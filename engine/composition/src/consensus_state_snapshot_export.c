@@ -286,6 +286,23 @@ void consensus_export_run_after_bind_hook(void) { }
 static void output_run_before_link_hook(void) { }
 #endif
 
+/* Defensive mode plus the FULL-durable pragma set on the staging database. */
+[[maybe_unused]] static bool output_destination_configure(sqlite3 *destination,
+                                                          char **error)
+{
+    int defensive = 0;
+    return sqlite3_db_config(destination, SQLITE_DBCONFIG_DEFENSIVE, 1,
+                             &defensive) == SQLITE_OK &&
+           defensive == 1 &&
+           sqlite3_exec(destination,
+               "PRAGMA journal_mode=MEMORY;"
+               "PRAGMA synchronous=FULL;"
+               "PRAGMA temp_store=MEMORY;"
+               "PRAGMA foreign_keys=ON;"
+               "PRAGMA locking_mode=EXCLUSIVE;",
+               NULL, NULL, error) == SQLITE_OK;
+}
+
 bool consensus_export_open_temp(struct consensus_export_output_binding *output,
                                 sqlite3 **destination,
                                 struct consensus_state_export_result *result)
@@ -329,18 +346,8 @@ bool consensus_export_open_temp(struct consensus_export_output_binding *output,
         return consensus_export_fail(result, CONSENSUS_EXPORT_OUTPUT_ERROR,
                                      "output SQLite descriptor open failed");
     }
-    int defensive = 0;
     char *error = NULL;
-    bool ok = sqlite3_db_config(*destination, SQLITE_DBCONFIG_DEFENSIVE, 1,
-                                &defensive) == SQLITE_OK &&
-              defensive == 1 &&
-              sqlite3_exec(*destination,
-                  "PRAGMA journal_mode=MEMORY;"
-                  "PRAGMA synchronous=FULL;"
-                  "PRAGMA temp_store=MEMORY;"
-                  "PRAGMA foreign_keys=ON;"
-                  "PRAGMA locking_mode=EXCLUSIVE;",
-                  NULL, NULL, &error) == SQLITE_OK;
+    bool ok = output_destination_configure(*destination, &error);
     if (error) {
         LOG_WARN(EXPORT_SUBSYS, "output durability configuration failed: %s",
                  error);
@@ -355,7 +362,7 @@ bool consensus_export_open_temp(struct consensus_export_output_binding *output,
 #endif
 }
 
-static bool manifests_equal(
+static bool manifests_state_equal(
     const struct consensus_state_bundle_manifest *a,
     const struct consensus_state_bundle_manifest *b)
 {
@@ -366,15 +373,27 @@ static bool manifests_equal(
            a->activation_boundary == b->activation_boundary &&
            a->utxo_count == b->utxo_count &&
            a->total_supply == b->total_supply &&
-           a->anchor_count == b->anchor_count &&
-           a->sprout_frontier_height == b->sprout_frontier_height &&
+           a->anchor_count == b->anchor_count;
+}
+
+static bool manifests_cursors_equal(
+    const struct consensus_state_bundle_manifest *a,
+    const struct consensus_state_bundle_manifest *b)
+{
+    return a->sprout_frontier_height == b->sprout_frontier_height &&
            a->sapling_frontier_height == b->sapling_frontier_height &&
            a->nullifier_count == b->nullifier_count &&
            a->sprout_source_cursor == b->sprout_source_cursor &&
            a->sapling_source_cursor == b->sapling_source_cursor &&
            a->nullifier_source_cursor == b->nullifier_source_cursor &&
-           a->source_fold_cursor == b->source_fold_cursor &&
-           memcmp(a->block_hash, b->block_hash, 32) == 0 &&
+           a->source_fold_cursor == b->source_fold_cursor;
+}
+
+static bool manifests_digests_equal(
+    const struct consensus_state_bundle_manifest *a,
+    const struct consensus_state_bundle_manifest *b)
+{
+    return memcmp(a->block_hash, b->block_hash, 32) == 0 &&
            memcmp(a->utxo_root, b->utxo_root, 32) == 0 &&
            memcmp(a->anchor_digest, b->anchor_digest, 32) == 0 &&
            memcmp(a->sprout_frontier_root, b->sprout_frontier_root, 32) == 0 &&
@@ -385,11 +404,78 @@ static bool manifests_equal(
            memcmp(a->artifact_digest, b->artifact_digest, 32) == 0;
 }
 
-bool consensus_export_finalize_temp(
+static bool manifests_equal(
+    const struct consensus_state_bundle_manifest *a,
+    const struct consensus_state_bundle_manifest *b)
+{
+    return manifests_state_equal(a, b) && manifests_cursors_equal(a, b) &&
+           manifests_digests_equal(a, b);
+}
+
+/* True when two fstat snapshots of the sealed staging inode agree on identity,
+ * mode, size and both timestamps and neither is linked. */
+static bool export_stat_sealed_same(const struct stat *a, const struct stat *b)
+{
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+           a->st_nlink == 0 && b->st_nlink == 0 &&
+           a->st_mode == b->st_mode &&
+           a->st_size == b->st_size &&
+           a->st_mtim.tv_sec == b->st_mtim.tv_sec &&
+           a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
+           a->st_ctim.tv_sec == b->st_ctim.tv_sec &&
+           a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+}
+
+static bool output_staged_identity_valid(
+    const struct consensus_export_output_binding *output,
+    const struct stat *before)
+{
+    return S_ISREG(before->st_mode) &&
+           before->st_dev == output->temp_dev &&
+           before->st_ino == output->temp_ino &&
+           before->st_nlink == 0 &&
+           (before->st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) == 0;
+}
+
+/* Hardened read-only configuration of the reopened immutable bundle. */
+static bool output_reopened_configure(sqlite3 *check, const _Atomic bool *cancel)
+{
+    int defensive = 0;
+    int trusted = 1;
+    consensus_export_install_cancel_handler(check, cancel);
+    return sqlite3_db_config(check, SQLITE_DBCONFIG_DEFENSIVE, 1,
+                             &defensive) == SQLITE_OK &&
+           sqlite3_db_config(check, SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0,
+                             &trusted) == SQLITE_OK &&
+           defensive == 1 && trusted == 0 &&
+           sqlite3_exec(check, "PRAGMA query_only=ON", NULL, NULL, NULL) ==
+               SQLITE_OK;
+}
+
+/* Configure, validate and compare the reopened bundle against the manifest. */
+static bool output_reopened_matches(
+    sqlite3 *check, const struct consensus_state_bundle_manifest *manifest,
+    const _Atomic bool *cancel)
+{
+    struct consensus_state_bundle_manifest reopened;
+    struct consensus_state_install_result validation;
+    bool ok = output_reopened_configure(check, cancel);
+    memset(&reopened, 0, sizeof(reopened));
+    memset(&validation, 0, sizeof(validation));
+    if (ok)
+        ok = consensus_state_bundle_validate(check, &reopened, &validation);
+    if (ok)
+        ok = manifests_equal(manifest, &reopened);
+    return ok;
+}
+
+/* Stage one: sync, make immutable, reopen read-only and validate. On success
+ * *after is the sealed stat the publish stage compares against. */
+static bool finalize_seal_validate(
     struct consensus_export_output_binding *output,
     const struct consensus_state_bundle_manifest *manifest,
     const _Atomic bool *cancel,
-    struct consensus_state_export_result *result)
+    struct consensus_state_export_result *result, struct stat *after)
 {
     if (!output || output->temp_fd < 0 || !output_sidecars_absent(output))
         return consensus_export_fail(result, CONSENSUS_EXPORT_OUTPUT_ERROR,
@@ -404,10 +490,7 @@ bool consensus_export_finalize_temp(
     if (!consensus_export_seal_readonly(output, &before))
         return consensus_export_fail(result, CONSENSUS_EXPORT_OUTPUT_ERROR,
                                      "bundle writable staging descriptor retained");
-    if (!S_ISREG(before.st_mode) ||
-        before.st_dev != output->temp_dev || before.st_ino != output->temp_ino ||
-        before.st_nlink != 0 ||
-        (before.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0)
+    if (!output_staged_identity_valid(output, &before))
         return consensus_export_fail(result, CONSENSUS_EXPORT_OUTPUT_ERROR,
                                      "staged bundle identity/mode invalid");
     sqlite3 *check = NULL;
@@ -418,57 +501,63 @@ bool consensus_export_finalize_temp(
         return consensus_export_fail(result, CONSENSUS_EXPORT_OUTPUT_ERROR,
                                      "immutable bundle reopen failed");
     }
-    int defensive = 0;
-    int trusted = 1;
-    consensus_export_install_cancel_handler(check, cancel);
-    bool ok = sqlite3_db_config(check, SQLITE_DBCONFIG_DEFENSIVE, 1,
-                                &defensive) == SQLITE_OK &&
-              sqlite3_db_config(check, SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0,
-                                &trusted) == SQLITE_OK &&
-              defensive == 1 && trusted == 0 &&
-              sqlite3_exec(check, "PRAGMA query_only=ON", NULL, NULL, NULL) ==
-                  SQLITE_OK;
-    struct consensus_state_bundle_manifest reopened;
-    struct consensus_state_install_result validation;
-    memset(&reopened, 0, sizeof(reopened));
-    memset(&validation, 0, sizeof(validation));
-    if (ok)
-        ok = consensus_state_bundle_validate(check, &reopened, &validation);
-    if (ok)
-        ok = manifests_equal(manifest, &reopened);
+    bool ok = output_reopened_matches(check, manifest, cancel);
     if (!output_sqlite_close_strict(output, &check))
         ok = false;
-    struct stat after;
-    if (!ok || fstat(output->temp_fd, &after) != 0 ||
-        before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
-        before.st_nlink != 0 || after.st_nlink != 0 ||
-        before.st_mode != after.st_mode ||
-        before.st_size != after.st_size ||
-        before.st_mtim.tv_sec != after.st_mtim.tv_sec ||
-        before.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
-        before.st_ctim.tv_sec != after.st_ctim.tv_sec ||
-        before.st_ctim.tv_nsec != after.st_ctim.tv_nsec)
+    if (!ok || fstat(output->temp_fd, after) != 0 ||
+        !export_stat_sealed_same(&before, after))
         return consensus_export_fail(
             result, CONSENSUS_EXPORT_OUTPUT_ERROR,
             "independent immutable bundle validation failed");
+    return true;
+}
 
-    uint8_t sealed_digest[32];
+/* True when the staging file still digests to sealed_digest and its stat is
+ * unchanged from after, i.e. nothing touched it across the pre-link hook. */
+static bool output_unchanged_after_hook(
+    const struct consensus_export_output_binding *output,
+    const struct stat *after, const uint8_t sealed_digest[32])
+{
     uint8_t after_hook_digest[32];
+    struct stat after_hook;
+    return consensus_export_descriptor_digest(output->temp_fd,
+                                              after_hook_digest) &&
+           memcmp(sealed_digest, after_hook_digest, 32) == 0 &&
+           fstat(output->temp_fd, &after_hook) == 0 &&
+           export_stat_sealed_same(&after_hook, after);
+}
+
+/* True when the published name is the sealed inode with the same content and
+ * a change time no earlier than the sealed one. */
+static bool output_published_matches(
+    const struct consensus_export_output_binding *output,
+    const struct stat *after, const uint8_t sealed_digest[32])
+{
+    struct stat published;
+    uint8_t published_digest[32];
+    return output_final_identity_matches(output, &published) &&
+           published.st_size == after->st_size &&
+           published.st_mtim.tv_sec == after->st_mtim.tv_sec &&
+           published.st_mtim.tv_nsec == after->st_mtim.tv_nsec &&
+           published.st_ctim.tv_sec >= after->st_ctim.tv_sec &&
+           (published.st_ctim.tv_sec != after->st_ctim.tv_sec ||
+            published.st_ctim.tv_nsec >= after->st_ctim.tv_nsec) &&
+           consensus_export_descriptor_digest(output->temp_fd,
+                                              published_digest) &&
+           memcmp(sealed_digest, published_digest, 32) == 0;
+}
+
+/* Stage two: digest the sealed file, link it no-replace and prove the link. */
+static bool finalize_publish(
+    struct consensus_export_output_binding *output, const struct stat *after,
+    struct consensus_state_export_result *result)
+{
+    uint8_t sealed_digest[32];
     if (!consensus_export_descriptor_digest(output->temp_fd, sealed_digest))
         return consensus_export_fail(result, CONSENSUS_EXPORT_OUTPUT_ERROR,
                                      "sealed bundle complete-file digest failed");
     output_run_before_link_hook();
-    struct stat after_hook;
-    if (!consensus_export_descriptor_digest(output->temp_fd, after_hook_digest) ||
-        memcmp(sealed_digest, after_hook_digest, 32) != 0 ||
-        fstat(output->temp_fd, &after_hook) != 0 ||
-        after_hook.st_dev != after.st_dev || after_hook.st_ino != after.st_ino ||
-        after_hook.st_nlink != 0 || after_hook.st_size != after.st_size ||
-        after_hook.st_mode != after.st_mode ||
-        after_hook.st_mtim.tv_sec != after.st_mtim.tv_sec ||
-        after_hook.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
-        after_hook.st_ctim.tv_sec != after.st_ctim.tv_sec ||
-        after_hook.st_ctim.tv_nsec != after.st_ctim.tv_nsec)
+    if (!output_unchanged_after_hook(output, after, sealed_digest))
         return consensus_export_fail(result, CONSENSUS_EXPORT_OUTPUT_ERROR,
                                      "bundle changed after immutable validation");
     if (!output_name_absent(output, output->final_name) ||
@@ -477,17 +566,7 @@ bool consensus_export_finalize_temp(
                         output->final_name))
         return consensus_export_fail(result, CONSENSUS_EXPORT_OUTPUT_ERROR,
                                      "atomic no-replace bundle publish failed");
-    struct stat published;
-    uint8_t published_digest[32];
-    if (!output_final_identity_matches(output, &published) ||
-        published.st_size != after.st_size ||
-        published.st_mtim.tv_sec != after.st_mtim.tv_sec ||
-        published.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
-        published.st_ctim.tv_sec < after.st_ctim.tv_sec ||
-        (published.st_ctim.tv_sec == after.st_ctim.tv_sec &&
-         published.st_ctim.tv_nsec < after.st_ctim.tv_nsec) ||
-        !consensus_export_descriptor_digest(output->temp_fd, published_digest) ||
-        memcmp(sealed_digest, published_digest, 32) != 0 ||
+    if (!output_published_matches(output, after, sealed_digest) ||
         fsync(output->dirfd) != 0) {
         /* Never unlink after a separate identity check: a concurrent name
          * replacement could turn cleanup into deletion of an unrelated file.
@@ -497,6 +576,17 @@ bool consensus_export_finalize_temp(
                                      "bundle published identity/durability ambiguous");
     }
     return true;
+}
+
+bool consensus_export_finalize_temp(
+    struct consensus_export_output_binding *output,
+    const struct consensus_state_bundle_manifest *manifest,
+    const _Atomic bool *cancel,
+    struct consensus_state_export_result *result)
+{
+    struct stat after;
+    return finalize_seal_validate(output, manifest, cancel, result, &after) &&
+           finalize_publish(output, &after, result);
 }
 
 /* Shared derive+write core used by BOTH exporter entries. Runs the proof, opens
@@ -578,13 +668,13 @@ void consensus_export_fill_success(
                  ? "full" : "checkpoint_fold");
 }
 
-bool consensus_state_snapshot_export(
+/* Refuse a NULL, foreign-handle or out-of-range request before any output
+ * descriptor is touched. */
+static bool export_request_valid(
     sqlite3 *progress_db,
     const struct consensus_state_snapshot_export_request *request,
     struct consensus_state_export_result *result)
 {
-    if (result)
-        memset(result, 0, sizeof(*result));
     if (!progress_db || !request)
         return consensus_export_fail(result, CONSENSUS_EXPORT_REFUSED,
                                      "NULL progress_db/request");
@@ -600,6 +690,58 @@ bool consensus_state_snapshot_export(
             request->expected_height,
             zcl_bytes_any_set(request->expected_block_hash, 32)
                 ? 1 : 0);
+    return true;
+}
+
+/* Open the frozen source transaction; *source_tx is true only after BEGIN. */
+static bool export_begin_source(
+    sqlite3 *progress_db, struct consensus_state_export_result *result,
+    bool *source_tx)
+{
+    *source_tx = false;
+    if (sqlite3_get_autocommit(progress_db) == 0)
+        return consensus_export_fail(result, CONSENSUS_EXPORT_REFUSED,
+                                     "source already has an open transaction");
+    if (sqlite3_exec(progress_db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK)
+        return consensus_export_fail(result, CONSENSUS_EXPORT_STORE_ERROR,
+                                     "frozen source transaction begin failed");
+    *source_tx = true;
+    return true;
+}
+
+/* Commit (ok) or roll back the frozen source transaction; returns the new ok. */
+static bool export_end_source(
+    sqlite3 *progress_db, bool ok,
+    struct consensus_state_export_result *result)
+{
+    const char *finish = ok ? "COMMIT" : "ROLLBACK";
+    if (sqlite3_exec(progress_db, finish, NULL, NULL, NULL) == SQLITE_OK)
+        return ok;
+    if (ok)
+        (void)consensus_export_fail(
+            result, CONSENSUS_EXPORT_STORE_ERROR,
+            "frozen source transaction close failed");
+    sqlite3_exec(progress_db, "ROLLBACK", NULL, NULL, NULL);
+    return false;
+}
+
+/* Close the output binding and free it unless the close abandoned it. */
+static void export_release_output(struct consensus_export_output_binding *output)
+{
+    consensus_export_output_close(output);
+    if (!output->abandon_on_close)
+        free(output);
+}
+
+bool consensus_state_snapshot_export(
+    sqlite3 *progress_db,
+    const struct consensus_state_snapshot_export_request *request,
+    struct consensus_state_export_result *result)
+{
+    if (result)
+        memset(result, 0, sizeof(*result));
+    if (!export_request_valid(progress_db, request, result))
+        return false;
 
     struct consensus_export_output_binding *output = zcl_calloc(
         1, sizeof(*output), "consensus_export_output_binding");
@@ -616,51 +758,25 @@ bool consensus_state_snapshot_export(
     struct consensus_state_bundle_manifest manifest;
     memset(&manifest, 0, sizeof(manifest));
     bool source_tx = false;
-    bool ok = true;
 
     progress_store_tx_lock();
-    if (sqlite3_get_autocommit(progress_db) == 0) {
-        (void)consensus_export_fail(result, CONSENSUS_EXPORT_REFUSED,
-                                    "source already has an open transaction");
-        ok = false;
-    }
-    if (ok && sqlite3_exec(progress_db, "BEGIN", NULL, NULL, NULL) !=
-                  SQLITE_OK) {
-        (void)consensus_export_fail(result, CONSENSUS_EXPORT_STORE_ERROR,
-                                    "frozen source transaction begin failed");
-        ok = false;
-    } else if (ok) {
-        source_tx = true;
-    }
+    bool ok = export_begin_source(progress_db, result, &source_tx);
     if (ok)
         ok = consensus_export_prove_write(progress_db, request, output, &manifest,
                                 result);
-    if (source_tx) {
-        const char *finish = ok ? "COMMIT" : "ROLLBACK";
-        if (sqlite3_exec(progress_db, finish, NULL, NULL, NULL) != SQLITE_OK) {
-            if (ok)
-                (void)consensus_export_fail(
-                    result, CONSENSUS_EXPORT_STORE_ERROR,
-                    "frozen source transaction close failed");
-            ok = false;
-            sqlite3_exec(progress_db, "ROLLBACK", NULL, NULL, NULL);
-        }
-    }
+    if (source_tx)
+        ok = export_end_source(progress_db, ok, result);
     progress_store_tx_unlock();
 
     if (ok)
         ok = consensus_export_finalize_temp(output, &manifest,
                                             request->cancel_requested, result);
     if (!ok) {
-        consensus_export_output_close(output);
-        if (!output->abandon_on_close)
-            free(output);
+        export_release_output(output);
         return false;
     }
     consensus_export_fill_success(&manifest, result);
-    consensus_export_output_close(output);
-    if (!output->abandon_on_close)
-        free(output);
+    export_release_output(output);
     return true;
 }
 
