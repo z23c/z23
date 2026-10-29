@@ -321,7 +321,6 @@ engine/composition/src/boot_snapshot_import.c:boot_import_snapshot_db:55
 engine/composition/src/consensus_state_replay_receipt_derive.c:derive_anchors:21
 engine/composition/src/consensus_state_replay_receipt_derive.c:derive_utxo:28
 engine/composition/src/consensus_state_snapshot_export_proof.c:running_binary_digest:18
-engine/controllers/src/nodelog_controller.c:diag_rpc_getnodelog:55
 engine/controllers/src/rpc_client.c:node_rpc_call_http_impl:45
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:88
 engine/entry/main_cli_modes.c:bench_crypto_verify:22

@@ -285,6 +285,208 @@ static enum log_level line_level(const char *line)
     return legacy_line_level(line);
 }
 
+struct nodelog_scan {
+    struct zcl_ere *re;
+    enum log_level want_level;
+    int64_t since_secs;
+    int64_t max_lines;
+    int64_t now;
+    int64_t earliest;
+    int emitted;
+    int64_t scanned;
+    int64_t pos;
+    int timestamped_candidates;
+    int timestamped_lines_skipped;
+    int undated_lines_included;
+    char *stack[NODELOG_MAX_MAX_LINES];
+    int stack_n;
+    char carry[NODELOG_CHUNK_SIZE + 1];
+    size_t carry_len;
+};
+
+static int64_t nodelog_since_param(const struct json_value *params)
+{
+    int64_t since_secs = json_at(params, 1) ?
+        json_get_int(json_at(params, 1)) : NODELOG_DEFAULT_SINCE_SECS;
+    if (since_secs < 0) since_secs = 0;
+    if (since_secs > NODELOG_MAX_SINCE_SECS)
+        since_secs = NODELOG_MAX_SINCE_SECS;
+    return since_secs;
+}
+
+static int64_t nodelog_max_lines_param(const struct json_value *params)
+{
+    int64_t max_lines = json_at(params, 2) ?
+        json_get_int(json_at(params, 2)) : NODELOG_DEFAULT_MAX_LINES;
+    if (max_lines < 1) max_lines = 1;
+    if (max_lines > NODELOG_MAX_MAX_LINES)
+        max_lines = NODELOG_MAX_MAX_LINES;
+    return max_lines;
+}
+
+/* Timestamp check for a candidate line: counts dated lines and skips,
+ * flags undated ones. */
+static void nodelog_classify_since(struct nodelog_scan *s, const char *line,
+                                   bool *since_ok, bool *undated_candidate)
+{
+    int64_t line_ts = 0;
+    if (line_timestamp_unix(line, s->now, &line_ts)) {
+        s->timestamped_candidates++;
+        *since_ok = (line_ts >= s->earliest &&
+                     line_ts <= s->now);
+        if (!*since_ok)
+            s->timestamped_lines_skipped++;
+    } else {
+        *undated_candidate = true;
+    }
+}
+
+/* Takes ownership of `line`: pushes it on the stack or frees it. */
+static void nodelog_filter_line(struct nodelog_scan *s, char *line, size_t llen)
+{
+    /* Filter by regex + level. */
+    bool match = zcl_ere_search(s->re, line, llen);
+    enum log_level lvl = line_level(line);
+    bool level_ok = (s->want_level == LL_ALL) ||
+                    (lvl >= s->want_level);
+    bool since_ok = true;
+    bool undated_candidate = false;
+    if (match && level_ok && s->since_secs > 0)
+        nodelog_classify_since(s, line, &since_ok, &undated_candidate);
+    if (match && level_ok && since_ok &&
+        s->stack_n < NODELOG_MAX_MAX_LINES) {
+        s->stack[s->stack_n++] = line;
+        s->emitted++;
+        if (undated_candidate)
+            s->undated_lines_included++;
+    } else {
+        free(line);
+    }
+}
+
+static void nodelog_take_slice(struct nodelog_scan *s, const char *combined,
+                               size_t start_off, size_t line_end, bool at_head)
+{
+    /* line = combined[start_off .. line_end) */
+    size_t llen = line_end - start_off;
+    if (at_head) {
+        /* Partial line at the start of this chunk —
+         * save as carry, don't emit yet (older chunk
+         * holds the head). */
+        if (llen > sizeof(s->carry) - 1) llen = sizeof(s->carry) - 1;
+        memcpy(s->carry, combined + start_off, llen);
+        s->carry_len = llen;
+        s->carry[llen] = '\0';
+    } else {
+        char *line = zcl_malloc(llen + 1, "diagnostics.node_log.line");
+        if (line) {
+            memcpy(line, combined + start_off, llen);
+            line[llen] = '\0';
+            nodelog_filter_line(s, line, llen);
+        }
+        s->carry_len = 0;
+    }
+}
+
+static void nodelog_split_lines(struct nodelog_scan *s, const char *combined,
+                                size_t combined_len)
+{
+    /* Walk backwards over `combined`, slicing at '\n'. */
+    size_t line_end = combined_len;
+    for (ssize_t i = (ssize_t)combined_len - 1;
+         i >= -1 && s->emitted < s->max_lines; i--) {
+        if (i < 0 || combined[i] == '\n') {
+            size_t start_off = (i < 0) ? 0 : (size_t)i + 1;
+            if (start_off < line_end)
+                nodelog_take_slice(s, combined, start_off, line_end,
+                                   i < 0 && s->pos > 0);
+            line_end = (size_t)i;
+        }
+        if (i < 0) break;
+    }
+}
+
+/* Reads and processes one chunk; false means stop scanning. */
+static bool nodelog_scan_chunk(struct nodelog_scan *s,
+                               struct platform_positioned_file *file)
+{
+    size_t want = (s->pos > NODELOG_CHUNK_SIZE) ? NODELOG_CHUNK_SIZE
+                                                : (size_t)s->pos;
+    int64_t start = s->pos - (int64_t)want;
+    char buf[NODELOG_CHUNK_SIZE + 1];
+    int64_t got = platform_positioned_file_read(
+        file, buf, want, (uint64_t)start);
+    if (got <= 0) return false; // raw-return-ok:read-end-or-error-ends-scan-and-the-partial-result-is-returned
+    buf[got] = '\0';
+    s->scanned += got;
+    s->pos = start;
+
+    /* Combine `buf` (this chunk) with `carry` (partial line from
+     * the previous-newer chunk). Process newline-separated lines
+     * from the end. */
+    if ((size_t)got > want || s->carry_len > NODELOG_CHUNK_SIZE)
+        return false; // raw-return-ok:impossible-size-bound-guard-for-the-compiler
+    size_t combined_cap = (size_t)got + s->carry_len + 1;
+    char *combined = zcl_malloc(combined_cap, "diagnostics.node_log.combined");
+    if (!combined) return false; // raw-return-ok:allocation-failure-ends-scan-and-the-partial-result-is-returned
+    memcpy(combined, buf, got);
+    memcpy(combined + got, s->carry, s->carry_len);
+    combined[got + s->carry_len] = '\0';
+    size_t combined_len = (size_t)got + s->carry_len;
+
+    nodelog_split_lines(s, combined, combined_len);
+    free(combined);
+    return s->pos != 0;
+}
+
+static void nodelog_scan_log(struct nodelog_scan *s,
+                             struct platform_positioned_file *file)
+{
+    while (s->pos > 0 && s->emitted < s->max_lines &&
+           s->scanned < NODELOG_MAX_SCAN_BYTES) {
+        if (!nodelog_scan_chunk(s, file)) break;
+    }
+}
+
+static void nodelog_emit_result(struct json_value *result,
+                                struct nodelog_scan *s, const char *log_path)
+{
+    struct json_value lines_arr = {0};
+    json_set_array(&lines_arr);
+    bool truncated = false;
+
+    if (s->pos > 0 && s->scanned >= NODELOG_MAX_SCAN_BYTES)
+        truncated = true;
+
+    /* The reverse scan pushes newest matches first, so preserve stack order. */
+    for (int i = 0; i < s->stack_n; i++) {
+        struct json_value lv = {0};
+        json_set_str(&lv, s->stack[i]);
+        json_push_back(&lines_arr, &lv);
+        json_free(&lv);
+        free(s->stack[i]);
+    }
+
+    json_push_kv(result, "lines", &lines_arr);
+    json_free(&lines_arr);
+    json_push_kv_int(result, "scanned_bytes", s->scanned);
+    json_push_kv_bool(result, "truncated", truncated);
+    json_push_kv_str(result, "log_path", log_path);
+    json_push_kv_int(result, "emitted", s->emitted);
+    json_push_kv_int(result, "since_secs", s->since_secs);
+    json_push_kv_int(result, "earliest_unix", s->earliest);
+    json_push_kv_str(result, "timestamp_filter",
+                     s->since_secs > 0 ? "timestamped_lines" : "disabled");
+    json_push_kv_int(result, "timestamped_candidates",
+                     s->timestamped_candidates);
+    json_push_kv_int(result, "timestamped_lines_skipped",
+                     s->timestamped_lines_skipped);
+    json_push_kv_int(result, "undated_lines_included",
+                     s->undated_lines_included);
+    json_push_kv_bool(result, "since_filter_complete",
+                      s->since_secs == 0 || s->undated_lines_included == 0);
+}
+
 bool diag_rpc_getnodelog(const struct json_value *params, bool help,
                          struct json_value *result)
 {
@@ -314,17 +516,8 @@ bool diag_rpc_getnodelog(const struct json_value *params, bool help,
                  plen, NODELOG_MAX_PATTERN_LEN);
     }
 
-    int64_t since_secs = json_at(params, 1) ?
-        json_get_int(json_at(params, 1)) : NODELOG_DEFAULT_SINCE_SECS;
-    if (since_secs < 0) since_secs = 0;
-    if (since_secs > NODELOG_MAX_SINCE_SECS)
-        since_secs = NODELOG_MAX_SINCE_SECS;
-
-    int64_t max_lines = json_at(params, 2) ?
-        json_get_int(json_at(params, 2)) : NODELOG_DEFAULT_MAX_LINES;
-    if (max_lines < 1) max_lines = 1;
-    if (max_lines > NODELOG_MAX_MAX_LINES)
-        max_lines = NODELOG_MAX_MAX_LINES;
+    int64_t since_secs = nodelog_since_param(params);
+    int64_t max_lines = nodelog_max_lines_param(params);
 
     const char *level_str = json_at(params, 3) ?
         json_get_str(json_at(params, 3)) : NULL;
@@ -386,139 +579,20 @@ bool diag_rpc_getnodelog(const struct json_value *params, bool help,
      * we split into lines and emit any complete lines that match.
      * Partial-line tail goes back into the next chunk. */
     json_set_object(result);
-    struct json_value lines_arr = {0};
-    json_set_array(&lines_arr);
-    int emitted = 0;
-    bool truncated = false;
-    int64_t scanned = 0;
-    int64_t pos = (int64_t)log_size;
-    int timestamped_candidates = 0;
-    int timestamped_lines_skipped = 0;
-    int undated_lines_included = 0;
 
     /* Each scanned line goes onto a stack so we emit in
      * newest-first order; lines_arr is built from that stack at the end. */
-    char *stack[NODELOG_MAX_MAX_LINES];
-    int stack_n = 0;
-    char carry[NODELOG_CHUNK_SIZE + 1] = {0};
-    size_t carry_len = 0;
+    struct nodelog_scan scan = {0};
+    scan.re = re;
+    scan.want_level = want_level;
+    scan.since_secs = since_secs;
+    scan.max_lines = max_lines;
+    scan.now = now;
+    scan.earliest = earliest;
+    scan.pos = (int64_t)log_size;
 
-    while (pos > 0 && emitted < max_lines &&
-           scanned < NODELOG_MAX_SCAN_BYTES) {
-        size_t want = (pos > NODELOG_CHUNK_SIZE) ? NODELOG_CHUNK_SIZE
-                                                  : (size_t)pos;
-        int64_t start = pos - (int64_t)want;
-        char buf[NODELOG_CHUNK_SIZE + 1];
-        int64_t got = platform_positioned_file_read(
-            &log_file, buf, want, (uint64_t)start);
-        if (got <= 0) break;
-        buf[got] = '\0';
-        scanned += got;
-        pos = start;
-
-        /* Combine `buf` (this chunk) with `carry` (partial line from
-         * the previous-newer chunk). Process newline-separated lines
-         * from the end. */
-        size_t combined_cap = (size_t)got + carry_len + 1;
-        char *combined = zcl_malloc(combined_cap, "diagnostics.node_log.combined");
-        if (!combined) break;
-        memcpy(combined, buf, got);
-        memcpy(combined + got, carry, carry_len);
-        combined[got + carry_len] = '\0';
-        size_t combined_len = (size_t)got + carry_len;
-
-        /* Walk backwards over `combined`, slicing at '\n'. */
-        size_t line_end = combined_len;
-        for (ssize_t i = (ssize_t)combined_len - 1;
-             i >= -1 && emitted < max_lines; i--) {
-            if (i < 0 || combined[i] == '\n') {
-                size_t start_off = (i < 0) ? 0 : (size_t)i + 1;
-                if (start_off < line_end) {
-                    /* line = combined[start_off .. line_end) */
-                    size_t llen = line_end - start_off;
-                    if (i < 0 && pos > 0) {
-                        /* Partial line at the start of this chunk —
-                         * save as carry, don't emit yet (older chunk
-                         * holds the head). */
-                        if (llen > sizeof(carry) - 1) llen = sizeof(carry) - 1;
-                        memcpy(carry, combined + start_off, llen);
-                        carry_len = llen;
-                        carry[llen] = '\0';
-                    } else {
-                        char *line = zcl_malloc(llen + 1, "diagnostics.node_log.line");
-                        if (line) {
-                            memcpy(line, combined + start_off, llen);
-                            line[llen] = '\0';
-                            /* Filter by regex + level. */
-                            bool match = zcl_ere_search(re, line, llen);
-                            enum log_level lvl = line_level(line);
-                            bool level_ok = (want_level == LL_ALL) ||
-                                            (lvl >= want_level);
-                            bool since_ok = true;
-                            bool undated_candidate = false;
-                            if (match && level_ok && since_secs > 0) {
-                                int64_t line_ts = 0;
-                                if (line_timestamp_unix(line, now, &line_ts)) {
-                                    timestamped_candidates++;
-                                    since_ok = (line_ts >= earliest &&
-                                                line_ts <= now);
-                                    if (!since_ok)
-                                        timestamped_lines_skipped++;
-                                } else {
-                                    undated_candidate = true;
-                                }
-                            }
-                            if (match && level_ok && since_ok &&
-                                stack_n < NODELOG_MAX_MAX_LINES) {
-                                stack[stack_n++] = line;
-                                emitted++;
-                                if (undated_candidate)
-                                    undated_lines_included++;
-                            } else {
-                                free(line);
-                            }
-                        }
-                        carry_len = 0;
-                    }
-                }
-                line_end = (size_t)i;
-            }
-            if (i < 0) break;
-        }
-        free(combined);
-        if (pos == 0) break;
-    }
-
-    if (pos > 0 && scanned >= NODELOG_MAX_SCAN_BYTES)
-        truncated = true;
-
-    /* The reverse scan pushes newest matches first, so preserve stack order. */
-    for (int i = 0; i < stack_n; i++) {
-        struct json_value lv = {0};
-        json_set_str(&lv, stack[i]);
-        json_push_back(&lines_arr, &lv);
-        json_free(&lv);
-        free(stack[i]);
-    }
-
-    json_push_kv(result, "lines", &lines_arr);
-    json_free(&lines_arr);
-    json_push_kv_int(result, "scanned_bytes", scanned);
-    json_push_kv_bool(result, "truncated", truncated);
-    json_push_kv_str(result, "log_path", log_path);
-    json_push_kv_int(result, "emitted", emitted);
-    json_push_kv_int(result, "since_secs", since_secs);
-    json_push_kv_int(result, "earliest_unix", earliest);
-    json_push_kv_str(result, "timestamp_filter",
-                     since_secs > 0 ? "timestamped_lines" : "disabled");
-    json_push_kv_int(result, "timestamped_candidates",
-                     timestamped_candidates);
-    json_push_kv_int(result, "timestamped_lines_skipped",
-                     timestamped_lines_skipped);
-    json_push_kv_int(result, "undated_lines_included",
-                     undated_lines_included);
-    json_push_kv_bool(result, "since_filter_complete",
-                      since_secs == 0 || undated_lines_included == 0);
+    nodelog_scan_log(&scan, &log_file);
+    nodelog_emit_result(result, &scan, log_path);
 
     free(re);
     platform_positioned_file_close(&log_file);
