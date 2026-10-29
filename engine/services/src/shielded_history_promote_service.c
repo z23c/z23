@@ -500,23 +500,168 @@ static bool promote_verify_cursors_zero(struct sqlite3 *db)
     return true;
 }
 
+/* Request shape check for shielded_history_promote_run. */
+static bool promote_request_valid(const struct shielded_promote_request *req)
+{
+    return req && req->target_progress_db && req->producer_datadir &&
+           req->producer_datadir[0] && req->header_tip &&
+           req->sapling_activation_height >= 0 && req->checkpoint_height >= 0;
+}
+
+static bool promote_target_schema_ready(struct sqlite3 *target)
+{
+    return anchor_kv_ensure_schema(target) &&
+           nullifier_kv_ensure_schema(target) &&
+           progress_meta_table_ensure(target);
+}
+
+/* Publish the running report through the optional out-parameter. */
+static void promote_publish_report(struct shielded_promote_report *out,
+                                   const struct shielded_promote_report *report)
+{
+    if (out)
+        *out = *report;
+}
+
+static void promote_free_exec_err(char *err)
+{
+    if (err)
+        sqlite3_free(err);
+}
+
+/* Open the producer store read-only. Returns 0 ok, 1 path overflow, 2 open
+ * failure (the caller logs); *src_out is set only on success. */
+static int promote_open_producer(const char *producer_datadir, char *src_path,
+                                 size_t src_path_size,
+                                 struct sqlite3 **src_out)
+{
+    if (!consensus_db_kernel_store_path(producer_datadir, src_path,
+                                        src_path_size))
+        return 1;
+    struct sqlite3 *src = NULL;
+    if (sqlite3_open_v2(src_path, &src,
+                        SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL)
+            != SQLITE_OK || !src) {
+        if (src) sqlite3_close(src);
+        return 2;
+    }
+    (void)sqlite3_exec(src, "PRAGMA query_only=ON", NULL, NULL, NULL);
+    *src_out = src;
+    return 0;
+}
+
+/* G1 + producer counts (report) + G5 preflight (no row above the checkpoint).
+ * On any failure the producer connection is closed; only the count/G5
+ * failures publish the partial report. */
+static bool promote_producer_preflight(struct sqlite3 *src,
+                                       const struct shielded_promote_request *req,
+                                       struct shielded_promote_report *out,
+                                       struct shielded_promote_report *report)
+{
+    /* G1: producer must be a finished from-genesis store (all cursors 0). */
+    if (!promote_check_producer_g1(src)) {
+        sqlite3_close(src);
+        return false;
+    }
+
+    /* Producer counts (report) + G5 preflight (no row above the checkpoint). */
+    bool ok = promote_count(src, "SELECT COUNT(*) FROM sapling_anchors",
+                            &report->producer_sapling_rows) &&
+              promote_count(src, "SELECT COUNT(*) FROM sprout_anchors",
+                            &report->producer_sprout_rows) &&
+              promote_count(src,
+                            "SELECT COUNT(*) FROM nullifiers WHERE pool=1",
+                            &report->producer_sapling_nf) &&
+              promote_count(src,
+                            "SELECT COUNT(*) FROM nullifiers WHERE pool=0",
+                            &report->producer_sprout_nf) &&
+              promote_g5_max_height_ok(src, "sapling_anchors",
+                                       req->checkpoint_height) &&
+              promote_g5_max_height_ok(src, "sprout_anchors",
+                                       req->checkpoint_height) &&
+              promote_g5_max_height_ok(src, "nullifiers",
+                                       req->checkpoint_height);
+    if (!ok) {
+        sqlite3_close(src);
+        promote_publish_report(out, report);
+    }
+    return ok;
+}
+
+/* Record the cross-check verdict in the report; true only on a full PASS. */
+static bool promote_crosscheck_passed(bool cc_ret,
+                                      const struct crosscheck_result *cc,
+                                      struct shielded_promote_report *report)
+{
+    report->sprout_crosscheck_ok = cc_ret && cc->sprout_ok;
+    report->nullifiers_crosscheck_ok = cc_ret && cc->nullifiers_ok;
+    return cc_ret && cc->sprout_ok && cc->nullifiers_ok;
+}
+
+/* G2..G4 installs inside the open transaction. Returns 0 ok, else the failing
+ * stage: 1 sapling install, 2 sapling completeness, 3 sprout, 4 nullifiers. */
+static int promote_install_stages(struct sqlite3 *target, struct sqlite3 *src,
+                                  const struct shielded_promote_request *req,
+                                  int64_t anchor_boundary,
+                                  struct shielded_promote_report *report)
+{
+    /* G2: install + header-bind every producer Sapling frontier. */
+    if (!promote_install_sapling(target, src, req->header_tip,
+                                 &report->sapling_anchors_installed))
+        return 1;
+
+    /* G2b: prove the below-boundary sapling history is now hole-free. */
+    if (!promote_g2b_sapling_complete(target, req->header_tip,
+                                      req->sapling_activation_height,
+                                      anchor_boundary))
+        return 2;
+    report->sapling_header_complete = true;
+
+    /* G3/G4: install sprout frontiers + nullifiers (crosscheck already passed). */
+    if (!promote_install_sprout(target, src,
+                                &report->sprout_anchors_installed))
+        return 3;
+    if (!promote_install_nullifiers(target, src,
+                                    &report->sapling_nullifiers_installed,
+                                    &report->sprout_nullifiers_installed))
+        return 4;
+    return 0;
+}
+
+/* Failed install stage: roll back, drop the producer, publish the report. */
+static void promote_abort_install(struct sqlite3 *target, struct sqlite3 *src,
+                                  struct shielded_promote_report *out,
+                                  const struct shielded_promote_report *report)
+{
+    promote_rollback(target);
+    sqlite3_close(src);
+    promote_publish_report(out, report);
+}
+
+/* G6: flip ALL THREE cursors, then stamp provenance. */
+static bool promote_flip_and_stamp(struct sqlite3 *target,
+                                   const struct shielded_promote_request *req,
+                                   int64_t anchor_boundary,
+                                   int64_t nullifier_boundary,
+                                   const struct shielded_promote_report *report)
+{
+    return promote_flip_cursors(target, anchor_boundary, nullifier_boundary) &&
+           promote_write_provenance(target, req->producer_datadir, report,
+                                    req->checkpoint_height);
+}
+
 bool shielded_history_promote_run(const struct shielded_promote_request *req,
                                   struct shielded_promote_report *out)
 {
     struct shielded_promote_report report = {0};
-    if (out)
-        *out = report;
+    promote_publish_report(out, &report);
 
-    if (!req || !req->target_progress_db || !req->producer_datadir ||
-        !req->producer_datadir[0] || !req->header_tip ||
-        req->sapling_activation_height < 0 || req->checkpoint_height < 0)
+    if (!promote_request_valid(req))
         LOG_FAIL(PROMOTE_SUBSYS, "invalid args");
 
     struct sqlite3 *target = req->target_progress_db;
 
-    if (!anchor_kv_ensure_schema(target) ||
-        !nullifier_kv_ensure_schema(target) ||
-        !progress_meta_table_ensure(target))
+    if (!promote_target_schema_ready(target))
         LOG_FAIL(PROMOTE_SUBSYS, "target schema ensure failed");
 
     int64_t anchor_boundary = 0, nullifier_boundary = 0;
@@ -540,48 +685,16 @@ bool shielded_history_promote_run(const struct shielded_promote_request *req,
      * consensus.db post-flip (or the legacy progress.kv on a pre-flip producer
      * datadir). */
     char src_path[PROGRESS_STORE_PATH_MAX];
-    if (!consensus_db_kernel_store_path(req->producer_datadir, src_path,
-                                        sizeof(src_path)))
-        LOG_FAIL(PROMOTE_SUBSYS, "producer kernel store path overflow");
     struct sqlite3 *src = NULL;
-    if (sqlite3_open_v2(src_path, &src,
-                        SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, NULL)
-            != SQLITE_OK || !src) {
-        if (src) sqlite3_close(src);
+    int open_rc = promote_open_producer(req->producer_datadir, src_path,
+                                        sizeof(src_path), &src);
+    if (open_rc == 1)
+        LOG_FAIL(PROMOTE_SUBSYS, "producer kernel store path overflow");
+    if (open_rc == 2)
         LOG_FAIL(PROMOTE_SUBSYS, "cannot open producer %s read-only", src_path);
-    }
-    (void)sqlite3_exec(src, "PRAGMA query_only=ON", NULL, NULL, NULL);
 
-    /* G1: producer must be a finished from-genesis store (all cursors 0). */
-    if (!promote_check_producer_g1(src)) {
-        sqlite3_close(src);
-        return false;
-    }
-
-    /* Producer counts (report) + G5 preflight (no row above the checkpoint). */
-    if (!promote_count(src, "SELECT COUNT(*) FROM sapling_anchors",
-                       &report.producer_sapling_rows) ||
-        !promote_count(src, "SELECT COUNT(*) FROM sprout_anchors",
-                       &report.producer_sprout_rows) ||
-        !promote_count(src,
-                       "SELECT COUNT(*) FROM nullifiers WHERE pool=1",
-                       &report.producer_sapling_nf) ||
-        !promote_count(src,
-                       "SELECT COUNT(*) FROM nullifiers WHERE pool=0",
-                       &report.producer_sprout_nf)) {
-        sqlite3_close(src);
-        if (out) *out = report;
-        return false;
-    }
-    if (!promote_g5_max_height_ok(src, "sapling_anchors",
-                                  req->checkpoint_height) ||
-        !promote_g5_max_height_ok(src, "sprout_anchors",
-                                  req->checkpoint_height) ||
-        !promote_g5_max_height_ok(src, "nullifiers", req->checkpoint_height)) {
-        sqlite3_close(src);
-        if (out) *out = report;
-        return false;
-    }
+    if (!promote_producer_preflight(src, req, out, &report))
+        return false;  // raw-return-ok:G1/count/G5 failures are logged inside the preflight calls
 
     /* G3/G4: the local-body cross-check is the trust root for the header-less
      * sprout frontiers + nullifier set. Run it BEFORE the transaction (a heavy
@@ -590,11 +703,9 @@ bool shielded_history_promote_run(const struct shielded_promote_request *req,
     bool cc_ret = promote_run_crosscheck(req->target_copy_datadir,
                                          req->producer_datadir,
                                          req->checkpoint_height, &cc);
-    report.sprout_crosscheck_ok = cc_ret && cc.sprout_ok;
-    report.nullifiers_crosscheck_ok = cc_ret && cc.nullifiers_ok;
-    if (!cc_ret || !cc.sprout_ok || !cc.nullifiers_ok) {
+    if (!promote_crosscheck_passed(cc_ret, &cc, &report)) {
         sqlite3_close(src);
-        if (out) *out = report;
+        promote_publish_report(out, &report);
         LOG_RETURN(false, PROMOTE_SUBSYS,
                    "G3/G4: local-body cross-check did not fully pass "
                    "(ret=%d sprout_ok=%d nullifiers_ok=%d) — refusing sprout + "
@@ -608,52 +719,35 @@ bool shielded_history_promote_run(const struct shielded_promote_request *req,
     if (sqlite3_exec(target, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN(PROMOTE_SUBSYS, "BEGIN IMMEDIATE failed: %s",
                  err ? err : sqlite3_errmsg(target));
-        if (err) sqlite3_free(err);
+        promote_free_exec_err(err);
         progress_store_tx_unlock();
         sqlite3_close(src);
-        if (out) *out = report;
+        promote_publish_report(out, &report);
         return false;
     }
-    if (err) { sqlite3_free(err); err = NULL; }
+    promote_free_exec_err(err);
+    err = NULL;
 
-    /* G2: install + header-bind every producer Sapling frontier. */
-    if (!promote_install_sapling(target, src, req->header_tip,
-                                 &report.sapling_anchors_installed)) {
-        promote_rollback(target);
-        sqlite3_close(src);
-        if (out) *out = report;
+    int stage = promote_install_stages(target, src, req, anchor_boundary,
+                                       &report);
+    if (stage == 1) {
+        promote_abort_install(target, src, out, &report);
         LOG_RETURN(false, PROMOTE_SUBSYS,
                    "G2 sapling install refused — rolled back, wedge intact");
     }
-
-    /* G2b: prove the below-boundary sapling history is now hole-free. */
-    if (!promote_g2b_sapling_complete(target, req->header_tip,
-                                      req->sapling_activation_height,
-                                      anchor_boundary)) {
-        promote_rollback(target);
-        sqlite3_close(src);
-        if (out) *out = report;
+    if (stage == 2) {
+        promote_abort_install(target, src, out, &report);
         LOG_RETURN(false, PROMOTE_SUBSYS,
                    "G2b sapling completeness FAILED — rolled back, wedge "
                    "intact");
     }
-    report.sapling_header_complete = true;
-
-    /* G3/G4: install sprout frontiers + nullifiers (crosscheck already passed). */
-    if (!promote_install_sprout(target, src,
-                                &report.sprout_anchors_installed)) {
-        promote_rollback(target);
-        sqlite3_close(src);
-        if (out) *out = report;
+    if (stage == 3) {
+        promote_abort_install(target, src, out, &report);
         LOG_RETURN(false, PROMOTE_SUBSYS,
                    "G3 sprout install refused — rolled back, wedge intact");
     }
-    if (!promote_install_nullifiers(target, src,
-                                    &report.sapling_nullifiers_installed,
-                                    &report.sprout_nullifiers_installed)) {
-        promote_rollback(target);
-        sqlite3_close(src);
-        if (out) *out = report;
+    if (stage == 4) {
+        promote_abort_install(target, src, out, &report);
         LOG_RETURN(false, PROMOTE_SUBSYS,
                    "G4 nullifier install refused — rolled back, wedge intact");
     }
@@ -662,12 +756,10 @@ bool shielded_history_promote_run(const struct shielded_promote_request *req,
     sqlite3_close(src);
     src = NULL;
 
-    /* G6: flip ALL THREE cursors, then stamp provenance. */
-    if (!promote_flip_cursors(target, anchor_boundary, nullifier_boundary) ||
-        !promote_write_provenance(target, req->producer_datadir, &report,
-                                  req->checkpoint_height)) {
+    if (!promote_flip_and_stamp(target, req, anchor_boundary,
+                                nullifier_boundary, &report)) {
         promote_rollback(target);
-        if (out) *out = report;
+        promote_publish_report(out, &report);
         LOG_RETURN(false, PROMOTE_SUBSYS,
                    "cursor flip / provenance failed — rolled back, wedge "
                    "intact");
@@ -676,18 +768,18 @@ bool shielded_history_promote_run(const struct shielded_promote_request *req,
     if (sqlite3_exec(target, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN(PROMOTE_SUBSYS, "COMMIT failed: %s",
                  err ? err : sqlite3_errmsg(target));
-        if (err) sqlite3_free(err);
+        promote_free_exec_err(err);
         promote_rollback(target);
-        if (out) *out = report;
+        promote_publish_report(out, &report);
         return false;
     }
-    if (err) sqlite3_free(err);
+    promote_free_exec_err(err);
     progress_store_tx_unlock();
 
     /* Post-commit: verify the durable cursors are all zero, then refresh the two
      * permanent gap blockers so the reducer resumes folding. */
     if (!promote_verify_cursors_zero(target)) {
-        if (out) *out = report;
+        promote_publish_report(out, &report);
         LOG_RETURN(false, PROMOTE_SUBSYS,
                    "post-commit cursor verification failed (committed rows "
                    "durable, but cursors not zero — see log)");
@@ -706,7 +798,6 @@ bool shielded_history_promote_run(const struct shielded_promote_request *req,
              (long long)report.sprout_nullifiers_installed,
              (long long)anchor_boundary, req->producer_datadir);
 
-    if (out)
-        *out = report;
+    promote_publish_report(out, &report);
     return true;
 }
