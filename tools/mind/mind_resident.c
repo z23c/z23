@@ -142,6 +142,117 @@ static bool mind_rebuild(struct zcl_mind_checkout *c, long long now)
     return ok;
 }
 
+/* Verdict of one watch slice. A lost watch is reported back so the serve loop
+ * logs it at the point it always did and stops watching that checkout. */
+enum mind_watch_verdict {
+    MIND_WATCH_QUIET,
+    MIND_WATCH_CHANGED,
+    MIND_WATCH_LOST,
+};
+
+static void mind_install_signals(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = mind_signal;
+    (void)sigaction(SIGTERM, &sa, NULL);
+    (void)sigaction(SIGINT, &sa, NULL);
+    g_mind_stop = 0;
+}
+
+static void mind_heartbeat_init(struct zcl_mind_heartbeat *beat,
+                                const struct zcl_mind_registry *reg)
+{
+    memset(beat, 0, sizeof(*beat));
+    beat->pid = (long long)getpid();
+    beat->started_unix = (long long)platform_time_wall_time_t();
+    beat->checkout_count = reg->count;
+    for (size_t i = 0; i < reg->count; i++)
+        snprintf(beat->checkouts[i].root, sizeof(beat->checkouts[i].root),
+                 "%s", reg->roots[i]);
+}
+
+static bool mind_watcher_open(struct platform_directory_watcher *w,
+                              const char *root)
+{
+    platform_directory_watcher_init(w);
+    return platform_directory_watcher_open(w, root);
+}
+
+/* An unwatched checkout is quiet: the cycle still polls it on its beat. */
+static enum mind_watch_verdict mind_watch_slice(
+    struct platform_directory_watcher *w, bool watching)
+{
+    if (!watching)
+        return MIND_WATCH_QUIET;
+    enum platform_directory_watch_result r =
+        platform_directory_watcher_wait(w, MIND_WATCH_SLICE_MS, NULL, NULL);
+    if (r == PLATFORM_DIRECTORY_WATCH_CHANGED ||
+        r == PLATFORM_DIRECTORY_WATCH_OVERFLOW)
+        return MIND_WATCH_CHANGED;
+    if (r == PLATFORM_DIRECTORY_WATCH_ERROR)
+        return MIND_WATCH_LOST;
+    return MIND_WATCH_QUIET;
+}
+
+static bool mind_stop_requested(zcl_mind_stop_predicate stop, void *stop_opaque)
+{
+    return g_mind_stop || (stop && stop(stop_opaque));
+}
+
+static bool mind_cycles_done(long long cycles, long long max_cycles)
+{
+    return max_cycles >= 0 && cycles >= max_cycles;
+}
+
+/* The registry is the retirement switch, so it is re-read on
+ * every wait pass and not only when something changed. */
+static bool mind_registry_retired(void)
+{
+    struct zcl_mind_registry current;
+    return !zcl_mind_registry_load(&current) || current.count == 0;
+}
+
+static bool mind_beat_due(bool changed, long long last_beat)
+{
+    long long now_s = (long long)platform_time_wall_time_t();
+    return !changed && now_s - last_beat >= MIND_HEARTBEAT_INTERVAL_S;
+}
+
+/* Read the generation, and rebuild it only when it is stale. Returns false
+ * when that rebuild was refused; the caller logs the refusal. */
+static bool mind_checkout_rebuild_if_stale(struct zcl_mind_checkout *c,
+                                           long long now)
+{
+    mind_observe(c, now);
+    return !(c->stale && !mind_rebuild(c, now));
+}
+
+static void mind_checkout_claim(struct zcl_mind_heartbeat *beat,
+                                struct zcl_mind_checkout *c, long long now)
+{
+    if (c->stale)
+        mind_observe(c, now);
+    /* Claim last: the marker means "a live owner has this checkout
+     * in hand", so it is written after the work, never before it. */
+    (void)codeindex_owner_claim(c->root, beat->pid, now);
+    if (c->last_rebuild_ms > beat->last_rebuild_ms)
+        beat->last_rebuild_ms = c->last_rebuild_ms;
+}
+
+static void mind_retire_checkouts(const struct zcl_mind_heartbeat *beat,
+                                  struct platform_directory_watcher *watchers,
+                                  const bool *watching)
+{
+    for (size_t i = 0; i < beat->checkout_count; i++) {
+        if (watching[i])
+            platform_directory_watcher_close(&watchers[i]);
+        /* Retiring means releasing the claim. A marker left behind by a dead
+         * mind would refuse every query for two more minutes for nothing. */
+        (void)codeindex_owner_release(beat->checkouts[i].root, beat->pid);
+    }
+}
+
 static int mind_serve_posix(zcl_mind_stop_predicate stop, void *stop_opaque,
                             long long max_cycles)
 {
@@ -164,28 +275,15 @@ static int mind_serve_posix(zcl_mind_stop_predicate stop, void *stop_opaque,
         return 1;
     }
 
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = mind_signal;
-    (void)sigaction(SIGTERM, &sa, NULL);
-    (void)sigaction(SIGINT, &sa, NULL);
-    g_mind_stop = 0;
+    mind_install_signals();
 
     struct zcl_mind_heartbeat beat;
-    memset(&beat, 0, sizeof(beat));
-    beat.pid = (long long)getpid();
-    beat.started_unix = (long long)platform_time_wall_time_t();
-    beat.checkout_count = reg.count;
-    for (size_t i = 0; i < reg.count; i++)
-        snprintf(beat.checkouts[i].root, sizeof(beat.checkouts[i].root), "%s",
-                 reg.roots[i]);
+    mind_heartbeat_init(&beat, &reg);
 
     struct platform_directory_watcher watchers[ZCL_MIND_CHECKOUTS_MAX];
     bool watching[ZCL_MIND_CHECKOUTS_MAX];
     for (size_t i = 0; i < reg.count; i++) {
-        platform_directory_watcher_init(&watchers[i]);
-        watching[i] = platform_directory_watcher_open(&watchers[i],
-                                                      reg.roots[i]);
+        watching[i] = mind_watcher_open(&watchers[i], reg.roots[i]);
         if (!watching[i])
             LOG_WARN("mind", "serve: cannot watch %s; polling it instead",
                      reg.roots[i]);
@@ -201,23 +299,16 @@ static int mind_serve_posix(zcl_mind_stop_predicate stop, void *stop_opaque,
         long long now = (long long)platform_time_wall_time_t();
         for (size_t i = 0; i < beat.checkout_count; i++) {
             struct zcl_mind_checkout *c = &beat.checkouts[i];
-            mind_observe(c, now);
-            if (c->stale && !mind_rebuild(c, now))
+            if (!mind_checkout_rebuild_if_stale(c, now))
                 LOG_WARN("mind", "serve: rebuild refused for %s", c->root);
-            if (c->stale)
-                mind_observe(c, now);
-            /* Claim last: the marker means "a live owner has this checkout
-             * in hand", so it is written after the work, never before it. */
-            (void)codeindex_owner_claim(c->root, beat.pid, now);
-            if (c->last_rebuild_ms > beat.last_rebuild_ms)
-                beat.last_rebuild_ms = c->last_rebuild_ms;
+            mind_checkout_claim(&beat, c, now);
         }
         beat.beat_unix = now;
         if (!zcl_mind_heartbeat_write(&beat))
             LOG_WARN("mind", "serve: heartbeat not published");
         last_beat = now;
         cycles++;
-        if (max_cycles >= 0 && cycles >= max_cycles)
+        if (mind_cycles_done(cycles, max_cycles))
             break;
 
         /* Wait for an edit. Each registered checkout gets one slice; a quiet
@@ -225,42 +316,28 @@ static int mind_serve_posix(zcl_mind_stop_predicate stop, void *stop_opaque,
          * keeps the claim fresh without a timer of its own. */
         bool changed = false;
         while (!changed) {
-            if (g_mind_stop || (stop && stop(stop_opaque)))
+            if (mind_stop_requested(stop, stop_opaque))
                 goto retire;
             for (size_t i = 0; i < beat.checkout_count && !changed; i++) {
-                if (!watching[i]) continue;
-                enum platform_directory_watch_result r =
-                    platform_directory_watcher_wait(&watchers[i],
-                                                    MIND_WATCH_SLICE_MS, NULL,
-                                                    NULL);
-                if (r == PLATFORM_DIRECTORY_WATCH_CHANGED ||
-                    r == PLATFORM_DIRECTORY_WATCH_OVERFLOW)
+                enum mind_watch_verdict v =
+                    mind_watch_slice(&watchers[i], watching[i]);
+                if (v == MIND_WATCH_CHANGED)
                     changed = true;
-                else if (r == PLATFORM_DIRECTORY_WATCH_ERROR) {
+                else if (v == MIND_WATCH_LOST) {
                     watching[i] = false;
                     LOG_WARN("mind", "serve: watch lost on %s",
                              beat.checkouts[i].root);
                 }
             }
-            /* The registry is the retirement switch, so it is re-read on
-             * every wait pass and not only when something changed. */
-            struct zcl_mind_registry current;
-            if (!zcl_mind_registry_load(&current) || current.count == 0)
+            if (mind_registry_retired())
                 goto retire;
-            long long now_s = (long long)platform_time_wall_time_t();
-            if (!changed && now_s - last_beat >= MIND_HEARTBEAT_INTERVAL_S)
+            if (mind_beat_due(changed, last_beat))
                 break;                     /* refresh the claim on a quiet box */
         }
     }
 
 retire:
-    for (size_t i = 0; i < beat.checkout_count; i++) {
-        if (watching[i])
-            platform_directory_watcher_close(&watchers[i]);
-        /* Retiring means releasing the claim. A marker left behind by a dead
-         * mind would refuse every query for two more minutes for nothing. */
-        (void)codeindex_owner_release(beat.checkouts[i].root, beat.pid);
-    }
+    mind_retire_checkouts(&beat, watchers, watching);
     (void)close(lock_fd);
     (void)remove(lock_path);
     return rc;
