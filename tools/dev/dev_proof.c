@@ -11003,10 +11003,17 @@ static bool proof_original_plan_prepare(const struct proof_paths *paths,
     if (!worktree_exact(root, local, true, paths, "original_plan_prepare", log_path, why, why_len)) return false;
     uint8_t flags[32], graph[32];
     struct dev_source_record plan_source = {0};
+    char detail[512] = {0};
     if (!proof_plan_roots(root, flags, graph, plan_source.mutation_id,
-                           why, why_len) ||
-        !zcl_dev_source_mutation_verify(root, &plan_source, why, why_len)) {
-        fprintf(stderr, "[devproof] prepared build plan does not match source\n");
+                          detail, sizeof(detail))) {
+        fprintf(stderr, "[devproof] prepared build plan invalid: %s\n",
+                detail[0] ? detail : "malformed plan");
+        proof_why(why, why_len, "proof_prepared_build_plan_invalid");
+        return false;
+    }
+    if (!zcl_dev_source_mutation_verify(root, &plan_source, detail, sizeof(detail))) {
+        fprintf(stderr, "[devproof] prepared build plan does not match source: %s\n",
+                detail[0] ? detail : "mutation verification failed");
         proof_why(why, why_len, "proof_prepared_build_plan_source_changed");
         return false;
     }

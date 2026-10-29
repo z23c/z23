@@ -8472,6 +8472,18 @@ static int test_pw_original_plan_refreshes_before_sealing(void)
         ASSERT(!zcl_dev_proof_test_original_plan_prepare(root, local, log,
                                                          why, sizeof(why)));
         ASSERT_STR_EQ(why, "proof_prepared_build_plan_source_changed");
+        char plan_path[4096];
+        ASSERT(snprintf(plan_path, sizeof(plan_path), "%s/build/dev-loop/restart.env", root) <
+               (int)sizeof(plan_path));
+        ASSERT(unlink(plan_path) == 0);
+        ASSERT(!zcl_dev_proof_test_original_plan_prepare(root, local, log, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_prepared_build_plan_invalid");
+        ASSERT(ic_write(root, "build/dev-loop/restart.env", "not-a-plan\n"));
+        ASSERT(!zcl_dev_proof_test_original_plan_prepare(root, local, log, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_prepared_build_plan_invalid");
+        static const char digest[] =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        ASSERT(ic_write_build_plan(root, digest, digest, "-O1", NULL));
         ASSERT(snprintf(marker, sizeof(marker), "%s/build/no-op", root) <
                (int)sizeof(marker));
         ASSERT(unlink(marker) == 0);
