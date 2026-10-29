@@ -432,9 +432,11 @@ static enum cseg_status parse_segment(struct chain_segment *seg,
 }
 
 /* Map the already-validated file, parse + digest-check the segment in it,
- * then confirm the file did not change while it was being validated. On
- * success *out owns the mapping and the file; on any failure every
- * resource is released and a typed status is returned. */
+ * then re-take the file snapshot and require it to equal the one taken
+ * before mapping (a best-effort check: matching snapshots do not prove
+ * the bytes were unchanged). On success *out owns the mapping and the
+ * file; on any failure every resource is released and a typed status is
+ * returned. */
 static enum cseg_status map_and_verify_segment(struct platform_positioned_file *file,
                                                const struct platform_positioned_file_snapshot *before,
                                                struct chain_segment **out,
