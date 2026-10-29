@@ -632,6 +632,69 @@ static bool multi_connect(struct multi_network *net, size_t a, size_t b) {
   return true;
 }
 
+static bool multi_deliver_frame(struct multi_network *net, size_t from,
+                                size_t to, const uint8_t *wire, size_t len,
+                                bool *moved_out) {
+  if (!net->connected[from][to] && net->allow_unsolicited) {
+    *moved_out = true;
+    return true;
+  }
+  if (!net->connected[from][to])
+    return false;
+  if (net->hold_enabled && !net->held_used &&
+      from == net->hold_from && to == net->hold_to) {
+    memcpy(net->held_wire, wire, len);
+    net->held_len = len;
+    net->held_used = true;
+    *moved_out = true;
+    return true;
+  }
+  enum vcs_zcode_dht_reject_reason rejected;
+  if (!vcs_zcode_dht_service_handle_frame(
+          net->service[to], from + 1, wire, len, net->now, &rejected)) {
+    if (net->allow_unsolicited &&
+        rejected == VCS_ZCODE_DHT_REJECT_UNSOLICITED) {
+      *moved_out = true;
+      return true;
+    }
+    printf("multi frame %zu->%zu rejected: %s\n", from, to,
+           vcs_zcode_dht_reject_reason_string(rejected));
+    return false;
+  }
+  net->frames++;
+  *moved_out = true;
+  return true;
+}
+
+static bool multi_connect_pending_pair(struct multi_network *net, size_t a,
+                                       size_t b, bool *moved_out) {
+  if (!net->pending[a][b] && !net->pending[b][a])
+    return true;
+  net->pending[a][b] = net->pending[b][a] = false;
+  if (!multi_connect(net, a, b))
+    return false;
+  *moved_out = true;
+  return true;
+}
+
+static bool multi_connect_first_pending(struct multi_network *net,
+                                        bool *moved_out) {
+  for (size_t a = 0; a < net->node_count; a++)
+    for (size_t b = a + 1; b < net->node_count; b++)
+      if (net->pending[a][b] || net->pending[b][a])
+        return multi_connect_pending_pair(net, a, b, moved_out);
+  return true;
+}
+
+static bool multi_connect_all_pending(struct multi_network *net,
+                                      bool *moved_out) {
+  for (size_t a = 0; a < net->node_count; a++)
+    for (size_t b = a + 1; b < net->node_count; b++)
+      if (!multi_connect_pending_pair(net, a, b, moved_out))
+        return false;
+  return true;
+}
+
 static bool multi_drive_one(struct multi_network *net, bool *moved_out) {
   if (!net || !moved_out)
     return false;
@@ -646,98 +709,40 @@ static bool multi_drive_one(struct multi_network *net, bool *moved_out) {
     if (peer == 0 || peer > net->node_count)
       return false;
     size_t to = (size_t)peer - 1;
-    if (!net->connected[from][to] && net->allow_unsolicited) {
-      *moved_out = true;
-      return true;
-    }
-    if (!net->connected[from][to])
-      return false;
-    if (net->hold_enabled && !net->held_used &&
-        from == net->hold_from && to == net->hold_to) {
-      memcpy(net->held_wire, wire, len);
-      net->held_len = len;
-      net->held_used = true;
-      *moved_out = true;
-      return true;
-    }
-    enum vcs_zcode_dht_reject_reason rejected;
-    if (!vcs_zcode_dht_service_handle_frame(
-            net->service[to], from + 1, wire, len, net->now, &rejected)) {
-      if (net->allow_unsolicited &&
-          rejected == VCS_ZCODE_DHT_REJECT_UNSOLICITED) {
-        *moved_out = true;
-        return true;
-      }
-      printf("multi frame %zu->%zu rejected: %s\n", from, to,
-             vcs_zcode_dht_reject_reason_string(rejected));
-      return false;
-    }
-    net->frames++;
-    *moved_out = true;
-    return true;
+    return multi_deliver_frame(net, from, to, wire, len, moved_out);
   }
-  for (size_t a = 0; a < net->node_count; a++)
-    for (size_t b = a + 1; b < net->node_count; b++)
-      if (net->pending[a][b] || net->pending[b][a]) {
-        net->pending[a][b] = net->pending[b][a] = false;
-        if (!multi_connect(net, a, b))
-          return false;
-        *moved_out = true;
-        return true;
-      }
+  return multi_connect_first_pending(net, moved_out);
+}
+
+static bool multi_drive_frames(struct multi_network *net, bool *moved_out) {
+  bool moved = false;
+  for (size_t from = 0; from < net->node_count; from++) {
+    uint8_t wire[VCS_ZCODE_DHT_MAX_FRAME_BYTES];
+    uint64_t peer = 0;
+    size_t len = 0;
+    while (vcs_zcode_dht_service_next_outbound(
+        net->service[from], 0, &peer, wire, sizeof(wire), &len)) {
+      if (peer == 0 || peer > net->node_count)
+        return false;
+      size_t to = (size_t)peer - 1;
+      bool step = false;
+      if (!multi_deliver_frame(net, from, to, wire, len, &step))
+        return false;
+      if (step)
+        moved = true;
+    }
+  }
+  *moved_out = moved;
   return true;
 }
 
 static bool multi_drive(struct multi_network *net) {
   for (size_t turn = 0; turn < 512; turn++) {
     bool moved = false;
-    for (size_t from = 0; from < net->node_count; from++) {
-      uint8_t wire[VCS_ZCODE_DHT_MAX_FRAME_BYTES];
-      uint64_t peer = 0;
-      size_t len = 0;
-      while (vcs_zcode_dht_service_next_outbound(
-          net->service[from], 0, &peer, wire, sizeof(wire), &len)) {
-        if (peer == 0 || peer > net->node_count)
-          return false;
-        size_t to = (size_t)peer - 1;
-        if (!net->connected[from][to] && net->allow_unsolicited) {
-          moved = true;
-          continue;
-        }
-        if (!net->connected[from][to])
-          return false;
-        if (net->hold_enabled && !net->held_used &&
-            from == net->hold_from && to == net->hold_to) {
-          memcpy(net->held_wire, wire, len);
-          net->held_len = len;
-          net->held_used = true;
-          moved = true;
-          continue;
-        }
-        enum vcs_zcode_dht_reject_reason rejected;
-        if (!vcs_zcode_dht_service_handle_frame(
-                net->service[to], from + 1, wire, len, net->now, &rejected)) {
-          if (net->allow_unsolicited &&
-              rejected == VCS_ZCODE_DHT_REJECT_UNSOLICITED) {
-            moved = true;
-            continue;
-          }
-          printf("multi frame %zu->%zu rejected: %s\n", from, to,
-                 vcs_zcode_dht_reject_reason_string(rejected));
-          return false;
-        }
-        net->frames++;
-        moved = true;
-      }
-    }
-    for (size_t a = 0; a < net->node_count; a++)
-      for (size_t b = a + 1; b < net->node_count; b++)
-        if (net->pending[a][b] || net->pending[b][a]) {
-          net->pending[a][b] = net->pending[b][a] = false;
-          if (!multi_connect(net, a, b))
-            return false;
-          moved = true;
-        }
+    if (!multi_drive_frames(net, &moved))
+      return false;
+    if (!multi_connect_all_pending(net, &moved))
+      return false;
     if (!moved)
       return true;
   }
@@ -908,6 +913,81 @@ static bool space16_policy_allows(
       observer->policy, action, &subject);
 }
 
+static bool space16_swarm_answer_want(struct space16_observer *observer,
+                                      uint64_t peer, uint64_t round,
+                                      const struct vcs_package_swarm_message *request) {
+  uint8_t *bytes = NULL;
+  size_t bytes_len = 0;
+  enum vcs_package_store_result loaded =
+      request->body.want.object_kind ==
+              VCS_PACKAGE_SWARM_OBJECT_MANIFEST
+          ? vcs_package_store_get_manifest_wire(
+                observer->provider_store,
+                request->body.want.package_root, &bytes, &bytes_len)
+          : vcs_package_store_get_chunk_at(
+                observer->provider_store,
+                request->body.want.package_root,
+                request->body.want.file_index,
+                request->body.want.chunk_index, &bytes, &bytes_len);
+  if (loaded != VCS_PACKAGE_STORE_OK ||
+      bytes_len > VCS_BLOB_MAX_BYTES) {
+    printf("space16 swarm provider load=%s len=%zu kind=%u\n",
+           vcs_package_store_result_string(loaded), bytes_len,
+           request->body.want.object_kind);
+    free(bytes);
+    return false;
+  }
+  struct vcs_package_swarm_message data;
+  memset(&data, 0, sizeof(data));
+  data.type = VCS_PACKAGE_SWARM_DATA;
+  data.body.data.object = request->body.want;
+  data.body.data.bytes = bytes;
+  data.body.data.bytes_len = (uint32_t)bytes_len;
+  size_t capacity = bytes_len + 128u;
+  uint8_t *wire = zcl_malloc(capacity, "space16_swarm_data");
+  size_t wire_len = 0;
+  bool encoded = wire && vcs_package_swarm_serialize(
+      &data, wire, capacity, &wire_len);
+  free(bytes);
+  if (!encoded) {
+    printf("space16 swarm data encode failed len=%zu cap=%zu\n",
+           bytes_len, capacity);
+    free(wire);
+    return false;
+  }
+  struct vcs_swarm_frame_result handled =
+      vcs_swarm_engine_handle_frame(
+          observer->swarm, peer, wire, wire_len, 0,
+          observer->now_ms + round + 1u);
+  free(wire);
+  free(handled.reply);
+  if (handled.penalty != VCS_SWARM_PENALTY_NONE)
+    printf("space16 swarm penalty=%u rule=%s\n", handled.penalty,
+           handled.rule ? handled.rule : "none");
+  if (handled.penalty != VCS_SWARM_PENALTY_NONE)
+    return false;
+  return true;
+}
+
+static bool space16_swarm_handle_outbound(struct space16_observer *observer,
+                                          uint64_t peer, uint64_t round,
+                                          const uint8_t *outbound,
+                                          size_t outbound_len) {
+  struct vcs_package_swarm_message request;
+  if (!vcs_package_swarm_parse(outbound, outbound_len, &request)) {
+    printf("space16 swarm outbound parse failed len=%zu\n", outbound_len);
+    return false;
+  }
+  if (request.type == VCS_PACKAGE_SWARM_CANCEL ||
+      request.type == VCS_PACKAGE_SWARM_ANNOUNCE)
+    return true;
+  if (request.type != VCS_PACKAGE_SWARM_WANT) {
+    printf("space16 swarm unexpected type=%u\n", request.type);
+    return false;
+  }
+  return space16_swarm_answer_want(observer, peer, round, &request);
+}
+
 /* Shared WANT/data exchange: tick the downloader, answer every WANT from
  * the provider store with real bytes, until the download completes or
  * fails. Both fetch variants below ride this pump — only how the
@@ -922,67 +1002,8 @@ static bool space16_swarm_pump(
     size_t outbound_len = 0;
     while (vcs_swarm_engine_next_outbound(
         observer->swarm, 0, &peer, outbound, &outbound_len)) {
-      struct vcs_package_swarm_message request;
-      if (!vcs_package_swarm_parse(outbound, outbound_len, &request)) {
-        printf("space16 swarm outbound parse failed len=%zu\n", outbound_len);
-        return false;
-      }
-      if (request.type == VCS_PACKAGE_SWARM_CANCEL ||
-          request.type == VCS_PACKAGE_SWARM_ANNOUNCE)
-        continue;
-      if (request.type != VCS_PACKAGE_SWARM_WANT) {
-        printf("space16 swarm unexpected type=%u\n", request.type);
-        return false;
-      }
-      uint8_t *bytes = NULL;
-      size_t bytes_len = 0;
-      enum vcs_package_store_result loaded =
-          request.body.want.object_kind ==
-                  VCS_PACKAGE_SWARM_OBJECT_MANIFEST
-              ? vcs_package_store_get_manifest_wire(
-                    observer->provider_store,
-                    request.body.want.package_root, &bytes, &bytes_len)
-              : vcs_package_store_get_chunk_at(
-                    observer->provider_store,
-                    request.body.want.package_root,
-                    request.body.want.file_index,
-                    request.body.want.chunk_index, &bytes, &bytes_len);
-      if (loaded != VCS_PACKAGE_STORE_OK ||
-          bytes_len > VCS_BLOB_MAX_BYTES) {
-        printf("space16 swarm provider load=%s len=%zu kind=%u\n",
-               vcs_package_store_result_string(loaded), bytes_len,
-               request.body.want.object_kind);
-        free(bytes);
-        return false;
-      }
-      struct vcs_package_swarm_message data;
-      memset(&data, 0, sizeof(data));
-      data.type = VCS_PACKAGE_SWARM_DATA;
-      data.body.data.object = request.body.want;
-      data.body.data.bytes = bytes;
-      data.body.data.bytes_len = (uint32_t)bytes_len;
-      size_t capacity = bytes_len + 128u;
-      uint8_t *wire = zcl_malloc(capacity, "space16_swarm_data");
-      size_t wire_len = 0;
-      bool encoded = wire && vcs_package_swarm_serialize(
-          &data, wire, capacity, &wire_len);
-      free(bytes);
-      if (!encoded) {
-        printf("space16 swarm data encode failed len=%zu cap=%zu\n",
-               bytes_len, capacity);
-        free(wire);
-        return false;
-      }
-      struct vcs_swarm_frame_result handled =
-          vcs_swarm_engine_handle_frame(
-              observer->swarm, peer, wire, wire_len, 0,
-              observer->now_ms + round + 1u);
-      free(wire);
-      free(handled.reply);
-      if (handled.penalty != VCS_SWARM_PENALTY_NONE)
-        printf("space16 swarm penalty=%u rule=%s\n", handled.penalty,
-               handled.rule ? handled.rule : "none");
-      if (handled.penalty != VCS_SWARM_PENALTY_NONE)
+      if (!space16_swarm_handle_outbound(observer, peer, round,
+                                         outbound, outbound_len))
         return false;
     }
     struct vcs_swarm_download_status status;
@@ -1124,6 +1145,52 @@ static enum vcs_space_scout_manifest_result space16_observe_local(
   return VCS_SPACE_SCOUT_MANIFEST_VERIFIED;
 }
 
+static bool space16_observe_pointer(
+    struct space16_observer *observer, const uint8_t root[32],
+    struct vcs_zcode_dht_record_discovery_result *pointers, size_t i,
+    size_t maximum_wire_bytes) {
+  struct vcs_zcode_dht_record *pointer = &pointers->records[i];
+  if (vcs_zcode_dht_record_conflicted_at(
+          pointers->records, pointers->record_count, i) ||
+      vcs_zcode_dht_record_superseded_at(
+          pointers->records, pointers->record_count, i) ||
+      !space16_policy_allows(
+          observer, VCS_ZCODE_SOVEREIGNTY_FETCH, root,
+          pointer->transport_root,
+          pointer->delegation.doc.master_pubkey))
+    return false;
+  struct vcs_zcode_dht_record_selector provider_selector = {
+      .kind = VCS_ZCODE_DHT_RECORD_PROVIDER};
+  (void)snprintf(provider_selector.namespace_name,
+                 sizeof(provider_selector.namespace_name),
+                 "space.manifest");
+  memcpy(provider_selector.root, pointer->transport_root, 32);
+  struct vcs_zcode_dht_record_discovery_result providers;
+  if (!multi_discover_records(
+          observer->network, observer->origin, &provider_selector,
+          &providers))
+    return false;
+  struct vcs_zcode_dht_provider_route route;
+  if (!vcs_zcode_dht_service_provider_route(
+          observer->network->service[observer->origin],
+          observer->network->now.wall_unix, &provider_selector, &route) ||
+      !route.authenticated_count)
+    return false;
+  if (!space16_swarm_fetch(
+          observer, pointer->transport_root, route.peer_ids,
+          route.authenticated_count, maximum_wire_bytes))
+    return false;
+  char semantic_hex[65], transport_hex[65];
+  zcl_hex_encode(root, 32, semantic_hex);
+  zcl_hex_encode(pointer->transport_root, 32, transport_hex);
+  enum metaverse_space_object_kind kind;
+  bool is_new = false;
+  struct zcl_result admitted = metaverse_space_admit_bounded(
+      observer->local_store, observer->workspace, semantic_hex,
+      transport_hex, maximum_wire_bytes, &kind, &is_new);
+  return admitted.ok && kind == METAVERSE_SPACE_OBJECT_MANIFEST;
+}
+
 static enum vcs_space_scout_manifest_result space16_observe(
     void *opaque, const uint8_t root[32], size_t maximum_wire_bytes,
     struct vcs_space_manifest_v1 *manifest_out, size_t *wire_bytes_out) {
@@ -1154,49 +1221,10 @@ static enum vcs_space_scout_manifest_result space16_observe(
           &pointers))
     return VCS_SPACE_SCOUT_MANIFEST_NOT_FOUND;
   for (size_t i = 0; i < pointers.record_count; i++) {
-    struct vcs_zcode_dht_record *pointer = &pointers.records[i];
-    if (vcs_zcode_dht_record_conflicted_at(
-            pointers.records, pointers.record_count, i) ||
-        vcs_zcode_dht_record_superseded_at(
-            pointers.records, pointers.record_count, i) ||
-        !space16_policy_allows(
-            observer, VCS_ZCODE_SOVEREIGNTY_FETCH, root,
-            pointer->transport_root,
-            pointer->delegation.doc.master_pubkey))
-      continue;
-    struct vcs_zcode_dht_record_selector provider_selector = {
-        .kind = VCS_ZCODE_DHT_RECORD_PROVIDER};
-    (void)snprintf(provider_selector.namespace_name,
-                   sizeof(provider_selector.namespace_name),
-                   "space.manifest");
-    memcpy(provider_selector.root, pointer->transport_root, 32);
-    struct vcs_zcode_dht_record_discovery_result providers;
-    if (!multi_discover_records(
-            observer->network, observer->origin, &provider_selector,
-            &providers))
-      continue;
-    struct vcs_zcode_dht_provider_route route;
-    if (!vcs_zcode_dht_service_provider_route(
-            observer->network->service[observer->origin],
-            observer->network->now.wall_unix, &provider_selector, &route) ||
-        !route.authenticated_count)
-      continue;
-    if (!space16_swarm_fetch(
-            observer, pointer->transport_root, route.peer_ids,
-            route.authenticated_count, maximum_wire_bytes))
-      continue;
-    char semantic_hex[65], transport_hex[65];
-    zcl_hex_encode(root, 32, semantic_hex);
-    zcl_hex_encode(pointer->transport_root, 32, transport_hex);
-    enum metaverse_space_object_kind kind;
-    bool is_new = false;
-    struct zcl_result admitted = metaverse_space_admit_bounded(
-        observer->local_store, observer->workspace, semantic_hex,
-        transport_hex, maximum_wire_bytes, &kind, &is_new);
-    if (!admitted.ok || kind != METAVERSE_SPACE_OBJECT_MANIFEST)
-      continue;
-    return space16_observe_local(
-        observer, root, maximum_wire_bytes, manifest_out, wire_bytes_out);
+    if (space16_observe_pointer(observer, root, &pointers, i,
+                                maximum_wire_bytes))
+      return space16_observe_local(
+          observer, root, maximum_wire_bytes, manifest_out, wire_bytes_out);
   }
   return VCS_SPACE_SCOUT_MANIFEST_NOT_FOUND;
 }
@@ -2272,6 +2300,225 @@ _test_next:;
   return failures;
 }
 
+static int churn_connect_nodes(struct multi_network *net,
+                               const uint8_t genesis[32]) {
+  int failures = 0;
+  for (size_t i = 0; i < net->node_count; i++) {
+    (void)snprintf(net->dir[i], sizeof(net->dir[i]),
+                   "/tmp/zcl_dht_churn_%zu_XXXXXX", i);
+    ASSERT(mkdtemp(net->dir[i]) != NULL);
+    memset(net->noise[i], (int)(0x20 + i), 32);
+    ASSERT(fixture_identity(net->dir[i], (uint8_t)(0x30 + i), genesis,
+                            net->noise[i]));
+    ASSERT(fixture_material(net->dir[i],
+                            &(struct vcs_zcode_dht_delegation){0},
+                            (uint8_t[32]){0}, net->node_id[i]));
+    net->reach[i].network = net;
+    net->reach[i].owner = i;
+    net->service[i] = multi_service(net, i, genesis);
+    ASSERT(net->service[i] != NULL);
+  }
+  const size_t origin = 0;
+  for (size_t i = 1; i < net->node_count; i++)
+    ASSERT(multi_connect(net, origin, i));
+  ASSERT(multi_drive(net));
+  return failures;
+_test_next:
+  return failures;
+}
+
+static int churn_begin_lookup(struct multi_network *net,
+                              const uint8_t genesis[32], size_t *failed_out,
+                              size_t *slow_out,
+                              struct vcs_zcode_dht_record *pointer,
+                              uint64_t *operation_out) {
+  int failures = 0;
+  const size_t origin = 0;
+  struct vcs_zcode_dht_record_selector selector = {
+      .kind = VCS_ZCODE_DHT_RECORD_POINTER};
+  (void)snprintf(selector.namespace_name, sizeof(selector.namespace_name),
+                 "science.study");
+  memset(selector.root, 0xa1, 32);
+  uint8_t target[32];
+  ASSERT(vcs_zcode_dht_record_key(genesis, selector.kind,
+                                  selector.namespace_name, selector.root,
+                                  target));
+  size_t all_order[MULTI_MAX_NODES];
+  for (size_t i = 0; i < net->node_count; i++)
+    all_order[i] = i;
+  for (size_t i = 0; i + 1 < net->node_count; i++)
+    for (size_t j = i + 1; j < net->node_count; j++)
+      if (farther_node(net->node_id[all_order[i]],
+                       net->node_id[all_order[j]], target)) {
+        size_t swap = all_order[i];
+        all_order[i] = all_order[j];
+        all_order[j] = swap;
+      }
+  ASSERT(all_order[VCS_ZCODE_DHT_K] != origin);
+  *failed_out = all_order[0] == origin ? all_order[1] : all_order[0];
+  *slow_out = all_order[VCS_ZCODE_DHT_K];
+  ASSERT(fixture_pointer_record(net->dir[*slow_out], genesis, 0xa1, 0x33,
+                                pointer));
+  ASSERT_EQ(vcs_zcode_dht_service_record_admit(
+                net->service[*slow_out], pointer, net->now),
+            VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+  ASSERT(vcs_zcode_dht_service_record_discovery_begin(
+      net->service[origin], &selector, net->now, operation_out));
+  return failures;
+_test_next:
+  return failures;
+}
+
+static int churn_hold_discovery(struct multi_network *net, size_t failed,
+                                size_t slow,
+                                const struct vcs_zcode_dht_record *pointer,
+                                uint64_t operation) {
+  int failures = 0;
+  const size_t origin = 0;
+    /* Finish only the routing lookup. Record discovery does not consume the
+     * completed lookup until poll(), which gives the fixture an exact
+     * routing/query churn boundary. */
+  for (size_t turn = 0; turn < 8; turn++) {
+    ASSERT(multi_drive(net));
+    vcs_zcode_dht_service_tick(net->service[origin], net->now);
+  }
+  multi_disconnect(net, origin, failed);
+  net->hold_enabled = true;
+  net->hold_from = origin;
+  net->hold_to = slow;
+  struct vcs_zcode_dht_record_discovery_result discovered;
+  memset(&discovered, 0, sizeof(discovered));
+  for (size_t turn = 0; turn < 64; turn++) {
+    ASSERT(multi_drive(net));
+    ASSERT(vcs_zcode_dht_service_record_discovery_poll(
+        net->service[origin], operation, net->now, &discovered));
+    if (net->held_used && discovered.nodes_queried > VCS_ZCODE_DHT_K)
+      break;
+  }
+  ASSERT(net->held_used);
+  ASSERT(discovered.nodes_queried > VCS_ZCODE_DHT_K);
+  ASSERT_EQ(discovered.state, VCS_ZCODE_DHT_RECORD_OPERATION_PENDING);
+  ASSERT_EQ(discovered.record_count, 0);
+  ASSERT(multi_release_held(net));
+  for (size_t turn = 0;
+       turn < 16 &&
+       discovered.state == VCS_ZCODE_DHT_RECORD_OPERATION_PENDING;
+       turn++) {
+    ASSERT(multi_drive(net));
+    ASSERT(vcs_zcode_dht_service_record_discovery_poll(
+        net->service[origin], operation, net->now, &discovered));
+  }
+  ASSERT_EQ(discovered.state, VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
+  ASSERT(!discovered.incomplete);
+  ASSERT_EQ(discovered.record_count, 1);
+  ASSERT_EQ(memcmp(discovered.records[0].transport_root,
+                   pointer->transport_root, 32), 0);
+  ASSERT(multi_connect(net, origin, failed));
+  ASSERT(multi_drive(net));
+  return failures;
+_test_next:
+  return failures;
+}
+
+static int churn_publish_and_churn(
+    struct multi_network *net, struct vcs_zcode_dht_publish_spec *publish,
+    struct vcs_zcode_dht_publication_test_view *churn_view) {
+  int failures = 0;
+  const size_t origin = 0;
+    /* Publication retains all authenticated lookup candidates. Lose the
+     * closest K after routing completes; candidates 17+ still receive the
+     * record, while the cycle remains an honest partial retry rather than a
+     * false responsible-set success. */
+  memset(publish, 0, sizeof(*publish));
+  publish->kind = VCS_ZCODE_DHT_RECORD_POINTER;
+  (void)snprintf(publish->namespace_name, sizeof(publish->namespace_name),
+                 "science");
+  memset(publish->semantic_root, 0xb1, 32);
+  memset(publish->transport_root, 0xb2, 32);
+  publish->sequence = 1;
+  publish->not_before = net->now.wall_unix;
+  publish->expiry = net->now.wall_unix + 1000;
+  uint8_t token[32];
+  struct vcs_zcode_dht_record published;
+  ASSERT(vcs_zcode_dht_service_record_publish_plan(
+      net->service[origin], publish, token, &published, NULL));
+  ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                net->service[origin], publish, token, net->now, &published,
+                NULL),
+            VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+  bool lookup_ready = false;
+  for (size_t frame = 0; frame < 4096; frame++) {
+    bool moved = false;
+    ASSERT(multi_drive_one(net, &moved));
+    ASSERT(moved);
+    ASSERT(vcs_zcode_dht_service_test_publication_retry(
+        net->service[origin], publish->semantic_root, churn_view));
+    if (churn_view->node_count == net->node_count - 1) {
+      lookup_ready = true;
+      break;
+    }
+  }
+  ASSERT(lookup_ready);
+  ASSERT_EQ(churn_view->node_count, net->node_count - 1);
+  ASSERT_EQ(churn_view->successes, 0);
+  for (size_t i = 0; i < VCS_ZCODE_DHT_K; i++) {
+    size_t peer = net->node_count;
+    for (size_t candidate = 1; candidate < net->node_count; candidate++)
+      if (memcmp(churn_view->node_ids[i], net->node_id[candidate], 32) == 0) {
+        peer = candidate;
+        break;
+      }
+    ASSERT(peer < net->node_count);
+    net->deny[origin][peer] = true;
+    net->deny[peer][origin] = true;
+    multi_disconnect(net, origin, peer);
+  }
+  for (size_t turn = 0; turn < 32; turn++) {
+    vcs_zcode_dht_service_tick(net->service[origin], net->now);
+    ASSERT(multi_drive(net));
+  }
+  return failures;
+_test_next:
+  return failures;
+}
+
+static int churn_verify_published(
+    struct multi_network *net,
+    const struct vcs_zcode_dht_publish_spec *publish,
+    struct vcs_zcode_dht_publication_test_view *churn_view) {
+  int failures = 0;
+  const size_t origin = 0;
+  struct vcs_zcode_dht_record_selector published_selector = {
+      .kind = VCS_ZCODE_DHT_RECORD_POINTER};
+  (void)snprintf(published_selector.namespace_name,
+                 sizeof(published_selector.namespace_name), "science");
+  memcpy(published_selector.root, publish->semantic_root, 32);
+  struct vcs_zcode_dht_record found[1];
+  for (size_t i = VCS_ZCODE_DHT_K; i < churn_view->node_count; i++) {
+    size_t peer = net->node_count;
+    for (size_t candidate = 1; candidate < net->node_count; candidate++)
+      if (memcmp(churn_view->node_ids[i], net->node_id[candidate], 32) == 0) {
+        peer = candidate;
+        break;
+      }
+    ASSERT(peer < net->node_count);
+    ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
+                  net->service[peer], net->now.wall_unix,
+                  &published_selector, found, 1),
+              1);
+  }
+  struct vcs_zcode_dht_service_status status;
+  vcs_zcode_dht_service_status(net->service[origin], &status);
+  ASSERT_EQ(status.active_publications, 0);
+  ASSERT(vcs_zcode_dht_service_test_publication_retry(
+      net->service[origin], publish->semantic_root, churn_view));
+  ASSERT_EQ(churn_view->succeeded_beyond_k,
+            net->node_count - 1 - VCS_ZCODE_DHT_K);
+  return failures;
+_test_next:
+  return failures;
+}
+
 static int test_record_churn_fallback(void) {
   int failures = 0;
   TEST("zcode dht service: slow responsible nodes and candidates beyond K") {
@@ -2282,180 +2529,18 @@ static int test_record_churn_fallback(void) {
     net.now = test_time(1001);
     uint8_t genesis[32];
     memset(genesis, 0x11, sizeof(genesis));
-    for (size_t i = 0; i < net.node_count; i++) {
-      (void)snprintf(net.dir[i], sizeof(net.dir[i]),
-                     "/tmp/zcl_dht_churn_%zu_XXXXXX", i);
-      ASSERT(mkdtemp(net.dir[i]) != NULL);
-      memset(net.noise[i], (int)(0x20 + i), 32);
-      ASSERT(fixture_identity(net.dir[i], (uint8_t)(0x30 + i), genesis,
-                              net.noise[i]));
-      ASSERT(fixture_material(net.dir[i],
-                              &(struct vcs_zcode_dht_delegation){0},
-                              (uint8_t[32]){0}, net.node_id[i]));
-      net.reach[i].network = &net;
-      net.reach[i].owner = i;
-      net.service[i] = multi_service(&net, i, genesis);
-      ASSERT(net.service[i] != NULL);
-    }
-    const size_t origin = 0;
-    for (size_t i = 1; i < net.node_count; i++)
-      ASSERT(multi_connect(&net, origin, i));
-    ASSERT(multi_drive(&net));
-
-    struct vcs_zcode_dht_record_selector selector = {
-        .kind = VCS_ZCODE_DHT_RECORD_POINTER};
-    (void)snprintf(selector.namespace_name, sizeof(selector.namespace_name),
-                   "science.study");
-    memset(selector.root, 0xa1, 32);
-    uint8_t target[32];
-    ASSERT(vcs_zcode_dht_record_key(genesis, selector.kind,
-                                    selector.namespace_name, selector.root,
-                                    target));
-    size_t all_order[MULTI_MAX_NODES];
-    for (size_t i = 0; i < net.node_count; i++)
-      all_order[i] = i;
-    for (size_t i = 0; i + 1 < net.node_count; i++)
-      for (size_t j = i + 1; j < net.node_count; j++)
-        if (farther_node(net.node_id[all_order[i]],
-                         net.node_id[all_order[j]], target)) {
-          size_t swap = all_order[i];
-          all_order[i] = all_order[j];
-          all_order[j] = swap;
-        }
-    ASSERT(all_order[VCS_ZCODE_DHT_K] != origin);
-    size_t failed = all_order[0] == origin ? all_order[1] : all_order[0];
-    size_t slow = all_order[VCS_ZCODE_DHT_K];
+    ASSERT(churn_connect_nodes(&net, genesis) == 0);
+    size_t failed = 0;
+    size_t slow = 0;
     struct vcs_zcode_dht_record pointer;
-    ASSERT(fixture_pointer_record(net.dir[slow], genesis, 0xa1, 0x33,
-                                  &pointer));
-    ASSERT_EQ(vcs_zcode_dht_service_record_admit(
-                  net.service[slow], &pointer, net.now),
-              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-
     uint64_t operation = 0;
-    ASSERT(vcs_zcode_dht_service_record_discovery_begin(
-        net.service[origin], &selector, net.now, &operation));
-    /* Finish only the routing lookup. Record discovery does not consume the
-     * completed lookup until poll(), which gives the fixture an exact
-     * routing/query churn boundary. */
-    for (size_t turn = 0; turn < 8; turn++) {
-      ASSERT(multi_drive(&net));
-      vcs_zcode_dht_service_tick(net.service[origin], net.now);
-    }
-    multi_disconnect(&net, origin, failed);
-    net.hold_enabled = true;
-    net.hold_from = origin;
-    net.hold_to = slow;
-    struct vcs_zcode_dht_record_discovery_result discovered;
-    memset(&discovered, 0, sizeof(discovered));
-    for (size_t turn = 0; turn < 64; turn++) {
-      ASSERT(multi_drive(&net));
-      ASSERT(vcs_zcode_dht_service_record_discovery_poll(
-          net.service[origin], operation, net.now, &discovered));
-      if (net.held_used && discovered.nodes_queried > VCS_ZCODE_DHT_K)
-        break;
-    }
-    ASSERT(net.held_used);
-    ASSERT(discovered.nodes_queried > VCS_ZCODE_DHT_K);
-    ASSERT_EQ(discovered.state, VCS_ZCODE_DHT_RECORD_OPERATION_PENDING);
-    ASSERT_EQ(discovered.record_count, 0);
-    ASSERT(multi_release_held(&net));
-    for (size_t turn = 0;
-         turn < 16 &&
-         discovered.state == VCS_ZCODE_DHT_RECORD_OPERATION_PENDING;
-         turn++) {
-      ASSERT(multi_drive(&net));
-      ASSERT(vcs_zcode_dht_service_record_discovery_poll(
-          net.service[origin], operation, net.now, &discovered));
-    }
-    ASSERT_EQ(discovered.state, VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
-    ASSERT(!discovered.incomplete);
-    ASSERT_EQ(discovered.record_count, 1);
-    ASSERT_EQ(memcmp(discovered.records[0].transport_root,
-                     pointer.transport_root, 32), 0);
-    ASSERT(multi_connect(&net, origin, failed));
-    ASSERT(multi_drive(&net));
-
-    /* Publication retains all authenticated lookup candidates. Lose the
-     * closest K after routing completes; candidates 17+ still receive the
-     * record, while the cycle remains an honest partial retry rather than a
-     * false responsible-set success. */
+    ASSERT(churn_begin_lookup(&net, genesis, &failed, &slow, &pointer,
+                              &operation) == 0);
+    ASSERT(churn_hold_discovery(&net, failed, slow, &pointer, operation) == 0);
     struct vcs_zcode_dht_publish_spec publish;
-    memset(&publish, 0, sizeof(publish));
-    publish.kind = VCS_ZCODE_DHT_RECORD_POINTER;
-    (void)snprintf(publish.namespace_name, sizeof(publish.namespace_name),
-                   "science");
-    memset(publish.semantic_root, 0xb1, 32);
-    memset(publish.transport_root, 0xb2, 32);
-    publish.sequence = 1;
-    publish.not_before = net.now.wall_unix;
-    publish.expiry = net.now.wall_unix + 1000;
-    uint8_t token[32];
-    struct vcs_zcode_dht_record published;
-    ASSERT(vcs_zcode_dht_service_record_publish_plan(
-        net.service[origin], &publish, token, &published, NULL));
-    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
-                  net.service[origin], &publish, token, net.now, &published,
-                  NULL),
-              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
     struct vcs_zcode_dht_publication_test_view churn_view;
-    bool lookup_ready = false;
-    for (size_t frame = 0; frame < 4096; frame++) {
-      bool moved = false;
-      ASSERT(multi_drive_one(&net, &moved));
-      ASSERT(moved);
-      ASSERT(vcs_zcode_dht_service_test_publication_retry(
-          net.service[origin], publish.semantic_root, &churn_view));
-      if (churn_view.node_count == net.node_count - 1) {
-        lookup_ready = true;
-        break;
-      }
-    }
-    ASSERT(lookup_ready);
-    ASSERT_EQ(churn_view.node_count, net.node_count - 1);
-    ASSERT_EQ(churn_view.successes, 0);
-    for (size_t i = 0; i < VCS_ZCODE_DHT_K; i++) {
-      size_t peer = net.node_count;
-      for (size_t candidate = 1; candidate < net.node_count; candidate++)
-        if (memcmp(churn_view.node_ids[i], net.node_id[candidate], 32) == 0) {
-          peer = candidate;
-          break;
-      }
-      ASSERT(peer < net.node_count);
-      net.deny[origin][peer] = true;
-      net.deny[peer][origin] = true;
-      multi_disconnect(&net, origin, peer);
-    }
-    for (size_t turn = 0; turn < 32; turn++) {
-      vcs_zcode_dht_service_tick(net.service[origin], net.now);
-      ASSERT(multi_drive(&net));
-    }
-    struct vcs_zcode_dht_record_selector published_selector = {
-        .kind = VCS_ZCODE_DHT_RECORD_POINTER};
-    (void)snprintf(published_selector.namespace_name,
-                   sizeof(published_selector.namespace_name), "science");
-    memcpy(published_selector.root, publish.semantic_root, 32);
-    struct vcs_zcode_dht_record found[1];
-    for (size_t i = VCS_ZCODE_DHT_K; i < churn_view.node_count; i++) {
-      size_t peer = net.node_count;
-      for (size_t candidate = 1; candidate < net.node_count; candidate++)
-        if (memcmp(churn_view.node_ids[i], net.node_id[candidate], 32) == 0) {
-          peer = candidate;
-          break;
-        }
-      ASSERT(peer < net.node_count);
-      ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
-                    net.service[peer], net.now.wall_unix,
-                    &published_selector, found, 1),
-                1);
-    }
-    struct vcs_zcode_dht_service_status status;
-    vcs_zcode_dht_service_status(net.service[origin], &status);
-    ASSERT_EQ(status.active_publications, 0);
-    ASSERT(vcs_zcode_dht_service_test_publication_retry(
-        net.service[origin], publish.semantic_root, &churn_view));
-    ASSERT_EQ(churn_view.succeeded_beyond_k,
-              net.node_count - 1 - VCS_ZCODE_DHT_K);
+    ASSERT(churn_publish_and_churn(&net, &publish, &churn_view) == 0);
+    ASSERT(churn_verify_published(&net, &publish, &churn_view) == 0);
 
     for (size_t i = 0; i < net.node_count; i++) {
       vcs_zcode_dht_service_free(net.service[i], net.now);
@@ -3296,6 +3381,491 @@ _test_next:;
   return failures;
 }
 
+static int sparse_iter_connect_lookup(struct multi_network *net,
+                                      uint8_t genesis[32],
+                                      size_t order[MULTI_NODES]) {
+  int failures = 0;
+    for (size_t i = 0; i < MULTI_NODES; i++) {
+      snprintf(net->dir[i], sizeof(net->dir[i]),
+               "/tmp/zcl_dht_multi_%zu_XXXXXX", i);
+      ASSERT(mkdtemp(net->dir[i]) != NULL);
+      memset(net->noise[i], (int)(0x30 + i), 32);
+      ASSERT(fixture_identity(net->dir[i], (uint8_t)(0x70 + i), genesis,
+                              net->noise[i]));
+      ASSERT(fixture_material(net->dir[i],
+                              &(struct vcs_zcode_dht_delegation){0},
+                              (uint8_t[32]){0}, net->node_id[i]));
+      net->reach[i].network = net;
+      net->reach[i].owner = i;
+    }
+    for (size_t i = 0; i < MULTI_NODES; i++) {
+      net->service[i] = multi_service(net, i, genesis);
+      ASSERT(net->service[i] != NULL);
+      ASSERT(vcs_zcode_dht_service_enabled(net->service[i]));
+    }
+
+    /* Put six independent identities in descending XOR distance from the
+     * target, then connect only that chain plus one B->D escape edge. */
+    const size_t target_node = MULTI_NODES - 1;
+    for (size_t i = 0; i < target_node; i++)
+      order[i] = i;
+    for (size_t i = 0; i < target_node; i++)
+      for (size_t j = i + 1; j < target_node; j++)
+        if (!farther_node(net->node_id[order[i]], net->node_id[order[j]],
+                          net->node_id[target_node])) {
+          size_t swap = order[i];
+          order[i] = order[j];
+          order[j] = swap;
+        }
+    order[target_node] = target_node;
+    for (size_t i = 1; i < MULTI_NODES; i++)
+      ASSERT(farther_node(net->node_id[order[i - 1]], net->node_id[order[i]],
+                          net->node_id[target_node]));
+    for (size_t i = 0; i + 1 < MULTI_NODES; i++)
+      ASSERT(multi_connect(net, order[i], order[i + 1]));
+    ASSERT(multi_connect(net, order[1], order[3]));
+    ASSERT(multi_drive(net));
+
+    const size_t origin = order[0];
+    net->deny[origin][order[2]] = true; /* break the obvious next hop */
+    struct vcs_zcode_dht_service_status before, after;
+    vcs_zcode_dht_service_status(net->service[origin], &before);
+    ASSERT_EQ(before.connected_authenticated, 1);
+    uint64_t lookup = 0;
+    ASSERT(vcs_zcode_dht_service_lookup_begin(
+        net->service[origin], net->node_id[target_node], net->now, &lookup));
+    uint64_t frames_before = net->frames;
+    ASSERT(multi_drive(net));
+    struct vcs_zcode_dht_lookup_result result;
+    ASSERT(vcs_zcode_dht_service_lookup_poll(net->service[origin], lookup,
+                                             net->now, &result));
+    ASSERT_EQ(result.state, VCS_ZCODE_DHT_LOOKUP_COMPLETE);
+    ASSERT_EQ(result.termination,
+              VCS_ZCODE_DHT_TERMINATION_TARGET_AUTHENTICATED);
+    ASSERT(result.rounds >= 3);
+    ASSERT(result.xor_progress >= 3);
+    ASSERT(net->denied_hints >= 1);
+    bool found_target = false, found_denied = false;
+    for (uint32_t i = 0; i < result.count; i++) {
+      found_target |= memcmp(result.node_ids[i], net->node_id[target_node], 32) == 0;
+      found_denied |= memcmp(result.node_ids[i], net->node_id[order[2]], 32) == 0;
+    }
+    ASSERT(found_target);
+    ASSERT(!found_denied);
+    ASSERT(net->frames - frames_before <= 96);
+    vcs_zcode_dht_service_status(net->service[origin], &after);
+    ASSERT(after.lookup_rounds >= result.rounds);
+    ASSERT(after.lookup_xor_progress >= result.xor_progress);
+  return failures;
+_test_next:
+  return failures;
+}
+
+static int sparse_iter_late_join(
+    struct multi_network *net, uint8_t genesis[32],
+    const size_t order[MULTI_NODES], size_t origin, size_t target_node,
+    struct vcs_zcode_dht_record_selector *selector,
+    struct vcs_zcode_dht_record *pointer) {
+  int failures = 0;
+    /* Recreate the origin as the actual late joiner in the S7.1 proof: its
+     * records cache and peer database do not exist, and its sole bootstrap
+     * session is not the publisher. The signed pointer remains only at the
+     * far target, so discovery below must traverse the sparse DHT. */
+    vcs_zcode_dht_service_free(net->service[origin], net->now);
+    net->service[origin] = NULL;
+    char late_path[512];
+    (void)snprintf(late_path, sizeof(late_path),
+                   "%s/zcode/dht/contacts.v2", net->dir[origin]);
+    (void)unlink(late_path);
+    ASSERT(access(late_path, F_OK) != 0);
+    (void)snprintf(late_path, sizeof(late_path),
+                   "%s/zcode/dht/records.v1", net->dir[origin]);
+    (void)unlink(late_path);
+    ASSERT(access(late_path, F_OK) != 0);
+    for (size_t i = 0; i < MULTI_NODES; i++) {
+      net->connected[origin][i] = false;
+      net->connected[i][origin] = false;
+      net->pending[origin][i] = false;
+      net->pending[i][origin] = false;
+    }
+    net->service[origin] = multi_service(net, origin, genesis);
+    ASSERT(net->service[origin] != NULL);
+    struct vcs_zcode_dht_service_status late_status;
+    vcs_zcode_dht_service_status(net->service[origin], &late_status);
+    ASSERT_EQ(late_status.cold_contacts, 0);
+    struct vcs_zcode_dht_record late_cache[1];
+    ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
+                  net->service[origin], net->now.wall_unix, selector,
+                  late_cache, 1),
+              0);
+    ASSERT(order[1] != target_node);
+    ASSERT(multi_connect(net, origin, order[1]));
+    ASSERT(multi_drive(net));
+    ASSERT(!net->connected[origin][target_node]);
+    vcs_zcode_dht_service_status(net->service[origin], &late_status);
+    ASSERT_EQ(late_status.connected_authenticated, 1);
+
+    uint64_t record_operation = 0;
+    ASSERT(vcs_zcode_dht_service_record_discovery_begin(
+        net->service[origin], selector, net->now, &record_operation));
+    ASSERT(multi_drive(net));
+    struct vcs_zcode_dht_record_discovery_result discovery_result;
+    ASSERT(vcs_zcode_dht_service_record_discovery_poll(
+        net->service[origin], record_operation, net->now, &discovery_result));
+    ASSERT_EQ(discovery_result.state,
+              VCS_ZCODE_DHT_RECORD_OPERATION_PENDING);
+    for (size_t drive = 0;
+         drive < VCS_ZCODE_DHT_K &&
+         discovery_result.state == VCS_ZCODE_DHT_RECORD_OPERATION_PENDING;
+         drive++) {
+      ASSERT(multi_drive(net));
+      ASSERT(vcs_zcode_dht_service_record_discovery_poll(
+          net->service[origin], record_operation, net->now, &discovery_result));
+    }
+    ASSERT_EQ(discovery_result.state,
+              VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
+    ASSERT_EQ(discovery_result.record_count, MULTI_NODES + 7u);
+    ASSERT(!discovery_result.truncated);
+    ASSERT(!discovery_result.incomplete);
+    for (size_t i = 0; i < MULTI_NODES; i++)
+      for (size_t j = i + 1; j < MULTI_NODES; j++)
+        ASSERT(memcmp(discovery_result.records[i].provider_node_id,
+                      discovery_result.records[j].provider_node_id, 32) != 0);
+    size_t target_conflicts = 0;
+    for (uint32_t i = 0; i < discovery_result.record_count; i++)
+      target_conflicts +=
+          memcmp(discovery_result.records[i].provider_node_id,
+                 pointer->provider_node_id, 32) == 0;
+    ASSERT_EQ(target_conflicts, 8);
+    struct vcs_zcode_dht_record cached[1];
+    ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
+                  net->service[origin], net->now.wall_unix, selector, cached, 1),
+              MULTI_NODES + 7u);
+  return failures;
+_test_next:
+  return failures;
+}
+
+static int sparse_iter_provider_route(struct multi_network *net,
+                                      uint8_t genesis[32], size_t origin,
+                                      size_t target_node) {
+  int failures = 0;
+    /* Provider routing binds a signed claim to the currently authenticated
+     * Noise/delegation session for that exact node ID. Local policy is
+     * re-evaluated for FETCH/STORE/INDEX before the peer handle is exposed. */
+    struct vcs_zcode_dht_record provider;
+    ASSERT(fixture_provider_record(net->dir[target_node], genesis,
+                                   0xf1, &provider));
+    ASSERT_EQ(vcs_zcode_dht_service_record_admit(
+                  net->service[origin], &provider, net->now),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    struct vcs_zcode_dht_record_selector provider_selector = {
+        .kind = VCS_ZCODE_DHT_RECORD_PROVIDER};
+    (void)snprintf(provider_selector.namespace_name,
+                   sizeof(provider_selector.namespace_name), "science");
+    memcpy(provider_selector.root, provider.transport_root, 32);
+    struct vcs_zcode_dht_provider_route route;
+    ASSERT(vcs_zcode_dht_service_provider_route(
+        net->service[origin], net->now.wall_unix, &provider_selector, &route));
+    ASSERT_EQ(route.authenticated_count, 1);
+    ASSERT_EQ(route.peer_ids[0], target_node + 1);
+    memcpy(net->banned_root, provider.transport_root, 32);
+    net->banned[origin] = true;
+    ASSERT(vcs_zcode_dht_service_provider_route(
+        net->service[origin], net->now.wall_unix, &provider_selector, &route));
+    ASSERT_EQ(route.authenticated_count, 0);
+    ASSERT_EQ(route.policy_denied, 1);
+    net->banned[origin] = false;
+  return failures;
+_test_next:
+  return failures;
+}
+
+static int sparse_iter_routed_publish(struct multi_network *net,
+                                      size_t target_node) {
+  int failures = 0;
+    /* Publication is a lookup against the deterministic record key, not a
+     * broadcast to the publisher's current sessions. Select a node that is
+     * not directly connected to the publisher, then prove that the closest
+     * set walk reaches it and stores the signed record. */
+    size_t indirect = MULTI_NODES;
+    for (size_t i = 0; i < MULTI_NODES; i++)
+      if (i != target_node && !net->connected[target_node][i]) {
+        indirect = i;
+        break;
+      }
+    ASSERT(indirect < MULTI_NODES);
+    struct vcs_zcode_dht_publish_spec routed_publish;
+    memset(&routed_publish, 0, sizeof(routed_publish));
+    routed_publish.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+    (void)snprintf(routed_publish.namespace_name,
+                   sizeof(routed_publish.namespace_name), "science");
+    memset(routed_publish.semantic_root, 0xb4, 32);
+    memset(routed_publish.transport_root, 0xb5, 32);
+    routed_publish.sequence = 1;
+    routed_publish.not_before = net->now.wall_unix;
+    routed_publish.expiry = net->now.wall_unix + 999;
+    uint8_t routed_token[32];
+    struct vcs_zcode_dht_record routed_record;
+    ASSERT(vcs_zcode_dht_service_record_publish_plan(
+        net->service[target_node], &routed_publish, routed_token,
+        &routed_record, NULL));
+    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
+                  net->service[target_node], &routed_publish, routed_token,
+                  net->now, &routed_record, NULL),
+              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
+    uint64_t publish_frames = net->frames;
+    struct vcs_zcode_dht_record_selector routed_selector = {
+        .kind = VCS_ZCODE_DHT_RECORD_POINTER};
+    (void)snprintf(routed_selector.namespace_name,
+                   sizeof(routed_selector.namespace_name), "science");
+    memcpy(routed_selector.root, routed_publish.semantic_root, 32);
+    struct vcs_zcode_dht_record routed_found[1];
+    size_t routed_count = 0;
+    for (size_t turn = 0; turn < 32 && routed_count == 0; turn++) {
+      ASSERT(multi_drive(net));
+      vcs_zcode_dht_service_tick(net->service[target_node], net->now);
+      routed_count = vcs_zcode_dht_service_record_local_query(
+          net->service[indirect], net->now.wall_unix, &routed_selector,
+          routed_found, 1);
+    }
+    ASSERT_EQ(routed_count, 1);
+    ASSERT_EQ(routed_found[0].sequence, 1);
+    ASSERT(net->connected[target_node][indirect]);
+    struct vcs_zcode_dht_service_status publish_status;
+    for (size_t turn = 0; turn < 32; turn++) {
+      vcs_zcode_dht_service_status(net->service[target_node], &publish_status);
+      if (publish_status.active_publications == 0)
+        break;
+      ASSERT(multi_drive(net));
+      vcs_zcode_dht_service_tick(net->service[target_node], net->now);
+    }
+    vcs_zcode_dht_service_status(net->service[target_node], &publish_status);
+    ASSERT_EQ(publish_status.active_publications, 0);
+    ASSERT(net->frames - publish_frames <= 256);
+
+    /* A local policy change freezes forwarding and renewal. Once the local
+     * root ban is removed, the same persisted intent renews and advances its
+     * sequence; no global state or shared ban is involved. */
+    memcpy(net->banned_root, routed_publish.semantic_root, 32);
+    net->banned[target_node] = true;
+    net->now.wall_unix = routed_publish.expiry - 300;
+    net->now.monotonic_s = net->now.wall_unix;
+    uint64_t frames_before_policy = net->frames;
+    vcs_zcode_dht_service_tick(net->service[target_node], net->now);
+    ASSERT(multi_drive(net));
+    ASSERT_EQ(net->frames, frames_before_policy);
+    ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
+                  net->service[target_node], net->now.wall_unix,
+                  &routed_selector, routed_found, 1),
+              1);
+    ASSERT_EQ(routed_found[0].sequence, 1);
+    net->banned[target_node] = false;
+    vcs_zcode_dht_service_tick(net->service[target_node], net->now);
+    ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
+                  net->service[target_node], net->now.wall_unix,
+                  &routed_selector, routed_found, 1),
+              1);
+    ASSERT_EQ(routed_found[0].sequence, 2);
+  return failures;
+_test_next:
+  return failures;
+}
+
+static int sparse_iter_ban_and_alternate(
+    struct multi_network *net, const size_t order[MULTI_NODES],
+    size_t origin, size_t target_node,
+    struct vcs_zcode_dht_record_selector *selector,
+    struct vcs_zcode_dht_record *pointer) {
+  int failures = 0;
+  uint64_t record_operation = 0;
+    /* A ban is strictly local. Origin stops serving this root while the
+     * target still serves the identical signed record to another node. */
+    struct vcs_zcode_dht_record_operation_result record_result;
+    memcpy(net->banned_root, pointer->semantic_root, 32);
+    net->banned[origin] = true;
+    ASSERT(vcs_zcode_dht_service_record_query_begin(
+        net->service[target_node], origin + 1, selector, net->now,
+        &record_operation));
+    ASSERT(multi_drive(net));
+    ASSERT(vcs_zcode_dht_service_record_operation_poll(
+        net->service[target_node], record_operation, net->now, &record_result));
+    ASSERT_EQ(record_result.record_count, 0);
+    size_t alternate = order[target_node - 1];
+    ASSERT(vcs_zcode_dht_service_record_query_begin(
+        net->service[alternate], target_node + 1, selector, net->now,
+        &record_operation));
+    ASSERT(multi_drive(net));
+    ASSERT(vcs_zcode_dht_service_record_operation_poll(
+        net->service[alternate], record_operation, net->now, &record_result));
+    ASSERT_EQ(record_result.record_count, VCS_ZCODE_DHT_RECORDS_PER_FRAME);
+  return failures;
+_test_next:
+  return failures;
+}
+
+static int sparse_iter_absent_lookup(struct multi_network *net,
+                                     size_t origin,
+                                     const size_t order[MULTI_NODES]) {
+  int failures = 0;
+  uint64_t lookup = 0;
+  struct vcs_zcode_dht_lookup_result result;
+    /* A reachability request can be accepted while the bounded dial itself
+     * fails.  The unverified ID must age out monotonically so a nonexistent
+     * target reaches shortlist stability instead of the 30-second ceiling. */
+    net->deny[origin][order[2]] = false;
+    net->stall[origin][order[2]] = true;
+    uint8_t absent_target[32];
+    memset(absent_target, 0xa5, sizeof(absent_target));
+    ASSERT(vcs_zcode_dht_service_lookup_begin(
+        net->service[origin], absent_target, net->now, &lookup));
+    ASSERT(multi_drive(net));
+    ASSERT(vcs_zcode_dht_service_lookup_poll(net->service[origin], lookup,
+                                             net->now, &result));
+    ASSERT_EQ(result.state, VCS_ZCODE_DHT_LOOKUP_PENDING);
+    net->now.monotonic_s +=
+        VCS_ZCODE_DHT_SERVICE_REACHABILITY_TIMEOUT_S + 1;
+    ASSERT(vcs_zcode_dht_service_lookup_poll(net->service[origin], lookup,
+                                             net->now, &result));
+    ASSERT_EQ(result.state, VCS_ZCODE_DHT_LOOKUP_COMPLETE);
+    ASSERT_EQ(result.termination,
+              VCS_ZCODE_DHT_TERMINATION_SHORTLIST_STABLE);
+    net->stall[origin][order[2]] = false;
+    net->deny[origin][order[2]] = true;
+  return failures;
+_test_next:
+  return failures;
+}
+
+static int sparse_iter_concurrent_lookups(struct multi_network *net,
+                                          size_t origin) {
+  int failures = 0;
+  struct vcs_zcode_dht_lookup_result result;
+  struct vcs_zcode_dht_service_status after;
+    /* All eight requests are admitted while the three global slots are
+     * occupied. Scheduler rotation eventually gives every lookup a query. */
+    uint64_t ids[VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS];
+    uint8_t concurrent_target[32];
+    memset(concurrent_target, 0xa6, sizeof(concurrent_target));
+    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS; i++)
+      ASSERT(vcs_zcode_dht_service_lookup_begin(
+          net->service[origin], concurrent_target, net->now, &ids[i]));
+    vcs_zcode_dht_service_status(net->service[origin], &after);
+    ASSERT_EQ(after.queued_lookups, VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS);
+    ASSERT_EQ(after.active_queries, VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES);
+    net->now.monotonic_s++;
+    ASSERT(multi_drive(net));
+    size_t waited = 0;
+    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS; i++) {
+      ASSERT(vcs_zcode_dht_service_lookup_poll(net->service[origin], ids[i],
+                                               net->now, &result));
+      ASSERT_EQ(result.state, VCS_ZCODE_DHT_LOOKUP_COMPLETE);
+      ASSERT(result.rounds > 0);
+      waited += result.queue_wait_s > 0;
+    }
+    ASSERT(waited >= 5);
+  return failures;
+_test_next:
+  return failures;
+}
+
+static int sparse_iter_cold_reconnect(
+    struct multi_network *net, uint8_t genesis[32], size_t origin,
+    size_t target_node, struct vcs_zcode_dht_record_selector *selector,
+    struct vcs_zcode_dht_record *pointer) {
+  int failures = 0;
+  struct vcs_zcode_dht_service_status after;
+  uint64_t lookup = 0;
+  struct vcs_zcode_dht_lookup_result result;
+    /* Durable authenticated contacts load cold; only a fresh Noise session
+     * promotes the neighbour back into connected/authenticated state. */
+    vcs_zcode_dht_service_free(net->service[origin], net->now);
+    net->service[origin] = multi_service(net, origin, genesis);
+    ASSERT(net->service[origin] != NULL);
+    vcs_zcode_dht_service_status(net->service[origin], &after);
+    ASSERT(after.persistence_loaded);
+    ASSERT(after.cold_contacts >= 1);
+    struct vcs_zcode_dht_record cold_record[1];
+    ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
+                  net->service[origin], net->now.wall_unix, selector,
+                  cold_record, 1),
+              MULTI_NODES + 7u);
+    ASSERT(memcmp(cold_record[0].semantic_root, pointer->semantic_root, 32) ==
+           0);
+    ASSERT_EQ(after.connected_authenticated, 0);
+    memset(net->connected[origin], 0, sizeof(net->connected[origin]));
+    for (size_t i = 0; i < MULTI_NODES; i++)
+      net->connected[i][origin] = false;
+    /* A new lookup seeds the closest persisted IDs as COLD/UNVERIFIED.  The
+     * reachability callback may arrange a connection, but the result remains
+     * pending until that connection freshly authenticates its Noise-bound
+     * delegation.  No explicit reconnect is injected here. */
+    ASSERT(vcs_zcode_dht_service_lookup_begin(
+        net->service[origin], net->node_id[target_node], net->now, &lookup));
+    ASSERT(net->pending[origin][target_node]);
+    ASSERT(multi_drive(net));
+    ASSERT(vcs_zcode_dht_service_lookup_poll(net->service[origin], lookup,
+                                             net->now, &result));
+    ASSERT_EQ(result.state, VCS_ZCODE_DHT_LOOKUP_COMPLETE);
+    ASSERT_EQ(result.termination,
+              VCS_ZCODE_DHT_TERMINATION_TARGET_AUTHENTICATED);
+    vcs_zcode_dht_service_status(net->service[origin], &after);
+    ASSERT(after.connected_authenticated >= 1);
+  return failures;
+_test_next:
+  return failures;
+}
+
+static int sparse_iter_ceiling_discovery(
+    struct multi_network *net, uint8_t genesis[32], size_t origin,
+    size_t target_node, struct vcs_zcode_dht_record_selector *selector) {
+  int failures = 0;
+  struct vcs_zcode_dht_record_discovery_result discovery_result;
+    /* Fill the same signed selector to its exact 64-record discovery ceiling.
+     * The operation preserves the bounded records and says truncated instead
+     * of claiming complete evidence beyond the cap. */
+    size_t ceiling_added = 0;
+    for (size_t i = 0; i < MULTI_NODES && ceiling_added < 45; i++) {
+      if (i == target_node)
+        continue;
+      for (size_t conflict = 0; conflict < 7 && ceiling_added < 45;
+           conflict++) {
+        struct vcs_zcode_dht_record flooded;
+        ASSERT(fixture_pointer_record(net->dir[i], genesis, 0xc1,
+                                      (uint8_t)(0x20 + ceiling_added),
+                                      &flooded));
+        ASSERT_EQ(vcs_zcode_dht_service_record_admit(
+                      net->service[target_node], &flooded, net->now),
+                  VCS_ZCODE_DHT_RECORD_STORE_CONFLICT);
+        ceiling_added++;
+      }
+    }
+    ASSERT_EQ(ceiling_added, 45);
+    uint64_t ceiling_operation = 0;
+    ASSERT(vcs_zcode_dht_service_record_discovery_begin(
+        net->service[origin], selector, net->now, &ceiling_operation));
+    ASSERT(multi_drive(net));
+    ASSERT(vcs_zcode_dht_service_record_discovery_poll(
+        net->service[origin], ceiling_operation, net->now, &discovery_result));
+    for (size_t drive = 0;
+         drive < 2 * VCS_ZCODE_DHT_K &&
+         discovery_result.state == VCS_ZCODE_DHT_RECORD_OPERATION_PENDING;
+         drive++) {
+      ASSERT(multi_drive(net));
+      ASSERT(vcs_zcode_dht_service_record_discovery_poll(
+          net->service[origin], ceiling_operation, net->now,
+          &discovery_result));
+    }
+    ASSERT_EQ(discovery_result.state,
+              VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
+    ASSERT_EQ(discovery_result.record_count,
+              VCS_ZCODE_DHT_RECORD_DISCOVERY_MAX_RESULTS);
+    ASSERT(discovery_result.truncated);
+  return failures;
+_test_next:
+  return failures;
+}
+
 static int test_sparse_iterative_network(void) {
   int failures = 0;
   TEST("zcode dht service: sparse multi-hop records, local ban and restart") {
@@ -3305,79 +3875,10 @@ static int test_sparse_iterative_network(void) {
     net.now = test_time(1001);
     uint8_t genesis[32];
     memset(genesis, 0x11, sizeof(genesis));
-    for (size_t i = 0; i < MULTI_NODES; i++) {
-      snprintf(net.dir[i], sizeof(net.dir[i]),
-               "/tmp/zcl_dht_multi_%zu_XXXXXX", i);
-      ASSERT(mkdtemp(net.dir[i]) != NULL);
-      memset(net.noise[i], (int)(0x30 + i), 32);
-      ASSERT(fixture_identity(net.dir[i], (uint8_t)(0x70 + i), genesis,
-                              net.noise[i]));
-      ASSERT(fixture_material(net.dir[i],
-                              &(struct vcs_zcode_dht_delegation){0},
-                              (uint8_t[32]){0}, net.node_id[i]));
-      net.reach[i].network = &net;
-      net.reach[i].owner = i;
-    }
-    for (size_t i = 0; i < MULTI_NODES; i++) {
-      net.service[i] = multi_service(&net, i, genesis);
-      ASSERT(net.service[i] != NULL);
-      ASSERT(vcs_zcode_dht_service_enabled(net.service[i]));
-    }
-
-    /* Put six independent identities in descending XOR distance from the
-     * target, then connect only that chain plus one B->D escape edge. */
-    const size_t target_node = MULTI_NODES - 1;
     size_t order[MULTI_NODES];
-    for (size_t i = 0; i < target_node; i++)
-      order[i] = i;
-    for (size_t i = 0; i < target_node; i++)
-      for (size_t j = i + 1; j < target_node; j++)
-        if (!farther_node(net.node_id[order[i]], net.node_id[order[j]],
-                          net.node_id[target_node])) {
-          size_t swap = order[i];
-          order[i] = order[j];
-          order[j] = swap;
-        }
-    order[target_node] = target_node;
-    for (size_t i = 1; i < MULTI_NODES; i++)
-      ASSERT(farther_node(net.node_id[order[i - 1]], net.node_id[order[i]],
-                          net.node_id[target_node]));
-    for (size_t i = 0; i + 1 < MULTI_NODES; i++)
-      ASSERT(multi_connect(&net, order[i], order[i + 1]));
-    ASSERT(multi_connect(&net, order[1], order[3]));
-    ASSERT(multi_drive(&net));
-
+    ASSERT(sparse_iter_connect_lookup(&net, genesis, order) == 0);
     const size_t origin = order[0];
-    net.deny[origin][order[2]] = true; /* break the obvious next hop */
-    struct vcs_zcode_dht_service_status before, after;
-    vcs_zcode_dht_service_status(net.service[origin], &before);
-    ASSERT_EQ(before.connected_authenticated, 1);
-    uint64_t lookup = 0;
-    ASSERT(vcs_zcode_dht_service_lookup_begin(
-        net.service[origin], net.node_id[target_node], net.now, &lookup));
-    uint64_t frames_before = net.frames;
-    ASSERT(multi_drive(&net));
-    struct vcs_zcode_dht_lookup_result result;
-    ASSERT(vcs_zcode_dht_service_lookup_poll(net.service[origin], lookup,
-                                             net.now, &result));
-    ASSERT_EQ(result.state, VCS_ZCODE_DHT_LOOKUP_COMPLETE);
-    ASSERT_EQ(result.termination,
-              VCS_ZCODE_DHT_TERMINATION_TARGET_AUTHENTICATED);
-    ASSERT(result.rounds >= 3);
-    ASSERT(result.xor_progress >= 3);
-    ASSERT(net.denied_hints >= 1);
-    bool found_target = false, found_denied = false;
-    for (uint32_t i = 0; i < result.count; i++) {
-      found_target |= memcmp(result.node_ids[i], net.node_id[target_node], 32) == 0;
-      found_denied |= memcmp(result.node_ids[i], net.node_id[order[2]], 32) == 0;
-    }
-    ASSERT(found_target);
-    ASSERT(!found_denied);
-    ASSERT(net.frames - frames_before <= 96);
-    vcs_zcode_dht_service_status(net.service[origin], &after);
-    ASSERT(after.lookup_rounds >= result.rounds);
-    ASSERT(after.lookup_xor_progress >= result.xor_progress);
-
+    const size_t target_node = MULTI_NODES - 1;
     /* Resolve the generic record key rather than naming the publisher peer.
      * The iterative record operation reuses the S6 walk, queries the closest
      * authenticated nodes, merges signed results, and treats records.v1 only
@@ -3404,335 +3905,19 @@ static int test_sparse_iterative_network(void) {
     snprintf(selector.namespace_name, sizeof(selector.namespace_name),
              "science.study");
     memcpy(selector.root, pointer.semantic_root, 32);
-
-    /* Recreate the origin as the actual late joiner in the S7.1 proof: its
-     * records cache and peer database do not exist, and its sole bootstrap
-     * session is not the publisher. The signed pointer remains only at the
-     * far target, so discovery below must traverse the sparse DHT. */
-    vcs_zcode_dht_service_free(net.service[origin], net.now);
-    net.service[origin] = NULL;
-    char late_path[512];
-    (void)snprintf(late_path, sizeof(late_path),
-                   "%s/zcode/dht/contacts.v2", net.dir[origin]);
-    (void)unlink(late_path);
-    ASSERT(access(late_path, F_OK) != 0);
-    (void)snprintf(late_path, sizeof(late_path),
-                   "%s/zcode/dht/records.v1", net.dir[origin]);
-    (void)unlink(late_path);
-    ASSERT(access(late_path, F_OK) != 0);
-    for (size_t i = 0; i < MULTI_NODES; i++) {
-      net.connected[origin][i] = false;
-      net.connected[i][origin] = false;
-      net.pending[origin][i] = false;
-      net.pending[i][origin] = false;
-    }
-    net.service[origin] = multi_service(&net, origin, genesis);
-    ASSERT(net.service[origin] != NULL);
-    struct vcs_zcode_dht_service_status late_status;
-    vcs_zcode_dht_service_status(net.service[origin], &late_status);
-    ASSERT_EQ(late_status.cold_contacts, 0);
-    struct vcs_zcode_dht_record late_cache[1];
-    ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
-                  net.service[origin], net.now.wall_unix, &selector,
-                  late_cache, 1),
-              0);
-    ASSERT(order[1] != target_node);
-    ASSERT(multi_connect(&net, origin, order[1]));
-    ASSERT(multi_drive(&net));
-    ASSERT(!net.connected[origin][target_node]);
-    vcs_zcode_dht_service_status(net.service[origin], &late_status);
-    ASSERT_EQ(late_status.connected_authenticated, 1);
-
-    uint64_t record_operation = 0;
-    ASSERT(vcs_zcode_dht_service_record_discovery_begin(
-        net.service[origin], &selector, net.now, &record_operation));
-    ASSERT(multi_drive(&net));
-    struct vcs_zcode_dht_record_discovery_result discovery_result;
-    ASSERT(vcs_zcode_dht_service_record_discovery_poll(
-        net.service[origin], record_operation, net.now, &discovery_result));
-    ASSERT_EQ(discovery_result.state,
-              VCS_ZCODE_DHT_RECORD_OPERATION_PENDING);
-    for (size_t drive = 0;
-         drive < VCS_ZCODE_DHT_K &&
-         discovery_result.state == VCS_ZCODE_DHT_RECORD_OPERATION_PENDING;
-         drive++) {
-      ASSERT(multi_drive(&net));
-      ASSERT(vcs_zcode_dht_service_record_discovery_poll(
-          net.service[origin], record_operation, net.now, &discovery_result));
-    }
-    ASSERT_EQ(discovery_result.state,
-              VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
-    ASSERT_EQ(discovery_result.record_count, MULTI_NODES + 7u);
-    ASSERT(!discovery_result.truncated);
-    ASSERT(!discovery_result.incomplete);
-    for (size_t i = 0; i < MULTI_NODES; i++)
-      for (size_t j = i + 1; j < MULTI_NODES; j++)
-        ASSERT(memcmp(discovery_result.records[i].provider_node_id,
-                      discovery_result.records[j].provider_node_id, 32) != 0);
-    size_t target_conflicts = 0;
-    for (uint32_t i = 0; i < discovery_result.record_count; i++)
-      target_conflicts +=
-          memcmp(discovery_result.records[i].provider_node_id,
-                 pointer.provider_node_id, 32) == 0;
-    ASSERT_EQ(target_conflicts, 8);
-    struct vcs_zcode_dht_record cached[1];
-    ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
-                  net.service[origin], net.now.wall_unix, &selector, cached, 1),
-              MULTI_NODES + 7u);
-
-    /* Provider routing binds a signed claim to the currently authenticated
-     * Noise/delegation session for that exact node ID. Local policy is
-     * re-evaluated for FETCH/STORE/INDEX before the peer handle is exposed. */
-    struct vcs_zcode_dht_record provider;
-    ASSERT(fixture_provider_record(net.dir[target_node], genesis,
-                                   0xf1, &provider));
-    ASSERT_EQ(vcs_zcode_dht_service_record_admit(
-                  net.service[origin], &provider, net.now),
-              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-    struct vcs_zcode_dht_record_selector provider_selector = {
-        .kind = VCS_ZCODE_DHT_RECORD_PROVIDER};
-    (void)snprintf(provider_selector.namespace_name,
-                   sizeof(provider_selector.namespace_name), "science");
-    memcpy(provider_selector.root, provider.transport_root, 32);
-    struct vcs_zcode_dht_provider_route route;
-    ASSERT(vcs_zcode_dht_service_provider_route(
-        net.service[origin], net.now.wall_unix, &provider_selector, &route));
-    ASSERT_EQ(route.authenticated_count, 1);
-    ASSERT_EQ(route.peer_ids[0], target_node + 1);
-    memcpy(net.banned_root, provider.transport_root, 32);
-    net.banned[origin] = true;
-    ASSERT(vcs_zcode_dht_service_provider_route(
-        net.service[origin], net.now.wall_unix, &provider_selector, &route));
-    ASSERT_EQ(route.authenticated_count, 0);
-    ASSERT_EQ(route.policy_denied, 1);
-    net.banned[origin] = false;
-
-    /* Publication is a lookup against the deterministic record key, not a
-     * broadcast to the publisher's current sessions. Select a node that is
-     * not directly connected to the publisher, then prove that the closest
-     * set walk reaches it and stores the signed record. */
-    size_t indirect = MULTI_NODES;
-    for (size_t i = 0; i < MULTI_NODES; i++)
-      if (i != target_node && !net.connected[target_node][i]) {
-        indirect = i;
-        break;
-      }
-    ASSERT(indirect < MULTI_NODES);
-    struct vcs_zcode_dht_publish_spec routed_publish;
-    memset(&routed_publish, 0, sizeof(routed_publish));
-    routed_publish.kind = VCS_ZCODE_DHT_RECORD_POINTER;
-    (void)snprintf(routed_publish.namespace_name,
-                   sizeof(routed_publish.namespace_name), "science");
-    memset(routed_publish.semantic_root, 0xb4, 32);
-    memset(routed_publish.transport_root, 0xb5, 32);
-    routed_publish.sequence = 1;
-    routed_publish.not_before = net.now.wall_unix;
-    routed_publish.expiry = net.now.wall_unix + 999;
-    uint8_t routed_token[32];
-    struct vcs_zcode_dht_record routed_record;
-    ASSERT(vcs_zcode_dht_service_record_publish_plan(
-        net.service[target_node], &routed_publish, routed_token,
-        &routed_record, NULL));
-    ASSERT_EQ(vcs_zcode_dht_service_record_publish_commit(
-                  net.service[target_node], &routed_publish, routed_token,
-                  net.now, &routed_record, NULL),
-              VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-    uint64_t publish_frames = net.frames;
-    struct vcs_zcode_dht_record_selector routed_selector = {
-        .kind = VCS_ZCODE_DHT_RECORD_POINTER};
-    (void)snprintf(routed_selector.namespace_name,
-                   sizeof(routed_selector.namespace_name), "science");
-    memcpy(routed_selector.root, routed_publish.semantic_root, 32);
-    struct vcs_zcode_dht_record routed_found[1];
-    size_t routed_count = 0;
-    for (size_t turn = 0; turn < 32 && routed_count == 0; turn++) {
-      ASSERT(multi_drive(&net));
-      vcs_zcode_dht_service_tick(net.service[target_node], net.now);
-      routed_count = vcs_zcode_dht_service_record_local_query(
-          net.service[indirect], net.now.wall_unix, &routed_selector,
-          routed_found, 1);
-    }
-    ASSERT_EQ(routed_count, 1);
-    ASSERT_EQ(routed_found[0].sequence, 1);
-    ASSERT(net.connected[target_node][indirect]);
-    struct vcs_zcode_dht_service_status publish_status;
-    for (size_t turn = 0; turn < 32; turn++) {
-      vcs_zcode_dht_service_status(net.service[target_node], &publish_status);
-      if (publish_status.active_publications == 0)
-        break;
-      ASSERT(multi_drive(&net));
-      vcs_zcode_dht_service_tick(net.service[target_node], net.now);
-    }
-    vcs_zcode_dht_service_status(net.service[target_node], &publish_status);
-    ASSERT_EQ(publish_status.active_publications, 0);
-    ASSERT(net.frames - publish_frames <= 256);
-
-    /* A local policy change freezes forwarding and renewal. Once the local
-     * root ban is removed, the same persisted intent renews and advances its
-     * sequence; no global state or shared ban is involved. */
-    memcpy(net.banned_root, routed_publish.semantic_root, 32);
-    net.banned[target_node] = true;
-    net.now.wall_unix = routed_publish.expiry - 300;
-    net.now.monotonic_s = net.now.wall_unix;
-    uint64_t frames_before_policy = net.frames;
-    vcs_zcode_dht_service_tick(net.service[target_node], net.now);
-    ASSERT(multi_drive(&net));
-    ASSERT_EQ(net.frames, frames_before_policy);
-    ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
-                  net.service[target_node], net.now.wall_unix,
-                  &routed_selector, routed_found, 1),
-              1);
-    ASSERT_EQ(routed_found[0].sequence, 1);
-    net.banned[target_node] = false;
-    vcs_zcode_dht_service_tick(net.service[target_node], net.now);
-    ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
-                  net.service[target_node], net.now.wall_unix,
-                  &routed_selector, routed_found, 1),
-              1);
-    ASSERT_EQ(routed_found[0].sequence, 2);
-
-    /* A ban is strictly local. Origin stops serving this root while the
-     * target still serves the identical signed record to another node. */
-    struct vcs_zcode_dht_record_operation_result record_result;
-    memcpy(net.banned_root, pointer.semantic_root, 32);
-    net.banned[origin] = true;
-    ASSERT(vcs_zcode_dht_service_record_query_begin(
-        net.service[target_node], origin + 1, &selector, net.now,
-        &record_operation));
-    ASSERT(multi_drive(&net));
-    ASSERT(vcs_zcode_dht_service_record_operation_poll(
-        net.service[target_node], record_operation, net.now, &record_result));
-    ASSERT_EQ(record_result.record_count, 0);
-    size_t alternate = order[target_node - 1];
-    ASSERT(vcs_zcode_dht_service_record_query_begin(
-        net.service[alternate], target_node + 1, &selector, net.now,
-        &record_operation));
-    ASSERT(multi_drive(&net));
-    ASSERT(vcs_zcode_dht_service_record_operation_poll(
-        net.service[alternate], record_operation, net.now, &record_result));
-    ASSERT_EQ(record_result.record_count, VCS_ZCODE_DHT_RECORDS_PER_FRAME);
-
-    /* A reachability request can be accepted while the bounded dial itself
-     * fails.  The unverified ID must age out monotonically so a nonexistent
-     * target reaches shortlist stability instead of the 30-second ceiling. */
-    net.deny[origin][order[2]] = false;
-    net.stall[origin][order[2]] = true;
-    uint8_t absent_target[32];
-    memset(absent_target, 0xa5, sizeof(absent_target));
-    ASSERT(vcs_zcode_dht_service_lookup_begin(
-        net.service[origin], absent_target, net.now, &lookup));
-    ASSERT(multi_drive(&net));
-    ASSERT(vcs_zcode_dht_service_lookup_poll(net.service[origin], lookup,
-                                             net.now, &result));
-    ASSERT_EQ(result.state, VCS_ZCODE_DHT_LOOKUP_PENDING);
-    net.now.monotonic_s +=
-        VCS_ZCODE_DHT_SERVICE_REACHABILITY_TIMEOUT_S + 1;
-    ASSERT(vcs_zcode_dht_service_lookup_poll(net.service[origin], lookup,
-                                             net.now, &result));
-    ASSERT_EQ(result.state, VCS_ZCODE_DHT_LOOKUP_COMPLETE);
-    ASSERT_EQ(result.termination,
-              VCS_ZCODE_DHT_TERMINATION_SHORTLIST_STABLE);
-    net.stall[origin][order[2]] = false;
-    net.deny[origin][order[2]] = true;
-
-    /* All eight requests are admitted while the three global slots are
-     * occupied. Scheduler rotation eventually gives every lookup a query. */
-    uint64_t ids[VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS];
-    uint8_t concurrent_target[32];
-    memset(concurrent_target, 0xa6, sizeof(concurrent_target));
-    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS; i++)
-      ASSERT(vcs_zcode_dht_service_lookup_begin(
-          net.service[origin], concurrent_target, net.now, &ids[i]));
-    vcs_zcode_dht_service_status(net.service[origin], &after);
-    ASSERT_EQ(after.queued_lookups, VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS);
-    ASSERT_EQ(after.active_queries, VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES);
-    net.now.monotonic_s++;
-    ASSERT(multi_drive(&net));
-    size_t waited = 0;
-    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS; i++) {
-      ASSERT(vcs_zcode_dht_service_lookup_poll(net.service[origin], ids[i],
-                                               net.now, &result));
-      ASSERT_EQ(result.state, VCS_ZCODE_DHT_LOOKUP_COMPLETE);
-      ASSERT(result.rounds > 0);
-      waited += result.queue_wait_s > 0;
-    }
-    ASSERT(waited >= 5);
-
-    /* Durable authenticated contacts load cold; only a fresh Noise session
-     * promotes the neighbour back into connected/authenticated state. */
-    vcs_zcode_dht_service_free(net.service[origin], net.now);
-    net.service[origin] = multi_service(&net, origin, genesis);
-    ASSERT(net.service[origin] != NULL);
-    vcs_zcode_dht_service_status(net.service[origin], &after);
-    ASSERT(after.persistence_loaded);
-    ASSERT(after.cold_contacts >= 1);
-    struct vcs_zcode_dht_record cold_record[1];
-    ASSERT_EQ(vcs_zcode_dht_service_record_local_query(
-                  net.service[origin], net.now.wall_unix, &selector,
-                  cold_record, 1),
-              MULTI_NODES + 7u);
-    ASSERT(memcmp(cold_record[0].semantic_root, pointer.semantic_root, 32) ==
+    ASSERT(sparse_iter_late_join(&net, genesis, order, origin, target_node,
+                                 &selector, &pointer) == 0);
+    ASSERT(sparse_iter_provider_route(&net, genesis, origin, target_node) ==
            0);
-    ASSERT_EQ(after.connected_authenticated, 0);
-    memset(net.connected[origin], 0, sizeof(net.connected[origin]));
-    for (size_t i = 0; i < MULTI_NODES; i++)
-      net.connected[i][origin] = false;
-    /* A new lookup seeds the closest persisted IDs as COLD/UNVERIFIED.  The
-     * reachability callback may arrange a connection, but the result remains
-     * pending until that connection freshly authenticates its Noise-bound
-     * delegation.  No explicit reconnect is injected here. */
-    ASSERT(vcs_zcode_dht_service_lookup_begin(
-        net.service[origin], net.node_id[target_node], net.now, &lookup));
-    ASSERT(net.pending[origin][target_node]);
-    ASSERT(multi_drive(&net));
-    ASSERT(vcs_zcode_dht_service_lookup_poll(net.service[origin], lookup,
-                                             net.now, &result));
-    ASSERT_EQ(result.state, VCS_ZCODE_DHT_LOOKUP_COMPLETE);
-    ASSERT_EQ(result.termination,
-              VCS_ZCODE_DHT_TERMINATION_TARGET_AUTHENTICATED);
-    vcs_zcode_dht_service_status(net.service[origin], &after);
-    ASSERT(after.connected_authenticated >= 1);
-
-    /* Fill the same signed selector to its exact 64-record discovery ceiling.
-     * The operation preserves the bounded records and says truncated instead
-     * of claiming complete evidence beyond the cap. */
-    size_t ceiling_added = 0;
-    for (size_t i = 0; i < MULTI_NODES && ceiling_added < 45; i++) {
-      if (i == target_node)
-        continue;
-      for (size_t conflict = 0; conflict < 7 && ceiling_added < 45;
-           conflict++) {
-        struct vcs_zcode_dht_record flooded;
-        ASSERT(fixture_pointer_record(net.dir[i], genesis, 0xc1,
-                                      (uint8_t)(0x20 + ceiling_added),
-                                      &flooded));
-        ASSERT_EQ(vcs_zcode_dht_service_record_admit(
-                      net.service[target_node], &flooded, net.now),
-                  VCS_ZCODE_DHT_RECORD_STORE_CONFLICT);
-        ceiling_added++;
-      }
-    }
-    ASSERT_EQ(ceiling_added, 45);
-    uint64_t ceiling_operation = 0;
-    ASSERT(vcs_zcode_dht_service_record_discovery_begin(
-        net.service[origin], &selector, net.now, &ceiling_operation));
-    ASSERT(multi_drive(&net));
-    ASSERT(vcs_zcode_dht_service_record_discovery_poll(
-        net.service[origin], ceiling_operation, net.now, &discovery_result));
-    for (size_t drive = 0;
-         drive < 2 * VCS_ZCODE_DHT_K &&
-         discovery_result.state == VCS_ZCODE_DHT_RECORD_OPERATION_PENDING;
-         drive++) {
-      ASSERT(multi_drive(&net));
-      ASSERT(vcs_zcode_dht_service_record_discovery_poll(
-          net.service[origin], ceiling_operation, net.now,
-          &discovery_result));
-    }
-    ASSERT_EQ(discovery_result.state,
-              VCS_ZCODE_DHT_RECORD_OPERATION_COMPLETE);
-    ASSERT_EQ(discovery_result.record_count,
-              VCS_ZCODE_DHT_RECORD_DISCOVERY_MAX_RESULTS);
-    ASSERT(discovery_result.truncated);
+    ASSERT(sparse_iter_routed_publish(&net, target_node) == 0);
+    ASSERT(sparse_iter_ban_and_alternate(&net, order, origin, target_node,
+                                         &selector, &pointer) == 0);
+    ASSERT(sparse_iter_absent_lookup(&net, origin, order) == 0);
+    ASSERT(sparse_iter_concurrent_lookups(&net, origin) == 0);
+    ASSERT(sparse_iter_cold_reconnect(&net, genesis, origin, target_node,
+                                      &selector, &pointer) == 0);
+    ASSERT(sparse_iter_ceiling_discovery(&net, genesis, origin, target_node,
+                                         &selector) == 0);
 
     for (size_t i = 0; i < MULTI_NODES; i++) {
       vcs_zcode_dht_service_free(net.service[i], net.now);
@@ -3743,6 +3928,7 @@ static int test_sparse_iterative_network(void) {
 _test_next:;
   return failures;
 }
+
 
 struct space16_record_wire {
   uint8_t bytes[VCS_ZCODE_DHT_RECORD_WIRE_BYTES];
@@ -5564,6 +5750,53 @@ _test_next:;
   return failures;
 }
 
+static int zcode_dht_rate_burst(struct vcs_zcode_dht_service *b, char *adir,
+                                uint8_t transcript[32], uint8_t *oversized,
+                                size_t oversized_cap, size_t *forged_len) {
+  int failures = 0;
+  enum vcs_zcode_dht_reject_reason rejected;
+  for (uint8_t i = 1; i <= 9; i++) {
+    ASSERT(signed_find(adir, 42, transcript, (uint8_t)(0xb0 + i), 0x7c,
+                       oversized, oversized_cap, forged_len));
+    bool accepted = vcs_zcode_dht_service_handle_frame(
+        b, 1, oversized, *forged_len, test_time(2000), &rejected);
+    if (i <= 8)
+      ASSERT(accepted);
+    else {
+      ASSERT(!accepted);
+      ASSERT_EQ(rejected, VCS_ZCODE_DHT_REJECT_RATE);
+    }
+  }
+  return failures;
+_test_next:
+  return failures;
+}
+
+static int zcode_dht_evict_probe(struct vcs_zcode_dht_service *b, char *adir,
+                                 uint8_t transcript[32], uint8_t *oversized,
+                                 size_t oversized_cap, size_t *forged_len,
+                                 uint8_t *old_frame, size_t *old_frame_len) {
+  int failures = 0;
+  enum vcs_zcode_dht_reject_reason rejected;
+  for (uint8_t i = 0; i < 24; i++) {
+    uint64_t mono = 3000 + i / 3;
+    ASSERT(signed_find(adir, 42, transcript, (uint8_t)(0x10 + i), 0x7d,
+                       oversized, oversized_cap, forged_len));
+    if (i == 0) {
+      memcpy(old_frame, oversized, *forged_len);
+      *old_frame_len = *forged_len;
+    }
+    struct vcs_zcode_dht_time when = {.wall_unix = 3000,
+                                      .monotonic_s = mono};
+    ASSERT(vcs_zcode_dht_service_handle_frame(
+        b, 1, oversized, *forged_len, when, &rejected));
+    (void)drain(b);
+  }
+  return failures;
+_test_next:
+  return failures;
+}
+
 int test_zcode_dht_service(void) {
   int failures = test_disabled_diagnostics();
   failures += test_signed_record_storage_denial(VCS_ZCODE_SOVEREIGNTY_STORE);
@@ -5803,18 +6036,8 @@ int test_zcode_dht_service(void) {
     /* Four requests/s with burst eight is exact and independent of peer
      * lengths; a ninth same-second request is named rate-limit. */
     (void)drain(b);
-    for (uint8_t i = 1; i <= 9; i++) {
-      ASSERT(signed_find(adir, 42, transcript, (uint8_t)(0xb0 + i), 0x7c,
-                         oversized, sizeof(oversized), &forged_len));
-      bool accepted = vcs_zcode_dht_service_handle_frame(
-          b, 1, oversized, forged_len, test_time(2000), &rejected);
-      if (i <= 8)
-        ASSERT(accepted);
-      else {
-        ASSERT(!accepted);
-        ASSERT_EQ(rejected, VCS_ZCODE_DHT_REJECT_RATE);
-      }
-    }
+    ASSERT(zcode_dht_rate_burst(b, adir, transcript, oversized,
+                                sizeof(oversized), &forged_len) == 0);
     ASSERT_EQ(drain(b), 8);
     ASSERT(signed_find(adir, 42, transcript, 0xca, 0x7c, oversized,
                        sizeof(oversized), &forged_len));
@@ -5838,20 +6061,9 @@ int test_zcode_dht_service(void) {
      * frames cannot evict an earlier still-live query ID. */
     uint8_t old_frame[VCS_ZCODE_DHT_NODES_MAX_WIRE_BYTES];
     size_t old_frame_len = 0;
-    for (uint8_t i = 0; i < 24; i++) {
-      uint64_t mono = 3000 + i / 3;
-      ASSERT(signed_find(adir, 42, transcript, (uint8_t)(0x10 + i), 0x7d,
-                         oversized, sizeof(oversized), &forged_len));
-      if (i == 0) {
-        memcpy(old_frame, oversized, forged_len);
-        old_frame_len = forged_len;
-      }
-      struct vcs_zcode_dht_time when = {.wall_unix = 3000,
-                                        .monotonic_s = mono};
-      ASSERT(vcs_zcode_dht_service_handle_frame(
-          b, 1, oversized, forged_len, when, &rejected));
-      (void)drain(b);
-    }
+    ASSERT(zcode_dht_evict_probe(b, adir, transcript, oversized,
+                                 sizeof(oversized), &forged_len, old_frame,
+                                 &old_frame_len) == 0);
     ASSERT(!vcs_zcode_dht_service_handle_frame(
         b, 1, old_frame, old_frame_len,
         (struct vcs_zcode_dht_time){.wall_unix = 3000, .monotonic_s = 3007},
