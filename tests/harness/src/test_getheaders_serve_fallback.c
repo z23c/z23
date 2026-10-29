@@ -60,6 +60,7 @@
 #include "net/msgprocessor.h"
 #include "primitives/block.h"
 #include "storage/progress_store.h"
+#include "sync/sync_planner.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 #include "util/safe_alloc.h"
@@ -604,6 +605,398 @@ static int gsf_sendheaders_one_tip_proof(struct main_state *ms,
     return failures;
 }
 
+/* ---- Locator anchoring and getheaders request choice ----
+ *
+ * Pins headers_start_from_locator (static; driven through process_getheaders),
+ * exec_getheaders_action, and the hdr_out branch of
+ * getheaders_index_header_servable. A six-block regtest chain is mined once and
+ * every entry carries its real solution, so each serves from memory and no
+ * store is consulted. */
+#define GH_CHAIN_LEN 6
+#define GH_UNKNOWN_HASH_BYTE 0x77
+#define GH_LOC_UNKNOWN (-1)     /* locator entry absent from the index */
+#define GH_LOC_FORK (-2)        /* indexed at H2 but off the active chain */
+#define GH_STOP_ZERO (-1)       /* null hash_stop */
+#define GH_STOP_UNKNOWN (-2)    /* hash_stop absent from the index */
+#define GH_FIRST_NONE (-1)      /* the locator names no hash */
+#define GH_FIRST_GENESIS (-2)   /* the chain params genesis hash */
+
+struct gh_chain {
+    struct block_header hdr[GH_CHAIN_LEN];
+    struct uint256 hash[GH_CHAIN_LEN];
+    struct block_index *bi[GH_CHAIN_LEN];
+};
+
+/* Locator rows. loc[] holds GH_LOC_* codes or chain indices; stop holds
+ * GH_STOP_* codes or a chain index. want_first is a chain index, or
+ * GH_FIRST_NONE to skip the first-header check. */
+struct gh_loc_case {
+    const char *name;
+    int tip;
+    int n;
+    int loc[2];
+    int stop;
+    int want_count;
+    int want_first;
+};
+
+static const struct gh_loc_case gh_loc_cases[] = {
+    {"empty locator, stop on H2 selects its successor H3", 5, 0, {0, 0}, 2, 3, 3},
+    {"empty locator, zero stop falls back to the active genesis", 5, 0, {0, 0},
+     GH_STOP_ZERO, 6, 0},
+    {"empty locator, unknown stop falls back to the active genesis", 5, 0, {0, 0},
+     GH_STOP_UNKNOWN, 6, 0},
+    {"known locator H2 selects its successor H3", 5, 1, {2, 0}, GH_STOP_ZERO, 3, 3},
+    {"unknown then H1 selects the first known entry's successor H2", 5, 2,
+     {GH_LOC_UNKNOWN, 1}, GH_STOP_ZERO, 4, 2},
+    {"off-chain fork at H2 is skipped for the active genesis", 5, 1,
+     {GH_LOC_FORK, 0}, GH_STOP_ZERO, 6, 0},
+    {"all-unknown locator falls back to the active genesis", 5, 1,
+     {GH_LOC_UNKNOWN, 0}, GH_STOP_ZERO, 6, 0},
+    {"hash_stop reached mid-walk ends the reply at the stop", 5, 1, {0, 0}, 2, 2, 1},
+    {"stop at the tip leaves no successor to serve", 5, 0, {0, 0}, 5, 0, GH_FIRST_NONE},
+    {"locator at the tip leaves no successor to serve", 5, 1, {5, 0}, GH_STOP_ZERO,
+     0, GH_FIRST_NONE},
+    {"no active chain and no genesis entry serves nothing", -1, 0, {0, 0},
+     GH_STOP_ZERO, 0, GH_FIRST_NONE},
+};
+
+/* Exec rows. first is a chain index, or GH_FIRST_GENESIS. want_count checks the
+ * locator count when >= 0, otherwise only the first locator hash is checked. */
+struct gh_exec_case {
+    const char *name;
+    int tip;
+    int best;
+    bool repaired;
+    enum sync_header_request_anchor anchor;
+    int first;
+    int want_count;
+};
+
+static const struct gh_exec_case gh_exec_cases[] = {
+    {"tip-parent: best header leads the tip", 3, 5, false,
+     SYNC_HEADER_REQUEST_TIP_PARENT, 5, -1},
+    {"tip-parent: best header behind tip uses tip->pprev", 5, 3, false,
+     SYNC_HEADER_REQUEST_TIP_PARENT, 4, -1},
+    {"tip-parent: no active tip anchors at the best header", -1, 5, false,
+     SYNC_HEADER_REQUEST_TIP_PARENT, 5, -1},
+    {"tip-parent: no tip and no best header sends the genesis locator", -1, -1,
+     false, SYNC_HEADER_REQUEST_TIP_PARENT, GH_FIRST_GENESIS, 1},
+    {"tip: plain locator from the active tip", 3, 5, false,
+     SYNC_HEADER_REQUEST_TIP, 3, -1},
+    {"tip: repaired heights anchor at the leading best header", 3, 5, true,
+     SYNC_HEADER_REQUEST_TIP, 5, -1},
+    {"tip: repaired heights, best behind tip keeps the tip", 5, 3, true,
+     SYNC_HEADER_REQUEST_TIP, 5, -1},
+    {"explicit: plain locator from the active tip", 3, 5, false,
+     SYNC_HEADER_REQUEST_EXPLICIT, 3, -1},
+    {"explicit: repaired heights anchor at the leading best header", 3, 5, true,
+     SYNC_HEADER_REQUEST_EXPLICIT, 5, -1},
+};
+
+/* Mine the chain once: GH_CHAIN_LEN headers, heights 0..5, each on the last. */
+static bool gh_mine_chain(struct gh_chain *c, const struct chain_params *cp)
+{
+    struct uint256 prev;
+    uint256_set_null(&prev);
+    for (int h = 0; h < GH_CHAIN_LEN; h++) {
+        if (!gsf_mine_header(&c->hdr[h], h, &prev, cp))
+            return false;
+        block_header_get_hash(&c->hdr[h], &c->hash[h]);
+        prev = c->hash[h];
+    }
+    return true;
+}
+
+/* Seed every chain entry with its real solution, so each serves from memory. */
+static bool gh_seed_chain(struct main_state *ms, struct gh_chain *c)
+{
+    struct block_index *prev = NULL;
+    for (int h = 0; h < GH_CHAIN_LEN; h++) {
+        struct block_index *bi =
+            gsf_seed_index(ms, &c->hdr[h], &c->hash[h], h, prev);
+        if (!bi)
+            return false;
+        size_t len = c->hdr[h].nSolutionSize;
+        uint8_t *sol = zcl_malloc(len, "gh_chain_sol");
+        if (!sol)
+            return false;
+        memcpy(sol, c->hdr[h].nSolution, len);
+        tbi_ext(bi)->nSolution = sol;
+        tbi_ext(bi)->nSolutionSize = len;
+        c->bi[h] = bi;
+        prev = bi;
+    }
+    return true;
+}
+
+/* Index H0..H5 with best header H5; the active window ends at `tip` (or is
+ * left unseated when tip < 0). */
+static bool gh_open_fixture(struct main_state *ms, struct gh_chain *c, int tip)
+{
+    main_state_init(ms);
+    if (!gh_seed_chain(ms, c))
+        return false;
+    ms->pindex_best_header = c->bi[GH_CHAIN_LEN - 1];
+    if (tip < 0)
+        return true;
+    return active_chain_move_window_tip(&ms->chain_active, c->bi[tip]);
+}
+
+/* Add an indexed entry at H2 whose hash is not on the active chain. */
+static bool gh_add_fork(struct main_state *ms, const struct gh_chain *c,
+                        struct uint256 *fork_hash)
+{
+    *fork_hash = c->hash[2];
+    fork_hash->data[0] ^= 0x5a;
+    struct block_index *fk =
+        chainstate_insert_block_index((struct chainstate *)ms, fork_hash);
+    if (!fk)
+        return false;
+    fk->nHeight = 2;
+    fk->pprev = c->bi[1];
+    return true;
+}
+
+static void gh_unknown_hash(struct uint256 *out)
+{
+    uint256_set_null(out);
+    memset(out->data, GH_UNKNOWN_HASH_BYTE, sizeof(out->data));
+}
+
+static const struct uint256 *gh_loc_hash(int code, const struct gh_chain *c,
+                                         const struct uint256 *unk,
+                                         const struct uint256 *fork)
+{
+    if (code == GH_LOC_UNKNOWN)
+        return unk;
+    if (code == GH_LOC_FORK)
+        return fork;
+    return &c->hash[code];
+}
+
+static const struct uint256 *gh_stop_hash(int code, const struct gh_chain *c,
+                                          const struct uint256 *unk)
+{
+    if (code == GH_STOP_ZERO)
+        return NULL;
+    if (code == GH_STOP_UNKNOWN)
+        return unk;
+    return &c->hash[code];
+}
+
+/* Serialize a getheaders payload (locator, then hash_stop) and hand it to the
+ * production request handler. The locator is caller-owned, never freed. */
+static void gh_send_getheaders(struct msg_processor *mp, struct p2p_node *node,
+                               struct uint256 *hashes, size_t n,
+                               const struct uint256 *stop)
+{
+    struct block_locator loc;
+    block_locator_init(&loc);
+    loc.vhave = hashes;
+    loc.num_hashes = n;
+    struct byte_stream s;
+    stream_init(&s, 512);
+    getheaders_serialize(&s, &loc, stop);
+    struct byte_stream rd;
+    stream_init_from_data(&rd, s.data, s.size);
+    process_getheaders(mp, node, &rd);
+    stream_free(&s);
+}
+
+/* Decode the head segment of a headers reply: a compact count, then per header
+ * the header and a zero tx count. Returns the count, or -1 when there is no
+ * well-formed reply. The first `max` hashes are copied out. */
+static int gh_read_headers_reply(const struct p2p_node *node,
+                                 struct uint256 *hashes, int max)
+{
+    const struct send_segment *seg = node->send_head;
+    if (!seg || seg->size <= (size_t)MSG_HEADER_SIZE)
+        return -1;
+    struct byte_stream wire;
+    stream_init_from_data(&wire, seg->data + MSG_HEADER_SIZE,
+                          seg->size - MSG_HEADER_SIZE);
+    uint64_t count = 0;
+    if (!stream_read_compact_size(&wire, &count))
+        return -1;
+    for (uint64_t i = 0; i < count; i++) {
+        struct block_header hdr;
+        block_header_init(&hdr);
+        uint64_t tx = 1;
+        if (!block_header_deserialize(&hdr, &wire) ||
+            !stream_read_compact_size(&wire, &tx) || tx != 0)
+            return -1;
+        if ((int)i < max)
+            block_header_get_hash(&hdr, &hashes[i]);
+    }
+    return (int)count;
+}
+
+static int gh_run_loc_case(const struct gh_loc_case *tc,
+                           const struct chain_params *cp, const char *dir,
+                           struct gh_chain *c)
+{
+    int failures = 0;
+    struct main_state ms;
+    struct uint256 unk, fork;
+    struct uint256 locs[2];
+    gh_unknown_hash(&unk);
+    bool opened = gh_open_fixture(&ms, c, tc->tip) && gh_add_fork(&ms, c, &fork);
+    if (!opened) {
+        GSF_CHECK(tc->name, false);
+        main_state_free(&ms);
+        return failures;
+    }
+    for (int i = 0; i < tc->n; i++)
+        locs[i] = *gh_loc_hash(tc->loc[i], c, &unk, &fork);
+
+    struct msg_processor mp;
+    msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_gsf_nm, NULL);
+    struct p2p_node node;
+    gsf_setup_outbound_peer(&node, GH_CHAIN_LEN - 1);
+    gh_send_getheaders(&mp, &node, locs, (size_t)tc->n,
+                       gh_stop_hash(tc->stop, c, &unk));
+
+    struct uint256 got[GH_CHAIN_LEN];
+    int count = gh_read_headers_reply(&node, got, GH_CHAIN_LEN);
+    bool first_ok = tc->want_first < 0 ||
+                    (count > 0 && uint256_eq(&got[0], &c->hash[tc->want_first]));
+    GSF_CHECK(tc->name, count == tc->want_count && first_ok);
+
+    gsf_free_outbound_peer(&node);
+    main_state_free(&ms);
+    return failures;
+}
+
+static bool gh_heights_repaired(void *ctx)
+{
+    (void)ctx;
+    return true;
+}
+
+/* Check the first queued message is a getheaders whose first locator hash is
+ * `first` (and whose count matches, when want_count >= 0). */
+static bool gh_expect_getheaders(const struct p2p_node *node,
+                                 const struct uint256 *first, int want_count)
+{
+    const struct send_segment *seg = node->send_head;
+    if (!seg || seg->size < (size_t)MSG_HEADER_SIZE + 4 + 1 + 32 + 32)
+        return false;
+    if (memcmp(seg->data + MESSAGE_START_SIZE, "getheaders", 10) != 0 ||
+        seg->data[MESSAGE_START_SIZE + 10] != 0)
+        return false;
+    const uint8_t *p = seg->data + MSG_HEADER_SIZE;
+    if (want_count >= 0 && p[4] != want_count)
+        return false;
+    return memcmp(p + 5, first->data, 32) == 0;
+}
+
+static int gh_run_exec_case(const struct gh_exec_case *tc,
+                            const struct chain_params *cp, const char *dir,
+                            struct gh_chain *c)
+{
+    int failures = 0;
+    struct main_state ms;
+    bool opened = gh_open_fixture(&ms, c, tc->tip);
+    struct msg_processor mp;
+    msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_gsf_nm, NULL);
+    if (tc->repaired)
+        mp.block_index_heights_repaired = gh_heights_repaired;
+    struct p2p_node node;
+    gsf_setup_outbound_peer(&node, GH_CHAIN_LEN - 1);
+    struct sync_getheaders_action act = {
+        .should_send = true, .anchor = tc->anchor, .should_log = false};
+    if (tc->best >= 0)
+        ms.pindex_best_header = c->bi[tc->best];
+    else
+        ms.pindex_best_header = NULL;
+    exec_getheaders_action(&mp, &node, &act);
+
+    const struct uint256 *first = tc->first == GH_FIRST_GENESIS
+        ? &cp->consensus.hashGenesisBlock : &c->hash[tc->first];
+    GSF_CHECK(tc->name,
+              opened && gh_expect_getheaders(&node, first, tc->want_count));
+
+    gsf_free_outbound_peer(&node);
+    main_state_free(&ms);
+    return failures;
+}
+
+/* Calls that must queue nothing, plus a NULL peer that must return. */
+static int gh_check_exec_no_send(const struct chain_params *cp, const char *dir,
+                                 struct gh_chain *c)
+{
+    int failures = 0;
+    struct main_state ms;
+    bool opened = gh_open_fixture(&ms, c, 3);
+    struct msg_processor mp;
+    msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_gsf_nm, NULL);
+    struct p2p_node node;
+    gsf_setup_outbound_peer(&node, GH_CHAIN_LEN - 1);
+    struct sync_getheaders_action act = {
+        .should_send = true, .anchor = SYNC_HEADER_REQUEST_TIP,
+        .should_log = false};
+    struct sync_getheaders_action off = act;
+    off.should_send = false;
+
+    exec_getheaders_action(&mp, &node, NULL);
+    GSF_CHECK("exec: NULL action queues nothing",
+              opened && node.send_head == NULL);
+    exec_getheaders_action(&mp, &node, &off);
+    GSF_CHECK("exec: should_send=false queues nothing",
+              node.send_head == NULL);
+    exec_getheaders_action(NULL, &node, &act);
+    GSF_CHECK("exec: NULL msg_processor queues nothing",
+              node.send_head == NULL);
+    exec_getheaders_action(&mp, NULL, &act);
+    GSF_CHECK("exec: NULL peer returns without queuing (no crash)", true);
+
+    gsf_free_outbound_peer(&node);
+    main_state_free(&ms);
+    return failures;
+}
+
+/* A hydrated, servable entry serves with or without an out-parameter. */
+static int gh_check_serve_hdr_out(const struct chain_params *cp,
+                                  const char *dir, struct gh_chain *c)
+{
+    int failures = 0;
+    struct main_state ms;
+    bool opened = gh_open_fixture(&ms, c, GH_CHAIN_LEN - 1);
+    struct msg_processor mp;
+    msg_processor_init(&mp, &ms, NULL, NULL, cp, dir, &g_gsf_nm, NULL);
+    struct block_header out;
+    block_header_init(&out);
+    bool null_out = getheaders_index_header_servable(&mp, c->bi[3], NULL);
+    bool with_out = getheaders_index_header_servable(&mp, c->bi[3], &out);
+    struct uint256 got;
+    block_header_get_hash(&out, &got);
+    GSF_CHECK("servable entry with NULL out-param reports success",
+              opened && null_out);
+    GSF_CHECK("servable entry fills the out-param with its hash",
+              opened && with_out && uint256_eq(&got, &c->hash[3]));
+    main_state_free(&ms);
+    return failures;
+}
+
+static int gh_serve_locator_cases(const struct chain_params *cp,
+                                  const char *dir)
+{
+    int failures = 0;
+    struct gh_chain c;
+    memset(&c, 0, sizeof(c));
+    GSF_CHECK("mine locator chain", gh_mine_chain(&c, cp));
+    if (failures)
+        return failures;
+    for (size_t i = 0; i < sizeof(gh_loc_cases) / sizeof(gh_loc_cases[0]); i++)
+        failures += gh_run_loc_case(&gh_loc_cases[i], cp, dir, &c);
+    for (size_t i = 0; i < sizeof(gh_exec_cases) / sizeof(gh_exec_cases[0]); i++)
+        failures += gh_run_exec_case(&gh_exec_cases[i], cp, dir, &c);
+    failures += gh_check_exec_no_send(cp, dir, &c);
+    failures += gh_check_serve_hdr_out(cp, dir, &c);
+    return failures;
+}
+
 int test_getheaders_serve_fallback(void);
 int test_getheaders_serve_fallback(void)
 {
@@ -708,6 +1101,10 @@ int test_getheaders_serve_fallback(void)
               (size_t)64 * 1024 * 1024);
 
     failures += gsf_sendheaders_one_tip_proof(&ms, &mp, bi_d, &hash_d);
+
+    /* Locator anchoring (headers_start_from_locator) and the getheaders
+     * request choice (exec_getheaders_action) on an independent chain. */
+    failures += gh_serve_locator_cases(cp, dir);
 
     app_runtime_set_current(NULL);
     db_service_stop(&dbsvc);
