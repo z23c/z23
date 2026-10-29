@@ -236,12 +236,12 @@ static enum vcs_package_checkout_result checkout_read_manifest(
     struct vcs_package_store *store, const uint8_t package_root[32],
     struct vcs_package_manifest *manifest)
 {
+    vcs_package_manifest_init(manifest);
     uint8_t *wire = NULL;
     size_t wire_len = 0;
     if (vcs_package_store_get_manifest_wire(
             store, package_root, &wire, &wire_len) != VCS_PACKAGE_STORE_OK)
         return VCS_PACKAGE_CHECKOUT_MANIFEST;
-    vcs_package_manifest_init(manifest);
     uint8_t observed[32];
     bool manifest_ok = vcs_package_manifest_parse(wire, wire_len, manifest) &&
         vcs_package_manifest_root(manifest, observed) &&
