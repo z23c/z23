@@ -114,6 +114,87 @@ bool address_index_drop(sqlite3 *db)
     return true;
 }
 
+/* Pass 1: create a row per output + fold it into the digest. */
+/* Returns SQLITE_DONE when every insert succeeds, else the failing sqlite rc
+ * with its tx and vout indexes. */
+static int ai_put_block_outputs(sqlite3 *db, sqlite3_stmt *ins,
+                                const struct block *blk, int height,
+                                struct sha3_256_ctx *dctx, int *added,
+                                size_t *ti_out, size_t *vo_out)
+{
+    for (size_t ti = 0; ti < blk->num_vtx; ti++) {
+        const struct transaction *tx = &blk->vtx[ti];
+        for (size_t vo = 0; vo < tx->num_vout; vo++) {
+            const struct tx_out *o = &tx->vout[vo];
+            uint8_t sh[32];
+            address_index_scripthash(o->script_pub_key.data,
+                                     o->script_pub_key.size, sh);
+            bool has_addr = false;
+            uint8_t addr_hash[20];
+            enum script_type stype = utxo_classify_script(
+                o->script_pub_key.data, o->script_pub_key.size,
+                addr_hash, &has_addr);
+
+            /* digest tuple: sh(32) txid(32) vout(4) value(8) */
+            uint8_t vb[4], valb[8];
+            ai_put_u32le(vb, (uint32_t)vo);
+            ai_put_u64le(valb, (uint64_t)o->value);
+            sha3_256_write(dctx, sh, 32);
+            sha3_256_write(dctx, tx->hash.data, 32);
+            sha3_256_write(dctx, vb, 4);
+            sha3_256_write(dctx, valb, 8);
+
+            sqlite3_reset(ins);
+            sqlite3_bind_blob (ins, 1, sh, 32, SQLITE_STATIC);
+            sqlite3_bind_blob (ins, 2, tx->hash.data, 32, SQLITE_STATIC);
+            sqlite3_bind_int64(ins, 3, (sqlite3_int64)vo);
+            sqlite3_bind_int64(ins, 4, (sqlite3_int64)height);
+            sqlite3_bind_int64(ins, 5, (sqlite3_int64)o->value);
+            sqlite3_bind_int  (ins, 6, (int)stype);
+            int rc = sqlite3_step(ins);  // raw-sql-ok:progress-kv-kernel-store
+            if (rc != SQLITE_DONE) {
+                *ti_out = ti;
+                *vo_out = vo;
+                return rc;
+            }
+            *added += sqlite3_changes(db);
+        }
+    }
+    return SQLITE_DONE;
+}
+
+/* Pass 2: mark spends. Coinbase inputs carry a null prevout — skip them.
+ * A spend of a pre-index (below-cursor) output no-ops; that output simply
+ * was never indexed, which is a coverage-floor truth, not an error. */
+/* Returns SQLITE_DONE when every spend succeeds, else the failing rc with its
+ * tx and vin indexes. */
+static int ai_put_block_spends(sqlite3_stmt *spend, const struct block *blk,
+                               int height, size_t *ti_out, size_t *vi_out)
+{
+    for (size_t ti = 0; ti < blk->num_vtx; ti++) {
+        const struct transaction *tx = &blk->vtx[ti];
+        if (transaction_is_coinbase(tx))
+            continue;
+        for (size_t vi = 0; vi < tx->num_vin; vi++) {
+            const struct outpoint *op = &tx->vin[vi].prevout;
+            if (outpoint_is_null(op))
+                continue;
+            sqlite3_reset(spend);
+            sqlite3_bind_blob (spend, 1, tx->hash.data, 32, SQLITE_STATIC);
+            sqlite3_bind_int64(spend, 2, (sqlite3_int64)height);
+            sqlite3_bind_blob (spend, 3, op->hash.data, 32, SQLITE_STATIC);
+            sqlite3_bind_int64(spend, 4, (sqlite3_int64)op->n);
+            int rc = sqlite3_step(spend);  // raw-sql-ok:progress-kv-kernel-store
+            if (rc != SQLITE_DONE) {
+                *ti_out = ti;
+                *vi_out = vi;
+                return rc;
+            }
+        }
+    }
+    return SQLITE_DONE;
+}
+
 bool address_index_put_block(sqlite3 *db, const struct block *blk, int height,
                              uint8_t digest[32], int *rows_added_out)
 {
@@ -154,73 +235,23 @@ bool address_index_put_block(sqlite3 *db, const struct block *blk, int height,
 
     bool ok = true;
     int added = 0;
+    size_t ti = 0, vo = 0, vi = 0;
 
-    /* Pass 1: create a row per output + fold it into the digest. */
-    for (size_t ti = 0; ok && ti < blk->num_vtx; ti++) {
-        const struct transaction *tx = &blk->vtx[ti];
-        for (size_t vo = 0; vo < tx->num_vout; vo++) {
-            const struct tx_out *o = &tx->vout[vo];
-            uint8_t sh[32];
-            address_index_scripthash(o->script_pub_key.data,
-                                     o->script_pub_key.size, sh);
-            bool has_addr = false;
-            uint8_t addr_hash[20];
-            enum script_type stype = utxo_classify_script(
-                o->script_pub_key.data, o->script_pub_key.size,
-                addr_hash, &has_addr);
-
-            /* digest tuple: sh(32) txid(32) vout(4) value(8) */
-            uint8_t vb[4], valb[8];
-            ai_put_u32le(vb, (uint32_t)vo);
-            ai_put_u64le(valb, (uint64_t)o->value);
-            sha3_256_write(&dctx, sh, 32);
-            sha3_256_write(&dctx, tx->hash.data, 32);
-            sha3_256_write(&dctx, vb, 4);
-            sha3_256_write(&dctx, valb, 8);
-
-            sqlite3_reset(ins);
-            sqlite3_bind_blob (ins, 1, sh, 32, SQLITE_STATIC);
-            sqlite3_bind_blob (ins, 2, tx->hash.data, 32, SQLITE_STATIC);
-            sqlite3_bind_int64(ins, 3, (sqlite3_int64)vo);
-            sqlite3_bind_int64(ins, 4, (sqlite3_int64)height);
-            sqlite3_bind_int64(ins, 5, (sqlite3_int64)o->value);
-            sqlite3_bind_int  (ins, 6, (int)stype);
-            int rc = sqlite3_step(ins);  // raw-sql-ok:progress-kv-kernel-store
-            if (rc != SQLITE_DONE) {
-                LOG_WARN("address_index",
-                         "[address_index] insert h=%d tx=%zu vout=%zu rc=%d",
-                         height, ti, vo, rc);
-                ok = false;
-                break;
-            }
-            added += sqlite3_changes(db);
-        }
+    int rc = ai_put_block_outputs(db, ins, blk, height, &dctx, &added, &ti, &vo);
+    if (rc != SQLITE_DONE) {
+        LOG_WARN("address_index",
+                 "[address_index] insert h=%d tx=%zu vout=%zu rc=%d",
+                 height, ti, vo, rc);
+        ok = false;
     }
-
-    /* Pass 2: mark spends. Coinbase inputs carry a null prevout — skip them.
-     * A spend of a pre-index (below-cursor) output no-ops; that output simply
-     * was never indexed, which is a coverage-floor truth, not an error. */
-    for (size_t ti = 0; ok && ti < blk->num_vtx; ti++) {
-        const struct transaction *tx = &blk->vtx[ti];
-        if (transaction_is_coinbase(tx))
-            continue;
-        for (size_t vi = 0; vi < tx->num_vin; vi++) {
-            const struct outpoint *op = &tx->vin[vi].prevout;
-            if (outpoint_is_null(op))
-                continue;
-            sqlite3_reset(spend);
-            sqlite3_bind_blob (spend, 1, tx->hash.data, 32, SQLITE_STATIC);
-            sqlite3_bind_int64(spend, 2, (sqlite3_int64)height);
-            sqlite3_bind_blob (spend, 3, op->hash.data, 32, SQLITE_STATIC);
-            sqlite3_bind_int64(spend, 4, (sqlite3_int64)op->n);
-            int rc = sqlite3_step(spend);  // raw-sql-ok:progress-kv-kernel-store
-            if (rc != SQLITE_DONE) {
-                LOG_WARN("address_index",
-                         "[address_index] spend h=%d tx=%zu vin=%zu rc=%d",
-                         height, ti, vi, rc);
-                ok = false;
-                break;
-            }
+    /* Pass 2 runs only after a clean pass 1: a failed insert skips the spends. */
+    if (ok) {
+        rc = ai_put_block_spends(spend, blk, height, &ti, &vi);
+        if (rc != SQLITE_DONE) {
+            LOG_WARN("address_index",
+                     "[address_index] spend h=%d tx=%zu vin=%zu rc=%d",
+                     height, ti, vi, rc);
+            ok = false;
         }
     }
 
@@ -352,6 +383,58 @@ int64_t address_index_row_count(sqlite3 *db)
     return n;
 }
 
+/* Confirmed unspent balance across ALL appearances (not just this page). */
+static void ai_query_balance(sqlite3 *db, const uint8_t scripthash[32],
+                             int64_t *balance_out)
+{
+    sqlite3_stmt *bs = NULL;
+    if (sqlite3_prepare_v2(db,
+        "SELECT COALESCE(SUM(value),0) FROM address_index "
+        "WHERE scripthash=? AND spent_by_txid IS NULL",
+        -1, &bs, NULL) == SQLITE_OK) {
+        sqlite3_bind_blob(bs, 1, scripthash, 32, SQLITE_STATIC);
+        if (sqlite3_step(bs) == SQLITE_ROW)  // raw-sql-ok:progress-kv-kernel-store
+            *balance_out = sqlite3_column_int64(bs, 0);
+        sqlite3_finalize(bs);
+    }
+}
+
+/* Appends one appearance object to out_arr from the current row of st. */
+static void ai_query_append_row(sqlite3_stmt *st, struct json_value *out_arr)
+{
+    const void *txid = sqlite3_column_blob(st, 0);
+    int txid_n = sqlite3_column_bytes(st, 0);
+    int64_t vout = sqlite3_column_int64(st, 1);
+    int64_t h = sqlite3_column_int64(st, 2);
+    int64_t val = sqlite3_column_int64(st, 3);
+    int64_t stype = sqlite3_column_int64(st, 4);
+    const void *sby = sqlite3_column_blob(st, 5);
+    int sby_n = sqlite3_column_bytes(st, 5);
+    bool spent = sby && sby_n == 32;
+
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    char hex[65];
+    if (txid && txid_n == 32) {
+        HexStr(txid, 32, false, hex, sizeof(hex));
+        json_push_kv_str(&row, "txid", hex);
+    }
+    json_push_kv_int(&row, "vout", vout);
+    json_push_kv_int(&row, "height", h);
+    json_push_kv_int(&row, "value", val);
+    json_push_kv_int(&row, "script_type", stype);
+    json_push_kv_bool(&row, "spent", spent);
+    if (spent) {
+        HexStr(sby, 32, false, hex, sizeof(hex));
+        json_push_kv_str(&row, "spent_by_txid", hex);
+        json_push_kv_int(&row, "spent_height",
+                         sqlite3_column_int64(st, 6));
+    }
+    json_push_back(out_arr, &row);
+    json_free(&row);
+}
+
 int address_index_query_appearances(sqlite3 *db, const uint8_t scripthash[32],
                                     int64_t from_height, int limit,
                                     struct json_value *out_arr,
@@ -363,19 +446,8 @@ int address_index_query_appearances(sqlite3 *db, const uint8_t scripthash[32],
     if (limit <= 0 || limit > ADDRESS_INDEX_QUERY_MAX_ROWS)
         limit = ADDRESS_INDEX_QUERY_MAX_ROWS;
 
-    /* Confirmed unspent balance across ALL appearances (not just this page). */
-    if (balance_out) {
-        sqlite3_stmt *bs = NULL;
-        if (sqlite3_prepare_v2(db,
-            "SELECT COALESCE(SUM(value),0) FROM address_index "
-            "WHERE scripthash=? AND spent_by_txid IS NULL",
-            -1, &bs, NULL) == SQLITE_OK) {
-            sqlite3_bind_blob(bs, 1, scripthash, 32, SQLITE_STATIC);
-            if (sqlite3_step(bs) == SQLITE_ROW)  // raw-sql-ok:progress-kv-kernel-store
-                *balance_out = sqlite3_column_int64(bs, 0);
-            sqlite3_finalize(bs);
-        }
-    }
+    if (balance_out)
+        ai_query_balance(db, scripthash, balance_out);
 
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(db,
@@ -394,37 +466,7 @@ int address_index_query_appearances(sqlite3 *db, const uint8_t scripthash[32],
     int appended = 0;
     int rc;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
-        const void *txid = sqlite3_column_blob(st, 0);
-        int txid_n = sqlite3_column_bytes(st, 0);
-        int64_t vout = sqlite3_column_int64(st, 1);
-        int64_t h = sqlite3_column_int64(st, 2);
-        int64_t val = sqlite3_column_int64(st, 3);
-        int64_t stype = sqlite3_column_int64(st, 4);
-        const void *sby = sqlite3_column_blob(st, 5);
-        int sby_n = sqlite3_column_bytes(st, 5);
-        bool spent = sby && sby_n == 32;
-
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        char hex[65];
-        if (txid && txid_n == 32) {
-            HexStr(txid, 32, false, hex, sizeof(hex));
-            json_push_kv_str(&row, "txid", hex);
-        }
-        json_push_kv_int(&row, "vout", vout);
-        json_push_kv_int(&row, "height", h);
-        json_push_kv_int(&row, "value", val);
-        json_push_kv_int(&row, "script_type", stype);
-        json_push_kv_bool(&row, "spent", spent);
-        if (spent) {
-            HexStr(sby, 32, false, hex, sizeof(hex));
-            json_push_kv_str(&row, "spent_by_txid", hex);
-            json_push_kv_int(&row, "spent_height",
-                             sqlite3_column_int64(st, 6));
-        }
-        json_push_back(out_arr, &row);
-        json_free(&row);
+        ai_query_append_row(st, out_arr);
         appended++;
     }
     sqlite3_finalize(st);

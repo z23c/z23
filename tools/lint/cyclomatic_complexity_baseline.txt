@@ -257,8 +257,6 @@ engine/entry/main_cli_modes.c:importchainstate_mode:19
 engine/entry/main_cli_modes.c:legacy_utxo_run:21
 engine/entry/main_cli_modes.c:mintutxocommitment_mode:26
 engine/entry/main_cli_modes.c:repair_utxos_mode:65
-engine/jobs/src/address_index.c:address_index_put_block:19
-engine/jobs/src/address_index.c:address_index_query_appearances:18
 engine/jobs/src/proof_validate_stage.c:step_validate:48
 engine/jobs/src/seal_rewind_executor.c:seal_rewind_to_nearest:23
 engine/jobs/src/stage_anchor.c:stage_anchor_cap_target_at_log_frontier:24
