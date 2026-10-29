@@ -406,7 +406,6 @@ engine/conditions/src/have_data_unreadable.c:witness_have_data_unreadable:17
 engine/conditions/src/sapling_anchor_frontier_unavailable.c:tier1b_borrow_verified_frontier:21
 engine/controllers/src/api_controller_status.c:api_milestone_status_json:43
 engine/controllers/src/blockchain_controller_chain.c:rpc_getblockchaininfo:34
-engine/controllers/src/hodl_controller.c:rpc_gethodlwaveimage:45
 engine/controllers/src/nodelog_controller.c:diag_rpc_getnodelog:55
 engine/controllers/src/repair_controller_rebuild.c:backfill_header_solutions_run:24
 engine/controllers/src/repair_controller_rebuild.c:rebuild_recent_fetch_and_connect:27

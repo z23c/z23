@@ -204,6 +204,213 @@ static const uint8_t hodl_colors[HODL_WAVE_BUCKETS][3] = {
     {80,  30,  120},  /* > 5y       — dark purple */
 };
 
+/* Heatmap scan accumulators: per-cell UTXO counts and HODL wave totals. */
+struct hodl_heatmap_acc {
+    int64_t *grid;
+    int64_t hodl_values[HODL_WAVE_BUCKETS];
+    int64_t total_value;
+    int64_t total_utxos;
+};
+
+/* Value bins: log10 scale from 1 satoshi (0) to 100000 ZCL (13)
+ * 1 sat = 10^0, 1 ZCL = 10^8, 100000 ZCL = 10^13 */
+static const double hodl_heatmap_log_min = 0.0;
+static const double hodl_heatmap_log_max = 13.0;
+
+/* Map a UTXO value to a heatmap row on the log10 value scale. */
+static int hodl_heatmap_cell_row(int64_t value, int heatmap_h)
+{
+    double logval = log10((double)value);
+    if (logval < hodl_heatmap_log_min) logval = hodl_heatmap_log_min;
+    if (logval > hodl_heatmap_log_max) logval = hodl_heatmap_log_max;
+    /* Map to row (bottom=small, top=large) */
+    int row = heatmap_h - 1 -
+        (int)((logval - hodl_heatmap_log_min)
+              / (hodl_heatmap_log_max - hodl_heatmap_log_min)
+              * (heatmap_h - 1));
+    if (row < 0) row = 0;
+    if (row >= heatmap_h) row = heatmap_h - 1;
+    return row;
+}
+
+/* Add one coin's non-null, positive-value outputs to the heatmap grid and
+ * the HODL wave totals. */
+static void hodl_heatmap_add_coin_outputs(const struct coins *c, int bucket,
+                                          int col, int img_w, int heatmap_h,
+                                          struct hodl_heatmap_acc *acc)
+{
+    for (size_t i = 0; i < c->num_vout; i++) {
+        if (!tx_out_is_null(&c->vout[i]) && c->vout[i].value > 0) {
+            int row = hodl_heatmap_cell_row(c->vout[i].value, heatmap_h);
+            acc->grid[row * img_w + col]++;
+
+            acc->hodl_values[bucket] += c->vout[i].value;
+            acc->total_value += c->vout[i].value;
+            acc->total_utxos++;
+        }
+    }
+}
+
+/* Scan the UTXO set, filling the heatmap grid and the HODL wave totals. */
+static void hodl_heatmap_scan(struct coins_view_db *coins_db, int tip_height,
+                              int blocks_per_col, int img_w, int heatmap_h,
+                              struct hodl_heatmap_acc *acc)
+{
+    /* Scan UTXO set */
+    struct db_iterator it;
+    db_iter_init(&it, &coins_db->db);
+    char prefix = 'c';
+    db_iter_seek(&it, &prefix, 1);
+
+    while (db_iter_valid(&it)) {
+        size_t keylen = 0;
+        const char *key = db_iter_key(&it, &keylen);
+        if (!key || keylen != 33 || key[0] != 'c')
+            break;
+
+        struct uint256 txid;
+        memcpy(txid.data, key + 1, 32);
+
+        struct coins c;
+        coins_init(&c);
+        if (coins_view_db_get_coins(coins_db, &txid, &c)) {
+            int height = c.height;
+            if (height < 0) height = 0;
+            if (height > tip_height) height = tip_height;
+            int64_t age_s = hodl_wave_age_seconds(height, tip_height);
+            int bucket = hodl_wave_bucket_index(age_s);
+
+            /* Heatmap column from creation height */
+            int col = height / blocks_per_col;
+            if (col >= img_w) col = img_w - 1;
+
+            hodl_heatmap_add_coin_outputs(&c, bucket, col, img_w, heatmap_h,
+                                          acc);
+        }
+        coins_free(&c);
+        db_iter_next(&it);
+    }
+    db_iter_free(&it);
+}
+
+/* Render the creation heatmap into the top portion of the pixel buffer. */
+static void hodl_heatmap_render(const int64_t *grid, int img_w, int heatmap_h,
+                                uint8_t *pixels)
+{
+    /* Find max grid value for normalization */
+    int64_t grid_max = 0;
+    for (int i = 0; i < heatmap_h * img_w; i++)
+        if (grid[i] > grid_max) grid_max = grid[i];
+
+    for (int row = 0; row < heatmap_h; row++) {
+        for (int col = 0; col < img_w; col++) {
+            int64_t count = grid[row * img_w + col];
+            if (count > 0 && grid_max > 0) {
+                double t = log1p((double)count) / log1p((double)grid_max);
+                uint8_t r, g, b;
+                plasma_color(t, &r, &g, &b);
+                int idx = (row * img_w + col) * 3;
+                pixels[idx] = r;
+                pixels[idx + 1] = g;
+                pixels[idx + 2] = b;
+            }
+            /* else: stays black */
+        }
+    }
+}
+
+/* Fill the separator gap rows below the heatmap with dark gray. */
+static void hodl_render_separator_gap(uint8_t *pixels, int img_w,
+                                      int gap_start, int gap_h)
+{
+    for (int row = gap_start; row < gap_start + gap_h; row++) {
+        for (int col = 0; col < img_w; col++) {
+            int idx = (row * img_w + col) * 3;
+            pixels[idx] = 20;
+            pixels[idx + 1] = 20;
+            pixels[idx + 2] = 20;
+        }
+    }
+}
+
+/* Draw the stacked HODL wave age bands across the bottom of the image. */
+static void hodl_render_wave_bar(uint8_t *pixels, int img_w, int img_h,
+                                 int heatmap_h, int gap_h,
+                                 const int64_t *hodl_values,
+                                 int64_t total_value)
+{
+    if (total_value <= 0)
+        return;
+    int x_start = 0;
+    for (int b = HODL_WAVE_BUCKETS - 1; b >= 0; b--) {
+        int band_width = (int)((double)hodl_values[b]
+                               / (double)total_value * img_w);
+        if (b == 0) band_width = img_w - x_start; /* fill remainder */
+
+        for (int col = x_start; col < x_start + band_width && col < img_w;
+             col++) {
+            for (int row = heatmap_h + gap_h; row < img_h; row++) {
+                int idx = (row * img_w + col) * 3;
+                pixels[idx]     = hodl_colors[b][0];
+                pixels[idx + 1] = hodl_colors[b][1];
+                pixels[idx + 2] = hodl_colors[b][2];
+            }
+        }
+        x_start += band_width;
+    }
+}
+
+/* Overlay consensus activation height markers on the heatmap. */
+static void hodl_render_height_markers(uint8_t *pixels, int img_w,
+                                       int heatmap_h, int blocks_per_col)
+{
+    int markers[] = { 476969, 585318, 585322, 707000 };
+    for (int m = 0; m < 4; m++) {
+        int col = markers[m] / blocks_per_col;
+        if (col >= 0 && col < img_w) {
+            for (int row = 0; row < heatmap_h; row++) {
+                int idx = (row * img_w + col) * 3;
+                /* Cyan marker line */
+                pixels[idx]     = (uint8_t)(pixels[idx] / 2 + 30);
+                pixels[idx + 1] = (uint8_t)(pixels[idx+1] / 2 + 200);
+                pixels[idx + 2] = (uint8_t)(pixels[idx+2] / 2 + 200);
+            }
+        }
+    }
+}
+
+/* Append per-bucket percentage and value entries to the HODL wave array. */
+static void hodl_push_wave_entries(struct json_value *wave,
+                                   const int64_t *hodl_values,
+                                   int64_t total_value)
+{
+    const struct hodl_wave_bucket *defs = hodl_wave_bucket_defs();
+    char amt[32];
+    for (int b = 0; b < HODL_WAVE_BUCKETS; b++) {
+        struct json_value entry = {0};
+        json_set_object(&entry);
+        json_push_kv_str(&entry, "label", defs[b].label);
+        double pct = total_value > 0
+            ? (double)hodl_values[b] / (double)total_value * 100.0 : 0.0;
+        json_push_kv_real(&entry, "percent", pct);
+
+        snprintf(amt, sizeof(amt), "%lld.%08lld",
+                 (long long)(hodl_values[b] / ZATOSHI_PER_ZCL),
+                 (long long)(hodl_values[b] % ZATOSHI_PER_ZCL));
+        json_push_kv_str(&entry, "value", amt);
+        json_push_back(wave, &entry);
+        json_free(&entry);
+    }
+}
+
+/* Format the HODL wave image path inside datadir. */
+static void hodl_format_image_filepath(char *buf, size_t buflen,
+                                       const char *datadir)
+{
+    snprintf(buf, buflen, "%s/hodlwave.png",
+             datadir ? datadir : ".");
+}
+
 /* gethodlwaveimage: Scan persisted chainstate, generate a PPM heatmap +
  * HODL wave bar, save to datadir/hodlwave.ppm. */
 static bool rpc_gethodlwaveimage(const struct json_value *params, bool help,
@@ -247,156 +454,43 @@ static bool rpc_gethodlwaveimage(const struct json_value *params, bool help,
     int blocks_per_col = (tip_height + IMG_W - 1) / IMG_W;
     if (blocks_per_col < 1) blocks_per_col = 1;
 
-    /* Value bins: log10 scale from 1 satoshi (0) to 100000 ZCL (13)
-     * 1 sat = 10^0, 1 ZCL = 10^8, 100000 ZCL = 10^13 */
-    const double LOG_MIN = 0.0;
-    const double LOG_MAX = 13.0;
-
     /* Allocate grid: grid[row][col] = count of UTXOs */
-    int64_t *grid = zcl_calloc((size_t)(HEATMAP_H * IMG_W), sizeof(int64_t), "heatmap_grid");
-    if (!grid) {
+    struct hodl_heatmap_acc acc = {0};
+    acc.grid = zcl_calloc((size_t)(HEATMAP_H * IMG_W), sizeof(int64_t), "heatmap_grid");
+    if (!acc.grid) {
         json_set_str(result, "Out of memory");
         return false;
     }
 
-    int64_t hodl_values[HODL_WAVE_BUCKETS] = {0};
-    int64_t total_value = 0;
-    int64_t total_utxos = 0;
-
-    /* Scan UTXO set */
-    struct db_iterator it;
-    db_iter_init(&it, &coins_db->db);
-    char prefix = 'c';
-    db_iter_seek(&it, &prefix, 1);
-
-    while (db_iter_valid(&it)) {
-        size_t keylen = 0;
-        const char *key = db_iter_key(&it, &keylen);
-        if (!key || keylen != 33 || key[0] != 'c')
-            break;
-
-        struct uint256 txid;
-        memcpy(txid.data, key + 1, 32);
-
-        struct coins c;
-        coins_init(&c);
-        if (coins_view_db_get_coins(coins_db, &txid, &c)) {
-            int height = c.height;
-            if (height < 0) height = 0;
-            if (height > tip_height) height = tip_height;
-            int64_t age_s = hodl_wave_age_seconds(height, tip_height);
-            int bucket = hodl_wave_bucket_index(age_s);
-
-            /* Heatmap column from creation height */
-            int col = height / blocks_per_col;
-            if (col >= IMG_W) col = IMG_W - 1;
-
-            for (size_t i = 0; i < c.num_vout; i++) {
-                if (!tx_out_is_null(&c.vout[i]) && c.vout[i].value > 0) {
-                    double logval = log10((double)c.vout[i].value);
-                    if (logval < LOG_MIN) logval = LOG_MIN;
-                    if (logval > LOG_MAX) logval = LOG_MAX;
-                    /* Map to row (bottom=small, top=large) */
-                    int row = HEATMAP_H - 1 -
-                        (int)((logval - LOG_MIN) / (LOG_MAX - LOG_MIN)
-                              * (HEATMAP_H - 1));
-                    if (row < 0) row = 0;
-                    if (row >= HEATMAP_H) row = HEATMAP_H - 1;
-                    grid[row * IMG_W + col]++;
-
-                    hodl_values[bucket] += c.vout[i].value;
-                    total_value += c.vout[i].value;
-                    total_utxos++;
-                }
-            }
-        }
-        coins_free(&c);
-        db_iter_next(&it);
-    }
-    db_iter_free(&it);
-
-    /* Find max grid value for normalization */
-    int64_t grid_max = 0;
-    for (int i = 0; i < HEATMAP_H * IMG_W; i++)
-        if (grid[i] > grid_max) grid_max = grid[i];
+    hodl_heatmap_scan(coins_db, tip_height, blocks_per_col, IMG_W, HEATMAP_H,
+                      &acc);
 
     /* Allocate pixel buffer */
     uint8_t *pixels = zcl_calloc((size_t)(IMG_W * IMG_H * 3), 1, "heatmap_pixels");
     if (!pixels) {
-        free(grid);
+        free(acc.grid);
         json_set_str(result, "Out of memory for image");
         return false;
     }
 
     /* Render heatmap (top portion) */
-    for (int row = 0; row < HEATMAP_H; row++) {
-        for (int col = 0; col < IMG_W; col++) {
-            int64_t count = grid[row * IMG_W + col];
-            if (count > 0 && grid_max > 0) {
-                double t = log1p((double)count) / log1p((double)grid_max);
-                uint8_t r, g, b;
-                plasma_color(t, &r, &g, &b);
-                int idx = (row * IMG_W + col) * 3;
-                pixels[idx] = r;
-                pixels[idx + 1] = g;
-                pixels[idx + 2] = b;
-            }
-            /* else: stays black */
-        }
-    }
+    hodl_heatmap_render(acc.grid, IMG_W, HEATMAP_H, pixels);
 
     /* Render separator gap (dark gray line) */
-    for (int row = HEATMAP_H; row < HEATMAP_H + GAP_H; row++) {
-        for (int col = 0; col < IMG_W; col++) {
-            int idx = (row * IMG_W + col) * 3;
-            pixels[idx] = 20;
-            pixels[idx + 1] = 20;
-            pixels[idx + 2] = 20;
-        }
-    }
+    hodl_render_separator_gap(pixels, IMG_W, HEATMAP_H, GAP_H);
 
     /* Render HODL wave bar (bottom portion) — stacked horizontal bands */
-    if (total_value > 0) {
-        int x_start = 0;
-        for (int b = HODL_WAVE_BUCKETS - 1; b >= 0; b--) {
-            int band_width = (int)((double)hodl_values[b]
-                                   / (double)total_value * IMG_W);
-            if (b == 0) band_width = IMG_W - x_start; /* fill remainder */
-
-            for (int col = x_start; col < x_start + band_width && col < IMG_W;
-                 col++) {
-                for (int row = HEATMAP_H + GAP_H; row < IMG_H; row++) {
-                    int idx = (row * IMG_W + col) * 3;
-                    pixels[idx]     = hodl_colors[b][0];
-                    pixels[idx + 1] = hodl_colors[b][1];
-                    pixels[idx + 2] = hodl_colors[b][2];
-                }
-            }
-            x_start += band_width;
-        }
-    }
+    hodl_render_wave_bar(pixels, IMG_W, IMG_H, HEATMAP_H, GAP_H,
+                         acc.hodl_values, acc.total_value);
 
     /* Draw consensus activation height markers on the heatmap */
-    int markers[] = { 476969, 585318, 585322, 707000 };
-    for (int m = 0; m < 4; m++) {
-        int col = markers[m] / blocks_per_col;
-        if (col >= 0 && col < IMG_W) {
-            for (int row = 0; row < HEATMAP_H; row++) {
-                int idx = (row * IMG_W + col) * 3;
-                /* Cyan marker line */
-                pixels[idx]     = (uint8_t)(pixels[idx] / 2 + 30);
-                pixels[idx + 1] = (uint8_t)(pixels[idx+1] / 2 + 200);
-                pixels[idx + 2] = (uint8_t)(pixels[idx+2] / 2 + 200);
-            }
-        }
-    }
+    hodl_render_height_markers(pixels, IMG_W, HEATMAP_H, blocks_per_col);
 
-    free(grid);
+    free(acc.grid);
 
     /* Write PNG file */
     char filepath[1024];
-    snprintf(filepath, sizeof(filepath), "%s/hodlwave.png",
-             ctx->datadir ? ctx->datadir : ".");
+    hodl_format_image_filepath(filepath, sizeof(filepath), ctx->datadir);
 
     if (!png_write_rgb(filepath, pixels, (uint32_t)IMG_W, (uint32_t)IMG_H)) {
         free(pixels);
@@ -410,34 +504,19 @@ static bool rpc_gethodlwaveimage(const struct json_value *params, bool help,
     json_push_kv_str(result, "file", filepath);
     json_push_kv_int(result, "width", IMG_W);
     json_push_kv_int(result, "height", IMG_H);
-    json_push_kv_int(result, "total_utxos", total_utxos);
+    json_push_kv_int(result, "total_utxos", acc.total_utxos);
     json_push_kv_int(result, "blocks_per_column", blocks_per_col);
 
     char amt[32];
     snprintf(amt, sizeof(amt), "%lld.%08lld",
-             (long long)(total_value / ZATOSHI_PER_ZCL),
-             (long long)(total_value % ZATOSHI_PER_ZCL));
+             (long long)(acc.total_value / ZATOSHI_PER_ZCL),
+             (long long)(acc.total_value % ZATOSHI_PER_ZCL));
     json_push_kv_str(result, "total_value", amt);
 
     /* Also include the HODL wave percentages */
-    const struct hodl_wave_bucket *defs = hodl_wave_bucket_defs();
     struct json_value wave = {0};
     json_set_array(&wave);
-    for (int b = 0; b < HODL_WAVE_BUCKETS; b++) {
-        struct json_value entry = {0};
-        json_set_object(&entry);
-        json_push_kv_str(&entry, "label", defs[b].label);
-        double pct = total_value > 0
-            ? (double)hodl_values[b] / (double)total_value * 100.0 : 0.0;
-        json_push_kv_real(&entry, "percent", pct);
-
-        snprintf(amt, sizeof(amt), "%lld.%08lld",
-                 (long long)(hodl_values[b] / ZATOSHI_PER_ZCL),
-                 (long long)(hodl_values[b] % ZATOSHI_PER_ZCL));
-        json_push_kv_str(&entry, "value", amt);
-        json_push_back(&wave, &entry);
-        json_free(&entry);
-    }
+    hodl_push_wave_entries(&wave, acc.hodl_values, acc.total_value);
     json_push_kv(result, "hodl_wave", &wave);
     json_free(&wave);
 
