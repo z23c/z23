@@ -57,32 +57,34 @@ static bool persisted_tip_matches_projection(struct node_db *ndb,
            memcmp(row.hash, hash->data, sizeof(row.hash)) == 0;
 }
 
-void chain_evidence_controller_snapshot(
+/* Zero the view and reset every height marker to "absent". */
+static void snapshot_view_reset(struct chain_evidence_controller_view *out)
+{
+    int *const absent_heights[] = {
+        &out->active_tip_height,
+        &out->header_tip_height,
+        &out->persisted_active_tip_height,
+        &out->snapshot_anchor_height,
+        &out->background_validation_height,
+        &out->utxo_max_height,
+        &out->coins_best_block_height,
+        &out->sqlite_max_height,
+    };
+    const size_t absent_height_count =
+        sizeof(absent_heights) / sizeof(absent_heights[0]);
+
+    memset(out, 0, sizeof(*out));
+    for (size_t i = 0; i < absent_height_count; i++)
+        *absent_heights[i] = -1;
+}
+
+/* Copy live CSR tip heights and hashes into the view. */
+static void snapshot_copy_csr_tips(
     struct chain_evidence_controller *authority,
     struct chain_evidence_controller_view *out)
 {
     struct chain_state_view csv;
-    int64_t v = -1;
 
-    if (!out)
-        return;
-    memset(out, 0, sizeof(*out));
-    out->active_tip_height = -1;
-    out->header_tip_height = -1;
-    out->persisted_active_tip_height = -1;
-    out->snapshot_anchor_height = -1;
-    out->background_validation_height = -1;
-    out->utxo_max_height = -1;
-    out->coins_best_block_height = -1;
-    out->sqlite_max_height = -1;
-    if (!authority)
-        return;
-
-    /* A snapshot is an observation, never a reconciliation boundary. The
-     * mutating loader may clear/backfill stale freeze state and can submit a
-     * DB-service write; doing that while a diagnostic holds sqlite3_db_mutex
-     * self-deadlocks against the DB worker. Boot init owns those repairs. */
-    out->state = chain_evidence_controller_load_state_readonly(authority);
     memset(&csv, 0, sizeof(csv));
     csr_snapshot(authority->csr, &csv);
     out->active_tip_height = csv.tip_height;
@@ -99,45 +101,58 @@ void chain_evidence_controller_snapshot(
             *(*authority->csr->pindex_best_hdr)->phashBlock;
         out->has_header_tip_hash = true;
     }
-    if (load_u256(authority->ndb, "cec.active_tip_hash",
-                  &out->persisted_active_tip_hash))
+}
+
+/* Load the persisted cec.* tip hash and height markers. */
+static void snapshot_load_persisted_markers(
+    struct node_db *ndb, struct chain_evidence_controller_view *out)
+{
+    if (load_u256(ndb, "cec.active_tip_hash", &out->persisted_active_tip_hash))
         out->has_persisted_active_tip_hash = true;
     out->persisted_active_tip_height =
-        state_get_i32(authority->ndb, "cec.active_tip_height", -1);
+        state_get_i32(ndb, "cec.active_tip_height", -1);
     out->snapshot_anchor_height =
-        state_get_i32(authority->ndb, "cec.snapshot_anchor_height", -1);
+        state_get_i32(ndb, "cec.snapshot_anchor_height", -1);
     out->background_validation_height =
-        state_get_i32(authority->ndb, "cec.background_validation_height", -1);
-    out->utxo_max_height =
-        state_get_i32(authority->ndb, "cec.utxo_max_height", -1);
+        state_get_i32(ndb, "cec.background_validation_height", -1);
+    out->utxo_max_height = state_get_i32(ndb, "cec.utxo_max_height", -1);
     out->coins_best_block_height =
-        state_get_i32(authority->ndb, "cec.coins_best_block_height", -1);
-    if (authority->ndb &&
-        node_db_state_get_int(authority->ndb, "cec.active_tip_source_class",
-                              &v))
+        state_get_i32(ndb, "cec.coins_best_block_height", -1);
+}
+
+/* Load the persisted cec.* enum and flag values. */
+static void snapshot_load_persisted_enums(
+    struct node_db *ndb, struct chain_evidence_controller_view *out)
+{
+    int64_t v = -1;
+
+    if (ndb && node_db_state_get_int(ndb, "cec.active_tip_source_class", &v))
         out->active_tip_source_class = (enum chain_evidence_source_class)v;
     v = CEC_PUBLISH_NOT_PUBLISHABLE;
-    if (authority->ndb &&
-        node_db_state_get_int(authority->ndb, "cec.publish_state", &v))
+    if (ndb && node_db_state_get_int(ndb, "cec.publish_state", &v))
         out->publish_state = (enum chain_evidence_publish_state)v;
     v = CEC_FULL_VALIDATION_UNKNOWN;
-    if (authority->ndb &&
-        node_db_state_get_int(authority->ndb,
-                              "cec.full_validation_origin", &v))
+    if (ndb && node_db_state_get_int(ndb,
+                                     "cec.full_validation_origin", &v))
         out->full_validation_origin =
             (enum chain_evidence_full_validation_origin)v;
     v = 0;
-    if (authority->ndb &&
-        node_db_state_get_int(authority->ndb,
-                              "cec.repaired_active_tip_evidence", &v))
+    if (ndb && node_db_state_get_int(ndb,
+                                     "cec.repaired_active_tip_evidence", &v))
         out->repaired_active_tip_evidence = v != 0;
-    (void)chain_evidence_store_load(authority->ndb,
+}
+
+/* Load the durable cec evidence records, backfilling enum gaps from them. */
+static void snapshot_load_evidence_records(
+    struct node_db *ndb, struct chain_evidence_controller_view *out)
+{
+    (void)chain_evidence_store_load(ndb,
                                     "cec.block_index_evidence_state",
                                     &out->block_index_evidence_state).ok;
-    (void)chain_evidence_store_load(authority->ndb, "cec.active_tip_evidence",
+    (void)chain_evidence_store_load(ndb, "cec.active_tip_evidence",
                                     &out->active_tip_evidence).ok;
     out->snapshot_evidence_loaded =
-        chain_evidence_store_load(authority->ndb, "cec.snapshot_evidence",
+        chain_evidence_store_load(ndb, "cec.snapshot_evidence",
                                   &out->snapshot_evidence).ok;
     /* Backward-readable assisted evidence: releases predating the explicit
      * origin key already bound FULLY_VALIDATED to this durable record.  Never
@@ -147,7 +162,7 @@ void chain_evidence_controller_snapshot(
         out->snapshot_evidence_loaded &&
         out->snapshot_evidence.full_validation_complete)
         out->full_validation_origin = CEC_FULL_VALIDATION_ASSISTED_SNAPSHOT;
-    (void)chain_evidence_store_load(authority->ndb, "cec.header_chain_evidence",
+    (void)chain_evidence_store_load(ndb, "cec.header_chain_evidence",
                                     &out->header_chain_evidence).ok;
     if (out->active_tip_source_class == CEC_SOURCE_CLASS_UNKNOWN &&
         out->active_tip_evidence.source_class != CEC_SOURCE_CLASS_UNKNOWN)
@@ -155,9 +170,12 @@ void chain_evidence_controller_snapshot(
     if (out->publish_state == CEC_PUBLISH_NOT_PUBLISHABLE &&
         out->active_tip_evidence.publish_state != CEC_PUBLISH_NOT_PUBLISHABLE)
         out->publish_state = out->active_tip_evidence.publish_state;
-    snprintf(out->contradiction_reason, sizeof(out->contradiction_reason),
-             "%s", authority->contradiction_reason);
+}
 
+/* Compute the active-tip evidence health flags. */
+static void snapshot_classify_tip_evidence(
+    struct chain_evidence_controller_view *out)
+{
     /* "Missing" means the active tip has no publishable evidence at all.
      * A reconstructed LOCAL_IMPORT tip (ancestry-linked + chainwork-
      * recomputed, publish_state=LOCAL_EVIDENCE) is publishable low-trust
@@ -179,6 +197,30 @@ void chain_evidence_controller_snapshot(
     out->publish_state_not_local =
         out->active_tip_height >= 0 &&
         out->publish_state != CEC_PUBLISH_LOCAL_EVIDENCE;
+}
+
+/* True when the persisted evidence lags the projection frontier by at
+ * most one hash-bound row. */
+static bool durable_frontier_lag_allows_hash_divergence(
+    struct node_db *ndb, int sqlite_max_height, int active_tip_height,
+    int persisted_active_tip_height, bool has_persisted_active_tip_hash,
+    const struct uint256 *persisted_active_tip_hash)
+{
+    return sqlite_max_height >= 0 &&
+           persisted_active_tip_height >= 0 &&
+           has_persisted_active_tip_hash &&
+           persisted_active_tip_height <= sqlite_max_height &&
+           persisted_active_tip_height >= sqlite_max_height - 1 &&
+           sqlite_max_height < active_tip_height &&
+           persisted_tip_matches_projection(
+               ndb, persisted_active_tip_height,
+               persisted_active_tip_hash);
+}
+
+/* Compute the active-tip hash mismatch flags. */
+static void snapshot_classify_hash_agreement(
+    struct node_db *ndb, struct chain_evidence_controller_view *out)
+{
     /* node.db's blocks projection and the cec evidence follower do not share
      * one transaction: the projection can commit height H while the evidence
      * record still names H-1.  Both are durable frontiers behind the live
@@ -193,14 +235,10 @@ void chain_evidence_controller_snapshot(
      * active_tip_hash_mismatch. csr_cursor_mismatch independently catches a
      * live active-tip/coins-tip split. */
     bool durable_frontier_lag =
-        out->sqlite_max_height >= 0 &&
-        out->persisted_active_tip_height >= 0 &&
-        out->has_persisted_active_tip_hash &&
-        out->persisted_active_tip_height <= out->sqlite_max_height &&
-        out->persisted_active_tip_height >= out->sqlite_max_height - 1 &&
-        out->sqlite_max_height < out->active_tip_height &&
-        persisted_tip_matches_projection(
-            authority->ndb, out->persisted_active_tip_height,
+        durable_frontier_lag_allows_hash_divergence(
+            ndb, out->sqlite_max_height, out->active_tip_height,
+            out->persisted_active_tip_height,
+            out->has_persisted_active_tip_hash,
             &out->persisted_active_tip_hash);
     out->active_tip_hash_mismatch =
         out->has_active_tip_hash &&
@@ -211,7 +249,12 @@ void chain_evidence_controller_snapshot(
         out->has_active_tip_hash &&
         out->has_coins_best_block_hash &&
         !u256_equal(&out->active_tip_hash, &out->coins_best_block_hash);
+}
 
+/* Fill health_reason from the first health flag that holds. */
+static void snapshot_set_health_reason(
+    struct chain_evidence_controller_view *out)
+{
     if (out->state == CEC_CONTRADICTION_FROZEN) {
         snprintf(out->health_reason, sizeof(out->health_reason),
                  "%.127s", out->contradiction_reason[0]
@@ -230,4 +273,30 @@ void chain_evidence_controller_snapshot(
         snprintf(out->health_reason, sizeof(out->health_reason),
                  "missing_active_tip_evidence");
     }
+}
+
+void chain_evidence_controller_snapshot(
+    struct chain_evidence_controller *authority,
+    struct chain_evidence_controller_view *out)
+{
+    if (!out)
+        return;
+    snapshot_view_reset(out);
+    if (!authority)
+        return;
+
+    /* A snapshot is an observation, never a reconciliation boundary. The
+     * mutating loader may clear/backfill stale freeze state and can submit a
+     * DB-service write; doing that while a diagnostic holds sqlite3_db_mutex
+     * self-deadlocks against the DB worker. Boot init owns those repairs. */
+    out->state = chain_evidence_controller_load_state_readonly(authority);
+    snapshot_copy_csr_tips(authority, out);
+    snapshot_load_persisted_markers(authority->ndb, out);
+    snapshot_load_persisted_enums(authority->ndb, out);
+    snapshot_load_evidence_records(authority->ndb, out);
+    snprintf(out->contradiction_reason, sizeof(out->contradiction_reason),
+             "%s", authority->contradiction_reason);
+    snapshot_classify_tip_evidence(out);
+    snapshot_classify_hash_agreement(authority->ndb, out);
+    snapshot_set_health_reason(out);
 }
