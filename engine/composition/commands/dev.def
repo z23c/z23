@@ -2452,6 +2452,54 @@ ZCL_COMMAND_DEV_COMMAND(
     "checking an offered bundle is a development-lane operation",
     "z23-dev dev land check_offer")
 
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.attest_offer", "dev.land", "",
+    "Check an offered bundle and sign a receipt for it",
+    "Runs exactly check_offer's checks (same inputs and OFFER_* refusals) "
+    "and only on a pass writes receipt_out (absolute), signed with this "
+    "box's dev proof key: commit, base, bundle_sha256, checks, verdict ok, "
+    "signer, signature. An existing receipt_out refuses "
+    "OFFER_RECEIPT_EXISTS; a failed check writes nothing.",
+    65536,
+    "land,offer,receipt,sign,p2p",
+    "zcl.land_attest_offer_input.v1", "zcl.land_attest_offer.v1",
+    "bundle,offer,repo,receipt_out", "bundle,offer,receipt_out",
+    "z23-dev dev land attest_offer --bundle=/abs/x.bundle --offer=/abs/x.bundle.offer.json --receipt_out=/abs/x.receipt.json",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land_remote,
+    "attesting an offered bundle is a development-lane operation",
+    "z23-dev dev land attest_offer")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.verify_offer_receipt", "dev.land", "",
+    "Verify a signed offer receipt, read-only",
+    "Rebuilds the signed message and verifies it with the dev proof signer: "
+    "OFFER_RECEIPT_BAD, RECEIPT_SIGNATURE_INVALID, RECEIPT_SIGNER_UNKNOWN "
+    "(not this box's key, not on signers.allow). With offer, the receipt's "
+    "commit, base and bundle_sha256 must equal it, else "
+    "RECEIPT_OFFER_MISMATCH. Returns commit, base, signer, verdict, checks.",
+    65536,
+    "land,offer,receipt,verify,p2p",
+    "zcl.land_verify_offer_receipt_input.v1", "zcl.land_verify_offer_receipt.v1",
+    "receipt,offer", "receipt",
+    "z23-dev dev land verify_offer_receipt --receipt=/abs/x.receipt.json",
+    ZCL_COMMAND_EFFECT_READ, ZCL_COMMAND_RISK_READ,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land_remote,
+    "verifying an offer receipt is a development-lane operation",
+    "z23-dev dev land verify_offer_receipt")
+
 /* ── dev.lane ──────────────────────────────────────────────────────────────
  * An agent worktree with the proof's vendored dependencies primed onto
  * independent inodes. Hardlinks are forbidden: they bump the shared inode's

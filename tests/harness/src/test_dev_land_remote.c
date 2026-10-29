@@ -889,11 +889,179 @@ _test_next:;
     return failures;
 }
 
+
+/* dev.land.attest_offer and dev.land.verify_offer_receipt. */
+static void dlt_attest(struct dlt_call *c, const char *cwd, const char *bundle,
+                       const char *offer, const char *out)
+{
+    dlt_begin(c, "dev.land.attest_offer");
+    (void)json_push_kv_str(&c->input, "bundle", bundle);
+    (void)json_push_kv_str(&c->input, "offer", offer);
+    (void)json_push_kv_str(&c->input, "receipt_out", out);
+    dlt_cd(cwd);
+    zcl_native_handle_dev_land_remote(&c->request, &c->reply);
+}
+
+static void dlt_vfy(struct dlt_call *c, const char *receipt, const char *offer)
+{
+    dlt_begin(c, "dev.land.verify_offer_receipt");
+    (void)json_push_kv_str(&c->input, "receipt", receipt);
+    if (offer)
+        (void)json_push_kv_str(&c->input, "offer", offer);
+    zcl_native_handle_dev_land_remote(&c->request, &c->reply);
+}
+
+/* Copies a receipt with the first character of one field's value changed. */
+static bool dlt_tweak(const char *src, const char *dst, const char *key)
+{
+    char text[2048], pat[40];
+    char *p;
+    if (!dlt_slurp(src, text, sizeof(text)))
+        return false;
+    (void)snprintf(pat, sizeof(pat), "\"%s\"", key);
+    p = strstr(text, pat);
+    p = p ? strchr(p + strlen(pat), ':') : NULL;
+    p = p ? strchr(p, '"') : NULL;
+    if (!p)
+        return false;
+    p[1] = p[1] == 'a' ? 'b' : 'a';
+    return dlt_write(dst, text, 0644);
+}
+
+static int dlt_receipt_cases(void)
+{
+    int failures = 0;
+    struct dlt_rig r;
+    struct dlt_call c;
+    char tip[64], b[900], o[900], rc[900], t1[900], t2[900], t3[900];
+    char bad[900], mo[900], rc2[900], st2[900], bsha[ZSHA256_HEX_LEN];
+    if (!dlt_rig(&r, "receipt") || !dlt_commit(r.sender, "a.txt", "a\n") ||
+        DLT_GIT(tip, sizeof(tip), r.sender, "rev-parse", "HEAD") != 0) {
+        printf("rig setup FAILED\n");
+        return 1;
+    }
+    tip[strcspn(tip, "\n")] = '\0';
+    (void)snprintf(b, sizeof(b), "%s/r.bundle", r.base);
+    (void)snprintf(o, sizeof(o), "%s/r.bundle.offer.json", r.base);
+    (void)snprintf(rc, sizeof(rc), "%s/r.receipt.json", r.base);
+    (void)snprintf(t1, sizeof(t1), "%s/t1.receipt.json", r.base);
+    (void)snprintf(t2, sizeof(t2), "%s/t2.receipt.json", r.base);
+    (void)snprintf(t3, sizeof(t3), "%s/t3.receipt.json", r.base);
+    (void)snprintf(bad, sizeof(bad), "%s/bad.bundle", r.base);
+    (void)snprintf(mo, sizeof(mo), "%s/mo.offer.json", r.base);
+    (void)snprintf(rc2, sizeof(rc2), "%s/other.receipt.json", r.base);
+    (void)snprintf(st2, sizeof(st2), "%s/state2", r.base);
+    dlt_send_x(&c, &r, tip, b, false);
+    (void)snprintf(bsha, sizeof(bsha), "%s",
+                   json_get_str(json_get(&c.reply.data, "bundle_sha256")));
+    ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+    dlt_end(&c);
+
+    TEST("land.attest_offer then verify_offer_receipt: a checked bundle gets "
+         "a receipt that verifies ok, with and without --offer") {
+        char text[1024];
+        dlt_attest(&c, r.queue, b, o, rc);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "receipt")), rc);
+        dlt_end(&c);
+        ASSERT(dlt_slurp(rc, text, sizeof(text)));
+        ASSERT(strstr(text, "zcl.dev_land_offer_receipt.v1") != NULL);
+        ASSERT(strstr(text, "bundle_sha256,bundle_verify,head,base") != NULL);
+        dlt_vfy(&c, rc, NULL);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "verdict")), "ok");
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "commit")), tip);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "base")),
+                      r.base_sha);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "checks")),
+                      "bundle_sha256,bundle_verify,head,base");
+        ASSERT(strlen(json_get_str(json_get(&c.reply.data, "signer"))) == 64);
+        dlt_end(&c);
+        dlt_vfy(&c, rc, o);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.attest_offer: an existing receipt_out refuses "
+         "OFFER_RECEIPT_EXISTS") {
+        dlt_attest(&c, r.queue, b, o, rc);
+        ASSERT(dlt_refused(&c, "OFFER_RECEIPT_EXISTS"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.attest_offer: a tampered bundle refuses OFFER_SHA_MISMATCH "
+         "and writes no receipt") {
+        ASSERT(dlt_flip(b, bad));
+        dlt_attest(&c, r.queue, bad, o, t3);
+        ASSERT(dlt_refused(&c, "OFFER_SHA_MISMATCH"));
+        dlt_end(&c);
+        ASSERT(access(t3, F_OK) != 0);
+        PASS();
+    }
+
+    TEST("land.verify_offer_receipt: one flipped signature digit refuses "
+         "RECEIPT_SIGNATURE_INVALID") {
+        ASSERT(dlt_tweak(rc, t1, "signature"));
+        dlt_vfy(&c, t1, NULL);
+        ASSERT(dlt_refused(&c, "RECEIPT_SIGNATURE_INVALID"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.verify_offer_receipt: a changed commit field refuses "
+         "RECEIPT_SIGNATURE_INVALID") {
+        ASSERT(dlt_tweak(rc, t2, "commit"));
+        dlt_vfy(&c, t2, NULL);
+        ASSERT(dlt_refused(&c, "RECEIPT_SIGNATURE_INVALID"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.verify_offer_receipt: a receipt that is not v1 refuses "
+         "OFFER_RECEIPT_BAD") {
+        ASSERT(dlt_write(t3, "{\"schema\":\"zcl.other.v1\"}\n", 0644));
+        dlt_vfy(&c, t3, NULL);
+        ASSERT(dlt_refused(&c, "OFFER_RECEIPT_BAD"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.verify_offer_receipt: another offer refuses "
+         "RECEIPT_OFFER_MISMATCH") {
+        ASSERT(dlt_manifest(mo, "zcl.dev_land_offer.v1", r.base_sha, r.base_sha,
+                            bsha, "mac"));
+        dlt_vfy(&c, rc, mo);
+        ASSERT(dlt_refused(&c, "RECEIPT_OFFER_MISMATCH"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.verify_offer_receipt: a receipt signed by a key outside the "
+         "allowlist refuses RECEIPT_SIGNER_UNKNOWN") {
+        ASSERT(mkdir(st2, 0700) == 0);
+        (void)setenv("XDG_STATE_HOME", st2, 1);
+        dlt_attest(&c, r.queue, b, o, rc2);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        dlt_end(&c);
+        (void)setenv("XDG_STATE_HOME", r.state, 1);
+        dlt_vfy(&c, rc2, NULL);
+        ASSERT(dlt_refused(&c, "RECEIPT_SIGNER_UNKNOWN"));
+        dlt_end(&c);
+        PASS();
+    }
+
+_test_next:;
+    dlt_done(&r);
+    return failures;
+}
+
 int test_dev_land_remote(void);
 int test_dev_land_remote(void)
 {
     int failures = dlt_receive_cases() + dlt_send_cases() + dlt_single_cases() +
-                   dlt_offer_cases();
+                   dlt_offer_cases() + dlt_receipt_cases();
     if (failures == 0)
         printf("test_dev_land_remote: all passed\n");
     else
