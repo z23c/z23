@@ -8,10 +8,9 @@
 #include <string.h>
 #include <stdio.h>
 
-int test_mmr(void)
+/* Verifies roots and peak counts for MMRs of 0, 1 and 2 leaves. */
+static void test_mmr_basic_root_structure(int *failures)
 {
-    int failures = 0;
-
     printf("mmr: init produces zero root... ");
     {
         struct mmr m;
@@ -21,7 +20,7 @@ int test_mmr(void)
         uint8_t zero[32] = {0};
         bool ok = (m.num_leaves == 0 && m.num_peaks == 0 &&
                    memcmp(root, zero, 32) == 0);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
 
     printf("mmr: single leaf root equals leaf hash... ");
@@ -39,7 +38,7 @@ int test_mmr(void)
         mmr_root(&m, root);
         bool ok = (m.num_leaves == 1 && m.num_peaks == 1 &&
                    memcmp(root, expected, 32) == 0);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
 
     printf("mmr: two leaves merge into single peak... ");
@@ -62,9 +61,13 @@ int test_mmr(void)
         mmr_root(&m, root);
         bool ok = (m.num_leaves == 2 && m.num_peaks == 1 &&
                    memcmp(root, expected, 32) == 0);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
+}
 
+/* Verifies peak counts for 3 leaves and for power-of-two leaf counts. */
+static void test_mmr_peak_counts(int *failures)
+{
     printf("mmr: three leaves produce two peaks... ");
     {
         struct mmr m;
@@ -74,7 +77,7 @@ int test_mmr(void)
         for (int i = 0; i < 3; i++) mmr_append(&m, blocks[i]);
 
         bool ok = (m.num_leaves == 3 && m.num_peaks == 2);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
 
     printf("mmr: power-of-two leaves produce single peak... ");
@@ -92,9 +95,13 @@ int test_mmr(void)
             }
             if (m.num_peaks != 1) { ok = false; break; }
         }
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
+}
 
+/* Verifies the plain-block MMR is deterministic and roundtrips through serialization. */
+static void test_mmr_determinism_and_roundtrip(int *failures)
+{
     printf("mmr: deterministic — same inputs same root... ");
     {
         uint8_t root1[32], root2[32];
@@ -110,7 +117,7 @@ int test_mmr(void)
             mmr_root(&m, trial == 0 ? root1 : root2);
         }
         bool ok = memcmp(root1, root2, 32) == 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
 
     printf("mmr: serialize/deserialize roundtrip... ");
@@ -136,9 +143,13 @@ int test_mmr(void)
         mmr_root(&m2, r2);
         ok = ok && memcmp(r1, r2, 32) == 0;
 
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
+}
 
+/* Verifies SHA3-256 one-shot matches streaming and leaf hashes differ from internal. */
+static void test_sha3_and_domain_separation(int *failures)
+{
     printf("mmr: sha3_256 one-shot matches streaming... ");
     {
         uint8_t data[] = "ZClassic23 MMR test data";
@@ -151,7 +162,7 @@ int test_mmr(void)
         sha3_256_finalize(&ctx, h2);
 
         bool ok = memcmp(h1, h2, 32) == 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
 
     printf("mmr: domain separation — leaf != internal... ");
@@ -164,9 +175,13 @@ int test_mmr(void)
         mmr_hash_internal(data, data, internal);
 
         bool ok = memcmp(leaf, internal, 32) != 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
+}
 
+/* Verifies mmr_hash_commitment is deterministic and varies with height and utxo_root. */
+static void test_mmr_commitment_hash_properties(int *failures)
+{
     /* ── Unified commitment leaf tests ──────────────────── */
 
     printf("mmr: commitment hash is deterministic... ");
@@ -182,7 +197,7 @@ int test_mmr(void)
         mmr_hash_commitment(&c, h1);
         mmr_hash_commitment(&c, h2);
         bool ok = memcmp(h1, h2, 32) == 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
 
     printf("mmr: commitment hash changes with height... ");
@@ -197,7 +212,7 @@ int test_mmr(void)
         mmr_hash_commitment(&c1, h1);
         mmr_hash_commitment(&c2, h2);
         bool ok = memcmp(h1, h2, 32) != 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
 
     printf("mmr: commitment hash changes with utxo_root... ");
@@ -212,9 +227,13 @@ int test_mmr(void)
         mmr_hash_commitment(&c1, h1);
         mmr_hash_commitment(&c2, h2);
         bool ok = memcmp(h1, h2, 32) != 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
+}
 
+/* Verifies appending commitments builds a valid, deterministic MMR. */
+static void test_mmr_commitment_append_and_determinism(int *failures)
+{
     printf("mmr: commitment append builds valid MMR... ");
     {
         struct mmr m;
@@ -233,7 +252,7 @@ int test_mmr(void)
         mmr_root(&m, root);
         uint8_t zero[32] = {0};
         ok = ok && memcmp(root, zero, 32) != 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
 
     printf("mmr: commitment MMR is deterministic... ");
@@ -252,9 +271,13 @@ int test_mmr(void)
             mmr_root(&m, trial == 0 ? r1 : r2);
         }
         bool ok = memcmp(r1, r2, 32) == 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
+}
 
+/* Verifies a commitment MMR roundtrips through serialization with the same root. */
+static void test_mmr_commitment_roundtrip(int *failures)
+{
     printf("mmr: commitment serializes and deserializes... ");
     {
         struct mmr m;
@@ -278,8 +301,21 @@ int test_mmr(void)
         mmr_root(&m2, r2);
         ok = ok && memcmp(r1, r2, 32) == 0;
         ok = ok && m.num_leaves == m2.num_leaves;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); (*failures)++; }
     }
+}
+
+int test_mmr(void)
+{
+    int failures = 0;
+
+    test_mmr_basic_root_structure(&failures);
+    test_mmr_peak_counts(&failures);
+    test_mmr_determinism_and_roundtrip(&failures);
+    test_sha3_and_domain_separation(&failures);
+    test_mmr_commitment_hash_properties(&failures);
+    test_mmr_commitment_append_and_determinism(&failures);
+    test_mmr_commitment_roundtrip(&failures);
 
     printf("mmr: commitment interval constant defined... ");
     {
