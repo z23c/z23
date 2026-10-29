@@ -177,7 +177,7 @@ bool zapp_speech_client_chat(const char *files, const char *prompt, const struct
     char *answer, size_t cap, const atomic_bool *cancel)
 {
     if (!files || !prompt || !answer || !cap) return false;
-    snprintf(answer, cap, "The private assistant on your laptop is unavailable. Connect it over USB.");
+    snprintf(answer, cap, "Laptop host not answering. Connect it over USB and keep it running.");
     struct json_value response = {0};
     bool ok = prompt[0] &&
         request(files, "chat", "prompt", prompt, history, &response, cancel, answer, cap);
@@ -266,7 +266,7 @@ bool zapp_speech_client_respond(const char *files, const char *prompt, const str
     void *ctx, char *answer, size_t cap, const atomic_bool *cancel)
 {
     if (!files || !prompt || !answer || !cap) return false;
-    snprintf(answer, cap, "The private assistant on your laptop is unavailable. Connect it over USB.");
+    snprintf(answer, cap, "Laptop host not answering. Connect it over USB and keep it running.");
     char *wire = calloc(1, SPEECH_CAP), *reply = calloc(1, SPEECH_CAP);
     struct respond_state *state = calloc(1, sizeof(*state));
     bool ok = prompt[0] && wire && reply && state && respond_wire(prompt, history, wire);

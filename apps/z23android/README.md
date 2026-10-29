@@ -70,6 +70,8 @@ unavailable balance is not displayed as zero.
 
 **Start node** records the choice in the app's private state, and the app
 starts the node each time it opens until **Stop node** clears the choice.
+**Stop node** shows while the node runs or while that choice is saved, so a
+node that keeps exiting on its own can still be turned off.
 Closing or leaving the app does not stop the node.
 After **Stop node** the node line reads "Node stopping" until the node has
 saved its data and exited. The app finds a node left by an earlier app process

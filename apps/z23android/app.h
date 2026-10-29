@@ -30,6 +30,7 @@ struct zapp_view {
     bool busy;
     bool node_running;
     bool node_process_running;
+    bool node_wanted;
     bool scanning;
     enum zapp_reply_state reply_state;
     enum zapp_voice_state voice_state;

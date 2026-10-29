@@ -279,7 +279,7 @@ static void respond_cases(const char *directory)
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         assert(!respond_with(directory, bad[i], final, true, &h, answer, sizeof(answer)));
-        assert(!strcmp(answer, "Voice cancelled.") || !strcmp(answer, "The private assistant on your laptop is unavailable. Connect it over USB."));
+        assert(!strcmp(answer, "Voice cancelled.") || !strcmp(answer, "Laptop host not answering. Connect it over USB and keep it running."));
         assert(!h.texts && !h.pcms);
     }
     char *large = malloc(96100); assert(large);

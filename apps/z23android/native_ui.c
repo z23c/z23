@@ -461,6 +461,7 @@ static void input_up(JNIEnv *env, float x, float y)
     }
     const char *action, *arg;
     if (fixed_action(index, &action, &arg)) { callback(action, arg); return; }
+    if (index >= (int)(sizeof(actions) / sizeof(*actions)) || !actions[index]) return;
     if (index == 3 || index == 5) { text_action(env, actions[index], index == 3 ? prompt_view : invite_view); return; }
     callback(actions[index], "");
 }
@@ -564,8 +565,10 @@ static void render_status(JNIEnv *env, const struct zapp_view *view)
              "Preview · separate from your main node" : view->node_line, fleet);
     (void)text(env, status_view, status);
     bool running = view->node_running || view->node_process_running;
-    if (buttons[0]) (void)set_visible(env, buttons[0], !voice_preview && !view->busy && !running);
-    if (buttons[1]) (void)set_visible(env, buttons[1], !voice_preview && !view->busy && running);
+    bool shown = !voice_preview && !view->busy;
+    if (buttons[0]) (void)set_visible(env, buttons[0], shown && !running);
+    /* Stop node also clears a saved Start node choice when that node has exited on its own. */
+    if (buttons[1]) (void)set_visible(env, buttons[1], shown && (running || view->node_wanted));
 }
 static void render_fleet(JNIEnv *env, const struct zapp_view *view)
 {

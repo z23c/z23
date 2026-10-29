@@ -126,6 +126,7 @@ static void observe_node(struct controller *c)
     observe_balance(c, output);
     free(output);
     bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
+    bool wanted = zapp_node_wanted(&c->runtime);
     char status[1024], line[96];
     sync_detail(&n, process_running, status, sizeof(status));
     if (stopping) copy_text(status, sizeof(status), "The node is saving its data before it exits.");
@@ -133,6 +134,7 @@ static void observe_node(struct controller *c)
     pthread_mutex_lock(&c->lock);
     c->view.node_running = n.responding;
     c->view.node_process_running = process_running;
+    c->view.node_wanted = wanted;
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), status);
     copy_text(c->view.node_line, sizeof(c->view.node_line), line);
     pthread_mutex_unlock(&c->lock);
@@ -565,8 +567,10 @@ static void *worker(void *opaque)
             execute(c, action, arg, ticket);
             memory_cleanse(arg, sizeof(arg));
             bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
+            bool wanted = zapp_node_wanted(&c->runtime);
             pthread_mutex_lock(&c->lock);
             c->view.node_process_running = process_running;
+            c->view.node_wanted = wanted;
             if (!c->view.node_running) {
                 struct node_reading idle = {.height = -1, .target = -1, .peers = -1};
                 sync_detail(&idle, process_running, c->view.sync_status, sizeof(c->view.sync_status));
@@ -599,6 +603,7 @@ bool zapp_controller_start(const char *files, const char *libs, bool preview, vo
     if (pthread_cond_init(&c->changed, NULL)) { pthread_mutex_destroy(&c->lock); goto fail; }
     if (!zapp_runtime_init(&c->runtime, files, libs, preview)) { pthread_cond_destroy(&c->changed); pthread_mutex_destroy(&c->lock); goto fail; }
     c->view.node_process_running = zapp_node_running(&c->runtime);
+    c->view.node_wanted = zapp_node_wanted(&c->runtime);
     copy_text(c->files, sizeof(c->files), files); c->notify = notify;
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), "Start the node to begin synchronization.");
     zapp_node_line(false, c->view.node_process_running, false, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
