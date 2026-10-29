@@ -10568,7 +10568,7 @@ mvp-coldstart-to-tip-local: zclassic23 zcl-rpc
 # every scheduled run burned 600s on a boot that could only log
 # "directory: handshake failed ... — skipping seed".
 .PHONY: mvp-coldstart-to-tip-stopwatch
-mvp-coldstart-to-tip-stopwatch: zclassic23 fs-handshake-probe
+mvp-coldstart-to-tip-stopwatch: zclassic23 fs-handshake-probe process-group-exec
 	@bash -c 'set -uo pipefail; \
 	 echo "══ MVP C3 STOPWATCH (real): wiped datadir -> checkpoint/fold -> peer tip, real wall-clock ══"; \
 	 if ! bash tools/scripts/cold_start_to_tip_stopwatch.sh --selftest >/dev/null 2>&1; then \
@@ -10665,7 +10665,7 @@ mvp-coldstart-to-tip-triple: zclassic23
 # is labelled in peer_prechecks[] as accept_close and the run reports
 # what the node actually earned.
 .PHONY: mvp-coldstart-to-tip-remote
-mvp-coldstart-to-tip-remote: zclassic23
+mvp-coldstart-to-tip-remote: zclassic23 process-group-exec
 	@if [ -z "$(ZCL_REMOTE_PEER)" ]; then \
 	 echo "mvp-coldstart-to-tip-remote: set ZCL_REMOTE_PEER=<host:port> locally; peer endpoints are operator-local and not committed"; \
 	 exit 1; \
