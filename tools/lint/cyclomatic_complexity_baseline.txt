@@ -335,7 +335,6 @@ engine/composition/src/boot_index.c:reindex_chainstate:30
 engine/composition/src/boot_mesh_pairing.c:boot_mesh_pairing_reason_code:20
 engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin:39
 engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin_result_string:16
-engine/composition/src/boot_mint_anchor.c:boot_mint_anchor_run:50
 engine/composition/src/boot_mint_anchor_preflight.c:boot_mint_anchor_normal_boot_preflight#2:20
 engine/composition/src/boot_mint_anchor_preflight.c:boot_mint_anchor_preflight_run_all#2:16
 engine/composition/src/boot_mint_anchor_preflight.c:copy_exact_file:16

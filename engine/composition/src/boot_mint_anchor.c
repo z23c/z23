@@ -191,7 +191,25 @@ bool boot_mint_anchor_stamp_sovereign_markers(sqlite3 *pdb)
                  "stamp sovereign markers: self-folded stamp failed");
     return true;
 }
-bool boot_mint_anchor_run(const char *datadir)
+/* consecutive no-progress kicks → walled */
+static const int kStallLimit = 64;
+/* Mutable state of the fold drive loop, shared by the per-round helpers. */
+struct mint_drive_state {
+    sqlite3 *pdb;
+    struct chain_activation_controller *ctl;
+    const char *progress_log;
+    int64_t drive_start_us;
+    int32_t anchor;
+    int32_t last_through;
+    int32_t last_durable;
+    int stall_kicks;
+    struct mint_rebuild_wait_state rebuild_wait;
+    bool mint_sync_off;
+    bool lookahead;
+    bool wal_manual;
+};
+/* Fail-closed lookup of the compiled checkpoint: absence is fatal. */
+static const struct sha3_utxo_checkpoint *mint_require_checkpoint(void)
 {
     const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
     if (!cp) {
@@ -200,11 +218,11 @@ bool boot_mint_anchor_run(const char *datadir)
                     "mint_anchor no_compiled_checkpoint");
         _exit(EXIT_FAILURE);
     }
-    /* -full-fold (boot_full_fold.c) overrides the target to the local header TIP
-     * and skips the checkpoint ceremony; disarmed → target == cp->height. */
-    int32_t ff_target = -1;
-    const bool full_fold = boot_full_fold_is_armed(&ff_target);
-    const int32_t anchor = full_fold ? ff_target : cp->height;
+    return cp;
+}
+/* Fail-closed lookup of the progress store and activation controller. */
+static sqlite3 *mint_require_store(struct chain_activation_controller **ctl_out)
+{
     sqlite3 *pdb = progress_store_db();
     if (!pdb) {
         fprintf(stderr, "FATAL: -mint-anchor: progress store not open\n");
@@ -215,45 +233,24 @@ bool boot_mint_anchor_run(const char *datadir)
         fprintf(stderr, "FATAL: -mint-anchor: no activation controller\n");
         _exit(EXIT_FAILURE);
     }
-    /* Producer-START ownership of the durable source receipt (see
-     * config/consensus_state_producer_receipt.h): record the running executable
-     * + source-identity claim and publish the source-epoch digest BEFORE the
-     * fold, so every stamped stage row carries it — the binding the contained
-     * full-history exporter's stage-row proof requires. Best-effort: a build
-     * with no exact 64-hex source identity cannot earn a v2 receipt, but the
-     * mint's primary artifact (the verified anchor snapshot) is still
-     * produced. */
-    {
-        uint8_t profile = mint_skip_crypto_get()
-                              ? CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD
-                              : CONSENSUS_STATE_VALIDATION_FULL;
-        char rc_err[256] = {0};
-        if (!consensus_state_producer_receipt_begin(pdb, profile, rc_err,
-                                                    sizeof(rc_err)))
-            LOG_WARN("mint_anchor",
-                     "[mint-anchor] source receipt begin skipped (mint still "
-                     "runs; artifact not exporter-admissible): %s", rc_err);
-        else
-            fprintf(stderr,
-                    "[mint-anchor] durable source receipt session opened "
-                    "(profile=%s)\n",
-                    profile == CONSENSUS_STATE_VALIDATION_FULL
-                        ? "full" : "checkpoint_fold");
-    }
-    /* (1) Drive the fold to the anchor. reducer_kick_unbudgeted drains the same
-     * eight-stage pipeline the supervisor uses, under the activation mutex (no
-     * race with the background ticks) AND with the reducer-drive guard held so
-     * the supervisor yields its 2s stage ticks for the whole drain. Unlike the
-     * budgeted reducer_kick, each call folds back-to-back until convergence.
-     * The header_admit ceiling (boot_mint_anchor_reset) caps the fold AT the anchor,
-     * so the pipeline converges there and the kick returns 0 advances. We loop
-     * until the utxo_apply frontier reaches the anchor; we also break on a
-     * no-progress plateau so a bodies-missing datadir cannot spin forever (the
-     * caller then reports the mint as incomplete, not a false anchor). */
-    /* Progress metric: the IMMEDIATE utxo_apply stage frontier
-     * (mint_frontier_through), NOT the durable coins_applied_height, which under
-     * -fold-inram only moves at coins_ram flush boundaries. On resume the
-     * stage cursor already reflects the durable resume point. */
+    *ctl_out = ctl;
+    return pdb;
+}
+static uint8_t mint_receipt_profile(void)
+{
+    return mint_skip_crypto_get() ? CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD
+                                  : CONSENSUS_STATE_VALIDATION_FULL;
+}
+static void mint_receipt_opened_note(uint8_t profile)
+{
+    fprintf(stderr,
+            "[mint-anchor] durable source receipt session opened "
+            "(profile=%s)\n",
+            profile == CONSENSUS_STATE_VALIDATION_FULL
+                ? "full" : "checkpoint_fold");
+}
+static void mint_suppress_eventlog(void)
+{
     /* Skip event_log emission during the offline mint: its only output
      * (utxo-anchor.snapshot) is built from coins_kv (progress.kv) + node.db
      * shielded state and never reads the event_log. Every fold-path emitter
@@ -271,6 +268,9 @@ bool boot_mint_anchor_run(const char *datadir)
                 "[mint-anchor] S1.2: event_log emission suppressed for the fold "
                 "(artifact reads coins_kv + shielded only)\n");
     }
+}
+static bool mint_progress_sync_off_begin(void)
+{
     /* progress.kv synchronous=OFF for the fold's duration: the same IBD
      * durability trade the live sync path makes via
      * progress_store_set_sync_mode() from the supervisor tick, which does not
@@ -289,163 +289,130 @@ bool boot_mint_anchor_run(const char *datadir)
                 "(bodies still fdatasync'd before each COMMIT; restored to "
                 "NORMAL+checkpoint at the anchor)\n");
     }
+    return mint_sync_off;
+}
+static int32_t mint_initial_through(sqlite3 *pdb)
+{
     int32_t last_through = mint_frontier_through();
     if (last_through < 0)
         last_through = mint_applied_through(pdb);  /* pre-init fallback */
-    int stall_kicks = 0;
-    struct mint_rebuild_wait_state rebuild_wait = {0};
-    const int kStallLimit = 64;   /* consecutive no-progress kicks → walled */
-    char progress_log[1200];
-    boot_mint_anchor_progress_log_path(datadir, progress_log, sizeof(progress_log));
-    const int64_t drive_start_us = GetTimeMicros();
-    fprintf(stderr,
-            "[mint-anchor] driving the genesis..%d fold; "
-            "starting at applied-through=%d; progress log -> %s\n",
-            anchor, last_through, progress_log);
-    boot_mint_anchor_progress_log_tick(progress_log, last_through, anchor,
-                           drive_start_us, /*force=*/true);
-    /* Serial mint pipeline: mark this drive thread so every stage step reads the
-     * un-flushed overlay via coins_kv_overlay_safe() (the writer bracket only
-     * spans utxo_apply). Sound ONLY because the mint fold is single-threaded.
-     * Balanced on every exit path below. */
-    coins_ram_mint_drive_enter();
-    /* Cross-height proof pre-verification (jobs/pv_lookahead.h): workers
-     * verify shielded proofs AHEAD of this drive so the pv stage consumes
-     * cached verdicts instead of paying 13-18ms serial per block. The workers
-     * never touch coins_kv/coins_ram (pure block-body readers), so the
-     * single-threaded-overlay invariant above is untouched. Skip-crypto mints
-     * never verify, so the pool would only waste cores there. A start failure
-     * degrades to the serial fold (verdict-identical either way). */
+    return last_through;
+}
+static bool mint_lookahead_start(void)
+{
     bool lookahead = false;
     if (!mint_skip_crypto_get()) {
         lookahead = proof_validate_lookahead_start();
         fprintf(stderr, "[mint-anchor] proof lookahead %s\n",
                 lookahead ? "started" : "unavailable — folding serially");
     }
-    /* WAL policy: once the overlay is the write path, hold auto-checkpoints off
-     * and TRUNCATE the WAL at each overlay flush boundary (where the durable
-     * coins_applied_height advances), bounding WAL growth without an fsync per
-     * commit. SQLite default when the overlay is opted out (ZCL_FOLD_INRAM=0). */
-    bool wal_manual = false;
-    int32_t last_durable = -1;
-    for (;;) {
-        int32_t through = mint_frontier_through();
-        if (through >= anchor)
-            break;
-        /* Bounded drain chunk: returns within ZCL_MINT_KICK_BUDGET_MS (or at
-         * the first frontier-stalled round) so THIS loop reliably regains
-         * control to log progress and run the stall detector below. */
-        (void)reducer_kick_unbudgeted(ctl);
-        if (!wal_manual && coins_ram_active()) {
-            mint_wal_autocheckpoint(pdb, 0);
-            wal_manual = true;
-            last_durable = mint_applied_through(pdb);
-            fprintf(stderr,
-                    "[mint-anchor] S1.3+: WAL auto-checkpoint disabled; the WAL "
-                    "is TRUNCATEd at each overlay flush boundary\n");
-        }
-        /* A flush landed iff the durable applied-through advanced. */
-        if (wal_manual) {
-            int32_t durable_now = mint_applied_through(pdb);
-            if (durable_now > last_durable) {
-                (void)progress_store_checkpoint();
-                last_durable = durable_now;
-            }
-        }
-        int32_t now = mint_frontier_through();
-        /* Throttled on-disk progress (every ~5s) — readable while the fold
-         * runs, regardless of the sparse stderr cadence below. */
-        boot_mint_anchor_progress_log_tick(progress_log, now, anchor, drive_start_us,
-                               /*force=*/false);
-        if (now > last_through) {
-            last_through = now;
-            stall_kicks = 0;
-            rebuild_wait = (struct mint_rebuild_wait_state){0};
-            if (boot_mint_anchor_should_log_progress(now, anchor))
-                fprintf(stderr, "[mint-anchor] applied-through=%d / %d\n",
-                        now, anchor);
-        } else if (utxo_apply_sapling_rebuild_paused() &&
-                   mint_rebuild_wait_max_s() > 0) {
-            /* NOT a stall — the deferred Sapling rebuild holds utxo_apply
-             * paused on purpose. Hold the stall counter and nap; the fold
-             * resumes by itself once the rebuild publishes its frontier. */
-            if (boot_mint_anchor_drive_rebuild_wait(&rebuild_wait) ==
-                MINT_REBUILD_WAIT_TIMEOUT) {
-                mint_drive_stop(pdb, mint_sync_off, wal_manual, lookahead);
-                boot_mint_anchor_report_frontier_walled(pdb, now, anchor,
-                                                        stall_kicks);
-                return false;
-            }
-        } else if (++stall_kicks < kStallLimit) {
-            /* No progress and nothing legitimately paused. Nap before the
-             * next round so a slow warm-up does not exhaust the 64-kick
-             * budget. */
-            mint_drive_nap_ms(200);
-        } else {
-            /* Fail CLOSED with a named blocker: register
-             * mint_fold.frontier_walled (all eight stage cursors in the
-             * reason), page EV_OPERATOR_NEEDED, and print a diagnosis that
-             * names the walled stage — "bodies incomplete" only when
-             * body_fetch really is the wall. */
-            mint_drive_stop(pdb, mint_sync_off, wal_manual, lookahead);
-            boot_mint_anchor_report_frontier_walled(pdb, now, anchor,
-                                                    kStallLimit);
-            return false;
+    return lookahead;
+}
+/* Per-round WAL policy: switch to manual checkpointing once the overlay is
+ * active, then TRUNCATE the WAL when a flush advanced the durable height. */
+static void mint_drive_wal_policy(struct mint_drive_state *d)
+{
+    if (!d->wal_manual && coins_ram_active()) {
+        mint_wal_autocheckpoint(d->pdb, 0);
+        d->wal_manual = true;
+        d->last_durable = mint_applied_through(d->pdb);
+        fprintf(stderr,
+                "[mint-anchor] S1.3+: WAL auto-checkpoint disabled; the WAL "
+                "is TRUNCATEd at each overlay flush boundary\n");
+    }
+    /* A flush landed iff the durable applied-through advanced. */
+    if (d->wal_manual) {
+        int32_t durable_now = mint_applied_through(d->pdb);
+        if (durable_now > d->last_durable) {
+            (void)progress_store_checkpoint();
+            d->last_durable = durable_now;
         }
     }
+}
+/* One drive round. Returns false when the fold is walled (state already
+ * stopped and the blocker reported); the caller returns false. */
+static bool mint_drive_round(struct mint_drive_state *d)
+{
+    /* Bounded drain chunk: returns within ZCL_MINT_KICK_BUDGET_MS (or at
+     * the first frontier-stalled round) so THIS loop reliably regains
+     * control to log progress and run the stall detector below. */
+    (void)reducer_kick_unbudgeted(d->ctl);
+    mint_drive_wal_policy(d);
+    int32_t now = mint_frontier_through();
+    /* Throttled on-disk progress (every ~5s) — readable while the fold
+     * runs, regardless of the sparse stderr cadence below. */
+    boot_mint_anchor_progress_log_tick(d->progress_log, now, d->anchor,
+                                       d->drive_start_us, /*force=*/false);
+    if (now > d->last_through) {
+        d->last_through = now;
+        d->stall_kicks = 0;
+        d->rebuild_wait = (struct mint_rebuild_wait_state){0};
+        if (boot_mint_anchor_should_log_progress(now, d->anchor))
+            fprintf(stderr, "[mint-anchor] applied-through=%d / %d\n",
+                    now, d->anchor);
+    } else if (utxo_apply_sapling_rebuild_paused() &&
+               mint_rebuild_wait_max_s() > 0) {
+        /* NOT a stall — the deferred Sapling rebuild holds utxo_apply
+         * paused on purpose. Hold the stall counter and nap; the fold
+         * resumes by itself once the rebuild publishes its frontier. */
+        if (boot_mint_anchor_drive_rebuild_wait(&d->rebuild_wait) ==
+            MINT_REBUILD_WAIT_TIMEOUT) {
+            mint_drive_stop(d->pdb, d->mint_sync_off, d->wal_manual,
+                            d->lookahead);
+            boot_mint_anchor_report_frontier_walled(d->pdb, now, d->anchor,
+                                                    d->stall_kicks);
+            return false;
+        }
+    } else if (++d->stall_kicks < kStallLimit) {
+        /* No progress and nothing legitimately paused. Nap before the
+         * next round so a slow warm-up does not exhaust the 64-kick
+         * budget. */
+        mint_drive_nap_ms(200);
+    } else {
+        /* Fail CLOSED with a named blocker: register
+         * mint_fold.frontier_walled (all eight stage cursors in the
+         * reason), page EV_OPERATOR_NEEDED, and print a diagnosis that
+         * names the walled stage — "bodies incomplete" only when
+         * body_fetch really is the wall. */
+        mint_drive_stop(d->pdb, d->mint_sync_off, d->wal_manual, d->lookahead);
+        boot_mint_anchor_report_frontier_walled(d->pdb, now, d->anchor,
+                                                kStallLimit);
+        return false;
+    }
+    return true;
+}
+/* Drive rounds until the fold frontier reaches the anchor; false = walled. */
+static bool mint_drive_until_anchor(struct mint_drive_state *d)
+{
+    for (;;) {
+        int32_t through = mint_frontier_through();
+        if (through >= d->anchor)
+            break;
+        if (!mint_drive_round(d))
+            return false;
+    }
+    return true;
+}
+static void mint_drive_leave(bool lookahead)
+{
     if (lookahead)
         proof_validate_lookahead_stop();
     coins_ram_mint_drive_exit();
-    int32_t through = mint_frontier_through();
-    int64_t count = coins_kv_count(pdb);
-    boot_mint_anchor_progress_log_tick(progress_log, through, anchor, drive_start_us,
-                           /*force=*/true);
-    /* Restore durability BEFORE any artifact derives from the DB (shared by the
-     * mint ceremony AND the -full-fold early return): NORMAL first (set_sync_mode
-     * does not checkpoint), then wal_checkpoint(TRUNCATE) so every fold write is
-     * durably in the main db. */
-    if (mint_sync_off) {
-        progress_store_set_sync_mode(/*ibd=*/false);
-        if (!progress_store_checkpoint())
-            LOG_WARN("mint_anchor",
-                     "pre-export wal_checkpoint failed; artifact remains "
-                     "SHA3-gated");
-    }
-    /* Restore auto-checkpointing + a final TRUNCATE (independent of the sync-off
-     * restore — wal_manual can be set with ZCL_MINT_PROGRESS_SYNC_OFF=0). */
-    if (wal_manual) {
-        mint_wal_autocheckpoint(pdb, 1000);
-        (void)progress_store_checkpoint();
-    }
-    /* -full-fold: SKIP the cp->height ceremony; verdict + tip bundle export. */
-    if (full_fold)
-        return boot_full_fold_conclude(pdb, datadir, through, count, anchor,
-                                       kStallLimit);
-    fprintf(stderr,
-            "[mint-anchor] fold reached the anchor: applied-through=%d, "
-            "coins_kv count=%lld — writing the snapshot\n",
-            through, (long long)count);
-    /* (2) Write the snapshot artifact. Output path: $ZCL_MINT_ANCHOR_OUT, else
-     * <datadir>/utxo-anchor.snapshot. */
-    char out_path[1100];
+}
+static void mint_anchor_out_path(char *out_path, size_t cap, const char *datadir)
+{
     const char *env_out = getenv("ZCL_MINT_ANCHOR_OUT");
     if (env_out && env_out[0]) {
-        snprintf(out_path, sizeof(out_path), "%s", env_out);
+        snprintf(out_path, cap, "%s", env_out);
     } else {
-        snprintf(out_path, sizeof(out_path), "%s/utxo-anchor.snapshot",
+        snprintf(out_path, cap, "%s/utxo-anchor.snapshot",
                  datadir ? datadir : ".");
     }
-    /* Collect the live SHIELDED frontier at the anchor (Sapling + Sprout
-     * commitment-tree frontiers + the nullifier set) so the legacy artifact is
-     * a locally self-minted current-state candidate, not a coins-only borrow.
-     * It still omits historical anchor rows and therefore is not a complete
-     * sovereign bundle. The transparent set is checked against the compiled
-     * checkpoint; Sprout and nullifier completeness still require the canonical
-     * bundle proof manifest and copy proof. FAIL LOUD if the
-     * frontier is unavailable — never emit a coins-only snapshot mislabeled
-     * shielded (the birth-defect this cure exists to close). */
-    struct snapshot_shielded shielded;
-    if (!snapshot_shielded_collect_from_db(pdb, anchor, &shielded)) {
+}
+static void mint_collect_shielded_or_die(sqlite3 *pdb, int32_t anchor,
+                                         struct snapshot_shielded *shielded)
+{
+    if (!snapshot_shielded_collect_from_db(pdb, anchor, shielded)) {
         fprintf(stderr,
                 "FATAL: -mint-anchor: shielded-frontier collection at h=%d "
                 "failed — refusing to emit a coins-only snapshot mislabeled "
@@ -454,25 +421,32 @@ bool boot_mint_anchor_run(const char *datadir)
                     "mint_anchor shielded_collect_failed h=%d", anchor);
         _exit(EXIT_FAILURE);
     }
-    uint8_t got_sha3[32] = {0};
-    uint64_t got_count = 0;
-    int64_t  got_supply = 0;
+}
+static void mint_snapshot_write_or_die(sqlite3 *pdb, const char *out_path,
+                                       int32_t anchor,
+                                       const struct sha3_utxo_checkpoint *cp,
+                                       struct snapshot_shielded *shielded,
+                                       uint8_t got_sha3[32],
+                                       uint64_t *got_count, int64_t *got_supply)
+{
     if (!coins_kv_snapshot_write(pdb, out_path, anchor, cp->block_hash,
-                                 &shielded, got_sha3, &got_count, &got_supply)) {
-        snapshot_shielded_free_collected(&shielded);
+                                 shielded, got_sha3, got_count, got_supply)) {
+        snapshot_shielded_free_collected(shielded);
         fprintf(stderr, "FATAL: -mint-anchor: snapshot write to %s failed\n",
                 out_path);
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
                     "mint_anchor snapshot_write_failed path=%s", out_path);
         _exit(EXIT_FAILURE);
     }
-    snapshot_shielded_free_collected(&shielded);
+}
+static void mint_coins_commitment_or_die(sqlite3 *pdb, uint8_t coins_sha3[32],
+                                         int32_t anchor, const char *out_path)
+{
     /* Coins-only commitment over the SAME effective set the writer streamed.
      * got_sha3 is the v3 BODY SHA3 (coins + shielded section), so it is NOT the
      * coins commitment the compiled checkpoint pins; compute that separately,
      * mirroring the writer's overlay predicate (coins_ram_active), so the value
      * covers any un-flushed in-RAM fold tail exactly as the writer did. */
-    uint8_t coins_sha3[32] = {0};
     int crc = coins_ram_active() ? coins_ram_commitment(coins_sha3)
                                  : coins_kv_commitment(pdb, coins_sha3);
     if (crc != 0) {
@@ -483,6 +457,12 @@ bool boot_mint_anchor_run(const char *datadir)
         unlink(out_path);
         _exit(EXIT_FAILURE);
     }
+}
+static void mint_assert_checkpoint_match(const struct sha3_utxo_checkpoint *cp,
+                                         const uint8_t coins_sha3[32],
+                                         uint64_t got_count, int32_t anchor,
+                                         const char *out_path)
+{
     /* (3) HARD-ASSERT the written set == the compiled checkpoint. The writer's
      * body SHA3 equals coins_kv_commitment (same record encoder),
      * so a match here proves our independently-folded anchor set reproduces
@@ -515,9 +495,11 @@ bool boot_mint_anchor_run(const char *datadir)
         unlink(out_path);
         _exit(EXIT_FAILURE);
     }
-    /* (3b) HARD-ASSERT the shielded keystone: anchors/nullifiers/frontier
-     * folds == the compiled ROM state checkpoint (boot_mint_anchor_rom_keystone.c). */
-    boot_mint_anchor_rom_keystone_assert(pdb, out_path);
+}
+static void mint_print_success(int32_t anchor, uint64_t got_count,
+                               int64_t got_supply, const uint8_t coins_sha3[32],
+                               const char *out_path)
+{
     char sha3_hex[65];
     for (int i = 0; i < 32; i++)
         snprintf(sha3_hex + 2 * i, 3, "%02x", coins_sha3[i]);
@@ -531,6 +513,172 @@ bool boot_mint_anchor_run(const char *datadir)
             "%s\n",
             anchor, (unsigned long long)got_count, (long long)got_supply,
             sha3_hex, out_path);
+}
+static void mint_receipt_finalized_note(int32_t anchor)
+{
+    fprintf(stderr,
+            "[mint-anchor] durable source receipt finalized at h=%d "
+            "(fold_cursor=%d) — exporter can now admit this producer\n",
+            anchor, anchor + 1);
+}
+/* Page and register the PERMANENT blocker for a failed marker stamp. */
+static void mint_report_marker_stamp_failed(int32_t anchor)
+{
+    event_emitf(EV_OPERATOR_NEEDED, 0,
+                "condition=mint_bundle_export_failed "
+                "reason=marker_stamp anchor=%d", anchor);
+    struct blocker_record frec;
+    if (blocker_init(&frec, "mint_bundle.export_failed",
+                     "mint_anchor", BLOCKER_PERMANENT,
+                     "consensus-state authority markers "
+                     "(migration-complete + self-folded) could not "
+                     "be stamped after a checkpoint-matched mint; "
+                     "export cannot proceed on an unmarked source"))
+        (void)blocker_set(&frec);
+}
+static void mint_bundle_export_skipped_note(void)
+{
+    fprintf(stderr,
+            "[mint-anchor] consensus-state bundle export skipped: "
+            "checkpoint-fold state is non-serving and not canonically "
+            "publishable (verified anchor snapshot produced)\n");
+}
+bool boot_mint_anchor_run(const char *datadir)
+{
+    const struct sha3_utxo_checkpoint *cp = mint_require_checkpoint();
+    /* -full-fold (boot_full_fold.c) overrides the target to the local header TIP
+     * and skips the checkpoint ceremony; disarmed → target == cp->height. */
+    int32_t ff_target = -1;
+    const bool full_fold = boot_full_fold_is_armed(&ff_target);
+    const int32_t anchor = full_fold ? ff_target : cp->height;
+    struct chain_activation_controller *ctl = NULL;
+    sqlite3 *pdb = mint_require_store(&ctl);
+    /* Producer-START ownership of the durable source receipt (see
+     * config/consensus_state_producer_receipt.h): record the running executable
+     * + source-identity claim and publish the source-epoch digest BEFORE the
+     * fold, so every stamped stage row carries it — the binding the contained
+     * full-history exporter's stage-row proof requires. Best-effort: a build
+     * with no exact 64-hex source identity cannot earn a v2 receipt, but the
+     * mint's primary artifact (the verified anchor snapshot) is still
+     * produced. */
+    {
+        uint8_t profile = mint_receipt_profile();
+        char rc_err[256] = {0};
+        if (!consensus_state_producer_receipt_begin(pdb, profile, rc_err,
+                                                    sizeof(rc_err)))
+            LOG_WARN("mint_anchor",
+                     "[mint-anchor] source receipt begin skipped (mint still "
+                     "runs; artifact not exporter-admissible): %s", rc_err);
+        else
+            mint_receipt_opened_note(profile);
+    }
+    /* (1) Drive the fold to the anchor. reducer_kick_unbudgeted drains the same
+     * eight-stage pipeline the supervisor uses, under the activation mutex (no
+     * race with the background ticks) AND with the reducer-drive guard held so
+     * the supervisor yields its 2s stage ticks for the whole drain. Unlike the
+     * budgeted reducer_kick, each call folds back-to-back until convergence.
+     * The header_admit ceiling (boot_mint_anchor_reset) caps the fold AT the anchor,
+     * so the pipeline converges there and the kick returns 0 advances. We loop
+     * until the utxo_apply frontier reaches the anchor; we also break on a
+     * no-progress plateau so a bodies-missing datadir cannot spin forever (the
+     * caller then reports the mint as incomplete, not a false anchor). */
+    /* Progress metric: the IMMEDIATE utxo_apply stage frontier
+     * (mint_frontier_through), NOT the durable coins_applied_height, which under
+     * -fold-inram only moves at coins_ram flush boundaries. On resume the
+     * stage cursor already reflects the durable resume point. */
+    mint_suppress_eventlog();
+    const bool mint_sync_off = mint_progress_sync_off_begin();
+    struct mint_drive_state ds = { .pdb = pdb, .ctl = ctl, .anchor = anchor,
+                                   .last_durable = -1,
+                                   .mint_sync_off = mint_sync_off };
+    ds.last_through = mint_initial_through(pdb);
+    char progress_log[1200];
+    boot_mint_anchor_progress_log_path(datadir, progress_log, sizeof(progress_log));
+    ds.progress_log = progress_log;
+    ds.drive_start_us = GetTimeMicros();
+    fprintf(stderr,
+            "[mint-anchor] driving the genesis..%d fold; "
+            "starting at applied-through=%d; progress log -> %s\n",
+            anchor, ds.last_through, progress_log);
+    boot_mint_anchor_progress_log_tick(progress_log, ds.last_through, anchor,
+                           ds.drive_start_us, /*force=*/true);
+    /* Serial mint pipeline: mark this drive thread so every stage step reads the
+     * un-flushed overlay via coins_kv_overlay_safe() (the writer bracket only
+     * spans utxo_apply). Sound ONLY because the mint fold is single-threaded.
+     * Balanced on every exit path below. */
+    coins_ram_mint_drive_enter();
+    /* Cross-height proof pre-verification (jobs/pv_lookahead.h): workers
+     * verify shielded proofs AHEAD of this drive so the pv stage consumes
+     * cached verdicts instead of paying 13-18ms serial per block. The workers
+     * never touch coins_kv/coins_ram (pure block-body readers), so the
+     * single-threaded-overlay invariant above is untouched. Skip-crypto mints
+     * never verify, so the pool would only waste cores there. A start failure
+     * degrades to the serial fold (verdict-identical either way). */
+    ds.lookahead = mint_lookahead_start();
+    /* WAL policy: once the overlay is the write path, hold auto-checkpoints off
+     * and TRUNCATE the WAL at each overlay flush boundary (where the durable
+     * coins_applied_height advances), bounding WAL growth without an fsync per
+     * commit. SQLite default when the overlay is opted out (ZCL_FOLD_INRAM=0). */
+    if (!mint_drive_until_anchor(&ds))
+        return false;
+    mint_drive_leave(ds.lookahead);
+    int32_t through = mint_frontier_through();
+    int64_t count = coins_kv_count(pdb);
+    boot_mint_anchor_progress_log_tick(progress_log, through, anchor, ds.drive_start_us,
+                           /*force=*/true);
+    /* Restore durability BEFORE any artifact derives from the DB (shared by the
+     * mint ceremony AND the -full-fold early return): NORMAL first (set_sync_mode
+     * does not checkpoint), then wal_checkpoint(TRUNCATE) so every fold write is
+     * durably in the main db. */
+    if (mint_sync_off) {
+        progress_store_set_sync_mode(/*ibd=*/false);
+        if (!progress_store_checkpoint())
+            LOG_WARN("mint_anchor",
+                     "pre-export wal_checkpoint failed; artifact remains "
+                     "SHA3-gated");
+    }
+    /* Restore auto-checkpointing + a final TRUNCATE (independent of the sync-off
+     * restore — wal_manual can be set with ZCL_MINT_PROGRESS_SYNC_OFF=0). */
+    if (ds.wal_manual) {
+        mint_wal_autocheckpoint(pdb, 1000);
+        (void)progress_store_checkpoint();
+    }
+    /* -full-fold: SKIP the cp->height ceremony; verdict + tip bundle export. */
+    if (full_fold)
+        return boot_full_fold_conclude(pdb, datadir, through, count, anchor,
+                                       kStallLimit);
+    fprintf(stderr,
+            "[mint-anchor] fold reached the anchor: applied-through=%d, "
+            "coins_kv count=%lld — writing the snapshot\n",
+            through, (long long)count);
+    /* (2) Write the snapshot artifact. Output path: $ZCL_MINT_ANCHOR_OUT, else
+     * <datadir>/utxo-anchor.snapshot. */
+    char out_path[1100];
+    mint_anchor_out_path(out_path, sizeof(out_path), datadir);
+    /* Collect the live SHIELDED frontier at the anchor (Sapling + Sprout
+     * commitment-tree frontiers + the nullifier set) so the legacy artifact is
+     * a locally self-minted current-state candidate, not a coins-only borrow.
+     * It still omits historical anchor rows and therefore is not a complete
+     * sovereign bundle. The transparent set is checked against the compiled
+     * checkpoint; Sprout and nullifier completeness still require the canonical
+     * bundle proof manifest and copy proof. FAIL LOUD if the
+     * frontier is unavailable — never emit a coins-only snapshot mislabeled
+     * shielded (the birth-defect this cure exists to close). */
+    struct snapshot_shielded shielded;
+    mint_collect_shielded_or_die(pdb, anchor, &shielded);
+    uint8_t got_sha3[32] = {0};
+    uint64_t got_count = 0;
+    int64_t  got_supply = 0;
+    mint_snapshot_write_or_die(pdb, out_path, anchor, cp, &shielded, got_sha3,
+                               &got_count, &got_supply);
+    snapshot_shielded_free_collected(&shielded);
+    uint8_t coins_sha3[32] = {0};
+    mint_coins_commitment_or_die(pdb, coins_sha3, anchor, out_path);
+    mint_assert_checkpoint_match(cp, coins_sha3, got_count, anchor, out_path);
+    /* (3b) HARD-ASSERT the shielded keystone: anchors/nullifiers/frontier
+     * folds == the compiled ROM state checkpoint (boot_mint_anchor_rom_keystone.c). */
+    boot_mint_anchor_rom_keystone_assert(pdb, out_path);
+    mint_print_success(anchor, got_count, got_supply, coins_sha3, out_path);
     if (!mint_anchor_progress_clear(pdb))
         LOG_WARN("mint_anchor",
                  "[mint-anchor] verified snapshot was written, but clearing "
@@ -554,10 +702,7 @@ bool boot_mint_anchor_run(const char *datadir)
                      "verified; not exporter-admissible): %s", rc_err);
         else {
             receipt_finalized = true;
-            fprintf(stderr,
-                    "[mint-anchor] durable source receipt finalized at h=%d "
-                    "(fold_cursor=%d) — exporter can now admit this producer\n",
-                    anchor, anchor + 1);
+            mint_receipt_finalized_note(anchor);
         }
     }
     /* Producer-END part 2: emit the contained full-history
@@ -580,17 +725,7 @@ bool boot_mint_anchor_run(const char *datadir)
              * BOTH markers. Fail CLOSED: page + PERMANENT blocker + exit
              * non-zero, never an unearned marker on a non-agreement path. */
             if (!boot_mint_anchor_stamp_sovereign_markers(pdb)) {
-                event_emitf(EV_OPERATOR_NEEDED, 0,
-                            "condition=mint_bundle_export_failed "
-                            "reason=marker_stamp anchor=%d", anchor);
-                struct blocker_record frec;
-                if (blocker_init(&frec, "mint_bundle.export_failed",
-                                 "mint_anchor", BLOCKER_PERMANENT,
-                                 "consensus-state authority markers "
-                                 "(migration-complete + self-folded) could not "
-                                 "be stamped after a checkpoint-matched mint; "
-                                 "export cannot proceed on an unmarked source"))
-                    (void)blocker_set(&frec);
+                mint_report_marker_stamp_failed(anchor);
                 LOG_FAIL("mint_anchor",
                          "[mint-anchor] failed to stamp the earned "
                          "migration-complete/self-folded markers at h=%d — "
@@ -600,10 +735,7 @@ bool boot_mint_anchor_run(const char *datadir)
             bundle_ok = boot_mint_anchor_export_bundle(pdb, datadir, anchor,
                                                        cp->block_hash);
         } else
-            fprintf(stderr,
-                    "[mint-anchor] consensus-state bundle export skipped: "
-                    "checkpoint-fold state is non-serving and not canonically "
-                    "publishable (verified anchor snapshot produced)\n");
+            mint_bundle_export_skipped_note();
     }
     return bundle_ok;
 }
