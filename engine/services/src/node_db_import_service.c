@@ -163,6 +163,202 @@ static bool import_job_start(struct import_job *job)
     return true;
 }
 
+/* Release the chunk ring and context, then close out the job status. */
+static void import_job_teardown(struct import_context *ctx, int total_rows)
+{
+    import_context_release_chunks(ctx);
+    free(ctx);
+    sync_job_import_finish(total_rows);
+}
+
+/* Leave turbo mode and close the job status for a failure that happens before
+ * the pipeline context exists; `why` names the failing step in the stderr note. */
+static void import_abort_before_pipeline(struct sync_db_turbo_scope *scope,
+                                         const char *why)
+{
+    if (!sync_db_turbo_scope_end(scope))
+        fprintf(stderr, "UTXO import: failed to restore normal mode after %s\n", why);
+    sync_job_import_finish(0);
+}
+
+static double import_elapsed_ms(const struct timespec *from,
+                                const struct timespec *to)
+{
+    return (to->tv_sec - from->tv_sec) * 1000.0 +
+           (to->tv_nsec - from->tv_nsec) / 1e6;
+}
+
+/* Allocate and initialise the pipeline context; NULL when allocation fails. */
+static struct import_context *import_context_create(struct node_db *ndb,
+                                                    struct coins_view_db *cvdb)
+{
+    struct import_context *ctx = zcl_calloc(1, sizeof(struct import_context), "import context");
+    if (!ctx)
+        return NULL;
+    ctx->cvdb = cvdb;
+    ctx->ndb = ndb;
+    atomic_store(&ctx->cancel_requested, false);
+    atomic_store(&ctx->reader_done, false);
+    atomic_store(&ctx->decoders_done, false);
+    for (int i = 0; i < IMPORT_NUM_CHUNKS; i++)
+        atomic_store(&ctx->chunks[i].state, 0);
+    return ctx;
+}
+
+/* Claim a free chunk (state 0 -> -1); NULL when a stop was requested first. */
+static struct import_chunk *import_reader_acquire_chunk(struct import_context *ctx,
+                                                        int *chunk_idx)
+{
+    struct import_chunk *chunk = NULL;
+    while (!chunk) {
+        if (import_ctx_should_stop(ctx))
+            return NULL;
+        for (int i = 0; i < IMPORT_NUM_CHUNKS; i++) {
+            int idx = (*chunk_idx + i) % IMPORT_NUM_CHUNKS;
+            int expected = 0;
+            if (atomic_compare_exchange_strong(&ctx->chunks[idx].state,
+                                              &expected, -1)) {
+                chunk = &ctx->chunks[idx];
+                *chunk_idx = (idx + 1) % IMPORT_NUM_CHUNKS;
+                break;
+            }
+        }
+        if (!chunk) {
+            struct timespec ts = {0, 50000}; /* 50μs */
+            nanosleep(&ts, NULL);
+        }
+    }
+    return chunk;
+}
+
+enum import_entry_rc {
+    IMPORT_ENTRY_ADDED,
+    IMPORT_ENTRY_SKIPPED,
+    IMPORT_ENTRY_END,
+    IMPORT_ENTRY_BAD_LEN,
+    IMPORT_ENTRY_NOMEM
+};
+
+/* Consume one LevelDB entry into `chunk`. The caller logs BAD_LEN / NOMEM from
+ * the returned status; the iterator is advanced for every status except END
+ * and BAD_LEN, exactly as the inline loop did. */
+static enum import_entry_rc import_reader_take_entry(struct db_iterator *it,
+                                                     struct import_chunk *chunk,
+                                                     uint32_t *checked_len,
+                                                     struct zcl_result *len_ok)
+{
+    size_t key_len;
+    const char *key_data = db_iter_key(it, &key_len);
+    if (key_len < 1 || key_data[0] != 'c')
+        return IMPORT_ENTRY_END;
+    if (key_len < 33) { db_iter_next(it); return IMPORT_ENTRY_SKIPPED; }
+
+    struct utxo_import_raw_entry *e =
+        &chunk->entries[chunk->num_entries];
+    memcpy(e->txid, key_data + 1, 32);
+
+    size_t val_len;
+    const char *val_data = db_iter_value(it, &val_len);
+    *checked_len = 0;
+    /* Replay-gated follow-up: older import code truncated CCoins
+     * values through a 65535-byte length path.  This branch already
+     * rejects only above the explicit 4 MiB cap and copies byte-for-
+     * byte into a uint32_t-sized buffer.  Do not reintroduce or tighten
+     * that boundary without full-history replay against real
+     * chainstate. */
+    *len_ok = utxo_import_value_len_checked(val_len, checked_len);
+    if (!len_ok->ok)
+        return IMPORT_ENTRY_BAD_LEN;
+
+    e->value = zcl_malloc(*checked_len, "import entry value");
+    if (!e->value) {
+        db_iter_next(it);
+        return IMPORT_ENTRY_NOMEM;
+    }
+    memcpy(e->value, val_data, *checked_len);
+    /* db_iter_value() already deobfuscates values using the
+     * obfuscation key (dbwrapper.c:370-372). Do NOT XOR
+     * again here — that would undo the deobfuscation. */
+    e->value_len = *checked_len;
+    chunk->num_entries++;
+    db_iter_next(it);
+    return IMPORT_ENTRY_ADDED;
+}
+
+/* Hand a filled chunk to the decoders, or release an empty one. */
+static void import_reader_publish_chunk(struct import_context *ctx,
+                                        struct import_chunk *chunk)
+{
+    if (chunk->num_entries > 0) {
+        atomic_fetch_add(&ctx->chunks_produced, 1);
+        atomic_thread_fence(memory_order_release);
+        atomic_store(&chunk->state, 1); /* filled → decoders */
+    } else {
+        atomic_store(&chunk->state, 0); /* empty, release */
+    }
+}
+
+/* After decoders finish, remaining chunks are in state 2 (decoded).
+ * We MUST wait for the writer to consume them ALL before signaling
+ * decoders_done. Otherwise the writer sees decoders_done=true, does
+ * a quick scan, misses state=2 chunks due to timing, and exits
+ * early — dropping the last ~219 txids / ~520 UTXOs. */
+static void import_wait_chunks_consumed(struct import_context *ctx)
+{
+    for (;;) {
+        if (import_ctx_should_stop(ctx))
+            break;
+        bool any_pending = false;
+        for (int i = 0; i < IMPORT_NUM_CHUNKS; i++) {
+            int s = atomic_load_explicit(&ctx->chunks[i].state,
+                                          memory_order_acquire);
+            if (s == 1 || s == 2) { any_pending = true; break; }
+        }
+        if (!any_pending) break;
+        struct timespec ts = {0, 1000000}; /* 1ms */
+        nanosleep(&ts, NULL);
+    }
+}
+
+enum import_sql_check { IMPORT_SQL_UNCHECKED, IMPORT_SQL_MISMATCH, IMPORT_SQL_OK };
+
+/* Verify all txids made it to SQLite. Returns IMPORT_SQL_MISMATCH on a
+ * row-count mismatch (the caller logs it, with *sql_rows_out), and
+ * IMPORT_SQL_UNCHECKED when the count query itself failed; prints the
+ * pruned-entry note. */
+static enum import_sql_check import_validate_sql_rows(struct node_db *ndb,
+                                                      int total_rows,
+                                                      int total_entries,
+                                                      int64_t *sql_rows_out)
+{
+    int64_t sql_rows = 0;
+    int64_t sql_txids = 0;
+    *sql_rows_out = 0;
+    if (!db_utxo_count_rows_and_distinct_txids(ndb, &sql_rows, &sql_txids))
+        return IMPORT_SQL_UNCHECKED;
+    *sql_rows_out = sql_rows;
+    if (sql_rows != total_rows)
+        return IMPORT_SQL_MISMATCH;
+    if (sql_txids < total_entries) {
+        /* Fewer distinct txids is expected: fully-pruned CCoins
+         * (all outputs spent) produce zero rows per txid.
+         * These exist in LevelDB as tombstones until compaction. */
+        int pruned = total_entries - (int)sql_txids;
+        printf("UTXO import: %d/%d LevelDB entries were "
+               "fully-pruned (all outputs spent)\n",
+               pruned, total_entries);
+    }
+    return IMPORT_SQL_OK;
+}
+
+static enum policy_decision import_wipe_policy_decision(int64_t existing)
+{
+    struct recovery_policy rp;
+    policy_load_from_env(&rp);
+    return policy_check_utxo_wipe(
+        &rp, existing, "sync_controller.import_utxos_reimport");
+}
+
 struct zcl_result node_db_import_service_run(struct node_db *ndb,
                                              struct coins_view_db *cvdb,
                                              int *out_rows)
@@ -212,15 +408,10 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
     if (existing < 0) existing = 0;
 
     if (existing > 0) {
-        struct recovery_policy rp;
-        policy_load_from_env(&rp);
-        enum policy_decision pd = policy_check_utxo_wipe(
-            &rp, existing, "sync_controller.import_utxos_reimport");
+        enum policy_decision pd = import_wipe_policy_decision(existing);
         if (pd != POLICY_ALLOW) {
             LOG_INFO("sync", "UTXO import: recovery_policy refused wipe (code=%s, rows=%lld)", policy_decision_name(pd), (long long)existing);
-            if (!sync_db_turbo_scope_end(&turbo_mode))
-                fprintf(stderr, "UTXO import: failed to restore normal mode after policy refusal\n");
-            sync_job_import_finish(0);
+            import_abort_before_pipeline(&turbo_mode, "policy refusal");
             return ZCL_ERR(-2, "import: recovery_policy refused utxo wipe "
                            "(existing_rows=%lld)", (long long)existing);
         }
@@ -229,45 +420,30 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
             DB_TXN_SCOPE(txn, ndb, "sync_controller.import_utxos_reimport");
             if (!txn) {
                 LOG_WARN("sync", "UTXO import: failed to open db_txn for wipe");
-                if (!sync_db_turbo_scope_end(&turbo_mode))
-                    fprintf(stderr, "UTXO import: failed to restore normal mode after db_txn failure\n");
-                sync_job_import_finish(0);
+                import_abort_before_pipeline(&turbo_mode, "db_txn failure");
                 return ZCL_ERR(-3, "import: failed to open db_txn for "
                                "utxo wipe");
             }
             if (!node_db_wipe_utxos(ndb)) {
                 LOG_WARN("sync", "UTXO import: failed to wipe utxos table");
                 /* leave scope → auto-rollback */
-                if (!sync_db_turbo_scope_end(&turbo_mode))
-                    fprintf(stderr, "UTXO import: failed to restore normal mode after wipe failure\n");
-                sync_job_import_finish(0);
+                import_abort_before_pipeline(&turbo_mode, "wipe failure");
                 return ZCL_ERR(-4, "import: failed to wipe utxos table");
             }
             if (!db_txn_commit(txn)) {
                 LOG_WARN("sync", "UTXO import: commit of wipe failed");
-                if (!sync_db_turbo_scope_end(&turbo_mode))
-                    fprintf(stderr, "UTXO import: failed to restore normal mode after commit failure\n");
-                sync_job_import_finish(0);
+                import_abort_before_pipeline(&turbo_mode, "commit failure");
                 return ZCL_ERR(-5, "import: commit of utxo wipe failed");
             }
         }
     }
 
     /* ── Initialize pipeline context ───────────────────────────────── */
-    struct import_context *ctx = zcl_calloc(1, sizeof(struct import_context), "import context");
+    struct import_context *ctx = import_context_create(ndb, cvdb);
     if (!ctx) {
-        if (!sync_db_turbo_scope_end(&turbo_mode))
-            fprintf(stderr, "UTXO import: failed to restore normal mode after alloc failure\n");
-        sync_job_import_finish(0);
+        import_abort_before_pipeline(&turbo_mode, "alloc failure");
         return ZCL_ERR(-6, "import: failed to allocate import context");
     }
-    ctx->cvdb = cvdb;
-    ctx->ndb = ndb;
-    atomic_store(&ctx->cancel_requested, false);
-    atomic_store(&ctx->reader_done, false);
-    atomic_store(&ctx->decoders_done, false);
-    for (int i = 0; i < IMPORT_NUM_CHUNKS; i++)
-        atomic_store(&ctx->chunks[i].state, 0);
     import_job_init(&job, ctx, num_decoders);
 
     /* ── Start decoder + writer threads ────────────────────────────── */
@@ -302,25 +478,9 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
         if (import_ctx_should_stop(ctx))
             break;
         /* Find a free chunk */
-        struct import_chunk *chunk = NULL;
-        while (!chunk) {
-            if (import_ctx_should_stop(ctx))
-                goto reader_done;
-            for (int i = 0; i < IMPORT_NUM_CHUNKS; i++) {
-                int idx = (chunk_idx + i) % IMPORT_NUM_CHUNKS;
-                int expected = 0;
-                if (atomic_compare_exchange_strong(&ctx->chunks[idx].state,
-                                                  &expected, -1)) {
-                    chunk = &ctx->chunks[idx];
-                    chunk_idx = (idx + 1) % IMPORT_NUM_CHUNKS;
-                    break;
-                }
-            }
-            if (!chunk) {
-                struct timespec ts = {0, 50000}; /* 50μs */
-                nanosleep(&ts, NULL);
-            }
-        }
+        struct import_chunk *chunk = import_reader_acquire_chunk(ctx, &chunk_idx);
+        if (!chunk)
+            goto reader_done;
 
         /* Fill chunk with raw entries from LevelDB */
         chunk->num_entries = 0;
@@ -331,32 +491,17 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
                db_iter_valid(&it)) {
             if (import_ctx_should_stop(ctx))
                 goto reader_done;
-            size_t key_len;
-            const char *key_data = db_iter_key(&it, &key_len);
-            if (key_len < 1 || key_data[0] != 'c') {
+            uint32_t checked_len = 0;
+            struct zcl_result len_ok;
+            enum import_entry_rc erc =
+                import_reader_take_entry(&it, chunk, &checked_len, &len_ok);
+            if (erc == IMPORT_ENTRY_END) {
                 /* Coins range ended: publish the in-fill chunk first —
                  * a goto here dropped the last ~1500 records (tail). */
                 end_of_range = true;
                 break;
             }
-            if (key_len < 33) { db_iter_next(&it); continue; }
-
-            struct utxo_import_raw_entry *e =
-                &chunk->entries[chunk->num_entries];
-            memcpy(e->txid, key_data + 1, 32);
-
-            size_t val_len;
-            const char *val_data = db_iter_value(&it, &val_len);
-            uint32_t checked_len = 0;
-            /* Replay-gated follow-up: older import code truncated CCoins
-             * values through a 65535-byte length path.  This branch already
-             * rejects only above the explicit 4 MiB cap and copies byte-for-
-             * byte into a uint32_t-sized buffer.  Do not reintroduce or tighten
-             * that boundary without full-history replay against real
-             * chainstate. */
-            struct zcl_result len_ok =
-                utxo_import_value_len_checked(val_len, &checked_len);
-            if (!len_ok.ok) {
+            if (erc == IMPORT_ENTRY_BAD_LEN) {
                 LOG_WARN("sync",
                          "UTXO import: rejecting LevelDB CCoins value after "
                          "%d txids: %s", total_entries, len_ok.message);
@@ -364,32 +509,17 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
                 import_ctx_request_stop(ctx);
                 goto reader_done;
             }
-
-            e->value = zcl_malloc(checked_len, "import entry value");
-            if (e->value) {
-                memcpy(e->value, val_data, checked_len);
-                /* db_iter_value() already deobfuscates values using the
-                 * obfuscation key (dbwrapper.c:370-372). Do NOT XOR
-                 * again here — that would undo the deobfuscation. */
-                e->value_len = checked_len;
-                chunk->num_entries++;
-                total_entries++;
-            } else {
+            if (erc == IMPORT_ENTRY_NOMEM) {
                 LOG_WARN("sync",
                          "malloc failed for chunk entry value (%u bytes), "
                          "skipping entry", checked_len);
                 skipped_entries++;
+            } else if (erc == IMPORT_ENTRY_ADDED) {
+                total_entries++;
             }
-            db_iter_next(&it);
         }
 
-        if (chunk->num_entries > 0) {
-            atomic_fetch_add(&ctx->chunks_produced, 1);
-            atomic_thread_fence(memory_order_release);
-            atomic_store(&chunk->state, 1); /* filled → decoders */
-        } else {
-            atomic_store(&chunk->state, 0); /* empty, release */
-        }
+        import_reader_publish_chunk(ctx, chunk);
         if (end_of_range)
             break;
     }
@@ -419,24 +549,7 @@ reader_done:
     import_job_join_decoders(&job);
 
     /* ── Wait for ALL chunks to be consumed by writer ──────────── */
-    /* After decoders finish, remaining chunks are in state 2 (decoded).
-     * We MUST wait for the writer to consume them ALL before signaling
-     * decoders_done. Otherwise the writer sees decoders_done=true, does
-     * a quick scan, misses state=2 chunks due to timing, and exits
-     * early — dropping the last ~219 txids / ~520 UTXOs. */
-    for (;;) {
-        if (import_ctx_should_stop(ctx))
-            break;
-        bool any_pending = false;
-        for (int i = 0; i < IMPORT_NUM_CHUNKS; i++) {
-            int s = atomic_load_explicit(&ctx->chunks[i].state,
-                                          memory_order_acquire);
-            if (s == 1 || s == 2) { any_pending = true; break; }
-        }
-        if (!any_pending) break;
-        struct timespec ts = {0, 1000000}; /* 1ms */
-        nanosleep(&ts, NULL);
-    }
+    import_wait_chunks_consumed(ctx);
     atomic_store(&ctx->decoders_done, true);
 
     /* ── Wait for writer ───────────────────────────────────────────── */
@@ -450,31 +563,17 @@ reader_done:
                decode_fail, skip_out);
 
     /* Validation: verify all txids made it to SQLite */
-    {
-        int64_t sql_rows = 0;
-        int64_t sql_txids = 0;
-        if (db_utxo_count_rows_and_distinct_txids(ndb, &sql_rows,
-                                                  &sql_txids)) {
-            if (sql_rows != total_rows) {
-                /* Row count mismatch = real data loss — pipeline bug */
-                LOG_WARN("sync", "UTXO IMPORT ERROR: wrote %d rows but " "SQLite has %lld rows — data loss!", total_rows, (long long)sql_rows);
-            } else if (sql_txids < total_entries) {
-                /* Fewer distinct txids is expected: fully-pruned CCoins
-                 * (all outputs spent) produce zero rows per txid.
-                 * These exist in LevelDB as tombstones until compaction. */
-                int pruned = total_entries - (int)sql_txids;
-                printf("UTXO import: %d/%d LevelDB entries were "
-                       "fully-pruned (all outputs spent)\n",
-                       pruned, total_entries);
-            }
-        }
+    int64_t sql_rows = 0;
+    if (import_validate_sql_rows(ndb, total_rows, total_entries, &sql_rows) ==
+        IMPORT_SQL_MISMATCH) {
+        /* Row count mismatch = real data loss — pipeline bug */
+        LOG_WARN("sync", "UTXO IMPORT ERROR: wrote %d rows but " "SQLite has %lld rows — data loss!", total_rows, (long long)sql_rows);
     }
     fflush(stdout);
 
     struct timespec ts_write;
     platform_time_monotonic_timespec(&ts_write);
-    double pipe_ms = (ts_write.tv_sec - ts_start.tv_sec) * 1000.0 +
-                     (ts_write.tv_nsec - ts_start.tv_nsec) / 1e6;
+    double pipe_ms = import_elapsed_ms(&ts_start, &ts_write);
     printf("UTXO import: %d rows written in %.0fms\n", total_rows, pipe_ms);
     fflush(stdout);
 
@@ -496,9 +595,7 @@ reader_done:
         if (!sync_db_turbo_scope_end(&turbo_mode))
             LOG_WARN("sync", "UTXO import: failed to restore normal mode after iterator-error reject");
         restore_ok = false;
-        import_context_release_chunks(ctx);
-        free(ctx);
-        sync_job_import_finish(total_rows);
+        import_job_teardown(ctx, total_rows);
         return ZCL_ERR(-10, "import: REJECTED — LevelDB iterator error left a "
                        "truncated UTXO set (%d txids read before error)",
                        total_entries);
@@ -509,9 +606,7 @@ reader_done:
         if (!sync_db_turbo_scope_end(&turbo_mode))
             LOG_WARN("sync", "UTXO import: failed to restore normal mode after abort");
         restore_ok = false;
-        import_context_release_chunks(ctx);
-        free(ctx);
-        sync_job_import_finish(total_rows);
+        import_job_teardown(ctx, total_rows);
         return ZCL_ERR(-8, "import: aborted%s",
                        g_shutdown_requested ? " on shutdown" : "");
     }
@@ -529,30 +624,24 @@ reader_done:
         LOG_WARN("sync", "UTXO import: failed to restore normal mode");
     }
     if (!restore_ok) {
-        import_context_release_chunks(ctx);
-        free(ctx);
-        sync_job_import_finish(total_rows);
+        import_job_teardown(ctx, total_rows);
         return ZCL_ERR(-9, "import: failed to restore normal db mode "
                        "after index build");
     }
 
     struct timespec ts_idx_done;
     platform_time_monotonic_timespec(&ts_idx_done);
-    double idx_ms = (ts_idx_done.tv_sec - ts_idx.tv_sec) * 1000.0 +
-                    (ts_idx_done.tv_nsec - ts_idx.tv_nsec) / 1e6;
+    double idx_ms = import_elapsed_ms(&ts_idx, &ts_idx_done);
     printf("UTXO import: indexes built in %.0fms\n", idx_ms);
 
-    double total_ms = (ts_idx_done.tv_sec - ts_start.tv_sec) * 1000.0 +
-                      (ts_idx_done.tv_nsec - ts_start.tv_nsec) / 1e6;
+    double total_ms = import_elapsed_ms(&ts_start, &ts_idx_done);
     printf("UTXO import complete: %d outputs from %d txids in %.1fs "
            "(pipeline %.0fms + index %.0fms)\n",
            total_rows, total_entries, total_ms / 1000.0,
            pipe_ms, idx_ms);
     fflush(stdout);
 
-    import_context_release_chunks(ctx);
-    free(ctx);
-    sync_job_import_finish(total_rows);
+    import_job_teardown(ctx, total_rows);
     if (out_rows)
         *out_rows = total_rows;
     return ZCL_OK;
