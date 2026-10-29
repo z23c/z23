@@ -119,16 +119,17 @@ static bool score_body_write_roots(
     struct zcl_codec_writer *writer,
     const struct vcs_zcode_score_receipt_v1 *receipt)
 {
-    return zcl_codec_write_bytes(writer, receipt->task_root, 32) &&
-        zcl_codec_write_bytes(writer, receipt->candidate_root, 32) &&
-        zcl_codec_write_bytes(writer, receipt->proof_policy_root, 32) &&
-        zcl_codec_write_bytes(writer, receipt->proof_set_root, 32) &&
-        zcl_codec_write_bytes(writer, receipt->proven_lane_root, 32) &&
-        zcl_codec_write_bytes(writer, receipt->package_root, 32) &&
-        zcl_codec_write_bytes(writer, receipt->release_root, 32) &&
-        zcl_codec_write_bytes(writer, receipt->recipe_root, 32) &&
-        zcl_codec_write_bytes(writer, receipt->dependency_lock_root, 32) &&
-        zcl_codec_write_bytes(writer, receipt->api_capsule_root, 32);
+    const uint8_t *const roots[] = {
+        receipt->task_root, receipt->candidate_root,
+        receipt->proof_policy_root, receipt->proof_set_root,
+        receipt->proven_lane_root, receipt->package_root,
+        receipt->release_root, receipt->recipe_root,
+        receipt->dependency_lock_root, receipt->api_capsule_root,
+    };
+    for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+        if (!zcl_codec_write_bytes(writer, roots[i], 32)) return false;
+    }
+    return true;
 }
 
 static enum vcs_zcode_score_error score_body(
@@ -278,66 +279,41 @@ static bool score_cas_load(const char *workspace, const uint8_t root[32],
         workspace, root, maximum, wire, wire_len) == 0;
 }
 
-static enum vcs_zcode_score_error score_cas_check_task(
-    const char *workspace, const struct vcs_zcode_score_receipt_v1 *receipt,
-    struct vcs_zcode_task_v1 *task)
-{
-    uint8_t *wire = NULL, observed_root[32];
-    size_t wire_len = 0;
+enum score_cas_kind { SCORE_CAS_TASK, SCORE_CAS_CANDIDATE, SCORE_CAS_POLICY };
 
-    if (!score_cas_load(workspace, receipt->task_root,
-                        VCS_ZCODE_TASK_WIRE_BYTES, &wire, &wire_len) ||
-        vcs_zcode_task_parse(wire, wire_len, task) != VCS_ZCODE_DEV_OK ||
-        vcs_zcode_task_root(task, observed_root) != VCS_ZCODE_DEV_OK ||
-        memcmp(observed_root, receipt->task_root, 32) != 0) {
-        free(wire);
-        return VCS_ZCODE_SCORE_CAS;
+static bool score_cas_parse_root(enum score_cas_kind kind, const uint8_t *wire,
+                                 size_t wire_len, void *object,
+                                 uint8_t root[32])
+{
+    switch (kind) {
+    case SCORE_CAS_TASK:
+        return vcs_zcode_task_parse(wire, wire_len, object) ==
+                   VCS_ZCODE_DEV_OK &&
+               vcs_zcode_task_root(object, root) == VCS_ZCODE_DEV_OK;
+    case SCORE_CAS_CANDIDATE:
+        return vcs_zcode_candidate_parse(wire, wire_len, object) ==
+                   VCS_ZCODE_DEV_OK &&
+               vcs_zcode_candidate_root(object, root) == VCS_ZCODE_DEV_OK;
+    case SCORE_CAS_POLICY:
+        return vcs_zcode_proof_policy_parse(wire, wire_len, object) ==
+                   VCS_ZCODE_DEV_OK &&
+               vcs_zcode_proof_policy_root(object, root) == VCS_ZCODE_DEV_OK;
     }
-    free(wire); wire = NULL;
-    return VCS_ZCODE_SCORE_OK;
+    return false;
 }
 
-static enum vcs_zcode_score_error score_cas_check_candidate(
-    const char *workspace, const struct vcs_zcode_score_receipt_v1 *receipt,
-    struct vcs_zcode_candidate_v1 *candidate)
+static enum vcs_zcode_score_error score_cas_check_object(
+    const char *workspace, enum score_cas_kind kind,
+    const uint8_t expected_root[32], size_t maximum, void *object)
 {
     uint8_t *wire = NULL, observed_root[32];
     size_t wire_len = 0;
-
-    if (!score_cas_load(workspace, receipt->candidate_root,
-                        VCS_ZCODE_CANDIDATE_WIRE_BYTES, &wire, &wire_len) ||
-        vcs_zcode_candidate_parse(wire, wire_len, candidate) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_candidate_root(candidate, observed_root) !=
-            VCS_ZCODE_DEV_OK ||
-        memcmp(observed_root, receipt->candidate_root, 32) != 0) {
-        free(wire);
-        return VCS_ZCODE_SCORE_CAS;
-    }
-    free(wire); wire = NULL;
-    return VCS_ZCODE_SCORE_OK;
-}
-
-static enum vcs_zcode_score_error score_cas_check_policy(
-    const char *workspace, const struct vcs_zcode_score_receipt_v1 *receipt,
-    struct vcs_zcode_proof_policy_v1 *policy)
-{
-    uint8_t *wire = NULL, observed_root[32];
-    size_t wire_len = 0;
-
-    if (!score_cas_load(workspace, receipt->proof_policy_root,
-                        VCS_ZCODE_PROOF_POLICY_WIRE_BYTES,
-                        &wire, &wire_len) ||
-        vcs_zcode_proof_policy_parse(wire, wire_len, policy) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_proof_policy_root(policy, observed_root) !=
-            VCS_ZCODE_DEV_OK ||
-        memcmp(observed_root, receipt->proof_policy_root, 32) != 0) {
-        free(wire);
-        return VCS_ZCODE_SCORE_CAS;
-    }
-    free(wire); wire = NULL;
-    return VCS_ZCODE_SCORE_OK;
+    bool ok = score_cas_load(workspace, expected_root, maximum,
+                             &wire, &wire_len) &&
+        score_cas_parse_root(kind, wire, wire_len, object, observed_root) &&
+        memcmp(observed_root, expected_root, 32) == 0;
+    free(wire);
+    return ok ? VCS_ZCODE_SCORE_OK : VCS_ZCODE_SCORE_CAS;
 }
 
 static enum vcs_zcode_score_error score_cas_check_proof_set(
@@ -437,12 +413,17 @@ enum vcs_zcode_score_error vcs_zcode_score_receipt_verify_cas(
         works[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS];
     size_t proof_count = 0;
 
-    enum vcs_zcode_score_error err =
-        score_cas_check_task(workspace, receipt, &task);
+    enum vcs_zcode_score_error err = score_cas_check_object(
+        workspace, SCORE_CAS_TASK, receipt->task_root,
+        VCS_ZCODE_TASK_WIRE_BYTES, &task);
     if (err != VCS_ZCODE_SCORE_OK) return err;
-    err = score_cas_check_candidate(workspace, receipt, &candidate);
+    err = score_cas_check_object(workspace, SCORE_CAS_CANDIDATE,
+                                 receipt->candidate_root,
+                                 VCS_ZCODE_CANDIDATE_WIRE_BYTES, &candidate);
     if (err != VCS_ZCODE_SCORE_OK) return err;
-    err = score_cas_check_policy(workspace, receipt, &policy);
+    err = score_cas_check_object(workspace, SCORE_CAS_POLICY,
+                                 receipt->proof_policy_root,
+                                 VCS_ZCODE_PROOF_POLICY_WIRE_BYTES, &policy);
     if (err != VCS_ZCODE_SCORE_OK) return err;
     err = score_cas_check_proof_set(workspace, receipt, proof_roots,
                                     &proof_count);
