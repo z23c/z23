@@ -685,4 +685,3 @@ tools/lint/lintc/gate_git_scan_a.c:edr_line:25
 tools/lint/lintc/gate_git_scan_a.c:ffs_scan_room:22
 tools/lint/lintc/gate_git_scan_a.c:nak_scan_file:17
 tools/mind/mind_resident.c:mind_serve_posix:21
-tools/zcode_package_registry_check.c:main:40

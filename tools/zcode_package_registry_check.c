@@ -137,6 +137,118 @@ static int derive_directory(const char *dir)
     return ok ? 0 : 1;
 }
 
+static bool row_publisher_key(const struct registry_row *row, bool derive,
+                              uint8_t pubkey[33])
+{
+    return derive ? derive_fixture_public(pubkey) :
+                    zcl_hex_decode_lower(row->publisher, pubkey, 33);
+}
+
+static bool row_roots_match(struct vcs_package_prepared *prepared,
+                            const struct registry_row *row)
+{
+    return strcmp(prepared->release.name, row->name) == 0 &&
+           root_equal(prepared->package_root, row->content) &&
+           root_equal(prepared->signing_digest, row->release) &&
+           root_equal(prepared->recipe_root, row->recipe) &&
+           root_equal(prepared->lock_root, row->lock) &&
+           root_equal(prepared->capsule_root, row->capsule) &&
+           zcl_hex_decode_lower(row->signature, prepared->release.signature,
+                                sizeof(prepared->release.signature)) &&
+           vcs_package_release_verify(&prepared->release) ==
+               VCS_PACKAGE_RELEASE_OK;
+}
+
+static bool lock_dag_matches(const struct vcs_package_prepared *prepared,
+                             size_t row_index)
+{
+    bool ok = prepared->lock.count >= 1 &&
+        prepared->lock.nodes[prepared->lock.count - 1u].depth == 0 &&
+        prepared->lock.nodes[prepared->lock.count - 1u].direct_deps ==
+            prepared->lock.count - 1u;
+    for (size_t d = 0; ok && d + 1u < prepared->lock.count; d++) {
+        bool found = false;
+        for (size_t p = 0; p < row_index; p++)
+            found = found || root_equal(
+                prepared->lock.nodes[d].root, rows[p].content);
+        ok = found && prepared->lock.nodes[d].depth >= 1 &&
+             prepared->lock.nodes[d].depth <=
+                 VCS_PACKAGE_LOCK_MAX_DEPTH;
+    }
+    return ok;
+}
+
+static void report_registry_mismatch(const struct registry_row *row,
+                                     struct vcs_package_prepared *prepared,
+                                     enum vcs_package_prepare_error err,
+                                     const char *detail)
+{
+    fprintf(stderr, "zcode registry mismatch: %s (%s: %s)\n",
+            row->name, vcs_package_prepare_error_string(err), detail);
+    if (err == VCS_PACKAGE_PREPARE_OK)
+        print_derived_roots(prepared);
+    if (err == VCS_PACKAGE_PREPARE_OK && prepared->lock.count > 0) {
+        const size_t root = prepared->lock.count - 1u;
+        fprintf(stderr,
+                "  release_verify=%d lock_count=%zu root_depth=%u "
+                "root_direct_deps=%u\n",
+                (int)vcs_package_release_verify(&prepared->release),
+                prepared->lock.count,
+                (unsigned)prepared->lock.nodes[root].depth,
+                (unsigned)prepared->lock.nodes[root].direct_deps);
+    }
+    /* Naming the values is not enough to act on: this row's new
+     * content root is ALSO pinned in dependencies[].root of every
+     * dependent's zcode-package.json, and rewriting those moves
+     * their own roots in turn. Fixing one row by hand therefore
+     * never terminates -- point at the tool that iterates the
+     * cascade to a fixpoint. */
+    fprintf(stderr,
+            "  fix: tools/scripts/zcode_registry_rederive.sh\n"
+            "  (re-derives this row AND every dependent's pinned\n"
+            "   copy of it, iterating to a fixpoint)\n");
+}
+
+static int check_registry_row(size_t i, bool derive, bool *derived)
+{
+    uint8_t pubkey[33];
+    if (!row_publisher_key(&rows[i], derive, pubkey))
+        return 1;
+    struct vcs_package_prepare_options options = {
+        .dir = rows[i].dir, .publisher_sequence = rows[i].sequence,
+        .reward_address = "", .chain_id = "zclassic-main",
+    };
+    memcpy(options.publisher_pubkey, pubkey, sizeof(pubkey));
+    struct vcs_package_prepared prepared; char detail[256] = {0};
+    enum vcs_package_prepare_error err = vcs_package_prepare(
+        &options, &prepared, detail, sizeof(detail));
+    bool ok = err == VCS_PACKAGE_PREPARE_OK &&
+        row_roots_match(&prepared, &rows[i]);
+    if (ok)
+        ok = lock_dag_matches(&prepared, i);
+    if (derive && err == VCS_PACKAGE_PREPARE_OK) {
+        *derived = print_derived_row(rows[i].name, &prepared);
+    }
+    if (!ok && !derive) {
+        report_registry_mismatch(&rows[i], &prepared, err, detail);
+        vcs_package_prepared_free(&prepared);
+        return 1;
+    }
+    vcs_package_prepared_free(&prepared);
+    return 0;
+}
+
+static int check_all_rows(bool derive, const char *derive_name, bool *derived)
+{
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        if (derive && strcmp(rows[i].name, derive_name) != 0)
+            continue;
+        if (check_registry_row(i, derive, derived) != 0)
+            return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     bool derive = argc == 3 && strcmp(argv[1], "--derive") == 0;
@@ -153,83 +265,8 @@ int main(int argc, char **argv)
     if (sizeof(rows) / sizeof(rows[0]) < 8)
         return 1;
     bool derived = false;
-    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
-        if (derive && strcmp(rows[i].name, derive_name) != 0)
-            continue;
-        uint8_t pubkey[33];
-        if (derive ? !derive_fixture_public(pubkey) :
-                     !zcl_hex_decode_lower(rows[i].publisher, pubkey,
-                                           sizeof(pubkey)))
-            return 1;
-        struct vcs_package_prepare_options options = {
-            .dir = rows[i].dir, .publisher_sequence = rows[i].sequence,
-            .reward_address = "", .chain_id = "zclassic-main",
-        };
-        memcpy(options.publisher_pubkey, pubkey, sizeof(pubkey));
-        struct vcs_package_prepared prepared; char detail[256] = {0};
-        enum vcs_package_prepare_error err = vcs_package_prepare(
-            &options, &prepared, detail, sizeof(detail));
-        bool ok = err == VCS_PACKAGE_PREPARE_OK &&
-            strcmp(prepared.release.name, rows[i].name) == 0 &&
-            root_equal(prepared.package_root, rows[i].content) &&
-            root_equal(prepared.signing_digest, rows[i].release) &&
-            root_equal(prepared.recipe_root, rows[i].recipe) &&
-            root_equal(prepared.lock_root, rows[i].lock) &&
-            root_equal(prepared.capsule_root, rows[i].capsule) &&
-            zcl_hex_decode_lower(rows[i].signature,
-                prepared.release.signature,
-                sizeof(prepared.release.signature)) &&
-            vcs_package_release_verify(&prepared.release) ==
-                VCS_PACKAGE_RELEASE_OK;
-        if (ok) {
-            ok = prepared.lock.count >= 1 &&
-                 prepared.lock.nodes[prepared.lock.count - 1u].depth == 0 &&
-                 prepared.lock.nodes[prepared.lock.count - 1u].direct_deps ==
-                     prepared.lock.count - 1u;
-            for (size_t d = 0; ok && d + 1u < prepared.lock.count; d++) {
-                bool found = false;
-                for (size_t p = 0; p < i; p++)
-                    found = found || root_equal(
-                        prepared.lock.nodes[d].root, rows[p].content);
-                ok = found && prepared.lock.nodes[d].depth >= 1 &&
-                     prepared.lock.nodes[d].depth <=
-                         VCS_PACKAGE_LOCK_MAX_DEPTH;
-            }
-        }
-        if (derive && err == VCS_PACKAGE_PREPARE_OK) {
-            derived = print_derived_row(rows[i].name, &prepared);
-        }
-        if (!ok && !derive) {
-            fprintf(stderr, "zcode registry mismatch: %s (%s: %s)\n",
-                    rows[i].name, vcs_package_prepare_error_string(err),
-                    detail);
-            if (err == VCS_PACKAGE_PREPARE_OK)
-                print_derived_roots(&prepared);
-            if (err == VCS_PACKAGE_PREPARE_OK && prepared.lock.count > 0) {
-                const size_t root = prepared.lock.count - 1u;
-                fprintf(stderr,
-                        "  release_verify=%d lock_count=%zu root_depth=%u "
-                        "root_direct_deps=%u\n",
-                        (int)vcs_package_release_verify(&prepared.release),
-                        prepared.lock.count,
-                        (unsigned)prepared.lock.nodes[root].depth,
-                        (unsigned)prepared.lock.nodes[root].direct_deps);
-            }
-            /* Naming the values is not enough to act on: this row's new
-             * content root is ALSO pinned in dependencies[].root of every
-             * dependent's zcode-package.json, and rewriting those moves
-             * their own roots in turn. Fixing one row by hand therefore
-             * never terminates -- point at the tool that iterates the
-             * cascade to a fixpoint. */
-            fprintf(stderr,
-                    "  fix: tools/scripts/zcode_registry_rederive.sh\n"
-                    "  (re-derives this row AND every dependent's pinned\n"
-                    "   copy of it, iterating to a fixpoint)\n");
-            vcs_package_prepared_free(&prepared);
-            return 1;
-        }
-        vcs_package_prepared_free(&prepared);
-    }
+    if (check_all_rows(derive, derive_name, &derived) != 0)
+        return 1;
     if (derive)
         return derived ? 0 : 1;
     printf("zcode package registry: %zu roots and exact dependency DAG rederived\n",
