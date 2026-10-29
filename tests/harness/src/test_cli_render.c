@@ -494,6 +494,64 @@ static int test_error_ansi_and_unknown_schema_fallback(void)
     return failures;
 }
 
+static int test_result_dispatch_precedence(void)
+{
+    int failures = 0;
+    TEST("result dispatch preserves error, guide and wiki precedence") {
+        const char *wiki =
+            "{\"schema\":\"zcl.result.v1\",\"ok\":true,"
+            "\"data_schema\":\"zcl.wiki_node.v1\",\"data\":{"
+            "\"path\":\"\",\"title\":\"Unique wiki title\","
+            "\"children_total\":0,\"children\":[]}}";
+        const char *error =
+            "{\"schema\":\"zcl.result.v1\",\"ok\":false,"
+            "\"data_schema\":\"zcl.wiki_node.v1\",\"data\":{"
+            "\"title\":\"Unique wiki title\"},\"error\":{"
+            "\"code\":\"DISPATCH_TEST\",\"message\":\"refused\","
+            "\"phase\":\"resolve\"},\"next\":[]}";
+        const char *nonbool =
+            "{\"schema\":\"zcl.result.v1\",\"ok\":\"false\","
+            "\"data_schema\":\"zcl.wiki_node.v1\",\"data\":{"
+            "\"path\":\"\",\"title\":\"Unique wiki title\","
+            "\"children_total\":0,\"children\":[]}}";
+        struct zcl_cli_render_env e = cr_env(80, false);
+        char plain[4096], selected[4096];
+        size_t n = zcl_cli_render_doc(wiki, strlen(wiki), NULL, &e, plain, sizeof(plain));
+        ASSERT(n > 0 && strstr(plain, "Unique wiki title") != NULL);
+        ASSERT(zcl_cli_render_doc(wiki, strlen(wiki), "lab.run", &e, selected, sizeof(selected)) == n);
+        ASSERT(strcmp(plain, selected) == 0);
+        ASSERT(zcl_cli_render_doc(nonbool, strlen(nonbool), NULL, &e, selected, sizeof(selected)) == n);
+        ASSERT(strcmp(plain, selected) == 0);
+        ASSERT(zcl_cli_render_doc(wiki, strlen(wiki), "code.guide", &e, selected, sizeof(selected)) > 0);
+        ASSERT(strstr(selected, "code.guide") != NULL && strstr(selected, "Unique wiki title") == NULL);
+        ASSERT(zcl_cli_render_doc(error, strlen(error), "code.guide", &e, selected, sizeof(selected)) > 0);
+        ASSERT(strstr(selected, "DISPATCH_TEST") != NULL && strstr(selected, "Unique wiki title") == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_dispatch_fallback_boundaries(void)
+{
+    int failures = 0;
+    TEST("dispatch refuses malformed schemas and preserves output fallback") {
+        const char *bad = "{\"schema\":42,\"ok\":true,\"data\":{}}";
+        const char *wiki = "{\"schema\":\"zcl.result.v1\",\"ok\":true,"
+            "\"data_schema\":\"zcl.wiki_node.v1\",\"data\":{\"path\":\"\","
+            "\"title\":\"Wiki title\",\"children_total\":0,\"children\":[]}}";
+        struct zcl_cli_render_env e = cr_env(80, false);
+        char out[4096];
+        ASSERT(zcl_cli_render_doc(bad, strlen(bad), "lab.run", &e, out, sizeof(out)) == 0);
+        ASSERT(zcl_cli_render_doc(wiki, strlen(wiki), NULL, &e, out, 1) == 0);
+        e.human = false;
+        out[0] = 'x';
+        ASSERT(zcl_cli_render_doc(wiki, strlen(wiki), NULL, &e, out, sizeof(out)) == 0);
+        ASSERT(out[0] == 'x');
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── unit: ops.state data tree ─────────────────────────────────────── */
 
 static int test_data_tree_render(void)
@@ -1385,6 +1443,8 @@ int test_cli_render(void)
         "\"path\":\"code.owner\"},\"reason\":\"inspect the contract\"}]");
     failures += test_error_unknown_command_uses_envelope_query();
     failures += test_error_ansi_and_unknown_schema_fallback();
+    failures += test_result_dispatch_precedence();
+    failures += test_dispatch_fallback_boundaries();
     failures += test_data_tree_render();
     failures += test_guide_tree_render();
     failures += test_brief_render();

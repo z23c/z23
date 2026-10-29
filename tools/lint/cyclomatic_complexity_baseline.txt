@@ -408,7 +408,6 @@ tools/command/cli_render.c:render_spec:50
 tools/command/cli_render.c:render_statecatalog:18
 tools/command/cli_render.c:render_yardsale_guide:17
 tools/command/cli_render.c:zcl_cli_render_brief:22
-tools/command/cli_render.c:zcl_cli_render_doc:39
 tools/command/cli_render.c:zcl_cli_render_resolve:20
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_build:29
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_check:19

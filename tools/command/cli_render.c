@@ -1755,6 +1755,47 @@ static bool render_guide_or_wiki(struct buf *b,
     return b->len > 0;
 }
 
+static bool render_result(struct buf *b, const struct zcl_cli_render_env *env,
+                          const struct json_value *root, const char *command_path)
+{
+    const struct json_value *okv = json_get(root, "ok");
+    if (okv && okv->type == JSON_BOOL && !json_get_bool(okv)) {
+        render_error(b, env, root);
+        return true;
+    }
+    if (render_guide_or_wiki(b, env, root, command_path)) return true;
+    recipe_fn recipe = recipe_for(command_path);
+    if (recipe) {
+        recipe(b, env, root);
+        return true;
+    }
+    if (!tree_render_leaf(command_path)) return false;
+    render_data_tree(b, env, root, command_path);
+    return true;
+}
+
+static bool render_document(struct buf *b, const struct zcl_cli_render_env *env,
+                            const struct json_value *root, const char *command_path)
+{
+    static const struct { const char *schema; recipe_fn render; } schemas[] = {
+        {"zcl.command_menu.v1", render_menu},
+        {"zcl.command_search.v1", render_search},
+        {"zcl.command_spec.v1", render_spec},
+        {"zcl.command_schema.v1", render_schema_doc},
+        {"zcl.state_catalog.v2", render_statecatalog},
+    };
+    const char *schema = json_get_str(json_get(root, "schema"));
+    if (!schema) return false;
+    if (strcmp(schema, "zcl.result.v1") == 0)
+        return render_result(b, env, root, command_path);
+    for (size_t i = 0; i < sizeof(schemas) / sizeof(schemas[0]); i++) {
+        if (strcmp(schema, schemas[i].schema) != 0) continue;
+        schemas[i].render(b, env, root);
+        return true;
+    }
+    return false;
+}
+
 size_t zcl_cli_render_doc(const char *doc, size_t doc_len,
                           const char *command_path,
                           const struct zcl_cli_render_env *env,
@@ -1772,34 +1813,7 @@ size_t zcl_cli_render_doc(const char *doc, size_t doc_len,
     struct buf b = { .p = out, .cap = cap, .len = 0, .overflow = false };
     out[0] = '\0';
 
-    const char *schema = json_get_str(json_get(&root, "schema"));
-    bool handled = true;
-    if (schema && strcmp(schema, "zcl.command_menu.v1") == 0)
-        render_menu(&b, env, &root);
-    else if (schema && strcmp(schema, "zcl.command_search.v1") == 0)
-        render_search(&b, env, &root);
-    else if (schema && strcmp(schema, "zcl.command_spec.v1") == 0)
-        render_spec(&b, env, &root);
-    else if (schema && strcmp(schema, "zcl.command_schema.v1") == 0)
-        render_schema_doc(&b, env, &root);
-    else if (schema && strcmp(schema, "zcl.state_catalog.v2") == 0)
-        render_statecatalog(&b, env, &root);
-    else if (schema && strcmp(schema, "zcl.result.v1") == 0) {
-        const struct json_value *okv = json_get(&root, "ok");
-        if (okv && okv->type == JSON_BOOL && !json_get_bool(okv))
-            render_error(&b, env, &root);
-        else if (render_guide_or_wiki(&b, env, &root, command_path))
-            ;
-        else if (recipe_for(command_path))
-            recipe_for(command_path)(&b, env, &root);
-        else if (tree_render_leaf(command_path))
-            render_data_tree(&b, env, &root, command_path);
-        else
-            handled = false;
-    } else {
-        handled = false;
-    }
-
+    bool handled = render_document(&b, env, &root, command_path);
     json_free(&root);
     if (!handled || b.overflow || b.len == 0)
         return 0;
