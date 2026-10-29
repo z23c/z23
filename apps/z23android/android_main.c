@@ -25,6 +25,8 @@ static ALooper *looper;
 static int signal_pipe[2] = {-1, -1};
 static uint64_t permission_ticket;
 static bool foreground = true;
+/* The saved Start node choice has been put to the background-network dialog. */
+static bool background_asked;
 static bool microphone_allowed(JNIEnv *env, jobject activity);
 
 static bool clean(JNIEnv *env)
@@ -38,12 +40,45 @@ static void notify(void)
     if (signal_pipe[1] >= 0) { char byte = 1; (void)write(signal_pipe[1], &byte, 1); }
     pthread_mutex_unlock(&lock);
 }
+/* Android withholds the network from a hidden app and from the node it started,
+ * unless the owner lets the app run in the background; ask through the system dialog. */
+static void allow_background_network(JNIEnv *env, jobject activity)
+{
+    if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)clean(env); return; }
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID name = cls ? (*env)->GetMethodID(env, cls, "getPackageName", "()Ljava/lang/String;") : NULL;
+    jmethodID service = clean(env) && cls ? (*env)->GetMethodID(env, cls, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;") : NULL;
+    jmethodID start = clean(env) && cls ? (*env)->GetMethodID(env, cls, "startActivity", "(Landroid/content/Intent;)V") : NULL;
+    jstring package = clean(env) && name ? (*env)->CallObjectMethod(env, activity, name) : NULL;
+    jstring power_name = clean(env) ? (*env)->NewStringUTF(env, "power") : NULL;
+    jobject power = clean(env) && service && power_name ? (*env)->CallObjectMethod(env, activity, service, power_name) : NULL;
+    jclass power_cls = clean(env) && power ? (*env)->GetObjectClass(env, power) : NULL;
+    jmethodID ignoring = power_cls ? (*env)->GetMethodID(env, power_cls, "isIgnoringBatteryOptimizations", "(Ljava/lang/String;)Z") : NULL;
+    if (!clean(env) || !package || !ignoring || !start ||
+        (*env)->CallBooleanMethod(env, power, ignoring, package) || !clean(env)) goto out;
+    jclass uri_cls = (*env)->FindClass(env, "android/net/Uri");
+    jmethodID parts = clean(env) && uri_cls ? (*env)->GetStaticMethodID(env, uri_cls, "fromParts",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Landroid/net/Uri;") : NULL;
+    jstring scheme = clean(env) ? (*env)->NewStringUTF(env, "package") : NULL;
+    jobject uri = clean(env) && parts && scheme ? (*env)->CallStaticObjectMethod(env, uri_cls, parts, scheme, package, NULL) : NULL;
+    jclass intent_cls = clean(env) && uri ? (*env)->FindClass(env, "android/content/Intent") : NULL;
+    jmethodID ctor = clean(env) && intent_cls ? (*env)->GetMethodID(env, intent_cls, "<init>", "(Ljava/lang/String;Landroid/net/Uri;)V") : NULL;
+    jstring request = clean(env) ? (*env)->NewStringUTF(env, "android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS") : NULL;
+    jobject intent = clean(env) && ctor && request ? (*env)->NewObject(env, intent_cls, ctor, request, uri) : NULL;
+    if (clean(env) && intent) (*env)->CallVoidMethod(env, activity, start, intent);
+out:
+    (void)clean(env); (*env)->PopLocalFrame(env, NULL);
+}
 static void refresh(JNIEnv *env)
 {
     struct zapp_view *view = calloc(1, sizeof(*view));
     if (!view) return;
     zapp_controller_snapshot(view);
     zapp_native_ui_render(env, view);
+    if (!view->node_wanted) background_asked = false;
+    else if (foreground && active && !background_asked) {
+        background_asked = true; allow_background_network(env, active);
+    }
     unsigned char *bmp = NULL; size_t size = 0;
     (void)zapp_camera_preview(&bmp, &size);
     zapp_native_ui_preview(env, bmp, size); free(bmp);
@@ -51,17 +86,14 @@ static void refresh(JNIEnv *env)
 }
 static void action(const char *name, const char *argument)
 {
-    if (!strcmp(name, "voice_start")) {
-        JNIEnv *env = NULL; JavaVM *current_vm = atomic_load(&vm);
-        if (!foreground || !current_vm ||
-            (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK ||
-            !active || !microphone_allowed(env, active)) return;
-    }
+    JNIEnv *env = NULL; JavaVM *current_vm = atomic_load(&vm);
+    if (!current_vm || (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) env = NULL;
+    if (!strcmp(name, "voice_start") && (!foreground || !env || !active || !microphone_allowed(env, active))) return;
     if (!zapp_controller_action(name, argument, "")) {
-        JNIEnv *env = NULL; JavaVM *current_vm = atomic_load(&vm);
-        if (current_vm && (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK)
-            zapp_native_ui_update(env, NULL, "Unable to start that action.");
-    } else notify();
+        if (env) zapp_native_ui_update(env, NULL, "Unable to start that action.");
+        return;
+    }
+    notify();
 }
 static void request_permission(JNIEnv *env, jobject activity, const char *name)
 {

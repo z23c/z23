@@ -79,6 +79,11 @@ unavailable balance is not displayed as zero.
 starts the node each time it opens until **Stop node** clears the choice.
 **Stop node** shows while the node runs or while that choice is saved, so a
 node that keeps exiting on its own can still be turned off.
+Android 15 cuts the network of a hidden app and of the node it started, so
+while the Start node choice is saved the app opens the system dialog that lets
+Z23 run in the background: once each time the app process starts and after
+each new start, by button or confirmed voice request, until the owner allows
+it. The node keeps its peers while hidden only with that permission.
 Closing or leaving the app does not stop the node. While the app is hidden it
 stops checking the node and fleet, which keep running; it checks the node again
 as soon as it shows, and the fleet once its last report is a minute old.
