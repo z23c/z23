@@ -19,6 +19,9 @@
  *     domain_consensus_signature_hash: JoinSplit commitment and version
  *     gate, Sapling shielded commitments, scriptCode varint lengths,
  *     other-input sequence under NONE/ALL.
+ *   - sighash_sprout, literal preimages: ALL/NONE/SINGLE with and without
+ *     ANYONECANPAY, v1 and v2 (no JoinSplit), and refusals (SINGLE with
+ *     nIn >= num_vout, nIn >= num_vin) that leave the result untouched.
  */
 
 #include "test/test_core.h"
@@ -26,6 +29,7 @@
 #include "domain/consensus/sighash.h"
 #include "validation/sighash.h"
 
+#include "core/hash.h"
 #include "core/uint256.h"
 #include "primitives/transaction.h"
 #include "script/script.h"
@@ -433,6 +437,207 @@ static bool dcs_row_other_sequence(bool ow, uint32_t ver, uint32_t vgi,
     return ok;
 }
 
+/* ---- sighash_sprout: literal pre-Overwinter preimages ----
+ * Fixture: build_tx(2, 2, ...) with vin[0] prevout hash 0xA0 x32, n=0,
+ * sequence ff ff ff ff; vin[1] prevout hash 0xA1 x32, n=1, sequence
+ * fe ff ff ff; vout[0] value 1e8 script 76 a9 14 00; vout[1] value 2e8
+ * script 76 a9 14 01; locktime 0. scriptCode is the one-byte 0x51
+ * (encoded 01 51). Each preimage below is the Sprout serialization spelled
+ * out by hand from the layout in sighash_sprout; the expected digest is
+ * hash256(preimage), with hash256 from core/hash.h (a primitive, not the
+ * function under test). No literal digest vector exists in the repo for
+ * these configurations, so the preimage bytes are the pin. */
+
+#define DCS_A0_8 0xA0, 0xA0, 0xA0, 0xA0, 0xA0, 0xA0, 0xA0, 0xA0
+#define DCS_A0_32 DCS_A0_8, DCS_A0_8, DCS_A0_8, DCS_A0_8
+#define DCS_A1_8 0xA1, 0xA1, 0xA1, 0xA1, 0xA1, 0xA1, 0xA1, 0xA1
+#define DCS_A1_32 DCS_A1_8, DCS_A1_8, DCS_A1_8, DCS_A1_8
+
+/* v1, ALL, nIn=0: both inputs serialized, real sequences, both outputs. */
+static const uint8_t PRE_V1_ALL_N0[] = {
+    0x01, 0x00, 0x00, 0x00,                         /* version 1 */
+    0x02,                                           /* 2 inputs */
+    DCS_A0_32, 0x00, 0x00, 0x00, 0x00,              /* vin0 prevout */
+    0x01, 0x51,                                     /* vin0 scriptCode */
+    0xff, 0xff, 0xff, 0xff,                         /* vin0 sequence */
+    DCS_A1_32, 0x01, 0x00, 0x00, 0x00,              /* vin1 prevout */
+    0x00,                                           /* vin1 empty script */
+    0xfe, 0xff, 0xff, 0xff,                         /* vin1 sequence */
+    0x02,                                           /* 2 outputs */
+    0x00, 0xe1, 0xf5, 0x05, 0x00, 0x00, 0x00, 0x00, /* vout0 value */
+    0x04, 0x76, 0xa9, 0x14, 0x00,                   /* vout0 script */
+    0x00, 0xc2, 0xeb, 0x0b, 0x00, 0x00, 0x00, 0x00, /* vout1 value */
+    0x04, 0x76, 0xa9, 0x14, 0x01,                   /* vout1 script */
+    0x00, 0x00, 0x00, 0x00,                         /* locktime */
+    0x01, 0x00, 0x00, 0x00,                         /* hashtype ALL */
+};
+
+/* v1, NONE, nIn=0: no outputs; other input's sequence zeroed. */
+static const uint8_t PRE_V1_NONE_N0[] = {
+    0x01, 0x00, 0x00, 0x00,
+    0x02,
+    DCS_A0_32, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x51,
+    0xff, 0xff, 0xff, 0xff,
+    DCS_A1_32, 0x01, 0x00, 0x00, 0x00,
+    0x00,
+    0x00, 0x00, 0x00, 0x00,                         /* other seq zeroed */
+    0x00,                                           /* 0 outputs */
+    0x00, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x00, 0x00,                         /* hashtype NONE */
+};
+
+/* v1, SINGLE, nIn=1: outputs 0..nIn; output 0 is the null output
+ * (value -1, empty script); other input's sequence zeroed. */
+static const uint8_t PRE_V1_SINGLE_N1[] = {
+    0x01, 0x00, 0x00, 0x00,
+    0x02,
+    DCS_A0_32, 0x00, 0x00, 0x00, 0x00,
+    0x00,                                           /* other empty script */
+    0x00, 0x00, 0x00, 0x00,                         /* other seq zeroed */
+    DCS_A1_32, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x51,
+    0xfe, 0xff, 0xff, 0xff,
+    0x02,                                           /* nIn+1 outputs */
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, /* null output value */
+    0x00,                                           /* null output script */
+    0x00, 0xc2, 0xeb, 0x0b, 0x00, 0x00, 0x00, 0x00, /* vout1 value */
+    0x04, 0x76, 0xa9, 0x14, 0x01,                   /* vout1 script */
+    0x00, 0x00, 0x00, 0x00,
+    0x03, 0x00, 0x00, 0x00,                         /* hashtype SINGLE */
+};
+
+/* v1, ALL|ANYONECANPAY, nIn=1: only vin[1] serialized (count 01). */
+static const uint8_t PRE_V1_ALLACP_N1[] = {
+    0x01, 0x00, 0x00, 0x00,
+    0x01,
+    DCS_A1_32, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x51,
+    0xfe, 0xff, 0xff, 0xff,
+    0x02,
+    0x00, 0xe1, 0xf5, 0x05, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x76, 0xa9, 0x14, 0x00,
+    0x00, 0xc2, 0xeb, 0x0b, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x76, 0xa9, 0x14, 0x01,
+    0x00, 0x00, 0x00, 0x00,
+    0x81, 0x00, 0x00, 0x00,                         /* hashtype ALL|ACP */
+};
+
+/* v1, NONE|ANYONECANPAY, nIn=0: only vin[0], no outputs. */
+static const uint8_t PRE_V1_NONEACP_N0[] = {
+    0x01, 0x00, 0x00, 0x00,
+    0x01,
+    DCS_A0_32, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x51,
+    0xff, 0xff, 0xff, 0xff,
+    0x00,                                           /* 0 outputs */
+    0x00, 0x00, 0x00, 0x00,
+    0x82, 0x00, 0x00, 0x00,                         /* hashtype NONE|ACP */
+};
+
+/* v1, SINGLE|ANYONECANPAY, nIn=1: only vin[1]; null output 0, vout1. */
+static const uint8_t PRE_V1_SINGLEACP_N1[] = {
+    0x01, 0x00, 0x00, 0x00,
+    0x01,
+    DCS_A1_32, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x51,
+    0xfe, 0xff, 0xff, 0xff,
+    0x02,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x00,
+    0x00, 0xc2, 0xeb, 0x0b, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x76, 0xa9, 0x14, 0x01,
+    0x00, 0x00, 0x00, 0x00,
+    0x83, 0x00, 0x00, 0x00,                         /* hashtype SINGLE|ACP */
+};
+
+/* v2 with no JoinSplits, ALL, nIn=0: the JoinSplit count 00 sits between
+ * locktime and hashtype, and no pubkey or signature placeholder follows. */
+static const uint8_t PRE_V2_ALL_N0_NOJS[] = {
+    0x02, 0x00, 0x00, 0x00,
+    0x02,
+    DCS_A0_32, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x51,
+    0xff, 0xff, 0xff, 0xff,
+    DCS_A1_32, 0x01, 0x00, 0x00, 0x00,
+    0x00,
+    0xfe, 0xff, 0xff, 0xff,
+    0x02,
+    0x00, 0xe1, 0xf5, 0x05, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x76, 0xa9, 0x14, 0x00,
+    0x00, 0xc2, 0xeb, 0x0b, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x76, 0xa9, 0x14, 0x01,
+    0x00, 0x00, 0x00, 0x00,                         /* locktime */
+    0x00,                                           /* 0 JoinSplits */
+    0x01, 0x00, 0x00, 0x00,                         /* hashtype ALL */
+};
+
+struct dcs_sprout_row_def {
+    const char *name;
+    const uint8_t *pre;
+    size_t pre_len;
+    uint32_t version;
+    unsigned int nin;
+    uint32_t raw_type;
+};
+
+static const struct dcs_sprout_row_def DCS_SPROUT_ROWS[] = {
+    { "sprout v1 ALL nIn=0 preimage",
+      PRE_V1_ALL_N0, sizeof(PRE_V1_ALL_N0), 1, 0, SIGHASH_ALL },
+    { "sprout v1 NONE nIn=0 preimage",
+      PRE_V1_NONE_N0, sizeof(PRE_V1_NONE_N0), 1, 0, SIGHASH_NONE },
+    { "sprout v1 SINGLE nIn=1 preimage",
+      PRE_V1_SINGLE_N1, sizeof(PRE_V1_SINGLE_N1), 1, 1, SIGHASH_SINGLE },
+    { "sprout v1 ALL|ACP nIn=1 preimage",
+      PRE_V1_ALLACP_N1, sizeof(PRE_V1_ALLACP_N1), 1, 1,
+      SIGHASH_ALL | SIGHASH_ANYONECANPAY },
+    { "sprout v1 NONE|ACP nIn=0 preimage",
+      PRE_V1_NONEACP_N0, sizeof(PRE_V1_NONEACP_N0), 1, 0,
+      SIGHASH_NONE | SIGHASH_ANYONECANPAY },
+    { "sprout v1 SINGLE|ACP nIn=1 preimage",
+      PRE_V1_SINGLEACP_N1, sizeof(PRE_V1_SINGLEACP_N1), 1, 1,
+      SIGHASH_SINGLE | SIGHASH_ANYONECANPAY },
+    { "sprout v2 (no JoinSplit) ALL nIn=0 preimage",
+      PRE_V2_ALL_N0_NOJS, sizeof(PRE_V2_ALL_N0_NOJS), 2, 0, SIGHASH_ALL },
+};
+
+/* Digest of the 2-in 2-out fixture must equal hash256 of the literal
+ * preimage. Returns false when the call refuses or the digest differs. */
+static bool dcs_sprout_row_run(const struct dcs_sprout_row_def *row)
+{
+    struct transaction tx = build_tx(2, 2, false, row->version, 0);
+    struct script sc;
+    dcs_one_byte_script(&sc);
+    struct sighash_type ht = { .raw = row->raw_type };
+    struct uint256 got, want;
+    bool ok = domain_consensus_signature_hash(&sc, &tx, row->nin, ht, 0, 0,
+                                              NULL, &got);
+    if (ok) {
+        hash256(row->pre, row->pre_len, want.data);
+        ok = uint256_eq(&got, &want);
+    }
+    free_tx(&tx);
+    return ok;
+}
+
+/* Refusal: the call returns false and writes nothing to *result. */
+static bool dcs_sprout_refused(unsigned int n_vout, unsigned int nin,
+                               uint32_t raw_type)
+{
+    struct transaction tx = build_tx(2, n_vout, false, 1, 0);
+    struct script sc;
+    dcs_one_byte_script(&sc);
+    struct sighash_type ht = { .raw = raw_type };
+    struct uint256 result;
+    uint8_t before[32];
+    memset(before, 0xCC, sizeof(before));
+    memcpy(result.data, before, sizeof(before));
+    bool rejected = !domain_consensus_signature_hash(&sc, &tx, nin, ht, 0, 0,
+                                                     NULL, &result);
+    free_tx(&tx);
+    return rejected && memcmp(result.data, before, sizeof(before)) == 0;
+}
+
 int test_domain_consensus_sighash(void)
 {
     int failures = 0;
@@ -683,6 +888,18 @@ int test_domain_consensus_sighash(void)
     DCS_CHECK("sprout NONE ignores other input sequence",
               dcs_row_other_sequence(false, 1, 0, 0, SIGHASH_NONE, false,
                                      PIN_SEQ_SPROUT_NONE));
+
+    /* --- sighash_sprout: literal preimages, then refusals --- */
+    for (size_t i = 0; i < sizeof(DCS_SPROUT_ROWS) / sizeof(DCS_SPROUT_ROWS[0]); i++)
+        DCS_CHECK(DCS_SPROUT_ROWS[i].name, dcs_sprout_row_run(&DCS_SPROUT_ROWS[i]));
+    DCS_CHECK("sprout SINGLE nIn>=vout refused, result untouched",
+              dcs_sprout_refused(1, 1, SIGHASH_SINGLE));
+    DCS_CHECK("sprout SINGLE|ACP nIn>=vout refused, result untouched",
+              dcs_sprout_refused(1, 1, SIGHASH_SINGLE | SIGHASH_ANYONECANPAY));
+    DCS_CHECK("sprout ALL nIn>=vin refused, result untouched",
+              dcs_sprout_refused(2, 2, SIGHASH_ALL));
+    DCS_CHECK("sprout ALL|ACP nIn far out of range refused",
+              dcs_sprout_refused(2, 7, SIGHASH_ALL | SIGHASH_ANYONECANPAY));
 
     return failures;
 }
