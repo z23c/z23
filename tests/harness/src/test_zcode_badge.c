@@ -44,6 +44,8 @@
 #include "json/json.h"
 #include "keys/key.h"
 #include "keys/pubkey.h"
+#include "vcs/package_index.h"
+#include "vcs/package_release.h"
 #include "vcs/package_badge.h"
 #include "vcs/package_badge_eligible.h"
 #include "vcs/package_rank.h"
@@ -2026,6 +2028,72 @@ static int t_hundred_tests_order(void)
     return failures;
 }
 
+/* Persist parseable fixture releases, then exercise the real index projection. */
+static bool zb_publish_fixture_release(const char *dir, struct privkey *sk,
+                                       const struct pubkey *pk, unsigned seq,
+                                       unsigned root_seed)
+{
+    struct vcs_package_release r = {0};
+    r.schema_version = VCS_PACKAGE_RELEASE_VERSION;
+    snprintf(r.name, sizeof(r.name), "fixture/package");
+    snprintf(r.semver, sizeof(r.semver), "1.0.%u", seq);
+    snprintf(r.license, sizeof(r.license), "Apache-2.0");
+    snprintf(r.chain_id, sizeof(r.chain_id), "fixture");
+    zb_root((uint8_t)root_seed, r.package_root);
+    zb_root(0x72, r.recipe_root);
+    memcpy(r.publisher_pubkey, pk->vch, 33);
+    r.publisher_sequence = seq;
+    uint8_t id[32], *wire = NULL;
+    size_t len = 0;
+    if (vcs_package_release_id(&r, id) != VCS_PACKAGE_RELEASE_OK) return false;
+    struct uint256 hash;
+    memcpy(hash.data, id, 32);
+    unsigned char sig[COMPACT_SIGNATURE_SIZE];
+    if (!privkey_sign_compact(sk, &hash, sig)) return false;
+    memcpy(r.signature, sig + 1, VCS_PACKAGE_RELEASE_SIGNATURE_BYTES);
+    if (vcs_package_release_serialize(&r, &wire, &len) != VCS_PACKAGE_RELEASE_OK)
+        return false;
+    char hex[65], path[4500];
+    zb_hex_enc(id, 32, hex);
+    snprintf(path, sizeof(path), "%s/releases/%s", dir, hex);
+    FILE *f = fopen(path, "wb");
+    bool ok = f && fwrite(wire, 1, len, f) == len;
+    if (f) ok = fclose(f) == 0 && ok;
+    free(wire);
+    return ok;
+}
+
+static int t_publish_distinct(void)
+{
+    int failures = 0;
+    char dir[4400], releases[4400];
+    snprintf(dir, sizeof(dir), "test-tmp/zb_publish_%ld", (long)getpid());
+    snprintf(releases, sizeof(releases), "%s/releases", dir);
+    zb_rm_rf(dir);
+    struct privkey sk;
+    struct pubkey pk;
+    bool ready = zb_mkdir_p(releases) && zb_keypair(2, &sk, &pk);
+    for (unsigned i = 1; ready && i <= 13; i++)
+        ready = zb_publish_fixture_release(dir, &sk, &pk, i, i == 13 ? 11 : i);
+    struct vcs_package_index *index = ready ? vcs_package_index_build(dir) : NULL;
+    ZB_CHECK("publish: thirteen release fixtures projected", index && vcs_package_index_count(index) == 13);
+    if (index) {
+        struct vcs_badge_facts facts;
+        uint8_t first[32], tenth[32];
+        zb_root(1, first);
+        zb_root(10, tenth);
+        vcs_badge_facts_build(pk.vch, index, NULL, 20000, &facts);
+        ZB_CHECK("publish: twelve distinct roots, repeated eleventh, stable milestones",
+                 facts.release_count == 13 && facts.distinct_package_count == 12 &&
+                 facts.has_first_package && facts.has_tenth_package &&
+                 memcmp(facts.first_package_root, first, 32) == 0 &&
+                 memcmp(facts.tenth_package_root, tenth, 32) == 0);
+    }
+    vcs_package_index_free(index);
+    zb_rm_rf(dir);
+    return failures;
+}
+
 int test_zcode_badge(void)
 {
     printf("\n=== zcode_badge: SIMULATED ZCODE Badges (slice 10) ===\n");
@@ -2033,6 +2101,7 @@ int test_zcode_badge(void)
     failures += t_codec();
     failures += t_evaluator();
     failures += t_hundred_tests_order();
+    failures += t_publish_distinct();
     failures += t_store();
     failures += t_plan_issue();
     failures += t_permanence_dedup();

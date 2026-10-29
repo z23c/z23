@@ -66,6 +66,31 @@ static int belig_pub_release_cmp(const void *a, const void *b)
     return memcmp(ra->root, rb->root, 32);
 }
 
+/* Distinct roots in release order determine the first and tenth milestones. */
+static void belig_publish_roots(const struct belig_pub_release *rels, size_t n,
+                                struct vcs_badge_facts *out)
+{
+    size_t distinct_count = 0;
+    for (size_t i = 0; i < n; i++) {
+        bool seen = false;
+        for (size_t j = 0; j < i && !seen; j++)
+            seen = memcmp(rels[j].root, rels[i].root, 32) == 0;
+        if (seen)
+            continue;
+        if (distinct_count == 0) {
+            out->has_first_package = true;
+            memcpy(out->first_package_root, rels[i].root, 32);
+        }
+        distinct_count++;
+        if (distinct_count == VCS_BADGE_TEN_PACKAGES_COUNT &&
+            !out->has_tenth_package) {
+            out->has_tenth_package = true;
+            memcpy(out->tenth_package_root, rels[i].root, 32);
+        }
+    }
+    out->distinct_package_count = (uint32_t)distinct_count;
+}
+
 /* Publish facts: the contributor's releases in sequence order; the first
  * package root and the 10th DISTINCT root by first appearance. */
 static void belig_facts_publish(const uint8_t contributor[33],
@@ -96,28 +121,7 @@ static void belig_facts_publish(const uint8_t contributor[33],
     }
     qsort(rels, n, sizeof(*rels), belig_pub_release_cmp);
     out->release_count = (uint32_t)n;
-    uint8_t distinct[VCS_BADGE_TEN_PACKAGES_COUNT][32];
-    size_t distinct_count = 0;
-    for (size_t i = 0; i < n; i++) {
-        bool seen = false;
-        for (size_t j = 0; j < distinct_count && !seen; j++)
-            seen = memcmp(distinct[j], rels[i].root, 32) == 0;
-        if (seen)
-            continue;
-        if (distinct_count == 0) {
-            out->has_first_package = true;
-            memcpy(out->first_package_root, rels[i].root, 32);
-        }
-        if (distinct_count < VCS_BADGE_TEN_PACKAGES_COUNT)
-            memcpy(distinct[distinct_count], rels[i].root, 32);
-        distinct_count++;
-        if (distinct_count == VCS_BADGE_TEN_PACKAGES_COUNT &&
-            !out->has_tenth_package) {
-            out->has_tenth_package = true;
-            memcpy(out->tenth_package_root, rels[i].root, 32);
-        }
-    }
-    out->distinct_package_count = (uint32_t)distinct_count;
+    belig_publish_roots(rels, n, out);
     free(rels);
 }
 
