@@ -244,6 +244,65 @@ struct zcl_result legacy_mirror_sync_request_catchup_result(const char *reason)
     return lms_request_catchup_result_internal(reason);
 }
 
+/* Applies cfg's host, port, cadence, tick limit and lag SLA to g_lms,
+ * substituting built-in defaults where cfg is NULL or a value is invalid. */
+static void lms_apply_config_defaults(
+    const struct legacy_mirror_sync_config *cfg)
+{
+    snprintf(g_lms.rpc_host, sizeof(g_lms.rpc_host), "%s",
+             (cfg && cfg->rpc_host) ? cfg->rpc_host : LMS_DEFAULT_HOST);
+    g_lms.rpc_port = (cfg && cfg->rpc_port > 0)
+                         ? cfg->rpc_port : ZCLASSICD_RPC_DEFAULT_PORT;
+    g_lms.cadence_secs = (cfg && cfg->cadence_secs > 0)
+                         ? cfg->cadence_secs : LMS_DEFAULT_CADENCE;
+    g_lms.max_blocks_tick = (cfg && cfg->max_blocks_tick > 0)
+                         ? cfg->max_blocks_tick : LMS_DEFAULT_MAX_BLOCKS;
+    g_lms.lag_sla = (cfg && cfg->lag_sla >= 0)
+                         ? cfg->lag_sla : LMS_DEFAULT_LAG_SLA;
+}
+
+/* Stores init's runtime pointers, datadir, and any cfg-provided RPC
+ * credentials into g_lms. */
+static void lms_store_config_refs_and_creds(
+    const struct legacy_mirror_sync_config *cfg,
+    struct main_state *ms,
+    struct coins_view_cache *coins_tip,
+    const struct chain_params *params,
+    const char *datadir)
+{
+    g_lms.ms = ms;
+    g_lms.coins_tip = coins_tip;
+    g_lms.params = params;
+    snprintf(g_lms.datadir, sizeof(g_lms.datadir), "%s",
+             datadir ? datadir : "");
+
+    if (cfg && cfg->rpc_user && cfg->rpc_user[0])
+        snprintf(g_lms.rpc_user, sizeof(g_lms.rpc_user), "%s",
+                 cfg->rpc_user);
+    if (cfg && cfg->rpc_password && cfg->rpc_password[0])
+        snprintf(g_lms.rpc_password, sizeof(g_lms.rpc_password), "%s",
+                 cfg->rpc_password);
+}
+
+/* Fills any missing RPC credentials and resolves enablement; returns
+ * whether credentials are available. */
+static bool lms_resolve_config_enablement(
+    const struct legacy_mirror_sync_config *cfg)
+{
+    /* Fill any missing credential from zclassic.conf; an explicit port
+     * (cfg->rpc_port > 0) is never overridden. A missing set is not
+     * fatal here — the have-creds check below decides enablement. */
+    bool have_creds = legacy_rpc_fill_missing_creds(
+        g_lms.rpc_user, sizeof(g_lms.rpc_user),
+        g_lms.rpc_password, sizeof(g_lms.rpc_password),
+        &g_lms.rpc_port, cfg && cfg->rpc_port > 0);
+    g_lms.enabled = (cfg ? cfg->enabled : true) && have_creds &&
+                    !lms_env_disabled();
+    mirror_consensus_set_enabled(g_lms.enabled);
+    g_lms.initialized = true;
+    return have_creds;
+}
+
 /* zcl_result error band for this file: -200..-209. The -1 code is owned
  * by lms_request_catchup_result_internal in legacy_mirror_sync_service.c. */
 struct zcl_result
@@ -255,16 +314,7 @@ legacy_mirror_sync_init(const struct legacy_mirror_sync_config *cfg,
 {
     pthread_mutex_lock(&g_lms.lock);
 
-    snprintf(g_lms.rpc_host, sizeof(g_lms.rpc_host), "%s",
-             (cfg && cfg->rpc_host) ? cfg->rpc_host : LMS_DEFAULT_HOST);
-    g_lms.rpc_port = (cfg && cfg->rpc_port > 0)
-                         ? cfg->rpc_port : ZCLASSICD_RPC_DEFAULT_PORT;
-    g_lms.cadence_secs = (cfg && cfg->cadence_secs > 0)
-                         ? cfg->cadence_secs : LMS_DEFAULT_CADENCE;
-    g_lms.max_blocks_tick = (cfg && cfg->max_blocks_tick > 0)
-                         ? cfg->max_blocks_tick : LMS_DEFAULT_MAX_BLOCKS;
-    g_lms.lag_sla = (cfg && cfg->lag_sla >= 0)
-                         ? cfg->lag_sla : LMS_DEFAULT_LAG_SLA;
+    lms_apply_config_defaults(cfg);
     g_lms.cadence_secs = lms_env_int("ZCL_MIRROR_CADENCE_SECS",
                                      g_lms.cadence_secs, 1, 300);
     g_lms.max_blocks_tick = lms_env_int("ZCL_MIRROR_MAX_BLOCKS_PER_TICK",
@@ -304,30 +354,8 @@ legacy_mirror_sync_init(const struct legacy_mirror_sync_config *cfg,
         lms_env_int("ZCL_MIRROR_LAG_SLA_CRITICAL_SECS",
                     atomic_load(&g_lms.lag_sla_critical_secs), 1, 86400));
 
-    g_lms.ms = ms;
-    g_lms.coins_tip = coins_tip;
-    g_lms.params = params;
-    snprintf(g_lms.datadir, sizeof(g_lms.datadir), "%s",
-             datadir ? datadir : "");
-
-    if (cfg && cfg->rpc_user && cfg->rpc_user[0])
-        snprintf(g_lms.rpc_user, sizeof(g_lms.rpc_user), "%s",
-                 cfg->rpc_user);
-    if (cfg && cfg->rpc_password && cfg->rpc_password[0])
-        snprintf(g_lms.rpc_password, sizeof(g_lms.rpc_password), "%s",
-                 cfg->rpc_password);
-
-    /* Fill any missing credential from zclassic.conf; an explicit port
-     * (cfg->rpc_port > 0) is never overridden. A missing set is not
-     * fatal here — the have-creds check below decides enablement. */
-    bool have_creds = legacy_rpc_fill_missing_creds(
-        g_lms.rpc_user, sizeof(g_lms.rpc_user),
-        g_lms.rpc_password, sizeof(g_lms.rpc_password),
-        &g_lms.rpc_port, cfg && cfg->rpc_port > 0);
-    g_lms.enabled = (cfg ? cfg->enabled : true) && have_creds &&
-                    !lms_env_disabled();
-    mirror_consensus_set_enabled(g_lms.enabled);
-    g_lms.initialized = true;
+    lms_store_config_refs_and_creds(cfg, ms, coins_tip, params, datadir);
+    bool have_creds = lms_resolve_config_enablement(cfg);
     pthread_mutex_unlock(&g_lms.lock);
 
     if (!have_creds) {
@@ -359,15 +387,10 @@ void legacy_mirror_sync_stop(void)
     legacy_mirror_supervisor_stop();
 }
 
-static void legacy_mirror_sync_stats_snapshot_impl(
-    struct legacy_mirror_sync_stats *out,
-    bool refresh_local_heights,
-    bool resolve_local_hash)
+/* Takes g_lms.lock and copies the lock-guarded mirror state into the
+ * snapshot. */
+static void lms_snapshot_locked_state(struct legacy_mirror_sync_stats *out)
 {
-    if (!out) return;
-    memset(out, 0, sizeof(*out));
-    if (refresh_local_heights)
-        lms_refresh_local_heights(NULL, NULL);
     pthread_mutex_lock(&g_lms.lock);
     out->enabled = g_lms.enabled;
 #ifdef ZCL_TESTING
@@ -403,6 +426,12 @@ static void legacy_mirror_sync_stats_snapshot_impl(
     snprintf(out->zclassic23_hash, sizeof(out->zclassic23_hash), "%s",
              g_lms.zclassic23_hash);
     pthread_mutex_unlock(&g_lms.lock);
+}
+
+/* Loads the reachable/height atomics and derives the advisory-height and
+ * lag-known flags. */
+static void lms_snapshot_lag_basis(struct legacy_mirror_sync_stats *out)
+{
     out->reachable = atomic_load(&g_lms.reachable) != 0;
     out->in_flight = atomic_load(&g_lms.in_flight) != 0;
     out->legacy_height = atomic_load(&g_lms.legacy_height);
@@ -415,6 +444,13 @@ static void legacy_mirror_sync_stats_snapshot_impl(
     out->lag_known = out->legacy_advisory_height_known &&
                      out->local_height >= 0;
     out->lag_valid = out->lag_known;
+}
+
+/* Resolves the local hash when asked, then computes lag and tip agreement. */
+static void lms_snapshot_local_hash_and_lag(
+    struct legacy_mirror_sync_stats *out,
+    bool resolve_local_hash)
+{
     if (resolve_local_hash &&
         !lms_local_hash_at(out->local_height, out->zclassic23_hash).ok) {
         pthread_mutex_lock(&g_lms.lock);
@@ -424,6 +460,11 @@ static void legacy_mirror_sync_stats_snapshot_impl(
     }
     out->lag = out->lag_known ? out->legacy_height - out->local_height : 0;
     out->tip_hashes_agree = lms_tips_agree(out);
+}
+
+/* Derives the snapshot's zclassicd transport, oracle and RPC-error view. */
+static void lms_snapshot_zclassicd_view(struct legacy_mirror_sync_stats *out)
+{
     out->zclassicd_rpc_transport_reachable =
         out->reachable || lms_error_implies_transport_reachable(out->last_error);
     out->legacy_oracle_usable =
@@ -432,6 +473,12 @@ static void legacy_mirror_sync_stats_snapshot_impl(
     out->zclassicd_rpc_error_code = lms_rpc_error_code(out->last_error);
     lms_rpc_error_message(out->last_error, out->zclassicd_rpc_error_message,
                           sizeof(out->zclassicd_rpc_error_message));
+}
+
+/* Loads the progress, stuck, and local-recovery counters into the snapshot. */
+static void lms_snapshot_progress_counters(
+    struct legacy_mirror_sync_stats *out)
+{
     out->target_height = atomic_load(&g_lms.target_height);
     out->authority_rewind_target =
         atomic_load(&g_lms.authority_rewind_target);
@@ -459,59 +506,109 @@ static void legacy_mirror_sync_stats_snapshot_impl(
     out->rpc_errors = atomic_load(&g_lms.rpc_errors);
     out->blocks_applied = atomic_load(&g_lms.blocks_applied);
     out->headers_added = atomic_load(&g_lms.headers_added);
-    {
-        struct mirror_consensus_stats mcs;
-        mirror_consensus_stats_snapshot(&mcs);
-        snprintf(out->consensus_authority,
-                 sizeof(out->consensus_authority), "%s",
-                 "local_consensus_validation");
-        snprintf(out->candidate_trust,
-                 sizeof(out->candidate_trust), "%s",
-                 "bounded_advisory_fallback");
-        out->override_active = mcs.override_active;
-        out->overrides_total = mcs.overrides_total;
-        out->unsafe_overrides_total = mcs.unsafe_overrides_total;
-        out->blockers_total = mcs.blockers_total;
-        out->last_override_height = mcs.last_override_height;
-        out->last_override_safe = mcs.last_override_safe;
-        out->activation_blocker_class = mcs.activation_blocker_class;
-        snprintf(out->last_override_reason,
-                 sizeof(out->last_override_reason), "%s",
-                 mcs.last_override_reason);
-        snprintf(out->last_override_scope,
-                 sizeof(out->last_override_scope), "%s",
-                 mcs.last_override_scope);
-        snprintf(out->activation_blocker_reason,
-                 sizeof(out->activation_blocker_reason), "%s",
-                 mcs.activation_blocker_reason);
-    }
-    if (lms_blocker_cleared_by_catchup(out->activation_blocker_reason,
-                                       out->lag_known,
-                                       out->lag)) {
-        out->activation_blocker_reason[0] = '\0';
-    } else if (lms_hash_disagreement_recovered(
-                   out->activation_blocker_reason, out)) {
+}
+
+/* Loads the mirror-consensus override and blocker state into the snapshot. */
+static void lms_snapshot_consensus_state(
+    struct legacy_mirror_sync_stats *out)
+{
+    struct mirror_consensus_stats mcs;
+    mirror_consensus_stats_snapshot(&mcs);
+    snprintf(out->consensus_authority,
+             sizeof(out->consensus_authority), "%s",
+             "local_consensus_validation");
+    snprintf(out->candidate_trust,
+             sizeof(out->candidate_trust), "%s",
+             "bounded_advisory_fallback");
+    out->override_active = mcs.override_active;
+    out->overrides_total = mcs.overrides_total;
+    out->unsafe_overrides_total = mcs.unsafe_overrides_total;
+    out->blockers_total = mcs.blockers_total;
+    out->last_override_height = mcs.last_override_height;
+    out->last_override_safe = mcs.last_override_safe;
+    out->activation_blocker_class = mcs.activation_blocker_class;
+    snprintf(out->last_override_reason,
+             sizeof(out->last_override_reason), "%s",
+             mcs.last_override_reason);
+    snprintf(out->last_override_scope,
+             sizeof(out->last_override_scope), "%s",
+             mcs.last_override_scope);
+    snprintf(out->activation_blocker_reason,
+             sizeof(out->activation_blocker_reason), "%s",
+             mcs.activation_blocker_reason);
+}
+
+/* Clears one snapshot blocker field when catchup or hash-disagreement
+ * recovery proves it resolved. */
+static void lms_snapshot_resolve_blocker_recovery(
+    struct legacy_mirror_sync_stats *out,
+    char *blocker)
+{
+    if (lms_blocker_cleared_by_catchup(blocker, out->lag_known, out->lag)) {
+        blocker[0] = '\0';
+    } else if (lms_hash_disagreement_recovered(blocker, out)) {
         out->blocker_recovered_by_tip_agreement =
             out->tip_hashes_agree &&
             out->local_height >= out->hash_disagreement_height;
         out->blocker_recovered_by_common_height_agreement =
             out->comparison_known && out->comparison_hashes_agree &&
             out->comparison_height >= out->hash_disagreement_height;
-        out->activation_blocker_reason[0] = '\0';
+        blocker[0] = '\0';
     }
-    if (lms_blocker_cleared_by_catchup(out->last_blocker_id,
-                                       out->lag_known,
-                                       out->lag)) {
-        out->last_blocker_id[0] = '\0';
-    } else if (lms_hash_disagreement_recovered(out->last_blocker_id, out)) {
-        out->blocker_recovered_by_tip_agreement =
-            out->tip_hashes_agree &&
-            out->local_height >= out->hash_disagreement_height;
-        out->blocker_recovered_by_common_height_agreement =
-            out->comparison_known && out->comparison_hashes_agree &&
-            out->comparison_height >= out->hash_disagreement_height;
-        out->last_blocker_id[0] = '\0';
-    }
+}
+
+/* Computes seconds spent in lag breach and critical lag from their
+ * since-timestamps. */
+static void lms_snapshot_lag_durations(struct legacy_mirror_sync_stats *out)
+{
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    out->lag_breach_seconds =
+        out->lag_known &&
+        out->lag_breach_since > 0 && now >= out->lag_breach_since
+            ? now - out->lag_breach_since : 0;
+    out->lag_critical_seconds =
+        out->lag_known &&
+        out->lag_critical_since > 0 && now >= out->lag_critical_since
+            ? now - out->lag_critical_since : 0;
+}
+
+/* Maps the snapshot's lag-SLA state to its breach severity label. */
+static const char *lms_snapshot_lag_severity(
+    const struct legacy_mirror_sync_stats *out)
+{
+    if (out->lag_known &&
+        out->lag_critical_since > 0 &&
+        out->lag_critical_seconds >= out->lag_sla_critical_secs)
+        return "fatal";
+    else if (out->lag_known && out->lag_critical_since > 0)
+        return "critical";
+    else if (out->lag_known &&
+             out->lag_breach_since > 0 &&
+             out->lag_breach_seconds >= out->lag_sla_breach_secs)
+        return "critical";
+    else if (out->lag_known && out->lag_breach_since > 0)
+        return "warn";
+    return "none";
+}
+
+static void legacy_mirror_sync_stats_snapshot_impl(
+    struct legacy_mirror_sync_stats *out,
+    bool refresh_local_heights,
+    bool resolve_local_hash)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (refresh_local_heights)
+        lms_refresh_local_heights(NULL, NULL);
+    lms_snapshot_locked_state(out);
+    lms_snapshot_lag_basis(out);
+    lms_snapshot_local_hash_and_lag(out, resolve_local_hash);
+    lms_snapshot_zclassicd_view(out);
+    lms_snapshot_progress_counters(out);
+    lms_snapshot_consensus_state(out);
+    lms_snapshot_resolve_blocker_recovery(out,
+                                          out->activation_blocker_reason);
+    lms_snapshot_resolve_blocker_recovery(out, out->last_blocker_id);
     if (!out->activation_blocker_reason[0])
         out->activation_blocker_class = BLOCKER_TRANSIENT;
     if (!out->last_blocker_id[0])
@@ -522,32 +619,9 @@ static void legacy_mirror_sync_stats_snapshot_impl(
     out->lag_sla_critical_secs   = atomic_load(&g_lms.lag_sla_critical_secs);
     out->lag_breach_since        = atomic_load(&g_lms.lag_breach_since);
     out->lag_critical_since      = atomic_load(&g_lms.lag_critical_since);
-    {
-        int64_t now = (int64_t)platform_time_wall_time_t();
-        out->lag_breach_seconds =
-            out->lag_known &&
-            out->lag_breach_since > 0 && now >= out->lag_breach_since
-                ? now - out->lag_breach_since : 0;
-        out->lag_critical_seconds =
-            out->lag_known &&
-            out->lag_critical_since > 0 && now >= out->lag_critical_since
-                ? now - out->lag_critical_since : 0;
-    }
-    const char *sev = "none";
-    if (out->lag_known &&
-        out->lag_critical_since > 0 &&
-        out->lag_critical_seconds >= out->lag_sla_critical_secs)
-        sev = "fatal";
-    else if (out->lag_known && out->lag_critical_since > 0)
-        sev = "critical";
-    else if (out->lag_known &&
-             out->lag_breach_since > 0 &&
-             out->lag_breach_seconds >= out->lag_sla_breach_secs)
-        sev = "critical";
-    else if (out->lag_known && out->lag_breach_since > 0)
-        sev = "warn";
+    lms_snapshot_lag_durations(out);
     snprintf(out->lag_breach_severity, sizeof(out->lag_breach_severity),
-             "%s", sev);
+             "%s", lms_snapshot_lag_severity(out));
     snprintf(out->state, sizeof(out->state), "%s", lms_state_name(out));
 }
 

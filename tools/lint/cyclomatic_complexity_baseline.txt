@@ -552,8 +552,6 @@ engine/services/src/chain_evidence_reconstruct.c:cec_reconstruct_active_tip_evid
 engine/services/src/chain_evidence_snapshot.c:chain_evidence_controller_snapshot:46
 engine/services/src/chain_state_validator.c:validate_coins_chain_agreement:45
 engine/services/src/legacy_import_service.c:legacy_import_service_run:22
-engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_init:31
-engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_stats_snapshot_impl:44
 engine/services/src/mirror_divergence_locator.c:mirror_divergence_locate:18
 engine/services/src/node_db_catchup_decrypt.c:node_db_catchup_try_sapling_decrypt:22
 engine/services/src/node_db_catchup_service.c:node_db_catchup_service_run:113
