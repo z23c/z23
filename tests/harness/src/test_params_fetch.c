@@ -22,6 +22,7 @@
 #include "net/params_service.h"
 #include "net/protocol.h"
 #include "crypto/sha256.h"
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 
 #include <errno.h>
@@ -1417,6 +1418,155 @@ static int test_chunk_no_manifest(void)
     return failures;
 }
 
+/* ── 12. Resume state re-verification: each refusal branch, pinned ──────
+ *
+ * Driven through zcl_param_fetch_open over pinned file 3 (sprout-verifying
+ * .key, one chunk). With one chunk the pinned chunk root IS the leaf, so a
+ * state file whose manifest is the decoded pinned root re-verifies with no
+ * real bytes. Only the bitmap-confirm success row needs the real file. */
+
+#define STATE3_LEN (8 + 4 + 4 + 8 + 32 + 32 + 1)
+
+/* Canonical resume image for one-chunk file 3: magic, fi, cc, bytes, pinned
+ * sha, manifest (32), bitmap (1). */
+static void build_state3(uint8_t *img, const char *magic, uint32_t fi,
+                         uint32_t cc, uint64_t bytes, const uint8_t sha[32],
+                         const uint8_t man[32], uint8_t bm)
+{
+    memcpy(img, magic, 8);
+    ph_put_u32(img + 8, fi);
+    ph_put_u32(img + 12, cc);
+    ph_put_u64(img + 16, bytes);
+    memcpy(img + 24, sha, 32);
+    memcpy(img + 56, man, 32);
+    img[88] = bm;
+}
+
+static void reset_file3(void)
+{
+    const char *n = zcl_param_pins[3].name;
+    char name[300];
+    rm_in_dir(n);
+    snprintf(name, sizeof(name), "%s.part", n);
+    rm_in_dir(name);
+    snprintf(name, sizeof(name), "%s.zpart", n);
+    rm_in_dir(name);
+}
+
+static void write_file3_aux(const char *suffix, const uint8_t *buf, size_t len)
+{
+    char p[900];
+    snprintf(p, sizeof(p), "%s/%s%s", g_dir, zcl_param_pins[3].name, suffix);
+    FILE *f = fopen(p, "wb");
+    if (!f)
+        return;
+    (void)fwrite(buf, 1, len, f);
+    fclose(f);
+}
+
+/* One row: optional state image and .part bytes, then open and read back
+ * what the session believes. img == NULL leaves no state file at all. */
+static int run_state_row(const char *label, const uint8_t *img, size_t img_len,
+                         const uint8_t *part, size_t part_len,
+                         bool want_manifest, uint32_t want_have)
+{
+    int failures = 0;
+    reset_file3();
+    if (img)
+        write_file3_aux(".zpart", img, img_len);
+    if (part)
+        write_file3_aux(".part", part, part_len);
+
+    struct zcl_param_fetch *s = zcl_param_fetch_open(g_dir, 3);
+    CHECK(s != NULL, label);
+    if (!s)
+        return failures;
+    CHECK(zcl_param_fetch_has_manifest(s) == want_manifest, label);
+    CHECK(zcl_param_fetch_chunks_have(s) == want_have, label);
+    CHECK(zcl_param_fetch_next_needed(s) == (want_have ? UINT32_MAX : 0u), label);
+    zcl_param_fetch_close(s);
+    return failures;
+}
+
+static int test_state_reverify_branches(void)
+{
+    int failures = 0;
+    printf("  [resume] state re-verification refusal branches\n");
+
+    const struct zcl_param_pin *p = &zcl_param_pins[3];
+    uint8_t sha[32], root[32], junk[32], zero[32] = {0};
+    uint8_t zero_sha[32] = {0};
+    CHECK(zcl_hex_decode(p->sha256_hex, sha, 32) && zcl_hex_decode(p->chunk_root_hex, root, 32),
+          "pinned sha and root decode");
+    fill_pattern(junk, sizeof(junk), 0x5EEDu);
+
+    uint8_t good[STATE3_LEN], long_img[STATE3_LEN + 1];
+    uint8_t bad_fi[STATE3_LEN], bad_cc[STATE3_LEN];
+    uint8_t bad_sha[STATE3_LEN], zero_man[STATE3_LEN];
+    uint8_t junk_man[STATE3_LEN], bad_bytes[STATE3_LEN], bad_magic[STATE3_LEN];
+    uint8_t bit_set[STATE3_LEN];
+    build_state3(good, "ZPART001", 3, 1, p->bytes, sha, root, 0x00);
+    build_state3(bad_magic, "ZPART002", 3, 1, p->bytes, sha, root, 0x00);
+    build_state3(bad_fi, "ZPART001", 2, 1, p->bytes, sha, root, 0x00);
+    build_state3(bad_cc, "ZPART001", 3, 2, p->bytes, sha, root, 0x00);
+    build_state3(bad_bytes, "ZPART001", 3, 1, p->bytes - 1, sha, root, 0x00);
+    build_state3(bad_sha, "ZPART001", 3, 1, p->bytes, zero_sha, root, 0x00);
+    build_state3(zero_man, "ZPART001", 3, 1, p->bytes, sha, zero, 0x00);
+    build_state3(junk_man, "ZPART001", 3, 1, p->bytes, sha, junk, 0x00);
+    build_state3(bit_set, "ZPART001", 3, 1, p->bytes, sha, root, 0x01);
+    memcpy(long_img, good, STATE3_LEN);
+    long_img[STATE3_LEN] = 0;
+
+    failures += run_state_row("no state file: nothing recovered",
+                              NULL, 0, NULL, 0, false, 0);
+    failures += run_state_row("control: valid header and manifest re-verify",
+                              good, STATE3_LEN, NULL, 0, true, 0);
+    failures += run_state_row("state one byte short is refused on size",
+                              good, STATE3_LEN - 1, NULL, 0, false, 0);
+    failures += run_state_row("state one byte long is refused on size",
+                              long_img, STATE3_LEN + 1, NULL, 0, false, 0);
+    failures += run_state_row("bad magic is refused",
+                              bad_magic, STATE3_LEN, NULL, 0, false, 0);
+    failures += run_state_row("wrong file index is refused",
+                              bad_fi, STATE3_LEN, NULL, 0, false, 0);
+    failures += run_state_row("wrong chunk count is refused",
+                              bad_cc, STATE3_LEN, NULL, 0, false, 0);
+    failures += run_state_row("wrong file length is refused",
+                              bad_bytes, STATE3_LEN, NULL, 0, false, 0);
+    failures += run_state_row("unpinned sha256 is refused",
+                              bad_sha, STATE3_LEN, NULL, 0, false, 0);
+    failures += run_state_row("all-zero manifest (no-manifest shape) is refused",
+                              zero_man, STATE3_LEN, NULL, 0, false, 0);
+    failures += run_state_row("junk manifest is refused on the root fold",
+                              junk_man, STATE3_LEN, NULL, 0, false, 0);
+    failures += run_state_row("bitmap bit with no matching bytes is dropped",
+                              bit_set, STATE3_LEN, NULL, 0, true, 0);
+
+    /* Bitmap-confirm success needs the real bytes; skipped when absent. */
+    size_t len = 0;
+    uint8_t *body = load_real_param(3, &len);
+    if (!body) {
+        printf("    (real sprout-verifying.key absent — bitmap-confirm rows "
+               "skipped)\n");
+        return failures;
+    }
+    uint8_t real[STATE3_LEN];
+    uint8_t *flipped = zcl_malloc(len, "test_state_flip");
+    CHECK(flipped != NULL, "flip buffer");
+    build_state3(real, "ZPART001", 3, 1, p->bytes, sha, root, 0x01);
+    if (flipped) {
+        memcpy(flipped, body, len);
+        flipped[len / 2] ^= 0x01;
+        failures += run_state_row("real bytes confirm the claimed chunk",
+                                  real, STATE3_LEN, body, len, true, 1);
+        failures += run_state_row("a flipped byte in the claimed chunk is dropped",
+                                  real, STATE3_LEN, flipped, len, true, 0);
+        free(flipped);
+    }
+    free(body);
+    return failures;
+}
+
 /* ── entry point ────────────────────────────────────────────────────── */
 
 int test_params_fetch(void);
@@ -1437,6 +1587,7 @@ int test_params_fetch(void)
     failures += test_session_roundtrip();
     failures += test_resume();
     failures += test_resume_rejects_corrupt_part();
+    failures += test_state_reverify_branches();
     failures += test_verify_installed_refusals();
     failures += test_pins_match_real_files();
     failures += test_serving_off_by_default();
