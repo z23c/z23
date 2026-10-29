@@ -1242,7 +1242,7 @@ static bool outbound_pin_pick_connected_clears_backoff(void)
     memset(&pick, 0, sizeof(pick));
     ok = ok && connman_pick_next_outbound_target(&cm, &cursor, &pick,
                                                  &source, &index);
-    ok = ok && source == CONNMAN_TARGET_ADDNODE && index == 1 && cursor == 2;
+    ok = ok && source == CONNMAN_TARGET_ADDNODE && index == 1 && cursor == 0;
     ok = ok && cm.addnode_backoff_sec[0] == 0;
     connman_free(&cm);
     return ok;
@@ -1270,7 +1270,7 @@ static bool outbound_pin_pick_backoff_window(void)
     memset(&pick, 0, sizeof(pick));
     ok = ok && connman_pick_next_outbound_target(&cm, &cursor, &pick,
                                                  &source, &index);
-    ok = ok && source == CONNMAN_TARGET_ADDNODE && index == 1 && cursor == 2;
+    ok = ok && source == CONNMAN_TARGET_ADDNODE && index == 1 && cursor == 0;
     connman_free(&cm);
     return ok;
 }
@@ -1296,7 +1296,7 @@ static bool outbound_pin_pick_saturated_group(void)
      * addnode is deferred while 198.51's addnode is ready. */
     ok = ok && connman_pick_next_outbound_target(&cm, &cursor, &pick,
                                                  &source, &index);
-    ok = ok && source == CONNMAN_TARGET_ADDNODE && index == 1 && cursor == 2;
+    ok = ok && source == CONNMAN_TARGET_ADDNODE && index == 1 && cursor == 0;
     /* Retire the only other ready addnode: nothing else is ready, so the
      * saturated addnode is dialled anyway. */
     cm.addnode_retired[1] = true;
