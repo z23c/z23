@@ -304,9 +304,14 @@ static bool ch_symbols_all_carry_valid(const struct ci_capability *cap)
     return all_relevant;
 }
 
-/* Count the distinct ref files the ref index reports for one symbol. */
-static int ch_count_distinct_ref_files(struct codeindex *ci,
-                                       const char *symbol)
+/* Count the distinct ref files the ref index reports for one symbol, reading
+ * at most 512 refs. The index orders refs by (ref_file, ref_line), so equal
+ * files are adjacent and a consecutive-duplicate check is exact within that
+ * window; when a symbol has more than 512 refs the result is a lower bound.
+ * A codeindex_refs error (negative count) yields 0 distinct files, which the
+ * caller's "distinct > 0" check reports as a failure. */
+static int ch_count_distinct_ref_files_capped(struct codeindex *ci,
+                                              const char *symbol)
 {
     static struct ci_ref refs[512];
     int nr = codeindex_refs(ci, symbol, refs,
@@ -360,7 +365,8 @@ static int ch_check_real_capability_evidence(struct codeindex *ci,
     /* Not fabricated: the capability's count must be at least the
      * count for ONE of its symbols, taken independently from the
      * ref index. */
-    int distinct = ch_count_distinct_ref_files(ci, "validates_presence_of");
+    int distinct = ch_count_distinct_ref_files_capped(ci,
+                                                      "validates_presence_of");
     CH_CHECK("the use count is consistent with the ref index",
              distinct > 0 && cap->used_by_files >= distinct);
     return failures;
