@@ -83,9 +83,9 @@ static bool handle_and_file_kind_valid(HANDLE handle, PSID user_sid,
 
 /* Queries the handle's owner and DACL; true only when the query succeeds,
  * the owner SID is exactly user_sid, and a DACL is present. */
-static bool owner_and_dacl_match_user(HANDLE handle, PSID user_sid,
-                                      PSID *owner, PACL *dacl,
-                                      PSECURITY_DESCRIPTOR *descriptor)
+static bool owner_is_user_and_dacl_present(HANDLE handle, PSID user_sid,
+                                           PSID *owner, PACL *dacl,
+                                           PSECURITY_DESCRIPTOR *descriptor)
 {
     return GetSecurityInfo(handle, SE_FILE_OBJECT,
                            OWNER_SECURITY_INFORMATION |
@@ -140,8 +140,8 @@ static bool validate_for_user(HANDLE handle, PSID user_sid,
                                          expect_directory) &&
               CreateWellKnownSid(WinLocalSystemSid, NULL, system_buffer,
                                  &system_size) &&
-              owner_and_dacl_match_user(handle, user_sid, &owner, &dacl,
-                                        &descriptor) &&
+              owner_is_user_and_dacl_present(handle, user_sid, &owner, &dacl,
+                                             &descriptor) &&
               dacl_protected_with_two_aces(descriptor, dacl, &acl_info);
     bool user_allowed = false, system_allowed = false;
     for (DWORD i = 0; ok && i < acl_info.AceCount; ++i) {
