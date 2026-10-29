@@ -1760,6 +1760,380 @@ static int sapling_crypto_sapling_spend_parse_witness_rejects_shor(void)
     return failures;
 }
 
+/* ── Characterization pins: groth16_pk_read, g1_msm, g2_msm ──────────
+ * Pin today's observable behaviour before the groth16 prover is split.
+ * The parser reads every byte in order, so any prefix shorter than a full
+ * key is refused; a point whose first byte has the compressed flag (0x80)
+ * is refused; the MSMs equal repeated point addition. */
+
+#define PKC_PK_TOTAL 1656 /* 6 CRS points + ic/h/l/a/b_g1/b_g2 arrays of 1..2 */
+
+static const uint8_t pkc_g1_gen_c[48] = {
+    0x97,0xf1,0xd3,0xa7,0x31,0x97,0xd7,0x94,
+    0x26,0x95,0x63,0x8c,0x4f,0xa9,0xac,0x0f,
+    0xc3,0x68,0x8c,0x4f,0x97,0x74,0xb9,0x05,
+    0xa1,0x4e,0x3a,0x3f,0x17,0x1b,0xac,0x58,
+    0x6c,0x55,0xe8,0x3f,0xf9,0x7a,0x1a,0xef,
+    0xfb,0x3a,0xf0,0x0a,0xdb,0x22,0xc6,0xbb
+};
+
+static const uint8_t pkc_g2_gen_c[96] = {
+    0x93,0xe0,0x2b,0x60,0x52,0x71,0x9f,0x60,
+    0x7d,0xac,0xd3,0xa0,0x88,0x27,0x4f,0x65,
+    0x59,0x6b,0xd0,0xd0,0x99,0x20,0xb6,0x1a,
+    0xb5,0xda,0x61,0xbb,0xdc,0x7f,0x50,0x49,
+    0x33,0x4c,0xf1,0x12,0x13,0x94,0x5d,0x57,
+    0xe5,0xac,0x7d,0x05,0x5d,0x04,0x2b,0x7e,
+    0x02,0x4a,0xa2,0xb2,0xf0,0x8f,0x0a,0x91,
+    0x26,0x08,0x05,0x27,0x2d,0xc5,0x10,0x51,
+    0xc6,0xe4,0x7a,0xd4,0xfa,0x40,0x3b,0x02,
+    0xb4,0x51,0x0b,0x64,0x7a,0xe3,0xd1,0x77,
+    0x0b,0xac,0x03,0x26,0xa8,0x05,0xbb,0xef,
+    0xd4,0x80,0x56,0xc8,0xc1,0x21,0xbd,0xb8
+};
+
+static size_t pkc_put(uint8_t *buf, size_t pos, const uint8_t *src, size_t n)
+{
+    memcpy(buf + pos, src, n);
+    return pos + n;
+}
+
+static size_t pkc_put_u32(uint8_t *buf, size_t pos, uint32_t v)
+{
+    buf[pos] = (uint8_t)(v >> 24);
+    buf[pos + 1] = (uint8_t)(v >> 16);
+    buf[pos + 2] = (uint8_t)(v >> 8);
+    buf[pos + 3] = (uint8_t)v;
+    return pos + 4;
+}
+
+/* Uncompressed 96-byte encoding of the canonical G1 generator. */
+static bool pkc_g1_gen_uncompressed(uint8_t out[96])
+{
+    struct g1_point gen;
+    if (!g1_from_compressed(&gen, pkc_g1_gen_c))
+        return false;
+    struct fp ax, ay;
+    g1_to_affine(&ax, &ay, &gen);
+    fp_to_bytes(out, &ax);
+    fp_to_bytes(out + 48, &ay);
+    return true;
+}
+
+/* Well-formed key: alpha_g1 = G1 generator, every other CRS point is the
+ * identity (0x40 = infinity flag), ic_len = 2, h/l/a/b_g1/b_g2 length 1.
+ * Byte offsets: alpha 0, beta_g1 96, beta_g2 192, gamma_g2 384,
+ * delta_g1 576, delta_g2 672, ic_len 864 (ic[0] 868, ic[1] 964),
+ * h_len 1060 (h[0] 1064), l_len 1160 (l[0] 1164), a_len 1260 (a[0] 1264),
+ * b_g1_len 1360 (b_g1[0] 1364), b_g2_len 1460 (b_g2[0] 1464). */
+static size_t pkc_build_valid(uint8_t *buf, const uint8_t g1_gen[96])
+{
+    uint8_t inf1[96] = { 0x40 };
+    uint8_t inf2[192] = { 0x40 };
+    size_t p = 0;
+    p = pkc_put(buf, p, g1_gen, 96);
+    p = pkc_put(buf, p, inf1, 96);
+    p = pkc_put(buf, p, inf2, 192);
+    p = pkc_put(buf, p, inf2, 192);
+    p = pkc_put(buf, p, inf1, 96);
+    p = pkc_put(buf, p, inf2, 192);
+    p = pkc_put_u32(buf, p, 2);
+    p = pkc_put(buf, p, g1_gen, 96);
+    p = pkc_put(buf, p, inf1, 96);
+    p = pkc_put_u32(buf, p, 1);
+    p = pkc_put(buf, p, inf1, 96);
+    p = pkc_put_u32(buf, p, 1);
+    p = pkc_put(buf, p, g1_gen, 96);
+    p = pkc_put_u32(buf, p, 1);
+    p = pkc_put(buf, p, inf1, 96);
+    p = pkc_put_u32(buf, p, 1);
+    p = pkc_put(buf, p, inf1, 96);
+    p = pkc_put_u32(buf, p, 1);
+    p = pkc_put(buf, p, inf2, 192);
+    return p;
+}
+
+static bool pkc_g1_eq(const struct g1_point *a, const struct g1_point *b)
+{
+    bool ia = g1_is_identity(a), ib = g1_is_identity(b);
+    if (ia || ib)
+        return ia && ib;
+    struct fp ax, ay, bx, by;
+    g1_to_affine(&ax, &ay, a);
+    g1_to_affine(&bx, &by, b);
+    return fp_eq(&ax, &bx) && fp_eq(&ay, &by);
+}
+
+static bool pkc_g2_eq(const struct g2_point *a, const struct g2_point *b)
+{
+    bool ia = g2_is_identity(a), ib = g2_is_identity(b);
+    if (ia || ib)
+        return ia && ib;
+    struct fp2 ax, ay, bx, by;
+    g2_to_affine(&ax, &ay, a);
+    g2_to_affine(&bx, &by, b);
+    return fp2_eq(&ax, &bx) && fp2_eq(&ay, &by);
+}
+
+static void pkc_small_fr(struct fr *out, uint32_t k)
+{
+    struct fr one;
+    fr_one(&one);
+    fr_zero(out);
+    for (uint32_t i = 0; i < k; i++)
+        fr_add(out, out, &one);
+}
+
+static bool pkc_pk_lengths_ok(const struct groth16_pk *pk)
+{
+    return pk->num_inputs == 1 && pk->h_len == 1 && pk->l_len == 1 &&
+           pk->a_len == 1 && pk->b_len == 1 && pk->vk.ic_len == 2;
+}
+
+/* The G1 slots of a valid key: generator where the valid key puts it,
+ * identity everywhere else. */
+static bool pkc_pk_g1_points_ok(const struct groth16_pk *pk,
+                                const struct g1_point *gen)
+{
+    struct g1_point id;
+    g1_identity(&id);
+    return pkc_g1_eq(&pk->alpha_g1, gen) && pkc_g1_eq(&pk->vk.alpha_g1, gen) &&
+           pkc_g1_eq(&pk->vk.ic[0], gen) && pkc_g1_eq(&pk->vk.ic[1], &id) &&
+           pkc_g1_eq(&pk->l_g1[0], gen) && pkc_g1_eq(&pk->h_g1[0], &id) &&
+           pkc_g1_eq(&pk->a_g1[0], &id) && pkc_g1_eq(&pk->b_g1[0], &id) &&
+           pkc_g1_eq(&pk->beta_g1, &id) && pkc_g1_eq(&pk->delta_g1, &id);
+}
+
+static bool pkc_pk_g2_points_ok(const struct groth16_pk *pk)
+{
+    return g2_is_identity(&pk->b_g2[0]) && g2_is_identity(&pk->vk.beta_g2) &&
+           g2_is_identity(&pk->vk.gamma_g2) && g2_is_identity(&pk->vk.delta_g2);
+}
+
+static int sapling_crypto_groth16_pk_read_pins_layout_and_points(void)
+{
+    int failures = 0;
+    printf("groth16_pk_read: well-formed key parses to the pinned layout... ");
+    {
+        uint8_t gen_bytes[96];
+        uint8_t buf[PKC_PK_TOTAL];
+        struct g1_point gen;
+        bool ok = pkc_g1_gen_uncompressed(gen_bytes);
+        ok = ok && g1_from_uncompressed(&gen, gen_bytes);
+        size_t n = pkc_build_valid(buf, gen_bytes);
+        ok = ok && n == PKC_PK_TOTAL;
+
+        struct groth16_pk pk;
+        bool read_ok = groth16_pk_read(&pk, buf, n);
+        ok = ok && read_ok;
+        if (read_ok) {
+            ok = ok && pkc_pk_lengths_ok(&pk);
+            ok = ok && pkc_pk_g1_points_ok(&pk, &gen);
+            ok = ok && pkc_pk_g2_points_ok(&pk);
+            groth16_pk_free(&pk);
+        }
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+static int sapling_crypto_groth16_pk_read_refuses_every_truncation_cut(void)
+{
+    int failures = 0;
+    printf("groth16_pk_read: every prefix shorter than a full key is refused... ");
+    {
+        /* Cuts land on each section boundary and inside each array. */
+        static const size_t cuts[] = {
+            0, 1, 95, 96, 192, 288, 384, 576, 672, 863, 864, 868, 1059,
+            1060, 1100, 1160, 1200, 1260, 1300, 1360, 1400, 1460, 1600, 1655
+        };
+        uint8_t gen_bytes[96];
+        uint8_t buf[PKC_PK_TOTAL];
+        bool ok = pkc_g1_gen_uncompressed(gen_bytes);
+        ok = ok && pkc_build_valid(buf, gen_bytes) == PKC_PK_TOTAL;
+        for (size_t i = 0; ok && i < sizeof(cuts) / sizeof(cuts[0]); i++) {
+            struct groth16_pk pk;
+            if (groth16_pk_read(&pk, buf, cuts[i])) {
+                groth16_pk_free(&pk);
+                ok = false;
+            }
+        }
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+static int sapling_crypto_groth16_pk_read_refuses_bad_point_flags(void)
+{
+    int failures = 0;
+    printf("groth16_pk_read: a point with the compressed flag is refused in every slot... ");
+    {
+        /* Offsets of the first byte of each point, see pkc_build_valid. */
+        static const size_t flag_offsets[] = {
+            0, 96, 192, 384, 576, 672, 868, 1064, 1164, 1264, 1364, 1464
+        };
+        uint8_t gen_bytes[96];
+        uint8_t valid[PKC_PK_TOTAL];
+        bool ok = pkc_g1_gen_uncompressed(gen_bytes);
+        ok = ok && pkc_build_valid(valid, gen_bytes) == PKC_PK_TOTAL;
+        for (size_t i = 0; ok && i < sizeof(flag_offsets) / sizeof(flag_offsets[0]); i++) {
+            uint8_t bad[PKC_PK_TOTAL];
+            memcpy(bad, valid, sizeof(bad));
+            bad[flag_offsets[i]] = 0x80;
+            struct groth16_pk pk;
+            if (groth16_pk_read(&pk, bad, sizeof(bad))) {
+                groth16_pk_free(&pk);
+                ok = false;
+            }
+        }
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+static int sapling_crypto_groth16_pk_read_refuses_b_len_mismatch(void)
+{
+    int failures = 0;
+    printf("groth16_pk_read: b_g1_len != b_g2_len is refused... ");
+    {
+        uint8_t gen_bytes[96];
+        uint8_t buf[PKC_PK_TOTAL];
+        bool ok = pkc_g1_gen_uncompressed(gen_bytes);
+        ok = ok && pkc_build_valid(buf, gen_bytes) == PKC_PK_TOTAL;
+        /* b_g2_len is the u32 at offset 1460: set it to 2 while b_g1_len is 1. */
+        buf[1463] = 0x02;
+        struct groth16_pk pk;
+        bool read_ok = groth16_pk_read(&pk, buf, PKC_PK_TOTAL);
+        if (read_ok)
+            groth16_pk_free(&pk);
+        ok = ok && !read_ok;
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+/* Runs g1_msm over n copies of g with the given small scalars and checks the
+ * result against sum * g built by repeated addition. */
+static bool pkc_g1_msm_row(const struct g1_point *g, const uint32_t *ks,
+                           size_t n, uint32_t sum)
+{
+    if (n > 32)
+        return false;
+    struct g1_point pts[32];
+    struct fr scalars[32];
+    for (size_t i = 0; i < n; i++) {
+        pts[i] = *g;
+        pkc_small_fr(&scalars[i], ks[i]);
+    }
+    struct g1_point got, want;
+    g1_msm(&got, pts, scalars, n);
+    g1_identity(&want);
+    for (uint32_t i = 0; i < sum; i++)
+        g1_add(&want, &want, g);
+    return pkc_g1_eq(&got, &want);
+}
+
+static bool pkc_g2_msm_row(const struct g2_point *g, const uint32_t *ks,
+                           size_t n, uint32_t sum)
+{
+    if (n > 32)
+        return false;
+    struct g2_point pts[32];
+    struct fr scalars[32];
+    for (size_t i = 0; i < n; i++) {
+        pts[i] = *g;
+        pkc_small_fr(&scalars[i], ks[i]);
+    }
+    struct g2_point got, want;
+    g2_msm(&got, pts, scalars, n);
+    g2_identity(&want);
+    for (uint32_t i = 0; i < sum; i++)
+        g2_add(&want, &want, g);
+    return pkc_g2_eq(&got, &want);
+}
+
+static int sapling_crypto_g1_msm_pins_small_scalar_sums(void)
+{
+    int failures = 0;
+    printf("g1_msm: n=0, zero, one, mixed and 17-term sums match repeated addition... ");
+    {
+        struct g1_point gen;
+        bool ok = g1_from_compressed(&gen, pkc_g1_gen_c);
+        static const uint32_t k_one[] = { 1 };
+        static const uint32_t k_zero[] = { 0 };
+        static const uint32_t k_two_three[] = { 2, 3 };
+        static const uint32_t k_mixed[] = { 5, 0, 6 };
+        static const uint32_t k_1_to_17[] = {
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17
+        };
+        ok = ok && pkc_g1_msm_row(&gen, NULL, 0, 0);
+        ok = ok && pkc_g1_msm_row(&gen, k_one, 1, 1);
+        ok = ok && pkc_g1_msm_row(&gen, k_zero, 1, 0);
+        ok = ok && pkc_g1_msm_row(&gen, k_two_three, 2, 5);
+        ok = ok && pkc_g1_msm_row(&gen, k_mixed, 3, 11);
+        ok = ok && pkc_g1_msm_row(&gen, k_1_to_17, 17, 153);
+
+        /* scalar -1 gives the negated point. */
+        struct fr one, neg_one;
+        fr_one(&one);
+        fr_neg(&neg_one, &one);
+        struct g1_point got, want;
+        g1_msm(&got, &gen, &neg_one, 1);
+        g1_neg(&want, &gen);
+        ok = ok && pkc_g1_eq(&got, &want);
+
+        /* identity base point times any scalar is the identity. */
+        struct g1_point id;
+        g1_identity(&id);
+        ok = ok && pkc_g1_msm_row(&id, k_one, 1, 1);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+static int sapling_crypto_g2_msm_pins_small_scalar_sums(void)
+{
+    int failures = 0;
+    printf("g2_msm: n=0, zero, one, mixed and 17-term sums match repeated addition... ");
+    {
+        struct g2_point gen;
+        bool ok = g2_from_compressed(&gen, pkc_g2_gen_c);
+        static const uint32_t k_one[] = { 1 };
+        static const uint32_t k_zero[] = { 0 };
+        static const uint32_t k_two_three[] = { 2, 3 };
+        static const uint32_t k_mixed[] = { 5, 0, 6 };
+        static const uint32_t k_1_to_17[] = {
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17
+        };
+        ok = ok && pkc_g2_msm_row(&gen, NULL, 0, 0);
+        ok = ok && pkc_g2_msm_row(&gen, k_one, 1, 1);
+        ok = ok && pkc_g2_msm_row(&gen, k_zero, 1, 0);
+        ok = ok && pkc_g2_msm_row(&gen, k_two_three, 2, 5);
+        ok = ok && pkc_g2_msm_row(&gen, k_mixed, 3, 11);
+        ok = ok && pkc_g2_msm_row(&gen, k_1_to_17, 17, 153);
+
+        struct fr one, neg_one;
+        fr_one(&one);
+        fr_neg(&neg_one, &one);
+        struct g2_point got, want;
+        g2_msm(&got, &gen, &neg_one, 1);
+        g2_neg(&want, &gen);
+        ok = ok && pkc_g2_eq(&got, &want);
+
+        struct g2_point id;
+        g2_identity(&id);
+        ok = ok && pkc_g2_msm_row(&id, k_one, 1, 1);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
 int test_sapling_crypto(void)
 {
     int failures = 0;
@@ -1974,6 +2348,20 @@ int test_sapling_crypto(void)
     /* ── spend-witness parser must reject short buffers ──────── */
 
     failures += sapling_crypto_sapling_spend_parse_witness_rejects_shor();
+
+    /* ── characterization pins ahead of the groth16 prover split ── */
+
+    failures += sapling_crypto_groth16_pk_read_pins_layout_and_points();
+
+    failures += sapling_crypto_groth16_pk_read_refuses_every_truncation_cut();
+
+    failures += sapling_crypto_groth16_pk_read_refuses_bad_point_flags();
+
+    failures += sapling_crypto_groth16_pk_read_refuses_b_len_mismatch();
+
+    failures += sapling_crypto_g1_msm_pins_small_scalar_sums();
+
+    failures += sapling_crypto_g2_msm_pins_small_scalar_sums();
 
     return failures;
 }
