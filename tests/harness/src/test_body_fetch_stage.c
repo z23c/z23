@@ -776,11 +776,13 @@ static int bf_check_authority_best_header_refusals(
              !log_row_at(progress_store_db(), 2, &(int){0}, NULL, 0) &&
              dump_has_idle_reason("authority.best_header_absent"));
 
-    struct uint256 other_hash;
+    /* Static storage: ms->pindex_best_header still points at other_best
+     * after this helper returns, so it and its hash outlive the call. */
+    static struct uint256 other_hash;
     memset(&other_hash, 0, sizeof(other_hash));
     other_hash.data[0] = 2;
     other_hash.data[1] = 0x72;
-    struct block_index other_best;
+    static struct block_index other_best;
     block_index_init(&other_best);
     other_best.phashBlock = &other_hash;
     other_best.nHeight = 2;
