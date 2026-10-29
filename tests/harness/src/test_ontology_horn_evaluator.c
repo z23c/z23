@@ -179,9 +179,8 @@ static bool horn_manifest_set(
         kind, count ? roots : NULL, count, out);
 }
 
-static bool horn_fixture_init(struct horn_fixture *fixture, bool imported)
+static bool horn_fixture_universe_init(struct horn_fixture *fixture)
 {
-    memset(fixture, 0, sizeof(*fixture));
     fixture->universe.schema_version = ZCL_SOURCE_UNIVERSE_VERSION;
     fixture->universe.coverage_mask = ZCL_SOURCE_COVER_ALL;
     fixture->universe.governed_path_count = 17;
@@ -197,7 +196,12 @@ static bool horn_fixture_init(struct horn_fixture *fixture, bool imported)
     if (!zcl_source_universe_v1_root(
             &fixture->universe, fixture->universe_root))
         return false;
+    return true;
+}
 
+static bool horn_fixture_contexts_init(
+    struct horn_fixture *fixture, bool imported)
+{
     uint8_t empty_imports_root[32];
     if (!zcl_ontology_import_manifest_v1_root(
             fixture->universe_root, NULL, 0, empty_imports_root))
@@ -235,7 +239,11 @@ static bool horn_fixture_init(struct horn_fixture *fixture, bool imported)
             &fixture->universe, &fixture->primary_context,
             &fixture->vocabulary))
         return false;
+    return true;
+}
 
+static bool horn_fixture_terms_init(struct horn_fixture *fixture)
+{
     for (size_t i = 0; i < ZCL_ONTOLOGY_VOCABULARY_TERM_COUNT; i++)
         fixture->terms[i] = fixture->vocabulary.terms[i];
     horn_term_init(
@@ -268,6 +276,11 @@ static bool horn_fixture_init(struct horn_fixture *fixture, bool imported)
                .identity_root, 32);
     if (!horn_term_sort(fixture->terms, HORN_FIXTURE_TERM_COUNT))
         return false;
+    return true;
+}
+
+static bool horn_fixture_formulas_contexts_init(struct horn_fixture *fixture)
+{
     for (size_t i = 0; i < ZCL_ONTOLOGY_VOCABULARY_FORMULA_COUNT; i++)
         if (!zcl_ontology_vocabulary_v1_formula_at(
                 &fixture->vocabulary, i, &fixture->formulas[i]))
@@ -277,6 +290,11 @@ static bool horn_fixture_init(struct horn_fixture *fixture, bool imported)
     fixture->contexts[1] = fixture->foreign_context;
     if (!horn_context_sort(fixture->contexts, HORN_FIXTURE_CONTEXT_COUNT))
         return false;
+    return true;
+}
+
+static bool horn_fixture_assertions_init(struct horn_fixture *fixture)
+{
     horn_assertion_init(
         &fixture->assertions[0], fixture->primary_context_root,
         fixture->vocabulary.genls_predicate_root,
@@ -300,7 +318,11 @@ static bool horn_fixture_init(struct horn_fixture *fixture, bool imported)
     if (!horn_assertion_sort(
             fixture->assertions, HORN_FIXTURE_ASSERTION_COUNT))
         return false;
+    return true;
+}
 
+static void horn_fixture_inputs_init(struct horn_fixture *fixture)
+{
     fixture->inputs.terms = fixture->terms;
     fixture->inputs.term_count = HORN_FIXTURE_TERM_COUNT;
     fixture->inputs.predicates = fixture->vocabulary.predicates;
@@ -315,7 +337,10 @@ static bool horn_fixture_init(struct horn_fixture *fixture, bool imported)
     fixture->inputs.context_count = HORN_FIXTURE_CONTEXT_COUNT;
     fixture->inputs.assertions = fixture->assertions;
     fixture->inputs.assertion_count = HORN_FIXTURE_ASSERTION_COUNT;
+}
 
+static void horn_fixture_manifest_fields_init(struct horn_fixture *fixture)
+{
     fixture->manifest.schema_version = ZCL_ONTOLOGY_OBJECT_VERSION;
     fixture->manifest.term_count = HORN_FIXTURE_TERM_COUNT;
     fixture->manifest.predicate_count =
@@ -332,6 +357,10 @@ static bool horn_fixture_init(struct horn_fixture *fixture, bool imported)
            fixture->vocabulary.vocabulary_root, 32);
     horn_root(fixture->manifest.extractor_root, 0x13);
     horn_root(fixture->manifest.policy_root, 0x23);
+}
+
+static bool horn_fixture_manifest_core_sets_init(struct horn_fixture *fixture)
+{
     if (!horn_manifest_set(
             ZCL_ONTOLOGY_OBJECT_TERM, fixture->terms,
             HORN_FIXTURE_TERM_COUNT, sizeof(fixture->terms[0]),
@@ -349,8 +378,14 @@ static bool horn_fixture_init(struct horn_fixture *fixture, bool imported)
             ZCL_ONTOLOGY_OBJECT_RULE, fixture->vocabulary.rules,
             ZCL_ONTOLOGY_VOCABULARY_RULE_COUNT,
             sizeof(fixture->vocabulary.rules[0]),
-            fixture->manifest.rule_set_root) ||
-        !horn_manifest_set(
+            fixture->manifest.rule_set_root))
+        return false;
+    return true;
+}
+
+static bool horn_fixture_manifest_scope_sets_init(struct horn_fixture *fixture)
+{
+    if (!horn_manifest_set(
             ZCL_ONTOLOGY_OBJECT_CONTEXT, fixture->contexts,
             HORN_FIXTURE_CONTEXT_COUNT, sizeof(fixture->contexts[0]),
             fixture->manifest.context_set_root) ||
@@ -367,6 +402,23 @@ static bool horn_fixture_init(struct horn_fixture *fixture, bool imported)
         !zcl_ontology_object_set_v1_root(
             ZCL_ONTOLOGY_OBJECT_GAP, NULL, 0,
             fixture->manifest.gap_set_root))
+        return false;
+    return true;
+}
+
+static bool horn_fixture_init(struct horn_fixture *fixture, bool imported)
+{
+    memset(fixture, 0, sizeof(*fixture));
+    if (!horn_fixture_universe_init(fixture) ||
+        !horn_fixture_contexts_init(fixture, imported) ||
+        !horn_fixture_terms_init(fixture) ||
+        !horn_fixture_formulas_contexts_init(fixture) ||
+        !horn_fixture_assertions_init(fixture))
+        return false;
+    horn_fixture_inputs_init(fixture);
+    horn_fixture_manifest_fields_init(fixture);
+    if (!horn_fixture_manifest_core_sets_init(fixture) ||
+        !horn_fixture_manifest_scope_sets_init(fixture))
         return false;
     return zcl_ontology_manifest_v1_validate(
         &fixture->manifest, &fixture->universe, &fixture->inputs);
@@ -451,286 +503,490 @@ static bool horn_result_derivation_root(
     return true;
 }
 
+struct horn_case {
+    struct horn_fixture isolated;
+    struct horn_fixture imported;
+    struct horn_fixture direct;
+    struct zcl_ontology_budget_v1 budget;
+    struct zcl_ontology_budget_v1 direct_budget;
+    struct horn_test_clock clock;
+    union {
+        max_align_t alignment;
+        uint8_t bytes[ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES];
+    } storage;
+    struct zcl_ontology_evaluator *evaluator;
+    struct zcl_ontology_horn_query_v1 query;
+    struct zcl_ontology_result_v1 result;
+    uint8_t direct_derivation_root[32];
+};
+
+static int horn_case_setup(struct horn_case *c)
+{
+    int failures = 0;
+    ASSERT(horn_fixture_init(&c->isolated, false));
+    ASSERT(horn_fixture_init(&c->imported, true));
+    c->budget = (struct zcl_ontology_budget_v1){
+        .schema_version = ZCL_ONTOLOGY_OBJECT_VERSION,
+        .memory_limit_bytes = 1u << 20,
+        .fact_limit = 4096,
+        .step_limit = 16384,
+        .recursion_limit = 32,
+        .derivation_limit = 1024,
+        .time_limit_us = 1000000,
+    };
+    c->clock = (struct horn_test_clock){0};
+    c->evaluator = NULL;
+    ASSERT(zcl_ontology_evaluator_init_v1(
+        c->storage.bytes, sizeof(c->storage.bytes), &c->evaluator));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_query_identity(struct horn_case *c)
+{
+    int failures = 0;
+    uint8_t query_root[32], query_root_again[32];
+    horn_query_init(
+        &c->query, &c->isolated, false,
+        c->isolated.vocabulary.isa_predicate_root,
+        c->isolated.entity_x, c->isolated.type_c, &c->budget, &c->clock);
+    ASSERT(zcl_ontology_horn_query_v1_root(&c->query, query_root));
+    ASSERT(zcl_ontology_horn_query_v1_root(&c->query, query_root_again));
+    ASSERT(memcmp(query_root, query_root_again, 32) == 0);
+    c->query.argument_roots[1][0] ^= 1u;
+    ASSERT(zcl_ontology_horn_query_v1_root(&c->query, query_root_again));
+    ASSERT(memcmp(query_root, query_root_again, 32) != 0);
+    c->query.argument_roots[1][0] ^= 1u;
+    ASSERT(!zcl_ontology_horn_query_v1_root(
+        &c->query, c->query.universe_root));
+    ASSERT(memcmp(c->query.universe_root, c->isolated.universe_root,
+                  32) == 0);
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_isolated_disproved(struct horn_case *c)
+{
+    int failures = 0;
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->isolated.universe, &c->query, &c->result));
+    ASSERT(c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_DISPROVED);
+    ASSERT(!c->result.observed_positive && c->result.observed_negative);
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_imported_isa(struct horn_case *c)
+{
+    int failures = 0;
+    horn_query_init(
+        &c->query, &c->imported, true,
+        c->imported.vocabulary.isa_predicate_root,
+        c->imported.entity_x, c->imported.type_c, &c->budget, &c->clock);
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(c->result.complete && c->result.status == ZCL_ONTOLOGY_BOTH);
+    ASSERT(c->result.observed_positive && c->result.observed_negative);
+    ASSERT(c->result.derivations_produced == 6);
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_genls_proved(struct horn_case *c)
+{
+    int failures = 0;
+    uint8_t query_root[32];
+    horn_query_init(
+        &c->query, &c->imported, true,
+        c->imported.vocabulary.genls_predicate_root,
+        c->imported.type_a, c->imported.type_c, &c->budget, &c->clock);
+    ASSERT(zcl_ontology_horn_query_v1_root(&c->query, query_root));
+    uint8_t import_before[32];
+    memcpy(import_before, c->imported.imports[0], 32);
+    ASSERT(!zcl_ontology_horn_query_v1_root(
+        &c->query, c->imported.imports[0]));
+    ASSERT(memcmp(import_before, c->imported.imports[0], 32) == 0);
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(c->result.complete && c->result.status == ZCL_ONTOLOGY_PROVED);
+    ASSERT(c->result.observed_positive && !c->result.observed_negative);
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_genls_unknown(struct horn_case *c)
+{
+    int failures = 0;
+    horn_query_init(
+        &c->query, &c->imported, true,
+        c->imported.vocabulary.genls_predicate_root,
+        c->imported.type_c, c->imported.type_a, &c->budget, &c->clock);
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(c->result.complete && c->result.status == ZCL_ONTOLOGY_UNKNOWN);
+    ASSERT(!c->result.observed_positive && !c->result.observed_negative);
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_unknown_stable(struct horn_case *c)
+{
+    int failures = 0;
+    uint64_t stable_facts = c->result.facts_examined;
+    uint64_t stable_steps = c->result.steps_taken;
+    uint64_t stable_derivations = c->result.derivations_produced;
+    uint32_t stable_depth = c->result.max_recursion_depth;
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(c->result.complete && c->result.status == ZCL_ONTOLOGY_UNKNOWN);
+    ASSERT(c->result.facts_examined == stable_facts);
+    ASSERT(c->result.steps_taken == stable_steps);
+    ASSERT(c->result.derivations_produced == stable_derivations);
+    ASSERT(c->result.max_recursion_depth == stable_depth);
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_direct_setup(struct horn_case *c)
+{
+    int failures = 0;
+    ASSERT(horn_fixture_init(&c->direct, false));
+    c->direct.inputs.formulas = NULL;
+    c->direct.inputs.formula_count = 0;
+    c->direct.inputs.rules = NULL;
+    c->direct.inputs.rule_count = 0;
+    c->direct.manifest.formula_count = 0;
+    c->direct.manifest.rule_count = 0;
+    ASSERT(zcl_ontology_object_set_v1_root(
+        ZCL_ONTOLOGY_OBJECT_FORMULA, NULL, 0,
+        c->direct.manifest.formula_set_root));
+    ASSERT(zcl_ontology_object_set_v1_root(
+        ZCL_ONTOLOGY_OBJECT_RULE, NULL, 0,
+        c->direct.manifest.rule_set_root));
+    ASSERT(zcl_ontology_manifest_v1_validate(
+        &c->direct.manifest, &c->direct.universe, &c->direct.inputs));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_direct_proved(struct horn_case *c)
+{
+    int failures = 0;
+    uint8_t query_root[32];
+    c->direct_budget = c->budget;
+    horn_query_init(
+        &c->query, &c->direct, false,
+        c->direct.vocabulary.genls_predicate_root,
+        c->direct.type_a, c->direct.type_b, &c->direct_budget, &c->clock);
+    ASSERT(zcl_ontology_horn_query_v1_root(&c->query, query_root));
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->direct.universe, &c->query, &c->result));
+    ASSERT(c->result.complete && c->result.status == ZCL_ONTOLOGY_PROVED);
+    ASSERT(c->result.observed_positive && !c->result.observed_negative);
+    ASSERT(c->result.derivations_produced == 0);
+    ASSERT(c->result.max_recursion_depth == 0);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_direct_fact_budget(struct horn_case *c)
+{
+    int failures = 0;
+    c->direct_budget.fact_limit = 0;
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->direct.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason == ZCL_ONTOLOGY_REASON_FACT_BUDGET);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_direct_step_budget(struct horn_case *c)
+{
+    int failures = 0;
+    c->direct_budget.fact_limit = 4096;
+    c->direct_budget.step_limit = 0;
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->direct.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason == ZCL_ONTOLOGY_REASON_STEP_BUDGET);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_imported_fact_budget(struct horn_case *c)
+{
+    int failures = 0;
+    c->budget.fact_limit = 1;
+    horn_query_init(
+        &c->query, &c->imported, true,
+        c->imported.vocabulary.isa_predicate_root,
+        c->imported.entity_x, c->imported.type_c, &c->budget, &c->clock);
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason == ZCL_ONTOLOGY_REASON_FACT_BUDGET);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_imported_step_budget(struct horn_case *c)
+{
+    int failures = 0;
+    c->budget.fact_limit = 4096;
+    c->budget.step_limit = 1;
+    horn_query_init(
+        &c->query, &c->imported, true,
+        c->imported.vocabulary.isa_predicate_root,
+        c->imported.entity_x, c->imported.type_c, &c->budget, &c->clock);
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason == ZCL_ONTOLOGY_REASON_STEP_BUDGET);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_derivation_budget(struct horn_case *c)
+{
+    int failures = 0;
+    c->budget.step_limit = 16384;
+    c->budget.derivation_limit = 0;
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason ==
+           ZCL_ONTOLOGY_REASON_DERIVATION_BUDGET);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_recursion_budget(struct horn_case *c)
+{
+    int failures = 0;
+    c->budget.derivation_limit = 1024;
+    c->budget.recursion_limit = 0;
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason ==
+           ZCL_ONTOLOGY_REASON_RECURSION_BUDGET);
+    ASSERT(c->result.observed_negative);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_memory_budget(struct horn_case *c)
+{
+    int failures = 0;
+    c->budget.recursion_limit = 32;
+    c->budget.memory_limit_bytes = 1;
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason == ZCL_ONTOLOGY_REASON_MEMORY_BUDGET);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_time_budget(struct horn_case *c)
+{
+    int failures = 0;
+    c->budget.memory_limit_bytes = 1u << 20;
+    c->budget.time_limit_us = 1;
+    c->clock.now_us = 0;
+    c->clock.advance_us = 1;
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason == ZCL_ONTOLOGY_REASON_TIME_BUDGET);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_time_regressed(struct horn_case *c)
+{
+    int failures = 0;
+    c->clock.now_us = 2;
+    c->clock.advance_us = UINT64_MAX;
+    c->budget.time_limit_us = UINT64_MAX;
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason ==
+           ZCL_ONTOLOGY_REASON_TIME_SOURCE_REGRESSED);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    c->clock.now_us = 0;
+    c->clock.advance_us = 0;
+    c->budget.time_limit_us = 1000000;
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_time_source_missing(struct horn_case *c)
+{
+    int failures = 0;
+    c->query.elapsed_us = NULL;
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason ==
+           ZCL_ONTOLOGY_REASON_TIME_SOURCE_MISSING);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_predicate_missing(struct horn_case *c)
+{
+    int failures = 0;
+    horn_query_init(
+        &c->query, &c->imported, true,
+        c->imported.vocabulary.isa_predicate_root,
+        c->imported.entity_x, c->imported.type_c, &c->budget, &c->clock);
+    horn_root(c->query.predicate_root, 0x77);
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason ==
+           ZCL_ONTOLOGY_REASON_PREDICATE_MISSING);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_non_imported_invalid(struct horn_case *c)
+{
+    int failures = 0;
+    horn_query_init(
+        &c->query, &c->imported, false,
+        c->imported.vocabulary.isa_predicate_root,
+        c->imported.entity_x, c->imported.type_c, &c->budget, &c->clock);
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason ==
+           ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_bad_inputs(struct horn_case *c)
+{
+    int failures = 0;
+    horn_query_init(
+        &c->query, &c->imported, true,
+        c->imported.vocabulary.isa_predicate_root,
+        c->imported.entity_x, c->imported.type_c, &c->budget, &c->clock);
+    struct zcl_ontology_manifest_inputs_v1 bad_inputs = c->imported.inputs;
+    bad_inputs.assertions = NULL;
+    c->query.inputs = &bad_inputs;
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason ==
+           ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID);
+    c->query.inputs = &c->imported.inputs;
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+static int horn_case_manifest_changed(struct horn_case *c)
+{
+    int failures = 0;
+    struct zcl_ontology_manifest_v1 changed = c->imported.manifest;
+    changed.rule_set_root[0] ^= 1u;
+    c->query.manifest = &changed;
+    ASSERT(zcl_ontology_evaluate_horn_v1(
+        c->evaluator, &c->imported.universe, &c->query, &c->result));
+    ASSERT(!c->result.complete &&
+           c->result.status == ZCL_ONTOLOGY_INCOMPLETE);
+    ASSERT(c->result.incomplete_reason ==
+           ZCL_ONTOLOGY_REASON_MANIFEST_INVALID);
+    ASSERT(horn_result_derivation_root(
+        &c->query, &c->result, c->direct_derivation_root));
+    if (0) { _test_next: ; }
+    return failures;
+}
+
+/* Scenario steps in their original order; the first failing step stops
+ * the case, as ASSERT's goto did before the split. */
+static int (*const horn_case_steps[])(struct horn_case *) = {
+    horn_case_setup,
+    horn_case_query_identity,
+    horn_case_isolated_disproved,
+    horn_case_imported_isa,
+    horn_case_genls_proved,
+    horn_case_genls_unknown,
+    horn_case_unknown_stable,
+    horn_case_direct_setup,
+    horn_case_direct_proved,
+    horn_case_direct_fact_budget,
+    horn_case_direct_step_budget,
+    horn_case_imported_fact_budget,
+    horn_case_imported_step_budget,
+    horn_case_derivation_budget,
+    horn_case_recursion_budget,
+    horn_case_memory_budget,
+    horn_case_time_budget,
+    horn_case_time_regressed,
+    horn_case_time_source_missing,
+    horn_case_predicate_missing,
+    horn_case_non_imported_invalid,
+    horn_case_bad_inputs,
+    horn_case_manifest_changed,
+};
+
 static int test_ontology_horn_fixed_point(void)
 {
     int failures = 0;
     TEST_CASE("ontology Horn: ISA and genls saturate without explosion") {
-        struct horn_fixture isolated, imported;
-        ASSERT(horn_fixture_init(&isolated, false));
-        ASSERT(horn_fixture_init(&imported, true));
-        struct zcl_ontology_budget_v1 budget = {
-            .schema_version = ZCL_ONTOLOGY_OBJECT_VERSION,
-            .memory_limit_bytes = 1u << 20,
-            .fact_limit = 4096,
-            .step_limit = 16384,
-            .recursion_limit = 32,
-            .derivation_limit = 1024,
-            .time_limit_us = 1000000,
-        };
-        struct horn_test_clock clock = {0};
-        union {
-            max_align_t alignment;
-            uint8_t bytes[ZCL_ONTOLOGY_EVALUATOR_STORAGE_BYTES];
-        } storage;
-        struct zcl_ontology_evaluator *evaluator = NULL;
-        ASSERT(zcl_ontology_evaluator_init_v1(
-            storage.bytes, sizeof(storage.bytes), &evaluator));
-        struct zcl_ontology_horn_query_v1 query;
-        struct zcl_ontology_result_v1 result;
-
-        horn_query_init(
-            &query, &isolated, false,
-            isolated.vocabulary.isa_predicate_root,
-            isolated.entity_x, isolated.type_c, &budget, &clock);
-        uint8_t query_root[32], query_root_again[32];
-        ASSERT(zcl_ontology_horn_query_v1_root(&query, query_root));
-        ASSERT(zcl_ontology_horn_query_v1_root(&query, query_root_again));
-        ASSERT(memcmp(query_root, query_root_again, 32) == 0);
-        query.argument_roots[1][0] ^= 1u;
-        ASSERT(zcl_ontology_horn_query_v1_root(&query, query_root_again));
-        ASSERT(memcmp(query_root, query_root_again, 32) != 0);
-        query.argument_roots[1][0] ^= 1u;
-        ASSERT(!zcl_ontology_horn_query_v1_root(
-            &query, query.universe_root));
-        ASSERT(memcmp(query.universe_root, isolated.universe_root, 32) == 0);
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &isolated.universe, &query, &result));
-        ASSERT(result.complete && result.status == ZCL_ONTOLOGY_DISPROVED);
-        ASSERT(!result.observed_positive && result.observed_negative);
-
-        horn_query_init(
-            &query, &imported, true,
-            imported.vocabulary.isa_predicate_root,
-            imported.entity_x, imported.type_c, &budget, &clock);
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(result.complete && result.status == ZCL_ONTOLOGY_BOTH);
-        ASSERT(result.observed_positive && result.observed_negative);
-        ASSERT(result.derivations_produced == 6);
-
-        horn_query_init(
-            &query, &imported, true,
-            imported.vocabulary.genls_predicate_root,
-            imported.type_a, imported.type_c, &budget, &clock);
-        ASSERT(zcl_ontology_horn_query_v1_root(&query, query_root));
-        uint8_t import_before[32];
-        memcpy(import_before, imported.imports[0], 32);
-        ASSERT(!zcl_ontology_horn_query_v1_root(
-            &query, imported.imports[0]));
-        ASSERT(memcmp(import_before, imported.imports[0], 32) == 0);
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(result.complete && result.status == ZCL_ONTOLOGY_PROVED);
-        ASSERT(result.observed_positive && !result.observed_negative);
-
-        horn_query_init(
-            &query, &imported, true,
-            imported.vocabulary.genls_predicate_root,
-            imported.type_c, imported.type_a, &budget, &clock);
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(result.complete && result.status == ZCL_ONTOLOGY_UNKNOWN);
-        ASSERT(!result.observed_positive && !result.observed_negative);
-
-        uint64_t stable_facts = result.facts_examined;
-        uint64_t stable_steps = result.steps_taken;
-        uint64_t stable_derivations = result.derivations_produced;
-        uint32_t stable_depth = result.max_recursion_depth;
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(result.complete && result.status == ZCL_ONTOLOGY_UNKNOWN);
-        ASSERT(result.facts_examined == stable_facts);
-        ASSERT(result.steps_taken == stable_steps);
-        ASSERT(result.derivations_produced == stable_derivations);
-        ASSERT(result.max_recursion_depth == stable_depth);
-
-        struct horn_fixture direct;
-        ASSERT(horn_fixture_init(&direct, false));
-        direct.inputs.formulas = NULL;
-        direct.inputs.formula_count = 0;
-        direct.inputs.rules = NULL;
-        direct.inputs.rule_count = 0;
-        direct.manifest.formula_count = 0;
-        direct.manifest.rule_count = 0;
-        ASSERT(zcl_ontology_object_set_v1_root(
-            ZCL_ONTOLOGY_OBJECT_FORMULA, NULL, 0,
-            direct.manifest.formula_set_root));
-        ASSERT(zcl_ontology_object_set_v1_root(
-            ZCL_ONTOLOGY_OBJECT_RULE, NULL, 0,
-            direct.manifest.rule_set_root));
-        ASSERT(zcl_ontology_manifest_v1_validate(
-            &direct.manifest, &direct.universe, &direct.inputs));
-        struct zcl_ontology_budget_v1 direct_budget = budget;
-        horn_query_init(
-            &query, &direct, false,
-            direct.vocabulary.genls_predicate_root,
-            direct.type_a, direct.type_b, &direct_budget, &clock);
-        ASSERT(zcl_ontology_horn_query_v1_root(&query, query_root));
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &direct.universe, &query, &result));
-        ASSERT(result.complete && result.status == ZCL_ONTOLOGY_PROVED);
-        ASSERT(result.observed_positive && !result.observed_negative);
-        ASSERT(result.derivations_produced == 0);
-        ASSERT(result.max_recursion_depth == 0);
-        uint8_t direct_derivation_root[32];
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-
-        direct_budget.fact_limit = 0;
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &direct.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_FACT_BUDGET);
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-        direct_budget.fact_limit = 4096;
-        direct_budget.step_limit = 0;
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &direct.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_STEP_BUDGET);
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-
-        budget.fact_limit = 1;
-        horn_query_init(
-            &query, &imported, true,
-            imported.vocabulary.isa_predicate_root,
-            imported.entity_x, imported.type_c, &budget, &clock);
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_FACT_BUDGET);
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-
-        budget.fact_limit = 4096;
-        budget.step_limit = 1;
-        horn_query_init(
-            &query, &imported, true,
-            imported.vocabulary.isa_predicate_root,
-            imported.entity_x, imported.type_c, &budget, &clock);
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_STEP_BUDGET);
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-
-        budget.step_limit = 16384;
-        budget.derivation_limit = 0;
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason ==
-               ZCL_ONTOLOGY_REASON_DERIVATION_BUDGET);
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-
-        budget.derivation_limit = 1024;
-        budget.recursion_limit = 0;
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason ==
-               ZCL_ONTOLOGY_REASON_RECURSION_BUDGET);
-        ASSERT(result.observed_negative);
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-
-        budget.recursion_limit = 32;
-        budget.memory_limit_bytes = 1;
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_MEMORY_BUDGET);
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-
-        budget.memory_limit_bytes = 1u << 20;
-        budget.time_limit_us = 1;
-        clock.now_us = 0;
-        clock.advance_us = 1;
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason == ZCL_ONTOLOGY_REASON_TIME_BUDGET);
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-        clock.now_us = 2;
-        clock.advance_us = UINT64_MAX;
-        budget.time_limit_us = UINT64_MAX;
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason ==
-               ZCL_ONTOLOGY_REASON_TIME_SOURCE_REGRESSED);
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-        clock.now_us = 0;
-        clock.advance_us = 0;
-        budget.time_limit_us = 1000000;
-
-        query.elapsed_us = NULL;
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason ==
-               ZCL_ONTOLOGY_REASON_TIME_SOURCE_MISSING);
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-
-        horn_query_init(
-            &query, &imported, true,
-            imported.vocabulary.isa_predicate_root,
-            imported.entity_x, imported.type_c, &budget, &clock);
-        horn_root(query.predicate_root, 0x77);
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason ==
-               ZCL_ONTOLOGY_REASON_PREDICATE_MISSING);
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-
-        horn_query_init(
-            &query, &imported, false,
-            imported.vocabulary.isa_predicate_root,
-            imported.entity_x, imported.type_c, &budget, &clock);
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason ==
-               ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID);
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-
-        horn_query_init(
-            &query, &imported, true,
-            imported.vocabulary.isa_predicate_root,
-            imported.entity_x, imported.type_c, &budget, &clock);
-        struct zcl_ontology_manifest_inputs_v1 bad_inputs = imported.inputs;
-        bad_inputs.assertions = NULL;
-        query.inputs = &bad_inputs;
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason ==
-               ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID);
-        query.inputs = &imported.inputs;
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
-
-        struct zcl_ontology_manifest_v1 changed = imported.manifest;
-        changed.rule_set_root[0] ^= 1u;
-        query.manifest = &changed;
-        ASSERT(zcl_ontology_evaluate_horn_v1(
-            evaluator, &imported.universe, &query, &result));
-        ASSERT(!result.complete && result.status == ZCL_ONTOLOGY_INCOMPLETE);
-        ASSERT(result.incomplete_reason ==
-               ZCL_ONTOLOGY_REASON_MANIFEST_INVALID);
-        ASSERT(horn_result_derivation_root(
-            &query, &result, direct_derivation_root));
+        struct horn_case c;
+        for (size_t i = 0;
+             i < sizeof(horn_case_steps) / sizeof(horn_case_steps[0]); i++) {
+            failures += horn_case_steps[i](&c);
+            if (failures)
+                goto _test_next;
+        }
         PASS();
     } TEST_END
     return failures;

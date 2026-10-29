@@ -697,8 +697,6 @@ tests/harness/src/test_network_crawler.c:test_network_crawler:46
 tests/harness/src/test_node_health_service.c:test_node_health_service:304
 tests/harness/src/test_nullifier_backfill_service.c:nbf_reader:16
 tests/harness/src/test_nullifier_backfill_service.c:test_nullifier_backfill_service:42
-tests/harness/src/test_ontology_horn_evaluator.c:horn_fixture_init:24
-tests/harness/src/test_ontology_horn_evaluator.c:test_ontology_horn_fixed_point:26
 tests/harness/src/test_overlay_parse_parity.c:blog_scan_both:28
 tests/harness/src/test_overlay_parse_parity.c:ref_slp_build_genesis:26
 tests/harness/src/test_overlay_parse_parity.c:ref_slp_parse:46
