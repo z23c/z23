@@ -321,6 +321,82 @@ static bool pcw_header_pow_ok(const struct block_header *h,
     return true;
 }
 
+/* Check one supplied ancestor (index `i`, oldest-first) for a well-formed
+ * header, valid work, and a link to the previous ancestor. On failure the
+ * rung is already marked FAILED and false is returned. */
+static bool pcw_rung1_ancestor_step(struct pcw_rung *r,
+                                    const struct chain_params *cp,
+                                    const struct json_value *e, size_t i,
+                                    struct uint256 *prev_hash, int *linked)
+{
+    const char *ehex = (e && e->type == JSON_STR) ? json_get_str(e)
+                                                  : NULL;
+    struct block_header ah;
+    if (!ehex || !pcw_decode_header(ehex, &ah)) {
+        pcw_field_int(r, "headers_linked", *linked);
+        pcw_set(r, PCW_FAILED,
+                "ancestor header %zu (oldest-first) is not a "
+                "well-formed header", i);
+        return false;
+    }
+    struct uint256 ahash;
+    const char *awhy = NULL;
+    if (!pcw_header_pow_ok(&ah, cp, &ahash, &awhy)) {
+        pcw_field_int(r, "headers_linked", *linked);
+        pcw_set(r, PCW_FAILED, "ancestor header %zu: %s", i, awhy);
+        return false;
+    }
+    if (i > 0 && memcmp(ah.hashPrevBlock.data, prev_hash->data,
+                        32) != 0) {
+        pcw_field_int(r, "headers_linked", *linked);
+        pcw_set(r, PCW_FAILED,
+                "ancestor header %zu does not build on ancestor "
+                "%zu — the supplied chain is broken", i, i - 1);
+        return false;
+    }
+    *prev_hash = ahash;
+    (*linked)++;
+    return true;
+}
+
+/* On failure the rung is already marked FAILED and false is returned. */
+/* Optional ancestors, oldest-first, each linking into the next and the
+ * last into `header`. Every ancestor must itself carry valid work. */
+static bool pcw_rung1_ancestors(struct pcw_walk *w,
+                                const struct json_value *input,
+                                const struct chain_params *cp, int *linked)
+{
+    struct pcw_rung *r = &w->rung[0];
+    const struct json_value *anc = json_get(input, "headers");
+    *linked = 0;
+    if (anc && anc->type == JSON_ARR) {
+        size_t n = json_size(anc);
+        if (n > PCW_MAX_ANCESTORS) {
+            pcw_field_int(r, "headers_linked", 0);
+            pcw_set(r, PCW_FAILED,
+                    "`headers` carries %zu ancestors, over the %d cap",
+                    n, PCW_MAX_ANCESTORS);
+            return false;
+        }
+        struct uint256 prev_hash;
+        uint256_set_null(&prev_hash);
+        for (size_t i = 0; i < n; i++) {
+            if (!pcw_rung1_ancestor_step(r, cp, json_at(anc, i), i,
+                                         &prev_hash, linked))
+                return false;
+        }
+        if (n > 0 && memcmp(w->header.hashPrevBlock.data, prev_hash.data,
+                            32) != 0) {
+            pcw_field_int(r, "headers_linked", *linked);
+            pcw_set(r, PCW_FAILED,
+                    "the anchoring header does not build on the newest "
+                    "supplied ancestor — the supplied chain is broken");
+            return false;
+        }
+    }
+    return true;
+}
+
 static void pcw_rung1_header_pow(struct pcw_walk *w,
                                  const struct json_value *input)
 {
@@ -364,60 +440,9 @@ static void pcw_rung1_header_pow(struct pcw_walk *w,
         return;
     }
 
-    /* Optional ancestors, oldest-first, each linking into the next and the
-     * last into `header`. Every ancestor must itself carry valid work. */
-    const struct json_value *anc = json_get(input, "headers");
     int linked = 0;
-    if (anc && anc->type == JSON_ARR) {
-        size_t n = json_size(anc);
-        if (n > PCW_MAX_ANCESTORS) {
-            pcw_field_int(r, "headers_linked", 0);
-            pcw_set(r, PCW_FAILED,
-                    "`headers` carries %zu ancestors, over the %d cap",
-                    n, PCW_MAX_ANCESTORS);
-            return;
-        }
-        struct uint256 prev_hash;
-        uint256_set_null(&prev_hash);
-        for (size_t i = 0; i < n; i++) {
-            const struct json_value *e = json_at(anc, i);
-            const char *ehex = (e && e->type == JSON_STR) ? json_get_str(e)
-                                                          : NULL;
-            struct block_header ah;
-            if (!ehex || !pcw_decode_header(ehex, &ah)) {
-                pcw_field_int(r, "headers_linked", linked);
-                pcw_set(r, PCW_FAILED,
-                        "ancestor header %zu (oldest-first) is not a "
-                        "well-formed header", i);
-                return;
-            }
-            struct uint256 ahash;
-            const char *awhy = NULL;
-            if (!pcw_header_pow_ok(&ah, cp, &ahash, &awhy)) {
-                pcw_field_int(r, "headers_linked", linked);
-                pcw_set(r, PCW_FAILED, "ancestor header %zu: %s", i, awhy);
-                return;
-            }
-            if (i > 0 && memcmp(ah.hashPrevBlock.data, prev_hash.data,
-                                32) != 0) {
-                pcw_field_int(r, "headers_linked", linked);
-                pcw_set(r, PCW_FAILED,
-                        "ancestor header %zu does not build on ancestor "
-                        "%zu — the supplied chain is broken", i, i - 1);
-                return;
-            }
-            prev_hash = ahash;
-            linked++;
-        }
-        if (n > 0 && memcmp(w->header.hashPrevBlock.data, prev_hash.data,
-                            32) != 0) {
-            pcw_field_int(r, "headers_linked", linked);
-            pcw_set(r, PCW_FAILED,
-                    "the anchoring header does not build on the newest "
-                    "supplied ancestor — the supplied chain is broken");
-            return;
-        }
-    }
+    if (!pcw_rung1_ancestors(w, input, cp, &linked))
+        return;
 
     pcw_field_int(r, "headers_linked", linked);
     if (linked > 0)
@@ -432,6 +457,66 @@ static void pcw_rung1_header_pow(struct pcw_walk *w,
 
 /* ── rung 2: tx inclusion (merkle path) ────────────────────────────── */
 
+enum pcw_tx_decode {
+    PCW_TX_DECODE_OK,
+    PCW_TX_DECODE_NOMEM,
+    PCW_TX_DECODE_BAD_HEX,
+    PCW_TX_DECODE_BAD_TX,
+};
+
+/* Decode `tx_hex` into w->tx; exactly one transaction, no trailing bytes. */
+static enum pcw_tx_decode pcw_decode_tx(struct pcw_walk *w, const char *tx_hex)
+{
+    uint8_t *buf = zcl_malloc(PCW_TX_MAX, "proof_chain.tx");
+    if (!buf)
+        return PCW_TX_DECODE_NOMEM;
+    size_t len = pcw_unhex(tx_hex, buf, PCW_TX_MAX);
+    if (len == 0) {
+        free(buf);
+        return PCW_TX_DECODE_BAD_HEX;
+    }
+    struct byte_stream s;
+    stream_init_from_data(&s, buf, len);
+    bool ok = transaction_deserialize(&w->tx, &s);
+    if (ok && stream_remaining(&s) != 0)
+        ok = false;
+    stream_free(&s);
+    free(buf);
+    return ok ? PCW_TX_DECODE_OK : PCW_TX_DECODE_BAD_TX;
+}
+
+/* Parse the optional hex sibling list; false when it is malformed. */
+static bool pcw_parse_branch(const char *branch_hex,
+                             uint8_t sib[][32], size_t *branch_len)
+{
+    *branch_len = 0;
+    if (branch_hex && branch_hex[0]) {
+        uint8_t raw[PCW_MAX_BRANCH * 32];
+        size_t n = pcw_unhex(branch_hex, raw, sizeof(raw));
+        if (n == 0 || (n % 32) != 0)
+            return false;
+        *branch_len = n / 32;
+        memcpy(sib, raw, n);
+    }
+    return true;
+}
+
+static struct uint256 pcw_merkle_fold(struct uint256 acc, int64_t index,
+                                      uint8_t sib[][32], size_t branch_len)
+{
+    for (size_t i = 0; i < branch_len; i++) {
+        struct uint256 other;
+        memcpy(other.data, sib[i], 32);
+        struct uint256 next;
+        if (((index >> (int)i) & 1) == 0)
+            merkle_hash_pair(&acc, &other, &next);
+        else
+            merkle_hash_pair(&other, &acc, &next);
+        acc = next;
+    }
+    return acc;
+}
+
 static void pcw_rung2_tx_inclusion(struct pcw_walk *w,
                                    const struct json_value *input)
 {
@@ -444,30 +529,21 @@ static void pcw_rung2_tx_inclusion(struct pcw_walk *w,
         return;
     }
 
-    uint8_t *buf = zcl_malloc(PCW_TX_MAX, "proof_chain.tx");
-    if (!buf) {
+    enum pcw_tx_decode dec = pcw_decode_tx(w, tx_hex);
+    if (dec == PCW_TX_DECODE_NOMEM) {
         pcw_set(r, PCW_NOT_CHECKED,
                 "out of memory decoding the anchoring transaction");
         LOG_ERROR(PCW_LOG, "tx buffer allocation failed (%d bytes)",
                   PCW_TX_MAX);
         return;
     }
-    size_t len = pcw_unhex(tx_hex, buf, PCW_TX_MAX);
-    if (len == 0) {
-        free(buf);
+    if (dec == PCW_TX_DECODE_BAD_HEX) {
         pcw_set(r, PCW_FAILED,
                 "`tx` is not even-length hex within the %d-byte cap",
                 PCW_TX_MAX);
         return;
     }
-    struct byte_stream s;
-    stream_init_from_data(&s, buf, len);
-    bool ok = transaction_deserialize(&w->tx, &s);
-    if (ok && stream_remaining(&s) != 0)
-        ok = false;
-    stream_free(&s);
-    free(buf);
-    if (!ok) {
+    if (dec != PCW_TX_DECODE_OK) {
         pcw_set(r, PCW_FAILED,
                 "`tx` is not exactly one well-formed transaction (wire "
                 "layout or trailing bytes)");
@@ -498,17 +574,11 @@ static void pcw_rung2_tx_inclusion(struct pcw_walk *w,
     uint8_t sib[PCW_MAX_BRANCH][32];
     size_t branch_len = 0;
     const char *branch_hex = json_get_str(json_get(input, "merkle_branch"));
-    if (branch_hex && branch_hex[0]) {
-        uint8_t raw[PCW_MAX_BRANCH * 32];
-        size_t n = pcw_unhex(branch_hex, raw, sizeof(raw));
-        if (n == 0 || (n % 32) != 0) {
-            pcw_set(r, PCW_FAILED,
-                    "`merkle_branch` must be a multiple of 32 bytes of hex "
-                    "(at most %d siblings)", PCW_MAX_BRANCH);
-            return;
-        }
-        branch_len = n / 32;
-        memcpy(sib, raw, n);
+    if (!pcw_parse_branch(branch_hex, sib, &branch_len)) {
+        pcw_set(r, PCW_FAILED,
+                "`merkle_branch` must be a multiple of 32 bytes of hex "
+                "(at most %d siblings)", PCW_MAX_BRANCH);
+        return;
     }
     pcw_field_int(r, "branch_len", (int64_t)branch_len);
 
@@ -522,17 +592,7 @@ static void pcw_rung2_tx_inclusion(struct pcw_walk *w,
         return;
     }
 
-    struct uint256 acc = w->tx.hash;
-    for (size_t i = 0; i < branch_len; i++) {
-        struct uint256 other;
-        memcpy(other.data, sib[i], 32);
-        struct uint256 next;
-        if (((index >> (int)i) & 1) == 0)
-            merkle_hash_pair(&acc, &other, &next);
-        else
-            merkle_hash_pair(&other, &acc, &next);
-        acc = next;
-    }
+    struct uint256 acc = pcw_merkle_fold(w->tx.hash, index, sib, branch_len);
     pcw_field_uint256(r, "computed_root", &acc);
 
     if (memcmp(acc.data, w->header.hashMerkleRoot.data, 32) != 0) {
@@ -974,6 +1034,57 @@ static void pcw_rung7_identity_anchor(struct pcw_walk *w,
 
 /* ── document intake ───────────────────────────────────────────────── */
 
+static bool pcw_snapshot_same(const struct platform_positioned_file_snapshot *a,
+                              const struct platform_positioned_file_snapshot *b)
+{
+    return a->size == b->size && a->volume == b->volume &&
+           a->file_low == b->file_low && a->file_high == b->file_high &&
+           a->modified_seconds == b->modified_seconds &&
+           a->modified_nanoseconds == b->modified_nanoseconds &&
+           a->changed_seconds == b->changed_seconds &&
+           a->changed_nanoseconds == b->changed_nanoseconds;
+}
+
+/* Read `doc_file` into `file_hex` (capacity `cap`), trimming trailing
+ * whitespace and NUL-terminating. Fills why/why_size and returns false on
+ * any failure. */
+static bool pcw_read_doc_file(const char *doc_file, char *file_hex, size_t cap,
+                              char *why, size_t why_size)
+{
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot snapshot;
+    platform_positioned_file_init(&file);
+    bool opened = platform_positioned_file_open(&file, doc_file) &&
+                  platform_positioned_file_snapshot(&file, &snapshot);
+    if (!opened) {
+        (void)snprintf(why, why_size, "cannot open doc_file: %s",
+                       strerror(errno));
+        return false;
+    }
+    if (snapshot.size == 0 || snapshot.size >= cap) {
+        platform_positioned_file_close(&file);
+        (void)snprintf(why, why_size,
+                       "doc_file is empty or exceeds the bounded document size");
+        return false;
+    }
+    int64_t n = platform_positioned_file_read(
+        &file, file_hex, (size_t)snapshot.size, 0);
+    struct platform_positioned_file_snapshot after;
+    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+        pcw_snapshot_same(&snapshot, &after);
+    platform_positioned_file_close(&file);
+    if (!stable || (n >= 0 && (uint64_t)n != snapshot.size)) n = -1;
+    if (n <= 0) {
+        (void)snprintf(why, why_size, "doc_file is empty or unreadable");
+        return false;
+    }
+    while (n > 0 && (file_hex[n - 1] == '\n' || file_hex[n - 1] == '\r' ||
+                     file_hex[n - 1] == ' ' || file_hex[n - 1] == '\t'))
+        n--;
+    file_hex[n] = '\0';
+    return true;
+}
+
 /* Load the document wire bytes from `doc` hex or `doc_file`. Fills
  * why/why_size on any failure and returns false. */
 static bool pcw_load_doc(const struct json_value *input, struct pcw_walk *w,
@@ -991,43 +1102,9 @@ static bool pcw_load_doc(const struct json_value *input, struct pcw_walk *w,
                            "saved .zid>");
             return false;
         }
-        struct platform_positioned_file file;
-        struct platform_positioned_file_snapshot snapshot;
-        platform_positioned_file_init(&file);
-        bool opened = platform_positioned_file_open(&file, doc_file) &&
-                      platform_positioned_file_snapshot(&file, &snapshot);
-        if (!opened) {
-            (void)snprintf(why, why_size, "cannot open doc_file: %s",
-                           strerror(errno));
+        if (!pcw_read_doc_file(doc_file, file_hex, sizeof(file_hex), why,
+                               why_size))
             return false;
-        }
-        if (snapshot.size == 0 || snapshot.size >= sizeof(file_hex)) {
-            platform_positioned_file_close(&file);
-            (void)snprintf(why, why_size,
-                           "doc_file is empty or exceeds the bounded document size");
-            return false;
-        }
-        int64_t n = platform_positioned_file_read(
-            &file, file_hex, (size_t)snapshot.size, 0);
-        struct platform_positioned_file_snapshot after;
-        bool stable = platform_positioned_file_snapshot(&file, &after) &&
-            snapshot.size == after.size && snapshot.volume == after.volume &&
-            snapshot.file_low == after.file_low &&
-            snapshot.file_high == after.file_high &&
-            snapshot.modified_seconds == after.modified_seconds &&
-            snapshot.modified_nanoseconds == after.modified_nanoseconds &&
-            snapshot.changed_seconds == after.changed_seconds &&
-            snapshot.changed_nanoseconds == after.changed_nanoseconds;
-        platform_positioned_file_close(&file);
-        if (!stable || (n >= 0 && (uint64_t)n != snapshot.size)) n = -1;
-        if (n <= 0) {
-            (void)snprintf(why, why_size, "doc_file is empty or unreadable");
-            return false;
-        }
-        while (n > 0 && (file_hex[n - 1] == '\n' || file_hex[n - 1] == '\r' ||
-                         file_hex[n - 1] == ' ' || file_hex[n - 1] == '\t'))
-            n--;
-        file_hex[n] = '\0';
         doc_hex = file_hex;
     }
 
@@ -1051,35 +1128,133 @@ static bool pcw_load_doc(const struct json_value *input, struct pcw_walk *w,
 
 /* ── report assembly ───────────────────────────────────────────────── */
 
-static void pcw_emit(const struct pcw_walk *w, struct json_value *data)
+struct pcw_tally {
+    int passed, failed, skipped;
+    int prefix;
+    int first_break;
+    int first_gap;
+};
+
+static void pcw_tally_rungs(const struct pcw_walk *w, struct pcw_tally *t)
 {
-    int passed = 0, failed = 0, skipped = 0;
-    int prefix = 0;
     bool prefix_open = true;
+    t->passed = 0;
+    t->failed = 0;
+    t->skipped = 0;
+    t->prefix = 0;
     /* `first_break` names the first rung that actually FAILED — a rung
      * that was merely not checked is a gap, not a break, and calling it
      * one would blame the wrong link. `first_gap` is the first rung that
      * did not pass for any reason, which is exactly where the verified
      * prefix stops. */
-    int first_break = 0;
-    int first_gap = 0;
+    t->first_break = 0;
+    t->first_gap = 0;
     for (int i = 0; i < PCW_RUNGS; i++) {
         switch (w->rung[i].result) {
-        case PCW_PASSED:      passed++;  break;
-        case PCW_FAILED:      failed++;  break;
-        case PCW_NOT_CHECKED: skipped++; break;
+        case PCW_PASSED:      t->passed++;  break;
+        case PCW_FAILED:      t->failed++;  break;
+        case PCW_NOT_CHECKED: t->skipped++; break;
         }
-        if (w->rung[i].result == PCW_FAILED && first_break == 0)
-            first_break = w->rung[i].n;
+        if (w->rung[i].result == PCW_FAILED && t->first_break == 0)
+            t->first_break = w->rung[i].n;
         if (prefix_open) {
             if (w->rung[i].result == PCW_PASSED) {
-                prefix++;
+                t->prefix++;
             } else {
                 prefix_open = false;
-                first_gap = w->rung[i].n;
+                t->first_gap = w->rung[i].n;
             }
         }
     }
+}
+
+static void pcw_format_verdict(const struct pcw_walk *w,
+                               const struct pcw_tally *t, char *verdict,
+                               size_t verdict_size)
+{
+    if (t->failed > 0)
+        (void)snprintf(verdict, verdict_size,
+                       "BROKEN — rung %d (%s) failed; %d passed, %d failed, "
+                       "%d not checked",
+                       t->first_break, w->rung[t->first_break - 1].id,
+                       t->passed, t->failed, t->skipped);
+    else if (t->passed == PCW_RUNGS)
+        (void)snprintf(verdict, verdict_size,
+                       "COMPLETE — all %d rungs passed: this record is bound "
+                       "to proof-of-work and signed by a key anchored and "
+                       "active on-chain",
+                       PCW_RUNGS);
+    else
+        (void)snprintf(verdict, verdict_size,
+                       "INCOMPLETE — %d/%d rungs passed, %d not checked "
+                       "(nothing failed)",
+                       t->passed, PCW_RUNGS, t->skipped);
+}
+
+static void pcw_emit_break_gap(const struct pcw_walk *w,
+                               const struct pcw_tally *t,
+                               struct json_value *data)
+{
+    if (t->first_break > 0) {
+        (void)json_push_kv_int(data, "first_break", t->first_break);
+        (void)json_push_kv_str(data, "first_break_id",
+                               w->rung[t->first_break - 1].id);
+    } else {
+        struct json_value nul;
+        json_init(&nul);
+        json_set_null(&nul);
+        (void)json_push_kv(data, "first_break", &nul);
+        json_free(&nul);
+    }
+    if (t->first_gap > 0) {
+        (void)json_push_kv_int(data, "first_gap", t->first_gap);
+        (void)json_push_kv_str(data, "first_gap_id",
+                               w->rung[t->first_gap - 1].id);
+        (void)json_push_kv_str(data, "first_gap_detail",
+                               w->rung[t->first_gap - 1].detail);
+    }
+}
+
+static void pcw_emit_rung_entry(const struct pcw_rung *r,
+                                struct json_value *report,
+                                struct json_value *rungs)
+{
+    char line[PCW_DETAIL_MAX + 80];
+    (void)snprintf(line, sizeof(line), "%s %d/%d %-15s %s",
+                   pcw_result_tag(r->result), r->n, PCW_RUNGS, r->id,
+                   r->detail);
+    struct json_value lv;
+    json_init(&lv);
+    json_set_str(&lv, line);
+    (void)json_push_back(report, &lv);
+    json_free(&lv);
+
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    (void)json_push_kv_int(&row, "n", r->n);
+    (void)json_push_kv_str(&row, "id", r->id);
+    (void)json_push_kv_str(&row, "title", r->title);
+    (void)json_push_kv_str(&row, "result", pcw_result_name(r->result));
+    (void)json_push_kv_str(&row, "detail", r->detail);
+    /* `reason` exists ONLY on not_checked rows: a passing rung never
+     * carries one, so the two can never be confused. */
+    if (r->result == PCW_NOT_CHECKED)
+        (void)json_push_kv_str(&row, "reason", r->detail);
+    (void)json_push_kv_str(&row, "proves", r->proves);
+    for (size_t k = 0; k < r->fields.num_children; k++)
+        (void)json_push_kv(&row, r->fields.keys[k],
+                           &r->fields.children[k]);
+    (void)json_push_back(rungs, &row);
+    json_free(&row);
+}
+
+static void pcw_emit(const struct pcw_walk *w, struct json_value *data)
+{
+    struct pcw_tally t;
+    pcw_tally_rungs(w, &t);
+    const int passed = t.passed, skipped = t.skipped;
+    const int prefix = t.prefix;
 
     /* Honest, not constant: true exactly when no rung opened a database.
      * Only rung 7 ever can, and only when the caller passed `datadir`. */
@@ -1096,23 +1271,7 @@ static void pcw_emit(const struct pcw_walk *w, struct json_value *data)
                                  "anchor, so a node-free walk stops at 6");
 
     char verdict[192];
-    if (failed > 0)
-        (void)snprintf(verdict, sizeof(verdict),
-                       "BROKEN — rung %d (%s) failed; %d passed, %d failed, "
-                       "%d not checked",
-                       first_break, w->rung[first_break - 1].id, passed,
-                       failed, skipped);
-    else if (passed == PCW_RUNGS)
-        (void)snprintf(verdict, sizeof(verdict),
-                       "COMPLETE — all %d rungs passed: this record is bound "
-                       "to proof-of-work and signed by a key anchored and "
-                       "active on-chain",
-                       PCW_RUNGS);
-    else
-        (void)snprintf(verdict, sizeof(verdict),
-                       "INCOMPLETE — %d/%d rungs passed, %d not checked "
-                       "(nothing failed)",
-                       passed, PCW_RUNGS, skipped);
+    pcw_format_verdict(w, &t, verdict, sizeof(verdict));
     (void)json_push_kv_str(data, "verdict", verdict);
 
     (void)json_push_kv_int(data, "verified_prefix", prefix);
@@ -1129,30 +1288,13 @@ static void pcw_emit(const struct pcw_walk *w, struct json_value *data)
                            "reports its own honest verdict but can never "
                            "lift this past an earlier break");
 
-    if (first_break > 0) {
-        (void)json_push_kv_int(data, "first_break", first_break);
-        (void)json_push_kv_str(data, "first_break_id",
-                               w->rung[first_break - 1].id);
-    } else {
-        struct json_value nul;
-        json_init(&nul);
-        json_set_null(&nul);
-        (void)json_push_kv(data, "first_break", &nul);
-        json_free(&nul);
-    }
-    if (first_gap > 0) {
-        (void)json_push_kv_int(data, "first_gap", first_gap);
-        (void)json_push_kv_str(data, "first_gap_id",
-                               w->rung[first_gap - 1].id);
-        (void)json_push_kv_str(data, "first_gap_detail",
-                               w->rung[first_gap - 1].detail);
-    }
+    pcw_emit_break_gap(w, &t, data);
 
     struct json_value summary;
     json_init(&summary);
     json_set_object(&summary);
     (void)json_push_kv_int(&summary, "passed", passed);
-    (void)json_push_kv_int(&summary, "failed", failed);
+    (void)json_push_kv_int(&summary, "failed", t.failed);
     (void)json_push_kv_int(&summary, "not_checked", skipped);
     (void)json_push_kv(data, "summary", &summary);
     json_free(&summary);
@@ -1164,37 +1306,8 @@ static void pcw_emit(const struct pcw_walk *w, struct json_value *data)
     json_init(&rungs);
     json_set_array(&rungs);
 
-    for (int i = 0; i < PCW_RUNGS; i++) {
-        const struct pcw_rung *r = &w->rung[i];
-        char line[PCW_DETAIL_MAX + 80];
-        (void)snprintf(line, sizeof(line), "%s %d/%d %-15s %s",
-                       pcw_result_tag(r->result), r->n, PCW_RUNGS, r->id,
-                       r->detail);
-        struct json_value lv;
-        json_init(&lv);
-        json_set_str(&lv, line);
-        (void)json_push_back(&report, &lv);
-        json_free(&lv);
-
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        (void)json_push_kv_int(&row, "n", r->n);
-        (void)json_push_kv_str(&row, "id", r->id);
-        (void)json_push_kv_str(&row, "title", r->title);
-        (void)json_push_kv_str(&row, "result", pcw_result_name(r->result));
-        (void)json_push_kv_str(&row, "detail", r->detail);
-        /* `reason` exists ONLY on not_checked rows: a passing rung never
-         * carries one, so the two can never be confused. */
-        if (r->result == PCW_NOT_CHECKED)
-            (void)json_push_kv_str(&row, "reason", r->detail);
-        (void)json_push_kv_str(&row, "proves", r->proves);
-        for (size_t k = 0; k < r->fields.num_children; k++)
-            (void)json_push_kv(&row, r->fields.keys[k],
-                               &r->fields.children[k]);
-        (void)json_push_back(&rungs, &row);
-        json_free(&row);
-    }
+    for (int i = 0; i < PCW_RUNGS; i++)
+        pcw_emit_rung_entry(&w->rung[i], &report, &rungs);
     (void)json_push_kv(data, "report", &report);
     json_free(&report);
     (void)json_push_kv(data, "rungs", &rungs);
