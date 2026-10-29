@@ -108,16 +108,6 @@ static struct node_reading read_status(const char *output)
     json_free(&root);
     return n;
 }
-static void sync_detail(const struct node_reading *n, bool process_running, char *out, size_t cap)
-{
-    char local[32], peer[32];
-    if (!n->responding) copy_text(out, cap, process_running ?
-        "Waiting for the node to answer. Sync progress is unknown." : "Start the node to begin synchronization.");
-    else if (n->target > 0)
-        snprintf(out, cap, "Local height %s\nPeer-reported height %s · %lld peers\nFull validation is still being checked.",
-                 zapp_grouped(n->height, local), zapp_grouped(n->target, peer), (long long)(n->peers < 0 ? 0 : n->peers));
-    else snprintf(out, cap, "Local height %s\nWaiting for peers with a current chain view.", zapp_grouped(n->height, local));
-}
 static void observe_node(struct controller *c)
 {
     char *output = calloc(1, ZAPP_TEXT_CAP);
@@ -128,7 +118,7 @@ static void observe_node(struct controller *c)
     bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
     bool wanted = zapp_node_wanted(&c->runtime);
     char status[1024], line[96];
-    sync_detail(&n, process_running, status, sizeof(status));
+    zapp_sync_line(n.responding, process_running, n.height, n.target, status, sizeof(status));
     if (stopping) copy_text(status, sizeof(status), "The node is saving its data before it exits.");
     zapp_node_line(n.responding, process_running, stopping, n.height, n.target, n.peers, line, sizeof(line));
     pthread_mutex_lock(&c->lock);
@@ -247,8 +237,8 @@ static void voice_answer(struct controller *c, enum zapp_voice_intent intent, ch
     else if (intent == ZAPP_VOICE_BALANCE) {
         if (!c->view.balance_known || c->view.balance_stale)
             copy_text(answer, 120, "Current balance is unavailable.");
-        else if (strlen(c->view.balance) < 100)
-            snprintf(answer, 120, "Balance: %.99s", c->view.balance);
+        else if (strcspn(c->view.balance, "\n") < 100)
+            snprintf(answer, 120, "%.*s", (int)strcspn(c->view.balance, "\n"), c->view.balance);
         else copy_text(answer, 120, "The refreshed balance is displayed on screen.");
     } else if (intent == ZAPP_VOICE_START && c->runtime.preview) {
         copy_text(answer, 120, "The preview app does not run a node.");
@@ -580,8 +570,7 @@ static void *worker(void *opaque)
             c->view.node_process_running = process_running;
             c->view.node_wanted = wanted;
             if (!c->view.node_running) {
-                struct node_reading idle = {.height = -1, .target = -1, .peers = -1};
-                sync_detail(&idle, process_running, c->view.sync_status, sizeof(c->view.sync_status));
+                zapp_sync_line(false, process_running, -1, -1, c->view.sync_status, sizeof(c->view.sync_status));
                 zapp_node_line(false, process_running, stopping, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
             }
             c->view.busy = false;

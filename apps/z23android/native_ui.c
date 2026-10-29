@@ -548,7 +548,7 @@ static void render_node(JNIEnv *env, const struct zapp_view *view)
     (void)text(env, sync_view, voice_preview ? "The preview app does not run a node." : status);
     (void)set_visible(env, balance_view, !voice_preview);
     char balance[600];
-    snprintf(balance, sizeof(balance), "%s%s", view->balance_stale ? "Last known, may be out of date:\n" : "",
+    snprintf(balance, sizeof(balance), "%s%s", view->balance_stale ? "Last known:\n" : "",
              view->balance[0] ? view->balance : "Balance appears when your node is ready");
     (void)text(env, balance_view, balance);
     (void)text(env, connection_view, view->connection[0] ? view->connection : "Connect a laptop to use chat.");

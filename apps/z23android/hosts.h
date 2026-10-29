@@ -19,4 +19,8 @@ const char *zapp_grouped(int64_t value, char out[32]);
  * Returns out. */
 const char *zapp_node_line(bool responding, bool process_running, bool stopping, int64_t height,
                            int64_t target, int64_t peers, char *out, size_t cap);
+/* The sentence under More that adds what the node line does not say: how many blocks are left,
+ * or that none are. Arguments as for zapp_node_line. Returns out. */
+const char *zapp_sync_line(bool responding, bool process_running, int64_t height, int64_t target,
+                           char *out, size_t cap);
 #endif

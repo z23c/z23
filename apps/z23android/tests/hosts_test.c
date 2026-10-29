@@ -97,6 +97,17 @@ int main(void)
                    "Node in sync · 3,301,553 · 1 peer"));
     assert(!strcmp(zapp_node_line(true, true, false, 3301554, 3301553, -1, line, sizeof(line)),
                    "Node in sync · 3,301,554"));
+    assert(!strcmp(zapp_sync_line(false, false, -1, -1, line, sizeof(line)),
+                   "Start the node to begin synchronization."));
+    assert(!strcmp(zapp_sync_line(false, true, -1, -1, line, sizeof(line)), "Waiting for the node to answer."));
+    assert(!strcmp(zapp_sync_line(true, true, -1, 3301553, line, sizeof(line)),
+                   "Waiting for the node to report its height."));
+    assert(!strcmp(zapp_sync_line(true, true, 3301133, 0, line, sizeof(line)),
+                   "Waiting for a peer that reports the current chain."));
+    assert(!strcmp(zapp_sync_line(true, true, 3301900, 3301812, line, sizeof(line)),
+                   "Your node has every block its peers report."));
+    assert(!strcmp(zapp_sync_line(true, true, 3300133, 3301537, line, sizeof(line)), "1,404 blocks to go."));
+    assert(!strcmp(zapp_sync_line(true, true, 3301536, 3301537, line, sizeof(line)), "1 block to go."));
     puts("hosts tests passed");
     return 0;
 }

@@ -368,6 +368,18 @@ static bool balance_fields(const struct json_value *data)
            wh && wh->type == JSON_INT && ch && ch->type == JSON_INT;
 }
 
+/* A checked eight-decimal amount without trailing zeros: "1.25000000" reads "1.25", "0.00000000" "0". */
+static const char *amount_short(const struct json_value *data, const char *key, char out[32])
+{
+    snprintf(out, 32, "%s", json_get_str(json_get(data, key)));
+    char *dot = strchr(out, '.'), *end = out + strlen(out);
+    while (dot && end > dot + 1 && end[-1] == '0') *--end = 0;
+    if (dot && end == dot + 1) *dot = 0;
+    return out;
+}
+
+/* One line for the total; the shielded and transparent split only when there is a balance, and the
+ * reserved amount only when something is reserved. */
 static bool balance_render(const struct json_value *data, char *out, size_t cap)
 {
     const char *source = json_get_str(json_get(data, "transparent_source"));
@@ -376,10 +388,16 @@ static bool balance_render(const struct json_value *data, char *out, size_t cap)
     bool stale = !strcmp(source, "unavailable") ||
         !json_get_bool(json_get(data, "transparent_sources_agree")) ||
         wh < 0 || ch < 0 || wh < ch;
-    int n = snprintf(out, cap, "Balance%s: %s ZCL\nTransparent: %s · Shielded: %s\nReserved: %s",
-                     stale ? " (may be stale)" : "", json_get_str(json_get(data, "total")),
-                     json_get_str(json_get(data, "transparent")), json_get_str(json_get(data, "private")),
-                     json_get_str(json_get(data, "encumbered")));
+    char total[32], shielded[32], open[32], reserved[32];
+    amount_short(data, "total", total);
+    amount_short(data, "private", shielded);
+    amount_short(data, "transparent", open);
+    amount_short(data, "encumbered", reserved);
+    int n = snprintf(out, cap, "Balance %s ZCL%s", total, stale ? ", may be out of date" : "");
+    if (n >= 0 && (size_t)n < cap && strcmp(total, "0"))
+        n += snprintf(out + n, cap - (size_t)n, "\nShielded %s · Transparent %s", shielded, open);
+    if (n >= 0 && (size_t)n < cap && strcmp(reserved, "0"))
+        n += snprintf(out + n, cap - (size_t)n, "\nReserved %s", reserved);
     return n >= 0 && (size_t)n < cap;
 }
 

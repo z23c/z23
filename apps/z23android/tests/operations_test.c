@@ -84,12 +84,18 @@ static void balance_tests(void)
         "\"encumbered\":\"0.00000000\",\"transparent_source\":\"wallet\","
         "\"transparent_sources_agree\":true,\"wallet_height\":20,\"chain_height\":20}}";
     assert(zapp_balance_format(valid, out, sizeof(out)));
-    assert(strstr(out, "1.25000000") && strstr(out, "Shielded: 1.00000000"));
+    assert(!strcmp(out, "Balance 1.25 ZCL\nShielded 1 · Transparent 0.25"));
     const char *stale = "{\"ok\":true,\"data\":{\"total\":\"0.00000000\","
         "\"transparent\":\"0.00000000\",\"private\":\"0.00000000\","
         "\"encumbered\":\"0.00000000\",\"transparent_source\":\"wallet\","
         "\"transparent_sources_agree\":true,\"wallet_height\":19,\"chain_height\":20}}";
-    assert(zapp_balance_format(stale, out, sizeof(out)) && strstr(out, "may be stale"));
+    assert(zapp_balance_format(stale, out, sizeof(out)) && !strcmp(out, "Balance 0 ZCL, may be out of date"));
+    const char *reserved = "{\"ok\":true,\"data\":{\"total\":\"10.00000000\","
+        "\"transparent\":\"0.00000000\",\"private\":\"10.00000000\","
+        "\"encumbered\":\"0.00010000\",\"transparent_source\":\"wallet\","
+        "\"transparent_sources_agree\":true,\"wallet_height\":20,\"chain_height\":20}}";
+    assert(zapp_balance_format(reserved, out, sizeof(out)));
+    assert(!strcmp(out, "Balance 10 ZCL\nShielded 10 · Transparent 0\nReserved 0.0001"));
     assert(!zapp_balance_format("{\"ok\":false,\"data\":{}}", out, sizeof(out)) && !out[0]);
     assert(!zapp_balance_format("{\"ok\":true,\"data\":{\"total\":\"0\"}}", out, sizeof(out)));
     assert(!zapp_balance_format(valid, out, 8));

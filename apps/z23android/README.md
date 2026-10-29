@@ -72,8 +72,12 @@ output reaches the screen only as plain sentences; a JSON error shows its
 message alone, and audio failures show one sentence while their cause goes to
 logcat. The app runs only two read-only node commands, the node status and
 the wallet balance, besides starting, stopping and joining a fleet. Failed
-balance refreshes keep the last value, labelled as possibly out of date; an
-unavailable balance is not displayed as zero.
+balance refreshes keep the last value, labelled "Last known"; an
+unavailable balance is not displayed as zero. The synchronization line adds
+only what the node line leaves out: the blocks still to go, or that the node
+has every block its peers report. The balance is one line without trailing
+zeros ("Balance 1.25 ZCL"); the shielded and transparent split follows only
+when there is a balance, and a reserved amount only when one exists.
 
 **Start node** records the choice in the app's private state, and the app
 starts the node each time it opens until **Stop node** clears the choice.

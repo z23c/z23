@@ -64,6 +64,19 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
     else snprintf(out, cap, "Node catching up · %s of %s", zapp_grouped(height, at), zapp_grouped(target, top));
     return out;
 }
+const char *zapp_sync_line(bool responding, bool process_running, int64_t height, int64_t target,
+                           char *out, size_t cap)
+{
+    char gap[32];
+    if (!responding) snprintf(out, cap, "%s", process_running ?
+        "Waiting for the node to answer." : "Start the node to begin synchronization.");
+    else if (height < 0) snprintf(out, cap, "Waiting for the node to report its height.");
+    else if (target <= 0) snprintf(out, cap, "Waiting for a peer that reports the current chain.");
+    else if (height >= target) snprintf(out, cap, "Your node has every block its peers report.");
+    else snprintf(out, cap, "%s %s to go.", zapp_grouped(target - height, gap),
+                  target - height == 1 ? "block" : "blocks");
+    return out;
+}
 /* "in sync", blocks behind or ahead of the host's zclassicd, then the height. A host that answered the
  * probe without a height has a node that did not answer; a negative height is unknown. */
 static size_t state_text(const struct json_value *row, char *out, size_t cap, size_t used)
