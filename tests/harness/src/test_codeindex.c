@@ -1586,7 +1586,7 @@ static void test_codeindex_platform_arm_group_scan(
     }
 }
 
-static int test_codeindex_platform_arm_group_check(bool has_libnet,
+static int test_codeindex_platform_arm_root_hierarchy_check(bool has_libnet,
     bool has_appsvc, bool has_libtest, bool has_packages, bool has_examples,
     bool has_src)
 {
@@ -1609,7 +1609,7 @@ static int test_codeindex_platform_arm_group_roots(struct codeindex *ci)
     bool has_packages = false, has_examples = false, has_src = false;
     test_codeindex_platform_arm_group_scan(groups, ng, &has_libnet,
         &has_appsvc, &has_libtest, &has_packages, &has_examples, &has_src);
-    failures += test_codeindex_platform_arm_group_check(has_libnet,
+    failures += test_codeindex_platform_arm_root_hierarchy_check(has_libnet,
         has_appsvc, has_libtest, has_packages, has_examples, has_src);
     return failures;
 }
