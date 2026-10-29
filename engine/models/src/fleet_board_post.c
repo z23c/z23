@@ -1245,6 +1245,30 @@ static bool fleet_board_inventory_row_valid(sqlite3_stmt *s,
            (previous == 0 || row->seq < previous);
 }
 
+static void fleet_board_inventory_query(struct qb *q, int64_t now,
+                                        int64_t before_seq, bool public_only,
+                                        size_t max)
+{
+    qb_select(q, QB_T_fleet_board_posts);
+    qb_select_columns(q, k_board_cols, BOARD_NCOLS);
+    fleet_board_where_discoverable(q, now);
+    if (public_only)
+        qb_where_int(q, QB_C_fleet_board_posts_scope, QB_NE,
+                     FLEET_BOARD_SCOPE_FLEET);
+    if (before_seq > 0)
+        qb_where_int(q, QB_C_fleet_board_posts_seq, QB_LT, before_seq);
+    qb_order_by(q, QB_C_fleet_board_posts_seq, QB_DESC);
+    qb_limit(q, (int64_t)max);
+}
+
+static void fleet_board_inventory_take(uint8_t id_out[32],
+    const struct db_fleet_board_post *row, int64_t *last_seq_out)
+{
+    memcpy(id_out, row->post.id, 32);
+    if (last_seq_out)
+        *last_seq_out = row->seq;
+}
+
 int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,
                               int64_t before_seq, bool public_only,
                               uint8_t (*ids)[32], size_t max,
@@ -1257,16 +1281,7 @@ int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,
     if (max > FLEET_BOARD_LIST_MAX)
         max = FLEET_BOARD_LIST_MAX;
     struct qb q;
-    qb_select(&q, QB_T_fleet_board_posts);
-    qb_select_columns(&q, k_board_cols, BOARD_NCOLS);
-    fleet_board_where_discoverable(&q, now);
-    if (public_only)
-        qb_where_int(&q, QB_C_fleet_board_posts_scope, QB_NE,
-                     FLEET_BOARD_SCOPE_FLEET);
-    if (before_seq > 0)
-        qb_where_int(&q, QB_C_fleet_board_posts_seq, QB_LT, before_seq);
-    qb_order_by(&q, QB_C_fleet_board_posts_seq, QB_DESC);
-    qb_limit(&q, (int64_t)max);
+    fleet_board_inventory_query(&q, now, before_seq, public_only, max);
     sqlite3_stmt *s = NULL;
     int count = 0;
     int64_t previous_seq = before_seq;
@@ -1294,9 +1309,7 @@ int db_fleet_board_ids_before(struct node_db *ndb, int64_t now,
             goto failed;
         }
         previous_seq = row.seq;
-        memcpy(ids[count], row.post.id, 32);
-        if (last_seq_out)
-            *last_seq_out = row.seq;
+        fleet_board_inventory_take(ids[count], &row, last_seq_out);
         count++;
     }
     sqlite3_finalize(s);
