@@ -46,6 +46,19 @@ static bool protected_stop_acl(HANDLE event)
     return ok;
 }
 
+static bool child_binding_matches(const struct platform_watcher_lease *lease,
+    const struct platform_watcher_accepted_binding *binding,
+    const char *root, const char *image)
+{
+    return strcmp(binding->canonical_root, root) == 0 &&
+           strcmp(binding->canonical_image, image) == 0 &&
+           strcmp(binding->image_sha256, hash_a) == 0 &&
+           strcmp(binding->nonce, lease->nonce) == 0 &&
+           binding->creator_pid != 0 && binding->creator_start_token != 0 &&
+           binding->root_low != 0 && binding->image_low != 0 &&
+           binding->image_size != 0;
+}
+
 static int child_main(int argc, char **argv)
 {
     if (argc != 7) return 20;
@@ -58,13 +71,7 @@ static int child_main(int argc, char **argv)
         return accepted ? 21 : 0;
     struct platform_watcher_accepted_binding binding;
     if (!accepted || !platform_watcher_lease_binding(&lease, &binding) ||
-        strcmp(binding.canonical_root, argv[4]) != 0 ||
-        strcmp(binding.canonical_image, argv[5]) != 0 ||
-        strcmp(binding.image_sha256, hash_a) != 0 ||
-        strcmp(binding.nonce, lease.nonce) != 0 ||
-        binding.creator_pid == 0 || binding.creator_start_token == 0 ||
-        binding.root_low == 0 || binding.image_low == 0 ||
-        binding.image_size == 0 ||
+        !child_binding_matches(&lease, &binding, argv[4], argv[5]) ||
         !platform_watcher_lease_wait_stop(&lease, 5000))
         return 22;
     platform_watcher_lease_close(&lease);
