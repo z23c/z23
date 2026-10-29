@@ -7,6 +7,10 @@
 /* Formats the laptop host's fleet snapshot as a headline and one block per host.
  * Unknown or missing values are shown as unknown, never as zero. */
 bool zapp_hosts_format(const char *json, char *out, size_t cap);
+/* The main screen's fleet line from a zapp_hosts_format report: its headline, "no current report"
+ * once a request has failed, or "checking" while a paired laptop host has not answered, so the
+ * line holds its place from the first frame. Empty when no host is paired and none answered. */
+const char *zapp_fleet_line(const char *report, bool stale, bool paired, char *out, size_t cap);
 /* Writes value with comma thousands separators, which models copy more reliably than long digit
  * runs; negative values are written plainly. Returns out. */
 const char *zapp_grouped(int64_t value, char out[32]);

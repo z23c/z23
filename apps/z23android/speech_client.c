@@ -88,6 +88,15 @@ bool zapp_speech_client_paired(const char *files, const char *json)
     if (fd >= 0) close(fd);
     return same;
 }
+bool zapp_speech_client_has_host(const char *files)
+{
+    struct stat st;
+    int fd = files ? open(files, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
+    bool found = fd >= 0 && fstatat(fd, "speech-bridge.json", &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+        S_ISREG(st.st_mode);
+    if (fd >= 0) close(fd);
+    return found;
+}
 static char *hex_encode(const unsigned char *data, size_t size)
 {
     static const char hex[] = "0123456789abcdef";

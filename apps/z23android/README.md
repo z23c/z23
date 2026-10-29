@@ -57,7 +57,9 @@ The main screen shows one line for the node, one for the fleet, **Talk** and
 the conversation, newest exchange first. The node line says whether the node
 is stopped, starting, waiting for peers, catching up (height of target) or in
 sync, with its peer count. The fleet line repeats the paired host's cached
-fleet headline, read every 60 seconds without probing the hosts again. When
+fleet headline, read every 60 seconds without probing the hosts again; while a
+laptop host is paired it reads "Fleet · checking" until the first report, so
+the screen does not shift under a tap when the report arrives. When
 the conversation buffer fills, whole older exchanges are dropped first.
 **More** holds typed questions, the host connection, each fleet host,
 synchronization detail, balance, **Stop node** and fleet invitations. Each host

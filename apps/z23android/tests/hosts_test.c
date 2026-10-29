@@ -20,6 +20,19 @@ static void sync_rule_tests(void)
     assert(strstr(out, "\nc · not synced · 3,301,698\n  Low on disk · 49 GB free\n"));
     assert(!strstr(out, "STATUS") && !strstr(out, "50 GB"));
 }
+/* The fleet line keeps its place from launch while a laptop host is paired. */
+static void fleet_line_tests(void)
+{
+    char line[160];
+    const char *report = "2 of 3 hosts in sync\n\nr1 · in sync · 3,301,702\n";
+    assert(!strcmp(zapp_fleet_line(report, false, true, line, sizeof(line)), "Fleet · 2 of 3 hosts in sync"));
+    assert(!strcmp(zapp_fleet_line(report, false, false, line, sizeof(line)), "Fleet · 2 of 3 hosts in sync"));
+    assert(!strcmp(zapp_fleet_line(report, true, false, line, sizeof(line)), "Fleet · no current report"));
+    assert(!strcmp(zapp_fleet_line("", false, true, line, sizeof(line)), "Fleet · checking"));
+    assert(!strcmp(zapp_fleet_line(NULL, true, true, line, sizeof(line)), "Fleet · no current report"));
+    assert(!strcmp(zapp_fleet_line("", true, false, line, sizeof(line)), ""));
+    assert(!strcmp(zapp_fleet_line("", false, false, line, sizeof(line)), ""));
+}
 int main(void)
 {
     static const char snapshot[] = "{\"hosts\":["
@@ -39,6 +52,7 @@ int main(void)
     assert(strstr(out, "\nmac · not answering after 25.0 s\n"));
     assert(!strstr(out, "Blocked") && !strstr(out, "bootstrap") && !strstr(out, "GB"));
     sync_rule_tests();
+    fleet_line_tests();
     static const char skew[] = "{\"hosts\":["
         "{\"host\":\"r2\",\"reachable\":true,\"synced\":\"yes\",\"height\":3301630,\"reference_height\":3301631},"
         "{\"host\":\"r1\",\"reachable\":true,\"synced\":\"yes\",\"height\":3301633,\"reference_height\":3301631},"

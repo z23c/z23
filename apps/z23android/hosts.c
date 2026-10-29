@@ -118,3 +118,11 @@ bool zapp_hosts_format(const char *json, char *out, size_t cap)
     json_free(&root);
     return ok;
 }
+const char *zapp_fleet_line(const char *report, bool stale, bool paired, char *out, size_t cap)
+{
+    size_t n = report ? strcspn(report, "\n") : 0;
+    if (stale && (n || paired)) snprintf(out, cap, "Fleet · no current report");
+    else if (n && n < 140) snprintf(out, cap, "Fleet · %.*s", (int)n, report);
+    else snprintf(out, cap, "%s", paired && !n ? "Fleet · checking" : "");
+    return out;
+}

@@ -92,7 +92,9 @@ static void stored_pairing(const char *directory, const struct pair_paths *p)
 {
     char error[256], bytes[256] = {0};
     mode_t mask = umask(0777);
+    assert(!zapp_speech_client_has_host(directory) && !zapp_speech_client_has_host(NULL));
     assert(zapp_speech_client_pair(directory, pairing, error, sizeof(error)));
+    assert(zapp_speech_client_has_host(directory));
     umask(mask);
     struct stat st;
     assert(!lstat(p->path, &st) && S_ISREG(st.st_mode) && (st.st_mode & 0777) == 0600);
@@ -130,7 +132,7 @@ static void staged_pairing(const char *directory, const struct pair_paths *p)
     fd = open(p->stage, O_WRONLY | O_CREAT | O_EXCL, 0600);
     assert(fd >= 0 && write(fd, "{", 1) == 1 && !close(fd));
     assert(zapp_speech_client_pair(directory, pairing, error, sizeof(error)) && access(p->stage, F_OK));
-    assert(!unlink(p->path) && !symlink(p->target, p->path));
+    assert(!unlink(p->path) && !symlink(p->target, p->path) && !zapp_speech_client_has_host(directory));
     assert(zapp_speech_client_pair(directory, pairing, error, sizeof(error)));
     assert(!lstat(p->path, &st) && S_ISREG(st.st_mode));
     fd = open(p->target, O_RDONLY);

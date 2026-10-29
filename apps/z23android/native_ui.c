@@ -2,6 +2,7 @@
 #include "native_ui.h"
 #include "base/cleanse.h"
 #include "fleet.h"
+#include "hosts.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -554,15 +555,13 @@ static void render_node(JNIEnv *env, const struct zapp_view *view)
     (void)text(env, transcript_view, view->transcript);
     (void)set_visible(env, transcript_view, view->transcript[0] != 0);
 }
-/* Two lines at the top: the phone node and, once a laptop host has probed it, the fleet headline. */
+/* Two lines at the top: the phone node and, while a laptop host is paired, the fleet headline. */
 static void render_status(JNIEnv *env, const struct zapp_view *view)
 {
-    char fleet[160] = "", status[320];
-    size_t n = strcspn(view->fleet_status, "\n");
-    if (n && view->fleet_stale) snprintf(fleet, sizeof(fleet), "\nFleet · no current report");
-    else if (n && n < 140) snprintf(fleet, sizeof(fleet), "\nFleet · %.*s", (int)n, view->fleet_status);
-    snprintf(status, sizeof(status), "%s%s", voice_preview ?
-             "Preview · separate from your main node" : view->node_line, fleet);
+    char fleet[160], status[320];
+    zapp_fleet_line(view->fleet_status, view->fleet_stale, view->fleet_paired, fleet, sizeof(fleet));
+    snprintf(status, sizeof(status), "%s%s%s", voice_preview ?
+             "Preview · separate from your main node" : view->node_line, fleet[0] ? "\n" : "", fleet);
     (void)text(env, status_view, status);
     bool running = view->node_running || view->node_process_running;
     bool shown = !voice_preview && !view->busy;

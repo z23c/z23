@@ -221,11 +221,12 @@ static bool fleet_hosts(struct controller *c, bool refresh, char *out)
         copy_text(c->view.fleet_status, sizeof(c->view.fleet_status), formatted);
         c->view.fleet_stale = false;
         /* An answered fleet request proves the paired host is reachable. */
+        c->view.fleet_paired = true;
         copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected. Press Talk to begin.");
-    } else if (c->view.fleet_status[0]) {
-        /* The last report stays visible, marked old, once no current one arrives. */
+    } else {
+        /* The last report, if any, stays visible, marked old, once no current one arrives. */
         c->view.fleet_stale = true;
-        copy_text(c->view.connection, sizeof(c->view.connection), answered ?
+        if (c->view.fleet_paired) copy_text(c->view.connection, sizeof(c->view.connection), answered ?
                   "Laptop host connected. It sent no fleet report." :
                   "Laptop host not answering. Connect it over USB and keep it running.");
     }
@@ -421,6 +422,8 @@ static bool pair_voice_host(struct controller *c, const char *arg, char *out)
     if (ok) {
         pthread_mutex_lock(&c->lock);
         c->view.pair_offer[0] = 0; c->view.pair_code[0] = 0;
+        c->view.fleet_paired = true;
+        c->fleet_at = 0;
         copy_text(c->view.voice_status, sizeof(c->view.voice_status), "Laptop host paired. Press Talk to begin.");
         pthread_mutex_unlock(&c->lock);
     }
@@ -607,7 +610,9 @@ bool zapp_controller_start(const char *files, const char *libs, bool preview, vo
     copy_text(c->files, sizeof(c->files), files); c->notify = notify;
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), "Start the node to begin synchronization.");
     zapp_node_line(false, c->view.node_process_running, false, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
-    copy_text(c->view.connection, sizeof(c->view.connection), "Private assistant: pair your laptop host over USB.");
+    c->view.fleet_paired = zapp_speech_client_has_host(files);
+    copy_text(c->view.connection, sizeof(c->view.connection), c->view.fleet_paired ?
+              "Laptop host paired. Connecting." : "Private assistant: pair your laptop host over USB.");
     pthread_t thread;
     if (pthread_create(&thread, NULL, worker, c)) {
         zapp_runtime_destroy(&c->runtime); pthread_cond_destroy(&c->changed); pthread_mutex_destroy(&c->lock); goto fail;
