@@ -321,6 +321,57 @@ static bool service_identity_reject(
     return reject(report, "service", false, detail);
 }
 
+static bool service_fields_missing(
+    const struct zcl_hotswap_service_contract *contract,
+    const struct zcl_hotswap_service_candidate *candidate)
+{
+    return !contract || !candidate || !contract->service_id ||
+           !contract->source_tu || !candidate->service_id ||
+           !candidate->source_tu || !contract->frozen_kat ||
+           !candidate->vtable;
+}
+
+/* Reject (and report true) when the candidate drifted from the frozen
+ * contract in ABI, schema, wire or KAT identity; all need DEV_RESTART. */
+static bool service_contract_drift_reject(
+    const struct zcl_hotswap_service_contract *contract,
+    const struct zcl_hotswap_service_candidate *candidate,
+    struct zcl_hotswap_service_report *report)
+{
+    if (contract->abi_version != candidate->abi_version ||
+        contract->vtable_size != candidate->vtable_size ||
+        !equal_text(contract->abi_fingerprint,
+                    candidate->abi_fingerprint)) {
+        (void)reject(report, "abi", true,
+                     "service ABI changed; select DEV_RESTART");
+        return true;
+    }
+    if (!equal_text(contract->schema_fingerprint,
+                    candidate->schema_fingerprint)) {
+        (void)reject(report, "schema", true,
+                     "service schema changed; select DEV_RESTART");
+        return true;
+    }
+    if (!equal_text(contract->wire_fingerprint,
+                    candidate->wire_fingerprint)) {
+        (void)reject(report, "wire", true,
+                     "service wire contract changed; select DEV_RESTART");
+        return true;
+    }
+    if (!equal_text(contract->kat_fingerprint,
+                    candidate->kat_fingerprint)) {
+        (void)reject(report, "kat", true,
+                     "frozen KAT identity changed; select DEV_RESTART");
+        return true;
+    }
+    return false;
+}
+
+static bool service_snapshot_activate(
+    const struct zcl_hotswap_service_contract *contract,
+    const struct zcl_hotswap_service_candidate *candidate,
+    struct zcl_hotswap_service_report *report);
+
 bool zcl_hotswap_service_publish(
     const struct zcl_hotswap_service_contract *contract,
     const struct zcl_hotswap_service_candidate *candidate,
@@ -338,32 +389,13 @@ bool zcl_hotswap_service_publish(
                       "service activation is disabled on Windows pending "
                       "validated PE imports and immutable staging");
 #endif
-    if (!contract || !candidate || !contract->service_id ||
-        !contract->source_tu || !candidate->service_id ||
-        !candidate->source_tu || !contract->frozen_kat ||
-        !candidate->vtable)
+    if (service_fields_missing(contract, candidate))
         return service_fields_reject(contract, candidate, report);
     if (!equal_text(contract->service_id, candidate->service_id) ||
         !equal_text(contract->source_tu, candidate->source_tu))
         return service_identity_reject(contract, candidate, report);
-    if (contract->abi_version != candidate->abi_version ||
-        contract->vtable_size != candidate->vtable_size ||
-        !equal_text(contract->abi_fingerprint,
-                    candidate->abi_fingerprint))
-        return reject(report, "abi", true,
-                      "service ABI changed; select DEV_RESTART");
-    if (!equal_text(contract->schema_fingerprint,
-                    candidate->schema_fingerprint))
-        return reject(report, "schema", true,
-                      "service schema changed; select DEV_RESTART");
-    if (!equal_text(contract->wire_fingerprint,
-                    candidate->wire_fingerprint))
-        return reject(report, "wire", true,
-                      "service wire contract changed; select DEV_RESTART");
-    if (!equal_text(contract->kat_fingerprint,
-                    candidate->kat_fingerprint))
-        return reject(report, "kat", true,
-                      "frozen KAT identity changed; select DEV_RESTART");
+    if (service_contract_drift_reject(contract, candidate, report))
+        return false;
     char why[192] = {0};
     int64_t execute_started = platform_time_monotonic_us();
     bool kat_ok = contract->frozen_kat(candidate->vtable, why, sizeof(why));
@@ -378,6 +410,16 @@ bool zcl_hotswap_service_publish(
         return true;
     }
 
+    return service_snapshot_activate(contract, candidate, report);
+}
+
+/* Build and install the next service snapshot; the caller already verified
+ * the candidate against the frozen contract. */
+static bool service_snapshot_activate(
+    const struct zcl_hotswap_service_contract *contract,
+    const struct zcl_hotswap_service_candidate *candidate,
+    struct zcl_hotswap_service_report *report)
+{
     service_lock();
     const struct service_snapshot *old = atomic_load_explicit(
         &g_active_services, memory_order_acquire);
@@ -545,6 +587,45 @@ static void service_close_after_quiesce(void *handle)
     LOG_WARN("hotswap.service", "retaining superseded mapping: readers did not quiesce");
 }
 
+static const struct zcl_hotswap_service_contract *service_contract_for(
+    const struct zcl_hotswap_service_contract *const *contracts,
+    size_t contract_count,
+    const struct zcl_hotswap_service_candidate *candidate)
+{
+    for (size_t i = 0; i < contract_count; i++)
+        if (contracts && contracts[i] &&
+            equal_text(contracts[i]->service_id, candidate->service_id))
+            return contracts[i];
+    return NULL;
+}
+
+/* Record the loaded mapping for a service id under the handle lock. Returns
+ * false (lock released, nothing recorded) when the table is full; otherwise
+ * *old_handle receives the superseded mapping, if any. */
+static bool service_handle_register(const char *service_id, void *handle,
+                                    void **old_handle)
+{
+    pthread_mutex_lock(&g_handle_lock);
+    size_t slot = g_handle_count;
+    for (size_t i = 0; i < g_handle_count; i++)
+        if (strcmp(g_handles[i].service_id, service_id) == 0) {
+            slot = i;
+            break;
+        }
+    if (slot == g_handle_count && g_handle_count < ZCL_HOTSWAP_SERVICE_MAX)
+        g_handle_count++;
+    if (slot >= ZCL_HOTSWAP_SERVICE_MAX) {
+        pthread_mutex_unlock(&g_handle_lock);
+        return false;
+    }
+    *old_handle = g_handles[slot].handle;
+    (void)snprintf(g_handles[slot].service_id,
+                   sizeof(g_handles[slot].service_id), "%s", service_id);
+    g_handles[slot].handle = handle;
+    pthread_mutex_unlock(&g_handle_lock);
+    return true;
+}
+
 bool zcl_hotswap_service_activate_so_any(
     const char *so_path, const char *resolved_datadir, bool request_activate,
     const struct zcl_hotswap_service_contract *const *contracts,
@@ -579,14 +660,8 @@ bool zcl_hotswap_service_activate_so_any(
                       "artifact does not export a service descriptor");
     }
     report->recognized = true;
-    const struct zcl_hotswap_service_contract *contract = NULL;
-    for (size_t i = 0; i < contract_count; i++)
-        if (contracts && contracts[i] && contracts[i]->service_id &&
-            candidate->service_id &&
-            strcmp(contracts[i]->service_id, candidate->service_id) == 0) {
-            contract = contracts[i];
-            break;
-        }
+    const struct zcl_hotswap_service_contract *contract =
+        service_contract_for(contracts, contract_count, candidate);
     if (!contract) {
         copy_text(report->service_id, sizeof(report->service_id),
                   candidate->service_id);
@@ -614,28 +689,12 @@ bool zcl_hotswap_service_activate_so_any(
     }
 
     void *old_handle = NULL;
-    pthread_mutex_lock(&g_handle_lock);
-    size_t slot = g_handle_count;
-    for (size_t i = 0; i < g_handle_count; i++)
-        if (strcmp(g_handles[i].service_id, candidate->service_id) == 0) {
-            slot = i;
-            break;
-        }
-    if (slot == g_handle_count && g_handle_count < ZCL_HOTSWAP_SERVICE_MAX)
-        g_handle_count++;
-    if (slot >= ZCL_HOTSWAP_SERVICE_MAX) {
-        pthread_mutex_unlock(&g_handle_lock);
+    if (!service_handle_register(candidate->service_id, handle, &old_handle)) {
         /* The vtable is already published, so this mapping must remain loaded.
          * Refuse only reclamation bookkeeping, never invalidate live code. */
         LOG_WARN("hotswap.service", "handle table full; retaining active mapping");
         return true;
     }
-    old_handle = g_handles[slot].handle;
-    (void)snprintf(g_handles[slot].service_id,
-                   sizeof(g_handles[slot].service_id), "%s",
-                   candidate->service_id);
-    g_handles[slot].handle = handle;
-    pthread_mutex_unlock(&g_handle_lock);
     service_close_after_quiesce(old_handle);
     return true;
 }
@@ -648,18 +707,6 @@ bool zcl_hotswap_service_activate_so(
     const struct zcl_hotswap_service_contract *contracts[] = {contract};
     return zcl_hotswap_service_activate_so_any(
         so_path, resolved_datadir, request_activate, contracts, 1, report);
-}
-
-static const struct zcl_hotswap_service_contract *service_contract_for(
-    const struct zcl_hotswap_service_contract *const *contracts,
-    size_t contract_count,
-    const struct zcl_hotswap_service_candidate *candidate)
-{
-    for (size_t i = 0; i < contract_count; i++)
-        if (contracts && contracts[i] &&
-            equal_text(contracts[i]->service_id, candidate->service_id))
-            return contracts[i];
-    return NULL;
 }
 
 /* Verify-only probe of an already-open, already-confined image descriptor.
