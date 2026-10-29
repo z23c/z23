@@ -308,6 +308,9 @@ static bool tela_install_tip(struct main_state *ms, struct block_index *bi,
  *     proofs first (no prover fixture in this file).
  *   - bad-txns-joinsplit-phgr13-invalid: the PHGR13 unverifiable gate fires
  *     first unless the PHGR13 key is loaded.
+ *   - shielded-verify-unavailable: needs NO verifying keys loaded. The row runs
+ *     only when this group finds them unloaded at entry; otherwise it is
+ *     reported as SKIP and the process-wide keys are left untouched.
  *   - error-computing-signature-hash and sapling-verification-ctx-init-failed:
  *     local-fault paths with no sender-reachable input (calloc failure).
  *   - tx-overwinter-active and tx-overwinter-flag-not-set: need an
@@ -488,9 +491,11 @@ static bool tela_sign_joinsplit(struct transaction *tx, int height)
     return true;
 }
 
+/* Runs only when no verifying keys were loaded at group entry: the row needs
+ * the unverifiable state, and reaching it means never freeing keys that
+ * another test in this process loaded. */
 static int tela_unverifiable_row(void)
 {
-    sapling_free_params();
     struct transaction tx = tela_make_tx(TELA_SAPLING_H + 100, 0,
                                          0xFFFFFFFF, false);
     tela_add_output(&tx);
@@ -570,7 +575,12 @@ static int tela_branch_rows(void)
     bool had_params = sapling_params_loaded();
     int f = tela_structural_rows();
     f += tela_oversize_row();
-    f += tela_unverifiable_row();
+    if (!had_params) {
+        f += tela_unverifiable_row();
+    } else {
+        printf("tx_contextual_branches: shielded-verify-unavailable... SKIP "
+               "(verifying keys already loaded at group entry)\n");
+    }
     f += tela_keyed_rows();
     if (!had_params)
         sapling_free_params();
