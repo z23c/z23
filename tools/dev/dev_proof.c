@@ -901,22 +901,9 @@ static bool receipt_load(const struct proof_paths *paths, const char *local,
         proof_why(why, why_len, "receipt_parse_failed");
         return false;
     }
-    if (!zcl_dev_proof_receipt_validate(out, local, base, why, why_len))
-        return false;
-    /* A key admitted only through signers.allow proves who signed, not that
-     * the proof ran on a toolchain equal to this box's own. */
-    if (zcl_dev_proof_receipt_signer_is_local(out))
-        return true;
-    struct zcl_dev_proof_build_identity_v1 host;
-    char cause[96] = "";
-    if (!zcl_dev_proof_build_identity_v1_capture(paths->root, &host, cause,
-                                                 sizeof(cause))) {
-        proof_why(why, why_len, "remote_toolchain_unverifiable");
-        return false;
-    }
-    return zcl_dev_proof_receipt_toolchain_check(
-        out, host.compiler, host.flags, host.environment, host.build_graph,
-        why, why_len);
+    return zcl_dev_proof_receipt_admit(
+        out, local, base, zcl_dev_proof_host_toolchain_capture,
+        (void *)paths->root, why, why_len);
 }
 
 static bool proof_read_text(const char *path, char *out, size_t out_size)
@@ -1405,8 +1392,10 @@ static bool proof_status_read_platform(const char *repo_root,
     }
     if (dp_failure_status_read(&paths, out)) return true;
     out->state = ZCL_DEV_PROOF_STATE_MISSING;
+    /* A receipt refused for its toolchain is not "missing": say why. */
     (void)snprintf(out->detail, sizeof(out->detail), "%s",
-                   "exact_receipt_missing");
+                   strncmp(why, "remote_toolchain_", 17) == 0
+                       ? why : "exact_receipt_missing");
     return true;
 }
 
@@ -3389,6 +3378,20 @@ bool zcl_dev_proof_build_identity_v1_capture(
     char *why, size_t why_len)
 {
     return proof_build_identity_capture(repo_root, out, NULL, why, why_len);
+}
+
+bool zcl_dev_proof_host_toolchain_capture(void *repo_root, uint8_t roots[4][32],
+                                          char *why, size_t why_len)
+{
+    struct zcl_dev_proof_build_identity_v1 id;
+    if (!repo_root || !zcl_dev_proof_build_identity_v1_capture(
+                          (const char *)repo_root, &id, why, why_len))
+        return false;
+    memcpy(roots[0], id.compiler, 32);
+    memcpy(roots[1], id.flags, 32);
+    memcpy(roots[2], id.environment, 32);
+    memcpy(roots[3], id.build_graph, 32);
+    return true;
 }
 
 bool zcl_dev_proof_build_plan_verify(

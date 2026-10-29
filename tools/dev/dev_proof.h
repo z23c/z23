@@ -286,6 +286,11 @@ struct zcl_dev_proof_build_identity_v1 {
 bool zcl_dev_proof_build_identity_v1_capture(
     const char *repo_root, struct zcl_dev_proof_build_identity_v1 *out,
     char *why, size_t why_len);
+/* Callback form of the capture for zcl_dev_proof_receipt_admit(); `repo_root`
+ * is the checkout path (const char *). Roots: compiler, flags, environment,
+ * build_graph. */
+bool zcl_dev_proof_host_toolchain_capture(void *repo_root, uint8_t roots[4][32],
+                                          char *why, size_t why_len);
 
 /* Compare the executed plan with the requested flags and dependency graph,
  * and bind its local BASE_GENERATION to that tree's sealed mutation token.

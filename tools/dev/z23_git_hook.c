@@ -699,9 +699,11 @@ static int admit_pair(const char *root, const char *local, const char *base)
             return refusal(ZCL_DEV_PROOF_SIGNER_WHY_UNSIGNED, local, base, 0);
         return admit_missing_receipt(root, local, base);
     }
+    /* The hook cannot capture a build identity, so admit() (capture NULL)
+     * fails closed: a receipt signed by any key but this box's own is refused. */
     if (!zcl_dev_proof_receipt_parse(wire, sizeof(wire), &receipt) ||
-        !zcl_dev_proof_receipt_validate(&receipt, local, base,
-                                        why, sizeof(why)))
+        !zcl_dev_proof_receipt_admit(&receipt, local, base, NULL, NULL,
+                                     why, sizeof(why)))
         return refusal(why[0] ? why : "receipt-invalid", local, base, 0);
     for (size_t i = 0; i < ZCL_DEV_PROOF_DIMENSIONS; i++) {
         const struct zcl_dev_proof_dimension *dimension =

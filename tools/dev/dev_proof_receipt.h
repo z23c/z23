@@ -191,6 +191,20 @@ bool zcl_dev_proof_receipt_toolchain_check(
     const uint8_t host_environment[ZCL_DEV_PROOF_ROOT_BYTES],
     const uint8_t host_build_graph[ZCL_DEV_PROOF_ROOT_BYTES],
     char *why, size_t why_len);
+/* Captures this host's four toolchain roots (compiler, flags, environment,
+ * build_graph, in that order) for `ctx`; false with `why` set on failure. */
+typedef bool (*zcl_dev_proof_host_toolchain_fn)(
+    void *ctx, uint8_t roots[4][ZCL_DEV_PROOF_ROOT_BYTES], char *why,
+    size_t why_len);
+/* THE admission decision every caller uses: validate(), then, when the key is
+ * not this box's own, the toolchain check against `capture`. A NULL `capture`
+ * (a binary that cannot capture, such as the pre-push hook) fails closed: any
+ * foreign-signed receipt is refused as "remote_toolchain_unverifiable:...". */
+bool zcl_dev_proof_receipt_admit(
+    const struct zcl_dev_acceptance_receipt_v1 *receipt,
+    const char *local_commit, const char *remote_base,
+    zcl_dev_proof_host_toolchain_fn capture, void *ctx,
+    char *why, size_t why_len);
 /* Always writes the v2 record (ZCL_DEV_PROOF_WIRE_BYTES). A receipt that was
  * never signed cannot be serialized — refusing here is what keeps an unsigned
  * record from reaching the cache in the first place. */

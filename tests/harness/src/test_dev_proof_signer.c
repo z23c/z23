@@ -14,6 +14,7 @@
 
 #include "base/hex.h"
 #include "crypto/ed25519.h"
+#include "dev_proof.h"
 #include "dev_proof_observation_lookup.h"
 #include "dev_proof_receipt.h"
 #include "dev_proof_signer.h"
@@ -405,6 +406,64 @@ static int test_dps_remote_toolchain(void)
     } _test_next:;
     return failures;
 }
+
+#if !defined(_WIN32)
+static bool dps_receipt_drop(const char *root,
+                             const struct zcl_dev_acceptance_receipt_v1 *r,
+                             const uint8_t *foreign_seed)
+{
+    uint8_t wire[ZCL_DEV_PROOF_WIRE_BYTES];
+    char dir[PATH_MAX], path[PATH_MAX];
+    const char *parts[] = {".cache", "zcl-dev-proof", "receipts"};
+    (void)snprintf(dir, sizeof(dir), "%s", root);
+    for (int i = 0; i < 3; i++) {
+        size_t n = strlen(dir);
+        (void)snprintf(dir + n, sizeof(dir) - n, "/%s", parts[i]);
+        if (mkdir(dir, 0700) != 0 && access(dir, F_OK) != 0) return false;
+    }
+    (void)snprintf(path, sizeof(path), "%s/%s-%s.receipt", dir, DPS_LOCAL,
+                   DPS_BASE);
+    if (!zcl_dev_proof_receipt_serialize(r, wire)) return false;
+    if (foreign_seed) dps_resign(wire, foreign_seed);
+    return dps_write(path, wire, sizeof(wire), 0600);
+}
+
+/* The wiring, not the pure compare: status_read -> receipt_load -> admit. */
+static int test_dps_remote_toolchain_wiring(void)
+{
+    int failures = 0;
+    struct zcl_dev_acceptance_receipt_v1 r;
+    struct zcl_dev_proof_status st = {0};
+    uint8_t seed[32], pubkey[32], secret[32];
+    char allow[PATH_MAX], hex[66], root[PATH_MAX];
+    TEST("dev proof signer: status read refuses an allow-listed foreign "
+         "receipt whose host toolchain cannot be captured") {
+        dps_isolate("remote_wiring");
+        test_make_tmpdir(root, sizeof(root), "dev_proof_signer", "wiring");
+        ASSERT(dps_sealed(&r));
+        /* Own key: admitted with no capture at all (restart.env is absent). */
+        ASSERT(dps_receipt_drop(root, &r, NULL));
+        ASSERT(zcl_dev_proof_status_read(root, DPS_LOCAL, DPS_BASE, &st));
+        ASSERT(st.state == ZCL_DEV_PROOF_STATE_PASSED);
+        /* Foreign key, trusted by signers.allow: the host identity cannot be
+         * captured here, so it must be refused, not admitted. */
+        memset(seed, 0xA5, sizeof(seed));
+        ed25519_keypair(pubkey, secret, seed);
+        zcl_hex_encode(pubkey, sizeof(pubkey), hex);
+        hex[64] = '\n';
+        ASSERT(dps_allow_path(allow, sizeof(allow)));
+        ASSERT(dps_write(allow, hex, 65, 0600));
+        ASSERT(dps_receipt_drop(root, &r, seed));
+        memset(&st, 0, sizeof(st));
+        (void)zcl_dev_proof_status_read(root, DPS_LOCAL, DPS_BASE, &st);
+        ASSERT(st.state != ZCL_DEV_PROOF_STATE_PASSED);
+        ASSERT(strstr(st.detail, "remote_toolchain_unverifiable:") != NULL);
+        dps_restore();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
 
 /* ── 6. an unreadable key ───────────────────────────────────────────────── */
 
@@ -1284,6 +1343,9 @@ int test_dev_proof_signer(void)
     failures += test_dps_unsigned_record();
     failures += test_dps_allowlist();
     failures += test_dps_remote_toolchain();
+#if !defined(_WIN32)
+    failures += test_dps_remote_toolchain_wiring();
+#endif
     failures += test_dps_key_unreadable();
     failures += test_dps_leaf_round_trip();
     failures += test_dps_leaf_tamper();

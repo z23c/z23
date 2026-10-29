@@ -686,8 +686,9 @@ static bool proof_coverage_receipt_read(struct proof_coverage_resolved *out)
     bool ok = rf && fread(wire, 1, sizeof(wire), rf) == sizeof(wire) &&
         fgetc(rf) == EOF &&
         zcl_dev_proof_receipt_parse(wire, sizeof(wire), &out->receipt) &&
-        zcl_dev_proof_receipt_validate(&out->receipt, out->status.local_commit,
-            out->status.remote_base, why, sizeof(why));
+        zcl_dev_proof_receipt_admit(&out->receipt, out->status.local_commit,
+            out->status.remote_base, zcl_dev_proof_host_toolchain_capture,
+            out->status.root, why, sizeof(why));
     if (rf) (void)fclose(rf);
     return ok;
 }

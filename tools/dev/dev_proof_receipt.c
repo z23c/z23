@@ -476,6 +476,29 @@ bool zcl_dev_proof_receipt_toolchain_check(
     return true;
 }
 
+bool zcl_dev_proof_receipt_admit(
+    const struct zcl_dev_acceptance_receipt_v1 *receipt,
+    const char *local_commit, const char *remote_base,
+    zcl_dev_proof_host_toolchain_fn capture, void *ctx,
+    char *why, size_t why_len)
+{
+    if (!zcl_dev_proof_receipt_validate(receipt, local_commit, remote_base,
+                                        why, why_len))
+        return false;
+    if (zcl_dev_proof_receipt_signer_is_local(receipt))
+        return true;
+    uint8_t h[4][ZCL_DEV_PROOF_ROOT_BYTES];
+    char cause[96] = "no_capture_in_this_binary";
+    if (!capture || !capture(ctx, h, cause, sizeof(cause))) {
+        if (why && why_len)
+            (void)snprintf(why, why_len, "remote_toolchain_unverifiable:%s",
+                           cause[0] ? cause : "capture_failed");
+        return false;
+    }
+    return zcl_dev_proof_receipt_toolchain_check(receipt, h[0], h[1], h[2],
+                                                 h[3], why, why_len);
+}
+
 bool zcl_dev_proof_child_receipt_create(
     enum zcl_dev_proof_dimension_id id,
     struct zcl_dev_proof_dimension *dimension,
