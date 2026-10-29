@@ -556,6 +556,50 @@ static size_t serve_favicon(uint8_t *response, size_t response_max)
     return off;
 }
 
+struct explorer_exact_route {
+    const char *path;
+    size_t (*handler)(uint8_t *, size_t);
+};
+static const struct explorer_exact_route explorer_exact_routes[] = {
+    {"/explorer/stats",serve_stats}, {"/explorer/tokens",serve_tokens},
+    {"/explorer/hodl",serve_hodl}, {"/explorer/events",serve_events},
+    {"/explorer/factoids",serve_factoids}, {"/explorer/names",serve_names},
+    {"/explorer/network",serve_network}, {"/explorer/market",serve_market},
+    {"/explorer/swaps",serve_swaps}, {"/explorer/messages",serve_messages},
+    {"/wallet",explorer_view_wallet_page}
+};
+static bool explorer_exact_dispatch(const char *path,uint8_t *out,size_t cap,size_t *result)
+{
+    for(size_t i=0;i<sizeof(explorer_exact_routes)/sizeof(explorer_exact_routes[0]);i++) {
+        const char *route=explorer_exact_routes[i].path;
+        size_t len=strlen(route);
+        if(!strcmp(path,route) || (strncmp(path,route,len)==0 && path[len]=='/' && path[len+1]=='\0')) {
+            *result=explorer_exact_routes[i].handler(out,cap);
+            return true;
+        }
+    }
+    return false;
+}
+static bool explorer_prefix_dispatch(const char *path,uint8_t *out,size_t cap,size_t *result)
+{
+    if(!strncmp(path,"/explorer/token/",16)) *result=serve_token_detail(path+16,out,cap);
+    else if(!strncmp(path,"/explorer/block/",16)) *result=serve_block(path+16,out,cap);
+    else if(!strncmp(path,"/explorer/tx/",13)) *result=serve_tx(path+13,out,cap);
+    else if(!strncmp(path,"/explorer/address/",18)) *result=serve_address(path+18,out,cap);
+    else return false;
+    return true;
+}
+static bool explorer_dashboard_dispatch(const char *path,uint8_t *out,size_t cap,size_t *result)
+{
+    if(strcmp(path,"/explorer") && strcmp(path,"/explorer/") &&
+       strncmp(path,"/explorer?",10) && strncmp(path,"/explorer/?",11)) return false;
+    const char *pp=strstr(path,"page=");
+    int page=pp?atoi(pp+5):0;
+    if(page<0) page=0;
+    *result=serve_dashboard_with_page(out,cap,page);
+    return true;
+}
+
 size_t explorer_handle_request(const char *method, const char *path,
                                 const uint8_t *body, size_t body_len,
                                 uint8_t *response, size_t response_max)
@@ -581,66 +625,17 @@ size_t explorer_handle_request(const char *method, const char *path,
     if (strcmp(path, "/explorer/favicon.png") == 0 ||
         strcmp(path, "/favicon.ico") == 0)
         return serve_favicon(response, response_max);
-    if (strcmp(path, "/explorer") == 0 || strcmp(path, "/explorer/") == 0 ||
-        strncmp(path, "/explorer?", 10) == 0 || strncmp(path, "/explorer/?", 11) == 0) {
-        int page = 0;
-        const char *pp = strstr(path, "page=");
-        if (pp) page = atoi(pp + 5);
-        if (page < 0) page = 0;
-        return serve_dashboard_with_page(response, response_max, page);
-    }
-
-    if (strcmp(path, "/explorer/stats") == 0 || strcmp(path, "/explorer/stats/") == 0)
-        return serve_stats(response, response_max);
-
-    if (strcmp(path, "/explorer/tokens") == 0 || strcmp(path, "/explorer/tokens/") == 0)
-        return serve_tokens(response, response_max);
-
-    if (strncmp(path, "/explorer/token/", 16) == 0)
-        return serve_token_detail(path + 16, response, response_max);
-
-    if (strcmp(path, "/explorer/hodl") == 0 || strcmp(path, "/explorer/hodl/") == 0)
-        return serve_hodl(response, response_max);
-
-    if (strcmp(path, "/explorer/events") == 0 || strcmp(path, "/explorer/events/") == 0)
-        return serve_events(response, response_max);
-
-    if (strcmp(path, "/explorer/factoids") == 0 || strcmp(path, "/explorer/factoids/") == 0)
-        return serve_factoids(response, response_max);
-
-    if (strcmp(path, "/explorer/names") == 0 || strcmp(path, "/explorer/names/") == 0)
-        return serve_names(response, response_max);
-
-    if (strcmp(path, "/explorer/network") == 0 || strcmp(path, "/explorer/network/") == 0)
-        return serve_network(response, response_max);
-
-    if (strcmp(path, "/explorer/market") == 0 || strcmp(path, "/explorer/market/") == 0)
-        return serve_market(response, response_max);
-
-    if (strcmp(path, "/explorer/swaps") == 0 || strcmp(path, "/explorer/swaps/") == 0)
-        return serve_swaps(response, response_max);
-
-    if (strcmp(path, "/explorer/messages") == 0 || strcmp(path, "/explorer/messages/") == 0)
-        return serve_messages(response, response_max);
-
-    if (strncmp(path, "/explorer/block/", 16) == 0)
-        return serve_block(path + 16, response, response_max);
-
-    if (strncmp(path, "/explorer/tx/", 13) == 0)
-        return serve_tx(path + 13, response, response_max);
-
-    if (strncmp(path, "/explorer/address/", 18) == 0)
-        return serve_address(path + 18, response, response_max);
+    size_t result = 0;
+    if (explorer_dashboard_dispatch(path, response, response_max, &result) ||
+        explorer_exact_dispatch(path, response, response_max, &result) ||
+        explorer_prefix_dispatch(path, response, response_max, &result))
+        return result;
 
     if (strncmp(path, "/explorer/search", 16) == 0) {
         const char *q = strstr(path, "q=");
         return serve_search(q ? q + 2 : "", response, response_max);
     }
 
-    /* Wallet — self-contained HTML+CSS+JS, fetches /api/wallet.
-     * HTML assembly lives in contexts/explorer/views/src/explorer_main_view.c. */
-    if (strcmp(path, "/wallet") == 0 || strcmp(path, "/wallet/") == 0)
-        return explorer_view_wallet_page(response, response_max);
 
     return 0; /* unhandled → caller returns 404 */
 }

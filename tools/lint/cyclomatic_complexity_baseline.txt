@@ -143,7 +143,6 @@ contexts/commons/services/src/zcode_benchmark_executor.c:exec_verify_samples:28
 contexts/commons/services/src/zcode_benchmark_executor.c:zcode_benchmark_executor_run:77
 contexts/commons/services/src/zcode_benchmark_executor.c:zcode_benchmark_executor_verify_receipt:23
 contexts/commons/services/src/zcode_lane_service.c:zcode_lane_advance:53
-contexts/explorer/controllers/src/explorer_controller.c:explorer_handle_request:43
 contexts/explorer/controllers/src/explorer_controller.c:rpc_call:22
 contexts/explorer/models/src/explorer_index_overlays.c:apply_znam:31
 contexts/explorer/views/src/explorer_factoids_records.c:factoids_emit_section_5_records:19

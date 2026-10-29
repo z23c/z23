@@ -5,6 +5,10 @@
 #include "platform/environment_compat.h"
 #include "platform/clock.h"
 #include "test/test_core.h"
+#include "test/api_test_fixtures.h"
+#include "../../../contexts/explorer/controllers/src/explorer_controller_internal.h"
+#include "encoding/utilstrencodings.h"
+#include "core/uint256.h"
 #include "controllers/explorer_controller.h"
 #include "controllers/explorer_internal.h"
 #include "jobs/reducer_frontier.h"
@@ -333,11 +337,161 @@ static int ex_favicon_boundaries(void)
     return ok?0:1;
 }
 
+static bool ex_route_redirect_case(const char *path,const char *location,const char *method)
+{
+    uint8_t out[512]; char expected[512];
+    int n=snprintf(expected,sizeof(expected),"HTTP/1.1 302 Found\r\nLocation: %s\r\nConnection: close\r\n\r\n",location);
+    if(n<0 || (size_t)n>=sizeof(expected)) return false;
+    size_t got=explorer_handle_request(method,path,NULL,0,out,sizeof(out));
+    return got==(size_t)n && !memcmp(out,expected,got);
+}
+static bool ex_route_shortcuts(void)
+{
+    const char *names[]={"stats","tokens","hodl","events","factoids","names","network","market","swaps","messages"};
+    bool ok=true;
+    for(size_t i=0;i<sizeof(names)/sizeof(names[0]);i++) {
+        char path[128],location[128];
+        snprintf(location,sizeof(location),"/explorer/%s",names[i]);
+        for(int slash=0;slash<2;slash++) {
+            snprintf(path,sizeof(path),"/%s%s",names[i],slash?"/":"");
+            if(!ex_route_redirect_case(path,location,"GET") || !ex_route_redirect_case(path,location,"POST")) ok=false;
+        }
+    }
+    return ok;
+}
+static bool ex_route_near_misses(void)
+{
+    const char *paths[]={"/apix","/stats//","/stats?x=1","/explorer/stats?x=1",
+        "/explorer/tokens//","/wallet//","/wallet?x=1","/explorer/block","/explorer/tx",
+        "/explorer/address","/explorer/token","/explorer/style.css/"};
+    uint8_t out[512]; bool ok=true;
+    for(size_t i=0;i<sizeof(paths)/sizeof(paths[0]);i++)
+        if(explorer_handle_request("GET",paths[i],NULL,0,out,sizeof(out))!=0) ok=false;
+    return ok;
+}
+static bool ex_route_css_method(void)
+{
+    uint8_t a[8192],b[8192];
+    size_t x=explorer_handle_request("GET","/explorer/style.css",NULL,0,a,sizeof(a));
+    size_t y=explorer_handle_request("POST","/explorer/style.css",NULL,0,b,sizeof(b));
+    return x>0 && x==y && !memcmp(a,b,x);
+}
+static bool ex_route_search_witness(void)
+{
+    uint8_t a[16384],b[16384];
+    size_t x=explorer_handle_request("GET","/explorer/searchExtra?xxq=bogus",NULL,0,a,sizeof(a)-1);
+    size_t y=explorer_handle_request("GET","/explorer/search?q=bogus",NULL,0,b,sizeof(b)-1);
+    if(!x || x!=y || x>=sizeof(a) || memcmp(a,b,x)) return false;
+    a[x]='\0';
+    return strstr((char *)a,"No results for: <code>bogus</code>")!=NULL;
+}
+static bool ex_route_wallet_witness(void)
+{
+    uint8_t a[32768],b[32768];
+    size_t x=explorer_handle_request("GET","/wallet",NULL,0,a,sizeof(a));
+    size_t y=explorer_handle_request("POST","/wallet/",NULL,0,b,sizeof(b));
+    return x>0 && x<=sizeof(a) && x==y && !memcmp(a,b,x);
+}
+
+static int ex_route_precedence_witness(void)
+{
+    bool shortcuts=ex_route_shortcuts(), misses=ex_route_near_misses(), methods=ex_route_css_method();
+    bool search=ex_route_search_witness(), wallet=ex_route_wallet_witness();
+    printf("explorer: route shortcut/miss/method witnesses... %s\n",shortcuts && misses && methods && search && wallet?"OK":"FAIL");
+    return shortcuts && misses && methods && search && wallet?0:1;
+}
+
+static bool ex_native_dashboard_case(const char *path,const char *shown,const char *hidden)
+{
+    uint8_t out[65536];
+    size_t n=explorer_handle_request("GET",path,NULL,0,out,sizeof(out)-1);
+    if(!n || n>=sizeof(out)) {
+        printf("native dashboard path=%s length=%zu invalid\n",path,n);
+        return false;
+    }
+    out[n]='\0';
+    bool has_shown=strstr((char *)out,shown)!=NULL;
+    bool has_hidden=strstr((char *)out,hidden)!=NULL;
+    printf("native dashboard path=%s length=%zu expected_row=%d excluded_row=%d\n",
+           path,n,has_shown?1:0,has_hidden?1:0);
+    return has_shown && !has_hidden;
+}
+static bool ex_native_dashboard_witness(void)
+{
+    const char *r30="<tr><td><a href='/explorer/block/30'>30</a></td>";
+    const char *r5="<tr><td><a href='/explorer/block/5'>5</a></td>";
+    bool ok=true;
+    if(!ex_native_dashboard_case("/explorer?page=0",r30,r5)) ok=false;
+    if(!ex_native_dashboard_case("/explorer?page=1",r5,r30)) ok=false;
+    if(!ex_native_dashboard_case("/explorer?xpage=1",r5,r30)) ok=false;
+    if(!ex_native_dashboard_case("/explorer/?xpage=1",r5,r30)) ok=false;
+    if(!ex_native_dashboard_case("/explorer?page=-1",r30,r5)) ok=false;
+    return ok;
+}
+static bool ex_native_block_witness(const struct uint256 *hash)
+{
+    uint8_t a[32768],b[32768],empty[8]; char hex[65],path[100];
+    uint256_get_hex(hash,hex);
+    int n=snprintf(path,sizeof(path),"/explorer/block/%s",hex);
+    if(n<0 || (size_t)n>=sizeof(path)) return false;
+    size_t x=explorer_handle_request("GET","/explorer/block/10",NULL,0,a,sizeof(a)-1);
+    size_t y=explorer_handle_request("GET",path,NULL,0,b,sizeof(b)-1);
+    size_t z=explorer_handle_request("GET","/explorer/block/",NULL,0,empty,sizeof(empty));
+    bool equal=x && x<sizeof(a) && x==y && !memcmp(a,b,x);
+    bool marker=false,hash_found=false;
+    if(x && x<sizeof(a)) {
+        a[x]='\0';
+        marker=strstr((char *)a,"<h2>Block 10</h2>")!=NULL;
+        hash_found=strstr((char *)a,hex)!=NULL;
+    }
+    printf("native block height_len=%zu hash_len=%zu same=%d marker=%d hash=%d empty_len=%zu\n",
+           x,y,equal?1:0,marker?1:0,hash_found?1:0,z);
+    return equal && marker && hash_found && z==0;
+}
+static bool ex_native_chain_build(struct main_state *ms,struct uint256 hashes[31])
+{
+    struct block_index *prev=NULL;
+    for(int h=0;h<31;h++) {
+        prev=api_test_insert_block(ms,&hashes[h],h,prev);
+        if(!prev) return false;
+    }
+    return active_chain_move_window_tip(&ms->chain_active,prev);
+}
+static int ex_route_native_chain_witness(void)
+{
+    struct main_state ms={0}; struct uint256 hashes[31];
+    struct explorer_context *ctx=explorer_ctx(), saved=*ctx;
+    bool published=reducer_frontier_provable_tip_is_published();
+    int32_t old_tip=reducer_frontier_provable_tip_cached();
+    bool ok=false;
+    main_state_init(&ms);
+    bool built=ex_native_chain_build(&ms,hashes);
+    printf("native setup built=%d cached_height=%d\n",built?1:0,active_chain_cached_height(&ms.chain_active));
+    if(!built) goto done;
+    memset(ctx,0,sizeof(*ctx)); ctx->main_state=&ms;
+    reducer_frontier_provable_tip_set(30);
+    bool proxy=use_rpc_proxy();
+    printf("native state height=%d cached=%d proxy=%d tip=%d\n",active_chain_height(&ms.chain_active),active_chain_cached_height(&ms.chain_active),proxy?1:0,reducer_frontier_provable_tip_cached());
+    if(proxy) goto done;
+    bool dashboard=ex_native_dashboard_witness();
+    bool block=ex_native_block_witness(&hashes[10]);
+    printf("native checks dashboard=%d block=%d\n",dashboard?1:0,block?1:0);
+    ok=dashboard && block;
+done:
+    *ctx=saved;
+    reducer_frontier_provable_tip_set(published?old_tip:-1);
+    main_state_free(&ms);
+    printf("explorer: native route dashboard/block witnesses... %s\n",ok?"OK":"FAIL");
+    return ok?0:1;
+}
+
 int test_explorer(void)
 {
     int failures = 0;
     failures += ex_shielded_sign_witness();
     failures += ex_favicon_boundaries();
+    failures += ex_route_precedence_witness();
+    failures += ex_route_native_chain_witness();
     uint8_t resp[8192];
     failures += ex_rpc_tx_rows();
 
