@@ -50,18 +50,25 @@ static bool geometry_valid(uint16_t cols, uint16_t rows)
 static const char *mesh_terminal_proto_error_head_string(
     enum mesh_terminal_proto_error error)
 {
-    switch (error) {
-    case MESH_TERMINAL_PROTO_OK: return "ok";
-    case MESH_TERMINAL_PROTO_NULL: return "null";
-    case MESH_TERMINAL_PROTO_SIZE: return "size";
-    case MESH_TERMINAL_PROTO_MAGIC: return "magic";
-    case MESH_TERMINAL_PROTO_VERSION_INVALID: return "version";
-    case MESH_TERMINAL_PROTO_FLAGS: return "flags";
-    case MESH_TERMINAL_PROTO_CAPABILITY: return "capability";
-    case MESH_TERMINAL_PROTO_FIELD: return "field";
-    case MESH_TERMINAL_PROTO_TIME: return "time";
-    default: return NULL;
+    static const struct {
+        enum mesh_terminal_proto_error code;
+        const char *name;
+    } head[] = {
+        {MESH_TERMINAL_PROTO_OK, "ok"},
+        {MESH_TERMINAL_PROTO_NULL, "null"},
+        {MESH_TERMINAL_PROTO_SIZE, "size"},
+        {MESH_TERMINAL_PROTO_MAGIC, "magic"},
+        {MESH_TERMINAL_PROTO_VERSION_INVALID, "version"},
+        {MESH_TERMINAL_PROTO_FLAGS, "flags"},
+        {MESH_TERMINAL_PROTO_CAPABILITY, "capability"},
+        {MESH_TERMINAL_PROTO_FIELD, "field"},
+        {MESH_TERMINAL_PROTO_TIME, "time"},
+    };
+    for (size_t i = 0; i < sizeof(head) / sizeof(head[0]); i++) {
+        if (head[i].code == error)
+            return head[i].name;
     }
+    return NULL;
 }
 
 static const char *mesh_terminal_proto_error_tail_string(
