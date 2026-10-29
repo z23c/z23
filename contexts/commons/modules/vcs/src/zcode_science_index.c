@@ -89,6 +89,255 @@ static void index_add_result(
     entry->finished_unix = finished_unix;
 }
 
+enum index_wire_kind {
+    INDEX_WIRE_NONE,
+    INDEX_WIRE_STUDY,
+    INDEX_WIRE_RESULT_V1,
+    INDEX_WIRE_RESULT_V2,
+    INDEX_WIRE_REPRODUCTION,
+    INDEX_WIRE_FINDINGS,
+    INDEX_WIRE_VOTE,
+    INDEX_WIRE_REVIEW,
+};
+
+enum index_add_status {
+    INDEX_ADD_OK,
+    INDEX_ADD_INVALID,
+    INDEX_ADD_CAPPED,
+};
+
+#define INDEX_MAGIC_BYTES 8
+
+/* One row per wire family, checked in the same order the magic chain ran. */
+static const struct {
+    size_t wire_bytes;
+    const uint8_t *magic;
+    enum index_wire_kind kind;
+} index_wire_table[] = {
+    {VCS_ZCODE_STUDY_SPEC_WIRE_BYTES, study_magic, INDEX_WIRE_STUDY},
+    {VCS_ZCODE_BENCHMARK_RESULT_WIRE_BYTES, result_v1_magic,
+     INDEX_WIRE_RESULT_V1},
+    {VCS_ZCODE_BENCHMARK_RESULT_V2_WIRE_BYTES, result_v2_magic,
+     INDEX_WIRE_RESULT_V2},
+    {VCS_ZCODE_REPRODUCTION_WIRE_BYTES, reproduction_magic,
+     INDEX_WIRE_REPRODUCTION},
+    {VCS_ZCODE_SCIENCE_FINDINGS_WIRE_BYTES, findings_magic,
+     INDEX_WIRE_FINDINGS},
+    {VCS_ZCODE_CURATION_VOTE_WIRE_BYTES, vote_magic, INDEX_WIRE_VOTE},
+    {VCS_ZCODE_REVIEW_WIRE_BYTES, review_magic, INDEX_WIRE_REVIEW},
+};
+
+static enum index_wire_kind index_wire_kind(const uint8_t *wire, size_t len)
+{
+    size_t rows = sizeof(index_wire_table) / sizeof(index_wire_table[0]);
+    for (size_t i = 0; i < rows; i++)
+        if (len == index_wire_table[i].wire_bytes &&
+            memcmp(wire, index_wire_table[i].magic, INDEX_MAGIC_BYTES) == 0)
+            return index_wire_table[i].kind;
+    return INDEX_WIRE_NONE;
+}
+
+static enum index_add_status index_add_study(
+    struct vcs_zcode_science_index *index, uint8_t *wire, size_t len,
+    const uint8_t address[32])
+{
+    struct vcs_zcode_study_spec_v1 study;
+    uint8_t root[32];
+    bool ok = vcs_zcode_study_spec_parse(wire, len, &study) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_study_spec_validate(&study) == VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_study_spec_root(&study, root) == VCS_ZCODE_SCIENCE_OK &&
+        index_root_agrees(root, address);
+    if (!ok)
+        return INDEX_ADD_INVALID;
+    if (index->study_count >= VCS_ZCODE_SCIENCE_INDEX_MAX_STUDIES)
+        return INDEX_ADD_CAPPED;
+    struct vcs_zcode_science_index_study_entry *e =
+        &index->studies[index->study_count++];
+    memset(e, 0, sizeof(*e));
+    zcl_hex_encode(address, 32, e->study_root_hex);
+    zcl_hex_encode(study.hypothesis_root, 32, e->hypothesis_root_hex);
+    zcl_hex_encode(study.null_hypothesis_root, 32,
+                   e->null_hypothesis_root_hex);
+    zcl_hex_encode(study.source_root, 32, e->source_root_hex);
+    e->required_reproductions = study.required_reproductions;
+    e->required_reviews = study.required_reviews;
+    e->sequence = study.sequence;
+    e->created_unix = study.created_unix;
+    e->expires_unix = study.expires_unix;
+    return INDEX_ADD_OK;
+}
+
+static enum index_add_status index_add_result_v1(
+    struct vcs_zcode_science_index *index, bool *cap_logged,
+    uint8_t *wire, size_t len, const uint8_t address[32])
+{
+    struct vcs_zcode_benchmark_result_v1 result;
+    uint8_t root[32];
+    bool ok = vcs_zcode_benchmark_result_parse(wire, len, &result) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_benchmark_result_validate(&result) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_benchmark_result_root(&result, root) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        index_root_agrees(root, address);
+    if (!ok)
+        return INDEX_ADD_INVALID;
+    index_add_result(
+        index, cap_logged, address, result.study_root,
+        result.task_root, result.candidate_root, result.action_root,
+        NULL, NULL, result.status, result.sequence,
+        result.started_unix, result.finished_unix);
+    return INDEX_ADD_OK;
+}
+
+static enum index_add_status index_add_result_v2(
+    struct vcs_zcode_science_index *index, bool *cap_logged,
+    uint8_t *wire, size_t len, const uint8_t address[32])
+{
+    struct vcs_zcode_benchmark_result_v2 result;
+    uint8_t root[32];
+    bool ok = vcs_zcode_benchmark_result_v2_parse(wire, len, &result) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_benchmark_result_v2_validate(&result) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_benchmark_result_v2_root(&result, root) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        index_root_agrees(root, address);
+    if (!ok)
+        return INDEX_ADD_INVALID;
+    index_add_result(
+        index, cap_logged, address, result.study_root,
+        result.task_root, result.candidate_root, result.action_root,
+        result.method_root, result.hardware_profile_root,
+        result.status, result.sequence, result.started_unix,
+        result.finished_unix);
+    return INDEX_ADD_OK;
+}
+
+static enum index_add_status index_add_reproduction(
+    struct vcs_zcode_science_index *index, uint8_t *wire, size_t len,
+    const uint8_t address[32])
+{
+    struct vcs_zcode_reproduction_v1 reproduction;
+    uint8_t root[32];
+    bool ok = vcs_zcode_reproduction_parse(wire, len, &reproduction) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_reproduction_validate(&reproduction) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_reproduction_root(&reproduction, root) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        index_root_agrees(root, address);
+    if (!ok)
+        return INDEX_ADD_INVALID;
+    if (index->reproduction_count >=
+        VCS_ZCODE_SCIENCE_INDEX_MAX_REPRODUCTIONS)
+        return INDEX_ADD_CAPPED;
+    struct vcs_zcode_science_index_reproduction_entry *e =
+        &index->reproductions[index->reproduction_count++];
+    memset(e, 0, sizeof(*e));
+    zcl_hex_encode(address, 32, e->reproduction_root_hex);
+    zcl_hex_encode(reproduction.study_root, 32, e->study_root_hex);
+    zcl_hex_encode(reproduction.original_result_root, 32,
+                   e->original_result_root_hex);
+    zcl_hex_encode(reproduction.reproduced_result_root, 32,
+                   e->reproduced_result_root_hex);
+    zcl_hex_encode(reproduction.reproducer_pubkey, 32,
+                   e->reproducer_pubkey_hex);
+    e->verdict = reproduction.verdict;
+    e->sequence = reproduction.sequence;
+    e->created_unix = reproduction.created_unix;
+    return INDEX_ADD_OK;
+}
+
+static enum index_add_status index_add_findings(
+    struct vcs_zcode_science_index *index, uint8_t *wire, size_t len,
+    const uint8_t address[32])
+{
+    struct vcs_zcode_science_findings_v1 findings;
+    uint8_t root[32];
+    bool ok = vcs_zcode_science_findings_parse(wire, len, &findings) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_science_findings_validate(&findings) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_science_findings_root(&findings, root) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        index_root_agrees(root, address);
+    if (!ok)
+        return INDEX_ADD_INVALID;
+    if (index->findings_count >= VCS_ZCODE_SCIENCE_INDEX_MAX_FINDINGS)
+        return INDEX_ADD_CAPPED;
+    struct vcs_zcode_science_index_findings_entry *e =
+        &index->findings[index->findings_count++];
+    memset(e, 0, sizeof(*e));
+    zcl_hex_encode(address, 32, e->findings_root_hex);
+    zcl_hex_encode(findings.study_root, 32, e->study_root_hex);
+    zcl_hex_encode(findings.result_root, 32, e->result_root_hex);
+    zcl_hex_encode(findings.retraction_target_root, 32,
+                   e->retraction_target_root_hex);
+    e->flags = findings.flags;
+    e->severity = findings.severity;
+    e->sequence = findings.sequence;
+    e->created_unix = findings.created_unix;
+    return INDEX_ADD_OK;
+}
+
+static enum index_add_status index_add_vote(
+    struct vcs_zcode_science_index *index, uint8_t *wire, size_t len,
+    const uint8_t address[32])
+{
+    struct vcs_zcode_curation_vote_v1 vote;
+    uint8_t id[32];
+    bool ok = vcs_zcode_curation_vote_parse(wire, len, &vote) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_curation_vote_validate(&vote) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_curation_vote_id(&vote, id) == VCS_ZCODE_SCIENCE_OK &&
+        index_root_agrees(id, address);
+    if (!ok)
+        return INDEX_ADD_INVALID;
+    if (index->vote_count >= VCS_ZCODE_SCIENCE_INDEX_MAX_VOTES)
+        return INDEX_ADD_CAPPED;
+    struct vcs_zcode_science_index_vote_entry *e =
+        &index->votes[index->vote_count++];
+    memset(e, 0, sizeof(*e));
+    zcl_hex_encode(address, 32, e->vote_id_hex);
+    zcl_hex_encode(vote.voter_zid_root, 32, e->voter_zid_root_hex);
+    zcl_hex_encode(vote.property_root, 32, e->property_root_hex);
+    zcl_hex_encode(vote.signer_pubkey, 32, e->signer_pubkey_hex);
+    e->signal = vote.signal;
+    e->sequence = vote.sequence;
+    e->expires_unix = vote.expires_unix;
+    return INDEX_ADD_OK;
+}
+
+static enum index_add_status index_add_review(
+    struct vcs_zcode_science_index *index, uint8_t *wire, size_t len,
+    const uint8_t address[32])
+{
+    struct vcs_zcode_review_v1 review;
+    uint8_t root[32];
+    bool ok = vcs_zcode_review_parse(wire, len, &review) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_review_validate(&review) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_review_root(&review, root) == VCS_ZCODE_DEV_OK &&
+        index_root_agrees(root, address);
+    if (!ok)
+        return INDEX_ADD_INVALID;
+    if (index->review_count >= VCS_ZCODE_SCIENCE_INDEX_MAX_REVIEWS)
+        return INDEX_ADD_CAPPED;
+    struct vcs_zcode_science_index_review_entry *e =
+        &index->reviews[index->review_count++];
+    memset(e, 0, sizeof(*e));
+    zcl_hex_encode(address, 32, e->review_root_hex);
+    zcl_hex_encode(review.findings_root, 32, e->findings_root_hex);
+    zcl_hex_encode(review.reviewer_pubkey, 32, e->reviewer_pubkey_hex);
+    e->verdict = review.verdict;
+    e->sequence = review.sequence;
+    e->created_unix = review.created_unix;
+    return INDEX_ADD_OK;
+}
+
 /* Wrong size or wrong magic means the object is another CAS citizen and is
  * skipped silently; right magic with a failed parse/validation/root check
  * is corruption and is logged. */
@@ -105,217 +354,82 @@ static void index_consider_object(const char *repo_root, const char *hex64,
         LOG_ERROR(INDEX_LOG, "unreadable CAS object %.8s", hex64);
         return;
     }
-    if (len == VCS_ZCODE_STUDY_SPEC_WIRE_BYTES &&
-        memcmp(wire, study_magic, sizeof(study_magic)) == 0) {
-        struct vcs_zcode_study_spec_v1 study;
-        uint8_t root[32];
-        bool ok = vcs_zcode_study_spec_parse(wire, len, &study) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_study_spec_validate(&study) == VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_study_spec_root(&study, root) == VCS_ZCODE_SCIENCE_OK &&
-            index_root_agrees(root, address);
-        if (!ok) {
+    enum index_wire_kind kind = index_wire_kind(wire, len);
+    if (kind == INDEX_WIRE_STUDY) {
+        enum index_add_status st = index_add_study(index, wire, len, address);
+        if (st == INDEX_ADD_INVALID) {
             LOG_ERROR(INDEX_LOG, "skipping study-magic object %.8s: "
                       "parse, validation, or root agreement failed", hex64);
-        } else if (index->study_count >=
-                   VCS_ZCODE_SCIENCE_INDEX_MAX_STUDIES) {
+        } else if (st == INDEX_ADD_CAPPED) {
             if (!*cap_logged) {
                 LOG_ERROR(INDEX_LOG, "study index cap %u reached",
                           VCS_ZCODE_SCIENCE_INDEX_MAX_STUDIES);
                 *cap_logged = true;
             }
-        } else {
-            struct vcs_zcode_science_index_study_entry *e =
-                &index->studies[index->study_count++];
-            memset(e, 0, sizeof(*e));
-            zcl_hex_encode(address, 32, e->study_root_hex);
-            zcl_hex_encode(study.hypothesis_root, 32, e->hypothesis_root_hex);
-            zcl_hex_encode(study.null_hypothesis_root, 32,
-                           e->null_hypothesis_root_hex);
-            zcl_hex_encode(study.source_root, 32, e->source_root_hex);
-            e->required_reproductions = study.required_reproductions;
-            e->required_reviews = study.required_reviews;
-            e->sequence = study.sequence;
-            e->created_unix = study.created_unix;
-            e->expires_unix = study.expires_unix;
         }
-    } else if (len == VCS_ZCODE_BENCHMARK_RESULT_WIRE_BYTES &&
-               memcmp(wire, result_v1_magic, sizeof(result_v1_magic)) == 0) {
-        struct vcs_zcode_benchmark_result_v1 result;
-        uint8_t root[32];
-        bool ok = vcs_zcode_benchmark_result_parse(wire, len, &result) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_benchmark_result_validate(&result) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_benchmark_result_root(&result, root) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            index_root_agrees(root, address);
-        if (!ok) {
+    } else if (kind == INDEX_WIRE_RESULT_V1) {
+        enum index_add_status st =
+            index_add_result_v1(index, cap_logged, wire, len, address);
+        if (st == INDEX_ADD_INVALID) {
             LOG_ERROR(INDEX_LOG, "skipping result-v1-magic object %.8s: "
                       "parse, validation, or root agreement failed", hex64);
-        } else {
-            index_add_result(
-                index, cap_logged, address, result.study_root,
-                result.task_root, result.candidate_root, result.action_root,
-                NULL, NULL, result.status, result.sequence,
-                result.started_unix, result.finished_unix);
         }
-    } else if (len == VCS_ZCODE_BENCHMARK_RESULT_V2_WIRE_BYTES &&
-               memcmp(wire, result_v2_magic, sizeof(result_v2_magic)) == 0) {
-        struct vcs_zcode_benchmark_result_v2 result;
-        uint8_t root[32];
-        bool ok = vcs_zcode_benchmark_result_v2_parse(wire, len, &result) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_benchmark_result_v2_validate(&result) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_benchmark_result_v2_root(&result, root) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            index_root_agrees(root, address);
-        if (!ok) {
+    } else if (kind == INDEX_WIRE_RESULT_V2) {
+        enum index_add_status st =
+            index_add_result_v2(index, cap_logged, wire, len, address);
+        if (st == INDEX_ADD_INVALID) {
             LOG_ERROR(INDEX_LOG, "skipping result-v2-magic object %.8s: "
                       "parse, validation, or root agreement failed", hex64);
-        } else {
-            index_add_result(
-                index, cap_logged, address, result.study_root,
-                result.task_root, result.candidate_root, result.action_root,
-                result.method_root, result.hardware_profile_root,
-                result.status, result.sequence, result.started_unix,
-                result.finished_unix);
         }
-    } else if (len == VCS_ZCODE_REPRODUCTION_WIRE_BYTES &&
-               memcmp(wire, reproduction_magic,
-                      sizeof(reproduction_magic)) == 0) {
-        struct vcs_zcode_reproduction_v1 reproduction;
-        uint8_t root[32];
-        bool ok = vcs_zcode_reproduction_parse(wire, len, &reproduction) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_reproduction_validate(&reproduction) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_reproduction_root(&reproduction, root) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            index_root_agrees(root, address);
-        if (!ok) {
+    } else if (kind == INDEX_WIRE_REPRODUCTION) {
+        enum index_add_status st =
+            index_add_reproduction(index, wire, len, address);
+        if (st == INDEX_ADD_INVALID) {
             LOG_ERROR(INDEX_LOG, "skipping reproduction-magic object %.8s: "
                       "parse, validation, or root agreement failed", hex64);
-        } else if (index->reproduction_count >=
-                   VCS_ZCODE_SCIENCE_INDEX_MAX_REPRODUCTIONS) {
+        } else if (st == INDEX_ADD_CAPPED) {
             if (!*cap_logged) {
                 LOG_ERROR(INDEX_LOG, "reproduction index cap %u reached",
                           VCS_ZCODE_SCIENCE_INDEX_MAX_REPRODUCTIONS);
                 *cap_logged = true;
             }
-        } else {
-            struct vcs_zcode_science_index_reproduction_entry *e =
-                &index->reproductions[index->reproduction_count++];
-            memset(e, 0, sizeof(*e));
-            zcl_hex_encode(address, 32, e->reproduction_root_hex);
-            zcl_hex_encode(reproduction.study_root, 32, e->study_root_hex);
-            zcl_hex_encode(reproduction.original_result_root, 32,
-                           e->original_result_root_hex);
-            zcl_hex_encode(reproduction.reproduced_result_root, 32,
-                           e->reproduced_result_root_hex);
-            zcl_hex_encode(reproduction.reproducer_pubkey, 32,
-                           e->reproducer_pubkey_hex);
-            e->verdict = reproduction.verdict;
-            e->sequence = reproduction.sequence;
-            e->created_unix = reproduction.created_unix;
         }
-    } else if (len == VCS_ZCODE_SCIENCE_FINDINGS_WIRE_BYTES &&
-               memcmp(wire, findings_magic, sizeof(findings_magic)) == 0) {
-        struct vcs_zcode_science_findings_v1 findings;
-        uint8_t root[32];
-        bool ok = vcs_zcode_science_findings_parse(wire, len, &findings) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_science_findings_validate(&findings) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_science_findings_root(&findings, root) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            index_root_agrees(root, address);
-        if (!ok) {
+    } else if (kind == INDEX_WIRE_FINDINGS) {
+        enum index_add_status st =
+            index_add_findings(index, wire, len, address);
+        if (st == INDEX_ADD_INVALID) {
             LOG_ERROR(INDEX_LOG, "skipping findings-magic object %.8s: "
                       "parse, validation, or root agreement failed", hex64);
-        } else if (index->findings_count >=
-                   VCS_ZCODE_SCIENCE_INDEX_MAX_FINDINGS) {
+        } else if (st == INDEX_ADD_CAPPED) {
             if (!*cap_logged) {
                 LOG_ERROR(INDEX_LOG, "findings index cap %u reached",
                           VCS_ZCODE_SCIENCE_INDEX_MAX_FINDINGS);
                 *cap_logged = true;
             }
-        } else {
-            struct vcs_zcode_science_index_findings_entry *e =
-                &index->findings[index->findings_count++];
-            memset(e, 0, sizeof(*e));
-            zcl_hex_encode(address, 32, e->findings_root_hex);
-            zcl_hex_encode(findings.study_root, 32, e->study_root_hex);
-            zcl_hex_encode(findings.result_root, 32, e->result_root_hex);
-            zcl_hex_encode(findings.retraction_target_root, 32,
-                           e->retraction_target_root_hex);
-            e->flags = findings.flags;
-            e->severity = findings.severity;
-            e->sequence = findings.sequence;
-            e->created_unix = findings.created_unix;
         }
-    } else if (len == VCS_ZCODE_CURATION_VOTE_WIRE_BYTES &&
-               memcmp(wire, vote_magic, sizeof(vote_magic)) == 0) {
-        struct vcs_zcode_curation_vote_v1 vote;
-        uint8_t id[32];
-        bool ok = vcs_zcode_curation_vote_parse(wire, len, &vote) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_curation_vote_validate(&vote) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_curation_vote_id(&vote, id) == VCS_ZCODE_SCIENCE_OK &&
-            index_root_agrees(id, address);
-        if (!ok) {
+    } else if (kind == INDEX_WIRE_VOTE) {
+        enum index_add_status st = index_add_vote(index, wire, len, address);
+        if (st == INDEX_ADD_INVALID) {
             LOG_ERROR(INDEX_LOG, "skipping vote-magic object %.8s: "
                       "parse, validation, or id agreement failed", hex64);
-        } else if (index->vote_count >= VCS_ZCODE_SCIENCE_INDEX_MAX_VOTES) {
+        } else if (st == INDEX_ADD_CAPPED) {
             if (!*cap_logged) {
                 LOG_ERROR(INDEX_LOG, "vote index cap %u reached",
                           VCS_ZCODE_SCIENCE_INDEX_MAX_VOTES);
                 *cap_logged = true;
             }
-        } else {
-            struct vcs_zcode_science_index_vote_entry *e =
-                &index->votes[index->vote_count++];
-            memset(e, 0, sizeof(*e));
-            zcl_hex_encode(address, 32, e->vote_id_hex);
-            zcl_hex_encode(vote.voter_zid_root, 32, e->voter_zid_root_hex);
-            zcl_hex_encode(vote.property_root, 32, e->property_root_hex);
-            zcl_hex_encode(vote.signer_pubkey, 32, e->signer_pubkey_hex);
-            e->signal = vote.signal;
-            e->sequence = vote.sequence;
-            e->expires_unix = vote.expires_unix;
         }
-    } else if (len == VCS_ZCODE_REVIEW_WIRE_BYTES &&
-               memcmp(wire, review_magic, sizeof(review_magic)) == 0) {
-        struct vcs_zcode_review_v1 review;
-        uint8_t root[32];
-        bool ok = vcs_zcode_review_parse(wire, len, &review) ==
-                VCS_ZCODE_DEV_OK &&
-            vcs_zcode_review_validate(&review) == VCS_ZCODE_DEV_OK &&
-            vcs_zcode_review_root(&review, root) == VCS_ZCODE_DEV_OK &&
-            index_root_agrees(root, address);
-        if (!ok) {
+    } else if (kind == INDEX_WIRE_REVIEW) {
+        enum index_add_status st = index_add_review(index, wire, len, address);
+        if (st == INDEX_ADD_INVALID) {
             LOG_ERROR(INDEX_LOG, "skipping review-magic object %.8s: "
                       "parse, validation, or root agreement failed", hex64);
-        } else if (index->review_count >=
-                   VCS_ZCODE_SCIENCE_INDEX_MAX_REVIEWS) {
+        } else if (st == INDEX_ADD_CAPPED) {
             if (!*cap_logged) {
                 LOG_ERROR(INDEX_LOG, "review index cap %u reached",
                           VCS_ZCODE_SCIENCE_INDEX_MAX_REVIEWS);
                 *cap_logged = true;
             }
-        } else {
-            struct vcs_zcode_science_index_review_entry *e =
-                &index->reviews[index->review_count++];
-            memset(e, 0, sizeof(*e));
-            zcl_hex_encode(address, 32, e->review_root_hex);
-            zcl_hex_encode(review.findings_root, 32, e->findings_root_hex);
-            zcl_hex_encode(review.reviewer_pubkey, 32,
-                           e->reviewer_pubkey_hex);
-            e->verdict = review.verdict;
-            e->sequence = review.sequence;
-            e->created_unix = review.created_unix;
         }
     }
     free(wire);
@@ -389,6 +503,70 @@ static bool index_hex64_zero(const char *hex)
     return true;
 }
 
+static void index_derive_vote_expiry(struct vcs_zcode_science_index *index,
+                                     int64_t now_unix)
+{
+    for (size_t i = 0; i < index->vote_count; i++)
+        index->votes[i].expired =
+            now_unix > 0 && now_unix >= index->votes[i].expires_unix;
+}
+
+static void index_derive_study(struct vcs_zcode_science_index *index,
+                               size_t i, int64_t now_unix)
+{
+    struct vcs_zcode_science_index_study_entry *s = &index->studies[i];
+    s->expired = now_unix > 0 && now_unix >= s->expires_unix;
+    for (size_t r = 0; r < index->result_count; r++)
+        if (strcmp(index->results[r].study_root_hex,
+                   s->study_root_hex) == 0)
+            s->result_count++;
+    for (size_t r = 0; r < index->reproduction_count; r++)
+        if (strcmp(index->reproductions[r].study_root_hex,
+                   s->study_root_hex) == 0)
+            s->reproduction_count++;
+    for (size_t f = 0; f < index->findings_count; f++)
+        if (strcmp(index->findings[f].study_root_hex,
+                   s->study_root_hex) == 0)
+            s->findings_count++;
+}
+
+static void index_derive_retraction(
+    struct vcs_zcode_science_index *index,
+    const struct vcs_zcode_science_index_findings_entry *fe)
+{
+    if (!(fe->flags & VCS_ZCODE_FINDING_RETRACTION) ||
+        index_hex64_zero(fe->retraction_target_root_hex))
+        return;
+    for (size_t i = 0; i < index->study_count; i++)
+        if (strcmp(index->studies[i].study_root_hex,
+                   fe->retraction_target_root_hex) == 0)
+            index->studies[i].retracted = true;
+    for (size_t r = 0; r < index->result_count; r++)
+        if (strcmp(index->results[r].result_root_hex,
+                   fe->retraction_target_root_hex) == 0)
+            index->results[r].retracted = true;
+}
+
+static void index_count_review_for_study(
+    struct vcs_zcode_science_index *index, const char *study_root_hex)
+{
+    for (size_t i = 0; i < index->study_count; i++)
+        if (strcmp(index->studies[i].study_root_hex, study_root_hex) == 0)
+            index->studies[i].review_count++;
+}
+
+static void index_derive_review(
+    struct vcs_zcode_science_index *index,
+    const struct vcs_zcode_science_index_review_entry *re)
+{
+    for (size_t f = 0; f < index->findings_count; f++) {
+        if (strcmp(index->findings[f].findings_root_hex,
+                   re->findings_root_hex) != 0)
+            continue;
+        index_count_review_for_study(index, index->findings[f].study_root_hex);
+    }
+}
+
 /* Derive per-study evidence counts, expiry flags, and retraction marks.
  * Retraction is an observation: a findings object carrying the RETRACTION
  * flag marks its target (a study root or a result root); nothing is
@@ -396,66 +574,18 @@ static bool index_hex64_zero(const char *hex)
 static void index_derive(struct vcs_zcode_science_index *index,
                          int64_t now_unix)
 {
-    for (size_t i = 0; i < index->vote_count; i++)
-        index->votes[i].expired =
-            now_unix > 0 && now_unix >= index->votes[i].expires_unix;
-    for (size_t i = 0; i < index->study_count; i++) {
-        struct vcs_zcode_science_index_study_entry *s = &index->studies[i];
-        s->expired = now_unix > 0 && now_unix >= s->expires_unix;
-        for (size_t r = 0; r < index->result_count; r++)
-            if (strcmp(index->results[r].study_root_hex,
-                       s->study_root_hex) == 0)
-                s->result_count++;
-        for (size_t r = 0; r < index->reproduction_count; r++)
-            if (strcmp(index->reproductions[r].study_root_hex,
-                       s->study_root_hex) == 0)
-                s->reproduction_count++;
-        for (size_t f = 0; f < index->findings_count; f++)
-            if (strcmp(index->findings[f].study_root_hex,
-                       s->study_root_hex) == 0)
-                s->findings_count++;
-    }
-    for (size_t f = 0; f < index->findings_count; f++) {
-        const struct vcs_zcode_science_index_findings_entry *fe =
-            &index->findings[f];
-        if (!(fe->flags & VCS_ZCODE_FINDING_RETRACTION) ||
-            index_hex64_zero(fe->retraction_target_root_hex))
-            continue;
-        for (size_t i = 0; i < index->study_count; i++)
-            if (strcmp(index->studies[i].study_root_hex,
-                       fe->retraction_target_root_hex) == 0)
-                index->studies[i].retracted = true;
-        for (size_t r = 0; r < index->result_count; r++)
-            if (strcmp(index->results[r].result_root_hex,
-                       fe->retraction_target_root_hex) == 0)
-                index->results[r].retracted = true;
-    }
+    index_derive_vote_expiry(index, now_unix);
+    for (size_t i = 0; i < index->study_count; i++)
+        index_derive_study(index, i, now_unix);
+    for (size_t f = 0; f < index->findings_count; f++)
+        index_derive_retraction(index, &index->findings[f]);
     /* Review counts attach to studies through their findings. */
-    for (size_t v = 0; v < index->review_count; v++) {
-        const struct vcs_zcode_science_index_review_entry *re =
-            &index->reviews[v];
-        for (size_t f = 0; f < index->findings_count; f++) {
-            if (strcmp(index->findings[f].findings_root_hex,
-                       re->findings_root_hex) != 0)
-                continue;
-            for (size_t i = 0; i < index->study_count; i++)
-                if (strcmp(index->studies[i].study_root_hex,
-                           index->findings[f].study_root_hex) == 0)
-                    index->studies[i].review_count++;
-        }
-    }
+    for (size_t v = 0; v < index->review_count; v++)
+        index_derive_review(index, &index->reviews[v]);
 }
 
-struct vcs_zcode_science_index *vcs_zcode_science_index_build(
-    const char *repo_root, int64_t now_unix)
+static bool index_alloc_entries(struct vcs_zcode_science_index *index)
 {
-    if (!repo_root)
-        LOG_RETURN(NULL, INDEX_LOG, "null repo_root");
-    struct vcs_zcode_science_index *index =
-        zcl_malloc(sizeof(*index), "vcs_zcode_science_index");
-    if (!index)
-        LOG_RETURN(NULL, INDEX_LOG, "index alloc");
-    memset(index, 0, sizeof(*index));
     index->studies = zcl_malloc(sizeof(*index->studies) *
         VCS_ZCODE_SCIENCE_INDEX_MAX_STUDIES, "science_index_studies");
     index->results = zcl_malloc(sizeof(*index->results) *
@@ -468,34 +598,30 @@ struct vcs_zcode_science_index *vcs_zcode_science_index_build(
         VCS_ZCODE_SCIENCE_INDEX_MAX_VOTES, "science_index_votes");
     index->reviews = zcl_malloc(sizeof(*index->reviews) *
         VCS_ZCODE_SCIENCE_INDEX_MAX_REVIEWS, "science_index_reviews");
-    if (!index->studies || !index->results || !index->reproductions ||
-        !index->findings || !index->votes || !index->reviews) {
-        vcs_zcode_science_index_free(index);
-        LOG_RETURN(NULL, INDEX_LOG, "entry arrays");
-    }
-    char objects[4400];
-    int n = snprintf(objects, sizeof(objects), "%s/.zvcs/objects", repo_root);
-    if (n <= 0 || (size_t)n >= sizeof(objects)) {
-        vcs_zcode_science_index_free(index);
-        LOG_RETURN(NULL, INDEX_LOG, "objects path too long");
-    }
-    DIR *d = opendir(objects);
-    if (!d)
-        return index; /* no object store yet: an empty projection */
+    return index->studies && index->results && index->reproductions &&
+        index->findings && index->votes && index->reviews;
+}
+
+static void index_scan_entries(const char *repo_root, const char *objects,
+                               DIR *d, struct vcs_zcode_science_index *index)
+{
     bool cap_logged = false;
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
         if (!zcl_is_lower_hex(de->d_name, 2))
             continue; /* skips "tmp" and any non-shard entry */
         char shard_path[4400];
-        n = snprintf(shard_path, sizeof(shard_path), "%s/%s", objects,
-                     de->d_name);
+        int n = snprintf(shard_path, sizeof(shard_path), "%s/%s", objects,
+                         de->d_name);
         if (n <= 0 || (size_t)n >= sizeof(shard_path))
             continue;
         index_scan_shard(repo_root, shard_path, de->d_name, index,
                          &cap_logged);
     }
-    closedir(d);
+}
+
+static void index_sort_entries(struct vcs_zcode_science_index *index)
+{
     if (index->study_count > 1)
         qsort(index->studies, index->study_count, sizeof(*index->studies),
               index_study_cmp);
@@ -514,6 +640,34 @@ struct vcs_zcode_science_index *vcs_zcode_science_index_build(
     if (index->review_count > 1)
         qsort(index->reviews, index->review_count, sizeof(*index->reviews),
               index_review_cmp);
+}
+
+struct vcs_zcode_science_index *vcs_zcode_science_index_build(
+    const char *repo_root, int64_t now_unix)
+{
+    if (!repo_root)
+        LOG_RETURN(NULL, INDEX_LOG, "null repo_root");
+    struct vcs_zcode_science_index *index =
+        zcl_malloc(sizeof(*index), "vcs_zcode_science_index");
+    if (!index)
+        LOG_RETURN(NULL, INDEX_LOG, "index alloc");
+    memset(index, 0, sizeof(*index));
+    if (!index_alloc_entries(index)) {
+        vcs_zcode_science_index_free(index);
+        LOG_RETURN(NULL, INDEX_LOG, "entry arrays");
+    }
+    char objects[4400];
+    int n = snprintf(objects, sizeof(objects), "%s/.zvcs/objects", repo_root);
+    if (n <= 0 || (size_t)n >= sizeof(objects)) {
+        vcs_zcode_science_index_free(index);
+        LOG_RETURN(NULL, INDEX_LOG, "objects path too long");
+    }
+    DIR *d = opendir(objects);
+    if (!d)
+        return index; /* no object store yet: an empty projection */
+    index_scan_entries(repo_root, objects, d, index);
+    closedir(d);
+    index_sort_entries(index);
     index_derive(index, now_unix);
     return index;
 }
