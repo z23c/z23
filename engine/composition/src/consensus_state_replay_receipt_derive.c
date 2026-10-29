@@ -56,6 +56,70 @@ static bool rr_column_i64(sqlite3_stmt *st, int col, int64_t *out)
     return true;
 }
 
+/* One `coins` row as read from the progress store; `numeric` is false when an
+ * integer column is not an INTEGER. */
+struct rr_utxo_row {
+    const uint8_t *txid;
+    const uint8_t *script;
+    int script_len;
+    int64_t vout, value, height, coinbase;
+    bool numeric;
+};
+
+static void derive_utxo_load(sqlite3_stmt *st, struct rr_utxo_row *row)
+{
+    row->txid = sqlite3_column_type(st, 0) == SQLITE_BLOB
+        ? sqlite3_column_blob(st, 0) : NULL;
+    row->script = sqlite3_column_type(st, 3) == SQLITE_BLOB
+        ? sqlite3_column_blob(st, 3) : NULL;
+    row->script_len = row->script ? sqlite3_column_bytes(st, 3) : 0;
+    row->vout = -1;
+    row->value = -1;
+    row->height = -1;
+    row->coinbase = -1;
+    row->numeric = rr_column_i64(st, 1, &row->vout) &&
+                   rr_column_i64(st, 2, &row->value) &&
+                   rr_column_i64(st, 4, &row->height) &&
+                   rr_column_i64(st, 5, &row->coinbase);
+}
+
+static bool derive_utxo_bad_shape(sqlite3_stmt *st, const struct rr_utxo_row *row)
+{
+    return !row->txid || sqlite3_column_bytes(st, 0) != 32 || !row->numeric ||
+           sqlite3_column_type(st, 3) != SQLITE_BLOB;
+}
+
+static bool derive_utxo_bad_range(const struct rr_utxo_row *row,
+                                  int32_t max_height, int64_t supply,
+                                  uint64_t count)
+{
+    return row->script_len < 0 || row->script_len > MAX_SCRIPT_SIZE ||
+           row->vout < 0 || row->vout > UINT32_MAX ||
+           !MoneyRange(row->value) || supply > MAX_MONEY - row->value ||
+           row->height < 0 || row->height > max_height ||
+           (row->coinbase != 0 && row->coinbase != 1) ||
+           count == UINT64_MAX;
+}
+
+static bool derive_utxo_fold_row(sqlite3_stmt *st, int32_t max_height,
+                                 struct sha3_256_ctx *ctx, uint64_t count,
+                                 int64_t *supply)
+{
+    struct rr_utxo_row row;
+    derive_utxo_load(st, &row);
+    if (derive_utxo_bad_shape(st, &row) ||
+        derive_utxo_bad_range(&row, max_height, *supply, count))
+        return false;
+    utxo_commitment_sha3_write_record(ctx, row.txid, (uint32_t)row.vout,
+                                      row.value,
+                                      row.script_len ? row.script : NULL,
+                                      (uint32_t)row.script_len,
+                                      (uint32_t)row.height,
+                                      (uint8_t)row.coinbase);
+    *supply += row.value;
+    return true;
+}
+
 static bool derive_utxo(sqlite3 *db, int32_t max_height, uint8_t root[32],
                         uint64_t *count_out, int64_t *supply_out)
 {
@@ -71,30 +135,10 @@ static bool derive_utxo(sqlite3 *db, int32_t max_height, uint8_t root[32],
     bool ok = true;
     int rc;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) { // raw-sql-ok:read-only-introspection
-        const uint8_t *txid = sqlite3_column_type(st, 0) == SQLITE_BLOB
-            ? sqlite3_column_blob(st, 0) : NULL;
-        const uint8_t *script = sqlite3_column_type(st, 3) == SQLITE_BLOB
-            ? sqlite3_column_blob(st, 3) : NULL;
-        int script_len = script ? sqlite3_column_bytes(st, 3) : 0;
-        int64_t vout = -1, value = -1, height = -1, coinbase = -1;
-        bool numeric = rr_column_i64(st, 1, &vout) &&
-                       rr_column_i64(st, 2, &value) &&
-                       rr_column_i64(st, 4, &height) &&
-                       rr_column_i64(st, 5, &coinbase);
-        if (!txid || sqlite3_column_bytes(st, 0) != 32 || !numeric ||
-            sqlite3_column_type(st, 3) != SQLITE_BLOB || script_len < 0 ||
-            script_len > MAX_SCRIPT_SIZE || vout < 0 || vout > UINT32_MAX ||
-            !MoneyRange(value) || supply > MAX_MONEY - value || height < 0 ||
-            height > max_height || (coinbase != 0 && coinbase != 1) ||
-            count == UINT64_MAX) {
+        if (!derive_utxo_fold_row(st, max_height, &ctx, count, &supply)) {
             ok = false;
             break;
         }
-        utxo_commitment_sha3_write_record(&ctx, txid, (uint32_t)vout, value,
-                                          script_len ? script : NULL,
-                                          (uint32_t)script_len,
-                                          (uint32_t)height, (uint8_t)coinbase);
-        supply += value;
         count++;
     }
     if (rc != SQLITE_DONE)
@@ -106,6 +150,40 @@ static bool derive_utxo(sqlite3 *db, int32_t max_height, uint8_t root[32],
     *count_out = count;
     *supply_out = supply;
     return true;
+}
+
+/* One anchor row as read from sprout_anchors or sapling_anchors; `numeric` is
+ * false when the pool or height column is not an INTEGER. */
+struct rr_anchor_row {
+    const uint8_t *root;
+    const uint8_t *tree;
+    int tree_len;
+    int64_t pool, height;
+    bool numeric;
+};
+
+static void derive_anchors_load(sqlite3_stmt *st, struct rr_anchor_row *row)
+{
+    row->root = sqlite3_column_type(st, 1) == SQLITE_BLOB
+        ? sqlite3_column_blob(st, 1) : NULL;
+    row->tree = sqlite3_column_type(st, 3) == SQLITE_BLOB
+        ? sqlite3_column_blob(st, 3) : NULL;
+    row->tree_len = row->tree ? sqlite3_column_bytes(st, 3) : 0;
+    row->pool = -1;
+    row->height = -1;
+    row->numeric = rr_column_i64(st, 0, &row->pool) &&
+                   rr_column_i64(st, 2, &row->height);
+}
+
+static bool derive_anchors_bad_row(sqlite3_stmt *st,
+                                   const struct rr_anchor_row *row,
+                                   int32_t max_height, uint64_t count)
+{
+    return !row->numeric ||
+           (row->pool != ANCHOR_POOL_SPROUT && row->pool != ANCHOR_POOL_SAPLING) ||
+           !row->root || sqlite3_column_bytes(st, 1) != 32 || !row->tree ||
+           row->tree_len <= 0 || row->height < 0 || row->height > max_height ||
+           count == UINT64_MAX;
 }
 
 static bool derive_anchors(sqlite3 *db, int32_t max_height, uint8_t digest[32],
@@ -126,26 +204,17 @@ static bool derive_anchors(sqlite3 *db, int32_t max_height, uint8_t digest[32],
     bool ok = true;
     int rc;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) { // raw-sql-ok:read-only-introspection
-        const uint8_t *root = sqlite3_column_type(st, 1) == SQLITE_BLOB
-            ? sqlite3_column_blob(st, 1) : NULL;
-        const uint8_t *tree = sqlite3_column_type(st, 3) == SQLITE_BLOB
-            ? sqlite3_column_blob(st, 3) : NULL;
-        int tree_len = tree ? sqlite3_column_bytes(st, 3) : 0;
-        int64_t pool = -1, height = -1;
-        bool numeric = rr_column_i64(st, 0, &pool) &&
-                       rr_column_i64(st, 2, &height);
-        if (!numeric ||
-            (pool != ANCHOR_POOL_SPROUT && pool != ANCHOR_POOL_SAPLING) ||
-            !root || sqlite3_column_bytes(st, 1) != 32 || !tree ||
-            tree_len <= 0 || height < 0 || height > max_height ||
-            count == UINT64_MAX) {
+        struct rr_anchor_row row;
+        derive_anchors_load(st, &row);
+        if (derive_anchors_bad_row(st, &row, max_height, count)) {
             ok = false;
             break;
         }
-        consensus_state_bundle_anchor_digest_row(&ctx, (uint8_t)pool, root,
-                                                 (uint64_t)height, tree,
-                                                 (uint32_t)tree_len);
-        have_pool[pool] = true;
+        consensus_state_bundle_anchor_digest_row(&ctx, (uint8_t)row.pool,
+                                                 row.root, (uint64_t)row.height,
+                                                 row.tree,
+                                                 (uint32_t)row.tree_len);
+        have_pool[row.pool] = true;
         count++;
     }
     if (rc != SQLITE_DONE)
