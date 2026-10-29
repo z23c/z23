@@ -21,6 +21,14 @@
 
 #include "lint_gate_selftests.h"
 
+/* Next occurrence of needle at or after from, or NULL when the anchor before
+ * it is missing. Each recipe anchor is searched from the previous one, so the
+ * proof is checked in the order the deploy recipe runs it. */
+static const char *deploy_find_after(const char *from, const char *needle)
+{
+    return from ? strstr(from, needle) : NULL;
+}
+
 int t_canonical_deploy_proof_binding_contract(void)
 {
     int failures = 0;
@@ -32,51 +40,40 @@ int t_canonical_deploy_proof_binding_contract(void)
         ASSERT(read_entire_file(path, &make_buf) == 0);
 
         const char *deploy_recipe = strstr(make_buf, "\ndeploy: vendor-ready");
-        const char *seed_target = deploy_recipe
-            ? strstr(deploy_recipe, "\nseed-anchor-snapshot:") : NULL;
+        const char *seed_target = deploy_find_after(
+            deploy_recipe, "\nseed-anchor-snapshot:");
         ASSERT(deploy_recipe != NULL);
         ASSERT(seed_target != NULL);
-        const char *pinned_build = strstr(
+        const char *pinned_build = deploy_find_after(
             deploy_recipe,
             "$(MAKE) BUILD_SOURCE_RECORD=\"$(BUILD_SOURCE_RECORD)\" zclassic23");
-        const char *frozen_candidate = pinned_build
-            ? strstr(pinned_build, "candidate=\"$$(mktemp") : NULL;
-        const char *agentbuild = frozen_candidate
-            ? strstr(frozen_candidate,
-                     "candidate_agentbuild=\"$$(timeout 30 \"$$candidate\" agentbuild")
-            : NULL;
-        const char *source_compare = agentbuild
-            ? strstr(agentbuild,
-                     "[ \"$$candidate_source_id\" = \"$(BUILD_SOURCE_ID)\" ]")
-            : NULL;
-        const char *record_verify = source_compare
-            ? strstr(source_compare, "tools/dev/source-identity.sh verify-record")
-            : NULL;
-        const char *service_preserve = record_verify
-            ? strstr(record_verify,
-                     "deploy: preserving existing canonical service unit")
-            : NULL;
-        const char *launcher_guard = service_preserve
-            ? strstr(service_preserve,
-                     "service_path\" = \"$(CURDIR)/build/bin/zcl-nodectl")
-            : NULL;
-        const char *binary_target = launcher_guard
-            ? strstr(launcher_guard,
-                     "n == 3")
-            : NULL;
-        const char *candidate_install = record_verify
-            ? strstr(record_verify,
-                     "install -m 755 \"$$candidate\" \"$$SERVICE_BIN\"")
-            : NULL;
-        const char *restart = candidate_install
-            ? strstr(candidate_install, "systemctl --user restart z23-node")
-            : NULL;
-        const char *stage_bind = restart
-            ? strstr(restart,
-                     "ZCL_DEPLOY_STAGE=\"$(DEPLOY_VERIFY_STAGE)\"")
-            : NULL;
-        const char *proof = stage_bind
-            ? strstr(stage_bind, "./tools/deploy_verify.sh") : NULL;
+        const char *frozen_candidate = deploy_find_after(
+            pinned_build, "candidate=\"$$(mktemp");
+        const char *agentbuild = deploy_find_after(
+            frozen_candidate,
+            "candidate_agentbuild=\"$$(timeout 30 \"$$candidate\" agentbuild");
+        const char *source_compare = deploy_find_after(
+            agentbuild,
+            "[ \"$$candidate_source_id\" = \"$(BUILD_SOURCE_ID)\" ]");
+        const char *record_verify = deploy_find_after(
+            source_compare, "tools/dev/source-identity.sh verify-record");
+        const char *service_preserve = deploy_find_after(
+            record_verify,
+            "deploy: preserving existing canonical service unit");
+        const char *launcher_guard = deploy_find_after(
+            service_preserve,
+            "service_path\" = \"$(CURDIR)/build/bin/zcl-nodectl");
+        const char *binary_target = deploy_find_after(
+            launcher_guard, "n == 3");
+        const char *candidate_install = deploy_find_after(
+            record_verify,
+            "install -m 755 \"$$candidate\" \"$$SERVICE_BIN\"");
+        const char *restart = deploy_find_after(
+            candidate_install, "systemctl --user restart z23-node");
+        const char *stage_bind = deploy_find_after(
+            restart, "ZCL_DEPLOY_STAGE=\"$(DEPLOY_VERIFY_STAGE)\"");
+        const char *proof = deploy_find_after(
+            stage_bind, "./tools/deploy_verify.sh");
         ASSERT(pinned_build != NULL && pinned_build < seed_target);
         ASSERT(frozen_candidate != NULL && frozen_candidate < seed_target);
         ASSERT(agentbuild != NULL && agentbuild < seed_target);

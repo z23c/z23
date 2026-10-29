@@ -569,7 +569,6 @@ platform/modules/util/src/cpu_topology.c:scan_windows:27
 tests/harness/src/codeindex_freshness_windows_acceptance.c:main:22
 tests/harness/src/codeindex_freshness_windows_acceptance.c:mutation_acceptance:32
 tests/harness/src/lint_gate_chain_contracts.c:t_no_new_coin_backfill_caller:47
-tests/harness/src/lint_gate_deploy_contracts.c:t_canonical_deploy_proof_binding_contract:26
 tests/harness/src/test.c:main:407
 tests/harness/src/test_accept_to_mempool.c:test_accept_to_mempool:44
 tests/harness/src/test_always_sync_lifecycle.c:test_always_sync_lifecycle_platform_arm:47
