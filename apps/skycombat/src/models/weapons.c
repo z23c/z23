@@ -76,9 +76,7 @@ void weapons_destroy(weapons_system_t* weapons) {
     free(weapons);
 }
 
-void weapons_update(weapons_system_t* weapons, float dt) {
-    CHECK_NULL(weapons);
-    // Update weapon cooldowns and effects
+static void weapons_update_cooldowns(weapons_system_t* weapons, float dt) {
     for (int i = 0; i < WEAPON_COUNT; i++) {
         if (weapons->fire_cooldown[i] > 0) {
             weapons->fire_cooldown[i] -= dt;
@@ -89,26 +87,9 @@ void weapons_update(weapons_system_t* weapons, float dt) {
             weapons->weapon_heat[i] = fmaxf(0.0f, weapons->weapon_heat[i]);
         }
     }
-    
-    // Update recoil
-    if (weapons->recoil_amount > 0) {
-        weapons->recoil_amount -= dt * 10.0f; // Recoil recovery speed
-        weapons->recoil_amount = fmaxf(0.0f, weapons->recoil_amount);
-    }
-    
-    // Update muzzle flash
-    if (weapons->muzzle_flash_timer > 0) {
-        weapons->muzzle_flash_timer -= dt;
-    }
-    
-    // Update upgrade timer
-    if (weapons->upgrade_timer > 0) {
-        weapons->upgrade_timer -= dt;
-        if (weapons->upgrade_timer <= 0) {
-            weapons_clear_upgrade(weapons);
-        }
-    }
-    
+}
+
+static void weapons_update_bullets(weapons_system_t* weapons, float dt) {
     // Update bullets - traverse linked list and remove expired ones
     bullet_t* current = weapons->bullets_head;
     bullet_t* prev = NULL;
@@ -141,34 +122,40 @@ void weapons_update(weapons_system_t* weapons, float dt) {
             current = current->next;
         }
     }
-    
+}
+
+static void weapons_home_missile(missile_t* missile, float dt) {
+    // Home towards target if exists
+    if (missile->target && !missile->target->collected) {
+        Vector3 toTarget = Vector3Subtract(
+            missile->target->position, 
+            missile->position
+        );
+        float targetLength = Vector3Length(toTarget);
+        Vector3 targetDir = toTarget;
+        if (targetLength > 0.001f) {
+            SAFE_NORMALIZE(targetDir);
+        } else {
+            targetDir = (Vector3){0, 0, 1};
+        }
+        
+        // Rockets have much less homing (they're fast enough to not need it)
+        float homingStrength = missile->is_rocket ? 0.5f : 2.0f;
+        float targetSpeed = missile->is_rocket ? ROCKET_MISSILE_SPEED : MISSILE_SPEED;
+        
+        missile->velocity = Vector3Lerp(
+            missile->velocity, 
+            Vector3Scale(targetDir, targetSpeed),
+            CLAMP(homingStrength * dt, 0.0f, 1.0f)
+        );
+    }
+}
+
+static void weapons_update_missiles(weapons_system_t* weapons, float dt) {
     // Update missiles with homing
     for (int i = 0; i < MAX_MISSILES; i++) {
         if (weapons->missiles[i].active) {
-            // Home towards target if exists
-            if (weapons->missiles[i].target && !weapons->missiles[i].target->collected) {
-                Vector3 toTarget = Vector3Subtract(
-                    weapons->missiles[i].target->position, 
-                    weapons->missiles[i].position
-                );
-                float targetLength = Vector3Length(toTarget);
-                Vector3 targetDir = toTarget;
-                if (targetLength > 0.001f) {
-                    SAFE_NORMALIZE(targetDir);
-                } else {
-                    targetDir = (Vector3){0, 0, 1};
-                }
-                
-                // Rockets have much less homing (they're fast enough to not need it)
-                float homingStrength = weapons->missiles[i].is_rocket ? 0.5f : 2.0f;
-                float targetSpeed = weapons->missiles[i].is_rocket ? ROCKET_MISSILE_SPEED : MISSILE_SPEED;
-                
-                weapons->missiles[i].velocity = Vector3Lerp(
-                    weapons->missiles[i].velocity, 
-                    Vector3Scale(targetDir, targetSpeed),
-                    CLAMP(homingStrength * dt, 0.0f, 1.0f)
-                );
-            }
+            weapons_home_missile(&weapons->missiles[i], dt);
             
             weapons->missiles[i].position = Vector3Add(
                 weapons->missiles[i].position, 
@@ -181,7 +168,9 @@ void weapons_update(weapons_system_t* weapons, float dt) {
             }
         }
     }
-    
+}
+
+static void weapons_update_lasers(weapons_system_t* weapons, float dt) {
     // Update lasers
     for (int i = 0; i < MAX_LASERS; i++) {
         if (weapons->lasers[i].active) {
@@ -193,7 +182,9 @@ void weapons_update(weapons_system_t* weapons, float dt) {
             }
         }
     }
-    
+}
+
+static void weapons_update_plasma(weapons_system_t* weapons, float dt) {
     // Update plasma bolts
     for (int i = 0; i < MAX_PLASMA; i++) {
         if (weapons->plasma[i].active) {
@@ -216,8 +207,37 @@ void weapons_update(weapons_system_t* weapons, float dt) {
     }
 }
 
-void weapons_draw(weapons_system_t* weapons) {
+void weapons_update(weapons_system_t* weapons, float dt) {
     CHECK_NULL(weapons);
+    // Update weapon cooldowns and effects
+    weapons_update_cooldowns(weapons, dt);
+    
+    // Update recoil
+    if (weapons->recoil_amount > 0) {
+        weapons->recoil_amount -= dt * 10.0f; // Recoil recovery speed
+        weapons->recoil_amount = fmaxf(0.0f, weapons->recoil_amount);
+    }
+    
+    // Update muzzle flash
+    if (weapons->muzzle_flash_timer > 0) {
+        weapons->muzzle_flash_timer -= dt;
+    }
+    
+    // Update upgrade timer
+    if (weapons->upgrade_timer > 0) {
+        weapons->upgrade_timer -= dt;
+        if (weapons->upgrade_timer <= 0) {
+            weapons_clear_upgrade(weapons);
+        }
+    }
+    
+    weapons_update_bullets(weapons, dt);
+    weapons_update_missiles(weapons, dt);
+    weapons_update_lasers(weapons, dt);
+    weapons_update_plasma(weapons, dt);
+}
+
+static void weapons_draw_muzzle_flash(weapons_system_t* weapons) {
     // Draw muzzle flash
     if (weapons->muzzle_flash_timer > 0) {
         float flash_size = 8.0f * weapons->muzzle_flash_timer * 5.0f; // Larger flash
@@ -230,7 +250,9 @@ void weapons_draw(weapons_system_t* weapons) {
         DrawSphere(weapons->last_fire_position, flash_size, Fade(flash_color, weapons->muzzle_flash_timer * 5.0f));
         DrawSphere(weapons->last_fire_position, flash_size * 0.7f, Fade(YELLOW, weapons->muzzle_flash_timer * 3.0f));
     }
-    
+}
+
+static void weapons_draw_bullets(weapons_system_t* weapons) {
     // Draw bullets with enhanced tracer effect - traverse linked list
     bullet_t* bullet = weapons->bullets_head;
     while (bullet) {
@@ -257,64 +279,79 @@ void weapons_draw(weapons_system_t* weapons) {
         
         bullet = bullet->next;
     }
+}
+
+static void weapons_draw_rocket_missile(missile_t* missile) {
+    // Rocket missile - skinny and fast!
+    Vector3 missile_vel_norm = missile->velocity;
+    SAFE_NORMALIZE(missile_vel_norm);
+    DrawCapsule(
+        missile->position, 
+        Vector3Add(missile->position, 
+            Vector3Scale(missile_vel_norm, -12)),
+        0.8f, 8, 8, ORANGE  // Much skinnier and longer
+    );
     
+    // Sleek flame trail for rockets
+    for (int j = 0; j < 10; j++) {
+        Vector3 smokePos = Vector3Subtract(
+            missile->position,
+            Vector3Scale(missile->velocity, j * 0.01f)
+        );
+        Color flameColor = j < 3 ? YELLOW : ORANGE;
+        if (j > 7) flameColor = RED;
+        DrawSphere(smokePos, 1.5f + j * 0.3f, Fade(flameColor, 0.6f - j * 0.05f));
+    }
+}
+
+static void weapons_draw_normal_missile(missile_t* missile) {
+    // Normal missile - also skinnier
+    Vector3 missile_vel_norm2 = missile->velocity;
+    SAFE_NORMALIZE(missile_vel_norm2);
+    DrawCapsule(
+        missile->position, 
+        Vector3Add(missile->position, 
+            Vector3Scale(missile_vel_norm2, -8)),
+        0.6f, 8, 8, RED  // Skinnier
+    );
+    
+    // Smaller smoke trail
+    for (int j = 0; j < 6; j++) {
+        Vector3 smokePos = Vector3Subtract(
+            missile->position,
+            Vector3Scale(missile->velocity, j * 0.015f)
+        );
+        DrawSphere(smokePos, 1.0f + j * 0.3f, Fade(GRAY, 0.4f - j * 0.06f));
+    }
+}
+
+static void weapons_draw_missile_target(missile_t* missile) {
+    // Target indicator (dimmer for rockets since they're less guided)
+    if (missile->target && !missile->target->collected) {
+        float alpha = missile->is_rocket ? 0.15f : 0.3f;
+        DrawLine3D(
+            missile->position, 
+            missile->target->position, 
+            Fade(RED, alpha)
+        );
+    }
+}
+
+static void weapons_draw_missiles(weapons_system_t* weapons) {
     // Draw missiles
     for (int i = 0; i < MAX_MISSILES; i++) {
         if (weapons->missiles[i].active) {
             if (weapons->missiles[i].is_rocket) {
-                // Rocket missile - skinny and fast!
-                Vector3 missile_vel_norm = weapons->missiles[i].velocity;
-                SAFE_NORMALIZE(missile_vel_norm);
-                DrawCapsule(
-                    weapons->missiles[i].position, 
-                    Vector3Add(weapons->missiles[i].position, 
-                        Vector3Scale(missile_vel_norm, -12)),
-                    0.8f, 8, 8, ORANGE  // Much skinnier and longer
-                );
-                
-                // Sleek flame trail for rockets
-                for (int j = 0; j < 10; j++) {
-                    Vector3 smokePos = Vector3Subtract(
-                        weapons->missiles[i].position,
-                        Vector3Scale(weapons->missiles[i].velocity, j * 0.01f)
-                    );
-                    Color flameColor = j < 3 ? YELLOW : ORANGE;
-                    if (j > 7) flameColor = RED;
-                    DrawSphere(smokePos, 1.5f + j * 0.3f, Fade(flameColor, 0.6f - j * 0.05f));
-                }
+                weapons_draw_rocket_missile(&weapons->missiles[i]);
             } else {
-                // Normal missile - also skinnier
-                Vector3 missile_vel_norm2 = weapons->missiles[i].velocity;
-                SAFE_NORMALIZE(missile_vel_norm2);
-                DrawCapsule(
-                    weapons->missiles[i].position, 
-                    Vector3Add(weapons->missiles[i].position, 
-                        Vector3Scale(missile_vel_norm2, -8)),
-                    0.6f, 8, 8, RED  // Skinnier
-                );
-                
-                // Smaller smoke trail
-                for (int j = 0; j < 6; j++) {
-                    Vector3 smokePos = Vector3Subtract(
-                        weapons->missiles[i].position,
-                        Vector3Scale(weapons->missiles[i].velocity, j * 0.015f)
-                    );
-                    DrawSphere(smokePos, 1.0f + j * 0.3f, Fade(GRAY, 0.4f - j * 0.06f));
-                }
+                weapons_draw_normal_missile(&weapons->missiles[i]);
             }
-            
-            // Target indicator (dimmer for rockets since they're less guided)
-            if (weapons->missiles[i].target && !weapons->missiles[i].target->collected) {
-                float alpha = weapons->missiles[i].is_rocket ? 0.15f : 0.3f;
-                DrawLine3D(
-                    weapons->missiles[i].position, 
-                    weapons->missiles[i].target->position, 
-                    Fade(RED, alpha)
-                );
-            }
+            weapons_draw_missile_target(&weapons->missiles[i]);
         }
     }
-    
+}
+
+static void weapons_draw_lasers(weapons_system_t* weapons) {
     // Draw lasers
     for (int i = 0; i < MAX_LASERS; i++) {
         if (weapons->lasers[i].active) {
@@ -335,7 +372,9 @@ void weapons_draw(weapons_system_t* weapons) {
             DrawSphere(weapons->lasers[i].end_position, 3.0f, WHITE);
         }
     }
-    
+}
+
+static void weapons_draw_plasma(weapons_system_t* weapons) {
     // Draw plasma bolts
     for (int i = 0; i < MAX_PLASMA; i++) {
         if (weapons->plasma[i].active) {
@@ -362,6 +401,15 @@ void weapons_draw(weapons_system_t* weapons) {
             }
         }
     }
+}
+
+void weapons_draw(weapons_system_t* weapons) {
+    CHECK_NULL(weapons);
+    weapons_draw_muzzle_flash(weapons);
+    weapons_draw_bullets(weapons);
+    weapons_draw_missiles(weapons);
+    weapons_draw_lasers(weapons);
+    weapons_draw_plasma(weapons);
 }
 
 void weapons_fire_bullet(weapons_system_t* weapons, Vector3 position, Vector3 direction, float yaw) {
