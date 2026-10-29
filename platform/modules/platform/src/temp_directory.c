@@ -83,7 +83,7 @@ static size_t temp_directory_trim_separators(char *base, size_t base_len)
     return base_len;
 }
 
-/* Copy the created path out, or undo the create when it does not fit. */
+/* Copy the created path out, or try to undo the create when it does not fit. */
 static bool temp_directory_publish_path(char *out_path, size_t out_cap,
                                         const char *candidate)
 {
