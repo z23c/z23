@@ -319,10 +319,60 @@ int vcs_tree_capture_into(const char *scan_root, const char *object_store_root,
     return result;
 }
 
+static bool snapshot_args_ok(const struct vcs_repo *r,
+                             const struct vcs_snapshot_meta *meta,
+                             const uint8_t *out_commit_id)
+{
+    return r && meta && out_commit_id;
+}
+
+/* Fill every commit field that does not come from the index (parent is
+ * loaded separately). */
+static void snapshot_fill_commit(struct vcs_commit *c,
+                                 const struct vcs_snapshot_meta *meta,
+                                 uint8_t tree_hash[32], uint8_t sealset[32])
+{
+    memset(c, 0, sizeof(*c));
+    c->version = VCS_COMMIT_VERSION;
+    memcpy(c->tree_hash, tree_hash, 32);
+    memcpy(c->sealset_hash, sealset, 32);
+    if (meta->generation_sha256) memcpy(c->generation_sha256, meta->generation_sha256, 32);
+    c->verdict_status = meta->verdict_status;
+    fill_fixed(c->phase, sizeof(c->phase), meta->phase);
+    c->elapsed_ms = meta->elapsed_ms;
+    if (meta->failure_hash) memcpy(c->failure_hash, meta->failure_hash, 32);
+    fill_fixed(c->agent_id, sizeof(c->agent_id), meta->agent_id);
+    fill_fixed(c->session_id, sizeof(c->session_id), meta->session_id);
+    fill_fixed(c->task_ref, sizeof(c->task_ref), meta->task_ref);
+    c->committed_at = platform_time_wall_unix();
+}
+
+static bool snapshot_load_parent(struct vcs_repo *r, struct vcs_commit *c)
+{
+    bool have_parent = false;
+    if (!vcs_index_ref_get(r->idx, "HEAD", c->parent, &have_parent))
+        return false;
+    if (!have_parent)
+        memset(c->parent, 0, 32);
+    return true;
+}
+
+static bool snapshot_advance_refs(struct vcs_repo *r, const struct vcs_commit *c,
+                                  uint8_t commit_id[32], uint8_t sealset[32])
+{
+    bool ok = vcs_index_ref_set_in_tx(r->idx, "HEAD", commit_id) &&
+              vcs_index_anchor_put_in_tx(r->idx, commit_id, c->generation_sha256,
+                                         c->verdict_status) &&
+              vcs_index_seal_pin_set_in_tx(r->idx, sealset);
+    if (ok) ok = vcs_index_commit(r->idx);
+    else vcs_index_rollback(r->idx);
+    return ok;
+}
+
 int vcs_snapshot(struct vcs_repo *r, const struct vcs_snapshot_meta *meta,
                  uint8_t out_commit_id[32])
 {
-    if (!r || !meta || !out_commit_id)
+    if (!snapshot_args_ok(r, meta, out_commit_id))
         LOG_ERR("vcs", "null arg to snapshot");
 
     struct vcs_manifest m;
@@ -356,24 +406,9 @@ int vcs_snapshot(struct vcs_repo *r, const struct vcs_snapshot_meta *meta,
 
     /* Build the commit record. */
     struct vcs_commit c;
-    memset(&c, 0, sizeof(c));
-    c.version = VCS_COMMIT_VERSION;
-    bool have_parent = false;
-    if (!vcs_index_ref_get(r->idx, "HEAD", c.parent, &have_parent))
+    snapshot_fill_commit(&c, meta, tree_hash, sealset);
+    if (!snapshot_load_parent(r, &c))
         LOG_ERR("vcs", "ref_get HEAD");
-    if (!have_parent)
-        memset(c.parent, 0, 32);
-    memcpy(c.tree_hash, tree_hash, 32);
-    memcpy(c.sealset_hash, sealset, 32);
-    if (meta->generation_sha256) memcpy(c.generation_sha256, meta->generation_sha256, 32);
-    c.verdict_status = meta->verdict_status;
-    fill_fixed(c.phase, sizeof(c.phase), meta->phase);
-    c.elapsed_ms = meta->elapsed_ms;
-    if (meta->failure_hash) memcpy(c.failure_hash, meta->failure_hash, 32);
-    fill_fixed(c.agent_id, sizeof(c.agent_id), meta->agent_id);
-    fill_fixed(c.session_id, sizeof(c.session_id), meta->session_id);
-    fill_fixed(c.task_ref, sizeof(c.task_ref), meta->task_ref);
-    c.committed_at = platform_time_wall_unix();
 
     uint8_t record[VCS_COMMIT_RECORD_BYTES];
     if (!vcs_commit_serialize(&c, record))
@@ -397,13 +432,7 @@ int vcs_snapshot(struct vcs_repo *r, const struct vcs_snapshot_meta *meta,
     /* Advance HEAD / anchor / seal_pin in one transaction. */
     if (!vcs_index_begin(r->idx))
         LOG_ERR("vcs", "index begin");
-    bool ok = vcs_index_ref_set_in_tx(r->idx, "HEAD", commit_id) &&
-              vcs_index_anchor_put_in_tx(r->idx, commit_id, c.generation_sha256,
-                                         c.verdict_status) &&
-              vcs_index_seal_pin_set_in_tx(r->idx, sealset);
-    if (ok) ok = vcs_index_commit(r->idx);
-    else vcs_index_rollback(r->idx);
-    if (!ok)
+    if (!snapshot_advance_refs(r, &c, commit_id, sealset))
         LOG_ERR("vcs", "index update");
 
     memcpy(out_commit_id, commit_id, 32);

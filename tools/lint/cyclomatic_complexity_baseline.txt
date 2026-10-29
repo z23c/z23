@@ -18,7 +18,7 @@ contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_plan_persist:22
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_receipt_load:19
 contexts/commons/modules/vcs/src/package_swarm_node.c:schedule_locked:46
 contexts/commons/modules/vcs/src/package_swarm_node.c:swarm_fetch:39
-contexts/commons/modules/vcs/src/vcs.c:vcs_snapshot:26
+contexts/commons/modules/vcs/src/vcs.c:vcs_snapshot:18
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_bid_dominates:18
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_choose:45
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_project:79
