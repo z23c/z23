@@ -698,7 +698,7 @@ static bool bench_cv_groth16_build(struct bench_groth16_arg *ga)
     return built;
 }
 
-/* TEETH for a built Groth16 output: valid -> true, one bit flipped -> false. */
+/* TEETH: valid -> true, one-bit-flipped -> false. */
 static void bench_groth16_teeth(struct bench_groth16_arg *ga, bool *pos,
                                 bool *neg)
 {
@@ -728,13 +728,13 @@ static int bench_crypto_verify(void)
     printf("  history:  %s\n", path);
     printf("  budget:   %.0f ms/primitive\n", budget_ms);
     printf("  clock:    clock_now_monotonic_ns (monotonic)\n\n");
-
     struct bench_row rows[2];
     size_t nrows = 0;
 
     /* ── (b) Equihash (200,9) — hermetic ───────────────────────────── */
     struct block_header h;
     verify_bench_fill_eh_header(&h);
+    /* TEETH: valid -> true, one-bit-flipped -> false. */
     bool pos = check_equihash_solution(&h, NULL);
     struct block_header bad = h;
     bad.nSolution[600] ^= 0x01;
