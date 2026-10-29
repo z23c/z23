@@ -467,8 +467,8 @@ static int zanc_file_digest_failures(void)
 
     printf("anchor_verify file: SHA2-256/SHA3-256 of \"abc\"... ");
     {
-        char path[] = "/tmp/zanc_test_XXXXXX";
-        int fd = mkstemp(path);
+        char path[PATH_MAX];
+        int fd = test_mkstemp(path, sizeof path, "zanc_test");
         bool wrote = zanc_write_abc_close(fd);
 
         struct node_db ndb = {0};

@@ -52,8 +52,8 @@ static int test_utxo_audit_detects_drift(void)
     int failures = 0;
 
     TEST("utxo_audit: detects commitment drift and persists advisory flag") {
-        char path[] = "/tmp/zclassic23-utxo-audit-XXXXXX";
-        int fd = mkstemp(path);
+        char path[PATH_MAX];
+        int fd = test_mkstemp(path, sizeof path, "zclassic23-utxo-audit");
         ASSERT(fd >= 0);
         close(fd);
 
@@ -92,8 +92,8 @@ static int test_utxo_drift_condition_escalates_and_clears(void)
     int failures = 0;
 
     TEST("utxo_drift_detected condition escalates persisted audit drift") {
-        char path[] = "/tmp/zclassic23-utxo-drift-cond-XXXXXX";
-        int fd = mkstemp(path);
+        char path[PATH_MAX];
+        int fd = test_mkstemp(path, sizeof path, "zclassic23-utxo-drift-cond");
         ASSERT(fd >= 0);
         close(fd);
 

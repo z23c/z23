@@ -33,7 +33,7 @@ struct sd_bootstrap_ctx {
     struct rpc_table tbl;
     struct json_value params;
     struct json_value result;
-    char tmp_template[64];
+    char tmp_template[PATH_MAX];
     char *tmp_dir;
     char snap_path[512];
     char index_path[512];
@@ -42,9 +42,7 @@ struct sd_bootstrap_ctx {
 static bool sd_bootstrap_setup_connman(struct sd_bootstrap_ctx *ctx)
 {
     progress_store_close();
-    memcpy(ctx->tmp_template, "/tmp/zcl-bootstrapstatus-XXXXXX",
-          sizeof "/tmp/zcl-bootstrapstatus-XXXXXX");
-    ctx->tmp_dir = mkdtemp(ctx->tmp_template);
+    ctx->tmp_dir = test_mkdtemp(ctx->tmp_template, sizeof ctx->tmp_template, "zcl-bootstrapstatus");
     memset(ctx->snap_path, 0, sizeof ctx->snap_path);
     memset(ctx->index_path, 0, sizeof ctx->index_path);
     int snap_n = ctx->tmp_dir ? snprintf(ctx->snap_path,

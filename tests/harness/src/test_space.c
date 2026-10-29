@@ -237,12 +237,12 @@ static int test_space_plan_commit_carrier(void)
 {
   int failures = 0;
   TEST("space service: exact stateless plan, CAS recheck and blob carrier") {
-    char workspace[] = "/tmp/zcl_space_service_XXXXXX";
-    char admitted_workspace[] = "/tmp/zcl_space_admit_XXXXXX";
-    char store_dir[] = "/tmp/zcl_space_store_XXXXXX";
-    ASSERT(mkdtemp(workspace) != NULL);
-    ASSERT(mkdtemp(admitted_workspace) != NULL);
-    ASSERT(mkdtemp(store_dir) != NULL);
+    char workspace[PATH_MAX];
+    char admitted_workspace[PATH_MAX];
+    char store_dir[PATH_MAX];
+    ASSERT(test_mkdtemp(workspace, sizeof workspace, "zcl_space_service") != NULL);
+    ASSERT(test_mkdtemp(admitted_workspace, sizeof admitted_workspace, "zcl_space_admit") != NULL);
+    ASSERT(test_mkdtemp(store_dir, sizeof store_dir, "zcl_space_store") != NULL);
     struct vcs_service_descriptor_v1 service;
     service_fixture(&service);
     struct metaverse_space_plan_out plan;
@@ -360,10 +360,10 @@ static int test_space_native_plan_commit_show(void)
 {
   int failures = 0;
   TEST("space commands: exact plan/commit/show and no executable authority") {
-    char datadir[] = "/tmp/zcl_space_command_XXXXXX";
-    char workspace[] = "/tmp/zcl_space_command_ws_XXXXXX";
-    ASSERT(mkdtemp(datadir) != NULL);
-    ASSERT(mkdtemp(workspace) != NULL);
+    char datadir[PATH_MAX];
+    char workspace[PATH_MAX];
+    ASSERT(test_mkdtemp(datadir, sizeof datadir, "zcl_space_command") != NULL);
+    ASSERT(test_mkdtemp(workspace, sizeof workspace, "zcl_space_command_ws") != NULL);
     struct vcs_zcode_dht_delegation delegation;
     char identity_error[192] = {0};
     ASSERT(space_current_delegation(&delegation));
@@ -582,8 +582,8 @@ static int test_space_admit_policy_identities(void)
 {
   int failures = 0;
   TEST("space admission: pointer publisher and manifest owner both gate") {
-    char datadir[] = "/tmp/zcl_space_policy_XXXXXX";
-    ASSERT(mkdtemp(datadir) != NULL);
+    char datadir[PATH_MAX];
+    ASSERT(test_mkdtemp(datadir, sizeof datadir, "zcl_space_policy") != NULL);
     struct vcs_zcode_dht_delegation delegation;
     char error[192] = {0};
     ASSERT(space_current_delegation(&delegation));
@@ -770,8 +770,8 @@ static int test_space_discovery_closed_states(void)
     zcl_command_reply_free(&reply);
     json_free(&input);
 
-    char datadir[] = "/tmp/zcl_space_discovery_state_XXXXXX";
-    ASSERT(mkdtemp(datadir) != NULL);
+    char datadir[PATH_MAX];
+    ASSERT(test_mkdtemp(datadir, sizeof datadir, "zcl_space_discovery_state") != NULL);
     struct vcs_zcode_dht_delegation delegation;
     char error[192] = {0};
     ASSERT(space_current_delegation(&delegation));
@@ -856,8 +856,8 @@ static int test_space_native_manifest_sign_refusal_named(void)
 {
   int failures = 0;
   TEST("space plan: signer/window refusals are named, not collapsed") {
-    char datadir[] = "/tmp/zcl_space_signrefuse_XXXXXX";
-    ASSERT(mkdtemp(datadir) != NULL);
+    char datadir[PATH_MAX];
+    ASSERT(test_mkdtemp(datadir, sizeof datadir, "zcl_space_signrefuse") != NULL);
 
     /* Provision the identity exactly as zcode network delegate would: an
      * online key file plus a delegation over that same key, current now. */

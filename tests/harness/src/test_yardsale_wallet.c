@@ -892,9 +892,9 @@ int test_yardsale_wallet(void)
         /* Logs: replay an arm commit (idempotent path touches no key —
          * so drive a FRESH arm plan+commit for a new ad under the
          * capture) plus a buy commit, then scan stdout/stderr. */
-        char dir[] = "/tmp/ywlogXXXXXX";
+        char dir[PATH_MAX];
         bool logged = false, anti = false;
-        if (mkdtemp(dir)) {
+        if (test_mkdtemp(dir, sizeof dir, "ywlog")) {
             struct zswap_quote_v1 ad4;
             uint8_t ad4_root[32];
             bool have4 = yw_make_ad(&ad4, token_txid, YW_TOKEN_SUPPLY,

@@ -682,8 +682,8 @@ static int test_wallet_lock_boot_credential(void)
     int failures = 0;
     const char *saved_dir = getenv("CREDENTIALS_DIRECTORY");
     char *saved_copy = saved_dir ? strdup(saved_dir) : NULL;
-    char dir[] = "/tmp/zcl-wallet-credential-XXXXXX";
-    char *made = mkdtemp(dir);
+    char dir[PATH_MAX];
+    char *made = test_mkdtemp(dir, sizeof dir, "zcl-wallet-credential");
     char path[256];
     snprintf(path, sizeof(path), "%s/wallet-passphrase", made ? made : dir);
 

@@ -1464,8 +1464,8 @@ static int test_science_pointer_candidate_policy(void)
 {
   int failures = 0;
   TEST("zcode pointer policy: one denied publisher does not deny another") {
-    char datadir[] = "/tmp/zcl_pointer_policy_XXXXXX";
-    ASSERT(mkdtemp(datadir) != NULL);
+    char datadir[PATH_MAX];
+    ASSERT(test_mkdtemp(datadir, sizeof datadir, "zcl_pointer_policy") != NULL);
     struct record_fixture fixture;
     int chain_calls = 0;
     ASSERT(rf_init(&fixture, &chain_calls));

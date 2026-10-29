@@ -457,8 +457,8 @@ static int test_delegation_identity_files(void)
 {
     int failures = 0;
     TEST("zcode dht delegation: identity files are atomic and mode-bound") {
-        char datadir[] = "/tmp/zcl_dht_identity_XXXXXX";
-        ASSERT(mkdtemp(datadir) != NULL);
+        char datadir[PATH_MAX];
+        ASSERT(test_mkdtemp(datadir, sizeof datadir, "zcl_dht_identity") != NULL);
         uint8_t seed1[32], pub1[32], seed2[32], pub2[32];
         char err[192];
         struct vcs_zcode_dht_delegation loaded;

@@ -354,14 +354,14 @@ static int test_publish_then_fetch_elsewhere(void)
     TEST("publish offers a workspace by its content root, and a second "
          "datadir reconstructs the identical tree from that root alone") {
         sbp_open_caps();
-        char aroot[] = "/tmp/zcl_sbpub_nodeA_XXXXXX";
-        char wroot[] = "/tmp/zcl_sbpub_work_XXXXXX";
-        char broot[] = "/tmp/zcl_sbpub_nodeB_XXXXXX";
-        char croot[] = "/tmp/zcl_sbpub_cas_XXXXXX";
-        char droot[] = "/tmp/zcl_sbpub_dest_XXXXXX";
-        char *adir = mkdtemp(aroot), *wdir = mkdtemp(wroot);
-        char *bdir = mkdtemp(broot), *cdir = mkdtemp(croot);
-        char *ddir = mkdtemp(droot);
+        char aroot[PATH_MAX];
+        char wroot[PATH_MAX];
+        char broot[PATH_MAX];
+        char croot[PATH_MAX];
+        char droot[PATH_MAX];
+        char *adir = test_mkdtemp(aroot, sizeof aroot, "zcl_sbpub_nodeA"), *wdir = test_mkdtemp(wroot, sizeof wroot, "zcl_sbpub_work");
+        char *bdir = test_mkdtemp(broot, sizeof broot, "zcl_sbpub_nodeB"), *cdir = test_mkdtemp(croot, sizeof croot, "zcl_sbpub_cas");
+        char *ddir = test_mkdtemp(droot, sizeof droot, "zcl_sbpub_dest");
         ASSERT(adir && wdir && bdir && cdir && ddir);
         ASSERT(sbp_make_tree(wdir, 'A'));
 
@@ -439,9 +439,9 @@ static int test_republish_is_idempotent(void)
     TEST("republishing an unchanged workspace re-offers the same artifact "
          "instead of writing a second copy") {
         sbp_open_caps();
-        char aroot[] = "/tmp/zcl_sbpub_again_dd_XXXXXX";
-        char wroot[] = "/tmp/zcl_sbpub_again_ws_XXXXXX";
-        char *adir = mkdtemp(aroot), *wdir = mkdtemp(wroot);
+        char aroot[PATH_MAX];
+        char wroot[PATH_MAX];
+        char *adir = test_mkdtemp(aroot, sizeof aroot, "zcl_sbpub_again_dd"), *wdir = test_mkdtemp(wroot, sizeof wroot, "zcl_sbpub_again_ws");
         ASSERT(adir && wdir);
         ASSERT(sbp_make_tree(wdir, 'A'));
         ASSERT(sbp_serve(adir) != 0);
@@ -481,9 +481,9 @@ static int test_malformed_existing_bundle_is_preserved(void)
     TEST("publishing refuses and preserves a malformed existing bundle at "
          "the captured tree's content address") {
         sbp_open_caps();
-        char aroot[] = "/tmp/zcl_sbpub_malformed_dd_XXXXXX";
-        char wroot[] = "/tmp/zcl_sbpub_malformed_ws_XXXXXX";
-        char *adir = mkdtemp(aroot), *wdir = mkdtemp(wroot);
+        char aroot[PATH_MAX];
+        char wroot[PATH_MAX];
+        char *adir = test_mkdtemp(aroot, sizeof aroot, "zcl_sbpub_malformed_dd"), *wdir = test_mkdtemp(wroot, sizeof wroot, "zcl_sbpub_malformed_ws");
         ASSERT(adir && wdir);
         ASSERT(sbp_make_tree(wdir, 'A'));
         ASSERT(sbp_serve(adir) != 0);
@@ -532,11 +532,11 @@ static int test_root_pin_refuses(void)
     TEST("a source_root pin refuses a workspace that captures to a different "
          "tree, and offers nothing") {
         sbp_open_caps();
-        char aroot[] = "/tmp/zcl_sbpub_pin_dd_XXXXXX";
-        char hroot[] = "/tmp/zcl_sbpub_pin_honest_XXXXXX";
-        char eroot[] = "/tmp/zcl_sbpub_pin_other_XXXXXX";
-        char *adir = mkdtemp(aroot), *hdir = mkdtemp(hroot);
-        char *edir = mkdtemp(eroot);
+        char aroot[PATH_MAX];
+        char hroot[PATH_MAX];
+        char eroot[PATH_MAX];
+        char *adir = test_mkdtemp(aroot, sizeof aroot, "zcl_sbpub_pin_dd"), *hdir = test_mkdtemp(hroot, sizeof hroot, "zcl_sbpub_pin_honest");
+        char *edir = test_mkdtemp(eroot, sizeof eroot, "zcl_sbpub_pin_other");
         ASSERT(adir && hdir && edir);
         ASSERT(sbp_make_tree(hdir, 'A'));
         ASSERT(sbp_make_tree(edir, 'B'));
@@ -579,9 +579,9 @@ static int test_immune_to_scan_cap(void)
          "serves a freshly published bundle, and says the sweep is no longer "
          "a promise") {
         sbp_open_caps();
-        char aroot[] = "/tmp/zcl_sbpub_cap_dd_XXXXXX";
-        char wroot[] = "/tmp/zcl_sbpub_cap_ws_XXXXXX";
-        char *adir = mkdtemp(aroot), *wdir = mkdtemp(wroot);
+        char aroot[PATH_MAX];
+        char wroot[PATH_MAX];
+        char *adir = test_mkdtemp(aroot, sizeof aroot, "zcl_sbpub_cap_dd"), *wdir = test_mkdtemp(wroot, sizeof wroot, "zcl_sbpub_cap_ws");
         ASSERT(adir && wdir);
         ASSERT(sbp_make_tree(wdir, 'A'));
         ASSERT(sbp_serve(adir) != 0);
@@ -621,8 +621,8 @@ static int test_immune_to_scan_cap(void)
         /* And the same call on an uncrowded directory reports the sweep as
          * still dependable — so the flag tracks the directory, not the code
          * path. */
-        char broot[] = "/tmp/zcl_sbpub_cap_dd2_XXXXXX";
-        char *bdir = mkdtemp(broot);
+        char broot[PATH_MAX];
+        char *bdir = test_mkdtemp(broot, sizeof broot, "zcl_sbpub_cap_dd2");
         ASSERT(bdir);
         struct source_bundle_publish_report clean;
         ASSERT(source_bundle_publish(wdir, bdir, NULL, &clean) ==
@@ -649,9 +649,9 @@ static int test_unservable_is_refused(void)
     TEST("publish refuses, with the reason, when there is no file service or "
          "seeding is switched off — it never reports an offer it cannot make") {
         sbp_open_caps();
-        char aroot[] = "/tmp/zcl_sbpub_off_dd_XXXXXX";
-        char wroot[] = "/tmp/zcl_sbpub_off_ws_XXXXXX";
-        char *adir = mkdtemp(aroot), *wdir = mkdtemp(wroot);
+        char aroot[PATH_MAX];
+        char wroot[PATH_MAX];
+        char *adir = test_mkdtemp(aroot, sizeof aroot, "zcl_sbpub_off_dd"), *wdir = test_mkdtemp(wroot, sizeof wroot, "zcl_sbpub_off_ws");
         ASSERT(adir && wdir);
         ASSERT(sbp_make_tree(wdir, 'A'));
 
@@ -700,9 +700,9 @@ static int test_leaf_through_rpc(void)
     TEST("zcode.workspace.source.bundle.publish reports the root and the port "
          "a peer needs, and fails loudly rather than half-publishing") {
         sbp_open_caps();
-        char aroot[] = "/tmp/zcl_sbpub_leaf_dd_XXXXXX";
-        char wroot[] = "/tmp/zcl_sbpub_leaf_ws_XXXXXX";
-        char *adir = mkdtemp(aroot), *wdir = mkdtemp(wroot);
+        char aroot[PATH_MAX];
+        char wroot[PATH_MAX];
+        char *adir = test_mkdtemp(aroot, sizeof aroot, "zcl_sbpub_leaf_dd"), *wdir = test_mkdtemp(wroot, sizeof wroot, "zcl_sbpub_leaf_ws");
         ASSERT(adir && wdir);
         ASSERT(sbp_make_tree(wdir, 'A'));
 
@@ -821,8 +821,8 @@ static int test_registry_cap_breaks_rescan_promise(void)
          "registry holds ROM_SEED_MAX_ARTIFACTS entries, so a seeded directory "
          "far under the entry cap still loses bundles on the next sweep") {
         sbp_open_caps();
-        char aroot[] = "/tmp/zcl_sbpub_slots_dd_XXXXXX";
-        char *adir = mkdtemp(aroot);
+        char aroot[PATH_MAX];
+        char *adir = test_mkdtemp(aroot, sizeof aroot, "zcl_sbpub_slots_dd");
         ASSERT(adir != NULL);
         ASSERT(sbp_serve(adir) != 0);
 
@@ -841,8 +841,8 @@ static int test_registry_cap_breaks_rescan_promise(void)
         struct source_bundle_publish_report report;
         memset(&report, 0, sizeof(report));
         for (unsigned i = 0; i < ROM_SEED_MAX_ARTIFACTS; i++) {
-            char wroot[] = "/tmp/zcl_sbpub_slots_ws_XXXXXX";
-            char *wdir = mkdtemp(wroot);
+            char wroot[PATH_MAX];
+            char *wdir = test_mkdtemp(wroot, sizeof wroot, "zcl_sbpub_slots_ws");
             ASSERT(wdir != NULL);
             ASSERT(sbp_make_tree(wdir, (char)('A' + (int)i)));
             ASSERT(source_bundle_publish(wdir, adir, NULL, &report) ==

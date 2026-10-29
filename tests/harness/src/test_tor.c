@@ -517,8 +517,8 @@ static int test_tor_log_last_ephemeral_address(void)
     int failures = 0;
     printf("test_tor_log_last_ephemeral_address: ");
 
-    char tmpdir[] = "/tmp/zcl_test_torlog_XXXXXX";
-    if (!mkdtemp(tmpdir)) {
+    char tmpdir[PATH_MAX];
+    if (!test_mkdtemp(tmpdir, sizeof tmpdir, "zcl_test_torlog")) {
         printf("FAIL (mkdtemp)\n");
         return 1;
     }
@@ -602,8 +602,8 @@ static int test_tor_log_has_descriptor_publication(void)
     int failures = 0;
     printf("test_tor_log_has_descriptor_publication: ");
 
-    char tmpdir[] = "/tmp/zcl_test_tordesc_XXXXXX";
-    if (!mkdtemp(tmpdir)) {
+    char tmpdir[PATH_MAX];
+    if (!test_mkdtemp(tmpdir, sizeof tmpdir, "zcl_test_tordesc")) {
         printf("FAIL (mkdtemp)\n");
         return 1;
     }

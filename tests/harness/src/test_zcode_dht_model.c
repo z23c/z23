@@ -665,8 +665,8 @@ static bool lock_stress_verdict(struct lock_stress *shared) {
 }
 
 static bool run_lock_stress(void) {
-  char dir[] = "/tmp/zcl-dht-lock-XXXXXX";
-  if (!mkdtemp(dir))
+  char dir[PATH_MAX];
+  if (!test_mkdtemp(dir, sizeof dir, "zcl-dht-lock"))
     return false;
   char zcode[160], dht[160], contacts[192];
   (void)snprintf(zcode, sizeof(zcode), "%s/zcode", dir);

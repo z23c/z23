@@ -100,6 +100,9 @@ static bool vs_layout(struct vs_fixture *f)
  * alone needs a private system-temp directory. */
 bool test_vs_key_root_make(char *out)
 {
+    /* Kept in the system temp dir on purpose: the verifier accepts a test
+     * key only when its parents are root-owned sticky (/tmp), and the
+     * checkout's test-tmp sits under group-writable ancestors. */
     char key_temporary[] = "/tmp/z23-verify-store-key.XXXXXX";
     return mkdtemp(key_temporary) && realpath(key_temporary, out);
 }

@@ -577,8 +577,8 @@ static void check_sqlite_11_sqlite_db_service_frees_the_context_of_a(int *failur
 static void check_sqlite_12_sqlite_sync_controller_opens_private_fil(int *failures)
 {
     printf("SQLite sync_controller opens private file-backed DB handles... ");
-    char dir_template[] = "/tmp/zclassic23-private-db-XXXXXX";
-    char *dir_path = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir_path = test_mkdtemp(dir_template, sizeof dir_template, "zclassic23-private-db");
     char db_path[1024];
     struct node_db ndb;
     struct node_db private_db;
@@ -670,8 +670,8 @@ static void check_sqlite_13_node_db_open_runtime_named_skips_boot_on(int *failur
      * reopen PRESERVES the snapshot_staging namespace that a boot open
      * would wipe, and (2) the reason argument is mandatory. */
     printf("node_db_open_runtime: named + skips boot-only staging wipe... ");
-    char dir_template[] = "/tmp/zclassic23-runtime-reopen-XXXXXX";
-    char *dir_path = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir_path = test_mkdtemp(dir_template, sizeof dir_template, "zclassic23-runtime-reopen");
     char db_path[1024];
     bool ok = dir_path != NULL;
 
@@ -754,8 +754,8 @@ static void check_sqlite_14_node_db_open_existing_runtime_exact_sche(int *failur
      * must preserve ordinary model access, never create a missing file,
      * and fail closed on a schema written by another binary version. */
     printf("node_db_open_existing_runtime: exact schema, no create... ");
-    char dir_template[] = "/tmp/zclassic23-existing-reopen-XXXXXX";
-    char *dir_path = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir_path = test_mkdtemp(dir_template, sizeof dir_template, "zclassic23-existing-reopen");
     char db_path[1024], missing_path[1024];
     bool ok = dir_path != NULL;
 
@@ -847,8 +847,8 @@ static void check_sqlite_15_sqlite_live_owner_blocks_cross_process_r(int *failur
      * RPC authentication is used. A one-shot mutable helper must still
      * discover the lease and fail before SQLite can touch its WAL. */
     printf("SQLite live owner blocks cross-process runtime reopen... ");
-    char dir_template[] = "/tmp/zclassic23-live-owner-process-XXXXXX";
-    char *dir_path = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir_path = test_mkdtemp(dir_template, sizeof dir_template, "zclassic23-live-owner-process");
     char db_path[1024], wal_path[1032], shm_path[1032];
     struct node_db canonical = {0};
     struct stat wal_before = {0}, shm_before = {0};
@@ -905,8 +905,8 @@ static void check_sqlite_16_sqlite_runtime_helper_preserves_live_wal(int *failur
      * which splits same-process readers across different WAL inodes and
      * surfaces later as schema=0 / SQLITE_IOERR. */
     printf("SQLite runtime helper preserves live WAL identity... ");
-    char dir_template[] = "/tmp/zclassic23-live-wal-owner-XXXXXX";
-    char *dir_path = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir_path = test_mkdtemp(dir_template, sizeof dir_template, "zclassic23-live-wal-owner");
     char db_path[1024], wal_path[1032];
     struct node_db canonical = {0};
     struct stat before = {0};
@@ -965,8 +965,8 @@ static void check_sqlite_17_sqlite_raw_reader_cannot_retire_canonica(int *failur
      * transacting.  Its close must not remove or replace the owner's WAL
      * pathname. */
     printf("SQLite raw reader cannot retire canonical live WAL... ");
-    char dir_template[] = "/tmp/zclassic23-live-wal-reader-XXXXXX";
-    char *dir_path = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir_path = test_mkdtemp(dir_template, sizeof dir_template, "zclassic23-live-wal-reader");
     char db_path[1024], wal_path[1032];
     struct node_db canonical = {0};
     struct stat before = {0};
@@ -1046,8 +1046,8 @@ static void check_sqlite_18_sqlite_second_process_cannot_boot_open_a(int *failur
      * process before SQLite is opened, while the resident connection
      * continues transacting throughout. */
     printf("SQLite second process cannot boot-open a live node.db... ");
-    char dir_template[] = "/tmp/zclassic23-live-db-process-XXXXXX";
-    char *dir_path = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir_path = test_mkdtemp(dir_template, sizeof dir_template, "zclassic23-live-db-process");
     char db_path[1024], wal_path[1032];
     struct node_db canonical = {0};
     struct stat before = {0};
@@ -1071,8 +1071,8 @@ static void check_sqlite_18_sqlite_second_process_cannot_boot_open_a(int *failur
 static void check_sqlite_19_sqlite_snapshot_tx_index_job_starts_and_(int *failures)
 {
     printf("SQLite snapshot tx-index job starts and joins cleanly... ");
-    char dir_template[] = "/tmp/zclassic23-tx-index-job-XXXXXX";
-    char *dir_path = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir_path = test_mkdtemp(dir_template, sizeof dir_template, "zclassic23-tx-index-job");
     char db_path[1024];
     struct node_db ndb;
     struct snapshot_tx_index_job job;
@@ -1680,8 +1680,8 @@ static bool check_sqlite_28_scan_sequence(struct node_db *ndb,
 static void check_sqlite_28_sqlite_projection_hole_scan_uses_canonic(int *failures)
 {
     printf("SQLite projection hole scan uses canonical owner and is bounded... ");
-    char dir_template[] = "/tmp/zclassic23-projection-hole-XXXXXX";
-    char *dir_path = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir_path = test_mkdtemp(dir_template, sizeof dir_template, "zclassic23-projection-hole");
     char db_path[1024];
     struct node_db ndb;
     bool opened = false;
@@ -1708,8 +1708,8 @@ static void check_sqlite_28_sqlite_projection_hole_scan_uses_canonic(int *failur
 static void check_sqlite_29_sqlite_block_save_retries_transient_writ(int *failures)
 {
     printf("SQLite block save retries transient writer lock... ");
-    char dir_template[] = "/tmp/zclassic23-block-save-lock-XXXXXX";
-    char *dir_path = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir_path = test_mkdtemp(dir_template, sizeof dir_template, "zclassic23-block-save-lock");
     char db_path[1024];
     struct node_db locker;
     struct node_db writer;
@@ -2194,8 +2194,8 @@ static void check_sqlite_37_sqlite_peer_save_find_recent(int *failures)
 static void check_sqlite_38_sqlite_peer_save_retries_transient_write(int *failures)
 {
     printf("SQLite peer save retries transient writer lock... ");
-    char dir_template[] = "/tmp/zclassic23-peer-save-lock-XXXXXX";
-    char *dir_path = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir_path = test_mkdtemp(dir_template, sizeof dir_template, "zclassic23-peer-save-lock");
     char db_path[1024];
     struct node_db locker;
     struct node_db writer;
@@ -2257,8 +2257,8 @@ static void check_sqlite_38_sqlite_peer_save_retries_transient_write(int *failur
 static void check_sqlite_39_sqlite_advisory_peer_save_fails_fast_und(int *failures)
 {
     printf("SQLite advisory peer save fails fast under writer lock... ");
-    char dir_template[] = "/tmp/zclassic23-peer-save-advisory-XXXXXX";
-    char *dir_path = mkdtemp(dir_template);
+    char dir_template[PATH_MAX];
+    char *dir_path = test_mkdtemp(dir_template, sizeof dir_template, "zclassic23-peer-save-advisory");
     char db_path[1024];
     struct node_db locker;
     struct node_db writer;

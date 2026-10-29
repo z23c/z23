@@ -87,9 +87,10 @@ static void hash_to_hex(const uint8_t hash[32], char out[65])
 
 /* Open a temp node.db with one UTXO and return its local commitment hex. */
 static bool open_ndb_with_local(struct node_db *ndb, char *path_io,
+                                size_t path_n, const char *prefix,
                                 char local_hex[65])
 {
-    int fd = mkstemp(path_io);
+    int fd = test_mkstemp(path_io, path_n, prefix);
     if (fd < 0)
         return false;
     close(fd);
@@ -161,10 +162,10 @@ static int case_match_no_page(void)
 {
     int failures = 0;
     TEST("utxo_parity: same-height MATCH does not page (negative control)") {
-        char path[] = "/tmp/zcl23-parity-match-XXXXXX";
+        char path[PATH_MAX];
         struct node_db ndb;
         char local_hex[65];
-        ASSERT(open_ndb_with_local(&ndb, path, local_hex));
+        ASSERT(open_ndb_with_local(&ndb, path, sizeof path, "zcl23-parity-match", local_hex));
 
         struct utxo_reference_source src;
         struct utxo_reference_source_fixture fx;
@@ -198,10 +199,10 @@ static int case_mismatch_pages(void)
 {
     int failures = 0;
     TEST("utxo_parity: same-height MISMATCH persists drift and pages") {
-        char path[] = "/tmp/zcl23-parity-drift-XXXXXX";
+        char path[PATH_MAX];
         struct node_db ndb;
         char local_hex[65];
-        ASSERT(open_ndb_with_local(&ndb, path, local_hex));
+        ASSERT(open_ndb_with_local(&ndb, path, sizeof path, "zcl23-parity-drift", local_hex));
 
         /* Nibble-flip the local hash → a same-height byte mismatch. */
         char remote_hex[65];
@@ -243,10 +244,10 @@ static int case_coarse_never_pages(void)
 {
     int failures = 0;
     TEST("utxo_parity: coarse reference never pages and clears stale drift") {
-        char path[] = "/tmp/zcl23-parity-coarse-XXXXXX";
+        char path[PATH_MAX];
         struct node_db ndb;
         char local_hex[65];
-        ASSERT(open_ndb_with_local(&ndb, path, local_hex));
+        ASSERT(open_ndb_with_local(&ndb, path, sizeof path, "zcl23-parity-coarse", local_hex));
 
         /* Pre-seed a stale drift flag from a prior exact divergence. The
          * coarse check must CLEAR it (a height confirmation cannot prove
@@ -282,10 +283,10 @@ static int case_height_skew_no_page(void)
 {
     int failures = 0;
     TEST("utxo_parity: exact reference at a different height never DRIFTs") {
-        char path[] = "/tmp/zcl23-parity-skew-XXXXXX";
+        char path[PATH_MAX];
         struct node_db ndb;
         char local_hex[65];
-        ASSERT(open_ndb_with_local(&ndb, path, local_hex));
+        ASSERT(open_ndb_with_local(&ndb, path, sizeof path, "zcl23-parity-skew", local_hex));
 
         /* An exact reference whose hash differs AND whose height differs from
          * the local applied height: the same-height guard must record this as
@@ -328,10 +329,10 @@ static int case_dormant(void)
 {
     int failures = 0;
     TEST("utxo_parity: tick is a no-op when disabled or without a frontier") {
-        char path[] = "/tmp/zcl23-parity-dormant-XXXXXX";
+        char path[PATH_MAX];
         struct node_db ndb;
         char local_hex[65];
-        ASSERT(open_ndb_with_local(&ndb, path, local_hex));
+        ASSERT(open_ndb_with_local(&ndb, path, sizeof path, "zcl23-parity-dormant", local_hex));
 
         /* Disabled config + no reference: the supervised tick must do nothing
          * (no checks, no page), even if a frontier marker exists. */
@@ -395,10 +396,10 @@ static int case_activation_gating_no_env(void)
 {
     int failures = 0;
     TEST("utxo_parity: activates on a wired oracle without any env var") {
-        char path[] = "/tmp/zcl23-parity-activate-XXXXXX";
+        char path[PATH_MAX];
         struct node_db ndb;
         char local_hex[65];
-        ASSERT(open_ndb_with_local(&ndb, path, local_hex));
+        ASSERT(open_ndb_with_local(&ndb, path, sizeof path, "zcl23-parity-activate", local_hex));
 
         int32_t applied = (int32_t)app_runtime_node_db_utxo_max_height(&ndb);
         ASSERT(applied > 0);
@@ -454,10 +455,10 @@ static int case_enabled_tick_checks_at_applied(void)
 {
     int failures = 0;
     TEST("utxo_parity: enabled tick waits while reorg-unsafe, checks at applied") {
-        char path[] = "/tmp/zcl23-parity-tick-XXXXXX";
+        char path[PATH_MAX];
         struct node_db ndb;
         char local_hex[65];
-        ASSERT(open_ndb_with_local(&ndb, path, local_hex));
+        ASSERT(open_ndb_with_local(&ndb, path, sizeof path, "zcl23-parity-tick", local_hex));
 
         /* The single test UTXO sets the live applied height. */
         int32_t applied = (int32_t)app_runtime_node_db_utxo_max_height(&ndb);
@@ -554,10 +555,10 @@ static int case_bh_match_counts(void)
 {
     int failures = 0;
     TEST("utxo_parity: block-hash MATCH increments checks_total, no page") {
-        char path[] = "/tmp/zcl23-parity-bh-match-XXXXXX";
+        char path[PATH_MAX];
         struct node_db ndb;
         char local_hex[65];
-        ASSERT(open_ndb_with_local(&ndb, path, local_hex));
+        ASSERT(open_ndb_with_local(&ndb, path, sizeof path, "zcl23-parity-bh-match", local_hex));
 
         /* No SHA3 reference: the UTXO SHA3 path is dormant; only the
          * block-hash check fires (once wire_bh_seams injects the RPC mock). */
@@ -605,10 +606,10 @@ static int case_bh_mismatch_pages(void)
 {
     int failures = 0;
     TEST("utxo_parity: block-hash MISMATCH sets drift flag and pages") {
-        char path[] = "/tmp/zcl23-parity-bh-mismatch-XXXXXX";
+        char path[PATH_MAX];
         struct node_db ndb;
         char local_hex[65];
-        ASSERT(open_ndb_with_local(&ndb, path, local_hex));
+        ASSERT(open_ndb_with_local(&ndb, path, sizeof path, "zcl23-parity-bh-mismatch", local_hex));
 
         /* No SHA3 reference so only the block-hash check runs; the coarse
          * SHA3 path cannot interfere with the drift flag we're testing. */
@@ -662,10 +663,10 @@ static int case_bh_ref_unreachable_skip(void)
 {
     int failures = 0;
     TEST("utxo_parity: block-hash reference unreachable → skip, no page") {
-        char path[] = "/tmp/zcl23-parity-bh-unreach-XXXXXX";
+        char path[PATH_MAX];
         struct node_db ndb;
         char local_hex[65];
-        ASSERT(open_ndb_with_local(&ndb, path, local_hex));
+        ASSERT(open_ndb_with_local(&ndb, path, sizeof path, "zcl23-parity-bh-unreach", local_hex));
 
         wire_bh_only_case(&ndb);
 
@@ -706,10 +707,10 @@ static int case_bh_ref_height_behind_skip(void)
 {
     int failures = 0;
     TEST("utxo_parity: block-hash ref height < h_check → skip, no page") {
-        char path[] = "/tmp/zcl23-parity-bh-behind-XXXXXX";
+        char path[PATH_MAX];
         struct node_db ndb;
         char local_hex[65];
-        ASSERT(open_ndb_with_local(&ndb, path, local_hex));
+        ASSERT(open_ndb_with_local(&ndb, path, sizeof path, "zcl23-parity-bh-behind", local_hex));
 
         wire_bh_only_case(&ndb);
 
@@ -751,10 +752,10 @@ static int case_bh_no_recheck_same_height(void)
 {
     int failures = 0;
     TEST("utxo_parity: block-hash same height is not re-checked each tick") {
-        char path[] = "/tmp/zcl23-parity-bh-advance-XXXXXX";
+        char path[PATH_MAX];
         struct node_db ndb;
         char local_hex[65];
-        ASSERT(open_ndb_with_local(&ndb, path, local_hex));
+        ASSERT(open_ndb_with_local(&ndb, path, sizeof path, "zcl23-parity-bh-advance", local_hex));
 
         wire_bh_only_case(&ndb);
 
@@ -800,10 +801,10 @@ static int case_bh_latch_survives_sha3_confirm(void)
 {
     int failures = 0;
     TEST("utxo_parity: BH mismatch latch survives same-tick SHA3 confirm") {
-        char path[] = "/tmp/zcl23-parity-bh-latch-XXXXXX";
+        char path[PATH_MAX];
         struct node_db ndb;
         char local_hex[65];
-        ASSERT(open_ndb_with_local(&ndb, path, local_hex));
+        ASSERT(open_ndb_with_local(&ndb, path, sizeof path, "zcl23-parity-bh-latch", local_hex));
 
         int32_t applied = (int32_t)app_runtime_node_db_utxo_max_height(&ndb);
         ASSERT(applied > 100);  /* h_check = applied-100 must be > 0 */

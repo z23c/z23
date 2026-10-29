@@ -47,8 +47,8 @@ int test_stage_db_fault(void)
               !stage_db_err_is_transient(SQLITE_IOERR_CORRUPTFS));
 
     /* Isolated datadir for the bounded auto-reindex routing checks. */
-    char dir[] = "/tmp/zcl_dbfault_XXXXXX";
-    char *made = mkdtemp(dir);
+    char dir[PATH_MAX];
+    char *made = test_mkdtemp(dir, sizeof dir, "zcl_dbfault");
     DBF_CHECK("temp datadir created", made != NULL);
 
     /* ── (2) a transient fault RETRIES, then a clean step recovers (no

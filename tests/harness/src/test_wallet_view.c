@@ -62,8 +62,8 @@
  * success and writes the datadir path into out (caller owns the dir). */
 static bool wv_build_fixture_datadir(char *out, size_t out_sz)
 {
-    char tmpl[] = "/tmp/zcl_wv_fixture_XXXXXX";
-    char *dir = mkdtemp(tmpl);
+    char tmpl[PATH_MAX];
+    char *dir = test_mkdtemp(tmpl, sizeof tmpl, "zcl_wv_fixture");
     if (!dir)
         return false;
     snprintf(out, out_sz, "%s", dir);
