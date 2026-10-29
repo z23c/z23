@@ -32,10 +32,8 @@ sha3_window_tripwire_eval(int window_index, const uint8_t *concat, size_t len);
 
 #define TRIPWIRE_BLOCKER_ID "sha3_window_mismatch"
 
-int test_sha3_windows(void)
+static void sha3_win_check_placeholder_count(void)
 {
-    int failures = 0;
-
     /* The committed placeholder must always reject — the real table
      * is filled in by tools/gen_sha3_windows at deploy time. */
     printf("sha3_windows: placeholder table has count==0... ");
@@ -45,26 +43,41 @@ int test_sha3_windows(void)
         /* Production table — the verifier tests below still apply. */
         printf("OK (production count=%zu)\n", g_sha3_windows_count);
     }
+}
 
+static int sha3_win_check_negative_index(void)
+{
     printf("sha3_windows: verify rejects negative index... ");
     {
         uint8_t buf[1] = { 0 };
         if (!sha3_windows_verify_window(-1, buf, 0)) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        else { printf("FAIL\n"); return 1; }
     }
+    return 0;
+}
 
+static int sha3_win_check_out_of_range_index(void)
+{
     printf("sha3_windows: verify rejects out-of-range index... ");
     {
         uint8_t buf[1] = { 0 };
         int oob = (int)g_sha3_windows_count;  /* one past the end */
         if (!sha3_windows_verify_window(oob, buf, 0)) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        else { printf("FAIL\n"); return 1; }
     }
+    return 0;
+}
 
+static int sha3_win_check_null_payload(void)
+{
     printf("sha3_windows: verify rejects NULL payload with nonzero len... ");
     if (!sha3_windows_verify_window(0, NULL, 16)) printf("OK\n");
-    else { printf("FAIL\n"); failures++; }
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
 
+static int sha3_win_check_digest_path(void)
+{
     /* Build a synthetic 32-byte block payload, compute its SHA3-256
      * directly, then prove the verifier reports a match against a
      * locally-built sha3_window with the same hash.
@@ -89,9 +102,13 @@ int test_sha3_windows(void)
 
         bool ok = memcmp(digest_oneshot, digest_streamed, 32) == 0;
         if (ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        else { printf("FAIL\n"); return 1; }
     }
+    return 0;
+}
 
+static int sha3_win_check_wrong_payload(void)
+{
     /* When the table is empty, no positive verify is possible — that's
      * expected (the placeholder's whole point). When the table is
      * populated, the next test confirms a known mismatch is rejected. */
@@ -100,11 +117,13 @@ int test_sha3_windows(void)
         uint8_t junk[64];
         memset(junk, 0xAB, sizeof(junk));
         if (!sha3_windows_verify_window(0, junk, sizeof(junk))) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
+        else { printf("FAIL\n"); return 1; }
     }
+    return 0;
+}
 
-    /* ── OBSERVE-ONLY golden-window corroboration tripwire ─────────────── */
-
+static int sha3_win_check_tripwire_skip_uncovered(void)
+{
     /* Uncovered / out-of-range window: SKIP, and stay SILENT (no blocker). */
     printf("sha3_windows: tripwire SKIPs an uncovered window silently... ");
     {
@@ -116,9 +135,13 @@ int test_sha3_windows(void)
         if (rc == SHA3_WINDOW_TRIPWIRE_SKIP &&
             !blocker_exists(TRIPWIRE_BLOCKER_ID)) printf("OK\n");
         else { printf("FAIL (rc=%d blocker=%d)\n", (int)rc,
-                      (int)blocker_exists(TRIPWIRE_BLOCKER_ID)); failures++; }
+                      (int)blocker_exists(TRIPWIRE_BLOCKER_ID)); return 1; }
     }
+    return 0;
+}
 
+static int sha3_win_check_tripwire_silent_clean(void)
+{
     /* A clean/matching window stays SILENT — no blocker, no evidence.
      * The match verdict is injected (report) because SHA3 is one-way: real
      * golden-window bytes cannot be reproduced without the live chain. */
@@ -130,11 +153,15 @@ int test_sha3_windows(void)
         if (rc == SHA3_WINDOW_TRIPWIRE_MATCH &&
             !blocker_exists(TRIPWIRE_BLOCKER_ID)) printf("OK\n");
         else { printf("FAIL (rc=%d blocker=%d)\n", (int)rc,
-                      (int)blocker_exists(TRIPWIRE_BLOCKER_ID)); failures++; }
+                      (int)blocker_exists(TRIPWIRE_BLOCKER_ID)); return 1; }
     } else {
         printf("OK (placeholder table)\n");
     }
+    return 0;
+}
 
+static int sha3_win_check_tripwire_fires_tampered(void)
+{
     /* A tampered body (digest won't match the locked golden entry) FIRES:
      * MISMATCH result + the typed evidence blocker is registered. This drives
      * the REAL sha3_windows_verify_window path against the real table. */
@@ -148,11 +175,15 @@ int test_sha3_windows(void)
         if (rc == SHA3_WINDOW_TRIPWIRE_MISMATCH &&
             blocker_exists(TRIPWIRE_BLOCKER_ID)) printf("OK\n");
         else { printf("FAIL (rc=%d blocker=%d)\n", (int)rc,
-                      (int)blocker_exists(TRIPWIRE_BLOCKER_ID)); failures++; }
+                      (int)blocker_exists(TRIPWIRE_BLOCKER_ID)); return 1; }
     } else {
         printf("OK (placeholder table)\n");
     }
+    return 0;
+}
 
+static int sha3_win_check_tripwire_report_mismatch(void)
+{
     /* The injected-mismatch path also FIRES the blocker (emission unit test). */
     printf("sha3_windows: tripwire report(mismatch) registers the blocker... ");
     if (g_sha3_windows_count > 0) {
@@ -165,11 +196,15 @@ int test_sha3_windows(void)
             cls == BLOCKER_PERMANENT) printf("OK\n");
         else { printf("FAIL (rc=%d blocker=%d class=%d)\n", (int)rc,
                       (int)blocker_exists(TRIPWIRE_BLOCKER_ID), cls);
-               failures++; }
+               return 1; }
     } else {
         printf("OK (placeholder table)\n");
     }
+    return 0;
+}
 
+static int sha3_win_check_tripwire_observe_only(void)
+{
     /* HARD PARITY GUARD: firing the tripwire must NOT change the accept/reject
      * gate. chain_linkage_hold is THE latch that would refuse tip moves; if the
      * tripwire were consensus-affecting it would appear here. Assert the gate is
@@ -201,10 +236,31 @@ int test_sha3_windows(void)
                       "hold_now=%d refuse_now=%d)\n",
                       (int)hold_before, refuse_before,
                       (int)chain_linkage_hold_active(),
-                      chain_linkage_hold_refuse_from()); failures++; }
+                      chain_linkage_hold_refuse_from()); return 1; }
     } else {
         printf("OK (placeholder table)\n");
     }
+    return 0;
+}
+
+int test_sha3_windows(void)
+{
+    int failures = 0;
+
+    sha3_win_check_placeholder_count();
+    failures += sha3_win_check_negative_index();
+    failures += sha3_win_check_out_of_range_index();
+    failures += sha3_win_check_null_payload();
+    failures += sha3_win_check_digest_path();
+    failures += sha3_win_check_wrong_payload();
+
+    /* ── OBSERVE-ONLY golden-window corroboration tripwire ─────────────── */
+
+    failures += sha3_win_check_tripwire_skip_uncovered();
+    failures += sha3_win_check_tripwire_silent_clean();
+    failures += sha3_win_check_tripwire_fires_tampered();
+    failures += sha3_win_check_tripwire_report_mismatch();
+    failures += sha3_win_check_tripwire_observe_only();
 
     /* Leave no evidence blocker behind for other groups. */
     blocker_clear(TRIPWIRE_BLOCKER_ID);
