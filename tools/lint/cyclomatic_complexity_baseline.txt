@@ -610,7 +610,6 @@ platform/modules/json/src/json.c:json_escape_str:18
 platform/modules/platform/src/watcher_record.c:platform_watcher_record_is_valid:16
 platform/modules/platform/src/watcher_record.c:platform_watcher_record_matches:27
 platform/modules/platform/src/watcher_record.c:platform_watcher_record_parse:30
-platform/modules/platform/tests/database_lifetime_windows_acceptance.c:main:17
 platform/modules/platform/tests/positioned_file_windows_acceptance.c:main:25
 platform/modules/platform/tests/private_file_windows_acceptance.c:main:64
 platform/modules/platform/tests/read_mapping_windows_acceptance.c:main:16
