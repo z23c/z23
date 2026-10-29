@@ -588,6 +588,144 @@ static int gate_synthesis_is_deterministic(const struct constraint_system *cs,
     return failures;
 }
 
+/* ── lookup3_xy padding shapes (characterization, test-only) ───────────── */
+
+/* gadget_fixed_base_mul pads a short final 3-bit window with constant-false
+ * high bits, which lookup3_xy_padded (circuit_gadgets.c) turns into fewer
+ * constraints and aux variables. Each row pins the code as it stands:
+ * constraint and aux counts per shape, the aux allocation order (x, y, then
+ * precomp), the precomp value, and the output point where it is derivable
+ * without a scalar-multiplication oracle. Counts were derived by reading the
+ * code: 2 constraints and 2 aux when both high bits are padded or only b2 is,
+ * 3 and 3 when none is. */
+enum pad_out { PAD_OUT_IDENTITY, PAD_OUT_BASE, PAD_OUT_UNCHECKED };
+
+struct pad_row {
+    const char *name;
+    size_t n_bits;
+    bool bit[3];
+    size_t want_constraints;
+    size_t want_vars;
+    enum pad_out want_out;
+};
+
+static const struct pad_row pad_rows[] = {
+    { "1 bit (b1,b2 padded), b0=0", 1, {false, false, false}, 2, 2,
+      PAD_OUT_IDENTITY },
+    { "1 bit (b1,b2 padded), b0=1", 1, {true, false, false}, 2, 2,
+      PAD_OUT_BASE },
+    { "2 bits (b2 padded), b0=b1=0", 2, {false, false, false}, 2, 2,
+      PAD_OUT_IDENTITY },
+    { "2 bits (b2 padded), b0=1 b1=0", 2, {true, false, false}, 2, 2,
+      PAD_OUT_BASE },
+    { "2 bits (b2 padded), b0=b1=1", 2, {true, true, false}, 2, 2,
+      PAD_OUT_UNCHECKED },
+    { "3 bits (none padded), all zero", 3, {false, false, false}, 3, 3,
+      PAD_OUT_IDENTITY },
+    { "3 bits (none padded), b0=1", 3, {true, false, false}, 3, 3,
+      PAD_OUT_BASE },
+    { "3 bits (none padded), b0=b1=1", 3, {true, true, false}, 3, 3,
+      PAD_OUT_UNCHECKED },
+    { "3 bits (none padded), b1=b2=1", 3, {false, true, true}, 3, 3,
+      PAD_OUT_UNCHECKED },
+};
+
+/* A fixed, valid Jubjub point (affine coordinates) used as the window base. */
+static bool pad_base_point(struct fr *bx, struct fr *by)
+{
+    static const uint8_t pers[8] = {'Z', 'c', 'a', 's', 'h', '_', 'P', 'H'};
+    static const uint8_t tag[] = "lookup3 padding pin";
+    struct jub_point p;
+    if (!group_hash(&p, tag, sizeof(tag) - 1, pers))
+        return false;
+    jub_get_x(bx, &p);
+    jub_get_y(by, &p);
+    return true;
+}
+
+static bool pad_output_matches(const struct constraint_system *cs, size_t xo,
+                               size_t yo, enum pad_out want,
+                               const struct fr *bx, const struct fr *by)
+{
+    struct fr one;
+    fr_one(&one);
+    switch (want) {
+    case PAD_OUT_IDENTITY:
+        return fr_is_zero(&cs->witness[xo]) && fr_eq(&cs->witness[yo], &one);
+    case PAD_OUT_BASE:
+        return fr_eq(&cs->witness[xo], bx) && fr_eq(&cs->witness[yo], by);
+    case PAD_OUT_UNCHECKED:
+    default:
+        return true;
+    }
+}
+
+static int pad_row_check(const struct pad_row *r, const struct fr *bx,
+                         const struct fr *by)
+{
+    int failures = 0;
+    struct constraint_system cs;
+    cs_init(&cs);
+
+    size_t bits[3] = {0, 0, 0};
+    for (size_t i = 0; i < r->n_bits; i++)
+        bits[i] = gadget_alloc_boolean(&cs, r->bit[i]);
+    const size_t cons0 = cs.num_constraints;
+    const size_t base = cs.num_vars;
+
+    size_t xo = SIZE_MAX, yo = SIZE_MAX;
+    gadget_fixed_base_mul(&cs, bits, r->n_bits, bx, by, &xo, &yo);
+
+    char label[192];
+    snprintf(label, sizeof(label), "padding %s: constraints == %zu",
+             r->name, r->want_constraints);
+    MERKLE_CHECK(label, cs.num_constraints - cons0 == r->want_constraints);
+    snprintf(label, sizeof(label), "padding %s: aux vars == %zu",
+             r->name, r->want_vars);
+    MERKLE_CHECK(label, cs.num_vars - base == r->want_vars);
+
+    const bool order = xo == base && yo == base + 1;
+    snprintf(label, sizeof(label),
+             "padding %s: output wires allocated x then y", r->name);
+    MERKLE_CHECK(label, order);
+    if (order) {
+        snprintf(label, sizeof(label), "padding %s: output point", r->name);
+        MERKLE_CHECK(label, pad_output_matches(&cs, xo, yo, r->want_out,
+                                               bx, by));
+    }
+    if (order && r->n_bits == 3 && cs.num_vars > base + 2) {
+        const bool both = r->bit[1] && r->bit[2];
+        struct fr want_precomp;
+        if (both) fr_one(&want_precomp); else fr_zero(&want_precomp);
+        snprintf(label, sizeof(label), "padding %s: precomp == b1 AND b2",
+                 r->name);
+        MERKLE_CHECK(label, fr_eq(&cs.witness[base + 2], &want_precomp));
+    }
+
+    size_t bad = SIZE_MAX;
+    snprintf(label, sizeof(label), "padding %s: honest witness satisfies R1CS",
+             r->name);
+    MERKLE_CHECK(label, cs_is_satisfied(&cs, &bad));
+    cs_free(&cs);
+    return failures;
+}
+
+static int gate_fixed_base_padding_shapes(void)
+{
+    printf("\n--- lookup3_xy padding shapes via gadget_fixed_base_mul "
+           "(characterization) ---\n");
+    int failures = 0;
+    struct fr bx, by;
+    if (!pad_base_point(&bx, &by)) {
+        printf("  >> BLOCKER: fixed base point did not derive\n");
+        return 1;
+    }
+    for (size_t i = 0; i < sizeof(pad_rows) / sizeof(pad_rows[0]); i++)
+        failures += pad_row_check(&pad_rows[i], &bx, &by);
+    printf("--- end lookup3 padding shapes (%d failure[s]) ---\n", failures);
+    return failures;
+}
+
 int groth16_merkle_path_gate(void);
 int groth16_merkle_path_gate(void)
 {
@@ -596,6 +734,7 @@ int groth16_merkle_path_gate(void)
     int failures = 0;
 
     failures += gate_jubjub_montgomery_params();
+    failures += gate_fixed_base_padding_shapes();
 
     struct merkle_fixture f;
     build_fixture(&f);
