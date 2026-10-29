@@ -360,7 +360,7 @@ static bool backfill_fold_genesis_digest(struct node_db *ndb,
     cur->height = 0;
     memcpy(cur->digest, genesis_digest, 32);
     if (!op_return_index_set_cursor(ndb, cur))
-        return false;
+        return false; /* raw-return-ok: caller logs the cursor persist failure */
     memcpy(digest, genesis_digest, 32);
     return true;
 }
@@ -379,7 +379,7 @@ static bool backfill_fold_digest_persist(struct node_db *ndb,
     cur->height = h;
     memcpy(cur->digest, new_digest, 32);
     if (!op_return_index_set_cursor(ndb, cur))
-        return false;
+        return false; /* raw-return-ok: caller logs the cursor persist failure */
     memcpy(digest, new_digest, 32);
     return true;
 }
