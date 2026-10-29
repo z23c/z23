@@ -293,6 +293,133 @@ static const char *relocation_reason(
 
 /* ── section header cross-check ─────────────────────────────────────────── */
 
+struct sec_arr {
+    bool saw;
+    uint64_t addr;
+    uint64_t off;
+    uint64_t size;
+};
+
+struct sec_arrays {
+    struct sec_arr init;
+    struct sec_arr fini;
+    struct sec_arr preinit;
+};
+
+static bool sec_name_table(const struct img *im, const unsigned char *shtab,
+                           uint32_t shnum, uint32_t shstrndx,
+                           uint64_t *shstr_off, uint64_t *shstr_size,
+                           struct hotswap_elf_facts *out,
+                           char *err, size_t err_cap)
+{
+    /* Locate the section header string table so section names can be read.
+     * shstrndx == SHN_UNDEF means "no names"; that is legal ELF but it means
+     * the section table cannot be cross-checked at all, which is exactly the
+     * state a deceptive file would choose. Refuse. */
+    if (shstrndx == SHN_UNDEF_ || shstrndx >= shnum)
+        return fail(out, err, err_cap,
+                    "section header string table index %u is absent or out of range (shnum %u)",
+                    shstrndx, shnum);
+
+    const unsigned char *shstr_sh = shtab + (size_t)shstrndx * SHDR64_SIZE;
+    *shstr_off  = rd64(shstr_sh + 24);
+    *shstr_size = rd64(shstr_sh + 32);
+    if (rd32(shstr_sh + 4) == SHT_NOBITS_ || !at(im, *shstr_off, *shstr_size))
+        return fail(out, err, err_cap,
+                    "section name table at offset %llu size %llu is out of bounds",
+                    (unsigned long long)*shstr_off,
+                    (unsigned long long)*shstr_size);
+    return true;
+}
+
+/* Records one array section, refusing a duplicate or a wrong section type. */
+static bool sec_arr_record(struct sec_arr *a, const char *name,
+                           uint32_t want_type, uint32_t sh_type,
+                           uint64_t sh_addr, uint64_t sh_offset,
+                           uint64_t sh_size,
+                           struct hotswap_elf_facts *out,
+                           char *err, size_t err_cap)
+{
+    if (a->saw)
+        return fail(out, err, err_cap, "more than one %s section", name);
+    if (sh_type != want_type)
+        return fail(out, err, err_cap,
+                    "%s has section type %u, want %u",
+                    name, sh_type, want_type);
+    a->saw = true;
+    a->addr = sh_addr;
+    a->off = sh_offset;
+    a->size = sh_size;
+    return true;
+}
+
+static bool sec_note_named(struct sec_arrays *arrs, const char *name,
+                           uint32_t sh_type, uint64_t sh_addr,
+                           uint64_t sh_offset, uint64_t sh_size,
+                           struct hotswap_elf_facts *out,
+                           char *err, size_t err_cap)
+{
+    if (strcmp(name, ".init_array") == 0)
+        return sec_arr_record(&arrs->init, ".init_array", SHT_INIT_ARRAY_,
+                              sh_type, sh_addr, sh_offset, sh_size,
+                              out, err, err_cap);
+    if (strcmp(name, ".fini_array") == 0)
+        return sec_arr_record(&arrs->fini, ".fini_array", SHT_FINI_ARRAY_,
+                              sh_type, sh_addr, sh_offset, sh_size,
+                              out, err, err_cap);
+    if (strcmp(name, ".preinit_array") == 0)
+        return sec_arr_record(&arrs->preinit, ".preinit_array",
+                              SHT_PREINIT_ARRAY_, sh_type, sh_addr,
+                              sh_offset, sh_size, out, err, err_cap);
+    return true;
+}
+
+static bool sec_scan_one(const struct img *im, const unsigned char *shtab,
+                         uint32_t i, uint64_t shstr_off, uint64_t shstr_size,
+                         struct sec_arrays *arrs,
+                         struct hotswap_elf_facts *out,
+                         char *err, size_t err_cap)
+{
+    const unsigned char *sh = shtab + (size_t)i * SHDR64_SIZE;
+    uint32_t sh_name   = rd32(sh + 0);
+    uint32_t sh_type   = rd32(sh + 4);
+    uint64_t sh_addr   = rd64(sh + 16);
+    uint64_t sh_offset = rd64(sh + 24);
+    uint64_t sh_size   = rd64(sh + 32);
+
+    /* SHT_NOBITS (.bss and friends) occupies no file bytes, so its
+     * sh_offset is not a range to validate. Everything else must lie
+     * wholly inside the file. Section 0 is the reserved null entry and is
+     * all zeroes; at(im, 0, 0) is fine for it. */
+    if (sh_type != SHT_NOBITS_ && sh_size != 0 && !at(im, sh_offset, sh_size))
+        return fail(out, err, err_cap,
+                    "section header %u claims offset %llu size %llu, past the %llu byte file",
+                    i, (unsigned long long)sh_offset,
+                    (unsigned long long)sh_size, (unsigned long long)im->n);
+
+    char name[32];
+    bool trunc = false;
+    if (!dynstr_copy(im, shstr_off, shstr_size, sh_name, name, sizeof(name), &trunc)) {
+        /* Section 0's sh_name is 0, which indexes the leading NUL of a
+         * well-formed name table and copies as "". A failure here means
+         * the index is out of range or the name never terminates. */
+        return fail(out, err, err_cap,
+                    "section header %u has an unreadable name (index %u into a %llu byte name table)",
+                    i, sh_name, (unsigned long long)shstr_size);
+    }
+    if (trunc)
+        return true;
+    return sec_note_named(arrs, name, sh_type, sh_addr, sh_offset, sh_size,
+                          out, err, err_cap);
+}
+
+static bool sec_arr_disagrees(const struct sec_arr *a, uint64_t dyn_addr,
+                              uint64_t dyn_off, uint64_t dyn_size)
+{
+    return a->saw &&
+           (a->addr != dyn_addr || a->off != dyn_off || a->size != dyn_size);
+}
+
 /* Validates the section header table and, where it overlaps the dynamic
  * segment's account of the same region, requires the two to AGREE.
  *
@@ -316,130 +443,47 @@ static bool sections_agree(const struct img *im, const unsigned char *shtab,
                            struct hotswap_elf_facts *out,
                            char *err, size_t err_cap)
 {
-    /* Locate the section header string table so section names can be read.
-     * shstrndx == SHN_UNDEF means "no names"; that is legal ELF but it means
-     * the section table cannot be cross-checked at all, which is exactly the
-     * state a deceptive file would choose. Refuse. */
-    if (shstrndx == SHN_UNDEF_ || shstrndx >= shnum)
-        return fail(out, err, err_cap,
-                    "section header string table index %u is absent or out of range (shnum %u)",
-                    shstrndx, shnum);
+    uint64_t shstr_off = 0, shstr_size = 0;
+    if (!sec_name_table(im, shtab, shnum, shstrndx, &shstr_off, &shstr_size,
+                        out, err, err_cap))
+        return false;
 
-    const unsigned char *shstr_sh = shtab + (size_t)shstrndx * SHDR64_SIZE;
-    uint64_t shstr_off  = rd64(shstr_sh + 24);
-    uint64_t shstr_size = rd64(shstr_sh + 32);
-    if (rd32(shstr_sh + 4) == SHT_NOBITS_ || !at(im, shstr_off, shstr_size))
-        return fail(out, err, err_cap,
-                    "section name table at offset %llu size %llu is out of bounds",
-                    (unsigned long long)shstr_off, (unsigned long long)shstr_size);
-
-    bool saw_init_array = false, saw_fini_array = false;
-    bool saw_preinit_array = false;
-    uint64_t sh_init_addr = 0, sh_init_off = 0, sh_init_arraysz = 0;
-    uint64_t sh_fini_addr = 0, sh_fini_off = 0, sh_fini_arraysz = 0;
-    uint64_t sh_preinit_addr = 0, sh_preinit_off = 0;
-    uint64_t sh_preinit_arraysz = 0;
-
+    struct sec_arrays arrs = {0};
     for (uint32_t i = 0; i < shnum; i++) {
-        const unsigned char *sh = shtab + (size_t)i * SHDR64_SIZE;
-        uint32_t sh_name   = rd32(sh + 0);
-        uint32_t sh_type   = rd32(sh + 4);
-        uint64_t sh_addr   = rd64(sh + 16);
-        uint64_t sh_offset = rd64(sh + 24);
-        uint64_t sh_size   = rd64(sh + 32);
-
-        /* SHT_NOBITS (.bss and friends) occupies no file bytes, so its
-         * sh_offset is not a range to validate. Everything else must lie
-         * wholly inside the file. Section 0 is the reserved null entry and is
-         * all zeroes; at(im, 0, 0) is fine for it. */
-        if (sh_type != SHT_NOBITS_ && sh_size != 0 && !at(im, sh_offset, sh_size))
-            return fail(out, err, err_cap,
-                        "section header %u claims offset %llu size %llu, past the %llu byte file",
-                        i, (unsigned long long)sh_offset,
-                        (unsigned long long)sh_size, (unsigned long long)im->n);
-
-        char name[32];
-        bool trunc = false;
-        if (!dynstr_copy(im, shstr_off, shstr_size, sh_name, name, sizeof(name), &trunc)) {
-            /* Section 0's sh_name is 0, which indexes the leading NUL of a
-             * well-formed name table and copies as "". A failure here means
-             * the index is out of range or the name never terminates. */
-            return fail(out, err, err_cap,
-                        "section header %u has an unreadable name (index %u into a %llu byte name table)",
-                        i, sh_name, (unsigned long long)shstr_size);
-        }
-        if (!trunc && strcmp(name, ".init_array") == 0) {
-            if (saw_init_array)
-                return fail(out, err, err_cap,
-                            "more than one .init_array section");
-            if (sh_type != SHT_INIT_ARRAY_)
-                return fail(out, err, err_cap,
-                            ".init_array has section type %u, want %u",
-                            sh_type, SHT_INIT_ARRAY_);
-            saw_init_array = true;
-            sh_init_addr = sh_addr;
-            sh_init_off = sh_offset;
-            sh_init_arraysz = sh_size;
-        } else if (!trunc && strcmp(name, ".fini_array") == 0) {
-            if (saw_fini_array)
-                return fail(out, err, err_cap,
-                            "more than one .fini_array section");
-            if (sh_type != SHT_FINI_ARRAY_)
-                return fail(out, err, err_cap,
-                            ".fini_array has section type %u, want %u",
-                            sh_type, SHT_FINI_ARRAY_);
-            saw_fini_array = true;
-            sh_fini_addr = sh_addr;
-            sh_fini_off = sh_offset;
-            sh_fini_arraysz = sh_size;
-        } else if (!trunc && strcmp(name, ".preinit_array") == 0) {
-            if (saw_preinit_array)
-                return fail(out, err, err_cap,
-                            "more than one .preinit_array section");
-            if (sh_type != SHT_PREINIT_ARRAY_)
-                return fail(out, err, err_cap,
-                            ".preinit_array has section type %u, want %u",
-                            sh_type, SHT_PREINIT_ARRAY_);
-            saw_preinit_array = true;
-            sh_preinit_addr = sh_addr;
-            sh_preinit_off = sh_offset;
-            sh_preinit_arraysz = sh_size;
-        }
+        if (!sec_scan_one(im, shtab, i, shstr_off, shstr_size, &arrs,
+                          out, err, err_cap))
+            return false;
     }
 
-    if (saw_init_array &&
-        (sh_init_addr != dyn_init_array || sh_init_off != dyn_init_off ||
-         sh_init_arraysz != dyn_init_arraysz))
+    if (sec_arr_disagrees(&arrs.init, dyn_init_array, dyn_init_off,
+                          dyn_init_arraysz))
         return fail(out, err, err_cap,
                     "section .init_array (addr 0x%llx off %llu size %llu) "
                     "disagrees with dynamic array (addr 0x%llx off %llu size %llu)",
-                    (unsigned long long)sh_init_addr,
-                    (unsigned long long)sh_init_off,
-                    (unsigned long long)sh_init_arraysz,
+                    (unsigned long long)arrs.init.addr,
+                    (unsigned long long)arrs.init.off,
+                    (unsigned long long)arrs.init.size,
                     (unsigned long long)dyn_init_array,
                     (unsigned long long)dyn_init_off,
                     (unsigned long long)dyn_init_arraysz);
-    if (!saw_init_array && dyn_init_arraysz != 0)
+    if (!arrs.init.saw && dyn_init_arraysz != 0)
         return fail(out, err, err_cap,
                     "DT_INIT_ARRAYSZ is %llu but there is no .init_array section "
                     "(constructors hidden from every section-header reader)",
                     (unsigned long long)dyn_init_arraysz);
-    if (saw_fini_array &&
-        (sh_fini_addr != dyn_fini_array || sh_fini_off != dyn_fini_off ||
-         sh_fini_arraysz != dyn_fini_arraysz))
+    if (sec_arr_disagrees(&arrs.fini, dyn_fini_array, dyn_fini_off,
+                          dyn_fini_arraysz))
         return fail(out, err, err_cap,
                     "section .fini_array disagrees with its dynamic pointer/size");
-    if (!saw_fini_array && dyn_fini_arraysz != 0)
+    if (!arrs.fini.saw && dyn_fini_arraysz != 0)
         return fail(out, err, err_cap,
                     "DT_FINI_ARRAYSZ is %llu but there is no .fini_array section",
                     (unsigned long long)dyn_fini_arraysz);
-    if (saw_preinit_array &&
-        (sh_preinit_addr != dyn_preinit_array ||
-         sh_preinit_off != dyn_preinit_off ||
-         sh_preinit_arraysz != dyn_preinit_arraysz))
+    if (sec_arr_disagrees(&arrs.preinit, dyn_preinit_array, dyn_preinit_off,
+                          dyn_preinit_arraysz))
         return fail(out, err, err_cap,
                     "section .preinit_array disagrees with its dynamic pointer/size");
-    if (!saw_preinit_array && dyn_preinit_arraysz != 0)
+    if (!arrs.preinit.saw && dyn_preinit_arraysz != 0)
         return fail(out, err, err_cap,
                     "DT_PREINIT_ARRAYSZ is %llu but there is no .preinit_array section",
                     (unsigned long long)dyn_preinit_arraysz);
@@ -1162,6 +1206,66 @@ static const char *pre_map_early_code_reason(
     return NULL;
 }
 
+static bool pre_map_needed_approved(const struct hotswap_elf_facts *facts,
+                                    char *err, size_t err_cap)
+{
+    static const char *const allowed_needed[] = {
+        "libc.so.6", "libm.so.6",
+    };
+    for (size_t i = 0; i < facts->needed_count; i++) {
+        bool allowed = false;
+        for (size_t k = 0;
+             k < sizeof(allowed_needed) / sizeof(allowed_needed[0]); k++) {
+            if (strcmp(facts->needed[i], allowed_needed[k]) == 0) {
+                allowed = true;
+                break;
+            }
+        }
+        if (!allowed)
+            return fail(NULL, err, err_cap,
+                        "module depends on unapproved library '%s'",
+                        facts->needed[i]);
+    }
+    return true;
+}
+
+static bool pre_map_identity_matches(const struct hotswap_elf_facts *facts,
+                                     const char expected_core_seal_root[65],
+                                     uint32_t expected_abi,
+                                     char *err, size_t err_cap)
+{
+    if (!facts->core_seal_root_present)
+        return fail(NULL, err, err_cap,
+                    "module does not export its consensus core seal");
+    if (strncmp(facts->core_seal_root, expected_core_seal_root, 65) != 0)
+        return fail(NULL, err, err_cap,
+                    "module consensus core seal does not match this node");
+    if (!facts->abi_version_present)
+        return fail(NULL, err, err_cap,
+                    "module does not export its ABI descriptor");
+    if (facts->abi_version != expected_abi)
+        return fail(NULL, err, err_cap,
+                    "module ABI %u does not match required ABI %u",
+                    facts->abi_version, expected_abi);
+    return true;
+}
+
+static bool pre_map_imports_declared(const struct hotswap_elf_facts *facts,
+                                     char *err, size_t err_cap)
+{
+    if (facts->undefined_symbols_truncated ||
+        facts->undefined_symbol_count > ZCL_HOTSWAP_ELF_PROBE_MAX_UNDEFINED)
+        return fail(NULL, err, err_cap,
+                    "module import set cannot be enumerated exactly");
+    for (size_t i = 0; i < facts->undefined_symbol_count; i++) {
+        if (!runtime_import_allowed(facts->undefined_symbols[i]))
+            return fail(NULL, err, err_cap,
+                        "module imports undeclared resident symbol '%s'",
+                        facts->undefined_symbols[i]);
+    }
+    return true;
+}
+
 bool hotswap_elf_pre_map_admit(const struct hotswap_elf_facts *facts,
                                const char expected_core_seal_root[65],
                                uint32_t expected_abi,
@@ -1188,49 +1292,14 @@ bool hotswap_elf_pre_map_admit(const struct hotswap_elf_facts *facts,
     if (facts->needed_truncated)
         return fail(NULL, err, err_cap,
                     "module dependency list cannot be enumerated exactly");
-    static const char *const allowed_needed[] = {
-        "libc.so.6", "libm.so.6",
-    };
-    for (size_t i = 0; i < facts->needed_count; i++) {
-        bool allowed = false;
-        for (size_t k = 0;
-             k < sizeof(allowed_needed) / sizeof(allowed_needed[0]); k++) {
-            if (strcmp(facts->needed[i], allowed_needed[k]) == 0) {
-                allowed = true;
-                break;
-            }
-        }
-        if (!allowed)
-            return fail(NULL, err, err_cap,
-                        "module depends on unapproved library '%s'",
-                        facts->needed[i]);
-    }
+    if (!pre_map_needed_approved(facts, err, err_cap))
+        return false;
 
-    if (!facts->core_seal_root_present)
-        return fail(NULL, err, err_cap,
-                    "module does not export its consensus core seal");
-    if (strncmp(facts->core_seal_root, expected_core_seal_root, 65) != 0)
-        return fail(NULL, err, err_cap,
-                    "module consensus core seal does not match this node");
-    if (!facts->abi_version_present)
-        return fail(NULL, err, err_cap,
-                    "module does not export its ABI descriptor");
-    if (facts->abi_version != expected_abi)
-        return fail(NULL, err, err_cap,
-                    "module ABI %u does not match required ABI %u",
-                    facts->abi_version, expected_abi);
+    if (!pre_map_identity_matches(facts, expected_core_seal_root,
+                                  expected_abi, err, err_cap))
+        return false;
 
-    if (facts->undefined_symbols_truncated ||
-        facts->undefined_symbol_count > ZCL_HOTSWAP_ELF_PROBE_MAX_UNDEFINED)
-        return fail(NULL, err, err_cap,
-                    "module import set cannot be enumerated exactly");
-    for (size_t i = 0; i < facts->undefined_symbol_count; i++) {
-        if (!runtime_import_allowed(facts->undefined_symbols[i]))
-            return fail(NULL, err, err_cap,
-                        "module imports undeclared resident symbol '%s'",
-                        facts->undefined_symbols[i]);
-    }
-    return true;
+    return pre_map_imports_declared(facts, err, err_cap);
 }
 
 bool hotswap_elf_probe_and_admit_fd(int fd,
