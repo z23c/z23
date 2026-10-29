@@ -1742,7 +1742,7 @@ static int test_pin_getdata_unservable_indexed_block_notfound(void)
 enum pin_reject_mode {
     PIN_REJECT_NO_INDEX,
     PIN_REJECT_EQUAL_WORK,
-    PIN_REJECT_MORE_WORK_BODY_INVALID,
+    PIN_REJECT_MORE_WORK,
 };
 
 static bool pin_submit_invalid(struct block *block,
@@ -1756,8 +1756,12 @@ static bool pin_submit_invalid(struct block *block,
 }
 
 /* Feed one locally-rejected, non-retryable block through process_block_msg.
- * The gate declines to self-suspect in every mode here (no index, equal work,
- * or a body that fails check_block), so the block must be dedup-marked. */
+ * Premise: sync is AT_TIP, so msg_processor_enqueue_p2p_block declines and
+ * block_submit runs the invalid verdict. (At any other sync state the block
+ * would be queued as retryable and never reach block_mark_seen.) The gate
+ * declines to self-suspect in every mode here (no index, equal work, or a
+ * more-work block that the height or body gate declines), so the block must
+ * be dedup-marked. */
 static bool pin_reject_marks_seen(enum pin_reject_mode mode)
 {
     struct block blk;
@@ -1791,7 +1795,7 @@ static bool pin_reject_marks_seen(enum pin_reject_mode mode)
             chainstate_insert_block_index((struct chainstate *)&ms, &hash);
         if (bi) {
             bi->nHeight = 1;
-            if (mode == PIN_REJECT_MORE_WORK_BODY_INVALID) {
+            if (mode == PIN_REJECT_MORE_WORK) {
                 bool neg = false, ovf = false;
                 arith_uint256_set_compact(&bi->nChainWork, 0x1f00ffffu,
                                           &neg, &ovf);
@@ -1809,9 +1813,16 @@ static bool pin_reject_marks_seen(enum pin_reject_mode mode)
     mp.block_submit_ctx = NULL;
     struct p2p_node *node = pin_peer_node(&nm, 621);
 
-    bool ret = ok && node && process_block_msg(&mp, node, &s);
+    /* Establish the AT_TIP premise explicitly; restored to IDLE below. */
+    test_msg_sync_to_blocks_download();
+    bool at_tip = sync_try_transition(SYNC_BLOCKS_DOWNLOAD, SYNC_AT_TIP,
+                                      "msg_handlers reject premise");
+
+    bool ret = at_tip && ok && node && process_block_msg(&mp, node, &s);
     bool seen = block_already_seen(&hash);
 
+    msg_processor_stop_block_intake(&mp);
+    test_msg_sync_to_idle();
     if (node)
         p2p_node_free(node);
     net_manager_free(&nm);
@@ -1842,11 +1853,11 @@ static int test_pin_reject_equal_work_marks_seen(void)
     return failures;
 }
 
-static int test_pin_reject_more_work_body_invalid_marks_seen(void)
+static int test_pin_reject_more_work_marks_seen(void)
 {
     int failures = 0;
-    TEST("msg_handlers: more-work block with an invalid body is marked seen (ban path)") {
-        ASSERT(pin_reject_marks_seen(PIN_REJECT_MORE_WORK_BODY_INVALID));
+    TEST("msg_handlers: more-work block the self-suspicion gate declines is marked seen (ban path)") {
+        ASSERT(pin_reject_marks_seen(PIN_REJECT_MORE_WORK));
         PASS();
     } _test_next:;
     return failures;
@@ -1903,7 +1914,7 @@ int test_msg_handlers(void)
     failures += test_pin_getdata_unservable_indexed_block_notfound();
     failures += test_pin_reject_no_index_marks_seen();
     failures += test_pin_reject_equal_work_marks_seen();
-    failures += test_pin_reject_more_work_body_invalid_marks_seen();
+    failures += test_pin_reject_more_work_marks_seen();
 
     return failures;
 }
