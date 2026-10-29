@@ -150,6 +150,82 @@ bool anchor_kv_ensure_schema(sqlite3 *db)
     return true;
 }
 
+enum anchor_state_insert_status {
+    ANCHOR_STATE_INSERT_OK,
+    ANCHOR_STATE_INSERT_BIND_FAILED,
+    ANCHOR_STATE_INSERT_STEP_FAILED,
+};
+
+/* Bind and step the prepared state-row insert for each pool in order.  On a
+ * step failure *rc_out carries the sqlite result code; the caller logs. */
+static enum anchor_state_insert_status anchor_kv_insert_state_rows(
+    sqlite3_stmt *s, int64_t activation_cursor, int *rc_out)
+{
+    for (int pool = ANCHOR_POOL_SPROUT; pool <= ANCHOR_POOL_SAPLING; pool++) {
+        sqlite3_reset(s);
+        sqlite3_clear_bindings(s);
+        if (sqlite3_bind_int(s, 1, pool) != SQLITE_OK ||
+            sqlite3_bind_int64(s, 2, (sqlite3_int64)activation_cursor)
+                != SQLITE_OK)
+            return ANCHOR_STATE_INSERT_BIND_FAILED;
+        int rc = sqlite3_step(s);  // raw-sql-ok:progress-kv-kernel-store
+        if (rc != SQLITE_DONE) {
+            *rc_out = rc;
+            return ANCHOR_STATE_INSERT_STEP_FAILED;
+        }
+    }
+    return ANCHOR_STATE_INSERT_OK;
+}
+
+/* True when every pool has a durable, well-typed activation cursor row. */
+static bool anchor_kv_state_rows_present(sqlite3 *db)
+{
+    for (int pool = ANCHOR_POOL_SPROUT; pool <= ANCHOR_POOL_SAPLING; pool++) {
+        int64_t persisted = 0;
+        bool found = false;
+        if (!anchor_kv_activation_cursor(db, pool, &persisted, &found) ||
+            !found)
+            return false;
+    }
+    return true;
+}
+
+/* BEGIN IMMEDIATE when the caller owns the transaction; true when no BEGIN
+ * was needed or it succeeded. */
+static bool anchor_kv_begin_owned_tx(sqlite3 *db, bool own_tx, char **err)
+{
+    return !(own_tx &&
+             sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, err)
+                 != SQLITE_OK);
+}
+
+static void anchor_kv_rollback_owned_tx(sqlite3 *db, bool own_tx)
+{
+    if (own_tx) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+}
+
+static void anchor_kv_free_err(char *err)
+{
+    if (err) sqlite3_free(err);
+}
+
+/* Lookup tail shared by get and latest_tree: ERROR when the cursor row cannot
+ * be read, HISTORY_INCOMPLETE when absent or adopted mid-history, MISSING
+ * when the history is complete from genesis. */
+static enum anchor_kv_lookup_result anchor_kv_history_gate(sqlite3 *db,
+                                                           int pool)
+{
+    int64_t activation = 0;
+    bool state_found = false;
+    if (!anchor_kv_activation_cursor(db, pool, &activation, &state_found))
+        return ANCHOR_KV_ERROR;
+    /* Missing state is not proof of completeness.  Fail closed just like an
+     * explicitly nonzero adoption cursor. */
+    if (!state_found || activation > 0)
+        return ANCHOR_KV_HISTORY_INCOMPLETE;
+    return ANCHOR_KV_MISSING;
+}
+
 bool anchor_kv_initialize_history(sqlite3 *db, int64_t activation_cursor)
 {
     if (!db || activation_cursor < 0) {
@@ -164,15 +240,14 @@ bool anchor_kv_initialize_history(sqlite3 *db, int64_t activation_cursor)
      * their existing progress.kv transaction. */
     bool own_tx = sqlite3_get_autocommit(db) != 0;
     char *err = NULL;
-    if (own_tx && sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err)
-                      != SQLITE_OK) {
+    if (!anchor_kv_begin_owned_tx(db, own_tx, &err)) {
         LOG_WARN(ANCHOR_SUBSYS, "initialize BEGIN failed: %s",
                  err ? err : sqlite3_errmsg(db));
-        if (err) sqlite3_free(err);
+        anchor_kv_free_err(err);
         return false;
     }
     if (!anchor_kv_ensure_schema(db)) {
-        if (own_tx) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        anchor_kv_rollback_owned_tx(db, own_tx);
         return false;
     }
 
@@ -182,52 +257,39 @@ bool anchor_kv_initialize_history(sqlite3 *db, int64_t activation_cursor)
             "VALUES(?,?)", -1, &s, NULL) != SQLITE_OK) {
         LOG_WARN(ANCHOR_SUBSYS, "initialize prepare failed: %s",
                  sqlite3_errmsg(db));
-        if (own_tx) sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        anchor_kv_rollback_owned_tx(db, own_tx);
         return false;
     }
     bool ok = true;
-    for (int pool = ANCHOR_POOL_SPROUT; pool <= ANCHOR_POOL_SAPLING; pool++) {
-        sqlite3_reset(s);
-        sqlite3_clear_bindings(s);
-        if (sqlite3_bind_int(s, 1, pool) != SQLITE_OK ||
-            sqlite3_bind_int64(s, 2, (sqlite3_int64)activation_cursor)
-                != SQLITE_OK) {
-            LOG_WARN(ANCHOR_SUBSYS, "initialize bind failed: %s",
-                     sqlite3_errmsg(db));
-            ok = false;
-            break;
-        }
-        int rc = sqlite3_step(s);  // raw-sql-ok:progress-kv-kernel-store
-        if (rc != SQLITE_DONE) {
-            LOG_WARN(ANCHOR_SUBSYS, "initialize step rc=%d: %s", rc,
-                     sqlite3_errmsg(db));
-            ok = false;
-            break;
-        }
+    int rc = 0;
+    enum anchor_state_insert_status ins =
+        anchor_kv_insert_state_rows(s, activation_cursor, &rc);
+    if (ins == ANCHOR_STATE_INSERT_BIND_FAILED) {
+        LOG_WARN(ANCHOR_SUBSYS, "initialize bind failed: %s",
+                 sqlite3_errmsg(db));
+        ok = false;
+    } else if (ins == ANCHOR_STATE_INSERT_STEP_FAILED) {
+        LOG_WARN(ANCHOR_SUBSYS, "initialize step rc=%d: %s", rc,
+                 sqlite3_errmsg(db));
+        ok = false;
     }
     sqlite3_finalize(s);
     /* INSERT OR IGNORE preserves legacy rows. Validate their durable storage
      * class before accepting initialization so a preexisting TEXT/BLOB/REAL
      * cursor cannot survive as a false complete zero via SQLite coercion. */
-    for (int pool = ANCHOR_POOL_SPROUT;
-         ok && pool <= ANCHOR_POOL_SAPLING; pool++) {
-        int64_t persisted = 0;
-        bool found = false;
-        if (!anchor_kv_activation_cursor(db, pool, &persisted, &found) ||
-            !found)
-            ok = false;
-    }
+    if (ok)
+        ok = anchor_kv_state_rows_present(db);
     if (own_tx) {
         const char *finish = ok ? "COMMIT" : "ROLLBACK";
         err = NULL;
         if (sqlite3_exec(db, finish, NULL, NULL, &err) != SQLITE_OK) {
             LOG_WARN(ANCHOR_SUBSYS, "initialize %s failed: %s", finish,
                      err ? err : sqlite3_errmsg(db));
-            if (err) sqlite3_free(err);
+            anchor_kv_free_err(err);
             sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
             return false;
         }
-        if (err) sqlite3_free(err);
+        anchor_kv_free_err(err);
     }
     return ok;
 }
@@ -316,6 +378,21 @@ static bool anchor_deserialize_checked(int pool, const struct uint256 *want,
     return true;
 }
 
+/* Decode the row the get statement is positioned on. */
+static enum anchor_kv_lookup_result anchor_kv_get_load_row(
+    sqlite3_stmt *s, int pool, const struct uint256 *root,
+    struct incremental_merkle_tree *tree_out, int64_t *height_out)
+{
+    const void *blob = sqlite3_column_blob(s, 1);
+    int blob_len = sqlite3_column_bytes(s, 1);
+    struct incremental_merkle_tree scratch;
+    struct incremental_merkle_tree *dst = tree_out ? tree_out : &scratch;
+    if (!anchor_deserialize_checked(pool, root, blob, blob_len, dst))
+        return ANCHOR_KV_ERROR;
+    if (height_out) *height_out = sqlite3_column_int64(s, 0);
+    return ANCHOR_KV_FOUND;
+}
+
 enum anchor_kv_lookup_result anchor_kv_get(
     sqlite3 *db, int pool, const struct uint256 *root,
     struct incremental_merkle_tree *tree_out, int64_t *height_out)
@@ -351,16 +428,7 @@ enum anchor_kv_lookup_result anchor_kv_get(
     enum anchor_kv_lookup_result result = ANCHOR_KV_MISSING;
     int rc = sqlite3_step(s);  // raw-sql-ok:progress-kv-kernel-store
     if (rc == SQLITE_ROW) {
-        const void *blob = sqlite3_column_blob(s, 1);
-        int blob_len = sqlite3_column_bytes(s, 1);
-        struct incremental_merkle_tree scratch;
-        struct incremental_merkle_tree *dst = tree_out ? tree_out : &scratch;
-        if (!anchor_deserialize_checked(pool, root, blob, blob_len, dst))
-            result = ANCHOR_KV_ERROR;
-        else {
-            if (height_out) *height_out = sqlite3_column_int64(s, 0);
-            result = ANCHOR_KV_FOUND;
-        }
+        result = anchor_kv_get_load_row(s, pool, root, tree_out, height_out);
     } else if (rc != SQLITE_DONE) {
         LOG_WARN(ANCHOR_SUBSYS, "get step rc=%d: %s", rc,
                  sqlite3_errmsg(db));
@@ -370,15 +438,23 @@ enum anchor_kv_lookup_result anchor_kv_get(
     if (result != ANCHOR_KV_MISSING)
         return result;
 
-    int64_t activation = 0;
-    bool state_found = false;
-    if (!anchor_kv_activation_cursor(db, pool, &activation, &state_found))
+    return anchor_kv_history_gate(db, pool);
+}
+
+/* Decode the latest-row tree whose root blob has already been length-checked
+ * and publish the root and height. */
+static enum anchor_kv_lookup_result anchor_kv_latest_load_row(
+    sqlite3_stmt *s, int pool, const void *rblob, const void *tblob, int tlen,
+    struct incremental_merkle_tree *tree_out, struct uint256 *root_out,
+    int64_t *height_out)
+{
+    struct uint256 root;
+    memcpy(root.data, rblob, 32);
+    if (!anchor_deserialize_checked(pool, &root, tblob, tlen, tree_out))
         return ANCHOR_KV_ERROR;
-    /* Missing state is not proof of completeness.  Fail closed just like an
-     * explicitly nonzero adoption cursor. */
-    if (!state_found || activation > 0)
-        return ANCHOR_KV_HISTORY_INCOMPLETE;
-    return ANCHOR_KV_MISSING;
+    if (root_out) *root_out = root;
+    if (height_out) *height_out = sqlite3_column_int64(s, 1);
+    return ANCHOR_KV_FOUND;
 }
 
 enum anchor_kv_lookup_result anchor_kv_latest_tree(
@@ -409,20 +485,12 @@ enum anchor_kv_lookup_result anchor_kv_latest_tree(
         int rlen = sqlite3_column_bytes(s, 0);
         const void *tblob = sqlite3_column_blob(s, 2);
         int tlen = sqlite3_column_bytes(s, 2);
-        struct uint256 root;
         if (!rblob || rlen != 32) {
             LOG_WARN(ANCHOR_SUBSYS, "latest_tree invalid root length=%d", rlen);
             result = ANCHOR_KV_ERROR;
         } else {
-            memcpy(root.data, rblob, 32);
-            if (!anchor_deserialize_checked(pool, &root, tblob, tlen,
-                                            tree_out))
-                result = ANCHOR_KV_ERROR;
-            else {
-                if (root_out) *root_out = root;
-                if (height_out) *height_out = sqlite3_column_int64(s, 1);
-                result = ANCHOR_KV_FOUND;
-            }
+            result = anchor_kv_latest_load_row(s, pool, rblob, tblob, tlen,
+                                               tree_out, root_out, height_out);
         }
     } else if (rc != SQLITE_DONE) {
         LOG_WARN(ANCHOR_SUBSYS, "latest_tree step rc=%d: %s", rc,
@@ -430,15 +498,12 @@ enum anchor_kv_lookup_result anchor_kv_latest_tree(
         result = ANCHOR_KV_ERROR;
     }
     sqlite3_finalize(s);
-    if (result == ANCHOR_KV_FOUND || result == ANCHOR_KV_ERROR)
+    if (result != ANCHOR_KV_HISTORY_INCOMPLETE)
         return result;
 
-    int64_t activation = 0;
-    bool state_found = false;
-    if (!anchor_kv_activation_cursor(db, pool, &activation, &state_found))
-        return ANCHOR_KV_ERROR;
-    if (!state_found || activation > 0)
-        return ANCHOR_KV_HISTORY_INCOMPLETE;
+    result = anchor_kv_history_gate(db, pool);
+    if (result != ANCHOR_KV_MISSING)
+        return result;
     anchor_tree_init(pool, tree_out);
     if (root_out) incremental_tree_root(tree_out, root_out);
     return ANCHOR_KV_FOUND;
@@ -628,6 +693,24 @@ bool anchor_kv_reset_mark_empty_below_in_tx(sqlite3 *db, int64_t below_height)
     return anchor_kv_reset_impl_in_tx(db, below_height);
 }
 
+/* True when the pool has a durable activation cursor row equal to `want`. */
+static bool anchor_kv_pool_cursor_is(sqlite3 *db, int pool, int64_t want,
+                                     int64_t *cursor, bool *found)
+{
+    return anchor_kv_activation_cursor(db, pool, cursor, found) &&
+           *found && *cursor == want;
+}
+
+/* Bind the expected boundary and step the zeroing UPDATE; *bound_ok reports
+ * whether the bind succeeded.  The caller owns finalize and logging. */
+static int anchor_kv_step_zero_update(sqlite3_stmt *st, int64_t boundary,
+                                      bool *bound_ok)
+{
+    *bound_ok = sqlite3_bind_int64(
+                    st, 1, (sqlite3_int64)boundary) == SQLITE_OK;
+    return *bound_ok ? sqlite3_step(st) : SQLITE_ERROR; // raw-sql-ok:progress-kv-kernel-store
+}
+
 bool anchor_kv_publish_full_replay_complete_in_tx(
     sqlite3 *db, int64_t expected_boundary)
 {
@@ -651,8 +734,8 @@ bool anchor_kv_publish_full_replay_complete_in_tx(
          pool <= ANCHOR_POOL_SAPLING; pool++) {
         int64_t cursor = -1;
         bool found = false;
-        if (!anchor_kv_activation_cursor(db, pool, &cursor, &found) ||
-            !found || cursor != expected_boundary) {
+        if (!anchor_kv_pool_cursor_is(db, pool, expected_boundary, &cursor,
+                                      &found)) {
             LOG_WARN(ANCHOR_SUBSYS,
                      "publish complete boundary mismatch pool=%d got=%lld "
                      "found=%d expected=%lld",
@@ -672,9 +755,8 @@ bool anchor_kv_publish_full_replay_complete_in_tx(
                  sqlite3_errmsg(db));
         return false;
     }
-    bool ok = sqlite3_bind_int64(
-                  st, 1, (sqlite3_int64)expected_boundary) == SQLITE_OK;
-    int rc = ok ? sqlite3_step(st) : SQLITE_ERROR; // raw-sql-ok:progress-kv-kernel-store
+    bool ok = false;
+    int rc = anchor_kv_step_zero_update(st, expected_boundary, &ok);
     sqlite3_finalize(st);
     if (!ok || rc != SQLITE_DONE || sqlite3_changes(db) != 2) {
         LOG_WARN(ANCHOR_SUBSYS,
@@ -687,8 +769,7 @@ bool anchor_kv_publish_full_replay_complete_in_tx(
          pool <= ANCHOR_POOL_SAPLING; pool++) {
         int64_t cursor = -1;
         bool found = false;
-        if (!anchor_kv_activation_cursor(db, pool, &cursor, &found) ||
-            !found || cursor != 0) {
+        if (!anchor_kv_pool_cursor_is(db, pool, 0, &cursor, &found)) {
             LOG_WARN(ANCHOR_SUBSYS,
                      "publish complete zero verification failed pool=%d",
                      pool);
