@@ -265,7 +265,7 @@ engine/jobs/src/stage_repair_coin_backfill.c:coin_backfill_insert_tx:23
 engine/jobs/src/stage_repair_coin_backfill_scan.c:coin_backfill_scan_step:17
 engine/jobs/src/tip_finalize_stage.c:is_canonical_header_successor:16
 engine/jobs/src/tip_finalize_stage.c:step_finalize:59
-engine/jobs/src/utxo_apply_delta_reorg.c:utxo_apply_reorg_unwind_if_needed:39
+engine/jobs/src/utxo_apply_delta_reorg.c:utxo_apply_reorg_unwind_if_needed:22
 engine/jobs/src/utxo_apply_delta_repair.c:utxo_apply_repair_value_overflow_hole:42
 engine/jobs/src/validate_headers_stage.c:recheck_failed_rows:27
 engine/models/src/database_migrate_features.c:migration_schema_object_matches:20

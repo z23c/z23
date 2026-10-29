@@ -428,6 +428,97 @@ void utxo_apply_reorg_name_refusal_blocker(int tip_h, int fork_h)
         (void)blocker_set(&b);
 }
 
+/* Divergence check for the stage cursor C. Returns -1 on a delta read error,
+ * 0 when there is nothing to unwind, 1 when the recorded branch diverged. */
+static int utxo_apply_reorg_detect_divergence(sqlite3 *db,
+                                              struct main_state *ms, int C)
+{
+    /* Compare the OLD branch hash recorded for the highest applied height
+     * (C-1) against the block now occupying that height on the active
+     * chain. A mismatch is the divergence signal: the winning branch now
+     * occupies C-1 (set by the stage itself); our delta rows recorded the
+     * losing branch. */
+    struct uint256 recorded;
+    int have = delta_branch_hash_at(db, C - 1, &recorded);
+    if (have < 0)
+        return -1;  // raw-return-ok:logged-above
+    if (have == 0)
+        return 0;  /* no delta at C-1 (e.g. all-failure tail) → nothing to do */
+
+    struct block_index *active = active_chain_at(&ms->chain_active, C - 1);
+    if (!active || !active->phashBlock) {
+        /* A missing slot or shorter raw window alone is NOT a branch verdict:
+         * boot/resume deliberately permits the visible window to lag durable
+         * reducer rows.  An operator invalidation supplies the missing fact by
+         * marking the exact recorded block hash FAILED before retracting the
+         * window.  Only that hash-bound verdict converts absence into a known
+         * divergence; otherwise preserve the sparse-window HOLD contract. */
+        struct block_index *recorded_owner =
+            block_map_find(&ms->map_block_index, &recorded);
+        if (!recorded_owner || !block_has_any_failure(recorded_owner))
+            return 0;
+        /* Explicitly failed recorded block: continue as a mismatch. */
+    } else if (uint256_eq(&recorded, active->phashBlock)) {
+        return 0;  /* no divergence */
+    }
+    return 1;
+}
+
+/* Walk down from `from` to `floor_h` on a prepared branch-hash statement.
+ * Returns the fork height, -1 when none matched, -2 on a step error. */
+static int utxo_apply_reorg_walk_fork(sqlite3_stmt *walk_st, sqlite3 *db,
+                                      struct main_state *ms, int from,
+                                      int floor_h)
+{
+    for (int h = from; h >= floor_h; h--) {
+        struct uint256 rec_h;
+        int hv = delta_branch_hash_step(walk_st, db, h, &rec_h);
+        if (hv < 0)
+            return -2;  // raw-return-ok:caller returns false after finalize
+        struct block_index *act_h = active_chain_at(&ms->chain_active, h);
+        if (hv == 1 && act_h && act_h->phashBlock &&
+            uint256_eq(&rec_h, act_h->phashBlock))
+            return h;
+    }
+    return -1;
+}
+
+/* The writes of one unwind txn; the caller rolls back when this fails. */
+static bool utxo_apply_reorg_unwind_writes(sqlite3 *db, int C, int fork_plus1)
+{
+    for (int h = C - 1; h >= fork_plus1; h--) {
+        if (!utxo_apply_emit_inverse_delta(db, h))
+            return false;  // raw-return-ok:logged-by-callee
+    }
+    if (!utxo_apply_delete_rows_above(db, fork_plus1, C - 1))
+        return false;  // raw-return-ok:logged-by-callee
+    if (!utxo_apply_unwind_write_cursor(db, (uint64_t)fork_plus1))
+        return false;  // raw-return-ok:logged-by-callee
+    /* Pull the contiguous applied frontier BACK to fork_plus1 in THIS unwind
+     * txn — the exact value just written to the cursor — so coins_applied_height
+     * == utxo_apply cursor stays true across a reorg. A PLAIN set (allows the
+     * decrease): a monotonic-floor helper would BLOCK the legitimate rewind and
+     * strand the frontier ABOVE the rewound coins (a phantom-forward frontier
+     * the self-heal would wrongly trust). Co-committed with the inverse delta +
+     * cursor; ROLLBACK on failure like the surrounding writes. */
+    return utxo_apply_frontier_set_in_tx(db, fork_plus1);
+}
+
+/* The open / undo / done statements of the unwind txn: a SAVEPOINT inside an
+ * outer drain batch, a plain transaction otherwise. */
+static void utxo_apply_unwind_txn_sql(bool batched, const char **open,
+                                      const char **undo, const char **done)
+{
+    *open = batched ? "SAVEPOINT utxo_apply_unwind"
+                    : "BEGIN IMMEDIATE";
+    *undo = batched
+        ? "ROLLBACK TO SAVEPOINT utxo_apply_unwind; "
+          "RELEASE SAVEPOINT utxo_apply_unwind"
+        : "ROLLBACK";
+    *done = batched ? "RELEASE SAVEPOINT utxo_apply_unwind"
+                    : "COMMIT";
+}
+
 bool utxo_apply_reorg_unwind_if_needed(sqlite3 *db,
                                        struct stage *stage,
                                        struct main_state *ms,
@@ -450,34 +541,11 @@ bool utxo_apply_reorg_unwind_if_needed(sqlite3 *db,
      * chain[]), so the active chain at C-1 reflects the stage's OWN tip. The
      * divergence detection + fork walk below run against that tip. */
 
-    /* Compare the OLD branch hash recorded for the highest applied height
-     * (C-1) against the block now occupying that height on the active
-     * chain. A mismatch is the divergence signal: the winning branch now
-     * occupies C-1 (set by the stage itself); our delta rows recorded the
-     * losing branch. */
-    struct uint256 recorded;
-    int have = delta_branch_hash_at(db, C - 1, &recorded);
-    if (have < 0)
+    int diverged = utxo_apply_reorg_detect_divergence(db, ms, C);
+    if (diverged < 0)
         return false;
-    if (have == 0)
-        return true;  /* no delta at C-1 (e.g. all-failure tail) → nothing to do */
-
-    struct block_index *active = active_chain_at(&ms->chain_active, C - 1);
-    if (!active || !active->phashBlock) {
-        /* A missing slot or shorter raw window alone is NOT a branch verdict:
-         * boot/resume deliberately permits the visible window to lag durable
-         * reducer rows.  An operator invalidation supplies the missing fact by
-         * marking the exact recorded block hash FAILED before retracting the
-         * window.  Only that hash-bound verdict converts absence into a known
-         * divergence; otherwise preserve the sparse-window HOLD contract. */
-        struct block_index *recorded_owner =
-            block_map_find(&ms->map_block_index, &recorded);
-        if (!recorded_owner || !block_has_any_failure(recorded_owner))
-            return true;
-        /* Explicitly failed recorded block: continue as a mismatch. */
-    } else if (uint256_eq(&recorded, active->phashBlock)) {
-        return true;  /* no divergence */
-    }
+    if (diverged == 0)
+        return true;
 
     /* Walk DOWN to the fork point F: the highest height where our recorded
      * branch_hash still matches the active chain. Disconnect (F, C-1].
@@ -504,21 +572,10 @@ bool utxo_apply_reorg_unwind_if_needed(sqlite3 *db,
                      sqlite3_errmsg(db));
             return false;
         }
-        for (int h = C - 2; h >= floor_h; h--) {
-            struct uint256 rec_h;
-            int hv = delta_branch_hash_step(walk_st, db, h, &rec_h);
-            if (hv < 0) {
-                sqlite3_finalize(walk_st);
-                return false;
-            }
-            struct block_index *act_h = active_chain_at(&ms->chain_active, h);
-            if (hv == 1 && act_h && act_h->phashBlock &&
-                uint256_eq(&rec_h, act_h->phashBlock)) {
-                fork = h;
-                break;
-            }
-        }
+        fork = utxo_apply_reorg_walk_fork(walk_st, db, ms, C - 2, floor_h);
         sqlite3_finalize(walk_st);
+        if (fork < -1)
+            return false;
     }
     if (fork < 0 && floor_h > 0) {
         LOG_WARN("utxo_apply",
@@ -575,42 +632,15 @@ bool utxo_apply_reorg_unwind_if_needed(sqlite3 *db,
      * batch (committed once by stage_batch_end). Pure I/O txn-boundary
      * change — identical writes, identical atomicity, fewer fsyncs. */
     const bool ua_batched = stage_batch_active();
-    const char *ua_open   = ua_batched ? "SAVEPOINT utxo_apply_unwind"
-                                       : "BEGIN IMMEDIATE";
-    const char *ua_undo   = ua_batched
-        ? "ROLLBACK TO SAVEPOINT utxo_apply_unwind; "
-          "RELEASE SAVEPOINT utxo_apply_unwind"
-        : "ROLLBACK";
-    const char *ua_done   = ua_batched ? "RELEASE SAVEPOINT utxo_apply_unwind"
-                                       : "COMMIT";
+    const char *ua_open, *ua_undo, *ua_done;
+    utxo_apply_unwind_txn_sql(ua_batched, &ua_open, &ua_undo, &ua_done);
     char *err = NULL;
     if (sqlite3_exec(db, ua_open, NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN("utxo_apply", "[utxo_apply] unwind BEGIN failed: %s", err ? err : "(no message)");
         if (err) sqlite3_free(err);
         return false;
     }
-    for (int h = C - 1; h >= fork_plus1; h--) {
-        if (!utxo_apply_emit_inverse_delta(db, h)) {
-            sqlite3_exec(db, ua_undo, NULL, NULL, NULL);
-            return false;
-        }
-    }
-    if (!utxo_apply_delete_rows_above(db, fork_plus1, C - 1)) {
-        sqlite3_exec(db, ua_undo, NULL, NULL, NULL);
-        return false;
-    }
-    if (!utxo_apply_unwind_write_cursor(db, (uint64_t)fork_plus1)) {
-        sqlite3_exec(db, ua_undo, NULL, NULL, NULL);
-        return false;
-    }
-    /* Pull the contiguous applied frontier BACK to fork_plus1 in THIS unwind
-     * txn — the exact value just written to the cursor — so coins_applied_height
-     * == utxo_apply cursor stays true across a reorg. A PLAIN set (allows the
-     * decrease): a monotonic-floor helper would BLOCK the legitimate rewind and
-     * strand the frontier ABOVE the rewound coins (a phantom-forward frontier
-     * the self-heal would wrongly trust). Co-committed with the inverse delta +
-     * cursor; ROLLBACK on failure like the surrounding writes. */
-    if (!utxo_apply_frontier_set_in_tx(db, fork_plus1)) {
+    if (!utxo_apply_reorg_unwind_writes(db, C, fork_plus1)) {
         sqlite3_exec(db, ua_undo, NULL, NULL, NULL);
         return false;
     }
