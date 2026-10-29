@@ -102,7 +102,7 @@ bool tip_finalize_reconcile_visible_cursor_body(
     struct block_index *bi =
         tip_finalize_visible_body_lookup_block(db, ms, height);
     if (!tip_finalize_visible_body_block_usable(bi, height))
-        return false;
+        return false; // raw-return-ok:original_gate_was_silent_not_ready_retry_next_pass
 
     /* A header witness proves the parent, not this body's transition. */
     struct utxo_apply_row applied;
