@@ -696,6 +696,151 @@ static int https_public_install_mapping_cases(void)
     return failures;
 }
 
+/* Points `link` at `target`, replacing any earlier link; false when the
+ * symlink could not be made. */
+static bool pi_relink(const char *link, const char *target)
+{
+    (void)remove(link);
+    return symlink(target, link) == 0;
+}
+
+static bool pi_maps_to(const char *root, const char *url, const char *want)
+{
+    char out[PATH_MAX];
+
+    return https_server_public_install_filepath_for_testing(
+               root, url, out, sizeof(out)) &&
+           strcmp(out, want) == 0;
+}
+
+static bool pi_refused(const char *root, const char *url)
+{
+    char out[PATH_MAX];
+
+    return !https_server_public_install_filepath_for_testing(
+        root, url, out, sizeof(out));
+}
+
+/* A symlink is judged by the place it resolves to. A target outside the
+ * root is refused, whether it is absolute or climbs out with "..", and so is
+ * a sibling directory whose name shares the root's name as a string prefix
+ * ("public-install-evil"): only the '/' boundary test keeps that one out.
+ * A symlink to a file inside the root maps to that file. */
+static int https_public_install_symlink_cases(void)
+{
+    int failures = 0;
+    char dir[256];
+    char root[PATH_MAX];
+    char release[PATH_MAX];
+    char evil_dir[PATH_MAX];
+    char evil_file[PATH_MAX];
+    char outside[PATH_MAX];
+    char shim[PATH_MAX];
+    char tar_path[PATH_MAX];
+    char tar_real[PATH_MAX];
+
+    test_fmt_tmpdir(dir, sizeof(dir), "path_check", "pubinst_escape");
+    (void)test_ensure_tmproot();
+    test_cleanup_tmpdir(dir);
+    (void)mkdir(dir, 0700);
+    snprintf(root, sizeof(root), "%s/public-install", dir);
+    snprintf(release, sizeof(release), "%s/release", root);
+    snprintf(evil_dir, sizeof(evil_dir), "%s/public-install-evil", dir);
+    snprintf(evil_file, sizeof(evil_file), "%s/file", evil_dir);
+    snprintf(outside, sizeof(outside), "%s/outside.bin", dir);
+    snprintf(shim, sizeof(shim), "%s/install.sh", root);
+    snprintf(tar_path, sizeof(tar_path), "%s/z23.tar.gz", release);
+    PC_CHECK("symlink fixture: root and release mkdir",
+             mkdir(root, 0700) == 0 && mkdir(release, 0700) == 0);
+    PC_CHECK("symlink fixture: sibling directory with a file",
+             mkdir(evil_dir, 0700) == 0 && write_small_file(evil_file, "evil"));
+    PC_CHECK("symlink fixture: tarball inside the root",
+             write_small_file(tar_path, "tarball") &&
+             realpath(tar_path, tar_real) != NULL);
+    PC_CHECK("symlink fixture: file outside the root",
+             write_small_file(outside, "outside"));
+
+    PC_CHECK("symlink to an absolute path outside the root is refused",
+             pi_relink(shim, outside) && pi_refused(root, "/"));
+    PC_CHECK("symlink climbing out with .. is refused",
+             pi_relink(shim, "../outside.bin") && pi_refused(root, "/"));
+    PC_CHECK("symlink into a sibling sharing the root's name prefix is refused",
+             pi_relink(shim, "../public-install-evil/file") &&
+             pi_refused(root, "/"));
+    PC_CHECK("symlink to a file inside the root maps to that file",
+             pi_relink(shim, "release/z23.tar.gz") &&
+             pi_maps_to(root, "/", tar_real));
+
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* Spellings of the root and of the URL over a regular shim. A root given
+ * with a trailing slash, or reached through a symlink, resolves to the same
+ * real root. A URL that is not an exact mapped name is refused before any
+ * disk access. A trailing slash on a directory resolves to that directory,
+ * and on a regular file it is refused (realpath() fails with ENOTDIR). */
+static int https_public_install_spelling_cases(void)
+{
+    int failures = 0;
+    char dir[256];
+    char root[PATH_MAX];
+    char root_slash[PATH_MAX];
+    char root_alias[PATH_MAX];
+    char release[PATH_MAX];
+    char sub[PATH_MAX];
+    char sub_real[PATH_MAX];
+    char shim[PATH_MAX];
+    char shim_real[PATH_MAX];
+    char tar_path[PATH_MAX];
+    char tar_real[PATH_MAX];
+
+    test_fmt_tmpdir(dir, sizeof(dir), "path_check", "pubinst_spell");
+    (void)test_ensure_tmproot();
+    test_cleanup_tmpdir(dir);
+    (void)mkdir(dir, 0700);
+    snprintf(root, sizeof(root), "%s/public-install", dir);
+    snprintf(root_slash, sizeof(root_slash), "%s/", root);
+    snprintf(root_alias, sizeof(root_alias), "%s/alias-root", dir);
+    snprintf(release, sizeof(release), "%s/release", root);
+    snprintf(sub, sizeof(sub), "%s/sub", release);
+    snprintf(shim, sizeof(shim), "%s/install.sh", root);
+    snprintf(tar_path, sizeof(tar_path), "%s/z23.tar.gz", release);
+    PC_CHECK("spelling fixture: root and release mkdir",
+             mkdir(root, 0700) == 0 && mkdir(release, 0700) == 0);
+    PC_CHECK("spelling fixture: release subdirectory", mkdir(sub, 0700) == 0);
+    PC_CHECK("spelling fixture: shim and tarball",
+             write_small_file(shim, "#!/bin/sh\n") &&
+             write_small_file(tar_path, "tarball"));
+    PC_CHECK("spelling fixture: realpaths",
+             realpath(shim, shim_real) != NULL &&
+             realpath(tar_path, tar_real) != NULL &&
+             realpath(sub, sub_real) != NULL);
+
+    PC_CHECK("a root with a trailing slash maps GET / to the shim",
+             pi_maps_to(root_slash, "/", shim_real));
+    PC_CHECK("a root reached through a symlink maps GET / to the shim",
+             symlink(root, root_alias) == 0 &&
+             pi_maps_to(root_alias, "/", shim_real));
+    PC_CHECK("a URL with a leading doubled slash is refused",
+             pi_refused(root, "//install.sh"));
+    PC_CHECK("a URL without a leading slash is refused",
+             pi_refused(root, "install.sh"));
+    PC_CHECK("a trailing slash on the install URL is refused",
+             pi_refused(root, "/install.sh/"));
+    PC_CHECK("a dot segment in front of the install URL is refused",
+             pi_refused(root, "/./install.sh"));
+    PC_CHECK("a trailing slash on a regular file is refused",
+             pi_refused(root, "/release/z23.tar.gz/"));
+    PC_CHECK("a trailing slash on a directory resolves to that directory",
+             pi_maps_to(root, "/release/sub/", sub_real));
+    PC_CHECK("a doubled slash inside a release URL resolves to the file",
+             pi_maps_to(root, "/release//z23.tar.gz", tar_real));
+
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static int path_check_read_whole_file_binary_cases(const char *present,
                                                    const char *empty,
                                                    const char *missing)
@@ -903,6 +1048,8 @@ int test_path_check(void)
     failures += https_public_install_refusal_cases();
     failures += https_public_install_routed_refusal_cases();
     failures += https_public_install_mapping_cases();
+    failures += https_public_install_symlink_cases();
+    failures += https_public_install_spelling_cases();
     failures += path_check_whole_file_cases();
 
     return failures;
