@@ -1212,6 +1212,260 @@ static int test_block_swarm_fail_retry(void)
     return failures;
 }
 
+/* ── Block swarm assignment (pins block_swarm_assign_piece_capped) ── */
+
+/* block_swarm_init deep-copies the hashes, so the fixture drops its own copy.
+ * end_height is taken verbatim; init does not check it against num_pieces. */
+static bool block_swarm_assign_fixture_init(struct block_swarm *bs,
+                                            struct block_piece_manifest *manifest,
+                                            uint32_t num_pieces,
+                                            int32_t end_height)
+{
+    memset(bs, 0, sizeof(*bs));
+    memset(manifest, 0, sizeof(*manifest));
+    manifest->end_height = end_height;
+    manifest->num_pieces = num_pieces;
+    manifest->piece_hashes = zcl_calloc(num_pieces, 32, "test_piece_hashes");
+    bool ok = manifest->piece_hashes != NULL &&
+              block_swarm_init(bs, manifest, NULL);
+    free(manifest->piece_hashes);
+    manifest->piece_hashes = NULL;
+    return ok;
+}
+
+static int test_block_swarm_assign_refusals(void)
+{
+    int failures = 0;
+    TEST("block_swarm assign refuses cap below hint, empty and freed swarms") {
+        struct block_piece_manifest manifest;
+        struct block_swarm bs;
+        ASSERT(block_swarm_assign_fixture_init(&bs, &manifest, 4, 255));
+
+        /* Piece 0 done: hint = 1. Height 63 caps at piece 0, below the hint. */
+        ASSERT(block_swarm_receive_piece(&bs, 0, 1));
+        ASSERT(block_swarm_assign_piece_through_height(&bs, 1, NULL, 0, 63) == -1);
+        ASSERT(bs.piece_states[1] == CHUNK_NEEDED);
+        ASSERT(bs.pieces_inflight == 0);
+
+        /* Height 127 completes two pieces: cap at piece 1 is assignable. */
+        ASSERT(block_swarm_assign_piece_through_height(&bs, 1, NULL, 0, 127) == 1);
+        ASSERT(bs.piece_states[1] == CHUNK_INFLIGHT);
+        ASSERT(bs.pieces_inflight == 1);
+        ASSERT(bs.next_assign_hint == 2);
+
+        /* Height 62 completes no piece: refused before the capped walk. */
+        ASSERT(block_swarm_assign_piece_through_height(&bs, 2, NULL, 0, 62) == -1);
+        ASSERT(bs.pieces_inflight == 1);
+
+        /* num_pieces 0 is refused on both entry points. */
+        bs.manifest.num_pieces = 0;
+        ASSERT(block_swarm_assign_piece(&bs, 3, NULL, 0) == -1);
+        ASSERT(block_swarm_assign_piece_through_height(&bs, 3, NULL, 0, 255) == -1);
+        ASSERT(bs.pieces_inflight == 1);
+
+        /* Freed swarm: piece_states is NULL while num_pieces still reads 4. */
+        bs.manifest.num_pieces = 4;
+        block_swarm_free(&bs);
+        ASSERT(block_swarm_assign_piece(&bs, 3, NULL, 0) == -1);
+        ASSERT(block_swarm_assign_piece_through_height(&bs, 3, NULL, 0, 255) == -1);
+        ASSERT(block_swarm_assign_piece_for_peer(&bs, 3, NULL, 0, 255, -1) == -1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_block_swarm_assign_clamps_cap(void)
+{
+    int failures = 0;
+    TEST("block_swarm assign clamps a cap past the last piece") {
+        struct block_piece_manifest manifest;
+        struct block_swarm bs;
+        /* Inconsistent on purpose: 2 pieces but end_height 1000 covers 15+
+         * pieces of height, so height 999 would cap at index 14 unclamped. */
+        ASSERT(block_swarm_assign_fixture_init(&bs, &manifest, 2, 1000));
+
+        ASSERT(block_swarm_receive_piece(&bs, 0, 1));
+        ASSERT(block_swarm_assign_piece_through_height(&bs, 1, NULL, 0, 999) == 1);
+        ASSERT(bs.piece_states[1] == CHUNK_INFLIGHT);
+        /* Hint has moved past the clamped cap: nothing left to hand out. */
+        ASSERT(block_swarm_assign_piece_through_height(&bs, 2, NULL, 0, 999) == -1);
+
+        block_swarm_free(&bs);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_block_swarm_assign_endgame_boundary(void)
+{
+    int failures = 0;
+    TEST("block_swarm assign endgame flag at the 8-piece boundary") {
+        struct block_piece_manifest manifest;
+        struct block_swarm bs;
+        ASSERT(block_swarm_assign_fixture_init(&bs, &manifest, 10, 639));
+
+        /* 9 remaining is above ENDGAME_THRESHOLD: flag stays clear. */
+        ASSERT(block_swarm_receive_piece(&bs, 0, 1));
+        ASSERT(block_swarm_assign_piece(&bs, 1, NULL, 0) == 1);
+        ASSERT(!bs.endgame);
+
+        /* 8 remaining: flag set on this assignment. */
+        ASSERT(block_swarm_receive_piece(&bs, 1, 1));
+        ASSERT(block_swarm_assign_piece(&bs, 2, NULL, 0) == 2);
+        ASSERT(bs.endgame);
+
+        /* Remaining NEEDED pieces are handed out in order. Once none are
+         * left, endgame does not re-request an INFLIGHT piece: the call
+         * returns -1. */
+        for (int32_t want = 3; want <= 9; want++)
+            ASSERT(block_swarm_assign_piece(&bs, 2, NULL, 0) == want);
+        ASSERT(block_swarm_assign_piece(&bs, 3, NULL, 0) == -1);
+        ASSERT(bs.pieces_inflight == 8);
+        ASSERT(bs.piece_peer[2] == 2);
+        ASSERT(bs.endgame);
+
+        block_swarm_free(&bs);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_block_swarm_assign_for_peer_clamp(void)
+{
+    int failures = 0;
+    TEST("block_swarm assign_for_peer clamps to peer end height") {
+        struct block_piece_manifest manifest;
+        struct block_swarm bs;
+        ASSERT(block_swarm_assign_fixture_init(&bs, &manifest, 10, 639));
+
+        ASSERT(block_swarm_receive_piece(&bs, 0, 1));
+        ASSERT(block_swarm_receive_piece(&bs, 1, 1));
+        ASSERT(block_swarm_receive_piece(&bs, 2, 1));
+
+        /* Peer ends at height 127: cap at piece 1, below hint 3. */
+        ASSERT(block_swarm_assign_piece_for_peer(&bs, 1, NULL, 0, 639, 127) == -1);
+        /* Peer end unknown (-1): no clamp, the full cap reaches piece 3. */
+        ASSERT(block_swarm_assign_piece_for_peer(&bs, 1, NULL, 0, 639, -1) == 3);
+
+        block_swarm_free(&bs);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_block_swarm_assign_side_effects(void)
+{
+    int failures = 0;
+    TEST("block_swarm assign marks the piece inflight and advances the hint") {
+        struct block_piece_manifest manifest;
+        struct block_swarm bs;
+        ASSERT(block_swarm_assign_fixture_init(&bs, &manifest, 6, 383));
+
+        ASSERT(block_swarm_assign_piece(&bs, 7, NULL, 0) == 0);
+        ASSERT(bs.piece_states[0] == CHUNK_INFLIGHT);
+        ASSERT(bs.piece_peer[0] == 7);
+        ASSERT(bs.piece_request_time[0] > 0);
+        ASSERT(bs.pieces_inflight == 1);
+        ASSERT(bs.next_assign_hint == 1);
+
+        block_swarm_free(&bs);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_block_swarm_assign_rarest_first_order(void)
+{
+    int failures = 0;
+    TEST("block_swarm assign picks rarest piece, lowest index on ties") {
+        struct block_piece_manifest manifest;
+        struct block_swarm bs;
+        ASSERT(block_swarm_assign_fixture_init(&bs, &manifest, 6, 383));
+
+        /* Availability 5,2,2,7,1,1: rarest is 4, then 5, then 1, then 2. */
+        uint32_t avail[6] = {5, 2, 2, 7, 1, 1};
+        memcpy(bs.piece_availability, avail, sizeof(avail));
+        ASSERT(block_swarm_assign_piece(&bs, 1, NULL, 0) == 4);
+        ASSERT(block_swarm_assign_piece(&bs, 2, NULL, 0) == 5);
+        ASSERT(block_swarm_assign_piece(&bs, 3, NULL, 0) == 1);
+        ASSERT(block_swarm_assign_piece(&bs, 4, NULL, 0) == 2);
+        block_swarm_free(&bs);
+
+        /* Equal availability: lowest index wins. */
+        ASSERT(block_swarm_assign_fixture_init(&bs, &manifest, 6, 383));
+        for (uint32_t i = 0; i < 6; i++)
+            bs.piece_availability[i] = 3;
+        ASSERT(block_swarm_assign_piece(&bs, 1, NULL, 0) == 0);
+        block_swarm_free(&bs);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_block_swarm_assign_bitmap_gate(void)
+{
+    int failures = 0;
+    TEST("block_swarm assign only offers pieces the peer bitmap holds") {
+        struct block_piece_manifest manifest;
+        struct block_swarm bs;
+        ASSERT(block_swarm_assign_fixture_init(&bs, &manifest, 6, 383));
+        uint32_t avail[6] = {5, 2, 2, 7, 1, 1};
+        memcpy(bs.piece_availability, avail, sizeof(avail));
+
+        /* Bitmap 0x28 holds pieces 3 and 5; rarest of those is 5, then 3. */
+        uint8_t bitmap[1] = {0x28};
+        ASSERT(block_swarm_assign_piece(&bs, 1, bitmap, 1) == 5);
+        ASSERT(block_swarm_assign_piece(&bs, 1, bitmap, 1) == 3);
+        /* Bitmap holding nothing offers nothing. */
+        uint8_t empty[1] = {0x00};
+        ASSERT(block_swarm_assign_piece(&bs, 1, empty, 1) == -1);
+
+        block_swarm_free(&bs);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_block_swarm_assign_bitmap_bytes_bound(void)
+{
+    int failures = 0;
+    TEST("block_swarm assign treats bits past the bitmap span as absent") {
+        struct block_piece_manifest manifest;
+        struct block_swarm bs;
+        ASSERT(block_swarm_assign_fixture_init(&bs, &manifest, 10, 639));
+
+        /* Bits 8 and 9 live in byte 1: a 1-byte span cannot reach them. */
+        uint8_t bitmap[2] = {0x00, 0x03};
+        ASSERT(block_swarm_assign_piece(&bs, 1, bitmap, 1) == -1);
+        ASSERT(block_swarm_assign_piece(&bs, 1, bitmap, 2) == 8);
+
+        block_swarm_free(&bs);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_block_swarm_assign_null_availability(void)
+{
+    int failures = 0;
+    TEST("block_swarm assign with no availability array counts each piece as one") {
+        struct block_piece_manifest manifest;
+        struct block_swarm bs;
+        ASSERT(block_swarm_assign_fixture_init(&bs, &manifest, 6, 383));
+        uint32_t avail[6] = {5, 2, 2, 7, 1, 1};
+        memcpy(bs.piece_availability, avail, sizeof(avail));
+        /* Dropping the array makes every piece count as one: lowest index wins
+         * instead of the rarest piece 4. */
+        free(bs.piece_availability);
+        bs.piece_availability = NULL;
+        ASSERT(block_swarm_assign_piece(&bs, 1, NULL, 0) == 0);
+
+        block_swarm_free(&bs);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Large-scale Merkle proof stress test ────────────────── */
 
 static int test_merkle_proof_large(void)
@@ -2303,6 +2557,15 @@ int test_fast_sync(void)
     failures += test_block_piece_manifest_refresh_after_coverage_expands();
     failures += test_block_swarm_lifecycle();
     failures += test_block_swarm_fail_retry();
+    failures += test_block_swarm_assign_refusals();
+    failures += test_block_swarm_assign_clamps_cap();
+    failures += test_block_swarm_assign_endgame_boundary();
+    failures += test_block_swarm_assign_for_peer_clamp();
+    failures += test_block_swarm_assign_side_effects();
+    failures += test_block_swarm_assign_rarest_first_order();
+    failures += test_block_swarm_assign_bitmap_gate();
+    failures += test_block_swarm_assign_bitmap_bytes_bound();
+    failures += test_block_swarm_assign_null_availability();
 
     /* UTXO commitment */
     failures += test_commitment_checkpoint_roundtrip();
