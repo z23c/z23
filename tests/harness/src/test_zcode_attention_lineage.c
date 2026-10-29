@@ -203,83 +203,124 @@ static bool al_selected_roots(
     return true;
 }
 
-int test_zcode_attention_lineage(void)
-{
-    int failures = 0;
+struct al_fixture {
     struct vcs_zcode_focus_v1 focus;
     struct vcs_zcode_heuristic_v1 heuristics[3], parents[3];
-    struct vcs_zcode_heuristic_v1 compose_parents[2];
+    struct vcs_zcode_heuristic_v1 wrong_parents[3];
     struct vcs_zcode_attention_bid_v1 bids[3];
-    al_focus(&focus);
-    al_seed(&heuristics[0], 40);
-    al_seed(&parents[0], 41);
-    al_specialize(&heuristics[1], &parents[0], 42);
+    struct vcs_zcode_attention_bid_v1 priority_bids[3];
+    struct vcs_zcode_attention_frontier_query query;
+    struct vcs_zcode_attention_frontier_query auto_query;
+    struct vcs_zcode_attention_frontier_report report;
+    struct vcs_zcode_attention_verified_report verified_report;
+    size_t selected[3];
+    uint8_t baseline_roots[3][32];
+    bool mixed_ok;
+    uint8_t secret[32], pubkey[32];
+    struct vcs_zcode_science_statement_v1 statements[3];
+    bool statements_ok;
+};
+
+static void al_setup(struct al_fixture *fx)
+{
+    struct vcs_zcode_heuristic_v1 compose_parents[2];
+    memset(fx, 0, sizeof(*fx));
+    al_focus(&fx->focus);
+    al_seed(&fx->heuristics[0], 40);
+    al_seed(&fx->parents[0], 41);
+    al_specialize(&fx->heuristics[1], &fx->parents[0], 42);
     al_seed(&compose_parents[0], 43);
     al_seed(&compose_parents[1], 44);
     al_order_two(compose_parents);
-    parents[1] = compose_parents[0];
-    parents[2] = compose_parents[1];
-    al_compose(&heuristics[2], compose_parents, 45);
+    fx->parents[1] = compose_parents[0];
+    fx->parents[2] = compose_parents[1];
+    al_compose(&fx->heuristics[2], compose_parents, 45);
     for (size_t i = 0; i < 3; i++)
-        al_bid(&bids[i], &heuristics[i], &focus, (uint8_t)(50u + i));
+        al_bid(&fx->bids[i], &fx->heuristics[i], &fx->focus,
+               (uint8_t)(50u + i));
+    al_query(&fx->query, &fx->focus, VCS_ZCODE_ATTENTION_P2_PRODUCTIVITY);
+    for (size_t i = 0; i < 3; i++)
+        fx->selected[i] = SIZE_MAX;
+    al_query(&fx->auto_query, &fx->focus, VCS_ZCODE_ATTENTION_PRIORITY_AUTO);
+    memcpy(fx->priority_bids, fx->bids, sizeof(fx->bids));
+    fx->priority_bids[1].priority_class = VCS_ZCODE_ATTENTION_P1_USER_JOURNEY;
+    memcpy(fx->wrong_parents, fx->parents, sizeof(fx->parents));
+    fx->wrong_parents[2].proposed_rule_root[0] ^= 1u;
+}
 
-    struct vcs_zcode_attention_frontier_query query;
-    struct vcs_zcode_attention_frontier_report report;
-    size_t selected[3] = {SIZE_MAX, SIZE_MAX, SIZE_MAX};
-    al_query(&query, &focus, VCS_ZCODE_ATTENTION_P2_PRODUCTIVITY);
-
+static int al_check_layouts(struct al_fixture *fx)
+{
+    int failures = 0;
     AL_CHECK("packed-layout-0-1-2",
              vcs_zcode_attention_frontier_project_with_lineage(
-                 bids, 3, heuristics, parents, 3, &query,
-                 selected, 3, &report) == VCS_ZCODE_ATTENTION_OK);
+                 fx->bids, 3, fx->heuristics, fx->parents, 3, &fx->query,
+                 fx->selected, 3, &fx->report) == VCS_ZCODE_ATTENTION_OK);
     AL_CHECK("empty-and-all-seed-layouts",
              vcs_zcode_attention_frontier_project_with_lineage(
-                 NULL, 0, NULL, NULL, 0, &query,
-                 selected, 3, &report) == VCS_ZCODE_ATTENTION_OK &&
+                 NULL, 0, NULL, NULL, 0, &fx->query,
+                 fx->selected, 3, &fx->report) == VCS_ZCODE_ATTENTION_OK &&
              vcs_zcode_attention_frontier_project_with_lineage(
-                 &bids[0], 1, &heuristics[0], NULL, 0, &query,
-                 selected, 3, &report) ==
+                 &fx->bids[0], 1, &fx->heuristics[0], NULL, 0, &fx->query,
+                 fx->selected, 3, &fx->report) ==
                  VCS_ZCODE_ATTENTION_OK);
+    return failures;
+}
+
+static int al_check_derived_focus(struct al_fixture *fx)
+{
+    int failures = 0;
     AL_CHECK("derived-focus-positive",
              vcs_zcode_attention_bid_validate_for_focus_with_lineage(
-                 &bids[1], &heuristics[1], &parents[0], 1, &focus) ==
-                 VCS_ZCODE_ATTENTION_OK &&
+                 &fx->bids[1], &fx->heuristics[1], &fx->parents[0], 1,
+                 &fx->focus) == VCS_ZCODE_ATTENTION_OK &&
              vcs_zcode_attention_bid_validate_for_focus_with_lineage(
-                 &bids[2], &heuristics[2], &parents[1], 2, &focus) ==
-                 VCS_ZCODE_ATTENTION_OK);
+                 &fx->bids[2], &fx->heuristics[2], &fx->parents[1], 2,
+                 &fx->focus) == VCS_ZCODE_ATTENTION_OK);
     AL_CHECK("legacy-focus-remains-seed-only",
              vcs_zcode_attention_bid_validate_for_focus(
-                 &bids[1], &heuristics[1], &focus) ==
+                 &fx->bids[1], &fx->heuristics[1], &fx->focus) ==
                  VCS_ZCODE_ATTENTION_DERIVATION);
+    return failures;
+}
+
+static int al_check_refusals(struct al_fixture *fx)
+{
+    int failures = 0;
+    struct vcs_zcode_heuristic_v1 swapped_parents[3] = {
+        fx->parents[0], fx->parents[2], fx->parents[1]
+    };
     AL_CHECK("packed-layout-short-long-null-refusal",
              vcs_zcode_attention_frontier_project_with_lineage(
-                 bids, 3, heuristics, parents, 2, &query,
-                 selected, 3, &report) ==
+                 fx->bids, 3, fx->heuristics, fx->parents, 2, &fx->query,
+                 fx->selected, 3, &fx->report) ==
                  VCS_ZCODE_ATTENTION_COUNT &&
              vcs_zcode_attention_frontier_project_with_lineage(
-                 bids, 3, heuristics, parents, 4, &query,
-                 selected, 3, &report) ==
+                 fx->bids, 3, fx->heuristics, fx->parents, 4, &fx->query,
+                 fx->selected, 3, &fx->report) ==
                  VCS_ZCODE_ATTENTION_COUNT &&
              vcs_zcode_attention_frontier_project_with_lineage(
-                 bids, 3, heuristics, NULL, 3, &query,
-                 selected, 3, &report) ==
+                 fx->bids, 3, fx->heuristics, NULL, 3, &fx->query,
+                 fx->selected, 3, &fx->report) ==
                  VCS_ZCODE_ATTENTION_NULL &&
              vcs_zcode_attention_frontier_project_with_lineage(
-                 &bids[0], 1, &heuristics[0], parents, 0, &query,
-                 selected, 3, &report) ==
+                 &fx->bids[0], 1, &fx->heuristics[0], fx->parents, 0,
+                 &fx->query, fx->selected, 3, &fx->report) ==
                  VCS_ZCODE_ATTENTION_COUNT &&
              vcs_zcode_attention_frontier_project_with_lineage(
-                 bids, 3, heuristics, parents, SIZE_MAX, &query,
-                 selected, 3, &report) ==
+                 fx->bids, 3, fx->heuristics, fx->parents, SIZE_MAX,
+                 &fx->query, fx->selected, 3, &fx->report) ==
                  VCS_ZCODE_ATTENTION_COUNT);
-    struct vcs_zcode_heuristic_v1 swapped_parents[3] = {
-        parents[0], parents[2], parents[1]
-    };
     AL_CHECK("swapped-compose-parent-order-refusal",
              vcs_zcode_attention_frontier_project_with_lineage(
-                 bids, 3, heuristics, swapped_parents, 3, &query,
-                 selected, 3, &report) == VCS_ZCODE_ATTENTION_BINDING);
-    struct vcs_zcode_heuristic_v1 unresolved_parent = parents[0];
+                 fx->bids, 3, fx->heuristics, swapped_parents, 3, &fx->query,
+                 fx->selected, 3, &fx->report) == VCS_ZCODE_ATTENTION_BINDING);
+    return failures;
+}
+
+static int al_check_lineage_scope(struct al_fixture *fx)
+{
+    int failures = 0;
+    struct vcs_zcode_heuristic_v1 unresolved_parent = fx->parents[0];
     unresolved_parent.derivation = VCS_ZCODE_HEURISTIC_REPAIR;
     unresolved_parent.parent_count = 1;
     al_root(unresolved_parent.parent_roots[0], 90);
@@ -287,41 +328,46 @@ int test_zcode_attention_lineage(void)
     struct vcs_zcode_heuristic_v1 grandchild;
     struct vcs_zcode_attention_bid_v1 grandchild_bid;
     al_specialize(&grandchild, &unresolved_parent, 92);
-    al_bid(&grandchild_bid, &grandchild, &focus, 93);
+    al_bid(&grandchild_bid, &grandchild, &fx->focus, 93);
     AL_CHECK("lineage-scope-is-exactly-one-hop",
              vcs_zcode_attention_bid_validate_for_focus_with_lineage(
                  &grandchild_bid, &grandchild, &unresolved_parent, 1,
-                 &focus) == VCS_ZCODE_ATTENTION_OK);
+                 &fx->focus) == VCS_ZCODE_ATTENTION_OK);
+    return failures;
+}
 
-    bool mixed_ok = vcs_zcode_attention_frontier_project_with_lineage(
-        bids, 3, heuristics, parents, 3, &query, selected, 3, &report) ==
-        VCS_ZCODE_ATTENTION_OK;
-    uint8_t baseline_roots[3][32] = {{0}};
+static int al_check_mixed_frontier(struct al_fixture *fx)
+{
+    int failures = 0;
+    fx->mixed_ok = vcs_zcode_attention_frontier_project_with_lineage(
+        fx->bids, 3, fx->heuristics, fx->parents, 3, &fx->query,
+        fx->selected, 3, &fx->report) == VCS_ZCODE_ATTENTION_OK;
     AL_CHECK("mixed-seed-derived-frontier",
-             mixed_ok && report.input_count == 3 &&
-             report.class_candidate_count == 3 &&
-             report.frontier_count == 3 && report.returned_count == 3 &&
-             al_selected_roots(bids, selected, 3, baseline_roots));
+             fx->mixed_ok && fx->report.input_count == 3 &&
+             fx->report.class_candidate_count == 3 &&
+             fx->report.frontier_count == 3 && fx->report.returned_count == 3 &&
+             al_selected_roots(fx->bids, fx->selected, 3, fx->baseline_roots));
+    return failures;
+}
 
-    struct vcs_zcode_attention_bid_v1 priority_bids[3] = {
-        bids[0], bids[1], bids[2]
-    };
-    priority_bids[1].priority_class = VCS_ZCODE_ATTENTION_P1_USER_JOURNEY;
-    struct vcs_zcode_attention_frontier_query auto_query;
+static int al_check_hard_priority(struct al_fixture *fx)
+{
+    int failures = 0;
     struct vcs_zcode_attention_choice_report choice;
-    al_query(&auto_query, &focus, VCS_ZCODE_ATTENTION_PRIORITY_AUTO);
     AL_CHECK("derived-hard-priority-before-pareto",
              vcs_zcode_attention_frontier_choose_with_lineage(
-                 priority_bids, 3, heuristics, parents, 3, &auto_query,
-                 selected, 3, &choice) == VCS_ZCODE_ATTENTION_OK &&
+                 fx->priority_bids, 3, fx->heuristics, fx->parents, 3,
+                 &fx->auto_query, fx->selected, 3, &choice) ==
+                 VCS_ZCODE_ATTENTION_OK &&
              choice.selected_priority_class ==
                  VCS_ZCODE_ATTENTION_P1_USER_JOURNEY &&
-             choice.frontier.frontier_count == 1 && selected[0] == 1);
+             choice.frontier.frontier_count == 1 && fx->selected[0] == 1);
+    return failures;
+}
 
-    struct vcs_zcode_heuristic_v1 wrong_parents[3] = {
-        parents[0], parents[1], parents[2]
-    };
-    wrong_parents[2].proposed_rule_root[0] ^= 1u;
+static int al_check_wrong_batch(struct al_fixture *fx)
+{
+    int failures = 0;
     struct vcs_zcode_attention_choice_report untouched_choice;
     memset(&untouched_choice, 0xa5, sizeof(untouched_choice));
     struct vcs_zcode_attention_choice_report choice_before =
@@ -329,129 +375,179 @@ int test_zcode_attention_lineage(void)
     size_t untouched_index = 777;
     AL_CHECK("invalid-lower-row-fails-whole-batch",
              vcs_zcode_attention_frontier_choose_with_lineage(
-                 priority_bids, 3, heuristics, wrong_parents, 3,
-                 &auto_query, &untouched_index, 1,
+                 fx->priority_bids, 3, fx->heuristics, fx->wrong_parents, 3,
+                 &fx->auto_query, &untouched_index, 1,
                  &untouched_choice) == VCS_ZCODE_ATTENTION_BINDING &&
              untouched_index == 777 &&
              memcmp(&untouched_choice, &choice_before,
                     sizeof(untouched_choice)) == 0);
+    return failures;
+}
 
+static int al_check_capacity_alias(struct al_fixture *fx)
+{
+    int failures = 0;
     size_t capacity_indices[2] = {777, 888};
     AL_CHECK("mixed-capacity-is-atomic",
              vcs_zcode_attention_frontier_project_with_lineage(
-                 bids, 3, heuristics, parents, 3, &query,
-                 capacity_indices, 2, &report) ==
+                 fx->bids, 3, fx->heuristics, fx->parents, 3, &fx->query,
+                 capacity_indices, 2, &fx->report) ==
                  VCS_ZCODE_ATTENTION_CAPACITY &&
-             report.frontier_count == 3 && report.returned_count == 0 &&
+             fx->report.frontier_count == 3 && fx->report.returned_count == 0 &&
              capacity_indices[0] == 777 && capacity_indices[1] == 888);
-    struct vcs_zcode_heuristic_v1 first_parent_before = parents[0];
+    struct vcs_zcode_heuristic_v1 first_parent_before = fx->parents[0];
     AL_CHECK("packed-parent-output-alias-refusal",
              vcs_zcode_attention_frontier_project_with_lineage(
-                 bids, 3, heuristics, parents, 3, &query,
-                 (size_t *)&parents[0], 1, &report) ==
+                 fx->bids, 3, fx->heuristics, fx->parents, 3, &fx->query,
+                 (size_t *)&fx->parents[0], 1, &fx->report) ==
                  VCS_ZCODE_ATTENTION_ALIAS &&
-             memcmp(&parents[0], &first_parent_before,
+             memcmp(&fx->parents[0], &first_parent_before,
                     sizeof(first_parent_before)) == 0);
+    return failures;
+}
 
+static size_t al_permuted_rows(
+    const struct al_fixture *fx, const uint8_t permutation[3],
+    struct vcs_zcode_heuristic_v1 perm_heuristics[3],
+    struct vcs_zcode_heuristic_v1 perm_parents[3],
+    struct vcs_zcode_attention_bid_v1 perm_bids[3])
+{
+    size_t parent_cursor = 0;
+    for (size_t row = 0; row < 3; row++) {
+        size_t source = permutation[row];
+        perm_heuristics[row] = fx->heuristics[source];
+        perm_bids[row] = fx->bids[source];
+        if (source == 1) {
+            perm_parents[parent_cursor++] = fx->parents[0];
+        } else if (source == 2) {
+            perm_parents[parent_cursor++] = fx->parents[1];
+            perm_parents[parent_cursor++] = fx->parents[2];
+        }
+    }
+    return parent_cursor;
+}
+
+static int al_check_permutations(struct al_fixture *fx)
+{
+    int failures = 0;
     static const uint8_t permutations[6][3] = {
         {0, 1, 2}, {0, 2, 1}, {1, 0, 2},
         {1, 2, 0}, {2, 0, 1}, {2, 1, 0},
     };
-    bool all_permutations_equal = mixed_ok;
+    bool all_permutations_equal = fx->mixed_ok;
     for (size_t permutation = 0; permutation < 6; permutation++) {
         struct vcs_zcode_heuristic_v1 perm_heuristics[3], perm_parents[3];
         struct vcs_zcode_attention_bid_v1 perm_bids[3];
-        size_t parent_cursor = 0;
-        for (size_t row = 0; row < 3; row++) {
-            size_t source = permutations[permutation][row];
-            perm_heuristics[row] = heuristics[source];
-            perm_bids[row] = bids[source];
-            if (source == 1) {
-                perm_parents[parent_cursor++] = parents[0];
-            } else if (source == 2) {
-                perm_parents[parent_cursor++] = parents[1];
-                perm_parents[parent_cursor++] = parents[2];
-            }
-        }
         size_t perm_selected[3] = {SIZE_MAX, SIZE_MAX, SIZE_MAX};
         uint8_t perm_roots[3][32] = {{0}};
+        size_t parent_cursor = al_permuted_rows(
+            fx, permutations[permutation], perm_heuristics, perm_parents,
+            perm_bids);
         if (parent_cursor != 3 ||
             vcs_zcode_attention_frontier_project_with_lineage(
                 perm_bids, 3, perm_heuristics, perm_parents, 3,
-                &query, perm_selected, 3, &report) !=
+                &fx->query, perm_selected, 3, &fx->report) !=
                     VCS_ZCODE_ATTENTION_OK ||
-            report.returned_count != 3 ||
+            fx->report.returned_count != 3 ||
             !al_selected_roots(
                 perm_bids, perm_selected, 3, perm_roots) ||
-            memcmp(perm_roots, baseline_roots, sizeof(perm_roots)) != 0)
+            memcmp(perm_roots, fx->baseline_roots, sizeof(perm_roots)) != 0)
             all_permutations_equal = false;
     }
     AL_CHECK("all-six-row-permutations-repack-lineage",
              all_permutations_equal);
+    return failures;
+}
 
-    uint8_t seed[32], secret[32], pubkey[32];
+static void al_sign_statements(struct al_fixture *fx)
+{
+    uint8_t seed[32];
     al_root(seed, 80);
-    ed25519_keypair(pubkey, secret, seed);
-    struct vcs_zcode_science_statement_v1 statements[3];
-    bool statements_ok = true;
+    ed25519_keypair(fx->pubkey, fx->secret, seed);
+    fx->statements_ok = true;
     for (size_t i = 0; i < 3; i++) {
-        statements_ok = statements_ok && al_statement(
-            &statements[i], &bids[i], &heuristics[i], &focus,
-            secret, pubkey);
+        fx->statements_ok = fx->statements_ok && al_statement(
+            &fx->statements[i], &fx->bids[i], &fx->heuristics[i], &fx->focus,
+            fx->secret, fx->pubkey);
     }
+}
+
+static int al_check_signed_derived(struct al_fixture *fx)
+{
+    int failures = 0;
     AL_CHECK("signed-derived-statement-positive",
-             statements_ok &&
+             fx->statements_ok &&
              vcs_zcode_attention_bid_verify_statement_with_lineage(
-                 &bids[1], &heuristics[1], &parents[0], 1, &focus,
-                 &statements[1], pubkey) == VCS_ZCODE_ATTENTION_OK);
-    struct vcs_zcode_attention_verified_report verified_report;
+                 &fx->bids[1], &fx->heuristics[1], &fx->parents[0], 1,
+                 &fx->focus, &fx->statements[1], fx->pubkey) ==
+                 VCS_ZCODE_ATTENTION_OK);
+    return failures;
+}
+
+static int al_check_verified_frontier(struct al_fixture *fx)
+{
+    int failures = 0;
     AL_CHECK("mixed-verified-frontier-positive",
-             statements_ok &&
+             fx->statements_ok &&
              vcs_zcode_attention_frontier_next_verified_with_lineage(
-                 bids, 3, heuristics, parents, 3, statements, &focus,
-                 bids[0].priority_policy_root, bids[0].bid_evaluator_root,
-                 pubkey, selected, 3, &verified_report) ==
-                     VCS_ZCODE_ATTENTION_OK &&
-             verified_report.verified_count == 3 &&
-             verified_report.choice.frontier.frontier_count == 3);
+                 fx->bids, 3, fx->heuristics, fx->parents, 3, fx->statements,
+                 &fx->focus, fx->bids[0].priority_policy_root,
+                 fx->bids[0].bid_evaluator_root, fx->pubkey, fx->selected, 3,
+                 &fx->verified_report) == VCS_ZCODE_ATTENTION_OK &&
+             fx->verified_report.verified_count == 3 &&
+             fx->verified_report.choice.frontier.frontier_count == 3);
     size_t verified_capacity_indices[2] = {777, 888};
     AL_CHECK("mixed-verified-capacity-is-atomic",
              vcs_zcode_attention_frontier_next_verified_with_lineage(
-                 bids, 3, heuristics, parents, 3, statements, &focus,
-                 bids[0].priority_policy_root, bids[0].bid_evaluator_root,
-                 pubkey, verified_capacity_indices, 2,
-                 &verified_report) == VCS_ZCODE_ATTENTION_CAPACITY &&
-             verified_report.verified_count == 3 &&
-             verified_report.choice.frontier.frontier_count == 3 &&
-             verified_report.choice.frontier.returned_count == 0 &&
+                 fx->bids, 3, fx->heuristics, fx->parents, 3, fx->statements,
+                 &fx->focus, fx->bids[0].priority_policy_root,
+                 fx->bids[0].bid_evaluator_root, fx->pubkey,
+                 verified_capacity_indices, 2,
+                 &fx->verified_report) == VCS_ZCODE_ATTENTION_CAPACITY &&
+             fx->verified_report.verified_count == 3 &&
+             fx->verified_report.choice.frontier.frontier_count == 3 &&
+             fx->verified_report.choice.frontier.returned_count == 0 &&
              verified_capacity_indices[0] == 777 &&
              verified_capacity_indices[1] == 888);
-    first_parent_before = parents[0];
+    return failures;
+}
+
+static int al_check_verified_alias_and_batch(struct al_fixture *fx)
+{
+    int failures = 0;
+    struct vcs_zcode_heuristic_v1 first_parent_before = fx->parents[0];
     AL_CHECK("verified-parent-output-alias-refusal",
              vcs_zcode_attention_frontier_next_verified_with_lineage(
-                 bids, 3, heuristics, parents, 3, statements, &focus,
-                 bids[0].priority_policy_root, bids[0].bid_evaluator_root,
-                 pubkey, (size_t *)&parents[0], 1,
-                 &verified_report) == VCS_ZCODE_ATTENTION_ALIAS &&
-             memcmp(&parents[0], &first_parent_before,
+                 fx->bids, 3, fx->heuristics, fx->parents, 3, fx->statements,
+                 &fx->focus, fx->bids[0].priority_policy_root,
+                 fx->bids[0].bid_evaluator_root, fx->pubkey,
+                 (size_t *)&fx->parents[0], 1,
+                 &fx->verified_report) == VCS_ZCODE_ATTENTION_ALIAS &&
+             memcmp(&fx->parents[0], &first_parent_before,
                     sizeof(first_parent_before)) == 0);
     struct vcs_zcode_attention_verified_report untouched_verified;
     memset(&untouched_verified, 0xa5, sizeof(untouched_verified));
     struct vcs_zcode_attention_verified_report verified_before =
         untouched_verified;
-    untouched_index = 777;
+    size_t untouched_index = 777;
     AL_CHECK("verified-wrong-parent-is-atomic",
              vcs_zcode_attention_frontier_next_verified_with_lineage(
-                 bids, 3, heuristics, wrong_parents, 3, statements, &focus,
-                 bids[0].priority_policy_root, bids[0].bid_evaluator_root,
-                 pubkey, &untouched_index, 1, &untouched_verified) ==
+                 fx->bids, 3, fx->heuristics, fx->wrong_parents, 3,
+                 fx->statements, &fx->focus, fx->bids[0].priority_policy_root,
+                 fx->bids[0].bid_evaluator_root, fx->pubkey,
+                 &untouched_index, 1, &untouched_verified) ==
                      VCS_ZCODE_ATTENTION_BINDING &&
              untouched_index == 777 &&
              memcmp(&untouched_verified, &verified_before,
                     sizeof(verified_before)) == 0);
+    return failures;
+}
 
+static int al_check_ranked_evidence(struct al_fixture *fx)
+{
+    int failures = 0;
     struct vcs_zcode_attention_bid_v1 ranked_bids[3] = {
-        bids[0], bids[1], bids[2]
+        fx->bids[0], fx->bids[1], fx->bids[2]
     };
     ranked_bids[1].priority_class = VCS_ZCODE_ATTENTION_P1_USER_JOURNEY;
     ranked_bids[2].priority_class = VCS_ZCODE_ATTENTION_P3_RESEARCH;
@@ -459,24 +555,48 @@ int test_zcode_attention_lineage(void)
     bool ranked_statements_ok = true;
     for (size_t i = 0; i < 3; i++) {
         ranked_statements_ok = ranked_statements_ok && al_statement(
-            &ranked_statements[i], &ranked_bids[i], &heuristics[i],
-            &focus, secret, pubkey);
+            &ranked_statements[i], &ranked_bids[i], &fx->heuristics[i],
+            &fx->focus, fx->secret, fx->pubkey);
     }
     ranked_statements[2].signature[0] ^= 1u;
+    struct vcs_zcode_attention_verified_report untouched_verified;
     memset(&untouched_verified, 0xa5, sizeof(untouched_verified));
-    verified_before = untouched_verified;
-    untouched_index = 777;
+    struct vcs_zcode_attention_verified_report verified_before =
+        untouched_verified;
+    size_t untouched_index = 777;
     AL_CHECK("invalid-lower-priority-evidence-fails-whole-batch",
              ranked_statements_ok &&
              vcs_zcode_attention_frontier_next_verified_with_lineage(
-                 ranked_bids, 3, heuristics, parents, 3,
-                 ranked_statements, &focus,
-                 bids[0].priority_policy_root, bids[0].bid_evaluator_root,
-                 pubkey, &untouched_index, 1, &untouched_verified) ==
+                 ranked_bids, 3, fx->heuristics, fx->parents, 3,
+                 ranked_statements, &fx->focus,
+                 fx->bids[0].priority_policy_root,
+                 fx->bids[0].bid_evaluator_root, fx->pubkey,
+                 &untouched_index, 1, &untouched_verified) ==
                      VCS_ZCODE_ATTENTION_EVIDENCE &&
              untouched_index == 777 &&
              memcmp(&untouched_verified, &verified_before,
                     sizeof(verified_before)) == 0);
+    return failures;
+}
 
+int test_zcode_attention_lineage(void)
+{
+    int failures = 0;
+    struct al_fixture fx;
+    al_setup(&fx);
+    failures += al_check_layouts(&fx);
+    failures += al_check_derived_focus(&fx);
+    failures += al_check_refusals(&fx);
+    failures += al_check_lineage_scope(&fx);
+    failures += al_check_mixed_frontier(&fx);
+    failures += al_check_hard_priority(&fx);
+    failures += al_check_wrong_batch(&fx);
+    failures += al_check_capacity_alias(&fx);
+    failures += al_check_permutations(&fx);
+    al_sign_statements(&fx);
+    failures += al_check_signed_derived(&fx);
+    failures += al_check_verified_frontier(&fx);
+    failures += al_check_verified_alias_and_batch(&fx);
+    failures += al_check_ranked_evidence(&fx);
     return failures;
 }
