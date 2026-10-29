@@ -266,6 +266,469 @@ void zcl_native_handle_zcode_commons_schedule_propose_commit(
     zep_propose_handle(request, reply, true);
 }
 
+static bool zep_claim_plan_inputs_ok(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    const char *workspace, struct vcs_zcode_epoch_selection_v2 *input,
+    uint64_t *cutoff_mtp, uint8_t roots[5][32])
+{
+    static const char *const keys[] = {
+        "workspace", "epoch", "cutoff_height", "cutoff_mtp",
+        "epoch_capacity_atoms", "previous_epoch_root",
+        "network_genesis_root", "moderation_policy_root",
+        "qualification_predicates_root", "backlog_algorithm_root",
+    };
+    if (!request || !reply || !workspace) return false;
+    return zep_keys(request->input, keys, sizeof(keys) / sizeof(keys[0])) &&
+        zep_u64_positive(request->input, "epoch", &input->epoch) &&
+        zep_u64_positive(request->input, "cutoff_height",
+                         &input->cutoff_height) &&
+        zep_u64_positive(request->input, "cutoff_mtp", cutoff_mtp) &&
+        *cutoff_mtp <= INT64_MAX &&
+        zep_u64_positive(request->input, "epoch_capacity_atoms",
+                         &input->epoch_capacity_atoms) &&
+        zep_root(request->input, "previous_epoch_root", roots[0]) &&
+        zep_root(request->input, "network_genesis_root", roots[1]) &&
+        zep_root(request->input, "moderation_policy_root", roots[2]) &&
+        zep_root(request->input, "qualification_predicates_root", roots[3]) &&
+        zep_root(request->input, "backlog_algorithm_root", roots[4]);
+}
+
+static bool zep_claim_verify_inputs_ok(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    const char *workspace, uint8_t roots[5][32])
+{
+    static const char *const keys[] = {
+        "workspace", "proposal_root", "network_genesis_root",
+        "moderation_policy_root", "qualification_predicates_root",
+        "backlog_algorithm_root",
+    };
+    if (!request || !reply || !workspace) return false;
+    return zep_keys(request->input, keys, sizeof(keys) / sizeof(keys[0])) &&
+        zep_root(request->input, "proposal_root", roots[0]) &&
+        zep_root(request->input, "network_genesis_root", roots[1]) &&
+        zep_root(request->input, "moderation_policy_root", roots[2]) &&
+        zep_root(request->input, "qualification_predicates_root", roots[3]) &&
+        zep_root(request->input, "backlog_algorithm_root", roots[4]);
+}
+
+static bool zep_claim_show_inputs_ok(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    const char *workspace, uint8_t requested_root[32])
+{
+    static const char *const keys[] = {"workspace", "root"};
+    if (!request || !reply || !workspace) return false;
+    return zep_keys(request->input, keys, sizeof(keys) / sizeof(keys[0])) &&
+        zep_root(request->input, "root", requested_root);
+}
+
+/* Copies the bounded claim projection into caller-owned storage.  The caller
+ * keeps its allocation label and refusal code, and frees its own state. */
+static bool zep_claim_copy_claims(
+    const struct vcs_zcode_commons_projection *projection, size_t count,
+    struct vcs_zcode_creation_claim_v2 *claims)
+{
+    for (size_t i = 0; i < count; i++) {
+        const struct vcs_zcode_creation_claim_v2 *claim =
+            vcs_zcode_commons_projection_claim_at(projection, i);
+        if (!claim) return false;
+        claims[i] = *claim;
+    }
+    return true;
+}
+
+static const struct zcode_c23_economics_service_v1 *zep_claim_service(
+    struct zcl_hotswap_service_lease *lease)
+{
+    const struct zcode_c23_economics_service_v1 *service =
+        zcl_hotswap_service_acquire(ZCODE_C23_ECONOMICS_SERVICE_ID, lease);
+    if (!service) service = zcode_c23_economics_service_builtin();
+    return service;
+}
+
+static enum vcs_zcode_commons_error zep_claim_policy_root(
+    const struct zcode_c23_economics_service_v1 *service, uint8_t roots[5][32],
+    struct vcs_zcode_policy_candidate_v2 *policy, uint8_t policy_root[32])
+{
+    service->policy_init(policy, roots[1], roots[2], roots[3], roots[4]);
+    enum vcs_zcode_commons_error error = service->policy_validate(policy);
+    if (error == VCS_ZCODE_COMMONS_OK)
+        error = service->policy_root(policy, policy_root);
+    return error;
+}
+
+static enum vcs_zcode_claim_epoch_error zep_claim_epoch_derive(
+    const struct vcs_zcode_epoch_selection_v2 *selection,
+    const uint8_t policy_root[32], const uint8_t projection_root[32],
+    const struct vcs_zcode_epoch_selection_result_v2 *result,
+    struct vcs_zcode_claim_epoch_proposal_v2 *proposal, uint8_t root[32])
+{
+    enum vcs_zcode_claim_epoch_error error =
+        vcs_zcode_claim_epoch_from_selection(
+            selection, policy_root, projection_root, result, proposal);
+    if (error == VCS_ZCODE_CLAIM_EPOCH_OK)
+        error = vcs_zcode_claim_epoch_root(proposal, root);
+    return error;
+}
+
+static bool zep_claim_epoch_persist(
+    const char *workspace,
+    const struct vcs_zcode_claim_epoch_proposal_v2 *claim_epoch,
+    const uint8_t root[32], uint8_t **wire, size_t *wire_len,
+    enum vcs_zcode_claim_epoch_error *error)
+{
+    *error = vcs_zcode_claim_epoch_encode(claim_epoch, wire, wire_len);
+    if (*error != VCS_ZCODE_CLAIM_EPOCH_OK) return false;
+    return vcs_object_store_init(workspace) &&
+        vcs_object_put_addressed(workspace, root, *wire, *wire_len);
+}
+
+static void zep_claim_plan_push_header(struct zcl_command_reply *reply,
+                                       bool persist)
+{
+    (void)json_push_kv_str(&reply->data, "service_id",
+                           ZCODE_C23_ECONOMICS_SERVICE_ID);
+    (void)json_push_kv_int(&reply->data, "service_generation",
+                           (int64_t)zcl_hotswap_service_generation());
+    (void)json_push_kv_bool(&reply->data, "pure_calculation", true);
+    (void)json_push_kv_bool(&reply->data, "simulation_only", true);
+    (void)json_push_kv_bool(&reply->data, "not_owner_approved", true);
+    (void)json_push_kv_bool(&reply->data, "persisted", persist);
+    (void)json_push_kv_bool(&reply->data, "issuance_enabled", false);
+    (void)json_push_kv_bool(&reply->data, "funds_moved", false);
+    (void)json_push_kv_bool(&reply->data, "wallet_used", false);
+}
+
+static void zep_claim_plan_push_roots(
+    struct zcl_command_reply *reply, const uint8_t policy_root[32],
+    const uint8_t projection_root[32],
+    const struct vcs_zcode_epoch_selection_v2 *input,
+    const struct vcs_zcode_epoch_selection_result_v2 *result,
+    const uint8_t claim_epoch_root[32])
+{
+    zep_hex(&reply->data, "policy_root", policy_root);
+    zep_hex(&reply->data, "claim_projection_root", projection_root);
+    zep_hex(&reply->data, "previous_epoch_root", input->previous_epoch_root);
+    zep_hex(&reply->data, "epoch_selection_root",
+            result->epoch_creation_root);
+    zep_hex(&reply->data, "claim_epoch_proposal_root", claim_epoch_root);
+}
+
+static void zep_claim_plan_push_counts(
+    struct zcl_command_reply *reply,
+    const struct vcs_zcode_epoch_selection_v2 *input,
+    const struct vcs_zcode_epoch_selection_result_v2 *result)
+{
+    (void)json_push_kv_int(
+        &reply->data, "claim_epoch_proposal_bytes",
+        (int64_t)(VCS_ZCODE_CLAIM_EPOCH_HEADER_BYTES +
+                  result->selected_count * 32u));
+    (void)json_push_kv_int(&reply->data, "epoch", (int64_t)input->epoch);
+    (void)json_push_kv_int(&reply->data, "cutoff_height",
+                           (int64_t)input->cutoff_height);
+    (void)json_push_kv_int(&reply->data, "cutoff_mtp", input->cutoff_mtp);
+    (void)json_push_kv_int(&reply->data, "epoch_capacity_atoms",
+                           (int64_t)input->epoch_capacity_atoms);
+    (void)json_push_kv_int(&reply->data, "claim_count",
+                           (int64_t)input->claim_count);
+    (void)json_push_kv_int(&reply->data, "selected_count",
+                           (int64_t)result->selected_count);
+    (void)json_push_kv_int(&reply->data, "deferred_count",
+                           (int64_t)result->deferred_count);
+    (void)json_push_kv_int(&reply->data, "invalid_count",
+                           (int64_t)result->invalid_count);
+    (void)json_push_kv_int(&reply->data, "selected_atoms",
+                           (int64_t)result->selected_atoms);
+    (void)json_push_kv_int(&reply->data, "expired_capacity_atoms",
+                           (int64_t)result->expired_capacity_atoms);
+    (void)json_push_kv_int(&reply->data, "recipient_cap_atoms",
+                           (int64_t)result->recipient_cap_atoms);
+    (void)json_push_kv_int(&reply->data, "lineage_cap_atoms",
+                           (int64_t)result->lineage_cap_atoms);
+    (void)json_push_kv_int(&reply->data, "first_category",
+                           result->first_category);
+}
+
+static void zep_claim_plan_push_selected(
+    struct zcl_command_reply *reply,
+    const struct vcs_zcode_creation_claim_v2 *claims,
+    const struct vcs_zcode_policy_candidate_v2 *policy,
+    const struct vcs_zcode_epoch_selection_result_v2 *result)
+{
+    /* The result root always binds the complete ordered selected set. Keep
+     * the inline review page bounded so a 4096-claim epoch cannot overflow a
+     * native result frame, and say when it is not complete. */
+    const size_t inline_limit = 16;
+    size_t inline_count = result->selected_count < inline_limit
+        ? result->selected_count : inline_limit;
+    struct json_value selected;
+    json_init(&selected); json_set_array(&selected);
+    for (size_t i = 0; i < inline_count; i++) {
+        const struct vcs_zcode_creation_claim_v2 *claim =
+            &claims[result->selected_indices[i]];
+        struct json_value row;
+        json_init(&row); json_set_object(&row);
+        zep_hex(&row, "claim_root", claim->claim_root);
+        (void)json_push_kv_int(&row, "category", claim->category);
+        (void)json_push_kv_int(&row, "award_atoms",
+                               (int64_t)policy->award_atoms[claim->category]);
+        (void)json_push_back(&selected, &row);
+        json_free(&row);
+    }
+    (void)json_push_kv(&reply->data, "selected_claims", &selected);
+    json_free(&selected);
+    (void)json_push_kv_int(&reply->data, "selected_claims_inline_count",
+                           (int64_t)inline_count);
+    (void)json_push_kv_bool(&reply->data, "selected_claims_complete",
+                            inline_count == result->selected_count);
+}
+
+static void zep_claim_verify_push_status(
+    struct zcl_command_reply *reply,
+    const struct zcode_c23_claim_epoch_view_v1 *view)
+{
+    (void)json_push_kv_bool(&reply->data, "verified", true);
+    (void)json_push_kv_bool(&reply->data, "restart_reconstructed", true);
+    (void)json_push_kv_bool(&reply->data, "bounded_load", true);
+    (void)json_push_kv_bool(&reply->data, "pure_calculation", true);
+    (void)json_push_kv_bool(&reply->data, "valid", view->valid);
+    (void)json_push_kv_bool(&reply->data, "persisted", view->persisted);
+    (void)json_push_kv_bool(&reply->data, "canonical_proposal",
+                            view->canonical_proposal);
+    (void)json_push_kv_bool(&reply->data, "current_selection_verified",
+                            view->current_selection_verified);
+    (void)json_push_kv_bool(&reply->data, "simulation_only",
+                            view->simulation_only);
+    (void)json_push_kv_bool(&reply->data, "not_owner_approved", true);
+    (void)json_push_kv_bool(&reply->data, "issuance_enabled",
+                            view->issuance_enabled);
+    (void)json_push_kv_bool(&reply->data, "wallet_used", view->wallet_used);
+    (void)json_push_kv_bool(&reply->data, "funds_moved", view->funds_moved);
+    (void)json_push_kv_str(&reply->data, "verification_state",
+                           view->verification_state);
+    (void)json_push_kv_str(&reply->data, "next_command", view->next_command);
+    (void)json_push_kv_str(&reply->data, "service_id",
+                           ZCODE_C23_ECONOMICS_SERVICE_ID);
+    (void)json_push_kv_int(&reply->data, "service_generation",
+                           (int64_t)zcl_hotswap_service_generation());
+}
+
+static void zep_claim_verify_push_roots(
+    struct zcl_command_reply *reply, const uint8_t proposal_root[32],
+    const uint8_t policy_root[32], const uint8_t projection_root[32],
+    const struct vcs_zcode_epoch_selection_result_v2 *result)
+{
+    zep_hex(&reply->data, "claim_epoch_proposal_root", proposal_root);
+    zep_hex(&reply->data, "policy_root", policy_root);
+    zep_hex(&reply->data, "claim_projection_root", projection_root);
+    zep_hex(&reply->data, "epoch_selection_root",
+            result->epoch_creation_root);
+}
+
+static void zep_claim_verify_push_counts(
+    struct zcl_command_reply *reply, size_t wire_len,
+    const struct zcode_c23_claim_epoch_view_v1 *view)
+{
+    (void)json_push_kv_int(&reply->data, "proposal_bytes",
+                           (int64_t)wire_len);
+    (void)json_push_kv_int(&reply->data, "claim_count",
+                           (int64_t)view->claim_count);
+    (void)json_push_kv_int(&reply->data, "selected_count",
+                           (int64_t)view->selected_count);
+    (void)json_push_kv_int(&reply->data, "selected_atoms",
+                           (int64_t)view->selected_atoms);
+}
+
+static void zep_claim_show_push_status(
+    struct zcl_command_reply *reply,
+    const struct zcode_c23_claim_epoch_view_v1 *view)
+{
+    (void)json_push_kv_str(&reply->data, "service_id",
+                           ZCODE_C23_ECONOMICS_SERVICE_ID);
+    (void)json_push_kv_int(&reply->data, "service_generation",
+                           (int64_t)zcl_hotswap_service_generation());
+    (void)json_push_kv_bool(&reply->data, "pure_calculation", true);
+    (void)json_push_kv_bool(&reply->data, "valid", view->valid);
+    (void)json_push_kv_bool(&reply->data, "persisted", view->persisted);
+    (void)json_push_kv_bool(&reply->data, "canonical_proposal",
+                            view->canonical_proposal);
+    (void)json_push_kv_bool(&reply->data, "current_selection_verified",
+                            view->current_selection_verified);
+    (void)json_push_kv_bool(&reply->data, "simulation_only",
+                            view->simulation_only);
+    (void)json_push_kv_bool(&reply->data, "issuance_enabled",
+                            view->issuance_enabled);
+    (void)json_push_kv_bool(&reply->data, "wallet_used", view->wallet_used);
+    (void)json_push_kv_bool(&reply->data, "funds_moved", view->funds_moved);
+    (void)json_push_kv_str(&reply->data, "verification_state",
+                           view->verification_state);
+    (void)json_push_kv_str(&reply->data, "next_command", view->next_command);
+}
+
+static void zep_claim_show_push_roots(
+    struct zcl_command_reply *reply, const uint8_t requested_root[32],
+    const struct vcs_zcode_claim_epoch_proposal_v2 *proposal)
+{
+    zep_hex(&reply->data, "claim_epoch_proposal_root", requested_root);
+    zep_hex(&reply->data, "previous_epoch_root", proposal->previous_epoch_root);
+    zep_hex(&reply->data, "policy_root", proposal->policy_root);
+    zep_hex(&reply->data, "claim_projection_root",
+            proposal->claim_projection_root);
+    zep_hex(&reply->data, "epoch_selection_root",
+            proposal->epoch_selection_root);
+}
+
+static void zep_claim_show_push_counts(
+    struct zcl_command_reply *reply, size_t wire_len,
+    const struct zcode_c23_claim_epoch_view_v1 *view)
+{
+    (void)json_push_kv_int(&reply->data, "proposal_bytes",
+                           (int64_t)wire_len);
+    (void)json_push_kv_int(&reply->data, "epoch", (int64_t)view->epoch);
+    (void)json_push_kv_int(&reply->data, "cutoff_height",
+                           (int64_t)view->cutoff_height);
+    (void)json_push_kv_int(&reply->data, "cutoff_mtp", view->cutoff_mtp);
+    (void)json_push_kv_int(&reply->data, "epoch_capacity_atoms",
+                           (int64_t)view->epoch_capacity_atoms);
+    (void)json_push_kv_int(&reply->data, "selected_atoms",
+                           (int64_t)view->selected_atoms);
+    (void)json_push_kv_int(&reply->data, "expired_capacity_atoms",
+                           (int64_t)view->expired_capacity_atoms);
+    (void)json_push_kv_int(&reply->data, "recipient_cap_atoms",
+                           (int64_t)view->recipient_cap_atoms);
+    (void)json_push_kv_int(&reply->data, "lineage_cap_atoms",
+                           (int64_t)view->lineage_cap_atoms);
+    (void)json_push_kv_int(&reply->data, "claim_count",
+                           (int64_t)view->claim_count);
+    (void)json_push_kv_int(&reply->data, "selected_count",
+                           (int64_t)view->selected_count);
+    (void)json_push_kv_int(&reply->data, "deferred_count",
+                           (int64_t)view->deferred_count);
+    (void)json_push_kv_int(&reply->data, "invalid_count",
+                           (int64_t)view->invalid_count);
+    (void)json_push_kv_int(&reply->data, "first_category",
+                           view->first_category);
+}
+
+static void zep_claim_show_push_selected(
+    struct zcl_command_reply *reply,
+    const struct vcs_zcode_claim_epoch_proposal_v2 *proposal)
+{
+    const size_t inline_limit = 16;
+    size_t inline_count = proposal->selected_count < inline_limit
+        ? proposal->selected_count : inline_limit;
+    struct json_value selected;
+    json_init(&selected); json_set_array(&selected);
+    for (size_t i = 0; i < inline_count; i++) {
+        struct json_value item;
+        char root_hex[65];
+        zcl_hex_encode(proposal->selected_claim_roots[i], 32, root_hex);
+        json_init(&item); json_set_str(&item, root_hex);
+        (void)json_push_back(&selected, &item);
+        json_free(&item);
+    }
+    (void)json_push_kv(&reply->data, "selected_claim_roots", &selected);
+    json_free(&selected);
+    (void)json_push_kv_bool(&reply->data, "selected_claim_roots_complete",
+                            inline_count == proposal->selected_count);
+}
+
+static bool zep_claim_projection_open(
+    const char *workspace, struct vcs_zcode_commons_projection **projection,
+    uint8_t projection_root[32])
+{
+    *projection = vcs_zcode_commons_projection_build(workspace);
+    return *projection &&
+        vcs_zcode_commons_claim_projection_ready(*projection) &&
+        vcs_zcode_commons_claim_projection_root(*projection, projection_root);
+}
+
+static enum vcs_zcode_commons_error zep_claim_plan_select(
+    const struct zcode_c23_economics_service_v1 *service,
+    const struct vcs_zcode_epoch_selection_v2 *input, uint8_t roots[5][32],
+    struct vcs_zcode_policy_candidate_v2 *policy, uint8_t policy_root[32],
+    struct vcs_zcode_epoch_selection_result_v2 *result)
+{
+    enum vcs_zcode_commons_error error =
+        zep_claim_policy_root(service, roots, policy, policy_root);
+    if (error == VCS_ZCODE_COMMONS_OK)
+        error = service->epoch_select(input, policy, result);
+    return error;
+}
+
+/* Loads and decodes the requested proposal.  Every refusal is reported here,
+ * so the verify handler only sees success or a stopped reply. */
+static bool zep_claim_verify_proposal(
+    const char *workspace, const uint8_t root[32],
+    struct vcs_zcode_claim_epoch_proposal_v2 *proposal, size_t *wire_len_out,
+    struct zcl_command_reply *reply, const char *command)
+{
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    uint8_t loaded_root[32];
+    int load_error = vcs_object_load_raw_bounded(
+        workspace, root, VCS_ZCODE_CLAIM_EPOCH_MAX_WIRE_BYTES,
+        &wire, &wire_len);
+    if (load_error != 0) {
+        zep_claim_fail(
+            reply, "CLAIM_EPOCH_LOAD_REFUSED",
+            load_error == -2
+                ? "proposal exceeds the canonical bounded wire maximum"
+                : "proposal is missing, unreadable, or outside the exact scratch CAS",
+            command);
+        return false;
+    }
+    enum vcs_zcode_claim_epoch_error proposal_error =
+        vcs_zcode_claim_epoch_decode(proposal, wire, wire_len);
+    free(wire);
+    if (proposal_error != VCS_ZCODE_CLAIM_EPOCH_OK) {
+        zep_claim_fail(reply, "CLAIM_EPOCH_DECODE_REFUSED",
+                       vcs_zcode_claim_epoch_error_string(proposal_error),
+                       command);
+        return false;
+    }
+    proposal_error = vcs_zcode_claim_epoch_root(proposal, loaded_root);
+    if (proposal_error != VCS_ZCODE_CLAIM_EPOCH_OK ||
+        memcmp(loaded_root, root, 32) != 0) {
+        vcs_zcode_claim_epoch_free(proposal);
+        zep_claim_fail(reply, "CLAIM_EPOCH_ADDRESS_MISMATCH",
+                       "canonical proposal bytes do not rederive the requested CAS address",
+                       command);
+        return false;
+    }
+    *wire_len_out = wire_len;
+    return true;
+}
+
+static enum vcs_zcode_claim_epoch_error zep_claim_verify_rebuild(
+    const struct zcode_c23_economics_service_v1 *service,
+    const struct vcs_zcode_epoch_selection_v2 *selection,
+    const struct vcs_zcode_policy_candidate_v2 *policy,
+    const uint8_t policy_root[32], const uint8_t projection_root[32],
+    struct vcs_zcode_epoch_selection_result_v2 *result,
+    struct vcs_zcode_claim_epoch_proposal_v2 *rebuilt, uint8_t root[32])
+{
+    if (service->epoch_select(selection, policy, result) !=
+        VCS_ZCODE_COMMONS_OK)
+        return VCS_ZCODE_CLAIM_EPOCH_SELECTION;
+    return zep_claim_epoch_derive(selection, policy_root, projection_root,
+                                  result, rebuilt, root);
+}
+
+static const char *zep_claim_policy_detail(enum vcs_zcode_commons_error error)
+{
+    return error == VCS_ZCODE_COMMONS_OK
+        ? "supplied policy bindings do not match the proposal"
+        : vcs_zcode_commons_error_string(error);
+}
+
+static const char *zep_claim_reconstruction_detail(
+    enum vcs_zcode_claim_epoch_error error)
+{
+    return error == VCS_ZCODE_CLAIM_EPOCH_OK
+        ? "fresh selection does not reproduce the proposal root"
+        : vcs_zcode_claim_epoch_error_string(error);
+}
+
 /* The v1 schedule proposer above intentionally preserves its creation-
  * attribution inputs and roots.  This additive planner is the first native
  * consumer of the signed creation_claim.v2 projection and the frozen v2
@@ -275,12 +738,6 @@ static void zep_claim_handle(
     const struct zcl_command_request *request, struct zcl_command_reply *reply,
     bool persist)
 {
-    static const char *const keys[] = {
-        "workspace", "epoch", "cutoff_height", "cutoff_mtp",
-        "epoch_capacity_atoms", "previous_epoch_root",
-        "network_genesis_root", "moderation_policy_root",
-        "qualification_predicates_root", "backlog_algorithm_root",
-    };
     struct vcs_zcode_epoch_selection_v2 input;
     struct vcs_zcode_policy_candidate_v2 policy;
     struct vcs_zcode_epoch_selection_result_v2 result;
@@ -292,20 +749,8 @@ static void zep_claim_handle(
     memset(&input, 0, sizeof(input));
     const char *workspace = request
         ? zep_str(request->input, "workspace") : NULL;
-    if (!request || !reply || !workspace ||
-        !zep_keys(request->input, keys, sizeof(keys) / sizeof(keys[0])) ||
-        !zep_u64_positive(request->input, "epoch", &input.epoch) ||
-        !zep_u64_positive(request->input, "cutoff_height",
-                          &input.cutoff_height) ||
-        !zep_u64_positive(request->input, "cutoff_mtp", &cutoff_mtp_u64) ||
-        cutoff_mtp_u64 > INT64_MAX ||
-        !zep_u64_positive(request->input, "epoch_capacity_atoms",
-                          &input.epoch_capacity_atoms) ||
-        !zep_root(request->input, "previous_epoch_root", roots[0]) ||
-        !zep_root(request->input, "network_genesis_root", roots[1]) ||
-        !zep_root(request->input, "moderation_policy_root", roots[2]) ||
-        !zep_root(request->input, "qualification_predicates_root", roots[3]) ||
-        !zep_root(request->input, "backlog_algorithm_root", roots[4])) {
+    if (!zep_claim_plan_inputs_ok(request, reply, workspace, &input,
+                                  &cutoff_mtp_u64, roots)) {
         zep_claim_fail(reply, "BAD_CLAIM_EPOCH_INPUT",
                        "closed input requires scratch workspace, positive epoch/cutoffs/capacity and five exact lowercase roots",
                        command);
@@ -320,12 +765,8 @@ static void zep_claim_handle(
     input.cutoff_mtp = (int64_t)cutoff_mtp_u64;
     memcpy(input.previous_epoch_root, roots[0], 32);
 
-    struct vcs_zcode_commons_projection *projection =
-        vcs_zcode_commons_projection_build(workspace);
-    if (!projection ||
-        !vcs_zcode_commons_claim_projection_ready(projection) ||
-        !vcs_zcode_commons_claim_projection_root(projection,
-                                                 projection_root)) {
+    struct vcs_zcode_commons_projection *projection = NULL;
+    if (!zep_claim_projection_open(workspace, &projection, projection_root)) {
         vcs_zcode_commons_projection_free(projection);
         zep_claim_fail(reply, "CLAIM_PROJECTION_NOT_READY",
                        "the bounded signed-claim projection is unavailable or contains a recognized corrupt object",
@@ -344,32 +785,22 @@ static void zep_claim_handle(
                            command);
             return;
         }
-        for (size_t i = 0; i < input.claim_count; i++) {
-            const struct vcs_zcode_creation_claim_v2 *claim =
-                vcs_zcode_commons_projection_claim_at(projection, i);
-            if (!claim) {
-                free(claims);
-                vcs_zcode_commons_projection_free(projection);
-                zep_claim_fail(reply, "CLAIM_PROJECTION_TORN",
-                               "the immutable projection refused an indexed claim",
-                               command);
-                return;
-            }
-            claims[i] = *claim;
+        if (!zep_claim_copy_claims(projection, input.claim_count, claims)) {
+            free(claims);
+            vcs_zcode_commons_projection_free(projection);
+            zep_claim_fail(reply, "CLAIM_PROJECTION_TORN",
+                           "the immutable projection refused an indexed claim",
+                           command);
+            return;
         }
     }
     input.claims = claims;
 
     struct zcl_hotswap_service_lease lease = {0};
     const struct zcode_c23_economics_service_v1 *service =
-        zcl_hotswap_service_acquire(ZCODE_C23_ECONOMICS_SERVICE_ID, &lease);
-    if (!service) service = zcode_c23_economics_service_builtin();
-    service->policy_init(&policy, roots[1], roots[2], roots[3], roots[4]);
-    enum vcs_zcode_commons_error error = service->policy_validate(&policy);
-    if (error == VCS_ZCODE_COMMONS_OK)
-        error = service->policy_root(&policy, policy_root);
-    if (error == VCS_ZCODE_COMMONS_OK)
-        error = service->epoch_select(&input, &policy, &result);
+        zep_claim_service(&lease);
+    enum vcs_zcode_commons_error error = zep_claim_plan_select(
+        service, &input, roots, &policy, policy_root, &result);
     if (error != VCS_ZCODE_COMMONS_OK) {
         zcl_hotswap_service_release(&lease);
         free(claims);
@@ -381,11 +812,8 @@ static void zep_claim_handle(
     struct vcs_zcode_claim_epoch_proposal_v2 claim_epoch;
     uint8_t claim_epoch_root[32];
     enum vcs_zcode_claim_epoch_error claim_epoch_error =
-        vcs_zcode_claim_epoch_from_selection(
-            &input, policy_root, projection_root, &result, &claim_epoch);
-    if (claim_epoch_error == VCS_ZCODE_CLAIM_EPOCH_OK)
-        claim_epoch_error = vcs_zcode_claim_epoch_root(
-            &claim_epoch, claim_epoch_root);
+        zep_claim_epoch_derive(&input, policy_root, projection_root, &result,
+                               &claim_epoch, claim_epoch_root);
     if (claim_epoch_error != VCS_ZCODE_CLAIM_EPOCH_OK) {
         vcs_zcode_claim_epoch_free(&claim_epoch);
         zcl_hotswap_service_release(&lease);
@@ -398,100 +826,30 @@ static void zep_claim_handle(
     }
     uint8_t *claim_epoch_wire = NULL;
     size_t claim_epoch_wire_len = 0;
-    if (persist) {
-        claim_epoch_error = vcs_zcode_claim_epoch_encode(
-            &claim_epoch, &claim_epoch_wire, &claim_epoch_wire_len);
-        if (claim_epoch_error != VCS_ZCODE_CLAIM_EPOCH_OK ||
-            !vcs_object_store_init(workspace) ||
-            !vcs_object_put_addressed(workspace, claim_epoch_root,
-                                      claim_epoch_wire,
-                                      claim_epoch_wire_len)) {
-            free(claim_epoch_wire);
-            vcs_zcode_claim_epoch_free(&claim_epoch);
-            zcl_hotswap_service_release(&lease);
-            free(claims);
-            vcs_zcode_commons_projection_free(projection);
-            zep_claim_fail(reply, "CLAIM_EPOCH_STORE_REFUSED",
-                           claim_epoch_error == VCS_ZCODE_CLAIM_EPOCH_OK
-                               ? "scratch CAS refused the canonical proposal bytes"
-                               : vcs_zcode_claim_epoch_error_string(
-                                     claim_epoch_error),
-                           command);
-            return;
-        }
+    if (persist && !zep_claim_epoch_persist(workspace, &claim_epoch,
+                                            claim_epoch_root,
+                                            &claim_epoch_wire,
+                                            &claim_epoch_wire_len,
+                                            &claim_epoch_error)) {
+        free(claim_epoch_wire);
+        vcs_zcode_claim_epoch_free(&claim_epoch);
+        zcl_hotswap_service_release(&lease);
+        free(claims);
+        vcs_zcode_commons_projection_free(projection);
+        zep_claim_fail(reply, "CLAIM_EPOCH_STORE_REFUSED",
+                       claim_epoch_error == VCS_ZCODE_CLAIM_EPOCH_OK
+                           ? "scratch CAS refused the canonical proposal bytes"
+                           : vcs_zcode_claim_epoch_error_string(
+                                 claim_epoch_error),
+                       command);
+        return;
     }
 
-    (void)json_push_kv_str(&reply->data, "service_id",
-                           ZCODE_C23_ECONOMICS_SERVICE_ID);
-    (void)json_push_kv_int(&reply->data, "service_generation",
-                           (int64_t)zcl_hotswap_service_generation());
-    (void)json_push_kv_bool(&reply->data, "pure_calculation", true);
-    (void)json_push_kv_bool(&reply->data, "simulation_only", true);
-    (void)json_push_kv_bool(&reply->data, "not_owner_approved", true);
-    (void)json_push_kv_bool(&reply->data, "persisted", persist);
-    (void)json_push_kv_bool(&reply->data, "issuance_enabled", false);
-    (void)json_push_kv_bool(&reply->data, "funds_moved", false);
-    (void)json_push_kv_bool(&reply->data, "wallet_used", false);
-    zep_hex(&reply->data, "policy_root", policy_root);
-    zep_hex(&reply->data, "claim_projection_root", projection_root);
-    zep_hex(&reply->data, "previous_epoch_root", input.previous_epoch_root);
-    zep_hex(&reply->data, "epoch_selection_root",
-            result.epoch_creation_root);
-    zep_hex(&reply->data, "claim_epoch_proposal_root", claim_epoch_root);
-    (void)json_push_kv_int(
-        &reply->data, "claim_epoch_proposal_bytes",
-        (int64_t)(VCS_ZCODE_CLAIM_EPOCH_HEADER_BYTES +
-                  result.selected_count * 32u));
-    (void)json_push_kv_int(&reply->data, "epoch", (int64_t)input.epoch);
-    (void)json_push_kv_int(&reply->data, "cutoff_height",
-                           (int64_t)input.cutoff_height);
-    (void)json_push_kv_int(&reply->data, "cutoff_mtp", input.cutoff_mtp);
-    (void)json_push_kv_int(&reply->data, "epoch_capacity_atoms",
-                           (int64_t)input.epoch_capacity_atoms);
-    (void)json_push_kv_int(&reply->data, "claim_count",
-                           (int64_t)input.claim_count);
-    (void)json_push_kv_int(&reply->data, "selected_count",
-                           (int64_t)result.selected_count);
-    (void)json_push_kv_int(&reply->data, "deferred_count",
-                           (int64_t)result.deferred_count);
-    (void)json_push_kv_int(&reply->data, "invalid_count",
-                           (int64_t)result.invalid_count);
-    (void)json_push_kv_int(&reply->data, "selected_atoms",
-                           (int64_t)result.selected_atoms);
-    (void)json_push_kv_int(&reply->data, "expired_capacity_atoms",
-                           (int64_t)result.expired_capacity_atoms);
-    (void)json_push_kv_int(&reply->data, "recipient_cap_atoms",
-                           (int64_t)result.recipient_cap_atoms);
-    (void)json_push_kv_int(&reply->data, "lineage_cap_atoms",
-                           (int64_t)result.lineage_cap_atoms);
-    (void)json_push_kv_int(&reply->data, "first_category",
-                           result.first_category);
-    /* The result root always binds the complete ordered selected set. Keep
-     * the inline review page bounded so a 4096-claim epoch cannot overflow a
-     * native result frame, and say when it is not complete. */
-    const size_t inline_limit = 16;
-    size_t inline_count = result.selected_count < inline_limit
-        ? result.selected_count : inline_limit;
-    struct json_value selected;
-    json_init(&selected); json_set_array(&selected);
-    for (size_t i = 0; i < inline_count; i++) {
-        const struct vcs_zcode_creation_claim_v2 *claim =
-            &claims[result.selected_indices[i]];
-        struct json_value row;
-        json_init(&row); json_set_object(&row);
-        zep_hex(&row, "claim_root", claim->claim_root);
-        (void)json_push_kv_int(&row, "category", claim->category);
-        (void)json_push_kv_int(&row, "award_atoms",
-                               (int64_t)policy.award_atoms[claim->category]);
-        (void)json_push_back(&selected, &row);
-        json_free(&row);
-    }
-    (void)json_push_kv(&reply->data, "selected_claims", &selected);
-    json_free(&selected);
-    (void)json_push_kv_int(&reply->data, "selected_claims_inline_count",
-                           (int64_t)inline_count);
-    (void)json_push_kv_bool(&reply->data, "selected_claims_complete",
-                            inline_count == result.selected_count);
+    zep_claim_plan_push_header(reply, persist);
+    zep_claim_plan_push_roots(reply, policy_root, projection_root, &input,
+                              &result, claim_epoch_root);
+    zep_claim_plan_push_counts(reply, &input, &result);
+    zep_claim_plan_push_selected(reply, claims, &policy, &result);
     free(claim_epoch_wire);
     vcs_zcode_claim_epoch_free(&claim_epoch);
     zcl_hotswap_service_release(&lease);
@@ -515,21 +873,10 @@ void zcl_native_handle_zcode_commons_schedule_claim_verify(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     static const char command[] = "zcode.commons.schedule.claim.verify";
-    static const char *const keys[] = {
-        "workspace", "proposal_root", "network_genesis_root",
-        "moderation_policy_root", "qualification_predicates_root",
-        "backlog_algorithm_root",
-    };
     const char *workspace = request
         ? zep_str(request->input, "workspace") : NULL;
     uint8_t roots[5][32], loaded_root[32], projection_root[32], policy_root[32];
-    if (!request || !reply || !workspace ||
-        !zep_keys(request->input, keys, sizeof(keys) / sizeof(keys[0])) ||
-        !zep_root(request->input, "proposal_root", roots[0]) ||
-        !zep_root(request->input, "network_genesis_root", roots[1]) ||
-        !zep_root(request->input, "moderation_policy_root", roots[2]) ||
-        !zep_root(request->input, "qualification_predicates_root", roots[3]) ||
-        !zep_root(request->input, "backlog_algorithm_root", roots[4])) {
+    if (!zep_claim_verify_inputs_ok(request, reply, workspace, roots)) {
         zep_claim_fail(reply, "BAD_CLAIM_EPOCH_VERIFY_INPUT",
                        "closed input requires scratch workspace, proposal_root and four exact policy binding roots",
                        command);
@@ -542,47 +889,14 @@ void zcl_native_handle_zcode_commons_schedule_claim_verify(
         return;
     }
 
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    int load_error = vcs_object_load_raw_bounded(
-        workspace, roots[0], VCS_ZCODE_CLAIM_EPOCH_MAX_WIRE_BYTES,
-        &wire, &wire_len);
-    if (load_error != 0) {
-        zep_claim_fail(
-            reply, "CLAIM_EPOCH_LOAD_REFUSED",
-            load_error == -2
-                ? "proposal exceeds the canonical bounded wire maximum"
-                : "proposal is missing, unreadable, or outside the exact scratch CAS",
-            command);
-        return;
-    }
-
     struct vcs_zcode_claim_epoch_proposal_v2 proposal;
-    enum vcs_zcode_claim_epoch_error proposal_error =
-        vcs_zcode_claim_epoch_decode(&proposal, wire, wire_len);
-    free(wire);
-    if (proposal_error != VCS_ZCODE_CLAIM_EPOCH_OK) {
-        zep_claim_fail(reply, "CLAIM_EPOCH_DECODE_REFUSED",
-                       vcs_zcode_claim_epoch_error_string(proposal_error),
-                       command);
+    size_t wire_len = 0;
+    if (!zep_claim_verify_proposal(workspace, roots[0], &proposal, &wire_len,
+                                   reply, command))
         return;
-    }
-    proposal_error = vcs_zcode_claim_epoch_root(&proposal, loaded_root);
-    if (proposal_error != VCS_ZCODE_CLAIM_EPOCH_OK ||
-        memcmp(loaded_root, roots[0], 32) != 0) {
-        vcs_zcode_claim_epoch_free(&proposal);
-        zep_claim_fail(reply, "CLAIM_EPOCH_ADDRESS_MISMATCH",
-                       "canonical proposal bytes do not rederive the requested CAS address",
-                       command);
-        return;
-    }
 
-    struct vcs_zcode_commons_projection *projection =
-        vcs_zcode_commons_projection_build(workspace);
-    if (!projection ||
-        !vcs_zcode_commons_claim_projection_ready(projection) ||
-        !vcs_zcode_commons_claim_projection_root(projection,
-                                                 projection_root) ||
+    struct vcs_zcode_commons_projection *projection = NULL;
+    if (!zep_claim_projection_open(workspace, &projection, projection_root) ||
         memcmp(projection_root, proposal.claim_projection_root, 32) != 0) {
         vcs_zcode_commons_projection_free(projection);
         vcs_zcode_claim_epoch_free(&proposal);
@@ -613,32 +927,25 @@ void zcl_native_handle_zcode_commons_schedule_claim_verify(
                            command);
             return;
         }
-        for (size_t i = 0; i < selection.claim_count; i++) {
-            const struct vcs_zcode_creation_claim_v2 *claim =
-                vcs_zcode_commons_projection_claim_at(projection, i);
-            if (!claim) {
-                free(claims);
-                vcs_zcode_commons_projection_free(projection);
-                vcs_zcode_claim_epoch_free(&proposal);
-                zep_claim_fail(reply, "CLAIM_EPOCH_PROJECTION_TORN",
-                               "the immutable projection refused an indexed claim",
-                               command);
-                return;
-            }
-            claims[i] = *claim;
+        if (!zep_claim_copy_claims(projection, selection.claim_count,
+                                   claims)) {
+            free(claims);
+            vcs_zcode_commons_projection_free(projection);
+            vcs_zcode_claim_epoch_free(&proposal);
+            zep_claim_fail(reply, "CLAIM_EPOCH_PROJECTION_TORN",
+                           "the immutable projection refused an indexed claim",
+                           command);
+            return;
         }
     }
     selection.claims = claims;
 
     struct zcl_hotswap_service_lease lease = {0};
     const struct zcode_c23_economics_service_v1 *service =
-        zcl_hotswap_service_acquire(ZCODE_C23_ECONOMICS_SERVICE_ID, &lease);
-    if (!service) service = zcode_c23_economics_service_builtin();
+        zep_claim_service(&lease);
     struct vcs_zcode_policy_candidate_v2 policy;
-    service->policy_init(&policy, roots[1], roots[2], roots[3], roots[4]);
-    enum vcs_zcode_commons_error error = service->policy_validate(&policy);
-    if (error == VCS_ZCODE_COMMONS_OK)
-        error = service->policy_root(&policy, policy_root);
+    enum vcs_zcode_commons_error error =
+        zep_claim_policy_root(service, roots, &policy, policy_root);
     if (error != VCS_ZCODE_COMMONS_OK ||
         memcmp(policy_root, proposal.policy_root, 32) != 0) {
         zcl_hotswap_service_release(&lease);
@@ -646,25 +953,17 @@ void zcl_native_handle_zcode_commons_schedule_claim_verify(
         vcs_zcode_commons_projection_free(projection);
         vcs_zcode_claim_epoch_free(&proposal);
         zep_claim_fail(reply, "CLAIM_EPOCH_POLICY_MISMATCH",
-                       error == VCS_ZCODE_COMMONS_OK
-                           ? "supplied policy bindings do not match the proposal"
-                           : vcs_zcode_commons_error_string(error),
-                       command);
+                       zep_claim_policy_detail(error), command);
         return;
     }
 
     struct vcs_zcode_epoch_selection_result_v2 result;
-    error = service->epoch_select(&selection, &policy, &result);
     struct vcs_zcode_claim_epoch_proposal_v2 rebuilt;
     vcs_zcode_claim_epoch_init(&rebuilt);
-    if (error == VCS_ZCODE_COMMONS_OK)
-        proposal_error = vcs_zcode_claim_epoch_from_selection(
-            &selection, policy_root, projection_root, &result, &rebuilt);
-    else
-        proposal_error = VCS_ZCODE_CLAIM_EPOCH_SELECTION;
-    if (proposal_error == VCS_ZCODE_CLAIM_EPOCH_OK)
-        proposal_error = vcs_zcode_claim_epoch_root(&rebuilt, loaded_root);
-    if (proposal_error != VCS_ZCODE_CLAIM_EPOCH_OK ||
+    enum vcs_zcode_claim_epoch_error rebuild_error = zep_claim_verify_rebuild(
+        service, &selection, &policy, policy_root, projection_root, &result,
+        &rebuilt, loaded_root);
+    if (rebuild_error != VCS_ZCODE_CLAIM_EPOCH_OK ||
         memcmp(loaded_root, roots[0], 32) != 0) {
         vcs_zcode_claim_epoch_free(&rebuilt);
         zcl_hotswap_service_release(&lease);
@@ -672,9 +971,7 @@ void zcl_native_handle_zcode_commons_schedule_claim_verify(
         vcs_zcode_commons_projection_free(projection);
         vcs_zcode_claim_epoch_free(&proposal);
         zep_claim_fail(reply, "CLAIM_EPOCH_RECONSTRUCTION_MISMATCH",
-                       proposal_error == VCS_ZCODE_CLAIM_EPOCH_OK
-                           ? "fresh selection does not reproduce the proposal root"
-                           : vcs_zcode_claim_epoch_error_string(proposal_error),
+                       zep_claim_reconstruction_detail(rebuild_error),
                        command);
         return;
     }
@@ -692,43 +989,10 @@ void zcl_native_handle_zcode_commons_schedule_claim_verify(
         return;
     }
 
-    (void)json_push_kv_bool(&reply->data, "verified", true);
-    (void)json_push_kv_bool(&reply->data, "restart_reconstructed", true);
-    (void)json_push_kv_bool(&reply->data, "bounded_load", true);
-    (void)json_push_kv_bool(&reply->data, "pure_calculation", true);
-    (void)json_push_kv_bool(&reply->data, "valid", view.valid);
-    (void)json_push_kv_bool(&reply->data, "persisted", view.persisted);
-    (void)json_push_kv_bool(&reply->data, "canonical_proposal",
-                            view.canonical_proposal);
-    (void)json_push_kv_bool(&reply->data, "current_selection_verified",
-                            view.current_selection_verified);
-    (void)json_push_kv_bool(&reply->data, "simulation_only",
-                            view.simulation_only);
-    (void)json_push_kv_bool(&reply->data, "not_owner_approved", true);
-    (void)json_push_kv_bool(&reply->data, "issuance_enabled",
-                            view.issuance_enabled);
-    (void)json_push_kv_bool(&reply->data, "wallet_used", view.wallet_used);
-    (void)json_push_kv_bool(&reply->data, "funds_moved", view.funds_moved);
-    (void)json_push_kv_str(&reply->data, "verification_state",
-                           view.verification_state);
-    (void)json_push_kv_str(&reply->data, "next_command", view.next_command);
-    (void)json_push_kv_str(&reply->data, "service_id",
-                           ZCODE_C23_ECONOMICS_SERVICE_ID);
-    (void)json_push_kv_int(&reply->data, "service_generation",
-                           (int64_t)zcl_hotswap_service_generation());
-    zep_hex(&reply->data, "claim_epoch_proposal_root", roots[0]);
-    zep_hex(&reply->data, "policy_root", policy_root);
-    zep_hex(&reply->data, "claim_projection_root", projection_root);
-    zep_hex(&reply->data, "epoch_selection_root",
-            result.epoch_creation_root);
-    (void)json_push_kv_int(&reply->data, "proposal_bytes",
-                           (int64_t)wire_len);
-    (void)json_push_kv_int(&reply->data, "claim_count",
-                           (int64_t)view.claim_count);
-    (void)json_push_kv_int(&reply->data, "selected_count",
-                           (int64_t)view.selected_count);
-    (void)json_push_kv_int(&reply->data, "selected_atoms",
-                           (int64_t)view.selected_atoms);
+    zep_claim_verify_push_status(reply, &view);
+    zep_claim_verify_push_roots(reply, roots[0], policy_root, projection_root,
+                                &result);
+    zep_claim_verify_push_counts(reply, wire_len, &view);
     vcs_zcode_claim_epoch_free(&rebuilt);
     zcl_hotswap_service_release(&lease);
     free(claims);
@@ -740,13 +1004,10 @@ void zcl_native_handle_zcode_commons_schedule_claim_show(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     static const char command[] = "zcode.commons.schedule.claim.show";
-    static const char *const keys[] = {"workspace", "root"};
     const char *workspace = request
         ? zep_str(request->input, "workspace") : NULL;
     uint8_t requested_root[32], derived_root[32];
-    if (!request || !reply || !workspace ||
-        !zep_keys(request->input, keys, sizeof(keys) / sizeof(keys[0])) ||
-        !zep_root(request->input, "root", requested_root)) {
+    if (!zep_claim_show_inputs_ok(request, reply, workspace, requested_root)) {
         zep_claim_fail(reply, "BAD_CLAIM_EPOCH_SHOW_INPUT",
                        "closed input requires scratch workspace and one exact lowercase root",
                        command);
@@ -790,8 +1051,7 @@ void zcl_native_handle_zcode_commons_schedule_claim_show(
     }
     struct zcl_hotswap_service_lease lease = {0};
     const struct zcode_c23_economics_service_v1 *service =
-        zcl_hotswap_service_acquire(ZCODE_C23_ECONOMICS_SERVICE_ID, &lease);
-    if (!service) service = zcode_c23_economics_service_builtin();
+        zep_claim_service(&lease);
     struct zcode_c23_claim_epoch_view_v1 view;
     if (!service->render_claim_epoch(
             &proposal, true, false, &view)) {
@@ -802,76 +1062,10 @@ void zcl_native_handle_zcode_commons_schedule_claim_show(
                        command);
         return;
     }
-    (void)json_push_kv_str(&reply->data, "service_id",
-                           ZCODE_C23_ECONOMICS_SERVICE_ID);
-    (void)json_push_kv_int(&reply->data, "service_generation",
-                           (int64_t)zcl_hotswap_service_generation());
-    (void)json_push_kv_bool(&reply->data, "pure_calculation", true);
-    (void)json_push_kv_bool(&reply->data, "valid", view.valid);
-    (void)json_push_kv_bool(&reply->data, "persisted", view.persisted);
-    (void)json_push_kv_bool(&reply->data, "canonical_proposal",
-                            view.canonical_proposal);
-    (void)json_push_kv_bool(&reply->data, "current_selection_verified",
-                            view.current_selection_verified);
-    (void)json_push_kv_bool(&reply->data, "simulation_only",
-                            view.simulation_only);
-    (void)json_push_kv_bool(&reply->data, "issuance_enabled",
-                            view.issuance_enabled);
-    (void)json_push_kv_bool(&reply->data, "wallet_used", view.wallet_used);
-    (void)json_push_kv_bool(&reply->data, "funds_moved", view.funds_moved);
-    (void)json_push_kv_str(&reply->data, "verification_state",
-                           view.verification_state);
-    (void)json_push_kv_str(&reply->data, "next_command", view.next_command);
-    zep_hex(&reply->data, "claim_epoch_proposal_root", requested_root);
-    zep_hex(&reply->data, "previous_epoch_root", proposal.previous_epoch_root);
-    zep_hex(&reply->data, "policy_root", proposal.policy_root);
-    zep_hex(&reply->data, "claim_projection_root",
-            proposal.claim_projection_root);
-    zep_hex(&reply->data, "epoch_selection_root",
-            proposal.epoch_selection_root);
-    (void)json_push_kv_int(&reply->data, "proposal_bytes",
-                           (int64_t)wire_len);
-    (void)json_push_kv_int(&reply->data, "epoch", (int64_t)view.epoch);
-    (void)json_push_kv_int(&reply->data, "cutoff_height",
-                           (int64_t)view.cutoff_height);
-    (void)json_push_kv_int(&reply->data, "cutoff_mtp", view.cutoff_mtp);
-    (void)json_push_kv_int(&reply->data, "epoch_capacity_atoms",
-                           (int64_t)view.epoch_capacity_atoms);
-    (void)json_push_kv_int(&reply->data, "selected_atoms",
-                           (int64_t)view.selected_atoms);
-    (void)json_push_kv_int(&reply->data, "expired_capacity_atoms",
-                           (int64_t)view.expired_capacity_atoms);
-    (void)json_push_kv_int(&reply->data, "recipient_cap_atoms",
-                           (int64_t)view.recipient_cap_atoms);
-    (void)json_push_kv_int(&reply->data, "lineage_cap_atoms",
-                           (int64_t)view.lineage_cap_atoms);
-    (void)json_push_kv_int(&reply->data, "claim_count",
-                           (int64_t)view.claim_count);
-    (void)json_push_kv_int(&reply->data, "selected_count",
-                           (int64_t)view.selected_count);
-    (void)json_push_kv_int(&reply->data, "deferred_count",
-                           (int64_t)view.deferred_count);
-    (void)json_push_kv_int(&reply->data, "invalid_count",
-                           (int64_t)view.invalid_count);
-    (void)json_push_kv_int(&reply->data, "first_category",
-                           view.first_category);
-    const size_t inline_limit = 16;
-    size_t inline_count = proposal.selected_count < inline_limit
-        ? proposal.selected_count : inline_limit;
-    struct json_value selected;
-    json_init(&selected); json_set_array(&selected);
-    for (size_t i = 0; i < inline_count; i++) {
-        struct json_value item;
-        char root_hex[65];
-        zcl_hex_encode(proposal.selected_claim_roots[i], 32, root_hex);
-        json_init(&item); json_set_str(&item, root_hex);
-        (void)json_push_back(&selected, &item);
-        json_free(&item);
-    }
-    (void)json_push_kv(&reply->data, "selected_claim_roots", &selected);
-    json_free(&selected);
-    (void)json_push_kv_bool(&reply->data, "selected_claim_roots_complete",
-                            inline_count == proposal.selected_count);
+    zep_claim_show_push_status(reply, &view);
+    zep_claim_show_push_roots(reply, requested_root, &proposal);
+    zep_claim_show_push_counts(reply, wire_len, &view);
+    zep_claim_show_push_selected(reply, &proposal);
     zcl_hotswap_service_release(&lease);
     vcs_zcode_claim_epoch_free(&proposal);
 }
