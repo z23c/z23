@@ -359,13 +359,13 @@ static bool tier1b_chainstate_path(char *cs_path, size_t cap)
 {
     const char *home = getenv("HOME");
     if (!home || !home[0])
-        return false;
+        return false;  // raw-return-ok:no HOME means no co-located chainstate, a not-found answer; caller falls through
     int n = snprintf(cs_path, cap, "%s/.zclassic/chainstate", home);
     if (n < 0 || (size_t)n >= cap)
-        return false;
+        return false;  // raw-return-ok:path overflow means no borrow source, a not-found answer; caller falls through
     struct stat st;
     if (stat(cs_path, &st) != 0)
-        return false;
+        return false;  // raw-return-ok:chainstate absent, a not-found answer; caller falls through
     return true;
 }
 
@@ -381,10 +381,10 @@ static bool tier1b_frontier_seed_height(sqlite3 *db, int64_t stall_height,
     bool found = false;
     if (!anchor_kv_activation_cursor(db, ANCHOR_POOL_SAPLING, &activation,
                                      &found) || !found)
-        return false;
+        return false;  // raw-return-ok:no activation cursor, a not-found answer; caller falls through
     *seed_h = stall_height - 1;
     if (*seed_h < activation || *seed_h >= stall_height)
-        return false;
+        return false;  // raw-return-ok:stall height outside the safe window, a false answer; caller falls through
     return true;
 }
 
@@ -401,11 +401,11 @@ static bool tier1b_borrow_verified_frontier(sqlite3 *db, struct main_state *ms,
      * import uses).  Absent => no borrow possible. */
     char cs_path[1024];
     if (!tier1b_chainstate_path(cs_path, sizeof(cs_path)))
-        return false;
+        return false;  // raw-return-ok:no co-located chainstate, a not-found answer; falls through to tier2/3
 
     int64_t seed_h = 0;
     if (!tier1b_frontier_seed_height(db, stall_height, &seed_h))
-        return false;
+        return false;  // raw-return-ok:no safe-window seed height, a false answer; falls through to tier2/3
 
     const struct block_index *bi = active_chain_at(&ms->chain_active,
                                                    (int)seed_h);
