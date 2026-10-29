@@ -102,6 +102,12 @@ static void rb_fail(struct zcl_command_reply *reply, const char *code,
                            message, evidence ? evidence : "");
 }
 
+static bool rb_is_dot_component(const char *part, size_t len)
+{
+    return (len == 1 && part[0] == '.') ||
+           (len == 2 && part[0] == '.' && part[1] == '.');
+}
+
 static bool rb_canonical_repo_path(const char *path)
 {
     if (!path || !path[0] || path[0] == '/' || strchr(path, '\\') ||
@@ -111,8 +117,7 @@ static bool rb_canonical_repo_path(const char *path)
     while (part && *part) {
         const char *slash = strchr(part, '/');
         size_t len = slash ? (size_t)(slash - part) : strlen(part);
-        if ((len == 1 && part[0] == '.') ||
-            (len == 2 && part[0] == '.' && part[1] == '.'))
+        if (rb_is_dot_component(part, len))
             return false;
         part = slash ? slash + 1 : NULL;
     }
