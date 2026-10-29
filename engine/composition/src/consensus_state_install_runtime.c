@@ -683,6 +683,8 @@ static struct zcl_result icb_install_admit_receipt(
     if (!consensus_state_artifact_evidence_manifest_copy(*artifact, manifest))
         return ZCL_ERR(-1, "artifact evidence became stale after admission");
     struct zcl_result rc = ZCL_OK;
+    /* Every deferral path sets rc to a non-ok -2 (install_note_header_wait), so
+     * returning it makes the caller take the same early exit as before. */
     if (install_defer_until_headers_ready(ms, manifest, out, &rc))
         return rc;
     /* (3) Read the producer source receipt from the pinned bundle handle. */
