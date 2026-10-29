@@ -942,14 +942,9 @@ static void section7_sign_and_bitflips(void)
     printf("%s\n", g_failures > before ? "FAIL" : "OK");
 }
 
-int test_ed25519_differential(void)
+/* Section 1: RFC 8032 vectors must be accepted by both implementations. */
+static void rfc8032_vectors_section(void)
 {
-    g_failures = 0;
-    g_agreements = 0;
-
-    printf("\n=== ed25519_differential (shipped verifier vs frozen ladder oracle) ===\n");
-
-    /* ── 1. RFC 8032 vectors ─────────────────────────────────────── */
     printf("RFC 8032 vectors accepted by both... ");
     {
         struct { const char *pk, *sig, *msg; size_t mlen; } V[] = {
@@ -982,8 +977,11 @@ int test_ed25519_differential(void)
         if (bad) { printf("FAIL (%d)\n", bad); g_failures += bad; }
         else printf("OK (3 vectors)\n");
     }
+}
 
-    /* ── 2+3. Random signatures: accept, then four corruptions ───── */
+/* Sections 2 and 3: random signatures accept, then four corruptions reject. */
+static void random_signatures_section(void)
+{
     printf("256 random signatures: accept + 1024 corruptions reject... ");
     {
         for (int iter = 0; iter < 256; iter++) {
@@ -1028,8 +1026,11 @@ int test_ed25519_differential(void)
         }
         printf("%s\n", g_failures ? "FAIL" : "OK");
     }
+}
 
-    /* ── 4. Random garbage triples ───────────────────────────────── */
+/* Section 4: random garbage triples must agree. */
+static void random_garbage_section(void)
+{
     printf("4096 random garbage triples agree... ");
     {
         int before = g_failures;
@@ -1044,8 +1045,158 @@ int test_ed25519_differential(void)
         }
         printf("%s\n", g_failures > before ? "FAIL" : "OK");
     }
+}
 
-    /* ── 5. Structured edge cases ────────────────────────────────── */
+/* Edge: identity public key, and S == L, L-1, L+1, top byte 0xff. */
+static void edge_identity_and_s_bounds(const uint8_t sig[64],
+                                       const uint8_t *msg, size_t mlen,
+                                       const uint8_t pk[32],
+                                       const uint8_t L_LE[32])
+{
+    /* identity public key */
+    {
+        uint8_t zpk[32] = {0};
+        expect_agree_and(sig, msg, mlen, zpk, false, "identity pk");
+    }
+    /* S == L, S == L-1, S == L+1 */
+    {
+        uint8_t s2[64];
+        memcpy(s2, sig, 64);
+        memcpy(s2 + 32, L_LE, 32);
+        expect_agree_and(s2, msg, mlen, pk, false, "S == L");
+
+        memcpy(s2 + 32, L_LE, 32);
+        s2[32] -= 1;
+        expect_agree(s2, msg, mlen, pk, "S == L-1");
+
+        memcpy(s2 + 32, L_LE, 32);
+        s2[32] += 1;
+        expect_agree_and(s2, msg, mlen, pk, false, "S == L+1");
+
+        memcpy(s2 + 32, L_LE, 32);
+        s2[63] = 0xff;
+        expect_agree_and(s2, msg, mlen, pk, false, "S top byte 0xff");
+    }
+}
+
+/* ── malleability, stated absolutely and not differentially ─────
+ * (R, S) and (R, S+L) satisfy the same group equation; RFC 8032
+ * §5.1.7 and the Zcash consensus rules forbid the second. This
+ * cannot be differential: the frozen reference has its own
+ * canonical-S check, and S == L fails the point equation on its own.
+ * So the honest signature must ACCEPT and its +L malleation must
+ * REJECT, both against the shipped verifier directly. */
+static void edge_malleability(const uint8_t sig[64], const uint8_t *msg,
+                              size_t mlen, const uint8_t pk[32],
+                              const uint8_t L_LE[32])
+{
+    uint8_t mal[64];
+    memcpy(mal, sig, 64);
+    unsigned carry = 0;
+    for (int i = 0; i < 32; i++) {
+        unsigned t = (unsigned)mal[32 + i] + (unsigned)L_LE[i] + carry;
+        mal[32 + i] = (uint8_t)(t & 0xFF);
+        carry = t >> 8;
+    }
+    if (!ed25519_verify(sig, msg, mlen, pk)) {
+        printf("FAIL (honest signature rejected)\n");
+        g_failures++;
+    } else {
+        g_agreements++;
+    }
+    if (ed25519_verify(mal, msg, mlen, pk)) {
+        printf("FAIL (S+L malleation ACCEPTED — canonical-S check "
+               "is not enforcing S < L)\n");
+        g_failures++;
+    } else {
+        g_agreements++;
+    }
+}
+
+/* Non-canonical y encodings: y = p, p+1, 2^255-1, and with the
+ * sign bit both clear and set. */
+static void edge_noncanonical_y(const uint8_t sig[64], const uint8_t *msg,
+                                size_t mlen)
+{
+    static const uint8_t P_LE[32] = {
+        0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+    };
+    uint8_t npk[32];
+    for (int variant = 0; variant < 3; variant++) {
+        memcpy(npk, P_LE, 32);
+        if (variant == 1) npk[0] += 1;               /* p+1 */
+        if (variant == 2) { for (int i = 0; i < 32; i++) npk[i] = 0xff;
+                            npk[31] = 0x7f; }        /* 2^255-1 */
+        for (int sign = 0; sign < 2; sign++) {
+            uint8_t t[32];
+            memcpy(t, npk, 32);
+            if (sign) t[31] |= 0x80;
+            expect_agree(sig, msg, mlen, t, "non-canonical y");
+        }
+    }
+}
+
+/* The eight low-order points (encodings of the order-1/2/4/8
+ * torsion subgroup), each with both sign bits. */
+static void edge_low_order(const uint8_t sig[64], const uint8_t *msg,
+                           size_t mlen, const uint8_t pk[32])
+{
+    static const char *LOW_ORDER[] = {
+        "0100000000000000000000000000000000000000000000000000000000000000",
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "0000000000000000000000000000000000000000000000000000000000000080",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+        "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    };
+    for (size_t i = 0; i < sizeof(LOW_ORDER) / sizeof(LOW_ORDER[0]); i++) {
+        uint8_t lp[32];
+        test_hex_to_bytes(LOW_ORDER[i], lp, 32);
+        for (int sign = 0; sign < 2; sign++) {
+            uint8_t t[32];
+            memcpy(t, lp, 32);
+            if (sign) t[31] ^= 0x80;
+            expect_agree(sig, msg, mlen, t, "low-order pk");
+            /* also as the R half of the signature */
+            uint8_t s2[64];
+            memcpy(s2, sig, 64);
+            memcpy(s2, t, 32);
+            expect_agree(s2, msg, mlen, pk, "low-order R");
+        }
+    }
+}
+
+/* Edge: S == 0 and S == 1 against a real key, then the empty message. */
+static void edge_s_zero_one_and_empty(const uint8_t sig[64],
+                                      const uint8_t *msg, size_t mlen,
+                                      const uint8_t pk[32],
+                                      const uint8_t seed[32])
+{
+    /* S == 0 and S == 1 against a real key. */
+    {
+        uint8_t s2[64];
+        memcpy(s2, sig, 64);
+        memset(s2 + 32, 0, 32);
+        expect_agree(s2, msg, mlen, pk, "S == 0");
+        s2[32] = 1;
+        expect_agree(s2, msg, mlen, pk, "S == 1");
+    }
+    /* Zero-length message on a real key pair. */
+    {
+        uint8_t esig[64];
+        ref_sign(esig, NULL, 0, seed, pk);
+        expect_agree_and(esig, NULL, 0, pk, true, "empty message");
+    }
+}
+
+/* Section 5: structured edge cases. */
+static void structured_edge_section(void)
+{
     printf("structured edge cases agree... ");
     {
         int before = g_failures;
@@ -1062,129 +1213,33 @@ int test_ed25519_differential(void)
         ref_keypair(pk, seed);
         ref_sign(sig, msg, sizeof(msg), seed, pk);
 
-        /* identity public key */
-        {
-            uint8_t zpk[32] = {0};
-            expect_agree_and(sig, msg, sizeof(msg), zpk, false, "identity pk");
-        }
-        /* S == L, S == L-1, S == L+1 */
-        {
-            uint8_t s2[64];
-            memcpy(s2, sig, 64);
-            memcpy(s2 + 32, L_LE, 32);
-            expect_agree_and(s2, msg, sizeof(msg), pk, false, "S == L");
-
-            memcpy(s2 + 32, L_LE, 32);
-            s2[32] -= 1;
-            expect_agree(s2, msg, sizeof(msg), pk, "S == L-1");
-
-            memcpy(s2 + 32, L_LE, 32);
-            s2[32] += 1;
-            expect_agree_and(s2, msg, sizeof(msg), pk, false, "S == L+1");
-
-            memcpy(s2 + 32, L_LE, 32);
-            s2[63] = 0xff;
-            expect_agree_and(s2, msg, sizeof(msg), pk, false, "S top byte 0xff");
-        }
-        /* ── malleability, stated absolutely and not differentially ─────
-         * (R, S) and (R, S+L) satisfy the same group equation; RFC 8032
-         * §5.1.7 and the Zcash consensus rules forbid the second. This
-         * cannot be differential: the frozen reference has its own
-         * canonical-S check, and S == L fails the point equation on its own.
-         * So the honest signature must ACCEPT and its +L malleation must
-         * REJECT, both against the shipped verifier directly. */
-        {
-            uint8_t mal[64];
-            memcpy(mal, sig, 64);
-            unsigned carry = 0;
-            for (int i = 0; i < 32; i++) {
-                unsigned t = (unsigned)mal[32 + i] + (unsigned)L_LE[i] + carry;
-                mal[32 + i] = (uint8_t)(t & 0xFF);
-                carry = t >> 8;
-            }
-            if (!ed25519_verify(sig, msg, sizeof(msg), pk)) {
-                printf("FAIL (honest signature rejected)\n");
-                g_failures++;
-            } else {
-                g_agreements++;
-            }
-            if (ed25519_verify(mal, msg, sizeof(msg), pk)) {
-                printf("FAIL (S+L malleation ACCEPTED — canonical-S check "
-                       "is not enforcing S < L)\n");
-                g_failures++;
-            } else {
-                g_agreements++;
-            }
-        }
-        /* Non-canonical y encodings: y = p, p+1, 2^255-1, and with the
-         * sign bit both clear and set. */
-        {
-            static const uint8_t P_LE[32] = {
-                0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
-            };
-            uint8_t npk[32];
-            for (int variant = 0; variant < 3; variant++) {
-                memcpy(npk, P_LE, 32);
-                if (variant == 1) npk[0] += 1;               /* p+1 */
-                if (variant == 2) { for (int i = 0; i < 32; i++) npk[i] = 0xff;
-                                    npk[31] = 0x7f; }        /* 2^255-1 */
-                for (int sign = 0; sign < 2; sign++) {
-                    uint8_t t[32];
-                    memcpy(t, npk, 32);
-                    if (sign) t[31] |= 0x80;
-                    expect_agree(sig, msg, sizeof(msg), t, "non-canonical y");
-                }
-            }
-        }
-        /* The eight low-order points (encodings of the order-1/2/4/8
-         * torsion subgroup), each with both sign bits. */
-        {
-            static const char *LOW_ORDER[] = {
-                "0100000000000000000000000000000000000000000000000000000000000000",
-                "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-                "0000000000000000000000000000000000000000000000000000000000000080",
-                "0000000000000000000000000000000000000000000000000000000000000000",
-                "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
-                "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
-                "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-                "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-            };
-            for (size_t i = 0; i < sizeof(LOW_ORDER) / sizeof(LOW_ORDER[0]); i++) {
-                uint8_t lp[32];
-                test_hex_to_bytes(LOW_ORDER[i], lp, 32);
-                for (int sign = 0; sign < 2; sign++) {
-                    uint8_t t[32];
-                    memcpy(t, lp, 32);
-                    if (sign) t[31] ^= 0x80;
-                    expect_agree(sig, msg, sizeof(msg), t, "low-order pk");
-                    /* also as the R half of the signature */
-                    uint8_t s2[64];
-                    memcpy(s2, sig, 64);
-                    memcpy(s2, t, 32);
-                    expect_agree(s2, msg, sizeof(msg), pk, "low-order R");
-                }
-            }
-        }
-        /* S == 0 and S == 1 against a real key. */
-        {
-            uint8_t s2[64];
-            memcpy(s2, sig, 64);
-            memset(s2 + 32, 0, 32);
-            expect_agree(s2, msg, sizeof(msg), pk, "S == 0");
-            s2[32] = 1;
-            expect_agree(s2, msg, sizeof(msg), pk, "S == 1");
-        }
-        /* Zero-length message on a real key pair. */
-        {
-            uint8_t esig[64];
-            ref_sign(esig, NULL, 0, seed, pk);
-            expect_agree_and(esig, NULL, 0, pk, true, "empty message");
-        }
+        edge_identity_and_s_bounds(sig, msg, sizeof(msg), pk, L_LE);
+        edge_malleability(sig, msg, sizeof(msg), pk, L_LE);
+        edge_noncanonical_y(sig, msg, sizeof(msg));
+        edge_low_order(sig, msg, sizeof(msg), pk);
+        edge_s_zero_one_and_empty(sig, msg, sizeof(msg), pk, seed);
         printf("%s\n", g_failures > before ? "FAIL" : "OK");
     }
+}
+
+int test_ed25519_differential(void)
+{
+    g_failures = 0;
+    g_agreements = 0;
+
+    printf("\n=== ed25519_differential (shipped verifier vs frozen ladder oracle) ===\n");
+
+    /* ── 1. RFC 8032 vectors ─────────────────────────────────────── */
+    rfc8032_vectors_section();
+
+    /* ── 2+3. Random signatures: accept, then four corruptions ───── */
+    random_signatures_section();
+
+    /* ── 4. Random garbage triples ───────────────────────────────── */
+    random_garbage_section();
+
+    /* ── 5. Structured edge cases ────────────────────────────────── */
+    structured_edge_section();
 
     /* ── 6. Published corpora ────────────────────────────────────── */
     g_published_diffs = 0;
