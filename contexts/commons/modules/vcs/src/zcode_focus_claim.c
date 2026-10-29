@@ -87,14 +87,18 @@ enum vcs_zcode_focus_error vcs_zcode_focus_claim_serialize(
 }
 
 static bool claim_read_header(struct zcl_codec_reader *reader,
-    struct vcs_zcode_focus_claim_v1 *out, uint8_t magic[8],
-    uint64_t *created, uint64_t *expires)
+    struct vcs_zcode_focus_claim_v1 *out, uint8_t magic[8])
 {
     return zcl_codec_read_bytes(reader, magic, 8) &&
         zcl_codec_read_u16le(reader, &out->schema_version) &&
         zcl_codec_read_u16le(reader, &out->flags) &&
-        zcl_codec_read_u32le(reader, &out->reserved) &&
-        zcl_codec_read_u64le(reader, created) &&
+        zcl_codec_read_u32le(reader, &out->reserved);
+}
+
+static bool claim_read_times(struct zcl_codec_reader *reader,
+    uint64_t *created, uint64_t *expires)
+{
+    return zcl_codec_read_u64le(reader, created) &&
         zcl_codec_read_u64le(reader, expires);
 }
 
@@ -119,7 +123,8 @@ enum vcs_zcode_focus_error vcs_zcode_focus_claim_parse(
     struct zcl_codec_reader reader;
     uint8_t magic[8]; uint64_t created, expires;
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = claim_read_header(&reader, out, magic, &created, &expires) &&
+    bool ok = claim_read_header(&reader, out, magic) &&
+        claim_read_times(&reader, &created, &expires) &&
         claim_read_roots(&reader, out) &&
         zcl_codec_reader_finish(&reader) &&
         memcmp(magic, claim_magic, 8) == 0 &&
