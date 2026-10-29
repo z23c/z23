@@ -475,12 +475,8 @@ engine/modules/storage/src/coins_kv.c:coins_kv_seed_genesis_applied_height:18
 engine/modules/storage/src/coins_kv.c:coins_kv_spend_many_sqlite:16
 engine/modules/storage/src/coins_kv.c:coins_kv_tip_is_self_derived:22
 engine/modules/storage/src/coins_kv.c:coins_kv_verify_against_checkpoint:21
-engine/modules/storage/src/coins_ram.c:build_effective_sorted:26
 engine/modules/storage/src/coins_ram.c:coins_ram_flush:46
-engine/modules/storage/src/coins_ram.c:coins_ram_get_coins:24
-engine/modules/storage/src/coins_ram.c:coins_ram_init:18
 engine/modules/storage/src/coins_ram.c:coins_ram_reconcile_boot:33
-engine/modules/storage/src/coins_ram.c:coins_ram_snapshot_write:41
 engine/modules/storage/src/consensus_db.c:cdb_ddl_copy_table:22
 engine/modules/storage/src/consensus_db.c:consensus_db_drop_migrated_from_progress:40
 engine/modules/storage/src/consensus_db.c:consensus_db_migrate_from_progress:41

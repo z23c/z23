@@ -243,6 +243,34 @@ static bool grow(void)
     return true;
 }
 /* ── lifecycle ───────────────────────────────────────────────────────── */
+static long init_env_long(const char *v, long lo, long hi, long dflt)
+{
+    if (!v || !v[0]) return dflt;
+    char *end = NULL;
+    long n = strtol(v, &end, 10);
+    if (end == v || n < lo) return dflt;
+    return n > hi ? hi : n;
+}
+
+static void coins_ram_init_flush_every(uint32_t flush_every_blocks)
+{
+    /* An explicit cadence wins, then ZCL_FOLD_INRAM_FLUSH_EVERY. When the env is
+     * unset the value is COINS_RAM_DEFAULT_FLUSH_EVERY exactly as before, so
+     * steady-state behavior is unchanged. Bounds keep it in [1, 5,000,000]. */
+    G.flush_every = flush_every_blocks ? flush_every_blocks :
+        (uint32_t)init_env_long(getenv("ZCL_FOLD_INRAM_FLUSH_EVERY"), 1, 5000000,
+                                COINS_RAM_DEFAULT_FLUSH_EVERY);
+}
+
+static void coins_ram_init_max_slots(void)
+{
+    /* Live-slot high-water flush cap (OOM guard): flush when the live overlay
+     * crosses this many slots even before the block cadence. ZCL_FOLD_INRAM_MAX
+     * _SLOTS overrides (0 disables); bounded. */
+    G.max_slots = (size_t)init_env_long(getenv("ZCL_FOLD_INRAM_MAX_SLOTS"), 0, 64000000L,
+                                        (long)COINS_RAM_DEFAULT_MAX_SLOTS);
+}
+
 bool coins_ram_init(struct sqlite3 *db, uint32_t flush_every_blocks,
                     coins_ram_frontier_writer_fn writer)
 {
@@ -266,40 +294,10 @@ bool coins_ram_init(struct sqlite3 *db, uint32_t flush_every_blocks,
     G.live_count = 0;
     G.used = 0;
     G.db = db;
-    /* An explicit cadence wins, then ZCL_FOLD_INRAM_FLUSH_EVERY. When the env is
-     * unset the value is COINS_RAM_DEFAULT_FLUSH_EVERY exactly as before, so
-     * steady-state behavior is unchanged. Bounds keep it in [1, 5,000,000]. */
-    if (flush_every_blocks) {
-        G.flush_every = flush_every_blocks;
-    } else {
-        G.flush_every = COINS_RAM_DEFAULT_FLUSH_EVERY;
-        const char *fe = getenv("ZCL_FOLD_INRAM_FLUSH_EVERY");
-        if (fe && fe[0]) {
-            char *end = NULL;
-            long n = strtol(fe, &end, 10);
-            if (end != fe && n >= 1) {
-                if (n > 5000000) n = 5000000;
-                G.flush_every = (uint32_t)n;
-            }
-        }
-    }
+    coins_ram_init_flush_every(flush_every_blocks);
     G.since_flush = 0;
     G.last_applied = -1;
-    /* Live-slot high-water flush cap (OOM guard): flush when the live overlay
-     * crosses this many slots even before the block cadence. ZCL_FOLD_INRAM_MAX
-     * _SLOTS overrides (0 disables); bounded. */
-    G.max_slots = COINS_RAM_DEFAULT_MAX_SLOTS;
-    {
-        const char *ms = getenv("ZCL_FOLD_INRAM_MAX_SLOTS");
-        if (ms && ms[0]) {
-            char *end = NULL;
-            long n = strtol(ms, &end, 10);
-            if (end != ms && n >= 0) {
-                if (n > 64000000L) n = 64000000L;
-                G.max_slots = (size_t)n;
-            }
-        }
-    }
+    coins_ram_init_max_slots();
     G.active = true;
     LOG_INFO("coins_ram",
              "[coins_ram] init: %zu slots (~%zu MB), flush every %u blocks, "
@@ -476,60 +474,29 @@ bool coins_ram_exists(const uint8_t txid[32], uint32_t vout)
     return coins_kv_exists_sqlite_cached(G.db, &G.rd_exists, txid, vout);
 }
 
-bool coins_ram_get_coins(const uint8_t txid[32], struct coins *out)
+struct get_coins_meta {
+    uint32_t max_vout;
+    bool any;
+    int32_t height;
+    bool cb;
+    bool set;
+};
+
+static void get_coins_scan_live(const uint8_t txid[32], struct get_coins_meta *m)
 {
-    if (!out) return false;
-    coins_init(out);
-    if (!coins_ram_active() || !txid) return false;
-
-    /* Start from the durable reconstruction (covers vouts that live only in
-     * coins_kv), then overlay the RAM entries for this txid: LIVE adds/replaces
-     * a vout, TOMB removes it. The result is the effective live coins for txid.
-     * The bulk fold's prevout resolver only needs the unspent vouts + their
-     * pre-image; this merge yields exactly that. */
-    struct coins base;
-    coins_init(&base);
-    bool have_base = coins_kv_get_coins_sqlite(G.db, txid, &base);
-
-    /* Determine max vout across base + any LIVE overlay rows for this txid. */
-    uint32_t max_vout = 0;
-    bool any = false;
-    int32_t  meta_height = 0;
-    bool     meta_cb = false;
-    bool     meta_set = false;
-    if (have_base && base.num_vout > 0) {
-        max_vout = (uint32_t)(base.num_vout - 1);
-        any = true;
-        meta_height = base.height;
-        meta_cb = base.is_coinbase;
-        meta_set = true;
-    }
     for (size_t i = 0; i < G.cap; i++) {
         const struct ram_slot *s = &G.slots[i];
         if (s->state != SLOT_LIVE) continue;
         if (memcmp(s->txid, txid, 32) != 0) continue;
-        if (s->vout > max_vout) max_vout = s->vout;
-        any = true;
-        if (!meta_set) { meta_height = s->height; meta_cb = s->is_coinbase != 0;
-                         meta_set = true; }
+        if (s->vout > m->max_vout) m->max_vout = s->vout;
+        m->any = true;
+        if (!m->set) { m->height = s->height; m->cb = s->is_coinbase != 0;
+                       m->set = true; }
     }
-    if (!any) { coins_free(&base); return false; }
+}
 
-    if (!coins_alloc(out, (size_t)max_vout + 1)) {
-        coins_free(&base);
-        return false;
-    }
-    out->version     = 1;
-    out->height      = meta_height;
-    out->is_coinbase = meta_cb;
-
-    /* Lay down the durable base first. */
-    if (have_base) {
-        for (size_t v = 0; v < base.num_vout && v < out->num_vout; v++) {
-            if (tx_out_is_null(&base.vout[v])) continue;
-            out->vout[v] = base.vout[v];  /* shallow copy of the embedded script */
-        }
-    }
+static void get_coins_overlay_ram(const uint8_t txid[32], struct coins *out)
+{
     /* Overlay RAM rows: LIVE writes the vout, TOMB nulls it. */
     for (size_t i = 0; i < G.cap; i++) {
         const struct ram_slot *s = &G.slots[i];
@@ -547,6 +514,51 @@ bool coins_ram_get_coins(const uint8_t txid[32], struct coins *out)
         if (slen) memcpy(o->script_pub_key.data, s->script, slen);
         o->script_pub_key.size = slen;
     }
+}
+
+bool coins_ram_get_coins(const uint8_t txid[32], struct coins *out)
+{
+    if (!out) return false;
+    coins_init(out);
+    if (!coins_ram_active() || !txid) return false;
+
+    /* Start from the durable reconstruction (covers vouts that live only in
+     * coins_kv), then overlay the RAM entries for this txid: LIVE adds/replaces
+     * a vout, TOMB removes it. The result is the effective live coins for txid.
+     * The bulk fold's prevout resolver only needs the unspent vouts + their
+     * pre-image; this merge yields exactly that. */
+    struct coins base;
+    coins_init(&base);
+    bool have_base = coins_kv_get_coins_sqlite(G.db, txid, &base);
+
+    /* Determine max vout across base + any LIVE overlay rows for this txid. */
+    struct get_coins_meta m = {0};
+    if (have_base && base.num_vout > 0) {
+        m.max_vout = (uint32_t)(base.num_vout - 1);
+        m.any = true;
+        m.height = base.height;
+        m.cb = base.is_coinbase;
+        m.set = true;
+    }
+    get_coins_scan_live(txid, &m);
+    if (!m.any) { coins_free(&base); return false; }
+
+    if (!coins_alloc(out, (size_t)m.max_vout + 1)) {
+        coins_free(&base);
+        return false;
+    }
+    out->version     = 1;
+    out->height      = m.height;
+    out->is_coinbase = m.cb;
+
+    /* Lay down the durable base first. */
+    if (have_base) {
+        for (size_t v = 0; v < base.num_vout && v < out->num_vout; v++) {
+            if (tx_out_is_null(&base.vout[v])) continue;
+            out->vout[v] = base.vout[v];  /* shallow copy of the embedded script */
+        }
+    }
+    get_coins_overlay_ram(txid, out);
     coins_cleanup(out);
     coins_free(&base);
     return true;
@@ -628,6 +640,93 @@ static int comm_cmp(const void *a, const void *b)
     return (x->vout < y->vout) ? -1 : (x->vout > y->vout) ? 1 : 0;
 }
 
+struct eff_scan {
+    struct comm_rec *recs;
+    size_t   cap;
+    size_t   n;
+    uint8_t *scr_pool;
+    size_t   scr_used;
+    size_t   scr_cap;
+};
+
+static bool eff_pool_store(struct eff_scan *e, struct comm_rec *r,
+                           const uint8_t *script, int slen)
+{
+    if (e->scr_used + (size_t)slen > e->scr_cap) {
+        size_t ncap = e->scr_cap ? e->scr_cap * 2 : (1u << 20);
+        while (ncap < e->scr_used + (size_t)slen) ncap *= 2;
+        uint8_t *np = zcl_realloc(e->scr_pool, ncap, "coins_ram_scrpool");
+        if (!np) return false;
+        e->scr_pool = np; e->scr_cap = ncap;
+        size_t off = 0;  /* re-point earlier records into the moved pool */
+        for (size_t k = 0; k < e->n; k++) {
+            if (e->recs[k].script_len) {
+                e->recs[k].script = e->scr_pool + off;
+                off += e->recs[k].script_len;
+            }
+        }
+    }
+    memcpy(e->scr_pool + e->scr_used, script, (size_t)slen);
+    r->script = e->scr_pool + e->scr_used;
+    e->scr_used += (size_t)slen;
+    return true;
+}
+
+/* Append the current durable row unless a RAM overlay entry shadows it.
+ * Returns false only on out-of-memory / slack exhaustion. */
+static bool eff_take_durable_row(sqlite3_stmt *s, struct eff_scan *e)
+{
+    const uint8_t *txid = (const uint8_t *)sqlite3_column_blob(s, 0);
+    int txid_len = sqlite3_column_bytes(s, 0);
+    if (!txid || txid_len < 32) return true;
+    uint32_t vout = (uint32_t)sqlite3_column_int(s, 1);
+
+    /* Skip a durable row shadowed by a RAM overlay entry (TOMB removes it;
+     * LIVE replaces it — the LIVE value is emitted from the overlay pass). */
+    bool found = false;
+    (void)probe(txid, vout, &found);
+    if (found) return true;
+
+    if (e->n >= e->cap) return false;  /* defensive — cap had slack */
+    struct comm_rec *r = &e->recs[e->n];
+    memcpy(r->txid, txid, 32);
+    r->vout        = vout;
+    r->value       = sqlite3_column_int64(s, 2);
+    const uint8_t *script = (const uint8_t *)sqlite3_column_blob(s, 3);
+    int slen = sqlite3_column_bytes(s, 3);
+    r->height      = sqlite3_column_int(s, 4);
+    r->is_coinbase = sqlite3_column_int(s, 5) ? 1 : 0;
+    r->script_len  = (uint32_t)(slen > 0 ? slen : 0);
+    r->script      = NULL;
+    if (slen > 0 && script && !eff_pool_store(e, r, script, slen))
+        return false;
+    e->n++;
+    return true;
+}
+
+/* Append one RAM LIVE slot, growing recs when full. Returns false on OOM
+ * (e->recs is left valid for the caller to free). */
+static bool eff_add_live_slot(struct eff_scan *e, const struct ram_slot *sl)
+{
+    if (e->n >= e->cap) {
+        size_t ncap = e->n + 1024;
+        struct comm_rec *nr = zcl_realloc(e->recs, ncap * sizeof(*e->recs),
+                                          "coins_ram_eff_grow");
+        if (!nr) return false;
+        e->cap = ncap;
+        e->recs = nr;
+    }
+    struct comm_rec *r = &e->recs[e->n++];
+    memcpy(r->txid, sl->txid, 32);
+    r->vout        = sl->vout;
+    r->value       = sl->value;
+    r->height      = sl->height;
+    r->is_coinbase = sl->is_coinbase;
+    r->script_len  = sl->script_len;
+    r->script      = sl->script;
+    return true;
+}
+
 /* Materialise the EFFECTIVE live set (durable coins_kv rows NOT shadowed by a
  * RAM overlay entry + every RAM LIVE row) into a freshly-malloc'd, (txid,vout)-
  * sorted array. *out_recs / *out_n receive the array + length; *out_scr_pool is
@@ -646,67 +745,24 @@ static bool build_effective_sorted(struct comm_rec **out_recs, size_t *out_n,
     struct comm_rec *recs = zcl_malloc(cap * sizeof(*recs), "coins_ram_eff");
     if (!recs)
         LOG_FAIL("coins_ram", "effective: OOM for %zu recs", cap);
-    uint8_t *scr_pool = NULL;
-    size_t   scr_used = 0, scr_cap = 0;
-    size_t   n = 0;
+    struct eff_scan e = { .recs = recs, .cap = cap };
 
     sqlite3_stmt *s = NULL;
     if (sqlite3_prepare_v2(db,
             "SELECT txid, vout, value, script, height, is_coinbase "
             "FROM coins ORDER BY txid, vout", -1, &s, NULL) != SQLITE_OK) {
-        free(recs);
+        free(e.recs);
         LOG_FAIL("coins_ram", "effective: prepare failed: %s", sqlite3_errmsg(db));
     }
 
     int rc;
     bool oom = false;
     while ((rc = sqlite3_step(s)) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
-        const uint8_t *txid = (const uint8_t *)sqlite3_column_blob(s, 0);
-        int txid_len = sqlite3_column_bytes(s, 0);
-        if (!txid || txid_len < 32) continue;
-        uint32_t vout = (uint32_t)sqlite3_column_int(s, 1);
-
-        /* Skip a durable row shadowed by a RAM overlay entry (TOMB removes it;
-         * LIVE replaces it — the LIVE value is emitted from the overlay pass). */
-        bool found = false;
-        (void)probe(txid, vout, &found);
-        if (found) continue;
-
-        if (n >= cap) { oom = true; break; }  /* defensive — cap had slack */
-        struct comm_rec *r = &recs[n];
-        memcpy(r->txid, txid, 32);
-        r->vout        = vout;
-        r->value       = sqlite3_column_int64(s, 2);
-        const uint8_t *script = (const uint8_t *)sqlite3_column_blob(s, 3);
-        int slen = sqlite3_column_bytes(s, 3);
-        r->height      = sqlite3_column_int(s, 4);
-        r->is_coinbase = sqlite3_column_int(s, 5) ? 1 : 0;
-        r->script_len  = (uint32_t)(slen > 0 ? slen : 0);
-        r->script      = NULL;
-        if (slen > 0 && script) {
-            if (scr_used + (size_t)slen > scr_cap) {
-                size_t ncap = scr_cap ? scr_cap * 2 : (1u << 20);
-                while (ncap < scr_used + (size_t)slen) ncap *= 2;
-                uint8_t *np = zcl_realloc(scr_pool, ncap, "coins_ram_scrpool");
-                if (!np) { oom = true; break; }
-                scr_pool = np; scr_cap = ncap;
-                size_t off = 0;  /* re-point earlier records into the moved pool */
-                for (size_t k = 0; k < n; k++) {
-                    if (recs[k].script_len) {
-                        recs[k].script = scr_pool + off;
-                        off += recs[k].script_len;
-                    }
-                }
-            }
-            memcpy(scr_pool + scr_used, script, (size_t)slen);
-            r->script = scr_pool + scr_used;
-            scr_used += (size_t)slen;
-        }
-        n++;
+        if (!eff_take_durable_row(s, &e)) { oom = true; break; }
     }
     sqlite3_finalize(s);
     if (oom || (rc != SQLITE_DONE && rc != SQLITE_ROW)) {
-        free(recs); free(scr_pool);
+        free(e.recs); free(e.scr_pool);
         LOG_FAIL("coins_ram", "effective: durable scan failed (oom=%d rc=%d)",
                  oom, rc);
     }
@@ -715,26 +771,12 @@ static bool build_effective_sorted(struct comm_rec **out_recs, size_t *out_n,
     for (size_t i = 0; i < G.cap; i++) {
         const struct ram_slot *sl = &G.slots[i];
         if (sl->state != SLOT_LIVE) continue;
-        if (n >= cap) {
-            cap = n + 1024;
-            struct comm_rec *nr = zcl_realloc(recs, cap * sizeof(*recs),
-                                              "coins_ram_eff_grow");
-            if (!nr) { free(recs); free(scr_pool);
-                LOG_FAIL("coins_ram", "effective: OOM growing recs"); }
-            recs = nr;
-        }
-        struct comm_rec *r = &recs[n++];
-        memcpy(r->txid, sl->txid, 32);
-        r->vout        = sl->vout;
-        r->value       = sl->value;
-        r->height      = sl->height;
-        r->is_coinbase = sl->is_coinbase;
-        r->script_len  = sl->script_len;
-        r->script      = sl->script;
+        if (!eff_add_live_slot(&e, sl)) { free(e.recs); free(e.scr_pool);
+            LOG_FAIL("coins_ram", "effective: OOM growing recs"); }
     }
 
-    qsort(recs, n, sizeof(*recs), comm_cmp);
-    *out_recs = recs; *out_n = n; *out_scr_pool = scr_pool;
+    qsort(e.recs, e.n, sizeof(*e.recs), comm_cmp);
+    *out_recs = e.recs; *out_n = e.n; *out_scr_pool = e.scr_pool;
     return true;
 }
 
@@ -758,6 +800,112 @@ int coins_ram_commitment(uint8_t out[32])
     free(recs);
     free(scr_pool);
     return 0;
+}
+
+static bool snap_write_records(FILE *out, struct sha3_256_ctx *ctx,
+                               const struct comm_rec *recs, size_t n,
+                               uint64_t *count, int64_t *total_supply)
+{
+    for (size_t i = 0; i < n; i++) {
+        const struct comm_rec *r = &recs[i];
+        uint8_t inline_buf[UTXO_SHA3_RECORD_MAX(1024)];
+        uint8_t *rec = inline_buf, *heap = NULL;
+        size_t bcap = sizeof(inline_buf);
+        if (r->script_len > 1024) {
+            bcap = UTXO_SHA3_RECORD_MAX(r->script_len);
+            heap = zcl_malloc(bcap, "coins_ram_snap_rec");
+            if (!heap) return false;
+            rec = heap;
+        }
+        size_t rec_len = 0;
+        if (!utxo_sha3_serialize_record(rec, bcap, &rec_len, r->txid, r->vout,
+                                        r->value,
+                                        r->script_len ? r->script : NULL,
+                                        r->script_len, (uint32_t)r->height,
+                                        r->is_coinbase)) {
+            if (heap) free(heap);
+            return false;
+        }
+        if (fwrite(rec, 1, rec_len, out) != rec_len) {
+            if (heap) free(heap);
+            return false;
+        }
+        sha3_256_write(ctx, rec, rec_len);
+        if (heap) free(heap);
+        *total_supply += r->value;
+        (*count)++;
+    }
+    return true;
+}
+
+static bool snap_write_sapling_frontier(FILE *out, struct sha3_256_ctx *ctx,
+                                        const struct snapshot_shielded *sh)
+{
+    uint8_t lenbuf[4];
+    for (int i = 0; i < 4; i++)
+        lenbuf[i] = (uint8_t)(sh->sapling_len >> (8 * i));
+    if (fwrite(lenbuf, 1, 4, out) != 4 ||
+        (sh->sapling_len &&
+         fwrite(sh->sapling, 1, sh->sapling_len, out) != sh->sapling_len))
+        return false;
+    sha3_256_write(ctx, lenbuf, 4);
+    if (sh->sapling_len)
+        sha3_256_write(ctx, sh->sapling, sh->sapling_len);
+    return true;
+}
+
+/* v2/v3 shielded section: returns 0 on success, else the failing version. */
+static int snap_write_shielded_section(FILE *out, struct sha3_256_ctx *ctx,
+                                       uint32_t ver,
+                                       const struct snapshot_shielded *sh)
+{
+    if (ver == 2 && !snap_write_sapling_frontier(out, ctx, sh)) return 2;
+    if (ver == 3 && !snapshot_shielded_write(out, ctx, sh)) return 3;
+    return 0;
+}
+
+static void snap_store_outputs(uint8_t *out_sha3, const uint8_t body_sha3[32],
+                               uint64_t *out_count, uint64_t count,
+                               int64_t *out_total_supply, int64_t total_supply)
+{
+    if (out_sha3) memcpy(out_sha3, body_sha3, 32);
+    if (out_count) *out_count = count;
+    if (out_total_supply) *out_total_supply = total_supply;
+}
+
+/* Fill the header, seek to the start and rewrite it; false on any I/O error. */
+static bool snap_rewrite_header(FILE *out, uint8_t header[104],
+                                uint32_t snap_version,
+                                int32_t height, uint64_t count,
+                                int64_t total_supply,
+                                const uint8_t anchor_block_hash[32],
+                                const uint8_t body_sha3[32])
+{
+    memcpy(header, "ZCLUTXO\x00", 8);
+    /* version u32 at off 8 (1/2/3); height u32 at off 16; count u64 at off 24;
+     * total_supply i64 at off 32; anchor hash at off 40; sha3 at off 72. */
+    header[8] = (uint8_t)snap_version;
+    header[16] = (uint8_t)height; header[17] = (uint8_t)(height >> 8);
+    header[18] = (uint8_t)(height >> 16); header[19] = (uint8_t)(height >> 24);
+    for (int i = 0; i < 8; i++) header[24 + i] = (uint8_t)(count >> (8 * i));
+    for (int i = 0; i < 8; i++)
+        header[32 + i] = (uint8_t)((uint64_t)total_supply >> (8 * i));
+    if (anchor_block_hash) memcpy(header + 40, anchor_block_hash, 32);
+    memcpy(header + 72, body_sha3, 32);
+    return fseek(out, 0, SEEK_SET) == 0 &&
+           fwrite(header, 1, 104, out) == 104 && fflush(out) == 0;
+}
+
+static uint32_t snap_version_for(const struct snapshot_shielded *shielded_or_null)
+{
+    uint32_t snap_version = 1;
+    if (shielded_or_null) {
+        if (shielded_or_null->sprout_len > 0 || shielded_or_null->nf_count > 0)
+            snap_version = 3;
+        else if (shielded_or_null->sapling_len > 0)
+            snap_version = 2;
+    }
+    return snap_version;
 }
 
 /* Stream the EFFECTIVE set to a ZCLUTXO snapshot in the exact format
@@ -784,13 +932,7 @@ bool coins_ram_snapshot_write(const char *out_path, int32_t height,
 
     /* Format version from the shielded content: NULL => v1; Sapling-only => v2;
      * Sprout and/or nullifiers => v3. */
-    uint32_t snap_version = 1;
-    if (shielded_or_null) {
-        if (shielded_or_null->sprout_len > 0 || shielded_or_null->nf_count > 0)
-            snap_version = 3;
-        else if (shielded_or_null->sapling_len > 0)
-            snap_version = 2;
-    }
+    uint32_t snap_version = snap_version_for(shielded_or_null);
 
     struct comm_rec *recs = NULL; size_t n = 0; uint8_t *scr_pool = NULL;
     if (!build_effective_sorted(&recs, &n, &scr_pool))
@@ -815,37 +957,7 @@ bool coins_ram_snapshot_write(const char *out_path, int32_t height,
     sha3_256_init(&ctx);
     uint64_t count = 0;
     int64_t  total_supply = 0;
-    for (size_t i = 0; ok && i < n; i++) {
-        const struct comm_rec *r = &recs[i];
-        uint8_t inline_buf[UTXO_SHA3_RECORD_MAX(1024)];
-        uint8_t *rec = inline_buf, *heap = NULL;
-        size_t bcap = sizeof(inline_buf);
-        if (r->script_len > 1024) {
-            bcap = UTXO_SHA3_RECORD_MAX(r->script_len);
-            heap = zcl_malloc(bcap, "coins_ram_snap_rec");
-            if (!heap) { ok = false; break; }
-            rec = heap;
-        }
-        size_t rec_len = 0;
-        if (!utxo_sha3_serialize_record(rec, bcap, &rec_len, r->txid, r->vout,
-                                        r->value,
-                                        r->script_len ? r->script : NULL,
-                                        r->script_len, (uint32_t)r->height,
-                                        r->is_coinbase)) {
-            if (heap) free(heap);
-            ok = false;
-            break;
-        }
-        if (fwrite(rec, 1, rec_len, out) != rec_len) {
-            if (heap) free(heap);
-            ok = false;
-            break;
-        }
-        sha3_256_write(&ctx, rec, rec_len);
-        if (heap) free(heap);
-        total_supply += r->value;
-        count++;
-    }
+    ok = ok && snap_write_records(out, &ctx, recs, n, &count, &total_supply);
     free(recs); free(scr_pool);
 
     if (!ok) { fclose(out); unlink(tmp_path);
@@ -854,45 +966,22 @@ bool coins_ram_snapshot_write(const char *out_path, int32_t height,
     /* OPTIONAL shielded section, appended after the UTXO records and inside the
      * body SHA3 region. v2 => single Sapling frontier ([u32 sapling_len][blob],
      * byte-identical to the historical layout); v3 => full shielded section. */
-    if (snap_version == 2) {
-        const struct snapshot_shielded *sh = shielded_or_null;
-        uint8_t lenbuf[4];
-        for (int i = 0; i < 4; i++)
-            lenbuf[i] = (uint8_t)(sh->sapling_len >> (8 * i));
-        if (fwrite(lenbuf, 1, 4, out) != 4 ||
-            (sh->sapling_len &&
-             fwrite(sh->sapling, 1, sh->sapling_len, out) != sh->sapling_len)) {
-            fclose(out); unlink(tmp_path);
-            LOG_FAIL("coins_ram", "snapshot_write: sapling frontier write failed");
-        }
-        sha3_256_write(&ctx, lenbuf, 4);
-        if (sh->sapling_len)
-            sha3_256_write(&ctx, sh->sapling, sh->sapling_len);
-    } else if (snap_version == 3) {
-        if (!snapshot_shielded_write(out, &ctx, shielded_or_null)) {
-            fclose(out); unlink(tmp_path);
-            LOG_FAIL("coins_ram", "snapshot_write: shielded section failed");
-        }
+    int sec = snap_write_shielded_section(out, &ctx, snap_version,
+                                          shielded_or_null);
+    if (sec == 2) {
+        fclose(out); unlink(tmp_path);
+        LOG_FAIL("coins_ram", "snapshot_write: sapling frontier write failed");
+    }
+    if (sec == 3) {
+        fclose(out); unlink(tmp_path);
+        LOG_FAIL("coins_ram", "snapshot_write: shielded section failed");
     }
 
     uint8_t body_sha3[32];
     sha3_256_finalize(&ctx, body_sha3);
 
-    memcpy(header, "ZCLUTXO\x00", 8);
-    /* version u32 at off 8 (1/2/3); height u32 at off 16; count u64 at off 24;
-     * total_supply i64 at off 32; anchor hash at off 40; sha3 at off 72. */
-    header[8] = (uint8_t)snap_version;
-    header[16] = (uint8_t)height; header[17] = (uint8_t)(height >> 8);
-    header[18] = (uint8_t)(height >> 16); header[19] = (uint8_t)(height >> 24);
-    for (int i = 0; i < 8; i++) header[24 + i] = (uint8_t)(count >> (8 * i));
-    for (int i = 0; i < 8; i++)
-        header[32 + i] = (uint8_t)((uint64_t)total_supply >> (8 * i));
-    if (anchor_block_hash) memcpy(header + 40, anchor_block_hash, 32);
-    memcpy(header + 72, body_sha3, 32);
-
-    if (fseek(out, 0, SEEK_SET) != 0 ||
-        fwrite(header, 1, sizeof(header), out) != sizeof(header) ||
-        fflush(out) != 0) {
+    if (!snap_rewrite_header(out, header, snap_version, height, count,
+                             total_supply, anchor_block_hash, body_sha3)) {
         fclose(out); unlink(tmp_path);
         LOG_FAIL("coins_ram", "snapshot_write: header rewrite failed");
     }
@@ -901,9 +990,8 @@ bool coins_ram_snapshot_write(const char *out_path, int32_t height,
         unlink(tmp_path);
         LOG_FAIL("coins_ram", "snapshot_write: rename failed");
     }
-    if (out_sha3) memcpy(out_sha3, body_sha3, 32);
-    if (out_count) *out_count = count;
-    if (out_total_supply) *out_total_supply = total_supply;
+    snap_store_outputs(out_sha3, body_sha3, out_count, count,
+                       out_total_supply, total_supply);
     return true;
 }
 
