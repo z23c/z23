@@ -102,12 +102,29 @@ static bool pubkey_verify_direct_baseline(secp256k1_context *ctx,
     return ecdsa_verify_direct(ctx, pk, hash, sig, sig_len);
 }
 
-int test_crypto_registry(void)
+struct registry_schemes {
+    const struct crypto_scheme *sha;
+    const struct crypto_scheme *blake;
+    const struct crypto_scheme *ecdsa;
+    const struct crypto_scheme *groth;
+    const struct crypto_scheme *equihash;
+};
+
+struct ecdsa_indirection {
+    secp256k1_context *ctx;
+    const struct pubkey *pk;
+    const struct uint256 *hash;
+    const uint8_t *sig;
+    size_t sig_len;
+    volatile int direct_true;
+    volatile int registry_true;
+    int64_t direct_ns;
+    int64_t registry_ns;
+};
+
+static int registry_case_lookup(struct registry_schemes *s)
 {
     int failures = 0;
-    uint8_t out[32];
-
-    printf("\n=== crypto_registry ===\n");
 
     /* Case 1: register_lookup_basic — all four wrappers registered at
      * constructor time with the expected per-kind counts. */
@@ -122,6 +139,11 @@ int test_crypto_registry(void)
         crypto_registry_lookup(CRYPTO_ZK_GROTH16_BLS12_381);
     const struct crypto_scheme *equihash =
         crypto_registry_lookup(CRYPTO_PROOF_EQUIHASH_200_9);
+    s->sha = sha;
+    s->blake = blake;
+    s->ecdsa = ecdsa;
+    s->groth = groth;
+    s->equihash = equihash;
     if (sha && blake && ecdsa && groth && equihash &&
         crypto_registry_count() == 5 &&
         crypto_registry_count_by_kind(CRYPTO_KIND_HASH) == 2 &&
@@ -134,6 +156,12 @@ int test_crypto_registry(void)
                crypto_registry_count());
         failures++;
     }
+    return failures;
+}
+
+static int registry_case_collision(void)
+{
+    int failures = 0;
 
     /* Case 2: register_collision_rejected — try to re-register the
      * SHA256 slot. The CAS must fail and the original wrapper must
@@ -159,6 +187,12 @@ int test_crypto_registry(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int registry_case_lookup_missing(void)
+{
+    int failures = 0;
 
     /* Case 3: lookup of an unregistered slot returns NULL. */
     printf("lookup_unregistered_returns_null... ");
@@ -175,6 +209,12 @@ int test_crypto_registry(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int registry_case_is_usable(void)
+{
+    int failures = 0;
 
     /* Case 4: is_usable returns false for unregistered + out-of-range. */
     printf("is_usable_false_for_unregistered... ");
@@ -190,6 +230,15 @@ int test_crypto_registry(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int registry_case_hash_vectors(const struct registry_schemes *s)
+{
+    int failures = 0;
+    uint8_t out[32];
+    const struct crypto_scheme *sha = s->sha;
+    const struct crypto_scheme *blake = s->blake;
 
     printf("sha256 wrapper vector... ");
     if (sha && sha->fn.hash("hello", 5, out) == 0)
@@ -208,6 +257,13 @@ int test_crypto_registry(void)
         printf("FAIL\n");
         failures++;
     }
+    return failures;
+}
+
+static int registry_case_ecdsa_wrapper(const struct registry_schemes *s)
+{
+    int failures = 0;
+    const struct crypto_scheme *ecdsa = s->ecdsa;
 
     printf("ecdsa wrapper verifies generated signature... ");
     {
@@ -236,6 +292,13 @@ int test_crypto_registry(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int registry_case_groth16_malformed(const struct registry_schemes *s)
+{
+    int failures = 0;
+    const struct crypto_scheme *groth = s->groth;
 
     printf("groth16 wrapper rejects malformed inputs... ");
     {
@@ -252,6 +315,13 @@ int test_crypto_registry(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int registry_case_equihash_fixture(const struct registry_schemes *s)
+{
+    int failures = 0;
+    const struct crypto_scheme *equihash = s->equihash;
 
     printf("equihash wrapper verifies known-good fixture... ");
     {
@@ -273,6 +343,13 @@ int test_crypto_registry(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static int registry_case_equihash_cost(const struct registry_schemes *s)
+{
+    int failures = 0;
+    const struct crypto_scheme *equihash = s->equihash;
 
     printf("equihash registry indirection cost... ");
     {
@@ -308,6 +385,48 @@ int test_crypto_registry(void)
             failures++;
         }
     }
+    return failures;
+}
+
+static void ecdsa_indirection_direct(struct ecdsa_indirection *e, int iters)
+{
+    for (int i = 0; i < iters; i++)
+        e->direct_true += pubkey_verify_direct_baseline(
+            e->ctx, e->pk, e->hash, e->sig, e->sig_len);
+}
+
+static void ecdsa_indirection_registry(struct ecdsa_indirection *e, int iters)
+{
+    for (int i = 0; i < iters; i++)
+        e->registry_true += pubkey_verify(e->pk, e->hash, e->sig, e->sig_len);
+}
+
+static void ecdsa_indirection_batch(struct ecdsa_indirection *e, int b,
+                                    int batch_iters)
+{
+    int64_t t0, t1, t2;
+    if ((b & 1) == 0) {
+        t0 = test_now_ns();
+        ecdsa_indirection_direct(e, batch_iters);
+        t1 = test_now_ns();
+        ecdsa_indirection_registry(e, batch_iters);
+        t2 = test_now_ns();
+        e->direct_ns += t1 - t0;
+        e->registry_ns += t2 - t1;
+    } else {
+        t0 = test_now_ns();
+        ecdsa_indirection_registry(e, batch_iters);
+        t1 = test_now_ns();
+        ecdsa_indirection_direct(e, batch_iters);
+        t2 = test_now_ns();
+        e->registry_ns += t1 - t0;
+        e->direct_ns += t2 - t1;
+    }
+}
+
+static int registry_case_ecdsa_cost(void)
+{
+    int failures = 0;
 
     printf("ecdsa pubkey_verify registry indirection cost... ");
     {
@@ -331,58 +450,42 @@ int test_crypto_registry(void)
         const int batches = 100;
         const int batch_iters = 1000;
         const int iters = batches * batch_iters;
-        volatile int direct_true = 0;
-        volatile int registry_true = 0;
-
-        int64_t direct_ns = 0;
-        int64_t registry_ns = 0;
-        for (int b = 0; ok && b < batches; b++) {
-            int64_t t0, t1, t2;
-            if ((b & 1) == 0) {
-                t0 = test_now_ns();
-                for (int i = 0; i < batch_iters; i++)
-                    direct_true += pubkey_verify_direct_baseline(
-                        ctx, &pk, &hash, sig, sig_len);
-                t1 = test_now_ns();
-                for (int i = 0; i < batch_iters; i++)
-                    registry_true += pubkey_verify(&pk, &hash, sig, sig_len);
-                t2 = test_now_ns();
-                direct_ns += t1 - t0;
-                registry_ns += t2 - t1;
-            } else {
-                t0 = test_now_ns();
-                for (int i = 0; i < batch_iters; i++)
-                    registry_true += pubkey_verify(&pk, &hash, sig, sig_len);
-                t1 = test_now_ns();
-                for (int i = 0; i < batch_iters; i++)
-                    direct_true += pubkey_verify_direct_baseline(
-                        ctx, &pk, &hash, sig, sig_len);
-                t2 = test_now_ns();
-                registry_ns += t1 - t0;
-                direct_ns += t2 - t1;
-            }
-        }
+        struct ecdsa_indirection e = {
+            .ctx = ctx,
+            .pk = &pk,
+            .hash = &hash,
+            .sig = sig,
+            .sig_len = sig_len,
+        };
+        for (int b = 0; ok && b < batches; b++)
+            ecdsa_indirection_batch(&e, b, batch_iters);
 
         if (ctx)
             secp256k1_context_destroy(ctx);
 
-        ok = ok && direct_true == iters && registry_true == iters;
+        ok = ok && e.direct_true == iters && e.registry_true == iters;
         if (ok) {
-            long long overhead_ppm = direct_ns > 0
-                ? ((long long)(registry_ns - direct_ns) * 1000000LL) /
-                      (long long)direct_ns
+            long long overhead_ppm = e.direct_ns > 0
+                ? ((long long)(e.registry_ns - e.direct_ns) * 1000000LL) /
+                      (long long)e.direct_ns
                 : 0;
             printf("OK (direct=%lldns registry=%lldns overhead=%lldppm)\n",
-                   (long long)direct_ns, (long long)registry_ns,
+                   (long long)e.direct_ns, (long long)e.registry_ns,
                    overhead_ppm);
         } else {
             printf("FAIL (direct=%lldns registry=%lldns direct_ok=%d "
                    "registry_ok=%d)\n",
-                   (long long)direct_ns, (long long)registry_ns,
-                   direct_true, registry_true);
+                   (long long)e.direct_ns, (long long)e.registry_ns,
+                   e.direct_true, e.registry_true);
             failures++;
         }
     }
+    return failures;
+}
+
+static int registry_case_diagnostics(void)
+{
+    int failures = 0;
 
     printf("diagnostics dump exposes schemes... ");
     {
@@ -401,6 +504,27 @@ int test_crypto_registry(void)
             failures++;
         }
     }
+    return failures;
+}
+
+int test_crypto_registry(void)
+{
+    int failures = 0;
+    struct registry_schemes s;
+
+    printf("\n=== crypto_registry ===\n");
+
+    failures += registry_case_lookup(&s);
+    failures += registry_case_collision();
+    failures += registry_case_lookup_missing();
+    failures += registry_case_is_usable();
+    failures += registry_case_hash_vectors(&s);
+    failures += registry_case_ecdsa_wrapper(&s);
+    failures += registry_case_groth16_malformed(&s);
+    failures += registry_case_equihash_fixture(&s);
+    failures += registry_case_equihash_cost(&s);
+    failures += registry_case_ecdsa_cost();
+    failures += registry_case_diagnostics();
 
     return failures;
 }
