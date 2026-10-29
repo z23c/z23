@@ -306,6 +306,49 @@ static void latest_index_row(struct zcl_fleet_ledger *l, uint8_t box,
     }
 }
 
+static void cell_touch(struct fleet_cell *c, const struct zcl_fleet_row *row)
+{
+    c->rows++;
+    if (row->ts_unix > c->last_ts)
+        c->last_ts = row->ts_unix;
+    accumulate(c->value, c->state, row);
+}
+
+/* True when the row landed in a day cell (existing or fresh). */
+static bool index_cell_row(struct zcl_fleet_ledger *l, uint8_t box,
+                           const struct zcl_fleet_row *row, uint32_t day)
+{
+    struct fleet_cell *free_slot = NULL;
+    for (size_t i = 0; i < ZCL_FLEET_INDEX_CELLS; i++) {
+        struct fleet_cell *c = &l->cell[i];
+        if (!c->used) {
+            if (!free_slot)
+                free_slot = c;
+            continue;
+        }
+        if (c->box == box && c->kind == row->kind &&
+            c->subject == row->subject && c->day == day) {
+            cell_touch(c, row);
+            return true;
+        }
+    }
+    if (free_slot) {
+        free_slot->used = true;
+        free_slot->box = box;
+        free_slot->kind = row->kind;
+        free_slot->subject = row->subject;
+        free_slot->day = day;
+        free_slot->rows = 0;
+        free_slot->last_ts = row->ts_unix;
+        cell_touch(free_slot, row);
+        return true;
+    }
+    /* The pool is full. The row still counts toward its total; what is
+     * lost is the per-day detail, and that loss is counted. */
+    l->overflow++;
+    return false;
+}
+
 static void index_row(struct zcl_fleet_ledger *l, uint8_t box,
                       const struct zcl_fleet_row *row, bool *cellular)
 {
@@ -317,42 +360,10 @@ static void index_row(struct zcl_fleet_ledger *l, uint8_t box,
     }
     bool in_window = l->newest_day + 1 < ZCL_FLEET_INDEX_DAYS ||
                      day >= l->newest_day + 1 - ZCL_FLEET_INDEX_DAYS;
-    if (in_window) {
-        struct fleet_cell *free_slot = NULL;
-        for (size_t i = 0; i < ZCL_FLEET_INDEX_CELLS; i++) {
-            struct fleet_cell *c = &l->cell[i];
-            if (!c->used) {
-                if (!free_slot)
-                    free_slot = c;
-                continue;
-            }
-            if (c->box == box && c->kind == row->kind &&
-                c->subject == row->subject && c->day == day) {
-                c->rows++;
-                if (row->ts_unix > c->last_ts)
-                    c->last_ts = row->ts_unix;
-                accumulate(c->value, c->state, row);
-                if (cellular)
-                    *cellular = true;
-                return;
-            }
-        }
-        if (free_slot) {
-            free_slot->used = true;
-            free_slot->box = box;
-            free_slot->kind = row->kind;
-            free_slot->subject = row->subject;
-            free_slot->day = day;
-            free_slot->rows = 1;
-            free_slot->last_ts = row->ts_unix;
-            accumulate(free_slot->value, free_slot->state, row);
-            if (cellular)
-                *cellular = true;
-            return;
-        }
-        /* The pool is full. The row still counts toward its total; what is
-         * lost is the per-day detail, and that loss is counted. */
-        l->overflow++;
+    if (in_window && index_cell_row(l, box, row, day)) {
+        if (cellular)
+            *cellular = true;
+        return;
     }
     struct fleet_series *s = series_for(l, box, row->kind, row->subject);
     if (!s) {
@@ -779,16 +790,11 @@ static enum zcl_fleet_status chain_tail(struct zcl_chainlog *log,
     return ZCL_FLEET_OK;
 }
 
-enum zcl_fleet_status zcl_fleet_ledger_append(
-    struct zcl_fleet_ledger *ledger, uint8_t kind, uint16_t subject,
+static enum zcl_fleet_status append_check_args(
+    const struct zcl_fleet_ledger *ledger, uint8_t kind,
     const struct zcl_fleet_pair *pairs, size_t pair_count, const char *note,
-    const char *story, const uint8_t seed[ZCL_FLEET_SEED_BYTES],
-    uint64_t *out_seq)
+    const char *story, const uint8_t *seed)
 {
-    uint64_t unused_seq;
-    if (!out_seq)
-        out_seq = &unused_seq;
-    *out_seq = 0;
     if (!ledger_writable(ledger) || !seed || (!pairs && pair_count))
         return ZCL_FLEET_ARGUMENT;
     if (!ledger->have_self)
@@ -805,27 +811,45 @@ enum zcl_fleet_status zcl_fleet_ledger_append(
     size_t story_len = story ? strlen(story) : 0;
     if (story_len > ZCL_FLEET_STORY_MAX)
         return ZCL_FLEET_ARGUMENT;
+    return ZCL_FLEET_OK;
+}
 
-    struct zcl_fleet_row row;
-    memset(&row, 0, sizeof row);
-    row.version = ZCL_FLEET_ROW_VERSION;
-    row.kind = kind;
-    row.subject = subject;
-    row.pair_count = (uint8_t)pair_count;
-    row.note_len = (uint8_t)note_len;
+/* Fill the unsigned row from already-validated arguments; false when the
+ * wall clock is not usable. */
+static bool append_row_fill(struct zcl_fleet_row *row,
+                            const struct zcl_fleet_ledger *ledger,
+                            uint8_t kind, uint16_t subject,
+                            const struct zcl_fleet_pair *pairs,
+                            size_t pair_count, const char *note,
+                            const char *story)
+{
+    size_t note_len = note ? strlen(note) : 0;
+    size_t story_len = story ? strlen(story) : 0;
+    memset(row, 0, sizeof *row);
+    row->version = ZCL_FLEET_ROW_VERSION;
+    row->kind = kind;
+    row->subject = subject;
+    row->pair_count = (uint8_t)pair_count;
+    row->note_len = (uint8_t)note_len;
     if (note_len)
-        memcpy(row.note, note, note_len);
-    row.story_len = (uint8_t)story_len;
+        memcpy(row->note, note, note_len);
+    row->story_len = (uint8_t)story_len;
     if (story_len)
-        memcpy(row.story, story, story_len);
+        memcpy(row->story, story, story_len);
     for (size_t i = 0; i < pair_count; i++)
-        row.pair[i] = pairs[i];
-    memcpy(row.box_id, ledger->self_id, ZCL_FLEET_ID_BYTES);
-    memcpy(row.signer, ledger->self_signer, ZCL_FLEET_ID_BYTES);
-    row.ts_unix = (int64_t)platform_time_wall_time_t();
-    if (row.ts_unix <= 0)
-        return ZCL_FLEET_ARGUMENT;
+        row->pair[i] = pairs[i];
+    memcpy(row->box_id, ledger->self_id, ZCL_FLEET_ID_BYTES);
+    memcpy(row->signer, ledger->self_signer, ZCL_FLEET_ID_BYTES);
+    row->ts_unix = (int64_t)platform_time_wall_time_t();
+    return row->ts_unix > 0;
+}
 
+/* Sign, encode and append the row under the chainlog's own lock. */
+static enum zcl_fleet_status append_row_store(
+    const struct zcl_fleet_ledger *ledger, struct zcl_fleet_row *row,
+    const uint8_t seed[ZCL_FLEET_SEED_BYTES],
+    uint8_t encoded[ZCL_FLEET_ROW_MAX_BYTES], size_t *len)
+{
     char path[600];
     if (!chain_path(ledger, ledger->self_id, path, sizeof path))
         return ZCL_FLEET_ARGUMENT;
@@ -837,23 +861,48 @@ enum zcl_fleet_status zcl_fleet_ledger_append(
         return ZCL_FLEET_IO;
 
     uint64_t tail_seq = 0;
-    enum zcl_fleet_status status = chain_tail(log, &tail_seq, row.prev_hash);
+    enum zcl_fleet_status status = chain_tail(log, &tail_seq, row->prev_hash);
     if (status == ZCL_FLEET_OK) {
-        row.seq = tail_seq + 1;
-        status = zcl_fleet_row_sign(&row, seed);
+        row->seq = tail_seq + 1;
+        status = zcl_fleet_row_sign(row, seed);
     }
-    uint8_t encoded[ZCL_FLEET_ROW_MAX_BYTES];
-    size_t len = 0;
+    *len = 0;
     if (status == ZCL_FLEET_OK) {
-        len = zcl_fleet_row_encode(&row, encoded, sizeof encoded);
-        if (len == 0)
+        *len = zcl_fleet_row_encode(row, encoded, ZCL_FLEET_ROW_MAX_BYTES);
+        if (*len == 0)
             status = ZCL_FLEET_MALFORMED;
     }
     if (status == ZCL_FLEET_OK &&
-        zcl_chainlog_append(log, FLEET_CHAINLOG_KIND, encoded, len, NULL,
+        zcl_chainlog_append(log, FLEET_CHAINLOG_KIND, encoded, *len, NULL,
                             NULL) != ZCL_CHAINLOG_OK)
         status = ZCL_FLEET_IO;
     zcl_chainlog_close(log);
+    return status;
+}
+
+enum zcl_fleet_status zcl_fleet_ledger_append(
+    struct zcl_fleet_ledger *ledger, uint8_t kind, uint16_t subject,
+    const struct zcl_fleet_pair *pairs, size_t pair_count, const char *note,
+    const char *story, const uint8_t seed[ZCL_FLEET_SEED_BYTES],
+    uint64_t *out_seq)
+{
+    uint64_t unused_seq;
+    if (!out_seq)
+        out_seq = &unused_seq;
+    *out_seq = 0;
+    enum zcl_fleet_status status = append_check_args(
+        ledger, kind, pairs, pair_count, note, story, seed);
+    if (status != ZCL_FLEET_OK)
+        return status;
+
+    struct zcl_fleet_row row;
+    if (!append_row_fill(&row, ledger, kind, subject, pairs, pair_count, note,
+                         story))
+        return ZCL_FLEET_ARGUMENT;
+
+    uint8_t encoded[ZCL_FLEET_ROW_MAX_BYTES];
+    size_t len = 0;
+    status = append_row_store(ledger, &row, seed, encoded, &len);
     if (status != ZCL_FLEET_OK)
         return status;
 
@@ -1162,6 +1211,47 @@ static struct zcl_fleet_bucket *bucket_for(struct zcl_fleet_bucket *out,
     return b;
 }
 
+static bool query_cell_selected(const struct zcl_fleet_ledger *ledger,
+                                const struct fleet_cell *c,
+                                const struct zcl_fleet_query *query,
+                                uint32_t oldest, uint32_t today)
+{
+    if (!c->used || c->kind != query->kind)
+        return false;
+    if (c->day < oldest || c->day > today)
+        return false;
+    if (query->have_subject && c->subject != query->subject)
+        return false;
+    return !query->have_box ||
+           memcmp(ledger->box[c->box].id, query->box_id,
+                  ZCL_FLEET_ID_BYTES) == 0;
+}
+
+static void query_add_cell(struct zcl_fleet_bucket *b, const struct fleet_cell *c)
+{
+    b->rows += c->rows;
+    /* Cells are visited in pool order, not day order, so an LWW key
+     * takes the cell with the newest timestamp rather than the last one
+     * the walk happened to reach. Within a cell the chain's order
+     * already decided; between cells of one series, the day does. */
+    bool newer = c->last_ts >= b->last_ts;
+    if (newer)
+        b->last_ts = c->last_ts;
+    for (size_t k = 0; k <= ZCL_FLEET_PAIR_KEY_MAX; k++) {
+        if (c->state[k] != ZCL_FLEET_FIELD_PRESENT)
+            continue;
+        enum zcl_fleet_merge merge =
+            zcl_fleet_pair_merge(c->kind, c->subject, (uint8_t)k);
+        if (merge == ZCL_FLEET_MERGE_COUNTER &&
+            b->state[k] == ZCL_FLEET_FIELD_PRESENT)
+            b->value[k] += c->value[k];
+        else if (merge == ZCL_FLEET_MERGE_COUNTER ||
+                 b->state[k] != ZCL_FLEET_FIELD_PRESENT || newer)
+            b->value[k] = c->value[k];
+        b->state[k] = ZCL_FLEET_FIELD_PRESENT;
+    }
+}
+
 enum zcl_fleet_status zcl_fleet_ledger_query(
     const struct zcl_fleet_ledger *ledger, const struct zcl_fleet_query *query,
     struct zcl_fleet_bucket *out, size_t cap, size_t *count,
@@ -1186,43 +1276,16 @@ enum zcl_fleet_status zcl_fleet_ledger_query(
 
     for (size_t i = 0; i < ZCL_FLEET_INDEX_CELLS; i++) {
         const struct fleet_cell *c = &ledger->cell[i];
-        if (!c->used || c->kind != query->kind)
-            continue;
-        if (c->day < oldest || c->day > today)
-            continue;
-        if (query->have_subject && c->subject != query->subject)
+        if (!query_cell_selected(ledger, c, query, oldest, today))
             continue;
         const struct fleet_box *box = &ledger->box[c->box];
-        if (query->have_box &&
-            memcmp(box->id, query->box_id, ZCL_FLEET_ID_BYTES) != 0)
-            continue;
         struct zcl_fleet_bucket *b =
             bucket_for(out, cap, count, box->id, c->subject);
         if (!b) {
             status = ZCL_FLEET_FULL;
             break;
         }
-        b->rows += c->rows;
-        /* Cells are visited in pool order, not day order, so an LWW key
-         * takes the cell with the newest timestamp rather than the last one
-         * the walk happened to reach. Within a cell the chain's order
-         * already decided; between cells of one series, the day does. */
-        bool newer = c->last_ts >= b->last_ts;
-        if (newer)
-            b->last_ts = c->last_ts;
-        for (size_t k = 0; k <= ZCL_FLEET_PAIR_KEY_MAX; k++) {
-            if (c->state[k] != ZCL_FLEET_FIELD_PRESENT)
-                continue;
-            enum zcl_fleet_merge merge =
-                zcl_fleet_pair_merge(c->kind, c->subject, (uint8_t)k);
-            if (merge == ZCL_FLEET_MERGE_COUNTER &&
-                b->state[k] == ZCL_FLEET_FIELD_PRESENT)
-                b->value[k] += c->value[k];
-            else if (merge == ZCL_FLEET_MERGE_COUNTER ||
-                     b->state[k] != ZCL_FLEET_FIELD_PRESENT || newer)
-                b->value[k] = c->value[k];
-            b->state[k] = ZCL_FLEET_FIELD_PRESENT;
-        }
+        query_add_cell(b, c);
     }
     int64_t end = platform_time_monotonic_us();
     if (index_us)
@@ -1273,6 +1336,111 @@ static int64_t median_i64(int64_t *v, size_t n)
     return v[(n - 1) / 2];
 }
 
+static bool experiment_has_predict(const struct zcl_fleet_ledger *ledger,
+                                   const struct fleet_experiment_event *e)
+{
+    for (uint32_t j = 0; j < ledger->experiment_count; j++) {
+        const struct fleet_experiment_event *p = &ledger->experiment[j];
+        if (p->phase == ZCL_FLEET_EXPERIMENT_PREDICT &&
+            experiment_task_equal(p, e))
+            return true;
+    }
+    return false;
+}
+
+/* Tally one event into its group; returns 1 when a result had no predict. */
+static uint64_t experiment_tally_event(const struct zcl_fleet_ledger *ledger,
+                                       struct zcl_fleet_experiment_group *g,
+                                       const struct fleet_experiment_event *e)
+{
+    if (e->phase == ZCL_FLEET_EXPERIMENT_PREDICT) {
+        g->predicts++;
+        return 0;
+    }
+    if (e->phase != ZCL_FLEET_EXPERIMENT_RESULT)
+        return 0;
+    g->results++;
+    if (e->outcome == 1) /* LAND */
+        g->lands++;
+    if (experiment_has_predict(ledger, e))
+        return 0;
+    g->unpredicted++;
+    return 1;
+}
+
+struct experiment_samples {
+    int64_t walls[FLEET_EXPERIMENT_EVENTS_MAX];
+    int64_t tokens[FLEET_EXPERIMENT_EVENTS_MAX];
+    size_t nw, nt;
+    int64_t pred_sum, act_sum;
+    bool have_ratio;
+};
+
+static void experiment_sample_result(const struct zcl_fleet_ledger *ledger,
+                                     struct experiment_samples *s,
+                                     const struct fleet_experiment_event *e)
+{
+    if (e->have_wall && s->nw < FLEET_EXPERIMENT_EVENTS_MAX)
+        s->walls[s->nw++] = e->wall_s;
+    if (e->have_tokens && s->nt < FLEET_EXPERIMENT_EVENTS_MAX)
+        s->tokens[s->nt++] = e->tokens;
+    for (uint32_t j = 0; j < ledger->experiment_count; j++) {
+        const struct fleet_experiment_event *p = &ledger->experiment[j];
+        if (p->phase != ZCL_FLEET_EXPERIMENT_PREDICT ||
+            !experiment_task_equal(p, e) || !p->have_tokens ||
+            !e->have_tokens)
+            continue;
+        s->pred_sum += p->tokens;
+        s->act_sum += e->tokens;
+        s->have_ratio = true;
+        break;
+    }
+}
+
+static void experiment_group_summarize(const struct zcl_fleet_ledger *ledger,
+                                       struct zcl_fleet_experiment_group *g)
+{
+    struct experiment_samples s;
+    memset(&s, 0, sizeof s);
+    for (uint32_t i = 0; i < ledger->experiment_count; i++) {
+        const struct fleet_experiment_event *e = &ledger->experiment[i];
+        if (e->task_class != g->task_class || e->model != g->model)
+            continue;
+        if (e->phase != ZCL_FLEET_EXPERIMENT_RESULT)
+            continue;
+        experiment_sample_result(ledger, &s, e);
+    }
+    if (s.nw > 0) {
+        g->median_wall_s = median_i64(s.walls, s.nw);
+        g->have_median_wall = 1;
+    }
+    if (s.nt > 0) {
+        g->median_tokens = median_i64(s.tokens, s.nt);
+        g->have_median_tokens = 1;
+    }
+    if (s.have_ratio && s.act_sum > 0) {
+        g->pred_actual_bp = (s.pred_sum * 10000) / s.act_sum;
+        g->have_pred_actual = 1;
+    }
+}
+
+static void experiment_groups_sort(struct zcl_fleet_experiment_group *out,
+                                   size_t count)
+{
+    for (size_t i = 1; i < count; i++) {
+        struct zcl_fleet_experiment_group t = out[i];
+        size_t j = i;
+        while (j > 0 &&
+               (out[j - 1].task_class > t.task_class ||
+                (out[j - 1].task_class == t.task_class &&
+                 out[j - 1].model > t.model))) {
+            out[j] = out[j - 1];
+            j--;
+        }
+        out[j] = t;
+    }
+}
+
 enum zcl_fleet_status zcl_fleet_ledger_experiment_stats(
     const struct zcl_fleet_ledger *ledger,
     struct zcl_fleet_experiment_group *out, size_t cap, size_t *count,
@@ -1297,84 +1465,14 @@ enum zcl_fleet_status zcl_fleet_ledger_experiment_stats(
             status = ZCL_FLEET_FULL;
             break;
         }
-        if (e->phase == ZCL_FLEET_EXPERIMENT_PREDICT)
-            g->predicts++;
-        else if (e->phase == ZCL_FLEET_EXPERIMENT_RESULT) {
-            g->results++;
-            if (e->outcome == 1) /* LAND */
-                g->lands++;
-            bool found = false;
-            for (uint32_t j = 0; j < ledger->experiment_count; j++) {
-                const struct fleet_experiment_event *p = &ledger->experiment[j];
-                if (p->phase == ZCL_FLEET_EXPERIMENT_PREDICT &&
-                    experiment_task_equal(p, e)) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                g->unpredicted++;
-                unmatched++;
-            }
-        }
+        unmatched += experiment_tally_event(ledger, g, e);
     }
 
-    for (size_t gi = 0; gi < *count && status == ZCL_FLEET_OK; gi++) {
-        int64_t walls[FLEET_EXPERIMENT_EVENTS_MAX];
-        int64_t tokens[FLEET_EXPERIMENT_EVENTS_MAX];
-        size_t nw = 0, nt = 0;
-        int64_t pred_sum = 0, act_sum = 0;
-        bool have_ratio = false;
-        struct zcl_fleet_experiment_group *g = &out[gi];
-        for (uint32_t i = 0; i < ledger->experiment_count; i++) {
-            const struct fleet_experiment_event *e = &ledger->experiment[i];
-            if (e->task_class != g->task_class || e->model != g->model)
-                continue;
-            if (e->phase != ZCL_FLEET_EXPERIMENT_RESULT)
-                continue;
-            if (e->have_wall && nw < FLEET_EXPERIMENT_EVENTS_MAX)
-                walls[nw++] = e->wall_s;
-            if (e->have_tokens && nt < FLEET_EXPERIMENT_EVENTS_MAX)
-                tokens[nt++] = e->tokens;
-            for (uint32_t j = 0; j < ledger->experiment_count; j++) {
-                const struct fleet_experiment_event *p = &ledger->experiment[j];
-                if (p->phase != ZCL_FLEET_EXPERIMENT_PREDICT ||
-                    !experiment_task_equal(p, e) || !p->have_tokens ||
-                    !e->have_tokens)
-                    continue;
-                pred_sum += p->tokens;
-                act_sum += e->tokens;
-                have_ratio = true;
-                break;
-            }
-        }
-        if (nw > 0) {
-            g->median_wall_s = median_i64(walls, nw);
-            g->have_median_wall = 1;
-        }
-        if (nt > 0) {
-            g->median_tokens = median_i64(tokens, nt);
-            g->have_median_tokens = 1;
-        }
-        if (have_ratio && act_sum > 0) {
-            g->pred_actual_bp = (pred_sum * 10000) / act_sum;
-            g->have_pred_actual = 1;
-        }
-    }
+    for (size_t gi = 0; gi < *count && status == ZCL_FLEET_OK; gi++)
+        experiment_group_summarize(ledger, &out[gi]);
 
     /* Stable order: task_class then model, so a fixture has one answer. */
-    for (size_t i = 1; i < *count; i++) {
-        struct zcl_fleet_experiment_group t = out[i];
-        size_t j = i;
-        while (j > 0 &&
-               (out[j - 1].task_class > t.task_class ||
-                (out[j - 1].task_class == t.task_class &&
-                 out[j - 1].model > t.model))) {
-            out[j] = out[j - 1];
-            j--;
-        }
-        out[j] = t;
-    }
+    experiment_groups_sort(out, *count);
 
     if (unpredicted)
         *unpredicted = unmatched;
