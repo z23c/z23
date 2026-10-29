@@ -896,6 +896,19 @@ static struct zcl_result sr_services_running(void *ctx)
     boot_step_start_maintenance_services();
     return ZCL_OK;
 }
+static void sandbox_add_home_dir_rule(struct os_sandbox_path_rule *rules, size_t cap, size_t *n,
+                                      char scratch[][PATH_MAX], size_t scratch_cap, size_t *s,
+                                      const char *home, const char *subdir, bool allow_write)
+{
+    if (!(home && home[0] && *n < cap && *s < scratch_cap)) return;
+    snprintf(scratch[*s], PATH_MAX, "%s/%s", home, subdir);
+    struct stat st;
+    if (stat(scratch[*s], &st) == 0 && S_ISDIR(st.st_mode)) {
+        rules[(*n)++] = (struct os_sandbox_path_rule){
+            .path = scratch[*s], .allow_read = true, .allow_write = allow_write };
+        (*s)++;
+    }
+}
 /* Late confinement: enter the os_sandbox node steady-state profile once every
  * thread is spawned and every late fd is open (SERVICES_RUNNING, highest
  * `order` — last record before READY). No-op unless -sandbox=steady.
@@ -922,19 +935,6 @@ static struct zcl_result sr_services_running(void *ctx)
  * extra read-only paths the confined node opens post-boot (Sapling params dir,
  * /etc/resolv.conf) — enabled for -confine, which uses a strict seccomp
  * allow-list and therefore benefits from the fuller path set. */
-static void sandbox_add_home_dir_rule(struct os_sandbox_path_rule *rules, size_t cap, size_t *n,
-                                      char scratch[][PATH_MAX], size_t scratch_cap, size_t *s,
-                                      const char *home, const char *subdir, bool allow_write)
-{
-    if (!(home && home[0] && *n < cap && *s < scratch_cap)) return;
-    snprintf(scratch[*s], PATH_MAX, "%s/%s", home, subdir);
-    struct stat st;
-    if (stat(scratch[*s], &st) == 0 && S_ISDIR(st.st_mode)) {
-        rules[(*n)++] = (struct os_sandbox_path_rule){
-            .path = scratch[*s], .allow_read = true, .allow_write = allow_write };
-        (*s)++;
-    }
-}
 static size_t sandbox_build_fs_rules(const char *datadir,
                                      struct os_sandbox_path_rule *rules,
                                      size_t cap, bool extra_ro,
