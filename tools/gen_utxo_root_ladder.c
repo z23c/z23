@@ -345,6 +345,51 @@ struct cli {
     const char *out_c;
 };
 
+/* Consumes one value-taking or boolean flag; false = not one of them. */
+static bool parse_cli_value_flag(const char *a, struct cli *c)
+{
+    if (strncmp(a, "--source-kernel-db=", 19) == 0)
+        c->source_kernel_db = a + 19;
+    else if (strncmp(a, "--source-progress-kv=", 21) == 0)
+        c->source_kernel_db = a + 21;  /* alias: pre-flip datadirs */
+    else if (strncmp(a, "--second-db=", 12) == 0) c->second_db = a + 12;
+    else if (strncmp(a, "--second-kernel-db=", 19) == 0)
+        c->second_kernel_db = a + 19;
+    else if (strncmp(a, "--second-progress-kv=", 21) == 0)
+        c->second_kernel_db = a + 21;  /* alias: pre-flip datadirs */
+    else if (strncmp(a, "--leaf-store=", 13) == 0) c->leaf_store = a + 13;
+    else if (strncmp(a, "--stride=", 9) == 0) c->stride = atoi(a + 9);
+    else if (strncmp(a, "--max-height=", 13) == 0) c->max_height = atoi(a + 13);
+    else if (strncmp(a, "--dense-height=", 15) == 0) c->dense_height = atoi(a + 15);
+    else if (strcmp(a, "--immutable-source") == 0) c->immutable_source = true;
+    else if (strncmp(a, "--out-h=", 8) == 0) c->out_h = a + 8;
+    else if (strncmp(a, "--out-c=", 8) == 0) c->out_c = a + 8;
+    else return false;
+    return true;
+}
+
+/* Required-argument and range checks run once every flag has been read. */
+static bool parse_cli_check(const struct cli *c)
+{
+    if (!c->source_db) {
+        fprintf(stderr, "missing required <source_node_db_copy> argument\n");
+        return false;
+    }
+    if (!c->source_kernel_db) {
+        fprintf(stderr, "missing required --source-kernel-db=PATH "
+                        "(boundary UTXO roots live there, not in node.db — "
+                        "see engine/modules/storage/src/consensus_db.c)\n");
+        return false;
+    }
+    if (c->stride <= 0 || (c->stride % MMR_COMMITMENT_INTERVAL) != 0) {
+        fprintf(stderr, "--stride must be a positive multiple of "
+                        "MMR_COMMITMENT_INTERVAL(%d), got %d\n",
+                MMR_COMMITMENT_INTERVAL, c->stride);
+        return false;
+    }
+    return true;
+}
+
 static bool parse_cli(int argc, char **argv, struct cli *c)
 {
     c->source_db = NULL;
@@ -361,23 +406,8 @@ static bool parse_cli(int argc, char **argv, struct cli *c)
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (strncmp(a, "--source-kernel-db=", 19) == 0)
-            c->source_kernel_db = a + 19;
-        else if (strncmp(a, "--source-progress-kv=", 21) == 0)
-            c->source_kernel_db = a + 21;  /* alias: pre-flip datadirs */
-        else if (strncmp(a, "--second-db=", 12) == 0) c->second_db = a + 12;
-        else if (strncmp(a, "--second-kernel-db=", 19) == 0)
-            c->second_kernel_db = a + 19;
-        else if (strncmp(a, "--second-progress-kv=", 21) == 0)
-            c->second_kernel_db = a + 21;  /* alias: pre-flip datadirs */
-        else if (strncmp(a, "--leaf-store=", 13) == 0) c->leaf_store = a + 13;
-        else if (strncmp(a, "--stride=", 9) == 0) c->stride = atoi(a + 9);
-        else if (strncmp(a, "--max-height=", 13) == 0) c->max_height = atoi(a + 13);
-        else if (strncmp(a, "--dense-height=", 15) == 0) c->dense_height = atoi(a + 15);
-        else if (strcmp(a, "--immutable-source") == 0) c->immutable_source = true;
-        else if (strncmp(a, "--out-h=", 8) == 0) c->out_h = a + 8;
-        else if (strncmp(a, "--out-c=", 8) == 0) c->out_c = a + 8;
-        else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
+        if (parse_cli_value_flag(a, c)) continue;
+        if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
             printf("Usage: %s <source_node_db_copy> "
                    "--source-kernel-db=PATH "
                    "[--second-db=PATH] [--second-kernel-db=PATH] "
@@ -398,23 +428,7 @@ static bool parse_cli(int argc, char **argv, struct cli *c)
             return false;
         }
     }
-    if (!c->source_db) {
-        fprintf(stderr, "missing required <source_node_db_copy> argument\n");
-        return false;
-    }
-    if (!c->source_kernel_db) {
-        fprintf(stderr, "missing required --source-kernel-db=PATH "
-                        "(boundary UTXO roots live there, not in node.db — "
-                        "see engine/modules/storage/src/consensus_db.c)\n");
-        return false;
-    }
-    if (c->stride <= 0 || (c->stride % MMR_COMMITMENT_INTERVAL) != 0) {
-        fprintf(stderr, "--stride must be a positive multiple of "
-                        "MMR_COMMITMENT_INTERVAL(%d), got %d\n",
-                MMR_COMMITMENT_INTERVAL, c->stride);
-        return false;
-    }
-    return true;
+    return parse_cli_check(c);
 }
 
 /* ── Output emitters (mirrors tools/gen_sha3_windows.c discipline) ─── */
@@ -627,63 +641,78 @@ static bool compute_dense_mmb_root(const char *leaf_store_path,
     return true;
 }
 
-/* ── Main ────────────────────────────────────────────────────────── */
-
-int main(int argc, char **argv)
+static void close_sources(sqlite3 *src, sqlite3 *snd)
 {
-    struct cli c;
-    if (!parse_cli(argc, argv, &c)) return 1;
+    sqlite3_close(src);
+    if (snd) sqlite3_close(snd);
+}
 
-    sqlite3 *src = open_db_ro(c.source_db, c.immutable_source);
-    if (!src) return 1;
-    bool src_has_kdb = attach_kernel_db(
-        src, c.source_kernel_db, c.immutable_source);
-    if (!src_has_kdb) {
+static void warn_missing_kernel_db(bool has_kdb, const char *path)
+{
+    if (!has_kdb) {
         fprintf(stderr, "[gen_utxo_root_ladder] cannot attach "
                         "--source-kernel-db=%s — stride rungs will all be "
                         "skipped (only the checkpoint rung can be emitted)\n",
-                c.source_kernel_db);
+                path);
     }
+}
 
-    sqlite3 *snd = NULL;
-    bool snd_has_kdb = false;
-    if (c.second_db) {
-        snd = open_db_ro(c.second_db, c.immutable_source);
-        if (!snd) { sqlite3_close(src); return 1; }
-        snd_has_kdb = attach_kernel_db(
-            snd, c.second_kernel_db, c.immutable_source);
+static void report_second_max(sqlite3 *snd)
+{
+    int32_t snd_max = -1;
+    const char *snd_why = NULL;
+    db_max_height(snd, &snd_max, &snd_why);
+    printf("[gen_utxo_root_ladder] second-db max_height=%d\n", snd_max);
+}
+
+/* Cross-checks one stride rung against the second source; returns provenance
+ * and counts any divergence. */
+static uint8_t dual_source_provenance(sqlite3 *snd, bool snd_has_kdb, int64_t h,
+                                      const uint8_t bh[32], const uint8_t ur[32],
+                                      int *divergences)
+{
+    uint8_t provenance = PROV_SINGLE;
+    uint8_t bh2[32], ur2[32];
+    bool have2 = db_block_hash_at(snd, (int32_t)h, bh2) &&
+                db_boundary_root_at(snd, snd_has_kdb, (int32_t)h, ur2);
+    if (!have2) {
+        printf("[gen_utxo_root_ladder] h=%lld: second-db has no data yet "
+               "(still folding) — single-source rung\n", (long long)h);
+    } else if (memcmp(bh, bh2, 32) != 0) {
+        char hx1[65], hx2[65];
+        zcl_hex_encode(bh, 32, hx1); zcl_hex_encode(bh2, 32, hx2);
+        fprintf(stderr, "[gen_utxo_root_ladder] DIVERGENCE h=%lld: "
+                        "block_hash source=%s second=%s (DIFFERENT CHAINS)\n",
+                (long long)h, hx1, hx2);
+        (*divergences)++;
+    } else if (memcmp(ur, ur2, 32) != 0) {
+        char hx1[65], hx2[65];
+        zcl_hex_encode(ur, 32, hx1); zcl_hex_encode(ur2, 32, hx2);
+        fprintf(stderr, "[gen_utxo_root_ladder] DIVERGENCE h=%lld: "
+                        "SAME block_hash, utxo_root source=%s second=%s "
+                        "(state-wrong-coin class)\n",
+                (long long)h, hx1, hx2);
+        (*divergences)++;
+    } else {
+        provenance = PROV_DUAL;
+        printf("[gen_utxo_root_ladder] h=%lld: DUAL-SOURCE confirmed\n",
+               (long long)h);
     }
+    return provenance;
+}
 
-    int32_t src_max = -1;
-    const char *max_why = NULL;
-    if (!db_max_height(src, &src_max, &max_why)) {
-        fprintf(stderr, "[gen_utxo_root_ladder] %s\n", max_why);
-        sqlite3_close(src);
-        if (snd) sqlite3_close(snd);
-        return 1;
-    }
-    int32_t max_h = c.max_height >= 0 ? c.max_height : src_max;
-    if (max_h > src_max) max_h = src_max;
-    if (snd) {
-        int32_t snd_max = -1;
-        const char *snd_why = NULL;
-        db_max_height(snd, &snd_max, &snd_why);
-        printf("[gen_utxo_root_ladder] second-db max_height=%d\n", snd_max);
-    }
-
-    printf("[gen_utxo_root_ladder] source=%s max_height=%d stride=%d%s\n",
-           c.source_db, max_h, c.stride, snd ? " (dual-source)" : "");
-
-    struct entry entries[MAX_ENTRIES];
-    size_t n = 0;
-    int divergences = 0;
-    int32_t last_stride_height_recorded = -1;
-
+/* Appends one rung per stride height; returns the new entry count. */
+static size_t collect_stride_rungs(sqlite3 *src, bool src_has_kdb,
+                                   sqlite3 *snd, bool snd_has_kdb,
+                                   int32_t max_h, int32_t stride,
+                                   struct entry *entries, size_t n,
+                                   int *divergences, int32_t *last_h)
+{
     /* h is int64 so `h += stride` can never wrap: with a best-chain height
      * near INT32_MAX (corrupt db, or --max-height=...), the int32 loop
      * overflowed to a negative height, the `h <= max_h` test stayed true,
      * and the loop never terminated. */
-    for (int64_t h = 0; h <= max_h; h += c.stride) {
+    for (int64_t h = 0; h <= max_h; h += stride) {
         uint8_t bh[32], ur[32];
         if (!db_block_hash_at(src, (int32_t)h, bh)) {
             printf("[gen_utxo_root_ladder] h=%lld: no best-chain block hash in "
@@ -698,34 +727,8 @@ int main(int argc, char **argv)
         }
 
         uint8_t provenance = PROV_SINGLE;
-        if (snd) {
-            uint8_t bh2[32], ur2[32];
-            bool have2 = db_block_hash_at(snd, (int32_t)h, bh2) &&
-                        db_boundary_root_at(snd, snd_has_kdb, (int32_t)h, ur2);
-            if (!have2) {
-                printf("[gen_utxo_root_ladder] h=%lld: second-db has no data yet "
-                       "(still folding) — single-source rung\n", (long long)h);
-            } else if (memcmp(bh, bh2, 32) != 0) {
-                char hx1[65], hx2[65];
-                zcl_hex_encode(bh, 32, hx1); zcl_hex_encode(bh2, 32, hx2);
-                fprintf(stderr, "[gen_utxo_root_ladder] DIVERGENCE h=%lld: "
-                                "block_hash source=%s second=%s (DIFFERENT CHAINS)\n",
-                        (long long)h, hx1, hx2);
-                divergences++;
-            } else if (memcmp(ur, ur2, 32) != 0) {
-                char hx1[65], hx2[65];
-                zcl_hex_encode(ur, 32, hx1); zcl_hex_encode(ur2, 32, hx2);
-                fprintf(stderr, "[gen_utxo_root_ladder] DIVERGENCE h=%lld: "
-                                "SAME block_hash, utxo_root source=%s second=%s "
-                                "(state-wrong-coin class)\n",
-                        (long long)h, hx1, hx2);
-                divergences++;
-            } else {
-                provenance = PROV_DUAL;
-                printf("[gen_utxo_root_ladder] h=%lld: DUAL-SOURCE confirmed\n",
-                       (long long)h);
-            }
-        }
+        if (snd) provenance = dual_source_provenance(snd, snd_has_kdb, h, bh, ur,
+                                                     divergences);
 
         if (n >= MAX_ENTRIES) {
             fprintf(stderr, "[gen_utxo_root_ladder] too many rungs (cap=%d)\n",
@@ -737,8 +740,125 @@ int main(int argc, char **argv)
         memcpy(entries[n].utxo_root, ur, 32);
         entries[n].provenance = provenance;
         n++;
-        last_stride_height_recorded = (int32_t)h;
+        *last_h = (int32_t)h;
     }
+    return n;
+}
+
+static void check_checkpoint_anchor(sqlite3 *src, const struct gen_checkpoint_anchor *cp,
+                                    int *divergences)
+{
+    uint8_t bh[32];
+    if (db_block_hash_at(src, cp->height, bh)) {
+        if (memcmp(bh, cp->block_hash, 32) != 0) {
+            char hx1[65], hx2[65];
+            zcl_hex_encode(bh, 32, hx1); zcl_hex_encode(cp->block_hash, 32, hx2);
+            fprintf(stderr, "[gen_utxo_root_ladder] DIVERGENCE h=%d "
+                            "(zclassicd-verified checkpoint): source "
+                            "block_hash=%s checkpoint block_hash=%s\n",
+                    cp->height, hx1, hx2);
+            (*divergences)++;
+        } else {
+            printf("[gen_utxo_root_ladder] h=%d: checkpoint block_hash "
+                   "confirmed against source db\n", cp->height);
+        }
+    } else {
+        printf("[gen_utxo_root_ladder] h=%d: source db has no block at the "
+               "checkpoint height (not reached) — checkpoint rung emitted "
+               "unverified-against-source\n", cp->height);
+    }
+}
+
+static void insert_checkpoint_rung(struct entry *entries, size_t *n,
+                                   const struct gen_checkpoint_anchor *cp)
+{
+    if (*n >= MAX_ENTRIES) {
+        fprintf(stderr, "[gen_utxo_root_ladder] no room for checkpoint rung\n");
+    } else {
+        /* Insert in height-sorted position. */
+        size_t pos = *n;
+        for (size_t i = 0; i < *n; i++) {
+            if (entries[i].height > cp->height) { pos = i; break; }
+        }
+        memmove(&entries[pos + 1], &entries[pos],
+               (*n - pos) * sizeof(entries[0]));
+        entries[pos].height = cp->height;
+        memcpy(entries[pos].block_hash, cp->block_hash, 32);
+        memcpy(entries[pos].utxo_root, cp->sha3_hash, 32);
+        entries[pos].provenance = PROV_CHECKPOINT;
+        (*n)++;
+    }
+}
+
+static void dense_anchor_for_table(const char *leaf_store, int32_t want_height,
+                                   int32_t last_stride_h, int32_t *dense_height,
+                                   uint8_t dense_root[32])
+{
+    if (!compute_dense_mmb_root(leaf_store, want_height, last_stride_h,
+                                dense_height, dense_root)) {
+        fprintf(stderr, "[gen_utxo_root_ladder] dense-layer computation "
+                        "failed — emitting table WITHOUT the dense anchor\n");
+        *dense_height = -1;
+        memset(dense_root, 0, 32);
+    } else if (*dense_height >= 0) {
+        char hx[65];
+        zcl_hex_encode(dense_root, 32, hx);
+        printf("[gen_utxo_root_ladder] dense mmb_root @ h=%d: %s\n",
+               *dense_height, hx);
+    }
+}
+
+static bool emit_tables(const struct cli *c, const struct entry *entries, size_t n,
+                        int32_t dense_height, const uint8_t dense_root[32])
+{
+    if (!emit_header(c->out_h)) return false;
+    if (!emit_source(c->out_c, entries, n, dense_height, dense_root)) return false;
+    return true;
+}
+
+/* ── Main ────────────────────────────────────────────────────────── */
+
+int main(int argc, char **argv)
+{
+    struct cli c;
+    if (!parse_cli(argc, argv, &c)) return 1;
+
+    sqlite3 *src = open_db_ro(c.source_db, c.immutable_source);
+    if (!src) return 1;
+    bool src_has_kdb = attach_kernel_db(
+        src, c.source_kernel_db, c.immutable_source);
+    warn_missing_kernel_db(src_has_kdb, c.source_kernel_db);
+
+    sqlite3 *snd = NULL;
+    bool snd_has_kdb = false;
+    if (c.second_db) {
+        snd = open_db_ro(c.second_db, c.immutable_source);
+        if (!snd) { sqlite3_close(src); return 1; }
+        snd_has_kdb = attach_kernel_db(
+            snd, c.second_kernel_db, c.immutable_source);
+    }
+
+    int32_t src_max = -1;
+    const char *max_why = NULL;
+    if (!db_max_height(src, &src_max, &max_why)) {
+        fprintf(stderr, "[gen_utxo_root_ladder] %s\n", max_why);
+        close_sources(src, snd);
+        return 1;
+    }
+    int32_t max_h = c.max_height >= 0 ? c.max_height : src_max;
+    if (max_h > src_max) max_h = src_max;
+    if (snd) report_second_max(snd);
+
+    printf("[gen_utxo_root_ladder] source=%s max_height=%d stride=%d%s\n",
+           c.source_db, max_h, c.stride, snd ? " (dual-source)" : "");
+
+    struct entry entries[MAX_ENTRIES];
+    size_t n = 0;
+    int divergences = 0;
+    int32_t last_stride_height_recorded = -1;
+
+    n = collect_stride_rungs(src, src_has_kdb, snd, snd_has_kdb, max_h, c.stride,
+                             entries, n, &divergences, &last_stride_height_recorded);
 
     /* Checkpoint rung: the one zclassicd-verified anchor. Always included
      * (it does not depend on coins_kv boundary roots at all — it is the
@@ -747,76 +867,29 @@ int main(int argc, char **argv)
      * at that exact height? */
     {
         const struct gen_checkpoint_anchor *cp = &g_checkpoint_anchor;
-        uint8_t bh[32];
-        if (db_block_hash_at(src, cp->height, bh)) {
-            if (memcmp(bh, cp->block_hash, 32) != 0) {
-                char hx1[65], hx2[65];
-                zcl_hex_encode(bh, 32, hx1); zcl_hex_encode(cp->block_hash, 32, hx2);
-                fprintf(stderr, "[gen_utxo_root_ladder] DIVERGENCE h=%d "
-                                "(zclassicd-verified checkpoint): source "
-                                "block_hash=%s checkpoint block_hash=%s\n",
-                        cp->height, hx1, hx2);
-                divergences++;
-            } else {
-                printf("[gen_utxo_root_ladder] h=%d: checkpoint block_hash "
-                       "confirmed against source db\n", cp->height);
-            }
-        } else {
-            printf("[gen_utxo_root_ladder] h=%d: source db has no block at the "
-                   "checkpoint height (not reached) — checkpoint rung emitted "
-                   "unverified-against-source\n", cp->height);
-        }
-
-        if (n >= MAX_ENTRIES) {
-            fprintf(stderr, "[gen_utxo_root_ladder] no room for checkpoint rung\n");
-        } else {
-            /* Insert in height-sorted position. */
-            size_t pos = n;
-            for (size_t i = 0; i < n; i++) {
-                if (entries[i].height > cp->height) { pos = i; break; }
-            }
-            memmove(&entries[pos + 1], &entries[pos],
-                   (n - pos) * sizeof(entries[0]));
-            entries[pos].height = cp->height;
-            memcpy(entries[pos].block_hash, cp->block_hash, 32);
-            memcpy(entries[pos].utxo_root, cp->sha3_hash, 32);
-            entries[pos].provenance = PROV_CHECKPOINT;
-            n++;
-        }
+        check_checkpoint_anchor(src, cp, &divergences);
+        insert_checkpoint_rung(entries, &n, cp);
     }
 
     if (divergences > 0) {
         fprintf(stderr, "[gen_utxo_root_ladder] %d divergence(s) found — "
                         "refusing to emit a locked table. Investigate before "
                         "re-running.\n", divergences);
-        sqlite3_close(src);
-        if (snd) sqlite3_close(snd);
+        close_sources(src, snd);
         return 1;
     }
 
     int32_t dense_height = -1;
     uint8_t dense_root[32] = {0};
     if (c.leaf_store) {
-        if (!compute_dense_mmb_root(c.leaf_store, c.dense_height,
-                                    last_stride_height_recorded,
-                                    &dense_height, dense_root)) {
-            fprintf(stderr, "[gen_utxo_root_ladder] dense-layer computation "
-                            "failed — emitting table WITHOUT the dense anchor\n");
-            dense_height = -1;
-            memset(dense_root, 0, 32);
-        } else if (dense_height >= 0) {
-            char hx[65];
-            zcl_hex_encode(dense_root, 32, hx);
-            printf("[gen_utxo_root_ladder] dense mmb_root @ h=%d: %s\n",
-                   dense_height, hx);
-        }
+        dense_anchor_for_table(c.leaf_store, c.dense_height,
+                               last_stride_height_recorded,
+                               &dense_height, dense_root);
     }
 
-    sqlite3_close(src);
-    if (snd) sqlite3_close(snd);
+    close_sources(src, snd);
 
-    if (!emit_header(c.out_h)) return 1;
-    if (!emit_source(c.out_c, entries, n, dense_height, dense_root)) return 1;
+    if (!emit_tables(&c, entries, n, dense_height, dense_root)) return 1;
 
     printf("[gen_utxo_root_ladder] wrote %s and %s (%zu rungs, dense=%s)\n",
            c.out_h, c.out_c, n, dense_height >= 0 ? "yes" : "no");
