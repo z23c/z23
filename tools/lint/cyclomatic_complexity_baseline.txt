@@ -619,8 +619,8 @@ engine/services/src/utxo_mirror_delta.c:utxo_mirror_delta_apply:28
 engine/services/src/utxo_recovery_frontier_gate.c:utxo_recovery_clamp_tip_to_header_frontier:30
 engine/services/src/utxo_recovery_frontier_gate.c:utxo_recovery_relink_scrambled_ancestry:38
 engine/services/src/utxo_recovery_frontier_gate.c:utxo_recovery_settle_finalized_floor:22
-engine/services/src/utxo_recovery_restore.c:utxo_recovery_import_ldb:48
-engine/services/src/utxo_recovery_restore.c:utxo_recovery_restore_chain_tip:65
+engine/services/src/utxo_recovery_restore.c:utxo_recovery_import_ldb:20
+engine/services/src/utxo_recovery_restore.c:utxo_recovery_restore_chain_tip:48
 engine/services/src/utxo_recovery_service.c:integrity_checks_boot_ok:25
 engine/services/src/utxo_recovery_service.c:utxo_recovery_commit_tip:28
 engine/services/src/utxo_recovery_service.c:utxo_recovery_execute:32

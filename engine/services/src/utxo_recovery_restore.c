@@ -81,23 +81,20 @@ static bool utxo_recovery_scan_fallback_below_finalized_floor(
     return floor > scan_fallback->nHeight;
 }
 
-/* ── LDB→SQLite UTXO import ─────────────────────────────────── */
-
-
-struct utxo_import_result utxo_recovery_import_ldb(
-    struct utxo_recovery_ctx *ctx)
+static struct zcl_result ldb_import_validate_ctx(
+    const struct utxo_recovery_ctx *ctx)
 {
-    struct utxo_import_result res = { .status = recovery_status_ok() };
-
-    if (!ctx || !ctx->ndb || !ctx->datadir) {
-        res.status = ZCL_ERR(-1,
+    if (!ctx || !ctx->ndb || !ctx->datadir)
+        return ZCL_ERR(-1,
             "utxo_recovery_import_ldb: invalid ctx=%p ndb=%p datadir=%s",
             (void *)ctx, ctx ? (void *)ctx->ndb : NULL,
             ctx && ctx->datadir ? ctx->datadir : "(null)");
-        LOG_WARN("utxo_recovery", "%s", res.status.message);
-        return res;
-    }
+    return ZCL_OK;
+}
 
+static struct zcl_result ldb_import_validate_datadir(
+    const struct utxo_recovery_ctx *ctx)
+{
     /* Defensive: ctx->datadir is interpolated into shell commands below
      * (the "rm -rf '%s' && cp -a ..." copy at the zclassicd-LOCK branch
      * and the "rm -rf '%s'" cleanup). A single quote or other shell
@@ -107,10 +104,281 @@ struct utxo_import_result utxo_recovery_import_ldb(
      * Reject any path containing characters meaningful to the shell;
      * all filesystem-valid paths without these rarely-needed characters
      * are unaffected. */
-    if (strcspn(ctx->datadir, "\"'$`|&;<>()") != strlen(ctx->datadir)) {
-        res.status = ZCL_ERR(-5,
+    if (strcspn(ctx->datadir, "\"'$`|&;<>()") != strlen(ctx->datadir))
+        return ZCL_ERR(-5,
             "utxo_recovery_import_ldb: datadir contains shell "
             "metacharacters datadir=%s", ctx->datadir);
+    return ZCL_OK;
+}
+
+static struct zcl_result ldb_import_validate_deps(
+    const struct utxo_recovery_ctx *ctx)
+{
+    if (!ctx->coins_sqlite || !ctx->coins_tip || !ctx->state)
+        return ZCL_ERR(-4,
+            "utxo_recovery_import_ldb: import requires coins_sqlite=%p "
+            "coins_tip=%p state=%p",
+            (void *)ctx->coins_sqlite, (void *)ctx->coins_tip,
+            (void *)ctx->state);
+    return ZCL_OK;
+}
+
+static void ldb_import_resolve_chainstate(char *cs_path, size_t cs_size,
+                                          struct stat *cs_st)
+{
+    if (stat(cs_path, cs_st) != 0) {
+        const char *home_cs = getenv("HOME");
+        if (home_cs)
+            snprintf(cs_path, cs_size,
+                     "%s/.zclassic/chainstate", home_cs);
+    }
+}
+
+/* Choose the directory to import from; when zclassicd owns the LevelDB,
+ * copy it to a temp dir and record that dir in cleanup_path. */
+static struct zcl_result ldb_import_prepare_source(
+    const struct utxo_recovery_ctx *ctx, const char *cs_path,
+    char import_path[1100], char *cleanup_path, size_t cleanup_size)
+{
+    /* If zclassicd's LOCK file exists, another process owns this
+     * LevelDB. Copy the chainstate to a temp dir to avoid
+     * corrupting zclassicd's data. NEVER delete another
+     * process's LOCK file. */
+    char cs_lock[1100];
+    snprintf(cs_lock, sizeof(cs_lock), "%s/LOCK", cs_path);
+    struct stat lock_st;
+    if (stat(cs_lock, &lock_st) != 0) {
+        snprintf(import_path, 1100, "%s", cs_path);
+        return ZCL_OK;
+    }
+    snprintf(import_path, 1100, "%s/chainstate_import_tmp", ctx->datadir);
+        /* The owner is LIVE — take a provably point-in-time copy
+         * (utxo_recovery_ldb_copy.c); a torn copy imports a UTXO set
+         * with silent holes whose first spend wedges the reducer. */
+    printf("Copying chainstate (zclassicd LOCK present)...\n");
+    fflush(stdout);
+    struct zcl_result cpres = utxo_recovery_copy_chainstate_stable(
+        cs_path, import_path);
+    if (!cpres.ok)
+        return cpres;
+        /* Remove the copied LOCK so we can open it */
+    char tmp_lock[1200];
+    snprintf(tmp_lock, sizeof(tmp_lock), "%s/LOCK", import_path);
+    unlink(tmp_lock);
+    snprintf(cleanup_path, cleanup_size, "%s", import_path);
+    return ZCL_OK;
+}
+
+static void ldb_import_sync_utxos(struct utxo_recovery_ctx *ctx,
+                                  struct coins_view_db *migrate_db)
+{
+    struct node_db import_db;
+    if (node_db_sync_open_private_db_like(ctx->ndb, &import_db)) {
+        node_db_sync_import_utxos(&import_db, migrate_db);
+        node_db_close(&import_db);
+    } else {
+        node_db_sync_import_utxos(ctx->ndb, migrate_db);
+    }
+}
+
+static void ldb_import_note_found_tip(struct utxo_recovery_ctx *ctx,
+                                      struct block_index *found,
+                                      const char *dbg_hex,
+                                      struct utxo_import_result *res)
+{
+                /* Block found in index — set as chain tip.
+                 * frontier_exempt: the import carries SHA3-verified snapshot
+                 * evidence and must not be clamped by a stale pre-import
+                 * log; the seed-anchor stamp re-raises the frontier to H. */
+                struct block_index *commit_blk = found;
+                if (utxo_recovery_commit_tip(
+                        ctx, &commit_blk, "ldb_import_found",
+                        true, true).ok) {
+                    printf("LDB import: chain tip at h=%d hash=%s\n",
+                           commit_blk->nHeight, dbg_hex);
+                    res->skip_activate = true;
+                    snprintf(res->anchor_reason, sizeof(res->anchor_reason),
+                             "ldb_import_found");
+                    /* Record the durable seed from the COMMITTED tip (the
+                     * exempt path never clamps, but the seed must attest to
+                     * what was actually installed, not what was proposed).
+                     * Count = live utxos rows. */
+                    utxo_recovery_write_cold_import_seed(ctx->ndb,
+                        commit_blk->nHeight, commit_blk->phashBlock,
+                        node_db_utxo_count(ctx->ndb));
+                }
+}
+
+static void ldb_import_note_anchor_tip(struct utxo_recovery_ctx *ctx,
+                                       const struct uint256 *ldb_best,
+                                       int ldb_height, const char *dbg_hex,
+                                       struct utxo_import_result *res)
+{
+                /* LDB best block NOT in our index — record an activation
+                 * anchor only. Do not publish coins_best_block until the
+                 * block is present in the local index and CSR can commit it. */
+                struct block_index *anchor = chain_restore_create_anchor(
+                    ctx->state, ldb_best, ldb_height);
+                if (anchor) {
+                    snapsync_set_anchor(anchor);
+
+                    printf("LDB import: metadata anchor at h=%d hash=%s "
+                           "— waiting for real block data.\n",
+                           ldb_height, dbg_hex);
+                    /* Record-only: a pprev-less anchor installed above
+                     * the trust-rooted extent is the band-hole class.
+                     * Ancestry-derived — abstains on a
+                     * contiguous imported header chain. */
+                    utxo_recovery_note_band_unrooted_tip(
+                        anchor, "ldb_import_anchor");
+                }
+                res->skip_activate = true;
+                snprintf(res->anchor_reason, sizeof(res->anchor_reason),
+                         "ldb_import_anchor");
+}
+
+static void ldb_import_note_unknown_height(const struct uint256 *ldb_best,
+                                           struct utxo_import_result *res)
+{
+                char dbg_hex2[65];
+                uint256_get_hex(ldb_best, dbg_hex2);
+                printf("LDB import: coins_best_block=%s "
+                       "(height unknown)\n", dbg_hex2);
+                res->skip_activate = true;
+                snprintf(res->anchor_reason, sizeof(res->anchor_reason),
+                         "ldb_import_unknown");
+}
+
+static void ldb_import_record_best_block(struct utxo_recovery_ctx *ctx,
+                                         struct coins_view_db *migrate_db,
+                                         int ldb_height,
+                                         struct uint256 *ldb_best,
+                                         struct utxo_import_result *res)
+{
+        /* Set coins_best_block from LDB */
+        memset(ldb_best, 0, sizeof(*ldb_best));
+        if (!coins_view_db_get_best_block(migrate_db, ldb_best) ||
+            uint256_is_null(ldb_best))
+            return;
+        struct block_index *found = block_map_find(
+            &ctx->state->map_block_index, ldb_best);
+
+        char dbg_hex[65];
+        uint256_get_hex(ldb_best, dbg_hex);
+
+        if (found && found->nHeight > 0)
+            ldb_import_note_found_tip(ctx, found, dbg_hex, res);
+        else if (ldb_height > 0)
+            ldb_import_note_anchor_tip(ctx, ldb_best, ldb_height, dbg_hex,
+                                       res);
+        else
+            ldb_import_note_unknown_height(ldb_best, res);
+}
+
+static int64_t ldb_import_live_row_count(struct utxo_recovery_ctx *ctx)
+{
+            int64_t actual = node_db_utxo_count(ctx->ndb);
+            {
+                int64_t ck = coins_kv_count(progress_store_db());
+                if (ck > actual)
+                    actual = ck;
+            }
+    return actual;
+}
+
+static bool ldb_import_checkpoint_matches(
+    const struct sha3_utxo_checkpoint *cp, uint64_t imported_count,
+    const uint8_t imported_root[32])
+{
+    return cp && imported_count == cp->utxo_count &&
+           memcmp(imported_root, cp->sha3_hash, 32) == 0;
+}
+
+static void ldb_import_stamp_seed(struct utxo_recovery_ctx *ctx,
+                                  int ldb_height,
+                                  const struct uint256 *ldb_best,
+                                  const uint8_t imported_root[32],
+                                  uint64_t imported_count,
+                                  bool stamp_sha3)
+{
+            /* DURABLE cold-import seed anchor for the path the ldb_import_found
+             * branch does NOT take (normal --importblockindex + boot
+             * auto-import). This gate (`imported_count > 100000`) is a
+             * ROW-COUNT heuristic, NOT a crypto token at non-checkpoint
+             * heights — the consumer establishes trust at consume time
+             * (hash-in-index at H, recorded count == live count, migrated-flag
+             * set) and the key is cleared on every wipe/reimport-prepare.
+             * ldb_height = MAX(utxo height); count = live rows. */
+            if (ldb_height > 0 && !uint256_is_null(ldb_best))
+                utxo_recovery_write_cold_import_seed(ctx->ndb, ldb_height,
+                                                     ldb_best,
+                                                     node_db_utxo_count(ctx->ndb));
+
+            /* Check 5, cold-import half: arm the seed gate's commitment
+             * check (trust model: seed_integrity_gate.h). Stamp
+             * ONLY at a genuine compiled-checkpoint match — never at a
+             * non-checkpoint height, where the stamp would be a vacuous
+             * self-certificate of the imported (possibly torn) set. */
+            if (ldb_height > 0 && stamp_sha3)
+                (void)seed_integrity_stamp_utxo_sha3(
+                    ctx->ndb, ldb_height, imported_root, imported_count);
+}
+
+static void ldb_import_write_reimport_marker(
+    const struct utxo_recovery_ctx *ctx)
+{
+        /* Marker for process_block.c's hot-loop exit debounce: if the
+         * reimport ran but the set is STILL incomplete (memtable-stale
+         * zclassicd LDB), the hot-loop exit must not restart-loop. The
+         * marker says "just tried reimport, still stuck" — stop
+         * requesting shutdown (10-min staleness window for operator). */
+        if (ctx->datadir) {
+            char marker_path[512];
+            snprintf(marker_path, sizeof(marker_path),
+                     "%s/last_reimport_attempted", ctx->datadir);
+            FILE *mf = fopen(marker_path, "w");
+            if (mf) {
+                fputs("1\n", mf);
+                fclose(mf);
+            }
+        }
+}
+
+static void ldb_import_reopen_coins(struct utxo_recovery_ctx *ctx,
+                                    int ldb_height)
+{
+        coins_view_sqlite_open(ctx->coins_sqlite, ctx->ndb->db);
+        /* Re-init coins cache after import */
+        coins_view_cache_init(ctx->coins_tip, &ctx->coins_sqlite->view);
+        set_coins_sqlite_for_commitment(ctx->coins_sqlite);
+
+        /* Diagnostic: log UTXO height vs chain tip after import */
+        {
+            int tip_h = active_chain_height(&ctx->state->chain_active);
+            printf("[boot] UTXO import: coins_best_block at h=%d, "
+                   "chain tip at h=%d%s\n",
+                   ldb_height, tip_h,
+                   ldb_height != tip_h
+                       ? " (MISMATCH — adjusting tip)" : "");
+        }
+}
+
+/* ── LDB→SQLite UTXO import ─────────────────────────────────── */
+
+
+struct utxo_import_result utxo_recovery_import_ldb(
+    struct utxo_recovery_ctx *ctx)
+{
+    struct utxo_import_result res = { .status = recovery_status_ok() };
+
+    res.status = ldb_import_validate_ctx(ctx);
+    if (!res.status.ok) {
+        LOG_WARN("utxo_recovery", "%s", res.status.message);
+        return res;
+    }
+
+    res.status = ldb_import_validate_datadir(ctx);
+    if (!res.status.ok) {
         LOG_WARN("utxo_recovery", "%s", res.status.message);
         return res;
     }
@@ -123,12 +391,8 @@ struct utxo_import_result utxo_recovery_import_ldb(
     if (migration_done)
         return res;
 
-    if (!ctx->coins_sqlite || !ctx->coins_tip || !ctx->state) {
-        res.status = ZCL_ERR(-4,
-            "utxo_recovery_import_ldb: import requires coins_sqlite=%p "
-            "coins_tip=%p state=%p",
-            (void *)ctx->coins_sqlite, (void *)ctx->coins_tip,
-            (void *)ctx->state);
+    res.status = ldb_import_validate_deps(ctx);
+    if (!res.status.ok) {
         LOG_WARN("utxo_recovery", "%s", res.status.message);
         return res;
     }
@@ -139,12 +403,7 @@ struct utxo_import_result utxo_recovery_import_ldb(
     struct stat cs_st;
 
     /* Fall back to zclassicd's chainstate if local doesn't exist */
-    if (stat(cs_path, &cs_st) != 0) {
-        const char *home_cs = getenv("HOME");
-        if (home_cs)
-            snprintf(cs_path, sizeof(cs_path),
-                     "%s/.zclassic/chainstate", home_cs);
-    }
+    ldb_import_resolve_chainstate(cs_path, sizeof(cs_path), &cs_st);
     if (stat(cs_path, &cs_st) != 0) {
         /* No chainstate dir — mark as done (fresh node) */
         uint8_t one = 1;
@@ -160,39 +419,14 @@ struct utxo_import_result utxo_recovery_import_ldb(
     printf("LevelDB→SQLite UTXO migration from %s\n", cs_path);
     fflush(stdout);
 
-    /* If zclassicd's LOCK file exists, another process owns this
-     * LevelDB. Copy the chainstate to a temp dir to avoid
-     * corrupting zclassicd's data. NEVER delete another
-     * process's LOCK file. */
-    char cs_lock[1100];
-    snprintf(cs_lock, sizeof(cs_lock), "%s/LOCK", cs_path);
     char import_path[1100];
-    struct stat lock_st;
-    if (stat(cs_lock, &lock_st) == 0) {
-        snprintf(import_path, sizeof(import_path),
-                 "%s/chainstate_import_tmp", ctx->datadir);
-        /* The owner is LIVE — take a provably point-in-time copy
-         * (utxo_recovery_ldb_copy.c); a torn copy imports a UTXO set
-         * with silent holes whose first spend wedges the reducer. */
-        printf("Copying chainstate (zclassicd LOCK present)...\n");
-        fflush(stdout);
-        {
-            struct zcl_result cpres = utxo_recovery_copy_chainstate_stable(
-                cs_path, import_path);
-            if (!cpres.ok) {
-                res.status = cpres;
-                LOG_WARN("utxo_recovery", "%s", res.status.message);
-                goto cleanup;
-            }
-        }
-        /* Remove the copied LOCK so we can open it */
-        char tmp_lock[1200];
-        snprintf(tmp_lock, sizeof(tmp_lock), "%s/LOCK", import_path);
-        unlink(tmp_lock);
-        snprintf(import_path_cleanup, sizeof(import_path_cleanup),
-                 "%s", import_path);
-    } else {
-        snprintf(import_path, sizeof(import_path), "%s", cs_path);
+    struct zcl_result prep = ldb_import_prepare_source(
+        ctx, cs_path, import_path, import_path_cleanup,
+        sizeof(import_path_cleanup));
+    if (!prep.ok) {
+        res.status = prep;
+        LOG_WARN("utxo_recovery", "%s", res.status.message);
+        goto cleanup;
     }
 
     {
@@ -206,13 +440,7 @@ struct utxo_import_result utxo_recovery_import_ldb(
     struct coins_view_db migrate_db;
     if (coins_view_db_open(&migrate_db, import_path,
                            450 << 20, false, false)) {
-        struct node_db import_db;
-        if (node_db_sync_open_private_db_like(ctx->ndb, &import_db)) {
-            node_db_sync_import_utxos(&import_db, &migrate_db);
-            node_db_close(&import_db);
-        } else {
-            node_db_sync_import_utxos(ctx->ndb, &migrate_db);
-        }
+        ldb_import_sync_utxos(ctx, &migrate_db);
 
         /* Discover LDB height from imported UTXOs */
         int ldb_height = utxo_recovery_max_utxo_height(ctx);
@@ -221,71 +449,9 @@ struct utxo_import_result utxo_recovery_import_ldb(
                    ldb_height);
         res.height = ldb_height;
 
-        /* Set coins_best_block from LDB */
         struct uint256 ldb_best;
-        memset(&ldb_best, 0, sizeof(ldb_best));
-        if (coins_view_db_get_best_block(&migrate_db, &ldb_best) &&
-            !uint256_is_null(&ldb_best)) {
-            struct block_index *found = block_map_find(
-                &ctx->state->map_block_index, &ldb_best);
-
-            char dbg_hex[65];
-            uint256_get_hex(&ldb_best, dbg_hex);
-
-            if (found && found->nHeight > 0) {
-                /* Block found in index — set as chain tip.
-                 * frontier_exempt: the import carries SHA3-verified snapshot
-                 * evidence and must not be clamped by a stale pre-import
-                 * log; the seed-anchor stamp re-raises the frontier to H. */
-                struct block_index *commit_blk = found;
-                if (utxo_recovery_commit_tip(
-                        ctx, &commit_blk, "ldb_import_found",
-                        true, true).ok) {
-                    printf("LDB import: chain tip at h=%d hash=%s\n",
-                           commit_blk->nHeight, dbg_hex);
-                    res.skip_activate = true;
-                    snprintf(res.anchor_reason, sizeof(res.anchor_reason),
-                             "ldb_import_found");
-                    /* Record the durable seed from the COMMITTED tip (the
-                     * exempt path never clamps, but the seed must attest to
-                     * what was actually installed, not what was proposed).
-                     * Count = live utxos rows. */
-                    utxo_recovery_write_cold_import_seed(ctx->ndb,
-                        commit_blk->nHeight, commit_blk->phashBlock,
-                        node_db_utxo_count(ctx->ndb));
-                }
-            } else if (ldb_height > 0) {
-                /* LDB best block NOT in our index — record an activation
-                 * anchor only. Do not publish coins_best_block until the
-                 * block is present in the local index and CSR can commit it. */
-                struct block_index *anchor = chain_restore_create_anchor(
-                    ctx->state, &ldb_best, ldb_height);
-                if (anchor) {
-                    snapsync_set_anchor(anchor);
-
-                    printf("LDB import: metadata anchor at h=%d hash=%s "
-                           "— waiting for real block data.\n",
-                           ldb_height, dbg_hex);
-                    /* Record-only: a pprev-less anchor installed above
-                     * the trust-rooted extent is the band-hole class.
-                     * Ancestry-derived — abstains on a
-                     * contiguous imported header chain. */
-                    utxo_recovery_note_band_unrooted_tip(
-                        anchor, "ldb_import_anchor");
-                }
-                res.skip_activate = true;
-                snprintf(res.anchor_reason, sizeof(res.anchor_reason),
-                         "ldb_import_anchor");
-            } else {
-                char dbg_hex2[65];
-                uint256_get_hex(&ldb_best, dbg_hex2);
-                printf("LDB import: coins_best_block=%s "
-                       "(height unknown)\n", dbg_hex2);
-                res.skip_activate = true;
-                snprintf(res.anchor_reason, sizeof(res.anchor_reason),
-                         "ldb_import_unknown");
-            }
-        }
+        ldb_import_record_best_block(ctx, &migrate_db, ldb_height,
+                                     &ldb_best, &res);
 
         coins_view_db_close(&migrate_db);
         node_db_wal_checkpoint(ctx->ndb);
@@ -316,11 +482,10 @@ struct utxo_import_result utxo_recovery_import_ldb(
          * below; at non-checkpoint heights leave the commitment check
          * honestly unarmed (Part A's forward-evidence gate is the sole trust
          * authority above the single checkpoint). */
-        bool checkpoint_match = false;
-        if (cp && imported_count == cp->utxo_count &&
-            memcmp(imported_root, cp->sha3_hash, 32) == 0) {
+        bool checkpoint_match = ldb_import_checkpoint_matches(
+            cp, imported_count, imported_root);
+        if (checkpoint_match) {
             printf("=== SHA3 UTXO CHECKPOINT: PASSED ===\n");
-            checkpoint_match = true;
         } else if (imported_count > 100000) {
             printf("SHA3: %llu UTXOs (different height from "
                    "checkpoint, will verify later)\n",
@@ -331,12 +496,7 @@ struct utxo_import_result utxo_recovery_import_ldb(
              * the UTXOs are actually in the table. Consult the
              * CANONICAL coins_kv count too (0 pre-seed in cold-import, so
              * the mirror count stays the live signal; max keeps both honest). */
-            int64_t actual = node_db_utxo_count(ctx->ndb);
-            {
-                int64_t ck = coins_kv_count(progress_store_db());
-                if (ck > actual)
-                    actual = ck;
-            }
+            int64_t actual = ldb_import_live_row_count(ctx);
             if (actual > 100000) {
                 printf("SHA3 saw %llu but utxo table has %lld rows "
                        "— keeping data (snapshot lag)\n",
@@ -371,59 +531,13 @@ struct utxo_import_result utxo_recovery_import_ldb(
                     sqlite3_db_filename(ctx->ndb->db, "main")))
                 LOG_WARN("utxo_recovery", "coins_kv import seed failed");
 
-            /* DURABLE cold-import seed anchor for the path the ldb_import_found
-             * branch does NOT take (normal --importblockindex + boot
-             * auto-import). This gate (`imported_count > 100000`) is a
-             * ROW-COUNT heuristic, NOT a crypto token at non-checkpoint
-             * heights — the consumer establishes trust at consume time
-             * (hash-in-index at H, recorded count == live count, migrated-flag
-             * set) and the key is cleared on every wipe/reimport-prepare.
-             * ldb_height = MAX(utxo height); count = live rows. */
-            if (ldb_height > 0 && !uint256_is_null(&ldb_best))
-                utxo_recovery_write_cold_import_seed(ctx->ndb, ldb_height,
-                                                     &ldb_best,
-                                                     node_db_utxo_count(ctx->ndb));
-
-            /* Check 5, cold-import half: arm the seed gate's commitment
-             * check (trust model: seed_integrity_gate.h). Stamp
-             * ONLY at a genuine compiled-checkpoint match — never at a
-             * non-checkpoint height, where the stamp would be a vacuous
-             * self-certificate of the imported (possibly torn) set. */
-            if (ldb_height > 0 && sha3_root_valid && checkpoint_match)
-                (void)seed_integrity_stamp_utxo_sha3(
-                    ctx->ndb, ldb_height, imported_root, imported_count);
+            ldb_import_stamp_seed(ctx, ldb_height, &ldb_best,
+                                  imported_root, imported_count,
+                                  sha3_root_valid && checkpoint_match);
         }
 
-        /* Marker for process_block.c's hot-loop exit debounce: if the
-         * reimport ran but the set is STILL incomplete (memtable-stale
-         * zclassicd LDB), the hot-loop exit must not restart-loop. The
-         * marker says "just tried reimport, still stuck" — stop
-         * requesting shutdown (10-min staleness window for operator). */
-        if (ctx->datadir) {
-            char marker_path[512];
-            snprintf(marker_path, sizeof(marker_path),
-                     "%s/last_reimport_attempted", ctx->datadir);
-            FILE *mf = fopen(marker_path, "w");
-            if (mf) {
-                fputs("1\n", mf);
-                fclose(mf);
-            }
-        }
-
-        coins_view_sqlite_open(ctx->coins_sqlite, ctx->ndb->db);
-        /* Re-init coins cache after import */
-        coins_view_cache_init(ctx->coins_tip, &ctx->coins_sqlite->view);
-        set_coins_sqlite_for_commitment(ctx->coins_sqlite);
-
-        /* Diagnostic: log UTXO height vs chain tip after import */
-        {
-            int tip_h = active_chain_height(&ctx->state->chain_active);
-            printf("[boot] UTXO import: coins_best_block at h=%d, "
-                   "chain tip at h=%d%s\n",
-                   ldb_height, tip_h,
-                   ldb_height != tip_h
-                       ? " (MISMATCH — adjusting tip)" : "");
-        }
+        ldb_import_write_reimport_marker(ctx);
+        ldb_import_reopen_coins(ctx, ldb_height);
 
         printf("UTXO migration complete.\n");
         fflush(stdout);
@@ -465,6 +579,145 @@ static bool has_disk_backed_competing_sibling(
     return false;
 }
 
+static void restore_derive_anchor_hash(struct uint256 *best_hash)
+{
+        int32_t d_h = -1;
+        uint8_t d_hash[32];
+        bool d_hf = false;
+        if (reducer_frontier_derive_coins_best_now(&d_h, d_hash, &d_hf) &&
+            d_hf) {
+            memcpy(best_hash->data, d_hash, 32);
+            printf("[boot] restore anchor: derived coins-best h=%d "
+                   "(coins_kv authority)\n", d_h);
+        }
+}
+
+static void restore_keep_scan_fallback(struct utxo_recovery_ctx *ctx,
+                                       struct block_index *committed,
+                                       struct chain_restore_result *res)
+{
+                if (utxo_recovery_scan_fallback_keep_commit(ctx, committed)) {
+                    res->restored = true;
+                    res->restored_height = committed->nHeight;
+                    if (committed->phashBlock)
+                        res->restored_hash = *committed->phashBlock;
+                }
+}
+
+static void restore_print_best_lookup(const struct utxo_recovery_ctx *ctx,
+                                      const struct block_index *best,
+                                      const struct uint256 *best_hash)
+{
+        char hex[65];
+        uint256_get_hex(best_hash, hex);
+        if (best)
+            printf("[boot] coins_best_block %s found in block_index "
+                   "at h=%d\n", hex, best->nHeight);
+        else
+            printf("[boot] coins_best_block %s NOT found in block_index "
+                   "(map size=%zu)\n", hex,
+                   ctx->state->map_block_index.size);
+}
+
+/* True when the SQLite block row gives a real height for a block_index entry
+ * that the map reports at height 0; corrects best->nHeight in that case. */
+static bool restore_correct_zero_height(struct utxo_recovery_ctx *ctx,
+                                        struct block_index *best,
+                                        const struct uint256 *best_hash)
+{
+    if (!ctx->ndb->open)
+        return false;
+    struct db_block sqlite_blk;
+    if (!db_block_find_by_hash(ctx->ndb, best_hash->data, &sqlite_blk) ||
+        sqlite_blk.height <= 0)
+        return false;
+    printf("Correcting: block nHeight 0→%d from SQLite\n",
+           sqlite_blk.height);
+    best->nHeight = sqlite_blk.height;
+    return true;
+}
+
+static struct block_index *restore_find_hashed_utxo_tip(
+    struct utxo_recovery_ctx *ctx, int max_utxo_h)
+{
+    struct block_index *utxo_tip =
+        utxo_recovery_find_disk_backed_utxo_tip(ctx, max_utxo_h);
+    return utxo_tip && utxo_tip->phashBlock ? utxo_tip : NULL;
+}
+
+static const struct uint256 *restore_load_seed_anchor(
+    struct utxo_recovery_ctx *ctx, int *seed_anchor_h,
+    struct uint256 *seed_anchor_hash)
+{
+    if (ctx->ndb && ctx->ndb->open &&
+        utxo_recovery_read_cold_import_seed(ctx->ndb, seed_anchor_h,
+                                            seed_anchor_hash))
+        return seed_anchor_hash;
+    return NULL;
+}
+
+static void restore_format_best_hexes(const struct block_index *best,
+                                      char best_hex[65], char prev_hex[65])
+{
+    if (best->phashBlock)
+        uint256_get_hex(best->phashBlock, best_hex);
+    if (best->pprev && best->pprev->phashBlock)
+        uint256_get_hex(best->pprev->phashBlock, prev_hex);
+}
+
+static void restore_publish_committed_tip(struct utxo_recovery_ctx *ctx,
+                                          struct block_index *restore_tip,
+                                          struct chain_restore_result *res)
+{
+        (void)chain_restore_rebuild_active_chain(ctx->state, restore_tip, NULL);
+        printf("Restored chain tip from coins DB: height=%d\n",
+               restore_tip->nHeight);
+        event_emitf(EV_BOOT_CHAIN_RESTORED, 0, "height=%d",
+                    restore_tip->nHeight);
+        res->restored = true;
+        res->restored_height = restore_tip->nHeight;
+        if (restore_tip->phashBlock)
+            res->restored_hash = *restore_tip->phashBlock;
+
+        /* populate active_chain.chain from pprev +
+         * block_map, and backfill nBits from on-disk block headers for
+         * any pindex entry whose nBits is still zero. Without this, the
+         * anchor-restore path leaves `getblockhash <h>` broken for every
+         * h below the tip and GetNextWorkRequired trips `bad-diffbits`
+         * on the first real-difficulty header whose pprev window
+         * includes an nBits==0 entry. */
+        snapsync_set_anchor(NULL);
+        (void)chain_restore_finalize(ctx->state, ctx->datadir);
+}
+
+static void restore_install_placeholder_anchor(
+    struct utxo_recovery_ctx *ctx, const struct uint256 *best_hash,
+    const char *hex, int utxo_max_height, struct chain_restore_result *res)
+{
+        struct block_index *anchor =
+            chain_restore_create_anchor(ctx->state, best_hash,
+                                        utxo_max_height);
+        if (anchor) {
+            snapsync_set_anchor(anchor);
+
+            printf("Chain restore: metadata anchor at h=%d hash=%s "
+                   "— waiting for real block data.\n", utxo_max_height, hex);
+            /* Record-only: same band-hole producer class as the LDB
+             * import anchor above (ancestry-derived). */
+            utxo_recovery_note_band_unrooted_tip(
+                anchor, "chain_restore_anchor");
+            /* see the same call above; fire here too
+             * so the fresh-anchor path gets rebuild + nBits backfill. */
+            (void)chain_restore_finalize(ctx->state, ctx->datadir);
+            res->restored_height = anchor->nHeight;
+            if (anchor->phashBlock)
+                res->restored_hash = *anchor->phashBlock;
+        }
+        res->skip_activate = true;
+        snprintf(res->anchor_reason, sizeof(res->anchor_reason),
+                 "chain_restore_anchor");
+}
+
 struct chain_restore_result utxo_recovery_restore_chain_tip(
     struct utxo_recovery_ctx *ctx,
     struct block_index *scan_fallback)
@@ -490,17 +743,7 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
      * logs resolve a hash for it; the in-RAM coins cache (seeded from the
      * node_state projection key) is the legacy fallback. */
     uint256_set_null(&best_hash);
-    {
-        int32_t d_h = -1;
-        uint8_t d_hash[32];
-        bool d_hf = false;
-        if (reducer_frontier_derive_coins_best_now(&d_h, d_hash, &d_hf) &&
-            d_hf) {
-            memcpy(best_hash.data, d_hash, 32);
-            printf("[boot] restore anchor: derived coins-best h=%d "
-                   "(coins_kv authority)\n", d_h);
-        }
-    }
+    restore_derive_anchor_hash(&best_hash);
     if (uint256_is_null(&best_hash))
         coins_view_cache_get_best_block(ctx->coins_tip, &best_hash);
 
@@ -547,12 +790,7 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
                     ctx, &committed, "scan_fallback", false, false).ok) {
                 printf("WARNING: Chain tip at height %d but coins DB is empty!\n",
                        scan_fallback->nHeight);
-                if (utxo_recovery_scan_fallback_keep_commit(ctx, committed)) {
-                    res.restored = true;
-                    res.restored_height = committed->nHeight;
-                    if (committed->phashBlock)
-                        res.restored_hash = *committed->phashBlock;
-                }
+                restore_keep_scan_fallback(ctx, committed, &res);
             } else {
                 res.status = ZCL_ERR(-21,
                     "utxo_recovery_restore_chain_tip: scan_fallback commit "
@@ -567,17 +805,7 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
         &ctx->state->map_block_index, &best_hash);
 
     /* Diagnostic: log whether coins_best_block was found in block_index */
-    {
-        char hex[65];
-        uint256_get_hex(&best_hash, hex);
-        if (best)
-            printf("[boot] coins_best_block %s found in block_index "
-                   "at h=%d\n", hex, best->nHeight);
-        else
-            printf("[boot] coins_best_block %s NOT found in block_index "
-                   "(map size=%zu)\n", hex,
-                   ctx->state->map_block_index.size);
-    }
+    restore_print_best_lookup(ctx, best, &best_hash);
 
     /* SQLite fallback: if block_map maps the hash to height 0
      * but it's not actually the genesis block */
@@ -586,20 +814,8 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
         char hex[65];
         uint256_get_hex(&best_hash, hex);
         LOG_WARN("chain", "coins DB best block %s mapped to height=0 " "in block_index (not genesis)", hex);
-        if (ctx->ndb->open) {
-            struct db_block sqlite_blk;
-            if (db_block_find_by_hash(ctx->ndb, best_hash.data,
-                                       &sqlite_blk) &&
-                sqlite_blk.height > 0) {
-                printf("Correcting: block nHeight 0→%d from SQLite\n",
-                       sqlite_blk.height);
-                best->nHeight = sqlite_blk.height;
-            } else {
-                best = NULL;
-            }
-        } else {
+        if (!restore_correct_zero_height(ctx, best, &best_hash))
             best = NULL;
-        }
     }
 
     if (best && best->nHeight == 0 &&
@@ -607,8 +823,8 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
         int max_utxo_h = utxo_recovery_max_utxo_height(ctx);
         if (max_utxo_h > 1000) {
             struct block_index *utxo_tip =
-                utxo_recovery_find_disk_backed_utxo_tip(ctx, max_utxo_h);
-            if (utxo_tip && utxo_tip->phashBlock) {
+                restore_find_hashed_utxo_tip(ctx, max_utxo_h);
+            if (utxo_tip) {
                 char tip_hex[65] = {0};
                 uint256_get_hex(utxo_tip->phashBlock, tip_hex);
                 LOG_INFO("boot", "[boot] coins_best_block is genesis but UTXOs reach " "h=%d; recovering directly to disk-backed UTXO ancestor " "h=%d hash=%s", max_utxo_h, utxo_tip->nHeight, tip_hex);
@@ -627,11 +843,8 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
      * every normal / P2P datadir → seed_anchor_hash_p stays NULL (identical). */
     struct uint256 seed_anchor_hash;
     int seed_anchor_h = -1;
-    const struct uint256 *seed_anchor_hash_p = NULL;
-    if (ctx->ndb && ctx->ndb->open &&
-        utxo_recovery_read_cold_import_seed(ctx->ndb, &seed_anchor_h,
-                                            &seed_anchor_hash))
-        seed_anchor_hash_p = &seed_anchor_hash;
+    const struct uint256 *seed_anchor_hash_p =
+        restore_load_seed_anchor(ctx, &seed_anchor_h, &seed_anchor_hash);
 
     /* PART C: register the seed anchor as the Invariant A trust-root terminus
      * (utxo_recovery_block_ancestry_break) so the commit treats coins_best as
@@ -649,10 +862,7 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
             char best_hex[65] = {0};
             char prev_hex[65] = {0};
             bool merkle_null = block_index_merkle_is_null(best);
-            if (best->phashBlock)
-                uint256_get_hex(best->phashBlock, best_hex);
-            if (best->pprev && best->pprev->phashBlock)
-                uint256_get_hex(best->pprev->phashBlock, prev_hex);
+            restore_format_best_hexes(best, best_hex, prev_hex);
             LOG_INFO("boot", "[boot] coins_best_block validation h=%d hash=%s " "status=%u file=%d pos=%u tx=%u chaintx=%lld bits=%u " "pprev_h=%d pprev=%s merkle_null=%d disk_backed=%d", best->nHeight, best_hex[0] ? best_hex : "<null>", best->nStatus, best->nFile, best->nDataPos, best->nTx, (long long)best->nChainTx, best->nBits, best->pprev ? best->pprev->nHeight : -1, prev_hex[0] ? prev_hex : "<null>", merkle_null ? 1 : 0, best_backed ? 1 : 0);
         }
         if (!best_backed) {
@@ -714,25 +924,7 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
          * everything below (active-chain rebuild, event, result fields)
          * must describe what was actually INSTALLED. */
         restore_tip = committed;
-        (void)chain_restore_rebuild_active_chain(ctx->state, restore_tip, NULL);
-        printf("Restored chain tip from coins DB: height=%d\n",
-               restore_tip->nHeight);
-        event_emitf(EV_BOOT_CHAIN_RESTORED, 0, "height=%d",
-                    restore_tip->nHeight);
-        res.restored = true;
-        res.restored_height = restore_tip->nHeight;
-        if (restore_tip->phashBlock)
-            res.restored_hash = *restore_tip->phashBlock;
-
-        /* populate active_chain.chain from pprev +
-         * block_map, and backfill nBits from on-disk block headers for
-         * any pindex entry whose nBits is still zero. Without this, the
-         * anchor-restore path leaves `getblockhash <h>` broken for every
-         * h below the tip and GetNextWorkRequired trips `bad-diffbits`
-         * on the first real-difficulty header whose pprev window
-         * includes an nBits==0 entry. */
-        snapsync_set_anchor(NULL);
-        (void)chain_restore_finalize(ctx->state, ctx->datadir);
+        restore_publish_committed_tip(ctx, restore_tip, &res);
 
         return res;
     }
@@ -746,28 +938,8 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
     int utxo_max_height = utxo_recovery_max_utxo_height(ctx);
 
     if (utxo_max_height > 0) {
-        struct block_index *anchor =
-            chain_restore_create_anchor(ctx->state, &best_hash,
-                                        utxo_max_height);
-        if (anchor) {
-            snapsync_set_anchor(anchor);
-
-            printf("Chain restore: metadata anchor at h=%d hash=%s "
-                   "— waiting for real block data.\n", utxo_max_height, hex);
-            /* Record-only: same band-hole producer class as the LDB
-             * import anchor above (ancestry-derived). */
-            utxo_recovery_note_band_unrooted_tip(
-                anchor, "chain_restore_anchor");
-            /* see the same call above; fire here too
-             * so the fresh-anchor path gets rebuild + nBits backfill. */
-            (void)chain_restore_finalize(ctx->state, ctx->datadir);
-            res.restored_height = anchor->nHeight;
-            if (anchor->phashBlock)
-                res.restored_hash = *anchor->phashBlock;
-        }
-        res.skip_activate = true;
-        snprintf(res.anchor_reason, sizeof(res.anchor_reason),
-                 "chain_restore_anchor");
+        restore_install_placeholder_anchor(ctx, &best_hash, hex,
+                                           utxo_max_height, &res);
     } else {
         /* No UTXOs — wipe and start fresh */
         printf("No UTXOs found — wiping coins state.\n");
