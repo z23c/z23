@@ -254,9 +254,11 @@ static bool dvq_group_ok(const char *s)
 
 static bool dvq_model_char_ok(char c)
 {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-' ||
-           c == ':' || c == '+';
+    static const char punct[] = "_.-:+";
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9'))
+        return true;
+    return c != '\0' && strchr(punct, c) != NULL;
 }
 
 static bool dvq_model_ok(const char *s)
