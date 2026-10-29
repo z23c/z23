@@ -56,10 +56,29 @@ static bool note_bytes_ok(const char *note, size_t len)
     return true;
 }
 
-enum zcl_fleet_status zcl_fleet_row_validate(const struct zcl_fleet_row *row)
+/* The experiment enum keys seen while scanning the pairs. */
+struct row_experiment_seen {
+    bool task_class, model, harness, effort, outcome;
+};
+
+static void row_experiment_seen_mark(struct row_experiment_seen *seen,
+                                     uint8_t key)
 {
-    if (!row)
-        return ZCL_FLEET_ARGUMENT;
+    if (key == ZCL_FLEET_PAIR_TASK_CLASS)
+        seen->task_class = true;
+    else if (key == ZCL_FLEET_PAIR_MODEL)
+        seen->model = true;
+    else if (key == ZCL_FLEET_PAIR_HARNESS)
+        seen->harness = true;
+    else if (key == ZCL_FLEET_PAIR_EFFORT)
+        seen->effort = true;
+    else if (key == ZCL_FLEET_PAIR_OUTCOME)
+        seen->outcome = true;
+}
+
+/* The scalar fields and the two byte runs, in their fixed check order. */
+static enum zcl_fleet_status row_validate_head(const struct zcl_fleet_row *row)
+{
     if (row->version != ZCL_FLEET_ROW_VERSION_V1 &&
         row->version != ZCL_FLEET_ROW_VERSION)
         return ZCL_FLEET_MALFORMED;
@@ -84,10 +103,15 @@ enum zcl_fleet_status zcl_fleet_row_validate(const struct zcl_fleet_row *row)
      * only be a decode bug or a forged struct, never a real v1 row. */
     if (row->version == ZCL_FLEET_ROW_VERSION_V1 && row->story_len != 0)
         return ZCL_FLEET_MALFORMED;
+    return ZCL_FLEET_OK;
+}
+
+static enum zcl_fleet_status
+row_validate_pairs(const struct zcl_fleet_row *row,
+                   struct row_experiment_seen *seen)
+{
     /* Ascending with no repeats: one canonical order, and a key can never
      * appear twice so a sum can never double-count one row. */
-    bool have_task_class = false, have_model = false, have_harness = false;
-    bool have_effort = false, have_outcome = false;
     for (size_t i = 0; i < row->pair_count; i++) {
         uint8_t key = row->pair[i].key;
         if (!zcl_fleet_pair_name(key))
@@ -99,30 +123,42 @@ enum zcl_fleet_status zcl_fleet_row_validate(const struct zcl_fleet_row *row)
                 return ZCL_FLEET_PAIR_UNKNOWN;
             if (!zcl_fleet_experiment_enum_pair_ok(key, row->pair[i].value))
                 return ZCL_FLEET_EXPERIMENT_ENUM;
-            if (key == ZCL_FLEET_PAIR_TASK_CLASS)
-                have_task_class = true;
-            else if (key == ZCL_FLEET_PAIR_MODEL)
-                have_model = true;
-            else if (key == ZCL_FLEET_PAIR_HARNESS)
-                have_harness = true;
-            else if (key == ZCL_FLEET_PAIR_EFFORT)
-                have_effort = true;
-            else if (key == ZCL_FLEET_PAIR_OUTCOME)
-                have_outcome = true;
+            row_experiment_seen_mark(seen, key);
         }
     }
-    if (row->kind == ZCL_FLEET_KIND_EXPERIMENT) {
-        /* The task_id is the note: two rows of one delegation link by it. */
-        if (row->note_len == 0)
-            return ZCL_FLEET_ARGUMENT;
-        if (!have_task_class || !have_model)
-            return ZCL_FLEET_EXPERIMENT_ENUM;
-        if (row->subject == ZCL_FLEET_EXPERIMENT_PREDICT &&
-            (!have_harness || !have_effort))
-            return ZCL_FLEET_EXPERIMENT_ENUM;
-        if (row->subject == ZCL_FLEET_EXPERIMENT_RESULT && !have_outcome)
-            return ZCL_FLEET_EXPERIMENT_ENUM;
-    }
+    return ZCL_FLEET_OK;
+}
+
+static enum zcl_fleet_status
+row_validate_experiment(const struct zcl_fleet_row *row,
+                        const struct row_experiment_seen *seen)
+{
+    /* The task_id is the note: two rows of one delegation link by it. */
+    if (row->note_len == 0)
+        return ZCL_FLEET_ARGUMENT;
+    if (!seen->task_class || !seen->model)
+        return ZCL_FLEET_EXPERIMENT_ENUM;
+    if (row->subject == ZCL_FLEET_EXPERIMENT_PREDICT &&
+        (!seen->harness || !seen->effort))
+        return ZCL_FLEET_EXPERIMENT_ENUM;
+    if (row->subject == ZCL_FLEET_EXPERIMENT_RESULT && !seen->outcome)
+        return ZCL_FLEET_EXPERIMENT_ENUM;
+    return ZCL_FLEET_OK;
+}
+
+enum zcl_fleet_status zcl_fleet_row_validate(const struct zcl_fleet_row *row)
+{
+    if (!row)
+        return ZCL_FLEET_ARGUMENT;
+    enum zcl_fleet_status st = row_validate_head(row);
+    if (st != ZCL_FLEET_OK)
+        return st;
+    struct row_experiment_seen seen = {0};
+    st = row_validate_pairs(row, &seen);
+    if (st != ZCL_FLEET_OK)
+        return st;
+    if (row->kind == ZCL_FLEET_KIND_EXPERIMENT)
+        return row_validate_experiment(row, &seen);
     return ZCL_FLEET_OK;
 }
 
@@ -201,24 +237,13 @@ size_t zcl_fleet_row_encode(const struct zcl_fleet_row *row, uint8_t *out,
     return n + ZCL_FLEET_SIG_BYTES;
 }
 
-enum zcl_fleet_status zcl_fleet_row_decode(const uint8_t *in, size_t len,
-                                           struct zcl_fleet_row *out,
-                                           size_t *consumed)
+/* Read the fixed leading fields and bound the counts; *n is left at the
+ * offset of the first field after them. */
+static enum zcl_fleet_status row_decode_counts(const uint8_t *in,
+                                               uint8_t wire_version, bool v2,
+                                               struct zcl_fleet_row *out,
+                                               size_t *n)
 {
-    if (!in || !out)
-        return ZCL_FLEET_ARGUMENT;
-    if (len < 1)
-        return ZCL_FLEET_MALFORMED;
-    uint8_t wire_version = in[0];
-    if (wire_version != ZCL_FLEET_ROW_VERSION_V1 &&
-        wire_version != ZCL_FLEET_ROW_VERSION)
-        return ZCL_FLEET_MALFORMED;
-    bool v2 = wire_version != ZCL_FLEET_ROW_VERSION_V1;
-    size_t head = v2 ? ZCL_FLEET_ROW_HEAD_BYTES : ZCL_FLEET_ROW_HEAD_BYTES_V1;
-    if (len < head + ZCL_FLEET_SIG_BYTES)
-        return ZCL_FLEET_MALFORMED;
-
-    memset(out, 0, sizeof(*out));
     out->version = wire_version;
     out->kind = in[1];
     out->subject = (uint16_t)(((uint16_t)in[2] << 8) | (uint16_t)in[3]);
@@ -227,25 +252,21 @@ enum zcl_fleet_status zcl_fleet_row_decode(const uint8_t *in, size_t len,
     if (out->pair_count > ZCL_FLEET_PAIRS_MAX ||
         out->note_len > ZCL_FLEET_NOTE_MAX)
         return ZCL_FLEET_MALFORMED;
-    size_t n = 6;
+    *n = 6;
     if (v2) {
-        out->story_len = in[n++];
+        out->story_len = in[(*n)++];
         if (out->story_len > ZCL_FLEET_STORY_MAX)
             return ZCL_FLEET_MALFORMED;
     }
+    return ZCL_FLEET_OK;
+}
 
-    /* The length is derived from the counts and checked against what is
-     * actually in the buffer BEFORE any of it is read. */
-    size_t body = head + (size_t)out->pair_count * ZCL_FLEET_ROW_PAIR_BYTES +
-                  (size_t)out->note_len +
-                  (v2 ? (size_t)out->story_len : 0u);
-    if (len < body + ZCL_FLEET_SIG_BYTES)
-        return ZCL_FLEET_MALFORMED;
-
-    out->seq = zcl_read_u64_be(in + n);
-    n += 8;
-    out->ts_unix = (int64_t)zcl_read_u64_be(in + n);
-    n += 8;
+/* Copy the ids, hash, pairs, note, story and signature out of a buffer whose
+ * length the caller has already checked; n is the offset after the seq and
+ * timestamp fields. */
+static void row_decode_tail(const uint8_t *in, size_t n, bool v2,
+                            struct zcl_fleet_row *out)
+{
     memcpy(out->box_id, in + n, ZCL_FLEET_ID_BYTES);
     n += ZCL_FLEET_ID_BYTES;
     memcpy(out->signer, in + n, ZCL_FLEET_ID_BYTES);
@@ -265,6 +286,43 @@ enum zcl_fleet_status zcl_fleet_row_decode(const uint8_t *in, size_t len,
         n += out->story_len;
     }
     memcpy(out->sig, in + n, ZCL_FLEET_SIG_BYTES);
+}
+
+enum zcl_fleet_status zcl_fleet_row_decode(const uint8_t *in, size_t len,
+                                           struct zcl_fleet_row *out,
+                                           size_t *consumed)
+{
+    if (!in || !out)
+        return ZCL_FLEET_ARGUMENT;
+    if (len < 1)
+        return ZCL_FLEET_MALFORMED;
+    uint8_t wire_version = in[0];
+    if (wire_version != ZCL_FLEET_ROW_VERSION_V1 &&
+        wire_version != ZCL_FLEET_ROW_VERSION)
+        return ZCL_FLEET_MALFORMED;
+    bool v2 = wire_version != ZCL_FLEET_ROW_VERSION_V1;
+    size_t head = v2 ? ZCL_FLEET_ROW_HEAD_BYTES : ZCL_FLEET_ROW_HEAD_BYTES_V1;
+    if (len < head + ZCL_FLEET_SIG_BYTES)
+        return ZCL_FLEET_MALFORMED;
+
+    memset(out, 0, sizeof(*out));
+    size_t n = 0;
+    if (row_decode_counts(in, wire_version, v2, out, &n) != ZCL_FLEET_OK)
+        return ZCL_FLEET_MALFORMED;
+
+    /* The length is derived from the counts and checked against what is
+     * actually in the buffer BEFORE any of it is read. */
+    size_t body = head + (size_t)out->pair_count * ZCL_FLEET_ROW_PAIR_BYTES +
+                  (size_t)out->note_len +
+                  (v2 ? (size_t)out->story_len : 0u);
+    if (len < body + ZCL_FLEET_SIG_BYTES)
+        return ZCL_FLEET_MALFORMED;
+
+    out->seq = zcl_read_u64_be(in + n);
+    n += 8;
+    out->ts_unix = (int64_t)zcl_read_u64_be(in + n);
+    n += 8;
+    row_decode_tail(in, n, v2, out);
 
     enum zcl_fleet_status shape = zcl_fleet_row_validate(out);
     if (shape != ZCL_FLEET_OK)
