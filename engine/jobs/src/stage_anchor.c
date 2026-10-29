@@ -169,6 +169,35 @@ static bool frontier_probe_row(sqlite3 *db, const char *sql,
     return ok;
 }
 
+enum {
+    FRONTIER_SCAN_OK = 0,
+    FRONTIER_SCAN_FAIL,
+    FRONTIER_SCAN_SQL_OVERFLOW,
+};
+
+/* Run one probe over `sql` that was just formatted with snprintf returning
+ * `n`. Overflow and probe failure are reported as FRONTIER_SCAN_* codes
+ * (probe failures are logged by frontier_probe_row; overflow is logged by
+ * the caller). */
+static int frontier_probe_formatted(sqlite3 *db, const char *sql, int n,
+                                    size_t sql_size, const char *log_table,
+                                    int64_t bind1, int64_t bind2, int nbinds,
+                                    bool *found, int64_t *value)
+{
+    if (n < 0 || n >= (int)sql_size)
+        return FRONTIER_SCAN_SQL_OVERFLOW;
+    if (!frontier_probe_row(db, sql, log_table, bind1, bind2, nbinds, found,
+                            value))
+        return FRONTIER_SCAN_FAIL;
+    return FRONTIER_SCAN_OK;
+}
+
+/* True when the first-gap probe found a rowless height below `requested`. */
+static bool frontier_gap_caps(bool found, int64_t gap, uint64_t requested)
+{
+    return found && gap >= 0 && (uint64_t)gap < requested;
+}
+
 bool stage_anchor_cap_target_at_log_frontier(sqlite3 *db,
                                              const char *log_table,
                                              uint64_t cursor,
@@ -216,14 +245,13 @@ bool stage_anchor_cap_target_at_log_frontier(sqlite3 *db,
         int n = snprintf(sql, sizeof(sql),
                          "SELECT 1 FROM %s WHERE height < ? LIMIT 1",
                          log_table);
-        if (n < 0 || n >= (int)sizeof(sql)) {
-            LOG_WARN("stage_anchor", "frontier cap: sql overflow table=%s",
-                     log_table);
-            ok = false;
-            break;
-        }
-        if (!frontier_probe_row(db, sql, log_table, (int64_t)requested, 0, 1,
-                                &found, NULL)) {
+        int rc = frontier_probe_formatted(db, sql, n, sizeof(sql), log_table,
+                                          (int64_t)requested, 0, 1, &found,
+                                          NULL);
+        if (rc != FRONTIER_SCAN_OK) {
+            if (rc == FRONTIER_SCAN_SQL_OVERFLOW)
+                LOG_WARN("stage_anchor", "frontier cap: sql overflow table=%s",
+                         log_table);
             ok = false;
             break;
         }
@@ -233,14 +261,12 @@ bool stage_anchor_cap_target_at_log_frontier(sqlite3 *db,
         /* (4a) Point-probe: a rowless cursor caps the jump immediately. */
         n = snprintf(sql, sizeof(sql),
                      "SELECT 1 FROM %s WHERE height = ? LIMIT 1", log_table);
-        if (n < 0 || n >= (int)sizeof(sql)) {
-            LOG_WARN("stage_anchor", "frontier cap: sql overflow table=%s",
-                     log_table);
-            ok = false;
-            break;
-        }
-        if (!frontier_probe_row(db, sql, log_table, (int64_t)cursor, 0, 1,
-                                &found, NULL)) {
+        rc = frontier_probe_formatted(db, sql, n, sizeof(sql), log_table,
+                                      (int64_t)cursor, 0, 1, &found, NULL);
+        if (rc != FRONTIER_SCAN_OK) {
+            if (rc == FRONTIER_SCAN_SQL_OVERFLOW)
+                LOG_WARN("stage_anchor", "frontier cap: sql overflow table=%s",
+                         log_table);
             ok = false;
             break;
         }
@@ -260,21 +286,19 @@ bool stage_anchor_cap_target_at_log_frontier(sqlite3 *db,
                      "AND NOT EXISTS (SELECT 1 FROM %s t2 "
                      "WHERE t2.height = t1.height + 1)",
                      log_table, log_table);
-        if (n < 0 || n >= (int)sizeof(sql)) {
-            LOG_WARN("stage_anchor", "frontier cap: sql overflow table=%s",
-                     log_table);
+        rc = frontier_probe_formatted(db, sql, n, sizeof(sql), log_table,
+                                      (int64_t)cursor, (int64_t)requested, 2,
+                                      &found, &gap);
+        if (rc != FRONTIER_SCAN_OK) {
+            if (rc == FRONTIER_SCAN_SQL_OVERFLOW)
+                LOG_WARN("stage_anchor", "frontier cap: sql overflow table=%s",
+                         log_table);
             ok = false;
             break;
         }
-        if (!frontier_probe_row(db, sql, log_table, (int64_t)cursor,
-                                (int64_t)requested, 2, &found, &gap)) {
-            ok = false;
-            break;
-        }
-        if (found && gap >= 0 && (uint64_t)gap < requested) {
-            cap_hit = true;
+        cap_hit = frontier_gap_caps(found, gap, requested);
+        if (cap_hit)
             cap_at = (uint64_t)gap;
-        }
     } while (0);
     progress_store_tx_unlock();
 
