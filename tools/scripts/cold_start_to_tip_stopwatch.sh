@@ -1737,12 +1737,14 @@ if [ "$SELFTEST" = "1" ]; then
     # The incompatible-fixture skip reason must carry the exact match
     # substring the shared skip-class table keys on, so the collector and
     # judge classify it fixture_incompatible (threshold 1 — never
-    # self-heals) rather than letting it drift to unclassified.
+    # self-heals) rather than letting it drift to unclassified. The class
+    # has more than one row, so select this harness's row by its substring.
     st_cls_match="$(sed -n 's/^STOPWATCH_SKIP_CLASS("fixture_incompatible",[ ]*[0-9][0-9]*,[ ]*"\(.*\)")[ ]*$/\1/p' \
-        "$REPO_ROOT/engine/services/include/services/stopwatch_skip_classes.def" | head -n1)"
+        "$REPO_ROOT/engine/services/include/services/stopwatch_skip_classes.def" |
+        grep -Fx "file_peer fixture incompatible")"
     st_ps_check "the shared skip-class table knows fixture_incompatible" \
         "file_peer fixture incompatible" "$st_cls_match"
-    grep -qF "$st_cls_match" "${BASH_SOURCE[0]}"
+    grep -qF "skip \"$st_cls_match" "${BASH_SOURCE[0]}"
     st_check "this harness's skip reason carries the table's match substring" 0 $?
 
     # Multi-peer input is one ordered set: comma lists and repeated flags feed
