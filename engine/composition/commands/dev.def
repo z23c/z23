@@ -2369,7 +2369,8 @@ ZCL_COMMAND_DEV_COMMAND(
     "else RECEIVE_NO_CHECKOUT). The host's file receive-policy beside "
     "queue.jsonl, one line require_receipts=N, makes N>0 demand offer and "
     "receipts (RECEIVE_RECEIPTS_REQUIRED), check_offer's checks and "
-    "qualify_offer's count (RECEIVE_NOT_QUALIFIED) before any fetch; a bad "
+    "qualify_offer's count (RECEIVE_NOT_QUALIFIED, evidence and data.rejected "
+    "name each skipped receipt and its code) before any fetch; a bad "
     "file is RECEIVE_BAD_POLICY; absent or 0 changes nothing.",
     65536,
     "land,receive,bundle,remote,queue",
@@ -2397,7 +2398,9 @@ ZCL_COMMAND_DEV_COMMAND(
     "(inbox defaults to .cache/development-scratch/z23/land-inbox under the "
     "remote home) and runs `<remote_cmd> dev land receive` over ssh "
     "(remote_cmd defaults to z23-dev), relaying the remote JSON reply as "
-    "data.remote. commit=<sha or ref> sends exactly that one commit instead "
+    "data.remote. lane defaults to the branch name minus a lane/ prefix; "
+    "an invalid one is SEND_BAD_ARGUMENT. "
+    "commit=<sha or ref> sends exactly that one commit instead "
     "of HEAD, dirty tracked trees allowed (the bundle comes from the object "
     "store); origin/main..commit must be that one commit, else SEND_NOT_SINGLE "
     "with the command that makes it single; an already-landed commit refuses "
@@ -2419,8 +2422,8 @@ ZCL_COMMAND_DEV_COMMAND(
     65536,
     "land,send,bundle,remote,ssh",
     "zcl.land_send_input.v1", "zcl.land_send.v1",
-    "host,lane,note,remote_cmd,inbox,remote_checkout,precheck,commit,bundle_out", "lane",
-    "z23-dev dev land send --host=queue-host --lane=mac",
+    "host,lane,note,remote_cmd,inbox,remote_checkout,precheck,commit,bundle_out", "",
+    "z23-dev dev land send --host=queue-host [--lane=NAME]",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
@@ -2542,11 +2545,16 @@ ZCL_COMMAND_DEV_COMMAND(
     "Count the distinct labs that re-verified an offered commit",
     "Each of receipts (comma list of absolute paths) passes "
     "verify_offer_receipt's checks against offer, same codes, its path as "
-    "evidence. It counts only with cx_check in its checks (else "
-    "QUALIFY_NOT_REVERIFIED) and a signer other than this box's own key "
-    "(QUALIFY_SIGNER_NOT_DISTINCT); a repeated signer counts once. Fewer "
-    "than require (integer, default 1, 1..16) refuses QUALIFY_SHORT. Returns "
-    "commit, base, required, qualified, signers, duplicates, verdict ready.",
+    "evidence. It counts only with cx_check in its checks and a signer other "
+    "than this box's own key; a receipt that fails any check is skipped, "
+    "not fatal, and listed in data.rejected as {receipt, code} (codes "
+    "as above plus QUALIFY_NOT_REVERIFIED, QUALIFY_SIGNER_NOT_DISTINCT); a "
+    "repeated signer counts once. Fewer than require (integer, default 1, "
+    "1..16) refuses QUALIFY_SHORT naming each rejected receipt. Whole-call "
+    "refusals: QUALIFY_BAD_ARGUMENT, QUALIFY_SIGNER_KEY_UNREADABLE (the key "
+    "is created by this box's first signature, dev land attest_offer or a "
+    "proof). Returns commit, base, required, qualified, signers, "
+    "duplicates, rejected, verdict ready.",
     65536,
     "land,offer,receipt,qualify,p2p",
     "zcl.land_qualify_offer_input.v1", "zcl.land_qualify_offer.v1",

@@ -39,8 +39,9 @@
  *          pre-push hook trusts; RECEIVE_WORKTREE_DIRTY when it holds tracked
  *          changes, which are never reset) and queues the tip through the
  *          in-process submit path, returning submit's reply unchanged.
- *          Admission: the host's file <state root>/land/receive-policy
- *          (beside queue.jsonl) holds one line `require_receipts=N`. Absent
+ *          Admission: the host's file land/receive-policy under the dev
+ *          state root ($XDG_STATE_HOME/z23/dev/land/receive-policy, beside
+ *          queue.jsonl) holds one line `require_receipts=N`. Absent
  *          or N=0 changes nothing. With N>0 receive needs --offer and
  *          --receipts (RECEIVE_RECEIPTS_REQUIRED), runs check_offer's checks
  *          on the bundle (its OFFER_* codes), then qualify_offer's count
@@ -474,14 +475,17 @@ static bool dlr_recv_admit(const struct zcl_command_request *req,
     zcl_command_reply_init(&tmp, "zcl.land.v1");
     ok = zcl_dlr_qualify(offer, receipts, need, &q, &tmp);
     if (!ok) {
+        char rej[200];
+        zcl_dlr_rejected_text(&q, rej, sizeof(rej));
         (void)snprintf(ev, sizeof(ev),
-                       "%s qualified=%d required=%d duplicates=%d %s",
-                       q.code, q.qualified, q.required, q.duplicates,
-                       tmp.error.evidence);
+                       "%s qualified=%d required=%d duplicates=%d %s", q.code,
+                       q.qualified, q.required, q.duplicates,
+                       rej[0] ? rej : tmp.error.evidence);
         dlr_recv_fail(reply, "RECEIVE_NOT_QUALIFIED", "admit",
                       "the offered commit is not qualified by enough "
                       "distinct re-verified receipts",
                       ev);
+        zcl_dlr_push_rejected(reply, &q);
     }
     zcl_command_reply_free(&tmp);
     return ok;
@@ -527,6 +531,7 @@ struct dlr_send {
     char bsha[SHA256_OUTPUT_SIZE * 2 + 1];
     long ahead;
     char note_buf[DLR_NOTE_MAX + 1];
+    char lane_buf[256];
 };
 
 static void dlr_send_fail(struct zcl_command_reply *reply, const char *code,
@@ -596,6 +601,35 @@ static bool dlr_send_out_free(struct dlr_send *s,
     return true;
 }
 
+/* No --lane: the lane is the current branch, with a fleet "lane/" prefix
+ * dropped (branch lane/<x> is lane <x>). A name that is still not a lane
+ * refuses SEND_BAD_ARGUMENT naming it, so the caller knows what to pass. */
+static bool dlr_send_lane(struct dlr_send *s, struct zcl_command_reply *reply)
+{
+    const char *head[] = {"rev-parse", "--abbrev-ref", "HEAD", NULL};
+    char br[sizeof(s->lane_buf)], msg[400];
+    const char *name;
+    br[0] = '\0';
+    if (dlr_git(".", head, br, sizeof(br)) != 0)
+        br[0] = '\0';
+    dlr_trim(br);
+    name = strncmp(br, "lane/", 5) == 0 ? br + 5 : br;
+    if (zcl_dlr_lane_ok(name)) {
+        (void)snprintf(s->lane_buf, sizeof(s->lane_buf), "%s", name);
+        s->lane = s->lane_buf;
+        return true;
+    }
+    (void)snprintf(msg, sizeof(msg),
+                   "no --lane given and the lane derived from the branch is "
+                   "\"%.100s\", which is not a lane name "
+                   "([a-z0-9][a-z0-9-]{0,47}); pass --lane=<name>",
+                   name);
+    dlr_send_fail(reply, "SEND_BAD_ARGUMENT", "input", msg,
+                  br[0] ? br : "branch unreadable (detached HEAD or not a "
+                              "checkout)");
+    return false;
+}
+
 static bool dlr_send_args(const struct zcl_command_request *req,
                           struct dlr_send *s, struct zcl_command_reply *reply)
 {
@@ -618,6 +652,8 @@ static bool dlr_send_args(const struct zcl_command_request *req,
                       "input.host");
         return false;
     }
+    if (!s->lane && !dlr_send_lane(s, reply))
+        return false;
     if (dlr_send_names_ok(s)) {
         if (!dlr_commit_ok(s->commit) || !dlr_out_ok(s->out)) {
             dlr_send_fail(reply, "SEND_BAD_ARGUMENT", "input",

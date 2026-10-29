@@ -109,6 +109,19 @@ static bool dlq_ready(const struct dlt_call *c, int qualified, int duplicates,
            json_get_int(json_get(&c->reply.data, "required")) == required;
 }
 
+/* data.rejected has `count` rows and row i is {path, code}. */
+static bool dlq_rej_row(const struct dlt_call *c, int count, int i,
+                        const char *path, const char *code)
+{
+    const struct json_value *rej = json_get(&c->reply.data, "rejected");
+    const struct json_value *row;
+    if (!rej || (int)json_size(rej) != count)
+        return false;
+    row = json_at(rej, (size_t)i);
+    return row && strcmp(json_get_str(json_get(row, "receipt")), path) == 0 &&
+           strcmp(json_get_str(json_get(row, "code")), code) == 0;
+}
+
 static int dlq_qualify_cases(void)
 {
     int failures = 0;
@@ -116,7 +129,7 @@ static int dlq_qualify_cases(void)
     struct dlt_call c;
     char sb[900], sc[900], sa[900], rb[900], rc[900], ra[900], rn[900];
     char bad[900], both[2000], twice[2000], bsign[65], csign[65], asign[65];
-    char nsign[65];
+    char nsign[65], mixed[3000];
     if (!dlq_fixture(&f, "qualify")) {
         printf("rig setup FAILED\n");
         return 1;
@@ -131,6 +144,7 @@ static int dlq_qualify_cases(void)
     (void)snprintf(bad, sizeof(bad), "%s/bad.receipt.json", f.r.base);
     (void)snprintf(both, sizeof(both), "%s,%s", rb, rc);
     (void)snprintf(twice, sizeof(twice), "%s,%s", rb, rb);
+    (void)snprintf(mixed, sizeof(mixed), "%s,%s,%s", rb, rn, bad);
     if (!dlq_sign(&f, sb, rb, DLQ_CX, bsign) ||
         !dlq_sign(&f, sc, rc, DLQ_CX, csign) ||
         !dlq_sign(&f, sa, ra, DLQ_CX, asign) ||
@@ -171,29 +185,66 @@ static int dlq_qualify_cases(void)
         PASS();
     }
 
-    TEST("land.qualify_offer: this box's own receipt refuses "
-         "QUALIFY_SIGNER_NOT_DISTINCT") {
+    TEST("land.qualify_offer: this box's own receipt alone refuses "
+         "QUALIFY_SHORT and lists QUALIFY_SIGNER_NOT_DISTINCT as rejected") {
         dlq_qualify(&c, &f, ra, 0);
-        ASSERT(dlt_refused(&c, "QUALIFY_SIGNER_NOT_DISTINCT"));
-        ASSERT_STR_EQ(c.reply.error.evidence, ra);
+        ASSERT(dlt_refused(&c, "QUALIFY_SHORT"));
+        ASSERT(dlq_rej_row(&c, 1, 0, ra, "QUALIFY_SIGNER_NOT_DISTINCT"));
+        ASSERT(strstr(c.reply.error.evidence, "QUALIFY_SIGNER_NOT_DISTINCT") !=
+               NULL);
         dlt_end(&c);
         PASS();
     }
 
-    TEST("land.qualify_offer: a 4-check receipt refuses "
-         "QUALIFY_NOT_REVERIFIED") {
+    TEST("land.qualify_offer: a 4-check receipt alone refuses "
+         "QUALIFY_SHORT and lists QUALIFY_NOT_REVERIFIED as rejected") {
         dlq_qualify(&c, &f, rn, 0);
-        ASSERT(dlt_refused(&c, "QUALIFY_NOT_REVERIFIED"));
-        ASSERT_STR_EQ(c.reply.error.evidence, rn);
+        ASSERT(dlt_refused(&c, "QUALIFY_SHORT"));
+        ASSERT(dlq_rej_row(&c, 1, 0, rn, "QUALIFY_NOT_REVERIFIED"));
+        ASSERT(strstr(c.reply.error.evidence, "QUALIFY_NOT_REVERIFIED") !=
+               NULL);
         dlt_end(&c);
         PASS();
     }
 
-    TEST("land.qualify_offer: one flipped signature byte refuses "
-         "RECEIPT_SIGNATURE_INVALID with the receipt's path") {
+    TEST("land.qualify_offer: one flipped signature byte alone refuses "
+         "QUALIFY_SHORT and lists RECEIPT_SIGNATURE_INVALID with the path") {
         dlq_qualify(&c, &f, bad, 0);
-        ASSERT(dlt_refused(&c, "RECEIPT_SIGNATURE_INVALID"));
-        ASSERT_STR_EQ(c.reply.error.evidence, bad);
+        ASSERT(dlt_refused(&c, "QUALIFY_SHORT"));
+        ASSERT(dlq_rej_row(&c, 1, 0, bad, "RECEIPT_SIGNATURE_INVALID"));
+        ASSERT(strstr(c.reply.error.evidence, "RECEIPT_SIGNATURE_INVALID") !=
+               NULL);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.qualify_offer: a valid receipt, an attest-only one and a "
+         "tampered one with require=1 is ready with two rejected rows") {
+        dlq_qualify(&c, &f, mixed, 1);
+        ASSERT(dlq_ready(&c, 1, 0, 1));
+        ASSERT_STR_EQ(json_get_str(json_at(json_get(&c.reply.data, "signers"),
+                                           0)),
+                      bsign);
+        ASSERT(dlq_rej_row(&c, 2, 0, rn, "QUALIFY_NOT_REVERIFIED"));
+        ASSERT(dlq_rej_row(&c, 2, 1, bad, "RECEIPT_SIGNATURE_INVALID"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.qualify_offer: the same set with require=2 refuses "
+         "QUALIFY_SHORT naming both rejected receipts") {
+        dlq_qualify(&c, &f, mixed, 2);
+        ASSERT(dlt_refused(&c, "QUALIFY_SHORT"));
+        ASSERT(strstr(c.reply.error.evidence, "qualified=1 required=2") !=
+               NULL);
+        ASSERT(strstr(c.reply.error.evidence, "n.receipt.json "
+                                              "QUALIFY_NOT_REVERIFIED") !=
+               NULL);
+        ASSERT(strstr(c.reply.error.evidence, "bad.receipt.json "
+                                              "RECEIPT_SIGNATURE_INVALID") !=
+               NULL);
+        ASSERT(dlq_rej_row(&c, 2, 0, rn, "QUALIFY_NOT_REVERIFIED"));
+        ASSERT(dlq_rej_row(&c, 2, 1, bad, "RECEIPT_SIGNATURE_INVALID"));
         dlt_end(&c);
         PASS();
     }
@@ -320,6 +371,7 @@ static int dlq_receive_cases(void)
         ASSERT(dlq_policy("require_receipts=1\n"));
         dlq_receive(&c, &f, "selfish", f.offer, ra);
         ASSERT(dlt_refused(&c, "RECEIVE_NOT_QUALIFIED"));
+        ASSERT(dlq_rej_row(&c, 1, 0, ra, "QUALIFY_SIGNER_NOT_DISTINCT"));
         ASSERT(strstr(c.reply.error.evidence, "QUALIFY_SIGNER_NOT_DISTINCT") !=
                NULL);
         dlt_end(&c);

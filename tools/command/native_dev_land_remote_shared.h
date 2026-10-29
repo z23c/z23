@@ -48,12 +48,26 @@ bool zcl_dlr_json_write_new(const struct json_value *doc, const char *path);
 
 #define DLR_QUAL_RECEIPTS_MAX 32
 
-/* What qualify_offer counted; q->code is the refusal code when it refused. */
+/* A receipt that did not count: its path (as given) and why. */
+struct dlr_qual_rej {
+    char path[512], code[64];
+};
+
+/* What qualify_offer counted; q->code is the refusal code when it refused.
+ * rej lists every receipt that failed a check and was skipped. */
 struct dlr_qual {
     char commit[48], base[48], code[64];
     char signers[DLR_QUAL_RECEIPTS_MAX][65];
-    int required, qualified, duplicates;
+    struct dlr_qual_rej rej[DLR_QUAL_RECEIPTS_MAX];
+    int required, qualified, duplicates, rejected;
 };
+
+/* data.rejected = [{"receipt": path, "code": code}] for the skipped receipts. */
+void zcl_dlr_push_rejected(struct zcl_command_reply *reply,
+                           const struct dlr_qual *q);
+/* "rejected=N: <file> <code>; ..." with file names only (an evidence field
+ * is short); empty when nothing was rejected. */
+void zcl_dlr_rejected_text(const struct dlr_qual *q, char *out, size_t cap);
 
 /* check_offer's checks with the checkout already known (the receiver's);
  * a refusal is in reply under leaf. */

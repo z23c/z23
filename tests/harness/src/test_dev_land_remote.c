@@ -381,6 +381,37 @@ static int dlt_single_cases(void)
         PASS();
     }
 
+    TEST("land.send: no lane on branch lane/<x> sends as lane <x>; a branch "
+         "that is no lane name refuses naming it") {
+        char b[900];
+        (void)snprintf(b, sizeof(b), "%s/derived.bundle", r.base);
+        ASSERT(DLT_GIT(NULL, 0, r.sender, "switch", "--quiet", "-c",
+                       "lane/zed") == 0);
+        dlt_begin(&c, "dev.land.send");
+        (void)json_push_kv_str(&c.input, "commit", one);
+        (void)json_push_kv_str(&c.input, "bundle_out", b);
+        dlt_cd(r.sender);
+        zcl_native_handle_dev_land_remote(&c.request, &c.reply);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "lane")), "zed");
+        dlt_end(&c);
+        ASSERT(DLT_GIT(NULL, 0, r.sender, "switch", "--quiet", "-c",
+                       "Not_A_Lane") == 0);
+        dlt_begin(&c, "dev.land.send");
+        (void)json_push_kv_str(&c.input, "commit", one);
+        (void)json_push_kv_str(&c.input, "bundle_out", b);
+        dlt_cd(r.sender);
+        zcl_native_handle_dev_land_remote(&c.request, &c.reply);
+        ASSERT(dlt_refused(&c, "SEND_BAD_ARGUMENT"));
+        ASSERT(strstr(c.reply.error.message, "Not_A_Lane") != NULL);
+        ASSERT(strstr(c.reply.error.message, "--lane=<name>") != NULL);
+        dlt_end(&c);
+        ASSERT(DLT_GIT(NULL, 0, r.sender, "switch", "--quiet", "-") == 0);
+        ASSERT(DLT_GIT(NULL, 0, r.sender, "branch", "--quiet", "-D",
+                       "Not_A_Lane") == 0);
+        PASS();
+    }
+
     TEST("land.send --bundle_out: an existing path refuses SEND_BUNDLE_EXISTS") {
         (void)snprintf(path, sizeof(path), "%s/out.bundle", r.base);
         dlt_send_x(&c, &r, one, path, false);

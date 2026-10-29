@@ -56,16 +56,22 @@
  * qualify_offer (read-only) takes absolute --offer, --receipts (comma list,
  *          1..32 absolute paths) and optional integer --require (default 1,
  *          1..16; QUALIFY_BAD_ARGUMENT otherwise). Each receipt first passes
- *          verify_offer_receipt's checks against the offer (same codes, the
- *          receipt's path as evidence). It then counts only when its checks
- *          include cx_check (else QUALIFY_NOT_REVERIFIED) and its signer is
- *          not this box's own key (QUALIFY_SIGNER_NOT_DISTINCT: a lab never
- *          vouches for itself; QUALIFY_SIGNER_KEY_UNREADABLE when that key
- *          cannot be read). A signer seen again counts once, as a duplicate.
- *          Fewer qualified signers than required refuses QUALIFY_SHORT with
- *          the counts. Reply: data {commit, base, required, qualified,
- *          signers[], duplicates, verdict "ready"}. zcl_dlr_qualify is also
- *          what dev.land.receive admits on.
+ *          verify_offer_receipt's checks against the offer (same codes). It
+ *          then counts only when its checks include cx_check and its signer
+ *          is not this box's own key. A receipt that fails any check is
+ *          skipped, not fatal: it is listed in data.rejected as
+ *          [{"receipt": path, "code": code}] with its code (OFFER_RECEIPT_BAD,
+ *          RECEIPT_SIGNATURE_INVALID, RECEIPT_SIGNER_UNKNOWN,
+ *          RECEIPT_OFFER_MISMATCH, QUALIFY_NOT_REVERIFIED, or
+ *          QUALIFY_SIGNER_NOT_DISTINCT: a lab never vouches for itself).
+ *          A signer seen again counts once, as a duplicate. Fewer qualified
+ *          signers than required refuses QUALIFY_SHORT; its evidence and
+ *          data.rejected name every rejected receipt. Whole-call refusals
+ *          (QUALIFY_BAD_ARGUMENT, QUALIFY_SIGNER_KEY_UNREADABLE) are about
+ *          the input or this box's key, not one receipt. Reply: data
+ *          {commit, base, required, qualified, signers[], duplicates,
+ *          rejected[], verdict "ready"}. zcl_dlr_qualify is also what
+ *          dev.land.receive admits on.
  */
 
 #include "command/native_command.h"
@@ -579,54 +585,102 @@ static bool dlr_qual_refuse(struct dlr_qctx *x, const char *code,
     return false;
 }
 
+/* A receipt that does not count is skipped and remembered, never fatal. */
+static void dlr_qual_reject(struct dlr_qctx *x, const char *path,
+                            const char *code)
+{
+    struct dlr_qual *q = x->q;
+    if (q->rejected >= DLR_QUAL_RECEIPTS_MAX)
+        return;
+    (void)snprintf(q->rej[q->rejected].path, sizeof(q->rej[0].path), "%s",
+                   path);
+    (void)snprintf(q->rej[q->rejected].code, sizeof(q->rej[0].code), "%s",
+                   code);
+    q->rejected++;
+}
+
+void zcl_dlr_push_rejected(struct zcl_command_reply *reply,
+                           const struct dlr_qual *q)
+{
+    struct json_value list, one;
+    json_init(&list);
+    json_set_array(&list);
+    for (int i = 0; i < q->rejected; i++) {
+        json_init(&one);
+        json_set_object(&one);
+        (void)json_push_kv_str(&one, "receipt", q->rej[i].path);
+        (void)json_push_kv_str(&one, "code", q->rej[i].code);
+        (void)json_push_back(&list, &one);
+        json_free(&one);
+    }
+    (void)json_push_kv(&reply->data, "rejected", &list);
+    json_free(&list);
+}
+
+void zcl_dlr_rejected_text(const struct dlr_qual *q, char *out, size_t cap)
+{
+    size_t n = 0;
+    if (cap == 0)
+        return;
+    out[0] = '\0';
+    if (q->rejected == 0)
+        return;
+    n = (size_t)snprintf(out, cap, "rejected=%d:", q->rejected);
+    for (int i = 0; i < q->rejected && n < cap; i++) {
+        const char *slash = strrchr(q->rej[i].path, '/');
+        int w = snprintf(out + n, cap - n, "%s %s %s", i ? ";" : "",
+                         slash ? slash + 1 : q->rej[i].path, q->rej[i].code);
+        if (w < 0)
+            break;
+        n += (size_t)w;
+    }
+}
+
 /* One receipt through verify_offer_receipt's checks against the offer; a
- * refusal keeps that check's code, with the receipt's path as evidence. */
+ * failed check keeps that check's code, recorded with the receipt's path. */
 static bool dlr_qual_verified(struct dlr_qctx *x, const char *path,
                               struct dlr_receipt *t)
 {
     struct zcl_command_reply tmp;
-    char code[sizeof(x->q->code)], msg[192];
     bool ok;
     zcl_command_reply_init(&tmp, "zcl.land.v1");
     ok = dlr_receipt_read(path, t, &tmp) && dlr_receipt_verify(t, &tmp) &&
          dlr_receipt_matches(t, x->offer, &tmp);
-    (void)snprintf(code, sizeof(code), "%s", tmp.error.code);
-    (void)snprintf(msg, sizeof(msg), "%s", tmp.error.message);
+    if (!ok)
+        dlr_qual_reject(x, path, tmp.error.code);
     zcl_command_reply_free(&tmp);
-    return ok || dlr_qual_refuse(x, code, msg, path);
+    return ok;
 }
 
 /* A verified receipt counts once per signer, and only as a reverify one from
- * a signer that is not this box's own key. */
-static bool dlr_qual_count(struct dlr_qctx *x, const char *path,
+ * a signer that is not this box's own key; any other is rejected. */
+static void dlr_qual_count(struct dlr_qctx *x, const char *path,
                            const struct dlr_receipt *t)
 {
     struct dlr_qual *q = x->q;
     int i;
-    if (strcmp(t->checks, DLR_RECEIPT_CHECKS_CX) != 0)
-        return dlr_qual_refuse(x, "QUALIFY_NOT_REVERIFIED",
-                               "the receipt lacks the cx_check check: it was "
-                               "not made by reverify_offer",
-                               path);
-    if (x->own_present && memcmp(t->pub, x->own, sizeof(x->own)) == 0)
-        return dlr_qual_refuse(x, "QUALIFY_SIGNER_NOT_DISTINCT",
-                               "the receipt is signed by this box's own key; "
-                               "a lab never vouches for itself",
-                               path);
+    if (strcmp(t->checks, DLR_RECEIPT_CHECKS_CX) != 0) {
+        dlr_qual_reject(x, path, "QUALIFY_NOT_REVERIFIED");
+        return;
+    }
+    if (x->own_present && memcmp(t->pub, x->own, sizeof(x->own)) == 0) {
+        dlr_qual_reject(x, path, "QUALIFY_SIGNER_NOT_DISTINCT");
+        return;
+    }
     for (i = 0; i < q->qualified; i++) {
         if (strcmp(q->signers[i], t->signer) == 0) {
             q->duplicates++;
-            return true;
+            return;
         }
     }
     (void)snprintf(q->signers[q->qualified++], sizeof(q->signers[0]), "%s",
                    t->signer);
     (void)snprintf(q->commit, sizeof(q->commit), "%s", t->commit);
     (void)snprintf(q->base, sizeof(q->base), "%s", t->base);
-    return true;
 }
 
-/* The comma list, one receipt at a time. */
+/* The comma list, one receipt at a time. Only a malformed list refuses the
+ * whole call; a receipt that fails a check is skipped. */
 static bool dlr_qual_each(struct dlr_qctx *x, const char *list)
 {
     char buf[DLR_QUAL_LIST_MAX], *p = buf, *end;
@@ -644,8 +698,8 @@ static bool dlr_qual_each(struct dlr_qctx *x, const char *list)
                                    "receipts are 1 to 32 absolute paths "
                                    "separated by commas",
                                    p);
-        if (!dlr_qual_verified(x, p, &t) || !dlr_qual_count(x, p, &t))
-            return false;
+        if (dlr_qual_verified(x, p, &t))
+            dlr_qual_count(x, p, &t);
         if (!end)
             return true;
         p = end + 1;
@@ -659,7 +713,7 @@ bool zcl_dlr_qualify(const char *offer, const char *receipts, int require,
 {
     struct dlr_qctx x = {.q = q, .reply = reply, .offer = offer};
     const char *why = NULL;
-    char ev[96];
+    char ev[256], rej[200];
     memset(q, 0, sizeof(*q));
     q->required = require;
     if (!offer || !platform_path_is_absolute(offer) || !receipts ||
@@ -670,18 +724,29 @@ bool zcl_dlr_qualify(const char *offer, const char *receipts, int require,
                                "input.offer, input.receipts or input.require");
     if (!zcl_dev_proof_signer_public(x.own, &x.own_present, &why))
         return dlr_qual_refuse(&x, "QUALIFY_SIGNER_KEY_UNREADABLE",
-                               "this box's own signer key cannot be read, so "
-                               "no receipt can be told apart from its own",
+                               "this box's signer key cannot be read; it is "
+                               "created by this box's first signature "
+                               "(dev land attest_offer or a proof), so sign "
+                               "once here first",
                                why ? why : "signer_key_unreadable");
     if (!dlr_qual_each(&x, receipts))
         return false;
     if (q->qualified >= require)
         return true;
-    (void)snprintf(ev, sizeof(ev), "qualified=%d required=%d duplicates=%d",
-                   q->qualified, require, q->duplicates);
-    return dlr_qual_refuse(&x, "QUALIFY_SHORT",
-                           "fewer distinct re-verified signers than required",
-                           ev);
+    zcl_dlr_rejected_text(q, rej, sizeof(rej));
+    (void)snprintf(ev, sizeof(ev), "qualified=%d required=%d duplicates=%d%s%s",
+                   q->qualified, require, q->duplicates, rej[0] ? " " : "",
+                   rej);
+    (void)dlr_qual_refuse(&x, "QUALIFY_SHORT",
+                          q->rejected > 0
+                              ? "fewer distinct re-verified signers than "
+                                "required; the rejected receipts and their "
+                                "codes are in the evidence and data.rejected"
+                              : "fewer distinct re-verified signers than "
+                                "required",
+                          ev);
+    zcl_dlr_push_rejected(reply, q);
+    return false;
 }
 
 /* Read-only: the receipts are checked, nothing is written. */
@@ -714,6 +779,7 @@ static void dlr_qualify_offer(const struct zcl_command_request *req,
     (void)json_push_kv(&reply->data, "signers", &list);
     (void)json_push_kv_int(&reply->data, "duplicates", q.duplicates);
     (void)json_push_kv_str(&reply->data, "verdict", "ready");
+    zcl_dlr_push_rejected(reply, &q);
     json_free(&list);
 }
 
