@@ -480,7 +480,7 @@ static int utxo_apply_reorg_walk_fork(sqlite3_stmt *walk_st, sqlite3 *db,
             uint256_eq(&rec_h, act_h->phashBlock))
             return h;
     }
-    return -1;
+    return -1; // raw-return-ok:no fork matched; the caller logs the finality-floor refusal
 }
 
 /* The writes of one unwind txn; the caller rolls back when this fails. */
