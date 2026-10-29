@@ -293,6 +293,12 @@ static void dl_reset(struct swarm_download *dl)
     memset(dl, 0, sizeof(*dl));
 }
 
+/* Per-chunk map slots: at least one, even for an empty manifest. */
+static size_t dl_map_slots(const struct swarm_download *dl)
+{
+    return dl->total_chunks ? dl->total_chunks : 1;
+}
+
 /* Build the flattened coordinate maps after dl->manifest was loaded.
  * False (logged) on allocation failure. */
 static bool dl_build_maps(struct swarm_download *dl)
@@ -304,32 +310,22 @@ static bool dl_build_maps(struct swarm_download *dl)
         LOG_FAIL(SWARM_LOG, "manifest chunk count over the wire bound");
     dl->total_chunks = (uint32_t)total;
     size_t bitmap_bytes = ((size_t)dl->total_chunks + 7u) / 8u;
-    dl->file_of = zcl_malloc((size_t)(dl->total_chunks ? dl->total_chunks
-                                                      : 1) *
-                                 sizeof(uint32_t),
+    dl->file_of = zcl_malloc(dl_map_slots(dl) * sizeof(uint32_t),
                              "vcs_swarm_file_of");
-    dl->chunk_of = zcl_malloc((size_t)(dl->total_chunks ? dl->total_chunks
-                                                       : 1) *
-                                  sizeof(uint32_t),
+    dl->chunk_of = zcl_malloc(dl_map_slots(dl) * sizeof(uint32_t),
                               "vcs_swarm_chunk_of");
     dl->have = zcl_malloc(bitmap_bytes ? bitmap_bytes : 1u,
                           "vcs_swarm_have");
-    dl->peer_failed = zcl_malloc(
-        (size_t)(dl->total_chunks ? dl->total_chunks : 1) * sizeof(uint64_t),
-        "vcs_swarm_peer_failed");
-    dl->chunk_attempts = zcl_malloc(
-        (size_t)(dl->total_chunks ? dl->total_chunks : 1) * sizeof(uint32_t),
-        "vcs_swarm_chunk_attempts");
+    dl->peer_failed = zcl_malloc(dl_map_slots(dl) * sizeof(uint64_t),
+                                 "vcs_swarm_peer_failed");
+    dl->chunk_attempts = zcl_malloc(dl_map_slots(dl) * sizeof(uint32_t),
+                                    "vcs_swarm_chunk_attempts");
     if (!dl->file_of || !dl->chunk_of || !dl->have || !dl->peer_failed ||
         !dl->chunk_attempts)
         LOG_FAIL(SWARM_LOG, "download map allocation failed");
     memset(dl->have, 0, bitmap_bytes ? bitmap_bytes : 1u);
-    memset(dl->peer_failed, 0,
-           (size_t)(dl->total_chunks ? dl->total_chunks : 1) *
-               sizeof(uint64_t));
-    memset(dl->chunk_attempts, 0,
-           (size_t)(dl->total_chunks ? dl->total_chunks : 1) *
-               sizeof(uint32_t));
+    memset(dl->peer_failed, 0, dl_map_slots(dl) * sizeof(uint64_t));
+    memset(dl->chunk_attempts, 0, dl_map_slots(dl) * sizeof(uint32_t));
     uint32_t g = 0;
     for (size_t i = 0; i < dl->manifest.count; i++)
         for (uint32_t c = 0; c < dl->manifest.files[i].chunk_count; c++) {

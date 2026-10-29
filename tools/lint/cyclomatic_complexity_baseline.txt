@@ -16,7 +16,6 @@ contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_commit:60
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_plan_build:18
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_plan_persist:22
 contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_receipt_load:19
-contexts/commons/modules/vcs/src/package_swarm_node.c:dl_build_maps:18
 contexts/commons/modules/vcs/src/package_swarm_node.c:schedule_locked:46
 contexts/commons/modules/vcs/src/package_swarm_node.c:swarm_fetch:39
 contexts/commons/modules/vcs/src/package_swarm_record.c:vcs_swarm_record_load:16
