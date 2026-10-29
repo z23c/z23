@@ -288,15 +288,9 @@ static int64_t cdb_qualified_count(sqlite3 *db, const char *schema,
     return n;
 }
 
-/* Recreate the exact schema objects (table DDL + its explicit indexes/triggers)
- * for src.<name> onto the destination `main`, using the source's own CREATE
- * text so an `INSERT INTO main.<name> SELECT * FROM src.<name>` aligns
- * column-for-column, then copy the rows. Used for the non-fingerprinted kernel
- * tables (Class B/D) whose schema-ensure functions live above this layer. The
- * dest table is assumed absent (fingerprint tables are handled separately and
- * excluded by the caller). */
-static bool cdb_ddl_copy_table(sqlite3 *db, const char *name, char *errbuf,
-                               size_t errcap)
+/* Fetch the source CREATE text for src.<name> into ddl_buf. */
+static bool cdb_ddl_fetch(sqlite3 *db, const char *name, char *ddl_buf,
+                          size_t cap, char *errbuf, size_t errcap)
 {
     /* 1) table DDL from the source. */
     sqlite3_stmt *q = NULL;
@@ -310,23 +304,24 @@ static bool cdb_ddl_copy_table(sqlite3 *db, const char *name, char *errbuf,
         return false;
     }
     sqlite3_bind_text(q, 1, name, -1, SQLITE_STATIC);
-    const char *ddl = NULL;
-    char ddl_buf[4096];
     ddl_buf[0] = '\0';
     if (sqlite3_step(q) == SQLITE_ROW) { // raw-sql-ok:progress-kv-kernel-store
         const unsigned char *t = sqlite3_column_text(q, 0);
-        if (t) {
-            snprintf(ddl_buf, sizeof(ddl_buf), "%s", (const char *)t);
-            ddl = ddl_buf;
-        }
+        if (t)
+            snprintf(ddl_buf, cap, "%s", (const char *)t);
     }
     sqlite3_finalize(q);
-    if (!ddl || !ddl[0]) {
+    if (!ddl_buf[0]) {
         cdb_set_err(errbuf, errcap,
                     "consensus_db: %s has no copyable CREATE ddl", name);
         return false;
     }
+    return true;
+}
 
+static bool cdb_ddl_create(sqlite3 *db, const char *name, const char *ddl,
+                           char *errbuf, size_t errcap)
+{
     char *err = NULL;
     if (sqlite3_exec(db, ddl, NULL, NULL, &err) != SQLITE_OK) {
         cdb_set_err(errbuf, errcap, "consensus_db: create %s on dest failed: %s",
@@ -335,8 +330,14 @@ static bool cdb_ddl_copy_table(sqlite3 *db, const char *name, char *errbuf,
         return false;
     }
     if (err) { sqlite3_free(err); err = NULL; }
+    return true;
+}
 
+static bool cdb_ddl_copy_rows(sqlite3 *db, const char *name, char *errbuf,
+                              size_t errcap)
+{
     /* 2) rows. */
+    char *err = NULL;
     char ins[160];
     snprintf(ins, sizeof(ins), "INSERT INTO main.\"%s\" SELECT * FROM src.\"%s\"",
              name, name);
@@ -347,7 +348,13 @@ static bool cdb_ddl_copy_table(sqlite3 *db, const char *name, char *errbuf,
         return false;
     }
     if (err) { sqlite3_free(err); err = NULL; }
+    return true;
+}
 
+static bool cdb_ddl_copy_indexes(sqlite3 *db, const char *name, char *errbuf,
+                                 size_t errcap)
+{
+    char *err = NULL;
     /* 3) explicit indexes/triggers (auto-indexes carry sql IS NULL and are
      *    recreated implicitly by the table DDL — skip them). */
     sqlite3_stmt *ix = NULL;
@@ -379,6 +386,23 @@ static bool cdb_ddl_copy_table(sqlite3 *db, const char *name, char *errbuf,
     }
     sqlite3_finalize(ix);
     return ok;
+}
+
+/* Recreate the exact schema objects (table DDL + its explicit indexes/triggers)
+ * for src.<name> onto the destination `main`, using the source's own CREATE
+ * text so an `INSERT INTO main.<name> SELECT * FROM src.<name>` aligns
+ * column-for-column, then copy the rows. Used for the non-fingerprinted kernel
+ * tables (Class B/D) whose schema-ensure functions live above this layer. The
+ * dest table is assumed absent (fingerprint tables are handled separately and
+ * excluded by the caller). */
+static bool cdb_ddl_copy_table(sqlite3 *db, const char *name, char *errbuf,
+                               size_t errcap)
+{
+    char ddl_buf[4096];
+    return cdb_ddl_fetch(db, name, ddl_buf, sizeof(ddl_buf), errbuf, errcap) &&
+           cdb_ddl_create(db, name, ddl_buf, errbuf, errcap) &&
+           cdb_ddl_copy_rows(db, name, errbuf, errcap) &&
+           cdb_ddl_copy_indexes(db, name, errbuf, errcap);
 }
 
 /* Copy every source (progress.kv) table that is NOT a projection STAY table into
@@ -493,6 +517,151 @@ static void cdb_unlink_family(const char *base)
     (void)unlink(p);
 }
 
+enum cdb_source_probe { CDB_SRC_FAIL, CDB_SRC_READY, CDB_SRC_SKIP };
+
+/* Fingerprint the SOURCE progress.kv and close it again. */
+static enum cdb_source_probe
+cdb_migrate_read_source(const char *ppath,
+                        struct consensus_db_kernel_stats *src_stats,
+                        char *errbuf, size_t errcap)
+{
+    sqlite3 *src = NULL;
+    if (sqlite3_open_v2(ppath, &src,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                        NULL) != SQLITE_OK) {
+        cdb_set_err(errbuf, errcap, "consensus_db: open source %s failed: %s",
+                    ppath, src ? sqlite3_errmsg(src) : "(open)");
+        if (src) sqlite3_close(src);
+        return CDB_SRC_FAIL;
+    }
+    if (!cdb_table_exists(src, "coins")) {
+        /* progress.kv present but uninitialised — nothing to migrate. */
+        sqlite3_close(src);
+        return CDB_SRC_SKIP;
+    }
+    bool ok = consensus_db_read_kernel_stats(src, src_stats, errbuf, errcap);
+    sqlite3_close(src);
+    return ok ? CDB_SRC_READY : CDB_SRC_FAIL;
+}
+
+/* ATTACH the source as `src` and open the destination write transaction. */
+static bool cdb_migrate_attach_begin(sqlite3 *dst, const char *ppath,
+                                     char *errbuf, size_t errcap)
+{
+    bool ok = true;
+    char *err = NULL;
+    char attach[1200];
+    snprintf(attach, sizeof(attach), "ATTACH DATABASE '%s' AS src", ppath);
+    if (sqlite3_exec(dst, attach, NULL, NULL, &err) != SQLITE_OK) {
+        cdb_set_err(errbuf, errcap, "consensus_db: attach source failed: %s",
+                    err ? err : "(no message)");
+        if (err) sqlite3_free(err);
+        ok = false;
+    }
+    if (err) { sqlite3_free(err); err = NULL; }
+
+    if (ok && sqlite3_exec(dst, "BEGIN IMMEDIATE", NULL, NULL, &err) !=
+                  SQLITE_OK) {
+        cdb_set_err(errbuf, errcap, "consensus_db: dest BEGIN failed: %s",
+                    err ? err : "(no message)");
+        if (err) sqlite3_free(err);
+        ok = false;
+    }
+    if (err) { sqlite3_free(err); err = NULL; }
+    return ok;
+}
+
+/* COMMIT when the copy succeeded, else ROLLBACK; false if the copy failed or
+ * the closing statement did. */
+static bool cdb_migrate_finish_tx(sqlite3 *dst, bool ok, char *errbuf,
+                                  size_t errcap)
+{
+    char *err = NULL;
+    const char *fini = ok ? "COMMIT" : "ROLLBACK";
+    if (sqlite3_exec(dst, fini, NULL, NULL, &err) != SQLITE_OK) {
+        if (ok)
+            cdb_set_err(errbuf, errcap, "consensus_db: dest COMMIT failed: %s",
+                        err ? err : "(no message)");
+        ok = false;
+    }
+    if (err) { sqlite3_free(err); err = NULL; }
+    return ok;
+}
+
+/* Verify while `src` is still ATTACHed: the 7-table SHA3 fingerprint AND every
+ * copied table's row count EQUAL the source. */
+static bool cdb_migrate_verify(sqlite3 *dst,
+                               const struct consensus_db_kernel_stats *src_stats,
+                               char *errbuf, size_t errcap)
+{
+    struct consensus_db_kernel_stats dst_stats;
+    return consensus_db_read_kernel_stats(dst, &dst_stats, errbuf, errcap) &&
+           consensus_db_kernel_stats_match(src_stats, &dst_stats, errbuf,
+                                           errcap) &&
+           cdb_verify_nonstay_counts(dst, errbuf, errcap);
+}
+
+/* Schema-ensure `dst`, copy the atomic set from the ATTACHed source, verify. */
+static bool cdb_migrate_fill(sqlite3 *dst, const char *ppath,
+                             const struct consensus_db_kernel_stats *src_stats,
+                             char *errbuf, size_t errcap)
+{
+    bool ok = cdb_ensure_kernel_schema(dst);
+    if (!ok)
+        cdb_set_err(errbuf, errcap, "consensus_db: dest schema ensure failed");
+    if (!ok)
+        return false;
+
+    ok = cdb_migrate_attach_begin(dst, ppath, errbuf, errcap);
+
+    /* Copy every non-projection source table: the 7 fingerprint tables plus
+     * the Class B/D tables written inside kernel txs. Enumerate-and-exclude
+     * so a kernel table can never be silently missed. */
+    if (ok)
+        ok = cdb_copy_nonstay_tables(dst, errbuf, errcap);
+
+    ok = cdb_migrate_finish_tx(dst, ok, errbuf, errcap);
+
+    /* 3) Verify while `src` is still ATTACHed: the 7-table SHA3 fingerprint
+     *    AND every copied table's row count EQUAL the source. */
+    if (ok)
+        ok = cdb_migrate_verify(dst, src_stats, errbuf, errcap);
+
+    (void)sqlite3_exec(dst, "DETACH DATABASE src", NULL, NULL, NULL);
+    return ok;
+}
+
+/* Build consensus.db.tmp fresh; on any failure no tmp family is left behind. */
+static bool cdb_migrate_build_tmp(const char *tpath, const char *ppath,
+                                  const struct consensus_db_kernel_stats *src_stats,
+                                  char *errbuf, size_t errcap)
+{
+    cdb_unlink_family(tpath);
+    sqlite3 *dst = NULL;
+    if (sqlite3_open_v2(tpath, &dst,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                            SQLITE_OPEN_FULLMUTEX,
+                        NULL) != SQLITE_OK) {
+        cdb_set_err(errbuf, errcap, "consensus_db: create %s failed: %s", tpath,
+                    dst ? sqlite3_errmsg(dst) : "(open)");
+        if (dst) sqlite3_close(dst);
+        cdb_unlink_family(tpath);
+        return false;
+    }
+
+    bool ok = cdb_migrate_fill(dst, ppath, src_stats, errbuf, errcap);
+
+    sqlite3_close(dst);
+
+    if (!ok) {
+        /* Refuse: never leave a half-migrated consensus.db. progress.kv is
+         * untouched, so the caller can retry or fall back. */
+        cdb_unlink_family(tpath);
+        return false;
+    }
+    return true;
+}
+
 bool consensus_db_migrate_from_progress(const char *datadir, char *errbuf,
                                         size_t errcap)
 {
@@ -524,105 +693,17 @@ bool consensus_db_migrate_from_progress(const char *datadir, char *errbuf,
     /* 1) Fingerprint the SOURCE, then close it before the ATTACH copy so the
      *    WAL file has a single writer/owner during the copy. */
     struct consensus_db_kernel_stats src_stats;
-    {
-        sqlite3 *src = NULL;
-        if (sqlite3_open_v2(ppath, &src,
-                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
-                            NULL) != SQLITE_OK) {
-            cdb_set_err(errbuf, errcap, "consensus_db: open source %s failed: %s",
-                        ppath, src ? sqlite3_errmsg(src) : "(open)");
-            if (src) sqlite3_close(src);
-            return false;
-        }
-        if (!cdb_table_exists(src, "coins")) {
-            /* progress.kv present but uninitialised — nothing to migrate. */
-            sqlite3_close(src);
-            return true;
-        }
-        bool ok = consensus_db_read_kernel_stats(src, &src_stats, errbuf, errcap);
-        sqlite3_close(src);
-        if (!ok)
-            return false;
-    }
+    enum cdb_source_probe probe =
+        cdb_migrate_read_source(ppath, &src_stats, errbuf, errcap);
+    if (probe != CDB_SRC_READY)
+        return probe == CDB_SRC_SKIP;
 
     /* 2) Build consensus.db.tmp fresh and copy the atomic set into it.  Use a
      *    rollback journal (default) so the finished file is self-contained —
      *    no -wal to carry across the rename; progress_store switches the real
      *    consensus.db to WAL on its first open. */
-    cdb_unlink_family(tpath);
-    sqlite3 *dst = NULL;
-    if (sqlite3_open_v2(tpath, &dst,
-                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
-                            SQLITE_OPEN_FULLMUTEX,
-                        NULL) != SQLITE_OK) {
-        cdb_set_err(errbuf, errcap, "consensus_db: create %s failed: %s", tpath,
-                    dst ? sqlite3_errmsg(dst) : "(open)");
-        if (dst) sqlite3_close(dst);
-        cdb_unlink_family(tpath);
+    if (!cdb_migrate_build_tmp(tpath, ppath, &src_stats, errbuf, errcap))
         return false;
-    }
-
-    bool ok = cdb_ensure_kernel_schema(dst);
-    if (!ok)
-        cdb_set_err(errbuf, errcap, "consensus_db: dest schema ensure failed");
-
-    if (ok) {
-        char *err = NULL;
-        char attach[1200];
-        snprintf(attach, sizeof(attach), "ATTACH DATABASE '%s' AS src", ppath);
-        if (sqlite3_exec(dst, attach, NULL, NULL, &err) != SQLITE_OK) {
-            cdb_set_err(errbuf, errcap, "consensus_db: attach source failed: %s",
-                        err ? err : "(no message)");
-            if (err) sqlite3_free(err);
-            ok = false;
-        }
-        if (err) { sqlite3_free(err); err = NULL; }
-
-        if (ok && sqlite3_exec(dst, "BEGIN IMMEDIATE", NULL, NULL, &err) !=
-                      SQLITE_OK) {
-            cdb_set_err(errbuf, errcap, "consensus_db: dest BEGIN failed: %s",
-                        err ? err : "(no message)");
-            if (err) sqlite3_free(err);
-            ok = false;
-        }
-        if (err) { sqlite3_free(err); err = NULL; }
-
-        /* Copy every non-projection source table: the 7 fingerprint tables plus
-         * the Class B/D tables written inside kernel txs. Enumerate-and-exclude
-         * so a kernel table can never be silently missed. */
-        if (ok)
-            ok = cdb_copy_nonstay_tables(dst, errbuf, errcap);
-
-        const char *fini = ok ? "COMMIT" : "ROLLBACK";
-        if (sqlite3_exec(dst, fini, NULL, NULL, &err) != SQLITE_OK) {
-            if (ok)
-                cdb_set_err(errbuf, errcap, "consensus_db: dest COMMIT failed: %s",
-                            err ? err : "(no message)");
-            ok = false;
-        }
-        if (err) { sqlite3_free(err); err = NULL; }
-
-        /* 3) Verify while `src` is still ATTACHed: the 7-table SHA3 fingerprint
-         *    AND every copied table's row count EQUAL the source. */
-        if (ok) {
-            struct consensus_db_kernel_stats dst_stats;
-            ok = consensus_db_read_kernel_stats(dst, &dst_stats, errbuf, errcap) &&
-                 consensus_db_kernel_stats_match(&src_stats, &dst_stats, errbuf,
-                                                 errcap) &&
-                 cdb_verify_nonstay_counts(dst, errbuf, errcap);
-        }
-
-        (void)sqlite3_exec(dst, "DETACH DATABASE src", NULL, NULL, NULL);
-    }
-
-    sqlite3_close(dst);
-
-    if (!ok) {
-        /* Refuse: never leave a half-migrated consensus.db. progress.kv is
-         * untouched, so the caller can retry or fall back. */
-        cdb_unlink_family(tpath);
-        return false;
-    }
 
     /* 4) Atomically publish. */
     if (rename(tpath, cpath) != 0) {
@@ -632,6 +713,143 @@ bool consensus_db_migrate_from_progress(const char *datadir, char *errbuf,
         return false;
     }
     return true;
+}
+
+/* Open progress.kv for the drop pass. On failure the handle is closed and the
+ * reason is in errbuf. */
+static bool cdb_drop_open(const char *ppath, sqlite3 **pdb_out, char *errbuf,
+                          size_t errcap)
+{
+    sqlite3 *pdb = NULL;
+#ifdef ZCL_TESTING
+    atomic_fetch_add(&g_consensus_db_drop_pdb_opens, 1);
+#endif
+    if (sqlite3_open_v2(ppath, &pdb,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                        NULL) != SQLITE_OK) {
+        cdb_set_err(errbuf, errcap, "consensus_db: drop open %s failed: %s",
+                    ppath, pdb ? sqlite3_errmsg(pdb) : "(open)");
+        if (pdb) sqlite3_close(pdb);
+        return false;
+    }
+    *pdb_out = pdb;
+    return true;
+}
+
+/* ATTACH consensus.db as `cdb` and prove it carries the kernel (coins). */
+static bool cdb_drop_attach_check(sqlite3 *pdb, const char *cpath, char *errbuf,
+                                  size_t errcap)
+{
+    char *err = NULL;
+    char attach[1200];
+    snprintf(attach, sizeof(attach), "ATTACH DATABASE '%s' AS cdb", cpath);
+    bool ok = sqlite3_exec(pdb, attach, NULL, NULL, &err) == SQLITE_OK;
+    if (!ok)
+        cdb_set_err(errbuf, errcap, "consensus_db: drop attach failed: %s",
+                    err ? err : "(no message)");
+    if (err) { sqlite3_free(err); err = NULL; }
+
+    /* consensus.db must carry the kernel (coins) — proof it is the authority. */
+    if (ok && cdb_qualified_count(pdb, "cdb", "coins") < 0) {
+        cdb_set_err(errbuf, errcap,
+                    "consensus_db: refusing drop — consensus.db has no coins");
+        ok = false;
+    }
+    return ok;
+}
+
+/* Snapshot the names of the progress.kv tables to drop into names[0..*ndrop). */
+static bool cdb_drop_collect(sqlite3 *pdb, char (*names)[128], size_t cap,
+                             size_t *ndrop, char *errbuf, size_t errcap)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(
+            pdb,
+            "SELECT name FROM main.sqlite_schema "
+            "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            -1, &st, NULL) != SQLITE_OK) {
+        cdb_set_err(errbuf, errcap, "consensus_db: drop enumerate failed: %s",
+                    sqlite3_errmsg(pdb));
+        return false;
+    }
+    while (sqlite3_step(st) == SQLITE_ROW && // raw-sql-ok:progress-kv-kernel-store
+           *ndrop < cap) {
+        const unsigned char *nm = sqlite3_column_text(st, 0);
+        if (!nm) continue;
+        char name[128];
+        snprintf(name, sizeof(name), "%s", (const char *)nm);
+        if (cdb_is_projection_stay(name))
+            continue;                        /* Class C — keep */
+        if (cdb_qualified_count(pdb, "cdb", name) < 0)
+            continue;                        /* not migrated — keep */
+        snprintf(names[*ndrop], sizeof(names[*ndrop]), "%s", name);
+        (*ndrop)++;
+    }
+    sqlite3_finalize(st);
+    return true;
+}
+
+static bool cdb_drop_begin(sqlite3 *pdb, char *errbuf, size_t errcap)
+{
+    char *err = NULL;
+    bool ok = true;
+#ifdef ZCL_TESTING
+    atomic_fetch_add(&g_consensus_db_drop_txn_begins, 1);
+#endif
+    if (sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
+        cdb_set_err(errbuf, errcap, "consensus_db: drop BEGIN failed: %s",
+                    err ? err : "(no message)");
+        ok = false;
+    }
+    if (err) { sqlite3_free(err); err = NULL; }
+    return ok;
+}
+
+static bool cdb_drop_tables(sqlite3 *pdb, char (*names)[128], size_t ndrop,
+                            char *errbuf, size_t errcap)
+{
+    char *err = NULL;
+    bool ok = true;
+    for (size_t i = 0; ok && i < ndrop; i++) {
+        char sql[192];
+        snprintf(sql, sizeof(sql), "DROP TABLE IF EXISTS main.\"%s\"", names[i]);
+        if (sqlite3_exec(pdb, sql, NULL, NULL, &err) != SQLITE_OK) {
+            cdb_set_err(errbuf, errcap, "consensus_db: drop %s failed: %s",
+                        names[i], err ? err : "(no message)");
+            ok = false;
+        }
+        if (err) { sqlite3_free(err); err = NULL; }
+    }
+    return ok;
+}
+
+static bool cdb_drop_end(sqlite3 *pdb, bool ok, char *errbuf, size_t errcap)
+{
+    char *err = NULL;
+    const char *fini = ok ? "COMMIT" : "ROLLBACK";
+    if (sqlite3_exec(pdb, fini, NULL, NULL, &err) != SQLITE_OK && ok) {
+        cdb_set_err(errbuf, errcap, "consensus_db: drop COMMIT failed: %s",
+                    err ? err : "(no message)");
+        ok = false;
+    }
+    if (err) { sqlite3_free(err); err = NULL; }
+    return ok;
+}
+
+/* Run the drop transaction (BEGIN, DROP each name, COMMIT or ROLLBACK). */
+static bool cdb_drop_apply(sqlite3 *pdb, char (*names)[128], size_t ndrop,
+                           bool ok, char *errbuf, size_t errcap)
+{
+    /* Only take the write transaction when there is something to drop. In the
+     * post-flip steady state ndrop==0 (the migrated tables are already gone), so
+     * skip the BEGIN IMMEDIATE write-lock entirely. */
+    if (ok && ndrop > 0)
+        ok = cdb_drop_begin(pdb, errbuf, errcap);
+    if (ok)
+        ok = cdb_drop_tables(pdb, names, ndrop, errbuf, errcap);
+    if (ndrop > 0)
+        ok = cdb_drop_end(pdb, ok, errbuf, errcap);
+    return ok;
 }
 
 bool consensus_db_drop_migrated_from_progress(const char *datadir, char *errbuf,
@@ -664,102 +882,20 @@ bool consensus_db_drop_migrated_from_progress(const char *datadir, char *errbuf,
     }
 
     sqlite3 *pdb = NULL;
-#ifdef ZCL_TESTING
-    atomic_fetch_add(&g_consensus_db_drop_pdb_opens, 1);
-#endif
-    if (sqlite3_open_v2(ppath, &pdb,
-                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
-                        NULL) != SQLITE_OK) {
-        cdb_set_err(errbuf, errcap, "consensus_db: drop open %s failed: %s",
-                    ppath, pdb ? sqlite3_errmsg(pdb) : "(open)");
-        if (pdb) sqlite3_close(pdb);
+    if (!cdb_drop_open(ppath, &pdb, errbuf, errcap))
         return false;
-    }
 
-    char *err = NULL;
-    char attach[1200];
-    snprintf(attach, sizeof(attach), "ATTACH DATABASE '%s' AS cdb", cpath);
-    bool ok = sqlite3_exec(pdb, attach, NULL, NULL, &err) == SQLITE_OK;
-    if (!ok)
-        cdb_set_err(errbuf, errcap, "consensus_db: drop attach failed: %s",
-                    err ? err : "(no message)");
-    if (err) { sqlite3_free(err); err = NULL; }
-
-    /* consensus.db must carry the kernel (coins) — proof it is the authority. */
-    if (ok && cdb_qualified_count(pdb, "cdb", "coins") < 0) {
-        cdb_set_err(errbuf, errcap,
-                    "consensus_db: refusing drop — consensus.db has no coins");
-        ok = false;
-    }
+    bool ok = cdb_drop_attach_check(pdb, cpath, errbuf, errcap);
 
     /* Collect the progress.kv tables to drop: every non-projection table that is
      * ALSO present in consensus.db (proof it was migrated). Snapshot the names
      * first (cannot DROP while stepping the schema cursor). */
     char names[64][128];
     size_t ndrop = 0;
-    if (ok) {
-        sqlite3_stmt *st = NULL;
-        if (sqlite3_prepare_v2(
-                pdb,
-                "SELECT name FROM main.sqlite_schema "
-                "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-                -1, &st, NULL) != SQLITE_OK) {
-            cdb_set_err(errbuf, errcap, "consensus_db: drop enumerate failed: %s",
-                        sqlite3_errmsg(pdb));
-            ok = false;
-        } else {
-            while (sqlite3_step(st) == SQLITE_ROW && // raw-sql-ok:progress-kv-kernel-store
-                   ndrop < sizeof(names) / sizeof(names[0])) {
-                const unsigned char *nm = sqlite3_column_text(st, 0);
-                if (!nm) continue;
-                char name[128];
-                snprintf(name, sizeof(name), "%s", (const char *)nm);
-                if (cdb_is_projection_stay(name))
-                    continue;                        /* Class C — keep */
-                if (cdb_qualified_count(pdb, "cdb", name) < 0)
-                    continue;                        /* not migrated — keep */
-                snprintf(names[ndrop], sizeof(names[ndrop]), "%s", name);
-                ndrop++;
-            }
-            sqlite3_finalize(st);
-        }
-    }
+    if (ok)
+        ok = cdb_drop_collect(pdb, names, 64, &ndrop, errbuf, errcap);
 
-    /* Only take the write transaction when there is something to drop. In the
-     * post-flip steady state ndrop==0 (the migrated tables are already gone), so
-     * skip the BEGIN IMMEDIATE write-lock entirely. */
-    if (ok && ndrop > 0) {
-#ifdef ZCL_TESTING
-        atomic_fetch_add(&g_consensus_db_drop_txn_begins, 1);
-#endif
-        if (sqlite3_exec(pdb, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
-            cdb_set_err(errbuf, errcap, "consensus_db: drop BEGIN failed: %s",
-                        err ? err : "(no message)");
-            ok = false;
-        }
-        if (err) { sqlite3_free(err); err = NULL; }
-    }
-
-    for (size_t i = 0; ok && i < ndrop; i++) {
-        char sql[192];
-        snprintf(sql, sizeof(sql), "DROP TABLE IF EXISTS main.\"%s\"", names[i]);
-        if (sqlite3_exec(pdb, sql, NULL, NULL, &err) != SQLITE_OK) {
-            cdb_set_err(errbuf, errcap, "consensus_db: drop %s failed: %s",
-                        names[i], err ? err : "(no message)");
-            ok = false;
-        }
-        if (err) { sqlite3_free(err); err = NULL; }
-    }
-
-    if (ndrop > 0) {
-        const char *fini = ok ? "COMMIT" : "ROLLBACK";
-        if (sqlite3_exec(pdb, fini, NULL, NULL, &err) != SQLITE_OK && ok) {
-            cdb_set_err(errbuf, errcap, "consensus_db: drop COMMIT failed: %s",
-                        err ? err : "(no message)");
-            ok = false;
-        }
-        if (err) { sqlite3_free(err); err = NULL; }
-    }
+    ok = cdb_drop_apply(pdb, names, ndrop, ok, errbuf, errcap);
 
     (void)sqlite3_exec(pdb, "DETACH DATABASE cdb", NULL, NULL, NULL);
     sqlite3_close(pdb);
