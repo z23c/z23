@@ -285,15 +285,11 @@ static bool shw_resolve_profile(const struct zcl_command_request *request,
 }
 
 /* ── app shop want post (plan/commit) ───────────────────────────────── */
-/* Parse, seal, and verify the want and its identity. */
-static bool shw_build_want(const struct zcl_command_request *request,
-                           int64_t now_unix, struct shop_want *row,
-                           struct zcl_command_reply *reply)
+/* The declared payment terms: amount, criteria and the optional spec hash. */
+static bool shw_parse_terms(const struct zcl_command_request *request,
+                            struct shop_want_v1 *w,
+                            struct zcl_command_reply *reply)
 {
-    memset(row, 0, sizeof(*row));
-    struct shop_want_v1 *w = &row->want;
-    w->schema_version = SHOP_WANT_VERSION;
-
     const struct json_value *amount = json_get(request->input,
                                                "amount_zatoshi");
     if (!amount || amount->type != JSON_INT || json_get_int(amount) <= 0) {
@@ -328,7 +324,14 @@ static bool shw_build_want(const struct zcl_command_request *request,
                  "spec_hash");
         return false;
     }
+    return true;
+}
 
+/* The issuance stamp: present or defaulted, and within the skew window. */
+static bool shw_parse_issued(const struct zcl_command_request *request,
+                             int64_t now_unix, struct shop_want_v1 *w,
+                             struct zcl_command_reply *reply)
+{
     const struct json_value *issued = json_get(request->input, "issued_unix");
     if (issued && (issued->type != JSON_INT || json_get_int(issued) <= 0)) {
         shw_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
@@ -347,7 +350,14 @@ static bool shw_build_want(const struct zcl_command_request *request,
                  "issued_unix");
         return false;
     }
+    return true;
+}
 
+/* The expiry, nonce and lifetime bounds of the want. */
+static bool shw_parse_window(const struct zcl_command_request *request,
+                             int64_t now_unix, struct shop_want_v1 *w,
+                             struct zcl_command_reply *reply)
+{
     const struct json_value *expires = json_get(request->input,
                                                 "expires_unix");
     if (!expires || expires->type != JSON_INT) {
@@ -394,6 +404,25 @@ static bool shw_build_want(const struct zcl_command_request *request,
                  "expires_unix");
         return false;
     }
+    return true;
+}
+
+/* Parse, seal, and verify the want and its identity. */
+static bool shw_build_want(const struct zcl_command_request *request,
+                           int64_t now_unix, struct shop_want *row,
+                           struct zcl_command_reply *reply)
+{
+    memset(row, 0, sizeof(*row));
+    struct shop_want_v1 *w = &row->want;
+    w->schema_version = SHOP_WANT_VERSION;
+
+    if (!shw_parse_terms(request, w, reply)) // raw-return-ok:shw_fail-already-logged-and-set-the-reply-error
+        return false;
+    if (!shw_parse_issued(request, now_unix, w, reply)) // raw-return-ok:shw_fail-already-logged-and-set-the-reply-error
+        return false;
+    if (!shw_parse_window(request, now_unix, w, reply)) // raw-return-ok:shw_fail-already-logged-and-set-the-reply-error
+        return false;
+
     /* The secret enters only once the document is known-valid, so no
      * early return above can strand it uncleansed on the stack. */
     uint8_t secret[32];
@@ -704,6 +733,111 @@ void zcl_native_handle_shop_want_status(
 }
 
 /* ── app shop want cancel (plan/commit) ─────────────────────────────── */
+/* Plan mode for cancel: read-only lookup and key check, then the plan. */
+static void shw_cancel_plan(const char *datadir, const uint8_t want_id[32],
+                            const uint8_t buyer[32], const char *id_hex,
+                            int64_t now_unix, struct zcl_command_reply *reply)
+{
+    /* Plan mode must be non-mutating: open the board read-only so the
+     * runtime open (which runs migrations) never fires on a plan. */
+    sqlite3 *db = NULL;
+    struct node_db ndb;
+    if (!shw_open_board_readonly(datadir, &db, &ndb, reply))
+        return;
+    struct shop_want row;
+    bool found = db_shop_want_find(&ndb, want_id, &row);
+    zcl_native_node_db_close_readonly(&db, &ndb);
+    if (found && memcmp(buyer, row.want.buyer_pubkey, 32) != 0) {
+        shw_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
+                 "WRONG_BUYER_KEY", "custody",
+                 "the presented buyer_secret derives a different pubkey "
+                 "than the one that signed this want — only the posting "
+                 "key can cancel it", id_hex);
+        return;
+    }
+    (void)json_push_kv_str(&reply->data, "mode", "plan");
+    (void)json_push_kv_str(&reply->data, "datadir", datadir);
+    (void)json_push_kv_str(&reply->data, "want_id", id_hex);
+    (void)json_push_kv_bool(&reply->data, "found", found);
+    if (found) {
+        struct shop_want_view_result_v1 rendered_want;
+        if (!zcl_shop_want_view_render(&row, now_unix, true,
+                                       &rendered_want)) {
+            shw_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                     ZCL_COMMAND_EXIT_INTERNAL, "WANT_VIEW_FAILED",
+                     "render", "the pure buyer-want view refused a "
+                     "verified cancellation-plan row",
+                     "app.shop.want.view.v1");
+            return;
+        }
+        struct json_value want;
+        json_init(&want);
+        json_set_object(&want);
+        zcl_shop_want_view_push_json(&want, &rendered_want);
+        (void)json_push_kv(&reply->data, "want", &want);
+        json_free(&want);
+        (void)json_push_kv_bool(&reply->data, "already_cancelled",
+                                row.cancelled_unix > 0);
+    }
+    (void)json_push_kv_str(&reply->data, "plan",
+        "mark this want cancelled on THIS node's board (the signed "
+        "row is kept as evidence; it leaves the open board); "
+        "cancellation is key-checked: the secret must derive the "
+        "want's buyer pubkey");
+    (void)json_push_kv_str(&reply->data, "commit_command",
+        "re-run the identical command with \"confirm\":true added to "
+        "the same input (buyer_secret is never echoed)");
+    return;
+}
+
+/* Commit mode for cancel: mark the stored want cancelled after a key check. */
+static void shw_cancel_commit(const char *datadir, const uint8_t want_id[32],
+                              const uint8_t buyer[32], const char *id_hex,
+                              int64_t now_unix, struct zcl_command_reply *reply)
+{
+struct node_db ndb;
+if (!shw_open_board_write(datadir, &ndb, reply))
+    return;
+struct shop_want row;
+bool found = db_shop_want_find(&ndb, want_id, &row);
+if (found && memcmp(buyer, row.want.buyer_pubkey, 32) != 0) {
+    node_db_close(&ndb);
+    shw_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
+             "WRONG_BUYER_KEY", "custody",
+             "the presented buyer_secret derives a different pubkey "
+             "than the one that signed this want — only the posting "
+             "key can cancel it", id_hex);
+    return;
+}
+if (!found) {
+    node_db_close(&ndb);
+    shw_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+             "WANT_NOT_FOUND", "execute",
+             "no want with this id is stored on this node's board",
+             id_hex);
+    return;
+}
+bool already = row.cancelled_unix > 0;
+bool marked = already ||
+              db_shop_want_mark_cancelled(&ndb, want_id, now_unix);
+node_db_close(&ndb);
+if (!marked) {
+    shw_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+             "CANCEL_FAILED", "execute",
+             "the cancellation could not be persisted", id_hex);
+    return;
+}
+(void)json_push_kv_str(&reply->data, "mode", "commit");
+(void)json_push_kv_str(&reply->data, "datadir", datadir);
+(void)json_push_kv_str(&reply->data, "want_id", id_hex);
+(void)json_push_kv_bool(&reply->data, "cancelled", true);
+(void)json_push_kv_bool(&reply->data, "already_cancelled", already);
+(void)json_push_kv_str(&reply->data, "cancel_note",
+    "cancellation is local and key-checked; the signed row stays "
+    "stored as evidence and the want leaves the open board");
+reply->error.mutated = !already;
+}
+
 void zcl_native_handle_shop_want_cancel(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -733,99 +867,10 @@ void zcl_native_handle_shop_want_cancel(
     zcl_hex_encode(want_id, 32, id_hex);
 
     if (!json_get_bool_or(request->input, "confirm", false)) {
-        /* Plan mode must be non-mutating: open the board read-only so the
-         * runtime open (which runs migrations) never fires on a plan. */
-        sqlite3 *db = NULL;
-        struct node_db ndb;
-        if (!shw_open_board_readonly(datadir, &db, &ndb, reply))
-            return;
-        struct shop_want row;
-        bool found = db_shop_want_find(&ndb, want_id, &row);
-        zcl_native_node_db_close_readonly(&db, &ndb);
-        if (found && memcmp(buyer, row.want.buyer_pubkey, 32) != 0) {
-            shw_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
-                     "WRONG_BUYER_KEY", "custody",
-                     "the presented buyer_secret derives a different pubkey "
-                     "than the one that signed this want — only the posting "
-                     "key can cancel it", id_hex);
-            return;
-        }
-        (void)json_push_kv_str(&reply->data, "mode", "plan");
-        (void)json_push_kv_str(&reply->data, "datadir", datadir);
-        (void)json_push_kv_str(&reply->data, "want_id", id_hex);
-        (void)json_push_kv_bool(&reply->data, "found", found);
-        if (found) {
-            struct shop_want_view_result_v1 rendered_want;
-            if (!zcl_shop_want_view_render(&row, now_unix, true,
-                                           &rendered_want)) {
-                shw_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                         ZCL_COMMAND_EXIT_INTERNAL, "WANT_VIEW_FAILED",
-                         "render", "the pure buyer-want view refused a "
-                         "verified cancellation-plan row",
-                         "app.shop.want.view.v1");
-                return;
-            }
-            struct json_value want;
-            json_init(&want);
-            json_set_object(&want);
-            zcl_shop_want_view_push_json(&want, &rendered_want);
-            (void)json_push_kv(&reply->data, "want", &want);
-            json_free(&want);
-            (void)json_push_kv_bool(&reply->data, "already_cancelled",
-                                    row.cancelled_unix > 0);
-        }
-        (void)json_push_kv_str(&reply->data, "plan",
-            "mark this want cancelled on THIS node's board (the signed "
-            "row is kept as evidence; it leaves the open board); "
-            "cancellation is key-checked: the secret must derive the "
-            "want's buyer pubkey");
-        (void)json_push_kv_str(&reply->data, "commit_command",
-            "re-run the identical command with \"confirm\":true added to "
-            "the same input (buyer_secret is never echoed)");
+        shw_cancel_plan(datadir, want_id, buyer, id_hex, now_unix, reply);
         return;
     }
-
-    struct node_db ndb;
-    if (!shw_open_board_write(datadir, &ndb, reply))
-        return;
-    struct shop_want row;
-    bool found = db_shop_want_find(&ndb, want_id, &row);
-    if (found && memcmp(buyer, row.want.buyer_pubkey, 32) != 0) {
-        node_db_close(&ndb);
-        shw_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_DENIED,
-                 "WRONG_BUYER_KEY", "custody",
-                 "the presented buyer_secret derives a different pubkey "
-                 "than the one that signed this want — only the posting "
-                 "key can cancel it", id_hex);
-        return;
-    }
-    if (!found) {
-        node_db_close(&ndb);
-        shw_fail(reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
-                 "WANT_NOT_FOUND", "execute",
-                 "no want with this id is stored on this node's board",
-                 id_hex);
-        return;
-    }
-    bool already = row.cancelled_unix > 0;
-    bool marked = already ||
-                  db_shop_want_mark_cancelled(&ndb, want_id, now_unix);
-    node_db_close(&ndb);
-    if (!marked) {
-        shw_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
-                 "CANCEL_FAILED", "execute",
-                 "the cancellation could not be persisted", id_hex);
-        return;
-    }
-    (void)json_push_kv_str(&reply->data, "mode", "commit");
-    (void)json_push_kv_str(&reply->data, "datadir", datadir);
-    (void)json_push_kv_str(&reply->data, "want_id", id_hex);
-    (void)json_push_kv_bool(&reply->data, "cancelled", true);
-    (void)json_push_kv_bool(&reply->data, "already_cancelled", already);
-    (void)json_push_kv_str(&reply->data, "cancel_note",
-        "cancellation is local and key-checked; the signed row stays "
-        "stored as evidence and the want leaves the open board");
-    reply->error.mutated = !already;
+    shw_cancel_commit(datadir, want_id, buyer, id_hex, now_unix, reply);
 }
 
 /* ── app shop want review (plan/commit) ─────────────────────────────── */
