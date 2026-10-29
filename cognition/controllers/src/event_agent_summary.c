@@ -678,6 +678,77 @@ static void agent_fast_collect(struct agent_fast_snapshot *s,
     s->onion_service_ready = onion_service_get_address() != NULL;
 }
 
+/* Leading rungs of the status ladder: typed blocker, posture review and
+ * health-operator blockers, then peer availability. Returns false when none
+ * applies so the caller runs the gap rungs. */
+static bool agent_summary_pick_leading_reason(
+    const struct agent_fast_snapshot *health,
+    const struct agent_security_posture *posture,
+    enum node_status_reason *reason, const char **primary, const char **next)
+{
+    if (health->hard_typed_blocker) {
+        *reason = ZCL_STATUS_REASON_TYPED_BLOCKER;
+        *primary = health->dominant_blocker_id[0]
+            ? health->dominant_blocker_id : "typed_blocker_operator_needed";
+        *next = "z23 dumpstate blocker";
+    } else if (posture->review_required) {
+        *reason = ZCL_STATUS_REASON_POSTURE_REVIEW;
+        *primary = posture->status;
+        *next = posture->next_action;
+    } else if (health->operator_action_required) {
+        *reason = ZCL_STATUS_REASON_HEALTH_BLOCKER;
+        *primary = health->blocking_reason[0] ? health->blocking_reason
+                                              : "operator_needed";
+        *next = "z23 healthcheck";
+    } else if (!health->peer_snapshot_available) {
+        *reason = ZCL_STATUS_REASON_PEER_SNAPSHOT_BUSY;
+        *primary = "peer_snapshot_unavailable";
+        *next = "z23 getpeerinfo";
+    } else if (!health->has_peers) {
+        *reason = ZCL_STATUS_REASON_NO_PEERS;
+        *primary = "no_peers";
+        *next = "z23 getpeerinfo";
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/* Chain-gap rungs of the status ladder, tried after the leading rungs. */
+static void agent_summary_pick_gap_reason(
+    const struct agent_fast_snapshot *health, bool material_gap,
+    bool material_index_gap, enum node_status_reason *reason,
+    const char **primary, const char **next)
+{
+    if (material_gap && health->catchup_stalled) {
+        *reason = ZCL_STATUS_REASON_CATCHUP_STALLED;
+        *primary = "catchup_stalled";
+        *next = "z23 getsyncdiag";
+    } else if (material_gap && health->download_dispatch_stalled) {
+        *reason = ZCL_STATUS_REASON_DOWNLOAD_DISPATCH_IDLE;
+        *primary = "download_dispatch_idle";
+        *next = "z23 getsyncdiag";
+    } else if (material_gap &&
+               (health->in_flight > 0 || health->queued > 0)) {
+        *reason = ZCL_STATUS_REASON_CHAIN_GAP_DOWNLOADING;
+        *primary = "chain_gap";
+        *next = "z23 downloadstats";
+    } else if (material_gap) {
+        *reason = ZCL_STATUS_REASON_DOWNLOAD_QUEUE_IDLE;
+        *primary = "download_queue_idle";
+        *next = "z23 getsyncdiag";
+    } else if (material_index_gap) {
+        *reason = ZCL_STATUS_REASON_PROJECTION_LAG;
+        *primary = "projection_lag";
+        *next = "z23 dumpstate chain_advance_coordinator";
+    } else if (!health->healthy) {
+        *reason = ZCL_STATUS_REASON_HEALTHCHECK_UNHEALTHY;
+        *primary = health->blocking_reason[0] ? health->blocking_reason
+                                              : "healthcheck_unhealthy";
+        *next = "z23 healthcheck";
+    }
+}
+
 bool rpc_agent_summary(const struct json_value *params, bool help,
                        struct json_value *result)
 {
@@ -716,54 +787,11 @@ bool rpc_agent_summary(const struct json_value *params, bool help,
      * surfaces cannot answer "does an operator need to act" differently. */
     enum node_status_reason reason = ZCL_STATUS_REASON_NONE;
 
-    if (health.hard_typed_blocker) {
-        reason = ZCL_STATUS_REASON_TYPED_BLOCKER;
-        primary = health.dominant_blocker_id[0]
-            ? health.dominant_blocker_id : "typed_blocker_operator_needed";
-        next = "z23 dumpstate blocker";
-    } else if (posture.review_required) {
-        reason = ZCL_STATUS_REASON_POSTURE_REVIEW;
-        primary = posture.status;
-        next = posture.next_action;
-    } else if (health.operator_action_required) {
-        reason = ZCL_STATUS_REASON_HEALTH_BLOCKER;
-        primary = health.blocking_reason[0] ? health.blocking_reason
-                                            : "operator_needed";
-        next = "z23 healthcheck";
-    } else if (!health.peer_snapshot_available) {
-        reason = ZCL_STATUS_REASON_PEER_SNAPSHOT_BUSY;
-        primary = "peer_snapshot_unavailable";
-        next = "z23 getpeerinfo";
-    } else if (!health.has_peers) {
-        reason = ZCL_STATUS_REASON_NO_PEERS;
-        primary = "no_peers";
-        next = "z23 getpeerinfo";
-    } else if (material_gap && health.catchup_stalled) {
-        reason = ZCL_STATUS_REASON_CATCHUP_STALLED;
-        primary = "catchup_stalled";
-        next = "z23 getsyncdiag";
-    } else if (material_gap && health.download_dispatch_stalled) {
-        reason = ZCL_STATUS_REASON_DOWNLOAD_DISPATCH_IDLE;
-        primary = "download_dispatch_idle";
-        next = "z23 getsyncdiag";
-    } else if (material_gap &&
-               (health.in_flight > 0 || health.queued > 0)) {
-        reason = ZCL_STATUS_REASON_CHAIN_GAP_DOWNLOADING;
-        primary = "chain_gap";
-        next = "z23 downloadstats";
-    } else if (material_gap) {
-        reason = ZCL_STATUS_REASON_DOWNLOAD_QUEUE_IDLE;
-        primary = "download_queue_idle";
-        next = "z23 getsyncdiag";
-    } else if (material_index_gap) {
-        reason = ZCL_STATUS_REASON_PROJECTION_LAG;
-        primary = "projection_lag";
-        next = "z23 dumpstate chain_advance_coordinator";
-    } else if (!health.healthy) {
-        reason = ZCL_STATUS_REASON_HEALTHCHECK_UNHEALTHY;
-        primary = health.blocking_reason[0] ? health.blocking_reason
-                                            : "healthcheck_unhealthy";
-        next = "z23 healthcheck";
+    if (!agent_summary_pick_leading_reason(&health, &posture, &reason,
+                                           &primary, &next)) {
+        agent_summary_pick_gap_reason(&health, material_gap,
+                                      material_index_gap, &reason, &primary,
+                                      &next);
     }
     const char *status = node_status_reason_status(reason);
     const char *summary = node_status_reason_summary(reason);
