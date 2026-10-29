@@ -500,7 +500,7 @@ static int t_deps_error_strings(void)
     return failures;
 }
 
-static int t_deps_rules(void)
+static int za_deps_grammar(void)
 {
     int failures = 0;
 
@@ -532,6 +532,12 @@ static int t_deps_rules(void)
              vcs_package_deps_parse_meta((const uint8_t *)"", 0, &deps, NULL,
                                          0) == VCS_PACKAGE_DEPS_OK &&
                  deps.count == 0);
+    return failures;
+}
+
+static int za_deps_cycles(void)
+{
+    int failures = 0;
 
     /* The adversarial DAG cases. */
     struct za_fake_src s;
@@ -571,6 +577,14 @@ static int t_deps_rules(void)
     za_fake_root(s.nodes[0].deps[0], 0xE5); /* nobody publishes 0xE5 */
     ZA_CHECK("an unresolvable dependency is named, not skipped",
              za_resolve(&s, 0xD4, &lock) == VCS_PACKAGE_DEPS_ERR_UNRESOLVED);
+    return failures;
+}
+
+static int za_deps_diamond(struct vcs_package_lock *diamond_out)
+{
+    int failures = 0;
+    struct za_fake_src s;
+    struct vcs_package_lock lock;
 
     /* A healthy diamond: one shared dependency, deduplicated, deps first. */
     memset(&s, 0, sizeof(s));
@@ -599,7 +613,15 @@ static int t_deps_rules(void)
                    lock.count == 4 && lock.nodes[3].depth == 0 &&
                    lock.nodes[0].depth == 2;
     ZA_CHECK("a diamond resolves once, in build order", diamond);
-    struct vcs_package_lock diamond_lock = lock;
+    *diamond_out = lock;
+    return failures;
+}
+
+static int za_deps_uneven(void)
+{
+    int failures = 0;
+    struct za_fake_src s;
+    struct vcs_package_lock lock;
 
     /* The shared leaf is visited directly before it is reached through the
      * codec. Its depth must describe topology, not first-visit root order. */
@@ -623,6 +645,14 @@ static int t_deps_rules(void)
                   lock.count == 3 && lock.nodes[0].depth == 2 &&
                   lock.nodes[1].depth == 1 && lock.nodes[2].depth == 0;
     ZA_CHECK("shared dependency depth follows the longest graph path", uneven);
+    return failures;
+}
+
+static int za_deps_overdepth(void)
+{
+    int failures = 0;
+    struct za_fake_src s;
+    struct vcs_package_lock lock;
 
     /* A direct edge must not hide a second path beyond the depth bound. */
     memset(&s, 0, sizeof(s));
@@ -646,7 +676,13 @@ static int t_deps_rules(void)
     }
     ZA_CHECK("a shared direct edge cannot hide an over-depth path",
              za_resolve(&s, 0x30, &lock) == VCS_PACKAGE_DEPS_ERR_DEPTH);
-    lock = diamond_lock;
+    return failures;
+}
+
+static int za_deps_lock_wire(const struct vcs_package_lock *diamond)
+{
+    int failures = 0;
+    struct vcs_package_lock lock = *diamond;
 
     /* The lock wire is closed: it roundtrips and rejects a flipped byte. */
     uint8_t *wire = NULL;
@@ -675,6 +711,19 @@ static int t_deps_rules(void)
                      VCS_PACKAGE_DEPS_OK);
     }
     free(wire);
+    return failures;
+}
+
+static int t_deps_rules(void)
+{
+    int failures = 0;
+    struct vcs_package_lock diamond_lock;
+    failures += za_deps_grammar();
+    failures += za_deps_cycles();
+    failures += za_deps_diamond(&diamond_lock);
+    failures += za_deps_uneven();
+    failures += za_deps_overdepth();
+    failures += za_deps_lock_wire(&diamond_lock);
     return failures;
 }
 
@@ -713,7 +762,7 @@ static int t_package_build_error_strings(void)
 
 /* ── 2. generation log, name split, plan expiry ─────────────────────── */
 
-static int t_generations(void)
+static int za_generations_wire(void)
 {
     int failures = 0;
     struct vcs_package_generations g;
@@ -753,6 +802,15 @@ static int t_generations(void)
                      VCS_PACKAGE_INSTALL_OK);
     }
     free(wire);
+    return failures;
+}
+
+static int za_generations_retention(void)
+{
+    int failures = 0;
+    uint8_t out[32];
+    uint8_t *wire = NULL;
+    size_t len = 0;
 
     /* --- retention is bounded by EVICTION, never by refusal --------------
      * A log that refused its own append once full would deny the next
@@ -793,6 +851,12 @@ static int t_generations(void)
                  len <= VCS_PACKAGE_GENERATION_MAX_WIRE_BYTES);
     free(wire);
     wire = NULL;
+    return failures;
+}
+
+static int za_generations_trim(void)
+{
+    int failures = 0;
 
     /* trim is the one eviction primitive, so assert it directly. */
     struct vcs_package_generations t;
@@ -811,7 +875,12 @@ static int t_generations(void)
              vcs_package_generations_trim(&t, 0) == 1u && t.count == 1u);
     ZA_CHECK("trim of a log already within the bound is a no-op",
              vcs_package_generations_trim(&t, 8u) == 0 && t.count == 1u);
+    return failures;
+}
 
+static int za_generations_names_plan(void)
+{
+    int failures = 0;
     char pub[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
     char pkg[VCS_PACKAGE_RELEASE_NAME_MAX + 1u];
     ZA_CHECK("a well-formed name splits",
@@ -831,6 +900,16 @@ static int t_generations(void)
     ZA_CHECK("a plan expires exactly at its stated expiry",
              !vcs_package_plan_expired(&plan, plan.expires_unix - 1) &&
                  vcs_package_plan_expired(&plan, plan.expires_unix));
+    return failures;
+}
+
+static int t_generations(void)
+{
+    int failures = 0;
+    failures += za_generations_wire();
+    failures += za_generations_retention();
+    failures += za_generations_trim();
+    failures += za_generations_names_plan();
     return failures;
 }
 
@@ -1380,6 +1459,128 @@ struct za_file {
     const char *content;
 };
 
+/* Stores each fixture file as a CAS chunk and adds it to the manifest. */
+static bool za_publish_add_files(const char *zcode, const struct za_file *files,
+                                 size_t file_count,
+                                 struct vcs_package_manifest *m)
+{
+    bool ok = true;
+    for (size_t i = 0; i < file_count && ok; i++) {
+        size_t len = strlen(files[i].content);
+        uint8_t hash[32];
+        struct sha3_256_ctx c;
+        sha3_256_init(&c);
+        sha3_256_write(&c, (const uint8_t *)files[i].content, len);
+        sha3_256_finalize(&c, hash);
+        ok = vcs_package_manifest_add(m, files[i].path,
+                                      VCS_PACKAGE_MODE_FILE, len, hash, 1);
+        if (ok) {
+            char hex[65];
+            za_hex(hash, 32, hex);
+            char cdir[4400];
+            char cpath[4500];
+            snprintf(cdir, sizeof(cdir), "%s/cas/sha3/%.2s", zcode, hex);
+            snprintf(cpath, sizeof(cpath), "%s/%s", cdir, hex);
+            ok = za_mkdir_p(cdir) &&
+                 za_write_file(cpath, files[i].content, len, 0600);
+        }
+    }
+    return ok;
+}
+
+/* Builds and stores the recipe; writes its root to recipe_root. */
+static bool za_publish_recipe(const char *zcode, const struct za_file *files,
+                              size_t file_count, const char *header_path,
+                              const char *source_path, const char *test_path,
+                              const char *include_dir, const char *program_path,
+                              uint8_t recipe_root[32])
+{
+    struct vcs_package_recipe r;
+    vcs_package_recipe_init(&r);
+    bool ok = vcs_package_recipe_add_header(&r, header_path, NULL);
+    for (size_t i = 0; i < file_count && ok; i++) {
+        size_t path_len = strlen(files[i].path);
+        if (strcmp(files[i].path, header_path) != 0 && path_len > 2u &&
+            strcmp(files[i].path + path_len - 2u, ".h") == 0)
+            ok = vcs_package_recipe_add_header(&r, files[i].path, NULL);
+    }
+    ok = ok &&
+         vcs_package_recipe_add_source(&r, source_path, NULL) &&
+         vcs_package_recipe_add_test_source(&r, test_path, NULL) &&
+         vcs_package_recipe_add_include_dir(&r, include_dir, NULL) &&
+         vcs_package_recipe_add_library(&r, VCS_PACKAGE_RECIPE_LIB_LIBC,
+                                        NULL) &&
+         (!program_path ||
+          vcs_package_recipe_add_program(&r, program_path, NULL));
+    vcs_package_recipe_set_test_limits(&r, 0, 60,
+                                       UINT64_C(64) * 1024u * 1024u);
+    uint8_t *rwire = NULL;
+    size_t rlen = 0;
+    if (ok)
+        ok = vcs_package_recipe_root(&r, recipe_root) ==
+                 VCS_PACKAGE_RECIPE_OK &&
+             vcs_package_recipe_serialize(&r, &rwire, &rlen) ==
+                 VCS_PACKAGE_RECIPE_OK;
+    vcs_package_recipe_free(&r);
+    if (!ok)
+        return false;
+    char rhex[65];
+    za_hex(recipe_root, 32, rhex);
+    char path[4500];
+    snprintf(path, sizeof(path), "%s/recipes/%s", zcode, rhex);
+    ok = za_write_file(path, rwire, rlen, 0600);
+    free(rwire);
+    return ok;
+}
+
+/* Signs the release over its id and stores it under releases/<id>. */
+static bool za_publish_release(const char *zcode, const char *name,
+                               const char *semver, uint64_t sequence,
+                               const uint8_t root[32],
+                               const uint8_t recipe_root[32])
+{
+    struct privkey sk;
+    struct pubkey pk;
+    memset(sk.vch, 0x11, 32);
+    sk.fValid = true;
+    sk.fCompressed = true;
+    if (!privkey_get_pubkey(&sk, &pk))
+        return false;
+    struct vcs_package_release rel;
+    memset(&rel, 0, sizeof(rel));
+    rel.schema_version = VCS_PACKAGE_RELEASE_VERSION;
+    snprintf(rel.name, sizeof(rel.name), "%s", name);
+    snprintf(rel.semver, sizeof(rel.semver), "%s", semver);
+    memcpy(rel.package_root, root, 32);
+    memcpy(rel.publisher_pubkey, pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
+    rel.publisher_sequence = sequence;
+    snprintf(rel.reward_address, sizeof(rel.reward_address), "t1fixture");
+    snprintf(rel.license, sizeof(rel.license), "MIT");
+    memcpy(rel.recipe_root, recipe_root, 32);
+    snprintf(rel.chain_id, sizeof(rel.chain_id), "zclassic-main");
+    uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
+    if (vcs_package_release_id(&rel, id) != VCS_PACKAGE_RELEASE_OK)
+        return false;
+    struct uint256 h;
+    memcpy(h.data, id, 32);
+    unsigned char compact[COMPACT_SIGNATURE_SIZE];
+    if (!privkey_sign_compact(&sk, &h, compact))
+        return false;
+    memcpy(rel.signature, compact + 1, VCS_PACKAGE_RELEASE_SIGNATURE_BYTES);
+    uint8_t *relwire = NULL;
+    size_t rellen = 0;
+    if (vcs_package_release_serialize(&rel, &relwire, &rellen) !=
+        VCS_PACKAGE_RELEASE_OK)
+        return false;
+    char id_hex[65];
+    za_hex(id, 32, id_hex);
+    char path[4500];
+    snprintf(path, sizeof(path), "%s/releases/%s", zcode, id_hex);
+    bool ok = za_write_file(path, relwire, rellen, 0600);
+    free(relwire);
+    return ok;
+}
+
 /* Publish one package (manifest + CAS chunks + recipe + signed release)
  * into <datadir>/zcode. `deps_json` is the package's own
  * zcode-package.json, or NULL for a package with no dependencies. */
@@ -1403,27 +1604,7 @@ static bool za_publish_ex(const char *zcode, const char *name,
 
     struct vcs_package_manifest m;
     vcs_package_manifest_init(&m);
-    bool ok = true;
-    for (size_t i = 0; i < file_count && ok; i++) {
-        size_t len = strlen(files[i].content);
-        uint8_t hash[32];
-        struct sha3_256_ctx c;
-        sha3_256_init(&c);
-        sha3_256_write(&c, (const uint8_t *)files[i].content, len);
-        sha3_256_finalize(&c, hash);
-        ok = vcs_package_manifest_add(&m, files[i].path,
-                                      VCS_PACKAGE_MODE_FILE, len, hash, 1);
-        if (ok) {
-            char hex[65];
-            za_hex(hash, 32, hex);
-            char cdir[4400];
-            char cpath[4500];
-            snprintf(cdir, sizeof(cdir), "%s/cas/sha3/%.2s", zcode, hex);
-            snprintf(cpath, sizeof(cpath), "%s/%s", cdir, hex);
-            ok = za_mkdir_p(cdir) &&
-                 za_write_file(cpath, files[i].content, len, 0600);
-        }
-    }
+    bool ok = za_publish_add_files(zcode, files, file_count, &m);
     if (ok)
         ok = vcs_package_manifest_root(&m, root_out);
     uint8_t *mwire = NULL;
@@ -1442,83 +1623,12 @@ static bool za_publish_ex(const char *zcode, const char *name,
     if (!ok)
         return false;
 
-    struct vcs_package_recipe r;
-    vcs_package_recipe_init(&r);
-    ok = vcs_package_recipe_add_header(&r, header_path, NULL);
-    for (size_t i = 0; i < file_count && ok; i++) {
-        size_t path_len = strlen(files[i].path);
-        if (strcmp(files[i].path, header_path) != 0 && path_len > 2u &&
-            strcmp(files[i].path + path_len - 2u, ".h") == 0)
-            ok = vcs_package_recipe_add_header(&r, files[i].path, NULL);
-    }
-    ok = ok &&
-         vcs_package_recipe_add_source(&r, source_path, NULL) &&
-         vcs_package_recipe_add_test_source(&r, test_path, NULL) &&
-         vcs_package_recipe_add_include_dir(&r, include_dir, NULL) &&
-         vcs_package_recipe_add_library(&r, VCS_PACKAGE_RECIPE_LIB_LIBC,
-                                        NULL) &&
-         (!program_path ||
-          vcs_package_recipe_add_program(&r, program_path, NULL));
-    vcs_package_recipe_set_test_limits(&r, 0, 60,
-                                       UINT64_C(64) * 1024u * 1024u);
     uint8_t recipe_root[32];
-    uint8_t *rwire = NULL;
-    size_t rlen = 0;
-    if (ok)
-        ok = vcs_package_recipe_root(&r, recipe_root) ==
-                 VCS_PACKAGE_RECIPE_OK &&
-             vcs_package_recipe_serialize(&r, &rwire, &rlen) ==
-                 VCS_PACKAGE_RECIPE_OK;
-    vcs_package_recipe_free(&r);
-    if (!ok)
+    if (!za_publish_recipe(zcode, files, file_count, header_path, source_path,
+                           test_path, include_dir, program_path, recipe_root))
         return false;
-    char rhex[65];
-    za_hex(recipe_root, 32, rhex);
-    snprintf(path, sizeof(path), "%s/recipes/%s", zcode, rhex);
-    ok = za_write_file(path, rwire, rlen, 0600);
-    free(rwire);
-    if (!ok)
-        return false;
-
-    struct privkey sk;
-    struct pubkey pk;
-    memset(sk.vch, 0x11, 32);
-    sk.fValid = true;
-    sk.fCompressed = true;
-    if (!privkey_get_pubkey(&sk, &pk))
-        return false;
-    struct vcs_package_release rel;
-    memset(&rel, 0, sizeof(rel));
-    rel.schema_version = VCS_PACKAGE_RELEASE_VERSION;
-    snprintf(rel.name, sizeof(rel.name), "%s", name);
-    snprintf(rel.semver, sizeof(rel.semver), "%s", semver);
-    memcpy(rel.package_root, root_out, 32);
-    memcpy(rel.publisher_pubkey, pk.vch, COMPRESSED_PUBLIC_KEY_SIZE);
-    rel.publisher_sequence = sequence;
-    snprintf(rel.reward_address, sizeof(rel.reward_address), "t1fixture");
-    snprintf(rel.license, sizeof(rel.license), "MIT");
-    memcpy(rel.recipe_root, recipe_root, 32);
-    snprintf(rel.chain_id, sizeof(rel.chain_id), "zclassic-main");
-    uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
-    if (vcs_package_release_id(&rel, id) != VCS_PACKAGE_RELEASE_OK)
-        return false;
-    struct uint256 h;
-    memcpy(h.data, id, 32);
-    unsigned char compact[COMPACT_SIGNATURE_SIZE];
-    if (!privkey_sign_compact(&sk, &h, compact))
-        return false;
-    memcpy(rel.signature, compact + 1, VCS_PACKAGE_RELEASE_SIGNATURE_BYTES);
-    uint8_t *relwire = NULL;
-    size_t rellen = 0;
-    if (vcs_package_release_serialize(&rel, &relwire, &rellen) !=
-        VCS_PACKAGE_RELEASE_OK)
-        return false;
-    char id_hex[65];
-    za_hex(id, 32, id_hex);
-    snprintf(path, sizeof(path), "%s/releases/%s", zcode, id_hex);
-    ok = za_write_file(path, relwire, rellen, 0600);
-    free(relwire);
-    return ok;
+    return za_publish_release(zcode, name, semver, sequence, root_out,
+                              recipe_root);
 }
 
 /* The library-only fixture: no program, recipe schema 1. */
@@ -3592,6 +3702,103 @@ static int za_library_rollback_programs(const char *base, const char *zcode,
     return failures;
 }
 
+/* A library-only package reports zero programs, not silence. */
+static int za_programs_library_reply(const char *base, int64_t t0)
+{
+    int failures = 0;
+    struct zcl_command_reply lib_reply;
+    zcl_command_reply_init(&lib_reply, "zcl.zcode_add_commit.v1");
+    bool lib_used = za_use_commit(base, "alice/ringlib", t0, &lib_reply);
+    const struct json_value *lib_programs =
+        json_get(&lib_reply.data, "programs");
+    ZA_CHECK("a library-only package reports zero programs, not silence",
+             lib_used && lib_reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 lib_programs && lib_programs->type == JSON_ARR &&
+                 lib_programs->num_children == 0 &&
+                 json_get_int(json_get(&lib_reply.data, "program_count")) ==
+                     0 &&
+                 json_get(&lib_reply.data, "next_action") == NULL);
+    zcl_command_reply_free(&lib_reply);
+    return failures;
+}
+
+/* A package that ships an application, locked to that library. */
+static bool za_programs_publish_cli(const char *zcode,
+                                    const uint8_t lib_root[32],
+                                    uint8_t cli_root[32])
+{
+    char deps_json[256];
+    char lib_hex[65];
+    za_hex(lib_root, 32, lib_hex);
+    snprintf(deps_json, sizeof(deps_json),
+             "{\"schema\":1,\"dependencies\":[{\"root\":\"%s\","
+             "\"name\":\"alice/ringlib\",\"semver\":\"1.0.0\"}]}", lib_hex);
+    struct za_file cli_files[] = {
+        { "LICENSE", ZA_LICENSE },
+        { "src/cli.h", ZA_CLI_H },
+        { "src/cli.c", ZA_CLI_C },
+        { "test/test_cli.c", ZA_CLI_TEST },
+        { "app/main.c", ZA_CLI_MAIN },
+        { VCS_PACKAGE_DEPS_META_PATH, deps_json },
+    };
+    return za_publish_ex(
+        zcode, "alice/ringcli", "1.0.0", 2, cli_files, 6, "src/cli.h",
+        "src/cli.c", "test/test_cli.c", "src", "app/main.c", cli_root);
+}
+
+/* An absolute path naming an existing executable regular file. */
+static bool za_programs_exec_path(const char *path)
+{
+    struct stat rst;
+    return path && path[0] == '/' && stat(path, &rst) == 0 &&
+           S_ISREG(rst.st_mode) && (rst.st_mode & 0111) != 0;
+}
+
+/* The reply names the exact program and where to run it. */
+static int za_programs_cli_reply(struct zcl_command_reply *cli_reply,
+                                 const char **first_path_out)
+{
+    int failures = 0;
+    const struct json_value *cli_programs =
+        json_get(&cli_reply->data, "programs");
+    const struct json_value *first =
+        cli_programs ? json_at(cli_programs, 0) : NULL;
+    const char *first_output = first ? json_get_str(json_get(first, "output"))
+                                     : NULL;
+    const char *first_path =
+        first ? json_get_str(json_get(first, "path")) : NULL;
+    const char *next_action =
+        json_get_str(json_get(&cli_reply->data, "next_action"));
+    ZA_CHECK("the reply names the exact program and where to run it",
+             cli_programs && cli_programs->num_children == 1 &&
+                 json_get_int(json_get(&cli_reply->data, "program_count")) ==
+                     1 &&
+                 first_output && strcmp(first_output, "bin/ringcli") == 0 &&
+                 za_programs_exec_path(first_path) &&
+                 next_action && strncmp(next_action, "run ", 4) == 0 &&
+                 strcmp(next_action + 4, first_path) == 0);
+    *first_path_out = first_path;
+    return failures;
+}
+
+/* The program links its locked dependency's archive, so running it
+ * exercises code that only reached it through the dependency closure. */
+static int za_programs_run(const char *first_path, bool installed_exec)
+{
+    int failures = 0;
+    char ran[512];
+    ran[0] = '\0';
+    const char *run_argv[] = { first_path, NULL };
+    int prc = (first_path && installed_exec)
+        ? zcl_spawn_capture(run_argv, ran, sizeof(ran), 30000)
+        : -1;
+    ZA_CHECK("running the installed program exercises the locked dependency",
+             prc == 0 && strstr(ran, "ringcli total=7") != NULL);
+    if (prc != 0)
+        printf("  zcode_add: program run rc=%d out=%s\n", prc, ran);
+    return failures;
+}
+
 static int t_programs(void)
 {
     int failures = 0;
@@ -3630,39 +3837,10 @@ static int t_programs(void)
         za_rm_rf(base);
         return failures;
     }
-    struct zcl_command_reply lib_reply;
-    zcl_command_reply_init(&lib_reply, "zcl.zcode_add_commit.v1");
-    bool lib_used = za_use_commit(base, "alice/ringlib", t0, &lib_reply);
-    const struct json_value *lib_programs =
-        json_get(&lib_reply.data, "programs");
-    ZA_CHECK("a library-only package reports zero programs, not silence",
-             lib_used && lib_reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 lib_programs && lib_programs->type == JSON_ARR &&
-                 lib_programs->num_children == 0 &&
-                 json_get_int(json_get(&lib_reply.data, "program_count")) ==
-                     0 &&
-                 json_get(&lib_reply.data, "next_action") == NULL);
-    zcl_command_reply_free(&lib_reply);
+    failures += za_programs_library_reply(base, t0);
 
-    /* A package that ships an application, locked to that library. */
-    char deps_json[256];
-    char lib_hex[65];
-    za_hex(lib_root, 32, lib_hex);
-    snprintf(deps_json, sizeof(deps_json),
-             "{\"schema\":1,\"dependencies\":[{\"root\":\"%s\","
-             "\"name\":\"alice/ringlib\",\"semver\":\"1.0.0\"}]}", lib_hex);
-    struct za_file cli_files[] = {
-        { "LICENSE", ZA_LICENSE },
-        { "src/cli.h", ZA_CLI_H },
-        { "src/cli.c", ZA_CLI_C },
-        { "test/test_cli.c", ZA_CLI_TEST },
-        { "app/main.c", ZA_CLI_MAIN },
-        { VCS_PACKAGE_DEPS_META_PATH, deps_json },
-    };
     uint8_t cli_root[32];
-    bool cli_published = za_publish_ex(
-        zcode, "alice/ringcli", "1.0.0", 2, cli_files, 6, "src/cli.h",
-        "src/cli.c", "test/test_cli.c", "src", "app/main.c", cli_root);
+    bool cli_published = za_programs_publish_cli(zcode, lib_root, cli_root);
     ZA_CHECK("a fixture declaring app/main.c publishes", cli_published);
 
     struct zcl_command_reply cli_reply;
@@ -3686,40 +3864,9 @@ static int t_programs(void)
              cli_used && cli_reply.status == ZCL_COMMAND_STATUS_PASSED &&
                  installed_exec);
 
-    const struct json_value *cli_programs =
-        json_get(&cli_reply.data, "programs");
-    const struct json_value *first =
-        cli_programs ? json_at(cli_programs, 0) : NULL;
-    const char *first_output = first ? json_get_str(json_get(first, "output"))
-                                     : NULL;
-    const char *first_path =
-        first ? json_get_str(json_get(first, "path")) : NULL;
-    const char *next_action =
-        json_get_str(json_get(&cli_reply.data, "next_action"));
-    struct stat rst;
-    ZA_CHECK("the reply names the exact program and where to run it",
-             cli_programs && cli_programs->num_children == 1 &&
-                 json_get_int(json_get(&cli_reply.data, "program_count")) ==
-                     1 &&
-                 first_output && strcmp(first_output, "bin/ringcli") == 0 &&
-                 first_path && first_path[0] == '/' &&
-                 stat(first_path, &rst) == 0 && S_ISREG(rst.st_mode) &&
-                 (rst.st_mode & 0111) != 0 &&
-                 next_action && strncmp(next_action, "run ", 4) == 0 &&
-                 strcmp(next_action + 4, first_path) == 0);
-
-    /* The program links its locked dependency's archive, so running it
-     * exercises code that only reached it through the dependency closure. */
-    char ran[512];
-    ran[0] = '\0';
-    const char *run_argv[] = { first_path, NULL };
-    int prc = (first_path && installed_exec)
-        ? zcl_spawn_capture(run_argv, ran, sizeof(ran), 30000)
-        : -1;
-    ZA_CHECK("running the installed program exercises the locked dependency",
-             prc == 0 && strstr(ran, "ringcli total=7") != NULL);
-    if (prc != 0)
-        printf("  zcode_add: program run rc=%d out=%s\n", prc, ran);
+    const char *first_path = NULL;
+    failures += za_programs_cli_reply(&cli_reply, &first_path);
+    failures += za_programs_run(first_path, installed_exec);
 
     /* The publisher-gone fixture removes source-store layout deliberately;
      * finish any fixture that publishes a new release before that boundary. */
