@@ -27,6 +27,45 @@
 #include <errno.h>
 #include <stdlib.h>
 
+/* Locate the three colons of "txid:vout:value:scripthex" and bound the
+ * txid width and the vout and value field widths. */
+static bool parse_input_bounds(const char *text, const char **c1,
+                               const char **c2, const char **c3)
+{
+    /* The script is last (hex has no colons), the txid first. */
+    const char *a = strchr(text, ':');
+    const char *b = a ? strchr(a + 1, ':') : NULL;
+    const char *c = b ? strchr(b + 1, ':') : NULL;
+    if (!c || c == b + 1)
+        return false; /* raw-return-ok:form-refusal-named-by-caller */
+    if ((size_t)(a - text) != 64 ||
+        (size_t)(b - a - 1) >= 16 || (size_t)(c - b - 1) >= 32)
+        return false; /* raw-return-ok:form-refusal-named-by-caller */
+    *c1 = a;
+    *c2 = b;
+    *c3 = c;
+    return true;
+}
+
+/* Strict decimal parse of the vout and value fields and their ranges. */
+static bool parse_input_numbers(const char *vout_s, const char *value_s,
+                                unsigned long *vout,
+                                unsigned long long *value)
+{
+    char *end = NULL;
+    errno = 0;
+    *vout = strtoul(vout_s, &end, 10);
+    if (errno != 0 || !end || *end != '\0')
+        return false; /* raw-return-ok:form-refusal-named-by-caller */
+    errno = 0;
+    *value = strtoull(value_s, &end, 10);
+    if (errno != 0 || !end || *end != '\0')
+        return false; /* raw-return-ok:form-refusal-named-by-caller */
+    if (*vout > UINT32_MAX || *value == 0 || *value > INT64_MAX)
+        return false; /* raw-return-ok:form-refusal-named-by-caller */
+    return true;
+}
+
 /* Parse one "txid:vout:value:scripthex" form field. */
 static bool parse_input_field(const char *text, struct zswap_swap_input *in)
 {
@@ -34,16 +73,9 @@ static bool parse_input_field(const char *text, struct zswap_swap_input *in)
     char txid_hex[65], script_hex[2 * ZSWAP_MAX_INPUT_SCRIPT_BYTES + 1];
     unsigned long vout;
     unsigned long long value;
-    /* The script is last (hex has no colons), the txid first. */
-    const char *c1 = strchr(text, ':');
-    const char *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
-    const char *c3 = c2 ? strchr(c2 + 1, ':') : NULL;
-    if (!c3 || c3 == c2 + 1)
-        return false;
-    size_t txid_len = (size_t)(c1 - text);
-    if (txid_len != 64 ||
-        (size_t)(c2 - c1 - 1) >= 16 || (size_t)(c3 - c2 - 1) >= 32)
-        return false;
+    const char *c1 = NULL, *c2 = NULL, *c3 = NULL;
+    if (!parse_input_bounds(text, &c1, &c2, &c3))
+        return false; /* raw-return-ok:form-refusal-named-by-caller */
     memcpy(txid_hex, text, 64);
     txid_hex[64] = 0;
     char vout_s[16], value_s[32];
@@ -56,17 +88,8 @@ static bool parse_input_field(const char *text, struct zswap_swap_input *in)
         script_hex_len > 2 * ZSWAP_MAX_INPUT_SCRIPT_BYTES)
         return false;
     memcpy(script_hex, c3 + 1, script_hex_len + 1);
-    char *end = NULL;
-    errno = 0;
-    vout = strtoul(vout_s, &end, 10);
-    if (errno != 0 || !end || *end != '\0')
-        return false;
-    errno = 0;
-    value = strtoull(value_s, &end, 10);
-    if (errno != 0 || !end || *end != '\0')
-        return false;
-    if (vout > UINT32_MAX || value == 0 || value > INT64_MAX)
-        return false;
+    if (!parse_input_numbers(vout_s, value_s, &vout, &value))
+        return false; /* raw-return-ok:form-refusal-named-by-caller */
     if (!zcl_hex_decode_lower(txid_hex, in->txid, 32))
         return false; /* raw-return-ok:form-refusal-named-by-caller */
     size_t script_len = script_hex_len / 2;
@@ -194,6 +217,313 @@ static size_t yardsale_render_buy_plan_page(
                                   response, response_max);
 }
 
+/* One resolved web-buy request: the form fields, the terms they name and
+ * the ledger state carried between the readers, steps and renderers. */
+struct buy_post {
+    char root_hex[80];
+    char token_recv[ZSWAP_ADDRESS_FIELD_BYTES];
+    char change[ZSWAP_ADDRESS_FIELD_BYTES];
+    char fee_s[24];
+    bool confirm;
+    uint8_t root[32];
+    uint64_t fee;
+    struct zswap_buyer_accept buyer;
+    struct privkey keys[ZSWAP_MAX_BUYER_INPUTS];
+    struct node_db *ndb;
+    struct zswap_yardsale_ad ad;
+    struct db_yardsale_plan plan;
+    bool have_plan;
+    bool arm_now;
+    bool already_begun;
+    bool expire_save_failed;
+    bool commit_save_failed;
+    int64_t now;
+    size_t ser_len;
+    uint8_t ser[ZSWAP_ACCEPT_WIRE_MAX_BYTES];
+    char request_hex[65];
+    char plan_root_hex[65];
+    char payload_hex[YARDSALE_PLAN_PAYLOAD_HEX_MAX];
+    enum yardsale_error result;
+    size_t wire_len;
+    uint8_t wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES];
+};
+
+static const char buy_plan_expired_msg[] =
+    "these planned terms expired — submit without confirm to plan again";
+
+static const char *buy_read_required(const char *form, size_t body_len,
+                                     struct buy_post *bp)
+{
+    if (!web_form_field(form, body_len, "root", bp->root_hex,
+                        sizeof(bp->root_hex)) ||
+        !web_form_field(form, body_len, "token_recv", bp->token_recv,
+                        sizeof(bp->token_recv)) ||
+        !web_form_field(form, body_len, "change", bp->change,
+                        sizeof(bp->change)) ||
+        !web_form_field(form, body_len, "fee", bp->fee_s,
+                        sizeof(bp->fee_s)))
+        return "root, token_recv, change, and fee are required";
+    return NULL;
+}
+
+static const char *buy_read_confirm(const char *form, size_t body_len,
+                                    struct buy_post *bp, const char *bad)
+{
+    /* Plan-first money on the form path too: without confirm=true this
+     * only persists the exact planned terms; confirm=true arms money but
+     * only against a stored PLANNED row whose terms match byte-for-byte. */
+    char confirm_s[8];
+    if (!bad && web_form_field(form, body_len, "confirm", confirm_s,
+                                 sizeof(confirm_s))) {
+        if (strcmp(confirm_s, "true") == 0 || strcmp(confirm_s, "1") == 0)
+            bp->confirm = true;
+        else
+            bad = "confirm must be \"true\" to arm money";
+    }
+    return bad;
+}
+
+static const char *buy_decode_root(struct buy_post *bp, const char *bad)
+{
+    if (!bad && !zcl_hex_decode_lower(bp->root_hex, bp->root, 32))
+        bad = "root must be 64 lowercase hex characters";
+    return bad;
+}
+
+/* One in<i>/key<i> pair: an empty pair is skipped, a complete pair is
+ * parsed and its WIF decoded into the next input slot. */
+static const char *buy_read_input_slot(const char *form, size_t body_len,
+                                       size_t i,
+                                       const unsigned char *sec_pfx,
+                                       size_t sec_pfx_len,
+                                       struct buy_post *bp)
+{
+    char fname[8], kname[8], in_s[640] = {0}, wif_s[128] = {0};
+    snprintf(fname, sizeof(fname), "in%zu", i);
+    snprintf(kname, sizeof(kname), "key%zu", i);
+    bool have_in = web_form_field(form, body_len, fname, in_s,
+                                    sizeof(in_s)) && in_s[0];
+    bool have_key = web_form_field(form, body_len, kname, wif_s,
+                                     sizeof(wif_s)) && wif_s[0];
+    if (!have_in && !have_key)
+        return NULL;
+    const char *bad = NULL;
+    size_t n = bp->buyer.num_inputs;
+    if (have_in != have_key)
+        bad = "every input needs its WIF, and every WIF its input";
+    else if (!parse_input_field(in_s, &bp->buyer.inputs[n]))
+        bad = "an input is not txid:vout:value:scripthex";
+    else if (!decode_secret(wif_s, sec_pfx, sec_pfx_len, &bp->keys[n]))
+        bad = "a WIF did not decode";
+    else
+        bp->buyer.num_inputs++;
+    memory_cleanse(wif_s, sizeof(wif_s));
+    return bad;
+}
+
+static const char *buy_read_inputs(const char *form, size_t body_len,
+                                   struct buy_post *bp, const char *bad)
+{
+    /* Up to four inputs via in1..in4 / key1..key4 (the web form's v1
+     * convenience bound; the controller API takes the full 16). */
+    const struct chain_params *cp = chain_params_get();
+    size_t sec_pfx_len = 0;
+    const unsigned char *sec_pfx =
+        chain_params_base58_prefix(cp, B58_SECRET_KEY, &sec_pfx_len);
+    for (size_t i = 1; i <= 4 && !bad; i++)
+        bad = buy_read_input_slot(form, body_len, i, sec_pfx, sec_pfx_len,
+                                  bp);
+    return bad;
+}
+
+static const char *buy_read_fee(struct buy_post *bp, const char *bad)
+{
+    if (bad)
+        return bad;
+    if (bp->buyer.num_inputs == 0)
+        bad = "at least one ZCL input is required";
+    char *end = NULL;
+    errno = 0;
+    bp->fee = strtoull(bp->fee_s, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || bp->fee == 0)
+        bad = "fee must be positive sats";
+    return bad;
+}
+
+static const char *buy_check_store(struct buy_post *bp, const char *bad)
+{
+    /* The ledger gates every arm. A missing plan store refuses rather
+     * than falling back to the old one-shot behavior. */
+    bp->ndb = app_runtime_node_db();
+    if (!bad && (!bp->ndb || !bp->ndb->open))
+        bad = "the web-buy plan store is unavailable — nothing was "
+              "planned or armed";
+    return bad;
+}
+
+static const char *buy_read_request(const char *form, size_t body_len,
+                                    struct buy_post *bp)
+{
+    const char *bad = buy_read_required(form, body_len, bp);
+    bad = buy_read_confirm(form, body_len, bp, bad);
+    bad = buy_decode_root(bp, bad);
+    bad = buy_read_inputs(form, body_len, bp, bad);
+    bad = buy_read_fee(bp, bad);
+    return buy_check_store(bp, bad);
+}
+
+static void buy_apply_terms(struct buy_post *bp)
+{
+    snprintf(bp->buyer.token_recv_address,
+             sizeof(bp->buyer.token_recv_address), "%s", bp->token_recv);
+    snprintf(bp->buyer.change_address, sizeof(bp->buyer.change_address),
+             "%s", bp->change);
+    bp->buyer.fee_sats = bp->fee;
+}
+
+static const char *buy_plan_renew(struct buy_post *bp)
+{
+    webbuy_plan_row(&bp->plan, bp->request_hex, bp->plan_root_hex,
+                    bp->payload_hex, bp->ad.quote.expires_unix, bp->now);
+    if (!db_yardsale_plan_save(bp->ndb, &bp->plan))
+        return "renewing the planned accept failed";
+    return NULL;
+}
+
+static const char *buy_plan_expire(struct buy_post *bp)
+{
+    snprintf(bp->plan.state, sizeof(bp->plan.state), "%s",
+             YARDSALE_PLAN_STATE_EXPIRED);
+    if (!db_yardsale_plan_save(bp->ndb, &bp->plan))
+        bp->expire_save_failed = true;
+    return buy_plan_expired_msg;
+}
+
+static const char *buy_plan_claim(struct buy_post *bp)
+{
+    enum db_yardsale_plan_claim_result claim =
+        db_yardsale_plan_claim(bp->ndb, &bp->plan, bp->now);
+    if (claim == DB_YARDSALE_PLAN_CLAIMED) {
+        bp->arm_now = true;
+        return NULL;
+    }
+    if (claim == DB_YARDSALE_PLAN_CLAIM_REFUSED)
+        return "these terms are already being armed or "
+               "changed state — inspect before retrying";
+    return "the plan ledger could not claim these "
+           "terms — nothing was armed";
+}
+
+/* A stored row already names these exact terms: replay, renew, refuse,
+ * expire or arm it according to its state and the confirm flag. */
+static const char *buy_plan_existing(struct buy_post *bp)
+{
+    if (strcmp(bp->plan.state, YARDSALE_PLAN_STATE_COMMITTED) == 0) {
+        bp->already_begun = true;
+        return NULL;
+    }
+    if (!bp->confirm &&
+        (strcmp(bp->plan.state, YARDSALE_PLAN_STATE_EXPIRED) == 0 ||
+         bp->now > bp->plan.expires_unix))
+        return buy_plan_renew(bp);
+    if (!bp->confirm)
+        return NULL; /* plain re-inspection of live terms */
+    if (strcmp(bp->plan.state, YARDSALE_PLAN_STATE_PLANNED) != 0)
+        return buy_plan_expired_msg;
+    if (bp->now > bp->plan.expires_unix)
+        return buy_plan_expire(bp);
+    return buy_plan_claim(bp);
+}
+
+static const char *buy_plan_new(struct buy_post *bp)
+{
+    webbuy_plan_row(&bp->plan, bp->request_hex, bp->plan_root_hex,
+                    bp->payload_hex, bp->ad.quote.expires_unix, bp->now);
+    if (!db_yardsale_plan_save(bp->ndb, &bp->plan)) {
+        memset(&bp->plan, 0, sizeof(bp->plan));
+        return "saving the planned accept failed";
+    }
+    return NULL;
+}
+
+/* Terms and ledger resolution use only public bytes. */
+static const char *buy_resolve_plan(struct buy_post *bp, const char *bad)
+{
+    if (bad)
+        return bad;
+    if (!zswap_yardsale_find(bp->root, &bp->ad))
+        return "that sign is not in this node's yardsale";
+    bp->buyer.deadline_unix = bp->ad.quote.expires_unix;
+    if (zswap_buyer_accept_serialize(&bp->buyer, bp->ser, sizeof(bp->ser),
+                                     &bp->ser_len) != ZSWAP_ASSEMBLY_OK)
+        return "the accept terms did not serialize";
+    webbuy_identity(bp->root, bp->ser, bp->ser_len, bp->request_hex,
+                    bp->plan_root_hex);
+    if (!webbuy_payload(bp->root, bp->ser, bp->ser_len, bp->payload_hex))
+        return "the planned accept outgrew the plan payload";
+    bp->have_plan = db_yardsale_plan_find_by_request(bp->ndb,
+                                                     bp->request_hex,
+                                                     &bp->plan);
+    if (bp->have_plan && strcmp(bp->plan.payload_hex, bp->payload_hex) != 0)
+        return "a different accept already claims this plan "
+               "hash — start over with fresh terms";
+    if (bp->have_plan)
+        return buy_plan_existing(bp);
+    if (bp->confirm)
+        return "no plan names these exact terms — submit "
+               "without confirm first and inspect them";
+    return buy_plan_new(bp);
+}
+
+static const char *buy_arm_ceremony(struct buy_post *bp)
+{
+    bp->result = yardsale_buyer_begin(&bp->ad.quote, &bp->buyer, bp->keys,
+                                      bp->buyer.num_inputs, bp->now,
+                                      bp->wire, sizeof(bp->wire),
+                                      &bp->wire_len);
+    if (bp->result == YARDSALE_OK && bp->have_plan) {
+        snprintf(bp->plan.state, sizeof(bp->plan.state), "%s",
+                 YARDSALE_PLAN_STATE_COMMITTED);
+        snprintf(bp->plan.result, sizeof(bp->plan.result), "begun");
+        if (!db_yardsale_plan_save(bp->ndb, &bp->plan)) {
+            bp->commit_save_failed = true;
+            return "the accept left the node but its durable outcome is "
+                   "uncertain — automatic replay is blocked";
+        }
+    } else if (bp->result != YARDSALE_OK) {
+        snprintf(bp->plan.state, sizeof(bp->plan.state), "%s",
+                 YARDSALE_PLAN_STATE_PLANNED);
+        bp->plan.result[0] = '\0';
+        if (!db_yardsale_plan_save(bp->ndb, &bp->plan))
+            return "the ceremony refused and the plan could not be "
+                   "released — inspect before retrying";
+    }
+    return NULL;
+}
+
+static size_t buy_success_page(const struct buy_post *bp, uint8_t *response,
+                               size_t response_max)
+{
+    char page[2048];
+    int n = snprintf(page, sizeof(page),
+        "<!doctype html><html><head><title>accept out</title>"
+        "<style>" YARDSALE_PAGE_STYLE "</style></head><body>"
+        "<h1>Accept pinned on the seller's door</h1>"
+        "<p>Your <code>zswap_accept.v1</code> (%zu bytes) is gossiping "
+        "toward the seller. When his <code>zswap_partial.v1</code> "
+        "returns, this node verifies every term of the sign, signs your "
+        "inputs, and broadcasts the swap — check <code>z23 "
+        "status</code> or the logs for the settlement. If the sign "
+        "expires first, the ceremony dies with it and nothing was "
+        "lost.</p><p><a href='/yardsale'>Back to the yard</a></p>"
+        "</body></html>", bp->wire_len);
+    if (n < 0)
+        return 0;
+    return yardsale_http_response("200 OK", "text/html; charset=utf-8",
+                                  (const uint8_t *)page, (size_t)n,
+                                  response, response_max);
+}
+
 /* ── POST /yardsale/buy — plan-first on the web form too ─────────── */
 /* A form POST without confirm=true resolves the exact accept terms
  * (canonical zswap serialization under the live ad) and stores them as a
@@ -220,254 +550,42 @@ size_t yardsale_site_handle_buy_post(const uint8_t *body, size_t body_len,
     memcpy(form, body, body_len);
     form[body_len] = 0;
 
-    char root_hex[80], token_recv[ZSWAP_ADDRESS_FIELD_BYTES],
-         change[ZSWAP_ADDRESS_FIELD_BYTES], fee_s[24];
-    const char *bad = NULL;
-    struct zswap_buyer_accept buyer;
-    memset(&buyer, 0, sizeof(buyer));
-    struct privkey keys[ZSWAP_MAX_BUYER_INPUTS];
-    memset(keys, 0, sizeof(keys));
-
-    if (!web_form_field(form, body_len, "root", root_hex,
-                          sizeof(root_hex)) ||
-        !web_form_field(form, body_len, "token_recv", token_recv,
-                          sizeof(token_recv)) ||
-        !web_form_field(form, body_len, "change", change,
-                          sizeof(change)) ||
-        !web_form_field(form, body_len, "fee", fee_s, sizeof(fee_s)))
-        bad = "root, token_recv, change, and fee are required";
-
-    /* Plan-first money on the form path too: without confirm=true this
-     * only persists the exact planned terms; confirm=true arms money but
-     * only against a stored PLANNED row whose terms match byte-for-byte. */
-    char confirm_s[8];
-    bool confirm = false;
-    if (!bad && web_form_field(form, body_len, "confirm", confirm_s,
-                                 sizeof(confirm_s))) {
-        if (strcmp(confirm_s, "true") == 0 || strcmp(confirm_s, "1") == 0)
-            confirm = true;
-        else
-            bad = "confirm must be \"true\" to arm money";
-    }
-
-    uint8_t root[32];
-    if (!bad && !zcl_hex_decode_lower(root_hex, root, 32))
-        bad = "root must be 64 lowercase hex characters";
-
-    /* Up to four inputs via in1..in4 / key1..key4 (the web form's v1
-     * convenience bound; the controller API takes the full 16). */
-    const struct chain_params *cp = chain_params_get();
-    size_t sec_pfx_len = 0;
-    const unsigned char *sec_pfx =
-        chain_params_base58_prefix(cp, B58_SECRET_KEY, &sec_pfx_len);
-    for (size_t i = 1; i <= 4 && !bad; i++) {
-        char fname[8], kname[8], in_s[640] = {0}, wif_s[128] = {0};
-        snprintf(fname, sizeof(fname), "in%zu", i);
-        snprintf(kname, sizeof(kname), "key%zu", i);
-        bool have_in = web_form_field(form, body_len, fname, in_s,
-                                        sizeof(in_s)) && in_s[0];
-        bool have_key = web_form_field(form, body_len, kname, wif_s,
-                                         sizeof(wif_s)) && wif_s[0];
-        if (!have_in && !have_key)
-            continue;
-        if (have_in != have_key) {
-            memory_cleanse(wif_s, sizeof(wif_s));
-            bad = "every input needs its WIF, and every WIF its input";
-            break;
-        }
-        struct zswap_swap_input *in = &buyer.inputs[buyer.num_inputs];
-        if (!parse_input_field(in_s, in)) {
-            memory_cleanse(wif_s, sizeof(wif_s));
-            bad = "an input is not txid:vout:value:scripthex";
-            break;
-        }
-        if (!decode_secret(wif_s, sec_pfx, sec_pfx_len,
-                           &keys[buyer.num_inputs])) {
-            bad = "a WIF did not decode";
-            memory_cleanse(wif_s, sizeof(wif_s));
-            break;
-        }
-        memory_cleanse(wif_s, sizeof(wif_s));
-        buyer.num_inputs++;
-    }
-
-    uint64_t fee = 0;
-    if (!bad) {
-        if (buyer.num_inputs == 0)
-            bad = "at least one ZCL input is required";
-        char *end = NULL;
-        errno = 0;
-        fee = strtoull(fee_s, &end, 10);
-        if (errno != 0 || !end || *end != '\0' || fee == 0)
-            bad = "fee must be positive sats";
-    }
-
-    /* The ledger gates every arm. A missing plan store refuses rather
-     * than falling back to the old one-shot behavior. */
-    struct node_db *ndb = app_runtime_node_db();
-    if (!bad && (!ndb || !ndb->open))
-        bad = "the web-buy plan store is unavailable — nothing was "
-              "planned or armed";
-
-    struct db_yardsale_plan plan;
-    bool have_plan = false;
-    if (!bad) {
-        snprintf(buyer.token_recv_address,
-                 sizeof(buyer.token_recv_address), "%s", token_recv);
-        snprintf(buyer.change_address, sizeof(buyer.change_address),
-                 "%s", change);
-        buyer.fee_sats = fee;
-    }
+    struct buy_post bp;
+    memset(&bp, 0, sizeof(bp));
+    bp.result = YARDSALE_ERR_NULL;
+    const char *bad = buy_read_request(form, body_len, &bp);
+    if (!bad)
+        buy_apply_terms(&bp);
 
     /* Terms and ledger resolution use only public bytes; the private keys
      * stay live solely for the phase-2 ceremony below. */
-    bool arm_now = false;
-    bool already_begun = false;
-    size_t ser_len = 0;
-    uint8_t ser[ZSWAP_ACCEPT_WIRE_MAX_BYTES];
-    struct zswap_yardsale_ad ad;
-    int64_t now = (int64_t)platform_time_wall_time_t();
-    if (!bad) {
-        if (!zswap_yardsale_find(root, &ad)) {
-            bad = "that sign is not in this node's yardsale";
-        } else {
-            buyer.deadline_unix = ad.quote.expires_unix;
-            if (zswap_buyer_accept_serialize(&buyer, ser, sizeof(ser),
-                                             &ser_len) !=
-                ZSWAP_ASSEMBLY_OK) {
-                bad = "the accept terms did not serialize";
-            } else {
-                char request_hex[65], plan_root_hex[65];
-                char payload_hex[YARDSALE_PLAN_PAYLOAD_HEX_MAX];
-                webbuy_identity(root, ser, ser_len, request_hex,
-                                plan_root_hex);
-                if (!webbuy_payload(root, ser, ser_len, payload_hex))
-                    bad = "the planned accept outgrew the plan payload";
-                else
-                    have_plan = db_yardsale_plan_find_by_request(
-                        ndb, request_hex, &plan);
-                if (!bad && have_plan &&
-                    strcmp(plan.payload_hex, payload_hex) != 0)
-                    bad = "a different accept already claims this plan "
-                          "hash — start over with fresh terms";
-
-                if (!bad && have_plan) {
-                    if (strcmp(plan.state, YARDSALE_PLAN_STATE_COMMITTED)
-                        == 0)
-                        already_begun = true;
-                    else if (!confirm &&
-                             (strcmp(plan.state,
-                                     YARDSALE_PLAN_STATE_EXPIRED) == 0 ||
-                              now > plan.expires_unix)) {
-                        webbuy_plan_row(&plan, request_hex, plan_root_hex,
-                                        payload_hex, ad.quote.expires_unix,
-                                        now);
-                        if (!db_yardsale_plan_save(ndb, &plan))
-                            bad = "renewing the planned accept failed";
-                    } else if (!confirm)
-                        ; /* plain re-inspection of live terms */
-                    else if (strcmp(plan.state,
-                                    YARDSALE_PLAN_STATE_PLANNED) != 0)
-                        bad = "these planned terms expired — submit "
-                              "without confirm to plan again";
-                    else if (now > plan.expires_unix) {
-                        snprintf(plan.state, sizeof(plan.state), "%s",
-                                 YARDSALE_PLAN_STATE_EXPIRED);
-                        if (!db_yardsale_plan_save(ndb, &plan))
-                            LOG_ERR("yardsale",
-                                    "web-buy expiry save failed");
-                        bad = "these planned terms expired — submit "
-                              "without confirm to plan again";
-                    } else {
-                        enum db_yardsale_plan_claim_result claim =
-                            db_yardsale_plan_claim(ndb, &plan, now);
-                        if (claim == DB_YARDSALE_PLAN_CLAIMED)
-                            arm_now = true;
-                        else if (claim == DB_YARDSALE_PLAN_CLAIM_REFUSED)
-                            bad = "these terms are already being armed or "
-                                  "changed state — inspect before retrying";
-                        else
-                            bad = "the plan ledger could not claim these "
-                                  "terms — nothing was armed";
-                    }
-                } else if (!bad && confirm && !have_plan) {
-                    bad = "no plan names these exact terms — submit "
-                          "without confirm first and inspect them";
-                }
-                if (!bad && !have_plan) {
-                    webbuy_plan_row(&plan, request_hex, plan_root_hex,
-                                    payload_hex, ad.quote.expires_unix,
-                                    now);
-                    if (!db_yardsale_plan_save(ndb, &plan)) {
-                        bad = "saving the planned accept failed";
-                        memset(&plan, 0, sizeof(plan));
-                    }
-                }
-            }
-        }
-    }
-
-    size_t wire_len = 0;
-    enum yardsale_error result = YARDSALE_ERR_NULL;
-    uint8_t wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES];
-    if (!bad && arm_now) {
-        result = yardsale_buyer_begin(&ad.quote, &buyer, keys,
-                                      buyer.num_inputs, now,
-                                      wire, sizeof(wire), &wire_len);
-        if (result == YARDSALE_OK && have_plan) {
-            snprintf(plan.state, sizeof(plan.state), "%s",
-                     YARDSALE_PLAN_STATE_COMMITTED);
-            snprintf(plan.result, sizeof(plan.result), "begun");
-            if (!db_yardsale_plan_save(ndb, &plan)) {
-                LOG_ERR("yardsale",
-                        "armed accept remains ARMING after commit save failed");
-                bad = "the accept left the node but its durable outcome is "
-                      "uncertain — automatic replay is blocked";
-            }
-        } else if (result != YARDSALE_OK) {
-            snprintf(plan.state, sizeof(plan.state), "%s",
-                     YARDSALE_PLAN_STATE_PLANNED);
-            plan.result[0] = '\0';
-            if (!db_yardsale_plan_save(ndb, &plan))
-                bad = "the ceremony refused and the plan could not be "
-                      "released — inspect before retrying";
-        }
-    }
-    memory_cleanse(keys, sizeof(keys));
+    bp.now = (int64_t)platform_time_wall_time_t();
+    bad = buy_resolve_plan(&bp, bad);
+    if (bp.expire_save_failed)
+        LOG_ERR("yardsale",
+                "web-buy expiry save failed");
+    if (!bad && bp.arm_now)
+        bad = buy_arm_ceremony(&bp);
+    if (bp.commit_save_failed)
+        LOG_ERR("yardsale",
+                "armed accept remains ARMING after commit save failed");
+    memory_cleanse(bp.keys, sizeof(bp.keys));
     memory_cleanse(form, body_len); /* raw body holds the WIF strings */
     free(form);
 
     if (bad)
         return yardsale_error_page("400 Bad Request", "400 Bad Request",
                                    bad, response, response_max);
-    if (already_begun || !arm_now)
-        return yardsale_render_buy_plan_page(&plan, root, &buyer,
-                                             already_begun,
+    if (bp.already_begun || !bp.arm_now)
+        return yardsale_render_buy_plan_page(&bp.plan, bp.root, &bp.buyer,
+                                             bp.already_begun,
                                              response, response_max);
-    if (result != YARDSALE_OK)
+    if (bp.result != YARDSALE_OK)
         return yardsale_error_page("502 Bad Gateway",
                                    "the accept never left the yard",
-                                   yardsale_error_string(result),
+                                   yardsale_error_string(bp.result),
                                    response, response_max);
-
-    char page[2048];
-    int n = snprintf(page, sizeof(page),
-        "<!doctype html><html><head><title>accept out</title>"
-        "<style>" YARDSALE_PAGE_STYLE "</style></head><body>"
-        "<h1>Accept pinned on the seller's door</h1>"
-        "<p>Your <code>zswap_accept.v1</code> (%zu bytes) is gossiping "
-        "toward the seller. When his <code>zswap_partial.v1</code> "
-        "returns, this node verifies every term of the sign, signs your "
-        "inputs, and broadcasts the swap — check <code>z23 "
-        "status</code> or the logs for the settlement. If the sign "
-        "expires first, the ceremony dies with it and nothing was "
-        "lost.</p><p><a href='/yardsale'>Back to the yard</a></p>"
-        "</body></html>", wire_len);
-    if (n < 0)
-        return 0;
-    return yardsale_http_response("200 OK", "text/html; charset=utf-8",
-                                  (const uint8_t *)page, (size_t)n,
-                                  response, response_max);
+    return buy_success_page(&bp, response, response_max);
 }
 
 /* ── POST /yardsale/accept — the seller endpoint ─────────────────── */
