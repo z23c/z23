@@ -318,36 +318,30 @@ enum streak_read_result {
     STREAK_CORRUPT
 };
 
-static enum streak_read_result read_streak_at(int dirfd, const char *base,
-                                               uint32_t *value)
+/* Reads the whole streak text from fd; false on a read error. */
+static bool streak_read_text(int fd, char *buf, size_t cap, size_t *used_out)
 {
-    int fd = openat(dirfd, base,
-                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    if (fd < 0)
-        return errno == ENOENT ? STREAK_MISSING : STREAK_CORRUPT;
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
-        st.st_size >= STREAK_TEXT_MAX) {
-        close(fd);
-        return STREAK_CORRUPT;
-    }
-    char buf[STREAK_TEXT_MAX];
     size_t used = 0;
-    while (used < sizeof(buf) - 1) {
-        ssize_t n = read(fd, buf + used, sizeof(buf) - 1 - used);
+    while (used < cap - 1) {
+        ssize_t n = read(fd, buf + used, cap - 1 - used);
         if (n > 0) {
             used += (size_t)n;
             continue;
         }
         if (n < 0 && errno == EINTR)
             continue;
-        if (n < 0) {
-            close(fd);
-            return STREAK_CORRUPT;
-        }
+        if (n < 0)
+            return false;
         break;
     }
-    close(fd);
+    *used_out = used;
+    return true;
+}
+
+/* Parses "<digits>\n" text of length used; terminates buf in place. */
+static enum streak_read_result streak_parse_text(char *buf, size_t used,
+                                                 uint32_t *value)
+{
     buf[used] = '\0';
     if (used < 2 || buf[used - 1] != '\n')
         return STREAK_CORRUPT;
@@ -364,6 +358,29 @@ static enum streak_read_result read_streak_at(int dirfd, const char *base,
     return STREAK_VALID;
 }
 
+static enum streak_read_result read_streak_at(int dirfd, const char *base,
+                                               uint32_t *value)
+{
+    int fd = openat(dirfd, base,
+                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0)
+        return errno == ENOENT ? STREAK_MISSING : STREAK_CORRUPT;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+        st.st_size >= STREAK_TEXT_MAX) {
+        close(fd);
+        return STREAK_CORRUPT;
+    }
+    char buf[STREAK_TEXT_MAX];
+    size_t used = 0;
+    if (!streak_read_text(fd, buf, sizeof(buf), &used)) {
+        close(fd);
+        return STREAK_CORRUPT;
+    }
+    close(fd);
+    return streak_parse_text(buf, used, value);
+}
+
 static bool write_all(int fd, const char *buf, size_t len)
 {
     size_t off = 0;
@@ -378,6 +395,54 @@ static bool write_all(int fd, const char *buf, size_t len)
         return false;
     }
     return true;
+}
+
+/* Writes, fsyncs and closes the temporary streak fd (always closes it). */
+static bool streak_write_tmp(int fd, uint32_t value,
+                             char *error, size_t error_size)
+{
+    char text[STREAK_TEXT_MAX];
+    int text_len = snprintf(text, sizeof(text), "%u\n", value);
+    bool ok = text_len > 0 && (size_t)text_len < sizeof(text) &&
+              write_all(fd, text, (size_t)text_len);
+    if (!ok)
+        set_error(error, error_size, "write streak temporary failed: %s",
+                  strerror(errno));
+    if (ok && fsync(fd) != 0) {
+        set_error(error, error_size, "fsync streak temporary failed: %s",
+                  strerror(errno));
+        ok = false;
+    }
+    if (close(fd) != 0 && ok) {
+        set_error(error, error_size, "close streak temporary failed: %s",
+                  strerror(errno));
+        ok = false;
+    }
+    return ok;
+}
+
+/* Publishes the temporary streak by rename and syncs the directory. */
+static bool streak_publish_tmp(int dirfd, const char *tmp, const char *base,
+                               char *error, size_t error_size)
+{
+    bool ok = true;
+#ifdef ZCL_TESTING
+    if (g_fail_before_rename_once) {
+        g_fail_before_rename_once = false;
+        set_error(error, error_size, "injected failure before streak rename");
+        ok = false;
+    }
+#endif
+    if (ok && renameat(dirfd, tmp, dirfd, base) != 0) {
+        set_error(error, error_size, "rename streak failed: %s", strerror(errno));
+        ok = false;
+    }
+    if (ok && fsync(dirfd) != 0) {
+        set_error(error, error_size, "fsync slots directory failed: %s",
+                  strerror(errno));
+        ok = false;
+    }
+    return ok;
 }
 
 static bool store_streak_at(int dirfd, const char *base, uint32_t value,
@@ -398,39 +463,8 @@ static bool store_streak_at(int dirfd, const char *base, uint32_t value,
                   strerror(errno));
         return false;
     }
-    char text[STREAK_TEXT_MAX];
-    int text_len = snprintf(text, sizeof(text), "%u\n", value);
-    bool ok = text_len > 0 && (size_t)text_len < sizeof(text) &&
-              write_all(fd, text, (size_t)text_len);
-    if (!ok)
-        set_error(error, error_size, "write streak temporary failed: %s",
-                  strerror(errno));
-    if (ok && fsync(fd) != 0) {
-        set_error(error, error_size, "fsync streak temporary failed: %s",
-                  strerror(errno));
-        ok = false;
-    }
-    if (close(fd) != 0 && ok) {
-        set_error(error, error_size, "close streak temporary failed: %s",
-                  strerror(errno));
-        ok = false;
-    }
-#ifdef ZCL_TESTING
-    if (ok && g_fail_before_rename_once) {
-        g_fail_before_rename_once = false;
-        set_error(error, error_size, "injected failure before streak rename");
-        ok = false;
-    }
-#endif
-    if (ok && renameat(dirfd, tmp, dirfd, base) != 0) {
-        set_error(error, error_size, "rename streak failed: %s", strerror(errno));
-        ok = false;
-    }
-    if (ok && fsync(dirfd) != 0) {
-        set_error(error, error_size, "fsync slots directory failed: %s",
-                  strerror(errno));
-        ok = false;
-    }
+    bool ok = streak_write_tmp(fd, value, error, error_size) &&
+              streak_publish_tmp(dirfd, tmp, base, error, error_size);
     if (!ok)
         (void)unlinkat(dirfd, tmp, 0);
     return ok;
@@ -478,6 +512,73 @@ static int pin_lastgood_at(int dirfd, bool *invalid,
     return fd;
 }
 
+static bool launch_args_valid(const char *slots_dir, const char *current_path,
+                              uint32_t fallback_threshold,
+                              const struct os_binary_slots_launch *out)
+{
+    return slots_dir && slots_dir[0] && current_path && current_path[0] &&
+           strlen(current_path) < sizeof(out->target_path) &&
+           fallback_threshold != 0;
+}
+
+/* Picks the executable fd; takes ownership of *lastgood_fd when it is used. */
+static int launch_select_fd(struct os_binary_slots_launch *out,
+                            const char *current_path,
+                            const char *lastgood_path,
+                            bool use_fallback, int *lastgood_fd)
+{
+    int selected_fd = -1;
+    if (use_fallback) {
+        selected_fd = *lastgood_fd;
+        *lastgood_fd = -1;
+        out->fallback_active = true;
+        memcpy(out->target_path, lastgood_path, strlen(lastgood_path) + 1u);
+    } else {
+        selected_fd = pin_executable_path(current_path, out->error,
+                                          sizeof(out->error));
+        if (selected_fd < 0 && *lastgood_fd >= 0) {
+            selected_fd = *lastgood_fd;
+            *lastgood_fd = -1;
+            out->fallback_active = true;
+            memcpy(out->target_path, lastgood_path,
+                   strlen(lastgood_path) + 1u);
+        } else {
+            memcpy(out->target_path, current_path, strlen(current_path) + 1u);
+        }
+    }
+    return selected_fd;
+}
+
+static bool launch_fallback_due(enum streak_read_result state, uint32_t prior,
+                                bool corrupt, uint32_t fallback_threshold)
+{
+    return corrupt || (state == STREAK_VALID && prior >= fallback_threshold);
+}
+
+static void launch_release_dir(int lockfd, int dirfd)
+{
+    (void)flock(lockfd, LOCK_UN);
+    close(lockfd);
+    close(dirfd);
+}
+
+/* Records the pre-launch streak and stores the incremented value. */
+static bool launch_record_streak(struct os_binary_slots_launch *out, int dirfd,
+                                 bool corrupt, uint32_t prior)
+{
+    out->streak_corrupt = corrupt;
+    out->streak_before = prior;
+    if (!corrupt) {
+        uint32_t next = prior + 1;
+        if (!store_streak_at(dirfd, OS_BINARY_SLOTS_STREAK_BASENAME, next,
+                             out->error, sizeof(out->error)))
+            return false;
+        out->streak_written = true;
+        out->streak_after = next;
+    }
+    return true;
+}
+
 bool os_binary_slots_prepare_launch(const char *slots_dir,
                                     const char *current_path,
                                     uint32_t fallback_threshold,
@@ -487,9 +588,7 @@ bool os_binary_slots_prepare_launch(const char *slots_dir,
         return false;
     memset(out, 0, sizeof(*out));
     out->executable_fd = -1;
-    if (!slots_dir || !slots_dir[0] || !current_path || !current_path[0] ||
-        strlen(current_path) >= sizeof(out->target_path) ||
-        fallback_threshold == 0) {
+    if (!launch_args_valid(slots_dir, current_path, fallback_threshold, out)) {
         set_error(out->error, sizeof(out->error), "invalid launch arguments");
         return false;
     }
@@ -518,64 +617,31 @@ bool os_binary_slots_prepare_launch(const char *slots_dir,
                    (state == STREAK_VALID && prior == UINT32_MAX);
     bool lastgood_invalid = false;
     int lastgood_fd = pin_lastgood_at(dirfd, &lastgood_invalid, NULL, 0);
-    bool fallback_due = corrupt ||
-                        (state == STREAK_VALID && prior >= fallback_threshold);
+    bool fallback_due = launch_fallback_due(state, prior, corrupt,
+                                            fallback_threshold);
     if (fallback_due && lastgood_invalid) {
         set_error(out->error, sizeof(out->error),
                   "fallback required but last-good is not a regular executable");
-        (void)flock(lockfd, LOCK_UN);
-        close(lockfd);
-        close(dirfd);
+        launch_release_dir(lockfd, dirfd);
         return false;
     }
     bool use_fallback = lastgood_fd >= 0 && fallback_due;
-    int selected_fd = -1;
-    if (use_fallback) {
-        selected_fd = lastgood_fd;
-        lastgood_fd = -1;
-        out->fallback_active = true;
-        memcpy(out->target_path, lastgood_path, strlen(lastgood_path) + 1u);
-    } else {
-        selected_fd = pin_executable_path(current_path, out->error,
-                                          sizeof(out->error));
-        if (selected_fd < 0 && lastgood_fd >= 0) {
-            selected_fd = lastgood_fd;
-            lastgood_fd = -1;
-            out->fallback_active = true;
-            memcpy(out->target_path, lastgood_path,
-                   strlen(lastgood_path) + 1u);
-        } else {
-            memcpy(out->target_path, current_path, strlen(current_path) + 1u);
-        }
-    }
+    int selected_fd = launch_select_fd(out, current_path, lastgood_path,
+                                       use_fallback, &lastgood_fd);
     if (lastgood_fd >= 0)
         close(lastgood_fd);
     if (selected_fd < 0) {
-        (void)flock(lockfd, LOCK_UN);
-        close(lockfd);
-        close(dirfd);
+        launch_release_dir(lockfd, dirfd);
         return false;
     }
 
-    out->streak_corrupt = corrupt;
-    out->streak_before = prior;
-    if (!corrupt) {
-        uint32_t next = prior + 1;
-        if (!store_streak_at(dirfd, OS_BINARY_SLOTS_STREAK_BASENAME, next,
-                             out->error, sizeof(out->error))) {
-            close(selected_fd);
-            (void)flock(lockfd, LOCK_UN);
-            close(lockfd);
-            close(dirfd);
-            return false;
-        }
-        out->streak_written = true;
-        out->streak_after = next;
+    if (!launch_record_streak(out, dirfd, corrupt, prior)) {
+        close(selected_fd);
+        launch_release_dir(lockfd, dirfd);
+        return false;
     }
     out->executable_fd = selected_fd;
-    (void)flock(lockfd, LOCK_UN);
-    close(lockfd);
-    close(dirfd);
+    launch_release_dir(lockfd, dirfd);
     return true;
 }
 
