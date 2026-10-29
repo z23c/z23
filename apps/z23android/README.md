@@ -144,7 +144,12 @@ on the phone it is briefly visible to shell and root in the arguments of the
 Press **Talk** and ask a question; recording ends after a pause of about
 0.8 seconds, or press **Done talking**. The answer appears in the
 conversation and is spoken sentence by sentence; **Stop speaking** interrupts
-it. Typed questions use the same private model. **Refresh fleet** probes every
+it and ends the conversation. After each spoken answer the app listens again:
+ask a follow-up within 6 seconds, or stay quiet to end the conversation. A
+conversation holds at most eight spoken exchanges. It stops at a start or stop
+proposal, which waits for a tap on screen, and when an answer cannot be spoken.
+When no speech starts within 8 seconds of pressing **Talk**, listening stops.
+Typed questions use the same private model. **Refresh fleet** probes every
 host. “Start node” and “stop node” create proposals that require **Confirm
 start** or **Confirm stop** on screen. The assistant cannot run commands,
 change hosts or spend funds.
@@ -192,6 +197,11 @@ tokens per question (0.80-0.96 s) instead of 669-734 tokens that grew with the
 conversation (1.75-1.84 s). Over six later answers the first text arrived in
 1.1-1.3 s and first audio in 4.4-5.2 s after the host received the question; in
 three of them the first sound came 5.4-5.7 s after the end of speech.
+
+In one live conversation the app answered a question, heard a follow-up spoken
+1.0 s after the first answer ended and answered it, then ended after 6 seconds
+of silence. The two answers played 18.1 s and 19.3 s with one gap each, of
+1.46 s and 0.38 s.
 
 `make -C apps/z23android preview-apk` builds a separate
 `org.z23.voicepreview` package with debugging enabled for testing. That

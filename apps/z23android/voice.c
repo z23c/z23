@@ -137,6 +137,10 @@ bool zapp_endpoint_update(struct zapp_endpoint *e, const int16_t *frame, size_t 
     if (e->voiced >= 2) e->speech = true;
     return e->speech && e->quiet >= 8;
 }
+bool zapp_endpoint_waited(const struct zapp_endpoint *e, uint32_t max_frames)
+{
+    return e && max_frames && !e->speech && e->frames >= max_frames;
+}
 /* Last sentence end within cap, else last clause end, else 0. */
 static size_t phrase_end(const char *text, size_t cap)
 {

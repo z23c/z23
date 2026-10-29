@@ -9,9 +9,11 @@
 
 /* Synchronous worker-only calls. The caller retains buffers and flags until return. */
 
-/* Records 16 kHz mono until stop, cancel, capacity, or the end of an utterance. */
-bool zapp_audio_capture(int16_t *samples, size_t capacity, size_t *count,
-                        const atomic_bool *stop, const atomic_bool *cancel,
+/* Records 16 kHz mono until stop, cancel, capacity, the end of an utterance, or wait_ms without
+ * speech starting (0 sets no such limit). heard reports whether speech started; a capture
+ * that heard nothing succeeds with heard false. */
+bool zapp_audio_capture(int16_t *samples, size_t capacity, size_t *count, unsigned wait_ms,
+                        bool *heard, const atomic_bool *stop, const atomic_bool *cancel,
                         char *error, size_t error_cap);
 
 /* Gapless streaming playback: queued audio plays while the caller prepares more.

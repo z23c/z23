@@ -151,35 +151,54 @@ static bool capture_scan(struct zapp_endpoint *endpoint, const int16_t *samples,
     return ended;
 }
 
-static bool capture_verdict(bool ok, size_t used, const atomic_bool *cancel, char *error, size_t error_cap) {
+/* A recording that heard nothing and was not stopped by the owner is empty, not too short. */
+static bool capture_verdict(bool ok, size_t used, bool kept, const atomic_bool *cancel,
+                            char *error, size_t error_cap) {
     if (audio_flag(cancel))
         ok = audio_error(error, error_cap, "Recording cancelled", AAUDIO_ERROR_INVALID_STATE);
-    if (ok && used < 480)
+    if (ok && kept && used < 480)
         ok = audio_error(error, error_cap, "Recording too short", AAUDIO_ERROR_ILLEGAL_ARGUMENT);
     return ok;
 }
 
-bool zapp_audio_capture(int16_t *samples, size_t capacity, size_t *count,
-                        const atomic_bool *stop, const atomic_bool *cancel,
+static bool capture_loop(AAudioStream *stream, int16_t *samples, size_t capacity, size_t *used,
+                         struct zapp_endpoint *endpoint, uint32_t wait_frames, const atomic_bool *stop,
+                         const atomic_bool *cancel, char *error, size_t error_cap) {
+    size_t scanned = 0;
+    bool ok = true, ended = false;
+    int64_t progress = audio_now();
+    while (ok && !ended && *used < capacity && !audio_flag(stop) && !audio_flag(cancel)) {
+        ok = capture_read(stream, samples, used, capacity, &progress, error, error_cap);
+        ended = capture_scan(endpoint, samples, *used, &scanned) ||
+            zapp_endpoint_waited(endpoint, wait_frames);
+    }
+    return ok;
+}
+
+bool zapp_audio_capture(int16_t *samples, size_t capacity, size_t *count, unsigned wait_ms,
+                        bool *heard, const atomic_bool *stop, const atomic_bool *cancel,
                         char *error, size_t error_cap) {
     if (error != NULL && error_cap != 0) error[0] = '\0';
     if (count != NULL) *count = 0;
+    if (heard == NULL)
+        return audio_error(error, error_cap, "Invalid capture request", AAUDIO_ERROR_ILLEGAL_ARGUMENT);
+    *heard = false;
     if (!capture_precheck(samples, capacity, count, stop, cancel, error, error_cap)) return false;
     AAudioStream *stream = NULL;
     bool ok = audio_open(&stream, AAUDIO_DIRECTION_INPUT, ZAPP_VOICE_CAPTURE_RATE, NULL, error, error_cap);
     struct zapp_endpoint endpoint;
     zapp_endpoint_init(&endpoint);
-    size_t used = 0, scanned = 0;
-    bool ended = false;
-    int64_t progress = audio_now();
-    while (ok && !ended && used < capacity && !audio_flag(stop) && !audio_flag(cancel)) {
-        ok = capture_read(stream, samples, &used, capacity, &progress, error, error_cap);
-        ended = capture_scan(&endpoint, samples, used, &scanned);
-    }
+    uint32_t wait_frames = (uint32_t)((uint64_t)wait_ms * ZAPP_VOICE_CAPTURE_RATE / 1000 / ZAPP_VOICE_FRAME);
+    size_t used = 0;
+    ok = ok && capture_loop(stream, samples, capacity, &used, &endpoint, wait_frames, stop, cancel,
+                             error, error_cap);
     __android_log_print(ANDROID_LOG_INFO, "z23", "voice capture %zu ms, level floor %u peak %u, %s",
                         used * 1000 / ZAPP_VOICE_CAPTURE_RATE, endpoint.floor, endpoint.peak,
-                        ended ? "utterance ended" : endpoint.speech ? "speech, no end" : "no speech");
-    ok = audio_close(stream, capture_verdict(ok, used, cancel, error, error_cap), error, error_cap);
+                        endpoint.speech && endpoint.quiet >= 8 ? "utterance ended" :
+                        endpoint.speech ? "speech, no end" : "no speech");
+    *heard = endpoint.speech;
+    bool kept = endpoint.speech || audio_flag(stop);
+    ok = audio_close(stream, capture_verdict(ok, used, kept, cancel, error, error_cap), error, error_cap);
     if (ok) *count = used;
     return ok;
 }

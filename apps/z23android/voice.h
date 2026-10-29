@@ -30,6 +30,8 @@ bool zapp_voice_wav_decode(const unsigned char *wav, size_t size,
 struct zapp_endpoint { uint32_t floor, peak, frames, voiced, quiet; bool speech; };
 void zapp_endpoint_init(struct zapp_endpoint *e);
 bool zapp_endpoint_update(struct zapp_endpoint *e, const int16_t *frame, size_t count);
+/* True once max_frames frames have passed without speech starting; false when max_frames is 0. */
+bool zapp_endpoint_waited(const struct zapp_endpoint *e, uint32_t max_frames);
 /* Length of the next spoken chunk of at most cap bytes: whole sentences, else clauses, else
  * words, never splitting UTF-8. Returns 0 only for empty text or a zero cap. */
 size_t zapp_voice_chunk(const char *text, size_t cap);

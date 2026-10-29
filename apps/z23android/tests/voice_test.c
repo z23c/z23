@@ -112,10 +112,21 @@ static void endpoint_floor(void)
     assert(e.peak == 150 && e.frames == 14);
     assert(!zapp_endpoint_update(&e, NULL, 1) && !zapp_endpoint_update(&e, (int16_t[1]){0}, 0));
 }
+static void endpoint_wait(void)
+{
+    struct zapp_endpoint e; zapp_endpoint_init(&e);
+    assert(!zapp_endpoint_waited(&e, 3) && !feed(&e, 60, 2) && !zapp_endpoint_waited(&e, 3));
+    assert(!feed(&e, 60, 1) && zapp_endpoint_waited(&e, 3) && !zapp_endpoint_waited(&e, 0));
+    assert(!zapp_endpoint_waited(NULL, 3));
+    zapp_endpoint_init(&e);
+    assert(!feed(&e, 60, 1) && !feed(&e, 3000, 2) && e.speech && !feed(&e, 3000, 5));
+    assert(!zapp_endpoint_waited(&e, 3));
+}
 static void endpoint(void)
 {
     endpoint_speech();
     endpoint_floor();
+    endpoint_wait();
 }
 static void chunks(void)
 {

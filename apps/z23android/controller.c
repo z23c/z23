@@ -19,6 +19,9 @@
 #include <stdatomic.h>
 #include <time.h>
 
+#define VOICE_TURNS 8u
+#define VOICE_FIRST_WAIT_MS 8000u
+#define VOICE_FOLLOW_UP_WAIT_MS 6000u
 struct controller {
     pthread_mutex_t lock;
     pthread_cond_t changed;
@@ -238,20 +241,34 @@ static void voice_answer(struct controller *c, enum zapp_voice_intent intent, ch
     } else copy_text(answer, 120, "Say node status, balance, start node, or stop node.");
     pthread_mutex_unlock(&c->lock);
 }
-static bool voice_listen(struct controller *c, char *transcript, size_t cap, char *error, size_t error_cap)
+static bool voice_transcribe(struct controller *c, const int16_t *samples, size_t count, char *transcript,
+                             size_t cap, char *error, size_t error_cap)
+{
+    voice_stage(c, ZAPP_VOICE_TRANSCRIBING, "Transcribing on your laptop…");
+    bool ok = zapp_speech_client_transcribe(c->files, samples, count, transcript, cap, &c->voice_cancel);
+    if (!ok) copy_text(error, error_cap, transcript[0] ? transcript : "Transcription unavailable. Type your question instead.");
+    return ok;
+}
+enum listen_result { LISTEN_FAILED, LISTEN_SILENT, LISTEN_HEARD };
+static enum listen_result voice_listen(struct controller *c, bool follow_up, char *transcript, size_t cap,
+                                       char *error, size_t error_cap)
 {
     int16_t *samples = calloc(320000, sizeof(*samples));
     size_t count = 0;
-    if (!samples) { copy_text(error, error_cap, "Not enough memory for recording."); return false; }
-    voice_stage(c, ZAPP_VOICE_RECORDING, "Listening… pause when you are done.");
-    bool ok = zapp_audio_capture(samples, 320000, &count, &c->voice_stop, &c->voice_cancel, error, error_cap);
-    if (ok && !atomic_load(&c->voice_cancel)) {
-        voice_stage(c, ZAPP_VOICE_TRANSCRIBING, "Transcribing on your laptop…");
-        ok = zapp_speech_client_transcribe(c->files, samples, count, transcript, cap, &c->voice_cancel);
-        if (!ok) copy_text(error, error_cap, transcript[0] ? transcript : "Transcription unavailable. Type your question instead.");
-    }
+    bool heard = false;
+    if (!samples) { copy_text(error, error_cap, "Not enough memory for recording."); return LISTEN_FAILED; }
+    atomic_store(&c->voice_stop, false);
+    voice_stage(c, ZAPP_VOICE_RECORDING, follow_up ? "Listening for a follow-up… stay quiet to finish." :
+                "Listening… pause when you are done.");
+    bool ok = zapp_audio_capture(samples, 320000, &count, follow_up ? VOICE_FOLLOW_UP_WAIT_MS : VOICE_FIRST_WAIT_MS,
+                                 &heard, &c->voice_stop, &c->voice_cancel, error, error_cap);
+    /* On the first turn Done talking counts as speech: the owner may speak below the threshold. */
+    heard = heard || (!follow_up && atomic_load(&c->voice_stop));
+    if (ok && heard && !atomic_load(&c->voice_cancel))
+        ok = voice_transcribe(c, samples, count, transcript, cap, error, error_cap);
     memory_cleanse(samples, 320000 * sizeof(*samples)); free(samples);
-    return ok && !atomic_load(&c->voice_cancel);
+    if (!ok || atomic_load(&c->voice_cancel)) return LISTEN_FAILED;
+    return heard ? LISTEN_HEARD : LISTEN_SILENT;
 }
 /* Start and stop stay on-screen proposals; everything else goes to the private model, which
  * streams its audio when the laptop supports it. Without any audio the caller speaks the text. */
@@ -303,37 +320,55 @@ static bool voice_speak(struct controller *c, const char *text, char *error, siz
     bool drain = !atomic_load(&c->voice_cancel);
     return zapp_player_close(player, drain, &c->voice_cancel, ok ? error : NULL, ok ? error_cap : 0) && ok;
 }
-/* Finishes a streamed answer, or speaks the text when no audio was streamed. */
-static void voice_finish(struct controller *c, struct voice_stream *stream, const char *text, char *error, size_t error_cap)
+/* Finishes a streamed answer, or speaks the text when no audio was streamed. A cancel closes the
+ * player without draining it. Returns whether the spoken answer played to its end. */
+static bool voice_finish(struct controller *c, struct voice_stream *stream, const char *text, char *error, size_t error_cap)
 {
-    bool drain = !atomic_load(&c->voice_cancel);
+    bool drain = !atomic_load(&c->voice_cancel), ok = false;
     if (stream->player) {
-        if (!zapp_player_close(stream->player, drain, &c->voice_cancel, error, error_cap) && drain)
-            voice_stage(c, ZAPP_VOICE_READY, "Spoken audio unavailable. The answer is shown in the conversation.");
+        ok = zapp_player_close(stream->player, drain, &c->voice_cancel, error, error_cap) && drain &&
+            !stream->failed;
         stream->player = NULL;
-        return;
+    } else if (drain) {
+        voice_stage(c, ZAPP_VOICE_SYNTHESIZING, "Preparing the spoken answer…");
+        ok = voice_speak(c, text, error, error_cap);
     }
-    if (atomic_load(&c->voice_cancel)) return;
-    voice_stage(c, ZAPP_VOICE_SYNTHESIZING, "Preparing the spoken answer…");
-    if (!voice_speak(c, text, error, error_cap) && !atomic_load(&c->voice_cancel))
+    if (!ok && !atomic_load(&c->voice_cancel))
         voice_stage(c, ZAPP_VOICE_READY, "Spoken audio unavailable. The answer is shown in the conversation.");
+    return ok;
 }
-static bool voice_conversation(struct controller *c, char *out)
+/* TURN_HELD: answered, but a proposal waits for a tap or the answer could not be spoken. */
+enum turn_result { TURN_FAILED, TURN_SILENT, TURN_ANSWERED, TURN_HELD };
+/* One spoken exchange; out keeps the previous answer when nothing was heard. */
+static enum turn_result voice_turn(struct controller *c, bool follow_up, char *out)
 {
     char transcript[4096] = "", error[256] = "";
-    if (!voice_listen(c, transcript, sizeof(transcript), error, sizeof(error))) {
-        copy_text(out, ZAPP_TEXT_CAP, error); return false;
-    }
+    enum listen_result heard = voice_listen(c, follow_up, transcript, sizeof(transcript), error, sizeof(error));
+    if (heard == LISTEN_FAILED) copy_text(out, ZAPP_TEXT_CAP, error);
+    if (heard != LISTEN_HEARD) return heard == LISTEN_SILENT ? TURN_SILENT : TURN_FAILED;
     struct voice_stream stream = {.c = c};
     voice_reply(c, transcript, out, &stream);
-    bool cancelled = atomic_load(&c->voice_cancel);
-    if (!cancelled) {
+    bool proposed = false;
+    if (!atomic_load(&c->voice_cancel)) {
         pthread_mutex_lock(&c->lock);
         chat_result(c, transcript, out);
+        proposed = c->view.voice_proposal[0] != 0;
         pthread_mutex_unlock(&c->lock);
     }
-    voice_finish(c, &stream, out, error, sizeof(error));
-    return !cancelled;
+    bool spoken = voice_finish(c, &stream, out, error, sizeof(error));
+    if (atomic_load(&c->voice_cancel)) return TURN_FAILED;
+    return proposed || !spoken ? TURN_HELD : TURN_ANSWERED;
+}
+/* Listens again after each spoken answer until the owner stays quiet or cancels, a proposal waits
+ * for a tap on screen, or an answer could not be spoken, for at most VOICE_TURNS exchanges. */
+static bool voice_conversation(struct controller *c, char *out)
+{
+    enum turn_result r = voice_turn(c, false, out);
+    if (r == TURN_SILENT) { copy_text(out, ZAPP_TEXT_CAP, "No speech heard. Press Talk and speak."); return false; }
+    for (unsigned turn = 1; r == TURN_ANSWERED && turn < VOICE_TURNS; turn++) r = voice_turn(c, true, out);
+    if (r == TURN_FAILED) return false;
+    if (r != TURN_HELD) voice_stage(c, ZAPP_VOICE_READY, "Conversation ended. Press Talk to begin.");
+    return true;
 }
 
 static bool scan_invitation(struct controller *c, uint64_t ticket, char *out)
