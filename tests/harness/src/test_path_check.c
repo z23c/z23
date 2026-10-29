@@ -482,6 +482,149 @@ static int https_public_install_jail_cases(void)
     return failures;
 }
 
+/* The public-install mapping refuses every input it cannot place under the
+ * root before it reaches the disk, and a too-small output buffer is a
+ * refusal, not a truncated path. */
+static int https_public_install_refusal_cases(void)
+{
+    int failures = 0;
+    char dir[256];
+    char root[PATH_MAX];
+    char plain[PATH_MAX];
+    char missing_root[PATH_MAX];
+    char shim_path[PATH_MAX];
+    char shim_real[PATH_MAX];
+    char out[PATH_MAX];
+    char longurl[2049];
+
+    test_make_tmpdir(dir, sizeof(dir), "path_check", "pubinst_refuse");
+    snprintf(root, sizeof(root), "%s/public-install", dir);
+    snprintf(plain, sizeof(plain), "%s/plainfile", dir);
+    snprintf(missing_root, sizeof(missing_root), "%s/no-such-root", dir);
+    snprintf(shim_path, sizeof(shim_path), "%s/install.sh", root);
+    PC_CHECK("refusal fixture: root mkdir", mkdir(root, 0700) == 0);
+    PC_CHECK("refusal fixture: install.sh",
+             write_small_file(shim_path, "#!/bin/sh\n"));
+    PC_CHECK("refusal fixture: plain file",
+             write_small_file(plain, "not a directory"));
+    PC_CHECK("refusal fixture: shim realpath",
+             realpath(shim_path, shim_real) != NULL);
+    memset(longurl, 'a', 2048);
+    longurl[0] = '/';
+    longurl[2048] = '\0';
+
+    PC_CHECK("refusal: NULL root",
+             !https_server_public_install_filepath_for_testing(
+                 NULL, "/", out, sizeof(out)));
+    PC_CHECK("refusal: empty root",
+             !https_server_public_install_filepath_for_testing(
+                 "", "/", out, sizeof(out)));
+    PC_CHECK("refusal: NULL url",
+             !https_server_public_install_filepath_for_testing(
+                 root, NULL, out, sizeof(out)));
+    PC_CHECK("refusal: NULL output buffer",
+             !https_server_public_install_filepath_for_testing(
+                 root, "/", NULL, sizeof(out)));
+    PC_CHECK("refusal: zero-length output buffer",
+             !https_server_public_install_filepath_for_testing(
+                 root, "/", out, 0));
+    PC_CHECK("refusal: control byte in URL",
+             !https_server_public_install_filepath_for_testing(
+                 root, "/\x01", out, sizeof(out)));
+    PC_CHECK("refusal: URL of 2048 bytes is over the 2047 cap",
+             !https_server_public_install_filepath_for_testing(
+                 root, longurl, out, sizeof(out)));
+    PC_CHECK("refusal: bare /bootstrap/ names no file",
+             !https_server_public_install_filepath_for_testing(
+                 root, "/bootstrap/", out, sizeof(out)));
+    PC_CHECK("refusal: bare /release/ names no file",
+             !https_server_public_install_filepath_for_testing(
+                 root, "/release/", out, sizeof(out)));
+    PC_CHECK("refusal: missing root directory",
+             !https_server_public_install_filepath_for_testing(
+                 missing_root, "/", out, sizeof(out)));
+    PC_CHECK("refusal: root that is a regular file",
+             !https_server_public_install_filepath_for_testing(
+                 plain, "/", out, sizeof(out)));
+    PC_CHECK("refusal: output one byte short of the path",
+             !https_server_public_install_filepath_for_testing(
+                 root, "/", out, strlen(shim_real)));
+    PC_CHECK("exact-size output buffer accepts the same path",
+             https_server_public_install_filepath_for_testing(
+                 root, "/", out, strlen(shim_real) + 1) &&
+             strcmp(out, shim_real) == 0);
+
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* A URL maps to the file it names, a directory maps as a directory (the
+ * server's regular-file check is what refuses it), and an absent file under
+ * the root is refused. */
+static int https_public_install_mapping_cases(void)
+{
+    int failures = 0;
+    char dir[256];
+    char root[PATH_MAX];
+    char empty_root[PATH_MAX];
+    char script_path[PATH_MAX];
+    char script_real[PATH_MAX];
+    char release[PATH_MAX];
+    char tar_path[PATH_MAX];
+    char tar_real[PATH_MAX];
+    char sub[PATH_MAX];
+    char sub_real[PATH_MAX];
+    char out[PATH_MAX];
+
+    test_make_tmpdir(dir, sizeof(dir), "path_check", "pubinst_map");
+    snprintf(root, sizeof(root), "%s/public-install", dir);
+    snprintf(empty_root, sizeof(empty_root), "%s/empty-install", dir);
+    snprintf(script_path, sizeof(script_path), "%s/install_z23.sh", root);
+    snprintf(release, sizeof(release), "%s/release", root);
+    snprintf(tar_path, sizeof(tar_path), "%s/z23.tar.gz", release);
+    snprintf(sub, sizeof(sub), "%s/sub", release);
+    PC_CHECK("mapping fixture: root mkdir", mkdir(root, 0700) == 0);
+    PC_CHECK("mapping fixture: empty root mkdir",
+             mkdir(empty_root, 0700) == 0);
+    PC_CHECK("mapping fixture: release mkdir", mkdir(release, 0700) == 0);
+    PC_CHECK("mapping fixture: release subdirectory", mkdir(sub, 0700) == 0);
+    PC_CHECK("mapping fixture: install_z23.sh",
+             write_small_file(script_path, "#!/bin/sh\n"));
+    PC_CHECK("mapping fixture: release tarball",
+             write_small_file(tar_path, "tarball"));
+
+    PC_CHECK("GET /install_z23.sh maps to its own file",
+             realpath(script_path, script_real) != NULL &&
+             https_server_public_install_filepath_for_testing(
+                 root, "/install_z23.sh", out, sizeof(out)) &&
+             strcmp(out, script_real) == 0);
+    PC_CHECK("GET /release/z23.tar.gz maps to the release file",
+             realpath(tar_path, tar_real) != NULL &&
+             https_server_public_install_filepath_for_testing(
+                 root, "/release/z23.tar.gz", out, sizeof(out)) &&
+             strcmp(out, tar_real) == 0);
+    PC_CHECK("GET /release/sub maps to the directory itself",
+             realpath(sub, sub_real) != NULL &&
+             https_server_public_install_filepath_for_testing(
+                 root, "/release/sub", out, sizeof(out)) &&
+             strcmp(out, sub_real) == 0);
+    PC_CHECK("GET / under an empty root names no file",
+             !https_server_public_install_filepath_for_testing(
+                 empty_root, "/", out, sizeof(out)));
+    PC_CHECK("GET /install.sh under an empty root names no file",
+             !https_server_public_install_filepath_for_testing(
+                 empty_root, "/install.sh", out, sizeof(out)));
+    PC_CHECK("GET /install_z23.sh under an empty root names no file",
+             !https_server_public_install_filepath_for_testing(
+                 empty_root, "/install_z23.sh", out, sizeof(out)));
+    PC_CHECK("GET /release/z23.tar.gz under an empty root names no file",
+             !https_server_public_install_filepath_for_testing(
+                 empty_root, "/release/z23.tar.gz", out, sizeof(out)));
+
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static int path_check_read_whole_file_binary_cases(const char *present,
                                                    const char *empty,
                                                    const char *missing)
@@ -686,6 +829,8 @@ int test_path_check(void)
     failures += https_incomplete_headers_case();
     failures += https_acme_redirect_containment_cases();
     failures += https_public_install_jail_cases();
+    failures += https_public_install_refusal_cases();
+    failures += https_public_install_mapping_cases();
     failures += path_check_whole_file_cases();
 
     return failures;

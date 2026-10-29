@@ -477,6 +477,108 @@ static bool challenge_digest_served(bool got, const struct served *s,
            (stale == NULL || memcmp(s->acme_digest, stale, 32) != 0);
 }
 
+/* Files under a public-install tree: a regular file is streamed whole with
+ * its type and no-store headers (a .sh file as text, anything else as octet
+ * stream); a missing file, a directory and an oversized file are not served
+ * from the tree, so none of those headers appear. */
+static bool sn_pi_fixture_files(const char *install_root)
+{
+    char path[768];
+    FILE *f;
+
+    snprintf(path, sizeof(path), "%s/release", install_root);
+    if (mkdir(path, 0700) != 0)
+        return false;
+    snprintf(path, sizeof(path), "%s/release/sub", install_root);
+    if (mkdir(path, 0700) != 0)
+        return false;
+    snprintf(path, sizeof(path), "%s/install_z23.sh", install_root);
+    if (!shim_fixture_written(fopen(path, "wb")))
+        return false;
+    snprintf(path, sizeof(path), "%s/release/huge.bin", install_root);
+    f = fopen(path, "wb");
+    if (!f || fclose(f) != 0)
+        return false;
+    return truncate(path, (off_t)64 * 1024 * 1024 + 1) == 0;
+}
+
+static bool sn_pi_body_fixture(const char *install_root)
+{
+    static unsigned char payload[40000];
+    char path[768];
+    FILE *f;
+    bool wrote;
+
+    memset(payload, 'A', sizeof(payload));
+    snprintf(path, sizeof(path), "%s/release/z23.bin", install_root);
+    f = fopen(path, "wb");
+    if (!f)
+        return false;
+    wrote = fwrite(payload, 1, sizeof(payload), f) == sizeof(payload);
+    return fclose(f) == 0 && wrote;
+}
+
+/* True when `resp` (`got` bytes) carries exactly 40000 body bytes after its
+ * header block, all of them 'A' as sn_pi_body_fixture wrote them. */
+static bool sn_pi_body_streamed(const char *resp, size_t got)
+{
+    const char *sep = strstr(resp, "\r\n\r\n");
+
+    if (sep == NULL || got < (size_t)(sep + 4 - resp) + 40000)
+        return false;
+    return got - (size_t)(sep + 4 - resp) == 40000 && sep[4] == 'A' &&
+           sep[4 + 39999] == 'A';
+}
+
+static int sn_pi_release_cases(const char *install_root)
+{
+    static char resp[65536];
+    int failures = 0;
+    size_t got;
+
+    SN_CHECK("public-install file fixtures are written",
+             sn_pi_fixture_files(install_root) &&
+             sn_pi_body_fixture(install_root));
+    got = http_get_ua("/release/z23.bin", NULL, resp, sizeof(resp))
+              ? strlen(resp) : 0;
+    SN_CHECK("a release file is served 200 with its octet-stream headers",
+             strstr(resp, "HTTP/1.1 200 OK") != NULL &&
+             strstr(resp, "Content-Type: application/octet-stream\r\n") !=
+                 NULL &&
+             strstr(resp, "Content-Length: 40000\r\n") != NULL &&
+             strstr(resp, "Cache-Control: no-store\r\n") != NULL);
+    SN_CHECK("the 40000-byte release body is streamed in full",
+             got > 0 && sn_pi_body_streamed(resp, got));
+    SN_CHECK("a .sh file is served as text",
+             http_get_ua("/install_z23.sh", NULL, resp, sizeof(resp)) &&
+             strstr(resp, "Content-Type: text/plain; charset=utf-8\r\n") !=
+                 NULL &&
+             strstr(resp, "echo z23-install") != NULL);
+    return failures;
+}
+
+static int sn_pi_refusal_cases(void)
+{
+    static char resp[65536];
+    int failures = 0;
+
+    SN_CHECK("a missing release file is not served from the tree",
+             http_get_ua("/release/missing.bin", NULL, resp, sizeof(resp)) &&
+             strstr(resp, "Cache-Control: no-store") == NULL);
+    SN_CHECK("a directory under the tree is not served from the tree",
+             http_get_ua("/release/sub", NULL, resp, sizeof(resp)) &&
+             strstr(resp, "Cache-Control: no-store") == NULL);
+    SN_CHECK("an oversized file is not served from the tree",
+             http_get_ua("/release/huge.bin", NULL, resp, sizeof(resp)) &&
+             strstr(resp, "Cache-Control: no-store") == NULL);
+    return failures;
+}
+
+static int sn_public_install_file_cases(const char *install_root)
+{
+    return sn_pi_release_cases(install_root) + sn_pi_refusal_cases();
+}
+
 int test_https_sni_select(void)
 {
     int failures = 0;
@@ -547,6 +649,7 @@ int test_https_sni_select(void)
         SN_CHECK("GET /explorer is not captured by the install tree",
                  http_get_shows("/explorer", NULL, NULL, "echo z23-install"));
         failures += sn_site_home_first();
+        failures += sn_public_install_file_cases(install_root);
         https_server_set_public_install_root(NULL);
         SN_CHECK("clearing the install root restores the explorer redirect",
                  http_get_shows("/", "Location: /explorer", NULL, NULL));
