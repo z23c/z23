@@ -500,6 +500,144 @@ static bool zpf_load_handoff(
     return ok;
 }
 
+struct zpf_reload_state {
+    struct vcs_zcode_agent_context_v1 *context;
+    struct vcs_zcode_focus_v1 focus;
+    struct vcs_zcode_task_v1 task;
+    struct vcs_zcode_write_scope_v1 task_scope;
+    uint8_t claim_roots[2][32];
+    size_t claim_count;
+    struct vcs_zcode_focus_claim_v1 claims[2];
+    struct vcs_zcode_write_scope_v1 scopes[2];
+};
+
+static bool zpf_reload_load_base(
+    const char *workspace, const uint8_t focus_root[32],
+    struct zpf_reload_state *st, struct zpf_metrics *metrics)
+{
+    uint8_t *claim_set_wire = NULL;
+    size_t claim_set_wire_len = 0;
+    bool ok = workspace && focus_root &&
+        zpf_load_focus(workspace, focus_root, &st->focus, metrics) &&
+        st->focus.claim_count == 2 &&
+        zpf_load_task(workspace, st->focus.task_root, &st->task, metrics) &&
+        zpf_load_scope(workspace, st->task.write_scope_root,
+                       &st->task_scope, metrics) &&
+        zpf_load_context(workspace, st->focus.context_root, &st->task,
+                         st->focus.task_root, st->context, NULL, metrics) &&
+        zpf_load(workspace, st->focus.claim_set_root,
+                 VCS_ZCODE_FOCUS_CLAIM_SET_WIRE_MAX,
+                 &claim_set_wire, &claim_set_wire_len, metrics) &&
+        vcs_zcode_focus_claim_set_parse(
+            claim_set_wire, claim_set_wire_len, st->claim_roots, 2,
+            &st->claim_count) == VCS_ZCODE_FOCUS_OK &&
+        st->claim_count == 2;
+    free(claim_set_wire);
+    return ok;
+}
+
+static bool zpf_reload_load_claims(
+    const char *workspace, struct zpf_reload_state *st,
+    struct zpf_metrics *metrics)
+{
+    for (size_t i = 0; i < st->claim_count; i++) {
+        if (!zpf_load_claim(workspace, st->claim_roots[i],
+                            &st->claims[i], metrics) ||
+            !zpf_load_scope(workspace, st->claims[i].write_scope_root,
+                            &st->scopes[i], metrics))
+            return false;
+    }
+    return true;
+}
+
+static bool zpf_reload_claims_proved(struct zpf_reload_state *st)
+{
+    int64_t snapshot_unix = st->claims[0].created_unix;
+    if (st->claims[1].created_unix > snapshot_unix)
+        snapshot_unix = st->claims[1].created_unix;
+    return vcs_zcode_focus_validate_for_context(
+               &st->focus, &st->task, st->context, st->claim_roots,
+               st->claim_count, true) == VCS_ZCODE_FOCUS_OK &&
+        vcs_zcode_focus_claim_set_status(
+            &st->focus, st->claims, st->scopes, st->claim_count,
+            snapshot_unix) == ZCL_ONTOLOGY_PROVED &&
+        vcs_zcode_focus_claim_authority_status(
+            &st->focus, &st->task, &st->task_scope, &st->claims[0],
+            &st->scopes[0], snapshot_unix) == ZCL_ONTOLOGY_PROVED &&
+        vcs_zcode_focus_claim_authority_status(
+            &st->focus, &st->task, &st->task_scope, &st->claims[1],
+            &st->scopes[1], snapshot_unix) == ZCL_ONTOLOGY_PROVED;
+}
+
+static bool zpf_reload_find_indices(
+    struct zpf_reload_state *st,
+    const struct vcs_zcode_focus_handoff_v1 *handoff,
+    size_t *from_index, size_t *next_index)
+{
+    *from_index = st->claim_count;
+    *next_index = st->claim_count;
+    for (size_t i = 0; i < st->claim_count; i++) {
+        if (memcmp(st->claim_roots[i], handoff->from_claim_root, 32) == 0)
+            *from_index = i;
+        if (memcmp(st->claim_roots[i], handoff->next_claim_root, 32) == 0)
+            *next_index = i;
+    }
+    return *from_index < st->claim_count && *next_index < st->claim_count &&
+        *from_index != *next_index;
+}
+
+static bool zpf_reload_load_messages(
+    const char *workspace, struct zpf_reload_state *st,
+    size_t from_index, size_t next_index,
+    const uint8_t admission_a_root[32], const uint8_t admission_b_root[32],
+    struct vcs_zcode_work_swarm_message messages[4],
+    struct zpf_metrics *metrics)
+{
+    return zpf_load_work_message(
+               workspace, st->claims[from_index].intent_root,
+               VCS_ZCODE_WORK_SWARM_REQUEST, &messages[0], metrics) &&
+        zpf_load_work_message(
+            workspace, st->claims[next_index].intent_root,
+            VCS_ZCODE_WORK_SWARM_REQUEST, &messages[1], metrics) &&
+        zpf_load_work_carrier(
+            workspace, admission_a_root,
+            VCS_ZCODE_WORK_SWARM_ADMISSION, &messages[2], metrics) &&
+        zpf_load_work_carrier(
+            workspace, admission_b_root,
+            VCS_ZCODE_WORK_SWARM_ADMISSION, &messages[3], metrics);
+}
+
+static bool zpf_reload_handoff_accepted(
+    const char *workspace, struct zpf_reload_state *st,
+    const uint8_t *handoff_root, const uint8_t *admission_a_root,
+    const uint8_t *admission_b_root, int64_t resume_unix,
+    struct zpf_metrics *metrics)
+{
+    struct vcs_zcode_focus_handoff_v1 handoff;
+    struct vcs_zcode_specialist_report_v1 report;
+    if (!zpf_load_handoff(workspace, handoff_root, &handoff, metrics) ||
+        !zpf_load_report(workspace, handoff.report_root, &report, metrics))
+        return false;
+    size_t from_index = 0, next_index = 0;
+    if (!zpf_reload_find_indices(st, &handoff, &from_index, &next_index))
+        return false;
+    struct vcs_zcode_work_swarm_message messages[4];
+    if (!zpf_reload_load_messages(workspace, st, from_index, next_index,
+                                  admission_a_root, admission_b_root,
+                                  messages, metrics))
+        return false;
+    struct vcs_zcode_work_receipt_v1 receipt;
+    if (!zpf_load_receipt(workspace, report.evidence_root, &receipt, metrics))
+        return false;
+    return vcs_zcode_focus_handoff_validate_for_work(
+               &st->focus, &st->task, st->context, &st->task_scope,
+               st->claims, st->scopes, st->claim_count, from_index,
+               next_index, &messages[0].body.request,
+               &messages[2].body.admission, &messages[1].body.request,
+               &messages[3].body.admission, &receipt, &report, &handoff,
+               resume_unix) == VCS_ZCODE_FOCUS_OK;
+}
+
 static bool zpf_process_reload_focus(
     const char *workspace, const uint8_t focus_root[32],
     const uint8_t *handoff_root, const uint8_t *admission_a_root,
@@ -507,57 +645,13 @@ static bool zpf_process_reload_focus(
 {
     bool accepted = false;
     struct zpf_metrics metrics = {0};
-    uint8_t *claim_set_wire = NULL;
-    size_t claim_set_wire_len = 0;
     struct vcs_zcode_agent_context_v1 context;
     vcs_zcode_agent_context_init(&context);
-    struct vcs_zcode_focus_v1 focus;
-    struct vcs_zcode_task_v1 task;
-    struct vcs_zcode_write_scope_v1 task_scope;
-    uint8_t claim_roots[2][32];
-    size_t claim_count = 0;
-    struct vcs_zcode_focus_claim_v1 claims[2];
-    struct vcs_zcode_write_scope_v1 scopes[2];
+    struct zpf_reload_state st = {.context = &context};
 
-    if (!workspace || !focus_root ||
-        !zpf_load_focus(workspace, focus_root, &focus, &metrics) ||
-        focus.claim_count != 2 ||
-        !zpf_load_task(workspace, focus.task_root, &task, &metrics) ||
-        !zpf_load_scope(workspace, task.write_scope_root,
-                        &task_scope, &metrics) ||
-        !zpf_load_context(workspace, focus.context_root, &task,
-                          focus.task_root, &context, NULL, &metrics) ||
-        !zpf_load(workspace, focus.claim_set_root,
-                  VCS_ZCODE_FOCUS_CLAIM_SET_WIRE_MAX,
-                  &claim_set_wire, &claim_set_wire_len, &metrics) ||
-        vcs_zcode_focus_claim_set_parse(
-            claim_set_wire, claim_set_wire_len, claim_roots, 2,
-            &claim_count) != VCS_ZCODE_FOCUS_OK || claim_count != 2)
-        goto cleanup;
-    free(claim_set_wire);
-    claim_set_wire = NULL;
-    for (size_t i = 0; i < claim_count; i++) {
-        if (!zpf_load_claim(workspace, claim_roots[i],
-                            &claims[i], &metrics) ||
-            !zpf_load_scope(workspace, claims[i].write_scope_root,
-                            &scopes[i], &metrics))
-            goto cleanup;
-    }
-    int64_t snapshot_unix = claims[0].created_unix;
-    if (claims[1].created_unix > snapshot_unix)
-        snapshot_unix = claims[1].created_unix;
-    if (vcs_zcode_focus_validate_for_context(
-            &focus, &task, &context, claim_roots, claim_count, true) !=
-            VCS_ZCODE_FOCUS_OK ||
-        vcs_zcode_focus_claim_set_status(
-            &focus, claims, scopes, claim_count, snapshot_unix) !=
-            ZCL_ONTOLOGY_PROVED ||
-        vcs_zcode_focus_claim_authority_status(
-            &focus, &task, &task_scope, &claims[0], &scopes[0],
-            snapshot_unix) != ZCL_ONTOLOGY_PROVED ||
-        vcs_zcode_focus_claim_authority_status(
-            &focus, &task, &task_scope, &claims[1], &scopes[1],
-            snapshot_unix) != ZCL_ONTOLOGY_PROVED)
+    if (!zpf_reload_load_base(workspace, focus_root, &st, &metrics) ||
+        !zpf_reload_load_claims(workspace, &st, &metrics) ||
+        !zpf_reload_claims_proved(&st))
         goto cleanup;
     if (!handoff_root) {
         accepted = true;
@@ -565,52 +659,11 @@ static bool zpf_process_reload_focus(
     }
     if (!admission_a_root || !admission_b_root || resume_unix <= 0)
         goto cleanup;
-
-    struct vcs_zcode_focus_handoff_v1 handoff;
-    struct vcs_zcode_specialist_report_v1 report;
-    if (!zpf_load_handoff(workspace, handoff_root, &handoff, &metrics) ||
-        !zpf_load_report(workspace, handoff.report_root,
-                         &report, &metrics))
-        goto cleanup;
-    size_t from_index = claim_count, next_index = claim_count;
-    for (size_t i = 0; i < claim_count; i++) {
-        if (memcmp(claim_roots[i], handoff.from_claim_root, 32) == 0)
-            from_index = i;
-        if (memcmp(claim_roots[i], handoff.next_claim_root, 32) == 0)
-            next_index = i;
-    }
-    if (from_index >= claim_count || next_index >= claim_count ||
-        from_index == next_index)
-        goto cleanup;
-
-    struct vcs_zcode_work_swarm_message from_request, next_request;
-    struct vcs_zcode_work_swarm_message from_admission, next_admission;
-    if (!zpf_load_work_message(
-            workspace, claims[from_index].intent_root,
-            VCS_ZCODE_WORK_SWARM_REQUEST, &from_request, &metrics) ||
-        !zpf_load_work_message(
-            workspace, claims[next_index].intent_root,
-            VCS_ZCODE_WORK_SWARM_REQUEST, &next_request, &metrics) ||
-        !zpf_load_work_carrier(
-            workspace, admission_a_root,
-            VCS_ZCODE_WORK_SWARM_ADMISSION, &from_admission, &metrics) ||
-        !zpf_load_work_carrier(
-            workspace, admission_b_root,
-            VCS_ZCODE_WORK_SWARM_ADMISSION, &next_admission, &metrics))
-        goto cleanup;
-    struct vcs_zcode_work_receipt_v1 receipt;
-    if (!zpf_load_receipt(workspace, report.evidence_root,
-                          &receipt, &metrics))
-        goto cleanup;
-    accepted = vcs_zcode_focus_handoff_validate_for_work(
-        &focus, &task, &context, &task_scope, claims, scopes, claim_count,
-        from_index, next_index, &from_request.body.request,
-        &from_admission.body.admission, &next_request.body.request,
-        &next_admission.body.admission, &receipt, &report, &handoff,
-        resume_unix) == VCS_ZCODE_FOCUS_OK;
+    accepted = zpf_reload_handoff_accepted(
+        workspace, &st, handoff_root, admission_a_root, admission_b_root,
+        resume_unix, &metrics);
 
 cleanup:
-    free(claim_set_wire);
     vcs_zcode_agent_context_free(&context);
     return accepted;
 }
@@ -638,6 +691,34 @@ static bool zpf_silence_exec_output(void)
     return ok;
 }
 
+static bool zpf_child_exited_zero(bool waited, int status)
+{
+    return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static void zpf_encode_optional_root(const uint8_t *root, char hex[65])
+{
+    if (root) zcl_hex_encode(root, 32, hex);
+}
+
+static bool zpf_child_environment_set(
+    const char *role, const char *workspace, const char *focus_hex,
+    const char *handoff_hex, const char *admission_a_hex,
+    const char *admission_b_hex, const char *resume_text)
+{
+    return platform_environment_set("ZCL_TEST_FORK_GROUP",
+                                    "test_zcode_package_dev", 1) == 0 &&
+        platform_environment_set("ZCL_TEST_FORK_ROLE", role, 1) == 0 &&
+        platform_environment_set(ZPF_ENV_WORKSPACE, workspace, 1) == 0 &&
+        platform_environment_set(ZPF_ENV_FOCUS_ROOT, focus_hex, 1) == 0 &&
+        platform_environment_set(ZPF_ENV_HANDOFF_ROOT, handoff_hex, 1) == 0 &&
+        platform_environment_set(ZPF_ENV_ADMISSION_A_ROOT,
+                                 admission_a_hex, 1) == 0 &&
+        platform_environment_set(ZPF_ENV_ADMISSION_B_ROOT,
+                                 admission_b_hex, 1) == 0 &&
+        platform_environment_set(ZPF_ENV_RESUME_UNIX, resume_text, 1) == 0;
+}
+
 static pid_t zpf_spawn_exec_agent(
     const char *role, const char *workspace,
     const uint8_t focus_root[32], const uint8_t *handoff_root,
@@ -653,11 +734,9 @@ static pid_t zpf_spawn_exec_agent(
     char admission_a_hex[65] = "", admission_b_hex[65] = "";
     char resume_text[32];
     zcl_hex_encode(focus_root, 32, focus_hex);
-    if (handoff_root) zcl_hex_encode(handoff_root, 32, handoff_hex);
-    if (admission_a_root)
-        zcl_hex_encode(admission_a_root, 32, admission_a_hex);
-    if (admission_b_root)
-        zcl_hex_encode(admission_b_root, 32, admission_b_hex);
+    zpf_encode_optional_root(handoff_root, handoff_hex);
+    zpf_encode_optional_root(admission_a_root, admission_a_hex);
+    zpf_encode_optional_root(admission_b_root, admission_b_hex);
     int n = snprintf(resume_text, sizeof(resume_text), "%" PRId64,
                      resume_unix);
     if (n < 0 || (size_t)n >= sizeof(resume_text))
@@ -666,18 +745,9 @@ static pid_t zpf_spawn_exec_agent(
     pid_t child = fork();
     if (child != 0)
         return child;
-    bool env_ok =
-        platform_environment_set("ZCL_TEST_FORK_GROUP",
-                                 "test_zcode_package_dev", 1) == 0 &&
-        platform_environment_set("ZCL_TEST_FORK_ROLE", role, 1) == 0 &&
-        platform_environment_set(ZPF_ENV_WORKSPACE, workspace, 1) == 0 &&
-        platform_environment_set(ZPF_ENV_FOCUS_ROOT, focus_hex, 1) == 0 &&
-        platform_environment_set(ZPF_ENV_HANDOFF_ROOT, handoff_hex, 1) == 0 &&
-        platform_environment_set(ZPF_ENV_ADMISSION_A_ROOT,
-                                 admission_a_hex, 1) == 0 &&
-        platform_environment_set(ZPF_ENV_ADMISSION_B_ROOT,
-                                 admission_b_hex, 1) == 0 &&
-        platform_environment_set(ZPF_ENV_RESUME_UNIX, resume_text, 1) == 0;
+    bool env_ok = zpf_child_environment_set(
+        role, workspace, focus_hex, handoff_hex, admission_a_hex,
+        admission_b_hex, resume_text);
     if (env_ok && zpf_silence_exec_output())
         execl(executable, executable,
               "--exact=test_zcode_package_dev", (char *)NULL);
@@ -839,6 +909,27 @@ bool zpd_user_session_resume(const char *workspace,
 #endif
 }
 
+#if !defined(_WIN32)
+static bool zpf_successor_inputs(
+    uint8_t handoff_root[32], uint8_t admission_a_root[32],
+    uint8_t admission_b_root[32], int64_t *resume_unix)
+{
+    const char *handoff_text = getenv(ZPF_ENV_HANDOFF_ROOT);
+    const char *admission_a_text = getenv(ZPF_ENV_ADMISSION_A_ROOT);
+    const char *admission_b_text = getenv(ZPF_ENV_ADMISSION_B_ROOT);
+    const char *resume_text = getenv(ZPF_ENV_RESUME_UNIX);
+    char *end = NULL;
+    errno = 0;
+    *resume_unix = resume_text ? strtoll(resume_text, &end, 10) : 0;
+    return handoff_text && admission_a_text && admission_b_text &&
+        resume_text && errno == 0 && end && *end == '\0' &&
+        *resume_unix > 0 &&
+        zcl_hex_decode_lower(handoff_text, handoff_root, 32) &&
+        zcl_hex_decode_lower(admission_a_text, admission_a_root, 32) &&
+        zcl_hex_decode_lower(admission_b_text, admission_b_root, 32);
+}
+#endif
+
 int zpd_focus_worker_role(const char *role)
 {
 #if defined(_WIN32)
@@ -860,19 +951,9 @@ int zpd_focus_worker_role(const char *role)
         return !zpf_process_reload_focus(
             workspace, focus_root, NULL, NULL, NULL, 0);
 
-    const char *handoff_text = getenv(ZPF_ENV_HANDOFF_ROOT);
-    const char *admission_a_text = getenv(ZPF_ENV_ADMISSION_A_ROOT);
-    const char *admission_b_text = getenv(ZPF_ENV_ADMISSION_B_ROOT);
-    const char *resume_text = getenv(ZPF_ENV_RESUME_UNIX);
-    char *end = NULL;
-    errno = 0;
-    int64_t resume_unix = resume_text ? strtoll(resume_text, &end, 10) : 0;
-    if (!handoff_text || !admission_a_text || !admission_b_text ||
-        !resume_text || errno != 0 || !end || *end != '\0' ||
-        resume_unix <= 0 ||
-        !zcl_hex_decode_lower(handoff_text, handoff_root, 32) ||
-        !zcl_hex_decode_lower(admission_a_text, admission_a_root, 32) ||
-        !zcl_hex_decode_lower(admission_b_text, admission_b_root, 32))
+    int64_t resume_unix = 0;
+    if (!zpf_successor_inputs(handoff_root, admission_a_root,
+                              admission_b_root, &resume_unix))
         return 1;
     return !zpf_process_reload_focus(
         workspace, focus_root, handoff_root, admission_a_root,
@@ -887,13 +968,8 @@ static size_t zpf_exec_clean_agent_acceptance(
     const uint8_t admission_b_root[32], int64_t resume_unix)
 {
 #if defined(_WIN32)
-    (void)worker_a;
-    (void)worker_b;
-    (void)focus_root;
-    (void)handoff_root;
-    (void)admission_a_root;
-    (void)admission_b_root;
-    (void)resume_unix;
+    (void)worker_a; (void)worker_b; (void)focus_root; (void)handoff_root;
+    (void)admission_a_root; (void)admission_b_root; (void)resume_unix;
     return 0;
 #else
     if (!worker_a || !worker_b || !focus_root || !handoff_root ||
@@ -914,12 +990,8 @@ static size_t zpf_exec_clean_agent_acceptance(
     bool waited_a = zpf_wait_child(worker_a_pid, &worker_a_status);
     bool waited_b = zpf_wait_child(worker_b_pid, &worker_b_status);
     size_t proved = 0;
-    if (waited_a && WIFEXITED(worker_a_status) &&
-        WEXITSTATUS(worker_a_status) == 0)
-        proved++;
-    if (waited_b && WIFEXITED(worker_b_status) &&
-        WEXITSTATUS(worker_b_status) == 0)
-        proved++;
+    if (zpf_child_exited_zero(waited_a, worker_a_status)) proved++;
+    if (zpf_child_exited_zero(waited_b, worker_b_status)) proved++;
     return proved;
 #endif
 }
@@ -946,10 +1018,16 @@ bool zpd_real_focus_preedit_acceptance(
     uint8_t worker_a_secret[32] = {0}, worker_b_secret[32] = {0};
     uint8_t requester_secret[32] = {0};
 
-    ZPF_REQUIRE(workspace && workspace[0] && work_id && work_id[0] &&
-                focus_data && focus_data->type == JSON_OBJ &&
-                duplicate_data && duplicate_data->type == JSON_OBJ &&
-                out_focus_root && out_observed_us);
+    ZPF_REQUIRE(workspace);
+    ZPF_REQUIRE(workspace[0]);
+    ZPF_REQUIRE(work_id);
+    ZPF_REQUIRE(work_id[0]);
+    ZPF_REQUIRE(focus_data);
+    ZPF_REQUIRE(focus_data->type == JSON_OBJ);
+    ZPF_REQUIRE(duplicate_data);
+    ZPF_REQUIRE(duplicate_data->type == JSON_OBJ);
+    ZPF_REQUIRE(out_focus_root);
+    ZPF_REQUIRE(out_observed_us);
     memset(out_focus_root, 0, 32);
     *out_observed_us = 0;
 
@@ -990,23 +1068,27 @@ bool zpd_real_focus_preedit_acceptance(
     zcl_hex_encode(source_root, 32, source_hex);
     zcl_hex_encode(goal_root, 32, goal_hex);
     zcl_hex_encode(context_root, 32, context_hex);
-    ZPF_REQUIRE(duplicate_kind && duplicate_task && duplicate_source &&
-                duplicate_goal && duplicate_context && duplicate_assignment &&
-                duplicate_execution &&
-                strcmp(duplicate_kind, "DUPLICATE_ACTIVE_WORK") == 0 &&
-                strcmp(duplicate_task, task_hex) == 0 &&
-                strcmp(duplicate_source, source_hex) == 0 &&
-                strcmp(duplicate_goal, goal_hex) == 0 &&
-                strcmp(duplicate_context, context_hex) == 0 &&
-                strcmp(duplicate_assignment, "UNOBSERVED") == 0 &&
-                strcmp(duplicate_execution, "UNOBSERVED") == 0);
+    ZPF_REQUIRE(duplicate_kind);
+    ZPF_REQUIRE(duplicate_task);
+    ZPF_REQUIRE(duplicate_source);
+    ZPF_REQUIRE(duplicate_goal);
+    ZPF_REQUIRE(duplicate_context);
+    ZPF_REQUIRE(duplicate_assignment);
+    ZPF_REQUIRE(duplicate_execution);
+    ZPF_REQUIRE(strcmp(duplicate_kind, "DUPLICATE_ACTIVE_WORK") == 0);
+    ZPF_REQUIRE(strcmp(duplicate_task, task_hex) == 0);
+    ZPF_REQUIRE(strcmp(duplicate_source, source_hex) == 0);
+    ZPF_REQUIRE(strcmp(duplicate_goal, goal_hex) == 0);
+    ZPF_REQUIRE(strcmp(duplicate_context, context_hex) == 0);
+    ZPF_REQUIRE(strcmp(duplicate_assignment, "UNOBSERVED") == 0);
+    ZPF_REQUIRE(strcmp(duplicate_execution, "UNOBSERVED") == 0);
 
     struct vcs_zcode_task_v1 task;
     struct vcs_zcode_write_scope_v1 task_scope;
     size_t context_wire_bytes = 0;
     ZPF_REQUIRE(zpf_load_task(workspace, task_root, &task, &metrics));
-    ZPF_REQUIRE(memcmp(task.source_root, source_root, 32) == 0 &&
-                memcmp(task.goal_root, goal_root, 32) == 0);
+    ZPF_REQUIRE(memcmp(task.source_root, source_root, 32) == 0);
+    ZPF_REQUIRE(memcmp(task.goal_root, goal_root, 32) == 0);
     ZPF_REQUIRE(zpf_load_context(workspace, context_root, &task, task_root,
                                  &context, &context_wire_bytes, &metrics));
     ZPF_REQUIRE(context_wire_bytes > 0);
@@ -1019,11 +1101,11 @@ bool zpd_real_focus_preedit_acceptance(
                     &task, task_root, context_root, story_root, story_status,
                     0, NULL, 0, &empty_focus) == VCS_ZCODE_FOCUS_OK);
     ZPF_REQUIRE(vcs_zcode_focus_root(&empty_focus, check_root) ==
-                    VCS_ZCODE_FOCUS_OK &&
-                vcs_zcode_focus_situation_root(
-                    &empty_focus, check_situation) == VCS_ZCODE_FOCUS_OK &&
-                memcmp(check_root, empty_focus_root, 32) == 0 &&
-                memcmp(check_situation, situation_root, 32) == 0);
+                    VCS_ZCODE_FOCUS_OK);
+    ZPF_REQUIRE(vcs_zcode_focus_situation_root(
+                    &empty_focus, check_situation) == VCS_ZCODE_FOCUS_OK);
+    ZPF_REQUIRE(memcmp(check_root, empty_focus_root, 32) == 0);
+    ZPF_REQUIRE(memcmp(check_situation, situation_root, 32) == 0);
 
     uint8_t worker_a_seed[32], worker_a_key[32];
     uint8_t worker_b_seed[32], worker_b_key[32];
@@ -1035,7 +1117,8 @@ bool zpd_real_focus_preedit_acceptance(
     ed25519_keypair(worker_b_key, worker_b_secret, worker_b_seed);
     ed25519_keypair(requester_key, requester_secret, requester_seed);
     int64_t observed_unix = (int64_t)platform_time_wall_unix();
-    ZPF_REQUIRE(observed_unix > 0 && task.expires_unix > observed_unix);
+    ZPF_REQUIRE(observed_unix > 0);
+    ZPF_REQUIRE(task.expires_unix > observed_unix);
 
     struct vcs_zcode_work_request_v1 requests[2];
     zpf_request(&requests[0], UINT64_C(7101), &task, task_root,
@@ -1045,15 +1128,15 @@ bool zpd_real_focus_preedit_acceptance(
                 task.source_root, task.proof_policy_root, context_root,
                 context_root, VCS_ZCODE_WORK_BUILD, task.expires_unix);
     ZPF_REQUIRE(vcs_zcode_work_request_seal(
-                    &requests[0], requester_secret, requester_key) &&
-                vcs_zcode_work_request_seal(
+                    &requests[0], requester_secret, requester_key));
+    ZPF_REQUIRE(vcs_zcode_work_request_seal(
                     &requests[1], requester_secret, requester_key));
     uint8_t request_roots[2][32], request_carriers[2][32];
     uint8_t admission_carriers[2][32];
     struct vcs_zcode_work_admission_v1 admissions[2];
     ZPF_REQUIRE(vcs_zcode_work_request_id(
-                    &requests[0], request_roots[0]) &&
-                vcs_zcode_work_request_id(
+                    &requests[0], request_roots[0]));
+    ZPF_REQUIRE(vcs_zcode_work_request_id(
                     &requests[1], request_roots[1]));
     for (size_t i = 0; i < 2; i++) {
         struct vcs_zcode_work_swarm_message message = {
@@ -1066,8 +1149,8 @@ bool zpd_real_focus_preedit_acceptance(
     }
     ZPF_REQUIRE(zpf_admission(&admissions[0], &requests[0], 0,
                               VCS_ZCODE_WORK_ADMISSION_GRANTED,
-                              worker_a_secret, worker_a_key) &&
-                zpf_admission(&admissions[1], &requests[1], 1,
+                              worker_a_secret, worker_a_key));
+    ZPF_REQUIRE(zpf_admission(&admissions[1], &requests[1], 1,
                               VCS_ZCODE_WORK_ADMISSION_GRANTED,
                               worker_b_secret, worker_b_key));
     for (size_t i = 0; i < 2; i++) {
@@ -1093,26 +1176,26 @@ bool zpd_real_focus_preedit_acceptance(
         json_init(&input); json_set_object(&input);
         json_init(&paths); json_set_array(&paths);
         json_init(&path); json_set_str(&path, scope_paths[i]);
-        ZPF_REQUIRE(json_push_back(&paths, &path) &&
-                    json_push_kv_str(&input, "workspace", workspace) &&
-                    json_push_kv_str(&input, "work", work_id) &&
-                    json_push_kv_str(&input, "situation_root",
-                                     situation_hex) &&
-                    json_push_kv(&input, "write_scope", &paths) &&
-                    json_push_kv_str(&input, "work_request_root",
-                                     request_hex[i]) &&
-                    json_push_kv_str(&input,
+        ZPF_REQUIRE(json_push_back(&paths, &path));
+        ZPF_REQUIRE(json_push_kv_str(&input, "workspace", workspace));
+        ZPF_REQUIRE(json_push_kv_str(&input, "work", work_id));
+        ZPF_REQUIRE(json_push_kv_str(&input, "situation_root",
+                                     situation_hex));
+        ZPF_REQUIRE(json_push_kv(&input, "write_scope", &paths));
+        ZPF_REQUIRE(json_push_kv_str(&input, "work_request_root",
+                                     request_hex[i]));
+        ZPF_REQUIRE(json_push_kv_str(&input,
                                      "work_admission_carrier_root",
                                      admission_hex[i]));
         struct zcl_command_request command = {.input = &input};
         struct zcl_command_reply reply;
         zcl_command_reply_init(&reply, "zcl.focus_claim_publish_test.v1");
         zcl_native_handle_zcode_focus_claim_publish(&command, &reply);
-        ZPF_REQUIRE(reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                    strcmp(json_get_str(json_get(
+        ZPF_REQUIRE(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ZPF_REQUIRE(strcmp(json_get_str(json_get(
                                &reply.data, "admitted_work_status")),
-                           "PROVED") == 0 &&
-                    zpf_json_root(&reply.data, "claim_root",
+                           "PROVED") == 0);
+        ZPF_REQUIRE(zpf_json_root(&reply.data, "claim_root",
                                   claim_roots_unsorted[i]));
         zcl_command_reply_free(&reply);
         json_free(&path); json_free(&paths); json_free(&input);
@@ -1128,14 +1211,14 @@ bool zpd_real_focus_preedit_acceptance(
         json_init(&claim_value); json_set_str(&claim_value, claim_hex);
         json_init(&admission_value);
         json_set_str(&admission_value, admission_hex[i]);
-        ZPF_REQUIRE(json_push_back(&claim_values, &claim_value) &&
-                    json_push_back(&admission_values, &admission_value));
+        ZPF_REQUIRE(json_push_back(&claim_values, &claim_value));
+        ZPF_REQUIRE(json_push_back(&admission_values, &admission_value));
         json_free(&claim_value); json_free(&admission_value);
     }
-    ZPF_REQUIRE(json_push_kv_str(&snapshot_input, "workspace", workspace) &&
-                json_push_kv_str(&snapshot_input, "work", work_id) &&
-                json_push_kv(&snapshot_input, "claim_roots", &claim_values) &&
-                json_push_kv(&snapshot_input,
+    ZPF_REQUIRE(json_push_kv_str(&snapshot_input, "workspace", workspace));
+    ZPF_REQUIRE(json_push_kv_str(&snapshot_input, "work", work_id));
+    ZPF_REQUIRE(json_push_kv(&snapshot_input, "claim_roots", &claim_values));
+    ZPF_REQUIRE(json_push_kv(&snapshot_input,
                              "work_admission_carrier_roots",
                              &admission_values));
     struct zcl_command_request snapshot_command = {.input = &snapshot_input};
@@ -1144,11 +1227,11 @@ bool zpd_real_focus_preedit_acceptance(
                            "zcl.focus_snapshot_publish_test.v1");
     zcl_native_handle_zcode_focus_snapshot_publish(
         &snapshot_command, &snapshot_reply);
-    ZPF_REQUIRE(snapshot_reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                strcmp(json_get_str(json_get(
+    ZPF_REQUIRE(snapshot_reply.status == ZCL_COMMAND_STATUS_PASSED);
+    ZPF_REQUIRE(strcmp(json_get_str(json_get(
                            &snapshot_reply.data, "scope_overlap")),
-                       "DISPROVED") == 0 &&
-                zpf_json_root(&snapshot_reply.data, "focus_root",
+                       "DISPROVED") == 0);
+    ZPF_REQUIRE(zpf_json_root(&snapshot_reply.data, "focus_root",
                               out_focus_root));
     zcl_command_reply_free(&snapshot_reply);
     json_free(&admission_values); json_free(&claim_values);
@@ -1165,15 +1248,15 @@ bool zpd_real_focus_preedit_acceptance(
         json_init(&claim_value); json_set_str(&claim_value, claim_hex);
         json_init(&admission_value);
         json_set_str(&admission_value, admission_hex[i]);
-        ZPF_REQUIRE(json_push_back(&reverse_claims, &claim_value) &&
-                    json_push_back(&reverse_admissions, &admission_value));
+        ZPF_REQUIRE(json_push_back(&reverse_claims, &claim_value));
+        ZPF_REQUIRE(json_push_back(&reverse_admissions, &admission_value));
         json_free(&claim_value); json_free(&admission_value);
     }
-    ZPF_REQUIRE(json_push_kv_str(&reverse_input, "workspace", workspace) &&
-                json_push_kv_str(&reverse_input, "work", work_id) &&
-                json_push_kv(&reverse_input, "claim_roots",
-                             &reverse_claims) &&
-                json_push_kv(&reverse_input,
+    ZPF_REQUIRE(json_push_kv_str(&reverse_input, "workspace", workspace));
+    ZPF_REQUIRE(json_push_kv_str(&reverse_input, "work", work_id));
+    ZPF_REQUIRE(json_push_kv(&reverse_input, "claim_roots",
+                             &reverse_claims));
+    ZPF_REQUIRE(json_push_kv(&reverse_input,
                              "work_admission_carrier_roots",
                              &reverse_admissions));
     struct zcl_command_request reverse_command = {.input = &reverse_input};
@@ -1183,10 +1266,10 @@ bool zpd_real_focus_preedit_acceptance(
                            "zcl.focus_snapshot_reverse_test.v1");
     zcl_native_handle_zcode_focus_snapshot_publish(
         &reverse_command, &reverse_reply);
-    ZPF_REQUIRE(reverse_reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                zpf_json_root(&reverse_reply.data, "focus_root",
-                              reverse_focus_root) &&
-                memcmp(reverse_focus_root, out_focus_root, 32) == 0);
+    ZPF_REQUIRE(reverse_reply.status == ZCL_COMMAND_STATUS_PASSED);
+    ZPF_REQUIRE(zpf_json_root(&reverse_reply.data, "focus_root",
+                              reverse_focus_root));
+    ZPF_REQUIRE(memcmp(reverse_focus_root, out_focus_root, 32) == 0);
     zcl_command_reply_free(&reverse_reply);
     json_free(&reverse_admissions); json_free(&reverse_claims);
     json_free(&reverse_input);
@@ -1234,8 +1317,10 @@ cleanup:
     memset(worker_a_secret, 0, sizeof(worker_a_secret));
     memset(worker_b_secret, 0, sizeof(worker_b_secret));
     memset(requester_secret, 0, sizeof(requester_secret));
-    if (!accepted && out_focus_root) memset(out_focus_root, 0, 32);
-    if (!accepted && out_observed_us) *out_observed_us = 0;
+    if (!accepted) {
+        if (out_focus_root) memset(out_focus_root, 0, 32);
+        if (out_observed_us) *out_observed_us = 0;
+    }
     return accepted;
 }
 
@@ -1264,11 +1349,16 @@ bool zpd_real_focus_handoff_acceptance(
     char worker_b[PATH_MAX] = {0};
     int64_t measured_started_us = platform_time_monotonic_us();
 
-    ZPF_REQUIRE(workspace && workspace[0] && work_id && work_id[0] &&
-                focus_data && focus_data->type == JSON_OBJ &&
-                source_receipt_root && preedit_focus_root &&
-                preedit_observed_us > 0 &&
-                edit_started_us >= preedit_observed_us);
+    ZPF_REQUIRE(workspace);
+    ZPF_REQUIRE(workspace[0]);
+    ZPF_REQUIRE(work_id);
+    ZPF_REQUIRE(work_id[0]);
+    ZPF_REQUIRE(focus_data);
+    ZPF_REQUIRE(focus_data->type == JSON_OBJ);
+    ZPF_REQUIRE(source_receipt_root);
+    ZPF_REQUIRE(preedit_focus_root);
+    ZPF_REQUIRE(preedit_observed_us > 0);
+    ZPF_REQUIRE(edit_started_us >= preedit_observed_us);
     uint8_t task_root[32], context_root[32], story_root[32];
     uint8_t empty_focus_root[32], expected_situation_root[32];
     ZPF_REQUIRE(zpf_json_root(focus_data, "task_root", task_root));
@@ -1294,12 +1384,12 @@ bool zpd_real_focus_handoff_acceptance(
     struct vcs_zcode_focus_v1 preedit_focus;
     ZPF_REQUIRE(zpf_load_focus(workspace, preedit_focus_root,
                                &preedit_focus, &metrics));
-    ZPF_REQUIRE(memcmp(preedit_focus.task_root, task_root, 32) == 0 &&
-                memcmp(preedit_focus.goal_root, source_task.goal_root, 32) == 0 &&
-                memcmp(preedit_focus.source_universe_root,
-                       source_task.source_root, 32) == 0 &&
-                memcmp(preedit_focus.context_root, context_root, 32) == 0 &&
-                preedit_focus.claim_count == 2);
+    ZPF_REQUIRE(memcmp(preedit_focus.task_root, task_root, 32) == 0);
+    ZPF_REQUIRE(memcmp(preedit_focus.goal_root, source_task.goal_root, 32) == 0);
+    ZPF_REQUIRE(memcmp(preedit_focus.source_universe_root,
+                       source_task.source_root, 32) == 0);
+    ZPF_REQUIRE(memcmp(preedit_focus.context_root, context_root, 32) == 0);
+    ZPF_REQUIRE(preedit_focus.claim_count == 2);
     uint8_t preedit_claim_roots[2][32];
     size_t preedit_claim_count = 0;
     ZPF_REQUIRE(zpf_load(
@@ -1310,8 +1400,8 @@ bool zpd_real_focus_handoff_acceptance(
     ZPF_REQUIRE(vcs_zcode_focus_claim_set_parse(
                     preedit_claim_set_wire, preedit_claim_set_wire_len,
                     preedit_claim_roots, 2, &preedit_claim_count) ==
-                    VCS_ZCODE_FOCUS_OK &&
-                preedit_claim_count == 2);
+                    VCS_ZCODE_FOCUS_OK);
+    ZPF_REQUIRE(preedit_claim_count == 2);
     free(preedit_claim_set_wire);
     preedit_claim_set_wire = NULL;
     struct vcs_zcode_focus_claim_v1 preedit_claims[2];
@@ -1347,10 +1437,10 @@ bool zpd_real_focus_handoff_acceptance(
     struct vcs_zcode_work_receipt_v1 source_receipt;
     ZPF_REQUIRE(zpf_load_receipt(workspace, receipt_root,
                                  &source_receipt, &metrics));
-    ZPF_REQUIRE(source_receipt.work_kind == VCS_ZCODE_WORK_BUILD &&
-                source_receipt.status == VCS_ZCODE_WORK_PASS &&
-                source_receipt.exit_status == 0 &&
-                memcmp(source_receipt.task_root, task_root, 32) == 0);
+    ZPF_REQUIRE(source_receipt.work_kind == VCS_ZCODE_WORK_BUILD);
+    ZPF_REQUIRE(source_receipt.status == VCS_ZCODE_WORK_PASS);
+    ZPF_REQUIRE(source_receipt.exit_status == 0);
+    ZPF_REQUIRE(memcmp(source_receipt.task_root, task_root, 32) == 0);
 
     uint8_t worker_a_seed[32], worker_a_key[32];
     uint8_t worker_b_seed[32], worker_b_key[32];
@@ -1364,8 +1454,9 @@ bool zpd_real_focus_handoff_acceptance(
     ZPF_REQUIRE(memcmp(worker_a_key, source_receipt.signer_pubkey, 32) == 0);
 
     int64_t completed_unix = source_receipt.finished_unix;
-    ZPF_REQUIRE(completed_unix > 0 && completed_unix <= INT64_MAX - 8 &&
-                source_task.expires_unix > completed_unix + 6);
+    ZPF_REQUIRE(completed_unix > 0);
+    ZPF_REQUIRE(completed_unix <= INT64_MAX - 8);
+    ZPF_REQUIRE(source_task.expires_unix > completed_unix + 6);
     int64_t source_expires_unix = completed_unix + 2;
     int64_t successor_expires_unix = completed_unix + 5;
     int64_t request_deadline_unix = completed_unix + 6;
@@ -1430,10 +1521,10 @@ bool zpd_real_focus_handoff_acceptance(
     ZPF_REQUIRE(vcs_zcode_focus_situation_root(
                     &empty_b, situation_b) == VCS_ZCODE_FOCUS_OK);
     ZPF_REQUIRE(vcs_zcode_focus_root(
-                    &empty_a, check_root) == VCS_ZCODE_FOCUS_OK &&
-                memcmp(check_root, empty_focus_root, 32) == 0 &&
-                memcmp(situation_a, situation_b, 32) == 0 &&
-                memcmp(situation_a, expected_situation_root, 32) == 0);
+                    &empty_a, check_root) == VCS_ZCODE_FOCUS_OK);
+    ZPF_REQUIRE(memcmp(check_root, empty_focus_root, 32) == 0);
+    ZPF_REQUIRE(memcmp(situation_a, situation_b, 32) == 0);
+    ZPF_REQUIRE(memcmp(situation_a, expected_situation_root, 32) == 0);
 
     struct vcs_zcode_write_scope_v1 scope_a, scope_b;
     vcs_zcode_write_scope_init(&scope_a);
@@ -1570,8 +1661,9 @@ bool zpd_real_focus_handoff_acceptance(
                      &claim_b, &scope_b, claim_b_root,
                      claims_b, scopes_b, claim_roots_b, &from_b, &next_b);
     ZPF_REQUIRE(memcmp(claim_roots_a, claim_roots_b,
-                       sizeof(claim_roots_a)) == 0 &&
-                from_a == from_b && next_a == next_b);
+                       sizeof(claim_roots_a)) == 0);
+    ZPF_REQUIRE(from_a == from_b);
+    ZPF_REQUIRE(next_a == next_b);
 
     struct vcs_zcode_focus_v1 focus_a, focus_b;
     ZPF_REQUIRE(vcs_zcode_focus_compose(
@@ -1587,8 +1679,8 @@ bool zpd_real_focus_handoff_acceptance(
                                 focus_a_root, &metrics));
     ZPF_REQUIRE(zpf_store_focus(worker_b, &focus_b,
                                 focus_b_root, &metrics));
-    ZPF_REQUIRE(memcmp(focus_a_root, focus_b_root, 32) == 0 &&
-                memcmp(focus_a_root, empty_focus_root, 32) != 0);
+    ZPF_REQUIRE(memcmp(focus_a_root, focus_b_root, 32) == 0);
+    ZPF_REQUIRE(memcmp(focus_a_root, empty_focus_root, 32) != 0);
     ZPF_REQUIRE(vcs_zcode_focus_claim_set_status(
                     &focus_b, claims_b, scopes_b, 2, completed_unix) ==
                 ZCL_ONTOLOGY_PROVED);
@@ -1713,11 +1805,11 @@ bool zpd_real_focus_handoff_acceptance(
                     &admission_b_at_b, &metrics));
     uint8_t request_check[32];
     ZPF_REQUIRE(vcs_zcode_work_request_id(
-                    &request_a_at_b.body.request, request_check) &&
-                memcmp(request_check, request_a_root, 32) == 0);
+                    &request_a_at_b.body.request, request_check));
+    ZPF_REQUIRE(memcmp(request_check, request_a_root, 32) == 0);
     ZPF_REQUIRE(vcs_zcode_work_request_id(
-                    &request_b_at_b.body.request, request_check) &&
-                memcmp(request_check, request_b_root, 32) == 0);
+                    &request_b_at_b.body.request, request_check));
+    ZPF_REQUIRE(memcmp(request_check, request_b_root, 32) == 0);
     struct vcs_zcode_work_receipt_v1 receipt_at_b;
     ZPF_REQUIRE(zpf_load_receipt(worker_b, receipt_root,
                                  &receipt_at_b, &metrics));
@@ -1731,8 +1823,8 @@ bool zpd_real_focus_handoff_acceptance(
     free(handoff_wire);
     handoff_wire = NULL;
     ZPF_REQUIRE(vcs_zcode_focus_handoff_root(
-                    &handoff_at_b, check_root) == VCS_ZCODE_FOCUS_OK &&
-                memcmp(check_root, handoff_root, 32) == 0);
+                    &handoff_at_b, check_root) == VCS_ZCODE_FOCUS_OK);
+    ZPF_REQUIRE(memcmp(check_root, handoff_root, 32) == 0);
     ZPF_REQUIRE(vcs_zcode_focus_handoff_validate_for_work(
                     &focus_b, &task_b, &context_b, &task_scope_b,
                     claims_b, scopes_b, 2, from_b, next_b,

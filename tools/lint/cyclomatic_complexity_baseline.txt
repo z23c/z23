@@ -637,12 +637,6 @@ tests/harness/src/test_zcode_package_dev.c:zpd_test_project_inspect:34
 tests/harness/src/test_zcode_package_dev.c:zpd_test_twelve_task_benchmark:30
 tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start:56
 tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start_license_lifecycle:18
-tests/harness/src/test_zcode_package_dev_focus.c:zpd_focus_worker_role:24
-tests/harness/src/test_zcode_package_dev_focus.c:zpd_real_focus_handoff_acceptance:42
-tests/harness/src/test_zcode_package_dev_focus.c:zpd_real_focus_preedit_acceptance:65
-tests/harness/src/test_zcode_package_dev_focus.c:zpf_exec_clean_agent_acceptance:16
-tests/harness/src/test_zcode_package_dev_focus.c:zpf_process_reload_focus:36
-tests/harness/src/test_zcode_package_dev_focus.c:zpf_spawn_exec_agent:20
 tests/harness/src/test_zcode_score_receipt.c:score_store_vertical:24
 tests/harness/src/test_zcode_score_receipt.c:score_transport_package:18
 tests/harness/src/test_zcode_score_receipt.c:shadow_protocol_package_vertical:49
