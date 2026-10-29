@@ -270,7 +270,7 @@ static bool anchor_batch_anchor_order_ok(const struct connman_dial_candidate *ba
     return order_ok;
 }
 
-/* Check the first gather returns the 3 loaded anchors before any addrman pick and a second gather returns none; returns 1 on failure. */
+/* Check the first gather returns the 3 loaded anchors before any addrman pick and a second gather returns no ANCHOR candidates (non-anchor candidates may still be returned); returns 1 on failure. */
 static int anchor_gather_order_check(void)
 {
     printf("anchor_peers: gather returns anchors before addrman... ");
