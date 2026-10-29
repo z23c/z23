@@ -236,6 +236,325 @@ static int atm_guard_test(struct main_state *state,
 }
 #endif
 
+/* ================================================================
+ * Characterization of accept_to_mempool_detailed(): one table row per
+ * reachable branch. Expectations are the literal results of the current
+ * code path (detail is reset to "" on entry; only the rejecting branches
+ * that name a reason write detail_out).
+ * ================================================================ */
+struct atm_ctx {
+    struct main_state *state;
+    const struct chain_params *params;
+    const struct key_id *kid;
+    const struct script *spk;
+    const struct privkey *key;
+    const struct pubkey *pub;
+};
+
+struct atm_fix {
+    struct tx_mempool pool;
+    struct coins_view null_view;
+    struct coins_view_cache coins;
+    struct uint256 utxo;
+    struct transaction tx;
+};
+
+static const int64_t atm_det_utxo = 100 * COIN_VALUE;
+
+/* Initialise every container unconditionally so atm_fix_free is always
+ * safe; returns false only when the UTXO could not be seeded. */
+static bool atm_fix_init(struct atm_fix *f, const struct atm_ctx *c,
+                         int64_t min_fee, int tag, int64_t utxo_value,
+                         int64_t out_value, bool corrupt)
+{
+    tx_mempool_init(&f->pool, min_fee);
+    memset(&f->null_view, 0, sizeof(f->null_view));
+    coins_view_cache_init(&f->coins, &f->null_view);
+    memset(f->utxo.data, tag, 32);
+    bool seeded = atm_add_p2pkh_utxo(&f->coins, &f->utxo, utxo_value, c->kid);
+    atm_build_spend(&f->tx, &f->utxo, out_value);
+    atm_sign_input(&f->tx, c->spk, utxo_value, c->key, c->pub, corrupt);
+    return seeded;
+}
+
+static void atm_fix_free(struct atm_fix *f)
+{
+    transaction_free(&f->tx);
+    coins_view_cache_free(&f->coins);
+    tx_mempool_free(&f->pool);
+}
+
+static bool atm_expect(enum mempool_accept_result got,
+                       enum mempool_accept_result want,
+                       const char *detail, const char *want_detail,
+                       size_t size, size_t want_size)
+{
+    return got == want && strcmp(detail, want_detail) == 0 &&
+           size == want_size;
+}
+
+static bool atm_case_null_pool(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xE1, atm_det_utxo, 50 * COIN_VALUE,
+                               false);
+    char detail[64] = "stale";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        NULL, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
+    bool ok = seeded && r == MEMPOOL_ACCEPT_INTERNAL_ERROR &&
+              strcmp(detail, "") == 0;
+    atm_fix_free(&f);
+    return ok;
+}
+
+static bool atm_case_coinbase(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xE2, atm_det_utxo, 50 * COIN_VALUE,
+                               false);
+    /* A single null-outpoint input is a coinbase shape. */
+    uint256_set_null(&f.tx.vin[0].prevout.hash);
+    f.tx.vin[0].prevout.n = UINT32_MAX;
+    char detail[64] = "";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
+    bool ok = seeded && atm_expect(r, MEMPOOL_ACCEPT_INVALID, detail,
+                                   "coinbase-standalone",
+                                   tx_mempool_size(&f.pool), 0);
+    atm_fix_free(&f);
+    return ok;
+}
+
+static bool atm_case_structural_reject(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xE3, atm_det_utxo, -1, false);
+    char detail[64] = "";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
+    bool ok = seeded && atm_expect(r, MEMPOOL_ACCEPT_INVALID, detail,
+                                   "bad-txns-vout-negative",
+                                   tx_mempool_size(&f.pool), 0);
+    atm_fix_free(&f);
+    return ok;
+}
+
+static bool atm_case_null_coins(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xE4, atm_det_utxo, 50 * COIN_VALUE,
+                               false);
+    char detail[64] = "stale";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, NULL, c->state, c->params, &f.tx, detail, sizeof(detail));
+    bool ok = seeded && atm_expect(r, MEMPOOL_ACCEPT_INTERNAL_ERROR, detail,
+                                   "", tx_mempool_size(&f.pool), 0);
+    atm_fix_free(&f);
+    return ok;
+}
+
+static bool atm_case_null_params(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xE5, atm_det_utxo, 50 * COIN_VALUE,
+                               false);
+    char detail[64] = "stale";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, NULL, &f.tx, detail, sizeof(detail));
+    bool ok = seeded && atm_expect(r, MEMPOOL_ACCEPT_INTERNAL_ERROR, detail,
+                                   "", tx_mempool_size(&f.pool), 0);
+    atm_fix_free(&f);
+    return ok;
+}
+
+static bool atm_case_duplicate(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xE6, atm_det_utxo, 50 * COIN_VALUE,
+                               false);
+    enum mempool_accept_result first = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, NULL, 0);
+    char detail[64] = "stale";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
+    bool ok = seeded && first == MEMPOOL_ACCEPT_OK &&
+              atm_expect(r, MEMPOOL_ACCEPT_DUPLICATE, detail, "",
+                         tx_mempool_size(&f.pool), 1);
+    atm_fix_free(&f);
+    return ok;
+}
+
+static bool atm_case_conflict(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xE7, atm_det_utxo, 50 * COIN_VALUE,
+                               false);
+    enum mempool_accept_result first = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, NULL, 0);
+    /* Same prevout, different output value: a distinct txid that double
+     * spends the pooled transaction. */
+    struct transaction rival;
+    atm_build_spend(&rival, &f.utxo, 40 * COIN_VALUE);
+    atm_sign_input(&rival, c->spk, atm_det_utxo, c->key, c->pub, false);
+    char detail[64] = "stale";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &rival, detail,
+        sizeof(detail));
+    bool ok = seeded && first == MEMPOOL_ACCEPT_OK &&
+              atm_expect(r, MEMPOOL_ACCEPT_CONFLICT, detail, "",
+                         tx_mempool_size(&f.pool), 1);
+    transaction_free(&rival);
+    atm_fix_free(&f);
+    return ok;
+}
+
+static bool atm_case_input_value_invalid(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    /* A prevout outside MoneyRange makes get_value_in return -1. */
+    bool seeded = atm_fix_init(&f, c, 0, 0xE8, -1, 50 * COIN_VALUE, false);
+    char detail[64] = "";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
+    bool ok = seeded && atm_expect(r, MEMPOOL_ACCEPT_INVALID, detail,
+                                   "input-value-invalid",
+                                   tx_mempool_size(&f.pool), 0);
+    atm_fix_free(&f);
+    return ok;
+}
+
+static bool atm_case_value_balance_invalid(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    /* 150 out of 100 in: value_in < value_out. */
+    bool seeded = atm_fix_init(&f, c, 0, 0xE9, atm_det_utxo, 150 * COIN_VALUE,
+                               false);
+    char detail[64] = "";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
+    bool ok = seeded && atm_expect(r, MEMPOOL_ACCEPT_INVALID, detail,
+                                   "value-balance-invalid",
+                                   tx_mempool_size(&f.pool), 0);
+    atm_fix_free(&f);
+    return ok;
+}
+
+static bool atm_case_below_fee(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    /* Zero fee against a one-coin relay floor. */
+    bool seeded = atm_fix_init(&f, c, COIN_VALUE, 0xEA, atm_det_utxo,
+                               atm_det_utxo, false);
+    char detail[64] = "";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
+    bool ok = seeded && atm_expect(r, MEMPOOL_ACCEPT_BELOW_FEE, detail, "",
+                                   tx_mempool_size(&f.pool), 0);
+    atm_fix_free(&f);
+    return ok;
+}
+
+static bool atm_case_script_invalid(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xEB, atm_det_utxo, 50 * COIN_VALUE,
+                               true);
+    char detail[64] = "";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
+    bool ok = seeded && atm_expect(r, MEMPOOL_ACCEPT_INVALID, detail,
+                                   "transparent-script-invalid",
+                                   tx_mempool_size(&f.pool), 0);
+    atm_fix_free(&f);
+    return ok;
+}
+
+static bool atm_case_missing_inputs(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xEC, atm_det_utxo, 50 * COIN_VALUE,
+                               false);
+    /* Point the spend at an outpoint the view never held. */
+    memset(f.tx.vin[0].prevout.hash.data, 0xEE, 32);
+    char detail[64] = "stale";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
+    bool ok = seeded && atm_expect(r, MEMPOOL_ACCEPT_MISSING_INPUTS, detail,
+                                   "", tx_mempool_size(&f.pool), 0);
+    atm_fix_free(&f);
+    return ok;
+}
+
+static bool atm_case_success_clears_detail(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xED, atm_det_utxo, 50 * COIN_VALUE,
+                               false);
+    char detail[64] = "stale";
+    enum mempool_accept_result r = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, detail, sizeof(detail));
+    bool ok = seeded && atm_expect(r, MEMPOOL_ACCEPT_OK, detail, "",
+                                   tx_mempool_size(&f.pool), 1);
+    atm_fix_free(&f);
+    return ok;
+}
+
+static bool atm_case_zero_cap_and_null_detail(const struct atm_ctx *c)
+{
+    struct atm_fix f;
+    bool seeded = atm_fix_init(&f, c, 0, 0xEE, atm_det_utxo, 50 * COIN_VALUE,
+                               true);
+    char detail[8] = "keep";
+    enum mempool_accept_result r1 = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, detail, 0);
+    enum mempool_accept_result r2 = accept_to_mempool_detailed(
+        &f.pool, &f.coins, c->state, c->params, &f.tx, NULL, 0);
+    bool ok = seeded && r1 == MEMPOOL_ACCEPT_INVALID &&
+              strcmp(detail, "keep") == 0 &&
+              r2 == MEMPOOL_ACCEPT_INVALID && tx_mempool_size(&f.pool) == 0;
+    atm_fix_free(&f);
+    return ok;
+}
+
+struct atm_det_case {
+    const char *name;
+    bool (*run)(const struct atm_ctx *c);
+};
+
+static const struct atm_det_case atm_det_cases[] = {
+    { "null pool -> INTERNAL_ERROR, detail cleared", atm_case_null_pool },
+    { "coinbase-shaped tx -> coinbase-standalone", atm_case_coinbase },
+    { "structural reject -> reason forwarded", atm_case_structural_reject },
+    { "null coins_tip -> INTERNAL_ERROR", atm_case_null_coins },
+    { "null params -> INTERNAL_ERROR", atm_case_null_params },
+    { "pooled txid resubmitted -> DUPLICATE", atm_case_duplicate },
+    { "double spend of pooled prevout -> CONFLICT", atm_case_conflict },
+    { "prevout out of MoneyRange -> input-value-invalid",
+      atm_case_input_value_invalid },
+    { "outputs exceed inputs -> value-balance-invalid",
+      atm_case_value_balance_invalid },
+    { "zero fee under relay floor -> BELOW_FEE", atm_case_below_fee },
+    { "bad transparent sig -> transparent-script-invalid",
+      atm_case_script_invalid },
+    { "unknown prevout -> MISSING_INPUTS", atm_case_missing_inputs },
+    { "accepted tx clears detail -> OK", atm_case_success_clears_detail },
+    { "zero detail cap writes nothing; NULL detail ok",
+      atm_case_zero_cap_and_null_detail },
+};
+
+static int atm_detail_branches(const struct atm_ctx *c)
+{
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(atm_det_cases) / sizeof(atm_det_cases[0]);
+         ++i) {
+        printf("accept_to_mempool: detail branch %s... ",
+               atm_det_cases[i].name);
+        if (atm_det_cases[i].run(c)) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
 int test_accept_to_mempool(void)
 {
     int failures = 0;
@@ -614,6 +933,12 @@ int test_accept_to_mempool(void)
         tx_mempool_free(&pool);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    struct atm_ctx detail_ctx = {
+        .state = &main_state, .params = params, .kid = &kid,
+        .spk = &prev_spk, .key = &key, .pub = &pub,
+    };
+    failures += atm_detail_branches(&detail_ctx);
 
     main_state_free(&main_state);
 
