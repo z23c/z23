@@ -937,21 +937,27 @@ static bool pin_accepts_stored(struct addr_man *am, const struct net_addr *src,
     return ok;
 }
 
-/* A penalty above the timestamp clamps to 0; a zero timestamp is accepted. */
+/* A penalty above the timestamp clamps to 0; a zero timestamp is accepted.
+ * The zero-timestamp entry is added to its own table: both entries are
+ * terrible, so a shared new-table slot would evict c (random per nKey). */
 static bool pin_accepts_clamped(struct addr_man *am, const struct net_addr *src,
                                 int64_t T)
 {
     struct addr_info out;
     struct net_address c = make_pub_addr(60, 1, 2, 5, 8033);
     struct net_address z = make_pub_addr(60, 1, 2, 6, 8033);
+    struct addr_man zm;
+    addrman_init(&zm);
     c.nTime = (uint32_t)T;
     z.nTime = 0;
     bool ok = addrman_add(am, &c, src, T + 10) &&
               addrman_find_info(am, &c.svc, &out) && out.addr.nTime == 0;
-    ok = ok && addrman_add(am, &z, src, 0) &&
-         addrman_find_info(am, &z.svc, &out) && out.addr.nTime == 0;
-    ok = ok && addrman_size(am) == 4 && am->new_count == 4 &&
+    ok = ok && addrman_size(am) == 3 && am->new_count == 3 &&
          am->tried_count == 0;
+    ok = ok && addrman_add(&zm, &z, src, 0) &&
+         addrman_find_info(&zm, &z.svc, &out) && out.addr.nTime == 0;
+    ok = ok && addrman_size(&zm) == 1 && zm.new_count == 1;
+    addrman_free(&zm);
     return ok;
 }
 
@@ -1014,10 +1020,14 @@ static bool pin_dup_tried_and_cap(struct addr_man *am,
     ok = ok && !addrman_add(am, &t_newer, src, 0);
     ok = ok && addrman_find_info(am, &t.svc, &out) && out.in_tried;
     ok = ok && am->tried_count == 1 && am->new_count == 1;
+    /* A refused tried entry must not reach the new table. */
+    ok = ok && addrman_consistency_check(am, NULL, 0) == 0;
 
     ok = ok && addrman_add(am, &cap, src, 0);
     am->entries[2].ref_count = ADDRMAN_NEW_BUCKETS_PER_ADDRESS;
     ok = ok && !addrman_add(am, &cap_newer, src, 0);
+    /* The cap guard returns before any slot is written. */
+    ok = ok && am->entries[2].ref_count == ADDRMAN_NEW_BUCKETS_PER_ADDRESS;
     return ok;
 }
 
