@@ -93,12 +93,10 @@ static bool cp_find_diversifier(uint8_t diversifier[11])
     return false;
 }
 
-int test_crypto_perf_selftest(void)
+/* ── Equihash (200,9) ─────────────────────────────────────────── */
+static int cp_equihash_leg(void)
 {
-    printf("\n=== crypto_perf_selftest (teeth for -bench-crypto-vs-rust) ===\n");
     int failures = 0;
-
-    /* ── Equihash (200,9) ─────────────────────────────────────────── */
     printf("Equihash 200,9 verify (baked real witness)\n");
     {
         struct block_header h;
@@ -108,8 +106,13 @@ int test_crypto_perf_selftest(void)
         bad.nSolution[600] ^= 0x01;
         CP_CHECK("one-bit-flipped -> false", !check_equihash_solution(&bad, NULL));
     }
+    return failures;
+}
 
-    /* ── BLS12-381 Fp multiply (square-consistency, Montgomery-agnostic) ── */
+/* ── BLS12-381 Fp multiply (square-consistency, Montgomery-agnostic) ── */
+static int cp_fp_mul_leg(void)
+{
+    int failures = 0;
     printf("BLS12-381 Fp multiply\n");
     {
         uint8_t ba[48], bb[48];
@@ -129,8 +132,13 @@ int test_crypto_perf_selftest(void)
         CP_CHECK("a*b non-degenerate (!=0, !=a, !=b)",
                  !fp_is_zero(&ab) && !fp_eq(&ab, &a) && !fp_eq(&ab, &b));
     }
+    return failures;
+}
 
-    /* ── BLS12-381 optimal-Ate pairing ────────────────────────────── */
+/* ── BLS12-381 optimal-Ate pairing ────────────────────────────── */
+static int cp_pairing_leg(void)
+{
+    int failures = 0;
     printf("BLS12-381 Ate pairing (canonical generators)\n");
     {
         struct g1_point g1;
@@ -149,8 +157,13 @@ int test_crypto_perf_selftest(void)
             CP_CHECK("e(G1,G2) != 1", !fp12_is_zero(&diff));
         }
     }
+    return failures;
+}
 
-    /* ── secp256k1 ECDSA verify (locally signed round-trip) ────────── */
+/* ── secp256k1 ECDSA verify (locally signed round-trip) ────────── */
+static int cp_ecdsa_leg(void)
+{
+    int failures = 0;
     printf("secp256k1 ECDSA verify\n");
     {
         /* The harness (test_parallel.c) has already called ecc_start() +
@@ -173,8 +186,13 @@ int test_crypto_perf_selftest(void)
         CP_CHECK("corrupted message -> false", signed_ok &&
                  !pubkey_verify(&pk, &bad, sig, siglen));
     }
+    return failures;
+}
 
-    /* ── ed25519 verify (JoinSplit) ───────────────────────────────── */
+/* ── ed25519 verify (JoinSplit) ───────────────────────────────── */
+static int cp_ed25519_leg(void)
+{
+    int failures = 0;
     printf("ed25519 verify (RFC 8032 Test 2)\n");
     {
         const uint8_t msg[1] = { 0x72 };
@@ -186,8 +204,13 @@ int test_crypto_perf_selftest(void)
         CP_CHECK("corrupted sig -> false",
                  !ed25519_verify(bad_sig, msg, 1, CP_ED_PK));
     }
+    return failures;
+}
 
-    /* ── Hash primitives (avalanche + not-a-copy of input) ─────────── */
+/* ── Hash primitives (avalanche + not-a-copy of input) ─────────── */
+static int cp_hash_leg(void)
+{
+    int failures = 0;
     printf("Hash primitives (SHA256 / SHA3-256 / BLAKE2b, 1 KiB)\n");
     {
         uint8_t msg[1024], flip[1024];
@@ -219,8 +242,51 @@ int test_crypto_perf_selftest(void)
         CP_CHECK("BLAKE2b avalanche + not-a-copy",
                  memcmp(a, b, 32) != 0 && memcmp(a, msg, 32) != 0);
     }
+    return failures;
+}
 
-    /* ── Groth16 / BLS12-381 output verify — params-heavy, opt-in ──── */
+/* Production prover round-trip: one valid output proof, one bit-flipped. */
+static int cp_groth16_prove_and_verify(void)
+{
+    int failures = 0;
+    uint8_t diversifier[11];
+    bool div_ok = cp_find_diversifier(diversifier);
+    uint8_t ask[32], nsk[32], ovk[32];
+    sapling_generate_r(ask);
+    sapling_generate_r(nsk);
+    sapling_generate_r(ovk);
+    uint8_t ak[32], nk[32], ivk[32], pk_d[32];
+    sapling_ask_to_ak(ask, ak);
+    sapling_nsk_to_nk(nsk, nk);
+    sapling_crh_ivk(ak, nk, ivk);
+    bool pk_ok = div_ok && sapling_ivk_to_pkd(ivk, diversifier, pk_d);
+    void *pctx = zclassic_sapling_proving_ctx_init();
+    uint8_t cv[32], cm[32], epk[32], enc[580], out_ct[80], proof[192];
+    bool built = pctx && pk_ok &&
+        sapling_build_output_with_ctx(pctx, ovk, diversifier, pk_d,
+                                      54321, NULL,
+                                      cv, cm, epk, enc, out_ct, proof);
+    CP_CHECK("production prover produced an output proof", built);
+    if (built) {
+        struct sapling_verification_ctx vctx;
+        sapling_verification_ctx_init(&vctx);
+        CP_CHECK("valid proof -> true",
+                 sapling_check_output(&vctx, cv, cm, epk, proof));
+        uint8_t bad_proof[192];
+        memcpy(bad_proof, proof, 192);
+        bad_proof[64] ^= 0x01;
+        sapling_verification_ctx_init(&vctx);
+        CP_CHECK("one-bit-flipped proof -> false",
+                 !sapling_check_output(&vctx, cv, cm, epk, bad_proof));
+    }
+    if (pctx) zclassic_sapling_proving_ctx_free(pctx);
+    return failures;
+}
+
+/* ── Groth16 / BLS12-381 output verify — params-heavy, opt-in ──── */
+static int cp_groth16_leg(void)
+{
+    int failures = 0;
     printf("Groth16 BLS12-381 output-proof verify\n");
     if (getenv("ZCL_PARAMS_TESTS") == NULL) {
         printf("  ZCL_PARAMS_TESTS unset -> SKIPPING Groth16 leg "
@@ -238,39 +304,24 @@ int test_crypto_perf_selftest(void)
                    zclassic_sapling_prover_backend(),
                    zclassic_sapling_prover_status());
         } else {
-            uint8_t diversifier[11];
-            bool div_ok = cp_find_diversifier(diversifier);
-            uint8_t ask[32], nsk[32], ovk[32];
-            sapling_generate_r(ask);
-            sapling_generate_r(nsk);
-            sapling_generate_r(ovk);
-            uint8_t ak[32], nk[32], ivk[32], pk_d[32];
-            sapling_ask_to_ak(ask, ak);
-            sapling_nsk_to_nk(nsk, nk);
-            sapling_crh_ivk(ak, nk, ivk);
-            bool pk_ok = div_ok && sapling_ivk_to_pkd(ivk, diversifier, pk_d);
-            void *pctx = zclassic_sapling_proving_ctx_init();
-            uint8_t cv[32], cm[32], epk[32], enc[580], out_ct[80], proof[192];
-            bool built = pctx && pk_ok &&
-                sapling_build_output_with_ctx(pctx, ovk, diversifier, pk_d,
-                                              54321, NULL,
-                                              cv, cm, epk, enc, out_ct, proof);
-            CP_CHECK("production prover produced an output proof", built);
-            if (built) {
-                struct sapling_verification_ctx vctx;
-                sapling_verification_ctx_init(&vctx);
-                CP_CHECK("valid proof -> true",
-                         sapling_check_output(&vctx, cv, cm, epk, proof));
-                uint8_t bad_proof[192];
-                memcpy(bad_proof, proof, 192);
-                bad_proof[64] ^= 0x01;
-                sapling_verification_ctx_init(&vctx);
-                CP_CHECK("one-bit-flipped proof -> false",
-                         !sapling_check_output(&vctx, cv, cm, epk, bad_proof));
-            }
-            if (pctx) zclassic_sapling_proving_ctx_free(pctx);
+            failures += cp_groth16_prove_and_verify();
         }
     }
+    return failures;
+}
+
+int test_crypto_perf_selftest(void)
+{
+    printf("\n=== crypto_perf_selftest (teeth for -bench-crypto-vs-rust) ===\n");
+    int failures = 0;
+
+    failures += cp_equihash_leg();
+    failures += cp_fp_mul_leg();
+    failures += cp_pairing_leg();
+    failures += cp_ecdsa_leg();
+    failures += cp_ed25519_leg();
+    failures += cp_hash_leg();
+    failures += cp_groth16_leg();
 
     printf("crypto_perf_selftest: %s (%d failures)\n",
            failures == 0 ? "OK" : "FAIL", failures);

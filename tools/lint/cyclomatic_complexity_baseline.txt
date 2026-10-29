@@ -595,7 +595,6 @@ tests/harness/src/test_consensus_state_snapshot_export.c:test_consensus_state_sn
 tests/harness/src/test_core_seal_interop.c:csi_dialect_discriminates:23
 tests/harness/src/test_core_seal_interop.c:csi_real_sections:37
 tests/harness/src/test_core_seal_interop.c:csi_synthetic_tree:27
-tests/harness/src/test_crypto_perf_selftest.c:test_crypto_perf_selftest:27
 tests/harness/src/test_dev_platform.c:run_darwin_attested_descriptor_fixture:24
 tests/harness/src/test_dev_platform.c:run_failure_store_fixture:59
 tests/harness/src/test_dev_platform.c:run_hotswap_artifact_cache_fixture:79
