@@ -617,6 +617,132 @@ static bool ace_pprevless_body_refused(struct main_state *ms)
     return ok;
 }
 
+/* 16. NULL ARGS / UNINITIALISED WINDOW: a NULL chain or block map, or a window
+ * whose height is still -1, is a no-op that returns true and touches nothing. */
+static bool ace_null_args_and_no_window_are_noop(struct main_state *ms)
+{
+    main_state_init(ms);
+    struct block_index *b[8];
+    bool ok = ace_build(ms, b, 8, 3);
+    ok = ok && active_chain_extend_window_have_data(
+                   NULL, &ms->map_block_index, ms->pindex_best_header, 7);
+    ok = ok && active_chain_extend_window_have_data(
+                   &ms->chain_active, NULL, ms->pindex_best_header, 7);
+    ok = ok && active_chain_at(&ms->chain_active, 4) == NULL;
+    ok = ok && active_chain_height(&ms->chain_active) == 3;
+
+    struct main_state fresh;
+    memset(&fresh, 0, sizeof(fresh));
+    main_state_init(&fresh);
+    ok = ok && active_chain_extend_window_have_data(
+                   &fresh.chain_active, &fresh.map_block_index, NULL, 7);
+    ok = ok && active_chain_cached_height(&fresh.chain_active) == -1;
+    main_state_free(&fresh);
+    return ok;
+}
+
+/* Authority hooks for the self-heal cases (17-19). The authority reports the
+ * finalized tip hash in ace_auth_h32; each case picks which hash to serve. */
+static uint8_t ace_auth_h32[32];
+static int64_t ace_auth_get_height(void) { return 2; }
+static bool ace_auth_is_authoritative(void) { return true; }
+static bool ace_auth_get_hash(uint8_t hash[32])
+{
+    memcpy(hash, ace_auth_h32, 32);
+    return true;
+}
+static bool ace_auth_get_hash_absent(uint8_t hash[32])
+{
+    (void)hash;
+    return false;
+}
+
+static void ace_auth_install(struct main_state *ms,
+                             bool (*get_hash)(uint8_t hash[32]))
+{
+    struct active_chain_authority auth = {
+        .get_height = ace_auth_get_height,
+        .get_hash = get_hash,
+        .is_authoritative = ace_auth_is_authoritative,
+    };
+    active_chain_register_authority(&auth);
+    active_chain_register_block_map(&ms->map_block_index);
+}
+
+static void ace_auth_reset(void)
+{
+    struct active_chain_authority none = {0};
+    active_chain_register_authority(&none);
+    active_chain_register_block_map(NULL);
+}
+
+/* Window at height 2 over bodies 0..5, with the tip slot chain[2] emptied the
+ * way a blocks-less snapshot boot leaves it. */
+static bool ace_empty_tip_slot_window(struct main_state *ms,
+                                      struct block_index **b)
+{
+    main_state_init(ms);
+    bool ok = ace_build(ms, b, 6, 2);
+    ok = ok && active_chain_at(&ms->chain_active, 2) == b[2];
+    ms->chain_active.chain[2] = NULL;
+    return ok;
+}
+
+/* 17. SELF-HEAL: the raw tip slot is empty but the authority resolves the
+ * finalized tip (same height) through the block map. The tip is re-installed
+ * into chain[2] and the window extends along the have-data frontier to 5. */
+static bool ace_self_heal_reinstalls_empty_tip_slot(struct main_state *ms)
+{
+    struct block_index *b[8];
+    bool ok = ace_empty_tip_slot_window(ms, b);
+    memcpy(ace_auth_h32, b[2]->hashBlock.data, 32);
+    ace_auth_install(ms, ace_auth_get_hash);
+
+    active_chain_extend_window_have_data(&ms->chain_active,
+                                         &ms->map_block_index, b[5], 5);
+    ok = ok && active_chain_at(&ms->chain_active, 2) == b[2];
+    ok = ok && active_chain_at(&ms->chain_active, 5) == b[5];
+    ok = ok && active_chain_height(&ms->chain_active) == 5;
+    ace_auth_reset();
+    return ok;
+}
+
+/* 18. NO COHERENT TIP: the raw slot is empty and the authority cannot name a
+ * finalized hash. Nothing to anchor on, so the extender returns with the window
+ * height and the empty slot unchanged. */
+static bool ace_no_authoritative_tip_leaves_window(struct main_state *ms)
+{
+    struct block_index *b[8];
+    bool ok = ace_empty_tip_slot_window(ms, b);
+    ace_auth_install(ms, ace_auth_get_hash_absent);
+
+    bool ret = active_chain_extend_window_have_data(
+        &ms->chain_active, &ms->map_block_index, b[5], 5);
+    ok = ok && ret;
+    ok = ok && active_chain_cached_tip(&ms->chain_active) == NULL;
+    ok = ok && active_chain_cached_height(&ms->chain_active) == 2;
+    ace_auth_reset();
+    return ok;
+}
+
+/* 19. TIP HEIGHT MISMATCH: the authority's hash resolves to a block at height 4
+ * while the window sits at 2. The height check refuses to self-heal from it. */
+static bool ace_mismatched_authority_tip_refused(struct main_state *ms)
+{
+    struct block_index *b[8];
+    bool ok = ace_empty_tip_slot_window(ms, b);
+    memcpy(ace_auth_h32, b[4]->hashBlock.data, 32);
+    ace_auth_install(ms, ace_auth_get_hash);
+
+    bool ret = active_chain_extend_window_have_data(
+        &ms->chain_active, &ms->map_block_index, b[5], 5);
+    ok = ok && ret;
+    ok = ok && active_chain_cached_tip(&ms->chain_active) == NULL;
+    ok = ok && active_chain_cached_height(&ms->chain_active) == 2;
+    ace_auth_reset();
+    return ok;
+}
+
 int test_active_chain_extend(void)
 {
     printf("\n=== active_chain_extend_window_have_data tests ===\n");
@@ -735,6 +861,37 @@ int test_active_chain_extend(void)
         ACE_CHECK("pprev-less body at tip+1 refused by all paths (no "
                   "false-reorg fuel)",
                   ace_pprevless_body_refused(&ms));
+        main_state_free(&ms);
+    }
+
+    {
+        struct main_state ms;
+        ACE_CHECK("NULL chain/map and uninitialised window are no-ops (true, "
+                  "untouched)",
+                  ace_null_args_and_no_window_are_noop(&ms));
+        main_state_free(&ms);
+    }
+
+    {
+        struct main_state ms;
+        ACE_CHECK("empty tip slot self-heals from authority-resolved tip and "
+                  "extends",
+                  ace_self_heal_reinstalls_empty_tip_slot(&ms));
+        main_state_free(&ms);
+    }
+
+    {
+        struct main_state ms;
+        ACE_CHECK("empty tip slot with no authoritative hash: no-op, height "
+                  "kept",
+                  ace_no_authoritative_tip_leaves_window(&ms));
+        main_state_free(&ms);
+    }
+
+    {
+        struct main_state ms;
+        ACE_CHECK("authority tip at a different height refused (no self-heal)",
+                  ace_mismatched_authority_tip_refused(&ms));
         main_state_free(&ms);
     }
 

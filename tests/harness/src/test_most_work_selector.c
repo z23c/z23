@@ -272,6 +272,198 @@ static int test_forward_higher_work_selected(void)
     return failures;
 }
 
+static int test_null_args_return_null(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    main_state_init(&ms);
+
+    struct block_index *g = mw_mk_idx(&ms, 0, 1, 0x00, NULL);
+    struct block_index *owned[] = {g};
+    if (!g)
+        failures++;
+    else {
+        struct most_work_selection_stats stats;
+        MW_CHECK("null args: NULL active chain returns NULL",
+                 select_most_work_eligible(NULL, &ms.map_block_index,
+                                           &stats) == NULL);
+        MW_CHECK("null args: NULL block map returns NULL",
+                 select_most_work_eligible(&ms.chain_active, NULL,
+                                           &stats) == NULL);
+    }
+
+    mw_free_state(&ms, owned, sizeof(owned) / sizeof(owned[0]));
+    return failures;
+}
+
+static int test_no_heavier_candidate_returns_tip(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    main_state_init(&ms);
+
+    struct block_index *g  = mw_mk_idx(&ms, 0, 1, 0x00, NULL);
+    struct block_index *a1 = mw_mk_idx(&ms, 1, 10, 0x0A, g);
+    struct block_index *a2 = mw_mk_idx(&ms, 2, 20, 0x0B, a1);
+    struct block_index *owned[] = {g, a1, a2};
+    struct block_index *active[] = {g, a1, a2};
+    if (!g || !a1 || !a2)
+        failures++;
+    else {
+        mw_set_active_tip(&ms, active, 3);
+
+        struct most_work_selection_stats stats;
+        struct block_index *direct = select_most_work_eligible(
+                &ms.chain_active, &ms.map_block_index, &stats);
+        MW_CHECK("no heavier candidate: selector returns active tip",
+                 direct == a2);
+        MW_CHECK("no heavier candidate: no skip counters set",
+                 stats.skipped_no_chaintx == 0 && stats.skipped_failed == 0 &&
+                 stats.skipped_invalid == 0 && stats.skipped_bad_ancestry == 0);
+        MW_CHECK("no heavier candidate: no refusal recorded",
+                 !stats.refused_below_tip &&
+                 stats.refused_below_tip_height == -1 &&
+                 stats.refused_below_tip_tip_height == -1);
+        MW_CHECK("no heavier candidate: NULL stats pointer accepted",
+                 select_most_work_eligible(&ms.chain_active,
+                                           &ms.map_block_index, NULL) == a2);
+    }
+
+    mw_free_state(&ms, owned, sizeof(owned) / sizeof(owned[0]));
+    return failures;
+}
+
+static int test_null_stats_pointer_accepted(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    main_state_init(&ms);
+
+    struct block_index *g  = mw_mk_idx(&ms, 0, 1, 0x00, NULL);
+    struct block_index *a1 = mw_mk_idx(&ms, 1, 10, 0x0A, g);
+    struct block_index *a2 = mw_mk_idx(&ms, 2, 20, 0x0B, a1);
+    struct block_index *b1 = mw_mk_idx(&ms, 1, 11, 0x1A, g);
+    struct block_index *b2 = mw_mk_idx(&ms, 2, 30, 0x1B, b1);
+    struct block_index *owned[] = {g, a1, a2, b1, b2};
+    struct block_index *active[] = {g, a1, a2};
+    if (!g || !a1 || !a2 || !b1 || !b2)
+        failures++;
+    else {
+        mw_set_active_tip(&ms, active, 3);
+        b2->nStatus |= BLOCK_FAILED_VALID;
+
+        MW_CHECK("null stats: failed candidate still skipped",
+                 select_most_work_eligible(&ms.chain_active,
+                                           &ms.map_block_index, NULL) == a2);
+    }
+
+    mw_free_state(&ms, owned, sizeof(owned) / sizeof(owned[0]));
+    return failures;
+}
+
+static int test_invalid_tree_candidate_skipped(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    main_state_init(&ms);
+
+    struct block_index *g  = mw_mk_idx(&ms, 0, 1, 0x00, NULL);
+    struct block_index *a1 = mw_mk_idx(&ms, 1, 10, 0x0A, g);
+    struct block_index *c2 = mw_mk_idx(&ms, 2, 50, 0x3B, a1);
+    struct block_index *owned[] = {g, a1, c2};
+    struct block_index *active[] = {g, a1};
+    if (!g || !a1 || !c2)
+        failures++;
+    else {
+        mw_set_active_tip(&ms, active, 2);
+        /* Have data but below BLOCK_VALID_TREE: level 0 < TREE. */
+        c2->nStatus = BLOCK_HAVE_DATA;
+
+        struct most_work_selection_stats stats;
+        struct block_index *direct = select_most_work_eligible(
+                &ms.chain_active, &ms.map_block_index, &stats);
+        MW_CHECK("invalid-tree candidate: selector returns active tip",
+                 direct == a1);
+        MW_CHECK("invalid-tree candidate: invalid counter increments",
+                 stats.skipped_invalid == 1);
+        MW_CHECK("invalid-tree candidate: not counted as failed",
+                 stats.skipped_failed == 0);
+    }
+
+    mw_free_state(&ms, owned, sizeof(owned) / sizeof(owned[0]));
+    return failures;
+}
+
+static int test_bad_ancestry_candidate_skipped(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    main_state_init(&ms);
+
+    struct block_index *g  = mw_mk_idx(&ms, 0, 1, 0x00, NULL);
+    struct block_index *a1 = mw_mk_idx(&ms, 1, 10, 0x0A, g);
+    struct block_index *a2 = mw_mk_idx(&ms, 2, 20, 0x0B, a1);
+    struct block_index *c3 = mw_mk_idx(&ms, 3, 30, 0x3A, a2);
+    struct block_index *c4 = mw_mk_idx(&ms, 4, 40, 0x3C, c3);
+    struct block_index *owned[] = {g, a1, a2, c3, c4};
+    struct block_index *active[] = {g, a1, a2};
+    if (!g || !a1 || !a2 || !c3 || !c4)
+        failures++;
+    else {
+        mw_set_active_tip(&ms, active, 3);
+        /* c4 has more work than the tip, but its ancestor c3 above the tip
+         * height is failed, so c4 must not be adopted. */
+        c3->nStatus |= BLOCK_FAILED_VALID;
+
+        struct most_work_selection_stats stats;
+        struct block_index *direct = select_most_work_eligible(
+                &ms.chain_active, &ms.map_block_index, &stats);
+        MW_CHECK("bad ancestry: selector returns active tip",
+                 direct == a2);
+        MW_CHECK("bad ancestry: ancestry counter increments",
+                 stats.skipped_bad_ancestry == 1);
+        MW_CHECK("bad ancestry: failed ancestor counted as failed",
+                 stats.skipped_failed == 1);
+    }
+
+    mw_free_state(&ms, owned, sizeof(owned) / sizeof(owned[0]));
+    return failures;
+}
+
+static int test_empty_active_chain_selects_best_block(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    main_state_init(&ms);
+
+    /* No window tip installed: the selector has no incumbent and must pick
+     * the heaviest eligible block from the map. */
+    struct block_index *g  = mw_mk_idx(&ms, 0, 1, 0x00, NULL);
+    struct block_index *a1 = mw_mk_idx(&ms, 1, 10, 0x0A, g);
+    struct block_index *a2 = mw_mk_idx(&ms, 2, 20, 0x0B, a1);
+    struct block_index *owned[] = {g, a1, a2};
+    if (!g || !a1 || !a2)
+        failures++;
+    else {
+        struct most_work_selection_stats stats;
+        struct block_index *direct = select_most_work_eligible(
+                &ms.chain_active, &ms.map_block_index, &stats);
+        MW_CHECK("empty active chain: selector picks heaviest block",
+                 direct == a2);
+        MW_CHECK("empty active chain: no below-tip refusal",
+                 !stats.refused_below_tip);
+    }
+
+    mw_free_state(&ms, owned, sizeof(owned) / sizeof(owned[0]));
+    return failures;
+}
+
 int test_most_work_selector(void)
 {
     printf("\n=== most-work selector parity tests ===\n");
@@ -281,6 +473,12 @@ int test_most_work_selector(void)
     failures += test_below_tip_candidate_refused();
     failures += test_equal_work_failed_incumbent_adopted();
     failures += test_forward_higher_work_selected();
+    failures += test_null_args_return_null();
+    failures += test_no_heavier_candidate_returns_tip();
+    failures += test_null_stats_pointer_accepted();
+    failures += test_invalid_tree_candidate_skipped();
+    failures += test_bad_ancestry_candidate_skipped();
+    failures += test_empty_active_chain_selects_best_block();
     printf("most_work_selector: %d failures\n", failures);
     return failures;
 }
