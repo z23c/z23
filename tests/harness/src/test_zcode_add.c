@@ -2000,6 +2000,87 @@ static bool za_tamper_chunk(const char *zcode, const char *content)
 }
 
 #if !defined(_WIN32)
+/* Store a valid alternate recipe under the original committed recipe key. */
+static bool za_replace_recipe_with_alternate(const struct pkgl_ctx *ctx,
+                                              const uint8_t root[32],
+                                              const uint8_t alternate[32])
+{
+    const struct vcs_package_release *release = pkgl_release_for_root(ctx, root);
+    if (!release) return false;
+    struct vcs_package_recipe recipe;
+    if (!pkgl_load_recipe(ctx, alternate, &recipe).ok) return false;
+    uint8_t *wire = NULL;
+    size_t len = 0;
+    bool ok = vcs_package_recipe_serialize(&recipe, &wire, &len) ==
+              VCS_PACKAGE_RECIPE_OK;
+    vcs_package_recipe_free(&recipe);
+    char hex[65], path[PKGL_PATH_MAX];
+    za_hex(release->recipe_root, 32, hex);
+    int n = snprintf(path, sizeof(path), "%s/recipes/%s", ctx->zcode_dir, hex);
+    ok = ok && n > 0 && (size_t)n < sizeof(path) &&
+         za_write_file(path, wire, len, 0600);
+    free(wire);
+    return ok;
+}
+
+/* A correctly signed release commits a valid recipe with a missing member. */
+static int t_verify_recipe_membership(void)
+{
+    int failures = 0;
+    char base[512] = {0}, zcode[600], rule[128];
+    struct za_file files[] = {{"LICENSE", ZA_LICENSE}, {"src/a.h", ZA_RING_H},
+                              {"src/b.c", "int fixture(void) { return 7; }\n"},
+                              {"test/t.c", ZA_RING_TEST}};
+    uint8_t root[32];
+    bool ready = test_mkdtemp(base, sizeof(base), "verify_recipe_membership") &&
+        snprintf(zcode, sizeof(zcode), "%s/zcode", base) > 0 &&
+        za_publish(zcode, "fixture/membership", "1.0.0", 1, files, 4,
+                   "src/a.h", "src/missing.c", "test/t.c", "src", root);
+    struct pkgl_ctx ctx;
+    bool opened = ready && pkgl_ctx_open(&ctx, base).ok;
+    ZA_CHECK("verify recipe: signed missing-member fixture opens", opened);
+    if (opened) {
+        struct zcl_result result = pkgl_verify_package(&ctx, root, rule, sizeof(rule));
+        ZA_CHECK("verify recipe: committed missing member refused",
+                 !result.ok && strcmp(rule, "recipe-path-not-in-manifest") == 0 &&
+                 strstr(result.message, "src/missing.c") != NULL);
+        pkgl_ctx_close(&ctx);
+    }
+    if (base[0]) za_rm_rf(base);
+    return failures;
+}
+
+/* Recipe mismatch takes precedence even if a committed chunk is corrupt. */
+static int t_verify_recipe_precedence(void)
+{
+    int failures = 0;
+    char base[512] = {0}, zcode[600], rule[128];
+    const char *content = "int fixture(void) { return 7; }\n";
+    struct za_file files[] = {{"LICENSE", ZA_LICENSE}, {"src/a.h", ZA_RING_H},
+                              {"src/b.c", content}, {"test/t.c", ZA_RING_TEST}};
+    uint8_t root[32], alternate[32];
+    bool ready = test_mkdtemp(base, sizeof(base), "verify_recipe_precedence") &&
+        snprintf(zcode, sizeof(zcode), "%s/zcode", base) > 0 &&
+        za_publish(zcode, "fixture/precedence", "1.0.0", 1, files, 4,
+                   "src/a.h", "src/b.c", "test/t.c", "src", root) &&
+        za_publish_recipe(zcode, files, 4, "src/a.h", "src/missing.c",
+                          "test/t.c", "src", NULL, alternate);
+    struct pkgl_ctx ctx;
+    bool opened = ready && pkgl_ctx_open(&ctx, base).ok;
+    ZA_CHECK("verify recipe: alternate recipe fixture opens", opened);
+    if (opened) {
+        bool changed = za_replace_recipe_with_alternate(&ctx, root, alternate) &&
+                       za_tamper_chunk(zcode, content);
+        struct zcl_result result = pkgl_verify_package(&ctx, root, rule, sizeof(rule));
+        ZA_CHECK("verify recipe: root mismatch precedes corrupt chunk",
+                 changed && !result.ok && strcmp(rule, "recipe-root-mismatch") == 0 &&
+                 strstr(result.message, "recipe does not hash") != NULL);
+        pkgl_ctx_close(&ctx);
+    }
+    if (base[0]) za_rm_rf(base);
+    return failures;
+}
+
 /* Exercise materialization directly, before lifecycle verification can refuse. */
 static int t_materialize_chunks(void)
 {
@@ -4123,6 +4204,8 @@ int test_zcode_add(void)
 #endif
 #if !defined(_WIN32)
     failures += t_materialize_chunks();
+    failures += t_verify_recipe_membership();
+    failures += t_verify_recipe_precedence();
 #endif
     failures += t_e2e();
     failures += t_programs();
