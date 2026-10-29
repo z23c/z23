@@ -46,8 +46,23 @@ bool zcl_dlr_file_sha256(const char *path,
 /* One JSON object plus a newline, created exclusively at path. */
 bool zcl_dlr_json_write_new(const struct json_value *doc, const char *path);
 
-/* check_offer, attest_offer, verify_offer_receipt, reverify_offer: true when
- * path named one of them. */
+#define DLR_QUAL_RECEIPTS_MAX 32
+
+/* What qualify_offer counted; q->code is the refusal code when it refused. */
+struct dlr_qual {
+    char commit[48], base[48], code[64];
+    char signers[DLR_QUAL_RECEIPTS_MAX][65];
+    int required, qualified, duplicates;
+};
+
+/* qualify_offer's count: true when at least `require` distinct signers other
+ * than this box's own key re-verified the offer. A refusal is in reply and
+ * q->code, with the counts in q. */
+bool zcl_dlr_qualify(const char *offer, const char *receipts, int require,
+                     struct dlr_qual *q, struct zcl_command_reply *reply);
+
+/* check_offer, attest_offer, verify_offer_receipt, reverify_offer,
+ * qualify_offer: true when path named one of them. */
 bool zcl_dlr_offer_dispatch(const char *path,
                             const struct zcl_command_request *req,
                             struct zcl_command_reply *reply);

@@ -829,10 +829,24 @@ static bool cr_match_lab(const char *path, const char *key,
     return true;
 }
 
+/* dev.land.qualify_offer: require is an integer; the handler owns the 1..16
+ * refusal so it carries QUALIFY_BAD_ARGUMENT. */
+static bool cr_match_qualify_require(const char *path, const char *key,
+                                     const struct json_value *value,
+                                     bool *type_ok)
+{
+    if (strcmp(path, "dev.land.qualify_offer") != 0 ||
+        strcmp(key, "require") != 0)
+        return false;
+    *type_ok = cr_int_range(value, INT64_MIN, INT64_MAX);
+    return true;
+}
+
 static bool cr_match_lab_or_ints(const char *path, const char *key,
                                  const struct json_value *value, bool *type_ok)
 {
-    return cr_match_lab(path, key, value, type_ok) ||
+    return cr_match_qualify_require(path, key, value, type_ok) ||
+           cr_match_lab(path, key, value, type_ok) ||
            cr_match_leaf_ints(path, key, value, type_ok);
 }
 

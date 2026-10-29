@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * dev.land.check_offer / attest_offer / verify_offer_receipt / reverify_offer:
+ * dev.land.check_offer / attest_offer / verify_offer_receipt / reverify_offer /
+ * qualify_offer:
  * the offer manifest, the signed receipt and the re-verification of an offered
  * commit. check_offer onward were moved out of native_dev_land_remote.c
  * (which keeps send and receive).
@@ -52,6 +53,18 @@
  *          receipt_out a pass is signed like attest_offer's with checks
  *          "bundle_sha256,bundle_verify,head,base,cx_check". Reply: data
  *          {commit, base, file, functions, verdict, receipt?}.
+ * qualify_offer (read-only) takes absolute --offer, --receipts (comma list,
+ *          1..32 absolute paths) and optional integer --require (default 1,
+ *          1..16; QUALIFY_BAD_ARGUMENT otherwise). Each receipt first passes
+ *          verify_offer_receipt's checks against the offer (same codes, the
+ *          receipt's path as evidence). It then counts only when its checks
+ *          include cx_check (else QUALIFY_NOT_REVERIFIED) and its signer is
+ *          not this box's own key (QUALIFY_SIGNER_NOT_DISTINCT: a lab never
+ *          vouches for itself; QUALIFY_SIGNER_KEY_UNREADABLE when that key
+ *          cannot be read). A signer seen again counts once, as a duplicate.
+ *          Fewer qualified signers than required refuses QUALIFY_SHORT with
+ *          the counts. Reply: data {commit, base, required, qualified,
+ *          signers[], duplicates, verdict "ready"}.
  */
 
 #include "command/native_command.h"
@@ -245,6 +258,18 @@ static void dlr_offer_ok(const struct dlr_offer *o,
     (void)json_push_kv_str(&reply->data, "verdict", "ok");
 }
 
+/* The bundle path, then the bundle checks against the manifest in o. */
+static bool dlr_offer_run(struct dlr_offer *o, const char *bundle,
+                          struct zcl_command_reply *reply)
+{
+    if (!zcl_dlr_bundle_abs(bundle, o->r.bundle, sizeof(o->r.bundle))) {
+        dlr_offer_fail(o->leaf, reply, "OFFER_BAD_BUNDLE", "verify",
+                       "bundle is not a usable path", bundle);
+        return false;
+    }
+    return dlr_offer_bundle(o, reply);
+}
+
 /* Reads the manifest and runs every check (check_offer and attest_offer
  * share this). NULL, with the refusal in reply, when any of them fails. */
 static struct dlr_offer *dlr_offer_checked(const struct zcl_command_request *req,
@@ -264,12 +289,7 @@ static struct dlr_offer *dlr_offer_checked(const struct zcl_command_request *req
     o = zcl_calloc(1, sizeof(*o), "dev_land_remote.offer");
     o->leaf = leaf;
     ok = dlr_offer_read(offer, o, reply) && dlr_offer_root(req, o, reply);
-    if (ok && !zcl_dlr_bundle_abs(bundle, o->r.bundle, sizeof(o->r.bundle))) {
-        dlr_offer_fail(leaf, reply, "OFFER_BAD_BUNDLE", "verify",
-                       "bundle is not a usable path", bundle);
-        ok = false;
-    }
-    if (!ok || !dlr_offer_bundle(o, reply)) {
+    if (!ok || !dlr_offer_run(o, bundle, reply)) {
         free(o);
         return NULL;
     }
@@ -519,6 +539,165 @@ static void dlr_verify_offer_receipt(const struct zcl_command_request *req,
     (void)json_push_kv_str(&reply->data, "signer", t.signer);
     (void)json_push_kv_str(&reply->data, "verdict", t.verdict);
     (void)json_push_kv_str(&reply->data, "checks", t.checks);
+}
+
+/* ── qualify_offer ─────────────────────────────────────────────────────── */
+
+#define DLR_QUALIFY_LEAF "dev.land.qualify_offer"
+#define DLR_QUAL_LIST_MAX 8192u
+
+struct dlr_qctx {
+    struct dlr_qual *q;
+    struct zcl_command_reply *reply;
+    const char *offer;
+    uint8_t own[ZCL_DEV_PROOF_SIGNER_PUBKEY_BYTES];
+    bool own_present;
+};
+
+static bool dlr_qual_refuse(struct dlr_qctx *x, const char *code,
+                            const char *msg, const char *evidence)
+{
+    (void)snprintf(x->q->code, sizeof(x->q->code), "%s", code);
+    zcl_dlr_fail(x->reply, DLR_QUALIFY_LEAF, code, "qualify", msg, evidence);
+    return false;
+}
+
+/* One receipt through verify_offer_receipt's checks against the offer; a
+ * refusal keeps that check's code, with the receipt's path as evidence. */
+static bool dlr_qual_verified(struct dlr_qctx *x, const char *path,
+                              struct dlr_receipt *t)
+{
+    struct zcl_command_reply tmp;
+    char code[sizeof(x->q->code)], msg[192];
+    bool ok;
+    zcl_command_reply_init(&tmp, "zcl.land.v1");
+    ok = dlr_receipt_read(path, t, &tmp) && dlr_receipt_verify(t, &tmp) &&
+         dlr_receipt_matches(t, x->offer, &tmp);
+    (void)snprintf(code, sizeof(code), "%s", tmp.error.code);
+    (void)snprintf(msg, sizeof(msg), "%s", tmp.error.message);
+    zcl_command_reply_free(&tmp);
+    return ok || dlr_qual_refuse(x, code, msg, path);
+}
+
+/* A verified receipt counts once per signer, and only as a reverify one from
+ * a signer that is not this box's own key. */
+static bool dlr_qual_count(struct dlr_qctx *x, const char *path,
+                           const struct dlr_receipt *t)
+{
+    struct dlr_qual *q = x->q;
+    int i;
+    if (strcmp(t->checks, DLR_RECEIPT_CHECKS_CX) != 0)
+        return dlr_qual_refuse(x, "QUALIFY_NOT_REVERIFIED",
+                               "the receipt lacks the cx_check check: it was "
+                               "not made by reverify_offer",
+                               path);
+    if (x->own_present && memcmp(t->pub, x->own, sizeof(x->own)) == 0)
+        return dlr_qual_refuse(x, "QUALIFY_SIGNER_NOT_DISTINCT",
+                               "the receipt is signed by this box's own key; "
+                               "a lab never vouches for itself",
+                               path);
+    for (i = 0; i < q->qualified; i++) {
+        if (strcmp(q->signers[i], t->signer) == 0) {
+            q->duplicates++;
+            return true;
+        }
+    }
+    (void)snprintf(q->signers[q->qualified++], sizeof(q->signers[0]), "%s",
+                   t->signer);
+    (void)snprintf(q->commit, sizeof(q->commit), "%s", t->commit);
+    (void)snprintf(q->base, sizeof(q->base), "%s", t->base);
+    return true;
+}
+
+/* The comma list, one receipt at a time. */
+static bool dlr_qual_each(struct dlr_qctx *x, const char *list)
+{
+    char buf[DLR_QUAL_LIST_MAX], *p = buf, *end;
+    int seen = 0;
+    if (snprintf(buf, sizeof(buf), "%s", list) >= (int)sizeof(buf))
+        return dlr_qual_refuse(x, "QUALIFY_BAD_ARGUMENT",
+                               "receipts is too long", "input.receipts");
+    for (;;) {
+        struct dlr_receipt t;
+        end = strchr(p, ',');
+        if (end)
+            *end = '\0';
+        if (!platform_path_is_absolute(p) || ++seen > DLR_QUAL_RECEIPTS_MAX)
+            return dlr_qual_refuse(x, "QUALIFY_BAD_ARGUMENT",
+                                   "receipts are 1 to 32 absolute paths "
+                                   "separated by commas",
+                                   p);
+        if (!dlr_qual_verified(x, p, &t) || !dlr_qual_count(x, p, &t))
+            return false;
+        if (!end)
+            return true;
+        p = end + 1;
+    }
+}
+
+/* Counts the distinct re-verified signers behind the offer; true when at
+ * least `require` of them. Every refusal is in reply and q->code. */
+bool zcl_dlr_qualify(const char *offer, const char *receipts, int require,
+                     struct dlr_qual *q, struct zcl_command_reply *reply)
+{
+    struct dlr_qctx x = {.q = q, .reply = reply, .offer = offer};
+    const char *why = NULL;
+    char ev[96];
+    memset(q, 0, sizeof(*q));
+    q->required = require;
+    if (!offer || !platform_path_is_absolute(offer) || !receipts ||
+        require < 1 || require > 16)
+        return dlr_qual_refuse(&x, "QUALIFY_BAD_ARGUMENT",
+                               "offer is an absolute path, receipts a "
+                               "comma list of absolute paths, require 1..16",
+                               "input.offer, input.receipts or input.require");
+    if (!zcl_dev_proof_signer_public(x.own, &x.own_present, &why))
+        return dlr_qual_refuse(&x, "QUALIFY_SIGNER_KEY_UNREADABLE",
+                               "this box's own signer key cannot be read, so "
+                               "no receipt can be told apart from its own",
+                               why ? why : "signer_key_unreadable");
+    if (!dlr_qual_each(&x, receipts))
+        return false;
+    if (q->qualified >= require)
+        return true;
+    (void)snprintf(ev, sizeof(ev), "qualified=%d required=%d duplicates=%d",
+                   q->qualified, require, q->duplicates);
+    return dlr_qual_refuse(&x, "QUALIFY_SHORT",
+                           "fewer distinct re-verified signers than required",
+                           ev);
+}
+
+/* Read-only: the receipts are checked, nothing is written. */
+static void dlr_qualify_offer(const struct zcl_command_request *req,
+                              struct zcl_command_reply *reply)
+{
+    struct dlr_qual q;
+    struct json_value list, one;
+    const struct json_value *rq = req->input ? json_get(req->input, "require")
+                                             : NULL;
+    int require = rq && rq->type == JSON_INT ? (int)json_get_int(rq) : 1;
+    if (rq && rq->type != JSON_INT)
+        require = 0;
+    if (!zcl_dlr_qualify(zcl_dlr_str(req, "offer"), zcl_dlr_str(req, "receipts"),
+                         require, &q, reply))
+        return;
+    json_init(&list);
+    json_set_array(&list);
+    for (int i = 0; i < q.qualified; i++) {
+        json_init(&one);
+        json_set_str(&one, q.signers[i]);
+        (void)json_push_back(&list, &one);
+        json_free(&one);
+    }
+    (void)json_push_kv_str(&reply->data, "leaf", DLR_QUALIFY_LEAF);
+    (void)json_push_kv_str(&reply->data, "commit", q.commit);
+    (void)json_push_kv_str(&reply->data, "base", q.base);
+    (void)json_push_kv_int(&reply->data, "required", q.required);
+    (void)json_push_kv_int(&reply->data, "qualified", q.qualified);
+    (void)json_push_kv(&reply->data, "signers", &list);
+    (void)json_push_kv_int(&reply->data, "duplicates", q.duplicates);
+    (void)json_push_kv_str(&reply->data, "verdict", "ready");
+    json_free(&list);
 }
 
 /* ── reverify_offer ────────────────────────────────────────────────────── */
@@ -909,6 +1088,8 @@ bool zcl_dlr_offer_dispatch(const char *path,
         dlr_verify_offer_receipt(req, reply);
     else if (strcmp(path, DLR_REVERIFY_LEAF) == 0)
         dlr_reverify_offer(req, reply);
+    else if (strcmp(path, DLR_QUALIFY_LEAF) == 0)
+        dlr_qualify_offer(req, reply);
     else
         return false;
     return true;

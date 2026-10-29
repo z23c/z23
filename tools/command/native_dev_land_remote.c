@@ -987,6 +987,7 @@ void zcl_native_handle_dev_land_remote(const struct zcl_command_request *req,
         zcl_dlr_fail(reply, "dev.land.remote", "UNKNOWN_LEAF", "route",
                  "this handler serves dev.land.send, dev.land.receive, "
                  "dev.land.check_offer, dev.land.attest_offer, "
-                 "dev.land.verify_offer_receipt and dev.land.reverify_offer",
+                 "dev.land.verify_offer_receipt, dev.land.reverify_offer and "
+                 "dev.land.qualify_offer",
                  path ? path : "no leaf resolved");
 }
