@@ -5837,6 +5837,171 @@ static int test_net_accept_inbound_socket_is_set_non_blocking(void)
     return failures;
 }
 
+/* bind_listen_port / accept_connection characterization: pins the branches
+ * reachable over loopback with the current code (the banned-peer reject, the
+ * per-IP cap and the loopback ceiling are not reachable from 127.0.0.1 here:
+ * is_banned() never bans localhost and loopback sources skip the per-IP cap
+ * by default; the IPv6 bind arm and the routable add_local() arm need a
+ * non-loopback address the sandbox does not provide). */
+static bool listen_fixture_bind(struct net_manager *nm, uint16_t port,
+                                bool whitelisted)
+{
+    struct net_service svc;
+    unsigned char ip4[4] = {127, 0, 0, 1};
+    net_service_init(&svc);
+    net_addr_set_ipv4(&svc.addr, ip4);
+    svc.port = port;
+    return bind_listen_port(nm, &svc, whitelisted);
+}
+
+static bool listen_fixture_connect(uint16_t port, zcl_socket_t *client)
+{
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(port);
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    *client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (*client == ZCL_INVALID_SOCKET)
+        return false;
+    return connect(*client, (struct sockaddr *)&to, sizeof(to)) == 0;
+}
+
+static bool listen_accept_retry(struct net_manager *nm,
+                                const struct listen_socket *ls)
+{
+    bool accepted = false;
+    for (int i = 0; i < 200 && !accepted; i++) {
+        accepted = accept_connection(nm, ls);
+        if (!accepted) platform_sleep_ms(5); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
+    }
+    return accepted;
+}
+
+static bool listen_accept_success_row(bool whitelisted)
+{
+    struct net_manager nm;
+    zcl_socket_t client = ZCL_INVALID_SOCKET;
+    net_manager_init(&nm);
+    bool ok = listen_fixture_bind(&nm, 0, whitelisted);
+    ok = ok && listen_fixture_connect(nm.listen_sockets[0].local_port, &client);
+    ok = ok && listen_accept_retry(&nm, &nm.listen_sockets[0]);
+    ok = ok && nm.num_nodes == 1;
+    if (ok) {
+        struct p2p_node *node = nm.nodes[0];
+        struct sockaddr_in me;
+        socklen_t me_len = sizeof(me);
+        memset(&me, 0, sizeof(me));
+        ok = getsockname(client, (struct sockaddr *)&me, &me_len) == 0;
+        ok = ok && node->inbound;
+        ok = ok && node->whitelisted == whitelisted;
+        ok = ok && node->accepted_local_port == nm.listen_sockets[0].local_port;
+        ok = ok && net_addr_is_ipv4(&node->addr.svc.addr);
+        ok = ok && node->addr.svc.port == ntohs(me.sin_port);
+    }
+    if (client != ZCL_INVALID_SOCKET) close_socket(&client);
+    net_manager_free(&nm);
+    return ok;
+}
+
+static bool listen_accept_cap_refusal_row(void)
+{
+    struct net_manager nm;
+    zcl_socket_t client = ZCL_INVALID_SOCKET;
+    net_manager_init(&nm);
+    nm.max_connections = MAX_OUTBOUND_CONNECTIONS; /* max_inbound == 0 */
+    bool ok = listen_fixture_bind(&nm, 0, false);
+    ok = ok && listen_fixture_connect(nm.listen_sockets[0].local_port, &client);
+    ok = ok && !accept_connection(&nm, &nm.listen_sockets[0]);
+    ok = ok && nm.num_nodes == 0;
+    /* The refusal consumed the queued connection: a raw accept now sees an
+     * empty queue (would-block), not a socket. */
+    zcl_socket_t raw = accept(nm.listen_sockets[0].socket, NULL, NULL);
+    ok = ok && raw == ZCL_INVALID_SOCKET &&
+         platform_socket_error_would_block(platform_socket_last_error());
+    if (raw != ZCL_INVALID_SOCKET) close_socket(&raw);
+    if (client != ZCL_INVALID_SOCKET) close_socket(&client);
+    net_manager_free(&nm);
+    return ok;
+}
+
+static bool listen_accept_invalid_socket_row(void)
+{
+    struct net_manager nm;
+    struct listen_socket ls;
+    net_manager_init(&nm);
+    memset(&ls, 0, sizeof(ls));
+    ls.socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP); /* not listening */
+    bool ok = ls.socket != ZCL_INVALID_SOCKET;
+    ok = ok && !accept_connection(&nm, &ls);
+    ok = ok && nm.num_nodes == 0;
+    if (ls.socket != ZCL_INVALID_SOCKET) close_socket(&ls.socket);
+    net_manager_free(&nm);
+    return ok;
+}
+
+static int test_net_bind_listen_port_branches(void)
+{
+    int failures = 0;
+    printf("bind_listen_port: ephemeral, whitelisted, duplicate port, array growth... ");
+    bool ok = true;
+    {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        ok = ok && listen_fixture_bind(&nm, 0, false);
+        ok = ok && nm.num_listen_sockets == 1;
+        ok = ok && nm.listen_sockets[0].local_port > 0;
+        ok = ok && !nm.listen_sockets[0].whitelisted;
+        /* bind() on a port a live listener holds is refused; nothing recorded */
+        uint16_t port = nm.listen_sockets[0].local_port;
+        ok = ok && !listen_fixture_bind(&nm, port, false);
+        ok = ok && nm.num_listen_sockets == 1;
+        net_manager_free(&nm);
+    }
+    {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        ok = ok && listen_fixture_bind(&nm, 0, true);
+        ok = ok && nm.num_listen_sockets == 1;
+        ok = ok && nm.listen_sockets[0].whitelisted;
+        net_manager_free(&nm);
+    }
+    {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        for (int i = 0; i < 5; i++)
+            ok = ok && listen_fixture_bind(&nm, 0, false);
+        ok = ok && nm.num_listen_sockets == 5;
+        ok = ok && nm.listen_sockets_cap >= 5;
+        net_manager_free(&nm);
+    }
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
+static int test_net_accept_connection_branches(void)
+{
+    int failures = 0;
+    printf("accept_connection: would-block, invalid socket, inbound cap refusal, admit... ");
+    bool ok = true;
+    {
+        struct net_manager nm;
+        net_manager_init(&nm);
+        ok = ok && listen_fixture_bind(&nm, 0, false);
+        ok = ok && !accept_connection(&nm, &nm.listen_sockets[0]);
+        ok = ok && nm.num_nodes == 0;
+        net_manager_free(&nm);
+    }
+    ok = ok && listen_accept_invalid_socket_row();
+    ok = ok && listen_accept_cap_refusal_row();
+    ok = ok && listen_accept_success_row(false);
+    ok = ok && listen_accept_success_row(true);
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
 /* p2p_node: create and free lifecycle */
 struct p2p_node_create_fixture {
     struct net_manager nm;
@@ -7232,6 +7397,8 @@ int test_net(void)
     failures += test_net_net_manager_ban_unban_clear();
     failures += test_net_net_manager_init_defaults();
     failures += test_net_accept_inbound_socket_is_set_non_blocking();
+    failures += test_net_bind_listen_port_branches();
+    failures += test_net_accept_connection_branches();
     failures += test_net_p2p_node_create_and_free();
     failures += test_net_p2p_node_receive_bytes_parses_message();
     failures += test_net_p2p_node_inventory_known();
