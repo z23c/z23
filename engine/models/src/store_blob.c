@@ -28,7 +28,7 @@ bool db_store_blob_put(struct node_db *ndb, const uint8_t *data, size_t len,
         LOG_FAIL("store_blob", "put: bad args (len=%zu)", len);
 
     ctype = (content_type && content_type[0]) ? content_type
-                                              : "engine/application/octet-stream";
+                                              : "application/octet-stream";
 
     zcl_sha3_256(data, len, hash);
 
@@ -78,6 +78,11 @@ bool db_store_blob_find(struct node_db *ndb,
 
     AR_READ_BLOB(s, 0, out->content_hash, STORE_BLOB_HASH_LEN);
     AR_READ_STR(s, 1, out->content_type, sizeof(out->content_type));
+    /* The 2026-10-12 rename stored "engine/application/..." (the fallback and
+     * the column DEFAULT); serve the real IANA type for those rows. */
+    if (strncmp(out->content_type, "engine/application/", 19) == 0)
+        memmove(out->content_type, out->content_type + 7,
+                strlen(out->content_type + 7) + 1);
     AR_READ_STR(s, 2, out->filename, sizeof(out->filename));
     out->size_bytes = AR_COL_INT(s, 3);
 

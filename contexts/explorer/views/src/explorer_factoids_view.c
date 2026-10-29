@@ -346,7 +346,7 @@ size_t explorer_factoids_build_json_for_served_tip(uint8_t *buf,
 
     APPEND(off, r, max,
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: engine/application/json; charset=utf-8\r\n"
+        "Content-Type: application/json; charset=utf-8\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "Cache-Control: no-store\r\n"
         "Connection: close\r\n\r\n");

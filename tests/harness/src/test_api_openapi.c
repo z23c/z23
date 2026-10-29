@@ -186,7 +186,7 @@ static bool openapi_hodl_response_ref_ok(bool ok,
     const struct json_value *hodl_200 =
         json_get(json_get(hodl, "responses"), "200");
     return ok && strcmp(json_get_str(json_get(json_get(json_get(
-               json_get(hodl_200, "content"), "engine/application/json"),
+               json_get(hodl_200, "content"), "application/json"),
                "schema"), "$ref")),
                "#/components/schemas/zcl.hodl_wave.v1") == 0;
 }

@@ -688,7 +688,7 @@ static char *node_rpc_call_http_impl(const char *method,
         "POST / HTTP/1.1\r\n"
         "Host: 127.0.0.1\r\n"
         "Authorization: Basic %s\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Content-Length: %d\r\n"
         "Connection: close\r\n\r\n", auth_b64, blen);
 

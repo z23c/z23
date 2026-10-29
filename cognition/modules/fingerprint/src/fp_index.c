@@ -93,7 +93,7 @@ static void fp_derive_group(const char *path, char *out, size_t cap)
     }
     if (strncmp(path, "lib/", 4) == 0 || strncmp(path, "app/", 4) == 0 ||
         strncmp(path, "domain/", 7) == 0 || strncmp(path, "core/", 5) == 0 ||
-        strncmp(path, "engine/application/", 12) == 0) {
+        strncmp(path, "engine/application/", 19) == 0) {
         if (slash2 == NULL) {
             n = (size_t)(slash1 - path);
         } else {

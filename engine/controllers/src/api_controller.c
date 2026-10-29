@@ -198,7 +198,7 @@ int api_rpc_call(const char *method, const char *params_json,
         "POST / HTTP/1.1\r\n"
         "Host: 127.0.0.1\r\n"
         "Authorization: Basic %s\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Content-Length: %d\r\n"
         "Connection: close\r\n\r\n%s",
         auth_b64, blen, body);
@@ -306,7 +306,7 @@ size_t api_json_status(uint8_t *r, size_t max, const char *status,
     char headers[256];
     int hn = snprintf(headers, sizeof(headers),
         "HTTP/1.1 %s\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "Cache-Control: no-cache\r\n"
         "Connection: close\r\n"
@@ -725,7 +725,7 @@ size_t api_handle_request(const char *method, const char *path,
     if (strcmp(method, "GET") != 0)
         return api_json_error(response, response_max,
             "HTTP/1.1 405 Method Not Allowed\r\n"
-            "Content-Type: engine/application/json\r\n"
+            "Content-Type: application/json\r\n"
             "Access-Control-Allow-Origin: *\r\n"
             "Connection: close\r\n\r\n",
             "Method not allowed");

@@ -244,7 +244,7 @@ static size_t yardsale_handle_accept_post(const uint8_t *body,
                                    "the accept was refused",
                                    yardsale_error_string(e),
                                    response, response_max);
-    return yardsale_http_response("200 OK", "engine/application/octet-stream",
+    return yardsale_http_response("200 OK", "application/octet-stream",
                                   partial, partial_len,
                                   response, response_max);
 }

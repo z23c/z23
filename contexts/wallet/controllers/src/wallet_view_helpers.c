@@ -276,7 +276,7 @@ int wv_rpc_call(const char *method, const char *params_json,
     int rlen = snprintf(req, sizeof(req),
         "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n"
         "Authorization: Basic %s\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Content-Length: %d\r\nConnection: close\r\n\r\n%s",
         auth_b64, blen, body);
     if (wv_snprintf_truncated(rlen, sizeof(req))) {

@@ -3424,7 +3424,7 @@ static void *delayed_vault_plan_serve(void *arg)
         "\"error\":null,\"id\":1}";
     char hdr[256];
     int hlen = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 200 OK\r\nContent-Type: engine/application/json\r\n"
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
         "Content-Length: %zu\r\nConnection: close\r\n\r\n",
         sizeof(body) - 1);
     (void)!write(fd, hdr, (size_t)hlen);
@@ -3530,7 +3530,7 @@ static void *partial_reply_serve(void *arg)
         return NULL;
     }
     static const char hdr[] =
-        "HTTP/1.1 200 OK\r\nContent-Type: engine/application/json\r\n"
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
         "Content-Length: 64\r\nConnection: close\r\n\r\n";
     (void)!write(fd, hdr, sizeof(hdr) - 1);
     close(fd);

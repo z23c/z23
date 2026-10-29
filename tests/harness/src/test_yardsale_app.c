@@ -1594,7 +1594,7 @@ static int t_seller_web_endpoint(void)
               terminated &&
               strstr((const char *)response, "200 OK") != NULL &&
               strstr((const char *)response,
-                     "engine/application/octet-stream") != NULL);
+                     "application/octet-stream") != NULL);
     struct zswap_partial_v1 partial;
     memset(&partial, 0, sizeof(partial));
     bool body_partial = false;

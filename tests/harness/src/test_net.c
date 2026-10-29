@@ -2625,7 +2625,7 @@ static int test_net_onion_service_get_status_returns_json_with_no(void)
         const char *resp = (const char *)buf;
         bool ok = (len > 0);
         ok = ok && (strstr(resp, "200 OK") != NULL);
-        ok = ok && (strstr(resp, "engine/application/json") != NULL);
+        ok = ok && (strstr(resp, "Content-Type: application/json") != NULL);
         ok = ok && (strstr(resp, "\"height\"") != NULL);
         ok = ok && (strstr(resp, "\"peers\"") != NULL);
         ok = ok && (strstr(resp, "\"version\"") != NULL);
@@ -2934,7 +2934,7 @@ static int test_net_onion_get_status_returns_json_with_height(void)
                                                  resp, sizeof(resp));
         bool ok = (n > 0);
         ok = ok && (strstr((char *)resp, "HTTP/1.1 200 OK") != NULL);
-        ok = ok && (strstr((char *)resp, "engine/application/json") != NULL);
+        ok = ok && (strstr((char *)resp, "Content-Type: application/json") != NULL);
         ok = ok && (strstr((char *)resp, "\"height\"") != NULL);
         ok = ok && (strstr((char *)resp, "\"version\"") != NULL);
         if (ok) printf("OK (%zu bytes)\n", n);

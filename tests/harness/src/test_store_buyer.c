@@ -210,7 +210,7 @@ static bool tsb_attach_blob(struct node_db *ndb, int64_t product_id,
                             const uint8_t *data, size_t len)
 {
     uint8_t hash[32];
-    if (!db_store_blob_put(ndb, data, len, "engine/application/octet-stream",
+    if (!db_store_blob_put(ndb, data, len, "application/octet-stream",
                            "payload.bin", hash))
         return false;
     return db_store_product_save_content(ndb, product_id, hash);

@@ -51,7 +51,7 @@ size_t zcode_error_response(const char *status_code,
                             uint8_t *resp, size_t max);
 
 /* Wrap arbitrary bytes (embedded NULs safe — memcpy, never printf %s) as
- * a 200 OK download: engine/application/octet-stream + Content-Disposition:
+ * a 200 OK download: application/octet-stream + Content-Disposition:
  * attachment + X-Content-Type-Options: nosniff. Returns 0 (nothing
  * written) when headers+body do not fit `max` — the caller must answer
  * with an honest capacity error, never a truncated payload. */

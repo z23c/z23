@@ -94,7 +94,7 @@ static bool p11_5_attach_blob_to_product(struct node_db *ndb,
 {
     uint8_t hash[32];
     if (!db_store_blob_put(ndb, P11_5_BLOB, sizeof(P11_5_BLOB),
-                           "engine/application/octet-stream", "secret.bin", hash))
+                           "application/octet-stream", "secret.bin", hash))
         return false;
     return db_store_product_save_content(ndb, product_id, hash);
 }
@@ -543,7 +543,7 @@ static void p11_5_gate_check_token_download(bool *ok, const char **fail_step,
         *ok = n > 0;
         *ok = *ok && strstr((char *)resp, "HTTP/1.1 200 OK") != NULL;
         *ok = *ok && strstr((char *)resp,
-                            "Content-Type: engine/application/octet-stream") != NULL;
+                            "Content-Type: application/octet-stream") != NULL;
 
         /* Locate the body after the header terminator. */
         const uint8_t *hdr_end = NULL;

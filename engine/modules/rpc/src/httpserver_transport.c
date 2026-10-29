@@ -166,6 +166,6 @@ void rpc_conn_send_response(const struct rpc_conn *conn, int status_code,
                             size_t body_len)
 {
     rpc_conn_send_response_with_type(conn, status_code, status_text,
-                                     "engine/application/json", body,
+                                     "application/json", body,
                                      body_len);
 }

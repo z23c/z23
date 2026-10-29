@@ -841,7 +841,7 @@ bool tls_client_fetch(const struct tls_client_request *req,
             const int m = snprintf(head + n, sizeof(head) - (size_t)n,
                                    "Content-Type: %s\r\nContent-Length: %zu\r\n",
                                    req->content_type ? req->content_type
-                                                     : "engine/application/octet-stream",
+                                                     : "application/octet-stream",
                                    req->body_len);
             if (m < 0 || (size_t)(n + m) >= sizeof(head)) {
                 LOG_WARN("tlsclient", "request head does not fit its buffer");

@@ -183,7 +183,7 @@ static char *rpc_call(const char *body, size_t body_cap, int composed_len)
         "POST / HTTP/1.1\r\n"
         "Host: %s\r\n"
         "Authorization: Basic %s\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
         "\r\n", g_host, auth_b64, body_len);

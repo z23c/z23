@@ -73,7 +73,7 @@ size_t store_error_response(const char *status_code,
                             const char *body, size_t body_len,
                             uint8_t *resp, size_t max);
 
-/* Wrap `body` as an `engine/application/json` HTTP response with the given
+/* Wrap `body` as an `application/json` HTTP response with the given
  * status line (e.g. "200 OK" or "404 Not Found"). GET /store.json and
  * GET /store/products/:id.json use this so a GET-only onion client can
  * discover token_id and content_hash without parsing HTML. */

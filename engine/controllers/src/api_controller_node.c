@@ -773,7 +773,7 @@ size_t api_serve_file_chunk(const char *hex, uint8_t *response,
 
     size_t off = (size_t)snprintf((char *)response, response_max,
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: engine/application/octet-stream\r\n"
+        "Content-Type: application/octet-stream\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "Cache-Control: public, max-age=31536000, immutable\r\n"
         "X-SHA3-256: %s\r\n"

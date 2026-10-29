@@ -353,7 +353,7 @@ static bool lrc_send_request(platform_socket_t sock, const char *host,
         "POST / HTTP/1.1\r\n"
         "Host: %s:%d\r\n"
         "Authorization: Basic %s\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
         "\r\n"

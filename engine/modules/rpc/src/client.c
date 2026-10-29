@@ -411,7 +411,7 @@ int rpc_call_local(int port, const char *creds,
     int rlen = snprintf(req, sizeof(req),
         "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n"
         "Authorization: Basic %s\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Content-Length: %zu\r\nConnection: close\r\n\r\n%s",
         auth_b64, body_len, body);
     if (rlen < 0 || rlen >= (int)sizeof(req)) {

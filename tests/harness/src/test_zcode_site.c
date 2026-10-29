@@ -800,7 +800,7 @@ static int t_routes_and_agreement(const char *dd)
 static bool zs_manifest_headers_ok(const char *r, size_t len)
 {
     return len > 0 && strstr(r, "HTTP/1.1 200 OK") == r &&
-           strstr(r, "Content-Type: engine/application/octet-stream") &&
+           strstr(r, "Content-Type: application/octet-stream") &&
            strstr(r, "Content-Disposition: attachment; filename="
                      "\"zcode-manifest-") &&
            strstr(r, "X-Content-Type-Options: nosniff");

@@ -192,7 +192,7 @@ static void *mock_server_loop(void *arg)  /* raw-pthread-ok: test-local */
         char resp[512];
         int rl = snprintf(resp, sizeof(resp),
             "HTTP/1.1 200 OK\r\n"
-            "Content-Type: engine/application/json\r\n"
+            "Content-Type: application/json\r\n"
             "Content-Length: %d\r\n"
             "Connection: close\r\n"
             "\r\n%s", bl, body);

@@ -93,7 +93,7 @@ int check_wallet_view_get_wallet_history_returns_history_or_loading(void)
     {
         size_t n = wv_get("/api/wallet/pulse");
         bool ok = (n > 0);
-        ok = ok && wv_has("engine/application/json");
+        ok = ok && wv_has("Content-Type: application/json");
         ok = ok && wv_has("\"height\":");
         ok = ok && wv_has("\"balance\":");
         ok = ok && wv_has("\"peers\":");

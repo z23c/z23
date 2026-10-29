@@ -165,7 +165,7 @@ static int check_supply_route_responses(void)
     {
         const char *canonical =
             "HTTP/1.1 200 OK\r\n"
-            "Content-Type: engine/application/json\r\n\r\n"
+            "Content-Type: application/json\r\n\r\n"
             "{\"schema\":\"zcl.supply.v1\",\"served_height\":9,"
             "\"indexed_height\":9,\"fresh\":true,\"freshness\":\"fresh\","
             "\"source_projection\":\"served_height\",\"blocker\":\"none\","
@@ -173,7 +173,7 @@ static int check_supply_route_responses(void)
             "\"supply\":112.5}";
         const char *legacy =
             "HTTP/1.1 200 OK\r\n"
-            "Content-Type: engine/application/json\r\n\r\n"
+            "Content-Type: application/json\r\n\r\n"
             "112.50000000";
         api_test_seed_supply_caches(canonical, legacy);
 

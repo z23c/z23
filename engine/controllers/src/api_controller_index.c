@@ -265,7 +265,7 @@ static void api_openapi_response_json(struct json_value *response,
     json_push_kv(&media, "schema", &schema);
     json_free(&schema);
 
-    json_push_kv(&content, "engine/application/json", &media);
+    json_push_kv(&content, "application/json", &media);
     json_free(&media);
 
     json_push_kv(response, "content", &content);
@@ -780,7 +780,7 @@ size_t api_serve_api_index(uint8_t *response, size_t response_max)
 
     int header_len = snprintf((char *)response, response_max,
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Access-Control-Allow-Origin: *\r\n"
         "Cache-Control: no-cache\r\n"
         "Connection: close\r\n"

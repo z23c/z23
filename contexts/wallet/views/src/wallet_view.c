@@ -171,7 +171,7 @@ void wallet_view_chain_coin(struct json_value *out,
 size_t wv_render_pulse(uint8_t *buf, size_t max, const struct wv_pulse *d) {
     return (size_t)snprintf((char *)buf, max,
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Cache-Control: no-cache\r\n"
         "Connection: close\r\n\r\n"
         "{\"height\":%d,\"balance\":%" PRId64 ",\"shielded\":%" PRId64

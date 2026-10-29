@@ -54,7 +54,7 @@ static bool http_contract_json_error_escapes_message(uint8_t *resp,
 {
     const char *headers =
         "HTTP/1.1 500 Internal Server Error\r\n"
-        "Content-Type: engine/application/json\r\n\r\n";
+        "Content-Type: application/json\r\n\r\n";
     const char *msg = "bad \"msg\"\nretry";
     size_t n = api_json_error(resp, resp_size, headers, msg);
     resp[n < resp_size ? n : resp_size - 1] = '\0';
@@ -200,6 +200,19 @@ int api_http_contract_focused_tests(void)
         bool ok = http_contract_error_envelope_matches(
             "GET", "/api/nonexistent", "404", "Unknown API endpoint",
             resp, sizeof(resp));
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+
+    printf("api: JSON endpoint sends the real IANA Content-Type... ");
+    {
+        size_t n = api_handle_request("GET", "/api/nonexistent", NULL, 0,
+                                      resp, sizeof(resp));
+        resp[n < sizeof(resp) ? n : sizeof(resp) - 1] = '\0';
+        bool ok = n > 0 &&
+                  strstr((char *)resp,
+                         "\r\nContent-Type: application/json") != NULL &&
+                  strstr((char *)resp, "engine/application/") == NULL;
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }

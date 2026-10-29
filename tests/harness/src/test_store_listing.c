@@ -162,6 +162,37 @@ static void sl_list_product(const char *dir, const char *name,
     json_free(&input);
 }
 
+/* Rows the 2026-10-12 rename stored with the engine/ prefix are served back
+ * as the real IANA type. */
+static int t_legacy_blob_content_type(void)
+{
+    int failures = 0;
+    char dir[256], db_path[512];
+    struct node_db ndb;
+    struct db_store_blob got;
+    uint8_t h[STORE_BLOB_HASH_LEN];
+    static const uint8_t data[] = "legacy-ctype";
+
+    SL_CHECK("legacy ctype: fixture datadir",
+             sl_mk_datadir(dir, sizeof(dir), "legacyct"));
+    snprintf(db_path, sizeof(db_path), "%s/node.db", dir);
+    memset(&got, 0, sizeof(got));
+    if (node_db_open_runtime(&ndb, db_path, "test.store_listing")) {
+        bool ok = db_store_blob_put(&ndb, data, sizeof(data),
+                                    "engine/application/octet-stream", NULL, h) &&
+                  db_store_blob_find(&ndb, h, &got);
+        SL_CHECK("legacy ctype: engine/application row served as real type",
+                 ok && strcmp(got.content_type,
+                              "application/octet-stream") == 0);
+        db_store_blob_free(&got);
+        node_db_close(&ndb);
+    } else {
+        SL_CHECK("legacy ctype: node.db opens", false);
+    }
+    test_rm_rf(dir);
+    return failures;
+}
+
 /* ── (1) list a product with a file, and see it on /store ─────────── */
 
 static int t_list_and_serve(void)
@@ -184,7 +215,7 @@ static int t_list_and_serve(void)
     (void)json_push_kv_real(&input, "price_zcl", 0.25);
     (void)json_push_kv_int(&input, "tokens_per_purchase", 2);
     (void)json_push_kv_str(&input, "content_path", file);
-    (void)json_push_kv_str(&input, "content_type", "engine/application/octet-stream");
+    (void)json_push_kv_str(&input, "content_type", "application/octet-stream");
     (void)json_push_kv_str(&input, "content_filename", "guide.bin");
     sl_call(zcl_native_handle_store_list_product, &input, &reply);
     json_free(&input);
@@ -398,7 +429,7 @@ static int t_storefront_json(void)
                                     sizeof(page), dir);
     page[n < sizeof(page) ? n : sizeof(page) - 1] = '\0';
     SL_CHECK("json catalog: Content-Type is JSON",
-             strstr((char *)page, "engine/application/json") != NULL);
+             strstr((char *)page, "Content-Type: application/json") != NULL);
 
     struct json_value cat;
     json_init(&cat);
@@ -416,7 +447,7 @@ static int t_storefront_json(void)
                              sizeof(page), dir);
     page[n < sizeof(page) ? n : sizeof(page) - 1] = '\0';
     SL_CHECK("json detail: Content-Type is JSON",
-             strstr((char *)page, "engine/application/json") != NULL);
+             strstr((char *)page, "Content-Type: application/json") != NULL);
 
     struct json_value detail;
     json_init(&detail);
@@ -1119,6 +1150,7 @@ int test_store_listing(void)
     int failures = 0;
     printf("\n=== Store listing (typed merchant surface) ===\n");
     failures += t_list_and_serve();
+    failures += t_legacy_blob_content_type();
     failures += t_storefront_identity();
     failures += t_storefront_json();
     failures += t_refusals();

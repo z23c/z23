@@ -42,7 +42,7 @@ struct db_store_blob {
 /* Hash `data[0..len)` with SHA3-256 and store it under that hash.
  * Idempotent: re-storing identical bytes is a no-op (INSERT OR IGNORE).
  * Writes the 32-byte content hash to out_hash on success. `content_type`
- * defaults to engine/application/octet-stream when NULL/empty; `filename` may be
+ * defaults to application/octet-stream when NULL/empty; `filename` may be
  * NULL. Returns false on bad args or a DB error. */
 bool db_store_blob_put(struct node_db *ndb, const uint8_t *data, size_t len,
                        const char *content_type, const char *filename,

@@ -207,7 +207,7 @@ static void hp_mock_send_reply(platform_socket_t cfd, const char *body,
     char hdr[256];
     int hl = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Content-Length: %d\r\n"
         "Connection: close\r\n"
         "\r\n", bl);

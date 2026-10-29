@@ -310,7 +310,7 @@ size_t store_binary_response(const uint8_t *body, size_t body_len,
     if (!resp || max == 0 || (!body && body_len > 0))
         return 0;
     if (!content_type || !content_type[0])
-        content_type = "engine/application/octet-stream";
+        content_type = "application/octet-stream";
 
     char disposition[STORE_BLOB_NAME_MAX + 64];
     store_content_disposition(disposition, sizeof(disposition),
@@ -360,7 +360,7 @@ size_t store_json_response(const char *status_code,
     if (!status_code || !status_code[0])
         status_code = "200 OK";
     return store_wrap_response(body, body_len, status_code,
-                               "engine/application/json", resp, max);
+                               "application/json", resp, max);
 }
 
 /* SHA3-256 payload digest as lowercase hex. Empty when the listing has

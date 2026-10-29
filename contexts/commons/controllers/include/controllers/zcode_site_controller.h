@@ -31,7 +31,7 @@
  *
  * SAFE DOWNLOADING: the download routes serve manifest/chunk bytes with
  * Content-Disposition: attachment + X-Content-Type-Options: nosniff and
- * engine/application/octet-stream — never anything executable inline, and the
+ * application/octet-stream — never anything executable inline, and the
  * node never compiles or executes published content. Chunk bytes are
  * rehashed against the manifest-committed SHA3-256 before serving (the
  * store's rehash-on-read discipline); a mismatch is a named integrity

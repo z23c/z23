@@ -96,7 +96,7 @@ extern pthread_mutex_t g_api_worker_generation_mutex;
 
 #define JSON_HEADERS \
     "HTTP/1.1 200 OK\r\n" \
-    "Content-Type: engine/application/json; charset=utf-8\r\n" \
+    "Content-Type: application/json; charset=utf-8\r\n" \
     "Access-Control-Allow-Origin: *\r\n" \
     "Access-Control-Allow-Methods: GET, OPTIONS\r\n" \
     "Access-Control-Allow-Headers: Content-Type\r\n" \
@@ -106,19 +106,19 @@ extern pthread_mutex_t g_api_worker_generation_mutex;
 
 #define JSON_404_HEADERS \
     "HTTP/1.1 404 Not Found\r\n" \
-    "Content-Type: engine/application/json; charset=utf-8\r\n" \
+    "Content-Type: application/json; charset=utf-8\r\n" \
     "Access-Control-Allow-Origin: *\r\n" \
     "Connection: close\r\n\r\n"
 
 #define JSON_500_HEADERS \
     "HTTP/1.1 500 Internal Server Error\r\n" \
-    "Content-Type: engine/application/json; charset=utf-8\r\n" \
+    "Content-Type: application/json; charset=utf-8\r\n" \
     "Access-Control-Allow-Origin: *\r\n" \
     "Connection: close\r\n\r\n"
 
 #define JSON_503_HEADERS \
     "HTTP/1.1 503 Service Unavailable\r\n" \
-    "Content-Type: engine/application/json; charset=utf-8\r\n" \
+    "Content-Type: application/json; charset=utf-8\r\n" \
     "Access-Control-Allow-Origin: *\r\n" \
     "Retry-After: 10\r\n" \
     "Connection: close\r\n\r\n"

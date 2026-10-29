@@ -89,7 +89,7 @@ size_t zcode_download_response(const uint8_t *body, size_t body_len,
 
     int hdr_len = snprintf((char *)resp, max,
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: engine/application/octet-stream\r\n"
+        "Content-Type: application/octet-stream\r\n"
         "Content-Disposition: attachment; filename=\"%s\"\r\n"
         "X-Content-Type-Options: nosniff\r\n"
         "Content-Length: %zu\r\n"

@@ -47,7 +47,7 @@ static size_t observation_site_serve(const char *method, const char *path,
         static const char denied[] = "{\"error\":\"method_not_allowed\"}\n";
         return (size_t)snprintf((char *)response, response_max,
             "HTTP/1.1 405 Method Not Allowed\r\n"
-            "Content-Type: engine/application/json\r\n"
+            "Content-Type: application/json\r\n"
             "Content-Length: %zu\r\n"
             "Cache-Control: no-store\r\n"
             "Connection: close\r\n\r\n%s",
@@ -71,7 +71,7 @@ static size_t observation_site_serve(const char *method, const char *path,
     char header[192];
     int hdr = snprintf(header, sizeof(header),
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Content-Length: %zu\r\n"
         "Cache-Control: no-store\r\n"
         "Connection: close\r\n\r\n", need);

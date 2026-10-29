@@ -51,16 +51,16 @@ static const char *content_type_for(const char *path)
     if (strcmp(ext, ".html") == 0 || strcmp(ext, ".htm") == 0)
         return "text/html; charset=utf-8";
     if (strcmp(ext, ".css") == 0) return "text/css";
-    if (strcmp(ext, ".js") == 0) return "engine/application/javascript";
+    if (strcmp(ext, ".js") == 0) return "application/javascript";
     if (strcmp(ext, ".png") == 0) return "image/png";
     if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".jpeg") == 0)
         return "image/jpeg";
     if (strcmp(ext, ".svg") == 0) return "image/svg+xml";
-    if (strcmp(ext, ".json") == 0) return "engine/application/json";
-    if (strcmp(ext, ".xml") == 0) return "engine/application/xml";
+    if (strcmp(ext, ".json") == 0) return "application/json";
+    if (strcmp(ext, ".xml") == 0) return "application/xml";
     if (strcmp(ext, ".txt") == 0) return "text/plain";
     if (strcmp(ext, ".ico") == 0) return "image/x-icon";
-    return "engine/application/octet-stream";
+    return "application/octet-stream";
 }
 
 /* Sanitize path: no .., no absolute paths, no control characters */

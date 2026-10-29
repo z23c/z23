@@ -90,7 +90,7 @@ static void sink_webhook(const char *url, const char *rule_name,
 
     const char *const argv[] = {
         "curl", "-s", "-X", "POST",
-        "-H", "Content-Type: engine/application/json",
+        "-H", "Content-Type: application/json",
         "-d", body, "--max-time", "5", url, NULL
     };
     ZCL_IGNORE_RESULT(zcl_spawn_detached(argv, NULL),

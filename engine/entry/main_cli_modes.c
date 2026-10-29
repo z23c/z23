@@ -1823,7 +1823,7 @@ static char *cli_rpc_call_internal_ex(const char *body, size_t body_len,
     int hlen = snprintf(hdr, sizeof(hdr),
         "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\n"
         "Authorization: Basic %s\r\n"
-        "Content-Type: engine/application/json\r\n"
+        "Content-Type: application/json\r\n"
         "Content-Length: %zu\r\nConnection: close\r\n\r\n",
         auth, body_len);
 
