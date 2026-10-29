@@ -860,17 +860,32 @@ static bool rlc_install_ztasks_variant(const char *base, const char *zcode,
  * program bytes, so the receipt-bound re-hash refuses. */
 /* Real installed programs, real confined preview, and the same native actions
  * as the window. No desktop or synthetic compatibility callback required. */
-static bool rlc_task_wait(struct task_update *update)
+static bool rlc_task_wait_detail(struct task_update *update, const char **reason,
+                                 struct zcl_result *result)
 {
     int64_t deadline = platform_time_monotonic_us() + INT64_C(15000000);
     while (update->pending && platform_time_monotonic_us() < deadline) {
         bool changed = false;
-        if (!task_update_poll(update, &changed).ok) return false;
+        struct zcl_result poll = task_update_poll(update, &changed);
+        if (!poll.ok) {
+            if (reason) *reason = "poll";
+            if (result) *result = poll;
+            return false;
+        }
         if (update->pending && (update->phase == TASK_UPDATE_KEPT ||
-            update->phase == TASK_UPDATE_READY || strstr(update->message, "restored"))) return false;
+            update->phase == TASK_UPDATE_READY || strstr(update->message, "restored"))) {
+            if (reason) *reason = "unexpected_pending_state";
+            return false;
+        }
         (void)sched_yield();
     }
+    if (update->pending && reason) *reason = "deadline_pending";
     return !update->pending;
+}
+
+static bool rlc_task_wait(struct task_update *update)
+{
+    return rlc_task_wait_detail(update, NULL, NULL);
 }
 
 static struct package_resident_identity rlc_task_identity(const struct rlc_binding *binding)
@@ -1061,24 +1076,61 @@ static int rlc_task_failures(const struct rlc_task_session *session)
     return failures;
 }
 
+/* Diagnose only the first failing cycle; expected-negative waits remain quiet. */
+static bool rlc_task_cycle_one(const struct rlc_task_session *session,
+                               unsigned cycle)
+{
+    const char *stage = "try";
+    struct zcl_result result = task_update_try(session->update, true, true);
+    if (!result.ok) goto failed;
+    stage = "wait";
+    if (!rlc_task_wait_detail(session->update, &stage, &result)) goto failed;
+    stage = "document_read";
+    result = task_document_read(session->store, session->document);
+    if (!result.ok) goto failed;
+    stage = "document_equal";
+    if (!rlc_task_equal(session->document, session->expected)) goto failed;
+    return true;
+failed:
+    printf("FAIL task cycle=%u stage=%s code=%d error=%s pending=%d phase=%d message=%s\n",
+           cycle, stage, result.code, result.message, session->update->pending != NULL,
+           (int)session->update->phase, session->update->message);
+    return false;
+}
+
+/* A failed worker release cannot safely return past stack-owned fixture state. */
+static void rlc_task_finish_or_abort(struct task_update *update)
+{
+    struct zcl_result result = task_update_finish(update);
+    if (!result.ok) {
+        fprintf(stderr, "FAIL task update cleanup: code=%d error=%s\n",
+                result.code, result.message);
+        abort();
+    }
+}
+
 static int rlc_task_cycles(const struct rlc_task_session *session)
 {
     int failures = 0;
     int64_t maximum_us = 0;
     bool cycles_passed = true;
     for (unsigned cycle = 0; cycle < 20 && cycles_passed; ++cycle) {
-        cycles_passed = task_update_try(session->update, true, true).ok && rlc_task_wait(session->update) &&
-            task_document_read(session->store, session->document).ok && rlc_task_equal(session->document, session->expected);
+        cycles_passed = rlc_task_cycle_one(session, cycle);
         if (session->update->elapsed_us > maximum_us) maximum_us = session->update->elapsed_us;
         printf("task return cycle=%u total_us=%lld helper_startup_us=%lld confined_us=%lld", cycle,
             (long long)session->update->elapsed_us, (long long)session->update->helper_startup_us,
             (long long)session->update->confined_us);
         for (unsigned step = 0; step < TASK_UPDATE_STEP_COUNT; ++step)
             printf(" step%u_us=%lld", step, (long long)session->update->step_us[step]);
+        if (!cycles_passed) printf(" metrics_may_be_stale=yes");
         putchar('\n');
 
     }
     RLC_CHECK("task journey: 20 confined compatibility checks and exact returns", cycles_passed);
+    if (!cycles_passed) {
+        rlc_task_finish_or_abort(session->update);
+        return failures;
+    }
     printf("task journey: return maximum_us=%lld real_gui=OPEN\n", (long long)maximum_us);
     RLC_CHECK("task journey: undo survives all program changes", task_document_apply(session->store, session->document->state.revision,
         TASK_DOCUMENT_UNDO, 0, NULL, session->document).ok && strcmp(session->document->state.tasks[0].title, "Edited before preview") == 0);
@@ -1167,6 +1219,53 @@ struct rlc_preview_context {
     struct package_resident_identity accepted;
 };
 
+/* Report the first failed preview operation without changing its ordering. */
+static bool rlc_preview_verify(struct rlc_preview_context *ctx, unsigned i,
+                               bool installed, const char *expected)
+{
+    const char *stage = "install";
+    struct zcl_result result = ZCL_OK;
+    if (!installed) goto failed;
+    stage = "try";
+    result = task_update_try(ctx->update, true, false);
+    if (!result.ok) goto failed;
+    stage = "wait";
+    if (!rlc_task_wait_detail(ctx->update, &stage, &result)) goto failed;
+    stage = "record_read";
+    struct package_resident_record record;
+    result = package_resident_record_read(ctx->store, &record);
+    if (!result.ok) goto failed;
+    stage = "accepted_identity";
+    if (!package_resident_identity_equal(&record.current, &ctx->accepted)) goto failed;
+    stage = "active_text";
+    if (strcmp(ctx->update->active, "No tasks yet.\n") != 0) goto failed;
+    stage = "preview_text";
+    if (strcmp(ctx->update->preview, expected) != 0) goto failed;
+    return true;
+failed:
+    printf("FAIL preview cycle=%u stage=%s code=%d error=%s pending=%d phase=%d message=%s\n",
+           i, stage, result.code, result.message, ctx->update->pending != NULL,
+           (int)ctx->update->phase, ctx->update->message);
+    return false;
+}
+
+static bool rlc_preview_restore(struct rlc_preview_context *ctx, unsigned i)
+{
+    const char *stage = "refresh";
+    struct zcl_result result = task_update_refresh(ctx->update);
+    if (!result.ok) goto failed;
+    stage = "wait";
+    if (!rlc_task_wait_detail(ctx->update, &stage, &result)) goto failed;
+    stage = "active_text_after_refresh";
+    if (strcmp(ctx->update->active, "No tasks yet.\n") != 0) goto failed;
+    return true;
+failed:
+    printf("FAIL preview cycle=%u stage=%s code=%d error=%s pending=%d phase=%d message=%s\n",
+           i, stage, result.code, result.message, ctx->update->pending != NULL,
+           (int)ctx->update->phase, ctx->update->message);
+    return false;
+}
+
 static bool rlc_preview_sample(struct rlc_preview_context *ctx, unsigned i,
                                int64_t *total_us, int64_t *build_us,
                                int64_t *execute_us)
@@ -1181,17 +1280,7 @@ static bool rlc_preview_sample(struct rlc_preview_context *ctx, unsigned i,
         version, i + 6u, line, RLC_PREVIEW_OK, &candidate);
     int64_t built = platform_time_monotonic_us();
     if (installed) ctx->update->candidate = rlc_task_identity(&candidate);
-    bool executed = installed && task_update_try(ctx->update, true, false).ok &&
-        rlc_task_wait(ctx->update);
-    struct package_resident_record record;
-    bool preserved = executed && package_resident_record_read(ctx->store, &record).ok &&
-        package_resident_identity_equal(&record.current, &ctx->accepted) &&
-        strcmp(ctx->update->active, "No tasks yet.\n") == 0 &&
-        strcmp(ctx->update->preview, expected) == 0;
-    if (!preserved) {
-        printf("preview fallback cycle=%u reason=%s\n", i, ctx->update->message);
-        return false;
-    }
+    if (!rlc_preview_verify(ctx, i, installed, expected)) return false;
     *total_us = platform_time_monotonic_us() - started;
     *build_us = built - started;
     *execute_us = *total_us - *build_us;
@@ -1201,9 +1290,7 @@ static bool rlc_preview_sample(struct rlc_preview_context *ctx, unsigned i,
            candidate.sha3, (long long)*total_us,
            (long long)*build_us, (long long)*execute_us);
     task_update_cancel(ctx->update);
-    return task_update_refresh(ctx->update).ok &&
-        rlc_task_wait(ctx->update) &&
-        strcmp(ctx->update->active, "No tasks yet.\n") == 0;
+    return rlc_preview_restore(ctx, i);
 }
 
 static int rlc_preview_fault_cases(struct rlc_preview_context *ctx)
@@ -1287,10 +1374,11 @@ static int rlc_task_preview_latency(const char *base, const char *zcode,
     }
     RLC_CHECK("preview latency: all distinct edit-to-behavior samples completed",
               measured == 20);
+    if (measured != 20) goto done;
 
     failures += rlc_preview_fault_cases(&ctx);
 done:
-    (void)task_update_finish(&update);
+    rlc_task_finish_or_abort(&update);
     (void)package_resident_store_close(&store);
     return failures;
 }
