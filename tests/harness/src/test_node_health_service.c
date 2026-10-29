@@ -335,7 +335,8 @@ static int health_test_headers_ahead_degraded(void)
     return failures;
 }
 
-/* Snapshot inside the warn lag threshold: serving with no reasons. */
+/* Snapshot inside the warn lag threshold: serving, with an empty degraded
+ * reason and an empty blocking reason. */
 static bool health_test_small_gap_snapshot_ok(
     const struct node_health_snapshot *health,
     int tip_height,
@@ -1585,7 +1586,8 @@ static bool health_test_persist_runtime_evidence(struct node_db *ndb,
     return ok;
 }
 
-/* Runtime-fallback snapshot: healthy at the seeded tip, no reason. */
+/* Runtime-fallback snapshot: healthy at the seeded tip, with an empty
+ * degraded reason. */
 static bool health_test_runtime_fallback_snapshot_ok(
     const struct node_health_snapshot *health,
     const struct block_index *tip)
