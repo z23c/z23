@@ -1373,8 +1373,8 @@ static int test_bootstatus_projects_recovery_and_blocker(void)
     TEST("core.node.bootstatus projects typed recovery and named blocker") {
         const struct zcl_command_spec *spec =
             find_spec(reg, "core.node.bootstatus");
-        char tmpl[] = "/tmp/zcl_native_bootstatus_XXXXXX";
-        char *dir = mkdtemp(tmpl);
+        char tmpl[256];
+        char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_native_bootstatus");
         ASSERT(spec != NULL);
         ASSERT(dir != NULL);
 

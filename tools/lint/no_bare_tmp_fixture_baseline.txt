@@ -26,7 +26,7 @@ tests/harness/src/test_chainstate_legacy_reader.c 2
 tests/harness/src/test_chaos_harness.c 2
 tests/harness/src/test_cli_auth_robust.c 1
 tests/harness/src/test_cold_start_driver.c 2
-tests/harness/src/test_command_registry_catalog.c 3
+tests/harness/src/test_command_registry_catalog.c 2
 tests/harness/src/test_confine.c 1
 tests/harness/src/test_consensus_state_producer_receipt.c 1
 tests/harness/src/test_core_seal.c 2
@@ -37,8 +37,8 @@ tests/harness/src/test_file_market.c 1
 tests/harness/src/test_fleet_board_bridge.c 4
 tests/harness/src/test_fleet_triggers.c 1
 tests/harness/src/test_hotswap_loader.c 6
-tests/harness/src/test_hotswap_module.c 5
-tests/harness/src/test_hotswap_module_v2.c 2
+tests/harness/src/test_hotswap_module.c 4
+tests/harness/src/test_hotswap_module_v2.c 1
 tests/harness/src/test_impact_composition.c 3
 tests/harness/src/test_importblockindex_cli_dispatch.c 1
 tests/harness/src/test_integrity.c 6

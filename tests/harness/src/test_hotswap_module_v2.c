@@ -1041,9 +1041,9 @@ static int t_sealed_image_is_bounded(void)
 {
     int failures = 0;
     TEST("sealed image rejects oversize before copying") {
-        char path[] = "/tmp/z23-hotswap-seal-XXXXXX";
+        char path[256];
         char err[256];
-        int fd = mkstemp(path);
+        int fd = test_mkstemp(path, sizeof(path), "z23-hotswap-seal");
         ASSERT(fd >= 0);
         ASSERT(ftruncate(fd, (off_t)ZCL_HOTSWAP_SEALED_IMAGE_MAX_BYTES + 1) == 0);
         int sealed = hotswap_sealed_image_from_fd(fd, err, sizeof(err));

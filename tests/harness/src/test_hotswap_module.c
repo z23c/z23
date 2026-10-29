@@ -581,8 +581,8 @@ static int test_activation_gate(void)
 {
     int failures = 0;
     TEST("activation is refused unless flag + env + exact dev datadir") {
-        char tmpl[] = "/tmp/zcl_hs_gate_XXXXXX";
-        char *home = mkdtemp(tmpl);
+        char tmpl[256];
+        char *home = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_hs_gate");
         ASSERT(home != NULL);
         char devdir[512], canondir[512];
         snprintf(devdir, sizeof(devdir), "%s/.zclassic-c23-dev", home);
