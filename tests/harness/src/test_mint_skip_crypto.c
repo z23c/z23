@@ -275,22 +275,12 @@ static bool msc_identity_same(const struct stat *a, const struct stat *b)
 #endif
 }
 
-#if defined(_WIN32)
-
-/* Child body for the Windows arm of msc_make_killed_wal: re-executed via
- * ZCL_TEST_FORK_ROLE (see test_core.h); commits the row, drops a ready-token
- * FILE, then sleeps until the parent TerminateProcess()es it. */
-static int msc_wal_writer_child(void)
+/* Opens the WAL-mode consensus.db at `path` and commits the fixture row. The
+ * connection is handed back open through *db_out: the caller keeps it alive
+ * until it is killed, because a close would checkpoint the row away. */
+static bool msc_wal_commit_fixture(sqlite3 **db_out, const char *path,
+                                   bool producer)
 {
-    const char *dir = getenv("ZCL_MSC_WAL_DIR");
-    const char *prod = getenv("ZCL_MSC_PRODUCER");
-    if (!dir || !dir[0] || !prod) return 2;
-    bool producer = strcmp(prod, "1") == 0;
-
-    char path[512];
-    int n = snprintf(path, sizeof(path), "%s/consensus.db", dir);
-    if (n <= 0 || (size_t)n >= sizeof(path)) return 2;
-
     sqlite3 *db = NULL;
     bool ok = sqlite3_open(path, &db) == SQLITE_OK &&
         sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) ==
@@ -315,6 +305,28 @@ static int msc_wal_writer_child(void)
                 SQLITE_OK &&
              sqlite3_exec(db, insert, NULL, NULL, NULL) == SQLITE_OK &&
              sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    *db_out = db;
+    return ok;
+}
+
+#if defined(_WIN32)
+
+/* Child body for the Windows arm of msc_make_killed_wal: re-executed via
+ * ZCL_TEST_FORK_ROLE (see test_core.h); commits the row, drops a ready-token
+ * FILE, then sleeps until the parent TerminateProcess()es it. */
+static int msc_wal_writer_child(void)
+{
+    const char *dir = getenv("ZCL_MSC_WAL_DIR");
+    const char *prod = getenv("ZCL_MSC_PRODUCER");
+    if (!dir || !dir[0] || !prod) return 2;
+    bool producer = strcmp(prod, "1") == 0;
+
+    char path[512];
+    int n = snprintf(path, sizeof(path), "%s/consensus.db", dir);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return 2;
+
+    sqlite3 *db = NULL;
+    bool ok = msc_wal_commit_fixture(&db, path, producer);
 
     char ready_path[560];
     if (snprintf(ready_path, sizeof(ready_path), "%s/wal_ready.token", dir) <= 0)
@@ -346,6 +358,66 @@ int msc_fork_role_dispatch(const char *role)
 }
 
 #endif /* _WIN32 */
+
+#if !defined(_WIN32)
+
+/* Child side of the POSIX arm: commit the row, report 'R' (or 'E') on `fd`,
+ * then wait to be killed. Never returns. */
+static void msc_wal_posix_child(int fd, const char *path, bool producer)
+{
+    sqlite3 *db = NULL;
+    bool ok = msc_wal_commit_fixture(&db, path, producer);
+    const char token = ok ? 'R' : 'E';
+    TEST_DISCARD(write(fd, &token, 1));
+    if (!ok)
+        _exit(2);
+    for (;;)
+        pause();
+}
+
+/* Parent side of the POSIX arm: read the child's token, SIGKILL a child that
+ * reported 'R', reap it, and accept only a clean SIGKILL death. */
+static bool msc_wal_reap_posix_child(int fd, pid_t child)
+{
+    char token = 0;
+    ssize_t got;
+    do {
+        got = read(fd, &token, 1);
+    } while (got < 0 && errno == EINTR);
+    close(fd);
+    if (got == 1 && token == 'R')
+        (void)kill(child, SIGKILL);
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    return got == 1 && token == 'R' && waited == child &&
+        WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
+}
+
+/* Forks the fixture writer and returns whether it committed, reported 'R' and
+ * was SIGKILLed while its WAL connection was still open. */
+static bool msc_wal_posix_spawn(const char *path, bool producer)
+{
+    int ready[2];
+    if (pipe(ready) != 0)
+        return false;
+    pid_t child = fork();
+    if (child < 0) {
+        close(ready[0]);
+        close(ready[1]);
+        return false;
+    }
+    if (child == 0) {
+        close(ready[0]);
+        msc_wal_posix_child(ready[1], path, producer);
+    }
+    close(ready[1]);
+    return msc_wal_reap_posix_child(ready[0], child);
+}
+
+#endif /* !_WIN32 */
 
 /* Leave a committed row only in a kill-9-surviving WAL: the child keeps the
  * SQLite connection open until the parent kills it, so no graceful close can
@@ -385,65 +457,7 @@ static bool msc_make_killed_wal(const char *dir, bool producer)
     (void)unlink(ready_path);
     return ready && code == 137;
 #else
-    int ready[2];
-    if (pipe(ready) != 0)
-        return false;
-    pid_t child = fork();
-    if (child < 0) {
-        close(ready[0]);
-        close(ready[1]);
-        return false;
-    }
-    if (child == 0) {
-        close(ready[0]);
-        sqlite3 *db = NULL;
-        bool ok = sqlite3_open(path, &db) == SQLITE_OK &&
-            sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) ==
-                SQLITE_OK &&
-            sqlite3_exec(db, "PRAGMA synchronous=FULL", NULL, NULL, NULL) ==
-                SQLITE_OK &&
-            sqlite3_exec(db, "PRAGMA wal_autocheckpoint=0", NULL, NULL, NULL) ==
-                SQLITE_OK &&
-            sqlite3_exec(db,
-                "CREATE TABLE IF NOT EXISTS progress_meta("
-                "key TEXT PRIMARY KEY,value BLOB NOT NULL)",
-                NULL, NULL, NULL) == SQLITE_OK &&
-            sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)",
-                         NULL, NULL, NULL) == SQLITE_OK;
-        const char *insert = producer
-            ? "INSERT OR REPLACE INTO progress_meta(key,value) VALUES('"
-              MINT_ANCHOR_PRODUCER_LANE_KEY "',X'02')"
-            : "INSERT OR REPLACE INTO progress_meta(key,value) "
-              "VALUES('ordinary_serving_marker',X'01')";
-        if (ok)
-            ok = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) ==
-                    SQLITE_OK &&
-                 sqlite3_exec(db, insert, NULL, NULL, NULL) == SQLITE_OK &&
-                 sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
-        const char token = ok ? 'R' : 'E';
-         TEST_DISCARD(write(ready[1], &token, 1));
-        if (!ok)
-            _exit(2);
-        for (;;)
-            pause();
-    }
-
-    close(ready[1]);
-    char token = 0;
-    ssize_t got;
-    do {
-        got = read(ready[0], &token, 1);
-    } while (got < 0 && errno == EINTR);
-    close(ready[0]);
-    if (got == 1 && token == 'R')
-        (void)kill(child, SIGKILL);
-    int status = 0;
-    pid_t waited;
-    do {
-        waited = waitpid(child, &status, 0);
-    } while (waited < 0 && errno == EINTR);
-    return got == 1 && token == 'R' && waited == child &&
-        WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
+    return msc_wal_posix_spawn(path, producer);
 #endif
 }
 
@@ -478,6 +492,49 @@ static bool seed_body_persist(sqlite3 *db, int n)
     return ok;
 }
 
+/* Reports whether a stage table binds source_epoch_digest (utxo_apply does
+ * not); false for any table this check does not know. */
+static bool stage_rows_epoch_bound(const char *table, bool *epoch_bound)
+{
+    bool script = strcmp(table, "script_validate_log") == 0;
+    bool proof = strcmp(table, "proof_validate_log") == 0;
+    bool utxo = strcmp(table, "utxo_apply_log") == 0;
+    if (!script && !proof && !utxo)
+        return false;
+    *epoch_bound = !utxo;
+    return true;
+}
+
+/* Height and status columns of the current stage row match the expectation. */
+static bool stage_row_key_matches(sqlite3_stmt *stmt, int expected,
+                                  const char *status, size_t status_size)
+{
+    int status_type = sqlite3_column_type(stmt, 1);
+    const void *text = status_type == SQLITE_TEXT
+        ? sqlite3_column_text(stmt, 1) : NULL;
+    return sqlite3_column_type(stmt, 0) == SQLITE_INTEGER &&
+        sqlite3_column_int(stmt, 0) == expected &&
+        status_type == SQLITE_TEXT && text &&
+        sqlite3_column_bytes(stmt, 1) == (int)status_size &&
+        memcmp(text, status, status_size) == 0;
+}
+
+/* The current row's epoch is exactly `epoch`: an epoch-bound table must hold a
+ * 32-byte BLOB there, the other tables carry no epoch to compare. */
+static bool stage_row_epoch_matches(sqlite3_stmt *stmt, bool epoch_bound,
+                                    const uint8_t epoch[32])
+{
+    int epoch_type = epoch_bound ? sqlite3_column_type(stmt, 2) : SQLITE_BLOB;
+    const void *row_epoch = epoch_bound
+        ? (epoch_type == SQLITE_BLOB ? sqlite3_column_blob(stmt, 2) : NULL)
+        : epoch;
+    if (!row_epoch)
+        return false;
+    return !epoch_bound ||
+        (epoch_type == SQLITE_BLOB && sqlite3_column_bytes(stmt, 2) == 32 &&
+         memcmp(row_epoch, epoch, 32) == 0);
+}
+
 /* Run the script_validate -> proof_validate -> utxo_apply tail over `n`
  * heights in a fresh datadir; `skip` selects full validation (false) or
  * state-only (true). Writes the commitment, count and whether real script
@@ -485,12 +542,9 @@ static bool seed_body_persist(sqlite3 *db, int n)
 static bool stage_rows_match(sqlite3 *db, const char *table, int rows,
                              const char *status, const uint8_t epoch[32])
 {
-    bool script = strcmp(table, "script_validate_log") == 0;
-    bool proof = strcmp(table, "proof_validate_log") == 0;
-    bool utxo = strcmp(table, "utxo_apply_log") == 0;
-    if (!script && !proof && !utxo)
+    bool epoch_bound = false;
+    if (!stage_rows_epoch_bound(table, &epoch_bound))
         return false;
-    bool epoch_bound = !utxo;
     char sql[160];
     int size = snprintf(sql, sizeof(sql),
         "SELECT height,status%s FROM %s ORDER BY height",
@@ -504,23 +558,8 @@ static bool stage_rows_match(sqlite3 *db, const char *table, int rows,
     int rc;
     size_t status_size = strlen(status);
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-        int status_type = sqlite3_column_type(stmt, 1);
-        int epoch_type = epoch_bound ? sqlite3_column_type(stmt, 2)
-                                     : SQLITE_BLOB;
-        const void *text = status_type == SQLITE_TEXT
-            ? sqlite3_column_text(stmt, 1) : NULL;
-        const void *row_epoch = epoch_bound
-            ? (epoch_type == SQLITE_BLOB ? sqlite3_column_blob(stmt, 2) : NULL)
-            : epoch;
-        if (sqlite3_column_type(stmt, 0) != SQLITE_INTEGER ||
-            sqlite3_column_int(stmt, 0) != expected ||
-            status_type != SQLITE_TEXT || !text ||
-            !row_epoch ||
-            sqlite3_column_bytes(stmt, 1) != (int)status_size ||
-            memcmp(text, status, status_size) != 0 ||
-            (epoch_bound && (epoch_type != SQLITE_BLOB ||
-             sqlite3_column_bytes(stmt, 2) != 32 ||
-             memcmp(row_epoch, epoch, 32) != 0))) {
+        if (!stage_row_key_matches(stmt, expected, status, status_size) ||
+            !stage_row_epoch_matches(stmt, epoch_bound, epoch)) {
             sqlite3_finalize(stmt);
             return false;
         }
@@ -773,19 +812,11 @@ static bool msc_stat_times_equal(const struct stat *a, const struct stat *b)
 }
 #endif
 
-static int test_mint_anchor_lane_containment(void)
+/* Serving-datadir rows: the clean boot, the legitimate seed anchor, and the
+ * embedded-NUL and checkpoint evidence that must stay contained. */
+static int msc_lane_check_serving_rows(sqlite3 *db)
 {
     int failures = 0;
-    char dir[256];
-    test_fmt_tmpdir(dir, sizeof(dir), "mint_skip_crypto", "producer_lane");
-    mkdir_p("./test-tmp");
-    mkdir_p(dir);
-    bool opened = progress_store_open(dir);
-    sqlite3 *db = opened ? progress_store_db() : NULL;
-    MSC_CHECK("producer lane: progress store opens", opened && db);
-    if (!opened || !db)
-        return failures + 1;
-
     char reason[256];
     MSC_CHECK("producer lane: clean serving datadir is allowed",
               mint_anchor_normal_boot_allowed(db, reason, sizeof(reason)));
@@ -810,6 +841,12 @@ static int test_mint_anchor_lane_containment(void)
               reason[0] != '\0');
     MSC_CHECK("producer lane: remove checkpoint fixture row",
               exec_sql(db, "DELETE FROM utxo_apply_log WHERE height=8"));
+    return failures;
+}
+
+static int msc_lane_check_malformed_ok(sqlite3 *db)
+{
+    int failures = 0;
     MSC_CHECK("producer lane: malformed ok storage is not success",
               exec_sql(db,
                   "INSERT INTO utxo_apply_log VALUES(9,'verified',"
@@ -817,9 +854,14 @@ static int test_mint_anchor_lane_containment(void)
               !utxo_apply_stage_succeeded_at(9));
     MSC_CHECK("producer lane: remove malformed ok fixture row",
               exec_sql(db, "DELETE FROM utxo_apply_log WHERE height=9"));
+    return failures;
+}
 
-    /* Pre-lane state is ambiguous (old full and fast producers wrote the same
-     * rows): it may only be adopted as checkpoint_fold, never promoted. */
+/* Pre-lane state is ambiguous (old full and fast producers wrote the same
+ * rows): it may only be adopted as checkpoint_fold, never promoted. */
+static int msc_lane_check_legacy_adoption(sqlite3 *db)
+{
+    int failures = 0;
     MSC_CHECK("producer lane: legacy applied frontier fixture",
               msc_set_applied_height(db, 43));
     MSC_CHECK("producer lane: legacy refold fixture",
@@ -840,7 +882,14 @@ static int test_mint_anchor_lane_containment(void)
     MSC_CHECK("producer lane: downgraded legacy can never become full",
               !mint_anchor_producer_lane_bind(db, false));
     msc_clear_refold_progress(db);
+    return failures;
+}
 
+/* TEXT and REAL in-progress markers never authorize resume or normal boot. */
+static int msc_lane_check_marker_fixtures(sqlite3 *db)
+{
+    int failures = 0;
+    char reason[256];
     MSC_CHECK("producer lane: TEXT marker fixture writes",
               exec_sql(db,
                   "INSERT OR REPLACE INTO progress_meta(key,value) VALUES('"
@@ -861,7 +910,13 @@ static int test_mint_anchor_lane_containment(void)
               !mint_anchor_normal_boot_allowed(db, reason, sizeof(reason)));
     MSC_CHECK("producer lane: remove REAL marker fixture",
               progress_meta_delete(db, MINT_ANCHOR_IN_PROGRESS_KEY));
+    return failures;
+}
 
+static int msc_lane_check_legacy_marker(sqlite3 *db)
+{
+    int failures = 0;
+    char reason[256];
     uint8_t legacy_marker[48] = {0};
     memcpy(legacy_marker, "ZAM1", 4);
     MSC_CHECK("producer lane: legacy in-progress marker is written",
@@ -872,7 +927,14 @@ static int test_mint_anchor_lane_containment(void)
               strstr(reason, "in-progress marker") != NULL);
     MSC_CHECK("producer lane: remove legacy marker fixture",
               progress_meta_delete(db, MINT_ANCHOR_IN_PROGRESS_KEY));
+    return failures;
+}
 
+/* TEXT and REAL producer-lane fixtures never authorize resume or normal boot. */
+static int msc_lane_check_lane_fixtures(sqlite3 *db)
+{
+    int failures = 0;
+    char reason[256];
     MSC_CHECK("producer lane: numeric-prefix TEXT lane fixture writes",
               exec_sql(db,
                   "INSERT OR REPLACE INTO progress_meta(key,value) VALUES('"
@@ -891,7 +953,15 @@ static int test_mint_anchor_lane_containment(void)
               !mint_anchor_normal_boot_allowed(db, reason, sizeof(reason)));
     MSC_CHECK("producer lane: remove REAL lane fixture",
               progress_meta_delete(db, MINT_ANCHOR_PRODUCER_LANE_KEY));
+    return failures;
+}
 
+/* A checkpoint profile binds the lane durably and the producer lane can never
+ * become a serving node. */
+static int msc_lane_check_profile_bind(sqlite3 *db)
+{
+    int failures = 0;
+    char reason[256];
     MSC_CHECK("producer lane: checkpoint profile binds durably",
               mint_anchor_producer_lane_bind(db, true));
     MSC_CHECK("producer lane: same profile may resume",
@@ -901,17 +971,23 @@ static int test_mint_anchor_lane_containment(void)
     MSC_CHECK("producer lane: producer cannot become serving node",
               !mint_anchor_normal_boot_allowed(db, reason, sizeof(reason)) &&
               strstr(reason, "producer lane") != NULL);
+    return failures;
+}
 
-    progress_store_close();
-    opened = progress_store_open(dir);
-    db = opened ? progress_store_db() : NULL;
+static int msc_lane_check_reopen(sqlite3 *db, bool opened)
+{
+    int failures = 0;
+    char reason[256];
     MSC_CHECK("producer lane: progress store reopens", opened && db);
     MSC_CHECK("producer lane: restart cannot erase containment",
               db && !mint_anchor_normal_boot_allowed(
                   db, reason, sizeof(reason)) && reason[0] != '\0');
-    if (opened)
-        progress_store_close();
+    return failures;
+}
 
+static int msc_lane_check_preflight(const char *dir)
+{
+    int failures = 0;
     char progress_path[512],node_path[512],wallet_path[512];
     snprintf(progress_path,sizeof(progress_path),"%s/consensus.db",dir);
     snprintf(node_path,sizeof(node_path),"%s/node.db",dir);
@@ -926,6 +1002,125 @@ static int test_mint_anchor_lane_containment(void)
               before.st_size==after.st_size&&before.st_mode==after.st_mode&&
               msc_stat_times_equal(&before,&after)&&
               access(node_path,F_OK)!=0&&access(wallet_path,F_OK)!=0);
+    return failures;
+}
+
+static int test_mint_anchor_lane_containment(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_fmt_tmpdir(dir, sizeof(dir), "mint_skip_crypto", "producer_lane");
+    mkdir_p("./test-tmp");
+    mkdir_p(dir);
+    bool opened = progress_store_open(dir);
+    sqlite3 *db = opened ? progress_store_db() : NULL;
+    MSC_CHECK("producer lane: progress store opens", opened && db);
+    if (!opened || !db)
+        return failures + 1;
+
+    failures += msc_lane_check_serving_rows(db);
+    failures += msc_lane_check_malformed_ok(db);
+    failures += msc_lane_check_legacy_adoption(db);
+    failures += msc_lane_check_marker_fixtures(db);
+    failures += msc_lane_check_legacy_marker(db);
+    failures += msc_lane_check_lane_fixtures(db);
+    failures += msc_lane_check_profile_bind(db);
+
+    progress_store_close();
+    opened = progress_store_open(dir);
+    db = opened ? progress_store_db() : NULL;
+    failures += msc_lane_check_reopen(db, opened);
+    if (opened)
+        progress_store_close();
+
+    failures += msc_lane_check_preflight(dir);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* Paths of a datadir's consensus.db family; false when one does not fit. */
+struct msc_wal_family {
+    char main_path[512];
+    char wal_path[512];
+    char shm_path[512];
+};
+
+static bool msc_wal_family_paths(const char *dir, struct msc_wal_family *f)
+{
+    int n1 = snprintf(f->main_path, sizeof(f->main_path), "%s/consensus.db", dir);
+    int n2 = snprintf(f->wal_path, sizeof(f->wal_path), "%s/consensus.db-wal", dir);
+    int n3 = snprintf(f->shm_path, sizeof(f->shm_path), "%s/consensus.db-shm", dir);
+    return n1 > 0 && (size_t)n1 < sizeof(f->main_path) &&
+        n2 > 0 && (size_t)n2 < sizeof(f->wal_path) &&
+        n3 > 0 && (size_t)n3 < sizeof(f->shm_path);
+}
+
+/* Removes the shm sidecar and records the main and WAL identities; true only
+ * when the source is the main file plus a non-empty WAL and no shm. */
+static bool msc_wal_source_identity(const char *dir, bool made,
+                                    struct msc_wal_family *f,
+                                    struct stat *main_before,
+                                    struct stat *wal_before)
+{
+    bool paths_ok = msc_wal_family_paths(dir, f);
+    bool shm_removed = paths_ok &&
+        (unlink(f->shm_path) == 0 || errno == ENOENT);
+    return made && shm_removed &&
+        lstat(f->main_path, main_before) == 0 &&
+        lstat(f->wal_path, wal_before) == 0 && wal_before->st_size > 0 &&
+        access(f->shm_path, F_OK) != 0 && errno == ENOENT;
+}
+
+/* The source family is exactly the identity recorded before the preflight. */
+static bool msc_wal_source_unchanged(const struct msc_wal_family *f,
+                                     bool identity_ready,
+                                     const struct stat *main_before,
+                                     const struct stat *wal_before)
+{
+    struct stat main_after, wal_after;
+    return identity_ready &&
+        lstat(f->main_path, &main_after) == 0 &&
+        lstat(f->wal_path, &wal_after) == 0 &&
+        msc_identity_same(main_before, &main_after) &&
+        msc_identity_same(wal_before, &wal_after) &&
+        access(f->shm_path, F_OK) != 0 && errno == ENOENT;
+}
+
+/* One kill-9 WAL fixture: the preflight refuses the producer marker and allows
+ * the benign row, and the source family is left unchanged either way. */
+static int msc_wal_preflight_case(bool producer)
+{
+    int failures = 0;
+    char dir[256];
+    test_fmt_tmpdir(dir, sizeof(dir), "mint_skip_crypto",
+                    producer ? "killed_wal_producer" :
+                               "killed_wal_benign");
+    mkdir_p("./test-tmp");
+    mkdir_p(dir);
+
+    bool made = msc_make_killed_wal(dir, producer);
+    MSC_CHECK(producer ? "WAL preflight: producer kill-9 fixture"
+                       : "WAL preflight: benign kill-9 fixture",
+              made);
+
+    struct msc_wal_family family;
+    struct stat main_before, wal_before;
+    bool identity_ready = msc_wal_source_identity(dir, made, &family,
+                                                  &main_before, &wal_before);
+    MSC_CHECK("WAL preflight: source is main plus non-empty WAL only",
+              identity_ready);
+
+    bool allowed = identity_ready &&
+        boot_mint_anchor_normal_boot_preflight(dir);
+    MSC_CHECK(producer
+                  ? "WAL preflight: WAL-only producer marker is refused"
+                  : "WAL preflight: benign WAL-only row is allowed",
+              producer ? identity_ready && !allowed : allowed);
+
+    bool unchanged = msc_wal_source_unchanged(&family, identity_ready,
+                                              &main_before, &wal_before);
+    MSC_CHECK("WAL preflight: source family remains exactly unchanged",
+              unchanged);
     test_cleanup_tmpdir(dir);
     return failures;
 }
@@ -933,54 +1128,8 @@ static int test_mint_anchor_lane_containment(void)
 static int test_normal_boot_preflight_killed_wal(void)
 {
     int failures = 0;
-    for (int producer = 0; producer <= 1; producer++) {
-        char dir[256];
-        test_fmt_tmpdir(dir, sizeof(dir), "mint_skip_crypto",
-                        producer ? "killed_wal_producer" :
-                                   "killed_wal_benign");
-        mkdir_p("./test-tmp");
-        mkdir_p(dir);
-
-        bool made = msc_make_killed_wal(dir, producer != 0);
-        MSC_CHECK(producer ? "WAL preflight: producer kill-9 fixture"
-                           : "WAL preflight: benign kill-9 fixture",
-                  made);
-
-        char main_path[512], wal_path[512], shm_path[512];
-        int n1 = snprintf(main_path, sizeof(main_path), "%s/consensus.db", dir);
-        int n2 = snprintf(wal_path, sizeof(wal_path), "%s/consensus.db-wal", dir);
-        int n3 = snprintf(shm_path, sizeof(shm_path), "%s/consensus.db-shm", dir);
-        bool paths_ok = n1 > 0 && (size_t)n1 < sizeof(main_path) &&
-            n2 > 0 && (size_t)n2 < sizeof(wal_path) &&
-            n3 > 0 && (size_t)n3 < sizeof(shm_path);
-        bool shm_removed = paths_ok &&
-            (unlink(shm_path) == 0 || errno == ENOENT);
-        struct stat main_before, wal_before;
-        bool identity_ready = made && shm_removed &&
-            lstat(main_path, &main_before) == 0 &&
-            lstat(wal_path, &wal_before) == 0 && wal_before.st_size > 0 &&
-            access(shm_path, F_OK) != 0 && errno == ENOENT;
-        MSC_CHECK("WAL preflight: source is main plus non-empty WAL only",
-                  identity_ready);
-
-        bool allowed = identity_ready &&
-            boot_mint_anchor_normal_boot_preflight(dir);
-        MSC_CHECK(producer
-                      ? "WAL preflight: WAL-only producer marker is refused"
-                      : "WAL preflight: benign WAL-only row is allowed",
-                  producer ? identity_ready && !allowed : allowed);
-
-        struct stat main_after, wal_after;
-        bool unchanged = identity_ready &&
-            lstat(main_path, &main_after) == 0 &&
-            lstat(wal_path, &wal_after) == 0 &&
-            msc_identity_same(&main_before, &main_after) &&
-            msc_identity_same(&wal_before, &wal_after) &&
-            access(shm_path, F_OK) != 0 && errno == ENOENT;
-        MSC_CHECK("WAL preflight: source family remains exactly unchanged",
-                  unchanged);
-        test_cleanup_tmpdir(dir);
-    }
+    for (int producer = 0; producer <= 1; producer++)
+        failures += msc_wal_preflight_case(producer != 0);
     return failures;
 }
 
@@ -1083,6 +1232,86 @@ static bool msc_epoch_cell(sqlite3 *db, const char *table, int height,
     return rc == SQLITE_DONE;
 }
 
+/* TEXT and REAL epoch fixtures: neither may publish a script or proof receipt. */
+static int msc_source_epoch_non_blob_refused(sqlite3 *db, struct uint256 *hash)
+{
+    int failures = 0;
+    MSC_CHECK("source epoch: numeric-prefix TEXT fixture writes",
+              exec_sql(db,
+                  "INSERT OR REPLACE INTO progress_meta(key,value) VALUES('"
+                  CONSENSUS_STATE_SOURCE_EPOCH_META_KEY
+                  "',CAST('123x' AS TEXT))"));
+    MSC_CHECK("source epoch: TEXT refuses script receipt publication",
+              !script_validate_log_insert(db, 1, "verified", true, 0, 0,
+                                          NULL, -1, SCRIPT_ERR_OK, hash));
+    MSC_CHECK("source epoch: TEXT refuses proof receipt publication",
+              !proof_validate_log_insert(db, 1, "verified", true, 0, 0, 0,
+                                         hash, NULL, NULL));
+
+    MSC_CHECK("source epoch: REAL fixture writes",
+              exec_sql(db,
+                  "INSERT OR REPLACE INTO progress_meta(key,value) VALUES('"
+                  CONSENSUS_STATE_SOURCE_EPOCH_META_KEY "',1.25)"));
+    MSC_CHECK("source epoch: REAL refuses script receipt publication",
+              !script_validate_log_insert(db, 2, "verified", true, 0, 0,
+                                          NULL, -1, SCRIPT_ERR_OK, hash));
+    MSC_CHECK("source epoch: REAL refuses proof receipt publication",
+              !proof_validate_log_insert(db, 2, "verified", true, 0, 0, 0,
+                                         hash, NULL, NULL));
+    return failures;
+}
+
+/* With no epoch row the legacy receipts are kept, explicitly unbound. */
+static int msc_source_epoch_legacy_unbound(sqlite3 *db, struct uint256 *hash)
+{
+    int failures = 0;
+    int type = -1, bytes = -1;
+    bool found = false;
+    MSC_CHECK("source epoch: optional legacy absence fixture",
+              progress_meta_delete(db, CONSENSUS_STATE_SOURCE_EPOCH_META_KEY));
+    MSC_CHECK("source epoch: absent epoch keeps legacy script receipt",
+              script_validate_log_insert(db, 3, "verified", true, 0, 0,
+                                         NULL, -1, SCRIPT_ERR_OK, hash));
+    MSC_CHECK("source epoch: absent epoch keeps legacy proof receipt",
+              proof_validate_log_insert(db, 3, "verified", true, 0, 0, 0,
+                                        hash, NULL, NULL));
+    MSC_CHECK("source epoch: legacy script receipt is explicitly unbound",
+              msc_epoch_cell(db, "script_validate_log", 3, &type, &bytes,
+                             &found) && found && type == SQLITE_NULL);
+    MSC_CHECK("source epoch: legacy proof receipt is explicitly unbound",
+              msc_epoch_cell(db, "proof_validate_log", 3, &type, &bytes,
+                             &found) && found && type == SQLITE_NULL);
+    return failures;
+}
+
+/* An exact 32-byte BLOB epoch binds both receipts and stores a BLOB32. */
+static int msc_source_epoch_exact_blob(sqlite3 *db, struct uint256 *hash)
+{
+    int failures = 0;
+    int type = -1, bytes = -1;
+    bool found = false;
+    uint8_t epoch[32];
+    memset(epoch, 0xa5, sizeof(epoch));
+    MSC_CHECK("source epoch: exact BLOB authority writes",
+              progress_meta_set(db, CONSENSUS_STATE_SOURCE_EPOCH_META_KEY,
+                                epoch, sizeof(epoch)));
+    MSC_CHECK("source epoch: exact BLOB binds script receipt",
+              script_validate_log_insert(db, 4, "verified", true, 0, 0,
+                                         NULL, -1, SCRIPT_ERR_OK, hash));
+    MSC_CHECK("source epoch: exact BLOB binds proof receipt",
+              proof_validate_log_insert(db, 4, "verified", true, 0, 0, 0,
+                                        hash, NULL, NULL));
+    MSC_CHECK("source epoch: script receipt stores exact BLOB32",
+              msc_epoch_cell(db, "script_validate_log", 4, &type, &bytes,
+                             &found) && found && type == SQLITE_BLOB &&
+              bytes == 32);
+    MSC_CHECK("source epoch: proof receipt stores exact BLOB32",
+              msc_epoch_cell(db, "proof_validate_log", 4, &type, &bytes,
+                             &found) && found && type == SQLITE_BLOB &&
+              bytes == 32);
+    return failures;
+}
+
 static int test_source_epoch_authority_types(void)
 {
     int failures = 0;
@@ -1102,65 +1331,9 @@ static int test_source_epoch_authority_types(void)
     struct uint256 hash;
     uint256_set_null(&hash);
     hash.data[0] = 0x42;
-    MSC_CHECK("source epoch: numeric-prefix TEXT fixture writes",
-              exec_sql(db,
-                  "INSERT OR REPLACE INTO progress_meta(key,value) VALUES('"
-                  CONSENSUS_STATE_SOURCE_EPOCH_META_KEY
-                  "',CAST('123x' AS TEXT))"));
-    MSC_CHECK("source epoch: TEXT refuses script receipt publication",
-              !script_validate_log_insert(db, 1, "verified", true, 0, 0,
-                                          NULL, -1, SCRIPT_ERR_OK, &hash));
-    MSC_CHECK("source epoch: TEXT refuses proof receipt publication",
-              !proof_validate_log_insert(db, 1, "verified", true, 0, 0, 0,
-                                         &hash, NULL, NULL));
-
-    MSC_CHECK("source epoch: REAL fixture writes",
-              exec_sql(db,
-                  "INSERT OR REPLACE INTO progress_meta(key,value) VALUES('"
-                  CONSENSUS_STATE_SOURCE_EPOCH_META_KEY "',1.25)"));
-    MSC_CHECK("source epoch: REAL refuses script receipt publication",
-              !script_validate_log_insert(db, 2, "verified", true, 0, 0,
-                                          NULL, -1, SCRIPT_ERR_OK, &hash));
-    MSC_CHECK("source epoch: REAL refuses proof receipt publication",
-              !proof_validate_log_insert(db, 2, "verified", true, 0, 0, 0,
-                                         &hash, NULL, NULL));
-
-    MSC_CHECK("source epoch: optional legacy absence fixture",
-              progress_meta_delete(db, CONSENSUS_STATE_SOURCE_EPOCH_META_KEY));
-    MSC_CHECK("source epoch: absent epoch keeps legacy script receipt",
-              script_validate_log_insert(db, 3, "verified", true, 0, 0,
-                                         NULL, -1, SCRIPT_ERR_OK, &hash));
-    MSC_CHECK("source epoch: absent epoch keeps legacy proof receipt",
-              proof_validate_log_insert(db, 3, "verified", true, 0, 0, 0,
-                                        &hash, NULL, NULL));
-    int type = -1, bytes = -1;
-    bool found = false;
-    MSC_CHECK("source epoch: legacy script receipt is explicitly unbound",
-              msc_epoch_cell(db, "script_validate_log", 3, &type, &bytes,
-                             &found) && found && type == SQLITE_NULL);
-    MSC_CHECK("source epoch: legacy proof receipt is explicitly unbound",
-              msc_epoch_cell(db, "proof_validate_log", 3, &type, &bytes,
-                             &found) && found && type == SQLITE_NULL);
-
-    uint8_t epoch[32];
-    memset(epoch, 0xa5, sizeof(epoch));
-    MSC_CHECK("source epoch: exact BLOB authority writes",
-              progress_meta_set(db, CONSENSUS_STATE_SOURCE_EPOCH_META_KEY,
-                                epoch, sizeof(epoch)));
-    MSC_CHECK("source epoch: exact BLOB binds script receipt",
-              script_validate_log_insert(db, 4, "verified", true, 0, 0,
-                                         NULL, -1, SCRIPT_ERR_OK, &hash));
-    MSC_CHECK("source epoch: exact BLOB binds proof receipt",
-              proof_validate_log_insert(db, 4, "verified", true, 0, 0, 0,
-                                        &hash, NULL, NULL));
-    MSC_CHECK("source epoch: script receipt stores exact BLOB32",
-              msc_epoch_cell(db, "script_validate_log", 4, &type, &bytes,
-                             &found) && found && type == SQLITE_BLOB &&
-              bytes == 32);
-    MSC_CHECK("source epoch: proof receipt stores exact BLOB32",
-              msc_epoch_cell(db, "proof_validate_log", 4, &type, &bytes,
-                             &found) && found && type == SQLITE_BLOB &&
-              bytes == 32);
+    failures += msc_source_epoch_non_blob_refused(db, &hash);
+    failures += msc_source_epoch_legacy_unbound(db, &hash);
+    failures += msc_source_epoch_exact_blob(db, &hash);
 
     progress_store_close();
     test_cleanup_tmpdir(dir);
