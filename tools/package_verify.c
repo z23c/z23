@@ -1070,6 +1070,18 @@ static void pv_run_child_close_authority(void)
     }
 }
 
+/* Verify group ownership before any payload or confinement setup. */
+static void pv_run_child_establish_group(void)
+{
+    int group_rc = setpgid(0, 0);
+    int group_errno = group_rc == 0 ? 0 : errno;
+    if (getpgrp() != getpid()) {
+        fprintf(stderr, "confinement: process group setup failed rc=%d errno=%d\n",
+                group_rc, group_errno);
+        _exit(PV_CHILD_SANDBOX_FAIL);
+    }
+}
+
 /* The forked child's whole body: never returns (always _exit or execvp). */
 static _Noreturn void pv_run_child_exec(const char *const argv[],
                                         const char *cwd,
@@ -1080,19 +1092,15 @@ static _Noreturn void pv_run_child_exec(const char *const argv[],
                                         const char *const env_pairs[],
                                         int out_pipe[2], int err_pipe[2])
 {
-    /* Own process group FIRST: it is what makes the action's process
-     * budget enforceable (the parent censuses this group) and what makes
-     * the deadline kill reach the WHOLE subtree instead of just this
-     * process. A group id is inherited across fork and is not lost when a
-     * grandchild is reparented. The Linux deny-set prevents group changes;
-     * Darwin package group-change containment remains unqualified.
-     * Raced with the parent's identical call so neither ordering loses. */
-    (void)setpgid(0, 0);
+    /* Capture diagnostics first, then verify group ownership before any
+     * payload or confinement work. Linux denies later group changes;
+     * Darwin package group-change containment remains unqualified. */
     close(out_pipe[0]);
     close(err_pipe[0]);
     if (dup2(out_pipe[1], STDOUT_FILENO) != STDOUT_FILENO ||
         dup2(err_pipe[1], STDERR_FILENO) != STDERR_FILENO)
         _exit(PV_CHILD_EXEC_FAIL);
+    pv_run_child_establish_group();
     pv_run_child_close_authority();
     if (cwd && chdir(cwd) != 0)
         _exit(PV_CHILD_EXEC_FAIL);

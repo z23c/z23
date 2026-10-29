@@ -27,8 +27,23 @@
 #include "test/test_core.h"
 #if defined(__linux__) || defined(__APPLE__)
 #include <errno.h>
+#include <stdio.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
+#include <unistd.h>
+enum pvm_group_fault { PVM_GROUP_NORMAL, PVM_GROUP_BOTH, PVM_GROUP_PARENT };
+static enum pvm_group_fault pvm_group_setup_fault;
+static int pvm_setpgid(pid_t pid, pid_t pgid)
+{
+    if (pvm_group_setup_fault == PVM_GROUP_BOTH) { errno = EPERM; return -1; }
+    if (pvm_group_setup_fault == PVM_GROUP_PARENT && pid != 0) { errno = EACCES; return -1; }
+    int rc = setpgid(pid, pgid);
+    if (pid == 0 && (rc != 0 || getpgrp() != getpid())) {
+        dprintf(STDERR_FILENO, "test: child group setup failed rc=%d errno=%d\n", rc, errno); _exit(79);
+    }
+    return rc;
+}
+#define setpgid pvm_setpgid
 static int pvm_wait_fault;
 static unsigned pvm_wait_calls;
 static pid_t pvm_wait4(pid_t pid, int *status, int options, struct rusage *usage)
@@ -52,6 +67,7 @@ static pid_t pvm_wait4(pid_t pid, int *status, int options, struct rusage *usage
 #include "../../../tools/package_verify.c"
 #if defined(__linux__) || defined(__APPLE__)
 #undef wait4
+#undef setpgid
 #endif
 #undef os_sandbox_process_group_census
 #undef g_shutdown_requested
@@ -729,6 +745,41 @@ static int t_package_group_custody(void)
 #endif
 
 
+#if defined(__linux__) || defined(__APPLE__)
+static bool pvm_group_marker(const char *root, enum pvm_group_fault inject, struct pv_run *run)
+{
+    char marker[1024];
+    int n = snprintf(marker, sizeof(marker), "%s/marker", root);
+    if (n <= 0 || (size_t)n >= sizeof(marker)) return false;
+    const char *argv[] = {"/bin/sh", "-c", "printf reached > \"$1\"", "fixture", marker, NULL};
+    pvm_group_setup_fault = inject;
+    *run = pv_run_child(PV_PROCESS_OTHER, argv, root, NULL, false, NULL, 0, NULL, 5000);
+    pvm_group_setup_fault = PVM_GROUP_NORMAL;
+    bool exists = access(marker, F_OK) == 0;
+    if (exists && unlink(marker) != 0) return false;
+    return exists;
+}
+static int t_group_establish_fail_closed(void)
+{
+    int failures = 0;
+    char root[1024];
+    if (!test_mkdtemp(root, sizeof(root), "pvm-group-establish")) return 1;
+    struct pv_run control = {0}, denied = {0}, raced = {0};
+    bool control_marker = pvm_group_marker(root, PVM_GROUP_NORMAL, &control);
+    bool denied_marker = pvm_group_marker(root, PVM_GROUP_BOTH, &denied);
+    bool raced_marker = pvm_group_marker(root, PVM_GROUP_PARENT, &raced);
+    PVM_CHECK("normal process group executes marker payload",
+              control_marker && control.launched && control.exited && control.exit_code == 0 && !control.sandbox_fail);
+    PVM_CHECK("failed group establishment refuses payload before marker",
+              !denied_marker && denied.launched && denied.sandbox_fail);
+    PVM_CHECK("parent EACCES permits verified child group",
+              raced_marker && raced.launched && raced.exited && raced.exit_code == 0 && !raced.sandbox_fail);
+    test_rm_rf(root);
+    return failures;
+}
+#endif
+
+
 int test_package_verify_materialize(void)
 {
     int failures = 0;
@@ -744,6 +795,7 @@ int test_package_verify_materialize(void)
     failures += t_package_group_custody();
 #endif
 #if defined(__linux__) || defined(__APPLE__)
+    failures += t_group_establish_fail_closed();
     failures += t_census_unavailable();
     failures += t_census_budget_control();
     failures += pvm_wait_fault_case(EINTR);
