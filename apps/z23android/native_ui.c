@@ -7,9 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-static jobject root, status_view, output_view, prompt_view, invite_view, camera_view, balance_view;
+static jobject root, status_view, result_view, prompt_view, invite_view, camera_view, balance_view;
 static jobject connection_view, transcript_view, fleet_view, receipt_view, details_view, notice_view;
-static jobject voice_view, pair_view, hosts_view;
+static jobject voice_view, pair_view, hosts_view, sync_view;
 static jobject buttons[16];
 static uint64_t voice_pair_generation;
 static enum zapp_voice_state voice_state;
@@ -21,7 +21,7 @@ static float down_x, down_y;
 static char last_receipt[8192];
 static float density = 1.0f;
 static bool voice_preview;
-static const char *const actions[] = {"node_start", "node_stop", "operation", "chat", "fleet_scan", "fleet_preview", "fleet_join", "fleet_refresh"};
+static const char *const actions[] = {"node_start", "node_stop", NULL, "chat", "fleet_scan", "fleet_preview", "fleet_join", "fleet_refresh"};
 
 static bool clean(JNIEnv *env)
 {
@@ -165,14 +165,13 @@ static bool keep(JNIEnv *env, jobject *dest, jobject value)
 }
 static bool small_label(const char *label, const jobject *save)
 {
-    return save == &status_view || save == &connection_view || save == &voice_view ||
-        !strncmp(label, "Self-hosted", 11) || !strncmp(label, "Private voice on", 16) ||
+    return save == &status_view || save == &sync_view || save == &connection_view || save == &voice_view ||
         !strncmp(label, "Voice pairing:", 14);
 }
 static float label_size(const char *label, const jobject *save)
 {
-    if (!strcmp(label, "Z23") || !strcmp(label, "Z23 Voice Preview")) return 24.0f;
-    if (!strcmp(label, "Fleet") || !strcmp(label, "Phone node")) return 20.0f;
+    if (!strcmp(label, "Fleet") || !strcmp(label, "Phone node") || !strcmp(label, "Type a question") ||
+        !strcmp(label, "Fleet invitation")) return 18.0f;
     return small_label(label, save) ? 14.0f : 16.0f;
 }
 static bool add_text(JNIEnv *env, jobject layout, jobject activity, const char *label, jobject *save)
@@ -208,7 +207,7 @@ void zapp_native_ui_destroy(JNIEnv *env)
         if (buttons[i]) (*env)->DeleteGlobalRef(env, buttons[i]);
         buttons[i] = NULL;
     }
-    jobject *views[] = {&root, &status_view, &balance_view, &output_view, &notice_view, &details_view, &prompt_view, &invite_view, &camera_view, &connection_view, &transcript_view, &fleet_view, &receipt_view, &voice_view, &pair_view, &hosts_view};
+    jobject *views[] = {&root, &status_view, &balance_view, &result_view, &notice_view, &details_view, &prompt_view, &invite_view, &camera_view, &connection_view, &transcript_view, &fleet_view, &receipt_view, &voice_view, &pair_view, &hosts_view, &sync_view};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) {
         if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
         *views[i] = NULL;
@@ -216,44 +215,40 @@ void zapp_native_ui_destroy(JNIEnv *env)
     callback = NULL; pressed = -1; details_open = false; reply_state = ZAPP_REPLY_READY; last_receipt[0] = 0;
     voice_pair_generation = 0;
 }
-/* Voice controls come first so the Talk button stays put while node and fleet text change. */
+/* The main screen holds only the status, Talk and the conversation; everything else is under More.
+ * Talk stays put above the conversation while status text changes. */
 static bool node_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject camera, jobject receipt, jobject scroll)
 {
     (void)prompt; (void)invite; (void)camera; (void)receipt; (void)scroll;
-    return !(!add_text(env, layout, activity, voice_preview ? "Z23 Voice Preview" : "Z23", NULL) ||
-        !add_text(env, layout, activity, voice_preview ?
-            "Private voice on your laptop GPU · separate test app, your main node and wallet are unchanged." :
-            "Private voice on your laptop GPU", NULL) ||
+    return !(!add_text(env, layout, activity, "", &status_view) ||
+        !add_button(env, layout, activity, "Start node", 0) ||
         !add_text(env, layout, activity, "", &pair_view) ||
         !add_button(env, layout, activity, "Accept pairing", 12) ||
         !add_button(env, layout, activity, "Reject", 13) ||
         !add_button(env, layout, activity, "Talk", 9) ||
-        !add_text(env, layout, activity, "Press Talk and ask anything. Answers stay on your laptop.", &voice_view) ||
-        !int_property(env, voice_view, "setMinLines", 2) ||
-        !add_button(env, layout, activity, "Confirm", 10));
+        !add_text(env, layout, activity, "Press Talk and ask anything.", &voice_view) ||
+        !add_button(env, layout, activity, "Confirm", 10) ||
+        !add_text(env, layout, activity, "", &notice_view) ||
+        !add_text(env, layout, activity, "", &transcript_view) ||
+        !add_button(env, layout, activity, "More", 8));
 }
 static bool chat_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject camera, jobject receipt, jobject scroll)
 {
-    (void)prompt; (void)invite; (void)camera; (void)receipt; (void)scroll;
-    return !(!add_text(env, layout, activity, "", &transcript_view) ||
-        !add_text(env, layout, activity, "Or type to the private assistant", NULL) ||
-        !add_text(env, layout, activity, "Not connected", &connection_view) ||
+    (void)invite; (void)camera; (void)receipt; (void)scroll;
+    return !(!add_text(env, layout, activity, "Type a question", NULL) ||
         !append(env, layout, prompt) || !keep(env, &prompt_view, prompt) ||
         !add_button(env, layout, activity, "Send", 3) ||
+        !add_text(env, layout, activity, "Not connected", &connection_view) ||
         !add_text(env, layout, activity, "Fleet", NULL) ||
         !add_text(env, layout, activity, "Ask by voice, or refresh to probe every host.", &hosts_view) ||
         !add_button(env, layout, activity, "Refresh fleet", 14) ||
         !add_text(env, layout, activity, "Phone node", NULL) ||
-        !add_text(env, layout, activity, "Balance appears when your node is ready", &balance_view) ||
-        !add_text(env, layout, activity, "Node not started", &status_view) ||
-        !add_button(env, layout, activity, "Start node", 0) ||
-        !add_text(env, layout, activity, "", &notice_view) ||
-        !add_button(env, layout, activity, "Details", 8));
+        !add_text(env, layout, activity, "", &sync_view) ||
+        !add_text(env, layout, activity, "Balance appears when your node is ready", &balance_view));
 }
 static bool detail_controls(JNIEnv *env, jobject layout, jobject activity)
 {
     return add_button(env, layout, activity, "Stop node", 1) &&
-        add_button(env, layout, activity, "Check status", 2) &&
         add_text(env, layout, activity, "Fleet invitation", NULL);
 }
 static bool fleet_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject camera, jobject receipt, jobject scroll)
@@ -272,8 +267,8 @@ static bool fleet_widgets(JNIEnv *env, jobject layout, jobject activity, jobject
 }
 static bool finish_widgets(JNIEnv *env, jobject layout, jobject activity, jobject receipt)
 {
-    return !(!append(env, layout, receipt) || !keep(env, &receipt_view, receipt) ||
-        !add_text(env, layout, activity, "", &output_view));
+    return append(env, layout, receipt) && keep(env, &receipt_view, receipt) &&
+        add_text(env, layout, activity, "", &result_view);
 }
 static bool orient_layout(JNIEnv *env, jobject layout)
 {
@@ -341,7 +336,7 @@ static bool build_ui(JNIEnv *env, jobject activity)
     jobject receipt = widget(env, "android/widget/ImageView", activity);
     return prepare_layouts(env, scroll, layout, details, prompt, invite, camera, receipt) &&
         node_widgets(env, layout, activity, prompt, invite, camera, receipt, scroll) &&
-        chat_widgets(env, layout, activity, prompt, invite, camera, receipt, scroll) &&
+        chat_widgets(env, details, activity, prompt, invite, camera, receipt, scroll) &&
         fleet_widgets(env, details, activity, prompt, invite, camera, receipt, scroll) &&
         finish_widgets(env, details, activity, receipt) &&
         attach_details(env, details, layout, scroll) && show_root(env, activity, scroll);
@@ -457,7 +452,7 @@ static void input_up(JNIEnv *env, float x, float y)
     if (index < 0 || !hit(env, buttons[index], x, y)) return;
     if (index == 8) {
         bool next = !details_open;
-        if (set_visible(env, details_view, next)) details_open = next;
+        if (set_visible(env, details_view, next)) { details_open = next; (void)text(env, buttons[8], next ? "Less" : "More"); }
         return;
     }
     const char *action, *arg;
@@ -466,7 +461,7 @@ static void input_up(JNIEnv *env, float x, float y)
         text_action(env, index == 11 ? "voice_pair" : actions[index], index == 3 ? prompt_view : invite_view);
         return;
     }
-    callback(actions[index], index == 2 ? "status" : "");
+    callback(actions[index], "");
 }
 void zapp_native_ui_input(JNIEnv *env, const AInputEvent *event)
 {
@@ -484,8 +479,8 @@ void zapp_native_ui_input(JNIEnv *env, const AInputEvent *event)
 }
 void zapp_native_ui_update(JNIEnv *env, const char *status, const char *output)
 {
-    if (status_view && status) (void)text(env, status_view, status);
-    if (output_view && output) (void)text(env, output_view, output);
+    if (voice_view && status) (void)text(env, voice_view, status);
+    if (notice_view && output) { (void)text(env, notice_view, output); (void)set_visible(env, notice_view, true); }
 }
 
 static jobject decode_bitmap(JNIEnv *env, const unsigned char *bmp, size_t len)
@@ -537,7 +532,7 @@ static void render_voice(JNIEnv *env, const struct zapp_view *view)
     }
     if (buttons[9]) (void)text(env, buttons[9], talk_label(voice_state));
     if (voice_view) (void)text(env, voice_view, view->voice_status[0] ? view->voice_status :
-        "Press Talk and ask anything. Answers stay on your laptop.");
+        "Press Talk and ask anything.");
     if (buttons[10]) {
         (void)text(env, buttons[10], !strcmp(view->voice_proposal, "node_start") ? "Confirm start" : "Confirm stop");
         (void)set_visible(env, buttons[10], view->voice_proposal[0] && !view->busy);
@@ -548,13 +543,10 @@ static void render_node(JNIEnv *env, const struct zapp_view *view)
     const char *send_label = reply_state == ZAPP_REPLY_WAITING ? "Stop reply" :
         reply_state == ZAPP_REPLY_CANCELLING ? "Stopping…" : "Send";
     if (buttons[3]) (void)text(env, buttons[3], send_label);
-    char status[1400];
-    snprintf(status, sizeof(status), "%s%s\n%s", view->node_running ? "Node responding" :
-             view->node_process_running ? "Node is starting" : "Node not started",
-             view->busy ? " · working" : "", view->sync_status[0] ? view->sync_status : "Sync status unknown");
-    (void)text(env, status_view, status);
-    if (buttons[0]) (void)set_visible(env, buttons[0], !view->busy &&
-        !view->node_running && !view->node_process_running);
+    char status[1100];
+    snprintf(status, sizeof(status), "%s%s", view->sync_status[0] ? view->sync_status : "Sync status unknown",
+             view->busy ? "\nWorking…" : "");
+    (void)text(env, sync_view, status);
     char balance[600];
     snprintf(balance, sizeof(balance), "%s%s", view->balance_stale ? "Last observed (stale):\n" : "",
              view->balance[0] ? view->balance : "Balance appears when your node is ready");
@@ -562,6 +554,18 @@ static void render_node(JNIEnv *env, const struct zapp_view *view)
     (void)text(env, connection_view, view->connection[0] ? view->connection : "Connect a laptop to use chat.");
     (void)text(env, transcript_view, view->transcript);
     (void)set_visible(env, transcript_view, view->transcript[0] != 0);
+}
+/* Two lines at the top: the phone node and, once a laptop host has probed it, the fleet headline. */
+static void render_status(JNIEnv *env, const struct zapp_view *view)
+{
+    char fleet[160] = "", status[320];
+    size_t n = strcspn(view->fleet_status, "\n");
+    if (n && n < 140) snprintf(fleet, sizeof(fleet), "\nFleet · %.*s", (int)n, view->fleet_status);
+    snprintf(status, sizeof(status), "%s%s", voice_preview ?
+             "Preview · separate from your main node" : view->node_line, fleet);
+    (void)text(env, status_view, status);
+    if (buttons[0]) (void)set_visible(env, buttons[0], !voice_preview && !view->busy &&
+        !view->node_running && !view->node_process_running);
 }
 static void render_fleet(JNIEnv *env, const struct zapp_view *view)
 {
@@ -577,7 +581,7 @@ static void render_fleet(JNIEnv *env, const struct zapp_view *view)
     (void)text(env, fleet_view, fleet);
     (void)text(env, notice_view, view->notice);
     (void)set_visible(env, notice_view, view->notice[0] != 0);
-    (void)text(env, output_view, view->output);
+    (void)text(env, result_view, view->result);
 }
 void zapp_native_ui_render(JNIEnv *env, const struct zapp_view *view)
 {
@@ -585,6 +589,7 @@ void zapp_native_ui_render(JNIEnv *env, const struct zapp_view *view)
     reply_state = view->reply_state;
     voice_state = view->voice_state;
     render_voice(env, view);
+    render_status(env, view);
     render_node(env, view);
     render_fleet(env, view);
     receipt_qr(env, view->fleet_receipt);

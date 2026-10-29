@@ -53,10 +53,25 @@ installing it. The node stores its data in the app's private storage.
 
 ## Current limits
 
-The main screen shows balance, synchronization status and the conversation.
-Details contains node controls, fleet invitations, QR codes and diagnostic
-output. Failed balance refreshes retain the last value with a stale label;
-an unavailable balance is not displayed as zero.
+The main screen shows one line for the node, one for the fleet, **Talk** and
+the conversation, newest exchange first. The node line says whether the node
+is stopped, starting, waiting for peers, catching up (height of target) or in
+sync, with its peer count. The fleet line repeats the paired host's cached
+fleet headline, read every 60 seconds without probing the hosts again. When
+the conversation buffer fills, whole older exchanges are dropped first.
+**More** holds typed questions, the host connection, each fleet host,
+synchronization detail, balance, node controls and fleet invitations. The
+screen never shows raw command output: **Refresh fleet status** shows one plain
+sentence per fleet check, without command suggestions. Failed balance
+refreshes retain the last value with a stale label; an unavailable balance is
+not displayed as zero.
+
+**Start node** records the choice in the app's private state, and the app
+starts the node each time it opens until **Stop node** clears the choice. The
+app finds a node left by an earlier app process through the node's pid file
+and its `-datadir` argument: it shows that node as running, refuses a second
+start and stops that node on request. The preview package shows no **Start
+node** button and states that it is separate from the main node.
 
 Chat refreshes a bounded read-only node summary before asking the private
 model on the paired laptop host. The summary includes synchronization text,

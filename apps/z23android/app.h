@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #define ZAPP_TEXT_CAP 65536
+#define ZAPP_NOTICE_CAP 1024u
 #define ZAPP_ERROR_CAP 256
 
 struct zapp_operation {
@@ -21,8 +22,8 @@ enum zapp_voice_state { ZAPP_VOICE_READY, ZAPP_VOICE_RECORDING, ZAPP_VOICE_TRANS
     ZAPP_VOICE_OBSERVING, ZAPP_VOICE_SYNTHESIZING, ZAPP_VOICE_PLAYING, ZAPP_VOICE_CANCELLING };
 
 struct zapp_view {
-    char notice[512];
-    char output[ZAPP_TEXT_CAP];
+    char notice[ZAPP_NOTICE_CAP];
+    char result[ZAPP_NOTICE_CAP];
     char transcript[ZAPP_TEXT_CAP];
     char hardware[1024];
     char connection[256];
@@ -45,5 +46,6 @@ struct zapp_view {
     uint64_t voice_pair_generation;
     char pair_offer[256]; /* Descriptor offered over USB, awaiting the owner's decision. */
     char pair_code[8];
+    char node_line[96]; /* One-line phone node summary for the main screen. */
 };
 #endif

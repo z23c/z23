@@ -107,9 +107,30 @@ static void format_cases(void)
     assert(!zapp_conversation_format(&s, "question", out, sizeof(out)));
 }
 
+/* The newest exchange comes first; whole older exchanges are dropped when the buffer is full. */
+static void transcript_cases(void)
+{
+    char text[56] = "";
+    zapp_transcript_prepend(text, sizeof(text), "a", "b");
+    assert(!strcmp(text, "You: a\n\nZ23: b\n"));
+    zapp_transcript_prepend(text, sizeof(text), "c", "d");
+    assert(!strcmp(text, "You: c\n\nZ23: d\n\nYou: a\n\nZ23: b\n"));
+    zapp_transcript_prepend(text, sizeof(text), "e", "f");
+    assert(!strcmp(text, "You: e\n\nZ23: f\n\nYou: c\n\nZ23: d\n\nYou: a\n\nZ23: b\n"));
+    zapp_transcript_prepend(text, sizeof(text), "g", "h");
+    assert(!strcmp(text, "You: g\n\nZ23: h\n\nYou: e\n\nZ23: f\n\nYou: c\n\nZ23: d\n"));
+    zapp_transcript_prepend(text, sizeof(text), "a longer question", "drops all older ones");
+    assert(!strcmp(text, "You: a longer question\n\nZ23: drops all older ones\n"));
+    char small[8] = "old";
+    zapp_transcript_prepend(small, sizeof(small), "q", "caf\xc3\xa9 au lait");
+    assert(!strcmp(small, "caf\xc3\xa9 a"));
+    zapp_transcript_prepend(small, 5, "q", "caf\xc3\xa9");
+    assert(!strcmp(small, "caf"));
+    zapp_transcript_prepend(NULL, sizeof(small), "q", "a");
+}
 int main(void)
 {
-    history_basic_cases(); history_turn_cases(); history_byte_cases(); format_cases();
+    history_basic_cases(); history_turn_cases(); history_byte_cases(); format_cases(); transcript_cases();
     puts("conversation tests passed");
     return 0;
 }

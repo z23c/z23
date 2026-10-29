@@ -97,3 +97,26 @@ bool zapp_history_json(const struct zapp_history *h, struct json_value *out)
     }
     return at == h->used;
 }
+/* Length of the longest run of whole exchanges in text that fits in room bytes. */
+static size_t whole_exchanges(const char *text, size_t room)
+{
+    for (size_t at = room; at > 0; at--)
+        if (text[at - 1] == '\n' && !strncmp(text + at, "\nYou: ", 6)) return at;
+    return 0;
+}
+void zapp_transcript_prepend(char *text, size_t cap, const char *question, const char *answer)
+{
+    if (!text || !cap || !question || !answer) return;
+    int n = snprintf(NULL, 0, "You: %s\n\nZ23: %s\n", question, answer);
+    if (n < 0 || (size_t)n + 1 >= cap) {
+        size_t keep = strlen(answer) < cap - 1 ? strlen(answer) : cap - 1;
+        while (keep && ((unsigned char)answer[keep] & 0xC0) == 0x80) keep--;
+        memcpy(text, answer, keep); text[keep] = 0; return;
+    }
+    size_t used = strlen(text), room = cap - 1 - (size_t)n - 1;
+    size_t keep = used <= room ? used : whole_exchanges(text, room);
+    size_t at = (size_t)n + (keep ? 1 : 0);
+    memmove(text + at, text, keep); text[at + keep] = 0;
+    snprintf(text, (size_t)n + 1, "You: %s\n\nZ23: %s\n", question, answer);
+    text[n] = keep ? '\n' : 0;
+}

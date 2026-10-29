@@ -25,7 +25,8 @@ static bool child_environment(void)
     if (!temp || strcmp(temp, "/tmp/private-tmp")) return false;
     const char *state = getenv("XDG_STATE_HOME");
     const char *preserved = getenv("ZAPP_TEST_PRESERVED");
-    return state && !strcmp(state, "/tmp/private-state") && preserved && !strcmp(preserved, "yes");
+    const char *want = getenv("ZAPP_TEST_STATE");
+    return state && want && !strcmp(state, want) && preserved && !strcmp(preserved, "yes");
 }
 
 static int child(int argc, char **argv)
@@ -71,10 +72,68 @@ static void balance_tests(void)
     assert(!zapp_balance_format(valid, out, 8));
 }
 
+static void doctor_tests(void)
+{
+    char out[256];
+    const char *json = "{\"ok\":true,\"data\":{\"state\":\"missing\",\"checks\":["
+        "{\"name\":\"node\",\"state\":\"ok\",\"detail\":\"A node is running and answered.\",\"next\":\"\"},"
+        "{\"name\":\"identity\",\"state\":\"ok\"},"
+        "{\"name\":\"membership\",\"state\":\"missing\",\"detail\":\"This box is not in a fleet.\","
+        "\"next\":\"z23 fleet invite --name=<box>\"}]}}";
+    assert(zapp_fleet_doctor_format(json, out, sizeof(out)));
+    assert(!strcmp(out, "Node: A node is running and answered.\nMembership: This box is not in a fleet."));
+    assert(zapp_fleet_doctor_format(json, out, 40) && !strcmp(out, "Node: A node is running and answered."));
+    assert(!zapp_fleet_doctor_format(json, out, 20) && !out[0]);
+    const char *shared = "{\"ok\":true,\"data\":{\"checks\":["
+        "{\"name\":\"node\",\"detail\":\"No node answered.\"},{\"name\":\"identity\",\"detail\":\"Needs a node.\"},"
+        "{\"name\":\"membership\",\"detail\":\"Not in a fleet.\"},{\"name\":\"transport\",\"detail\":\"Needs a node.\"},"
+        "{\"name\":\"mail\",\"detail\":\"Developer tool.\",\"informational\":true},"
+        "{\"name\":\"wiki\",\"detail\":\"Needs a node.\"}]}}";
+    assert(zapp_fleet_doctor_format(shared, out, sizeof(out)));
+    assert(!strcmp(out, "Node: No node answered.\nIdentity, transport and wiki: Needs a node.\nMembership: Not in a fleet."));
+    assert(!zapp_fleet_doctor_format("{\"ok\":false,\"data\":{\"checks\":[]}}", out, sizeof(out)));
+    assert(!zapp_fleet_doctor_format("not json", out, sizeof(out)) && !out[0]);
+    char failed[128] = "{\"ok\":false,\"error\":{\"code\":\"E\",\"message\":\"The manager is offline.\"}}";
+    zapp_plain_text(failed, sizeof(failed));
+    assert(!strcmp(failed, "The manager is offline."));
+    char bare[64] = "{\"ok\":false}";
+    zapp_plain_text(bare, sizeof(bare));
+    assert(!strcmp(bare, "The command did not return a readable result."));
+    char words[32] = "Node starting.";
+    zapp_plain_text(words, sizeof(words));
+    assert(!strcmp(words, "Node starting."));
+}
+
+/* A node left by an earlier app process is found through its pid file and its -datadir argument. */
+static void earlier_cases(struct zapp_runtime *r, const char *self, const char *directory)
+{
+    char data[300], pidfile[300], out[128];
+    assert(snprintf(data, sizeof(data), "-datadir=%s", directory) > 0);
+    assert(snprintf(pidfile, sizeof(pidfile), "%s/zclassic23.pid", directory) > 0);
+    pid_t other = fork();
+    assert(other >= 0);
+    if (!other) { execl(self, self, data, "orphan", (char *)NULL); _exit(127); }
+    FILE *f = fopen(pidfile, "w");
+    assert(f && fprintf(f, "%d\n", (int)other) > 0 && fclose(f) == 0);
+    for (int i = 0; i < 500 && !zapp_node_running(r); ++i) {
+        struct timespec pause = {.tv_nsec = 10000000}; nanosleep(&pause, NULL);
+    }
+    assert(zapp_node_running(r));
+    assert(!zapp_node_start(r, out, sizeof(out)) && !strcmp(out, "The local node is already running."));
+    assert(zapp_node_stop(r, out, sizeof(out)) && !strcmp(out, "Node stopping. It saves its data first."));
+    int status;
+    assert(waitpid(other, &status, 0) == other && WIFSIGNALED(status) && WTERMSIG(status) == SIGINT);
+    assert(!zapp_node_running(r));
+    f = fopen(pidfile, "w");
+    assert(f && fprintf(f, "%d\n", (int)getpid()) > 0 && fclose(f) == 0);
+    assert(!zapp_node_running(r) && unlink(pidfile) == 0);
+}
 int main(int argc, char **argv)
 {
+    if (argc == 3 && !strcmp(argv[2], "orphan")) { alarm(30); pause(); return 0; }
     if (argc > 1) return child(argc, argv);
     balance_tests();
+    doctor_tests();
     struct zapp_runtime r = {0};
     assert(pthread_mutex_init(&r.mutex, NULL) == 0);
     assert(snprintf(r.executable, sizeof(r.executable), "%s", argv[0]) > 0);
@@ -83,6 +142,7 @@ int main(int argc, char **argv)
     assert(snprintf(r.temporary_root, sizeof(r.temporary_root), "%s", "/tmp/private-tmp") > 0);
     assert(setenv("XDG_STATE_HOME", "/tmp/parent-state", 1) == 0);
     assert(setenv("ZAPP_TEST_PRESERVED", "yes", 1) == 0);
+    assert(setenv("ZAPP_TEST_STATE", "/tmp/private-state", 1) == 0);
     assert(setenv("ZCL_CATCHUP_DRAIN_BUDGET_MS", "77", 1) == 0);
     char out[128];
     assert(!zapp_operation_run(&r, "not-allowed", out, sizeof(out)));
@@ -99,10 +159,20 @@ int main(int argc, char **argv)
     char directory[] = "/tmp/zapp-ops-test-XXXXXX";
     assert(mkdtemp(directory));
     assert(snprintf(r.directory, sizeof(r.directory), "%s", directory) > 0);
-    assert(zapp_node_start(&r, out, sizeof(out)));
+    assert(snprintf(r.state_root, sizeof(r.state_root), "%s/missing", directory) > 0);
+    assert(setenv("ZAPP_TEST_STATE", r.state_root, 1) == 0);
+    assert(zapp_node_start(&r, out, sizeof(out)) && strstr(out, "could not save") && !zapp_node_wanted(&r));
     int status;
     assert(waitpid(r.node, &status, 0) == r.node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     r.node = 0;
+    assert(snprintf(r.state_root, sizeof(r.state_root), "%s", directory) > 0);
+    assert(setenv("ZAPP_TEST_STATE", r.state_root, 1) == 0);
+    assert(!zapp_node_wanted(&r));
+    assert(zapp_node_start(&r, out, sizeof(out)) && zapp_node_wanted(&r));
+    assert(waitpid(r.node, &status, 0) == r.node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    r.node = 0;
+    assert(zapp_node_stop(&r, out, sizeof(out)) && !strcmp(out, "The local node is stopped.") && !zapp_node_wanted(&r));
+    earlier_cases(&r, argv[0], directory);
     char log[256];
     assert(snprintf(log, sizeof(log), "%s/app-console.log", directory) > 0);
     assert(unlink(log) == 0 && rmdir(directory) == 0);

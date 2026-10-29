@@ -10,4 +10,8 @@ bool zapp_hosts_format(const char *json, char *out, size_t cap);
 /* Writes value with comma thousands separators, which models copy more reliably than long digit
  * runs; negative values are written plainly. Returns out. */
 const char *zapp_grouped(int64_t value, char out[32]);
+/* One line for the phone node on the main screen. height, target and peers are negative when
+ * unknown; target is the highest height reported by peers. Returns out. */
+const char *zapp_node_line(bool responding, bool process_running, int64_t height, int64_t target,
+                           int64_t peers, char *out, size_t cap);
 #endif

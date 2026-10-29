@@ -45,32 +45,71 @@ const char *zapp_grouped(int64_t value, char out[32])
     out[at] = 0;
     return out;
 }
-static size_t height_text(const struct json_value *row, char *out, size_t cap, size_t used)
+const char *zapp_node_line(bool responding, bool process_running, int64_t height, int64_t target,
+                           int64_t peers, char *out, size_t cap)
 {
-    int64_t height = 0, reference = 0;
-    bool has_height = count_of(row, "height", &height), has_ref = count_of(row, "reference_height", &reference);
-    char a[32], b[32];
-    if (has_height && has_ref && height == reference)
-        return append(out, cap, used, "  height %s matches zclassicd\n", zapp_grouped(height, a));
-    if (has_height && has_ref)
-        return append(out, cap, used, "  height %s · zclassicd %s\n", zapp_grouped(height, a),
-                      zapp_grouped(reference, b));
-    if (has_height) return append(out, cap, used, "  height %s · zclassicd unknown\n", zapp_grouped(height, a));
-    return append(out, cap, used, "  height unknown\n");
+    char at[32], top[32], count[40] = "";
+    if (peers >= 0) snprintf(count, sizeof(count), " · %lld %s", (long long)peers, peers == 1 ? "peer" : "peers");
+    if (!responding) snprintf(out, cap, "Node %s", process_running ? "starting" : "stopped");
+    else if (height < 0) snprintf(out, cap, "Node running%s", count);
+    else if (target <= 0) snprintf(out, cap, "Node waiting for peers · %s", zapp_grouped(height, at));
+    else if (height >= target) snprintf(out, cap, "Node in sync · %s%s", zapp_grouped(height, at), count);
+    else snprintf(out, cap, "Node catching up · %s of %s", zapp_grouped(height, at), zapp_grouped(target, top));
+    return out;
+}
+/* "in step", blocks behind or ahead of zclassicd, then the height; a negative height is unknown. */
+static size_t state_text(const struct json_value *row, char *out, size_t cap, size_t used)
+{
+    int64_t height = -1, reference = -1;
+    char at[32], by[32];
+    if (!count_of(row, "height", &height) || height < 0) return append(out, cap, used, "height unknown");
+    zapp_grouped(height, at);
+    if (host_ok(row)) return append(out, cap, used, "in step · %s", at);
+    if (!count_of(row, "reference_height", &reference) || reference < 0)
+        return append(out, cap, used, "zclassicd unknown · %s", at);
+    if (height == reference) return append(out, cap, used, "not synced · %s", at);
+    int64_t gap = height < reference ? reference - height : height - reference;
+    return append(out, cap, used, "%s %s %s · %s", zapp_grouped(gap, by), gap == 1 ? "block" : "blocks",
+                  height < reference ? "behind" : "ahead", at);
+}
+/* A status code such as review_required_bootstrap_trust read as words. */
+static const char *plain_words(const char *code, char out[160])
+{
+    size_t i = 0;
+    for (; code[i] && i < 159; i++) {
+        char ch = code[i] == '_' ? ' ' : code[i];
+        out[i] = ch >= 'A' && ch <= 'Z' ? (char)(ch - 'A' + 'a') : ch;
+    }
+    out[i] = 0;
+    return out;
+}
+static bool known(const char *value)
+{
+    return strcmp(value, "unknown") && strcmp(value, "none") && strcmp(value, "ok");
+}
+static size_t detail_text(const struct json_value *row, char *out, size_t cap, size_t used)
+{
+    const char *node = text_of(row, "node"), *blocker = text_of(row, "blocker");
+    char words[160];
+    int64_t disk = 0;
+    bool blocked = known(blocker), odd = !blocked && known(node);
+    if (blocked) used = append(out, cap, used, "\n  Blocked: %s", plain_words(blocker, words));
+    else if (odd) used = append(out, cap, used, "\n  Node %s", plain_words(node, words));
+    if (count_of(row, "disk_free_gb", &disk))
+        used = append(out, cap, used, "%s%lld GB free", blocked || odd ? " · " : "\n  ", (long long)disk);
+    return used;
 }
 static size_t row_text(const struct json_value *row, char *out, size_t cap, size_t used)
 {
     const struct json_value *reachable = json_get(row, "reachable");
-    int64_t ms = 0, disk = 0;
+    int64_t ms = 0;
     (void)count_of(row, "probe_ms", &ms);
     if (!reachable || reachable->type != JSON_BOOL || !json_get_bool(reachable))
         return append(out, cap, used, "\n%s · unreachable after %lld.%lld s\n", text_of(row, "host"),
             (long long)(ms / 1000), (long long)(ms % 1000 / 100));
-    used = append(out, cap, used, "\n%s · %s\n", text_of(row, "host"), host_ok(row) ? "in step" : "needs attention");
-    used = height_text(row, out, cap, used);
-    used = append(out, cap, used, "  node %s", text_of(row, "node"));
-    if (strcmp(text_of(row, "blocker"), "unknown")) used = append(out, cap, used, ": %s", text_of(row, "blocker"));
-    if (count_of(row, "disk_free_gb", &disk)) used = append(out, cap, used, " · %lld GB free", (long long)disk);
+    used = append(out, cap, used, "\n%s · ", text_of(row, "host"));
+    used = state_text(row, out, cap, used);
+    used = detail_text(row, out, cap, used);
     return append(out, cap, used, "\n");
 }
 bool zapp_hosts_format(const char *json, char *out, size_t cap)
@@ -83,7 +122,7 @@ bool zapp_hosts_format(const char *json, char *out, size_t cap)
     ok = hosts && hosts->type == JSON_ARR && hosts->num_children;
     size_t healthy = 0, total = ok ? hosts->num_children : 0, used = 0;
     for (size_t i = 0; i < total; i++) healthy += host_ok(json_at(hosts, i));
-    if (ok) used = append(out, cap, 0, "%zu of %zu hosts match zclassicd\n", healthy, total);
+    if (ok) used = append(out, cap, 0, "%zu of %zu hosts in step\n", healthy, total);
     for (size_t i = 0; ok && i < total; i++) used = row_text(json_at(hosts, i), out, cap, used);
     ok = ok && used < cap;
     if (!ok) out[0] = 0;

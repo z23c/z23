@@ -31,7 +31,8 @@ struct controller {
     char files[1024], action[32], argument[24000];
     uint64_t camera_ticket;
     void (*notify)(void);
-    bool pending;
+    bool pending, autostart_checked;
+    time_t fleet_at;
     atomic_bool reply_cancel;
     atomic_bool voice_cancel, voice_stop;
 };
@@ -87,58 +88,60 @@ static void observe_balance(struct controller *c, char *output)
     c->view.balance_stale = !ok && c->view.balance_known;
     pthread_mutex_unlock(&c->lock);
 }
+/* Heights and peer count from a status reply; values the reply lacks stay negative. */
+struct node_reading { bool responding; int64_t height, target, peers; };
+static struct node_reading read_status(const char *output)
+{
+    struct node_reading n = {.height = -1, .target = -1, .peers = -1};
+    struct json_value root = {0};
+    if (!output || !json_read(&root, output, strlen(output))) return n;
+    const struct json_value *success = json_get(&root, "ok"), *data = json_get(&root, "data");
+    const struct json_value *height = json_get(data, "provable_tip"), *target = json_get(data, "max_peer_height");
+    const struct json_value *peers = json_get(data, "peers");
+    n.responding = success && success->type == JSON_BOOL && json_get_bool(success) && height &&
+        height->type == JSON_INT;
+    if (n.responding) {
+        n.height = json_get_int(height);
+        if (target && target->type == JSON_INT) n.target = json_get_int(target);
+        if (peers && peers->type == JSON_INT) n.peers = json_get_int(peers);
+    }
+    json_free(&root);
+    return n;
+}
+static void sync_detail(const struct node_reading *n, bool process_running, char *out, size_t cap)
+{
+    char local[32], peer[32];
+    if (!n->responding) copy_text(out, cap, process_running ?
+        "Waiting for the node to answer. Sync progress is unknown." : "Start the node to begin synchronization.");
+    else if (n->target > 0)
+        snprintf(out, cap, "Local height %s\nPeer-reported height %s · %lld peers\nFull validation is still being checked.",
+                 zapp_grouped(n->height, local), zapp_grouped(n->target, peer), (long long)(n->peers < 0 ? 0 : n->peers));
+    else snprintf(out, cap, "Local height %s\nWaiting for peers with a current chain view.", zapp_grouped(n->height, local));
+}
 static void observe_node(struct controller *c)
 {
-    bool responding = false;
     char *output = calloc(1, ZAPP_TEXT_CAP);
-    char status[1024] = "Node status unavailable. Sync progress is unknown.";
-    if (output) {
-        bool ok = zapp_operation_run(&c->runtime, "status", output, ZAPP_TEXT_CAP);
-        struct json_value root = {0};
-        ok = ok && json_read(&root, output, strlen(output));
-        const struct json_value *success = json_get(&root, "ok");
-        ok = ok && success && success->type == JSON_BOOL && json_get_bool(success);
-        const struct json_value *data = json_get(&root, "data");
-        const struct json_value *height = json_get(data, "provable_tip");
-        const struct json_value *peers = json_get(data, "peers");
-        const struct json_value *target = json_get(data, "max_peer_height");
-        if (ok && height && height->type == JSON_INT) {
-            responding = true;
-            char local[32], peer[32];
-            if (target && target->type == JSON_INT && json_get_int(target) > 0)
-                snprintf(status, sizeof(status), "Local height %s\nPeer-reported height %s · %lld peers\n"
-                    "Full validation is still being checked.", zapp_grouped(json_get_int(height), local),
-                    zapp_grouped(json_get_int(target), peer), (long long)json_get_int(peers));
-            else snprintf(status, sizeof(status), "Local height %s\nWaiting for peers with a current chain view.",
-                          zapp_grouped(json_get_int(height), local));
-        }
-        json_free(&root);
-    }
+    bool ran = output && zapp_operation_run(&c->runtime, "status", output, ZAPP_TEXT_CAP);
+    struct node_reading n = read_status(ran ? output : NULL);
     observe_balance(c, output);
     free(output);
     bool process_running = zapp_node_running(&c->runtime);
-    if (!responding) copy_text(status, sizeof(status), process_running ?
-        "Waiting for the node to answer. Sync progress is unknown." :
-        "Start the node to begin synchronization.");
+    char status[1024], line[96];
+    sync_detail(&n, process_running, status, sizeof(status));
+    zapp_node_line(n.responding, process_running, n.height, n.target, n.peers, line, sizeof(line));
     pthread_mutex_lock(&c->lock);
-    c->view.node_running = responding;
+    c->view.node_running = n.responding;
     c->view.node_process_running = process_running;
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), status);
+    copy_text(c->view.node_line, sizeof(c->view.node_line), line);
     pthread_mutex_unlock(&c->lock);
     notify_view(c);
 }
-/* Shows the exchange; only answers from the model join the history sent with later questions. */
+/* Shows the exchange first; only answers from the model join the history sent with later questions. */
 static void chat_result(struct controller *c, const char *prompt, const char *answer, bool from_model)
 {
     if (from_model) (void)zapp_history_append(&c->history, prompt, answer);
-    size_t needed = strlen(prompt) + strlen(answer) + 24;
-    size_t used = strlen(c->view.transcript);
-    if (needed >= sizeof(c->view.transcript)) {
-        copy_text(c->view.transcript, sizeof(c->view.transcript), answer); return;
-    }
-    if (needed >= sizeof(c->view.transcript) - used) used = 0;
-    snprintf(c->view.transcript + used, sizeof(c->view.transcript) - used,
-        "%sYou: %s\n\nZ23: %s\n", used ? "\n" : "", prompt, answer);
+    zapp_transcript_prepend(c->view.transcript, sizeof(c->view.transcript), prompt, answer);
 }
 static void voice_stage(struct controller *c, enum zapp_voice_state state, const char *text)
 {
@@ -213,6 +216,8 @@ static bool fleet_hosts(struct controller *c, bool refresh, char *out)
     if (ok) {
         pthread_mutex_lock(&c->lock);
         copy_text(c->view.fleet_status, sizeof(c->view.fleet_status), formatted);
+        /* An answered fleet request proves the paired host is reachable. */
+        copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected. Press Talk to begin.");
         pthread_mutex_unlock(&c->lock);
         copy_text(out, ZAPP_TEXT_CAP, formatted);
     } else if (formatted) copy_text(out, ZAPP_TEXT_CAP, "Fleet status is unavailable. Connect the laptop host over USB.");
@@ -383,11 +388,21 @@ static bool scan_invitation(struct controller *c, uint64_t ticket, char *out)
     copy_text(out, ZAPP_TEXT_CAP, ok ? "Invitation scanned. Review before joining." : "The QR code is not a fleet invitation.");
     return ok;
 }
+/* Fleet doctor JSON stays off screen: the notice holds one plain line per check. */
+static bool fleet_doctor(struct controller *c, char *out)
+{
+    char *json = calloc(1, ZAPP_TEXT_CAP);
+    bool ran = json && zapp_operation_run(&c->runtime, "fleet_doctor", json, ZAPP_TEXT_CAP);
+    bool ok = json && zapp_fleet_doctor_format(json, out, ZAPP_NOTICE_CAP);
+    if (!ok) copy_text(out, ZAPP_TEXT_CAP, "The fleet check could not run.");
+    free(json);
+    return ran && ok;
+}
 static bool execute_fleet(struct controller *c, const char *action, const char *arg,
                           uint64_t ticket, char *out)
 {
     bool ok = false;
-    if (!strcmp(action, "fleet_refresh")) ok = zapp_operation_run(&c->runtime, "fleet_doctor", out, ZAPP_TEXT_CAP);
+    if (!strcmp(action, "fleet_refresh")) ok = fleet_doctor(c, out);
     else if (!strcmp(action, "fleet_hosts")) ok = fleet_hosts(c, !strcmp(arg, "refresh"), out);
     else if (!strcmp(action, "fleet_join")) ok = zapp_fleet_join_run(&c->runtime, arg, out, ZAPP_TEXT_CAP);
     else if (!strcmp(action, "fleet_preview")) {
@@ -418,7 +433,6 @@ static bool execute_action(struct controller *c, const char *action, const char 
     if (!strncmp(action, "fleet_", 6)) return execute_fleet(c, action, arg, ticket, out);
     if (!strcmp(action, "node_start")) return zapp_node_start(&c->runtime, out, ZAPP_TEXT_CAP);
     if (!strcmp(action, "node_stop")) return zapp_node_stop(&c->runtime, out, ZAPP_TEXT_CAP);
-    if (!strcmp(action, "operation")) return zapp_operation_run(&c->runtime, arg, out, ZAPP_TEXT_CAP);
     if (!strcmp(action, "chat")) return conversation_chat(c, arg, out);
     if (!strcmp(action, "voice_start")) return voice_conversation(c, out);
     if (!strcmp(action, "voice_pair")) return pair_voice_host(c, arg, out);
@@ -464,6 +478,12 @@ static bool join_result(struct controller *c, char *out)
     if (ok) { c->view.fleet_token[0] = 0; copy_text(out, ZAPP_TEXT_CAP, "Show the receipt QR to your manager. Admission and network connection are still pending."); }
     return ok;
 }
+/* The node line already shows a start or stop; a notice is needed only when the choice was not saved. */
+static bool node_choice_saved(struct controller *c, const char *action)
+{
+    if (strcmp(action, "node_start") && strcmp(action, "node_stop")) return false;
+    return zapp_node_wanted(&c->runtime) == !strcmp(action, "node_start");
+}
 static void execute_result(struct controller *c, const char *action, const char *arg,
                            char *out, bool ok)
 {
@@ -475,8 +495,12 @@ static void execute_result(struct controller *c, const char *action, const char 
     if (chat && !chat_state(c)) { pthread_mutex_unlock(&c->lock); return; }
     if (!strcmp(action, "fleet_join") && ok) ok = join_result(c, out);
     if (chat) chat_outcome(c, arg, ok, out);
-    copy_text(c->view.output, sizeof(c->view.output), out);
-    copy_text(c->view.notice, sizeof(c->view.notice), ok ? "" : out[0] ? out : "Operation could not complete.");
+    zapp_plain_text(out, ZAPP_TEXT_CAP);
+    /* Actions under More report beside their controls; the rest report on the main screen. */
+    bool more = !strncmp(action, "fleet_", 6) || !strcmp(action, "voice_pair");
+    bool shown = ok && (chat || !strcmp(action, "fleet_hosts") || node_choice_saved(c, action));
+    copy_text(more ? c->view.result : c->view.notice, ZAPP_NOTICE_CAP,
+              shown ? "" : out[0] ? out : "Operation could not complete.");
     c->view.scanning = false;
     pthread_mutex_unlock(&c->lock);
 }
@@ -492,6 +516,29 @@ static void execute(struct controller *c, const char *action, const char *arg, u
     bool ok = execute_action(c, action, arg, ticket, out);
     execute_result(c, action, arg, out, ok);
     memory_cleanse(out, ZAPP_TEXT_CAP); free(out);
+}
+/* Opening the app starts its node once, unless the owner's last choice was Stop node or a node
+ * already answers. */
+/* The laptop host refreshes its fleet snapshot every minute; reading its copy as often keeps the
+ * fleet headline current without probing the hosts again. */
+static void observe_fleet(struct controller *c)
+{
+    time_t now = time(NULL);
+    if (now != (time_t)-1 && now - c->fleet_at < 60) return;
+    c->fleet_at = now;
+    char *out = calloc(1, ZAPP_TEXT_CAP);
+    if (out) (void)fleet_hosts(c, false, out);
+    free(out);
+}
+static void queue_action(struct controller *c, const char *action, const char *arg);
+static void start_if_wanted(struct controller *c)
+{
+    c->autostart_checked = true;
+    bool wanted = zapp_node_wanted(&c->runtime);
+    pthread_mutex_lock(&c->lock);
+    bool idle = !c->pending && !c->view.busy && !c->view.node_running && !c->view.node_process_running;
+    if (wanted && idle) queue_action(c, "node_start", "");
+    pthread_mutex_unlock(&c->lock);
 }
 static void *worker(void *opaque)
 {
@@ -517,15 +564,18 @@ static void *worker(void *opaque)
             bool process_running = zapp_node_running(&c->runtime);
             pthread_mutex_lock(&c->lock);
             c->view.node_process_running = process_running;
-            if (!c->view.node_running)
-                copy_text(c->view.sync_status, sizeof(c->view.sync_status), process_running ?
-                    "Waiting for the node to answer. Sync progress is unknown." :
-                    "Start the node to begin synchronization.");
+            if (!c->view.node_running) {
+                struct node_reading idle = {.height = -1, .target = -1, .peers = -1};
+                sync_detail(&idle, process_running, c->view.sync_status, sizeof(c->view.sync_status));
+                zapp_node_line(false, process_running, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
+            }
             c->view.busy = false;
             pthread_mutex_unlock(&c->lock);
             notify_view(c);
         }
         observe_node(c);
+        observe_fleet(c);
+        if (!c->autostart_checked) start_if_wanted(c);
     }
     return NULL;
 }
@@ -548,6 +598,7 @@ bool zapp_controller_start(const char *files, const char *libs, void (*notify)(v
     c->view.node_process_running = zapp_node_running(&c->runtime);
     copy_text(c->files, sizeof(c->files), files); c->notify = notify;
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), "Start the node to begin synchronization.");
+    zapp_node_line(false, c->view.node_process_running, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
     copy_text(c->view.connection, sizeof(c->view.connection), "Private assistant: pair your laptop host over USB.");
     zapp_device_info(c->view.hardware, sizeof(c->view.hardware));
     pthread_t thread;
@@ -569,7 +620,7 @@ void zapp_controller_snapshot(struct zapp_view *view)
 }
 static bool action_allowed(const char *action)
 {
-    static const char *const allowed[] = {"node_start", "node_stop", "operation", "fleet_refresh", "fleet_join", "fleet_preview", "fleet_scan", "chat", "voice_start", "voice_confirm", "voice_pair", "fleet_hosts", "pair_accept"};
+    static const char *const allowed[] = {"node_start", "node_stop", "fleet_refresh", "fleet_join", "fleet_preview", "fleet_scan", "chat", "voice_start", "voice_confirm", "voice_pair", "fleet_hosts", "pair_accept"};
     for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); ++i)
         if (!strcmp(action, allowed[i])) return true;
     return false;
@@ -655,7 +706,7 @@ static void queue_action(struct controller *c, const char *action, const char *a
     }
     copy_text(c->action, sizeof(c->action), action); copy_text(c->argument, sizeof(c->argument), arg);
     c->camera_ticket = zapp_camera_ticket(); c->pending = true; c->view.busy = true;
-    c->view.scanning = !strcmp(action, "fleet_scan"); c->view.notice[0] = 0;
+    c->view.scanning = !strcmp(action, "fleet_scan"); c->view.notice[0] = 0; c->view.result[0] = 0;
     if (!strcmp(action, "chat")) {
         atomic_store(&c->reply_cancel, false);
         c->view.reply_state = ZAPP_REPLY_WAITING;

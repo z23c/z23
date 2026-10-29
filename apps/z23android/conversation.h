@@ -24,4 +24,8 @@ bool zapp_conversation_format(const struct zapp_conversation_snapshot *snapshot,
 bool zapp_history_append(struct zapp_history *h, const char *question, const char *answer);
 /* Writes the history as a JSON array of [question, answer] pairs. */
 bool zapp_history_json(const struct zapp_history *h, struct json_value *out);
+/* Puts one exchange before the shown conversation, newest first. When it does not fit, whole
+ * older exchanges are dropped from the end; an exchange larger than the buffer replaces it with
+ * as much of the answer as fits. */
+void zapp_transcript_prepend(char *text, size_t cap, const char *question, const char *answer);
 #endif
