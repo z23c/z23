@@ -54,7 +54,7 @@ Z23_GOAL("C2", "Tor onion bootstrap in under 60 s",
 Z23_GOAL("C3", "Cold-start sync to tip in under 10 min",
          "fresh datadir reports phase=ready within 10 min on a 100 Mbps link")
 Z23_GOAL("C4", "Receive shielded payment end to end",
-         "a test wallet receives 1 ZCL to a z-address and the balance reflects it within 2 blocks")
+         "a previously uncredited wallet receives a shielded payment reflected within 2 blocks; live: minimal owner-authorized amount, never a whole ZCL; isolated fixture: 1 ZCL")
 Z23_GOAL("C5", "List and sell a file via store",
          "operator lists a product, buyer pays shielded, buyer receives the file")
 Z23_GOAL("C6", "7-day soak with zero operator intervention",
