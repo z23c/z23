@@ -725,6 +725,133 @@ static void plan_named_library_bypass(struct plan *pl)
         pl->bypass = "named library has no explicit search directory";
 }
 
+/* True, with the bypass reason set, for a flag that makes the invocation
+ * something this cache never serves. */
+static bool plan_flag_bypasses(struct plan *pl, const char *a)
+{
+    if (strcmp(a, "-E") == 0 || strcmp(a, "-M") == 0 ||
+        strcmp(a, "-MM") == 0) {
+        pl->bypass = "preprocessor-only invocation";
+        return true;
+    }
+    if (strcmp(a, "--coverage") == 0 || strncmp(a, "-fprofile", 9) == 0 ||
+        strcmp(a, "-ftest-coverage") == 0) {
+        pl->bypass = "coverage writes artifacts beside the object";
+        return true;
+    }
+    return false;
+}
+
+/* -MT/-MQ in either spelling. True when `a` was one; `*ip` moves past a
+ * separate value. */
+static bool plan_parse_target_option(struct plan *pl, int argc, char **argv,
+                                     int *ip)
+{
+    int i = *ip;
+    const char *a = argv[i];
+    if ((strcmp(a, "-MT") == 0 || strcmp(a, "-MQ") == 0) && i + 1 < argc) {
+        /* -MT/-MQ NAME the make target in the depfile. Their value is an
+         * object path, not an input. Leaving it unconsumed made it look
+         * like a positional input, which broke the -E probe and silently
+         * bypassed EVERY node object in this repository. The value is
+         * recorded so the key can placeholder it and serve() can rewrite
+         * the restored depfile onto the current target. */
+        pl->mt_idx = ++i;
+        pl->mt_path = argv[i];
+    } else if ((strncmp(a, "-MT", 3) == 0 || strncmp(a, "-MQ", 3) == 0) &&
+               a[3]) {
+        pl->mt_inline_idx = i;
+        pl->mt_path = a + 3;
+    } else {
+        return false;
+    }
+    *ip = i;
+    return true;
+}
+
+/* The depfile options. True when `a` was one; `*ip` moves past a separate
+ * value. */
+static bool plan_parse_dep_option(struct plan *pl, int argc, char **argv,
+                                  int *ip, bool *want_dep,
+                                  const char **dep_explicit)
+{
+    int i = *ip;
+    const char *a = argv[i];
+    if (strcmp(a, "-MD") == 0 || strcmp(a, "-MMD") == 0) {
+        *want_dep = true;
+    } else if (strcmp(a, "-MF") == 0 && i + 1 < argc) {
+        *dep_explicit = argv[++i];
+        pl->dep_idx = i;
+    } else if (strncmp(a, "-MF", 3) == 0 && a[3]) {
+        *dep_explicit = a + 3;
+        pl->dep_inline_idx = i;
+    } else if (!plan_parse_target_option(pl, argc, argv, &i)) {
+        return false;
+    }
+    *ip = i;
+    return true;
+}
+
+/* -L in either spelling. True when `a` was one. */
+static bool plan_parse_libdir(struct plan *pl, int argc, char **argv, int *ip)
+{
+    int i = *ip;
+    const char *a = argv[i];
+    if (strcmp(a, "-L") == 0 && i + 1 < argc)
+        pl->libdir[pl->libdir_n++] = argv[++i];
+    else if (strncmp(a, "-L", 2) == 0 && a[2])
+        pl->libdir[pl->libdir_n++] = argv[i] + 2;
+    else
+        return false;
+    *ip = i;
+    return true;
+}
+
+/* One argument of the command line. False stops planning (the bypass reason
+ * is set). */
+static bool plan_parse_arg(struct plan *pl, int argc, char **argv, int *ip,
+                           bool *want_dep, const char **dep_explicit)
+{
+    int i = *ip;
+    const char *a = argv[i];
+    if (strcmp(a, "-o") == 0 && i + 1 < argc) {
+        pl->out_idx = ++i;
+        pl->out_path = argv[i];
+    } else if (plan_flag_bypasses(pl, a)) {
+        return false;
+    } else if (plan_parse_dep_option(pl, argc, argv, &i, want_dep,
+                                     dep_explicit) ||
+               plan_parse_libdir(pl, argc, argv, &i)) {
+        /* consumed */
+    } else if (!plan_parse_input(pl, a, i)) {
+        return false;
+    }
+    *ip = i;
+    return true;
+}
+
+/* Where the dependency file goes: the explicit -MF, else the output with its
+ * suffix swapped when -MD/-MMD asked for one. */
+static void plan_resolve_dep_path(struct plan *pl, bool want_dep,
+                                  const char *dep_explicit)
+{
+    if (dep_explicit) {
+        pl->dep_path = dep_explicit;
+    } else if (want_dep) {
+        /* gcc -MD without -MF writes <output-with-.d>. */
+        snprintf(pl->dep_buf, sizeof pl->dep_buf, "%s", pl->out_path);
+        char *dot = strrchr(pl->dep_buf, '.');
+        char *slash = strrchr(pl->dep_buf, '/');
+        if (dot && (!slash || dot > slash))
+            *dot = '\0';
+        size_t n = strlen(pl->dep_buf);
+        if (n + 3u < sizeof pl->dep_buf) {
+            memcpy(pl->dep_buf + n, ".d", 3);
+            pl->dep_path = pl->dep_buf;
+        }
+    }
+}
+
 static void plan_build(struct plan *pl, int argc, char **argv)
 {
     pl->argv = argv;
@@ -746,49 +873,9 @@ static void plan_build(struct plan *pl, int argc, char **argv)
     bool want_dep = false;
     const char *dep_explicit = NULL;
 
-    for (int i = 1; i < argc; i++) {
-        const char *a = argv[i];
-        if (strcmp(a, "-o") == 0 && i + 1 < argc) {
-            pl->out_idx = ++i;
-            pl->out_path = argv[i];
-        } else if (strcmp(a, "-E") == 0 || strcmp(a, "-M") == 0 ||
-                   strcmp(a, "-MM") == 0) {
-            pl->bypass = "preprocessor-only invocation";
+    for (int i = 1; i < argc; i++)
+        if (!plan_parse_arg(pl, argc, argv, &i, &want_dep, &dep_explicit))
             return;
-        } else if (strcmp(a, "--coverage") == 0 ||
-                   strncmp(a, "-fprofile", 9) == 0 ||
-                   strcmp(a, "-ftest-coverage") == 0) {
-            pl->bypass = "coverage writes artifacts beside the object";
-            return;
-        } else if (strcmp(a, "-MD") == 0 || strcmp(a, "-MMD") == 0) {
-            want_dep = true;
-        } else if (strcmp(a, "-MF") == 0 && i + 1 < argc) {
-            dep_explicit = argv[++i];
-            pl->dep_idx = i;
-        } else if (strncmp(a, "-MF", 3) == 0 && a[3]) {
-            dep_explicit = a + 3;
-            pl->dep_inline_idx = i;
-        } else if ((strcmp(a, "-MT") == 0 || strcmp(a, "-MQ") == 0) &&
-                   i + 1 < argc) {
-            /* -MT/-MQ NAME the make target in the depfile. Their value is an
-             * object path, not an input. Leaving it unconsumed made it look
-             * like a positional input, which broke the -E probe and silently
-             * bypassed EVERY node object in this repository. The value is
-             * recorded so the key can placeholder it and serve() can rewrite
-             * the restored depfile onto the current target. */
-            pl->mt_idx = ++i;
-            pl->mt_path = argv[i];
-        } else if ((strncmp(a, "-MT", 3) == 0 || strncmp(a, "-MQ", 3) == 0) &&
-                   a[3]) {
-            pl->mt_inline_idx = i;
-            pl->mt_path = a + 3;
-        } else if (strcmp(a, "-L") == 0 && i + 1 < argc) {
-            pl->libdir[pl->libdir_n++] = argv[++i];
-        } else if (strncmp(a, "-L", 2) == 0 && a[2]) {
-            pl->libdir[pl->libdir_n++] = argv[i] + 2;
-        } else if (!plan_parse_input(pl, a, i))
-            return;
-    }
 
     if (!pl->out_path || strcmp(pl->out_path, "-") == 0) {
         pl->bypass = "no single -o artifact";
@@ -799,21 +886,7 @@ static void plan_build(struct plan *pl, int argc, char **argv)
         return;
     }
     pl->want_dep = want_dep;
-    if (dep_explicit) {
-        pl->dep_path = dep_explicit;
-    } else if (want_dep) {
-        /* gcc -MD without -MF writes <output-with-.d>. */
-        snprintf(pl->dep_buf, sizeof pl->dep_buf, "%s", pl->out_path);
-        char *dot = strrchr(pl->dep_buf, '.');
-        char *slash = strrchr(pl->dep_buf, '/');
-        if (dot && (!slash || dot > slash))
-            *dot = '\0';
-        size_t n = strlen(pl->dep_buf);
-        if (n + 3u < sizeof pl->dep_buf) {
-            memcpy(pl->dep_buf + n, ".d", 3);
-            pl->dep_path = pl->dep_buf;
-        }
-    }
+    plan_resolve_dep_path(pl, want_dep, dep_explicit);
     plan_named_library_bypass(pl);
 }
 
@@ -1149,12 +1222,12 @@ static char **apple_tool_query_argv(const struct plan *pl,
                      strcmp(arg, "-arch") == 0;
         if (value) {
             if (i + 1 >= pl->argc) { free(query); return NULL; }
-            query[n++] = arg;
+            query[n++] = pl->argv[i];
             query[n++] = pl->argv[++i];
         } else if ((strncmp(arg, "-B", 2) == 0 && arg[2]) ||
                    strncmp(arg, "-target=", 8) == 0 ||
                    strncmp(arg, "--target=", 9) == 0) {
-            query[n++] = arg;
+            query[n++] = pl->argv[i];
         }
     }
     query[n++] = (char *)query_flag;
@@ -2223,6 +2296,43 @@ static void deps_scan(struct deps *d, const unsigned char *p, size_t len)
     }
 }
 
+/* Flags the -E run drops outright. */
+static bool pp_flag_dropped(const char *a)
+{
+    return strcmp(a, "-o") == 0 || strcmp(a, "-c") == 0 ||
+           strcmp(a, "-MD") == 0 || strcmp(a, "-MMD") == 0 ||
+           strcmp(a, "-MP") == 0;
+}
+
+/* Flags whose value is the next argument, which goes with them. */
+static bool pp_flag_takes_value(const char *a)
+{
+    return strcmp(a, "-MF") == 0 || strcmp(a, "-MT") == 0 ||
+           strcmp(a, "-MQ") == 0;
+}
+
+/* -MF/-MT/-MQ with the value glued on. */
+static bool pp_flag_inline_dep(const char *a)
+{
+    if (strncmp(a, "-MF", 3) == 0 && a[3])
+        return true;
+    return (strncmp(a, "-MT", 3) == 0 || strncmp(a, "-MQ", 3) == 0) && a[3];
+}
+
+/* True when argument `i` is an input other than the one being preprocessed. */
+static bool pp_other_input(const struct plan *pl, int i, int src_idx)
+{
+    /* other inputs would only produce "linker input unused" noise */
+    bool other_input = false;
+    for (int s = 0; s < pl->src_n; s++)
+        if (pl->src[s] == i && i != src_idx)
+            other_input = true;
+    for (int b = 0; b < pl->blob_n; b++)
+        if (pl->blob[b] == i)
+            other_input = true;
+    return other_input;
+}
+
 /* Preprocess ONE source with the same flags, minus everything that would
  * make the compiler do more than preprocess or write a second artifact. */
 static bool preprocess(const struct plan *pl, int src_idx, const char *tmpdir,
@@ -2237,28 +2347,15 @@ static bool preprocess(const struct plan *pl, int src_idx, const char *tmpdir,
         if (i == pl->out_idx)
             continue;
         const char *a = pl->argv[i];
-        if (strcmp(a, "-o") == 0 || strcmp(a, "-c") == 0 ||
-            strcmp(a, "-MD") == 0 || strcmp(a, "-MMD") == 0 ||
-            strcmp(a, "-MP") == 0)
+        if (pp_flag_dropped(a))
             continue;
-        if (strcmp(a, "-MF") == 0 || strcmp(a, "-MT") == 0 ||
-            strcmp(a, "-MQ") == 0) {
+        if (pp_flag_takes_value(a)) {
             i++;   /* also drop the value, or it becomes a phantom input */
             continue;
         }
-        if (strncmp(a, "-MF", 3) == 0 && a[3])
+        if (pp_flag_inline_dep(a))
             continue;
-        if ((strncmp(a, "-MT", 3) == 0 || strncmp(a, "-MQ", 3) == 0) && a[3])
-            continue;
-        /* other inputs would only produce "linker input unused" noise */
-        bool other_input = false;
-        for (int s = 0; s < pl->src_n; s++)
-            if (pl->src[s] == i && i != src_idx)
-                other_input = true;
-        for (int b = 0; b < pl->blob_n; b++)
-            if (pl->blob[b] == i)
-                other_input = true;
-        if (other_input)
+        if (pp_other_input(pl, i, src_idx))
             continue;
         if (strncmp(a, "-l", 2) == 0 && a[2])
             continue;
@@ -2837,6 +2934,82 @@ static long long sweep_tmp(const struct cache *c, time_t now)
     return kept;
 }
 
+/* Reads one shard directory into `*fr`, adding the shard's own blocks and any
+ * stray bytes to `*total`. False only when growing the record array failed. */
+static bool scan_shard_files(DIR *sd, const char *sdir, char kind, time_t now,
+                             struct filerec **fr, size_t *fr_cap, size_t *fn,
+                             long long *total)
+{
+    struct dirent *fe;
+    while ((fe = readdir(sd))) {
+        char fp[PATH_MAX];
+        if (snprintf(fp, sizeof fp, "%.4000s/%.80s", sdir, fe->d_name) >=
+            (int)sizeof fp)
+            continue;
+        struct stat st;
+        if (lstat(fp, &st) != 0 || !S_ISREG(st.st_mode))
+            continue;
+        char stem[HEXLEN + 1u];
+        if (!entry_name(kind, fe->d_name, stem)) {
+            /* A STRAY. store_atomic() stages through .zcc.XXXXXX in
+             * this very directory, so a process killed between
+             * mkstemp() and rename() leaves one here and nothing else
+             * would ever remove it. A stray the bound can count but
+             * never evict is how a self-bounding cache starves
+             * itself: once strays alone exceed the ceiling, every
+             * trim deletes every real entry and is STILL over. Sweep
+             * the ones too old for any live store to own. */
+            if (now != (time_t)-1 && now - st.st_mtime > ZCC_STRAY_AGE_SEC)
+                unlink(fp);
+            else
+                *total += ZCC_DISK(st);
+            continue;
+        }
+        if (*fn == *fr_cap) {
+            size_t nc = *fr_cap ? *fr_cap * 2u : 8192u;
+            struct filerec *nf =
+                zcl_realloc(*fr, nc * sizeof *nf, "zcc shard scan");
+            if (!nf)
+                return false;
+            *fr = nf;
+            *fr_cap = nc;
+        }
+        memcpy((*fr)[*fn].stem, stem, HEXLEN + 1u);
+        (*fr)[*fn].size = ZCC_DISK(st);
+        (*fr)[*fn].mtime = st.st_mtime;
+        (*fn)++;
+    }
+    return true;
+}
+
+/* Folds one shard's file records into entries on `l`. False when `l` could
+ * not take one. */
+static bool scan_shard_coalesce(struct filerec *fr, size_t fn, char kind,
+                                const char *shard, struct evict_list *l,
+                                long long *total)
+{
+    /* Coalesce this shard's files into entries before moving on, so
+     * only entries are ever held in memory. */
+    qsort(fr, fn, sizeof *fr, by_stem);
+    for (size_t i = 0; i < fn;) {
+        struct entry e = { .kind = kind, .size = 0, .mtime = 0 };
+        snprintf(e.shard, sizeof e.shard, "%.2s", shard);
+        memcpy(e.stem, fr[i].stem, HEXLEN + 1u);
+        size_t j = i;
+        while (j < fn && strcmp(fr[j].stem, e.stem) == 0) {
+            e.size += fr[j].size;
+            if (fr[j].mtime > e.mtime)
+                e.mtime = fr[j].mtime;
+            j++;
+        }
+        *total += e.size;
+        if (!ev_push(l, &e))
+            return false;
+        i = j;
+    }
+    return true;
+}
+
 /* Total bytes held, and one record per entry into `l`. Returns -1 only when
  * it ran out of memory, which abandons the trim entirely: trimming against a
  * partial total would evict against a number that is not the cache's size.
@@ -2874,72 +3047,13 @@ static long long scan_entries(const struct cache *c, struct evict_list *l)
             if (lstat(sdir, &dst) == 0)
                 total += ZCC_DISK(dst);
             size_t fn = 0;
-            struct dirent *fe;
-            while ((fe = readdir(sd))) {
-                char fp[PATH_MAX];
-                if (snprintf(fp, sizeof fp, "%.4000s/%.80s", sdir,
-                             fe->d_name) >= (int)sizeof fp)
-                    continue;
-                struct stat st;
-                if (lstat(fp, &st) != 0 || !S_ISREG(st.st_mode))
-                    continue;
-                char stem[HEXLEN + 1u];
-                if (!entry_name(kinds[k], fe->d_name, stem)) {
-                    /* A STRAY. store_atomic() stages through .zcc.XXXXXX in
-                     * this very directory, so a process killed between
-                     * mkstemp() and rename() leaves one here and nothing else
-                     * would ever remove it. A stray the bound can count but
-                     * never evict is how a self-bounding cache starves
-                     * itself: once strays alone exceed the ceiling, every
-                     * trim deletes every real entry and is STILL over. Sweep
-                     * the ones too old for any live store to own. */
-                    if (now != (time_t)-1 &&
-                        now - st.st_mtime > ZCC_STRAY_AGE_SEC)
-                        unlink(fp);
-                    else
-                        total += ZCC_DISK(st);
-                    continue;
-                }
-                if (fn == fr_cap) {
-                    size_t nc = fr_cap ? fr_cap * 2u : 8192u;
-                    struct filerec *nf =
-                        zcl_realloc(fr, nc * sizeof *nf, "zcc shard scan");
-                    if (!nf) {
-                        oom = true;
-                        break;
-                    }
-                    fr = nf;
-                    fr_cap = nc;
-                }
-                memcpy(fr[fn].stem, stem, HEXLEN + 1u);
-                fr[fn].size = ZCC_DISK(st);
-                fr[fn].mtime = st.st_mtime;
-                fn++;
-            }
+            oom = !scan_shard_files(sd, sdir, kinds[k], now, &fr, &fr_cap, &fn,
+                                    &total);
             closedir(sd);
             if (oom)
                 break;
-            /* Coalesce this shard's files into entries before moving on, so
-             * only entries are ever held in memory. */
-            qsort(fr, fn, sizeof *fr, by_stem);
-            for (size_t i = 0; i < fn;) {
-                struct entry e = { .kind = kinds[k], .size = 0, .mtime = 0 };
-                snprintf(e.shard, sizeof e.shard, "%.2s", se->d_name);
-                memcpy(e.stem, fr[i].stem, HEXLEN + 1u);
-                size_t j = i;
-                while (j < fn && strcmp(fr[j].stem, e.stem) == 0) {
-                    e.size += fr[j].size;
-                    if (fr[j].mtime > e.mtime)
-                        e.mtime = fr[j].mtime;
-                    j++;
-                }
-                total += e.size;
-                if (!ev_push(l, &e)) {
-                    oom = true;
-                    break;
-                }
-                i = j;
-            }
+            oom = !scan_shard_coalesce(fr, fn, kinds[k], se->d_name, l,
+                                       &total);
         }
         closedir(kd);
     }
@@ -3926,17 +4040,15 @@ static void epoch_authority_close(struct epoch_authority *authority)
     authority->admission_dir_fd = authority->object_root_fd = -1;
 }
 
-static bool epoch_authority_open(const char *output, const char *session,
-                                 const char *source_id, const char *complete,
-                                 const char *mutation, const char *compiler_id,
-                                 const char *epoch,
-                                 struct epoch_authority *authority)
+/* Marker bytes and the epoch and object-root path strings; no descriptor is
+ * opened here, so a refusal needs no close. */
+static bool epoch_authority_paths(const char *output, const char *source_id,
+                                  const char *mutation,
+                                  const char *compiler_id, const char *epoch,
+                                  struct epoch_authority *authority,
+                                  size_t *root_len_out)
 {
     size_t root_len = 0;
-    memset(authority, 0, sizeof *authority);
-    authority->epoch_fd = authority->session_parent_fd = -1;
-    authority->session_fd = authority->object_root_fd = -1;
-    authority->admission_dir_fd = -1;
     int marker_len = snprintf(
         authority->unverified, sizeof authority->unverified,
         "schema=zcl.build_epoch_unverified.v1\n"
@@ -3962,6 +4074,55 @@ static bool epoch_authority_open(const char *output, const char *session,
         memcpy(authority->object_root_path, output, object_root_len);
         authority->object_root_path[object_root_len] = '\0';
     }
+    *root_len_out = root_len;
+    return true;
+}
+
+/* Opens the session file under the epoch directory and checks its bytes. */
+static bool epoch_authority_session(const char *session, size_t root_len,
+                                    const char *source_id,
+                                    const char *complete,
+                                    const char *mutation,
+                                    const char *compiler_id, const char *epoch,
+                                    struct epoch_authority *authority)
+{
+    const char *session_relative = session + root_len + 1u;
+    char session_parent[PATH_MAX];
+    if (!epoch_split_relative(session_relative, session_parent,
+                              authority->session_leaf))
+        return false;
+    authority->session_parent_fd = epoch_open_relative_dir(
+        authority->epoch_fd, session_parent, false);
+    if (authority->session_parent_fd < 0)
+        return false;
+    authority->session_fd = openat(authority->session_parent_fd,
+                                    authority->session_leaf,
+                                    O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (authority->session_fd < 0)
+        return false;
+    struct buf text = { 0 };
+    bool ok = epoch_read_fd(authority->session_fd, &text, &authority->stamp) &&
+              text.len != 0u && memchr(text.p, '\0', text.len) == NULL &&
+              epoch_session_bytes(&text, source_id, complete, mutation,
+                                  compiler_id, epoch);
+    buf_free(&text);
+    return ok;
+}
+
+static bool epoch_authority_open(const char *output, const char *session,
+                                 const char *source_id, const char *complete,
+                                 const char *mutation, const char *compiler_id,
+                                 const char *epoch,
+                                 struct epoch_authority *authority)
+{
+    size_t root_len = 0;
+    memset(authority, 0, sizeof *authority);
+    authority->epoch_fd = authority->session_parent_fd = -1;
+    authority->session_fd = authority->object_root_fd = -1;
+    authority->admission_dir_fd = -1;
+    if (!epoch_authority_paths(output, source_id, mutation, compiler_id, epoch,
+                               authority, &root_len))
+        return false;
     authority->object_root_fd = epoch_open_path_dir(
         authority->object_root_path);
     char epoch_relative[NAME_MAX + 9u];
@@ -3982,27 +4143,8 @@ static bool epoch_authority_open(const char *output, const char *session,
                  sizeof authority->admission_lock_name, "%s.lock", epoch) >=
         (int)sizeof authority->admission_lock_name)
         goto fail;
-    const char *session_relative = session + root_len + 1u;
-    char session_parent[PATH_MAX];
-    if (!epoch_split_relative(session_relative, session_parent,
-                              authority->session_leaf))
-        goto fail;
-    authority->session_parent_fd = epoch_open_relative_dir(
-        authority->epoch_fd, session_parent, false);
-    if (authority->session_parent_fd < 0)
-        goto fail;
-    authority->session_fd = openat(authority->session_parent_fd,
-                                    authority->session_leaf,
-                                    O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (authority->session_fd < 0)
-        goto fail;
-    struct buf text = { 0 };
-    bool ok = epoch_read_fd(authority->session_fd, &text, &authority->stamp) &&
-              text.len != 0u && memchr(text.p, '\0', text.len) == NULL &&
-              epoch_session_bytes(&text, source_id, complete, mutation,
-                                  compiler_id, epoch);
-    buf_free(&text);
-    if (ok)
+    if (epoch_authority_session(session, root_len, source_id, complete,
+                                mutation, compiler_id, epoch, authority))
         return true;
 fail:
     epoch_authority_close(authority);
@@ -4017,9 +4159,10 @@ static bool epoch_lookup_same(int parent_fd, const char *name,
            S_ISREG(now.st_mode) && epoch_same_stamp(expected, &now);
 }
 
-static bool epoch_authority_current(const struct epoch_authority *authority)
+static bool epoch_authority_roots_same(
+    const struct epoch_authority *authority)
 {
-    struct stat session_now, epoch_now, object_root_now, admission_now;
+    struct stat epoch_now, object_root_now, admission_now;
     int object_root = epoch_open_path_dir(authority->object_root_path);
     int root = epoch_open_path_dir(authority->epoch_path);
     int admission = epoch_open_relative_dir(authority->object_root_fd,
@@ -4039,6 +4182,13 @@ static bool epoch_authority_current(const struct epoch_authority *authority)
         close(root);
     if (admission >= 0)
         close(admission);
+    return root_ok;
+}
+
+static bool epoch_authority_current(const struct epoch_authority *authority)
+{
+    struct stat session_now;
+    bool root_ok = epoch_authority_roots_same(authority);
     return root_ok && fstat(authority->session_fd, &session_now) == 0 &&
            S_ISREG(session_now.st_mode) &&
            epoch_same_stamp(&authority->stamp, &session_now) &&
@@ -4641,6 +4791,48 @@ static int epoch_compile_or_serve(int argc, char **argv, const char *mode,
     return zcc_dispatch(compiler_argc, cc, false, output);
 }
 
+/* Drops the staged artifacts and the coverage lock, if one is held. */
+static void epoch_abort_stage(struct epoch_artifacts *artifacts, int lock_fd)
+{
+    epoch_artifacts_close(artifacts, true);
+    if (lock_fd >= 0)
+        close(lock_fd);
+}
+
+/* Takes the coverage object's exclusive lock into `*lock_fd`. On false the
+ * lock and the staged artifacts are already released. */
+static bool epoch_coverage_lock(const struct epoch_authority *authority,
+                                struct epoch_artifacts *artifacts,
+                                int *lock_fd)
+{
+    *lock_fd = openat(artifacts->parent_fd, artifacts->lock_name,
+                      O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (*lock_fd < 0 || flock(*lock_fd, LOCK_EX) != 0 ||
+        !epoch_stage_current(authority, artifacts)) {
+        if (*lock_fd >= 0)
+            close(*lock_fd);
+        epoch_artifacts_close(artifacts, true);
+        return false;
+    }
+    return true;
+}
+
+/* Publishes the staged artifacts and takes them back when the authority moved
+ * under the admission lock. True when they stand published. */
+static bool epoch_publish_checked(const struct epoch_authority *authority,
+                                  struct epoch_artifacts *artifacts,
+                                  bool coverage, int admission_fd)
+{
+    bool published = epoch_publish(coverage, artifacts);
+    if (published &&
+        (!epoch_admission_lock_current(authority, admission_fd) ||
+         !epoch_stage_current(authority, artifacts))) {
+        epoch_retract(coverage, artifacts);
+        published = false;
+    }
+    return published;
+}
+
 static int epoch_compile_publish(int argc, char **argv, const char *mode,
                                  const char *output, const char *source,
                                  const struct epoch_authority *authority)
@@ -4652,24 +4844,13 @@ static int epoch_compile_publish(int argc, char **argv, const char *mode,
         return epoch_fail("could not create complete object staging paths");
     }
     bool coverage = strcmp(mode, "coverage") == 0;
-    if (coverage) {
-        lock_fd = openat(artifacts.parent_fd, artifacts.lock_name,
-                         O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
-        if (lock_fd < 0 || flock(lock_fd, LOCK_EX) != 0 ||
-            !epoch_stage_current(authority, &artifacts)) {
-            if (lock_fd >= 0)
-                close(lock_fd);
-            epoch_artifacts_close(&artifacts, true);
-            return epoch_fail("could not lock coverage object");
-        }
-    }
+    if (coverage && !epoch_coverage_lock(authority, &artifacts, &lock_fd))
+        return epoch_fail("could not lock coverage object");
     int compiler_argc = 0;
     char **cc = epoch_compiler_argv(argc, argv, output, source, &artifacts,
                                     coverage, &compiler_argc);
     if (!cc) {
-        epoch_artifacts_close(&artifacts, true);
-        if (lock_fd >= 0)
-            close(lock_fd);
+        epoch_abort_stage(&artifacts, lock_fd);
         return epoch_fail("could not allocate compiler argv");
     }
     int rc = epoch_compile_or_serve(argc, argv, mode, output, source,
@@ -4677,9 +4858,7 @@ static int epoch_compile_publish(int argc, char **argv, const char *mode,
     free(cc);
     bool complete = epoch_compile_complete(rc, coverage, &artifacts);
     if (!complete || !epoch_stage_current(authority, &artifacts)) {
-        epoch_artifacts_close(&artifacts, true);
-        if (lock_fd >= 0)
-            close(lock_fd);
+        epoch_abort_stage(&artifacts, lock_fd);
         if (rc != 0)
             return rc;
         return epoch_fail(!complete ? "compiler did not create a complete object"
@@ -4687,18 +4866,11 @@ static int epoch_compile_publish(int argc, char **argv, const char *mode,
     }
     int admission_fd = epoch_admission_acquire(authority, &artifacts);
     if (admission_fd < 0) {
-        epoch_artifacts_close(&artifacts, true);
-        if (lock_fd >= 0)
-            close(lock_fd);
+        epoch_abort_stage(&artifacts, lock_fd);
         return epoch_fail("could not acquire stable-publication admission");
     }
-    bool published = epoch_publish(coverage, &artifacts);
-    if (published &&
-        (!epoch_admission_lock_current(authority, admission_fd) ||
-         !epoch_stage_current(authority, &artifacts))) {
-        epoch_retract(coverage, &artifacts);
-        published = false;
-    }
+    bool published = epoch_publish_checked(authority, &artifacts, coverage,
+                                           admission_fd);
     epoch_artifacts_close(&artifacts, !coverage || !published);
     close(admission_fd);
     if (lock_fd >= 0)
@@ -4895,22 +5067,159 @@ static int zcc_command_dispatch(int argc, char **argv)
     return 2;
 }
 
-static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass,
-                        const char *diagnostic_output)
+/* Releases the plan, then runs the compiler with no cache involved. */
+static int zcc_run_uncached(struct plan *pl, char **cc_argv,
+                            bool replace_on_bypass)
+{
+    plan_free(pl);
+    return replace_on_bypass ? exec_direct(cc_argv)
+                             : run_argv(cc_argv, NULL, NULL);
+}
+
+/* True when this invocation must not use the cache: disabled, planned as a
+ * bypass, or the cache would not open. The bypass is counted and logged when
+ * the cache is there to count it in. */
+static bool zcc_bypassed(struct cache *c, const struct plan *pl,
+                         bool disabled)
+{
+    if (disabled || pl->bypass || !cache_open(c)) {
+        if (!disabled && pl->bypass && cache_open(c)) {
+            bump(c, "bypass");
+            logline("BYPASS", pl->bypass, pl);
+        }
+        return true;
+    }
+    return false;
+}
+
+/* Level 2: key on the preprocessed content and try to serve it. Returns 1
+ * when served, 0 on a miss, -1 when the key could not be computed (deps are
+ * already released then). */
+static int zcc_content_lookup(struct cache *c, const struct plan *pl,
+                              const char *pkey, char ckey[HEXLEN + 1u],
+                              bool have_pkey, bool audit, struct deps *deps,
+                              bool *have_deps)
+{
+    if (!content_key(pl, c->tmp, c->root, deps, ckey)) {
+        /* The -E probe did not work here. Run the real compiler, but say
+         * so: an invocation that silently declines to be cached is a
+         * performance bug nobody can see. A -MT value left unconsumed
+         * once made EVERY node object take this path. */
+        deps_free(deps);
+        bump(c, "unkeyable");
+        logline("UNKEY", "the -E probe failed", pl);
+        return -1;
+    }
+    *have_deps = true;
+    if (!audit && serve(c, ckey, pl)) {
+        bool wrote = have_pkey && *have_deps &&
+                     manifest_write(c, pkey, ckey, deps);
+        deps_free(deps);
+        bump(c, "hit");
+        logline("HIT", "level 2 (content)", pl);
+        /* A level-2 hit still ADDS a manifest, so it is one of the two
+         * places bytes enter the cache and therefore one of the two that
+         * has to check the bound. */
+        if (wrote)
+            maybe_trim(c, pl);
+        return 1;
+    }
+    return 0;
+}
+
+/* Takes the single-flight slot into `*flight_fd`. Returns 0 to compile, 1
+ * when another process already served the result, 2 to bypass the cache. */
+static int zcc_flight_stage(const struct cache *c, const struct plan *pl,
+                            const char *pkey, const char *ckey,
+                            bool have_pkey, bool audit, struct deps *deps,
+                            bool *have_deps, int *flight_fd)
+{
+    if (audit)
+        return 0;
+    *flight_fd = flight_prepare(c, pl, ckey, deps, have_deps);
+    if (*flight_fd >= 0)
+        return 0;
+    if (*flight_fd == -2) {
+        if (manifest_store(c, pkey, ckey, deps, have_pkey, *have_deps))
+            maybe_trim(c, pl);
+        deps_free(deps);
+        return 1;
+    }
+    deps_free(deps);
+    bump(c, "bypass");
+    logline("BYPASS", "content coordination unavailable or changed", pl);
+    return 2;
+}
+
+/* Miss (or audit): run the real compiler, capturing stderr so a later
+ * hit can reproduce the warnings the developer would have seen. */
+static int zcc_compile_miss(const struct cache *c, const struct plan *pl,
+                            char **cc_argv, const char *ckey,
+                            const char *pkey, bool have_pkey, bool audit,
+                            struct deps *deps, int flight_fd)
+{
+    char errfile[PATH_MAX];
+    snprintf(errfile, sizeof errfile, "%.3000s/err.%d", c->tmp,
+             (int)getpid());
+
+    struct buf cached_before = { 0 };
+    bool had_cached = false;
+    if (audit) {
+        char art[PATH_MAX];
+        entry_path(c, "obj", ckey, ".bin", art);
+        had_cached = read_file(art, &cached_before);
+    }
+
+    int rc = run_argv(cc_argv, NULL, errfile);
+
+    struct buf errbytes = { 0 };
+    if (read_file(errfile, &errbytes) && errbytes.len > 0)
+        (void)!write(STDERR_FILENO, errbytes.p, errbytes.len);
+    buf_free(&errbytes);
+
+    if (rc == 0) {
+        record_compilation(c, pl, errfile, audit, had_cached,
+                           &cached_before, ckey, deps, pkey, have_pkey,
+                           &flight_fd);
+    }
+    buf_free(&cached_before);
+    flight_release(flight_fd);
+    deps_free(deps);
+    unlink(errfile);
+    return rc;
+}
+
+/* The invocations that are not a compile: usage, the epoch publisher and the
+ * --zcc-* commands. True with their result in `*rc`. */
+static bool zcc_special_command(int argc, char **argv, int *rc)
 {
     if (argc < 2) {
         fprintf(stderr,
                 "usage: zcc <compiler> [args...]\n"
                 "       zcc --epoch-object dep|coverage OUTPUT SOURCE ...\n"
                 "       zcc --zcc-stats | --zcc-clear | --zcc-trim [MB]\n");
-        return 2;
+        *rc = 2;
+        return true;
     }
 
-    if (strcmp(argv[1], "--epoch-object") == 0)
-        return cmd_epoch_object(argc, argv);
+    if (strcmp(argv[1], "--epoch-object") == 0) {
+        *rc = cmd_epoch_object(argc, argv);
+        return true;
+    }
 
-    if (strncmp(argv[1], "--zcc-", 6) == 0)
-        return zcc_command_dispatch(argc, argv);
+    if (strncmp(argv[1], "--zcc-", 6) == 0) {
+        *rc = zcc_command_dispatch(argc, argv);
+        return true;
+    }
+    return false;
+}
+
+static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass,
+                        const char *diagnostic_output)
+{
+    int special_rc = 0;
+    if (zcc_special_command(argc, argv, &special_rc))
+        return special_rc;
 
     struct cache c;
 
@@ -4929,20 +5238,11 @@ static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass,
      * publisher reaches it through its nested zcc_dispatch call. */
     if (getenv("ZCC_VERIFIED") != NULL) {
         logline("MISS", "verified:no_verifier_key", &pl);
-        plan_free(&pl);
-        return replace_on_bypass ? exec_direct(cc_argv)
-                                 : run_argv(cc_argv, NULL, NULL);
+        return zcc_run_uncached(&pl, cc_argv, replace_on_bypass);
     }
 
-    if (disabled || pl.bypass || !cache_open(&c)) {
-        if (!disabled && pl.bypass && cache_open(&c)) {
-            bump(&c, "bypass");
-            logline("BYPASS", pl.bypass, &pl);
-        }
-        plan_free(&pl);
-        return replace_on_bypass ? exec_direct(cc_argv)
-                                 : run_argv(cc_argv, NULL, NULL);
-    }
+    if (zcc_bypassed(&c, &pl, disabled))
+        return zcc_run_uncached(&pl, cc_argv, replace_on_bypass);
 
     const bool strict = getenv("ZCC_STRICT") != NULL;
     const bool audit = getenv("ZCC_AUDIT") != NULL;
@@ -4971,86 +5271,28 @@ static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass,
     }
 
     if (!have_ckey || audit) {
-        if (!content_key(&pl, c.tmp, c.root, &deps, ckey)) {
-            /* The -E probe did not work here. Run the real compiler, but say
-             * so: an invocation that silently declines to be cached is a
-             * performance bug nobody can see. A -MT value left unconsumed
-             * once made EVERY node object take this path. */
-            deps_free(&deps);
-            bump(&c, "unkeyable");
-            logline("UNKEY", "the -E probe failed", &pl);
-            plan_free(&pl);
-            return replace_on_bypass ? exec_direct(cc_argv)
-                                     : run_argv(cc_argv, NULL, NULL);
-        }
-        have_deps = true;
-        if (!audit && serve(&c, ckey, &pl)) {
-            bool wrote = have_pkey && have_deps &&
-                         manifest_write(&c, pkey, ckey, &deps);
-            deps_free(&deps);
-            bump(&c, "hit");
-            logline("HIT", "level 2 (content)", &pl);
-            /* A level-2 hit still ADDS a manifest, so it is one of the two
-             * places bytes enter the cache and therefore one of the two that
-             * has to check the bound. */
-            if (wrote)
-                maybe_trim(&c, &pl);
+        int found = zcc_content_lookup(&c, &pl, pkey, ckey, have_pkey, audit,
+                                       &deps, &have_deps);
+        if (found < 0)
+            return zcc_run_uncached(&pl, cc_argv, replace_on_bypass);
+        if (found > 0) {
             plan_free(&pl);
             return 0;
         }
     }
 
     int flight_fd = -1;
-    if (!audit) {
-        flight_fd = flight_prepare(&c, &pl, ckey, &deps, &have_deps);
-        if (flight_fd < 0) {
-            if (flight_fd == -2) {
-                if (manifest_store(&c, pkey, ckey, &deps,
-                                   have_pkey, have_deps))
-                    maybe_trim(&c, &pl);
-                deps_free(&deps);
-                plan_free(&pl);
-                return 0;
-            }
-            deps_free(&deps);
-            bump(&c, "bypass");
-            logline("BYPASS", "content coordination unavailable or changed", &pl);
-            plan_free(&pl);
-            return replace_on_bypass ? exec_direct(cc_argv)
-                                     : run_argv(cc_argv, NULL, NULL);
-        }
+    int staged = zcc_flight_stage(&c, &pl, pkey, ckey, have_pkey, audit,
+                                  &deps, &have_deps, &flight_fd);
+    if (staged == 1) {
+        plan_free(&pl);
+        return 0;
     }
+    if (staged == 2)
+        return zcc_run_uncached(&pl, cc_argv, replace_on_bypass);
 
-    /* Miss (or audit): run the real compiler, capturing stderr so a later
-     * hit can reproduce the warnings the developer would have seen. */
-    char errfile[PATH_MAX];
-    snprintf(errfile, sizeof errfile, "%.3000s/err.%d", c.tmp,
-             (int)getpid());
-
-    struct buf cached_before = { 0 };
-    bool had_cached = false;
-    if (audit) {
-        char art[PATH_MAX];
-        entry_path(&c, "obj", ckey, ".bin", art);
-        had_cached = read_file(art, &cached_before);
-    }
-
-    int rc = run_argv(cc_argv, NULL, errfile);
-
-    struct buf errbytes = { 0 };
-    if (read_file(errfile, &errbytes) && errbytes.len > 0)
-        (void)!write(STDERR_FILENO, errbytes.p, errbytes.len);
-    buf_free(&errbytes);
-
-    if (rc == 0) {
-        record_compilation(&c, &pl, errfile, audit, had_cached,
-                           &cached_before, ckey, &deps, pkey, have_pkey,
-                           &flight_fd);
-    }
-    buf_free(&cached_before);
-    flight_release(flight_fd);
-    deps_free(&deps);
-    unlink(errfile);
+    int rc = zcc_compile_miss(&c, &pl, cc_argv, ckey, pkey, have_pkey, audit,
+                              &deps, flight_fd);
     plan_free(&pl);
     return rc;
 }
