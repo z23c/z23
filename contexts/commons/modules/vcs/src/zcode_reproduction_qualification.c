@@ -35,58 +35,41 @@ static bool qualification_load(const char *workspace, const uint8_t root[32],
         workspace, root, maximum, wire, wire_len) == 0;
 }
 
-static const char *qualification_string_input_verdict(
-    enum vcs_zcode_reproduction_qualification verdict)
-{
-    switch (verdict) {
-    case VCS_ZCODE_QUALIFICATION_READY:
-        return "ready_for_shadow_attribution";
-    case VCS_ZCODE_QUALIFICATION_NULL: return "null";
-    case VCS_ZCODE_QUALIFICATION_CAS: return "cas_object_invalid";
-    case VCS_ZCODE_QUALIFICATION_POLICY: return "policy_invalid";
-    case VCS_ZCODE_QUALIFICATION_SCORE: return "score_vertical_invalid";
-    case VCS_ZCODE_QUALIFICATION_REQUEST: return "request_invalid";
-    case VCS_ZCODE_QUALIFICATION_NO_RECEIPT:
-        return "no_reproduction_receipt";
-    case VCS_ZCODE_QUALIFICATION_RECEIPT:
-        return "reproduction_receipt_invalid";
-    default:
-        return NULL;
-    }
-}
-
-static const char *qualification_string_outcome_verdict(
-    enum vcs_zcode_reproduction_qualification verdict)
-{
-    switch (verdict) {
-    case VCS_ZCODE_QUALIFICATION_OUTPUT_MISMATCH:
-        return "reproduction_output_mismatch";
-    case VCS_ZCODE_QUALIFICATION_SIGNER_NOT_APPROVED:
-        return "signer_not_approved";
-    case VCS_ZCODE_QUALIFICATION_SIGNER_NOT_DISTINCT:
-        return "signer_not_distinct";
-    case VCS_ZCODE_QUALIFICATION_APPROVAL_NOT_VALID:
-        return "approval_not_valid_at_receipt_time";
-    case VCS_ZCODE_QUALIFICATION_CHALLENGE_EXPIRED:
-        return "challenge_expired";
-    case VCS_ZCODE_QUALIFICATION_CONFINEMENT_INSUFFICIENT:
-        return "confinement_insufficient";
-    case VCS_ZCODE_QUALIFICATION_DUPLICATE:
-        return "duplicate_reproduction";
-    case VCS_ZCODE_QUALIFICATION_CONTRADICTION:
-        return "contradictory_reproductions";
-    default:
-        return NULL;
-    }
-}
+static const struct {
+    enum vcs_zcode_reproduction_qualification verdict;
+    const char *name;
+} qualification_verdict_names[] = {
+    { VCS_ZCODE_QUALIFICATION_READY, "ready_for_shadow_attribution" },
+    { VCS_ZCODE_QUALIFICATION_NULL, "null" },
+    { VCS_ZCODE_QUALIFICATION_CAS, "cas_object_invalid" },
+    { VCS_ZCODE_QUALIFICATION_POLICY, "policy_invalid" },
+    { VCS_ZCODE_QUALIFICATION_SCORE, "score_vertical_invalid" },
+    { VCS_ZCODE_QUALIFICATION_REQUEST, "request_invalid" },
+    { VCS_ZCODE_QUALIFICATION_NO_RECEIPT, "no_reproduction_receipt" },
+    { VCS_ZCODE_QUALIFICATION_RECEIPT, "reproduction_receipt_invalid" },
+    { VCS_ZCODE_QUALIFICATION_OUTPUT_MISMATCH,
+      "reproduction_output_mismatch" },
+    { VCS_ZCODE_QUALIFICATION_SIGNER_NOT_APPROVED, "signer_not_approved" },
+    { VCS_ZCODE_QUALIFICATION_SIGNER_NOT_DISTINCT, "signer_not_distinct" },
+    { VCS_ZCODE_QUALIFICATION_APPROVAL_NOT_VALID,
+      "approval_not_valid_at_receipt_time" },
+    { VCS_ZCODE_QUALIFICATION_CHALLENGE_EXPIRED, "challenge_expired" },
+    { VCS_ZCODE_QUALIFICATION_CONFINEMENT_INSUFFICIENT,
+      "confinement_insufficient" },
+    { VCS_ZCODE_QUALIFICATION_DUPLICATE, "duplicate_reproduction" },
+    { VCS_ZCODE_QUALIFICATION_CONTRADICTION,
+      "contradictory_reproductions" },
+};
 
 const char *vcs_zcode_reproduction_qualification_string(
     enum vcs_zcode_reproduction_qualification verdict)
 {
-    const char *text = qualification_string_input_verdict(verdict);
-    if (!text)
-        text = qualification_string_outcome_verdict(verdict);
-    return text ? text : "unknown";
+    for (size_t i = 0; i < sizeof(qualification_verdict_names) /
+                           sizeof(qualification_verdict_names[0]); i++) {
+        if (qualification_verdict_names[i].verdict == verdict)
+            return qualification_verdict_names[i].name;
+    }
+    return "unknown";
 }
 
 static enum vcs_zcode_reproduction_qualification qualification_finish(
@@ -225,9 +208,14 @@ static bool qualification_load_score_receipt(
         VCS_ZCODE_SCORE_OK;
 }
 
+static bool qualification_load_approved_set(
+    const char *workspace, struct vcs_zcode_policy_candidate_v1 *policy,
+    struct vcs_zcode_approved_reproducer_set_v1 *approved);
+
 static bool qualification_load_policy_candidate(
     const char *workspace, const uint8_t root[32],
-    struct vcs_zcode_policy_candidate_v1 *policy)
+    struct vcs_zcode_policy_candidate_v1 *policy,
+    struct vcs_zcode_approved_reproducer_set_v1 *approved)
 {
     uint8_t *wire = NULL, observed[32];
     size_t wire_len = 0;
@@ -240,7 +228,7 @@ static bool qualification_load_policy_candidate(
             VCS_ZCODE_SHADOW_OK &&
         qualification_equal(observed, root);
     free(wire);
-    return ok;
+    return ok && qualification_load_approved_set(workspace, policy, approved);
 }
 
 static bool qualification_load_approved_set(
@@ -311,9 +299,7 @@ qualification_load_score_policy_request(
                                           score))
         return VCS_ZCODE_QUALIFICATION_SCORE;
     if (!qualification_load_policy_candidate(workspace, policy_candidate_root,
-                                             policy))
-        return VCS_ZCODE_QUALIFICATION_POLICY;
-    if (!qualification_load_approved_set(workspace, policy, approved))
+                                             policy, approved))
         return VCS_ZCODE_QUALIFICATION_POLICY;
     if (!qualification_load_request(workspace, reproduction_request_root,
                                     policy_candidate_root, policy, score,
