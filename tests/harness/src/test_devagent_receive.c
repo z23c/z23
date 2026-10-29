@@ -55,11 +55,17 @@ static char g_rtx_saved_xdg[4096];
 static bool g_rtx_had_xdg;
 static int g_rtx_ts;
 
+/* Pure wait ceiling for a drive that must run every requested beat: the
+ * loop ends early when this wall-clock window closes, so a host at load 300
+ * could stop a 20-beat drive short. Nothing asserts on elapsed time. */
+#define RTX_BEATS_DEADLINE_S 900
+
 /* ── who the rig's senders are ─────────────────────────────────────
  * Rows carry the stamp of the credential that sent them, and the receiver
  * admits on that stamp. Each minted grant's binding is remembered by label;
  * a label never minted gets RTX_FOREIGN_BINDING (well-formed, belongs to
  * nobody), not an empty stamp, which is refused one gate earlier. */
+
 #define RTX_FOREIGN_BINDING "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 struct rtx_ident {
@@ -750,6 +756,7 @@ static int test_receive_intake_paging(void)
         ASSERT(rtx_deliver("chatgpt", "box-a", "job-fresh", body, 201));
         /* A receiver with no cursor pages through and admits it. */
         rtx_opts(&o, 20);
+        o.deadline_s = RTX_BEATS_DEADLINE_S;
         memset(&st, 0, sizeof(st));
         ASSERT_EQ(zcl_devagent_receive_drive(&o, &st), 20);
         ASSERT_EQ(st.intake_failed, 0);
