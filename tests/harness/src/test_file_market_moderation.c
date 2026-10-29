@@ -695,6 +695,15 @@ static int mmt_vf_dump(void)
     return failures;
 }
 
+/* Unbind the RPC store and close it if a stage failed before its own
+ * close, so no pointer to the static store outlives this test. */
+static void mmt_vf_release(void)
+{
+    rpc_market_set_state(NULL);
+    if (ndb.open)
+        node_db_close(&ndb);
+}
+
 static int test_mmt_view_filter(void)
 {
     int failures = 0;
@@ -724,6 +733,7 @@ static int test_mmt_view_filter(void)
         PASS();
     }
     _test_next:;
+    mmt_vf_release();
     return failures;
 }
 
