@@ -60,8 +60,8 @@ int test_zslp_store_port(void)
 
     /* ---- happy path: open creates node.db + zslp_balances ---- */
     {
-        char dir[] = "/tmp/zcl_zss_test_XXXXXX";
-        bool made = (mkdtemp(dir) != NULL);
+        char dir[256];
+        bool made = (test_mkdtemp(dir, sizeof dir, "zcl_zss_test") != NULL);
         ZSS_CHECK("temp datadir made", made);
 
         struct zslp_store_port port = {0};
@@ -110,8 +110,8 @@ int test_zslp_store_port(void)
 
         /* A datadir that is actually a regular file makes "<dir>/node.db"
          * unopenable. */
-        char f[] = "/tmp/zcl_zss_file_XXXXXX";
-        int fd = mkstemp(f);
+        char f[256];
+        int fd = test_mkstemp(f, sizeof f, "zcl_zss_file");
         if (fd >= 0) close(fd);
 
         void *db = (void *)0x1;

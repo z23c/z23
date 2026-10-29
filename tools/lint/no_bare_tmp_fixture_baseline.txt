@@ -46,7 +46,6 @@ tests/harness/src/test_metaverse_broker_authority.c 1
 tests/harness/src/test_metaverse_vocabulary.c 1
 tests/harness/src/test_mmb.c 1
 tests/harness/src/test_native_api_contract.c 8
-tests/harness/src/test_net.c 1
 tests/harness/src/test_net_bootstrap.c 3
 tests/harness/src/test_no_hardcoded_home.c 7
 tests/harness/src/test_node_config_file.c 4
@@ -92,7 +91,7 @@ tests/harness/src/test_zcode_creation_attribution.c 1
 tests/harness/src/test_zcode_dht_service.c 37
 tests/harness/src/test_zcode_node_command.c 1
 tests/harness/src/test_zcode_package_dev.c 5
-tests/harness/src/test_zslp_store_port.c 3
+tests/harness/src/test_zslp_store_port.c 1
 tools/command/native_devagent_mail.c 1
 tools/command/native_presentation_release_confirmation_command.c 1
 tools/command/native_zcode_source_bundle_command.c 1

@@ -1984,9 +1984,9 @@ static int test_net_net_manager_ban_unban_clear(void)
     /* addr_db_read: missing peers.dat is a clean cold-start miss */
     {
         printf("addr_db_read: missing peers.dat is cold-start miss... ");
-        char tmpdir[] = "/tmp/zcl_peers_missing_XXXXXX";
+        char tmpdir[256];
         bool ok = false;
-        if (mkdtemp(tmpdir)) {
+        if (test_mkdtemp(tmpdir, sizeof tmpdir, "zcl_peers_missing")) {
             struct net_manager nm;
             net_manager_init(&nm);
             ok = !addr_db_read(&nm, tmpdir);
