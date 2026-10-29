@@ -773,7 +773,7 @@ ZCL_COMMAND_READY_READ(
     "last hour, Tor and onion readiness, uptime and last block age beside "
     "this node's own tip and the height difference. One fetch at a time; "
     "the raw body is never echoed. Typed refusals: BAD_ONION, BUSY, "
-    "TOR_UNAVAILABLE, TIMEOUT, RATE_LIMITED, PUZZLE_REQUIRED, HTTP_STATUS, "
+    "TOR_UNAVAILABLE, UNREACHABLE, RATE_LIMITED, PUZZLE_REQUIRED, HTTP_STATUS, "
     "BODY_TOO_LARGE, BAD_JSON, BAD_HEIGHT.", 0,
     "onion,tor,remote,status,height,peer,phone",
     "zcl.onion_remote_status.input.v1", "zcl.onion_remote_status.v1",

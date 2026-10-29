@@ -8,9 +8,11 @@
 #include "test/test_core.h"
 
 #include "config/command_catalog.h"
+#include "controllers/network_controller.h"
 #include "controllers/onion_remote_status.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "rpc/server.h"
 #include "util/safe_alloc.h"
 
 #include <stdint.h>
@@ -147,14 +149,14 @@ static int test_body_refusals(void)
 static int test_transport_refusals(void)
 {
     int failures = 0;
-    TEST_CASE("onion_remote_status: timeout, dial refusal, Tor down") {
+    TEST_CASE("onion_remote_status: silence and dial refusal are UNREACHABLE, Tor down is TOR_UNAVAILABLE") {
         arm(200, OK_BODY);
         g_silent = true;
-        ASSERT(refused_with(HOST, 1, "TIMEOUT"));
+        ASSERT(refused_with(HOST, 1, "UNREACHABLE"));
         ASSERT_EQ(g_calls, 1);
         arm(200, OK_BODY);
         g_dispatch_rc = -1;
-        ASSERT(refused_with(HOST, 1, "TOR_UNAVAILABLE"));
+        ASSERT(refused_with(HOST, 1, "UNREACHABLE"));
         arm(200, OK_BODY);
         onion_remote_status_set_test_hooks(fake_dispatch, false);
         ASSERT(refused_with(HOST, 1, "TOR_UNAVAILABLE"));
@@ -209,6 +211,109 @@ static int test_busy(void)
     return failures;
 }
 
+/* Run onionremotestatus in-process through the real RPC table. */
+static bool rpc_run(const char *params_json, struct json_value *result)
+{
+    struct rpc_table tbl;
+    rpc_table_init(&tbl);
+    register_net_rpc_commands(&tbl);
+    struct json_value params;
+    json_init(&params);
+    json_init(result);
+    bool ok = json_read(&params, params_json, strlen(params_json)) &&
+              rpc_table_execute(&tbl, "onionremotestatus", &params, result);
+    json_free(&params);
+    return ok;
+}
+
+/* True when the RPC refused with `code` as the message prefix. */
+static bool rpc_refused_with(const char *params_json, const char *code)
+{
+    struct json_value result;
+    bool ok = rpc_run(params_json, &result);
+    const char *msg = json_get_str(json_get(&result, "message"));
+    bool match = !ok && msg && strncmp(msg, code, strlen(code)) == 0 &&
+                 msg[strlen(code)] == ':';
+    json_free(&result);
+    return match;
+}
+
+static int test_rpc_registered(void)
+{
+    int failures = 0;
+    TEST_CASE("onion_remote_status: onionremotestatus RPC is registered") {
+        struct rpc_table tbl;
+        rpc_table_init(&tbl);
+        register_net_rpc_commands(&tbl);
+        ASSERT(rpc_table_find(&tbl, "onionremotestatus") != NULL);
+        ASSERT(rpc_table_find(&tbl, "onionstatus") != NULL);
+    } TEST_END
+    return failures;
+}
+
+static int test_rpc_success(void)
+{
+    int failures = 0;
+    TEST_CASE("onion_remote_status: RPC success runs in the node") {
+        arm(200, OK_BODY);
+        struct json_value result;
+        ASSERT(rpc_run("[\"" HOST "\",5]", &result));
+        ASSERT(strcmp(g_last_path, "/status") == 0);
+        ASSERT_STR_EQ(json_get_str(json_get(&result, "schema")),
+                      "zcl.onion_remote_status.v1");
+        ASSERT_EQ(json_get_int(json_get(json_get(&result, "remote"),
+                                        "height")), 90);
+        json_free(&result);
+        /* The timeout is optional. */
+        ASSERT(rpc_run("[\"" HOST "\"]", &result));
+        json_free(&result);
+        ASSERT_EQ(g_calls, 2);
+    } TEST_END
+    onion_remote_status_clear_test_hooks();
+    return failures;
+}
+
+static int test_rpc_refusals(void)
+{
+    int failures = 0;
+    TEST_CASE("onion_remote_status: RPC revalidates and refuses typed") {
+        arm(200, OK_BODY);
+        ASSERT(rpc_refused_with("[]", "BAD_ONION"));
+        ASSERT(rpc_refused_with("{}", "BAD_ONION"));
+        ASSERT(rpc_refused_with("[\"http://" HOST "\"]", "BAD_ONION"));
+        ASSERT(rpc_refused_with("[7]", "BAD_ONION"));
+        ASSERT(rpc_refused_with("[\"" HOST "\",4]", "BAD_TIMEOUT"));
+        ASSERT(rpc_refused_with("[\"" HOST "\",61]", "BAD_TIMEOUT"));
+        ASSERT(rpc_refused_with("[\"" HOST "\",\"9\"]", "BAD_TIMEOUT"));
+        ASSERT_EQ(g_calls, 0);
+        g_silent = true;
+        ASSERT(rpc_refused_with("[\"" HOST "\",5]", "UNREACHABLE"));
+        arm(429, "slow");
+        ASSERT(rpc_refused_with("[\"" HOST "\",5]", "RATE_LIMITED"));
+        arm(200, OK_BODY);
+        onion_remote_status_set_test_hooks(fake_dispatch, false);
+        ASSERT(rpc_refused_with("[\"" HOST "\",5]", "TOR_UNAVAILABLE"));
+        ASSERT_EQ(g_calls, 0);
+    } TEST_END
+    onion_remote_status_clear_test_hooks();
+    return failures;
+}
+
+static int test_rpc_busy(void)
+{
+    int failures = 0;
+    TEST_CASE("onion_remote_status: RPC refuses BUSY while one is in flight") {
+        arm(200, OK_BODY);
+        g_reenter = true;
+        struct json_value result;
+        ASSERT(rpc_run("[\"" HOST "\",5]", &result));
+        json_free(&result);
+        ASSERT(strncmp(g_inner_msg, "BUSY:", 5) == 0);
+    } TEST_END
+    onion_remote_status_clear_test_hooks();
+    return failures;
+}
+
 static bool has_permit_row(const char *leaf)
 {
     bool found = false;
@@ -249,6 +354,10 @@ int test_onion_remote_status(void)
     failures += test_transport_refusals();
     failures += test_bad_onions();
     failures += test_busy();
+    failures += test_rpc_registered();
+    failures += test_rpc_success();
+    failures += test_rpc_refusals();
+    failures += test_rpc_busy();
     failures += test_registry();
     return failures;
 }

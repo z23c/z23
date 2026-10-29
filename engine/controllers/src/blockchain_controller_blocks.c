@@ -127,6 +127,13 @@ bool rpc_getbestblockhash(const struct json_value *params, bool help,
 /* Bundle the tip identity + timing + work into one call. Power-user
  * convenience: avoids round-tripping getbestblockhash + getblockheader
  * just to check "where am I and how stale am I". */
+int64_t rpc_blockchain_provable_tip_height(void)
+{
+    struct blockchain_context *ctx = blockchain_ctx();
+    struct block_index *tip = rpc_provable_tip(ctx, NULL);
+    return (tip && tip->phashBlock) ? tip->nHeight : -1;
+}
+
 bool rpc_getchaintip(const struct json_value *params, bool help,
                      struct json_value *result)
 {

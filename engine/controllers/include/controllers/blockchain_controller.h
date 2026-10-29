@@ -35,6 +35,11 @@ bool rpc_blockchain_mmr_snapshot(uint8_t root[32], uint64_t *num_leaves,
  * Runs alongside MMR during transition. */
 struct mmb;
 struct mmb_leaf;
+/* Height of the provable chain tip getchaintip reports, or -1 when the chain
+ * is not initialized or the tip is unresolved. In-node callers use this
+ * instead of an RPC call to themselves. */
+int64_t rpc_blockchain_provable_tip_height(void);
+
 void rpc_blockchain_mmb_append(const struct mmb_leaf *leaf);
 void rpc_blockchain_mmb_init_from_state(struct node_db *ndb);
 void rpc_blockchain_mmb_catchup(struct main_state *ms);

@@ -78,10 +78,11 @@ static int rs_fetch(const char *onion, int timeout_secs,
 /* Map a fetch outcome that is not a usable 200 body to a typed refusal.
  * Returns true when the response is a 200 with a body inside the cap. */
 static bool rs_check_response(int rc, const struct onion_fetch_result *res,
-                              int timeout_secs, int64_t elapsed_ms,
+                              int timeout_secs,
                               struct zcl_native_body_err *err)
 {
     if (rc < 0) {
+        char detail[128];
         if (res->status >= 200)
             rs_fail(err, ZCL_NATIVE_BODY_PROTOCOL, "BODY_TOO_LARGE",
                     "remote body exceeds the fetch ceiling; this is not a "
@@ -89,12 +90,14 @@ static bool rs_check_response(int rc, const struct onion_fetch_result *res,
         else if (res->status > 0)
             rs_fail(err, ZCL_NATIVE_BODY_UNAVAILABLE, "HTTP_STATUS",
                     "remote answered with an interim status; retry later");
-        else if (elapsed_ms < (int64_t)timeout_secs * 500)
-            rs_fail(err, ZCL_NATIVE_BODY_UNAVAILABLE, "TOR_UNAVAILABLE",
-                    "the dial was refused; check core network onion status");
-        else
-            rs_fail(err, ZCL_NATIVE_BODY_UNAVAILABLE, "TIMEOUT",
-                    "no answer in time; retry or raise timeout_secs");
+        else {
+            /* Tor readiness was checked before the fetch, so no HTTP status
+             * means one honest outcome: nothing answered. */
+            (void)snprintf(detail, sizeof(detail),
+                           "no answer from the onion within %d s (down, "
+                           "unreachable or slow); retry", timeout_secs);
+            rs_fail(err, ZCL_NATIVE_BODY_UNAVAILABLE, "UNREACHABLE", detail);
+        }
         return false;
     }
     if (res->status == 429)
@@ -187,7 +190,7 @@ static char *rs_fetch_and_render(const char *onion, int timeout_secs,
     int64_t elapsed_ms = platform_time_monotonic_ms() - t0;
 
     char *out = NULL;
-    if (rs_check_response(rc, &res, timeout_secs, elapsed_ms, err)) {
+    if (rs_check_response(rc, &res, timeout_secs, err)) {
         struct json_value root;
         json_init(&root);
         const struct json_value *h = NULL;
@@ -228,54 +231,108 @@ char *onion_remote_status_run(const char *onion, int timeout_secs,
     return out;
 }
 
-/* This node's own tip height from the getchaintip handler that backs
- * core.chain.tip, or -1 when it cannot be read. */
-static int64_t rs_local_height(void)
+bool onion_remote_status_check_args(const struct json_value *onion,
+                                    const struct json_value *timeout,
+                                    int *timeout_out,
+                                    struct zcl_native_body_err *err)
 {
-    char *raw = node_rpc_call("getchaintip", "[]");
-    if (!raw)
-        return -1;
-    struct json_value root;
-    json_init(&root);
-    int64_t height = -1;
-    if (json_read(&root, raw, strlen(raw))) {
-        const struct json_value *h = json_get(&root, "height");
-        if (h && h->type == JSON_INT)
-            height = json_get_int(h);
+    if (!onion || onion->type != JSON_STR ||
+        !onion_hostname_valid(json_get_str(onion))) {
+        rs_fail(err, ZCL_NATIVE_BODY_INVALID, "BAD_ONION",
+                "onion must be 56 base32 chars plus .onion, nothing else");
+        return false;
     }
-    json_free(&root);
-    free(raw);
-    return height;
-}
-
-static bool rs_timeout_arg(const struct json_value *args, int *out,
-                           struct zcl_native_body_err *err)
-{
-    const struct json_value *t = json_get(args, "timeout_secs");
-    *out = ONION_REMOTE_STATUS_TIMEOUT_DEFAULT;
-    if (!t || t->type == JSON_NULL)
+    *timeout_out = ONION_REMOTE_STATUS_TIMEOUT_DEFAULT;
+    if (!timeout || timeout->type == JSON_NULL)
         return true;
-    int64_t v = json_get_int(t);
-    if (t->type != JSON_INT || v < ONION_REMOTE_STATUS_TIMEOUT_MIN ||
+    int64_t v = json_get_int(timeout);
+    if (timeout->type != JSON_INT || v < ONION_REMOTE_STATUS_TIMEOUT_MIN ||
         v > ONION_REMOTE_STATUS_TIMEOUT_MAX) {
         rs_fail(err, ZCL_NATIVE_BODY_INVALID, "BAD_TIMEOUT",
                 "timeout_secs must be an integer 5..60");
         return false;
     }
-    *out = (int)v;
+    *timeout_out = (int)v;
     return true;
+}
+
+/* The refusal class a typed "CODE: detail" message belongs to. */
+static enum zcl_native_body_status rs_status_for_message(const char *msg)
+{
+    static const struct {
+        const char *code;
+        enum zcl_native_body_status status;
+    } rows[] = {
+        { "BAD_ONION:", ZCL_NATIVE_BODY_INVALID },
+        { "BAD_TIMEOUT:", ZCL_NATIVE_BODY_INVALID },
+        { "BODY_TOO_LARGE:", ZCL_NATIVE_BODY_PROTOCOL },
+        { "BAD_JSON:", ZCL_NATIVE_BODY_PROTOCOL },
+        { "BAD_HEIGHT:", ZCL_NATIVE_BODY_PROTOCOL },
+        { "INTERNAL:", ZCL_NATIVE_BODY_INTERNAL },
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+        if (strncmp(msg, rows[i].code, strlen(rows[i].code)) == 0)
+            return rows[i].status;
+    return ZCL_NATIVE_BODY_UNAVAILABLE;
+}
+
+/* The node's refusal object ({"code","message"} or {"error":{...}}), or NULL
+ * when `root` is an ordinary result. */
+static const struct json_value *rs_rpc_error(const struct json_value *root)
+{
+    const struct json_value *e = json_get(root, "error");
+    if (e && e->type == JSON_OBJ)
+        return e;
+    const struct json_value *code = json_get(root, "code");
+    const struct json_value *msg = json_get(root, "message");
+    return (code && code->type == JSON_INT && msg && msg->type == JSON_STR)
+               ? root : NULL;
+}
+
+/* Hand back the node's document, or turn its refusal into a typed one. */
+static char *rs_unwrap_reply(char *raw, struct zcl_native_body_err *err)
+{
+    if (!raw)
+        return rs_fail(err, ZCL_NATIVE_BODY_UNAVAILABLE, "NODE_UNAVAILABLE",
+                       "no answer from the node; check core status");
+    struct json_value root;
+    json_init(&root);
+    if (!json_read(&root, raw, strlen(raw)) || root.type != JSON_OBJ) {
+        json_free(&root);
+        free(raw);
+        return rs_fail(err, ZCL_NATIVE_BODY_INTERNAL, "INTERNAL",
+                       "the node returned an unreadable reply; retry");
+    }
+    const struct json_value *e = rs_rpc_error(&root);
+    if (e) {
+        const char *m = json_get_str(json_get(e, "message"));
+        char msg[sizeof(err->message)];
+        snprintf(msg, sizeof(msg), "%s", m ? m : "node refused the call");
+        err->status = rs_status_for_message(msg);
+        snprintf(err->message, sizeof(err->message), "%s", msg);
+        json_free(&root);
+        free(raw);
+        return NULL;
+    }
+    json_free(&root);
+    return raw;
 }
 
 char *zcl_native_onion_remote_status_body(const struct json_value *args,
                                           struct zcl_native_body_err *err)
 {
     const struct json_value *o = json_get(args, "onion");
-    if (!o || o->type != JSON_STR)
-        return rs_fail(err, ZCL_NATIVE_BODY_INVALID, "BAD_ONION",
-                       "onion is required: a v3 onion host string");
     int timeout_secs;
-    if (!rs_timeout_arg(args, &timeout_secs, err))
+    if (!onion_remote_status_check_args(o, json_get(args, "timeout_secs"),
+                                        &timeout_secs, err))
         return NULL;
-    return onion_remote_status_run(json_get_str(o), timeout_secs,
-                                   rs_local_height(), err);
+    /* The embedded Tor and the chain live in the node, not in this CLI
+     * process: ask the node to run the fetch. The onion was validated above,
+     * so it carries nothing that needs JSON escaping. */
+    char params[128];
+    snprintf(params, sizeof(params), "[\"%s\",%d]", json_get_str(o),
+             timeout_secs);
+    char *raw = node_rpc_call_deadline("onionremotestatus", params, 2000,
+                                       ((long)timeout_secs + 10) * 1000L);
+    return rs_unwrap_reply(raw, err);
 }

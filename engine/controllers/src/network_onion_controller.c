@@ -1,7 +1,9 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: one coherent RPC contract for embedded Tor/onion readiness. */
 
+#include "controllers/blockchain_controller.h"
 #include "controllers/network_controller.h"
+#include "controllers/onion_remote_status.h"
 
 #include "controllers/strong_params.h"
 #include "json/json.h"
@@ -10,9 +12,12 @@
 #include "net/onion_stream.h"
 #include "net/peer_lifecycle.h"
 #include "net/tor_integration.h"
+#include "rpc/protocol.h"
 #include "platform/time_compat.h"
 
 #include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Readiness probes in contract order: the first row not yet reached names
@@ -375,5 +380,52 @@ bool network_onion_status_rpc(const struct json_value *params, bool help,
     json_free(&mapping);
     json_free(&handshake);
     json_free(&outbound_streams);
+    return true;
+}
+
+/* Turn a typed refusal from the remote-status core into an RPC error. */
+static bool onion_remote_status_refuse(struct json_value *result,
+                                       const struct zcl_native_body_err *err)
+{
+    int code = RPC_MISC_ERROR;
+    if (err->status == ZCL_NATIVE_BODY_INVALID)
+        code = RPC_INVALID_PARAMS;
+    else if (err->status == ZCL_NATIVE_BODY_INTERNAL)
+        code = RPC_INTERNAL_ERROR;
+    json_rpc_error_full(result, code, err->message, "onionremotestatus");
+    return false;
+}
+
+bool network_onion_remote_status_rpc(const struct json_value *params,
+                                     bool help, struct json_value *result)
+{
+    RPC_HELP(help, result,
+        "onionremotestatus \"onion\" ( timeout_secs )\n"
+        "Fetches one other node's public /status over this node's embedded "
+        "Tor and returns an allowlisted summary beside this node's tip. "
+        "Operator only; one fetch at a time; timeout_secs is 5..60.");
+    bool is_array = params && params->type == JSON_ARR;
+    struct zcl_native_body_err err = {0};
+    int timeout_secs = 0;
+    /* Validated again here: the caller is never trusted. */
+    if (!onion_remote_status_check_args(is_array ? json_at(params, 0) : NULL,
+                                        is_array ? json_at(params, 1) : NULL,
+                                        &timeout_secs, &err))
+        return onion_remote_status_refuse(result, &err);
+    char *body = onion_remote_status_run(json_get_str(json_at(params, 0)),
+                                         timeout_secs,
+                                         rpc_blockchain_provable_tip_height(),
+                                         &err);
+    if (!body)
+        return onion_remote_status_refuse(result, &err);
+    json_free(result);
+    bool parsed = json_read(result, body, strlen(body));
+    free(body);
+    if (!parsed) {
+        err.status = ZCL_NATIVE_BODY_INTERNAL;
+        snprintf(err.message, sizeof(err.message),
+                 "INTERNAL: unreadable response; retry");
+        return onion_remote_status_refuse(result, &err);
+    }
     return true;
 }

@@ -969,6 +969,7 @@ void register_net_rpc_commands(struct rpc_table *t)
         { "network", "getnetworkinfo",    rpc_getnetworkinfo,    true },
         { "network", "bootstrapstatus",   rpc_bootstrapstatus,   true },
         { "network", "onionstatus",       network_onion_status_rpc, true },
+        { "network", "onionremotestatus", network_onion_remote_status_rpc, true },
         { "network", "getpeerinfo",       rpc_getpeerinfo,       true },
         { "network", "getconnectioncount", rpc_getconnectioncount, true },
         { "network", "peerincidents",     rpc_peerincidents,     true },
