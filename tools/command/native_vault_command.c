@@ -308,6 +308,24 @@ static void vault_push_legacy_wallet(struct zcl_command_reply *reply)
     json_free(&legacy);
 }
 
+/* The usable state object of a dumpstate envelope, or NULL when the envelope
+ * is an error or reports the projection unavailable. */
+static const struct json_value *vault_envelope_state(
+    const struct json_value *envelope)
+{
+    const struct json_value *code = json_get(envelope, "code");
+    const struct json_value *message = json_get(envelope, "message");
+    const struct json_value *state = json_get(envelope, "state");
+    const struct json_value *available = state
+        ? json_get(state, "available") : NULL;
+    if ((code && code->type == JSON_INT && message) || !state ||
+        state->type != JSON_OBJ ||
+        (available && available->type == JSON_BOOL &&
+         !json_get_bool(available)))
+        return NULL;
+    return state;
+}
+
 /* ── THE READ SEAM (see the header block) ───────────────────────────────────
  * The ONLY place this file reads holdings. Integration with the read model is
  * this function body and nothing else. */
@@ -339,15 +357,8 @@ static bool vault_read_seam(const char *class_filter, struct json_value *out,
         return false;
     }
 
-    const struct json_value *code = json_get(&envelope, "code");
-    const struct json_value *message = json_get(&envelope, "message");
-    const struct json_value *state = json_get(&envelope, "state");
-    const struct json_value *available = state
-        ? json_get(state, "available") : NULL;
-    if ((code && code->type == JSON_INT && message) || !state ||
-        state->type != JSON_OBJ ||
-        (available && available->type == JSON_BOOL &&
-         !json_get_bool(available))) {
+    const struct json_value *state = vault_envelope_state(&envelope);
+    if (!state) {
         json_free(&envelope);
         (void)snprintf(why, why_cap,
                        "the target node's vault projection is unavailable");
@@ -400,7 +411,81 @@ static void vault_push_provenance(struct zcl_command_reply *reply,
     }
 }
 
+/* Fill the status half of one vault.list class object. Returns true when the
+ * class was read and determined (counts as available). */
+static bool vault_list_class_status(struct json_value *o,
+                                    const struct json_value *row, bool linked,
+                                    const char *why)
+{
+    bool available = false;
+    if (row) {
+        const struct json_value *complete = json_get(row, "determined");
+        const struct json_value *money = json_get(row, "is_money");
+        bool determined = complete && complete->type == JSON_BOOL &&
+                          json_get_bool(complete);
+        bool is_money = money && money->type == JSON_BOOL &&
+                        json_get_bool(money);
+        (void)json_push_kv_str(o, "status",
+                               determined ? "ok" : "undetermined");
+        vault_copy_str_as(o, row, "source_primitive", "source",
+                          "vault_read_snapshot");
+        (void)json_push_kv_bool(o, "complete",
+                                determined);
+        if (is_money) {
+            vault_push_total_as(o, row, "total_zat");
+            vault_copy_int_as(o, row, "spendable", "spendable_zat");
+            vault_copy_int_as(o, row, "pending", "pending_zat");
+            vault_copy_int_as(o, row, "immature", "immature_zat");
+            vault_copy_int_as(o, row, "encumbered", "encumbered_zat");
+        }
+        vault_copy_int(o, row, "item_count");
+        if (!determined) {
+            const char *reason = json_get_str(json_get(row, "reason"));
+            (void)json_push_kv_str(o, "reason",
+                                   reason ? reason : "reader incomplete");
+        } else {
+            available = true;
+        }
+    } else {
+        (void)json_push_kv_str(o, "status", "unavailable");
+        (void)json_push_kv_str(o, "source", "none");
+        (void)json_push_kv_bool(o, "complete", false);
+        (void)json_push_kv_str(o, "reason",
+                               linked ? "the read model returned no row "
+                                        "for this class"
+                                      : why);
+    }
+    return available;
+}
+
 /* ── vault.list ───────────────────────────────────────────────────────────── */
+
+/* Render one vault.list class: its row object and its text line. Returns true
+ * when the class counts as available. */
+static bool vault_list_class_row(struct json_value *rows,
+                                 struct json_value *lines,
+                                 const struct vault_route *c,
+                                 const struct json_value *row, bool linked,
+                                 const char *why)
+{
+    struct json_value o;
+    json_init(&o);
+    json_set_object(&o);
+    (void)json_push_kv_str(&o, "class", c->name);
+    (void)json_push_kv_str(&o, "kind", c->kind);
+    (void)json_push_kv_str(&o, "custody_command",
+                           c->vault_verb[0] ? c->vault_verb : "none");
+    bool available = vault_list_class_status(&o, row, linked, why);
+    vault_push_obj(rows, &o);
+
+    char line[220];
+    (void)snprintf(line, sizeof(line), "%-12s %-12s custody=%s%s",
+                   c->name, c->kind,
+                   c->vault_verb[0] ? c->vault_verb : "none",
+                   row ? "" : "  [unavailable]");
+    vault_push_line(lines, line);
+    return available;
+}
 
 void zcl_native_handle_vault_list(const struct zcl_command_request *request,
                                   struct zcl_command_reply *reply)
@@ -436,60 +521,10 @@ void zcl_native_handle_vault_list(const struct zcl_command_request *request,
         const struct json_value *row =
             linked ? vault_snapshot_class(&snap, c->read_class) : NULL;
 
-        struct json_value o;
-        json_init(&o);
-        json_set_object(&o);
-        (void)json_push_kv_str(&o, "class", c->name);
-        (void)json_push_kv_str(&o, "kind", c->kind);
-        (void)json_push_kv_str(&o, "custody_command",
-                               c->vault_verb[0] ? c->vault_verb : "none");
-        if (row) {
-            const struct json_value *complete = json_get(row, "determined");
-            const struct json_value *money = json_get(row, "is_money");
-            bool determined = complete && complete->type == JSON_BOOL &&
-                              json_get_bool(complete);
-            bool is_money = money && money->type == JSON_BOOL &&
-                            json_get_bool(money);
-            (void)json_push_kv_str(&o, "status",
-                                   determined ? "ok" : "undetermined");
-            vault_copy_str_as(&o, row, "source_primitive", "source",
-                              "vault_read_snapshot");
-            (void)json_push_kv_bool(&o, "complete",
-                                    determined);
-            if (is_money) {
-                vault_push_total_as(&o, row, "total_zat");
-                vault_copy_int_as(&o, row, "spendable", "spendable_zat");
-                vault_copy_int_as(&o, row, "pending", "pending_zat");
-                vault_copy_int_as(&o, row, "immature", "immature_zat");
-                vault_copy_int_as(&o, row, "encumbered", "encumbered_zat");
-            }
-            vault_copy_int(&o, row, "item_count");
-            if (!determined) {
-                const char *reason = json_get_str(json_get(row, "reason"));
-                (void)json_push_kv_str(&o, "reason",
-                                       reason ? reason : "reader incomplete");
-                unavailable++;
-            } else {
-                available++;
-            }
-        } else {
-            (void)json_push_kv_str(&o, "status", "unavailable");
-            (void)json_push_kv_str(&o, "source", "none");
-            (void)json_push_kv_bool(&o, "complete", false);
-            (void)json_push_kv_str(&o, "reason",
-                                   linked ? "the read model returned no row "
-                                            "for this class"
-                                          : why);
+        if (vault_list_class_row(&rows, &lines, c, row, linked, why))
+            available++;
+        else
             unavailable++;
-        }
-        vault_push_obj(&rows, &o);
-
-        char line[220];
-        (void)snprintf(line, sizeof(line), "%-12s %-12s custody=%s%s",
-                       c->name, c->kind,
-                       c->vault_verb[0] ? c->vault_verb : "none",
-                       row ? "" : "  [unavailable]");
-        vault_push_line(&lines, line);
     }
 
     struct json_value dropped;
@@ -532,6 +567,110 @@ void zcl_native_handle_vault_list(const struct zcl_command_request *request,
 
 /* ── vault.show / vault.encumbered ────────────────────────────────────────── */
 
+/* Free an array and make it a fresh empty one. */
+static void vault_reset_array(struct json_value *arr)
+{
+    json_free(arr);
+    json_init(arr);
+    json_set_array(arr);
+}
+
+/* Fill one rendered item object (after its "class" key). */
+static void vault_item_fill(struct json_value *o, const struct vault_route *c,
+                            const struct json_value *it, const char *unit,
+                            bool is_money, bool is_enc)
+{
+    (void)json_push_kv_str(o, "unit", unit ? unit : "unknown");
+    if (is_money) {
+        vault_copy_int(o, it, "amount_zat");
+    } else if (strcmp(c->name, "tokens") == 0) {
+        vault_copy_int(o, it, "units");
+        vault_copy_int(o, it, "utxo_count");
+        vault_copy_str(o, it, "ticker", "unknown");
+        vault_copy_str(o, it, "name", "unknown");
+        vault_copy_int(o, it, "decimals");
+    }
+    (void)json_push_kv_bool(o, "encumbered", is_enc);
+    if (is_enc) {
+        vault_copy_str(o, it, "encumbered_reason", "unknown");
+        (void)json_push_kv_str(o, "release_command",
+                               c->vault_verb[0] ? c->vault_verb : "none");
+    }
+    (void)json_push_kv_str(o, "source", "vault_read_snapshot");
+}
+
+/* Running state of one vault.show / vault.encumbered scan pass. */
+struct vault_scan {
+    struct json_value *items;
+    struct json_value *lines;
+    struct json_value *scanned;
+    bool encumbered_only;
+    bool truncated;
+    int cap;
+    int emitted;
+    int matched;
+    int missing;
+};
+
+/* Render the items of one class row into the scan's arrays. */
+static void vault_scan_items(struct vault_scan *sc, const struct vault_route *c,
+                             const struct json_value *arr, const char *unit,
+                             bool is_money)
+{
+    for (size_t i = 0; i < json_size(arr); i++) {
+        const struct json_value *it = json_at(arr, i);
+        const struct json_value *enc = json_get(it, "encumbered");
+        bool is_enc = enc && enc->type == JSON_BOOL &&
+                      json_get_bool(enc);
+        if (sc->encumbered_only && !is_enc)
+            continue;
+        sc->matched++;
+        if (sc->emitted >= sc->cap) {
+            sc->truncated = true;
+            continue;
+        }
+        struct json_value o;
+        json_init(&o);
+        json_set_object(&o);
+        (void)json_push_kv_str(&o, "class", c->name);
+        vault_copy_str(&o, it, "id", "unknown");
+        vault_item_fill(&o, c, it, unit, is_money, is_enc);
+        vault_push_obj(sc->items, &o);
+
+        char line[220];
+        const char *id = json_get_str(json_get(it, "id"));
+        (void)snprintf(line, sizeof(line), "%-12s %-24s %s", c->name,
+                       id && id[0] ? id : "(unidentified)",
+                       is_enc ? "ENCUMBERED" : "free");
+        vault_push_line(sc->lines, line);
+        sc->emitted++;
+    }
+}
+
+/* One pass over the classes (all, or the filtered one) of a snapshot. */
+static void vault_scan_pass(struct vault_scan *sc, const struct json_value *snap,
+                            const char *filter)
+{
+    for (int ci = 0; ci < VAULT_ROUTE_COUNT; ci++) {
+        const struct vault_route *c = &k_vault_routes[ci];
+        if (filter && strcmp(filter, c->name) != 0)
+            continue;
+        const struct json_value *row = vault_snapshot_class(snap,
+                                                             c->read_class);
+        if (!row) {
+            sc->missing++;
+            continue;
+        }
+        vault_push_line(sc->scanned, c->name);
+        const char *unit = json_get_str(json_get(row, "unit"));
+        bool is_money = unit && strcmp(unit, "zatoshi") == 0;
+        const struct json_value *arr = json_get(row, "items");
+        if (!arr || arr->type != JSON_ARR)
+            continue;
+        vault_scan_items(sc, c, arr, unit, is_money);
+    }
+}
+
 /* Both leaves render the same item document; `encumbered_only` selects which
  * items pass and which summary is emitted. Neither computes an amount: every
  * number is copied from the read model or rendered as an explicit unknown. */
@@ -573,7 +712,6 @@ static void vault_render_items(const struct zcl_command_request *request,
         return;
     }
 
-    int cap = vault_item_cap(request);
     struct json_value items, lines, scanned;
     json_init(&items);
     json_set_array(&items);
@@ -582,92 +720,27 @@ static void vault_render_items(const struct zcl_command_request *request,
     json_init(&scanned);
     json_set_array(&scanned);
 
-    bool truncated = false;
-    int emitted = 0, matched = 0, classes_missing = 0;
+    struct vault_scan sc = { .items = &items, .lines = &lines,
+                             .scanned = &scanned,
+                             .encumbered_only = encumbered_only,
+                             .cap = vault_item_cap(request) };
 
     for (int attempt = 0; attempt < 3; attempt++) {
-        json_free(&items);
-        json_init(&items);
-        json_set_array(&items);
-        json_free(&lines);
-        json_init(&lines);
-        json_set_array(&lines);
-        json_free(&scanned);
-        json_init(&scanned);
-        json_set_array(&scanned);
-        truncated = false;
-        emitted = 0;
-        matched = 0;
-        classes_missing = 0;
+        vault_reset_array(&items);
+        vault_reset_array(&lines);
+        vault_reset_array(&scanned);
+        sc.truncated = false;
+        sc.emitted = 0;
+        sc.matched = 0;
+        sc.missing = 0;
 
-        for (int ci = 0; ci < VAULT_ROUTE_COUNT; ci++) {
-            const struct vault_route *c = &k_vault_routes[ci];
-            if (filter && strcmp(filter, c->name) != 0)
-                continue;
-            const struct json_value *row = vault_snapshot_class(&snap,
-                                                                 c->read_class);
-            if (!row) {
-                classes_missing++;
-                continue;
-            }
-            vault_push_line(&scanned, c->name);
-            const char *unit = json_get_str(json_get(row, "unit"));
-            bool is_money = unit && strcmp(unit, "zatoshi") == 0;
-            const struct json_value *arr = json_get(row, "items");
-            if (!arr || arr->type != JSON_ARR)
-                continue;
-            for (size_t i = 0; i < json_size(arr); i++) {
-                const struct json_value *it = json_at(arr, i);
-                const struct json_value *enc = json_get(it, "encumbered");
-                bool is_enc = enc && enc->type == JSON_BOOL &&
-                              json_get_bool(enc);
-                if (encumbered_only && !is_enc)
-                    continue;
-                matched++;
-                if (emitted >= cap) {
-                    truncated = true;
-                    continue;
-                }
-                struct json_value o;
-                json_init(&o);
-                json_set_object(&o);
-                (void)json_push_kv_str(&o, "class", c->name);
-                vault_copy_str(&o, it, "id", "unknown");
-                (void)json_push_kv_str(&o, "unit", unit ? unit : "unknown");
-                if (is_money) {
-                    vault_copy_int(&o, it, "amount_zat");
-                } else if (strcmp(c->name, "tokens") == 0) {
-                    vault_copy_int(&o, it, "units");
-                    vault_copy_int(&o, it, "utxo_count");
-                    vault_copy_str(&o, it, "ticker", "unknown");
-                    vault_copy_str(&o, it, "name", "unknown");
-                    vault_copy_int(&o, it, "decimals");
-                }
-                (void)json_push_kv_bool(&o, "encumbered", is_enc);
-                if (is_enc) {
-                    vault_copy_str(&o, it, "encumbered_reason", "unknown");
-                    (void)json_push_kv_str(
-                        &o, "release_command",
-                        c->vault_verb[0] ? c->vault_verb : "none");
-                }
-                (void)json_push_kv_str(&o, "source", "vault_read_snapshot");
-                vault_push_obj(&items, &o);
-
-                char line[220];
-                const char *id = json_get_str(json_get(it, "id"));
-                (void)snprintf(line, sizeof(line), "%-12s %-24s %s", c->name,
-                               id && id[0] ? id : "(unidentified)",
-                               is_enc ? "ENCUMBERED" : "free");
-                vault_push_line(&lines, line);
-                emitted++;
-            }
-        }
+        vault_scan_pass(&sc, &snap, filter);
 
         const struct json_value *parts[] = { &items, &lines, &scanned };
         if (vault_used(parts, 3) + VAULT_ENVELOPE_RESERVE <=
             ZCL_COMMAND_LIST_BUDGET)
             break;
-        cap = cap > 1 ? cap / 2 : 1;
+        sc.cap = sc.cap > 1 ? sc.cap / 2 : 1;
     }
 
     struct json_value dropped;
@@ -679,7 +752,7 @@ static void vault_render_items(const struct zcl_command_request *request,
         keep_lines = false;
         vault_push_line(&dropped, "lines");
     }
-    if (truncated)
+    if (sc.truncated)
         vault_push_line(&dropped, "items_beyond_limit");
 
     (void)json_push_kv_str(&reply->data, "scope",
@@ -690,12 +763,12 @@ static void vault_render_items(const struct zcl_command_request *request,
         (void)json_push_kv(&reply->data, "lines", &lines);
     (void)json_push_kv(&reply->data, "classes_scanned", &scanned);
     (void)json_push_kv(&reply->data, "dropped_sections", &dropped);
-    (void)json_push_kv_int(&reply->data, "items_rendered", emitted);
-    (void)json_push_kv_int(&reply->data, "items_matched", matched);
-    (void)json_push_kv_int(&reply->data, "item_limit", cap);
-    (void)json_push_kv_bool(&reply->data, "items_truncated", truncated);
+    (void)json_push_kv_int(&reply->data, "items_rendered", sc.emitted);
+    (void)json_push_kv_int(&reply->data, "items_matched", sc.matched);
+    (void)json_push_kv_int(&reply->data, "item_limit", sc.cap);
+    (void)json_push_kv_bool(&reply->data, "items_truncated", sc.truncated);
     (void)json_push_kv_int(&reply->data, "classes_missing_from_snapshot",
-                           classes_missing);
+                           sc.missing);
     vault_push_provenance(reply, &snap, true, why);
 
     json_free(&items);
@@ -746,6 +819,27 @@ static void vault_describe_target(struct json_value *o, const char *path)
                            zcl_command_risk_name(spec->risk));
 }
 
+/* Fill one vault.routes row object (after its "class" key). */
+static void vault_routes_fill_row(struct json_value *o,
+                                  const struct vault_route *c)
+{
+    (void)json_push_kv_str(o, "route", c->route_kind);
+    (void)json_push_kv_str(o, "owner",
+                           c->route_owner[0] ? c->route_owner : "none");
+    (void)json_push_kv_str(o, "builder_lives_in",
+                           c->route_builder[0] ? c->route_builder : "none");
+    (void)json_push_kv_str(o, "vault_command",
+                           c->vault_verb[0] ? c->vault_verb : "none");
+    (void)json_push_kv_str(o, "note", c->route_note);
+    if (strcmp(c->route_kind, "native_command") == 0)
+        vault_describe_target(o, c->route_owner);
+    else if (strcmp(c->route_kind, "node_rpc") == 0)
+        (void)json_push_kv_str(o, "owner_availability",
+                               "rpc_only (no native leaf binds it)");
+    else
+        (void)json_push_kv_str(o, "owner_availability", "none");
+}
+
 void zcl_native_handle_vault_routes(const struct zcl_command_request *request,
                                     struct zcl_command_reply *reply)
 {
@@ -778,21 +872,7 @@ void zcl_native_handle_vault_routes(const struct zcl_command_request *request,
         json_init(&o);
         json_set_object(&o);
         (void)json_push_kv_str(&o, "class", c->name);
-        (void)json_push_kv_str(&o, "route", c->route_kind);
-        (void)json_push_kv_str(&o, "owner",
-                               c->route_owner[0] ? c->route_owner : "none");
-        (void)json_push_kv_str(&o, "builder_lives_in",
-                               c->route_builder[0] ? c->route_builder : "none");
-        (void)json_push_kv_str(&o, "vault_command",
-                               c->vault_verb[0] ? c->vault_verb : "none");
-        (void)json_push_kv_str(&o, "note", c->route_note);
-        if (strcmp(c->route_kind, "native_command") == 0)
-            vault_describe_target(&o, c->route_owner);
-        else if (strcmp(c->route_kind, "node_rpc") == 0)
-            (void)json_push_kv_str(&o, "owner_availability",
-                                   "rpc_only (no native leaf binds it)");
-        else
-            (void)json_push_kv_str(&o, "owner_availability", "none");
+        vault_routes_fill_row(&o, c);
         if (c->vault_verb[0])
             routed++;
         else
@@ -863,35 +943,13 @@ static void vault_forward_keys(const struct json_value *src,
     }
 }
 
-/* Route one custody request to the leaf that already owns it.
- *
- * This is the ONLY way this file reaches a spend, and it builds nothing. It
- * resolves `target_path` in the live catalog, re-runs the authorization the
- * kernel would run for a direct invocation of that leaf (availability, lane,
- * session authority ceiling, capabilities), refuses any route that would let
- * the vault leaf grant more than it declares, validates the forwarded object
- * against the TARGET's own input schema, and then calls the very handler
- * function pointer the target binds — writing into the caller's reply, so the
- * target's document, errors and next-actions come back unmodified.
- *
- * Returns true when the target handler ran. */
-static bool vault_dispatch(const struct zcl_command_request *request,
-                           const char *target_path,
-                           const struct json_value *input,
-                           struct zcl_command_reply *reply)
+/* Refuse a route that is missing, not executable, escalating or not granted. */
+static bool vault_route_authorized(const struct zcl_command_request *request,
+                                   const struct zcl_command_spec *self,
+                                   const struct zcl_command_spec *target,
+                                   const char *target_path,
+                                   struct zcl_command_reply *reply)
 {
-    const struct zcl_command_registry *reg = zcl_command_catalog();
-    const struct zcl_command_spec *self = request->spec;
-    const struct zcl_command_spec *target =
-        reg ? zcl_command_registry_find(reg, target_path, NULL) : NULL;
-
-    if (!target) {
-        vault_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                   ZCL_COMMAND_EXIT_INTERNAL, "ROUTE_MISSING", "dispatch",
-                   false, "the command this vault verb routes to is not in "
-                          "the registry", target_path);
-        return false;
-    }
     if (target->mode == ZCL_COMMAND_MODE_BRANCH ||
         target->availability != ZCL_COMMAND_READY || !target->handler) {
         vault_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
@@ -934,6 +992,15 @@ static bool vault_dispatch(const struct zcl_command_request *request,
                    "not granted", target_path);
         return false;
     }
+    return true;
+}
+
+/* Agent spend policy gate for a dispatch that bypassed the kernel gate. */
+static bool vault_agent_policy_allows(const struct zcl_command_request *request,
+                                      const struct zcl_command_spec *target,
+                                      const struct json_value *input,
+                                      struct zcl_command_reply *reply)
+{
     /* Agent spend policy. The vault calls target->handler directly, so the
      * TARGET never passes through execute_json — but the vault LEAF itself
      * did, and the kernel gate already ruled on this invocation (and, for a
@@ -968,6 +1035,42 @@ static bool vault_dispatch(const struct zcl_command_request *request,
             }
         }
     }
+    return true;
+}
+
+/* Route one custody request to the leaf that already owns it.
+ *
+ * This is the ONLY way this file reaches a spend, and it builds nothing. It
+ * resolves `target_path` in the live catalog, re-runs the authorization the
+ * kernel would run for a direct invocation of that leaf (availability, lane,
+ * session authority ceiling, capabilities), refuses any route that would let
+ * the vault leaf grant more than it declares, validates the forwarded object
+ * against the TARGET's own input schema, and then calls the very handler
+ * function pointer the target binds — writing into the caller's reply, so the
+ * target's document, errors and next-actions come back unmodified.
+ *
+ * Returns true when the target handler ran. */
+static bool vault_dispatch(const struct zcl_command_request *request,
+                           const char *target_path,
+                           const struct json_value *input,
+                           struct zcl_command_reply *reply)
+{
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *self = request->spec;
+    const struct zcl_command_spec *target =
+        reg ? zcl_command_registry_find(reg, target_path, NULL) : NULL;
+
+    if (!target) {
+        vault_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                   ZCL_COMMAND_EXIT_INTERNAL, "ROUTE_MISSING", "dispatch",
+                   false, "the command this vault verb routes to is not in "
+                          "the registry", target_path);
+        return false;
+    }
+    if (!vault_route_authorized(request, self, target, target_path, reply))
+        return false;
+    if (!vault_agent_policy_allows(request, target, input, reply))
+        return false;
 
     char why[192] = { 0 };
     if (!zcl_command_registry_input_validate(target, input, why, sizeof(why))) {
@@ -1134,6 +1237,68 @@ static bool vault_funding_args(const struct zcl_command_request *request,
     return true;
 }
 
+/* Build the confirm:true input a plan hands back; returns the bytes written. */
+static size_t vault_settle_commit_input(char *commit, size_t cap,
+                                        const char *swap_id,
+                                        const char *secret,
+                                        const char *funding_txid, int64_t vout)
+{
+    struct json_value ci;
+    json_init(&ci);
+    json_set_object(&ci);
+    (void)json_push_kv_str(&ci, "swap_id", swap_id);
+    if (secret)
+        (void)json_push_kv_str(&ci, "secret", secret);
+    if (funding_txid) {
+        (void)json_push_kv_str(&ci, "funding_txid", funding_txid);
+        char vb[16];
+        (void)snprintf(vb, sizeof(vb), "%lld", (long long)vout);
+        (void)json_push_kv_str(&ci, "vout", vb);
+    }
+    (void)json_push_kv_bool(&ci, "confirm", true);
+    size_t n = json_write(&ci, commit, cap);
+    json_free(&ci);
+    return n;
+}
+
+/* Encode the settlement RPC parameters; NULL when the builder failed. */
+static char *vault_settle_params(const char *swap_id, const char *secret,
+                                 const char *funding_txid, int64_t vout)
+{
+    struct rpc_arg_builder p;
+    rpc_arg_builder_init(&p);
+    rpc_arg_builder_push_str(&p, swap_id);
+    if (secret)
+        rpc_arg_builder_push_str(&p, secret);
+    if (funding_txid) {
+        rpc_arg_builder_push_str(&p, funding_txid);
+        rpc_arg_builder_push_int(&p, vout);
+    }
+    return rpc_arg_builder_to_json(&p);
+}
+
+/* The refusal text of a settlement body, or NULL when it reports success. */
+static const char *vault_settle_refusal(const struct json_value *body)
+{
+    /* node_rpc_call surfaces a failure as {"error":{...}}, a bare
+     * {"code":..,"message":..}, or a plain string — the swap controller
+     * returns its refusals as the latter. All three mean nothing was
+     * broadcast. */
+    const struct json_value *err = json_get(body, "error");
+    const struct json_value *ecode = json_get(body, "code");
+    const struct json_value *emsg = json_get(body, "message");
+    const char *msg = NULL;
+    if (body->type == JSON_STR)
+        msg = json_get_str(body);
+    else if (err && err->type == JSON_OBJ)
+        msg = json_get_str(json_get(err, "message"));
+    else if (err && err->type == JSON_STR)
+        msg = json_get_str(err);
+    else if (ecode && ecode->type == JSON_INT && emsg && emsg->type == JSON_STR)
+        msg = json_get_str(emsg);
+    return msg;
+}
+
 /* Plan or commit one swap settlement. `secret` is NULL for a refund. */
 static void vault_rpc_settle(const struct zcl_command_request *request,
                              struct zcl_command_reply *reply,
@@ -1173,27 +1338,14 @@ static void vault_rpc_settle(const struct zcl_command_request *request,
                            "by engine/controllers/src/swap_controller.c");
 
     if (!json_get_bool_or(request->input, "confirm", false)) {
-        struct json_value ci;
-        json_init(&ci);
-        json_set_object(&ci);
-        (void)json_push_kv_str(&ci, "swap_id", swap_id);
-        if (secret)
-            (void)json_push_kv_str(&ci, "secret", secret);
-        if (funding_txid) {
-            (void)json_push_kv_str(&ci, "funding_txid", funding_txid);
-            char vb[16];
-            (void)snprintf(vb, sizeof(vb), "%lld", (long long)vout);
-            (void)json_push_kv_str(&ci, "vout", vb);
-        }
-        (void)json_push_kv_bool(&ci, "confirm", true);
         char commit[512];
-        size_t n = json_write(&ci, commit, sizeof(commit));
+        size_t n = vault_settle_commit_input(commit, sizeof(commit), swap_id,
+                                             secret, funding_txid, vout);
         if (n == 0 || n >= sizeof(commit)) {
             LOG_WARN(VAULT_TAG, "commit input truncated (%zu bytes)", n);
             (void)snprintf(commit, sizeof(commit),
                            "{\"swap_id\":\"%s\",\"confirm\":true}", swap_id);
         }
-        json_free(&ci);
         (void)json_push_kv_str(&reply->data, "stage", "plan");
         (void)json_push_kv_bool(&reply->data, "committed", false);
         /* The commit travels as data, not as a next-action: the kernel rejects
@@ -1209,16 +1361,7 @@ static void vault_rpc_settle(const struct zcl_command_request *request,
         return;
     }
 
-    struct rpc_arg_builder p;
-    rpc_arg_builder_init(&p);
-    rpc_arg_builder_push_str(&p, swap_id);
-    if (secret)
-        rpc_arg_builder_push_str(&p, secret);
-    if (funding_txid) {
-        rpc_arg_builder_push_str(&p, funding_txid);
-        rpc_arg_builder_push_int(&p, vout);
-    }
-    char *params = rpc_arg_builder_to_json(&p);
+    char *params = vault_settle_params(swap_id, secret, funding_txid, vout);
     if (!params) {
         vault_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                    ZCL_COMMAND_EXIT_INTERNAL, "ARG_BUILD_FAILED", "normalize",
@@ -1253,22 +1396,7 @@ static void vault_rpc_settle(const struct zcl_command_request *request,
     }
     free(result);
 
-    /* node_rpc_call surfaces a failure as {"error":{...}}, a bare
-     * {"code":..,"message":..}, or a plain string — the swap controller
-     * returns its refusals as the latter. All three mean nothing was
-     * broadcast. */
-    const struct json_value *err = json_get(&body, "error");
-    const struct json_value *ecode = json_get(&body, "code");
-    const struct json_value *emsg = json_get(&body, "message");
-    const char *msg = NULL;
-    if (body.type == JSON_STR)
-        msg = json_get_str(&body);
-    else if (err && err->type == JSON_OBJ)
-        msg = json_get_str(json_get(err, "message"));
-    else if (err && err->type == JSON_STR)
-        msg = json_get_str(err);
-    else if (ecode && ecode->type == JSON_INT && emsg && emsg->type == JSON_STR)
-        msg = json_get_str(emsg);
+    const char *msg = vault_settle_refusal(&body);
     if (msg) {
         vault_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
                    "SETTLE_REFUSED", "execute", false,

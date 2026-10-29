@@ -551,12 +551,6 @@ tools/command/native_devagent_queue.c:dvq_next:46
 tools/command/native_devagent_queue.c:dvq_post:34
 tools/command/native_devagent_queue.c:dvq_status:27
 tools/command/native_devagent_queue.c:dvq_task_prev:23
-tools/command/native_vault_command.c:vault_dispatch:24
-tools/command/native_vault_command.c:vault_read_seam:16
-tools/command/native_vault_command.c:vault_render_items:35
-tools/command/native_vault_command.c:vault_rpc_settle:26
-tools/command/native_vault_command.c:zcl_native_handle_vault_list:27
-tools/command/native_vault_command.c:zcl_native_handle_vault_routes:17
 tools/command/native_zcode_command.c:zcl_native_handle_zcode_package_attest_import:17
 tools/command/native_zcode_command.c:zcl_native_handle_zcode_package_library:21
 tools/command/native_zcode_command.c:zcl_native_handle_zcode_package_recipe:17
