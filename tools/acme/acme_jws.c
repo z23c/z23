@@ -230,6 +230,38 @@ bool acme_jwk_thumbprint(const EVP_PKEY *key, uint8_t out[32])
 
 /* ── JWS ─────────────────────────────────────────────────────────────── */
 
+/* Sign into a freshly allocated DER buffer; the caller frees *der even on
+ * failure. */
+static bool es256_sign_der(EVP_MD_CTX *ctx, const EVP_PKEY *key, const void *msg,
+                           size_t msg_len, unsigned char **der, size_t *der_len)
+{
+    if (EVP_DigestSignInit(ctx, NULL, EVP_sha256(), NULL, (EVP_PKEY *)key) != 1)
+        return false;
+    if (EVP_DigestSign(ctx, NULL, der_len, msg, msg_len) != 1 || *der_len == 0)
+        return false;
+    *der = zcl_malloc(*der_len, "acme_es256_der");
+    if (!*der)
+        return false;
+    return EVP_DigestSign(ctx, *der, der_len, msg, msg_len) == 1;
+}
+
+/* Convert a DER ECDSA signature to the fixed 64-byte r||s JWS form. */
+static bool es256_der_to_raw(const unsigned char *der, size_t der_len,
+                             uint8_t sig[64])
+{
+    const unsigned char *p = der;
+    ECDSA_SIG *ecsig = d2i_ECDSA_SIG(NULL, &p, (long)der_len);
+    if (!ecsig)
+        return false;
+    const BIGNUM *r = NULL;
+    const BIGNUM *s = NULL;
+    ECDSA_SIG_get0(ecsig, &r, &s);
+    const bool ok = r && s && BN_bn2binpad(r, sig, 32) == 32 &&
+                    BN_bn2binpad(s, sig + 32, 32) == 32;
+    ECDSA_SIG_free(ecsig);
+    return ok;
+}
+
 bool acme_es256_sign(const EVP_PKEY *key, const void *msg, size_t msg_len,
                      uint8_t sig[64])
 {
@@ -242,34 +274,49 @@ bool acme_es256_sign(const EVP_PKEY *key, const void *msg, size_t msg_len,
         LOG_FAIL("acme", "cannot allocate a signing context");
     unsigned char *der = NULL;
     size_t der_len = 0;
-    bool ok = false;
-    if (EVP_DigestSignInit(ctx, NULL, EVP_sha256(), NULL, (EVP_PKEY *)key) != 1)
-        goto out;
-    if (EVP_DigestSign(ctx, NULL, &der_len, msg, msg_len) != 1 || der_len == 0)
-        goto out;
-    der = zcl_malloc(der_len, "acme_es256_der");
-    if (!der)
-        goto out;
-    if (EVP_DigestSign(ctx, der, &der_len, msg, msg_len) != 1)
-        goto out;
-    {
-        const unsigned char *p = der;
-        ECDSA_SIG *ecsig = d2i_ECDSA_SIG(NULL, &p, (long)der_len);
-        if (!ecsig)
-            goto out;
-        const BIGNUM *r = NULL;
-        const BIGNUM *s = NULL;
-        ECDSA_SIG_get0(ecsig, &r, &s);
-        ok = r && s && BN_bn2binpad(r, sig, 32) == 32 &&
-             BN_bn2binpad(s, sig + 32, 32) == 32;
-        ECDSA_SIG_free(ecsig);
-    }
-out:
+    const bool ok = es256_sign_der(ctx, key, msg, msg_len, &der, &der_len) &&
+                    es256_der_to_raw(der, der_len, sig);
     free(der);
     EVP_MD_CTX_free(ctx);
     if (!ok)
         LOG_FAIL("acme", "ES256 signing failed");
     return true;
+}
+
+/* True when no field carries a byte that would break the JSON string. */
+static bool header_fields_are_clean(const char *kid, const char *nonce,
+                                    const char *url)
+{
+    /* A nonce or url carrying a quote or backslash would break out of the
+     * JSON string; both come from the CA, so refuse rather than escape. */
+    const char *checked[3] = {kid, nonce, url};
+    for (size_t i = 0; i < 3; i++) {
+        for (const char *p = checked[i]; p && *p; p++) {
+            if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20)
+                return false;
+        }
+    }
+    return true;
+}
+
+/* Format the protected header JSON; returns snprintf's result. */
+static int header_format(char *out, size_t cap, const char *kid,
+                         const char *nonce, const char *url, const char *jwk)
+{
+    if (kid) {
+        return nonce ? snprintf(out, cap,
+                                "{\"alg\":\"ES256\",\"kid\":\"%s\",\"nonce\":\"%s\","
+                                "\"url\":\"%s\"}", kid, nonce, url)
+                     : snprintf(out, cap,
+                                "{\"alg\":\"ES256\",\"kid\":\"%s\",\"url\":\"%s\"}",
+                                kid, url);
+    }
+    return nonce ? snprintf(out, cap,
+                            "{\"alg\":\"ES256\",\"jwk\":%s,\"nonce\":\"%s\","
+                            "\"url\":\"%s\"}", jwk, nonce, url)
+                 : snprintf(out, cap,
+                            "{\"alg\":\"ES256\",\"jwk\":%s,\"url\":\"%s\"}",
+                            jwk, url);
 }
 
 char *acme_jws_protected_header(const EVP_PKEY *key, const char *kid,
@@ -281,42 +328,79 @@ char *acme_jws_protected_header(const EVP_PKEY *key, const char *kid,
     if (!kid && !acme_jwk_json(key, jwk, sizeof(jwk)))
         return NULL;
 
-    /* A nonce or url carrying a quote or backslash would break out of the
-     * JSON string; both come from the CA, so refuse rather than escape. */
-    const char *checked[3] = {kid, nonce, url};
-    for (size_t i = 0; i < 3; i++) {
-        for (const char *p = checked[i]; p && *p; p++) {
-            if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20)
-                LOG_NULL("acme",
-                         "refusing a protected header field carrying a quote, "
-                         "backslash or control byte");
-        }
-    }
+    if (!header_fields_are_clean(kid, nonce, url))
+        LOG_NULL("acme",
+                 "refusing a protected header field carrying a quote, "
+                 "backslash or control byte");
 
     const size_t cap = 1024 + (kid ? strlen(kid) : sizeof(jwk)) +
                        (nonce ? strlen(nonce) : 0) + strlen(url);
     char *out = zcl_malloc(cap, "acme_jws_protected");
     if (!out)
         LOG_NULL("acme", "cannot allocate a protected header");
-    int n;
-    if (kid) {
-        n = nonce ? snprintf(out, cap,
-                             "{\"alg\":\"ES256\",\"kid\":\"%s\",\"nonce\":\"%s\","
-                             "\"url\":\"%s\"}", kid, nonce, url)
-                  : snprintf(out, cap,
-                             "{\"alg\":\"ES256\",\"kid\":\"%s\",\"url\":\"%s\"}",
-                             kid, url);
-    } else {
-        n = nonce ? snprintf(out, cap,
-                             "{\"alg\":\"ES256\",\"jwk\":%s,\"nonce\":\"%s\","
-                             "\"url\":\"%s\"}", jwk, nonce, url)
-                  : snprintf(out, cap,
-                             "{\"alg\":\"ES256\",\"jwk\":%s,\"url\":\"%s\"}",
-                             jwk, url);
-    }
+    const int n = header_format(out, cap, kid, nonce, url, jwk);
     if (n < 0 || (size_t)n >= cap) {
         free(out);
         LOG_NULL("acme", "protected header does not fit its buffer");
+    }
+    return out;
+}
+
+/* Base64url the protected header and payload into caller buffers. */
+static bool jws_encode_parts(const char *protected_json, size_t protected_len,
+                             const char *payload_json, size_t payload_len,
+                             char *b64_protected, size_t b64_protected_len,
+                             char *b64_payload, size_t b64_payload_len)
+{
+    if (acme_b64url_encode(protected_json, protected_len, b64_protected,
+                           b64_protected_len + 1) != b64_protected_len)
+        return false;
+    b64_payload[0] = '\0';
+    if (payload_json &&
+        acme_b64url_encode(payload_json, payload_len, b64_payload,
+                           b64_payload_len + 1) != b64_payload_len)
+        return false;
+    return true;
+}
+
+/* Sign "protected.payload" and base64url the signature into b64_sig. */
+static bool jws_sign_parts(const EVP_PKEY *key, const char *b64_protected,
+                           size_t b64_protected_len, const char *b64_payload,
+                           size_t b64_payload_len, char b64_sig[128])
+{
+    const size_t signing_len = b64_protected_len + 1 + b64_payload_len;
+    char *signing_input = zcl_malloc(signing_len + 1, "acme_jws_input");
+    if (!signing_input)
+        return false;
+    memcpy(signing_input, b64_protected, b64_protected_len);
+    signing_input[b64_protected_len] = '.';
+    memcpy(signing_input + b64_protected_len + 1, b64_payload, b64_payload_len);
+    signing_input[signing_len] = '\0';
+
+    uint8_t raw[64];
+    const bool signed_ok = acme_es256_sign(key, signing_input, signing_len, raw);
+    free(signing_input);
+    if (!signed_ok)
+        return false;
+    return acme_b64url_encode(raw, sizeof(raw), b64_sig, 128) != 0;
+}
+
+/* Assemble the flattened JWS JSON; NULL on allocation or overflow. */
+static char *jws_assemble(const char *b64_protected, size_t b64_protected_len,
+                          const char *b64_payload, size_t b64_payload_len,
+                          const char b64_sig[128])
+{
+    const size_t cap = b64_protected_len + b64_payload_len + 128 + 64;
+    char *out = zcl_malloc(cap, "acme_jws_body");
+    if (!out)
+        return NULL;
+    const int n = snprintf(out, cap,
+                           "{\"protected\":\"%s\",\"payload\":\"%s\","
+                           "\"signature\":\"%s\"}",
+                           b64_protected, b64_payload, b64_sig);
+    if (n < 0 || (size_t)n >= cap) {
+        free(out);
+        return NULL;
     }
     return out;
 }
@@ -340,50 +424,17 @@ char *acme_jws_body(const EVP_PKEY *key, const char *kid, const char *nonce,
     char *b64_payload = zcl_malloc(b64_payload_len + 1, "acme_jws_b64pl");
     if (!b64_protected || !b64_payload)
         goto done;
-    if (acme_b64url_encode(protected_json, protected_len, b64_protected,
-                           b64_protected_len + 1) != b64_protected_len)
-        goto done;
-    b64_payload[0] = '\0';
-    if (payload_json &&
-        acme_b64url_encode(payload_json, payload_len, b64_payload,
-                           b64_payload_len + 1) != b64_payload_len)
+    if (!jws_encode_parts(protected_json, protected_len, payload_json,
+                          payload_len, b64_protected, b64_protected_len,
+                          b64_payload, b64_payload_len))
         goto done;
 
-    {
-        const size_t signing_len = b64_protected_len + 1 + b64_payload_len;
-        char *signing_input = zcl_malloc(signing_len + 1, "acme_jws_input");
-        if (!signing_input)
-            goto done;
-        memcpy(signing_input, b64_protected, b64_protected_len);
-        signing_input[b64_protected_len] = '.';
-        memcpy(signing_input + b64_protected_len + 1, b64_payload, b64_payload_len);
-        signing_input[signing_len] = '\0';
-
-        uint8_t raw[64];
-        const bool signed_ok =
-            acme_es256_sign(key, signing_input, signing_len, raw);
-        free(signing_input);
-        if (!signed_ok)
-            goto done;
-
-        char b64_sig[128];
-        if (acme_b64url_encode(raw, sizeof(raw), b64_sig, sizeof(b64_sig)) == 0)
-            goto done;
-
-        const size_t cap = b64_protected_len + b64_payload_len + sizeof(b64_sig) + 64;
-        out = zcl_malloc(cap, "acme_jws_body");
-        if (!out)
-            goto done;
-        const int n = snprintf(out, cap,
-                               "{\"protected\":\"%s\",\"payload\":\"%s\","
-                               "\"signature\":\"%s\"}",
-                               b64_protected, b64_payload, b64_sig);
-        if (n < 0 || (size_t)n >= cap) {
-            free(out);
-            out = NULL;
-            goto done;
-        }
-    }
+    char b64_sig[128];
+    if (!jws_sign_parts(key, b64_protected, b64_protected_len, b64_payload,
+                        b64_payload_len, b64_sig))
+        goto done;
+    out = jws_assemble(b64_protected, b64_protected_len, b64_payload,
+                       b64_payload_len, b64_sig);
 
 done:
     free(protected_json);

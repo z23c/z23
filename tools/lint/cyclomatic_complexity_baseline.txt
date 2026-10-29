@@ -529,9 +529,6 @@ tests/harness/src/test_zcode_package_dev.c:zpd_test_project_inspect:34
 tests/harness/src/test_zcode_package_dev.c:zpd_test_twelve_task_benchmark:30
 tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start:56
 tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start_license_lifecycle:18
-tools/acme/acme_jws.c:acme_es256_sign:16
-tools/acme/acme_jws.c:acme_jws_body:16
-tools/acme/acme_jws.c:acme_jws_protected_header:19
 tools/acme/tls_client.c:tls_client_fetch:50
 tools/acme/tls_client.c:tls_client_response_parse_bounded:27
 tools/acme/tls_client.c:tls_client_url_parse:33
