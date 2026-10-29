@@ -143,15 +143,10 @@ static bool ls_iterate(const char *dir, int *n_out, int *b_out, char *why,
     return ok;
 }
 
-int test_ldb_snapshot(void)
+/* NULL-arg path. */
+static int ls_check_null_args(void)
 {
     int failures = 0;
-    char src[512], dst[512], scratch[512];
-
-    test_fmt_tmpdir(scratch, sizeof(scratch), "ldb_snapshot", "scratch");
-    mkdir("test-tmp", 0755);
-
-    /* NULL-arg path. */
     printf("ldb_snapshot: NULL args... ");
     {
         char err[64] = {0};
@@ -159,9 +154,14 @@ int test_ldb_snapshot(void)
         if (ok) { printf("FAIL (returned true)\n"); failures++; }
         else printf("OK (err=%s)\n", err);
     }
+    return failures;
+}
 
-    /* Missing-src path. Destination is per-process: a second suite running
-     * concurrently must not be able to observe or race this path. */
+/* Missing-src path. Destination is per-process: a second suite running
+ * concurrently must not be able to observe or race this path. */
+static int ls_check_missing_src(const char *scratch)
+{
+    int failures = 0;
     printf("ldb_snapshot: missing src... ");
     {
         char missing_dst[600];
@@ -178,8 +178,12 @@ int test_ldb_snapshot(void)
             rmdir(missing_dst);
         }
     }
+    return failures;
+}
 
-    /* Destroy of non-existent is safe. */
+/* Destroy of non-existent is safe. */
+static void ls_check_destroy_nonexistent(const char *scratch)
+{
     printf("ldb_snapshot: destroy nonexistent... ");
     {
         char nope[600];
@@ -187,39 +191,26 @@ int test_ldb_snapshot(void)
         ldb_snapshot_destroy(nope);
         printf("OK\n");
     }
+}
 
-    /* ── Self-owned fixture: build a real LevelDB, hold its LOCK, snapshot
-     * it, and read the snapshot back. ─────────────────────────────────── */
-    test_fmt_tmpdir(src, sizeof(src), "ldb_snapshot", "src");
-    test_fmt_tmpdir(dst, sizeof(dst), "ldb_snapshot", "dst");
-    test_rm_rf(src);
-    ldb_snapshot_destroy(dst);
-
-    printf("ldb_snapshot: build fixture leveldb (%d records)... ",
-           LS_RECORDS);
-    leveldb_t *srcdb = ls_build_fixture(src);
-    if (!srcdb) {
-        test_rm_rf(src);
-        return failures + 1;
-    }
-    printf("OK\n");
-
+/* True when the fixture left at least one *.ldb SST file behind. */
+static bool ls_check_fixture_ssts(const char *src)
+{
     printf("ldb_snapshot: fixture has SST files... ");
-    {
-        int ssts = ls_count_sst(src);
-        if (ssts <= 0) {
-            printf("FAIL (%d *.ldb files — nothing for the snapshot to "
-                   "hardlink)\n", ssts);
-            leveldb_close(srcdb);
-            test_rm_rf(src);
-            return failures + 1;
-        }
-        printf("OK (%d)\n", ssts);
+    int ssts = ls_count_sst(src);
+    if (ssts <= 0) {
+        printf("FAIL (%d *.ldb files — nothing for the snapshot to "
+               "hardlink)\n", ssts);
+        return false;
     }
+    printf("OK (%d)\n", ssts);
+    return true;
+}
 
-    /* The source LOCK is genuinely held by srcdb right now — prove it, so a
-     * future change that quietly stops holding it cannot make the snapshot
-     * path below vacuous. */
+/* Opening the locked source directly must fail; returns failures added. */
+static int ls_check_src_locked(const char *src)
+{
+    int failures = 0;
     printf("ldb_snapshot: src LOCK is held (direct open must fail)... ");
     {
         char *err = NULL;
@@ -236,25 +227,31 @@ int test_ldb_snapshot(void)
         }
         leveldb_free(err);
     }
+    return failures;
+}
 
+/* Snapshot the locked source, retrying on manifest_changed. True on success. */
+static bool ls_check_make_snapshot(const char *src, const char *dst)
+{
     printf("ldb_snapshot: make (source still locked)... ");
-    {
-        char err[256] = {0};
-        bool ok = false;
-        for (int try = 0; try < 3 && !ok; try++) {
-            ok = ldb_snapshot_make(src, dst, err, sizeof(err));
-            if (!ok && strcmp(err, "manifest_changed") != 0) break;
-        }
-        if (!ok) {
-            printf("FAIL (%s)\n", err);
-            leveldb_close(srcdb);
-            test_rm_rf(src);
-            ldb_snapshot_destroy(dst);
-            return failures + 1;
-        }
-        printf("OK\n");
+    char err[256] = {0};
+    bool ok = false;
+    for (int try = 0; try < 3 && !ok; try++) {
+        ok = ldb_snapshot_make(src, dst, err, sizeof(err));
+        if (!ok && strcmp(err, "manifest_changed") != 0) break;
     }
+    if (!ok) {
+        printf("FAIL (%s)\n", err);
+        return false;
+    }
+    printf("OK\n");
+    return true;
+}
 
+/* Open the snapshot read-only and check exact record counts. */
+static int ls_check_snapshot_iterate(const char *dst)
+{
+    int failures = 0;
     printf("ldb_snapshot: open + iterate the snapshot... ");
     {
         int n = 0, b_keys = 0;
@@ -270,9 +267,13 @@ int test_ldb_snapshot(void)
             printf("OK n=%d b_keys=%d\n", n, b_keys);
         }
     }
+    return failures;
+}
 
-    /* Hardlinks are names for the same inode: tearing the snapshot down must
-     * not disturb the source, which is still open and serving reads. */
+/* Reads the still-open source for a known record; returns failures added. */
+static int ls_check_source_intact(leveldb_t *srcdb)
+{
+    int failures = 0;
     printf("ldb_snapshot: source intact after snapshot... ");
     {
         leveldb_readoptions_t *ro = leveldb_readoptions_create();
@@ -293,8 +294,13 @@ int test_ldb_snapshot(void)
         leveldb_free(v);
         leveldb_readoptions_destroy(ro);
     }
+    return failures;
+}
 
-    /* Teardown. */
+/* Destroy the snapshot dir and confirm it is gone; returns failures added. */
+static int ls_check_teardown(const char *dst)
+{
+    int failures = 0;
     printf("ldb_snapshot: teardown... ");
     ldb_snapshot_destroy(dst);
     {
@@ -306,13 +312,17 @@ int test_ldb_snapshot(void)
             printf("OK\n");
         }
     }
+    return failures;
+}
 
-    /* Source must still be readable after the snapshot was destroyed —
-     * dropping a hardlink only decrements the link count. */
+/* Closes the source handle (setting it NULL) and re-iterates the source. */
+static int ls_check_source_survives(leveldb_t **srcdb, const char *src)
+{
+    int failures = 0;
     printf("ldb_snapshot: source survives snapshot teardown... ");
     {
-        leveldb_close(srcdb);
-        srcdb = NULL;
+        leveldb_close(*srcdb);
+        *srcdb = NULL;
         int n = 0, b_keys = 0;
         char why[256] = {0};
         if (!ls_iterate(src, &n, &b_keys, why, sizeof(why))) {
@@ -325,6 +335,73 @@ int test_ldb_snapshot(void)
             printf("OK\n");
         }
     }
+    return failures;
+}
+
+int test_ldb_snapshot(void)
+{
+    int failures = 0;
+    char src[512], dst[512], scratch[512];
+
+    test_fmt_tmpdir(scratch, sizeof(scratch), "ldb_snapshot", "scratch");
+    mkdir("test-tmp", 0755);
+
+    /* NULL-arg path. */
+    failures += ls_check_null_args();
+
+    /* Missing-src path. Destination is per-process: a second suite running
+     * concurrently must not be able to observe or race this path. */
+    failures += ls_check_missing_src(scratch);
+
+    /* Destroy of non-existent is safe. */
+    ls_check_destroy_nonexistent(scratch);
+
+    /* ── Self-owned fixture: build a real LevelDB, hold its LOCK, snapshot
+     * it, and read the snapshot back. ─────────────────────────────────── */
+    test_fmt_tmpdir(src, sizeof(src), "ldb_snapshot", "src");
+    test_fmt_tmpdir(dst, sizeof(dst), "ldb_snapshot", "dst");
+    test_rm_rf(src);
+    ldb_snapshot_destroy(dst);
+
+    printf("ldb_snapshot: build fixture leveldb (%d records)... ",
+           LS_RECORDS);
+    leveldb_t *srcdb = ls_build_fixture(src);
+    if (!srcdb) {
+        test_rm_rf(src);
+        return failures + 1;
+    }
+    printf("OK\n");
+
+    if (!ls_check_fixture_ssts(src)) {
+        leveldb_close(srcdb);
+        test_rm_rf(src);
+        return failures + 1;
+    }
+
+    /* The source LOCK is genuinely held by srcdb right now — prove it, so a
+     * future change that quietly stops holding it cannot make the snapshot
+     * path below vacuous. */
+    failures += ls_check_src_locked(src);
+
+    if (!ls_check_make_snapshot(src, dst)) {
+        leveldb_close(srcdb);
+        test_rm_rf(src);
+        ldb_snapshot_destroy(dst);
+        return failures + 1;
+    }
+
+    failures += ls_check_snapshot_iterate(dst);
+
+    /* Hardlinks are names for the same inode: tearing the snapshot down must
+     * not disturb the source, which is still open and serving reads. */
+    failures += ls_check_source_intact(srcdb);
+
+    /* Teardown. */
+    failures += ls_check_teardown(dst);
+
+    /* Source must still be readable after the snapshot was destroyed —
+     * dropping a hardlink only decrements the link count. */
+    failures += ls_check_source_survives(&srcdb, src);
 
     if (srcdb) leveldb_close(srcdb);
     test_rm_rf(src);

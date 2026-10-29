@@ -678,7 +678,6 @@ tests/harness/src/test_helpers.c:test_spawn_capture_kill:42
 tests/harness/src/test_https_sni_select.c:handshake:19
 tests/harness/src/test_https_sni_select.c:test_https_sni_select:39
 tests/harness/src/test_keys.c:test_keys:27
-tests/harness/src/test_ldb_snapshot.c:test_ldb_snapshot:27
 tests/harness/src/test_merkle_tree.c:test_merkle_tree:22
 tests/harness/src/test_merkle_tree.c:test_merkle_tree_scale:149
 tests/harness/src/test_mint_skip_crypto.c:msc_make_killed_wal:39
