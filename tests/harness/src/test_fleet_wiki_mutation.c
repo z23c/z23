@@ -825,7 +825,8 @@ static int fwm_review_missing(void)
 }
 
 /* MCP plan/confirm for fleet.wiki.write: the stub node forwards each RPC
- * call to a real fleet_board table so a confirmed write is really stored. */
+ * call to a real fleet_board table so a confirmed write is really stored.
+ * fwm_plan_calls counts the write calls; fwm_plan_find's own read restores it. */
 static struct rpc_table *fwm_plan_table;
 static unsigned fwm_plan_calls;
 static char *fwm_plan_rpc(const char *method, const char *params)
@@ -866,6 +867,7 @@ static bool fwm_plan_call(const struct zcl_command_context *ctx, const char *slu
 
 static bool fwm_plan_find(const char *slug)
 {
+    unsigned writes = fwm_plan_calls;
     struct json_value in;
     json_init(&in); json_set_object(&in);
     bool found = json_push_kv_str(&in, "q", slug);
@@ -880,6 +882,7 @@ static bool fwm_plan_find(const char *slug)
             "slug")), slug);
     zcl_command_reply_free(&reply);
     json_free(&in);
+    fwm_plan_calls = writes;
     return found;
 }
 
