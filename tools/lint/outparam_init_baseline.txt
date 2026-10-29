@@ -132,7 +132,6 @@ cg_arm|ms|main_state
 p11_6_build_paid_output_tx|tx|transaction
 srp_build_received_output_tx|tx|transaction
 srs_build_received_output_tx|tx|transaction
-txk_build_multisig_spend|tx|transaction
 wfs_make_view_note|out|db_sapling_note
 zwn_prepare_package_transport|prepared|vcs_package_prepared
 
