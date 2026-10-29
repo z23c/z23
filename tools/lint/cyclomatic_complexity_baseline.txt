@@ -25,7 +25,6 @@ contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_project:
 contexts/commons/modules/vcs/src/zcode_patronage_verify.c:patronage_binding:16
 contexts/commons/modules/vcs/src/zcode_replication.c:vcs_zcode_replication_evaluate_evidence:38
 contexts/commons/modules/vcs/src/zcode_science_index.c:index_consider_object:27
-contexts/commons/modules/vcs/src/zcode_write_scope.c:vcs_zcode_write_scope_parse:16
 contexts/commons/packages/zdiff/tests/test_zdiff.c:test_kat:22
 contexts/commons/packages/zdiff/tests/test_zdiff.c:verify_script:25
 contexts/commons/packages/zdogfight/tests/test_zdogfight.c:test_bounds_and_wrap:30

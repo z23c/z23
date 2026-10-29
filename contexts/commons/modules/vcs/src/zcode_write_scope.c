@@ -95,22 +95,22 @@ enum vcs_zcode_write_scope_result vcs_zcode_write_scope_serialize(
     return VCS_ZCODE_WRITE_SCOPE_OK;
 }
 
-enum vcs_zcode_write_scope_result vcs_zcode_write_scope_parse(
-    const uint8_t *wire, size_t wire_len,
-    struct vcs_zcode_write_scope_v1 *out)
+static bool scope_wire_header_valid(const uint8_t *wire, size_t wire_len)
 {
-    if (!wire || !out) return VCS_ZCODE_WRITE_SCOPE_NULL;
-    vcs_zcode_write_scope_init(out);
     if (wire_len < VCS_ZCODE_WRITE_SCOPE_HEADER_BYTES ||
         wire_len > VCS_ZCODE_WRITE_SCOPE_WIRE_MAX ||
         memcmp(wire, scope_magic, 8) != 0 ||
         vcs_rd_u16le(wire + 8) != VCS_ZCODE_WRITE_SCOPE_VERSION ||
         vcs_rd_u32le(wire + 12) != 0)
-        return VCS_ZCODE_WRITE_SCOPE_SHAPE;
-    uint16_t count = vcs_rd_u16le(wire + 10);
-    if (count == 0 || count > VCS_ZCODE_WRITE_SCOPE_MAX_PATHS)
-        return VCS_ZCODE_WRITE_SCOPE_SHAPE;
-    size_t off = VCS_ZCODE_WRITE_SCOPE_HEADER_BYTES;
+        return false;
+    return true;
+}
+
+static enum vcs_zcode_write_scope_result scope_parse_entries(
+    const uint8_t *wire, size_t wire_len, size_t *off_io,
+    uint16_t count, struct vcs_zcode_write_scope_v1 *out)
+{
+    size_t off = *off_io;
     for (size_t i = 0; i < count; i++) {
         if (wire_len - off < 2u) return VCS_ZCODE_WRITE_SCOPE_SHAPE;
         uint16_t len = vcs_rd_u16le(wire + off); off += 2;
@@ -120,6 +120,25 @@ enum vcs_zcode_write_scope_result vcs_zcode_write_scope_parse(
         memcpy(out->paths[i], wire + off, len);
         out->paths[i][len] = '\0'; off += len;
     }
+    *off_io = off;
+    return VCS_ZCODE_WRITE_SCOPE_OK;
+}
+
+enum vcs_zcode_write_scope_result vcs_zcode_write_scope_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_zcode_write_scope_v1 *out)
+{
+    if (!wire || !out) return VCS_ZCODE_WRITE_SCOPE_NULL;
+    vcs_zcode_write_scope_init(out);
+    if (!scope_wire_header_valid(wire, wire_len))
+        return VCS_ZCODE_WRITE_SCOPE_SHAPE;
+    uint16_t count = vcs_rd_u16le(wire + 10);
+    if (count == 0 || count > VCS_ZCODE_WRITE_SCOPE_MAX_PATHS)
+        return VCS_ZCODE_WRITE_SCOPE_SHAPE;
+    size_t off = VCS_ZCODE_WRITE_SCOPE_HEADER_BYTES;
+    enum vcs_zcode_write_scope_result entries =
+        scope_parse_entries(wire, wire_len, &off, count, out);
+    if (entries != VCS_ZCODE_WRITE_SCOPE_OK) return entries;
     out->count = count;
     if (off != wire_len) return VCS_ZCODE_WRITE_SCOPE_SHAPE;
     return vcs_zcode_write_scope_validate(out);
