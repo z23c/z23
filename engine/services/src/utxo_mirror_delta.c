@@ -342,6 +342,89 @@ static int32_t mirror_delta_upper(int32_t cursor, int32_t frontier,
     return upper;
 }
 
+/* Open progress.kv read-only; on failure nothing stays open and *rdb is NULL.
+ * The caller logs. */
+static bool mirror_open_progress_ro(const char *pkv_path, sqlite3 **rdb)
+{
+    *rdb = NULL;
+    if (sqlite3_open_v2(pkv_path, rdb, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (*rdb) sqlite3_close(*rdb);
+        *rdb = NULL;
+        return false;
+    }
+    sqlite3_busy_timeout(*rdb, 5000);
+    return true;
+}
+
+/* Load the height-stamped checkpoint; true only when its stamp is within
+ * [cursor, upper]. */
+static bool mirror_commitment_tracked(struct node_db *ndb, struct utxo_commitment *uc,
+                                      int32_t cursor, int32_t upper, int32_t *ch)
+{
+    return utxo_commitment_load_checkpoint_at_height(ndb->db, uc, ch) &&
+           *ch >= cursor && *ch <= upper;
+}
+
+/* Prepare and bind the live-coins query for [cursor, upper). */
+static bool mirror_coins_query_open(sqlite3 *rdb, int32_t cursor, int32_t upper,
+                                    sqlite3_stmt **sel)
+{
+    if (sqlite3_prepare_v2(rdb,
+            "SELECT txid, vout, value, height, is_coinbase, script "
+            "FROM coins WHERE height >= ? AND height < ? ORDER BY height",
+            -1, sel, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_int64(*sel, 1, cursor);
+    sqlite3_bind_int64(*sel, 2, upper);
+    return true;
+}
+
+enum mirror_coin_step {
+    MIRROR_COIN_STEP_OK,
+    MIRROR_COIN_STEP_DONE,
+    MIRROR_COIN_STEP_FAIL,
+    MIRROR_COIN_STEP_SKIP_BAD_TXID,
+    MIRROR_COIN_STEP_SKIP_BIG_SCRIPT,
+};
+
+/* Advance the coins query one row and apply it; the caller logs skips. */
+static enum mirror_coin_step mirror_coin_step_apply(
+    struct node_db *ndb, struct addr_set *touched, sqlite3_stmt *sel,
+    struct utxo_commitment *uc, bool track_commitment, int32_t ch,
+    int64_t *rows_changed)
+{
+    int rc = sqlite3_step(sel);  // raw-sql-ok:progress-kv-kernel-store
+    if (rc == SQLITE_DONE) return MIRROR_COIN_STEP_DONE;
+    if (rc != SQLITE_ROW) return MIRROR_COIN_STEP_FAIL;
+    int slen = 0;
+    enum mirror_coin_row kind = mirror_coin_row_check(sel, &slen);
+    if (kind == MIRROR_COIN_ROW_BAD_TXID) return MIRROR_COIN_STEP_SKIP_BAD_TXID;
+    if (kind == MIRROR_COIN_ROW_BIG_SCRIPT) return MIRROR_COIN_STEP_SKIP_BIG_SCRIPT;
+    return mirror_add_coin_row(ndb, touched, sel, slen, uc, track_commitment,
+                               ch, rows_changed)
+               ? MIRROR_COIN_STEP_OK
+               : MIRROR_COIN_STEP_FAIL;
+}
+
+/* Steps 2 and 3 after the adds: delete spends, close the read handle, refresh
+ * the touched caches, free the touched set. */
+static bool mirror_finish_range(struct node_db *ndb, sqlite3 *rdb,
+                                struct addr_set *touched, int64_t *rows_changed,
+                                struct utxo_commitment *uc, bool track_commitment,
+                                int32_t ch, int32_t cursor, int32_t upper, bool ok)
+{
+    if (ok)
+        ok = mirror_delete_spends(ndb, rdb, touched, rows_changed,
+                                  track_commitment ? uc : NULL, ch,
+                                  cursor, upper);
+    sqlite3_close(rdb);
+
+    if (ok)
+        ok = mirror_refresh_touched(ndb, touched);
+    addr_set_free(touched);
+    return ok;
+}
+
 /* ── The delta pass ──────────────────────────────────────────────────── */
 
 int utxo_mirror_delta_apply(struct node_db *ndb,
@@ -363,12 +446,9 @@ int utxo_mirror_delta_apply(struct node_db *ndb,
                    "delta: progress store path unavailable");
 
     sqlite3 *rdb = NULL;
-    if (sqlite3_open_v2(pkv_path, &rdb, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
-        if (rdb) sqlite3_close(rdb);
+    if (!mirror_open_progress_ro(pkv_path, &rdb))
         LOG_RETURN(UTXO_MIRROR_DELTA_ERROR, "utxo_mirror",
                    "delta: open ro progress.kv failed: %s", pkv_path);
-    }
-    sqlite3_busy_timeout(rdb, 5000);
 
     /* Missing utxo_apply_delta rows in the range mean the spent side would be
      * incomplete → refuse the delta and let the caller quarantine. Every
@@ -404,8 +484,7 @@ int utxo_mirror_delta_apply(struct node_db *ndb,
     utxo_commitment_init(&uc);
     int32_t ch = -1;
     bool track_commitment =
-        utxo_commitment_load_checkpoint_at_height(ndb->db, &uc, &ch) &&
-        ch >= cursor && ch <= upper;
+        mirror_commitment_tracked(ndb, &uc, cursor, upper, &ch);
     if (!track_commitment) {
         sqlite3_close(rdb);
         if (!node_db_rollback(ndb))
@@ -423,43 +502,26 @@ int utxo_mirror_delta_apply(struct node_db *ndb,
 
     /* 1. UPSERT adds: live coins created in the range. */
     sqlite3_stmt *sel = NULL;
-    if (sqlite3_prepare_v2(rdb,
-            "SELECT txid, vout, value, height, is_coinbase, script "
-            "FROM coins WHERE height >= ? AND height < ? ORDER BY height",
-            -1, &sel, NULL) != SQLITE_OK) {
-        ok = false;
-    } else {
-        sqlite3_bind_int64(sel, 1, cursor);
-        sqlite3_bind_int64(sel, 2, upper);
-        while (ok) {
-            int rc = sqlite3_step(sel);  // raw-sql-ok:progress-kv-kernel-store
-            if (rc == SQLITE_DONE) break;
-            if (rc != SQLITE_ROW) { ok = false; break; }
-            int slen = 0;
-            enum mirror_coin_row kind = mirror_coin_row_check(sel, &slen);
-            if (kind == MIRROR_COIN_ROW_BAD_TXID) {
-                LOG_WARN("utxo_mirror", "delta: malformed coin txid — skipping");
-                continue;
-            }
-            if (kind == MIRROR_COIN_ROW_BIG_SCRIPT) {
-                LOG_WARN("utxo_mirror", "delta: oversize coin script — skipping");
-                continue;
-            }
-            ok = mirror_add_coin_row(ndb, &touched, sel, slen, &uc,
-                                     track_commitment, ch, &rows_changed);
+    ok = mirror_coins_query_open(rdb, cursor, upper, &sel);
+    while (ok) {
+        enum mirror_coin_step step =
+            mirror_coin_step_apply(ndb, &touched, sel, &uc, track_commitment,
+                                   ch, &rows_changed);
+        if (step == MIRROR_COIN_STEP_DONE) break;
+        if (step == MIRROR_COIN_STEP_SKIP_BAD_TXID) {
+            LOG_WARN("utxo_mirror", "delta: malformed coin txid — skipping");
+            continue;
         }
+        if (step == MIRROR_COIN_STEP_SKIP_BIG_SCRIPT) {
+            LOG_WARN("utxo_mirror", "delta: oversize coin script — skipping");
+            continue;
+        }
+        ok = step == MIRROR_COIN_STEP_OK;
     }
     sqlite3_finalize(sel);
 
-    if (ok)
-        ok = mirror_delete_spends(ndb, rdb, &touched, &rows_changed,
-                                  track_commitment ? &uc : NULL, ch,
-                                  cursor, upper);
-    sqlite3_close(rdb);
-
-    if (ok)
-        ok = mirror_refresh_touched(ndb, &touched);
-    addr_set_free(&touched);
+    ok = mirror_finish_range(ndb, rdb, &touched, &rows_changed, &uc,
+                             track_commitment, ch, cursor, upper, ok);
 
     if (!ok) {
         if (!node_db_rollback(ndb))
