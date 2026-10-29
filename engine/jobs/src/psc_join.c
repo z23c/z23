@@ -169,7 +169,7 @@ static int psc_join_alloc_shard_arrays(struct psc_join_ctx *ctx)
     ctx->buckets  = zcl_calloc((size_t)ctx->s_shards, sizeof(*ctx->buckets), "psc_buckets");
     ctx->bucket_n = zcl_calloc((size_t)ctx->s_shards, sizeof(*ctx->bucket_n), "psc_bucket_n");
     ctx->out      = zcl_calloc((size_t)ctx->s_shards, sizeof(*ctx->out), "psc_shard_out");
-    if (!ctx->buckets || !ctx->bucket_n || !ctx->out) return -1;
+    if (!ctx->buckets || !ctx->bucket_n || !ctx->out) return -1;  // raw-return-ok:caller-reports-internal-reject
     return 0;
 }
 
@@ -203,7 +203,7 @@ static int psc_join_place_records(struct psc_join_ctx *ctx, size_t n,
                                   const uint32_t *shard_of)
 {
     size_t *fill = zcl_calloc((size_t)ctx->s_shards, sizeof(*fill), "psc_fill");
-    if (!fill) return -1;
+    if (!fill) return -1;  // raw-return-ok:caller-reports-internal-reject
     for (size_t i = 0; i < n; i++) {
         uint32_t s = shard_of[i];
         struct psc_sortrec *r = &ctx->buckets[s][fill[s]++];
@@ -225,7 +225,7 @@ static int psc_join_scatter(struct psc_join_ctx *ctx, size_t n)
         shard_of = zcl_malloc(n * sizeof(*shard_of), "psc_shard_of");
         if (!shard_of) {
             free(ctx->buckets); free(ctx->bucket_n); free(ctx->out);
-            return -1;
+            return -1;  // raw-return-ok:caller-reports-internal-reject
         }
     }
     psc_join_count_shard_events(ctx, n, shard_of);
@@ -233,7 +233,7 @@ static int psc_join_scatter(struct psc_join_ctx *ctx, size_t n)
         psc_join_place_records(ctx, n, shard_of) != 0) {
         for (int s = 0; s < ctx->s_shards; s++) free(ctx->buckets[s]);
         free(shard_of); free(ctx->buckets); free(ctx->bucket_n); free(ctx->out);
-        return -1;
+        return -1;  // raw-return-ok:caller-reports-internal-reject
     }
     free(shard_of);
     return 0;
@@ -283,7 +283,7 @@ static int psc_join_merge_coins(const struct psc_shard_out *out, int s_shards,
         *out_count = total;
         return 0;
     }
-    return -1;
+    return -1;  // raw-return-ok:reject-buffer-reports-failure
 }
 
 /* Report the reduce result: fill reject/reject_height, or hand back the
@@ -303,7 +303,7 @@ static int psc_join_report(struct psc_join_ctx *ctx, size_t total,
         return psc_join_merge_coins(ctx->out, ctx->s_shards, total, reject,
                                     out_coins, out_count);
     }
-    return -1;
+    return -1;  // raw-return-ok:reject-buffer-reports-failure
 }
 
 bool psc_join(const struct psc_event *ev, size_t n, const uint8_t *scripts,
