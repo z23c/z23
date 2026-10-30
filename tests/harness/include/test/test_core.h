@@ -321,6 +321,9 @@ bool test_spawn_capture_kill(const char *const argv[],
                              const char *const *needles, int max_ms,
                              char *out, size_t cap);
 #endif
+/* True when every string in the NULL-terminated `needles` array occurs in
+ * `out`. */
+bool test_out_has_all_needles(const char *out, const char *const *needles);
 
 /* Test group functions — each returns failure count */
 int test_crypto(void);

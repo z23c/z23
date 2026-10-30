@@ -288,7 +288,6 @@ platform/modules/util/src/cpu_topology.c:scan_windows:27
 tests/harness/src/lint_gate_chain_contracts.c:t_no_new_coin_backfill_caller:47
 tests/harness/src/test.c:main:407
 tests/harness/src/test_accept_to_mempool.c:test_accept_to_mempool:44
-tests/harness/src/test_cli_argv_strict.c:cas_run_daemon_wait_for:23
 tests/harness/src/test_consensus_state_snapshot_export.c:test_consensus_state_snapshot_export_platform_arm:186
 tests/harness/src/test_dev_platform.c:run_darwin_attested_descriptor_fixture:24
 tests/harness/src/test_dev_platform.c:run_failure_store_fixture:59

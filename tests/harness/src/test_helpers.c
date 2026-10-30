@@ -246,6 +246,17 @@ void test_make_easy_consensus_params(struct consensus_params *p)
     for (int i = 0; i < 32; i++) p->powLimit.data[i] = 0xff;
 }
 
+/* True when every string in the NULL-terminated `needles` array occurs in
+ * `out`. */
+bool test_out_has_all_needles(const char *out,
+                              const char *const *needles)
+{
+    bool all = true;
+    for (size_t i = 0; needles[i]; i++)
+        if (!strstr(out, needles[i])) { all = false; break; }
+    return all;
+}
+
 #if defined(_WIN32)
 
 #include <windows.h>
@@ -403,17 +414,6 @@ static size_t test_append_clamped(char *out, size_t pos, size_t cap,
         pos += take;
     }
     return pos;
-}
-
-/* True when every string in the NULL-terminated `needles` array occurs in
- * `out`. */
-static bool test_out_has_all_needles(const char *out,
-                                     const char *const *needles)
-{
-    bool all = true;
-    for (size_t i = 0; needles[i]; i++)
-        if (!strstr(out, needles[i])) { all = false; break; }
-    return all;
 }
 
 /* Read up to one bufferful of the bytes queued on `rd` into `out`; *found

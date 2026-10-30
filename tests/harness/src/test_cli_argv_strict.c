@@ -259,6 +259,52 @@ static long cas_now_ms(void)
     return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 
+#if !defined(_WIN32)
+/* Milliseconds left before the deadline, clamped to at most 50 (0 = past). */
+static int cas_daemon_wait_ms(long deadline)
+{
+    long remaining = deadline - cas_now_ms();
+    if (remaining <= 0) return 0;
+    if (remaining > 50) remaining = 50;
+    return (int)remaining;
+}
+
+/* Poll fd for up to wait_ms: 1 = readable, 0 = hang-up/error, -1 = timeout. */
+static int cas_daemon_poll_readable(int fd, int wait_ms)
+{
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    int pr = poll(&pfd, 1, wait_ms);
+    if (pr > 0) {
+        if (pfd.revents & POLLIN) return 1;
+        if (pfd.revents & (POLLHUP | POLLERR)) return 0;
+    }
+    return -1;
+}
+
+/* Read one chunk from fd into out; 1 = all needles now present, 0 = EOF,
+ * -1 = keep waiting. */
+static int cas_daemon_read_chunk(int fd, char *out, size_t cap, size_t *pos,
+                                 const char *const *needles)
+{
+    char buf[4096];
+    ssize_t r = read(fd, buf, sizeof(buf));
+    if (r > 0) {
+        size_t take = (size_t)r;
+        size_t room = (*pos + 1 < cap) ? (cap - 1 - *pos) : 0;
+        if (take > room) take = room;
+        if (take > 0) {
+            memcpy(out + *pos, buf, take);
+            *pos += take;
+            out[*pos] = 0;
+        }
+        return test_out_has_all_needles(out, needles) ? 1 : -1;
+    } else if (r == 0) {
+        return 0; /* child exited before printing everything */
+    }
+    return -1;
+}
+#endif
+
 /* Fork/exec a DAEMON-mode invocation (never exits on its own), accumulate its
  * combined stdout+stderr until EVERY string in `needles` is present (or the
  * deadline passes / the child hangs up), then SIGKILL it regardless and reap
@@ -307,31 +353,15 @@ static bool cas_run_daemon_wait_for(char *const argv[], const char *home,
     bool found = false;
     const long deadline = cas_now_ms() + max_ms;
     for (;;) {
-        long remaining = deadline - cas_now_ms();
-        if (remaining <= 0) break;
-        if (remaining > 50) remaining = 50;
-        struct pollfd pfd = { .fd = pipefd[0], .events = POLLIN };
-        int pr = poll(&pfd, 1, (int)remaining);
-        if (pr > 0 && (pfd.revents & POLLIN)) {
-            char buf[4096];
-            ssize_t r = read(pipefd[0], buf, sizeof(buf));
-            if (r > 0) {
-                size_t take = (size_t)r;
-                size_t room = (pos + 1 < cap) ? (cap - 1 - pos) : 0;
-                if (take > room) take = room;
-                if (take > 0) {
-                    memcpy(out + pos, buf, take);
-                    pos += take;
-                    out[pos] = 0;
-                }
-                bool all = true;
-                for (size_t i = 0; needles[i]; i++)
-                    if (!strstr(out, needles[i])) { all = false; break; }
-                if (all) { found = true; break; }
-            } else if (r == 0) {
-                break; /* child exited before printing everything */
-            }
-        } else if (pr > 0 && (pfd.revents & (POLLHUP | POLLERR))) {
+        int wait = cas_daemon_wait_ms(deadline);
+        if (wait == 0) break;
+        int ev = cas_daemon_poll_readable(pipefd[0], wait);
+        if (ev == 1) {
+            int st = cas_daemon_read_chunk(pipefd[0], out, cap, &pos,
+                                           needles);
+            if (st == 1) { found = true; break; }
+            if (st == 0) break;
+        } else if (ev == 0) {
             break;
         }
     }
@@ -342,9 +372,7 @@ static bool cas_run_daemon_wait_for(char *const argv[], const char *home,
     waitpid(pid, &status, 0);
     close(pipefd[0]);
     if (found) return true;
-    for (size_t i = 0; needles[i]; i++)
-        if (!strstr(out, needles[i])) return false;
-    return true;
+    return test_out_has_all_needles(out, needles);
 #endif
 }
 
