@@ -10642,7 +10642,7 @@ mvp-coldstart-to-tip-stopwatch: zclassic23 fs-handshake-probe p2p-version-probe 
 # hash-confirmed; the printed table names which run and why.
 ZCL_RUNS ?= 3
 .PHONY: mvp-coldstart-to-tip-triple
-mvp-coldstart-to-tip-triple: zclassic23
+mvp-coldstart-to-tip-triple: zclassic23 p2p-version-probe
 	@bash -c 'set -uo pipefail; \
 	 echo "══ MVP C3 STOPWATCH x$(ZCL_RUNS) (real): wiped -> peer tip, hash-confirmed, per run ══"; \
 	 if ! bash tools/scripts/c3_stopwatch_triple_run.sh --selftest >/dev/null 2>&1; then \
