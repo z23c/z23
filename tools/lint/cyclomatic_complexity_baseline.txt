@@ -97,11 +97,7 @@ core/modules/crypto/src/sha3_256_x4.c:sha3_256_x4_avx512:17
 core/modules/crypto/src/sha3_256_x4.c:sha3_256_x4_neon:17
 core/modules/crypto_registry/src/crypto_registry.c:crypto_registry_register:16
 core/modules/mining/src/gen.c:try_solve_equihash:16
-core/modules/net/src/addrman.c:addrman_add:34
-core/modules/net/src/addrman.c:addrman_consistency_check:30
-core/modules/net/src/addrman.c:addrman_select:27
-core/modules/net/src/addrman.c:make_tried:16
-core/modules/net/src/addrman_codec.c:addrman_deserialize:21
+core/modules/net/src/addrman_codec.c:addrman_deserialize:19
 core/modules/net/src/compact_blocks.c:compact_block_msg_deserialize:17
 core/modules/net/src/compact_blocks.c:compact_block_reconstruct:25
 core/modules/net/src/connman.c:connman_get_outbound_health:33
@@ -116,7 +112,6 @@ core/modules/net/src/connman_onion_seeds.c:apply_onion_seed_directory:35
 core/modules/net/src/connman_onion_seeds.c:connman_run_onion_seed_pass:42
 core/modules/net/src/connman_onion_seeds.c:onion_seed_directory_has_endpoint:20
 core/modules/net/src/connman_zcl23_dial.c:connman_gather_known_zcl23_candidate:17
-core/modules/net/src/dandelion.c:dandelion_maybe_rotate_epoch:19
 core/modules/net/src/download.c:dl_assign_to_peer:90
 core/modules/net/src/download.c:dl_queue_blocks_class:39
 core/modules/net/src/download_diagnostics.c:dl_get_diagnostics:27
@@ -134,13 +129,8 @@ core/modules/net/src/file_service.c:fs_parse_serve_request#2:26
 core/modules/net/src/file_service.c:fs_test_range_worker_socket_lifecycle#2:34
 core/modules/net/src/file_service.c:fs_test_resolved_connect_lifecycle#2:31
 core/modules/net/src/file_service.c:range_worker_fn:39
-core/modules/net/src/file_service_handshake.c:fs_handshake_until:24
-core/modules/net/src/file_service_private_chunk.c:fs_recv_chunk_private_until:18
-core/modules/net/src/flyclient.c:fc_generate_indices:27
 core/modules/net/src/header_serve_repair.c:header_serve_repair_arm:16
 core/modules/net/src/header_serve_repair.c:header_serve_repair_maybe_send:24
-core/modules/net/src/https_server_install.c:https_server_try_public_install:18
-core/modules/net/src/https_server_install.c:public_install_filepath_under_root:16
 core/modules/net/src/msg_blocks.c:process_block_msg:55
 core/modules/net/src/msg_blocks.c:process_getdata:17
 core/modules/net/src/msg_blocks.c:self_suspicion_record:17
@@ -174,10 +164,7 @@ core/modules/net/src/net.c:ban_db_read:33
 core/modules/net/src/net.c:p2p_disconnect_reason_name:21
 core/modules/net/src/net.c:p2p_node_receive_bytes:21
 core/modules/net/src/net.c:peer_misbehaving:16
-core/modules/net/src/net_listen.c:accept_connection:33
-core/modules/net/src/net_listen.c:bind_listen_port:17
 core/modules/net/src/noise_transport.c:noise_transport_feed:37
-core/modules/net/src/onion_stream_telemetry.c:onion_stream_dial_bump:17
 core/modules/net/src/params_service.c:mp_handle_param_chunk:18
 core/modules/net/src/params_service.c:mp_handle_param_info:17
 core/modules/net/src/peer_eviction.c:peer_eviction_select:18
@@ -188,7 +175,6 @@ core/modules/net/src/rom_fetch.c:rf_download_verified_core:23
 core/modules/net/src/rom_fetch.c:rom_fetch_download:18
 core/modules/net/src/state_offer.c:offer_shape:17
 core/modules/net/src/state_offer.c:state_offer_error_string:17
-core/modules/net/src/tor_config_log.c:tor_log_last_ephemeral_address:17
 core/modules/noise/src/noise_handshake.c:noise_hs_init:18
 core/modules/noise/src/session_transport.c:session_transport_decrypt:16
 core/modules/policy/src/fees.c:tx_confirm_stats_estimate_median:18

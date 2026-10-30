@@ -38,32 +38,32 @@ static struct log_throttle g_banned_accept_log = LOG_THROTTLE_INIT;
 
 /* --- bind/listen --- */
 
-bool bind_listen_port(struct net_manager *nm, const struct net_service *addr,
-                      bool whitelisted)
+static socklen_t listen_fill_sockaddr(struct sockaddr_storage *ss,
+                                      const struct net_service *addr)
 {
-    struct sockaddr_storage ss;
-    socklen_t sslen = sizeof(ss);
-    memset(&ss, 0, sizeof(ss));
+    socklen_t sslen = sizeof(*ss);
+    memset(ss, 0, sizeof(*ss));
 
     if (net_addr_is_ipv4(&addr->addr)) {
-        struct sockaddr_in *s4 = (struct sockaddr_in *)&ss;
+        struct sockaddr_in *s4 = (struct sockaddr_in *)ss;
         s4->sin_family = AF_INET;
         s4->sin_port = htons(addr->port);
         memcpy(&s4->sin_addr, addr->addr.ip + 12, 4);
         sslen = sizeof(*s4);
     } else {
-        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&ss;
+        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)ss;
         s6->sin6_family = AF_INET6;
         s6->sin6_port = htons(addr->port);
         memcpy(&s6->sin6_addr, addr->addr.ip, 16);
         sslen = sizeof(*s6);
     }
+    return sslen;
+}
 
-    zcl_socket_t sock = socket(((struct sockaddr *)&ss)->sa_family,
-                                SOCK_STREAM, IPPROTO_TCP);
-    if (sock == ZCL_INVALID_SOCKET)
-        LOG_FAIL("net", "socket() failed for listen port");
-
+/* Socket options set before the non-blocking switch: reuse, no-delay and
+ * no-SIGPIPE where the platform has it. */
+static void listen_set_base_sockopts(zcl_socket_t sock)
+{
     int one = 1;
 #ifndef _WIN32
 #ifdef SO_NOSIGPIPE
@@ -75,36 +75,70 @@ bool bind_listen_port(struct net_manager *nm, const struct net_service *addr,
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&one, sizeof(one));
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
 #endif
+}
 
-    if (!set_socket_nonblocking(sock, true)) {
-        close_socket(&sock);
-        LOG_FAIL("net", "set_socket_nonblocking failed for listen port");
-    }
-
+/* IPv6 sockets are v6-only; a no-op for IPv4 listeners. */
+static void listen_set_v6only(zcl_socket_t sock, const struct net_service *addr)
+{
+    int one = 1;
     if (!net_addr_is_ipv4(&addr->addr)) {
 #ifdef IPV6_V6ONLY
         setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY,
                    (const char *)&one, sizeof(one));
 #endif
     }
+    (void)sock;
+    (void)one;
+}
+
+/* Reads the kernel-assigned local port of a bound socket. Returns false when
+ * getsockname() fails; *port is 0 for an unknown address family. */
+static bool listen_bound_port(zcl_socket_t sock, uint16_t *port)
+{
+    struct sockaddr_storage bound;
+    socklen_t bound_len = sizeof(bound);
+    memset(&bound, 0, sizeof(bound));
+    if (getsockname(sock, (struct sockaddr *)&bound, &bound_len) != 0)
+        return false;
+    uint16_t local_port = 0;
+    if (bound.ss_family == AF_INET)
+        local_port = ntohs(((struct sockaddr_in *)&bound)->sin_port);
+    else if (bound.ss_family == AF_INET6)
+        local_port = ntohs(((struct sockaddr_in6 *)&bound)->sin6_port);
+    *port = local_port;
+    return true;
+}
+
+bool bind_listen_port(struct net_manager *nm, const struct net_service *addr,
+                      bool whitelisted)
+{
+    struct sockaddr_storage ss;
+    socklen_t sslen = listen_fill_sockaddr(&ss, addr);
+
+    zcl_socket_t sock = socket(((struct sockaddr *)&ss)->sa_family,
+                                SOCK_STREAM, IPPROTO_TCP);
+    if (sock == ZCL_INVALID_SOCKET)
+        LOG_FAIL("net", "socket() failed for listen port");
+
+    listen_set_base_sockopts(sock);
+
+    if (!set_socket_nonblocking(sock, true)) {
+        close_socket(&sock);
+        LOG_FAIL("net", "set_socket_nonblocking failed for listen port");
+    }
+
+    listen_set_v6only(sock, addr);
 
     if (bind(sock, (struct sockaddr *)&ss, sslen) == ZCL_SOCKET_ERROR) {
         close_socket(&sock);
         LOG_FAIL("net", "bind() failed for listen port");
     }
 
-    struct sockaddr_storage bound;
-    socklen_t bound_len = sizeof(bound);
-    memset(&bound, 0, sizeof(bound));
-    if (getsockname(sock, (struct sockaddr *)&bound, &bound_len) != 0) {
+    uint16_t local_port = 0;
+    if (!listen_bound_port(sock, &local_port)) {
         close_socket(&sock);
         LOG_FAIL("net", "getsockname() failed for bound listen port");
     }
-    uint16_t local_port = 0;
-    if (bound.ss_family == AF_INET)
-        local_port = ntohs(((struct sockaddr_in *)&bound)->sin_port);
-    else if (bound.ss_family == AF_INET6)
-        local_port = ntohs(((struct sockaddr_in6 *)&bound)->sin6_port);
     if (local_port == 0) {
         close_socket(&sock);
         LOG_FAIL("net", "bound listen socket reported local port zero");
@@ -135,6 +169,120 @@ bool bind_listen_port(struct net_manager *nm, const struct net_service *addr,
 
 /* --- accept connection --- */
 
+/* True for the accept() errors that just mean "nothing to accept now". */
+static bool accept_error_is_retry(int error)
+{
+    return platform_socket_error_would_block(error) ||
+           platform_socket_error_interrupted(error);
+}
+
+static void accept_fill_address(const struct sockaddr_storage *ss,
+                                struct net_address *addr)
+{
+    if (ss->ss_family == AF_INET) {
+        const struct sockaddr_in *s4 = (const struct sockaddr_in *)ss;
+        memset(addr->svc.addr.ip, 0, 10);
+        memset(addr->svc.addr.ip + 10, 0xff, 2);
+        memcpy(addr->svc.addr.ip + 12, &s4->sin_addr, 4);
+        addr->svc.port = ntohs(s4->sin_port);
+    } else if (ss->ss_family == AF_INET6) {
+        const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)ss;
+        memcpy(addr->svc.addr.ip, &s6->sin6_addr, 16);
+        addr->svc.port = ntohs(s6->sin6_port);
+    }
+}
+
+/* Whitelisted listeners and capped-but-nonzero loopback sources skip the
+ * per-IP cap. */
+static bool accept_ip_cap_exempt(bool is_whitelisted, bool src_loopback,
+                                 int max_loopback)
+{
+    return is_whitelisted || (src_loopback && max_loopback > 0);
+}
+
+static bool accept_same_ip_over_cap(bool ip_cap_exempt, int same_ip_count,
+                                    int max_per_ip)
+{
+    return !ip_cap_exempt && same_ip_count >= max_per_ip;
+}
+
+static bool accept_loopback_ceiling_hit(bool is_whitelisted, bool src_loopback,
+                                        int max_loopback,
+                                        int loopback_inbound_count)
+{
+    return !is_whitelisted && src_loopback && max_loopback > 0 &&
+           loopback_inbound_count >= max_loopback;
+}
+
+/* Counts inbound peers, inbound peers sharing the source address, and inbound
+ * loopback peers. Caller holds cs_nodes. */
+static void accept_count_inbound_locked(struct net_manager *nm,
+                                        const struct net_address *addr,
+                                        int *inbound_count, int *same_ip_count,
+                                        int *loopback_inbound_count)
+{
+    for (size_t i = 0; i < nm->num_nodes; i++) {
+        if (nm->nodes[i]->inbound)
+            (*inbound_count)++;
+        if (nm->nodes[i]->inbound &&
+            memcmp(nm->nodes[i]->addr.svc.addr.ip, addr->svc.addr.ip, 16) == 0)
+            (*same_ip_count)++;
+        if (nm->nodes[i]->inbound &&
+            net_addr_is_operator_local(&nm->nodes[i]->addr.svc.addr))
+            (*loopback_inbound_count)++;
+    }
+}
+
+/* Picks and disconnects the least-valuable inbound peer. Returns true and
+ * fills the id and name when a victim was chosen. Caller holds cs_nodes. */
+static bool accept_evict_victim_locked(struct net_manager *nm,
+                                       node_id_t *evicted_id,
+                                       char *evicted_addr_name,
+                                       size_t evicted_addr_name_size)
+{
+    struct peer_eviction_candidate cand[PEER_EVICTION_MAX_CANDIDATES];
+    struct p2p_node *cand_node[PEER_EVICTION_MAX_CANDIDATES];
+    size_t ncand = nm->num_nodes < PEER_EVICTION_MAX_CANDIDATES
+                        ? nm->num_nodes : PEER_EVICTION_MAX_CANDIDATES;
+    for (size_t i = 0; i < ncand; i++) {
+        struct p2p_node *cn = nm->nodes[i];
+        cand[i].is_outbound = !cn->inbound;
+        cand[i].whitelisted = cn->whitelisted;
+        cand[i].connected_time = cn->time_connected;
+        cand[i].last_block_time = cn->last_block_time;
+        cand[i].last_tx_time = cn->last_tx_time;
+        cand_node[i] = cn;
+    }
+    int victim_idx = peer_eviction_select(
+        cand, ncand, (int64_t)platform_time_wall_time_t());
+    if (victim_idx < 0)
+        return false;
+    struct p2p_node *victim = cand_node[victim_idx];
+    (void)p2p_node_request_disconnect(
+        victim, P2P_DISCONNECT_EVICTED,
+        P2P_DISCONNECT_SOURCE_PEER_POLICY,
+        victim->endpoint_generation);
+    *evicted_id = victim->id;
+    snprintf(evicted_addr_name, evicted_addr_name_size, "%s",
+             victim->addr_name);
+    return true;
+}
+
+static void accept_arm_noise(struct net_manager *nm, struct p2p_node *node)
+{
+    /* Noise transport (default OFF): arm as RESPONDER in NOISE_DETECT when
+     * enabled. The first inbound bytes decide plaintext (v1 magic) vs Noise
+     * msg1. */
+    if (nm->noise_enabled) {
+        uint8_t *unused = NULL;
+        size_t unused_len = 0;
+        node->transport = noise_transport_begin(false, nm->identity_priv,
+                                             nm->message_start,
+                                             &unused, &unused_len);
+        free(unused);
+    }
+}
+
 bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
 {
     struct sockaddr_storage ss;
@@ -143,8 +291,7 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
 
     if (sock == ZCL_INVALID_SOCKET) {
         int error = platform_socket_last_error();
-        if (platform_socket_error_would_block(error) ||
-            platform_socket_error_interrupted(error))
+        if (accept_error_is_retry(error))
             return false;
         LOG_FAIL("net", "accept() returned invalid socket");
     }
@@ -152,17 +299,7 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
     struct net_address addr;
     net_address_init(&addr);
 
-    if (ss.ss_family == AF_INET) {
-        struct sockaddr_in *s4 = (struct sockaddr_in *)&ss;
-        memset(addr.svc.addr.ip, 0, 10);
-        memset(addr.svc.addr.ip + 10, 0xff, 2);
-        memcpy(addr.svc.addr.ip + 12, &s4->sin_addr, 4);
-        addr.svc.port = ntohs(s4->sin_port);
-    } else if (ss.ss_family == AF_INET6) {
-        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *)&ss;
-        memcpy(addr.svc.addr.ip, &s6->sin6_addr, 16);
-        addr.svc.port = ntohs(s6->sin6_port);
-    }
+    accept_fill_address(&ss, &addr);
 
     bool is_whitelisted = ls->whitelisted;
 
@@ -215,8 +352,8 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
     int max_inbound = nm->max_connections - MAX_OUTBOUND_CONNECTIONS;
     bool src_loopback = net_addr_is_operator_local(&addr.svc.addr);
     int max_loopback = peer_scoring_max_inbound_loopback(max_inbound);
-    bool ip_cap_exempt = is_whitelisted ||
-                         (src_loopback && max_loopback > 0);
+    bool ip_cap_exempt = accept_ip_cap_exempt(is_whitelisted, src_loopback,
+                                              max_loopback);
     /* Evict-not-reject: when the inbound cap is hit, free a slot by
      * disconnecting the least-valuable existing inbound peer instead of
      * refusing the new one (peer_eviction_select() never picks outbound/
@@ -227,47 +364,15 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
     node_id_t evicted_id = 0;
     char evicted_addr_name[256] = "";
     zcl_mutex_lock(&nm->cs_nodes);
-    for (size_t i = 0; i < nm->num_nodes; i++) {
-        if (nm->nodes[i]->inbound)
-            inbound_count++;
-        if (nm->nodes[i]->inbound &&
-            memcmp(nm->nodes[i]->addr.svc.addr.ip, addr.svc.addr.ip, 16) == 0)
-            same_ip_count++;
-        if (nm->nodes[i]->inbound &&
-            net_addr_is_operator_local(&nm->nodes[i]->addr.svc.addr))
-            loopback_inbound_count++;
-    }
+    accept_count_inbound_locked(nm, &addr, &inbound_count, &same_ip_count,
+                                &loopback_inbound_count);
     if (inbound_count >= max_inbound) {
-        struct peer_eviction_candidate cand[PEER_EVICTION_MAX_CANDIDATES];
-        struct p2p_node *cand_node[PEER_EVICTION_MAX_CANDIDATES];
-        size_t ncand = nm->num_nodes < PEER_EVICTION_MAX_CANDIDATES
-                            ? nm->num_nodes : PEER_EVICTION_MAX_CANDIDATES;
-        for (size_t i = 0; i < ncand; i++) {
-            struct p2p_node *cn = nm->nodes[i];
-            cand[i].is_outbound = !cn->inbound;
-            cand[i].whitelisted = cn->whitelisted;
-            cand[i].connected_time = cn->time_connected;
-            cand[i].last_block_time = cn->last_block_time;
-            cand[i].last_tx_time = cn->last_tx_time;
-            cand_node[i] = cn;
-        }
-        int victim_idx = peer_eviction_select(
-            cand, ncand, (int64_t)platform_time_wall_time_t());
-        if (victim_idx >= 0) {
-            struct p2p_node *victim = cand_node[victim_idx];
-            (void)p2p_node_request_disconnect(
-                victim, P2P_DISCONNECT_EVICTED,
-                P2P_DISCONNECT_SOURCE_PEER_POLICY,
-                victim->endpoint_generation);
-            evicted = true;
-            evicted_id = victim->id;
-            snprintf(evicted_addr_name, sizeof(evicted_addr_name), "%s",
-                     victim->addr_name);
-        }
+        evicted = accept_evict_victim_locked(nm, &evicted_id, evicted_addr_name,
+                                             sizeof(evicted_addr_name));
     }
     zcl_mutex_unlock(&nm->cs_nodes);
 
-    if (!ip_cap_exempt && same_ip_count >= max_per_ip) {
+    if (accept_same_ip_over_cap(ip_cap_exempt, same_ip_count, max_per_ip)) {
         close_socket(&sock);
         LOG_FAIL("net",
                  "too many inbound connections from same IP: count=%d "
@@ -282,8 +387,8 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
      * per-IP cap alone would bound nothing. Whitelisted listeners are
      * still exempt (an explicit operator decision), everything else on
      * loopback shares this budget. */
-    if (!is_whitelisted && src_loopback && max_loopback > 0 &&
-        loopback_inbound_count >= max_loopback) {
+    if (accept_loopback_ceiling_hit(is_whitelisted, src_loopback, max_loopback,
+                                    loopback_inbound_count)) {
         close_socket(&sock);
         LOG_FAIL("net",
                  "loopback inbound ceiling reached: count=%d cap=%d of "
@@ -349,17 +454,7 @@ bool accept_connection(struct net_manager *nm, const struct listen_socket *ls)
         LOG_FAIL("net", "p2p_node_create failed for inbound connection");
     }
 
-    /* Noise transport (default OFF): arm as RESPONDER in NOISE_DETECT when
-     * enabled. The first inbound bytes decide plaintext (v1 magic) vs Noise
-     * msg1. */
-    if (nm->noise_enabled) {
-        uint8_t *unused = NULL;
-        size_t unused_len = 0;
-        node->transport = noise_transport_begin(false, nm->identity_priv,
-                                             nm->message_start,
-                                             &unused, &unused_len);
-        free(unused);
-    }
+    accept_arm_noise(nm, node);
 
     p2p_node_add_ref(node);
     node->whitelisted = is_whitelisted;

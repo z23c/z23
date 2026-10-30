@@ -78,6 +78,47 @@ static bool dandelion_secret_u64(uint64_t *out, const char *label)
 
 /* ── Epoch management ──────────────────────────────────────────── */
 
+static void dandelion_clear_stem_slots(struct dandelion_state *ds)
+{
+    for (int i = 0; i < DANDELION_NUM_STEM_PEERS; i++)
+        ds->stem_peers[i] = DANDELION_NODE_ID_NONE;
+}
+
+static int dandelion_collect_stem_candidates(node_id_t *candidates,
+                                             struct net_manager *nm)
+{
+    int num_candidates = 0;
+
+    /* Collect eligible peer IDs (outbound, handshake complete, relays tx) */
+    zcl_mutex_lock(&nm->cs_nodes);
+    for (size_t i = 0; i < nm->num_nodes && num_candidates < MAX_OUTBOUND_CONNECTIONS; i++) {
+        struct p2p_node *peer = nm->nodes[i];
+        if (!peer->inbound &&
+            peer->state >= PEER_HANDSHAKE_COMPLETE &&
+            !peer->disconnect &&
+            peer->relay_txes) {
+            candidates[num_candidates++] = peer->id;
+        }
+    }
+    zcl_mutex_unlock(&nm->cs_nodes);
+    return num_candidates;
+}
+
+static bool dandelion_shuffle_stem_candidates(node_id_t *candidates,
+                                              int num_candidates)
+{
+    for (int i = num_candidates - 1; i > 0; i--) {
+        uint64_t r;
+        if (!dandelion_secret_u64(&r, "dandelion-stem-shuffle"))
+            return false;
+        int j = (int)(r % (uint64_t)(i + 1));
+        node_id_t tmp = candidates[i];
+        candidates[i] = candidates[j];
+        candidates[j] = tmp;
+    }
+    return true;
+}
+
 void dandelion_maybe_rotate_epoch(struct dandelion_state *ds,
                                   struct net_manager *nm)
 {
@@ -97,49 +138,23 @@ void dandelion_maybe_rotate_epoch(struct dandelion_state *ds,
     /* New epoch — pick stem relay peers from connected outbound peers */
     ds->epoch_start = now;
     ds->num_stem_peers = 0;
-    for (int i = 0; i < DANDELION_NUM_STEM_PEERS; i++)
-        ds->stem_peers[i] = DANDELION_NODE_ID_NONE;
+    dandelion_clear_stem_slots(ds);
 
-    /* Collect eligible peer IDs (outbound, handshake complete, relays tx) */
     node_id_t candidates[MAX_OUTBOUND_CONNECTIONS];
-    int num_candidates = 0;
-
-    zcl_mutex_lock(&nm->cs_nodes);
-    for (size_t i = 0; i < nm->num_nodes && num_candidates < MAX_OUTBOUND_CONNECTIONS; i++) {
-        struct p2p_node *peer = nm->nodes[i];
-        if (!peer->inbound &&
-            peer->state >= PEER_HANDSHAKE_COMPLETE &&
-            !peer->disconnect &&
-            peer->relay_txes) {
-            candidates[num_candidates++] = peer->id;
-        }
-    }
-    zcl_mutex_unlock(&nm->cs_nodes);
+    int num_candidates = dandelion_collect_stem_candidates(candidates, nm);
 
     /* Fisher-Yates shuffle backed by the cryptographic RNG. On RNG
      * failure: leave num_stem_peers=0 so dandelion_should_stem returns
      * false and txs fluff via normal relay (safer than picking with a
      * compromised RNG). */
-    bool rng_ok = true;
-    for (int i = num_candidates - 1; i > 0; i--) {
-        uint64_t r;
-        if (!dandelion_secret_u64(&r, "dandelion-stem-shuffle")) {
-            rng_ok = false;
-            break;
-        }
-        int j = (int)(r % (uint64_t)(i + 1));
-        node_id_t tmp = candidates[i];
-        candidates[i] = candidates[j];
-        candidates[j] = tmp;
-    }
+    bool rng_ok = dandelion_shuffle_stem_candidates(candidates, num_candidates);
 
     if (!rng_ok) {
         fprintf(stderr, "[dandelion] stem-peer RNG failed; deferring "  // obs-ok:helper-context-logged
                         "selection (txs will fluff this epoch)\n");
         ds->num_stem_peers = 0;
         ds->stem_rr_index = 0;
-        for (int i = 0; i < DANDELION_NUM_STEM_PEERS; i++)
-            ds->stem_peers[i] = DANDELION_NODE_ID_NONE;
+        dandelion_clear_stem_slots(ds);
         zcl_mutex_unlock(&ds->cs);
         return;
     }

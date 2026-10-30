@@ -78,6 +78,28 @@ int tor_logs_rotate(const char *datadir, int64_t max_bytes)
     return rotated;
 }
 
+static void tor_log_seek_scan_start(FILE *f, long scan_from)
+{
+    if (scan_from > 0) {
+        if (fseek(f, 0, SEEK_END) != 0 || ftell(f) < scan_from ||
+            fseek(f, scan_from, SEEK_SET) != 0)
+            rewind(f);
+    }
+}
+
+static bool tor_log_copy_ephemeral_token(char *p, char *out, size_t out_size)
+{
+    char *end = p;
+    while (*end && *end != '\n' && *end != '\r' && *end != ' ')
+        end++;
+    size_t len = (size_t)(end - p);
+    if (len > 0 && len < out_size) {
+        memcpy(out, p, len);
+        out[len] = '\0';
+        return true;
+    }
+    return false;
+}
 
 bool tor_log_last_ephemeral_address(const char *log_path, long scan_from,
                                     char *out, size_t out_size)
@@ -88,11 +110,7 @@ bool tor_log_last_ephemeral_address(const char *log_path, long scan_from,
     FILE *f = fopen(log_path, "r");
     if (!f)
         return false;
-    if (scan_from > 0) {
-        if (fseek(f, 0, SEEK_END) != 0 || ftell(f) < scan_from ||
-            fseek(f, scan_from, SEEK_SET) != 0)
-            rewind(f);
-    }
+    tor_log_seek_scan_start(f, scan_from);
 
     static const char marker[] = "ephemeral service created with address: ";
     char line[512];
@@ -102,15 +120,8 @@ bool tor_log_last_ephemeral_address(const char *log_path, long scan_from,
         if (!p)
             continue;
         p += sizeof(marker) - 1;
-        char *end = p;
-        while (*end && *end != '\n' && *end != '\r' && *end != ' ')
-            end++;
-        size_t len = (size_t)(end - p);
-        if (len > 0 && len < out_size) {
-            memcpy(out, p, len);
-            out[len] = '\0';
+        if (tor_log_copy_ephemeral_token(p, out, out_size))
             found = true; /* the latest current-boot line supersedes */
-        }
     }
     fclose(f);
     return found;

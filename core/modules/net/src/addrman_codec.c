@@ -520,6 +520,34 @@ static void addrman_rebuild_loaded_index(struct addr_man *am)
     addrman_index_rebuild_locked(am, want);
 }
 
+/* The stored bucket count: every format other than version 0 flips bit 30. */
+static int32_t addrman_ubuckets_for_version(uint8_t nVersion, int32_t nUBuckets)
+{
+    if (nVersion != 0) nUBuckets ^= (1 << 30);
+    return nUBuckets;
+}
+
+/* Read the bucket table up to walk_limit. Returns 0 when every bucket read,
+ * 1 when a bucket size was unreadable (its index in *bucket_out), 2 when a
+ * bucket's index list was truncated (its index in *bucket_out). */
+static int addrman_walk_bucket_table(struct addr_man *am, struct byte_stream *s,
+                                     const int *remap, int32_t nNew,
+                                     int walk_limit, int *bucket_out)
+{
+    for (int bucket = 0; bucket < walk_limit; bucket++) {
+        int bstat = addrman_read_bucket(am, s, remap, nNew, bucket);
+        if (bstat == 1) {
+            *bucket_out = bucket;
+            return 1;
+        }
+        if (bstat == 2) {
+            *bucket_out = bucket;
+            return 2;   /* stop the outer walk too */
+        }
+    }
+    return 0;
+}
+
 bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
 {
     addrman_clear(am);
@@ -545,7 +573,7 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
 
     int32_t nUBuckets;
     if (!stream_read_i32_le(s, &nUBuckets)) LOG_FAIL("addrman", "deserialize: failed to read bucket count");
-    if (nVersion != 0) nUBuckets ^= (1 << 30);
+    nUBuckets = addrman_ubuckets_for_version(nVersion, nUBuckets);
 
     /* Reject out-of-range counts BEFORE the (size_t) cast: a negative nNew/
      * nTried (corrupt/hostile peers.dat) would wrap to a huge need and force a
@@ -610,22 +638,18 @@ bool addrman_deserialize(struct addr_man *am, struct byte_stream *s)
      * the addresses: a truncated or nonsensical hint costs us the writer's
      * layout, which the pass below recomputes, and never the address book. */
     int walk_limit = addrman_bucket_walk_limit(nVersion, nUBuckets, table_buckets);
-    for (int bucket = 0; bucket < walk_limit; bucket++) {
-        int bstat = addrman_read_bucket(am, s, remap, nNew, bucket);
-        if (bstat == 1) {
-            LOG_WARN("addrman",
-                     "load: bucket table unreadable at bucket=%d — "
-                     "re-bucketing the remaining addresses ourselves", bucket);
-            break;
-        }
-        if (bstat == 2) {
-            LOG_WARN("addrman",
-                     "load: bucket table truncated at bucket=%d — "
-                     "re-bucketing the remaining addresses ourselves",
-                     bucket);
-            bucket = walk_limit;   /* stop the outer walk too */
-            break;
-        }
+    int bucket = 0;
+    int bstat = addrman_walk_bucket_table(am, s, remap, nNew, walk_limit, &bucket);
+    if (bstat == 1) {
+        LOG_WARN("addrman",
+                 "load: bucket table unreadable at bucket=%d — "
+                 "re-bucketing the remaining addresses ourselves", bucket);
+    }
+    if (bstat == 2) {
+        LOG_WARN("addrman",
+                 "load: bucket table truncated at bucket=%d — "
+                 "re-bucketing the remaining addresses ourselves",
+                 bucket);
     }
 
     free(remap);

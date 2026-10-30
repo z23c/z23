@@ -701,7 +701,8 @@ static void clear_new(struct addr_man *am, int nUBucket, int nUBucketPos)
     }
 }
 
-static void make_tried(struct addr_man *am, struct addr_info *info, int nId)
+static void make_tried_unlink_new(struct addr_man *am, struct addr_info *info,
+                                  int nId)
 {
     for (int bucket = 0; bucket < ADDRMAN_NEW_BUCKET_COUNT; bucket++) {
         int pos = addr_info_get_bucket_position(info, &am->nKey, true, bucket);
@@ -710,12 +711,63 @@ static void make_tried(struct addr_man *am, struct addr_info *info, int nId)
             info->ref_count--;
         }
     }
-    am->new_count--;
+}
 
-    int nKBucket = addr_info_get_tried_bucket(info, &am->nKey);
-    int nKBucketPos = addr_info_get_bucket_position(info, &am->nKey, false,
-                                                     nKBucket);
+static void make_tried_requeue_new(struct addr_man *am, struct addr_info *old,
+                                   int nIdEvict, int nUBucket, int nUBucketPos)
+{
+    clear_new(am, nUBucket, nUBucketPos);
+    old->ref_count = 1;
+    am->vvNew[nUBucket][nUBucketPos] = nIdEvict;
+    am->new_count++;
+}
 
+static bool make_tried_occupant_is_good(const struct addr_man *am,
+                                        int existing_new_id)
+{
+    if (existing_new_id != -1 &&
+        existing_new_id >= 0 &&
+        (size_t)existing_new_id < am->entries_cap) {
+        const struct addr_info *occupant = &am->entries[existing_new_id];
+        if (occupant->used &&
+            !addr_info_is_terrible(occupant, GetAdjustedTime()) &&
+            occupant->ref_count <= 1)
+            return true;
+    }
+    return false;
+}
+
+static void make_tried_place_alt_new(struct addr_man *am, struct addr_info *old,
+                                     int nIdEvict, int nUBucket,
+                                     int nUBucketPos)
+{
+    /* Occupant is still good — don't evict. Place the
+     * tried-evicted entry in a different new bucket. */
+    bool placed = false;
+    for (int attempt = 1; attempt < 8 && !placed; attempt++) {
+        unsigned char salt[4];
+        memcpy(salt, &attempt, 4);
+        /* Try alternative buckets derived from source */
+        int alt_bucket = (nUBucket + attempt * 97) %
+                         ADDRMAN_NEW_BUCKET_COUNT;
+        int alt_pos = addr_info_get_bucket_position(
+            old, &am->nKey, true, alt_bucket);
+        if (am->vvNew[alt_bucket][alt_pos] == -1) {
+            old->ref_count = 1;
+            am->vvNew[alt_bucket][alt_pos] = nIdEvict;
+            am->new_count++;
+            placed = true;
+        }
+    }
+    if (!placed) {
+        /* Last resort: evict the occupant anyway */
+        make_tried_requeue_new(am, old, nIdEvict, nUBucket, nUBucketPos);
+    }
+}
+
+static void make_tried_evict_slot(struct addr_man *am, int nKBucket,
+                                  int nKBucketPos)
+{
     if (am->vvTried[nKBucket][nKBucketPos] != -1) {
         int nIdEvict = am->vvTried[nKBucket][nKBucketPos];
         if (nIdEvict < 0 || (size_t)nIdEvict >= am->entries_cap) {
@@ -735,52 +787,114 @@ static void make_tried(struct addr_man *am, struct addr_info *info, int nId)
              * an attacker from cascading evictions through tried→new to
              * purge legitimate addresses from the new table. */
             int existing_new_id = am->vvNew[nUBucket][nUBucketPos];
-            if (existing_new_id != -1 &&
-                existing_new_id >= 0 &&
-                (size_t)existing_new_id < am->entries_cap) {
-                struct addr_info *occupant = &am->entries[existing_new_id];
-                if (occupant->used &&
-                    !addr_info_is_terrible(occupant, GetAdjustedTime()) &&
-                    occupant->ref_count <= 1) {
-                    /* Occupant is still good — don't evict. Place the
-                     * tried-evicted entry in a different new bucket. */
-                    bool placed = false;
-                    for (int attempt = 1; attempt < 8 && !placed; attempt++) {
-                        unsigned char salt[4];
-                        memcpy(salt, &attempt, 4);
-                        /* Try alternative buckets derived from source */
-                        int alt_bucket = (nUBucket + attempt * 97) %
-                                         ADDRMAN_NEW_BUCKET_COUNT;
-                        int alt_pos = addr_info_get_bucket_position(
-                            old, &am->nKey, true, alt_bucket);
-                        if (am->vvNew[alt_bucket][alt_pos] == -1) {
-                            old->ref_count = 1;
-                            am->vvNew[alt_bucket][alt_pos] = nIdEvict;
-                            am->new_count++;
-                            placed = true;
-                        }
-                    }
-                    if (!placed) {
-                        /* Last resort: evict the occupant anyway */
-                        clear_new(am, nUBucket, nUBucketPos);
-                        old->ref_count = 1;
-                        am->vvNew[nUBucket][nUBucketPos] = nIdEvict;
-                        am->new_count++;
-                    }
-                    goto place_tried;
-                }
+            if (make_tried_occupant_is_good(am, existing_new_id)) {
+                make_tried_place_alt_new(am, old, nIdEvict, nUBucket,
+                                         nUBucketPos);
+                return;
             }
-            clear_new(am, nUBucket, nUBucketPos);
-            old->ref_count = 1;
-            am->vvNew[nUBucket][nUBucketPos] = nIdEvict;
-            am->new_count++;
+            make_tried_requeue_new(am, old, nIdEvict, nUBucket, nUBucketPos);
         }
     }
+}
 
-place_tried:
+static void make_tried(struct addr_man *am, struct addr_info *info, int nId)
+{
+    make_tried_unlink_new(am, info, nId);
+    am->new_count--;
+
+    int nKBucket = addr_info_get_tried_bucket(info, &am->nKey);
+    int nKBucketPos = addr_info_get_bucket_position(info, &am->nKey, false,
+                                                     nKBucket);
+
+    make_tried_evict_slot(am, nKBucket, nKBucketPos);
+
     am->vvTried[nKBucket][nKBucketPos] = nId;
     am->tried_count++;
     info->in_tried = true;
+}
+
+static void add_refresh_time(struct addr_info *pinfo,
+                             const struct net_address *addr,
+                             int64_t time_penalty)
+{
+    int64_t nUpdateInterval = 24 * 60 * 60;
+    bool fCurrentlyOnline = (GetAdjustedTime() - (int64_t)addr->nTime < 24 * 60 * 60);
+    if (fCurrentlyOnline)
+        nUpdateInterval = 60 * 60;
+
+    if (addr->nTime && (!pinfo->addr.nTime ||
+        (int64_t)pinfo->addr.nTime < (int64_t)addr->nTime - nUpdateInterval - time_penalty)) {
+        int64_t t = (int64_t)addr->nTime - time_penalty;
+        pinfo->addr.nTime = (uint32_t)(t > 0 ? t : 0);
+    }
+
+    pinfo->addr.nServices |= addr->nServices;
+}
+
+/* True when an already-known address should get another new-bucket
+ * reference; false when addrman_add should return without inserting. */
+static bool add_existing_wants_ref(const struct addr_info *pinfo,
+                                   const struct net_address *addr)
+{
+    if (!addr->nTime || (pinfo->addr.nTime && addr->nTime <= pinfo->addr.nTime))
+        return false;
+    if (pinfo->in_tried)
+        return false;
+    if (pinfo->ref_count == ADDRMAN_NEW_BUCKETS_PER_ADDRESS)
+        return false;
+
+    int nFactor = 1;
+    for (int n = 0; n < pinfo->ref_count; n++)
+        nFactor *= 2;
+    if (nFactor > 1 && (GetRandInt(nFactor) != 0))
+        return false;
+    return true;
+}
+
+static bool add_slot_replaceable(struct addr_man *am,
+                                 const struct addr_info *pinfo,
+                                 int bucket, int pos)
+{
+    bool fInsert = am->vvNew[bucket][pos] == -1;
+    if (!fInsert) {
+        int eId = am->vvNew[bucket][pos];
+        if (eId < 0 || (size_t)eId >= am->entries_cap) {
+            am->vvNew[bucket][pos] = -1;
+            fInsert = true;
+        } else {
+            struct addr_info *existing = &am->entries[eId];
+            if (!existing->used ||
+                addr_info_is_terrible(existing, GetAdjustedTime()) ||
+                (existing->ref_count > 1 && pinfo->ref_count == 0))
+                fInsert = true;
+        }
+    }
+    return fInsert;
+}
+
+static bool add_insert_new_bucket(struct addr_man *am, struct addr_info *pinfo,
+                                  int nId, const struct net_addr *source)
+{
+    bool inserted = false;
+    int nUBucket = addr_info_get_new_bucket(pinfo, &am->nKey, source);
+    for (int attempt = 0; attempt < ADDRMAN_NEW_BUCKETS_PER_ADDRESS; attempt++) {
+        int bucket = (nUBucket + attempt * 97) % ADDRMAN_NEW_BUCKET_COUNT;
+        int pos = addr_info_get_bucket_position(pinfo, &am->nKey, true, bucket);
+        if (am->vvNew[bucket][pos] == nId) {
+            inserted = true;
+            break;
+        }
+
+        if (!add_slot_replaceable(am, pinfo, bucket, pos))
+            continue;
+
+        clear_new(am, bucket, pos);
+        pinfo->ref_count++;
+        am->vvNew[bucket][pos] = nId;
+        inserted = true;
+        break;
+    }
+    return inserted;
 }
 
 bool addrman_add(struct addr_man *am, const struct net_address *addr,
@@ -807,36 +921,8 @@ bool addrman_add(struct addr_man *am, const struct net_address *addr,
     struct addr_info *pinfo = addrman_find_addr_locked(am, &addr->svc.addr, &nId);
 
     if (pinfo) {
-        int64_t nUpdateInterval = 24 * 60 * 60;
-        bool fCurrentlyOnline = (GetAdjustedTime() - (int64_t)addr->nTime < 24 * 60 * 60);
-        if (fCurrentlyOnline)
-            nUpdateInterval = 60 * 60;
-
-        if (addr->nTime && (!pinfo->addr.nTime ||
-            (int64_t)pinfo->addr.nTime < (int64_t)addr->nTime - nUpdateInterval - time_penalty)) {
-            int64_t t = (int64_t)addr->nTime - time_penalty;
-            pinfo->addr.nTime = (uint32_t)(t > 0 ? t : 0);
-        }
-
-        pinfo->addr.nServices |= addr->nServices;
-
-        if (!addr->nTime || (pinfo->addr.nTime && addr->nTime <= pinfo->addr.nTime)) {
-            zcl_mutex_unlock(&am->cs);
-            return false;
-        }
-        if (pinfo->in_tried) {
-            zcl_mutex_unlock(&am->cs);
-            return false;
-        }
-        if (pinfo->ref_count == ADDRMAN_NEW_BUCKETS_PER_ADDRESS) {
-            zcl_mutex_unlock(&am->cs);
-            return false;
-        }
-
-        int nFactor = 1;
-        for (int n = 0; n < pinfo->ref_count; n++)
-            nFactor *= 2;
-        if (nFactor > 1 && (GetRandInt(nFactor) != 0)) {
+        add_refresh_time(pinfo, addr, time_penalty);
+        if (!add_existing_wants_ref(pinfo, addr)) {
             zcl_mutex_unlock(&am->cs);
             return false;
         }
@@ -852,39 +938,7 @@ bool addrman_add(struct addr_man *am, const struct net_address *addr,
         fNew = true;
     }
 
-    bool inserted = false;
-    int nUBucket = addr_info_get_new_bucket(pinfo, &am->nKey, source);
-    for (int attempt = 0; attempt < ADDRMAN_NEW_BUCKETS_PER_ADDRESS; attempt++) {
-        int bucket = (nUBucket + attempt * 97) % ADDRMAN_NEW_BUCKET_COUNT;
-        int pos = addr_info_get_bucket_position(pinfo, &am->nKey, true, bucket);
-        if (am->vvNew[bucket][pos] == nId) {
-            inserted = true;
-            break;
-        }
-
-        bool fInsert = am->vvNew[bucket][pos] == -1;
-        if (!fInsert) {
-            int eId = am->vvNew[bucket][pos];
-            if (eId < 0 || (size_t)eId >= am->entries_cap) {
-                am->vvNew[bucket][pos] = -1;
-                fInsert = true;
-            } else {
-                struct addr_info *existing = &am->entries[eId];
-                if (!existing->used ||
-                    addr_info_is_terrible(existing, GetAdjustedTime()) ||
-                    (existing->ref_count > 1 && pinfo->ref_count == 0))
-                    fInsert = true;
-            }
-        }
-        if (!fInsert)
-            continue;
-
-        clear_new(am, bucket, pos);
-        pinfo->ref_count++;
-        am->vvNew[bucket][pos] = nId;
-        inserted = true;
-        break;
-    }
+    bool inserted = add_insert_new_bucket(am, pinfo, nId, source);
     if (!inserted && pinfo->ref_count == 0)
         delete_entry(am, nId);
 
@@ -951,6 +1005,78 @@ void addrman_attempt(struct addr_man *am, const struct net_service *addr,
     zcl_mutex_unlock(&am->cs);
 }
 
+enum {
+    SELECT_PROBE_MISS = 0,
+    SELECT_PROBE_FOUND = 1,
+    SELECT_PROBE_EXHAUSTED = 2
+};
+
+static void select_repair_slot(struct addr_man *am, bool use_tried,
+                               int nBucket, int nBucketPos)
+{
+    if (use_tried)
+        am->vvTried[nBucket][nBucketPos] = -1; /* repair */
+    else
+        am->vvNew[nBucket][nBucketPos] = -1; /* repair */
+}
+
+static int select_probe_table(struct addr_man *am, bool use_tried, int *table,
+                              int bucket_count, int64_t nNow,
+                              struct addr_info *result)
+{
+    double fChanceFactor = 1.0;
+    for (int i = 0; i < 200000; i++) {
+        int nBucket = GetRandInt(bucket_count);
+        int nBucketPos = GetRandInt(ADDRMAN_BUCKET_SIZE);
+        if (table[nBucket * ADDRMAN_BUCKET_SIZE + nBucketPos] == -1 &&
+            !addrman_find_occupied_slot(table,
+                                        bucket_count,
+                                        nBucket,
+                                        nBucketPos,
+                                        &nBucket,
+                                        &nBucketPos))
+            return SELECT_PROBE_EXHAUSTED;
+        int nId = table[nBucket * ADDRMAN_BUCKET_SIZE + nBucketPos];
+        if (nId < 0 || (size_t)nId >= am->entries_cap) {
+            select_repair_slot(am, use_tried, nBucket, nBucketPos);
+            fChanceFactor *= 1.2;
+            continue;
+        }
+        struct addr_info *info = &am->entries[nId];
+        double chance = fChanceFactor * addr_info_get_chance(am, info, nNow);
+        if (GetRandInt(1 << 30) < chance * (double)(1 << 30)) {
+            *result = *info;
+            return SELECT_PROBE_FOUND;
+        }
+        fChanceFactor *= 1.2;
+    }
+    return SELECT_PROBE_MISS;
+}
+
+static bool select_fallback_scan(struct addr_man *am, bool new_only,
+                                 struct addr_info *result)
+{
+    /* Fallback for sparse bucket layouts: if randomized bucket probing
+     * failed, return the first eligible address from the random-order set
+     * instead of spuriously reporting an empty addrman. */
+    if (am->random_size > 0) {
+        size_t start = (size_t)GetRandInt((int)am->random_size);
+        for (size_t n = 0; n < am->random_size; n++) {
+            int nId = am->random_order[(start + n) % am->random_size];
+            if (nId < 0 || (size_t)nId >= am->entries_cap)
+                continue;
+            struct addr_info *info = &am->entries[nId];
+            if (!info->used)
+                continue;
+            if (new_only && info->in_tried)
+                continue;
+            *result = *info;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool addrman_select(struct addr_man *am, bool new_only,
                     struct addr_info *result)
 {
@@ -967,89 +1093,30 @@ bool addrman_select(struct addr_man *am, bool new_only,
 
     int64_t nNow = GetAdjustedTime();
 
-    if (!new_only && am->tried_count > 0 &&
-        (am->new_count == 0 || GetRandInt(2) == 0)) {
-        double fChanceFactor = 1.0;
-        for (int i = 0; i < 200000; i++) {
-            int nKBucket = GetRandInt(ADDRMAN_TRIED_BUCKET_COUNT);
-            int nKBucketPos = GetRandInt(ADDRMAN_BUCKET_SIZE);
-            if (am->vvTried[nKBucket][nKBucketPos] == -1 &&
-                !addrman_find_occupied_slot(&am->vvTried[0][0],
-                                            ADDRMAN_TRIED_BUCKET_COUNT,
-                                            nKBucket,
-                                            nKBucketPos,
-                                            &nKBucket,
-                                            &nKBucketPos)) {
-                zcl_mutex_unlock(&am->cs);
-                LOG_FAIL("addrman", "select exhausted tried bucket search after full table scan");
-                return false;
-            }
-            int nId = am->vvTried[nKBucket][nKBucketPos];
-            if (nId < 0 || (size_t)nId >= am->entries_cap) {
-                am->vvTried[nKBucket][nKBucketPos] = -1; /* repair */
-                fChanceFactor *= 1.2;
-                continue;
-            }
-            struct addr_info *info = &am->entries[nId];
-            double chance = fChanceFactor * addr_info_get_chance(am, info, nNow);
-            if (GetRandInt(1 << 30) < chance * (double)(1 << 30)) {
-                *result = *info;
-                zcl_mutex_unlock(&am->cs);
-                return true;
-            }
-            fChanceFactor *= 1.2;
+    bool use_tried = !new_only && am->tried_count > 0 &&
+        (am->new_count == 0 || GetRandInt(2) == 0);
+    int probe = use_tried
+        ? select_probe_table(am, true, &am->vvTried[0][0],
+                             ADDRMAN_TRIED_BUCKET_COUNT, nNow, result)
+        : select_probe_table(am, false, &am->vvNew[0][0],
+                             ADDRMAN_NEW_BUCKET_COUNT, nNow, result);
+    if (probe == SELECT_PROBE_EXHAUSTED) {
+        zcl_mutex_unlock(&am->cs);
+        if (use_tried) {
+            LOG_FAIL("addrman", "select exhausted tried bucket search after full table scan");
+            return false;
         }
-    } else {
-        double fChanceFactor = 1.0;
-        for (int i = 0; i < 200000; i++) {
-            int nUBucket = GetRandInt(ADDRMAN_NEW_BUCKET_COUNT);
-            int nUBucketPos = GetRandInt(ADDRMAN_BUCKET_SIZE);
-            if (am->vvNew[nUBucket][nUBucketPos] == -1 &&
-                !addrman_find_occupied_slot(&am->vvNew[0][0],
-                                            ADDRMAN_NEW_BUCKET_COUNT,
-                                            nUBucket,
-                                            nUBucketPos,
-                                            &nUBucket,
-                                            &nUBucketPos)) {
-                zcl_mutex_unlock(&am->cs);
-                LOG_FAIL("addrman", "select exhausted new bucket search after full table scan");
-                return false;
-            }
-            int nId = am->vvNew[nUBucket][nUBucketPos];
-            if (nId < 0 || (size_t)nId >= am->entries_cap) {
-                am->vvNew[nUBucket][nUBucketPos] = -1; /* repair */
-                fChanceFactor *= 1.2;
-                continue;
-            }
-            struct addr_info *info = &am->entries[nId];
-            double chance = fChanceFactor * addr_info_get_chance(am, info, nNow);
-            if (GetRandInt(1 << 30) < chance * (double)(1 << 30)) {
-                *result = *info;
-                zcl_mutex_unlock(&am->cs);
-                return true;
-            }
-            fChanceFactor *= 1.2;
-        }
+        LOG_FAIL("addrman", "select exhausted new bucket search after full table scan");
+        return false;
+    }
+    if (probe == SELECT_PROBE_FOUND) {
+        zcl_mutex_unlock(&am->cs);
+        return true;
     }
 
-    /* Fallback for sparse bucket layouts: if randomized bucket probing
-     * failed, return the first eligible address from the random-order set
-     * instead of spuriously reporting an empty addrman. */
-    if (am->random_size > 0) {
-        size_t start = (size_t)GetRandInt((int)am->random_size);
-        for (size_t n = 0; n < am->random_size; n++) {
-            int nId = am->random_order[(start + n) % am->random_size];
-            if (nId < 0 || (size_t)nId >= am->entries_cap)
-                continue;
-            struct addr_info *info = &am->entries[nId];
-            if (!info->used)
-                continue;
-            if (new_only && info->in_tried)
-                continue;
-            *result = *info;
-            zcl_mutex_unlock(&am->cs);
-            return true;
-        }
+    if (select_fallback_scan(am, new_only, result)) {
+        zcl_mutex_unlock(&am->cs);
+        return true;
     }
 
     zcl_mutex_unlock(&am->cs);
@@ -1096,15 +1163,15 @@ size_t addrman_get_addr(struct addr_man *am, struct net_address *out,
     return count;
 }
 
-int addrman_consistency_check(const struct addr_man *am,
-                              char *err_buf, size_t err_cap)
-{
 #define CC_ERR(fmt, ...) do { \
     if (err_buf && err_cap > 0) \
         snprintf(err_buf, err_cap, fmt __VA_OPT__(,) __VA_ARGS__); \
     return -1; \
 } while (0)
 
+static int cc_check_new_table(const struct addr_man *am,
+                              char *err_buf, size_t err_cap)
+{
     /* 1. Verify new table: every non-(-1) slot points to a valid, used,
      *    non-tried entry with ref_count > 0. */
     for (int b = 0; b < ADDRMAN_NEW_BUCKET_COUNT; b++) {
@@ -1124,7 +1191,12 @@ int addrman_consistency_check(const struct addr_man *am,
                        b, p, id, info->ref_count);
         }
     }
+    return 0;
+}
 
+static int cc_check_tried_table(const struct addr_man *am, int *tried_refs_out,
+                                char *err_buf, size_t err_cap)
+{
     /* 2. Verify tried table: every non-(-1) slot points to a valid, used,
      *    in_tried entry. */
     int tried_refs = 0;
@@ -1143,12 +1215,13 @@ int addrman_consistency_check(const struct addr_man *am,
             tried_refs++;
         }
     }
+    *tried_refs_out = tried_refs;
+    return 0;
+}
 
-    /* 3. Verify counts match. */
-    if (tried_refs != am->tried_count)
-        CC_ERR("tried_count mismatch: table has %d, tracked %d",
-               tried_refs, am->tried_count);
-
+static int cc_check_ref_counts(const struct addr_man *am,
+                               char *err_buf, size_t err_cap)
+{
     /* 4. Verify ref_count sums: each new-table entry's ref_count should
      *    equal the number of new bucket slots pointing to it. */
     for (int i = 0; i < am->id_count; i++) {
@@ -1163,7 +1236,12 @@ int addrman_consistency_check(const struct addr_man *am,
             CC_ERR("entry %d: ref_count=%d but %d bucket refs",
                    i, info->ref_count, actual_refs);
     }
+    return 0;
+}
 
+static int cc_check_tried_dups(const struct addr_man *am,
+                               char *err_buf, size_t err_cap)
+{
     /* 5. Verify no duplicate entries in buckets. */
     for (int b = 0; b < ADDRMAN_TRIED_BUCKET_COUNT; b++) {
         for (int p1 = 0; p1 < ADDRMAN_BUCKET_SIZE; p1++) {
@@ -1175,6 +1253,29 @@ int addrman_consistency_check(const struct addr_man *am,
             }
         }
     }
+    return 0;
+}
+
+int addrman_consistency_check(const struct addr_man *am,
+                              char *err_buf, size_t err_cap)
+{
+    if (cc_check_new_table(am, err_buf, err_cap) != 0)
+        return -1;
+
+    int tried_refs;
+    if (cc_check_tried_table(am, &tried_refs, err_buf, err_cap) != 0)
+        return -1;
+
+    /* 3. Verify counts match. */
+    if (tried_refs != am->tried_count)
+        CC_ERR("tried_count mismatch: table has %d, tracked %d",
+               tried_refs, am->tried_count);
+
+    if (cc_check_ref_counts(am, err_buf, err_cap) != 0)
+        return -1;
+
+    if (cc_check_tried_dups(am, err_buf, err_cap) != 0)
+        return -1;
 
     /* 6. Verify the O(1) address index agrees with `entries`. */
     if (addrman_index_verify(am, err_buf, err_cap) != 0)

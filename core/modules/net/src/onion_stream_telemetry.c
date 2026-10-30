@@ -126,6 +126,25 @@ struct onion_stream_dial_record *onion_stream_dial_begin(
     return pick;
 }
 
+static const char *dial_stage_result(enum onion_stream_dial_stage stage)
+{
+    switch (stage) {
+    case ONION_DIAL_STREAM_QUEUED:      return "stream_queued";
+    case ONION_DIAL_CIRCUIT_READY:      return "circuit_ready";
+    case ONION_DIAL_BRIDGE_UP:          return "bridge_up";
+    case ONION_DIAL_OPEN_REFUSED:       return "open_refused";
+    case ONION_DIAL_CIRCUIT_TIMEOUT:    return "circuit_timeout";
+    case ONION_DIAL_CIRCUIT_TORN_DOWN:  return "circuit_torn_down";
+    case ONION_DIAL_BRIDGE_CLOSED:
+    case ONION_DIAL_BYTES_TO_PEER:
+    case ONION_DIAL_BYTES_FROM_PEER:
+    case ONION_DIAL_PEERS_ANSWERED:
+    case ONION_DIAL_STAGE_COUNT:
+        break;
+    }
+    return NULL;
+}
+
 void onion_stream_dial_bump(struct onion_stream_dial_record *record,
                             enum onion_stream_dial_stage stage, uint64_t by)
 {
@@ -137,21 +156,7 @@ void onion_stream_dial_bump(struct onion_stream_dial_record *record,
     if (record)
         stage_bump(&record->stages[index], by);
 
-    const char *result = NULL;
-    switch (stage) {
-    case ONION_DIAL_STREAM_QUEUED:      result = "stream_queued"; break;
-    case ONION_DIAL_CIRCUIT_READY:      result = "circuit_ready"; break;
-    case ONION_DIAL_BRIDGE_UP:          result = "bridge_up"; break;
-    case ONION_DIAL_OPEN_REFUSED:       result = "open_refused"; break;
-    case ONION_DIAL_CIRCUIT_TIMEOUT:    result = "circuit_timeout"; break;
-    case ONION_DIAL_CIRCUIT_TORN_DOWN:  result = "circuit_torn_down"; break;
-    case ONION_DIAL_BRIDGE_CLOSED:
-    case ONION_DIAL_BYTES_TO_PEER:
-    case ONION_DIAL_BYTES_FROM_PEER:
-    case ONION_DIAL_PEERS_ANSWERED:
-    case ONION_DIAL_STAGE_COUNT:
-        break;
-    }
+    const char *result = dial_stage_result(stage);
     if (result)
         onion_stream_note_last_dial(record ? record->target : NULL, result);
 }

@@ -55,6 +55,19 @@ static const char *public_install_relpath(const char *url)
     return NULL;
 }
 
+#if !defined(_WIN32)
+static bool public_install_prefix_ok(const char *root_real,
+                                     const char *file_real)
+{
+    size_t root_len = strlen(root_real);
+
+    if (strncmp(file_real, root_real, root_len) != 0 ||
+        (file_real[root_len] != '/' && file_real[root_len] != '\0'))
+        return false;
+    return true;
+}
+#endif
+
 static bool public_install_filepath_under_root(const char *root,
                                                const char *url,
                                                char *out, size_t out_len)
@@ -70,7 +83,6 @@ static bool public_install_filepath_under_root(const char *root,
     char root_real[PATH_MAX];
     char filepath[PATH_MAX];
     char file_real[PATH_MAX];
-    size_t root_len;
     int n;
 
     if (!root || !root[0] || !url || !out || out_len == 0)
@@ -87,9 +99,7 @@ static bool public_install_filepath_under_root(const char *root,
         return false;
     if (!realpath(filepath, file_real))
         return false;
-    root_len = strlen(root_real);
-    if (strncmp(file_real, root_real, root_len) != 0 ||
-        (file_real[root_len] != '/' && file_real[root_len] != '\0'))
+    if (!public_install_prefix_ok(root_real, file_real))
         return false;
     n = snprintf(out, out_len, "%s", file_real);
     return n >= 0 && n < (int)out_len;
@@ -205,16 +215,49 @@ const char *https_front_home_first_for_testing(const char *path,
 }
 #endif
 
+static const char *public_install_ctype(const char *filepath)
+{
+    return strstr(filepath, ".sh") ? "text/plain; charset=utf-8"
+                                    : "application/octet-stream";
+}
+
+static bool public_install_send_head(SSL *ssl, const char *ctype,
+                                     long long size)
+{
+    char hdr[256];
+    int hlen = snprintf(hdr, sizeof(hdr),
+                        "HTTP/1.1 200 OK\r\n"
+                        "Content-Type: %s\r\n"
+                        "Content-Length: %lld\r\n"
+                        "Connection: close\r\n"
+                        "Cache-Control: no-store\r\n\r\n",
+                        ctype, size);
+
+    return hlen > 0 && (size_t)hlen < sizeof(hdr) &&
+           public_install_write_all(ssl, hdr, (size_t)hlen);
+}
+
+static void public_install_stream_body(SSL *ssl, FILE *f, size_t remain)
+{
+    char body[16384];
+
+    while (remain > 0) {
+        size_t want = remain < sizeof(body) ? remain : sizeof(body);
+        size_t n = fread(body, 1, want, f);
+
+        if (n == 0)
+            break;
+        if (!public_install_write_all(ssl, body, n))
+            break;
+        remain -= n;
+    }
+}
+
 bool https_server_try_public_install(SSL *ssl, const char *url)
 {
     char filepath[PATH_MAX];
     struct stat st;
     FILE *f;
-    char hdr[256];
-    int hlen;
-    const char *ctype;
-    char body[16384];
-    size_t remain;
     const char *root = g_public_install_root;
 
     if (!ssl || !url || !root[0])
@@ -233,31 +276,12 @@ bool https_server_try_public_install(SSL *ssl, const char *url)
     f = fopen(filepath, "rb");
     if (!f)
         return false;
-    ctype = strstr(filepath, ".sh") ? "text/plain; charset=utf-8"
-                                    : "application/octet-stream";
-    hlen = snprintf(hdr, sizeof(hdr),
-                    "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: %s\r\n"
-                    "Content-Length: %lld\r\n"
-                    "Connection: close\r\n"
-                    "Cache-Control: no-store\r\n\r\n",
-                    ctype, (long long)st.st_size);
-    if (hlen <= 0 || (size_t)hlen >= sizeof(hdr) ||
-        !public_install_write_all(ssl, hdr, (size_t)hlen)) {
+    if (!public_install_send_head(ssl, public_install_ctype(filepath),
+                                  (long long)st.st_size)) {
         fclose(f);
         return true;
     }
-    remain = (size_t)st.st_size;
-    while (remain > 0) {
-        size_t want = remain < sizeof(body) ? remain : sizeof(body);
-        size_t n = fread(body, 1, want, f);
-
-        if (n == 0)
-            break;
-        if (!public_install_write_all(ssl, body, n))
-            break;
-        remain -= n;
-    }
+    public_install_stream_body(ssl, f, (size_t)st.st_size);
     fclose(f);
     return true;
 }

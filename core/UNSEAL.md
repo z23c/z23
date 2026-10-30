@@ -360,3 +360,7 @@ later lane flips it HARD.
 - 2026-10-29T20:11:38Z — REASON: addrman review fixes: cap a failed dial at one charge per connection epoch only while no outbound peer is healthy, and count every connection as a new epoch; directed by the owner 2026-10-29
   old ROOT: 1171b5099d05b85ec56ccb5c04f608028aadea4d1b7f649750ac04426b6a0af8
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-30T00:03:15Z — REASON: behaviour-preserving complexity split of 10 tier-A network files (core wave 6): addrman, addrman_codec, dandelion, file_service_handshake, file_service_private_chunk, flyclient, https_server_install, net_listen, onion_stream_telemetry, tor_config_log; no validity decision
+  old ROOT: f11519173354f225ec536915da2e06880e87bbdbc7e61205faeaed9a4a164626
+  by: owner unseal ritual (make core-unseal)

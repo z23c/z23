@@ -38,6 +38,77 @@ static bool fc_check_pow(const uint8_t block_hash[32], uint32_t nBits)
 
 /* ── Index generation (weighted toward recent blocks) ──── */
 
+/* Weighted block index for one 32-byte sample hash (see fc_generate_indices). */
+static uint64_t fc_weighted_index(const uint8_t h[32], double exponent, uint64_t chain_length)
+{
+    /* Map first 8 bytes to [0, 1) */
+    uint64_t raw = 0;
+    for (int j = 0; j < 8; j++)
+        raw = (raw << 8) | h[j];
+    double x = (double)raw / (double)UINT64_MAX;
+
+    /* Apply FlyClient distribution: x^(1/log(n))
+     * When x is near 1, weighted is near 1 → index near tip (recent).
+     * When x is near 0, weighted is near 0 → index near genesis (old). */
+    double weighted = pow(x, exponent);
+
+    /* Map to block index: weighted near 1 → near tip (recent) */
+    uint64_t idx = (uint64_t)((double)(chain_length - 1) * weighted);
+    if (idx >= chain_length) idx = chain_length - 1;
+    return idx;
+}
+
+/* True when idx is already among the first n sampled indices. */
+static bool fc_index_taken(const uint64_t *indices, uint32_t n, uint64_t idx)
+{
+    for (uint32_t j = 0; j < n; j++) {
+        if (indices[j] == idx) return true;
+    }
+    return false;
+}
+
+/* Linear-probe forward (wrapping) from idx to the first unused index. */
+static uint64_t fc_probe_free_index(uint64_t idx, const uint64_t *indices, uint32_t i,
+                                    uint64_t chain_length)
+{
+    uint64_t probe = idx;
+    for (uint64_t step = 0; step < chain_length; step++) {
+        if (!fc_index_taken(indices, i, probe)) return probe;
+        probe++;
+        if (probe >= chain_length) probe = 0;
+    }
+    return idx;
+}
+
+/* Rehash a colliding sample with a counter byte, then probe if still taken. */
+static uint64_t fc_retry_duplicate_index(const uint8_t hash_input[36], uint64_t idx,
+                                         const uint64_t *indices, uint32_t i,
+                                         uint64_t chain_length, double exponent)
+{
+    uint8_t retry_input[37];
+    memcpy(retry_input, hash_input, 36);
+    bool dup = true;
+    for (uint16_t r = 1; r <= 255; r++) {
+        retry_input[36] = (uint8_t)r;
+        uint8_t h[32];
+        sha3_256(retry_input, 37, h);
+        idx = fc_weighted_index(h, exponent, chain_length);
+        dup = fc_index_taken(indices, i, idx);
+        if (!dup) break;
+    }
+    /* Retry budget can be exhausted (observed for short chains,
+     * e.g. ~2% of seeds at chain_length=100): all 255 rehashes
+     * may collide with already-chosen recent-biased indices.
+     * Storing a duplicate here would silently verify the same
+     * block twice and weaken the soundness guarantee (each of
+     * the `count` samples must cover a DISTINCT block).  Since
+     * chain_length > count, a free slot is guaranteed to exist:
+     * linear-probe forward (wrapping) from the colliding index
+     * until we land on an unused one. */
+    if (dup) idx = fc_probe_free_index(idx, indices, i, chain_length);
+    return idx;
+}
+
 void fc_generate_indices(const uint8_t seed[32], uint64_t chain_length,
                          uint64_t *indices, uint32_t *num_indices)
 {
@@ -76,71 +147,16 @@ void fc_generate_indices(const uint8_t seed[32], uint64_t chain_length,
         uint8_t h[32];
         sha3_256(hash_input, 36, h);
 
-        /* Map first 8 bytes to [0, 1) */
-        uint64_t raw = 0;
-        for (int j = 0; j < 8; j++)
-            raw = (raw << 8) | h[j];
-        double x = (double)raw / (double)UINT64_MAX;
-
-        /* Apply FlyClient distribution: x^(1/log(n))
-         * When x is near 1, weighted is near 1 → index near tip (recent).
-         * When x is near 0, weighted is near 0 → index near genesis (old). */
-        double weighted = pow(x, exponent);
-
-        /* Map to block index: weighted near 1 → near tip (recent) */
-        uint64_t idx = (uint64_t)((double)(chain_length - 1) * weighted);
-        if (idx >= chain_length) idx = chain_length - 1;
+        uint64_t idx = fc_weighted_index(h, exponent, chain_length);
 
         /* Deduplicate: if this index was already sampled, rehash with
          * an extra counter byte until we get a unique one.  With 20
          * samples from a 3M chain collisions are rare, but with short
          * chains this matters for security (each sample must verify a
          * distinct block). */
-        bool dup = false;
-        for (uint32_t j = 0; j < i; j++) {
-            if (indices[j] == idx) { dup = true; break; }
-        }
-        if (dup && chain_length > count) {
-            uint8_t retry_input[37];
-            memcpy(retry_input, hash_input, 36);
-            for (uint16_t r = 1; r <= 255; r++) {
-                retry_input[36] = (uint8_t)r;
-                sha3_256(retry_input, 37, h);
-                raw = 0;
-                for (int j = 0; j < 8; j++)
-                    raw = (raw << 8) | h[j];
-                x = (double)raw / (double)UINT64_MAX;
-                weighted = pow(x, exponent);
-                idx = (uint64_t)((double)(chain_length - 1) * weighted);
-                if (idx >= chain_length) idx = chain_length - 1;
-                dup = false;
-                for (uint32_t j = 0; j < i; j++) {
-                    if (indices[j] == idx) { dup = true; break; }
-                }
-                if (!dup) break;
-            }
-            /* Retry budget can be exhausted (observed for short chains,
-             * e.g. ~2% of seeds at chain_length=100): all 255 rehashes
-             * may collide with already-chosen recent-biased indices.
-             * Storing a duplicate here would silently verify the same
-             * block twice and weaken the soundness guarantee (each of
-             * the `count` samples must cover a DISTINCT block).  Since
-             * chain_length > count, a free slot is guaranteed to exist:
-             * linear-probe forward (wrapping) from the colliding index
-             * until we land on an unused one. */
-            if (dup) {
-                uint64_t probe = idx;
-                for (uint64_t step = 0; step < chain_length; step++) {
-                    bool taken = false;
-                    for (uint32_t j = 0; j < i; j++) {
-                        if (indices[j] == probe) { taken = true; break; }
-                    }
-                    if (!taken) { idx = probe; break; }
-                    probe++;
-                    if (probe >= chain_length) probe = 0;
-                }
-            }
-        }
+        bool dup = fc_index_taken(indices, i, idx);
+        if (dup && chain_length > count)
+            idx = fc_retry_duplicate_index(hash_input, idx, indices, i, chain_length, exponent);
 
         indices[i] = idx;
     }

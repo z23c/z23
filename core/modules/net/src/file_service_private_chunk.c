@@ -168,6 +168,16 @@ static void private_nonce(uint8_t out[CHACHA20_NONCE_SIZE], uint64_t counter)
     zcl_write_u64_le(out + 4, counter);
 }
 
+static bool private_recv_args_valid(const struct fs_session *session,
+                                    uint8_t **out, uint32_t *out_size,
+                                    uint32_t expected_size,
+                                    const uint8_t expected_sha3[32])
+{
+    return session && out && out_size && expected_sha3 &&
+           session->key_established && expected_size != 0 &&
+           expected_size <= FS_PRIVATE_CHUNK_MAX;
+}
+
 bool fs_send_chunk_private(struct fs_session *session, const uint8_t *data,
                            uint32_t size, const uint8_t sha3[32])
 {
@@ -224,9 +234,8 @@ bool fs_recv_chunk_private_until(struct fs_session *session, uint8_t **out,
                                  const uint8_t expected_sha3[32],
                                  int64_t caller_deadline_ms)
 {
-    if (!session || !out || !out_size || !expected_sha3 ||
-        !session->key_established || expected_size == 0 ||
-        expected_size > FS_PRIVATE_CHUNK_MAX)
+    if (!private_recv_args_valid(session, out, out_size, expected_size,
+                                 expected_sha3))
         LOG_FAIL("filesvc_private", "receive: invalid arguments or size=%u",
                  expected_size);
     *out = NULL;

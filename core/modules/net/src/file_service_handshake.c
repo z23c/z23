@@ -129,6 +129,90 @@ static bool confirmation_equal(const uint8_t a[32], const uint8_t b[32])
     return diff == 0;
 }
 
+static const char *handshake_deadline(int64_t caller_deadline_ms,
+                                      int64_t *deadline_ms)
+{
+    int64_t now_ms = platform_time_monotonic_ms();
+    if (now_ms <= 0 || now_ms > INT64_MAX - FS_HANDSHAKE_RECV_BUDGET_MS)
+        return "monotonic receive deadline unavailable";
+    *deadline_ms = now_ms + FS_HANDSHAKE_RECV_BUDGET_MS;
+    if (caller_deadline_ms <= 0)
+        return "invalid caller deadline";
+    if (caller_deadline_ms < *deadline_ms)
+        *deadline_ms = caller_deadline_ms;
+    if (now_ms >= *deadline_ms)
+        return "caller deadline expired";
+    return NULL;
+}
+
+static const char *handshake_ephemeral(struct fs_session *session,
+                                       uint8_t ephemeral_private[32])
+{
+    if (!zcl_random_secret_bytes(ephemeral_private, 32,
+                                 "file-service-ephemeral"))
+        return "ephemeral secret generation failed";
+    if (!curve25519_scalarmult_base(session->our_nonce, ephemeral_private))
+        return "ephemeral public-key derivation failed";
+    return NULL;
+}
+
+static const char *handshake_exchange(struct fs_session *session,
+                                      bool initiator, int64_t deadline_ms)
+{
+    if (initiator) {
+        if (!handshake_send_all(session->fd, session->our_nonce, 32,
+                                deadline_ms))
+            return "initiator public-key send failed";
+        if (!handshake_recv_all(session->fd, session->peer_nonce, 32,
+                                deadline_ms))
+            return "responder public-key receive failed";
+        return NULL;
+    }
+    if (!handshake_recv_all(session->fd, session->peer_nonce, 32,
+                            deadline_ms))
+        return "initiator public-key receive failed";
+    if (!handshake_send_all(session->fd, session->our_nonce, 32,
+                            deadline_ms))
+        return "responder public-key send failed";
+    return NULL;
+}
+
+static const char *handshake_derive(
+    struct fs_session *session, const uint8_t utxo_root[32], bool initiator,
+    const uint8_t ephemeral_private[32], uint8_t shared_secret[32],
+    uint8_t transcript[sizeof(k_fs_handshake_domain) - 1 + 64])
+{
+    if (!x25519_safe(shared_secret, ephemeral_private, session->peer_nonce))
+        return "peer public key produced a degenerate shared secret";
+    handshake_transcript(session, initiator, transcript);
+    if (!hkdf_sha3_256(utxo_root, 32, shared_secret, 32,
+                       transcript, sizeof(k_fs_handshake_domain) - 1 + 64,
+                       session->key, sizeof(session->key)))
+        return "HKDF-SHA3 session-key derivation failed";
+    return NULL;
+}
+
+static const char *handshake_confirm(
+    struct fs_session *session, bool initiator,
+    const uint8_t transcript[sizeof(k_fs_handshake_domain) - 1 + 64],
+    int64_t deadline_ms, uint8_t our_confirmation[32],
+    uint8_t expected_peer_confirmation[32], uint8_t peer_confirmation[32])
+{
+    handshake_confirmation(session->key, transcript, initiator ? 1 : 2,
+                           our_confirmation);
+    handshake_confirmation(session->key, transcript, initiator ? 2 : 1,
+                           expected_peer_confirmation);
+    if (!handshake_send_all(session->fd, our_confirmation, 32,
+                            deadline_ms))
+        return "key confirmation send failed";
+    if (!handshake_recv_all(session->fd, peer_confirmation, 32,
+                            deadline_ms))
+        return "key confirmation receive failed";
+    if (!confirmation_equal(expected_peer_confirmation, peer_confirmation))
+        return "key confirmation failed (peer root or transcript differs)";
+    return NULL;
+}
+
 bool fs_handshake(struct fs_session *session, const uint8_t utxo_root[32],
                   bool initiator)
 {
@@ -146,97 +230,31 @@ bool fs_handshake_until(struct fs_session *session,
     uint8_t expected_peer_confirmation[32] = {0};
     uint8_t peer_confirmation[32] = {0};
     const char *failure = NULL;
-    int64_t now_ms = 0, deadline_ms = 0;
+    int64_t deadline_ms = 0;
 
     if (!session || !utxo_root)
         LOG_FAIL("filesvc", "handshake: null session or UTXO root");
     session->key_established = false;
     memory_cleanse(session->key, sizeof(session->key));
 
-    now_ms = platform_time_monotonic_ms();
-    if (now_ms <= 0 || now_ms > INT64_MAX - FS_HANDSHAKE_RECV_BUDGET_MS) {
-        failure = "monotonic receive deadline unavailable";
+    failure = handshake_deadline(caller_deadline_ms, &deadline_ms);
+    if (failure)
         goto done;
-    }
-    deadline_ms = now_ms + FS_HANDSHAKE_RECV_BUDGET_MS;
-    if (caller_deadline_ms <= 0) {
-        failure = "invalid caller deadline";
+    failure = handshake_ephemeral(session, ephemeral_private);
+    if (failure)
         goto done;
-    }
-    if (caller_deadline_ms < deadline_ms)
-        deadline_ms = caller_deadline_ms;
-    if (now_ms >= deadline_ms) {
-        failure = "caller deadline expired";
+    failure = handshake_exchange(session, initiator, deadline_ms);
+    if (failure)
         goto done;
-    }
-
-    if (!zcl_random_secret_bytes(ephemeral_private,
-                                 sizeof(ephemeral_private),
-                                 "file-service-ephemeral")) {
-        failure = "ephemeral secret generation failed";
+    failure = handshake_derive(session, utxo_root, initiator,
+                               ephemeral_private, shared_secret, transcript);
+    if (failure)
         goto done;
-    }
-    if (!curve25519_scalarmult_base(session->our_nonce,
-                                    ephemeral_private)) {
-        failure = "ephemeral public-key derivation failed";
+    failure = handshake_confirm(session, initiator, transcript, deadline_ms,
+                                our_confirmation, expected_peer_confirmation,
+                                peer_confirmation);
+    if (failure)
         goto done;
-    }
-
-    if (initiator) {
-        if (!handshake_send_all(session->fd, session->our_nonce, 32,
-                                deadline_ms)) {
-            failure = "initiator public-key send failed";
-            goto done;
-        }
-        if (!handshake_recv_all(session->fd, session->peer_nonce, 32,
-                                deadline_ms)) {
-            failure = "responder public-key receive failed";
-            goto done;
-        }
-    } else {
-        if (!handshake_recv_all(session->fd, session->peer_nonce, 32,
-                                deadline_ms)) {
-            failure = "initiator public-key receive failed";
-            goto done;
-        }
-        if (!handshake_send_all(session->fd, session->our_nonce, 32,
-                                deadline_ms)) {
-            failure = "responder public-key send failed";
-            goto done;
-        }
-    }
-
-    if (!x25519_safe(shared_secret, ephemeral_private,
-                     session->peer_nonce)) {
-        failure = "peer public key produced a degenerate shared secret";
-        goto done;
-    }
-    handshake_transcript(session, initiator, transcript);
-    if (!hkdf_sha3_256(utxo_root, 32, shared_secret, sizeof(shared_secret),
-                       transcript, sizeof(transcript), session->key,
-                       sizeof(session->key))) {
-        failure = "HKDF-SHA3 session-key derivation failed";
-        goto done;
-    }
-
-    handshake_confirmation(session->key, transcript, initiator ? 1 : 2,
-                           our_confirmation);
-    handshake_confirmation(session->key, transcript, initiator ? 2 : 1,
-                           expected_peer_confirmation);
-    if (!handshake_send_all(session->fd, our_confirmation, 32,
-                            deadline_ms)) {
-        failure = "key confirmation send failed";
-        goto done;
-    }
-    if (!handshake_recv_all(session->fd, peer_confirmation, 32,
-                            deadline_ms)) {
-        failure = "key confirmation receive failed";
-        goto done;
-    }
-    if (!confirmation_equal(expected_peer_confirmation, peer_confirmation)) {
-        failure = "key confirmation failed (peer root or transcript differs)";
-        goto done;
-    }
     session->key_established = true;
 
 done:
