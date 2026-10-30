@@ -276,44 +276,12 @@ static bool commit_resolve_lineage(
     return true;
 }
 
-/* Outcome of charging the grant and its lineage. */
-enum commit_debit {
-    COMMIT_DEBIT_OK = 0,
-    COMMIT_DEBIT_OWN_REJECTED,
-    COMMIT_DEBIT_ANCESTOR_REFUSED,
-};
-
-/* Lock held. Charge the grant, then every ancestor. An ancestor refusal
- * restores the ancestors already charged; `failed` is the index of the one
- * that refused. On any refusal the caller restores `g` itself before it
- * unlocks. */
-static enum commit_debit commit_apply_debit(
-    struct metaverse_grant *g, const struct metaverse_action_request *req,
-    struct metaverse_grant *const *lineage,
-    const struct metaverse_grant *lineage_before, size_t anc_count,
-    size_t *failed)
-{
-    if (!metaverse_grant_record_commit(g, req))
-        return COMMIT_DEBIT_OWN_REJECTED;
-
-    for (size_t i = 0; i < anc_count; i++) {
-        if (metaverse_grant_record_descendant_charge(lineage[i], req))
-            continue;
-        for (size_t j = 0; j < i; j++) *lineage[j] = lineage_before[j];
-        *failed = i;
-        return COMMIT_DEBIT_ANCESTOR_REFUSED;
-    }
-    return COMMIT_DEBIT_OK;
-}
-
-/* Lock held. Build the receipt for this commit and seal it. When the seal
- * fails the lineage is restored before returning false; the caller restores
- * `g` itself before it unlocks. */
+/* Lock held. Build the receipt for this commit and seal it. It changes no
+ * record: on false the caller restores the grant and its lineage inside the
+ * same lock hold, before it unlocks. */
 static bool commit_seal_receipt(
     struct metaverse_grant *g, const struct metaverse_action_request *req,
     const char *idempotency_key, int64_t revision, int64_t height, int64_t now,
-    struct metaverse_grant *const *lineage,
-    const struct metaverse_grant *lineage_before, size_t anc_count,
     struct metaverse_receipt *r)
 {
     memset(r, 0, sizeof(*r));
@@ -342,19 +310,6 @@ static bool commit_seal_receipt(
     if (sealed && g_pg_store.seal_hook)
         sealed = g_pg_store.seal_hook(g_pg_store.seal_hook_ctx);
 #endif
-    if (!sealed) {
-        /* No evidence, so no effect. The restore is byte-exact, which is why
-         * this path does NOT bump the authority generation: the record is
-         * genuinely unmutated, the receipt array is untouched, and the plan is
-         * still uncommitted, so there is nothing for a reader to have missed.
-         * A bump here would be the opposite defect — telling every in-flight
-         * decision the world moved when it did not.
-         *
-         * The lineage is restored with it: by here every ancestor has taken
-         * this action's charge, and leaving any of them debited for a commit
-         * that minted no receipt is the same defect one record over. */
-        for (size_t i = 0; i < anc_count; i++) *lineage[i] = lineage_before[i];
-    }
     return sealed;
 }
 
@@ -563,10 +518,7 @@ static enum property_grant_reason commit_attempt(
      * taken: property_grant_service_snapshot() takes the same mutex. */
     const struct metaverse_grant grant_before_effect = *g;
 
-    size_t i = 0;
-    enum commit_debit debit = commit_apply_debit(
-        g, &req, lineage, lineage_before, anc_count, &i);
-    if (debit == COMMIT_DEBIT_OWN_REJECTED) {
+    if (!metaverse_grant_record_commit(g, &req)) {
         /* It can refuse AFTER having already rolled the rate window, so the
          * restore is not optional on this path either. */
         *g = grant_before_effect;
@@ -576,7 +528,11 @@ static enum property_grant_reason commit_attempt(
                   g->grant_id);
         return PROPERTY_GRANT_BUDGET_EXCEEDED;
     }
-    if (debit == COMMIT_DEBIT_ANCESTOR_REFUSED) {
+
+    for (size_t i = 0; i < anc_count; i++) {
+        if (metaverse_grant_record_descendant_charge(lineage[i], &req))
+            continue;
+        for (size_t j = 0; j < i; j++) *lineage[j] = lineage_before[j];
         *g = grant_before_effect;
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_WARN(PGC_LOG,
@@ -588,8 +544,19 @@ static enum property_grant_reason commit_attempt(
 
     struct metaverse_receipt r;
     if (!commit_seal_receipt(g, &req, idempotency_key, view.revision, height,
-                             now, lineage, lineage_before, anc_count, &r)) {
+                             now, &r)) {
+        /* No evidence, so no effect. The restore is byte-exact, which is why
+         * this path does NOT bump the authority generation: the record is
+         * genuinely unmutated, the receipt array is untouched, and the plan is
+         * still uncommitted, so there is nothing for a reader to have missed.
+         * A bump here would be the opposite defect — telling every in-flight
+         * decision the world moved when it did not.
+         *
+         * The lineage is restored with it: by here every ancestor has taken
+         * this action's charge, and leaving any of them debited for a commit
+         * that minted no receipt is the same defect one record over. */
         *g = grant_before_effect;
+        for (size_t i = 0; i < anc_count; i++) *lineage[i] = lineage_before[i];
         pthread_mutex_unlock(&g_pg_store.lock);
         LOG_ERROR(PGC_LOG, "commit: could not seal receipt for grant %s",
                   g->grant_id);
