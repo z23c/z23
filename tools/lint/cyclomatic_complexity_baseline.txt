@@ -335,14 +335,6 @@ tools/command/cli_render.c:zcl_cli_render_resolve:20
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_build:29
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_check:19
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_status:17
-tools/command/native_zcode_swarm_command.c:zcl_native_handle_zcode_package_fastobj_admit:22
-tools/command/native_zcode_swarm_command.c:zcl_native_handle_zcode_package_fastobj_export:18
-tools/command/native_zcode_swarm_command.c:zcl_native_handle_zcode_package_fetch:41
-tools/command/native_zcode_swarm_command.c:zcl_native_handle_zcode_package_offered:51
-tools/command/native_zcode_swarm_command.c:zw_export_via_resident:27
-tools/command/native_zcode_swarm_command.c:zw_handle_pin:29
-tools/command/native_zcode_swarm_command.c:zw_pin_via_resident:21
-tools/command/native_zcode_swarm_command.c:zw_resolve_fetch_root:21
 tools/core_seal.c:compute_sections:32
 tools/core_seal.c:open_sealed_file:27
 tools/core_seal.c:path_reject_reason:19

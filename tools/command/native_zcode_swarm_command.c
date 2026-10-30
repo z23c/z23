@@ -172,6 +172,66 @@ static bool zw_root(const struct zcl_command_request *request,
     return true;
 }
 
+/* Look up a LOCAL library name in the rebuildable package index. False
+ * with the error body set. */
+static bool zw_resolve_fetch_name(struct zcl_command_reply *reply,
+                                  const char *zcode_dir, const char *name,
+                                  uint8_t from_name[32])
+{
+    struct vcs_package_index *index = vcs_package_index_build(zcode_dir);
+    if (!index) {
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+            "INDEX_OPEN", "normalize", false, false,
+            "the local package index failed to rebuild", zcode_dir);
+        return false;
+    }
+    const struct vcs_package_index_entry *found = NULL;
+    bool ambiguous = false;
+    for (size_t i = 0; i < vcs_package_index_count(index); i++) {
+        const struct vcs_package_index_entry *e =
+            vcs_package_index_at(index, i);
+        if (!e || strcmp(e->name, name) != 0)
+            continue;
+        uint8_t candidate[32];
+        if (!zcl_hex_decode_lower(e->package_root_hex, candidate, 32)) {
+            vcs_package_index_free(index);
+            zcl_command_reply_fail(
+                reply, ZCL_COMMAND_STATUS_FAILED,
+                ZCL_COMMAND_EXIT_INTERNAL, "BAD_ROOT", "normalize",
+                false, false,
+                "local library name maps to a non-hex package root",
+                e->package_root_hex);
+            return false;
+        }
+        if (!found) {
+            memcpy(from_name, candidate, 32);
+            found = e;
+        } else if (memcmp(from_name, candidate, 32) != 0) {
+            ambiguous = true;
+            break;
+        }
+    }
+    vcs_package_index_free(index);
+    if (ambiguous) {
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "AMBIGUOUS_NAME", "normalize", false, false,
+            "local library name maps to more than one package root",
+            name);
+        return false;
+    }
+    if (!found) {
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "UNKNOWN_NAME", "normalize", false, false,
+            "no local library name matches (name is a store-index "
+            "label, not ZNAM)", name);
+        return false;
+    }
+    return true;
+}
+
 /* Resolve fetch identity: `root` (64 hex) and/or a LOCAL library `name`
  * from the rebuildable package index. Name is not ZNAM. False with the
  * error body set. */
@@ -204,57 +264,8 @@ static bool zw_resolve_fetch_root(const struct zcl_command_request *request,
         return false;
     }
     if (have_name) {
-        struct vcs_package_index *index = vcs_package_index_build(zcode_dir);
-        if (!index) {
-            zcl_command_reply_fail(
-                reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                "INDEX_OPEN", "normalize", false, false,
-                "the local package index failed to rebuild", zcode_dir);
+        if (!zw_resolve_fetch_name(reply, zcode_dir, name, from_name))
             return false;
-        }
-        const struct vcs_package_index_entry *found = NULL;
-        bool ambiguous = false;
-        for (size_t i = 0; i < vcs_package_index_count(index); i++) {
-            const struct vcs_package_index_entry *e =
-                vcs_package_index_at(index, i);
-            if (!e || strcmp(e->name, name) != 0)
-                continue;
-            uint8_t candidate[32];
-            if (!zcl_hex_decode_lower(e->package_root_hex, candidate, 32)) {
-                vcs_package_index_free(index);
-                zcl_command_reply_fail(
-                    reply, ZCL_COMMAND_STATUS_FAILED,
-                    ZCL_COMMAND_EXIT_INTERNAL, "BAD_ROOT", "normalize",
-                    false, false,
-                    "local library name maps to a non-hex package root",
-                    e->package_root_hex);
-                return false;
-            }
-            if (!found) {
-                memcpy(from_name, candidate, 32);
-                found = e;
-            } else if (memcmp(from_name, candidate, 32) != 0) {
-                ambiguous = true;
-                break;
-            }
-        }
-        vcs_package_index_free(index);
-        if (ambiguous) {
-            zcl_command_reply_fail(
-                reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "AMBIGUOUS_NAME", "normalize", false, false,
-                "local library name maps to more than one package root",
-                name);
-            return false;
-        }
-        if (!found) {
-            zcl_command_reply_fail(
-                reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "UNKNOWN_NAME", "normalize", false, false,
-                "no local library name matches (name is a store-index "
-                "label, not ZNAM)", name);
-            return false;
-        }
         named = true;
     }
     if (have_root && named && memcmp(from_root, from_name, 32) != 0) {
@@ -416,6 +427,227 @@ static void zw_push_peer_transfer(struct json_value *row,
 
 /* ── zcode package fetch ────────────────────────────────────────────── */
 
+/* Reply for a routed fetch that failed. Frees `routed`. */
+static void zw_fetch_routed_refusal(struct zcl_command_reply *reply,
+                                    struct json_value *routed,
+                                    uint32_t records)
+{
+    /* Name the boundary that actually refused. Three unrelated facts
+     * used to wear one coat here: nobody published a provider record,
+     * the records name peers this node is not authenticated to right
+     * now, or the routed carrier arrived and something further along
+     * — the swarm fetch, the signed-release import — said no. Only
+     * the first two are discovery, and each has a different next step
+     * (wait, connect, change a policy rule, or stop retrying because
+     * the carrier itself is wrong). A failed reply carries no data
+     * object, so what the reader needs belongs in the message. */
+    const char *route_code = json_get_str(json_get(routed, "code"));
+    const char *route_error = json_get_str(json_get(routed, "error"));
+    const char *fetch_result = json_get_str(
+        json_get(routed, "fetch_result"));
+    char detail[192];
+    if (route_code && route_code[0]) {
+        /* The node routed the root and then refused under its own
+         * name. Pass that name through rather than blaming discovery
+         * for a failure that happened after it succeeded. The routed
+         * tree is freed before the reply is built, so the code must
+         * be copied out first. */
+        char code_copy[64];
+        (void)snprintf(code_copy, sizeof(code_copy), "%s", route_code);
+        bool transient = strcmp(code_copy, "FETCH_REFUSED") == 0;
+        (void)snprintf(detail, sizeof(detail),
+                       "%s: %s (fetch=%s, %lu provider record(s))",
+                       code_copy,
+                       route_error ? route_error : "no reason given",
+                       fetch_result ? fetch_result : "none",
+                       (unsigned long)records);
+        json_free(routed);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_BLOCKED,
+            transient ? ZCL_COMMAND_EXIT_TRANSIENT
+                      : ZCL_COMMAND_EXIT_BLOCKED,
+            code_copy, "fetch", transient, false, detail,
+            "zcode.package.fetch");
+        return;
+    }
+    (void)snprintf(
+        detail, sizeof(detail),
+        "no authenticated DHT provider routed the root: "
+        "records=%lu authenticated=%lld denied=%lld pending=%lld",
+        (unsigned long)records,
+        (long long)json_get_int(
+            json_get(routed, "authenticated_providers")),
+        (long long)json_get_int(json_get(routed, "policy_denied")),
+        (long long)json_get_int(
+            json_get(routed, "reachability_pending")));
+    json_free(routed);
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_BLOCKED,
+        ZCL_COMMAND_EXIT_TRANSIENT, "PROVIDER_DISCOVERY_FAILED",
+        "discover", true, false, detail, "zcode.package.fetch");
+}
+
+/* Route the exact root through the running node's provider discovery and
+ * reply with the outcome. */
+static void zw_fetch_via_provider(const struct zcl_command_request *request,
+                                  struct zcl_command_reply *reply,
+                                  const uint8_t root[32],
+                                  const char *namespace_name)
+{
+    struct json_value selector, routed;
+    json_init(&selector);
+    json_init(&routed);
+    json_set_object(&selector);
+    char root_hex[65];
+    zcl_hex_encode(root, 32, root_hex);
+    bool selector_ok =
+        json_push_kv_str(&selector, "kind", "provider") &&
+        json_push_kv_str(&selector, "namespace", namespace_name) &&
+        json_push_kv_str(&selector, "transport_root", root_hex);
+    const struct json_value *maximum =
+        json_get(request->input, "maximum_bytes");
+    if (selector_ok && maximum)
+        selector_ok = maximum->type == JSON_INT &&
+            json_push_kv_int(&selector, "maximum_bytes",
+                             json_get_int(maximum));
+    uint32_t records = 0;
+    bool routed_ok = selector_ok &&
+        zcl_native_zcode_provider_discover_and_route(
+            &selector, &routed, &records);
+    json_free(&selector);
+    if (!routed_ok) {
+        zw_fetch_routed_refusal(reply, &routed, records);
+        return;
+    }
+    json_copy(&reply->data, &routed);
+    json_free(&routed);
+    (void)json_push_kv_str(&reply->data, "transport_root", root_hex);
+    if (strcmp(namespace_name, "zclassic23.package") != 0)
+        (void)json_push_kv_str(&reply->data, "package_root", root_hex);
+    (void)json_push_kv_bool(&reply->data, "live", true);
+    (void)json_push_kv_int(&reply->data, "provider_records", records);
+}
+
+/* Open the datadir store and service book and build the one-shot engine.
+ * NULL with the error body set on failure. */
+static struct vcs_swarm_engine *zw_fetch_open_oneshot(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply, const char *zcode_dir,
+    struct vcs_package_store **store_out, struct vcs_service_book **book_out)
+{
+    struct vcs_package_store *store = vcs_package_store_open(
+        zw_datadir(request), vcs_package_store_quota_bytes());
+    if (!store) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "NO_STORE",
+                               "execute", false, false,
+                               "the package store failed to open",
+                               zcode_dir);
+        return NULL;
+    }
+    struct vcs_service_book *book = vcs_service_book_load(zcode_dir);
+    struct vcs_swarm_engine *engine =
+        vcs_swarm_engine_create(store, book, zcode_dir, NULL, NULL);
+    if (!engine) {
+        vcs_service_book_free(book);
+        vcs_package_store_close(store);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "ENGINE",
+                               "execute", false, false,
+                               "the swarm engine failed to initialize",
+                               zcode_dir);
+        return NULL;
+    }
+    *store_out = store;
+    *book_out = book;
+    return engine;
+}
+
+static const char *zw_fetch_refusal_code(enum vcs_swarm_fetch_result r)
+{
+    const char *code = "FETCH_REFUSED";
+    if (r == VCS_SWARM_FETCH_NO_STORE)
+        code = "NO_STORE";
+    else if (r == VCS_SWARM_FETCH_FULL)
+        code = "DOWNLOAD_SLOTS_FULL";
+    else if (r == VCS_SWARM_FETCH_RECORD_IO)
+        code = "RECORD_IO";
+    else if (r == VCS_SWARM_FETCH_BAD_INPUT)
+        code = "BAD_ROOT";
+    return code;
+}
+
+static void zw_fetch_push_result(struct zcl_command_reply *reply,
+                                 const uint8_t root[32], bool live,
+                                 enum vcs_swarm_fetch_result r,
+                                 const struct vcs_swarm_download_status *st,
+                                 bool have_status)
+{
+    char hex[65];
+    zcl_hex_encode(root, 32, hex);
+    (void)json_push_kv_str(&reply->data, "transport_root", hex);
+    (void)json_push_kv_str(&reply->data, "package_root", hex);
+    (void)json_push_kv_bool(&reply->data, "live", live);
+    (void)json_push_kv_bool(&reply->data, "already_complete",
+                            r == VCS_SWARM_FETCH_ALREADY_COMPLETE);
+    (void)json_push_kv_str(
+        &reply->data, "result", vcs_swarm_fetch_result_string(r));
+    if (have_status) {
+        struct json_value sj;
+        json_init(&sj);
+        json_set_object(&sj);
+        zw_push_status(&sj, st);
+        (void)json_push_kv(&reply->data, "download", &sj);
+        json_free(&sj);
+    }
+}
+
+static void zw_fetch_push_inert_note(const struct zcl_command_request *request,
+                                     struct zcl_command_reply *reply)
+{
+    /* The record is inert until a hosting node loads it. Name `z23 join`
+     * (or the restart, once this process is already hosting) instead of
+     * reciting `-packagehost=1` as the next boot action. */
+    struct zcl_zcode_join_posture join;
+    char note[ZW_SHELL_QUOTED_MAX + 1200u];
+    char quoted_dd[ZW_SHELL_QUOTED_MAX];
+    const char *dd = zw_datadir(request);
+    bool have_quoted_dd = dd && dd[0] &&
+        zw_shell_quote(dd, quoted_dd, sizeof(quoted_dd));
+    if (!zcl_zcode_join_posture_fill(&join))
+        join.package_hosting = false;
+    int n;
+    if (join.package_hosting)
+        n = snprintf(
+            note, sizeof(note),
+            "no live hosting engine: the resumable download record is "
+            "persisted under <datadir>/zcode/downloads; "
+            "systemctl --user restart z23-node so the live engine "
+            "resumes it (manifest-first, then chunks rarest-first from "
+            "the peers advertising the root)");
+    else if (have_quoted_dd)
+        n = snprintf(
+            note, sizeof(note),
+            "no live hosting engine: the resumable download record is "
+            "persisted under <datadir>/zcode/downloads; run "
+            "z23 join -datadir=%s then restart so the live engine "
+            "resumes it (manifest-first, then chunks rarest-first from "
+            "the peers advertising the root)",
+            quoted_dd);
+    else
+        n = snprintf(
+            note, sizeof(note),
+            "no live hosting engine: the resumable download record is "
+            "persisted under <datadir>/zcode/downloads; run z23 join "
+            "then restart so the live engine resumes it "
+            "(manifest-first, then chunks rarest-first from the peers "
+            "advertising the root)");
+    if (n < 0 || (size_t)n >= sizeof(note))
+        (void)snprintf(note, sizeof(note),
+                       "no live hosting engine: run z23 join then restart");
+    (void)json_push_kv_str(&reply->data, "note", note);
+}
+
 void zcl_native_handle_zcode_package_fetch(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -438,90 +670,7 @@ void zcl_native_handle_zcode_package_fetch(
      * and the daemon starts the bounded swarm fetch in-process. */
     const char *namespace_name = zw_input_str(request->input, "namespace");
     if (!live && namespace_name && namespace_name[0]) {
-        struct json_value selector, routed;
-        json_init(&selector);
-        json_init(&routed);
-        json_set_object(&selector);
-        char root_hex[65];
-        zcl_hex_encode(root, 32, root_hex);
-        bool selector_ok =
-            json_push_kv_str(&selector, "kind", "provider") &&
-            json_push_kv_str(&selector, "namespace", namespace_name) &&
-            json_push_kv_str(&selector, "transport_root", root_hex);
-        const struct json_value *maximum =
-            json_get(request->input, "maximum_bytes");
-        if (selector_ok && maximum)
-            selector_ok = maximum->type == JSON_INT &&
-                json_push_kv_int(&selector, "maximum_bytes",
-                                 json_get_int(maximum));
-        uint32_t records = 0;
-        bool routed_ok = selector_ok &&
-            zcl_native_zcode_provider_discover_and_route(
-                &selector, &routed, &records);
-        json_free(&selector);
-        if (!routed_ok) {
-            /* Name the boundary that actually refused. Three unrelated facts
-             * used to wear one coat here: nobody published a provider record,
-             * the records name peers this node is not authenticated to right
-             * now, or the routed carrier arrived and something further along
-             * — the swarm fetch, the signed-release import — said no. Only
-             * the first two are discovery, and each has a different next step
-             * (wait, connect, change a policy rule, or stop retrying because
-             * the carrier itself is wrong). A failed reply carries no data
-             * object, so what the reader needs belongs in the message. */
-            const char *route_code = json_get_str(json_get(&routed, "code"));
-            const char *route_error = json_get_str(json_get(&routed, "error"));
-            const char *fetch_result = json_get_str(
-                json_get(&routed, "fetch_result"));
-            char detail[192];
-            if (route_code && route_code[0]) {
-                /* The node routed the root and then refused under its own
-                 * name. Pass that name through rather than blaming discovery
-                 * for a failure that happened after it succeeded. The routed
-                 * tree is freed before the reply is built, so the code must
-                 * be copied out first. */
-                char code_copy[64];
-                (void)snprintf(code_copy, sizeof(code_copy), "%s", route_code);
-                bool transient = strcmp(code_copy, "FETCH_REFUSED") == 0;
-                (void)snprintf(detail, sizeof(detail),
-                               "%s: %s (fetch=%s, %lu provider record(s))",
-                               code_copy,
-                               route_error ? route_error : "no reason given",
-                               fetch_result ? fetch_result : "none",
-                               (unsigned long)records);
-                json_free(&routed);
-                zcl_command_reply_fail(
-                    reply, ZCL_COMMAND_STATUS_BLOCKED,
-                    transient ? ZCL_COMMAND_EXIT_TRANSIENT
-                              : ZCL_COMMAND_EXIT_BLOCKED,
-                    code_copy, "fetch", transient, false, detail,
-                    "zcode.package.fetch");
-                return;
-            }
-            (void)snprintf(
-                detail, sizeof(detail),
-                "no authenticated DHT provider routed the root: "
-                "records=%lu authenticated=%lld denied=%lld pending=%lld",
-                (unsigned long)records,
-                (long long)json_get_int(
-                    json_get(&routed, "authenticated_providers")),
-                (long long)json_get_int(json_get(&routed, "policy_denied")),
-                (long long)json_get_int(
-                    json_get(&routed, "reachability_pending")));
-            json_free(&routed);
-            zcl_command_reply_fail(
-                reply, ZCL_COMMAND_STATUS_BLOCKED,
-                ZCL_COMMAND_EXIT_TRANSIENT, "PROVIDER_DISCOVERY_FAILED",
-                "discover", true, false, detail, "zcode.package.fetch");
-            return;
-        }
-        json_copy(&reply->data, &routed);
-        json_free(&routed);
-        (void)json_push_kv_str(&reply->data, "transport_root", root_hex);
-        if (strcmp(namespace_name, "zclassic23.package") != 0)
-            (void)json_push_kv_str(&reply->data, "package_root", root_hex);
-        (void)json_push_kv_bool(&reply->data, "live", true);
-        (void)json_push_kv_int(&reply->data, "provider_records", records);
+        zw_fetch_via_provider(request, reply, root, namespace_name);
         return;
     }
 
@@ -532,28 +681,10 @@ void zcl_native_handle_zcode_package_fetch(
     struct vcs_package_store *store = NULL;
     struct vcs_service_book *book = NULL;
     if (!live) {
-        store = vcs_package_store_open(zw_datadir(request),
-                                       vcs_package_store_quota_bytes());
-        if (!store) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INTERNAL, "NO_STORE",
-                                   "execute", false, false,
-                                   "the package store failed to open",
-                                   zcode_dir);
+        engine = zw_fetch_open_oneshot(request, reply, zcode_dir, &store,
+                                       &book);
+        if (!engine)
             return;
-        }
-        book = vcs_service_book_load(zcode_dir);
-        engine = vcs_swarm_engine_create(store, book, zcode_dir, NULL, NULL);
-        if (!engine) {
-            vcs_service_book_free(book);
-            vcs_package_store_close(store);
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INTERNAL, "ENGINE",
-                                   "execute", false, false,
-                                   "the swarm engine failed to initialize",
-                                   zcode_dir);
-            return;
-        }
     }
 
     int64_t day = (int64_t)platform_time_wall_unix() / 86400;
@@ -575,15 +706,7 @@ void zcl_native_handle_zcode_package_fetch(
     }
 
     if (r != VCS_SWARM_FETCH_OK && r != VCS_SWARM_FETCH_ALREADY_COMPLETE) {
-        const char *code = "FETCH_REFUSED";
-        if (r == VCS_SWARM_FETCH_NO_STORE)
-            code = "NO_STORE";
-        else if (r == VCS_SWARM_FETCH_FULL)
-            code = "DOWNLOAD_SLOTS_FULL";
-        else if (r == VCS_SWARM_FETCH_RECORD_IO)
-            code = "RECORD_IO";
-        else if (r == VCS_SWARM_FETCH_BAD_INPUT)
-            code = "BAD_ROOT";
+        const char *code = zw_fetch_refusal_code(r);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, code, "execute",
                                false, true,
@@ -592,66 +715,9 @@ void zcl_native_handle_zcode_package_fetch(
         return;
     }
 
-    char hex[65];
-    zcl_hex_encode(root, 32, hex);
-    (void)json_push_kv_str(&reply->data, "transport_root", hex);
-    (void)json_push_kv_str(&reply->data, "package_root", hex);
-    (void)json_push_kv_bool(&reply->data, "live", live);
-    (void)json_push_kv_bool(&reply->data, "already_complete",
-                            r == VCS_SWARM_FETCH_ALREADY_COMPLETE);
-    (void)json_push_kv_str(
-        &reply->data, "result", vcs_swarm_fetch_result_string(r));
-    if (have_status) {
-        struct json_value sj;
-        json_init(&sj);
-        json_set_object(&sj);
-        zw_push_status(&sj, &st);
-        (void)json_push_kv(&reply->data, "download", &sj);
-        json_free(&sj);
-    }
-    if (!live) {
-        /* The record is inert until a hosting node loads it. Name `z23 join`
-         * (or the restart, once this process is already hosting) instead of
-         * reciting `-packagehost=1` as the next boot action. */
-        struct zcl_zcode_join_posture join;
-        char note[ZW_SHELL_QUOTED_MAX + 1200u];
-        char quoted_dd[ZW_SHELL_QUOTED_MAX];
-        const char *dd = zw_datadir(request);
-        bool have_quoted_dd = dd && dd[0] &&
-            zw_shell_quote(dd, quoted_dd, sizeof(quoted_dd));
-        if (!zcl_zcode_join_posture_fill(&join))
-            join.package_hosting = false;
-        int n;
-        if (join.package_hosting)
-            n = snprintf(
-                note, sizeof(note),
-                "no live hosting engine: the resumable download record is "
-                "persisted under <datadir>/zcode/downloads; "
-                "systemctl --user restart z23-node so the live engine "
-                "resumes it (manifest-first, then chunks rarest-first from "
-                "the peers advertising the root)");
-        else if (have_quoted_dd)
-            n = snprintf(
-                note, sizeof(note),
-                "no live hosting engine: the resumable download record is "
-                "persisted under <datadir>/zcode/downloads; run "
-                "z23 join -datadir=%s then restart so the live engine "
-                "resumes it (manifest-first, then chunks rarest-first from "
-                "the peers advertising the root)",
-                quoted_dd);
-        else
-            n = snprintf(
-                note, sizeof(note),
-                "no live hosting engine: the resumable download record is "
-                "persisted under <datadir>/zcode/downloads; run z23 join "
-                "then restart so the live engine resumes it "
-                "(manifest-first, then chunks rarest-first from the peers "
-                "advertising the root)");
-        if (n < 0 || (size_t)n >= sizeof(note))
-            (void)snprintf(note, sizeof(note),
-                           "no live hosting engine: run z23 join then restart");
-        (void)json_push_kv_str(&reply->data, "note", note);
-    }
+    zw_fetch_push_result(reply, root, live, r, &st, have_status);
+    if (!live)
+        zw_fetch_push_inert_note(request, reply);
 }
 
 /* ── zcode package peers ────────────────────────────────────────────── */
@@ -788,14 +854,11 @@ void zcl_native_handle_zcode_package_peers(
 
 /* ── zcode package offered ──────────────────────────────────────────── */
 
-void zcl_native_handle_zcode_package_offered(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply)
+/* True, with the error body set, when the manifests path exists and is
+ * not a directory. */
+static bool zw_offered_manifests_blocked(const char *datadir,
+                                         struct zcl_command_reply *reply)
 {
-    if (!request || !reply)
-        return;
-
-    const char *datadir = zw_datadir(request);
     if (datadir && datadir[0]) {
         char manifests[4400];
         int n = snprintf(manifests, sizeof(manifests), "%s/zcode/manifests",
@@ -808,9 +871,172 @@ void zcl_native_handle_zcode_package_offered(
                 "STORE_UNREADABLE", "execute", false, false,
                 "package manifests path exists and is not enumerable",
                 manifests);
-            return;
+            return true;
         }
     }
+    return false;
+}
+
+static size_t zw_offered_peer_count(struct vcs_swarm_engine *engine,
+                                    bool remote_status_read,
+                                    const struct json_value *remote_status)
+{
+    uint64_t peer_ids[VCS_SWARM_MAX_PEERS];
+    return engine ? vcs_swarm_engine_peer_ids(
+                        engine, peer_ids, VCS_SWARM_MAX_PEERS)
+                  : remote_status_read
+                      ? (size_t)json_get_int(json_get(
+                            remote_status, "peer_count"))
+                      : 0;
+}
+
+/* Copy one remote advertised item into `row`. False to skip the item. */
+static bool zw_offered_remote_row(const struct json_value *item,
+                                  struct vcs_swarm_advertised *row)
+{
+    const char *root = item ? json_get_str(json_get(item, "root")) : NULL;
+    int64_t advertisers = item
+        ? json_get_int(json_get(item, "advertisers")) : 0;
+    if (!root || strlen(root) != 64u || advertisers <= 0 ||
+        advertisers > UINT32_MAX ||
+        !zcl_hex_decode_lower(root, row->root, sizeof(row->root)))
+        return false;
+    row->advertisers = (uint32_t)advertisers;
+    return true;
+}
+
+static size_t zw_offered_remote_rows(const struct json_value *remote_status,
+                                     struct vcs_swarm_advertised *rows,
+                                     bool *truncated)
+{
+    const struct json_value *advertised =
+        json_get(remote_status, "advertised");
+    size_t seen = advertised && advertised->type == JSON_ARR
+        ? json_size(advertised) : 0;
+    size_t n = 0;
+    *truncated = seen > VCS_SWARM_MAX_LOCAL_ANNOUNCES;
+    if (seen > VCS_SWARM_MAX_LOCAL_ANNOUNCES)
+        seen = VCS_SWARM_MAX_LOCAL_ANNOUNCES;
+    for (size_t i = 0; i < seen; i++) {
+        if (zw_offered_remote_row(json_at(advertised, i), &rows[n]))
+            n++;
+    }
+    return n;
+}
+
+static size_t zw_offered_gather(struct vcs_swarm_engine *engine,
+                                const struct json_value *remote_status,
+                                struct vcs_swarm_advertised *rows,
+                                bool *truncated)
+{
+    size_t n = 0;
+    if (engine) {
+        n = vcs_swarm_engine_advertised(
+            engine, rows, VCS_SWARM_MAX_LOCAL_ANNOUNCES + 1u);
+    } else {
+        n = zw_offered_remote_rows(remote_status, rows, truncated);
+    }
+    if (n > VCS_SWARM_MAX_LOCAL_ANNOUNCES) {
+        *truncated = true;
+        n = VCS_SWARM_MAX_LOCAL_ANNOUNCES;
+    }
+    return n;
+}
+
+static void zw_offered_push_row(struct json_value *items,
+                                struct vcs_package_store *store,
+                                struct vcs_swarm_advertised *src,
+                                const char *hex)
+{
+    bool have_local = false;
+    if (store) {
+        struct vcs_package_store_status st;
+        memset(&st, 0, sizeof(st));
+        if (vcs_package_store_package_status(store, src->root, &st) &&
+            st.tracked && st.complete)
+            have_local = true;
+    }
+
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    (void)json_push_kv_str(&row, "root", hex);
+    (void)json_push_kv_int(&row, "advertisers",
+                           (int64_t)src->advertisers);
+    (void)json_push_kv_bool(&row, "have_local", have_local);
+    (void)json_push_back(items, &row);
+    json_free(&row);
+}
+
+static void zw_offered_push_rows(const struct zcl_command_request *request,
+                                 struct vcs_swarm_advertised *rows, size_t n,
+                                 struct json_value *items, char *first_root)
+{
+    bool own_store = false;
+    struct vcs_package_store *store =
+        zw_observe_store(request, &own_store);
+    for (size_t i = 0; i < n; i++) {
+        char hex[65];
+        zcl_hex_encode(rows[i].root, 32, hex);
+        if (i == 0)
+            memcpy(first_root, hex, 65u);
+        zw_offered_push_row(items, store, &rows[i], hex);
+    }
+    if (own_store)
+        vcs_package_store_close(store);
+}
+
+/* The next-step hint: the offline branch names how to join or restart; the
+ * live branches name the next peer or the next fetch. */
+static void zw_offered_next_command(char *next, size_t cap, bool live,
+                                    size_t peer_count, size_t offered,
+                                    const char *first_root,
+                                    const char *datadir,
+                                    const struct zcl_zcode_join_posture *join)
+{
+    if (!live) {
+        char quoted_dd[ZW_SHELL_QUOTED_MAX];
+        bool have_quoted_dd = datadir && datadir[0] &&
+            zw_shell_quote(datadir, quoted_dd, sizeof(quoted_dd));
+        int wn;
+        if (join->package_hosting && have_quoted_dd)
+            wn = snprintf(next, cap,
+                          "systemctl --user restart z23-node, then "
+                          "z23 zcode package offered -datadir=%s",
+                          quoted_dd);
+        else if (join->package_hosting)
+            wn = snprintf(next, cap, "%s", join->offline_next_command);
+        else if (have_quoted_dd)
+            wn = snprintf(next, cap, "z23 join -datadir=%s", quoted_dd);
+        else
+            wn = snprintf(next, cap, "z23 join");
+        if (wn < 0 || (size_t)wn >= cap)
+            (void)snprintf(next, cap, "%s", join->offline_next_command);
+    } else if (peer_count == 0) {
+        (void)snprintf(next, cap, "wait for an eligible NODE_ZCL23 peer");
+    } else if (offered == 0) {
+        (void)snprintf(
+            next, cap,
+            "wait for ANNOUNCE / z23 zcode package peers "
+            "--input='{\"root\":\"<64hex>\"}'");
+    } else {
+        (void)snprintf(
+            next, cap,
+            "z23 zcode package fetch --input='{\"root\":\"%s\"}'",
+            first_root);
+    }
+}
+
+void zcl_native_handle_zcode_package_offered(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+
+    const char *datadir = zw_datadir(request);
+    if (zw_offered_manifests_blocked(datadir, reply))
+        return;
 
     struct vcs_swarm_engine *engine = vcs_swarm_engine_global();
     struct json_value remote_status;
@@ -822,13 +1048,8 @@ void zcl_native_handle_zcode_package_offered(
         (remote_status_read &&
          json_get_bool_or(&remote_status, "enabled", false) &&
          json_get_bool_or(&remote_status, "present", false));
-    uint64_t peer_ids[VCS_SWARM_MAX_PEERS];
-    size_t peer_count = engine ? vcs_swarm_engine_peer_ids(
-                                   engine, peer_ids, VCS_SWARM_MAX_PEERS)
-                             : remote_status_read
-                                 ? (size_t)json_get_int(json_get(
-                                       &remote_status, "peer_count"))
-                                 : 0;
+    size_t peer_count =
+        zw_offered_peer_count(engine, remote_status_read, &remote_status);
     (void)json_push_kv_bool(&reply->data, "live", live);
     (void)json_push_kv_int(&reply->data, "peer_count",
                            (int64_t)peer_count);
@@ -856,68 +1077,8 @@ void zcl_native_handle_zcode_package_offered(
 
     if (live) {
         struct vcs_swarm_advertised rows[VCS_SWARM_MAX_LOCAL_ANNOUNCES + 1u];
-        size_t n = 0;
-        if (engine) {
-            n = vcs_swarm_engine_advertised(
-                engine, rows, VCS_SWARM_MAX_LOCAL_ANNOUNCES + 1u);
-        } else {
-            const struct json_value *advertised =
-                json_get(&remote_status, "advertised");
-            size_t seen = advertised && advertised->type == JSON_ARR
-                ? json_size(advertised) : 0;
-            truncated = seen > VCS_SWARM_MAX_LOCAL_ANNOUNCES;
-            if (seen > VCS_SWARM_MAX_LOCAL_ANNOUNCES)
-                seen = VCS_SWARM_MAX_LOCAL_ANNOUNCES;
-            for (size_t i = 0; i < seen; i++) {
-                const struct json_value *item = json_at(advertised, i);
-                const char *root = item
-                    ? json_get_str(json_get(item, "root")) : NULL;
-                int64_t advertisers = item
-                    ? json_get_int(json_get(item, "advertisers")) : 0;
-                if (!root || strlen(root) != 64u || advertisers <= 0 ||
-                    advertisers > UINT32_MAX ||
-                    !zcl_hex_decode_lower(root, rows[n].root,
-                                          sizeof(rows[n].root)))
-                    continue;
-                rows[n++].advertisers = (uint32_t)advertisers;
-            }
-        }
-        if (n > VCS_SWARM_MAX_LOCAL_ANNOUNCES) {
-            truncated = true;
-            n = VCS_SWARM_MAX_LOCAL_ANNOUNCES;
-        }
-
-        bool own_store = false;
-        struct vcs_package_store *store =
-            zw_observe_store(request, &own_store);
-        for (size_t i = 0; i < n; i++) {
-            char hex[65];
-            zcl_hex_encode(rows[i].root, 32, hex);
-            if (i == 0)
-                memcpy(first_root, hex, sizeof(first_root));
-
-            bool have_local = false;
-            if (store) {
-                struct vcs_package_store_status st;
-                memset(&st, 0, sizeof(st));
-                if (vcs_package_store_package_status(store, rows[i].root,
-                                                     &st) &&
-                    st.tracked && st.complete)
-                    have_local = true;
-            }
-
-            struct json_value row;
-            json_init(&row);
-            json_set_object(&row);
-            (void)json_push_kv_str(&row, "root", hex);
-            (void)json_push_kv_int(&row, "advertisers",
-                                   (int64_t)rows[i].advertisers);
-            (void)json_push_kv_bool(&row, "have_local", have_local);
-            (void)json_push_back(&items, &row);
-            json_free(&row);
-        }
-        if (own_store)
-            vcs_package_store_close(store);
+        size_t n = zw_offered_gather(engine, &remote_status, rows, &truncated);
+        zw_offered_push_rows(request, rows, n, &items, first_root);
         offered = n;
     }
     if (remote_status_read)
@@ -929,45 +1090,207 @@ void zcl_native_handle_zcode_package_offered(
     (void)json_push_kv_bool(&reply->data, "truncated", truncated);
 
     char next[ZW_SHELL_QUOTED_MAX + 384u];
-    if (!live) {
-        char quoted_dd[ZW_SHELL_QUOTED_MAX];
-        bool have_quoted_dd = datadir && datadir[0] &&
-            zw_shell_quote(datadir, quoted_dd, sizeof(quoted_dd));
-        int wn;
-        if (join.package_hosting && have_quoted_dd)
-            wn = snprintf(next, sizeof(next),
-                          "systemctl --user restart z23-node, then "
-                          "z23 zcode package offered -datadir=%s",
-                          quoted_dd);
-        else if (join.package_hosting)
-            wn = snprintf(next, sizeof(next), "%s",
-                          join.offline_next_command);
-        else if (have_quoted_dd)
-            wn = snprintf(next, sizeof(next), "z23 join -datadir=%s",
-                          quoted_dd);
-        else
-            wn = snprintf(next, sizeof(next), "z23 join");
-        if (wn < 0 || (size_t)wn >= sizeof(next))
-            (void)snprintf(next, sizeof(next), "%s",
-                           join.offline_next_command);
-    } else if (peer_count == 0) {
-        (void)snprintf(next, sizeof(next),
-                       "wait for an eligible NODE_ZCL23 peer");
-    } else if (offered == 0) {
-        (void)snprintf(
-            next, sizeof(next),
-            "wait for ANNOUNCE / z23 zcode package peers "
-            "--input='{\"root\":\"<64hex>\"}'");
-    } else {
-        (void)snprintf(
-            next, sizeof(next),
-            "z23 zcode package fetch --input='{\"root\":\"%s\"}'",
-            first_root);
-    }
+    zw_offered_next_command(next, sizeof(next), live, peer_count, offered,
+                            first_root, datadir, &join);
     (void)json_push_kv_str(&reply->data, "next_command", next);
 }
 
 /* ── zcode package pin / unpin ──────────────────────────────────────── */
+
+/* True when `datadir` is set and a `.cookie` path exists under it. */
+static bool zw_resident_cookie_present(const char *datadir)
+{
+    if (!datadir)
+        return false;
+    char cookie[4400];
+    int n = snprintf(cookie, sizeof(cookie), "%s/.cookie", datadir);
+    return n > 0 && (size_t)n < sizeof(cookie) && access(cookie, F_OK) == 0;
+}
+
+/* Relay the resident's RPC reply into `reply`. Frees `raw`. */
+static void zw_resident_reply(struct zcl_command_reply *reply, char *raw,
+                              const char *command, const char *unreadable,
+                              const char *refused_code,
+                              const char *refused_text)
+{
+    struct json_value body;
+    json_init(&body);
+    bool parsed = json_read(&body, raw, strlen(raw)) &&
+                  body.type == JSON_OBJ;
+    free(raw);
+    if (!parsed) {
+        json_free(&body);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "BAD_RPC_BODY",
+                               "serialize", false, false, unreadable,
+                               command);
+        return;
+    }
+    const struct json_value *data = json_get(&body, "data");
+    if (json_get_bool_or(&body, "ok", false) && data &&
+        data->type == JSON_OBJ) {
+        json_free(&reply->data);
+        json_init(&reply->data);
+        json_copy(&reply->data, data);
+        json_free(&body);
+        return;
+    }
+    const char *code = json_get_str(json_get(&body, "code"));
+    const char *phase = json_get_str(json_get(&body, "phase"));
+    const char *message = json_get_str(json_get(&body, "message"));
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+        code && code[0] ? code : refused_code,
+        phase && phase[0] ? phase : "execute",
+        json_get_bool_or(&body, "retryable", false),
+        json_get_bool_or(&body, "mutated", false),
+        message && message[0] ? message : refused_text,
+        command);
+    json_free(&body);
+}
+
+/* Mode must be exactly plan or commit. False with the error body set. */
+static bool zw_pin_mode_ok(struct zcl_command_reply *reply, const char *mode,
+                           const char *command)
+{
+    if (!mode || (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "INVALID_MODE",
+                               "normalize", false, false,
+                               "mode must be exactly plan or commit", command);
+        return false;
+    }
+    return true;
+}
+
+/* The store this pin works on, or NULL with the error body set. */
+static struct vcs_package_store *zw_pin_open_store(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    struct vcs_package_store *resident_store, const char *zcode_dir,
+    bool *own_store)
+{
+    /* A live daemon owns one store and may be writing CAS temp files while
+     * this status/plan runs. Borrow that handle for the node's implicit
+     * datadir; opening a second recovery owner over the same files can sweep
+     * or GC state that belongs to the live engine. Explicit offline datadirs
+     * retain the one-shot owned-store path. */
+    struct vcs_package_store *store =
+        zw_input_str(request->input, "datadir")
+            ? NULL : resident_store;
+    if (!store) {
+        store = vcs_package_store_open(
+            zw_datadir(request), vcs_package_store_quota_bytes());
+        *own_store = true;
+    }
+    if (!store) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "NO_STORE",
+                               "execute", false, false,
+                               "the package store failed to open", zcode_dir);
+    }
+    return store;
+}
+
+/* Check a commit's canonical plan_token against the plan. False with the
+ * error body set and an owned store closed. */
+static bool zw_pin_plan_token_ok(const struct zcl_command_request *request,
+                                 struct zcl_command_reply *reply,
+                                 const char *command,
+                                 struct vcs_package_store *store,
+                                 bool own_store, const uint8_t root[32],
+                                 const uint8_t token[32])
+{
+    uint8_t supplied[32];
+    const char *supplied_hex = zw_input_str(request->input, "plan_token");
+    if (!supplied_hex || strlen(supplied_hex) != 64 ||
+        !zcl_hex_decode_lower(supplied_hex, supplied, 32)) {
+        if (own_store) vcs_package_store_close(store);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID,
+                               "INVALID_PLAN_TOKEN", "commit", false,
+                               false, "commit requires canonical plan_token",
+                               command);
+        return false;
+    }
+    uint8_t difference = 0;
+    for (size_t i = 0; i < 32; i++)
+        difference |= supplied[i] ^ token[i];
+    if (difference) {
+        if (own_store) vcs_package_store_close(store);
+        char root_hex[65], next_input[160];
+        zcl_hex_encode(root, 32, root_hex);
+        (void)snprintf(next_input, sizeof(next_input),
+                       "{\"root\":\"%s\",\"mode\":\"plan\"}", root_hex);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "STALE_PLAN", "commit", true, false,
+            "pin-relevant package state changed after plan; run zcode "
+            "package pin mode=plan again",
+            command);
+        (void)zcl_command_reply_add_next(
+            reply, "zcode.package.pin", next_input,
+            "re-observe the exact pin plan");
+        return false;
+    }
+    return true;
+}
+
+static void zw_pin_store_fail(struct zcl_command_reply *reply,
+                              enum vcs_package_store_result r,
+                              const char *command)
+{
+    const char *code = "STORE_IO";
+    if (r == VCS_PACKAGE_STORE_ERR_UNKNOWN_PACKAGE)
+        code = "UNKNOWN_PACKAGE";
+    else if (r == VCS_PACKAGE_STORE_ERR_QUOTA)
+        code = "PINS_POOL_FULL";
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_INVALID, code, "execute",
+                           false, true,
+                           vcs_package_store_result_string(r), command);
+}
+
+static void zw_pin_push_result(struct zcl_command_reply *reply,
+                               const char *mode, bool pinned,
+                               const uint8_t root[32], const uint8_t token[32],
+                               const struct vcs_package_store_status *st,
+                               bool have_status,
+                               enum vcs_package_store_result r)
+{
+    char hex[65];
+    char token_hex[65];
+    zcl_hex_encode(root, 32, hex);
+    zcl_hex_encode(token, 32, token_hex);
+    (void)json_push_kv_str(&reply->data, "package_root", hex);
+    (void)json_push_kv_str(&reply->data, "mode", mode);
+    (void)json_push_kv_str(&reply->data, "plan_token", token_hex);
+    (void)json_push_kv_bool(&reply->data, "committed",
+                            strcmp(mode, "commit") == 0);
+    (void)json_push_kv_bool(&reply->data, "pinned",
+                            strcmp(mode, "commit") == 0 ? pinned : st->pinned);
+    (void)json_push_kv_str(&reply->data, "result",
+                           vcs_package_store_result_string(r));
+    if (have_status) {
+        struct json_value sj;
+        json_init(&sj);
+        json_set_object(&sj);
+        (void)json_push_kv_bool(&sj, "tracked", st->tracked);
+        (void)json_push_kv_bool(&sj, "pinned", st->pinned);
+        (void)json_push_kv_bool(&sj, "complete", st->complete);
+        (void)json_push_kv_str(&sj, "pool",
+                               vcs_package_store_pool_string(st->pool));
+        (void)json_push_kv_int(&sj, "present_bytes",
+                               (int64_t)st->present_bytes);
+        (void)json_push_kv_int(&sj, "total_bytes", (int64_t)st->total_bytes);
+        (void)json_push_kv(&reply->data, "package", &sj);
+        json_free(&sj);
+    }
+    (void)json_push_kv_str(
+        &reply->data, "note",
+        "operator pins are never tier-gated and the PINS pool is never "
+        "evicted; contributor-requested pins (pin-allowance-exceeded, "
+        "vcs_policy_check_pin) are a separate, earned allowance");
+}
 
 /* The one-shot CLI must never open the resident's package store: open runs
  * recovery + orphan GC and a second process can race the daemon between its
@@ -981,10 +1304,7 @@ static bool zw_pin_via_resident(const struct zcl_command_request *request,
         vcs_package_store_global())
         return false;
     const char *datadir = zw_datadir(request);
-    char cookie[4400];
-    int n = datadir ? snprintf(cookie, sizeof(cookie), "%s/.cookie", datadir)
-                     : -1;
-    if (n <= 0 || (size_t)n >= sizeof(cookie) || access(cookie, F_OK) != 0)
+    if (!zw_resident_cookie_present(datadir))
         return false;
 
     struct rpc_arg_builder args;
@@ -998,41 +1318,9 @@ static bool zw_pin_via_resident(const struct zcl_command_request *request,
     if (!raw)
         return false; /* the exclusive store lock makes fallback fail safe */
 
-    struct json_value body;
-    json_init(&body);
-    bool parsed = json_read(&body, raw, strlen(raw)) &&
-                  body.type == JSON_OBJ;
-    free(raw);
-    if (!parsed) {
-        json_free(&body);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "BAD_RPC_BODY",
-                               "serialize", false, false,
-                               "resident returned an unreadable pin response",
-                               command);
-        return true;
-    }
-    const struct json_value *data = json_get(&body, "data");
-    if (json_get_bool_or(&body, "ok", false) && data &&
-        data->type == JSON_OBJ) {
-        json_free(&reply->data);
-        json_init(&reply->data);
-        json_copy(&reply->data, data);
-        json_free(&body);
-        return true;
-    }
-    const char *code = json_get_str(json_get(&body, "code"));
-    const char *phase = json_get_str(json_get(&body, "phase"));
-    const char *message = json_get_str(json_get(&body, "message"));
-    zcl_command_reply_fail(
-        reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-        code && code[0] ? code : "PIN_RPC_REFUSED",
-        phase && phase[0] ? phase : "execute",
-        json_get_bool_or(&body, "retryable", false),
-        json_get_bool_or(&body, "mutated", false),
-        message && message[0] ? message : "resident refused pin operation",
-        command);
-    json_free(&body);
+    zw_resident_reply(reply, raw, command,
+                      "resident returned an unreadable pin response",
+                      "PIN_RPC_REFUSED", "resident refused pin operation");
     return true;
 }
 
@@ -1054,37 +1342,16 @@ static void zw_handle_pin(const struct zcl_command_request *request,
     if (!zw_root(request, reply, command, root))
         return;
     const char *mode = zw_input_str(request->input, "mode");
-    if (!mode || (strcmp(mode, "plan") != 0 && strcmp(mode, "commit") != 0)) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "INVALID_MODE",
-                               "normalize", false, false,
-                               "mode must be exactly plan or commit", command);
+    if (!zw_pin_mode_ok(reply, mode, command))
         return;
-    }
     if (zw_pin_via_resident(request, reply, pinned, command))
         return;
 
-    /* A live daemon owns one store and may be writing CAS temp files while
-     * this status/plan runs. Borrow that handle for the node's implicit
-     * datadir; opening a second recovery owner over the same files can sweep
-     * or GC state that belongs to the live engine. Explicit offline datadirs
-     * retain the one-shot owned-store path. */
     bool own_store = false;
-    struct vcs_package_store *store =
-        zw_input_str(request->input, "datadir")
-            ? NULL : resident_store;
-    if (!store) {
-        store = vcs_package_store_open(
-            zw_datadir(request), vcs_package_store_quota_bytes());
-        own_store = true;
-    }
-    if (!store) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "NO_STORE",
-                               "execute", false, false,
-                               "the package store failed to open", zcode_dir);
+    struct vcs_package_store *store = zw_pin_open_store(
+        request, reply, resident_store, zcode_dir, &own_store);
+    if (!store)
         return;
-    }
     struct vcs_package_store_status st;
     uint8_t token[32];
     bool have_status = vcs_package_store_pin_plan(
@@ -1099,37 +1366,9 @@ static void zw_handle_pin(const struct zcl_command_request *request,
     }
     enum vcs_package_store_result r = VCS_PACKAGE_STORE_OK;
     if (strcmp(mode, "commit") == 0) {
-        const char *supplied_hex = zw_input_str(request->input, "plan_token");
-        uint8_t supplied[32], difference = 0;
-        if (!supplied_hex || strlen(supplied_hex) != 64 ||
-            !zcl_hex_decode_lower(supplied_hex, supplied, 32)) {
-            if (own_store) vcs_package_store_close(store);
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID,
-                                   "INVALID_PLAN_TOKEN", "commit", false,
-                                   false, "commit requires canonical plan_token",
-                                   command);
+        if (!zw_pin_plan_token_ok(request, reply, command, store, own_store,
+                                  root, token))
             return;
-        }
-        for (size_t i = 0; i < 32; i++)
-            difference |= supplied[i] ^ token[i];
-        if (difference) {
-            if (own_store) vcs_package_store_close(store);
-            char root_hex[65], next_input[160];
-            zcl_hex_encode(root, 32, root_hex);
-            (void)snprintf(next_input, sizeof(next_input),
-                           "{\"root\":\"%s\",\"mode\":\"plan\"}", root_hex);
-            zcl_command_reply_fail(
-                reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "STALE_PLAN", "commit", true, false,
-                "pin-relevant package state changed after plan; run zcode "
-                "package pin mode=plan again",
-                command);
-            (void)zcl_command_reply_add_next(
-                reply, "zcode.package.pin", next_input,
-                "re-observe the exact pin plan");
-            return;
-        }
         r = vcs_package_store_pin(store, root, pinned);
         memset(&st, 0, sizeof(st));
         have_status = vcs_package_store_package_status(store, root, &st);
@@ -1137,51 +1376,11 @@ static void zw_handle_pin(const struct zcl_command_request *request,
     if (own_store) vcs_package_store_close(store);
 
     if (r != VCS_PACKAGE_STORE_OK) {
-        const char *code = "STORE_IO";
-        if (r == VCS_PACKAGE_STORE_ERR_UNKNOWN_PACKAGE)
-            code = "UNKNOWN_PACKAGE";
-        else if (r == VCS_PACKAGE_STORE_ERR_QUOTA)
-            code = "PINS_POOL_FULL";
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, code, "execute",
-                               false, true,
-                               vcs_package_store_result_string(r), command);
+        zw_pin_store_fail(reply, r, command);
         return;
     }
 
-    char hex[65];
-    char token_hex[65];
-    zcl_hex_encode(root, 32, hex);
-    zcl_hex_encode(token, 32, token_hex);
-    (void)json_push_kv_str(&reply->data, "package_root", hex);
-    (void)json_push_kv_str(&reply->data, "mode", mode);
-    (void)json_push_kv_str(&reply->data, "plan_token", token_hex);
-    (void)json_push_kv_bool(&reply->data, "committed",
-                            strcmp(mode, "commit") == 0);
-    (void)json_push_kv_bool(&reply->data, "pinned",
-                            strcmp(mode, "commit") == 0 ? pinned : st.pinned);
-    (void)json_push_kv_str(&reply->data, "result",
-                           vcs_package_store_result_string(r));
-    if (have_status) {
-        struct json_value sj;
-        json_init(&sj);
-        json_set_object(&sj);
-        (void)json_push_kv_bool(&sj, "tracked", st.tracked);
-        (void)json_push_kv_bool(&sj, "pinned", st.pinned);
-        (void)json_push_kv_bool(&sj, "complete", st.complete);
-        (void)json_push_kv_str(&sj, "pool",
-                               vcs_package_store_pool_string(st.pool));
-        (void)json_push_kv_int(&sj, "present_bytes",
-                               (int64_t)st.present_bytes);
-        (void)json_push_kv_int(&sj, "total_bytes", (int64_t)st.total_bytes);
-        (void)json_push_kv(&reply->data, "package", &sj);
-        json_free(&sj);
-    }
-    (void)json_push_kv_str(
-        &reply->data, "note",
-        "operator pins are never tier-gated and the PINS pool is never "
-        "evicted; contributor-requested pins (pin-allowance-exceeded, "
-        "vcs_policy_check_pin) are a separate, earned allowance");
+    zw_pin_push_result(reply, mode, pinned, root, token, &st, have_status, r);
 }
 
 void zcl_native_handle_zcode_package_pin(
@@ -1212,6 +1411,23 @@ static void zw_push_carrier_stats(struct json_value *obj,
     (void)json_push_kv_int(obj, "total_bytes", (int64_t)st->total_bytes);
 }
 
+/* The resident datadir this export may route to, or NULL when the input
+ * names a different datadir or none resolves. */
+static const char *zw_export_resident_datadir(
+    const struct zcl_command_request *request)
+{
+    const char *input_dd = zw_input_str(request->input, "datadir");
+    const char *cli_dd = zcl_native_command_datadir();
+    if (input_dd && input_dd[0]) {
+        if (!cli_dd || !cli_dd[0] || strcmp(input_dd, cli_dd) != 0)
+            return NULL;
+    }
+    const char *datadir = input_dd && input_dd[0] ? input_dd : cli_dd;
+    if (!datadir || !datadir[0])
+        return NULL;
+    return datadir;
+}
+
 /* The export writes the store, and a serving engine answers wants from
  * the in-memory table of ITS store object. A one-shot CLI export opens a
  * second handle and the bytes land on disk where the resident never
@@ -1227,18 +1443,8 @@ static bool zw_export_via_resident(const struct zcl_command_request *request,
 {
     if (vcs_package_store_global())
         return false;
-    const char *input_dd = zw_input_str(request->input, "datadir");
-    const char *cli_dd = zcl_native_command_datadir();
-    if (input_dd && input_dd[0]) {
-        if (!cli_dd || !cli_dd[0] || strcmp(input_dd, cli_dd) != 0)
-            return false;
-    }
-    const char *datadir = input_dd && input_dd[0] ? input_dd : cli_dd;
-    if (!datadir || !datadir[0])
-        return false;
-    char cookie[4400];
-    int n = snprintf(cookie, sizeof(cookie), "%s/.cookie", datadir);
-    if (n <= 0 || (size_t)n >= sizeof(cookie) || access(cookie, F_OK) != 0)
+    const char *datadir = zw_export_resident_datadir(request);
+    if (!zw_resident_cookie_present(datadir))
         return false;
 
     struct json_value fwd;
@@ -1257,44 +1463,58 @@ static bool zw_export_via_resident(const struct zcl_command_request *request,
     if (!raw)
         return false; /* the exclusive store lock makes fallback fail safe */
 
-    struct json_value body;
-    json_init(&body);
-    bool parsed = json_read(&body, raw, strlen(raw)) &&
-                  body.type == JSON_OBJ;
-    free(raw);
-    if (!parsed) {
-        json_free(&body);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "BAD_RPC_BODY",
-                               "serialize", false, false,
-                               "resident returned an unreadable export "
-                               "response",
-                               "zcode.package.fastobj.export");
-        return true;
-    }
-    const struct json_value *data = json_get(&body, "data");
-    if (json_get_bool_or(&body, "ok", false) && data &&
-        data->type == JSON_OBJ) {
-        json_free(&reply->data);
-        json_init(&reply->data);
-        json_copy(&reply->data, data);
-        json_free(&body);
-        return true;
-    }
-    const char *code = json_get_str(json_get(&body, "code"));
-    const char *phase = json_get_str(json_get(&body, "phase"));
-    const char *message = json_get_str(json_get(&body, "message"));
-    zcl_command_reply_fail(
-        reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-        code && code[0] ? code : "EXPORT_RPC_REFUSED",
-        phase && phase[0] ? phase : "execute",
-        json_get_bool_or(&body, "retryable", false),
-        json_get_bool_or(&body, "mutated", false),
-        message && message[0] ? message
-                              : "resident refused carrier export",
-        "zcode.package.fastobj.export");
-    json_free(&body);
+    zw_resident_reply(reply, raw, "zcode.package.fastobj.export",
+                      "resident returned an unreadable export response",
+                      "EXPORT_RPC_REFUSED", "resident refused carrier export");
     return true;
+}
+
+/* The store directory a fastobj export writes to. False with the error
+ * body set. */
+static bool zw_fastobj_export_dir(const struct zcl_command_request *request,
+                                  struct zcl_command_reply *reply,
+                                  struct vcs_package_store *resident,
+                                  const char *command, char *zcode_dir,
+                                  size_t cap)
+{
+    /* A resident handler already owns its store directory; only a one-shot
+     * CLI (or an explicit offline datadir) must spell it out — the bridge
+     * datadir context does not exist inside the daemon. */
+    if (resident) {
+        const char *root_dir = vcs_package_store_root_dir(resident);
+        (void)snprintf(zcode_dir, cap, "%s",
+                       root_dir && root_dir[0] ? root_dir
+                                               : "resident-package-store");
+        return true;
+    }
+    return zw_zcode_dir(request, reply, command, zcode_dir);
+}
+
+/* The store a fastobj export writes through, or NULL with the error body
+ * set. */
+static struct vcs_package_store *zw_fastobj_export_store(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply,
+    struct vcs_package_store *resident, const char *zcode_dir, bool *own_store)
+{
+    /* The publish-commit store rule: writes go through the resident
+     * handle when it owns exactly this <datadir>/zcode — a running host
+     * answers from that object, not from the bytes on disk, so publishing
+     * through a second handle would leave its engine announcing a root it
+     * cannot send until restart. Any other datadir keeps the one-shot
+     * owned-store path (which may create the store). */
+    const char *resident_root = vcs_package_store_root_dir(resident);
+    *own_store = !(resident_root && strcmp(resident_root, zcode_dir) == 0);
+    struct vcs_package_store *store = *own_store
+        ? vcs_package_store_open(zw_datadir(request),
+                                 vcs_package_store_quota_bytes())
+        : resident;
+    if (!store) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "NO_STORE",
+                               "execute", false, false,
+                               "the package store failed to open", zcode_dir);
+    }
+    return store;
 }
 
 void zcl_native_handle_zcode_package_fastobj_export(
@@ -1304,19 +1524,11 @@ void zcl_native_handle_zcode_package_fastobj_export(
     if (!request || !reply)
         return;
     static const char *const command = "zcode.package.fastobj.export";
-    /* A resident handler already owns its store directory; only a one-shot
-     * CLI (or an explicit offline datadir) must spell it out — the bridge
-     * datadir context does not exist inside the daemon. */
     struct vcs_package_store *resident = vcs_package_store_global();
     char zcode_dir[4400];
-    if (resident) {
-        const char *root_dir = vcs_package_store_root_dir(resident);
-        (void)snprintf(zcode_dir, sizeof(zcode_dir), "%s",
-                       root_dir && root_dir[0] ? root_dir
-                                               : "resident-package-store");
-    } else if (!zw_zcode_dir(request, reply, command, zcode_dir)) {
+    if (!zw_fastobj_export_dir(request, reply, resident, command, zcode_dir,
+                               sizeof(zcode_dir)))
         return;
-    }
     const char *cache_dir = zw_input_str(request->input, "cache_dir");
     if (!cache_dir || !cache_dir[0]) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -1330,25 +1542,11 @@ void zcl_native_handle_zcode_package_fastobj_export(
     if (zw_export_via_resident(request, reply, cache_dir))
         return;
 
-    /* The publish-commit store rule: writes go through the resident
-     * handle when it owns exactly this <datadir>/zcode — a running host
-     * answers from that object, not from the bytes on disk, so publishing
-     * through a second handle would leave its engine announcing a root it
-     * cannot send until restart. Any other datadir keeps the one-shot
-     * owned-store path (which may create the store). */
-    const char *resident_root = vcs_package_store_root_dir(resident);
-    bool own_store = !(resident_root && strcmp(resident_root, zcode_dir) == 0);
-    struct vcs_package_store *store = own_store
-        ? vcs_package_store_open(zw_datadir(request),
-                                 vcs_package_store_quota_bytes())
-        : resident;
-    if (!store) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "NO_STORE",
-                               "execute", false, false,
-                               "the package store failed to open", zcode_dir);
+    bool own_store = false;
+    struct vcs_package_store *store = zw_fastobj_export_store(
+        request, reply, resident, zcode_dir, &own_store);
+    if (!store)
         return;
-    }
 
     uint8_t root[32];
     struct vcs_fastobj_carrier_stats stats;
@@ -1400,19 +1598,17 @@ void zcl_native_handle_zcode_package_fastobj_export(
         "serve it publicly");
 }
 
-void zcl_native_handle_zcode_package_fastobj_admit(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply)
+/* Read the carrier's package root into `root`. False with the error body
+ * set. */
+static bool zw_admit_decode_root(const struct zcl_command_request *request,
+                                 struct zcl_command_reply *reply,
+                                 uint8_t root[32])
 {
-    if (!request || !reply)
-        return;
-    static const char *const command = "zcode.package.fastobj.admit";
     /* package_root is the documented field; root stays accepted because
      * every sibling leaf (and fetch's own reply) spells it that way. */
     const char *hex = zw_input_str(request->input, "package_root");
     if (!hex || !hex[0])
         hex = zw_input_str(request->input, "root");
-    uint8_t root[32];
     if (!hex || !zcl_hex_decode(hex, root, 32)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "BAD_ROOT",
@@ -1420,8 +1616,51 @@ void zcl_native_handle_zcode_package_fastobj_admit(
                                "package_root must be 64 lowercase hex chars "
                                "(the carrier's package root)",
                                hex ? hex : "(missing)");
-        return;
+        return false;
     }
+    return true;
+}
+
+/* The store admit reads from, or NULL when none is available. */
+static struct vcs_package_store *zw_admit_open_store(
+    const struct zcl_command_request *request, const char *zcode_dir,
+    bool *own_store)
+{
+    /* The observe rule (the peers leaf): admit only READS the store — the
+     * cache is what it writes — so it never creates <datadir>/zcode as a
+     * read side-effect and never opens a second recovery owner behind a
+     * live daemon's cookie. An explicit input datadir is the deliberate
+     * offline/copy path and must already hold the carrier. When the
+     * in-process resident owns exactly this store, borrowing its handle is
+     * the only safe read — a second open of the same root would contend
+     * with it on the store's own process lock. */
+    struct vcs_package_store *store = NULL;
+    struct vcs_package_store *resident = vcs_package_store_global();
+    const char *resident_root = vcs_package_store_root_dir(resident);
+    if (resident_root && strcmp(resident_root, zcode_dir) == 0) {
+        store = resident;
+    } else if (zw_input_str(request->input, "datadir")) {
+        if (access(zcode_dir, F_OK) == 0) {
+            store = vcs_package_store_open(
+                zw_datadir(request), vcs_package_store_quota_bytes());
+            *own_store = store != NULL;
+        }
+    } else {
+        store = zw_observe_store(request, own_store);
+    }
+    return store;
+}
+
+void zcl_native_handle_zcode_package_fastobj_admit(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    static const char *const command = "zcode.package.fastobj.admit";
+    uint8_t root[32];
+    if (!zw_admit_decode_root(request, reply, root))
+        return;
     const char *cache_dir = zw_input_str(request->input, "cache_dir");
     if (!cache_dir || !cache_dir[0]) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -1436,29 +1675,9 @@ void zcl_native_handle_zcode_package_fastobj_admit(
     if (!zw_zcode_dir(request, reply, command, zcode_dir))
         return;
 
-    /* The observe rule (the peers leaf): admit only READS the store — the
-     * cache is what it writes — so it never creates <datadir>/zcode as a
-     * read side-effect and never opens a second recovery owner behind a
-     * live daemon's cookie. An explicit input datadir is the deliberate
-     * offline/copy path and must already hold the carrier. When the
-     * in-process resident owns exactly this store, borrowing its handle is
-     * the only safe read — a second open of the same root would contend
-     * with it on the store's own process lock. */
     bool own_store = false;
-    struct vcs_package_store *store = NULL;
-    struct vcs_package_store *resident = vcs_package_store_global();
-    const char *resident_root = vcs_package_store_root_dir(resident);
-    if (resident_root && strcmp(resident_root, zcode_dir) == 0) {
-        store = resident;
-    } else if (zw_input_str(request->input, "datadir")) {
-        if (access(zcode_dir, F_OK) == 0) {
-            store = vcs_package_store_open(
-                zw_datadir(request), vcs_package_store_quota_bytes());
-            own_store = store != NULL;
-        }
-    } else {
-        store = zw_observe_store(request, &own_store);
-    }
+    struct vcs_package_store *store =
+        zw_admit_open_store(request, zcode_dir, &own_store);
     if (!store) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
