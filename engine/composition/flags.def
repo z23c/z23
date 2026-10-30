@@ -825,9 +825,9 @@ Z23_FLAG("ZCL_DISABLE_SHA3_WINDOW_TRIPWIRE", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_DISABLE_UTXO_LADDER_TRIPWIRE", "env_runtime", "-", "-",
           "undocumented; first use engine/jobs/src/utxo_root_ladder_tripwire.c:auto")
 Z23_FLAG("ZCL_DISCARD_GATE_FILE_FLOOR", "env_build", "1", "-",
-          "undocumented; first use tools/lint/check_discarded_status.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_discarded_status.c:auto")
 Z23_FLAG("ZCL_DISCARD_GATE_SCAN_GLOB", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_discarded_status.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_discarded_status.c:auto")
 Z23_FLAG("ZCL_DOC_CLAIMS_GATE_TIMEOUT", "env_build", "180", "-",
           "undocumented; first use tools/lint/lintc/gate_doc_claims.c:auto")
 Z23_FLAG("ZCL_DOC_INLINE_PATHS_BASELINE", "env_build", "-", "-",

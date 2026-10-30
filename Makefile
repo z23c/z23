@@ -14891,10 +14891,10 @@ check-shell-host-assumptions: $(LINTC_TOOL) $(JSONQ_BIN) $(DEV_PACKAGE_VERIFY_BI
 # (B) `make ... | head/tail` with no pipefail: the pipeline reports tail's 0
 # and a failed build reads as a successful one. Both prongs are HARD with no
 # baseline and no per-line escape hatch.
-check-discarded-status:
+check-discarded-status: $(LINTC_TOOL)
 	@echo "══ LINT: no assertion or build status the shell discards ══"
-	@./tools/lint/check_discarded_status.sh --selftest
-	@./tools/lint/check_discarded_status.sh
+	@./build/bin/z23-lint check-discarded-status --selftest
+	@./build/bin/z23-lint check-discarded-status
 
 # Anti-flake ratchet: no NEW test assertion graded on a measured wall-clock
 # interval. A verdict a busy box can flip is measuring the box, not the code —

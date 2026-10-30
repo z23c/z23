@@ -125,6 +125,7 @@ LINT_GATE("check-stable-publish-contained", check_stable_publish_containment, LI
 LINT_GATE("check-determinism-ratchet", check_determinism_ratchet, LINT_CMD_PAIR)
 LINT_GATE("check-service-result-convergence", check_service_result_convergence, LINT_CMD_NONE)
 LINT_GATE("check-frontier-single-writer", check_frontier_single_writer, LINT_CMD_NONE)
+LINT_GATE("check-discarded-status", check_discarded_status, LINT_CMD_PAIR)
 LINT_GATE("check-no-utxos-mirror-read", check_no_utxos_mirror_read, LINT_CMD_PAIR)
 LINT_GATE("check-no-dev-history-in-contracts", check_no_dev_history_in_contracts, LINT_CMD_NONE)
 LINT_GATE("check-doc-claims", check_doc_claims, LINT_CMD_PAIR)

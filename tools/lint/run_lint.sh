@@ -154,7 +154,6 @@ gate_command() {
         check-z23-release-install)         echo 'make --no-print-directory -s z23-bootstrap install-selftest && "$ZCL_LINT_BIN_DIR/install_selftest" --selftest && bash platform/packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest && bash tools/scripts/deploy_z23_release.sh --selftest' ;;
         check-published-platforms)         echo './tools/lint/check_published_platforms.sh --selftest && ./tools/lint/check_published_platforms.sh' ;;
         check-shell-host-assumptions)      echo './build/bin/z23-lint check-shell-host-assumptions --selftest && ./tools/scripts/port_probe.sh --selftest && ./tools/scripts/commons_fix_admit.sh --selftest && ./tools/scripts/isolated_node_env_selftest.sh && ./tools/scripts/service_args_selftest.sh && bash tools/scripts/two_node_peer_tip_selftest.sh && ./build/bin/z23-lint check-shell-host-assumptions' ;;
-        check-discarded-status)            echo './tools/lint/check_discarded_status.sh --selftest && ./tools/lint/check_discarded_status.sh' ;;
         check-framework-shape)             echo 'ZCL_LINT_MODE=RATCHET ./build/bin/z23-lint check-framework-shape' ;;
         check-standalone-tools-link)       echo './tools/lint/check_standalone_tools_link.sh' ;;
         check-no-operator-paths)           echo './tools/lint/check_no_operator_paths.sh --selftest && ./tools/lint/check_no_operator_paths.sh' ;;
