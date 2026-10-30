@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "conditions/have_data_unreadable.h"
+#include "conditions/block_height_census.h"
 #include "framework/condition.h"
 #include "util/log_macros.h"
 
@@ -38,18 +39,17 @@ static hdu_select_idle_height_fn g_select_idle_height_fn =
 static hdu_select_idle_is_read_failure_fn g_select_idle_is_read_failure_fn =
     utxo_apply_stage_select_idle_is_read_failure;
 
+static bool pred_readable_candidate(const struct block_index *p, void *ctx)
+{
+    (void)ctx;
+    return (p->nStatus & BLOCK_HAVE_DATA) && !(p->nStatus & BLOCK_FAILED_MASK);
+}
+
 static struct block_index *target_index(struct main_state *ms, int target)
 {
     if (!ms || target < 0)
         return NULL;
-    size_t iter = 0;
-    struct block_index *p = NULL;
-    while (block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
-        if (p && p->nHeight == target && (p->nStatus & BLOCK_HAVE_DATA) &&
-            !(p->nStatus & BLOCK_FAILED_MASK))
-            return p;
-    }
-    return NULL;
+    return block_height_find(ms, target, pred_readable_candidate, NULL);
 }
 
 static struct block_index *exact_target_index(

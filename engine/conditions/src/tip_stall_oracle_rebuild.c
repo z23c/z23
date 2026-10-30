@@ -43,6 +43,7 @@
  */
 
 #include "conditions/tip_stall_oracle_rebuild.h"
+#include "conditions/block_height_census.h"
 #include "framework/condition.h"
 #include "util/log_macros.h"
 
@@ -100,6 +101,20 @@ static int64_t current_tip_height(struct main_state *ms)
     return ms ? (int64_t)active_chain_height(&ms->chain_active) : -1;
 }
 
+struct stale_fork_ctx {
+    const struct block_index *tip;
+    struct block_index *bh;
+    int target;
+};
+
+static bool pred_stale_fork_child(const struct block_index *p, void *vctx)
+{
+    const struct stale_fork_ctx *c = vctx;
+    return p->pprev == c->tip && (p->nStatus & BLOCK_HAVE_DATA) &&
+           !block_has_any_failure(p) &&
+           block_index_get_ancestor(c->bh, c->target) != p;
+}
+
 /* True iff a data-bearing child of the active tip sits at tip+1 but is NOT
  * the best-header chain's block at tip+1 — the stale-fork signature that
  * tip_fork_stale owns. We must defer to it (it also invalidates). */
@@ -108,23 +123,10 @@ static bool has_stale_fork_child(struct main_state *ms, struct block_index *tip,
 {
     if (!ms || !tip || !bh)
         return false;
-    size_t iter = 0;
-    struct block_index *p = NULL;
-    while (block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
-        if (!p || p->nHeight != target)
-            continue;
-        if (p->pprev != tip)
-            continue; /* must be a direct child of the active tip */
-        if (!(p->nStatus & BLOCK_HAVE_DATA))
-            continue;
-        if (block_has_any_failure(p))
-            continue;
-        /* data-bearing tip+1 child. If it is NOT on the best-header chain,
-         * it is a confirmed stale fork -> tip_fork_stale's job. */
-        if (block_index_get_ancestor(bh, target) != p)
-            return true;
-    }
-    return false;
+    /* data-bearing tip+1 children: one that is NOT on the best-header chain is
+     * a confirmed stale fork -> tip_fork_stale's job. */
+    struct stale_fork_ctx ctx = { .tip = tip, .bh = bh, .target = target };
+    return block_height_find(ms, target, pred_stale_fork_child, &ctx) != NULL;
 }
 
 static bool detect_tip_stall_oracle_rebuild(void)

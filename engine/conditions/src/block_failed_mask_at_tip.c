@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
+#include "conditions/block_height_census.h"
 #include "framework/condition.h"
 #include "util/log_macros.h"
 
@@ -247,16 +248,22 @@ static bool reducer_frontier_owns_stall(struct main_state *ms,
     return true;
 }
 
+static bool pred_failed(const struct block_index *p, void *ctx)
+{
+    (void)ctx;
+    return (p->nStatus & BLOCK_FAILED_MASK) != 0;
+}
+
+static bool pred_have_data_child(const struct block_index *p, void *tip)
+{
+    return p->pprev == tip && (p->nStatus & BLOCK_HAVE_DATA) &&
+           !(p->nStatus & BLOCK_FAILED_MASK);
+}
+
 static struct block_index *find_failed_next(struct main_state *ms, int target)
 {
     if (!ms) return NULL;
-    size_t iter = 0;
-    struct block_index *p = NULL;
-    while (block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
-        if (p && p->nHeight == target && (p->nStatus & BLOCK_FAILED_MASK))
-            return p;
-    }
-    return NULL;
+    return block_height_find(ms, target, pred_failed, NULL);
 }
 
 static struct block_index *find_have_data_next(struct main_state *ms, int target)
@@ -265,17 +272,7 @@ static struct block_index *find_have_data_next(struct main_state *ms, int target
     struct block_index *tip = active_chain_tip(&ms->chain_active);
     if (!tip || !tip->phashBlock)
         return NULL;
-
-    size_t iter = 0;
-    struct block_index *p = NULL;
-    while (block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
-        if (p && p->nHeight == target &&
-            p->pprev == tip &&
-            (p->nStatus & BLOCK_HAVE_DATA) &&
-            !(p->nStatus & BLOCK_FAILED_MASK))
-            return p;
-    }
-    return NULL;
+    return block_height_find(ms, target, pred_have_data_child, tip);
 }
 
 static int64_t current_tip_height(struct main_state *ms)

@@ -52,6 +52,7 @@
  */
 
 #include "conditions/tip_fork_stale.h"
+#include "conditions/block_height_census.h"
 #include "framework/condition.h"
 #include "util/log_macros.h"
 
@@ -206,6 +207,13 @@ static void remember_stale_target(struct block_index *target,
     atomic_store(&g_stale_target_valid, true);
 }
 
+static bool pred_tip_child_with_data(const struct block_index *p, void *tip)
+{
+    /* direct child of the active tip, with data, not already invalidated */
+    return same_index_hash(p->pprev, tip) && (p->nStatus & BLOCK_HAVE_DATA) &&
+           !block_has_any_failure(p);
+}
+
 /* Among the children at `target` height, return the one that is a CHILD of
  * the active tip carrying BLOCK_HAVE_DATA but NOT itself failed — i.e. the
  * data-bearing block the node keeps retrying at tip+1. NULL if none. */
@@ -214,20 +222,7 @@ static struct block_index *find_active_tip_child_with_data(
 {
     if (!ms || !tip)
         return NULL;
-    size_t iter = 0;
-    struct block_index *p = NULL;
-    while (block_map_next(&ms->map_block_index, &iter, NULL, &p)) {
-        if (!p || p->nHeight != target_height)
-            continue;
-        if (!same_index_hash(p->pprev, tip))
-            continue; /* must be a direct child of the active tip */
-        if (!(p->nStatus & BLOCK_HAVE_DATA))
-            continue;
-        if (block_has_any_failure(p))
-            continue; /* already invalidated — nothing to heal */
-        return p;
-    }
-    return NULL;
+    return block_height_find(ms, target_height, pred_tip_child_with_data, tip);
 }
 
 /* How long the tip must have held still before gates (b)/(c) are consulted.

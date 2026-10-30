@@ -791,6 +791,7 @@ int test_reducer_drive_watchdog(void);
 int test_orphan_utxo_above_tip(void);
 int test_tip_fork_stale(void);
 int test_tip_stall_oracle_rebuild_condition(void);
+int test_block_height_census(void);
 int test_active_chain_extend(void);
 int test_rebuild_recent(void);
 int test_torn_index_blocks_tip(void);

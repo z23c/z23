@@ -787,5 +787,6 @@ int test_tip_fork_stale(void)
         main_state_free(&ms);
     }
 
+    failures += test_block_height_census();
     return failures;
 }
