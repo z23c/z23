@@ -225,10 +225,16 @@ static int test_sync_service_request_policy(void)
         node.starting_height = 1000;
         node.last_getheaders_time = 100;
 
-        /* IBD: 10s interval */
+        /* IBD, peer lead under SYNCSVC_IBD_NEAR_LEAD: 1s interval */
         ASSERT(syncsvc_is_initial_block_download(&node, 500));
+        ASSERT(!syncsvc_should_request_headers(&node, 500, 101));
+        ASSERT(syncsvc_should_request_headers(&node, 500, 102));
+
+        /* IBD, far lead: 10s interval */
+        node.starting_height = 100500;
         ASSERT(!syncsvc_should_request_headers(&node, 500, 109));
         ASSERT(syncsvc_should_request_headers(&node, 500, 111));
+        node.starting_height = 1000;
 
         /* Catching up (not IBD, but behind peer): 30s interval */
         ASSERT(!syncsvc_is_initial_block_download(&node, 900));
@@ -307,7 +313,7 @@ static int test_sync_service_periodic_getheaders_action(void)
         memset(&node, 0, sizeof(node));
         memset(&action, 0, sizeof(action));
         node.state = PEER_SYNCING_HEADERS;
-        node.starting_height = 1000;
+        node.starting_height = 100500; /* far lead: the 10 s IBD base */
         node.last_getheaders_time = 100;
 
         syncsvc_plan_periodic_getheaders(&action, &node, 500, 109);
