@@ -598,10 +598,11 @@ static int bundle_case_timeout_messages(void)
              zcl_fleet_bundle_timeout_message(msg, sizeof(msg), NULL,
                                               ZCL_FLEET_PEER_UNKNOWN, root) &&
              strcmp(msg, no_peer) == 0);
-    SW_CHECK("bundle: a named peer that never connected is said so",
+    SW_CHECK("bundle: a named peer not connected after the timeout expired is "
+             "said so",
              zcl_fleet_bundle_timeout_message(msg, sizeof(msg), BUNDLE_ONION,
                                               ZCL_FLEET_PEER_ABSENT, root) &&
-             strstr(msg, "never connected within timeout_s") != NULL &&
+             strstr(msg, "was not connected after timeout_s expired") != NULL &&
              strstr(msg, BUNDLE_ONION) != NULL);
     SW_CHECK("bundle: a connected peer that did not serve the root is said so",
              zcl_fleet_bundle_timeout_message(msg, sizeof(msg), BUNDLE_ONION,
@@ -689,7 +690,7 @@ static int bundle_case_timeout_facts(void)
              strstr(out, "\"facts\":{") != NULL &&
              strstr(out, "\"peer_connected\":false") != NULL &&
              strstr(out, "\"peers_connected\":3") != NULL &&
-             strstr(out, "never connected within timeout_s") != NULL &&
+             strstr(out, "was not connected after timeout_s expired") != NULL &&
              strstr(out, "it may be offline or still dialing over Tor") !=
                  NULL);
     return failures;

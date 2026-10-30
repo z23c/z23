@@ -379,9 +379,9 @@ bool zcl_fleet_bundle_timeout_message(char *out, size_t cap, const char *peer,
                      "bundle offer while connected", peer, root);
     else if (state == ZCL_FLEET_PEER_ABSENT)
         n = snprintf(out, cap,
-                     "the named peer %s never connected within timeout_s (it "
-                     "may be offline or still dialing over Tor); ask its "
-                     "operator to keep the node up, then retry", peer);
+                     "the named peer %s was not connected after timeout_s "
+                     "expired (it may be offline or still dialing over Tor); "
+                     "ask its operator to keep the node up, then retry", peer);
     else
         n = snprintf(out, cap,
                      "the named peer %s state is unknown: the node's peer "
@@ -405,9 +405,9 @@ bool zcl_fleet_bundle_timeout_summary(char *out, size_t cap, const char *peer,
                      "fleet bundle offer", peer);
     else if (state == ZCL_FLEET_PEER_ABSENT)
         n = snprintf(out, cap,
-                     "the named peer %s never connected within timeout_s; "
-                     "ask its operator to keep the node up, then retry",
-                     peer);
+                     "the named peer %s was not connected after timeout_s "
+                     "expired; ask its operator to keep the node up, then "
+                     "retry", peer);
     else
         n = snprintf(out, cap,
                      "the named peer %s: peer state is unknown (the node's "
