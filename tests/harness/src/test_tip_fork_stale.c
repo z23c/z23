@@ -24,6 +24,8 @@
 
 #include "test/test_core.h"
 
+#include "conditions/block_height_census.h"
+
 #include "conditions/tip_fork_stale.h"
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
@@ -169,6 +171,7 @@ static bool tfs_confirmed_stale_fork_ok(struct main_state *ms, int tip_h)
     atomic_store(&g_stub_rebuild_ret, true);
 
     main_state_init(ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256];
     struct block_index *tip = tfs_build_main(ms, hashes, tip_h);
 
@@ -234,6 +237,7 @@ static bool tfs_same_height_stale_sibling_ok(struct main_state *ms, int tip_h)
     atomic_store(&g_stub_rebuild_ret, true);
 
     main_state_init(ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256];
     struct block_index *tip = tfs_build_main(ms, hashes, tip_h);
 
@@ -294,6 +298,7 @@ static bool tfs_rebuild_fail_queues_body_ok(struct main_state *ms, int tip_h)
     atomic_store(&g_stub_rebuild_ret, false);
 
     main_state_init(ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256];
     struct block_index *tip = tfs_build_main(ms, hashes, tip_h);
 
@@ -352,6 +357,7 @@ static bool tfs_legit_catchup_on_header_chain_ok(struct main_state *ms,
     atomic_store(&g_stub_rebuild_calls, 0);
 
     main_state_init(ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256];
     struct block_index *tip = tfs_build_main(ms, hashes, tip_h);
 
@@ -400,6 +406,7 @@ static bool tfs_no_higher_work_header_ok(struct main_state *ms, int tip_h)
     atomic_store(&g_stub_invalidate_calls, 0);
 
     main_state_init(ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256];
     struct block_index *tip = tfs_build_main(ms, hashes, tip_h);
 
@@ -431,6 +438,7 @@ static bool tfs_unstalled_tip_stays_quiet_ok(struct main_state *ms, int tip_h)
     atomic_store(&g_stub_invalidate_calls, 0);
 
     main_state_init(ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256];
     struct block_index *tip = tfs_build_main(ms, hashes, tip_h);
 
@@ -476,6 +484,7 @@ static bool tfs_incident_without_hold_stays_patient_ok(
     atomic_store(&g_stub_anomaly_hold, -1);
 
     main_state_init(ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256], canon_hash, hdr_h[8];
     struct block_index *best_header = NULL;
     struct block_index *tip = tfs_build_incident_shape(
@@ -509,6 +518,7 @@ static bool tfs_incident_hold_at_next_fires_ok(struct main_state *ms,
     atomic_store(&g_stub_anomaly_hold, (int64_t)tip_h + 1);
 
     main_state_init(ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256], canon_hash, hdr_h[8];
     struct block_index *best_header = NULL;
     struct block_index *tip = tfs_build_incident_shape(
@@ -549,6 +559,7 @@ static bool tfs_unrelated_anomaly_hold_stays_patient_ok(
     atomic_store(&g_stub_anomaly_hold, (int64_t)tip_h - 40);
 
     main_state_init(ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256], canon_hash, hdr_h[8];
     struct block_index *best_header = NULL;
     struct block_index *tip = tfs_build_incident_shape(
@@ -584,6 +595,7 @@ static bool tfs_hold_on_canonical_child_refuses_ok(struct main_state *ms,
     atomic_store(&g_stub_anomaly_hold, (int64_t)tip_h + 1);
 
     main_state_init(ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256];
     struct block_index *tip = tfs_build_main(ms, hashes, tip_h);
 

@@ -19,6 +19,8 @@
 
 #include "test/test_core.h"
 
+#include "conditions/block_height_census.h"
+
 #include "conditions/tip_stall_oracle_rebuild.h"
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
@@ -177,6 +179,7 @@ static int tsor_case_nonfork_oracle_ahead(int tip_h)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256];
     struct block_index *tip = tsor_build_main(&ms, hashes, tip_h);
 
@@ -236,6 +239,7 @@ static int tsor_case_oracle_unreachable(int tip_h)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256];
     struct block_index *tip = tsor_build_main(&ms, hashes, tip_h);
     struct uint256 hdr_h[8];
@@ -273,6 +277,7 @@ static int tsor_case_stale_fork_present(int tip_h)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256];
     struct block_index *tip = tsor_build_main(&ms, hashes, tip_h);
 
@@ -324,6 +329,7 @@ static int tsor_case_no_higher_work_header(int tip_h)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256];
     struct block_index *tip = tsor_build_main(&ms, hashes, tip_h);
     ms.pindex_best_header = tip; /* no more-work header */
@@ -358,6 +364,7 @@ static int tsor_case_tip_not_stalled(int tip_h)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     struct uint256 hashes[256];
     struct block_index *tip = tsor_build_main(&ms, hashes, tip_h);
     struct uint256 hdr_h[8];

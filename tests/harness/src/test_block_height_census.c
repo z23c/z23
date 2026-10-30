@@ -156,6 +156,67 @@ static int bhc_case_overflow_falls_back_to_scan(void)
     BHC_CHECK("overflow result matches the full scan",
               block_height_find(&ms, 1, pred_any, NULL) ==
               bhc_scan(&ms, 1, pred_any));
+    unsigned long scans = block_height_census_test_scans();
+    (void)block_height_find(&ms, 1, pred_failed, NULL);
+    (void)block_height_find(&ms, 1, pred_failed, NULL);
+    BHC_CHECK("overflow marker is cached: no census rescan per call",
+              block_height_census_test_scans() == scans);
+    return failures;
+}
+
+static int64_t g_fake_secs;
+static int64_t bhc_fake_clock(void)
+{
+    return g_fake_secs;
+}
+
+static int bhc_case_moved_block_not_returned(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    block_height_census_test_reset();
+
+    struct block_index *g = bhc_insert(&ms, 0, 0, NULL, BLOCK_VALID_TREE);
+    struct block_index *x =
+        bhc_insert(&ms, 1, 1, g, BLOCK_VALID_TREE | BLOCK_FAILED_VALID);
+    BHC_CHECK("failed block found at its height",
+              block_height_find(&ms, 1, pred_failed, NULL) == x);
+    unsigned long scans = block_height_census_test_scans();
+    x->nHeight = 7;
+    BHC_CHECK("a block relinked to another height is no longer returned",
+              block_height_find(&ms, 1, pred_failed, NULL) == NULL &&
+              bhc_scan(&ms, 1, pred_failed) == NULL &&
+              block_height_census_test_scans() == scans);
+    return failures;
+}
+
+static int bhc_case_expiry_rescans(void)
+{
+    int failures = 0;
+    struct main_state ms;
+    main_state_init(&ms);
+    block_height_census_test_reset();
+    g_fake_secs = 1000;
+    block_height_census_test_set_clock(bhc_fake_clock);
+
+    struct block_index *g = bhc_insert(&ms, 0, 0, NULL, BLOCK_VALID_TREE);
+    struct block_index *y = bhc_insert(&ms, 5, 1, g, BLOCK_VALID_TREE);
+    y->nHeight = 9; /* height assigned elsewhere after insertion */
+    y->nStatus |= BLOCK_FAILED_VALID;
+    BHC_CHECK("nothing failed at h=5 yet",
+              block_height_find(&ms, 5, pred_failed, NULL) == NULL);
+    unsigned long scans = block_height_census_test_scans();
+    y->nHeight = 5; /* relinked INTO h=5; map, tip, header unchanged */
+    g_fake_secs += 29;
+    BHC_CHECK("inside the window the census is reused",
+              block_height_find(&ms, 5, pred_failed, NULL) == NULL &&
+              block_height_census_test_scans() == scans);
+    g_fake_secs += 1;
+    BHC_CHECK("after 30 s the census rescans and sees the block",
+              block_height_find(&ms, 5, pred_failed, NULL) == y &&
+              block_height_census_test_scans() == scans + 1);
+    block_height_census_test_reset();
     return failures;
 }
 
@@ -166,5 +227,7 @@ int test_block_height_census(void)
     failures += bhc_case_matches_scan_and_caches();
     failures += bhc_case_rebuilds_on_change();
     failures += bhc_case_overflow_falls_back_to_scan();
+    failures += bhc_case_moved_block_not_returned();
+    failures += bhc_case_expiry_rescans();
     return failures;
 }

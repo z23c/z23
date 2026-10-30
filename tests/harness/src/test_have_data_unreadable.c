@@ -35,6 +35,8 @@
 
 #include "test/test_core.h"
 
+#include "conditions/block_height_census.h"
+
 #include "conditions/have_data_unreadable.h"
 #include "core/arith_uint256.h"
 #include "core/serialize.h"
@@ -336,6 +338,7 @@ static int hdu_case_fresh_tip_no_remedy(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     hdu_build_chain(&ms, 10, hashes); /* tip h=9, all blocks readable */
     condition_engine_set_main_state(&ms);
     register_have_data_unreadable();
@@ -374,6 +377,7 @@ static int hdu_case_unknown_age_clears_have_data(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     hdu_build_chain(&ms, 10, hashes); /* tip h=9 */
     condition_engine_set_main_state(&ms);
     register_have_data_unreadable();
@@ -414,6 +418,7 @@ static int hdu_case_stalled_tip_clears_have_data(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     hdu_build_chain(&ms, 10, hashes); /* tip h=9 */
     condition_engine_set_main_state(&ms);
     register_have_data_unreadable();
@@ -479,6 +484,7 @@ static int hdu_case_healed_block_does_not_refire(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     hdu_build_chain(&ms, 10, hashes); /* tip h=9 */
     condition_engine_set_main_state(&ms);
     register_have_data_unreadable();
@@ -535,6 +541,7 @@ static int hdu_case_midchain_read_fail_targeted(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     hdu_build_chain(&ms, 10, hashes); /* tip h=9, all blocks readable */
     condition_engine_set_main_state(&ms);
     register_have_data_unreadable();
@@ -618,6 +625,7 @@ static int hdu_case_witness_clears_when_readable(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     hdu_build_chain(&ms, 10, hashes); /* tip h=9 */
     condition_engine_set_main_state(&ms);
     register_have_data_unreadable();
@@ -691,6 +699,7 @@ static int hdu_case_cooldown_rearm_fourth_remedy(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     hdu_build_chain(&ms, 10, hashes); /* tip h=9 */
     condition_engine_set_main_state(&ms);
     register_have_data_unreadable();
@@ -772,6 +781,7 @@ static int hdu_case_body_torn_read_repair(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     hdu_build_chain(&ms, 10, hashes); /* tip h=9 */
     condition_engine_set_main_state(&ms);
     register_have_data_unreadable();
@@ -840,6 +850,7 @@ static int hdu_case_orphan_note_spares_active(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     hdu_build_chain(&ms, 10, hashes);
     condition_engine_set_main_state(&ms);
     register_have_data_unreadable();

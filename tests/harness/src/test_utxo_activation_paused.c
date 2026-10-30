@@ -2,6 +2,8 @@
 
 #include "test/test_core.h"
 
+#include "conditions/block_height_census.h"
+
 #include "conditions/utxo_activation_paused.h"
 #include "chain/mmb.h"
 #include "chain/mmr.h"
@@ -676,6 +678,7 @@ static int uap_run_block_stale_tip_case(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     struct uint256 hashes[2];
     struct block_index *tip = insert_test_block(
         &ms, hashes, 0, BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA);
@@ -723,6 +726,7 @@ static int uap_run_block_fork_child_case(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     struct uint256 active_h;
     struct uint256 fork_parent_h;
     struct uint256 fork_child_h;
@@ -800,6 +804,7 @@ static int uap_run_tip_wedged_no_advance_case(void)
     memset(block_hash, 0x54, sizeof(block_hash));
     memset(chain_work, 0x58, sizeof(chain_work));
     main_state_init(&ms);
+    block_height_census_test_reset();
     tip.nHeight = 100;
     tip.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
     recovered_tip.nHeight = 101;
@@ -856,6 +861,7 @@ static int uap_run_validate_repair_owner_case(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     struct uint256 hashes[3];
     struct block_index *b0 = insert_test_block(
         &ms, hashes, 0, BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA);
@@ -907,6 +913,7 @@ static int uap_run_reducer_owner_case(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     struct uint256 h1, h2, h3;
     struct block_index *b1 = insert_reducer_owner_block(
         &ms, &h1, a + 1, NULL, BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA);
@@ -965,6 +972,7 @@ static int uap_run_pending_finalize_case(void)
 
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     struct uint256 h100, h101;
     struct block_index *tip = insert_reducer_owner_block(
         &ms, &h100, 100, NULL, BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA);
@@ -1061,6 +1069,7 @@ static int uap_run_resume_remedy_case(void)
      * resumed activation observably reached it. */
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     struct uint256 hashes[2];
     struct block_index *b0 = insert_test_block(
         &ms, hashes, 0, BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA);
@@ -1101,6 +1110,7 @@ static int uap_run_drift_repair_case(void)
     bool ok = true;
     struct main_state ms;
     main_state_init(&ms);
+    block_height_census_test_reset();
     struct uint256 hashes[2];
     struct block_index *b0 = insert_test_block(
         &ms, hashes, 0, BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA);
@@ -1183,6 +1193,7 @@ static int uap_run_snapshot_recovery_case(void)
     memset(block_hash, 0x51, sizeof(block_hash));
     memset(chain_work, 0x55, sizeof(chain_work));
     main_state_init(&ms);
+    block_height_census_test_reset();
     tip.nHeight = 100;
     tip.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
     recovered_tip.nHeight = 101;
@@ -1252,6 +1263,7 @@ static int uap_run_local_import_case(void)
     memset(block_hash, 0x52, sizeof(block_hash));
     memset(chain_work, 0x56, sizeof(chain_work));
     main_state_init(&ms);
+    block_height_census_test_reset();
     tip.nHeight = 100;
     tip.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
     best_header.nHeight = 110;
@@ -1326,6 +1338,7 @@ static int uap_run_cooldown_rearm_case(void)
     memset(block_hash, 0x54, sizeof(block_hash));
     memset(chain_work, 0x58, sizeof(chain_work));
     main_state_init(&ms);
+    block_height_census_test_reset();
     tip.nHeight = 100;
     tip.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
     best_header.nHeight = 110;
@@ -1405,6 +1418,7 @@ static int uap_run_idle_snapshot_wait_case(void)
     memset(block_hash, 0x53, sizeof(block_hash));
     memset(chain_work, 0x57, sizeof(chain_work));
     main_state_init(&ms);
+    block_height_census_test_reset();
     tip.nHeight = 100;
     tip.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
     best_header.nHeight = 110;
