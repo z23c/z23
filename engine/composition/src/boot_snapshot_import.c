@@ -787,13 +787,42 @@ static void snapshot_import_publish_outputs(int64_t *out_utxo_count, int64_t sna
     if (out_best_hash)   memcpy(out_best_hash, best_hash, 32);
 }
 
+/* Argument guard for boot_import_snapshot_db; the caller logs the refusal. */
+static bool snapshot_import_args_ok(struct node_db *ndb, const char *snapshot_path)
+{
+    return ndb && ndb->open && ndb->db && snapshot_path;
+}
+
+/* Provenance predicate for the peer-served path; the caller logs the refusal. */
+static bool snapshot_import_above_checkpoint(const struct sha3_utxo_checkpoint *cp,
+    int64_t snap_height)
+{
+    return cp && snap_height > (int64_t)cp->height;
+}
+
+/* True when the installed set must be rejected at the compiled checkpoint
+ * height; the caller logs the mismatch. A match prints the verification line. */
+static bool snapshot_import_checkpoint_mismatch(struct node_db *ndb,
+    const struct sha3_utxo_checkpoint *cp, int64_t snap_height, uint64_t *cnt)
+{
+    if (!cp || snap_height != (int64_t)cp->height)
+        return false;
+    if (snapshot_import_checkpoint_match(ndb, cp, cnt)) {
+        printf("[boot_snapshot_import] checkpoint SHA3 verified at "
+               "h=%lld (%llu UTXOs)\n", (long long)snap_height,
+               (unsigned long long)*cnt);
+        return false;
+    }
+    return true;
+}
+
 bool boot_import_snapshot_db(struct node_db *ndb,
                               const char *snapshot_path,
                               int64_t *out_utxo_count,
                               int64_t *out_snap_height,
                               uint8_t out_best_hash[32])
 {
-    if (!ndb || !ndb->open || !ndb->db || !snapshot_path)
+    if (!snapshot_import_args_ok(ndb, snapshot_path))
         LOG_FAIL("boot_snapshot_import", "null inputs");
     if (!snapshot_import_target_eligible(ndb))
         return false;
@@ -847,7 +876,7 @@ bool boot_import_snapshot_db(struct node_db *ndb,
      * UTXO/shielded contents, and the path does NOT use this function. */
     {
         const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-        if (cp && snap_height > (int64_t)cp->height) {
+        if (snapshot_import_above_checkpoint(cp, snap_height)) {
             sqlite3_close(src);
             LOG_FAIL("boot_snapshot_import",
                      "REFUSING peer snapshot at h=%lld (above compiled "
@@ -908,21 +937,15 @@ bool boot_import_snapshot_db(struct node_db *ndb,
      * load-bearing half and closes the fabricate-at-the-checkpoint hole. */
     if (ok) {
         const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-        if (cp && snap_height == (int64_t)cp->height) {
-            uint64_t cnt = 0;
-            if (!snapshot_import_checkpoint_match(ndb, cp, &cnt)) {
-                LOG_WARN("boot_snapshot_import",
-                         "checkpoint SHA3 MISMATCH at h=%lld (count=%llu "
-                         "want=%llu) — snapshot REJECTED, not installed as "
-                         "ground truth",
-                         (long long)snap_height, (unsigned long long)cnt,
-                         (unsigned long long)cp->utxo_count);
-                ok = false;
-            } else {
-                printf("[boot_snapshot_import] checkpoint SHA3 verified at "
-                       "h=%lld (%llu UTXOs)\n", (long long)snap_height,
-                       (unsigned long long)cnt);
-            }
+        uint64_t cnt = 0;
+        if (snapshot_import_checkpoint_mismatch(ndb, cp, snap_height, &cnt)) {
+            LOG_WARN("boot_snapshot_import",
+                     "checkpoint SHA3 MISMATCH at h=%lld (count=%llu "
+                     "want=%llu) — snapshot REJECTED, not installed as "
+                     "ground truth",
+                     (long long)snap_height, (unsigned long long)cnt,
+                     (unsigned long long)cp->utxo_count);
+            ok = false;
         }
     }
     if (ok) {
