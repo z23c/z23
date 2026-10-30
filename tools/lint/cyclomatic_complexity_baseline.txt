@@ -247,7 +247,7 @@ engine/composition/src/boot_refold_staged.c:boot_snapshot_drop_bodiless_have_dat
 engine/composition/src/boot_snapshot_import.c:boot_import_snapshot_db:55
 engine/composition/src/consensus_state_snapshot_export_proof.c:running_binary_digest:18
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:37
-engine/entry/main_cli_modes.c:bench_crypto_vs_rust:55
+engine/entry/main_cli_modes.c:bench_crypto_vs_rust:51
 engine/entry/main_cli_modes.c:cli_main:108
 engine/entry/main_cli_modes.c:cli_rpc_call_internal_ex:29
 engine/entry/main_cli_modes.c:import_complete_shielded_mode:39
