@@ -17,7 +17,9 @@
 #include <ctype.h>
 #include <errno.h>
 #include <stdarg.h>
+#if defined(__linux__)
 #include <sched.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -555,9 +557,11 @@ static long cp_nproc(void)
 {
     const char *e = getenv("OMP_NUM_THREADS");
     long n = e && *e ? strtol(e, NULL, 10) : 0;
+#if defined(__linux__)
     cpu_set_t set;
     if (n <= 0 && sched_getaffinity(0, sizeof set, &set) == 0)
         n = CPU_COUNT(&set);
+#endif
     if (n <= 0)
         n = sysconf(_SC_NPROCESSORS_ONLN);
     e = getenv("OMP_THREAD_LIMIT");
