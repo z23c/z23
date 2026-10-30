@@ -20,7 +20,7 @@ Checkpoint status (2026-07-11):
   `ZCL_DEV_BUILD`) and to an honest `ZCL_COMMAND_COMPAT` stub with a
   `compat_target` in the release build. The old checkout-local devloop
   dispatcher path in `engine/entry/main.c` is deleted;
-  `tools/lint/check_release_no_dev_symbols.sh` proves with `nm` that the
+  `z23-lint check-release-no-dev-symbols` proves with `nm` that the
   release binary links none of the dev executors.
 - The transport-neutral registry engine compiles in `engine/modules/kernel`
   (`engine/modules/kernel/src/command_registry.c`).

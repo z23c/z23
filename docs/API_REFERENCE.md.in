@@ -92,7 +92,7 @@ are `ready` with a real handler; in a release build they are honest `compat`
 stubs whose `availability_reason` and `compat_target` tell you to run the same
 command against `z23-dev` instead. This page always renders the
 **release** view, so it describes the binary an operator actually ships.
-[`tools/lint/check_release_no_dev_symbols.sh`](../tools/lint/check_release_no_dev_symbols.sh)
+`z23-lint check-release-no-dev-symbols`
 proves via `nm` that the release binary links none of the dev executors, so the
 distinction is structural, not a convention.
 
@@ -177,4 +177,4 @@ stop does not reach that process.
 | Missing required input fails closed with a structured `zcl.result.v1` error, not a silent pass | `test_command_registry_catalog.c::test_ops_state_requires_subsystem`; `test_native_api_contract.c::test_missing_required_input_fails_closed_structured` |
 | `dev.*` leaves are release-`compat`, never falsely `ready` | `test_command_registry_catalog.c::test_dev_branch_leaves`, `test_dev_vcs_revert_release_stub`, `test_dev_vcs_seal_grant_release_stub` |
 | Every bridged `ready` leaf has exactly one dispatch binding (body fn XOR direct RPC) | `test_command_registry_catalog.c` bridge-binding coverage |
-| Release binary links no dev-mutation executor symbols | `tools/lint/check_release_no_dev_symbols.sh` |
+| Release binary links no dev-mutation executor symbols | `z23-lint check-release-no-dev-symbols` |

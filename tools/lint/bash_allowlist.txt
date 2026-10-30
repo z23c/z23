@@ -173,7 +173,6 @@ tools/lint/check_pipefail_status_pipe.sh
 tools/lint/check_platform_header_guards.sh
 tools/lint/check_published_platforms.sh
 tools/lint/check_read_leaf_no_boot_ceremony.sh
-tools/lint/check_release_no_dev_symbols.sh
 tools/lint/check_ship_remote_transaction.sh
 tools/lint/check_standalone_tools_link.sh
 tools/lint/check_status_reason_single.sh

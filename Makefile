@@ -13170,8 +13170,9 @@ check-hotswap-module-imports:
 # the `current` generation symlink, exec `systemctl --user ...`). Structural
 # proof always runs; the nm -D artifact proof runs when a fresh release
 # binary is present.
-check-release-no-dev-symbols:
-	@tools/lint/check_release_no_dev_symbols.sh
+check-release-no-dev-symbols: $(LINTC_TOOL)
+	@./build/bin/z23-lint check-release-no-dev-symbols --selftest
+	@./build/bin/z23-lint check-release-no-dev-symbols
 
 # Phase-0 release containment.  Remove this gate only in the same reviewed
 # change that lands immutable exact-candidate evidence, signed manifests, and

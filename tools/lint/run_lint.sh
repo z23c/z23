@@ -124,7 +124,6 @@ gate_command() {
         check-hotswap-swappable-shape)     echo 'build/bin/z23-lint check-hotswap-swappable-shape' ;;
         check-hotswap-package-receipt-is-not-authority) echo 'build/bin/z23-lint check-hotswap-package-receipt-is-not-authority --selftest && build/bin/z23-lint check-hotswap-package-receipt-is-not-authority' ;;
         check-hotswap-module-imports)      echo 'tools/lint/check_hotswap_module_imports.sh --selftest && tools/lint/check_hotswap_module_imports.sh' ;;
-        check-release-no-dev-symbols)      echo 'tools/lint/check_release_no_dev_symbols.sh' ;;
         check-stable-publish-contained)    echo 'bash tools/scripts/check_stable_publish_containment.sh --self-test && bash tools/scripts/check_stable_publish_containment.sh' ;;
         check-raw-sqlite)                  echo 'tools/scripts/check_raw_sqlite.sh' ;;
         check-raw-malloc)                  echo 'tools/scripts/check_raw_malloc.sh --selftest && tools/scripts/check_raw_malloc.sh' ;;

@@ -839,7 +839,7 @@ directly): partially landed.**
   release build. The legacy checkout-local devloop dispatcher is deleted
   from `engine/entry/main.c`; `tools/dev/devloop_menu.c` is a thin wrapper over
   `zcl_command_registry_menu_json`/`_search_json`;
-  `tools/lint/check_release_no_dev_symbols.sh` proves via `nm` that the
+  `z23-lint check-release-no-dev-symbols` proves via `nm` that the
   release binary links no dev-mutation executors.
 - **Live on the dev lane (swappable leaves + owner-gated generation activation):**
   Tier-1 in-process hot-swap has a native `native.leaves` provider, and the

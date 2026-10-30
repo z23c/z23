@@ -37,6 +37,7 @@ LINT_GATE("check-core-seal-root-mirror", check_core_seal_root_mirror, LINT_CMD_P
 LINT_GATE("check-peer-floor-single-source", check_peer_floor_single_source, LINT_CMD_PLAIN)
 LINT_GATE("check-proof-server-pin", check_proof_server_pin, LINT_CMD_PLAIN)
 LINT_GATE("check-tu-random-seed", check_tu_random_seed, LINT_CMD_PLAIN)
+LINT_GATE("check-release-no-dev-symbols", check_release_no_dev_symbols, LINT_CMD_PAIR)
 LINT_GATE("check-stopwatch-skip-detector", check_stopwatch_skip_detector, LINT_CMD_PLAIN)
 LINT_GATE("check-no-warning-suppression", check_no_warning_suppression, LINT_CMD_NONE)
 LINT_GATE("check-privileged-transition-receipt", check_privileged_transition_receipt, LINT_CMD_PLAIN)
