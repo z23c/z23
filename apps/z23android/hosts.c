@@ -65,6 +65,17 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
     else snprintf(out, cap, "Node catching up · %s of %s", zapp_grouped(height, at), zapp_grouped(target, top));
     return out;
 }
+enum zapp_pace zapp_status_pace(const char *status)
+{
+    struct json_value root = {0};
+    enum zapp_pace pace = ZAPP_PACE_NORMAL;
+    if (!status || !json_read(&root, status, strlen(status))) return pace;
+    const char *word = json_get_str(json_get(json_get(&root, "data"), "pace"));
+    if (word && !strcmp(word, "gentle")) pace = ZAPP_PACE_GENTLE;
+    else if (word && !strcmp(word, "pause")) pace = ZAPP_PACE_PAUSE;
+    json_free(&root);
+    return pace;
+}
 const char *zapp_paced_line(enum zapp_pace pace, bool process_running, const char *node_line,
                             char *out, size_t cap)
 {

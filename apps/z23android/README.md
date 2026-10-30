@@ -150,9 +150,10 @@ registers the platform listener through the NDK thermal API. The app registers i
 starts and keeps it while hidden, because the foreground service keeps the process alive. When the pace
 changes the app replaces the one-word file `pace` (`normal`, `gentle` or `pause`) in the node data
 directory by writing a temporary file, syncing it and renaming it; the first status after start always
-writes, replacing a file left by an earlier run. A missing file means normal. The main status line reads
-"Syncing gently · phone is warm" at gentle pace and "Sync paused · phone is cooling down" at pause
-while the node runs. The node applies the pace in a separate change.
+writes, replacing a file left by an earlier run. A missing file means normal. The main status line shows what the node reports, not what the app wrote: it reads
+"Syncing gently · phone is warm" when the node status carries pace `gentle` and "Sync paused · phone is
+cooling down" for `pause`. A node that does not apply the pace file reports no pace, so the plain node
+line stays.
 
 ## Private voice and fleet host
 

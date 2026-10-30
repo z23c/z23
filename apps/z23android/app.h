@@ -42,7 +42,7 @@ struct zapp_view {
     char pair_offer[256]; /* Descriptor offered over USB, awaiting the owner's decision. */
     char pair_code[8];
     char node_line[96]; /* One-line phone node summary for the main screen. */
-    enum zapp_pace pace; /* Pace the node was told to keep, from the phone thermal status. */
+    enum zapp_pace pace; /* Pace the node reports in its status, normal when it reports none. */
     char suggestion[96]; /* One question for the current state, or empty. */
     char pending_question[ZAPP_PENDING_CAP]; /* Question being answered, shown until its answer or cancel. */
 };

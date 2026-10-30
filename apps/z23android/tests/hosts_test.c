@@ -192,6 +192,14 @@ int main(void)
     assert(!strcmp(zapp_node_line(true, true, false, 3301554, 3301553, -1, line, sizeof(line)),
                    "Node in sync · 3,301,554"));
     const char *sync_text = "Node catching up · 3,301,133 of 3,301,537";
+    const char *gentle_reply = "{\"ok\":true,\"data\":{\"provable_tip\":5,\"pace\":\"gentle\"}}";
+    const char *old_reply = "{\"ok\":true,\"data\":{\"provable_tip\":5}}";
+    assert(!strcmp(zapp_paced_line(zapp_status_pace(gentle_reply), true, sync_text, line, sizeof(line)),
+                   "Syncing gently · phone is warm"));
+    assert(!strcmp(zapp_paced_line(zapp_status_pace(old_reply), true, sync_text, line, sizeof(line)), sync_text));
+    assert(zapp_status_pace("{\"data\":{\"pace\":\"pause\"}}") == ZAPP_PACE_PAUSE);
+    assert(zapp_status_pace("{\"data\":{\"pace\":\"unknown\"}}") == ZAPP_PACE_NORMAL);
+    assert(zapp_status_pace("not json") == ZAPP_PACE_NORMAL && zapp_status_pace(NULL) == ZAPP_PACE_NORMAL);
     assert(!strcmp(zapp_paced_line(ZAPP_PACE_NORMAL, true, sync_text, line, sizeof(line)), sync_text));
     assert(!strcmp(zapp_paced_line(ZAPP_PACE_GENTLE, true, sync_text, line, sizeof(line)),
                    "Syncing gently · phone is warm"));

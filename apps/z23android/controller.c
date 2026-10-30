@@ -130,18 +130,14 @@ static void refresh_suggestion(struct controller *c)
                     c->view.fleet_stale ? NULL : c->view.fleet_status, c->asked,
                     c->view.suggestion, sizeof(c->view.suggestion));
 }
-/* Runs on a platform binder thread; the pace file write is small and done inline. */
+/* Runs on a platform binder thread; the pace file write is small and done inline. The view shows the
+ * pace the node reports, not the one written here, so a node that ignores the file is not misreported. */
 #ifdef __ANDROID__
 static void thermal_status(int status, void *ctx)
 {
     struct controller *c = ctx;
     pthread_mutex_lock(&c->pace_lock);
-    enum zapp_pace next = zapp_pace_next(zapp_node_pace(&c->runtime), status);
-    bool changed = next != zapp_node_pace(&c->runtime);
-    if (zapp_node_pace_write(&c->runtime, next) && changed) {
-        pthread_mutex_lock(&c->lock); c->view.pace = next; pthread_mutex_unlock(&c->lock);
-        notify_view(c);
-    }
+    (void)zapp_node_pace_write(&c->runtime, zapp_pace_next(zapp_node_pace(&c->runtime), status));
     pthread_mutex_unlock(&c->pace_lock);
 }
 #endif
@@ -150,6 +146,7 @@ static void observe_node(struct controller *c)
     char *output = calloc(1, ZAPP_TEXT_CAP);
     bool ran = output && zapp_operation_run(&c->runtime, "status", output, ZAPP_TEXT_CAP);
     struct node_reading n = read_status(ran ? output : NULL);
+    enum zapp_pace pace = zapp_status_pace(ran ? output : NULL);
     observe_balance(c, output);
     free(output);
     bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
@@ -161,6 +158,7 @@ static void observe_node(struct controller *c)
     pthread_mutex_lock(&c->lock);
     c->view.node_running = n.responding;
     c->view.node_process_running = process_running;
+    c->view.pace = pace;
     c->view.node_wanted = wanted;
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), status);
     copy_text(c->view.node_line, sizeof(c->view.node_line), line);
