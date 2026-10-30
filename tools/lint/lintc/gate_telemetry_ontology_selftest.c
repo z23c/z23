@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creiton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: --selftest for check-telemetry-ontology
  * (gate_telemetry_ontology.c). Runs the whole 13-case trip/recover matrix

@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creiton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: ontology-side half of check-telemetry-ontology: the declared
  * TELEMETRY_FIELD key set (with judged/question population floors), the

@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creiton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: --selftest for check-capability-inventory-generated
  * (gate_capability_inventory_generated.c). Mirrors the shell selftest: the

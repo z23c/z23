@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creiton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: shared helpers for the check_ship_remote_transaction gate port.
  * Subprocess execution (fork + execvp, never system or popen), an internal

@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creiton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: the pre-scan self-check for check-doc-claims, ported from the
  * selfcheck() function of tools/lint/check_doc_claims.sh. Proves with

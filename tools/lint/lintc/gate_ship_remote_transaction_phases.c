@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creeton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: the proof phases of gate check_ship_remote_transaction (immutable
  * mismatch, activation lock, partial stage, reload/restart faults, drop-in

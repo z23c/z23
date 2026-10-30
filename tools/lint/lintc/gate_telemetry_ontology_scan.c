@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creiton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: scan-side half of check-telemetry-ontology: manifest parsing
  * (FUNC and TABLE rows, both floors), the function-slicing emission scan

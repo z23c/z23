@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creeton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate check_ship_remote_transaction — hermetic proof of the
  * immutable remote release transaction. Ported from

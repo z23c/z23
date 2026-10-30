@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creiton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: shared declarations for the check-telemetry-ontology gate port
  * (gate_telemetry_ontology.c plus its _onto and _scan parts). Ported from

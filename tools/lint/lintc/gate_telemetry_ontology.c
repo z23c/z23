@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creiton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate check-telemetry-ontology — every network telemetry field a
  * covered dump function emits must carry a MEANING row in the ontology.

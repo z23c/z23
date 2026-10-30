@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creeton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Shared declarations for the check_ship_remote_transaction gate port
  * (gate_ship_remote_transaction.c + gate_ship_remote_transaction_util.c).
