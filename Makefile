@@ -14671,9 +14671,9 @@ check-no-dev-history-in-contracts: $(LINTC_TOOL)
 # Funded transaction receipts and isolated recipient-wallet manifests are
 # private local state. Tracked baselines may contain reproducible simnet and
 # public consensus fixtures, but never owner experiment history.
-check-no-live-lab-history:
-	@./tools/scripts/check_no_live_lab_history.sh --selftest
-	@./tools/scripts/check_no_live_lab_history.sh
+check-no-live-lab-history: $(LINTC_TOOL)
+	@./build/bin/z23-lint check-no-live-lab-history --selftest
+	@./build/bin/z23-lint check-no-live-lab-history
 
 # Gate E9 — EV_OPERATOR_NEEDED emit must reach a registered sink (HARD).
 # The silent-halt fix: the loud "human needed" signal can never be emitted

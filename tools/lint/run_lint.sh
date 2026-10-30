@@ -181,7 +181,6 @@ gate_command() {
         check-dumper-never-blocks)         echo './tools/scripts/check_dumper_never_blocks.sh' ;;
         check-no-authoritative-ram-state)  echo './tools/scripts/check_no_authoritative_ram_state.sh' ;;
         check-no-dev-history-in-contracts) echo './tools/scripts/check_no_dev_history_in_contracts.sh --selftest && ./tools/scripts/check_no_dev_history_in_contracts.sh' ;;
-        check-no-live-lab-history)        echo './tools/scripts/check_no_live_lab_history.sh --selftest && ./tools/scripts/check_no_live_lab_history.sh' ;;
         check-stage-advances-or-blocks)    echo './tools/scripts/check_stage_advances_or_blocks.sh' ;;
         check-honest-witness)              echo 'ZCL_LINT_MODE=FAIL ./build/bin/z23-lint check-honest-witness' ;;
         check-consensus-parity)            echo './tools/scripts/check_consensus_parity.sh --selftest && ./tools/scripts/check_consensus_parity.sh' ;;

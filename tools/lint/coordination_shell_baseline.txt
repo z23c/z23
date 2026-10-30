@@ -163,7 +163,6 @@ tools/scripts/check_long_functions.sh
 tools/scripts/check_model_ar_lifecycle.sh
 tools/scripts/check_no_authoritative_ram_state.sh
 tools/scripts/check_no_dev_history_in_contracts.sh
-tools/scripts/check_no_live_lab_history.sh
 tools/scripts/check_no_new_repair_rung.sh
 tools/scripts/check_no_secret_printf.sh
 tools/scripts/check_no_uncited_victory.sh

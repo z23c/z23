@@ -1564,7 +1564,7 @@ wrongly concludes the feature is still a stub. `docs/`, `vendor/`, and any
 path with a `test`/`tests` component or a `*_test.*` filename are allowed to
 narrate dev history on purpose and are excluded from the scan.
 
-`check-no-live-lab-history` (`tools/scripts/check_no_live_lab_history.sh`)
+`check-no-live-lab-history` (`tools/lint/lintc/gate_no_live_lab_history.c`)
 keeps funded experiment evidence out of Git. It requires the tracked micro-lab
 ledger to remain its one-line empty campaign template, rejects tracked
 `live_confirmed` receipts and micro-lab event rows, rejects recipient-wallet
