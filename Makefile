@@ -16330,6 +16330,15 @@ pr-check:
 # changed since then. A universal selection (an added, deleted or type-changed
 # path, or a plan that does not close) runs the proof's whole set, never a
 # narrowed one; the `agent-verify: selection ...` line says which and why.
+# ONLY=@route is a screen, not the proof's set: the union of the shared-rule
+# route groups of every committed path changed since the merge-base (`dev proof
+# select --route-only`), with no include/call closure, so it never goes
+# universal. A path that routes to no group is named on the selection line
+# (detail=unrouted=N first=<path>); with no routed group the test step is
+# skipped. The stack gate still runs the proof's full set.
+# The check-kpi-floor step reads only build/gen/CAPABILITY_INVENTORY.jsonl
+# (built by the step before it), so a KPI regression such as a new duplicate
+# function fails here instead of at the stack gate.
 # Never pick groups from the presentation lists of `code guide` or
 # `code tests`: they are capped and miss groups the proof runs.
 # Logs: build/scratch/agent-verify.<step>.log; verdict lines: agent-verify.rc.
@@ -16343,28 +16352,30 @@ agent-verify:
 	 mkdir -p build/scratch && : > build/scratch/agent-verify.rc || exit 1; \
 	 rm -f build/scratch/agent-verify.*.log || exit 1; \
 	 only='$(strip $(ONLY))'; \
-	 if [ "$$only" = '@changed' ]; then \
+	 if [ "$$only" = '@changed' ] || [ "$$only" = '@route' ]; then \
+	    rflag=; [ "$$only" = '@route' ] && rflag=--route-only; \
 	    dirty=$$(git status --porcelain --untracked-files=no | wc -l); \
 	    if [ "$$dirty" -ne 0 ]; then \
-	       echo "agent-verify: ONLY=@changed selects committed paths, as the land proof does, and $$dirty tracked path(s) are uncommitted; commit first, or name the groups with ONLY=<group,group>" | tee -a build/scratch/agent-verify.rc >&2; \
+	       echo "agent-verify: ONLY=$$only selects committed paths, as the land proof does, and $$dirty tracked path(s) are uncommitted; commit first, or name the groups with ONLY=<group,group>" | tee -a build/scratch/agent-verify.rc >&2; \
 	       exit 2; \
 	    fi; \
 	    $(MAKE) --no-print-directory dev-bin >build/scratch/agent-verify.dev-bin.log 2>&1 || { echo "agent-verify: dev-bin failed; see build/scratch/agent-verify.dev-bin.log" >&2; exit 2; }; \
 	    base=$$(git merge-base origin/main HEAD) || { echo "agent-verify: no merge-base with origin/main; use ONLY=<group,group>" >&2; exit 2; }; \
-	    sel=$$(build/bin/z23-dev dev proof select --base="$$base" 2>build/scratch/agent-verify.select.err); \
-	    case "$$sel" in *'"reason":"plan-not-closed"'*) sel=$$(build/bin/z23-dev dev proof select --base="$$base" 2>>build/scratch/agent-verify.select.err);; esac; \
+	    sel=$$(build/bin/z23-dev dev proof select --base="$$base" $$rflag 2>build/scratch/agent-verify.select.err); \
+	    case "$$sel" in *'"reason":"plan-not-closed"'*) sel=$$(build/bin/z23-dev dev proof select --base="$$base" $$rflag 2>>build/scratch/agent-verify.select.err);; esac; \
 	    only=$$(printf '%s' "$$sel" | sed -n 's/.*"groups":"\([^"]*\)".*/\1/p'); \
 	    kind=$$(printf '%s' "$$sel" | sed -n 's/.*"selector":"\([^"]*\)".*/\1/p'); \
 	    why=$$(printf '%s' "$$sel" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p'); \
 	    detail=$$(printf '%s' "$$sel" | sed -n 's/.*"detail":"\([^"]*\)".*/\1/p'); \
 	    count=$$(printf '%s' "$$sel" | sed -n 's/.*"groups_selected":\([0-9]*\).*/\1/p'); \
 	    names=$$(printf '%s' "$$only" | tr ',' '\n' | grep -c .); \
-	    if [ -z "$$only" ] || [ -z "$$kind" ] || [ "$$names" != "$$count" ]; then \
+	    if [ -z "$$kind" ] || [ "$$names" != "$$count" ] || { [ -z "$$only" ] && [ -z "$$rflag" ]; }; then \
 	       echo "agent-verify: the proof selector refused this range or its reply exceeded the leaf budget (PROOF_SELECT_REPLY_TOO_LARGE); use ONLY=<group,group>" >&2; \
 	       printf '%s\n' "$$sel" | cut -c1-400 >&2; exit 2; \
 	    fi; \
-	    echo "agent-verify: selection $$kind groups=$$count reason=$$why detail=$$detail base=$$base" | tee -a build/scratch/agent-verify.rc; \
+	    echo "agent-verify: selection $$kind groups=$$count reason=$$why detail=$$detail base=$$base$${rflag:+ names=$$only}" | tee -a build/scratch/agent-verify.rc; \
 	    if [ "$$kind" = universal ]; then echo "agent-verify: selection is universal: the proof would run its whole set, so this does too" | tee -a build/scratch/agent-verify.rc; fi; \
+	    if [ -n "$$rflag" ]; then echo "agent-verify: route screen: not the land proof's set; the stack gate still runs the proof" | tee -a build/scratch/agent-verify.rc; fi; \
 	 fi; \
 	 failed=""; \
 	 av_step() { \
@@ -16378,8 +16389,9 @@ agent-verify:
 	    if [ $$rc -ne 0 ]; then failed="$$failed $$step"; fi; \
 	 }; \
 	 av_step check-cyclomatic-complexity; \
-	 av_step t-fast-exact "ONLY=$$only" ZCL_TEST_WERROR=1; \
+	 if [ -n "$$only" ]; then av_step t-fast-exact "ONLY=$$only" ZCL_TEST_WERROR=1; fi; \
 	 av_step docs-capability-inventory; \
+	 av_step check-kpi-floor; \
 	 av_step lint-fast; \
 	 if [ -z "$$failed" ]; then \
 	    echo "agent-verify: OK" | tee -a build/scratch/agent-verify.rc; \

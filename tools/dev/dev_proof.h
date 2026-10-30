@@ -363,6 +363,12 @@ struct zcl_dev_proof_range_selection {
     uint32_t count;
     size_t files;
     bool universal;
+    /* In: take only the shared-rule route groups of the changed paths: no
+     * include/call closure and no structural widening, so the set never goes
+     * universal. A path-group overflow refuses instead. Out: `unrouted` counts
+     * changed paths that routed to no group. */
+    bool route_only;
+    uint32_t unrouted;
     const char *reason;
     char detail[160];
     char gated[PROOF_HOST_GATED_MAX];

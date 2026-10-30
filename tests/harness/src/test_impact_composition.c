@@ -6635,6 +6635,105 @@ static int test_ic_proof_select_range_matches_proof_selector(void)
     return failures;
 }
 
+/* `dev proof select --route-only` / `agent-verify ONLY=@route`: the union of
+ * the shared-rule route groups of the changed paths, no closure, never
+ * universal. One engine file selects exactly its routed groups; an added
+ * (structural) path that the full selector widens to universal stays narrow;
+ * a path with no route is counted, not widened. */
+static int test_ic_proof_select_route_only(void)
+{
+    int failures = 0;
+    static char ic_fixture_saved[4096];
+    bool ic_fixture_was_set =
+        ic_host_fixture_save(ic_fixture_saved, sizeof(ic_fixture_saved));
+    TEST("proof select: route-only selects the routed groups, never universal") {
+        ASSERT(ic_changed_fixture_build());
+        ic_host_fixture_env(true);
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        char base[65], root0[65], one[65], tip[65], mod[65];
+        ASSERT(ic_read_sha("rename_known.sha", base));
+        ASSERT(ic_read_sha("base.sha", root0));
+        ASSERT(ic_read_sha("one.sha", one));
+        ASSERT(system("set -e; cd " IC_CHANGED_REPO "; mkdir -p engine/composition; "
+                      "echo x > engine/composition/goals.def; git add -A; "
+                      "git commit -qm goals; "
+                      "git rev-parse HEAD > ../goals_add.sha; "
+                      "echo y > engine/composition/goals.def; git add -A; "
+                      "git commit -qm goals2; git rev-parse HEAD > ../goals_mod.sha; "
+                      "true") == 0);
+        ASSERT(ic_read_sha("goals_add.sha", tip));
+        ASSERT(ic_read_sha("goals_mod.sha", mod));
+        size_t cap = zcl_dev_proof_select_groups_capacity();
+        char *lane = calloc(cap, 1);
+        ASSERT(lane);
+        char why[256] = {0};
+
+        /* One modified engine file: exactly the groups its rule routes to. */
+        struct zcl_dev_proof_range_selection sel = {
+            .groups = lane, .groups_size = cap, .route_only = true};
+        bool route_ok = zcl_dev_proof_select_range(
+            IC_CHANGED_REPO, tip, mod, &sel, why, sizeof(why));
+        if (!route_ok) printf("invariant=proof_select route refused why=%s\n", why);
+        ASSERT(route_ok);
+        const char *files[] = {"engine/composition/goals.def"};
+        struct zcl_devloop_plan *plan = calloc(1, sizeof(*plan));
+        ASSERT(plan && zcl_devloop_plan_files(files, 1, plan));
+        char want[65536], gated[PROOF_HOST_GATED_MAX];
+        uint32_t want_count = 0;
+        ASSERT(zcl_dev_proof_test_build_test_selector(
+            plan, IC_CHANGED_REPO, want, sizeof(want), &want_count, gated,
+            sizeof(gated)));
+        free(plan);
+        printf("invariant=proof_select case=route universal=%d selected=%u "
+               "unrouted=%u reason=%s\n", sel.universal ? 1 : 0,
+               (unsigned)sel.count, (unsigned)sel.unrouted, sel.reason);
+        ASSERT(!sel.universal);
+        ASSERT(strcmp(sel.reason, "route-only") == 0);
+        ASSERT(sel.files == 1 && sel.unrouted == 0);
+        ASSERT(sel.count > 0 && sel.count == want_count);
+        ASSERT(strcmp(lane, want) == 0);
+        ASSERT(strstr(lane, "fleet_goals") != NULL);
+        ASSERT(zcl_dev_proof_select_reply_fits(strlen(lane), 65536));
+
+        /* An added path widens the full selector to universal; the route
+         * screen of the same range stays on the routed groups. */
+        memset(lane, 0, cap);
+        struct zcl_dev_proof_range_selection full = {
+            .groups = lane, .groups_size = cap};
+        ASSERT(zcl_dev_proof_select_range(IC_CHANGED_REPO, base, tip, &full,
+                                          why, sizeof(why)));
+        ASSERT(full.universal);
+        memset(lane, 0, cap);
+        struct zcl_dev_proof_range_selection narrow = {
+            .groups = lane, .groups_size = cap, .route_only = true};
+        ASSERT(zcl_dev_proof_select_range(IC_CHANGED_REPO, base, tip, &narrow,
+                                          why, sizeof(why)));
+        ASSERT(!narrow.universal);
+        ASSERT(narrow.count < full.count);
+        ASSERT(strstr(lane, "fleet_goals") != NULL);
+
+        /* Paths with no route are counted and named, never widened. */
+        memset(lane, 0, cap);
+        struct zcl_dev_proof_range_selection none = {
+            .groups = lane, .groups_size = cap, .route_only = true};
+        ASSERT(zcl_dev_proof_select_range(IC_CHANGED_REPO, root0, one, &none,
+                                          why, sizeof(why)));
+        printf("invariant=proof_select case=route_unrouted universal=%d "
+               "files=%zu selected=%u unrouted=%u detail=%.40s\n",
+               none.universal ? 1 : 0, none.files, (unsigned)none.count,
+               (unsigned)none.unrouted, none.detail);
+        ASSERT(!none.universal);
+        ASSERT(none.files == 1000 && none.unrouted == 1000);
+        ASSERT(none.count == 0 && lane[0] == '\0');
+        ASSERT(strncmp(none.detail, "unrouted=1000 first=", 20) == 0);
+        free(lane);
+        PASS();
+    } _test_next:;
+    (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+    ic_host_fixture_restore(ic_fixture_saved, ic_fixture_was_set);
+    return failures;
+}
+
 /* dev_proof's own worker never captures the changed set against the shared
  * landing worktree: it captures against `generation`, the private
  * `git worktree add --detach` copy generation_prepare() already pinned to
@@ -14936,6 +15035,7 @@ int test_impact_composition(void)
     failures += test_ic_changed_set_carries_a_landing_batch();
     failures += test_ic_changed_set_widens_structural_changes();
     failures += test_ic_proof_select_range_matches_proof_selector();
+    failures += test_ic_proof_select_route_only();
     failures += test_ic_deleted_input_closes_current_graph();
     failures += test_ic_changed_set_reads_a_private_generation_worktree();
     failures += test_ic_changed_set_refuses_above_its_ceiling();

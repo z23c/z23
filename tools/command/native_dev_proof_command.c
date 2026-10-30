@@ -1061,6 +1061,19 @@ bool zcl_dev_proof_select_reply_fits(size_t groups_len, size_t budget_bytes)
     return groups_len <= budget && budget - groups_len >= PROOF_SELECT_REPLY_RESERVE;
 }
 
+/* The CLI spells the flag --route-only and does not fold dashes, so the input
+ * schema declares both spellings. */
+[[maybe_unused]] static bool proof_route_only_flag(const struct json_value *input)
+{
+    static const char *const keys[] = {"route_only", "route-only"};
+    for (size_t i = 0; input && i < 2; i++) {
+        const struct json_value *v = json_get(input, keys[i]);
+        if (v && v->type == JSON_BOOL && json_get_bool(v))
+            return true;
+    }
+    return false;
+}
+
 /* dev.proof.select: the test groups the land proof would select for
  * base..local, from the proof worker's own planner and selector. A lane
  * verify runs exactly this set, so it cannot miss a group the proof runs. */
@@ -1086,6 +1099,7 @@ static void proof_select(
     }
     if (!local) local = "HEAD";
     struct zcl_dev_proof_range_selection selection = {0};
+    selection.route_only = proof_route_only_flag(request->input);
     selection.groups_size = zcl_dev_proof_select_groups_capacity();
     selection.groups = zcl_calloc(selection.groups_size, 1,
                                   "dev.proof.select groups");
@@ -1123,7 +1137,8 @@ static void proof_select(
     (void)json_push_kv_str(&reply->data, "local_commit", local);
     (void)json_push_kv_int(&reply->data, "files", (int64_t)selection.files);
     (void)json_push_kv_str(&reply->data, "selector",
-                           selection.universal ? "universal" : "exact");
+                           selection.universal ? "universal"
+                           : selection.route_only ? "route" : "exact");
     (void)json_push_kv_str(&reply->data, "reason", selection.reason);
     (void)json_push_kv_str(&reply->data, "detail",
                            selection.detail[0] ? selection.detail : "-");

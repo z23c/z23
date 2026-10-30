@@ -858,11 +858,14 @@ ZCL_COMMAND_DEV_READ(
     "selector is universal when the proof would run the whole catalog (an "
     "added, deleted or type-changed input, a path-group cap, a closure it "
     "cannot bound, or a plan the include graph cannot close), with the "
-    "reason named. Read-only; make agent-verify ONLY=@changed runs this set.",
+    "reason named. route_only=true selects only the shared-rule route groups "
+    "of the changed paths (selector route, never universal; unrouted paths "
+    "are counted in detail). Read-only; make agent-verify ONLY=@changed runs "
+    "this set, ONLY=@route the route screen.",
     65536,
     "dev,proof,select,groups,verify,changed,land",
     "zcl.dev_proof_input.v1", "zcl.dev_proof_select.v1",
-    "root,base,local_commit", "",
+    "root,base,local_commit,route_only,route-only", "",
     "z23-dev dev proof select --base=origin/main",
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_LOW,

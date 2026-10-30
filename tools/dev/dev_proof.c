@@ -7608,6 +7608,65 @@ static void dp_select_close(const char *root,
     out->reason = widened ? "changed-input-structure" : "plan-not-closed";
 }
 
+/* Route screen: the plan's path-floor groups (the shared-rule route of every
+ * changed path) with the closure left empty and no widening. A path that
+ * routes to no group is counted and named, never widened to universal. */
+static bool dp_select_route_only(const struct zcl_dev_proof_changed_set *set,
+                                 struct zcl_devloop_plan *plan,
+                                 struct zcl_dev_proof_range_selection *out,
+                                 char *why, size_t why_len)
+{
+    if (plan->path_universal) {
+        proof_why(why, why_len, "route_group_cap");
+        return false;
+    }
+    struct zcl_devloop_plan *one = zcl_calloc(1, sizeof(*one),
+                                              "proof select route plan");
+    if (!one) {
+        proof_why(why, why_len, "proof_select_allocation_failed");
+        return false;
+    }
+    const char *first = NULL;
+    for (size_t i = 0; i < set->count; i++) {
+        const char *file = set->files[i];
+        if (zcl_devloop_plan_files(&file, 1, one) &&
+            one->path_groups_len == 0 && !one->path_universal) {
+            if (!first) first = file;
+            out->unrouted++;
+        }
+    }
+    free(one);
+    plan->closure_groups_len = 0;
+    plan->closure_universal = false;
+    out->reason = "route-only";
+    if (out->unrouted)
+        (void)snprintf(out->detail, sizeof(out->detail),
+                       "unrouted=%u first=%s", (unsigned)out->unrouted, first);
+    return true;
+}
+
+/* Narrow or close the plan (route screen or proof closure) and select. */
+static bool dp_select_plan(const char *root,
+                           const struct zcl_dev_proof_changed_set *set,
+                           struct zcl_devloop_plan *plan,
+                           struct zcl_dev_proof_range_selection *out,
+                           char *why, size_t why_len)
+{
+    if (out->route_only) {
+        if (!dp_select_route_only(set, plan, out, why, why_len))
+            return false;
+    } else {
+        dp_select_close(root, set, plan, out);
+    }
+    out->universal = plan->closure_universal;
+    out->files = set->count;
+    if (build_test_selector(plan, root, out->groups, out->groups_size,
+                            &out->count, out->gated, sizeof(out->gated)))
+        return true;
+    proof_why(why, why_len, "test_selection_invalid_or_truncated");
+    return false;
+}
+
 /* The selection the proof worker would make for base..local, from the same
  * planner, widening and selector, without a proof cycle. A plan the include
  * graph cannot close selects the universal set rather than a narrowed one. */
@@ -7629,6 +7688,7 @@ bool zcl_dev_proof_select_range(const char *root_in, const char *base,
     out->count = 0;
     out->files = 0;
     out->universal = false;
+    out->unrouted = 0;
     out->reason = "impact-plan";
     out->gated[0] = '\0';
     out->detail[0] = '\0';
@@ -7645,16 +7705,8 @@ bool zcl_dev_proof_select_range(const char *root_in, const char *base,
         proof_why(why, why_len, "impact_plan_invalid");
         ok = false;
     }
-    if (ok) {
-        dp_select_close(root, &set, plan, out);
-        out->universal = plan->closure_universal;
-        out->files = set.count;
-        ok = build_test_selector(plan, root, out->groups,
-                                 out->groups_size, &out->count, out->gated,
-                                 sizeof(out->gated));
-        if (!ok)
-            proof_why(why, why_len, "test_selection_invalid_or_truncated");
-    }
+    if (ok)
+        ok = dp_select_plan(root, &set, plan, out, why, why_len);
     zcl_dev_proof_changed_set_release(&set);
     free(plan);
     return ok;
