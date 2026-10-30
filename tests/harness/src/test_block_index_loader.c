@@ -28,11 +28,15 @@
 #include "models/block.h"
 #include "util/blocker.h"
 #include "util/boot_phase.h"
+#include "platform/read_mapping.h"
 #include "support/log_throttle.h"
 #include <sqlite3.h>
 #include <stdio.h>
+#include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include "test/setup_result.h"
 
@@ -2290,6 +2294,322 @@ static int bil_failed_bit_sqlite_case(void)
     return failures;
 }
 
+/* Resident-set figures in KiB from /proc/self/status; 0 where unavailable. */
+static long bil_status_kib(const char *key)
+{
+    FILE *fp = fopen("/proc/self/status", "r");
+    if (!fp)
+        return 0;
+    char line[256];
+    long kib = 0;
+    size_t klen = strlen(key);
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, key, klen) == 0 && line[klen] == ':') {
+            kib = strtol(line + klen + 1, NULL, 10);
+            break;
+        }
+    }
+    fclose(fp);
+    return kib;
+}
+
+/* Writes `rows` height-chained rows to dir/block_index.bin. */
+static bool bil_peak_write_fixture(const char *dir, int rows)
+{
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    block_map_init(&ms.map_block_index);
+    active_chain_init(&ms.chain_active);
+    struct block_index *prev = NULL;
+    for (int h = 0; h < rows; h++) {
+        struct uint256 hash = make_test_hash(h);
+        struct block_index *pi =
+            chainstate_insert_block_index((struct chainstate *)&ms, &hash);
+        if (!pi)
+            return false;
+        pi->nHeight = h;
+        pi->nBits = 0x1f07ffff;
+        pi->nTime = 1000000 + (uint32_t)h * 150;
+        pi->nVersion = 4;
+        pi->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+        pi->nTx = 1;
+        pi->nFile = h / 1000;
+        pi->nDataPos = (uint32_t)h * 2048u;
+        pi->pprev = prev;
+        pi->nChainTx = prev ? prev->nChainTx + 1 : 1;
+        prev = pi;
+    }
+    save_block_index_flat(dir, &ms);
+    return true;
+}
+
+/* Walks the loaded chain: every row above height 0 must sit at its own height
+ * and link pprev to the row at height-1. The link pass reads the rows the
+ * release applies to, so a bad link here is the observable symptom. */
+static bool bil_peak_pprev_linked(struct main_state *ms, int rows)
+{
+    for (int h = 1; h < rows; h++) {
+        struct uint256 hash = make_test_hash(h);
+        struct uint256 prev_hash = make_test_hash(h - 1);
+        struct block_index *pi = block_map_find(&ms->map_block_index, &hash);
+        struct block_index *pp =
+            block_map_find(&ms->map_block_index, &prev_hash);
+        if (!pi || !pp || pi->nHeight != h || pi->pprev != pp)
+            return false;
+    }
+    return true;
+}
+
+/* Loads the fixture in this (forked) process and reports peak growth. */
+static int bil_peak_load_child(const char *dir, int rows, int out_fd)
+{
+    long rss_before = bil_status_kib("VmRSS");
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    block_map_init(&ms.map_block_index);
+    active_chain_init(&ms.chain_active);
+    bool ok = load_block_index_flat(dir, &ms).ok &&
+              ms.map_block_index.size == (size_t)rows;
+    long hwm = bil_status_kib("VmHWM");
+    long growth = hwm > rss_before ? hwm - rss_before : 0;
+    bool linked = ok && bil_peak_pprev_linked(&ms, rows);
+    char msg[96];
+    int n = snprintf(msg, sizeof(msg), "%d %d %ld\n", ok ? 1 : 0,
+                     linked ? 1 : 0, growth);
+    return n > 0 && write(out_fd, msg, (size_t)n) == n ? 0 : 1;
+}
+
+/* Exit status of a forked child, or -1 if it did not exit normally. */
+static int bil_peak_wait_code(pid_t pid)
+{
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st))
+        return -1;
+    return WEXITSTATUS(st);
+}
+
+static bool bil_peak_wait_ok(pid_t pid)
+{
+    return bil_peak_wait_code(pid) == 0;
+}
+
+/* Reads the loader child's one-line report, then reaps it. */
+static void bil_peak_collect(pid_t loader, int rfd, int *loaded, int *linked,
+                             long *growth_kib)
+{
+    char msg[96] = {0};
+    ssize_t got = read(rfd, msg, sizeof(msg) - 1);
+    close(rfd);
+    bool exited = bil_peak_wait_ok(loader);
+    if (exited && got > 0)
+        sscanf(msg, "%d %d %ld", loaded, linked, growth_kib);
+}
+
+/* Boot peak of the flat loader on an isolated fixture. ZCL_BLOCK_INDEX_PEAK_ROWS
+ * sets the row count (default 140000, enough for each row pass to cross the
+ * 64K-row release stride twice); growth of the loading process's VmHWM over
+ * its pre-load VmRSS is printed as a [peak] line. Each phase runs in its own
+ * forked child so the figure excludes fixture construction. */
+static int bil_flat_boot_peak_case(void)
+{
+    int failures = 0;
+    const char *env = getenv("ZCL_BLOCK_INDEX_PEAK_ROWS");
+    int rows = env ? atoi(env) : 140000;
+    if (rows < 100)
+        rows = 100;
+    char dir[256];
+    snprintf(dir, sizeof(dir), "./test-tmp/%d_bil_peak", getpid());
+    mkdir("./test-tmp", 0755);
+    mkdir(dir, 0755);
+
+    fflush(NULL);
+    pid_t writer = fork();
+    if (writer == 0)
+        _exit(bil_peak_write_fixture(dir, rows) ? 0 : 1);
+    bool written = writer > 0 && bil_peak_wait_ok(writer);
+
+    int fds[2];
+    bool piped = written && pipe(fds) == 0;
+    pid_t loader = piped ? fork() : -1;
+    if (piped && loader < 0) {
+        close(fds[0]);
+        close(fds[1]);
+    }
+    if (loader == 0) {
+        close(fds[0]);
+        _exit(bil_peak_load_child(dir, rows, fds[1]));
+    }
+    int loaded = 0;
+    int linked = 0;
+    long growth_kib = 0;
+    if (loader > 0) {
+        close(fds[1]);
+        bil_peak_collect(loader, fds[0], &loaded, &linked, &growth_kib);
+    }
+    printf("[peak] flat load rows=%d growth_kib=%ld\n", rows, growth_kib);
+    BIL_CHECK("bil: flat boot-peak child loads every fixture row",
+              written && loaded == 1);
+    BIL_CHECK("bil: flat boot-peak child links every row to its height-1 parent",
+              written && linked == 1);
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/block_index.bin", dir);
+    unlink(path);
+    rmdir(dir);
+    return failures;
+}
+
+#if defined(__linux__)
+/* Present bit (bit 63) of each of `pages` virtual pages from base, read from
+ * /proc/self/pagemap. The kernel reports the page-table state per page, so a
+ * single released page is visible. Returns false when pagemap is unreadable. */
+static bool bil_pages_present(const uint8_t *base, size_t pages, size_t pg,
+                              bool *present)
+{
+    int fd = open("/proc/self/pagemap", O_RDONLY);
+    if (fd < 0)
+        return false;
+    bool ok = true;
+    for (size_t i = 0; i < pages && ok; i++) {
+        uint64_t entry = 0;
+        off_t at = (off_t)(((uintptr_t)base / pg + i) * sizeof(entry));
+        ok = pread(fd, &entry, sizeof(entry), at) == (ssize_t)sizeof(entry);
+        present[i] = (entry >> 63) & 1u;
+    }
+    close(fd);
+    return ok;
+}
+
+/* Exit bits for the pagemap state of an all-touched mapping after the first
+ * `dropped` bytes (the page-aligned consumed prefix, not the returned boundary)
+ * were released: 1 pagemap unreadable, 4 a page below dropped is still present,
+ * 16 a page at or above dropped is no longer present. */
+static int bil_release_pagemap_bits(const uint8_t *base, size_t size,
+                                    size_t dropped, size_t pg)
+{
+    bool present[16];
+    size_t pages = size / pg;
+    if (pages > sizeof(present) / sizeof(present[0]) ||
+        !bil_pages_present(base, pages, pg, present))
+        return 1;
+    int code = 0;
+    for (size_t i = 0; i < pages; i++) {
+        if (i * pg < dropped && present[i])
+            code |= 4;
+        if (i * pg >= dropped && !present[i])
+            code |= 16;
+    }
+    return code;
+}
+#endif
+
+/* Release child: maps the fixture, touches every page, drops a consumed prefix
+ * and reads the whole file back. Exit bits: 1 setup failed, 2 boundary wrong,
+ * 4 a page below the boundary is still present (Linux), 8 bytes differ from
+ * the fixture, 16 a page at or above the boundary was dropped (Linux). */
+static int bil_release_child(const char *path, const uint8_t *expected,
+                             size_t size)
+{
+    long page_l = sysconf(_SC_PAGESIZE);
+    if (page_l <= 0)
+        return 1;
+    size_t pg = (size_t)page_l;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return 1;
+    struct platform_read_mapping m;
+    platform_read_mapping_init(&m);
+    if (!platform_read_mapping_open(&m, fd, size)) {
+        close(fd);
+        return 1;
+    }
+    volatile uint8_t sink = 0;
+    for (size_t off = 0; off < size; off += pg)
+        sink = (uint8_t)(sink ^ m.data[off]);
+    (void)sink;
+    size_t consumed = 5 * pg + 100;
+    size_t released = platform_read_mapping_release_below(&m, 0, consumed);
+    int code = 0;
+#if defined(__linux__)
+    if (released == 0 || released % pg != 0 || released > consumed)
+        code |= 2;
+    code |= bil_release_pagemap_bits(m.data, size, consumed - consumed % pg,
+                                     pg);
+#else
+    if (released != 0)
+        code |= 2;
+#endif
+    if (memcmp(m.data, expected, size) != 0)
+        code |= 8;
+    platform_read_mapping_close(&m);
+    close(fd);
+    return code;
+}
+
+static bool bil_release_write(const char *path, const uint8_t *expected,
+                              size_t size)
+{
+    FILE *fp = fopen(path, "wb");
+    if (!fp)
+        return false;
+    bool wrote = fwrite(expected, 1, size, fp) == size;
+    return fclose(fp) == 0 && wrote;
+}
+
+/* Forks the release child over the fixture; its exit bits, or -1. */
+static int bil_release_fork(const char *path, const uint8_t *expected,
+                            size_t size)
+{
+    fflush(NULL);
+    pid_t child = fork();
+    if (child == 0)
+        _exit(bil_release_child(path, expected, size));
+    return child > 0 ? bil_peak_wait_code(child) : -1;
+}
+
+/* A multi-page file with every page touched and a consumed prefix released:
+ * the boundary is page-aligned and no larger than consumed, pagemap shows the
+ * released pages not present and the rest present (Linux), and the file reads back byte for
+ * byte. The child is forked so its mappings are its own. */
+static int bil_release_direct_case(void)
+{
+    int failures = 0;
+    long page_l = sysconf(_SC_PAGESIZE);
+    if (page_l <= 0) {
+        BIL_CHECK("bil: release test has a page size", false);
+        return failures;
+    }
+    size_t size = 8 * (size_t)page_l;
+    uint8_t *expected = malloc(size);
+    char dir[PATH_MAX];
+    if (!expected || !test_mkdtemp(dir, sizeof(dir), "bil_release")) {
+        free(expected);
+        BIL_CHECK("bil: release test fixture directory", false);
+        return failures;
+    }
+    for (size_t i = 0; i < size; i++)
+        expected[i] = (uint8_t)(i * 131u + (i >> 12) * 7u + 1u);
+    char path[PATH_MAX + 32];
+    int n = snprintf(path, sizeof(path), "%s/release.bin", dir);
+    bool wrote = n > 0 && (size_t)n < sizeof(path) &&
+                 bil_release_write(path, expected, size);
+    int code = wrote ? bil_release_fork(path, expected, size) : -1;
+    bool mapped = code >= 0 && !(code & 1);
+    BIL_CHECK("bil: release child maps and touches every page", mapped);
+    BIL_CHECK("bil: release returns a page-aligned boundary no larger than consumed",
+              mapped && !(code & 2));
+    BIL_CHECK("bil: released pages are not present in pagemap (Linux)",
+              mapped && !(code & 4));
+    BIL_CHECK("bil: touched pages at or above the boundary stay present (Linux)",
+              mapped && !(code & 16));
+    BIL_CHECK("bil: released range reads back the exact file bytes",
+              mapped && !(code & 8));
+    unlink(path);
+    rmdir(dir);
+    free(expected);
+    return failures;
+}
+
 int test_block_index_loader(void)
 {
     printf("\n=== block index loader tests ===\n");
@@ -2298,6 +2618,8 @@ int test_block_index_loader(void)
     /* ── 1. Flat file round-trip ─────────────────────────── */
 
     failures += bil_flat_round_trip_case();
+    failures += bil_flat_boot_peak_case();
+    failures += bil_release_direct_case();
 
     /* ── 2. Flat file pprev linking ──────────────────────── */
 

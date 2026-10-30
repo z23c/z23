@@ -256,6 +256,8 @@ Z23_FLAG("ZCL_BLOCKER_RATE_LIMIT_MS", "env_runtime", "-", "-",
           "undocumented; first use platform/modules/util/src/blocker.c:auto")
 Z23_FLAG("ZCL_BLOCKER_REMEDY_SCAN_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_blocker_remedy.c:auto")
+Z23_FLAG("ZCL_BLOCK_INDEX_PEAK_ROWS", "env_test", "140000", "-",
+          "row count of the flat block-index fixture that bil_flat_boot_peak_case loads in a child process to report its peak-memory growth (default 140000); first use tests/harness/src/test_block_index_loader.c:auto")
 Z23_FLAG("ZCL_BLOCK_SCAN_WORKERS", "env_runtime", "-", "-",
           "first use engine/composition/src/boot_block_file_scan.c:auto; documented at docs/quality/BENCHMARKS_LOG.md:28: | 2026-05-24 | 6e0f6a82c | #1 cold import identity | serial 48.9s / default-workers 57....")
 Z23_FLAG("ZCL_BODY_HISTORY_BACKFILL_MODE", "env_runtime", "-", "-",

@@ -8759,7 +8759,7 @@ $(BIN_DIR)/ldb_verify_c23: tools/ldb_verify_c23.c \
 		engine/modules/storage/src/ldb_reader_version.c \
 		engine/modules/storage/src/ldb_reader_db.c \
 		engine/modules/storage/src/ldb_reader_api.c \
-		platform/modules/util/src/crc32c.c platform/modules/base/src/safe_alloc.c \
+		platform/modules/util/src/crc32c.c platform/modules/base/src/safe_alloc.c platform/modules/base/src/log_level.c \
 		platform/modules/platform/src/positioned_file.c \
 		platform/modules/platform/src/read_mapping.c
 	@mkdir -p $(dir $@)

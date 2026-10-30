@@ -3,13 +3,21 @@
  * purpose: read-only memory mapping of a file, portable across POSIX mmap
  * and Windows file mappings. */
 
+/* madvise(MADV_DONTNEED) is a BSD/Linux extension outside strict POSIX. */
+#if defined(__linux__) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE 1
+#endif
+
 #include "platform/read_mapping.h"
 #ifdef ZCL_TESTING
 #include "platform/read_mapping_testing.h"
 #endif
 #include "platform/positioned_file.h"
+#include "util/log_macros.h"
 
 #include <limits.h>
+#include <errno.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #if defined(_WIN32)
@@ -21,6 +29,7 @@
 
 #else
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 #ifdef ZCL_TESTING
@@ -139,6 +148,41 @@ void platform_read_mapping_advise_sequential(
                         POSIX_MADV_SEQUENTIAL);
     (void)posix_madvise((void *)mapping->data, mapping->size,
                         POSIX_MADV_WILLNEED);
+#endif
+}
+
+size_t platform_read_mapping_release_below(
+    const struct platform_read_mapping *mapping, size_t released,
+    size_t consumed)
+{
+#if defined(__linux__)
+    if (!mapping || !mapping->data) return released;
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0) return released;
+    if (consumed > mapping->size) consumed = mapping->size;
+    size_t end = consumed - consumed % (size_t)page;
+    if (end <= released) return released;
+    /* MADV_DONTNEED on a read-only private file mapping only drops the
+     * pages; posix_madvise(POSIX_MADV_DONTNEED) is a no-op in glibc. */
+    int rc = madvise((void *)(mapping->data + released), end - released,
+                     MADV_DONTNEED);
+    if (rc != 0) {
+        int err = errno;
+        /* The release is advisory: the pages stay resident and the
+         * failure is logged once per process. */
+        static _Atomic bool g_release_warned;
+        if (!atomic_exchange_explicit(&g_release_warned, true,
+                                      memory_order_relaxed))
+            LOG_WARN("read_mapping",
+                     "madvise(MADV_DONTNEED) failed errno=%d (%s); "
+                     "consumed pages stay resident",
+                     err, strerror(err));
+        return released;
+    }
+    return end;
+#else
+    (void)mapping; (void)consumed;
+    return released;
 #endif
 }
 

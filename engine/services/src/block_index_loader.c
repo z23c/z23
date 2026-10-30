@@ -448,11 +448,30 @@ bool block_index_row_admit(int32_t height, const uint8_t hash[32],
     return false;
 }
 
+/* Rows already consumed by a pass are dropped from the file mapping in 64K-row
+ * steps so the mapping and the arena are not both fully resident at the peak.
+ * Both row passes read the mapping front to back; a dropped page that a later
+ * pass touches faults back in from the file. */
+struct bil_flat_release {
+    const struct platform_read_mapping *mapping;
+    const struct block_index_flat *entries;
+    size_t released;
+};
+
+static void bil_flat_release_rows(struct bil_flat_release *rel, uint32_t next)
+{
+    size_t consumed = (size_t)((const uint8_t *)(rel->entries + next) -
+                               rel->mapping->data);
+    rel->released = platform_read_mapping_release_below(
+        rel->mapping, rel->released, consumed);
+}
+
 static struct zcl_result bil_flat_insert_rows(
-    struct main_state *ms, const struct block_index_flat *entries,
+    struct main_state *ms, struct bil_flat_release *rel,
     uint32_t count, struct block_index *arena)
 {
     /* Bulk insert directly into the hash table; loader is single-threaded. */
+    const struct block_index_flat *entries = rel->entries;
     struct block_map *bm = &ms->map_block_index;
     /* Persisted-FAILED trust boundary: the baked ROM checkpoint height. Fetched
      * once; the per-entry reconcile below is O(1) and adds no extra scan. */
@@ -468,8 +487,10 @@ static struct zcl_result bil_flat_insert_rows(
         /* Feed the supervisor_backstop liveness marker every 64K entries so
          * this single-threaded pre-serving loop over ~3.1M entries is not
          * mistaken for a frozen supervisor sweep (util/boot_phase.h). */
-        if ((i & 0xFFFF) == 0)
+        if ((i & 0xFFFF) == 0) {
             boot_progress_note("block_index.flat_insert", i, count);
+            bil_flat_release_rows(rel, i);
+        }
         if (uint256_is_null((const struct uint256 *)entries[i].hash))
             continue;
 
@@ -520,9 +541,10 @@ static struct zcl_result bil_flat_insert_rows(
 }
 
 static void bil_flat_link_rows(
-    struct block_map *bm, const struct block_index_flat *entries,
+    struct block_map *bm, struct bil_flat_release *rel,
     uint32_t count, struct block_index *arena)
 {
+    const struct block_index_flat *entries = rel->entries;
     /* Link pprev HASH-ONLY: resolve each entry's parent by its stored
      * prev_hash, never by a height guess. The insert loop above has already
      * fully populated the block_map (linking is a separate second pass), so a
@@ -539,8 +561,10 @@ static void bil_flat_link_rows(
      * pure height-label scramble is curable by the scoped ancestry relink
      * (terminus-pinned to the compiled checkpoint), not by the loader. */
     for (uint32_t i = 0; i < count; i++) {
-        if ((i & 0xFFFF) == 0)
+        if ((i & 0xFFFF) == 0) {
             boot_progress_note("block_index.flat_link", i, count);
+            bil_flat_release_rows(rel, i);
+        }
         struct block_index *pindex = &arena[i];
         bool has_prev = false;
         for (int pb = 0; pb < 32; pb++)
@@ -654,11 +678,14 @@ struct zcl_result load_block_index_flat(const char *datadir, struct main_state *
     memset(arena, 0, count * sizeof(struct block_index)); /* pre-fault */
     void *release = arena;
     int64_t t_parse_ms = 0, t_fwd_ms = 0;
-    result = bil_flat_insert_rows(ms, input.entries, count, arena);
+    struct bil_flat_release rel = {.mapping = &mapping,
+                                   .entries = input.entries};
+    result = bil_flat_insert_rows(ms, &rel, count, arena);
     if (!result.ok) {
         goto finish;
     }
-    bil_flat_link_rows(&ms->map_block_index, input.entries, count, arena);
+    rel.released = 0;
+    bil_flat_link_rows(&ms->map_block_index, &rel, count, arena);
     /* Old files end at expected; old readers ignore the new trailer. */
     if (file_size > input.expected) {
         struct zcl_result ar = block_index_flat_anchor_apply(

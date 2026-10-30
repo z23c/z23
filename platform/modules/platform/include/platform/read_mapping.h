@@ -32,6 +32,16 @@ bool platform_read_mapping_open_positioned(
 void platform_read_mapping_advise_sequential(
     const struct platform_read_mapping *mapping);
 
+/* Drop the resident pages of a consumed prefix.  `released` is the byte
+ * boundary a previous call returned (zero first); the pages wholly below
+ * `consumed` and at or above `released` are returned to the kernel and the
+ * new page-aligned boundary is returned.  The mapping stays valid: a later
+ * read of a dropped page faults it back in from the file.  The release runs
+ * on Linux, including Android, and is a no-op elsewhere. */
+size_t platform_read_mapping_release_below(
+    const struct platform_read_mapping *mapping, size_t released,
+    size_t consumed);
+
 void platform_read_mapping_close(struct platform_read_mapping *mapping);
 
 #endif

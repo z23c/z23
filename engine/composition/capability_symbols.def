@@ -1019,6 +1019,9 @@ ZCL_CAPABILITY_SYMBOL("log", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("log10", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("log1p", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("log2", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("madvise", CAP_HARMLESS,
+    "Drops resident pages of a read-only file mapping the caller already "
+    "holds; the pages fault back in from the file. Opens and writes nothing.")
 ZCL_CAPABILITY_SYMBOL("malloc", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("malloc_trim", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("mallopt", CAP_HARMLESS, "")
