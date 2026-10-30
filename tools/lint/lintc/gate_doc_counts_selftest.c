@@ -53,25 +53,25 @@ static int dcn_st_fixture(const char *dir, const struct dcn_counts *c)
         "1500+ tests <!-- doc-count-ok: fixture -->\n", c->groups + 1),
             sizeof sup))
         return 2;
-    int rc = dcn_st_write(dir, "good.md", 0, good);
-    rc = rc ? rc : dcn_st_write(dir, "bad.md", 1, bad);
-    return rc ? rc : dcn_st_write(dir, "suppressed.md", 2, sup);
+    int rc = dcn_st_write(dir, "good.md", 0, good); // error-doc-ref-ok: selftest fixture name
+    rc = rc ? rc : dcn_st_write(dir, "bad.md", 1, bad); // error-doc-ref-ok: selftest fixture name
+    return rc ? rc : dcn_st_write(dir, "suppressed.md", 2, sup); // error-doc-ref-ok: selftest fixture name
 }
 
 static int dcn_st_judge(void)
 {
     int total = g_dcn_st_viol.n, in_bad = 0;
     for (int i = 0; i < total; i++)
-        if (strstr(g_dcn_st_viol.t[i], "bad.md"))
+        if (strstr(g_dcn_st_viol.t[i], "bad.md")) // error-doc-ref-ok: selftest fixture name
             in_bad++;
     if (total == 8 && in_bad == 8)
         return 0;
     fputs("FAIL: check_doc_counts self-check broken — the prose matcher no "
           "longer\n      behaves as specified, so a clean tree scan would "
           "prove nothing.\n      expected 8 violations (one per derived "
-          "rule, plus the denylist\n      phrase), all in bad.md; got ",
+          "rule, plus the denylist\n      phrase), all in bad.md; got ", // error-doc-ref-ok: selftest fixture name
           stderr);
-    fprintf(stderr, "%d total,\n      %d in bad.md:\n        ", total, in_bad);
+    fprintf(stderr, "%d total,\n      %d in bad.md:\n        ", total, in_bad); // error-doc-ref-ok: selftest fixture name
     for (int i = 0; i < total; i++)
         fprintf(stderr, "%s%s", i ? "\n" : "", g_dcn_st_viol.t[i]);
     fputc('\n', stderr);

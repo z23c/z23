@@ -434,7 +434,7 @@ static void dcn_report_fail(const struct dcn_viol *v)
         printf("    %s\n", v->t[i]);
     printf("\nFix: the CODE is authoritative.\n"
            "  - For a MISMATCH: update the <!-- DOC-COUNTS --> block in %s\n"
-           "    AND any prose (FRAMEWORK.md, CLAUDE.md, docs/dev/BUILD.md, "
+           "    AND any prose (docs/commons/FRAMEWORK.md, CLAUDE.md, docs/dev/BUILD.md, "
            "docs/agent/HANDOFF.md) to match.\n"
            "  - For a stale phrase: delete or correct the prose (the number "
            "is wrong).\n", k_dcn_doc);
