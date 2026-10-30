@@ -105,10 +105,15 @@ static int ucg_case_failed_refresh_keeps_last_good(void)
     UCG_CHECK("failed first refresh serves 0 and stores nothing",
               utxo_count_cache_refresh(&c, 100, false, 0) == 0 &&
               !utxo_count_cache_get(&c, 100, 60, &(int64_t){0}));
+    int64_t lg = -1;
+    UCG_CHECK("last_good on an empty cache reports none and 0",
+              !utxo_count_cache_last_good(&c, &lg) && lg == 0);
     UCG_CHECK("good refresh is stored",
               utxo_count_cache_refresh(&c, 100, true, 7) == 7);
     UCG_CHECK("failed refresh serves the last good value, not 0",
               utxo_count_cache_refresh(&c, 200, false, 0) == 7);
+    UCG_CHECK("last_good reports presence and value from one read",
+              utxo_count_cache_last_good(&c, &lg) && lg == 7);
     int64_t v = -1;
     UCG_CHECK("failed refresh did not extend the cache age",
               !utxo_count_cache_get(&c, 200, 60, &v));

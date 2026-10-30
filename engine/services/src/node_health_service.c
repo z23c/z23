@@ -546,13 +546,22 @@ static void health_collect_utxo_count(struct node_health_snapshot *snapshot,
     if (!ok) {
         static struct log_throttle warn = LOG_THROTTLE_INIT;
         uint64_t reps = 0;
+        int64_t last = 0;
+        bool have_good = utxo_count_cache_last_good(&g_health_utxo_cache, &last);
+        snapshot->utxo_count = last;
         if (log_throttle_should_emit(&warn, 1, now,
-                                     UTXO_COUNT_REFRESH_WARN_SECS, &reps))
-            LOG_WARN("health", "[health] utxo count refresh failed on both "
-                     "handles; serving the last good value");
+                                     UTXO_COUNT_REFRESH_WARN_SECS, &reps)) {
+            if (have_good)
+                LOG_WARN("health", "[health] utxo count refresh failed on both "
+                         "handles; serving the last good value");
+            else
+                LOG_WARN("health", "[health] utxo count refresh failed on both "
+                         "handles; no good value yet, serving 0");
+        }
+        return;
     }
-    snapshot->utxo_count =
-        utxo_count_cache_refresh(&g_health_utxo_cache, now, ok, count);
+    utxo_count_cache_put(&g_health_utxo_cache, now, count);
+    snapshot->utxo_count = count;
 }
 
 static void health_collect_db_status(struct node_health_snapshot *snapshot,

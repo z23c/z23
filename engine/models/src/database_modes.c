@@ -111,15 +111,23 @@ int64_t node_db_utxo_count_gauge(struct node_db *ndb)
     if (!node_db_utxo_count_checked(ndb, &count)) {
         static struct log_throttle warn = LOG_THROTTLE_INIT;
         uint64_t reps = 0;
+        int64_t last = 0;
+        bool have_good = atomic_load(&g_utxo_gauge_owner) == ndb &&
+                         utxo_count_cache_last_good(&g_utxo_gauge_cache, &last);
         if (log_throttle_should_emit(&warn, 1, now,
-                                     UTXO_COUNT_REFRESH_WARN_SECS, &reps))
-            LOG_WARN("db", "[db] utxo count gauge: refresh failed (%s); "
-                     "serving the last good value", ndb->path);
-        return atomic_load(&g_utxo_gauge_owner) == ndb
-                   ? atomic_load(&g_utxo_gauge_cache.value) : 0;
+                                     UTXO_COUNT_REFRESH_WARN_SECS, &reps)) {
+            if (have_good)
+                LOG_WARN("db", "[db] utxo count gauge: refresh failed (%s); "
+                         "serving the last good value", ndb->path);
+            else
+                LOG_WARN("db", "[db] utxo count gauge: refresh failed (%s); "
+                         "no good value yet, serving 0", ndb->path);
+        }
+        return have_good ? last : 0;
     }
-    atomic_store(&g_utxo_gauge_owner, ndb);
+    /* Value first, owner second: a reader that sees the owner sees its count. */
     utxo_count_cache_put(&g_utxo_gauge_cache, now, count);
+    atomic_store(&g_utxo_gauge_owner, ndb);
     return count;
 }
 
