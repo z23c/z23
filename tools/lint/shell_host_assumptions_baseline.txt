@@ -5,7 +5,6 @@ nproc	tools/dev/doctor-build.sh	1
 nproc	tools/dev/module-linkgraph.sh	2
 nproc	tools/dev/sovereign_source_network_hook.sh	3
 nproc	tools/lint/check_standalone_tools_link.sh	1
-nproc	tools/lint/check_windows_cross_syntax.sh	1
 nproc	tools/scripts/anchor-snapshot-copy-prove.sh	1
 nproc	tools/scripts/binary_size.sh	1
 nproc	tools/scripts/build_bench.sh	2

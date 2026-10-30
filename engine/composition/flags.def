@@ -1030,8 +1030,6 @@ Z23_FLAG("ZCL_GATE_OUT", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_windows_cross_syntax.sh:auto")
 Z23_FLAG("ZCL_GATE_SCAN_LOG", "env_build", "-", "-",
           "undocumented; first use tools/lint/gate_lib.sh:auto")
-Z23_FLAG("ZCL_GATE_TEST_COMPAT_HEADER", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_windows_cross_syntax.sh:auto")
 Z23_FLAG("ZCL_GATE_WIRING_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_lint_gate_wiring.c:auto")
 Z23_FLAG("ZCL_GC_MAIN_REF", "env_build", "main", "-",
@@ -1527,7 +1525,7 @@ Z23_FLAG("ZCL_METRICS_HTTP_ENABLE", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_MIND_STATE_DIR", "env_runtime", "-", "-",
           "undocumented; first use tools/mind/mind_state.c:auto")
 Z23_FLAG("ZCL_MINGW_CC", "env_build", "x86_64-w64-mingw32-gcc", "-",
-          "undocumented; first use tools/lint/check_windows_cross_syntax.sh:auto")
+          "undocumented; first use tools/lint/check_windows_platform_seam.sh:auto")
 Z23_FLAG("ZCL_MINT_ANCHOR_OUT", "env_runtime", "-", "-",
           "first use engine/composition/src/boot_anchor_snapshot_reachability.c:auto; documented at docs/dev/fast-path.md:53: $ZCL_MINT_ANCHOR_OUT or <src>/utxo-anchor.snapshot. A refold proof also")
 Z23_FLAG("ZCL_MINT_FORCE_REBUILD", "env_runtime", "-", "-",
@@ -2655,7 +2653,7 @@ Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_GUARD_SCRATCH", "env_build", "-", "-",
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_windows_acceptance.c:auto")
 Z23_FLAG("ZCL_WIN_CROSS_JOBS", "env_build", "ZCL_CC_JOBS", "-",
-          "undocumented; first use tools/lint/check_windows_cross_syntax.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_windows_cross_syntax.c:auto")
 Z23_FLAG("ZCL_WRS_DIR", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_wallet_recovery_safety.c:auto")
 Z23_FLAG("ZCL_WRS_GO", "env_test", "-", "-",

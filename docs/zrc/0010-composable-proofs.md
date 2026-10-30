@@ -177,7 +177,7 @@ verifier signed count.
 **Hits are exact.** A stale closure is a miss. `tu_result_cache.sh` keys a
 TU on compiler identity, flags, and TU bytes plus an include-set digest
 (`tools/lint/tu_result_cache.sh:53-74`, `:297-310`);
-`tools/lint/check_windows_cross_syntax.sh:41-49` replays that cache into
+`tools/lint/lintc/gate_windows_cross_syntax_cache.c` replays that cache into
 the same log and rc paths. The warm generation
 (`proof_build_identity_equal` at `tools/dev/dev_proof.c:2192-2198`,
 `warm_donor_scan` at `:2607-2637`) is the same idea at generation grain.

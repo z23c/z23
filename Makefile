@@ -2712,7 +2712,7 @@ windows-acceptance-wine: windows-acceptance-compile
 windows-portability-acceptance: $(LINTC_TOOL)
 	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_platform_seam.sh --self-test
 	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_platform_seam.sh
-	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_cross_syntax.sh
+	@ZCL_REQUIRE_MINGW=1 ./build/bin/z23-lint check-windows-cross-syntax
 	@ZCL_REQUIRE_MINGW=1 ./build/bin/z23-lint check-windows-acceptance --selftest
 	@ZCL_REQUIRE_MINGW=1 ./build/bin/z23-lint check-windows-acceptance
 ifeq ($(ZCL_HOST_WINDOWS),1)
@@ -14324,9 +14324,9 @@ check-windows-acceptance-guard: $(LINTC_TOOL)
 # Windows-only syntax error sat undetected.
 # -fsyntax-only, no objects, no archives. SKIP (exit 0, not a pass) when
 # mingw is absent.
-check-windows-cross-syntax:
+check-windows-cross-syntax: $(LINTC_TOOL)
 	@echo "══ LINT: Windows cross-syntax (mingw -fsyntax-only over every _WIN32 TU) ══"
-	@./tools/lint/check_windows_cross_syntax.sh
+	@./build/bin/z23-lint check-windows-cross-syntax
 
 # A platform-only system header may not be included outside a conditional that
 # names that platform. Every gate above needs a cross-compiler; this one needs
