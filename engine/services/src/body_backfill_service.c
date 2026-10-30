@@ -40,11 +40,13 @@
 #include "chain/chain.h"
 #include "core/uint256.h"
 #include "event/event.h"
+#include "jobs/node_pace.h"
 #include "jobs/tip_finalize_stage.h"
 #include "net/download.h"
 #include "storage/body_coverage.h"
 #include "storage/body_history.h"
 #include "storage/progress_store.h"
+#include "support/log_throttle.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "util/sync.h"
@@ -203,6 +205,24 @@ static size_t bb_drop_in_flight(struct download_manager *dm,
     return keep;
 }
 
+/* node_pace: history is optional work. A host that asked the node to cool
+ * (gentle or pause) gets no new below-tip requests; the census still runs so
+ * the verdict stays fresh, and requests already in flight finish. */
+static bool bb_pace_allows(void)
+{
+    node_pace_poll();
+    return node_pace_get() == NODE_PACE_NORMAL;
+}
+
+static bool bb_may_enqueue(enum bb_backfill_mode mode, bool folded, bool held)
+{
+    return mode != BB_BACKFILL_OFF && folded && !held && bb_pace_allows();
+}
+
+/* One enqueue line per minute; the count is the enqueue passes so far. */
+#define BB_ENQUEUE_LOG_SECS 60
+static struct log_throttle g_bb_enqueue_log = LOG_THROTTLE_INIT;
+
 static void bb_note_enqueued(size_t added, int64_t lo, size_t n, int tip_h,
                              const char *why, body_backfill_wake_fn wake,
                              void *wake_ctx)
@@ -212,11 +232,15 @@ static void bb_note_enqueued(size_t added, int64_t lo, size_t n, int tip_h,
     body_history_global_lock();
     body_history_global_census()->blocks_enqueued += (uint64_t)added;
     body_history_global_unlock();
-    LOG_WARN("body_backfill",
-             "[body-history] backfill queued %zu below-tip "
-             "bodies (%s window [%lld..%lld] tip=%d)",
-             added, label, (long long)lo,
-             (long long)(lo + (int64_t)n - 1), tip_h);
+    uint64_t reps = 0;
+    if (log_throttle_should_emit(&g_bb_enqueue_log, 0, platform_time_wall_unix(),
+                                 BB_ENQUEUE_LOG_SECS, &reps))
+        LOG_INFO("body_backfill",
+                 "[body-history] backfill queued %zu below-tip "
+                 "bodies (%s window [%lld..%lld] tip=%d, passes=%llu)",
+                 added, label, (long long)lo,
+                 (long long)(lo + (int64_t)n - 1), tip_h,
+                 (unsigned long long)reps);
     event_emitf(EV_BLOCK_REQUESTED, 0,
                 "body_history backfill queued=%zu lo=%lld "
                 "hi=%lld tip=%d why=%s",
@@ -465,8 +489,7 @@ int body_backfill_pass(struct main_state *ms, struct download_manager *dm,
     body_history_publish((folded && evaluated) ? &verdict : NULL);
 
     enum bb_backfill_mode mode = bb_backfill_mode();
-    bool may_enqueue = mode != BB_BACKFILL_OFF && folded &&
-                       !tip_work_pending && !census_only;
+    bool may_enqueue = bb_may_enqueue(mode, folded, tip_work_pending || census_only);
     int enqueued = bb_enqueue_after_census(
         ms, dm, anchor, may_enqueue, classes, hashes, n, lo, hi, tip_h, mode,
         &res, evaluated ? &verdict : NULL, wake, wake_ctx);
@@ -500,6 +523,9 @@ int body_backfill_catch_up(struct main_state *ms, struct download_manager *dm,
                            body_backfill_abort_fn should_abort, void *abort_ctx,
                            body_backfill_wake_fn heartbeat, void *hb_ctx)
 {
+    /* The burst is pure catch-up work; it waits for a normal pace. */
+    if (!bb_pace_allows())
+        return 0;
     int64_t deadline_us =
         platform_time_monotonic_us() + BODY_HISTORY_CENSUS_BURST_MS * 1000;
     uint64_t passes = 0, walked_at_start = 0, walked = 0;

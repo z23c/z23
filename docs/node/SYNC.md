@@ -478,8 +478,8 @@ status) writes one word to `<datadir>/pace`:
 | Word     | Effect |
 | -------- | ------ |
 | `normal` | Default. Identical to a node that never reads the file. |
-| `gentle` | One proof pre-verification worker; the reducer drain sleeps for as long as each round took (at most 250 ms). |
-| `pause`  | No pre-verification workers; the reducer drain does nothing; gap_fill queues no downloads; the staged-sync supervisor skips its drains. P2P stays connected. |
+| `gentle` | One proof pre-verification worker; the reducer drain sleeps for as long as each round took (at most 250 ms). Below-tip history backfill queues no new body requests. |
+| `pause`  | No pre-verification workers; the reducer drain does nothing; gap_fill queues no downloads and history backfill requests nothing; the staged-sync supervisor skips its drains. P2P stays connected. |
 
 The node re-reads the file at most once per second; a missing, empty or
 unrecognised file means `normal`. The pace never changes a validation verdict.

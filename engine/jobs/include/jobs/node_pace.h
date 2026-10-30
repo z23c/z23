@@ -5,10 +5,12 @@
  *
  *   normal  today's behaviour, unchanged
  *   gentle  one pv_lookahead worker; the live reducer drain sleeps in
- *           proportion to the work each round took
+ *           proportion to the work each round took; history backfill
+ *           queues no new below-tip bodies (in-flight ones finish)
  *   pause   no pv_lookahead workers; the live reducer drain does nothing, so
  *           block fetch and validation stop. P2P, pings and held headers are
- *           untouched.
+ *           untouched. History backfill
+ *           queues nothing.
  *
  * Control: the host writes one word (normal, gentle or pause) to
  * <datadir>/pace. The node reads it at most once per second from the places

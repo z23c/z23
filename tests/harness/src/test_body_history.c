@@ -31,6 +31,7 @@
 #include "net/download.h"
 #include "net/net.h"
 #include "services/body_backfill_service.h"
+#include "jobs/node_pace.h"
 #include "validation/main_state.h"
 #include "platform/time_compat.h"
 #include "json/json.h"
@@ -1680,9 +1681,40 @@ static int test_bh_service_abort_resume_rewind(void)
     return failures;
 }
 
+static int test_bh_backfill_yields_to_node_pace(void)
+{
+    int failures = 0;
+    TEST("backfill enqueues only at normal pace") {
+        struct main_state *ms = calloc(1, sizeof(*ms));
+        ASSERT(ms);
+        main_state_init(ms);
+        ASSERT(bh_service_chain(ms, 100, 1));
+        struct download_manager dm;
+        dl_init(&dm);
+        body_history_reset();
+        node_pace_set(NODE_PACE_PAUSE);
+        ASSERT(body_backfill_pass(ms, &dm, false, false, NULL, NULL) == 0);
+        ASSERT(dm.queue_len == 0);
+        node_pace_set(NODE_PACE_GENTLE);
+        ASSERT(body_backfill_pass(ms, &dm, false, false, NULL, NULL) == 0);
+        ASSERT(body_backfill_catch_up(ms, &dm, false, NULL, NULL, NULL, NULL) == 0);
+        ASSERT(dm.queue_len == 0);
+        node_pace_set(NODE_PACE_NORMAL);
+        ASSERT(body_backfill_pass(ms, &dm, false, false, NULL, NULL) == 1);
+        ASSERT(dm.queue_len == 1);
+        dl_free(&dm);
+        main_state_free(ms);
+        free(ms);
+        body_history_reset();
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_body_history(void)
 {
     int failures = 0;
+    failures += test_bh_backfill_yields_to_node_pace();
     failures += test_bh_service_abort_resume_rewind();
     failures += test_bh_service_boundary(4095, 2);
     failures += test_bh_service_boundary(4096, 2);
