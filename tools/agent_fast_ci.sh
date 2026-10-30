@@ -581,7 +581,7 @@ cache_manifest() {
         tools/scripts/check_stable_publish_containment.sh \
         tools/scripts/build_vendor.sh \
         tools/scripts/background_quality_lane.sh \
-        tools/scripts/check_agentdeployguard_cli_exit.sh \
+        tools/lint/lintc/gate_agent_cli.c \
         platform/deploy/examples/z23-remote-test-node.service \
         platform/deploy/examples/z23-remote-test.env.example \
         platform/deploy/examples/z23-self-update.service \

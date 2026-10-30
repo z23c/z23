@@ -92,7 +92,7 @@ Z23_FLAG("ZCL_AGENT_COMPDB_PATH", "env_build", "-", "-",
 Z23_FLAG("ZCL_AGENT_COPY_PROVE_SCRIPT", "env_runtime", "-", "-",
           "undocumented; first use cognition/controllers/src/agent_copy_prove_controller.c:auto")
 Z23_FLAG("ZCL_AGENTDEPLOYGUARD_CLI_TIMEOUT", "env_build", "10", "-",
-          "undocumented; first use tools/scripts/check_agentdeployguard_cli_exit.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_agent_cli.c:auto")
 Z23_FLAG("ZCL_AGENT_DEV_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/agent-dev-status.sh:auto")
 Z23_FLAG("ZCL_AGENT_DEV_DATADIR", "env_build", "-", "-",

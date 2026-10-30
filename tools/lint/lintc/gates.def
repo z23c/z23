@@ -209,6 +209,7 @@ LINT_GATE("check-windows-acceptance-guard", check_windows_acceptance_guard, LINT
 LINT_GATE("check-lint-gate-wiring", check_lint_gate_wiring, LINT_CMD_PAIR)
 LINT_GATE("check-package-capabilities", check_package_capabilities, LINT_CMD_PAIR)
 LINT_GATE("check-arm-symbol-single", check_arm_symbol_single, LINT_CMD_PAIR)
+LINT_GATE("check-agent-cli", check_agent_cli, LINT_CMD_NONE)
 LINT_GATE("check-macos-acceptance", check_macos_acceptance, LINT_CMD_PAIR)
 LINT_GATE("check-sqlite-cursor-lifetime", check_sqlite_cursor_lifetime, LINT_CMD_PAIR)
 LINT_GATE("capability-closure-data", capability_closure_data, LINT_CMD_NONE)

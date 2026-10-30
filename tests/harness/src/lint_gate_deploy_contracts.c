@@ -739,10 +739,9 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf,
                       "ZCL_FAST_LIVE=0 ZCL_FAST_COMPILE=strict $(MAKE) fast-ci")
                == NULL);
-        ASSERT(strstr(buf, "check-agent-cli: zclassic23") != NULL);
-        ASSERT(strstr(buf,
-                      "tools/scripts/check_agentdeployguard_cli_exit.sh")
+        ASSERT(strstr(buf, "check-agent-cli: zclassic23 $(LINTC_TOOL)")
                != NULL);
+        ASSERT(strstr(buf, "@$(LINTC_TOOL) check-agent-cli") != NULL);
         ASSERT(strstr(buf, "install-quality-linger") != NULL);
         ASSERT(strstr(buf, "quality-linger-status") != NULL);
         ASSERT(strstr(buf, "tools/scripts/background_quality_lane.sh") != NULL);
@@ -833,9 +832,7 @@ int t_agent_fast_ci_contract(void)
         ASSERT(strstr(buf, "tools/deploy_guard.sh") != NULL);
         ASSERT(strstr(buf, "tools/dev/deploy-dev-lane.sh") != NULL);
         ASSERT(strstr(buf, "tools/dev/agent-dev-status.sh") != NULL);
-        ASSERT(strstr(buf,
-                      "tools/scripts/check_agentdeployguard_cli_exit.sh")
-               != NULL);
+        ASSERT(strstr(buf, "tools/lint/lintc/gate_agent_cli.c") != NULL);
         ASSERT(strstr(buf, "make_fast lint-fast") != NULL);
         ASSERT(strstr(buf, "ZCL_FAST_COMPILE") != NULL);
         ASSERT(strstr(buf, "ZCL_FAST_CHANGED_FILES_ONLY") != NULL);
