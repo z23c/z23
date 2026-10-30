@@ -452,10 +452,9 @@ static int nc_case_probe_silent(void)
     return failures;
 }
 
-int test_network_crawler(void)
+static int nc_case_census_fold(void)
 {
     int failures = 0;
-    printf("network_crawler...\n");
 
     /* ── 1. pure fold: histograms, splits, height distribution ─────────── */
     printf("  census fold: histogram + split + height distribution... ");
@@ -562,6 +561,13 @@ int test_network_crawler(void)
         printf("done\n");
     }
 
+    return failures;
+}
+
+static int nc_case_census_table(void)
+{
+    int failures = 0;
+
     /* ── 5. census ingest via probe seam: dedup + per-round cap ────────── */
     printf("  census ingest: addr dedup + per-round cap (probe seam)... ");
     {
@@ -620,6 +626,13 @@ int test_network_crawler(void)
         printf("done\n");
     }
 
+    return failures;
+}
+
+static int nc_case_dumper_eclipse(void)
+{
+    int failures = 0;
+
     /* ── 7. dumper surfaces the eclipse signal + evidence ──────────────── */
     printf("  network_census dumper surfaces eclipse + evidence... ");
     {
@@ -660,6 +673,13 @@ int test_network_crawler(void)
         network_crawler_test_reset();
         printf("done\n");
     }
+
+    return failures;
+}
+
+static int nc_case_eclipse_condition(void)
+{
+    int failures = 0;
 
     /* ── 8. eclipse CONDITION: 2-round trip + remedy names the blocker ───── */
     printf("  eclipse condition: 2 consecutive census rounds trip + remedy... ");
@@ -704,6 +724,13 @@ int test_network_crawler(void)
         printf("done\n");
     }
 
+    return failures;
+}
+
+static int nc_case_onion_render(void)
+{
+    int failures = 0;
+
     /* ── 9. onion address rendering: a REAL v3 hostname, never "[torv3]" ── */
     printf("  onion addresses render to distinct real v3 hostnames... ");
     {
@@ -729,6 +756,13 @@ int test_network_crawler(void)
         NC_CHECK(onion_hostname_valid(host));
         printf("done\n");
     }
+
+    return failures;
+}
+
+static int nc_case_not_probed_fold(void)
+{
+    int failures = 0;
 
     /* ── 10. NOT PROBED is its own bucket, not an unreachable ──────────── */
     printf("  fold: not-probed rows counted apart from unreachable... ");
@@ -757,6 +791,13 @@ int test_network_crawler(void)
         NC_CHECK(strcmp(v.not_probed_reason, "tor unavailable") == 0);
         printf("done\n");
     }
+
+    return failures;
+}
+
+static int nc_case_onion_phase(void)
+{
+    int failures = 0;
 
     /* ── 11. onion phase is bounded SEPARATELY; clearnet is never starved ── */
     printf("  onion phase: per-round cap + budget, clearnet runs first... ");
@@ -834,6 +875,13 @@ int test_network_crawler(void)
         printf("done\n");
     }
 
+    return failures;
+}
+
+static int nc_case_onion_not_probed(void)
+{
+    int failures = 0;
+
     /* ── 13. NOT PROBED never erases a real measurement ────────────────── */
     printf("  not-probed never overwrites a measured census row... ");
     {
@@ -903,6 +951,13 @@ int test_network_crawler(void)
         printf("done\n");
     }
 
+    return failures;
+}
+
+static int nc_case_full_census(void)
+{
+    int failures = 0;
+
     /* ── 14b. a FULL census: unprobed rows never evict measurements ────── */
     printf("  full census: not-probed never evicts a measured row... ");
     {
@@ -948,6 +1003,13 @@ int test_network_crawler(void)
         printf("done\n");
     }
 
+    return failures;
+}
+
+static int nc_case_default_probe_onion(void)
+{
+    int failures = 0;
+
     /* ── 15. the REAL default probe degrades an onion to NOT PROBED ─────── */
     printf("  default probe: no Tor => onion NOT PROBED (never unreachable)... ");
     {
@@ -965,6 +1027,13 @@ int test_network_crawler(void)
         NC_CHECK(strstr(r.addr, ".onion:8033") != NULL);
         printf("done\n");
     }
+
+    return failures;
+}
+
+static int nc_case_ledger_unprobed(void)
+{
+    int failures = 0;
 
     /* ── 16. unprobed is banked as a NOTE, never as a failed dial ───────── */
     printf("  ledger notes unprobed addresses without a census failure... ");
@@ -1009,6 +1078,13 @@ int test_network_crawler(void)
         printf("done\n");
     }
 
+    return failures;
+}
+
+static int nc_case_slow_loopback(void)
+{
+    int failures = 0;
+
     /* ── 17. the real dial waits out a slow reply on a blocking socket ───── */
     printf("  default probe reads a delayed version reply over loopback... ");
     {
@@ -1029,6 +1105,26 @@ int test_network_crawler(void)
         printf("done\n");
     }
 
+    return failures;
+}
+
+int test_network_crawler(void)
+{
+    int failures = 0;
+    printf("network_crawler...\n");
+
+    failures += nc_case_census_fold();
+    failures += nc_case_census_table();
+    failures += nc_case_dumper_eclipse();
+    failures += nc_case_eclipse_condition();
+    failures += nc_case_onion_render();
+    failures += nc_case_not_probed_fold();
+    failures += nc_case_onion_phase();
+    failures += nc_case_onion_not_probed();
+    failures += nc_case_full_census();
+    failures += nc_case_default_probe_onion();
+    failures += nc_case_ledger_unprobed();
+    failures += nc_case_slow_loopback();
     failures += nc_case_chain_fold();
     failures += nc_case_probe_chain();
     failures += nc_case_probe_silent();
