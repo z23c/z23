@@ -26,6 +26,8 @@
 #include "base/safe_alloc.h"
 #include "gate_capability_closure_priv.h"
 #include "lintc.h"
+#include "lintc_text.h"
+#include "util/str_suffix.h"
 #include "lintc_proc.h"
 #include "lintc_sig.h"
 
@@ -129,16 +131,10 @@ static int ccg_is_file(const char *root, const char *rel)
            && S_ISREG(st.st_mode);
 }
 
-static int ccg_has_suffix(const char *name, const char *suffix)
-{
-    size_t n = strlen(name), k = strlen(suffix);
-    return n >= k && strcmp(name + n - k, suffix) == 0;
-}
-
 /* "dir/x.o" becomes "dir/x.c"; any other name is kept. */
 static void ccg_c_of(const char *obj, char *out, size_t cap)
 {
-    if (ccg_has_suffix(obj, ".o"))
+    if (zcl_str_has_suffix(obj, ".o"))
         snprintf(out, cap, "%.*s.c", (int)(strlen(obj) - 2), obj);
     else
         snprintf(out, cap, "%s", obj);
@@ -175,7 +171,7 @@ static int ccg_walk_entry(const struct ccg_scan *s, const char *base, const char
         return ccg_walk_fail(s, "cannot stat", p, errno);
     if (S_ISDIR(st.st_mode))
         return ccg_walk(s, base, r, suffix, out);
-    return ccg_has_suffix(name, suffix) ? ccd_map_put(out, r, "") : 0;
+    return zcl_str_has_suffix(name, suffix) ? ccd_map_put(out, r, "") : 0;
 }
 
 /* Collects the base-relative names under base/rel that end in suffix. An

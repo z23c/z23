@@ -3,6 +3,7 @@
 #include "devloop_facts_make.h"
 
 #include "util/safe_alloc.h"
+#include "util/str_suffix.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1524,19 +1525,13 @@ static void fxm_free(struct fxm *m)
     free(m->b.p);
 }
 
-static bool fxm_ends_with(const char *s, const char *suffix)
-{
-    size_t n = strlen(s), k = strlen(suffix);
-    return n >= k && strcmp(s + n - k, suffix) == 0;
-}
-
 static bool fxm_makefile_name(const char *path)
 {
     const char *b = strrchr(path, '/');
     b = b != NULL ? b + 1 : path;
     return strcmp(b, "GNUmakefile") == 0 || strcmp(b, "makefile") == 0 ||
-           strncmp(b, "Makefile", 8) == 0 || fxm_ends_with(b, ".mk") ||
-           fxm_ends_with(b, ".make");
+           strncmp(b, "Makefile", 8) == 0 || zcl_str_has_suffix(b, ".mk") ||
+           zcl_str_has_suffix(b, ".make");
 }
 
 /* A directory above path, below the root, holds a makefile: a sub-make run

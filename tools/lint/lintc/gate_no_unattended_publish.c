@@ -28,6 +28,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lintc_text.h"
+#include "util/str_suffix.h"
 
 enum {
     NUP_MAXF = 4096, NUP_PATH = 512, NUP_HITBUF = 4096, NUP_MAXV = 64,
@@ -77,12 +79,6 @@ struct nup_regs {
     const regex_t *publish, *push_lit, *spawn, *report;
 };
 
-static int nup_ends_with(const char *s, const char *suf)
-{
-    size_t ls = strlen(s), lf = strlen(suf);
-    return ls >= lf && strcmp(s + ls - lf, suf) == 0;
-}
-
 static int nup_starts_with(const char *s, const char *pre)
 { return strncmp(s, pre, strlen(pre)) == 0; }
 
@@ -98,14 +94,14 @@ static int nup_is_shell_kind(const char *p)
 {
     const char *base = strrchr(p, '/');
     base = base ? base + 1 : p;
-    return nup_ends_with(p, ".sh")
-        || strcmp(base, "pre-commit") == 0 || nup_ends_with(p, ".service")
-        || nup_ends_with(p, ".timer");
+    return zcl_str_has_suffix(p, ".sh")
+        || strcmp(base, "pre-commit") == 0 || zcl_str_has_suffix(p, ".service")
+        || zcl_str_has_suffix(p, ".timer");
 }
 
 static int nup_is_native_kind(const char *p)
 {
-    if (!nup_ends_with(p, ".c"))
+    if (!zcl_str_has_suffix(p, ".c"))
         return 0;
     return nup_starts_with(p, "tools/command/") || strstr(p, "/tools/command/")
         || nup_starts_with(p, "tools/dev/") || strstr(p, "/tools/dev/");
@@ -120,7 +116,7 @@ static int nup_is_native_kind(const char *p)
 static int nup_in_scope(const char *p)
 {
     return nup_starts_with(p, "tools/") || nup_starts_with(p, "deploy/")
-        || nup_ends_with(p, ".sh");
+        || zcl_str_has_suffix(p, ".sh");
 }
 
 static int nup_line_is_comment(const char *line)

@@ -45,6 +45,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lintc_text.h"
+#include "util/str_suffix.h"
 
 enum {
     HSW_PATH = 320,
@@ -203,12 +205,6 @@ static int hsw_is_blank(const char *s)
     return 1;
 }
 
-static int hsw_ends_with(const char *s, const char *suf)
-{
-    size_t sl = strlen(s), fl = strlen(suf);
-    return sl >= fl && strcmp(s + sl - fl, suf) == 0;
-}
-
 static int hsw_leaf_name_valid(const char *h)
 {
     if (!h[0])
@@ -258,12 +254,6 @@ static int hsw_ready_add(struct hsw_ready *ready, int *n, const char *name)
     return 0;
 }
 
-static int hsw_has_suffix(const char *name, const char *suf)
-{
-    size_t nl = strlen(name), sl = strlen(suf);
-    return nl >= sl && strcmp(name + nl - sl, suf) == 0;
-}
-
 static int hsw_scan_def_file(const char *path, struct hsw_ready *ready,
                              int *nready, int *def_count, int *ready_count)
 {
@@ -298,7 +288,7 @@ static int hsw_load_ready(const char *defdir, struct hsw_ready *ready,
     struct dirent *de;
     int rc = 0;
     while (rc == 0 && (de = readdir(d)) != NULL) {
-        if (!hsw_has_suffix(de->d_name, ".def"))
+        if (!zcl_str_has_suffix(de->d_name, ".def"))
             continue;
         char path[HSW_PATH];
         if (ovf(snprintf(path, sizeof path, "%s/%s", defdir, de->d_name),
@@ -439,7 +429,7 @@ static int hsw_phase1_row(const struct hsw_row *row, const regex_t *forbidden,
         return hsw_note(v, "  %s (under a forbidden consensus/state/supervisor root)\n", s);
     if (regexec(allowed, s, 0, NULL, 0) != 0)
         return hsw_note(v, "  %s (not under a physical controller, view, or condition room)\n", s);
-    if (!hsw_ends_with(s, ".c"))
+    if (!zcl_str_has_suffix(s, ".c"))
         return hsw_note(v, "  %s (not a .c translation unit)\n", s);
     struct stat st;
     if (stat(s, &st) != 0 || !S_ISREG(st.st_mode))

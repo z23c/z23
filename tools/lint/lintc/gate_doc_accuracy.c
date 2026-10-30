@@ -39,6 +39,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lintc_text.h"
+#include "util/str_suffix.h"
 #include "gate_doc_accuracy_priv.h"
 
 enum { DA_PATH = 1024, DA_GATE = 128, DA_MAXGATES = 512, DA_LINE = 1 << 18,
@@ -491,12 +493,6 @@ static int da_pruned(const char *name)
            strcmp(name, "build") == 0 || strcmp(name, "node_modules") == 0;
 }
 
-static int da_is_md(const char *name)
-{
-    size_t n = strlen(name);
-    return n > 3 && strcmp(name + n - 3, ".md") == 0;
-}
-
 static int da_walk_dir(const char *root, const char *rel, struct da_docs *d);
 
 static int da_walk_entry(const char *root, const char *rel, const char *name,
@@ -516,7 +512,7 @@ static int da_walk_entry(const char *root, const char *rel, const char *name,
     }
     if (S_ISDIR(st.st_mode))
         return da_walk_dir(root, crel, d);
-    if (S_ISREG(st.st_mode) && da_is_md(name))
+    if (S_ISREG(st.st_mode) && zcl_str_has_suffix(name, ".md"))
         return da_doc_add(d, crel);
     return 0;
 }
