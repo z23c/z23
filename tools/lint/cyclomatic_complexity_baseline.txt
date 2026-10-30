@@ -274,7 +274,7 @@ engine/reducer/jobs/src/stage_repair_reducer_frontier_tipfin.c:tipfin_batch_tx:2
 engine/reducer/jobs/src/stage_repair_reducer_frontier_tipfin.c:tipfin_eval_p:19
 engine/reducer/jobs/src/stage_repair_reducer_frontier_tipfin.c:tipfin_log_ok_hash_at:18
 engine/services/src/bg_validation_proofs.c:bg_validation_verify_shielded_proofs:30
-engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_stages_from_cold_import:33
+engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_stages_from_cold_import:18
 engine/services/src/legacy_import_service.c:legacy_import_service_run:22
 engine/services/src/node_db_catchup_service.c:node_db_catchup_service_run:80
 engine/services/src/node_db_import_service.c:node_db_import_service_run:38

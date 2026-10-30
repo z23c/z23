@@ -638,9 +638,12 @@ int block_index_loader_arm_cold_start_from_index(struct main_state *ms,
     return 1;
 }
 
-int block_index_loader_seed_stages_from_cold_import(struct main_state *ms,
-                                                    struct node_db *ndb,
-                                                    struct sqlite3 *progress_db)
+/* Precondition and durable-anchor read for the cold-import seed. A NULL
+ * argument or an absent/malformed anchor key is a silent decline, as before. */
+static int cold_import_seed_read_anchor(struct main_state *ms,
+                                        struct node_db *ndb,
+                                        struct sqlite3 *progress_db,
+                                        int32_t *H, uint8_t anchor_hash[32])
 {
     if (!ms || !ndb || !progress_db)
         return 0;
@@ -652,22 +655,121 @@ int block_index_loader_seed_stages_from_cold_import(struct main_state *ms,
         return 0;  /* no cold-import this datadir's lifetime — normal boot */
     if (anchor_h <= 0 || anchor_h > INT32_MAX)
         return 0;
-    uint8_t anchor_hash[32];
     size_t hn = 0;
     if (!node_db_state_get(ndb, COLD_IMPORT_SEED_HASH_KEY,
-                           anchor_hash, sizeof(anchor_hash), &hn) ||
-        hn != sizeof(anchor_hash))
+                           anchor_hash, 32, &hn) ||
+        hn != 32)
         return 0;
-    int32_t H = (int32_t)anchor_h;
+    *H = (int32_t)anchor_h;
+    return 1;
+}
+
+/* Block-index entry for the durable anchor hash, or NULL when not loaded. */
+static struct block_index *cold_import_seed_find_anchor(struct main_state *ms,
+                                                        const uint8_t anchor_hash[32])
+{
+    struct uint256 ah;
+    memcpy(ah.data, anchor_hash, 32);
+    return block_map_find(&ms->map_block_index, &ah);
+}
+
+/* True when the anchor entry exists and sits at exactly height H. */
+static bool cold_import_seed_anchor_at_height(const struct block_index *anchor,
+                                              int32_t H)
+{
+    return anchor && anchor->nHeight == H;
+}
+
+/* Compiled SHA3 UTXO checkpoint height, or the trusted-anchor fallback. */
+static int32_t cold_import_seed_checkpoint_height(void)
+{
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    return cp ? cp->height : REDUCER_FRONTIER_TRUSTED_ANCHOR;
+}
+
+/* True only when the live leveldb_utxo_migrated flag is set to exactly 1. */
+static bool cold_import_seed_live_migrated(struct node_db *ndb)
+{
+    uint8_t mig = 0;
+    size_t mig_len = 0;
+    return node_db_state_get(ndb, "leveldb_utxo_migrated",
+                             &mig, sizeof(mig), &mig_len) &&
+           mig_len == 1 && mig == 1;
+}
+
+/* Coin-presence verdict for the (2d) cross-check. */
+enum cold_import_coins {
+    COLD_IMPORT_COINS_OK,
+    COLD_IMPORT_COINS_CK_TORN,
+    COLD_IMPORT_COINS_COUNT_MISSING,
+    COLD_IMPORT_COINS_UTXO_TORN,
+};
+
+/* Reads the recorded and live coin provenance tokens. The caller owns the
+ * log for every non-OK verdict, using the values written to the out-params. */
+static enum cold_import_coins cold_import_seed_coins_probe(struct node_db *ndb,
+                                                           sqlite3 *progress_db,
+                                                           int64_t *recorded_ck,
+                                                           int64_t *live_ck,
+                                                           int64_t *recorded_count,
+                                                           int64_t *live_count)
+{
+    if (node_db_state_get_int(ndb, "cold_import_seed_coins_kv_count",
+                              recorded_ck) && *recorded_ck > 0) {
+        *live_ck = coins_kv_count(progress_db);
+        return *live_ck != *recorded_ck ? COLD_IMPORT_COINS_CK_TORN
+                                        : COLD_IMPORT_COINS_OK;
+    }
+    if (!node_db_state_get_int(ndb, COLD_IMPORT_SEED_COUNT_KEY,
+                               recorded_count) ||
+        *recorded_count <= 0)
+        return COLD_IMPORT_COINS_COUNT_MISSING;
+    *live_count = node_db_utxo_count(ndb);
+    return *live_count != *recorded_count ? COLD_IMPORT_COINS_UTXO_TORN
+                                          : COLD_IMPORT_COINS_OK;
+}
+
+/* Reads H* under the progress-store transaction lock. */
+static bool cold_import_seed_compute_hstar(sqlite3 *db, int32_t *hstar,
+                                           int32_t *served)
+{
+    progress_store_tx_lock();
+    bool ok = reducer_frontier_compute_hstar(db, hstar, served);
+    progress_store_tx_unlock();
+    return ok;
+}
+
+/* True when H* reads successfully and equals the import height H. */
+static bool cold_import_seed_hstar_reached(sqlite3 *db, int32_t H,
+                                           int32_t *hstar, int32_t *served)
+{
+    return cold_import_seed_compute_hstar(db, hstar, served) && *hstar == H;
+}
+
+/* Declares the external-seed floor under the progress-store transaction lock. */
+static bool cold_import_seed_declare_floor(sqlite3 *db, int32_t H)
+{
+    progress_store_tx_lock();
+    bool ok = reducer_seed_floor_declare_if_absent(db, H);
+    progress_store_tx_unlock();
+    return ok;
+}
+
+int block_index_loader_seed_stages_from_cold_import(struct main_state *ms,
+                                                    struct node_db *ndb,
+                                                    struct sqlite3 *progress_db)
+{
+    int32_t H = 0;
+    uint8_t anchor_hash[32];
+    if (!cold_import_seed_read_anchor(ms, ndb, progress_db, &H, anchor_hash))
+        return 0;
 
     /* (2) INTEGRITY: the durable anchor block must exist in the loaded block
      *     index at exactly height H, binding H to a real header we hold. The
      *     active tip is NOT required to be the anchor: at this boot point it
      *     is the body-availability floor and reaches H later. */
-    struct uint256 ah;
-    memcpy(ah.data, anchor_hash, 32);
-    struct block_index *anchor = block_map_find(&ms->map_block_index, &ah);
-    if (!anchor || anchor->nHeight != H) {
+    struct block_index *anchor = cold_import_seed_find_anchor(ms, anchor_hash);
+    if (!cold_import_seed_anchor_at_height(anchor, H)) {
         LOG_WARN("block_index",
                  "cold-import seed: durable anchor not in index at H=%d "
                  "(found=%d); skip — not trusting an anchor we don't hold",
@@ -675,8 +777,7 @@ int block_index_loader_seed_stages_from_cold_import(struct main_state *ms,
         return 0;
     }
 
-    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-    int32_t checkpoint = cp ? cp->height : REDUCER_FRONTIER_TRUSTED_ANCHOR;
+    int32_t checkpoint = cold_import_seed_checkpoint_height();
     if (H < checkpoint) {
         LOG_WARN("block_index",
                  "cold-import seed: import H=%d below checkpoint=%d; skip",
@@ -719,17 +820,11 @@ int block_index_loader_seed_stages_from_cold_import(struct main_state *ms,
      *     (and the anchor) when a reimport starts. An interrupted reimport that
      *     left a STALE height/hash key but cleared the flag is rejected here —
      *     the durable key alone is not a coin-presence proof. */
-    {
-        uint8_t mig = 0;
-        size_t mig_len = 0;
-        if (!node_db_state_get(ndb, "leveldb_utxo_migrated",
-                               &mig, sizeof(mig), &mig_len) ||
-            mig_len != 1 || mig != 1) {
-            LOG_WARN("block_index",
-                     "cold-import seed: leveldb_utxo_migrated not set; skip — "
-                     "import not live (H=%d)", H);
-            return 0;
-        }
+    if (!cold_import_seed_live_migrated(ndb)) {
+        LOG_WARN("block_index",
+                 "cold-import seed: leveldb_utxo_migrated not set; skip — "
+                 "import not live (H=%d)", H);
+        return 0;
     }
 
     /* (2d) COIN-PRESENCE CROSS-CHECK: the torn-datadir guard. H*==H (step 6)
@@ -741,42 +836,34 @@ int block_index_loader_seed_stages_from_cold_import(struct main_state *ms,
      *     The canonical token 'cold_import_seed_coins_kv_count' (the coins_kv
      *     store in progress.kv that the reducer spends from) is checked
      *     first; the mirror-count token is the fallback. */
-    {
-        int64_t recorded_ck = 0;
-        if (node_db_state_get_int(ndb, "cold_import_seed_coins_kv_count",
-                                  &recorded_ck) && recorded_ck > 0) {
-            int64_t live_ck = coins_kv_count(progress_db);
-            if (live_ck != recorded_ck) {
-                LOG_WARN("block_index",
-                         "cold-import seed: live coins_kv count %lld != "
-                         "recorded %lld at H=%d; skip — canonical coins torn "
-                         "since import, not seeding above the real coin "
-                         "frontier", (long long)live_ck,
-                         (long long)recorded_ck, H);
-                return 0;
-            }
-        } else {
-            int64_t recorded_count = 0;
-            if (!node_db_state_get_int(ndb, COLD_IMPORT_SEED_COUNT_KEY,
-                                       &recorded_count) ||
-                recorded_count <= 0) {
-                LOG_WARN("block_index",
-                         "cold-import seed: durable utxo_count missing/invalid "
-                         "(recorded=%lld); skip — incomplete anchor",
-                         (long long)recorded_count);
-                return 0;
-            }
-            int64_t live_count = node_db_utxo_count(ndb);
-            if (live_count != recorded_count) {
-                LOG_WARN("block_index",
-                         "cold-import seed: live utxo count %lld != recorded "
-                         "%lld at H=%d; skip — coins torn since import, not "
-                         "seeding above the real coin frontier",
-                         (long long)live_count,
-                         (long long)recorded_count, H);
-                return 0;
-            }
-        }
+    int64_t recorded_ck = 0, live_ck = 0;
+    int64_t recorded_count = 0, live_count = 0;
+    enum cold_import_coins coins = cold_import_seed_coins_probe(
+        ndb, progress_db, &recorded_ck, &live_ck, &recorded_count, &live_count);
+    if (coins == COLD_IMPORT_COINS_CK_TORN) {
+        LOG_WARN("block_index",
+                 "cold-import seed: live coins_kv count %lld != "
+                 "recorded %lld at H=%d; skip — canonical coins torn "
+                 "since import, not seeding above the real coin "
+                 "frontier", (long long)live_ck,
+                 (long long)recorded_ck, H);
+        return 0;
+    }
+    if (coins == COLD_IMPORT_COINS_COUNT_MISSING) {
+        LOG_WARN("block_index",
+                 "cold-import seed: durable utxo_count missing/invalid "
+                 "(recorded=%lld); skip — incomplete anchor",
+                 (long long)recorded_count);
+        return 0;
+    }
+    if (coins == COLD_IMPORT_COINS_UTXO_TORN) {
+        LOG_WARN("block_index",
+                 "cold-import seed: live utxo count %lld != recorded "
+                 "%lld at H=%d; skip — coins torn since import, not "
+                 "seeding above the real coin frontier",
+                 (long long)live_count,
+                 (long long)recorded_count, H);
+        return 0;
     }
 
     /* NOTE: the forward-evidence torn-import gate is (2a.5) above (runs on
@@ -789,10 +876,7 @@ int block_index_loader_seed_stages_from_cold_import(struct main_state *ms,
      *     checkpoint while the upstream cursors are pinned. Fires once; the
      *     instant H* reaches H the gate self-clears (idempotent). */
     int32_t hstar = 0, served = 0;
-    progress_store_tx_lock();
-    bool hs_ok = reducer_frontier_compute_hstar(progress_db, &hstar, &served);
-    progress_store_tx_unlock();
-    if (!hs_ok) {
+    if (!cold_import_seed_compute_hstar(progress_db, &hstar, &served)) {
         LOG_WARN("block_index", "cold-import seed: H* read failed; skip");
         return 0;
     }
@@ -850,10 +934,7 @@ int block_index_loader_seed_stages_from_cold_import(struct main_state *ms,
      *     above H (the seeded extent has no undo data to script-verify
      *     against). Absent-guarded — a re-seed keeps the first declaration.
      *     Advisory: never fail the heal over the marker. */
-    progress_store_tx_lock();
-    bool floor_ok = reducer_seed_floor_declare_if_absent(progress_db, H);
-    progress_store_tx_unlock();
-    if (!floor_ok)
+    if (!cold_import_seed_declare_floor(progress_db, H))
         LOG_WARN("block_index",
                  "cold-import seed: seed-floor declare failed H=%d "
                  "(bg-validation will walk from genesis — slow, correct)", H);
@@ -861,10 +942,7 @@ int block_index_loader_seed_stages_from_cold_import(struct main_state *ms,
     /* (6) Self-check: the seed must have moved H* up to H. If not, the heal
      *     silently did nothing — keep the durable anchor so the next boot
      *     retries rather than booting half-seeded. */
-    progress_store_tx_lock();
-    hs_ok = reducer_frontier_compute_hstar(progress_db, &hstar, &served);
-    progress_store_tx_unlock();
-    if (!hs_ok || hstar != H) {
+    if (!cold_import_seed_hstar_reached(progress_db, H, &hstar, &served)) {
         LOG_WARN("block_index",
                  "cold-import seed: post-seed H*=%d != H=%d (heal incomplete) "
                  "— durable anchor retained for retry", hstar, H);
