@@ -75,8 +75,19 @@ synchronization detail, balance, **Stop node** and fleet invitations. Each host
 row gives the host's state and height and adds free disk only below 50 GB;
 blockers are left to the voice assistant. A host whose node gives no height
 reads "node not answering", and one that does not answer the probe reads "host
-not answering". A host counts as in sync within two
-blocks of its `zclassicd` unless it reports itself not synced. Command
+not answering". A host counts as in sync within two blocks of its `zclassicd`
+unless it reports itself not synced. A host whose `zclassicd` height is unknown
+cannot be compared, so it is not counted even when it reports itself synced; its
+row reads "reports synced but zclassicd height unknown, not counted in sync",
+and the headline count and the spoken answer use that one rule. The laptop
+tells the model which text describes the fleet hosts and which the phone's own
+node, whose buttons (**Start node**, **Stop node**, **Talk**, **More**,
+**Confirm**) are never advice for a fleet host, and removes a spoken lead-in
+such as "the observation says" or "the host blockers tool returned" before the owner hears it.
+The model does not read the screen rows. It gets one verdict line per host from
+the same rule as the headline ("in sync", "not in sync: N blocks behind", "not
+counted in sync: <reason>") with no heights, so it has no numbers to compare;
+a host one block ahead of its `zclassicd` reads "in sync". Command
 output reaches the screen only as plain sentences; a JSON error shows its
 message alone, and audio failures show one sentence while their cause goes to
 logcat. The app runs only two read-only node commands, the node status and
@@ -359,6 +370,17 @@ Mac's node not answering at 23 GB free, 20 answers each to "Which hosts need
 attention?" from Qwen3.5-4B named both r1 and the Mac in 4 of 20 without the
 guide and 19 of 20 with it; one answer with the guide gave low disk as the
 reason the Mac's node was not answering.
+
+On the live fleet on 2026-10-29, six fleet questions asked twice before and
+after the grounding change, with the phone's text "Start the node to begin
+synchronization." in the request as the app sends it: 2 of 12 answers told the
+owner to start the node for the Mac, 1 used "the observations show", and 4
+contradicted the host rows or themselves (for example two of three hosts in
+sync with r2 called not in sync); afterwards 0 of 12 suggested a phone control
+for a host, 1 said "the host blockers tool returned", and 2 called r1 out of
+sync for a one-block lead the two-block rule counts as in sync. The headline
+was not captured per answer, so the last two counts compare answers with the
+rule, not with the headline.
 
 `make -C apps/z23android preview-apk` builds a separate
 `org.z23.voicepreview` package with debugging enabled for testing, written to

@@ -255,8 +255,8 @@ bool zapp_fleet_blockers(const struct zapp_fleet_host *host, int timeout_ms, cha
     free(p);
     return ok;
 }
-const char zapp_fleet_tool_guide[] = "The fleet observations show at most one blocker for each host and never "
-    "the rest. Whenever a question asks about a host's blockers or problems, or why it is blocked, "
+const char zapp_fleet_tool_guide[] = "The fleet rows never list a host's blockers. Whenever a question asks about a host's "
+    "blockers or problems, or why it is blocked, "
     "call host_blockers for that host before answering. Only an operator on that host can clear its "
     "blockers; no control in this app clears them, so never suggest one for a blocker.";
 bool zapp_fleet_tool_schema(const struct zapp_fleet_host *hosts, size_t count, struct json_value *schema)
@@ -267,7 +267,7 @@ bool zapp_fleet_tool_schema(const struct zapp_fleet_host *hosts, size_t count, s
         used += (size_t)snprintf(labels + used, sizeof(labels) - used, "%s\"%s\"", i ? "," : "", hosts[i].label);
     int n = snprintf(text, sizeof(text), "[{\"type\":\"function\",\"function\":{\"name\":\"host_blockers\","
         "\"description\":\"Read the current sync blockers of one fleet host with each blocker's reason. "
-        "Read-only; use it when the observations do not answer the question.\",\"parameters\":"
+        "Read-only; use it when the fleet rows do not answer the question.\",\"parameters\":"
         "{\"type\":\"object\",\"properties\":{\"host\":{\"type\":\"string\",\"enum\":[%s]}},"
         "\"required\":[\"host\"]}}}]", labels);
     return count && n > 0 && (size_t)n < sizeof(text) && json_read(schema, text, (size_t)n);

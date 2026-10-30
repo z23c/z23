@@ -25,6 +25,52 @@ static void sync_rule_tests(void)
     assert(zapp_hosts_format(silent, out, sizeof(out)));
     assert(strstr(out, "\nm · node not answering\n  Low on disk · 23 GB free\n"));
 }
+/* The 2026-10-29 fleet: r2 in sync with its zclassicd, r1 synced by its own report but with no zclassicd
+ * height, the Mac's node unavailable after 13.6 s. One host counts, and every other row says why not. */
+static void unverified_host_tests(void)
+{
+    static const char fleet[] = "{\"hosts\":["
+        "{\"host\":\"r1\",\"reachable\":true,\"probe_ms\":900,\"node\":\"blocked\",\"synced\":\"yes\","
+        "\"blocker\":\"review_required_bootstrap_trust\",\"height\":3302089,\"reference_height\":null},"
+        "{\"host\":\"r2\",\"reachable\":true,\"probe_ms\":950,\"node\":\"blocked\",\"synced\":\"yes\","
+        "\"blocker\":\"review_required_bootstrap_trust\",\"height\":3302089,\"reference_height\":3302089},"
+        "{\"host\":\"mac\",\"reachable\":true,\"probe_ms\":13600,\"node\":\"unknown\",\"synced\":\"unknown\","
+        "\"blocker\":\"STATUS_SOURCE_UNAVAILABLE\",\"height\":null,\"reference_height\":null}]}";
+    char out[1024];
+    assert(zapp_hosts_format(fleet, out, sizeof(out)) && !strncmp(out, "1 of 3 hosts in sync\n", 21));
+    assert(strstr(out, "\nr1 · reports synced but zclassicd height unknown, not counted in sync · 3,302,089\n"));
+    assert(strstr(out, "\nr2 · in sync · 3,302,089\n") && strstr(out, "\nmac · node not answering\n"));
+    assert(zapp_fleet_attention(out) == 2);
+    assert(!strstr(out, "bootstrap") && !strstr(out, "STATUS_SOURCE"));
+    static const char unsynced[] = "{\"hosts\":[{\"host\":\"t\",\"reachable\":true,\"synced\":\"no\",\"height\":5}]}";
+    assert(zapp_hosts_format(unsynced, out, sizeof(out)) &&
+           strstr(out, "\nt · zclassicd height unknown, not counted in sync · 5\n"));
+}
+/* The model gets one verdict per host from the headline's rule, no heights, so a host one block ahead
+ * of its zclassicd reads "in sync" and the model has no arithmetic to get wrong. */
+static void verdict_tests(void)
+{
+    static const char fleet[] = "{\"hosts\":["
+        "{\"host\":\"r1\",\"reachable\":true,\"synced\":\"yes\",\"height\":3302090,\"reference_height\":3302089},"
+        "{\"host\":\"r2\",\"reachable\":true,\"synced\":\"yes\",\"height\":3302089,\"reference_height\":null},"
+        "{\"host\":\"r3\",\"reachable\":true,\"synced\":\"yes\",\"height\":3302000,\"reference_height\":3302089,"
+        "\"disk_free_gb\":23},"
+        "{\"host\":\"r4\",\"reachable\":true,\"synced\":\"no\",\"height\":3302089,\"reference_height\":3302089},"
+        "{\"host\":\"r5\",\"reachable\":true,\"synced\":\"yes\",\"height\":3302095,\"reference_height\":3302089},"
+        "{\"host\":\"mac\",\"reachable\":true,\"height\":null,\"reference_height\":null},"
+        "{\"host\":\"r6\",\"reachable\":false,\"probe_ms\":13600}]}";
+    char out[1024];
+    assert(zapp_hosts_verdicts(fleet, out, sizeof(out)) && !strncmp(out, "1 of 7 hosts in sync\n", 21));
+    assert(strstr(out, "\nr1: in sync\n"));
+    assert(strstr(out, "\nr2: not counted in sync: zclassicd height unknown although the node reports itself synced\n"));
+    assert(strstr(out, "\nr3: not in sync: 89 blocks behind; low on disk, 23 GB free\n"));
+    assert(strstr(out, "\nr4: not in sync: the node reports itself not synced\n"));
+    assert(strstr(out, "\nr5: not in sync: 6 blocks ahead of its zclassicd\n"));
+    assert(strstr(out, "\nmac: not counted in sync: its node is not answering\n"));
+    assert(strstr(out, "\nr6: host not answering after 13.6 s\n"));
+    assert(!strstr(out, "3,302") && !strstr(out, "3302"));
+    assert(!zapp_hosts_verdicts("not json", out, sizeof(out)) && !out[0]);
+}
 /* The fleet line keeps its place from launch while a laptop host is paired. */
 static void fleet_line_tests(void)
 {
@@ -102,6 +148,8 @@ int main(void)
     assert(strstr(out, "\nmac · host not answering after 25.0 s\n"));
     assert(!strstr(out, "Blocked") && !strstr(out, "bootstrap") && !strstr(out, "GB"));
     sync_rule_tests();
+    unverified_host_tests();
+    verdict_tests();
     fleet_line_tests();
     suggestion_tests();
     static const char skew[] = "{\"hosts\":["

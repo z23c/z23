@@ -514,7 +514,7 @@ static void message_cases(void)
     struct json_value messages = {0};
     assert(chat_messages(&messages, "Q?", NULL, NULL, NULL) && json_size(&messages) == 2);
     expect_message(&messages, 0, "system", system_prompt);
-    expect_message(&messages, 1, "user", "Observations:\nnone\n\nQ?");
+    expect_message(&messages, 1, "user", "Fleet hosts, read over ssh by the laptop; none of this describes the phone:\nnone\n\nQ?");
     json_free(&messages);
     char guided[sizeof(system_prompt) + 16];
     snprintf(guided, sizeof(guided), "%s Use the tool.", system_prompt);
@@ -525,7 +525,7 @@ static void message_cases(void)
     expect_message(&messages, 0, "system", system_prompt);
     expect_message(&messages, 1, "user", "q1"); expect_message(&messages, 2, "assistant", "a1");
     expect_message(&messages, 3, "user", "q2"); expect_message(&messages, 4, "assistant", "a2");
-    expect_message(&messages, 5, "user", "Observations:\nfleet data\n\nQ?");
+    expect_message(&messages, 5, "user", "Fleet hosts, read over ssh by the laptop; none of this describes the phone:\nfleet data\n\nQ?");
     json_free(&messages);
     struct json_value repeat = {0};
     static const char earlier[] = "[[\"How is r2?\",\"r2 is not syncing.\"],[\"Other?\",\"a2\"]]";
@@ -556,6 +556,37 @@ static void message_cases(void)
     assert(messages_for(many, &messages) && json_size(&messages) == 2 + 2 * ZAPP_ASSISTANT_TURNS);
     json_free(&messages);
 }
+/* The failing fleet answers: the phone's "Start the node" text rode along as if it described a host,
+ * and the model said "The observation says". The phone's state stays under its own label after the
+ * fleet text, and a lead-in that names its source never reaches the owner. */
+static void grounding_cases(const struct zapp_assistant *a)
+{
+    static const char phone[] = "This phone's own node, which is not one of the fleet hosts: "
+        "{\"sync_status\":\"Start the node to begin synchronization.\"}\n\nQuestion: is the mac in sync";
+    struct json_value messages = {0};
+    assert(chat_messages(&messages, phone, NULL, "1 of 3 hosts in sync\n\nmac · node not answering", NULL));
+    const char *user = json_get_str(json_get(json_at(&messages, 1), "content"));
+    const char *fleet = strstr(user, "mac · node not answering"), *own = strstr(user, "This phone's own node");
+    assert(fleet && own && fleet < own && !strcasestr(user, "observation"));
+    assert(!strstr(user, "Start the node") && strstr(user, "This phone's node is stopped."));
+    assert(strstr(system_prompt, "exist only on the phone and are never advice for a fleet host"));
+    assert(strstr(system_prompt, "never a fleet host") && strstr(system_prompt, "never say observation"));
+    json_free(&messages);
+    static const char *const heard[][2] = {
+        {"The observation says the mac is not answering.", "The mac is not answering."},
+        {"No. The observations show that r1 is synced.", "No. R1 is synced."},
+        {"According to the data, r2 is in sync.", "R2 is in sync."},
+        {"r2 is in sync, and the data says it has four blockers.", "r2 is in sync, and it has four blockers."},
+        {"The host blockers tool returned four active blockers for r2.", "Four active blockers for r2."},
+        {"r2 is fine, and the fleet tool says r1 is in sync.", "r2 is fine, and r1 is in sync."}};
+    for (size_t i = 0; i < sizeof(heard) / sizeof(heard[0]); i++) {
+        reset_log();
+        struct respond *r = new_respond(a, true);
+        snprintf(r->pending, sizeof(r->pending), "%s", heard[i][0]); r->pending_len = strlen(r->pending);
+        assert(respond_finish(r) && !strcmp(r->text, heard[i][1]));
+        free_respond(r);
+    }
+}
 int main(void)
 {
     struct zapp_assistant a = {.speaker_b64 = NULL};
@@ -563,7 +594,7 @@ int main(void)
     rejected_cases(&a); tool_cases(&a); underscore_cases(&a);
     pcm_cases(&a); type_cases(&a); respond_streamed(); respond_muted(); respond_tool(true); respond_tool(false); respond_wanted();
     chat_quiet();
-    message_cases();
+    message_cases(); grounding_cases(&a);
     reset_log();
     puts("assistant tests passed");
     return 0;

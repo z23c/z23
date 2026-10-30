@@ -79,7 +79,9 @@ const char *zapp_sync_line(bool responding, bool process_running, int64_t height
     return out;
 }
 /* "in sync", blocks behind or ahead of the host's zclassicd, then the height. A host that answered the
- * probe without a height has a node that did not answer; a negative height is unknown. */
+ * probe without a height has a node that did not answer; a negative height is unknown. Without the
+ * zclassicd height a host cannot be compared, so it is not counted in sync even when it reports itself
+ * synced, and its row says so. */
 static size_t state_text(const struct json_value *row, char *out, size_t cap, size_t used)
 {
     int64_t height = -1, reference = -1;
@@ -89,7 +91,8 @@ static size_t state_text(const struct json_value *row, char *out, size_t cap, si
     zapp_grouped(height, at);
     if (host_ok(row)) return append(out, cap, used, "in sync · %s", at);
     if (!count_of(row, "reference_height", &reference) || reference < 0)
-        return append(out, cap, used, "network height unknown · %s", at);
+        return append(out, cap, used, "%szclassicd height unknown, not counted in sync · %s",
+                      strcmp(text_of(row, "synced"), "yes") ? "" : "reports synced but ", at);
     if (height == reference) return append(out, cap, used, "not synced · %s", at);
     int64_t gap = height < reference ? reference - height : height - reference;
     return append(out, cap, used, "%s %s %s · %s", zapp_grouped(gap, by), gap == 1 ? "block" : "blocks",
@@ -117,7 +120,8 @@ static size_t row_text(const struct json_value *row, char *out, size_t cap, size
     used = disk_text(row, out, cap, used);
     return append(out, cap, used, "\n");
 }
-bool zapp_hosts_format(const char *json, char *out, size_t cap)
+typedef size_t (*row_writer)(const struct json_value *row, char *out, size_t cap, size_t used);
+static bool hosts_report(const char *json, char *out, size_t cap, row_writer write_row)
 {
     if (!json || !out || !cap) return false;
     out[0] = 0;
@@ -128,11 +132,50 @@ bool zapp_hosts_format(const char *json, char *out, size_t cap)
     size_t healthy = 0, total = ok ? hosts->num_children : 0, used = 0;
     for (size_t i = 0; i < total; i++) healthy += host_ok(json_at(hosts, i));
     if (ok) used = append(out, cap, 0, "%zu of %zu hosts in sync\n", healthy, total);
-    for (size_t i = 0; ok && i < total; i++) used = row_text(json_at(hosts, i), out, cap, used);
+    for (size_t i = 0; ok && i < total; i++) used = write_row(json_at(hosts, i), out, cap, used);
     ok = ok && used < cap;
     if (!ok) out[0] = 0;
     json_free(&root);
     return ok;
+}
+bool zapp_hosts_format(const char *json, char *out, size_t cap)
+{
+    return hosts_report(json, out, cap, row_text);
+}
+/* One verdict per host for the voice model, decided by the same host_ok rule as the headline, so the
+ * model reads a result and never compares heights itself. */
+static size_t verdict_text(const struct json_value *row, char *out, size_t cap, size_t used)
+{
+    int64_t height = -1, reference = -1;
+    if (!count_of(row, "height", &height)) return append(out, cap, used, "not counted in sync: its node is not answering");
+    if (height < 0) return append(out, cap, used, "height unknown, not counted in sync");
+    if (host_ok(row)) return append(out, cap, used, "in sync");
+    if (!count_of(row, "reference_height", &reference) || reference < 0)
+        return append(out, cap, used, "not counted in sync: zclassicd height unknown%s",
+                      strcmp(text_of(row, "synced"), "yes") ? "" : " although the node reports itself synced");
+    int64_t gap = height < reference ? reference - height : height - reference;
+    char by[32];
+    if (gap <= IN_SYNC_SKEW) return append(out, cap, used, "not in sync: the node reports itself not synced");
+    return append(out, cap, used, "not in sync: %s %s %s", zapp_grouped(gap, by), gap == 1 ? "block" : "blocks",
+                  height < reference ? "behind" : "ahead of its zclassicd");
+}
+static size_t verdict_row(const struct json_value *row, char *out, size_t cap, size_t used)
+{
+    const struct json_value *reachable = json_get(row, "reachable");
+    int64_t ms = 0, disk = 0;
+    (void)count_of(row, "probe_ms", &ms);
+    if (!reachable || reachable->type != JSON_BOOL || !json_get_bool(reachable))
+        return append(out, cap, used, "\n%s: host not answering after %lld.%lld s\n", text_of(row, "host"),
+            (long long)(ms / 1000), (long long)(ms % 1000 / 100));
+    used = append(out, cap, used, "\n%s: ", text_of(row, "host"));
+    used = verdict_text(row, out, cap, used);
+    if (count_of(row, "disk_free_gb", &disk) && disk >= 0 && disk < LOW_DISK_GB)
+        used = append(out, cap, used, "; low on disk, %lld GB free", (long long)disk);
+    return append(out, cap, used, "\n");
+}
+bool zapp_hosts_verdicts(const char *json, char *out, size_t cap)
+{
+    return hosts_report(json, out, cap, verdict_row);
 }
 const char *zapp_fleet_line(const char *report, bool stale, bool paired, char *out, size_t cap)
 {

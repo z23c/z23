@@ -7,6 +7,9 @@
 /* Formats the laptop host's fleet snapshot as a headline and one block per host.
  * Unknown or missing values are shown as unknown, never as zero. */
 bool zapp_hosts_format(const char *json, char *out, size_t cap);
+/* The same snapshot as one verdict per host for the voice model: "in sync", "not in sync: N blocks
+ * behind", "not counted in sync: <reason>". The headline count uses the same rule; heights are left out. */
+bool zapp_hosts_verdicts(const char *json, char *out, size_t cap);
 /* The main screen's fleet line from a zapp_hosts_format report: its headline, "no current report"
  * once a request has failed, or "checking" while a paired laptop host has not answered, so the
  * line holds its place from the first frame. Empty when no host is paired and none answered. */

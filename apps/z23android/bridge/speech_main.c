@@ -99,7 +99,7 @@ static bool chat(const struct json_value *request, int client, struct json_value
         pthread_mutex_lock(&fleet_lock);
         int n = fleet_time ? snprintf(context, FLEET_CAP + 128, "Owner's fleet, observed %lld seconds ago:\n",
             (long long)(time(NULL) - fleet_time)) : 0;
-        if (n <= 0 || !zapp_hosts_format(fleet_snapshot, context + n, FLEET_CAP + 128 - (size_t)n))
+        if (n <= 0 || !zapp_hosts_verdicts(fleet_snapshot, context + n, FLEET_CAP + 128 - (size_t)n))
             snprintf(context, FLEET_CAP + 128, "Fleet status not yet observed.");
         pthread_mutex_unlock(&fleet_lock);
         ok = (stream ? zapp_assistant_respond : zapp_assistant_chat)(&assistant, prompt,
