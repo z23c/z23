@@ -297,12 +297,6 @@ tools/command/cli_render.c:render_statecatalog:18
 tools/command/cli_render.c:render_yardsale_guide:17
 tools/command/cli_render.c:zcl_cli_render_brief:22
 tools/command/cli_render.c:zcl_cli_render_resolve:20
-tools/core_seal.c:compute_sections:32
-tools/core_seal.c:open_sealed_file:27
-tools/core_seal.c:path_reject_reason:19
-tools/core_seal.c:read_and_hash:27
-tools/core_seal.c:read_manifest:27
-tools/core_seal.c:verify_sections:20
 tools/dev/devloop_hotswap_build.c:hs_hotfork_build:38
 tools/dev/devloop_hotswap_build.c:zcl_devloop_hotswap_build:45
 tools/engine_unit.c:append_unit_receipt:25

@@ -270,6 +270,27 @@ static int is_hex64(const char *s)
     return is_hex64_prefix(s) && s[2 * HSZ] == '\0';
 }
 
+/* Component walk: no empty ("//"), no "." or "..", none over-long. */
+static const char *path_component_reject_reason(const char *p, size_t len)
+{
+    size_t start = 0;
+    for (size_t i = 0; i <= len; i++) {
+        if (i != len && p[i] != '/')
+            continue;
+        size_t clen = i - start;
+        if (clen == 0)
+            return "empty path component (\"//\")";
+        if (clen >= MERKLE_NAME_MAX)
+            return "path component is >= MERKLE_NAME_MAX bytes";
+        if (clen == 1 && p[start] == '.')
+            return "\".\" path component";
+        if (clen == 2 && p[start] == '.' && p[start + 1] == '.')
+            return "\"..\" path component";
+        start = i + 1;
+    }
+    return NULL;
+}
+
 /* ── sealable-path policy ──────────────────────────────────────────────────
  *
  * Returns NULL when `p` may be sealed, else a short human reason. This is the
@@ -293,23 +314,7 @@ static const char *path_reject_reason(const char *p)
         if (c < 0x20u || c == 0x7fu)
             return "path contains a control byte (newline, tab, CR, ...)";
     }
-    /* Component walk: no empty ("//"), no "." or "..", none over-long. */
-    size_t start = 0;
-    for (size_t i = 0; i <= len; i++) {
-        if (i != len && p[i] != '/')
-            continue;
-        size_t clen = i - start;
-        if (clen == 0)
-            return "empty path component (\"//\")";
-        if (clen >= MERKLE_NAME_MAX)
-            return "path component is >= MERKLE_NAME_MAX bytes";
-        if (clen == 1 && p[start] == '.')
-            return "\".\" path component";
-        if (clen == 2 && p[start] == '.' && p[start + 1] == '.')
-            return "\"..\" path component";
-        start = i + 1;
-    }
-    return NULL;
+    return path_component_reject_reason(p, len);
 }
 
 static void die_path(const char *path, const char *why)
@@ -339,31 +344,11 @@ static void write_u64le(struct sha3_256_ctx *ctx, uint64_t v)
     sha3_256_write(ctx, b, sizeof(b));
 }
 
-/* One pass over the file's bytes feeding TWO digests:
- *   `out`  the frozen flat per-file SHA3-256 (unchanged: raw content only —
- *          this is what the manifest's per-file lines and ROOT consume), and
- *   `leaf` the codeindex Merkle leaf (tag + domain + relpath + u64le size,
- *          then the same bytes).
- * Returns 0 on success. Fails closed if the byte count does not match the
- * stat size the leaf preimage already committed to. */
-static int open_sealed_file(const char *path)
-{
-    if (path_reject_reason(path) != NULL)
-        return -1;
-
 #if defined(_WIN32)
-    wchar_t wide[MERKLE_PATH_MAX];
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
-                                       wide, MERKLE_PATH_MAX);
-    if (wide_len == 0) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    /* CreateFileW follows reparse points in intermediate components even when
-     * FILE_FLAG_OPEN_REPARSE_POINT is set.  Refuse every component first, then
-     * open the final component itself as a reparse point so neither a symlink
-     * nor a junction is accepted as a sealed file. */
+/* Returns 0 when every component of `wide` exists and none is a reparse point,
+ * else -1 with errno ELOOP. */
+static int win_refuse_reparse_components(wchar_t *wide)
+{
     for (wchar_t *cursor = wide;; cursor++) {
         if (*cursor != L'/' && *cursor != L'\\' && *cursor != L'\0')
             continue;
@@ -379,6 +364,43 @@ static int open_sealed_file(const char *path)
         if (saved == L'\0')
             break;
     }
+    return 0;
+}
+
+/* True when the final path of `handle` equals the full path of `wide`
+ * (compared case-insensitively). */
+static bool win_resolved_path_matches(HANDLE handle, const wchar_t *wide)
+{
+    wchar_t expected[MERKLE_PATH_MAX], resolved[MERKLE_PATH_MAX + 4];
+    DWORD expected_len = GetFullPathNameW(wide, MERKLE_PATH_MAX, expected,
+                                          NULL);
+    DWORD resolved_len = GetFinalPathNameByHandleW(
+        handle, resolved, MERKLE_PATH_MAX + 4,
+        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    const wchar_t *resolved_path = resolved;
+    if (resolved_len >= 4 && wcsncmp(resolved, L"\\\\?\\", 4) == 0)
+        resolved_path += 4;
+    return !(expected_len == 0 || expected_len >= MERKLE_PATH_MAX ||
+             resolved_len == 0 || resolved_len >= MERKLE_PATH_MAX + 4 ||
+             _wcsicmp(expected, resolved_path) != 0);
+}
+
+static int open_sealed_file_win32(const char *path)
+{
+    wchar_t wide[MERKLE_PATH_MAX];
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                                       wide, MERKLE_PATH_MAX);
+    if (wide_len == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    /* CreateFileW follows reparse points in intermediate components even when
+     * FILE_FLAG_OPEN_REPARSE_POINT is set.  Refuse every component first, then
+     * open the final component itself as a reparse point so neither a symlink
+     * nor a junction is accepted as a sealed file. */
+    if (win_refuse_reparse_components(wide) != 0)
+        return -1;
 
     HANDLE handle = CreateFileW(
         wide, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
@@ -395,18 +417,7 @@ static int open_sealed_file(const char *path)
         errno = EINVAL;
         return -1;
     }
-    wchar_t expected[MERKLE_PATH_MAX], resolved[MERKLE_PATH_MAX + 4];
-    DWORD expected_len = GetFullPathNameW(wide, MERKLE_PATH_MAX, expected,
-                                          NULL);
-    DWORD resolved_len = GetFinalPathNameByHandleW(
-        handle, resolved, MERKLE_PATH_MAX + 4,
-        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-    const wchar_t *resolved_path = resolved;
-    if (resolved_len >= 4 && wcsncmp(resolved, L"\\\\?\\", 4) == 0)
-        resolved_path += 4;
-    if (expected_len == 0 || expected_len >= MERKLE_PATH_MAX ||
-        resolved_len == 0 || resolved_len >= MERKLE_PATH_MAX + 4 ||
-        _wcsicmp(expected, resolved_path) != 0) {
+    if (!win_resolved_path_matches(handle, wide)) {
         CloseHandle(handle);
         errno = ELOOP;
         return -1;
@@ -415,6 +426,23 @@ static int open_sealed_file(const char *path)
     if (fd < 0)
         CloseHandle(handle);
     return fd;
+}
+#endif
+
+/* One pass over the file's bytes feeding TWO digests:
+ *   `out`  the frozen flat per-file SHA3-256 (unchanged: raw content only —
+ *          this is what the manifest's per-file lines and ROOT consume), and
+ *   `leaf` the codeindex Merkle leaf (tag + domain + relpath + u64le size,
+ *          then the same bytes).
+ * Returns 0 on success. Fails closed if the byte count does not match the
+ * stat size the leaf preimage already committed to. */
+static int open_sealed_file(const char *path)
+{
+    if (path_reject_reason(path) != NULL)
+        return -1;
+
+#if defined(_WIN32)
+    return open_sealed_file_win32(path);
 #else
     char copy[MERKLE_PATH_MAX];
     memcpy(copy, path, strlen(path) + 1);
@@ -536,11 +564,9 @@ static void entries_sort(struct entry *ents, size_t n)
         qsort(ents, n, sizeof(*ents), cmp_entry);
 }
 
-/* Read NUL-separated paths from stdin — NUL and nothing else, because that is
- * the one separator `git ls-files -z` guarantees cannot occur inside a path.
- * Excludes the manifest path itself. Hashes each file, returns a path-sorted
- * array with duplicates rejected. */
-static struct entry *read_and_hash(const char *manifest_path, size_t *out_n)
+/* Reads all of stdin into a heap buffer the caller frees, and sets *out_len to
+ * its byte count. A read error or input over MAX_FILELIST_BYTES is a hard exit. */
+static char *slurp_stdin(size_t *out_len)
 {
     /* Slurp stdin. */
     size_t cap = 65536, len = 0;
@@ -572,6 +598,56 @@ static struct entry *read_and_hash(const char *manifest_path, size_t *out_n)
             break;
         }
     }
+    *out_len = len;
+    return data;
+}
+
+/* Copies the `plen` bytes at data + start into a fresh NUL-terminated string the
+ * caller owns. A copy the path policy rejects is a hard exit. */
+static char *path_token_copy(const char *data, size_t start, size_t plen)
+{
+    char *path = malloc(plen + 1); // raw-alloc-ok:standalone-build-time-seal-tool-links-no-safe_alloc
+    if (!path)
+        die("out of memory");
+    memcpy(path, data + start, plen);
+    path[plen] = '\0';
+    const char *why = path_reject_reason(path);
+    if (why)
+        die_path(path, why);
+    return path;
+}
+
+/* Appends `path` (ownership passes in) as a new entry, growing *ents when full,
+ * and hashes its file. A file that cannot be read is a hard exit. */
+static void entries_append(struct entry **ents, size_t *n, size_t *ecap,
+                           char *path)
+{
+    if (*n == MAX_MAN_FILES)
+        die("sealed file count exceeds manifest parser limit");
+    if (*n == *ecap) {
+        *ecap = *ecap ? *ecap * 2 : 64;
+        struct entry *ne = realloc(*ents, *ecap * sizeof(*ne)); // raw-alloc-ok:standalone-build-time-seal-tool-links-no-safe_alloc
+        if (!ne)
+            die("out of memory");
+        *ents = ne;
+    }
+    struct entry *e = &(*ents)[*n];
+    e->path = path;
+    if (hash_file(path, e->hash, e->leaf, &e->size) != 0) {
+        fprintf(stderr, "core_seal: cannot read sealed file '%s'\n", path);
+        exit(2);
+    }
+    (*n)++;
+}
+
+/* Read NUL-separated paths from stdin — NUL and nothing else, because that is
+ * the one separator `git ls-files -z` guarantees cannot occur inside a path.
+ * Excludes the manifest path itself. Hashes each file, returns a path-sorted
+ * array with duplicates rejected. */
+static struct entry *read_and_hash(const char *manifest_path, size_t *out_n)
+{
+    size_t len = 0;
+    char *data = slurp_stdin(&len);
     if (len > 0 && data[len - 1] != '\0')
         die("NUL-separated file list ended with an incomplete path token");
 
@@ -588,33 +664,10 @@ static struct entry *read_and_hash(const char *manifest_path, size_t *out_n)
             j++;
         size_t plen = j - i;
         if (plen > 0) {
-            char *path = malloc(plen + 1); // raw-alloc-ok:standalone-build-time-seal-tool-links-no-safe_alloc
-            if (!path)
-                die("out of memory");
-            memcpy(path, data + i, plen);
-            path[plen] = '\0';
-            const char *why = path_reject_reason(path);
-            if (why)
-                die_path(path, why);
+            char *path = path_token_copy(data, i, plen);
             /* Skip the manifest itself — it can never seal its own bytes. */
             if (strcmp(path, manifest_path) != 0) {
-                if (n == MAX_MAN_FILES)
-                    die("sealed file count exceeds manifest parser limit");
-                if (n == ecap) {
-                    ecap = ecap ? ecap * 2 : 64;
-                    struct entry *ne = realloc(ents, ecap * sizeof(*ents)); // raw-alloc-ok:standalone-build-time-seal-tool-links-no-safe_alloc
-                    if (!ne)
-                        die("out of memory");
-                    ents = ne;
-                }
-                ents[n].path = path;
-                if (hash_file(path, ents[n].hash, ents[n].leaf,
-                              &ents[n].size) != 0) {
-                    fprintf(stderr, "core_seal: cannot read sealed file '%s'\n",
-                            path);
-                    exit(2);
-                }
-                n++;
+                entries_append(&ents, &n, &ecap, path);
             } else {
                 free(path);
             }
@@ -773,26 +826,12 @@ static int cmp_str(const void *a, const void *b)
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
-/* Build the directory Merkle over the sealed entries.
- *
- * Returns the node count (including the root node ""), writes the nodes into
- * *out_nodes (caller frees) sorted by path — index 0 is the root — and the
- * whole-set root digest into `tree`. n == 0 yields 0 nodes.
- *
- * Fail closed: every entry must land in exactly one directory node, and the
- * root node's recursive file count must equal n. */
-static size_t compute_sections(const struct entry *ents, size_t n,
-                               struct dnode **out_nodes, unsigned char tree[HSZ])
+/* Collects the parent directory of each sealed entry and every ancestor of it,
+ * up to and including the root "" (so nothing when n is 0), into a heap array
+ * of owned strings (unsorted, may repeat). Sets *out_dn to its length. */
+static char **collect_directories(const struct entry *ents, size_t n,
+                                  size_t *out_dn)
 {
-    *out_nodes = NULL;
-    if (n == 0)
-        return 0;
-
-    /* 1. Every directory that has at least one sealed file below it, plus the
-     *    root "" — i.e. every proper ancestor of every entry path. Path shape
-     *    (length, components, control bytes) was already settled by
-     *    path_reject_reason() in read_and_hash; re-assert the two bounds the
-     *    node records depend on so a future caller cannot skip the policy. */
     size_t dcap = 0, dn = 0;
     char **dirs = NULL;
     for (size_t i = 0; i < n; i++) {
@@ -821,6 +860,14 @@ static size_t compute_sections(const struct entry *ents, size_t n,
             memcpy(cur, up, strlen(up) + 1);
         }
     }
+    *out_dn = dn;
+    return dirs;
+}
+
+/* Sorts `dirs` by strcmp and drops repeats in place, freeing each dropped
+ * string. Returns the number of distinct entries kept at the front. */
+static size_t sort_dedupe_directories(char **dirs, size_t dn)
+{
     qsort(dirs, dn, sizeof(*dirs), cmp_str);
     /* dedupe in place */
     size_t uniq = 0;
@@ -831,8 +878,13 @@ static size_t compute_sections(const struct entry *ents, size_t n,
         }
         dirs[uniq++] = dirs[i];
     }
-    dn = uniq;
+    return uniq;
+}
 
+/* Allocates one zeroed node per directory path (caller frees) and copies each
+ * path in. A path that does not fit MERKLE_PATH_MAX is a hard error. */
+static struct dnode *dnodes_from_dirs(char **dirs, size_t dn)
+{
     struct dnode *nodes = calloc(dn, sizeof(*nodes)); // raw-alloc-ok:standalone-build-time-seal-tool-links-no-safe_alloc
     if (!nodes)
         die("out of memory building directory nodes");
@@ -842,6 +894,94 @@ static size_t compute_sections(const struct entry *ents, size_t n,
             die("internal error: directory path exceeds MERKLE_PATH_MAX");
         memcpy(nodes[i].path, dirs[i], l + 1);
     }
+    return nodes;
+}
+
+/* Gathers the direct children of nodes[x] into kids[0..nk): sealed files whose
+ * parent is that directory, then subdirectory nodes whose parent is it. Adds
+ * the files placed to *placed and sets *below to the recursive file count. */
+static uint32_t node_collect_children(const struct entry *ents, size_t n,
+                                      const struct dnode *nodes, size_t dn,
+                                      size_t x, struct mchild *kids,
+                                      size_t kidcap, size_t *placed,
+                                      uint64_t *below)
+{
+    const struct dnode *d = &nodes[x];
+    uint32_t nk = 0;
+    char par[MERKLE_PATH_MAX];
+    *below = 0;
+
+    for (size_t i = 0; i < n; i++) {
+        parent_of(ents[i].path, par);
+        if (strcmp(par, d->path) != 0)
+            continue;
+        if (nk == kidcap)
+            die("internal error: child overflow");
+        child_set_name(&kids[nk], base_of(ents[i].path));
+        kids[nk].kind = 0;
+        memcpy(kids[nk].digest, ents[i].leaf, HSZ);
+        kids[nk].file_count = 1;
+        nk++;
+        (*below)++;
+        (*placed)++;
+    }
+    for (size_t j = 0; j < dn; j++) {
+        if (j == x || nodes[j].path[0] == '\0')
+            continue;
+        parent_of(nodes[j].path, par);
+        if (strcmp(par, d->path) != 0)
+            continue;
+        if (nk == kidcap)
+            die("internal error: child overflow");
+        child_set_name(&kids[nk], base_of(nodes[j].path));
+        kids[nk].kind = 1;
+        memcpy(kids[nk].digest, nodes[j].digest, HSZ);
+        kids[nk].file_count = nodes[j].file_count;
+        nk++;
+        *below += nodes[j].file_count;
+    }
+    return nk;
+}
+
+/* Puts the nk children in canonical order, checks the order is strict, then
+ * digests them into `d` and records its child count and recursive file count. */
+static void node_seal_children(struct dnode *d, struct mchild *kids,
+                               uint32_t nk, uint64_t below)
+{
+    qsort(kids, nk, sizeof(*kids), cmp_child);
+    for (uint32_t k = 1; k < nk; k++)
+        if (cmp_child(&kids[k - 1], &kids[k]) >= 0)
+            die("internal error: canonical child order violated");
+
+    node_digest(d->path, kids, nk, d->digest);
+    d->direct_children = nk;
+    d->file_count = below;
+}
+
+/* Build the directory Merkle over the sealed entries.
+ *
+ * Returns the node count (including the root node ""), writes the nodes into
+ * *out_nodes (caller frees) sorted by path — index 0 is the root — and the
+ * whole-set root digest into `tree`. n == 0 yields 0 nodes.
+ *
+ * Fail closed: every entry must land in exactly one directory node, and the
+ * root node's recursive file count must equal n. */
+static size_t compute_sections(const struct entry *ents, size_t n,
+                               struct dnode **out_nodes, unsigned char tree[HSZ])
+{
+    *out_nodes = NULL;
+    if (n == 0)
+        return 0;
+
+    /* 1. Every directory that has at least one sealed file below it, plus the
+     *    root "" — i.e. every proper ancestor of every entry path. Path shape
+     *    (length, components, control bytes) was already settled by
+     *    path_reject_reason() in read_and_hash; re-assert the two bounds the
+     *    node records depend on so a future caller cannot skip the policy. */
+    size_t dn = 0;
+    char **dirs = collect_directories(ents, n, &dn);
+    dn = sort_dedupe_directories(dirs, dn);
+    struct dnode *nodes = dnodes_from_dirs(dirs, dn);
 
     /* 2. Digest each node. `dirs` is strcmp-sorted, and a parent is always a
      *    strict prefix of its children, so a parent always sorts BEFORE its
@@ -854,49 +994,10 @@ static size_t compute_sections(const struct entry *ents, size_t n,
 
     size_t placed = 0;
     for (size_t x = dn; x-- > 0;) {
-        struct dnode *d = &nodes[x];
-        uint32_t nk = 0;
         uint64_t below = 0;
-        char par[MERKLE_PATH_MAX];
-
-        for (size_t i = 0; i < n; i++) {
-            parent_of(ents[i].path, par);
-            if (strcmp(par, d->path) != 0)
-                continue;
-            if (nk == kidcap)
-                die("internal error: child overflow");
-            child_set_name(&kids[nk], base_of(ents[i].path));
-            kids[nk].kind = 0;
-            memcpy(kids[nk].digest, ents[i].leaf, HSZ);
-            kids[nk].file_count = 1;
-            nk++;
-            below++;
-            placed++;
-        }
-        for (size_t j = 0; j < dn; j++) {
-            if (j == x || nodes[j].path[0] == '\0')
-                continue;
-            parent_of(nodes[j].path, par);
-            if (strcmp(par, d->path) != 0)
-                continue;
-            if (nk == kidcap)
-                die("internal error: child overflow");
-            child_set_name(&kids[nk], base_of(nodes[j].path));
-            kids[nk].kind = 1;
-            memcpy(kids[nk].digest, nodes[j].digest, HSZ);
-            kids[nk].file_count = nodes[j].file_count;
-            nk++;
-            below += nodes[j].file_count;
-        }
-
-        qsort(kids, nk, sizeof(*kids), cmp_child);
-        for (uint32_t k = 1; k < nk; k++)
-            if (cmp_child(&kids[k - 1], &kids[k]) >= 0)
-                die("internal error: canonical child order violated");
-
-        node_digest(d->path, kids, nk, d->digest);
-        d->direct_children = nk;
-        d->file_count = below;
+        uint32_t nk = node_collect_children(ents, n, nodes, dn, x, kids,
+                                            kidcap, &placed, &below);
+        node_seal_children(&nodes[x], kids, nk, below);
     }
     free(kids);
     for (size_t i = 0; i < dn; i++)
@@ -1103,6 +1204,160 @@ static void manifest_view_free(struct manifest_view *mv)
     mv->file = NULL;
 }
 
+/* Returns 0 when the physical line is well formed, else -2 after reporting it. */
+static int manifest_physical_line(const char *manifest_path,
+                                  unsigned long lineno, const char *line)
+{
+    /* The writer emits one newline-terminated physical record. A missing
+     * newline here means either an overlong/truncated line or an embedded
+     * NUL hiding bytes that fgets already consumed. Both are ambiguous. */
+    size_t visible = strlen(line);
+    if (visible == 0 || line[visible - 1] != '\n' ||
+        memchr(line, '\r', visible) != NULL) {
+        fprintf(stderr,
+                "core_seal: FATAL — malformed physical line in '%s' "
+                "line %lu\n", manifest_path, lineno);
+        return -2;
+    }
+    return 0;
+}
+
+/* ROOT and TREE lines. Returns 0 when `line` is one and was recorded, -1 when
+ * it is neither, and -2 on any error (already reported). */
+static int manifest_root_tree_line(const char *manifest_path,
+                                   unsigned long lineno, const char *line,
+                                   struct manifest_view *mv)
+{
+    char hex[HEXSZ];
+    int pr = hex_line_parse(line, "ROOT", hex);
+    if (pr == 0) {
+        memcpy(mv->root_hex, hex, sizeof(hex));
+        mv->have_root = 1;
+        return 0;
+    }
+    if (pr == -2) {
+        fprintf(stderr,
+                "core_seal: FATAL — malformed ROOT line in '%s' line %lu: %s",
+                manifest_path, lineno, line);
+        return -2;
+    }
+
+    pr = hex_line_parse(line, "TREE", hex);
+    if (pr == 0) {
+        int rc = 0;
+        if (mv->have_tree) {
+            fprintf(stderr,
+                    "core_seal: FATAL — more than one TREE line in '%s'\n",
+                    manifest_path);
+            rc = -2;
+        }
+        memcpy(mv->tree_hex, hex, sizeof(hex));
+        mv->have_tree = 1;
+        return rc;
+    }
+    if (pr == -2) {
+        fprintf(stderr,
+                "core_seal: FATAL — malformed TREE line in '%s' line %lu: %s",
+                manifest_path, lineno, line);
+        return -2;
+    }
+    return -1;
+}
+
+/* A SECTION line. Returns 0 when it is recorded, -1 when `line` is not a
+ * SECTION line, and -2 on any error (already reported). A repeated name is
+ * reported and still recorded, but it returns -2. */
+static int manifest_section_line(const char *manifest_path,
+                                 unsigned long lineno, const char *line,
+                                 struct manifest_view *mv)
+{
+    char hex[HEXSZ], name[MERKLE_PATH_MAX];
+    uint64_t count = 0;
+    int rc = 0;
+    int pr = section_line_parse(line, name, &count, hex);
+    if (pr == -2) {
+        fprintf(stderr,
+                "core_seal: FATAL — malformed SECTION line in '%s' line "
+                "%lu: %s",
+                manifest_path, lineno, line);
+        return -2;
+    }
+    if (pr != 0)
+        return -1;
+    if (mv->nsec == MAX_MAN_SECTIONS) {
+        fprintf(stderr,
+                "core_seal: FATAL — more than %d SECTION lines in "
+                "'%s'\n",
+                MAX_MAN_SECTIONS, manifest_path);
+        return -2;
+    }
+    for (size_t k = 0; k < mv->nsec; k++)
+        if (strcmp(mv->sec[k].name, name) == 0) {
+            fprintf(stderr,
+                    "core_seal: FATAL — duplicate SECTION '%s' in "
+                    "'%s'\n",
+                    name, manifest_path);
+            rc = -2;
+        }
+    memcpy(mv->sec[mv->nsec].name, name, strlen(name) + 1);
+    mv->sec[mv->nsec].count = count;
+    memcpy(mv->sec[mv->nsec].hex, hex, sizeof(hex));
+    mv->nsec++;
+    return rc;
+}
+
+/* A per-file line. Returns 0 when it is recorded, else -2 (already reported). */
+static int manifest_file_line(const char *manifest_path, unsigned long lineno,
+                              const char *line, struct manifest_view *mv)
+{
+    char hex[HEXSZ], name[MERKLE_PATH_MAX];
+    if (file_line_parse(line, hex, name) != 0) {
+        fprintf(stderr,
+                "core_seal: FATAL — unrecognised line in '%s' line %lu: %s",
+                manifest_path, lineno, line);
+        return -2;
+    }
+    if (mv->nfile == MAX_MAN_FILES) {
+        fprintf(stderr,
+                "core_seal: FATAL — more than %d file lines in '%s'\n",
+                MAX_MAN_FILES, manifest_path);
+        return -2;
+    }
+    memcpy(mv->file[mv->nfile].path, name, strlen(name) + 1);
+    memcpy(mv->file[mv->nfile].hex, hex, sizeof(hex));
+    mv->nfile++;
+    return 0;
+}
+
+/* One manifest line that passed the physical check. Returns 0 when it is
+ * accepted, else -2 after reporting it. A comment or blank line is accepted
+ * only before the final ROOT line; any line after ROOT is an error. */
+static int manifest_parse_line(const char *manifest_path, unsigned long lineno,
+                               const char *line, struct manifest_view *mv)
+{
+    if (mv->have_root) {
+        if (strncmp(line, "ROOT", 4) == 0)
+            fprintf(stderr,
+                    "core_seal: FATAL — more than one ROOT line in '%s' "
+                    "line %lu\n", manifest_path, lineno);
+        else
+            fprintf(stderr,
+                    "core_seal: FATAL — data follows final ROOT in '%s' "
+                    "line %lu\n", manifest_path, lineno);
+        return -2;
+    }
+    if (line[0] == '#' || line[0] == '\n' || line[0] == '\r')
+        return 0;
+
+    int pr = manifest_root_tree_line(manifest_path, lineno, line, mv);
+    if (pr != -1)
+        return pr;
+    pr = manifest_section_line(manifest_path, lineno, line, mv);
+    if (pr != -1)
+        return pr;
+    return manifest_file_line(manifest_path, lineno, line, mv);
+}
+
 /* Parse the per-file, SECTION, TREE and ROOT lines out of an existing manifest.
  * Returns 0 on success, -1 if the manifest cannot be opened, -2 if any line is
  * present but malformed. A manifest we cannot parse must never be reported as
@@ -1129,123 +1384,12 @@ static int read_manifest(const char *manifest_path, struct manifest_view *mv)
     unsigned long lineno = 0;
     while (fgets(line, sizeof(line), m)) {
         lineno++;
-        size_t visible = strlen(line);
-        /* The writer emits one newline-terminated physical record. A missing
-         * newline here means either an overlong/truncated line or an embedded
-         * NUL hiding bytes that fgets already consumed. Both are ambiguous. */
-        if (visible == 0 || line[visible - 1] != '\n' ||
-            memchr(line, '\r', visible) != NULL) {
-            fprintf(stderr,
-                    "core_seal: FATAL — malformed physical line in '%s' "
-                    "line %lu\n", manifest_path, lineno);
+        if (manifest_physical_line(manifest_path, lineno, line) != 0) {
             rc = -2;
             continue;
         }
-        if (mv->have_root) {
-            if (strncmp(line, "ROOT", 4) == 0)
-                fprintf(stderr,
-                        "core_seal: FATAL — more than one ROOT line in '%s' "
-                        "line %lu\n", manifest_path, lineno);
-            else
-                fprintf(stderr,
-                        "core_seal: FATAL — data follows final ROOT in '%s' "
-                        "line %lu\n", manifest_path, lineno);
+        if (manifest_parse_line(manifest_path, lineno, line, mv) != 0)
             rc = -2;
-            continue;
-        }
-        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r')
-            continue;
-
-        char hex[HEXSZ], name[MERKLE_PATH_MAX];
-        uint64_t count = 0;
-        int pr;
-
-        pr = hex_line_parse(line, "ROOT", hex);
-        if (pr == 0) {
-            memcpy(mv->root_hex, hex, sizeof(hex));
-            mv->have_root = 1;
-            continue;
-        }
-        if (pr == -2) {
-            fprintf(stderr,
-                    "core_seal: FATAL — malformed ROOT line in '%s' line %lu: %s",
-                    manifest_path, lineno, line);
-            rc = -2;
-            continue;
-        }
-
-        pr = hex_line_parse(line, "TREE", hex);
-        if (pr == 0) {
-            if (mv->have_tree) {
-                fprintf(stderr,
-                        "core_seal: FATAL — more than one TREE line in '%s'\n",
-                        manifest_path);
-                rc = -2;
-            }
-            memcpy(mv->tree_hex, hex, sizeof(hex));
-            mv->have_tree = 1;
-            continue;
-        }
-        if (pr == -2) {
-            fprintf(stderr,
-                    "core_seal: FATAL — malformed TREE line in '%s' line %lu: %s",
-                    manifest_path, lineno, line);
-            rc = -2;
-            continue;
-        }
-
-        pr = section_line_parse(line, name, &count, hex);
-        if (pr == -2) {
-            fprintf(stderr,
-                    "core_seal: FATAL — malformed SECTION line in '%s' line "
-                    "%lu: %s",
-                    manifest_path, lineno, line);
-            rc = -2;
-            continue;
-        }
-        if (pr == 0) {
-            if (mv->nsec == MAX_MAN_SECTIONS) {
-                fprintf(stderr,
-                        "core_seal: FATAL — more than %d SECTION lines in "
-                        "'%s'\n",
-                        MAX_MAN_SECTIONS, manifest_path);
-                rc = -2;
-                continue;
-            }
-            for (size_t k = 0; k < mv->nsec; k++)
-                if (strcmp(mv->sec[k].name, name) == 0) {
-                    fprintf(stderr,
-                            "core_seal: FATAL — duplicate SECTION '%s' in "
-                            "'%s'\n",
-                            name, manifest_path);
-                    rc = -2;
-                }
-            memcpy(mv->sec[mv->nsec].name, name, strlen(name) + 1);
-            mv->sec[mv->nsec].count = count;
-            memcpy(mv->sec[mv->nsec].hex, hex, sizeof(hex));
-            mv->nsec++;
-            continue;
-        }
-
-        pr = file_line_parse(line, hex, name);
-        if (pr == 0) {
-            if (mv->nfile == MAX_MAN_FILES) {
-                fprintf(stderr,
-                        "core_seal: FATAL — more than %d file lines in '%s'\n",
-                        MAX_MAN_FILES, manifest_path);
-                rc = -2;
-                continue;
-            }
-            memcpy(mv->file[mv->nfile].path, name, strlen(name) + 1);
-            memcpy(mv->file[mv->nfile].hex, hex, sizeof(hex));
-            mv->nfile++;
-            continue;
-        }
-
-        fprintf(stderr,
-                "core_seal: FATAL — unrecognised line in '%s' line %lu: %s",
-                manifest_path, lineno, line);
-        rc = -2;
     }
     if (ferror(m)) {
         fprintf(stderr, "core_seal: FATAL — read error in manifest '%s'\n",
@@ -1298,6 +1442,53 @@ static int verify_files(const char *manifest_path, const struct manifest_view *m
     return rc;
 }
 
+/* Compares one manifest SECTION with its computed node, printing each field that
+ * differs. Returns 1 if any field differs, else 0. `hex` is the node's digest. */
+static int verify_section_fields(const struct man_section *found,
+                                 const struct dnode *node, const char *hex)
+{
+    int bad = 0;
+    if (found->count != node->file_count) {
+        fprintf(stderr,
+                "core_seal: DRIFT — section '%s': file count changed "
+                "(manifest %llu, computed %llu).\n",
+                node->path, (unsigned long long)found->count,
+                (unsigned long long)node->file_count);
+        bad = 1;
+    }
+    if (strcmp(found->hex, hex) != 0) {
+        fprintf(stderr,
+                "core_seal: DRIFT — section '%s' drifted.\n"
+                "  manifest section root: %s\n"
+                "  computed section root: %s\n",
+                node->path, found->hex, hex);
+        bad = 1;
+    }
+    return bad;
+}
+
+/* Returns 1 if some manifest SECTION names a directory that no longer holds a
+ * sealed file (printing each one), else 0. */
+static int verify_orphan_sections(const struct manifest_view *mv,
+                                  const struct dnode *nodes, size_t dn)
+{
+    int rc = 0;
+    for (size_t j = 0; j < mv->nsec; j++) {
+        int still_there = 0;
+        for (size_t k = 1; k < dn; k++)
+            if (strcmp(mv->sec[j].name, nodes[k].path) == 0)
+                still_there = 1;
+        if (!still_there) {
+            fprintf(stderr,
+                    "core_seal: DRIFT — section '%s' is in the manifest but no "
+                    "longer holds any sealed file.\n",
+                    mv->sec[j].name);
+            rc = 1;
+        }
+    }
+    return rc;
+}
+
 /* Compare the manifest's SECTION/TREE lines against freshly derived ones.
  * 0 = match, 1 = drift, 2 = malformed/downgraded manifest.
  * Every drift message NAMES the directory, which is the point of the
@@ -1342,23 +1533,7 @@ static int verify_sections(const char *manifest_path,
             continue;
         }
         zcl_hex_encode(nodes[k].digest, HSZ, hex);
-        int bad = 0;
-        if (found->count != nodes[k].file_count) {
-            fprintf(stderr,
-                    "core_seal: DRIFT — section '%s': file count changed "
-                    "(manifest %llu, computed %llu).\n",
-                    nodes[k].path, (unsigned long long)found->count,
-                    (unsigned long long)nodes[k].file_count);
-            bad = 1;
-        }
-        if (strcmp(found->hex, hex) != 0) {
-            fprintf(stderr,
-                    "core_seal: DRIFT — section '%s' drifted.\n"
-                    "  manifest section root: %s\n"
-                    "  computed section root: %s\n",
-                    nodes[k].path, found->hex, hex);
-            bad = 1;
-        }
+        int bad = verify_section_fields(found, &nodes[k], hex);
         if (bad) {
             rc = 1;
             size_t l = strlen(nodes[k].path);
@@ -1369,19 +1544,8 @@ static int verify_sections(const char *manifest_path,
         }
     }
 
-    for (size_t j = 0; j < mv->nsec; j++) {
-        int still_there = 0;
-        for (size_t k = 1; k < dn; k++)
-            if (strcmp(mv->sec[j].name, nodes[k].path) == 0)
-                still_there = 1;
-        if (!still_there) {
-            fprintf(stderr,
-                    "core_seal: DRIFT — section '%s' is in the manifest but no "
-                    "longer holds any sealed file.\n",
-                    mv->sec[j].name);
-            rc = 1;
-        }
-    }
+    if (verify_orphan_sections(mv, nodes, dn) != 0)
+        rc = 1;
 
     zcl_hex_encode(tree, HSZ, hex);
     if (strcmp(mv->tree_hex, hex) != 0) {
