@@ -60,6 +60,118 @@ static bool tls_client_parse_port(const char *text, const char *end,
     return true;
 }
 
+/* Result of splitting the authority; the caller logs each refusal. */
+enum tls_authority_status {
+    TLS_AUTHORITY_OK,
+    TLS_AUTHORITY_NO_BRACKET,
+    TLS_AUTHORITY_JUNK_AFTER_V6,
+    TLS_AUTHORITY_EMPTY_PORT_V6,
+    TLS_AUTHORITY_BAD_PORT_V6,
+    TLS_AUTHORITY_EMPTY_PORT,
+    TLS_AUTHORITY_BAD_PORT,
+};
+
+enum tls_path_status {
+    TLS_PATH_OK,
+    TLS_PATH_TOO_LONG,
+    TLS_PATH_CONTROL,
+};
+
+enum tls_host_status {
+    TLS_HOST_OK,
+    TLS_HOST_LEN,
+    TLS_HOST_BYTE,
+};
+
+static const char *tls_client_authority_end(const char *authority)
+{
+    const char *slash = strchr(authority, '/');
+    return slash ? slash : authority + strlen(authority);
+}
+
+static bool tls_client_authority_has_userinfo(const char *authority,
+                                              const char *authority_end)
+{
+    for (const char *p = authority; p < authority_end; p++) {
+        if (*p == '@')
+            return true;
+    }
+    return false;
+}
+
+static int tls_client_split_authority(const char *authority,
+                                      const char *authority_end,
+                                      const char **host_start,
+                                      const char **host_end, int *port)
+{
+    if (*authority == '[') {
+        const char *rb = memchr(authority, ']', (size_t)(authority_end - authority));
+        if (!rb)
+            return TLS_AUTHORITY_NO_BRACKET;
+        *host_start = authority + 1;
+        *host_end = rb;
+        if (rb + 1 < authority_end) {
+            if (rb[1] != ':')
+                return TLS_AUTHORITY_JUNK_AFTER_V6;
+            const char *port_text = rb + 2;
+            if (port_text >= authority_end)
+                return TLS_AUTHORITY_EMPTY_PORT_V6;
+            if (!tls_client_parse_port(port_text, authority_end, port))
+                return TLS_AUTHORITY_BAD_PORT_V6;
+        }
+    } else {
+        const char *colon = memchr(authority, ':', (size_t)(authority_end - authority));
+        if (colon) {
+            *host_end = colon;
+            const char *port_text = colon + 1;
+            if (port_text >= authority_end)
+                return TLS_AUTHORITY_EMPTY_PORT;
+            if (!tls_client_parse_port(port_text, authority_end, port))
+                return TLS_AUTHORITY_BAD_PORT;
+        }
+    }
+    return TLS_AUTHORITY_OK;
+}
+
+static bool tls_client_port_valid(int port)
+{
+    return port > 0 && port <= 65535;
+}
+
+static int tls_client_check_host(const char *host, size_t host_len, size_t host_cap)
+{
+    if (host_len == 0 || host_len >= host_cap)
+        return TLS_HOST_LEN;
+    for (size_t i = 0; i < host_len; i++) {
+        const unsigned char c = (unsigned char)host[i];
+        if (c <= 0x20 || c == 0x7f || c == '/' || c == '\\' || c == '?' || c == '#')
+            return TLS_HOST_BYTE;
+    }
+    return TLS_HOST_OK;
+}
+
+static int tls_client_set_path(const char *authority, struct tls_client_url *out,
+                               size_t *path_len)
+{
+    const char *slash = strchr(authority, '/');
+    if (!slash) {
+        out->path[0] = '/';
+        out->path[1] = '\0';
+        return TLS_PATH_OK;
+    }
+    *path_len = strlen(slash);
+    if (*path_len >= sizeof(out->path))
+        return TLS_PATH_TOO_LONG;
+    for (size_t i = 0; i < *path_len; i++) {
+        const unsigned char c = (unsigned char)slash[i];
+        /* A CR/LF or NUL in a request target is request smuggling. */
+        if (c < 0x21 || c == 0x7f)
+            return TLS_PATH_CONTROL;
+    }
+    memcpy(out->path, slash, *path_len + 1);
+    return TLS_PATH_OK;
+}
+
 bool tls_client_url_parse(const char *url, struct tls_client_url *out)
 {
     if (!url || !out)
@@ -76,75 +188,48 @@ bool tls_client_url_parse(const char *url, struct tls_client_url *out)
     const char *authority = url + scheme_len;
     /* Userinfo would let a URL carry credentials into a CA conversation.
      * Nothing we talk to uses it; refuse rather than silently ignore. */
-    const char *slash = strchr(authority, '/');
-    const char *authority_end = slash ? slash : authority + strlen(authority);
-    for (const char *p = authority; p < authority_end; p++) {
-        if (*p == '@')
-            LOG_FAIL("tlsclient", "refusing a URL authority carrying userinfo");
-    }
+    const char *authority_end = tls_client_authority_end(authority);
+    if (tls_client_authority_has_userinfo(authority, authority_end))
+        LOG_FAIL("tlsclient", "refusing a URL authority carrying userinfo");
     if (authority_end == authority)
         LOG_FAIL("tlsclient", "refusing a URL with an empty host");
 
     const char *host_start = authority;
     const char *host_end = authority_end;
     int port = 443;
+    const int authority_status = tls_client_split_authority(
+        authority, authority_end, &host_start, &host_end, &port);
+    if (authority_status == TLS_AUTHORITY_NO_BRACKET)
+        LOG_FAIL("tlsclient", "refusing a URL with an unterminated IPv6 literal");
+    if (authority_status == TLS_AUTHORITY_JUNK_AFTER_V6)
+        LOG_FAIL("tlsclient", "refusing junk after an IPv6 literal in a URL");
+    if (authority_status == TLS_AUTHORITY_EMPTY_PORT_V6)
+        LOG_FAIL("tlsclient", "refusing a URL with an empty port");
+    if (authority_status == TLS_AUTHORITY_BAD_PORT_V6)
+        LOG_FAIL("tlsclient", "refusing an invalid URL port");
+    if (authority_status == TLS_AUTHORITY_EMPTY_PORT)
+        LOG_FAIL("tlsclient", "refusing a URL with an empty port");
+    if (authority_status == TLS_AUTHORITY_BAD_PORT)
+        LOG_FAIL("tlsclient", "refusing an invalid URL port");
 
-    if (*host_start == '[') {
-        const char *rb = memchr(host_start, ']', (size_t)(authority_end - host_start));
-        if (!rb)
-            LOG_FAIL("tlsclient", "refusing a URL with an unterminated IPv6 literal");
-        host_start++;
-        host_end = rb;
-        if (rb + 1 < authority_end) {
-            if (rb[1] != ':')
-                LOG_FAIL("tlsclient", "refusing junk after an IPv6 literal in a URL");
-            const char *port_text = rb + 2;
-            if (port_text >= authority_end)
-                LOG_FAIL("tlsclient", "refusing a URL with an empty port");
-            if (!tls_client_parse_port(port_text, authority_end, &port))
-                LOG_FAIL("tlsclient", "refusing an invalid URL port");
-        }
-    } else {
-        const char *colon = memchr(host_start, ':', (size_t)(authority_end - host_start));
-        if (colon) {
-            host_end = colon;
-            const char *port_text = colon + 1;
-            if (port_text >= authority_end)
-                LOG_FAIL("tlsclient", "refusing a URL with an empty port");
-            if (!tls_client_parse_port(port_text, authority_end, &port))
-                LOG_FAIL("tlsclient", "refusing an invalid URL port");
-        }
-    }
-
-    if (port <= 0 || port > 65535)
+    if (!tls_client_port_valid(port))
         LOG_FAIL("tlsclient", "refusing a URL port outside 1..65535");
     const size_t host_len = (size_t)(host_end - host_start);
-    if (host_len == 0 || host_len >= sizeof(out->host))
+    const int host_status = tls_client_check_host(host_start, host_len, sizeof(out->host));
+    if (host_status == TLS_HOST_LEN)
         LOG_FAIL("tlsclient", "refusing a URL host of %zu bytes", host_len);
-    for (size_t i = 0; i < host_len; i++) {
-        const unsigned char c = (unsigned char)host_start[i];
-        if (c <= 0x20 || c == 0x7f || c == '/' || c == '\\' || c == '?' || c == '#')
-            LOG_FAIL("tlsclient", "refusing a URL host with a control or delimiter byte");
-    }
+    if (host_status == TLS_HOST_BYTE)
+        LOG_FAIL("tlsclient", "refusing a URL host with a control or delimiter byte");
     memcpy(out->host, host_start, host_len);
     out->host[host_len] = '\0';
     out->port = port;
 
-    if (!slash) {
-        out->path[0] = '/';
-        out->path[1] = '\0';
-        return true;
-    }
-    const size_t path_len = strlen(slash);
-    if (path_len >= sizeof(out->path))
+    size_t path_len = 0;
+    const int path_status = tls_client_set_path(authority, out, &path_len);
+    if (path_status == TLS_PATH_TOO_LONG)
         LOG_FAIL("tlsclient", "refusing a URL path of %zu bytes", path_len);
-    for (size_t i = 0; i < path_len; i++) {
-        const unsigned char c = (unsigned char)slash[i];
-        /* A CR/LF or NUL in a request target is request smuggling. */
-        if (c < 0x21 || c == 0x7f)
-            LOG_FAIL("tlsclient", "refusing a URL path with a control byte");
-    }
-    memcpy(out->path, slash, path_len + 1);
+    if (path_status == TLS_PATH_CONTROL)
+        LOG_FAIL("tlsclient", "refusing a URL path with a control byte");
     return true;
 }
 
@@ -731,6 +816,62 @@ static bool extra_headers_ok(const struct tls_client_request *req)
     return true;
 }
 
+/* Zeroes a buffer through a volatile pointer so the wipe survives optimization. */
+static void tls_client_wipe(void *p, size_t n)
+{
+    volatile char *wipe = p;
+    for (size_t i = 0; i < n; i++)
+        wipe[i] = 0;
+}
+
+/* Appends the caller's extra headers after this client's own. Returns false
+ * when one does not fit; the caller logs it. */
+static bool tls_client_append_extra_headers(const struct tls_client_request *req,
+                                            char *head, size_t cap, int *n)
+{
+    for (size_t i = 0; i < req->header_count; i++) {
+        const int m = snprintf(head + *n, cap - (size_t)*n, "%s: %s\r\n",
+                               req->headers[i].name, req->headers[i].value);
+        if (m < 0 || (size_t)(*n + m) >= cap)
+            return false; // raw-return-ok:caller logs the request head overflow
+        *n += m;
+    }
+    return true;
+}
+
+enum tls_read_status {
+    TLS_READ_DONE,
+    TLS_READ_DEADLINE,
+    TLS_READ_CAP,
+    TLS_READ_FAILED,
+};
+
+/* Reads until the framing is complete or the peer closes. The caller logs
+ * each failure; *err_out carries the SSL error for TLS_READ_FAILED. */
+static int tls_client_read_response(SSL *ssl, char *buf, size_t read_cap,
+                                    size_t body_cap, int64_t deadline,
+                                    size_t *used, int *err_out)
+{
+    for (;;) {
+        if (now_ms() > deadline)
+            return TLS_READ_DEADLINE;
+        if (*used >= read_cap)
+            return TLS_READ_CAP;
+        const int want = (int)(read_cap - *used);
+        const int got = SSL_read(ssl, buf + *used, want);
+        if (got <= 0) {
+            *err_out = SSL_get_error(ssl, got);
+            if (*err_out == SSL_ERROR_ZERO_RETURN || *err_out == SSL_ERROR_SYSCALL)
+                break; /* peer closed; framing decides whether that is enough */
+            return TLS_READ_FAILED;
+        }
+        *used += (size_t)got;
+        if (tls_client_response_complete_bounded(buf, *used, body_cap))
+            break;
+    }
+    return TLS_READ_DONE;
+}
+
 bool tls_client_fetch(const struct tls_client_request *req,
                       struct tls_client_response *out)
 {
@@ -853,18 +994,9 @@ bool tls_client_fetch(const struct tls_client_request *req,
          * cannot displace Host or Connection. Each was validated above for
          * control bytes; this is the point at which an API credential enters
          * the process's outbound path. */
-        bool head_ok = true;
-        for (size_t i = 0; i < req->header_count && head_ok; i++) {
-            const int m = snprintf(head + n, sizeof(head) - (size_t)n,
-                                   "%s: %s\r\n", req->headers[i].name,
-                                   req->headers[i].value);
-            if (m < 0 || (size_t)(n + m) >= sizeof(head)) {
-                LOG_WARN("tlsclient", "request head does not fit its buffer");
-                head_ok = false;
-            } else {
-                n += m;
-            }
-        }
+        bool head_ok = tls_client_append_extra_headers(req, head, sizeof(head), &n);
+        if (!head_ok)
+            LOG_WARN("tlsclient", "request head does not fit its buffer");
         if (head_ok && (size_t)n + 2 >= sizeof(head)) {
             LOG_WARN("tlsclient", "request head does not fit its buffer");
             head_ok = false;
@@ -878,11 +1010,7 @@ bool tls_client_fetch(const struct tls_client_request *req,
          * before the scope ends rather than leaving a credential in a stack
          * page that a later core dump would carry off the machine. The write
          * is through a volatile pointer so it survives optimization. */
-        {
-            volatile char *wipe = head;
-            for (size_t i = 0; i < sizeof(head); i++)
-                wipe[i] = 0;
-        }
+        tls_client_wipe(head, sizeof(head));
         if (!head_ok)
             goto done;
         if (req->body_len && !ssl_write_all(ssl, req->body, req->body_len, deadline))
@@ -895,28 +1023,21 @@ bool tls_client_fetch(const struct tls_client_request *req,
         goto done;
     }
     size_t used = 0;
-    for (;;) {
-        if (now_ms() > deadline) {
-            LOG_WARN("tlsclient", "response read exceeded the deadline");
-            goto done;
-        }
-        if (used >= read_cap) {
-            LOG_WARN("tlsclient",
-                     "refusing a response over the %zu-byte read cap", read_cap);
-            goto done;
-        }
-        const int want = (int)(read_cap - used);
-        const int got = SSL_read(ssl, buf + used, want);
-        if (got <= 0) {
-            const int err = SSL_get_error(ssl, got);
-            if (err == SSL_ERROR_ZERO_RETURN || err == SSL_ERROR_SYSCALL)
-                break; /* peer closed; framing decides whether that is enough */
-            LOG_WARN("tlsclient", "TLS read failed: ssl_error=%d", err);
-            goto done;
-        }
-        used += (size_t)got;
-        if (tls_client_response_complete_bounded(buf, used, body_cap))
-            break;
+    int err = 0;
+    const int read_status = tls_client_read_response(ssl, buf, read_cap, body_cap,
+                                                     deadline, &used, &err);
+    if (read_status == TLS_READ_DEADLINE) {
+        LOG_WARN("tlsclient", "response read exceeded the deadline");
+        goto done;
+    }
+    if (read_status == TLS_READ_CAP) {
+        LOG_WARN("tlsclient",
+                 "refusing a response over the %zu-byte read cap", read_cap);
+        goto done;
+    }
+    if (read_status == TLS_READ_FAILED) {
+        LOG_WARN("tlsclient", "TLS read failed: ssl_error=%d", err);
+        goto done;
     }
     ok = tls_client_response_parse_bounded(buf, used, body_cap, out);
 
