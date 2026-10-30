@@ -1139,8 +1139,8 @@ void addrman_connected(struct addr_man *am, const struct net_service *addr,
     zcl_mutex_unlock(&am->cs);
 }
 
-size_t addrman_get_addr(struct addr_man *am, struct net_address *out,
-                        size_t max_out)
+static size_t addrman_sample(struct addr_man *am, struct net_address *out,
+                            size_t max_out, bool include_tor)
 {
     zcl_mutex_lock(&am->cs);
     size_t nNodes = ADDRMAN_GETADDR_MAX_PCT * am->random_size / 100;
@@ -1155,12 +1155,29 @@ size_t addrman_get_addr(struct addr_man *am, struct net_address *out,
         int rid = am->random_order[n];
         if (rid < 0 || (size_t)rid >= am->entries_cap) continue;
         struct addr_info *ai = &am->entries[rid];
+        if (!include_tor && net_addr_is_tor(&ai->addr.svc.addr)) continue;
         if (!addr_info_is_terrible(ai, nNow))
             out[count++] = ai->addr;
     }
 
     zcl_mutex_unlock(&am->cs);
     return count;
+}
+
+/* Gossip sample. The legacy addr wire format has no torv3 field; a torv3 row
+ * would serialize as "::", so onions are never gossiped. */
+size_t addrman_get_addr(struct addr_man *am, struct net_address *out,
+                        size_t max_out)
+{
+    return addrman_sample(am, out, max_out, false);
+}
+
+/* Census sample: the same draw including torv3 rows, for the network crawler
+ * only. Never use it to build an addr message. */
+size_t addrman_get_census(struct addr_man *am, struct net_address *out,
+                          size_t max_out)
+{
+    return addrman_sample(am, out, max_out, true);
 }
 
 #define CC_ERR(fmt, ...) do { \

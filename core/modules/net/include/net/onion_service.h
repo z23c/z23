@@ -346,10 +346,12 @@ bool onion_service_directory_learn(const char *hostname, int port, int height,
  *
  * The node learns onion hostnames from every /directory.json it fetches
  * (onion_service_directory_learn), persists them, and re-serves them.
- * This is the reader that lets it also DIAL them again on a later boot,
- * so the compiled-in chainparams onionSeeds[] array stops being the only
- * door into the network: reach any peer once and its neighbourhood is
- * reachable forever without a rebuild.
+ * This is the reader that lets the seed pass FETCH their directories again on a
+ * later boot, so the compiled-in chainparams onionSeeds[] array stops being
+ * the only door into the network: reach any peer once and its neighbourhood is
+ * reachable forever without a rebuild. A row is only a place to look. A
+ * hint whose directory row names a P2P port also enters addrman, and the
+ * dialer reaches it through the outbound onion slot (connman_internal.h).
  *
  * FRESH, non-self rows only (last_seen within ONION_DIR_STALE_SECS),
  * ranked measured-contact-first so hearsay can never displace a host we

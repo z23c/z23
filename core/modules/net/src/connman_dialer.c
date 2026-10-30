@@ -308,9 +308,8 @@ static bool batch_diversity_ok(struct connman *cm,
     return true;
 }
 
-size_t connman_gather_dial_candidates(struct connman *cm,
-                                      struct connman_dial_candidate *out,
-                                      size_t max)
+static size_t connman_gather_clearnet_candidates(
+    struct connman *cm, struct connman_dial_candidate *out, size_t max)
 {
     if (!cm || !out || max == 0)
         return 0;
@@ -430,6 +429,37 @@ size_t connman_gather_dial_candidates(struct connman *cm,
     return n;
 }
 
+size_t connman_gather_dial_candidates(struct connman *cm,
+                                      struct connman_dial_candidate *out,
+                                      size_t max)
+{
+    if (!cm || !out || max == 0)
+        return 0;
+    if (max > ZCL_DIAL_BATCH_MAX)
+        max = ZCL_DIAL_BATCH_MAX;
+
+    struct addr_info onion;
+    bool slot = connman_onion_slot_pick(cm, &onion);
+    size_t n = connman_gather_clearnet_candidates(cm, out,
+                                                  slot ? max - 1 : max);
+    for (size_t i = 0; slot && i < n; i++)
+        slot = !net_addr_is_tor(&out[i].addr.svc.addr);
+    if (!slot)
+        return n;
+
+    /* Charge the attempt at pick time, as every addrman candidate is, so a
+     * dead onion backs off and the slot returns to clearnet. */
+    addrman_attempt(&cm->manager.addrman, &onion.addr.svc,
+                    (int64_t)platform_time_wall_time_t(),
+                    connman_outbound_healthy_count(cm) == 0);
+    connman_onion_slot_note_offered(cm);
+    out[n].addr = onion.addr;
+    out[n].source = CONNMAN_TARGET_ADDRMAN;
+    out[n].addnode_index = SIZE_MAX;
+    out[n].is_feeler = false;
+    return n + 1;
+}
+
 /* ── Feeler probes (Bitcoin Core pattern) ─────────────────────────────── */
 
 static int64_t connman_feeler_interval_secs(void)
@@ -464,6 +494,8 @@ static bool connman_pick_feeler_target(struct connman *cm,
         memset(&pick, 0, sizeof(pick));
         if (!addrman_select(&cm->manager.addrman, /*new_only=*/true, &pick))
             return false;
+        if (net_addr_is_tor(&pick.addr.svc.addr))
+            continue;                  /* a feeler could block 120 s */
         if (!connman_candidate_addr_dialable(cm, &pick.addr,
                                              CONNMAN_TARGET_ADDRMAN))
             continue;

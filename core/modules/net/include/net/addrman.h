@@ -171,8 +171,15 @@ bool addrman_select(struct addr_man *am, bool new_only,
 void addrman_connected(struct addr_man *am, const struct net_service *addr,
                        int64_t nTime);
 
+/* Gossip sample: never returns torv3 rows (the addr wire format cannot carry
+ * them). */
 size_t addrman_get_addr(struct addr_man *am, struct net_address *out,
                         size_t max_out);
+
+/* Census sample: as addrman_get_addr but including torv3 rows. Network
+ * crawler only. */
+size_t addrman_get_census(struct addr_man *am, struct net_address *out,
+                          size_t max_out);
 
 int addr_info_get_tried_bucket(const struct addr_info *info,
                                const struct uint256 *nKey);

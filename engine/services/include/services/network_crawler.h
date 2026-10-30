@@ -5,7 +5,8 @@
  * The own-peer network_monitor only ever sees THIS node's handful of
  * connections; it structurally cannot answer "what does the ENTIRE reachable
  * ZClassic P2P network look like?" This service closes that gap Bitnodes-style:
- * a supervised worker walks the full local address table (addrman_get_addr),
+ * a supervised worker walks the full local address table (addrman_get_census,
+ * which, unlike ADDR gossip, includes onion rows),
  * opens SHORT-LIVED measurement sockets to a bounded, rate-limited batch of
  * addresses per round OUTSIDE the node's connman, performs only a version/verack
  * handshake, records {addr, onion-vs-clearnet, version, subver, services,

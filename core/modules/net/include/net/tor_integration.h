@@ -276,6 +276,11 @@ typedef int (*tor_fetch_dispatch_fn)(const char *onion_address,
                                      void *ctx, int timeout_secs);
 
 #ifdef ZCL_TESTING
+/* Test seam: force the outbound-dial readiness flag without a Tor client. */
+void tor_integration_set_dial_ready_for_test(bool ready);
+#endif
+
+#ifdef ZCL_TESTING
 /* Test seam: tor_integration_fetch_onion_blocking with an injected
  * dispatcher, so the wait loop runs without a live Tor client. */
 int tor_integration_fetch_onion_blocking_for_test(

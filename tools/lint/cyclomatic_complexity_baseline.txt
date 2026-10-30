@@ -101,7 +101,7 @@ core/modules/net/src/connman.c:connman_run_message_cycle:17
 core/modules/net/src/connman.c:thread_dns_seed:28
 core/modules/net/src/connman.c:thread_socket_handler:89
 core/modules/net/src/connman_dialer.c:connman_dial_batch:25
-core/modules/net/src/connman_dialer.c:connman_gather_dial_candidates:32
+core/modules/net/src/connman_dialer.c:connman_gather_clearnet_candidates:32
 core/modules/net/src/connman_dialer.c:thread_open_connections:23
 core/modules/net/src/connman_onion_seeds.c:apply_onion_seed_directory:35
 core/modules/net/src/connman_onion_seeds.c:connman_run_onion_seed_pass:42

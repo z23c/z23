@@ -292,6 +292,13 @@ struct connman {
     _Atomic uint64_t zcl23_dials_scheduled;
     _Atomic uint64_t zcl23_backoff_skips;
     _Atomic uint64_t zcl23_policy_skips;
+    /* Times the onion-directory seed pass ran past its Tor-ready check this
+     * boot. Zero means the once-after-ready walk is still owed
+     * (connman_onion_walk_once); any later run satisfies it. */
+    _Atomic uint32_t onion_walk_runs;
+    /* Monotonic millisecond the dialer last offered the outbound onion slot
+     * (0 = never); spaces offers by ONION_SLOT_MIN_GAP_SECS. */
+    _Atomic int64_t onion_slot_last_ts;
 
     /* Message-loop counters for operator/agent diagnostics. The message
      * thread updates these on the hot path; RPC/API readers snapshot them
@@ -402,6 +409,15 @@ void connman_kick_onion_seeds(struct connman *cm);
  * is never the path a node below the peer floor takes. */
 void connman_run_onion_seed_pass(struct connman *cm);
 void connman_onion_seed_fetch_one(struct connman *cm, const char *onion);
+
+/* The once-per-boot walk: true when Tor can dial, this boot has not yet run
+ * the seed pass, and the node holds no outbound onion peer and no onion row
+ * in addrman. Independent of the healthy-peer floor, so a phone with four
+ * clearnet peers still learns onions. connman_onion_walk_once() runs the pass
+ * (and persists addrman) when due and returns whether it ran; it is called
+ * from the discovery loop and runs at most once per boot. */
+bool connman_onion_walk_due(struct connman *cm);
+bool connman_onion_walk_once(struct connman *cm);
 
 /* Resolve one operator-selected v3 onion through /directory.json, add every
  * advertised numeric endpoint to the persistent addnode set, and schedule an
@@ -556,6 +572,12 @@ struct connman_dial_candidate {
  *   2. a chain-bound DHT endpoint hint, then
  *   3. database-discovered ZCL23 peers on alternating scheduler turns, then
  *   4. addnode / addrman via connman_pick_next_outbound_target.
+ * While Tor can dial, no outbound onion peer is connected and at least
+ * ZCL_PEER_FLOOR_HEALTHY healthy peers exist, one position of `max` is
+ * reserved for a single dialable addrman onion candidate (at most one offer
+ * per 240 s): the sources above then fill at most max-1 and the onion is
+ * appended last. Below the floor, or with Tor not dial-ready, the batch is
+ * unchanged.
  * Learned candidates pass the public reachable-port policy; explicit
  * operator addnodes retain their requested non-zero port. Every candidate is
  * still checked for existing/local connections and /16+/32+onion diversity,

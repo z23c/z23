@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * network_crawler service — see services/network_crawler.h. A supervised worker
- * walks the full local address table (addrman_get_addr), dials a bounded,
+ * walks the full local address table (addrman_get_census), dials a bounded,
  * rate-limited batch of addresses per round OUTSIDE the node's connman (the
  * injectable probe_fn seam), records a bounded/pruned census, and folds it into
  * a whole-network view: reachable count, version histogram, height
@@ -338,7 +338,7 @@ static void ncrawl_do_round(void)
     size_t want = (size_t)g_ncrawl.max_per_round;
     if (want > NCRAWL_MAX_PER_ROUND)
         want = NCRAWL_MAX_PER_ROUND;
-    size_t got = addrman_get_addr(am, batch, want);
+    size_t got = addrman_get_census(am, batch, want);
     int n = (int)(got > NCRAWL_MAX_PER_ROUND ? NCRAWL_MAX_PER_ROUND : got);
 
     struct ncrawl_round_limits lim;

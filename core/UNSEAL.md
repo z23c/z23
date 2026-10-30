@@ -380,3 +380,7 @@ later lane flips it HARD.
 - 2026-10-30T20:49:17Z — REASON: Owner-authorized 2026-10-30 unseal: Android embedded Tor sets ReducedConnectionPadding 1 to cut idle channel padding wake-ups on phones; circuit padding kept for onion circuit privacy; servers unchanged (byte-identical torrc); no consensus predicate
   old ROOT: 885b73e66178c1b1e1f665830850f05b17939c2d876839135c6b7723fd314d9f
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-30T23:35:46Z — REASON: Owner-authorized 2026-10-30 unseal: a Tor-ready node turns onion-directory relay hints with a known P2P port into addrman candidates, walks the seed directories once after Tor is ready, and reserves one outbound slot for an onion peer; no consensus predicate, clearnet behaviour unchanged when Tor is off
+  old ROOT: cd527dd7479b71f1606b1bdacc957208ca5feb20e8cb1ee632c6f81a3b2bc156
+  by: owner unseal ritual (make core-unseal)

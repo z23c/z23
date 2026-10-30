@@ -50,6 +50,10 @@ int check_connman_addnode_peer_floor_diverse_subnets(void);
 int check_connman_addnode_addrman_skips_saturated(void);
 int check_connman_addnode_inbound_ephemeral_not_block(void);
 int check_connman_dialer_gather_pins(void);
+
+/* test_connman_onion_slot.c — onion relay hints to addrman, the once-per-boot
+ * onion walk, the dialer's reserved onion slot, and no onion gossip. */
+int check_connman_onion_slot(void);
 int check_connman_outbound_pin_characterization(void);
 
 /* test_connman_addnode_protocol_backoff.c — pre/post-handshake protocol

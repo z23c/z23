@@ -886,6 +886,13 @@ bool tor_integration_is_dial_ready(void)
     return atomic_load(&g_tor_dial_ready);
 }
 
+#ifdef ZCL_TESTING
+void tor_integration_set_dial_ready_for_test(bool ready)
+{
+    atomic_store(&g_tor_dial_ready, ready);
+}
+#endif
+
 bool tor_integration_is_enabled(void)
 {
     return atomic_load(&g_tor_running);

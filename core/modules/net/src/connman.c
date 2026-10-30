@@ -538,6 +538,7 @@ static void *thread_dns_seed(void *arg)
         } else {
             floor_below_since = 0;
         }
+        (void)connman_onion_walk_once(cm);
         /* Periodic flush regardless of floor state. */
         if (now - last_addrman_flush >= ADDRMAN_FLUSH_SECS && !g_stop) {
             connman_save_addrman(cm);
@@ -804,7 +805,9 @@ bool connman_addrman_candidate_usable(struct connman *cm,
 
     if (connman_addr_is_advertised_external(&info->addr))
         return false;
-
+    if (net_addr_is_tor(&info->addr.svc.addr) &&
+        !connman_onion_row_offered(starving))
+        return false;
     if (info->last_try > 0) {
         int64_t now = (int64_t)platform_time_wall_time_t();
         if (now - info->last_try < connman_addrman_retry_cooldown(info, starving))
@@ -814,9 +817,7 @@ bool connman_addrman_candidate_usable(struct connman *cm,
     if (connman_addr_is_connected(cm, &info->addr))
         return false;
 
-    /* Eclipse/sybil diversity cap — IPv4 /16, IPv6 /32, and the flat
-     * onion bucket are all enforced here so no network kind bypasses
-     * the diversity gate that IPv4 alone used to get. */
+    /* Diversity cap for IPv4 /16, IPv6 /32 and the flat onion bucket. */
     if (connman_outbound_diversity_capped(cm, &info->addr.svc.addr))
         return false;
 
@@ -2640,10 +2641,9 @@ void connman_add_seed_node(struct connman *cm, const char *host,
     net_address_init(&addr);
     addr.svc.port = port;
 
-    /* A .onion seed is parsed locally and enters addrman as a torv3
-     * address — it must NEVER reach getaddrinfo (no DNS leak, no clearnet
-     * fallback). Onion peers remain operator-directed: they are accepted
-     * here and via addnode, never gossiped. */
+    /* A .onion seed enters addrman as torv3 and must NEVER reach getaddrinfo
+     * (no DNS leak). Onions also come from addnode and onion directories;
+     * they are never gossiped (addrman_get_addr). */
     if (net_name_is_onion(host)) {
         if (!net_addr_from_onion(host, &addr.svc.addr)) {
             LOG_WARN("connman", "ignoring invalid .onion seed '%s'", host);

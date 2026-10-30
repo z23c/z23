@@ -69,13 +69,30 @@ extern struct thread_liveness_child g_open_liveness;
  *
  * connman_kick_onion_seeds() / run_onion_seed_pass() is UNAFFECTED by
  * this cap: it fetches /directory.json directly over Tor via
- * tor_integration_fetch_onion_blocking() to discover CLEARNET peers —
- * it never dials an outbound P2P connection through
- * connman_pick_next_outbound_target(), so eclipse-recovery via onion
- * seeds still works even when the onion outbound bucket is full. */
+ * tor_integration_fetch_onion_blocking(), so eclipse-recovery via onion
+ * seeds still works even when the onion outbound bucket is full. The onion
+ * relay hints it reads (with a known P2P port) become addrman rows that the
+ * dialer reaches through the outbound onion slot below the cap: while Tor
+ * can dial and no outbound onion peer is connected, one slot is reserved
+ * for one onion candidate. The cap stays a ceiling. */
 #define MAX_OUTBOUND_PER_GROUP16 2
 #define MAX_OUTBOUND_IPV6_GROUP32 2
 #define MAX_OUTBOUND_ONION 3
+
+/* The outbound onion slot (connman_onion_seeds.c). True, with the chosen row
+ * in `out`, when Tor can dial, at least ZCL_PEER_FLOOR_HEALTHY healthy peers
+ * exist, no outbound onion peer is connected, the last offer is more than
+ * 240 s old (monotonic) and an addrman onion row is past its failure
+ * cooldown. The dialer then reserves one batch position for it. Read-only:
+ * the caller charges the attempt and stamps the offer. */
+bool connman_onion_slot_pick(struct connman *cm, struct addr_info *out);
+/* Stamp the slot as offered; the next offer waits ONION_SLOT_MIN_GAP_SECS. */
+void connman_onion_slot_note_offered(struct connman *cm);
+
+/* May an addrman onion row enter the ordinary dial draw (and the feeler)?
+ * Needs Tor dial-ready; with no healthy peer (`starving`) only under
+ * -onlynet=onion. Refused rows are not charged an attempt. */
+bool connman_onion_row_offered(bool starving);
 
 /* Extract /16 subnet group from IPv4-mapped address (bytes 12-13). */
 uint16_t ipv4_group16(const unsigned char ip[16]);

@@ -35,9 +35,12 @@
 #include "net/onion_peer_merge.h"
 #include "net/onion_seed_race.h"
 #include "net/onion_service.h"
+#include "net/onion_stream.h"
+#include "net/port_policy.h"
 #include "net/tor_integration.h"
 #include "platform/time_compat.h"
 #include "util/log_macros.h"
+#include "util/timedata.h"
 
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -182,6 +185,49 @@ static int try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
     return added;
 }
 
+/* An addrman address time that is neither stale nor in the future. The
+ * advertiser's last_seen is clamped into [now - (horizon - 1 day), now] so the
+ * row is not "terrible" (nTime 0 reads as stale: never sampled, first evicted
+ * on a bucket collision). A hint without last_seen is stamped 5 days old,
+ * as Bitcoin Core does for an address that arrives with no time. */
+static uint32_t onion_hint_time(int64_t last_seen, int64_t now)
+{
+    const int64_t oldest = now - (ADDRMAN_HORIZON_DAYS - 1) * 24 * 60 * 60;
+    if (last_seen <= 0)
+        return (uint32_t)(now - 5 * 24 * 60 * 60);
+    if (last_seen > now)
+        last_seen = now;
+    if (last_seen < oldest)
+        last_seen = oldest;
+    return (uint32_t)last_seen;
+}
+
+/* An onion relay hint becomes an addrman candidate only when the directory
+ * row names its P2P port. A port of 0 is "unknown" (the row is null or out of
+ * range); a port is never guessed, and it must pass the public-port policy
+ * every learned address meets. The advertising directory host is the source,
+ * so the entry buckets by who told us. The hint is hearsay: addrman_add
+ * inserts it as NEW and only our own completed handshake promotes it. */
+static bool onion_seed_hint_to_addrman(struct connman *cm, const char *source,
+                                       const struct onion_relay_hint *h)
+{
+    if (h->port <= 0 || h->port > 65535 ||
+        !zcl_net_port_is_reachable_candidate((uint16_t)h->port))
+        return false;
+    struct net_address addr;
+    memset(&addr, 0, sizeof(addr));
+    if (!net_addr_from_onion(h->hostname, &addr.svc.addr))
+        return false;
+    addr.svc.port = (uint16_t)h->port;
+    addr.nServices = NODE_NETWORK;
+    addr.nTime = onion_hint_time(h->last_seen, GetAdjustedTime());
+    struct net_addr src;
+    net_addr_init(&src);
+    if (!net_addr_from_onion(source, &src))
+        net_addr_init(&src);
+    return addrman_add(&cm->manager.addrman, &addr, &src, 0);
+}
+
 static int apply_onion_seed_directory(struct connman *cm, const char *onion,
                                       const uint8_t *body, size_t body_len,
                                       int depth, bool pin_endpoints)
@@ -287,6 +333,7 @@ static int apply_onion_seed_directory(struct connman *cm, const char *onion,
                                           hints[i].height, hints[i].last_seen,
                                           hints[i].apps))
             learned++;
+        (void)onion_seed_hint_to_addrman(cm, onion, &hints[i]);
     }
 
     /* GETTING A FIRST PEER OUTRANKS ENRICHING THE GRAPH. The depth-1
@@ -408,6 +455,7 @@ void connman_run_onion_seed_pass(struct connman *cm)
     if (!cm || !cm->params || g_stop) return;
     if (g_connect_only) return;
     if (!tor_integration_is_dial_ready()) return;
+    atomic_fetch_add(&cm->onion_walk_runs, 1u);
 
     struct onion_pass_seen seen;
     seen.n = 0;
@@ -522,4 +570,131 @@ int connman_apply_onion_seed_directory_for_test(struct connman *cm,
                                                 size_t body_len)
 {
     return apply_onion_seed_directory(cm, onion, body, body_len, 0, false);
+}
+
+/* ── The outbound onion slot ────────────────────────────────────────────
+ *
+ * A Tor-ready node that has learned onion peers (directory hints, addnode)
+ * but holds no outbound onion connection reserves one outbound slot for one
+ * of them. The dialer places a single onion candidate in its batch and the
+ * clearnet fill stops one short of the batch width, so a full clearnet set
+ * cannot starve the onion edge forever. The reservation is released the
+ * moment an onion peer connects, or when the candidate is charged a failed
+ * attempt: addrman's failure-aware cooldown then makes it undialable and the
+ * slot returns to clearnet until the cooldown elapses. The slot is offered
+ * only once the node holds ZCL_PEER_FLOOR_HEALTHY healthy peers, so clearnet
+ * backfill below the floor is never displaced, and at most once per
+ * ONION_SLOT_MIN_GAP_SECS (monotonic clock). MAX_OUTBOUND_ONION stays the
+ * ceiling. With Tor not dial-ready the slot is never reserved and the dialer
+ * behaves exactly as it did before.
+ * Onion addresses are never gossiped (addrman_get_addr drops them), so the
+ * slot is fed only by directories and operator addnodes. */
+#define ONION_SCAN_COPY_MAX 64
+
+struct onion_scan {
+    size_t           total;                     /* torv3 rows in addrman */
+    size_t           copied;
+    struct addr_info rows[ONION_SCAN_COPY_MAX]; /* first rows, copied */
+};
+
+static void onion_scan_addrman(struct connman *cm, struct onion_scan *out)
+{
+    struct addr_man *am = &cm->manager.addrman;
+    out->total = 0;
+    out->copied = 0;
+    zcl_mutex_lock(&am->cs);
+    for (size_t n = 0; n < am->random_size; n++) {
+        int id = am->random_order[n];
+        if (id < 0 || (size_t)id >= am->entries_cap)
+            continue;
+        const struct addr_info *info = &am->entries[id];
+        if (!info->used || !net_addr_is_tor(&info->addr.svc.addr))
+            continue;
+        out->total++;
+        if (out->copied < ONION_SCAN_COPY_MAX)
+            out->rows[out->copied++] = *info;
+    }
+    zcl_mutex_unlock(&am->cs);
+}
+
+/* May an addrman onion row be offered to the ordinary dial draw? Only while
+ * Tor can dial, and with no healthy peer only when -onlynet=onion leaves
+ * nothing else to dial: an onion dial blocks the scheduler for up to its
+ * whole circuit budget, which a bootstrapping node cannot afford. */
+bool connman_onion_row_offered(bool starving)
+{
+    return tor_integration_is_dial_ready() &&
+           (!starving || netbase_onlynet_onion());
+}
+
+/* The onion slot is offered at most once per ONION_SLOT_MIN_GAP_SECS, twice
+ * the onion connect budget, so a timing-out onion cannot hold the scheduler
+ * back to back. */
+#define ONION_SLOT_MIN_GAP_SECS (2 * (ONION_STREAM_CONNECT_TIMEOUT_MS / 1000))
+
+/* The offer is inside the minimum gap of the previous one (monotonic). */
+static bool onion_slot_gap_open(const struct connman *cm)
+{
+    int64_t last_ms = atomic_load(&cm->onion_slot_last_ts);
+    return last_ms != 0 &&
+           platform_time_monotonic_ms() - last_ms <
+               ONION_SLOT_MIN_GAP_SECS * 1000;
+}
+
+bool connman_onion_slot_pick(struct connman *cm, struct addr_info *out)
+{
+    if (!cm || !out || g_connect_only || g_stop ||
+        !tor_integration_is_dial_ready() ||
+        connman_outbound_healthy_count(cm) < (size_t)ZCL_PEER_FLOOR_HEALTHY ||
+        onion_slot_gap_open(cm) || connman_outbound_onion_count(cm) > 0)
+        return false;
+    struct onion_scan scan;
+    onion_scan_addrman(cm, &scan);
+    const struct addr_info *best = NULL;
+    for (size_t i = 0; i < scan.copied; i++) {
+        if (!connman_addrman_candidate_usable(cm, &scan.rows[i], false))
+            continue;
+        if (!best || scan.rows[i].attempts < best->attempts)
+            best = &scan.rows[i];
+    }
+    if (!best)
+        return false;
+    *out = *best;
+    return true;
+}
+
+void connman_onion_slot_note_offered(struct connman *cm)
+{
+    int64_t now_ms = platform_time_monotonic_ms();
+    atomic_store(&cm->onion_slot_last_ts, now_ms != 0 ? now_ms : 1);
+}
+
+/* ── The once-per-boot walk ─────────────────────────────────────────── */
+
+/* Due when Tor can dial, no seed pass has run this boot, and the node has no
+ * outbound onion peer and no DIALABLE onion row: persisted rows that are all
+ * cooling down from failures do not keep the walk from learning new ones. */
+bool connman_onion_walk_due(struct connman *cm)
+{
+    if (!cm || g_connect_only || g_stop || !tor_integration_is_dial_ready() ||
+        atomic_load(&cm->onion_walk_runs) != 0 ||
+        connman_outbound_onion_count(cm) > 0)
+        return false;
+    struct onion_scan scan;
+    onion_scan_addrman(cm, &scan);
+    for (size_t i = 0; i < scan.copied; i++)
+        if (connman_addrman_candidate_usable(cm, &scan.rows[i], false))
+            return false;
+    return true;
+}
+
+bool connman_onion_walk_once(struct connman *cm)
+{
+    if (!connman_onion_walk_due(cm))
+        return false;
+    LOG_INFO("connman", "Tor is ready with no onion peer or candidate: "
+                        "walking the onion-directory seeds once");
+    connman_run_onion_seed_pass(cm);
+    connman_save_addrman(cm);
+    return true;
 }
