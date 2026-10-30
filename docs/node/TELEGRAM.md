@@ -43,10 +43,17 @@ echo '{"text":"42"}' | z23 telegram send --input=-
   several messages, up to 12000 bytes in all. The reply lists the message ids.
 - `chat_id` defaults to `TELEGRAM_CHAT_ID` and must be that id or one in
   `TELEGRAM_ALLOW_FROM`.
-- A repeated `idempotency_key` returns the first send's ids and sends nothing.
 - Text holding the bot token, an API key shape, a mention of a private key,
   seed phrase or mnemonic, or an onion address is refused with
-  `TELEGRAM_SECRET_REFUSED` before any request.
+  `TELEGRAM_SECRET_REFUSED` before any request. The filter also refuses
+  BIP-32 extended keys (`xprv`, `xpub`, `tprv`, `tpub`, checksummed), Sapling
+  spending and viewing keys (`secret-extended-key-...`, `zxviews...`, test
+  networks included), checksummed WIF private keys and twelve or more
+  consecutive BIP-39 words. It is best effort: it catches common shapes, not
+  every encoding, so never rely on it to make secret text safe to send.
+- A repeated `idempotency_key` with the same chat and text returns the first
+  send's ids and sends nothing; with different text or chat it is refused with
+  `IDEMPOTENCY_KEY_REUSED`.
 - A value that looks like a number or `true`/`false` in `--text=` is read as
   that type; send such text through `--input`.
 

@@ -10,6 +10,8 @@
 #include "mcp/mcp_policy.h"
 #include "platform/process_lock.h"
 #include "platform/temp_directory.h"
+#include "domain/encoding/base58.h"
+#include "domain/wallet/mnemonic.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -227,6 +229,11 @@ static int tgt_case_3(void)
         json_free(&r.data);
         ASSERT(tgt_call("ops.telegram.send", "{\"text\":\"x\",\"idempotency_key\":\"bad key\"}", &r, &clean));
         ASSERT(tgt_failed(&r, "TELEGRAM_BAD_KEY"));
+        ASSERT(tgt_call("ops.telegram.send", "{\"text\":\"other\",\"idempotency_key\":\"job-1\"}", &r, &clean));
+        ASSERT(tgt_failed(&r, "IDEMPOTENCY_KEY_REUSED"));
+        ASSERT(tgt_call("ops.telegram.send", "{\"text\":\"hello\",\"chat_id\":99,\"idempotency_key\":\"job-1\"}", &r, &clean));
+        ASSERT(tgt_failed(&r, "IDEMPOTENCY_KEY_REUSED"));
+        ASSERT_EQ(g_fake.calls, 1);
     } TEST_END
     return failures;
 }
@@ -295,6 +302,28 @@ static int tgt_case_6(void)
         ASSERT(tgt_call("ops.telegram.inbox", "{}", &r, &clean));
         ASSERT(tgt_failed(&r, "POLLER_CONFLICT"));
         ASSERT(strstr(r.error.message, "another host or process") != NULL);
+        ASSERT(tgt_call("ops.telegram.inbox", "{}", &r, &clean));
+        ASSERT(strstr(g_fake.body[g_fake.calls - 1], "\"offset\":13") != NULL);
+        json_free(&r.data);
+    } TEST_END
+    return failures;
+}
+
+static int tgt_case_mono(void)
+{
+    int failures = 0;
+    static const char skewed[] =
+        "{\"ok\":true,\"result\":[{\"message\":{\"message_id\":1}},"
+        "{\"update_id\":3,\"message\":{\"message_id\":2}},"
+        "{\"update_id\":9223372036854775807,\"message\":{\"message_id\":3}}]}";
+    TEST_CASE("telegram inbox offset never moves backwards or past INT64_MAX") {
+        tgt_script(200, skewed);
+        ASSERT(tgt_call("ops.telegram.inbox", "{}", &r, &clean));
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(tgt_int(&r, "count"), 0);
+        ASSERT_EQ(tgt_int(&r, "dropped"), 3);
+        ASSERT_EQ(tgt_int(&r, "next_offset"), 13);
+        json_free(&r.data);
         ASSERT(tgt_call("ops.telegram.inbox", "{}", &r, &clean));
         ASSERT(strstr(g_fake.body[g_fake.calls - 1], "\"offset\":13") != NULL);
         json_free(&r.data);
@@ -395,6 +424,53 @@ static int tgt_case_10(void)
         tg_configure_text("TELEGRAM_BOT_TOKEN=1234567890:CANARYtokenFRESHFRESHFRESHFRESH12\n", &r);
         ASSERT(tgt_failed(&r, "TELEGRAM_CREDENTIALS_INVALID"));
         setenv("Z23_TELEGRAM_ENV", g_env, 1);
+    } TEST_END
+    return failures;
+}
+
+static void tgt_b58(const unsigned char *raw, size_t n, char *out)
+{
+    size_t len = 0;
+    out[0] = '\0';
+    (void)domain_encoding_base58check_encode(raw, n, out, 160, &len);
+}
+
+static int tgt_case_wallet(void)
+{
+    int failures = 0;
+    TEST_CASE("telegram guard refuses wallet secrets and passes ordinary text") {
+        unsigned char raw[78] = {0x04, 0x88, 0xAD, 0xE4};
+        char text[600], key[160], phrase[300] = "";
+        memset(raw + 4, 0x2a, 74);
+        tgt_b58(raw, 78, key);
+        ASSERT(strncmp(key, "xprv", 4) == 0);
+        snprintf(text, sizeof(text), "here %s done", key);
+        ASSERT(tg_secret_refusal(text, NULL) != NULL);
+        raw[1] = 0x35; raw[2] = 0x83; raw[3] = 0x94;
+        tgt_b58(raw, 78, key);
+        ASSERT(strncmp(key, "tprv", 4) == 0 && tg_secret_refusal(key, NULL) != NULL);
+        unsigned char wif[34];
+        memset(wif, 0x11, sizeof(wif));
+        wif[0] = 0x80;
+        tgt_b58(wif, 33, key);
+        ASSERT(strlen(key) == 51 && tg_secret_refusal(key, NULL) != NULL);
+        wif[33] = 0x01;
+        tgt_b58(wif, 34, key);
+        ASSERT(strlen(key) == 52 && tg_secret_refusal(key, NULL) != NULL);
+        key[10] = key[10] == 'a' ? 'b' : 'a';
+        ASSERT(tg_secret_refusal(key, NULL) == NULL);
+        ASSERT(tg_secret_refusal("secret-extended-key-main1qqqqqq", NULL) != NULL);
+        ASSERT(tg_secret_refusal("zxviews1qqqqqq and secret-extended-key-test1q", NULL) != NULL);
+        ASSERT(tg_secret_refusal("zxviewtestsapling1qqqq", NULL) != NULL);
+        for (int i = 0; i < 12; i++) {
+            strcat(phrase, domain_wallet_mnemonic_wordlist_get(100 + i * 7));
+            strcat(phrase, i < 11 ? " " : "");
+        }
+        ASSERT(tg_secret_refusal(phrase, NULL) != NULL);
+        phrase[strlen(phrase) - 1] = '\0';
+        strrchr(phrase, ' ')[0] = ',';
+        ASSERT(tg_secret_refusal(phrase, NULL) == NULL);
+        ASSERT(tg_secret_refusal("The build passed on r1; 3 tests were slow.", NULL) == NULL);
     } TEST_END
     return failures;
 }
@@ -500,8 +576,8 @@ static int tgt_curl_case(void)
     pthread_t thread;
     char base[64];
     if (!tgt_have_curl()) {
-        printf("telegram curl transport... SKIP (no curl on PATH)\n");
-        return 0;
+        printf("telegram curl transport... FAIL (curl was not found on PATH; the Telegram leaves cannot work without it)\n");
+        return 1;
     }
     if (!tgt_write_file(g_env, TGT_ENV_TEXT, 0600))
         return 1;
@@ -537,8 +613,8 @@ int test_telegram(void)
         return 1;
     }
     failures += tgt_case_0() + tgt_case_1() + tgt_case_2() + tgt_case_3() + tgt_case_4();
-    failures += tgt_case_5() + tgt_case_6() + tgt_case_7();
-    failures += tgt_status_case() + tgt_case_9() + tgt_case_10() + tgt_registry_cases();
+    failures += tgt_case_5() + tgt_case_6() + tgt_case_mono() + tgt_case_7();
+    failures += tgt_status_case() + tgt_case_9() + tgt_case_10() + tgt_registry_cases() + tgt_case_wallet();
     failures += tgt_curl_case();
     tg_transport_override(NULL, NULL);
 #endif

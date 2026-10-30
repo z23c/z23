@@ -222,7 +222,7 @@ enum tg_load tg_credentials_load(const char *path, struct tg_config *cfg)
 
 /* ── outbound guard ──────────────────────────────────────────────────── */
 
-static bool tg_icontains(const char *hay, const char *needle)
+bool tg_icontains(const char *hay, const char *needle)
 {
     size_t n = strlen(needle);
     for (; *hay; hay++) {
@@ -306,7 +306,7 @@ const char *tg_secret_refusal(const char *text, const char *token)
     }
     if (tg_has_shape(text))
         return "text contains a bot token or API key";
-    return NULL;
+    return tg_wallet_secret_refusal(text);
 }
 
 /* ── UTF-8 and chunking ──────────────────────────────────────────────── */

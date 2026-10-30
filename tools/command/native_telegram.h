@@ -40,6 +40,10 @@ bool tg_token_valid(const char *token);
 bool tg_parse_i64(const char *text, size_t len, int64_t *out);
 bool tg_allowed(const struct tg_config *cfg, int64_t user_id);
 
+/* Extended keys, Sapling secrets, WIF keys and BIP-39 phrases; best effort. */
+const char *tg_wallet_secret_refusal(const char *text);
+/* Case-insensitive substring test; needle must be lowercase. */
+bool tg_icontains(const char *hay, const char *needle);
 /* NULL when the text may leave the host, else a plain reason. */
 const char *tg_secret_refusal(const char *text, const char *token);
 bool tg_utf8_valid(const char *text, size_t len);
@@ -52,8 +56,14 @@ bool tg_state_dir(char *out, size_t cap);
 bool tg_atomic_write_private(const char *path, const char *data, size_t len);
 bool tg_offset_load(const char *dir, const char *token, int64_t *offset);
 bool tg_offset_store(const char *dir, const char *token, int64_t offset);
-bool tg_sent_lookup(const char *dir, const char *key, int64_t *first_id, int64_t *count);
-bool tg_sent_record(const char *dir, const char *key, int64_t first_id, int64_t count);
+/* The request hash binds a key to one chat and text; hash is 32 hex characters. */
+#define TG_HASH_HEX 33
+void tg_request_hash(int64_t chat_id, const char *text, char hash[TG_HASH_HEX]);
+enum tg_sent { TG_SENT_NONE = 0, TG_SENT_SAME, TG_SENT_DIFFERENT };
+enum tg_sent tg_sent_lookup(const char *dir, const char *key, const char *hash,
+                            int64_t *first_id, int64_t *count);
+bool tg_sent_record(const char *dir, const char *key, const char *hash, int64_t first_id,
+                    int64_t count);
 bool tg_key_valid(const char *key);
 
 /* Transport. A response body is NUL-terminated and owned by the caller. */

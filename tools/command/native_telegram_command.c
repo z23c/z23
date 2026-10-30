@@ -180,6 +180,7 @@ struct tg_send_in {
     const char *text;
     const char *key;
     int64_t chat_id;
+    char hash[TG_HASH_HEX];
 };
 
 static const char *tg_input_str(const struct zcl_command_request *request, const char *key)
@@ -298,8 +299,15 @@ static bool tg_send_duplicate(struct zcl_command_reply *reply, const char *dir,
 {
     int64_t first = 0, count = 0;
     struct json_value ids = {0};
-    if (!in->key || !tg_sent_lookup(dir, in->key, &first, &count))
+    enum tg_sent seen = in->key ? tg_sent_lookup(dir, in->key, in->hash, &first, &count) : TG_SENT_NONE;
+    if (seen == TG_SENT_NONE)
         return false;
+    if (seen == TG_SENT_DIFFERENT) {
+        tg_fail(reply, ZCL_COMMAND_EXIT_INVALID, "IDEMPOTENCY_KEY_REUSED", "idempotency", false, false,
+                "idempotency_key was already used for a different chat or text",
+                "use a new idempotency_key for a different message");
+        return true;
+    }
     json_set_array(&ids);
     for (int64_t i = 0; i < count; i++) {
         struct json_value id = {0};
@@ -318,6 +326,7 @@ static void tg_send_run(struct zcl_command_reply *reply, const struct tg_config 
     char dir[TG_PATH_MAX];
     struct json_value ids = {0};
     bool have_dir = tg_state_dir(dir, sizeof(dir));
+    tg_request_hash(in->chat_id, in->text, in->hash);
     if (in->key && !have_dir) {
         tg_internal(reply, "state");
         return;
@@ -326,7 +335,7 @@ static void tg_send_run(struct zcl_command_reply *reply, const struct tg_config 
         return;
     if (tg_send_all(reply, cfg, in, &ids)) {
         int64_t first = json_size(&ids) ? json_get_int(json_at(&ids, 0)) : 0;
-        if (in->key && !tg_sent_record(dir, in->key, first, (int64_t)json_size(&ids)))
+        if (in->key && !tg_sent_record(dir, in->key, in->hash, first, (int64_t)json_size(&ids)))
             tg_internal(reply, "state");
         else if (!tg_send_emit(reply, in->chat_id, &ids, false))
             tg_internal(reply, "send");
@@ -403,12 +412,27 @@ static bool tg_inbox_wanted(const struct tg_config *cfg, const struct json_value
            tg_allowed(cfg, json_get_int(json_get(from, "id")));
 }
 
+/* Offsets only move forward: an update needs an integer id of at least next_offset - 1
+ * and below INT64_MAX, else it is skipped and counted as dropped. */
+static bool tg_update_id(const struct tg_inbox *box, const struct json_value *update, int64_t *id)
+{
+    const struct json_value *v = json_get(update, "update_id");
+    if (!v || v->type != JSON_INT)
+        return false;
+    *id = json_get_int(v);
+    return *id < INT64_MAX && *id >= box->next_offset - 1;
+}
+
 static bool tg_inbox_take(struct tg_inbox *box, const struct tg_config *cfg,
                           const struct json_value *update)
 {
     const struct json_value *msg = json_get(update, "message");
-    int64_t update_id = json_get_int(json_get(update, "update_id"));
+    int64_t update_id = 0;
     struct json_value item = {0};
+    if (!tg_update_id(box, update, &update_id)) {
+        box->dropped++;
+        return true;
+    }
     if (msg && tg_inbox_wanted(cfg, msg)) {
         if (box->bytes >= TG_INBOX_BUDGET && json_size(&box->list) > 0) {
             box->more = true;

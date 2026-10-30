@@ -4,6 +4,8 @@
 #include "command/native_telegram.h"
 #include "platform/private_directory.h"
 #include "platform/state_root.h"
+#include "base/hex.h"
+#include "sha3/sha3.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -142,29 +144,45 @@ static bool tg_sent_path(const char *dir, char *out, size_t cap)
     return n > 0 && (size_t)n < cap;
 }
 
-bool tg_sent_lookup(const char *dir, const char *key, int64_t *first_id, int64_t *count)
+void tg_request_hash(int64_t chat_id, const char *text, char hash[TG_HASH_HEX])
+{
+    struct sha3_256_ctx ctx;
+    uint8_t digest[32];
+    char head[32];
+    int n = snprintf(head, sizeof(head), "%lld\n", (long long)chat_id);
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, (const unsigned char *)head, (size_t)n);
+    sha3_256_write(&ctx, (const unsigned char *)text, strlen(text));
+    sha3_256_finalize(&ctx, digest);
+    zcl_hex_encode(digest, 16, hash);
+}
+
+enum tg_sent tg_sent_lookup(const char *dir, const char *key, const char *hash,
+                            int64_t *first_id, int64_t *count)
 {
     char path[TG_PATH_MAX + 16], buf[TG_SENT_BYTES];
     size_t len = 0, klen = strlen(key);
     if (!tg_sent_path(dir, path, sizeof(path)) || tg_read_small(path, buf, sizeof(buf), &len) != 1)
-        return false;
+        return TG_SENT_NONE;
     for (char *line = buf; *line;) {
         char *nl = strchr(line, '\n');
         long long id = 0, chunks = 0;
+        char stored[TG_HASH_HEX] = "";
         if (!strncmp(line, key, klen) && line[klen] == ' ' &&
-            sscanf(line + klen + 1, "%lld %lld", &id, &chunks) == 2) {
+            sscanf(line + klen + 1, "%lld %lld %32s", &id, &chunks, stored) >= 2) {
             *first_id = id;
             *count = chunks;
-            return true;
+            return strcmp(stored, hash) == 0 ? TG_SENT_SAME : TG_SENT_DIFFERENT;
         }
         if (!nl)
             break;
         line = nl + 1;
     }
-    return false;
+    return TG_SENT_NONE;
 }
 
-bool tg_sent_record(const char *dir, const char *key, int64_t first_id, int64_t count)
+bool tg_sent_record(const char *dir, const char *key, const char *hash, int64_t first_id,
+                    int64_t count)
 {
     char path[TG_PATH_MAX + 16], buf[TG_SENT_BYTES + 128];
     size_t len = 0, lines = 0;
@@ -184,7 +202,7 @@ bool tg_sent_record(const char *dir, const char *key, int64_t first_id, int64_t 
     }
     len -= (size_t)(keep - buf);
     memmove(buf, keep, len);
-    int n = snprintf(buf + len, sizeof(buf) - len, "%s %lld %lld\n", key, (long long)first_id,
-                     (long long)count);
+    int n = snprintf(buf + len, sizeof(buf) - len, "%s %lld %lld %s\n", key, (long long)first_id,
+                     (long long)count, hash);
     return n > 0 && tg_atomic_write_private(path, buf, len + (size_t)n);
 }
