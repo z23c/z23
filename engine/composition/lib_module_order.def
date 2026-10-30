@@ -15,7 +15,7 @@
  *
  * The lib/ tree is the independent witness for the SET: a lib/<mod>/
  * directory exists whether or not anyone declared it, and both
- * tools/scripts/check_lib_module_order.sh and test_codeindex.c case 6 compare
+ * check-lib-module-order (tools/lint/lintc/gate_lib_module_order.c) and test_codeindex.c case 6 compare
  * this file's set against it. Rank has no such witness, so the gate also
  * enforces the rank rule against the MEASURED link graph
  * (tools/dev/module-linkgraph.sh).

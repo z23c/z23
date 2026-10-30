@@ -9,7 +9,6 @@ nproc	tools/scripts/binary_size.sh	1
 nproc	tools/scripts/build_bench.sh	2
 nproc	tools/scripts/build_tor_full.sh	1
 nproc	tools/scripts/build_vendor.sh	1
-nproc	tools/scripts/check_lib_module_order.sh	3
 nproc	tools/scripts/check_reproducible_build.sh	1
 nproc	tools/scripts/ci_install_gate.sh	1
 nproc	tools/scripts/first_build_timing.sh	1

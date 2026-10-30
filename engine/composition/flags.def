@@ -1461,7 +1461,7 @@ Z23_FLAG("ZCL_LINT_PRODUCTION_SCAN", "env_runtime", "0", "-",
 Z23_FLAG("ZCL_LINT_REPO_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/lib.c:auto")
 Z23_FLAG("ZCL_LINT_REQUIRE_LINKGRAPH", "env_build", "0", "-",
-          "undocumented; first use tools/scripts/check_lib_module_order.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_lib_module_order.c:auto")
 Z23_FLAG("ZCL_LINT_TIMING_DIR", "env_build", "-", "-",
           "undocumented; first use tools/lint/run_lint.sh:auto")
 Z23_FLAG("ZCL_LINT_TU_CACHE", "env_build", "1", "-",

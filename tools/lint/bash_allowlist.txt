@@ -195,7 +195,6 @@ tools/scripts/check_frontier_single_writer.sh
 tools/scripts/check_git_hooks_installed.sh
 tools/scripts/check_golden_freshness.sh
 tools/scripts/check_lib_layering.sh
-tools/scripts/check_lib_module_order.sh
 tools/scripts/check_long_functions.sh
 tools/scripts/check_model_ar_lifecycle.sh
 tools/scripts/check_no_authoritative_ram_state.sh

@@ -1,5 +1,5 @@
 # Grandfathered lib/ module link-order back edges — see
-# tools/scripts/check_lib_module_order.sh.
+# check-lib-module-order (tools/lint/lintc/gate_lib_module_order.c).
 #
 # Each line is an edge "lib/<from> -> lib/<to>" where <to> is ranked at or
 # above <from> in engine/composition/lib_module_order.def, i.e. a reference that runs the

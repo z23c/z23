@@ -13853,9 +13853,10 @@ check-lib-layering: $(LINTC_TOOL)
 # Baseline tools/scripts/lib_module_order_baseline.txt grandfathers the 5 back
 # edges that are the proven-minimum feedback arc set over the two cycles in the
 # graph; it may only shrink.
-check-lib-module-order:
+check-lib-module-order: $(LINTC_TOOL)
 	@echo "══ LINT: lib/ module link order ══"
-	@./tools/scripts/check_lib_module_order.sh
+	@./build/bin/z23-lint check-lib-module-order --selftest
+	@./build/bin/z23-lint check-lib-module-order
 
 # Lint with the link-graph gate actually armed and MANDATORY: compile the
 # objects it measures, then refuse to accept "NOT MEASURED" as a pass. Plain

@@ -138,7 +138,6 @@ gate_command() {
         check-model-ar-lifecycle)          echo './tools/scripts/check_model_ar_lifecycle.sh --selftest && ./tools/scripts/check_model_ar_lifecycle.sh' ;;
         check-long-functions)              echo './tools/scripts/check_long_functions.sh --selftest && ./tools/scripts/check_long_functions.sh' ;;
         check-lib-layering)                echo './tools/scripts/check_lib_layering.sh --selftest && ./tools/scripts/check_lib_layering.sh' ;;
-        check-lib-module-order)            echo './tools/scripts/check_lib_module_order.sh' ;;
         check-shape-include-direction)     echo './tools/scripts/check_shape_include_direction.sh --selftest && ./tools/scripts/check_shape_include_direction.sh' ;;
         check-domain-purity)               echo 'build/bin/z23-lint check-domain-purity --selftest && build/bin/z23-lint check-domain-purity' ;;
         check-core-seal)                   echo '__core_seal__' ;;
