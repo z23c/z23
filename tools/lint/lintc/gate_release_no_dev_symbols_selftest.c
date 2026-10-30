@@ -87,6 +87,14 @@ static const char k_rnfs_elf_exports[] =
 static const char k_rnfs_elf_clean[] =
     "int main(void) { return 0; }\n";
 
+/* The nm read the gate reports, chosen per host as the gate does: Mach-O has
+ * no dynamic symbol table, so Darwin reads nm -gU; ELF reads nm -D. */
+#if defined(__APPLE__)
+#define RNFS_NM_READ "nm -gU"
+#else
+#define RNFS_NM_READ "nm -D --defined-only"
+#endif
+
 static const struct rnfs_case k_rnfs_cases[] = {
     { "clean fixture with no binary passes", NULL, NULL, NULL, NULL, NULL,
       NULL, 0, NULL, NULL },
@@ -110,7 +118,7 @@ static const struct rnfs_case k_rnfs_cases[] = {
       "'zcl_devloop_run_cycle'" },
     { "fresh clean ELF passes the nm read", NULL, NULL, NULL, NULL, NULL,
       "build/bin/rnd-clean", 0, k_rnfs_elf_clean,
-      "nm -D --defined-only build/bin/rnd-clean: all 11 dev-executor symbols "
+      RNFS_NM_READ " build/bin/rnd-clean: all 11 dev-executor symbols "
       "ABSENT" },
 };
 
