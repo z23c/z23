@@ -22,7 +22,7 @@ only. It never links a compiler to do so.
 | Facts tests | `tests/harness/src/test_semantic_facts.c`, `test_semantic_facts_live.c`, `tests/fixtures/semantic_facts/*.zsm` | groups `semantic_facts` (no clang) and `semantic_facts_live` |
 
 The sensor is an external tool. The link gate lists it as outside the base
-toolchain (`tools/lint/check_standalone_tools_link.sh`), and it never enters
+toolchain (the `check-standalone-tools-link` gate in `tools/lint/lintc/gate_standalone_tools_link.c`), and it never enters
 z23, z23-dev, the test harness, or core. The exact root is meant to become one
 input, the "semantic root", to the v2 action root later. Its conventions match
 the v2 action preimage: fixed field order, length-prefixed and domain-tagged

@@ -1166,7 +1166,7 @@ Z23_FLAG("ZCL_HOST_GC_ZCC_CAP_MB", "env_build", "15360", "-",
 Z23_FLAG("ZCL_HOST_GC_ZCC_DIR", "env_build", "$GC_HOME/.cache/zcc", "-",
           "fixture seam for the zcc cache directory the zcc sweep measures and trims; first use tools/scripts/host_gc.sh:auto")
 Z23_FLAG("ZCL_HOST_JOBS", "make_var", "nproc", "-",
-          "the one processor count this build sizes every job count from -- coreutils nproc, which is the affinity mask this process may actually run on, not the box; the Makefile exports it so a gate script derives its own -j from the same answer instead of asking again; first use Makefile and tools/lint/check_standalone_tools_link.sh")
+          "the one processor count this build sizes every job count from -- coreutils nproc, which is the affinity mask this process may actually run on, not the box; the Makefile exports it so a gate script derives its own -j from the same answer instead of asking again; first use Makefile and tools/lint/lintc/gate_standalone_tools_link_build.c")
 Z23_FLAG("ZCL_HOST_WATCHDOG_DOWN_CYCLES", "env_build", "2", "-",
           "undocumented; first use platform/deploy/z23-host-watchdog.sh:auto")
 Z23_FLAG("ZCL_HOST_WATCHDOG_LOG", "env_build", "-", "-",
@@ -2544,7 +2544,7 @@ Z23_FLAG("ZCL_THREADSUP_SCAN_ROOTS", "env_build", "-", "-",
 Z23_FLAG("ZCL_TIMINGS_CACHE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/build_bench.sh:auto")
 Z23_FLAG("ZCL_TOOLS_LINK_JOBS", "env_build", "1", "-",
-          "undocumented; first use tools/lint/check_standalone_tools_link.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_standalone_tools_link_build.c:auto")
 Z23_FLAG("ZCL_TOR", "env_runtime", "full", "-",
           "first use tools/tor_provenance.c:auto; documented at docs/dev/DEVELOPING.md:296: make ZCL_TOR=stub … is the dev-only escape: it links the offline stub,")
 Z23_FLAG("ZCL_TOR_JOBS", "env_build", "-", "-",

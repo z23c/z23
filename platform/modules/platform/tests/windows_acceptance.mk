@@ -477,7 +477,7 @@ ZCL_WINDOWS_ACCEPTANCE_glob_match_SOURCES := \
 # replacement evidence. This row is the ONLY thing on a POSIX host that proves
 # the source still compiles and links for Windows; delete it and the exemption
 # over there becomes exactly the rot the gate exists to stop. The coupling is
-# not a comment: check_standalone_tools_link.sh reads this file and refuses
+# not a comment: the check-standalone-tools-link gate reads this file and refuses
 # (exit 2) if it stops naming tools/dev/windows_headless_run.c.
 #
 # STANDARD NOTE -- deliberate, not a silent divergence. The native Makefile

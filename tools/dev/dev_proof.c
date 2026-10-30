@@ -6912,7 +6912,7 @@ static bool proof_observation_env_close(const char *state, const char *key)
  * (each lint-gate shard copies build/bin/z23-lint and
  * build/bin/file_size_policy into its sandbox and execs them). The lint
  * dimension does run make: `lint`'s own built prerequisites, and the
- * standalone tool targets exported by check_standalone_tools_link.sh into
+ * standalone tool targets exported by the check-standalone-tools-link gate into
  * the same prefork Make graph -- a set that includes z23-lint,
  * zcl-nodectl, fbsh, file_size_policy, fleet-board-bridge and
  * z23-engine-unit, i.e. the very executables the test dimension is

@@ -133,6 +133,7 @@ tools/lint/lintc/gate_markdown_links.c 2
 tools/lint/lintc/gate_model_column_drift_workers.c 1
 tools/lint/lintc/gate_read_leaf_no_boot_ceremony_selftest.c 1
 tools/lint/lintc/gate_platform_header_guards_selftest.c 1
+tools/lint/lintc/gate_standalone_tools_link_x11.c 1
 tools/lint/lintc/gate_no_adx_overclaim.c 1
 tools/lint/lintc/gate_no_adx_overclaim_selftest.c 1
 tools/lint/lintc/gate_pattern_guard.c 2

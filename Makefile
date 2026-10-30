@@ -6559,6 +6559,7 @@ LINTC_PREMISE_SRCS = $(LINTC_PREMISE_CORE_SRCS) tools/lint/lintc/selection.c
 # elsewhere) that unit-exec enters.
 LINTC_NODE_SRCS = platform/modules/sha3/src/sha3.c contexts/commons/packages/zsha256/src/zsha256.c $(ZCL_TOOL_SANDBOX_SRC) \
     platform/modules/util/src/spawn.c platform/modules/platform/src/clock.c \
+    platform/modules/platform/src/logical_cpu.c platform/modules/platform/src/os_proc_mem.c \
     platform/modules/base/src/log_level.c platform/modules/base/src/result.c \
     platform/modules/base/src/safe_alloc.c \
     cognition/modules/kpi/src/kpi_metrics.c cognition/modules/kpi/src/kpi_cmd.c \
@@ -14081,9 +14082,10 @@ check-fuzz-artifact-ledger: $(LINTC_TOOL)
 # helpers — nothing else — so every other $(BIN_DIR)/<tool> rule was reachable
 # from no gate and rotted silently. The tool list is DERIVED from this
 # Makefile (fail-closed: a new tool is covered the day it lands).
-check-standalone-tools-link:
+check-standalone-tools-link: $(LINTC_TOOL)
 	@echo "→ Gate: standalone_tools_link (every tool rule still builds)"
-	@./tools/lint/check_standalone_tools_link.sh
+	@./build/bin/z23-lint check-standalone-tools-link --selftest
+	@./build/bin/z23-lint check-standalone-tools-link
 
 # tools/scripts/make_app_bundle.sh must be a pure function of its input: two
 # bundle runs over identical binaries into two temp dirs must be
@@ -15665,7 +15667,7 @@ check-lint-gate-wiring: $(LINTC_TOOL)
 # the MEASUREMENT that chose it. An unexplained number is the defect.
 ZCL_HOST_JOBS := $(shell nproc 2>/dev/null || echo 8)
 # Exported so a gate script sizes itself from the same answer instead of
-# re-deriving one (tools/lint/check_standalone_tools_link.sh reads it).
+# re-deriving one (tools/lint/lintc/gate_standalone_tools_link_build.c reads it).
 export ZCL_HOST_JOBS
 # Test targets recurse with this. An explicit caller -jN already reaches the
 # recursive make through MAKEFLAGS, so a default is added only when make was
@@ -15981,7 +15983,7 @@ endif
 # shard copies build/bin/z23-lint and build/bin/file_size_policy into its
 # sandbox and execs them). The lint dimension does run make: its own
 # prerequisites above, and one nested make inside
-# check_standalone_tools_link.sh, which links every standalone tool rule this
+# the check-standalone-tools-link gate, which links every standalone tool rule this
 # Makefile carries. Those two sets OVERLAP the helper executables the test
 # dimension reads, and a relink is an unlink followed by a write: on 2026-09-06
 # a landing proof's shard exec'd build/bin/z23-lint inside that window and got
@@ -15996,23 +15998,22 @@ endif
 .PHONY: proof-lint-prebuild
 # The proof names this goal explicitly. Derive the gate's closed tool set once
 # during this Make parse, then build it in this Make's existing job graph.
-# Other callers retain the gate's own nested-Make fallback.
+# The parse runs before any rule, so z23-lint may be absent or older than the
+# --list-targets flag (a fresh checkout, or the proof prefork step): then the
+# list stays empty and the recipe falls back to the gate's own nested Make
+# (--build-only) after $(LINTC_TOOL) has been built. Other callers take the
+# same fallback.
+PROOF_LINT_TOOL_TARGETS :=
 ifneq ($(filter proof-lint-prebuild dev-proof-bundle-prefork,$(MAKECMDGOALS)),)
-PROOF_LINT_TOOL_TARGETS := $(shell tools/lint/check_standalone_tools_link.sh --list-targets || printf 'PROOF_LINT_TOOL_CATALOG_FAILED')
-ifeq ($(strip $(PROOF_LINT_TOOL_TARGETS)),)
-$(error proof-lint-prebuild tool catalog was empty)
-endif
-ifneq ($(filter PROOF_LINT_TOOL_CATALOG_FAILED,$(PROOF_LINT_TOOL_TARGETS)),)
-$(error proof-lint-prebuild tool catalog failed)
-endif
+PROOF_LINT_TOOL_TARGETS := $(shell ./build/bin/z23-lint check-standalone-tools-link --list-targets 2>/dev/null)
 endif
 proof-lint-prebuild: $(LINT_BUILT_PREREQS) $(LINTC_TOOL) $(EQUIHASH_FACT_TOOL) tor-provenance-ready $(PROOF_LINT_TOOL_TARGETS)
-ifneq ($(filter proof-lint-prebuild dev-proof-bundle-prefork,$(MAKECMDGOALS)),)
+ifneq ($(strip $(PROOF_LINT_TOOL_TARGETS)),)
 	@for tool in $(PROOF_LINT_TOOL_TARGETS); do \
 	  [ -f "$$tool" ] || { echo "proof-lint-prebuild: missing $$tool" >&2; exit 1; }; \
 	done
 else
-	+@./tools/lint/check_standalone_tools_link.sh --build-only
+	+@./build/bin/z23-lint check-standalone-tools-link --build-only
 endif
 	@echo "proof-lint-prebuild: every target the lint dimension can build is fresh"
 

@@ -8,7 +8,6 @@ trap 'rm -rf -- "$tmp"' EXIT
 fixture="$tmp/repo"
 mkdir -p "$fixture/tools/lint" "$fixture/tools/agent" "$fixture/vendor/x11" \
     "$fixture/platform/modules/platform/tests" "$fixture/build/bin" "$tmp/bin" "$tmp/lib"
-cp "$ROOT/tools/lint/check_standalone_tools_link.sh" "$ROOT/tools/lint/gate_lib.sh" "$fixture/tools/lint/"
 cp -R "$ROOT/vendor/x11/include" "$fixture/vendor/x11/"
 printf '#include <X11/Xlib.h>\n#ifndef PR72_PLATFORM\n#error missing platform flag\n#endif\nint main(void){return XOpenDisplay(0)==0;}\n' > "$tmp/good.c"
 cp "$tmp/good.c" "$fixture/tools/native_ui_driver.c"
@@ -113,7 +112,7 @@ check() {
     cases=$((cases + 1))
     echo "PASS $label"
 }
-gate=(env "MAKEFLAGS=CC=$tmp/bin/compiler" bash tools/lint/check_standalone_tools_link.sh)
+gate=(env "MAKEFLAGS=CC=$tmp/bin/compiler" "ZCL_LINT_REPO_ROOT=$fixture" "$ROOT/build/bin/z23-lint" check-standalone-tools-link)
 for mode in normal build-only list-targets; do
     args=(); [[ "$mode" == normal ]] || args+=("--$mode")
     export PR72_FAULT=absent
@@ -158,25 +157,25 @@ for mode in normal build-only list-targets; do
     args=(); [[ "$mode" == normal ]] || args+=("--$mode")
     for fault in baseline-run partial-object partial-baseline; do
         for spelling in i --ignore-errors; do
-            check "$mode/$fault/MAKEFLAGS=$spelling" 2 env "MAKEFLAGS=$spelling CC=$tmp/bin/compiler" "PR72_FAULT=$fault" bash tools/lint/check_standalone_tools_link.sh "${args[@]}"
+            check "$mode/$fault/MAKEFLAGS=$spelling" 2 env "MAKEFLAGS=$spelling CC=$tmp/bin/compiler" "PR72_FAULT=$fault" "ZCL_LINT_REPO_ROOT=$fixture" "$ROOT/build/bin/z23-lint" check-standalone-tools-link "${args[@]}"
             check "$mode/$fault/GNUMAKEFLAGS=$spelling" 2 env "GNUMAKEFLAGS=$spelling" "PR72_FAULT=$fault" "${gate[@]}" "${args[@]}"
         done
     done
     for flag in n t q; do
-        check "$mode/non-execution MAKEFLAGS=$flag" 2 env "MAKEFLAGS=$flag CC=$tmp/bin/compiler" PR72_FAULT=absent bash tools/lint/check_standalone_tools_link.sh "${args[@]}"
+        check "$mode/non-execution MAKEFLAGS=$flag" 2 env "MAKEFLAGS=$flag CC=$tmp/bin/compiler" PR72_FAULT=absent "ZCL_LINT_REPO_ROOT=$fixture" "$ROOT/build/bin/z23-lint" check-standalone-tools-link "${args[@]}"
     done
 done
 export PR72_FAULT=absent
-check 'successful compiler override survives MAKEFLAGS ignore-errors' 0 env "MAKEFLAGS=i CC=$tmp/bin/compiler ZCL_PLATFORM_CPPFLAGS=-DPR72_PLATFORM=2" PR72_FAULT=absent bash tools/lint/check_standalone_tools_link.sh --list-targets
+check 'successful compiler override survives MAKEFLAGS ignore-errors' 0 env "MAKEFLAGS=i CC=$tmp/bin/compiler ZCL_PLATFORM_CPPFLAGS=-DPR72_PLATFORM=2" PR72_FAULT=absent "ZCL_LINT_REPO_ROOT=$fixture" "$ROOT/build/bin/z23-lint" check-standalone-tools-link --list-targets
 check 'successful compiler override survives GNUMAKEFLAGS ignore-errors' 0 env GNUMAKEFLAGS=--ignore-errors "${gate[@]}" --list-targets
-check 'default compiler' 0 env -u MAKEFLAGS bash tools/lint/check_standalone_tools_link.sh --list-targets
+check 'default compiler' 0 env -u MAKEFLAGS "ZCL_LINT_REPO_ROOT=$fixture" "$ROOT/build/bin/z23-lint" check-standalone-tools-link --list-targets
 check 'inherited probe variables cannot exempt present runtime' 0 env PR72_FAULT=present X11_PROBE_DONE=1 X11_RUNTIME_OK=0 "${gate[@]}" --list-targets
 grep -q '^build/bin/native_ui_driver$' "$tmp/out"
 check 'inherited probe variables cannot hide failure' 2 env PR72_FAULT=generic-link X11_PROBE_DONE=1 X11_RUNTIME_OK=0 "${gate[@]}" --list-targets
 for fault in compile wrong-target generic-link mixed-link object empty-object; do
     check "$fault is fatal" 2 env "PR72_FAULT=$fault" "${gate[@]}" --list-targets
 done
-check 'missing compiler is fatal' 2 env "MAKEFLAGS=CC=$tmp/no-such-compiler" bash tools/lint/check_standalone_tools_link.sh --list-targets
+check 'missing compiler is fatal' 2 env "MAKEFLAGS=CC=$tmp/no-such-compiler" "ZCL_LINT_REPO_ROOT=$fixture" "$ROOT/build/bin/z23-lint" check-standalone-tools-link --list-targets
 for defect in syntax warning pedantic; do
     cp "$tmp/good.c" "$fixture/tools/native_ui_driver.c"
     case "$defect" in
@@ -193,20 +192,15 @@ printf '#include "../vendor/x11/include/X11/Xlib.h"\n' > "$fixture/tools/native_
 check 'missing vendor header is fatal' 2 "${gate[@]}" --list-targets
 mv "$tmp/Xlib.h" "$fixture/vendor/x11/include/X11/Xlib.h"
 cp "$tmp/good.c" "$fixture/tools/native_ui_driver.c"
-check 'platform flags selected by Make' 0 env "MAKEFLAGS=CC=$tmp/bin/compiler ZCL_PLATFORM_CPPFLAGS=-DPR72_PLATFORM=2" "PR72_FAULT=absent" bash tools/lint/check_standalone_tools_link.sh --list-targets
+check 'platform flags selected by Make' 0 env "MAKEFLAGS=CC=$tmp/bin/compiler ZCL_PLATFORM_CPPFLAGS=-DPR72_PLATFORM=2" "PR72_FAULT=absent" "ZCL_LINT_REPO_ROOT=$fixture" "$ROOT/build/bin/z23-lint" check-standalone-tools-link --list-targets
 grep -q -- '-std=c23 -O2 -Wall -Wextra -Werror -pedantic' "$PR72_CC_LOG"
 grep -q -- '-DPR72_PLATFORM=2' "$PR72_CC_LOG"
 grep -q -- '-c tools/native_ui_driver.c' "$PR72_CC_LOG"
-cat > "$tmp/bin/mktemp" <<'EOF'
-#!/usr/bin/env bash
-exit 1
-EOF
-chmod +x "$tmp/bin/mktemp"
-check 'temp creation failure is fatal' 2 env "PATH=$tmp/bin:$PATH" "${gate[@]}" --list-targets
+# The gate makes its scratch directories with mkdtemp under TMPDIR; an
+# unusable TMPDIR (missing, or not a directory) must be fatal, never a skip.
 printf 'not a directory\n' > "$tmp/not-directory"
-printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s"\n' "$tmp/not-directory" > "$tmp/bin/mktemp"
-check 'temp write failure is fatal' 2 env "PATH=$tmp/bin:$PATH" "${gate[@]}" --list-targets
-rm "$tmp/bin/mktemp"
+check 'temp creation failure is fatal' 2 env "TMPDIR=$tmp/no-such-dir" "${gate[@]}" --list-targets
+check 'temp write failure is fatal' 2 env "TMPDIR=$tmp/not-directory" "${gate[@]}" --list-targets
 printf '$(BIN_DIR)/unknown_fixture:\n\t@exit 1\n' >> "$fixture/Makefile"
 for host in Darwin MSYS_NT-10.0; do
     printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s"\n' "$host" > "$tmp/bin/uname"
