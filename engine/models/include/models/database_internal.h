@@ -231,6 +231,12 @@ void node_db_note_turbo_mode(struct node_db *ndb, bool turbo_mode,
  * in database_migrate.c.) */
 void node_db_note_activity(struct node_db *ndb, const char *op, int rc);
 
+/* Describe what keeps `db` inside a transaction: autocommit state plus the
+ * SQL text (truncated, never bound values) of every statement that has been
+ * stepped and not reset. Writes a single line to `out`; returns the number of
+ * busy statements. */
+int node_db_describe_open_statements(sqlite3 *db, char *out, size_t cap);
+
 /* Atomically stamp transaction-open state with the same health activity
  * fields. Defined by the connection lifecycle unit and used by the runtime
  * transaction operations sibling. */

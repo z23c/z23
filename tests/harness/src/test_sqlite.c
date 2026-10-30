@@ -3446,6 +3446,58 @@ static bool sqlite_owned_cursor_resume_after_refused_write(
            sqlite3_step(held) == SQLITE_DONE;  // raw-sql-ok:test-fixture-setup
 }
 
+static bool sqlite_locked_refusal_names_statement(
+    struct sqlite_poison_fixture *f, struct wal_ckpt_record *rec, int *busy)
+{
+    char what[512] = "";
+    bool refused = !node_db_wal_checkpoint_result(&f->ndb, rec);
+    *busy = node_db_describe_open_statements(f->ndb.db, what, sizeof(what));
+    return refused && rec->rc == SQLITE_LOCKED && *busy == 1 &&
+           strstr(what, "cursor-seed") != NULL &&
+           strstr(what, "autocommit=1") != NULL;
+}
+
+static bool sqlite_checkpoint_moves_frames_once_reset(
+    struct sqlite_poison_fixture *f, struct wal_ckpt_record *rec)
+{
+    char what[512] = "";
+    return node_db_wal_checkpoint_result(&f->ndb, rec) &&
+           rec->rc == SQLITE_OK && rec->ckpt_frames > 0 &&
+           node_db_describe_open_statements(f->ndb.db, what,
+                                            sizeof(what)) == 0;
+}
+
+/* A cached statement left on a row keeps the shared handle inside a read
+ * transaction, so the checkpoint is refused with SQLITE_LOCKED. The report
+ * names the statement (SQL text only) and the autocommit state, and the
+ * checkpoint succeeds and moves frames once the statement is reset. */
+static void check_checkpoint_locked_names_open_statement(int *failures)
+{
+    struct sqlite_poison_fixture f;
+    sqlite3_stmt *held = NULL;
+    struct wal_ckpt_record rec = {0};
+    int busy = 0;
+    bool ok = sqlite_poison_open(&f);
+    if (ok)
+        ok = sqlite_poison_hold_read_cursor(&f, &held) &&
+             sqlite_poison_advance_wal(&f) &&
+             sqlite_locked_refusal_names_statement(&f, &rec, &busy);
+    if (held)
+        ok = sqlite3_reset(held) == SQLITE_OK && ok;
+    if (ok)
+        ok = sqlite_checkpoint_moves_frames_once_reset(&f, &rec);
+    if (held)
+        sqlite3_finalize(held);
+    db_service_stop(&f.svc);
+    node_db_close(&f.ndb);
+    test_rm_rf_recursive(f.dir);
+    printf("SQLite LOCKED checkpoint names the open statement: %s "
+           "(busy=%d frames=%lld)\n", ok ? "OK" : "FAIL", busy,
+           (long long)rec.ckpt_frames);
+    if (!ok)
+        (*failures)++;
+}
+
 static void check_db_worker_preserves_owned_read_cursor(int *failures)
 {
     struct sqlite_poison_fixture f;
@@ -4179,6 +4231,7 @@ int test_sqlite(void) {
     check_state_write_does_not_wait_behind_catchup(&failures);
     check_db_worker_recovers_poisoned_snapshot(&failures);
     check_db_worker_preserves_owned_read_cursor(&failures);
+    check_checkpoint_locked_names_open_statement(&failures);
 
     /* 100k-row UTXO open + random-read smoke test. Guards the
      * class of bug the brief worries about: a cache-size tweak that

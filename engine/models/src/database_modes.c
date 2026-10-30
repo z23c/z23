@@ -16,6 +16,7 @@
 #include "models/database.h"
 #include "models/database_lifetime.h"
 #include "models/database_internal.h"
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -317,6 +318,50 @@ static bool wal_checkpoint_truncate_hard_failure(int truncate_rc)
            truncate_rc != SQLITE_BUSY && truncate_rc != SQLITE_LOCKED;
 }
 
+#define CKPT_LOCKED_SQL_MAX 120
+
+int node_db_describe_open_statements(sqlite3 *db, char *out, size_t cap)
+{
+    int busy = 0;
+    if (!out || cap == 0)
+        return 0;
+    out[0] = '\0';
+    if (!db)
+        return 0;
+    size_t n = (size_t)snprintf(out, cap, "autocommit=%d",
+                                sqlite3_get_autocommit(db));
+    for (sqlite3_stmt *s = sqlite3_next_stmt(db, NULL); s;
+         s = sqlite3_next_stmt(db, s)) {
+        if (!sqlite3_stmt_busy(s))
+            continue;
+        busy++;
+        const char *sql = sqlite3_sql(s);
+        if (n < cap)
+            n += (size_t)snprintf(out + n, cap - n, " busy[%d]=\"%.*s\"", busy,
+                                  CKPT_LOCKED_SQL_MAX, sql ? sql : "(null)");
+    }
+    return busy;
+}
+
+/* One report per failure streak: a node that stays LOCKED must name the
+ * statement once, not once per attempt. */
+static _Atomic bool g_ckpt_locked_streak;
+
+static void wal_checkpoint_note_locked(sqlite3 *db, int passive_rc)
+{
+    if (passive_rc != SQLITE_LOCKED) {
+        if (passive_rc == SQLITE_OK)
+            atomic_store(&g_ckpt_locked_streak, false);
+        return;
+    }
+    if (atomic_exchange(&g_ckpt_locked_streak, true))
+        return;
+    char what[1024];
+    int busy = node_db_describe_open_statements(db, what, sizeof(what));
+    LOG_WARN("db", "[db] wal checkpoint refused (SQLITE_LOCKED): %d statement(s) "
+             "stepped and not reset; %s", busy, what);
+}
+
 /* Build the outcome record from the PASSIVE checkpoint's verdict and counts. */
 static struct wal_ckpt_record wal_checkpoint_record_from_result(
     int rc, int log_frames, int ckpt_frames)
@@ -398,6 +443,7 @@ bool node_db_wal_checkpoint_result(struct node_db *ndb,
     int passive_rc = sqlite3_wal_checkpoint_v2(ndb->db, NULL,
                                                 SQLITE_CHECKPOINT_PASSIVE,
                                                 &log_frames, &ckpt_frames);
+    wal_checkpoint_note_locked(ndb->db, passive_rc);
     int truncate_rc = -1;
     if (passive_rc == SQLITE_OK)
         truncate_rc = sqlite3_wal_checkpoint_v2(ndb->db, NULL,
