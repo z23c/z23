@@ -76,6 +76,24 @@ milestone threshold is met as written, so no status symbol changed.
 | D6 | Focused test runs: waiting median 1 s, 95th percentile 745 s; running median 154 s, 95th percentile 2,640 s. 57 failed runs, none classifiable because run output is not recorded | 119 runs in 24 hours | maintainer scratch area mvp-20261009 (d4_first_try.md, d6_failures.md, d7_landing.md, outcomes_519.json) |
 | D7 | 0 failures without a named cause in the 10 most recent landing outcomes. 40 publications in 24 hours; median spacing 26.8 minutes (target 20) | 10 landing outcomes; 40 publications in 24 hours | maintainer scratch area mvp-20261009 (d4_first_try.md, d6_failures.md, d7_landing.md, outcomes_519.json) |
 
+## Measurements of 2026-10-30
+
+Known-answer review set v1 has 97 cases cut from 31 landed changes. 66 of them
+carry one seeded code defect, from nine classes with at most 8 per class and 3
+per change, and a second model checked each seeded case. When the reviewer's
+findings on the 31 sound cases were triaged, 10 of those cases already held a
+real defect when they landed (7 are still present and each has its own fix).
+Set v1.1 drops those 10, leaving 21 sound cases and 66 seeded ones. Each
+reviewer saw only the uncommitted change on its parent commit. Scores come from
+`z23 dev agent reviewscore`. No threshold is met, so no status symbol changed.
+
+| Milestone | Measured value | Sample | Evidence |
+|---|---|---|---|
+| D3 (gpt-6.1-terra, low effort, one pass) | Sound changes rejected in 6 of 21; seeded defects accepted in 4 of 66 | Set v1.1, 87 reviews | maintainer state area zclassic23-review-set/v1 (set-v1.1.jsonl, scores/) |
+| D3 (gpt-6.1-terra, medium effort, one pass) | Sound rejected in 9 of 21; seeded accepted in 2 of 66 | Set v1.1, 87 reviews | as above |
+| D3 (low effort, prompt limited to changed lines with a named failing input) | Sound rejected in 5 of 21; seeded accepted in 14 of 66 | Set v1.1, 87 reviews | as above |
+| D3 (low effort, then a second pass asked to refute each finding) | Sound rejected in 5 of 21; seeded accepted in 10 of 66 | Set v1.1, 87 reviews | as above |
+
 ## Remaining condition per milestone
 
 - **D1:** the engine-unit snapshot records provider requests, token counters, the prompt template, and tool source, mutation, and content stamps. An omitted counter stays null. The host with no record is still not named in the tree.
