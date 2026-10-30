@@ -276,6 +276,12 @@ static void syncsvc_note_stale_interval(int64_t base)
     }
 }
 
+/* IBD lead (peer starting_height minus our height) below which getheaders
+ * is re-sent after 1 s instead of 10 s: about 100 full batches of 160
+ * headers, so a drop costs seconds of pacing, not a stale-backoff ladder.
+ * Pacing only; no validity rule reads it. */
+enum { SYNCSVC_IBD_NEAR_LEAD = 16384 };
+
 /* Compute getheaders interval with exponential backoff for stale peers.
  * Base interval depends on sync phase; each consecutive empty header
  * response doubles the interval up to a cap of 600s.
@@ -293,7 +299,10 @@ static int64_t syncsvc_getheaders_interval(const struct p2p_node *node,
                                            int our_height)
 {
     int64_t base;
-    if (syncsvc_is_initial_block_download(node, our_height) || syncsvc_header_band_hole_open())
+    if (syncsvc_is_initial_block_download(node, our_height) &&
+        node->starting_height - our_height < SYNCSVC_IBD_NEAR_LEAD)
+        base = 1;    /* short lead: a few batch runs close it, so re-ask quickly */
+    else if (syncsvc_is_initial_block_download(node, our_height) || syncsvc_header_band_hole_open())
         base = 10;   /* S8: band hole (island-anchored tip) also forces IBD */
     else if (node->starting_height > 0 && our_height < node->starting_height)
         base = 30;   /* tighter than old 60s for faster catch-up */

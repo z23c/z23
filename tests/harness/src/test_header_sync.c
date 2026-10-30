@@ -29,9 +29,9 @@ static int header_sync_check_request_intervals(void)
     int failures = 0;
 
     /* ── 1. IBD base interval is 10s ──────────────────────── */
-    printf("header_sync: IBD base interval 10s... ");
+    printf("header_sync: IBD far-lead base interval 10s... ");
     {
-        struct p2p_node n = make_test_node(10000, 0);
+        struct p2p_node n = make_test_node(100000, 0);
         bool ok = syncsvc_should_request_headers(&n, 100, 11);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
@@ -222,12 +222,35 @@ static int header_sync_check_locator_timing_and_anchor_release(void)
     /* ── 16. IBD stale backoff starts small ───────────────── */
     printf("header_sync: IBD stale backoff starts small... ");
     {
-        struct p2p_node n = make_test_node(10000, 0);
+        struct p2p_node n = make_test_node(100000, 0);
         /* IBD base=10, stale_count=1 → 10*2=20s */
         n.getheaders_stale_count = 1;
         bool at_15 = syncsvc_should_request_headers(&n, 100, 15);
         bool at_25 = syncsvc_should_request_headers(&n, 100, 25);
         bool ok = !at_15 && at_25;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    /* ── 16b. Near-lead IBD re-asks after 1s, stale backoff intact ─ */
+    printf("header_sync: near-lead IBD interval 1s with backoff... ");
+    {
+        struct p2p_node n = make_test_node(10000, 100);
+        bool at_100 = syncsvc_should_request_headers(&n, 100, 100);
+        bool at_102 = syncsvc_should_request_headers(&n, 100, 102);
+        n.getheaders_stale_count = 2;  /* 1 * 4 = 4s */
+        bool stale_103 = syncsvc_should_request_headers(&n, 100, 103);
+        bool stale_105 = syncsvc_should_request_headers(&n, 100, 105);
+        struct p2p_node far = make_test_node(100 + 16384, 100);
+        bool far_101 = syncsvc_should_request_headers(&far, 100, 101);
+        bool ok = !at_100 && at_102 && !stale_103 && stale_105 && !far_101;
+        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+    }
+
+    /* ── 16c. Fresh peer after a drop is asked at once ────── */
+    printf("header_sync: fresh IBD peer asked at once... ");
+    {
+        struct p2p_node n = make_test_node(10000, 0);
+        bool ok = syncsvc_should_request_headers(&n, 100, 1700000000);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
@@ -261,7 +284,7 @@ static int header_sync_replay_suppresses_rekick(void)
     printf("header_sync: replayed batches suppress periodic re-kick... ");
     {
         int64_t W = (int64_t)platform_time_wall_time_t();
-        struct p2p_node n = make_test_node(10000, W - 100);
+        struct p2p_node n = make_test_node(100000, W - 100);
         net_addr_set_ipv4(&n.addr.svc.addr,
                           (const unsigned char[4]){127, 0, 0, 1});
         int rekicks = 0;
