@@ -164,6 +164,7 @@ LINT_GATE("check-no-unattended-publish", check_no_unattended_publish, LINT_CMD_P
 LINT_GATE("check-hex-codec-single", check_hex_codec_single, LINT_CMD_PAIR)
 LINT_GATE("check-specialists", check_specialists, LINT_CMD_PAIR)
 LINT_GATE("check-shell-host-assumptions", check_shell_host_assumptions, LINT_CMD_NONE)
+LINT_GATE("check-scanner-immunity", check_scanner_immunity, LINT_CMD_PAIR)
 LINT_GATE("check-doc-inline-paths", check_doc_inline_paths, LINT_CMD_PLAIN)
 LINT_GATE("check-fleet-airship-rules", check_fleet_airship_rules, LINT_CMD_PAIR)
 LINT_GATE("check-source-identity-authority", check_source_identity_authority, LINT_CMD_PAIR)

@@ -15474,10 +15474,11 @@ check-installed-acceptance-tools: $(LINTC_TOOL)
 # selftest-style direct invocation still detects it (detection unweakened),
 # (3) a REAL violation with a non-fixture name still fails every mode, and
 # (4) an untracked stray file is named distinctly, not as a code violation.
-# See tools/lint/selftest_scanner_immunity.sh.
+# See tools/lint/lintc/gate_scanner_immunity.c.
 check-scanner-immunity: $(LINTC_TOOL)
 	@echo "══ LINT: scanner fixture-race immunity regression proof (DX1) ══"
-	@./tools/lint/selftest_scanner_immunity.sh
+	@./build/bin/z23-lint check-scanner-immunity --selftest
+	@./build/bin/z23-lint check-scanner-immunity
 
 # The in-tree compile cache wraps EVERY compile in this repository, so a wrong
 # hit is a wrong binary underneath every other proof here. This gate builds a

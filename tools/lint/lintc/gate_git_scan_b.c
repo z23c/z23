@@ -871,7 +871,7 @@ static int sus_seen(const char seen[][RS_PATH], int n, const char *d)
  * default 6-root list a dead root must FATAL even if a future refactor
  * drops the per-root require_scan_root() call this gate relies on today.
  * The env-test override (ZCL_STRAY_SCAN_DIRS_FOR_TEST, used by
- * selftest_scanner_immunity.sh) intentionally passes one directory, so its
+ * check-scanner-immunity gate) intentionally passes one directory, so its
  * floor stays 1. Extracted as its own helper so check_no_stray_untracked_
  * source_run's own decision count stays under the complexity gate's cap. */
 static int sus_floor_check(const char *env, int ne)

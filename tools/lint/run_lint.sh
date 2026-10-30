@@ -111,7 +111,6 @@ gate_command() {
         check-checkout-lock)               echo 'tools/dev/checkout-lock-selftest.sh' ;;
         check-host-gc-selftest)            echo 'tools/scripts/host_gc_selftest.sh' ;;
         check-commons-journey-ordering)    echo 'tools/dev/commons-journey-ordering-selftest.sh' ;;
-        check-scanner-immunity)            echo './tools/lint/selftest_scanner_immunity.sh' ;;
         check-zcc-cache)                   echo './tools/lint/check_zcc_cache.sh' ;;
         check-zcc-epoch-object)            echo './tools/lint/check_zcc_epoch_object.sh' ;;
         check-zcc-epoch-batch)             echo './tools/lint/check_zcc_epoch_batch.sh' ;;
