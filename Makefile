@@ -14327,8 +14327,9 @@ check-windows-acceptance-guard: $(LINTC_TOOL)
 # gcc/clang on this box never take the _WIN32 branch of the rest, so a
 # Windows-only syntax error sat undetected.
 # -fsyntax-only, no objects, no archives. SKIP (exit 0, not a pass) when
-# mingw is absent.
-check-windows-cross-syntax: $(LINTC_TOOL)
+# mingw is absent. The sweep and its result-cache proof compile the
+# generated guest-kernel TU too, so a fresh tree builds it first.
+check-windows-cross-syntax: $(LINTC_TOOL) $(GUEST_KERNEL_GEN)
 	@echo "══ LINT: Windows cross-syntax (mingw -fsyntax-only over every _WIN32 TU) ══"
 	@./build/bin/z23-lint check-windows-cross-syntax
 
