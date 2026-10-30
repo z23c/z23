@@ -136,8 +136,8 @@ static bool enter_foreground(JNIEnv *env, jobject service)
                           NOTIFICATION_ID, n, SERVICE_TYPE_SPECIAL_USE);
 }
 
-/* The service holds a global reference to itself while the node watch runs. */
-static struct { pthread_mutex_t lock; JavaVM *vm; jobject service; } held = { PTHREAD_MUTEX_INITIALIZER, NULL, NULL };
+/* generation counts service starts; a watch from an earlier start must not stop a newer one. */
+static struct { pthread_mutex_t lock; JavaVM *vm; jobject service; uintptr_t generation; } held = { PTHREAD_MUTEX_INITIALIZER, NULL, NULL, 0 };
 
 static void release_service(JNIEnv *env)
 {
@@ -149,31 +149,35 @@ static void release_service(JNIEnv *env)
 }
 static atomic_bool ended;
 static bool node_alive(void *context) { (void)context; return zapp_controller_node_running(); }
-/* The node exited while nothing in the app was watching: end the service from the watch thread. */
-static void node_gone(void *context)
+/* The node exited with nothing in the app watching: end the service from the watch thread. Returns
+ * false when the stop could not be issued, so the watch tries again. */
+static bool node_gone(void *context)
 {
-    (void)context;
-    atomic_store(&ended, true);
     JNIEnv *env = NULL;
     pthread_mutex_lock(&held.lock); JavaVM *vm = held.vm; pthread_mutex_unlock(&held.lock);
-    if (!vm || (*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) return;
+    if (!vm || (*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) return false;
     pthread_mutex_lock(&held.lock);
-    jobject service = held.service ? (*env)->NewLocalRef(env, held.service) : NULL;
+    bool current = held.generation == (uintptr_t)context && held.service;
+    /* Held across stopSelf so a newer start cannot be delivered before this stop is issued. */
+    bool stopped = !current || call_void(env, held.service, "stopSelf", "()V");
+    jobject service = stopped && current ? held.service : NULL;
+    if (service) held.service = NULL;
     pthread_mutex_unlock(&held.lock);
-    if (service) { (void)call_void(env, service, "stopSelf", "()V"); (*env)->DeleteLocalRef(env, service); }
-    release_service(env);
+    if (service) { atomic_store(&ended, true); (*env)->DeleteGlobalRef(env, service); }
     (*vm)->DetachCurrentThread(vm);
+    return stopped;
 }
 static void watch_node(JNIEnv *env, jobject service)
 {
-    static const struct node_watch_ops ops = { node_alive, node_gone, NULL, 5000 };
+    struct node_watch_ops ops = { node_alive, node_gone, NULL, 5000 };
     JavaVM *vm = NULL;
     zapp_node_watch_stop();
     release_service(env);
     if ((*env)->GetJavaVM(env, &vm) != JNI_OK) return;
     jobject ref = (*env)->NewGlobalRef(env, service);
     if (!ref) { (void)failed(env, "global ref"); return; }
-    pthread_mutex_lock(&held.lock); held.vm = vm; held.service = ref; pthread_mutex_unlock(&held.lock);
+    pthread_mutex_lock(&held.lock); held.vm = vm; held.service = ref; ops.context = (void *)held.generation;
+    pthread_mutex_unlock(&held.lock);
     if (!zapp_node_watch_start(&ops)) release_service(env);
 }
 
@@ -205,6 +209,7 @@ bool zapp_node_service_start(JNIEnv *env, jobject context)
     bool ok = false;
     if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)failed(env, "local frame"); return false; }
     atomic_store(&ended, false);
+    pthread_mutex_lock(&held.lock); held.generation++; pthread_mutex_unlock(&held.lock);
     jobject intent = service_intent(env, context);
     ok = intent && call_object(env, context, "startForegroundService",
                                "(Landroid/content/Intent;)Landroid/content/ComponentName;", intent) != NULL;

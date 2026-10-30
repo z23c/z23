@@ -5,13 +5,13 @@
 
 struct node_watch_ops {
     bool (*alive)(void *context); /* True while the node runs. */
-    void (*gone)(void *context);  /* Called once, on the watch thread, when the node is gone. */
+    bool (*gone)(void *context); /* Called on the watch thread when the node is gone; false retries on the next tick. */
     void *context;
     unsigned interval_ms;
 };
 
 /* Replaces any running watch with one that calls ops->alive every interval until the node is gone
- * or the watch is stopped. */
+ * and gone() has handled it, or the watch is stopped. A stop that arrives first suppresses gone(). */
 bool zapp_node_watch_start(const struct node_watch_ops *ops);
 /* Stops the watch and waits for its thread. A no-op without a watch. */
 void zapp_node_watch_stop(void);

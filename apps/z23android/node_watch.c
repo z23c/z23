@@ -34,11 +34,20 @@ static bool wait_interval(struct watch *w)
     pthread_mutex_unlock(&w->mutex);
     return running;
 }
+/* True when the node is gone, the watch was not stopped meanwhile, and gone() handled it. */
+static bool tick(struct watch *w)
+{
+    if (w->ops.alive(w->ops.context)) return false;
+    pthread_mutex_lock(&w->mutex);
+    bool stopped = w->stop;
+    pthread_mutex_unlock(&w->mutex);
+    return !stopped && w->ops.gone(w->ops.context);
+}
 static void *watch_thread(void *argument)
 {
     struct watch *w = argument;
     while (wait_interval(w)) {
-        if (!w->ops.alive(w->ops.context)) { w->ops.gone(w->ops.context); break; }
+        if (tick(w)) break;
     }
     return NULL;
 }
