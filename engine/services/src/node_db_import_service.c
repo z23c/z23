@@ -359,6 +359,21 @@ static enum policy_decision import_wipe_policy_decision(int64_t existing)
         &rp, existing, "sync_controller.import_utxos_reimport");
 }
 
+static bool import_args_invalid(struct node_db *ndb, struct coins_view_db *cvdb)
+{
+    return !ndb || !ndb->open || !cvdb;
+}
+
+/* Writer-side counters, printed only when the pipeline dropped something. */
+static void import_report_writer_stats(struct import_context *ctx)
+{
+    int decode_fail = atomic_load(&ctx->decode_failures);
+    int skip_out = atomic_load(&ctx->skipped_outputs);
+    if (decode_fail > 0 || skip_out > 0)
+        printf("UTXO import: %d decode failures, %d skipped outputs\n",
+               decode_fail, skip_out);
+}
+
 struct zcl_result node_db_import_service_run(struct node_db *ndb,
                                              struct coins_view_db *cvdb,
                                              int *out_rows)
@@ -367,7 +382,7 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
     struct sync_db_turbo_scope turbo_mode = {0};
     bool restore_ok = true;
 
-    if (!ndb || !ndb->open || !cvdb)
+    if (import_args_invalid(ndb, cvdb))
         return ZCL_ERR(-10, "import_utxos: invalid args (ndb=%p, cvdb=%p)",
                        (void *)ndb, (void *)cvdb);
     sync_job_import_begin();
@@ -556,11 +571,7 @@ reader_done:
     import_job_join_writer(&job);
     int total_rows = atomic_load(&ctx->total_rows);
     sync_job_import_progress(total_rows);
-    int decode_fail = atomic_load(&ctx->decode_failures);
-    int skip_out = atomic_load(&ctx->skipped_outputs);
-    if (decode_fail > 0 || skip_out > 0)
-        printf("UTXO import: %d decode failures, %d skipped outputs\n",
-               decode_fail, skip_out);
+    import_report_writer_stats(ctx);
 
     /* Validation: verify all txids made it to SQLite */
     int64_t sql_rows = 0;

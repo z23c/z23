@@ -277,7 +277,7 @@ engine/services/src/bg_validation_proofs.c:bg_validation_verify_shielded_proofs:
 engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_stages_from_cold_import:18
 engine/services/src/legacy_import_service.c:legacy_import_service_run:22
 engine/services/src/node_db_catchup_service.c:node_db_catchup_service_run:80
-engine/services/src/node_db_import_service.c:node_db_import_service_run:38
+engine/services/src/node_db_import_service.c:node_db_import_service_run:34
 engine/services/src/nullifier_backfill_service.c:nullifier_backfill_service_run:16
 engine/services/src/property_grant_commit.c:commit_attempt:24
 engine/services/src/shielded_history_import_service.c:shielded_history_import_from_chainstate:29
