@@ -36,6 +36,7 @@
 #include "primitives/transaction.h"
 #include <fcntl.h>
 #include <pthread.h>
+#include <limits.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
 #if !defined(_WIN32)
@@ -3453,6 +3454,8 @@ static bool sqlite_locked_refusal_names_statement(
     bool refused = !node_db_wal_checkpoint_result(&f->ndb, rec);
     *busy = node_db_describe_open_statements(f->ndb.db, what, sizeof(what));
     return refused && rec->rc == SQLITE_LOCKED && *busy == 1 &&
+           atomic_load(&f->ndb.ckpt_locked_refusals) == 1 &&
+           atomic_load(&f->ndb.ckpt_locked_next_report) == INT_MAX &&
            strstr(what, "cursor-seed") != NULL &&
            strstr(what, "autocommit=1") != NULL;
 }
@@ -3463,6 +3466,7 @@ static bool sqlite_checkpoint_moves_frames_once_reset(
     char what[512] = "";
     return node_db_wal_checkpoint_result(&f->ndb, rec) &&
            rec->rc == SQLITE_OK && rec->ckpt_frames > 0 &&
+           atomic_load(&f->ndb.ckpt_locked_refusals) == 0 &&
            node_db_describe_open_statements(f->ndb.db, what,
                                             sizeof(what)) == 0;
 }

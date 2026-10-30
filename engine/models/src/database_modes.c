@@ -16,6 +16,7 @@
 #include "models/database.h"
 #include "models/database_lifetime.h"
 #include "models/database_internal.h"
+#include <limits.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -320,6 +321,10 @@ static bool wal_checkpoint_truncate_hard_failure(int truncate_rc)
 
 #define CKPT_LOCKED_SQL_MAX 120
 
+/* The connection mutex is held across the autocommit read and the whole
+ * statement walk: sqlite3_stmt_busy and sqlite3_sql take no mutex, so another
+ * thread finalizing a statement mid-walk would be a use-after-free. The mutex
+ * is recursive, so a caller already inside the connection is unaffected. */
 int node_db_describe_open_statements(sqlite3 *db, char *out, size_t cap)
 {
     int busy = 0;
@@ -328,6 +333,8 @@ int node_db_describe_open_statements(sqlite3 *db, char *out, size_t cap)
     out[0] = '\0';
     if (!db)
         return 0;
+    sqlite3_mutex *mu = sqlite3_db_mutex(db);
+    sqlite3_mutex_enter(mu);
     size_t n = (size_t)snprintf(out, cap, "autocommit=%d",
                                 sqlite3_get_autocommit(db));
     for (sqlite3_stmt *s = sqlite3_next_stmt(db, NULL); s;
@@ -340,26 +347,37 @@ int node_db_describe_open_statements(sqlite3 *db, char *out, size_t cap)
             n += (size_t)snprintf(out + n, cap - n, " busy[%d]=\"%.*s\"", busy,
                                   CKPT_LOCKED_SQL_MAX, sql ? sql : "(null)");
     }
+    sqlite3_mutex_leave(mu);
     return busy;
 }
 
-/* One report per failure streak: a node that stays LOCKED must name the
- * statement once, not once per attempt. */
-static _Atomic bool g_ckpt_locked_streak;
+/* Report on the first refusal of a streak, and again after
+ * CKPT_LOCKED_REPORT_RETRY further refusals while a capture came back empty,
+ * so one empty capture cannot silence the diagnostic. The streak ends on the
+ * next PASSIVE success. State is per handle: two node_db handles exist. */
+#define CKPT_LOCKED_REPORT_RETRY 20
 
-static void wal_checkpoint_note_locked(sqlite3 *db, int passive_rc)
+static void wal_checkpoint_note_locked(struct node_db *ndb, int passive_rc)
 {
-    if (passive_rc != SQLITE_LOCKED) {
-        if (passive_rc == SQLITE_OK)
-            atomic_store(&g_ckpt_locked_streak, false);
+    if (passive_rc == SQLITE_OK) {
+        atomic_store(&ndb->ckpt_locked_refusals, 0);
+        atomic_store(&ndb->ckpt_locked_next_report, 0);
         return;
     }
-    if (atomic_exchange(&g_ckpt_locked_streak, true))
+    if (passive_rc != SQLITE_LOCKED)
+        return;
+    int n = atomic_fetch_add(&ndb->ckpt_locked_refusals, 1) + 1;
+    if (n < atomic_load(&ndb->ckpt_locked_next_report))
         return;
     char what[1024];
-    int busy = node_db_describe_open_statements(db, what, sizeof(what));
-    LOG_WARN("db", "[db] wal checkpoint refused (SQLITE_LOCKED): %d statement(s) "
-             "stepped and not reset; %s", busy, what);
+    int busy = node_db_describe_open_statements(ndb->db, what, sizeof(what));
+    bool empty = busy == 0 && strstr(what, "autocommit=1") != NULL;
+    atomic_store(&ndb->ckpt_locked_next_report,
+                 empty ? n + CKPT_LOCKED_REPORT_RETRY : INT_MAX);
+    /* Sampled just after the refusal, not at its exact instant. */
+    LOG_WARN("db", "[db] wal checkpoint refused (SQLITE_LOCKED, refusal #%d): "
+             "%d statement(s) stepped and not reset, sampled just after the "
+             "refusal; %s", n, busy, what);
 }
 
 /* Build the outcome record from the PASSIVE checkpoint's verdict and counts. */
@@ -443,7 +461,7 @@ bool node_db_wal_checkpoint_result(struct node_db *ndb,
     int passive_rc = sqlite3_wal_checkpoint_v2(ndb->db, NULL,
                                                 SQLITE_CHECKPOINT_PASSIVE,
                                                 &log_frames, &ckpt_frames);
-    wal_checkpoint_note_locked(ndb->db, passive_rc);
+    wal_checkpoint_note_locked(ndb, passive_rc);
     int truncate_rc = -1;
     if (passive_rc == SQLITE_OK)
         truncate_rc = sqlite3_wal_checkpoint_v2(ndb->db, NULL,

@@ -78,6 +78,11 @@ struct node_db {
     int  sync_pending_blocks;   /* blocks since last COMMIT */
     bool sync_in_batch;         /* true if a batch transaction is open */
 
+    /* WAL checkpoint refusals (SQLITE_LOCKED) in the current streak, and the
+     * refusal count at which the next report is due. */
+    atomic_int ckpt_locked_refusals;
+    atomic_int ckpt_locked_next_report;
+
     /* Runtime ownership/health state for SQLite access. */
     zcl_mutex_t state_mutex;
     bool state_mutex_init;
