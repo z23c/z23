@@ -208,6 +208,27 @@ static int test_tx_sighash_type_anyone_can_pay(void)
     return failures;
 }
 
+/* Write each value, then read them back in order: true when every write and
+ * read succeeds, each read returns its value, and the stream holds no error. */
+static bool stream_u64_roundtrip(bool (*put)(struct byte_stream *, uint64_t),
+                                 bool (*get)(struct byte_stream *, uint64_t *),
+                                 const uint64_t *vals, size_t n)
+{
+    struct byte_stream s;
+    stream_init(&s, 64);
+    bool ok = true;
+    for (size_t i = 0; ok && i < n; i++)
+        ok = put(&s, vals[i]);
+    s.read_pos = 0;
+    for (size_t i = 0; ok && i < n; i++) {
+        uint64_t v = 0;
+        ok = get(&s, &v) && v == vals[i];
+    }
+    ok = ok && !s.error;
+    stream_free(&s);
+    return ok;
+}
+
 static int test_tx_stream_scalar_roundtrips(void)
 {
     int failures = 0;
@@ -219,10 +240,9 @@ static int test_tx_stream_scalar_roundtrips(void)
         stream_write_u32_le(&s, 0xDEADBEEF);
         stream_write_u32_le(&s, 0x12345678);
         s.read_pos = 0;
-        uint32_t v1, v2;
-        stream_read_u32_le(&s, &v1);
-        stream_read_u32_le(&s, &v2);
-        if (v1 == 0xDEADBEEF && v2 == 0x12345678 && s.size == 8)
+        uint32_t v1 = 0, v2 = 0;
+        bool ok = stream_read_u32_le(&s, &v1) && stream_read_u32_le(&s, &v2);
+        if (ok && v1 == 0xDEADBEEF && v2 == 0x12345678 && s.size == 8)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
         stream_free(&s);
@@ -230,48 +250,20 @@ static int test_tx_stream_scalar_roundtrips(void)
 
     printf("stream compact_size roundtrip... ");
     {
-        struct byte_stream s;
-        stream_init(&s, 64);
-        stream_write_compact_size(&s, 0);
-        stream_write_compact_size(&s, 252);
-        stream_write_compact_size(&s, 253);
-        stream_write_compact_size(&s, 0x10000);
-        stream_write_compact_size(&s, 0x100000000ULL);
-        s.read_pos = 0;
-        uint64_t v;
-        bool ok = true;
-        stream_read_compact_size(&s, &v); ok &= (v == 0);
-        stream_read_compact_size(&s, &v); ok &= (v == 252);
-        stream_read_compact_size(&s, &v); ok &= (v == 253);
-        stream_read_compact_size(&s, &v); ok &= (v == 0x10000);
-        stream_read_compact_size(&s, &v); ok &= (v == 0x100000000ULL);
-        if (ok && !s.error)
+        static const uint64_t vals[] = {0, 252, 253, 0x10000, 0x100000000ULL};
+        if (stream_u64_roundtrip(stream_write_compact_size, stream_read_compact_size,
+                                 vals, sizeof(vals) / sizeof(vals[0])))
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
-        stream_free(&s);
     }
 
     printf("stream varint roundtrip... ");
     {
-        struct byte_stream s;
-        stream_init(&s, 64);
-        stream_write_varint(&s, 0);
-        stream_write_varint(&s, 127);
-        stream_write_varint(&s, 128);
-        stream_write_varint(&s, 0xFFFF);
-        stream_write_varint(&s, 0xFFFFFFFFULL);
-        s.read_pos = 0;
-        uint64_t v;
-        bool ok = true;
-        stream_read_varint(&s, &v); ok &= (v == 0);
-        stream_read_varint(&s, &v); ok &= (v == 127);
-        stream_read_varint(&s, &v); ok &= (v == 128);
-        stream_read_varint(&s, &v); ok &= (v == 0xFFFF);
-        stream_read_varint(&s, &v); ok &= (v == 0xFFFFFFFFULL);
-        if (ok && !s.error)
+        static const uint64_t vals[] = {0, 127, 128, 0xFFFF, 0xFFFFFFFFULL};
+        if (stream_u64_roundtrip(stream_write_varint, stream_read_varint,
+                                 vals, sizeof(vals) / sizeof(vals[0])))
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
-        stream_free(&s);
     }
 
     printf("stream from_data read-only... ");
@@ -279,10 +271,9 @@ static int test_tx_stream_scalar_roundtrips(void)
         unsigned char data[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
         struct byte_stream s;
         stream_init_from_data(&s, data, sizeof(data));
-        uint32_t v1, v2;
-        stream_read_u32_le(&s, &v1);
-        stream_read_u32_le(&s, &v2);
-        if (v1 == 0x04030201 && v2 == 0x08070605 && stream_remaining(&s) == 0)
+        uint32_t v1 = 0, v2 = 0;
+        bool ok = stream_read_u32_le(&s, &v1) && stream_read_u32_le(&s, &v2);
+        if (ok && v1 == 0x04030201 && v2 == 0x08070605 && stream_remaining(&s) == 0)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
