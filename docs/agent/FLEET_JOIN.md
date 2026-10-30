@@ -87,7 +87,7 @@ else.
 git clone https://github.com/z23c/z23.git
 cd z23
 make -j8 build/bin/z23-dev
-build/bin/z23-dev fleet join <token>          # add --onion=<v3>.onion if this box has one
+build/bin/z23-dev fleet join <token>          # records the node's persistent onion; add --datadir=<node-datadir> if not the default
 ```
 
 Then hand the printed `z23 fleet admit …` line back to the owner, with `--datadir=<node-datadir>` added to it.
@@ -115,14 +115,17 @@ name, the public key, the assigned port, the time).
 ## The onion column
 
 A machine may also carry an **onion** — the persistent v3 onion hostname it
-says it will answer on. Pass it at step 2:
+says it will answer on. At step 2, `z23 fleet join <token>` reads it from the
+node's persistent onion service (`<datadir>/tor_data/onion_service/hostname`,
+written by a node started with `-onion-persist`), using the datadir the command
+is bound to. To record a different one, pass it explicitly; `--onion` wins:
 
 ```sh
 z23 fleet join <token> --onion=<56-characters>.onion
 ```
 
-It is optional. A computer with no persistent onion yet joins without one
-and the column is empty.
+A computer whose node has no persistent onion yet joins without one and the
+column is empty.
 
 It is **self-reported**, exactly like the hardware facts. The joining
 computer signs the string, so the record proves that computer claimed that
