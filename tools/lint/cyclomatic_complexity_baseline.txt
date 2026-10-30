@@ -387,8 +387,8 @@ tools/dev/devloop_cycle.c:find_artifact:18
 tools/dev/devloop_cycle.c:finish_cycle:44
 tools/dev/devloop_cycle.c:zcl_devloop_deterministic_compile_failure:18
 tools/dev/devloop_cycle.c:zcl_devloop_run_cycle_mode:77
-tools/dev/devloop_hotswap_build.c:hs_hotfork_build:80
-tools/dev/devloop_hotswap_build.c:zcl_devloop_hotswap_build:75
+tools/dev/devloop_hotswap_build.c:hs_hotfork_build:38
+tools/dev/devloop_hotswap_build.c:zcl_devloop_hotswap_build:45
 tools/engine_unit.c:append_unit_receipt:25
 tools/engine_unit.c:compose_prompt:23
 tools/engine_unit.c:dispatch_cli:20

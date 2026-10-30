@@ -1243,6 +1243,33 @@ static bool hs_cache_publish(const char *cache_obj, const char *cache_so,
     return true;
 }
 
+/* One source byte mapped into the artifact-name alphabet. */
+static char hs_safe_char(unsigned char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '.' || c == '-'
+        ? (char)c : c ? '_' : 0;
+}
+
+/* Maps src (terminator included) into safe, byte for byte. False when src does
+ * not fit the cap-byte name, so the caller names its own bound failure. */
+static bool hs_safe_name(const char *src, char *safe, size_t cap)
+{
+    size_t n = strlen(src);
+    if (n >= cap)
+        return false;
+    for (size_t i = 0; i <= n; i++)
+        safe[i] = hs_safe_char((unsigned char)src[i]);
+    return true;
+}
+
+/* Unlinks each non-empty path in order; failures are ignored as before. */
+static void hs_unlink_nonempty(const char *const *paths, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (paths[i][0]) (void)unlink(paths[i]);
+}
+
 static bool hs_temp(char *out, size_t out_len, const char *root,
                     const char *suffix)
 {
@@ -1710,6 +1737,85 @@ static bool hs_run_link(const struct hs_action_plan *plan,
     return true;
 }
 
+/* Non-null inputs, and a source_tu that is not absolute and has no ".."
+ * substring. Allowlist membership is not checked here. */
+static bool hs_hotswap_source_allowed(
+    const char *repo_root, const char *source_tu, const char *owner,
+    struct zcl_devloop_hotswap_build_receipt *receipt,
+    struct zcl_devloop_process_result *process)
+{
+    return repo_root && source_tu && receipt && process &&
+           source_tu[0] != '/' && !strstr(source_tu, "..") && owner;
+}
+
+/* Confined temporaries and the cache path; each name is built in order. */
+static bool hs_hotswap_temps(const char *root, const char *safe,
+                             char cached_dep[PATH_MAX], char tmp_o[PATH_MAX],
+                             char tmp_d[PATH_MAX], char tmp_so[PATH_MAX])
+{
+    return snprintf(cached_dep, PATH_MAX, "%s/build/hotswap-fast/%s.d",
+                    root, safe) < (int)PATH_MAX &&
+           hs_temp(tmp_o, PATH_MAX, root, ".o") &&
+           hs_temp(tmp_d, PATH_MAX, root, ".d") &&
+           hs_temp(tmp_so, PATH_MAX, root, ".so");
+}
+
+/* Dependency proof plus the post-verification key check, in that order. */
+static bool hs_hotswap_dependencies_stable(
+    const struct hs_action_plan *plan, const char *root, const char *owner,
+    const struct hs_dep *before, size_t before_n,
+    const struct hs_dep *after, size_t after_n, const char *cached_dep,
+    const struct zcl_action_root_t0 *compile_t0,
+    struct zcl_devloop_hotswap_build_receipt *receipt,
+    char *why, size_t why_len)
+{
+    bool stable = hs_deps_unchanged(before, before_n, after, after_n,
+                                    why, why_len);
+    char post_key[65] = {0};
+    if (stable && receipt->artifact_cache_key[0] &&
+        (!hs_cache_key(plan, root, owner, after, after_n,
+                       &(const struct hs_key_action){ owner, NULL, cached_dep,
+                                                        compile_t0 },
+                       receipt, post_key) ||
+         strcmp(post_key, receipt->artifact_cache_key) != 0)) {
+        hs_why(why, why_len,
+               "artifact cache key changed across dependency verification");
+        stable = false;
+    }
+    return stable;
+}
+
+/* Hashes and publishes the module artifact; the caller times the phase. */
+static bool hs_hotswap_publish(
+    const char *root, const char *safe, int cache_fd,
+    const char *cache_obj, const char *cache_so, const char *cache_hash,
+    const char *tmp_o, const char *tmp_so,
+    struct zcl_devloop_hotswap_build_receipt *receipt,
+    char *why, size_t why_len)
+{
+    if (!hs_sha256_file(tmp_so, receipt->artifact_sha256)) {
+        hs_why(why, why_len, "could not hash resident module artifact");
+        return false;
+    }
+    if (cache_fd >= 0 &&
+        !hs_cache_publish(cache_obj, cache_so, cache_hash, tmp_o,
+                          receipt->candidate_object_sha256, tmp_so,
+                          receipt->artifact_sha256)) {
+        hs_why(why, why_len,
+               "shared artifact cache publication or verification failed");
+        return false;
+    }
+    const char *published_source = cache_fd >= 0 ? cache_so : tmp_so;
+    if (!hs_publish_artifact_path(root, safe, published_source,
+                                  receipt->artifact_sha256,
+                                  receipt->artifact_path)) {
+        hs_why(why, why_len,
+               "content-addressed artifact collision or publish failure");
+        return false;
+    }
+    return true;
+}
+
 bool zcl_devloop_hotswap_build(
     const char *repo_root, const char *source_tu,
     struct zcl_devloop_hotswap_build_receipt *receipt,
@@ -1724,8 +1830,8 @@ bool zcl_devloop_hotswap_build(
         owner = zcl_hotswap_service_source_for_path(source_tu);
         service_island = owner != NULL;
     }
-    if (!repo_root || !source_tu || !receipt || !process ||
-        source_tu[0] == '/' || strstr(source_tu, "..") || !owner) {
+    if (!hs_hotswap_source_allowed(repo_root, source_tu, owner, receipt,
+                                   process)) {
         hs_why(why, why_len, "source is outside the compiled swappable allowlist");
         return false;
     }
@@ -1746,16 +1852,9 @@ bool zcl_devloop_hotswap_build(
         return false;
 
     char safe[256];
-    size_t sn = strlen(owner);
-    if (sn >= sizeof(safe)) {
+    if (!hs_safe_name(owner, safe, sizeof(safe))) {
         hs_why(why, why_len, "source path exceeds artifact-name bound");
         return false;
-    }
-    for (size_t i = 0; i <= sn; i++) {
-        unsigned char c = (unsigned char)owner[i];
-        safe[i] = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                  (c >= '0' && c <= '9') || c == '.' || c == '-'
-            ? (char)c : c ? '_' : 0;
     }
     char cached_dep[PATH_MAX], tmp_o[PATH_MAX] = {0}, tmp_d[PATH_MAX] = {0};
     char tmp_so[PATH_MAX] = {0}, unity[PATH_MAX] = {0};
@@ -1764,12 +1863,7 @@ bool zcl_devloop_hotswap_build(
     char cache_hash[PATH_MAX] = {0};
     int cache_fd = -1;
     struct zcl_action_root_t0 compile_t0 = {0};
-    if (snprintf(cached_dep, sizeof(cached_dep),
-                 "%s/build/hotswap-fast/%s.d", root, safe) >=
-            (int)sizeof(cached_dep) ||
-        !hs_temp(tmp_o, sizeof(tmp_o), root, ".o") ||
-        !hs_temp(tmp_d, sizeof(tmp_d), root, ".d") ||
-        !hs_temp(tmp_so, sizeof(tmp_so), root, ".so")) {
+    if (!hs_hotswap_temps(root, safe, cached_dep, tmp_o, tmp_d, tmp_so)) {
         hs_why(why, why_len, "could not allocate confined build temporaries");
         goto fail;
     }
@@ -1940,19 +2034,9 @@ bool zcl_devloop_hotswap_build(
     }
     tmp_d[0] = 0;
     receipt->dependency_count = (uint32_t)after_n;
-    bool stable = hs_deps_unchanged(before, before_n, after, after_n,
-                                    why, why_len);
-    char post_key[65] = {0};
-    if (stable && receipt->artifact_cache_key[0] &&
-        (!hs_cache_key(&plan, root, owner, after, after_n,
-                       &(const struct hs_key_action){ owner, NULL, cached_dep,
-                                                        &compile_t0 },
-                       receipt, post_key) ||
-         strcmp(post_key, receipt->artifact_cache_key) != 0)) {
-        hs_why(why, why_len,
-               "artifact cache key changed across dependency verification");
-        stable = false;
-    }
+    bool stable = hs_hotswap_dependencies_stable(
+        &plan, root, owner, before, before_n, after, after_n, cached_dep,
+        &compile_t0, receipt, why, why_len);
     free(before);
     free(after);
     if (!stable) {
@@ -1968,26 +2052,10 @@ bool zcl_devloop_hotswap_build(
         goto fail;
 
     int64_t publish_started = platform_time_monotonic_us();
-    if (!hs_sha256_file(tmp_so, receipt->artifact_sha256)) {
-        hs_why(why, why_len, "could not hash resident module artifact");
+    if (!hs_hotswap_publish(root, safe, cache_fd, cache_obj, cache_so,
+                            cache_hash, tmp_o, tmp_so, receipt, why,
+                            why_len))
         goto fail;
-    }
-    if (cache_fd >= 0 &&
-        !hs_cache_publish(cache_obj, cache_so, cache_hash, tmp_o,
-                          receipt->candidate_object_sha256, tmp_so,
-                          receipt->artifact_sha256)) {
-        hs_why(why, why_len,
-               "shared artifact cache publication or verification failed");
-        goto fail;
-    }
-    const char *published_source = cache_fd >= 0 ? cache_so : tmp_so;
-    if (!hs_publish_artifact_path(root, safe, published_source,
-                                  receipt->artifact_sha256,
-                                  receipt->artifact_path)) {
-        hs_why(why, why_len,
-               "content-addressed artifact collision or publish failure");
-        goto fail;
-    }
     receipt->publish_us = platform_time_monotonic_us() - publish_started;
     (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu), "%s",
                    owner);
@@ -2004,9 +2072,10 @@ bool zcl_devloop_hotswap_build(
     return true;
 
 fail:
-    if (tmp_o[0]) (void)unlink(tmp_o);
-    if (tmp_d[0]) (void)unlink(tmp_d);
-    if (tmp_so[0]) (void)unlink(tmp_so);
+    {
+        const char *const partial[] = { tmp_o, tmp_d, tmp_so };
+        hs_unlink_nonempty(partial, 3);
+    }
     if (cache_fd >= 0) {
         (void)flock(cache_fd, LOCK_UN);
         (void)close(cache_fd);
@@ -2381,6 +2450,131 @@ static int hs_hotfork_unity_source(
                                     out, out_size);
 }
 
+/* Canonicalises repo_root into root (rejecting a quote or backslash byte in
+ * it) and checks that root/def->source_tu fits PATH_MAX and is a regular,
+ * non-symlink file (hs_regular). It does not check def->source_tu for
+ * traversal or symlinked parents. */
+static bool hs_hotfork_source_is_file(const char *repo_root,
+                                      const struct hs_hotfork_def *def,
+                                      char root[PATH_MAX],
+                                      char source_path[PATH_MAX])
+{
+    return repo_root && def &&
+           platform_directory_canonical_real(repo_root, root, PATH_MAX) &&
+           !strpbrk(root, "\"\\") &&
+           snprintf(source_path, PATH_MAX, "%s/%s", root, def->source_tu) <
+               (int)PATH_MAX &&
+           hs_regular(source_path, NULL);
+}
+
+/* The eight confined HOT_FORK build inputs, allocated in this fixed order. */
+static bool hs_hotfork_temps(const char *root, char unity[PATH_MAX],
+                             char descriptor[PATH_MAX],
+                             char candidate_obj[PATH_MAX],
+                             char descriptor_obj[PATH_MAX],
+                             char dep[PATH_MAX], char descriptor_dep[PATH_MAX],
+                             char version_script[PATH_MAX], char so[PATH_MAX])
+{
+    return hs_temp(unity, PATH_MAX, root, ".c") &&
+           hs_temp(descriptor, PATH_MAX, root, ".c") &&
+           hs_temp(candidate_obj, PATH_MAX, root, ".o") &&
+           hs_temp(descriptor_obj, PATH_MAX, root, ".o") &&
+           hs_temp(dep, PATH_MAX, root, ".d") &&
+           hs_temp(descriptor_dep, PATH_MAX, root, ".d") &&
+           hs_temp(version_script, PATH_MAX, root, ".map") &&
+           hs_temp(so, PATH_MAX, root, ".so");
+}
+
+/* Writes the capsule descriptor and its version script, then compiles the
+ * descriptor. The compile time is added to the receipt on success only. */
+static bool hs_hotfork_emit_descriptor(
+    const struct hs_action_plan *plan, const char *root,
+    const struct hs_hotfork_def *def, const char *descriptor,
+    const char *descriptor_obj, const char *descriptor_dep,
+    const char *version_script, struct zcl_devloop_process_result *process,
+    struct zcl_devloop_hotswap_build_receipt *receipt,
+    char *why, size_t why_len)
+{
+    char story_root[65], fixture_root[65];
+    hs_hotfork_story_roots(def, story_root, fixture_root);
+    char descriptor_text[4096];
+    int descriptor_n = snprintf(descriptor_text, sizeof(descriptor_text),
+        "#include \"hotswap/hotfork_capsule.h\"\n"
+        "extern bool zcl_hotfork_candidate_story_v1("
+        "struct zcl_hotfork_observation_v1 *);\n"
+        "__attribute__((visibility(\"default\"))) const struct "
+        "zcl_hotfork_capsule_v1 zcl_hotfork_capsule_v1={"
+        ".abi_version=ZCL_HOTFORK_CAPSULE_ABI_V1,"
+        ".descriptor_size=sizeof(struct zcl_hotfork_capsule_v1),"
+        ".owner_id=\"%s\",.source_tu=\"%s\","
+        ".candidate_object_root=\"%s\",.story_id=\"%s\","
+        ".story_root=\"%s\",.story_fixture_root=\"%s\","
+        ".run_story=zcl_hotfork_candidate_story_v1};\n",
+        def->owner_id, def->source_tu, receipt->candidate_object_sha256,
+        def->story_id, story_root, fixture_root);
+    static const char map_text[] =
+        "ZCL_HOTFORK_1 { global: zcl_hotfork_capsule_v1; local: *; };\n";
+    int64_t descriptor_compile_us = 0;
+    if (descriptor_n <= 0 || descriptor_n >= (int)sizeof(descriptor_text) ||
+        !hs_write_generated(descriptor, descriptor_text, why, why_len) ||
+        !hs_write_generated(version_script, map_text, why, why_len) ||
+        !hs_run_hotfork_compile(plan, root, descriptor, descriptor_obj,
+                                descriptor_dep, process,
+                                &descriptor_compile_us, why, why_len))
+        return false;
+    receipt->compile_us += descriptor_compile_us;
+    return true;
+}
+
+/* Dependency proof plus the post-verification key check, in that order. */
+static bool hs_hotfork_dependencies_stable(
+    const struct hs_action_plan *plan, const char *root,
+    const char *key_owner, const struct hs_hotfork_def *def,
+    const char *unity, const char *cached_dep,
+    const struct hs_dep *before, size_t before_n,
+    const struct hs_dep *after, size_t after_n,
+    const struct zcl_action_root_t0 *compile_t0,
+    struct zcl_devloop_hotswap_build_receipt *receipt,
+    char *why, size_t why_len)
+{
+    bool stable = hs_deps_unchanged(before, before_n, after, after_n,
+                                    why, why_len);
+    char post_key[65] = {0};
+    if (stable && receipt->artifact_cache_key[0] &&
+        (!hs_cache_key(plan, root, key_owner, after, after_n,
+                       &(const struct hs_key_action){ def->source_tu, unity,
+                                                      cached_dep, compile_t0 },
+                       receipt, post_key) ||
+         strcmp(post_key, receipt->artifact_cache_key) != 0))
+        stable = false;
+    return stable;
+}
+
+/* Publishes the shared cache entry, then the content-addressed artifact. */
+static bool hs_hotfork_publish(
+    const char *root, const char *safe, int cache_fd,
+    const char *cache_obj, const char *cache_so, const char *cache_hash,
+    const char *candidate_obj, const char *so,
+    struct zcl_devloop_hotswap_build_receipt *receipt,
+    char *why, size_t why_len)
+{
+    if (cache_fd >= 0 &&
+        !hs_cache_publish(cache_obj, cache_so, cache_hash, candidate_obj,
+                          receipt->candidate_object_sha256, so,
+                          receipt->artifact_sha256)) {
+        hs_why(why, why_len, "HOT_FORK cache publication failed");
+        return false;
+    }
+    const char *published = cache_fd >= 0 ? cache_so : so;
+    if (!hs_publish_artifact_path(root, safe, published,
+                                  receipt->artifact_sha256,
+                                  receipt->artifact_path)) {
+        hs_why(why, why_len, "HOT_FORK artifact publication failed");
+        return false;
+    }
+    return true;
+}
+
 static bool hs_hotfork_build(
     const char *repo_root, const struct hs_hotfork_def *def,
     struct zcl_devloop_hotswap_build_receipt *receipt,
@@ -2390,12 +2584,7 @@ static bool hs_hotfork_build(
     memset(receipt, 0, sizeof(*receipt));
     memset(process, 0, sizeof(*process));
     char root[PATH_MAX], source_path[PATH_MAX];
-    if (!repo_root || !def ||
-        !platform_directory_canonical_real(repo_root, root, sizeof(root)) ||
-        strpbrk(root, "\"\\") ||
-        snprintf(source_path, sizeof(source_path), "%s/%s", root,
-                 def->source_tu) >= (int)sizeof(source_path) ||
-        !hs_regular(source_path, NULL)) {
+    if (!hs_hotfork_source_is_file(repo_root, def, root, source_path)) {
         hs_why(why, why_len, "HOT_FORK source is not a confined regular file");
         return false;
     }
@@ -2406,16 +2595,9 @@ static bool hs_hotfork_build(
         return false;
 
     char safe[256], key_owner[384];
-    size_t source_len = strlen(def->source_tu);
-    if (source_len >= sizeof(safe)) {
+    if (!hs_safe_name(def->source_tu, safe, sizeof(safe))) {
         hs_why(why, why_len, "HOT_FORK owner exceeds identity bound");
         return false;
-    }
-    for (size_t i = 0; i <= source_len; i++) {
-        unsigned char c = (unsigned char)def->source_tu[i];
-        safe[i] = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                  (c >= '0' && c <= '9') || c == '.' || c == '-'
-            ? (char)c : c ? '_' : 0;
     }
     char cached_dep[PATH_MAX], unity[PATH_MAX] = {0}, descriptor[PATH_MAX] = {0};
     char candidate_obj[PATH_MAX] = {0}, descriptor_obj[PATH_MAX] = {0};
@@ -2425,14 +2607,9 @@ static bool hs_hotfork_build(
     char cache_so[PATH_MAX] = {0}, cache_hash[PATH_MAX] = {0};
     int cache_fd = -1;
     struct zcl_action_root_t0 compile_t0 = {0};
-    if (!hs_temp(unity, sizeof(unity), root, ".c") ||
-        !hs_temp(descriptor, sizeof(descriptor), root, ".c") ||
-        !hs_temp(candidate_obj, sizeof(candidate_obj), root, ".o") ||
-        !hs_temp(descriptor_obj, sizeof(descriptor_obj), root, ".o") ||
-        !hs_temp(dep, sizeof(dep), root, ".d") ||
-        !hs_temp(descriptor_dep, sizeof(descriptor_dep), root, ".d") ||
-        !hs_temp(version_script, sizeof(version_script), root, ".map") ||
-        !hs_temp(so, sizeof(so), root, ".so")) {
+    if (!hs_hotfork_temps(root, unity, descriptor, candidate_obj,
+                          descriptor_obj, dep, descriptor_dep,
+                          version_script, so)) {
         hs_why(why, why_len, "could not allocate HOT_FORK build inputs");
         goto fail;
     }
@@ -2580,16 +2757,9 @@ static bool hs_hotfork_build(
     }
     dep[0] = 0;
     receipt->dependency_count = (uint32_t)after_n;
-    bool stable = hs_deps_unchanged(before, before_n, after, after_n,
-                                    why, why_len);
-    char post_key[65] = {0};
-    if (stable && receipt->artifact_cache_key[0] &&
-        (!hs_cache_key(&plan, root, key_owner, after, after_n,
-                       &(const struct hs_key_action){ def->source_tu, unity,
-                                                      cached_dep, &compile_t0 },
-                       receipt, post_key) ||
-         strcmp(post_key, receipt->artifact_cache_key) != 0))
-        stable = false;
+    bool stable = hs_hotfork_dependencies_stable(
+        &plan, root, key_owner, def, unity, cached_dep, before, before_n,
+        after, after_n, &compile_t0, receipt, why, why_len);
     free(before); free(after);
     if (!zcl_hotfork_shape_admit(stable, &shape, candidate_obj, cached_dep,
                                  why, why_len)) {
@@ -2599,34 +2769,11 @@ static bool hs_hotfork_build(
         hs_why(why, why_len, "could not hash HOT_FORK candidate object");
         goto fail;
     }
-    char story_root[65], fixture_root[65];
-    hs_hotfork_story_roots(def, story_root, fixture_root);
-    char descriptor_text[4096];
-    int descriptor_n = snprintf(descriptor_text, sizeof(descriptor_text),
-        "#include \"hotswap/hotfork_capsule.h\"\n"
-        "extern bool zcl_hotfork_candidate_story_v1("
-        "struct zcl_hotfork_observation_v1 *);\n"
-        "__attribute__((visibility(\"default\"))) const struct "
-        "zcl_hotfork_capsule_v1 zcl_hotfork_capsule_v1={"
-        ".abi_version=ZCL_HOTFORK_CAPSULE_ABI_V1,"
-        ".descriptor_size=sizeof(struct zcl_hotfork_capsule_v1),"
-        ".owner_id=\"%s\",.source_tu=\"%s\","
-        ".candidate_object_root=\"%s\",.story_id=\"%s\","
-        ".story_root=\"%s\",.story_fixture_root=\"%s\","
-        ".run_story=zcl_hotfork_candidate_story_v1};\n",
-        def->owner_id, def->source_tu, receipt->candidate_object_sha256,
-        def->story_id, story_root, fixture_root);
-    static const char map_text[] =
-        "ZCL_HOTFORK_1 { global: zcl_hotfork_capsule_v1; local: *; };\n";
-    int64_t descriptor_compile_us = 0;
-    if (descriptor_n <= 0 || descriptor_n >= (int)sizeof(descriptor_text) ||
-        !hs_write_generated(descriptor, descriptor_text, why, why_len) ||
-        !hs_write_generated(version_script, map_text, why, why_len) ||
-        !hs_run_hotfork_compile(&plan, root, descriptor, descriptor_obj,
-                                descriptor_dep, process,
-                                &descriptor_compile_us, why, why_len))
+    if (!hs_hotfork_emit_descriptor(&plan, root, def, descriptor,
+                                    descriptor_obj, descriptor_dep,
+                                    version_script, process, receipt, why,
+                                    why_len))
         goto fail;
-    receipt->compile_us += descriptor_compile_us;
     receipt->compiler_processes++;
     receipt->linker_processes = 1;
     if (!hs_run_hotfork_link(&plan, root, candidate_obj, descriptor_obj,
@@ -2635,20 +2782,10 @@ static bool hs_hotfork_build(
         !hs_sha256_file(so, receipt->artifact_sha256))
         goto fail;
     int64_t publish_started = platform_time_monotonic_us();
-    if (cache_fd >= 0 &&
-        !hs_cache_publish(cache_obj, cache_so, cache_hash, candidate_obj,
-                          receipt->candidate_object_sha256, so,
-                          receipt->artifact_sha256)) {
-        hs_why(why, why_len, "HOT_FORK cache publication failed");
+    if (!hs_hotfork_publish(root, safe, cache_fd, cache_obj, cache_so,
+                            cache_hash, candidate_obj, so, receipt, why,
+                            why_len))
         goto fail;
-    }
-    const char *published = cache_fd >= 0 ? cache_so : so;
-    if (!hs_publish_artifact_path(root, safe, published,
-                                  receipt->artifact_sha256,
-                                  receipt->artifact_path)) {
-        hs_why(why, why_len, "HOT_FORK artifact publication failed");
-        goto fail;
-    }
     receipt->publish_us = platform_time_monotonic_us() - publish_started;
     (void)snprintf(receipt->source_tu, sizeof(receipt->source_tu), "%s",
                    def->source_tu);
@@ -2661,10 +2798,12 @@ success:
     zcl_devloop_action_root_hotfork(root, def->source_tu, plan.cc, plan.cflags,
                                     unity, cached_dep, &compile_t0, plan.env,
                                     receipt);
-    (void)unlink(unity); (void)unlink(descriptor);
-    (void)unlink(candidate_obj); (void)unlink(descriptor_obj);
-    if (dep[0]) (void)unlink(dep);
-    (void)unlink(descriptor_dep); (void)unlink(version_script); (void)unlink(so);
+    {
+        const char *const built[] = { unity, descriptor, candidate_obj,
+                                      descriptor_obj, dep, descriptor_dep,
+                                      version_script, so };
+        hs_unlink_nonempty(built, 8);
+    }
     return true;
 
 fail:
@@ -2674,14 +2813,12 @@ fail:
     zcl_devloop_action_root_hotfork(root, def->source_tu, plan.cc, plan.cflags,
                                     unity, NULL, &compile_t0, plan.env,
                                     receipt);
-    if (unity[0]) (void)unlink(unity);
-    if (descriptor[0]) (void)unlink(descriptor);
-    if (candidate_obj[0]) (void)unlink(candidate_obj);
-    if (descriptor_obj[0]) (void)unlink(descriptor_obj);
-    if (dep[0]) (void)unlink(dep);
-    if (descriptor_dep[0]) (void)unlink(descriptor_dep);
-    if (version_script[0]) (void)unlink(version_script);
-    if (so[0]) (void)unlink(so);
+    {
+        const char *const partial[] = { unity, descriptor, candidate_obj,
+                                        descriptor_obj, dep, descriptor_dep,
+                                        version_script, so };
+        hs_unlink_nonempty(partial, 8);
+    }
     receipt->total_us = platform_time_monotonic_us() - started;
     return false;
 }
