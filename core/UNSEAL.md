@@ -364,3 +364,11 @@ later lane flips it HARD.
 - 2026-10-30T00:03:15Z — REASON: behaviour-preserving complexity split of 10 tier-A network files (core wave 6): addrman, addrman_codec, dandelion, file_service_handshake, file_service_private_chunk, flyclient, https_server_install, net_listen, onion_stream_telemetry, tor_config_log; no validity decision
   old ROOT: f11519173354f225ec536915da2e06880e87bbdbc7e61205faeaed9a4a164626
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-30T01:04:33Z — REASON: core wave 7: behaviour-preserving complexity splits and whole-function moves in net (wave 6 + peer_lifecycle incident JSON move + file_service client/self-test move); owner-authorized hardening program, non-author reviews LAND
+  old ROOT: 3baddb9856e6afe78e28fddaeb0e2abbb93c9a302ab14ccacafb6365f9ccf798
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-10-30T02:01:18Z — REASON: core wave 7 follow-up: file_service_selftest.c compiles to an empty unit without ZCL_TESTING (-pedantic error in dev-bin); add the repo's nonempty-translation-unit typedef
+  old ROOT: 4a4bf02911d36d06667f8d8ec03bac0c22c127fda874286d28fb25caf402dc50
+  by: owner unseal ritual (make core-unseal)

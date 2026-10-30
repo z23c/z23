@@ -321,4 +321,6 @@ bool fs_test_range_worker_socket_lifecycle(void)
     return ok;
 }
 
+#else
+typedef int file_service_selftest_nonempty_translation_unit;
 #endif
