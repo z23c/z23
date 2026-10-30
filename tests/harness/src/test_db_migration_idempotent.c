@@ -1501,10 +1501,17 @@ static bool db_mig_v29_seed(const char *dbpath, const char *prologue,
 
 static bool db_mig_v29_outcome(const char *dbpath, int *opened, int *stamp)
 {
+    /* node_db_open() would refuse this seed before running any migration
+     * (open preflight: schema_version 28 contradicts the 030..087 rows in
+     * the migration ledger, SCHEMA_VERSION_UNKNOWN), so the v29 step would
+     * never execute and the stamp count would always be 0. Drive
+     * node_db_migrate() on a raw handle instead, as the other stamped-back
+     * cases in this file do; a negative return is the open refusal. */
     struct node_db ndb;
-    *opened = node_db_open(&ndb, dbpath) ? 1 : 0;
-    if (*opened)
-        node_db_close(&ndb);
+    if (!db_mig_open_raw_handle(&ndb, dbpath))
+        return false;
+    *opened = node_db_migrate(&ndb, NULL) >= 0 ? 1 : 0;
+    db_mig_close_raw_handle(&ndb);
 
     sqlite3 *raw = NULL;
     if (sqlite3_open(dbpath, &raw) != SQLITE_OK) {
