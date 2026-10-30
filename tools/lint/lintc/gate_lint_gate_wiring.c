@@ -9,7 +9,7 @@
  *
  * Sources of truth this gate never re-parses by hand: the Makefile's
  * backslash-continued LINT_GATES/LINT_FAST_GATES blocks (read directly,
- * same shape tools/scripts/check_doc_accuracy.sh and
+ * same shape the check-doc-accuracy gate (gate_doc_accuracy.c) and
  * tools/dev/agent-baseline.sh already assume), and run_lint.sh's own
  * `--list` / `--print-command <gate>` outputs (spawned via capture_cmd,
  * the same producer the shell original invoked — this gate never
@@ -38,8 +38,8 @@
  * catch the third file the same way A/B catch the second — by NAME, not
  * just by count, so a doc block that swaps one gate for another (same
  * count, wrong names) still fails. The doc-block extraction mirrors the
- * awk block scan in tools/scripts/check_doc_accuracy.sh (not literally
- * shared — that script is bash, this gate is C — but same markers, same
+ * block scan in gate_doc_accuracy.c (not literally
+ * shared — that gate lives in its own file — but same markers, same
  * shape: everything between LINT-GATES-BEGIN and LINT-GATES-END, check-*
  * tokens only).
  */

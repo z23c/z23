@@ -14751,9 +14751,10 @@ check-condition-cooldown: $(LINTC_TOOL)
 
 # Gate E11 — doc accuracy: the gate list in DEFENSIVE_CODING.md must match
 # the actual check-* dependencies of the lint: target (count + names).
-check-doc-accuracy:
+check-doc-accuracy: $(LINTC_TOOL)
 	@echo "══ LINT: doc accuracy (E11) ══"
-	@./tools/scripts/check_doc_accuracy.sh
+	@./build/bin/z23-lint check-doc-accuracy --selftest
+	@./build/bin/z23-lint check-doc-accuracy
 
 # Local Markdown targets are part of the developer interface. Scan tracked
 # Markdown as it exists in the worktree; fail on missing/escaping relative
@@ -15660,7 +15661,7 @@ check-tor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN) $(LINTC_TOOL)
 # tools/lint/run_lint.sh's gate_command() case table gets the invocation
 # (the parallel driver execs each gate's script directly and never reads
 # the Make recipe), and docs/DEFENSIVE_CODING.md's <!-- LINT-GATES-BEGIN
-# --> block gets the gate name (the doc gate + check_doc_accuracy.sh only
+# --> block gets the gate name (the doc gate + check-doc-accuracy only
 # catch a drifted doc much later, in t-fast). On 2026-08-26 three gates
 # landed with the first half and without the second in one session and
 # `make lint` was FATAL (exit 2) tree-wide until they were wired. The

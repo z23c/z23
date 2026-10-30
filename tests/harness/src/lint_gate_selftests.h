@@ -234,7 +234,7 @@
     "engine/controllers/src/sync_controller_e10_rawsql_fixture_tmp.c"
 #define E10_SQL_SERVICE_FIXTURE_DST \
     "engine/services/src/_e10_receipt_sql_fixture_tmp.c"
-#define E11_SCRIPT_REL   "tools/scripts/check_doc_accuracy.sh"
+#define E11_SCRIPT_REL   "build/bin/z23-lint check-doc-accuracy"
 /* Not gitignored: E11's repo-wide prong scans tracked and non-ignored files,
  * so an ignored path would make the trip case vacuous. */
 #define E11_FIXTURE_DST  "docs/_e11_doc_count_fixture_tmp.md"

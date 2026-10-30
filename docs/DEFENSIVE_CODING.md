@@ -1528,7 +1528,7 @@ gate name. Nothing enforced the second and third files, so gates shipped with
 only the first part and `make lint` went FATAL (exit 2) for the whole tree,
 reporting no gate results at all, until somebody wired them by hand; the doc
 block drifting was worse — it only surfaced much later, in `t-fast
-ONLY=make_lint_gates` via `check_doc_accuracy.sh`, not on the lane's first
+ONLY=make_lint_gates` via the `check-doc-accuracy` gate, not on the lane's first
 gate run. This gate asserts the parity by NAME in every direction across all
 three files (a listed gate with no table entry or no doc entry, a table entry
 no list names, and a doc-only phantom gate), plus a real Make target behind
@@ -1537,7 +1537,7 @@ prerequisites) and an existing script behind every table entry. It reads the
 Makefile lists with the same backslash-continuation scan `check-doc-accuracy`
 uses, reads the case table through `run_lint.sh --list` (which greps its own
 case labels), and reads the doc block by scanning between the same
-`LINT-GATES-BEGIN`/`LINT-GATES-END` markers `check_doc_accuracy.sh` scans —
+`LINT-GATES-BEGIN`/`LINT-GATES-END` markers the `check-doc-accuracy` gate scans —
 never a second, divergent parser of any of the three files. Its `--selftest`
 plants each defect class in a throwaway fixture tree and asserts the gate
 rejects it *and names the offender*, with a correctly-wired fixture as the
