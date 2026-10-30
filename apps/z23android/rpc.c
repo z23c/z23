@@ -101,14 +101,30 @@ static bool send_all(int fd, const char *data, size_t length, int64_t deadline)
     return true;
 }
 
-/* Reads until the node closes the connection. False on error, timeout or a reply over cap - 1. */
+static const char *head_value(const char *head, size_t length, const char *name);
+
+/* True once the reply head names a Content-Length and that many body bytes have arrived. */
+static bool reply_complete(const char *reply, size_t used)
+{
+    const char *split = memmem(reply, used, "\r\n\r\n", 4);
+    const char *declared = split ? head_value(reply, (size_t)(split - reply) + 2, "Content-Length") : NULL;
+    return declared && used - (size_t)(split + 4 - reply) >= strtoull(declared, NULL, 10);
+}
+
+/* Reads until the reply is complete or the node closes the connection. False on error, timeout or a
+ * reply over cap - 1. */
 static bool receive_all(int fd, char *out, size_t cap, size_t *used, int64_t deadline)
 {
     *used = 0;
     for (;;) {
         if (*used + 1 >= cap) { errno = EMSGSIZE; return false; }
         ssize_t n = recv(fd, out + *used, cap - 1 - *used, 0);
-        if (n > 0) { *used += (size_t)n; continue; }
+        if (n > 0) {
+            *used += (size_t)n;
+            out[*used] = 0;
+            if (reply_complete(out, *used)) return true;
+            continue;
+        }
         if (n == 0) { out[*used] = 0; return true; }
         if (errno == EINTR) continue;
         if (errno != EAGAIN || !wait_fd(fd, POLLIN, deadline)) return false;
@@ -186,27 +202,38 @@ static enum zapp_rpc_result exchange(unsigned port, const char *cookie, const ch
     return reply_body(out, used, why, why_cap) ? ZAPP_RPC_OK : ZAPP_RPC_FAILED;
 }
 
+/* Reads the port and cookie the node recorded in datadir, or says why it cannot be reached. */
+static enum zapp_rpc_result endpoint(const char *datadir, unsigned *port, char *cookie, size_t cookie_cap,
+                                     char *why, size_t why_cap)
+{
+    char text[32], *end = NULL;
+    if (!read_line(datadir, ".rpcport", text, sizeof(text)))
+        return fail(ZAPP_RPC_UNREACHABLE, why, why_cap, "no RPC port file", 0);
+    long value = strtol(text, &end, 10);
+    if (*end || value <= 0 || value > 65535)
+        return fail(ZAPP_RPC_FAILED, why, why_cap, "RPC port file is not a port", 0);
+    *port = (unsigned)value;
+    if (!read_line(datadir, ".cookie", cookie, cookie_cap))
+        return fail(ZAPP_RPC_UNREACHABLE, why, why_cap, "no RPC cookie", 0);
+    return ZAPP_RPC_OK;
+}
+
 enum zapp_rpc_result zapp_rpc_call(const char *datadir, const char *method, const char *params,
                                    int timeout_ms, char *out, size_t cap, char *why, size_t why_cap)
 {
     if (!why || !why_cap) return ZAPP_RPC_FAILED;
     if (!datadir || !method || !params || !out || cap < 256 || timeout_ms <= 0)
         return fail(ZAPP_RPC_FAILED, why, why_cap, "bad request", 0);
-    char port_text[32], cookie[COOKIE_CAP], request[512];
-    if (!read_line(datadir, ".rpcport", port_text, sizeof(port_text)))
-        return fail(ZAPP_RPC_UNREACHABLE, why, why_cap, "no RPC port file", 0);
-    char *end = NULL;
-    long port = strtol(port_text, &end, 10);
-    if (*end || port <= 0 || port > 65535)
-        return fail(ZAPP_RPC_FAILED, why, why_cap, "RPC port file is not a port", 0);
-    if (!read_line(datadir, ".cookie", cookie, sizeof(cookie)))
-        return fail(ZAPP_RPC_UNREACHABLE, why, why_cap, "no RPC cookie", 0);
+    char cookie[COOKIE_CAP], request[512];
+    unsigned port = 0;
+    enum zapp_rpc_result rc = endpoint(datadir, &port, cookie, sizeof(cookie), why, why_cap);
+    if (rc != ZAPP_RPC_OK) return rc;
     int64_t now = now_ms();
     int length = snprintf(request, sizeof(request), "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"%s\",\"params\":%s}",
                           method, params);
-    enum zapp_rpc_result rc = now < 0 ? fail(ZAPP_RPC_FAILED, why, why_cap, "clock", errno) :
+    rc = now < 0 ? fail(ZAPP_RPC_FAILED, why, why_cap, "clock", errno) :
         length <= 0 || (size_t)length >= sizeof(request) ? fail(ZAPP_RPC_FAILED, why, why_cap, "request too large", 0) :
-        exchange((unsigned)port, cookie, request, (size_t)length, now + timeout_ms, out, cap, why, why_cap);
+        exchange(port, cookie, request, (size_t)length, now + timeout_ms, out, cap, why, why_cap);
     memory_cleanse(cookie, sizeof(cookie));
     return rc;
 }

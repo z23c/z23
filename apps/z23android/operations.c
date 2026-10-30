@@ -23,7 +23,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#define DIRECT_TIMEOUT_MS 5000
+/* Per call. Loopback answers in under a millisecond, so a longer wait only delays the CLI fallback;
+ * status and balance run back to back, so a silent node costs at most twice this. */
+#define DIRECT_TIMEOUT_MS 2000
 extern char **environ;
 /* The only read-only operations the app runs; start, stop and fleet join have their own paths. args is
  * the CLI form; rpc and params are the node call that produces the same data, member the part
@@ -535,7 +537,9 @@ static bool direct_envelope(const struct operation *op, char *out, size_t cap)
     const struct json_value *error = json_get(&reply, "error");
     const struct json_value *data = json_get(&reply, "result");
     if (ok && op->member) data = json_get(data, op->member);
-    ok = ok && data && data->type == JSON_OBJ && (!error || json_is_null(error));
+    const struct json_value *id = json_get(&reply, "id");
+    ok = ok && id && id->type == JSON_INT && json_get_int(id) == 1 &&
+         data && data->type == JSON_OBJ && (!error || json_is_null(error));
     if (ok) {
         json_set_object(&envelope);
         ok = json_push_kv_bool(&envelope, "ok", true) && json_push_kv(&envelope, "data", data) &&

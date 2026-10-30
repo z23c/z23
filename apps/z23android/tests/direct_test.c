@@ -23,59 +23,77 @@
     "\"total\":\"1.25000000\",\"transparent_source\":\"durable_projection\",\"transparent_sources_agree\":true," \
     "\"wallet_height\":20,\"chain_height\":20},\"error\":null,\"id\":1}"
 
-enum mode { SERVE_OK, SERVE_HTTP_401, SERVE_RPC_ERROR, SERVE_GARBAGE, SERVE_SILENT, SERVE_CHUNKED, SERVE_SHORT, SERVE_LARGE };
+enum mode { SERVE_OK, SERVE_HTTP_401, SERVE_RPC_ERROR, SERVE_GARBAGE, SERVE_SILENT, SERVE_CHUNKED, SERVE_SHORT, SERVE_LARGE, SERVE_KEEPALIVE, SERVE_WRONG_ID };
 static atomic_int mode;
 static int listener;
 static pthread_mutex_t seen_lock = PTHREAD_MUTEX_INITIALIZER;
 static char seen[4096];
 static atomic_int served;
 
-/* Reads one request, records it, and answers according to the current mode. */
-static void serve(int fd)
+/* Reads one whole request (head and body) into request. False when the client leaves early. */
+static bool read_request(int fd, char *request, size_t cap)
 {
-    char request[4096];
     size_t used = 0;
     const char *split = NULL;
-    while (used < sizeof(request) - 1 && !(split = memmem(request, used, "\r\n\r\n", 4))) {
-        ssize_t n = recv(fd, request + used, sizeof(request) - 1 - used, 0);
-        if (n <= 0) return;
+    while (used < cap - 1 && !(split = memmem(request, used, "\r\n\r\n", 4))) {
+        ssize_t n = recv(fd, request + used, cap - 1 - used, 0);
+        if (n <= 0) return false;
         used += (size_t)n;
     }
     const char *length = strcasestr(request, "Content-Length:");
     size_t body = length ? strtoul(length + 15, NULL, 10) : 0;
     while (split && used < (size_t)(split + 4 - request) + body) {
-        ssize_t n = recv(fd, request + used, sizeof(request) - 1 - used, 0);
-        if (n <= 0) return;
+        ssize_t n = recv(fd, request + used, cap - 1 - used, 0);
+        if (n <= 0) return false;
         used += (size_t)n;
     }
     request[used] = 0;
+    return true;
+}
+
+/* The JSON-RPC body the current mode sends. */
+static const char *reply_body(int mode_now, const char *request, char *scratch, size_t cap)
+{
+    const char *reply = strstr(request, "dumpstate") ? STATUS_REPLY : BALANCE_REPLY;
+    if (mode_now == SERVE_LARGE) {
+        assert(cap > 2402);
+        memset(scratch, 'x', 2402);
+        scratch[0] = '{';
+        scratch[2401] = '}';
+        scratch[2402] = 0;
+        return scratch;
+    }
+    if (mode_now == SERVE_WRONG_ID) {
+        const char *tail = strstr(reply, "\"id\":1");
+        snprintf(scratch, cap, "%.*s\"id\":2}", (int)(tail - reply), reply);
+        return scratch;
+    }
+    if (mode_now == SERVE_RPC_ERROR) return "{\"result\":null,\"error\":{\"code\":-28,\"message\":\"Loading\"},\"id\":1}";
+    return reply;
+}
+
+/* Reads one request, records it, and answers according to the current mode. */
+static void serve(int fd)
+{
+    char request[4096], scratch[2600], out[4096];
+    if (!read_request(fd, request, sizeof(request))) return;
     pthread_mutex_lock(&seen_lock);
     snprintf(seen, sizeof(seen), "%s", request);
     pthread_mutex_unlock(&seen_lock);
-    const char *reply = strstr(request, "dumpstate") ? STATUS_REPLY : BALANCE_REPLY;
-    char out[4096];
     int mode_now = atomic_load(&mode);
     if (mode_now == SERVE_SILENT) { usleep(600000); return; }
-    char large[2600];
-    if (mode_now == SERVE_LARGE) {
-        memset(large, 0, sizeof(large));
-        memset(large + 1, 'x', 2400);
-        large[0] = '{';
-        large[2401] = '}';
-        reply = large;
-    }
+    const char *reply = reply_body(mode_now, request, scratch, sizeof(scratch));
     if (mode_now == SERVE_HTTP_401) snprintf(out, sizeof(out), "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
     else if (mode_now == SERVE_GARBAGE) snprintf(out, sizeof(out), "not http at all");
     else if (mode_now == SERVE_CHUNKED)
         snprintf(out, sizeof(out), "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n%zx\r\n%s\r\n0\r\n\r\n", strlen(reply), reply);
     else if (mode_now == SERVE_SHORT)
         snprintf(out, sizeof(out), "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\n\r\n%.20s", strlen(reply), reply);
-    else {
-        if (mode_now == SERVE_RPC_ERROR) reply = "{\"result\":null,\"error\":{\"code\":-28,\"message\":\"Loading\"},\"id\":1}";
+    else
         snprintf(out, sizeof(out), "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n"
                  "Connection: close\r\n\r\n%s", strlen(reply), reply);
-    }
     (void)send(fd, out, strlen(out), MSG_NOSIGNAL);
+    if (mode_now == SERVE_KEEPALIVE) usleep(600000);
 }
 
 static void *accept_loop(void *arg)
@@ -103,7 +121,7 @@ static unsigned start_server(pthread_t *thread)
 
 static void write_file(const char *directory, const char *name, const char *text)
 {
-    char file[512];
+    char file[1024];
     assert(snprintf(file, sizeof(file), "%s/%s", directory, name) > 0);
     FILE *f = fopen(file, "w");
     assert(f && fputs(text, f) >= 0 && fclose(f) == 0);
@@ -149,13 +167,20 @@ static void protocol_cases(const char *directory, unsigned port)
     assert(!strncmp(seen, "POST / HTTP/1.1\r\n", 17) && strstr(seen, AUTH "\r\n"));
     assert(strstr(seen, "\"method\":\"dumpstate\",\"params\":[\"status_frontdoor\"]}"));
     pthread_mutex_unlock(&seen_lock);
+    /* A reply with a Content-Length ends the read; a server that keeps the connection open cannot hold the client. */
+    atomic_store(&mode, SERVE_KEEPALIVE);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    assert(zapp_rpc_call(directory, "dumpstate", "[]", 2000, out, sizeof(out), why, sizeof(why)) == ZAPP_RPC_OK);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    assert((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 < 400);
     static const struct { enum mode mode; const char *reason; } failures[] = {
         {SERVE_HTTP_401, "HTTP 401"}, {SERVE_GARBAGE, "not HTTP"}, {SERVE_CHUNKED, "chunked"},
         {SERVE_SHORT, "incomplete"}, {SERVE_LARGE, "exchange: Message too long"},
         {SERVE_SILENT, "exchange: Connection timed out"}};
     for (size_t i = 0; i < sizeof(failures) / sizeof(failures[0]); ++i) {
         atomic_store(&mode, failures[i].mode);
-        assert(zapp_rpc_call(directory, "dumpstate", "[]", 200, out, 1024, why, sizeof(why)) == ZAPP_RPC_FAILED);
+        assert(zapp_rpc_call(directory, "dumpstate", "[]", failures[i].mode == SERVE_SILENT ? 200 : 2000, out, 1024, why, sizeof(why)) == ZAPP_RPC_FAILED);
         assert(strstr(why, failures[i].reason));
     }
     atomic_store(&mode, SERVE_OK);
@@ -165,7 +190,7 @@ static void protocol_cases(const char *directory, unsigned port)
     assert(zapp_rpc_call(directory, "dumpstate", "[]", 2000, out, sizeof(out), why, sizeof(why)) == ZAPP_RPC_UNREACHABLE);
     write_file(directory, ".rpcport", "junk\n");
     assert(zapp_rpc_call(directory, "dumpstate", "[]", 2000, out, sizeof(out), why, sizeof(why)) == ZAPP_RPC_FAILED);
-    char cookie[512];
+    char cookie[1024];
     snprintf(cookie, sizeof(cookie), "%s/.cookie", directory);
     assert(unlink(cookie) == 0);
     write_file(directory, ".rpcport", "1\n");
@@ -183,10 +208,17 @@ static void operation_cases(struct zapp_runtime *r, const char *directory, unsig
     assert(zapp_operation_run(r, "wallet_balance", out, sizeof(out)));
     assert(zapp_balance_format(out, balance, sizeof(balance)) && !strncmp(balance, "Balance 1.25 ZCL", 16));
     assert(atomic_load(&served) == before + 2 && log_lines(log) == 0);
-    /* A failing node answer falls back to the CLI and is logged once per failing streak. */
+}
+
+/* A failing node answer falls back to the CLI and is logged once per failing streak. */
+static void fallback_cases(struct zapp_runtime *r, const char *directory, const char *log)
+{
+    char out[ZAPP_TEXT_CAP / 8];
     atomic_store(&mode, SERVE_HTTP_401);
     for (int i = 0; i < 3; ++i) assert(zapp_operation_run(r, "status", out, sizeof(out)) && strstr(out, "\"peers\":9"));
     assert(log_lines(log) == 1);
+    atomic_store(&mode, SERVE_WRONG_ID);
+    assert(zapp_operation_run(r, "status", out, sizeof(out)) && strstr(out, "\"peers\":9"));
     atomic_store(&mode, SERVE_RPC_ERROR);
     assert(zapp_operation_run(r, "status", out, sizeof(out)) && strstr(out, "\"peers\":9") && log_lines(log) == 1);
     atomic_store(&mode, SERVE_OK);
@@ -194,7 +226,7 @@ static void operation_cases(struct zapp_runtime *r, const char *directory, unsig
     atomic_store(&mode, SERVE_GARBAGE);
     assert(zapp_operation_run(r, "status", out, sizeof(out)) && strstr(out, "\"peers\":9") && log_lines(log) == 2);
     /* No port file: the node is not serving, the CLI runs and nothing is logged. */
-    char file[512];
+    char file[1024];
     snprintf(file, sizeof(file), "%s/.rpcport", directory);
     assert(unlink(file) == 0);
     long lines = log_lines(log);
@@ -204,7 +236,9 @@ static void operation_cases(struct zapp_runtime *r, const char *directory, unsig
 int main(int argc, char **argv)
 {
     if (argc > 1) return cli_child(argc, argv);
-    char directory[] = "/tmp/zapp-direct-test-XXXXXX", log[512], file[512];
+    char directory[512], log[1024], file[1024];
+    const char *temporary = getenv("TMPDIR");
+    assert(snprintf(directory, sizeof(directory), "%s/zapp-direct-test-XXXXXX", temporary && temporary[0] ? temporary : "/tmp") < (int)sizeof(directory));
     assert(mkdtemp(directory));
     pthread_t thread;
     unsigned port = start_server(&thread);
@@ -219,6 +253,7 @@ int main(int argc, char **argv)
     assert(freopen(log, "w", stderr));
     setvbuf(stderr, NULL, _IONBF, 0);
     operation_cases(&r, directory, port, log);
+    fallback_cases(&r, directory, log);
     pthread_mutex_destroy(&r.mutex);
     shutdown(listener, SHUT_RDWR);
     close(listener);
