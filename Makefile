@@ -4951,9 +4951,9 @@ check-package-capabilities: $(BIN_DIR)/z23-lint
 	@./build/bin/z23-lint check-package-capabilities --selftest
 	@./build/bin/z23-lint check-package-capabilities
 .PHONY: check-package-anatomy
-check-package-anatomy: $(BIN_DIR)/z23_bounded_run
-	@./tools/lint/check_package_anatomy.sh --selftest
-	@./tools/lint/check_package_anatomy.sh
+check-package-anatomy: $(LINTC_TOOL) $(BIN_DIR)/z23_bounded_run
+	@./build/bin/z23-lint check-package-anatomy --selftest
+	@./build/bin/z23-lint check-package-anatomy
 ifeq ($(ZCL_HOST_WINDOWS),1)
 Z23_BOUNDED_RUN_PLATFORM_FLAGS = -D_WIN32_WINNT=0x0A00 \
 	-DWIN32_LEAN_AND_MEAN -municode
@@ -15149,6 +15149,14 @@ build/lintc-obj/gate_object_reproducible_support.o \
 build/lintc-obj/gate_object_reproducible_xlink.o \
 build/lintc-obj/gate_riscv64_universal.o: \
     tools/lint/lintc/gate_object_reproducible_priv.h
+
+# check_package_anatomy's files share one private header; without this line a
+# header-only change leaves stale objects that disagree about struct layout.
+build/lintc-obj/gate_package_anatomy.o \
+build/lintc-obj/gate_package_anatomy_hdr.o \
+build/lintc-obj/gate_package_anatomy_kat.o \
+build/lintc-obj/gate_package_anatomy_selftest.o: \
+    tools/lint/lintc/gate_package_anatomy_priv.h
 
 # The app-bundle gate's directory-walk seam exists only under ZCL_TESTING.
 build/lintc-obj/gate_app_bundle_reproducible_manifest.o \

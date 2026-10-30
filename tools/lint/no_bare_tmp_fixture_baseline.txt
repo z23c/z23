@@ -128,6 +128,7 @@ tools/lint/lintc/gate_hosted_suite_verdict_selftest.c 1
 tools/lint/lintc/gate_hotswap_candidates_ledger.c 1
 tools/lint/lintc/gate_installed_acceptance_tools.c 1
 tools/lint/lintc/gate_landing_proof.c 8
+tools/lint/lintc/gate_package_anatomy_kat.c 1
 tools/lint/lintc/gate_markdown_links.c 2
 tools/lint/lintc/gate_model_column_drift_workers.c 1
 tools/lint/lintc/gate_platform_header_guards_selftest.c 1

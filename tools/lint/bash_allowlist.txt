@@ -158,7 +158,6 @@ tools/harvest_checkpoints.sh
 tools/lint/check_capability_inventory_generated.sh
 tools/lint/check_hotswap_module_imports.sh
 tools/lint/check_hotswap_service_islands.sh
-tools/lint/check_package_anatomy.sh
 tools/lint/check_read_leaf_no_boot_ceremony.sh
 tools/lint/check_standalone_tools_link.sh
 tools/lint/check_telemetry_ontology.sh

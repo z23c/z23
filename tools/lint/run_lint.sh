@@ -126,7 +126,6 @@ gate_command() {
         check-raw-sqlite)                  echo 'tools/scripts/check_raw_sqlite.sh' ;;
         check-raw-malloc)                  echo 'tools/scripts/check_raw_malloc.sh --selftest && tools/scripts/check_raw_malloc.sh' ;;
         check-json-value-init)             echo './build/bin/z23-lint check-json-value-init --self-test && ./build/bin/z23-lint check-json-value-init' ;;
-        check-package-anatomy)             echo './tools/lint/check_package_anatomy.sh --selftest && ./tools/lint/check_package_anatomy.sh' ;;
         check-coins-lookup-nullcheck)      echo 'tools/scripts/check_coins_lookup_nullcheck.sh' ;;
         check-observability-pairing)       echo '"$ZCL_LINT_BIN_DIR/check_observability_pairing"' ;;
         check-no-hardlink-seeding)         echo '"$ZCL_LINT_BIN_DIR/check_no_hardlink_seeding" --selftest && "$ZCL_LINT_BIN_DIR/check_no_hardlink_seeding"' ;;
