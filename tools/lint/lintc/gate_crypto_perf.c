@@ -28,10 +28,10 @@ static const char k_ccp_gate[] = "check-crypto-perf";
 static const char k_ccp_dashes[] =
     "---------------------------------------------------------------------------------";
 
-/* The script's ${VAR:-fallback}: an empty value falls back too. */
-static const char *ccp_env(const char *name, const char *fallback)
+/* The script's ${VAR:-fallback}: an empty value falls back too. The caller
+ * passes getenv("ZCL_...") itself so the flag scanner sees the literal read. */
+static const char *ccp_or(const char *v, const char *fallback)
 {
-    const char *v = getenv(name);
     return v && *v ? v : fallback;
 }
 
@@ -413,11 +413,11 @@ int ccp_core(const struct ccp_opts *o)
 int check_crypto_perf_run(int argc, char **argv)
 {
     struct ccp_opts o = {
-        .binary = ccp_env("ZCL_CRYPTO_PERF_BIN", "build/bin/zclassic23"),
-        .baseline = ccp_env("ZCL_CRYPTO_PERF_BASELINE",
-                            "tools/crypto_perf_baseline.csv"),
-        .margin = ccp_env("ZCL_CRYPTO_PERF_MARGIN", "0.20"),
-        .history = ccp_env("ZCL_BENCH_HISTORY", "docs/bench-history.csv"),
+        .binary = ccp_or(getenv("ZCL_CRYPTO_PERF_BIN"), "build/bin/zclassic23"),
+        .baseline = ccp_or(getenv("ZCL_CRYPTO_PERF_BASELINE"),
+                           "tools/crypto_perf_baseline.csv"),
+        .margin = ccp_or(getenv("ZCL_CRYPTO_PERF_MARGIN"), "0.20"),
+        .history = ccp_or(getenv("ZCL_BENCH_HISTORY"), "docs/bench-history.csv"),
         .out = stdout,
         .err = stderr,
     };
