@@ -25,6 +25,44 @@ static bool patronage_load(const char *workspace, const uint8_t root[32],
                                        wire, wire_len) == 0;
 }
 
+static enum vcs_zcode_binding_error patronage_binding_v1(
+    uint8_t *wire, size_t wire_len,
+    const struct vcs_zcode_patronage_validation_context *context,
+    uint8_t derived[32], uint8_t pubkey[32], uint8_t *operation)
+{
+    struct vcs_zcode_contributor_binding_v1 binding;
+    enum vcs_zcode_binding_error error =
+        vcs_zcode_contributor_binding_parse(wire, wire_len, &binding);
+    if (error == VCS_ZCODE_BINDING_OK)
+        error = vcs_zcode_contributor_binding_root(&binding, derived);
+    if (error == VCS_ZCODE_BINDING_OK)
+        error = vcs_zcode_contributor_binding_verify(
+            &binding, context->expected_network_genesis_root,
+            binding.zid_pubkey, context->now_unix);
+    memcpy(pubkey, binding.zid_pubkey, 32);
+    *operation = binding.operation;
+    return error;
+}
+
+static enum vcs_zcode_binding_error patronage_binding_v2(
+    uint8_t *wire, size_t wire_len,
+    const struct vcs_zcode_patronage_validation_context *context,
+    uint8_t derived[32], uint8_t pubkey[32], uint8_t *operation)
+{
+    struct vcs_zcode_contributor_binding_v2 binding;
+    enum vcs_zcode_binding_error error =
+        vcs_zcode_contributor_binding_parse_v2(wire, wire_len, &binding);
+    if (error == VCS_ZCODE_BINDING_OK)
+        error = vcs_zcode_contributor_binding_root_v2(&binding, derived);
+    if (error == VCS_ZCODE_BINDING_OK)
+        error = vcs_zcode_contributor_binding_verify_v2(
+            &binding, context->expected_network_genesis_root,
+            binding.zid_pubkey, context->now_unix);
+    memcpy(pubkey, binding.zid_pubkey, 32);
+    *operation = binding.operation;
+    return error;
+}
+
 static enum vcs_zcode_patronage_error patronage_binding(
     const uint8_t root[32], const uint8_t expected_pubkey[32],
     const struct vcs_zcode_patronage_validation_context *context)
@@ -37,30 +75,12 @@ static enum vcs_zcode_patronage_error patronage_binding(
                         &wire, &wire_len))
         return VCS_ZCODE_PATRONAGE_CONTRIBUTOR;
     enum vcs_zcode_binding_error error = VCS_ZCODE_BINDING_ERR_VERSION;
-    if (wire_len == VCS_ZCODE_CONTRIBUTOR_BINDING_WIRE_BYTES) {
-        struct vcs_zcode_contributor_binding_v1 binding;
-        error = vcs_zcode_contributor_binding_parse(wire, wire_len, &binding);
-        if (error == VCS_ZCODE_BINDING_OK)
-            error = vcs_zcode_contributor_binding_root(&binding, derived);
-        if (error == VCS_ZCODE_BINDING_OK)
-            error = vcs_zcode_contributor_binding_verify(
-                &binding, context->expected_network_genesis_root,
-                binding.zid_pubkey, context->now_unix);
-        memcpy(pubkey, binding.zid_pubkey, 32);
-        operation = binding.operation;
-    } else if (wire_len == VCS_ZCODE_CONTRIBUTOR_BINDING_V2_WIRE_BYTES) {
-        struct vcs_zcode_contributor_binding_v2 binding;
-        error = vcs_zcode_contributor_binding_parse_v2(
-            wire, wire_len, &binding);
-        if (error == VCS_ZCODE_BINDING_OK)
-            error = vcs_zcode_contributor_binding_root_v2(&binding, derived);
-        if (error == VCS_ZCODE_BINDING_OK)
-            error = vcs_zcode_contributor_binding_verify_v2(
-                &binding, context->expected_network_genesis_root,
-                binding.zid_pubkey, context->now_unix);
-        memcpy(pubkey, binding.zid_pubkey, 32);
-        operation = binding.operation;
-    }
+    if (wire_len == VCS_ZCODE_CONTRIBUTOR_BINDING_WIRE_BYTES)
+        error = patronage_binding_v1(wire, wire_len, context, derived,
+                                     pubkey, &operation);
+    else if (wire_len == VCS_ZCODE_CONTRIBUTOR_BINDING_V2_WIRE_BYTES)
+        error = patronage_binding_v2(wire, wire_len, context, derived,
+                                     pubkey, &operation);
     free(wire);
     if (error != VCS_ZCODE_BINDING_OK || !patronage_equal(root, derived) ||
         operation == VCS_ZCODE_BINDING_REVOKE ||
