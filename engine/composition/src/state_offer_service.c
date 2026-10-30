@@ -72,6 +72,8 @@ static char g_datadir[1024];
 static struct node_db *g_ndb;
 static bool g_have_identity;
 static uint8_t g_online_seed[32];
+static uint32_t g_identity_gap_warn_count;
+static bool g_identity_gap_logged;
 
 static struct sosvc_artifact g_artifacts[STATE_OFFER_MAX_PER_PEER];
 static uint32_t g_artifact_count;
@@ -440,6 +442,19 @@ static bool sosvc_has_offerable_artifact_locked(int32_t tip)
  * also the ONLY place the artifact snapshot is refreshed (every
  * SOSVC_SNAPSHOT_TTL_S, and cheaply: an unchanged bundle is a cache hit, see
  * sosvc_refresh_snapshot), so the send path never opens a bundle. */
+/* One WARN per gap: the first failed mint of an offerable-without-identity gap
+ * logs; the retries on later ticks stay quiet until the gap closes. */
+static bool sosvc_identity_gap_open(void)
+{
+    pthread_mutex_lock(&g_lock);
+    bool first = !g_identity_gap_logged;
+    g_identity_gap_logged = true;
+    if (first)
+        g_identity_gap_warn_count++;
+    pthread_mutex_unlock(&g_lock);
+    return first;
+}
+
 static void sosvc_ensure_offering_identity(int32_t tip)
 {
     if (!g_datadir[0] || tip <= 0)
@@ -449,7 +464,14 @@ static void sosvc_ensure_offering_identity(int32_t tip)
     pthread_mutex_lock(&g_lock);
     bool have = g_have_identity;
     bool offerable = !have && sosvc_has_offerable_artifact_locked(tip);
+    bool cleared = g_identity_gap_logged && !offerable;
+    if (cleared)
+        g_identity_gap_logged = false;
     pthread_mutex_unlock(&g_lock);
+    if (cleared)
+        LOG_INFO(SOSVC_SUBSYS,
+                 "offer identity gap closed: no offerable bundle is held without "
+                 "an online identity any more");
     if (have || !offerable)
         return; /* nothing to advertise — mint nothing, write nothing */
 
@@ -458,11 +480,13 @@ static void sosvc_ensure_offering_identity(int32_t tip)
     err[0] = '\0';
     if (!vcs_zcode_dht_online_key_load_or_create(g_datadir, seed, pubkey, err,
                                                  sizeof(err))) {
-        LOG_WARN(SOSVC_SUBSYS,
-                 "holding an offerable bundle but this node has no online "
-                 "identity to sign an offer with (%s) — peers will hear our "
-                 "file-service port and no state offer",
-                 err[0] ? err : "unknown reason");
+        bool first = sosvc_identity_gap_open();
+        if (first)
+            LOG_WARN(SOSVC_SUBSYS,
+                     "holding an offerable bundle but this node has no online "
+                     "identity to sign an offer with (%s) — peers will hear our "
+                     "file-service port and no state offer",
+                     err[0] ? err : "unknown reason");
         memory_cleanse(seed, sizeof(seed));
         return;
     }
@@ -470,6 +494,7 @@ static void sosvc_ensure_offering_identity(int32_t tip)
     pthread_mutex_lock(&g_lock);
     memcpy(g_online_seed, seed, sizeof(g_online_seed));
     g_have_identity = true;
+    g_identity_gap_logged = false;
     pthread_mutex_unlock(&g_lock);
     memory_cleanse(seed, sizeof(seed));
     LOG_INFO(SOSVC_SUBSYS,
@@ -835,6 +860,14 @@ void state_offer_service_test_hold_artifact(int32_t bundle_height)
 void state_offer_service_test_ensure_identity(int32_t tip)
 {
     sosvc_ensure_offering_identity(tip);
+}
+
+uint32_t state_offer_service_test_identity_gap_warns(void)
+{
+    pthread_mutex_lock(&g_lock);
+    uint32_t warns = g_identity_gap_warn_count;
+    pthread_mutex_unlock(&g_lock);
+    return warns;
 }
 
 bool state_offer_service_test_have_identity(void)

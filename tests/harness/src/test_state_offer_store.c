@@ -535,6 +535,45 @@ static int advertise_when_we_hold_the_checkpoint_bundle(void)
     return failures;
 }
 
+/* THE LOG RULE. A node that holds an offerable bundle but cannot mint its online
+ * identity says so ONCE for that gap, not once per peer-link tick: a live node
+ * logged the same warning 1142 times in 25 minutes. */
+static int identity_gap_warns_once(void)
+{
+    int failures = 0;
+    TEST_CASE("an unmintable identity warns once per gap, not once per tick") {
+        char dir[PATH_MAX], blocker[PATH_MAX], data[PATH_MAX], key[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "state_offer_adv", "gapwarn");
+        ASSERT(snprintf(blocker, sizeof(blocker), "%s/blocker", dir) > 0);
+        ASSERT(snprintf(data, sizeof(data), "%s/node", blocker) > 0);
+        identity_path(data, key, sizeof(key));
+        /* A regular file where the datadir should be: the identity cannot be written. */
+        FILE *f = fopen(blocker, "w");
+        ASSERT(f != NULL);
+        fclose(f);
+
+        state_offer_service_start(data, NULL);
+        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+        ASSERT(cp != NULL);
+        state_offer_service_test_hold_artifact(cp->height);
+        uint32_t before = state_offer_service_test_identity_gap_warns();
+        for (int tick = 0; tick < 5; ++tick)
+            state_offer_service_test_ensure_identity(cp->height + 100000);
+        ASSERT(!state_offer_service_test_have_identity());
+        ASSERT(state_offer_service_test_identity_gap_warns() - before == 1);
+
+        /* Make the identity writable: the next tick mints it and the gap ends. */
+        ASSERT(unlink(blocker) == 0 && mkdir(blocker, 0700) == 0 && mkdir(data, 0700) == 0);
+        state_offer_service_test_ensure_identity(cp->height + 100000);
+        ASSERT(state_offer_service_test_have_identity());
+        ASSERT(access(key, F_OK) == 0);
+        ASSERT(state_offer_service_test_identity_gap_warns() - before == 1);
+        state_offer_service_shutdown();
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
 static int no_advertisement_for_a_stale_bundle(void)
 {
     int failures = 0;
@@ -898,6 +937,7 @@ int test_state_offer_store(void)
     failures += advertise_only_when_we_hold_a_bundle();
     failures += advertise_when_we_hold_the_checkpoint_bundle();
     failures += no_advertisement_for_a_stale_bundle();
+    failures += identity_gap_warns_once();
     failures += picks_newest_acceptable();
     failures += stale_offer_never_chosen();
     failures += bad_bundle_discards_and_tries_next();

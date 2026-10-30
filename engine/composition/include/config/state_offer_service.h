@@ -106,6 +106,8 @@ void state_offer_service_test_hold_artifact(int32_t bundle_height);
 void state_offer_service_test_ensure_identity(int32_t tip);
 /* True iff this node can sign an offer right now. */
 bool state_offer_service_test_have_identity(void);
+/* How many times the "offerable bundle, no online identity" WARN was emitted. */
+uint32_t state_offer_service_test_identity_gap_warns(void);
 /* Force the disk-backed artifact snapshot rebuild (the real
  * rom_seed_list()->open()->manifest-read path this file uses to decide what
  * to offer, not the injected `test_hold_artifact` shortcut) and return how
