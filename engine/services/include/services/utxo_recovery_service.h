@@ -407,7 +407,9 @@ struct zcl_result utxo_recovery_backfill_shielded_range(struct node_db *ndb,
 /* Pure planner for the cursor-gated suffix backfill: given the persisted
  * cursor `done_cursor` (-1 if unset) and the current `tip_height`, return the
  * first height to (re)compute — done_cursor+1, or the tip itself when unset
- * (the background verify pass covers the rest) — when
+ * (rows below the tip are written by the node.db projection with their
+ * values; the background verify pass only repairs EXISTING rows from height 1
+ * upward and never creates a row) — when
  * (done_cursor, tip_height] is non-empty and tip_height > 1000. Returns 0 to
  * SKIP (cursor already covers the tip, or tip too shallow). */
 int utxo_recovery_shielded_backfill_start(int64_t done_cursor, int tip_height);
@@ -426,7 +428,9 @@ void utxo_recovery_backfill_shielded_if_needed(struct node_db *ndb,
 
 /* ── Background self-verify of blocks.{sapling,sprout}_value ────────────
  * Re-derives both values from the block bodies (valueDeltaZat =
- * -sum(valueBalance)) for the active chain from Sapling activation upward, in
+ * -sum(valueBalance)) and the Sprout value for the active chain from height 1
+ * (`sapling_activation` is unused; a pass begun by older code, with no
+ * `shielded_value_verify_version` key, restarts at height 1 once), in
  * small batches, and compare-and-updates rows keyed by hash. Cursor
  * `shielded_value_verify_height` (node_state) is advanced in the same
  * transaction as the repairs; `shielded_value_verify_done` marks a completed

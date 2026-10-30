@@ -24,6 +24,7 @@
 #include "primitives/transaction.h"
 #include "core/amount.h"
 #include "core/uint256.h"
+#include "util/safe_alloc.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
@@ -38,7 +39,11 @@
 /* Build the body for height h whose Sapling valueDelta is `sapling_value`
  * (zclassicd: valueDeltaZat = -sum(tx.valueBalance), so valueBalance is the
  * negation). Header fields make the hash unique per height. */
-static void sbf_make_block(struct block *b, int h, int64_t sapling_value)
+/* Non-zero: sbf_make_block adds a pre-Overwinter JoinSplit tx whose
+ * vpub_old (the block's Sprout value) is this. */
+static int64_t g_sbf_sprout;
+
+static bool sbf_make_block(struct block *b, int h, int64_t sapling_value)
 {
     block_init(b);
     b->header.nVersion = 4;
@@ -46,25 +51,50 @@ static void sbf_make_block(struct block *b, int h, int64_t sapling_value)
     b->header.nBits = 0x2000ffffu;
     b->header.nNonce.data[0] = (uint8_t)(h & 0xFF);
     b->header.nNonce.data[1] = (uint8_t)((h >> 8) & 0xFF);
-    b->num_vtx = 1;
-    b->vtx = calloc(1, sizeof(struct transaction)); // raw-alloc-ok:test-fixture
+    b->num_vtx = 0;
+    b->vtx = calloc(g_sbf_sprout != 0 ? 2 : 1, sizeof(struct transaction)); // raw-alloc-ok:test-fixture
+    if (!b->vtx)
+        return false;
+    b->num_vtx = g_sbf_sprout != 0 ? 2 : 1;
     transaction_init(&b->vtx[0]);
-    transaction_alloc(&b->vtx[0], 1, 1);
+    if (g_sbf_sprout != 0)
+        transaction_init(&b->vtx[1]);
+    if (!transaction_alloc(&b->vtx[0], 1, 1))
+        return false;
     b->vtx[0].vin[0].sequence = 0xffffffff;
     b->vtx[0].vout[0].value = COIN;
     b->vtx[0].overwintered = true;
     b->vtx[0].version = 4;
     b->vtx[0].version_group_id = SAPLING_VERSION_GROUP_ID;
     b->vtx[0].value_balance = -sapling_value;
+    if (g_sbf_sprout == 0)
+        return true;
+    struct transaction *js = &b->vtx[1];
+    if (!transaction_alloc(js, 1, 1))
+        return false;
+    js->vin[0].sequence = 0xffffffff;
+    js->vout[0].value = COIN;
+    js->version = 2;
+    js->v_joinsplit = calloc(1, sizeof(struct js_description)); // raw-alloc-ok:test-fixture
+    if (!js->v_joinsplit)
+        return false;
+    js->num_joinsplit = 1;
+    js->v_joinsplit[0].vpub_old = g_sbf_sprout;
+    return true;
 }
 
-/* The block hash for height h (header-only; independent of the body value). */
-static void sbf_hash_for(int h, struct uint256 *out)
+/* The block hash for height h (header-only; independent of the body value).
+ * Returns false (and zeroes *out) when the fixture block cannot be built. */
+static bool sbf_hash_for(int h, struct uint256 *out)
 {
     struct block b;
-    sbf_make_block(&b, h, 0);
-    block_get_hash(&b, out);
+    bool built = sbf_make_block(&b, h, 0);
+    if (built)
+        block_get_hash(&b, out);
+    else
+        memset(out, 0, sizeof(*out));
     block_free(&b);
+    return built;
 }
 
 /* Install a body-backed block_index at height h on the active chain whose BODY
@@ -77,7 +107,10 @@ static struct block_index *sbf_install_cached(struct main_state *ms,
                                               int64_t cached)
 {
     struct block b;
-    sbf_make_block(&b, h, sapling_value);
+    if (!sbf_make_block(&b, h, sapling_value)) {
+        block_free(&b);
+        return NULL;
+    }
     struct uint256 hh;
     block_get_hash(&b, &hh);
     struct disk_block_pos pos;
@@ -444,6 +477,197 @@ static int sbf_test_verify_snapshot_gap(void)
     return failures;
 }
 
+/* Number of blocks rows at `height` (any value, zero included); -1 on error. */
+static int sbf_row_count(struct node_db *ndb, int height)
+{
+    sqlite3_stmt *s = NULL;
+    int n = -1;
+    if (sqlite3_prepare_v2(ndb->db, "SELECT COUNT(*) FROM blocks WHERE height=?",
+                           -1, &s, NULL) != SQLITE_OK)
+        return -1;
+    sqlite3_bind_int(s, 1, height);
+    if (sqlite3_step(s) == SQLITE_ROW)
+        n = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    return n;
+}
+
+/* verify starts at height 1, not Sapling activation: a pre-Sapling row with a
+ * wrong sprout_value is re-derived from the body, and a body whose row is
+ * missing still gets no row at all */
+static int sbf_test_verify_pre_sapling_sprout(void)
+{
+    int failures = 0;
+    char vdir[256], vpath[320];
+    test_make_tmpdir(vdir, sizeof(vdir), "shielded_backfill", "presapling");
+    g_sbf_dir = vdir;
+    snprintf(vpath, sizeof(vpath), "%s/node.db", vdir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!node_db_open(&ndb, vpath)) {
+        printf("  shielded_backfill: (n) node.db opens... FAIL\n");
+        return 1;
+    }
+    struct main_state ms;
+    main_state_init(&ms);
+    g_sbf_sprout = 250;
+    struct block_index *b1 = sbf_install(&ms, 1, 0);
+    struct uint256 hh;
+    bool hashed = sbf_hash_for(1, &hh);
+    g_sbf_sprout = 0;
+    struct block_index *b2 = b1 ? sbf_install(&ms, 2, 300) : NULL;
+    uint8_t sol[8], cw[32], sr[32];
+    memset(sol, 0x11, sizeof(sol));
+    memset(cw, 0x22, sizeof(cw));
+    memset(sr, 0x33, sizeof(sr));
+    bool staged = b1 && b2 && hashed &&
+        sbf_insert_real_row(&ndb, &hh, 1, sol, (int)sizeof(sol), cw, sr) &&
+        sqlite3_exec(ndb.db, "UPDATE blocks SET sprout_value=7 WHERE height=1",
+                     NULL, NULL, NULL) == SQLITE_OK;
+    SBF_CHECK("(n) fixture built: sprout block, plain block, stale row 1",
+              staged);
+    if (staged) {
+        struct shielded_value_verify_batch b = {0};
+        /* activation 2: the old clamp would skip height 1 */
+        struct zcl_result r = utxo_recovery_verify_shielded_values_batch(
+            &ndb, NULL, &ms, vdir, 2, 2, 512, &b);
+        SBF_CHECK("(n) verify starts at height 1 and reaches the tip",
+                  r.ok && b.from == 1 && b.at_tip);
+        SBF_CHECK("(n) pre-Sapling sprout_value re-derived from the body",
+                  sbf_read_col_int(&ndb, 1, "sprout_value") == 250);
+        SBF_CHECK("(n) in-memory sprout value refreshed",
+                  b1->nSproutValue == 250);
+        SBF_CHECK("(n) no row at all for the row-less height 2",
+                  sbf_row_count(&ndb, 2) == 0);
+    }
+    main_state_free(&ms);
+    node_db_close(&ndb);
+    return failures;
+}
+
+/* A verify pass begun by the old Sapling-start code (cursor at activation, with
+ * or without a done marker, no version key) restarts at height 1 exactly once:
+ * the stale pre-Sapling sprout_value is re-derived and the version recorded;
+ * a second run does not restart. */
+/* Stage heights 1..4 (height 1 carries Sprout value 250 in its body but a
+ * stale 7 in its row) plus the old-version cursor/done state. */
+static bool sbf_stage_old_verify(struct node_db *ndb, struct main_state *ms,
+                                 bool old_done)
+{
+    g_sbf_sprout = 250;
+    struct block_index *b1 = sbf_install(ms, 1, 0);
+    struct uint256 hh;
+    bool hashed = sbf_hash_for(1, &hh);
+    g_sbf_sprout = 0;
+    bool built = b1 && hashed;
+    for (int h = 2; built && h <= 4; h++)
+        built = sbf_install(ms, h, 100 + h) != NULL;
+    uint8_t sol[8], cw[32], sr[32];
+    memset(sol, 0x11, sizeof(sol));
+    memset(cw, 0x22, sizeof(cw));
+    memset(sr, 0x33, sizeof(sr));
+    return built &&
+        sbf_insert_real_row(ndb, &hh, 1, sol, (int)sizeof(sol), cw, sr) &&
+        sqlite3_exec(ndb->db, "UPDATE blocks SET sprout_value=7 WHERE height=1",
+                     NULL, NULL, NULL) == SQLITE_OK &&
+        node_db_state_set_int(ndb, "shielded_value_verify_height", 3) &&
+        (!old_done ||
+         node_db_state_set_int(ndb, "shielded_value_verify_done", 1));
+}
+
+static int sbf_verify_version_run(struct node_db *ndb, struct main_state *ms,
+                                  const char *vdir)
+{
+    int failures = 0;
+    struct shielded_value_verify_batch b = {0};
+    struct zcl_result r = utxo_recovery_verify_shielded_values_batch(
+        ndb, NULL, ms, vdir, 3, 4, 512, &b);
+    SBF_CHECK("(o) old pass restarts at height 1",
+              r.ok && b.from == 1 && b.at_tip && !b.already_done);
+    SBF_CHECK("(o) stale pre-Sapling sprout_value re-derived",
+              sbf_read_col_int(ndb, 1, "sprout_value") == 250);
+    int64_t ver = -1;
+    SBF_CHECK("(o) pass version recorded",
+              node_db_state_get_int(ndb, "shielded_value_verify_version",
+                                    &ver) && ver == 2);
+    SBF_CHECK("(o) restart writes no row for a row-less height",
+              sbf_row_count(ndb, 2) == 0);
+    SBF_CHECK("(o) value made stale again",
+              sqlite3_exec(ndb->db, "UPDATE blocks SET sprout_value=7 "
+                           "WHERE height=1", NULL, NULL, NULL) == SQLITE_OK);
+    struct shielded_value_verify_batch b2 = {0};
+    r = utxo_recovery_verify_shielded_values_batch(ndb, NULL, ms, vdir, 3, 4,
+                                                   512, &b2);
+    SBF_CHECK("(o) second run does not restart",
+              r.ok && b2.already_done && b2.scanned == 0 &&
+              sbf_read_col_int(ndb, 1, "sprout_value") == 7);
+    return failures;
+}
+
+/* A verify pass begun by the old Sapling-start code (cursor at activation, with
+ * or without a done marker, no version key) restarts at height 1 exactly once:
+ * the stale pre-Sapling sprout_value is re-derived and the version recorded;
+ * a second run does not restart. */
+static int sbf_verify_version_case(const char *tag, bool old_done)
+{
+    int failures = 0;
+    char vdir[256], vpath[320];
+    test_make_tmpdir(vdir, sizeof(vdir), "shielded_backfill", tag);
+    g_sbf_dir = vdir;
+    snprintf(vpath, sizeof(vpath), "%s/node.db", vdir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!node_db_open(&ndb, vpath)) {
+        printf("  shielded_backfill: (o) %s node.db opens... FAIL\n", tag);
+        return 1;
+    }
+    struct main_state ms;
+    main_state_init(&ms);
+    bool staged = sbf_stage_old_verify(&ndb, &ms, old_done);
+    SBF_CHECK("(o) old-version state seeded (cursor 3, no version)", staged);
+    if (staged)
+        failures += sbf_verify_version_run(&ndb, &ms, vdir);
+    main_state_free(&ms);
+    node_db_close(&ndb);
+    return failures;
+}
+
+static int sbf_test_verify_version_migration(void)
+{
+    return sbf_verify_version_case("vermig_open", false) +
+           sbf_verify_version_case("vermig_done", true);
+}
+
+/* An allocation failure of the pending batch happens AFTER backfill_open_write
+ * has BEGAN a transaction; the pass must roll it back so a later writer on the
+ * connection is not left inside it. Uses the allocation-fault seam. */
+static int sbf_test_oom_rolls_back(void)
+{
+    int failures = 0;
+    char vdir[256], vpath[320];
+    test_make_tmpdir(vdir, sizeof(vdir), "shielded_backfill", "oom");
+    g_sbf_dir = vdir;
+    snprintf(vpath, sizeof(vpath), "%s/node.db", vdir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    SBF_CHECK("(m) node.db opens", node_db_open(&ndb, vpath));
+    struct main_state ms;
+    main_state_init(&ms);
+    SBF_CHECK("(m) block installed", sbf_install(&ms, 1, 700) != NULL);
+    zcl_alloc_fault_fail_next("backfill_pending");
+    int updated = -1;
+    struct zcl_result r = utxo_recovery_backfill_shielded_range(
+        &ndb, NULL, &ms, vdir, 1, 1, &updated);
+    zcl_alloc_fault_clear();
+    SBF_CHECK("(m) allocation failure fails the pass", !r.ok);
+    SBF_CHECK("(m) failed pass leaves no transaction open",
+              node_db_begin(&ndb));
+    SBF_CHECK("(m) the begun transaction can be closed", node_db_rollback(&ndb));
+    main_state_free(&ms);
+    node_db_close(&ndb);
+    return failures;
+}
+
 /* the verify pass yields to sync */
 static int sbf_test_verify_yield(void)
 {
@@ -727,6 +951,9 @@ int test_utxo_recovery_shielded_backfill(void)
     failures += sbf_test_verify_missing_body();
     failures += sbf_test_verify_snapshot_gap();
     failures += sbf_test_verify_yield();
+    failures += sbf_test_verify_pre_sapling_sprout();
+    failures += sbf_test_verify_version_migration();
+    failures += sbf_test_oom_rolls_back();
     disk_block_io_set_deferred_sync(false);
 
     printf("=== shielded backfill: %d failure(s) ===\n", failures);

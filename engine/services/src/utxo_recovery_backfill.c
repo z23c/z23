@@ -87,7 +87,9 @@ int utxo_recovery_shielded_backfill_start(int64_t done_cursor, int tip_height)
     if (done_cursor >= tip_height)
         return 0;                   /* cursor already covers the tip: skip */
     /* Absent cursor: do NOT read ~every body before services start. Cover only
-     * the tip; the background verify pass heals everything below it. */
+     * the tip. Rows below it come from the node.db projection with their
+     * values; the verify pass repairs existing rows from height 1 (Sprout
+     * included) and never inserts, so it does not create missing rows. */
     return (done_cursor < 0) ? tip_height : (int)(done_cursor + 1);
 }
 
@@ -429,8 +431,9 @@ static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
                             "backfill_pending"),
     };
     if (!pend.items) {
-        sqlite3_finalize(upd);
-        sqlite3_finalize(ins);
+        /* backfill_open_write already BEGAN a transaction: roll it back so a
+         * later writer on this connection is not left inside it. */
+        backfill_abort_write(ndb, upd, ins, "allocate pending batch");
         LOG_FAIL("utxo_recovery", "backfill: out of memory");
     }
     int updated = 0;
@@ -557,6 +560,12 @@ void utxo_recovery_backfill_shielded_if_needed(struct node_db *ndb,
 
 #define SHIELDED_VERIFY_CURSOR_KEY "shielded_value_verify_height"
 #define SHIELDED_VERIFY_DONE_KEY "shielded_value_verify_done"
+/* Pass version, kept in the same node_state kv as the cursor. Version 2 =
+ * the pass starts at height 1 (Sprout values predate Sapling). A pass with no
+ * version or a lower one (cursor/done marker written by the old Sapling-start
+ * code) restarts at height 1 exactly once, then records this version. */
+#define SHIELDED_VERIFY_VERSION_KEY "shielded_value_verify_version"
+#define SHIELDED_VERIFY_VERSION 2
 
 
 struct shielded_verify_ctx {
@@ -564,6 +573,8 @@ struct shielded_verify_ctx {
     int count;
     int through;      /* cursor value to persist with this batch */
     bool mark_done;   /* persist the done marker in the same transaction */
+    bool restart;     /* first batch of a version migration: clear the old
+                       * done marker and record SHIELDED_VERIFY_VERSION */
     int repaired;
 };
 
@@ -610,6 +621,16 @@ static int verify_collect_range(struct active_chain *chain, const char *datadir,
     return n;
 }
 
+/* Version migration, inside the batch transaction: drop a done marker the old
+ * code wrote and record the new version (the cursor is persisted right after
+ * with this batch's own value, which began at height 1). */
+static bool verify_persist_restart(struct node_db *ndb)
+{
+    return node_db_state_delete(ndb, SHIELDED_VERIFY_DONE_KEY) &&
+           node_db_state_set_int(ndb, SHIELDED_VERIFY_VERSION_KEY,
+                                 SHIELDED_VERIFY_VERSION);
+}
+
 static bool verify_write_batch(struct node_db *ndb, void *ctx_ptr)
 {
     struct shielded_verify_ctx *vctx = ctx_ptr;
@@ -628,6 +649,8 @@ static bool verify_write_batch(struct node_db *ndb, void *ctx_ptr)
             return false; // raw-return-ok:backfill_write_value_row rolled back
         vctx->repaired += wrote;
     }
+    if (vctx->restart && !verify_persist_restart(ndb))
+        return backfill_abort_write(ndb, upd, ins, "persist verify version");
     if (!node_db_state_set_int(ndb, SHIELDED_VERIFY_CURSOR_KEY, vctx->through))
         return backfill_abort_write(ndb, upd, ins, "persist verify cursor");
     if (vctx->mark_done &&
@@ -656,22 +679,29 @@ static bool verify_commit_batch(struct node_db *ndb, struct db_service *dbsvc,
     return ok;
 }
 
-/* First height still to verify: above the persisted cursor, never below Sapling
- * activation. */
-static int verify_first_height(struct node_db *ndb, int sapling_activation,
+/* First height still to verify: above the persisted cursor, from height 1.
+ * Sprout values exist from the first JoinSplit, long before Sapling, so the
+ * pass does not start at Sapling activation. */
+static int verify_first_height(struct node_db *ndb, bool restart,
                                int64_t *cursor)
 {
     *cursor = -1;
-    node_db_state_get_int(ndb, SHIELDED_VERIFY_CURSOR_KEY, cursor);
+    if (!restart)
+        node_db_state_get_int(ndb, SHIELDED_VERIFY_CURSOR_KEY, cursor);
     int from = (int)*cursor + 1;
-    if (from < sapling_activation)
-        from = sapling_activation;
     return from < 1 ? 1 : from;
 }
 
 static bool verify_args_ok(const struct node_db *ndb, int max_heights)
 {
     return ndb && ndb->open && max_heights > 0;
+}
+
+static bool verify_needs_restart(struct node_db *ndb)
+{
+    int64_t ver = 0;
+    return !node_db_state_get_int(ndb, SHIELDED_VERIFY_VERSION_KEY, &ver) ||
+           ver < SHIELDED_VERIFY_VERSION;
 }
 
 static bool verify_marker_set(struct node_db *ndb)
@@ -704,14 +734,16 @@ struct zcl_result utxo_recovery_verify_shielded_values_batch(
     if (!verify_args_ok(ndb, max_heights))
         return ZCL_ERR(-53, "shielded verify: bad batch arguments");
 
-    if (verify_marker_set(ndb)) {
+    bool restart = verify_needs_restart(ndb);
+    if (!restart && verify_marker_set(ndb)) {
         res.at_tip = res.already_done = true;
         if (out)
             *out = res;
         return ZCL_OK;
     }
     int64_t cursor;
-    int from = verify_first_height(ndb, sapling_activation, &cursor);
+    (void)sapling_activation;   /* kept for the caller; the pass starts at 1 */
+    int from = verify_first_height(ndb, restart, &cursor);
     if (cursor < 0)
         cursor = 0;
     int to = from + max_heights - 1;
@@ -732,6 +764,7 @@ struct zcl_result utxo_recovery_verify_shielded_values_batch(
      * the done marker is withheld until a later batch verifies it. */
     vctx.through = (to >= from && verified >= from) ? verified : (int)cursor;
     vctx.mark_done = verified >= tip_height;
+    vctx.restart = restart;
     res.through = verified;
     if (!verify_commit_batch(ndb, dbsvc, &vctx))
         return ZCL_ERR(-55, "shielded verify: batch write failed");
