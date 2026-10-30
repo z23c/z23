@@ -37,9 +37,12 @@ static bool fixture_identity(struct device_identity *identity, uint8_t seed)
 }
 
 /* Pure wait ceilings: nothing asserts elapsed time; generous so a loaded host
- * (hundreds of concurrent builds) cannot expire a handshake or child reap. */
+ * (hundreds of concurrent builds) cannot expire a handshake or child reap.
+ * The handshake deadline stays under the 10 s that remaining_ms
+ * (engine/services/src/device_connection_io.c) accepts: a farther deadline
+ * is invalid there, so every transfer would refuse at once. */
 static const int64_t DEVICE_TEST_REAP_US = INT64_C(60000000);
-static const int64_t DEVICE_TEST_REVOKE_NS = INT64_C(30000000000);
+static const int64_t DEVICE_TEST_REVOKE_NS = INT64_C(9000000000);
 
 static bool reap_bounded(pid_t child)
 {
