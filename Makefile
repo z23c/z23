@@ -14818,10 +14818,10 @@ check-published-platforms:
 # produced a false "identical identities" report on 2026-07-28); this is a
 # shrink-only ratchet over the tools/dev/ scripts still carrying their own
 # copy, named in tools/lint/identity_parser_baseline.txt.
-check-identity-parser-single:
+check-identity-parser-single: $(LINTC_TOOL)
 	@echo "══ LINT: source-identity JSON parser stays single ══"
-	@./tools/lint/check_identity_parser_single.sh --selftest
-	@./tools/lint/check_identity_parser_single.sh
+	@./build/bin/z23-lint check-identity-parser-single --selftest
+	@./build/bin/z23-lint check-identity-parser-single
 
 # Gate — the JSON key "source_id_sha256" answers two different questions in
 # this tree (what a BINARY was built from, baked in and constant, vs. what a

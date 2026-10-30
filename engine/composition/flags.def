@@ -1264,17 +1264,17 @@ Z23_FLAG("ZCL_HOTSWAP_VERIFY_DIR", "env_build", "-", "-",
 Z23_FLAG("ZCL_HUMAN", "env_test", "-", "-",
           "first use tests/harness/src/test_cli_render.c:auto; documented at docs/dev/NATIVE_COMMAND_INTERFACE.md:1142: overridden: ZCL_HUMAN=1 (also true/yes/on) forces it even on a pipe")
 Z23_FLAG("ZCL_IDENTITY_PARSER_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_identity_parser_single.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_identity_parser_single.c:auto")
 Z23_FLAG("ZCL_IDENTITY_PARSER_CEILING", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_identity_parser_single.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_identity_parser_single.c:auto")
 Z23_FLAG("ZCL_IDENTITY_PARSER_FILE_FLOOR", "env_build", "5", "-",
-          "undocumented; first use tools/lint/check_identity_parser_single.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_identity_parser_single.c:auto")
 Z23_FLAG("ZCL_IDENTITY_PARSER_MARKER_ALLOWED", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_identity_parser_single.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_identity_parser_single.c:auto")
 Z23_FLAG("ZCL_IDENTITY_PARSER_MARKER_CEILING", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_identity_parser_single.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_identity_parser_single.c:auto")
 Z23_FLAG("ZCL_IDENTITY_PARSER_SCAN_ROOT", "env_build", "tools", "-",
-          "undocumented; first use tools/lint/check_identity_parser_single.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_identity_parser_single.c:auto")
 Z23_FLAG("ZCL_INSTALL_ASSISTED", "env_runtime", "-", "-",
           "undocumented; first use engine/composition/src/consensus_state_install_runtime.c:auto")
 Z23_FLAG("ZCL_INTERNAL_CLANG_COVERAGE_SELFTEST", "env_build", "0", "-",
