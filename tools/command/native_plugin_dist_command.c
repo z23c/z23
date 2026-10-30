@@ -447,10 +447,14 @@ static bool pdc_remote_wait(struct zcl_command_reply *reply, struct json_value *
     return last_ok || (pdc_remote_poll_lost(reply, job, "the wait ran out before the node answered again"), false);
 }
 
+/* Largest accepted fetch_remote wait, in seconds. Bounding it keeps
+ * wait_s * 1000 well inside int64 milliseconds for the poll deadline. */
+#define PDC_REMOTE_WAIT_MAX_S 86400u
+
 static bool pdc_remote_args_ok(const struct zcl_command_request *request, bool polling, bool bad,
                                const char *params, uint64_t *wait_s)
 {
-    return !bad && params && pdc_u64(request, "wait", wait_s) &&
+    return !bad && params && pdc_u64(request, "wait", wait_s) && *wait_s <= PDC_REMOTE_WAIT_MAX_S &&
            (polling || (plg_str(request, "root") && plg_str(request, "name")));
 }
 
@@ -465,7 +469,7 @@ void zcl_native_handle_plugin_fetch_remote(const struct zcl_command_request *req
     if (!pdc_remote_args_ok(request, polling, bad, params, &wait_s)) {
         free(params);
         pdc_refuse(reply, PLUGIN_DIST_ERR_ARGUMENT, "fetch_remote",
-                   "root and name (or job), and positive integers for peer_id, max-bytes, timeout, wait are required",
+                   "root and name (or job), and positive integers for peer_id, max-bytes, timeout, wait are required; wait is at most 86400 seconds",
                    false, false);
         return;
     }

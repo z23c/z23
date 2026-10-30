@@ -442,6 +442,24 @@ static int pjr_case_2(void)
     return failures;
 }
 
+/* A wait that wrapped int64 milliseconds used to leave the deadline in the
+ * past, so the wait returned without polling. It is now refused before any RPC. */
+static int pjr_case_4(void)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    TEST_CASE("fetch_remote refuses a wait past the cap before any poll") {
+        const char *const polls[] = { pjr_running };
+        pjr_run(polls, 1, "9223372036854775807", &r);
+        ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(r.error.code[0] != '\0');
+        ASSERT(strstr(r.error.message, "86400") != NULL);
+        ASSERT(g_pjr_calls == 0);
+        zcl_command_reply_free(&r);
+    } TEST_END
+    return failures;
+}
+
 static int pjr_case_3(void)
 {
     int failures = 0;
@@ -482,6 +500,7 @@ int test_plugin_fetch_job(void)
     failures += pjr_case_1();
     failures += pjr_case_2();
     failures += pjr_case_3();
+    failures += pjr_case_4();
     /* Every case has ended (pass or fail); drop this run's RAM trees. */
     test_shm_reap_own("zcode_swarm-test-tmp_");
     return failures;
