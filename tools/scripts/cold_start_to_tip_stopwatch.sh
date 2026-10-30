@@ -157,9 +157,7 @@ PEER_TIP_TOLERANCE="${ZCL_CS_PEER_TIP_TOLERANCE:-1000}"
 PEER_HANDSHAKE_SECS="${ZCL_CS_PEER_HANDSHAKE_SECS:-12}"
 PEER_MAGIC="${ZCL_CS_PEER_MAGIC:-24e92764}"
 P2P_VERSION_PROBE="${ZCL_CS_P2P_VERSION_PROBE:-$REPO_ROOT/tools/scripts/p2p_version_probe.sh}"
-# The node runs as the leader of its own process group so teardown can kill
-# the whole group. Prefer the native launcher (tools/process_group_exec.c);
-# setsid(1) is util-linux only and absent on macOS.
+# The node leads its own process group, launched natively: macOS has no setsid(1).
 PROCESS_GROUP_EXEC="${ZCL_PROCESS_GROUP_EXEC:-$REPO_ROOT/build/bin/process-group-exec}"
 BUDGET="${ZCL_CS_BUDGET_SECS:-600}"     # 10-minute MVP C3 target
 SAMPLE_SECS="${ZCL_CS_SAMPLE_SECS:-10}"
@@ -1737,11 +1735,9 @@ if [ "$SELFTEST" = "1" ]; then
     # The incompatible-fixture skip reason must carry the exact match
     # substring the shared skip-class table keys on, so the collector and
     # judge classify it fixture_incompatible (threshold 1 — never
-    # self-heals) rather than letting it drift to unclassified. The class
-    # has more than one row, so select this harness's row by its substring.
+    # self-heals) rather than drift to unclassified. The class has several rows.
     st_cls_match="$(sed -n 's/^STOPWATCH_SKIP_CLASS("fixture_incompatible",[ ]*[0-9][0-9]*,[ ]*"\(.*\)")[ ]*$/\1/p' \
-        "$REPO_ROOT/engine/services/include/services/stopwatch_skip_classes.def" |
-        grep -Fx "file_peer fixture incompatible")"
+        "$REPO_ROOT/engine/services/include/services/stopwatch_skip_classes.def" | grep -Fx "file_peer fixture incompatible")"
     st_ps_check "the shared skip-class table knows fixture_incompatible" \
         "file_peer fixture incompatible" "$st_cls_match"
     grep -qF "skip \"$st_cls_match" "${BASH_SOURCE[0]}"
@@ -2641,8 +2637,7 @@ skip() { echo "cold-start-wipe-stopwatch: SKIP ($*)"; write_artifact "skip" 2 "$
 die()  { echo "cold-start-wipe-stopwatch: FAIL: $*" >&2; write_artifact "fail" 1 "$*"; exit 1; }
 
 [ -x "$NODE_BIN" ] || skip "node binary absent/not executable: $NODE_BIN"
-[ -x "$PROCESS_GROUP_EXEC" ] || command -v setsid >/dev/null 2>&1 ||
-    skip "no process-group launcher: run make process-group-exec"
+[ -x "$PROCESS_GROUP_EXEC" ] || skip "no process-group launcher: run make process-group-exec"
 
 # Identity of WHAT IS ABOUT TO BE MEASURED, read once, before the run, via the
 # ONE canonical reader (tools/scripts/source_identity_lib.sh). Empty output is a
@@ -2900,17 +2895,10 @@ launch_node() {
     # launch only: a followed self-respawn is the same run on the same
     # datadir, so moving this would restart a clock that never stopped.
     [ "$NODE_LAUNCH_UNIX" = "-1" ] && NODE_LAUNCH_UNIX=$(date +%s)
-    group_exec env HOME="$ISO_HOME" "$NODE_BIN" \
+    "$PROCESS_GROUP_EXEC" env HOME="$ISO_HOME" "$NODE_BIN" \
         "${node_args[@]}" \
         >>"$DATADIR/node.log" 2>&1 &
     PID=$!
-}
-
-# group_exec CMD... — exec CMD as the leader of a new process group. Run in
-# a background subshell, exec keeps $! as both the node pid and its group id.
-group_exec() {
-    [ -x "$PROCESS_GROUP_EXEC" ] && exec "$PROCESS_GROUP_EXEC" "$@"
-    exec setsid "$@"
 }
 
 launch_node
