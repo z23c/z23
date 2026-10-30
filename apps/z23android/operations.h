@@ -5,6 +5,7 @@
 #include "nodelog.h"
 #include "thermal.h"
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/types.h>
 struct zapp_runtime {
     pthread_mutex_t mutex;
@@ -23,6 +24,8 @@ struct zapp_runtime {
     enum zapp_pace pace;
     /* Forwards the node console log to logcat and tracks its boot stage. */
     struct zapp_nodelog log;
+    /* The last direct node query failed and its reason is logged; cleared by the next success. */
+    atomic_bool direct_reported;
 };
 bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *libs, bool preview);
 void zapp_runtime_signal_stop(struct zapp_runtime *r);
@@ -44,6 +47,9 @@ enum zapp_pace zapp_node_pace(const struct zapp_runtime *r);
  * later calls with an unchanged pace do nothing. Returns false and logs when the file cannot be
  * replaced, leaving the recorded pace unchanged. Not thread safe; callers serialize. */
 bool zapp_node_pace_write(struct zapp_runtime *r, enum zapp_pace pace);
+/* Runs one read-only operation and leaves its JSON reply in out. The reply comes from the running
+ * node over its local RPC port; when that fails the same operation runs through the CLI, and the
+ * reason is logged once until the next success. */
 bool zapp_operation_run(struct zapp_runtime *r, const char *id, char *out, size_t cap);
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
 /* True when the node has published its onion address: a valid Tor v3 hostname file. */

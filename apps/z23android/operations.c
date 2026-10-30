@@ -3,6 +3,7 @@
 #include "operations.h"
 #include "json/json.h"
 #include "base/cleanse.h"
+#include "rpc.h"
 #ifdef __ANDROID__
 #include <android/log.h>
 #endif
@@ -22,12 +23,15 @@
 #include <time.h>
 #include <unistd.h>
 
+#define DIRECT_TIMEOUT_MS 5000
 extern char **environ;
-/* The only read-only commands the app runs; start, stop and fleet join have their own paths. */
-struct operation { const char *id; const char *args[4]; };
+/* The only read-only operations the app runs; start, stop and fleet join have their own paths. args is
+ * the CLI form; rpc and params are the node call that produces the same data, member the part
+ * of its result the CLI reports as data. */
+struct operation { const char *id; const char *args[4]; const char *rpc, *params, *member; };
 static const struct operation operations[] = {
-    {"status", {"core", "status"}},
-    {"wallet_balance", {"core", "wallet", "balance"}},
+    {"status", {"core", "status"}, "dumpstate", "[\"status_frontdoor\"]", "state"},
+    {"wallet_balance", {"core", "wallet", "balance"}, "z_gettotalbalance", "[]", NULL},
 };
 
 static int64_t milliseconds(void)
@@ -513,11 +517,64 @@ bool zapp_balance_format(const char *json, char *out, size_t cap)
     return ok;
 }
 
+static void direct_note(const char *id, const char *why)
+{
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_WARN, "z23", "%s: node query failed, using the command line: %s", id, why);
+#else
+    fprintf(stderr, "z23: %s: node query failed, using the command line: %s\n", id, why);
+#endif
+}
+
+/* Rewrites the node's JSON-RPC reply in out as the CLI replies: {"ok":true,"data":<result>}, where
+ * data is the named member of the result when the operation has one. */
+static bool direct_envelope(const struct operation *op, char *out, size_t cap)
+{
+    struct json_value reply = {0}, envelope = {0};
+    bool ok = json_read(&reply, out, strlen(out));
+    const struct json_value *error = json_get(&reply, "error");
+    const struct json_value *data = json_get(&reply, "result");
+    if (ok && op->member) data = json_get(data, op->member);
+    ok = ok && data && data->type == JSON_OBJ && (!error || json_is_null(error));
+    if (ok) {
+        json_set_object(&envelope);
+        ok = json_push_kv_bool(&envelope, "ok", true) && json_push_kv(&envelope, "data", data) &&
+             json_write(&envelope, out, cap) < cap;
+    }
+    json_free(&envelope);
+    json_free(&reply);
+    return ok;
+}
+
+/* Asks the running node over its local RPC port, which costs no process start. False leaves the
+ * caller to run the CLI. A node that is not serving RPC is the normal stopped state and is not
+ * logged; any other failure is logged once until a query succeeds again. */
+static bool direct_query(struct zapp_runtime *r, const struct operation *op, char *out, size_t cap)
+{
+    pthread_mutex_lock(&r->mutex);
+    bool stopping = r->stopping;
+    pthread_mutex_unlock(&r->mutex);
+    if (stopping) return false;
+    char why[160] = "";
+    enum zapp_rpc_result rc = zapp_rpc_call(r->directory, op->rpc, op->params, DIRECT_TIMEOUT_MS,
+                                            out, cap, why, sizeof(why));
+    if (rc == ZAPP_RPC_OK && !direct_envelope(op, out, cap)) {
+        snprintf(why, sizeof(why), "the node reply has no usable %s", op->member ? op->member : "result");
+        rc = ZAPP_RPC_FAILED;
+    }
+    if (rc == ZAPP_RPC_FAILED && !atomic_exchange(&r->direct_reported, true)) direct_note(op->id, why);
+    if (rc != ZAPP_RPC_FAILED) atomic_store(&r->direct_reported, false);
+    return rc == ZAPP_RPC_OK;
+}
+
 bool zapp_operation_run(struct zapp_runtime *r, const char *id, char *out, size_t cap)
 {
     if (!r || !id || !out || !cap) return false;
-    for (size_t i = 0; i < sizeof(operations) / sizeof(operations[0]); ++i)
-        if (strcmp(id, operations[i].id) == 0) return command(r, operations[i].args, NULL, out, cap);
+    for (size_t i = 0; i < sizeof(operations) / sizeof(operations[0]); ++i) {
+        if (strcmp(id, operations[i].id) != 0) continue;
+        return direct_query(r, &operations[i], out, cap) ||
+               command(r, operations[i].args, NULL, out, cap);
+    }
     snprintf(out, cap, "This operation is not available in the phone's permission set.");
     return false;
 }

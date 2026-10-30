@@ -107,11 +107,16 @@ test: prepare-quirc test-bridge test-voice test-host test-dexgen test-watch
 	  -lm -o '$(BUILD_DIR)/fleet-test'
 	'$(BUILD_DIR)/fleet-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/json/include \
-	  -I../../platform/modules/base/include tests/operations_test.c operations.c nodelog.c \
+	  -I../../platform/modules/base/include tests/operations_test.c operations.c rpc.c nodelog.c \
 	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
 	  ../../platform/modules/base/src/safe_alloc.c -Wl,--wrap=clock_gettime \
 	  -o '$(BUILD_DIR)/operations-test'
 	'$(BUILD_DIR)/operations-test'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/json/include \
+	  -I../../platform/modules/base/include tests/direct_test.c operations.c rpc.c nodelog.c \
+	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
+	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/direct-test'
+	'$(BUILD_DIR)/direct-test'
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../platform/modules/json/include \
 	  -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include \
 	  tests/conversation_test.c conversation.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
