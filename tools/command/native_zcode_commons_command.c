@@ -60,55 +60,92 @@ static bool zcc_segment_contains(const char *segment, size_t segment_len,
     return false;
 }
 
+/* Rejects whole path strings that can never name a scratch workspace. */
+static bool zcc_workspace_rejects_whole_path(const char *workspace, size_t len)
+{
+    return len > 4096 || strcmp(workspace, "/") == 0 ||
+        strcmp(workspace, "\\") == 0 ||
+        strcmp(workspace, ".") == 0 || strcmp(workspace, "./") == 0 ||
+        strcmp(workspace, ".\\") == 0 || strcmp(workspace, "..") == 0;
+}
+
+/* Returns the length of the workspace's leading root, ./ or drive prefix. */
+static size_t zcc_workspace_prefix_length(const char *workspace)
+{
+    if (workspace[0] == '/' || workspace[0] == '\\') return 1;
+    if (workspace[0] == '.' &&
+        (workspace[1] == '/' || workspace[1] == '\\')) return 2;
+#if defined(_WIN32)
+    if (((workspace[0] >= 'A' && workspace[0] <= 'Z') ||
+         (workspace[0] >= 'a' && workspace[0] <= 'z')) &&
+        workspace[1] == ':' &&
+        (workspace[2] == '/' || workspace[2] == '\\')) return 3;
+#endif
+    return 0;
+}
+
+static bool zcc_workspace_byte_allowed(unsigned char ch)
+{
+    return !(ch < 0x20 || ch == 0x7f || ch == ':');
+}
+
+/* True when a path segment is empty, "." or "..", or begins with .zclassic. */
+static bool zcc_workspace_segment_rejected(const char *workspace, size_t start,
+                                           size_t segment_len)
+{
+    return segment_len == 0 ||
+        (segment_len == 1 && workspace[start] == '.') ||
+        (segment_len == 2 && workspace[start] == '.' &&
+         workspace[start + 1] == '.') ||
+        (segment_len >= 9 &&
+         memcmp(workspace + start, ".zclassic", 9) == 0);
+}
+
+static bool zcc_workspace_segment_is_scratch(const char *workspace,
+                                             size_t start, size_t segment_len)
+{
+    return (segment_len == 3 &&
+            memcmp(workspace + start, "tmp", 3) == 0) ||
+        (segment_len == 8 &&
+         memcmp(workspace + start, "test-tmp", 8) == 0) ||
+        zcc_segment_contains(workspace + start, segment_len,
+                             "scratch", 7);
+}
+
+/* Walks every segment; false on any disallowed byte or rejected segment. */
+static bool zcc_workspace_scan_segments(const char *workspace, size_t len,
+                                        size_t pos, bool *scratch_named)
+{
+    while (pos < len) {
+        size_t start = pos;
+        while (pos < len && workspace[pos] != '/' && workspace[pos] != '\\') {
+            if (!zcc_workspace_byte_allowed((unsigned char)workspace[pos]))
+                return false;
+            pos++;
+        }
+        size_t segment_len = pos - start;
+        if (zcc_workspace_segment_rejected(workspace, start, segment_len))
+            return false;
+        if (zcc_workspace_segment_is_scratch(workspace, start, segment_len))
+            *scratch_named = true;
+        if (pos < len) pos++;
+    }
+    return true;
+}
+
 static bool zcc_workspace_is_lexical_scratch(const char *workspace)
 {
     if (!workspace || workspace[0] == '\0' || workspace[0] == '~')
         return false;
     size_t len = strlen(workspace);
-    if (len > 4096 || strcmp(workspace, "/") == 0 ||
-        strcmp(workspace, "\\") == 0 ||
-        strcmp(workspace, ".") == 0 || strcmp(workspace, "./") == 0 ||
-        strcmp(workspace, ".\\") == 0 || strcmp(workspace, "..") == 0)
-        return false;
+    if (zcc_workspace_rejects_whole_path(workspace, len)) return false;
 
-    size_t pos = 0;
-    if (workspace[0] == '/' || workspace[0] == '\\') pos = 1;
-    else if (workspace[0] == '.' &&
-             (workspace[1] == '/' || workspace[1] == '\\')) pos = 2;
-#if defined(_WIN32)
-    else if (((workspace[0] >= 'A' && workspace[0] <= 'Z') ||
-              (workspace[0] >= 'a' && workspace[0] <= 'z')) &&
-             workspace[1] == ':' &&
-             (workspace[2] == '/' || workspace[2] == '\\')) pos = 3;
-#endif
+    size_t pos = zcc_workspace_prefix_length(workspace);
     bool scratch_named = false;
-    while (pos < len) {
-        size_t start = pos;
-        while (pos < len && workspace[pos] != '/' && workspace[pos] != '\\') {
-            unsigned char ch = (unsigned char)workspace[pos];
-            if (ch < 0x20 || ch == 0x7f || ch == ':') return false;
-            pos++;
-        }
-        size_t segment_len = pos - start;
-        if (segment_len == 0 ||
-            (segment_len == 1 && workspace[start] == '.') ||
-            (segment_len == 2 && workspace[start] == '.' &&
-             workspace[start + 1] == '.'))
-            return false;
-        if (segment_len >= 9 &&
-            memcmp(workspace + start, ".zclassic", 9) == 0)
-            return false;
-        if ((segment_len == 3 &&
-             memcmp(workspace + start, "tmp", 3) == 0) ||
-            (segment_len == 8 &&
-             memcmp(workspace + start, "test-tmp", 8) == 0) ||
-            zcc_segment_contains(workspace + start, segment_len,
-                                 "scratch", 7))
-            scratch_named = true;
-        if (pos < len) pos++;
-    }
+    if (!zcc_workspace_scan_segments(workspace, len, pos, &scratch_named))
+        return false;
     return scratch_named && workspace[len - 1] != '/' &&
-           workspace[len - 1] != '\\';
+        workspace[len - 1] != '\\';
 }
 
 bool zcl_native_zcode_workspace_is_explicit_scratch(const char *workspace)
@@ -396,6 +433,120 @@ static const struct zcc_shadow_package *zcc_shadow_package_lookup(
     return NULL;
 }
 
+/* Validates the shadow-plan request fields and allowed input keys. */
+static bool zcc_shadow_input_complete(
+    const struct zcl_command_request *request, const char *workspace,
+    const struct json_value *epoch_value, const struct json_value *now_value,
+    const char *const *keys)
+{
+    return workspace && request && zcc_keys(request->input, keys, 7) &&
+        epoch_value && now_value &&
+        epoch_value->type == JSON_INT && now_value->type == JSON_INT &&
+        json_get_int(epoch_value) >= 0 && json_get_int(now_value) > 0;
+}
+
+/* Decodes the four input roots and loads the raw score receipt wire. */
+static bool zcc_shadow_roots_and_wire_loaded(
+    const char *workspace, const struct json_value *input,
+    uint8_t score_root[32], uint8_t policy_root[32],
+    uint8_t reproduction_root[32], uint8_t reproduction_proof_set_root[32],
+    uint8_t **wire, size_t *wire_len)
+{
+    return zcc_root(input, "score_receipt_root", score_root) &&
+        zcc_root(input, "policy_candidate_root", policy_root) &&
+        zcc_root(input, "reproduction_request_root", reproduction_root) &&
+        zcc_root(input, "reproduction_proof_set_root",
+                 reproduction_proof_set_root) &&
+        vcs_object_load_raw_bounded(
+            workspace, score_root, VCS_ZCODE_SCORE_WIRE_BYTES,
+            wire, wire_len) == 0;
+}
+
+/* Parses the wire and checks the receipt rederives its own address. */
+static bool zcc_shadow_score_rederives(
+    const uint8_t *wire, size_t wire_len,
+    struct vcs_zcode_score_receipt_v1 *score, const uint8_t score_root[32])
+{
+    uint8_t derived[32];
+    return vcs_zcode_score_receipt_parse(
+            wire, wire_len, score) == VCS_ZCODE_SCORE_OK &&
+        vcs_zcode_score_receipt_id(score, derived) == VCS_ZCODE_SCORE_OK &&
+        memcmp(derived, score_root, 32) == 0;
+}
+
+/* Writes the shadow-plan root fields of the receipt and its inputs. */
+static void zcc_render_shadow_roots(
+    struct json_value *data, const struct vcs_zcode_score_receipt_v1 *score,
+    const uint8_t score_root[32], const uint8_t policy_root[32],
+    const uint8_t reproduction_root[32],
+    const uint8_t reproduction_proof_set_root[32])
+{
+    zcc_hex(data, "score_receipt_root", score_root);
+    zcc_hex(data, "policy_candidate_root", policy_root);
+    zcc_hex(data, "reproduction_request_root", reproduction_root);
+    zcc_hex(data, "reproduction_proof_set_root",
+            reproduction_proof_set_root);
+    zcc_hex(data, "package_root", score->package_root);
+    zcc_hex(data, "release_root", score->release_root);
+    zcc_hex(data, "task_root", score->task_root);
+    zcc_hex(data, "candidate_root", score->candidate_root);
+    zcc_hex(data, "proof_policy_root", score->proof_policy_root);
+    zcc_hex(data, "proof_set_root", score->proof_set_root);
+    zcc_hex(data, "proven_lane_root", score->proven_lane_root);
+    zcc_hex(data, "accepted_extraction_evidence_root",
+            score->evidence_roots[VCS_ZCODE_SCORE_ACCEPTED_EXTRACTION]);
+    zcc_hex(data, "independent_reproduction_evidence_root",
+            score->evidence_roots[VCS_ZCODE_SCORE_INDEPENDENT_REPRODUCTION]);
+}
+
+/* Writes the reproduction-qualification findings of the shadow plan. */
+static void zcc_render_shadow_qualification(
+    struct json_value *data,
+    const struct vcs_zcode_reproduction_qualification_report *qualification)
+{
+    (void)json_push_kv_bool(data, "exact_reproduction_match",
+                            qualification->exact_reproduction_match);
+    (void)json_push_kv_bool(data, "distinct_signer",
+                            qualification->distinct_signer);
+    (void)json_push_kv_bool(data, "signer_policy_approved",
+                            qualification->signer_policy_approved);
+    (void)json_push_kv_bool(data,
+        "declared_operator_group_distinct",
+        qualification->declared_operator_group_distinct);
+    (void)json_push_kv_bool(data, "remote_transport_used",
+                            qualification->remote_transport_used);
+    (void)json_push_kv_bool(data,
+        "physical_independence_proven",
+        qualification->physical_independence_proven);
+    (void)json_push_kv_bool(data, "identity_linkage_complete",
+                            qualification->identity_linkage_complete);
+    (void)json_push_kv_int(data, "reproduction_receipts",
+                           qualification->reproduction_receipts);
+    (void)json_push_kv_str(data, "reproduction_compare_rule",
+        vcs_reproduce_rule_string(
+            (enum vcs_reproduce_rule)qualification->reproduce_rule));
+}
+
+/* Writes the static pre-genesis guarantees of the shadow plan. */
+static void zcc_render_shadow_plan_guarantees(struct json_value *data,
+                                              bool ready)
+{
+    (void)json_push_kv_str(data, "why_shadow_units_would_exist",
+        "challenge_matured_public_c23_creation_with_approved_off_host_reproduction");
+    (void)json_push_kv_int(data, "shadow_award_atoms", 0);
+    (void)json_push_kv_bool(data, "creation_attribution_created", false);
+    (void)json_push_kv_bool(data, "epoch_creation_set_created", false);
+    (void)json_push_kv_bool(data, "moves_live_funds", false);
+    (void)json_push_kv_bool(data, "creates_ownership_right", false);
+    (void)json_push_kv_bool(data, "token_required_for_access", false);
+    (void)json_push_kv_bool(data, "money_establishes_truth", false);
+    (void)json_push_kv_bool(data,
+                            "permissive_license_validation_required", true);
+    (void)json_push_kv_str(data, "next_safe_action",
+        ready ? "prepare_scratch_only_shadow_attribution_plan"
+              : "inspect_qualification_blocker_and_exact_cas_roots");
+}
+
 void zcl_native_handle_zcode_commons_shadow_plan(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -412,12 +563,11 @@ void zcl_native_handle_zcode_commons_shadow_plan(
         ? json_get(request->input, "now_unix") : NULL;
     uint8_t score_root[32], policy_root[32], reproduction_root[32];
     uint8_t reproduction_proof_set_root[32];
-    uint8_t derived[32], *wire = NULL;
+    uint8_t *wire = NULL;
     size_t wire_len = 0;
-    if (!request || !reply || !workspace ||
-        !zcc_keys(request->input, keys, 7) || !epoch_value || !now_value ||
-        epoch_value->type != JSON_INT || now_value->type != JSON_INT ||
-        json_get_int(epoch_value) < 0 || json_get_int(now_value) <= 0) {
+    if (!request || !reply ||
+        !zcc_shadow_input_complete(request, workspace, epoch_value, now_value,
+                                   keys)) {
         zcc_fail(reply, "BAD_SHADOW_INPUT",
                  "closed input requires workspace, score/policy/request/result-proof-set roots, epoch and now_unix");
         return;
@@ -427,25 +577,18 @@ void zcl_native_handle_zcode_commons_shadow_plan(
                  "workspace must explicitly name an isolated tmp, test-tmp, or scratch path");
         return;
     }
-    if (!zcc_root(request->input, "score_receipt_root", score_root) ||
-        !zcc_root(request->input, "policy_candidate_root", policy_root) ||
-        !zcc_root(request->input, "reproduction_request_root",
-                  reproduction_root) ||
-        !zcc_root(request->input, "reproduction_proof_set_root",
-                  reproduction_proof_set_root) ||
-        vcs_object_load_raw_bounded(
-            workspace, score_root, VCS_ZCODE_SCORE_WIRE_BYTES,
-            &wire, &wire_len) != 0) {
+    if (!zcc_shadow_roots_and_wire_loaded(
+            workspace, request->input, score_root, policy_root,
+            reproduction_root, reproduction_proof_set_root, &wire,
+            &wire_len)) {
         free(wire);
         zcc_fail(reply, "SHADOW_SCORE_NOT_FOUND",
                  "exact Score receipt root absent or input malformed");
         return;
     }
     struct vcs_zcode_score_receipt_v1 score;
-    bool parsed = vcs_zcode_score_receipt_parse(
-            wire, wire_len, &score) == VCS_ZCODE_SCORE_OK &&
-        vcs_zcode_score_receipt_id(&score, derived) == VCS_ZCODE_SCORE_OK &&
-        memcmp(derived, score_root, 32) == 0;
+    bool parsed = zcc_shadow_score_rederives(wire, wire_len, &score,
+                                             score_root);
     free(wire);
     if (!parsed ||
         vcs_zcode_score_receipt_verify_cas(workspace, &score) !=
@@ -472,44 +615,10 @@ void zcl_native_handle_zcode_commons_shadow_plan(
     bool ready = verdict == VCS_ZCODE_QUALIFICATION_READY;
     (void)json_push_kv_str(&reply->data, "mode", "shadow_pre_genesis");
     (void)json_push_kv_str(&reply->data, "package_name", package->name);
-    zcc_hex(&reply->data, "score_receipt_root", score_root);
-    zcc_hex(&reply->data, "policy_candidate_root", policy_root);
-    zcc_hex(&reply->data, "reproduction_request_root", reproduction_root);
-    zcc_hex(&reply->data, "reproduction_proof_set_root",
-            reproduction_proof_set_root);
-    zcc_hex(&reply->data, "package_root", score.package_root);
-    zcc_hex(&reply->data, "release_root", score.release_root);
-    zcc_hex(&reply->data, "task_root", score.task_root);
-    zcc_hex(&reply->data, "candidate_root", score.candidate_root);
-    zcc_hex(&reply->data, "proof_policy_root", score.proof_policy_root);
-    zcc_hex(&reply->data, "proof_set_root", score.proof_set_root);
-    zcc_hex(&reply->data, "proven_lane_root", score.proven_lane_root);
-    zcc_hex(&reply->data, "accepted_extraction_evidence_root",
-            score.evidence_roots[VCS_ZCODE_SCORE_ACCEPTED_EXTRACTION]);
-    zcc_hex(&reply->data, "independent_reproduction_evidence_root",
-            score.evidence_roots[VCS_ZCODE_SCORE_INDEPENDENT_REPRODUCTION]);
+    zcc_render_shadow_roots(&reply->data, &score, score_root, policy_root,
+                            reproduction_root, reproduction_proof_set_root);
     (void)json_push_kv_bool(&reply->data, "vertical_reverified", true);
-    (void)json_push_kv_bool(&reply->data, "exact_reproduction_match",
-                            qualification.exact_reproduction_match);
-    (void)json_push_kv_bool(&reply->data, "distinct_signer",
-                            qualification.distinct_signer);
-    (void)json_push_kv_bool(&reply->data, "signer_policy_approved",
-                            qualification.signer_policy_approved);
-    (void)json_push_kv_bool(&reply->data,
-        "declared_operator_group_distinct",
-        qualification.declared_operator_group_distinct);
-    (void)json_push_kv_bool(&reply->data, "remote_transport_used",
-                            qualification.remote_transport_used);
-    (void)json_push_kv_bool(&reply->data,
-        "physical_independence_proven",
-        qualification.physical_independence_proven);
-    (void)json_push_kv_bool(&reply->data, "identity_linkage_complete",
-                            qualification.identity_linkage_complete);
-    (void)json_push_kv_int(&reply->data, "reproduction_receipts",
-                           qualification.reproduction_receipts);
-    (void)json_push_kv_str(&reply->data, "reproduction_compare_rule",
-        vcs_reproduce_rule_string(
-            (enum vcs_reproduce_rule)qualification.reproduce_rule));
+    zcc_render_shadow_qualification(&reply->data, &qualification);
     if (ready) {
         zcc_hex(&reply->data, "reproduction_receipt_root",
                 qualification.reproduction_receipt_root);
@@ -524,22 +633,7 @@ void zcl_native_handle_zcode_commons_shadow_plan(
     (void)json_push_kv_str(&reply->data,
         ready ? "qualification" : "blocker",
         vcs_zcode_reproduction_qualification_string(verdict));
-    (void)json_push_kv_str(&reply->data, "why_shadow_units_would_exist",
-        "challenge_matured_public_c23_creation_with_approved_off_host_reproduction");
-    (void)json_push_kv_int(&reply->data, "shadow_award_atoms", 0);
-    (void)json_push_kv_bool(&reply->data,
-                            "creation_attribution_created", false);
-    (void)json_push_kv_bool(&reply->data,
-                            "epoch_creation_set_created", false);
-    (void)json_push_kv_bool(&reply->data, "moves_live_funds", false);
-    (void)json_push_kv_bool(&reply->data, "creates_ownership_right", false);
-    (void)json_push_kv_bool(&reply->data, "token_required_for_access", false);
-    (void)json_push_kv_bool(&reply->data, "money_establishes_truth", false);
-    (void)json_push_kv_bool(&reply->data,
-                            "permissive_license_validation_required", true);
-    (void)json_push_kv_str(&reply->data, "next_safe_action",
-        ready ? "prepare_scratch_only_shadow_attribution_plan"
-              : "inspect_qualification_blocker_and_exact_cas_roots");
+    zcc_render_shadow_plan_guarantees(&reply->data, ready);
 }
 
 void zcl_native_handle_zcode_commons_verify(
