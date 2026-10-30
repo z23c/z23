@@ -1,11 +1,11 @@
-#if !defined(_WIN32)
-#define _GNU_SOURCE  /* pthread_timedjoin_np */
-#endif
-
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Fast File Service client half: resolved-endpoint connect, the parallel
  * range-download workers and fs_client_sync(). Split out of file_service.c. */
+
+#if !defined(_WIN32)
+#define _GNU_SOURCE  /* pthread_timedjoin_np */
+#endif
 
 #if !defined(_WIN32)
 

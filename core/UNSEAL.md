@@ -372,3 +372,7 @@ later lane flips it HARD.
 - 2026-10-30T02:01:18Z — REASON: core wave 7 follow-up: file_service_selftest.c compiles to an empty unit without ZCL_TESTING (-pedantic error in dev-bin); add the repo's nonempty-translation-unit typedef
   old ROOT: 4a4bf02911d36d06667f8d8ec03bac0c22c127fda874286d28fb25caf402dc50
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-30T05:44:52Z — REASON: wave 7: file_service_client.c purpose comment moved above the feature macro (check-file-purpose)
+  old ROOT: dd0101eaafbf98e26869d5e303c99d24cbe518d5a1c562381b7be87f705e5e31
+  by: owner unseal ritual (make core-unseal)
