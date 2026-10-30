@@ -183,13 +183,15 @@ run_fuzz() {
     # never fails the lane: a refresh that cannot proceed (dirty tree,
     # diverged history, no network) is logged loudly and the lane continues
     # against whatever HEAD $ROOT actually has, same as it always did.
-    local freshness_tool="$SCRIPT_DIR/check_quality_lane_freshness.sh"
+    local freshness_tool="$ROOT/build/bin/z23-lint"
     if [ -x "$freshness_tool" ]; then
         {
             echo "background_quality: checking whether \$ROOT ($ROOT) is pinned behind main..."
-            "$freshness_tool" --refresh --root="$ROOT" --ref=main
+            "$freshness_tool" check-quality-lane-freshness --refresh --root="$ROOT" --ref=main
         } >>"$log" 2>&1 || \
             echo "background_quality: WARNING — \$ROOT freshness refresh did not complete cleanly; see $log. Proceeding with whatever HEAD \$ROOT currently has." | tee -a "$log"
+    else
+        echo "background_quality: WARNING — $freshness_tool is not built; skipping the \$ROOT freshness check. Proceeding with whatever HEAD \$ROOT currently has." | tee -a "$log"
     fi
 
     local tree

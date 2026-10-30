@@ -1768,11 +1768,11 @@ AGENT_IMPACT_RULE("core/modules/sapling/src/params_vk_embedded.c|core/modules/sa
  * replay.sh's ledger enforcement both read lives in fuzz_verdict_lib.sh;
  * background_quality_lane.sh's fuzz lane checks (and best-effort refreshes)
  * whether its own checkout is pinned behind main via
- * check_quality_lane_freshness.sh before it fuzzes anything. Already covered
+ * z23-lint check-quality-lane-freshness before it fuzzes anything. Already covered
  * by the generic tools-scripts and tools glob rule above; listed explicitly
  * so a change to any one of these five is never left to an implicit
  * catch-all to notice. */
-AGENT_IMPACT_RULE("tools/scripts/promote_fuzz_artifacts.sh|tools/scripts/fuzz_verdict_lib.sh|tools/lint/lintc/gate_fuzz_artifact_replay.c|tools/lint/lintc/gate_fuzz_artifact_replay_priv.h|tools/lint/lintc/gate_fuzz_artifact_replay_replay.c|tools/lint/lintc/gate_fuzz_artifact_replay_selftest.c|tools/lint/lintc/gate_fuzz_artifact_replay_struct.c|tools/scripts/background_quality_lane.sh|tools/scripts/check_quality_lane_freshness.sh|tests/harness/fuzz_seeds/ARTIFACT_VERDICTS.txt", "make_lint_gates")
+AGENT_IMPACT_RULE("tools/scripts/promote_fuzz_artifacts.sh|tools/scripts/fuzz_verdict_lib.sh|tools/lint/lintc/gate_fuzz_artifact_replay.c|tools/lint/lintc/gate_fuzz_artifact_replay_priv.h|tools/lint/lintc/gate_fuzz_artifact_replay_replay.c|tools/lint/lintc/gate_fuzz_artifact_replay_selftest.c|tools/lint/lintc/gate_fuzz_artifact_replay_struct.c|tools/scripts/background_quality_lane.sh|tools/lint/lintc/gate_quality_lane_freshness.c|tools/lint/lintc/gate_quality_lane_freshness_priv.h|tools/lint/lintc/gate_quality_lane_freshness_selftest.c|tests/harness/fuzz_seeds/ARTIFACT_VERDICTS.txt", "make_lint_gates")
 /* Lane: published build identity (peer build identity on the wire).
  * ONE slice: the advertised subversion and its reader (msg_version.c +
  * net/version.h), the getpeerinfo field that republishes what each peer
