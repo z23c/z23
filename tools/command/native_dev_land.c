@@ -7552,7 +7552,7 @@ static bool dl_push_proven_pair(const struct dl_dirs *d,
 
 /* Git landing has its own local publication intent. It binds the existing
  * exact proof and configured origin, not a Commons package publication. */
-#if !defined(_WIN32)
+#if !defined(_WIN32) || defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 static bool dl_publication_file_sha256(const char *path, uint64_t max_bytes,
                                         char out[65])
 {
@@ -7672,7 +7672,7 @@ static bool dl_publication_target(const struct dl_dirs *d, char out[65])
     return true;
 }
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) || defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 static bool dl_publication_bundle_path(const struct dl_dirs *d,
                                         const struct dl_row *row,
                                         char *out, size_t cap)
@@ -10026,7 +10026,7 @@ static bool dl_fence_anchor_same(const struct dl_row *a, const struct dl_row *b)
 
 #define DL_FENCE_CAP (4u * DL_LINE_CAP)
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) || defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 static bool dl_fence_path(const struct dl_dirs *d, char path[4192])
 {
     return snprintf(path, 4192, "%s/fence.jsonl", d->land) < 4192;
