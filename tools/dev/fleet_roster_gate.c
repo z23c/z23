@@ -143,7 +143,9 @@ static bool gate_endpoint(const char *line, const uint8_t root[32],
     (void)snprintf(onion, cap, "%s", machine.receipt.onion);
     bool ok = fleet_enrol_key_load(seed, own_pub, false, &present, &why);
     memory_cleanse(seed, sizeof seed);
-    *self = ok && present &&
+    if (!ok || !present)
+        return false; /* cannot tell whether this line is our own: skip it */
+    *self =
             memcmp(machine.receipt.box_pubkey, own_pub,
                    FLEET_ENROL_PUBKEY_BYTES) == 0;
     return true;

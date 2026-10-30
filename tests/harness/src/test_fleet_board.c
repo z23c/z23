@@ -9208,6 +9208,148 @@ static int test_fleet_board_roster_dial_guards(void)
     return failures;
 }
 
+/* The own-key cases of the roster gate's endpoint. While this box's key is
+ * readable its own sealed line is recognised as this box (self, with its
+ * onion) and another box's line is not. While the key is absent or unreadable
+ * any valid line is refused, because the box cannot prove the line is not its
+ * own, so the dialler must skip it. The key leaf is tools/dev/fleet_enrol_key.c
+ * FLEET_KEY_LEAF. */
+#define FBK_KEY_LEAF "box.ed25519"
+#define FBK_OWN_ONION FBD_ONION_A
+#define FBK_OTHER_ONION FBD_ONION_B
+
+static bool fbk_isolate(const char *env, const char *tag, char *dir,
+                        size_t cap)
+{
+    test_make_tmpdir(dir, cap, "fleet_board_own_key", tag);
+    return platform_environment_set(env, dir, 1) == 0;
+}
+
+/* Truncate the key file so it still opens but is not a 32-byte key. */
+static bool fbk_break_key(void)
+{
+    char path[PATH_MAX];
+    FILE *f = NULL;
+    if (!fleet_enrol_state_path(FBK_KEY_LEAF, path, sizeof path))
+        return false;
+    f = fopen(path, "wb");
+    if (!f)
+        return false;
+    bool wrote = fwrite("short", 1, 5, f) == 5;
+    return fclose(f) == 0 && wrote;
+}
+
+/* Create this isolate's own key and return its seed and public half. */
+static bool fbk_make_key(uint8_t seed[FLEET_ENROL_SEED_BYTES],
+                         uint8_t pub[FLEET_ENROL_PUBKEY_BYTES])
+{
+    const char *why = NULL;
+    bool present = false;
+    return fleet_enrol_key_load(seed, pub, true, &present, &why) && present;
+}
+
+/* One sealed machine line for the box whose key is box_seed/box_pub, with
+ * the receipt claiming `onion`; the same chain fbr_line builds. */
+static bool fbk_line(const uint8_t box_seed[32], const uint8_t box_pub[32],
+                     const char *onion, char *out, size_t cap)
+{
+    uint8_t op_seed[32], op_pub[32];
+    uint8_t invite_wire[FLEET_ENROL_INVITE_WIRE_MAX];
+    uint8_t receipt_wire[FLEET_ENROL_RECEIPT_WIRE_MAX];
+    char token[FLEET_ENROL_MACHINE_TEXT_MAX];
+    char receipt[FLEET_ENROL_MACHINE_TEXT_MAX];
+    struct fleet_invite invite;
+    struct fleet_receipt parsed;
+    struct fleet_box_facts facts;
+    struct fleet_signing_key signer;
+    size_t invite_len = 0, receipt_len = 0;
+    const char *why = NULL;
+    memset(&facts, 0, sizeof facts);
+    (void)snprintf(facts.hostname, sizeof facts.hostname, "fbk-box");
+    fbr_root_pub(FBR_ROOT, op_seed, op_pub);
+    fb_test_identity(2, signer.seed, signer.pubkey);
+    return fleet_invite_mint("fbk-box", 24, "", op_seed, op_pub, FBR_LINE_NOW,
+                             token, sizeof token, &invite, &why) &&
+           fleet_invite_parse(token, &invite, invite_wire, sizeof invite_wire,
+                              &invite_len, &why) &&
+           fleet_receipt_mint(invite_wire, invite_len, onion, &facts, "",
+                              box_seed, box_pub, &signer, receipt,
+                              sizeof receipt, &why) &&
+           fleet_receipt_parse(receipt, &parsed, receipt_wire,
+                               sizeof receipt_wire, &receipt_len, &why) &&
+           fleet_machine_mint(receipt_wire, receipt_len, FBR_LINE_NOW,
+                              FLEET_ENROL_PORT_FIRST, op_seed, op_pub, out,
+                              cap, &why);
+}
+
+static int test_fleet_board_roster_dial_own_key(void)
+{
+    int failures = 0;
+#ifdef _WIN32
+    const char *env = "ZCL_STATE_ROOT";
+#else
+    const char *env = "XDG_STATE_HOME";
+#endif
+    const char *prior = getenv(env);
+    char saved[4096], dir[512], own_line[FLEET_ENROL_MACHINE_TEXT_MAX];
+    char other_line[FLEET_ENROL_MACHINE_TEXT_MAX], onion[96];
+    uint8_t root[32], own_seed[FLEET_ENROL_SEED_BYTES];
+    uint8_t own_pub[FLEET_ENROL_PUBKEY_BYTES], other_seed[32], other_pub[32];
+    bool changed = false, self = false;
+    const struct zcl_fleet_roster_provider *real =
+        zcl_fleet_roster_gate_provider();
+    if (prior && strlen(prior) >= sizeof(saved)) return 1;
+    (void)snprintf(saved, sizeof(saved), "%s", prior ? prior : "");
+    TEST("fleet roster dial: with a readable key this box's own line is "
+         "recognised as self and another box's line is not; with the key "
+         "absent or unreadable the own line is refused") {
+        ASSERT(real && real->endpoint);
+        fbr_root_pub(FBR_ROOT, other_seed, root);
+        fbr_root_pub(0x82, other_seed, other_pub);
+        ASSERT(fbk_line(other_seed, other_pub, FBK_OTHER_ONION, other_line,
+                        sizeof other_line));
+
+        /* Readable key: the own line is this box, the other line is not. */
+        ASSERT(fbk_isolate(env, "readable", dir, sizeof dir)); changed = true;
+        ASSERT(fbk_make_key(own_seed, own_pub));
+        ASSERT(fbk_line(own_seed, own_pub, FBK_OWN_ONION, own_line,
+                        sizeof own_line));
+        ASSERT(real->endpoint(own_line, root, onion, sizeof onion, &self,
+                              real->ctx));
+        ASSERT(self);
+        ASSERT_STR_EQ(onion, FBK_OWN_ONION);
+        ASSERT(real->endpoint(other_line, root, onion, sizeof onion, &self,
+                              real->ctx));
+        ASSERT(!self);
+        ASSERT_STR_EQ(onion, FBK_OTHER_ONION);
+
+        /* Absent key: the own line (made under a key that is then removed by
+         * switching to an empty state root) is refused. */
+        ASSERT(fbk_isolate(env, "absent-src", dir, sizeof dir));
+        ASSERT(fbk_make_key(own_seed, own_pub));
+        ASSERT(fbk_line(own_seed, own_pub, FBK_OWN_ONION, own_line,
+                        sizeof own_line));
+        ASSERT(fbk_isolate(env, "absent", dir, sizeof dir));
+        ASSERT(!real->endpoint(own_line, root, onion, sizeof onion, &self,
+                               real->ctx));
+
+        /* Unreadable key: the same own line is refused. */
+        ASSERT(fbk_isolate(env, "unreadable", dir, sizeof dir));
+        ASSERT(fbk_make_key(own_seed, own_pub));
+        ASSERT(fbk_line(own_seed, own_pub, FBK_OWN_ONION, own_line,
+                        sizeof own_line));
+        ASSERT(fbk_break_key());
+        ASSERT(!real->endpoint(own_line, root, onion, sizeof onion, &self,
+                               real->ctx));
+        PASS();
+    } _test_next:;
+    if (changed) {
+        if (prior ? platform_environment_set(env, saved, 1) : unsetenv(env))
+            failures++;
+    }
+    return failures;
+}
+
 int test_fleet_board(void)
 {
     int failures = 0;
@@ -9273,6 +9415,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_roster_dial();
     failures += test_fleet_board_roster_dial_board();
     failures += test_fleet_board_roster_dial_guards();
+    failures += test_fleet_board_roster_dial_own_key();
     failures += test_fleet_board_public_no_grant_needed();
     /* Leave the process as this group found it: the next group in the same
      * binary must not inherit an open gate. */
