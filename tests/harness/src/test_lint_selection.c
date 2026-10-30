@@ -18,6 +18,7 @@
 #include "test/test_core.h"
 
 #include "lint/lintc/lintc.h"
+#include "lint/lintc/precheck_base.h"
 #include "lint/lintc/premise.h"
 #include "util/spawn.h"
 
@@ -1178,11 +1179,25 @@ static int lsel_pc_root_marker_run(int argc, char **argv)
     return access(marker, F_OK) == 0;
 }
 
+/* Appends one line to $LSEL_PC_COUNT per run: counts how often it executes. */
+static int lsel_pc_count_run(int argc, char **argv)
+{
+    const char *path = getenv("LSEL_PC_COUNT");
+    FILE *f = path ? fopen(path, "a") : NULL;
+    (void)argc;
+    (void)argv;
+    if (!f)
+        return 2;
+    (void)fputs("x\n", f);
+    return fclose(f) != 0;
+}
+
 static const struct lint_gate k_lsel_pc_gates[] = {
     { "check-no-python", lsel_pc_no_python_run, NULL },
     { "check-clean", lsel_pc_clean_run, NULL },
     { "check-argv-no-python", lsel_pc_argv_run, NULL },
     { "check-root-marker", lsel_pc_root_marker_run, NULL },
+    { "check-count", lsel_pc_count_run, NULL },
 };
 
 const struct lint_gate *lint_gate_table(size_t *n)
@@ -1341,12 +1356,97 @@ static int test_lsel_precheck_repo_root(void)
 static int test_lsel_precheck_usage(void)
 {
     int failures = 0;
-    TEST_CASE("lint_selection: precheck refuses a missing --base as a usage error") {
+    TEST_CASE("lint_selection: precheck refuses a bad option as a usage error") {
         struct lsel_pc_fx fx;
-        char out[512];
-        char *argv[] = { (char *)"--gates=check-no-python" };
+        char base_arg[PATH_MAX + 16], out[512];
         ASSERT(lsel_pc_plant(&fx));
-        ASSERT_EQ(lsel_pc_run(&fx, fx.dirty, argv, 1, out, sizeof(out)), 2);
+        (void)snprintf(base_arg, sizeof(base_arg), "--base=%s", fx.clean);
+        char *argv[] = { base_arg, (char *)"--jobs=0" };
+        ASSERT_EQ(lsel_pc_run(&fx, fx.dirty, argv, 2, out, sizeof(out)), 2);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
+/* A git repo at <root>/repo with one commit; the cache lives in <root>/cache. */
+static bool lsel_pc_git_repo(const struct lsel_pc_fx *fx, char *repo, size_t cap)
+{
+    char cache[PATH_MAX + 8], f[PATH_MAX + 16];
+    const char *init[] = { "init", "-q", NULL };
+    (void)snprintf(repo, cap, "%s/repo", fx->root);
+    (void)snprintf(cache, sizeof(cache), "%s/cache", fx->root);
+    (void)snprintf(f, sizeof(f), "%s/a.txt", repo);
+    return mkdir(repo, 0755) == 0 && setenv("ZCL_PRECHECK_CACHE", cache, 1) == 0
+        && precheck_base_git(repo, init, NULL, 0) == 0
+        && lsel_pc_file(f, "a\n");
+}
+
+static bool lsel_pc_commit(const char *repo)
+{
+    const char *add[] = { "add", "-A", NULL };
+    const char *ci[] = { "-c", "user.name=t", "-c", "user.email=t@t", "-c",
+                         "commit.gpgsign=false", "commit", "-q", "-m", "c",
+                         NULL };
+    return precheck_base_git(repo, add, NULL, 0) == 0
+        && precheck_base_git(repo, ci, NULL, 0) == 0;
+}
+
+static size_t lsel_pc_file_size(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 ? (size_t)st.st_size : 0;
+}
+
+static int test_lsel_precheck_no_origin(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: precheck without --base needs origin/main, exit 2") {
+        struct lsel_pc_fx fx;
+        char repo[PATH_MAX], out[512];
+        char *argv[] = { (char *)"--gates=check-clean" };
+        ASSERT(lsel_pc_plant(&fx));
+        ASSERT(lsel_pc_git_repo(&fx, repo, sizeof(repo)) && lsel_pc_commit(repo));
+        ASSERT_EQ(lsel_pc_run(&fx, repo, argv, 1, out, sizeof(out)), 2);
+        (void)unsetenv("ZCL_PRECHECK_CACHE");
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
+static int test_lsel_precheck_auto_base(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: precheck auto base is the merge-base and its results are cached") {
+        struct lsel_pc_fx fx;
+        char repo[PATH_MAX], out[512], cnt[PATH_MAX + 16], res[PATH_MAX * 2];
+        char sha[72], text[64] = "";
+        const char *head[] = { "rev-parse", "HEAD", NULL };
+        char *argv[] = { (char *)"--gates=check-no-python,check-count" };
+        ASSERT(lsel_pc_plant(&fx));
+        ASSERT(lsel_pc_git_repo(&fx, repo, sizeof(repo)) && lsel_pc_commit(repo));
+        ASSERT_EQ(precheck_base_git(repo, head, sha, sizeof(sha)), 0);
+        const char *ref[] = { "update-ref", "refs/remotes/origin/main", sha, NULL };
+        ASSERT_EQ(precheck_base_git(repo, ref, NULL, 0), 0);
+        (void)snprintf(res, sizeof(res), "%s/tool.py", repo);
+        ASSERT(lsel_pc_file(res, "x = 1\n") && lsel_pc_commit(repo));
+        (void)snprintf(cnt, sizeof(cnt), "%s/count.txt", fx.root);
+        ASSERT_EQ(setenv("LSEL_PC_COUNT", cnt, 1), 0);
+        /* HEAD has tool.py, the merge-base does not: NEW only if the base is it. */
+        ASSERT_EQ(lsel_pc_run(&fx, repo, argv, 1, out, sizeof(out)), 1);
+        ASSERT(strstr(out, "NEW check-no-python rc=1\n") != NULL);
+        ASSERT_EQ(lsel_pc_file_size(cnt), 4U);
+        (void)snprintf(res, sizeof(res), "%s/cache/base-native-%s.txt", fx.root, sha);
+        FILE *f = fopen(res, "r");
+        ASSERT(f != NULL);
+        ASSERT(fread(text, 1, sizeof(text) - 1, f) > 0);
+        fclose(f);
+        ASSERT(strstr(text, "check-no-python 0\n") != NULL);
+        /* Second call: the cached base rcs are used, only the tree here reruns. */
+        ASSERT_EQ(lsel_pc_run(&fx, repo, argv, 1, out, sizeof(out)), 1);
+        ASSERT(strstr(out, "NEW check-no-python rc=1\n") != NULL);
+        ASSERT_EQ(lsel_pc_file_size(cnt), 6U);
+        (void)unsetenv("LSEL_PC_COUNT");
+        (void)unsetenv("ZCL_PRECHECK_CACHE");
         test_rm_rf_recursive(fx.root);
     } TEST_END
     return failures;
@@ -1357,6 +1457,8 @@ int test_lint_selection(void)
     int failures = 0;
     failures += test_lsel_precheck();
     failures += test_lsel_precheck_usage();
+    failures += test_lsel_precheck_no_origin();
+    failures += test_lsel_precheck_auto_base();
     failures += test_lsel_precheck_argv();
     failures += test_lsel_precheck_repo_root();
     failures += test_lsel_doc_claims();

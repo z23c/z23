@@ -1825,6 +1825,8 @@ Z23_FLAG("ZCL_PP_PORT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_stopwatch.sh:auto")
 Z23_FLAG("ZCL_PPREV_REPAIR_MAX_READS", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/block_index_integrity.c:auto")
+Z23_FLAG("ZCL_PRECHECK_CACHE", "env_build", "-", "-",
+          "Directory for the shared precheck base worktree, its flock and base-native-<sha>.txt results; default $HOME/.cache/development-scratch/z23/precheck.")
 Z23_FLAG("ZCL_PRI_SEED", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_projection_replay_invariant.c:auto")
 Z23_FLAG("ZCL_PRIV_RECEIPT_BASELINE", "env_runtime", "-", "-",

@@ -5,7 +5,15 @@
  * forked child whose stdout and stderr go to /dev/null. One line per gate
  * that passes in DIR and fails here: `NEW <gate> rc=<n>`.
  *
- *   z23-lint precheck --base=DIR [--jobs=N] [--gates=a,b]
+ *   z23-lint precheck [--base=DIR] [--jobs=N] [--gates=a,b]
+ *
+ * Without --base, the base is a shared detached worktree at
+ * merge-base(HEAD, origin/main) of the current tree, kept under
+ * $ZCL_PRECHECK_CACHE (default $HOME/.cache/development-scratch/z23/precheck)
+ * and serialized by a flock (precheck_base.c). Its gate results are cached by
+ * sha in base-native-<sha>.txt, so a later call does not rerun them. A missing
+ * origin/main or a git failure exits 2. An explicit --base=DIR runs and
+ * caches nothing extra: the base is simply DIR.
  *
  * At most N children run at once (default 8, accepted 1..32). A child killed
  * by a signal counts as rc=124. Exit 0 = no new failure, 1 = new failure(s),
@@ -15,6 +23,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "lintc.h"
+#include "precheck_base.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -45,7 +54,7 @@ struct pc_slot {
 };
 
 static const char k_pc_usage[] =
-    "z23-lint: usage: z23-lint precheck --base=DIR [--jobs=N] [--gates=a,b]\n";
+    "z23-lint: usage: z23-lint precheck [--base=DIR] [--jobs=N] [--gates=a,b]\n";
 
 static bool pc_parse_jobs(const char *s, int *out)
 {
@@ -83,7 +92,7 @@ static int pc_parse(struct pc_opts *o, int argc, char **argv)
         if (pc_parse_arg(o, argv[i]) != 0)
             return 2;
     }
-    return o->base ? 0 : 2;
+    return 0;
 }
 
 static int pc_select_one(struct pc_opts *o, const struct lint_gate *tab,
@@ -151,8 +160,14 @@ static int pc_spawn(const struct lint_gate *g, const char *dir, pid_t *pid)
 
 /* Start work item *next: even items run the gate here, odd items in base. */
 static int pc_start_next(const struct lint_gate *tab, const struct pc_opts *o,
-                         struct pc_slot *slots, size_t *live, size_t *next)
+                         const int *rc, struct pc_slot *slots, size_t *live,
+                         size_t *next)
 {
+    /* A base item with a cached rc is not run again. */
+    while (*next < 2 * o->n_sel && *next % 2 == 1 && rc[*next] >= 0)
+        (*next)++;
+    if (*next >= 2 * o->n_sel)
+        return 0;
     const struct lint_gate *g = &tab[o->sel[*next / 2]];
     const char *dir = (*next % 2 == 0) ? "." : o->base;
     if (pc_spawn(g, dir, &slots[*live].pid) != 0)
@@ -201,7 +216,7 @@ static int pc_run_all(const struct lint_gate *tab, const struct pc_opts *o,
     bool err = false;
     while (next < total || live > 0) {
         while (!err && next < total && live < (size_t)o->jobs) {
-            if (pc_start_next(tab, o, slots, &live, &next) != 0) {
+            if (pc_start_next(tab, o, rc, slots, &live, &next) != 0) {
                 err = true;
                 next = total;
             }
@@ -226,6 +241,64 @@ static int pc_report(const struct lint_gate *tab, const struct pc_opts *o,
     return fails > 0 ? 1 : 0;
 }
 
+/* Auto base: open the shared tree and take the cached rc of each selected
+ * gate (rc[2k+1] stays -1 for a gate to run). */
+static int pc_auto_open(struct pc_opts *o, const struct lint_gate *tab,
+                        struct precheck_base *pb, int *rc)
+{
+    char why[160];
+    if (precheck_base_open(pb, why, sizeof why) != 0) {
+        fprintf(stderr, "precheck: %s\n", why);
+        return 2;
+    }
+    o->base = pb->tree;
+    for (size_t k = 0; k < o->n_sel; k++) {
+        int cached = 0;
+        if (precheck_base_lookup(pb, tab[o->sel[k]].name, &cached) == 0)
+            rc[2 * k + 1] = cached;
+    }
+    return 0;
+}
+
+/* Cache the base rcs just measured; a signal or setup rc is not a result. */
+static void pc_auto_save(const struct lint_gate *tab, const struct pc_opts *o,
+                         const struct precheck_base *pb, const int *rc)
+{
+    const char *names[PC_MAX_GATES];
+    int rcs[PC_MAX_GATES];
+    size_t n = 0;
+    for (size_t k = 0; k < o->n_sel; k++) {
+        if (rc[2 * k + 1] < 0 || rc[2 * k + 1] >= PC_RC_SIGNAL)
+            continue;
+        names[n] = tab[o->sel[k]].name;
+        rcs[n++] = rc[2 * k + 1];
+    }
+    if (precheck_base_store(pb, names, rcs, n) != 0)
+        fputs("precheck: warning: could not cache the base results\n", stderr);
+}
+
+static int pc_run_report(const struct lint_gate *tab, struct pc_opts *o)
+{
+    struct precheck_base pb;
+    int rc[2 * PC_MAX_GATES];
+    bool autob = o->base == NULL;
+    for (size_t i = 0; i < 2 * o->n_sel; i++)
+        rc[i] = -1;
+    if (autob && pc_auto_open(o, tab, &pb, rc) != 0)
+        return 2;
+    int run = pc_run_all(tab, o, rc);
+    if (autob && run == 0)
+        pc_auto_save(tab, o, &pb, rc);
+    if (autob)
+        precheck_base_close(&pb);
+    if (run != 0) {
+        fputs("precheck: a gate child could not be started or reaped\n",
+              stderr);
+        return 2;
+    }
+    return pc_report(tab, o, rc);
+}
+
 int lint_precheck_main(int argc, char **argv)
 {
     struct pc_opts o;
@@ -236,11 +309,5 @@ int lint_precheck_main(int argc, char **argv)
         fputs(k_pc_usage, stderr);
         return 2;
     }
-    int rc[2 * PC_MAX_GATES];
-    if (pc_run_all(tab, &o, rc) != 0) {
-        fputs("precheck: a gate child could not be started or reaped\n",
-              stderr);
-        return 2;
-    }
-    return pc_report(tab, &o, rc);
+    return pc_run_report(tab, &o);
 }
