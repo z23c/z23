@@ -170,7 +170,7 @@ gate_command() {
         check-no-stale-pinned-facts)       echo './build/bin/z23-lint check-no-stale-pinned-facts --selftest && ./build/bin/z23-lint check-no-stale-pinned-facts .' ;;
         check-no-uncited-victory)          echo './tools/scripts/check_no_uncited_victory.sh' ;;
         check-doc-claims)                  echo './build/bin/z23-lint check-doc-claims --selftest && ./build/bin/z23-lint check-doc-claims' ;;
-        check-capability-inventory-generated) echo './tools/lint/check_capability_inventory_generated.sh --selftest' ;;
+        check-capability-inventory-generated) echo './build/bin/z23-lint check-capability-inventory-generated --selftest' ;;
         check-markdown-links)              echo './build/bin/z23-lint check-markdown-links .' ;;
         check-one-result-type)             echo './tools/scripts/check_one_result_type.sh --selftest && ./tools/scripts/check_one_result_type.sh' ;;
         check-no-secret-printf)            echo './tools/scripts/check_no_secret_printf.sh --selftest && ./tools/scripts/check_no_secret_printf.sh' ;;

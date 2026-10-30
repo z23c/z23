@@ -20,6 +20,7 @@ LINT_GATE("check-fortify-masked-decls", check_fortify_masked_decls, LINT_CMD_PAI
 LINT_GATE("check-dev-proof-native-fast-path", check_dev_proof_native_fast_path, LINT_CMD_PLAIN)
 LINT_GATE("check-before-save-hooks", check_before_save_hooks, LINT_CMD_PLAIN)
 LINT_GATE("check-pthread-create", check_pthread_create, LINT_CMD_PLAIN)
+LINT_GATE("check-capability-inventory-generated", check_capability_inventory_generated, LINT_CMD_NONE)
 LINT_GATE("check-silent-error-returns", check_silent_error_returns, LINT_CMD_NONE)
 LINT_GATE("check-no-gnu-va-args", check_no_gnu_va_args, LINT_CMD_PLAIN)
 LINT_GATE("check-sysinit-ordering", check_sysinit_ordering, LINT_CMD_PLAIN)

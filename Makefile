@@ -15104,10 +15104,9 @@ docs-capability-inventory: $(CAPABILITY_INVENTORY_TOOL)
 	@mkdir -p build/gen
 	@$(CAPABILITY_INVENTORY_TOOL) build/gen/CAPABILITY_INVENTORY.jsonl .
 
-check-capability-inventory-generated: $(CAPABILITY_INVENTORY_TOOL)
+check-capability-inventory-generated: $(LINTC_TOOL) $(CAPABILITY_INVENTORY_TOOL)
 	@echo "══ LINT: the generated capability inventory (build/gen) is complete ══"
-	@./tools/lint/check_capability_inventory_generated.sh --selftest \
-	  "$(CAPABILITY_INVENTORY_TOOL)"
+	@./build/bin/z23-lint check-capability-inventory-generated --selftest
 
 # Sealed proof generations need these direct-cc checker tools before the
 # generated-doc freshness gate. This exact goal avoids node identities and
