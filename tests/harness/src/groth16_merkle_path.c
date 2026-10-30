@@ -630,17 +630,12 @@ static const struct pad_row pad_rows[] = {
       PAD_OUT_UNCHECKED },
 };
 
-/* A fixed, valid Jubjub point (affine coordinates) used as the window base. */
+/* The window base: the same generator circuit_spend.c section 24 hands to
+ * gadget_fixed_base_mul (sapling_nullifier_position_generator). */
 static bool pad_base_point(struct fr *bx, struct fr *by)
 {
-    static const uint8_t pers[8] = {'Z', 'c', 'a', 's', 'h', '_', 'P', 'H'};
-    static const uint8_t tag[] = "lookup3 padding pin";
-    struct jub_point p;
-    if (!group_hash(&p, tag, sizeof(tag) - 1, pers))
-        return false;
-    jub_get_x(bx, &p);
-    jub_get_y(by, &p);
-    return true;
+    sapling_nullifier_position_generator(bx, by);
+    return !fr_is_zero(bx) || !fr_is_zero(by);
 }
 
 static bool pad_output_matches(const struct constraint_system *cs, size_t xo,
