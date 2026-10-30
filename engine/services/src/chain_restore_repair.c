@@ -884,7 +884,12 @@ static void chain_restore_clear_resolved_anchor(struct main_state *ms,
  * by cs_main -> csr->lock (small-tip commit) or cs_main ->
  * active_chain.write_lock. Released before the lock-free post-restore
  * integrity reader below. The rebuild path takes no coins_kv, so the
- * LOCK-ORDER LAW (drive's coins_kv never crosses cs_main) is preserved. */
+ * LOCK-ORDER LAW (drive's coins_kv never crosses cs_main) is preserved.
+ * The band-hole note is recorded after cs_main is released: it reads the
+ * reducer log frontier under progress_store_tx_lock, and a blocking progress
+ * wait while owning cs_main closes an ABBA cycle with the reducer drain, which
+ * holds progress and takes cs_main in its steps. The note is record-only and
+ * walks pprev links of entries that live for the process lifetime. */
 static struct block_index *chain_restore_finalize_repair_locked(
     struct main_state *ms,
     const char *datadir)
@@ -897,6 +902,8 @@ static struct block_index *chain_restore_finalize_repair_locked(
     if (datadir && datadir[0])
         (void)chain_restore_backfill_nbits_from_disk(ms, datadir);
 
+    zcl_mutex_unlock(&ms->cs_main);
+
     /* Catch-all band-hole scan: a tip not contiguously linked to its
      * trust root means headers below it were installed above the
      * frontier — record the fact loudly (record-only) so the header
@@ -905,7 +912,6 @@ static struct block_index *chain_restore_finalize_repair_locked(
      * trust-rooted chains and at band closure. */
     if (tip)
         utxo_recovery_note_band_unrooted_tip(tip, "chain_restore_finalize");
-    zcl_mutex_unlock(&ms->cs_main);
     return tip;
 }
 

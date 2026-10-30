@@ -25,6 +25,10 @@
 #include "json/json.h"
 #include "util/boot_scan.h"
 #include "util/thread_registry.h"
+#include "jobs/reducer_frontier.h"
+#include "services/utxo_recovery_service.h"
+#include <pthread.h>
+#include <sched.h>
 #include <sqlite3.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -1749,6 +1753,138 @@ static int test_finalize_quarantine_preserves_served_floor(void) {
     return failures;
 }
 
+/* Lock-order regression: the finalize repair owns cs_main, and the reducer
+ * drain owns the progress store and takes cs_main in its steps, so finalize
+ * must never WAIT for the progress store while it owns cs_main. A detached
+ * island tip makes the band-hole note read the reducer log frontier under
+ * progress_store_tx_lock. The test plays the drain: it owns the progress
+ * store, waits until finalize owns cs_main, then asks for cs_main. Correct
+ * code releases cs_main before it waits for the store. The height authority is
+ * registered, as it is for the whole steady state, so nothing else in
+ * finalize reaches the store while it owns cs_main. */
+static uint8_t g_flo_hash[32];
+static int64_t g_flo_height;
+
+static int64_t flo_get_height(void) { return g_flo_height; }
+static bool flo_is_authoritative(void) { return true; }
+static bool flo_get_hash(uint8_t hash[32])
+{
+    memcpy(hash, g_flo_hash, 32);
+    return true;
+}
+
+struct finalize_lock_order {
+    struct main_state *ms;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    bool started;
+};
+
+static void *finalize_lock_order_thread(void *arg)
+{
+    struct finalize_lock_order *c = arg;
+    pthread_mutex_lock(&c->mu);
+    c->started = true;
+    pthread_cond_broadcast(&c->cv);
+    pthread_mutex_unlock(&c->mu);
+    (void)chain_restore_finalize(c->ms, NULL);
+    return NULL;
+}
+
+/* Spin until another thread owns cs_main. Finalize that waits for the store
+ * while owning it keeps it until the store is released, so the first probe
+ * after it enters is certain; correct code may release it before the first
+ * probe, in which case there is nothing to wait for and the iteration bound
+ * only ends the search. No clock decides a verdict. */
+static void flo_observe_main_owned(struct main_state *ms)
+{
+    for (int i = 0; i < 200000; i++) {
+        if (!zcl_mutex_trylock(&ms->cs_main))
+            return;
+        zcl_mutex_unlock(&ms->cs_main);
+        sched_yield();
+    }
+}
+
+/* Wait for cs_main with no bound: finalize that holds it while waiting for the
+ * store never releases it, and the group watchdog reports that wedge. */
+static void flo_acquire_main(struct main_state *ms)
+{
+    zcl_mutex_lock(&ms->cs_main);
+    zcl_mutex_unlock(&ms->cs_main);
+}
+
+static int test_finalize_never_waits_for_progress_under_main(void) {
+    int failures = 0;
+    TEST("chain_restore_finalize: no progress-store wait while owning cs_main") {
+        char tmpdir[256];
+        test_make_tmpdir(tmpdir, sizeof(tmpdir),
+                         "chain_restore", "finalize_lock_order");
+        ASSERT(test_rm_rf_recursive(tmpdir) == 0);
+        ASSERT(platform_private_directory_create(tmpdir));
+        progress_store_close();
+        ASSERT(progress_store_open(tmpdir));
+
+        struct main_state ms;
+        main_state_init(&ms);
+        struct uint256 hash;
+        memset(&hash, 0, sizeof(hash));
+        hash.data[0] = 0x71;
+        hash.data[31] = 0xC4;
+        struct block_index *island =
+            chainstate_insert_block_index((struct chainstate *)&ms, &hash);
+        ASSERT(island != NULL);
+        island->nHeight = REDUCER_FRONTIER_TRUSTED_ANCHOR + 100;
+        island->pprev = NULL;
+        island->nBits = 0x1f07ffff;
+        island->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+        island->nTx = 1;
+        island->nChainTx = 1;
+        island->nDataPos = 1;
+        arith_uint256_set_u64(&island->nChainWork, 1);
+        ASSERT(active_chain_move_window_tip(&ms.chain_active, island));
+        ASSERT(utxo_recovery_block_ancestry_break(island) == island);
+
+        memcpy(g_flo_hash, hash.data, 32);
+        g_flo_height = island->nHeight;
+        struct active_chain_authority auth = {
+            .get_height = flo_get_height,
+            .get_hash = flo_get_hash,
+            .is_authoritative = flo_is_authoritative,
+        };
+        active_chain_register_authority(&auth);
+        active_chain_register_block_map(&ms.map_block_index);
+
+        struct finalize_lock_order ctx = { .ms = &ms };
+        ASSERT(pthread_mutex_init(&ctx.mu, NULL) == 0);
+        ASSERT(pthread_cond_init(&ctx.cv, NULL) == 0);
+
+        progress_store_tx_lock();
+        pthread_t th;
+        ASSERT(pthread_create(&th, NULL, finalize_lock_order_thread, &ctx) == 0);
+        pthread_mutex_lock(&ctx.mu);
+        while (!ctx.started)
+            pthread_cond_wait(&ctx.cv, &ctx.mu);
+        pthread_mutex_unlock(&ctx.mu);
+
+        flo_observe_main_owned(&ms);
+        flo_acquire_main(&ms);
+        progress_store_tx_unlock();
+        pthread_join(th, NULL);
+
+        struct active_chain_authority none = {0};
+        active_chain_register_authority(&none);
+        active_chain_register_block_map(NULL);
+        pthread_cond_destroy(&ctx.cv);
+        pthread_mutex_destroy(&ctx.mu);
+        main_state_free(&ms);
+        progress_store_close();
+        test_cleanup_tmpdir(tmpdir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* Build a fully-consistent on-disk chain of `n_blocks` (heights 0..n_blocks-1)
  * whose block-index entries point at their real disk positions and whose pprev
  * links are intact, so chain_restore_rebuild_active_chain_from_disk walks
@@ -2162,6 +2298,7 @@ int test_chain_restore_service(void) {
     failures += test_finalize_null_datadir_skips_disk();
     failures += test_finalize_verified_scopes_trust_flag();
     failures += test_finalize_quarantine_preserves_served_floor();
+    failures += test_finalize_never_waits_for_progress_under_main();
     failures += test_rebuild_active_chain_is_o_chain_not_delta();
     failures += test_unclean_restart_recovery_is_o_delta();
     failures += test_chain_restore_walks_abort_on_shutdown();
