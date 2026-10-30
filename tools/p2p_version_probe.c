@@ -173,17 +173,43 @@ static int try_connect(const struct addrinfo *ai, uint64_t deadline, int *fd_out
     return RC_OK;
 }
 
-static int connect_peer(const char *host, const char *port, uint64_t deadline, int *fd_out)
+/* A numeric address is parsed first (AI_NUMERICHOST), so it never reaches the
+ * resolver. A name goes through getaddrinfo, which has no timeout, and this
+ * tool adds no threads to bound it; the deadline is therefore checked as soon
+ * as it returns, and a lookup that finished after the budget, resolved or
+ * not, is reported as an overrun (no handshake), never connected. */
+static int resolve_peer(const char *host, const char *port, uint64_t deadline,
+                        struct addrinfo **res)
 {
     struct addrinfo hints;
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo *res = NULL;
-    if (getaddrinfo(host, port, &hints, &res) != 0) {
-        return RC_UNREACHABLE;
+    hints.ai_flags = AI_NUMERICHOST;
+    if (getaddrinfo(host, port, &hints, res) == 0) {
+        return RC_OK;
     }
-    int rc = RC_UNREACHABLE;
+    hints.ai_flags = 0;
+    bool resolved = getaddrinfo(host, port, &hints, res) == 0;
+    if (now_ms() < deadline) {
+        return resolved ? RC_OK : RC_UNREACHABLE;
+    }
+    if (resolved) {
+        freeaddrinfo(*res);
+        *res = NULL;
+    }
+    fputs("p2p_version_probe: name resolution exhausted the handshake budget\n", stderr);
+    return RC_NO_HANDSHAKE;
+}
+
+static int connect_peer(const char *host, const char *port, uint64_t deadline, int *fd_out)
+{
+    struct addrinfo *res = NULL;
+    int rc = resolve_peer(host, port, deadline, &res);
+    if (rc != RC_OK) {
+        return rc;
+    }
+    rc = RC_UNREACHABLE;
     for (struct addrinfo *ai = res; ai != NULL && rc == RC_UNREACHABLE; ai = ai->ai_next) {
         rc = try_connect(ai, deadline, fd_out);
     }
