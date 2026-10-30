@@ -234,7 +234,6 @@ engine/entry/main_cli_modes.c:legacy_utxo_run:21
 engine/entry/main_cli_modes.c:mintutxocommitment_mode:26
 engine/jobs/src/proof_validate_stage.c:step_validate:26
 engine/jobs/src/seal_rewind_executor.c:seal_rewind_to_nearest:19
-engine/jobs/src/stage_anchor.c:stage_anchor_cap_target_at_log_frontier:24
 engine/jobs/src/stage_repair_coin_backfill.c:backfill_run:28
 engine/jobs/src/stage_repair_coin_backfill.c:coin_backfill_insert_tx:23
 engine/jobs/src/stage_repair_coin_backfill_scan.c:coin_backfill_scan_step:17

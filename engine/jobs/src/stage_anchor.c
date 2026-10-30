@@ -173,6 +173,9 @@ enum {
     FRONTIER_SCAN_OK = 0,
     FRONTIER_SCAN_FAIL,
     FRONTIER_SCAN_SQL_OVERFLOW,
+    FRONTIER_SCAN_OVERFLOW_FRESH,
+    FRONTIER_SCAN_OVERFLOW_CURSOR,
+    FRONTIER_SCAN_OVERFLOW_GAP,
 };
 
 /* Run one probe over `sql` that was just formatted with snprintf returning
@@ -196,6 +199,84 @@ static int frontier_probe_formatted(sqlite3 *db, const char *sql, int n,
 static bool frontier_gap_caps(bool found, int64_t gap, uint64_t requested)
 {
     return found && gap >= 0 && (uint64_t)gap < requested;
+}
+
+static int frontier_probe_status(int rc, int overflow)
+{
+    return rc == FRONTIER_SCAN_SQL_OVERFLOW ? overflow : FRONTIER_SCAN_FAIL;
+}
+
+static int frontier_cap_scan(sqlite3 *db, const char *log_table,
+                             uint64_t cursor, uint64_t requested,
+                             uint64_t *cap_at, bool *cap_hit)
+{
+    char sql[256];
+    bool found = false;
+    int64_t gap = -1;
+    int status = FRONTIER_SCAN_OK;
+
+    *cap_at = requested;
+    *cap_hit = false;
+    do {
+        bool exists = false;
+        if (!frontier_log_table_exists(db, log_table, &exists)) {
+            status = FRONTIER_SCAN_FAIL;
+            break;
+        }
+        if (!exists)
+            break; /* (3) absent table == empty log == fresh seed. */
+
+        /* (3) No row below requested -> fresh log, full jump. */
+        int n = snprintf(sql, sizeof(sql),
+                         "SELECT 1 FROM %s WHERE height < ? LIMIT 1",
+                         log_table);
+        int rc = frontier_probe_formatted(db, sql, n, sizeof(sql), log_table,
+                                          (int64_t)requested, 0, 1, &found,
+                                          NULL);
+        if (rc != FRONTIER_SCAN_OK) {
+            status = frontier_probe_status(rc, FRONTIER_SCAN_OVERFLOW_FRESH);
+            break;
+        }
+        if (!found)
+            break;
+
+        /* (4a) Point-probe: a rowless cursor caps the jump immediately. */
+        n = snprintf(sql, sizeof(sql),
+                     "SELECT 1 FROM %s WHERE height = ? LIMIT 1", log_table);
+        rc = frontier_probe_formatted(db, sql, n, sizeof(sql), log_table,
+                                      (int64_t)cursor, 0, 1, &found, NULL);
+        if (rc != FRONTIER_SCAN_OK) {
+            status = frontier_probe_status(rc, FRONTIER_SCAN_OVERFLOW_CURSOR);
+            break;
+        }
+        if (!found) {
+            *cap_hit = true;
+            *cap_at = cursor;
+            break;
+        }
+
+        /* (4b) Lowest rowless height in (cursor, requested): one indexed
+         * first-gap query (the PK index makes both sides O(log n)) — NOT a
+         * per-height loop. With a row at `cursor` (proved by 4a), the lowest
+         * rowless height necessarily follows an existing row >= cursor. */
+        n = snprintf(sql, sizeof(sql),
+                     "SELECT MIN(t1.height + 1) FROM %s t1 "
+                     "WHERE t1.height >= ? AND t1.height + 1 < ? "
+                     "AND NOT EXISTS (SELECT 1 FROM %s t2 "
+                     "WHERE t2.height = t1.height + 1)",
+                     log_table, log_table);
+        rc = frontier_probe_formatted(db, sql, n, sizeof(sql), log_table,
+                                      (int64_t)cursor, (int64_t)requested, 2,
+                                      &found, &gap);
+        if (rc != FRONTIER_SCAN_OK) {
+            status = frontier_probe_status(rc, FRONTIER_SCAN_OVERFLOW_GAP);
+            break;
+        }
+        *cap_hit = frontier_gap_caps(found, gap, requested);
+        if (*cap_hit)
+            *cap_at = (uint64_t)gap;
+    } while (0);
+    return status;
 }
 
 bool stage_anchor_cap_target_at_log_frontier(sqlite3 *db,
@@ -224,85 +305,24 @@ bool stage_anchor_cap_target_at_log_frontier(sqlite3 *db,
                  "frontier cap: target out of range table=%s requested=%llu",
                  log_table, (unsigned long long)requested);
 
-    char sql[256];
-    bool ok = true;
     bool cap_hit = false;
     uint64_t cap_at = requested;
-    bool found = false;
-    int64_t gap = -1;
 
     progress_store_tx_lock();
-    do {
-        bool exists = false;
-        if (!frontier_log_table_exists(db, log_table, &exists)) {
-            ok = false;
-            break;
-        }
-        if (!exists)
-            break; /* (3) absent table == empty log == fresh seed. */
-
-        /* (3) No row below requested -> fresh log, full jump. */
-        int n = snprintf(sql, sizeof(sql),
-                         "SELECT 1 FROM %s WHERE height < ? LIMIT 1",
-                         log_table);
-        int rc = frontier_probe_formatted(db, sql, n, sizeof(sql), log_table,
-                                          (int64_t)requested, 0, 1, &found,
-                                          NULL);
-        if (rc != FRONTIER_SCAN_OK) {
-            if (rc == FRONTIER_SCAN_SQL_OVERFLOW)
-                LOG_WARN("stage_anchor", "frontier cap: sql overflow table=%s",
-                         log_table);
-            ok = false;
-            break;
-        }
-        if (!found)
-            break;
-
-        /* (4a) Point-probe: a rowless cursor caps the jump immediately. */
-        n = snprintf(sql, sizeof(sql),
-                     "SELECT 1 FROM %s WHERE height = ? LIMIT 1", log_table);
-        rc = frontier_probe_formatted(db, sql, n, sizeof(sql), log_table,
-                                      (int64_t)cursor, 0, 1, &found, NULL);
-        if (rc != FRONTIER_SCAN_OK) {
-            if (rc == FRONTIER_SCAN_SQL_OVERFLOW)
-                LOG_WARN("stage_anchor", "frontier cap: sql overflow table=%s",
-                         log_table);
-            ok = false;
-            break;
-        }
-        if (!found) {
-            cap_hit = true;
-            cap_at = cursor;
-            break;
-        }
-
-        /* (4b) Lowest rowless height in (cursor, requested): one indexed
-         * first-gap query (the PK index makes both sides O(log n)) — NOT a
-         * per-height loop. With a row at `cursor` (proved by 4a), the lowest
-         * rowless height necessarily follows an existing row >= cursor. */
-        n = snprintf(sql, sizeof(sql),
-                     "SELECT MIN(t1.height + 1) FROM %s t1 "
-                     "WHERE t1.height >= ? AND t1.height + 1 < ? "
-                     "AND NOT EXISTS (SELECT 1 FROM %s t2 "
-                     "WHERE t2.height = t1.height + 1)",
-                     log_table, log_table);
-        rc = frontier_probe_formatted(db, sql, n, sizeof(sql), log_table,
-                                      (int64_t)cursor, (int64_t)requested, 2,
-                                      &found, &gap);
-        if (rc != FRONTIER_SCAN_OK) {
-            if (rc == FRONTIER_SCAN_SQL_OVERFLOW)
-                LOG_WARN("stage_anchor", "frontier cap: sql overflow table=%s",
-                         log_table);
-            ok = false;
-            break;
-        }
-        cap_hit = frontier_gap_caps(found, gap, requested);
-        if (cap_hit)
-            cap_at = (uint64_t)gap;
-    } while (0);
+    int scan = frontier_cap_scan(db, log_table, cursor, requested, &cap_at,
+                                 &cap_hit);
+    if (scan == FRONTIER_SCAN_OVERFLOW_FRESH)
+        LOG_WARN("stage_anchor", "frontier cap: sql overflow table=%s",
+                 log_table);
+    if (scan == FRONTIER_SCAN_OVERFLOW_CURSOR)
+        LOG_WARN("stage_anchor", "frontier cap: sql overflow table=%s",
+                 log_table);
+    if (scan == FRONTIER_SCAN_OVERFLOW_GAP)
+        LOG_WARN("stage_anchor", "frontier cap: sql overflow table=%s",
+                 log_table);
     progress_store_tx_unlock();
 
-    if (!ok)
+    if (scan != FRONTIER_SCAN_OK)
         return false;  // raw-return-ok:logged-in-probe-helpers
     if (cap_hit) {
         *capped = cap_at;
