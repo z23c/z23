@@ -3795,10 +3795,14 @@ $(TMPL_TOOL): tools/gen_templates.c platform/modules/base/src/safe_alloc.c \
 # The stamp records the variable's value and is rewritten only when it changes,
 # so a switch between a kernel, another kernel and none relinks every binary
 # that takes the blob or the stub, and a different file is always re-checked.
+# Each make writes its own temporary (suffix = shell PID): parallel sub-makes
+# run this FORCE rule at once, and a shared name let one rename it away
+# before another's mv ("cannot stat guest_kernel.stamp.new").
 $(GUEST_KERNEL_STAMP): FORCE
 	@mkdir -p $(dir $@)
-	@printf '%s\n' '$(subst ','\'',$(GUEST_KERNEL_VALUE))' > $@.new; \
-	if cmp -s $@.new $@; then rm -f $@.new; else mv -f $@.new $@; fi
+	@t=$@.new.$$$$; printf '%s\n' '$(subst ','\'',$(GUEST_KERNEL_VALUE))' > $$t || \
+	{ rm -f $$t; exit 1; }; \
+	if cmp -s $$t $@; then rm -f $$t; else mv -f $$t $@; fi
 
 $(GUEST_KERNEL_TOOL): $(GUEST_KERNEL_TOOL_SRCS) tools/command/native_builtin_kernel.h
 	@mkdir -p $(dir $@)
