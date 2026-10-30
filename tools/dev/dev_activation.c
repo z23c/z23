@@ -5,7 +5,8 @@
  *
  * The whole engine is compiled only under a dev OR test build so the release
  * binary carries none of these symbols (proven by
- * tools/lint/check_release_no_dev_symbols.sh). Process exec (the real
+ * the lint gate check-release-no-dev-symbols in
+ * tools/lint/lintc/gate_release_no_dev_symbols.c). Process exec (the real
  * systemctl/proc ops) is further confined to ZCL_DEV_BUILD.
  */
 

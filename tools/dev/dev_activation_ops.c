@@ -7,7 +7,7 @@
  * does process exec, so the whole TU is confined to ZCL_DEV_BUILD and is absent
  * from both the release binary and the (ZCL_TESTING) test harness — tests drive
  * a fake ops vtable instead. Symbol absence from release is proven by
- * tools/lint/check_release_no_dev_symbols.sh.
+ * the lint gate check-release-no-dev-symbols (tools/lint/lintc/gate_release_no_dev_symbols.c).
  */
 
 #define _GNU_SOURCE

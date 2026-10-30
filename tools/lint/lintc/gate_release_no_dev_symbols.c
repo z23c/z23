@@ -2,7 +2,7 @@
  *
  * purpose: gate check-release-no-dev-symbols — prove the RELEASE binary
  * contains none of the dev-only mutation entry points. Two layers, exactly
- * like tools/lint/check_release_no_dev_symbols.sh (deleted):
+ * like the retired shell gate (deleted):
  *   1. STRUCTURAL (always): main.c has no legacy devloop dispatch, the
  *      Makefile puts the devloop executors in DEV_ONLY_SRCS and filters
  *      them out of DEVLOOP_SRCS, and every dev-activation engine source
@@ -61,8 +61,12 @@ struct rnd_nmres {
     int seen[RND_NFORBID]; /* forbidden name i was exported (by index) */
 };
 
+/* An absolute rel (the binary argument may be one) is used as given, exactly
+ * as the shell script's `[ -x "$BIN" ]` did; a relative one joins root. */
 static int rnd_join(const char *root, const char *rel, char *out, size_t cap)
 {
+    if (rel[0] == '/')
+        return ovf(snprintf(out, cap, "%s", rel), cap) ? 2 : 0;
     return ovf(snprintf(out, cap, "%s/%s", root, rel), cap) ? 2 : 0;
 }
 

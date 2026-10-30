@@ -26,7 +26,7 @@
  * The three extern entry points (dev_activation_run,
  * dev_activation_activate_generation, dev_activation_default_ops) are compiled
  * out of the release binary and their absence is proven by the lint gate
- * tools/lint/check_release_no_dev_symbols.sh.
+ * the lint gate check-release-no-dev-symbols (tools/lint/lintc/gate_release_no_dev_symbols.c).
  */
 
 #include <stdbool.h>

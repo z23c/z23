@@ -14857,7 +14857,7 @@ check-status-reason-single:
 # grep -q exits at the first match, printf then takes SIGPIPE, and pipefail
 # reports printf's 141 instead of grep's 0 — so a MATCH becomes
 # indistinguishable from a miss and the decision inverts. For a lint gate that
-# is a hollow PASS: check_release_no_dev_symbols.sh read the release binary as
+# is a hollow PASS: the check-release-no-dev-symbols gate read the release binary as
 # clean in 20/20 runs with a forbidden dev-only symbol planted in it. Fix with
 # str_contains/str_lacks (tools/scripts/sh_str.sh) or by extracting the match
 # into a variable and testing the string. Shrink-only baseline at
