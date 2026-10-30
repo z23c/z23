@@ -198,3 +198,5 @@ test-host:
 	'$(BUILD_DIR)/assistant-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/thermal_test.c thermal.c -o '$(BUILD_DIR)/thermal-test'
 	'$(BUILD_DIR)/thermal-test'
+	$(HOST_CC) $(HOST_WARNINGS) -D__ANDROID__ -pthread -Itests/ndk_fake -I. tests/thermal_start_test.c thermal.c -o '$(BUILD_DIR)/thermal-start-test'
+	'$(BUILD_DIR)/thermal-start-test'

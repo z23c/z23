@@ -241,6 +241,14 @@ int main(void)
                    "Sync paused · phone is cooling down"));
     assert(!strcmp(zapp_paced_line(ZAPP_PACE_PAUSE, false, "Node stopped", line, sizeof(line)), "Node stopped"));
     assert(!strcmp(zapp_paced_line(ZAPP_PACE_GENTLE, true, sync_text, line, 8), "Syncing"));
+    /* A synced or stopping node keeps its true line; only a node that is starting or catching up shows the pace. */
+    {
+        const char *synced = "Node in sync · 3,301,553 · 1 peer", *stopping = "Node stopping";
+        assert(!strcmp(zapp_paced_line(ZAPP_PACE_GENTLE, true, synced, line, sizeof(line)), synced));
+        assert(!strcmp(zapp_paced_line(ZAPP_PACE_PAUSE, true, synced, line, sizeof(line)), synced));
+        assert(!strcmp(zapp_paced_line(ZAPP_PACE_GENTLE, true, stopping, line, sizeof(line)), stopping));
+        assert(!strcmp(zapp_paced_line(ZAPP_PACE_PAUSE, true, stopping, line, sizeof(line)), stopping));
+    }
     assert(!strcmp(zapp_sync_line(false, false, -1, -1, line, sizeof(line)),
                    "Start the node to begin synchronization."));
     assert(!strcmp(zapp_sync_line(false, true, -1, -1, line, sizeof(line)), "Waiting for the node to answer."));

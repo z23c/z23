@@ -56,6 +56,11 @@ int main(void)
     transition_table_tests();
     hysteresis_edge_tests();
     trace_tests();
+    /* A stale pause is cleared at start unless a status already reached the pace file. */
+    assert(zapp_pace_default_needed(false, false));
+    assert(!zapp_pace_default_needed(false, true));
+    assert(!zapp_pace_default_needed(true, false));
+    assert(!zapp_pace_default_needed(true, true));
     puts("thermal tests passed");
     return 0;
 }

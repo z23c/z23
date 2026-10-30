@@ -12,7 +12,11 @@
 #include "fleet.h"
 #include "json/json.h"
 #include "base/cleanse.h"
+#include <errno.h>
 #include <pthread.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +43,7 @@ struct controller {
     char asked[96];                               /* Question last answered by the model. */
     atomic_bool reply_cancel;
     atomic_bool voice_cancel, voice_stop;
+    bool pace_seen;            /* A thermal status or the startup default has set the pace file. */
     pthread_mutex_t pace_lock; /* Serializes thermal callbacks: previous pace, file write, view. */
 };
 static pthread_mutex_t startup_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -134,11 +139,35 @@ static void refresh_suggestion(struct controller *c)
 /* Runs on a platform binder thread; the pace file write is small and done inline. The view shows the
  * pace the node reports, not the one written here, so a node that ignores the file is not misreported. */
 #ifdef __ANDROID__
-static void thermal_status(int status, void *ctx)
+/* Applies a status to the pace file; the caller holds pace_lock. */
+static bool pace_apply_locked(struct controller *c, int status)
+{
+    const bool written = zapp_node_pace_write(&c->runtime, zapp_pace_next(zapp_node_pace(&c->runtime), status));
+    if (written)
+        c->pace_seen = true;
+    return written;
+}
+
+static bool thermal_status(int status, void *ctx)
 {
     struct controller *c = ctx;
     pthread_mutex_lock(&c->pace_lock);
-    (void)zapp_node_pace_write(&c->runtime, zapp_pace_next(zapp_node_pace(&c->runtime), status));
+    const bool written = pace_apply_locked(c, status);
+    pthread_mutex_unlock(&c->pace_lock);
+    return written;
+}
+
+/* No status is known at all: a pace file left as "pause" by an earlier run would hold the node paused
+ * for good, so normal is written. Runs under the thermal lock, so no status can be delivered between
+ * the decision and the write; a known status is applied by zapp_thermal_settle and never replaced. */
+static void startup_default(void *ctx)
+{
+    struct controller *c = ctx;
+    pthread_mutex_lock(&c->pace_lock);
+    if (zapp_pace_default_needed(c->pace_seen, false)) {
+        if (zapp_node_pace_write(&c->runtime, ZAPP_PACE_NORMAL)) c->pace_seen = true;
+        else __android_log_print(ANDROID_LOG_WARN, "z23", "startup pace file not written: %s", strerror(errno));
+    }
     pthread_mutex_unlock(&c->pace_lock);
 }
 #endif
@@ -743,6 +772,7 @@ bool zapp_controller_start(const char *files, const char *libs, bool preview, vo
     /* The listener outlives the activity: the foreground service keeps the process, and so the pace,
      * alive while the app is hidden. The controller lives as long as the process. */
     (void)zapp_thermal_start(thermal_status, c);
+    zapp_thermal_settle(thermal_status, startup_default, c);
 #endif
     pthread_mutex_unlock(&startup_lock); return true;
 fail:
