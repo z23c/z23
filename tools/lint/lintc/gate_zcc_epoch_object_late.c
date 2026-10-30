@@ -17,6 +17,7 @@
 #include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
+#include "lintc_text.h"
 #include "lintc.h"
 #include "gate_zcc_epoch_object_priv.h"
 
@@ -206,7 +207,7 @@ static void p2_copy_warm(struct zeo *z, const char *obj, const char *errf,
         zeo_count_line_eq(z->compiler_launches, "compile") != cold_cmp)
         zeo_fail("copied-wrapper warm hit failed fresh preprocess or "
                  "compiled an object");
-    if (zeo_grep_f(k_no_print_prog, errf))
+    if (lct_file_has(errf, k_no_print_prog))
         zeo_fail("copied-wrapper warm compile queried zcc as the compiler "
                  "driver");
 }
@@ -227,7 +228,7 @@ static void p2_copy(struct zeo *z)
     p2_copy_outcome(z, log_before + 1, "MISS",
                     "copied-wrapper cold compile used more than one zcc "
                     "coordinator");
-    if (zeo_grep_f(k_no_print_prog, cold_err))
+    if (lct_file_has(cold_err, k_no_print_prog))
         zeo_fail("copied-wrapper cold compile queried zcc as the compiler "
                  "driver");
     p2_copy_warm(z, obj, warm_err, log_before);
@@ -418,7 +419,7 @@ static void p2_mmd_retained(const char *ndep, const char *const dirs[3],
         if (ovf(snprintf(needle, sizeof needle, "%s%s", dirs[i], names[i]),
                 sizeof needle))
             zeo_bail(2);
-        if (!zeo_grep_f(needle, ndep))
+        if (!lct_file_has(ndep, needle))
             zeo_failf("%s MMD depfile omitted project input %s", label,
                       needle);
     }
@@ -439,7 +440,7 @@ static void p2_mmd_compare(struct zeo *z, char *cc[10], const char *label,
     if (!zeo_files_equal(f[3], f[1]))
         zeo_failf("%s native/legacy MMD depfile bytes diverged", label);
     p2_mmd_retained(f[3], dirs, label);
-    if (zeo_grep_f(sysn, f[3]) || zeo_grep_f("stdio.h", f[3]))
+    if (lct_file_has(f[3], sysn) || lct_file_has(f[3], "stdio.h"))
         zeo_failf("%s MMD depfile retained a system header", label);
 }
 

@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "lintc_text.h"
 #include "lintc.h"
 #include "gate_zcc_cache_priv.h"
 
@@ -55,7 +56,7 @@ int zc_sec_stage(void)
     zc_want(strcmp(s1, s2) == 0, "a staged cache hit produced different object bytes");
     zc_want(zc_nonempty(zcw("stage.two/main.d")),
             "a cache hit did not restore the depfile");
-    zc_want(zc_file_has(zcw("stage.two/main.d"), "main.o"),
+    zc_want(lct_file_has(zcw("stage.two/main.d"), "main.o"),
             "the restored depfile does not name its target");
     return 0;
 }
@@ -183,9 +184,9 @@ int zc_sec_epoch(void)
     zc_disp("HIT", "a rebuild whose only change was the -MT epoch path missed the cache");
     zc_want(strcmp(e1, e2) == 0, "an epoch-path cache hit produced different object bytes");
     zc_want(zc_nonempty(d), "the epoch-path hit did not restore a depfile");
-    zc_want(zc_file_has(d, "epochs/bbbb/main.o"),
+    zc_want(lct_file_has(d, "epochs/bbbb/main.o"),
             "the restored depfile does not name the current -MT target");
-    zc_want(!zc_file_has(d, "epochs/aaaa/main.o"),
+    zc_want(!lct_file_has(d, "epochs/aaaa/main.o"),
             "the restored depfile still names the previous epoch's -MT target");
     return 0;
 }

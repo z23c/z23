@@ -81,7 +81,6 @@ int to_each_line(const char *path, FILE *err,
 int to_viol_add(struct to_viol *v, FILE *err, const char *fmt, ...);
 int to_viol_has(const struct to_viol *v, const char *needle);
 void to_viol_print(FILE *f, const struct to_viol *v);
-int to_readable(const char *path);
 /* onto part */
 int to_phase_onto(struct to_state *st);
 int to_onto_has(const struct to_state *st, const char *key);

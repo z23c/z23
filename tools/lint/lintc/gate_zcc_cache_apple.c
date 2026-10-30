@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "lintc_text.h"
 #include "lintc.h"
 #include "gate_zcc_cache_priv.h"
 
@@ -150,7 +151,7 @@ static int ap_race_run(const struct ap_race *r)
         zc_copy(be, zcw("%s-original", r->stem), 1) || zc_put(r->counter, ""))
         return 1;
     r->compile();
-    zc_want(zc_file_has(log, ap_race_msg), zcf("mid-compile %s mutation was not detected", r->noun));
+    zc_want(lct_file_has(log, ap_race_msg), zcf("mid-compile %s mutation was not detected", r->noun));
     if (zc_copy(be, zcw("%s-changed", r->stem), 1) ||
         zc_copy(zcw("%s-original", r->stem), be, 0))
         return 1;
@@ -271,7 +272,7 @@ static int ap_as_basic(void)
         zcf("-B%s", dir), "-c", zcw("apple-as.c"), "-o", zcw("apple-as.o")),
         .outf = zcw("apple-as-driver"), .merge = 1 };
     zc_want(zc_run(&c) == 0, "Apple assembler driver query failed");
-    zc_want(zc_file_has(zcw("apple-as-driver"), zcw("apple-as/as")),
+    zc_want(lct_file_has(zcw("apple-as-driver"), zcw("apple-as/as")),
             "Apple driver did not select the fixture assembler");
     ap_as_compile(cache, log, dir, NULL, NULL, m);
     zc_disp_in(log, "MISS", "Apple assembler cold compile was not a MISS");

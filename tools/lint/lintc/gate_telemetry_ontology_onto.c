@@ -15,6 +15,7 @@
 #include <regex.h>
 #include <stdio.h>
 #include <string.h>
+#include "lintc_text.h"
 #include "lintc.h"
 #include "gate_telemetry_ontology_priv.h"
 
@@ -304,7 +305,7 @@ static int to_paste_pair(struct to_state *st, const char *sub,
     if (ovf(snprintf(dfile, sizeof dfile, "%s/%s_fields.def",
                      st->fields_dir, sub), sizeof dfile))
         return 2;
-    if (!to_readable(dfile)) {
+    if (!lct_readable(dfile)) {
         fprintf(st->err,
                 "%s: FATAL — %s pastes domain '%s' but its field\n"
                 "  table is missing or unreadable: %s\n",
@@ -388,7 +389,7 @@ static int to_half_check(struct to_state *st)
 
 static int to_parse_paste(struct to_state *st)
 {
-    if (!to_readable(st->tu_path)) {
+    if (!lct_readable(st->tu_path)) {
         fprintf(st->err,
                 "%s: FATAL — the g_fields[] paste site is missing or unreadable:\n"
                 "  %s\n",

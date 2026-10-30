@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "lintc_text.h"
 #include "lintc.h"
 #include "gate_telemetry_ontology_priv.h"
 
@@ -33,15 +34,6 @@ static struct to_state g_to;
 static const char *to_dash(const char *v, const char *dflt)
 {
     return v ? v : dflt;
-}
-
-int to_readable(const char *path)
-{
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return 0;
-    fclose(f);
-    return 1;
 }
 
 /* Reads path line by line (newline stripped; a final unterminated line is
@@ -132,13 +124,13 @@ static int to_inputs(struct to_state *st)
     const char *req[3] = { st->manifest_path, st->onto_path,
                            st->domains_path };
     for (int i = 0; i < 3; i++)
-        if (!to_readable(req[i])) {
+        if (!lct_readable(req[i])) {
             fprintf(st->err,
                     "%s: FATAL — required input missing or unreadable: %s\n",
                     TO_GATE, req[i]);
             return 2;
         }
-    if (st->extra_path[0] && !to_readable(st->extra_path)) {
+    if (st->extra_path[0] && !lct_readable(st->extra_path)) {
         fprintf(st->err,
                 "%s: FATAL — ZCL_TELEMETRY_SCAN_EXTRA_MANIFEST is set but\n"
                 "  unreadable: %s\n",

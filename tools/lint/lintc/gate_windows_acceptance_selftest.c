@@ -22,21 +22,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "lintc_text.h"
 #include "lintc.h"
 #include "gate_windows_acceptance_priv.h"
 
 static char waf_out[WA_TEXT];
-
-static int waf_root(char *out, size_t cap)
-{
-    const char *td = env_or("TMPDIR", "/tmp");
-    if (ovf(snprintf(out, cap, "%s/windows-acceptance-selftest.XXXXXX", td),
-            cap))
-        return 2;
-    if (!mkdtemp(out))
-        return die("z23-lint: mkdtemp failed for selftest scratch\n", "");
-    return 0;
-}
 
 static int waf_mkdirs(const char *dir)
 {
@@ -582,7 +572,7 @@ static int waf_case_13(const char *fx)
 int check_windows_acceptance_selftest(void)
 {
     static char fx[WA_PATH];
-    int rc0 = waf_root(fx, sizeof fx);
+    int rc0 = lint_mkdtemp(fx, sizeof fx, "windows-acceptance-selftest");
     if (rc0)
         return rc0;
     printf("══ check-windows-acceptance self-test ══\n");

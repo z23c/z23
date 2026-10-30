@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include "lintc_text.h"
 #include "lintc.h"
 #include "gate_telemetry_ontology_priv.h"
 
@@ -66,7 +67,7 @@ static int to_man_table(struct to_state *st, char **tok, int nt,
                 TO_GATE, line);
         return 2;
     }
-    if (!to_readable(tok[2])) {
+    if (!lct_readable(tok[2])) {
         fprintf(st->err,
                 "%s: FATAL — TABLE row names an unreadable field table: %s\n",
                 TO_GATE, tok[2]);
@@ -126,7 +127,7 @@ static int to_man_func(struct to_state *st, char **tok, int nt,
                 line);
         return 2;
     }
-    if (!to_readable(tok[1])) {
+    if (!lct_readable(tok[1])) {
         fprintf(st->err,
                 "%s: FATAL — manifest names an unreadable file: %s\n", TO_GATE,
                 tok[1]);
@@ -701,7 +702,7 @@ static int to_fc_line(void *v, const char *line, size_t len)
 
 static int to_fill_count(struct to_state *st)
 {
-    if (!to_readable(st->fill_count_path)) {
+    if (!lct_readable(st->fill_count_path)) {
         fprintf(st->err,
                 "%s: FATAL — fill-provider count file missing: %s\n", TO_GATE,
                 st->fill_count_path);

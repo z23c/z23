@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "lintc_text.h"
 #include "lintc.h"
 #include "gate_zcc_cache_priv.h"
 
@@ -29,9 +30,9 @@ int zc_sec_basic(void)
     zc_disp("HIT", "a changed parent lint source receipt prevented a HIT");
     zc_want(strcmp(zc.sha_a, b) == 0,
             "a cache hit produced different bytes than the compile");
-    zc_want(zc_file_has(zcw("stderr.cold"), "never_called"),
+    zc_want(lct_file_has(zcw("stderr.cold"), "never_called"),
             "the fixture stopped producing the warning this gate depends on");
-    zc_want(zc_file_has(zcw("stderr.warm"), "never_called"),
+    zc_want(lct_file_has(zcw("stderr.warm"), "never_called"),
             "a cache hit did not replay the compiler's warning");
     zc_touch_now(zcw("main.c"));
     if (zc_build("touched", NULL, c))

@@ -22,6 +22,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "lintc_text.h"
 #include "lintc.h"
 #include "gate_zcc_epoch_object_priv.h"
 
@@ -131,7 +132,7 @@ static void p1_silent(struct zeo *z)
     if (ovf(snprintf(needle, sizeof needle, "compiler exited rc=2 source=%s",
                      z->source), sizeof needle))
         zeo_bail(2);
-    if (!zeo_grep_f(needle, log)) {
+    if (!lct_file_has(log, needle)) {
         zeo_head_to_stderr(log, 80);
         zeo_fail("silent compiler failure lacked source and exit-status "
                  "context");
@@ -157,7 +158,7 @@ static void p1_verify_published(struct zeo *z, const char *dep,
     if (!zeo_files_equal(z->expected, z->unverified))
         zeo_fail("successful publication did not leave exact unverified "
                  "authority");
-    if (!zeo_grep_f(needle, dep))
+    if (!lct_file_has(dep, needle))
         zeo_fail("native depfile does not name the final object");
     char *largs[5];
     largs[0] = (char *)"cc";

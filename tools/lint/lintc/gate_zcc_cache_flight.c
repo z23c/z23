@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include "lintc_text.h"
 #include "lintc.h"
 #include "gate_zcc_cache_priv.h"
 
@@ -156,11 +157,11 @@ static int sf_shared(void)
     sf_join(follower, "follower");
     zc_want(sf_count("compile") == 2, "identical cold requests did not share one compile");
     zc_want(zc_same(sp("owner.o"), sp("follower.o")), "shared compile output bytes differ");
-    zc_want(zc_file_has(sp("follower.d"), zcf("%s:", sp("follower.o"))),
+    zc_want(lct_file_has(sp("follower.d"), zcf("%s:", sp("follower.o"))),
             "shared compile depfile does not name the follower target");
-    zc_want(zc_file_has(sp("follower.d"), sp("value.h")),
+    zc_want(lct_file_has(sp("follower.d"), sp("value.h")),
             "shared compile depfile lost a header dependency");
-    zc_want(zc_file_has(sp("stderr.owner"), "sf_unused"),
+    zc_want(lct_file_has(sp("stderr.owner"), "sf_unused"),
             "shared compile warning fixture produced no warning");
     zc_want(zc_same(sp("stderr.owner"), sp("stderr.follower")),
             "shared compile did not replay exact compiler diagnostics");
@@ -246,7 +247,7 @@ static int sf_unavailable(const char *shape)
             zcf("%s lock refusal did not compile independently", shape));
     zc_want(zc_same(sp("first.o"), sp("second.o")),
             zcf("%s lock refusal changed output bytes", shape));
-    zc_want(zc_file_has(sp("sentinel"), "untouched"),
+    zc_want(lct_file_has(sp("sentinel"), "untouched"),
             "lock refusal changed the symlink target");
     zc_want(zc_line_with_prefix(sp("log.second"), "BYPASS "),
             zcf("%s lock refusal did not report bypass", shape));

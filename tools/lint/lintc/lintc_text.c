@@ -65,3 +65,27 @@ int lct_read_line_fd(int rfd, char *buf, size_t cap)
     buf[used] = '\0';
     return used ? 0 : -1;
 }
+
+/* True when path can be opened for reading. */
+int lct_readable(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    fclose(f);
+    return 1;
+}
+
+/* Line-wise substring search over a file; 16384-byte line buffer. */
+int lct_file_has(const char *path, const char *needle)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    char line[16384];
+    int hit = 0;
+    while (!hit && fgets(line, sizeof line, f))
+        hit = strstr(line, needle) != NULL;
+    fclose(f);
+    return hit;
+}

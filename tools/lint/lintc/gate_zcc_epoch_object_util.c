@@ -104,7 +104,6 @@ int zeo_sha256_hex(const char *s, char out[ZEO_HASH])
     return 0;
 }
 
-
 int zeo_write_file(const char *path, const char *text)
 {
     FILE *f = fopen(path, "w");
@@ -347,19 +346,6 @@ int zeo_tail1(const char *path, char *out, size_t cap)
 int zeo_first_tok_is(const char *line, const char *word)
 {
     return zeo_line_first_is(line, word);
-}
-
-int zeo_grep_f(const char *needle, const char *path)
-{
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return 0;
-    char line[ZEO_PATH];
-    int found = 0;
-    while (!found && fgets(line, sizeof line, f))
-        found = strstr(line, needle) != NULL;
-    fclose(f);
-    return found;
 }
 
 int zeo_grep_re(const char *pattern, const char *path)

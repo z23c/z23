@@ -193,19 +193,6 @@ int zc_x(const char *const *argv, const char *const *env, const char *errf)
     return zc_run(&c);
 }
 
-int zc_file_has(const char *path, const char *needle)
-{
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return 0;
-    char line[ZC_OUT];
-    int hit = 0;
-    while (!hit && fgets(line, sizeof line, f))
-        hit = strstr(line, needle) != NULL;
-    fclose(f);
-    return hit;
-}
-
 int zc_line_with_prefix(const char *path, const char *prefix)
 {
     FILE *f = fopen(path, "r");

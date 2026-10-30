@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "lintc_text.h"
 #include "lintc.h"
 #include "gate_zcc_cache_priv.h"
 
@@ -79,7 +80,7 @@ static int boot_edit_cycle(char *hash)
         return 1;
     struct zc_cmd u = { .argv = ZC_ARGV(bs_bin), .outf = zcw("bootstrap-usage"), .merge = 1 };
     zc_run(&u);
-    zc_want(zc_file_has(zcw("bootstrap-usage"), "usage: zcc-fixture <compiler>"),
+    zc_want(lct_file_has(zcw("bootstrap-usage"), "usage: zcc-fixture <compiler>"),
             "bootstrap source edit did not change the published behavior");
     zc_want(zc_sha(bs_bin, now) && strcmp(now, hash) != 0,
             "bootstrap source edit did not change compiler bytes");
@@ -89,7 +90,7 @@ static int boot_edit_cycle(char *hash)
             "restoring bootstrap source did not restore compiler bytes");
     u.outf = zcw("bootstrap-restored-usage");
     zc_run(&u);
-    zc_want(zc_file_has(zcw("bootstrap-restored-usage"), "usage: zcc <compiler>"),
+    zc_want(lct_file_has(zcw("bootstrap-restored-usage"), "usage: zcc <compiler>"),
             "restoring bootstrap source mtime retained mutated compiler behavior");
     return 0;
 }

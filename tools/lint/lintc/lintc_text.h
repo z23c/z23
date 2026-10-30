@@ -25,4 +25,14 @@ int lct_read_line_fd(int rfd, char *buf, size_t cap);
  * failed). */
 int lct_scratch_dir(char *out, size_t cap, const char *leaf);
 
+
+/* True when path can be opened for reading. */
+int lct_readable(const char *path);
+
+/* True when some line of the file at path contains needle (plain substring,
+ * no regex). Lines are read through a 16384-byte buffer (the larger of the
+ * two buffer sizes the ported gates used before this was shared); a longer
+ * line is seen as consecutive chunks. An unreadable file is 0. */
+int lct_file_has(const char *path, const char *needle);
+
 #endif

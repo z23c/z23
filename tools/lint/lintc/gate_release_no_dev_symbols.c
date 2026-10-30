@@ -32,6 +32,7 @@
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "lintc_text.h"
 #include "lintc.h"
 
 static const char k_rnd_gate[] = "check-release-no-dev-symbols";
@@ -70,15 +71,6 @@ static int rnd_join(const char *root, const char *rel, char *out, size_t cap)
     return ovf(snprintf(out, cap, "%s/%s", root, rel), cap) ? 2 : 0;
 }
 
-static int rnd_readable(const char *path)
-{
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return 0;
-    fclose(f);
-    return 1;
-}
-
 /* ── layer 1: structural ─────────────────────────────────────────────── */
 
 static int rnd_main_c(const char *root, FILE *err, int *rc)
@@ -88,7 +80,7 @@ static int rnd_main_c(const char *root, FILE *err, int *rc)
     int hits = 0;
     if (rnd_join(root, "engine/entry/main.c", path, sizeof path))
         return 2;
-    if (!rnd_readable(path)) {
+    if (!lct_readable(path)) {
         fprintf(err, "FAIL: %s is unreadable (fail closed)\n", path);
         *rc = 1;
         return 0;
@@ -170,7 +162,7 @@ static int rnd_makefile(const char *root, FILE *err, int *rc)
     int hits = 0;
     if (rnd_join(root, "Makefile", path, sizeof path))
         return 2;
-    if (!rnd_readable(path)) {
+    if (!lct_readable(path)) {
         fprintf(err, "FAIL: %s is unreadable (fail closed)\n", path);
         *rc = 1;
         return 0;
@@ -219,7 +211,7 @@ static int rnd_check_set(const char *root, const char *const *files, int n,
     for (int i = 0; i < n; i++) {
         if (rnd_join(root, files[i], path, sizeof path))
             return 2;
-        if (!rnd_readable(path)) {
+        if (!lct_readable(path)) {
             fprintf(err, "FAIL: %s is missing (dev-activation engine file set"
                          " changed shape)\n", files[i]);
             *rc = 1;

@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "lintc_text.h"
 #include "lintc.h"
 #include "gate_read_leaf_no_boot_ceremony_priv.h"
 
@@ -47,16 +48,6 @@ static const struct x_case k_cases[] = {
       "app.other create_schema", 1 },
     { "unresolved handler is noted, not gated", NULL, "return 0;", NULL, 0 },
 };
-
-static int x_root(char *out, size_t cap)
-{
-    const char *td = env_or("TMPDIR", "/tmp");
-    if (ovf(snprintf(out, cap, "%s/z23-lint-rlnbc.XXXXXX", td), cap))
-        return 2;
-    if (!mkdtemp(out))
-        return die("z23-lint: mkdtemp failed for selftest scratch\n", "");
-    return 0;
-}
 
 static int x_write_def(const char *root, const char *handler, int zeros)
 {
@@ -185,7 +176,7 @@ static int x_drift_case(const char *root)
 int check_read_leaf_no_boot_ceremony_selftest(void)
 {
     char root[X_PATH];
-    int rc = x_root(root, sizeof root);
+    int rc = lint_mkdtemp(root, sizeof root, "rlnbc");
     if (rc)
         return rc;
     int bad = 0;

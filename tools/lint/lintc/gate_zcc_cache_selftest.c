@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "lintc_text.h"
 #include "lintc.h"
 #include "gate_zcc_cache_priv.h"
 
@@ -60,7 +61,7 @@ static int zs_text(void)
 {
     const char *log = zcw("zcc.log");
     if (zc_sed_first(zcw("t.txt"), zcw("u.txt"), "beta", "BETA") ||
-        !zc_file_has(zcw("u.txt"), "alpha BETA") || zc_same(zcw("t.txt"), zcw("u.txt")))
+        !lct_file_has(zcw("u.txt"), "alpha BETA") || zc_same(zcw("t.txt"), zcw("u.txt")))
         return zs_fail("sed first occurrence");
     if (zc_copy(zcw("t.txt"), zcw("v.txt"), 1) || !zc_same(zcw("t.txt"), zcw("v.txt")))
         return zs_fail("copy");

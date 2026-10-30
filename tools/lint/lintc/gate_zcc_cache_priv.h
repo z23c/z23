@@ -54,7 +54,6 @@ int zc_run(const struct zc_cmd *c);
 /* stdout discarded, stderr to errf (NULL: inherited); exit code. */
 int zc_x(const char *const *argv, const char *const *env, const char *errf);
 
-int zc_file_has(const char *path, const char *needle);
 int zc_line_with_prefix(const char *path, const char *prefix);
 int zc_exists(const char *path);
 int zc_nonempty(const char *path);

@@ -74,7 +74,6 @@ long zeo_count_first_field(const char *path, const char *word);
 long zeo_outcome_count(const char *path);
 int zeo_tail1(const char *path, char *out, size_t cap);
 int zeo_first_tok_is(const char *line, const char *word);
-int zeo_grep_f(const char *needle, const char *path);
 int zeo_grep_re(const char *pattern, const char *path);
 int zeo_head_to_stderr(const char *path, long lines);
 
