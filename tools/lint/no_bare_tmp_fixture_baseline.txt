@@ -140,6 +140,7 @@ tools/lint/lintc/gate_pipefail_status_pipe_selftest.c 1
 tools/lint/lintc/gate_progress_honesty_fences.c 1
 tools/lint/lintc/gate_projection_purity_fences.c 1
 tools/lint/lintc/gate_release_no_dev_symbols_selftest.c 1
+tools/lint/lintc/gate_zcc_cache_util.c 1
 tools/lint/lintc/gate_windows_platform_seam.c 1
 tools/lint/lintc/gate_route_command_parity.c 1
 tools/lint/lintc/gate_rule_vocabulary.c 1

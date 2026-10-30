@@ -15499,10 +15499,11 @@ check-scanner-immunity: $(LINTC_TOOL)
 # hit is a wrong binary underneath every other proof here. This gate builds a
 # fixture five ways and requires identical bytes on a hit, replayed warnings,
 # and a MISS after a header edit — the exact case an earlier version of
-# tools/zcc.c got wrong. See tools/lint/check_zcc_cache.sh.
-check-zcc-cache:
+# tools/zcc.c got wrong. See tools/lint/lintc/gate_zcc_cache.c.
+check-zcc-cache: $(LINTC_TOOL)
 	@echo "══ LINT: compile cache serves correct bytes ══"
-	@./tools/lint/check_zcc_cache.sh
+	@./build/bin/z23-lint check-zcc-cache --selftest
+	@./build/bin/z23-lint check-zcc-cache
 
 check-zcc-epoch-object:
 	@echo "══ LINT: native epoch object depfile parity and publication safety ══"

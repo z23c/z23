@@ -111,7 +111,7 @@ gate_command() {
         check-checkout-lock)               echo 'tools/dev/checkout-lock-selftest.sh' ;;
         check-host-gc-selftest)            echo 'tools/scripts/host_gc_selftest.sh' ;;
         check-commons-journey-ordering)    echo 'tools/dev/commons-journey-ordering-selftest.sh' ;;
-        check-zcc-cache)                   echo './tools/lint/check_zcc_cache.sh' ;;
+        check-zcc-cache)                   echo 'build/bin/z23-lint check-zcc-cache --selftest && build/bin/z23-lint check-zcc-cache' ;;
         check-zcc-epoch-object)            echo './tools/lint/check_zcc_epoch_object.sh' ;;
         check-git-hooks-installed)         echo './tools/scripts/check_git_hooks_installed.sh --self-test && ./tools/scripts/install_git_hooks_selftest.sh && ./tools/scripts/check_git_hooks_installed.sh' ;;
         check-hotswap-eligible-scope)      echo 'build/bin/z23-lint check-hotswap-eligible-scope' ;;
