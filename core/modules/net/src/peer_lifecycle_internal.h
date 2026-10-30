@@ -125,4 +125,44 @@ void incident_pick_consider(struct peer_lifecycle_incident_pick *picks,
                             int64_t score, int64_t duplicate_host_entries,
                             const char *host);
 
+/* Entry predicates and renderers split across peer_lifecycle.c (entry state,
+ * g_pl) and peer_lifecycle_incident_json.c (incidents JSON rendering). The
+ * first group is defined in peer_lifecycle.c and used by the renderers; the
+ * second group is defined in peer_lifecycle_incident_json.c and called while
+ * peer_lifecycle.c holds g_pl.lock. */
+const char *entry_direction(const struct peer_lifecycle_entry *e);
+bool entry_connection_open(const struct peer_lifecycle_entry *e);
+bool entry_current_connection_handshaked(
+    const struct peer_lifecycle_entry *e);
+int64_t entry_handshake_age_secs(const struct peer_lifecycle_entry *e,
+                                 int64_t now);
+int64_t entry_reconnects(const struct peer_lifecycle_entry *e);
+void services_summary(uint64_t services, char *out, size_t out_sz);
+bool entry_advertised_height_trusted(const struct peer_lifecycle_entry *e);
+bool entry_bootstrap_useful(const struct peer_lifecycle_entry *e);
+const char *entry_advertised_height_trust(
+    const struct peer_lifecycle_entry *e);
+const char *entry_bootstrap_readiness(const struct peer_lifecycle_entry *e);
+bool entry_fast_sync_useful(const struct peer_lifecycle_entry *e);
+
+void append_incident_peer_json(
+    const struct peer_lifecycle_incident_pick *pick, int64_t now,
+    struct json_value *arr);
+void append_host_group_json(const struct peer_lifecycle_host_group *g,
+                            int64_t score, struct json_value *arr);
+void append_primary_host_issue_json(
+    const struct peer_lifecycle_host_pick *pick, struct json_value *out);
+const char *peer_incidents_bootstrap_readiness(
+    int64_t open_connections, int64_t handshaked_connections,
+    int64_t bootstrap_useful_connections);
+const char *peer_incidents_fast_sync_readiness(
+    int64_t bootstrap_useful_connections, int64_t fast_sync_useful_connections,
+    const char *bootstrap_readiness);
+const char *peer_incidents_severity(
+    int64_t incident_count, int64_t host_incident_count,
+    int64_t duplicate_group_count);
+const char *peer_incidents_next_action(
+    size_t host_pick_count, int64_t incident_count,
+    bool bootstrap_blocked, bool fast_sync_blocked);
+
 #endif /* ZCL_NET_PEER_LIFECYCLE_INTERNAL_H */
