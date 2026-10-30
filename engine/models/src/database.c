@@ -382,6 +382,12 @@ static bool prepare_statements(struct node_db *ndb)
 #define ZCL_NODE_DB_CACHE_CEIL_KIB     (64 * 1024)            /* 64 MiB */
 #define ZCL_NODE_DB_MMAP_CEILING_BYTES (256LL * 1024 * 1024)  /* 256 MiB */
 #define ZCL_NODE_DB_CONSTRAINED_BYTES  (4LL * 1024 * 1024 * 1024)
+#define ZCL_NODE_DB_TURBO_CACHE_KIB    (512LL * 1024)         /* 512 MiB */
+/* Bulk catch-up on 300k blocks: 16-512 MiB showed no throughput difference
+ * outside host noise; process maxrss on a loaded r1 fixture run grew
+ * 193/211/251/328/473 MiB for 16/32/64/128/512 MiB. 64 MiB matches the
+ * steady-state ceiling. */
+#define ZCL_NODE_DB_TURBO_CONSTRAINED_KIB (64LL * 1024)
 #define ZCL_NODE_DB_MIDRANGE_BYTES     (8LL * 1024 * 1024 * 1024)
 #define ZCL_NODE_DB_MIDRANGE_MMAP      (64LL * 1024 * 1024)
 #define ZCL_NODE_DB_BUSY_TIMEOUT_MS 10000
@@ -425,6 +431,20 @@ int64_t node_db_budget_cache_kib(void)
     int64_t cache_ceiling = ram > 0 && ram <= ZCL_NODE_DB_CONSTRAINED_BYTES
         ? 16 * 1024 : ZCL_NODE_DB_CACHE_CEIL_KIB;
     return hw_profile_sqlite_cache_kib(ram, 16 * 1024, cache_ceiling);
+}
+
+int64_t node_db_turbo_cache_kib_for_ram(int64_t ram)
+{
+    /* ram <= 0 is unreadable RAM: take the constrained size, as the budget
+     * cache takes its floor. */
+    if (ram <= ZCL_NODE_DB_CONSTRAINED_BYTES)
+        return ZCL_NODE_DB_TURBO_CONSTRAINED_KIB;
+    return ZCL_NODE_DB_TURBO_CACHE_KIB;
+}
+
+int64_t node_db_turbo_cache_kib(void)
+{
+    return node_db_turbo_cache_kib_for_ram(db_effective_ram_bytes());
 }
 
 static void db_set_pragmas(sqlite3 *db)

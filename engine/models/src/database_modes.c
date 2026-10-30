@@ -248,14 +248,17 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb)
      * returns the .wal file's blocks to the filesystem afterwards. */
     static const char *const turbo_pragmas[] = {
         "PRAGMA synchronous=OFF",
-        "PRAGMA cache_size=-524288",
         "PRAGMA wal_autocheckpoint="
             ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_WAL_AUTOCKPT_PAGES_BULK),
         "PRAGMA journal_size_limit="
             ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_JOURNAL_SIZE_LIMIT_BULK),
         NULL,
     };
-    bool turbo_ok = true;
+    char cache_sql[48];
+    snprintf(cache_sql, sizeof(cache_sql), "PRAGMA cache_size=-%lld",
+             (long long)node_db_turbo_cache_kib());
+    bool turbo_ok = db_exec_checked(ndb->db, cache_sql,
+                                    "ibd_turbo_mode cache") == SQLITE_OK;
     for (int i = 0; turbo_pragmas[i]; i++) {
         if (db_exec_checked(ndb->db, turbo_pragmas[i],
                             "ibd_turbo_mode pragma") != SQLITE_OK)

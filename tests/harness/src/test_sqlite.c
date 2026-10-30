@@ -622,6 +622,7 @@ static bool check_sqlite_13_stage_marker(const char *db_path)
     /* Stage a marker in the crash-recovery namespace the boot open wipes. */
     ok = ok && node_db_state_set(&ndb, "snapshot_staging_testmark", "x", 1);
     if (ndb.open) node_db_close(&ndb);
+    os_proc_mem_set_override(NULL);
     return ok;
 }
 
@@ -2639,10 +2640,20 @@ static int64_t sqlite_test_cache_pages(struct node_db *ndb)
     return pages;
 }
 
+static bool sqlite_test_turbo_cache(struct node_db *ndb, int64_t kib)
+{
+    return node_db_ibd_turbo_mode(ndb) &&
+           sqlite_test_cache_pages(ndb) == -kib;
+}
+
 /* Bulk-mode exits (normal mode, turbo fallback, snapshot receive exit) all
  * restore through node_db_restore_cache_size; none may leave a larger cache. */
 static bool sqlite_test_restore_keeps_budget(struct node_db *ndb)
 {
+    if (!sqlite_test_turbo_cache(ndb, 64 * 1024) ||
+        !node_db_restore_cache_size(ndb) ||
+        sqlite_test_cache_pages(ndb) != -(16 * 1024))
+        return false;
     if (!node_db_exec(ndb, "PRAGMA cache_size=-524288") ||
         !node_db_restore_cache_size(ndb) ||
         sqlite_test_cache_pages(ndb) != -(16 * 1024))
@@ -2650,6 +2661,40 @@ static bool sqlite_test_restore_keeps_budget(struct node_db *ndb)
     return node_db_exec(ndb, "PRAGMA cache_size=-524288") &&
            node_db_normal_mode(ndb) &&
            sqlite_test_cache_pages(ndb) == -(16 * 1024);
+}
+
+/* A server-class lane keeps the 512 MiB bulk cache. */
+static bool sqlite_test_server_turbo_cache(void)
+{
+    struct os_proc_mem server = {
+        .rss_bytes = 1024 * 1024,
+        .vsize_bytes = 2 * 1024 * 1024,
+        .cgroup_current = 2LL * 1024 * 1024 * 1024,
+        .cgroup_high = 16LL * 1024 * 1024 * 1024,
+        .cgroup_max = 32LL * 1024 * 1024 * 1024,
+        .sys_total_bytes = 64LL * 1024 * 1024 * 1024,
+        .sys_avail_bytes = 32LL * 1024 * 1024 * 1024,
+    };
+    os_proc_mem_set_override(&server);
+    struct node_db ndb;
+    bool ok = node_db_open(&ndb, ":memory:") &&
+              sqlite_test_turbo_cache(&ndb, 512 * 1024) &&
+              node_db_normal_mode(&ndb) &&
+              sqlite_test_cache_pages(&ndb) == -(64 * 1024);
+    if (ndb.open) node_db_close(&ndb);
+    return ok;
+}
+
+/* Unreadable RAM (ram <= 0) takes the constrained turbo size; 4 GiB is the
+ * last constrained size and one byte above it is the server size. */
+static bool sqlite_test_unreadable_ram_turbo(void)
+{
+    return node_db_turbo_cache_kib_for_ram(0) == 64 * 1024 &&
+           node_db_turbo_cache_kib_for_ram(-1) == 64 * 1024 &&
+           node_db_turbo_cache_kib_for_ram(4LL * 1024 * 1024 * 1024) ==
+               64 * 1024 &&
+           node_db_turbo_cache_kib_for_ram(4LL * 1024 * 1024 * 1024 + 1) ==
+               512 * 1024;
 }
 
 static void check_sqlite_47_sqlite_pragma_tuning_honors_constrained_(int *failures)
@@ -2677,6 +2722,8 @@ static void check_sqlite_47_sqlite_pragma_tuning_honors_constrained_(int *failur
     cache_pages = sqlite_test_cache_pages(&ndb);
     ok = ok && node_db_recommended_mmap_bytes() == 0;
     if (ndb.open) node_db_close(&ndb);
+    ok = ok && sqlite_test_server_turbo_cache();
+    ok = ok && sqlite_test_unreadable_ram_turbo();
     os_proc_mem_set_override(NULL);
     if (ok) printf("OK (cache=%lld mmap=0)\n",
                    (long long)cache_pages);

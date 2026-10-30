@@ -205,6 +205,14 @@ int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
  * 16 MiB; an unreadable RAM size also yields the 16 MiB floor. */
 int64_t node_db_budget_cache_kib(void);
 
+/* Page-cache KiB for bulk (turbo) catch-up and import: 512 MiB, or the
+ * measured constrained-lane size when the budget is 4 GiB or less. */
+int64_t node_db_turbo_cache_kib(void);
+
+/* Pure form of node_db_turbo_cache_kib() for a given RAM size in bytes;
+ * ram <= 0 (unreadable RAM) yields the constrained size. */
+int64_t node_db_turbo_cache_kib_for_ram(int64_t ram);
+
 /* Execute `sql`, logging any error with `where` context. Returns the
  * sqlite3 rc so callers can make tolerance decisions. (Defined in
  * database.c; used by migrations and performance-mode helpers.) */
