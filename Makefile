@@ -14638,9 +14638,10 @@ check-zclassicd-reach-allowlist: $(LINTC_TOOL)
 	@echo "══ LINT: zclassicd reach allowlist (node stands alone) ══"
 	@./build/bin/z23-lint check-zclassicd-reach-allowlist .
 
-check-stage-log-reorg-unsafe:
+check-stage-log-reorg-unsafe: $(LINTC_TOOL)
 	@echo "══ LINT: stage-log reorg-unsafe ratchet ══"
-	@./tools/scripts/gate_stage_log_reorg_unsafe_ratchet.sh
+	@./build/bin/z23-lint check-stage-log-reorg-unsafe --selftest
+	@./build/bin/z23-lint check-stage-log-reorg-unsafe
 
 check-no-csr-lock-on-finalize-drive: $(LINTC_TOOL)
 	@echo "══ LINT: no csr->lock on post-finalize drive (LOCK-ORDER LAW / ABBA) ══"

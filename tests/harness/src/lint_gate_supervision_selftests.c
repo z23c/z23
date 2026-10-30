@@ -1247,7 +1247,7 @@ int t_lint_gates_fail_loud_on_empty_scan(void)
      * override at a nonexistent path and assert the drifted-surface preflight
      * fires exit 2 (the old code exit 1'd / a swallowed grep would mask it). */
     failures += meta_gate_empty_scan_trips(
-        "tools/scripts/gate_stage_log_reorg_unsafe_ratchet.sh",
+        "build/bin/z23-lint check-stage-log-reorg-unsafe",
         "ZCL_REORG_RATCHET_FILES", "/nonexistent/_lint_missing_store.c");
 
     (void)rmdir(empty_dir);

@@ -19,7 +19,7 @@ count falls below a known floor. A `gate_grep` wrapper treats `grep` exit
 of swallowing it as "no match."
 
 Gates wired to this pattern: `check_one_write_path.sh`,
-`check_no_secret_printf.sh`, `gate_stage_log_reorg_unsafe_ratchet.sh`,
+`check_no_secret_printf.sh`, `z23-lint check-stage-log-reorg-unsafe`,
 `check_projections_pure.sh`, `z23-lint check-supervisor-domain`,
 `check_supervisor_registration.sh`, `check_stage_advances_or_blocks.sh`,
 `check_consensus_parity.sh` (E13), `z23-lint check-honest-witness` (Law 7),

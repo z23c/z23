@@ -2016,7 +2016,7 @@ Z23_FLAG("ZCL_REMOTE_SSH", "env_build", "ssh", "-",
 Z23_FLAG("ZCL_REMOTE_UNIT", "env_build", "z23-test.service", "-",
           "undocumented; first use tools/scripts/remote_node_update.sh:auto")
 Z23_FLAG("ZCL_REORG_RATCHET_FILES", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/gate_stage_log_reorg_unsafe_ratchet.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_stage_log_reorg_unsafe.c:auto")
 Z23_FLAG("ZCL_REPLAY_COUNT_ONLY", "env_runtime", "-", "-",
           "first use engine/jobs/src/replay_count_only.c:auto; documented at docs/work/fail-safe-architecture.md:67: boot force-raise (stage_repair.c:127), ZCL_REPLAY_COUNT_ONLY cursor")
 Z23_FLAG("ZCL_REPO_SHAPE_MAKEFILE", "env_runtime", "-", "-",

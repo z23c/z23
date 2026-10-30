@@ -202,7 +202,6 @@ tools/scripts/fresh-boot-weld-prove-selftest.sh
 tools/scripts/fresh-boot-weld-prove.sh
 tools/scripts/fuzz_verdict_lib.sh
 tools/scripts/gate-and-report.sh
-tools/scripts/gate_stage_log_reorg_unsafe_ratchet.sh
 tools/scripts/gen_core_seal_root.sh
 tools/scripts/gen_oversize_grandfather_table.sh
 tools/scripts/hooks_status.sh

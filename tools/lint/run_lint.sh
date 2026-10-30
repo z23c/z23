@@ -192,7 +192,6 @@ gate_command() {
         check-route-command-parity)        echo './build/bin/z23-lint check-route-command-parity .' ;;
         check-doc-no-false-deleted)        echo './build/bin/z23-lint check-doc-no-false-deleted --selftest && ./build/bin/z23-lint check-doc-no-false-deleted .' ;;
         check-zclassicd-reach-allowlist)   echo './build/bin/z23-lint check-zclassicd-reach-allowlist .' ;;
-        check-stage-log-reorg-unsafe)      echo './tools/scripts/gate_stage_log_reorg_unsafe_ratchet.sh' ;;
         check-no-csr-lock-on-finalize-drive) echo './build/bin/z23-lint check-no-csr-lock-on-finalize-drive --selftest && ./build/bin/z23-lint check-no-csr-lock-on-finalize-drive .' ;;
         check-mint-skip-crypto-offline-only) echo './build/bin/z23-lint check-mint-skip-crypto-offline-only .' ;;
         check-vcs-no-sha1)                 echo './build/bin/z23-lint check-vcs-no-sha1 && tools/dev/source-identity-selftest.sh' ;;
