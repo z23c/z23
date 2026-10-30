@@ -13161,9 +13161,9 @@ check-hotswap-package-receipt-is-not-authority: $(LINTC_TOOL)
 # The allowlist leg is fail-closed and needs no build; the artifact leg is
 # UNOBSERVED (loud, never "OK") when build/hotswap has never been produced,
 # and FATAL when that directory exists but holds no module.
-check-hotswap-module-imports:
-	@tools/lint/check_hotswap_module_imports.sh --selftest
-	@tools/lint/check_hotswap_module_imports.sh
+check-hotswap-module-imports: $(LINTC_TOOL)
+	@./build/bin/z23-lint check-hotswap-module-imports --selftest
+	@./build/bin/z23-lint check-hotswap-module-imports
 
 # Prove the RELEASE binary links none of the dev-only mutation entry points
 # (dispatcher, cycle, watcher, subprocess runner) NOR the native dev-lane

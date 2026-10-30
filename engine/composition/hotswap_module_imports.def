@@ -31,7 +31,7 @@
  * and a call.
  *
  * So the import set is declared here and gated by
- * `check-hotswap-module-imports` (tools/lint/check_hotswap_module_imports.sh),
+ * `check-hotswap-module-imports` (tools/lint/lintc/gate_hotswap_module_imports.c),
  * which reads the UNDEFINED symbols out of every built module .so and refuses
  * any name absent from this file. Widening the contract is now an explicit,
  * reviewable edit to a data file with a rationale column.

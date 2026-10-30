@@ -1218,15 +1218,15 @@ Z23_FLAG("ZCL_HOTSWAP_DENY_SCAN_DIR", "env_build", "engine/composition", "-",
 Z23_FLAG("ZCL_HOTSWAP_DENY_TU_ROOT", "env_build", ".", "-",
           "undocumented; first use tools/lint/lintc/gate_hotswap_denied_leaves.c:auto")
 Z23_FLAG("ZCL_HOTSWAP_IMPORTS_CAPFILE_OVERRIDE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_hotswap_module_imports.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_hotswap_module_imports.c:auto")
 Z23_FLAG("ZCL_HOTSWAP_IMPORTS_CLASSFILE_OVERRIDE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_hotswap_module_imports.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_hotswap_module_imports.c:auto")
 Z23_FLAG("ZCL_HOTSWAP_IMPORTS_DEF_OVERRIDE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_hotswap_module_imports.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_hotswap_module_imports.c:auto")
 Z23_FLAG("ZCL_HOTSWAP_IMPORTS_SANDBOX_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_hotswap_module_imports.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_hotswap_module_imports.c:auto")
 Z23_FLAG("ZCL_HOTSWAP_IMPORTS_SELFTEST", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_hotswap_module_imports.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_hotswap_module_imports.c:auto")
 Z23_FLAG("ZCL_HOTSWAP_ISLAND_MANIFEST", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-candidates.sh:auto")
 Z23_FLAG("ZCL_HOTSWAP_MANIFEST", "env_build", "-", "-",
