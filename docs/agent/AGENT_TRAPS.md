@@ -374,3 +374,33 @@ that answers the question or a gate that refuses the mistake, and an error
 message whose last line is a concrete next action rather than a symptom. Prose
 is the fallback, and it owes the reader the measurement that ruled the other two
 out.
+
+---
+
+## (6) SHARED-STATE TRAPS — git stash and wedged-process diagnosis
+
+- **`git stash` has one list per clone, and every worktree of that clone shares
+  it.** On 2026-10-30 two agents each ran `git stash push` and then
+  `git stash pop` for an old-code control, in separate worktrees of one clone.
+  Each pop took the other agent's entry. Recovery used the dangling stash
+  commits found by `git fsck --no-reflog`. For an old-code control, save the
+  change with `git diff -- <paths> > <file>.patch`, run
+  `git checkout -- <paths>`, run the control, then `git apply <file>.patch`.
+  To reuse a stash, apply it by its exact commit hash; never `pop` a stash
+  another agent may have created.
+
+- **A wedged Android node with a stripped binary can be diagnosed from `/proc`
+  without root or a debugger.** The steps:
+  1. Group futex waiters by address. Each thread in
+     `/proc/<pid>/task/<tid>/syscall` that is blocked in `futex` reports the
+     futex syscall number first and the futex word address as its first
+     argument.
+  2. Read the owner thread id from the 32-bit word that follows a bionic
+     recursive mutex's state word, at the mutex address in the process memory.
+  3. Resolve the addresses against the unstripped `build/bin/z23.debug` with
+     `llvm-nm` for symbols and `llvm-symbolizer` for file and line. For a
+     shared library, convert the address to a file offset with
+     `/proc/<pid>/maps` first.
+
+  The experiment record for this diagnosis (2026-10-30, Android replay lock
+  order) is not on `origin/main`, so the steps are recorded here in full.
