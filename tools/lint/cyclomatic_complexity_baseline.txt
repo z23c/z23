@@ -13,9 +13,6 @@ contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_receipt_load:19
 contexts/commons/modules/vcs/src/package_swarm_node.c:schedule_locked:46
 contexts/commons/modules/vcs/src/package_swarm_node.c:swarm_fetch:39
 contexts/commons/modules/vcs/src/vcs.c:vcs_snapshot:18
-contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_bid_dominates:18
-contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_choose:45
-contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_project:79
 contexts/commons/modules/vcs/src/zcode_patronage_verify.c:patronage_binding:16
 contexts/commons/modules/vcs/src/zcode_science_index.c:index_consider_object:27
 contexts/commons/packages/zdiff/tests/test_zdiff.c:test_kat:22
