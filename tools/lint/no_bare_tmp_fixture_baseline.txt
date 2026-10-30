@@ -131,6 +131,7 @@ tools/lint/lintc/gate_model_column_drift_workers.c 1
 tools/lint/lintc/gate_no_adx_overclaim.c 1
 tools/lint/lintc/gate_no_adx_overclaim_selftest.c 1
 tools/lint/lintc/gate_pattern_guard.c 2
+tools/lint/lintc/gate_pipefail_status_pipe_selftest.c 1
 tools/lint/lintc/gate_progress_honesty_fences.c 1
 tools/lint/lintc/gate_projection_purity_fences.c 1
 tools/lint/lintc/gate_release_no_dev_symbols_selftest.c 1

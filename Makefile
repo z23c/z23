@@ -14861,10 +14861,10 @@ check-status-reason-single: $(LINTC_TOOL)
 # str_contains/str_lacks (tools/scripts/sh_str.sh) or by extracting the match
 # into a variable and testing the string. Shrink-only baseline at
 # tools/lint/pipefail_status_pipe_baseline.txt; no allow-comment escape hatch.
-check-pipefail-status-pipe:
+check-pipefail-status-pipe: $(LINTC_TOOL)
 	@echo "══ LINT: no status-carrying printf|grep -q under pipefail ══"
-	@./tools/lint/check_pipefail_status_pipe.sh --selftest
-	@./tools/lint/check_pipefail_status_pipe.sh
+	@./build/bin/z23-lint check-pipefail-status-pipe --selftest
+	@./build/bin/z23-lint check-pipefail-status-pipe
 
 # Cross-host shell debt must only shrink.  The shared port helper is exercised
 # here too, so a fallback or fail-closed regression cannot hide behind an

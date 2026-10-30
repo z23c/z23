@@ -14,7 +14,7 @@
 # the number here. Adding a row for a NEW file is not a fix — a file
 # with no row may carry ZERO.
 #
-# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_pipefail_status_pipe.sh
+# Regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-pipefail-status-pipe
 platform/deploy/migrate-role-names-selftest.sh 3
 platform/deploy/z23-bundle-export.sh 2
 tools/deploy_guard.sh 2

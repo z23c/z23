@@ -1800,13 +1800,13 @@ Z23_FLAG("ZCL_PERSONA_DEF", "env_build", "-", "-",
 Z23_FLAG("ZCL_PERSONA_ROW_FLOOR", "env_build", "3", "-",
           "undocumented; first use tools/lint/lintc/gate_def_parsers.c:auto")
 Z23_FLAG("ZCL_PIPEFAIL_GATE_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_pipefail_status_pipe.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_pipefail_status_pipe.c:auto")
 Z23_FLAG("ZCL_PIPEFAIL_GATE_CEILING", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_pipefail_status_pipe.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_pipefail_status_pipe.c:auto")
 Z23_FLAG("ZCL_PIPEFAIL_GATE_FILE_FLOOR", "env_build", "1", "-",
-          "undocumented; first use tools/lint/check_pipefail_status_pipe.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_pipefail_status_pipe.c:auto")
 Z23_FLAG("ZCL_PIPEFAIL_GATE_SCAN_GLOB", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_pipefail_status_pipe.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_pipefail_status_pipe.c:auto")
 Z23_FLAG("ZCL_PORTABILITY_SCOPE", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_clang_portability.sh:auto")
 Z23_FLAG("ZCL_PORTABLE_CC", "env_build", "cc", "-",
