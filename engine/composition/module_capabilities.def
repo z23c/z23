@@ -282,7 +282,7 @@ ZCL_MODULE_CAPABILITY("engine/models/src/database_schema_preflight.c", CAP_FS_RE
 ZCL_MODULE_CAPABILITY("engine/models/src/db_txn.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/explorer/models/src/explorer_index.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/market/models/src/explorer_index_zslp.c", CAP_FS_READ|CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("engine/models/src/fleet_board_post.c", CAP_FS_WRITE|CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("engine/models/src/fleet_board_post.c", CAP_FS_WRITE|CAP_FS_READ|CAP_CLOCK, "bounded retry of a busy local write reads the monotonic clock and sleeps between attempts")
 ZCL_MODULE_CAPABILITY("engine/models/src/fleet_board_post_scan.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/fleet_board_post_wiki.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/models/src/fleet_board_post_quota.c", CAP_NONE, "read-only count queries built through the query builder; no classified symbol is referenced")

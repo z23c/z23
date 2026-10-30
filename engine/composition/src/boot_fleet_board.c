@@ -696,6 +696,10 @@ static enum fleet_board_result fleet_board_review_publish(
 }
 
 
+/* Longest a local publish waits for the node's own open transaction or write
+ * lock to clear before it reports BOARD_BUSY. Peer ingest never waits. */
+#define FLEET_BOARD_PUBLISH_WAIT_MS 100
+
 enum fleet_board_result boot_fleet_board_publish(
     struct fleet_board_post *post, int64_t now)
 {
@@ -720,7 +724,8 @@ enum fleet_board_result boot_fleet_board_publish(
 
     if (typed) return fleet_board_review_publish(ndb, post, now);
     bool stored = false;
-    r = db_fleet_board_post_ingest(ndb, post, now, &stored);
+    r = db_fleet_board_post_ingest_wait(ndb, post, now,
+                                        FLEET_BOARD_PUBLISH_WAIT_MS, &stored);
     if (r != FLEET_BOARD_OK)
         return r;
     if (boot_fleet_roster_is_row(post))

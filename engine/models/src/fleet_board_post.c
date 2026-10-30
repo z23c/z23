@@ -719,6 +719,35 @@ enum fleet_board_result db_fleet_board_post_ingest(
     return r;
 }
 
+#define FLEET_BOARD_WAIT_STEP_MS 5
+
+#ifdef ZCL_TESTING
+static void (*s_test_wait_hook)(void);
+
+void db_fleet_board_test_set_wait_hook(void (*fn)(void))
+{
+    s_test_wait_hook = fn;
+}
+#endif
+
+enum fleet_board_result db_fleet_board_post_ingest_wait(
+    struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
+    int64_t wait_ms, bool *stored_out)
+{
+    int64_t until = platform_time_monotonic_ms() + wait_ms;
+    enum fleet_board_result r =
+        db_fleet_board_post_ingest(ndb, post, now, stored_out);
+    while (r == FLEET_BOARD_ERR_BUSY && platform_time_monotonic_ms() < until) {
+#ifdef ZCL_TESTING
+        if (s_test_wait_hook)
+            s_test_wait_hook();
+#endif
+        platform_sleep_ms(FLEET_BOARD_WAIT_STEP_MS);
+        r = db_fleet_board_post_ingest(ndb, post, now, stored_out);
+    }
+    return r;
+}
+
 /* What a reclaim pass is allowed to take back, written once so the count
  * and the delete can never key on different rows.
  *

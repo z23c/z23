@@ -1969,6 +1969,74 @@ static int test_fleet_board_native_busy(void)
     return failures;
 }
 
+static struct node_db *s_wait_writer;
+
+static void fb_wait_release_writer(void)
+{
+    db_fleet_board_test_set_wait_hook(NULL);
+    (void)node_db_rollback(s_wait_writer);
+}
+
+static int test_fleet_board_ingest_wait_bounded(void)
+{
+    int failures = 0;
+    struct node_db writer, board;
+    bool opened = false;
+    memset(&writer, 0, sizeof(writer));
+    memset(&board, 0, sizeof(board));
+    TEST("fleet board: a local write waits out a short lock and gives up on a long one") {
+        char dbdir[256];
+        char dbpath[320];
+        test_make_tmpdir(dbdir, sizeof(dbdir), "fleet_board_wait", "zcl");
+        (void)snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
+        ASSERT(node_db_open(&board, dbpath));
+        opened = true;
+        ASSERT(node_db_open(&writer, dbpath));
+        (void)sqlite3_busy_timeout(board.db, 0);
+        db_fleet_board_test_clear_quarantine();
+
+        uint8_t seed[32], pk[32];
+        fb_test_identity(11, seed, pk);
+        struct fleet_board_post released, held;
+        fb_test_compose(&released, FLEET_BOARD_KIND_NOTE, "lane-wait",
+                        "lock released inside the bound", 100, 1000);
+        fb_test_compose(&held, FLEET_BOARD_KIND_NOTE, "lane-wait",
+                        "lock outlives the bound", 100, 1000);
+        ASSERT_EQ(fleet_board_post_sign(&released, seed, pk), FLEET_BOARD_OK);
+        ASSERT_EQ(fleet_board_post_sign(&held, seed, pk), FLEET_BOARD_OK);
+
+        /* The second connection holds the write lock. The hook releases it
+         * on the first retry, far inside the 100 ms bound. */
+        ASSERT(node_db_begin_immediate(&writer));
+        s_wait_writer = &writer;
+        db_fleet_board_test_set_wait_hook(fb_wait_release_writer);
+        bool stored = false;
+        enum fleet_board_result r = db_fleet_board_post_ingest_wait(
+            &board, &released, 100, 100, &stored);
+        db_fleet_board_test_set_wait_hook(NULL);
+        ASSERT_EQ(r, FLEET_BOARD_OK);
+        ASSERT(stored && db_fleet_board_have(&board, released.id));
+
+        /* The lock outlives a 30 ms bound: the refusal stays BUSY, nothing is
+         * stored, and the call really waited for the bound. */
+        ASSERT(node_db_begin_immediate(&writer));
+        stored = true;
+        int64_t t0 = platform_time_monotonic_ms();
+        r = db_fleet_board_post_ingest_wait(&board, &held, 100, 30, &stored);
+        int64_t waited_ms = platform_time_monotonic_ms() - t0;
+        ASSERT_EQ(r, FLEET_BOARD_ERR_BUSY);
+        ASSERT(!stored && !db_fleet_board_have(&board, held.id) && waited_ms >= 30);
+        ASSERT(node_db_rollback(&writer));
+        ASSERT_EQ(db_fleet_board_post_ingest_wait(&board, &held, 100, 30, &stored),
+                  FLEET_BOARD_OK);
+        ASSERT(stored);
+        PASS();
+    } _test_next:;
+    if (opened) node_db_close(&board);
+    node_db_close(&writer);
+    return failures;
+}
+
 static int64_t fb_room_boundary_mono_ns(void *self)
 {
     (void)self;
@@ -9383,6 +9451,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_rpc_created_at();
     failures += test_fleet_board_rpc_fleet_page();
     failures += test_fleet_board_native_busy();
+    failures += test_fleet_board_ingest_wait_bounded();
     failures += test_fleet_board_durable_wiki();
     failures += test_fleet_board_local_capacity_does_not_score_peer();
     failures += test_fleet_board_peer_inventory_cursor();

@@ -158,6 +158,19 @@ enum fleet_board_result db_fleet_board_post_ingest(
     struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
     bool *stored_out);
 
+/* Local one-shot write: as db_fleet_board_post_ingest, but a BUSY refusal is
+ * retried every few milliseconds for at most `wait_ms`, so a moment of
+ * contention with the node's own open transaction does not fail the command.
+ * Every other refusal returns at once. Peer ingest never waits. */
+enum fleet_board_result db_fleet_board_post_ingest_wait(
+    struct node_db *ndb, const struct fleet_board_post *post, int64_t now,
+    int64_t wait_ms, bool *stored_out);
+
+#ifdef ZCL_TESTING
+/* Runs before each retry of db_fleet_board_post_ingest_wait; NULL clears it. */
+void db_fleet_board_test_set_wait_hook(void (*fn)(void));
+#endif
+
 enum fleet_board_wiki_write_status {
     FLEET_WIKI_WRITE_OK, FLEET_WIKI_WRITE_REPLAY,
     FLEET_WIKI_WRITE_ARGS, FLEET_WIKI_WRITE_CONFLICT,
