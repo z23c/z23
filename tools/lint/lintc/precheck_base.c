@@ -18,7 +18,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__)
 #include <sys/auxv.h>
+#endif
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -176,13 +178,23 @@ static int pb_ensure_tree(const struct precheck_base *b)
 const char *precheck_base_binary_tag(char *out, size_t cap)
 {
     struct stat st;
+#if defined(__linux__)
     const char *exe = (const char *)getauxval(AT_EXECFN);
+#else
+    const char *exe = NULL; /* no AT_EXECFN: pid-keyed tag, never reused */
+#endif
     if (!exe || stat(exe, &st) != 0)
         snprintf(out, cap, "unknown-%ld", (long)getpid());
-    else
+    else {
+#if defined(__APPLE__)
+        const struct timespec *mt = &st.st_mtimespec;
+#else
+        const struct timespec *mt = &st.st_mtim;
+#endif
         snprintf(out, cap, "%llx-%llx%llx", (unsigned long long)st.st_size,
-                 (unsigned long long)st.st_mtim.tv_sec,
-                 (unsigned long long)st.st_mtim.tv_nsec);
+                 (unsigned long long)mt->tv_sec,
+                 (unsigned long long)mt->tv_nsec);
+    }
     return out;
 }
 
