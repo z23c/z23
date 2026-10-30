@@ -344,6 +344,42 @@ static void ldb_import_write_reimport_marker(
         }
 }
 
+/* Verifies the imported set against the compiled checkpoint, then the live row
+ * count. Returns false only when the import must be retried; the caller logs
+ * and wipes. *imported_count and *sha3_root_valid are updated in place. */
+static bool ldb_import_sha3_keep(struct utxo_recovery_ctx *ctx,
+                                 bool checkpoint_match,
+                                 uint64_t *imported_count,
+                                 struct utxo_import_result *res,
+                                 bool *sha3_root_valid)
+{
+    if (checkpoint_match) {
+        printf("=== SHA3 UTXO CHECKPOINT: PASSED ===\n");
+    } else if (*imported_count > 100000) {
+        printf("SHA3: %llu UTXOs (different height from "
+               "checkpoint, will verify later)\n",
+               (unsigned long long)*imported_count);
+    } else {
+            /* Double-check actual row count before wiping — the SHA3
+             * function might have missed data due to a stale snapshot, but
+             * the UTXOs are actually in the table. Consult the
+             * CANONICAL coins_kv count too (0 pre-seed in cold-import, so
+             * the mirror count stays the live signal; max keeps both honest). */
+        int64_t actual = ldb_import_live_row_count(ctx);
+        if (actual <= 100000)
+            return false; // raw-return-ok:retry-logged-by-caller
+        printf("SHA3 saw %llu but utxo table has %lld rows "
+               "— keeping data (snapshot lag)\n",
+               (unsigned long long)*imported_count,
+               (long long)actual);
+        *imported_count = (uint64_t)actual;
+        res->utxo_count = *imported_count;
+        /* Digest came from the stale snapshot — never stamp it. */
+        *sha3_root_valid = false;
+    }
+    return true;
+}
+
 static void ldb_import_reopen_coins(struct utxo_recovery_ctx *ctx,
                                     int ldb_height)
 {
@@ -484,35 +520,13 @@ struct utxo_import_result utxo_recovery_import_ldb(
          * authority above the single checkpoint). */
         bool checkpoint_match = ldb_import_checkpoint_matches(
             cp, imported_count, imported_root);
-        if (checkpoint_match) {
-            printf("=== SHA3 UTXO CHECKPOINT: PASSED ===\n");
-        } else if (imported_count > 100000) {
-            printf("SHA3: %llu UTXOs (different height from "
-                   "checkpoint, will verify later)\n",
-                   (unsigned long long)imported_count);
-        } else {
-            /* Double-check actual row count before wiping — the SHA3
-             * function might have missed data due to a stale snapshot, but
-             * the UTXOs are actually in the table. Consult the
-             * CANONICAL coins_kv count too (0 pre-seed in cold-import, so
-             * the mirror count stays the live signal; max keeps both honest). */
-            int64_t actual = ldb_import_live_row_count(ctx);
-            if (actual > 100000) {
-                printf("SHA3 saw %llu but utxo table has %lld rows "
-                       "— keeping data (snapshot lag)\n",
-                       (unsigned long long)imported_count,
-                       (long long)actual);
-                imported_count = (uint64_t)actual;
-                res.utxo_count = imported_count;
-                /* Digest came from the stale snapshot — never stamp it. */
-                sha3_root_valid = false;
-            } else {
-                LOG_WARN("chain", "only %llu UTXOs imported " "— will retry on next boot", (unsigned long long)imported_count);
-                struct zcl_result wipe = utxo_recovery_wipe(ctx->ndb,
-                    "boot.ldb_import_failed_retry");
-                if (!wipe.ok)
-                    LOG_WARN("utxo_recovery", "%s", wipe.message);
-            }
+        if (!ldb_import_sha3_keep(ctx, checkpoint_match, &imported_count,
+                                  &res, &sha3_root_valid)) {
+            LOG_WARN("chain", "only %llu UTXOs imported " "— will retry on next boot", (unsigned long long)imported_count);
+            struct zcl_result wipe = utxo_recovery_wipe(ctx->ndb,
+                "boot.ldb_import_failed_retry");
+            if (!wipe.ok)
+                LOG_WARN("utxo_recovery", "%s", wipe.message);
         }
 
         uint8_t one = 1;
@@ -590,6 +604,18 @@ static void restore_derive_anchor_hash(struct uint256 *best_hash)
             printf("[boot] restore anchor: derived coins-best h=%d "
                    "(coins_kv authority)\n", d_h);
         }
+}
+
+/* The restore anchor is the DERIVED coins-best when the durable
+ * logs resolve a hash for it; the in-RAM coins cache (seeded from the
+ * node_state projection key) is the legacy fallback. */
+static void restore_resolve_best_hash(struct utxo_recovery_ctx *ctx,
+                                      struct uint256 *best_hash)
+{
+    uint256_set_null(best_hash);
+    restore_derive_anchor_hash(best_hash);
+    if (uint256_is_null(best_hash))
+        coins_view_cache_get_best_block(ctx->coins_tip, best_hash);
 }
 
 static void restore_keep_scan_fallback(struct utxo_recovery_ctx *ctx,
@@ -718,6 +744,17 @@ static void restore_install_placeholder_anchor(
                  "chain_restore_anchor");
 }
 
+static struct zcl_result restore_ctx_error(struct utxo_recovery_ctx *ctx)
+{
+    return ZCL_ERR(-20,
+        "utxo_recovery_restore_chain_tip: invalid ctx=%p state=%p "
+        "coins_tip=%p ndb=%p params=%p",
+        (void *)ctx, ctx ? (void *)ctx->state : NULL,
+        ctx ? (void *)ctx->coins_tip : NULL,
+        ctx ? (void *)ctx->ndb : NULL,
+        ctx ? (void *)ctx->params : NULL);
+}
+
 /* True when ctx or any member restore needs is missing. */
 static bool restore_ctx_incomplete(const struct utxo_recovery_ctx *ctx)
 {
@@ -795,6 +832,66 @@ static bool restore_tip_is_seed_anchor(const struct block_index *restore_tip,
            uint256_cmp(restore_tip->phashBlock, seed_anchor_hash_p) == 0;
 }
 
+enum restore_sf_outcome {
+    RESTORE_SF_DONE,
+    RESTORE_SF_FLOOR_REFUSED,
+    RESTORE_SF_COMMIT_FAILED,
+};
+
+/* scan_fallback path for a null coins_best_block: the finalized-floor guard,
+ * then the commit. The caller logs a refusal (*served_floor holds the floor)
+ * and a commit failure (res->status holds it). */
+static enum restore_sf_outcome restore_scan_fallback_tip(
+    struct utxo_recovery_ctx *ctx, struct block_index *scan_fallback,
+    int *served_floor, struct chain_restore_result *res)
+{
+    if (!scan_fallback)
+        return RESTORE_SF_DONE;
+    struct uint256 served_hash;
+    bool have_served_hash = false;
+    if (restore_floor_guard_hit(ctx, scan_fallback, served_floor,
+                                &served_hash, &have_served_hash)) {
+        res->restored = true;
+        res->restored_height = *served_floor;
+        if (have_served_hash)
+            res->restored_hash = served_hash;
+        res->skip_activate = true;
+        snprintf(res->anchor_reason, sizeof(res->anchor_reason),
+                 "finalized_floor_guard");
+        return RESTORE_SF_FLOOR_REFUSED;
+    }
+    struct block_index *committed = scan_fallback;
+    if (utxo_recovery_commit_tip(
+            ctx, &committed, "scan_fallback", false, false).ok) {
+        printf("WARNING: Chain tip at height %d but coins DB is empty!\n",
+               scan_fallback->nHeight);
+        restore_keep_scan_fallback(ctx, committed, res);
+        return RESTORE_SF_DONE;
+    }
+    res->status = ZCL_ERR(-21,
+        "utxo_recovery_restore_chain_tip: scan_fallback commit "
+        "failed h=%d", scan_fallback->nHeight);
+    return RESTORE_SF_COMMIT_FAILED;
+}
+
+/* True when best maps the coins best hash to height 0 but is not genesis. */
+static bool restore_zero_height_alias(const struct utxo_recovery_ctx *ctx,
+                                      const struct block_index *best,
+                                      const struct uint256 *best_hash)
+{
+    return best && best->nHeight == 0 &&
+           !uint256_eq(best_hash, &ctx->params->consensus.hashGenesisBlock);
+}
+
+/* Writes the hash of bi into hex; false (hex untouched) when bi has none. */
+static bool restore_block_hash_hex(const struct block_index *bi, char hex[65])
+{
+    if (!(bi && bi->phashBlock))
+        return false;
+    uint256_get_hex(bi->phashBlock, hex);
+    return true;
+}
+
 struct chain_restore_result utxo_recovery_restore_chain_tip(
     struct utxo_recovery_ctx *ctx,
     struct block_index *scan_fallback)
@@ -803,63 +900,30 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
     res.restored_height = -1;
 
     if (restore_ctx_incomplete(ctx)) {
-        res.status = ZCL_ERR(-20,
-            "utxo_recovery_restore_chain_tip: invalid ctx=%p state=%p "
-            "coins_tip=%p ndb=%p params=%p",
-            (void *)ctx, ctx ? (void *)ctx->state : NULL,
-            ctx ? (void *)ctx->coins_tip : NULL,
-            ctx ? (void *)ctx->ndb : NULL,
-            ctx ? (void *)ctx->params : NULL);
+        res.status = restore_ctx_error(ctx);
         LOG_WARN("utxo_recovery", "%s", res.status.message);
         return res;
     }
 
     struct uint256 best_hash;
-    /* The restore anchor is the DERIVED coins-best when the durable
-     * logs resolve a hash for it; the in-RAM coins cache (seeded from the
-     * node_state projection key) is the legacy fallback. */
-    uint256_set_null(&best_hash);
-    restore_derive_anchor_hash(&best_hash);
-    if (uint256_is_null(&best_hash))
-        coins_view_cache_get_best_block(ctx->coins_tip, &best_hash);
+    restore_resolve_best_hash(ctx, &best_hash);
 
     if (uint256_is_null(&best_hash)) {
         /* No best block — try fast rebuild if fallback available */
-        if (scan_fallback) {
-            int served_floor = -1;
-            struct uint256 served_hash;
-            bool have_served_hash = false;
-            if (restore_floor_guard_hit(ctx, scan_fallback, &served_floor,
-                                        &served_hash, &have_served_hash)) {
-                /* The held floor is VERIFIED above: hash resolves at
-                 * the recorded height on a trust-rooted chain. The
-                 * boot consumer re-checks that agreement before any
-                 * active-chain install. */
-                LOG_WARN("utxo_recovery",
-                         "scan_fallback h=%d below durable finalized floor "
-                         "h=%d; refusing active-tip rollback",
-                         scan_fallback->nHeight, served_floor);
-                res.restored = true;
-                res.restored_height = served_floor;
-                if (have_served_hash)
-                    res.restored_hash = served_hash;
-                res.skip_activate = true;
-                snprintf(res.anchor_reason, sizeof(res.anchor_reason),
-                         "finalized_floor_guard");
-                return res;
-            }
-            struct block_index *committed = scan_fallback;
-            if (utxo_recovery_commit_tip(
-                    ctx, &committed, "scan_fallback", false, false).ok) {
-                printf("WARNING: Chain tip at height %d but coins DB is empty!\n",
-                       scan_fallback->nHeight);
-                restore_keep_scan_fallback(ctx, committed, &res);
-            } else {
-                res.status = ZCL_ERR(-21,
-                    "utxo_recovery_restore_chain_tip: scan_fallback commit "
-                    "failed h=%d", scan_fallback->nHeight);
-                LOG_WARN("utxo_recovery", "%s", res.status.message);
-            }
+        int served_floor = -1;
+        enum restore_sf_outcome sf = restore_scan_fallback_tip(
+            ctx, scan_fallback, &served_floor, &res);
+        if (sf == RESTORE_SF_FLOOR_REFUSED) {
+            /* The held floor is VERIFIED above: hash resolves at
+             * the recorded height on a trust-rooted chain. The
+             * boot consumer re-checks that agreement before any
+             * active-chain install. */
+            LOG_WARN("utxo_recovery",
+                     "scan_fallback h=%d below durable finalized floor "
+                     "h=%d; refusing active-tip rollback",
+                     scan_fallback->nHeight, served_floor);
+        } else if (sf == RESTORE_SF_COMMIT_FAILED) {
+            LOG_WARN("utxo_recovery", "%s", res.status.message);
         }
         return res;
     }
@@ -872,8 +936,7 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
 
     /* SQLite fallback: if block_map maps the hash to height 0
      * but it's not actually the genesis block */
-    if (best && best->nHeight == 0 &&
-        !uint256_eq(&best_hash, &ctx->params->consensus.hashGenesisBlock)) {
+    if (restore_zero_height_alias(ctx, best, &best_hash)) {
         char hex[65];
         uint256_get_hex(&best_hash, hex);
         LOG_WARN("chain", "coins DB best block %s mapped to height=0 " "in block_index (not genesis)", hex);
@@ -930,17 +993,17 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
                                                 seed_anchor_hash_p,
                                                 seed_anchor_h, &tip_kind);
         if (tip_kind == 1) {
-            if (restore_tip && restore_tip->phashBlock) {
-                char bad_hex[65], good_hex[65];
+            char good_hex[65];
+            if (restore_block_hash_hex(restore_tip, good_hex)) {
+                char bad_hex[65];
                 uint256_get_hex(&best_hash, bad_hex);
-                uint256_get_hex(restore_tip->phashBlock, good_hex);
                 LOG_INFO("boot", "[boot] coins_best_block %s at h=%d is not backed by " "real block data; using nearest consensus-backed " "ancestor h=%d hash=%s", bad_hex, best->nHeight, restore_tip->nHeight, good_hex);
             }
         } else if (tip_kind == 2) {
-            if (restore_tip && restore_tip->phashBlock) {
-                char bad_hex[65], parent_hex[65];
+            char parent_hex[65];
+            if (restore_block_hash_hex(restore_tip, parent_hex)) {
+                char bad_hex[65];
                 uint256_get_hex(&best_hash, bad_hex);
-                uint256_get_hex(restore_tip->phashBlock, parent_hex);
                 LOG_INFO("boot", "[boot] coins_best_block %s at h=%d is a disk-backed " "fork leaf with a competing disk-backed sibling; " "restoring common ancestor h=%d hash=%s so normal " "validation can choose the best branch", bad_hex, best->nHeight, restore_tip->nHeight, parent_hex);
             }
         }
