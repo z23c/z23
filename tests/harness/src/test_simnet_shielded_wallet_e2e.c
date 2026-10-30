@@ -186,6 +186,389 @@ static bool we_decrypt_note(const struct output_description *od,
 /* ─────────────────────────────────────────────────────────────────────
  * PART A — production-prover consensus ACCEPT E2E (t->z, z->z, z->t).
  * ───────────────────────────────────────────────────────────────────── */
+/* One note of the PART A chain: its rcm (recovered by decrypting the output),
+ * its incremental witness and the tree anchor. have is true only when the
+ * simulator tree held the note and returned both the witness and the anchor. */
+struct we_a_note {
+    uint8_t rcm[32];
+    struct incremental_witness w;
+    struct uint256 anchor;
+    bool have;
+};
+
+/* Flip one proof byte of a copy of tz; the REAL verifier must reject it. */
+static int part_a_tz_tamper(struct transaction *tz,
+                            const struct consensus_params *cp, int tz_height)
+{
+    int failures = 0;
+    struct transaction bad;
+    transaction_init(&bad);
+    bool copied = transaction_copy(&bad, tz);
+    if (copied && bad.num_shielded_output == 1) {
+        bad.v_shielded_output[0].zkproof[0] ^= 0x01;
+        transaction_compute_hash(&bad);
+    }
+    WE_CHECK("t->z: tampered output proof REJECTED",
+             copied && !we_verify(&bad, cp, tz_height));
+    transaction_free(&bad);
+    return failures;
+}
+
+/* t->z stage: shield the coinbase, check the verifier, decrypt, mint note0. */
+static int part_a_t_to_z(struct simnet *s, struct we_id *id,
+                         const struct consensus_params *cp,
+                         const struct uint256 *cb_txid, int64_t shielded_value,
+                         int tz_height, struct we_a_note *n0)
+{
+    int failures = 0;
+    uint8_t memo[512];
+    memset(memo, 0xF6, sizeof(memo));
+    const char *msg = "zclassic23 W1-d: production t->z shield";
+    memcpy(memo, msg, strlen(msg));
+
+    void *pctx = zclassic_sapling_proving_ctx_init();
+    WE_CHECK("t->z: acquire native C23 proving ctx", pctx != NULL);
+
+    struct transaction tz;
+    transaction_init(&tz);
+    tz.overwintered     = true;
+    tz.version          = SAPLING_TX_VERSION;
+    tz.version_group_id = SAPLING_VERSION_GROUP_ID;
+    tz.lock_time        = 0;
+    tz.expiry_height    = 0;
+    WE_CHECK("t->z: alloc transparent input", transaction_alloc(&tz, 1, 0));
+    tz.vin[0].prevout.hash = *cb_txid;
+    tz.vin[0].prevout.n    = 0;
+    tz.vin[0].sequence     = 0xFFFFFFFF;
+    { uint8_t ss[2] = {0x00, 0x00}; script_set(&tz.vin[0].script_sig, ss, sizeof(ss)); }
+    tz.value_balance = -shielded_value;   /* value INTO the shielded pool */
+
+    tz.v_shielded_output = zcl_calloc(1, sizeof(struct output_description),
+                                      "we_tz_out");
+    WE_CHECK("t->z: alloc shielded output", tz.v_shielded_output != NULL);
+    tz.num_shielded_output = 1;
+
+    bool built = pctx && tz.v_shielded_output &&
+        sapling_build_output_with_ctx(
+            pctx, id->ovk, id->d, id->pk_d, (uint64_t)shielded_value, memo,
+            tz.v_shielded_output[0].cv.data,
+            tz.v_shielded_output[0].cm.data,
+            tz.v_shielded_output[0].ephemeral_key.data,
+            tz.v_shielded_output[0].enc_ciphertext,
+            tz.v_shielded_output[0].out_ciphertext,
+            tz.v_shielded_output[0].zkproof);
+    WE_CHECK("t->z: build output (production prover)", built);
+
+    struct uint256 sighash;
+    WE_CHECK("t->z: sighash", built && we_sighash(&tz, cp, tz_height, &sighash));
+    WE_CHECK("t->z: binding sig (production ctx)",
+             built && zclassic_sapling_binding_sig(
+                 pctx, tz.value_balance, sighash.data, tz.binding_sig));
+    transaction_compute_hash(&tz);
+
+    /* THE assertion: the REAL consensus verifier ACCEPTS a production
+     * bundle (not probe agreement). */
+    WE_CHECK("t->z: consensus verifier ACCEPTS (contextual_check_transaction)",
+             built && we_verify(&tz, cp, tz_height));
+
+    /* Negative control: one flipped proof byte must be REJECTED. */
+    if (built)
+        failures += part_a_tz_tamper(&tz, cp, tz_height);
+
+    /* Honest receive: decrypt back to (value, rcm, memo). */
+    uint64_t dv = 0; uint8_t dmemo[512];
+    bool dec = built && we_decrypt_note(&tz.v_shielded_output[0], id->ivk,
+                                        &dv, n0->rcm, dmemo);
+    WE_CHECK("t->z: note decrypts to recipient (AEAD authenticates)", dec);
+    WE_CHECK("t->z: decrypted value matches", dec && dv == (uint64_t)shielded_value);
+    WE_CHECK("t->z: memo round-trips (z_getmemo source)",
+             dec && memcmp(dmemo, memo, 512) == 0);
+
+    /* Mint: append note0 to the tree, advance tip. */
+    WE_CHECK("t->z: mint (tree append + connect_block)",
+             built && simnet_mint_txs(s, &tz, 1));
+    free(tz.v_shielded_output);
+    tz.v_shielded_output = NULL;
+    tz.num_shielded_output = 0;
+    WE_CHECK("t->z: tree has 1 note", simnet_sapling_tree_size(s) == 1);
+
+    n0->have = simnet_sapling_tree_size(s) == 1 &&
+               simnet_sapling_witness_last(s, &n0->w) &&
+               simnet_sapling_tree_root(s, &n0->anchor);
+    WE_CHECK("t->z: witness note0 + read anchor", n0->have);
+
+    zclassic_sapling_proving_ctx_free(pctx);
+    return failures;
+}
+
+/* Sign the spend_auth of one re-randomized spend; name labels its WE_CHECK. */
+static int part_a_spend_auth(const char *name, struct we_id *id,
+                             const uint8_t ar[32],
+                             const struct uint256 *sighash,
+                             struct spend_description *sp)
+{
+    int failures = 0;
+    uint8_t rsk[32];
+    we_rsk(id->ask, ar, rsk);
+    WE_CHECK(name,
+             redjubjub_sign(rsk, sighash->data, 32, sp->spend_auth_sig, 5));
+    memory_cleanse(rsk, sizeof(rsk));
+    return failures;
+}
+
+/* z->z build: the spend (note0, position 0) and the change output. */
+static int part_a_zz_spend_output(void *pctx, struct we_id *id,
+                                  struct we_a_note *n0, struct transaction *zz,
+                                  int64_t shielded_value,
+                                  uint8_t zz_spend_nf[32], uint8_t ar[32],
+                                  bool *spend_out, bool *out_out)
+{
+    int failures = 0;
+    uint8_t path[1 + 32 * 33]; size_t path_len = 0;
+    bool pathok = n0->have &&
+                  incremental_witness_merkle_path(&n0->w, path, &path_len);
+    WE_CHECK("z->z: extract Merkle path (note0, position 0)", pathok);
+
+    bool spend_built = pctx && zz->v_shielded_spend && pathok &&
+        sapling_build_spend_with_ctx(
+            pctx, id->ask, id->nsk, id->d, id->pk_d, n0->rcm,
+            (uint64_t)shielded_value, /*position*/0, n0->anchor.data,
+            path, path_len,
+            zz->v_shielded_spend[0].cv.data,
+            zz->v_shielded_spend[0].nullifier.data,
+            zz->v_shielded_spend[0].rk.data,
+            zz->v_shielded_spend[0].zkproof, ar);
+    WE_CHECK("z->z: build spend (production spend prover)", spend_built);
+    if (spend_built) {
+        zz->num_shielded_spend = 1;
+        memcpy(zz->v_shielded_spend[0].anchor.data, n0->anchor.data, 32);
+        memcpy(zz_spend_nf, zz->v_shielded_spend[0].nullifier.data, 32);
+    }
+
+    bool out_built = pctx && zz->v_shielded_output &&
+        sapling_build_output_with_ctx(
+            pctx, id->ovk, id->d, id->pk_d, (uint64_t)shielded_value, NULL,
+            zz->v_shielded_output[0].cv.data,
+            zz->v_shielded_output[0].cm.data,
+            zz->v_shielded_output[0].ephemeral_key.data,
+            zz->v_shielded_output[0].enc_ciphertext,
+            zz->v_shielded_output[0].out_ciphertext,
+            zz->v_shielded_output[0].zkproof);
+    WE_CHECK("z->z: build output (production prover)", out_built);
+    if (out_built) zz->num_shielded_output = 1;
+
+    *spend_out = spend_built;
+    *out_out = out_built;
+    return failures;
+}
+
+/* z->z sighash, signatures and the consensus verifier, then the change note. */
+static int part_a_zz_sign_verify(void *pctx, struct we_id *id,
+                                 const struct consensus_params *cp,
+                                 struct transaction *zz, int zz_height,
+                                 int64_t shielded_value, const uint8_t ar[32],
+                                 bool ready, bool out_built,
+                                 struct we_a_note *n1)
+{
+    int failures = 0;
+    struct uint256 sighash;
+    WE_CHECK("z->z: sighash", ready && we_sighash(zz, cp, zz_height, &sighash));
+
+    if (ready)
+        failures += part_a_spend_auth("z->z: spend_auth_sig", id, ar, &sighash,
+                                      &zz->v_shielded_spend[0]);
+    WE_CHECK("z->z: binding sig (production ctx)",
+             ready && zclassic_sapling_binding_sig(
+                 pctx, zz->value_balance, sighash.data, zz->binding_sig));
+    transaction_compute_hash(zz);
+
+    WE_CHECK("z->z: consensus verifier ACCEPTS",
+             ready && we_verify(zz, cp, zz_height));
+
+    /* Recover note1 rcm for the later z->t spend. */
+    uint64_t dv1 = 0;
+    bool dec1 = out_built && we_decrypt_note(&zz->v_shielded_output[0], id->ivk,
+                                             &dv1, n1->rcm, NULL);
+    WE_CHECK("z->z: change note decrypts",
+             dec1 && dv1 == (uint64_t)shielded_value);
+    return failures;
+}
+
+/* z->z durable nullifier path: record it, then reject a double-spend replay. */
+static int part_a_zz_nullifier(struct transaction *zz, int zz_height,
+                               bool ready, const uint8_t zz_spend_nf[32])
+{
+    int failures = 0;
+    /* Durable nullifier path: record + double-spend replay reject. */
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open(":memory:", &db);
+    WE_CHECK("z->z: open :memory: nullifier db", rc == SQLITE_OK && db);
+    WE_CHECK("z->z: nullifier_kv schema", db && nullifier_kv_ensure_schema(db));
+
+    struct block blk; memset(&blk, 0, sizeof(blk));
+    blk.num_vtx = 1; blk.vtx = zz;
+    struct delta_summary sum1; memset(&sum1, 0, sizeof(sum1)); sum1.ok = true;
+    WE_CHECK("z->z: utxo_apply records nullifier (real path)",
+             ready && db &&
+             utxo_apply_check_and_insert_nullifiers(db, &blk, zz_height, &sum1) &&
+             sum1.ok);
+    bool found = false;
+    WE_CHECK("z->z: nullifier present in durable set",
+             db && nullifier_kv_get(db, zz_spend_nf, NULLIFIER_POOL_SAPLING,
+                                    &found, NULL) && found);
+    struct delta_summary sum2; memset(&sum2, 0, sizeof(sum2)); sum2.ok = true;
+    bool applied = db &&
+        utxo_apply_check_and_insert_nullifiers(db, &blk, zz_height + 1, &sum2);
+    WE_CHECK("z->z: replay of spent nullifier REJECTED (double-spend)",
+             applied && !sum2.ok);
+    if (db) sqlite3_close(db);
+    return failures;
+}
+
+/* z->z stage: build, verify, record the nullifier, mint note1. */
+static int part_a_z_to_z(struct simnet *s, struct we_id *id,
+                         const struct consensus_params *cp,
+                         int64_t shielded_value, int zz_height,
+                         struct we_a_note *n0, struct we_a_note *n1,
+                         uint8_t zz_spend_nf[32])
+{
+    int failures = 0;
+    void *pctx = zclassic_sapling_proving_ctx_init();
+    WE_CHECK("z->z: acquire proving ctx", pctx != NULL);
+
+    struct transaction zz;
+    transaction_init(&zz);
+    zz.overwintered     = true;
+    zz.version          = SAPLING_TX_VERSION;
+    zz.version_group_id = SAPLING_VERSION_GROUP_ID;
+    zz.lock_time        = 0;
+    zz.expiry_height    = 0;
+    zz.value_balance    = 0;   /* all value stays shielded */
+
+    zz.v_shielded_spend  = zcl_calloc(1, sizeof(struct spend_description), "we_zz_sp");
+    zz.v_shielded_output = zcl_calloc(1, sizeof(struct output_description), "we_zz_out");
+    WE_CHECK("z->z: alloc spend + output",
+             zz.v_shielded_spend && zz.v_shielded_output);
+
+    uint8_t ar[32];
+    bool spend_built = false, out_built = false;
+    failures += part_a_zz_spend_output(pctx, id, n0, &zz, shielded_value,
+                                       zz_spend_nf, ar, &spend_built, &out_built);
+    bool ready = spend_built && out_built;
+    failures += part_a_zz_sign_verify(pctx, id, cp, &zz, zz_height,
+                                      shielded_value, ar, ready, out_built, n1);
+    failures += part_a_zz_nullifier(&zz, zz_height, ready, zz_spend_nf);
+
+    WE_CHECK("z->z: mint (tree append + connect_block)",
+             ready && simnet_mint_txs(s, &zz, 1));
+    free(zz.v_shielded_spend);  zz.v_shielded_spend  = NULL; zz.num_shielded_spend  = 0;
+    free(zz.v_shielded_output); zz.v_shielded_output = NULL; zz.num_shielded_output = 0;
+    WE_CHECK("z->z: tree has 2 notes", simnet_sapling_tree_size(s) == 2);
+
+    n1->have = simnet_sapling_tree_size(s) == 2 &&
+               simnet_sapling_witness_last(s, &n1->w) &&
+               simnet_sapling_tree_root(s, &n1->anchor);
+    WE_CHECK("z->z: witness note1 + read anchor", n1->have);
+
+    zclassic_sapling_proving_ctx_free(pctx);
+    return failures;
+}
+
+/* z->t mint: connect the block and check the transparent output value. */
+static int part_a_zt_mint_check(struct simnet *s, struct transaction *zt,
+                                int64_t shielded_value, bool zt_verified)
+{
+    int failures = 0;
+    struct uint256 zt_txid = zt->hash;
+    bool zt_mined = zt_verified && simnet_mint_txs(s, zt, 1);
+    WE_CHECK("z->t: mint (transparent UTXO + connect_block)", zt_mined);
+    int64_t transparent_value = 0;
+    WE_CHECK("z->t: mined transparent output has exact value",
+             zt_mined &&
+             simnet_coin_value(s, &zt_txid, 0, &transparent_value) &&
+             transparent_value == shielded_value);
+    WE_CHECK("z->t: no shielded output means tree stays at 2 notes",
+             zt_mined && simnet_sapling_tree_size(s) == 2);
+    return failures;
+}
+
+/* z->t stage: spend note1 (position 1) into a transparent output. */
+static int part_a_z_to_t(struct simnet *s, struct we_id *id,
+                         const struct consensus_params *cp,
+                         int64_t shielded_value, int zt_height,
+                         struct we_a_note *n1,
+                         const uint8_t zz_spend_nf[32])
+{
+    int failures = 0;
+    void *pctx = zclassic_sapling_proving_ctx_init();
+    WE_CHECK("z->t: acquire proving ctx", pctx != NULL);
+
+    struct transaction zt;
+    transaction_init(&zt);
+    zt.overwintered     = true;
+    zt.version          = SAPLING_TX_VERSION;
+    zt.version_group_id = SAPLING_VERSION_GROUP_ID;
+    zt.lock_time        = 0;
+    zt.expiry_height    = 0;
+    zt.value_balance    = shielded_value;   /* value OUT of the shielded pool */
+    WE_CHECK("z->t: alloc transparent output", transaction_alloc(&zt, 0, 1));
+    if (zt.vout) {
+        zt.vout[0].value = shielded_value;
+        uint8_t spk[3] = {0x76, 0xa9, 0x14};
+        script_set(&zt.vout[0].script_pub_key, spk, sizeof(spk));
+    }
+
+    zt.v_shielded_spend = zcl_calloc(1, sizeof(struct spend_description), "we_zt_sp");
+    WE_CHECK("z->t: alloc spend", zt.v_shielded_spend != NULL);
+
+    uint8_t path[1 + 32 * 33]; size_t path_len = 0;
+    bool pathok = n1->have &&
+                  incremental_witness_merkle_path(&n1->w, path, &path_len);
+    WE_CHECK("z->t: extract Merkle path (note1, position 1)", pathok);
+
+    uint8_t ar[32];
+    bool spend_built = pctx && zt.v_shielded_spend && pathok &&
+        sapling_build_spend_with_ctx(
+            pctx, id->ask, id->nsk, id->d, id->pk_d, n1->rcm,
+            (uint64_t)shielded_value, /*position*/1, n1->anchor.data,
+            path, path_len,
+            zt.v_shielded_spend[0].cv.data,
+            zt.v_shielded_spend[0].nullifier.data,
+            zt.v_shielded_spend[0].rk.data,
+            zt.v_shielded_spend[0].zkproof, ar);
+    WE_CHECK("z->t: build spend (production spend prover)", spend_built);
+    if (spend_built) {
+        zt.num_shielded_spend = 1;
+        memcpy(zt.v_shielded_spend[0].anchor.data, n1->anchor.data, 32);
+    }
+
+    /* Note-selection sanity: z->t spends a DIFFERENT note than z->z. */
+    WE_CHECK("z->t: nullifier distinct from z->z (note-selection)",
+             spend_built &&
+             memcmp(zt.v_shielded_spend[0].nullifier.data, zz_spend_nf, 32) != 0);
+
+    struct uint256 sighash;
+    WE_CHECK("z->t: sighash",
+             spend_built && we_sighash(&zt, cp, zt_height, &sighash));
+    if (spend_built)
+        failures += part_a_spend_auth("z->t: spend_auth_sig", id, ar, &sighash,
+                                      &zt.v_shielded_spend[0]);
+    WE_CHECK("z->t: binding sig (production ctx, value_balance=+V)",
+             spend_built && zclassic_sapling_binding_sig(
+                 pctx, zt.value_balance, sighash.data, zt.binding_sig));
+    transaction_compute_hash(&zt);
+
+    bool zt_verified = spend_built && we_verify(&zt, cp, zt_height);
+    WE_CHECK("z->t: consensus verifier ACCEPTS", zt_verified);
+
+    failures += part_a_zt_mint_check(s, &zt, shielded_value, zt_verified);
+
+    free(zt.v_shielded_spend); zt.v_shielded_spend = NULL; zt.num_shielded_spend = 0;
+    transaction_free(&zt);
+    zclassic_sapling_proving_ctx_free(pctx);
+    return failures;
+}
+
 static int part_a_consensus_accept(void)
 {
     int failures = 0;
@@ -227,307 +610,19 @@ static int part_a_consensus_accept(void)
     const int zt_height = zz_height + 1;
 
     /* ── (1) t->z ─────────────────────────────────────────────────────── */
-    uint8_t note0_rcm[32]; memset(note0_rcm, 0, 32);
-    struct incremental_witness w0; memset(&w0, 0, sizeof(w0));
-    struct uint256 anchor0;
-    bool have_note0 = false;
-    {
-        uint8_t memo[512];
-        memset(memo, 0xF6, sizeof(memo));
-        const char *msg = "zclassic23 W1-d: production t->z shield";
-        memcpy(memo, msg, strlen(msg));
-
-        void *pctx = zclassic_sapling_proving_ctx_init();
-        WE_CHECK("t->z: acquire native C23 proving ctx", pctx != NULL);
-
-        struct transaction tz;
-        transaction_init(&tz);
-        tz.overwintered     = true;
-        tz.version          = SAPLING_TX_VERSION;
-        tz.version_group_id = SAPLING_VERSION_GROUP_ID;
-        tz.lock_time        = 0;
-        tz.expiry_height    = 0;
-        WE_CHECK("t->z: alloc transparent input", transaction_alloc(&tz, 1, 0));
-        tz.vin[0].prevout.hash = cb_txid;
-        tz.vin[0].prevout.n    = 0;
-        tz.vin[0].sequence     = 0xFFFFFFFF;
-        { uint8_t ss[2] = {0x00, 0x00}; script_set(&tz.vin[0].script_sig, ss, sizeof(ss)); }
-        tz.value_balance = -SHIELDED_VALUE;   /* value INTO the shielded pool */
-
-        tz.v_shielded_output = zcl_calloc(1, sizeof(struct output_description),
-                                          "we_tz_out");
-        WE_CHECK("t->z: alloc shielded output", tz.v_shielded_output != NULL);
-        tz.num_shielded_output = 1;
-
-        bool built = pctx && tz.v_shielded_output &&
-            sapling_build_output_with_ctx(
-                pctx, id.ovk, id.d, id.pk_d, (uint64_t)SHIELDED_VALUE, memo,
-                tz.v_shielded_output[0].cv.data,
-                tz.v_shielded_output[0].cm.data,
-                tz.v_shielded_output[0].ephemeral_key.data,
-                tz.v_shielded_output[0].enc_ciphertext,
-                tz.v_shielded_output[0].out_ciphertext,
-                tz.v_shielded_output[0].zkproof);
-        WE_CHECK("t->z: build output (production prover)", built);
-
-        struct uint256 sighash;
-        WE_CHECK("t->z: sighash", built && we_sighash(&tz, cp, tz_height, &sighash));
-        WE_CHECK("t->z: binding sig (production ctx)",
-                 built && zclassic_sapling_binding_sig(
-                     pctx, tz.value_balance, sighash.data, tz.binding_sig));
-        transaction_compute_hash(&tz);
-
-        /* THE assertion: the REAL consensus verifier ACCEPTS a production
-         * bundle (not probe agreement). */
-        WE_CHECK("t->z: consensus verifier ACCEPTS (contextual_check_transaction)",
-                 built && we_verify(&tz, cp, tz_height));
-
-        /* Negative control: one flipped proof byte must be REJECTED. */
-        if (built) {
-            struct transaction bad;
-            transaction_init(&bad);
-            bool copied = transaction_copy(&bad, &tz);
-            if (copied && bad.num_shielded_output == 1) {
-                bad.v_shielded_output[0].zkproof[0] ^= 0x01;
-                transaction_compute_hash(&bad);
-            }
-            WE_CHECK("t->z: tampered output proof REJECTED",
-                     copied && !we_verify(&bad, cp, tz_height));
-            transaction_free(&bad);
-        }
-
-        /* Honest receive: decrypt back to (value, rcm, memo). */
-        uint64_t dv = 0; uint8_t dmemo[512];
-        bool dec = built && we_decrypt_note(&tz.v_shielded_output[0], id.ivk,
-                                            &dv, note0_rcm, dmemo);
-        WE_CHECK("t->z: note decrypts to recipient (AEAD authenticates)", dec);
-        WE_CHECK("t->z: decrypted value matches", dec && dv == (uint64_t)SHIELDED_VALUE);
-        WE_CHECK("t->z: memo round-trips (z_getmemo source)",
-                 dec && memcmp(dmemo, memo, 512) == 0);
-
-        /* Mint: append note0 to the tree, advance tip. */
-        WE_CHECK("t->z: mint (tree append + connect_block)",
-                 built && simnet_mint_txs(&s, &tz, 1));
-        free(tz.v_shielded_output);
-        tz.v_shielded_output = NULL;
-        tz.num_shielded_output = 0;
-        WE_CHECK("t->z: tree has 1 note", simnet_sapling_tree_size(&s) == 1);
-
-        have_note0 = simnet_sapling_tree_size(&s) == 1 &&
-                     simnet_sapling_witness_last(&s, &w0) &&
-                     simnet_sapling_tree_root(&s, &anchor0);
-        WE_CHECK("t->z: witness note0 + read anchor", have_note0);
-
-        zclassic_sapling_proving_ctx_free(pctx);
-    }
+    struct we_a_note note0; memset(&note0, 0, sizeof(note0));
+    failures += part_a_t_to_z(&s, &id, cp, &cb_txid, SHIELDED_VALUE,
+                              tz_height, &note0);
 
     /* ── (2) z->z ─────────────────────────────────────────────────────── */
-    uint8_t note1_rcm[32]; memset(note1_rcm, 0, 32);
     uint8_t zz_spend_nf[32]; memset(zz_spend_nf, 0, 32);
-    struct incremental_witness w1; memset(&w1, 0, sizeof(w1));
-    struct uint256 anchor1;
-    bool have_note1 = false;
-    {
-        void *pctx = zclassic_sapling_proving_ctx_init();
-        WE_CHECK("z->z: acquire proving ctx", pctx != NULL);
-
-        struct transaction zz;
-        transaction_init(&zz);
-        zz.overwintered     = true;
-        zz.version          = SAPLING_TX_VERSION;
-        zz.version_group_id = SAPLING_VERSION_GROUP_ID;
-        zz.lock_time        = 0;
-        zz.expiry_height    = 0;
-        zz.value_balance    = 0;   /* all value stays shielded */
-
-        zz.v_shielded_spend  = zcl_calloc(1, sizeof(struct spend_description), "we_zz_sp");
-        zz.v_shielded_output = zcl_calloc(1, sizeof(struct output_description), "we_zz_out");
-        WE_CHECK("z->z: alloc spend + output",
-                 zz.v_shielded_spend && zz.v_shielded_output);
-
-        uint8_t path[1 + 32 * 33]; size_t path_len = 0;
-        bool pathok = have_note0 &&
-                      incremental_witness_merkle_path(&w0, path, &path_len);
-        WE_CHECK("z->z: extract Merkle path (note0, position 0)", pathok);
-
-        uint8_t ar[32];
-        bool spend_built = pctx && zz.v_shielded_spend && pathok &&
-            sapling_build_spend_with_ctx(
-                pctx, id.ask, id.nsk, id.d, id.pk_d, note0_rcm,
-                (uint64_t)SHIELDED_VALUE, /*position*/0, anchor0.data,
-                path, path_len,
-                zz.v_shielded_spend[0].cv.data,
-                zz.v_shielded_spend[0].nullifier.data,
-                zz.v_shielded_spend[0].rk.data,
-                zz.v_shielded_spend[0].zkproof, ar);
-        WE_CHECK("z->z: build spend (production spend prover)", spend_built);
-        if (spend_built) {
-            zz.num_shielded_spend = 1;
-            memcpy(zz.v_shielded_spend[0].anchor.data, anchor0.data, 32);
-            memcpy(zz_spend_nf, zz.v_shielded_spend[0].nullifier.data, 32);
-        }
-
-        bool out_built = pctx && zz.v_shielded_output &&
-            sapling_build_output_with_ctx(
-                pctx, id.ovk, id.d, id.pk_d, (uint64_t)SHIELDED_VALUE, NULL,
-                zz.v_shielded_output[0].cv.data,
-                zz.v_shielded_output[0].cm.data,
-                zz.v_shielded_output[0].ephemeral_key.data,
-                zz.v_shielded_output[0].enc_ciphertext,
-                zz.v_shielded_output[0].out_ciphertext,
-                zz.v_shielded_output[0].zkproof);
-        WE_CHECK("z->z: build output (production prover)", out_built);
-        if (out_built) zz.num_shielded_output = 1;
-
-        struct uint256 sighash;
-        bool ready = spend_built && out_built;
-        WE_CHECK("z->z: sighash", ready && we_sighash(&zz, cp, zz_height, &sighash));
-
-        if (ready) {
-            uint8_t rsk[32];
-            we_rsk(id.ask, ar, rsk);
-            WE_CHECK("z->z: spend_auth_sig",
-                     redjubjub_sign(rsk, sighash.data, 32,
-                                    zz.v_shielded_spend[0].spend_auth_sig, 5));
-            memory_cleanse(rsk, sizeof(rsk));
-        }
-        WE_CHECK("z->z: binding sig (production ctx)",
-                 ready && zclassic_sapling_binding_sig(
-                     pctx, zz.value_balance, sighash.data, zz.binding_sig));
-        transaction_compute_hash(&zz);
-
-        WE_CHECK("z->z: consensus verifier ACCEPTS",
-                 ready && we_verify(&zz, cp, zz_height));
-
-        /* Recover note1 rcm for the later z->t spend. */
-        uint64_t dv1 = 0;
-        bool dec1 = out_built && we_decrypt_note(&zz.v_shielded_output[0], id.ivk,
-                                                 &dv1, note1_rcm, NULL);
-        WE_CHECK("z->z: change note decrypts", dec1 && dv1 == (uint64_t)SHIELDED_VALUE);
-
-        /* Durable nullifier path: record + double-spend replay reject. */
-        {
-            sqlite3 *db = NULL;
-            int rc = sqlite3_open(":memory:", &db);
-            WE_CHECK("z->z: open :memory: nullifier db", rc == SQLITE_OK && db);
-            WE_CHECK("z->z: nullifier_kv schema", db && nullifier_kv_ensure_schema(db));
-
-            struct block blk; memset(&blk, 0, sizeof(blk));
-            blk.num_vtx = 1; blk.vtx = &zz;
-            struct delta_summary sum1; memset(&sum1, 0, sizeof(sum1)); sum1.ok = true;
-            WE_CHECK("z->z: utxo_apply records nullifier (real path)",
-                     ready && db &&
-                     utxo_apply_check_and_insert_nullifiers(db, &blk, zz_height, &sum1) &&
-                     sum1.ok);
-            bool found = false;
-            WE_CHECK("z->z: nullifier present in durable set",
-                     db && nullifier_kv_get(db, zz_spend_nf, NULLIFIER_POOL_SAPLING,
-                                            &found, NULL) && found);
-            struct delta_summary sum2; memset(&sum2, 0, sizeof(sum2)); sum2.ok = true;
-            bool applied = db &&
-                utxo_apply_check_and_insert_nullifiers(db, &blk, zz_height + 1, &sum2);
-            WE_CHECK("z->z: replay of spent nullifier REJECTED (double-spend)",
-                     applied && !sum2.ok);
-            if (db) sqlite3_close(db);
-        }
-
-        WE_CHECK("z->z: mint (tree append + connect_block)",
-                 ready && simnet_mint_txs(&s, &zz, 1));
-        free(zz.v_shielded_spend);  zz.v_shielded_spend  = NULL; zz.num_shielded_spend  = 0;
-        free(zz.v_shielded_output); zz.v_shielded_output = NULL; zz.num_shielded_output = 0;
-        WE_CHECK("z->z: tree has 2 notes", simnet_sapling_tree_size(&s) == 2);
-
-        have_note1 = simnet_sapling_tree_size(&s) == 2 &&
-                     simnet_sapling_witness_last(&s, &w1) &&
-                     simnet_sapling_tree_root(&s, &anchor1);
-        WE_CHECK("z->z: witness note1 + read anchor", have_note1);
-
-        zclassic_sapling_proving_ctx_free(pctx);
-    }
+    struct we_a_note note1; memset(&note1, 0, sizeof(note1));
+    failures += part_a_z_to_z(&s, &id, cp, SHIELDED_VALUE, zz_height,
+                              &note0, &note1, zz_spend_nf);
 
     /* ── (3) z->t ─────────────────────────────────────────────────────── */
-    {
-        void *pctx = zclassic_sapling_proving_ctx_init();
-        WE_CHECK("z->t: acquire proving ctx", pctx != NULL);
-
-        struct transaction zt;
-        transaction_init(&zt);
-        zt.overwintered     = true;
-        zt.version          = SAPLING_TX_VERSION;
-        zt.version_group_id = SAPLING_VERSION_GROUP_ID;
-        zt.lock_time        = 0;
-        zt.expiry_height    = 0;
-        zt.value_balance    = SHIELDED_VALUE;   /* value OUT of the shielded pool */
-        WE_CHECK("z->t: alloc transparent output", transaction_alloc(&zt, 0, 1));
-        if (zt.vout) {
-            zt.vout[0].value = SHIELDED_VALUE;
-            uint8_t spk[3] = {0x76, 0xa9, 0x14};
-            script_set(&zt.vout[0].script_pub_key, spk, sizeof(spk));
-        }
-
-        zt.v_shielded_spend = zcl_calloc(1, sizeof(struct spend_description), "we_zt_sp");
-        WE_CHECK("z->t: alloc spend", zt.v_shielded_spend != NULL);
-
-        uint8_t path[1 + 32 * 33]; size_t path_len = 0;
-        bool pathok = have_note1 &&
-                      incremental_witness_merkle_path(&w1, path, &path_len);
-        WE_CHECK("z->t: extract Merkle path (note1, position 1)", pathok);
-
-        uint8_t ar[32];
-        bool spend_built = pctx && zt.v_shielded_spend && pathok &&
-            sapling_build_spend_with_ctx(
-                pctx, id.ask, id.nsk, id.d, id.pk_d, note1_rcm,
-                (uint64_t)SHIELDED_VALUE, /*position*/1, anchor1.data,
-                path, path_len,
-                zt.v_shielded_spend[0].cv.data,
-                zt.v_shielded_spend[0].nullifier.data,
-                zt.v_shielded_spend[0].rk.data,
-                zt.v_shielded_spend[0].zkproof, ar);
-        WE_CHECK("z->t: build spend (production spend prover)", spend_built);
-        if (spend_built) {
-            zt.num_shielded_spend = 1;
-            memcpy(zt.v_shielded_spend[0].anchor.data, anchor1.data, 32);
-        }
-
-        /* Note-selection sanity: z->t spends a DIFFERENT note than z->z. */
-        WE_CHECK("z->t: nullifier distinct from z->z (note-selection)",
-                 spend_built &&
-                 memcmp(zt.v_shielded_spend[0].nullifier.data, zz_spend_nf, 32) != 0);
-
-        struct uint256 sighash;
-        WE_CHECK("z->t: sighash",
-                 spend_built && we_sighash(&zt, cp, zt_height, &sighash));
-        if (spend_built) {
-            uint8_t rsk[32];
-            we_rsk(id.ask, ar, rsk);
-            WE_CHECK("z->t: spend_auth_sig",
-                     redjubjub_sign(rsk, sighash.data, 32,
-                                    zt.v_shielded_spend[0].spend_auth_sig, 5));
-            memory_cleanse(rsk, sizeof(rsk));
-        }
-        WE_CHECK("z->t: binding sig (production ctx, value_balance=+V)",
-                 spend_built && zclassic_sapling_binding_sig(
-                     pctx, zt.value_balance, sighash.data, zt.binding_sig));
-        transaction_compute_hash(&zt);
-
-        bool zt_verified = spend_built && we_verify(&zt, cp, zt_height);
-        WE_CHECK("z->t: consensus verifier ACCEPTS", zt_verified);
-
-        struct uint256 zt_txid = zt.hash;
-        bool zt_mined = zt_verified && simnet_mint_txs(&s, &zt, 1);
-        WE_CHECK("z->t: mint (transparent UTXO + connect_block)", zt_mined);
-        int64_t transparent_value = 0;
-        WE_CHECK("z->t: mined transparent output has exact value",
-                 zt_mined &&
-                 simnet_coin_value(&s, &zt_txid, 0, &transparent_value) &&
-                 transparent_value == SHIELDED_VALUE);
-        WE_CHECK("z->t: no shielded output means tree stays at 2 notes",
-                 zt_mined && simnet_sapling_tree_size(&s) == 2);
-
-        free(zt.v_shielded_spend); zt.v_shielded_spend = NULL; zt.num_shielded_spend = 0;
-        transaction_free(&zt);
-        zclassic_sapling_proving_ctx_free(pctx);
-    }
+    failures += part_a_z_to_t(&s, &id, cp, SHIELDED_VALUE, zt_height,
+                              &note1, zz_spend_nf);
 
     simnet_free(&s);
     return failures;
@@ -566,6 +661,93 @@ static void part_b_str_param(struct json_value *arr, const char *s)
     json_set_array(arr);
     struct json_value a; json_init(&a); json_set_str(&a, s);
     json_push_back(arr, &a); json_free(&a);
+}
+
+/* Part B receive views: z_getbalance, z_gettotalbalance and z_listunspent. */
+static int part_b_receive_views(struct rpc_table *tbl, const char *zaddr)
+{
+    int failures = 0;
+    /* z_getbalance(zaddr) reflects the shielded receive (minconf-aware). */
+    {
+        struct json_value p; json_init(&p); part_b_str_param(&p, zaddr);
+        char bal[32] = {0};
+        bool ok = we_rpc_str(tbl, "z_getbalance", &p, bal, sizeof(bal));
+        json_free(&p);
+        WE_CHECK("Part B: z_getbalance == 2.50000000",
+                 ok && strcmp(bal, "2.50000000") == 0);
+    }
+
+    /* z_gettotalbalance private field reflects it. */
+    {
+        struct json_value p, r; json_init(&p); json_init(&r); json_set_array(&p);
+        bool ok = rpc_table_execute(tbl, "z_gettotalbalance", &p, &r);
+        const struct json_value *priv = ok ? json_get(&r, "private") : NULL;
+        const char *ps = priv ? json_get_str(priv) : NULL;
+        WE_CHECK("Part B: z_gettotalbalance private == 2.50000000",
+                 ok && ps && strcmp(ps, "2.50000000") == 0);
+        json_free(&p); json_free(&r);
+    }
+
+    /* z_listunspent lists exactly the one note with the right amount + memo. */
+    {
+        struct json_value p, r; json_init(&p); json_init(&r); json_set_array(&p);
+        bool ok = rpc_table_execute(tbl, "z_listunspent", &p, &r);
+        bool one = ok && r.type == JSON_ARR && json_size(&r) == 1;
+        const struct json_value *e0 = one ? json_at(&r, 0) : NULL;
+        const struct json_value *amt = e0 ? json_get(e0, "amount") : NULL;
+        const char *as = amt ? json_get_str(amt) : NULL;
+        WE_CHECK("Part B: z_listunspent has 1 note @ 2.50000000",
+                 one && as && strcmp(as, "2.50000000") == 0);
+        json_free(&p); json_free(&r);
+    }
+    return failures;
+}
+
+/* Part B memo check: z_getmemo returns the persisted note's memo text. */
+static int part_b_memo_check(struct rpc_table *tbl, bool note_saved)
+{
+    int failures = 0;
+    /* z_getmemo round-trips the memo text for the note. */
+    {
+        char txid_hex[65];   /* note txid is 32 bytes of 0xB7 (palindromic) */
+        for (int i = 0; i < 32; i++) { txid_hex[i * 2] = 'b'; txid_hex[i * 2 + 1] = '7'; }
+        txid_hex[64] = '\0';
+        struct json_value p; json_init(&p); part_b_str_param(&p, txid_hex);
+        struct json_value r; json_init(&r);
+        bool ok = rpc_table_execute(tbl, "z_getmemo", &p, &r);
+        const struct json_value *memo = ok ? json_get(&r, "memo") : NULL;
+        const char *ms2 = memo ? json_get_str(memo) : NULL;
+        WE_CHECK("Part B: z_getmemo returns the note memo text",
+                 note_saved && ok && ms2 &&
+                 strncmp(ms2, "W1-d persisted note", 19) == 0);
+        json_free(&p); json_free(&r);
+    }
+    return failures;
+}
+
+/* Part B spend checks: after the mark-spent, balance and unspent drop to zero. */
+static int part_b_spend_checks(struct node_db *ndb, struct rpc_table *tbl,
+                               const char *zaddr, uint8_t nnf[32])
+{
+    int failures = 0;
+    uint8_t spent_by[32]; memset(spent_by, 0xC4, 32);
+    enum db_mark_spent_result msr =
+        db_sapling_note_mark_spent(ndb, nnf, spent_by);
+    WE_CHECK("Part B: db_sapling_note_mark_spent OK", msr == DB_MARK_SPENT_OK);
+
+    struct json_value p; json_init(&p); part_b_str_param(&p, zaddr);
+    char bal[32] = {0};
+    bool ok = we_rpc_str(tbl, "z_getbalance", &p, bal, sizeof(bal));
+    json_free(&p);
+    WE_CHECK("Part B: z_getbalance == 0 after spend",
+             ok && strcmp(bal, "0.00000000") == 0);
+
+    struct json_value p2, r2; json_init(&p2); json_init(&r2); json_set_array(&p2);
+    bool ok2 = rpc_table_execute(tbl, "z_listunspent", &p2, &r2);
+    WE_CHECK("Part B: z_listunspent empty after spend",
+             ok2 && r2.type == JSON_ARR && json_size(&r2) == 0);
+    json_free(&p2); json_free(&r2);
+    return failures;
 }
 
 static int part_b_wallet_rpc(void)
@@ -674,76 +856,12 @@ static int part_b_wallet_rpc(void)
         WE_CHECK("Part B: decode new z-address", false);
     }
 
-    /* z_getbalance(zaddr) reflects the shielded receive (minconf-aware). */
-    {
-        struct json_value p; json_init(&p); part_b_str_param(&p, zaddr);
-        char bal[32] = {0};
-        bool ok = we_rpc_str(&tbl, "z_getbalance", &p, bal, sizeof(bal));
-        json_free(&p);
-        WE_CHECK("Part B: z_getbalance == 2.50000000",
-                 ok && strcmp(bal, "2.50000000") == 0);
-    }
-
-    /* z_gettotalbalance private field reflects it. */
-    {
-        struct json_value p, r; json_init(&p); json_init(&r); json_set_array(&p);
-        bool ok = rpc_table_execute(&tbl, "z_gettotalbalance", &p, &r);
-        const struct json_value *priv = ok ? json_get(&r, "private") : NULL;
-        const char *ps = priv ? json_get_str(priv) : NULL;
-        WE_CHECK("Part B: z_gettotalbalance private == 2.50000000",
-                 ok && ps && strcmp(ps, "2.50000000") == 0);
-        json_free(&p); json_free(&r);
-    }
-
-    /* z_listunspent lists exactly the one note with the right amount + memo. */
-    {
-        struct json_value p, r; json_init(&p); json_init(&r); json_set_array(&p);
-        bool ok = rpc_table_execute(&tbl, "z_listunspent", &p, &r);
-        bool one = ok && r.type == JSON_ARR && json_size(&r) == 1;
-        const struct json_value *e0 = one ? json_at(&r, 0) : NULL;
-        const struct json_value *amt = e0 ? json_get(e0, "amount") : NULL;
-        const char *as = amt ? json_get_str(amt) : NULL;
-        WE_CHECK("Part B: z_listunspent has 1 note @ 2.50000000",
-                 one && as && strcmp(as, "2.50000000") == 0);
-        json_free(&p); json_free(&r);
-    }
-
-    /* z_getmemo round-trips the memo text for the note. */
-    {
-        char txid_hex[65];   /* note txid is 32 bytes of 0xB7 (palindromic) */
-        for (int i = 0; i < 32; i++) { txid_hex[i * 2] = 'b'; txid_hex[i * 2 + 1] = '7'; }
-        txid_hex[64] = '\0';
-        struct json_value p; json_init(&p); part_b_str_param(&p, txid_hex);
-        struct json_value r; json_init(&r);
-        bool ok = rpc_table_execute(&tbl, "z_getmemo", &p, &r);
-        const struct json_value *memo = ok ? json_get(&r, "memo") : NULL;
-        const char *ms2 = memo ? json_get_str(memo) : NULL;
-        WE_CHECK("Part B: z_getmemo returns the note memo text",
-                 note_saved && ok && ms2 &&
-                 strncmp(ms2, "W1-d persisted note", 19) == 0);
-        json_free(&p); json_free(&r);
-    }
+    failures += part_b_receive_views(&tbl, zaddr);
+    failures += part_b_memo_check(&tbl, note_saved);
 
     /* Mark the note spent (note-selection view): balance + unspent drop to 0. */
-    if (note_saved) {
-        uint8_t spent_by[32]; memset(spent_by, 0xC4, 32);
-        enum db_mark_spent_result msr =
-            db_sapling_note_mark_spent(&ndb, nnf, spent_by);
-        WE_CHECK("Part B: db_sapling_note_mark_spent OK", msr == DB_MARK_SPENT_OK);
-
-        struct json_value p; json_init(&p); part_b_str_param(&p, zaddr);
-        char bal[32] = {0};
-        bool ok = we_rpc_str(&tbl, "z_getbalance", &p, bal, sizeof(bal));
-        json_free(&p);
-        WE_CHECK("Part B: z_getbalance == 0 after spend",
-                 ok && strcmp(bal, "0.00000000") == 0);
-
-        struct json_value p2, r2; json_init(&p2); json_init(&r2); json_set_array(&p2);
-        bool ok2 = rpc_table_execute(&tbl, "z_listunspent", &p2, &r2);
-        WE_CHECK("Part B: z_listunspent empty after spend",
-                 ok2 && r2.type == JSON_ARR && json_size(&r2) == 0);
-        json_free(&p2); json_free(&r2);
-    }
+    if (note_saved)
+        failures += part_b_spend_checks(&ndb, &tbl, zaddr, nnf);
 
     rpc_wallet_set_node_db(NULL);
     rpc_wallet_set_coins_tip(NULL);
