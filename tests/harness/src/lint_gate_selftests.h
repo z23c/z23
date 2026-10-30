@@ -78,7 +78,7 @@
 #define HOTSWAP_SCOPE_SCRIPT_REL  "build/bin/z23-lint check-hotswap-eligible-scope"
 #define HOTSWAP_STATIC_SCRIPT_REL "build/bin/z23-lint check-hotswap-static-state"
 #define HOTSWAP_SERVICE_SCRIPT_REL \
-    "tools/lint/check_hotswap_service_islands.sh"
+    "build/bin/z23-lint check-hotswap-service-islands"
 #define HOTSWAP_SERVICE_BAD_MANIFEST_REL \
     "tests/harness/fixtures/hotswap_services_bad.def"
 #define HOTSWAP_SERVICE_STALE_CONTRACT_REL \

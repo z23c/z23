@@ -1240,13 +1240,13 @@ Z23_FLAG("ZCL_HOTSWAP_PRELOAD", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_HOTSWAP_PROBE_CASES", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-candidates.sh:auto")
 Z23_FLAG("ZCL_HOTSWAP_SERVICE_FIXTURE", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_hotswap_service_islands.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_hotswap_service_islands.c:auto")
 Z23_FLAG("ZCL_HOTSWAP_SERVICE_MANIFEST", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_hotswap_service_islands.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_hotswap_service_islands.c:auto")
 Z23_FLAG("ZCL_HOTSWAP_SERVICES", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-candidates.sh:auto")
 Z23_FLAG("ZCL_HOTSWAP_SHADOW_OWNERS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_hotswap_service_islands.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_hotswap_service_islands.c:auto")
 Z23_FLAG("ZCL_HOTSWAP_SWAPPABLE_MANIFEST", "env_build", "-", "-",
           "undocumented; first use tools/dev/hotswap-candidates.sh:auto")
 Z23_FLAG("ZCL_HOTSWAP_SYMBOLS_DIR", "env_build", "-", "-",

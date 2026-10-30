@@ -117,7 +117,7 @@ gate_command() {
         check-hotswap-denied-leaves)       echo 'build/bin/z23-lint check-hotswap-denied-leaves --selftest && build/bin/z23-lint check-hotswap-denied-leaves' ;;
         check-determinism-ratchet)         echo 'build/bin/z23-lint check-determinism-ratchet --selftest && build/bin/z23-lint check-determinism-ratchet' ;;
         check-hotswap-static-state)        echo 'build/bin/z23-lint check-hotswap-static-state' ;;
-        check-hotswap-service-islands)     echo 'tools/lint/check_hotswap_service_islands.sh' ;;
+        check-hotswap-service-islands)     echo 'build/bin/z23-lint check-hotswap-service-islands --selftest && build/bin/z23-lint check-hotswap-service-islands' ;;
         check-hotswap-swappable-shape)     echo 'build/bin/z23-lint check-hotswap-swappable-shape' ;;
         check-hotswap-package-receipt-is-not-authority) echo 'build/bin/z23-lint check-hotswap-package-receipt-is-not-authority --selftest && build/bin/z23-lint check-hotswap-package-receipt-is-not-authority' ;;
         check-hotswap-module-imports)      echo 'build/bin/z23-lint check-hotswap-module-imports --selftest && build/bin/z23-lint check-hotswap-module-imports' ;;

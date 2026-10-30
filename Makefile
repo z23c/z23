@@ -13104,8 +13104,9 @@ check-hotswap-static-state: $(LINTC_TOOL)
 # Pure calculation service islands may own no ambient state or effects and may
 # import only the stable symbols declared beside their frozen ABI/schema/wire/
 # KAT fingerprints in config/hotswap_services.def.
-check-hotswap-service-islands:
-	@tools/lint/check_hotswap_service_islands.sh
+check-hotswap-service-islands: $(LINTC_TOOL)
+	@./build/bin/z23-lint check-hotswap-service-islands --selftest
+	@./build/bin/z23-lint check-hotswap-service-islands
 
 # THE HARD LINE for the REAL (activatable) module ABI, both halves: every
 # swappable source_tu (engine/composition/hotswap_swappable.def) must be owned by a
