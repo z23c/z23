@@ -18,6 +18,7 @@
 #include "models/database_internal.h"
 #include "models/utxo_count_cache.h"
 #include "platform/time_compat.h"
+#include "support/log_throttle.h"
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -107,9 +108,16 @@ int64_t node_db_utxo_count_gauge(struct node_db *ndb)
                              UTXO_COUNT_GAUGE_MAX_AGE_SECS, &count))
         return count;
     atomic_fetch_add(&g_utxo_gauge_full_counts, 1);
-    if (!node_db_utxo_count_checked(ndb, &count))
+    if (!node_db_utxo_count_checked(ndb, &count)) {
+        static struct log_throttle warn = LOG_THROTTLE_INIT;
+        uint64_t reps = 0;
+        if (log_throttle_should_emit(&warn, 1, now,
+                                     UTXO_COUNT_REFRESH_WARN_SECS, &reps))
+            LOG_WARN("db", "[db] utxo count gauge: refresh failed (%s); "
+                     "serving the last good value", ndb->path);
         return atomic_load(&g_utxo_gauge_owner) == ndb
                    ? atomic_load(&g_utxo_gauge_cache.value) : 0;
+    }
     atomic_store(&g_utxo_gauge_owner, ndb);
     utxo_count_cache_put(&g_utxo_gauge_cache, now, count);
     return count;

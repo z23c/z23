@@ -98,11 +98,43 @@ static int ucg_case_cache_primitive(void)
     return failures;
 }
 
+static int ucg_case_failed_refresh_keeps_last_good(void)
+{
+    int failures = 0;
+    struct utxo_count_cache c = {0};
+    UCG_CHECK("failed first refresh serves 0 and stores nothing",
+              utxo_count_cache_refresh(&c, 100, false, 0) == 0 &&
+              !utxo_count_cache_get(&c, 100, 60, &(int64_t){0}));
+    UCG_CHECK("good refresh is stored",
+              utxo_count_cache_refresh(&c, 100, true, 7) == 7);
+    UCG_CHECK("failed refresh serves the last good value, not 0",
+              utxo_count_cache_refresh(&c, 200, false, 0) == 7);
+    int64_t v = -1;
+    UCG_CHECK("failed refresh did not extend the cache age",
+              !utxo_count_cache_get(&c, 200, 60, &v));
+
+    struct node_db ndb;
+    if (!node_db_open(&ndb, ":memory:"))
+        return failures + 1;
+    node_db_utxo_count_gauge_test_reset(ucg_clock);
+    g_ucg_now = 1000;
+    bool seeded = ucg_put(&ndb, 1) && ucg_put(&ndb, 2);
+    UCG_CHECK("gauge seeded", seeded && node_db_utxo_count_gauge(&ndb) == 2);
+    g_ucg_now += UTXO_COUNT_GAUGE_MAX_AGE_SECS;
+    bool dropped = node_db_exec(&ndb, "ALTER TABLE utxos RENAME TO utxos_gone");
+    UCG_CHECK("unreadable table serves the last good count, not 0",
+              dropped && node_db_utxo_count_gauge(&ndb) == 2);
+    node_db_utxo_count_gauge_test_reset(NULL);
+    node_db_close(&ndb);
+    return failures;
+}
+
 int test_utxo_count_gauge(void)
 {
     printf("\n=== utxo_count_gauge tests ===\n");
     int failures = 0;
     failures += ucg_case_cached_and_correct();
     failures += ucg_case_cache_primitive();
+    failures += ucg_case_failed_refresh_keeps_last_good();
     return failures;
 }

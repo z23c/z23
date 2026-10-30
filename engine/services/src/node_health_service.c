@@ -32,6 +32,7 @@
 #include "models/block.h"
 #include "models/database.h"
 #include "models/utxo_count_cache.h"
+#include "support/log_throttle.h"
 #include "net/onion_service.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
@@ -539,9 +540,19 @@ static void health_collect_utxo_count(struct node_health_snapshot *snapshot,
                              UTXO_COUNT_GAUGE_MAX_AGE_SECS,
                              &snapshot->utxo_count))
         return;
-    if (!store->utxo_count(store->self, &snapshot->utxo_count))
-        snapshot->utxo_count = node_db_utxo_count(ndb);
-    utxo_count_cache_put(&g_health_utxo_cache, now, snapshot->utxo_count);
+    int64_t count = 0;
+    bool ok = store->utxo_count(store->self, &count) ||
+              node_db_utxo_count_checked(ndb, &count);
+    if (!ok) {
+        static struct log_throttle warn = LOG_THROTTLE_INIT;
+        uint64_t reps = 0;
+        if (log_throttle_should_emit(&warn, 1, now,
+                                     UTXO_COUNT_REFRESH_WARN_SECS, &reps))
+            LOG_WARN("health", "[health] utxo count refresh failed on both "
+                     "handles; serving the last good value");
+    }
+    snapshot->utxo_count =
+        utxo_count_cache_refresh(&g_health_utxo_cache, now, ok, count);
 }
 
 static void health_collect_db_status(struct node_health_snapshot *snapshot,

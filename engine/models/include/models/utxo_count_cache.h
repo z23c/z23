@@ -40,4 +40,21 @@ static inline void utxo_count_cache_put(struct utxo_count_cache *c,
     atomic_store(&c->at_secs, now_secs > 0 ? now_secs : 1);
 }
 
+/* Fold one refresh into the cache. A successful read is stored and returned.
+ * A failed read is never stored: the last good value is returned (0 if there
+ * has never been one) so an unreadable table cannot show as an empty set. */
+static inline int64_t utxo_count_cache_refresh(struct utxo_count_cache *c,
+                                               int64_t now_secs, bool read_ok,
+                                               int64_t value)
+{
+    if (read_ok) {
+        utxo_count_cache_put(c, now_secs, value);
+        return value;
+    }
+    return atomic_load(&c->at_secs) != 0 ? atomic_load(&c->value) : 0;
+}
+
+/* Keepalive for the "refresh failed" WARN: one line per this many seconds. */
+#define UTXO_COUNT_REFRESH_WARN_SECS 600
+
 #endif /* ZCL_MODELS_UTXO_COUNT_CACHE_H */
