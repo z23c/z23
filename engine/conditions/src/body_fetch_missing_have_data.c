@@ -21,6 +21,7 @@
 
 static _Atomic int g_target_at_detect = -1;
 static _Atomic int g_remedy_calls = 0;
+static _Atomic bool g_last_queued;
 
 enum bfmhd_target_route {
     BFMHD_TARGET_NONE = 0,
@@ -346,12 +347,14 @@ static enum condition_remedy_result remedy_body_fetch_missing_have_data(void)
         g_before_remedy_queue_fn();
 #endif
     atomic_fetch_add(&g_remedy_calls, 1);
+    bool queued = false;
     struct zcl_result r = route == BFMHD_TARGET_BEST_HEADER
-        ? sync_monitor_queue_best_header_body(
+        ? sync_monitor_queue_best_header_body_checked(
               target, &g_target_hash,
-              "condition:body_fetch_missing_have_data canonical")
-        : sync_monitor_queue_active_frontier_body(
-              target, "condition:body_fetch_missing_have_data mid-chain");
+              "condition:body_fetch_missing_have_data canonical", &queued)
+        : sync_monitor_queue_active_frontier_body_checked(
+              target, "condition:body_fetch_missing_have_data mid-chain",
+              &queued);
     if (!r.ok) {
         LOG_WARN("condition",
                  "[condition:body_fetch_missing_have_data] queue failed "
@@ -360,8 +363,11 @@ static enum condition_remedy_result remedy_body_fetch_missing_have_data(void)
         return COND_REMEDY_FAILED;
     }
 
+    atomic_store(&g_last_queued, queued);
     LOG_WARN("condition",
-             "[condition:body_fetch_missing_have_data] queued h=%d",
+             "[condition:body_fetch_missing_have_data] %s h=%d",
+             queued ? "queued" : "skipped (body already present, nothing "
+                                 "queued)",
              target);
     return COND_REMEDY_OK;
 }
@@ -419,6 +425,7 @@ void body_fetch_missing_have_data_test_reset(void)
 {
     atomic_store(&g_target_at_detect, -1);
     atomic_store(&g_remedy_calls, 0);
+    atomic_store(&g_last_queued, false);
     atomic_store(&g_target_route, BFMHD_TARGET_NONE);
     atomic_store(&g_target_hash_valid, false);
     atomic_store(&g_last_skip_state, BODY_FETCH_EXACT_READY);
@@ -433,6 +440,11 @@ void body_fetch_missing_have_data_test_reset(void)
 int body_fetch_missing_have_data_test_remedy_calls(void)
 {
     return atomic_load(&g_remedy_calls);
+}
+
+bool body_fetch_missing_have_data_test_last_queued(void)
+{
+    return atomic_load(&g_last_queued);
 }
 
 const char *body_fetch_missing_have_data_test_last_skip_reason(void)

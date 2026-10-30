@@ -592,6 +592,94 @@ static int test_bg_validation_body_repair_stops_responsively(void)
     return failures;
 }
 
+static _Atomic int64_t g_slept_ms;
+static _Atomic int g_blocker_sleeps;
+static char g_blocker_reason[BLOCKER_REASON_MAX];
+
+static bool find_blocker_by_id(const char *id, struct blocker_snapshot *out)
+{
+    struct blocker_snapshot snaps[BLOCKER_CAP];
+    int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
+    for (int i = 0; i < n; i++) {
+        if (strcmp(snaps[i].id, id) == 0) {
+            if (out) *out = snaps[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool body_read_succeeds_twentieth(
+    struct block *block, const struct block_index *index, const char *datadir)
+{
+    (void)block;
+    (void)index;
+    (void)datadir;
+    return body_read_count_increment() >= 20;
+}
+
+static void body_repair_account_sleep(int ms)
+{
+    struct blocker_snapshot snap;
+    atomic_fetch_add(&g_slept_ms, ms);
+    if (find_blocker_by_id("bg_validation.body_unreadable", &snap)) {
+        atomic_fetch_add(&g_blocker_sleeps, 1);
+        snprintf(g_blocker_reason, sizeof(g_blocker_reason), "%s",
+                 snap.reason);
+    }
+}
+
+static int test_bg_validation_body_repair_backs_off_and_names_blocker(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: persistent unreadable body backs off and names a "
+         "typed blocker until it reads") {
+        struct main_state ms;
+        main_state_init(&ms);
+        struct uint256 hash;
+        ASSERT(make_repair_index(&ms, &hash) != NULL);
+
+        struct bg_validation_service svc;
+        memset(&svc, 0, sizeof(svc));
+        svc.ms = &ms;
+        atomic_store(&svc.progress.state, BG_VALIDATION_RUNNING);
+        reducer_frontier_body_read_note_reset_for_testing();
+        blocker_clear("bg_validation.body_unreadable");
+        atomic_store(&g_body_read_calls, 0);
+        atomic_store(&g_slept_ms, 0);
+        atomic_store(&g_blocker_sleeps, 0);
+        g_blocker_reason[0] = '\0';
+        g_body_repair_svc = &svc;
+        bg_validation_test_set_body_repair_stubs(
+            body_read_succeeds_twentieth, body_repair_account_sleep);
+
+        struct block block;
+        block_init(&block);
+        struct block_index *actual = NULL;
+        ASSERT(bg_validation_read_body_resilient(
+            &svc, 0, "unused", BG_VALIDATION_RUNNING, &block, &actual));
+        ASSERT(atomic_load(&g_body_read_calls) == 20);
+        /* 11 waits of 5 s, then 10, 20, 40, 80, 160, 320, 600, 600 s. */
+        ASSERT(atomic_load(&g_slept_ms) == 1885000);
+        /* The blocker is present for every one-second tick of the eight
+         * backed-off waits (10+20+40+80+160+320+600+600 = 1830). */
+        ASSERT(atomic_load(&g_blocker_sleeps) == 1830);
+        ASSERT(strstr(g_blocker_reason, "h=0") != NULL);
+        ASSERT(strstr(g_blocker_reason, "nFile=") != NULL);
+        ASSERT(strstr(g_blocker_reason, "nDataPos=") != NULL);
+        ASSERT(strstr(g_blocker_reason, "failures=") != NULL);
+        ASSERT(!find_blocker_by_id("bg_validation.body_unreadable", NULL));
+
+        block_free(&block);
+        bg_validation_test_set_body_repair_stubs(NULL, NULL);
+        reducer_frontier_body_read_note_reset_for_testing();
+        main_state_free(&ms);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bg_validation_legacy_cursor_restarts_walk(void)
 {
     int failures = 0;
@@ -1269,6 +1357,7 @@ int test_bg_validation_reverify(void)
     failures += test_bg_validation_body_repair_retries_exact_height();
     failures += test_bg_validation_body_repair_reads_replacement_bytes();
     failures += test_bg_validation_body_repair_stops_responsively();
+    failures += test_bg_validation_body_repair_backs_off_and_names_blocker();
     failures += test_bg_validation_body_repair_reproves_reorg();
     failures += test_bg_validation_post_verify_reorg_is_orphan();
     failures += test_bg_validation_restart_keeps_reverify_worker();

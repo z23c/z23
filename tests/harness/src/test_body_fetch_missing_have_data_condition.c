@@ -460,6 +460,7 @@ static bool bfmhd_positive_queued_dedup(
 {
     ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
     ok = ok && condition_engine_get_active_count() == 1;
+    ok = ok && body_fetch_missing_have_data_test_last_queued();
     ok = ok && got && snap->last_outcome == COND_REMEDY_UNWITNESSED;
     ok = ok && queue_has_target(fx);
     ok = ok && !msgprocessor_test_block_already_seen(
@@ -493,6 +494,7 @@ static bool bfmhd_arrival_before_queue_outcome(struct bfmhd_fixture *fx,
     struct condition_runtime_snapshot snap;
     ok = ok && g_bfmhd_arrival_seeded;
     ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 1;
+    ok = ok && !body_fetch_missing_have_data_test_last_queued();
     ok = ok && condition_engine_get_active_count() == 0;
     ok = ok && queued == 0 && fx->dm.queue_len == 0;
     ok = ok && after.recoveries_total == before.recoveries_total;

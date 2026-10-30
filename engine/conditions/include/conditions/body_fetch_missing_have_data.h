@@ -32,6 +32,7 @@ void register_body_fetch_missing_have_data(void);
 #ifdef ZCL_TESTING
 void body_fetch_missing_have_data_test_reset(void);
 int body_fetch_missing_have_data_test_remedy_calls(void);
+bool body_fetch_missing_have_data_test_last_queued(void);
 /* Stable diagnostic emitted when candidate 1 is intentionally not queued. */
 const char *body_fetch_missing_have_data_test_last_skip_reason(void);
 /* Overrides the utxo_apply select-idle candidate's source. NULL restores the

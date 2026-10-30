@@ -20,11 +20,13 @@
 #include "platform/time_compat.h"
 #include "services/bg_validation_service.h"
 #include "storage/disk_block_io.h"
+#include "util/blocker.h"
 #include "util/log_macros.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 
 #ifdef ZCL_TESTING
 static bg_validation_test_body_read_fn g_body_read_fn =
@@ -124,15 +126,50 @@ static enum bg_validation_body_read_outcome bg_validation_attempt_body_read(
     return BG_VALIDATION_BODY_READ_ACCEPTED;
 }
 
+#define BG_VALIDATION_BODY_BLOCKER_ID "bg_validation.body_unreadable"
+#define BG_VALIDATION_BODY_BACKOFF_AFTER 12u
+#define BG_VALIDATION_BODY_RETRY_SECS 5u
+#define BG_VALIDATION_BODY_RETRY_MAX_SECS 600u
+
 static bool bg_validation_should_log_body_read_failure(unsigned failures)
 {
-    return failures == 1 || failures % 12 == 0;
+    return failures == 1 || failures >= BG_VALIDATION_BODY_BACKOFF_AFTER;
+}
+
+/* Fixed retry for the first failures, then exponential growth to the cap. */
+static unsigned bg_validation_body_retry_secs(unsigned failures)
+{
+    if (failures < BG_VALIDATION_BODY_BACKOFF_AFTER)
+        return BG_VALIDATION_BODY_RETRY_SECS;
+    unsigned shift = failures - BG_VALIDATION_BODY_BACKOFF_AFTER + 1;
+    if (shift > 7)
+        shift = 7;
+    unsigned secs = BG_VALIDATION_BODY_RETRY_SECS << shift;
+    return secs > BG_VALIDATION_BODY_RETRY_MAX_SECS
+        ? BG_VALIDATION_BODY_RETRY_MAX_SECS : secs;
+}
+
+static void bg_validation_name_body_blocker(
+    int height, const struct block_index *index, unsigned failures,
+    unsigned retry_secs)
+{
+    char reason[BLOCKER_REASON_MAX];
+    snprintf(reason, sizeof(reason),
+             "unreadable canonical body h=%d nFile=%d nDataPos=%u "
+             "failures=%u; background validation is held at this height, "
+             "retrying every %us until a peer-fetched body reads back",
+             height, block_index_file_load(index),
+             block_index_data_pos_load(index), failures, retry_secs);
+    struct blocker_record rec;
+    if (blocker_init(&rec, BG_VALIDATION_BODY_BLOCKER_ID, "bg_validation",
+                     BLOCKER_TRANSIENT, reason))
+        (void)blocker_set(&rec);
 }
 
 static void bg_validation_pause_before_body_retry(
-    struct bg_validation_service *svc)
+    struct bg_validation_service *svc, unsigned secs)
 {
-    for (int i = 0; i < 5 && !atomic_load(&svc->stop_requested); i++) {
+    for (unsigned i = 0; i < secs && !atomic_load(&svc->stop_requested); i++) {
         bg_validation_supervisor_heartbeat(svc);
 #ifdef ZCL_TESTING
         g_sleep_fn(1000);
@@ -140,6 +177,29 @@ static void bg_validation_pause_before_body_retry(
         platform_sleep_ms(1000);
 #endif
     }
+}
+
+/* Record the disk-failure note, publish the paused state, log and name the
+ * typed blocker once the retry cadence backs off, then wait. */
+static void bg_validation_note_body_read_failure(
+    struct bg_validation_service *svc, int height,
+    const struct block_index *index, const struct uint256 *expected_hash,
+    unsigned failures)
+{
+    reducer_frontier_body_read_note_record(
+        height, block_index_file_load(index),
+        (int64_t)block_index_data_pos_load(index),
+        REDUCER_FRONTIER_BODY_READ_DISK, expected_hash);
+    atomic_store(&svc->progress.state, BG_VALIDATION_PAUSED);
+    unsigned secs = bg_validation_body_retry_secs(failures);
+    if (failures >= BG_VALIDATION_BODY_BACKOFF_AFTER)
+        bg_validation_name_body_blocker(height, index, failures, secs);
+    if (bg_validation_should_log_body_read_failure(failures))
+        LOG_WARN("bg_validation",
+                 "[bg-valid] unreadable body h=%d failures=%u; repair "
+                 "queued, retrying in %us",
+                 height, failures, secs);
+    bg_validation_pause_before_body_retry(svc, secs);
 }
 
 bool bg_validation_read_body_resilient(
@@ -170,6 +230,7 @@ bool bg_validation_read_body_resilient(
                 svc, height, datadir, ready_state, block, index,
                 &expected_hash, had_note, &note_before_read);
         if (outcome == BG_VALIDATION_BODY_READ_ACCEPTED) {
+            blocker_clear(BG_VALIDATION_BODY_BLOCKER_ID);
             *index_out = index;
             return true;
         }
@@ -178,20 +239,11 @@ bool bg_validation_read_body_resilient(
             block_init(block);
             continue;
         }
-        reducer_frontier_body_read_note_record(
-            height, block_index_file_load(index),
-            (int64_t)block_index_data_pos_load(index),
-            REDUCER_FRONTIER_BODY_READ_DISK, &expected_hash);
         failures++;
         block_free(block);
         block_init(block);
-        atomic_store(&svc->progress.state, BG_VALIDATION_PAUSED);
-        if (bg_validation_should_log_body_read_failure(failures))
-            LOG_WARN("bg_validation",
-                     "[bg-valid] unreadable body h=%d failures=%u; repair "
-                     "queued, retrying",
-                     height, failures);
-        bg_validation_pause_before_body_retry(svc);
+        bg_validation_note_body_read_failure(svc, height, index,
+                                             &expected_hash, failures);
     }
     return false;
 }

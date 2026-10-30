@@ -617,8 +617,11 @@ static struct zcl_result queue_body_target(
     int target_height,
     const char *reason,
     enum body_queue_selector selector,
-    const struct uint256 *expected_hash)
+    const struct uint256 *expected_hash,
+    bool *queued_out)
 {
+    if (queued_out)
+        *queued_out = false;
     struct main_state *ms = sync_monitor_main_state();
     struct download_manager *dm = sync_monitor_download_manager();
     if (!ms || !dm)
@@ -663,6 +666,8 @@ static struct zcl_result queue_body_target(
                                  cm ? (int)connman_get_node_count(cm) : 0,
                                  sync_monitor_reason_or(reason,
                                  "frontier body queue"));
+    if (queued_out)
+        *queued_out = true;
     return ZCL_OK;
 }
 
@@ -671,7 +676,16 @@ struct zcl_result sync_monitor_queue_active_frontier_body(
     const char *reason)
 {
     return queue_body_target(target_height, reason,
-                             BODY_QUEUE_ACTIVE_FRONTIER, NULL);
+                             BODY_QUEUE_ACTIVE_FRONTIER, NULL, NULL);
+}
+
+struct zcl_result sync_monitor_queue_active_frontier_body_checked(
+    int target_height,
+    const char *reason,
+    bool *queued_out)
+{
+    return queue_body_target(target_height, reason,
+                             BODY_QUEUE_ACTIVE_FRONTIER, NULL, queued_out);
 }
 
 struct zcl_result sync_monitor_queue_best_header_body(
@@ -681,7 +695,18 @@ struct zcl_result sync_monitor_queue_best_header_body(
 {
     return queue_body_target(target_height, reason,
                              BODY_QUEUE_BEST_HEADER_ANCESTOR,
-                             expected_hash);
+                             expected_hash, NULL);
+}
+
+struct zcl_result sync_monitor_queue_best_header_body_checked(
+    int target_height,
+    const struct uint256 *expected_hash,
+    const char *reason,
+    bool *queued_out)
+{
+    return queue_body_target(target_height, reason,
+                             BODY_QUEUE_BEST_HEADER_ANCESTOR,
+                             expected_hash, queued_out);
 }
 
 bool sync_monitor_active_next_child_exists(struct main_state *ms,

@@ -86,6 +86,17 @@ struct zcl_result sync_monitor_queue_best_header_body(
     /* Optional: refuse if the best ancestor changed since review. */
     const struct uint256 *expected_hash,
     const char *reason);
+/* Same calls, reporting through *queued_out whether a download was queued
+ * (false when the block already held BLOCK_HAVE_DATA and nothing changed). */
+struct zcl_result sync_monitor_queue_active_frontier_body_checked(
+    int target_height,
+    const char *reason,
+    bool *queued_out);
+struct zcl_result sync_monitor_queue_best_header_body_checked(
+    int target_height,
+    const struct uint256 *expected_hash,
+    const char *reason,
+    bool *queued_out);
 int sync_monitor_local_header_refill(struct connman *cm,
                                      int next_h,
                                      const char *reason);
