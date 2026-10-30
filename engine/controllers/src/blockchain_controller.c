@@ -160,19 +160,29 @@ void rpc_blockchain_mmr_catchup(struct main_state *ms)
            (unsigned long long)leaves);
 }
 
+/* Persist one MMR under `key`. Returns false only when the state write
+ * fails; a closed db or an uninitialised MMR is a silent no-op (true). */
+static bool mmr_state_save(struct node_db *ndb, struct mmr *m,
+                           bool *initialized, pthread_mutex_t *lock,
+                           const char *key)
+{
+    if (!ndb || !ndb->open) return true;
+    uint8_t buf[MMR_SERIALIZED_MAX];
+    pthread_mutex_lock(lock);
+    if (!*initialized) {
+        pthread_mutex_unlock(lock);
+        return true;
+    }
+    size_t len = mmr_serialize(m, buf, sizeof(buf));
+    pthread_mutex_unlock(lock);
+    if (len == 0) return true;
+    return node_db_state_set(ndb, key, buf, len);
+}
+
 void rpc_blockchain_mmr_save(struct node_db *ndb)
 {
-    if (!ndb || !ndb->open) return;
-    uint8_t buf[MMR_SERIALIZED_MAX];
-    pthread_mutex_lock(&g_mmr_lock);
-    if (!g_mmr_initialized) {
-        pthread_mutex_unlock(&g_mmr_lock);
-        return;
-    }
-    size_t len = mmr_serialize(&g_mmr, buf, sizeof(buf));
-    pthread_mutex_unlock(&g_mmr_lock);
-    if (len == 0) return;
-    if (!node_db_state_set(ndb, "mmr_state", buf, len))
+    if (!mmr_state_save(ndb, &g_mmr, &g_mmr_initialized, &g_mmr_lock,
+                        "mmr_state"))
         LOG_WARN("blockchain", "MMR state save failed");
 }
 
@@ -362,17 +372,8 @@ void rpc_blockchain_commitment_mmr_init_from_state(struct node_db *ndb)
 
 void rpc_blockchain_commitment_mmr_save(struct node_db *ndb)
 {
-    if (!ndb || !ndb->open) return;
-    uint8_t buf[MMR_SERIALIZED_MAX];
-    pthread_mutex_lock(&g_commitment_mmr_lock);
-    if (!g_commitment_mmr_initialized) {
-        pthread_mutex_unlock(&g_commitment_mmr_lock);
-        return;
-    }
-    size_t len = mmr_serialize(&g_commitment_mmr, buf, sizeof(buf));
-    pthread_mutex_unlock(&g_commitment_mmr_lock);
-    if (len == 0) return;
-    if (!node_db_state_set(ndb, "commitment_mmr_state", buf, len))
+    if (!mmr_state_save(ndb, &g_commitment_mmr, &g_commitment_mmr_initialized,
+                        &g_commitment_mmr_lock, "commitment_mmr_state"))
         LOG_WARN("blockchain", "commitment MMR state save failed");
 }
 
