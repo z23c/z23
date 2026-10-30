@@ -13,9 +13,11 @@
 
 #define NODE_PACE_POLL_US 1000000
 #define NODE_PACE_GENTLE_SLEEP_MAX_MS 250
+#define NODE_PACE_RESUME_GRACE_US 120000000
 
 static _Atomic int g_pace = NODE_PACE_NORMAL;
 static _Atomic int64_t g_next_poll_us;
+static _Atomic int64_t g_resume_until_us;
 static pthread_mutex_t g_path_mu = PTHREAD_MUTEX_INITIALIZER;
 static char g_path[1024];
 
@@ -51,6 +53,9 @@ enum node_pace node_pace_get(void)
 void node_pace_set(enum node_pace pace)
 {
     int prev = atomic_exchange(&g_pace, (int)pace);
+    if (prev == (int)NODE_PACE_PAUSE && pace != NODE_PACE_PAUSE)
+        atomic_store(&g_resume_until_us,
+                     platform_time_monotonic_us() + NODE_PACE_RESUME_GRACE_US);
     if (prev != (int)pace)
         LOG_INFO("node_pace", "[node_pace] pace %s -> %s",
                  node_pace_name((enum node_pace)prev), node_pace_name(pace));
@@ -98,6 +103,20 @@ void node_pace_poll(void)
     if (path[0])
         node_pace_set(node_pace_read_file(path));
 }
+
+bool node_pace_hold_recovery(void)
+{
+    return node_pace_get() == NODE_PACE_PAUSE ||
+           platform_time_monotonic_us() <
+               atomic_load_explicit(&g_resume_until_us, memory_order_relaxed);
+}
+
+#ifdef ZCL_TESTING
+void node_pace_test_end_resume_grace(void)
+{
+    atomic_store(&g_resume_until_us, 0);
+}
+#endif
 
 int node_pace_gentle_sleep_ms(int64_t round_us)
 {

@@ -40,6 +40,7 @@
 #include "test/test_helpers.h"
 
 #include "jobs/catchup_cadence.h"
+#include "jobs/node_pace.h"
 #include "net/connman.h"
 #include "net/net.h"
 #include "net/protocol.h"
@@ -606,6 +607,49 @@ static int spt_case_drive_active(struct main_state *staged_ms)
     return failures;
 }
 
+/* node_pace through the real staged_stage_tick: pause skips the drain and
+ * publishes a moving marker, gentle still drains but never ticks faster than
+ * 2 s, normal restores the unpaced period. */
+static int spt_case_paced(struct main_state *staged_ms)
+{
+    int failures = 0;
+    atomic_store(&g_spt_drain_calls, 0);
+    bool esc = false;
+    int64_t period_us = -1;
+
+    node_pace_set(NODE_PACE_PAUSE);
+    int64_t marker = staged_sync_supervisor_test_run_stage_tick(
+        "staged.spt_test_stage", "staged.spt_test_upstream",
+        spt_stub_drain, spt_stub_cursor, spt_stub_upstream_cursor,
+        staged_ms, &esc, &period_us);
+    SPT_CHECK("paused tick skips the drain",
+              atomic_load(&g_spt_drain_calls) == 0);
+    SPT_CHECK("paused tick publishes a moving marker, not the cursor",
+              marker != (int64_t)SPT_STUB_CURSOR && marker > 0);
+
+    node_pace_set(NODE_PACE_GENTLE);
+    sync_monitor_set_context(NULL, NULL, NULL);
+    catchup_cadence_test_reset();
+    period_us = -1;
+    marker = staged_sync_supervisor_test_run_stage_tick(
+        "staged.spt_test_stage", "staged.spt_test_upstream",
+        spt_stub_drain, spt_stub_cursor, spt_stub_upstream_cursor,
+        staged_ms, &esc, &period_us);
+    SPT_CHECK("gentle tick still drains", atomic_load(&g_spt_drain_calls) == 1);
+    SPT_CHECK("gentle tick period is at least 2 s",
+              period_us == (int64_t)2000 * 1000);
+
+    node_pace_set(NODE_PACE_NORMAL);
+    period_us = -1;
+    (void)staged_sync_supervisor_test_run_stage_tick(
+        "staged.spt_test_stage", "staged.spt_test_upstream",
+        spt_stub_drain, spt_stub_cursor, spt_stub_upstream_cursor,
+        staged_ms, &esc, &period_us);
+    SPT_CHECK("normal tick drains and restores period 0",
+              atomic_load(&g_spt_drain_calls) == 2 && period_us == 0);
+    return failures;
+}
+
 /* ── catchup_cadence tick-period integration (Lane B2, wf/catchup-tick):
  * staged_stage_tick recomputes the contract's effective period_us every
  * tick — refold_cadence_tick_period_us() first, catchup_cadence_tick_
@@ -941,6 +985,7 @@ int test_supervisor_production_tree(void)
     failures += spt_case_staged_failed_init(&staged_ms);
     failures += spt_case_stall_escalation();
     failures += spt_case_drive_active(&staged_ms);
+    failures += spt_case_paced(&staged_ms);
     failures += spt_case_catchup_cadence(&staged_ms);
 
     /* ── small-chain catch-up durability (journey run1 regression) ────── */

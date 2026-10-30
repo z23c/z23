@@ -118,6 +118,8 @@ uint64_t pv_lookahead_bodiless_skipped_total(void);
 #ifdef ZCL_TESTING
 /* Number of height claims the workers have made (verification attempts). */
 uint64_t pv_lookahead_test_claims_total(void);
+/* Claims made by worker idx since the last pv_lookahead_start. */
+uint64_t pv_lookahead_test_worker_claims(int idx);
 #endif
 
 /* See CLAUDE.md "Adding state introspection". Reentrant-safe. Reports the

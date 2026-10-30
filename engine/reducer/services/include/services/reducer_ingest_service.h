@@ -43,6 +43,11 @@ uint64_t reducer_ingest_seed_anchor_reseed_failure_count(void);
  * helper does NOT lock. Returns the total number of stage advances. */
 int reducer_drain_to_convergence(void);
 
+/* Same drain, never paced (jobs/node_pace.h). For the synchronous
+ * reducer_ingest_block path: a block the owner submits or mines must reach its
+ * verdict even while the node is paused. */
+int reducer_drain_to_convergence_unpaced(void);
+
 /* Same staged-Job drain, but with NO latency budget: loop until a no-advance
  * pass (convergence) or the round hard cap. The CALLER must hold the
  * chain_activation_controller mutex — this helper does NOT lock. Used only by

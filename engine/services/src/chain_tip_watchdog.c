@@ -20,6 +20,7 @@
 // No bare-bool here strips a failure reason — they all log or carry the
 // reason in an event/out-struct. Behavior bit-for-bit.
 
+#include "jobs/node_pace.h"
 #include "platform/time_compat.h"
 #include "services/chain_tip_watchdog.h"
 
@@ -504,12 +505,34 @@ static void wd_drive_named_selection_wedge(const char *cause)
  * chain height, the real monotonic clock, and do_shutdown=true; the test seam
  * injects a height + monotonic timestamp and do_shutdown=false. For the
  * production call this is byte-identical to the previous inline tick body. */
+/* App-requested pause holds H* on purpose: keep the stall clock at zero while
+ * paused, and restart it from the moment the pause ends. */
+static _Atomic bool g_wd_was_paused;
+static bool wd_pace_hold(int64_t now_us)
+{
+    if (node_pace_get() == NODE_PACE_PAUSE) {
+        atomic_store(&g_wd_was_paused, true);
+        atomic_store(&g_escalation, 0);
+        atomic_store(&g_stall_start_us, 0);
+        return true;
+    }
+    if (atomic_exchange(&g_wd_was_paused, false)) {
+        atomic_store(&g_escalation, 0);
+        atomic_store(&g_stall_start_us, now_us);
+    }
+    return false;
+}
+
 static void wd_apply_tick(int64_t h, int64_t now_us, bool do_shutdown)
 {
     int64_t prev = atomic_load(&g_highest_tip);
 
     if (wd_commit_tip_advance(h, prev, now_us))
         return;
+    if (wd_pace_hold(now_us)) {
+        supervisor_progress(atomic_load(&g_id), h);
+        return;
+    }
 
     /* No height change is not itself a fault.  If neither active chain nor
      * best-header knowledge extends above the provable tip, there is no work
@@ -769,6 +792,7 @@ void chain_tip_watchdog_test_reset_runtime(void)
     atomic_store(&g_highest_tip, 0);
     atomic_store(&g_last_advance_us, 0);
     atomic_store(&g_last_advance_unix, 0);
+    atomic_store(&g_wd_was_paused, false);
     atomic_store(&g_stall_start_us, 0);
     atomic_store(&g_escalation, 0);
     atomic_store(&g_fires_mirror, 0u);

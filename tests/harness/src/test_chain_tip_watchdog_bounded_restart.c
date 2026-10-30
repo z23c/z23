@@ -23,6 +23,7 @@
 #include "test/test_block_map.h"
 
 #include "config/boot_background_workers.h"
+#include "jobs/node_pace.h"
 #include "services/chain_tip_watchdog.h"
 #include "services/sticky_escalator.h"
 #include "storage/progress_store.h"
@@ -597,6 +598,64 @@ static int wd_check_escalation_ladder_ticks(void)
     return failures;
 }
 
+/* (h): an app-requested pause never restarts the node. Stay paused far past
+ * the restart threshold: no mirror, no restart, no bounded-restart count. The
+ * stall clock restarts from the moment the pause ends, so the restart rung
+ * needs a full threshold of fresh stall afterwards. */
+static int wd_check_pause_holds_watchdog(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "chain_tip_wd", "pause");
+    WD_CHECK("open progress.kv (pause)", progress_store_open(dir));
+    struct chain_tip_watchdog_stats def;
+    chain_tip_watchdog_get_stats(&def);
+    chain_tip_watchdog_test_reset_runtime();
+    chain_tip_watchdog_test_set_thresholds(100, 150, 200);
+
+    const int64_t H = 5000000;
+    const int64_t US = 1000000;
+    const int64_t T0 = 1000 * US;
+    chain_tip_watchdog_test_tick(H, T0, false);            /* seed advance */
+    chain_tip_watchdog_test_tick(H, T0 + 10 * US, false);  /* arms stall */
+
+    node_pace_set(NODE_PACE_PAUSE);
+    for (int i = 1; i <= 40; i++)
+        chain_tip_watchdog_test_tick(H, T0 + (20 + i * 50) * US, false);
+    struct chain_tip_watchdog_stats s;
+    chain_tip_watchdog_get_stats(&s);
+    WD_CHECK("paused 2000 s: no mirror fire", s.fires_mirror == 0);
+    WD_CHECK("paused 2000 s: no restart fire", s.fires_restart == 0);
+    WD_CHECK("paused 2000 s: no restart count or operator page",
+             s.no_progress_restarts == 0 && s.fires_operator_needed == 0);
+    WD_CHECK("paused 2000 s: escalation level stays 0",
+             s.escalation_level == 0);
+
+    node_pace_set(NODE_PACE_NORMAL);
+    const int64_t R = T0 + 2100 * US;
+    chain_tip_watchdog_test_tick(H, R, false);
+    chain_tip_watchdog_test_tick(H, R + 99 * US, false);
+    chain_tip_watchdog_get_stats(&s);
+    WD_CHECK("resume: stall clock restarted, nothing fires at once",
+             s.fires_mirror == 0 && s.fires_restart == 0);
+    chain_tip_watchdog_test_tick(H, R + 150 * US, false);
+    chain_tip_watchdog_get_stats(&s);
+    WD_CHECK("resume: mirror rung needs a fresh 100 s",
+             s.fires_mirror == 1 && s.fires_restart == 0);
+    chain_tip_watchdog_test_tick(H, R + 205 * US, false);
+    chain_tip_watchdog_get_stats(&s);
+    WD_CHECK("resume: restart rung only after a fresh 200 s",
+             s.fires_restart == 1);
+
+    chain_tip_watchdog_test_reset_runtime();
+    chain_tip_watchdog_test_set_thresholds(def.threshold_mirror_secs,
+                                           def.threshold_reserved_secs,
+                                           def.threshold_restart_secs);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 /* (g): a caught-up chain at H* stays up past the restart threshold;
  * new work opens a fresh stall interval. */
 static int wd_check_quiet_chain_does_not_restart(void)
@@ -878,6 +937,7 @@ int test_chain_tip_watchdog_bounded_restart(void)
      * than the restart threshold: the watchdog stays up. A later new header
      * starts a fresh actionable-stall interval. */
     failures += wd_check_quiet_chain_does_not_restart();
+    failures += wd_check_pause_holds_watchdog();
 
     /* ── (h) tip-extension SELECTION wedge: cause-probe classifies it and the
      * watchdog drives a TARGETED revalidate instead of a blind restart ─────

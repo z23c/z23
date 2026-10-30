@@ -16,6 +16,7 @@
 // it never fakes a "done". The deepest rung ALWAYS re-derives from folded bodies
 // (from-anchor refold + self-respawn), NEVER installs a borrowed value.
 
+#include "jobs/node_pace.h"
 #include "platform/time_compat.h"
 #include "services/sticky_escalator.h"
 #include "services/sticky_escalator_resnapshot.h"
@@ -1142,9 +1143,25 @@ void sticky_escalator_note_stall(const char *cause)
     }
 }
 
+/* Hold the ladder while the app has the node paused. An episode armed before
+ * the pause restarts from the first rung window once the hold ends, so the
+ * pause time never counts toward a deeper rung. */
+static bool sticky_pace_hold(void)
+{
+    static _Atomic bool held;
+    if (node_pace_hold_recovery()) {
+        atomic_store(&held, true);
+        return true;
+    }
+    if (atomic_exchange(&held, false) && atomic_load(&g_armed))
+        clear_episode(now_unix(), observe_tip());
+    return false;
+}
+
 void sticky_escalator_drive(void)
 {
     if (!g_ms) return;
+    if (sticky_pace_hold()) return;
     apply_drive(observe_tip(), now_unix());
 }
 

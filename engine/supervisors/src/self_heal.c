@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
+#include "jobs/node_pace.h"
 #include "supervisors/self_heal.h"
 #include "util/log_macros.h"
 
@@ -68,6 +69,12 @@ static void self_heal_engine_progress(void)
 static void self_heal_run_once(void)
 {
     if (!g_ms) return;
+    if (node_pace_hold_recovery()) {
+        /* An app-requested pause stalls the tip on purpose: no condition
+         * remedy, blocker escape or sticky rung may judge it. */
+        service_state_driver_tick();
+        return;
+    }
     condition_engine_tick();
     /* Dispatch any blocker whose escape_deadline has lapsed (edge-triggered +
      * rate-limited inside the sweep). */

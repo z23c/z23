@@ -479,12 +479,29 @@ status) writes one word to `<datadir>/pace`:
 | -------- | ------ |
 | `normal` | Default. Identical to a node that never reads the file. |
 | `gentle` | One proof pre-verification worker; the reducer drain sleeps for as long as each round took (at most 250 ms). |
-| `pause`  | No pre-verification workers; the reducer drain does nothing, so block fetch and validation stop. P2P stays connected. |
+| `pause`  | No pre-verification workers; the reducer drain does nothing; gap_fill queues no downloads; the staged-sync supervisor skips its drains. P2P stays connected. |
 
 The node re-reads the file at most once per second; a missing, empty or
 unrecognised file means `normal`. The pace never changes a validation verdict.
 `z23 status` reports the applied pace as `pace`, and the `getnodepace` RPC
 returns it as `{"pace":"gentle"}`.
+
+During `pause`:
+
+- Header and body stages stop advancing, so H* holds still. Headers still
+  arrive, because the header request chain and message thread live in sealed
+  `core/`; the node keeps and stores them but does not validate further.
+- Recovery is held. The chain-tip watchdog keeps its stall clock at zero and
+  never requests a restart; condition remedies, the blocker escape sweep and
+  the sticky escalator (including resnapshot and reindex rungs) do not run. The
+  hold lasts two minutes past the end of the pause so detectors see the node
+  advancing before they judge it, and the watchdog stall clock restarts from
+  the moment the pause ends. Condition checks unrelated to sync (disk, memory)
+  are also not evaluated until then.
+- Synchronous block ingest is not background sync. A block the owner submits
+  or mines (`submitblock`, `generate`) and an at-tip relay block both reach
+  `reducer_ingest_block`, which drains unpaced and returns its true verdict
+  while the node is paused. Catch-up bodies are staged instead and stay paused.
 
 ## Check sync status
 

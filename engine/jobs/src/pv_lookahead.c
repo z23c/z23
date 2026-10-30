@@ -108,9 +108,15 @@ static _Atomic uint64_t g_verified_total = 0;
 static _Atomic int64_t  g_start_us = 0;
 #ifdef ZCL_TESTING
 static _Atomic uint64_t g_claims_total = 0;   /* pvla_verify_height calls */
+static _Atomic uint64_t g_worker_claims[PVLA_MAX_WORKERS];
 uint64_t pv_lookahead_test_claims_total(void)
 {
     return atomic_load(&g_claims_total);
+}
+uint64_t pv_lookahead_test_worker_claims(int idx)
+{
+    return idx >= 0 && idx < PVLA_MAX_WORKERS
+        ? atomic_load(&g_worker_claims[idx]) : 0;
 }
 #endif
 
@@ -162,8 +168,13 @@ static void pvla_success_cb(const struct transaction *tx,
 static void pvla_timed_wait_locked(int ms)
 {
     struct timespec until;
-    if (platform_time_realtime_timespec(&until) != 0)
+    if (platform_time_realtime_timespec(&until) != 0) {
+        /* No clock: still wait, so a parked worker cannot busy-spin. */
+        pthread_mutex_unlock(&g_mu);
+        platform_sleep_ms(ms);
+        pthread_mutex_lock(&g_mu);
         return;
+    }
     until.tv_nsec += (long)ms * 1000000L;
     if (until.tv_nsec >= 1000000000L) {
         until.tv_sec += 1;
@@ -480,6 +491,9 @@ static void *pvla_worker_entry(void *arg)
         pthread_mutex_unlock(&g_mu);
 
         enum pvla_attempt r = pvla_verify_height((int32_t)h);
+#ifdef ZCL_TESTING
+        atomic_fetch_add(&g_worker_claims[idx], 1);
+#endif
 
         pthread_mutex_lock(&g_mu);
         pvla_note_verify_attempt_locked(r, h, cursor);
@@ -553,6 +567,10 @@ bool pv_lookahead_start(struct main_state *ms, const char *datadir,
     atomic_store(&g_miss_total, (uint64_t)0);
     atomic_store(&g_verified_total, (uint64_t)0);
     atomic_store(&g_bodiless_skipped_total, (uint64_t)0);
+#ifdef ZCL_TESTING
+    for (int i = 0; i < PVLA_MAX_WORKERS; i++)
+        atomic_store(&g_worker_claims[i], 0);
+#endif
     atomic_store(&g_start_us, platform_time_monotonic_us());
     pthread_mutex_unlock(&g_mu);
 

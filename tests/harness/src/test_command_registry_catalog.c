@@ -2339,6 +2339,8 @@ static char *status_journey_mock_rpc(const char *method,
         );
     if (strcmp(method, "getmempoolinfo") == 0)
         return strdup("{\"size\":1}");
+    if (strcmp(method, "getnodepace") == 0)
+        return strdup("{\"pace\":\"gentle\"}");
     return strdup("null");
 }
 
@@ -2468,6 +2470,7 @@ static int test_status_journey_safe_money_frontdoor(void)
         ASSERT(json_get_bool(json_get(data, "sapling_witness_ready")));
         ASSERT_STR_EQ(json_get_str(json_get(data, "sapling_witness_state")),
                       "ready");
+        ASSERT_STR_EQ(json_get_str(json_get(data, "pace")), "gentle");
         ASSERT_STR_EQ(json_get_str(json_get(data, "error_code")), "NONE");
         ASSERT_STR_EQ(json_get_str(json_get(data, "operator_status")),
                       "healthy");

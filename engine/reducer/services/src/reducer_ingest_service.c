@@ -795,7 +795,7 @@ bool reducer_ingest_block(struct chain_activation_controller *ctl,
     reducer_extend_window_to_best_header(ctl);
     /* Full drain now that BLOCK_HAVE_DATA is set: body_fetch .. tip_finalize
      * each process this height exactly once, with the body present. */
-    (void)reducer_drain_to_convergence();
+    (void)reducer_drain_to_convergence_unpaced();
 
     struct block_index *ingested =
         block_map_find(&ctl->ms->map_block_index, &block_hash);

@@ -45,9 +45,19 @@ bool node_pace_parse(const char *word, enum node_pace *out);
  * any thread; otherwise a single atomic compare. No-op without a datadir. */
 void node_pace_poll(void);
 
+/* True while recovery machinery (condition remedies, the sticky escalator, the
+ * blocker escape sweep) must not act on tip progress: during pause and for a
+ * grace period after leaving it, so their detectors see the node advancing
+ * again before they judge it. An app-requested cooldown is never a fault. */
+bool node_pace_hold_recovery(void);
+
 /* Sleep applied after one reducer drain round that took round_us: 0 at normal,
  * the round's own duration (capped) at gentle. Pause is handled by the caller
  * skipping the round. */
 int node_pace_gentle_sleep_ms(int64_t round_us);
+
+#ifdef ZCL_TESTING
+void node_pace_test_end_resume_grace(void);
+#endif
 
 #endif

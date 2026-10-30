@@ -484,7 +484,7 @@ static void reducer_drain_page_fatal(uint64_t fatal_gen0)
 /* Pace gate for the live drain (node_pace.h). At pause it refuses the round;
  * at gentle it sleeps for as long as the finished round took (capped), so the
  * drain thread runs about half the time. The offline -mint-anchor fold
- * (converge_on_frontier_stall) is never paced. True means stop draining. */
+ * (paced=false) is never paced. True means stop draining. */
 static bool reducer_drain_pace_stop(bool paced, int64_t round_start_us)
 {
     if (!paced)
@@ -519,7 +519,7 @@ static bool reducer_drain_pace_stop(bool paced, int64_t round_start_us)
  * round), so this fires only when the frontier is genuinely walled. */
 static int reducer_drain_core(int64_t budget_us, int hard_cap,
                               int per_stage_batch,
-                              bool converge_on_frontier_stall)
+                              bool converge_on_frontier_stall, bool paced)
 {
     int64_t   start_us        = GetTimeMicros();
     uint64_t  fatal_gen0      = stage_fatal_generation();
@@ -535,7 +535,6 @@ static int reducer_drain_core(int64_t budget_us, int hard_cap,
           DRAIN_EXIT_FRONTIER_STALL, DRAIN_EXIT_PACED }
         exit_reason = DRAIN_EXIT_BUDGET;
     if (per_stage_batch <= 0) per_stage_batch = 100;
-    const bool paced = !converge_on_frontier_stall;
     int64_t   round_start_us  = 0;
     for (int round = 0; round < hard_cap; round++) {
         /* On shutdown, return at this round boundary (a safe, committed point —
@@ -603,7 +602,9 @@ static int reducer_drain_core(int64_t budget_us, int hard_cap,
     return total;
 }
 
-int reducer_drain_to_convergence(void)
+/* paced=true: background and relay-driven drains honour node_pace. paced=false:
+ * the owner submitting a block synchronously is not background sync. */
+static int reducer_drain_live(bool paced)
 {
     const int64_t drain_budget_us = 2000 * 1000; /* 2s, same as legacy */
     const int     drain_hard_cap  = 4096;
@@ -625,7 +626,17 @@ int reducer_drain_to_convergence(void)
     const int per_stage_batch =
         catchup_cadence_drain_batch(hw_bench_batch_size(100));
     return reducer_drain_core(drain_budget_us, drain_hard_cap, per_stage_batch,
-                              /*converge_on_frontier_stall=*/false);
+                              /*converge_on_frontier_stall=*/false, paced);
+}
+
+int reducer_drain_to_convergence(void)
+{
+    return reducer_drain_live(/*paced=*/true);
+}
+
+int reducer_drain_to_convergence_unpaced(void)
+{
+    return reducer_drain_live(/*paced=*/false);
 }
 
 int reducer_drain_to_convergence_unbudgeted(void)
@@ -650,7 +661,7 @@ int reducer_drain_to_convergence_unbudgeted(void)
         refold_cadence_drain_batch(hw_profile_drain_batch_effective(1000));
     return reducer_drain_core(/*budget_us=*/budget_ms * 1000, drain_hard_cap,
                               per_stage_batch,
-                              /*converge_on_frontier_stall=*/true);
+                              /*converge_on_frontier_stall=*/true, /*paced=*/false);
 }
 
 /* A clean restart already restores a fully-applied coins-best tip as local

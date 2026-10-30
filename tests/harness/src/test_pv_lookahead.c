@@ -833,6 +833,50 @@ static int la_test_pace_file(void)
     return failures;
 }
 
+/* Gentle keeps worker 0 and parks worker 1; leaving the grace after a pause
+ * ends on its own. */
+static int la_test_pace_gentle(void)
+{
+    int failures = 0;
+    setenv("ZCL_PV_WORKERS", "2", 1);
+    struct la_pool_fixture fx;
+    la_pool_fixture_init(&fx, "pace_gentle", 8);
+    node_pace_set(NODE_PACE_GENTLE);
+    bool started = fx.ok &&
+        pv_lookahead_start(&fx.ms, fx.dir, la_reader, &fx.sc, la_verifier,
+                           &fx.sc);
+    PVLA_CHECK("pace gentle: pool starts", started);
+    if (started) {
+        PVLA_CHECK("pace gentle: worker 0 alone verifies the window",
+                   la_wait_populated(8, 10000));
+        platform_sleep_ms(300);
+        PVLA_CHECK("pace gentle: worker 0 ran, worker 1 stayed parked",
+                   pv_lookahead_test_worker_claims(0) > 0 &&
+                   pv_lookahead_test_worker_claims(1) == 0);
+    }
+    node_pace_set(NODE_PACE_NORMAL);
+    la_pool_fixture_destroy(&fx);
+    return failures;
+}
+
+/* Recovery machinery is held during pause and for a grace after it. */
+static int la_test_pace_hold(void)
+{
+    int failures = 0;
+    node_pace_test_end_resume_grace();
+    node_pace_set(NODE_PACE_NORMAL);
+    PVLA_CHECK("pace hold: not held at normal", !node_pace_hold_recovery());
+    node_pace_set(NODE_PACE_PAUSE);
+    PVLA_CHECK("pace hold: held while paused", node_pace_hold_recovery());
+    node_pace_set(NODE_PACE_NORMAL);
+    PVLA_CHECK("pace hold: still held right after resume",
+               node_pace_hold_recovery());
+    node_pace_test_end_resume_grace();
+    PVLA_CHECK("pace hold: released once the grace ends",
+               !node_pace_hold_recovery());
+    return failures;
+}
+
 /* The pool parks at pause, resumes at gentle, and the pace file alone drives
  * both. Verdicts are unaffected: only when they are produced changes. */
 static int la_test_pace_pool(void)
@@ -1088,6 +1132,8 @@ int test_pv_lookahead(void)
     failures += la_test_chain_end_idle();
     failures += la_test_pace_file();
     failures += la_test_pace_pool();
+    failures += la_test_pace_gentle();
+    failures += la_test_pace_hold();
 
     printf("pv_lookahead tests: %s\n", failures ? "FAILED" : "PASSED");
     return failures;

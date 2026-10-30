@@ -15,6 +15,7 @@
  */
 
 #include "test/test_core.h"
+#include "jobs/node_pace.h"
 #include "test/test_block_map.h"
 #include "test/test_timing_budget.h"
 
@@ -35,6 +36,7 @@
 #include "services/chain_activation_service.h"
 #include "services/header_admit_inbox.h"
 #include "services/reducer_drain.h"
+#include "services/reducer_ingest_service.h"
 #include "storage/disk_block_io.h"
 #include "storage/event_log.h"
 #include "storage/progress_store.h"
@@ -663,6 +665,40 @@ static int sd_check_mint_progress_log(const char *dir, bool stages_ok)
     return failures;
 }
 
+/* Paused drain: with block 3 persisted and pending, the live drain returns 0
+ * and moves no cursor; once the pace is normal it applies the block. */
+static int sd_check_paced_drain(struct main_state *ms,
+                                const struct uint256 *prev,
+                                const struct chain_params *cp,
+                                const char *netdir)
+{
+    int failures = 0;
+    struct block blk3;
+    int64_t cb = 0;
+    bool built = sd_build_regtest_block(&blk3, 3, prev, cp, &cb) &&
+                 mine_block_pow(&blk3, 3, cp, 0);
+    SD_CHECK("block 3 built (paced drain)", built);
+    if (!built)
+        return failures;
+    struct uint256 h3;
+    block_get_hash(&blk3, &h3);
+    failures += sd_check_block1_admit_persist(ms, &blk3, &h3,
+                                              progress_store_db(), cp, netdir);
+    uint64_t ua = utxo_apply_stage_cursor();
+    uint64_t tf = tip_finalize_stage_cursor();
+    node_pace_set(NODE_PACE_PAUSE);
+    int paused = reducer_drain_to_convergence();
+    SD_CHECK("paused drain returns 0 and moves no cursor",
+             paused == 0 && ua == utxo_apply_stage_cursor() &&
+             tf == tip_finalize_stage_cursor());
+    node_pace_set(NODE_PACE_NORMAL);
+    int resumed = reducer_drain_to_convergence();
+    SD_CHECK("resumed drain applies the pending block",
+             resumed > 0 && utxo_apply_stage_cursor() > ua);
+    block_free(&blk3);
+    return failures;
+}
+
 int test_reducer_step_drain_harness(void);
 int test_reducer_step_drain_harness(void)
 {
@@ -749,17 +785,22 @@ int test_reducer_step_drain_harness(void)
             int h_before = active_chain_height(&ms.chain_active);
             struct validation_state out;
             validation_state_init(&out);
+            node_pace_set(NODE_PACE_PAUSE);
             bool acc = reducer_ingest_block(&ctl, &blk2, REDUCER_SRC_MINED,
                                             true, &out);
+            node_pace_set(NODE_PACE_NORMAL);
             int h_after = active_chain_height(&ms.chain_active);
-            SD_CHECK("INTEGRATION reducer_ingest_block(block 2) accepted", acc);
+            SD_CHECK("INTEGRATION reducer_ingest_block(block 2) accepted while paused", acc);
             SD_CHECK("INTEGRATION tip advanced 1 -> 2 via reducer_ingest_block",
                      h_after == 2);
             if (!acc || h_after != 2)
                 printf("  >> integration: acc=%d h %d->%d reject=%s\n",
                        (int)acc, h_before, h_after,
                        out.reject_reason[0] ? out.reject_reason : "(none)");
+            struct uint256 h2;
+            block_get_hash(&blk2, &h2);
             block_free(&blk2);
+            failures += sd_check_paced_drain(&ms, &h2, cp, netdir);
         }
         activation_controller_destroy(&ctl);
     }

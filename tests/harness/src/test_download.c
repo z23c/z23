@@ -3,6 +3,7 @@
 
 #include "platform/time_compat.h"
 #include "test/test_core.h"
+#include "jobs/node_pace.h"
 #include "services/gap_fill_service.h"
 #include "net/download.h"
 #include "sync/sync_state.h"
@@ -1179,6 +1180,61 @@ static int test_gap_fill_timeout_wakes_dispatcher(void)
     return failures;
 }
 
+/* A paused node queues no downloads: the timeout sweep (the first thing a
+ * pass does) must not run until the pace returns to normal. */
+static int test_gap_fill_paused_skips_pass(void)
+{
+    int failures = 0;
+    TEST("gap_fill pass is skipped while paused, runs after resume") {
+        bool ok = true;
+        supervisor_reset_for_testing();
+        struct main_state ms;
+        main_state_init(&ms);
+        struct download_manager dm;
+        dl_init(&dm);
+        struct uint256 h1 = make_hash(15);
+        int64_t now = (int64_t)platform_time_wall_time_t();
+        int timeout = dl_get_request_timeout_secs();
+        ok = ok && dl_mark_requested(&dm, &h1, 302, 10);
+        zcl_mutex_lock(&dm.cs);
+        for (size_t i = 0; i < dm.num_slots; i++) {
+            if (dm.slots[i].active && uint256_eq(&dm.slots[i].hash, &h1))
+                dm.slots[i].request_time = now - timeout - 1;
+        }
+        zcl_mutex_unlock(&dm.cs);
+
+        atomic_store(&g_gap_fill_dispatch_wakes, 0);
+        gap_fill_set_dispatch_wake(test_gap_fill_dispatch_wake, NULL);
+        node_pace_set(NODE_PACE_PAUSE);
+        struct zcl_result r = gap_fill_start(&ms, &dm);
+        ok = ok && r.ok;
+        if (r.ok) {
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 500 * 1000 * 1000 };
+            nanosleep(&ts, NULL);
+            struct gap_fill_stats st;
+            gap_fill_get_stats(&st);
+            ok = ok && st.passes == 0 && st.timeout_sweeps == 0;
+            ok = ok && atomic_load(&g_gap_fill_dispatch_wakes) == 0;
+            node_pace_set(NODE_PACE_NORMAL);
+            gap_fill_kick();
+            for (int i = 0; i < 100 &&
+                 atomic_load(&g_gap_fill_dispatch_wakes) == 0; i++) {
+                struct timespec t2 = { .tv_sec = 0, .tv_nsec = 20 * 1000 * 1000 };
+                nanosleep(&t2, NULL);
+            }
+            ok = ok && atomic_load(&g_gap_fill_dispatch_wakes) > 0;
+            gap_fill_stop();
+        }
+        node_pace_set(NODE_PACE_NORMAL);
+        dl_free(&dm);
+        main_state_free(&ms);
+        supervisor_reset_for_testing();
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_gap_fill_kick_latch_skips_wait(void)
 {
     int failures = 0;
@@ -2020,6 +2076,7 @@ int test_download(void)
     failures += test_dl_diagnostics();
     failures += test_gap_fill_timeout_sweep();
     failures += test_gap_fill_timeout_wakes_dispatcher();
+    failures += test_gap_fill_paused_skips_pass();
     failures += test_gap_fill_kick_latch_skips_wait();
     failures += test_gap_fill_queued_idle_wakes_dispatcher();
     failures += test_dl_many_insertions();
