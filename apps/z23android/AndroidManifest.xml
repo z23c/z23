@@ -7,11 +7,14 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <application android:label="Z23" android:icon="@drawable/ic_z23"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
-        android:hasCode="false" android:allowBackup="false"
+        android:hasCode="true" android:allowBackup="false"
         android:fullBackupContent="false" android:debuggable="false" android:hardwareAccelerated="true"
         android:extractNativeLibs="true" android:supportsRtl="true">
         <activity android:name="android.app.NativeActivity"
@@ -23,5 +26,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service android:name="org.z23.nativeapp.NodeService" android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the user-started Z23 node connected and in sync while the app is hidden" />
+        </service>
     </application>
 </manifest>

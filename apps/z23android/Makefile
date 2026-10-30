@@ -22,7 +22,7 @@ HOST_WARNINGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic
 export JAVA_HOME
 export PATH := $(JAVA_HOME)/bin:$(PATH)
 
-.PHONY: apk native install launch check-config check-node prepare-quirc test bridge test-bridge
+.PHONY: dexgen test-dexgen apk native install launch check-config check-node prepare-quirc test bridge test-bridge
 prepare-quirc:
 	@mkdir -p '$(QUIRC_DIR)'
 	cp ../../vendor/quirc/*.[ch] '$(QUIRC_DIR)/'
@@ -70,9 +70,20 @@ speech-probe:
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/speech_roundtrip.c speech_client.c bridge_client.c voice.c \
 	  $(SPEECH_JSON) -o '$(BUILD_DIR)/speech-roundtrip'
 
+DEXDUMP ?= $(TOOLS)/dexdump
+dexgen:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) dexgen.c -o '$(BUILD_DIR)/dexgen'
+
+test-dexgen:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -I. tests/dexgen_test.c -o '$(BUILD_DIR)/dexgen-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/dexgen-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/dexgen-test' "$$scratch" $$(test -x '$(DEXDUMP)' && echo '$(DEXDUMP)')
+
 preview-apk:
 	@mkdir -p '$(BUILD_DIR)/preview'
-	sed -e 's/org.z23.nativeapp/org.z23.voicepreview/' -e 's/android:label="Z23"/android:label="Z23 Voice Preview"/' \
+	sed -e 's/package="org.z23.nativeapp"/package="org.z23.voicepreview"/' -e 's/android:label="Z23"/android:label="Z23 Voice Preview"/' \
 	  -e 's/android:debuggable="false"/android:debuggable="true"/' AndroidManifest.xml > '$(BUILD_DIR)/preview/AndroidManifest.xml'
 	$(MAKE) apk APP_MANIFEST='$(BUILD_DIR)/preview/AndroidManifest.xml' APK='$(BUILD_DIR)/z23-preview.apk'
 
@@ -85,7 +96,7 @@ test-voice:
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/speech-client.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/speech-client-test' "$$scratch"
 
-test: prepare-quirc test-bridge test-voice test-host
+test: prepare-quirc test-bridge test-voice test-host test-dexgen
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' \
 	  tests/fleet_test.c fleet.c ../../vendor/qrcodegen/qrcodegen.c $(QUIRC_SOURCES) \
 	  -lm -o '$(BUILD_DIR)/fleet-test'
@@ -133,15 +144,16 @@ $(KEYSTORE):
 	  -alias z23-development -keypass android -dname 'CN=Z23 Development' \
 	  -keyalg RSA -keysize 3072 -validity 3650 -noprompt
 
-apk: check-node native $(KEYSTORE)
+apk: check-node native dexgen $(KEYSTORE)
 	@test -x '$(NODE_BIN)' || { echo 'Build the Android node with make ZCL_TARGET=android-arm64 z23 first' >&2; exit 1; }
 	@mkdir -p '$(BUILD_DIR)/package/lib/arm64-v8a'
 	cp '$(BUILD_DIR)/native/libz23android.so' '$(BUILD_DIR)/package/lib/arm64-v8a/'
 	cp '$(NODE_BIN)' '$(BUILD_DIR)/package/lib/arm64-v8a/libz23node.so'
 	'$(TOOLS)/aapt' package -f -M '$(APP_MANIFEST)' -S res \
 	  -I '$(ANDROID_JAR)' -F '$(BUILD_DIR)/resources.apk'
+	'$(BUILD_DIR)/dexgen' '$(BUILD_DIR)/package/classes.dex'
 	cp '$(BUILD_DIR)/resources.apk' '$(BUILD_DIR)/unsigned.apk'
-	'$(JAVA_HOME)/bin/jar' uf '$(BUILD_DIR)/unsigned.apk' -C '$(BUILD_DIR)/package' lib
+	'$(JAVA_HOME)/bin/jar' uf '$(BUILD_DIR)/unsigned.apk' -C '$(BUILD_DIR)/package' classes.dex -C '$(BUILD_DIR)/package' lib
 	'$(TOOLS)/zipalign' -f -P 16 4 '$(BUILD_DIR)/unsigned.apk' '$(BUILD_DIR)/aligned.apk'
 	'$(TOOLS)/apksigner' sign --ks '$(KEYSTORE)' --ks-key-alias z23-development \
 	  --ks-pass pass:android --key-pass pass:android --out '$(APK)' '$(BUILD_DIR)/aligned.apk'

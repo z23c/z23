@@ -97,7 +97,10 @@ while the Start node choice is saved the app opens the system dialog that lets
 Z23 run in the background: once each time the app process starts and after
 each new start, by button or confirmed voice request, until the owner allows
 it. The node keeps its peers while hidden only with that permission.
-Closing or leaving the app does not stop the node. While the app is hidden it
+Closing or leaving the app does not stop the node. While the node runs, the app keeps a low-importance "Z23 node" notification: it belongs to a foreground
+service, the only Java class in the package, which `dexgen.c` writes as `classes.dex` during `make apk`.
+Without it Android kills the hidden app and the node with it. Denying the notification permission hides
+the notification but keeps the service. While the app is hidden it
 stops checking the node and fleet, which keep running; it checks the node again
 as soon as it shows, and the fleet once its last report is a minute old.
 After **Stop node** the node line reads "Node stopping" until the node has

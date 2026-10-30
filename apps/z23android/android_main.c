@@ -5,6 +5,7 @@
 #include "camera.h"
 #include "controller.h"
 #include "native_ui.h"
+#include "node_service.h"
 #include <android/input.h>
 #include <android/looper.h>
 #include <android/native_activity.h>
@@ -27,7 +28,12 @@ static uint64_t permission_ticket;
 static bool foreground = true;
 /* The saved Start node choice has been put to the background-network dialog. */
 static bool background_asked;
+/* The foreground service that keeps the node's process above hidden-app priority is running. */
+static bool node_service_on;
+/* Notifications were requested once; the service works without them. */
+static bool notifications_asked;
 static bool microphone_allowed(JNIEnv *env, jobject activity);
+static void request_permission(JNIEnv *env, jobject activity, const char *name);
 
 static bool clean(JNIEnv *env)
 {
@@ -86,12 +92,37 @@ static void allow_background_network(JNIEnv *env, jobject activity)
     if (intent) (*env)->CallVoidMethod(env, activity, start, intent);
     (void)clean(env); (*env)->PopLocalFrame(env, NULL);
 }
+static bool notifications_allowed(JNIEnv *env, jobject activity)
+{
+    if ((*env)->PushLocalFrame(env, 4) != JNI_OK) { (void)clean(env); return false; }
+    jclass cls = (*env)->GetObjectClass(env, activity);
+    jmethodID check = cls ? (*env)->GetMethodID(env, cls, "checkSelfPermission", "(Ljava/lang/String;)I") : NULL;
+    jstring permission = (*env)->NewStringUTF(env, "android.permission.POST_NOTIFICATIONS");
+    bool granted = clean(env) && check && permission && (*env)->CallIntMethod(env, activity, check, permission) == 0;
+    (void)clean(env); (*env)->PopLocalFrame(env, NULL);
+    return granted;
+}
+/* While the node process runs and the app is visible, run the foreground service that keeps the
+ * process out of the hidden-app kill class; stop it once the node has exited. */
+static void sync_node_service(JNIEnv *env, const struct zapp_view *view)
+{
+    if (!active) return;
+    if (!node_service_on && foreground && view->node_process_running) {
+        if (!notifications_asked && !notifications_allowed(env, active)) {
+            notifications_asked = true; request_permission(env, active, "android.permission.POST_NOTIFICATIONS");
+        }
+        node_service_on = zapp_node_service_start(env, active);
+    } else if (node_service_on && !view->node_process_running) {
+        zapp_node_service_stop(env, active); node_service_on = false;
+    }
+}
 static void refresh(JNIEnv *env)
 {
     struct zapp_view *view = calloc(1, sizeof(*view));
     if (!view) return;
     zapp_controller_snapshot(view);
     zapp_native_ui_render(env, view);
+    sync_node_service(env, view);
     if (!view->node_wanted) background_asked = false;
     else if (foreground && active && !background_asked) {
         background_asked = true; allow_background_network(env, active);
