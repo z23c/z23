@@ -857,12 +857,33 @@ static bool cr_match_qualify_require(const char *path, const char *key,
     return true;
 }
 
+/* ops.telegram.*: text is the message body (at most TG_TEXT_MAX bytes, 12000),
+ * chat_id a signed Telegram id, wait_s the long-poll seconds. */
+static bool cr_match_telegram(const char *path, const char *key,
+                              const struct json_value *value, bool *type_ok)
+{
+    if (strncmp(path, "ops.telegram.", 13) != 0)
+        return false;
+    if (!strcmp(key, "text"))
+        *type_ok = cr_nonempty_str(value, 12000u);
+    else if (!strcmp(key, "chat_id"))
+        *type_ok = cr_int_range(value, INT64_MIN, INT64_MAX);
+    else if (!strcmp(key, "wait_s"))
+        *type_ok = cr_int_range(value, 0, 50);
+    else if (!strcmp(key, "idempotency_key"))
+        *type_ok = cr_nonempty_str(value, 64u);
+    else
+        return false;
+    return true;
+}
+
 static bool cr_match_lab_or_ints(const char *path, const char *key,
                                  const struct json_value *value, bool *type_ok)
 {
     return cr_match_qualify_require(path, key, value, type_ok) ||
            cr_match_lab(path, key, value, type_ok) ||
-           cr_match_leaf_ints(path, key, value, type_ok);
+           cr_match_leaf_ints(path, key, value, type_ok) ||
+           cr_match_telegram(path, key, value, type_ok);
 }
 
 /* Only the canary lifecycle accepts either CLI integers or structured decimal strings. */

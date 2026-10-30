@@ -44,6 +44,7 @@ test_device_host_bridge	12
 test_device_host_psk	11
 test_device_host_runtime	59
 test_pair_renew	44
+test_telegram	8
 test_device_command	11
 test_mesh_pairing_list	30
 test_transaction_intent	10

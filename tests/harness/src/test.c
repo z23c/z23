@@ -1311,6 +1311,8 @@ int main(int argc, char **argv)
       failures += test_device_host_shell(); }
     { extern int test_pair_renew(void);
       failures += test_pair_renew(); }
+    { extern int test_telegram(void);
+      failures += test_telegram(); }
     { extern int test_device_host_runtime(void);
       failures += test_device_host_runtime(); }
     { extern int test_native_tunnel_export(void);

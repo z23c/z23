@@ -31,6 +31,7 @@ How the node boots, syncs, stores state, holds keys and recovers: operator and m
 | [RELEASE_CANDIDATE_PIN.md](./RELEASE_CANDIDATE_PIN.md) | the record naming the build under proof |
 | [SECURITY_AND_INTEGRITY.md](./SECURITY_AND_INTEGRITY.md) | security boundaries and build-verification results |
 | [SELL.md](./SELL.md) | pay ZCL and sell a 1/1 collectible |
+| [TELEGRAM.md](./TELEGRAM.md) | message the owner and read replies through the Telegram bot |
 
 ## Also in this directory
 

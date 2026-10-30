@@ -113,6 +113,9 @@ bool zcl_native_command_is_root(const char *word)
          * commands/ops.def): the build's version, source id and Tor link, one
          * word, no node. A child alias, not a root, so the twelve-root cap holds. */
         "version",
+        /* `z23 telegram <status|send|inbox|configure>` are bare aliases of the
+         * ops.telegram leaves (engine/composition/commands/ops.def). */
+        "telegram",
         /* Onboarding roots: `z23 join` is the first command a stranger runs
          * after installing, and `z23 update` the one they reach for later.
          * Both are bare aliases of zcode.node.* (engine/composition/commands/zcode.def)

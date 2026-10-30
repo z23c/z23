@@ -1549,3 +1549,58 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_ops_node_restart)
+
+/* Telegram bot access for agents on any fleet host. `z23 telegram <leaf>` is
+ * the short spelling of each leaf. The bot token lives in the owner-private
+ * ~/.config/z23/telegram.env and never appears in argv, output or logs. */
+ZCL_COMMAND_BRANCH("ops.telegram", "ops", "Telegram bot: status, send, inbox, configure",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_READ(
+    "ops.telegram.status", "ops.telegram", "telegram.status",
+    "Check the Telegram credentials file and the bot",
+    "Refuses a credentials file that is missing, not a regular file you own, or readable by group or others. Otherwise asks the Bot API getMe and reports the bot id, username and name, whether a chat id is configured, how many user ids may talk to the bot, and whether a process on this host holds the poll lock. Sends nothing. The token is never reported.",
+    ZCL_COMMAND_RESULT_BUDGET, "telegram,bot,status,credentials,chat",
+    "zcl.command.empty_input.v1", "zcl.telegram.status.v1", "", "",
+    "z23 telegram status",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT, ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_ops_telegram_status)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.telegram.send", "ops.telegram", "telegram.send",
+    "Send a text message to the owner chat",
+    "Sends text through the bot to chat_id, default TELEGRAM_CHAT_ID; the chat must be TELEGRAM_CHAT_ID or listed in TELEGRAM_ALLOW_FROM. Text over 4096 UTF-16 units is split on character boundaries into several messages, up to 12000 bytes in all. Text that holds the bot token, an API key, a private key or seed phrase mention, or an onion address is refused with TELEGRAM_SECRET_REFUSED before any request. idempotency_key (1..64 of letters, digits . _ : -) makes a retry return the first send's message ids without sending again; MCP callers must supply it. A number or true/false as --text is read as a number or flag: pass such text with --input.",
+    ZCL_COMMAND_RESULT_BUDGET, "telegram,send,message,notify,chat",
+    "zcl.telegram.send.input.v1", "zcl.telegram.send.v1",
+    "text,chat_id,idempotency_key", "text",
+    "z23 telegram send --text='build finished' --idempotency_key=build-42",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_IDEMPOTENCY,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_ops_telegram_send)
+ZCL_COMMAND_READY_READ(
+    "ops.telegram.inbox", "ops.telegram", "telegram.inbox",
+    "Take new direct messages from allowlisted users",
+    "One getUpdates call from the offset saved under the z23 state root, waiting up to wait_s seconds (0..50). Returns direct messages from TELEGRAM_CHAT_ID and TELEGRAM_ALLOW_FROM users only; every other update is dropped and counted. The offset advances past what is returned, so each message is delivered once; more=true means call again. An exclusive local lock keeps two processes on one host from polling. Telegram allows one poller per bot across all hosts: a second one gets POLLER_CONFLICT.",
+    ZCL_COMMAND_EXTENDED_LIST_BUDGET, "telegram,inbox,receive,poll,messages",
+    "zcl.telegram.inbox.input.v1", "zcl.telegram.inbox.v1", "wait_s", "",
+    "z23 telegram inbox --wait_s=30",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_MAINTENANCE, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_NONE, ZCL_COMMAND_TRANSPORT_NATIVE,
+    zcl_native_handle_ops_telegram_inbox)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.telegram.configure", "ops.telegram", "telegram.configure",
+    "Write the Telegram credentials file from stdin",
+    "Reads TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID and optional TELEGRAM_ALLOW_FROM lines from stdin, never from arguments, validates them and replaces ~/.config/z23/telegram.env atomically with mode 0600. Z23_TELEGRAM_ENV names another path. The reply never repeats the token. Owner authority: not offered to MCP callers.",
+    ZCL_COMMAND_RESULT_BUDGET, "telegram,configure,credentials,setup",
+    "zcl.command.empty_input.v1", "zcl.telegram.configure.v1", "", "",
+    "z23 telegram configure < telegram.env",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_APP_WRITE,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE, ZCL_COMMAND_CAP_NONE,
+    ZCL_COMMAND_TRAIT_NONE, zcl_native_handle_ops_telegram_configure)

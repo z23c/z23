@@ -219,3 +219,4 @@ plugin.fetch exempt: authority is the publisher signature checked against the ow
 plugin.fetch_remote exempt: asks the node running on this datadir over its local cookie-authenticated RPC to run the same plugin fetch verification (publisher signature against the owner publisher_keys, SHA3-512 against the signed manifest, root, completeness, downgrade and size checks); it stores a new generation only and never changes current, last-good or a running binary
 
 dev.test.canary_sentinel exempt: durably resets or publishes fixed replay-canary verdict evidence in a validated owner directory; installs no privileged artifact and changes no running binary or canonical node
+ops.telegram.configure exempt: writes only the caller's owner-private Telegram credentials file from stdin; it installs no artifact, changes no running binary and grants no authority
