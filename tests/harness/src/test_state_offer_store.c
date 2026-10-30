@@ -930,6 +930,40 @@ static int manifest_cache_skips_unchanged_bundles(void)
     return failures;
 }
 
+/* A restart is a new process-level state: with the gap still open, the next
+ * failed mint warns again rather than staying silent under the old gap. */
+static int identity_gap_rewarns_after_restart(void)
+{
+    int failures = 0;
+    TEST_CASE("an open identity gap warns again after a restart") {
+        char dir[PATH_MAX], blocker[PATH_MAX], data[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "state_offer_adv", "gaprestart");
+        ASSERT(snprintf(blocker, sizeof(blocker), "%s/blocker", dir) > 0);
+        ASSERT(snprintf(data, sizeof(data), "%s/node", blocker) > 0);
+        FILE *f = fopen(blocker, "w");
+        ASSERT(f != NULL);
+        fclose(f);
+        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+        ASSERT(cp != NULL);
+
+        state_offer_service_start(data, NULL);
+        state_offer_service_test_hold_artifact(cp->height);
+        uint32_t before = state_offer_service_test_identity_gap_warns();
+        state_offer_service_test_ensure_identity(cp->height + 100000);
+        ASSERT(state_offer_service_test_identity_gap_warns() - before == 1);
+        state_offer_service_shutdown();
+
+        state_offer_service_start(data, NULL);
+        state_offer_service_test_hold_artifact(cp->height);
+        uint32_t again = state_offer_service_test_identity_gap_warns();
+        state_offer_service_test_ensure_identity(cp->height + 100000);
+        ASSERT(state_offer_service_test_identity_gap_warns() - again == 1);
+        state_offer_service_shutdown();
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
 int test_state_offer_store(void)
 {
     int failures = 0;
@@ -938,6 +972,7 @@ int test_state_offer_store(void)
     failures += advertise_when_we_hold_the_checkpoint_bundle();
     failures += no_advertisement_for_a_stale_bundle();
     failures += identity_gap_warns_once();
+    failures += identity_gap_rewarns_after_restart();
     failures += picks_newest_acceptable();
     failures += stale_offer_never_chosen();
     failures += bad_bundle_discards_and_tries_next();

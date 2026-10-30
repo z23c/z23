@@ -414,6 +414,19 @@ static bool sosvc_has_offerable_artifact_locked(int32_t tip)
     return false;
 }
 
+/* One WARN per gap: the first failed mint of an offerable-without-identity gap
+ * logs; the retries on later ticks stay quiet until the gap closes. */
+static bool sosvc_identity_gap_open(void)
+{
+    pthread_mutex_lock(&g_lock);
+    bool first = !g_identity_gap_logged;
+    g_identity_gap_logged = true;
+    if (first)
+        g_identity_gap_warn_count++;
+    pthread_mutex_unlock(&g_lock);
+    return first;
+}
+
 /* THE GAP THIS CLOSES. A node that registers and serves a 513 MB consensus
  * bundle still appended NO offer batch to its "zfileaddr" messages, because
  * state_offer_service_start() LOADS the durable online identity and nothing in
@@ -442,19 +455,6 @@ static bool sosvc_has_offerable_artifact_locked(int32_t tip)
  * also the ONLY place the artifact snapshot is refreshed (every
  * SOSVC_SNAPSHOT_TTL_S, and cheaply: an unchanged bundle is a cache hit, see
  * sosvc_refresh_snapshot), so the send path never opens a bundle. */
-/* One WARN per gap: the first failed mint of an offerable-without-identity gap
- * logs; the retries on later ticks stay quiet until the gap closes. */
-static bool sosvc_identity_gap_open(void)
-{
-    pthread_mutex_lock(&g_lock);
-    bool first = !g_identity_gap_logged;
-    g_identity_gap_logged = true;
-    if (first)
-        g_identity_gap_warn_count++;
-    pthread_mutex_unlock(&g_lock);
-    return first;
-}
-
 static void sosvc_ensure_offering_identity(int32_t tip)
 {
     if (!g_datadir[0] || tip <= 0)
@@ -772,6 +772,9 @@ void state_offer_service_shutdown(void)
         pthread_join(g_fetch_thread, NULL);
         g_fetch_started = false;
     }
+    pthread_mutex_lock(&g_lock);
+    g_identity_gap_logged = false;
+    pthread_mutex_unlock(&g_lock);
     g_have_identity = false;
     memset(g_online_seed, 0, sizeof(g_online_seed));
     g_snapshot_valid = false;
