@@ -46,6 +46,16 @@ static void copy_text(char *out, size_t cap, const char *text)
 {
     if (cap) snprintf(out, cap, "%s", text ? text : "");
 }
+/* Records the question being answered for display; a long one is cut on a character boundary. */
+static void set_pending(char *out, const char *question)
+{
+    copy_text(out, ZAPP_PENDING_CAP, question);
+    size_t n = strlen(out);
+    if (question[n]) {
+        while (n && ((unsigned char)question[n] & 0xC0) == 0x80) n--;
+        out[n] = 0;
+    }
+}
 static void notify_view(struct controller *c)
 {
     pthread_mutex_lock(&c->lock);
@@ -153,6 +163,7 @@ static void chat_result(struct controller *c, const char *prompt, const char *an
         refresh_suggestion(c);
     }
     zapp_transcript_prepend(c->view.transcript, sizeof(c->view.transcript), prompt, answer);
+    c->view.pending_question[0] = 0;
 }
 static void voice_stage(struct controller *c, enum zapp_voice_state state, const char *text)
 {
@@ -308,6 +319,9 @@ static bool voice_reply(struct controller *c, const char *transcript, char *answ
     if (intent == ZAPP_VOICE_START || intent == ZAPP_VOICE_STOP) {
         voice_answer(c, intent, brief); copy_text(answer, ZAPP_TEXT_CAP, brief); return false;
     }
+    pthread_mutex_lock(&c->lock);
+    set_pending(c->view.pending_question, transcript);
+    pthread_mutex_unlock(&c->lock);
     voice_stage(c, ZAPP_VOICE_OBSERVING, "Thinking privately on your laptop…");
     if (ask_with(c, transcript, answer, &c->voice_cancel, stream)) return true;
     if (atomic_load(&c->voice_cancel) || stream->player) return false;
@@ -455,6 +469,7 @@ static bool execute_action(struct controller *c, const char *action, const char 
 static bool voice_result(struct controller *c, bool ok, const char *out)
 {
     c->view.voice_state = ZAPP_VOICE_READY;
+    c->view.pending_question[0] = 0;
     if (atomic_load(&c->voice_cancel)) {
         c->view.voice_proposal[0] = 0;
         copy_text(c->view.voice_status, sizeof(c->view.voice_status), "Voice cancelled. Press Talk to begin again.");
@@ -469,6 +484,7 @@ static bool voice_result(struct controller *c, bool ok, const char *out)
 static bool chat_state(struct controller *c)
 {
     c->view.reply_state = ZAPP_REPLY_READY;
+    c->view.pending_question[0] = 0;
     if (!atomic_load(&c->reply_cancel)) return true;
     copy_text(c->view.notice, sizeof(c->view.notice), "Reply cancelled.");
     return false;
@@ -659,6 +675,7 @@ static bool cancel_reply(void)
     if (c->view.reply_state != ZAPP_REPLY_READY) {
         atomic_store(&c->reply_cancel, true);
         c->view.reply_state = ZAPP_REPLY_CANCELLING;
+        c->view.pending_question[0] = 0;
         copy_text(c->view.notice, sizeof(c->view.notice), "Stopping reply…");
     }
     pthread_mutex_unlock(&c->lock);
@@ -684,6 +701,7 @@ static void voice_control(struct controller *c, const char *action)
     if (!strcmp(action, "voice_finish")) { atomic_store(&c->voice_stop, true); return; }
     atomic_store(&c->voice_cancel, true);
     c->view.voice_proposal[0] = 0;
+    c->view.pending_question[0] = 0;
     if (c->view.voice_state != ZAPP_VOICE_READY) c->view.voice_state = ZAPP_VOICE_CANCELLING;
 }
 static bool is_pair_control(const char *action)
@@ -734,6 +752,7 @@ static void queue_action(struct controller *c, const char *action, const char *a
     if (!strcmp(action, "chat")) {
         atomic_store(&c->reply_cancel, false);
         c->view.reply_state = ZAPP_REPLY_WAITING;
+        set_pending(c->view.pending_question, arg);
     }
     pthread_cond_signal(&c->changed);
 }

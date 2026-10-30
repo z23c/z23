@@ -186,7 +186,7 @@ static bool html_text(JNIEnv *env, jobject view, const char *html)
 static void show_transcript(JNIEnv *env, const struct zapp_view *view)
 {
     static char html[2 * ZAPP_TEXT_CAP];
-    if (!(zapp_transcript_html(view->transcript, html, sizeof(html)) && html_text(env, transcript_view, html)))
+    if (!(zapp_transcript_html_pending(view->transcript, view->pending_question, html, sizeof(html)) && html_text(env, transcript_view, html)))
         (void)text(env, transcript_view, view->transcript);
 }
 static bool append(JNIEnv *env, jobject layout, jobject view)
@@ -554,6 +554,7 @@ static bool hit(JNIEnv *env, jobject view, float x, float y)
 }
 static const char *voice_action(void)
 {
+    if (voice_state == ZAPP_VOICE_READY && reply_state != ZAPP_REPLY_READY) return "chat_cancel";
     return voice_state == ZAPP_VOICE_READY ? "voice_start" :
         voice_state == ZAPP_VOICE_RECORDING ? "voice_finish" : "voice_cancel";
 }
@@ -649,10 +650,17 @@ static void receipt_qr(JNIEnv *env, const char *value)
     if (shown && strlen(value) < sizeof(last_receipt)) memcpy(last_receipt, value, strlen(value) + 1);
     else (void)set_bitmap(env, receipt_view, NULL, 0);
 }
-static const char *talk_label(enum zapp_voice_state state)
+static const char *talk_label(enum zapp_voice_state voice, enum zapp_reply_state reply)
 {
-    return state == ZAPP_VOICE_READY ? "Talk" : state == ZAPP_VOICE_RECORDING ? "Done talking" :
-        state == ZAPP_VOICE_PLAYING ? "Stop speaking" : "Cancel";
+    if (voice == ZAPP_VOICE_READY && reply != ZAPP_REPLY_READY) return "Stop";
+    return voice == ZAPP_VOICE_READY ? "Talk" : voice == ZAPP_VOICE_RECORDING ? "Done talking" :
+        voice == ZAPP_VOICE_OBSERVING ? "Stop" : voice == ZAPP_VOICE_PLAYING ? "Stop speaking" : "Cancel";
+}
+/* While a question is answered the caption says so, whatever the last voice stage reported. */
+static const char *caption(const struct zapp_view *view)
+{
+    if (view->reply_state == ZAPP_REPLY_WAITING || view->voice_state == ZAPP_VOICE_OBSERVING) return "Thinking…";
+    return view->voice_status[0] ? view->voice_status : "Press Talk and ask anything.";
 }
 /* The suggestion shows while voice is idle, nothing awaits confirmation and no reply is pending. */
 static bool suggestion_shown(const struct zapp_view *view)
@@ -663,13 +671,12 @@ static bool suggestion_shown(const struct zapp_view *view)
 /* A voice status line stays above the suggestion; only the default hint gives way to it. */
 static void render_voice(JNIEnv *env, const struct zapp_view *view)
 {
-    if (buttons[9]) (void)text(env, buttons[9], talk_label(voice_state));
+    if (buttons[9]) (void)text(env, buttons[9], talk_label(voice_state, reply_state));
     bool offer = suggestion_shown(view);
     snprintf(suggestion, sizeof(suggestion), "%s", offer ? view->suggestion : "");
     if (buttons[15]) { (void)text(env, buttons[15], suggestion); (void)set_visible(env, buttons[15], offer); }
     if (voice_view) (void)set_visible(env, voice_view, view->voice_status[0] || !offer);
-    if (voice_view) (void)text(env, voice_view, view->voice_status[0] ? view->voice_status :
-        "Press Talk and ask anything.");
+    if (voice_view) (void)text(env, voice_view, caption(view));
     if (buttons[10]) {
         (void)text(env, buttons[10], !strcmp(view->voice_proposal, "node_start") ? "Confirm start" : "Confirm stop");
         (void)set_visible(env, buttons[10], view->voice_proposal[0] && !view->busy);
@@ -691,7 +698,7 @@ static void render_node(JNIEnv *env, const struct zapp_view *view)
     (void)text(env, balance_view, balance);
     (void)text(env, connection_view, view->connection[0] ? view->connection : "Connect a laptop to use chat.");
     show_transcript(env, view);
-    (void)set_visible(env, transcript_view, view->transcript[0] != 0);
+    (void)set_visible(env, transcript_view, view->transcript[0] || view->pending_question[0]);
 }
 /* Two lines at the top: the phone node and, while a laptop host is paired, the fleet headline. */
 static void render_status(JNIEnv *env, const struct zapp_view *view)

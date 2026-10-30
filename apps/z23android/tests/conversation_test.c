@@ -159,9 +159,30 @@ static void html_cases(void)
     assert(!zapp_transcript_html("", out, sizeof(out)) && !zapp_transcript_html(NULL, out, sizeof(out)));
     assert(!zapp_transcript_html("plain text", out, 5) && out[0] == 0);
 }
+
+#define WAITING MUTED ZAPP_PENDING_ANSWER "</font>"
+/* A question still being answered leads, with a placeholder; stored exchanges follow as earlier ones. */
+static void pending_cases(void)
+{
+    char out[512];
+    assert(zapp_transcript_html_pending("", "q?", out, sizeof(out)));
+    assert(!strcmp(out, MUTED "q?</font><br>" WAITING));
+    assert(zapp_transcript_html_pending("You: q1\n\nZ23: a1\n", "q2 <&>", out, sizeof(out)));
+    assert(!strcmp(out, MUTED "q2 &lt;&amp;&gt;</font><br>" WAITING FADED "q1<br>a1</font></small>"));
+    assert(zapp_transcript_html_pending(NULL, "q", out, sizeof(out)) && !strstr(out, "<small>"));
+    assert(zapp_transcript_html_pending("You: q\n\nZ23: a\n", "", out, sizeof(out)));
+    assert(!strcmp(out, MUTED "q</font><br>a"));
+    assert(zapp_transcript_html_pending("You: q\n\nZ23: a\n", NULL, out, sizeof(out)) && !strstr(out, "Thinking"));
+    size_t lead = strlen(MUTED "q2</font><br>" WAITING);
+    assert(zapp_transcript_html_pending("You: q1\n\nZ23: a1\n", "q2", out, lead + 1));
+    assert(!strcmp(out, MUTED "q2</font><br>" WAITING));
+    assert(!zapp_transcript_html_pending("You: q1\n\nZ23: a1\n", "q2", out, lead) && out[0] == 0);
+    assert(zapp_transcript_html_pending("old <i>", "q", out, sizeof(out)));
+    assert(!strcmp(out, MUTED "q</font><br>" WAITING "<br><br>old &lt;i&gt;"));
+}
 int main(void)
 {
-    history_basic_cases(); history_turn_cases(); history_byte_cases(); format_cases(); transcript_cases(); html_cases();
+    history_basic_cases(); history_turn_cases(); history_byte_cases(); format_cases(); transcript_cases(); html_cases(); pending_cases();
     puts("conversation tests passed");
     return 0;
 }

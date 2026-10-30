@@ -167,29 +167,47 @@ static const char *find_answer(const char *text, size_t n)
         if (!memcmp(text + i, "\n\nZ23: ", 7)) return text + i;
     return NULL;
 }
-bool zapp_transcript_html(const char *transcript, char *out, size_t cap)
+/* The question being answered, with the placeholder where its answer will appear. */
+static bool html_pending(struct html_sink *s, const char *question)
 {
-    if (!out || !cap) return false;
-    out[0] = 0;
-    if (!transcript) return false;
-    struct html_sink s = {out, cap, 0};
-    if (strncmp(transcript, "You: ", 5)) {
-        if (!html_escaped(&s, transcript, strlen(transcript))) out[0] = 0;
-        return out[0] != 0;
-    }
-    for (const char *at = transcript; at; ) {
+    return html_puts(s, "<font color=\"#6B716D\">") && html_escaped(s, question, strlen(question)) &&
+        html_puts(s, "</font><br><font color=\"#6B716D\">" ZAPP_PENDING_ANSWER "</font>");
+}
+/* Appends the stored exchanges; the first is the newest unless a pending question precedes them. */
+static bool html_stored(struct html_sink *s, const char *transcript, bool newest_first)
+{
+    for (const char *at = transcript; at && *at; ) {
         size_t n = exchange_length(at), q_at = 5, a_at = n;
         const char *split = find_answer(at, n);
         size_t q_end = split ? (size_t)(split - at) : n;
         if (split) a_at = q_end + 7;
         while (n > a_at && at[n - 1] == '\n') n--;
-        size_t before = s.len;
-        if (!html_exchange(&s, at + q_at, q_end - q_at, at + a_at, n - a_at, at == transcript)) {
-            s.len = before; s.out[before] = 0; break;
+        size_t before = s->len;
+        if (!html_exchange(s, at + q_at, q_end - q_at, at + a_at, n - a_at, newest_first && at == transcript)) {
+            s->len = before; s->out[before] = 0; break;
         }
         at = strstr(at + n, "\n\nYou: ");
         if (at) at += 2;
     }
-    if (!s.len) out[0] = 0;
-    return s.len > 0;
+    return s->len > 0;
+}
+bool zapp_transcript_html_pending(const char *transcript, const char *pending, char *out, size_t cap)
+{
+    if (!out || !cap) return false;
+    out[0] = 0;
+    struct html_sink s = {out, cap, 0};
+    bool waiting = pending && *pending;
+    if (waiting && !html_pending(&s, pending)) { out[0] = 0; return false; }
+    if (!transcript || !*transcript) return s.len > 0;
+    if (strncmp(transcript, "You: ", 5)) {
+        size_t before = s.len;
+        bool fits = (!waiting || html_puts(&s, "<br><br>")) && html_escaped(&s, transcript, strlen(transcript));
+        if (!fits) { s.len = before; out[before] = 0; }
+        return s.len > 0;
+    }
+    return html_stored(&s, transcript, !waiting);
+}
+bool zapp_transcript_html(const char *transcript, char *out, size_t cap)
+{
+    return zapp_transcript_html_pending(transcript, NULL, out, cap);
 }

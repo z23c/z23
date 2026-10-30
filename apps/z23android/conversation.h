@@ -32,4 +32,9 @@ void zapp_transcript_prepend(char *text, size_t cap, const char *question, const
  * answer plain, earlier exchanges small and muted. Older exchanges that do not fit are dropped;
  * false with an empty out when even the newest does not fit. */
 bool zapp_transcript_html(const char *transcript, char *out, size_t cap);
+/* The same with a question still being answered shown first, muted, with ZAPP_PENDING_ANSWER in
+ * place of its answer; the stored exchanges follow as earlier ones. A NULL or empty pending
+ * question renders the transcript alone. */
+#define ZAPP_PENDING_ANSWER "Thinking privately on your laptop\xe2\x80\xa6"
+bool zapp_transcript_html_pending(const char *transcript, const char *pending, char *out, size_t cap);
 #endif

@@ -8,6 +8,7 @@
 #define ZAPP_TEXT_CAP 65536
 #define ZAPP_NOTICE_CAP 1024u
 #define ZAPP_ERROR_CAP 256
+#define ZAPP_PENDING_CAP 1024u
 
 enum zapp_reply_state { ZAPP_REPLY_READY, ZAPP_REPLY_WAITING, ZAPP_REPLY_CANCELLING };
 enum zapp_voice_state { ZAPP_VOICE_READY, ZAPP_VOICE_RECORDING, ZAPP_VOICE_TRANSCRIBING,
@@ -41,5 +42,6 @@ struct zapp_view {
     char pair_code[8];
     char node_line[96]; /* One-line phone node summary for the main screen. */
     char suggestion[96]; /* One question for the current state, or empty. */
+    char pending_question[ZAPP_PENDING_CAP]; /* Question being answered, shown until its answer or cancel. */
 };
 #endif
