@@ -30,7 +30,7 @@ core/modules/net/src/msgprocessor.c 3031
 core/modules/net/src/msgprocessor_snapshot.c 1810
 core/modules/net/src/net.c 2373
 core/modules/net/src/onion_directory.c 1516
-contexts/commons/modules/vcs/src/package_reward.c 1986
+contexts/commons/modules/vcs/src/package_reward.c 1886
 contexts/commons/modules/vcs/src/package_swarm_node.c 2015
 contexts/wallet/modules/wallet/src/wallet.c 1530
 contexts/wallet/modules/wallet/src/wallet_sqlite.c 1603

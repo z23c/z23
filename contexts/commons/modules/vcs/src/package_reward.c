@@ -30,6 +30,7 @@
 #include "platform/private_file.h"
 #include "package_directory.h"
 #include "package_file_io.h"
+#include "package_reward_priv.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "vcs/package_score.h"
@@ -43,8 +44,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
-
-#define REWARD_LOG "vcs.reward"
 
 /* Hash domains (never sign/hash undomained content). */
 static const uint8_t k_domain_entry[] = "zcl.zcode_reward_entry.v1";
@@ -324,18 +323,6 @@ static bool reward_queue_wire_decode(const uint8_t *wire, size_t len,
     return true;
 }
 
-struct vcs_reward_fact {
-    uint8_t entry_id[32];
-    uint8_t release_root[32];
-    uint8_t contributor[33];
-    uint8_t kind;
-    uint8_t category;
-    uint32_t points; /* settled */
-    int64_t day;
-    uint8_t facts_hash[32];
-    uint8_t plan_id[32];
-};
-
 static void reward_fact_wire_encode(const struct vcs_reward_fact *f,
                                     uint8_t out[REWARD_FACT_WIRE_BYTES])
 {
@@ -492,32 +479,6 @@ static bool reward_plan_wire_decode(const uint8_t *wire, size_t len,
 
 /* ── the ledger ─────────────────────────────────────────────────────── */
 
-struct vcs_reward_loaded_plan {
-    uint8_t id[32];
-    int64_t day;
-    uint8_t (*refs)[32]; /* PLANNED row entry ids */
-    size_t ref_count;
-    bool committed;
-};
-
-struct vcs_reward_ledger {
-    char root[4400]; /* <zcode_dir>/rewards */
-    struct vcs_reward_entry *entries; /* ascending entry_id */
-    size_t entry_count;
-    size_t entry_cap;
-    struct vcs_reward_fact *facts;
-    size_t fact_count;
-    size_t fact_cap;
-    struct vcs_reward_loaded_plan *plans; /* ascending id */
-    size_t plan_count;
-    size_t plan_cap;
-    uint8_t (*commits)[32]; /* committed plan ids */
-    size_t commit_count;
-    size_t commit_cap;
-    uint32_t corrupt;
-    bool truncated;
-};
-
 void vcs_reward_plan_free(struct vcs_reward_plan *plan)
 {
     if (!plan)
@@ -536,7 +497,7 @@ void vcs_reward_receipt_free(struct vcs_reward_receipt *receipt)
     receipt->row_count = 0;
 }
 
-static int reward_id_cmp(const uint8_t a[32], const uint8_t b[32])
+int reward_id_cmp(const uint8_t a[32], const uint8_t b[32])
 {
     return memcmp(a, b, 32);
 }
@@ -672,6 +633,25 @@ static struct vcs_reward_loaded_plan *reward_plan_slot(
 }
 
 /* ── load / replay ──────────────────────────────────────────────────── */
+
+/* Fills a slot that reward_plan_slot just inserted: the day, the id and the
+ * refs of its PLANNED rows. False when the refs cannot be allocated. */
+static bool reward_plan_fill_slot(struct vcs_reward_loaded_plan *lp,
+                                  const struct vcs_reward_plan *plan)
+{
+    lp->day = plan->day;
+    memcpy(lp->id, plan->plan_id, 32);
+    if (plan->planned_count > 0) {
+        lp->refs = zcl_calloc(plan->planned_count, sizeof(*lp->refs),
+                              "reward_plan_refs");
+        if (!lp->refs)
+            return false;
+    }
+    for (size_t i = 0; i < plan->row_count; i++)
+        if (plan->rows[i].disposition == VCS_REWARD_DISP_PLANNED)
+            memcpy(lp->refs[lp->ref_count++], plan->rows[i].entry_id, 32);
+    return true;
+}
 
 /* Scan one directory of hex64-named wires; parse with `decode` (queue or
  * fact). Verified: the file name must equal the content-derived id. */
@@ -836,24 +816,11 @@ static void reward_load_plan_dir(struct vcs_reward_ledger *l, const char *dir)
             vcs_reward_plan_free(&plan);
             continue;
         }
-        if (inserted) {
-            lp->day = plan.day;
-            memcpy(lp->id, plan.plan_id, 32);
-            if (plan.planned_count > 0) {
-                lp->refs = zcl_calloc(plan.planned_count, sizeof(*lp->refs),
-                                      "reward_plan_refs");
-                if (!lp->refs) {
-                    LOG_ERROR(REWARD_LOG, "alloc %u plan refs",
-                              plan.planned_count);
-                    l->corrupt++;
-                    vcs_reward_plan_free(&plan);
-                    continue;
-                }
-            }
-            for (size_t i = 0; i < plan.row_count; i++)
-                if (plan.rows[i].disposition == VCS_REWARD_DISP_PLANNED)
-                    memcpy(lp->refs[lp->ref_count++], plan.rows[i].entry_id,
-                           32);
+        if (inserted && !reward_plan_fill_slot(lp, &plan)) {
+            LOG_ERROR(REWARD_LOG, "alloc %u plan refs", plan.planned_count);
+            l->corrupt++;
+            vcs_reward_plan_free(&plan);
+            continue;
         }
         vcs_reward_plan_free(&plan);
     }
@@ -1185,11 +1152,11 @@ enum vcs_reward_enqueue_error vcs_reward_enqueue_claim(
 
 /* Gather the contributor's settled-fact history (optionally excluding one
  * plan's facts) into period entries. Returns the count. */
-static size_t reward_history_for(const struct vcs_reward_ledger *l,
-                                 const uint8_t contributor[33],
-                                 const uint8_t exclude_plan[32],
-                                 struct vcs_score_period_entry *out,
-                                 size_t cap)
+size_t reward_history_for(const struct vcs_reward_ledger *l,
+                          const uint8_t contributor[33],
+                          const uint8_t exclude_plan[32],
+                          struct vcs_score_period_entry *out,
+                          size_t cap)
 {
     size_t n = 0;
     for (size_t i = 0; i < l->fact_count && n < cap; i++) {
@@ -1206,11 +1173,11 @@ static size_t reward_history_for(const struct vcs_reward_ledger *l,
 }
 
 /* The ledger already settled (release, contributor, category)? */
-static bool reward_fact_duplicate(const struct vcs_reward_ledger *l,
-                                  const uint8_t release_root[32],
-                                  const uint8_t contributor[33],
-                                  enum vcs_reward_category category,
-                                  const uint8_t exclude_plan[32])
+bool reward_fact_duplicate(const struct vcs_reward_ledger *l,
+                           const uint8_t release_root[32],
+                           const uint8_t contributor[33],
+                           enum vcs_reward_category category,
+                           const uint8_t exclude_plan[32])
 {
     for (size_t i = 0; i < l->fact_count; i++) {
         const struct vcs_reward_fact *f = &l->facts[i];
@@ -1224,7 +1191,7 @@ static bool reward_fact_duplicate(const struct vcs_reward_ledger *l,
     return false;
 }
 
-static const struct vcs_reward_fact *reward_fact_find(
+const struct vcs_reward_fact *reward_fact_find(
     const struct vcs_reward_ledger *l, const uint8_t entry_id[32])
 {
     for (size_t i = 0; i < l->fact_count; i++)
@@ -1322,6 +1289,24 @@ static void reward_plan_eval_entry(const struct vcs_reward_ledger *l,
     row->weekly_cap_clamped = caps.allowed_score < e->points;
 }
 
+/* Folds one evaluated row into the plan totals; a PLANNED row joins the batch. */
+static void reward_plan_tally_row(struct vcs_reward_plan *out,
+                                  const struct vcs_reward_plan_row *row,
+                                  struct vcs_reward_plan_row *batch,
+                                  size_t *batch_count)
+{
+    switch (row->disposition) {
+    case VCS_REWARD_DISP_PLANNED:
+        out->planned_count++;
+        out->points_total += row->points_settled;
+        batch[(*batch_count)++] = *row;
+        break;
+    case VCS_REWARD_DISP_DEFERRED: out->deferred_count++; break;
+    case VCS_REWARD_DISP_BLOCKED: out->blocked_count++; break;
+    case VCS_REWARD_DISP_DUPLICATE: out->duplicate_count++; break;
+    }
+}
+
 bool vcs_reward_plan_build(const struct vcs_reward_ledger *l, int64_t day,
                            struct vcs_reward_plan *out)
 {
@@ -1374,20 +1359,35 @@ bool vcs_reward_plan_build(const struct vcs_reward_ledger *l, int64_t day,
         struct vcs_reward_plan_row *row = &out->rows[out->row_count++];
         reward_plan_eval_entry(l, e, day, batch, batch_count,
                                out->planned_count, row);
-        switch (row->disposition) {
-        case VCS_REWARD_DISP_PLANNED:
-            out->planned_count++;
-            out->points_total += row->points_settled;
-            batch[batch_count++] = *row;
-            break;
-        case VCS_REWARD_DISP_DEFERRED: out->deferred_count++; break;
-        case VCS_REWARD_DISP_BLOCKED: out->blocked_count++; break;
-        case VCS_REWARD_DISP_DUPLICATE: out->duplicate_count++; break;
-        }
+        reward_plan_tally_row(out, row, batch, &batch_count);
     }
     free(batch);
     reward_plan_id(day, out->rows, out->row_count, out->plan_id);
     return true;
+}
+
+/* Encodes plan into wire and writes it atomically to path. */
+static bool reward_plan_wire_write(const char *path,
+                                   const struct vcs_reward_plan *plan,
+                                   uint8_t *wire, size_t wire_len)
+{
+    size_t encoded = 0;
+    return reward_plan_wire_encode(plan, wire, &encoded) &&
+           encoded == wire_len && reward_atomic_write(path, wire, wire_len);
+}
+
+/* Moves each queued entry named by the plan's refs to PLANNED. */
+static void reward_plan_mark_planned(struct vcs_reward_ledger *l,
+                                     const struct vcs_reward_loaded_plan *lp)
+{
+    for (size_t r = 0; r < lp->ref_count; r++) {
+        bool found = false;
+        size_t at = reward_entry_lower_bound(l, lp->refs[r], &found);
+        if (found && l->entries[at].state == VCS_REWARD_STATE_QUEUED) {
+            l->entries[at].state = VCS_REWARD_STATE_PLANNED;
+            memcpy(l->entries[at].planned_by, lp->id, 32);
+        }
+    }
 }
 
 enum vcs_reward_plan_persist_error vcs_reward_plan_persist(
@@ -1422,14 +1422,10 @@ enum vcs_reward_plan_persist_error vcs_reward_plan_persist(
         LOG_ERROR(REWARD_LOG, "alloc %zu plan wire", wire_len);
         return VCS_REWARD_PLAN_PERSIST_IO;
     }
-    size_t encoded = 0;
-    if (!reward_plan_wire_encode(plan, wire, &encoded) ||
-        encoded != wire_len ||
-        !reward_atomic_write(path, wire, wire_len)) {
-        free(wire);
-        return VCS_REWARD_PLAN_PERSIST_IO;
-    }
+    bool wrote = reward_plan_wire_write(path, plan, wire, wire_len);
     free(wire);
+    if (!wrote)
+        return VCS_REWARD_PLAN_PERSIST_IO;
 
     /* Register in memory and derive PLANNED states. */
     bool inserted = false;
@@ -1437,31 +1433,12 @@ enum vcs_reward_plan_persist_error vcs_reward_plan_persist(
         reward_plan_slot(l, plan->plan_id, &inserted);
     if (!lp)
         return VCS_REWARD_PLAN_PERSIST_IO;
-    if (inserted) {
-        lp->day = plan->day;
-        memcpy(lp->id, plan->plan_id, 32);
-        if (plan->planned_count > 0) {
-            lp->refs = zcl_calloc(plan->planned_count, sizeof(*lp->refs),
-                                  "reward_plan_refs");
-            if (!lp->refs) {
-                LOG_ERROR(REWARD_LOG, "alloc %u plan refs",
-                          plan->planned_count);
-                return VCS_REWARD_PLAN_PERSIST_IO;
-            }
-        }
-        for (size_t i = 0; i < plan->row_count; i++)
-            if (plan->rows[i].disposition == VCS_REWARD_DISP_PLANNED)
-                memcpy(lp->refs[lp->ref_count++], plan->rows[i].entry_id,
-                       32);
+    if (inserted && !reward_plan_fill_slot(lp, plan)) {
+        LOG_ERROR(REWARD_LOG, "alloc %u plan refs",
+                  plan->planned_count);
+        return VCS_REWARD_PLAN_PERSIST_IO;
     }
-    for (size_t r = 0; r < lp->ref_count; r++) {
-        bool found = false;
-        size_t at = reward_entry_lower_bound(l, lp->refs[r], &found);
-        if (found && l->entries[at].state == VCS_REWARD_STATE_QUEUED) {
-            l->entries[at].state = VCS_REWARD_STATE_PLANNED;
-            memcpy(l->entries[at].planned_by, lp->id, 32);
-        }
-    }
+    reward_plan_mark_planned(l, lp);
     return VCS_REWARD_PLAN_PERSIST_OK;
 }
 
@@ -1621,6 +1598,97 @@ static bool reward_commit_record_write(const struct vcs_reward_ledger *l,
     return ok;
 }
 
+/* Pass 2 writes one PLANNED row: a rejection, or its fact and queue state. */
+static enum vcs_reward_commit_error reward_commit_settle_row(
+    struct reward_commit_ctx *c, size_t i, const struct vcs_reward_plan_row *r)
+{
+    bool found = false;
+    size_t at = reward_entry_lower_bound(c->l, r->entry_id, &found);
+    if (!found)
+        return VCS_REWARD_COMMIT_IO; /* validated above; cannot happen */
+    struct vcs_reward_entry *e = &c->l->entries[at];
+    if (c->rejected[i]) {
+        e->state = VCS_REWARD_STATE_REJECTED;
+        snprintf(e->rejected_rule, sizeof(e->rejected_rule), "%s",
+                 VCS_REWARD_RULE_DUPLICATE);
+        if (!reward_entry_rewrite(c->l, e))
+            return VCS_REWARD_COMMIT_IO;
+        c->out->rejected_count++;
+        return VCS_REWARD_COMMIT_OK;
+    }
+    if (!c->resumed[i]) {
+        struct vcs_reward_fact f;
+        memset(&f, 0, sizeof(f));
+        memcpy(f.entry_id, e->entry_id, 32);
+        memcpy(f.release_root, e->release_root, 32);
+        memcpy(f.contributor, e->contributor, 33);
+        f.kind = (uint8_t)e->kind;
+        f.category = (uint8_t)e->category;
+        f.points = r->points_settled;
+        f.day = c->plan->day;
+        memcpy(f.facts_hash, e->facts_hash, 32);
+        memcpy(f.plan_id, c->plan_id, 32);
+        if (!reward_fact_write(c->l, &f))
+            return VCS_REWARD_COMMIT_IO;
+        struct vcs_reward_fact *slot = reward_fact_slot(c->l);
+        if (!slot)
+            return VCS_REWARD_COMMIT_IO;
+        *slot = f;
+    }
+    if (e->state != VCS_REWARD_STATE_SETTLED) {
+        e->state = VCS_REWARD_STATE_SETTLED;
+        memcpy(e->settled_by_plan, c->plan_id, 32);
+        e->settled_day = c->plan->day;
+        if (!reward_entry_rewrite(c->l, e))
+            return VCS_REWARD_COMMIT_IO;
+    }
+    c->out->settled_count++;
+    c->out->points_settled += r->points_settled;
+    if (c->resumed[i])
+        c->out->resumed = true;
+    return VCS_REWARD_COMMIT_OK;
+}
+
+static enum vcs_reward_commit_error reward_commit_settle_planned(
+    struct reward_commit_ctx *c)
+{
+    /* PASS 2 — write facts + queue transitions, commit record LAST. */
+    for (size_t i = 0; i < c->plan->row_count; i++) {
+        const struct vcs_reward_plan_row *r = &c->plan->rows[i];
+        if (r->disposition != VCS_REWARD_DISP_PLANNED)
+            continue;
+        enum vcs_reward_commit_error err = reward_commit_settle_row(c, i, r);
+        if (err != VCS_REWARD_COMMIT_OK)
+            return err;
+    }
+    return VCS_REWARD_COMMIT_OK;
+}
+
+/* Writes the commit record, registers the commit and marks the plan committed. */
+static bool reward_commit_finish(struct reward_commit_ctx *c)
+{
+    if (!reward_commit_record_write(c->l, c->plan, c->rejected) ||
+        !reward_commit_register(c->l, c->plan_id))
+        return false;
+    bool found = false;
+    struct vcs_reward_loaded_plan *lp =
+        reward_plan_slot(c->l, c->plan_id, &found);
+    if (lp)
+        lp->committed = true;
+    return true;
+}
+
+static enum vcs_reward_commit_error reward_commit_apply_plan(
+    struct reward_commit_ctx *c)
+{
+    enum vcs_reward_commit_error err = reward_commit_validate_planned(c);
+    if (err == VCS_REWARD_COMMIT_OK)
+        err = reward_commit_settle_planned(c);
+    if (err == VCS_REWARD_COMMIT_OK && !reward_commit_finish(c))
+        err = VCS_REWARD_COMMIT_IO;
+    return err;
+}
+
 enum vcs_reward_commit_error vcs_reward_commit(
     struct vcs_reward_ledger *l, const uint8_t plan_id[32],
     struct vcs_reward_commit_result *out, char *detail, size_t detail_size)
@@ -1653,197 +1721,12 @@ enum vcs_reward_commit_error vcs_reward_commit(
         }
     }
 
-    /* PASS 1 — validate every PLANNED row against the CURRENT ledger.
-     * Nothing is written in this pass. Batch additions for the cap
-     * recomputation accumulate in entry-id order exactly as plan_build
-     * did, with this plan's own settled facts excluded (they are the
-     * result, not the input). */
-    {
-        struct vcs_score_period_entry additions[VCS_REWARD_MAX_BATCH_ENTRIES];
-        size_t addition_count = 0;
-        char contributors[VCS_REWARD_MAX_BATCH_ENTRIES][33];
-        uint8_t accepted_roots[VCS_REWARD_MAX_BATCH_ENTRIES][32];
-        uint8_t accepted_cats[VCS_REWARD_MAX_BATCH_ENTRIES];
-        for (size_t i = 0; i < plan->row_count; i++) {
-            const struct vcs_reward_plan_row *r = &plan->rows[i];
-            if (r->disposition != VCS_REWARD_DISP_PLANNED)
-                continue;
-            const struct vcs_reward_entry *e =
-                vcs_reward_ledger_find(l, r->entry_id);
-            char id_hex[65];
-            zcl_hex_encode(r->entry_id, 32, id_hex);
-            if (!e) {
-                if (detail && detail_size > 0)
-                    snprintf(detail, detail_size, "entry %s missing", id_hex);
-                err = VCS_REWARD_COMMIT_STALE;
-                goto done;
-            }
-            if (e->state == VCS_REWARD_STATE_REJECTED) {
-                if (detail && detail_size > 0)
-                    snprintf(detail, detail_size,
-                             "entry %s rejected (%s)", id_hex,
-                             e->rejected_rule);
-                err = VCS_REWARD_COMMIT_STALE;
-                goto done;
-            }
-            const struct vcs_reward_fact *fact =
-                reward_fact_find(l, r->entry_id);
-            if (e->state == VCS_REWARD_STATE_SETTLED) {
-                if (reward_id_cmp(e->settled_by_plan, plan_id) != 0 ||
-                    !fact) {
-                    if (detail && detail_size > 0)
-                        snprintf(detail, detail_size,
-                                 "entry %s settled by another plan", id_hex);
-                    err = VCS_REWARD_COMMIT_STALE;
-                    goto done;
-                }
-                resumed[i] = true; /* replay of an interrupted commit */
-            } else if (fact &&
-                       reward_id_cmp(fact->plan_id, plan_id) != 0) {
-                if (detail && detail_size > 0)
-                    snprintf(detail, detail_size,
-                             "entry %s settled by another plan", id_hex);
-                err = VCS_REWARD_COMMIT_STALE;
-                goto done;
-            } else if (fact) {
-                resumed[i] = true; /* fact durable, queue update crashed */
-            }
-
-            /* A same-(release, contributor, category) fact from ANOTHER
-             * plan appeared since the plan was made: this entry can never
-             * settle — reject it with the named rule, settle the rest.
-             * The within-batch walk below catches the same collision
-             * between two rows of THIS plan (defense in depth: plan_build
-             * already excludes it). */
-            if (!resumed[i] &&
-                reward_fact_duplicate(l, e->release_root, e->contributor,
-                                      e->category, plan_id)) {
-                rejected[i] = true;
-                continue;
-            }
-            if (!resumed[i]) {
-                bool batch_dup = false;
-                for (size_t a = 0; a < addition_count; a++)
-                    if (accepted_cats[a] == (uint8_t)e->category &&
-                        memcmp(accepted_roots[a], e->release_root, 32) ==
-                            0 &&
-                        memcmp(contributors[a], e->contributor, 33) == 0) {
-                        batch_dup = true;
-                        break;
-                    }
-                if (batch_dup) {
-                    rejected[i] = true;
-                    continue;
-                }
-            }
-
-            /* Exact cap recomputation against the current ledger. */
-            struct vcs_score_period_entry
-                history[VCS_REWARD_MAX_FACTS + VCS_REWARD_MAX_BATCH_ENTRIES];
-            size_t hcount = reward_history_for(l, e->contributor, plan_id,
-                                               history,
-                                               VCS_REWARD_MAX_FACTS);
-            for (size_t a = 0; a < addition_count; a++) {
-                if (memcmp(contributors[a], e->contributor, 33) == 0 &&
-                    hcount < sizeof(history) / sizeof(history[0]))
-                    history[hcount++] = additions[a];
-            }
-            struct vcs_score_period_caps caps;
-            vcs_score_apply_period_caps(history, hcount, plan->day,
-                                        r->points_requested, &caps);
-            if (caps.allowed_score != r->points_settled ||
-                caps.daily_release_cap_hit) {
-                if (detail && detail_size > 0)
-                    snprintf(detail, detail_size,
-                             "entry %s: allowed %u != planned %u", id_hex,
-                             caps.allowed_score, r->points_settled);
-                err = VCS_REWARD_COMMIT_CAPS_CHANGED;
-                goto done;
-            }
-            if (!rejected[i] &&
-                addition_count < VCS_REWARD_MAX_BATCH_ENTRIES) {
-                additions[addition_count].day = plan->day;
-                additions[addition_count].score = r->points_settled;
-                memcpy(contributors[addition_count], e->contributor, 33);
-                memcpy(accepted_roots[addition_count], e->release_root, 32);
-                accepted_cats[addition_count] = (uint8_t)e->category;
-                addition_count++;
-            }
-        }
-    }
-
-    /* PASS 2 — write facts + queue transitions, commit record LAST. */
-    for (size_t i = 0; i < plan->row_count; i++) {
-        const struct vcs_reward_plan_row *r = &plan->rows[i];
-        if (r->disposition != VCS_REWARD_DISP_PLANNED)
-            continue;
-        bool found = false;
-        size_t at = reward_entry_lower_bound(l, r->entry_id, &found);
-        if (!found) {
-            err = VCS_REWARD_COMMIT_IO; /* validated above; cannot happen */
-            goto done;
-        }
-        struct vcs_reward_entry *e = &l->entries[at];
-        if (rejected[i]) {
-            e->state = VCS_REWARD_STATE_REJECTED;
-            snprintf(e->rejected_rule, sizeof(e->rejected_rule), "%s",
-                     VCS_REWARD_RULE_DUPLICATE);
-            if (!reward_entry_rewrite(l, e)) {
-                err = VCS_REWARD_COMMIT_IO;
-                goto done;
-            }
-            out->rejected_count++;
-            continue;
-        }
-        if (!resumed[i]) {
-            struct vcs_reward_fact f;
-            memset(&f, 0, sizeof(f));
-            memcpy(f.entry_id, e->entry_id, 32);
-            memcpy(f.release_root, e->release_root, 32);
-            memcpy(f.contributor, e->contributor, 33);
-            f.kind = (uint8_t)e->kind;
-            f.category = (uint8_t)e->category;
-            f.points = r->points_settled;
-            f.day = plan->day;
-            memcpy(f.facts_hash, e->facts_hash, 32);
-            memcpy(f.plan_id, plan_id, 32);
-            if (!reward_fact_write(l, &f)) {
-                err = VCS_REWARD_COMMIT_IO;
-                goto done;
-            }
-            struct vcs_reward_fact *slot = reward_fact_slot(l);
-            if (!slot) {
-                err = VCS_REWARD_COMMIT_IO;
-                goto done;
-            }
-            *slot = f;
-        }
-        if (e->state != VCS_REWARD_STATE_SETTLED) {
-            e->state = VCS_REWARD_STATE_SETTLED;
-            memcpy(e->settled_by_plan, plan_id, 32);
-            e->settled_day = plan->day;
-            if (!reward_entry_rewrite(l, e)) {
-                err = VCS_REWARD_COMMIT_IO;
-                goto done;
-            }
-        }
-        out->settled_count++;
-        out->points_settled += r->points_settled;
-        if (resumed[i])
-            out->resumed = true;
-    }
-    if (!reward_commit_record_write(l, plan, rejected) ||
-        !reward_commit_register(l, plan_id)) {
-        err = VCS_REWARD_COMMIT_IO;
-        goto done;
-    }
-    {
-        bool found = false;
-        struct vcs_reward_loaded_plan *lp =
-            reward_plan_slot(l, plan_id, &found);
-        if (lp)
-            lp->committed = true;
-    }
+    struct reward_commit_ctx ctx = {
+        .l = l, .plan = plan, .plan_id = plan_id, .rejected = rejected,
+        .resumed = resumed, .out = out, .detail = detail,
+        .detail_size = detail_size,
+    };
+    err = reward_commit_apply_plan(&ctx);
 
 done:
     free(rejected);
@@ -1854,6 +1737,49 @@ done:
 }
 
 /* ── receipt ────────────────────────────────────────────────────────── */
+
+/* Maps a receipt whose commit wire could not be read to its error. */
+static enum vcs_reward_receipt_error reward_receipt_missing(
+    const struct vcs_reward_ledger *l, const uint8_t plan_id[32])
+{
+    if (reward_commit_known(l, plan_id))
+        return VCS_REWARD_RECEIPT_IO; /* registered but unreadable */
+    bool corrupt = false;
+    struct vcs_reward_plan *plan = reward_plan_read(l, plan_id, &corrupt);
+    if (plan) {
+        vcs_reward_plan_free(plan);
+        free(plan);
+        return VCS_REWARD_RECEIPT_NOT_SETTLED;
+    }
+    return corrupt ? VCS_REWARD_RECEIPT_IO
+                   : VCS_REWARD_RECEIPT_UNKNOWN_PLAN;
+}
+
+/* Decodes one receipt row at *pp; on success advances *pp past it. False
+ * when the category or outcome is out of range. */
+static bool reward_receipt_row_decode(const uint8_t **pp,
+                                      struct vcs_reward_receipt_row *r)
+{
+    const uint8_t *p = *pp;
+    memcpy(r->entry_id, p, 32);
+    p += 32;
+    memcpy(r->contributor, p, 33);
+    p += 33;
+    r->category = (enum vcs_reward_category)p[0];
+    p++;
+    r->outcome = (enum vcs_reward_receipt_outcome)p[0];
+    p++;
+    if (r->category >= VCS_REWARD_CATEGORY_COUNT ||
+        r->outcome > VCS_REWARD_RECEIPT_REJECTED)
+        return false;
+    memcpy(r->rule, p, VCS_REWARD_RULE_MAX);
+    r->rule[VCS_REWARD_RULE_MAX - 1u] = '\0';
+    p += VCS_REWARD_RULE_MAX;
+    r->points = reward_get_u32le(p);
+    p += 4;
+    *pp = p;
+    return true;
+}
 
 enum vcs_reward_receipt_error vcs_reward_receipt_load(
     const struct vcs_reward_ledger *l, const uint8_t plan_id[32],
@@ -1873,20 +1799,8 @@ enum vcs_reward_receipt_error vcs_reward_receipt_load(
     size_t wire_len = 0;
     uint8_t *wire = reward_read_file(path, VCS_REWARD_MAX_COMMIT_WIRE_BYTES,
                                      &wire_len);
-    if (!wire) {
-        if (reward_commit_known(l, plan_id))
-            return VCS_REWARD_RECEIPT_IO; /* registered but unreadable */
-        bool corrupt = false;
-        struct vcs_reward_plan *plan =
-            reward_plan_read(l, plan_id, &corrupt);
-        if (plan) {
-            vcs_reward_plan_free(plan);
-            free(plan);
-            return VCS_REWARD_RECEIPT_NOT_SETTLED;
-        }
-        return corrupt ? VCS_REWARD_RECEIPT_IO
-                       : VCS_REWARD_RECEIPT_UNKNOWN_PLAN;
-    }
+    if (!wire)
+        return reward_receipt_missing(l, plan_id);
     if (wire_len < REWARD_COMMIT_HEADER_BYTES ||
         memcmp(wire, REWARD_COMMIT_MAGIC, 4) != 0) {
         free(wire);
@@ -1920,26 +1834,12 @@ enum vcs_reward_receipt_error vcs_reward_receipt_load(
     out->row_count = rows;
     for (size_t i = 0; i < rows; i++) {
         struct vcs_reward_receipt_row *r = &out->rows[i];
-        memcpy(r->entry_id, p, 32);
-        p += 32;
-        memcpy(r->contributor, p, 33);
-        p += 33;
-        r->category = (enum vcs_reward_category)p[0];
-        p++;
-        r->outcome = (enum vcs_reward_receipt_outcome)p[0];
-        p++;
-        if (r->category >= VCS_REWARD_CATEGORY_COUNT ||
-            r->outcome > VCS_REWARD_RECEIPT_REJECTED) {
+        if (!reward_receipt_row_decode(&p, r)) {
             free(wire);
             vcs_reward_receipt_free(out);
             LOG_ERROR(REWARD_LOG, "commit record %s row %zu", id_hex, i);
             return VCS_REWARD_RECEIPT_IO;
         }
-        memcpy(r->rule, p, VCS_REWARD_RULE_MAX);
-        r->rule[VCS_REWARD_RULE_MAX - 1u] = '\0';
-        p += VCS_REWARD_RULE_MAX;
-        r->points = reward_get_u32le(p);
-        p += 4;
         if (r->outcome == VCS_REWARD_RECEIPT_SETTLED) {
             out->settled_count++;
             out->points_total += r->points;

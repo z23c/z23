@@ -5,11 +5,6 @@
 # Only-gets-simpler ratchet: a pin may only fall. A grown function, a pin whose function
 # no longer exists, or a pin whose function is now within the cap fails the gate.
 # A shrunk function still over the cap passes; --tighten-baseline lowers its pin.
-contexts/commons/modules/vcs/src/package_reward.c:reward_load_plan_dir:16
-contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_commit:60
-contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_plan_build:18
-contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_plan_persist:22
-contexts/commons/modules/vcs/src/package_reward.c:vcs_reward_receipt_load:19
 contexts/commons/modules/vcs/src/package_swarm_node.c:schedule_locked:46
 contexts/commons/modules/vcs/src/package_swarm_node.c:swarm_fetch:39
 contexts/commons/modules/vcs/src/vcs.c:vcs_snapshot:18
