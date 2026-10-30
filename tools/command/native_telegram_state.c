@@ -136,8 +136,11 @@ bool tg_key_valid(const char *key)
     return true;
 }
 
-/* sent: one `<key> <first message id> <chunk count>` line per accepted send,
- * newest last, bounded to TG_SENT_MAX lines. */
+/* sent: one line per accepted send, newest last, bounded to TG_SENT_MAX lines.
+ * Current format: `<key> <first message id> <chunk count> <request hash>`.
+ * Legacy format, written before the hash was added: `<key> <first message id>
+ * <chunk count>`; a legacy record has no hash, so it matches any request with
+ * the same key (the pre-upgrade behaviour). */
 static bool tg_sent_path(const char *dir, char *out, size_t cap)
 {
     int n = snprintf(out, cap, "%s/sent", dir);
@@ -168,10 +171,16 @@ enum tg_sent tg_sent_lookup(const char *dir, const char *key, const char *hash,
         char *nl = strchr(line, '\n');
         long long id = 0, chunks = 0;
         char stored[TG_HASH_HEX] = "";
+        /* Bound the record: %s skips newlines, so a legacy line without a hash
+         * would otherwise read the next record's key as its hash. */
+        if (nl)
+            *nl = '\0';
         if (!strncmp(line, key, klen) && line[klen] == ' ' &&
             sscanf(line + klen + 1, "%lld %lld %32s", &id, &chunks, stored) >= 2) {
             *first_id = id;
             *count = chunks;
+            if (stored[0] == '\0')
+                return TG_SENT_SAME;
             return strcmp(stored, hash) == 0 ? TG_SENT_SAME : TG_SENT_DIFFERENT;
         }
         if (!nl)

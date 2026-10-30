@@ -503,6 +503,44 @@ static int tgt_registry_cases(void)
     return failures;
 }
 
+/* A sent record written before the request hash existed carries no hash field;
+ * a same-key retry must still dedup to the first send, not report key reuse. */
+static int tgt_legacy_sent_case(void)
+{
+    int failures = 0;
+    char path[PLATFORM_TEMP_PATH_MAX + 16], hash[TG_HASH_HEX];
+    int64_t first = 0, count = 0;
+    tg_request_hash(-100123, "hello", hash);
+    snprintf(path, sizeof(path), "%s/sent", g_root);
+    TEST_CASE("legacy sent record without a hash dedups on the key") {
+        ASSERT(tgt_write_file(path, "legacy1 77 2\n", 0600));
+        ASSERT_EQ(tg_sent_lookup(g_root, "legacy1", hash, &first, &count), TG_SENT_SAME);
+        ASSERT_EQ(first, 77);
+        ASSERT_EQ(count, 2);
+    } TEST_END
+    return failures;
+}
+
+/* A legacy record has no hash field, so the parse must stop at its newline. */
+static int tgt_legacy_sent_next_case(void)
+{
+    int failures = 0;
+    char path[PLATFORM_TEMP_PATH_MAX + 16], hash[TG_HASH_HEX];
+    int64_t first = 0, count = 0;
+    tg_request_hash(-100123, "hello", hash);
+    snprintf(path, sizeof(path), "%s/sent", g_root);
+    TEST_CASE("legacy record followed by another record does not read its key as a hash") {
+        ASSERT(tgt_write_file(path, "legacy1 77 2\nnext 5 1 0123456789abcdef0123456789abcdef\n",
+                              0600));
+        ASSERT_EQ(tg_sent_lookup(g_root, "legacy1", hash, &first, &count), TG_SENT_SAME);
+        ASSERT_EQ(first, 77);
+        ASSERT_EQ(count, 2);
+        ASSERT_EQ(tg_sent_lookup(g_root, "next", hash, &first, &count), TG_SENT_DIFFERENT);
+        ASSERT_EQ(first, 5);
+    } TEST_END
+    return failures;
+}
+
 /* One-shot loopback Bot API: proves the real curl transport sends the token
  * only in the request path and returns the parsed answer. */
 struct tgt_server {
@@ -615,6 +653,8 @@ int test_telegram(void)
     failures += tgt_case_0() + tgt_case_1() + tgt_case_2() + tgt_case_3() + tgt_case_4();
     failures += tgt_case_5() + tgt_case_6() + tgt_case_mono() + tgt_case_7();
     failures += tgt_status_case() + tgt_case_9() + tgt_case_10() + tgt_registry_cases() + tgt_case_wallet();
+    failures += tgt_legacy_sent_case();
+    failures += tgt_legacy_sent_next_case();
     failures += tgt_curl_case();
     tg_transport_override(NULL, NULL);
 #endif
