@@ -953,8 +953,8 @@ static int ash_test_pause_hold_conditions(void)
               atomic_load(&g_hold_pressure_polls) == 1);
     ASH_CHECK("hold: stall condition NOT polled while paused",
               atomic_load(&g_hold_stall_polls) == 0);
-    ASH_CHECK("hold: peer-floor redial condition polled while paused",
-              atomic_load(&g_hold_peer_polls) == 1);
+    ASH_CHECK("hold: peer-floor condition is held while paused",
+              atomic_load(&g_hold_peer_polls) == 0);
 
     node_pace_set(NODE_PACE_NORMAL);
     condition_engine_reset_for_testing();

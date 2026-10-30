@@ -497,11 +497,11 @@ During `pause`:
   hold lasts two minutes past the end of the pause so detectors see the node
   advancing before they judge it, and the watchdog stall clock restarts from
   the moment the pause ends. Device-pressure conditions (disk full or low, memory
-  pressure, segment corruption, clock skew, fsync slowness) and the peer-floor
-  redial keep running during the hold, so a long pause cannot let the disk fill,
-  memory climb or every peer drop without a redial. The redial only reconnects
-  and kicks seed discovery; at worst an unwitnessed episode pages once and
-  re-arms every 10 minutes.
+  pressure, segment corruption, clock skew, fsync slowness)
+  keep running during the hold, so a long pause cannot let the disk fill or
+  memory climb. The peer-floor condition is held, because its witness needs the
+  chain to advance and would page about a pause the app chose; the connection
+  manager's own dial scheduler keeps redialling below the floor during the hold.
 - Synchronous block ingest is not background sync. A block the owner submits
   or mines (`submitblock`, `generate`), an at-tip relay block and every
   compact-block announcement reach `reducer_ingest_block`, which drains unpaced
