@@ -217,6 +217,9 @@ static bool rpc_run(const char *params_json, struct json_value *result)
     struct rpc_table tbl;
     rpc_table_init(&tbl);
     register_net_rpc_commands(&tbl);
+    /* rpc_table_execute refuses every method while the process is in
+     * warmup, which is the default in a bare test process. */
+    set_rpc_warmup_finished();
     struct json_value params;
     json_init(&params);
     json_init(result);
