@@ -520,6 +520,32 @@ static int vh_recheck_scan_rows(struct main_state *ms, sqlite3 *db,
     return rc;
 }
 
+/* Store the recheck floor after a committed pass and report whether the pass
+ * made progress: JOB_ADVANCED only when the floor moved past start. */
+static job_result_t vh_recheck_settle_floor(const struct vh_job *jobs, int n,
+                                            int64_t last_seen,
+                                            int64_t first_unresolved,
+                                            int64_t start)
+{
+    /* Advance the floor only past rows that RESOLVED to ok=1; pin it at the
+     * lowest row still ok=0 so the next pass retries it once its solution is
+     * backfilled. jobs[] is height-ascending, so the first !ok is the lowest
+     * still-failing height. Advancing unconditionally to last_seen+1 (the old
+     * behavior) re-stranded a repairable row the moment recheck touched it
+     * before its solution landed — the same monotonic-strand defect as the
+     * forward drain. Verdict-preserving: a row only leaves ok=0 via a genuine
+     * PoW + Equihash pass in vh_pool_run_batch above. */
+    int64_t lowest_still_failing = vh_lowest_repairable_failure(jobs, n);
+    int64_t new_floor = vh_recheck_pick_floor(lowest_still_failing, last_seen,
+                                              first_unresolved);
+    atomic_store(&g_failure_recheck_cursor, new_floor);
+    /* Only claim progress when the floor actually advanced. A pinned floor
+     * (the lowest repairable row still has no backfilled solution) returns
+     * JOB_IDLE so the stage backs off rather than busy-looping on a row it
+     * cannot yet flip; the next poll retries it once the solution lands. */
+    return (new_floor > start) ? JOB_ADVANCED : JOB_IDLE;
+}
+
 static job_result_t recheck_failed_rows(struct main_state *ms,
                                           sqlite3 *db,
                                           uint64_t validated_cursor)
@@ -664,23 +690,7 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
         return vh_db_fault(frc, (int)last_seen, "recheck commit");
     }
     progress_store_tx_unlock();
-    /* Advance the floor only past rows that RESOLVED to ok=1; pin it at the
-     * lowest row still ok=0 so the next pass retries it once its solution is
-     * backfilled. jobs[] is height-ascending, so the first !ok is the lowest
-     * still-failing height. Advancing unconditionally to last_seen+1 (the old
-     * behavior) re-stranded a repairable row the moment recheck touched it
-     * before its solution landed — the same monotonic-strand defect as the
-     * forward drain. Verdict-preserving: a row only leaves ok=0 via a genuine
-     * PoW + Equihash pass in vh_pool_run_batch above. */
-    int64_t lowest_still_failing = vh_lowest_repairable_failure(jobs, n);
-    int64_t new_floor = vh_recheck_pick_floor(lowest_still_failing, last_seen,
-                                              first_unresolved);
-    atomic_store(&g_failure_recheck_cursor, new_floor);
-    /* Only claim progress when the floor actually advanced. A pinned floor
-     * (the lowest repairable row still has no backfilled solution) returns
-     * JOB_IDLE so the stage backs off rather than busy-looping on a row it
-     * cannot yet flip; the next poll retries it once the solution lands. */
-    return (new_floor > start) ? JOB_ADVANCED : JOB_IDLE;
+    return vh_recheck_settle_floor(jobs, n, last_seen, first_unresolved, start);
 }
 
 static bool mark_valid_header(struct block_index *bi)
