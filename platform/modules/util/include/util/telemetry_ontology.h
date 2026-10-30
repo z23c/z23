@@ -25,7 +25,7 @@
  * the SUBSYSTEM-level descriptor (owner file, cost, freshness, key forms).
  * This file is strictly the FIELD level below it and duplicates none of that.
  *
- * Enforced by tools/lint/check_telemetry_ontology.sh: a field emitted inside a
+ * Enforced by tools/lint/lintc/gate_telemetry_ontology.c: a field emitted inside a
  * covered dump function with no row here fails `make lint`.
  */
 #ifndef ZCL_UTIL_TELEMETRY_ONTOLOGY_H

@@ -10,7 +10,7 @@
  *                                  rows owe all three; TFR_INFO rows owe
  *                                  `means` and are explicitly allowed to leave
  *                                  implies/next empty (the same split
- *                                  check_telemetry_ontology.sh enforces).
+ *                                  check-telemetry-ontology enforces).
  *   a filled snapshot has no UNSET a leaf the collector forgot renders as null
  *                                  and is counted a provider defect — the
  *                                  point being that forgetting is VISIBLE, so

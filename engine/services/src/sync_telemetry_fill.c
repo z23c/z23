@@ -17,7 +17,7 @@
  * file and there must never be one: telemetry_render() is the single place a
  * telemetry field becomes JSON, and a collector that hand-writes a key
  * reintroduces the unannotated, unrenderable field the whole layer exists to
- * make impossible (tools/lint/check_telemetry_ontology.sh, TABLE rule 4).
+ * make impossible (tools/lint/lintc/gate_telemetry_ontology.c, TABLE rule 4).
  * There is no health decision here either — a verdict comes from the TL_LEAF
  * row's rule through telemetry_ontology_annotate(), never from a provider.
  *

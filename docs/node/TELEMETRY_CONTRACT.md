@@ -117,7 +117,7 @@ restart from a stall.
 
 | Gate | Holds |
 |---|---|
-| `check-telemetry-ontology` | the row-content check rejects an empty `means`; for the eight judged rules it also rejects an empty `next`, including when both `implies` and `next` are empty. Empty `implies` with non-empty `next` passes this check; it does not validate the unit or rule column (`tools/lint/check_telemetry_ontology.sh:485-509`; current rules: `platform/modules/util/include/util/telemetry_ontology.h:59-69`). Table-driven domains receive structural checks (`tools/lint/check_telemetry_ontology.sh:629-672`); scanned fill-provider files fail on calls matching `json_push_kv_(int\|str\|bool\|dbl\|uint)` (`tools/lint/check_telemetry_ontology.sh:675-718`). |
+| `check-telemetry-ontology` | the row-content check rejects an empty `means`; for the eight judged rules it also rejects an empty `next`, including when both `implies` and `next` are empty. Empty `implies` with non-empty `next` passes this check; it does not validate the unit or rule column (`tools/lint/lintc/gate_telemetry_ontology.c`; current rules: `platform/modules/util/include/util/telemetry_ontology.h:59-69`). Table-driven domains receive structural checks (`tools/lint/lintc/gate_telemetry_ontology.c`); scanned fill-provider files fail on calls matching `json_push_kv_(int\|str\|bool\|dbl\|uint)` (`tools/lint/lintc/gate_telemetry_ontology.c`). |
 | `check-dumper-never-blocks` | no blocking lock or unbounded scan in a dumper **or** a collector |
 | `check-command-contract` | every leaf states its source and freshness |
 | `check-command-availability-truthful` | a leaf that cannot answer is `PLANNED`, not silently empty |

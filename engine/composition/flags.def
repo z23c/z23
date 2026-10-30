@@ -2452,21 +2452,21 @@ Z23_FLAG("ZCL_SYSTEMD_MEMORY_BUDGET_SELFTEST", "env_build", "0", "-",
 Z23_FLAG("ZCL_TASK_REF", "env_runtime", "-", "-",
           "first use tools/dev/devloop_cycle.c:auto; documented at docs/commons/ZVCS.md:259: [128 task_ref] from ZCL_TASK_REF")
 Z23_FLAG("ZCL_TELEMETRY_DOMAINS_DEF", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_telemetry_ontology.c:auto")
 Z23_FLAG("ZCL_TELEMETRY_FIELDS_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_telemetry_ontology.c:auto")
 Z23_FLAG("ZCL_TELEMETRY_FILL_PROVIDER_COUNT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_telemetry_ontology.c:auto")
 Z23_FLAG("ZCL_TELEMETRY_FILL_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_telemetry_ontology.c:auto")
 Z23_FLAG("ZCL_TELEMETRY_ONTOLOGY_DEF", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_telemetry_ontology.c:auto")
 Z23_FLAG("ZCL_TELEMETRY_ONTOLOGY_TU", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_telemetry_ontology.c:auto")
 Z23_FLAG("ZCL_TELEMETRY_SCAN_EXTRA_MANIFEST", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_telemetry_ontology.c:auto")
 Z23_FLAG("ZCL_TELEMETRY_SCAN_MANIFEST", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_telemetry_ontology.c:auto")
 Z23_FLAG("ZCL_TEST_CANONICAL_DATADIR", "env_runtime", "-", "-",
           "the operator's real default datadir, exported by the test runners before they swap HOME; the request writers in storage/boot_auto_reindex.c refuse any write at or under it while ZCL_TEST_HARNESS is set; first use engine/modules/storage/src/boot_auto_reindex.c:auto")
 Z23_FLAG("ZCL_TEST_HARNESS", "env_runtime", "-", "-",

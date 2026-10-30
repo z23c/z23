@@ -2,7 +2,7 @@
  *
  * The including translation unit defines TELEMETRY_FIELD, TELEMETRY_ALIAS and
  * TELEMETRY_QUESTION. See util/telemetry_ontology.h for the row contract and
- * tools/lint/check_telemetry_ontology.sh for the gate that keeps this file in
+ * tools/lint/lintc/gate_telemetry_ontology.c for the gate that keeps this file in
  * step with what the dump functions actually emit.
  *
  * TELEMETRY_FIELD(subsystem, path, unit, rule, operand, threshold, severity,

@@ -17,7 +17,7 @@
 #                           in the same commit; that is the acknowledgement
 #                           that the new file is now covered.
 #
-# Discovery shape (tools/lint/check_telemetry_ontology.sh): a file under the
+# Discovery shape (tools/lint/lintc/gate_telemetry_ontology.c): a file under the
 # scan roots named `*_fill.c` whose basename starts with `<domain>_`, or which
 # defines `<domain>_dump_state_fill(`, for a domain named by a TABLE row.
 #

@@ -742,7 +742,7 @@ assert green).
   ontology rows, judged (non-info) rows and extracted fields make a hollow
   scan exit 2 rather than pass. Self-test:
   `tests/harness/src/lint_gate_quality_selftests.c:t_telemetry_ontology_gate`.
-  Impl: `tools/lint/check_telemetry_ontology.sh`.
+  Impl: `tools/lint/lintc/gate_telemetry_ontology.c`.
 
 - **Gate #51: `check-accel-oracle-pinned`** (HARD) — the `core/` seal (Gate #47)
   covers the TEXT of the consensus predicates, not the ISA-dispatched

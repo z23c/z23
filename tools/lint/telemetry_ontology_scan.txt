@@ -1,5 +1,5 @@
 # Telemetry-ontology scan manifest — the declared coverage surface of
-# tools/lint/check_telemetry_ontology.sh.
+# tools/lint/lintc/gate_telemetry_ontology.c.
 #
 # One row per (subsystem, owning .c file, emitting function, JSON target
 # variable) tuple. The gate slices each named function out of its file,

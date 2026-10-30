@@ -164,6 +164,7 @@ LINT_GATE("check-blocker-escape-registered", check_blocker_escape_registered, LI
 LINT_GATE("check-status-reason-single", check_status_reason_single, LINT_CMD_PAIR)
 LINT_GATE("check-git-hooks-installed", check_git_hooks_installed, LINT_CMD_NONE)
 LINT_GATE("check-fleet-facts", check_fleet_facts, LINT_CMD_PAIR)
+LINT_GATE("check-telemetry-ontology", check_telemetry_ontology, LINT_CMD_PAIR)
 LINT_GATE("check-fleet-vitals", check_fleet_vitals, LINT_CMD_PAIR)
 LINT_GATE("check-fleet-observations", check_fleet_observations, LINT_CMD_PAIR)
 LINT_GATE("check-windows-acceptance", check_windows_acceptance, LINT_CMD_PAIR)

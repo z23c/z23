@@ -221,7 +221,7 @@
 /* check-telemetry-ontology: the fixture pair is checked in (a .fixture suffix
  * keeps it out of source globs), so the trip case runs against the real
  * ontology and floors. */
-#define TELEMETRY_ONTOLOGY_SCRIPT_REL "tools/lint/check_telemetry_ontology.sh"
+#define TELEMETRY_ONTOLOGY_SCRIPT_REL "build/bin/z23-lint check-telemetry-ontology"
 #define TELEMETRY_ONTOLOGY_EXTRA_ENV "ZCL_TELEMETRY_SCAN_EXTRA_MANIFEST"
 #define TELEMETRY_ONTOLOGY_EXTRA_REL "tools/lint/fixtures/telemetry_scan_extra.txt"
 #define TELEMETRY_ONTOLOGY_MANIFEST_ENV "ZCL_TELEMETRY_SCAN_MANIFEST"

@@ -14477,9 +14477,10 @@ check-read-leaf-no-boot-ceremony: $(LINTC_TOOL)
 # counts, its health rule, what a bad value implies, what to read next) in
 # platform/modules/util/include/util/telemetry_ontology.def. A new field with no meaning
 # fails here, named with its file:line.
-check-telemetry-ontology:
+check-telemetry-ontology: $(LINTC_TOOL)
 	@echo "══ LINT: telemetry field ontology ══"
-	@./tools/lint/check_telemetry_ontology.sh
+	@./build/bin/z23-lint check-telemetry-ontology --selftest
+	@./build/bin/z23-lint check-telemetry-ontology
 
 # Gate — no NEW repair rung without a write-time-invariant test (RATCHET for
 # TENACITY I3). A new repair/reconcile/backfill/heal file in app/ must cite a
