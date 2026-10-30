@@ -1521,13 +1521,8 @@ ZCL_COMMAND_BRANCH("ops.node", "ops", "Local node unit control",
                    ZCL_COMMAND_LAYER_OPS)
 ZCL_COMMAND_READY_COMMAND(
     "ops.node.restart", "ops.node", "",
-    "Restart this host's z23 node unit, then report tip height and uptime",
-    "Two steps. A call without confirm changes nothing: it reads the node's "
-    "tip height and process uptime and returns a plan_id that is valid for "
-    "five minutes and one use. The same call with that plan_id and "
-    "confirm:true runs exactly one `systemctl --user restart "
-    "z23-node.service`, then polls the node's own RPC until it answers or "
-    "wait_s (1..120, default 120) seconds pass. Reply: restarted:true, "
+    "Restart this host's node unit (z23-node.service, or the legacy zclassic23.service when it is the only active node unit), then report tip height and uptime",
+    "Two steps. A call without confirm changes nothing: it selects the node unit, reads the node's tip height and process uptime, and returns a plan_id that is valid for five minutes and one use, bound to the selected unit. The same call with that plan_id and confirm:true re-checks the selection, refuses NODE_UNIT_CHANGED if the active unit moved since the plan, then runs exactly one `systemctl --user restart <unit>` of the planned unit and polls the node's own RPC until it answers or wait_s (1..120, default 120) seconds pass. Unit selection: z23-node.service is the default; zclassic23.service is used when it is the only active node unit. Both active is NODE_UNIT_AMBIGUOUS, and neither active or an unrecognised answer is NODE_UNIT_NOT_FOUND; nothing restarts then. Reply: unit, restarted:true, "
     "height_before, uptime_s_before, height_after, uptime_s_after and a note "
     "`restarted, answering at height H`; NODE_NOT_ANSWERING when the node is "
     "silent after the wait, NOT_RESTARTED when it answers with an uptime that "
