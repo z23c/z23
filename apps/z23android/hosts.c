@@ -164,6 +164,18 @@ static void first_attention_host(const char *report, char *label, size_t cap)
         line += n;
     }
 }
+/* Copies the first offered question after the one just asked, wrapping around and never repeating it. */
+static void next_question(const char *const ask[], size_t count, const char *asked, char *out, size_t cap)
+{
+    size_t start = 0;
+    bool answered = asked && asked[0];
+    for (size_t i = 0; answered && i < count; i++)
+        if (ask[i][0] && !strcasecmp(ask[i], asked)) start = i + 1;
+    for (size_t i = 0; !out[0] && i < count; i++) {
+        const char *q = ask[(start + i) % count];
+        if (q[0] && !(answered && !strcasecmp(q, asked))) snprintf(out, cap, "%s", q);
+    }
+}
 const char *zapp_suggestion(bool paired, bool responding, int64_t height, int64_t target, int64_t peers,
                             const char *report, const char *asked, char *out, size_t cap)
 {
@@ -174,14 +186,7 @@ const char *zapp_suggestion(bool paired, bool responding, int64_t height, int64_
         responding && (peers == 0 || target <= 0) ? "Why is my node waiting for peers?" : "",
         responding && height >= 0 && height < target ? "How long until my node catches up?" : "",
         zapp_fleet_attention(report) > 0 ? "Which hosts need attention?" : "", drill, "How is my fleet?"};
-    size_t count = sizeof(ask) / sizeof(ask[0]), start = 0;
-    bool answered = asked && asked[0];
-    for (size_t i = 0; answered && i < count; i++)
-        if (ask[i][0] && !strcasecmp(ask[i], asked)) start = i + 1;
     out[0] = 0;
-    for (size_t i = 0; paired && !out[0] && i < count; i++) {
-        const char *q = ask[(start + i) % count];
-        if (q[0] && !(answered && !strcasecmp(q, asked))) snprintf(out, cap, "%s", q);
-    }
+    if (paired) next_question(ask, sizeof(ask) / sizeof(ask[0]), asked, out, cap);
     return out;
 }
