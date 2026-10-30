@@ -274,6 +274,7 @@ ZCL_BLOCKER_REMEDY(supervisor.tick_runner_wedged,               OWNER)
 ZCL_BLOCKER_REMEDY(connman_reactor_overflow,                    OWNER)
 ZCL_BLOCKER_REMEDY(bg_validation.reverify_failed,               OWNER)
 ZCL_BLOCKER_REMEDY(bg_validation.full_history_unproven,         OWNER)
+ZCL_BLOCKER_REMEDY(bg_validation.body_unreadable,               body_fetch_missing_have_data) /* detect: the reader's body-read note names the height; remedy queues the fetch whose arrival makes the next 5 s re-read succeed and clear this blocker */
 ZCL_BLOCKER_REMEDY(recovery_coordinator.no_applicable_rung,     OWNER)
 ZCL_BLOCKER_REMEDY(seed.linkage_gate,                           OWNER)
 ZCL_BLOCKER_REMEDY(seed.torn_import,                            OWNER)
