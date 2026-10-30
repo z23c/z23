@@ -322,6 +322,17 @@ static void rnd_sym_line(const char *line, int darwin, struct rnd_nmres *res)
     rnd_mark_forbidden(s, res);
 }
 
+/* read() that retries on EINTR, so an interrupted read cannot end the scan
+ * early. Any other failure returns -1 to the caller. */
+static ssize_t rnd_read(int fd, char *buf, size_t n)
+{
+    ssize_t r;
+    do {
+        r = read(fd, buf, n);
+    } while (r < 0 && errno == EINTR);
+    return r;
+}
+
 /* Reaps pid; EINTR retries, any other waitpid failure is an error (never a
  * clean status). */
 static int rnd_wait(pid_t pid, int *st)
@@ -333,12 +344,34 @@ static int rnd_wait(pid_t pid, int *st)
     return r == pid ? 0 : 2;
 }
 
-/* Runs nm with fork + execvp and an argv array (never a shell). stdout is
- * drained first and streamed through the forbidden matcher; stderr is read
- * after, so a large symbol list can never wedge the pipe. */
-static int rnd_nm(const char *bin, int darwin, struct rnd_nmres *res)
+/* Child side of the nm spawn: wire the pipes to fds 1 and 2, then exec nm
+ * with an argv array. Returns only if exec fails (exit 127). */
+static void rnd_exec_nm(const char *bin, int darwin, const int outp[2],
+                        const int errp[2])
 {
-    int outp[2], errp[2];
+    dup2(outp[1], 1);
+    dup2(errp[1], 2);
+    close(outp[0]); close(outp[1]);
+    close(errp[0]); close(errp[1]);
+    char *argv[6];
+    int a = 0;
+    argv[a++] = (char *)"nm";
+    if (!darwin) {
+        argv[a++] = (char *)"-D";
+        argv[a++] = (char *)"--defined-only";
+    } else {
+        argv[a++] = (char *)"-gU";
+    }
+    argv[a++] = (char *)bin;
+    argv[a] = NULL;
+    execvp("nm", argv);
+    _exit(127);
+}
+
+/* Creates both pipes and forks the nm child. Parent keeps the read ends. */
+static int rnd_spawn_nm(const char *bin, int darwin, int outp[2], int errp[2],
+                        pid_t *pid_out)
+{
     if (pipe(outp) != 0)
         return 2;
     if (pipe(errp) != 0) {
@@ -352,31 +385,22 @@ static int rnd_nm(const char *bin, int darwin, struct rnd_nmres *res)
         close(errp[0]); close(errp[1]);
         return 2;
     }
-    if (pid == 0) {
-        dup2(outp[1], 1);
-        dup2(errp[1], 2);
-        close(outp[0]); close(outp[1]);
-        close(errp[0]); close(errp[1]);
-        char *argv[6];
-        int a = 0;
-        argv[a++] = (char *)"nm";
-        if (!darwin) {
-            argv[a++] = (char *)"-D";
-            argv[a++] = (char *)"--defined-only";
-        } else {
-            argv[a++] = (char *)"-gU";
-        }
-        argv[a++] = (char *)bin;
-        argv[a] = NULL;
-        execvp("nm", argv);
-        _exit(127);
-    }
+    if (pid == 0)
+        rnd_exec_nm(bin, darwin, outp, errp);
     close(outp[1]);
     close(errp[1]);
+    *pid_out = pid;
+    return 0;
+}
+
+/* Streams nm's stdout through the symbol matcher. Returns the last read()
+ * result: 0 at EOF, negative on a read failure. */
+static ssize_t rnd_pump_stdout(int fd, int darwin, struct rnd_nmres *res)
+{
     char pend[RND_LINE], chunk[4096];
     size_t pl = 0;
     ssize_t r;
-    while ((r = read(outp[0], chunk, sizeof chunk)) > 0) {
+    while ((r = rnd_read(fd, chunk, sizeof chunk)) > 0) {
         for (ssize_t i = 0; i < r; i++) {
             if (chunk[i] == '\n') {
                 pend[pl] = '\0';
@@ -387,13 +411,25 @@ static int rnd_nm(const char *bin, int darwin, struct rnd_nmres *res)
             }
         }
     }
-    close(outp[0]);
+    return r;
+}
+
+/* Reads nm's stderr into res->err and closes fd. 2 on a read failure. */
+static int rnd_drain_stderr(int fd, struct rnd_nmres *res)
+{
+    ssize_t r = 0;
     size_t el = 0;
     while (el + 1 < sizeof res->err &&
-           (r = read(errp[0], res->err + el, sizeof res->err - 1 - el)) > 0)
+           (r = rnd_read(fd, res->err + el, sizeof res->err - 1 - el)) > 0)
         el += (size_t)r;
     res->err[el] = '\0';
-    close(errp[0]);
+    close(fd);
+    return r < 0 ? 2 : 0;
+}
+
+/* Reaps nm and records its exit status: code, 128+signal, or 127. */
+static int rnd_nm_status(pid_t pid, struct rnd_nmres *res)
+{
     int st = 0;
     if (rnd_wait(pid, &st))
         return 2;
@@ -404,6 +440,26 @@ static int rnd_nm(const char *bin, int darwin, struct rnd_nmres *res)
     else
         res->rc = 127;
     return 0;
+}
+
+/* Runs nm with fork + execvp and an argv array (never a shell). stdout is
+ * drained first and streamed through the forbidden matcher; stderr is read
+ * after, so a large symbol list can never wedge the pipe. */
+static int rnd_nm(const char *bin, int darwin, struct rnd_nmres *res)
+{
+    int outp[2], errp[2];
+    pid_t pid = 0;
+    if (rnd_spawn_nm(bin, darwin, outp, errp, &pid))
+        return 2;
+    ssize_t r = rnd_pump_stdout(outp[0], darwin, res);
+    close(outp[0]);
+    if (r < 0) {
+        close(errp[0]);
+        return 2;
+    }
+    if (rnd_drain_stderr(errp[0], res))
+        return 2;
+    return rnd_nm_status(pid, res);
 }
 
 static int rnd_layer2(const char *root, const char *bin, FILE *out, FILE *err,
