@@ -36,7 +36,6 @@ contexts/wallet/views/src/wallet_gui.c	wallet_gui_main
 core/modules/crypto/src/keccak_x4.c	keccak_x4_available
 core/modules/crypto/src/sha3_256_x4.c	sha3_256_x4_avx512
 core/modules/net/src/file_service.c	file_service_dump_state_json
-core/modules/net/src/file_service.c	fs_client_sync
 core/modules/net/src/file_service.c	fs_conn_budget_ok
 core/modules/net/src/file_service.c	fs_ip_bytes_charge
 core/modules/net/src/file_service.c	fs_ip_serve_acquire
@@ -48,8 +47,6 @@ core/modules/net/src/file_service.c	fs_server_is_running
 core/modules/net/src/file_service.c	fs_server_refresh_manifest
 core/modules/net/src/file_service.c	fs_server_start
 core/modules/net/src/file_service.c	fs_server_stop
-core/modules/net/src/file_service.c	fs_test_range_worker_socket_lifecycle
-core/modules/net/src/file_service.c	fs_test_resolved_connect_lifecycle
 core/modules/sapling/src/params_fetch_session.c	zcl_param_fetch_accept_chunk
 core/modules/sapling/src/params_fetch_session.c	zcl_param_fetch_bytes_rejected
 core/modules/sapling/src/params_fetch_session.c	zcl_param_fetch_chunks_have
