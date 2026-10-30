@@ -958,6 +958,8 @@ int test_coldimport_restart_fragility(void);
 int test_territory(void);
 /* Base-relative lint premise selection (tests/harness/src/test_lint_selection.c). */
 int test_lint_selection(void);
+/* z23-lint precheck on a fixture gate table (tests/harness/src/test_lint_precheck.c). */
+int test_lint_precheck(void);
 
 /* Spec-based user story tests (one per feature area) */
 int spec_wallet_dashboard(void);
