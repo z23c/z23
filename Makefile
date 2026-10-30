@@ -6622,7 +6622,11 @@ LINT_FAST_GATES := \
     check-zcode-package-registry \
     check-orient-facts \
     check-arena-view-stub \
-    check-hotfork-stories
+    check-hotfork-stories \
+    check-silent-errors-bool \
+    check-no-raw-clock-outside-platform \
+    check-hex-codec-single \
+    check-byte-order-codec-single
 
 # These gates check the generated capability inventory and package registry
 # roots, including zcode-package.json dependency pins. Both also run in full lint.
@@ -6655,8 +6659,6 @@ LINT_LAND_EXTRA_GATES := \
     check-core-seal \
     check-remote-command-classes \
     check-api-reference-generated \
-    check-silent-errors-bool \
-    check-no-raw-clock-outside-platform \
     check-tor-provenance \
     check-no-real-clock-test-deadline \
     check-release-no-dev-symbols \
@@ -6670,8 +6672,6 @@ LINT_LAND_EXTRA_GATES := \
     check-doc-accuracy \
     check-scanner-immunity \
     check-posix-ere-only \
-    check-byte-order-codec-single \
-    check-hex-codec-single \
     check-hotswap-dev-only \
     check-blocker-remedy \
     check-kpi-floor \
