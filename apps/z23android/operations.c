@@ -133,30 +133,59 @@ static bool inherited_environment(const char *entry)
                    sizeof("ZCL_BIP_PAGE_CACHE_KIB=") - 1) != 0;
 }
 
+static bool inherited_home(const char *entry)
+{
+    return strncmp(entry, "HOME=", 5) == 0;
+}
+
+/* Writes "name=root" into out. The root must be absolute and the entry must fit. */
+static bool app_root_entry(char *out, size_t cap, const char *name, const char *root)
+{
+    int n = snprintf(out, cap, "%s=%s", name, root);
+    return n > 0 && (size_t)n < cap && root[0] == '/';
+}
+
+/* Copies the parent's environment entries the app does not set itself. */
+static size_t copy_inherited_environment(char **env, size_t count, bool *has_home)
+{
+    size_t used = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (!inherited_environment(environ[i])) continue;
+        *has_home = *has_home || inherited_home(environ[i]);
+        env[used++] = environ[i];
+    }
+    return used;
+}
+
+/* Appends the fixed app entries; HOME is added only when the parent did not supply one. */
+static void append_app_environment(char **env, size_t used, char *state,
+                                   char *temp, char *home, bool has_home)
+{
+    env[used++] = state;
+    env[used++] = temp;
+    if (!has_home) env[used++] = home;
+    env[used++] = "ZCL_CATCHUP_DRAIN_BUDGET_MS=100";
+    env[used++] = "ZCL_BIP_PAGE_CACHE_KIB=32768";
+    env[used] = NULL;
+}
+
 static int spawn_environment(struct zapp_runtime *r, char *const argv[], pid_t *pid,
                              posix_spawn_file_actions_t *actions, posix_spawnattr_t *attr)
 {
-    int rc = 0;
     char state[sizeof(r->state_root) + 16], temp[sizeof(r->temporary_root) + 8];
-    int written = snprintf(state, sizeof(state), "XDG_STATE_HOME=%s", r->state_root);
-    int temp_written = snprintf(temp, sizeof(temp), "TMPDIR=%s", r->temporary_root);
+    char home[sizeof(r->state_root) + 8];
     size_t count = 0;
-    rc = environment_count(&count);
-    char **env = rc ? NULL : calloc(count + 5, sizeof(*env));
-    if (!rc && (!env || written < 0 || (size_t)written >= sizeof(state) ||
-                r->state_root[0] != '/' || temp_written < 0 ||
-                (size_t)temp_written >= sizeof(temp) || r->temporary_root[0] != '/')) rc = EINVAL;
-    size_t used = 0;
-    for (size_t i = 0; !rc && i < count; ++i)
-        if (inherited_environment(environ[i])) env[used++] = environ[i];
-    if (!rc) {
-        env[used++] = state;
-        env[used++] = temp;
-        env[used++] = "ZCL_CATCHUP_DRAIN_BUDGET_MS=100";
-        env[used++] = "ZCL_BIP_PAGE_CACHE_KIB=32768";
-        env[used] = NULL;
-        rc = posix_spawn(pid, r->executable, actions, attr, argv, env);
-    }
+    int rc = environment_count(&count);
+    if (rc) return rc;
+    if (!app_root_entry(state, sizeof(state), "XDG_STATE_HOME", r->state_root) ||
+        !app_root_entry(temp, sizeof(temp), "TMPDIR", r->temporary_root) ||
+        !app_root_entry(home, sizeof(home), "HOME", r->state_root)) return EINVAL;
+    char **env = calloc(count + 6, sizeof(*env));
+    if (!env) return EINVAL;
+    bool has_home = false;
+    size_t used = copy_inherited_environment(env, count, &has_home);
+    append_app_environment(env, used, state, temp, home, has_home);
+    rc = posix_spawn(pid, r->executable, actions, attr, argv, env);
     free(env);
     return rc;
 }

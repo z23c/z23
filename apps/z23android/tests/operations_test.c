@@ -20,7 +20,8 @@ int __wrap_clock_gettime(clockid_t id, struct timespec *out)
 
 extern char **environ;
 
-static bool child_environment(void)
+/* The fixed entries the app gives the child: the drain budget, the page cache and TMPDIR. */
+static bool child_fixed_environment(void)
 {
     const char *batch = getenv("ZCL_CATCHUP_DRAIN_BUDGET_MS");
     if (!batch || strcmp(batch, "100")) return false;
@@ -31,11 +32,33 @@ static bool child_environment(void)
     const char *cache = getenv("ZCL_BIP_PAGE_CACHE_KIB");
     if (cache_entries != 1 || !cache || strcmp(cache, "32768")) return false;
     const char *temp = getenv("TMPDIR");
-    if (!temp || strcmp(temp, "/tmp/private-tmp")) return false;
+    return temp && !strcmp(temp, "/tmp/private-tmp");
+}
+
+/* The state root, and HOME: the parent's HOME when one is inherited, else the state root. */
+/* Exactly one HOME= entry in the child environment, counted the way the fixed entries are. */
+static bool single_home_entry(void)
+{
+    size_t home_entries = 0;
+    for (char **e = environ; *e; ++e)
+        if (!strncmp(*e, "HOME=", sizeof("HOME=") - 1)) ++home_entries;
+    return home_entries == 1;
+}
+
+static bool child_root_environment(void)
+{
     const char *state = getenv("XDG_STATE_HOME");
     const char *preserved = getenv("ZAPP_TEST_PRESERVED");
     const char *want = getenv("ZAPP_TEST_STATE");
-    return state && want && !strcmp(state, want) && preserved && !strcmp(preserved, "yes");
+    const char *home = getenv("HOME");
+    const char *home_want = getenv("ZAPP_TEST_HOME");
+    if (!single_home_entry() || !home || !want || strcmp(home, home_want ? home_want : want)) return false;
+    return state && !strcmp(state, want) && preserved && !strcmp(preserved, "yes");
+}
+
+static bool child_environment(void)
+{
+    return child_fixed_environment() && child_root_environment();
 }
 
 static volatile sig_atomic_t interrupted;
@@ -383,10 +406,17 @@ int main(int argc, char **argv)
     assert(setenv("ZAPP_TEST_STATE", "/tmp/private-state", 1) == 0);
     assert(setenv("ZCL_CATCHUP_DRAIN_BUDGET_MS", "77", 1) == 0);
     assert(setenv("ZCL_BIP_PAGE_CACHE_KIB", "999", 1) == 0);
+    char *runner_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+    assert(setenv("HOME", "/tmp/parent-home", 1) == 0);
+    assert(setenv("ZAPP_TEST_HOME", "/tmp/parent-home", 1) == 0);
     command_cases(&r);
+    assert(unsetenv("HOME") == 0 && unsetenv("ZAPP_TEST_HOME") == 0);
     char directory[] = "/tmp/zapp-ops-test-XXXXXX", log[256], out[128];
     assert(mkdtemp(directory));
     node_cases(&r, argv[0], directory);
+    if (runner_home) assert(setenv("HOME", runner_home, 1) == 0);
+    else assert(unsetenv("HOME") == 0);
+    free(runner_home);
     assert(snprintf(log, sizeof(log), "%s/app-console.log", directory) > 0);
     assert(unlink(log) == 0 && rmdir(directory) == 0);
     zapp_runtime_signal_stop(&r);
