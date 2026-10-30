@@ -98,6 +98,11 @@ endif
 ZCL_HOST_OS := Android
 export PATH := $(ZCL_ANDROID_BIN):$(PATH)
 export ANDROID_NDK_ROOT ANDROID_API
+# Older GNU Make does not pass exported assignments to parse-time shells, and
+# the compiler identity fingerprints the linkers on PATH: without this, the
+# parse-time identity misses the NDK linkers and every build stops with
+# "compiler/toolchain changed during build".
+ZCL_COMPILER_ID_ENV = PATH='$(subst ','"'"',$(PATH))'
 else
 $(error unknown ZCL_TARGET '$(ZCL_TARGET)' — known: host, windows-x86_64, android-arm64)
 endif
