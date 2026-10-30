@@ -141,6 +141,20 @@ static bool zdc_read_stable(const char *path, void *out, size_t capacity,
     return ok;
 }
 
+/* Copy the 64 hex chars at the front of raw, cleanse raw, then decode the
+ * copy into seed_out. The hex copy is cleansed before return. */
+static bool zdc_decode_seed_hex(uint8_t *raw, size_t raw_size,
+                                uint8_t seed_out[32])
+{
+    char hex[65];
+    memcpy(hex, raw, 64);
+    hex[64] = '\0';
+    memory_cleanse(raw, raw_size);
+    bool ok = IsHex(hex) && ParseHex(hex, seed_out, 32) == 32;
+    memory_cleanse(hex, sizeof(hex));
+    return ok;
+}
+
 static bool zdc_read_seed(const char *path, uint8_t seed_out[32], char *err,
                           size_t err_size)
 {
@@ -171,12 +185,7 @@ static bool zdc_read_seed(const char *path, uint8_t seed_out[32], char *err,
                  "seed file must be exactly 64 hex chars (read %zu bytes)", n);
         return false;
     }
-    char hex[65];
-    memcpy(hex, raw, 64);
-    hex[64] = '\0';
-    memory_cleanse(raw, sizeof(raw));
-    bool ok = IsHex(hex) && ParseHex(hex, seed_out, 32) == 32;
-    memory_cleanse(hex, sizeof(hex));
+    bool ok = zdc_decode_seed_hex(raw, sizeof(raw), seed_out);
     if (!ok)
         snprintf(err, err_size, "seed file is not 64 hex chars");
     return ok;
@@ -231,46 +240,57 @@ static bool zdc_record_dir(const char *datadir, char *out, size_t out_size,
     return true;
 }
 
-static bool zdc_write_record(const char *datadir, const char *key_hex,
-                             const char *doc_hex, char *path_out,
-                             size_t path_size, char *err, size_t err_size)
-{
-    char dir[1024];
-    if (!zdc_record_dir(datadir, dir, sizeof(dir), err, err_size))
-        return false;
-    int n = snprintf(path_out, path_size, "%s/%s.zid", dir, key_hex);
-    if (n <= 0 || (size_t)n >= path_size) {
-        snprintf(err, err_size, "path too long under datadir");
-        return false;
-    }
 #if defined(_WIN32)
-    char leaf[80], staged_leaf[96];
+/* Name the record leaf and its random staged leaf. Returns false when
+ * either name does not fit its buffer or no nonce could be drawn; the
+ * caller refuses the write. */
+static bool zdc_record_leaf_names(const char *key_hex, char *leaf,
+                                  size_t leaf_size, char *staged_leaf,
+                                  size_t staged_size)
+{
     uint8_t nonce[12];
     char nonce_hex[25];
-    n = snprintf(leaf, sizeof(leaf), "%s.zid", key_hex);
+    int n = snprintf(leaf, leaf_size, "%s.zid", key_hex);
     bool named = rng_fill(nonce, sizeof(nonce));
     if (named) HexStr(nonce, sizeof(nonce), false, nonce_hex,
                       sizeof(nonce_hex));
-    int sn = named ? snprintf(staged_leaf, sizeof(staged_leaf),
+    int sn = named ? snprintf(staged_leaf, staged_size,
                               ".%s.%s.tmp", key_hex, nonce_hex) : -1;
+    return n > 0 && (size_t)n < leaf_size && sn > 0 &&
+        (size_t)sn < staged_size;
+}
+
+static bool zdc_stage_record_bytes(struct platform_directory_transaction *directory,
+                                   struct platform_directory_child *file,
+                                   const char *leaf, const char *doc_hex)
+{
+    size_t len = strlen(doc_hex);
+    return platform_directory_child_truncate(file, 0) &&
+        platform_directory_child_write_exact(file, doc_hex, len, 0) &&
+        platform_directory_child_write_exact(file, "\n", 1, len) &&
+        platform_directory_child_flush(file) &&
+        platform_directory_child_replace(directory, file, leaf, false) &&
+        platform_directory_transaction_flush(directory);
+}
+
+static bool zdc_write_record_staged(const char *dir, const char *key_hex,
+                                    const char *doc_hex, const char *path_out,
+                                    char *err, size_t err_size)
+{
+    char leaf[80], staged_leaf[96];
+    bool fit = zdc_record_leaf_names(key_hex, leaf, sizeof(leaf),
+                                     staged_leaf, sizeof(staged_leaf));
     struct platform_directory_transaction directory;
     struct platform_directory_child file;
     platform_directory_transaction_init(&directory);
     platform_directory_child_init(&file);
-    enum platform_directory_result opened = n > 0 && (size_t)n < sizeof(leaf) &&
-        sn > 0 && (size_t)sn < sizeof(staged_leaf) &&
+    enum platform_directory_result opened = fit &&
         platform_directory_transaction_open(&directory, dir)
         ? (platform_directory_child_create(&directory, staged_leaf, &file)
               ? PLATFORM_DIRECTORY_OK : PLATFORM_DIRECTORY_REFUSED)
         : PLATFORM_DIRECTORY_REFUSED;
-    size_t len = strlen(doc_hex);
     bool ok = opened == PLATFORM_DIRECTORY_OK &&
-        platform_directory_child_truncate(&file, 0) &&
-        platform_directory_child_write_exact(&file, doc_hex, len, 0) &&
-        platform_directory_child_write_exact(&file, "\n", 1, len) &&
-        platform_directory_child_flush(&file) &&
-        platform_directory_child_replace(&directory, &file, leaf, false) &&
-        platform_directory_transaction_flush(&directory);
+        zdc_stage_record_bytes(&directory, &file, leaf, doc_hex);
     platform_directory_child_close(&file);
     if (opened == PLATFORM_DIRECTORY_OK && !ok)
         (void)platform_directory_child_unlink(
@@ -278,7 +298,11 @@ static bool zdc_write_record(const char *datadir, const char *key_hex,
     platform_directory_transaction_close(&directory);
     if (!ok) snprintf(err, err_size, "private record write refused: %s", path_out);
     return ok;
+}
 #else
+static bool zdc_write_record_direct(const char *path_out, const char *doc_hex,
+                                    char *err, size_t err_size)
+{
     int fd = open(path_out, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) {
         snprintf(err, err_size, "open %s: %s", path_out, strerror(errno));
@@ -293,6 +317,26 @@ static bool zdc_write_record(const char *datadir, const char *key_hex,
         return false;
     }
     return true;
+}
+#endif
+
+static bool zdc_write_record(const char *datadir, const char *key_hex,
+                             const char *doc_hex, char *path_out,
+                             size_t path_size, char *err, size_t err_size)
+{
+    char dir[1024];
+    if (!zdc_record_dir(datadir, dir, sizeof(dir), err, err_size))
+        return false;
+    int n = snprintf(path_out, path_size, "%s/%s.zid", dir, key_hex);
+    if (n <= 0 || (size_t)n >= path_size) {
+        snprintf(err, err_size, "path too long under datadir");
+        return false;
+    }
+#if defined(_WIN32)
+    return zdc_write_record_staged(dir, key_hex, doc_hex, path_out, err,
+                                   err_size);
+#else
+    return zdc_write_record_direct(path_out, doc_hex, err, err_size);
 #endif
 }
 
@@ -413,6 +457,26 @@ static void zdc_push_descriptor(struct zcl_command_reply *reply,
     json_free(&intros);
 }
 
+/* Read a saved doc file into file_hex, with trailing '\n', '\r' and ' '
+ * characters trimmed. On a failed stable read the reply's error body
+ * names DOC_UNREADABLE. */
+static bool zdc_read_doc_file(const char *file, char *file_hex,
+                              size_t file_hex_size,
+                              struct zcl_command_reply *reply)
+{
+    size_t n = 0;
+    if (!zdc_read_stable(file, file_hex, file_hex_size - 1, &n)) {
+        zdc_fail(reply, "DOC_UNREADABLE", "normalize",
+                 "cannot stably read bounded doc file", file);
+        return false;
+    }
+    while (n > 0 && (file_hex[n - 1] == '\n' || file_hex[n - 1] == '\r' ||
+                     file_hex[n - 1] == ' '))
+        n--;
+    file_hex[n] = '\0';
+    return true;
+}
+
 /* Decode 'doc' hex (or read it from 'file') into wire bytes. Fills the
  * reply's error body and returns 0 on every failure path. */
 static size_t zdc_load_doc_wire(const struct json_value *in,
@@ -430,16 +494,8 @@ static size_t zdc_load_doc_wire(const struct json_value *in,
     }
     static char file_hex[ZID_DOC_MAX * 2 + 2];
     if (!doc_hex || !doc_hex[0]) {
-        size_t n = 0;
-        if (!zdc_read_stable(file, file_hex, sizeof(file_hex) - 1, &n)) {
-            zdc_fail(reply, "DOC_UNREADABLE", "normalize",
-                     "cannot stably read bounded doc file", file);
+        if (!zdc_read_doc_file(file, file_hex, sizeof(file_hex), reply))
             return 0;
-        }
-        while (n > 0 && (file_hex[n - 1] == '\n' || file_hex[n - 1] == '\r' ||
-                         file_hex[n - 1] == ' '))
-            n--;
-        file_hex[n] = '\0';
         doc_hex = file_hex;
     }
     size_t hex_len = strlen(doc_hex);
@@ -541,6 +597,257 @@ static void zdc_fail_result(struct zcl_command_reply *reply,
     }
 }
 
+/* The publish clock, validity window and sequence. A bad not_before, seq
+ * or window fails the reply and returns false. */
+static bool zdc_input_window(const struct json_value *in, int64_t *now,
+                             struct zdesc *desc, int64_t *seq,
+                             int64_t *expiry, struct zcl_command_reply *reply,
+                             const char *cmd)
+{
+    *now = zdc_input_int(in, "now", 0);
+    if (*now <= 0)
+        *now = platform_time_wall_unix();
+    int64_t not_before = zdc_input_int(in, "not_before", *now);
+    if (not_before < 0) {
+        zdc_fail(reply, "BAD_NOT_BEFORE", "normalize",
+                 "not_before must be a unix timestamp >= 0", cmd);
+        return false;
+    }
+    desc->not_before = (uint64_t)not_before;
+
+    *seq = zdc_input_int(in, "seq", 1);
+    if (*seq < 0) {
+        zdc_fail(reply, "BAD_SEQ", "normalize",
+                 "seq must be >= 0 and monotonic per identity — rotation "
+                 "means a strictly higher seq", cmd);
+        return false;
+    }
+    *expiry = zdc_input_int(in, "expiry", 0);
+    if (*expiry == 0)
+        *expiry = not_before + ZDC_DEFAULT_VALIDITY_SECONDS;
+    if (*expiry <= not_before) {
+        zdc_fail(reply, "BAD_WINDOW", "normalize",
+                 "expiry must be strictly after not_before — otherwise the "
+                 "validity window never opens", cmd);
+        return false;
+    }
+    return true;
+}
+
+/* One "<onion>:<64hex>" item of the flat intro string. s is its first
+ * character and comma the next ',' (NULL for the last item). */
+static bool zdc_parse_flat_intro(const char *s, const char *comma,
+                                 struct zdesc_intro *slot,
+                                 struct zcl_command_reply *reply,
+                                 const char *cmd)
+{
+    const char *colon = strchr(s, ':');
+    size_t item_len = comma ? (size_t)(comma - s) : strlen(s);
+    if (!colon || (comma && colon > comma) ||
+        (size_t)(colon - s) != (size_t)ZDESC_ONION_LEN ||
+        item_len != (size_t)ZDESC_ONION_LEN + 1u + 64u) {
+        zdc_fail(reply, "BAD_INTROS", "normalize",
+                 "each introduction point must be "
+                 "\"<62-char v3 onion>:<64hex auth_key>\", "
+                 "comma-separated", cmd);
+        return false;
+    }
+    char host[ZDESC_ONION_LEN + 1];
+    memcpy(host, s, ZDESC_ONION_LEN);
+    host[ZDESC_ONION_LEN] = '\0';
+    char keyhex[65];
+    memcpy(keyhex, colon + 1, 64);
+    keyhex[64] = '\0';
+    if (!zdesc_onion_valid(host)) {
+        zdc_fail(reply, "BAD_INTRO_ONION", "normalize",
+                 "every introduction point needs a v3 onion hostname",
+                 cmd);
+        return false;
+    }
+    if (!IsHex(keyhex) ||
+        ParseHex(keyhex, slot->auth_key, 32) != 32) {
+        zdc_fail(reply, "BAD_INTRO_KEY", "normalize",
+                 "every introduction point needs a 64-hex auth_key",
+                 cmd);
+        return false;
+    }
+    memcpy(slot->onion, host, sizeof(host));
+    return true;
+}
+
+static bool zdc_parse_flat_intros(const char *s, struct zdesc *desc,
+                                  struct zcl_command_reply *reply,
+                                  const char *cmd)
+{
+    size_t count = 0;
+    while (s && *s) {
+        if (count == ZDESC_INTRO_MAX) {
+            zdc_fail(reply, "TOO_MANY_INTROS", "normalize",
+                     "at most 8 introduction points fit one descriptor",
+                     cmd);
+            return false;
+        }
+        const char *comma = strchr(s, ',');
+        if (!zdc_parse_flat_intro(s, comma, &desc->intro[count], reply, cmd))
+            return false;
+        count++;
+        if (!comma)
+            break;
+        s = comma + 1;
+    }
+    desc->intro_count = (uint8_t)count;
+    return true;
+}
+
+static bool zdc_parse_json_intros(const struct json_value *intros,
+                                  struct zdesc *desc,
+                                  struct zcl_command_reply *reply,
+                                  const char *cmd)
+{
+    size_t n = json_size(intros);
+    if (n > ZDESC_INTRO_MAX) {
+        zdc_fail(reply, "TOO_MANY_INTROS", "normalize",
+                 "at most 8 introduction points fit one descriptor", cmd);
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        const struct json_value *one = json_at(intros, i);
+        const char *ionion = one ? zdc_input_str(one, "onion") : NULL;
+        const char *ikey = one ? zdc_input_str(one, "auth_key") : NULL;
+        if (!ionion || !zdesc_onion_valid(ionion)) {
+            zdc_fail(reply, "BAD_INTRO_ONION", "normalize",
+                     "every introduction point needs a v3 onion "
+                     "hostname", cmd);
+            return false;
+        }
+        if (!ikey || strlen(ikey) != 64 || !IsHex(ikey) ||
+            ParseHex(ikey, desc->intro[i].auth_key, 32) != 32) {
+            zdc_fail(reply, "BAD_INTRO_KEY", "normalize",
+                     "every introduction point needs a 64-hex auth_key",
+                     cmd);
+            return false;
+        }
+        snprintf(desc->intro[i].onion, sizeof(desc->intro[i].onion), "%s",
+                 ionion);
+    }
+    desc->intro_count = (uint8_t)n;
+    return true;
+}
+
+static bool zdc_parse_intros(const struct json_value *in, struct zdesc *desc,
+                             struct zcl_command_reply *reply, const char *cmd)
+{
+    /* Introduction points, in either of two equivalent forms:
+     *   - a JSON array of {"onion","auth_key"} objects, or
+     *   - the flat string "<onion>:<64hex>,<onion>:<64hex>,..."
+     * The registry's input-key type rule admits a bare string for any
+     * key it does not name, so the flat form is what actually works
+     * from the command line today; the array form is accepted so the
+     * leaf keeps working unchanged if a typed rule is added later. */
+    const struct json_value *intros = json_get(in, "intros");
+    if (intros && intros->type == JSON_STR)
+        return zdc_parse_flat_intros(json_get_str(intros), desc, reply, cmd);
+    if (intros && intros->type == JSON_ARR)
+        return zdc_parse_json_intros(intros, desc, reply, cmd);
+    if (intros) {
+        zdc_fail(reply, "BAD_INTROS", "normalize",
+                 "intros must be a JSON array of {\"onion\",\"auth_key\"} or the "
+                 "string \"<onion>:<64hex>,...\"",
+                 cmd);
+        return false;
+    }
+    return true;
+}
+
+/* True when seq does not supersede the highest seq zdc_held_seq finds in
+ * this identity's current or previous period record; held receives that
+ * seq. */
+static bool zdc_replay_refused(const char *datadir, const uint8_t seed[32],
+                               int64_t now, int64_t seq, uint64_t *held)
+{
+    uint8_t pk[32], sk[32];
+    ed25519_keypair(pk, sk, seed);
+    memory_cleanse(sk, sizeof(sk));
+    return zdc_held_seq(datadir, pk, zdesc_period_at((uint64_t)now), held) &&
+        (uint64_t)seq <= *held;
+}
+
+struct zdc_published {
+    struct zid_doc doc;
+    uint64_t period;
+    uint8_t record_key[32];
+    uint8_t root[32];
+    uint8_t pubkey[32];
+};
+
+/* Publish through the content-addressed store, then read back the entry
+ * the global directory now holds. The seed is cleansed on the store-open
+ * failure path and again after the publish call, whatever its result. On
+ * failure the reply's error body is filled. */
+static bool zdc_publish_stored(const char *datadir, struct zdesc *desc,
+                               int64_t seq, int64_t expiry, int64_t now,
+                               uint8_t (*seed)[32], struct zdc_published *out,
+                               struct zcl_command_reply *reply,
+                               const char *cmd)
+{
+    struct vcs_package_store *store =
+        vcs_package_store_open(datadir, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    if (!store) {
+        memory_cleanse(*seed, sizeof(*seed));
+        zdc_fail(reply, "STORE_UNAVAILABLE", "execute",
+                 "cannot open the content-addressed package store under "
+                 "<datadir>/zcode", datadir);
+        return false;
+    }
+
+    /* The global directory is what the node's signed onion-peer
+     * discovery source reads (engine/composition/src/boot_services.c), so an
+     * in-node publish feeds discovery immediately. */
+    struct zdesc_directory *dir = zdesc_directory_global();
+    enum zdesc_result r =
+        zdesc_publish_to(store, dir, desc, (uint64_t)seq, (uint64_t)expiry,
+                         *seed, (uint64_t)now, out->root, out->pubkey);
+    memory_cleanse(*seed, sizeof(*seed));
+    vcs_package_store_close(store);
+    if (r != ZDESC_OK) {
+        zdc_fail_result(reply, r, cmd);
+        return false;
+    }
+
+    const struct zdesc_entry *entry = NULL;
+    if (!zdesc_directory_find(dir, out->pubkey, &entry) || !entry) {
+        zdc_fail(reply, "DIRECTORY_LOST", "execute",
+                 "the descriptor was stored but its directory entry is "
+                 "missing", cmd);
+        return false;
+    }
+    out->doc = entry->doc;
+    out->period = entry->period;
+    memcpy(out->record_key, entry->record_key, 32);
+    return true;
+}
+
+/* Encode the doc to wire form and hex it into doc_hex. Returns the wire
+ * length, or 0 with the reply's error body filled when encoding fails. */
+static size_t zdc_encode_doc_hex(const struct zid_doc *doc,
+                                 struct zcl_command_reply *reply,
+                                 const char *cmd, char *doc_hex,
+                                 size_t doc_hex_size)
+{
+    uint8_t wire[ZID_DOC_MAX];
+    size_t wire_len = zid_doc_encode(wire, sizeof(wire), doc);
+    if (wire_len == 0) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "ENCODE_FAILED",
+                               "serialize", false, true,
+                               "zid_doc_encode failed after a successful "
+                               "publish", cmd);
+        return 0;
+    }
+    HexStr(wire, wire_len, false, doc_hex, doc_hex_size);
+    return wire_len;
+}
+
 /* ── zcode.desc.publish ────────────────────────────────────────────── */
 
 void zcl_native_handle_zdesc_publish(const struct zcl_command_request *request,
@@ -570,125 +877,11 @@ void zcl_native_handle_zdesc_publish(const struct zcl_command_request *request,
     memset(&desc, 0, sizeof(desc));
     snprintf(desc.onion, sizeof(desc.onion), "%s", onion);
 
-    int64_t now = zdc_input_int(in, "now", 0);
-    if (now <= 0)
-        now = platform_time_wall_unix();
-    int64_t not_before = zdc_input_int(in, "not_before", now);
-    if (not_before < 0) {
-        zdc_fail(reply, "BAD_NOT_BEFORE", "normalize",
-                 "not_before must be a unix timestamp >= 0", cmd);
+    int64_t now = 0, seq = 0, expiry = 0;
+    if (!zdc_input_window(in, &now, &desc, &seq, &expiry, reply, cmd))
         return;
-    }
-    desc.not_before = (uint64_t)not_before;
-
-    int64_t seq = zdc_input_int(in, "seq", 1);
-    if (seq < 0) {
-        zdc_fail(reply, "BAD_SEQ", "normalize",
-                 "seq must be >= 0 and monotonic per identity — rotation "
-                 "means a strictly higher seq", cmd);
+    if (!zdc_parse_intros(in, &desc, reply, cmd))
         return;
-    }
-    int64_t expiry = zdc_input_int(in, "expiry", 0);
-    if (expiry == 0)
-        expiry = not_before + ZDC_DEFAULT_VALIDITY_SECONDS;
-    if (expiry <= not_before) {
-        zdc_fail(reply, "BAD_WINDOW", "normalize",
-                 "expiry must be strictly after not_before — otherwise the "
-                 "validity window never opens", cmd);
-        return;
-    }
-
-    /* Introduction points, in either of two equivalent forms:
-     *   - a JSON array of {"onion","auth_key"} objects, or
-     *   - the flat string "<onion>:<64hex>,<onion>:<64hex>,..."
-     * The registry's input-key type rule admits a bare string for any
-     * key it does not name, so the flat form is what actually works
-     * from the command line today; the array form is accepted so the
-     * leaf keeps working unchanged if a typed rule is added later. */
-    const struct json_value *intros = json_get(in, "intros");
-    if (intros && intros->type == JSON_STR) {
-        const char *s = json_get_str(intros);
-        size_t count = 0;
-        while (s && *s) {
-            if (count == ZDESC_INTRO_MAX) {
-                zdc_fail(reply, "TOO_MANY_INTROS", "normalize",
-                         "at most 8 introduction points fit one descriptor",
-                         cmd);
-                return;
-            }
-            const char *colon = strchr(s, ':');
-            const char *comma = strchr(s, ',');
-            size_t item_len = comma ? (size_t)(comma - s) : strlen(s);
-            if (!colon || (comma && colon > comma) ||
-                (size_t)(colon - s) != (size_t)ZDESC_ONION_LEN ||
-                item_len != (size_t)ZDESC_ONION_LEN + 1u + 64u) {
-                zdc_fail(reply, "BAD_INTROS", "normalize",
-                         "each introduction point must be "
-                         "\"<62-char v3 onion>:<64hex auth_key>\", "
-                         "comma-separated", cmd);
-                return;
-            }
-            char host[ZDESC_ONION_LEN + 1];
-            memcpy(host, s, ZDESC_ONION_LEN);
-            host[ZDESC_ONION_LEN] = '\0';
-            char keyhex[65];
-            memcpy(keyhex, colon + 1, 64);
-            keyhex[64] = '\0';
-            if (!zdesc_onion_valid(host)) {
-                zdc_fail(reply, "BAD_INTRO_ONION", "normalize",
-                         "every introduction point needs a v3 onion hostname",
-                         cmd);
-                return;
-            }
-            if (!IsHex(keyhex) ||
-                ParseHex(keyhex, desc.intro[count].auth_key, 32) != 32) {
-                zdc_fail(reply, "BAD_INTRO_KEY", "normalize",
-                         "every introduction point needs a 64-hex auth_key",
-                         cmd);
-                return;
-            }
-            memcpy(desc.intro[count].onion, host, sizeof(host));
-            count++;
-            if (!comma)
-                break;
-            s = comma + 1;
-        }
-        desc.intro_count = (uint8_t)count;
-    } else if (intros && intros->type == JSON_ARR) {
-        size_t n = json_size(intros);
-        if (n > ZDESC_INTRO_MAX) {
-            zdc_fail(reply, "TOO_MANY_INTROS", "normalize",
-                     "at most 8 introduction points fit one descriptor", cmd);
-            return;
-        }
-        for (size_t i = 0; i < n; i++) {
-            const struct json_value *one = json_at(intros, i);
-            const char *ionion = one ? zdc_input_str(one, "onion") : NULL;
-            const char *ikey = one ? zdc_input_str(one, "auth_key") : NULL;
-            if (!ionion || !zdesc_onion_valid(ionion)) {
-                zdc_fail(reply, "BAD_INTRO_ONION", "normalize",
-                         "every introduction point needs a v3 onion "
-                         "hostname", cmd);
-                return;
-            }
-            if (!ikey || strlen(ikey) != 64 || !IsHex(ikey) ||
-                ParseHex(ikey, desc.intro[i].auth_key, 32) != 32) {
-                zdc_fail(reply, "BAD_INTRO_KEY", "normalize",
-                         "every introduction point needs a 64-hex auth_key",
-                         cmd);
-                return;
-            }
-            snprintf(desc.intro[i].onion, sizeof(desc.intro[i].onion), "%s",
-                     ionion);
-        }
-        desc.intro_count = (uint8_t)n;
-    } else if (intros) {
-        zdc_fail(reply, "BAD_INTROS", "normalize",
-                 "intros must be a JSON array of {\"onion\",\"auth_key\"} or the "
-                 "string \"<onion>:<64hex>,...\"",
-                 cmd);
-        return;
-    }
 
     const char *datadir = zdc_datadir(request);
     if (!datadir) {
@@ -710,12 +903,8 @@ void zcl_native_handle_zdesc_publish(const struct zcl_command_request *request,
      * process, so the library's in-memory seq rule sees nothing; the
      * authority here is the record already on disk. Checked BEFORE the
      * store is touched, so a refused republish writes nothing at all. */
-    uint8_t pk[32], sk[32];
-    ed25519_keypair(pk, sk, seed);
-    memory_cleanse(sk, sizeof(sk));
     uint64_t held = 0;
-    if (zdc_held_seq(datadir, pk, zdesc_period_at((uint64_t)now), &held) &&
-        (uint64_t)seq <= held) {
+    if (zdc_replay_refused(datadir, seed, now, seq, &held)) {
         memory_cleanse(seed, sizeof(seed));
         char msg[256];
         snprintf(msg, sizeof(msg),
@@ -727,60 +916,21 @@ void zcl_native_handle_zdesc_publish(const struct zcl_command_request *request,
         return;
     }
 
-    struct vcs_package_store *store =
-        vcs_package_store_open(datadir, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
-    if (!store) {
-        memory_cleanse(seed, sizeof(seed));
-        zdc_fail(reply, "STORE_UNAVAILABLE", "execute",
-                 "cannot open the content-addressed package store under "
-                 "<datadir>/zcode", datadir);
+    struct zdc_published pub;
+    if (!zdc_publish_stored(datadir, &desc, seq, expiry, now, &seed, &pub,
+                            reply, cmd))
         return;
-    }
 
-    /* The global directory is what the node's signed onion-peer
-     * discovery source reads (engine/composition/src/boot_services.c), so an
-     * in-node publish feeds discovery immediately. */
-    struct zdesc_directory *dir = zdesc_directory_global();
-    uint8_t root[32], pubkey[32];
-    enum zdesc_result r =
-        zdesc_publish_to(store, dir, &desc, (uint64_t)seq, (uint64_t)expiry,
-                         seed, (uint64_t)now, root, pubkey);
-    memory_cleanse(seed, sizeof(seed));
-    vcs_package_store_close(store);
-    if (r != ZDESC_OK) {
-        zdc_fail_result(reply, r, cmd);
-        return;
-    }
-
-    const struct zdesc_entry *entry = NULL;
-    if (!zdesc_directory_find(dir, pubkey, &entry) || !entry) {
-        zdc_fail(reply, "DIRECTORY_LOST", "execute",
-                 "the descriptor was stored but its directory entry is "
-                 "missing", cmd);
-        return;
-    }
-    struct zid_doc doc = entry->doc;
-    uint64_t period = entry->period;
-    uint8_t record_key[32];
-    memcpy(record_key, entry->record_key, 32);
-
-    uint8_t wire[ZID_DOC_MAX];
-    size_t wire_len = zid_doc_encode(wire, sizeof(wire), &doc);
-    if (wire_len == 0) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "ENCODE_FAILED",
-                               "serialize", false, true,
-                               "zid_doc_encode failed after a successful "
-                               "publish", cmd);
-        return;
-    }
     char doc_hex[ZID_DOC_MAX * 2 + 1];
-    HexStr(wire, wire_len, false, doc_hex, sizeof(doc_hex));
+    size_t wire_len = zdc_encode_doc_hex(&pub.doc, reply, cmd, doc_hex,
+                                         sizeof(doc_hex));
+    if (wire_len == 0)
+        return;
 
     char key_hex[65], root_hex[65], pk_hex[65];
-    zdc_hex32(record_key, key_hex);
-    zdc_hex32(root, root_hex);
-    zdc_hex32(pubkey, pk_hex);
+    zdc_hex32(pub.record_key, key_hex);
+    zdc_hex32(pub.root, root_hex);
+    zdc_hex32(pub.pubkey, pk_hex);
 
     char saved_path[1200];
     char save_err[512] = {0};
@@ -792,10 +942,10 @@ void zcl_native_handle_zdesc_publish(const struct zcl_command_request *request,
     json_push_kv_int(&reply->data, "doc_bytes", (int64_t)wire_len);
     json_push_kv_str(&reply->data, "root", root_hex);
     json_push_kv_str(&reply->data, "record_key", key_hex);
-    json_push_kv_int(&reply->data, "period", (int64_t)period);
+    json_push_kv_int(&reply->data, "period", (int64_t)pub.period);
     json_push_kv_int(&reply->data, "period_seconds", ZDESC_PERIOD_SECONDS);
     (void)pk_hex;
-    zdc_push_descriptor(reply, &doc, &desc);
+    zdc_push_descriptor(reply, &pub.doc, &desc);
     zdc_push_verification_status(reply);
     json_push_kv_bool(&reply->data, "saved", saved);
     if (saved)

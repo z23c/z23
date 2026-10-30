@@ -353,10 +353,6 @@ tools/command/native_zcode_swarm_command.c:zw_export_via_resident:27
 tools/command/native_zcode_swarm_command.c:zw_handle_pin:29
 tools/command/native_zcode_swarm_command.c:zw_pin_via_resident:21
 tools/command/native_zcode_swarm_command.c:zw_resolve_fetch_root:21
-tools/command/native_zdesc_command.c:zcl_native_handle_zdesc_publish:50
-tools/command/native_zdesc_command.c:zdc_load_doc_wire:17
-tools/command/native_zdesc_command.c:zdc_read_seed:16
-tools/command/native_zdesc_command.c:zdc_write_record:25
 tools/core_seal.c:compute_sections:32
 tools/core_seal.c:open_sealed_file:27
 tools/core_seal.c:path_reject_reason:19
