@@ -306,12 +306,15 @@ static void boot_blkidx_import_from_zclassicd(struct app_context *ctx,
              "%s/.legacy_ldb_snap", ctx->datadir);
     /* Only the snapshot is ever opened: opening zclassicd's own directory
      * would write a new log and MANIFEST into another program's datadir. */
-    if (!boot_legacy_index_snapshot(zcd_idx_path, snap_path))
-        return;
-    boot_zcd_load_index(ctx, st, snap_path, have_ndcb, ndcb);
-    /* Tear down the snapshot (hardlinks free cheaply). */
-    ldb_snapshot_destroy(snap_path);
-    /* Copy block files from zclassicd if we don't have them */
+    if (boot_legacy_index_snapshot(zcd_idx_path, snap_path)) {
+        boot_zcd_load_index(ctx, st, snap_path, have_ndcb, ndcb);
+        /* Tear down the snapshot (hardlinks free cheaply). */
+        ldb_snapshot_destroy(snap_path);
+    }
+    /* Copy block files from zclassicd if we don't have them. This runs even
+     * when the index snapshot failed: an existing index whose block files
+     * are missing still gets them, and the copy reads only zclassicd's
+     * blocks directory, never its index. */
     if (st->map_block_index.size > 1000)
         boot_zcd_copy_block_files(ctx, home);
 }
