@@ -1,3 +1,7 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: selftest for check-fortify-masked-decls - writes scratch files
+ * with a masked call, a guarded call and a commented-out call; checks verdicts. */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif

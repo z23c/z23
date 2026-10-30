@@ -1,3 +1,9 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * purpose: gate check-fortify-masked-decls - a .c file may not call a POSIX
+ * or GNU function whose declaration reaches it only through a glibc fortify
+ * inline (only when optimisation is on), unless the file sets a feature-test
+ * macro before its first #include. */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
