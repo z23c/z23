@@ -23,7 +23,7 @@ static bool fake_exec(const struct zapp_fleet_host *host, const char *command, i
     snprintf(out, cap, "%s", f->reply);
     return true;
 }
-static const struct zapp_fleet_host hosts[] = {{"r1", "rhett.dev"}, {"r2", "rhett2.dev"}};
+static const struct zapp_fleet_host hosts[] = {{"r1", "host-a.example"}, {"r2", "host-b.example"}};
 static char reply[4096];
 static struct json_value doc;
 
