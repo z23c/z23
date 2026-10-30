@@ -107,7 +107,7 @@ SELECTION_GATE("check-windows-platform-seam", SELECTION_UNITS_TUS,
  * (vendor/raylib/) are grepped by the gate but are in no premise, so a
  * unit-selected run scans them fresh every time. */
 SELECTION_GATE("check-fortify-masked-decls", SELECTION_UNITS_FILES, "\\.c$",
-    "tools/lint/check_fortify_masked_decls.sh tools/lint/strip_c_comments.awk "
+    "tools/lint/lintc/gate_fortify_masked_decls.c tools/lint/lintc/lib.c "
     SELECTION_DRIVER,
     "check-fortify-masked-decls:",
     "")

@@ -455,7 +455,7 @@ These are the checks the lane asked for:
     `tools/lint/windows_platform_seam_baseline.txt`, `Makefile` and
     `tools/lint/check_windows_platform_seam.sh`;
   - `check-fortify-masked-decls` (4289/4289): `tools/lint/strip_c_comments.awk`
-    and `tools/lint/check_fortify_masked_decls.sh`;
+    and the shell gate, since ported to `tools/lint/lintc/gate_fortify_masked_decls.c`;
   - `check-raw-sqlite` (4695/4695): `tools/scripts/raw_sqlite_allowlist.txt`
     and `tools/lint/gate_lib.sh`.
 

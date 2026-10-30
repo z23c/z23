@@ -16,6 +16,7 @@
 LINT_GATE("check-live-datadir-isolation", check_live_datadir_isolation, LINT_CMD_PAIR)
 LINT_GATE("check-no-python", check_no_python, LINT_CMD_PAIR)
 LINT_GATE("check-malloc", check_malloc, LINT_CMD_PLAIN)
+LINT_GATE("check-fortify-masked-decls", check_fortify_masked_decls, LINT_CMD_PAIR)
 LINT_GATE("check-dev-proof-native-fast-path", check_dev_proof_native_fast_path, LINT_CMD_PLAIN)
 LINT_GATE("check-before-save-hooks", check_before_save_hooks, LINT_CMD_PLAIN)
 LINT_GATE("check-pthread-create", check_pthread_create, LINT_CMD_PLAIN)

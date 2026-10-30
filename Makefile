@@ -13229,10 +13229,9 @@ check-arm-symbol-single: $(LINTC_TOOL)
 # the live toolchain on every run rather than hardcoding a list, because
 # which functions are masked is a property of the compiler and libc, not of
 # this tree. Baseline is empty by design and must stay empty.
-check-fortify-masked-decls:
+check-fortify-masked-decls: $(LINTC_TOOL)
 	@echo "══ LINT: no declaration that depends on optimisation ══"
-	@./tools/lint/check_fortify_masked_decls.sh --selftest
-	@./tools/lint/check_fortify_masked_decls.sh
+	@./build/bin/z23-lint check-fortify-masked-decls --selftest && ./build/bin/z23-lint check-fortify-masked-decls
 
 check-coins-lookup-nullcheck:
 	@echo "══ LINT: guarded controller coin lookups ══"
