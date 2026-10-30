@@ -161,6 +161,7 @@ LINT_GATE("check-hosted-suite-verdict", check_hosted_suite_verdict, LINT_CMD_NON
 LINT_GATE("check-command-input-keys", check_command_input_keys, LINT_CMD_PAIR)
 LINT_GATE("check-no-real-clock-test-deadline", check_no_real_clock_test_deadline, LINT_CMD_PAIR)
 LINT_GATE("check-supervisor-progress-declared", check_supervisor_progress_declared, LINT_CMD_PLAIN)
+LINT_GATE("check-zcc-epoch-batch", check_zcc_epoch_batch, LINT_CMD_PAIR)
 LINT_GATE("check-no-unattended-publish", check_no_unattended_publish, LINT_CMD_PAIR)
 LINT_GATE("check-hex-codec-single", check_hex_codec_single, LINT_CMD_PAIR)
 LINT_GATE("check-specialists", check_specialists, LINT_CMD_PAIR)

@@ -113,7 +113,6 @@ gate_command() {
         check-commons-journey-ordering)    echo 'tools/dev/commons-journey-ordering-selftest.sh' ;;
         check-zcc-cache)                   echo './tools/lint/check_zcc_cache.sh' ;;
         check-zcc-epoch-object)            echo './tools/lint/check_zcc_epoch_object.sh' ;;
-        check-zcc-epoch-batch)             echo './tools/lint/check_zcc_epoch_batch.sh' ;;
         check-determinism-ratchet)         echo './tools/lint/check_determinism_ratchet.sh --selftest && ./tools/lint/check_determinism_ratchet.sh' ;;
         check-git-hooks-installed)         echo './tools/scripts/check_git_hooks_installed.sh --self-test && ./tools/scripts/install_git_hooks_selftest.sh && ./tools/scripts/check_git_hooks_installed.sh' ;;
         check-hotswap-eligible-scope)      echo 'build/bin/z23-lint check-hotswap-eligible-scope' ;;

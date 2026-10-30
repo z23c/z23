@@ -174,7 +174,6 @@ tools/lint/check_windows_acceptance.sh
 tools/lint/check_windows_cross_syntax.sh
 tools/lint/check_windows_platform_seam.sh
 tools/lint/check_zcc_cache.sh
-tools/lint/check_zcc_epoch_batch.sh
 tools/lint/check_zcc_epoch_object.sh
 tools/lint/dumper_defs.sh
 tools/lint/gate_lib.sh

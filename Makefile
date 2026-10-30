@@ -15494,9 +15494,10 @@ check-zcc-epoch-object:
 	@echo "══ LINT: native epoch object depfile parity and publication safety ══"
 	@./tools/lint/check_zcc_epoch_object.sh
 
-check-zcc-epoch-batch:
+check-zcc-epoch-batch: $(LINTC_TOOL)
 	@echo "══ LINT: epoch batch manifests refuse incomplete authority ══"
-	@./tools/lint/check_zcc_epoch_batch.sh
+	@./build/bin/z23-lint check-zcc-epoch-batch --selftest
+	@./build/bin/z23-lint check-zcc-epoch-batch
 
 check-dev-proof-native-fast-path: $(LINTC_TOOL)
 	@echo "══ LINT: native push admission has no shell or build authority ══"
