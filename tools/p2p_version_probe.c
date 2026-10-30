@@ -24,8 +24,10 @@
  *   usage                  rc 2
  */
 
+#include "base/hex.h"
 #include "base/serialize_le.h"
 #include "crypto/sha256.h"
+#include "platform/clock.h"
 #include "platform/rng.h"
 
 #include <errno.h>
@@ -40,7 +42,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <time.h>
 #include <unistd.h>
 
 enum {
@@ -78,9 +79,7 @@ static uint8_t body_buf[MAX_BODY_LEN];
 
 static uint64_t now_ms(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+    return (uint64_t)(clock_now_monotonic_ns() / 1000000);
 }
 
 /* Strict decimal: digits only, no overflow, value at most max. */
@@ -103,40 +102,13 @@ static bool parse_decimal(const char *s, uint32_t max, uint32_t *out)
     return true;
 }
 
-static int hex_nibble(char c)
-{
-    if (c >= '0' && c <= '9') {
-        return c - '0';
-    }
-    if (c >= 'a' && c <= 'f') {
-        return c - 'a' + 10;
-    }
-    return -1;
-}
-
-static bool parse_magic(const char *hex, uint8_t out[4])
-{
-    if (strlen(hex) != 8) {
-        return false;
-    }
-    for (size_t i = 0; i < 4; i++) {
-        int hi = hex_nibble(hex[2 * i]);
-        int lo = hex_nibble(hex[2 * i + 1]);
-        if (hi < 0 || lo < 0) {
-            return false;
-        }
-        out[i] = (uint8_t)(hi * 16 + lo);
-    }
-    return true;
-}
-
 static bool magic_from_env(uint8_t out[4])
 {
     const char *m = getenv("ZCL_CS_PEER_MAGIC");
     if (m == NULL || *m == '\0') {
         m = DEFAULT_MAGIC_HEX;
     }
-    return parse_magic(m, out);
+    return zcl_hex_decode_lower(m, out, 4);
 }
 
 static bool parse_args(int argc, char **argv, struct probe_args *a)
@@ -313,7 +285,7 @@ static size_t build_message(uint8_t *msg, const uint8_t magic[4])
     if (!rng_fill(nonce, sizeof nonce)) {
         memset(nonce, 0, sizeof nonce);
     }
-    build_payload(payload, (uint64_t)time(NULL), nonce);
+    build_payload(payload, (uint64_t)(clock_now_wall_ms() / 1000), nonce);
     double_sha256(payload, sizeof payload, digest);
 
     memcpy(msg, magic, 4);
