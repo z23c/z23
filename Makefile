@@ -11252,9 +11252,9 @@ bench-crypto-vs-rust: zclassic23
 # DELIBERATELY NOT in the default `make lint` aggregate (timing flakes under CI
 # load) — run it in a quiet context. Passes on current main = today's numbers.
 .PHONY: check-crypto-perf
-check-crypto-perf: zclassic23
+check-crypto-perf: zclassic23 $(LINTC_TOOL)
 	@ZCL_BENCH_COMMIT="$(BUILD_COMMIT)" \
-	  ZCL_CRYPTO_PERF_BIN=$(Z23_BIN) tools/scripts/check_crypto_perf.sh
+	  ZCL_CRYPTO_PERF_BIN=$(Z23_BIN) $(LINTC_TOOL) check-crypto-perf
 
 # The STANDING Groth16 differential parity gate (docs/CRYPTO_PERF.md
 # "Optimizing safely"). Compiles the in-tree consensus verifier

@@ -452,11 +452,11 @@ Z23_FLAG("ZCL_CRASH_REQUIRE_TEETH", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_CROSS_TRIPLE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/tor_archives_ready.sh:auto")
 Z23_FLAG("ZCL_CRYPTO_PERF_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_crypto_perf.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_crypto_perf.c:auto")
 Z23_FLAG("ZCL_CRYPTO_PERF_BIN", "env_build", "build/bin/zclassic23", "-",
-          "undocumented; first use tools/scripts/check_crypto_perf.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_crypto_perf.c:auto")
 Z23_FLAG("ZCL_CRYPTO_PERF_MARGIN", "env_build", "0.20", "-",
-          "first use tools/scripts/check_crypto_perf.sh:auto; documented at docs/CRYPTO_PERF.md:35: Margin default **20%** (ZCL_CRYPTO_PERF_MARGIN).")
+          "first use tools/lint/lintc/gate_crypto_perf.c:auto; documented at docs/CRYPTO_PERF.md:35: Margin default **20%** (ZCL_CRYPTO_PERF_MARGIN).")
 Z23_FLAG("ZCL_CS_ARTIFACT_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_stopwatch.sh:auto")
 Z23_FLAG("ZCL_CS_BUDGET_SECS", "env_build", "600", "-",

@@ -3,7 +3,7 @@
  *
  * crypto_perf_selftest — the teeth for the crypto-vs-Rust benchmark
  * (`build/bin/zclassic23 -bench-crypto-vs-rust`, engine/entry/main.c) and its
- * gate (tools/scripts/check_crypto_perf.sh / `make check-crypto-perf`).
+ * gate (tools/lint/lintc/gate_crypto_perf.c / `make check-crypto-perf`).
  *
  * The gate lets a primitive's baseline ratchet down as we optimise, so a
  * hollow primitive (no-op hash, always-true verify) must not pass. This test

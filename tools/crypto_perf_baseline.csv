@@ -3,7 +3,7 @@
 # The STANDING invariant (docs/CRYPTO_PERF.md): every C crypto primitive on the
 # consensus path must stay AT LEAST as fast as its Rust/blst counterpart, and
 # may only ever get FASTER. This file is the pinned line. It is consumed by
-# tools/scripts/check_crypto_perf.sh (`make check-crypto-perf`), which measures
+# tools/lint/lintc/gate_crypto_perf.c (`make check-crypto-perf`), which measures
 # the live C median (build/bin/zclassic23 -bench-crypto-vs-rust) and enforces:
 #
 #   RATCHET  (always, hard):  measured_c_ns <= c_ns_baseline * (1 + margin).

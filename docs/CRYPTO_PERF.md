@@ -19,7 +19,7 @@ cited Rust numbers, never a live Rust link.
 |---|---|---|
 | Benchmark | `build/bin/z23 -bench-crypto-vs-rust` (`engine/entry/main.c`) — `make bench-crypto-vs-rust` | Times every consensus-path C primitive as a **median of N** ns/op, prints machine-readable `CRYPTOPERF <key> <ns> <ops/s>` lines, appends medians to `docs/bench-history.csv`. |
 | Baseline | `tools/crypto_perf_baseline.csv` | Per primitive: `c_ns_baseline` (a **ceiling that may only shrink**), `rust_ns_baseline`, `gate_mode`, `rust_source`. |
-| Gate | `tools/scripts/check_crypto_perf.sh` — `make check-crypto-perf` | Measures C live and enforces the ratchet + the ratio-vs-Rust rule below. |
+| Gate | `tools/lint/lintc/gate_crypto_perf.c` — `make check-crypto-perf` | Measures C live and enforces the ratchet + the ratio-vs-Rust rule below. |
 
 The benchmark cannot go **hollow-fast**: every primitive is TEETH-checked
 (valid → true, perturbed → false / avalanche / square-consistency) before any

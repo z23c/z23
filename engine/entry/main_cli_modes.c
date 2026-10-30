@@ -792,7 +792,7 @@ static int bench_crypto_verify(void)
  * verify, SHA256, SHA3-256, BLAKE2b), reports a flake-resistant MEDIAN
  * ns/op per primitive, appends the medians to docs/bench-history.csv, and
  * prints a machine-readable `CRYPTOPERF <key> <median_ns> <ops_per_sec>
- * <samples>` line the gate (tools/scripts/check_crypto_perf.sh) parses to
+ * <samples>` line the gate (tools/lint/lintc/gate_crypto_perf.c) parses to
  * enforce the ratchet + ratio-vs-Rust invariant.
  *
  * This is MEASUREMENT ONLY — it calls the exact production verify/hash
@@ -915,7 +915,7 @@ static bool bench_verify_ed25519(void *arg)
  * host-ISA build gets the tag.
  *
  * The CRYPTOPERF key is deliberately unchanged in both builds:
- * tools/scripts/check_crypto_perf.sh parses it against a baseline pinned to
+ * tools/lint/lintc/gate_crypto_perf.c parses it against a baseline pinned to
  * the -v3 build, and renaming it would silently disarm the gate. Running
  * `make check-crypto-perf` against a ZCL_NATIVE=1 binary compares host-ISA
  * numbers to -v3-pinned ceilings and would ratchet the ceiling to a value the
