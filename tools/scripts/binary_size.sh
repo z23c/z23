@@ -11,7 +11,7 @@
 #
 # DESIGN DECISION (step 2 of the anti-stale lane): the binary size is NOT baked
 # into the machine-checked DOC-COUNTS block in docs/dev/CODEBASE_MAP.md. That block
-# is build-free by contract (check_doc_counts.sh is "filesystem + grep only, no
+# is build-free by contract (check-doc-counts is "filesystem + grep only, no
 # build"), whereas a binary size only exists after a whole-program LTO link and
 # depends on the flag profile (release vs test, portable vs ZCL_NATIVE, Tor stub
 # vs real libtor). Pinning it into a build-free doc gate would either break that

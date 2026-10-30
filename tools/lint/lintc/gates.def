@@ -160,6 +160,7 @@ LINT_GATE("check-pipefail-status-pipe", check_pipefail_status_pipe, LINT_CMD_PAI
 LINT_GATE("check-cookbook", check_cookbook, LINT_CMD_PAIR)
 LINT_GATE("check-promotion-receipt-chain", check_promotion_receipt_chain, LINT_CMD_PAIR)
 LINT_GATE("check-platform-header-guards", check_platform_header_guards, LINT_CMD_PAIR)
+LINT_GATE("check-doc-counts", check_doc_counts, LINT_CMD_PAIR)
 LINT_GATE("check-object-reproducible", check_object_reproducible, LINT_CMD_NONE)
 LINT_GATE("riscv64-universal", riscv64_universal, LINT_CMD_NONE)
 LINT_GATE("check-read-leaf-no-boot-ceremony", check_read_leaf_no_boot_ceremony, LINT_CMD_PAIR)

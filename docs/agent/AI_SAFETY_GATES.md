@@ -197,7 +197,7 @@ exempts a line that legitimately records a constant or a dated measurement — a
 benchmark log row, an immutable positioning statement in an ADR.
 
 **A gap that was closed, and the rule it left behind.** The sibling gate
-`tools/scripts/check_doc_counts.sh`, which machine-checks code-derived counts
+`z23-lint check-doc-counts`, which machine-checks code-derived counts
 (test groups, ports, adapters, condition registrations) against a canonical
 `DOC-COUNTS` block in [`CODEBASE_MAP.md`](../dev/CODEBASE_MAP.md), once scanned
 `CLAUDE.md` and `docs/**` but **not** `README.md`. The single most-read file in

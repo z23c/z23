@@ -42,7 +42,6 @@
  * dumper set must resolve fully before that message can print. */
 
 #define SW_MAX_DEFS 128
-#define SW_PATH 512
 
 static const char k_sw_boot[] = "engine/composition/src/boot.c";
 static const char k_sw_linux[] =
@@ -72,18 +71,19 @@ static int sw_compile(struct sw_re *r)
         "syscall[[:space:]]*\\([[:space:]]*__NR_" "seccomp",
         "\"confine" "ment\"[[:space:]]*,[[:space:]]*confine"
             "ment_dump_state_json",
-        "^[[:space:]]*#include[[:space:]]+\"controllers/(diagnostics_dumpers_"
-            "[A-Za-z0-9_]+\\.def)\"",
     };
     regex_t *re[] = { &r->name, &r->stage, &r->nrsec, &r->conf, &r->incl };
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 4; i++) {
         int err = regcomp(re[i], pat[i], REG_EXTENDED);
         if (err) {
             sw_free(r, i);
             return reg_fail(re[i], err);
         }
     }
-    return 0;
+    int rc = lint_dumper_include_re(&r->incl);
+    if (rc)
+        sw_free(r, 4);
+    return rc;
 }
 
 static int sw_is_reg(const char *path)
@@ -172,110 +172,12 @@ static int sw_file_has_ident(const char *path, const char *ident)
     return found;
 }
 
-struct sw_owners { char *out; size_t cap; int count; };
 
-static int sw_owner_path(const char *path, void *ctx)
+static int sw_check_confinement(regex_t *conf)
 {
-    struct sw_owners *owners = ctx;
-    if (owners->count == 0) {
-        size_t n = strlen(path);
-        if (n >= owners->cap)
-            return die("z23-lint: git ls-files path overflow: %s\n", path);
-        memcpy(owners->out, path, n + 1);
-    }
-    owners->count++;
-    return 0;
-}
-
-static int sw_owners_command(const char *cmd, char *out, size_t cap)
-{
-    struct sw_owners owners = { .out = out, .cap = cap };
-    out[0] = '\0';
-    return each_zpath(cmd, sw_owner_path, &owners) ? -1 : owners.count;
-}
-
-/* git ls-files -z -- <engine path> <cognition path> <contexts glob>: number of
- * tracked owners for one per-domain include; when exactly one, the path is
- * copied to out. A failed producer or read returns -1, never a partial count.
- * git's own stderr passes through, as in the shell original. */
-static int sw_git_owners(const char *rel, char *out, size_t cap)
-{
-    char cmd[4096];
-    if (ovf(snprintf(cmd, sizeof cmd,
-                     "git ls-files -z -- 'engine/controllers/include/controllers/%s' "
-                     "'cognition/controllers/include/controllers/%s' "
-                     "'contexts/*/controllers/include/controllers/%s'",
-                     rel, rel, rel), sizeof cmd))
-        return -1;
-    return sw_owners_command(cmd, out, cap);
-}
-
-/* dumper_def_files twin: aggregator first, then each parsed include's single
- * resolved owner, in include order. Returns 1 (explaining on stderr) when the
- * aggregator is missing, an include resolves to != 1 owners, or the set comes
- * back under the anti-hollowness floor. */
-static int sw_dumper_files(regex_t *incl, char out[][SW_PATH], int *nout)
-{
-    *nout = 0;
-    if (!sw_is_reg(k_sw_agg)) {
-        fprintf(stderr, "dumper_defs: missing %s (run from repo root)\n",
-                k_sw_agg);
-        return 1;
-    }
-    memcpy(out[0], k_sw_agg, sizeof k_sw_agg);
-    *nout = 1;
-    FILE *f = fopen(k_sw_agg, "r");
-    if (!f)
-        return die("z23-lint: cannot open %s\n", k_sw_agg);
-    char *line = NULL;
-    size_t cap = 0;
-    int rc = 0;
-    while (getline(&line, &cap, f) >= 0 && rc == 0) {
-        regmatch_t m[2];
-        if (regexec(incl, line, 2, m, 0) != 0)
-            continue;
-        char rel[128];
-        size_t rl = (size_t)(m[1].rm_eo - m[1].rm_so);
-        if (rl >= sizeof rel || *nout >= SW_MAX_DEFS) {
-            rc = die("z23-lint: dumper include overflow\n", "");
-            break;
-        }
-        memcpy(rel, line + m[1].rm_so, rl);
-        rel[rl] = '\0';
-        int owners = sw_git_owners(rel, out[*nout], SW_PATH);
-        if (owners < 0) {
-            rc = 2;
-            break;
-        }
-        if (owners != 1) {
-            fprintf(stderr, "dumper_defs: %s includes '%s' but the "
-                    "feature-first controller rooms resolve %d owners\n",
-                    k_sw_agg, rel, owners);
-            rc = 1;
-            break;
-        }
-        (*nout)++;
-    }
-    free(line);
-    fclose(f);
-    if (rc)
-        return rc;
-    int domains = *nout - 1;
-    if (domains < 8) {
-        fprintf(stderr, "dumper_defs: resolved only %d per-domain .def "
-                "include(s) from %s, expected at least 8 — the include "
-                "pattern moved and every consumer of this set has gone blind\n",
-                domains, k_sw_agg);
-        return 1;
-    }
-    return 0;
-}
-
-static int sw_check_confinement(regex_t *incl, regex_t *conf)
-{
-    static char defs[SW_MAX_DEFS][SW_PATH];
+    static char defs[SW_MAX_DEFS][LINT_DUMPER_PATH];
     int ndef = 0;
-    int rc = sw_dumper_files(incl, defs, &ndef);
+    int rc = lint_dumper_def_files(defs, SW_MAX_DEFS, &ndef);
     if (rc) {
         fputs("check_sandbox_wired: FAIL — could not resolve the dumpstate "
               "descriptor set\n", stderr);
@@ -357,7 +259,7 @@ int check_sandbox_wired_run(int argc, char **argv)
                 "process is KILL_PROCESS)\n", k_sw_witness);
         fail = 1;
     }
-    rc = sw_check_confinement(&r.incl, &r.conf);
+    rc = sw_check_confinement(&r.conf);
     if (rc == 2) {
         sw_free(&r, 5);
         return rc;
@@ -409,7 +311,7 @@ static int sw_owner_selftest(void)
     char out[64];
     int bad = 0;
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
-        int count = sw_owners_command(cases[i].command, out, sizeof out);
+        int count = lint_dumper_owners_command(cases[i].command, out, sizeof out);
         if (count != cases[i].owners ||
             (count > 0 && strcmp(out, "owner.c") != 0)) {
             fprintf(stderr, "check_sandbox_wired selftest: producer case %zu "
@@ -418,7 +320,7 @@ static int sw_owner_selftest(void)
         }
     }
     char tiny[4];
-    bad |= sw_owners_command("printf 'owner.c\\000'", tiny, sizeof tiny) != -1;
+    bad |= lint_dumper_owners_command("printf 'owner.c\\000'", tiny, sizeof tiny) != -1;
     return bad;
 }
 

@@ -145,6 +145,19 @@ static inline void lintc_buf_clear(char **p, size_t *n)
         (*p)[0] = '\0';
 }
 
+/* The dumpstate descriptor set (lintc_dumper.c; twin of dumper_def_files in
+ * tools/lint/dumper_defs.sh): the aggregator then each per-domain .def it
+ * includes, in include order, into out[0..*nout). Returns 0, 1 after a
+ * message on stderr (missing aggregator, an include with != 1 owners, or
+ * fewer than the floor of domains) or 2 on a read or producer error.
+ * lint_dumper_include_re compiles the include-line pattern (capture 1 is the
+ * file name); lint_dumper_owners_command counts the NUL-separated paths a
+ * producer command prints, copying the first, or -1 on any failure. */
+enum { LINT_DUMPER_PATH = 256 };
+int lint_dumper_def_files(char out[][LINT_DUMPER_PATH], int max, int *nout);
+int lint_dumper_include_re(regex_t *re);
+int lint_dumper_owners_command(const char *cmd, char *out, size_t cap);
+
 const char *env_or(const char *name, const char *fallback);
 /* $TMPDIR (else /tmp)/z23-lint-<tag>.XXXXXX via mkdtemp; 0, or 2 after a
  * message. */

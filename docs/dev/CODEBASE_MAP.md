@@ -272,11 +272,11 @@ Outbound-only by design: 13 port interfaces in `platform/ports/include/ports/*_p
 + 14 sqlite/file write impls in `platform/adapters/outbound/persistence/{src,include}/`.
 Reads are owned by Models (Law 5), so inbound repository ports are
 reserved-empty. Both counts are pinned by the `DOC-COUNTS` block below —
-`check_doc_counts.sh` fails if either directory changes shape without this
+`z23-lint check-doc-counts` fails if either directory changes shape without this
 page changing with it.
 
 <!-- DOC-COUNTS-BEGIN -->
-<!-- Canonical code-derived counts (machine-checked by tools/scripts/check_doc_counts.sh). -->
+<!-- Canonical code-derived counts (machine-checked by z23-lint check-doc-counts). -->
 <!-- Update BOTH this block AND any prose that cites these numbers when the code moves. -->
 <!--   port_interfaces      = platform/ports/include/ports/*.h                                -->
 <!--   persistence_adapters = platform/adapters/outbound/persistence/src/*.c                  -->
@@ -496,8 +496,7 @@ Gates live in **two** directories and neither is deprecated:
 `tools/lint/check_*.sh` and `tools/scripts/check_*.sh` (roughly half each).
 Rule of thumb: put it in `tools/lint/` if it sources `tools/lint/gate_lib.sh`;
 put it in `tools/scripts/` if it is also runnable standalone as an operator
-tool (`check_consensus_parity.sh`, and `check_doc_counts.sh`
-all live there). Native gates such as
+tool (`check_consensus_parity.sh` lives there). Native gates such as
 `z23-lint check-domain-purity` live in `tools/lint/lintc/`. Either way,
 add it as a dependency of the `lint` target in the `Makefile`.
 

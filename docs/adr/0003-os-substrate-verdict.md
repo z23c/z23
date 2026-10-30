@@ -91,7 +91,7 @@ fairly." The organs that contract actually needs are built:
   Built specifically to fix an 8.6h silent sweeper wedge (see the header's
   own incident note).
 - **Condition engine** — `engine/conditions/` (32 live `condition_register(...)`
-  registrations, per `tools/scripts/check_doc_counts.sh`'s own measured
+  registrations, per `z23-lint check-doc-counts`'s own measured
   count): typed
   detect/remedy/witness healers — the node's equivalent of an OS's
   self-healing daemons, but wired to the append-only log instead of ambient

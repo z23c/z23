@@ -163,7 +163,6 @@ gate_command() {
         check-operator-needed-sink)        echo './build/bin/z23-lint check-operator-needed-sink' ;;
         check-systemd-memory-budget)       echo './tools/scripts/check_systemd_memory_budget.sh --selftest && ./tools/scripts/check_systemd_memory_budget.sh' ;;
         check-doc-accuracy)                echo './tools/scripts/check_doc_accuracy.sh' ;;
-        check-doc-counts)                  echo './tools/scripts/check_doc_counts.sh' ;;
         check-no-stale-pinned-facts)       echo './build/bin/z23-lint check-no-stale-pinned-facts --selftest && ./build/bin/z23-lint check-no-stale-pinned-facts .' ;;
         check-no-uncited-victory)          echo './tools/scripts/check_no_uncited_victory.sh' ;;
         check-doc-claims)                  echo './build/bin/z23-lint check-doc-claims --selftest && ./build/bin/z23-lint check-doc-claims' ;;

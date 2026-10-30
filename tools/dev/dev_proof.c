@@ -5857,8 +5857,8 @@ static const struct dp_docs_fresh_artifact DP_DOCS_FRESH[] = {
       "build/bin/z23-lint",
       "make docs-executor-routing", "check-fleet-observations" },
     { "docs/dev/CODEBASE_MAP.md",
-      "tools/scripts/check_doc_counts.sh",
-      "make fix-doc-counts", NULL },
+      "build/bin/z23-lint",
+      "make fix-doc-counts", "check-doc-counts" },
 };
 #define DP_DOCS_FRESH_N (sizeof(DP_DOCS_FRESH) / sizeof(DP_DOCS_FRESH[0]))
 

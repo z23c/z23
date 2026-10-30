@@ -14733,18 +14733,19 @@ check-doc-inline-paths: $(LINTC_TOOL)
 # persistence_adapters) declared in the <!-- DOC-COUNTS --> block of
 # docs/dev/CODEBASE_MAP.md must agree with the code, and known-stale compound
 # phrases ("15 ports", "1500+ tests", ...) must not return to the prose.
-check-doc-counts:
+check-doc-counts: $(LINTC_TOOL)
 	@echo "══ LINT: doc counts vs code ══"
-	@./tools/scripts/check_doc_counts.sh
+	@./build/bin/z23-lint check-doc-counts --selftest
+	@./build/bin/z23-lint check-doc-counts
 
-# The REPAIR half of the gate above. check_doc_counts.sh already carries a
+# The REPAIR half of the gate above. check-doc-counts already carries a
 # --fix mode (the code is authoritative, so a drift is always resolved by
 # rewriting the declared values from the code-measured ones) but nothing
 # could reach it through `make`. It is the author's repair: the land queue
 # never runs it, and a stale block fails the proof naming this target.
 .PHONY: fix-doc-counts
-fix-doc-counts:
-	@./tools/scripts/check_doc_counts.sh --fix
+fix-doc-counts: $(LINTC_TOOL)
+	@./build/bin/z23-lint check-doc-counts --fix
 
 # Gate — the checkout's own knowledge stays true. Every row in
 # engine/composition/facts/ carries the repo-relative file its claim was read

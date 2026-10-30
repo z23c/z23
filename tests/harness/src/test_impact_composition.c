@@ -121,16 +121,24 @@ static bool ic_write(const char *dir, const char *rel, const char *content)
 
 /* z23-lint serves both fleet checkers, so a fixture scripts each checker by
  * its subcommand. The two bodies are shell statements that end their arm. */
-static bool ic_write_lint(const char *dir, const char *facts, const char *obs)
+static bool ic_write_lint_counts(const char *dir, const char *facts,
+                                 const char *obs, const char *counts)
 {
     char body[1024];
     if (snprintf(body, sizeof(body),
                  "#!/bin/sh\ncase \"$1\" in\n"
                  "check-fleet-facts) %s ;;\n"
                  "check-fleet-observations) %s ;;\n"
-                 "*) exit 0 ;;\nesac\n", facts, obs) >= (int)sizeof(body))
+                 "check-doc-counts) %s ;;\n"
+                 "*) exit 0 ;;\nesac\n", facts, obs, counts) >=
+        (int)sizeof(body))
         return false;
     return ic_write(dir, "build/bin/z23-lint", body);
+}
+
+static bool ic_write_lint(const char *dir, const char *facts, const char *obs)
+{
+    return ic_write_lint_counts(dir, facts, obs, "exit 0");
 }
 
 /* Whole-item membership in a comma-separated selector. A substring test would
@@ -11602,13 +11610,10 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
         static const char *const stubs[] = {
             "build/bin/z23-lint",
             "build/bin/z23-lint",
-            "tools/scripts/check_doc_counts.sh",
         };
-        char generation[4096], bare[4096], script[4352], cmd[8704];
+        char generation[4096], script[4352], cmd[8704];
         test_make_tmpdir(generation, sizeof(generation),
                          "impact_composition", "docs-fresh");
-        test_make_tmpdir(bare, sizeof(bare),
-                         "impact_composition", "docs-fresh-bare");
         for (size_t i = 0; i < sizeof(stubs) / sizeof(stubs[0]); i++) {
             ASSERT(ic_write(generation, stubs[i], "#!/bin/sh\nexit 0\n"));
             ASSERT(snprintf(script, sizeof(script), "%s/%s", generation,
@@ -11626,12 +11631,6 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
         for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
             ASSERT(ic_write(generation, tools[i], "#!/bin/sh\nexit 0\n"));
             ASSERT(snprintf(script, sizeof(script), "%s/%s", generation,
-                            tools[i]) < (int)sizeof(script));
-            ASSERT(chmod(script, 0755) == 0);
-            /* The bare dir below tests the checker layer, not the
-             * toolchain layer, so it carries the same binaries. */
-            ASSERT(ic_write(bare, tools[i], "#!/bin/sh\nexit 0\n"));
-            ASSERT(snprintf(script, sizeof(script), "%s/%s", bare,
                             tools[i]) < (int)sizeof(script));
             ASSERT(chmod(script, 0755) == 0);
         }
@@ -11671,27 +11670,15 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
         /* The doc-counts block is a generated document too: stale counts alone
          * refuse the proof naming the make target the author runs, since the
          * land queue no longer repairs them. */
-        ASSERT(ic_write_lint(generation, "exit 0", "exit 0"));
-        ASSERT(ic_write(generation, "tools/scripts/check_doc_counts.sh",
-                        "#!/bin/sh\necho FAIL >&2\nexit 1\n"));
-        ASSERT(snprintf(script, sizeof(script), "%s/%s", generation,
-                        "tools/scripts/check_doc_counts.sh") <
-               (int)sizeof(script));
-        ASSERT(chmod(script, 0755) == 0);
+        ASSERT(ic_write_lint_counts(generation, "exit 0", "exit 0",
+                                    "echo FAIL >&2; exit 1"));
         memset(why, 0, sizeof(why));
         ASSERT(!zcl_dev_proof_test_generation_docs_fresh(generation, why,
                                                          sizeof(why)));
         ASSERT_STR_EQ(why, "proof_generated_docs_stale:"
                       "docs/dev/CODEBASE_MAP.md (make fix-doc-counts)");
-        /* A generation without the checkers is a distinct refusal,
-         * never a pass. */
-        memset(why, 0, sizeof(why));
-        ASSERT(!zcl_dev_proof_test_generation_docs_fresh(bare, why,
-                                                         sizeof(why)));
-        ASSERT_STR_EQ(why, "proof_generated_docs_checker_missing:"
-                      "tools/scripts/check_doc_counts.sh");
-        ASSERT((size_t)snprintf(cmd, sizeof(cmd), "rm -rf '%s' '%s'",
-                                generation, bare) < sizeof(cmd));
+        ASSERT((size_t)snprintf(cmd, sizeof(cmd), "rm -rf '%s'",
+                                generation) < sizeof(cmd));
         ASSERT(system(cmd) == 0);
         PASS();
 #endif
@@ -11707,7 +11694,6 @@ static bool ic_docs_fresh_fixture(char *generation, size_t len,
     static const char *const stubs[] = {
         "build/bin/z23-lint",
         "build/bin/z23-lint",
-        "tools/scripts/check_doc_counts.sh",
         "build/bin/z23-lint",
         "build/bin/z23-fleet-observe",
         "build/bin/gen_capability_inventory",
@@ -12096,7 +12082,6 @@ static int test_ic_generation_docs_fresh_refuses_missing_tools(void)
         static const char *const stubs[] = {
             "build/bin/z23-lint",
             "build/bin/z23-lint",
-            "tools/scripts/check_doc_counts.sh",
         };
         static const char *const tools[] = {
             "build/bin/z23-lint",

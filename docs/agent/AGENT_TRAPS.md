@@ -273,7 +273,7 @@ CLEAN** unless its empty-scan floor is preserved, as the native domain gate now 
 | `engine/application/` | two `.gitkeep` files, no source | Hardcoded in the `roots[]` list of `run_check_build_commit_macro_contract()` in `tests/harness/src/test_make_lint_gates.c`; each entry is `opendir()`ed. Delete the directory and the test aborts. |
 | `apps/` | a second code layout next to `app/` | **Runtime data, not code.** `engine/modules/framework/src/app_catalog.c` `snprintf`s `"%s/apps/%s/app.def"` against the datadir at run time, and a native command's reply is asserted equal to that exact string. |
 | `domain/` | 8 files, mostly superseded by `core/` | `build/bin/z23-lint check-domain-purity` requires a non-empty source set and refuses an empty scan. The former shell scan could report clean after `find domain -type f …` matched nothing; preserve the fail-loud floor when moving its scan roots. |
-| `platform/ports/` | 12 headers, no `.c` | `tools/scripts/check_doc_counts.sh` hard-counts `platform/ports/include/ports/*.h` against `port_interfaces` in the `DOC-COUNTS` block of `docs/dev/CODEBASE_MAP.md`. |
+| `platform/ports/` | 12 headers, no `.c` | `z23-lint check-doc-counts` hard-counts `platform/ports/include/ports/*.h` against `port_interfaces` in the `DOC-COUNTS` block of `docs/dev/CODEBASE_MAP.md`. |
 | `platform/adapters/` | thin sqlite wrappers | Same gate hard-counts `platform/adapters/outbound/persistence/src/*.c` against `persistence_adapters`. |
 | `src/` | four loose files at the root | The program entry point (`engine/entry/main.c`, `engine/entry/cli.c`, `src/main_cli_modes.{c,h}`) and the most content-asserted path outside `app/`. It is also in the same `roots[]` list as `engine/application/`. |
 
