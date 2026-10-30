@@ -215,33 +215,105 @@ static float label_size(const char *label, const jobject *save)
     if (save == &transcript_view) return 18.0f;
     return small_label(label, save) ? 14.0f : 16.0f;
 }
+static bool padding4(JNIEnv *env, jobject view, int left, int top, int right, int bottom)
+{
+    jmethodID set = method_of(env, view, "setPadding", "(IIII)V");
+    if (!set) return false;
+    (*env)->CallVoidMethod(env, view, set, dp((float)left), dp((float)top), dp((float)right), dp((float)bottom));
+    return clean(env);
+}
+/* Gives a child of a vertical LinearLayout its size, weight and bottom margin (width and height in
+ * pixels or a LayoutParams constant). */
+static bool place(JNIEnv *env, jobject view, int width, int height, float weight, int bottom_dp)
+{
+    jclass cls = (*env)->FindClass(env, "android/widget/LinearLayout$LayoutParams");
+    jmethodID ctor = clean(env) && cls ? (*env)->GetMethodID(env, cls, "<init>", "(IIF)V") : NULL;
+    jmethodID margins = ctor ? (*env)->GetMethodID(env, cls, "setMargins", "(IIII)V") : NULL;
+    jobject params = clean(env) && margins ? (*env)->NewObject(env, cls, ctor, width, height, weight) : NULL;
+    jmethodID set = clean(env) && params ? method_of(env, view, "setLayoutParams", "(Landroid/view/ViewGroup$LayoutParams;)V") : NULL;
+    bool ok = set != NULL;
+    if (ok) {
+        (*env)->CallVoidMethod(env, params, margins, 0, 0, 0, dp((float)bottom_dp));
+        (*env)->CallVoidMethod(env, view, set, params);
+        ok = clean(env);
+    }
+    if (params) (*env)->DeleteLocalRef(env, params);
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    return ok;
+}
+/* Filled buttons are flat: the default elevation shadow is clipped by the bottom bar. */
+static bool flatten(JNIEnv *env, jobject view)
+{
+    jmethodID animator = method_of(env, view, "setStateListAnimator", "(Landroid/animation/StateListAnimator;)V");
+    jmethodID elevation = animator ? method_of(env, view, "setElevation", "(F)V") : NULL;
+    if (!elevation) return false;
+    (*env)->CallVoidMethod(env, view, animator, NULL);
+    (*env)->CallVoidMethod(env, view, elevation, 0.0f);
+    return clean(env);
+}
+/* Fills the view with a rounded rectangle of the given color and corner radius. */
+static bool pill(JNIEnv *env, jobject view, jint color, float radius_dp)
+{
+    jclass cls = (*env)->FindClass(env, "android/graphics/drawable/GradientDrawable");
+    jmethodID ctor = clean(env) && cls ? (*env)->GetMethodID(env, cls, "<init>", "()V") : NULL;
+    jobject shape = ctor ? (*env)->NewObject(env, cls, ctor) : NULL;
+    jmethodID fill = clean(env) && shape ? method_of(env, shape, "setColor", "(I)V") : NULL;
+    jmethodID round = fill ? method_of(env, shape, "setCornerRadius", "(F)V") : NULL;
+    jmethodID back = round ? method_of(env, view, "setBackground", "(Landroid/graphics/drawable/Drawable;)V") : NULL;
+    bool ok = back != NULL;
+    if (ok) {
+        (*env)->CallVoidMethod(env, shape, fill, color);
+        (*env)->CallVoidMethod(env, shape, round, (jfloat)dp(radius_dp));
+        (*env)->CallVoidMethod(env, view, back, shape);
+        ok = clean(env);
+    }
+    if (shape) (*env)->DeleteLocalRef(env, shape);
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    return ok;
+}
+/* The Talk caption sits centered and muted in the bottom bar; the transcript gets open line spacing. */
+static bool special_text(JNIEnv *env, jobject view, const jobject *save)
+{
+    if (save == &transcript_view) return line_spacing(env, view, 4.0f);
+    return save != &voice_view || (int_property(env, view, "setGravity", 1) &&
+        int_property(env, view, "setTextColor", (jint)0xff5f6662));
+}
 static bool add_text(JNIEnv *env, jobject layout, jobject activity, const char *label, jobject *save)
 {
     jobject view = widget(env, "android/widget/TextView", activity);
     bool ok = view && typography(env, view, label_size(label, save), (jint)0xff262b2b) && padding(env, view, 0, 4) &&
-        text(env, view, label) && (save != &transcript_view || line_spacing(env, view, 4.0f)) &&
+        text(env, view, label) && special_text(env, view, save) &&
         append(env, layout, view) && (!save || keep(env, save, view));
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
-static bool style_button(JNIEnv *env, jobject view, size_t i, bool primary)
+static bool primary_button(size_t i) { return i == 0 || i == 9 || i == 10; }
+static bool style_button(JNIEnv *env, jobject view, size_t i)
 {
-    int min_height = dp(i == 9 ? 72.0f : 48.0f);
-    return typography(env, view, 16.0f, primary ? (jint)0xffffffff : (jint)0xff264a43) &&
+    int min_height = dp(i == 9 ? 64.0f : i == 15 ? 40.0f : 48.0f);
+    return typography(env, view, i == 15 || i == 8 ? 15.0f : 16.0f, primary_button(i) ? (jint)0xffffffff : (jint)0xff264a43) &&
         bool_property(env, view, "setAllCaps", false) &&
         int_property(env, view, "setMinHeight", min_height) &&
         int_property(env, view, "setMinimumHeight", min_height) &&
         padding(env, view, 16, 8);
 }
+/* Talk and Confirm are green pills, the suggestion a pale pill, More plain text, Start node a slab. */
+static bool shape_button(JNIEnv *env, jobject view, size_t i)
+{
+    switch (i) {
+    case 9: return pill(env, view, (jint)0xff235e50, 32.0f) && flatten(env, view) && place(env, view, -1, -2, 0.0f, 0);
+    case 10: return pill(env, view, (jint)0xff235e50, 32.0f) && flatten(env, view);
+    case 15: return pill(env, view, (jint)0xffe4ebe7, 20.0f) && flatten(env, view) && place(env, view, -2, -2, 0.0f, 8);
+    case 8: return int_property(env, view, "setBackgroundColor", 0);
+    case 0: return int_property(env, view, "setBackgroundColor", (jint)0xff235e50);
+    default: return true;
+    }
+}
 static bool add_button(JNIEnv *env, jobject layout, jobject activity, const char *label, size_t i)
 {
     jobject view = widget(env, "android/widget/Button", activity);
-    bool primary = i == 9 || i == 0;
-    bool flat = i == 15;
-    bool ok = view && style_button(env, view, i, primary) && text(env, view, label) &&
-        append(env, layout, view) && keep(env, &buttons[i], view);
-    if (ok && primary) ok = int_property(env, view, "setBackgroundColor", (jint)0xff235e50);
-    if (ok && flat) ok = int_property(env, view, "setBackgroundColor", 0);
+    bool ok = view && style_button(env, view, i) && text(env, view, label) &&
+        append(env, layout, view) && keep(env, &buttons[i], view) && shape_button(env, view, i);
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
@@ -259,23 +331,25 @@ void zapp_native_ui_destroy(JNIEnv *env)
     suggestion[0] = 0;
     callback = NULL; pressed = -1; details_open = false; reply_state = ZAPP_REPLY_READY; last_receipt[0] = 0;
 }
-/* The main screen holds only the status, Talk and the conversation; everything else is under More.
- * Talk stays put above the conversation while status text changes. */
-static bool node_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject camera, jobject receipt, jobject scroll)
+/* The main screen keeps the status and the conversation in the scrolling content; the voice controls
+ * sit in a bottom bar that stays put while the conversation scrolls. */
+static bool node_widgets(JNIEnv *env, jobject layout, jobject activity)
 {
-    (void)prompt; (void)invite; (void)camera; (void)receipt; (void)scroll;
-    return !(!add_text(env, layout, activity, "", &status_view) ||
-        !add_button(env, layout, activity, "Start node", 0) ||
-        !add_text(env, layout, activity, "", &pair_view) ||
-        !add_button(env, layout, activity, "Accept pairing", 12) ||
-        !add_button(env, layout, activity, "Reject", 13) ||
-        !add_button(env, layout, activity, "Talk", 9) ||
-        !add_text(env, layout, activity, "Press Talk and ask anything.", &voice_view) ||
-        !add_button(env, layout, activity, "", 15) ||
-        !add_button(env, layout, activity, "Confirm", 10) ||
-        !add_text(env, layout, activity, "", &notice_view) ||
-        !add_text(env, layout, activity, "", &transcript_view) ||
-        !add_button(env, layout, activity, "More", 8));
+    return add_text(env, layout, activity, "", &status_view) &&
+        add_button(env, layout, activity, "Start node", 0) &&
+        add_text(env, layout, activity, "", &pair_view) &&
+        add_button(env, layout, activity, "Accept pairing", 12) &&
+        add_button(env, layout, activity, "Reject", 13) &&
+        add_text(env, layout, activity, "", &notice_view) &&
+        add_text(env, layout, activity, "", &transcript_view) &&
+        add_button(env, layout, activity, "More", 8);
+}
+static bool bar_widgets(JNIEnv *env, jobject bar, jobject activity)
+{
+    return add_text(env, bar, activity, "Press Talk and ask anything.", &voice_view) &&
+        add_button(env, bar, activity, "", 15) &&
+        add_button(env, bar, activity, "Confirm", 10) &&
+        add_button(env, bar, activity, "Talk", 9);
 }
 static bool chat_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject camera, jobject receipt, jobject scroll)
 {
@@ -351,38 +425,52 @@ static bool style_prompt(JNIEnv *env, jobject field)
     return typography(env, field, 16.0f, (jint)0xff262b2b) &&
            int_property(env, field, "setMinLines", 1) && int_property(env, field, "setMaxLines", 4);
 }
-static bool prepare_layouts(JNIEnv *env, jobject scroll, jobject layout,
-                            jobject details, jobject prompt, jobject invite,
+static bool prepare_layouts(JNIEnv *env, jobject layout, jobject details, jobject prompt, jobject invite,
                             jobject camera, jobject receipt)
 {
-    return scroll && layout && prompt && invite && camera && receipt && details &&
+    return layout && prompt && invite && camera && receipt && details &&
            orient_layout(env, layout) && orient_layout(env, details) &&
-           bool_property(env, scroll, "setFitsSystemWindows", true) &&
-           int_property(env, scroll, "setBackgroundColor", (jint)0xfff7f5ef) &&
            padding(env, layout, 20, 20) && style_prompt(env, prompt) && style_prompt(env, invite) &&
            char_sequence(env, invite, "setHint", "Or paste an invitation");
+}
+/* The root stacks the scrolling content above a fixed bottom bar for the voice controls. */
+static bool assemble_root(JNIEnv *env, jobject root_layout, jobject scroll, jobject bar)
+{
+    return root_layout && scroll && bar && orient_layout(env, root_layout) && orient_layout(env, bar) &&
+           bool_property(env, root_layout, "setFitsSystemWindows", true) &&
+           int_property(env, root_layout, "setBackgroundColor", (jint)0xfff7f5ef) &&
+           int_property(env, bar, "setBackgroundColor", (jint)0xfff7f5ef) &&
+           int_property(env, bar, "setGravity", 1) && padding4(env, bar, 20, 8, 20, 16) &&
+           place(env, scroll, -1, 0, 1.0f, 0) && append(env, root_layout, scroll) &&
+           append(env, root_layout, bar) && keep(env, &root, root_layout);
 }
 static bool attach_details(JNIEnv *env, jobject details, jobject layout, jobject scroll)
 {
     return set_visible(env, details, false) && append(env, layout, details) &&
-           keep(env, &details_view, details) && append(env, scroll, layout) &&
-           keep(env, &root, scroll);
+           keep(env, &details_view, details) && append(env, scroll, layout);
+}
+static bool build_content(JNIEnv *env, jobject activity, jobject layout, jobject details, jobject bar)
+{
+    jobject prompt = widget(env, "android/widget/EditText", activity);
+    jobject invite = widget(env, "android/widget/EditText", activity);
+    jobject camera = widget(env, "android/widget/ImageView", activity);
+    jobject receipt = widget(env, "android/widget/ImageView", activity);
+    return prepare_layouts(env, layout, details, prompt, invite, camera, receipt) &&
+        node_widgets(env, layout, activity) && bar_widgets(env, bar, activity) &&
+        chat_widgets(env, details, activity, prompt, invite, camera, receipt, NULL) &&
+        fleet_widgets(env, details, activity, prompt, invite, camera, receipt, NULL) &&
+        finish_widgets(env, details, activity, receipt);
 }
 static bool build_ui(JNIEnv *env, jobject activity)
 {
     jobject scroll = widget(env, "android/widget/ScrollView", activity);
     jobject layout = widget(env, "android/widget/LinearLayout", activity);
     jobject details = widget(env, "android/widget/LinearLayout", activity);
-    jobject prompt = widget(env, "android/widget/EditText", activity);
-    jobject invite = widget(env, "android/widget/EditText", activity);
-    jobject camera = widget(env, "android/widget/ImageView", activity);
-    jobject receipt = widget(env, "android/widget/ImageView", activity);
-    return prepare_layouts(env, scroll, layout, details, prompt, invite, camera, receipt) &&
-        node_widgets(env, layout, activity, prompt, invite, camera, receipt, scroll) &&
-        chat_widgets(env, details, activity, prompt, invite, camera, receipt, scroll) &&
-        fleet_widgets(env, details, activity, prompt, invite, camera, receipt, scroll) &&
-        finish_widgets(env, details, activity, receipt) &&
-        attach_details(env, details, layout, scroll) && show_root(env, activity, scroll);
+    jobject bar = widget(env, "android/widget/LinearLayout", activity);
+    jobject outer = widget(env, "android/widget/LinearLayout", activity);
+    return scroll && build_content(env, activity, layout, details, bar) &&
+        attach_details(env, details, layout, scroll) && assemble_root(env, outer, scroll, bar) &&
+        show_root(env, activity, outer);
 }
 bool zapp_native_ui_create(JNIEnv *env, jobject activity, zapp_native_action action)
 {
