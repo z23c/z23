@@ -5,7 +5,7 @@
 # pipelines in a script that sets pipefail. Any producer counts: a
 # `cmd | grep -q` inverts the same way `printf | grep -q` does. Mode:
 # shrink-only ratchet (ZCL_LINT_MODE: FAIL default | WARN | UPDATE — same
-# shape as check_status_reason_single.sh).
+# shape as gate_status_reason_single.c).
 #
 # ── WHY THIS EXISTS ────────────────────────────────────────────────────────
 # Under `set -o pipefail`,
@@ -34,7 +34,7 @@
 # other syntactic context to know the status is a decision. That matters,
 # because every one of those recognisers is a whitespace/line-shape
 # assumption, and a shape-matching gate in this tree was recently defeated by
-# a plain reindent (see check_status_reason_single.sh's header). Nothing here
+# a plain reindent (see gate_status_reason_single.c's header). Nothing here
 # anchors to a line start, a column, an indent level, a brace position, or
 # one-statement-per-line: the scanner tokenises with a quote-aware state
 # machine and splits only on characters and keywords that are statement or

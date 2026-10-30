@@ -174,7 +174,6 @@ tools/lint/check_published_platforms.sh
 tools/lint/check_read_leaf_no_boot_ceremony.sh
 tools/lint/check_ship_remote_transaction.sh
 tools/lint/check_standalone_tools_link.sh
-tools/lint/check_status_reason_single.sh
 tools/lint/check_telemetry_ontology.sh
 tools/lint/check_windows_acceptance.sh
 tools/lint/check_windows_cross_syntax.sh

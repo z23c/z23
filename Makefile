@@ -14847,10 +14847,9 @@ check-source-identity-authority: $(LINTC_TOOL)
 # one place. This gate matches the ladder by SHAPE, not by any variable or
 # function name (a name-keyed gate is dodged by one rename), over a shrink-only
 # baseline at tools/lint/status_reason_baseline.txt.
-check-status-reason-single:
+check-status-reason-single: $(LINTC_TOOL)
 	@echo "══ LINT: the operator-needed ladder stays single ══"
-	@./tools/lint/check_status_reason_single.sh --selftest
-	@./tools/lint/check_status_reason_single.sh
+	@./build/bin/z23-lint check-status-reason-single --selftest && ./build/bin/z23-lint check-status-reason-single
 
 # Anti-rot ratchet: no NEW decision made on the exit status of a
 # `printf | grep -q` / `echo | grep -q` pipeline in a script that sets pipefail.

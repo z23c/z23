@@ -123,7 +123,7 @@ GATE=check_discarded_status
 #
 # The walk is a quote-aware character scan, deliberately NOT a line-shape
 # match: a gate in this tree was defeated by a plain reindent once already
-# (see check_status_reason_single.sh's header), so nothing below anchors to a
+# (see gate_status_reason_single.c's header), so nothing below anchors to a
 # column, an indent level, or one-statement-per-line.
 scan_violations() {
     awk '

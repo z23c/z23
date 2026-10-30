@@ -2366,13 +2366,13 @@ Z23_FLAG("ZCL_STALE_FACTS_SCAN_FILES", "env_build", "-", "-",
 Z23_FLAG("ZCL_STATUS_DEADLINE_MS", "env_runtime", "-", "-",
           "undocumented; first use engine/controllers/src/status_brief_native_handler.c:auto")
 Z23_FLAG("ZCL_STATUS_REASON_GATE_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_status_reason_single.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_status_reason_single.c:auto")
 Z23_FLAG("ZCL_STATUS_REASON_GATE_CEILING", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_status_reason_single.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_status_reason_single.c:auto")
 Z23_FLAG("ZCL_STATUS_REASON_GATE_FILE_FLOOR", "env_build", "1", "-",
-          "undocumented; first use tools/lint/check_status_reason_single.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_status_reason_single.c:auto")
 Z23_FLAG("ZCL_STATUS_REASON_GATE_SCAN_GLOB", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_status_reason_single.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_status_reason_single.c:auto")
 Z23_FLAG("ZCL_STICKY_REQUIRE_ALL", "env_build", "0", "-",
           "undocumented; first use tools/scripts/sticky_matrix.sh:auto")
 Z23_FLAG("ZCL_STICKY_VERDICT_DIR", "make_var", "-", "-",
