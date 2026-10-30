@@ -101,6 +101,10 @@ devbuild --wait make -j"$(getconf _NPROCESSORS_ONLN)" t-fast-exact ONLY=<exact-g
 devbuild --wait make -j"$(getconf _NPROCESSORS_ONLN)" test-parallel TEST_PARALLEL_ARGS=--no-cache
 ```
 
+Run `devbuild` from inside the worktree, not from `$HOME`: outside a checkout it
+is classified `exclusive` and queues behind shared z23 jobs. The first log line
+must contain `z23 class normal`.
+
 Inspect before editing: `pwd`, `git status --short --branch`,
 `git fetch origin main`, `git rev-parse HEAD origin/main`. On a fresh clone,
 `make setup` (under `devbuild --wait`) arms dependencies and hooks. Descend the
