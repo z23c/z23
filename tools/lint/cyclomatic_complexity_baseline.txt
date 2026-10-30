@@ -338,12 +338,6 @@ tools/core_seal.c:path_reject_reason:19
 tools/core_seal.c:read_and_hash:27
 tools/core_seal.c:read_manifest:27
 tools/core_seal.c:verify_sections:20
-tools/dev/devloop_cycle.c:cycle_json:101
-tools/dev/devloop_cycle.c:distill_first_error:17
-tools/dev/devloop_cycle.c:find_artifact:18
-tools/dev/devloop_cycle.c:finish_cycle:44
-tools/dev/devloop_cycle.c:zcl_devloop_deterministic_compile_failure:18
-tools/dev/devloop_cycle.c:zcl_devloop_run_cycle_mode:77
 tools/dev/devloop_hotswap_build.c:hs_hotfork_build:38
 tools/dev/devloop_hotswap_build.c:zcl_devloop_hotswap_build:45
 tools/engine_unit.c:append_unit_receipt:25
