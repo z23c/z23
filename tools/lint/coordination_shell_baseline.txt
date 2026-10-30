@@ -156,7 +156,6 @@ tools/scripts/check_dumper_never_blocks.sh
 tools/scripts/check_fleet_source_status.sh
 tools/scripts/check_frontier_single_writer.sh
 tools/scripts/check_git_hooks_installed.sh
-tools/scripts/check_golden_freshness.sh
 tools/scripts/check_lib_layering.sh
 tools/scripts/check_long_functions.sh
 tools/scripts/check_model_ar_lifecycle.sh

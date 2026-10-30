@@ -8992,7 +8992,7 @@ DETECTIVE_SCENARIOS = \
 UTXO_LADDER_LEAF_STORE ?= $(HOME)/.zclassic-c23/mmb_leaves.bin
 
 .PHONY: simnet-nightly
-simnet-nightly: $(TEST_PARALLEL_REL_CANDIDATE)
+simnet-nightly: $(TEST_PARALLEL_REL_CANDIDATE) $(LINTC_TOOL)
 	@echo "══ simnet-nightly: step 1/6 — full .scenario corpus (make chaos) ══"
 	@if $(MAKE) --no-print-directory chaos; then \
 	    step1=PASS; \
@@ -9036,7 +9036,7 @@ simnet-nightly: $(TEST_PARALLEL_REL_CANDIDATE)
 	    step5="SKIP (no fixture at $(UTXO_LADDER_LEAF_STORE))"; \
 	fi; \
 	echo "══ simnet-nightly: step 6/6 — golden-table tip-coverage-lag check ══"; \
-	if bash tools/scripts/check_golden_freshness.sh; then \
+	if $(LINTC_TOOL) check-golden-freshness; then \
 	    step6=PASS; \
 	else \
 	    step6=FAIL; \

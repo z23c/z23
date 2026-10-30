@@ -1049,15 +1049,15 @@ Z23_FLAG("ZCL_GIT_HOOK_SOURCE_ROOT", "env_build", "-", "-",
 Z23_FLAG("ZCL_GIT_HOOKS_PATH_FOR_TEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_git_hooks_installed.c:auto")
 Z23_FLAG("ZCL_GOLDEN_FRESHNESS", "env_build", "0", "-",
-          "undocumented; first use tools/scripts/check_golden_freshness.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_golden_freshness.c:auto")
 Z23_FLAG("ZCL_GOLDEN_FRESHNESS_DATADIR", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_golden_freshness.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_golden_freshness.c:auto")
 Z23_FLAG("ZCL_GOLDEN_FRESHNESS_LAG_MAX", "env_build", "70000", "-",
-          "undocumented; first use tools/scripts/check_golden_freshness.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_golden_freshness.c:auto")
 Z23_FLAG("ZCL_GOLDEN_FRESHNESS_RPCPORT", "env_build", "18232", "-",
-          "undocumented; first use tools/scripts/check_golden_freshness.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_golden_freshness.c:auto")
 Z23_FLAG("ZCL_GOLDEN_FRESHNESS_TIP", "env_build", "-", "-",
-          "undocumented; first use tools/scripts/check_golden_freshness.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_golden_freshness.c:auto")
 Z23_FLAG("ZCL_GOLDEN_TIMING_STRICT", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_golden_dev_cycle.c:auto")
 Z23_FLAG("ZCL_GROUP_PURPOSE_SRC", "env_build", "-", "-",

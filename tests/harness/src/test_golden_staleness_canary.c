@@ -9,7 +9,8 @@
  *     changes when tools/gen_sha3_windows is deliberately re-run);
  *   - g_utxo_root_ladder_count must be at or above a pinned minimum (it
  *     grows as rungs are minted, so a floor never false-fails on growth).
- * The NIGHTLY tip-coverage-lag check (check_golden_freshness.sh) additionally
+ * The NIGHTLY tip-coverage-lag check (z23-lint check-golden-freshness,
+ * tools/lint/lintc/gate_golden_freshness.c) additionally
  * watches for a table that is never re-minted. */
 
 #include "test/test_core.h"
