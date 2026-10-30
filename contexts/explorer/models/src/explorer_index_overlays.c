@@ -85,6 +85,106 @@ bool explorer_index_owner_address(struct node_db *ndb,
 
 /* ── ZNAM ──────────────────────────────────────────────────────────── */
 
+static int apply_znam_register(struct node_db *ndb, const struct transaction *tx,
+                               const struct znam_message *zm, int height,
+                               bool have_owner, const char *owner)
+{
+    if (!have_owner)
+        return 0;   /* owner unresolvable → reject (non-P2PKH input) */
+    struct znam_entry existing;
+    if (db_znam_find(ndb, zm->name, &existing))
+        return 0;   /* FCFS: name already taken */
+    struct znam_entry e;
+    memset(&e, 0, sizeof(e));
+    snprintf(e.name, sizeof(e.name), "%s", zm->name);
+    snprintf(e.owner_address, sizeof(e.owner_address), "%s", owner);
+    e.target_type = zm->target_type;
+    snprintf(e.target_value, sizeof(e.target_value), "%s",
+             zm->target_value);
+    memcpy(e.reg_txid, tx->hash.data, 32);
+    e.reg_height = height;
+    memcpy(e.last_update_txid, tx->hash.data, 32);
+    e.expiry_height = height + ZNAM_REGISTRATION_TERM_BLOCKS;
+    return !db_znam_save(ndb, &e);
+}
+
+static int apply_znam_update(struct node_db *ndb, const struct transaction *tx,
+                             const struct znam_message *zm, bool have_owner,
+                             const char *owner)
+{
+    struct znam_entry e;
+    if (!db_znam_find(ndb, zm->name, &e))
+        return 0;   /* name must exist */
+    if (!have_owner || strcmp(e.owner_address, owner) != 0)
+        return 0;   /* owner auth */
+    e.target_type = zm->target_type;
+    snprintf(e.target_value, sizeof(e.target_value), "%s",
+             zm->target_value);
+    memcpy(e.last_update_txid, tx->hash.data, 32);
+    return !db_znam_save(ndb, &e);
+}
+
+static int apply_znam_transfer(struct node_db *ndb, const struct transaction *tx,
+                               const struct znam_message *zm, bool have_owner,
+                               const char *owner)
+{
+    struct znam_entry e;
+    if (!db_znam_find(ndb, zm->name, &e))
+        return 0;
+    if (!have_owner || strcmp(e.owner_address, owner) != 0)
+        return 0;   /* only current owner may transfer */
+    snprintf(e.owner_address, sizeof(e.owner_address), "%s",
+             zm->new_owner);
+    memcpy(e.last_update_txid, tx->hash.data, 32);
+    return !db_znam_save(ndb, &e);
+}
+
+static int apply_znam_set_record(struct node_db *ndb,
+                                 const struct znam_message *zm, bool have_owner,
+                                 const char *owner)
+{
+    /* Records resolve the identity, so only the current owner may set
+     * them — same auth as UPDATE/TRANSFER. Without this guard anyone
+     * could post a coin address under any name (identity spoofing). */
+    struct znam_entry e;
+    if (!db_znam_find(ndb, zm->name, &e))
+        return 0;   /* name must exist */
+    if (!have_owner || strcmp(e.owner_address, owner) != 0)
+        return 0;   /* only the current owner may set records */
+    return !db_znam_addr_save(ndb, zm->name, zm->target_type,
+                              zm->target_value);
+}
+
+static int apply_znam_set_text(struct node_db *ndb,
+                               const struct znam_message *zm, bool have_owner,
+                               const char *owner)
+{
+    /* Same owner authorization as SET_RECORD — text records (onion,
+     * pubkey, url, ...) are identity-bearing. */
+    struct znam_entry e;
+    if (!db_znam_find(ndb, zm->name, &e))
+        return -1;   /* name must exist */
+    if (!have_owner || strcmp(e.owner_address, owner) != 0)
+        return -1;   /* only the current owner may set text records */
+    return !db_znam_text_save(ndb, zm->name, zm->text_key, zm->text_value);
+}
+
+static int apply_znam_renew(struct node_db *ndb, const struct transaction *tx,
+                            const struct znam_message *zm, int height)
+{
+    /* Extend the registration term. Renewal is permissionless
+     * (ENS-style): extending expiry can only benefit the owner, so no
+     * owner check — anyone may keep a name alive. Extend from the later
+     * of the current expiry or the anchor height, by one term. */
+    struct znam_entry e;
+    if (!db_znam_find(ndb, zm->name, &e))
+        return 0;   /* name must exist */
+    int32_t base = e.expiry_height > height ? e.expiry_height : height;
+    e.expiry_height = base + ZNAM_REGISTRATION_TERM_BLOCKS;
+    memcpy(e.last_update_txid, tx->hash.data, 32);
+    return !db_znam_save(ndb, &e);
+}
+
 /* Apply one parsed ZNAM op into the node.db registry tables (path A).
  * Stateful commands (REGISTER FCFS, UPDATE, TRANSFER, RENEW, SET_RECORD,
  * SET_TEXT) are correct only under the genesis-ascending walk the catchup
@@ -104,81 +204,31 @@ static void apply_znam(struct node_db *ndb, const struct transaction *tx,
                                                    sizeof(owner));
 
     switch (zm->command) {
-    case ZNAM_CMD_REGISTER: {
-        if (!have_owner)
-            return;   /* owner unresolvable → reject (non-P2PKH input) */
-        struct znam_entry existing;
-        if (db_znam_find(ndb, zm->name, &existing))
-            return;   /* FCFS: name already taken */
-        struct znam_entry e;
-        memset(&e, 0, sizeof(e));
-        snprintf(e.name, sizeof(e.name), "%s", zm->name);
-        snprintf(e.owner_address, sizeof(e.owner_address), "%s", owner);
-        e.target_type = zm->target_type;
-        snprintf(e.target_value, sizeof(e.target_value), "%s",
-                 zm->target_value);
-        memcpy(e.reg_txid, tx->hash.data, 32);
-        e.reg_height = height;
-        memcpy(e.last_update_txid, tx->hash.data, 32);
-        e.expiry_height = height + ZNAM_REGISTRATION_TERM_BLOCKS;
-        if (!db_znam_save(ndb, &e))
+    case ZNAM_CMD_REGISTER:
+        if (apply_znam_register(ndb, tx, zm, height, have_owner, owner))
             LOG_WARN("explorer", "apply_znam: REGISTER %s save failed",
                      zm->name);
         break;
-    }
-    case ZNAM_CMD_UPDATE: {
-        struct znam_entry e;
-        if (!db_znam_find(ndb, zm->name, &e))
-            return;   /* name must exist */
-        if (!have_owner || strcmp(e.owner_address, owner) != 0)
-            return;   /* owner auth */
-        e.target_type = zm->target_type;
-        snprintf(e.target_value, sizeof(e.target_value), "%s",
-                 zm->target_value);
-        memcpy(e.last_update_txid, tx->hash.data, 32);
-        if (!db_znam_save(ndb, &e))
+    case ZNAM_CMD_UPDATE:
+        if (apply_znam_update(ndb, tx, zm, have_owner, owner))
             LOG_WARN("explorer", "apply_znam: UPDATE %s save failed",
                      zm->name);
         break;
-    }
-    case ZNAM_CMD_TRANSFER: {
-        struct znam_entry e;
-        if (!db_znam_find(ndb, zm->name, &e))
-            return;
-        if (!have_owner || strcmp(e.owner_address, owner) != 0)
-            return;   /* only current owner may transfer */
-        snprintf(e.owner_address, sizeof(e.owner_address), "%s",
-                 zm->new_owner);
-        memcpy(e.last_update_txid, tx->hash.data, 32);
-        if (!db_znam_save(ndb, &e))
+    case ZNAM_CMD_TRANSFER:
+        if (apply_znam_transfer(ndb, tx, zm, have_owner, owner))
             LOG_WARN("explorer", "apply_znam: TRANSFER %s save failed",
                      zm->name);
         break;
-    }
-    case ZNAM_CMD_SET_RECORD: {
-        /* Records resolve the identity, so only the current owner may set
-         * them — same auth as UPDATE/TRANSFER. Without this guard anyone
-         * could post a coin address under any name (identity spoofing). */
-        struct znam_entry e;
-        if (!db_znam_find(ndb, zm->name, &e))
-            return;   /* name must exist */
-        if (!have_owner || strcmp(e.owner_address, owner) != 0)
-            return;   /* only the current owner may set records */
-        if (!db_znam_addr_save(ndb, zm->name, zm->target_type,
-                               zm->target_value))
+    case ZNAM_CMD_SET_RECORD:
+        if (apply_znam_set_record(ndb, zm, have_owner, owner))
             LOG_WARN("explorer", "apply_znam: SET_RECORD %s save failed",
                      zm->name);
         break;
-    }
     case ZNAM_CMD_SET_TEXT: {
-        /* Same owner authorization as SET_RECORD — text records (onion,
-         * pubkey, url, ...) are identity-bearing. */
-        struct znam_entry e;
-        if (!db_znam_find(ndb, zm->name, &e))
-            return;   /* name must exist */
-        if (!have_owner || strcmp(e.owner_address, owner) != 0)
-            return;   /* only the current owner may set text records */
-        if (!db_znam_text_save(ndb, zm->name, zm->text_key, zm->text_value))
+        int rc = apply_znam_set_text(ndb, zm, have_owner, owner);
+        if (rc < 0)
+            break;
+        if (rc > 0)
             LOG_WARN("explorer", "apply_znam: SET_TEXT %s save failed",
                      zm->name);
         /* Sovereign-identity feed 1: text key "zid" carries a 64-hex ed25519
@@ -189,22 +239,11 @@ static void apply_znam(struct node_db *ndb, const struct transaction *tx,
                                            zm->text_value, owner, height);
         break;
     }
-    case ZNAM_CMD_RENEW: {
-        /* Extend the registration term. Renewal is permissionless
-         * (ENS-style): extending expiry can only benefit the owner, so no
-         * owner check — anyone may keep a name alive. Extend from the later
-         * of the current expiry or the anchor height, by one term. */
-        struct znam_entry e;
-        if (!db_znam_find(ndb, zm->name, &e))
-            return;   /* name must exist */
-        int32_t base = e.expiry_height > height ? e.expiry_height : height;
-        e.expiry_height = base + ZNAM_REGISTRATION_TERM_BLOCKS;
-        memcpy(e.last_update_txid, tx->hash.data, 32);
-        if (!db_znam_save(ndb, &e))
+    case ZNAM_CMD_RENEW:
+        if (apply_znam_renew(ndb, tx, zm, height))
             LOG_WARN("explorer", "apply_znam: RENEW %s save failed",
                      zm->name);
         break;
-    }
     case ZNAM_CMD_INVALID:
     default:
         break;
