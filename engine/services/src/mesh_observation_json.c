@@ -409,17 +409,36 @@ static bool mo_take_bool(struct mo_parse_ctx *c, const struct json_value *obj,
     return true;
 }
 
-static bool mo_take_stage(struct mo_parse_ctx *c, const struct json_value *obj,
-                          const char *key, enum mesh_obs_stage *dst)
+/* Reads an optional token field and maps it through one static table. *idx
+ * is the table index, or -1 when the field is absent or empty. An unknown
+ * token is refused under the `unknown` name. */
+static bool mo_take_token_index(struct mo_parse_ctx *c,
+                                const struct json_value *obj, const char *key,
+                                const char *const *toks, int n,
+                                const char *unknown, int *idx)
 {
     char tok[32];
-    *dst = MESH_STAGE_NONE;
+    *idx = -1;
     if (!mo_take_str(c, obj, key, tok, sizeof(tok)))
         return false;   // raw-return-ok:refusal-named-in-reason-out
     if (!tok[0])
         return true;
-    if (!mesh_obs_stage_from_name(tok, dst))
-        return mo_refuse(c, "unknown_stage_token");
+    *idx = mo_find_token(tok, toks, n);
+    if (*idx < 0)
+        return mo_refuse(c, unknown);
+    return true;
+}
+
+static bool mo_take_stage(struct mo_parse_ctx *c, const struct json_value *obj,
+                          const char *key, enum mesh_obs_stage *dst)
+{
+    int idx;
+    *dst = MESH_STAGE_NONE;
+    if (!mo_take_token_index(c, obj, key, k_stage_tok, MESH_STAGE_NUM,
+                             "unknown_stage_token", &idx))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (idx >= 0)
+        *dst = (enum mesh_obs_stage)idx;
     return true;
 }
 
@@ -427,14 +446,13 @@ static bool mo_take_outcome(struct mo_parse_ctx *c,
                             const struct json_value *obj, const char *key,
                             enum mesh_obs_outcome *dst)
 {
-    char tok[32];
+    int idx;
     *dst = MESH_OBS_NOT_PROBED;
-    if (!mo_take_str(c, obj, key, tok, sizeof(tok)))
+    if (!mo_take_token_index(c, obj, key, k_outcome_tok, MESH_OBS_OUTCOME_NUM,
+                             "unknown_outcome_token", &idx))
         return false;   // raw-return-ok:refusal-named-in-reason-out
-    if (!tok[0])
-        return true;
-    if (!mesh_obs_outcome_from_name(tok, dst))
-        return mo_refuse(c, "unknown_outcome_token");
+    if (idx >= 0)
+        *dst = (enum mesh_obs_outcome)idx;
     return true;
 }
 
