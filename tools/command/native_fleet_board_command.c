@@ -23,7 +23,9 @@
 #include "kernel/command_registry.h"
 #include "platform/time_compat.h"
 #include "rpc/protocol.h"
+#include "session/fleet_board_proto.h"
 #include "sha3/sha3.h"
+#include "util/file_io.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -718,6 +720,32 @@ static bool fb_wiki_write_authorised(const struct zcl_command_request *request,
     return true;
 }
 
+/* CLI only: `@path` makes the body the bytes of that regular file, bounded by
+ * the wiki text limit. MCP (plan_first) keeps `@path` literal, so a remote
+ * caller cannot publish a local file under this node's signature. */
+static bool fb_wiki_body_from_file(const char *arg, char **body, size_t *len,
+                                   struct zcl_command_reply *reply)
+{
+    if (zcl_read_whole_file_text(arg + 1, FLEET_BOARD_WIKI_TEXT_MAX, body, len,
+                                 "fleet.wiki.write") &&
+        strlen(*body) == *len && *len > 0)
+        return true;
+    free(*body);
+    *body = NULL;
+    /* The error message holds 192 bytes: keep the end of a long path, where
+     * the file name is. */
+    size_t n = strlen(arg + 1);
+    const char *shown = n > 100 ? arg + 1 + (n - 100) : arg + 1;
+    char msg[192];
+    (void)snprintf(msg, sizeof(msg),
+                   "body file %s%s: not a non-empty regular file of at most "
+                   "%d bytes without NUL",
+                   n > 100 ? "..." : "", shown, FLEET_BOARD_WIKI_TEXT_MAX);
+    fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "BODY_FILE", "normalize", false, msg, "text");
+    return false;
+}
+
 void zcl_native_handle_fleet_wiki_write(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -735,6 +763,13 @@ void zcl_native_handle_fleet_wiki_write(
     }
     if (!fb_wiki_write_authorised(request, reply))
         return;
+    char *file_body = NULL;
+    size_t file_len = 0;
+    if (text[0] == '@' && !(request->context && request->context->plan_first)) {
+        if (!fb_wiki_body_from_file(text, &file_body, &file_len, reply))
+            return;
+        text = file_body;
+    }
     struct json_value out;
     json_init(&out);
     json_set_object(&out);
@@ -752,6 +787,7 @@ void zcl_native_handle_fleet_wiki_write(
     json_init(&body);
     bool ok = fb_call(reply, &out, &body, 0);
     json_free(&out);
+    free(file_body);
     if (!ok)
         return;
     fb_project_object(reply, &body);

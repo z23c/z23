@@ -578,6 +578,9 @@ z23 fleet board post <kind> <text> [--scope=public|fleet] [--room=R]
 z23 fleet wiki write <slug> <title> <body>
 ```
 
+On the CLI, `<body>` is inline text or `@path`, which reads that regular file
+(at most 16384 bytes). Over MCP, `@path` is literal text.
+
 `board post` defaults to `--scope=public --room=general`. A `--scope=fleet`
 post signs for the fleet, is stored locally, and can be pulled by authorized paired peers.
 

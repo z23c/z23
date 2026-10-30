@@ -121,7 +121,7 @@ ZCL_COMMAND_READY_COMMAND(
     "JSON object (topic, summary, lessons, applies_to, updated), which "
     "`fleet wiki find` and `fleet wiki read` return as structured data; "
     "without it the page stays plain text. Wiki revisions have their own "
-    "per-key budget, separate from board posts. Over MCP a call without confirm returns a plan (plan_id, slug, title, bytes, supersedes) and writes nothing; repeat it with plan_id and confirm:true to write. The CLI writes at once.", 0,
+    "per-key budget, separate from board posts. Over MCP a call without confirm returns a plan (plan_id, slug, title, bytes, supersedes) and writes nothing; repeat it with plan_id and confirm:true to write. The CLI writes at once; there `@path` is the body read from that regular file (at most 16384 bytes). Over MCP `@path` is literal text.", 0,
     "wiki,write,page,revision,knowledge",
     "zcl.fleet_wiki_write_input.v1", "zcl.fleet_board_post_id.v1",
     "slug,title,text,agent,supersedes,ttl,format,plan_id,confirm", "slug,title,text",

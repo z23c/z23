@@ -13,6 +13,7 @@
 #include "crypto/ed25519.h"
 #include "util/thread_registry.h"
 #include "util/fleet_role_check.h"
+#include "session/fleet_board_proto.h"
 #include "session/fleet_wiki_entry.h"
 #include "platform/time_compat.h"
 
@@ -947,8 +948,87 @@ static int fwm_plan_confirm(void)
     return failures;
 }
 
+static bool fwm_write_file(const char *path, const char *bytes, size_t n)
+{
+    FILE *f = fopen(path, "wb");
+    bool ok = f && fwrite(bytes, 1, n, f) == n;
+    if (f) ok = fclose(f) == 0 && ok;
+    return ok;
+}
+
+/* CLI `@path` reads the body from a regular file; the same literal text over
+ * MCP (plan_first) stays literal, so a remote caller cannot read local files. */
+static int fwm_atfile_cli(void)
+{
+    int failures = 0;
+    struct node_db db = {0};
+    char dir[256] = {0}, warmup[256];
+    bool was_warming = rpc_is_in_warmup(warmup, sizeof(warmup));
+    TEST("wiki write: CLI @path stores the file body, refuses missing or oversized files, MCP keeps @path literal") {
+        ASSERT(node_db_open(&db, ":memory:"));
+        test_make_tmpdir(dir, sizeof(dir), "fleetboard", "atfile");
+        struct db_service service = {.node_db = &db, .started = true};
+        struct app_runtime_context runtime = {.db_service = &service};
+        struct boot_svc_ctx svc = {.node_db = &db, .datadir = dir};
+        boot_fleet_board_shutdown(); boot_fleet_board_wire(&svc);
+        app_runtime_set_current(&runtime);
+        struct rpc_table table;
+        rpc_table_init(&table); boot_fleet_board_register_rpc(&table);
+        set_rpc_warmup_finished();
+        fwm_plan_table = &table; fwm_plan_calls = 0;
+        node_rpc_client_set_test_hook(fwm_plan_rpc);
+        char body[320], missing[320], big[FLEET_BOARD_WIKI_TEXT_MAX + 2];
+        (void)snprintf(body, sizeof(body), "%s/body.md", dir);
+        (void)snprintf(missing, sizeof(missing), "%s/absent.md", dir);
+        ASSERT(fwm_write_file(body, "first body", 10));
+        memset(big, 'x', sizeof(big) - 1); big[sizeof(big) - 1] = '\0';
+        char big_path[320];
+        (void)snprintf(big_path, sizeof(big_path), "%s/big.md", dir);
+        ASSERT(fwm_write_file(big_path, big, sizeof(big) - 1));
+        struct zcl_command_reply reply;
+        char arg[322];
+        (void)snprintf(arg, sizeof(arg), "@%s", body);
+        ASSERT(fwm_plan_call(NULL, "atfile-write", arg, NULL, false, &reply));
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(fwm_plan_calls, 1);
+        const char *id = json_get_str(json_get(&reply.data, "id"));
+        uint8_t decoded[32];
+        struct db_fleet_board_post row;
+        ASSERT(id && fleet_board_id_from_hex(id, decoded) &&
+            db_fleet_board_post_find(&db, decoded, &row) &&
+            row.post.text_len == 10 && !memcmp(row.post.text, "first body", 10));
+        zcl_command_reply_free(&reply);
+        (void)snprintf(arg, sizeof(arg), "@%s", missing);
+        ASSERT(fwm_plan_call(NULL, "atfile-write", arg, NULL, false, &reply));
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(!strcmp(reply.error.code, "BODY_FILE"));
+        ASSERT(strstr(reply.error.message, "absent.md") != NULL);
+        zcl_command_reply_free(&reply);
+        (void)snprintf(arg, sizeof(arg), "@%s", big_path);
+        ASSERT(fwm_plan_call(NULL, "atfile-write", arg, NULL, false, &reply));
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(!strcmp(reply.error.code, "BODY_FILE"));
+        ASSERT_EQ(fwm_plan_calls, 1);
+        zcl_command_reply_free(&reply);
+        struct zcl_command_context mcp = {.plan_first = true};
+        ASSERT(fwm_plan_call(&mcp, "atfile-write", arg, NULL, false, &reply));
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "bytes")), (int64_t)strlen(arg));
+        ASSERT_EQ(fwm_plan_calls, 1);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    app_runtime_set_current(NULL);
+    if (was_warming) set_rpc_warmup_started(warmup);
+    boot_fleet_board_shutdown();
+    if (db.open) node_db_close(&db);
+    if (dir[0]) test_rm_rf(dir);
+    return failures;
+}
+
 int test_fleet_wiki_mutation(void)
 {
-    return fwm_plan_confirm() +fwm_review_native_faults() + fwm_review_rpc() + fwm_review_parser() + fwm_review_queries() + fwm_review_quota() + fwm_review_boundaries() + fwm_review_peer_order() + fwm_review_admission() + fwm_review_missing() + fwm_replay_cas() + fwm_race_case() + fwm_storage_cases() +
+    return fwm_plan_confirm() + fwm_atfile_cli() +fwm_review_native_faults() + fwm_review_rpc() + fwm_review_parser() + fwm_review_queries() + fwm_review_quota() + fwm_review_boundaries() + fwm_review_peer_order() + fwm_review_admission() + fwm_review_missing() + fwm_replay_cas() + fwm_race_case() + fwm_storage_cases() +
         fwm_sequence_overflow() + fwm_eviction_case() + fwm_head_step_case();
 }
