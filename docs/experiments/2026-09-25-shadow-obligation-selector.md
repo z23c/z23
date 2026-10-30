@@ -651,7 +651,7 @@ the real set is 72.7% with the eight declared gates (below);
 
 #### Splitting check-doc-claims
 
-`tools/lint/check_doc_claims.sh` now has two parts. Run with no argument it
+`z23-lint check-doc-claims` now has two parts. Run with no argument it
 still does both, so the full gate's verdict is unchanged.
 
 - **Global part (`--global`)**: the self-check (which gains a split case

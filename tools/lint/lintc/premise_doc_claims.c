@@ -5,7 +5,7 @@
  * resolve against unchanged bytes can keep a verified base's verdict.
  * Nothing here is authority.
  *
- * The gate's per-document part (check_doc_claims.sh --doc=PATH) evaluates
+ * The gate's per-document part (z23-lint check-doc-claims --doc=PATH) evaluates
  * every annotation whose first token is not gate-passes or gate-fails; the
  * global part owns those, because they run other gates. What the others
  * read:

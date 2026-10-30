@@ -148,7 +148,7 @@ SELECTION_GATE("check-windows-acceptance", SELECTION_UNITS_CATALOG_ROWS,
     "check-windows-acceptance:",
     "")
 
-/* Per document: check_doc_claims.sh --doc=PATH evaluates every annotation
+/* Per document: z23-lint check-doc-claims --doc=PATH evaluates every annotation
  * of one tracked document except gate-passes/gate-fails. A unit reads its
  * own bytes, the path set (file-present/absent), and the tracked files
  * each symbol claim's git pathspec can match: every path with the
@@ -162,6 +162,9 @@ SELECTION_GATE("check-windows-acceptance", SELECTION_UNITS_CATALOG_ROWS,
  * pruned directory (.claude/, vendor/raylib/) are scanned by the gate but
  * are in no premise, so a unit-selected run scans them fresh every time. */
 SELECTION_GATE("check-doc-claims", SELECTION_UNITS_DOC_CLAIMS, "\\.md$",
-    "tools/lint/check_doc_claims.sh tools/lint/gate_lib.sh " SELECTION_DRIVER,
-    "check-doc-claims:",
+    "tools/lint/lintc/gate_doc_claims.c tools/lint/lintc/gate_doc_claims_eval.c "
+    "tools/lint/lintc/gate_doc_claims_scan.c tools/lint/lintc/gate_doc_claims_selfcheck.c "
+    "tools/lint/lintc/gate_doc_claims_selftest.c tools/lint/lintc/gate_doc_claims_priv.h "
+    SELECTION_DRIVER,
+    "check-doc-claims: " SELECTION_LINTC_VARS,
     "")

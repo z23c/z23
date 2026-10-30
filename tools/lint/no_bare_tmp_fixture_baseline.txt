@@ -111,6 +111,7 @@ tools/lint/lintc/gate_controller_private_headers_workers.c 1
 tools/lint/lintc/gate_def_parsers.c 2
 tools/lint/lintc/gate_demoted_store_ratchets.c 1
 tools/lint/lintc/gate_describe_budget.c 1
+tools/lint/lintc/gate_doc_claims_selfcheck.c 1
 tools/lint/lintc/gate_doc_index.c 1
 tools/lint/lintc/gate_dumper_never_blocks.c 1
 tools/lint/lintc/gate_flag_registry.c 2

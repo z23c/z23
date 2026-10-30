@@ -14951,10 +14951,11 @@ check-no-uncited-victory: $(LINTC_TOOL)
 # work is outstanding goes red the day the gate that watches it turns green.
 # Generalizes the two hardcoded rows in check-doc-no-false-deleted. Covers
 # tracked *.md; out-of-repo plans need the explicit
-# `tools/lint/check_doc_claims.sh --scan <dir>` invocation.
+# `z23-lint check-doc-claims --scan <dir>` invocation.
 check-doc-claims: $(LINTC_TOOL) $(BIN_DIR)/z23_bounded_run
 	@echo "══ LINT: bound doc claims (doc freshness) ══"
-	@./tools/lint/check_doc_claims.sh
+	@./build/bin/z23-lint check-doc-claims --selftest
+	@./build/bin/z23-lint check-doc-claims
 
 # The out-of-repo half, made one command instead of a remembered path.
 # ~/.claude/plans/*.md is where the motivating failure happened (a plan listed
@@ -14966,9 +14967,9 @@ check-doc-claims: $(LINTC_TOOL) $(BIN_DIR)/z23_bounded_run
 # PLANS=<dir> overrides the default location.
 PLANS ?= $(HOME)/.claude/plans
 .PHONY: check-plan-claims
-check-plan-claims:
+check-plan-claims: $(LINTC_TOOL)
 	@echo "══ CHECK: bound claims in out-of-repo plans ($(PLANS)) ══"
-	@./tools/lint/check_doc_claims.sh --scan "$(PLANS)"
+	@./build/bin/z23-lint check-doc-claims --scan "$(PLANS)"
 
 # A document path baked into an operator-facing C string literal must resolve
 # to a file that exists. Three wallet-path boot refusals pointed the operator
