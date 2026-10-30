@@ -150,6 +150,19 @@ size_t rescan_append_block_commitments(
     return appended;
 }
 
+static int rescan_oldest_note_height(const struct db_sapling_note *notes,
+                                     int n_notes,
+                                     int sapling_activation_height)
+{
+    int oldest_height = INT_MAX;
+    for (int i = 0; i < n_notes; i++) {
+        if (notes[i].block_height >= sapling_activation_height &&
+            notes[i].block_height < oldest_height)
+            oldest_height = notes[i].block_height;
+    }
+    return oldest_height;
+}
+
 /* Seed a witness rebuild from the header-bound Sapling frontier immediately
  * before the oldest unspent note, when that frontier is present in the
  * canonical anchor ledger.  Snapshot/bundle nodes intentionally do not have
@@ -175,12 +188,8 @@ bool rescan_seed_before_oldest_note_from_db(
         !seed_height_out)
         return false;
 
-    int oldest_height = INT_MAX;
-    for (int i = 0; i < n_notes; i++) {
-        if (notes[i].block_height >= sapling_activation_height &&
-            notes[i].block_height < oldest_height)
-            oldest_height = notes[i].block_height;
-    }
+    int oldest_height = rescan_oldest_note_height(notes, n_notes,
+                                                  sapling_activation_height);
     if (oldest_height == INT_MAX ||
         oldest_height <= sapling_activation_height)
         return false;
@@ -220,6 +229,197 @@ static bool rescan_seed_before_oldest_note(
         seed_height_out);
     sqlite3_close(rdb);
     return ok;
+}
+
+static bool rescan_block_body_mapped(const struct block_index *pindex,
+                                     struct wallet_rescan_block_mapping *block_mapping,
+                                     const char *block_datadir)
+{
+    /* File coordinates, not the lag-prone HAVE_DATA projection, decide
+     * whether this recovery pass can attempt the immutable body. Any
+     * absent/truncated body leaves the reconstructed root short and the
+     * consensus comparison below refuses every save. */
+    if (!pindex->phashBlock || pindex->nFile < 0)
+        return false;
+
+    if (pindex->nFile != block_mapping->file_num &&
+        !wallet_rescan_block_mapping_open(block_mapping, block_datadir,
+                                          pindex->nFile))
+        return false;
+    if (!block_mapping->view.data ||
+        (uintmax_t)pindex->nDataPos >=
+            (uintmax_t)block_mapping->view.size)
+        return false;
+    return true;
+}
+
+static void rescan_print_checkpoint(const struct incremental_merkle_tree *tree,
+                                    const struct block_index *pindex,
+                                    int blocks_scanned, int h,
+                                    size_t total_commitments,
+                                    int witnesses_built, int n_notes,
+                                    int64_t t_start)
+{
+    int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
+    printf("rescanwitnesses: %d blocks (height %d), "
+           "%zu cms, %d/%d witnesses, %llds",
+           blocks_scanned, h, total_commitments,
+           witnesses_built, n_notes, (long long)elapsed);
+
+    struct uint256 our_root;
+    incremental_tree_root(tree, &our_root);
+    if (memcmp(our_root.data,
+               pindex->hashFinalSaplingRoot.data, 32) == 0) {
+        printf(" [tree OK]\n");
+    } else {
+        char oh[65], bh[65];
+        uint256_get_hex(&our_root, oh);
+        uint256_get_hex(&pindex->hashFinalSaplingRoot, bh);
+        printf(" [TREE DIVERGED!]\n"
+               "  our root:   %s (size=%zu)\n"
+               "  block root: %s\n",
+               oh, incremental_tree_size(tree), bh);
+    }
+    fflush(stdout);
+}
+
+static void rescan_check_final_root(
+    const struct wallet_rpc_context *ctx,
+    const struct incremental_merkle_tree *tree,
+    const struct uint256 *final_tree_root, int safe_tip,
+    const struct uint256 *endpoint_hash, const struct uint256 *endpoint_root,
+    struct uint256 *final_header_root)
+{
+    const struct block_index *current_save_block =
+        active_chain_at(&ctx->main_state->chain_active, safe_tip);
+    if (current_save_block && current_save_block->phashBlock &&
+        uint256_eq(current_save_block->phashBlock, endpoint_hash) &&
+        uint256_eq(&current_save_block->hashFinalSaplingRoot,
+                   endpoint_root)) {
+        *final_header_root = *endpoint_root;
+        char oh[65], bh[65];
+        uint256_get_hex(final_tree_root, oh);
+        uint256_get_hex(final_header_root, bh);
+        if (memcmp(final_tree_root->data, final_header_root->data, 32) == 0) {
+            printf("rescanwitnesses: FINAL tree root matches block header at height %d ✓\n", safe_tip);
+        } else {
+            printf("rescanwitnesses: FINAL tree root DOES NOT match block header at height %d!\n"
+                   "  our root:   %s (size=%zu)\n"
+                   "  block root: %s\n",
+                   safe_tip, oh, incremental_tree_size(tree), bh);
+        }
+        fflush(stdout);
+    } else {
+        printf("rescanwitnesses: FINAL tree root cannot be checked at height %d (missing active-chain block)\n",
+               safe_tip);
+        fflush(stdout);
+    }
+}
+
+static int rescan_check_witness_roots(
+    const struct incremental_merkle_tree *tree,
+    const struct incremental_witness *witnesses, const bool *witness_active,
+    int n_notes, const struct uint256 *final_tree_root)
+{
+    int witness_root_mismatches = 0;
+    {
+        char tr_hex[65]; uint256_get_hex(final_tree_root, tr_hex);
+        for (int ni = 0; ni < n_notes; ni++) {
+            if (!witness_active[ni]) continue;
+            struct uint256 wr;
+            incremental_witness_root(&witnesses[ni], &wr);
+            char wr_hex[65]; uint256_get_hex(&wr, wr_hex);
+            if (memcmp(wr.data, final_tree_root->data, 32) != 0) {
+                witness_root_mismatches++;
+                printf("rescanwitnesses: WITNESS ROOT MISMATCH for note %d!\n"
+                    "  tree root:    %s (size=%zu)\n"
+                    "  witness root: %s (fills=%zu)\n",
+                    ni, tr_hex, incremental_tree_size(tree),
+                    wr_hex, witnesses[ni].num_filled);
+            } else {
+                printf("rescanwitnesses: note %d witness root MATCHES tree ✓\n", ni);
+            }
+        }
+        fflush(stdout);
+    }
+    return witness_root_mismatches;
+}
+
+static void rescan_save_tree_state(const struct wallet_rpc_context *ctx,
+                                   const struct incremental_merkle_tree *tree,
+                                   int safe_tip)
+{
+    {
+        struct byte_stream ts;
+        stream_init(&ts, 4096);
+        incremental_tree_serialize(tree, &ts);
+        /* Save to the normal key + "sapling_tree_rebuild_height" as ONE
+         * atomic pair (sapling_tree_persist_pair, lane/sapling-tree-persist)
+         * — this is the SAME height key engine/composition/src/boot.c's loader and
+         * sapling_tree_rebuild() trust to resume/fold-forward from, and the
+         * consensus check just above (rescan_result_consensus_valid) already
+         * proved final_tree_root == the real header root at safe_tip, so
+         * safe_tip is a legitimate saved-height binding. Also save to the
+         * rescan-specific key (can't be overwritten by connect_block). */
+        sapling_tree_persist_pair(ctx->node_db, ts.data, ts.size,
+                                  (int64_t)safe_tip);
+        node_db_state_set(ctx->node_db, "sapling_tree_rescan", ts.data, ts.size);
+
+        printf("rescanwitnesses: tree saved (%zu bytes, %zu cms)\n",
+               ts.size, incremental_tree_size(tree));
+        fflush(stdout);
+        stream_free(&ts);
+
+        char height_str[16];
+        snprintf(height_str, sizeof(height_str), "%d", safe_tip);
+        node_db_state_set(ctx->node_db, "sapling_tree_height",
+                          (uint8_t *)height_str, strlen(height_str));
+        node_db_state_set(ctx->node_db, "sapling_tree_rescan_height",
+                          (uint8_t *)height_str, strlen(height_str));
+    }
+}
+
+static int rescan_save_witnesses(const struct wallet_rpc_context *ctx,
+                                 const struct incremental_witness *witnesses,
+                                 const bool *witness_active,
+                                 const struct db_sapling_note *notes,
+                                 int n_notes, int safe_tip)
+{
+    int saved = 0;
+    for (int ni = 0; ni < n_notes; ni++) {
+        if (!witness_active[ni]) continue;
+
+        const struct sapling_key_entry *key =
+            sapling_keystore_find_by_ivk(&ctx->wallet->sapling_keys,
+                                         notes[ni].ivk);
+        if (!key || incremental_tree_size(&witnesses[ni].tree) == 0)
+            continue;
+        uint8_t ak[32], nk[32], nf[32];
+        sapling_ask_to_ak(key->xsk.expsk.ask, ak);
+        sapling_nsk_to_nk(key->xsk.expsk.nsk, nk);
+        uint64_t position = incremental_tree_size(&witnesses[ni].tree) - 1;
+        if (!sapling_compute_nf(notes[ni].diversifier, notes[ni].pk_d,
+                                (uint64_t)notes[ni].value, notes[ni].rcm,
+                                ak, nk, position, nf)) {
+            memory_cleanse(ak, sizeof(ak));
+            memory_cleanse(nk, sizeof(nk));
+            continue;
+        }
+        memory_cleanse(ak, sizeof(ak));
+        memory_cleanse(nk, sizeof(nk));
+
+        struct byte_stream ws;
+        stream_init(&ws, 4096);
+        if (incremental_witness_serialize(&witnesses[ni], &ws)) {
+            if (db_sapling_note_save_witness_and_nullifier(
+                    ctx->node_db, notes[ni].txid, notes[ni].output_index,
+                    ws.data, ws.size, safe_tip, nf))
+                saved++;
+        }
+        memory_cleanse(nf, sizeof(nf));
+        stream_free(&ws);
+    }
+    return saved;
 }
 
 /* One completion line per Sapling witness rescan that reached its scan:
@@ -372,20 +572,7 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
         const struct block_index *pindex =
             active_chain_at(&ctx->main_state->chain_active, h);
         if (!pindex) continue;
-        /* File coordinates, not the lag-prone HAVE_DATA projection, decide
-         * whether this recovery pass can attempt the immutable body. Any
-         * absent/truncated body leaves the reconstructed root short and the
-         * consensus comparison below refuses every save. */
-        if (!pindex->phashBlock || pindex->nFile < 0)
-            continue;
-
-        if (pindex->nFile != block_mapping.file_num &&
-            !wallet_rescan_block_mapping_open(&block_mapping, block_datadir,
-                                              pindex->nFile))
-            continue;
-        if (!block_mapping.view.data ||
-            (uintmax_t)pindex->nDataPos >=
-                (uintmax_t)block_mapping.view.size)
+        if (!rescan_block_body_mapped(pindex, &block_mapping, block_datadir))
             continue;
 
         /* A repeated header root proves this block did not change the Sapling
@@ -433,27 +620,9 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
         bool do_ckpt = (blocks_scanned % 100000 == 0) ||
                        (h > safe_tip - 10000 && h % 1000 == 0);
         if (do_ckpt) {
-            int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
-            printf("rescanwitnesses: %d blocks (height %d), "
-                   "%zu cms, %d/%d witnesses, %llds",
-                   blocks_scanned, h, total_commitments,
-                   witnesses_built, n_notes, (long long)elapsed);
-
-            struct uint256 our_root;
-            incremental_tree_root(&tree, &our_root);
-            if (memcmp(our_root.data,
-                       pindex->hashFinalSaplingRoot.data, 32) == 0) {
-                printf(" [tree OK]\n");
-            } else {
-                char oh[65], bh[65];
-                uint256_get_hex(&our_root, oh);
-                uint256_get_hex(&pindex->hashFinalSaplingRoot, bh);
-                printf(" [TREE DIVERGED!]\n"
-                       "  our root:   %s (size=%zu)\n"
-                       "  block root: %s\n",
-                       oh, incremental_tree_size(&tree), bh);
-            }
-            fflush(stdout);
+            rescan_print_checkpoint(&tree, pindex, blocks_scanned, h,
+                                    total_commitments, witnesses_built, n_notes,
+                                    t_start);
         }
     }
 
@@ -472,55 +641,12 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
     memset(&final_header_root, 0, sizeof(final_header_root));
 
     /* Verify tree root matches block header at save height */
-    {
-        const struct block_index *current_save_block =
-            active_chain_at(&ctx->main_state->chain_active, safe_tip);
-        if (current_save_block && current_save_block->phashBlock &&
-            uint256_eq(current_save_block->phashBlock, &endpoint_hash) &&
-            uint256_eq(&current_save_block->hashFinalSaplingRoot,
-                       &endpoint_root)) {
-            final_header_root = endpoint_root;
-            char oh[65], bh[65];
-            uint256_get_hex(&final_tree_root, oh);
-            uint256_get_hex(&final_header_root, bh);
-            if (memcmp(final_tree_root.data, final_header_root.data, 32) == 0) {
-                printf("rescanwitnesses: FINAL tree root matches block header at height %d ✓\n", safe_tip);
-            } else {
-                printf("rescanwitnesses: FINAL tree root DOES NOT match block header at height %d!\n"
-                       "  our root:   %s (size=%zu)\n"
-                       "  block root: %s\n",
-                       safe_tip, oh, incremental_tree_size(&tree), bh);
-            }
-            fflush(stdout);
-        } else {
-            printf("rescanwitnesses: FINAL tree root cannot be checked at height %d (missing active-chain block)\n",
-                   safe_tip);
-            fflush(stdout);
-        }
-    }
+    rescan_check_final_root(ctx, &tree, &final_tree_root, safe_tip, &endpoint_hash,
+                            &endpoint_root, &final_header_root);
 
     /* Verify witness roots match tree root BEFORE saving */
-    int witness_root_mismatches = 0;
-    {
-        char tr_hex[65]; uint256_get_hex(&final_tree_root, tr_hex);
-        for (int ni = 0; ni < n_notes; ni++) {
-            if (!witness_active[ni]) continue;
-            struct uint256 wr;
-            incremental_witness_root(&witnesses[ni], &wr);
-            char wr_hex[65]; uint256_get_hex(&wr, wr_hex);
-            if (memcmp(wr.data, final_tree_root.data, 32) != 0) {
-                witness_root_mismatches++;
-                printf("rescanwitnesses: WITNESS ROOT MISMATCH for note %d!\n"
-                    "  tree root:    %s (size=%zu)\n"
-                    "  witness root: %s (fills=%zu)\n",
-                    ni, tr_hex, incremental_tree_size(&tree),
-                    wr_hex, witnesses[ni].num_filled);
-            } else {
-                printf("rescanwitnesses: note %d witness root MATCHES tree ✓\n", ni);
-            }
-        }
-        fflush(stdout);
-    }
+    int witness_root_mismatches = rescan_check_witness_roots(
+        &tree, witnesses, witness_active, n_notes, &final_tree_root);
 
     if (!rescan_result_consensus_valid(&final_tree_root, &final_header_root,
                                        witness_root_mismatches)) {
@@ -555,70 +681,11 @@ bool rpc_rescanwitnesses(const struct json_value *params, bool help,
      * This replaces any incomplete tree from catchup.
      * Tree is saved at safe_tip height — subsequent connect_block
      * calls will load it and extend naturally for remaining blocks. */
-    {
-        struct byte_stream ts;
-        stream_init(&ts, 4096);
-        incremental_tree_serialize(&tree, &ts);
-        /* Save to the normal key + "sapling_tree_rebuild_height" as ONE
-         * atomic pair (sapling_tree_persist_pair, lane/sapling-tree-persist)
-         * — this is the SAME height key engine/composition/src/boot.c's loader and
-         * sapling_tree_rebuild() trust to resume/fold-forward from, and the
-         * consensus check just above (rescan_result_consensus_valid) already
-         * proved final_tree_root == the real header root at safe_tip, so
-         * safe_tip is a legitimate saved-height binding. Also save to the
-         * rescan-specific key (can't be overwritten by connect_block). */
-        sapling_tree_persist_pair(ctx->node_db, ts.data, ts.size,
-                                  (int64_t)safe_tip);
-        node_db_state_set(ctx->node_db, "sapling_tree_rescan", ts.data, ts.size);
-
-        printf("rescanwitnesses: tree saved (%zu bytes, %zu cms)\n",
-               ts.size, incremental_tree_size(&tree));
-        fflush(stdout);
-        stream_free(&ts);
-
-        char height_str[16];
-        snprintf(height_str, sizeof(height_str), "%d", safe_tip);
-        node_db_state_set(ctx->node_db, "sapling_tree_height",
-                          (uint8_t *)height_str, strlen(height_str));
-        node_db_state_set(ctx->node_db, "sapling_tree_rescan_height",
-                          (uint8_t *)height_str, strlen(height_str));
-    }
+    rescan_save_tree_state(ctx, &tree, safe_tip);
 
     /* Serialize and save witnesses (BEFORE releasing the rescan lock) */
-    int saved = 0;
-    for (int ni = 0; ni < n_notes; ni++) {
-        if (!witness_active[ni]) continue;
-
-        const struct sapling_key_entry *key =
-            sapling_keystore_find_by_ivk(&ctx->wallet->sapling_keys,
-                                         notes[ni].ivk);
-        if (!key || incremental_tree_size(&witnesses[ni].tree) == 0)
-            continue;
-        uint8_t ak[32], nk[32], nf[32];
-        sapling_ask_to_ak(key->xsk.expsk.ask, ak);
-        sapling_nsk_to_nk(key->xsk.expsk.nsk, nk);
-        uint64_t position = incremental_tree_size(&witnesses[ni].tree) - 1;
-        if (!sapling_compute_nf(notes[ni].diversifier, notes[ni].pk_d,
-                                (uint64_t)notes[ni].value, notes[ni].rcm,
-                                ak, nk, position, nf)) {
-            memory_cleanse(ak, sizeof(ak));
-            memory_cleanse(nk, sizeof(nk));
-            continue;
-        }
-        memory_cleanse(ak, sizeof(ak));
-        memory_cleanse(nk, sizeof(nk));
-
-        struct byte_stream ws;
-        stream_init(&ws, 4096);
-        if (incremental_witness_serialize(&witnesses[ni], &ws)) {
-            if (db_sapling_note_save_witness_and_nullifier(
-                    ctx->node_db, notes[ni].txid, notes[ni].output_index,
-                    ws.data, ws.size, safe_tip, nf))
-                saved++;
-        }
-        memory_cleanse(nf, sizeof(nf));
-        stream_free(&ws);
-    }
+    int saved = rescan_save_witnesses(ctx, witnesses, witness_active, notes,
+                                      n_notes, safe_tip);
 
     free(witnesses);
     free(witness_active);
