@@ -147,6 +147,7 @@ gate_command() {
         check-shape-include-direction)     echo './tools/scripts/check_shape_include_direction.sh --selftest && ./tools/scripts/check_shape_include_direction.sh' ;;
         check-domain-purity)               echo 'build/bin/z23-lint check-domain-purity --selftest && build/bin/z23-lint check-domain-purity' ;;
         check-core-seal)                   echo '__core_seal__' ;;
+        check-no-adx-overclaim)            echo './build/bin/z23-lint check-no-adx-overclaim --selftest && ./build/bin/z23-lint check-no-adx-overclaim && ./build/bin/z23-lint check-asan-adx-exception --selftest && ./build/bin/z23-lint check-asan-adx-exception' ;;
         check-supervisor-registration)     echo './tools/scripts/check_supervisor_registration.sh --selftest && ./tools/scripts/check_supervisor_registration.sh' ;;
         check-test-registration)           echo './tools/scripts/check_test_registration.sh --selftest && ./tools/scripts/check_test_registration.sh' ;;
         check-blocker-escape-registered)   echo './build/bin/z23-lint check-blocker-escape-registered --selftest && ./build/bin/z23-lint check-blocker-escape-registered' ;;

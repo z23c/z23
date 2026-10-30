@@ -121,6 +121,15 @@ static int ao_spawn(char *const av[], char *const envp[], char *out,
     return 0;
 }
 
+/* A child that exits 127 (exec failed) or 128 (fatal signal) could not
+ * run at all; say so, so the fail-closed exit 2 is not silent. */
+static void ao_report_spawn(const char *tool, int code)
+{
+    if (code == 127 || code == 128)
+        fprintf(stderr, "%s: FATAL — cannot run %s (exit %d)\n", k_ao_gate,
+                tool, code);
+}
+
 /* 0 = tool present, 1 = missing (exec failed), 2 = internal error. */
 static int ao_tool_ok(const char *tool)
 {
@@ -198,6 +207,7 @@ static int ao_population(struct ao_fset *fs)
         int code = 0;
         if (ao_spawn(av, NULL, buf, AO_TEXT - 1, &len, NULL, &code))
             return 2;
+        ao_report_spawn("git", code);
         if (code > 1)
             return 2;
         buf[len] = '\0';
@@ -303,6 +313,7 @@ static int ao_get_includes(struct ao_incset *set)
         return 2;
     if (ao_spawn(av, envp, buf, AO_TEXT - 1, &len, NULL, &code))
         return 2;
+    ao_report_spawn("make", code);
     if (code != 0)
         return 2;
     buf[len] = '\0';
@@ -455,6 +466,8 @@ static int ao_count_adx(const char *obj, int *count)
     size_t len = 0;
     int code = 0;
     rc = ao_spawn(av, NULL, buf, AO_TEXT - 1, &len, NULL, &code);
+    if (rc == 0)
+        ao_report_spawn("objdump", code);
     if (rc == 0 && code != 0)
         rc = 2;
     if (rc == 0) {

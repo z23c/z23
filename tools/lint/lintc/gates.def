@@ -45,7 +45,7 @@ LINT_GATE("check-no-new-coin-backfill-caller", check_no_new_coin_backfill_caller
 LINT_GATE("check-mind-owns-rebuild", check_mind_owns_rebuild, LINT_CMD_PAIR)
 LINT_GATE("check-codeindex-coverage", check_codeindex_coverage, LINT_CMD_PAIR)
 LINT_GATE("check-asan-adx-exception", check_asan_adx_exception, LINT_CMD_NONE)
-LINT_GATE("check-no-adx-overclaim", check_no_adx_overclaim, LINT_CMD_PAIR)
+LINT_GATE("check-no-adx-overclaim", check_no_adx_overclaim, LINT_CMD_NONE)
 LINT_GATE("check-framework-filename-suffix", check_framework_filename_suffix, LINT_CMD_PLAIN)
 LINT_GATE("check-no-stray-untracked-source", check_no_stray_untracked_source, LINT_CMD_PLAIN)
 LINT_GATE("check-group-purpose", check_group_purpose, LINT_CMD_NONE)
