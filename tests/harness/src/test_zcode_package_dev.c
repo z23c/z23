@@ -344,6 +344,58 @@ static char *zpd_publication_rpc_response(const char *method, const char *params
     return NULL;
 }
 
+static bool zpd_publication_bad_next_refused(
+    const struct zcl_command_request *request, bool roundtrip)
+{
+    zpd_publish_rpc_wire = "{\"ok\":true,\"data\":{},\"next\":["
+        "{\"command\":\"nonexistent.command\",\"input_json\":\"{}\",\"reason\":\"bad\"}]}";
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.zcode_work_publish.v1");
+    if (roundtrip) zcl_native_handle_zcode_work_publish(request, &reply);
+    roundtrip = roundtrip && reply.status == ZCL_COMMAND_STATUS_FAILED &&
+        strcmp(reply.error.code, "LIVE_CONTINUATION_INVALID") == 0 &&
+        reply.next_count == 0;
+    zcl_command_reply_free(&reply);
+    return roundtrip;
+}
+
+static bool zpd_publication_child_roundtrip(
+    const struct json_value *accept_input, const char *job_hex,
+    const char *accept_wire, const char *publish_wire)
+{
+    zpd_accept_rpc_wire = accept_wire;
+    zpd_publish_rpc_wire = publish_wire;
+    zpd_accept_rpc_calls = zpd_publish_rpc_calls = 0;
+    node_rpc_client_set_test_hook(zpd_publication_rpc_response);
+    struct zcl_command_request request = {.input = accept_input};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.zcode_work_accept.v1");
+    zcl_native_handle_zcode_work_accept(&request, &reply);
+    bool roundtrip = reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        reply.next_count == 1 &&
+        strcmp(reply.next[0].command, "zcode.work.publish") == 0 &&
+        json_get_int(json_get(&reply.data, "live_rpc_response_bytes")) > 0;
+    struct json_value next;
+    json_init(&next);
+    roundtrip = roundtrip && json_read(&next, reply.next[0].input_json,
+                                      strlen(reply.next[0].input_json));
+    const char *forwarded_job = json_get_str(json_get(&next, "job_root"));
+    roundtrip = roundtrip && forwarded_job && strcmp(forwarded_job, job_hex) == 0;
+    zcl_command_reply_free(&reply);
+    request.input = &next;
+    zcl_command_reply_init(&reply, "zcl.zcode_work_publish.v1");
+    if (roundtrip) zcl_native_handle_zcode_work_publish(&request, &reply);
+    roundtrip = roundtrip && reply.status == ZCL_COMMAND_STATUS_PASSED &&
+        reply.next_count == 1 &&
+        strcmp(reply.next[0].command, "discover.schema") == 0 &&
+        json_get_int(json_get(&reply.data, "live_rpc_response_bytes")) > 0 &&
+        zpd_accept_rpc_calls == 1 && zpd_publish_rpc_calls == 1;
+    zcl_command_reply_free(&reply);
+    roundtrip = zpd_publication_bad_next_refused(&request, roundtrip);
+    json_free(&next);
+    return roundtrip;
+}
+
 /* Serialize actual registered RPC results first, then consume them through
  * a separate process's real live-ledger forwarding path. This exercises both
  * envelope adapters without needing a listening network endpoint. */
@@ -379,44 +431,9 @@ static bool zpd_publication_rpc_roundtrip(
     ok = ok && node_db_open(&resident, db_path);
     pid_t child = ok ? fork() : -1;
     if (child == 0) {
-        zpd_accept_rpc_wire = accept_wire;
-        zpd_publish_rpc_wire = publish_wire;
-        zpd_accept_rpc_calls = zpd_publish_rpc_calls = 0;
-        node_rpc_client_set_test_hook(zpd_publication_rpc_response);
-        struct zcl_command_request request = {.input = accept_input};
-        struct zcl_command_reply reply;
-        zcl_command_reply_init(&reply, "zcl.zcode_work_accept.v1");
-        zcl_native_handle_zcode_work_accept(&request, &reply);
-        bool roundtrip = reply.status == ZCL_COMMAND_STATUS_PASSED &&
-            reply.next_count == 1 &&
-            strcmp(reply.next[0].command, "zcode.work.publish") == 0 &&
-            json_get_int(json_get(&reply.data, "live_rpc_response_bytes")) > 0;
-        struct json_value next;
-        json_init(&next);
-        roundtrip = roundtrip && json_read(&next, reply.next[0].input_json,
-                                          strlen(reply.next[0].input_json));
-        const char *forwarded_job = json_get_str(json_get(&next, "job_root"));
-        roundtrip = roundtrip && forwarded_job && strcmp(forwarded_job, job_hex) == 0;
-        zcl_command_reply_free(&reply);
-        request.input = &next;
-        zcl_command_reply_init(&reply, "zcl.zcode_work_publish.v1");
-        if (roundtrip) zcl_native_handle_zcode_work_publish(&request, &reply);
-        roundtrip = roundtrip && reply.status == ZCL_COMMAND_STATUS_PASSED &&
-            reply.next_count == 1 &&
-            strcmp(reply.next[0].command, "discover.schema") == 0 &&
-            json_get_int(json_get(&reply.data, "live_rpc_response_bytes")) > 0 &&
-            zpd_accept_rpc_calls == 1 && zpd_publish_rpc_calls == 1;
-        zcl_command_reply_free(&reply);
-        zpd_publish_rpc_wire = "{\"ok\":true,\"data\":{},\"next\":["
-            "{\"command\":\"nonexistent.command\",\"input_json\":\"{}\",\"reason\":\"bad\"}]}";
-        zcl_command_reply_init(&reply, "zcl.zcode_work_publish.v1");
-        if (roundtrip) zcl_native_handle_zcode_work_publish(&request, &reply);
-        roundtrip = roundtrip && reply.status == ZCL_COMMAND_STATUS_FAILED &&
-            strcmp(reply.error.code, "LIVE_CONTINUATION_INVALID") == 0 &&
-            reply.next_count == 0;
-        zcl_command_reply_free(&reply);
-        json_free(&next);
-        _exit(roundtrip ? 0 : 1);
+        _exit(zpd_publication_child_roundtrip(accept_input, job_hex,
+                                              accept_wire, publish_wire)
+              ? 0 : 1);
     }
     int status = 0;
     bool waited = child > 0 && waitpid(child, &status, 0) == child;
@@ -424,6 +441,34 @@ static bool zpd_publication_rpc_roundtrip(
     return ok && waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 #endif
+
+static bool zpd_publication_predecessors_load(
+    const char *workspace, const struct vcs_devloop_publication_receipt *mapping,
+    struct vcs_devloop_publication_receipt *accepted,
+    uint8_t **accepted_wire, size_t *accepted_len,
+    uint8_t **waiting_wire, size_t *waiting_len)
+{
+    return vcs_devloop_publication_receipt_load(
+        workspace, mapping->predecessor_receipt_root, accepted) &&
+        accepted->phase == VCS_DEVLOOP_PUBLICATION_PHASE_ACCEPTED_LANE_BOUND &&
+        vcs_object_get(workspace, mapping->predecessor_receipt_root,
+                       VCS_TAG_PUBLICATION_RECEIPT, accepted_wire, accepted_len) == 0 &&
+        vcs_object_get(workspace, accepted->predecessor_receipt_root,
+                       VCS_TAG_PUBLICATION_RECEIPT, waiting_wire, waiting_len) == 0 &&
+        *accepted_len >= 112 && *waiting_len >= 112;
+}
+
+static bool zpd_publish_refused(const struct json_value *input)
+{
+    struct zcl_command_request request = {.input = input};
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.zcode_work_publish.v1");
+    zcl_native_handle_zcode_work_publish(&request, &reply);
+    bool refused = reply.status == ZCL_COMMAND_STATUS_FAILED &&
+        strcmp(reply.error.code, "WORK_PUBLICATION_MISMATCH") == 0;
+    zcl_command_reply_free(&reply);
+    return refused;
+}
 
 static bool zpd_publication_bad_predecessors(
     const char *workspace, const struct json_value *input,
@@ -433,14 +478,9 @@ static bool zpd_publication_bad_predecessors(
     struct vcs_devloop_publication_receipt accepted;
     uint8_t *accepted_wire = NULL, *waiting_wire = NULL;
     size_t accepted_len = 0, waiting_len = 0;
-    bool ok = vcs_devloop_publication_receipt_load(
-        workspace, mapping->predecessor_receipt_root, &accepted) &&
-        accepted.phase == VCS_DEVLOOP_PUBLICATION_PHASE_ACCEPTED_LANE_BOUND &&
-        vcs_object_get(workspace, mapping->predecessor_receipt_root,
-                       VCS_TAG_PUBLICATION_RECEIPT, &accepted_wire, &accepted_len) == 0 &&
-        vcs_object_get(workspace, accepted.predecessor_receipt_root,
-                       VCS_TAG_PUBLICATION_RECEIPT, &waiting_wire, &waiting_len) == 0 &&
-        accepted_len >= 112 && waiting_len >= 112;
+    bool ok = zpd_publication_predecessors_load(
+        workspace, mapping, &accepted, &accepted_wire, &accepted_len,
+        &waiting_wire, &waiting_len);
     char log_path[4600];
     int n = snprintf(log_path, sizeof(log_path),
                      "%s/.zvcs/publication.receipts.log", workspace);
@@ -464,13 +504,7 @@ static bool zpd_publication_bad_predecessors(
             event_log_append(log, EV_VCS_PUBLICATION_RECEIPT,
                               bad_accepted, 32) != UINT64_MAX;
         if (!ok) break;
-        struct zcl_command_request request = {.input = input};
-        struct zcl_command_reply reply;
-        zcl_command_reply_init(&reply, "zcl.zcode_work_publish.v1");
-        zcl_native_handle_zcode_work_publish(&request, &reply);
-        bool refused = reply.status == ZCL_COMMAND_STATUS_FAILED &&
-            strcmp(reply.error.code, "WORK_PUBLICATION_MISMATCH") == 0;
-        zcl_command_reply_free(&reply);
+        bool refused = zpd_publish_refused(input);
         bool restored = event_log_append(log, EV_VCS_PUBLICATION_RECEIPT,
                                          original_progress_root, 32) != UINT64_MAX;
         ok = refused && restored;
@@ -574,6 +608,21 @@ static bool zpd_array_has_string(const struct json_value *array,
     return false;
 }
 
+static bool zpd_next_input_matches(const struct json_value *input,
+                                    const char *workspace,
+                                    const char *work_id, const char *adapter)
+{
+    return input->type == JSON_OBJ &&
+        strcmp(json_get_str(json_get(input, "workspace")), workspace) == 0 &&
+        strcmp(json_get_str(json_get(input, "work")), work_id) == 0 &&
+        (!adapter || strcmp(json_get_str(json_get(input, "adapter")),
+                            adapter) == 0) &&
+        (adapter || json_get(input, "adapter") == NULL) &&
+        json_get(input, "task_root") == NULL &&
+        json_get(input, "package_root") == NULL &&
+        json_get(input, "candidate_root") == NULL;
+}
+
 static bool zpd_next_is(const struct zcl_command_reply *reply,
                         const char *command, const char *workspace,
                         const char *work_id, const char *adapter)
@@ -585,15 +634,7 @@ static bool zpd_next_is(const struct zcl_command_reply *reply,
     json_init(&input);
     bool ok = json_read(&input, reply->next[0].input_json,
                         strlen(reply->next[0].input_json)) &&
-        input.type == JSON_OBJ &&
-        strcmp(json_get_str(json_get(&input, "workspace")), workspace) == 0 &&
-        strcmp(json_get_str(json_get(&input, "work")), work_id) == 0 &&
-        (!adapter || strcmp(json_get_str(json_get(&input, "adapter")),
-                            adapter) == 0) &&
-        (adapter || json_get(&input, "adapter") == NULL) &&
-        json_get(&input, "task_root") == NULL &&
-        json_get(&input, "package_root") == NULL &&
-        json_get(&input, "candidate_root") == NULL;
+        zpd_next_input_matches(&input, workspace, work_id, adapter);
     const struct zcl_command_spec *spec = ok
         ? zcl_command_registry_find(zcl_command_catalog(), command, NULL)
         : NULL;
@@ -1433,31 +1474,87 @@ static bool zpd_expert_root(const struct json_value *expert,
            zcl_hex_decode_lower(json_get_str(value), out, 32);
 }
 
+static bool zpd_build_expected_roots(const struct json_value *expert,
+                                     uint8_t expected_task[32],
+                                     uint8_t expected_candidate[32],
+                                     uint8_t expected_policy[32],
+                                     uint8_t expected_toolchain[32],
+                                     uint8_t expected_action[32])
+{
+    return zpd_expert_root(expert, "task_root", expected_task) &&
+        zpd_expert_root(expert, "candidate_root", expected_candidate) &&
+        zpd_expert_root(expert, "proof_policy_root", expected_policy) &&
+        zpd_expert_root(expert, "toolchain_capsule_root",
+                        expected_toolchain) &&
+        zpd_expert_root(expert, "proof_action_root", expected_action);
+}
+
+static bool zpd_build_proof_db_path(const char *candidate_workspace,
+                                    char *proof_db, size_t capacity)
+{
+    int n = snprintf(proof_db, capacity, "%s", candidate_workspace);
+    char *attempt = n > 0 && (size_t)n < capacity
+        ? strrchr(proof_db, '/') : NULL;
+    size_t remaining = attempt
+        ? (size_t)(proof_db + capacity - attempt) : 0;
+    int replaced = attempt
+        ? snprintf(attempt, remaining, "/zbuild/node.db") : -1;
+    return attempt && replaced > 0 && (size_t)replaced < remaining;
+}
+
+static bool zpd_build_receipt_load(const char *workspace,
+                                   const uint8_t receipt_root[32],
+                                   struct vcs_zcode_work_receipt_v1 *receipt)
+{
+    uint8_t checked[32];
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    bool ok = vcs_object_load_raw_bounded(
+             workspace, receipt_root,
+             VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES, &wire, &wire_len) == 0 &&
+         vcs_zcode_work_receipt_parse(wire, wire_len, receipt) ==
+             VCS_ZCODE_DEV_OK &&
+         vcs_zcode_work_receipt_id(receipt, checked) ==
+             VCS_ZCODE_DEV_OK &&
+         memcmp(checked, receipt_root, 32) == 0 &&
+         vcs_zcode_work_receipt_verify(
+             receipt, receipt->signer_pubkey) == VCS_ZCODE_DEV_OK;
+    free(wire);
+    return ok;
+}
+
+static bool zpd_build_receipt_matches(
+    const struct vcs_zcode_work_receipt_v1 *receipt,
+    const uint8_t expected_task[32], const uint8_t expected_candidate[32],
+    const uint8_t expected_policy[32], const uint8_t expected_toolchain[32],
+    const uint8_t expected_action[32])
+{
+    return receipt->work_kind == VCS_ZCODE_WORK_BUILD &&
+        receipt->status == VCS_ZCODE_WORK_PASS && receipt->exit_status == 0 &&
+        memcmp(receipt->task_root, expected_task, 32) == 0 &&
+        memcmp(receipt->candidate_root, expected_candidate, 32) == 0 &&
+        memcmp(receipt->proof_policy_root, expected_policy, 32) == 0 &&
+        memcmp(receipt->toolchain_capsule_root,
+               expected_toolchain, 32) == 0 &&
+        memcmp(receipt->action_root, expected_action, 32) == 0;
+}
+
 static bool zpd_find_build_receipt(
     const char *workspace, const char *candidate_workspace,
     const struct json_value *expert,
     struct vcs_zcode_work_receipt_v1 *out, uint8_t out_root[32])
 {
-    uint8_t checked[32], expected_task[32];
+    uint8_t expected_task[32];
     uint8_t expected_candidate[32], expected_policy[32], expected_toolchain[32];
     uint8_t expected_action[32];
     if (!workspace || !candidate_workspace || !out || !out_root ||
-        !zpd_expert_root(expert, "task_root", expected_task) ||
-        !zpd_expert_root(expert, "candidate_root", expected_candidate) ||
-        !zpd_expert_root(expert, "proof_policy_root", expected_policy) ||
-        !zpd_expert_root(expert, "toolchain_capsule_root",
-                         expected_toolchain) ||
-        !zpd_expert_root(expert, "proof_action_root", expected_action))
+        !zpd_build_expected_roots(expert, expected_task, expected_candidate,
+                                  expected_policy, expected_toolchain,
+                                  expected_action))
         return false;
     char proof_db[4608];
-    int n = snprintf(proof_db, sizeof(proof_db), "%s", candidate_workspace);
-    char *attempt = n > 0 && (size_t)n < sizeof(proof_db)
-        ? strrchr(proof_db, '/') : NULL;
-    size_t remaining = attempt
-        ? (size_t)(proof_db + sizeof(proof_db) - attempt) : 0;
-    int replaced = attempt
-        ? snprintf(attempt, remaining, "/zbuild/node.db") : -1;
-    if (!attempt || replaced <= 0 || (size_t)replaced >= remaining)
+    if (!zpd_build_proof_db_path(candidate_workspace, proof_db,
+                                 sizeof(proof_db)))
         return false;
     struct node_db ndb = {0};
     if (!node_db_open_existing_runtime(
@@ -1480,33 +1577,171 @@ static bool zpd_find_build_receipt(
             strcmp(rows[i].action_id, action_hex) != 0 ||
             !zcl_hex_decode_lower(rows[i].work_receipt_sha3, out_root, 32))
             continue;
-        uint8_t *wire = NULL;
-        size_t wire_len = 0;
         struct vcs_zcode_work_receipt_v1 receipt;
-        bool ok = vcs_object_load_raw_bounded(
-                 workspace, out_root,
-                 VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES, &wire, &wire_len) == 0 &&
-             vcs_zcode_work_receipt_parse(wire, wire_len, &receipt) ==
-                 VCS_ZCODE_DEV_OK &&
-             vcs_zcode_work_receipt_id(&receipt, checked) ==
-                 VCS_ZCODE_DEV_OK &&
-             memcmp(checked, out_root, 32) == 0 &&
-             vcs_zcode_work_receipt_verify(
-                 &receipt, receipt.signer_pubkey) == VCS_ZCODE_DEV_OK;
-        free(wire);
-        if (!ok || receipt.work_kind != VCS_ZCODE_WORK_BUILD ||
-            receipt.status != VCS_ZCODE_WORK_PASS || receipt.exit_status != 0 ||
-            memcmp(receipt.task_root, expected_task, 32) != 0 ||
-            memcmp(receipt.candidate_root, expected_candidate, 32) != 0 ||
-            memcmp(receipt.proof_policy_root, expected_policy, 32) != 0 ||
-            memcmp(receipt.toolchain_capsule_root,
-                   expected_toolchain, 32) != 0 ||
-            memcmp(receipt.action_root, expected_action, 32) != 0)
+        if (!zpd_build_receipt_load(workspace, out_root, &receipt) ||
+            !zpd_build_receipt_matches(&receipt, expected_task,
+                                       expected_candidate, expected_policy,
+                                       expected_toolchain, expected_action))
             continue;
         *out = receipt;
         return true;
     }
     return false;
+}
+
+static bool zpd_story_app_in_window(int64_t started, int64_t finished,
+                                    int64_t floor_unix)
+{
+    return started >= floor_unix && finished >= started;
+}
+
+static bool zpd_story_app_write_source(const char *candidate_workspace,
+                                       char *app_source, size_t source_size,
+                                       char *app_binary, size_t binary_size)
+{
+    int source_n = snprintf(app_source, source_size,
+                            "%s/.story-app.c", candidate_workspace);
+    int binary_n = snprintf(app_binary, binary_size,
+                            "%s/.story-app", candidate_workspace);
+    static const char app_source_text[] =
+        "#include <stdio.h>\n#include \"x.h\"\n"
+        "int main(void) { printf(\"x=%d\\n\", x()); return 0; }\n";
+    if (source_n <= 0 || (size_t)source_n >= source_size ||
+        binary_n <= 0 || (size_t)binary_n >= binary_size ||
+        !zpd_write(app_source, app_source_text))
+        return false;
+    return true;
+}
+
+static bool zpd_story_app_compile(const char *candidate_workspace,
+                                  struct zcl_devloop_process_result *compiled)
+{
+    const char *compile_argv[] = {
+        "cc", "-std=c23", "-O1", "-Iinclude", ".story-app.c", "src/x.c",
+        "-o", ".story-app", NULL,
+    };
+    return zcl_devloop_process_run(
+        candidate_workspace, compile_argv, 30000, compiled) &&
+        !compiled->timed_out && !compiled->cancelled &&
+        compiled->term_signal == 0 && compiled->exit_code == 0 &&
+        !compiled->output_truncated;
+}
+
+static bool zpd_story_app_store_artifact(const char *workspace,
+                                         const char *app_binary, bool compile_ok,
+                                         uint8_t artifact_root[32])
+{
+    char *artifact = compile_ok
+        ? zpd_read_bounded(app_binary, 16u * 1024u * 1024u) : NULL;
+    struct stat artifact_stat;
+    bool artifact_ok = artifact && stat(app_binary, &artifact_stat) == 0 &&
+        artifact_stat.st_size > 0 &&
+        (uint64_t)artifact_stat.st_size <= 16u * 1024u * 1024u;
+    artifact_ok = artifact_ok && vcs_object_put(
+        workspace, (const uint8_t *)artifact, (size_t)artifact_stat.st_size,
+        VCS_TAG_BLOB, artifact_root);
+    free(artifact);
+    return artifact_ok;
+}
+
+static bool zpd_story_app_store_compile(
+    const char *workspace, const struct zcl_devloop_process_result *compiled,
+    uint8_t compile_invocation_root[32], uint8_t compile_output_root[32],
+    uint8_t compile_confinement_root[32])
+{
+    static const uint8_t compile_invocation[] =
+        "cc -std=c23 -O1 -Iinclude .story-app.c src/x.c -o .story-app";
+    static const uint8_t compile_confinement[] =
+        "fixture compiler; timeout=30000ms; network state unclaimed";
+    static const uint8_t compile_silent[] = "compiler produced no output";
+    const uint8_t *compile_evidence = compiled->output_len
+        ? (const uint8_t *)compiled->output : compile_silent;
+    size_t compile_evidence_len = compiled->output_len
+        ? compiled->output_len : sizeof(compile_silent) - 1u;
+    return vcs_object_put(workspace, compile_invocation,
+                          sizeof(compile_invocation) - 1u, VCS_TAG_BLOB,
+                          compile_invocation_root) &&
+        vcs_object_put(workspace, compile_evidence,
+                       compile_evidence_len, VCS_TAG_BLOB,
+                       compile_output_root) &&
+        vcs_object_put(workspace, compile_confinement,
+                       sizeof(compile_confinement) - 1u, VCS_TAG_BLOB,
+                       compile_confinement_root);
+}
+
+static bool zpd_story_app_seal_build(const char *workspace,
+                                     struct vcs_zcode_work_receipt_v1 *app_build,
+                                     uint8_t secret[64], uint8_t pubkey[32],
+                                     uint8_t build_root[32])
+{
+    bool sealed = vcs_zcode_work_receipt_seal(
+        app_build, secret, pubkey) == VCS_ZCODE_DEV_OK;
+    uint8_t build_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+    sealed = sealed && vcs_zcode_work_receipt_serialize(
+        app_build, build_wire) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_receipt_id(app_build, build_root) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_object_put_addressed(workspace, build_root, build_wire,
+                                 sizeof(build_wire));
+    return sealed;
+}
+
+static bool zpd_story_app_ran(const char *candidate_workspace,
+                              struct zcl_devloop_process_result *ran)
+{
+    const char *run_argv[] = {"./.story-app", NULL};
+    return zcl_devloop_process_run(candidate_workspace, run_argv, 10000, ran) &&
+        !ran->timed_out && !ran->cancelled && ran->term_signal == 0 &&
+        ran->exit_code == 0 && !ran->output_truncated &&
+        strcmp(ran->output, "x=10\n") == 0;
+}
+
+static bool zpd_story_app_store_run(
+    const char *workspace, const struct zcl_devloop_process_result *ran,
+    uint8_t invocation_root[32], uint8_t stdout_root[32],
+    uint8_t stderr_root[32], uint8_t confinement_root[32])
+{
+    static const uint8_t invocation[] = "./.story-app";
+    static const uint8_t stream_note[] =
+        "stderr is merged into the complete captured process stream";
+    static const uint8_t confinement[] =
+        "fixture executor; timeout=10000ms; network state unclaimed; streams merged";
+    return vcs_object_put(workspace, invocation, sizeof(invocation) - 1u,
+                          VCS_TAG_BLOB, invocation_root) &&
+        vcs_object_put(workspace, (const uint8_t *)ran->output,
+                       ran->output_len, VCS_TAG_BLOB, stdout_root) &&
+        vcs_object_put(workspace, stream_note, sizeof(stream_note) - 1u,
+                       VCS_TAG_BLOB, stderr_root) &&
+        vcs_object_put(workspace, confinement, sizeof(confinement) - 1u,
+                       VCS_TAG_BLOB, confinement_root);
+}
+
+static bool zpd_story_app_store_observation(
+    const char *workspace,
+    const struct vcs_zcode_app_run_observation_v1 *observation,
+    uint8_t observation_root[32])
+{
+    uint8_t observation_wire[VCS_ZCODE_APP_RUN_OBSERVATION_WIRE_BYTES];
+    return vcs_zcode_app_run_observation_v1_serialize(
+        observation, observation_wire) == VCS_ZCODE_APP_RUN_OK &&
+        vcs_zcode_app_run_observation_v1_root(
+            observation, observation_root) == VCS_ZCODE_APP_RUN_OK &&
+        vcs_object_put_addressed(
+            workspace, observation_root, observation_wire,
+            sizeof(observation_wire));
+}
+
+static bool zpd_story_app_store_receipt(
+    const char *workspace, const struct vcs_zcode_work_receipt_v1 *receipt,
+    uint8_t receipt_root[32])
+{
+    uint8_t receipt_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
+    return vcs_zcode_work_receipt_serialize(receipt, receipt_wire) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_work_receipt_id(receipt, receipt_root) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_object_put_addressed(workspace, receipt_root, receipt_wire,
+                                 sizeof(receipt_wire));
 }
 
 static bool zpd_store_app_run_evidence(
@@ -1520,67 +1755,29 @@ static bool zpd_store_app_run_evidence(
         build.finished_unix > INT64_MAX - 2)
         return false;
     char app_source[4608], app_binary[4608];
-    int source_n = snprintf(app_source, sizeof(app_source),
-                            "%s/.story-app.c", candidate_workspace);
-    int binary_n = snprintf(app_binary, sizeof(app_binary),
-                            "%s/.story-app", candidate_workspace);
-    static const char app_source_text[] =
-        "#include <stdio.h>\n#include \"x.h\"\n"
-        "int main(void) { printf(\"x=%d\\n\", x()); return 0; }\n";
-    if (source_n <= 0 || (size_t)source_n >= sizeof(app_source) ||
-        binary_n <= 0 || (size_t)binary_n >= sizeof(app_binary) ||
-        !zpd_write(app_source, app_source_text))
+    if (!zpd_story_app_write_source(candidate_workspace, app_source,
+                                    sizeof(app_source), app_binary,
+                                    sizeof(app_binary)))
         return false;
-    const char *compile_argv[] = {
-        "cc", "-std=c23", "-O1", "-Iinclude", ".story-app.c", "src/x.c",
-        "-o", ".story-app", NULL,
-    };
     struct zcl_devloop_process_result compiled = {0};
     int64_t compile_started_unix = platform_time_wall_unix();
-    bool compile_ok = zcl_devloop_process_run(
-        candidate_workspace, compile_argv, 30000, &compiled) &&
-        !compiled.timed_out && !compiled.cancelled &&
-        compiled.term_signal == 0 && compiled.exit_code == 0 &&
-        !compiled.output_truncated;
+    bool compile_ok = zpd_story_app_compile(candidate_workspace, &compiled);
     int64_t compile_finished_unix = platform_time_wall_unix();
-    compile_ok = compile_ok && compile_started_unix >= build.finished_unix &&
-        compile_finished_unix >= compile_started_unix;
-    char *artifact = compile_ok
-        ? zpd_read_bounded(app_binary, 16u * 1024u * 1024u) : NULL;
-    struct stat artifact_stat;
-    bool artifact_ok = artifact && stat(app_binary, &artifact_stat) == 0 &&
-        artifact_stat.st_size > 0 &&
-        (uint64_t)artifact_stat.st_size <= 16u * 1024u * 1024u;
+    compile_ok = compile_ok && zpd_story_app_in_window(
+        compile_started_unix, compile_finished_unix, build.finished_unix);
     uint8_t artifact_root[32];
-    artifact_ok = artifact_ok && vcs_object_put(
-        workspace, (const uint8_t *)artifact, (size_t)artifact_stat.st_size,
-        VCS_TAG_BLOB, artifact_root);
-    free(artifact);
-    if (!artifact_ok) {
+    if (!zpd_story_app_store_artifact(workspace, app_binary, compile_ok,
+                                      artifact_root)) {
         (void)unlink(app_source);
         (void)unlink(app_binary);
         return false;
     }
-    static const uint8_t compile_invocation[] =
-        "cc -std=c23 -O1 -Iinclude .story-app.c src/x.c -o .story-app";
-    static const uint8_t compile_confinement[] =
-        "fixture compiler; timeout=30000ms; network state unclaimed";
-    static const uint8_t compile_silent[] = "compiler produced no output";
-    const uint8_t *compile_evidence = compiled.output_len
-        ? (const uint8_t *)compiled.output : compile_silent;
-    size_t compile_evidence_len = compiled.output_len
-        ? compiled.output_len : sizeof(compile_silent) - 1u;
     uint8_t compile_invocation_root[32], compile_output_root[32];
     uint8_t compile_confinement_root[32];
-    if (!vcs_object_put(workspace, compile_invocation,
-                        sizeof(compile_invocation) - 1u, VCS_TAG_BLOB,
-                        compile_invocation_root) ||
-        !vcs_object_put(workspace, compile_evidence,
-                        compile_evidence_len, VCS_TAG_BLOB,
-                        compile_output_root) ||
-        !vcs_object_put(workspace, compile_confinement,
-                        sizeof(compile_confinement) - 1u, VCS_TAG_BLOB,
-                        compile_confinement_root)) {
+    if (!zpd_story_app_store_compile(workspace, &compiled,
+                                     compile_invocation_root,
+                                     compile_output_root,
+                                     compile_confinement_root)) {
         (void)unlink(app_source);
         (void)unlink(app_binary);
         return false;
@@ -1607,44 +1804,22 @@ static bool zpd_store_app_run_evidence(
     uint8_t seed[32], secret[64], pubkey[32];
     memset(seed, 0xb7, sizeof(seed));
     ed25519_keypair(pubkey, secret, seed);
-    bool sealed = vcs_zcode_work_receipt_seal(
-        &app_build, secret, pubkey) == VCS_ZCODE_DEV_OK;
-    uint8_t build_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
-    sealed = sealed && vcs_zcode_work_receipt_serialize(
-        &app_build, build_wire) == VCS_ZCODE_DEV_OK &&
-        vcs_zcode_work_receipt_id(&app_build, build_root) ==
-            VCS_ZCODE_DEV_OK &&
-        vcs_object_put_addressed(workspace, build_root, build_wire,
-                                 sizeof(build_wire));
-    static const uint8_t invocation[] = "./.story-app";
+    bool sealed = zpd_story_app_seal_build(workspace, &app_build, secret,
+                                           pubkey, build_root);
     struct zcl_devloop_process_result ran = {0};
-    const char *run_argv[] = {"./.story-app", NULL};
     int64_t run_started_unix = platform_time_wall_unix();
-    bool ran_ok = sealed && zcl_devloop_process_run(
-        candidate_workspace, run_argv, 10000, &ran) &&
-        !ran.timed_out && !ran.cancelled && ran.term_signal == 0 &&
-        ran.exit_code == 0 && !ran.output_truncated &&
-        strcmp(ran.output, "x=10\n") == 0;
+    bool ran_ok = sealed && zpd_story_app_ran(candidate_workspace, &ran);
     int64_t run_finished_unix = platform_time_wall_unix();
-    ran_ok = ran_ok && run_started_unix >= app_build.finished_unix &&
-        run_finished_unix >= run_started_unix;
+    ran_ok = ran_ok && zpd_story_app_in_window(
+        run_started_unix, run_finished_unix, app_build.finished_unix);
     (void)unlink(app_source);
     (void)unlink(app_binary);
-    static const uint8_t stream_note[] =
-        "stderr is merged into the complete captured process stream";
-    static const uint8_t confinement[] =
-        "fixture executor; timeout=10000ms; network state unclaimed; streams merged";
     uint8_t invocation_root[32], stdout_root[32], stderr_root[32];
     uint8_t confinement_root[32];
     if (!ran_ok ||
-        !vcs_object_put(workspace, invocation, sizeof(invocation) - 1u,
-                        VCS_TAG_BLOB, invocation_root) ||
-        !vcs_object_put(workspace, (const uint8_t *)ran.output,
-                        ran.output_len, VCS_TAG_BLOB, stdout_root) ||
-        !vcs_object_put(workspace, stream_note, sizeof(stream_note) - 1u,
-                        VCS_TAG_BLOB, stderr_root) ||
-        !vcs_object_put(workspace, confinement, sizeof(confinement) - 1u,
-                        VCS_TAG_BLOB, confinement_root)) {
+        !zpd_story_app_store_run(workspace, &ran, invocation_root,
+                                 stdout_root, stderr_root,
+                                 confinement_root)) {
         memset(secret, 0, sizeof(secret));
         return false;
     }
@@ -1663,15 +1838,9 @@ static bool zpd_store_app_run_evidence(
     memcpy(observation.stdout_root, stdout_root, 32);
     memcpy(observation.stderr_root, stderr_root, 32);
     memcpy(observation.confinement_root, confinement_root, 32);
-    uint8_t observation_wire[VCS_ZCODE_APP_RUN_OBSERVATION_WIRE_BYTES];
     uint8_t observation_root[32];
-    if (vcs_zcode_app_run_observation_v1_serialize(
-            &observation, observation_wire) != VCS_ZCODE_APP_RUN_OK ||
-        vcs_zcode_app_run_observation_v1_root(
-            &observation, observation_root) != VCS_ZCODE_APP_RUN_OK ||
-        !vcs_object_put_addressed(
-            workspace, observation_root, observation_wire,
-            sizeof(observation_wire)))
+    if (!zpd_story_app_store_observation(workspace, &observation,
+                                         observation_root))
         return false;
     struct vcs_zcode_work_receipt_v1 receipt = {
         .schema_version = VCS_ZCODE_DEV_VERSION,
@@ -1695,15 +1864,9 @@ static bool zpd_store_app_run_evidence(
     bool ok = vcs_zcode_work_receipt_seal(&receipt, secret, pubkey) ==
               VCS_ZCODE_DEV_OK;
     memset(secret, 0, sizeof(secret));
-    uint8_t receipt_wire[VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES];
     uint8_t receipt_root[32];
     bool stored = ok &&
-        vcs_zcode_work_receipt_serialize(&receipt, receipt_wire) ==
-            VCS_ZCODE_DEV_OK &&
-        vcs_zcode_work_receipt_id(&receipt, receipt_root) ==
-            VCS_ZCODE_DEV_OK &&
-        vcs_object_put_addressed(workspace, receipt_root, receipt_wire,
-                                 sizeof(receipt_wire));
+        zpd_story_app_store_receipt(workspace, &receipt, receipt_root);
     if (stored && out_build_receipt_root)
         memcpy(out_build_receipt_root, build_root, 32);
     return stored;
