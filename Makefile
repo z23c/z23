@@ -13037,9 +13037,10 @@ check-malloc: $(LINTC_TOOL)
 	@echo "══ LINT: bare malloc/calloc/realloc in app/tools code ══"
 	@./build/bin/z23-lint check-malloc
 
-check-raw-sqlite:
+check-raw-sqlite: $(LINTC_TOOL)
 	@echo "══ LINT: raw sqlite3_step in app code ══"
-	@tools/scripts/check_raw_sqlite.sh
+	@./build/bin/z23-lint check-raw-sqlite --selftest
+	@./build/bin/z23-lint check-raw-sqlite
 
 check-vcs-no-git: $(LINTC_TOOL)
 	@echo "══ LINT: contexts/commons/modules/vcs is git-free + spawns no processes ══"

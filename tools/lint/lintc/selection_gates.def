@@ -125,7 +125,9 @@ SELECTION_GATE("check-fortify-masked-decls", SELECTION_UNITS_FILES, "\\.c$",
  * files >= 2) is over the path set. */
 SELECTION_GATE("check-raw-sqlite", SELECTION_UNITS_FILES,
     "^(core|engine|contexts|cognition|platform|tools)/.*\\.[ch]$",
-    "tools/scripts/check_raw_sqlite.sh tools/scripts/raw_sqlite_allowlist.txt "
+    "tools/lint/lintc/gate_raw_sqlite.c tools/lint/lintc/gate_raw_sqlite_ctx.c "
+    "tools/lint/lintc/gate_raw_sqlite_exec.c tools/lint/lintc/gate_raw_sqlite_priv.h "
+    "tools/lint/lintc/gate_raw_sqlite_selftest.c tools/scripts/raw_sqlite_allowlist.txt "
     "tools/lint/scan_exclusions.sh tools/lint/gate_lib.sh "
     "tools/lint/repo_shape.sh engine/composition/lib_module_order.def "
     SELECTION_DRIVER,

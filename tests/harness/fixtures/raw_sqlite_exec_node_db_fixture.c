@@ -1,5 +1,5 @@
 /* Fixture copied into app/ by test_make_lint_gates.c. It must trip
- * check_raw_sqlite.sh because wallet-table DML forwarded through
+ * the check-raw-sqlite gate because wallet-table DML forwarded through
  * node_db_exec bypasses the model owner. */
 struct node_db {
     void *db;

@@ -50,7 +50,7 @@ and before/after hooks fire. Direct `sqlite3_exec(ndb->db|ndb.db, "...")` DML
 (`INSERT`/`DELETE`/`UPDATE`/`REPLACE`) is also linted and must route through
 `ar_exec_write_sql()` / `AR_STEP_WRITE` or a reviewed helper; transaction
 control, PRAGMAs, ATTACH/DETACH, schema DDL, projection stores, and the kernel
-store remain outside that narrow DML gate. `make lint` runs `check_raw_sqlite.sh`
+store remain outside that narrow DML gate. `make lint` runs `check-raw-sqlite`
 (one of the gates in the canonical block below).
 
 ### The one principled exception: the kernel store (`consensus.db`)
@@ -87,7 +87,7 @@ hook to fire). The discipline:
   colon). `progress_store.c` itself uses the equivalent `kernel-primitive` tag.
 - This is a **bounded, stable exception**, not a deferred migration — the count
   changes only when the reducer gains/drops a stage table; it does not ratchet
-  toward zero. `check_raw_sqlite.sh` treats `progress-kv-kernel-store` as the
+  toward zero. `check-raw-sqlite` treats `progress-kv-kernel-store` as the
   principled kernel-store hatch.
 
 A reducer Job that writes a `node.db` **model** (not a kernel-store `*_log`/cursor
@@ -1814,7 +1814,7 @@ name a genuinely unique structural property
 - `long-function-ok:` — `legacy-import-state-machine`.
 
 Implementation: `tools/check_observability_pairing.c`,
-`tools/scripts/check_raw_sqlite.sh`, `tools/scripts/check_raw_malloc.sh`,
+`lintc` gate `check-raw-sqlite`, `tools/scripts/check_raw_malloc.sh`,
 `tools/scripts/check_long_functions.sh`, and the inline `check-silent-errors*`
 recipes in `Makefile:1481+`.
 

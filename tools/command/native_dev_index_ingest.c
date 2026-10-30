@@ -9,7 +9,7 @@
  * comment and DEFENSIVE_CODING.md Sec 1): index.db is not a node.db model,
  * it is a brand-new standalone store with its own FTS5 schema that the
  * fixed node.db AR models cannot express. Every direct sqlite3_step call below
- * carries the `// raw-sql-ok:index-store` marker check_raw_sqlite.sh reads.
+ * carries the `// raw-sql-ok:index-store` marker the check-raw-sqlite gate reads.
  *
  * IDENTITY, NOT CURSOR: a `rows` row is only ever added once for a given
  * (source_id, row_key) pair, where row_key is a SHA3-256 hash of the row's

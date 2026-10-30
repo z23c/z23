@@ -73,7 +73,7 @@
 #define OBS_OK_FIXTURE_DST_REL "engine/controllers/src/_observability_ok_lint_fixture_tmp.c"
 #define RAW_MALLOC_FIXTURE_DST_REL "engine/controllers/src/_raw_malloc_lint_fixture_tmp.c"
 #define RAW_MALLOC_OK_FIXTURE_DST_REL "engine/controllers/src/_raw_malloc_ok_lint_fixture_tmp.c"
-#define RAW_SQLITE_SCRIPT_REL "tools/scripts/check_raw_sqlite.sh"
+#define RAW_SQLITE_SCRIPT_REL "build/bin/z23-lint check-raw-sqlite"
 #define RAW_MALLOC_SCRIPT_REL "tools/scripts/check_raw_malloc.sh"
 #define HOTSWAP_SCOPE_SCRIPT_REL  "build/bin/z23-lint check-hotswap-eligible-scope"
 #define HOTSWAP_STATIC_SCRIPT_REL "build/bin/z23-lint check-hotswap-static-state"

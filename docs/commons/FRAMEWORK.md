@@ -232,7 +232,7 @@ implementations; Event is a concept rather than a required folder.
 | 5 | **Supervisor** | `engine/supervisors/` | declared liveness tree, restart policy | partial — `net`/`chain`/`staged_sync` declared; `boot_services.c` still owns lifecycle wiring | `engine/supervisors/src/staged_sync_supervisor.c` |
 | 6 | **Condition** | `engine/conditions/` | `{detect, remedy, witness}` struct + `register()` | **real, the model citizen** (`condition_registrations` count is machine-checked in `docs/dev/CODEBASE_MAP.md`'s DOC-COUNTS block) | `block_failed_mask_at_tip.c` |
 | 7 | **Event** | concept, not a physical shape | typed append-only emit + subscribers | owned by `engine/modules/event/` + `engine/modules/storage/src/event_log.c` + `engine/modules/storage/src/*_projection.c` | `engine/modules/storage/src/event_log.c` |
-| 8 | **Storage Adapter** | `platform/adapters/` + `platform/ports/` | port interface + swappable impl | **real — outbound-only by design** (§6); port/adapter counts are machine-checked in `docs/dev/CODEBASE_MAP.md`'s DOC-COUNTS block; `check_raw_sqlite.sh` CLEAN | `platform/adapters/outbound/persistence/` |
+| 8 | **Storage Adapter** | `platform/adapters/` + `platform/ports/` | port interface + swappable impl | **real — outbound-only by design** (§6); port/adapter counts are machine-checked in `docs/dev/CODEBASE_MAP.md`'s DOC-COUNTS block; `check-raw-sqlite` CLEAN | `platform/adapters/outbound/persistence/` |
 
 ### The canonical form is struct-registration, not a block-DSL
 
@@ -453,7 +453,7 @@ as Event (§3 row 7): the concept has a real home
 and does not need an empty placeholder. App sites that call
 `engine/modules/storage/src/*_sqlite.c` directly are
 legitimate (Models ARE storage; Jobs use the consensus.db kernel store;
-Views are read-only introspection), and `check_raw_sqlite.sh` stays CLEAN
+Views are read-only introspection), and `check-raw-sqlite` stays CLEAN
 with an empty baseline. The `check-lib-layering` ratchet guards writes.
 
 ### The `engine/application/` tier — staged consensus logic

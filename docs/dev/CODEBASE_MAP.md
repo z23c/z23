@@ -410,7 +410,7 @@ Use `docs/agent/AGENT_ARCHITECTURE.md` as the full checklist. The short path:
 1. Struct in `engine/models/include/models/X.h`. <!-- doc-path-ok: X is a placeholder for your resource name -->
 2. `DEFINE_MODEL_CALLBACKS` + `db_X_save`/`validate`/`find`/`delete` in
    `engine/models/src/X.c`. Use `AR_*_SAVE` macros — raw `sqlite3_step()` is <!-- doc-path-ok: X is a placeholder -->
-   lint-rejected in app code (text-scan gate `check_raw_sqlite.sh`).
+   lint-rejected in app code (text-scan gate `check-raw-sqlite`).
 3. Add a migration in `engine/models/src/database_migrate.c` (per-feature tables
    in `database_migrate_features.c`; schema `database_schema.c`; validators
    `database_validators.c`). Migrations auto-run at `BOOT_STAGE_DB_OPEN`; no
@@ -496,8 +496,8 @@ Gates live in **two** directories and neither is deprecated:
 `tools/lint/check_*.sh` and `tools/scripts/check_*.sh` (roughly half each).
 Rule of thumb: put it in `tools/lint/` if it sources `tools/lint/gate_lib.sh`;
 put it in `tools/scripts/` if it is also runnable standalone as an operator
-tool (`check_consensus_parity.sh`, `check_doc_counts.sh`,
-`check_raw_sqlite.sh` all live there). Native gates such as
+tool (`check_consensus_parity.sh`, and `check_doc_counts.sh`
+all live there). Native gates such as
 `z23-lint check-domain-purity` live in `tools/lint/lintc/`. Either way,
 add it as a dependency of the `lint` target in the `Makefile`.
 

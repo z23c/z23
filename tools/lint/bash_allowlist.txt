@@ -208,7 +208,6 @@ tools/scripts/check_onion_pair_watch.sh
 tools/scripts/check_projections_pure.sh
 tools/scripts/check_quality_lane_freshness.sh
 tools/scripts/check_raw_malloc.sh
-tools/scripts/check_raw_sqlite.sh
 tools/scripts/check_reproducible_build.sh
 tools/scripts/check_service_result_convergence.sh
 tools/scripts/check_shape_include_direction.sh
