@@ -658,7 +658,9 @@ static int test_code_body_long_function_truncates(void)
     TEST("code_body: a function past the 400-line cap returns a line-bounded "
          "prefix with truncated=true") {
         struct zcl_command_reply reply;
-        code_body_run("node_db_migrate_features", &reply);
+        /* The sealed script interpreter: about 580 lines, and the tree's
+         * long function least likely to be split. */
+        code_body_run("domain_consensus_eval_script", &reply);
 
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT(json_get_bool(json_get(&reply.data, "truncated")));
