@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "native_ui.h"
 #include "base/cleanse.h"
+#include "conversation.h"
 #include "fleet.h"
 #include "hosts.h"
 #include <stdio.h>
@@ -158,6 +159,36 @@ static bool text(JNIEnv *env, jobject view, const char *value)
 {
     return char_sequence(env, view, "setText", value);
 }
+static bool line_spacing(JNIEnv *env, jobject view, float extra_dp)
+{
+    jmethodID set = method_of(env, view, "setLineSpacing", "(FF)V");
+    if (!set) return false;
+    (*env)->CallVoidMethod(env, view, set, (jfloat)dp(extra_dp), 1.0f);
+    return clean(env);
+}
+/* Shows HTML through android.text.Html.fromHtml; false leaves the view untouched. */
+static bool html_text(JNIEnv *env, jobject view, const char *html)
+{
+    jclass cls = (*env)->FindClass(env, "android/text/Html");
+    jmethodID from = clean(env) && cls ?
+        (*env)->GetStaticMethodID(env, cls, "fromHtml", "(Ljava/lang/String;I)Landroid/text/Spanned;") : NULL;
+    jstring string = clean(env) && from ? make_string(env, html) : NULL;
+    jobject spanned = string ? (*env)->CallStaticObjectMethod(env, cls, from, string, 0) : NULL;
+    jmethodID set = clean(env) && spanned ? method_of(env, view, "setText", "(Ljava/lang/CharSequence;)V") : NULL;
+    bool ok = set != NULL;
+    if (ok) { (*env)->CallVoidMethod(env, view, set, spanned); ok = clean(env); }
+    if (spanned) (*env)->DeleteLocalRef(env, spanned);
+    if (string) (*env)->DeleteLocalRef(env, string);
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    return ok;
+}
+/* Answer first: the newest answer in the default color, earlier text small and muted. */
+static void show_transcript(JNIEnv *env, const struct zapp_view *view)
+{
+    static char html[2 * ZAPP_TEXT_CAP];
+    if (!(zapp_transcript_html(view->transcript, html, sizeof(html)) && html_text(env, transcript_view, html)))
+        (void)text(env, transcript_view, view->transcript);
+}
 static bool append(JNIEnv *env, jobject layout, jobject view)
 {
     jclass cls = (*env)->GetObjectClass(env, layout);
@@ -181,13 +212,15 @@ static float label_size(const char *label, const jobject *save)
 {
     if (!strcmp(label, "Fleet") || !strcmp(label, "Phone node") || !strcmp(label, "Type a question") ||
         !strcmp(label, "Fleet invitation")) return 18.0f;
+    if (save == &transcript_view) return 18.0f;
     return small_label(label, save) ? 14.0f : 16.0f;
 }
 static bool add_text(JNIEnv *env, jobject layout, jobject activity, const char *label, jobject *save)
 {
     jobject view = widget(env, "android/widget/TextView", activity);
     bool ok = view && typography(env, view, label_size(label, save), (jint)0xff262b2b) && padding(env, view, 0, 4) &&
-        text(env, view, label) && append(env, layout, view) && (!save || keep(env, save, view));
+        text(env, view, label) && (save != &transcript_view || line_spacing(env, view, 4.0f)) &&
+        append(env, layout, view) && (!save || keep(env, save, view));
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
@@ -569,7 +602,7 @@ static void render_node(JNIEnv *env, const struct zapp_view *view)
              view->balance[0] ? view->balance : "Balance appears when your node is ready");
     (void)text(env, balance_view, balance);
     (void)text(env, connection_view, view->connection[0] ? view->connection : "Connect a laptop to use chat.");
-    (void)text(env, transcript_view, view->transcript);
+    show_transcript(env, view);
     (void)set_visible(env, transcript_view, view->transcript[0] != 0);
 }
 /* Two lines at the top: the phone node and, while a laptop host is paired, the fleet headline. */

@@ -28,4 +28,8 @@ bool zapp_history_json(const struct zapp_history *h, struct json_value *out);
  * older exchanges are dropped from the end; an exchange larger than the buffer replaces it with
  * as much of the answer as fits. */
 void zapp_transcript_prepend(char *text, size_t cap, const char *question, const char *answer);
+/* Renders the stored transcript as HTML for android.text.Html: the newest question muted and its
+ * answer plain, earlier exchanges small and muted. Older exchanges that do not fit are dropped;
+ * false with an empty out when even the newest does not fit. */
+bool zapp_transcript_html(const char *transcript, char *out, size_t cap);
 #endif

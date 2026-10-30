@@ -120,3 +120,76 @@ void zapp_transcript_prepend(char *text, size_t cap, const char *question, const
     snprintf(text, (size_t)n + 1, "You: %s\n\nZ23: %s\n", question, answer);
     text[n] = keep ? '\n' : 0;
 }
+
+struct html_sink { char *out; size_t cap, len; };
+static bool html_put(struct html_sink *s, const char *text, size_t n)
+{
+    if (n >= s->cap - s->len) return false;
+    memcpy(s->out + s->len, text, n); s->len += n; s->out[s->len] = 0;
+    return true;
+}
+static bool html_puts(struct html_sink *s, const char *text) { return html_put(s, text, strlen(text)); }
+/* Appends text[0, n) with markup characters escaped and newlines as line breaks. */
+static bool html_escaped(struct html_sink *s, const char *text, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        const char *rep = NULL;
+        switch (text[i]) {
+        case '&': rep = "&amp;"; break;
+        case '<': rep = "&lt;"; break;
+        case '>': rep = "&gt;"; break;
+        case '"': rep = "&quot;"; break;
+        case '\n': rep = "<br>"; break;
+        default: break;
+        }
+        if (!(rep ? html_puts(s, rep) : html_put(s, text + i, 1))) return false;
+    }
+    return true;
+}
+/* Appends one stored exchange (question and answer) for the given position in the list. */
+static bool html_exchange(struct html_sink *s, const char *q, size_t qn, const char *a, size_t an, bool newest)
+{
+    if (!html_puts(s, newest ? "<font color=\"#6B716D\">" : "<br><br><small><font color=\"#8A8F8B\">") ||
+        !html_escaped(s, q, qn) || (newest && !html_puts(s, "</font>")) ||
+        (an && !html_puts(s, "<br>")) || !html_escaped(s, a, an)) return false;
+    return newest || html_puts(s, "</font></small>");
+}
+/* Length of the exchange at text, ending before the next "\n\nYou: " or at the terminator. */
+static size_t exchange_length(const char *text)
+{
+    const char *next = strstr(text, "\n\nYou: ");
+    return next ? (size_t)(next - text) : strlen(text);
+}
+/* The "\n\nZ23: " that starts the answer inside the n-byte exchange at text, or NULL. */
+static const char *find_answer(const char *text, size_t n)
+{
+    for (size_t i = 5; i + 7 <= n; i++)
+        if (!memcmp(text + i, "\n\nZ23: ", 7)) return text + i;
+    return NULL;
+}
+bool zapp_transcript_html(const char *transcript, char *out, size_t cap)
+{
+    if (!out || !cap) return false;
+    out[0] = 0;
+    if (!transcript) return false;
+    struct html_sink s = {out, cap, 0};
+    if (strncmp(transcript, "You: ", 5)) {
+        if (!html_escaped(&s, transcript, strlen(transcript))) out[0] = 0;
+        return out[0] != 0;
+    }
+    for (const char *at = transcript; at; ) {
+        size_t n = exchange_length(at), q_at = 5, a_at = n;
+        const char *split = find_answer(at, n);
+        size_t q_end = split ? (size_t)(split - at) : n;
+        if (split) a_at = q_end + 7;
+        while (n > a_at && at[n - 1] == '\n') n--;
+        size_t before = s.len;
+        if (!html_exchange(&s, at + q_at, q_end - q_at, at + a_at, n - a_at, at == transcript)) {
+            s.len = before; s.out[before] = 0; break;
+        }
+        at = strstr(at + n, "\n\nYou: ");
+        if (at) at += 2;
+    }
+    if (!s.len) out[0] = 0;
+    return s.len > 0;
+}

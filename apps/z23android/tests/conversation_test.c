@@ -128,9 +128,40 @@ static void transcript_cases(void)
     assert(!strcmp(small, "caf"));
     zapp_transcript_prepend(NULL, sizeof(small), "q", "a");
 }
+
+#define MUTED "<font color=\"#6B716D\">"
+#define FADED "<br><br><small><font color=\"#8A8F8B\">"
+static void html_of(const char *transcript, char *out, size_t cap)
+{
+    assert(zapp_transcript_html(transcript, out, cap));
+    assert(!strstr(out, "You:") && !strstr(out, "Z23:"));
+}
+/* The newest answer is plain, the question muted, and earlier exchanges small and muted. */
+static void html_cases(void)
+{
+    char out[512];
+    html_of("You: q\n\nZ23: a\n", out, sizeof(out));
+    assert(!strcmp(out, MUTED "q</font><br>a"));
+    html_of("You: q2\n\nZ23: a2\n\nYou: q1\n\nZ23: a1\n", out, sizeof(out));
+    assert(!strcmp(out, MUTED "q2</font><br>a2" FADED "q1<br>a1</font></small>"));
+    html_of("You: <b>&\"\n\nZ23: x < y > z\n", out, sizeof(out));
+    assert(!strcmp(out, MUTED "&lt;b&gt;&amp;&quot;</font><br>x &lt; y &gt; z"));
+    html_of("You: q\n\nZ23: one\ntwo\n\nthree\n", out, sizeof(out));
+    assert(!strcmp(out, MUTED "q</font><br>one<br>two<br><br>three"));
+    html_of("You: \xc3\x9c" "bersicht \xc2\xb7 3 302 068\n\nZ23: \xc3\x9c" "ber \xc2\xb7 ok\n", out, sizeof(out));
+    assert(!strcmp(out, MUTED "\xc3\x9c" "bersicht \xc2\xb7 3 302 068</font><br>\xc3\x9c" "ber \xc2\xb7 ok"));
+    assert(zapp_transcript_html("hello <i> & more\nline", out, sizeof(out)));
+    assert(!strcmp(out, "hello &lt;i&gt; &amp; more<br>line"));
+    const char *two = "You: q2\n\nZ23: a2\n\nYou: q1\n\nZ23: a1\n";
+    size_t newest = strlen(MUTED "q2</font><br>a2");
+    assert(zapp_transcript_html(two, out, newest + 1) && !strcmp(out, MUTED "q2</font><br>a2"));
+    assert(!zapp_transcript_html(two, out, newest) && out[0] == 0);
+    assert(!zapp_transcript_html("", out, sizeof(out)) && !zapp_transcript_html(NULL, out, sizeof(out)));
+    assert(!zapp_transcript_html("plain text", out, 5) && out[0] == 0);
+}
 int main(void)
 {
-    history_basic_cases(); history_turn_cases(); history_byte_cases(); format_cases(); transcript_cases();
+    history_basic_cases(); history_turn_cases(); history_byte_cases(); format_cases(); transcript_cases(); html_cases();
     puts("conversation tests passed");
     return 0;
 }
