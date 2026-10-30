@@ -18,6 +18,9 @@
 #include "platform/time_compat.h"
 
 #include <stdatomic.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <pthread.h>
 #include <string.h>
 
@@ -964,7 +967,7 @@ static int fwm_atfile_cli(void)
     struct node_db db = {0};
     char dir[256] = {0}, warmup[256];
     bool was_warming = rpc_is_in_warmup(warmup, sizeof(warmup));
-    TEST("wiki write: CLI @path stores the file body, refuses missing or oversized files, MCP keeps @path literal") {
+    TEST("wiki write: CLI @path stores the file body, refuses missing, oversized or non-regular files, CLI @@ escapes a literal @, MCP keeps both literal") {
         ASSERT(node_db_open(&db, ":memory:"));
         test_make_tmpdir(dir, sizeof(dir), "fleetboard", "atfile");
         struct db_service service = {.node_db = &db, .started = true};
@@ -1010,11 +1013,61 @@ static int fwm_atfile_cli(void)
         ASSERT(!strcmp(reply.error.code, "BODY_FILE"));
         ASSERT_EQ(fwm_plan_calls, 1);
         zcl_command_reply_free(&reply);
+        /* On the old code the FIFO case hangs rather than fails: its blocking
+         * open waits for a writer that never comes. */
+        char sub[320], pipe_path[320];
+        (void)snprintf(sub, sizeof(sub), "%s/subdir", dir);
+        (void)snprintf(pipe_path, sizeof(pipe_path), "%s/pipe.md", dir);
+        ASSERT(mkdir(sub, 0700) == 0 && mkfifo(pipe_path, 0600) == 0);
+        (void)snprintf(arg, sizeof(arg), "@%s", sub);
+        ASSERT(fwm_plan_call(NULL, "atfile-write", arg, NULL, false, &reply));
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(!strcmp(reply.error.code, "BODY_FILE_TYPE"));
+        ASSERT(strstr(reply.error.message, "subdir") != NULL);
+        zcl_command_reply_free(&reply);
+        (void)snprintf(arg, sizeof(arg), "@%s", pipe_path);
+        ASSERT(fwm_plan_call(NULL, "atfile-write", arg, NULL, false, &reply));
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(!strcmp(reply.error.code, "BODY_FILE_TYPE"));
+        ASSERT(strstr(reply.error.message, "pipe.md") != NULL);
+        ASSERT_EQ(fwm_plan_calls, 1);
+        zcl_command_reply_free(&reply);
+        char sock_path[320];
+        (void)snprintf(sock_path, sizeof(sock_path), "%s/sock.md", dir);
+        int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        struct sockaddr_un sun;
+        memset(&sun, 0, sizeof(sun));
+        sun.sun_family = AF_UNIX;
+        ASSERT(sock_fd >= 0 && strlen(sock_path) < sizeof(sun.sun_path));
+        (void)snprintf(sun.sun_path, sizeof(sun.sun_path), "%s", sock_path);
+        /* open(2) on a bound socket fails with ENXIO; no listener is needed. */
+        ASSERT(bind(sock_fd, (struct sockaddr *)&sun, sizeof(sun)) == 0);
+        (void)close(sock_fd);
+        (void)snprintf(arg, sizeof(arg), "@%s", sock_path);
+        ASSERT(fwm_plan_call(NULL, "atfile-write", arg, NULL, false, &reply));
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
+        ASSERT(!strcmp(reply.error.code, "BODY_FILE_TYPE"));
+        ASSERT(strstr(reply.error.message, "sock.md") != NULL);
+        ASSERT_EQ(fwm_plan_calls, 1);
+        zcl_command_reply_free(&reply);
+        ASSERT(fwm_plan_call(NULL, "atfile-write", "@@here notes", NULL, false, &reply));
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(fwm_plan_calls, 2);
+        const char *escaped_id = json_get_str(json_get(&reply.data, "id"));
+        ASSERT(escaped_id && fleet_board_id_from_hex(escaped_id, decoded) &&
+            db_fleet_board_post_find(&db, decoded, &row) &&
+            row.post.text_len == 11 && !memcmp(row.post.text, "@here notes", 11));
+        zcl_command_reply_free(&reply);
         struct zcl_command_context mcp = {.plan_first = true};
         ASSERT(fwm_plan_call(&mcp, "atfile-write", arg, NULL, false, &reply));
         ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
         ASSERT_EQ(json_get_int(json_get(&reply.data, "bytes")), (int64_t)strlen(arg));
-        ASSERT_EQ(fwm_plan_calls, 1);
+        ASSERT_EQ(fwm_plan_calls, 2);
+        zcl_command_reply_free(&reply);
+        ASSERT(fwm_plan_call(&mcp, "atfile-write", "@@here notes", NULL, false, &reply));
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "bytes")), 12);
+        ASSERT_EQ(fwm_plan_calls, 2);
         zcl_command_reply_free(&reply);
         PASS();
     } _test_next:;

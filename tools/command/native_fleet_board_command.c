@@ -25,11 +25,21 @@
 #include "rpc/protocol.h"
 #include "session/fleet_board_proto.h"
 #include "sha3/sha3.h"
-#include "util/file_io.h"
-
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/* Windows C runtimes lack both flags; zero leaves the open unchanged. */
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+#ifndef O_NONBLOCK
+#define O_NONBLOCK 0
+#endif
 
 /* Environment the interim shell tool honoured, kept so existing agent scripts
  * swap to this command without edits. An explicit input key always wins: the
@@ -720,23 +730,92 @@ static bool fb_wiki_write_authorised(const struct zcl_command_request *request,
     return true;
 }
 
+enum fb_body_file_result {
+    FB_BODY_FILE_OK,
+    FB_BODY_FILE_INVALID,
+    FB_BODY_FILE_NOT_REGULAR,
+};
+
+/* Reads the body through the fd that fstat checked, so the type test and the
+ * read see the same object. O_NONBLOCK stops open() from waiting for a FIFO
+ * writer; it does not change reads from a regular file. */
+static enum fb_body_file_result fb_read_body_file(const char *path, char **body,
+                                                  size_t *len)
+{
+    *body = NULL;
+    *len = 0;
+    /* A UNIX socket opens with ENXIO, before fstat: it is not a regular file. */
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+        return errno == ENXIO ? FB_BODY_FILE_NOT_REGULAR : FB_BODY_FILE_INVALID;
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        return FB_BODY_FILE_INVALID;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        close(fd);
+        return FB_BODY_FILE_NOT_REGULAR;
+    }
+    char *buf = zcl_malloc(FLEET_BOARD_WIKI_TEXT_MAX + 1,
+                           "fleet.wiki.write body file");
+    if (!buf) {
+        close(fd);
+        return FB_BODY_FILE_INVALID;
+    }
+    /* One byte past the limit is read so a file that grows after fstat is
+     * still refused. */
+    size_t n = 0;
+    bool io_ok = true;
+    while (n <= FLEET_BOARD_WIKI_TEXT_MAX) {
+        ssize_t got = read(fd, buf + n, FLEET_BOARD_WIKI_TEXT_MAX + 1 - n);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got < 0) {
+            io_ok = false;
+            break;
+        }
+        if (got == 0)
+            break;
+        n += (size_t)got;
+    }
+    close(fd);
+    if (!io_ok || n == 0 || n > FLEET_BOARD_WIKI_TEXT_MAX ||
+        memchr(buf, '\0', n) != NULL) {
+        free(buf);
+        return FB_BODY_FILE_INVALID;
+    }
+    buf[n] = '\0';
+    *body = buf;
+    *len = n;
+    return FB_BODY_FILE_OK;
+}
+
 /* CLI only: `@path` makes the body the bytes of that regular file, bounded by
  * the wiki text limit. MCP (plan_first) keeps `@path` literal, so a remote
  * caller cannot publish a local file under this node's signature. */
 static bool fb_wiki_body_from_file(const char *arg, char **body, size_t *len,
                                    struct zcl_command_reply *reply)
 {
-    if (zcl_read_whole_file_text(arg + 1, FLEET_BOARD_WIKI_TEXT_MAX, body, len,
-                                 "fleet.wiki.write") &&
-        strlen(*body) == *len && *len > 0)
-        return true;
-    free(*body);
-    *body = NULL;
     /* The error message holds 192 bytes: keep the end of a long path, where
      * the file name is. */
     size_t n = strlen(arg + 1);
     const char *shown = n > 100 ? arg + 1 + (n - 100) : arg + 1;
     char msg[192];
+    switch (fb_read_body_file(arg + 1, body, len)) {
+    case FB_BODY_FILE_OK:
+        return true;
+    case FB_BODY_FILE_NOT_REGULAR:
+        (void)snprintf(msg, sizeof(msg),
+                       "body file %s%s: not a regular file (FIFO, device, "
+                       "directory or socket)",
+                       n > 100 ? "..." : "", shown);
+        fb_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "BODY_FILE_TYPE", "normalize", false, msg, "text");
+        return false;
+    case FB_BODY_FILE_INVALID:
+        break;
+    }
     (void)snprintf(msg, sizeof(msg),
                    "body file %s%s: not a non-empty regular file of at most "
                    "%d bytes without NUL",
@@ -766,9 +845,13 @@ void zcl_native_handle_fleet_wiki_write(
     char *file_body = NULL;
     size_t file_len = 0;
     if (text[0] == '@' && !(request->context && request->context->plan_first)) {
-        if (!fb_wiki_body_from_file(text, &file_body, &file_len, reply))
-            return;
-        text = file_body;
+        if (text[1] == '@') {
+            text++;
+        } else {
+            if (!fb_wiki_body_from_file(text, &file_body, &file_len, reply))
+                return;
+            text = file_body;
+        }
     }
     struct json_value out;
     json_init(&out);

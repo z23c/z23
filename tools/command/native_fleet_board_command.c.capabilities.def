@@ -1,2 +1,2 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
-ZCL_MODULE_CAPABILITY("tools/command/native_fleet_board_command.c", CAP_FS_WRITE, "Checked RPC parameter allocation emits bounded diagnostics on stderr; board storage remains at the selected node")
+ZCL_MODULE_CAPABILITY("tools/command/native_fleet_board_command.c", CAP_FS_READ|CAP_FS_WRITE, "Reads the one CLI body file named by @path with a non-blocking open checked by fstat; checked RPC parameter allocation emits bounded diagnostics on stderr; board storage remains at the selected node")
