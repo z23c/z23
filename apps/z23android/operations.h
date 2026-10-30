@@ -2,6 +2,7 @@
 #ifndef ZAPP_OPERATIONS_H
 #define ZAPP_OPERATIONS_H
 #include "app.h"
+#include "nodelog.h"
 #include <pthread.h>
 #include <sys/types.h>
 struct zapp_runtime {
@@ -16,6 +17,8 @@ struct zapp_runtime {
     bool preview;
     /* Shutdown was requested from a node that has not exited yet. */
     bool stop_sent;
+    /* Forwards the node console log to logcat and tracks its boot stage. */
+    struct zapp_nodelog log;
 };
 bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *libs, bool preview);
 void zapp_runtime_signal_stop(struct zapp_runtime *r);
@@ -25,6 +28,9 @@ bool zapp_node_running(struct zapp_runtime *r);
 bool zapp_node_stopping(struct zapp_runtime *r);
 bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap);
 bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap);
+/* What the node is doing after its latest boot stage, as a short plain phrase such as "opening the
+ * database"; "starting the node" before it reports one. */
+const char *zapp_node_stage(struct zapp_runtime *r);
 /* True after the owner chose Start node, until Stop node runs; always false in the preview package. */
 bool zapp_node_wanted(const struct zapp_runtime *r);
 bool zapp_operation_run(struct zapp_runtime *r, const char *id, char *out, size_t cap);

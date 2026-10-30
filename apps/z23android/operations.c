@@ -52,6 +52,7 @@ bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *li
 {
     memset(r, 0, sizeof(*r));
     r->preview = preview;
+    zapp_nodelog_init(&r->log, NULL, NULL);
     if (pthread_mutex_init(&r->mutex, NULL) != 0) return false;
     bool ok = path(r->directory, sizeof(r->directory), files, "node") &&
               path(r->executable, sizeof(r->executable), libs, "libz23node.so") &&
@@ -189,6 +190,23 @@ bool zapp_node_wanted(const struct zapp_runtime *r)
     char marker[1100];
     return !r->preview && path(marker, sizeof(marker), r->state_root, "node-on") && access(marker, F_OK) == 0;
 }
+/* Starts the node with its console in app-console.log and begins forwarding what it writes there. */
+static int spawn_node(struct zapp_runtime *r)
+{
+    char data[1100], log[1100];
+    snprintf(data, sizeof(data), "-datadir=%s", r->directory);
+    bool ok = path(log, sizeof(log), r->directory, "app-console.log");
+    int fd = ok ? open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+    off_t offset = fd >= 0 ? lseek(fd, 0, SEEK_END) : 0;
+    int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    char *argv[] = {r->executable, data, "-operator-lane=canonical",
+                    "-tor", "-onion-persist", NULL};
+    int rc = fd >= 0 && in >= 0 ? spawn_redirect(r, argv, in, fd, &r->node) : EIO;
+    if (fd >= 0) close(fd);
+    if (in >= 0) close(in);
+    if (!rc) (void)zapp_nodelog_start(&r->log, log, offset < 0 ? 0 : offset, r->node);
+    return rc;
+}
 bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap)
 {
     pthread_mutex_lock(&r->mutex);
@@ -197,16 +215,7 @@ bool zapp_node_start(struct zapp_runtime *r, char *out, size_t cap)
                  r->stopping ? "App is closing." : "The local node is already running.");
         pthread_mutex_unlock(&r->mutex); return false;
     }
-    char data[1100], log[1100];
-    snprintf(data, sizeof(data), "-datadir=%s", r->directory);
-    bool ok = path(log, sizeof(log), r->directory, "app-console.log");
-    int fd = ok ? open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
-    int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
-    char *argv[] = {r->executable, data, "-operator-lane=canonical",
-                    "-tor", "-onion-persist", NULL};
-    int rc = fd >= 0 && in >= 0 ? spawn_redirect(r, argv, in, fd, &r->node) : EIO;
-    if (fd >= 0) close(fd);
-    if (in >= 0) close(in);
+    int rc = spawn_node(r);
     r->stop_sent = false;
     if (rc) { r->node = 0; snprintf(out, cap, "Could not start Z23: %s", strerror(rc)); }
     else snprintf(out, cap, "Node starting.%s",
@@ -227,6 +236,11 @@ bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap)
              kept ? "" : " The app could not save this choice and may start the node when reopened.");
     pthread_mutex_unlock(&r->mutex);
     return rc == 0;
+}
+
+const char *zapp_node_stage(struct zapp_runtime *r)
+{
+    return zapp_nodelog_stage(&r->log);
 }
 
 void zapp_runtime_signal_stop(struct zapp_runtime *r)
@@ -253,6 +267,7 @@ void zapp_runtime_destroy(struct zapp_runtime *r)
         while (waitpid(r->node, NULL, 0) < 0 && errno == EINTR) {}
     }
     pthread_mutex_unlock(&r->mutex);
+    zapp_nodelog_stop(&r->log);
     pthread_mutex_destroy(&r->mutex);
 }
 

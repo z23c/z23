@@ -244,6 +244,11 @@ change hosts or spend funds.
   BUILD_DIR=../../build/android-voice`. `preview-apk` needs `NODE_BIN`,
   `ANDROID_NDK_ROOT`, `SDK_ROOT` and `JAVA_HOME`; without them it stops before
   building and leaves any previous APK in place.
+- A developer sees why the phone node is stuck without root: the app forwards
+  the node console log's boot stage changes, `[boot]` timings, warnings,
+  errors and failures, Tor bootstrap progress and peer handshakes to logcat,
+  at most 20 lines a second. `adb logcat -s z23node` shows them. Lines naming
+  keys, seeds or mnemonics are never forwarded.
 - The host defaults to `--app org.z23.nativeapp`. Pass
   `--app org.z23.voicepreview` when testing the preview package, or the pairing
   offer reopens the production app.

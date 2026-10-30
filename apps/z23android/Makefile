@@ -107,7 +107,7 @@ test: prepare-quirc test-bridge test-voice test-host test-dexgen test-watch
 	  -lm -o '$(BUILD_DIR)/fleet-test'
 	'$(BUILD_DIR)/fleet-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/json/include \
-	  -I../../platform/modules/base/include tests/operations_test.c operations.c \
+	  -I../../platform/modules/base/include tests/operations_test.c operations.c nodelog.c \
 	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
 	  ../../platform/modules/base/src/safe_alloc.c -Wl,--wrap=clock_gettime \
 	  -o '$(BUILD_DIR)/operations-test'
@@ -177,6 +177,9 @@ test-host:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/hosts_test.c hosts.c pairing.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/hosts-test'
 	'$(BUILD_DIR)/hosts-test'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. tests/nodelog_test.c nodelog.c -o '$(BUILD_DIR)/nodelog-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/nodelog-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/nodelog-test' "$$scratch"
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/fleet_probe_test.c bridge/fleet_probe.c \
 	  ../../contexts/commons/packages/zutf8/src/zutf8.c $(SPEECH_JSON) -o '$(BUILD_DIR)/fleet-probe-test'
 	'$(BUILD_DIR)/fleet-probe-test'
