@@ -207,6 +207,7 @@ bool bg_validation_record_reverify(struct bg_validation_service *svc,
 #ifdef ZCL_TESTING
 /* Proves the restart shortcut accepts only the current coverage schema. */
 bool bg_validation_test_coverage_version_current(int64_t version);
+unsigned bg_validation_test_body_report_count(void);
 typedef bool (*bg_validation_test_body_read_fn)(
     struct block *, const struct block_index *, const char *);
 typedef void (*bg_validation_test_sleep_fn)(int);

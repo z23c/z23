@@ -609,13 +609,15 @@ static bool find_blocker_by_id(const char *id, struct blocker_snapshot *out)
     return false;
 }
 
-static bool body_read_succeeds_twentieth(
+static int g_body_succeeds_at;
+
+static bool body_read_succeeds_at_configured_call(
     struct block *block, const struct block_index *index, const char *datadir)
 {
     (void)block;
     (void)index;
     (void)datadir;
-    return body_read_count_increment() >= 20;
+    return body_read_count_increment() >= g_body_succeeds_at;
 }
 
 static void body_repair_account_sleep(int ms)
@@ -629,51 +631,116 @@ static void body_repair_account_sleep(int ms)
     }
 }
 
+/* Runs one resilient read whose injected body read succeeds on call
+ * `succeeds_at`, returning false when the read, the call count, the 5 s tick
+ * total or the report count disagree with the design. */
+static bool body_repair_run_backoff_case(
+    int succeeds_at, int64_t slept_ms, int blocker_ticks, unsigned reports)
+{
+    struct main_state ms;
+    main_state_init(&ms);
+    struct uint256 hash;
+    bool ok = make_repair_index(&ms, &hash) != NULL;
+
+    struct bg_validation_service svc;
+    memset(&svc, 0, sizeof(svc));
+    svc.ms = &ms;
+    atomic_store(&svc.progress.state, BG_VALIDATION_RUNNING);
+    reducer_frontier_body_read_note_reset_for_testing();
+    blocker_clear("bg_validation.body_unreadable");
+    atomic_store(&g_body_read_calls, 0);
+    atomic_store(&g_slept_ms, 0);
+    atomic_store(&g_blocker_sleeps, 0);
+    g_blocker_reason[0] = '\0';
+    g_body_succeeds_at = succeeds_at;
+    g_body_repair_svc = &svc;
+    unsigned reports_before = bg_validation_test_body_report_count();
+    bg_validation_test_set_body_repair_stubs(
+        body_read_succeeds_at_configured_call, body_repair_account_sleep);
+
+    struct block block;
+    block_init(&block);
+    struct block_index *actual = NULL;
+    ok = ok && bg_validation_read_body_resilient(
+        &svc, 0, "unused", BG_VALIDATION_RUNNING, &block, &actual);
+    /* The read is retried on every 5 s tick: success on call N is noticed
+     * after exactly N-1 ticks, however long the failures have run. */
+    ok = ok && atomic_load(&g_body_read_calls) == succeeds_at;
+    ok = ok && atomic_load(&g_slept_ms) == slept_ms;
+    ok = ok && atomic_load(&g_blocker_sleeps) == blocker_ticks;
+    ok = ok && bg_validation_test_body_report_count() - reports_before ==
+        reports;
+    ok = ok && !find_blocker_by_id("bg_validation.body_unreadable", NULL);
+
+    block_free(&block);
+    bg_validation_test_set_body_repair_stubs(NULL, NULL);
+    reducer_frontier_body_read_note_reset_for_testing();
+    main_state_free(&ms);
+    return ok;
+}
+
 static int test_bg_validation_body_repair_backs_off_and_names_blocker(void)
 {
     int failures = 0;
 
-    TEST("bg_validation: persistent unreadable body backs off and names a "
-         "typed blocker until it reads") {
+    TEST("bg_validation: unreadable body is re-read every 5 s; warning and "
+         "blocker follow a doubling cadence") {
+        /* 19 failures: reports at failures 1, 12 (blocker raised) and 16
+         * (interval 20 s). The blocker is up for the 8 waits after failure
+         * 12 (8 x 5 ticks) and the total wait is 19 x 5 s. */
+        ASSERT(body_repair_run_backoff_case(20, 95000, 40, 3));
+        ASSERT(strstr(g_blocker_reason, "h=0") != NULL);
+        ASSERT(strstr(g_blocker_reason, "nFile=") != NULL);
+        ASSERT(strstr(g_blocker_reason, "nDataPos=") != NULL);
+        ASSERT(strstr(g_blocker_reason, "failures=") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_bg_validation_body_repair_notices_body_mid_backoff(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: a body that reads mid-backoff is noticed on the "
+         "next tick and clears the blocker") {
+        /* 13 failures then success: reports at failures 1 and 12, blocker up
+         * for the 2 waits after failure 12, 13 x 5 s waited in total. */
+        ASSERT(body_repair_run_backoff_case(14, 65000, 10, 2));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_bg_validation_body_blocker_cleared_on_coverage_gap(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: a coverage gap clears a stale unreadable-body "
+         "blocker") {
         struct main_state ms;
         main_state_init(&ms);
         struct uint256 hash;
         ASSERT(make_repair_index(&ms, &hash) != NULL);
 
+        struct blocker_record rec;
+        ASSERT(blocker_init(&rec, "bg_validation.body_unreadable",
+                            "bg_validation", BLOCKER_TRANSIENT, "stale"));
+        ASSERT(blocker_set(&rec) == 0);
+        ASSERT(find_blocker_by_id("bg_validation.body_unreadable", NULL));
+
         struct bg_validation_service svc;
         memset(&svc, 0, sizeof(svc));
         svc.ms = &ms;
-        atomic_store(&svc.progress.state, BG_VALIDATION_RUNNING);
-        reducer_frontier_body_read_note_reset_for_testing();
-        blocker_clear("bg_validation.body_unreadable");
-        atomic_store(&g_body_read_calls, 0);
-        atomic_store(&g_slept_ms, 0);
-        atomic_store(&g_blocker_sleeps, 0);
-        g_blocker_reason[0] = '\0';
-        g_body_repair_svc = &svc;
-        bg_validation_test_set_body_repair_stubs(
-            body_read_succeeds_twentieth, body_repair_account_sleep);
-
         struct block block;
         block_init(&block);
         struct block_index *actual = NULL;
-        ASSERT(bg_validation_read_body_resilient(
-            &svc, 0, "unused", BG_VALIDATION_RUNNING, &block, &actual));
-        ASSERT(atomic_load(&g_body_read_calls) == 20);
-        /* 11 waits of 5 s, then 10, 20, 40, 80, 160, 320, 600, 600 s. */
-        ASSERT(atomic_load(&g_slept_ms) == 1885000);
-        /* The blocker is present for every one-second tick of the eight
-         * backed-off waits (10+20+40+80+160+320+600+600 = 1830). */
-        ASSERT(atomic_load(&g_blocker_sleeps) == 1830);
-        ASSERT(strstr(g_blocker_reason, "h=0") != NULL);
-        ASSERT(strstr(g_blocker_reason, "nFile=") != NULL);
-        ASSERT(strstr(g_blocker_reason, "nDataPos=") != NULL);
-        ASSERT(strstr(g_blocker_reason, "failures=") != NULL);
+        /* Height 7 has no active block: the walk reports a coverage gap. */
+        ASSERT(!bg_validation_read_body_resilient(
+            &svc, 7, "unused", BG_VALIDATION_RUNNING, &block, &actual));
         ASSERT(!find_blocker_by_id("bg_validation.body_unreadable", NULL));
 
         block_free(&block);
-        bg_validation_test_set_body_repair_stubs(NULL, NULL);
-        reducer_frontier_body_read_note_reset_for_testing();
         main_state_free(&ms);
         PASS();
     } _test_next:;
@@ -1358,6 +1425,8 @@ int test_bg_validation_reverify(void)
     failures += test_bg_validation_body_repair_reads_replacement_bytes();
     failures += test_bg_validation_body_repair_stops_responsively();
     failures += test_bg_validation_body_repair_backs_off_and_names_blocker();
+    failures += test_bg_validation_body_repair_notices_body_mid_backoff();
+    failures += test_bg_validation_body_blocker_cleared_on_coverage_gap();
     failures += test_bg_validation_body_repair_reproves_reorg();
     failures += test_bg_validation_post_verify_reorg_is_orphan();
     failures += test_bg_validation_restart_keeps_reverify_worker();
