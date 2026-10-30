@@ -898,11 +898,21 @@ bool platform_private_file_replace(struct platform_private_file *f,
                                    const char *staging_path,
                                    const char *destination_path) {
   struct stat held, named;
-  if (!f || !staging_path || !destination_path ||
-      fstat(pf_fd(f), &held) != 0 || lstat(staging_path, &named) != 0 ||
-      !S_ISREG(held.st_mode) || !S_ISREG(named.st_mode) ||
-      held.st_dev != named.st_dev || held.st_ino != named.st_ino ||
-      !platform_private_file_flush(f) || rename(staging_path, destination_path))
+  if (!f || !staging_path || !destination_path) {
+    errno = EINVAL;
+    return false;
+  }
+  if (fstat(pf_fd(f), &held) != 0 || lstat(staging_path, &named) != 0)
+    return false;
+  if (!S_ISREG(held.st_mode) || !S_ISREG(named.st_mode)) {
+    errno = EINVAL;
+    return false;
+  }
+  if (held.st_dev != named.st_dev || held.st_ino != named.st_ino) {
+    errno = ESTALE;
+    return false;
+  }
+  if (!platform_private_file_flush(f) || rename(staging_path, destination_path))
     return false;
   platform_private_file_close(f);
   return true;

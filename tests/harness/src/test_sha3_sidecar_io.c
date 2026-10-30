@@ -18,11 +18,16 @@
 #include "coins/undo.h"
 
 #include "crypto/sha3.h"
+#include "platform/private_file.h"
 #include "storage/sha3_sidecar_io.h"
 #include "util/result.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
 
 #define SS_CHECK(name, expr) do {                                   \
     printf("sha3_sidecar_io: %s... ", (name));                      \
@@ -270,6 +275,133 @@ static int case_write_sidecar_pipeline(void)
     return failures;
 }
 
+/* A failed create reports the exact cause: the destination directory is
+ * absent, so the private create fails with ENOENT. */
+static int case_write_sidecar_errno_reports_cause(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "ssio", "errno_cause");
+
+    struct ssio_spec spec = {
+        .body_name = "block_index.bin",
+        .sidecar_name = "block_index.bin.sha3",
+        .magic = "BIIX",
+        .version = 2,
+        .domain = "ssio_test",
+        .malloc_label = "ssio_test_buf",
+        .corrupt_event = 0,
+    };
+    char missing[300];
+    snprintf(missing, sizeof(missing), "%s/absent", dir);
+    uint8_t sha[32] = {0};
+    struct zcl_result wr = ssio_write_sidecar_raw(missing, &spec, 0, sha);
+#if !defined(_WIN32)
+    char want[64];
+    snprintf(want, sizeof(want), "(errno %d)", ENOENT);
+    SS_CHECK("write_sidecar create failure names private create and ENOENT",
+             !wr.ok && strstr(wr.message, "private create") != NULL &&
+             strstr(wr.message, want) != NULL);
+#else
+    SS_CHECK("write_sidecar create failure names private create and a cause",
+             !wr.ok && strstr(wr.message, "private create") != NULL &&
+             (strstr(wr.message, "(errno ") != NULL ||
+              strstr(wr.message, "cause unavailable") != NULL));
+#endif
+
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+#if !defined(_WIN32)
+/* A non-empty directory squatting on the sidecar path makes the final
+ * rename fail with EISDIR. The atomic-replace message (the Android symptom)
+ * must carry that exact errno, and the staged .tmp must be removed. */
+static int case_replace_failure_reports_errno_and_cleans_tmp(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "ssio", "replace_eisdir");
+
+    struct ssio_spec spec = {
+        .body_name = "block_index.bin",
+        .sidecar_name = "block_index.bin.sha3",
+        .magic = "BIIX",
+        .version = 2,
+        .domain = "ssio_test",
+        .malloc_label = "ssio_test_buf",
+        .corrupt_event = 0,
+    };
+    char side[300];
+    char tmp[310];
+    snprintf(side, sizeof(side), "%s/block_index.bin.sha3", dir);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", side);
+    SS_CHECK("replace fixture: sidecar path is a directory",
+             mkdir(side, 0700) == 0);
+    char child[320];
+    snprintf(child, sizeof(child), "%s/occupant", side);
+    struct platform_private_file occupant;
+    platform_private_file_init(&occupant);
+    SS_CHECK("replace fixture: directory is non-empty",
+             platform_private_file_create(child, &occupant));
+    platform_private_file_close(&occupant);
+
+    uint8_t sha[32] = {0};
+    struct zcl_result wr = ssio_write_sidecar_raw(dir, &spec, 0, sha);
+    char want[64];
+    snprintf(want, sizeof(want), "(errno %d)", EISDIR);
+    SS_CHECK("replace failure message names atomic replace",
+             !wr.ok && strstr(wr.message, "atomic replace") != NULL);
+    SS_CHECK("replace failure message carries the exact EISDIR errno",
+             !wr.ok && strstr(wr.message, want) != NULL);
+    SS_CHECK("replace failure removes the staged .tmp file",
+             platform_private_path_absent(tmp));
+
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+#endif
+#if !defined(_WIN32)
+/* Replacing the staged path with a different file between create and
+ * replace must be refused with ESTALE, and the destination must stay
+ * absent. */
+static int case_replace_identity_mismatch_is_estale(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "ssio", "replace_estale");
+    char staging[300];
+    char dest[300];
+    snprintf(staging, sizeof(staging), "%s/stage.bin", dir);
+    snprintf(dest, sizeof(dest), "%s/dest.bin", dir);
+
+    struct platform_private_file staged;
+    platform_private_file_init(&staged);
+    static const char other_bytes[] = "other-file";
+    struct platform_private_file other;
+    platform_private_file_init(&other);
+    bool created = platform_private_file_create(staging, &staged);
+    bool swapped = created &&
+        platform_private_file_unlink_missing_ok(staging) &&
+        platform_private_file_create(staging, &other) &&
+        platform_private_file_write_at(&other, other_bytes,
+                                       sizeof(other_bytes), 0) &&
+        platform_private_file_flush(&other);
+    platform_private_file_close(&other);
+    errno = 0;
+    bool replaced = swapped &&
+        platform_private_file_replace(&staged, staging, dest);
+    SS_CHECK("replace refuses a swapped staged path with ESTALE",
+             swapped && !replaced && errno == ESTALE);
+    SS_CHECK("replace leaves the destination absent after ESTALE",
+             swapped && platform_private_path_absent(dest));
+    platform_private_file_close(&staged);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+#endif
+
 int test_sha3_sidecar_io(void)
 {
     printf("\n=== sha3_sidecar_io tests ===\n");
@@ -277,5 +409,12 @@ int test_sha3_sidecar_io(void)
     failures += case_hash_body();
     failures += case_sidecar_round_trip();
     failures += case_write_sidecar_pipeline();
+    failures += case_write_sidecar_errno_reports_cause();
+#if !defined(_WIN32)
+    failures += case_replace_failure_reports_errno_and_cleans_tmp();
+#endif
+#if !defined(_WIN32)
+    failures += case_replace_identity_mismatch_is_estale();
+#endif
     return failures;
 }

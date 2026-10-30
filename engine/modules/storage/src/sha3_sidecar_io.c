@@ -81,6 +81,28 @@ bool ssio_hash_body(const char *datadir, const struct ssio_spec *spec,
 
 /* ── Sidecar writer ─────────────────────────────────────────── */
 
+/* Render a captured errno for a failure message. errno 0 means the failing
+ * call set none (Windows CRT paths, or a zero-byte pwrite): say so rather
+ * than print a stale or misleading "(errno 0)". */
+static void ssio_cause(char *out, size_t cap, int err)
+{
+    if (err == 0)
+        snprintf(out, cap, "cause unavailable");
+    else
+        snprintf(out, cap, "%s (errno %d)", strerror(err), err);
+}
+
+static struct zcl_result ssio_staged_fail(
+    struct platform_private_file *staged, const char *tmp_path,
+    const struct ssio_spec *spec, const char *op, int err)
+{
+    char cause[160];
+    ssio_cause(cause, sizeof(cause), err);
+    platform_private_file_close(staged);
+    (void)platform_private_file_unlink_missing_ok(tmp_path);
+    return ZCL_ERR(-6, "%s: %s failed: %s", spec->domain, op, cause);
+}
+
 struct zcl_result ssio_write_sidecar_raw(const char *datadir,
                                          const struct ssio_spec *spec,
                                          uint64_t body_size,
@@ -104,27 +126,45 @@ struct zcl_result ssio_write_sidecar_raw(const char *datadir,
     (void)platform_private_file_unlink_missing_ok(tmp_path);
     struct platform_private_file staged;
     platform_private_file_init(&staged);
-    if (!platform_private_file_create(tmp_path, &staged))
-        return ZCL_ERR(-5, "%s: private create %s failed", spec->domain,
-                       tmp_path);
-    if (!platform_private_file_write_at(&staged, &hdr, sizeof(hdr), 0) ||
-        !platform_private_file_truncate(&staged, sizeof(hdr)) ||
-        !platform_private_file_flush(&staged)) {
-        platform_private_file_close(&staged);
-        (void)platform_private_file_unlink_missing_ok(tmp_path);
-        return ZCL_ERR(-6, "%s: fwrite failed", spec->domain);
+    errno = 0;
+    if (!platform_private_file_create(tmp_path, &staged)) {
+        int err = errno;
+        char cause[160];
+        ssio_cause(cause, sizeof(cause), err);
+        return ZCL_ERR(-5, "%s: private create failed: %s (%s)",
+                       spec->domain, cause, tmp_path);
     }
+    errno = 0;
+    if (!platform_private_file_write_at(&staged, &hdr, sizeof(hdr), 0))
+        return ssio_staged_fail(&staged, tmp_path, spec, "fwrite", errno);
+    errno = 0;
+    if (!platform_private_file_truncate(&staged, sizeof(hdr)))
+        return ssio_staged_fail(&staged, tmp_path, spec, "ftruncate",
+                                errno);
+    errno = 0;
+    if (!platform_private_file_flush(&staged))
+        return ssio_staged_fail(&staged, tmp_path, spec, "fsync", errno);
+    errno = 0;
     if (!platform_private_file_replace(&staged, tmp_path, side_path)) {
+        int err = errno;
         platform_private_file_close(&staged);
+        char cause[160];
+        ssio_cause(cause, sizeof(cause), err);
         struct zcl_result r = ZCL_ERR(-7,
-            "%s: atomic replace %s -> %s failed",
-            spec->domain, tmp_path, side_path);
+            "%s: atomic replace failed: %s (%s -> %s)",
+            spec->domain, cause, tmp_path, side_path);
         (void)platform_private_file_unlink_missing_ok(tmp_path);
         return r;
     }
     platform_private_file_close(&staged);
-    if (!platform_private_parent_flush(datadir))
-        return ZCL_ERR(-7, "%s: sidecar parent flush failed", spec->domain);
+    errno = 0;
+    if (!platform_private_parent_flush(datadir)) {
+        int err = errno;
+        char cause[160];
+        ssio_cause(cause, sizeof(cause), err);
+        return ZCL_ERR(-7, "%s: sidecar parent flush failed: %s",
+                       spec->domain, cause);
+    }
     return ZCL_OK;
 }
 
