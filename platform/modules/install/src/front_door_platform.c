@@ -14,7 +14,7 @@
  * Windows PE has never been executed, and there is no Windows second-stage
  * installer for the bootstrap to hand off to. Widening this list is checked
  * against what the cutter reports it produces by
- * tools/lint/check_published_platforms.sh, which is a floor and not a
+ * tools/lint/lintc/gate_published_platforms.c, which is a floor and not a
  * licence — a platform can be packaged and still not be fit to publish.
  */
 

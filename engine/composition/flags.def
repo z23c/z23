@@ -1808,15 +1808,15 @@ Z23_FLAG("ZCL_PORTABILITY_SCOPE", "env_build", "-", "-",
 Z23_FLAG("ZCL_PORTABLE_CC", "env_build", "cc", "-",
           "undocumented; first use tools/scripts/c23_portable_sysroot.sh:auto")
 Z23_FLAG("ZCL_PP_CUTTER", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_published_platforms.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_published_platforms.c:auto")
 Z23_FLAG("ZCL_PP_FRONT_DOOR_C", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_published_platforms.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_published_platforms.c:auto")
 Z23_FLAG("ZCL_PP_HOST", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_stopwatch.sh:auto")
 Z23_FLAG("ZCL_PP_INSTALL_PS1", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_published_platforms.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_published_platforms.c:auto")
 Z23_FLAG("ZCL_PP_INSTALL_SH", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_published_platforms.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_published_platforms.c:auto")
 Z23_FLAG("ZCL_PP_PORT", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_stopwatch.sh:auto")
 Z23_FLAG("ZCL_PPREV_REPAIR_MAX_READS", "env_runtime", "-", "-",

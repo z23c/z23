@@ -33,7 +33,7 @@
 # A platform-index authority is still needed as well: the current
 # single-manifest pin cannot describe different per-platform releases.
 # Adding a row below is therefore not a sufficient release action, and
-# tools/lint/check_published_platforms.sh refuses a row the release cutter
+# tools/lint/lintc/gate_published_platforms.c refuses a row the release cutter
 # cannot actually produce a bootstrap for.
 #
 # These checks run only after this file is already executing. An irm-to-iex

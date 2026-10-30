@@ -352,7 +352,7 @@ refusal on either platform.
    peer-health acceptance remain green.
 5. Publish `darwin-arm64` and `windows-x86_64` bootstraps from native cuts, each
    with its real digest row. Acceptance: `build_release.sh
-   --print-bootstrap-platforms` lists both and `tools/lint/check_published_platforms.sh`
+   --print-bootstrap-platforms` lists both and `tools/lint/lintc/gate_published_platforms.c`
    passes.
 6. Earn a chain-sync receipt on macOS and Windows with `make mvp`, `make
    test-two-node-peer-tip` and `make mvp-coldstart-to-tip-stopwatch`.

@@ -14810,10 +14810,10 @@ check-z23-release-install: $(Z23_BOOTSTRAP_BIN) $(INSTALL_SELFTEST_BIN)
 # platform/packaging/release/build_release.sh reports it can cut. The same gate holds
 # the all-zero sentinel as the checked-in default: real digests belong only in
 # the copies `build_release.sh --front-door` publishes.
-check-published-platforms:
+check-published-platforms: $(LINTC_TOOL)
 	@echo "══ LINT: published platforms match what the release cutter produces ══"
-	@./tools/lint/check_published_platforms.sh --selftest
-	@./tools/lint/check_published_platforms.sh
+	@./build/bin/z23-lint check-published-platforms --selftest
+	@./build/bin/z23-lint check-published-platforms
 
 # Gate — stop a tenth copy of the source-identity JSON parser from growing
 # back. tools/scripts/source_identity_lib.sh is the one canonical reader

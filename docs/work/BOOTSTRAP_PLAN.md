@@ -66,7 +66,7 @@ real binary by `tools/install/install_selftest.c`.
 front-door stage: it packages `z23-bootstrap` per platform triple under
 `bootstrap/<triple>/` and writes the digests into COPIES of both shims, so the
 copies that get served name real bytes while the copies in this repository stay
-all-zero refusals. `tools/lint/check_published_platforms.sh` refuses any
+all-zero refusals. `tools/lint/lintc/gate_published_platforms.c` refuses any
 platform either shim claims that the cutter cannot actually produce a bootstrap
 for, and refuses a non-sentinel digest checked into the tree.
 

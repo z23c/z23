@@ -46,7 +46,7 @@
 # macOS is absent for a different reason: no Linux host may produce a Mach-O
 # (the SDK is not redistributable), so there is no runtime to publish at all.
 # Adding a name below is therefore a separate act from making a release, and
-# tools/lint/check_published_platforms.sh refuses any name the release cutter
+# tools/lint/lintc/gate_published_platforms.c refuses any name the release cutter
 # cannot actually produce a bootstrap for. Refusing a machine we do not
 # publish for, by name, beats installing a binary that cannot run on it.
 #
@@ -56,7 +56,7 @@
 set -euf
 # The claim, and the table that makes it good: PUBLISHED_PLATFORMS is what a
 # refusal names, and the BOOT_* digests are what a fetch is checked against.
-# check_published_platforms.sh keeps the two in step with each other, with
+# gate_published_platforms.c keeps the two in step with each other, with
 # install.ps1, and with what the release cutter can actually produce.
 PUBLISHED_PLATFORMS=" linux-x86_64 "
 BOOT_ZERO=0000000000000000000000000000000000000000000000000000000000000000

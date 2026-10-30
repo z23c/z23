@@ -105,7 +105,7 @@ platform_of_binary() {
 
 # The EXACT closed set of platform triples a RUNTIME is packaged for. Written
 # out as a list rather than a case pattern because it is also an answer this
-# script has to give to other programs: tools/lint/check_published_platforms.sh
+# script has to give to other programs: tools/lint/lintc/gate_published_platforms.c
 # reads it back through --print-runtime-platforms rather than re-deriving it
 # with a regex, so there is one authority for what a release contains and no
 # second copy to drift.
@@ -514,7 +514,7 @@ package_from_bin() {
 # copies that get served name real bytes, and the copies in this repository
 # stay all-zero refusals, so no cut can leave a permissive default committed
 # and no half-finished cut can turn a refusal into a broken install.
-# tools/lint/check_published_platforms.sh enforces the second half of that
+# tools/lint/lintc/gate_published_platforms.c enforces the second half of that
 # from the other side.
 
 # The EXACT closed set of platform triples a z23-bootstrap can be produced
@@ -915,7 +915,7 @@ selftest() {
 
     # The real shims must claim only platforms the cutter can produce, and
     # must be checked in carrying the sentinel. This is the same invariant
-    # tools/lint/check_published_platforms.sh enforces; asserting it here too
+    # tools/lint/lintc/gate_published_platforms.c enforces; asserting it here too
     # means a cut cannot be attempted against a shim that already drifted.
     local shim_platform known
     for shim_platform in $(posix_shim_platforms "$POSIX_SHIM") \
