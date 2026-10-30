@@ -376,3 +376,7 @@ later lane flips it HARD.
 - 2026-10-30T05:44:52Z — REASON: wave 7: file_service_client.c purpose comment moved above the feature macro (check-file-purpose)
   old ROOT: dd0101eaafbf98e26869d5e303c99d24cbe518d5a1c562381b7be87f705e5e31
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-30T20:49:17Z — REASON: Owner-authorized 2026-10-30 unseal: Android embedded Tor sets ReducedConnectionPadding 1 to cut idle channel padding wake-ups on phones; circuit padding kept for onion circuit privacy; servers unchanged (byte-identical torrc); no consensus predicate
+  old ROOT: 885b73e66178c1b1e1f665830850f05b17939c2d876839135c6b7723fd314d9f
+  by: owner unseal ritual (make core-unseal)

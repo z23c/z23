@@ -109,8 +109,13 @@ const char *tor_onion_port_map_state_name(
  * everything. A localhost-only SocksPort is opened as a bootstrap
  * workaround (Tor refuses to start without a listener). The port is
  * derived from p2p_port so multiple instances don't collide.
+ * reduced_padding appends ReducedConnectionPadding 1 (less channel padding,
+ * OR connections not held open as long); only the Android build sets it.
+ * Circuit padding stays at Tor's default on purpose: it protects onion
+ * circuit setup. false writes the four base lines unchanged.
  * Exposed for testing — normally called by tor_integration_start(). */
-bool tor_write_torrc(const char *datadir, uint16_t p2p_port);
+bool tor_write_torrc(const char *datadir, uint16_t p2p_port,
+                     bool reduced_padding);
 
 /* Scan the dynhost log from byte offset scan_from and copy the LAST
  * "ephemeral service created with address:" match into out. dynhost mints

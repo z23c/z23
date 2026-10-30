@@ -185,7 +185,7 @@ static int test_tor_write_torrc_bootstrap_port(void)
     mkdir(td, 0700);
 
     /* Default port 8033 → bootstrap port 19999 */
-    bool ok = tor_write_torrc(tmpdir, 8033);
+    bool ok = tor_write_torrc(tmpdir, 8033, false);
     if (!ok) {
         printf("FAIL (tor_write_torrc returned false)\n");
         remove_tree(tmpdir);
@@ -246,8 +246,8 @@ static int test_tor_write_torrc_no_collision(void)
     mkdir(td, 0700);
 
     /* Port 8033 and 8035 should produce different bootstrap ports */
-    tor_write_torrc(tmpdir1, 8033);
-    tor_write_torrc(tmpdir2, 8035);
+    tor_write_torrc(tmpdir1, 8033, false);
+    tor_write_torrc(tmpdir2, 8035, false);
 
     char path1[512], path2[512];
     snprintf(path1, sizeof(path1), "%s/torrc", tmpdir1);
@@ -288,7 +288,7 @@ static int test_tor_write_torrc_datadir(void)
     snprintf(td, sizeof(td), "%s/tor_data", tmpdir);
     mkdir(td, 0700);
 
-    tor_write_torrc(tmpdir, 8033);
+    tor_write_torrc(tmpdir, 8033, false);
 
     char torrc_path[512];
     snprintf(torrc_path, sizeof(torrc_path), "%s/torrc", tmpdir);
@@ -331,7 +331,7 @@ static int test_tor_write_torrc_idempotent(void)
     snprintf(td, sizeof(td), "%s/tor_data", tmpdir);
     mkdir(td, 0700);
 
-    tor_write_torrc(tmpdir, 8033);
+    tor_write_torrc(tmpdir, 8033, false);
 
     char torrc_path[512];
     snprintf(torrc_path, sizeof(torrc_path), "%s/torrc", tmpdir);
@@ -346,7 +346,7 @@ static int test_tor_write_torrc_idempotent(void)
     }
 
     /* Write again */
-    tor_write_torrc(tmpdir, 8033);
+    tor_write_torrc(tmpdir, 8033, false);
 
     f = fopen(torrc_path, "r");
     char buf2[2048] = "";
@@ -806,7 +806,7 @@ static int test_tor_torrc_log_levels(void)
     snprintf(td, sizeof(td), "%s/tor_data", tmpdir);
     mkdir(td, 0700);
 
-    if (!tor_write_torrc(tmpdir, 8033)) {
+    if (!tor_write_torrc(tmpdir, 8033, false)) {
         printf("FAIL (tor_write_torrc returned false)\n");
         remove_tree(tmpdir);
         return 1;
@@ -1081,6 +1081,61 @@ static int test_blocking_fetch_abandons_on_shutdown(void)
     return 0;
 }
 
+/* Padding reduction is opt-in. reduced_padding=false must write exactly the
+ * four base lines servers run with; reduced_padding=true appends the two Tor
+ * mobile-client lines that only the Android build requests. */
+static bool read_torrc_text(const char *dir, char *buf, size_t size)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/torrc", dir);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return false;
+    size_t n = fread(buf, 1, size - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    return true;
+}
+
+static int test_tor_write_torrc_reduced_padding(void)
+{
+    int failures = 0;
+    printf("test_tor_write_torrc_reduced_padding: ");
+
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "padding");
+    char td[512];
+    snprintf(td, sizeof(td), "%s/tor_data", tmpdir);
+    mkdir(td, 0700);
+
+    char want_off[2048], want_on[3072], got[3072];
+    snprintf(want_off, sizeof(want_off),
+        "SocksPort 127.0.0.1:19999\n"
+        "DataDirectory %s/tor_data\n"
+        "Log notice file %s/" TOR_LOG_BASENAME "\n"
+        "Log info [rend] file %s/" TOR_REND_LOG_BASENAME "\n",
+        tmpdir, tmpdir, tmpdir);
+    snprintf(want_on, sizeof(want_on),
+        "%sReducedConnectionPadding 1\n", want_off);
+
+    bool off_ok = tor_write_torrc(tmpdir, 8033, false) &&
+                  read_torrc_text(tmpdir, got, sizeof(got)) &&
+                  strcmp(got, want_off) == 0;
+    bool on_ok = tor_write_torrc(tmpdir, 8033, true) &&
+                 read_torrc_text(tmpdir, got, sizeof(got)) &&
+                 strcmp(got, want_on) == 0;
+
+    if (off_ok && on_ok) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (false_exact=%d true_exact=%d)\n", off_ok, on_ok);
+        failures++;
+    }
+
+    remove_tree(tmpdir);
+    return failures;
+}
+
 int test_tor(void)
 
 {
@@ -1094,6 +1149,7 @@ int test_tor(void)
 
     /* torrc generation — bootstrap port derivation */
     failures += test_tor_write_torrc_bootstrap_port();
+    failures += test_tor_write_torrc_reduced_padding();
     failures += test_tor_write_torrc_no_collision();
     failures += test_tor_write_torrc_datadir();
     failures += test_tor_write_torrc_idempotent();

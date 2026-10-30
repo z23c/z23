@@ -600,7 +600,7 @@ itself within seconds and needs no operator at all.
 **Operator action, by reason:**
 
 - `port_in_use` — something else holds Tor's bootstrap SocksPort (derived from
-  `-port`; see `tor_write_torrc()` in `core/modules/net/src/tor_integration.c`).
+  `-port`; see `tor_write_torrc()` in `core/modules/net/src/tor_config_log.c`).
   Usually a previous z23 instance that has not finished exiting. Confirm no
   second node is running against this datadir, then let the retry take it. If
   a foreign process owns the port permanently, free it or move this node's

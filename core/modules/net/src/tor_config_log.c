@@ -21,7 +21,8 @@
  * — an operator's log, small enough to read — and confines the chatty
  * bootstrap evidence to a file whose only reader is this node's own
  * readiness poll. Both are size-bounded by tor_logs_rotate() below. */
-bool tor_write_torrc(const char *datadir, uint16_t p2p_port)
+bool tor_write_torrc(const char *datadir, uint16_t p2p_port,
+                    bool reduced_padding)
 {
     char torrc_path[1024];
     snprintf(torrc_path, sizeof(torrc_path), "%s/torrc", datadir);
@@ -40,6 +41,8 @@ bool tor_write_torrc(const char *datadir, uint16_t p2p_port)
         "Log notice file %s/" TOR_LOG_BASENAME "\n"
         "Log info [rend] file %s/" TOR_REND_LOG_BASENAME "\n",
         bootstrap_port, datadir, datadir, datadir);
+    if (reduced_padding)
+        fprintf(f, "ReducedConnectionPadding 1\n");
 
     fclose(f);
     return true;

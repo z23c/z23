@@ -734,6 +734,24 @@ static void *tor_onion_monitor(void *arg)
     return NULL;
 }
 
+/* Android embedded Tor sends a padding cell on each idle OR channel, and
+ * every one wakes the zcl_tor thread. ReducedConnectionPadding (Tor's
+ * mobile-client setting) sends less channel padding and does not hold OR
+ * connections open as long. Circuit padding is deliberately left at Tor's
+ * default: it protects onion circuit setup (proposal 302 intro and rend
+ * hiding) and runs only during circuit setup, so it adds no idle wake-ups.
+ * Z23 is never a relay, so only the phone build takes this; servers and
+ * desktop keep Tor's default padding, which defends against traffic
+ * analysis. */
+static bool tor_reduced_padding_for_platform(void)
+{
+#if defined(__ANDROID__)
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool tor_integration_start(const char *datadir, uint16_t p2p_port)
 {
     if (atomic_load(&g_tor_running))
@@ -795,7 +813,8 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
     g_tor_log_scan_from = tor_log_scan_offset(datadir, tor_log_path);
     g_tor_rend_log_scan_from = tor_log_scan_offset(datadir, tor_rend_log_path);
 
-    if (!tor_write_torrc(datadir, p2p_port))
+    if (!tor_write_torrc(datadir, p2p_port,
+                          tor_reduced_padding_for_platform()))
         LOG_FAIL("tor", "failed to write torrc to %s", datadir);
 
     /* Register our handler with Tor's dynhost before starting.

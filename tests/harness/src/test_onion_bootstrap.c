@@ -95,7 +95,7 @@ static void p11_remove_tree(const char *path)
 static bool onion_torrc_maps(const char *datadir, uint32_t socks, uint16_t p2p)
 {
     char path[320], expected[80], line[80];
-    if (!tor_write_torrc(datadir, p2p)) return false;
+    if (!tor_write_torrc(datadir, p2p, false)) return false;
     if (snprintf(path, sizeof(path), "%s/torrc", datadir) >= (int)sizeof(path)) return false;
     snprintf(expected, sizeof(expected), "SocksPort 127.0.0.1:%u\n", (unsigned)socks);
     FILE *f = fopen(path, "rb");
