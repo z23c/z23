@@ -14220,9 +14220,10 @@ check-no-snapshot-struct-memcmp: $(LINTC_TOOL)
 # in core/modules/net/src/p2p_game.c that only clang rejects. Ratchets realized
 # diagnostic sites against a recorded baseline. SKIPs loudly when clang is
 # absent, so a contributor without it is never blocked by a tool they lack.
-check-clang-portability:
+check-clang-portability: $(LINTC_TOOL)
 	@echo "══ LINT: second-compiler portability (clang -std=c23 -pedantic) ══"
-	@./tools/lint/check_clang_portability.sh --self-test && ./tools/lint/check_clang_portability.sh
+	@./build/bin/z23-lint check-clang-portability --selftest
+	@./build/bin/z23-lint check-clang-portability
 
 # Windows cross-compile check for the platform seam (platform/modules/platform/src/*.c),
 # the layer whose entire job is hiding OS differences behind one header per

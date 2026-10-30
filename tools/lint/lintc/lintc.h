@@ -9,6 +9,7 @@
 #include <regex.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -126,6 +127,14 @@ static inline int lintc_ident_start(int c)
 static inline int lintc_strcmp_ptr(const void *a, const void *b)
 {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* Free a heap string array and its strings. Callers reset their own count. */
+static inline void lintc_strv_free(char **v, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        free(v[i]);
+    free(v);
 }
 
 /* Drop the length of a growable NUL-terminated buffer. Does not free it. */

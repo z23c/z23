@@ -174,7 +174,7 @@ Z23_FLAG("ZCL_API_KEY_SCAN_FILES", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_APP_AUTHORITY_DIRS", "env_build", "-", "-",
           "undocumented; first use tools/lint/repo_shape.sh:auto")
 Z23_FLAG("ZCL_APP_SHAPES", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/repo_shape.sh:auto")
 Z23_FLAG("ZCL_ARENA_BIN", "env_build", "-", "-",
           "undocumented; first use tools/dev/arena_acceptance.sh:auto")
 Z23_FLAG("ZCL_ARM_SYMBOL_BASELINE", "env_build", "-", "-",
@@ -345,19 +345,19 @@ Z23_FLAG("ZCL_CAP_CLOSURE_ENFORCE_SYMMETRY", "env_build", "-", "-",
 Z23_FLAG("ZCL_CAP_CLOSURE_SOURCE_RECORD", "env_build", "-", "-",
           "Reuse the parent Make source record for the same checkout's read-only compiler flag query")
 Z23_FLAG("ZCL_CC", "env_build", "clang", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_clang_portability_run.c:auto")
 Z23_FLAG("ZCL_CC_JOBS", "env_build", "ZCL_HOST_JOBS/2", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_clang_portability_run.c:auto")
 Z23_FLAG("ZCL_CHECKOUT_LOCK_HELD", "env_build", "0", "-",
           "undocumented; first use tools/dev/checkout-lock.sh:auto")
 Z23_FLAG("ZCL_CLANG_MANIFEST_INJECT_WARM_MISMATCH", "env_runtime", "0", "-",
           "test fault: 1 makes the semantic sensor session corrupt every warm manifest before its cold-oracle comparison, so the semantic_sensor group proves a mismatch disables warm reuse and writes only the cold bytes; first use tools/sensors/clang_manifest_session.c")
 Z23_FLAG("ZCL_CLANG_PORTABILITY_COVERAGE", "env_build", "1", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_clang_portability_scan.c:auto")
 Z23_FLAG("ZCL_CLANG_PORTABILITY_COVERAGE_ALLOWANCE", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_clang_portability_scan.c:auto")
 Z23_FLAG("ZCL_CLANG_PORTABILITY_MAKEFILE", "env_build", "Makefile", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_clang_portability_run.c:auto")
 Z23_FLAG("ZCL_CLI", "env_build", "build/bin/zclassic-cli", "-",
           "undocumented; first use tools/scripts/agent_msg_roundtrip.sh:auto")
 Z23_FLAG("ZCL_CLI_RPC_TIMEOUT_SEC", "env_runtime", "-", "-",
@@ -836,10 +836,8 @@ Z23_FLAG("ZCL_DOC_INLINE_PATHS_GLOB", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_doc_inline_paths.c:718")
 Z23_FLAG("ZCL_DOCTOR_TSV", "env_build", "-", "-",
           "undocumented; first use tools/scripts/doctor.sh:auto")
-Z23_FLAG("ZCL_DOMAIN_CONTEXTS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
 Z23_FLAG("ZCL_DOMAIN_DIRS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/repo_shape.sh:auto")
 Z23_FLAG("ZCL_DRIFT_LEDGER_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/build_drift_probe.sh:auto")
 Z23_FLAG("ZCL_DRIFT_PID", "env_build", "-", "-",
@@ -1025,11 +1023,11 @@ Z23_FLAG("ZCL_FUZZ_REPLAY_TIMEOUT", "env_build", "5", "-",
 Z23_FLAG("ZCL_FUZZ_TIMEOUT", "env_build", "2", "-",
           "undocumented; first use tools/scripts/background_quality_lane.sh:auto")
 Z23_FLAG("ZCL_GATE_CC", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/check_windows_cross_syntax.sh:auto")
 Z23_FLAG("ZCL_GATE_FLAGS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/check_windows_cross_syntax.sh:auto")
 Z23_FLAG("ZCL_GATE_OUT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/check_windows_cross_syntax.sh:auto")
 Z23_FLAG("ZCL_GATE_SCAN_LOG", "env_build", "-", "-",
           "undocumented; first use tools/lint/gate_lib.sh:auto")
 Z23_FLAG("ZCL_GATE_TEST_COMPAT_HEADER", "env_build", "-", "-",
@@ -1278,7 +1276,7 @@ Z23_FLAG("ZCL_IDENTITY_PARSER_SCAN_ROOT", "env_build", "tools", "-",
 Z23_FLAG("ZCL_INSTALL_ASSISTED", "env_runtime", "-", "-",
           "undocumented; first use engine/composition/src/consensus_state_install_runtime.c:auto")
 Z23_FLAG("ZCL_INTERNAL_CLANG_COVERAGE_SELFTEST", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_clang_portability_run.c:auto")
 Z23_FLAG("ZCL_INTERVENE_ACTOR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/intervention_ledger.sh:auto")
 Z23_FLAG("ZCL_INTERVENE_CAT_CMD", "env_build", "-", "-",
@@ -1448,8 +1446,6 @@ Z23_FLAG("ZCL_LEGACY_ORACLE_MODE", "env_runtime", "-", "-",
           "undocumented; first use engine/composition/src/boot_runtime_sync_services.c:auto")
 Z23_FLAG("ZCL_LEVELDB_NO_VERIFY_CHECKSUMS", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/storage/src/dbwrapper.c:auto")
-Z23_FLAG("ZCL_LIB_MODULES", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
 Z23_FLAG("ZCL_LINKGRAPH_OBJ_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/module-linkgraph.sh:auto")
 Z23_FLAG("ZCL_LINT_BIN_DIR", "env_build", "build/bin", "-",
@@ -1567,7 +1563,7 @@ Z23_FLAG("ZCL_MODEL_SQL_FILE_FLOOR", "env_build", "80", "-",
 Z23_FLAG("ZCL_MODEL_SQL_SCAN_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_model_sql_literals.c:auto")
 Z23_FLAG("ZCL_MODULE_DIRS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/repo_shape.sh:auto")
 Z23_FLAG("ZCL_MSC_PRODUCER", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_mint_skip_crypto.c:auto")
 Z23_FLAG("ZCL_MSC_WAL_DIR", "env_test", "-", "-",
@@ -1808,7 +1804,7 @@ Z23_FLAG("ZCL_PIPEFAIL_GATE_FILE_FLOOR", "env_build", "1", "-",
 Z23_FLAG("ZCL_PIPEFAIL_GATE_SCAN_GLOB", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_pipefail_status_pipe.c:auto")
 Z23_FLAG("ZCL_PORTABILITY_SCOPE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_clang_portability_run.c:auto")
 Z23_FLAG("ZCL_PORTABLE_CC", "env_build", "cc", "-",
           "undocumented; first use tools/scripts/c23_portable_sysroot.sh:auto")
 Z23_FLAG("ZCL_PP_CUTTER", "env_build", "-", "-",
@@ -2318,7 +2314,7 @@ Z23_FLAG("ZCL_SOAK_SHOW_CMD", "env_build", "-", "-",
 Z23_FLAG("ZCL_SOAK_UNIT", "env_build", "z23-node", "-",
           "first use tools/mvp_gate.sh:auto; documented at docs/quality/mvp-live-gate.md:39: live -datadir / -rpcport defaults (default: ZCL_SOAK_UNIT)")
 Z23_FLAG("ZCL_SOURCE_AUTHORITIES", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/scripts/check_sync_state_no_ordinal.sh:auto")
 Z23_FLAG("ZCL_SOURCE_AUTHORITY_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_source_identity_authority.c:auto")
 Z23_FLAG("ZCL_SOURCE_AUTHORITY_CEILING", "env_build", "-", "-",
@@ -2592,7 +2588,7 @@ Z23_FLAG("ZCL_TU_CACHE_DIGEST_SELFTEST_VANISH", "env_build", "-", "-",
 Z23_FLAG("ZCL_TU_CACHE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/lint/tu_result_cache.sh:auto")
 Z23_FLAG("ZCL_TU_CACHE_LIB", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_clang_portability.sh:auto")
+          "undocumented; first use tools/lint/tu_result_cache.sh:auto")
 Z23_FLAG("ZCL_TU_CACHE_ON", "env_build", "0", "-",
           "undocumented; first use tools/lint/tu_result_cache.sh:auto")
 Z23_FLAG("ZCL_TU_CACHE_SCRATCH", "env_build", "-", "-",

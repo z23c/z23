@@ -79,9 +79,9 @@ ZCL_FACT("lint.gates", "scan_floor_capability_closure",
          "tools/lint/lintc/gate_capability_closure.c",
          "CCG_MIN_OBJECTS = 500")
 ZCL_FACT("lint.gates", "scan_floor_clang_portability",
-         "check_clang_portability.sh sets a known source floor of 900 translation units so a broken Makefile parse cannot silently pass.",
-         "tools/lint/check_clang_portability.sh",
-         "SRC_FLOOR=900")
+         "The native check-clang-portability gate sets a known source floor of 900 translation units so a broken Makefile parse cannot silently pass.",
+         "tools/lint/lintc/gate_clang_portability_scan.c",
+         "cp_reqscan(c->nsrc, 900, hint)")
 ZCL_FACT("lint.gates", "scan_floor_byte_order_measured",
          "check_byte_order_codec_single is ported to the native lint runtime; its shell shim was deleted and callers run z23-lint directly.",
          "tools/lint/lintc/gate_byte_order_codec_single_report.c",

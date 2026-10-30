@@ -111,9 +111,7 @@ static int strv_add(struct strv *s, const char *p, size_t n)
 
 static void strv_free(struct strv *s)
 {
-    for (size_t i = 0; i < s->n; i++)
-        free(s->v[i]);
-    free(s->v);
+    lintc_strv_free(s->v, s->n);
     memset(s, 0, sizeof *s);
 }
 

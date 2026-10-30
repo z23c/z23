@@ -67,7 +67,11 @@ SELECTION_GATE("check-windows-cross-syntax", SELECTION_UNITS_NODE_C23_WINDOWS, "
     "tools/lint/windows_cross_syntax_baseline.txt")
 
 SELECTION_GATE("check-clang-portability", SELECTION_UNITS_CLANG_ORACLE, "",
-    "tools/lint/check_clang_portability.sh tools/lint/gate_lib.sh "
+    "tools/lint/lintc/gate_clang_portability_run.c "
+    "tools/lint/lintc/gate_clang_portability_scan.c tools/lint/lintc/gate_clang_portability_cache.c "
+    "tools/lint/lintc/gate_clang_portability_util.c tools/lint/lintc/gate_clang_portability_priv.h "
+    "tools/lint/lintc/gate_clang_portability_selftest.c tools/lint/lintc/gate_clang_portability_selftest_cache.c "
+    "tools/lint/gate_lib.sh "
     "tools/lint/repo_shape.sh tools/lint/tu_result_cache.sh "
     "engine/composition/lib_module_order.def " SELECTION_DRIVER,
     "check-clang-portability: PRODUCT_CONTEXTS APP_DIRS CORE_CONTEXTS "

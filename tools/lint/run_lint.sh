@@ -210,7 +210,6 @@ gate_command() {
         check-sync-state-no-ordinal)     echo './tools/scripts/check_sync_state_no_ordinal.sh' ;;
         check-no-snapshot-struct-memcmp)   echo './build/bin/z23-lint check-no-snapshot-struct-memcmp --self-test && ./build/bin/z23-lint check-no-snapshot-struct-memcmp' ;;
         check-no-warning-suppression)      echo './build/bin/z23-lint check-no-warning-suppression .' ;;
-        check-clang-portability)           echo './tools/lint/check_clang_portability.sh --self-test && ./tools/lint/check_clang_portability.sh' ;;
         check-windows-platform-seam)       echo './tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh' ;;
         check-windows-acceptance)          echo './tools/lint/check_windows_acceptance.sh --self-test && ./tools/lint/check_windows_acceptance.sh' ;;
         check-windows-cross-syntax)        echo './tools/lint/check_windows_cross_syntax.sh' ;;
