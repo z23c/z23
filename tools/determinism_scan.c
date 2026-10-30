@@ -787,7 +787,7 @@ static void write_baseline_header(FILE *bl,
 "# THIS LIST MAY ONLY SHRINK. A group appearing here means a test stopped\n"
 "# giving the same answer twice, and the fix is the test, not this file. There\n"
 "# is no flag, allowlist or environment variable that admits a new row;\n"
-"# tools/lint/check_determinism_ratchet.sh enforces that against the\n"
+"# the check-determinism-ratchet gate enforces that against the\n"
 "# merge-base with origin/main.\n"
 "#\n"
 "# Re-measure with 'make determinism-scan', then one\n"

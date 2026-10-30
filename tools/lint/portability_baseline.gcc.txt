@@ -1,5 +1,5 @@
 # gcc portability ratchet baseline — regenerate with:
-#   ZCL_CC=gcc ZCL_LINT_MODE=UPDATE tools/lint/check_clang_portability.sh
+#   ZCL_CC=gcc ZCL_LINT_MODE=UPDATE ./build/bin/z23-lint check-clang-portability
 #
 # One '<path> <count>' line per file that still holds gcc
 # diagnostic sites under the gate's flag set. Every one is a real

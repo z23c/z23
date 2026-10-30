@@ -21,7 +21,7 @@
 #
 # The perturbation names the CAUSE. "It varies" is not a finding; "it varies
 # when CC is set" is. A row with no cause is rejected by
-# tools/lint/check_determinism_ratchet.sh.
+# the check-determinism-ratchet gate.
 #
 # THIS LIST MAY ONLY SHRINK. A group appearing here means a test stopped
 # giving the same answer twice, and the fix is the test, not this file. There

@@ -115,7 +115,7 @@ cd "$REPO_DIR"
 # The ONE canonical reader for a build's baked source identity. Nine inline
 # copies of this parser had diverged (a greedy sed returns the LAST of
 # agentbuild's several source_id_sha256 values, i.e. a runtime value, not the
-# baked one) — tools/lint/check_identity_parser_single.sh exists to stop a
+# baked one) — the check-identity-parser-single gate exists to stop a
 # tenth. zcl_binary_source_id() is the only identity reader used below.
 # shellcheck source=tools/scripts/source_identity_lib.sh
 . "$REPO_DIR/tools/scripts/source_identity_lib.sh"

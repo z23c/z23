@@ -113,7 +113,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=tools/scripts/source_identity_lib.sh
 # The ONE source-identity reader (zcl_binary_source_id / zcl_json_first_string /
 # zcl_json_first_sha256). Do NOT inline a tenth copy of that parser here —
-# tools/lint/check_identity_parser_single.sh counts them and this file carries
+# the check-identity-parser-single gate counts them and this file carries
 # no baseline row, so it may carry ZERO.
 . "$REPO_ROOT/tools/scripts/source_identity_lib.sh"
 

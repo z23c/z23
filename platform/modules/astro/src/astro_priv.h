@@ -50,7 +50,7 @@
  * Both compilers this tree builds with honour the pragma and both diagnose a
  * use of a poisoned identifier as an error. A `#define double ...` would look
  * equivalent and is not: GCC accepts it silently, but clang rejects it under
- * -Wkeyword-macro, which tools/lint/check_clang_portability.sh runs with
+ * -Wkeyword-macro, which the check-clang-portability gate runs with
  * -Werror. The pragma is the portable spelling.
  */
 

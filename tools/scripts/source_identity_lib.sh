@@ -55,7 +55,7 @@
 # each match as its own line and `-oE`'s NON-greedy-per-match scanning finds
 # the first occurrence first. Every function below uses that form, and nine
 # copies of a subtly different version of it are exactly the defect
-# tools/lint/check_identity_parser_single.sh exists to stop from growing
+# the check-identity-parser-single gate exists to stop from growing
 # back — see that gate for the anti-rot enforcement, and dev_lib.sh's
 # baked_source_id() (predates this library, deliberately left as the
 # tools/dev/ in-tree reference and NOT migrated here — see the lane's

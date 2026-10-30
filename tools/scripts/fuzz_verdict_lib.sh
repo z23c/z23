@@ -3,7 +3,7 @@
 # fuzz_verdict_lib.sh — shared vocabulary for what counts as sufficient
 # evidence to CLOSE a fuzz artifact as `regression-seed` (audited, does not
 # reproduce). Sourced by tools/scripts/promote_fuzz_artifacts.sh (which
-# WRITES verdict reasons) and tools/lint/check_fuzz_artifact_replay.sh
+# WRITES verdict reasons) and the check-fuzz-artifact-ledger gate
 # (which READS them back and rejects an insufficient one). Keeping the
 # marker spellings in exactly one file means the writer and the reader can
 # never drift apart on what phrase means what.

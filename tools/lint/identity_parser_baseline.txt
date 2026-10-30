@@ -30,7 +30,7 @@
 # the number here. Adding a row for a NEW file is not a fix — a file with
 # no baseline entry may carry zero copies.
 #
-# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_identity_parser_single.sh
+# Regenerate: ZCL_LINT_MODE=UPDATE ./build/bin/z23-lint check-identity-parser-single
 tools/agent_fast_ci.sh 1
 tools/dev/agent-dev-status.sh 3
 tools/dev/build-epoch-key.sh 1

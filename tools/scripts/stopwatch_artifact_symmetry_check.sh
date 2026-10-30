@@ -58,7 +58,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck source=tools/scripts/source_identity_lib.sh
 # The ONE source-identity reader — zcl_is_sha256 is used by check 11. Do NOT
-# inline a local 64-hex validator here: tools/lint/check_identity_parser_single.sh
+# inline a local 64-hex validator here: the check-identity-parser-single gate
 # counts those and this file carries no baseline row, so it may carry ZERO.
 . "$REPO_ROOT/tools/scripts/source_identity_lib.sh"
 
