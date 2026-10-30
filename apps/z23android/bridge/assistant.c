@@ -269,6 +269,8 @@ bool zapp_assistant_speak(const struct zapp_assistant *a, const char *text,
 #define THINK_CAP 8192u
 #define MIN_CHUNK 24u
 #define MAX_CHUNK 160u
+/* Most bytes at the end of the waiting text that may be held back as the start of a lead-in. */
+#define HOLD_MAX 64u
 /* Synthesis returns a chunk's audio in blocks, each only once it is complete, so the first chunk is
  * short: it ends at a clause (FIRST_WORDS words or more) or after FIRST_WORD_CAP words. FIRST_CHUNK is
  * the byte allowance later chunks start from. */
@@ -288,7 +290,7 @@ struct respond {
     char *text; size_t text_len, text_cap;
     char tool_id[64], tool_name[32], tool_args[256];
     char raw[THINK_CAP]; size_t raw_len, fed;
-    char pending[MAX_CHUNK + 2]; size_t pending_len;
+    char pending[MAX_CHUNK + HOLD_MAX + 2]; size_t pending_len;
     char sse[SSE_CAP]; size_t sse_len;
     unsigned char carry[4]; size_t carry_len;
     int16_t pcm[PCM_EVENT_MAX]; size_t pcm_len;
@@ -387,48 +389,120 @@ static bool append_text(struct respond *r, const char *chunk)
     memcpy(r->text + r->text_len, chunk, n + 1); r->text_len += n;
     return true;
 }
-/* Length of a lead-in such as "the host blockers tool returned " at the start of text, or 0. */
+/* Lead-ins that name the model's sources. A phrase ending in a comma also takes the spaces after it. */
+static const char *const lead_in[] = {"according to the observations,", "according to the observation,",
+    "according to the data,", "based on the observations,", "based on the data,",
+    "the observations say that ", "the observations say ", "the observations show that ",
+    "the observations show ", "the observations indicate that ", "the observation says that ",
+    "the observation says ", "the data says that ", "the data says ", "the data shows that ",
+    "the data shows "};
+static const char *const tool_verbs[] = {"returned", "says", "shows", "reports", "found", "indicates"};
+enum { TOOL_LEAD_MAX = 36 };
+/* Length of a lead-in such as "the host blockers tool returned " or "the tool shows " at the start of
+ * text, or 0. */
 static size_t tool_lead(const char *at)
 {
-    static const char *const verbs[] = {"returned", "says", "shows", "reports", "found", "indicates"};
     if (strncasecmp(at, "the ", 4)) return 0;
-    const char *tool = strstr(at + 4, " tool "), *q = tool ? tool + 6 : NULL;
-    if (!tool || tool - at > 36 || memchr(at, '.', (size_t)(tool - at)) || memchr(at, ',', (size_t)(tool - at))) return 0;
-    for (size_t i = 0; i < sizeof(verbs) / sizeof(verbs[0]); i++) {
-        size_t n = strlen(verbs[i]);
-        if (strncasecmp(q, verbs[i], n) || q[n] != ' ') continue;
-        q += n + 1;
-        if (!strncasecmp(q, "that ", 5)) q += 5;
-        return (size_t)(q - at);
+    const char *tool = strstr(at + 3, " tool "), *q = tool ? tool + 6 : NULL;
+    if (!tool || tool - at > TOOL_LEAD_MAX || memchr(at, '.', (size_t)(tool - at)) || memchr(at, ',', (size_t)(tool - at)))
+        return 0;
+    for (size_t i = 0; i < sizeof(tool_verbs) / sizeof(tool_verbs[0]); i++) {
+        size_t n = strlen(tool_verbs[i]);
+        if (!strncasecmp(q, tool_verbs[i], n) && q[n] == ' ') return (size_t)(q + n + 1 - at);
     }
     return 0;
 }
-static void cut_lead(char *text, char *at, size_t n)
+/* A lead-in may be followed by "that "; while only part of it has arrived the cut waits. */
+static bool awaiting_that(const char *rest) { return strlen(rest) < 5 && !strncasecmp(rest, "that ", strlen(rest)); }
+/* A phrase that may still be followed by "that ": it ends in a space but not in "that ". */
+static bool takes_that(const char *phrase)
 {
-    bool starts = at == text || (at - text >= 2 && at[-1] == ' ' && strchr(".!?", at[-2]));
-    memmove(at, at + n, strlen(at + n) + 1);
-    if (starts && *at >= 'a' && *at <= 'z') *at = (char)(*at - 'a' + 'A');
+    size_t n = strlen(phrase);
+    return phrase[n - 1] == ' ' && (n < 5 || strcmp(phrase + n - 5, "that "));
 }
-/* The model is told never to name its sources; a lead-in that still does is cut so the owner hears
- * the fact itself. Longer phrases come first, and a cut at a sentence start capitalizes what follows. */
-static void strip_sources(char *text)
+static size_t that_len(const char *rest) { return strncasecmp(rest, "that ", 5) ? 0 : 5; }
+/* A token with a digit is a host label such as r1 and keeps its case. */
+static bool host_label(const char *s)
 {
-    static const char *const lead_in[] = {"according to the observations, ", "according to the observation, ",
-        "according to the data, ", "based on the observations, ", "based on the data, ",
-        "the observations say that ", "the observations say ", "the observations show that ",
-        "the observations show ", "the observations indicate that ", "the observation says that ",
-        "the observation says ", "the data says that ", "the data says ", "the data shows that ",
-        "the data shows "};
-    for (size_t i = 0; i < sizeof(lead_in) / sizeof(lead_in[0]); i++)
-        for (char *at; (at = strcasestr(text, lead_in[i]));) cut_lead(text, at, strlen(lead_in[i]));
-    for (char *at = strcasestr(text, "the "); at; at = strcasestr(at + 1, "the "))
-        if ((at == text || at[-1] == ' ') && tool_lead(at)) { cut_lead(text, at, tool_lead(at)); at = text; }
+    for (; *s && *s != ' ' && !strchr(".,;:!?", *s); s++)
+        if (*s >= '0' && *s <= '9') return true;
+    return false;
+}
+static void cut_lead(size_t *len, char *at, size_t n, bool starts)
+{
+    n += strspn(at + n, " ");
+    memmove(at, at + n, strlen(at + n) + 1);
+    *len -= n;
+    if (starts && *at >= 'a' && *at <= 'z' && !host_label(at)) *at = (char)(*at - 'a' + 'A');
+}
+static bool starts_sentence(const char *text, const char *at, bool before)
+{
+    return at == text ? before : at - text >= 2 && at[-1] == ' ' && strchr(".!?", at[-2]);
+}
+static bool word_start(const char *text, const char *at) { return at == text || at[-1] == ' '; }
+/* The model is told never to name its sources; a lead-in that still does is cut so the owner hears
+ * the fact itself. Longer phrases come first, and a cut at a sentence start capitalizes what follows
+ * unless it is a host label. Until final, a lead-in whose optional "that " may still arrive is kept. */
+static void strip_sources(char *text, size_t *len, bool before, bool final)
+{
+    for (size_t i = 0; i < sizeof(lead_in) / sizeof(lead_in[0]); i++) {
+        size_t n = strlen(lead_in[i]);
+        for (char *at = text; (at = strcasestr(at, lead_in[i]));) {
+            if (!word_start(text, at) || (!final && takes_that(lead_in[i]) && awaiting_that(at + n))) { at++; continue; }
+            cut_lead(len, at, n, starts_sentence(text, at, before));
+        }
+    }
+    for (char *at = text; (at = strcasestr(at, "the "));) {
+        size_t n = word_start(text, at) ? tool_lead(at) : 0;
+        if (!n || (!final && awaiting_that(at + n))) { at++; continue; }
+        cut_lead(len, at, n + that_len(at + n), starts_sentence(text, at, before));
+        at = text;
+    }
+}
+/* Could s, which starts a word and runs to the end of the text, still grow into a lead-in? */
+static bool tool_prefix(const char *s)
+{
+    size_t n = strlen(s);
+    if (strncasecmp(s, "the ", n < 4 ? n : 4) || strpbrk(s, ".,;:!?")) return false;
+    if (n < 4) return true;
+    const char *tool = strstr(s + 3, " tool ");
+    if (!tool) return n <= TOOL_LEAD_MAX + 5;
+    size_t rl = strlen(tool + 6);
+    for (size_t i = 0; tool - s <= TOOL_LEAD_MAX && i < sizeof(tool_verbs) / sizeof(tool_verbs[0]); i++)
+        if (rl <= strlen(tool_verbs[i]) && !strncasecmp(tool + 6, tool_verbs[i], rl)) return true;
+    return false;
+}
+static bool lead_prefix(const char *s)
+{
+    size_t n = strlen(s);
+    for (size_t i = 0; i < sizeof(lead_in) / sizeof(lead_in[0]); i++) {
+        size_t pl = strlen(lead_in[i]);
+        if ((n < pl && !strncasecmp(s, lead_in[i], n)) ||
+            (takes_that(lead_in[i]) && n >= pl && !strncasecmp(s, lead_in[i], pl) && awaiting_that(s + pl))) return true;
+    }
+    size_t tl = tool_lead(s);
+    return tool_prefix(s) || (tl && awaiting_that(s + tl));
+}
+/* Bytes at the end of text that begin a word and may still grow into a lead-in: they wait for more. */
+static size_t partial_tail(const char *text, size_t len)
+{
+    for (size_t i = len > HOLD_MAX ? len - HOLD_MAX : 0; i < len; i++)
+        if (word_start(text, text + i) && lead_prefix(text + i)) return len - i;
+    return 0;
+}
+/* Cuts complete lead-ins from the text waiting to be spoken and returns how many bytes at its end to
+ * keep waiting. Only that partial tail is held, so speech starts as soon as a chunk is complete. */
+static size_t clean_pending(struct respond *r, bool final)
+{
+    char last = r->text_len ? r->text[r->text_len - 1] : 0;
+    strip_sources(r->pending, &r->pending_len, !last || strchr(".!?", last), final);
+    return final ? 0 : partial_tail(r->pending, r->pending_len);
 }
 static bool speak_pending(struct respond *r, size_t n)
 {
-    char chunk[MAX_CHUNK + 2];
+    char chunk[sizeof(r->pending)];
     snprintf(chunk, sizeof(chunk), "%.*s", (int)n, r->pending);
-    strip_sources(chunk); trim(chunk);
+    trim(chunk);
     memmove(r->pending, r->pending + n, r->pending_len - n + 1); r->pending_len -= n;
     size_t lead = strspn(r->pending, " ");
     memmove(r->pending, r->pending + lead, r->pending_len - lead + 1); r->pending_len -= lead;
@@ -488,9 +562,12 @@ static size_t chunk_cap(const struct respond *r)
 }
 static bool drain(struct respond *r)
 {
-    for (size_t n; (n = ready_len(r->pending, r->pending_len, chunk_cap(r), !r->text_len));)
+    for (;;) {
+        size_t held = clean_pending(r, false);
+        size_t n = ready_len(r->pending, r->pending_len - held, chunk_cap(r), !r->text_len);
+        if (!n) return true;
         if (!speak_pending(r, n)) return false;
-    return true;
+    }
 }
 /* Markdown marks are dropped, and newlines and underscores read as spaces. */
 static bool push_char(struct respond *r, char c)
@@ -581,6 +658,7 @@ static bool sse_sink(const unsigned char *data, size_t size, void *ctx)
 static bool respond_finish(struct respond *r)
 {
     if (!r->open) { r->open = true; if (!feed_raw(r)) return false; }
+    if (r->pending_len) clean_pending(r, true);
     return !r->pending_len || speak_pending(r, r->pending_len);
 }
 /* Streams one chat request into r with a fresh line buffer and thinking gate; without tools the

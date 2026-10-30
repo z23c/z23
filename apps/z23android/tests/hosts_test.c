@@ -98,7 +98,7 @@ static void suggestion_tests(void)
     assert(zapp_fleet_attention("5 of 3 hosts in sync\n") == 0);
     static const char calm[] = "2 of 2 hosts in sync\n\nr1 · in sync · 3,301,702\n\nr2 · in sync · 3,301,702\n";
     static const char trouble[] = "1 of 3 hosts in sync\n\nr2 · in sync · 3,301,932\n\n"
-        "r1 · network height unknown · 3,301,932\n\nmac · node not answering\n  Low on disk · 23 GB free\n";
+        "r1 · zclassicd height unknown, not counted in sync · 3,301,932\n\nmac · node not answering\n  Low on disk · 23 GB free\n";
     static const char *const offline = "0 of 1 hosts in sync\n\nmac · host not answering after 25.0 s\n";
     assert(!strcmp(zapp_suggestion(false, true, 10, 100, 0, trouble, NULL, q, sizeof(q)), ""));
     assert(!strcmp(zapp_suggestion(true, true, 100, 100, 0, calm, NULL, q, sizeof(q)), "Why is my node waiting for peers?"));

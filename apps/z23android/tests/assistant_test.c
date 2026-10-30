@@ -622,17 +622,64 @@ static void grounding_cases(const struct zapp_assistant *a)
     json_free(&messages);
     static const char *const heard[][2] = {
         {"The observation says the mac is not answering.", "The mac is not answering."},
-        {"No. The observations show that r1 is synced.", "No. R1 is synced."},
-        {"According to the data, r2 is in sync.", "R2 is in sync."},
+        {"No. The observations show that r1 is synced.", "No. r1 is synced."},
+        {"According to the data, r2 is in sync.", "r2 is in sync."},
         {"r2 is in sync, and the data says it has four blockers.", "r2 is in sync, and it has four blockers."},
         {"The host blockers tool returned four active blockers for r2.", "Four active blockers for r2."},
-        {"r2 is fine, and the fleet tool says r1 is in sync.", "r2 is fine, and r1 is in sync."}};
+        {"r2 is fine, and the fleet tool says r1 is in sync.", "r2 is fine, and r1 is in sync."},
+        {"The tool shows nothing wrong with r1.", "Nothing wrong with r1."}};
     for (size_t i = 0; i < sizeof(heard) / sizeof(heard[0]); i++) {
         reset_log();
         struct respond *r = new_respond(a, true);
         snprintf(r->pending, sizeof(r->pending), "%s", heard[i][0]); r->pending_len = strlen(r->pending);
         assert(respond_finish(r) && !strcmp(r->text, heard[i][1]));
         free_respond(r);
+    }
+}
+/* Streams text as model tokens of k bytes each and checks what speak() receives, chunk by chunk. */
+static void expect_spoken(const struct zapp_assistant *a, const char *text, size_t k, const char *const *want, size_t count)
+{
+    static char sse[16384];
+    sse[0] = 0;
+    size_t used = 0, n = strlen(text);
+    for (size_t at = 0; at < n; at += k)
+        used += (size_t)snprintf(sse + used, sizeof(sse) - used, "data: {\"choices\":[{\"delta\":{\"content\":\"%.*s\"}}]}\n\n",
+                                 (int)(n - at < k ? n - at : k), text + at);
+    snprintf(sse + used, sizeof(sse) - used, "data: [DONE]\n\n");
+    reset_log();
+    struct respond *r = new_respond(a, true);
+    r->quiet = false;
+    assert(feed(r, sse, 64) && r->done && respond_finish(r));
+    bool same = emitted_count == count;
+    for (size_t i = 0; same && i < count; i++) {
+        char line[512];
+        snprintf(line, sizeof(line), "{\"event\":\"text\",\"data\":\"%s\"}", want[i]);
+        same = !strcmp(emitted[i], line);
+    }
+    for (size_t i = 0; !same && i < emitted_count; i++) fprintf(stderr, "k=%zu spoken %zu: %s\n", k, i, emitted[i]);
+    assert(same);
+    free_respond(r);
+}
+/* A lead-in is cut whole wherever the stream and the chunker split it. */
+static void lead_in_stream_cases(const struct zapp_assistant *a)
+{
+    static const char *const first[] = {"r2 is in sync."}, *const based[] = {"r1 and r2 are in sync,", "and the mac is not."},
+        *const word_cap[] = {"One two three four five six seven eight r1 is", "in sync today."},
+        *const later[] = {"Hello there my friend,", "All hosts are fine today and r1 is", "fine."},
+        *const tool[] = {"Nothing wrong"};
+    static const char word_cap_in[] = "One two three four five six seven eight the observations show that r1 is in sync today.";
+    static const char later_in[] = "Hello there my friend, All hosts are fine today and the observations show that r1 is fine.";
+    size_t cut = first_len(word_cap_in, strlen(word_cap_in));
+    assert(cut > (size_t)(strstr(word_cap_in, "the observations") - word_cap_in) &&
+           cut < (size_t)(strstr(word_cap_in, " r1") - word_cap_in));
+    size_t second = ready_len(later_in + 23, strlen(later_in + 23), FIRST_CHUNK + 22 / 4, false);
+    assert(second > 29 && second < 55);
+    for (size_t k = 1; k <= 7; k += 3) {
+        expect_spoken(a, "According to the data, r2 is in sync.", k, first, 1);
+        expect_spoken(a, "Based on the data, r1 and r2 are in sync, and the mac is not.", k, based, 2);
+        expect_spoken(a, word_cap_in, k, word_cap, 2);
+        expect_spoken(a, later_in, k, later, 3);
+        expect_spoken(a, "the fleet tool shows nothing wrong", k, tool, 1);
     }
 }
 int main(void)
@@ -642,7 +689,7 @@ int main(void)
     rejected_cases(&a); tool_cases(&a); underscore_cases(&a);
     pcm_cases(&a); type_cases(&a); respond_streamed(); respond_first_clause(); first_len_cases(); respond_muted(); respond_tool(true); respond_tool(false); respond_wanted();
     chat_quiet();
-    message_cases(); grounding_cases(&a);
+    message_cases(); grounding_cases(&a); lead_in_stream_cases(&a);
     reset_log();
     puts("assistant tests passed");
     return 0;

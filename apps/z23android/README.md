@@ -83,7 +83,9 @@ and the headline count and the spoken answer use that one rule. The laptop
 tells the model which text describes the fleet hosts and which the phone's own
 node, whose buttons (**Start node**, **Stop node**, **Talk**, **More**,
 **Confirm**) are never advice for a fleet host, and removes a spoken lead-in
-such as "the observation says" or "the host blockers tool returned" before the owner hears it.
+such as "the observation says" or "the host blockers tool returned" before the owner hears it, even when
+the lead-in spans two spoken chunks: only the trailing words that may still grow into one wait for
+the next chunk. A host label such as r1 keeps its lower case where a lead-in is cut.
 The model does not read the screen rows. It gets one verdict line per host from
 the same rule as the headline ("in sync", "not in sync: N blocks behind", "not
 counted in sync: <reason>") with no heights, so it has no numbers to compare;
