@@ -16369,8 +16369,12 @@ pr-check:
 # universal. A path that routes to no group is named on the selection line
 # (detail=unrouted=N first=<path>); with no routed group the test step is
 # skipped. The stack gate still runs the proof's full set.
-# The check-kpi-floor step reads only build/gen/CAPABILITY_INVENTORY.jsonl
-# (built by the step before it), so a KPI regression such as a new duplicate
+# The check-kpi-floor step reads the floor file tools/lint/kpi_floor.txt and
+# the inputs its metrics measure: build/gen/CAPABILITY_INVENTORY.jsonl (built
+# by the step before it), engine/composition/commands/catalog.def,
+# tests/harness/src, tools/dev/test_group_catalog.def, the Makefile and
+# tools/lint/{bash_allowlist,file_size_policy_baseline,determinism_baseline,
+# orphan_placement_baseline}.txt. So a KPI regression such as a new duplicate
 # function fails here instead of at the stack gate.
 # Never pick groups from the presentation lists of `code guide` or
 # `code tests`: they are capped and miss groups the proof runs.
