@@ -121,20 +121,32 @@ bool fs_conn_budget_ok(uint64_t bytes, int64_t start, int64_t now)
  * on an otherwise-identical parser. Collapsing it into one definition is a
  * real behavior change to the PoW admission path, out of this fix's scope.
  * Tracked, not silently accepted, in tools/lint/arm_symbol_single_baseline.txt. */
-bool fs_parse_serve_request(const uint8_t *p, uint32_t n, bool *all,
-                            bool *range, const uint8_t **puzzle,
-                            uint16_t *start, uint16_t *end)
+static void fs_win_parse_serve_reset(bool *all, bool *range,
+                                     const uint8_t **puzzle,
+                                     uint16_t *start, uint16_t *end)
 {
     if (all) *all = false;
     if (range) *range = false;
     if (puzzle) *puzzle = NULL;
     if (start) *start = 0;
     if (end) *end = 0;
+}
+
+static bool fs_win_parse_serve_gated(const uint8_t *p, uint32_t n)
+{
+    return n >= FS_POW_SOLUTION_SIZE + 3 &&
+           (memcmp(p + FS_POW_SOLUTION_SIZE, "ALL", 3) == 0 ||
+            memcmp(p + FS_POW_SOLUTION_SIZE, "RNG", 3) == 0);
+}
+
+bool fs_parse_serve_request(const uint8_t *p, uint32_t n, bool *all,
+                            bool *range, const uint8_t **puzzle,
+                            uint16_t *start, uint16_t *end)
+{
+    fs_win_parse_serve_reset(all, range, puzzle, start, end);
     if (!p) return false;
     uint32_t off = 0;
-    if (n >= FS_POW_SOLUTION_SIZE + 3 &&
-        (memcmp(p + FS_POW_SOLUTION_SIZE, "ALL", 3) == 0 ||
-         memcmp(p + FS_POW_SOLUTION_SIZE, "RNG", 3) == 0)) {
+    if (fs_win_parse_serve_gated(p, n)) {
         if (puzzle) *puzzle = p;
         off = FS_POW_SOLUTION_SIZE;
     }
@@ -421,28 +433,21 @@ static bool fs_conn_deadline_ms(const struct fs_session *session,
     return true;
 }
 
-bool fs_parse_serve_request(const uint8_t *payload, uint32_t plen,
-                            bool *is_all, bool *is_rng,
-                            const uint8_t **puzzle,
-                            uint16_t *rng_start, uint16_t *rng_end)
+static void fs_parse_serve_reset(bool *is_all, bool *is_rng,
+                                 const uint8_t **puzzle,
+                                 uint16_t *rng_start, uint16_t *rng_end)
 {
     if (is_all) *is_all = false;
     if (is_rng) *is_rng = false;
     if (puzzle) *puzzle = NULL;
     if (rng_start) *rng_start = 0;
     if (rng_end) *rng_end = 0;
-    if (!payload) return false;
+}
 
-    const uint8_t *body = payload;
-    uint32_t blen = plen;
-    /* A gated request carries a 48-byte solution prefix. Detect it by total
-     * length: gated ALL is 51 bytes, gated RNG is 56 bytes. */
-    if (plen >= FS_POW_SOLUTION_SIZE + 3) {
-        body = payload + FS_POW_SOLUTION_SIZE;
-        blen = plen - FS_POW_SOLUTION_SIZE;
-        if (puzzle) *puzzle = payload;
-    }
-
+static bool fs_parse_serve_classify(const uint8_t *body, uint32_t blen,
+                                    bool *is_all, bool *is_rng,
+                                    uint16_t *rng_start, uint16_t *rng_end)
+{
     if (blen == 3 && memcmp(body, "ALL", 3) == 0) {
         if (is_all) *is_all = true;
         return true;
@@ -455,22 +460,35 @@ bool fs_parse_serve_request(const uint8_t *payload, uint32_t plen,
             *rng_end = (uint16_t)body[5] | ((uint16_t)body[6] << 8);
         return true;
     }
+    return false;
+}
+
+bool fs_parse_serve_request(const uint8_t *payload, uint32_t plen,
+                            bool *is_all, bool *is_rng,
+                            const uint8_t **puzzle,
+                            uint16_t *rng_start, uint16_t *rng_end)
+{
+    fs_parse_serve_reset(is_all, is_rng, puzzle, rng_start, rng_end);
+    if (!payload) return false;
+
+    const uint8_t *body = payload;
+    uint32_t blen = plen;
+    /* A gated request carries a 48-byte solution prefix. Detect it by total
+     * length: gated ALL is 51 bytes, gated RNG is 56 bytes. */
+    if (plen >= FS_POW_SOLUTION_SIZE + 3) {
+        body = payload + FS_POW_SOLUTION_SIZE;
+        blen = plen - FS_POW_SOLUTION_SIZE;
+        if (puzzle) *puzzle = payload;
+    }
+
+    if (fs_parse_serve_classify(body, blen, is_all, is_rng, rng_start,
+                                rng_end))
+        return true;
     /* Not a large-serve request (e.g., no puzzle prefix present). Retry the
      * ungated interpretation so a pre-puzzle probe still classifies. */
     if (puzzle) *puzzle = NULL;
-    if (plen == 3 && memcmp(payload, "ALL", 3) == 0) {
-        if (is_all) *is_all = true;
-        return true;
-    }
-    if (plen >= 8 && memcmp(payload, "RNG", 3) == 0) {
-        if (is_rng) *is_rng = true;
-        if (rng_start)
-            *rng_start = (uint16_t)payload[3] | ((uint16_t)payload[4] << 8);
-        if (rng_end)
-            *rng_end = (uint16_t)payload[5] | ((uint16_t)payload[6] << 8);
-        return true;
-    }
-    return false;
+    return fs_parse_serve_classify(payload, plen, is_all, is_rng, rng_start,
+                                   rng_end);
 }
 
 enum fs_admit_result fs_admit_serve_pow(const uint8_t *puzzle,
@@ -878,6 +896,185 @@ static void fs_serve_rom_list(struct fs_session *session,
     rom_seed_peer_release(client_ip);
 }
 
+/* Outcome of the per-request-frame dispatch for one received frame. */
+enum fs_request_step {
+    FS_REQUEST_STEP_STOP,
+    FS_REQUEST_STEP_NEXT,
+    FS_REQUEST_STEP_FALL,
+};
+
+static bool fs_client_budget_check(const struct fs_session *session)
+{
+    if (!fs_conn_budget_ok(session->bytes_sent,
+                           session->start_monotonic_ms,
+                           platform_time_monotonic_ms())) {
+        fs_gate_log_throttled("connection_lifetime_exceeded", 0);
+        return false;
+    }
+    return true;
+}
+
+static bool fs_client_recv_checked(struct fs_session *session,
+                                   uint8_t *type, const uint8_t **payload,
+                                   uint32_t *plen, int64_t deadline_ms)
+{
+    if (!fs_recv_frame_until(session, type, payload, plen, deadline_ms))
+        return false;
+    return fs_client_budget_check(session);
+}
+
+static bool fs_client_serve_challenge(struct fs_session *session)
+{
+    uint8_t seed[32];
+    int bits = PUZZLE_MIN_BITS;
+    int64_t st = 0;
+    puzzle_gate_challenge(fs_pow_gate(), seed, &bits, &st);
+    return fs_send_challenge(session, seed, bits, st);
+}
+
+static enum fs_request_step fs_client_serve_request(
+    struct fs_session *session, const uint8_t client_ip[16],
+    const uint8_t *payload, uint32_t plen)
+{
+    if (file_market_delivery_is_request(payload, plen)) {
+        if (!file_market_delivery_serve(session, client_ip,
+                                        payload, plen))
+            return FS_REQUEST_STEP_STOP;
+        return FS_REQUEST_STEP_NEXT;
+    }
+    /* Free ROM requests use independent rom_seed caps. */
+    uint8_t rom_root[32];
+    uint32_t rom_idx = 0;
+    if (fs_parse_rom_request(payload, plen, rom_root, &rom_idx)) {
+        fs_serve_rom_chunk(session, client_ip, rom_root, rom_idx);
+        return FS_REQUEST_STEP_NEXT;
+    }
+    uint8_t rmf_root[32];
+    if (fs_parse_rom_manifest_request(payload, plen, rmf_root)) {
+        fs_serve_rom_manifest(session, client_ip, rmf_root);
+        return FS_REQUEST_STEP_NEXT;
+    }
+    if (fs_parse_rom_list_request(payload, plen)) {
+        fs_serve_rom_list(session, client_ip);
+        return FS_REQUEST_STEP_NEXT;
+    }
+    return FS_REQUEST_STEP_FALL;
+}
+
+static void fs_client_stream_admitted(struct fs_session *session,
+                                      const struct file_manifest *manifest,
+                                      const uint8_t client_ip[16],
+                                      bool snapshot_allowed, bool is_rng,
+                                      uint16_t rng_start, uint16_t rng_end)
+{
+    puzzle_gate_serve_begin(fs_pow_gate());
+    if (is_rng) {
+        uint32_t end = rng_end;
+        if (end > manifest->num_chunks) end = manifest->num_chunks;
+        fs_stream_range(session, manifest, rng_start, end,
+                        client_ip, snapshot_allowed);
+    } else { /* is_all */
+        printf("file_service: streaming %u chunks (%.1f GB)...\n",
+               manifest->num_chunks,
+               (double)manifest->total_bytes / (1024.0*1024.0*1024.0));
+        fs_stream_range(session, manifest, 0, manifest->num_chunks,
+                        client_ip, snapshot_allowed);
+        printf("file_service: streaming done (%.1f MB/s)\n",
+               fs_session_mbps(session));
+    }
+    puzzle_gate_serve_end(fs_pow_gate());
+    fs_ip_serve_release(client_ip);
+}
+
+static bool fs_client_serve_gated(struct fs_session *session,
+                                  const struct file_manifest *manifest,
+                                  const uint8_t client_ip[16],
+                                  bool snapshot_allowed, const uint8_t *puzzle,
+                                  bool is_rng, uint16_t rng_start,
+                                  uint16_t rng_end)
+{
+    /* ── PoW admission gate (mirrors snapsync_validate_serve_request
+     * for the P2P path) — required BEFORE committing a worker to a
+     * large stream. Missing/invalid/stale puzzle → challenge + retry,
+     * never a silent drop. ─────────────────────────────────────── */
+    uint8_t seed[32];
+    int bits = PUZZLE_MIN_BITS;
+    int64_t st = 0;
+    enum fs_admit_result adm =
+        fs_admit_serve_pow(puzzle, session->peer_nonce, seed, &bits, &st);
+    if (adm == FS_ADMIT_CHALLENGE) {
+        fs_gate_log_throttled("challenge_issued", bits);
+        return fs_send_challenge(session, seed, bits, st);
+    }
+
+    /* Puzzle valid — enforce the per-IP concurrent-serve cap. */
+    if (!fs_ip_serve_acquire(client_ip)) {
+        fs_gate_log_throttled("ip_concurrency_refused", 0);
+        return fs_send_frame(session, FS_DONE, NULL, 0);
+    }
+
+    fs_client_stream_admitted(session, manifest, client_ip, snapshot_allowed,
+                              is_rng, rng_start, rng_end);
+    return true;
+}
+
+static bool fs_client_serve_manifest(struct fs_session *session,
+                                     const struct file_manifest *manifest,
+                                     bool snapshot_allowed)
+{
+    for (uint32_t i = 0; i < manifest->num_chunks; i++) {
+        if (manifest->chunks[i].file_index == 254 &&
+            !snapshot_allowed)
+            continue;
+        uint8_t entry[45]; /* sha3(32)+size(4)+file_idx(1)+offset(8) */
+        memcpy(entry, manifest->chunks[i].sha3, 32);
+        entry[32] = (uint8_t)(manifest->chunks[i].size);
+        entry[33] = (uint8_t)(manifest->chunks[i].size >> 8);
+        entry[34] = (uint8_t)(manifest->chunks[i].size >> 16);
+        entry[35] = (uint8_t)(manifest->chunks[i].size >> 24);
+        entry[36] = manifest->chunks[i].file_index;
+        memcpy(entry + 37, &manifest->chunks[i].offset, 8);
+        if (!fs_send_frame(session, FS_MANIFEST, entry, 45))
+            break;
+    }
+    return fs_send_frame(session, FS_DONE, NULL, 0);
+}
+
+/* Handle one received frame: false means stop serving this connection. */
+static bool fs_client_dispatch(struct fs_session *session,
+                               const struct file_manifest *manifest,
+                               const uint8_t client_ip[16],
+                               uint8_t type, const uint8_t *payload,
+                               uint32_t plen, bool have_manifest,
+                               bool snapshot_allowed)
+{
+    /* Client explicitly asks for a challenge before requesting bulk data. */
+    if (type == FS_CHALLENGE)
+        return fs_client_serve_challenge(session);
+
+    if (type == FS_REQUEST) {
+        enum fs_request_step step =
+            fs_client_serve_request(session, client_ip, payload, plen);
+        if (step != FS_REQUEST_STEP_FALL)
+            return step == FS_REQUEST_STEP_NEXT;
+    }
+
+    bool is_all = false, is_rng = false;
+    const uint8_t *puzzle = NULL;
+    uint16_t rng_start = 0, rng_end = 0;
+    bool is_serve = (type == FS_REQUEST) &&
+        fs_parse_serve_request(payload, plen, &is_all, &is_rng,
+                               &puzzle, &rng_start, &rng_end);
+
+    if (is_serve && (is_all || is_rng) && have_manifest)
+        return fs_client_serve_gated(session, manifest, client_ip,
+                                     snapshot_allowed, puzzle, is_rng,
+                                     rng_start, rng_end);
+    if (type == FS_MANIFEST && have_manifest)
+        return fs_client_serve_manifest(session, manifest, snapshot_allowed);
+    return type != FS_DONE;
+}
+
 /* Per-client handler run on a bounded worker pool. */
 static void fs_handle_client_fd(int client_fd, const uint8_t client_ip[16])
 {
@@ -902,25 +1099,15 @@ static void fs_handle_client_fd(int client_fd, const uint8_t client_ip[16])
     }
 
     while (atomic_load(&g_fs_running)) {
-        if (!fs_conn_budget_ok(session.bytes_sent,
-                               session.start_monotonic_ms,
-                               platform_time_monotonic_ms())) {
-            fs_gate_log_throttled("connection_lifetime_exceeded", 0);
+        if (!fs_client_budget_check(&session))
             break;
-        }
         bool have_manifest = atomic_load(&g_have_manifest);
         uint8_t type;
         const uint8_t *payload;
         uint32_t plen;
-        if (!fs_recv_frame_until(&session, &type, &payload, &plen,
-                                 connection_deadline_ms))
+        if (!fs_client_recv_checked(&session, &type, &payload, &plen,
+                                    connection_deadline_ms))
             break;
-        if (!fs_conn_budget_ok(session.bytes_sent,
-                               session.start_monotonic_ms,
-                               platform_time_monotonic_ms())) {
-            fs_gate_log_throttled("connection_lifetime_exceeded", 0);
-            break;
-        }
 
         if (have_manifest) {
             pthread_mutex_lock(&g_manifest_mutex);
@@ -929,112 +1116,9 @@ static void fs_handle_client_fd(int client_fd, const uint8_t client_ip[16])
         }
         bool snapshot_allowed = fs_snapshot_serving_allowed();
 
-        /* Client explicitly asks for a challenge before requesting bulk data. */
-        if (type == FS_CHALLENGE) {
-            uint8_t seed[32];
-            int bits = PUZZLE_MIN_BITS;
-            int64_t st = 0;
-            puzzle_gate_challenge(fs_pow_gate(), seed, &bits, &st);
-            if (!fs_send_challenge(&session, seed, bits, st))
-                break;
-            continue;
-        }
-
-        if (type == FS_REQUEST) {
-            if (file_market_delivery_is_request(payload, plen)) {
-                if (!file_market_delivery_serve(&session, client_ip,
-                                                payload, plen))
-                    break;
-                continue;
-            }
-            /* Free ROM requests use independent rom_seed caps. */
-            uint8_t rom_root[32];
-            uint32_t rom_idx = 0;
-            if (fs_parse_rom_request(payload, plen, rom_root, &rom_idx)) {
-                fs_serve_rom_chunk(&session, client_ip, rom_root, rom_idx);
-                continue;
-            }
-            uint8_t rmf_root[32];
-            if (fs_parse_rom_manifest_request(payload, plen, rmf_root)) {
-                fs_serve_rom_manifest(&session, client_ip, rmf_root);
-                continue;
-            }
-            if (fs_parse_rom_list_request(payload, plen)) {
-                fs_serve_rom_list(&session, client_ip);
-                continue;
-            }
-        }
-
-        bool is_all = false, is_rng = false;
-        const uint8_t *puzzle = NULL;
-        uint16_t rng_start = 0, rng_end = 0;
-        bool is_serve = (type == FS_REQUEST) &&
-            fs_parse_serve_request(payload, plen, &is_all, &is_rng,
-                                   &puzzle, &rng_start, &rng_end);
-
-        if (is_serve && (is_all || is_rng) && have_manifest) {
-            /* ── PoW admission gate (mirrors snapsync_validate_serve_request
-             * for the P2P path) — required BEFORE committing a worker to a
-             * large stream. Missing/invalid/stale puzzle → challenge + retry,
-             * never a silent drop. ─────────────────────────────────────── */
-            uint8_t seed[32];
-            int bits = PUZZLE_MIN_BITS;
-            int64_t st = 0;
-            enum fs_admit_result adm =
-                fs_admit_serve_pow(puzzle, session.peer_nonce, seed, &bits, &st);
-            if (adm == FS_ADMIT_CHALLENGE) {
-                fs_gate_log_throttled("challenge_issued", bits);
-                if (!fs_send_challenge(&session, seed, bits, st))
-                    break;
-                continue;
-            }
-
-            /* Puzzle valid — enforce the per-IP concurrent-serve cap. */
-            if (!fs_ip_serve_acquire(client_ip)) {
-                fs_gate_log_throttled("ip_concurrency_refused", 0);
-                if (!fs_send_frame(&session, FS_DONE, NULL, 0))
-                    break;
-                continue;
-            }
-
-            puzzle_gate_serve_begin(fs_pow_gate());
-            if (is_rng) {
-                uint32_t end = rng_end;
-                if (end > manifest.num_chunks) end = manifest.num_chunks;
-                fs_stream_range(&session, &manifest, rng_start, end,
-                                client_ip, snapshot_allowed);
-            } else { /* is_all */
-                printf("file_service: streaming %u chunks (%.1f GB)...\n",
-                       manifest.num_chunks,
-                       (double)manifest.total_bytes / (1024.0*1024.0*1024.0));
-                fs_stream_range(&session, &manifest, 0, manifest.num_chunks,
-                                client_ip, snapshot_allowed);
-                printf("file_service: streaming done (%.1f MB/s)\n",
-                       fs_session_mbps(&session));
-            }
-            puzzle_gate_serve_end(fs_pow_gate());
-            fs_ip_serve_release(client_ip);
-        } else if (type == FS_MANIFEST && have_manifest) {
-            for (uint32_t i = 0; i < manifest.num_chunks; i++) {
-                if (manifest.chunks[i].file_index == 254 &&
-                    !snapshot_allowed)
-                    continue;
-                uint8_t entry[45]; /* sha3(32)+size(4)+file_idx(1)+offset(8) */
-                memcpy(entry, manifest.chunks[i].sha3, 32);
-                entry[32] = (uint8_t)(manifest.chunks[i].size);
-                entry[33] = (uint8_t)(manifest.chunks[i].size >> 8);
-                entry[34] = (uint8_t)(manifest.chunks[i].size >> 16);
-                entry[35] = (uint8_t)(manifest.chunks[i].size >> 24);
-                entry[36] = manifest.chunks[i].file_index;
-                memcpy(entry + 37, &manifest.chunks[i].offset, 8);
-                if (!fs_send_frame(&session, FS_MANIFEST, entry, 45))
-                    break;
-            }
-            if (!fs_send_frame(&session, FS_DONE, NULL, 0))
-                break;
-        } else if (type == FS_DONE) {
+        if (!fs_client_dispatch(&session, &manifest, client_ip, type, payload,
+                                plen, have_manifest, snapshot_allowed))
             break;
-        }
     }
 
     printf("file_service: client done (%.1f MB/s, %llu bytes)\n",

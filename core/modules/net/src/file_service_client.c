@@ -37,6 +37,80 @@
 #include "util/log_macros.h"
 #define FS_WORKER_CONNECT_BUDGET_MS 10000LL
 #define FS_WORKER_CONNECT_POLL_MS 100
+#define FS_NWORKERS 8
+
+static int64_t fs_connect_now_ms(const struct fs_connect_ops *ops)
+{
+    return ops ? ops->now_ms(ops->opaque) : platform_time_monotonic_ms();
+}
+
+static bool fs_connect_args_invalid(const struct sockaddr_storage *address,
+                                    socklen_t address_len, int64_t budget_ms,
+                                    const struct fs_connect_ops *ops)
+{
+    return !address || address_len == 0 || address_len > sizeof(*address) ||
+        budget_ms <= 0 ||
+        (ops && (!ops->now_ms || !ops->connect_fd || !ops->poll_fd ||
+                 !ops->check_fd));
+}
+
+static const char *fs_connect_open_nonblocking(
+    const struct sockaddr_storage *address, int socktype, int protocol,
+    int *fd, int *flags)
+{
+    *fd = socket(address->ss_family, socktype, protocol);
+    if (*fd < 0)
+        return "socket creation failed";
+    *flags = fcntl(*fd, F_GETFL, 0);
+    if (*flags < 0 || fcntl(*fd, F_SETFL, *flags | O_NONBLOCK) < 0)
+        return "nonblocking setup failed";
+    return NULL;
+}
+
+static int fs_connect_start(int fd, const struct sockaddr_storage *address,
+                            socklen_t address_len,
+                            const struct fs_connect_ops *ops)
+{
+    return ops
+        ? ops->connect_fd(ops->opaque, fd,
+                          (const struct sockaddr *)address, address_len)
+        : netbase_connect_guarded(fd, (const struct sockaddr *)address, address_len);
+}
+
+static const char *fs_connect_poll_ready(const struct pollfd *pfd, int fd,
+                                         const struct fs_connect_ops *ops)
+{
+    bool connected = ops ? ops->check_fd(ops->opaque, fd)
+                         : connect_socket_check(fd);
+    if ((pfd->revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 ||
+        (pfd->revents & POLLOUT) == 0 || !connected)
+        return "asynchronous connect failed";
+    return NULL;
+}
+
+static const char *fs_connect_wait(int fd, const struct fs_connect_ops *ops,
+                                   int64_t start_ms, int64_t deadline_ms)
+{
+    for (;;) {
+        int64_t now_ms = fs_connect_now_ms(ops);
+        if (now_ms < start_ms || now_ms >= deadline_ms)
+            return "connect deadline expired or clock reversed";
+        int64_t remaining_ms = deadline_ms - now_ms;
+        int timeout_ms = remaining_ms > INT_MAX ? INT_MAX
+                                                : (int)remaining_ms;
+        struct pollfd pfd = {.fd = fd, .events = POLLOUT, .revents = 0};
+        int poll_rc = ops ? ops->poll_fd(ops->opaque, &pfd, timeout_ms)
+                          : poll(&pfd, 1, timeout_ms);
+        if (poll_rc < 0 && errno == EINTR)
+            continue;
+        if (poll_rc < 0)
+            return "connect poll failed";
+        if (poll_rc == 0)
+            continue;
+        return fs_connect_poll_ready(&pfd, fd, ops);
+    }
+}
+
 
 
 /* Connect an already-resolved endpoint with one absolute monotonic budget.
@@ -54,73 +128,34 @@ int fs_connect_resolved_until(const struct sockaddr_storage *address,
     int flags = -1;
     int64_t start_ms = 0;
 
-    if (!address || address_len == 0 || address_len > sizeof(*address) ||
-        budget_ms <= 0 ||
-        (ops && (!ops->now_ms || !ops->connect_fd || !ops->poll_fd ||
-                 !ops->check_fd))) {
+    if (fs_connect_args_invalid(address, address_len, budget_ms, ops)) {
         failure = "invalid resolved endpoint or budget";
         goto failed;
     }
-    start_ms = ops ? ops->now_ms(ops->opaque)
-                   : platform_time_monotonic_ms();
+    start_ms = fs_connect_now_ms(ops);
     if (start_ms <= 0 || start_ms > INT64_MAX - budget_ms) {
         failure = "monotonic connect deadline unavailable";
         goto failed;
     }
     int64_t deadline_ms = start_ms + budget_ms;
 
-    fd = socket(address->ss_family, socktype, protocol);
-    if (fd < 0) {
-        failure = "socket creation failed";
+    failure = fs_connect_open_nonblocking(address, socktype, protocol,
+                                          &fd, &flags);
+    if (failure)
         goto failed;
-    }
-    flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        failure = "nonblocking setup failed";
-        goto failed;
-    }
 
-    int rc = ops
-        ? ops->connect_fd(ops->opaque, fd,
-                          (const struct sockaddr *)address, address_len)
-        : netbase_connect_guarded(fd, (const struct sockaddr *)address, address_len);
+    int rc = fs_connect_start(fd, address, address_len, ops);
     if (rc < 0 && errno != EINPROGRESS && errno != EWOULDBLOCK) {
         failure = "connect failed";
         goto failed;
     }
-    while (rc < 0) {
-        int64_t now_ms = ops ? ops->now_ms(ops->opaque)
-                             : platform_time_monotonic_ms();
-        if (now_ms < start_ms || now_ms >= deadline_ms) {
-            failure = "connect deadline expired or clock reversed";
+    if (rc < 0) {
+        failure = fs_connect_wait(fd, ops, start_ms, deadline_ms);
+        if (failure)
             goto failed;
-        }
-        int64_t remaining_ms = deadline_ms - now_ms;
-        int timeout_ms = remaining_ms > INT_MAX ? INT_MAX
-                                                : (int)remaining_ms;
-        struct pollfd pfd = {.fd = fd, .events = POLLOUT, .revents = 0};
-        int poll_rc = ops ? ops->poll_fd(ops->opaque, &pfd, timeout_ms)
-                          : poll(&pfd, 1, timeout_ms);
-        if (poll_rc < 0 && errno == EINTR)
-            continue;
-        if (poll_rc < 0) {
-            failure = "connect poll failed";
-            goto failed;
-        }
-        if (poll_rc == 0)
-            continue;
-        bool connected = ops ? ops->check_fd(ops->opaque, fd)
-                             : connect_socket_check(fd);
-        if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0 ||
-            (pfd.revents & POLLOUT) == 0 || !connected) {
-            failure = "asynchronous connect failed";
-            goto failed;
-        }
-        rc = 0;
     }
 
-    int64_t completed_ms = ops ? ops->now_ms(ops->opaque)
-                               : platform_time_monotonic_ms();
+    int64_t completed_ms = fs_connect_now_ms(ops);
     if (completed_ms < start_ms || completed_ms >= deadline_ms) {
         failure = "connect completed outside its absolute deadline";
         goto failed;
@@ -205,6 +240,87 @@ static bool fs_client_solve_challenge(struct fs_session *s,
     return true;
 }
 
+static bool range_worker_set_nonblocking(int fd, int *flags)
+{
+    *flags = fcntl(fd, F_GETFL, 0);
+    return !(*flags < 0 || fcntl(fd, F_SETFL, *flags | O_NONBLOCK) < 0);
+}
+
+static bool range_worker_set_timeouts(int fd)
+{
+    /* The record layer has tighter absolute deadlines; socket timeouts remain
+     * a final kernel-level backstop for handshake and challenge traffic. */
+    struct timeval tv = {.tv_sec = 120, .tv_usec = 0};
+    return !(setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
+             setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0);
+}
+
+static void range_worker_build_request(const struct range_worker *w,
+                                       const uint8_t solution[FS_POW_SOLUTION_SIZE],
+                                       uint8_t rng[FS_POW_SOLUTION_SIZE + 8])
+{
+    memcpy(rng, solution, FS_POW_SOLUTION_SIZE);
+    rng[FS_POW_SOLUTION_SIZE + 0] = 'R';
+    rng[FS_POW_SOLUTION_SIZE + 1] = 'N';
+    rng[FS_POW_SOLUTION_SIZE + 2] = 'G';
+    zcl_write_u16_le(&rng[FS_POW_SOLUTION_SIZE + 3], (uint16_t)w->start);
+    zcl_write_u16_le(&rng[FS_POW_SOLUTION_SIZE + 5], (uint16_t)w->end);
+    rng[FS_POW_SOLUTION_SIZE + 7] = 0;
+}
+
+static void range_worker_chunk_path(const struct range_worker *w, uint32_t i,
+                                    char blk_path[600])
+{
+    /* Write to the correct file at the correct offset.
+     * file_index 0-252: block files (blk%05d.dat)
+     * file_index 253: block_index.bin
+     * file_index 254: node.db (SQLite UTXO set)
+     * Uses pwrite() for atomic positioned write. */
+    if (w->chunks[i].file_index == 254)
+        snprintf(blk_path, 600, "%s/consensus_snapshot.db", w->datadir);
+    else if (w->chunks[i].file_index == 253)
+        snprintf(blk_path, 600, "%s/block_index.bin", w->datadir);
+    else
+        snprintf(blk_path, 600, "%s/blocks/blk%05d.dat",
+                 w->datadir, w->chunks[i].file_index);
+}
+
+/* Writes one received chunk and frees buf. False means the positioned write
+ * failed and the chunk must not count as progress. */
+static bool range_worker_store_chunk(struct range_worker *w, uint32_t i,
+                                      uint8_t *buf, uint32_t sz)
+{
+    char blk_path[600];
+    range_worker_chunk_path(w, i, blk_path);
+    int bfd = open(blk_path, O_WRONLY | O_CREAT, 0644);
+    if (bfd >= 0) {
+        ssize_t written = pwrite(bfd, buf, sz, (off_t)w->chunks[i].offset);
+        if (written != (ssize_t)sz) {
+            fprintf(stderr,  // obs-ok:file-transfer-disk-failure
+                    "worker %d: pwrite %s offset=%llu "
+                    "sz=%u wrote=%zd errno=%d\n",
+                    w->id, blk_path,
+                    (unsigned long long)w->chunks[i].offset,
+                    sz, written, errno);
+            close(bfd);
+            free(buf);
+            atomic_fetch_add(&w->chunks_fail, 1);
+            return false;
+        }
+        /* Sync to disk so crash can't lose this chunk */
+        platform_data_sync(bfd);
+        close(bfd);
+        atomic_fetch_add(&w->chunks_ok, 1);
+    } else {
+        fprintf(stderr,  // obs-ok:file-transfer-disk-failure
+                "worker %d: open %s failed: %s\n",
+                w->id, blk_path, strerror(errno));
+        atomic_fetch_add(&w->chunks_fail, 1);
+    }
+    free(buf);
+    return true;
+}
+
 static void *range_worker_fn(void *arg)
 {
     struct range_worker *w = (struct range_worker *)arg;
@@ -225,8 +341,7 @@ static void *range_worker_fn(void *arg)
         goto done;
     }
 
-    socket_flags = fcntl(wfd, F_GETFL, 0);
-    if (socket_flags < 0 || fcntl(wfd, F_SETFL, socket_flags | O_NONBLOCK) < 0) {
+    if (!range_worker_set_nonblocking(wfd, &socket_flags)) {
         LOG_ERROR("filesvc", "worker %d: nonblocking setup failed: %s",
                   w->id, strerror(errno));
         goto done;
@@ -302,11 +417,7 @@ static void *range_worker_fn(void *arg)
         goto done;
     }
 
-    /* The record layer has tighter absolute deadlines; socket timeouts remain
-     * a final kernel-level backstop for handshake and challenge traffic. */
-    struct timeval tv = {.tv_sec = 120, .tv_usec = 0};
-    if (setsockopt(wfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
-        setsockopt(wfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+    if (!range_worker_set_timeouts(wfd)) {
         LOG_ERROR("filesvc", "worker %d: socket timeout setup failed: %s",
                   w->id, strerror(errno));
         goto done;
@@ -328,13 +439,7 @@ static void *range_worker_fn(void *arg)
 
     /* Send the gated range request: [48-byte solution]["RNG"][start][end]. */
     uint8_t rng[FS_POW_SOLUTION_SIZE + 8];
-    memcpy(rng, solution, FS_POW_SOLUTION_SIZE);
-    rng[FS_POW_SOLUTION_SIZE + 0] = 'R';
-    rng[FS_POW_SOLUTION_SIZE + 1] = 'N';
-    rng[FS_POW_SOLUTION_SIZE + 2] = 'G';
-    zcl_write_u16_le(&rng[FS_POW_SOLUTION_SIZE + 3], (uint16_t)w->start);
-    zcl_write_u16_le(&rng[FS_POW_SOLUTION_SIZE + 5], (uint16_t)w->end);
-    rng[FS_POW_SOLUTION_SIZE + 7] = 0;
+    range_worker_build_request(w, solution, rng);
     if (!fs_send_frame(&ws, FS_REQUEST, rng, sizeof(rng))) {
         LOG_ERROR("filesvc", "worker %d: range request send failed", w->id);
         goto done;
@@ -356,46 +461,10 @@ static void *range_worker_fn(void *arg)
             goto done;
         }
 
-        /* Write to the correct file at the correct offset.
-         * file_index 0-252: block files (blk%05d.dat)
-         * file_index 253: block_index.bin
-         * file_index 254: node.db (SQLite UTXO set)
-         * Uses pwrite() for atomic positioned write. */
-        char blk_path[600];
-        if (w->chunks[i].file_index == 254)
-            snprintf(blk_path, 600, "%s/consensus_snapshot.db", w->datadir);
-        else if (w->chunks[i].file_index == 253)
-            snprintf(blk_path, 600, "%s/block_index.bin", w->datadir);
-        else
-            snprintf(blk_path, 600, "%s/blocks/blk%05d.dat",
-                     w->datadir, w->chunks[i].file_index);
-        int bfd = open(blk_path, O_WRONLY | O_CREAT, 0644);
-        if (bfd >= 0) {
-            ssize_t written = pwrite(bfd, buf, sz, (off_t)w->chunks[i].offset);
-            if (written != (ssize_t)sz) {
-                fprintf(stderr,  // obs-ok:file-transfer-disk-failure
-                        "worker %d: pwrite %s offset=%llu "
-                        "sz=%u wrote=%zd errno=%d\n",
-                        w->id, blk_path,
-                        (unsigned long long)w->chunks[i].offset,
-                        sz, written, errno);
-                close(bfd);
-                free(buf);
-                atomic_fetch_add(&w->chunks_fail, 1);
-                next_chunk = i + 1;
-                continue; /* skip — don't count failed write as progress */
-            }
-            /* Sync to disk so crash can't lose this chunk */
-            platform_data_sync(bfd);
-            close(bfd);
-            atomic_fetch_add(&w->chunks_ok, 1);
-        } else {
-            fprintf(stderr,  // obs-ok:file-transfer-disk-failure
-                    "worker %d: open %s failed: %s\n",
-                    w->id, blk_path, strerror(errno));
-            atomic_fetch_add(&w->chunks_fail, 1);
+        if (!range_worker_store_chunk(w, i, buf, sz)) {
+            next_chunk = i + 1;
+            continue; /* skip — don't count failed write as progress */
         }
-        free(buf);
         atomic_fetch_add(&w->bytes, sz);
         next_chunk = i + 1;
     }
@@ -408,6 +477,241 @@ done:
     range_worker_socket_close(w, wfd);
     atomic_store_explicit(&w->done, true, memory_order_release);
     return NULL;
+}
+
+/* Resume support: how many leading chunks already sit on disk intact. */
+static uint32_t fs_sync_resume_scan(const char *datadir,
+                                    const struct file_chunk *chunks,
+                                    uint32_t num_chunks)
+{
+    uint32_t skip_chunks = 0;
+    {
+        uint32_t verified = 0, checked = 0;
+        for (uint32_t j = 0; j < num_chunks; j++) {
+            char blk_path[600];
+            if (chunks[j].file_index == 253)
+                snprintf(blk_path, 600, "%s/block_index.bin", datadir);
+            else
+                snprintf(blk_path, 600, "%s/blocks/blk%05d.dat",
+                         datadir, chunks[j].file_index);
+
+            /* Check if file is large enough for this chunk */
+            struct stat st;
+            if (stat(blk_path, &st) != 0 ||
+                (uint64_t)st.st_size < chunks[j].offset + chunks[j].size)
+                break; /* this chunk not on disk, stop skipping */
+
+            /* SHA3 verify every 20th chunk + first + last existing.
+             * Full verification would be slow on 7GB, spot-check is fast. */
+            if (j == 0 || j % 20 == 0) {
+                int fd2 = open(blk_path, O_RDONLY);
+                if (fd2 < 0) break;
+                uint8_t *vbuf = zcl_malloc(chunks[j].size, "file_verify_buf");
+                if (!vbuf) { close(fd2); break; }
+                ssize_t got = pread(fd2, vbuf, chunks[j].size,
+                                     (off_t)chunks[j].offset);
+                close(fd2);
+                if (got != (ssize_t)chunks[j].size) {
+                    free(vbuf); break;
+                }
+                uint8_t hash[32];
+                sha3_256(vbuf, chunks[j].size, hash);
+                free(vbuf);
+                if (memcmp(hash, chunks[j].sha3, 32) != 0) {
+                    fprintf(stderr,  // obs-ok:file-transfer-integrity-retry
+                            "file_service: resume SHA3 mismatch at "
+                            "chunk %u (file=%d off=%llu) — re-downloading "
+                            "from here\n", j, chunks[j].file_index,
+                            (unsigned long long)chunks[j].offset);
+                    break;
+                }
+                checked++;
+            }
+            verified++;
+        }
+        skip_chunks = verified;
+        if (skip_chunks > 0) {
+            printf("file_service: resuming — %u/%u chunks on disk "
+                   "(%u SHA3-verified)\n", skip_chunks, num_chunks, checked);
+        }
+    }
+    return skip_chunks;
+}
+
+static void fs_sync_check_stalls(struct range_worker *workers, int nworkers,
+                                 uint64_t *prev_done_bytes, int *stall_counts)
+{
+        /* The transport itself bounds a maximum public record to 271s.
+         * Keep this coarser recovery guard above that honest wire budget. */
+        {
+            for (int w = 0; w < nworkers; w++) {
+                uint64_t wb = atomic_load(&workers[w].bytes);
+                if (!atomic_load(&workers[w].done) && wb == prev_done_bytes[w]) {
+                    stall_counts[w]++;
+                    if (stall_counts[w] >= 60) { /* 60*5s = 300s stall */
+                        fprintf(stderr,  // obs-ok:file-transfer-stall-recovery
+                                "file_service: worker %d stalled "
+                                "at %llu bytes, cancelling\n",
+                                w, (unsigned long long)wb);
+                        range_worker_cancel(&workers[w]);
+                        stall_counts[w] = 0;
+                    }
+                } else {
+                    stall_counts[w] = 0;
+                    prev_done_bytes[w] = wb;
+                }
+            }
+        }
+}
+
+static void fs_sync_monitor_workers(struct range_worker *workers,
+                                    int nworkers, uint64_t total_bytes,
+                                    int64_t dl_start)
+{
+    /* Monitor progress — give up after 30 min total */
+    int64_t max_wait = 1800;
+    uint64_t prev_done_bytes[FS_NWORKERS];
+    int stall_counts[FS_NWORKERS];
+    memset(prev_done_bytes, 0, sizeof(prev_done_bytes));
+    /* Start at -4 so workers have 20s grace period to connect+handshake
+     * before stall detection kicks in. Prevents false cancellation. */
+    for (int w = 0; w < FS_NWORKERS; w++) stall_counts[w] = -4;
+    while (true) {
+        sleep(5);
+        uint64_t done = 0;
+        bool all_done = true;
+        for (int w = 0; w < nworkers; w++) {
+            done += atomic_load(&workers[w].bytes);
+            if (!atomic_load(&workers[w].done)) all_done = false;
+        }
+        int64_t el = (int64_t)platform_time_wall_time_t() - dl_start;
+        if (el > max_wait) {
+            printf("file_service: timeout after %llds, cancelling stuck "
+                   "workers\n", (long long)el);
+            for (int w = 0; w < nworkers; w++) {
+                if (!atomic_load(&workers[w].done)) {
+                    range_worker_cancel(&workers[w]);
+                }
+            }
+            break;
+        }
+        fs_sync_check_stalls(workers, nworkers, prev_done_bytes, stall_counts);
+        double pct = total_bytes > 0 ? 100.0 * (double)done / (double)total_bytes : 0;
+        int64_t elapsed = (int64_t)platform_time_wall_time_t() - dl_start;
+        double mbps = elapsed > 0 ? (double)done / (1048576.0 * (double)elapsed) : 0;
+        int eta = (done > 0 && elapsed > 0) ?
+            (int)((double)(total_bytes - done) / ((double)done / (double)elapsed)) : 0;
+        printf("file_service: [%3.0f%%] %.1f/%.1f GB  %.1f MB/s  "
+               "(%d connections)  ETA %dm%02ds\n",
+               pct, (double)done / (1024.0*1024.0*1024.0),
+               (double)total_bytes / (1024.0*1024.0*1024.0),
+               mbps, nworkers, eta / 60, eta % 60);
+        fflush(stdout);
+        if (all_done || done >= total_bytes) break;
+    }
+}
+
+static void fs_sync_worker_init(struct range_worker *wk, int w,
+                                const struct sockaddr_storage *peer,
+                                socklen_t peer_len, int peer_socktype,
+                                int peer_protocol, const uint8_t utxo_root[32],
+                                struct file_chunk *chunks, uint32_t ws,
+                                uint32_t we, const char *datadir,
+                                pthread_mutex_t *fd_mutex)
+{
+    wk->peer_sockaddr = *peer;
+    wk->peer_sockaddr_len = peer_len;
+    wk->peer_socktype = peer_socktype;
+    wk->peer_protocol = peer_protocol;
+    memcpy(wk->utxo_root, utxo_root, 32);
+    wk->chunks = chunks;
+    wk->start = ws;
+    wk->end = we;
+    wk->datadir = datadir;
+    wk->id = w;
+    wk->fd_mutex = fd_mutex;
+    wk->fd = -1;
+    atomic_store(&wk->done, false);
+    atomic_store(&wk->cancel, false);
+    atomic_store(&wk->bytes, 0);
+    atomic_store(&wk->chunks_ok, 0);
+    atomic_store(&wk->chunks_fail, 0);
+}
+
+static uint32_t fs_sync_collect_retry(const struct file_chunk *chunks,
+                                      uint32_t skip_chunks,
+                                      uint32_t num_chunks, const char *datadir,
+                                      uint32_t total_fail,
+                                      uint32_t *retry_idx)
+{
+        uint32_t nretry = 0;
+        for (uint32_t c = skip_chunks; c < num_chunks && nretry < total_fail; c++) {
+            /* Quick check: try reading the chunk back and verifying hash */
+            char blk_path[600];
+            if (chunks[c].file_index == 254)
+                snprintf(blk_path, 600, "%s/consensus_snapshot.db", datadir);
+            else if (chunks[c].file_index == 253)
+                snprintf(blk_path, 600, "%s/block_index.bin", datadir);
+            else
+                snprintf(blk_path, 600, "%s/blocks/blk%05d.dat",
+                         datadir, chunks[c].file_index);
+            int cfd = open(blk_path, O_RDONLY);
+            if (cfd < 0) { retry_idx[nretry++] = c; continue; }
+            uint8_t probe[1];
+            ssize_t rd = pread(cfd, probe, 1, (off_t)chunks[c].offset);
+            close(cfd);
+            if (rd <= 0)
+                retry_idx[nretry++] = c;
+        }
+    return nretry;
+}
+
+static uint32_t fs_sync_retry_fetch(struct fs_session *rs,
+                                    const struct file_chunk *chunks,
+                                    const char *datadir,
+                                    const uint32_t *retry_idx,
+                                    uint32_t nretry, int retry)
+{
+    uint32_t recovered = 0;
+        for (uint32_t r = 0; r < nretry; r++) {
+            uint32_t ci = retry_idx[r];
+            /* Request individual chunk by hash. A send failure means the
+             * retry connection is dead — stop and let the post-loop cleanup
+             * close rfd and free retry_idx. */
+            if (!fs_send_frame(rs, FS_REQUEST, chunks[ci].sha3, 32))
+                break;
+
+            uint8_t *buf = NULL;
+            uint32_t sz = 0;
+            if (!fs_recv_chunk_fast(rs, &buf, &sz, chunks[ci].sha3)) {
+                printf("[file] retrying chunk %u attempt %d failed\n",
+                       ci, retry + 1);
+                break;
+            }
+
+            char blk_path[600];
+            if (chunks[ci].file_index == 254)
+                snprintf(blk_path, 600, "%s/consensus_snapshot.db", datadir);
+            else if (chunks[ci].file_index == 253)
+                snprintf(blk_path, 600, "%s/block_index.bin", datadir);
+            else
+                snprintf(blk_path, 600, "%s/blocks/blk%05d.dat",
+                         datadir, chunks[ci].file_index);
+            int bfd = open(blk_path, O_WRONLY | O_CREAT, 0644);
+            if (bfd >= 0) {
+                ssize_t written = pwrite(bfd, buf, sz,
+                                         (off_t)chunks[ci].offset);
+                platform_data_sync(bfd);
+                close(bfd);
+                if (written == (ssize_t)sz) {
+                    recovered++;
+                    printf("[file] retrying chunk %u attempt %d succeeded\n",
+                           ci, retry + 1);
+                }
+            }
+            free(buf);
+        }
+    return recovered;
 }
 
 /* ── Client ────────────────────────────────────────────────────── */
@@ -560,64 +864,13 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
 
     /* Check if previous partial download exists — verify and resume.
      * We spot-check existing chunks with SHA3 to detect corruption. */
-    uint32_t skip_chunks = 0;
-    {
-        uint32_t verified = 0, checked = 0;
-        for (uint32_t j = 0; j < num_chunks; j++) {
-            char blk_path[600];
-            if (chunks[j].file_index == 253)
-                snprintf(blk_path, 600, "%s/block_index.bin", datadir);
-            else
-                snprintf(blk_path, 600, "%s/blocks/blk%05d.dat",
-                         datadir, chunks[j].file_index);
-
-            /* Check if file is large enough for this chunk */
-            struct stat st;
-            if (stat(blk_path, &st) != 0 ||
-                (uint64_t)st.st_size < chunks[j].offset + chunks[j].size)
-                break; /* this chunk not on disk, stop skipping */
-
-            /* SHA3 verify every 20th chunk + first + last existing.
-             * Full verification would be slow on 7GB, spot-check is fast. */
-            if (j == 0 || j % 20 == 0) {
-                int fd2 = open(blk_path, O_RDONLY);
-                if (fd2 < 0) break;
-                uint8_t *vbuf = zcl_malloc(chunks[j].size, "file_verify_buf");
-                if (!vbuf) { close(fd2); break; }
-                ssize_t got = pread(fd2, vbuf, chunks[j].size,
-                                     (off_t)chunks[j].offset);
-                close(fd2);
-                if (got != (ssize_t)chunks[j].size) {
-                    free(vbuf); break;
-                }
-                uint8_t hash[32];
-                sha3_256(vbuf, chunks[j].size, hash);
-                free(vbuf);
-                if (memcmp(hash, chunks[j].sha3, 32) != 0) {
-                    fprintf(stderr,  // obs-ok:file-transfer-integrity-retry
-                            "file_service: resume SHA3 mismatch at "
-                            "chunk %u (file=%d off=%llu) — re-downloading "
-                            "from here\n", j, chunks[j].file_index,
-                            (unsigned long long)chunks[j].offset);
-                    break;
-                }
-                checked++;
-            }
-            verified++;
-        }
-        skip_chunks = verified;
-        if (skip_chunks > 0) {
-            printf("file_service: resuming — %u/%u chunks on disk "
-                   "(%u SHA3-verified)\n", skip_chunks, num_chunks, checked);
-        }
-    }
+    uint32_t skip_chunks = fs_sync_resume_scan(datadir, chunks, num_chunks);
 
     /* Close manifest connection — we'll open parallel ones */
     fs_session_cleanup(&session);
     close(fd);
 
     /* Launch 8 parallel workers, each downloads a range of chunks */
-    #define FS_NWORKERS 8
     uint32_t remaining = num_chunks - skip_chunks;
     if (remaining == 0) {
         printf("file_service: all %u chunks already verified on disk\n",
@@ -640,23 +893,10 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
         if (we > num_chunks) we = num_chunks;
         if (ws >= num_chunks) break;
 
-        workers[nworkers].peer_sockaddr = resolved_peer;
-        workers[nworkers].peer_sockaddr_len = resolved_peer_len;
-        workers[nworkers].peer_socktype = resolved_peer_socktype;
-        workers[nworkers].peer_protocol = resolved_peer_protocol;
-        memcpy(workers[nworkers].utxo_root, utxo_root, 32);
-        workers[nworkers].chunks = chunks;
-        workers[nworkers].start = ws;
-        workers[nworkers].end = we;
-        workers[nworkers].datadir = datadir;
-        workers[nworkers].id = w;
-        workers[nworkers].fd_mutex = &worker_fd_mutex;
-        workers[nworkers].fd = -1;
-        atomic_store(&workers[nworkers].done, false);
-        atomic_store(&workers[nworkers].cancel, false);
-        atomic_store(&workers[nworkers].bytes, 0);
-        atomic_store(&workers[nworkers].chunks_ok, 0);
-        atomic_store(&workers[nworkers].chunks_fail, 0);
+        fs_sync_worker_init(&workers[nworkers], w, &resolved_peer,
+                            resolved_peer_len, resolved_peer_socktype,
+                            resolved_peer_protocol, utxo_root, chunks, ws, we,
+                            datadir, &worker_fd_mutex);
         /* raw-pthread-ok: short-burst-joined-immediately (per-download workers) */
         if (pthread_create(&wthreads[nworkers], NULL,
                            range_worker_fn, &workers[nworkers]) != 0) {
@@ -673,67 +913,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
 
     printf("file_service: %d parallel connections downloading...\n", nworkers);
 
-    /* Monitor progress — give up after 30 min total */
-    int64_t max_wait = 1800;
-    uint64_t prev_done_bytes[FS_NWORKERS];
-    int stall_counts[FS_NWORKERS];
-    memset(prev_done_bytes, 0, sizeof(prev_done_bytes));
-    /* Start at -4 so workers have 20s grace period to connect+handshake
-     * before stall detection kicks in. Prevents false cancellation. */
-    for (int w = 0; w < FS_NWORKERS; w++) stall_counts[w] = -4;
-    while (true) {
-        sleep(5);
-        uint64_t done = 0;
-        bool all_done = true;
-        for (int w = 0; w < nworkers; w++) {
-            done += atomic_load(&workers[w].bytes);
-            if (!atomic_load(&workers[w].done)) all_done = false;
-        }
-        int64_t el = (int64_t)platform_time_wall_time_t() - dl_start;
-        if (el > max_wait) {
-            printf("file_service: timeout after %llds, cancelling stuck "
-                   "workers\n", (long long)el);
-            for (int w = 0; w < nworkers; w++) {
-                if (!atomic_load(&workers[w].done)) {
-                    range_worker_cancel(&workers[w]);
-                }
-            }
-            break;
-        }
-        /* The transport itself bounds a maximum public record to 271s.
-         * Keep this coarser recovery guard above that honest wire budget. */
-        {
-            for (int w = 0; w < nworkers; w++) {
-                uint64_t wb = atomic_load(&workers[w].bytes);
-                if (!atomic_load(&workers[w].done) && wb == prev_done_bytes[w]) {
-                    stall_counts[w]++;
-                    if (stall_counts[w] >= 60) { /* 60*5s = 300s stall */
-                        fprintf(stderr,  // obs-ok:file-transfer-stall-recovery
-                                "file_service: worker %d stalled "
-                                "at %llu bytes, cancelling\n",
-                                w, (unsigned long long)wb);
-                        range_worker_cancel(&workers[w]);
-                        stall_counts[w] = 0;
-                    }
-                } else {
-                    stall_counts[w] = 0;
-                    prev_done_bytes[w] = wb;
-                }
-            }
-        }
-        double pct = total_bytes > 0 ? 100.0 * (double)done / (double)total_bytes : 0;
-        int64_t elapsed = (int64_t)platform_time_wall_time_t() - dl_start;
-        double mbps = elapsed > 0 ? (double)done / (1048576.0 * (double)elapsed) : 0;
-        int eta = (done > 0 && elapsed > 0) ?
-            (int)((double)(total_bytes - done) / ((double)done / (double)elapsed)) : 0;
-        printf("file_service: [%3.0f%%] %.1f/%.1f GB  %.1f MB/s  "
-               "(%d connections)  ETA %dm%02ds\n",
-               pct, (double)done / (1024.0*1024.0*1024.0),
-               (double)total_bytes / (1024.0*1024.0*1024.0),
-               mbps, nworkers, eta / 60, eta % 60);
-        fflush(stdout);
-        if (all_done || done >= total_bytes) break;
-    }
+    fs_sync_monitor_workers(workers, nworkers, total_bytes, dl_start);
 
     for (int w = 0; w < nworkers; w++)
         pthread_join(wthreads[w], NULL);
@@ -764,25 +944,8 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
         uint32_t *retry_idx = zcl_calloc(total_fail, sizeof(uint32_t),
                                          "retry_indices");
         if (!retry_idx) break;
-        uint32_t nretry = 0;
-        for (uint32_t c = skip_chunks; c < num_chunks && nretry < total_fail; c++) {
-            /* Quick check: try reading the chunk back and verifying hash */
-            char blk_path[600];
-            if (chunks[c].file_index == 254)
-                snprintf(blk_path, 600, "%s/consensus_snapshot.db", datadir);
-            else if (chunks[c].file_index == 253)
-                snprintf(blk_path, 600, "%s/block_index.bin", datadir);
-            else
-                snprintf(blk_path, 600, "%s/blocks/blk%05d.dat",
-                         datadir, chunks[c].file_index);
-            int cfd = open(blk_path, O_RDONLY);
-            if (cfd < 0) { retry_idx[nretry++] = c; continue; }
-            uint8_t probe[1];
-            ssize_t rd = pread(cfd, probe, 1, (off_t)chunks[c].offset);
-            close(cfd);
-            if (rd <= 0)
-                retry_idx[nretry++] = c;
-        }
+        uint32_t nretry = fs_sync_collect_retry(chunks, skip_chunks, num_chunks,
+                                                datadir, total_fail, retry_idx);
 
         if (nretry == 0) { free(retry_idx); break; }
 
@@ -815,45 +978,8 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
             continue;
         }
 
-        uint32_t recovered = 0;
-        for (uint32_t r = 0; r < nretry; r++) {
-            uint32_t ci = retry_idx[r];
-            /* Request individual chunk by hash. A send failure means the
-             * retry connection is dead — stop and let the post-loop cleanup
-             * close rfd and free retry_idx. */
-            if (!fs_send_frame(&rs, FS_REQUEST, chunks[ci].sha3, 32))
-                break;
-
-            uint8_t *buf = NULL;
-            uint32_t sz = 0;
-            if (!fs_recv_chunk_fast(&rs, &buf, &sz, chunks[ci].sha3)) {
-                printf("[file] retrying chunk %u attempt %d failed\n",
-                       ci, retry + 1);
-                break;
-            }
-
-            char blk_path[600];
-            if (chunks[ci].file_index == 254)
-                snprintf(blk_path, 600, "%s/consensus_snapshot.db", datadir);
-            else if (chunks[ci].file_index == 253)
-                snprintf(blk_path, 600, "%s/block_index.bin", datadir);
-            else
-                snprintf(blk_path, 600, "%s/blocks/blk%05d.dat",
-                         datadir, chunks[ci].file_index);
-            int bfd = open(blk_path, O_WRONLY | O_CREAT, 0644);
-            if (bfd >= 0) {
-                ssize_t written = pwrite(bfd, buf, sz,
-                                         (off_t)chunks[ci].offset);
-                platform_data_sync(bfd);
-                close(bfd);
-                if (written == (ssize_t)sz) {
-                    recovered++;
-                    printf("[file] retrying chunk %u attempt %d succeeded\n",
-                           ci, retry + 1);
-                }
-            }
-            free(buf);
-        }
+        uint32_t recovered = fs_sync_retry_fetch(&rs, chunks, datadir, retry_idx,
+                                                 nretry, retry);
 
         fs_session_cleanup(&rs);
         close(rfd);
