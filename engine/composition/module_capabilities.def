@@ -1355,6 +1355,7 @@ ZCL_MODULE_CAPABILITY("tools/command/native_slot_common.c", CAP_FS_READ|CAP_FS_W
 ZCL_MODULE_CAPABILITY("tools/command/native_ops_slot_activate.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK|CAP_NETWORK, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_slot_tip.c", CAP_NONE, "conf reads (open, fstat, ownership and mode checks) and the RPC socket are carried by the legacy_rpc_client row; this leaf references no classified symbol")
 ZCL_MODULE_CAPABILITY("tools/command/native_ops_slot_status.c", CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("tools/command/native_ops_node_restart.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK, "restart is one systemctl child; the node read path is the loopback rpc_client")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_reproduction_command.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_reward_command.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("tools/command/native_zcode_science_command.c", CAP_FS_WRITE, "")

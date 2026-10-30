@@ -344,6 +344,7 @@ int test_ops_release_sign(void);
 int test_ops_slot_install(void);
 int release_threshold_suite(void);
 int test_ops_slot_activate(void);
+int test_ops_node_restart(void);
 int test_netbase_split_host_port(void);
 int test_nat_route_dump(void);
 int test_peer_strategy_worker(void);

@@ -1516,3 +1516,36 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     zcl_native_handle_ops_slot_status)
+
+ZCL_COMMAND_BRANCH("ops.node", "ops", "Local node unit control",
+                   ZCL_COMMAND_LAYER_OPS)
+ZCL_COMMAND_READY_COMMAND(
+    "ops.node.restart", "ops.node", "",
+    "Restart this host's z23 node unit, then report tip height and uptime",
+    "Two steps. A call without confirm changes nothing: it reads the node's "
+    "tip height and process uptime and returns a plan_id that is valid for "
+    "five minutes and one use. The same call with that plan_id and "
+    "confirm:true runs exactly one `systemctl --user restart "
+    "z23-node.service`, then polls the node's own RPC until it answers or "
+    "wait_s (1..120, default 120) seconds pass. Reply: restarted:true, "
+    "height_before, uptime_s_before, height_after, uptime_s_after and a note "
+    "`restarted, answering at height H`; NODE_NOT_ANSWERING when the node is "
+    "silent after the wait, NOT_RESTARTED when it answers with an uptime that "
+    "did not reset, RESTART_FAILED when systemctl fails. A wrong, used or "
+    "mismatched plan_id is PLAN_MISMATCH and an old one PLAN_EXPIRED. The "
+    "only inputs are wait_s, plan_id and confirm: any other option, such as a "
+    "reindex, wipe or datadir change, is refused UNKNOWN_OPTION, and the unit "
+    "file, drop-ins and datadir are never touched. macOS (launchd) and "
+    "Windows return UNSUPPORTED naming the platform. systemctl is "
+    "ZCL_SLOT_SYSTEMCTL_BIN and the plan is kept in ZCL_SLOT_STATE_DIR.",
+    65536, "node,restart,systemd,fleet,plan,confirm",
+    "zcl.ops_node_restart.input.v1", "zcl.ops_node_restart.v1",
+    "wait_s,plan_id,confirm", "",
+    "z23 ops node restart",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_PLAN_COMMIT, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_ops_node_restart)
