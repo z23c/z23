@@ -847,7 +847,7 @@ build_openssl() {      # FETCHED: OpenSSL -> libcrypto.a + libssl.a
     # tree, i.e. /home/<user>/...) those leaked the build user's $HOME into the
     # final zclassic23 binary, failing test_no_hardcoded_home. This leakage is
     # exactly what the build-twice byte-identity gate catches
-    # (tools/scripts/check_reproducible_build.sh, exposed as `make
+    # (check-reproducible-build gate (z23-lint), exposed as `make
     # ci-reproducible`): a non-neutral prefix bakes a per-build path into the
     # .a, so two builds of zclassic23 fail byte-identity. We only ever copy the
     # .a files (never `make install`), so these paths affect ONLY the embedded strings — the

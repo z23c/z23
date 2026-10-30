@@ -2,7 +2,7 @@
 #
 # Sourced (NOT executed) by:
 #   tools/release.sh                       — the release archive builder
-#   tools/scripts/check_reproducible_build.sh — the build-twice byte-identity gate
+#   check-reproducible-build gate (z23-lint) — the build-twice byte-identity gate
 #
 # Centralizing the determinism flags here means the release artifact and the
 # reproducibility gate CANNOT drift apart: the gate proves the EXACT flag set a
@@ -51,7 +51,7 @@ _repro_make_var() {
 }
 
 # SOURCE_DATE_EPOCH: pin from the HEAD commit time. Allow a caller to override
-# (e.g. check_reproducible_build.sh may pin to a literal constant for a stricter
+# (e.g. the check-reproducible-build gate may pin to a literal constant for a stricter
 # two-build test). The two-build gate sets this ONCE before sourcing so both
 # builds share the identical value.
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || echo 0)}"

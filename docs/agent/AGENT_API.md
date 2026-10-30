@@ -1470,7 +1470,7 @@ push or AI edit loop.
 ## Reproducible build proof
 
 Use `make ci-reproducible` for byte identity. It runs
-`tools/scripts/check_reproducible_build.sh`, which builds twice in isolated
+`check-reproducible-build` (z23-lint gate), which builds twice in isolated
 `BUILD_DIR`s using `tools/scripts/repro_build_vars.sh`, then compares the
 binaries with `cmp`.
 

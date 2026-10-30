@@ -122,7 +122,7 @@ guard breaks both:
   while `/proc/cpuinfo` still reports `sha_ni` — silently, since the portable
   fallback stays correct, merely ~4× slower on every block hash, merkle root,
   txid and sighash. This was the state of the tree until the guard was removed.
-* `tools/scripts/check_reproducible_build.sh` deliberately does not set
+* `check-reproducible-build` (z23-lint gate) deliberately does not set
   `ZCL_NATIVE`, so the binary must be byte-identical across build hosts.
   Runtime dispatch keeps it so; compile-time selection would make the artifact
   depend on the builder's CPU.
@@ -140,7 +140,7 @@ SHA-NI within the same binary:
 case, i.e. within noise of the portable-march build — because the target
 attribute, not the `-march`, is what emits the SHA-NI opcodes. The dispatch
 stays a runtime decision precisely so the binary remains byte-identical across
-build hosts for `tools/scripts/check_reproducible_build.sh`.
+build hosts for `check-reproducible-build` (z23-lint gate).
 
 The `test_sha256_isa_parity` group is the differential oracle for the two
 transforms and the standing regression guard: on a CPU that advertises SHA-NI

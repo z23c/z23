@@ -16089,8 +16089,8 @@ ci-symbol-floor: zclassic23
 # are covered instead by `make simnet-nightly` via the
 # z23-simnet-nightly.timer (deploy/), not by the hot loop.
 .PHONY: ci-reproducible
-ci-reproducible:
-	@bash tools/scripts/check_reproducible_build.sh
+ci-reproducible: $(LINTC_TOOL)
+	@$(LINTC_TOOL) check-reproducible-build
 
 # repro-verify: the STANDING two-builder byte-identity gate. Unlike
 # ci-reproducible above (which builds twice in the SAME source directory,

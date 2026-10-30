@@ -109,18 +109,6 @@ barrier_line="$(grep -n '^VENDOR_BOOTSTRAP_MK :=' "$ROOT/Makefile" | cut -d: -f1
 (( policy_line < barrier_line )) ||
     fail 'Make offline policy is defined after the vendor parse barrier'
 
-# The same-directory release profile also consults make while deriving flags.
-# Preserve the real tools needed for hashing/comparison after the fake prefix.
-if ! check_output="$(cd "$ROOT" && \
-        ZCL_VENDOR_OFFLINE=0 PATH=/usr/bin:/bin JOBS=1 BINARY=zclassic23 \
-        bash tools/scripts/check_reproducible_build.sh 2>&1)"; then
-    fail 'check_reproducible_build fixture failed'
-fi
-[[ "$check_output" == *'-march=x86-64-v3 -Iexpanded/include'* ]] ||
-    fail 'release profile did not report the compiler-expanded CFLAGS'
-[[ "$check_output" != *'$('* ]] ||
-    fail 'release profile retained an unresolved Make expression'
-
 # The different-path gate snapshots a tiny synthetic source and lets the same
 # fake make produce its two equal artifacts.
 if ! (cd "$SANDBOX/source" && \
@@ -131,12 +119,12 @@ if ! (cd "$SANDBOX/source" && \
 fi
 
 line_count="$(wc -l < "$contact_log")"
-[[ "$line_count" == "4" ]] ||
-    fail "expected four observed child builds, got $line_count"
+[[ "$line_count" == "2" ]] ||
+    fail "expected two observed child builds, got $line_count"
 if grep -v '^offline=1 ccache=0 locale=C timezone=UTC path=/usr/bin:/bin home=/nonexistent$' \
         "$contact_log" >/dev/null; then
     fail 'a child build inherited non-hermetic execution policy'
 fi
 
 printf '%s\n' \
-    'repro_network_policy_selftest: PASS builds=4 make_parse_offline=true make_parse_cache=false host_cache=false'
+    'repro_network_policy_selftest: PASS builds=2 make_parse_offline=true make_parse_cache=false host_cache=false'

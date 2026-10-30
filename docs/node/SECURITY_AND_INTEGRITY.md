@@ -341,7 +341,7 @@ papered over.
 default portable `-march=x86-64-v3` profile on a single toolchain/host class;
 cross-*toolchain* (different gcc versions) reproducibility is not asserted. A
 `ZCL_NATIVE=1` build is machine-specific by design and is excluded. The
-`ci-reproducible` target / `tools/scripts/check_reproducible_build.sh` remains
+`ci-reproducible` target / `check-reproducible-build` (z23-lint gate) remains
 the complementary same-directory check under the Makefile's resolved release
 flag profile (pinned `SOURCE_DATE_EPOCH`, `-Wl,--build-id=none`); it and
 `repro-verify` share the `REPRO_CFLAGS` determinism through the resolved release

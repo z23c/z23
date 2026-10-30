@@ -9,7 +9,6 @@ nproc	tools/scripts/binary_size.sh	1
 nproc	tools/scripts/build_bench.sh	2
 nproc	tools/scripts/build_tor_full.sh	1
 nproc	tools/scripts/build_vendor.sh	1
-nproc	tools/scripts/check_reproducible_build.sh	1
 nproc	tools/scripts/ci_install_gate.sh	1
 nproc	tools/scripts/first_build_timing.sh	1
 nproc	tools/scripts/fleet_sync.sh	1
@@ -72,7 +71,6 @@ stat	tools/dev/zcode_async_proof_acceptance_hook.sh	1
 stat	tools/scripts/binary_size.sh	1
 stat	tools/scripts/build_bench.sh	3
 stat	tools/scripts/build_drift_probe.sh	1
-stat	tools/scripts/check_reproducible_build.sh	3
 stat	tools/scripts/ci_install_gate.sh	1
 stat	tools/scripts/cold_start_test.sh	4
 stat	tools/scripts/cold_start_to_tip_probe.sh	5

@@ -783,7 +783,7 @@ bool rpc_agent_build(const struct json_value *params, bool help,
     json_set_object(&repro);
     json_push_kv_str(&repro, "command", "make ci-reproducible");
     json_push_kv_str(&repro, "script",
-                     "tools/scripts/check_reproducible_build.sh");
+                     "build/bin/z23-lint check-reproducible-build");
     json_push_kv_str(&repro, "flag_source",
                      "tools/scripts/repro_build_vars.sh");
     json_push_kv_str(&repro, "source_date_epoch",
