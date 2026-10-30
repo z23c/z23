@@ -318,7 +318,6 @@ tests/harness/src/test_wallet_destruction_drill.c:act3_shielded:61
 tests/harness/src/test_wallet_destruction_drill.c:act4_recovery_phrase:26
 tests/harness/src/test_yardsale_wallet.c:test_yardsale_wallet:130
 tests/harness/src/test_zcode_add.c:t_e2e:289
-tests/harness/src/test_zcode_dht_service.c:test_sparse_space16_network:59
 tests/harness/src/test_zcode_package_dev.c:zpd_publication_rpc_roundtrip:23
 tests/harness/src/test_zcode_package_dev.c:zpd_test_project_inspect:34
 tests/harness/src/test_zcode_package_dev.c:zpd_test_twelve_task_benchmark:30

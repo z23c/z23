@@ -4029,473 +4029,926 @@ static bool space16_load_raw(
   return vcs_object_load_raw(workspace, root, wire, wire_len) == 0;
 }
 
+struct space16_case {
+  struct multi_network net;
+  uint8_t genesis[32], dead_root[32], online_seed[32], observer_node_id[32];
+  uint8_t roots[SPACE16_MANIFESTS][32], blobs[SPACE16_MANIFESTS][32];
+  size_t created_dirs;
+  size_t order[SPACE16_NODES];
+  size_t target, origin_a, origin_b;
+  struct vcs_package_store *provider_store;
+  struct vcs_package_store *local_store_a, *local_store_b;
+  struct vcs_swarm_engine *swarm_a, *swarm_b;
+  struct vcs_zcode_sovereignty_policy *policy_a, *policy_b;
+  struct vcs_space_scout_map_v1 *first, *second, *allowed, *reloaded;
+  uint8_t *space_bytes_before[SPACE16_MANIFESTS - 1u];
+  size_t space_lens_before[SPACE16_MANIFESTS - 1u];
+  char provider_workspace[128], workspace_a[128], workspace_b[128];
+  char zcode_a[128], zcode_b[128];
+  struct vcs_space_manifest_v1 manifests[SPACE16_MANIFESTS];
+  struct vcs_zcode_dht_record alpha_records[24];
+  size_t alpha_count;
+  struct vcs_zcode_dht_record_selector selector;
+  struct vcs_zcode_dht_record_discovery_result discovered;
+  struct vcs_zcode_dht_provider_route route;
+  struct space16_observer observer_a, observer_b;
+  struct vcs_space_scout_run_context context_a, context_b;
+  struct vcs_space_scout_mission_v1 mission;
+  struct metaverse_space_scout_plan_out plan;
+  struct metaverse_space_scout_run_out recorded, initial_recorded;
+  bool mutated;
+  struct space16_record_wire before[SPACE16_RECORD_MAX];
+  struct space16_record_wire after[SPACE16_RECORD_MAX];
+  size_t before_count, after_count;
+};
+
+/* Reports a failed check exactly as the original SPACE16_REQUIRE did. */
+static bool space16_expect(bool ok, const char *expr, int line) {
+  if (!ok)
+    printf("FAIL (%s at line %d)\n", expr, line);
+  return ok;
+}
+
+static bool space16_setup_nodes(struct space16_case *c) {
+  for (size_t i = 0; i < SPACE16_NODES; i++) {
+    (void)snprintf(c->net.dir[i], sizeof(c->net.dir[i]),
+                   "/tmp/zcl_space16_%zu_XXXXXX", i);
+    if (!space16_expect(mkdtemp(c->net.dir[i]) != NULL,
+                        "mkdtemp(net.dir[i]) != NULL", __LINE__))
+      return false;
+    c->created_dirs++;
+    memset(c->net.noise[i], (int)(0x20 + i), 32);
+    if (!space16_expect(
+            fixture_identity(c->net.dir[i], (uint8_t)(0x50 + i), c->genesis,
+                             c->net.noise[i]),
+            "fixture_identity(net.dir[i], (uint8_t)(0x50 + i), genesis, "
+            "net.noise[i])", __LINE__))
+      return false;
+    if (!space16_expect(
+            fixture_material(c->net.dir[i], &(struct vcs_zcode_dht_delegation){0},
+                             (uint8_t[32]){0}, c->net.node_id[i]),
+            "fixture_material(net.dir[i], &(struct vcs_zcode_dht_delegation){0}, "
+            "(uint8_t[32]){0}, net.node_id[i])", __LINE__))
+      return false;
+    c->net.reach[i].network = &c->net;
+    c->net.reach[i].owner = i;
+    c->net.service[i] = multi_service(&c->net, i, c->genesis);
+    if (!space16_expect(c->net.service[i] != NULL,
+                        "net.service[i] != NULL", __LINE__))
+      return false;
+  }
+  return true;
+}
+
+static void space16_order_nodes(struct space16_case *c) {
+  c->target = SPACE16_NODES - 1u;
+  for (size_t i = 0; i < c->target; i++)
+    c->order[i] = i;
+  for (size_t i = 0; i < c->target; i++)
+    for (size_t j = i + 1; j < c->target; j++)
+      if (!farther_node(c->net.node_id[c->order[i]],
+                        c->net.node_id[c->order[j]],
+                        c->net.node_id[c->target])) {
+        size_t swap = c->order[i]; c->order[i] = c->order[j]; c->order[j] = swap;
+      }
+  c->order[c->target] = c->target;
+}
+
+static bool space16_connect_order(struct space16_case *c) {
+  for (size_t i = 0; i + 1 < SPACE16_NODES; i++)
+    if (!space16_expect(multi_connect(&c->net, c->order[i], c->order[i + 1]),
+                        "multi_connect(&net, order[i], order[i + 1])",
+                        __LINE__))
+      return false;
+  if (!space16_expect(multi_connect(&c->net, c->order[1], c->order[4]),
+                      "multi_connect(&net, order[1], order[4])", __LINE__))
+    return false;
+  return space16_expect(multi_drive(&c->net), "multi_drive(&net)", __LINE__);
+}
+
+static bool space16_make_provider_space(struct space16_case *c) {
+  (void)snprintf(c->provider_workspace, sizeof(c->provider_workspace),
+                 "%s/space-cas", c->net.dir[c->target]);
+  if (!space16_expect(mkdir(c->provider_workspace, 0700) == 0,
+                      "mkdir(provider_workspace, 0700) == 0", __LINE__))
+    return false;
+  if (!space16_expect(vcs_object_store_init(c->provider_workspace),
+                      "vcs_object_store_init(provider_workspace)", __LINE__))
+    return false;
+  if (!space16_expect(
+          space16_manifest_make(c->net.dir[12], c->genesis, "delta", NULL, 0,
+                                0xd4, &c->manifests[3], c->roots[3]),
+          "space16_manifest_make(net.dir[12], genesis, \"delta\", NULL, 0, "
+          "0xd4, &manifests[3], roots[3])", __LINE__))
+    return false;
+  uint8_t c_portals[1][32]; memcpy(c_portals[0], c->roots[3], 32);
+  if (!space16_expect(
+          space16_manifest_make(c->net.dir[9], c->genesis, "charlie", c_portals,
+                                1, 0xc3, &c->manifests[2], c->roots[2]),
+          "space16_manifest_make(net.dir[9], genesis, \"charlie\", c_portals, "
+          "1, 0xc3, &manifests[2], roots[2])", __LINE__))
+    return false;
+  uint8_t b_portals[1][32]; memcpy(b_portals[0], c->roots[2], 32);
+  if (!space16_expect(
+          space16_manifest_make(c->net.dir[6], c->genesis, "bravo", b_portals,
+                                1, 0xb2, &c->manifests[1], c->roots[1]),
+          "space16_manifest_make(net.dir[6], genesis, \"bravo\", b_portals, "
+          "1, 0xb2, &manifests[1], roots[1])", __LINE__))
+    return false;
+  uint8_t a_portals[3][32];
+  memcpy(a_portals[0], c->roots[1], 32);
+  memcpy(a_portals[1], c->roots[2], 32);
+  memcpy(a_portals[2], c->dead_root, 32);
+  if (!space16_expect(
+          space16_manifest_make(c->net.dir[3], c->genesis, "alpha", a_portals,
+                                3, 0xa1, &c->manifests[0], c->roots[0]),
+          "space16_manifest_make(net.dir[3], genesis, \"alpha\", a_portals, 3, "
+          "0xa1, &manifests[0], roots[0])", __LINE__))
+    return false;
+  for (size_t i = 0; i < SPACE16_MANIFESTS; i++)
+    if (!space16_expect(
+            space16_store_manifest(c->provider_workspace, &c->manifests[i],
+                                   c->roots[i]),
+            "space16_store_manifest(provider_workspace, &manifests[i], "
+            "roots[i])", __LINE__))
+      return false;
+  return true;
+}
+
+static bool space16_publish_provider(struct space16_case *c) {
+  c->provider_store = vcs_package_store_open(
+      c->net.dir[c->target], VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+  if (!space16_expect(c->provider_store != NULL,
+                      "provider_store != NULL", __LINE__))
+    return false;
+  for (size_t i = 0; i < SPACE16_MANIFESTS; i++) {
+    char semantic[65], transport[65];
+    zcl_hex_encode(c->roots[i], 32, semantic);
+    enum metaverse_space_object_kind kind;
+    if (!space16_expect(
+            metaverse_space_publish(c->provider_store, c->provider_workspace,
+                                    semantic, transport, &kind).ok,
+            "metaverse_space_publish(provider_store, provider_workspace, "
+            "semantic, transport, &kind).ok", __LINE__))
+      return false;
+    if (!space16_expect(
+            kind == METAVERSE_SPACE_OBJECT_MANIFEST &&
+                zcl_hex_decode_lower(transport, c->blobs[i], 32),
+            "kind == METAVERSE_SPACE_OBJECT_MANIFEST && "
+            "zcl_hex_decode_lower(transport, blobs[i], 32)", __LINE__))
+      return false;
+  }
+  return true;
+}
+
+static bool space16_admit_conflicts(struct space16_case *c) {
+  for (size_t i = 0; i < 8; i++) {
+    uint8_t left[32], right[32];
+    if (!space16_expect(
+            space16_root_after(c->blobs[0], (uint8_t)(0x20 + 2 * i), left),
+            "space16_root_after(blobs[0], (uint8_t)(0x20 + 2 * i), left)",
+            __LINE__))
+      return false;
+    if (!space16_expect(
+            space16_root_after(c->blobs[0], (uint8_t)(0x21 + 2 * i), right),
+            "space16_root_after(blobs[0], (uint8_t)(0x21 + 2 * i), right)",
+            __LINE__))
+      return false;
+    if (!space16_expect(
+            space16_pointer_conflict(
+                c->net.dir[i], c->genesis, c->roots[0], left, right, 2000u + i,
+                &c->alpha_records[c->alpha_count],
+                &c->alpha_records[c->alpha_count + 1]),
+            "space16_pointer_conflict(net.dir[i], genesis, roots[0], left, "
+            "right, 2000u + i, &alpha_records[alpha_count], "
+            "&alpha_records[alpha_count + 1])", __LINE__))
+      return false;
+    if (!space16_expect(
+            vcs_zcode_dht_service_record_admit(
+                c->net.service[c->target], &c->alpha_records[c->alpha_count],
+                c->net.now) == VCS_ZCODE_DHT_RECORD_STORE_ADDED,
+            "vcs_zcode_dht_service_record_admit(net.service[target], "
+            "&alpha_records[alpha_count], net.now) == "
+            "VCS_ZCODE_DHT_RECORD_STORE_ADDED", __LINE__))
+      return false;
+    if (!space16_expect(
+            vcs_zcode_dht_service_record_admit(
+                c->net.service[c->target],
+                &c->alpha_records[c->alpha_count + 1], c->net.now) ==
+                VCS_ZCODE_DHT_RECORD_STORE_CONFLICT,
+            "vcs_zcode_dht_service_record_admit(net.service[target], "
+            "&alpha_records[alpha_count + 1], net.now) == "
+            "VCS_ZCODE_DHT_RECORD_STORE_CONFLICT", __LINE__))
+      return false;
+    c->alpha_count += 2;
+  }
+  return true;
+}
+
+static bool space16_admit_malicious(struct space16_case *c) {
+  for (size_t i = 8; i < c->target; i++) {
+    uint8_t malicious[32];
+    if (!space16_expect(
+            space16_root_after(c->blobs[0], (uint8_t)(0x60 + i), malicious),
+            "space16_root_after(blobs[0], (uint8_t)(0x60 + i), malicious)",
+            __LINE__))
+      return false;
+    if (!space16_expect(
+            fixture_pointer_record_named(
+                c->net.dir[i], c->genesis, "space.manifest", c->roots[0], 1,
+                1000u + i, &c->alpha_records[c->alpha_count]),
+            "fixture_pointer_record_named(net.dir[i], genesis, "
+            "\"space.manifest\", roots[0], 1, 1000u + i, "
+            "&alpha_records[alpha_count])", __LINE__))
+      return false;
+    memcpy(c->alpha_records[c->alpha_count].transport_root, malicious, 32);
+    uint8_t seed[32], ignored[32];
+    struct vcs_zcode_dht_delegation delegation;
+    if (!space16_expect(
+            fixture_material(c->net.dir[i], &delegation, seed, ignored),
+            "fixture_material(net.dir[i], &delegation, seed, ignored)",
+            __LINE__))
+      return false;
+    if (!space16_expect(
+            vcs_zcode_dht_record_sign(&c->alpha_records[c->alpha_count], seed) ==
+                VCS_ZCODE_DHT_RECORD_OK,
+            "vcs_zcode_dht_record_sign(&alpha_records[alpha_count], seed) == "
+            "VCS_ZCODE_DHT_RECORD_OK", __LINE__))
+      return false;
+    memory_cleanse(seed, sizeof(seed));
+    if (!space16_expect(
+            vcs_zcode_dht_service_record_admit(
+                c->net.service[c->target], &c->alpha_records[c->alpha_count],
+                c->net.now) == VCS_ZCODE_DHT_RECORD_STORE_ADDED,
+            "vcs_zcode_dht_service_record_admit(net.service[target], "
+            "&alpha_records[alpha_count], net.now) == "
+            "VCS_ZCODE_DHT_RECORD_STORE_ADDED", __LINE__))
+      return false;
+    c->alpha_count++;
+  }
+  return true;
+}
+
+static bool space16_admit_honest_pointer(struct space16_case *c) {
+  if (!space16_expect(c->alpha_count == 23, "alpha_count == 23", __LINE__))
+    return false;
+  if (!space16_expect(
+          fixture_pointer_record_named(
+              c->net.dir[c->target], c->genesis, "space.manifest", c->roots[0],
+              1, 1, &c->alpha_records[c->alpha_count]),
+          "fixture_pointer_record_named(net.dir[target], genesis, "
+          "\"space.manifest\", roots[0], 1, 1, &alpha_records[alpha_count])",
+          __LINE__))
+    return false;
+  memcpy(c->alpha_records[c->alpha_count].transport_root, c->blobs[0], 32);
+  {
+    uint8_t seed[32], ignored[32];
+    struct vcs_zcode_dht_delegation delegation;
+    if (!space16_expect(
+            fixture_material(c->net.dir[c->target], &delegation, seed, ignored),
+            "fixture_material(net.dir[target], &delegation, seed, ignored)",
+            __LINE__))
+      return false;
+    if (!space16_expect(
+            vcs_zcode_dht_record_sign(&c->alpha_records[c->alpha_count], seed) ==
+                VCS_ZCODE_DHT_RECORD_OK,
+            "vcs_zcode_dht_record_sign(&alpha_records[alpha_count], seed) == "
+            "VCS_ZCODE_DHT_RECORD_OK", __LINE__))
+      return false;
+    memory_cleanse(seed, sizeof(seed));
+  }
+  if (!space16_expect(
+          vcs_zcode_dht_service_record_admit(
+              c->net.service[c->target], &c->alpha_records[c->alpha_count],
+              c->net.now) == VCS_ZCODE_DHT_RECORD_STORE_ADDED,
+          "vcs_zcode_dht_service_record_admit(net.service[target], "
+          "&alpha_records[alpha_count], net.now) == "
+          "VCS_ZCODE_DHT_RECORD_STORE_ADDED", __LINE__))
+    return false;
+  c->alpha_count++;
+  return true;
+}
+
+static bool space16_admit_pointers(struct space16_case *c) {
+  for (size_t i = 0; i < SPACE16_MANIFESTS; i++) {
+    struct vcs_zcode_dht_record pointer, provider;
+    if (i > 0) {
+      if (!space16_expect(
+              fixture_pointer_record_named(
+                  c->net.dir[c->target], c->genesis, "space.manifest",
+                  c->roots[i], 1, 1, &pointer),
+              "fixture_pointer_record_named(net.dir[target], genesis, "
+              "\"space.manifest\", roots[i], 1, 1, &pointer)", __LINE__))
+        return false;
+      memcpy(pointer.transport_root, c->blobs[i], 32);
+      uint8_t seed[32], ignored[32];
+      struct vcs_zcode_dht_delegation delegation;
+      if (!space16_expect(
+              fixture_material(c->net.dir[c->target], &delegation, seed, ignored),
+              "fixture_material(net.dir[target], &delegation, seed, ignored)",
+              __LINE__))
+        return false;
+      if (!space16_expect(
+              vcs_zcode_dht_record_sign(&pointer, seed) ==
+                  VCS_ZCODE_DHT_RECORD_OK,
+              "vcs_zcode_dht_record_sign(&pointer, seed) == "
+              "VCS_ZCODE_DHT_RECORD_OK", __LINE__))
+        return false;
+      memory_cleanse(seed, sizeof(seed));
+      if (!space16_expect(
+              vcs_zcode_dht_service_record_admit(
+                  c->net.service[c->target], &pointer, c->net.now) ==
+                  VCS_ZCODE_DHT_RECORD_STORE_ADDED,
+              "vcs_zcode_dht_service_record_admit(net.service[target], "
+              "&pointer, net.now) == VCS_ZCODE_DHT_RECORD_STORE_ADDED",
+              __LINE__))
+        return false;
+    }
+    if (!space16_expect(
+            fixture_provider_record_named(
+                c->net.dir[c->target], c->genesis, "space.manifest",
+                c->blobs[i], &provider),
+            "fixture_provider_record_named(net.dir[target], genesis, "
+            "\"space.manifest\", blobs[i], &provider)", __LINE__))
+      return false;
+    if (!space16_expect(
+            vcs_zcode_dht_service_record_admit(
+                c->net.service[c->target], &provider, c->net.now) ==
+                VCS_ZCODE_DHT_RECORD_STORE_ADDED,
+            "vcs_zcode_dht_service_record_admit(net.service[target], "
+            "&provider, net.now) == VCS_ZCODE_DHT_RECORD_STORE_ADDED",
+            __LINE__))
+      return false;
+  }
+  return true;
+}
+
+static bool space16_reset_joiners(struct space16_case *c) {
+  c->origin_a = c->order[0];
+  c->origin_b = c->order[1];
+  if (!space16_expect(c->origin_a != c->target && c->origin_b != c->target,
+                      "origin_a != target && origin_b != target", __LINE__))
+    return false;
+  if (!space16_expect(
+          space16_reset_late_joiner(&c->net, c->origin_a, c->order[2],
+                                    c->genesis),
+          "space16_reset_late_joiner(&net, origin_a, order[2], genesis)",
+          __LINE__))
+    return false;
+  return space16_expect(
+      space16_reset_late_joiner(&c->net, c->origin_b, c->order[2], c->genesis),
+      "space16_reset_late_joiner(&net, origin_b, order[2], genesis)", __LINE__);
+}
+
+static bool space16_discover_pointers(struct space16_case *c) {
+  c->selector = (struct vcs_zcode_dht_record_selector){
+      .kind = VCS_ZCODE_DHT_RECORD_POINTER};
+  (void)snprintf(c->selector.namespace_name,
+                 sizeof(c->selector.namespace_name), "space.manifest");
+  memcpy(c->selector.root, c->roots[0], 32);
+  if (!space16_expect(
+          multi_discover_records(&c->net, c->origin_a, &c->selector,
+                                 &c->discovered),
+          "multi_discover_records(&net, origin_a, &selector, &discovered)",
+          __LINE__))
+    return false;
+  return space16_expect(
+      c->discovered.record_count == c->alpha_count &&
+          c->discovered.record_count > VCS_ZCODE_DHT_RECORDS_PER_FRAME &&
+          !c->discovered.incomplete && !c->discovered.truncated &&
+          c->net.connected[c->origin_a][c->target],
+      "discovered.record_count == alpha_count && discovered.record_count > "
+      "VCS_ZCODE_DHT_RECORDS_PER_FRAME && !discovered.incomplete && "
+      "!discovered.truncated && net.connected[origin_a][target]", __LINE__);
+}
+
+static bool space16_check_conflicts(struct space16_case *c) {
+  size_t conflicts = 0;
+  bool honest_usable = false, hostile_high = false;
+  for (size_t i = 0; i < c->discovered.record_count; i++) {
+    bool conflicted = vcs_zcode_dht_record_conflicted_at(
+        c->discovered.records, c->discovered.record_count, i);
+    conflicts += conflicted;
+    hostile_high |= c->discovered.records[i].sequence >= 1000;
+    honest_usable |= c->discovered.records[i].sequence == 1 &&
+        memcmp(c->discovered.records[i].transport_root, c->blobs[0], 32) == 0 &&
+        !conflicted && !vcs_zcode_dht_record_superseded_at(
+            c->discovered.records, c->discovered.record_count, i);
+  }
+  return space16_expect(conflicts == 16 && hostile_high && honest_usable,
+                        "conflicts == 16 && hostile_high && honest_usable",
+                        __LINE__);
+}
+
+static bool space16_check_provider_route(struct space16_case *c) {
+  c->selector.kind = VCS_ZCODE_DHT_RECORD_PROVIDER;
+  memcpy(c->selector.root, c->blobs[0], 32);
+  if (!space16_expect(
+          multi_discover_records(&c->net, c->origin_a, &c->selector,
+                                 &c->discovered),
+          "multi_discover_records(&net, origin_a, &selector, &discovered)",
+          __LINE__))
+    return false;
+  if (!space16_expect(
+          vcs_zcode_dht_service_provider_route(
+              c->net.service[c->origin_a], c->net.now.wall_unix, &c->selector,
+              &c->route),
+          "vcs_zcode_dht_service_provider_route(net.service[origin_a], "
+          "net.now.wall_unix, &selector, &route)", __LINE__))
+    return false;
+  if (!space16_expect(c->route.authenticated_count == 1,
+                      "route.authenticated_count == 1", __LINE__))
+    return false;
+  multi_disconnect(&c->net, c->origin_a, c->target);
+  if (!space16_expect(
+          vcs_zcode_dht_service_provider_route(
+              c->net.service[c->origin_a], c->net.now.wall_unix, &c->selector,
+              &c->route),
+          "vcs_zcode_dht_service_provider_route(net.service[origin_a], "
+          "net.now.wall_unix, &selector, &route)", __LINE__))
+    return false;
+  if (!space16_expect(c->route.authenticated_count == 0,
+                      "route.authenticated_count == 0", __LINE__))
+    return false;
+  if (!space16_expect(multi_drive(&c->net), "multi_drive(&net)", __LINE__))
+    return false;
+  if (!space16_expect(
+          vcs_zcode_dht_service_provider_route(
+              c->net.service[c->origin_a], c->net.now.wall_unix, &c->selector,
+              &c->route),
+          "vcs_zcode_dht_service_provider_route(net.service[origin_a], "
+          "net.now.wall_unix, &selector, &route)", __LINE__))
+    return false;
+  return space16_expect(c->route.authenticated_count == 1,
+                        "route.authenticated_count == 1", __LINE__);
+}
+
+static bool space16_offer_fetch(struct space16_case *c) {
+  /* Announcement-free recovery, end to end: this route stands in for the
+   * boot discovery lane's result and the offer seam replaces announce
+   * frames entirely — yet real manifest/chunk bytes still transfer. */
+  char offer_store_dir[512];
+  (void)snprintf(offer_store_dir, sizeof(offer_store_dir),
+                 "%s/space-offer-store", c->net.dir[c->origin_a]);
+  if (!space16_expect(mkdir(offer_store_dir, 0700) == 0,
+                      "mkdir(offer_store_dir, 0700) == 0", __LINE__))
+    return false;
+  struct vcs_package_store *offer_store = vcs_package_store_open(
+      offer_store_dir, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+  if (!space16_expect(offer_store != NULL, "offer_store != NULL", __LINE__))
+    return false;
+  struct vcs_swarm_engine *offer_swarm =
+      vcs_swarm_engine_create(offer_store, NULL, NULL, NULL, NULL);
+  if (!space16_expect(offer_swarm != NULL, "offer_swarm != NULL", __LINE__))
+    return false;
+  struct space16_observer offer_observer = {
+      .local_store = offer_store,
+      .provider_store = c->provider_store,
+      .swarm = offer_swarm,
+      .now_ms = 100};
+  if (!space16_expect(
+          space16_swarm_fetch_offered(
+              &offer_observer, c->blobs[0], c->route.peer_ids,
+              c->route.expires_at, c->route.authenticated_count,
+              c->net.now.wall_unix),
+          "space16_swarm_fetch_offered(&offer_observer, blobs[0], "
+          "route.peer_ids, route.expires_at, route.authenticated_count, "
+          "net.now.wall_unix)", __LINE__))
+    return false;
+  vcs_swarm_engine_free(offer_swarm);
+  vcs_package_store_close(offer_store);
+  return true;
+}
+
+static bool space16_open_workspaces(struct space16_case *c) {
+  (void)snprintf(c->workspace_a, sizeof(c->workspace_a),
+                 "%s/space-cas", c->net.dir[c->origin_a]);
+  (void)snprintf(c->workspace_b, sizeof(c->workspace_b),
+                 "%s/space-cas", c->net.dir[c->origin_b]);
+  (void)snprintf(c->zcode_a, sizeof(c->zcode_a), "%s/zcode",
+                 c->net.dir[c->origin_a]);
+  (void)snprintf(c->zcode_b, sizeof(c->zcode_b), "%s/zcode",
+                 c->net.dir[c->origin_b]);
+  if (!space16_expect(mkdir(c->workspace_a, 0700) == 0,
+                      "mkdir(workspace_a, 0700) == 0", __LINE__))
+    return false;
+  if (!space16_expect(mkdir(c->workspace_b, 0700) == 0,
+                      "mkdir(workspace_b, 0700) == 0", __LINE__))
+    return false;
+  if (!space16_expect(vcs_object_store_init(c->workspace_a),
+                      "vcs_object_store_init(workspace_a)", __LINE__))
+    return false;
+  if (!space16_expect(vcs_object_store_init(c->workspace_b),
+                      "vcs_object_store_init(workspace_b)", __LINE__))
+    return false;
+  return space16_expect(
+      !vcs_object_has(c->workspace_a, c->roots[0]) &&
+          !vcs_object_has(c->workspace_b, c->roots[0]),
+      "!vcs_object_has(workspace_a, roots[0]) && "
+      "!vcs_object_has(workspace_b, roots[0])", __LINE__);
+}
+
+static bool space16_open_local(struct space16_case *c) {
+  c->local_store_a = vcs_package_store_open(
+      c->net.dir[c->origin_a], VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+  c->local_store_b = vcs_package_store_open(
+      c->net.dir[c->origin_b], VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+  if (!space16_expect(c->local_store_a && c->local_store_b,
+                      "local_store_a && local_store_b", __LINE__))
+    return false;
+  c->swarm_a = vcs_swarm_engine_create(
+      c->local_store_a, NULL, c->zcode_a, NULL, NULL);
+  c->swarm_b = vcs_swarm_engine_create(
+      c->local_store_b, NULL, c->zcode_b, NULL, NULL);
+  if (!space16_expect(c->swarm_a && c->swarm_b, "swarm_a && swarm_b", __LINE__))
+    return false;
+  if (!space16_expect(
+          space16_policy_create(c->genesis, c->roots[3], &c->policy_a),
+          "space16_policy_create(genesis, roots[3], &policy_a)", __LINE__))
+    return false;
+  return space16_expect(
+      space16_policy_create(c->genesis, NULL, &c->policy_b),
+      "space16_policy_create(genesis, NULL, &policy_b)", __LINE__);
+}
+
+static bool space16_prepare_scout(struct space16_case *c) {
+  c->observer_a = (struct space16_observer){
+      .network = &c->net, .origin = c->origin_a, .workspace = c->workspace_a,
+      .local_store = c->local_store_a, .provider_store = c->provider_store,
+      .swarm = c->swarm_a, .policy = c->policy_a,
+      .observation_unix = 1500, .now_ms = 100};
+  c->observer_b = (struct space16_observer){
+      .network = &c->net, .origin = c->origin_b, .workspace = c->workspace_b,
+      .local_store = c->local_store_b, .provider_store = c->provider_store,
+      .swarm = c->swarm_b, .policy = c->policy_b,
+      .observation_unix = 1500, .now_ms = 100};
+  memcpy(c->observer_a.genesis, c->genesis, 32);
+  memcpy(c->observer_b.genesis, c->genesis, 32);
+  memcpy(c->observer_a.dead_root, c->dead_root, 32);
+  memcpy(c->observer_b.dead_root, c->dead_root, 32);
+  memset(&c->mission, 0, sizeof(c->mission));
+  c->mission.schema_version = VCS_SPACE_SCOUT_MISSION_VERSION;
+  memcpy(c->mission.network_genesis, c->genesis, 32);
+  c->mission.observation_unix = 1500;
+  c->mission.start_count = 1;
+  memcpy(c->mission.starting_roots[0], c->roots[0], 32);
+  c->mission.maximum_depth = 6;
+  c->mission.maximum_spaces = 8;
+  c->mission.maximum_portals = 12;
+  c->mission.maximum_bytes = 65536;
+  c->mission.deadline_ms = 1000;
+  c->context_a = (struct vcs_space_scout_run_context){
+      .observe = space16_observe, .observe_context = &c->observer_a,
+      .monotonic_ms = space16_clock, .clock_context = &c->observer_a};
+  c->context_b = (struct vcs_space_scout_run_context){
+      .observe = space16_observe, .observe_context = &c->observer_b,
+      .monotonic_ms = space16_clock, .clock_context = &c->observer_b};
+  c->first = zcl_calloc(1, sizeof(*c->first), "test_space16_first_map");
+  c->second = zcl_calloc(1, sizeof(*c->second), "test_space16_second_map");
+  c->allowed = zcl_calloc(1, sizeof(*c->allowed), "test_space16_allowed_map");
+  return space16_expect(c->first && c->second && c->allowed,
+                        "first && second && allowed", __LINE__);
+}
+
+static bool space16_scout_maps(struct space16_case *c) {
+  if (!space16_expect(
+          vcs_space_scout_run(&c->mission, &c->context_a, c->first) ==
+              VCS_SPACE_SCOUT_OK,
+          "vcs_space_scout_run(&mission, &context_a, first) == "
+          "VCS_SPACE_SCOUT_OK", __LINE__))
+    return false;
+  if (!space16_expect(
+          vcs_object_has(c->workspace_a, c->roots[0]) &&
+              vcs_object_has(c->workspace_a, c->roots[1]) &&
+              vcs_object_has(c->workspace_a, c->roots[2]) &&
+              !vcs_object_has(c->workspace_a, c->roots[3]),
+          "vcs_object_has(workspace_a, roots[0]) && "
+          "vcs_object_has(workspace_a, roots[1]) && "
+          "vcs_object_has(workspace_a, roots[2]) && "
+          "!vcs_object_has(workspace_a, roots[3])", __LINE__))
+    return false;
+  if (!space16_expect(
+          vcs_space_scout_run(&c->mission, &c->context_a, c->second) ==
+              VCS_SPACE_SCOUT_OK,
+          "vcs_space_scout_run(&mission, &context_a, second) == "
+          "VCS_SPACE_SCOUT_OK", __LINE__))
+    return false;
+  return space16_expect(
+      memcmp(c->first, c->second, sizeof(*c->first)) == 0 &&
+          c->first->policy_denial_count == 1 &&
+          space16_map_has_result(c->first, c->roots[3],
+                                 VCS_SPACE_SCOUT_MANIFEST_POLICY_DENIED),
+      "memcmp(first, second, sizeof(*first)) == 0 && "
+      "first->policy_denial_count == 1 && "
+      "space16_map_has_result(first, roots[3], "
+      "VCS_SPACE_SCOUT_MANIFEST_POLICY_DENIED)", __LINE__);
+}
+
+static bool space16_check_cycle_dead(struct space16_case *c) {
+  bool cycle = false, dead = false;
+  for (size_t i = 0; i < c->first->portal_count; i++)
+    cycle |= c->first->portals[i].result == VCS_SPACE_SCOUT_PORTAL_CYCLE;
+  for (size_t i = 0; i < c->first->failure_count; i++)
+    dead |= c->first->failures[i].result ==
+            VCS_SPACE_SCOUT_MANIFEST_NOT_FOUND;
+  return space16_expect(cycle && dead, "cycle && dead", __LINE__);
+}
+
+static bool space16_scout_allowed(struct space16_case *c) {
+  if (!space16_expect(
+          vcs_space_scout_run(&c->mission, &c->context_b, c->allowed) ==
+              VCS_SPACE_SCOUT_OK,
+          "vcs_space_scout_run(&mission, &context_b, allowed) == "
+          "VCS_SPACE_SCOUT_OK", __LINE__))
+    return false;
+  return space16_expect(
+      c->allowed->policy_denial_count == 0 &&
+          space16_map_has_result(c->allowed, c->roots[3],
+                                 VCS_SPACE_SCOUT_MANIFEST_VERIFIED) &&
+          vcs_object_has(c->workspace_b, c->roots[3]),
+      "allowed->policy_denial_count == 0 && "
+      "space16_map_has_result(allowed, roots[3], "
+      "VCS_SPACE_SCOUT_MANIFEST_VERIFIED) && "
+      "vcs_object_has(workspace_b, roots[3])", __LINE__);
+}
+
+static bool space16_check_unknown_policy(struct space16_case *c) {
+  struct vcs_zcode_sovereignty_subject unknown;
+  memset(&unknown, 0, sizeof(unknown));
+  memcpy(unknown.package_root, c->manifests[0].service_roots[0], 32);
+  return space16_expect(
+      !vcs_zcode_sovereignty_policy_check(
+           c->policy_a, VCS_ZCODE_SOVEREIGNTY_EXECUTE, &unknown).allow &&
+          !vcs_zcode_sovereignty_policy_check(
+               c->policy_b, VCS_ZCODE_SOVEREIGNTY_EXECUTE, &unknown).allow &&
+          c->observer_a.policy_calls[VCS_ZCODE_SOVEREIGNTY_EXECUTE] == 0 &&
+          c->observer_b.policy_calls[VCS_ZCODE_SOVEREIGNTY_EXECUTE] == 0,
+      "!vcs_zcode_sovereignty_policy_check(policy_a, "
+      "VCS_ZCODE_SOVEREIGNTY_EXECUTE, &unknown).allow && "
+      "!vcs_zcode_sovereignty_policy_check(policy_b, "
+      "VCS_ZCODE_SOVEREIGNTY_EXECUTE, &unknown).allow && "
+      "observer_a.policy_calls[VCS_ZCODE_SOVEREIGNTY_EXECUTE] == 0 && "
+      "observer_b.policy_calls[VCS_ZCODE_SOVEREIGNTY_EXECUTE] == 0", __LINE__);
+}
+
+static bool space16_scout_mutating(struct space16_case *c) {
+  if (!space16_expect(metaverse_space_scout_plan(&c->mission, &c->plan).ok,
+                      "metaverse_space_scout_plan(&mission, &plan).ok",
+                      __LINE__))
+    return false;
+  struct vcs_zcode_dht_delegation delegation;
+  if (!space16_expect(
+          fixture_material(c->net.dir[c->origin_a], &delegation,
+                           c->online_seed, c->observer_node_id),
+          "fixture_material(net.dir[origin_a], &delegation, online_seed, "
+          "observer_node_id)", __LINE__))
+    return false;
+  c->mutated = false;
+  if (!space16_expect(
+          metaverse_space_scout_run(
+              c->workspace_a, &c->mission, c->plan.plan_token, true,
+              &c->context_a, &delegation, c->online_seed,
+              space16_store_allowed, &c->observer_a, &c->mutated,
+              &c->recorded).ok,
+          "metaverse_space_scout_run(workspace_a, &mission, plan.plan_token, "
+          "true, &context_a, &delegation, online_seed, space16_store_allowed, "
+          "&observer_a, &mutated, &recorded).ok", __LINE__))
+    return false;
+  if (!space16_expect(c->mutated && !c->recorded.already_recorded,
+                      "mutated && !recorded.already_recorded", __LINE__))
+    return false;
+  c->initial_recorded = c->recorded;
+  memory_cleanse(c->online_seed, sizeof(c->online_seed));
+  return true;
+}
+
+static bool space16_record_before(struct space16_case *c) {
+  c->selector.kind = VCS_ZCODE_DHT_RECORD_POINTER;
+  memcpy(c->selector.root, c->roots[0], 32);
+  if (!space16_expect(
+          space16_record_set(c->net.service[c->origin_a], c->net.now.wall_unix,
+                             &c->selector, c->before, &c->before_count),
+          "space16_record_set(net.service[origin_a], net.now.wall_unix, "
+          "&selector, before, &before_count)", __LINE__))
+    return false;
+  if (!space16_expect(c->before_count == c->alpha_count,
+                      "before_count == alpha_count", __LINE__))
+    return false;
+  for (size_t i = 0; i < SPACE16_MANIFESTS - 1u; i++)
+    if (!space16_expect(
+            space16_load_raw(c->workspace_a, c->roots[i],
+                             &c->space_bytes_before[i],
+                             &c->space_lens_before[i]),
+            "space16_load_raw(workspace_a, roots[i], &space_bytes_before[i], "
+            "&space_lens_before[i])", __LINE__))
+      return false;
+  return true;
+}
+
+static bool space16_restart_origin_a(struct space16_case *c) {
+  vcs_swarm_engine_free(c->swarm_a);
+  c->swarm_a = NULL;
+  vcs_package_store_close(c->local_store_a);
+  c->local_store_a = NULL;
+  vcs_zcode_dht_service_free(c->net.service[c->origin_a], c->net.now);
+  c->net.service[c->origin_a] =
+      multi_service(&c->net, c->origin_a, c->genesis);
+  if (!space16_expect(c->net.service[c->origin_a] != NULL,
+                      "net.service[origin_a] != NULL", __LINE__))
+    return false;
+  c->local_store_a = vcs_package_store_open(
+      c->net.dir[c->origin_a], VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+  if (!space16_expect(c->local_store_a != NULL, "local_store_a != NULL",
+                      __LINE__))
+    return false;
+  c->swarm_a = vcs_swarm_engine_create(
+      c->local_store_a, NULL, c->zcode_a, NULL, NULL);
+  if (!space16_expect(c->swarm_a != NULL, "swarm_a != NULL", __LINE__))
+    return false;
+  c->observer_a.local_store = c->local_store_a;
+  c->observer_a.swarm = c->swarm_a;
+  if (!space16_expect(
+          space16_record_set(c->net.service[c->origin_a], c->net.now.wall_unix,
+                             &c->selector, c->after, &c->after_count),
+          "space16_record_set(net.service[origin_a], net.now.wall_unix, "
+          "&selector, after, &after_count)", __LINE__))
+    return false;
+  return space16_expect(
+      c->after_count == c->before_count &&
+          memcmp(c->before, c->after,
+                 c->before_count * sizeof(c->before[0])) == 0,
+      "after_count == before_count && memcmp(before, after, before_count * "
+      "sizeof(before[0])) == 0", __LINE__);
+}
+
+static bool space16_check_restored_spaces(struct space16_case *c) {
+  for (size_t i = 0; i < SPACE16_MANIFESTS - 1u; i++) {
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    if (!space16_expect(
+            space16_load_raw(c->workspace_a, c->roots[i], &wire, &wire_len),
+            "space16_load_raw(workspace_a, roots[i], &wire, &wire_len)",
+            __LINE__))
+      return false;
+    bool exact_space = wire_len == c->space_lens_before[i] &&
+        memcmp(wire, c->space_bytes_before[i], wire_len) == 0;
+    free(wire);
+    if (!space16_expect(exact_space, "exact_space", __LINE__))
+      return false;
+  }
+  c->reloaded = zcl_calloc(
+      1, sizeof(*c->reloaded), "test_space16_reloaded_map");
+  if (!space16_expect(c->reloaded != NULL, "reloaded != NULL", __LINE__))
+    return false;
+  if (!space16_expect(
+          metaverse_space_scout_show(c->workspace_a,
+                                     c->recorded.evidence_root, c->reloaded).ok,
+          "metaverse_space_scout_show(workspace_a, recorded.evidence_root, "
+          "reloaded).ok", __LINE__))
+    return false;
+  return space16_expect(
+      memcmp(c->reloaded, c->first, sizeof(*c->first)) == 0,
+      "memcmp(reloaded, first, sizeof(*first)) == 0", __LINE__);
+}
+
+static bool space16_rerun_scout(struct space16_case *c) {
+  struct vcs_zcode_dht_delegation delegation;
+  if (!space16_expect(
+          fixture_material(c->net.dir[c->origin_a], &delegation,
+                           c->online_seed, c->observer_node_id),
+          "fixture_material(net.dir[origin_a], &delegation, online_seed, "
+          "observer_node_id)", __LINE__))
+    return false;
+  c->mutated = true;
+  struct metaverse_space_scout_run_out rerun;
+  if (!space16_expect(
+          metaverse_space_scout_run(
+              c->workspace_a, &c->mission, c->plan.plan_token, true,
+              &c->context_a, &delegation, c->online_seed,
+              space16_store_allowed, &c->observer_a, &c->mutated, &rerun).ok,
+          "metaverse_space_scout_run(workspace_a, &mission, plan.plan_token, "
+          "true, &context_a, &delegation, online_seed, space16_store_allowed, "
+          "&observer_a, &mutated, &rerun).ok", __LINE__))
+    return false;
+  if (!space16_expect(
+          !c->mutated && rerun.already_recorded &&
+              strcmp(rerun.evidence_root, c->initial_recorded.evidence_root) ==
+                  0 &&
+              strcmp(rerun.attestation_root,
+                     c->initial_recorded.attestation_root) == 0,
+          "!mutated && rerun.already_recorded && strcmp(rerun.evidence_root, "
+          "initial_recorded.evidence_root) == 0 && strcmp(rerun.attestation_root, "
+          "initial_recorded.attestation_root) == 0", __LINE__))
+    return false;
+  memory_cleanse(c->online_seed, sizeof(c->online_seed));
+  return true;
+}
+
+static bool space16_stage_nodes(struct space16_case *c) {
+  if (!space16_setup_nodes(c))
+    return false;
+  space16_order_nodes(c);
+  return space16_connect_order(c);
+}
+
+static bool space16_stage_provider(struct space16_case *c) {
+  if (!space16_make_provider_space(c))
+    return false;
+  if (!space16_publish_provider(c))
+    return false;
+  if (!space16_admit_conflicts(c))
+    return false;
+  if (!space16_admit_malicious(c))
+    return false;
+  if (!space16_admit_honest_pointer(c))
+    return false;
+  return space16_admit_pointers(c);
+}
+
+static bool space16_stage_routes(struct space16_case *c) {
+  if (!space16_reset_joiners(c))
+    return false;
+  if (!space16_discover_pointers(c))
+    return false;
+  if (!space16_check_conflicts(c))
+    return false;
+  if (!space16_check_provider_route(c))
+    return false;
+  if (!space16_offer_fetch(c))
+    return false;
+  if (!space16_open_workspaces(c))
+    return false;
+  if (!space16_open_local(c))
+    return false;
+  return space16_prepare_scout(c);
+}
+
+static bool space16_stage_scout(struct space16_case *c) {
+  if (!space16_scout_maps(c))
+    return false;
+  if (!space16_check_cycle_dead(c))
+    return false;
+  if (!space16_scout_allowed(c))
+    return false;
+  if (!space16_check_unknown_policy(c))
+    return false;
+  if (!space16_scout_mutating(c))
+    return false;
+  if (!space16_record_before(c))
+    return false;
+  if (!space16_restart_origin_a(c))
+    return false;
+  if (!space16_check_restored_spaces(c))
+    return false;
+  return space16_rerun_scout(c);
+}
+
+static void space16_release(struct space16_case *c) {
+  memory_cleanse(c->online_seed, sizeof(c->online_seed));
+  for (size_t i = 0; i < SPACE16_MANIFESTS - 1u; i++)
+    free(c->space_bytes_before[i]);
+  free(c->reloaded); free(c->allowed); free(c->second); free(c->first);
+  vcs_zcode_sovereignty_policy_free(c->policy_b);
+  vcs_zcode_sovereignty_policy_free(c->policy_a);
+  vcs_swarm_engine_free(c->swarm_b);
+  vcs_swarm_engine_free(c->swarm_a);
+  if (c->local_store_b) vcs_package_store_close(c->local_store_b);
+  if (c->local_store_a) vcs_package_store_close(c->local_store_a);
+  if (c->provider_store) vcs_package_store_close(c->provider_store);
+  for (size_t i = 0; i < SPACE16_NODES; i++)
+    if (c->net.service[i])
+      vcs_zcode_dht_service_free(c->net.service[i], c->net.now);
+  for (size_t i = 0; i < c->created_dirs; i++)
+    (void)test_rm_rf_recursive(c->net.dir[i]);
+}
+
 static int test_sparse_space16_network(void) {
   int failures = 0;
   printf("zcode space: sparse 16-node transport, scout and restart proof... ");
   bool ok = false;
-  struct multi_network net;
-  memset(&net, 0, sizeof(net));
-  net.node_count = SPACE16_NODES;
-  net.now = test_time(1500);
-  uint8_t genesis[32], roots[SPACE16_MANIFESTS][32], blobs[SPACE16_MANIFESTS][32];
-  uint8_t dead_root[32], online_seed[32] = {0}, observer_node_id[32];
-  memset(genesis, 0x11, sizeof(genesis));
-  memset(dead_root, 0xfe, sizeof(dead_root));
-  struct vcs_package_store *provider_store = NULL;
-  struct vcs_package_store *local_store_a = NULL, *local_store_b = NULL;
-  struct vcs_swarm_engine *swarm_a = NULL, *swarm_b = NULL;
-  struct vcs_zcode_sovereignty_policy *policy_a = NULL, *policy_b = NULL;
-  struct vcs_space_scout_map_v1 *first = NULL, *second = NULL;
-  struct vcs_space_scout_map_v1 *allowed = NULL, *reloaded = NULL;
-  uint8_t *space_bytes_before[SPACE16_MANIFESTS - 1u] = {0};
-  size_t space_lens_before[SPACE16_MANIFESTS - 1u] = {0};
-  char provider_workspace[128] = {0}, workspace_a[128] = {0};
-  char workspace_b[128] = {0}, zcode_a[128] = {0}, zcode_b[128] = {0};
-  size_t created_dirs = 0;
+  struct space16_case cs;
+  memset(&cs, 0, sizeof(cs));
+  cs.net.node_count = SPACE16_NODES;
+  cs.net.now = test_time(1500);
+  memset(cs.genesis, 0x11, sizeof(cs.genesis));
+  memset(cs.dead_root, 0xfe, sizeof(cs.dead_root));
 
-#define SPACE16_REQUIRE(expr) do {                                           \
-    if (!(expr)) {                                                           \
-      printf("FAIL (%s at line %d)\n", #expr, __LINE__);                    \
-      goto space16_cleanup;                                                  \
-    }                                                                        \
-  } while (0)
-
-  for (size_t i = 0; i < SPACE16_NODES; i++) {
-    (void)snprintf(net.dir[i], sizeof(net.dir[i]),
-                   "/tmp/zcl_space16_%zu_XXXXXX", i);
-    SPACE16_REQUIRE(mkdtemp(net.dir[i]) != NULL);
-    created_dirs++;
-    memset(net.noise[i], (int)(0x20 + i), 32);
-    SPACE16_REQUIRE(fixture_identity(
-        net.dir[i], (uint8_t)(0x50 + i), genesis, net.noise[i]));
-    SPACE16_REQUIRE(fixture_material(
-        net.dir[i], &(struct vcs_zcode_dht_delegation){0},
-        (uint8_t[32]){0}, net.node_id[i]));
-    net.reach[i].network = &net;
-    net.reach[i].owner = i;
-    net.service[i] = multi_service(&net, i, genesis);
-    SPACE16_REQUIRE(net.service[i] != NULL);
-  }
-
-  const size_t target = SPACE16_NODES - 1u;
-  size_t order[SPACE16_NODES];
-  for (size_t i = 0; i < target; i++)
-    order[i] = i;
-  for (size_t i = 0; i < target; i++)
-    for (size_t j = i + 1; j < target; j++)
-      if (!farther_node(net.node_id[order[i]], net.node_id[order[j]],
-                        net.node_id[target])) {
-        size_t swap = order[i]; order[i] = order[j]; order[j] = swap;
-      }
-  order[target] = target;
-  for (size_t i = 0; i + 1 < SPACE16_NODES; i++)
-    SPACE16_REQUIRE(multi_connect(&net, order[i], order[i + 1]));
-  SPACE16_REQUIRE(multi_connect(&net, order[1], order[4]));
-  SPACE16_REQUIRE(multi_drive(&net));
-
-  (void)snprintf(provider_workspace, sizeof(provider_workspace),
-                 "%s/space-cas", net.dir[target]);
-  SPACE16_REQUIRE(mkdir(provider_workspace, 0700) == 0);
-  SPACE16_REQUIRE(vcs_object_store_init(provider_workspace));
-  struct vcs_space_manifest_v1 manifests[SPACE16_MANIFESTS];
-  SPACE16_REQUIRE(space16_manifest_make(
-      net.dir[12], genesis, "delta", NULL, 0, 0xd4,
-      &manifests[3], roots[3]));
-  uint8_t c_portals[1][32]; memcpy(c_portals[0], roots[3], 32);
-  SPACE16_REQUIRE(space16_manifest_make(
-      net.dir[9], genesis, "charlie", c_portals, 1, 0xc3,
-      &manifests[2], roots[2]));
-  uint8_t b_portals[1][32]; memcpy(b_portals[0], roots[2], 32);
-  SPACE16_REQUIRE(space16_manifest_make(
-      net.dir[6], genesis, "bravo", b_portals, 1, 0xb2,
-      &manifests[1], roots[1]));
-  uint8_t a_portals[3][32];
-  memcpy(a_portals[0], roots[1], 32);
-  memcpy(a_portals[1], roots[2], 32);
-  memcpy(a_portals[2], dead_root, 32);
-  SPACE16_REQUIRE(space16_manifest_make(
-      net.dir[3], genesis, "alpha", a_portals, 3, 0xa1,
-      &manifests[0], roots[0]));
-  for (size_t i = 0; i < SPACE16_MANIFESTS; i++)
-    SPACE16_REQUIRE(space16_store_manifest(
-        provider_workspace, &manifests[i], roots[i]));
-
-  provider_store = vcs_package_store_open(
-      net.dir[target], VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
-  SPACE16_REQUIRE(provider_store != NULL);
-  for (size_t i = 0; i < SPACE16_MANIFESTS; i++) {
-    char semantic[65], transport[65];
-    zcl_hex_encode(roots[i], 32, semantic);
-    enum metaverse_space_object_kind kind;
-    SPACE16_REQUIRE(metaverse_space_publish(
-        provider_store, provider_workspace, semantic, transport, &kind).ok);
-    SPACE16_REQUIRE(kind == METAVERSE_SPACE_OBJECT_MANIFEST &&
-                    zcl_hex_decode_lower(transport, blobs[i], 32));
-  }
-
-  struct vcs_zcode_dht_record alpha_records[24];
-  size_t alpha_count = 0;
-  for (size_t i = 0; i < 8; i++) {
-    uint8_t left[32], right[32];
-    SPACE16_REQUIRE(space16_root_after(blobs[0], (uint8_t)(0x20 + 2 * i),
-                                       left));
-    SPACE16_REQUIRE(space16_root_after(blobs[0],
-                                       (uint8_t)(0x21 + 2 * i), right));
-    SPACE16_REQUIRE(space16_pointer_conflict(
-        net.dir[i], genesis, roots[0], left, right, 2000u + i,
-        &alpha_records[alpha_count], &alpha_records[alpha_count + 1]));
-    SPACE16_REQUIRE(vcs_zcode_dht_service_record_admit(
-        net.service[target], &alpha_records[alpha_count], net.now) ==
-        VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-    SPACE16_REQUIRE(vcs_zcode_dht_service_record_admit(
-        net.service[target], &alpha_records[alpha_count + 1], net.now) ==
-        VCS_ZCODE_DHT_RECORD_STORE_CONFLICT);
-    alpha_count += 2;
-  }
-  for (size_t i = 8; i < target; i++) {
-    uint8_t malicious[32];
-    SPACE16_REQUIRE(space16_root_after(
-        blobs[0], (uint8_t)(0x60 + i), malicious));
-      SPACE16_REQUIRE(fixture_pointer_record_named(
-        net.dir[i], genesis, "space.manifest", roots[0], 1, 1000u + i,
-        &alpha_records[alpha_count]));
-    memcpy(alpha_records[alpha_count].transport_root, malicious, 32);
-    uint8_t seed[32], ignored[32];
-    struct vcs_zcode_dht_delegation delegation;
-    SPACE16_REQUIRE(fixture_material(
-        net.dir[i], &delegation, seed, ignored));
-    SPACE16_REQUIRE(vcs_zcode_dht_record_sign(
-        &alpha_records[alpha_count], seed) == VCS_ZCODE_DHT_RECORD_OK);
-    memory_cleanse(seed, sizeof(seed));
-    SPACE16_REQUIRE(vcs_zcode_dht_service_record_admit(
-        net.service[target], &alpha_records[alpha_count], net.now) ==
-        VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-    alpha_count++;
-  }
-  SPACE16_REQUIRE(alpha_count == 23);
-  SPACE16_REQUIRE(fixture_pointer_record_named(
-      net.dir[target], genesis, "space.manifest", roots[0], 1, 1,
-      &alpha_records[alpha_count]));
-  memcpy(alpha_records[alpha_count].transport_root, blobs[0], 32);
-  {
-    uint8_t seed[32], ignored[32];
-    struct vcs_zcode_dht_delegation delegation;
-    SPACE16_REQUIRE(fixture_material(
-        net.dir[target], &delegation, seed, ignored));
-    SPACE16_REQUIRE(vcs_zcode_dht_record_sign(
-        &alpha_records[alpha_count], seed) == VCS_ZCODE_DHT_RECORD_OK);
-    memory_cleanse(seed, sizeof(seed));
-  }
-  SPACE16_REQUIRE(vcs_zcode_dht_service_record_admit(
-      net.service[target], &alpha_records[alpha_count], net.now) ==
-      VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-  alpha_count++;
-
-  for (size_t i = 0; i < SPACE16_MANIFESTS; i++) {
-    struct vcs_zcode_dht_record pointer, provider;
-    if (i > 0) {
-      SPACE16_REQUIRE(fixture_pointer_record_named(
-          net.dir[target], genesis, "space.manifest", roots[i], 1, 1,
-          &pointer));
-      memcpy(pointer.transport_root, blobs[i], 32);
-      uint8_t seed[32], ignored[32];
-      struct vcs_zcode_dht_delegation delegation;
-      SPACE16_REQUIRE(fixture_material(
-          net.dir[target], &delegation, seed, ignored));
-      SPACE16_REQUIRE(vcs_zcode_dht_record_sign(&pointer, seed) ==
-                      VCS_ZCODE_DHT_RECORD_OK);
-      memory_cleanse(seed, sizeof(seed));
-      SPACE16_REQUIRE(vcs_zcode_dht_service_record_admit(
-          net.service[target], &pointer, net.now) ==
-          VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-    }
-    SPACE16_REQUIRE(fixture_provider_record_named(
-        net.dir[target], genesis, "space.manifest", blobs[i], &provider));
-    SPACE16_REQUIRE(vcs_zcode_dht_service_record_admit(
-        net.service[target], &provider, net.now) ==
-        VCS_ZCODE_DHT_RECORD_STORE_ADDED);
-  }
-
-  const size_t origin_a = order[0], origin_b = order[1];
-  SPACE16_REQUIRE(origin_a != target && origin_b != target);
-  SPACE16_REQUIRE(space16_reset_late_joiner(
-      &net, origin_a, order[2], genesis));
-  SPACE16_REQUIRE(space16_reset_late_joiner(
-      &net, origin_b, order[2], genesis));
-  struct vcs_zcode_dht_record_selector selector = {
-      .kind = VCS_ZCODE_DHT_RECORD_POINTER};
-  (void)snprintf(selector.namespace_name, sizeof(selector.namespace_name),
-                 "space.manifest");
-  memcpy(selector.root, roots[0], 32);
-  struct vcs_zcode_dht_record_discovery_result discovered;
-  SPACE16_REQUIRE(multi_discover_records(
-      &net, origin_a, &selector, &discovered));
-  SPACE16_REQUIRE(discovered.record_count == alpha_count &&
-                  discovered.record_count >
-                      VCS_ZCODE_DHT_RECORDS_PER_FRAME &&
-                  !discovered.incomplete && !discovered.truncated &&
-                  net.connected[origin_a][target]);
-  size_t conflicts = 0;
-  bool honest_usable = false, hostile_high = false;
-  for (size_t i = 0; i < discovered.record_count; i++) {
-    bool conflicted = vcs_zcode_dht_record_conflicted_at(
-        discovered.records, discovered.record_count, i);
-    conflicts += conflicted;
-    hostile_high |= discovered.records[i].sequence >= 1000;
-    honest_usable |= discovered.records[i].sequence == 1 &&
-        memcmp(discovered.records[i].transport_root, blobs[0], 32) == 0 &&
-        !conflicted && !vcs_zcode_dht_record_superseded_at(
-            discovered.records, discovered.record_count, i);
-  }
-  SPACE16_REQUIRE(conflicts == 16 && hostile_high && honest_usable);
-
-  selector.kind = VCS_ZCODE_DHT_RECORD_PROVIDER;
-  memcpy(selector.root, blobs[0], 32);
-  SPACE16_REQUIRE(multi_discover_records(
-      &net, origin_a, &selector, &discovered));
-  struct vcs_zcode_dht_provider_route route;
-  SPACE16_REQUIRE(vcs_zcode_dht_service_provider_route(
-      net.service[origin_a], net.now.wall_unix, &selector, &route));
-  SPACE16_REQUIRE(route.authenticated_count == 1);
-  multi_disconnect(&net, origin_a, target);
-  SPACE16_REQUIRE(vcs_zcode_dht_service_provider_route(
-      net.service[origin_a], net.now.wall_unix, &selector, &route));
-  SPACE16_REQUIRE(route.authenticated_count == 0);
-  SPACE16_REQUIRE(multi_drive(&net));
-  SPACE16_REQUIRE(vcs_zcode_dht_service_provider_route(
-      net.service[origin_a], net.now.wall_unix, &selector, &route));
-  SPACE16_REQUIRE(route.authenticated_count == 1);
-
-  /* Announcement-free recovery, end to end: this route stands in for the
-   * boot discovery lane's result and the offer seam replaces announce
-   * frames entirely — yet real manifest/chunk bytes still transfer. */
-  {
-    char offer_store_dir[512];
-    (void)snprintf(offer_store_dir, sizeof(offer_store_dir),
-                   "%s/space-offer-store", net.dir[origin_a]);
-    SPACE16_REQUIRE(mkdir(offer_store_dir, 0700) == 0);
-    struct vcs_package_store *offer_store = vcs_package_store_open(
-        offer_store_dir, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
-    SPACE16_REQUIRE(offer_store != NULL);
-    struct vcs_swarm_engine *offer_swarm =
-        vcs_swarm_engine_create(offer_store, NULL, NULL, NULL, NULL);
-    SPACE16_REQUIRE(offer_swarm != NULL);
-    struct space16_observer offer_observer = {
-        .local_store = offer_store,
-        .provider_store = provider_store,
-        .swarm = offer_swarm,
-        .now_ms = 100};
-    SPACE16_REQUIRE(space16_swarm_fetch_offered(
-        &offer_observer, blobs[0], route.peer_ids, route.expires_at,
-        route.authenticated_count, net.now.wall_unix));
-    vcs_swarm_engine_free(offer_swarm);
-    vcs_package_store_close(offer_store);
-  }
-
-  (void)snprintf(workspace_a, sizeof(workspace_a),
-                 "%s/space-cas", net.dir[origin_a]);
-  (void)snprintf(workspace_b, sizeof(workspace_b),
-                 "%s/space-cas", net.dir[origin_b]);
-  (void)snprintf(zcode_a, sizeof(zcode_a), "%s/zcode", net.dir[origin_a]);
-  (void)snprintf(zcode_b, sizeof(zcode_b), "%s/zcode", net.dir[origin_b]);
-  SPACE16_REQUIRE(mkdir(workspace_a, 0700) == 0);
-  SPACE16_REQUIRE(mkdir(workspace_b, 0700) == 0);
-  SPACE16_REQUIRE(vcs_object_store_init(workspace_a));
-  SPACE16_REQUIRE(vcs_object_store_init(workspace_b));
-  SPACE16_REQUIRE(!vcs_object_has(workspace_a, roots[0]) &&
-                  !vcs_object_has(workspace_b, roots[0]));
-  local_store_a = vcs_package_store_open(
-      net.dir[origin_a], VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
-  local_store_b = vcs_package_store_open(
-      net.dir[origin_b], VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
-  SPACE16_REQUIRE(local_store_a && local_store_b);
-  swarm_a = vcs_swarm_engine_create(
-      local_store_a, NULL, zcode_a, NULL, NULL);
-  swarm_b = vcs_swarm_engine_create(
-      local_store_b, NULL, zcode_b, NULL, NULL);
-  SPACE16_REQUIRE(swarm_a && swarm_b);
-  SPACE16_REQUIRE(space16_policy_create(genesis, roots[3], &policy_a));
-  SPACE16_REQUIRE(space16_policy_create(genesis, NULL, &policy_b));
-
-  struct space16_observer observer_a = {
-      .network = &net, .origin = origin_a, .workspace = workspace_a,
-      .local_store = local_store_a, .provider_store = provider_store,
-      .swarm = swarm_a, .policy = policy_a,
-      .observation_unix = 1500, .now_ms = 100};
-  struct space16_observer observer_b = {
-      .network = &net, .origin = origin_b, .workspace = workspace_b,
-      .local_store = local_store_b, .provider_store = provider_store,
-      .swarm = swarm_b, .policy = policy_b,
-      .observation_unix = 1500, .now_ms = 100};
-  memcpy(observer_a.genesis, genesis, 32);
-  memcpy(observer_b.genesis, genesis, 32);
-  memcpy(observer_a.dead_root, dead_root, 32);
-  memcpy(observer_b.dead_root, dead_root, 32);
-  struct vcs_space_scout_mission_v1 mission;
-  memset(&mission, 0, sizeof(mission));
-  mission.schema_version = VCS_SPACE_SCOUT_MISSION_VERSION;
-  memcpy(mission.network_genesis, genesis, 32);
-  mission.observation_unix = 1500;
-  mission.start_count = 1;
-  memcpy(mission.starting_roots[0], roots[0], 32);
-  mission.maximum_depth = 6;
-  mission.maximum_spaces = 8;
-  mission.maximum_portals = 12;
-  mission.maximum_bytes = 65536;
-  mission.deadline_ms = 1000;
-  struct vcs_space_scout_run_context context_a = {
-      .observe = space16_observe, .observe_context = &observer_a,
-      .monotonic_ms = space16_clock, .clock_context = &observer_a};
-  struct vcs_space_scout_run_context context_b = {
-      .observe = space16_observe, .observe_context = &observer_b,
-      .monotonic_ms = space16_clock, .clock_context = &observer_b};
-  first = zcl_calloc(1, sizeof(*first), "test_space16_first_map");
-  second = zcl_calloc(1, sizeof(*second), "test_space16_second_map");
-  allowed = zcl_calloc(1, sizeof(*allowed), "test_space16_allowed_map");
-  SPACE16_REQUIRE(first && second && allowed);
-  SPACE16_REQUIRE(vcs_space_scout_run(
-      &mission, &context_a, first) == VCS_SPACE_SCOUT_OK);
-  SPACE16_REQUIRE(vcs_object_has(workspace_a, roots[0]) &&
-                  vcs_object_has(workspace_a, roots[1]) &&
-                  vcs_object_has(workspace_a, roots[2]) &&
-                  !vcs_object_has(workspace_a, roots[3]));
-  SPACE16_REQUIRE(vcs_space_scout_run(
-      &mission, &context_a, second) == VCS_SPACE_SCOUT_OK);
-  SPACE16_REQUIRE(memcmp(first, second, sizeof(*first)) == 0 &&
-                  first->policy_denial_count == 1 &&
-                  space16_map_has_result(
-                      first, roots[3],
-                      VCS_SPACE_SCOUT_MANIFEST_POLICY_DENIED));
-  bool cycle = false, dead = false;
-  for (size_t i = 0; i < first->portal_count; i++)
-    cycle |= first->portals[i].result == VCS_SPACE_SCOUT_PORTAL_CYCLE;
-  for (size_t i = 0; i < first->failure_count; i++)
-    dead |= first->failures[i].result ==
-            VCS_SPACE_SCOUT_MANIFEST_NOT_FOUND;
-  SPACE16_REQUIRE(cycle && dead);
-  SPACE16_REQUIRE(vcs_space_scout_run(
-      &mission, &context_b, allowed) == VCS_SPACE_SCOUT_OK);
-  SPACE16_REQUIRE(allowed->policy_denial_count == 0 &&
-                  space16_map_has_result(
-                      allowed, roots[3],
-                      VCS_SPACE_SCOUT_MANIFEST_VERIFIED) &&
-                  vcs_object_has(workspace_b, roots[3]));
-  struct vcs_zcode_sovereignty_subject unknown;
-  memset(&unknown, 0, sizeof(unknown));
-  memcpy(unknown.package_root, manifests[0].service_roots[0], 32);
-  SPACE16_REQUIRE(!vcs_zcode_sovereignty_policy_check(
-                       policy_a, VCS_ZCODE_SOVEREIGNTY_EXECUTE,
-                       &unknown).allow &&
-                  !vcs_zcode_sovereignty_policy_check(
-                       policy_b, VCS_ZCODE_SOVEREIGNTY_EXECUTE,
-                       &unknown).allow &&
-                  observer_a.policy_calls[VCS_ZCODE_SOVEREIGNTY_EXECUTE] ==
-                      0 &&
-                  observer_b.policy_calls[VCS_ZCODE_SOVEREIGNTY_EXECUTE] ==
-                      0);
-
-  struct metaverse_space_scout_plan_out plan;
-  SPACE16_REQUIRE(metaverse_space_scout_plan(&mission, &plan).ok);
-  struct vcs_zcode_dht_delegation delegation;
-  SPACE16_REQUIRE(fixture_material(
-      net.dir[origin_a], &delegation, online_seed, observer_node_id));
-  struct metaverse_space_scout_run_out recorded;
-  bool mutated = false;
-  SPACE16_REQUIRE(metaverse_space_scout_run(
-      workspace_a, &mission, plan.plan_token, true, &context_a,
-      &delegation, online_seed, space16_store_allowed, &observer_a,
-      &mutated, &recorded).ok);
-  SPACE16_REQUIRE(mutated && !recorded.already_recorded);
-  struct metaverse_space_scout_run_out initial_recorded = recorded;
-  memory_cleanse(online_seed, sizeof(online_seed));
-
-  struct space16_record_wire before[SPACE16_RECORD_MAX];
-  struct space16_record_wire after[SPACE16_RECORD_MAX];
-  size_t before_count = 0, after_count = 0;
-  selector.kind = VCS_ZCODE_DHT_RECORD_POINTER;
-  memcpy(selector.root, roots[0], 32);
-  SPACE16_REQUIRE(space16_record_set(
-      net.service[origin_a], net.now.wall_unix, &selector,
-      before, &before_count));
-  SPACE16_REQUIRE(before_count == alpha_count);
-  for (size_t i = 0; i < SPACE16_MANIFESTS - 1u; i++)
-    SPACE16_REQUIRE(space16_load_raw(
-        workspace_a, roots[i],
-        &space_bytes_before[i], &space_lens_before[i]));
-
-  vcs_swarm_engine_free(swarm_a); swarm_a = NULL;
-  vcs_package_store_close(local_store_a); local_store_a = NULL;
-  vcs_zcode_dht_service_free(net.service[origin_a], net.now);
-  net.service[origin_a] = multi_service(&net, origin_a, genesis);
-  SPACE16_REQUIRE(net.service[origin_a] != NULL);
-  local_store_a = vcs_package_store_open(
-      net.dir[origin_a], VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
-  SPACE16_REQUIRE(local_store_a != NULL);
-  swarm_a = vcs_swarm_engine_create(
-      local_store_a, NULL, zcode_a, NULL, NULL);
-  SPACE16_REQUIRE(swarm_a != NULL);
-  observer_a.local_store = local_store_a;
-  observer_a.swarm = swarm_a;
-  SPACE16_REQUIRE(space16_record_set(
-      net.service[origin_a], net.now.wall_unix, &selector,
-      after, &after_count));
-  SPACE16_REQUIRE(after_count == before_count &&
-                  memcmp(before, after,
-                         before_count * sizeof(before[0])) == 0);
-  for (size_t i = 0; i < SPACE16_MANIFESTS - 1u; i++) {
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    SPACE16_REQUIRE(space16_load_raw(
-        workspace_a, roots[i], &wire, &wire_len));
-    bool exact_space = wire_len == space_lens_before[i] &&
-        memcmp(wire, space_bytes_before[i], wire_len) == 0;
-    free(wire);
-    SPACE16_REQUIRE(exact_space);
-  }
-  reloaded = zcl_calloc(
-      1, sizeof(*reloaded), "test_space16_reloaded_map");
-  SPACE16_REQUIRE(reloaded != NULL);
-  SPACE16_REQUIRE(metaverse_space_scout_show(
-      workspace_a, recorded.evidence_root, reloaded).ok);
-  SPACE16_REQUIRE(memcmp(reloaded, first, sizeof(*first)) == 0);
-  SPACE16_REQUIRE(fixture_material(
-      net.dir[origin_a], &delegation, online_seed, observer_node_id));
-  mutated = true;
-  struct metaverse_space_scout_run_out rerun;
-  SPACE16_REQUIRE(metaverse_space_scout_run(
-      workspace_a, &mission, plan.plan_token, true, &context_a,
-      &delegation, online_seed, space16_store_allowed, &observer_a,
-      &mutated, &rerun).ok);
-  SPACE16_REQUIRE(!mutated && rerun.already_recorded &&
-                  strcmp(rerun.evidence_root,
-                         initial_recorded.evidence_root) == 0 &&
-                  strcmp(rerun.attestation_root,
-                         initial_recorded.attestation_root) == 0);
-  memory_cleanse(online_seed, sizeof(online_seed));
+  if (!space16_stage_nodes(&cs))
+    goto space16_cleanup;
+  if (!space16_stage_provider(&cs))
+    goto space16_cleanup;
+  if (!space16_stage_routes(&cs))
+    goto space16_cleanup;
+  if (!space16_stage_scout(&cs))
+    goto space16_cleanup;
   ok = true;
 
 space16_cleanup:
-  memory_cleanse(online_seed, sizeof(online_seed));
-  for (size_t i = 0; i < SPACE16_MANIFESTS - 1u; i++)
-    free(space_bytes_before[i]);
-  free(reloaded); free(allowed); free(second); free(first);
-  vcs_zcode_sovereignty_policy_free(policy_b);
-  vcs_zcode_sovereignty_policy_free(policy_a);
-  vcs_swarm_engine_free(swarm_b);
-  vcs_swarm_engine_free(swarm_a);
-  if (local_store_b) vcs_package_store_close(local_store_b);
-  if (local_store_a) vcs_package_store_close(local_store_a);
-  if (provider_store) vcs_package_store_close(provider_store);
-  for (size_t i = 0; i < SPACE16_NODES; i++)
-    if (net.service[i])
-      vcs_zcode_dht_service_free(net.service[i], net.now);
-  for (size_t i = 0; i < created_dirs; i++)
-    (void)test_rm_rf_recursive(net.dir[i]);
+  space16_release(&cs);
   if (ok)
     PASS();
   else
     failures++;
-#undef SPACE16_REQUIRE
   return failures;
 }
 
