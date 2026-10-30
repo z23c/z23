@@ -3224,8 +3224,8 @@ AGENT_IMPACT_RULE("engine/models/include/models/query_schema.def|engine/models/i
 AGENT_IMPACT_RULE("tools/lint/lintc/gate_fortify_masked_decls.c|tools/lint/lintc/gate_fortify_masked_decls_selftest.c", "make_lint_gates")
 AGENT_IMPACT_RULE("tools/install/install_selftest.c|tools/install/install_selftest_fs.c|tools/install/install_selftest_proc.c|tools/install/install_selftest_signals.c|tools/install/install_selftest.h|tools/scripts/deploy_z23_release.sh", "make_lint_gates")
 
-/* One comment/string stripper, shared by check_fortify_masked_decls and
- * check_model_sql_literals. Both are text scanners whose verdict changes
+/* The comment/string stripper check_model_sql_literals reads (the fortify
+ * gate moved to lintc's cstrip_line). A text scanner whose verdict changes
  * if it changes, so it rides the model group the SQL gate reports through
  * as well as the lint-gate group. */
 AGENT_IMPACT_RULE("tools/lint/strip_c_comments.awk|tools/lint/lintc/gate_model_sql_literals.c|tools/lint/model_sql_literal_baseline.txt", "activerecord_query_builder models make_lint_gates")

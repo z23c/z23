@@ -30,7 +30,7 @@ static const char *const k_fmd_candidates[] = {
 
 enum { FMD_CC_MAX = 32, FMD_CC_BUF = 1024, FMD_MAX_MASKED = 64,
        FMD_NAME = 32, FMD_PATH = 1024, FMD_HITS = 512,
-       FMD_OFF_CAP = 64 };
+       FMD_OFF_CAP = 64, FMD_LINE_MAX = 1 << 20 };
 
 /* $CC in this tree is routinely a COMMAND LINE ("<path>/zcc cc"); it is
  * word-split on whitespace, exactly like the script's `read -r -a`. */
@@ -55,6 +55,7 @@ struct fmd_meas {
 /* One tracked file under scan. */
 struct fmd_scan1 {
     const struct fmd_meas *m;
+    const char *path;
     struct cstrip st;
     int hit[FMD_MAX_MASKED];
     char hits[FMD_HITS];
@@ -167,8 +168,9 @@ static int fmd_compile(const char *src, const char *obj, const char *opt,
         _exit(127);
     }
     int st = 0;
-    while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
-        ;
+    while (waitpid(pid, &st, 0) < 0)
+        if (errno != EINTR)
+            return -1; /* unobserved: an error, never a clean compile */
     return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : 1;
 }
 
@@ -335,9 +337,14 @@ static int fmd_scan_cb(void *vp, const char *line, size_t len)
     size_t n = len;
     if (n > 0 && line[n - 1] == '\n')
         n--;
-    static char raw[CSTRIP_LINE_MAX], code[CSTRIP_LINE_MAX];
-    if (n >= sizeof raw)
+    /* The script read lines of any length; 1 MiB covers generated tables
+     * (the longest tracked line is far shorter) and still fails closed. */
+    static char raw[FMD_LINE_MAX], code[FMD_LINE_MAX];
+    if (n >= sizeof raw) {
+        fprintf(stderr, "%s: %s has a line over %zu bytes\n", k_fmd_gate,
+                s->path, sizeof raw);
         return 2;
+    }
     memcpy(raw, line, n);
     raw[n] = '\0';
     if (!cstrip_line(&s->st, raw, n, code, sizeof code))
@@ -370,6 +377,7 @@ int fmd_scan_file(const char *path, const struct fmd_meas *m, char *hits,
     static struct fmd_scan1 s;
     memset(&s, 0, sizeof s);
     s.m = m;
+    s.path = path;
     int rc = lc_each_line(path, fmd_scan_cb, &s, 1);
     int out = 2;
     if (rc != 0) {
