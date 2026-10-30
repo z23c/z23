@@ -770,6 +770,185 @@ static bool rfs_case_drains_halfclosed_loopback(void)
 }
 #undef RFS_HALFCLOSE_N
 
+/* ── Reserved fast lane ───────────────────────────────────────────
+ *
+ * Every general worker parked inside a blocking method must not stop the
+ * lock-free status call from answering. Four "block" requests occupy the
+ * four general workers (a condvar handshake proves each entered its
+ * handler and none can return), then dumpstate ["status_frontdoor"] must
+ * get a full reply while the gate is still closed. dumpstate with any
+ * other key is not allowlisted and must wait behind the workers. */
+#if !defined(_WIN32)
+#include <pthread.h>
+
+#define RFS_LANE_BLOCKERS 4
+#define RFS_LANE_REPLY_MS 5000  /* real-clock: upper bound on a loopback reply */
+#define RFS_LANE_QUIET_MS 300   /* real-clock: window proving no reply arrives */
+
+static pthread_mutex_t rfs_gate_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t rfs_gate_cv = PTHREAD_COND_INITIALIZER;
+static int rfs_gate_entered;
+static bool rfs_gate_open;
+
+static bool rfs_lane_block(const struct json_value *params, bool help,
+                           struct json_value *result)
+{
+    (void)params; (void)help;
+    pthread_mutex_lock(&rfs_gate_mu);
+    rfs_gate_entered++;
+    pthread_cond_broadcast(&rfs_gate_cv);
+    while (!rfs_gate_open)
+        pthread_cond_wait(&rfs_gate_cv, &rfs_gate_mu);
+    pthread_mutex_unlock(&rfs_gate_mu);
+    json_set_object(result);
+    return true;
+}
+
+static bool rfs_lane_dumpstate(const struct json_value *params, bool help,
+                               struct json_value *result)
+{
+    (void)params; (void)help;
+    json_set_object(result);
+    return json_push_kv_bool(result, "lane_ok", true);
+}
+
+static int rfs_lane_connect(uint16_t port, const char *method,
+                            const char *params)
+{
+    int fd = (int)platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = htons(port);
+    if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    char body[160];
+    int blen = snprintf(body, sizeof(body),
+        "{\"method\":\"%s\",\"params\":%s,\"id\":1}", method, params);
+    char req[512];
+    int rlen = snprintf(req, sizeof(req),
+        "POST / HTTP/1.1\r\nAuthorization: Basic dTpw\r\n"
+        "Content-Length: %d\r\n\r\n%s", blen, body);
+    if (write(fd, req, (size_t)rlen) != rlen) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* True when a reply containing want arrives within ms. */
+static bool rfs_lane_reply_has(int fd, const char *want, int ms)
+{
+    char buf[2048];
+    size_t n = 0;
+    struct pollfd p = { .fd = fd, .events = POLLIN };
+    while (n < sizeof(buf) - 1 && poll(&p, 1, ms) > 0) {
+        ssize_t r = read(fd, buf + n, sizeof(buf) - 1 - n);
+        if (r <= 0) break;
+        n += (size_t)r;
+        buf[n] = '\0';
+        if (strstr(buf, want) != NULL) return true;
+    }
+    return false;
+}
+
+static bool rfs_lane_wait_entered(int want)
+{
+    struct timespec dl;  /* real-clock: bound the handshake wait */
+    clock_gettime(CLOCK_REALTIME, &dl);
+    dl.tv_sec += 10;
+    pthread_mutex_lock(&rfs_gate_mu);
+    while (rfs_gate_entered < want &&
+           pthread_cond_timedwait(&rfs_gate_cv, &rfs_gate_mu, &dl) == 0)
+        ;
+    bool ok = rfs_gate_entered >= want;
+    pthread_mutex_unlock(&rfs_gate_mu);
+    return ok;
+}
+
+static void rfs_lane_open_gate(void)
+{
+    pthread_mutex_lock(&rfs_gate_mu);
+    rfs_gate_open = true;
+    pthread_cond_broadcast(&rfs_gate_cv);
+    pthread_mutex_unlock(&rfs_gate_mu);
+}
+
+#define RFS_LANE_STEP(cond, what) do { \
+    if (ok && !(cond)) { printf("[%s failed] ", what); ok = false; } \
+} while (0)
+
+static bool rfs_lane_exercise(uint16_t port)
+{
+    int blk[RFS_LANE_BLOCKERS];
+    bool ok = true;
+    for (int i = 0; i < RFS_LANE_BLOCKERS; i++) {
+        blk[i] = rfs_lane_connect(port, "block", "[]");
+        RFS_LANE_STEP(blk[i] >= 0, "connect blocker");
+    }
+    RFS_LANE_STEP(rfs_lane_wait_entered(RFS_LANE_BLOCKERS), "blockers entered");
+    int other = ok ? rfs_lane_connect(port, "dumpstate", "[\"peers\"]") : -1;
+    int status = ok ? rfs_lane_connect(port, "dumpstate",
+                                       "[\"status_frontdoor\"]") : -1;
+    RFS_LANE_STEP(status >= 0 && other >= 0, "connect status");
+    RFS_LANE_STEP(rfs_lane_reply_has(status, "\"lane_ok\":true",
+                                     RFS_LANE_REPLY_MS), "status reply");
+    RFS_LANE_STEP(!rfs_lane_reply_has(other, "lane_ok", RFS_LANE_QUIET_MS),
+                  "non-allowlisted stays queued");
+    rfs_lane_open_gate();
+    RFS_LANE_STEP(rfs_lane_reply_has(other, "lane_ok", RFS_LANE_REPLY_MS),
+                  "queued call served after release");
+    for (int i = 0; i < RFS_LANE_BLOCKERS; i++) {
+        if (blk[i] >= 0) close(blk[i]);
+    }
+    if (status >= 0) close(status);
+    if (other >= 0) close(other);
+    return ok;
+}
+
+static bool rfs_case_fast_lane_serves_status(void)
+{
+    char rpcdir[512];
+    printf("frontdoor fast lane answers status while workers are blocked... ");
+
+    test_make_tmpdir(rpcdir, sizeof(rpcdir), "rpc_frontdoor", "fastlane");
+    uint16_t port = rfs_free_port();
+    struct rpc_table tbl;
+    rpc_table_init(&tbl);
+    struct rpc_command blk = { "test", "block", rfs_lane_block, true };
+    struct rpc_command dmp = { "test", "dumpstate", rfs_lane_dumpstate, true };
+    bool ok = port != 0 && rpc_table_append(&tbl, &blk) &&
+              rpc_table_append(&tbl, &dmp) &&
+              rpc_http_start(&tbl, port, "u", "p", rpcdir);
+    if (ok) {
+        set_rpc_warmup_finished();
+        ok = rfs_lane_exercise(port);
+        rfs_lane_open_gate();
+        rpc_http_stop();
+        set_rpc_warmup_started("test");
+    }
+    test_rm_rf(rpcdir);
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok;
+}
+
+static bool rfs_case_fast_lane_allowlist(void)
+{
+    printf("frontdoor fast lane allowlist is exactly status_frontdoor... ");
+    bool ok = rpc_http_test_fastlane_allows("dumpstate", "[\"status_frontdoor\"]") &&
+        !rpc_http_test_fastlane_allows("dumpstate", "[\"peers\"]") &&
+        !rpc_http_test_fastlane_allows("dumpstate", "[]") &&
+        !rpc_http_test_fastlane_allows("dumpstate", "[\"status_frontdoor\",1]") &&
+        !rpc_http_test_fastlane_allows("dumpstate", "{\"k\":\"status_frontdoor\"}") &&
+        !rpc_http_test_fastlane_allows("getinfo", "[\"status_frontdoor\"]");
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok;
+}
+#endif
+
 int test_rpc_frontdoor_slots(void)
 {
     int failures = 0;
@@ -802,9 +981,13 @@ int test_rpc_frontdoor_slots(void)
     if (!rfs_case_survives_partial_close_run(cap, &st)) failures++;
 #endif
     if (!rfs_case_drains_halfclosed_loopback()) failures++;
+#if !defined(_WIN32)
+    if (!rfs_case_fast_lane_allowlist()) failures++;
+    if (!rfs_case_fast_lane_serves_status()) failures++;
+#endif
 
     rpc_http_test_queue_reset(-1);
 
-    printf("\n%d rpc front-door slot tests, %d failed\n", 8, failures);
+    printf("\n%d rpc front-door slot tests, %d failed\n", 10, failures);
     return failures;
 }

@@ -87,4 +87,7 @@ platform_socket_t rpc_http_test_queue_take(void);
 void rpc_http_test_queue_reset(int wait_ms);
 void rpc_http_test_queue_stats(struct rpc_http_queue_stats *out);
 
+/* test surface: whether (method, params_json) is on the fast-lane allowlist. */
+bool rpc_http_test_fastlane_allows(const char *method, const char *params_json);
+
 #endif

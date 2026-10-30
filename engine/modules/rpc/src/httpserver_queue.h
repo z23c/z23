@@ -9,6 +9,8 @@
 void rpc_http_queue_start(int wait_ms);
 bool rpc_http_queue_admit(struct rpc_conn conn);
 struct rpc_conn rpc_http_queue_take_wait(const _Atomic bool *running);
+struct rpc_conn rpc_http_queue_take_matching(
+    const _Atomic bool *running, bool (*match)(const struct rpc_conn *));
 void rpc_http_queue_wake(void);
 void rpc_http_queue_drain(void);
 

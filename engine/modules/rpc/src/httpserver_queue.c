@@ -11,6 +11,7 @@
 
 #define RPC_HTTP_QUEUE_CAP 64
 #define RPC_HTTP_QUEUE_WAIT_MS_DEFAULT 10000
+#define RPC_HTTP_FAST_POLL_NS 20000000L
 
 /* Every admitted connection has exactly one owner: listener, this queue,
  * worker, or ws_events after an explicit transfer. The queue surrenders dead
@@ -96,7 +97,7 @@ bool rpc_http_queue_admit(struct rpc_conn conn)
             g_client_queue_peak = g_client_queue_count;
         g_client_admitted++;
         admitted = true;
-        pthread_cond_signal(&g_client_queue_cond);
+        pthread_cond_broadcast(&g_client_queue_cond);
     } else {
         g_client_rejected_busy++;
     }
@@ -121,6 +122,52 @@ struct rpc_conn rpc_http_queue_take_wait(const _Atomic bool *running)
                                &deadline);
     }
     struct rpc_conn conn = queue_pop_locked();
+    pthread_mutex_unlock(&g_client_queue_mutex);
+    return conn;
+}
+
+/* Removes and returns the first queued entry satisfying match, keeping the
+ * order of the rest; fd -1 when none does. Caller holds the queue mutex. */
+static struct rpc_conn queue_pop_matching_locked(
+    bool (*match)(const struct rpc_conn *))
+{
+    struct rpc_conn conn = { .fd = PLATFORM_SOCKET_INVALID, .ssl = NULL,
+                             .admitted_us = 0 };
+    for (size_t i = 0; i < g_client_queue_count; i++) {
+        size_t at = (g_client_queue_head + i) % RPC_HTTP_QUEUE_CAP;
+        if (!match(&g_client_queue[at]))
+            continue;
+        conn = g_client_queue[at];
+        for (size_t j = i + 1; j < g_client_queue_count; j++)
+            g_client_queue[(g_client_queue_head + j - 1) % RPC_HTTP_QUEUE_CAP] =
+                g_client_queue[(g_client_queue_head + j) % RPC_HTTP_QUEUE_CAP];
+        g_client_queue_tail =
+            (g_client_queue_tail + RPC_HTTP_QUEUE_CAP - 1) % RPC_HTTP_QUEUE_CAP;
+        g_client_queue_count--;
+        break;
+    }
+    return conn;
+}
+
+struct rpc_conn rpc_http_queue_take_matching(
+    const _Atomic bool *running, bool (*match)(const struct rpc_conn *))
+{
+    pthread_mutex_lock(&g_client_queue_mutex);
+    struct rpc_conn conn = queue_pop_matching_locked(match);
+    if (conn.fd == PLATFORM_SOCKET_INVALID && atomic_load(running)) {
+        /* Request bytes arrive after admission and wake nobody, so rescan on
+         * a short period. */
+        struct timespec deadline;  /* real-clock: poll period for late bytes */
+        platform_time_realtime_timespec(&deadline);
+        deadline.tv_nsec += RPC_HTTP_FAST_POLL_NS;
+        if (deadline.tv_nsec >= 1000000000L) {
+            deadline.tv_sec++;
+            deadline.tv_nsec -= 1000000000L;
+        }
+        pthread_cond_timedwait(&g_client_queue_cond, &g_client_queue_mutex,
+                               &deadline);
+        conn = queue_pop_matching_locked(match);
+    }
     pthread_mutex_unlock(&g_client_queue_mutex);
     return conn;
 }

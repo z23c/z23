@@ -924,6 +924,7 @@ ZCL_MODULE_CAPABILITY("engine/modules/rpc/src/client.c", CAP_NETWORK|CAP_FS_WRIT
 ZCL_MODULE_CAPABILITY("engine/modules/rpc/src/httpserver.c", CAP_NETWORK|CAP_FS_WRITE|CAP_WALLET, "the RPC HTTP lifecycle owner: binds listeners, owns TLS and worker lifetime, and supplies the wallet-bearing RPC table to bounded request dispatch")
 ZCL_MODULE_CAPABILITY("engine/modules/rpc/src/httpserver_auth.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK|CAP_RANDOM, "the sole live RPC credential owner: draws fresh cookie secrets, creates and retires the private auth cookie, and owns its timed rotation thread")
 ZCL_MODULE_CAPABILITY("engine/modules/rpc/src/httpserver_queue.c", CAP_FS_WRITE|CAP_CLOCK, "the accepted-socket waiting-room owner: timestamps admission and reports bounded stale or abandoned connection reclamation")
+ZCL_MODULE_CAPABILITY("engine/modules/rpc/src/httpserver_fastlane.c", CAP_NETWORK, "non-consuming peek classifier for the reserved RPC fast lane: reads already-received request bytes to select allowlisted lock-free status calls")
 ZCL_MODULE_CAPABILITY("engine/modules/rpc/src/httpserver_request.c", CAP_NETWORK|CAP_FS_WRITE, "authenticated per-connection request dispatch: identifies the peer, emits bounded HTTP responses, and may explicitly transfer a WebSocket fd")
 ZCL_MODULE_CAPABILITY("engine/modules/rpc/src/httpserver_response.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/rpc/src/httpserver_transport.c", CAP_NETWORK, "deadline-aware plain-text and TLS I/O for the RPC HTTP server's live connections")

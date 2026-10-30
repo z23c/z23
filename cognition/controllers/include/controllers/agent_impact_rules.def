@@ -238,7 +238,7 @@ AGENT_IMPACT_RULE("engine/modules/rpc/src/httpserver.c|engine/modules/rpc/includ
  * explicit: a file move must not make credential, fd, or dispatch regressions
  * fall back to lint-only evidence. */
 AGENT_IMPACT_RULE("engine/modules/rpc/src/httpserver_auth.c|engine/modules/rpc/src/httpserver_auth.h", "cookie_rotation rpc_auth_hardening cli_auth_robust rpc rpc_service_restart make_lint_gates")
-AGENT_IMPACT_RULE("engine/modules/rpc/src/httpserver_queue.c|engine/modules/rpc/src/httpserver_queue.h", "rpc_frontdoor_slots rpc rpc_service_restart make_lint_gates")
+AGENT_IMPACT_RULE("engine/modules/rpc/src/httpserver_queue.c|engine/modules/rpc/src/httpserver_queue.h|engine/modules/rpc/src/httpserver_fastlane.c|engine/modules/rpc/src/httpserver_fastlane.h", "rpc_frontdoor_slots rpc rpc_service_restart make_lint_gates")
 AGENT_IMPACT_RULE("engine/modules/rpc/src/httpserver_request.c|engine/modules/rpc/src/httpserver_request.h", "rpc rpc_auth_hardening cookie_rotation rpc_error_envelope ws_events rpc_timeout make_lint_gates")
 /* JSON-RPC reply shaping + two-pass serialization, split out of
  * httpserver.c. rpc_error_envelope is the group that drives both functions

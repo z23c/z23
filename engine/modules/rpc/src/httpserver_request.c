@@ -6,6 +6,7 @@
  * or explicitly transfers the raw descriptor to ws_events. */
 
 #include "httpserver_request.h"
+#include "httpserver_fastlane.h"
 
 #include "httpserver_auth.h"
 #include "httpserver_transport.h"
@@ -366,6 +367,17 @@ static bool http_parse_and_authenticate_post(
     return true;
 }
 
+/* A request that reached the fast lane but is not allowlisted (the
+ * pre-read classification can be fooled by a crafted body) is refused
+ * so the lane never runs a method that may block. */
+static void http_send_lane_refusal(struct rpc_conn *conn)
+{
+    char errbuf[256];
+    size_t elen = json_rpc_error_response(errbuf, sizeof(errbuf),
+        RPC_INTERNAL_ERROR, "RPC server busy", NULL, NULL);
+    rpc_conn_send_response(conn, 503, "Service Unavailable", errbuf, elen);
+}
+
 /* Read the body, parse it, execute the method and write the envelope.
  * Every path in the original flows to the same point just before the
  * single exit, so this is one unconditional call for the caller. */
@@ -410,6 +422,13 @@ static void http_dispatch_json_rpc(
         return;
     }
     json_free(&request);
+
+    if (context->fast_lane &&
+        !rpc_http_fastlane_allows(req.method, &req.params)) {
+        http_send_lane_refusal(conn);
+        json_request_free(&req);
+        return;
+    }
 
     /* Now that we know the method name, label the timeout slot so
      * EV_RPC_TIMEOUT carries useful context if the watchdog kills us

@@ -14,6 +14,7 @@ struct rpc_http_request_context {
     struct rpc_http_middleware *middleware;
     struct rpc_timeout_mgr *timeout;
     bool metrics_http_enable;
+    bool fast_lane; /* serve only fastlane-allowlisted calls */
 };
 
 void rpc_http_request_handle(

@@ -6,6 +6,7 @@
 #include "platform/socket_compat.h"
 #include "rpc/httpserver.h"
 #include "httpserver_auth.h"
+#include "httpserver_fastlane.h"
 #include "httpserver_queue.h"
 #include "httpserver_request.h"
 #include "httpserver_transport.h"
@@ -30,6 +31,7 @@
 #include "util/thread_liveness.h"
 
 #define RPC_HTTP_WORKERS 4
+#define RPC_HTTP_FAST_WORKERS 1
 
 /* ── SINGLE-OWNER INVARIANT for accepted sockets ───────────────────
  *
@@ -96,7 +98,7 @@ static struct rpc_http_request_context g_request_context;
  * would expose peer counts / tx volume / mempool size to anyone who can
  * reach the TLS listener (network fingerprinting). The HTTP middleware (rate-limit + ban
  * + loopback bypass) still runs first, unchanged. */
-static pthread_t g_worker_threads[RPC_HTTP_WORKERS];
+static pthread_t g_worker_threads[RPC_HTTP_WORKERS + RPC_HTTP_FAST_WORKERS];
 static size_t g_workers_started = 0;
 
 /* ── TLS state ────────────────────────────────────────────────────── */
@@ -106,7 +108,7 @@ static pthread_t g_tls_listen_thread;
 static bool g_tls_listen_thread_started = false;
 static uint16_t g_tls_port = 0;
 
-/* Supervisor liveness for the 4 RPC HTTP threads. Root children (not
+/* Supervisor liveness for the four RPC HTTP thread roles. Root children (not
  * supervisor_register_in_domain(...)): engine/modules/rpc cannot include the app-side
  * supervisors/domains.h without a lib-layering violation — see
  * util/thread_liveness.h ("RPC-timeout" is already listed there as one of
@@ -115,8 +117,9 @@ static uint16_t g_tls_port = 0;
  * worker pool blocks on a queue condvar, the cookie rotator sleeps on a
  * fixed cadence) so they are liveness-only (no deadline, no progress
  * gate) — present on the tree, heartbeat when they do work, never falsely
- * flagged for a quiet cycle. g_worker_threads spawns RPC_HTTP_WORKERS
- * workers under one name ("zcl_rpc_worker"); they share ONE contract —
+ * flagged for a quiet cycle. g_worker_threads spawns RPC_HTTP_WORKERS general
+ * workers plus RPC_HTTP_FAST_WORKERS status-lane workers under one name
+ * ("zcl_rpc_worker"); they share ONE contract —
  * any worker's heartbeat proves at least one worker loop is alive. */
 static struct thread_liveness_child g_rpc_worker_liveness = { .id = SUPERVISOR_INVALID_ID };
 static struct thread_liveness_child g_rpc_listen_liveness = { .id = SUPERVISOR_INVALID_ID };
@@ -132,6 +135,27 @@ static void *rpc_worker_thread_fn(void *arg)
         if (conn.fd == PLATFORM_SOCKET_INVALID)
             continue;
         rpc_http_request_handle(conn, &g_request_context);
+    }
+
+    return NULL;
+}
+
+/* The reserved lane: one extra thread that serves only allowlisted
+ * lock-free calls, so status answers while every general worker is
+ * parked on a long lock. */
+static void *rpc_fast_worker_thread_fn(void *arg)
+{
+    (void)arg;
+
+    while (g_running) {
+        struct rpc_conn conn = rpc_http_queue_take_matching(
+            &g_running, rpc_http_fastlane_conn_matches);
+        thread_liveness_beat(&g_rpc_worker_liveness, -1);
+        if (conn.fd == PLATFORM_SOCKET_INVALID)
+            continue;
+        struct rpc_http_request_context lane = g_request_context;
+        lane.fast_lane = true;
+        rpc_http_request_handle(conn, &lane);
     }
 
     return NULL;
@@ -464,8 +488,10 @@ static void rpc_tls_listen_socket_setup(void)
  * run got so rpc_http_stop() joins exactly what exists. */
 static bool rpc_http_spawn_workers(void)
 {
-    for (size_t i = 0; i < RPC_HTTP_WORKERS; i++) {
-        if (thread_registry_spawn("zcl_rpc_worker", rpc_worker_thread_fn,
+    for (size_t i = 0; i < RPC_HTTP_WORKERS + RPC_HTTP_FAST_WORKERS; i++) {
+        void *(*fn)(void *) = i < RPC_HTTP_WORKERS ? rpc_worker_thread_fn
+                                                   : rpc_fast_worker_thread_fn;
+        if (thread_registry_spawn("zcl_rpc_worker", fn,
                                       NULL, &g_worker_threads[i]) != 0) {
             perror("thread_registry_spawn");
             return false;
