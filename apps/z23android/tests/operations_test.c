@@ -297,6 +297,63 @@ static void pace_tests(void)
     assert(zapp_node_pace_write(&r, ZAPP_PACE_NORMAL) && pace_file_is(directory, "normal"));
     assert(unlink(file) == 0 && rmdir(directory) == 0);
 }
+static int waiting_calls;
+static void count_waiting(void *arg) { (void)arg; ++waiting_calls; }
+static void write_hostname(const char *directory, const char *text)
+{
+    char dir[400], file[420];
+    snprintf(dir, sizeof(dir), "%s/tor_data", directory); (void)mkdir(dir, 0700);
+    snprintf(dir, sizeof(dir), "%s/tor_data/onion_service", directory); (void)mkdir(dir, 0700);
+    snprintf(file, sizeof(file), "%s/hostname", dir);
+    FILE *f = fopen(file, "w");
+    assert(f && fputs(text, f) >= 0 && fclose(f) == 0);
+}
+static void onion_tests(void)
+{
+    static const char good[] = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+    char directory[] = "/tmp/zapp-onion-test-XXXXXX", file[420], dir[400];
+    assert(mkdtemp(directory));
+    struct zapp_runtime r = {0};
+    assert(pthread_mutex_init(&r.mutex, NULL) == 0);
+    assert(snprintf(r.directory, sizeof(r.directory), "%s", directory) > 0);
+    /* No file, an empty file and malformed hostnames are never ready. */
+    assert(!zapp_onion_ready(&r));
+    write_hostname(directory, "");
+    assert(!zapp_onion_ready(&r));
+    write_hostname(directory, "short.onion\n");
+    assert(!zapp_onion_ready(&r));
+    write_hostname(directory, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRSTUVWX.onion\n");
+    assert(!zapp_onion_ready(&r));
+    write_hostname(directory, "abcdefghijklmnopqrstuvwxyz234561abcdefghijklmnopqrstuvwx.onion\n");
+    assert(!zapp_onion_ready(&r));
+    write_hostname(directory, "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onionx\n");
+    assert(!zapp_onion_ready(&r));
+    /* A stopped node never waits. */
+    assert(zapp_onion_wait(&r, 5, count_waiting, NULL) == ZAPP_ONION_NODE_STOPPED && waiting_calls == 0);
+    pid_t node = fork();
+    assert(node >= 0);
+    if (node == 0) { sleep(30); _exit(0); }
+    r.node = node;
+    /* A running node whose address never appears times out after reporting the wait once. */
+    assert(zapp_onion_wait(&r, 2, count_waiting, NULL) == ZAPP_ONION_TIMEOUT && waiting_calls == 1);
+    write_hostname(directory, good);
+    assert(zapp_onion_ready(&r));
+    write_hostname(directory, "");
+    pid_t writer = fork();
+    assert(writer >= 0);
+    if (writer == 0) { sleep(1); write_hostname(directory, good); _exit(0); }
+    waiting_calls = 0;
+    assert(zapp_onion_wait(&r, 10, count_waiting, NULL) == ZAPP_ONION_READY && waiting_calls == 1);
+    assert(waitpid(writer, NULL, 0) == writer);
+    assert(kill(node, SIGKILL) == 0 && waitpid(node, NULL, 0) == node);
+    r.node = 0;
+    snprintf(file, sizeof(file), "%s/tor_data/onion_service/hostname", directory);
+    snprintf(dir, sizeof(dir), "%s/tor_data/onion_service", directory);
+    assert(unlink(file) == 0 && rmdir(dir) == 0);
+    snprintf(dir, sizeof(dir), "%s/tor_data", directory);
+    assert(rmdir(dir) == 0 && rmdir(directory) == 0);
+    pthread_mutex_destroy(&r.mutex);
+}
 
 int main(int argc, char **argv)
 {
@@ -306,6 +363,7 @@ int main(int argc, char **argv)
     balance_tests();
     plain_text_tests();
     pace_tests();
+    onion_tests();
     struct zapp_runtime r = {0};
     assert(pthread_mutex_init(&r.mutex, NULL) == 0);
     assert(snprintf(r.executable, sizeof(r.executable), "%s", argv[0]) > 0);

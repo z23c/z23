@@ -438,12 +438,35 @@ static bool scan_invitation(struct controller *c, uint64_t ticket, char *out)
     copy_text(out, ZAPP_TEXT_CAP, ok ? "Invitation scanned. Review before joining." : "The QR code is not a fleet invitation.");
     return ok;
 }
+#define ONION_WAIT_SECONDS 90
+static void onion_waiting(void *arg)
+{
+    struct controller *c = arg;
+    pthread_mutex_lock(&c->lock);
+    copy_text(c->view.result, ZAPP_NOTICE_CAP, "Waiting for this phone's onion address");
+    pthread_mutex_unlock(&c->lock);
+    notify_view(c);
+}
+/* Joining records the node's onion address in a signed record, so it never runs without one. */
+static bool join_fleet(struct controller *c, const char *token, char *out)
+{
+    switch (zapp_onion_wait(&c->runtime, ONION_WAIT_SECONDS, onion_waiting, c)) {
+    case ZAPP_ONION_NODE_STOPPED:
+        copy_text(out, ZAPP_TEXT_CAP, "Start the node first so this phone can record its onion address.");
+        return false;
+    case ZAPP_ONION_TIMEOUT:
+        copy_text(out, ZAPP_TEXT_CAP, "Tor has not published this phone's onion address yet. Try again in a minute.");
+        return false;
+    case ZAPP_ONION_READY: break;
+    }
+    return zapp_fleet_join_run(&c->runtime, token, out, ZAPP_TEXT_CAP);
+}
 static bool execute_fleet(struct controller *c, const char *action, const char *arg,
                           uint64_t ticket, char *out)
 {
     bool ok = false;
     if (!strcmp(action, "fleet_hosts")) ok = fleet_hosts(c, !strcmp(arg, "refresh"), out);
-    else if (!strcmp(action, "fleet_join")) ok = zapp_fleet_join_run(&c->runtime, arg, out, ZAPP_TEXT_CAP);
+    else if (!strcmp(action, "fleet_join")) ok = join_fleet(c, arg, out);
     else if (!strcmp(action, "fleet_preview")) {
         ok = invitation(c, arg);
         copy_text(out, ZAPP_TEXT_CAP, ok ? "Review the manager invitation." : "This is not a valid fleet invitation.");

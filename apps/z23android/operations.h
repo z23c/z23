@@ -46,6 +46,12 @@ enum zapp_pace zapp_node_pace(const struct zapp_runtime *r);
 bool zapp_node_pace_write(struct zapp_runtime *r, enum zapp_pace pace);
 bool zapp_operation_run(struct zapp_runtime *r, const char *id, char *out, size_t cap);
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
+/* True when the node has published its onion address: a valid Tor v3 hostname file. */
+bool zapp_onion_ready(const struct zapp_runtime *r);
+enum zapp_onion { ZAPP_ONION_READY, ZAPP_ONION_NODE_STOPPED, ZAPP_ONION_TIMEOUT };
+/* Re-checks once a second for up to the given seconds. waiting runs once, when the address is not
+ * yet there. Returns early if the node exits. */
+enum zapp_onion zapp_onion_wait(struct zapp_runtime *r, unsigned seconds, void (*waiting)(void *), void *arg);
 bool zapp_balance_format(const char *json, char *out, size_t cap);
 /* The JSON object in command output: at its start, or on the first line beginning with {, after
  * warnings the command wrote first. NULL when there is none. */

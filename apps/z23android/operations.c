@@ -503,6 +503,51 @@ bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, s
     return ok;
 }
 
+/* The node writes tor_data/onion_service/hostname once Tor has published its hidden service. */
+static void onion_error(const char *step, const char *file)
+{
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_ERROR, "z23", "onion address: %s %s failed: %s", step, file, strerror(errno));
+#else
+    fprintf(stderr, "z23: onion address: %s %s failed: %s\n", step, file, strerror(errno));
+#endif
+}
+/* Same closed grammar as onion_hostname_valid in core: 56 characters of a-z2-7, then ".onion". apps
+ * link neither core nor engine, so the predicate is restated here. */
+static bool onion_hostname_valid(const char *text, size_t length)
+{
+    if (length != 62 || memcmp(text + 56, ".onion", 6) != 0) return false;
+    for (size_t i = 0; i < 56; ++i)
+        if (!((text[i] >= 'a' && text[i] <= 'z') || (text[i] >= '2' && text[i] <= '7'))) return false;
+    return true;
+}
+bool zapp_onion_ready(const struct zapp_runtime *r)
+{
+    char file[1200], text[128];
+    if (!r || snprintf(file, sizeof(file), "%s/tor_data/onion_service/hostname", r->directory) >= (int)sizeof(file))
+        return false;
+    int fd = open(file, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) { if (errno != ENOENT) onion_error("open", file); return false; }
+    ssize_t n = read(fd, text, sizeof(text));
+    if (n < 0) onion_error("read", file);
+    close(fd);
+    if (n > 0 && text[n - 1] == '\n') --n;
+    return n > 0 && onion_hostname_valid(text, (size_t)n);
+}
+enum zapp_onion zapp_onion_wait(struct zapp_runtime *r, unsigned seconds, void (*waiting)(void *), void *arg)
+{
+    if (!zapp_node_running(r)) return ZAPP_ONION_NODE_STOPPED;
+    for (unsigned i = 0; i <= seconds; ++i) {
+        if (zapp_onion_ready(r)) return ZAPP_ONION_READY;
+        if (i == 0 && waiting) waiting(arg);
+        if (i == seconds) break;
+        struct timespec second = {.tv_sec = 1};
+        while (nanosleep(&second, &second) != 0 && errno == EINTR) {}
+        if (!zapp_node_running(r)) return ZAPP_ONION_NODE_STOPPED;
+    }
+    return ZAPP_ONION_TIMEOUT;
+}
+
 const char *zapp_json_object(const char *text)
 {
     const char *json = !text ? NULL : text[0] == '{' ? text : strstr(text, "\n{");
