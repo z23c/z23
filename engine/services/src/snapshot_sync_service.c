@@ -85,6 +85,17 @@ void snapsync_service_unlock_internal(void)
     pthread_mutex_unlock(&g_snapsync_service_lock);
 }
 
+enum snapshot_sync_state snapsync_get_state_internal(
+    const struct snapshot_sync_service *svc)
+{
+    if (!svc)
+        return SNAPSYNC_IDLE;
+    snapsync_service_lock_internal();
+    enum snapshot_sync_state state = svc->state;
+    snapsync_service_unlock_internal();
+    return state;
+}
+
 struct snapshot_sync_service *snapsync_global(void) { return &g_snapsync_instance; }
 bool snapsync_global_initialized(void) { return g_snapsync_init_done; }
 

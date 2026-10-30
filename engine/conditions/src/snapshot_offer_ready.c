@@ -7,6 +7,7 @@
 #include "config/runtime.h"
 #include "event/event.h"
 #include "net/snapshot_sync_contract.h"
+#include "../../services/src/snapshot_sync_internal.h"
 #include "services/sync_monitor.h"
 #include "sync/sync_state.h"
 #include "validation/chainstate.h"
@@ -65,6 +66,26 @@ static bool sync_state_can_receive_snapshot(enum sync_state state)
            state == SYNC_CONNECTING_BLOCKS;
 }
 
+/* Reads the offer fields. This is the only path here that counts staged rows
+ * (snapsync_get_status_snapshot); callers read the state first and call it
+ * only for an active offer. */
+static void snapshot_offer_read_status(struct snapshot_sync_service *svc,
+                                       struct snapsync_status *status)
+{
+#ifdef ZCL_TESTING
+    if (svc == g_test_svc) {
+        /* The test service has no ndb; read its fields directly instead of
+         * snapsync_get_status_snapshot, which would deref a NULL staging store. */
+        status->state = svc->state;
+        status->offered_height = svc->offered_height;
+        status->offered_count = svc->offered_count;
+        status->serving_peer_id = svc->serving_peer_id;
+        return;
+    }
+#endif
+    snapsync_get_status_snapshot(svc, status);
+}
+
 static bool detect_snapshot_offer_ready(void)
 {
     struct snapshot_sync_service *svc = runtime_snapsync();
@@ -72,17 +93,10 @@ static bool detect_snapshot_offer_ready(void)
     if (!svc)
         return false;
 
-#ifdef ZCL_TESTING
-    if (svc == g_test_svc) {
-        status.state = svc->state;
-        status.offered_height = svc->offered_height;
-        status.offered_count = svc->offered_count;
-        status.serving_peer_id = svc->serving_peer_id;
-    } else
-#endif
-    {
-        snapsync_get_status_snapshot(svc, &status);
-    }
+    /* State first: the staged-row count is read only for an active offer. */
+    if (!snapshot_offer_is_active(snapsync_get_state_internal(svc)))
+        return false; // raw-return-ok:snapsync-offer-not-active-is-normal-steady-state
+    snapshot_offer_read_status(svc, &status);
     if (!snapshot_offer_is_active(status.state) ||
         status.offered_height <= 0 ||
         status.offered_count == 0)
@@ -111,18 +125,10 @@ static bool detect_snapshot_offer_ready(void)
 static bool snapshot_offer_currently_active(void)
 {
     struct snapshot_sync_service *svc = runtime_snapsync();
-    struct snapsync_status status = {0};
     if (!svc)
         return false;
-#ifdef ZCL_TESTING
-    if (svc == g_test_svc) {
-        status.state = svc->state;
-    } else
-#endif
-    {
-        snapsync_get_status_snapshot(svc, &status);
-    }
-    return snapshot_offer_is_active(status.state);
+    /* State only: this runs on every witness poll and must not count rows. */
+    return snapshot_offer_is_active(snapsync_get_state_internal(svc));
 }
 
 static enum condition_remedy_result remedy_snapshot_offer_ready(void)
@@ -196,30 +202,21 @@ static bool witness_snapshot_offer_ready(int64_t target_at_detect)
     if (!svc)
         return false;
 
-    struct snapsync_status status = {0};
-#ifdef ZCL_TESTING
-    if (svc == g_test_svc) {
-        /* The test service has no ndb; read its fields directly (matching
-         * detect_snapshot_offer_ready) instead of snapsync_get_status_snapshot,
-         * which would deref a NULL staging store. */
-        status.state = svc->state;
-        status.offered_height = svc->offered_height;
-        status.offered_count = svc->offered_count;
-        status.serving_peer_id = svc->serving_peer_id;
-    } else
-#endif
-    {
-        snapsync_get_status_snapshot(svc, &status);
-    }
-
-    if (!snapshot_offer_is_active(status.state)) {
+    /* State first: the staged-row count is read only for an active offer. */
+    enum snapshot_sync_state state = snapsync_get_state_internal(svc);
+    if (!snapshot_offer_is_active(state)) {
         LOG_WARN("condition",
                  "[condition:snapshot_offer_ready] witness: snapsync offer "
                  "no longer active (state=%d) — remedy's FSM move to "
                  "SYNC_SNAPSHOT_RECEIVE was a remedy echo, not proof",
-                 (int)status.state);
+                 (int)state);
         return false;
     }
+
+    struct snapsync_status status = {0};
+    snapshot_offer_read_status(svc, &status);
+    if (!snapshot_offer_is_active(status.state))
+        return false; // raw-return-ok:snapsync-offer-superseded-between-reads
 
     int64_t staged_at_detect = atomic_load(&g_staged_at_detect);
     return status.staged_row_count >= staged_at_detect;

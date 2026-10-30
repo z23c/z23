@@ -9,6 +9,8 @@
 #include "config/db_service.h"
 #include "config/boot_snapshot_offer.h"
 #include "config/runtime.h"
+#include "framework/condition.h"
+#include "conditions/snapshot_offer_ready.h"
 #include "services/sync_trust_policy.h"
 #include "coins/utxo_commitment.h"
 #include "core/serialize.h"
@@ -2188,6 +2190,49 @@ static int test_failed_status_counts_staging_only_when_failed(void)
     return failures;
 }
 
+void register_snapshot_complete_resume(void);
+void snapshot_complete_resume_test_reset(void);
+
+/* An idle service must not reach the staging table from the periodic
+ * condition polls: detect of snapshot_offer_ready and snapshot_complete_resume
+ * reads the state first and counts staged rows only for an offer that needs it. */
+static int test_idle_condition_detect_skips_staging_count(void)
+{
+    int failures = 0;
+    TEST("idle snapshot condition detect issues zero staging COUNT statements") {
+        struct node_db ndb;
+        struct snapshot_sync_service svc;
+        struct app_runtime_context runtime = {0};
+
+        memset(&svc, 0, sizeof(svc));
+        ASSERT(node_db_open(&ndb, ":memory:"));
+        snapsync_init(&svc, &ndb);
+        runtime.snapshot_sync = &svc;
+        app_runtime_set_current(&runtime);
+
+        condition_engine_reset_for_testing();
+        snapshot_offer_ready_test_reset();
+        snapshot_complete_resume_test_reset();
+        register_snapshot_offer_ready();
+        register_snapshot_complete_resume();
+
+        staging_stmt_trace_hits = 0;
+        sqlite3_trace_v2(ndb.db, SQLITE_TRACE_STMT, staging_stmt_trace_cb, NULL);
+        condition_engine_tick();
+        sqlite3_trace_v2(ndb.db, 0, NULL, NULL);
+        ASSERT(staging_stmt_trace_hits == 0);
+
+        condition_engine_reset_for_testing();
+        snapshot_offer_ready_test_reset();
+        snapshot_complete_resume_test_reset();
+        app_runtime_set_current(NULL);
+        snapsync_reset(&svc);
+        node_db_close(&ndb);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_snapshot_sync_service(void)
 {
     int failures = 0;
@@ -2244,6 +2289,7 @@ int test_snapshot_sync_service(void)
     failures += test_snapshot_global_ensure_init_completes();
     failures += test_snapshot_global_post_init_fallback();
     failures += test_failed_status_counts_staging_only_when_failed();
+    failures += test_idle_condition_detect_skips_staging_count();
     progress_store_close();
     test_cleanup_tmpdir(progress_dir);
     return failures;
