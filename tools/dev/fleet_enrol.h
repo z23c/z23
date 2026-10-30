@@ -307,6 +307,14 @@ bool fleet_enrol_name_valid(const char *name);
  * else. Says nothing about whether the address answers. */
 bool fleet_enrol_onion_valid(const char *onion);
 
+/* Read the node's own persistent onion hostname from
+ * <datadir>/tor_data/onion_service/hostname (written by -onion-persist)
+ * into `out`. True only when the file holds one valid locator; a missing,
+ * unreadable, empty or invalid file leaves `out` empty and returns false,
+ * which is the same column a box with no persistent onion records. */
+bool fleet_enrol_onion_from_datadir(const char *datadir, char *out,
+                                    size_t cap);
+
 /* Mint a signed invite. `seed`/`pubkey` are this box's key. `text` receives
  * the unpadded base64url token. Refuses by name; writes nothing on refusal.
  *

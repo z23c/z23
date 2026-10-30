@@ -855,6 +855,82 @@ static int test_fe_onion_grammar(void)
     return failures;
 }
 
+/* A box that runs its own node keeps one persistent onion under its datadir;
+ * the receipt records it when the owner names none, and an absent or
+ * unusable file leaves the column empty exactly as a box with no onion. */
+static bool fe_write_hostname(const char *dir, const char *content)
+{
+    char path[PATH_MAX + 64];
+    FILE *f;
+    (void)snprintf(path, sizeof(path), "%s/tor_data", dir);
+    if (mkdir(path, 0700) != 0 && errno != EEXIST) return false;
+    (void)snprintf(path, sizeof(path), "%s/tor_data/onion_service", dir);
+    if (mkdir(path, 0700) != 0 && errno != EEXIST) return false;
+    (void)snprintf(path, sizeof(path), "%s/tor_data/onion_service/hostname",
+                   dir);
+    f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = fputs(content, f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+static int test_fe_onion_from_datadir(void)
+{
+    int failures = 0;
+    TEST("fleet enrol: the persisted onion hostname fills the receipt and "
+         "a missing or invalid file leaves it empty") {
+        char dir[PATH_MAX - 64], onion[FLEET_ENROL_ONION_MAX + 1];
+        char token[FLEET_ENROL_MACHINE_TEXT_MAX], receipt[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char host_line[FLEET_ENROL_ONION_MAX + 2];
+        uint8_t op_seed[32], op_pub[32], box_seed[32], box_pub[32];
+        uint8_t invite_wire[FLEET_ENROL_INVITE_WIRE_MAX];
+        struct fleet_invite invite;
+        struct fleet_receipt parsed;
+        struct fleet_box_facts facts = fe_facts();
+        size_t invite_len = 0;
+        const char *why = NULL;
+        test_make_tmpdir(dir, sizeof(dir), "fleet_enrol", "onion-datadir");
+        /* No file: empty, and a NULL or empty datadir is the same answer. */
+        ASSERT(!fleet_enrol_onion_from_datadir(dir, onion, sizeof(onion)));
+        ASSERT_STR_EQ(onion, "");
+        ASSERT(!fleet_enrol_onion_from_datadir(NULL, onion, sizeof(onion)));
+        ASSERT(!fleet_enrol_onion_from_datadir("", onion, sizeof(onion)));
+        /* Tor writes the hostname with a trailing newline. */
+        ASSERT(snprintf(host_line, sizeof(host_line), "%s\n", FE_ONION) > 0);
+        ASSERT(fe_write_hostname(dir, host_line));
+        ASSERT(fleet_enrol_onion_from_datadir(dir, onion, sizeof(onion)));
+        ASSERT_STR_EQ(onion, FE_ONION);
+        /* A buffer too small for the locator refuses rather than truncates. */
+        ASSERT(!fleet_enrol_onion_from_datadir(dir, onion, 10));
+        ASSERT_STR_EQ(onion, "");
+        /* The value travels into a signed receipt. */
+        ASSERT(fleet_enrol_onion_from_datadir(dir, onion, sizeof(onion)));
+        fe_key(0x61, op_seed, op_pub);
+        fe_key(0x62, box_seed, box_pub);
+        ASSERT(fleet_invite_mint("studio", FE_TTL, "", op_seed, op_pub, FE_NOW,
+                                 token, sizeof(token), &invite, &why));
+        ASSERT(fleet_invite_parse(token, &invite, invite_wire,
+                                  sizeof(invite_wire), &invite_len, &why));
+        ASSERT(fleet_receipt_mint(invite_wire, invite_len, onion, &facts, "",
+                                  box_seed, box_pub, NULL, receipt,
+                                  sizeof(receipt), &why));
+        ASSERT(fleet_receipt_parse(receipt, &parsed, NULL, 0, NULL, &why));
+        ASSERT_STR_EQ(parsed.onion, FE_ONION);
+        /* Not a v3 locator, empty, or a v2 address: nothing is recorded. */
+        ASSERT(fe_write_hostname(dir, "relay.example.com\n"));
+        ASSERT(!fleet_enrol_onion_from_datadir(dir, onion, sizeof(onion)));
+        ASSERT_STR_EQ(onion, "");
+        ASSERT(fe_write_hostname(dir, ""));
+        ASSERT(!fleet_enrol_onion_from_datadir(dir, onion, sizeof(onion)));
+        ASSERT_STR_EQ(onion, "");
+        ASSERT(fe_write_hostname(dir, "abcdefghijklmnop.onion\n"));
+        ASSERT(!fleet_enrol_onion_from_datadir(dir, onion, sizeof(onion)));
+        ASSERT_STR_EQ(onion, "");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* A receipt with an intact signature but a non-locator onion field is refused
  * on the way in: a signature proves who wrote it, not that it is dialable. */
 static int test_fe_onion_refused_at_mint(void)
@@ -3138,6 +3214,7 @@ int test_fleet_enrol(void)
     failures += test_fe_bridge_nul();
     failures += test_fe_ssh_record();
     failures += test_fe_onion_grammar();
+    failures += test_fe_onion_from_datadir();
     failures += test_fe_onion_refused_at_mint();
     failures += test_fe_machines_page();
     failures += test_fe_render();

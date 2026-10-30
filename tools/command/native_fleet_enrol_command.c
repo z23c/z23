@@ -322,15 +322,20 @@ static void fe_join(const struct zcl_command_request *request,
     size_t invite_len = 0;
     const char *token = json_get_str(json_get(request ? request->input : NULL,
                                               "token"));
-    /* Self-reported and optional. The owner (or the agent on this box) says
-     * where this machine will answer; this lane does not run a node and has
-     * nothing to read the address off, and inventing one would be worse than
-     * an empty column. */
+    /* Optional. An explicit --onion is what the owner says this machine will
+     * answer on. Without one, the persistent onion this box's node already
+     * keeps in its datadir (-onion-persist) is recorded; with neither the
+     * column stays empty, because inventing an address would be worse. */
     const char *onion = json_get_str(json_get(request ? request->input : NULL,
                                               "onion"));
+    char persisted[FLEET_ENROL_ONION_MAX + 1];
     const char *why = NULL;
     bool present = false;
     if (!onion) onion = "";
+    if (!onion[0] &&
+        fleet_enrol_onion_from_datadir(zcl_native_command_datadir(), persisted,
+                                       sizeof(persisted)))
+        onion = persisted;
     if (!fleet_enrol_onion_valid(onion)) {
         fe_fail(reply, "FLEET_ONION_INVALID", "normalize",
                 "--onion must be this box's v3 onion hostname: 56 lowercase "

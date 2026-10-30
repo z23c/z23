@@ -276,6 +276,27 @@ bool fleet_enrol_onion_valid(const char *onion)
     return fe_onion_port_digits_valid(onion, n);
 }
 
+bool fleet_enrol_onion_from_datadir(const char *datadir, char *out, size_t cap)
+{
+    char path[1024], line[FLEET_ENROL_ONION_MAX + 4];
+    if (!out || cap == 0) return false;
+    out[0] = '\0';
+    if (!datadir || !datadir[0] ||
+        snprintf(path, sizeof(path), "%s/tor_data/onion_service/hostname",
+                 datadir) >= (int)sizeof(path))
+        return false;
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    char *got = fgets(line, (int)sizeof(line), f);
+    (void)fclose(f);
+    if (!got) return false;
+    size_t n = strcspn(line, "\r\n");
+    line[n] = '\0';
+    if (n == 0 || n >= cap || !fleet_enrol_onion_valid(line)) return false;
+    memcpy(out, line, n + 1u);
+    return true;
+}
+
 static bool fe_relay_char_ok(unsigned char c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
