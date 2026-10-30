@@ -22,6 +22,8 @@ struct precheck_base {
     char results[PATH_MAX];
 };
 
+/* The <binary> part of the results name for the running executable. */
+const char *precheck_base_binary_tag(char *out, size_t cap);
 /* 0 on success; else 2 with a one-line reason in why (no newline). */
 int precheck_base_open(struct precheck_base *b, char *why, size_t wcap);
 void precheck_base_close(struct precheck_base *b);

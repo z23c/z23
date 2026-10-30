@@ -173,7 +173,7 @@ static int pb_ensure_tree(const struct precheck_base *b)
 
 /* The base gates run in-process, so cached rcs are only valid for the lint
  * binary that produced them: key the cache on this binary's size and mtime. */
-static const char *pb_binary_tag(char *out, size_t cap)
+const char *precheck_base_binary_tag(char *out, size_t cap)
 {
     struct stat st;
     const char *exe = (const char *)getauxval(AT_EXECFN);
@@ -198,8 +198,12 @@ int precheck_base_open(struct precheck_base *b, char *why, size_t wcap)
         return 2;
     }
     snprintf(b->tree, sizeof b->tree, "%s/base-tree", cache);
-    snprintf(b->results, sizeof b->results, "%s/base-native-%s-%s.txt", cache,
-             b->sha, pb_binary_tag(tag, sizeof tag));
+    int n = snprintf(b->results, sizeof b->results, "%s/base-native-%s-%s.txt",
+                     cache, b->sha, precheck_base_binary_tag(tag, sizeof tag));
+    if (n < 0 || (size_t)n >= sizeof b->results) {
+        snprintf(why, wcap, "the precheck cache path is too long");
+        return 2;
+    }
     b->lock_fd = pb_lock(cache);
     if (b->lock_fd < 0) {
         snprintf(why, wcap, "cannot lock the precheck cache");

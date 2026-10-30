@@ -1419,7 +1419,7 @@ static int test_lsel_precheck_auto_base(void)
     TEST_CASE("lint_selection: precheck auto base is the merge-base and its results are cached") {
         struct lsel_pc_fx fx;
         char repo[PATH_MAX], out[512], cnt[PATH_MAX + 16], res[PATH_MAX * 2];
-        char sha[72], text[64] = "";
+        char sha[72], text[64] = "", tag[48];
         const char *head[] = { "rev-parse", "HEAD", NULL };
         char *argv[] = { (char *)"--gates=check-no-python,check-count" };
         ASSERT(lsel_pc_plant(&fx));
@@ -1435,7 +1435,8 @@ static int test_lsel_precheck_auto_base(void)
         ASSERT_EQ(lsel_pc_run(&fx, repo, argv, 1, out, sizeof(out)), 1);
         ASSERT(strstr(out, "NEW check-no-python rc=1\n") != NULL);
         ASSERT_EQ(lsel_pc_file_size(cnt), 4U);
-        (void)snprintf(res, sizeof(res), "%s/cache/base-native-%s.txt", fx.root, sha);
+        (void)snprintf(res, sizeof(res), "%s/cache/base-native-%s-%s.txt", fx.root, sha,
+                       precheck_base_binary_tag(tag, sizeof(tag)));
         FILE *f = fopen(res, "r");
         ASSERT(f != NULL);
         ASSERT(fread(text, 1, sizeof(text) - 1, f) > 0);
