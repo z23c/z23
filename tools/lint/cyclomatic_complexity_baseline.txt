@@ -332,9 +332,6 @@ tools/command/cli_render.c:render_statecatalog:18
 tools/command/cli_render.c:render_yardsale_guide:17
 tools/command/cli_render.c:zcl_cli_render_brief:22
 tools/command/cli_render.c:zcl_cli_render_resolve:20
-tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_build:29
-tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_check:19
-tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_status:17
 tools/core_seal.c:compute_sections:32
 tools/core_seal.c:open_sealed_file:27
 tools/core_seal.c:path_reject_reason:19

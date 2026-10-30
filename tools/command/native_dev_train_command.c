@@ -312,6 +312,217 @@ static bool dvt_stack_children(const struct zcl_command_request *request,
     (void)platform_directory_list_real_sorted(parent, children);
     return true;
 }
+
+/* Fetch origin, then probe every source before any stack is cut. */
+static bool dvt_fetch_and_probe(const char *root, const char *sources,
+                                struct zcl_command_reply *reply)
+{
+    static const char *const fetch_args[] = {"fetch", "-q", "origin", NULL};
+    if (zcl_dev_train_git(root, fetch_args, NULL, 0, DVT_FETCH_TIMEOUT_MS) != 0) {
+        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                "GIT_FAILED", "fetch", "git fetch origin failed", root);
+        return false;
+    }
+    return dvt_sources_preflight(root, sources, reply);
+}
+
+/* Cut the stack worktree at origin/main, initialise its submodules and run
+ * its prime target. */
+static bool dvt_stack_worktree_setup(const char *root, const char *stack_dir,
+                                     struct zcl_command_reply *reply)
+{
+    const char *worktree_add_args[] = {"worktree", "add", "--detach",
+                                       stack_dir, "origin/main", NULL};
+    if (zcl_dev_train_git(root, worktree_add_args, NULL, 0, DVT_GIT_TIMEOUT_MS) != 0) {
+        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                "GIT_FAILED", "worktree_add",
+                "git worktree add --detach failed", stack_dir);
+        return false;
+    }
+
+    static const char *const submodule_args[] = {"submodule", "-q", "update",
+                                                 "--init", NULL};
+    if (zcl_dev_train_git(stack_dir, submodule_args, NULL, 0, DVT_FETCH_TIMEOUT_MS) != 0) {
+        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                "GIT_FAILED", "submodule_init",
+                "git submodule update --init failed; the worktree is left "
+                "in place for inspection",
+                stack_dir);
+        return false;
+    }
+
+    const char *prime_argv[] = {"make", "-s", "--no-print-directory",
+                                "worktree-prime", NULL};
+    struct zcl_devloop_process_result prime_result;
+    if (!zcl_devloop_process_run(stack_dir, prime_argv, DVT_MAKE_TIMEOUT_MS,
+                                 &prime_result) ||
+        prime_result.exit_code != 0 || prime_result.timed_out) {
+        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                "PRIME_FAILED", "worktree_prime",
+                "make worktree-prime failed; the worktree is left in place "
+                "for inspection",
+                stack_dir);
+        return false;
+    }
+    return true;
+}
+
+/* Fetch a directory source's HEAD into the stack, so its commits resolve. */
+static bool dvt_fetch_source_head(const char *stack_dir, const char *source,
+                                  struct zcl_command_reply *reply)
+{
+            /* A directory source may be a linked worktree of the SAME
+             * repository (the common case: another lane worktree beside
+             * this one) or an entirely separate clone. Either way, its
+             * commits are not necessarily reachable from stack_dir's object
+             * database yet — a linked worktree shares objects already (this
+             * fetch is then a fast no-op), a separate clone does not. Fetch
+             * its HEAD into stack_dir before cherry-picking anything from
+             * it, so `git cherry-pick <sha>` never hits "bad object". */
+    const char *fetch_source_args[] = {"fetch", "-q", source, "HEAD", NULL};
+    if (zcl_dev_train_git(stack_dir, fetch_source_args, NULL, 0,
+                           DVT_FETCH_TIMEOUT_MS) != 0) {
+        (void)dvt_source_fail(reply, "SOURCE_FETCH_FAILED",
+                               "could not fetch the source HEAD into the stack", source);
+        return false;
+    }
+    return true;
+}
+
+static void dvt_warn_no_commits(struct json_value *warnings, const char *source,
+                                const char *range)
+{
+    struct json_value w;
+    json_init(&w);
+    char msg[PATH_MAX + 64];
+    (void)snprintf(msg, sizeof(msg), "no commits found for %s (%s)",
+                  source, range);
+    json_set_str(&w, msg);
+    (void)json_push_back(warnings, &w);
+    json_free(&w);
+}
+
+/* One row of the picked or skipped list: sha, subject and the source it came
+ * from. */
+static void dvt_push_commit_row(struct json_value *list, const char *sha,
+                                const char *subject, const char *source)
+{
+    struct json_value item;
+    json_init(&item); json_set_object(&item);
+    (void)json_push_kv_str(&item, "sha", sha);
+    (void)json_push_kv_str(&item, "subject", subject);
+    (void)json_push_kv_str(&item, "source", source);
+    (void)json_push_back(list, &item);
+    json_free(&item);
+}
+
+static void dvt_pick_lists_free(struct json_value *picked,
+                                struct json_value *skipped,
+                                struct json_value *warnings)
+{
+    json_free(picked); json_free(skipped); json_free(warnings);
+}
+
+/* Report a real cherry-pick conflict in the reply, then free the picked,
+ * skipped and warnings lists it has copied in. */
+static void dvt_report_pick_conflict(const char *stack_dir, const char *source,
+                                     const char *sha, const char *subject,
+                                     struct zcl_command_reply *reply,
+                                     struct json_value *picked,
+                                     struct json_value *skipped,
+                                     struct json_value *warnings)
+{
+    struct json_value paths;
+    dvt_conflict_paths(stack_dir, &paths);
+    (void)json_push_kv_str(&reply->data, "state", "conflict");
+    (void)json_push_kv_str(&reply->data, "source", source);
+    (void)json_push_kv_str(&reply->data, "sha", sha);
+    (void)json_push_kv_str(&reply->data, "subject", subject);
+    (void)json_push_kv(&reply->data, "paths", &paths);
+    json_free(&paths);
+    (void)json_push_kv(&reply->data, "picked", picked);
+    (void)json_push_kv(&reply->data, "skipped", skipped);
+    (void)json_push_kv(&reply->data, "warnings", warnings);
+    dvt_pick_lists_free(picked, skipped, warnings);
+    char next[PATH_MAX + 64];
+    (void)snprintf(next, sizeof(next),
+                  "git -C %s cherry-pick --continue", stack_dir);
+    (void)json_push_kv_str(&reply->data, "next", next);
+    dvt_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+            ZCL_COMMAND_EXIT_BLOCKED, "CHERRY_PICK_CONFLICT",
+            "cherry_pick",
+            "a real cherry-pick conflict; the stack worktree is "
+            "left mid-cherry-pick",
+            sha);
+}
+
+/* Pick one source's origin/main..<range> commits into the stack, oldest first.
+ * False when the reply already names the failure; the lists are freed by then. */
+static bool dvt_pick_source(const char *root, const char *stack_dir,
+                            const char *source, struct zcl_command_reply *reply,
+                            struct json_value *picked, struct json_value *skipped,
+                            struct json_value *warnings)
+{
+    bool source_is_dir;
+    const char *ref_repo;
+    char range[PATH_MAX + 32];
+    if (!dvt_source_range(root, source, reply, &source_is_dir, &ref_repo,
+                           range, sizeof range)) {
+        dvt_pick_lists_free(picked, skipped, warnings);
+        return false;
+    }
+    if (source_is_dir && !dvt_fetch_source_head(stack_dir, source, reply)) {
+        dvt_pick_lists_free(picked, skipped, warnings);
+        return false;
+    }
+    char log_out[DVT_OUT_CAP];
+    if (!dvt_source_log(ref_repo, source, range, reply, log_out, sizeof log_out)) {
+        dvt_pick_lists_free(picked, skipped, warnings);
+        return false;
+    }
+    if (!log_out[0]) {
+        dvt_warn_no_commits(warnings, source, range);
+        return true;
+    }
+    char *line_save = NULL;
+    for (char *line = strtok_r(log_out, "\n", &line_save); line;
+         line = strtok_r(NULL, "\n", &line_save)) {
+        char *sep = strchr(line, '\x1f');
+        if (!sep)
+            continue;
+        *sep = '\0';
+        const char *sha = line;
+        const char *subject = sep + 1;
+        if (zcl_dev_train_skip_subject(subject)) {
+            dvt_push_commit_row(skipped, sha, subject, source);
+            continue;
+        }
+        const char *pick_args[] = {"cherry-pick", sha, NULL};
+        int rc = zcl_dev_train_git(stack_dir, pick_args, NULL, 0, DVT_GIT_TIMEOUT_MS);
+        if (rc != 0) {
+            dvt_report_pick_conflict(stack_dir, source, sha, subject, reply,
+                                     picked, skipped, warnings);
+            return false;
+        }
+        dvt_push_commit_row(picked, sha, subject, source);
+    }
+    return true;
+}
+
+/* Commits the stack carries past origin/main; `fallback` when git cannot say. */
+static int64_t dvt_commits_ahead(const char *stack_dir, int64_t fallback)
+{
+    static const char *const count_args[] = {"rev-list", "--count",
+                                             "origin/main..HEAD", NULL};
+    char count_out[64];
+    int64_t commits = fallback;
+    if (zcl_dev_train_git(stack_dir, count_args, count_out, sizeof(count_out),
+                DVT_GIT_TIMEOUT_MS) == 0) {
+        zcl_dev_train_strip(count_out);
+        commits = strtoll(count_out, NULL, 10);
+    }
+    return commits;
+}
 #endif
 
 void zcl_native_handle_dev_train_build(
@@ -350,48 +561,8 @@ void zcl_native_handle_dev_train_build(
 
     char root[PATH_MAX], stack_dir[PATH_MAX];
     if (!dvt_prepare_stack(request, reply, name, root, stack_dir, true)) return;
-
-    static const char *const fetch_args[] = {"fetch", "-q", "origin", NULL};
-    if (zcl_dev_train_git(root, fetch_args, NULL, 0, DVT_FETCH_TIMEOUT_MS) != 0) {
-        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                "GIT_FAILED", "fetch", "git fetch origin failed", root);
-        return;
-    }
-    if (!dvt_sources_preflight(root, sources_csv, reply)) return;
-
-    const char *worktree_add_args[] = {"worktree", "add", "--detach",
-                                       stack_dir, "origin/main", NULL};
-    if (zcl_dev_train_git(root, worktree_add_args, NULL, 0, DVT_GIT_TIMEOUT_MS) != 0) {
-        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                "GIT_FAILED", "worktree_add",
-                "git worktree add --detach failed", stack_dir);
-        return;
-    }
-
-    static const char *const submodule_args[] = {"submodule", "-q", "update",
-                                                 "--init", NULL};
-    if (zcl_dev_train_git(stack_dir, submodule_args, NULL, 0, DVT_FETCH_TIMEOUT_MS) != 0) {
-        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                "GIT_FAILED", "submodule_init",
-                "git submodule update --init failed; the worktree is left "
-                "in place for inspection",
-                stack_dir);
-        return;
-    }
-
-    const char *prime_argv[] = {"make", "-s", "--no-print-directory",
-                                "worktree-prime", NULL};
-    struct zcl_devloop_process_result prime_result;
-    if (!zcl_devloop_process_run(stack_dir, prime_argv, DVT_MAKE_TIMEOUT_MS,
-                                 &prime_result) ||
-        prime_result.exit_code != 0 || prime_result.timed_out) {
-        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                "PRIME_FAILED", "worktree_prime",
-                "make worktree-prime failed; the worktree is left in place "
-                "for inspection",
-                stack_dir);
-        return;
-    }
+    if (!dvt_fetch_and_probe(root, sources_csv, reply)) return;
+    if (!dvt_stack_worktree_setup(root, stack_dir, reply)) return;
 
     /* The stack's own record of what it was cut from, read back by
      * `dev train check --gates=verify` to name the guilty source. */
@@ -411,114 +582,12 @@ void zcl_native_handle_dev_train_build(
     char *save = NULL;
     for (char *source = strtok_r(sources_buf, "\n", &save); source;
          source = strtok_r(NULL, "\n", &save)) {
-        bool source_is_dir;
-        const char *ref_repo;
-        char range[PATH_MAX + 32];
-        if (!dvt_source_range(root, source, reply, &source_is_dir, &ref_repo,
-                               range, sizeof range)) {
-            json_free(&picked); json_free(&skipped); json_free(&warnings);
+        if (!dvt_pick_source(root, stack_dir, source, reply, &picked, &skipped,
+                             &warnings))
             return;
-        }
-        if (source_is_dir) {
-            /* A directory source may be a linked worktree of the SAME
-             * repository (the common case: another lane worktree beside
-             * this one) or an entirely separate clone. Either way, its
-             * commits are not necessarily reachable from stack_dir's object
-             * database yet — a linked worktree shares objects already (this
-             * fetch is then a fast no-op), a separate clone does not. Fetch
-             * its HEAD into stack_dir before cherry-picking anything from
-             * it, so `git cherry-pick <sha>` never hits "bad object". */
-            const char *fetch_source_args[] = {"fetch", "-q", source, "HEAD",
-                                               NULL};
-            if (zcl_dev_train_git(stack_dir, fetch_source_args, NULL, 0,
-                                   DVT_FETCH_TIMEOUT_MS) != 0) {
-                (void)dvt_source_fail(reply, "SOURCE_FETCH_FAILED",
-                                       "could not fetch the source HEAD into the stack", source);
-                json_free(&picked); json_free(&skipped); json_free(&warnings);
-                return;
-            }
-        }
-        char log_out[DVT_OUT_CAP];
-        if (!dvt_source_log(ref_repo, source, range, reply, log_out, sizeof log_out)) {
-            json_free(&picked); json_free(&skipped); json_free(&warnings);
-            return;
-        }
-        if (!log_out[0]) {
-            struct json_value w;
-            json_init(&w);
-            char msg[PATH_MAX + 64];
-            (void)snprintf(msg, sizeof(msg), "no commits found for %s (%s)",
-                          source, range);
-            json_set_str(&w, msg);
-            (void)json_push_back(&warnings, &w);
-            json_free(&w);
-            continue;
-        }
-        char *line_save = NULL;
-        for (char *line = strtok_r(log_out, "\n", &line_save); line;
-             line = strtok_r(NULL, "\n", &line_save)) {
-            char *sep = strchr(line, '\x1f');
-            if (!sep)
-                continue;
-            *sep = '\0';
-            const char *sha = line;
-            const char *subject = sep + 1;
-            if (zcl_dev_train_skip_subject(subject)) {
-                struct json_value item;
-                json_init(&item); json_set_object(&item);
-                (void)json_push_kv_str(&item, "sha", sha);
-                (void)json_push_kv_str(&item, "subject", subject);
-                (void)json_push_kv_str(&item, "source", source);
-                (void)json_push_back(&skipped, &item);
-                json_free(&item);
-                continue;
-            }
-            const char *pick_args[] = {"cherry-pick", sha, NULL};
-            int rc = zcl_dev_train_git(stack_dir, pick_args, NULL, 0, DVT_GIT_TIMEOUT_MS);
-            if (rc != 0) {
-                struct json_value paths;
-                dvt_conflict_paths(stack_dir, &paths);
-                (void)json_push_kv_str(&reply->data, "state", "conflict");
-                (void)json_push_kv_str(&reply->data, "source", source);
-                (void)json_push_kv_str(&reply->data, "sha", sha);
-                (void)json_push_kv_str(&reply->data, "subject", subject);
-                (void)json_push_kv(&reply->data, "paths", &paths);
-                json_free(&paths);
-                (void)json_push_kv(&reply->data, "picked", &picked);
-                (void)json_push_kv(&reply->data, "skipped", &skipped);
-                (void)json_push_kv(&reply->data, "warnings", &warnings);
-                json_free(&picked); json_free(&skipped); json_free(&warnings);
-                char next[PATH_MAX + 64];
-                (void)snprintf(next, sizeof(next),
-                              "git -C %s cherry-pick --continue", stack_dir);
-                (void)json_push_kv_str(&reply->data, "next", next);
-                dvt_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
-                        ZCL_COMMAND_EXIT_BLOCKED, "CHERRY_PICK_CONFLICT",
-                        "cherry_pick",
-                        "a real cherry-pick conflict; the stack worktree is "
-                        "left mid-cherry-pick",
-                        sha);
-                return;
-            }
-            struct json_value item;
-            json_init(&item); json_set_object(&item);
-            (void)json_push_kv_str(&item, "sha", sha);
-            (void)json_push_kv_str(&item, "subject", subject);
-            (void)json_push_kv_str(&item, "source", source);
-            (void)json_push_back(&picked, &item);
-            json_free(&item);
-        }
     }
 
-    static const char *const count_args[] = {"rev-list", "--count",
-                                             "origin/main..HEAD", NULL};
-    char count_out[64];
-    int64_t commits = 0;
-    if (zcl_dev_train_git(stack_dir, count_args, count_out, sizeof(count_out),
-                DVT_GIT_TIMEOUT_MS) == 0) {
-        zcl_dev_train_strip(count_out);
-        commits = strtoll(count_out, NULL, 10);
-    }
+    int64_t commits = dvt_commits_ahead(stack_dir, 0);
 
     (void)json_push_kv_str(&reply->data, "state", "ok");
     (void)json_push_kv_str(&reply->data, "base", "origin/main");
@@ -685,6 +754,36 @@ static void dvt_check_gated(struct zcl_command_reply *reply, const char *name,
                               : ZCL_COMMAND_STATUS_FAILED;
     reply->exit_code = report.ok ? ZCL_COMMAND_EXIT_OK : ZCL_COMMAND_EXIT_FAILED;
 }
+
+/* Every `FAIL <gate>` line of the lint output, as the JSON array and as the
+ * comma list the state file keeps. */
+static void dvt_collect_failed_gates(const char *output,
+                                     struct json_value *gates_failed,
+                                     char *gates_csv, size_t csv_cap)
+{
+    size_t gates_csv_len = 0;
+    char *save = NULL;
+    char output_copy[ZCL_DEVLOOP_OUTPUT_MAX];
+    (void)snprintf(output_copy, sizeof(output_copy), "%s", output);
+    for (char *line = strtok_r(output_copy, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        if (strncmp(line, "FAIL ", 5) != 0)
+            continue;
+        char gate[256];
+        if (sscanf(line + 5, "%255s", gate) != 1)
+            continue;
+        struct json_value g;
+        json_init(&g);
+        json_set_str(&g, gate);
+        (void)json_push_back(gates_failed, &g);
+        json_free(&g);
+        int n = snprintf(gates_csv + gates_csv_len,
+                        csv_cap - gates_csv_len, "%s%s",
+                        gates_csv_len ? "," : "", gate);
+        if (n > 0 && (size_t)n < csv_cap - gates_csv_len)
+            gates_csv_len += (size_t)n;
+    }
+}
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
 void zcl_native_handle_dev_train_check(
@@ -747,28 +846,8 @@ void zcl_native_handle_dev_train_check(
     json_init(&gates_failed);
     json_set_array(&gates_failed);
     char gates_csv[4096] = {0};
-    size_t gates_csv_len = 0;
-    char *save = NULL;
-    char output_copy[ZCL_DEVLOOP_OUTPUT_MAX];
-    (void)snprintf(output_copy, sizeof(output_copy), "%s", result.output);
-    for (char *line = strtok_r(output_copy, "\n", &save); line;
-         line = strtok_r(NULL, "\n", &save)) {
-        if (strncmp(line, "FAIL ", 5) != 0)
-            continue;
-        char gate[256];
-        if (sscanf(line + 5, "%255s", gate) != 1)
-            continue;
-        struct json_value g;
-        json_init(&g);
-        json_set_str(&g, gate);
-        (void)json_push_back(&gates_failed, &g);
-        json_free(&g);
-        int n = snprintf(gates_csv + gates_csv_len,
-                        sizeof(gates_csv) - gates_csv_len, "%s%s",
-                        gates_csv_len ? "," : "", gate);
-        if (n > 0 && (size_t)n < sizeof(gates_csv) - gates_csv_len)
-            gates_csv_len += (size_t)n;
-    }
+    dvt_collect_failed_gates(result.output, &gates_failed, gates_csv,
+                             sizeof(gates_csv));
 
     dvt_write_check_state(stack_dir, ok, gates_csv, log_path);
 
@@ -793,6 +872,45 @@ void zcl_native_handle_dev_train_check(
 }
 
 /* ── status ───────────────────────────────────────────────────────────── */
+
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* The last check verdict of one stack, or "unavailable" when none is on disk. */
+static void dvt_status_check_fields(struct json_value *entry, const char *stack_dir)
+{
+    bool check_ok = false;
+    char gates_csv[4096] = {0};
+    char log_path[PATH_MAX] = {0};
+    bool has_check = dvt_read_check_state(
+        stack_dir, &check_ok, gates_csv, sizeof(gates_csv), log_path,
+        sizeof(log_path));
+    (void)json_push_kv_str(entry, "check",
+                           has_check ? (check_ok ? "passed" : "failed")
+                                     : "unavailable");
+    if (has_check)
+        (void)json_push_kv_str(entry, "check_log_path", log_path);
+}
+
+static void dvt_status_land_queue(struct zcl_command_reply *reply)
+{
+    /* The landing queue lives where dev.land put it, and dev.land derives
+     * that from platform_state_root(). Reading it from a hardcoded second
+     * path is how this field spent its whole life reporting `false` about a
+     * queue that was busy landing trains. */
+    char land_dir[PATH_MAX];
+    char queue_file[PATH_MAX];
+    bool present = false;
+    if (zcl_dev_train_land_dir(land_dir, sizeof(land_dir)) &&
+        snprintf(queue_file, sizeof(queue_file), "%s/queue.jsonl", land_dir) <
+            (int)sizeof(queue_file)) {
+        FILE *q = fopen(queue_file, "rb");
+        present = q != NULL;
+        if (q)
+            (void)fclose(q);
+        (void)json_push_kv_str(&reply->data, "land_queue_path", queue_file);
+    }
+    (void)json_push_kv_bool(&reply->data, "land_queue_present", present);
+}
+#endif
 
 void zcl_native_handle_dev_train_status(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
@@ -838,29 +956,9 @@ void zcl_native_handle_dev_train_status(
             (void)json_push_kv_str(&entry, "name", stack_name);
             (void)json_push_kv_str(&entry, "path", stack_dir);
             (void)json_push_kv_str(&entry, "base", "origin/main");
-
-            static const char *const count_args[] = {
-                "rev-list", "--count", "origin/main..HEAD", NULL};
-            char count_out[64];
-            int64_t commits = -1;
-            if (zcl_dev_train_git(stack_dir, count_args, count_out, sizeof(count_out),
-                        DVT_GIT_TIMEOUT_MS) == 0) {
-                zcl_dev_train_strip(count_out);
-                commits = strtoll(count_out, NULL, 10);
-            }
+            int64_t commits = dvt_commits_ahead(stack_dir, -1);
             (void)json_push_kv_int(&entry, "commits", commits);
-
-            bool check_ok = false;
-            char gates_csv[4096] = {0};
-            char log_path[PATH_MAX] = {0};
-            bool has_check = dvt_read_check_state(
-                stack_dir, &check_ok, gates_csv, sizeof(gates_csv), log_path,
-                sizeof(log_path));
-            (void)json_push_kv_str(&entry, "check",
-                                   has_check ? (check_ok ? "passed" : "failed")
-                                             : "unavailable");
-            if (has_check)
-                (void)json_push_kv_str(&entry, "check_log_path", log_path);
+            dvt_status_check_fields(&entry, stack_dir);
 
             (void)json_push_back(&stacks, &entry);
             json_free(&entry);
@@ -871,23 +969,7 @@ void zcl_native_handle_dev_train_status(
     (void)json_push_kv(&reply->data, "stacks", &stacks);
     json_free(&stacks);
 
-    /* The landing queue lives where dev.land put it, and dev.land derives
-     * that from platform_state_root(). Reading it from a hardcoded second
-     * path is how this field spent its whole life reporting `false` about a
-     * queue that was busy landing trains. */
-    char land_dir[PATH_MAX];
-    char queue_file[PATH_MAX];
-    bool present = false;
-    if (zcl_dev_train_land_dir(land_dir, sizeof(land_dir)) &&
-        snprintf(queue_file, sizeof(queue_file), "%s/queue.jsonl", land_dir) <
-            (int)sizeof(queue_file)) {
-        FILE *q = fopen(queue_file, "rb");
-        present = q != NULL;
-        if (q)
-            (void)fclose(q);
-        (void)json_push_kv_str(&reply->data, "land_queue_path", queue_file);
-    }
-    (void)json_push_kv_bool(&reply->data, "land_queue_present", present);
+    dvt_status_land_queue(reply);
 
     reply->status = ZCL_COMMAND_STATUS_PASSED;
 #endif
