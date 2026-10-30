@@ -23,6 +23,43 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+/* One transaction's contribution to a block scan: fold it into the wallet,
+ * count owned outputs, trial-decrypt Sapling outputs and mark spent
+ * nullifiers. Returns outputs + notes found in this transaction. */
+static int wallet_scan_one_tx(struct wallet *w, struct transaction *tx,
+                              const struct block_index *pindex,
+                              struct wallet_rescan_report *r)
+{
+    int found = 0;
+    wallet_sync_transaction(w, tx, pindex);
+    for (size_t j = 0; j < tx->num_vout; j++) {
+        if (wallet_is_mine(w, &tx->vout[j])) {
+            found++;
+            if (r) r->outputs_found++;
+        }
+    }
+    /* Trial-decrypt Sapling outputs */
+    if (tx->num_shielded_output > 0) {
+        if (w->sapling_keys.num_keys > 0) {
+            struct uint256 txid;
+            transaction_compute_hash((struct transaction *)tx);
+            txid = tx->hash;
+            int z_found = wallet_try_sapling_decrypt(w, tx, &txid);
+            found += z_found;
+            if (r) r->shielded_notes_found += z_found;
+        } else if (r) {
+            /* No Sapling key: these outputs were never even tried. The
+             * seed-only-restore state. Record it instead of silently
+             * skipping — a caller that reports "0 found" here is
+             * reporting the absence of a search, not of funds. */
+            r->shielded_txs_unscanned++;
+        }
+    }
+    /* Mark spent nullifiers */
+    if (tx->num_shielded_spend > 0)
+        wallet_mark_sapling_nullifiers_spent(w, tx);
+    return found;
+}
 
 /* One block's contribution to a rescan. `r` is optional; when present every
  * outcome — including the two distinct ways a block yields nothing — is
@@ -53,33 +90,7 @@ static int wallet_scan_one_block(struct wallet *w,
 
     int found = 0;
     for (size_t i = 0; i < b.num_vtx; i++) {
-        wallet_sync_transaction(w, &b.vtx[i], pindex);
-        for (size_t j = 0; j < b.vtx[i].num_vout; j++) {
-            if (wallet_is_mine(w, &b.vtx[i].vout[j])) {
-                found++;
-                if (r) r->outputs_found++;
-            }
-        }
-        /* Trial-decrypt Sapling outputs */
-        if (b.vtx[i].num_shielded_output > 0) {
-            if (w->sapling_keys.num_keys > 0) {
-                struct uint256 txid;
-                transaction_compute_hash((struct transaction *)&b.vtx[i]);
-                txid = b.vtx[i].hash;
-                int z_found = wallet_try_sapling_decrypt(w, &b.vtx[i], &txid);
-                found += z_found;
-                if (r) r->shielded_notes_found += z_found;
-            } else if (r) {
-                /* No Sapling key: these outputs were never even tried. The
-                 * seed-only-restore state. Record it instead of silently
-                 * skipping — a caller that reports "0 found" here is
-                 * reporting the absence of a search, not of funds. */
-                r->shielded_txs_unscanned++;
-            }
-        }
-        /* Mark spent nullifiers */
-        if (b.vtx[i].num_shielded_spend > 0)
-            wallet_mark_sapling_nullifiers_spent(w, &b.vtx[i]);
+        found += wallet_scan_one_tx(w, &b.vtx[i], pindex, r);
     }
 
     block_free(&b);
