@@ -119,6 +119,7 @@ static bool phh_install_chain(struct phh_fixture *f)
         memcpy(bi->hashBlock.data, f->hash[h], 32);
         bi->phashBlock = &bi->hashBlock;
         bi->nHeight = h;
+        bi->pprev = h > 0 ? &f->bi[h - 1] : NULL;
         if (!active_chain_install_tip_slot(&f->chain, bi))
             return false;
     }
@@ -545,6 +546,70 @@ static int phh_case_fork_stale(void)
     return failures;
 }
 
+/* Slot reader for the lower-fork rewind interleaving: slot[tip] still holds
+ * the old tip while slot[height] already holds a block of the new fork. */
+struct phh_reorg {
+    struct block_index fork_at;
+};
+
+static const struct block_index *phh_reorg_slot(void *c, const struct active_chain *chain,
+                                                int height)
+{
+    struct phh_reorg *r = c;
+    if (height == PHH_TIP)
+        return active_chain_at(chain, height);
+    return &r->fork_at;
+}
+
+static void phh_reorg_arm(struct phh_fixture *f, struct phh_reorg *r, const uint8_t hash[32])
+{
+    memset(r, 0, sizeof *r);
+    block_index_init(&r->fork_at);
+    memcpy(r->fork_at.hashBlock.data, hash, 32);
+    r->fork_at.phashBlock = &r->fork_at.hashBlock;
+    r->fork_at.nHeight = 2;
+    f->node.slot = phh_reorg_slot;
+    f->node.slot_context = r;
+}
+
+static int phh_case_reorg_between_reads(void)
+{
+    int failures = 0;
+    struct phh_fixture f;
+    struct phh_reorg r;
+    uint8_t reply[PLUGIN_HOSTCALL_MAX_FRAME];
+    struct plugin_hostcall_frame rep;
+    TEST_CASE("header_by_height never serves a fork block swapped into the requested slot") {
+        ASSERT(phh_open_variant(&f, PHH_FORK_STALE));
+        struct uint256 fid;
+        block_header_get_hash(&f.fork_hdr, &fid);
+        phh_reorg_arm(&f, &r, fid.data);
+        ASSERT_EQ(phh_header_status(&f, 2, &rep, reply, sizeof reply), (int)PLUGIN_HOSTCALL_OK);
+        ASSERT(!phh_reply_is_header(&rep, &f.fork_hdr));
+        phh_close(&f);
+    } TEST_END
+    return failures;
+}
+
+static int phh_case_reorg_ancestor(void)
+{
+    int failures = 0;
+    struct phh_fixture f;
+    struct phh_reorg r;
+    uint8_t reply[PLUGIN_HOSTCALL_MAX_FRAME];
+    struct plugin_hostcall_frame rep;
+    TEST_CASE("header_by_height serves the ancestor of the tip, not the requested slot") {
+        ASSERT(phh_open(&f));
+        uint8_t other[32];
+        memset(other, 0xF1, sizeof other);
+        phh_reorg_arm(&f, &r, other);
+        ASSERT_EQ(phh_header_status(&f, 2, &rep, reply, sizeof reply), (int)PLUGIN_HOSTCALL_OK);
+        ASSERT(phh_reply_is_header(&rep, &f.hdr[2]));
+        phh_close(&f);
+    } TEST_END
+    return failures;
+}
+
 struct phh_thread_job {
     struct phh_fixture *f;
     enum plugin_hostcall_status status;
@@ -646,6 +711,8 @@ int test_plugin_host_handlers(void)
     failures += phh_case_log_8();
     failures += phh_case_fork_loser();
     failures += phh_case_fork_stale();
+    failures += phh_case_reorg_between_reads();
+    failures += phh_case_reorg_ancestor();
     failures += phh_case_thread();
     failures += phh_case_two_plugins();
     failures += phh_case_c1();

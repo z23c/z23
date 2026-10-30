@@ -41,19 +41,31 @@ static int read_authority(const struct plugin_host_node *n, int64_t *height,
 }
 
 
+static const struct block_index *chain_slot(const struct plugin_host_node *n, int height)
+{
+    if (n->slot != nullptr)
+        return n->slot(n->slot_context, n->chain, height);
+    return active_chain_at(n->chain, height);
+}
+
 /* The hash of the block at `height` on the chain that ends at the authority
- * tip: the lock-free active chain index, accepted only while its tip slot
- * agrees with the authority pair. 0 on success. */
+ * tip. Only the tip slot of the lock-free active chain index is read, and it
+ * is accepted only while it carries the authority hash. The requested block
+ * is then its ancestor through the immutable pprev/pskip links, never a
+ * second slot read: during a rewind the writer can replace slot[height] while
+ * slot[tip_height] still holds the old tip, so a second slot read could pair
+ * a new-fork block with the old tip. 0 on success. */
 static int canonical_hash_at(const struct plugin_host_node *n, int height,
                              int64_t tip_height, const uint8_t tip_hash[32],
                              uint8_t out[32])
 {
-    const struct block_index *tip = active_chain_at(n->chain, (int)tip_height);
-    const struct block_index *bi = active_chain_at(n->chain, height);
-    if (tip == nullptr || bi == nullptr || tip->phashBlock == nullptr ||
-        bi->phashBlock == nullptr || bi->nHeight != height ||
-        memcmp(tip->phashBlock->data, tip_hash, 32) != 0)
+    const struct block_index *tip = chain_slot(n, (int)tip_height);
+    if (tip == nullptr || tip->phashBlock == nullptr || height < 0 ||
+        height > tip_height || memcmp(tip->phashBlock->data, tip_hash, 32) != 0)
         return -1; // raw-return-ok:the index does not agree with the authority; not found
+    const struct block_index *bi = block_index_get_ancestor((struct block_index *)tip, height);
+    if (bi == nullptr || bi->phashBlock == nullptr || bi->nHeight != height)
+        return -1; // raw-return-ok:no ancestor at that height; not found
     memcpy(out, bi->phashBlock->data, 32);
     return 0;
 }

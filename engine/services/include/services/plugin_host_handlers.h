@@ -39,6 +39,7 @@
 
 struct node_db;
 struct active_chain;
+struct block_index;
 
 #define PLUGIN_HOST_NAME_MAX 48u      /* plugin name bytes kept in a log prefix */
 #define PLUGIN_HOST_LOG_TEXT_MAX 256u /* log text bytes accepted per line */
@@ -60,6 +61,11 @@ typedef bool (*plugin_host_authority_fn)(void *context, int64_t *height,
                                          uint8_t hash[32]);
 /* Monotonic milliseconds for the log rate window; NULL means the node clock. */
 typedef int64_t (*plugin_host_now_ms_fn)(void *context);
+/* One slot of the active chain index; NULL in the node means active_chain_at
+ * on the node's chain. A test seam for a reorg between two slot reads. */
+typedef const struct block_index *(*plugin_host_slot_fn)(void *context,
+                                                         const struct active_chain *chain,
+                                                         int height);
 /* Receives one sanitized log line; NULL means the node log. */
 typedef void (*plugin_host_log_sink_fn)(void *context, unsigned level,
                                         const char *line);
@@ -73,6 +79,8 @@ struct plugin_host_node {
     void *authority_context;
     plugin_host_now_ms_fn now_ms;
     void *now_context;
+    plugin_host_slot_fn slot;
+    void *slot_context;
     plugin_host_log_sink_fn log_sink;
     void *log_context;
     int64_t window_start_ms; /* rate window, owned by log.write */
