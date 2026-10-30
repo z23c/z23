@@ -51,14 +51,22 @@ static int inv_digest_cmp(const uint8_t a[32], const uint8_t b[32])
     return memcmp(a, b, 32);
 }
 
+static int inv_body_digest_cmp(const uint8_t xd[32], const uint8_t yd[32],
+                               const struct inv_body *x,
+                               const struct inv_body *y)
+{
+    int c = inv_digest_cmp(xd, yd);
+    if (c) return c;
+    c = strcmp(x->path, y->path);
+    if (c) return c;
+    return (x->line > y->line) - (x->line < y->line);
+}
+
 static int inv_body_exact_cmp(const void *a, const void *b)
 {
     const struct inv_body_order *x = a, *y = b;
-    int c = inv_digest_cmp(x->body->exact_sha3, y->body->exact_sha3);
-    if (c) return c;
-    c = strcmp(x->body->path, y->body->path);
-    if (c) return c;
-    return (x->body->line > y->body->line) - (x->body->line < y->body->line);
+    return inv_body_digest_cmp(x->body->exact_sha3, y->body->exact_sha3,
+                               x->body, y->body);
 }
 
 /* qsort's base is declared nonnull; sorting 0 or 1 entries is a no-op. */
@@ -70,11 +78,8 @@ static void inv_body_order_sort_exact(struct inv_body_order *v, int n)
 static int inv_body_shape_cmp(const void *a, const void *b)
 {
     const struct inv_body_order *x = a, *y = b;
-    int c = inv_digest_cmp(x->body->shape_sha3, y->body->shape_sha3);
-    if (c) return c;
-    c = strcmp(x->body->path, y->body->path);
-    if (c) return c;
-    return (x->body->line > y->body->line) - (x->body->line < y->body->line);
+    return inv_body_digest_cmp(x->body->shape_sha3, y->body->shape_sha3,
+                               x->body, y->body);
 }
 
 /* qsort's base is declared nonnull; sorting 0 or 1 entries is a no-op. */
@@ -83,15 +88,23 @@ static void inv_body_order_sort_shape(struct inv_body_order *v, int n)
     if (n > 1) qsort(v, (size_t)n, sizeof(*v), inv_body_shape_cmp);
 }
 
+static int inv_name_path_line_cmp(const char *a_name, const char *a_path,
+                                  int a_line, const char *b_name,
+                                  const char *b_path, int b_line)
+{
+    int c = strcmp(a_name, b_name);
+    if (c) return c;
+    c = strcmp(a_path, b_path);
+    if (c) return c;
+    return (a_line > b_line) - (a_line < b_line);
+}
+
 static int inv_def_order_cmp(const void *a, const void *b)
 {
     const struct inv_def_order *x = a, *y = b;
-    int c = strcmp(x->name, y->name);
-    if (c) return c;
-    c = strcmp(x->symbol->def_path, y->symbol->def_path);
-    if (c) return c;
-    return (x->symbol->def_line > y->symbol->def_line) -
-           (x->symbol->def_line < y->symbol->def_line);
+    return inv_name_path_line_cmp(x->name, x->symbol->def_path,
+                                  x->symbol->def_line, y->name,
+                                  y->symbol->def_path, y->symbol->def_line);
 }
 
 /* qsort's base is declared nonnull; sorting 0 or 1 entries is a no-op. */
@@ -103,12 +116,8 @@ static void inv_def_order_sort(struct inv_def_order *v, int n)
 static int inv_body_name_order_cmp(const void *a, const void *b)
 {
     const struct inv_body_name_order *x = a, *y = b;
-    int c = strcmp(x->name, y->name);
-    if (c) return c;
-    c = strcmp(x->body->path, y->body->path);
-    if (c) return c;
-    return (x->body->line > y->body->line) -
-           (x->body->line < y->body->line);
+    return inv_name_path_line_cmp(x->name, x->body->path, x->body->line,
+                                  y->name, y->body->path, y->body->line);
 }
 
 /* qsort's base is declared nonnull; sorting 0 or 1 entries is a no-op. */
