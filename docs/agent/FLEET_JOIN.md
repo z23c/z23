@@ -112,6 +112,15 @@ not verified. `z23 fleet machines` keeps self-reported facts in their own
 object, separate from what the operator's signature actually attests (the
 name, the public key, the assigned port, the time).
 
+`fleet machines` lists one entry per box public key. Re-running `fleet
+invite`, `fleet join` and `fleet admit` for a box that is already enrolled
+appends a second verified row for the same key; the listing collapses those
+rows into one entry that shows the most recently enrolled row (the largest
+`enrolled_at`), so its `onion` is the latest one recorded. The entry's
+`rows` field counts the verified rows it stands for. `total` counts entries,
+not roster lines. Rows with different public keys are never merged, even when
+they carry the same name. `offset` and `limit` page over entries.
+
 ## The onion column
 
 A machine may also carry an **onion** — the persistent v3 onion hostname it

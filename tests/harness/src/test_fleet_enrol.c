@@ -1008,6 +1008,96 @@ static bool fe_machines_call(const char *body, struct zcl_command_reply *reply,
     return true;
 }
 
+static bool fe_row_at(const char *name, uint8_t op_byte, uint8_t box_byte,
+                      uint16_t port, const char *onion, int64_t now,
+                      char *out, size_t cap)
+{
+    uint8_t op_seed[32], op_pub[32], box_seed[32], box_pub[32];
+    uint8_t invite_wire[FLEET_ENROL_INVITE_WIRE_MAX];
+    uint8_t receipt_wire[FLEET_ENROL_RECEIPT_WIRE_MAX];
+    char token[FLEET_ENROL_MACHINE_TEXT_MAX];
+    char receipt[FLEET_ENROL_MACHINE_TEXT_MAX];
+    struct fleet_invite invite;
+    struct fleet_receipt parsed;
+    struct fleet_box_facts facts = fe_facts();
+    size_t invite_len = 0, receipt_len = 0;
+    const char *why = NULL;
+    fe_key(op_byte, op_seed, op_pub);
+    fe_key(box_byte, box_seed, box_pub);
+    return fleet_invite_mint(name, FE_TTL, "", op_seed, op_pub, FE_NOW, token,
+                             sizeof(token), &invite, &why) &&
+           fleet_invite_parse(token, &invite, invite_wire, sizeof(invite_wire),
+                              &invite_len, &why) &&
+           fleet_receipt_mint(invite_wire, invite_len, onion, &facts, "",
+                              box_seed, box_pub, NULL, receipt,
+                              sizeof(receipt), &why) &&
+           fleet_receipt_parse(receipt, &parsed, receipt_wire,
+                               sizeof(receipt_wire), &receipt_len, &why) &&
+           fleet_machine_mint(receipt_wire, receipt_len, now, port, op_seed,
+                              op_pub, out, cap, &why);
+}
+
+/* Rows that share a box public key are one machine in `fleet machines`: the
+ * latest enrolment is listed, with the number of rows it stands for. Rows
+ * with different keys stay apart even when their names match. */
+static int test_fe_machines_collapse(void)
+{
+    int failures = 0;
+    TEST("fleet machines: one entry per box key, the latest enrolment wins "
+         "and rows counts the lines it stands for") {
+        static const char onion_new[] =
+            "2bcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
+        char row[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char why_text[192];
+        const char *why = NULL;
+        uint8_t op_pub[32], op_seed[32];
+        struct zcl_command_reply reply;
+        const struct json_value *machines = NULL;
+        const struct json_value *studio = NULL;
+        fe_isolate("machines-collapse");
+        fe_key(0xa1, op_seed, op_pub);
+        ASSERT(fleet_enrol_operator_write(op_pub, &why));
+
+        /* Re-admission appends a second row for the same box key. */
+        ASSERT(fe_row_at("studio", 0xa1, 0x61, FLEET_ENROL_PORT_FIRST,
+                         FE_ONION, FE_NOW, row, sizeof(row)));
+        ASSERT(fleet_roster_append(row, &why));
+        ASSERT(fe_row_at("studio", 0xa1, 0x61, FLEET_ENROL_PORT_FIRST,
+                         onion_new, FE_NOW + 60, row, sizeof(row)));
+        ASSERT(fleet_roster_append(row, &why));
+        /* Two boxes that share a name are two machines. */
+        ASSERT(fe_row_at("twin", 0xa1, 0x62, FLEET_ENROL_PORT_FIRST + 1,
+                         FE_ONION, FE_NOW, row, sizeof(row)));
+        ASSERT(fleet_roster_append(row, &why));
+        ASSERT(fe_row_at("twin", 0xa1, 0x63, FLEET_ENROL_PORT_FIRST + 2, "",
+                         FE_NOW, row, sizeof(row)));
+        ASSERT(fleet_roster_append(row, &why));
+
+        ASSERT(fe_machines_call("{}", &reply, why_text, sizeof(why_text)));
+        ASSERT_STR_EQ(reply.error.code, "");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "total")), 3);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "returned")), 3);
+        machines = json_get(&reply.data, "machines");
+        ASSERT(machines != NULL && machines->num_children == 3u);
+        studio = json_at(machines, 0);
+        ASSERT_EQ(json_get_int(json_get(studio, "rows")), 2);
+        ASSERT_EQ(json_get_int(json_get(json_get(studio, "verified"),
+                                        "enrolled_at")),
+                  FE_NOW + 60);
+        ASSERT_STR_EQ(json_get_str(json_get(json_get(studio, "self_reported"),
+                                            "onion")),
+                      onion_new);
+        ASSERT_STR_EQ(fe_listed_name(&reply, 0), "studio");
+        ASSERT_EQ(json_get_int(json_get(json_at(machines, 1), "rows")), 1);
+        ASSERT_EQ(json_get_int(json_get(json_at(machines, 2), "rows")), 1);
+        ASSERT_STR_EQ(fe_listed_name(&reply, 1), "twin");
+        ASSERT_STR_EQ(fe_listed_name(&reply, 2), "twin");
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_fe_machines_page(void)
 {
     int failures = 0;
@@ -3308,6 +3398,7 @@ int test_fleet_enrol(void)
     failures += test_fe_onion_from_datadir();
     failures += test_fe_onion_refused_at_mint();
     failures += test_fe_join_onion_from_datadir();
+    failures += test_fe_machines_collapse();
     failures += test_fe_machines_page();
     failures += test_fe_render();
     failures += test_fd_empty_datadir();

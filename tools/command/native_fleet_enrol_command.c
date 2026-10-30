@@ -1039,14 +1039,29 @@ struct fe_page {
     uint32_t limit;
 };
 
+/* One entry per box public key: the box's most recently enrolled row and
+ * the number of verified rows the box holds. Rows that share a key are one
+ * machine; rows that differ in key never merge, whatever their names. */
+struct fe_entry {
+    struct fleet_machine machine;
+    uint32_t rows;
+};
+
+struct fe_collect {
+    struct fe_entry *entries;
+    uint32_t count;
+    uint32_t cap;
+    bool oom;
+};
+
 struct fe_list {
     struct json_value *array;
+    const struct fe_entry *entries;
+    uint32_t count;
     uint32_t skip;
     uint32_t limit;
     uint32_t rendered;
-    uint32_t dropped;
     bool more;
-    bool stopped;
 };
 
 static bool fe_u32_key(const struct json_value *in, const char *key,
@@ -1100,33 +1115,75 @@ static bool fe_machines_page(const struct zcl_command_request *request,
     return true;
 }
 
-static void fe_list_row(const struct fleet_machine *machine, void *user)
+static struct fe_entry *fe_entry_for(struct fe_collect *c,
+                                     const struct fleet_machine *machine)
 {
-    struct fe_list *list = user;
-    struct json_value row;
-    if (list->stopped)
+    for (uint32_t i = 0; i < c->count; i++) {
+        if (memcmp(c->entries[i].machine.receipt.box_pubkey,
+                   machine->receipt.box_pubkey, FLEET_ENROL_PUBKEY_BYTES) == 0)
+            return &c->entries[i];
+    }
+    return NULL;
+}
+
+static bool fe_collect_grow(struct fe_collect *c)
+{
+    uint32_t cap = c->cap ? c->cap * 2u : 16u;
+    struct fe_entry *grown =
+        zcl_realloc(c->entries, cap * sizeof(*grown), "fleet-machines");
+    if (!grown)
+        return false;
+    c->entries = grown;
+    c->cap = cap;
+    return true;
+}
+
+/* Visits every verified row in roster order. A later row for a known box
+ * replaces the entry only when its enrolment time is newer, so ties keep the
+ * earlier row. */
+static void fe_collect_row(const struct fleet_machine *machine, void *user)
+{
+    struct fe_collect *c = user;
+    struct fe_entry *known = NULL;
+    if (c->oom)
         return;
-    /* `offset` counts verified rows only. Unverifiable lines never reach
-     * this callback, so they do not consume a page slot. */
-    if (list->skip > 0) {
-        list->skip--;
+    known = fe_entry_for(c, machine);
+    if (known) {
+        known->rows++;
+        if (machine->enrolled_at > known->machine.enrolled_at)
+            known->machine = *machine;
         return;
     }
-    if (list->rendered >= list->limit) {
-        list->more = true;
-        list->stopped = true;
+    if (c->count == c->cap && !fe_collect_grow(c)) {
+        c->oom = true;
         return;
     }
-    json_init(&row);
-    fleet_machine_render(machine, &row);
-    if (json_push_back(list->array, &row))
+    c->entries[c->count].machine = *machine;
+    c->entries[c->count].rows = 1;
+    c->count++;
+}
+
+/* `offset` and `limit` address collapsed machines, not raw roster lines. */
+static void fe_list_page(struct fe_list *list)
+{
+    for (uint32_t i = list->skip; i < list->count; i++) {
+        const struct fe_entry *e = &list->entries[i];
+        struct json_value row;
+        if (list->rendered >= list->limit) {
+            list->more = true;
+            return;
+        }
+        json_init(&row);
+        fleet_machine_render(&e->machine, &row);
+        (void)json_push_kv_int(&row, "rows", (int64_t)e->rows);
+        if (!json_push_back(list->array, &row)) {
+            json_free(&row);
+            list->more = true;
+            return;
+        }
+        json_free(&row);
         list->rendered++;
-    else {
-        list->dropped++;
-        list->more = true;
-        list->stopped = true;
     }
-    json_free(&row);
 }
 
 static int64_t fe_next_offset(uint32_t offset, uint32_t rendered, bool more)
@@ -1163,10 +1220,11 @@ static void fe_machines(const struct zcl_command_request *request,
     char hex[FLEET_ENROL_PUBKEY_HEX];
     struct json_value array;
     struct fe_page page = {0};
-    struct fe_list list = { &array, 0, 0, 0, 0, false, false };
+    struct fe_collect collect = {0};
+    struct fe_list list = {0};
     struct fleet_roster_scan scan = {0};
     const char *why = NULL;
-    bool joined = false, own_present = false, more = false;
+    bool joined = false, own_present = false;
     if (!fe_machines_page(request, &page, reply))
         return;
     list.skip = page.offset;
@@ -1189,27 +1247,39 @@ static void fe_machines(const struct zcl_command_request *request,
         }
         memcpy(operator_pubkey, own, FLEET_ENROL_PUBKEY_BYTES);
     }
-    json_init(&array);
-    json_set_array(&array);
-    if (!fleet_roster_each(operator_pubkey, fe_list_row, &list, &scan, &why)) {
-        json_free(&array);
+    if (!fleet_roster_each(operator_pubkey, fe_collect_row, &collect, &scan,
+                           &why)) {
+        free(collect.entries);
         fe_fail(reply, "FLEET_ROSTER_UNREADABLE", "resolve",
                 "this box cannot read its machine roster.", why);
         return;
     }
+    if (collect.oom) {
+        free(collect.entries);
+        fe_fail(reply, "FLEET_ROSTER_UNREADABLE", "resolve",
+                "this box cannot hold its machine roster in memory.", "");
+        return;
+    }
+    json_init(&array);
+    json_set_array(&array);
+    list.array = &array;
+    list.entries = collect.entries;
+    list.count = collect.count;
+    fe_list_page(&list);
+    free(collect.entries);
     zcl_hex_encode(operator_pubkey, FLEET_ENROL_PUBKEY_BYTES, hex);
-    more = list.more || list.dropped != 0;
     (void)json_push_kv_str(&reply->data, "schema", "zcl.fleet.machines.v1");
     (void)json_push_kv_str(&reply->data, "operator_pubkey",
                            joined || own_present ? hex : "");
     (void)json_push_kv_bool(&reply->data, "joined", joined);
-    (void)json_push_kv_int(&reply->data, "total", (int64_t)scan.rows);
+    (void)json_push_kv_int(&reply->data, "total", (int64_t)collect.count);
     (void)json_push_kv_int(&reply->data, "offset", (int64_t)page.offset);
     (void)json_push_kv_int(&reply->data, "limit", (int64_t)page.limit);
     (void)json_push_kv_int(&reply->data, "returned", (int64_t)list.rendered);
     (void)json_push_kv_int(&reply->data, "next_offset",
-                           fe_next_offset(page.offset, list.rendered, more));
-    (void)json_push_kv_bool(&reply->data, "truncated", more);
+                           fe_next_offset(page.offset, list.rendered,
+                                          list.more));
+    (void)json_push_kv_bool(&reply->data, "truncated", list.more);
     /* Counted, never rendered: a line this operator key did not seal is
      * somebody else's row or a corrupted one, and either way it is not
      * evidence about this fleet. */
@@ -1218,7 +1288,7 @@ static void fe_machines(const struct zcl_command_request *request,
     fe_machines_anchor(request, reply, operator_pubkey, joined || own_present);
     (void)json_push_kv(&reply->data, "machines", &array);
     json_free(&array);
-    if (scan.rows == 0)
+    if (collect.count == 0)
         (void)zcl_command_reply_add_next(
             reply, "fleet.invite", "{\"name\":\"<box>\"}",
             "no machine has enrolled here yet; mint an invite to add one");

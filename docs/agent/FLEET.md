@@ -45,7 +45,8 @@ The name is required, unique and permanent: 2 to 24 characters of `a-z`,
 `0-9` and interior dashes. `z23 fleet doctor --datadir=<node-datadir>` reads
 state only and lists the next missing step (node, identity, membership,
 delegation, transport, pairing, mail, wiki). `z23 fleet machines` lists the
-roster. Hardware facts in a record are self-reported, not verified.
+roster, one entry per box key (re-enrolled rows collapse; see
+[FLEET_JOIN.md](FLEET_JOIN.md#what-is-in-each-string)). Hardware facts in a record are self-reported, not verified.
 
 The full procedure, refusal names, the optional `ssh` bridge, on-chain root
 anchoring and the roster gate (`-fleetrostergate`) are in
