@@ -514,6 +514,27 @@ static int test_onr_unit_changed(void)
     return failures;
 }
 
+/* A plan file in the pre-unit format (three fields, no unit) is not a plan
+ * this build recorded: it must be refused and must not restart anything. */
+static int test_onr_old_plan_format(void)
+{
+    struct onr_cmd c;
+    char path[PATH_MAX];
+    int failures = 0;
+    if (!onr_init("oldplan"))
+        return onr_check(false, "fixture");
+    mkdir(onr.state, 0755);
+    snprintf(path, sizeof(path), "%s/node-restart.plan", onr.state);
+    onr_put(path, "0123456789abcdef0123456789abcdef 4102444800 120\n", 0600);
+    onr_confirm(&c, "0123456789abcdef0123456789abcdef", "");
+    failures += onr_check(oc_code(&c, "PLAN_MISMATCH") && onr_restarts() == 0 &&
+                          access(onr.calls, F_OK) != 0,
+                          "a three-field plan file is refused, no restart");
+    oc_free(&c);
+    onr_done();
+    return failures;
+}
+
 int test_ops_node_restart(void)
 {
     int failures = 0;
@@ -527,6 +548,7 @@ int test_ops_node_restart(void)
     failures += test_onr_new_only();
     failures += test_onr_ambiguous();
     failures += test_onr_not_found();
+    failures += test_onr_old_plan_format();
     failures += test_onr_unit_changed();
     printf("=== OPS_NODE_RESTART: %d failure(s) ===\n", failures);
     return failures;

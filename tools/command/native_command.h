@@ -1032,8 +1032,9 @@ void zcl_native_legacy_status_set_rpc(char *(*fn)(const char *datadir,
 /* ops.slot.status - read-only: the slot each instance runs, its last-good
  * and the installed slots with sha256 (tools/command/native_ops_slot_status.c). */
 
-/* ops.node.restart - plan, then restart the z23-node.service user unit on a
- * matching plan_id and report tip height and uptime before and after
+/* ops.node.restart - plan, then restart the one active node unit,
+ * z23-node.service or the legacy zclassic23.service, on a matching plan_id
+ * and report tip height and uptime before and after
  * (tools/command/native_ops_node_restart.c). */
 
 /* ops.debug.meaning — node-free field ontology + question index. Answers
