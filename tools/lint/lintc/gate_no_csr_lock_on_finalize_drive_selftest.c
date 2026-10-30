@@ -18,6 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "lintc.h"
+#include "lintc_text.h"
 #include "gate_no_csr_lock_on_finalize_drive_priv.h"
 
 enum { CNFS_PATH = 1024, CNFS_TEXT = 4096 };
@@ -120,27 +121,6 @@ static int cnfs_write_fixture(const char *root, const struct cnfs_case *c)
     return rc;
 }
 
-/* Fixture scratch root (never /tmp): mkdtemp under the state scratch dir. */
-static int cnfs_fixture_root(char *out, size_t cap)
-{
-    const char *home = getenv("HOME");
-    if (!home || !home[0])
-        return die("z23-lint: HOME unset; cannot place selftest scratch\n", "");
-    char base[CNFS_PATH];
-    if (ovf(snprintf(base, sizeof base, "%s/.local/state/zclassic23/scratch",
-                     home), sizeof base))
-        return 2;
-    int rc = csr_mkdirs(base);
-    if (rc)
-        return rc;
-    if (ovf(snprintf(out, cap, "%s/no-csr-lock-finalize-drive.XXXXXX", base),
-            cap))
-        return 2;
-    if (!mkdtemp(out))
-        return die("z23-lint: mkdtemp failed for selftest scratch\n", "");
-    return 0;
-}
-
 /* Runs one case; returns 0 when the gate answered the way the case expects. */
 static int cnfs_run_case(const char *root, const struct cnfs_case *c)
 {
@@ -164,7 +144,7 @@ static int cnfs_run_case(const char *root, const struct cnfs_case *c)
 int check_no_csr_lock_on_finalize_drive_selftest(void)
 {
     char root[CNFS_PATH];
-    int rc = cnfs_fixture_root(root, sizeof root);
+    int rc = lct_scratch_dir(root, sizeof root, "no-csr-lock-finalize-drive");
     if (rc)
         return rc;
     int bad = 0;

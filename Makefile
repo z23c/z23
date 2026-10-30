@@ -13979,9 +13979,10 @@ check-blocker-remedy: $(LINTC_TOOL)
 # automatic remedy (condition healer / ESCAPE(action)) or an explicit
 # ZCL_BLOCKER_DECISION row spelling out the decision the operator owns. The
 # baseline may only shrink; a stale entry fails too.
-check-blocker-handoff-declared:
+check-blocker-handoff-declared: $(LINTC_TOOL)
 	@echo "══ LINT: blocker hand-off declaration ══"
-	@./tools/lint/check_blocker_handoff_declared.sh
+	@./build/bin/z23-lint check-blocker-handoff-declared --selftest
+	@./build/bin/z23-lint check-blocker-handoff-declared
 
 # Every supervised child must declare a progress policy — ARMED (a frozen
 # progress marker raises NO_PROGRESS) or EXEMPT with an operator-readable

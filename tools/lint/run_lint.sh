@@ -149,7 +149,7 @@ gate_command() {
         check-test-registration)           echo './tools/scripts/check_test_registration.sh --selftest && ./tools/scripts/check_test_registration.sh' ;;
         check-blocker-escape-registered)   echo './build/bin/z23-lint check-blocker-escape-registered --selftest && ./build/bin/z23-lint check-blocker-escape-registered' ;;
         check-blocker-remedy)              echo './build/bin/z23-lint check-blocker-remedy' ;;
-        check-blocker-handoff-declared)    echo './tools/lint/check_blocker_handoff_declared.sh' ;;
+        check-blocker-handoff-declared)    echo './build/bin/z23-lint check-blocker-handoff-declared --selftest && ./build/bin/z23-lint check-blocker-handoff-declared' ;;
         check-ship-remote-transaction)     echo './tools/ship.sh --selftest && ./tools/ship_selftest.sh && ./tools/lint/check_ship_remote_transaction.sh' ;;
         check-z23-release-install)         echo 'make --no-print-directory -s z23-bootstrap install-selftest && "$ZCL_LINT_BIN_DIR/install_selftest" --selftest && bash platform/packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest && bash tools/scripts/deploy_z23_release.sh --selftest' ;;
         check-published-platforms)         echo './tools/lint/check_published_platforms.sh --selftest && ./tools/lint/check_published_platforms.sh' ;;

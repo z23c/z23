@@ -155,7 +155,6 @@ tools/diagnose_gap.sh
 tools/fuzz/run_fuzz_ci.sh
 tools/githooks/pre-commit
 tools/harvest_checkpoints.sh
-tools/lint/check_blocker_handoff_declared.sh
 tools/lint/check_capability_inventory_generated.sh
 tools/lint/check_clang_portability.sh
 tools/lint/check_determinism_ratchet.sh

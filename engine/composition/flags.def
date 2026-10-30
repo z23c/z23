@@ -235,21 +235,21 @@ Z23_FLAG("ZCL_BLUE_EXPORT_TEST_KEYS", "env_test", "-", "-",
 Z23_FLAG("ZCL_BLOCKER_ESCAPE_SCAN_FILES", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_blocker_escape.c:auto")
 Z23_FLAG("ZCL_BLOCKER_HANDOFF_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_blocker_handoff_declared.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_blocker_handoff_declared.c:auto")
 Z23_FLAG("ZCL_BLOCKER_HANDOFF_DECISION_FLOOR", "env_build", "1", "-",
-          "undocumented; first use tools/lint/check_blocker_handoff_declared.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_blocker_handoff_declared.c:auto")
 Z23_FLAG("ZCL_BLOCKER_HANDOFF_DECISION_TABLE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_blocker_handoff_declared.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_blocker_handoff_declared.c:auto")
 Z23_FLAG("ZCL_BLOCKER_HANDOFF_FILE_FLOOR", "env_build", "200", "-",
-          "undocumented; first use tools/lint/check_blocker_handoff_declared.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_blocker_handoff_declared.c:auto")
 Z23_FLAG("ZCL_BLOCKER_HANDOFF_REMEDY_FLOOR", "env_build", "80", "-",
-          "undocumented; first use tools/lint/check_blocker_handoff_declared.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_blocker_handoff_declared.c:auto")
 Z23_FLAG("ZCL_BLOCKER_HANDOFF_REMEDY_TABLE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_blocker_handoff_declared.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_blocker_handoff_declared.c:auto")
 Z23_FLAG("ZCL_BLOCKER_HANDOFF_SCAN_ROOTS", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_blocker_handoff_declared.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_blocker_handoff_declared.c:auto")
 Z23_FLAG("ZCL_BLOCKER_HANDOFF_SITE_FLOOR", "env_build", "100", "-",
-          "undocumented; first use tools/lint/check_blocker_handoff_declared.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_blocker_handoff_declared.c:auto")
 Z23_FLAG("ZCL_BLOCKER_META_STALL_SECS", "env_runtime", "-", "-",
           "undocumented; first use engine/conditions/src/blocker_stall_meta_detector.c:auto")
 Z23_FLAG("ZCL_BLOCKER_RATE_LIMIT_MS", "env_runtime", "-", "-",

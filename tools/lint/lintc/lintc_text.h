@@ -19,4 +19,10 @@ bool lct_ends_with_paren(const char *line);
  * of input or a read error. */
 int lct_read_line_fd(int rfd, char *buf, size_t cap);
 
+/* mkdtemp a fresh directory "<leaf>.XXXXXX" under
+ * $HOME/.local/state/zclassic23/scratch (never /tmp) into out. Returns 0, or
+ * 2 after the message on stderr (HOME unset, path too long, mkdir or mkdtemp
+ * failed). */
+int lct_scratch_dir(char *out, size_t cap, const char *leaf);
+
 #endif

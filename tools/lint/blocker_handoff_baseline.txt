@@ -1,6 +1,6 @@
 # check_blocker_handoff_declared baseline — ids raisable with an EMPTY escape_action that are
 # bound OWNER with no ZCL_BLOCKER_DECISION row yet. SHRINK ONLY.
-# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_blocker_handoff_declared.sh
+# Regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-blocker-handoff-declared
 api_cache_refresh_stalled
 api_lookup_stalled
 authority.pair_self_check
