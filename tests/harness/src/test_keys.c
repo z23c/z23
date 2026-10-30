@@ -3,7 +3,7 @@
 #include "test/test_core.h"
 #include "keys/key_io.h"
 
-int test_keys(void)
+static int test_keys_pubkey_init(void)
 {
     int failures = 0;
 
@@ -18,6 +18,13 @@ int test_keys(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_keys_pubkey_get_id(void)
+{
+    int failures = 0;
 
     printf("pubkey_get_id... ");
     {
@@ -35,6 +42,13 @@ int test_keys(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_keys_ext_pubkey_codec(void)
+{
+    int failures = 0;
 
     printf("ext_pubkey encode/decode... ");
     {
@@ -63,6 +77,13 @@ int test_keys(void)
         }
     }
 
+    return failures;
+}
+
+static int test_keys_sign_verify(void)
+{
+    int failures = 0;
+
     printf("key generate + sign + verify... ");
     {
         struct privkey k;
@@ -85,6 +106,13 @@ int test_keys(void)
             failures++;
         }
     }
+
+    return failures;
+}
+
+static int test_keys_sign_compact_recover(void)
+{
+    int failures = 0;
 
     printf("key sign_compact + recover... ");
     {
@@ -112,6 +140,13 @@ int test_keys(void)
         }
     }
 
+    return failures;
+}
+
+static int test_keys_encode_destination_pubkey(void)
+{
+    int failures = 0;
+
     printf("encode_destination pubkey... ");
     {
         const unsigned char pubkey_pfx[] = {0x1C, 0xB8};
@@ -131,6 +166,13 @@ int test_keys(void)
         } else { printf("FAIL (encode)\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_keys_encode_destination_script(void)
+{
+    int failures = 0;
+
     printf("encode_destination script... ");
     {
         const unsigned char pubkey_pfx[] = {0x1C, 0xB8};
@@ -148,6 +190,13 @@ int test_keys(void)
             else { printf("FAIL (decode mismatch)\n"); failures++; }
         } else { printf("FAIL (encode)\n"); failures++; }
     }
+
+    return failures;
+}
+
+static int test_keys_secret_roundtrip(void)
+{
+    int failures = 0;
 
     printf("encode/decode_secret roundtrip... ");
     {
@@ -168,6 +217,13 @@ int test_keys(void)
         } else { printf("FAIL (encode)\n"); failures++; }
     }
 
+    return failures;
+}
+
+static int test_keys_decode_destination_invalid(void)
+{
+    int failures = 0;
+
     printf("decode_destination invalid... ");
     {
         const unsigned char pubkey_pfx[] = {0x1C, 0xB8};
@@ -178,6 +234,23 @@ int test_keys(void)
             printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+
+    return failures;
+}
+
+int test_keys(void)
+{
+    int failures = 0;
+
+    failures += test_keys_pubkey_init();
+    failures += test_keys_pubkey_get_id();
+    failures += test_keys_ext_pubkey_codec();
+    failures += test_keys_sign_verify();
+    failures += test_keys_sign_compact_recover();
+    failures += test_keys_encode_destination_pubkey();
+    failures += test_keys_encode_destination_script();
+    failures += test_keys_secret_roundtrip();
+    failures += test_keys_decode_destination_invalid();
 
     return failures;
 }
