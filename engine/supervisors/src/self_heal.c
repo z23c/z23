@@ -74,6 +74,7 @@ static const char *const k_hold_exempt[] = {
     "disk_full_pause", "disk_low_pause", "memory_pressure_high",
     "segment_corruption", "clock_skew_reconcile", "batch_fsync_slow",
     "state_auditor_mismatch", "tor_start_failed", "rpc_start_failed",
+    "peer_floor_violated",
 };
 
 static bool self_heal_hold_skips(const struct condition *cond)

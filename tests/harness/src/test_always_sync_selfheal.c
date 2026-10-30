@@ -898,6 +898,12 @@ static int ash_test_stall_named_blocker_cured(void)
  * device-pressure conditions keep running. */
 static _Atomic int g_hold_pressure_polls;
 static _Atomic int g_hold_stall_polls;
+static _Atomic int g_hold_peer_polls;
+static bool hold_detect_peer(void)
+{
+    atomic_fetch_add(&g_hold_peer_polls, 1);
+    return false;
+}
 static bool hold_detect_pressure(void)
 {
     atomic_fetch_add(&g_hold_pressure_polls, 1);
@@ -930,8 +936,15 @@ static int ash_test_pause_hold_conditions(void)
         .detect = hold_detect_stall, .remedy = hold_remedy,
         .witness = hold_witness,
     };
+    static struct condition c_peer = {
+        .name = "peer_floor_violated", .severity = COND_WARN,
+        .poll_secs = 1, .backoff_secs = 1, .max_attempts = 1,
+        .detect = hold_detect_peer, .remedy = hold_remedy,
+        .witness = hold_witness,
+    };
     ASH_CHECK("hold: test conditions register",
-              condition_register(&c_pressure) && condition_register(&c_stall));
+              condition_register(&c_pressure) && condition_register(&c_stall) &&
+              condition_register(&c_peer));
     self_heal_test_install_hold_filter();
 
     node_pace_set(NODE_PACE_PAUSE);
@@ -940,6 +953,8 @@ static int ash_test_pause_hold_conditions(void)
               atomic_load(&g_hold_pressure_polls) == 1);
     ASH_CHECK("hold: stall condition NOT polled while paused",
               atomic_load(&g_hold_stall_polls) == 0);
+    ASH_CHECK("hold: peer-floor redial condition polled while paused",
+              atomic_load(&g_hold_peer_polls) == 1);
 
     node_pace_set(NODE_PACE_NORMAL);
     condition_engine_reset_for_testing();
@@ -1012,6 +1027,7 @@ static int ash_test_pause_hold_sticky(void)
               sticky_escalator_test_rung() == STICKY_RUNG_RETRY);
 
     sticky_escalator_test_reset();
+    sticky_escalator_test_set_main_state(NULL);
     main_state_free(&ms);
     return failures;
 }
