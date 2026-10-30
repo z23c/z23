@@ -285,9 +285,6 @@ engine/services/src/utxo_recovery_restore.c:utxo_recovery_import_ldb:18
 engine/services/src/utxo_recovery_restore.c:utxo_recovery_restore_chain_tip:26
 engine/services/src/utxo_recovery_service.c:utxo_recovery_execute:21
 platform/modules/json/src/json.c:json_escape_str:18
-platform/modules/platform/src/watcher_record.c:platform_watcher_record_is_valid:16
-platform/modules/platform/src/watcher_record.c:platform_watcher_record_matches:27
-platform/modules/platform/src/watcher_record.c:platform_watcher_record_parse:30
 platform/modules/platform/tests/read_mapping_windows_acceptance.c:main:16
 platform/modules/util/src/cpu_topology.c:scan_darwin:18
 platform/modules/util/src/cpu_topology.c:scan_windows:27

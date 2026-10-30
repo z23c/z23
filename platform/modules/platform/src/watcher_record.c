@@ -34,20 +34,28 @@ static bool identity_valid(const struct platform_watcher_file_identity *id)
     return id && (id->volume != 0 || id->file_low != 0 || id->file_high != 0);
 }
 
+static bool mode_valid(enum platform_watcher_mode mode)
+{
+    return mode == PLATFORM_WATCHER_MODE_VERIFY || mode == PLATFORM_WATCHER_MODE_AUTO;
+}
+
+static bool state_valid(enum platform_watcher_state state)
+{
+    return state == PLATFORM_WATCHER_STATE_STARTING ||
+           state == PLATFORM_WATCHER_STATE_READY ||
+           state == PLATFORM_WATCHER_STATE_STOPPING;
+}
+
 bool platform_watcher_record_is_valid(const struct platform_watcher_record *r)
 {
     return r && r->version == PLATFORM_WATCHER_RECORD_VERSION &&
            fixed_hex(r->nonce, PLATFORM_WATCHER_RECORD_NONCE_HEX) &&
-           r->pid != 0 && r->start_token != 0 &&
-           (r->mode == PLATFORM_WATCHER_MODE_VERIFY ||
-            r->mode == PLATFORM_WATCHER_MODE_AUTO) &&
+           r->pid != 0 && r->start_token != 0 && mode_valid(r->mode) &&
            path_valid(r->canonical_root) && identity_valid(&r->root_identity) &&
            path_valid(r->canonical_image) && identity_valid(&r->image_identity) &&
            r->image_size != 0 &&
            fixed_hex(r->image_sha256, PLATFORM_WATCHER_RECORD_HASH_HEX) &&
-           (r->state == PLATFORM_WATCHER_STATE_STARTING ||
-            r->state == PLATFORM_WATCHER_STATE_READY ||
-            r->state == PLATFORM_WATCHER_STATE_STOPPING);
+           state_valid(r->state);
 }
 
 static const char *mode_name(enum platform_watcher_mode mode)
@@ -115,6 +123,51 @@ static bool number_line(const char **p, const char *end, const char *prefix,
     return take_line(p, end, prefix, value, sizeof(value)) && decimal(value, out);
 }
 
+static bool mode_line(const char **p, const char *end, enum platform_watcher_mode *out)
+{
+    char mode[16];
+    if (!take_line(p,end,"mode=",mode,sizeof(mode))) return false;
+    if (strcmp(mode,"verify") == 0) *out = PLATFORM_WATCHER_MODE_VERIFY;
+    else if (strcmp(mode,"auto") == 0) *out = PLATFORM_WATCHER_MODE_AUTO;
+    else return false;
+    return true;
+}
+
+static bool state_line(const char **p, const char *end, enum platform_watcher_state *out)
+{
+    char state[16];
+    if (!take_line(p,end,"state=",state,sizeof(state))) return false;
+    if (strcmp(state,"starting") == 0) *out = PLATFORM_WATCHER_STATE_STARTING;
+    else if (strcmp(state,"ready") == 0) *out = PLATFORM_WATCHER_STATE_READY;
+    else if (strcmp(state,"stopping") == 0) *out = PLATFORM_WATCHER_STATE_STOPPING;
+    else return false;
+    return true;
+}
+
+static bool parse_identity_lines(const char **p, const char *end,
+                                 const char *volume_key, const char *low_key,
+                                 const char *high_key, struct platform_watcher_file_identity *id)
+{
+    return number_line(p,end,volume_key,&id->volume) &&
+           number_line(p,end,low_key,&id->file_low) &&
+           number_line(p,end,high_key,&id->file_high);
+}
+
+static bool parse_record_body(const char **p, const char *end, struct platform_watcher_record *r)
+{
+    return take_line(p,end,"nonce=",r->nonce,sizeof(r->nonce)) &&
+        number_line(p,end,"pid=",&r->pid) &&
+        number_line(p,end,"start_token=",&r->start_token) &&
+        mode_line(p,end,&r->mode) &&
+        take_line(p,end,"root_path=",r->canonical_root,sizeof(r->canonical_root)) &&
+        parse_identity_lines(p,end,"root_volume=","root_file_low=","root_file_high=",&r->root_identity) &&
+        take_line(p,end,"image_path=",r->canonical_image,sizeof(r->canonical_image)) &&
+        parse_identity_lines(p,end,"image_volume=","image_file_low=","image_file_high=",&r->image_identity) &&
+        number_line(p,end,"image_size=",&r->image_size) &&
+        take_line(p,end,"image_sha256=",r->image_sha256,sizeof(r->image_sha256)) &&
+        state_line(p,end,&r->state) && *p == end;
+}
+
 bool platform_watcher_record_parse(const char *encoded, size_t size,
                                    struct platform_watcher_record *out)
 {
@@ -126,29 +179,7 @@ bool platform_watcher_record_parse(const char *encoded, size_t size,
     size_t magic = sizeof(RECORD_MAGIC) - 1u;
     if (memcmp(p, RECORD_MAGIC, magic) != 0) return false;
     p += magic; r.version = PLATFORM_WATCHER_RECORD_VERSION;
-    char mode[16], state[16];
-    if (!take_line(&p,end,"nonce=",r.nonce,sizeof(r.nonce)) ||
-        !number_line(&p,end,"pid=",&r.pid) ||
-        !number_line(&p,end,"start_token=",&r.start_token) ||
-        !take_line(&p,end,"mode=",mode,sizeof(mode)) ||
-        !take_line(&p,end,"root_path=",r.canonical_root,sizeof(r.canonical_root)) ||
-        !number_line(&p,end,"root_volume=",&r.root_identity.volume) ||
-        !number_line(&p,end,"root_file_low=",&r.root_identity.file_low) ||
-        !number_line(&p,end,"root_file_high=",&r.root_identity.file_high) ||
-        !take_line(&p,end,"image_path=",r.canonical_image,sizeof(r.canonical_image)) ||
-        !number_line(&p,end,"image_volume=",&r.image_identity.volume) ||
-        !number_line(&p,end,"image_file_low=",&r.image_identity.file_low) ||
-        !number_line(&p,end,"image_file_high=",&r.image_identity.file_high) ||
-        !number_line(&p,end,"image_size=",&r.image_size) ||
-        !take_line(&p,end,"image_sha256=",r.image_sha256,sizeof(r.image_sha256)) ||
-        !take_line(&p,end,"state=",state,sizeof(state)) || p != end) return false;
-    if (strcmp(mode,"verify") == 0) r.mode = PLATFORM_WATCHER_MODE_VERIFY;
-    else if (strcmp(mode,"auto") == 0) r.mode = PLATFORM_WATCHER_MODE_AUTO;
-    else return false;
-    if (strcmp(state,"starting") == 0) r.state = PLATFORM_WATCHER_STATE_STARTING;
-    else if (strcmp(state,"ready") == 0) r.state = PLATFORM_WATCHER_STATE_READY;
-    else if (strcmp(state,"stopping") == 0) r.state = PLATFORM_WATCHER_STATE_STOPPING;
-    else return false;
+    if (!parse_record_body(&p,end,&r)) return false;
     if (!platform_watcher_record_is_valid(&r)) return false;
     *out = r; return true;
 }
@@ -158,22 +189,20 @@ static bool identity_equal(const struct platform_watcher_file_identity *a,
 { return a->volume == b->volume && a->file_low == b->file_low &&
          a->file_high == b->file_high; }
 
-bool platform_watcher_record_matches(const struct platform_watcher_record *r,
-    const struct platform_watcher_record_binding *b)
+static bool binding_valid(const struct platform_watcher_record_binding *b)
 {
-    return platform_watcher_record_is_valid(r) && b &&
-        fixed_hex(b->nonce, PLATFORM_WATCHER_RECORD_NONCE_HEX) &&
+    return fixed_hex(b->nonce, PLATFORM_WATCHER_RECORD_NONCE_HEX) &&
         fixed_hex(b->image_sha256, PLATFORM_WATCHER_RECORD_HASH_HEX) &&
-        b->pid != 0 && b->start_token != 0 &&
-        (b->mode == PLATFORM_WATCHER_MODE_VERIFY ||
-         b->mode == PLATFORM_WATCHER_MODE_AUTO) &&
+        b->pid != 0 && b->start_token != 0 && mode_valid(b->mode) &&
         path_valid(b->canonical_root) && identity_valid(&b->root_identity) &&
         path_valid(b->canonical_image) && identity_valid(&b->image_identity) &&
-        b->image_size != 0 &&
-        (b->state == PLATFORM_WATCHER_STATE_STARTING ||
-         b->state == PLATFORM_WATCHER_STATE_READY ||
-         b->state == PLATFORM_WATCHER_STATE_STOPPING) &&
-        r->pid == b->pid && r->start_token == b->start_token &&
+        b->image_size != 0 && state_valid(b->state);
+}
+
+static bool binding_equal(const struct platform_watcher_record *r,
+                          const struct platform_watcher_record_binding *b)
+{
+    return r->pid == b->pid && r->start_token == b->start_token &&
         r->mode == b->mode && strcmp(r->nonce,b->nonce) == 0 &&
         strcmp(r->canonical_root,b->canonical_root) == 0 &&
         identity_equal(&r->root_identity,&b->root_identity) &&
@@ -181,4 +210,11 @@ bool platform_watcher_record_matches(const struct platform_watcher_record *r,
         identity_equal(&r->image_identity,&b->image_identity) &&
         r->image_size == b->image_size &&
         strcmp(r->image_sha256,b->image_sha256) == 0 && r->state == b->state;
+}
+
+bool platform_watcher_record_matches(const struct platform_watcher_record *r,
+    const struct platform_watcher_record_binding *b)
+{
+    return platform_watcher_record_is_valid(r) && b && binding_valid(b) &&
+        binding_equal(r, b);
 }
