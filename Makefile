@@ -14130,9 +14130,10 @@ check-privileged-transition-receipt: $(LINTC_TOOL)
 # (services/sync_trust_policy.h) are ORTHOGONAL provenance facts, not a trust
 # ordinal, so any </<=/>/>= against a SYNC_TRUST_* value is a latent
 # authorization bug. Authorization must route through the capability mask.
-check-sync-state-no-ordinal:
+check-sync-state-no-ordinal: $(LINTC_TOOL)
 	@echo "══ LINT: no ordinal sync_trust_state comparison ══"
-	@./tools/scripts/check_sync_state_no_ordinal.sh
+	@./build/bin/z23-lint check-sync-state-no-ordinal --selftest
+	@./build/bin/z23-lint check-sync-state-no-ordinal
 
 # The shipped node, development binary, tests and vendor builder have one
 # compiled-language path: C23. Historical external vectors may retain source

@@ -581,7 +581,7 @@ int t_dumper_never_blocks_gate(void)
 /* Gate check-sync-state-no-ordinal: the sync_trust_state enumerators are
  * ORTHOGONAL provenance facts, so any </<=/>/>= comparison against a
  * SYNC_TRUST_* value is forbidden (it invites the `state >= X` mis-grant bug).
- * The script exercises tracked/untracked violations and recovery in its own
+ * The gate exercises tracked/untracked violations and recovery in its own
  * private Git repository, leaving the live source tree read-only. */
 int t_sync_state_no_ordinal_gate(void)
 {

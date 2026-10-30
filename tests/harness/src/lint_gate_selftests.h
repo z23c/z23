@@ -108,10 +108,10 @@
 #define GIT_HOOKS_SCRIPT_REL "tools/scripts/check_git_hooks_installed.sh"
 #define PRIV_RECEIPT_SCRIPT_REL \
     "build/bin/z23-lint check-privileged-transition-receipt"
-/* Gate — no ordinal comparison of enum sync_trust_state. The script owns a
+/* Gate — no ordinal comparison of enum sync_trust_state. The gate owns a
  * private Git fixture repo for its trip/recover selftest. */
 #define TRUST_ORDER_SCRIPT_REL \
-    "tools/scripts/check_sync_state_no_ordinal.sh"
+    "build/bin/z23-lint check-sync-state-no-ordinal"
 #define GIT_HOOKS_PRE_PUSH_REL "tools/dev/z23_git_hook.c"
 /* Fixture path prefixes, not whole paths: these two checks run in the
  * REALROOT lane inside the worker pool and are resolved via repo_path_pid()

@@ -15,8 +15,10 @@ bool lct_is_digits(const char *s);
 bool lct_ends_with_paren(const char *line);
 
 /* Read one line from rfd into buf, dropping the newline and NUL-terminating.
- * Retries EINTR. Returns 0 for a non-empty line, -1 for an empty line, end
- * of input or a read error. */
+ * Retries EINTR. Returns 0 for a non-empty line; -1 for end of input or an
+ * empty line (callers that only test < 0 or != 0 need no change); -2 for a
+ * non-EINTR read error; -3 when the line does not fit in cap-1 bytes (the
+ * buffer is then empty, never a truncated line). */
 int lct_read_line_fd(int rfd, char *buf, size_t cap);
 
 /* mkdtemp a fresh directory "<leaf>.XXXXXX" under

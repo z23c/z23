@@ -51,14 +51,49 @@ int lct_scratch_dir(char *out, size_t cap, const char *leaf)
     return 0;
 }
 
+/* One byte from rfd: 1 read, 0 end of input, -2 read error. EINTR retried. */
+static int lct_read_byte(int rfd, char *c)
+{
+    for (;;) {
+        ssize_t n = read(rfd, c, 1);
+        if (n < 0 && errno == EINTR)
+            continue;
+        return n < 0 ? -2 : (int)n;
+    }
+}
+
+/* A full buffer holds cap-1 bytes with no newline yet. Peek one more byte: a
+ * newline or end of input means the line fit exactly (0); any other byte is
+ * an overlong line (-3); a read error is -2. */
+static int lct_line_full(int rfd, char *buf, size_t used)
+{
+    char c = '\0';
+    int got = lct_read_byte(rfd, &c);
+    if (got < 0)
+        return -2;
+    if (got == 0 || c == '\n') {
+        buf[used] = '\0';
+        return 0;
+    }
+    buf[0] = '\0';
+    return -3;
+}
+
 int lct_read_line_fd(int rfd, char *buf, size_t cap)
 {
     size_t used = 0;
-    while (used + 1 < cap) {
-        ssize_t n = read(rfd, buf + used, 1);
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n <= 0 || buf[used] == '\n')
+    buf[0] = '\0';
+    if (cap < 2)
+        return -3;
+    for (;;) {
+        if (used + 1 >= cap)
+            return lct_line_full(rfd, buf, used);
+        int got = lct_read_byte(rfd, &buf[used]);
+        if (got < 0) {
+            buf[0] = '\0';
+            return -2;
+        }
+        if (got == 0 || buf[used] == '\n')
             break;
         used++;
     }
