@@ -233,7 +233,7 @@ engine/jobs/src/stage_repair_coin_backfill_scan.c:coin_backfill_scan_step:17
 engine/jobs/src/tip_finalize_stage.c:is_canonical_header_successor:16
 engine/jobs/src/tip_finalize_stage.c:step_finalize:27
 engine/jobs/src/utxo_apply_delta_reorg.c:utxo_apply_reorg_unwind_if_needed:20
-engine/jobs/src/utxo_apply_delta_repair.c:utxo_apply_repair_value_overflow_hole:35
+engine/jobs/src/utxo_apply_delta_repair.c:utxo_apply_repair_value_overflow_hole:23
 engine/jobs/src/validate_headers_stage.c:recheck_failed_rows:26
 engine/models/src/database_migrate_features.c:node_db_migrate_features:31
 engine/models/src/database_migrate_features_v67_up.c:node_db_migrate_features_v67_up:51

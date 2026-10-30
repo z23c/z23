@@ -655,6 +655,28 @@ static bool repair_value_overflow_rewind_in_tx(
                                     sizeof(present));
 }
 
+/* Copies the result to the caller's struct when the caller passed one. */
+static void repair_value_overflow_copy_result(
+    struct utxo_apply_value_overflow_repair_result *out,
+    const struct utxo_apply_value_overflow_repair_result *local)
+{
+    if (out)
+        *out = *local;
+}
+
+static bool repair_value_overflow_inputs_ok(sqlite3 *db,
+                                            const struct uint256 *block_hash,
+                                            const struct block *blk)
+{
+    return db && block_hash && blk;
+}
+
+/* True when (uint64_t)C equals cursor and C lies above height. */
+static bool repair_value_overflow_cursor_ok(int height, uint64_t cursor, int C)
+{
+    return (uint64_t)C == cursor && C > height;
+}
+
 bool utxo_apply_repair_value_overflow_hole(
     sqlite3 *db,
     int height,
@@ -668,10 +690,9 @@ bool utxo_apply_repair_value_overflow_hole(
     local.height = height;
     local.cursor_before = cursor;
     local.cursor_after = cursor;
-    if (out)
-        *out = local;
+    repair_value_overflow_copy_result(out, &local);
 
-    if (!db || !block_hash || !blk) {
+    if (!repair_value_overflow_inputs_ok(db, block_hash, blk)) {
         LOG_WARN("utxo_apply",
                  "[utxo_apply] value_overflow repair refused: bad input "
                  "db=%p block_hash=%p blk=%p",
@@ -679,8 +700,7 @@ bool utxo_apply_repair_value_overflow_hole(
         return false;
     }
     if (repair_value_overflow_nothing_to_rewind(height, cursor)) {
-        if (out)
-            *out = local;
+        repair_value_overflow_copy_result(out, &local);
         return true;
     }
 
@@ -704,8 +724,7 @@ bool utxo_apply_repair_value_overflow_hole(
         /* blocker-id: utxo_apply.value_overflow_owner_gate */
         blocker_name_dependency("utxo_apply.value_overflow_owner_gate",
                                 "utxo_apply", why);
-        if (out)
-            *out = local;
+        repair_value_overflow_copy_result(out, &local);
         return true;
     }
     blocker_clear("utxo_apply.value_overflow_owner_gate");
@@ -728,13 +747,12 @@ bool utxo_apply_repair_value_overflow_hole(
                  height, (unsigned long long)cursor,
                  (unsigned long long)cursor_now);
         progress_store_tx_unlock();
-        if (out)
-            *out = local;
+        repair_value_overflow_copy_result(out, &local);
         return true;
     }
 
     int C = (int)cursor;
-    if ((uint64_t)C != cursor || C <= height) {
+    if (!repair_value_overflow_cursor_ok(height, cursor, C)) {
         progress_store_tx_unlock();
         LOG_WARN("utxo_apply",
                  "[utxo_apply] value_overflow repair cursor invalid h=%d "
@@ -750,8 +768,7 @@ bool utxo_apply_repair_value_overflow_hole(
     }
     if (row_present == 0) {
         progress_store_tx_unlock();
-        if (out)
-            *out = local;
+        repair_value_overflow_copy_result(out, &local);
         return true;
     }
 
@@ -772,8 +789,7 @@ bool utxo_apply_repair_value_overflow_hole(
                  "one-shot marker already present",
                  height);
         progress_store_tx_unlock();
-        if (out)
-            *out = local;
+        repair_value_overflow_copy_result(out, &local);
         return true;
     }
 
@@ -792,8 +808,7 @@ bool utxo_apply_repair_value_overflow_hole(
                  "log/delta range below cursor %d",
                  height, C);
         progress_store_tx_unlock();
-        if (out)
-            *out = local;
+        repair_value_overflow_copy_result(out, &local);
         return true;
     }
 
@@ -812,8 +827,7 @@ bool utxo_apply_repair_value_overflow_hole(
                  dry.failure_kind ? dry.failure_kind : "(null)");
         free_delta(&dry);
         progress_store_tx_unlock();
-        if (out)
-            *out = local;
+        repair_value_overflow_copy_result(out, &local);
         return true;
     }
     free_delta(&dry);
@@ -852,7 +866,6 @@ bool utxo_apply_repair_value_overflow_hole(
              "for stale hole h=%d",
              (unsigned long long)cursor, height, height);
 
-    if (out)
-        *out = local;
+    repair_value_overflow_copy_result(out, &local);
     return true;
 }
