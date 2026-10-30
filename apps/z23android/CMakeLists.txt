@@ -17,7 +17,7 @@ if(NOT EXISTS "${Z23_QUIRC_DIR}/quirc.c")
 endif()
 
 add_library(z23android SHARED
-    android_main.c node_service.c camera.c native_ui.c controller.c conversation.c bridge_client.c operations.c fleet.c
+    android_main.c node_service.c node_watch.c camera.c native_ui.c controller.c conversation.c bridge_client.c operations.c fleet.c
     audio.c speech_client.c voice.c hosts.c pairing.c
     "${Z23_ROOT}/platform/modules/sha3/src/sha3.c"
     "${Z23_ROOT}/contexts/commons/packages/zutf8/src/zutf8.c"

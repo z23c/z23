@@ -10,4 +10,6 @@ void zapp_controller_detach(void);
 /* Hidden, the app cancels voice and stops observing the node and fleet, which keep running on
  * their own; shown again, it observes at once. */
 void zapp_controller_visible(bool visible);
+/* True while the node process runs; safe from any thread, with or without an activity. */
+bool zapp_controller_node_running(void);
 #endif

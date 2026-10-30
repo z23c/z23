@@ -22,7 +22,7 @@ HOST_WARNINGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic
 export JAVA_HOME
 export PATH := $(JAVA_HOME)/bin:$(PATH)
 
-.PHONY: dexgen test-dexgen apk native install launch check-config check-node prepare-quirc test bridge test-bridge
+.PHONY: dexgen test-dexgen test-watch apk native install launch check-config check-node prepare-quirc test bridge test-bridge
 prepare-quirc:
 	@mkdir -p '$(QUIRC_DIR)'
 	cp ../../vendor/quirc/*.[ch] '$(QUIRC_DIR)/'
@@ -75,6 +75,11 @@ dexgen:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) dexgen.c -o '$(BUILD_DIR)/dexgen'
 
+test-watch:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. tests/node_watch_test.c node_watch.c -o '$(BUILD_DIR)/node-watch-test'
+	'$(BUILD_DIR)/node-watch-test'
+
 test-dexgen:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/dexgen_test.c -o '$(BUILD_DIR)/dexgen-test'
@@ -96,7 +101,7 @@ test-voice:
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/speech-client.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/speech-client-test' "$$scratch"
 
-test: prepare-quirc test-bridge test-voice test-host test-dexgen
+test: prepare-quirc test-bridge test-voice test-host test-dexgen test-watch
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' \
 	  tests/fleet_test.c fleet.c ../../vendor/qrcodegen/qrcodegen.c $(QUIRC_SOURCES) \
 	  -lm -o '$(BUILD_DIR)/fleet-test'

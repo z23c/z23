@@ -1,8 +1,12 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "node_service.h"
+#include "controller.h"
+#include "node_watch.h"
 #include <android/log.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 #define TAG "z23"
 #define SERVICE_CLASS "org.z23.nativeapp.NodeService"
@@ -71,33 +75,106 @@ static jobject tap_action(JNIEnv *env, jobject service, jstring package)
     jobject action = (*env)->CallStaticObjectMethod(env, cls, get, service, 0, launch, FLAG_IMMUTABLE);
     return failed(env, "getActivity") ? NULL : action;
 }
+static jint stock_icon(JNIEnv *env)
+{
+    jclass cls = (*env)->FindClass(env, "android/R$drawable");
+    jfieldID field = cls ? (*env)->GetStaticFieldID(env, cls, "sym_def_app_icon", "I") : NULL;
+    jint id = field ? (*env)->GetStaticIntField(env, cls, field) : 0;
+    return failed(env, "stock icon") ? 0 : id;
+}
+/* The app icon, or the stock one when the app has none. */
 static jint app_icon(JNIEnv *env, jobject service)
 {
     jobject info = call_object(env, service, "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;");
     jclass cls = info ? (*env)->GetObjectClass(env, info) : NULL;
     jfieldID icon = cls ? (*env)->GetFieldID(env, cls, "icon", "I") : NULL;
     jint id = icon ? (*env)->GetIntField(env, info, icon) : 0;
-    return failed(env, "icon") ? 0 : id;
+    return failed(env, "icon") || id == 0 ? stock_icon(env) : id;
 }
+static const char *const builder_class = "Landroid/app/Notification$Builder;";
+static jobject new_builder(JNIEnv *env, jobject service)
+{
+    return new_object(env, "android/app/Notification$Builder", "(Landroid/content/Context;Ljava/lang/String;)V",
+                      service, jstr(env, "node"));
+}
+/* The full notification; a missing tap action only costs the tap. */
 static jobject build_notification(JNIEnv *env, jobject service)
 {
     jstring package = call_object(env, service, "getPackageName", "()Ljava/lang/String;");
     jobject tap = package ? tap_action(env, service, package) : NULL;
-    jobject b = new_object(env, "android/app/Notification$Builder", "(Landroid/content/Context;Ljava/lang/String;)V",
-                           service, jstr(env, "node"));
-    static const char *const self = "Landroid/app/Notification$Builder;";
+    jobject b = new_builder(env, service);
     char sig[96];
-    if (!b || !tap) return NULL;
-    snprintf(sig, sizeof(sig), "(Ljava/lang/CharSequence;)%s", self);
+    if (!b) return NULL;
+    snprintf(sig, sizeof(sig), "(Ljava/lang/CharSequence;)%s", builder_class);
     (void)call_object(env, b, "setContentTitle", sig, jstr(env, "Z23 node"));
     (void)call_object(env, b, "setContentText", sig, jstr(env, "Running and in sync while hidden"));
-    snprintf(sig, sizeof(sig), "(I)%s", self);
+    snprintf(sig, sizeof(sig), "(I)%s", builder_class);
     (void)call_object(env, b, "setSmallIcon", sig, app_icon(env, service));
-    snprintf(sig, sizeof(sig), "(Z)%s", self);
+    snprintf(sig, sizeof(sig), "(Z)%s", builder_class);
     (void)call_object(env, b, "setOngoing", sig, 1);
-    snprintf(sig, sizeof(sig), "(Landroid/app/PendingIntent;)%s", self);
-    (void)call_object(env, b, "setContentIntent", sig, tap);
+    if (tap) {
+        snprintf(sig, sizeof(sig), "(Landroid/app/PendingIntent;)%s", builder_class);
+        (void)call_object(env, b, "setContentIntent", sig, tap);
+    }
     return call_object(env, b, "build", "()Landroid/app/Notification;");
+}
+/* Only what startForeground needs, for when the full notification cannot be built. */
+static jobject minimal_notification(JNIEnv *env, jobject service)
+{
+    jobject b = new_builder(env, service);
+    char sig[96];
+    if (!b) return NULL;
+    snprintf(sig, sizeof(sig), "(I)%s", builder_class);
+    (void)call_object(env, b, "setSmallIcon", sig, stock_icon(env));
+    return call_object(env, b, "build", "()Landroid/app/Notification;");
+}
+static bool enter_foreground(JNIEnv *env, jobject service)
+{
+    jobject n = build_notification(env, service);
+    if (!n) n = minimal_notification(env, service);
+    return n && call_void(env, service, "startForeground", "(ILandroid/app/Notification;I)V",
+                          NOTIFICATION_ID, n, SERVICE_TYPE_SPECIAL_USE);
+}
+
+/* The service holds a global reference to itself while the node watch runs. */
+static struct { pthread_mutex_t lock; JavaVM *vm; jobject service; } held = { PTHREAD_MUTEX_INITIALIZER, NULL, NULL };
+
+static void release_service(JNIEnv *env)
+{
+    pthread_mutex_lock(&held.lock);
+    jobject service = held.service;
+    held.service = NULL;
+    pthread_mutex_unlock(&held.lock);
+    if (service) (*env)->DeleteGlobalRef(env, service);
+}
+static atomic_bool ended;
+static bool node_alive(void *context) { (void)context; return zapp_controller_node_running(); }
+/* The node exited while nothing in the app was watching: end the service from the watch thread. */
+static void node_gone(void *context)
+{
+    (void)context;
+    atomic_store(&ended, true);
+    JNIEnv *env = NULL;
+    pthread_mutex_lock(&held.lock); JavaVM *vm = held.vm; pthread_mutex_unlock(&held.lock);
+    if (!vm || (*vm)->AttachCurrentThread(vm, &env, NULL) != JNI_OK) return;
+    pthread_mutex_lock(&held.lock);
+    jobject service = held.service ? (*env)->NewLocalRef(env, held.service) : NULL;
+    pthread_mutex_unlock(&held.lock);
+    if (service) { (void)call_void(env, service, "stopSelf", "()V"); (*env)->DeleteLocalRef(env, service); }
+    release_service(env);
+    (*vm)->DetachCurrentThread(vm);
+}
+static void watch_node(JNIEnv *env, jobject service)
+{
+    static const struct node_watch_ops ops = { node_alive, node_gone, NULL, 5000 };
+    JavaVM *vm = NULL;
+    zapp_node_watch_stop();
+    release_service(env);
+    if ((*env)->GetJavaVM(env, &vm) != JNI_OK) return;
+    jobject ref = (*env)->NewGlobalRef(env, service);
+    if (!ref) { (void)failed(env, "global ref"); return; }
+    pthread_mutex_lock(&held.lock); held.vm = vm; held.service = ref; pthread_mutex_unlock(&held.lock);
+    if (!zapp_node_watch_start(&ops)) release_service(env);
 }
 
 /* Called by NodeService.onStartCommand on the main thread. */
@@ -107,11 +184,9 @@ JNIEXPORT jint JNICALL Java_org_z23_nativeapp_NodeService_start(JNIEnv *env, jcl
     (void)cls; (void)id;
     if ((*env)->PushLocalFrame(env, 64) != JNI_OK) { (void)failed(env, "local frame"); return START_NOT_STICKY; }
     create_channel(env, service);
-    jobject notification = build_notification(env, service);
-    bool ok = notification && call_void(env, service, "startForeground", "(ILandroid/app/Notification;I)V",
-                                        NOTIFICATION_ID, notification, SERVICE_TYPE_SPECIAL_USE);
     /* Android ends an app whose started foreground service never calls startForeground. */
-    if (!ok) (void)call_void(env, service, "stopSelf", "()V");
+    if (enter_foreground(env, service)) watch_node(env, service);
+    else (void)call_void(env, service, "stopSelf", "()V");
     (*env)->PopLocalFrame(env, NULL);
     return START_NOT_STICKY;
 }
@@ -129,14 +204,18 @@ bool zapp_node_service_start(JNIEnv *env, jobject context)
 {
     bool ok = false;
     if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)failed(env, "local frame"); return false; }
+    atomic_store(&ended, false);
     jobject intent = service_intent(env, context);
     ok = intent && call_object(env, context, "startForegroundService",
                                "(Landroid/content/Intent;)Landroid/content/ComponentName;", intent) != NULL;
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }
+bool zapp_node_service_ended(void) { return atomic_load(&ended); }
 void zapp_node_service_stop(JNIEnv *env, jobject context)
 {
+    zapp_node_watch_stop();
+    release_service(env);
     if ((*env)->PushLocalFrame(env, 16) != JNI_OK) { (void)failed(env, "local frame"); return; }
     jobject intent = service_intent(env, context);
     jmethodID stop = intent ? method_of(env, context, "stopService", "(Landroid/content/Intent;)Z") : NULL;

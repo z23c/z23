@@ -32,6 +32,8 @@ static bool background_asked;
 static bool node_service_on;
 /* Notifications were requested once; the service works without them. */
 static bool notifications_asked;
+/* A failed service start is not retried before this CLOCK_MONOTONIC second. */
+static time_t service_retry_at;
 static bool microphone_allowed(JNIEnv *env, jobject activity);
 static void request_permission(JNIEnv *env, jobject activity, const char *name);
 
@@ -106,12 +108,16 @@ static bool notifications_allowed(JNIEnv *env, jobject activity)
  * process out of the hidden-app kill class; stop it once the node has exited. */
 static void sync_node_service(JNIEnv *env, const struct zapp_view *view)
 {
+    struct timespec now;
     if (!active) return;
-    if (!node_service_on && foreground && view->node_process_running) {
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (node_service_on && zapp_node_service_ended()) node_service_on = false;
+    if (!node_service_on && foreground && view->node_process_running && now.tv_sec >= service_retry_at) {
         if (!notifications_asked && !notifications_allowed(env, active)) {
             notifications_asked = true; request_permission(env, active, "android.permission.POST_NOTIFICATIONS");
         }
         node_service_on = zapp_node_service_start(env, active);
+        if (!node_service_on) service_retry_at = now.tv_sec + 60;
     } else if (node_service_on && !view->node_process_running) {
         zapp_node_service_stop(env, active); node_service_on = false;
     }

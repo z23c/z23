@@ -792,3 +792,10 @@ void zapp_controller_visible(bool visible)
     }
     pthread_mutex_unlock(&startup_lock);
 }
+bool zapp_controller_node_running(void)
+{
+    pthread_mutex_lock(&startup_lock);
+    struct controller *c = current;
+    pthread_mutex_unlock(&startup_lock);
+    return c && zapp_node_running(&c->runtime);
+}
