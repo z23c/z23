@@ -1,5 +1,5 @@
 # Windows platform-seam ratchet baseline — regenerate with:
-#   ZCL_LINT_MODE=UPDATE tools/lint/check_windows_platform_seam.sh
+#   ZCL_LINT_MODE=UPDATE ./build/bin/z23-lint check-windows-platform-seam
 #
 # One '<path> <count>' line per platform/modules/platform/src/*.c file that
 # still holds mingw diagnostic sites under

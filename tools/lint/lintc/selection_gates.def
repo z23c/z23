@@ -98,7 +98,9 @@ SELECTION_GATE("check-no-api-keys", SELECTION_UNITS_FILES, "",
  * with it. Include roots and the file-count floor come from the path set. */
 SELECTION_GATE("check-windows-platform-seam", SELECTION_UNITS_TUS,
     "^platform/modules/platform/src/[^/]+\\.c$",
-    "tools/lint/check_windows_platform_seam.sh tools/lint/gate_lib.sh "
+    "tools/lint/lintc/gate_windows_platform_seam.c "
+    "tools/lint/lintc/gate_windows_platform_seam_selftest.c "
+    "tools/lint/gate_lib.sh "
     "tools/lint/repo_shape.sh engine/composition/lib_module_order.def "
     "Makefile tools/lint/windows_platform_seam_baseline.txt " SELECTION_DRIVER,
     "check-windows-platform-seam:",

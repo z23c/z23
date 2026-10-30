@@ -2710,8 +2710,8 @@ windows-acceptance-wine: windows-acceptance-compile
 # explicit UNOBSERVED mode for contributors without MinGW; this acceptance,
 # pre-push and hosted-CI path does not.
 windows-portability-acceptance: $(LINTC_TOOL)
-	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_platform_seam.sh --self-test
-	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_platform_seam.sh
+	@ZCL_REQUIRE_MINGW=1 ./build/bin/z23-lint check-windows-platform-seam --selftest
+	@ZCL_REQUIRE_MINGW=1 ./build/bin/z23-lint check-windows-platform-seam
 	@ZCL_REQUIRE_MINGW=1 ./build/bin/z23-lint check-windows-cross-syntax
 	@ZCL_REQUIRE_MINGW=1 ./build/bin/z23-lint check-windows-acceptance --selftest
 	@ZCL_REQUIRE_MINGW=1 ./build/bin/z23-lint check-windows-acceptance
@@ -14234,9 +14234,10 @@ check-clang-portability: $(LINTC_TOOL)
 # that newly stops cross-compiling for Windows fails the build instead of
 # surfacing later as a human-caught revert. Reports UNOBSERVED, never a pass,
 # when mingw is absent.
-check-windows-platform-seam:
+check-windows-platform-seam: $(LINTC_TOOL)
 	@echo "══ LINT: Windows platform-seam cross-compile (mingw -fsyntax-only) ══"
-	@./tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh
+	@./build/bin/z23-lint check-windows-platform-seam --selftest
+	@./build/bin/z23-lint check-windows-platform-seam
 
 # ─────────────────────────────────────────────────────────────────────────
 # BEGIN windows-acceptance lane — one contiguous block, nothing above or below
