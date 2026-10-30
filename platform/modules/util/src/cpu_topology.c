@@ -254,6 +254,41 @@ static void darwin_sysctl_text(const char *name, char *out, size_t out_size)
     out[out_size - 1] = '\0';
 }
 
+static bool darwin_read_performance_level(struct cpu_topology_state *st,
+                                          int i)
+{
+    char key[64];
+    struct cpu_topology_performance_level *level =
+        &st->performance_levels[st->performance_level_count];
+    snprintf(key, sizeof(key), "hw.perflevel%d.logicalcpu", i);
+    bool level_logical = darwin_sysctl_int(key, &level->logical_cpus);
+    snprintf(key, sizeof(key), "hw.perflevel%d.physicalcpu", i);
+    bool level_physical =
+        darwin_sysctl_int(key, &level->physical_cores);
+    if (!level_logical && !level_physical)
+        return false;
+    snprintf(key, sizeof(key), "hw.perflevel%d.name", i);
+    darwin_sysctl_text(key, level->name, sizeof(level->name));
+    if (level->name[0] == '\0')
+        snprintf(level->name, sizeof(level->name), "level%d", i);
+    snprintf(key, sizeof(key), "hw.perflevel%d.l2cachesize", i);
+    (void)darwin_sysctl_i64(key, &level->l2_size_bytes);
+    return true;
+}
+
+static void darwin_scan_performance_levels(struct cpu_topology_state *st)
+{
+    int levels = 0;
+    if (darwin_sysctl_int("hw.nperflevels", &levels) && levels > 0) {
+        if (levels > CPU_TOPOLOGY_MAX_PERFORMANCE_LEVELS)
+            levels = CPU_TOPOLOGY_MAX_PERFORMANCE_LEVELS;
+        for (int i = 0; i < levels; i++) {
+            if (darwin_read_performance_level(st, i))
+                st->performance_level_count++;
+        }
+    }
+}
+
 static bool scan_darwin(struct cpu_topology_state *st)
 {
     fill_fallback(st);
@@ -283,30 +318,7 @@ static bool scan_darwin(struct cpu_topology_state *st)
         st->physical_cores = physical > st->logical_cpus
             ? st->logical_cpus : physical;
 
-    int levels = 0;
-    if (darwin_sysctl_int("hw.nperflevels", &levels) && levels > 0) {
-        if (levels > CPU_TOPOLOGY_MAX_PERFORMANCE_LEVELS)
-            levels = CPU_TOPOLOGY_MAX_PERFORMANCE_LEVELS;
-        for (int i = 0; i < levels; i++) {
-            char key[64];
-            struct cpu_topology_performance_level *level =
-                &st->performance_levels[st->performance_level_count];
-            snprintf(key, sizeof(key), "hw.perflevel%d.logicalcpu", i);
-            bool level_logical = darwin_sysctl_int(key, &level->logical_cpus);
-            snprintf(key, sizeof(key), "hw.perflevel%d.physicalcpu", i);
-            bool level_physical =
-                darwin_sysctl_int(key, &level->physical_cores);
-            if (!level_logical && !level_physical)
-                continue;
-            snprintf(key, sizeof(key), "hw.perflevel%d.name", i);
-            darwin_sysctl_text(key, level->name, sizeof(level->name));
-            if (level->name[0] == '\0')
-                snprintf(level->name, sizeof(level->name), "level%d", i);
-            snprintf(key, sizeof(key), "hw.perflevel%d.l2cachesize", i);
-            (void)darwin_sysctl_i64(key, &level->l2_size_bytes);
-            st->performance_level_count++;
-        }
-    }
+    darwin_scan_performance_levels(st);
 
     snprintf(st->source, sizeof(st->source), "darwin_sysctl");
     st->valid = st->logical_cpus > 0;
@@ -333,6 +345,75 @@ static int windows_mask_count(KAFFINITY mask)
     return count;
 }
 
+static void windows_note_core(struct cpu_topology_state *st,
+                              SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *record)
+{
+    st->physical_cores++;
+    int siblings = 0;
+    for (WORD i = 0; i < record->Processor.GroupCount; i++)
+        siblings += windows_mask_count(
+            record->Processor.GroupMask[i].Mask);
+    if (siblings > st->smt_width) st->smt_width = siblings;
+}
+
+static void windows_fill_domain_cpus(struct cpu_topology_state *st,
+                                     struct cpu_topology_domain *domain,
+                                     GROUP_AFFINITY affinity)
+{
+    for (BYTE bit = 0; bit < sizeof(KAFFINITY) * 8; bit++) {
+        if ((affinity.Mask & ((KAFFINITY)1 << bit)) == 0)
+            continue;
+        int cpu = windows_group_cpu_id(affinity.Group, bit);
+        if (cpu >= 0 && domain->cpu_count < CPU_TOPOLOGY_MAX_CPUS) {
+            domain->cpus[domain->cpu_count++] = cpu;
+            st->domain_of[cpu] = domain->id;
+        }
+    }
+}
+
+static void windows_add_l3_domain(struct cpu_topology_state *st,
+                                  SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *record)
+{
+    struct cpu_topology_domain *domain = &st->domains[st->domain_count];
+    domain->id = st->domain_count;
+    domain->l3_size_bytes = record->Cache.CacheSize;
+    windows_fill_domain_cpus(st, domain, record->Cache.GroupMask);
+    st->domain_count++;
+}
+
+static void windows_walk_records(struct cpu_topology_state *st,
+                                 SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *records,
+                                 DWORD bytes)
+{
+    BYTE *cursor = (BYTE *)records;
+    BYTE *end = cursor + bytes;
+    while (cursor < end) {
+        SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *record =
+            (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)cursor;
+        if (record->Size == 0 || cursor + record->Size > end)
+            break;
+        if (record->Relationship == RelationProcessorCore) {
+            windows_note_core(st, record);
+        } else if (record->Relationship == RelationCache &&
+                   record->Cache.Level == 3 &&
+                   st->domain_count < CPU_TOPOLOGY_MAX_DOMAINS) {
+            windows_add_l3_domain(st, record);
+        }
+        cursor += record->Size;
+    }
+}
+
+static void windows_assign_orphan_cpus(struct cpu_topology_state *st)
+{
+    for (int cpu = 0; cpu < st->logical_cpus; cpu++) {
+        if (st->domain_of[cpu] < 0 &&
+            st->domains[0].cpu_count < CPU_TOPOLOGY_MAX_CPUS) {
+            st->domains[0].cpus[st->domains[0].cpu_count++] = cpu;
+            st->domain_of[cpu] = 0;
+        }
+    }
+}
+
 static bool scan_windows(struct cpu_topology_state *st)
 {
     DWORD bytes = 0;
@@ -353,41 +434,7 @@ static bool scan_windows(struct cpu_topology_state *st)
     if (st->logical_cpus > CPU_TOPOLOGY_MAX_CPUS)
         st->logical_cpus = CPU_TOPOLOGY_MAX_CPUS;
 
-    BYTE *cursor = (BYTE *)records;
-    BYTE *end = cursor + bytes;
-    while (cursor < end) {
-        SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *record =
-            (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)cursor;
-        if (record->Size == 0 || cursor + record->Size > end)
-            break;
-        if (record->Relationship == RelationProcessorCore) {
-            st->physical_cores++;
-            int siblings = 0;
-            for (WORD i = 0; i < record->Processor.GroupCount; i++)
-                siblings += windows_mask_count(
-                    record->Processor.GroupMask[i].Mask);
-            if (siblings > st->smt_width) st->smt_width = siblings;
-        } else if (record->Relationship == RelationCache &&
-                   record->Cache.Level == 3 &&
-                   st->domain_count < CPU_TOPOLOGY_MAX_DOMAINS) {
-            struct cpu_topology_domain *domain =
-                &st->domains[st->domain_count];
-            domain->id = st->domain_count;
-            domain->l3_size_bytes = record->Cache.CacheSize;
-            GROUP_AFFINITY affinity = record->Cache.GroupMask;
-            for (BYTE bit = 0; bit < sizeof(KAFFINITY) * 8; bit++) {
-                if ((affinity.Mask & ((KAFFINITY)1 << bit)) == 0)
-                    continue;
-                int cpu = windows_group_cpu_id(affinity.Group, bit);
-                if (cpu >= 0 && domain->cpu_count < CPU_TOPOLOGY_MAX_CPUS) {
-                    domain->cpus[domain->cpu_count++] = cpu;
-                    st->domain_of[cpu] = domain->id;
-                }
-            }
-            st->domain_count++;
-        }
-        cursor += record->Size;
-    }
+    windows_walk_records(st, records, bytes);
     free(records);
 
     if (st->physical_cores <= 0)
@@ -398,13 +445,7 @@ static bool scan_windows(struct cpu_topology_state *st)
         fill_fallback(st);
         return true;
     }
-    for (int cpu = 0; cpu < st->logical_cpus; cpu++) {
-        if (st->domain_of[cpu] < 0 &&
-            st->domains[0].cpu_count < CPU_TOPOLOGY_MAX_CPUS) {
-            st->domains[0].cpus[st->domains[0].cpu_count++] = cpu;
-            st->domain_of[cpu] = 0;
-        }
-    }
+    windows_assign_orphan_cpus(st);
     snprintf(st->source, sizeof(st->source), "windows");
     st->valid = true;
     return true;

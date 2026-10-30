@@ -280,8 +280,6 @@ engine/services/src/utxo_recovery_restore.c:utxo_recovery_import_ldb:18
 engine/services/src/utxo_recovery_restore.c:utxo_recovery_restore_chain_tip:26
 engine/services/src/utxo_recovery_service.c:utxo_recovery_execute:21
 platform/modules/platform/tests/read_mapping_windows_acceptance.c:main:16
-platform/modules/util/src/cpu_topology.c:scan_darwin:18
-platform/modules/util/src/cpu_topology.c:scan_windows:27
 tests/harness/src/lint_gate_chain_contracts.c:t_no_new_coin_backfill_caller:47
 tests/harness/src/test.c:main:407
 tests/harness/src/test_accept_to_mempool.c:test_accept_to_mempool:44
