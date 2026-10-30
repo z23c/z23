@@ -113,10 +113,10 @@ gate_command() {
         check-commons-journey-ordering)    echo 'tools/dev/commons-journey-ordering-selftest.sh' ;;
         check-zcc-cache)                   echo './tools/lint/check_zcc_cache.sh' ;;
         check-zcc-epoch-object)            echo './tools/lint/check_zcc_epoch_object.sh' ;;
-        check-determinism-ratchet)         echo './tools/lint/check_determinism_ratchet.sh --selftest && ./tools/lint/check_determinism_ratchet.sh' ;;
         check-git-hooks-installed)         echo './tools/scripts/check_git_hooks_installed.sh --self-test && ./tools/scripts/install_git_hooks_selftest.sh && ./tools/scripts/check_git_hooks_installed.sh' ;;
         check-hotswap-eligible-scope)      echo 'build/bin/z23-lint check-hotswap-eligible-scope' ;;
         check-hotswap-denied-leaves)       echo 'build/bin/z23-lint check-hotswap-denied-leaves --selftest && build/bin/z23-lint check-hotswap-denied-leaves' ;;
+        check-determinism-ratchet)         echo 'build/bin/z23-lint check-determinism-ratchet --selftest && build/bin/z23-lint check-determinism-ratchet' ;;
         check-hotswap-static-state)        echo 'build/bin/z23-lint check-hotswap-static-state' ;;
         check-hotswap-service-islands)     echo 'tools/lint/check_hotswap_service_islands.sh' ;;
         check-hotswap-swappable-shape)     echo 'build/bin/z23-lint check-hotswap-swappable-shape' ;;

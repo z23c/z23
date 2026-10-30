@@ -3318,7 +3318,7 @@ AGENT_IMPACT_RULE("engine/modules/chainlog/src/*.c|engine/modules/chainlog/inclu
  * groups that do not reproduce may only shrink, and a change to the classifier
  * that quietly reclassifies a group would move that record without anyone
  * measuring anything. */
-AGENT_IMPACT_RULE("engine/modules/determinism/src/*.c|engine/modules/determinism/include/determinism/*.h|tests/harness/src/test_determinism.c|tools/determinism_scan.c|tools/lint/check_determinism_ratchet.sh|tools/lint/determinism_baseline.txt", "determinism make_lint_gates")
+AGENT_IMPACT_RULE("engine/modules/determinism/src/*.c|engine/modules/determinism/include/determinism/*.h|tests/harness/src/test_determinism.c|tools/determinism_scan.c|tools/lint/lintc/gate_determinism_ratchet.c|tools/lint/lintc/gate_determinism_ratchet_selftest.c|tools/lint/lintc/gate_determinism_ratchet_priv.h|tools/lint/determinism_baseline.txt", "determinism make_lint_gates")
 /* The cookbook: the answers to "how do I do X here", as a checked registry
  * plus the document generated from it. It rides make_lint_gates only — the
  * gate IS the coverage, and it runs the recipes rather than reading about

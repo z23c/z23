@@ -587,7 +587,7 @@ Z23_FLAG("ZCL_DEPLOY_VERIFY_TIMEOUT", "env_build", "600", "-",
 Z23_FLAG("ZCL_DEPLOY_VERIFY_WAIT", "env_build", "0", "-",
           "undocumented; first use tools/deploy_verify.sh:auto")
 Z23_FLAG("ZCL_DETERMINISM_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_determinism_ratchet.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_determinism_ratchet.c:auto")
 Z23_FLAG("ZCL_DET_FIXTURE_CC", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_determinism.c:auto")
 Z23_FLAG("ZCL_DEVICE_HOST_BENCH_MIB", "env_test", "4", "-",

@@ -9392,10 +9392,10 @@ determinism-receipt-abi:
 # Wiring lives in THREE files: this recipe, the gate_command() case in
 # tools/lint/run_lint.sh, and the LINT-GATES block in docs/DEFENSIVE_CODING.md.
 .PHONY: check-determinism-ratchet
-check-determinism-ratchet:
+check-determinism-ratchet: $(LINTC_TOOL)
 	@echo "══ LINT: determinism ratchet (shrink-only) ══"
-	@./tools/lint/check_determinism_ratchet.sh --selftest
-	@./tools/lint/check_determinism_ratchet.sh
+	@build/bin/z23-lint check-determinism-ratchet --selftest
+	@build/bin/z23-lint check-determinism-ratchet
 
 # ── Behavioral fingerprinting (cognition/modules/fingerprint) ──────────────────────────
 # `make fingerprint-scan` indexes what every in-tree function DOES rather than
