@@ -612,6 +612,27 @@ int condition_engine_get_unresolved_critical_count(void)
     return n;
 }
 
+size_t condition_engine_for_each_unresolved_critical(
+    void (*fn)(const char *name, void *ctx), void *ctx)
+{
+    /* Registered condition structs outlive the registry, so their names stay
+     * valid after the lock is released. */
+    const struct condition *hits[CONDITION_MAX_REGISTRY];
+    size_t n = 0;
+    pthread_mutex_lock(&g_condition_mu);
+    for (int i = 0; i < g_condition_count; i++) {
+        const struct condition *c = g_conditions[i];
+        if (c->severity == COND_CRITICAL && condition_is_unresolved(c))
+            hits[n++] = c;
+    }
+    pthread_mutex_unlock(&g_condition_mu);
+    if (fn) {
+        for (size_t i = 0; i < n; i++)
+            fn(hits[i]->name, ctx);
+    }
+    return n;
+}
+
 bool condition_engine_dump_state_json(struct json_value *out, const char *key)
 {
     (void)key;

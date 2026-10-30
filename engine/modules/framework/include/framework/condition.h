@@ -6,6 +6,7 @@
 #include "json/json.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdatomic.h>
 
@@ -184,6 +185,14 @@ int condition_engine_get_unresolved_count(void);
  * bounded, self-contained cooldown (e.g. an external peer/bandwidth fault)
  * without that ever meaning "run the chain-recovery ladder". */
 int condition_engine_get_unresolved_critical_count(void);
+
+/* Calls fn(name, ctx) once per unresolved COND_CRITICAL condition, in
+ * registration order, and returns the number visited. The names are read
+ * under the engine lock and fn runs after it is released, so fn may call back
+ * into the engine. The return value equals
+ * condition_engine_get_unresolved_critical_count() for the same snapshot. */
+size_t condition_engine_for_each_unresolved_critical(
+    void (*fn)(const char *name, void *ctx), void *ctx);
 
 /* Re-baseline the engine's wall-keyed cadence anchors (last_poll/last_remedy)
  * to "now" for every registered condition. Called by the clock_skew_reconcile

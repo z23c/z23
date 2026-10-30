@@ -25,6 +25,8 @@
 #define ZCL_SERVICES_RECOVERY_COORDINATOR_H
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 struct main_state;
 struct json_value;
@@ -48,6 +50,12 @@ void recovery_coordinator_test_drive(void);
 void recovery_coordinator_test_name_blocker(void);
 long long recovery_coordinator_test_blocker_fires(void);
 long long recovery_coordinator_test_runs(void);
+/* Replaces the cadence clock (monotonic seconds); NULL restores it. */
+void recovery_coordinator_test_set_clock(int64_t (*now)(void));
+/* Number of WARN lines emitted for the unresolved-critical set. */
+long long recovery_coordinator_test_log_emits(void);
+/* Formats the logged critical names into out (cap bytes), as the WARN does. */
+void recovery_coordinator_test_format_logged(char *out, size_t cap);
 #endif
 
 #endif /* ZCL_SERVICES_RECOVERY_COORDINATOR_H */

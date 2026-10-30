@@ -500,6 +500,48 @@ static bool ce_cooldown_rearms_then_resets(struct condition *cond)
     return ce_cooldown_witness_clear_resets(cond, ok);
 }
 
+struct ce_visit {
+    int calls;
+    bool crit_seen;
+    bool warn_seen;
+};
+
+static void ce_visit_fn(const char *name, void *ctx)
+{
+    struct ce_visit *v = ctx;
+    v->calls++;
+    if (strcmp(name, "ce_visit_crit") == 0)
+        v->crit_seen = true;
+    if (strcmp(name, "ce_visit_warn") == 0)
+        v->warn_seen = true;
+}
+
+static bool ce_for_each_unresolved_critical_visits_names(
+    struct condition *crit, struct condition *warn)
+{
+    /* The visitor reports exactly the unresolved CRITICAL conditions, and its
+     * return value equals the scoped count. An empty registry visits nothing. */
+    reset_fixture();
+    struct ce_visit empty = {0};
+    bool ok = condition_engine_for_each_unresolved_critical(ce_visit_fn,
+                                                            &empty) == 0;
+    ok = ok && empty.calls == 0;
+
+    ok = ok && condition_register(crit) && condition_register(warn);
+    atomic_store(&g_detect, true);
+    condition_engine_tick();
+    condition_engine_tick();
+
+    struct ce_visit v = {0};
+    size_t visited = condition_engine_for_each_unresolved_critical(ce_visit_fn,
+                                                                   &v);
+    ok = ok && visited == 1;
+    ok = ok && (size_t)condition_engine_get_unresolved_critical_count() ==
+               visited;
+    ok = ok && v.calls == 1 && v.crit_seen && !v.warn_seen;
+    return ok;
+}
+
 int test_condition_engine(void)
 {
     printf("\n=== condition engine tests ===\n");
@@ -731,6 +773,33 @@ int test_condition_engine(void)
     ok = ce_cooldown_rearms_then_resets(&c_cooldown);
     CE_CHECK("cooldown-bearing CRITICAL re-arms past max_attempts "
              "instead of latching, then witness-clear resets it", ok);
+
+    static struct condition c_visit_crit = {
+        .name = "ce_visit_crit",
+        .severity = COND_CRITICAL,
+        .poll_secs = 1,
+        .backoff_secs = 0,
+        .max_attempts = 2,
+        .detect = ce_detect,
+        .remedy = ce_remedy,
+        .witness = ce_witness,
+        .witness_window_secs = 60,
+    };
+    static struct condition c_visit_warn = {
+        .name = "ce_visit_warn",
+        .severity = COND_WARN,
+        .poll_secs = 1,
+        .backoff_secs = 0,
+        .max_attempts = 2,
+        .detect = ce_detect,
+        .remedy = ce_remedy,
+        .witness = ce_witness,
+        .witness_window_secs = 60,
+    };
+    ok = ce_for_each_unresolved_critical_visits_names(&c_visit_crit,
+                                                      &c_visit_warn);
+    CE_CHECK("unresolved-critical visitor names only CRITICAL conditions and "
+             "matches the scoped count", ok);
 
     reset_fixture();
     return failures;

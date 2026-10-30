@@ -21,6 +21,7 @@
 #include "util/blocker.h"
 
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -37,6 +38,9 @@
 static enum condition_remedy_result cf_remedy(void)  { return COND_REMEDY_OK; }
 static bool cf_detect(void)  { return true; }
 static bool cf_witness(int64_t t) { (void)t; return false; }
+
+static int64_t rc_now;
+static int64_t rc_clock(void) { return rc_now; }
 
 static void drive_to_unresolved_critical(struct condition *c)
 {
@@ -139,6 +143,114 @@ int test_recovery_coordinator(void)
         RC_CHECK("naming: blocker is a retry-forever DEPENDENCY (guard kept)",
                  retry_forever_dependency);
         blocker_reset_for_testing();
+    }
+
+    /* ── 5. log cadence: identical ticks log once, a changed set logs again,
+     *       and the keepalive fires once RC_KEEPALIVE_SECS (600) have passed ─ */
+    {
+        rc_reset();
+        rc_now = 1000;
+        recovery_coordinator_test_set_clock(rc_clock);
+        static struct condition c_log_a = {
+            .name = "rc_log_a",
+            .severity = COND_CRITICAL, .poll_secs = 1, .backoff_secs = 0,
+            .max_attempts = 2, .detect = cf_detect, .remedy = cf_remedy,
+            .witness = cf_witness, .witness_window_secs = 60,
+        };
+        drive_to_unresolved_critical(&c_log_a);
+
+        recovery_coordinator_test_drive();
+        recovery_coordinator_test_drive();
+        recovery_coordinator_test_drive();
+        RC_CHECK("log: identical ticks emit one WARN",
+                 recovery_coordinator_test_log_emits() == 1);
+
+        rc_now = 1000 + 599;
+        recovery_coordinator_test_drive();
+        RC_CHECK("log: no keepalive before 600s",
+                 recovery_coordinator_test_log_emits() == 1);
+
+        rc_now = 1000 + 600;
+        recovery_coordinator_test_drive();
+        RC_CHECK("log: keepalive fires at 600s",
+                 recovery_coordinator_test_log_emits() == 2);
+
+        static struct condition c_log_b = {
+            .name = "rc_log_b",
+            .severity = COND_CRITICAL, .poll_secs = 1, .backoff_secs = 0,
+            .max_attempts = 2, .detect = cf_detect, .remedy = cf_remedy,
+            .witness = cf_witness, .witness_window_secs = 60,
+        };
+        drive_to_unresolved_critical(&c_log_b);
+        recovery_coordinator_test_drive();
+        RC_CHECK("log: changed unresolved set logs again at once",
+                 recovery_coordinator_test_log_emits() == 3);
+        recovery_coordinator_test_drive();
+        RC_CHECK("log: unchanged set after the change stays quiet",
+                 recovery_coordinator_test_log_emits() == 3);
+        recovery_coordinator_test_set_clock(NULL);
+        rc_reset();
+    }
+
+    /* ── 6. rc_format_names: nine unresolved criticals name eight, then +1 ─ */
+    {
+        static struct condition c_fmt[9];
+        static const char *const fmt_names[9] = {
+            "rc_fmt_0", "rc_fmt_1", "rc_fmt_2", "rc_fmt_3", "rc_fmt_4",
+            "rc_fmt_5", "rc_fmt_6", "rc_fmt_7", "rc_fmt_8",
+        };
+        char text[512];
+        rc_reset();
+        for (int i = 0; i < 9; i++) {
+            c_fmt[i] = (struct condition){
+                .name = fmt_names[i],
+                .severity = COND_CRITICAL, .poll_secs = 1, .backoff_secs = 0,
+                .max_attempts = 2, .detect = cf_detect, .remedy = cf_remedy,
+                .witness = cf_witness, .witness_window_secs = 60,
+            };
+            drive_to_unresolved_critical(&c_fmt[i]);
+        }
+        recovery_coordinator_test_drive();
+        recovery_coordinator_test_format_logged(text, sizeof(text));
+        RC_CHECK("format: 9 criticals name 8 then +1 more",
+                 strcmp(text, "rc_fmt_0, rc_fmt_1, rc_fmt_2, rc_fmt_3, "
+                              "rc_fmt_4, rc_fmt_5, rc_fmt_6, rc_fmt_7, +1 more") == 0);
+        rc_reset();
+    }
+
+    /* ── 7. rc_format_names: names past the 512-byte cap end in "..." ───── */
+    {
+        static struct condition c_long[9];
+        static char long_names[9][101];
+        char text[512];
+        char want[512];
+        size_t at = 0;
+        rc_reset();
+        for (int i = 0; i < 9; i++) {
+            memset(long_names[i], 'a' + i, 100);
+            long_names[i][100] = '\0';
+            c_long[i] = (struct condition){
+                .name = long_names[i],
+                .severity = COND_CRITICAL, .poll_secs = 1, .backoff_secs = 0,
+                .max_attempts = 2, .detect = cf_detect, .remedy = cf_remedy,
+                .witness = cf_witness, .witness_window_secs = 60,
+            };
+            drive_to_unresolved_critical(&c_long[i]);
+        }
+        recovery_coordinator_test_drive();
+        recovery_coordinator_test_format_logged(text, sizeof(text));
+        for (int i = 0; i < 5; i++) {
+            if (i) {
+                memcpy(want + at, ", ", 2);
+                at += 2;
+            }
+            memset(want + at, 'a' + i, 100);
+            at += 100;
+        }
+        memcpy(want + at, "...", 4);
+        RC_CHECK("overflow: long names end in ... within 512 bytes",
+                 strlen(text) == 511 && strcmp(text, want) == 0);
+        rc_reset();
     }
 
     printf("recovery_coordinator: %d failures\n", failures);
