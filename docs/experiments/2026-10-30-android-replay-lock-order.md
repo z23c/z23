@@ -50,8 +50,12 @@ the steady-state drain.
 ## Change
 
 `reducer_frontier_replay_lock` takes the progress store, then tries
-`cs_main`. When `cs_main` is busy, it releases the progress store, sleeps
-1 ms and retries, so the replay never waits while owning either lock. The
+`cs_main`. When `cs_main` is busy, it releases the progress store and
+retries after 1 ms, or 20 ms once eight retries have failed, so the replay
+never waits while owning either lock and a long `cs_main` holder costs about
+50 wake-ups a second. The LOCK ORDER comments in `jobs/stage_repair.h` and
+`stage_repair_reducer_frontier.c` now name both repair paths that hold the
+two locks and the rule they share. The
 stale-script replay holds both locks over the snapshot and the kernel
 transaction, then releases both before the best-effort created-outputs
 transaction. The backfill uses the same acquisition.

@@ -164,7 +164,7 @@ static bool rfrl_main_stays_free(struct main_state *ms)
         if (!zcl_mutex_trylock(&ms->cs_main))
             return false;
         zcl_mutex_unlock(&ms->cs_main);
-        platform_sleep_ms(1);
+        platform_sleep_ms(1); /* real-clock: observation window only; correct lock order cannot fail it, a slow box can only miss a regression */
     }
     return true;
 }
@@ -175,6 +175,25 @@ static void *rfrl_replay_worker(void *arg)
     cycle->ok = stage_reducer_frontier_reconcile_light(
         cycle->db, cycle->ms, &cycle->result);
     return NULL;
+}
+
+/* Checks at the parked attempt, then resumes the worker. With progress as the
+ * holder, the drain claims it here, while the replay is about to acquire: the
+ * earlier reconcile steps need progress themselves, so holding it from the
+ * start would stop the worker before the replay boundary. */
+static bool rfrl_check_parked(struct rfrl_main_cycle *cycle,
+                              enum rfrl_holder holder, bool parked)
+{
+    bool drain_held = holder == RFRL_HOLD_PROGRESS && parked;
+    if (drain_held)
+        progress_store_tx_lock();
+    bool other_free = parked && rfrl_other_lock_free(cycle, holder);
+    rfrl_release_parked(cycle);
+    bool ordered = holder == RFRL_HOLD_MAIN ||
+                   (other_free && rfrl_main_stays_free(cycle->ms));
+    if (drain_held)
+        progress_store_tx_unlock();
+    return other_free && ordered;
 }
 
 static bool rfrl_run_lock_cycle(struct rfrl_main_cycle *cycle,
@@ -190,27 +209,16 @@ static bool rfrl_run_lock_cycle(struct rfrl_main_cycle *cycle,
     pthread_t worker;
     bool started = pthread_create(&worker, NULL, rfrl_replay_worker, cycle) == 0;
     bool parked = started && rfrl_wait_parked(cycle);
-    /* The drain claims progress while the replay is about to acquire: the
-     * earlier reconcile steps need progress themselves, so holding it from
-     * the start would stop the worker before the replay boundary. */
-    bool drain_held = holder == RFRL_HOLD_PROGRESS && parked;
-    if (drain_held)
-        progress_store_tx_lock();
-    bool other_free = parked && rfrl_other_lock_free(cycle, holder);
-    rfrl_release_parked(cycle);
-    bool ordered = holder == RFRL_HOLD_MAIN ||
-                   (other_free && rfrl_main_stays_free(cycle->ms));
+    bool checked = rfrl_check_parked(cycle, holder, parked);
     /* Release even when a baseline/timeout fails, before joining the worker. */
     if (holder == RFRL_HOLD_MAIN)
         zcl_mutex_unlock(&cycle->ms->cs_main);
-    if (drain_held)
-        progress_store_tx_unlock();
     if (started)
         pthread_join(worker, NULL);
     reducer_frontier_replay_set_main_hook_for_testing(NULL, NULL);
     pthread_cond_destroy(&cycle->cond);
     pthread_mutex_destroy(&cycle->mutex);
-    return started && parked && other_free && ordered && cycle->ok;
+    return started && parked && checked && cycle->ok;
 }
 
 struct rfrl_fixture {

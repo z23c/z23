@@ -412,9 +412,12 @@ bool stage_repair_tipfin_refusal_is_pending_forward(
  * never mutates coins. If coins_applied_height is absent or present above H*,
  * the helper refuses (unknown/L2 coin-tear domain).
  *
- * LOCK ORDER — cs_main OUTER, progress store INNER, and the inner acquire is
- * a TRYLOCK. This function holds both, and it is the only one that may, at
- * the cost of never being allowed to WAIT for the second one.
+ * LOCK ORDER — whichever lock a repair takes second, it takes by TRYLOCK and
+ * never WAITS for it. Two repair paths hold both: reconcile_block_index_flags
+ * takes cs_main, then tries the progress store and skips the tick when it is
+ * busy; the stale-script replay (reducer_frontier_replay_lock) takes the
+ * progress store, then tries cs_main and releases the progress store before
+ * retrying when it is busy.
  *
  * There is no single global order available to conform to, because the tree
  * changes order partway through boot:
@@ -432,10 +435,11 @@ bool stage_repair_tipfin_refusal_is_pending_forward(
  *     progress_store_tx_lock across the entire drain and body_fetch's step
  *     takes cs_main inside it (engine/jobs/src/body_fetch_stage.c).
  *
- * A blocking acquire here closes an ABBA cycle against whichever phase it
+ * A blocking second acquire closes an ABBA cycle against whichever phase it
  * does not match: progress-first deadlocks the boot window (script_validate_
  * stage_init blocks on the progress store); cs_main-first deadlocks the steady
- * state against the drive. Reordering fixes neither.
+ * state against the drive. Reordering fixes neither; on 2026-10-30 a blocking
+ * cs_main-first replay deadlocked a phone node against the drive.
  *
  * The resolution is to stop waiting. This reconcile is a self-heal observer
  * on the condition-engine thread (and via sticky_escalator the supervisor
@@ -444,7 +448,7 @@ bool stage_repair_tipfin_refusal_is_pending_forward(
  * same way by engine/reducer/conditions/src/reducer_drive_watchdog.c — lets it decline
  * and retry on the next tick. A path that never waits-for cannot be half of
  * a deadlock, whichever way the rest of the tree happens to be nesting.
- * Cover: the "lock-order" cases in
+ * Cover: the "lock-order" cases and rfrl_run_lock_cycle in
  * tests/harness/src/test_reducer_frontier_reconcile_light.c. */
 bool stage_reducer_frontier_reconcile_light_needed(
     struct sqlite3 *db,

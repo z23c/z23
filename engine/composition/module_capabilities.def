@@ -207,7 +207,7 @@ ZCL_MODULE_CAPABILITY("engine/reducer/jobs/src/reducer_frontier_evidence.c", CAP
 ZCL_MODULE_CAPABILITY("engine/reducer/jobs/src/reducer_frontier_itag.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/reducer/jobs/src/reducer_frontier_readers.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/reducer/jobs/src/reducer_frontier_replay.c", CAP_FS_READ|CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("engine/reducer/jobs/src/reducer_frontier_replay_tx.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/reducer/jobs/src/reducer_frontier_replay_tx.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "replay lock back-off sleeps between busy-main retries")
 ZCL_MODULE_CAPABILITY("engine/reducer/jobs/src/reducer_frontier_stage_cursor.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/refold_progress.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/script_validate_log_store.c", CAP_FS_READ|CAP_FS_WRITE, "")

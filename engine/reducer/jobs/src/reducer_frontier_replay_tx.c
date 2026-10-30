@@ -546,12 +546,17 @@ void reducer_frontier_replay_set_main_hook_for_testing(
 /* Progress, then main, never waiting for one while owning the other. The tree
  * nests both orders (LOCK ORDER in jobs/stage_repair.h): the reducer drain holds
  * progress and takes main, and boot-window main holders read the progress
- * store. A busy main therefore releases progress before the retry. The hook
- * observes each attempt while this thread owns neither; test owners
- * install/clear it only while no replay worker is running. */
+ * store. A busy main therefore releases progress before the retry; after the
+ * first few retries the back-off grows so a long main holder costs a phone
+ * about 50 wake-ups a second, not 1000. The hook observes each attempt while
+ * this thread owns neither; test owners install/clear it only while no replay
+ * worker is running. */
+#define RF_REPLAY_LOCK_FAST_RETRIES 8
+#define RF_REPLAY_LOCK_SLOW_MS 20
+
 void reducer_frontier_replay_lock(struct main_state *ms)
 {
-    for (;;) {
+    for (unsigned attempt = 0;; attempt++) {
 #ifdef ZCL_TESTING
         if (g_replay_main_hook)
             g_replay_main_hook(g_replay_main_hook_ctx);
@@ -560,7 +565,8 @@ void reducer_frontier_replay_lock(struct main_state *ms)
         if (!ms || zcl_mutex_trylock(&ms->cs_main))
             return;
         progress_store_tx_unlock();
-        platform_sleep_ms(1);
+        platform_sleep_ms(attempt < RF_REPLAY_LOCK_FAST_RETRIES
+                              ? 1 : RF_REPLAY_LOCK_SLOW_MS);
     }
 }
 

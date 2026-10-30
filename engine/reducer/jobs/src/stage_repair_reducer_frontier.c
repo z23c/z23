@@ -69,7 +69,9 @@ static bool reconcile_block_index_flags(
      * same way by engine/conditions/src/reducer_drive_watchdog.c. Losing the
      * race costs one tick — the condition re-runs — and it can never
      * wait-for a lock while holding cs_main, so it cannot be half of a
-     * deadlock. Skipped, not blocked. */
+     * deadlock. Skipped, not blocked. The stale-script replay holds both in
+     * the opposite order under the same rule: reducer_frontier_replay_lock
+     * takes progress, tries cs_main, and releases progress before retrying. */
     zcl_mutex_lock(&ms->cs_main);
     if (!progress_store_tx_trylock()) {
         zcl_mutex_unlock(&ms->cs_main);
