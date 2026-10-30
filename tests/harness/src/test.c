@@ -1172,6 +1172,7 @@ int main(int argc, char **argv)
     { extern int test_merkle_malleability(void); failures += test_merkle_malleability(); }
     failures += test_slp();
     failures += test_models();
+    failures += test_utxo_count_gauge();
     failures += test_core();
     failures += test_znam();
     failures += test_zid();

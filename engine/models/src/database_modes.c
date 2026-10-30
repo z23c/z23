@@ -16,6 +16,8 @@
 #include "models/database.h"
 #include "models/database_lifetime.h"
 #include "models/database_internal.h"
+#include "models/utxo_count_cache.h"
+#include "platform/time_compat.h"
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -72,6 +74,61 @@ bool node_db_utxo_count_checked(struct node_db *ndb, int64_t *out)
     sqlite3_finalize(stmt);
     return ok;
 }
+
+/* UTXO row count for periodic gauges: the exact count, at most
+ * UTXO_COUNT_GAUGE_MAX_AGE_SECS old. A full count is only run when the cached
+ * value has expired or belongs to another handle; consensus and audit callers
+ * use node_db_utxo_count / _checked. Returns the last value when a refresh
+ * cannot read the table, and 0 when there has never been one. */
+static struct utxo_count_cache g_utxo_gauge_cache;
+static _Atomic(const struct node_db *) g_utxo_gauge_owner;
+static _Atomic unsigned long g_utxo_gauge_full_counts;
+#ifdef ZCL_TESTING
+static int64_t (*g_utxo_gauge_test_clock)(void);
+#endif
+
+static int64_t utxo_gauge_now_secs(void)
+{
+#ifdef ZCL_TESTING
+    if (g_utxo_gauge_test_clock)
+        return g_utxo_gauge_test_clock();
+#endif
+    return platform_time_monotonic_ms() / 1000;
+}
+
+int64_t node_db_utxo_count_gauge(struct node_db *ndb)
+{
+    if (!ndb || !ndb->open)
+        return 0;
+    int64_t now = utxo_gauge_now_secs();
+    int64_t count = 0;
+    if (atomic_load(&g_utxo_gauge_owner) == ndb &&
+        utxo_count_cache_get(&g_utxo_gauge_cache, now,
+                             UTXO_COUNT_GAUGE_MAX_AGE_SECS, &count))
+        return count;
+    atomic_fetch_add(&g_utxo_gauge_full_counts, 1);
+    if (!node_db_utxo_count_checked(ndb, &count))
+        return atomic_load(&g_utxo_gauge_owner) == ndb
+                   ? atomic_load(&g_utxo_gauge_cache.value) : 0;
+    atomic_store(&g_utxo_gauge_owner, ndb);
+    utxo_count_cache_put(&g_utxo_gauge_cache, now, count);
+    return count;
+}
+
+#ifdef ZCL_TESTING
+unsigned long node_db_utxo_count_gauge_test_full_counts(void)
+{
+    return atomic_load(&g_utxo_gauge_full_counts);
+}
+
+void node_db_utxo_count_gauge_test_reset(int64_t (*clock)(void))
+{
+    g_utxo_gauge_test_clock = clock;
+    atomic_store(&g_utxo_gauge_owner, NULL);
+    atomic_store(&g_utxo_gauge_cache.at_secs, 0);
+    atomic_store(&g_utxo_gauge_full_counts, 0);
+}
+#endif
 
 /* ── Performance Modes ─────────────────────────────────────────── */
 

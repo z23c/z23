@@ -65,7 +65,7 @@ static void boot_metrics_fill_utxo_count(struct metrics_external_gauges *out,
                                          struct boot_svc_ctx *svc)
 {
     if (svc && svc->node_db && svc->node_db->open)
-        out->utxo_count = node_db_utxo_count(svc->node_db);
+        out->utxo_count = node_db_utxo_count_gauge(svc->node_db);
 }
 
 /* mirror_lag_* gauges: one snapshot of the legacy mirror sync service. */

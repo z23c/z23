@@ -31,6 +31,7 @@
 #include "controllers/network_controller.h"
 #include "models/block.h"
 #include "models/database.h"
+#include "models/utxo_count_cache.h"
 #include "net/onion_service.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
@@ -524,6 +525,25 @@ static void health_collect_active_tip(struct node_health_snapshot *snapshot,
     }
 }
 
+/* The health snapshot is collected by the metrics tick every second and by
+ * every status call; a full UTXO count per collection would scan the whole
+ * table each time. The count is at most UTXO_COUNT_GAUGE_MAX_AGE_SECS old. */
+static struct utxo_count_cache g_health_utxo_cache;
+
+static void health_collect_utxo_count(struct node_health_snapshot *snapshot,
+                                      struct node_db *ndb,
+                                      struct node_health_store_port *store)
+{
+    int64_t now = platform_time_monotonic_ms() / 1000;
+    if (utxo_count_cache_get(&g_health_utxo_cache, now,
+                             UTXO_COUNT_GAUGE_MAX_AGE_SECS,
+                             &snapshot->utxo_count))
+        return;
+    if (!store->utxo_count(store->self, &snapshot->utxo_count))
+        snapshot->utxo_count = node_db_utxo_count(ndb);
+    utxo_count_cache_put(&g_health_utxo_cache, now, snapshot->utxo_count);
+}
+
 static void health_collect_db_status(struct node_health_snapshot *snapshot,
                                      struct node_db *ndb)
 {
@@ -570,9 +590,7 @@ static void health_collect_db_status(struct node_health_snapshot *snapshot,
                 snapshot->tip_height = db_block_max_height(ndb);
             }
         }
-        if (!store.utxo_count(store.self, &snapshot->utxo_count)) {
-            snapshot->utxo_count = node_db_utxo_count(ndb);
-        }
+        health_collect_utxo_count(snapshot, ndb, &store);
 
         int64_t wal_bytes = 0;
         if (store.wal_size_bytes(store.self, &wal_bytes))

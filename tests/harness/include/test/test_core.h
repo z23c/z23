@@ -366,6 +366,7 @@ int test_merkle_tree(void);
 int test_merkle_malleability(void);
 int test_slp(void);
 int test_models(void);
+int test_utxo_count_gauge(void);
 int test_core(void);
 int test_json(void);
 int test_engine(void);

@@ -291,6 +291,14 @@ int64_t node_db_utxo_count(struct node_db *ndb);
  * left untouched. */
 bool node_db_utxo_count_checked(struct node_db *ndb, int64_t *out);
 
+/* UTXO count for periodic gauges: exact, at most 60 s old, so an idle node
+ * does not scan the whole table on every poll. Not for consensus or audit. */
+int64_t node_db_utxo_count_gauge(struct node_db *ndb);
+#ifdef ZCL_TESTING
+unsigned long node_db_utxo_count_gauge_test_full_counts(void);
+void node_db_utxo_count_gauge_test_reset(int64_t (*clock)(void));
+#endif
+
 /* ── Performance Modes ─────────────────────────────────────────── */
 
 /* IBD turbo: synchronous=OFF, large cache, drop secondary indexes.
