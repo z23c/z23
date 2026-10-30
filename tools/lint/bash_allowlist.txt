@@ -160,7 +160,6 @@ tools/lint/gate_lib.sh
 tools/lint/repo_shape.sh
 tools/lint/run_lint.sh
 tools/lint/scan_exclusions.sh
-tools/lint/selftest_standalone_tools_x11.sh
 tools/lint/tu_result_cache.sh
 tools/lint/zcode_pkg_sources.sh
 tools/mvp_gate.sh

@@ -7,6 +7,10 @@
  * beside the build (skipped while its stamped inputs are unchanged), builds
  * every covered tool in one `make -k` batch and reports the verdict.
  */
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
+#include <limits.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -16,10 +20,14 @@
 #include "platform/logical_cpu.h"
 #include "lintc.h"
 #include "gate_standalone_tools_link_priv.h"
+#include "gate_standalone_tools_link_x11_suite.h"
 
 enum { STL_ROW = 160, STL_FAILED = 4, STL_JOBS_MIN = 4, STL_JOBS_MAX = 16 };
 
-static const char k_x11_script[] = "tools/lint/selftest_standalone_tools_x11.sh";
+static const char k_x11_suite_files[] =
+    "tools/lint/lintc/gate_standalone_tools_link_x11_suite.c"
+    " tools/lint/lintc/gate_standalone_tools_link_x11_suite_fixture.c"
+    " tools/lint/lintc/gate_standalone_tools_link_x11_suite.h";
 static const char k_x11_stamp[] = "build/lint-stamps/standalone-x11.sha256";
 
 struct stl_bs {
@@ -126,7 +134,7 @@ static void stl_x11_key(struct stl_bs *bs)
         "{ sha256sum %s %s && find vendor/x11/include -type f | LC_ALL=C sort | xargs sha256sum"
         " && cc --version && awk '/^NATIVE_UI_DRIVER_BIN = /{a=1} a{if(/^# Crash recovery/)exit;print}'"
         " Makefile; } >%s 2>/dev/null && sha256sum %s | cut -c1-64",
-        k_x11_script, qexe, qkin, qkin), sizeof cmd))
+        k_x11_suite_files, qexe, qkin, qkin), sizeof cmd))
         return;
     if (capture_cmd(cmd, bs->key, sizeof bs->key, &code) != 0 || code != 0 ||
         strlen(bs->key) != 64)
@@ -150,6 +158,26 @@ static int stl_stamp_matches(const struct stl_bs *bs)
     return strcmp(have, bs->key) == 0;
 }
 
+/* The suite exports its fixture root in k_stl_x11_nested so the gates it
+ * launches stub the suite out. The marker counts only when it names the
+ * tree this gate is checking; any other value is an inherited fake and is
+ * refused, never skipped. 0 = unset, 1 = honoured, 2 = refused. */
+static int g_nested;
+
+static int stl_nested_state(void)
+{
+    const char *v = getenv(k_stl_x11_nested);
+    char root[STL_PATH], rr[PATH_MAX], vr[PATH_MAX];
+    if (!v)
+        return 0;
+    if (cic_repo_root(root, sizeof root) == 0 && realpath(root, rr) && realpath(v, vr) &&
+        strcmp(rr, vr) == 0)
+        return 1;
+    fprintf(stderr, "[check_standalone_tools_link] %s is set but does not name the tree being"
+            " checked; refusing to skip the X11 suite (unset it)\n", k_stl_x11_nested);
+    return 2;
+}
+
 /* Hermetic X11 failure regressions run BESIDE the build. */
 static void stl_x11_start(struct stl_bs *bs)
 {
@@ -163,8 +191,11 @@ static void stl_x11_start(struct stl_bs *bs)
         int fd = open(bs->xlog, O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd < 0 || dup2(fd, 1) < 0 || dup2(fd, 2) < 0)
             _exit(127);
-        execl(k_x11_script, k_x11_script, (char *)NULL);
-        _exit(127);
+        int rc = g_nested ? (puts("fixture-x11-selftest"), 0)
+                                          : stl_x11_selftest_run();
+        fflush(stdout);
+        fflush(stderr);
+        _exit(rc);
     }
     if (pid > 0)
         bs->xpid = pid;
@@ -311,6 +342,9 @@ static int stl_phase(struct stl_bs *bs, char (*targets)[STL_TGT], int nt,
 int stl_build_phase(char (*targets)[STL_TGT], int nt, int build_only,
                     const char *mode, int host_linux)
 {
+    g_nested = stl_nested_state();
+    if (g_nested == 2)
+        return 2;
     if (stl_open(&g_bs) != 0) {
         stl_cleanup(&g_bs);
         return 2;

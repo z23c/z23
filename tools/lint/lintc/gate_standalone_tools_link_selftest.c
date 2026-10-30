@@ -3,15 +3,17 @@
  * purpose: native selftest for check-standalone-tools-link. Fixture
  * Makefiles and catalogs prove each reader accepts the real shapes and
  * fails closed on the damaged ones; the hermetic X11 policy suite stays in
- * tools/lint/selftest_standalone_tools_x11.sh, which the gate runs itself.
+ * gate_standalone_tools_link_x11_suite.c, which the gate runs itself.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "lintc.h"
 #include "gate_standalone_tools_link_priv.h"
+#include "gate_standalone_tools_link_x11_suite.h"
 
 int check_standalone_tools_link_run(int argc, char **argv);
 
@@ -137,6 +139,23 @@ static int stl_st_link_log(const char *dir)
     return bad;
 }
 
+/* An inherited nested marker naming some other tree must refuse, never skip. */
+static int stl_st_nested(void)
+{
+    char *old = getenv(k_stl_x11_nested);
+    char saved[STL_PATH] = "";
+    if (old && ovf(snprintf(saved, sizeof saved, "%s", old), sizeof saved))
+        saved[0] = 0;
+    setenv(k_stl_x11_nested, "/nonexistent-stl-x11-root", 1);
+    int bad = stl_st_expect("nested marker for another root refused",
+                            stl_build_phase(NULL, 0, 1, "FAIL", 1), 2);
+    if (old)
+        setenv(k_stl_x11_nested, saved, 1);
+    else
+        unsetenv(k_stl_x11_nested);
+    return bad;
+}
+
 int check_standalone_tools_link_selftest(void)
 {
     char dir[STL_PATH];
@@ -147,6 +166,7 @@ int check_standalone_tools_link_selftest(void)
     bad |= stl_st_fuzz(dir);
     bad |= stl_st_catalog(dir);
     bad |= stl_st_link_log(dir);
+    bad |= stl_st_nested();
     bad |= stl_st_expect("unknown argument is fatal",
                          check_standalone_tools_link_run(1, bogus), 2);
     rap_rm_rf(dir);
