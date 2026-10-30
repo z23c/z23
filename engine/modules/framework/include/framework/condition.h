@@ -156,6 +156,12 @@ void condition_engine_tick(void);
  * NULL clears it. Cleared by condition_engine_reset_for_testing(). */
 void condition_engine_set_progress_hook(void (*fn)(void));
 
+/* Optional per-tick filter. When set and it returns true for a condition, that
+ * condition is skipped on this tick (neither detected nor remedied). NULL
+ * clears it. Cleared by condition_engine_reset_for_testing(). */
+typedef bool (*condition_skip_fn)(const struct condition *cond);
+void condition_engine_set_skip_filter(condition_skip_fn fn);
+
 bool condition_engine_dump_state_json(struct json_value *out, const char *key);
 
 struct condition_engine_summary {

@@ -27,12 +27,14 @@
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
 #include "framework/condition.h"
+#include "jobs/node_pace.h"
 #include "jobs/reducer_frontier.h"
 #include "jobs/stage_repair.h"
 #include "json/json.h"
 #include "services/sticky_escalator.h"
 #include "services/sync_monitor.h"
 #include "storage/progress_store.h"
+#include "supervisors/self_heal.h"
 #include "supervisors/staged_sync_supervisor.h"
 #include "util/blocker.h"
 #include "validation/chainstate.h"
@@ -891,6 +893,129 @@ static int ash_test_stall_named_blocker_cured(void)
     return failures;
 }
 
+/* ── Pause hold ───────────────────────────────────────────────────────────
+ * While the app has the node paused, sync-stall conditions are skipped and
+ * device-pressure conditions keep running. */
+static _Atomic int g_hold_pressure_polls;
+static _Atomic int g_hold_stall_polls;
+static bool hold_detect_pressure(void)
+{
+    atomic_fetch_add(&g_hold_pressure_polls, 1);
+    return false;
+}
+static bool hold_detect_stall(void)
+{
+    atomic_fetch_add(&g_hold_stall_polls, 1);
+    return false;
+}
+static enum condition_remedy_result hold_remedy(void) { return COND_REMEDY_FAILED; }
+static bool hold_witness(int64_t target) { (void)target; return false; }
+
+static int ash_test_pause_hold_conditions(void)
+{
+    int failures = 0;
+    printf("\n--- pause hold: device conditions run, sync conditions held ---\n");
+    condition_engine_reset_for_testing();
+    node_pace_test_end_resume_grace();
+    node_pace_set(NODE_PACE_NORMAL);
+    static struct condition c_pressure = {
+        .name = "memory_pressure_high", .severity = COND_CRITICAL,
+        .poll_secs = 1, .backoff_secs = 1, .max_attempts = 1,
+        .detect = hold_detect_pressure, .remedy = hold_remedy,
+        .witness = hold_witness,
+    };
+    static struct condition c_stall = {
+        .name = "header_stall_at_height", .severity = COND_CRITICAL,
+        .poll_secs = 1, .backoff_secs = 1, .max_attempts = 1,
+        .detect = hold_detect_stall, .remedy = hold_remedy,
+        .witness = hold_witness,
+    };
+    ASH_CHECK("hold: test conditions register",
+              condition_register(&c_pressure) && condition_register(&c_stall));
+    self_heal_test_install_hold_filter();
+
+    node_pace_set(NODE_PACE_PAUSE);
+    condition_engine_tick();
+    ASH_CHECK("hold: memory condition polled while paused",
+              atomic_load(&g_hold_pressure_polls) == 1);
+    ASH_CHECK("hold: stall condition NOT polled while paused",
+              atomic_load(&g_hold_stall_polls) == 0);
+
+    node_pace_set(NODE_PACE_NORMAL);
+    condition_engine_reset_for_testing();
+    ASH_CHECK("hold: re-register", condition_register(&c_stall));
+    self_heal_test_install_hold_filter();
+    atomic_store(&g_hold_stall_polls, 0);
+    condition_engine_tick();
+    ASH_CHECK("hold: stall condition NOT polled in the resume grace",
+              atomic_load(&g_hold_stall_polls) == 0);
+    node_pace_test_end_resume_grace();
+    condition_engine_tick();
+    ASH_CHECK("hold: stall condition polled once the grace ends",
+              atomic_load(&g_hold_stall_polls) == 1);
+    condition_engine_reset_for_testing();
+    return failures;
+}
+
+static enum sticky_rung_result hold_rung_progressing(void)
+{
+    return STICKY_RUNG_PROGRESSING;
+}
+
+/* The sticky ladder through its public drive: paused with a static tip well past
+ * the rung window it must not advance; after the grace the episode is cleared
+ * and restarts from the first rung window. Deleting the sticky_pace_hold() call
+ * makes the paused drive advance the rung and fails the first check. */
+static int ash_test_pause_hold_sticky(void)
+{
+    int failures = 0;
+    printf("\n--- pause hold: sticky escalator ---\n");
+    node_pace_test_end_resume_grace();
+    node_pace_set(NODE_PACE_NORMAL);
+    blocker_reset_for_testing();
+    sticky_escalator_test_reset();
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    main_state_init(&ms);
+    sticky_escalator_test_set_main_state(&ms);
+    sticky_escalator_register_rung(STICKY_RUNG_RETRY, hold_rung_progressing);
+
+    sticky_escalator_note_stall("pause-hold-test");
+    ASH_CHECK("sticky: armed at the first rung",
+              sticky_escalator_test_armed() &&
+              sticky_escalator_test_rung() == STICKY_RUNG_RETRY);
+    sticky_escalator_test_backdate_rung(1000000);   /* far past any window */
+    uint64_t d0 = sticky_escalator_test_rung_dispatches(STICKY_RUNG_RETRY);
+
+    node_pace_set(NODE_PACE_PAUSE);
+    sticky_escalator_drive();
+    ASH_CHECK("sticky: paused drive does not advance the rung",
+              sticky_escalator_test_rung() == STICKY_RUNG_RETRY &&
+              sticky_escalator_test_rung_dispatches(STICKY_RUNG_RETRY) == d0);
+
+    node_pace_set(NODE_PACE_NORMAL);
+    sticky_escalator_drive();
+    ASH_CHECK("sticky: still held in the resume grace",
+              sticky_escalator_test_rung() == STICKY_RUNG_RETRY &&
+              sticky_escalator_test_armed());
+
+    node_pace_test_end_resume_grace();
+    sticky_escalator_drive();
+    ASH_CHECK("sticky: episode cleared once the grace ends",
+              !sticky_escalator_test_armed() &&
+              sticky_escalator_test_rung() == STICKY_RUNG_RETRY);
+
+    sticky_escalator_note_stall("pause-hold-test-2");
+    sticky_escalator_drive();
+    ASH_CHECK("sticky: a new episode starts on a fresh first-rung window",
+              sticky_escalator_test_armed() &&
+              sticky_escalator_test_rung() == STICKY_RUNG_RETRY);
+
+    sticky_escalator_test_reset();
+    main_state_free(&ms);
+    return failures;
+}
+
 int test_always_sync_selfheal(void);
 int test_always_sync_selfheal(void)
 {
@@ -901,6 +1026,8 @@ int test_always_sync_selfheal(void)
     failures += ash_test_ladder_cycles_never_gives_up();
     failures += ash_test_lcc_refuses_incoherent_raise();
     failures += ash_test_stall_named_blocker_cured();
+    failures += ash_test_pause_hold_conditions();
+    failures += ash_test_pause_hold_sticky();
     printf("always_sync_selfheal: %d total failures\n", failures);
     return failures;
 }

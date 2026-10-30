@@ -496,12 +496,16 @@ During `pause`:
   the sticky escalator (including resnapshot and reindex rungs) do not run. The
   hold lasts two minutes past the end of the pause so detectors see the node
   advancing before they judge it, and the watchdog stall clock restarts from
-  the moment the pause ends. Condition checks unrelated to sync (disk, memory)
-  are also not evaluated until then.
+  the moment the pause ends. Device-pressure conditions (disk full or low, memory
+  pressure, segment corruption, clock skew, fsync slowness) keep running during
+  the hold, so a long pause cannot let the disk fill or memory climb.
 - Synchronous block ingest is not background sync. A block the owner submits
-  or mines (`submitblock`, `generate`) and an at-tip relay block both reach
-  `reducer_ingest_block`, which drains unpaced and returns its true verdict
-  while the node is paused. Catch-up bodies are staged instead and stay paused.
+  or mines (`submitblock`, `generate`), an at-tip relay block and every
+  compact-block announcement reach `reducer_ingest_block`, which drains unpaced
+  and returns its true verdict while the node is paused. A node that is behind
+  and paused therefore still does at most one bounded drain burst (up to 2 s)
+  per network block; catch-up is not fully paused, only background fetching and
+  validation are.
 
 ## Check sync status
 

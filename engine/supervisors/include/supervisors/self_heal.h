@@ -46,6 +46,9 @@ void self_heal_stop(void);
 #ifdef ZCL_TESTING
 /* Reset module state (stops the runner, clears g_ms/g_id/g_registered). */
 void self_heal_test_reset(void);
+
+/* Install the pause-hold condition filter without registering the runner. */
+void self_heal_test_install_hold_filter(void);
 #endif
 
 #endif /* ZCL_SELF_HEAL_SUPERVISOR_H */

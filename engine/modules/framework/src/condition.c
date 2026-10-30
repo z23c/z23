@@ -18,6 +18,7 @@ static struct main_state *g_main_state;
  * runner; read on the engine-tick thread. Atomic so the store/load are safe
  * across the runner-register / engine-tick threads without the registry lock. */
 static void (*_Atomic g_progress_hook)(void);
+static condition_skip_fn _Atomic g_skip_filter;
 
 void condition_engine_set_progress_hook(void (*fn)(void))
 {
@@ -470,6 +471,11 @@ static void condition_tick_one(const struct condition *cond, int64_t now)
         condition_emit_operator_page(cond, s, now);
 }
 
+void condition_engine_set_skip_filter(condition_skip_fn fn)
+{
+    atomic_store(&g_skip_filter, fn);
+}
+
 void condition_engine_tick(void)
 {
     const struct condition *snapshot[CONDITION_MAX_REGISTRY];
@@ -482,8 +488,10 @@ void condition_engine_tick(void)
 
     int64_t now = platform_time_wall_unix();
     void (*hook)(void) = atomic_load(&g_progress_hook);
+    condition_skip_fn skip = atomic_load(&g_skip_filter);
     for (int i = 0; i < count; i++) {
-        condition_tick_one(snapshot[i], now);
+        if (!skip || !skip(snapshot[i]))
+            condition_tick_one(snapshot[i], now);
         /* Refresh the runner's heartbeat between conditions so a long pass
          * over many heavy detect()/remedy() probes never lapses the runner's
          * stall deadline — only a single remedy that never returns can. */
@@ -712,6 +720,7 @@ void condition_engine_reset_for_testing(void)
     g_condition_count = 0;
     g_main_state = NULL;
     atomic_store(&g_progress_hook, NULL);
+    atomic_store(&g_skip_filter, NULL);
     pthread_mutex_unlock(&g_condition_mu);
 }
 #endif

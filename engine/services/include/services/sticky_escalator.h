@@ -120,6 +120,9 @@ void sticky_escalator_test_reset(void);
 enum sticky_rung sticky_escalator_test_drive(int64_t injected_tip,
                                              int64_t now_unix);
 bool sticky_escalator_test_armed(void);
+void sticky_escalator_test_set_main_state(struct main_state *ms);
+enum sticky_rung sticky_escalator_test_rung(void);
+void sticky_escalator_test_backdate_rung(int64_t secs);
 /* Refold rung test seams: suppress the real shutdown/self-respawn syscalls (so a
  * unit test drives the rung without killing the test process) and force the
  * anchor-artifact gate (-1 = real probe, 0 = no artifact, 1 = artifact present)

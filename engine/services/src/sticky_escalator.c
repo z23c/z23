@@ -1301,6 +1301,22 @@ enum sticky_rung sticky_escalator_test_drive(int64_t injected_tip,
     return (enum sticky_rung)atomic_load(&g_rung);
 }
 
+void sticky_escalator_test_set_main_state(struct main_state *ms)
+{
+    g_ms = ms;
+}
+
+enum sticky_rung sticky_escalator_test_rung(void)
+{
+    return (enum sticky_rung)atomic_load(&g_rung);
+}
+
+/* Age the current rung window by secs so a test need not wait it out. */
+void sticky_escalator_test_backdate_rung(int64_t secs)
+{
+    atomic_fetch_sub(&g_rung_entered_unix, secs);
+}
+
 bool sticky_escalator_test_armed(void)
 {
     return atomic_load(&g_armed);

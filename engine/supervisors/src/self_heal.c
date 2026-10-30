@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 /* Why a dedicated thread (the never-freeze law)
@@ -65,13 +66,35 @@ static void self_heal_engine_progress(void)
     supervisor_tick(atomic_load(&g_id));
 }
 
+/* Conditions that guard the device rather than sync progress. They keep running
+ * while the app has the node paused: a paused phone still receives headers,
+ * mempool traffic and block data, so disk, memory and clock pressure must be
+ * relieved. Every other condition judges tip progress and is held. */
+static const char *const k_hold_exempt[] = {
+    "disk_full_pause", "disk_low_pause", "memory_pressure_high",
+    "segment_corruption", "clock_skew_reconcile", "batch_fsync_slow",
+    "state_auditor_mismatch", "tor_start_failed", "rpc_start_failed",
+};
+
+static bool self_heal_hold_skips(const struct condition *cond)
+{
+    if (!node_pace_hold_recovery())
+        return false;
+    for (size_t i = 0; i < sizeof(k_hold_exempt) / sizeof(k_hold_exempt[0]); i++)
+        if (strcmp(cond->name, k_hold_exempt[i]) == 0)
+            return false;
+    return true;
+}
+
 /* One full self-heal pass, driven by the dedicated runner thread. */
 static void self_heal_run_once(void)
 {
     if (!g_ms) return;
     if (node_pace_hold_recovery()) {
-        /* An app-requested pause stalls the tip on purpose: no condition
-         * remedy, blocker escape or sticky rung may judge it. */
+        /* An app-requested pause stalls the tip on purpose: sync conditions
+         * are filtered out of the tick, and no blocker escape or sticky rung
+         * may judge it. Device-pressure conditions still run. */
+        condition_engine_tick();
         service_state_driver_tick();
         return;
     }
@@ -150,6 +173,7 @@ void self_heal_register(struct main_state *ms)
     condition_engine_set_main_state(ms);
     /* Fine-grained per-condition heartbeat for the runner thread. */
     condition_engine_set_progress_hook(self_heal_engine_progress);
+    condition_engine_set_skip_filter(self_heal_hold_skips);
     liveness_contract_init(&g_contract, "self_heal.engine");
     /* period_secs=0 ⇒ the supervisor NEVER drives on_tick inline. The runner
      * thread drives the engine and heartbeats; the supervisor only watches the
@@ -235,6 +259,11 @@ void self_heal_stop(void)
 }
 
 #ifdef ZCL_TESTING
+void self_heal_test_install_hold_filter(void)
+{
+    condition_engine_set_skip_filter(self_heal_hold_skips);
+}
+
 void self_heal_test_reset(void)
 {
     self_heal_stop();
