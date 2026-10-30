@@ -82,8 +82,49 @@ static void zsc_render(struct json_value *data,
     (void)json_push_kv(data, "units", &units); json_free(&units);
 }
 
-void zcl_native_handle_zcode_package_dev_score_plan(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+struct zsc_plan_state {
+    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
+    uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
+    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
+    uint8_t lane_wire[VCS_ZCODE_LANE_WIRE_BYTES];
+    uint8_t proof_wire[VCS_ZCODE_PROOF_SET_WIRE_MAX];
+    size_t proof_len;
+    struct vcs_zcode_task_v1 task;
+    struct vcs_zcode_candidate_v1 candidate;
+    struct vcs_zcode_proof_policy_v1 policy;
+    struct vcs_zcode_lane_receipt_v1 lane;
+    uint8_t roots[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS][32];
+    size_t count;
+    struct vcs_zcode_work_receipt_v1 receipts[
+        VCS_ZCODE_PROOF_SET_MAX_RECEIPTS];
+    uint8_t package[32], release[32], recipe[32], lock[32], capsule[32];
+};
+
+static bool zsc_plan_fixed_wires(const struct json_value *input,
+                                 struct zsc_plan_state *st)
+{
+    return zsc_hex_fixed(input, "task_hex", st->task_wire,
+                         sizeof(st->task_wire)) &&
+           zsc_hex_fixed(input, "candidate_hex", st->candidate_wire,
+                         sizeof(st->candidate_wire)) &&
+           zsc_hex_fixed(input, "proof_policy_hex", st->policy_wire,
+                         sizeof(st->policy_wire)) &&
+           zsc_hex_fixed(input, "proven_lane_hex", st->lane_wire,
+                         sizeof(st->lane_wire));
+}
+
+/* proof_hex and st->proof_len are looked up by the caller before any check. */
+static bool zsc_plan_proof_wire(const char *proof_hex,
+                                struct zsc_plan_state *st)
+{
+    if (!proof_hex ||
+        (strlen(proof_hex) & 1u) != 0 || st->proof_len > sizeof(st->proof_wire))
+        return false;
+    return zcl_hex_decode_lower(proof_hex, st->proof_wire, st->proof_len);
+}
+
+static bool zsc_plan_input(const struct json_value *input,
+                           const char *workspace, struct zsc_plan_state *st)
 {
     static const char *const keys[] = {
         "workspace", "task_hex", "candidate_hex", "proof_policy_hex",
@@ -91,80 +132,91 @@ void zcl_native_handle_zcode_package_dev_score_plan(
         "release_root", "recipe_root", "dependency_lock_root",
         "api_capsule_root",
     };
+    const char *proof_hex = zsc_str(input, "proof_set_hex");
+    st->proof_len = proof_hex ? strlen(proof_hex) / 2u : 0;
+    return zsc_keys(input, keys, sizeof(keys) / sizeof(keys[0])) &&
+           workspace &&
+           zcl_native_zcode_workspace_is_explicit_scratch(workspace) &&
+           zsc_plan_fixed_wires(input, st) &&
+           zsc_plan_proof_wire(proof_hex, st);
+}
+
+static bool zsc_plan_parse(struct zsc_plan_state *st)
+{
+    st->count = 0;
+    return vcs_zcode_task_parse(st->task_wire, sizeof(st->task_wire),
+                                &st->task) == VCS_ZCODE_DEV_OK &&
+           vcs_zcode_candidate_parse(st->candidate_wire,
+                                     sizeof(st->candidate_wire),
+                                     &st->candidate) == VCS_ZCODE_DEV_OK &&
+           vcs_zcode_proof_policy_parse(st->policy_wire,
+                                        sizeof(st->policy_wire),
+                                        &st->policy) == VCS_ZCODE_DEV_OK &&
+           vcs_zcode_lane_receipt_parse(st->lane_wire, sizeof(st->lane_wire),
+                                        &st->lane) == VCS_ZCODE_DEV_OK &&
+           vcs_zcode_proof_set_parse(st->proof_wire, st->proof_len, st->roots,
+               VCS_ZCODE_PROOF_SET_MAX_RECEIPTS,
+               &st->count) == VCS_ZCODE_DEV_OK &&
+           st->count != 0;
+}
+
+static bool zsc_plan_load_receipts(const char *workspace,
+                                   struct zsc_plan_state *st)
+{
+    for (size_t i = 0; i < st->count; i++) {
+        uint8_t *wire = NULL; size_t len = 0;
+        bool ok = vcs_object_load_raw_bounded(workspace, st->roots[i],
+                      VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES, &wire, &len) == 0 &&
+                  vcs_zcode_work_receipt_parse(wire, len, &st->receipts[i]) ==
+                      VCS_ZCODE_DEV_OK;
+        free(wire);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static bool zsc_plan_roots(const struct json_value *input,
+                           struct zsc_plan_state *st)
+{
+    return zsc_hex_fixed(input, "package_root", st->package, 32) &&
+           zsc_hex_fixed(input, "release_root", st->release, 32) &&
+           zsc_hex_fixed(input, "recipe_root", st->recipe, 32) &&
+           zsc_hex_fixed(input, "dependency_lock_root", st->lock, 32) &&
+           zsc_hex_fixed(input, "api_capsule_root", st->capsule, 32);
+}
+
+void zcl_native_handle_zcode_package_dev_score_plan(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
     if (!request || !reply) return;
     const struct json_value *input = request->input;
     const char *workspace = zsc_str(input, "workspace");
-    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
-    uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
-    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
-    uint8_t lane_wire[VCS_ZCODE_LANE_WIRE_BYTES];
-    uint8_t proof_wire[VCS_ZCODE_PROOF_SET_WIRE_MAX];
-    const char *proof_hex = zsc_str(input, "proof_set_hex");
-    size_t proof_len = proof_hex ? strlen(proof_hex) / 2u : 0;
-    if (!zsc_keys(input, keys, sizeof(keys) / sizeof(keys[0])) || !workspace ||
-        !zcl_native_zcode_workspace_is_explicit_scratch(workspace) ||
-        !zsc_hex_fixed(input, "task_hex", task_wire, sizeof(task_wire)) ||
-        !zsc_hex_fixed(input, "candidate_hex", candidate_wire,
-                       sizeof(candidate_wire)) ||
-        !zsc_hex_fixed(input, "proof_policy_hex", policy_wire,
-                       sizeof(policy_wire)) ||
-        !zsc_hex_fixed(input, "proven_lane_hex", lane_wire,
-                       sizeof(lane_wire)) || !proof_hex ||
-        (strlen(proof_hex) & 1u) != 0 || proof_len > sizeof(proof_wire) ||
-        !zcl_hex_decode_lower(proof_hex, proof_wire, proof_len)) {
+    struct zsc_plan_state st;
+    if (!zsc_plan_input(input, workspace, &st)) {
         zsc_fail(reply, "BAD_SCORE_PLAN", "closed score-plan input refused");
         return;
     }
-    struct vcs_zcode_task_v1 task;
-    struct vcs_zcode_candidate_v1 candidate;
-    struct vcs_zcode_proof_policy_v1 policy;
-    struct vcs_zcode_lane_receipt_v1 lane;
-    uint8_t roots[VCS_ZCODE_PROOF_SET_MAX_RECEIPTS][32]; size_t count = 0;
-    if (vcs_zcode_task_parse(task_wire, sizeof(task_wire), &task) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_candidate_parse(candidate_wire, sizeof(candidate_wire),
-                                  &candidate) != VCS_ZCODE_DEV_OK ||
-        vcs_zcode_proof_policy_parse(policy_wire, sizeof(policy_wire),
-                                     &policy) != VCS_ZCODE_DEV_OK ||
-        vcs_zcode_lane_receipt_parse(lane_wire, sizeof(lane_wire), &lane) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_proof_set_parse(proof_wire, proof_len, roots,
-            VCS_ZCODE_PROOF_SET_MAX_RECEIPTS, &count) != VCS_ZCODE_DEV_OK ||
-        count == 0) {
+    if (!zsc_plan_parse(&st)) {
         zsc_fail(reply, "BAD_SCORE_OBJECT", "a canonical input wire refused");
         return;
     }
-    struct vcs_zcode_work_receipt_v1 receipts[
-        VCS_ZCODE_PROOF_SET_MAX_RECEIPTS];
-    for (size_t i = 0; i < count; i++) {
-        uint8_t *wire = NULL; size_t len = 0;
-        if (vcs_object_load_raw_bounded(workspace, roots[i],
-                VCS_ZCODE_WORK_RECEIPT_WIRE_BYTES, &wire, &len) != 0 ||
-            vcs_zcode_work_receipt_parse(wire, len, &receipts[i]) !=
-                VCS_ZCODE_DEV_OK) {
-            free(wire);
-            zsc_fail(reply, "MISSING_WORK_RECEIPT",
-                     "proof-set receipt absent or corrupt in workspace CAS");
-            return;
-        }
-        free(wire);
+    if (!zsc_plan_load_receipts(workspace, &st)) {
+        zsc_fail(reply, "MISSING_WORK_RECEIPT",
+                 "proof-set receipt absent or corrupt in workspace CAS");
+        return;
     }
-    uint8_t package[32], release[32], recipe[32], lock[32], capsule[32];
-    if (!zsc_hex_fixed(input, "package_root", package, 32) ||
-        !zsc_hex_fixed(input, "release_root", release, 32) ||
-        !zsc_hex_fixed(input, "recipe_root", recipe, 32) ||
-        !zsc_hex_fixed(input, "dependency_lock_root", lock, 32) ||
-        !zsc_hex_fixed(input, "api_capsule_root", capsule, 32)) {
+    if (!zsc_plan_roots(input, &st)) {
         zsc_fail(reply, "BAD_SCORE_ROOT", "all five package roots are required");
         return;
     }
     struct vcs_zcode_score_plan_input planned = {
-        .task = &task, .candidate = &candidate, .proof_policy = &policy,
-        .proven_lane = &lane, .proof_receipt_roots = roots,
-        .work_receipts = receipts, .work_receipt_count = count,
-        .package_root = package, .release_root = release,
-        .recipe_root = recipe, .dependency_lock_root = lock,
-        .api_capsule_root = capsule,
+        .task = &st.task, .candidate = &st.candidate,
+        .proof_policy = &st.policy,
+        .proven_lane = &st.lane, .proof_receipt_roots = st.roots,
+        .work_receipts = st.receipts, .work_receipt_count = st.count,
+        .package_root = st.package, .release_root = st.release,
+        .recipe_root = st.recipe, .dependency_lock_root = st.lock,
+        .api_capsule_root = st.capsule,
     };
     struct vcs_zcode_score_receipt_v1 score;
     enum vcs_zcode_score_error err = vcs_zcode_score_plan(&planned, &score);
