@@ -115,6 +115,14 @@ void header_probe_note_repair_served(enum header_probe_repair_source src,
  * repair right now (missing input) and is counted separately. */
 void header_probe_note_p2p_request(int height, int peers_available);
 
+/* True once header_probe_init() accepted an oracle configuration. A node
+ * without zclassicd never initializes it, so repair callers skip the oracle
+ * step instead of attempting it on every episode. */
+bool header_probe_oracle_configured(void);
+
+/* Record that a repair bypassed the oracle because none is configured. */
+void header_probe_note_oracle_skipped(void);
+
 /* Reentrant-safe dispatcher entry for `z23 dumpstate header_probe`. */
 bool header_probe_dump_state_json(struct json_value *out, const char *key);
 
@@ -128,6 +136,7 @@ struct header_probe_repair_stats {
     int64_t p2p_requests;
     int64_t p2p_repairs;
     int64_t p2p_no_peer_events;
+    int64_t oracle_skipped;
     int     last_repair_source;   /* enum header_probe_repair_source */
     int     last_repair_height;
 };

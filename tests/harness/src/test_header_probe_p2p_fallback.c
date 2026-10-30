@@ -519,6 +519,7 @@ static int run_p2p_repair_case(void)
     header_probe_test_get_repair_stats(&s1);
     ok = ok && check_p2p_refetch_requested(&s1, blocks);
     ok = ok && check_full_block_fallback_armed(blocks, &dm, &rhash);
+    ok = ok && s1.oracle_skipped == 0;      /* a configured oracle is attempted */
     HPF_CHECK("oracle dead → bounded header-only repair armed + full-block "
               "fallback requested (no premature repair or missing-input "
               "blocker)", ok);
@@ -545,6 +546,45 @@ static int run_p2p_repair_case(void)
     ok = ok && condition_engine_get_active_count() == 0;
     HPF_CHECK("repaired frontier folds through + H* advances → Condition "
               "clears (no latch)", ok);
+
+    case_teardown(dir, &ms, &dm);
+    return failures;
+}
+
+/* A node without zclassicd never configures the oracle: the repair goes
+ * straight to the P2P re-fetch and records the bypass instead of attempting
+ * an oracle pull that can only fail. */
+static int run_no_oracle_case(void)
+{
+    int failures = 0;
+    char dir[256];
+    struct main_state ms;
+    struct block_index blocks[2];
+    struct uint256 hashes[2];
+    struct download_manager dm;
+
+    struct block_header rh;
+    build_repair_header(1, &rh);
+    struct uint256 rhash;
+    block_header_get_hash(&rh, &rhash);
+
+    bool ok = case_setup("no_oracle", dir, sizeof(dir), &ms, blocks, hashes,
+                         &rhash, &dm);
+    header_probe_reset_for_test();
+    sqlite3 *db = progress_store_db();
+    ok = ok && p2p_seed_repair_fixture(db);
+    ok = ok && !header_probe_oracle_configured();
+    stale_validate_headers_repair_test_set_peer_count(1);
+
+    condition_engine_tick();
+
+    struct header_probe_repair_stats s1;
+    header_probe_test_get_repair_stats(&s1);
+    ok = ok && check_p2p_refetch_requested(&s1, blocks);
+    ok = ok && check_full_block_fallback_armed(blocks, &dm, &rhash);
+    ok = ok && s1.oracle_skipped == 1;
+    HPF_CHECK("no oracle configured → oracle step skipped and counted, P2P "
+              "re-fetch and header-only repair requested", ok);
 
     case_teardown(dir, &ms, &dm);
     return failures;
@@ -693,6 +733,7 @@ int test_header_probe_p2p_fallback(void)
         printf("header_probe_p2p_fallback: WARN blocker_module_init failed\n");
 
     failures += run_p2p_repair_case();
+    failures += run_no_oracle_case();
     failures += run_missing_input_case();
     failures += run_invalid_header_scoring_case();
 

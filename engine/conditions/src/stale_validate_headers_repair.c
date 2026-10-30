@@ -387,6 +387,21 @@ static enum condition_remedy_result rewind_result_to_remedy(
     return COND_REMEDY_SKIP;
 }
 
+/* Oracle pull for the repair target. `*skipped` is set, and no pull is made,
+ * when the oracle is not configured. A missing best-header authority is a
+ * failure of this step, reported by the caller. */
+static struct zcl_result stale_repair_oracle_pull(int target,
+                                                  const struct uint256 *canon,
+                                                  bool *skipped)
+{
+    if (!canon)
+        return ZCL_ERR(-1, "best-header authority unavailable h=%d", target);
+    *skipped = !header_probe_oracle_configured();
+    if (*skipped)
+        return ZCL_OK;
+    return header_probe_pull_range(target, 128, NULL);
+}
+
 static enum condition_remedy_result remedy_stale_validate_headers_repair(void)
 {
     sqlite3 *db = progress_store_db();
@@ -429,10 +444,14 @@ static enum condition_remedy_result remedy_stale_validate_headers_repair(void)
          * header_solution_repair (INSERT OR REPLACE by height — it OVERWRITES
          * any stale wrong-block row, which the hash-aware availability check
          * above does not accept). */
-        struct zcl_result r = canon
-            ? header_probe_pull_range(target, 128, NULL)
-            : ZCL_ERR(-1, "best-header authority unavailable h=%d", target);
-        if (r.ok) {
+        bool oracle_skipped = false;
+        struct zcl_result r = stale_repair_oracle_pull(target, canon,
+                                                       &oracle_skipped);
+        if (oracle_skipped) {
+            /* No zclassicd configured (the normal case on a node without one):
+             * nothing to attempt and nothing to report. */
+            header_probe_note_oracle_skipped();
+        } else if (r.ok) {
             solution_present = stage_repair_header_solution_available(
                 db, target, canon);
             if (solution_present) {

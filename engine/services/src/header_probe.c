@@ -86,6 +86,7 @@ static struct {
     _Atomic int64_t p2p_requests;
     _Atomic int64_t p2p_repairs;
     _Atomic int64_t p2p_no_peer_events;
+    _Atomic int64_t oracle_skipped;     /* repairs that bypassed an unconfigured oracle */
     _Atomic int     last_repair_source;   /* enum header_probe_repair_source */
     _Atomic int     last_repair_height;
 } g_hp = {
@@ -496,6 +497,7 @@ void header_probe_reset_for_test(void)
     atomic_store(&g_hp.p2p_requests, 0);
     atomic_store(&g_hp.p2p_repairs, 0);
     atomic_store(&g_hp.p2p_no_peer_events, 0);
+    atomic_store(&g_hp.oracle_skipped, 0);
     atomic_store(&g_hp.last_repair_source, HEADER_PROBE_SRC_NONE);
     atomic_store(&g_hp.last_repair_height, -1);
     pthread_mutex_unlock(&g_hp.lock);
@@ -538,6 +540,19 @@ void header_probe_note_p2p_request(int height, int peers_available)
         atomic_fetch_add(&g_hp.p2p_no_peer_events, 1);
 }
 
+bool header_probe_oracle_configured(void)
+{
+    pthread_mutex_lock(&g_hp.lock);
+    bool configured = g_hp.initialized;
+    pthread_mutex_unlock(&g_hp.lock);
+    return configured;
+}
+
+void header_probe_note_oracle_skipped(void)
+{
+    atomic_fetch_add(&g_hp.oracle_skipped, 1);
+}
+
 #ifdef ZCL_TESTING
 void header_probe_test_get_repair_stats(struct header_probe_repair_stats *out)
 {
@@ -546,6 +561,7 @@ void header_probe_test_get_repair_stats(struct header_probe_repair_stats *out)
     out->p2p_requests       = atomic_load(&g_hp.p2p_requests);
     out->p2p_repairs        = atomic_load(&g_hp.p2p_repairs);
     out->p2p_no_peer_events = atomic_load(&g_hp.p2p_no_peer_events);
+    out->oracle_skipped     = atomic_load(&g_hp.oracle_skipped);
     out->last_repair_source = atomic_load(&g_hp.last_repair_source);
     out->last_repair_height = atomic_load(&g_hp.last_repair_height);
 }
@@ -586,6 +602,8 @@ bool header_probe_dump_state_json(struct json_value *out, const char *key)
                       atomic_load(&g_hp.p2p_repairs));
     json_push_kv_int (out, "p2p_no_peer_events",
                       atomic_load(&g_hp.p2p_no_peer_events));
+    json_push_kv_int (out, "oracle_skipped",
+                      atomic_load(&g_hp.oracle_skipped));
     json_push_kv_str (out, "last_repair_source",
                       header_probe_repair_source_name(
                           atomic_load(&g_hp.last_repair_source)));
