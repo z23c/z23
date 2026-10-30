@@ -403,6 +403,94 @@ static bool cb_persist_and_refuse(sqlite3 *db,
     return refuse(r, st, hole_hash, "%s", reason);
 }
 
+/* G3 + G4: the failing block and the frontier. Returns true with *blk loaded
+ * (the caller frees it); false after a refusal recorded in r by refuse(),
+ * with blk holding nothing to free (never loaded, or freed before return). */
+static bool cb_hole_gates(const struct coin_backfill_io *io,
+                          struct coin_backfill_result *r, bool hash_found,
+                          int hole_h, const struct uint256 *hole_hash,
+                          bool frontier_found, int32_t frontier,
+                          struct block *blk)
+{
+    /* G3: failing block hash-verified on the active chain AND equal to the
+     * hole row's own hash (a NULL legacy row cannot bind → refuse) */
+    if (!hash_found) {
+        refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, NULL,
+               "hole_hash_missing");
+        return false;
+    }
+    int g3 = cb_verify_hole_block(io, hole_h, hole_hash, blk);
+    if (g3 == 1) {
+        refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, hole_hash,
+               "hole_block_unreadable");
+        return false;
+    }
+    if (g3 != 0) {
+        refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, hole_hash,
+               "hole_hash_mismatch");
+        return false;
+    }
+
+    /* G4 */
+    int g4 = cb_check_frontier(frontier_found, frontier, hole_h);
+    if (g4 == 1) {
+        block_free(blk);
+        refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, hole_hash,
+               "frontier_unknown");
+        return false;
+    }
+    if (g4 == 2) {
+        block_free(blk);
+        refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, hole_hash,
+               "frontier_above_hole f=%d", (int)frontier);
+        return false;
+    }
+    return true;
+}
+
+/* G5 verdicts after the enumeration: true when the run is decided here (a
+ * refusal was recorded in r, or nothing is left to repair). */
+static bool cb_g5_decided(sqlite3 *db, const struct coin_backfill_io *io,
+                          struct coin_backfill_result *r, int hole_h,
+                          const struct uint256 *hole_hash,
+                          const struct cb_g5 *g5)
+{
+    if (g5->ereason[0]) {
+        /* coin_present_unusable (metadata height tear) / too_many_unresolved
+         * are deterministic properties of the hole block — terminal. */
+        return cb_persist_and_refuse(db, io, r, hole_h, hole_hash,
+                                 COIN_BACKFILL_REFUSED_UNPROVABLE,
+                                 COIN_BACKFILL_TC_TERMINAL,
+                                 COIN_BACKFILL_UNPROVABLE_MARKER, g5->ereason);
+    }
+    if (g5->n == 0)
+        return true; /* all prevouts resolve now → existing replay owns it */
+    if (g5->marker_hit[0]) {
+        /* A previously-backfilled outpoint lost AGAIN is a proven repeated
+         * tear, never retryable. Persist the durable refusal marker the boot
+         * torn-gate reads (condition 3), mirroring the unprovable/round_cap
+         * terminal persists — otherwise refuse() raises only the in-memory
+         * blocker, which is gone after a reboot and the boot gate stays silent. */
+        return cb_persist_and_refuse(db, io, r, hole_h, hole_hash,
+                                 COIN_BACKFILL_MARKER_SEEN,
+                                 COIN_BACKFILL_TC_TERMINAL,
+                                 COIN_BACKFILL_RELOST_MARKER, g5->marker_hit);
+    }
+    if (g5->refused_marker)
+        return refuse(r, COIN_BACKFILL_REFUSED_SPENT, hole_hash,
+                      "refusal_marker_present");
+    if (g5->rounds >= COIN_BACKFILL_MAX_ROUNDS) {
+        /* repair exhausted its retry budget for this hole — terminal. */
+        char cap[64];
+        snprintf(cap, sizeof(cap), "round_cap rounds=%d", (int)g5->rounds);
+        return cb_persist_and_refuse(db, io, r, hole_h, hole_hash,
+                                 COIN_BACKFILL_REFUSED_UNPROVABLE,
+                                 COIN_BACKFILL_TC_TERMINAL,
+                                 COIN_BACKFILL_ROUND_CAP_MARKER, cap);
+    }
+    return false;
+}
+
 /* G7 delta-horizon walk under the store lock. */
 static bool cb_horizon_locked(sqlite3 *db, int utxo_cursor, int *horizon)
 {
@@ -492,32 +580,10 @@ static bool backfill_run(sqlite3 *db, struct main_state *ms,
     if (strcmp(hole_status, "prevout_unresolved") != 0)
         return true;
 
-    /* G3: failing block hash-verified on the active chain AND equal to the
-     * hole row's own hash (a NULL legacy row cannot bind → refuse) */
-    if (!hash_found)
-        return refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, NULL,
-                      "hole_hash_missing");
     struct block blk;
-    int g3 = cb_verify_hole_block(io, hole_h, &hole_hash, &blk);
-    if (g3 == 1)
-        return refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, &hole_hash,
-                      "hole_block_unreadable");
-    if (g3 != 0)
-        return refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, &hole_hash,
-                      "hole_hash_mismatch");
-
-    /* G4 */
-    int g4 = cb_check_frontier(frontier_found, frontier, hole_h);
-    if (g4 == 1) {
-        block_free(&blk);
-        return refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, &hole_hash,
-                      "frontier_unknown");
-    }
-    if (g4 == 2) {
-        block_free(&blk);
-        return refuse(r, COIN_BACKFILL_REFUSED_UNPROVABLE, &hole_hash,
-                      "frontier_above_hole f=%d", (int)frontier);
-    }
+    if (!cb_hole_gates(io, r, hash_found, hole_h, &hole_hash, frontier_found,
+                       frontier, &blk))
+        return true; /* refuse() recorded the outcome (it always returns true) */
     r->scan_top_height = frontier - 1;
 
     /* G5: enumeration + outpoint markers + refusal marker + round cap,
@@ -531,7 +597,6 @@ static bool backfill_run(sqlite3 *db, struct main_state *ms,
                  "[coin_backfill] enumeration/marker read failed h=%d",
                  hole_h);
     int n = g5.n;
-    int32_t rounds = g5.rounds;
     if (g5.legacy_spent_marker) {
         if (!repair_marker_forget(db, REPAIR_MARKER_KIND_COIN_BACKFILL_REFUSED,
                                   hole_h, hole_hash.data))
@@ -556,39 +621,8 @@ static bool backfill_run(sqlite3 *db, struct main_state *ms,
     }
 
     r->unresolved_count = n;
-    if (g5.ereason[0]) {
-        /* coin_present_unusable (metadata height tear) / too_many_unresolved
-         * are deterministic properties of the hole block — terminal. */
-        return cb_persist_and_refuse(db, io, r, hole_h, &hole_hash,
-                                 COIN_BACKFILL_REFUSED_UNPROVABLE,
-                                 COIN_BACKFILL_TC_TERMINAL,
-                                 COIN_BACKFILL_UNPROVABLE_MARKER, g5.ereason);
-    }
-    if (n == 0)
-        return true; /* all prevouts resolve now → existing replay owns it */
-    if (g5.marker_hit[0]) {
-        /* A previously-backfilled outpoint lost AGAIN is a proven repeated
-         * tear, never retryable. Persist the durable refusal marker the boot
-         * torn-gate reads (condition 3), mirroring the unprovable/round_cap
-         * terminal persists — otherwise refuse() raises only the in-memory
-         * blocker, which is gone after a reboot and the boot gate stays silent. */
-        return cb_persist_and_refuse(db, io, r, hole_h, &hole_hash,
-                                 COIN_BACKFILL_MARKER_SEEN,
-                                 COIN_BACKFILL_TC_TERMINAL,
-                                 COIN_BACKFILL_RELOST_MARKER, g5.marker_hit);
-    }
-    if (g5.refused_marker)
-        return refuse(r, COIN_BACKFILL_REFUSED_SPENT, &hole_hash,
-                      "refusal_marker_present");
-    if (rounds >= COIN_BACKFILL_MAX_ROUNDS) {
-        /* repair exhausted its retry budget for this hole — terminal. */
-        char cap[64];
-        snprintf(cap, sizeof(cap), "round_cap rounds=%d", (int)rounds);
-        return cb_persist_and_refuse(db, io, r, hole_h, &hole_hash,
-                                 COIN_BACKFILL_REFUSED_UNPROVABLE,
-                                 COIN_BACKFILL_TC_TERMINAL,
-                                 COIN_BACKFILL_ROUND_CAP_MARKER, cap);
-    }
+    if (cb_g5_decided(db, io, r, hole_h, &hole_hash, &g5))
+        return true; /* refuse() always returns true; n == 0 is also true */
 
     /* G6 owner gate — the refusal already carries owner_ack_missing and the
      * page's escape text names the ack env var; no extra per-tick WARN */
