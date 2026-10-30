@@ -323,38 +323,47 @@ static int rd_update(void)
     return 0;
 }
 
-static void rd_comm_count(char base[][RD_KEY], int nb, int *nnew, int *ngone)
+/* comm -23 CUR BASE over row-major key sets: count the base-only "::" keys
+ * (gone) and the current keys absent from base (new). Rows are brow/crow
+ * bytes, NUL-terminated, sorted by strcoll. */
+static void comm_count_rows(const char *base, size_t brow, int nb,
+                            const char *cur, size_t crow, int ncur,
+                            int *nnew, int *ngone)
 {
     int bi = 0;
     *nnew = 0;
     *ngone = 0;
-    for (int i = 0; i < g_rd_nkeys; i++) {
-        while (bi < nb && strcoll(base[bi], g_rd_keys[i]) < 0) {
-            if (strstr(base[bi], "::") != NULL)
+    for (int i = 0; i < ncur; i++) {
+        const char *ck = cur + (size_t)i * crow;
+        while (bi < nb && strcoll(base + (size_t)bi * brow, ck) < 0) {
+            if (strstr(base + (size_t)bi * brow, "::") != NULL)
                 (*ngone)++;
             bi++;
         }
-        if (bi < nb && strcoll(base[bi], g_rd_keys[i]) == 0)
+        if (bi < nb && strcoll(base + (size_t)bi * brow, ck) == 0)
             bi++;
         else
             (*nnew)++;
     }
     while (bi < nb) {
-        if (strstr(base[bi], "::") != NULL)
+        if (strstr(base + (size_t)bi * brow, "::") != NULL)
             (*ngone)++;
         bi++;
     }
 }
 
-static int rd_print_new_keys(char base[][RD_KEY], int nb)
+/* Print every current key absent from base, one per line, on stdout. */
+static int print_new_rows(const char *base, size_t brow, int nb,
+                          const char *cur, size_t crow, int ncur)
 {
     int bi = 0;
-    for (int i = 0; i < g_rd_nkeys; i++) {
-        while (bi < nb && strcoll(base[bi], g_rd_keys[i]) < 0)
+    for (int i = 0; i < ncur; i++) {
+        const char *ck = cur + (size_t)i * crow;
+        while (bi < nb && strcoll(base + (size_t)bi * brow, ck) < 0)
             bi++;
-        if (bi < nb && strcoll(base[bi], g_rd_keys[i]) == 0)
+        if (bi < nb && strcoll(base + (size_t)bi * brow, ck) == 0)
             bi++;
-        else if (fprintf(stdout, "%s\n", g_rd_keys[i]) < 0)
+        else if (fprintf(stdout, "%s\n", ck) < 0)
             return die("z23-lint: write failed\n", "");
     }
     return 0;
@@ -379,14 +388,16 @@ static int rd_fail_mode(void)
     rd_sort_uniq((char *)base, RD_KEY, &nb);
     /* comm -23 CUR BASE: keys present in the scan but absent from baseline. */
     int nnew = 0, ngone = 0;
-    rd_comm_count(base, nb, &nnew, &ngone);
+    comm_count_rows((char *)base, RD_KEY, nb, (char *)g_rd_keys, RD_KEY,
+                    g_rd_nkeys, &nnew, &ngone);
     if (nnew) {
         fputs("FAIL: new (vo" "id)-cast discard of a [[nodiscard]] struct zcl_result.\n"
               "State why the failure is safe to drop:\n"
               "  ZCL_IGNORE_RESULT(<call>, \"<reason>\");   (util/result.h)\n"
               "or mark the line // result-discard-" "ok:<reason> if the macro cannot be used:\n",
               stdout);
-        rc = rd_print_new_keys(base, nb);
+        rc = print_new_rows((char *)base, RD_KEY, nb, (char *)g_rd_keys,
+                            RD_KEY, g_rd_nkeys);
         if (rc)
             return rc;
         return 1;
@@ -578,22 +589,6 @@ int check_result_discard_selftest(void)
 static char g_wrpl_keys[WRPL_MAX_KEYS][WRPL_KEY];
 static int g_wrpl_nkeys;
 static int g_wrpl_tok_files; /* files that carried the prepare token (floor) */
-
-static int wrpl_cmp(const void *a, const void *b)
-{ return strcoll(a, b); }
-
-/* sort -u: locale-collated ascending, collation-equal duplicates collapse. */
-static void wrpl_sort_uniq(char *set, size_t row, int *n)
-{
-    if (*n <= 0)
-        return;
-    qsort(set, (size_t)*n, row, wrpl_cmp);
-    int w = 0;
-    for (int r = 1; r < *n; r++)
-        if (strcoll(set + (size_t)w * row, set + (size_t)r * row) != 0)
-            memmove(set + (size_t)++w * row, set + (size_t)r * row, row);
-    *n = w + 1;
-}
 
 struct wrpl_re {
     regex_t semi;  /* ;[ \t]*$            — prototype ender */
@@ -960,43 +955,6 @@ static int wrpl_update(void)
     return 0;
 }
 
-static void wrpl_comm_count(char base[][WRPL_KEY], int nb, int *nnew, int *ngone)
-{
-    int bi = 0;
-    *nnew = 0;
-    *ngone = 0;
-    for (int i = 0; i < g_wrpl_nkeys; i++) {
-        while (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) < 0) {
-            if (strstr(base[bi], "::") != NULL)
-                (*ngone)++;
-            bi++;
-        }
-        if (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) == 0)
-            bi++;
-        else
-            (*nnew)++;
-    }
-    while (bi < nb) {
-        if (strstr(base[bi], "::") != NULL)
-            (*ngone)++;
-        bi++;
-    }
-}
-
-static int wrpl_print_new_keys(char base[][WRPL_KEY], int nb)
-{
-    int bi = 0;
-    for (int i = 0; i < g_wrpl_nkeys; i++) {
-        while (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) < 0)
-            bi++;
-        if (bi < nb && strcoll(base[bi], g_wrpl_keys[i]) == 0)
-            bi++;
-        else if (fprintf(stdout, "%s\n", g_wrpl_keys[i]) < 0)
-            return die("z23-lint: write failed\n", "");
-    }
-    return 0;
-}
-
 static int wrpl_fail_mode(void)
 {
     static char base[WRPL_MAX_KEYS][WRPL_KEY];
@@ -1004,17 +962,19 @@ static int wrpl_fail_mode(void)
     int rc = wrpl_base_read(base, &nb);
     if (rc)
         return rc;
-    wrpl_sort_uniq((char *)base, WRPL_KEY, &nb);
+    rd_sort_uniq((char *)base, WRPL_KEY, &nb);
     /* comm -23 CUR BASE: keys present in the scan but absent from baseline. */
     int nnew = 0, ngone = 0;
-    wrpl_comm_count(base, nb, &nnew, &ngone);
+    comm_count_rows((char *)base, WRPL_KEY, nb, (char *)g_wrpl_keys,
+                    WRPL_KEY, g_wrpl_nkeys, &nnew, &ngone);
     if (nnew) {
         fputs("FAIL: new raw sqlite3_prepare_" "v2() with an unlogged NULL-check return.\n"
               "      Log the failure via LOG_FAIL/LOG_RETURN/LOG_ERR/LOG_NULL/LOG_WARN\n"
               "      between the prepare and the 'if (!stmt)' return, or route the\n"
               "      prepare through the AR_* lifecycle macros (activerecord.h):\n",
               stdout);
-        rc = wrpl_print_new_keys(base, nb);
+        rc = print_new_rows((char *)base, WRPL_KEY, nb, (char *)g_wrpl_keys,
+                            WRPL_KEY, g_wrpl_nkeys);
         if (rc)
             return rc;
         return 1;
@@ -1057,7 +1017,7 @@ int check_wallet_raw_prepare_log_run(int argc, char **argv)
                         "vacuously)\n", dirs);
         return 2;
     }
-    wrpl_sort_uniq((char *)g_wrpl_keys, WRPL_KEY, &g_wrpl_nkeys);
+    rd_sort_uniq((char *)g_wrpl_keys, WRPL_KEY, &g_wrpl_nkeys);
     if (mode && strcmp(mode, "UPDATE") == 0)
         return wrpl_update();
     return wrpl_fail_mode();
