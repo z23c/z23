@@ -178,19 +178,22 @@ static bool dlr_offer_read(const char *path, struct dlr_offer *o,
 }
 
 /* The bundle's prerequisites from its header ("-<sha> <subject>" lines
- * before the blank line that ends it): how many, and the first. */
+ * before the blank line that ends it): how many, and the first. A chunk
+ * that continues an overlong line is never a header line. */
 static bool dlr_offer_prereq(const char *bundle, char out[48], int *count)
 {
     char line[512];
     FILE *f = fopen(bundle, "rb");
     bool ok = f != NULL;
+    bool bol = true;
     *count = 0;
     out[0] = '\0';
-    while (ok && fgets(line, sizeof(line), f) && line[0] != '\n') {
-        if (line[0] != '-')
-            continue;
-        if (++*count == 1)
+    while (ok && fgets(line, sizeof(line), f)) {
+        if (bol && line[0] == '\n')
+            break;
+        if (bol && line[0] == '-' && ++*count == 1)
             ok = snprintf(out, 48, "%.40s", line + 1) < 48;
+        bol = strchr(line, '\n') != NULL;
     }
     if (f)
         ok = fclose(f) == 0 && ok;

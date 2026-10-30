@@ -632,6 +632,59 @@ _test_next:;
     return failures;
 }
 
+/* A prerequisite whose header line is longer than the reader's 511-byte
+ * chunk: the continuation chunk starts with '-' and must not count. */
+static int dlt_prereq_cases(void)
+{
+    int failures = 0;
+    struct dlt_rig r;
+    struct dlt_call c;
+    char subject[621], base[64], tip[64], caret[72], needle[64];
+    char path[900], b[900], mo[900], bsha[ZSHA256_HEX_LEN], blob[4096];
+    if (!dlt_rig(&r, "prereq")) {
+        printf("rig setup FAILED\n");
+        return 1;
+    }
+    memset(subject, 'x', 620);
+    subject[469] = '-';
+    subject[620] = '\0';
+    (void)snprintf(path, sizeof(path), "%s/long.txt", r.sender);
+    ASSERT(dlt_write(path, "long\n", 0644) &&
+           DLT_GIT(NULL, 0, r.sender, "add", "-A") == 0 &&
+           DLT_GIT(NULL, 0, r.sender, "commit", "--quiet", "--no-verify",
+                   "-m", subject) == 0);
+    ASSERT(DLT_GIT(base, sizeof(base), r.sender, "rev-parse", "HEAD") == 0);
+    base[strcspn(base, "\n")] = '\0';
+    ASSERT(dlt_commit(r.sender, "tip.txt", "tip\n"));
+    ASSERT(DLT_GIT(tip, sizeof(tip), r.sender, "rev-parse", "HEAD") == 0);
+    tip[strcspn(tip, "\n")] = '\0';
+    (void)snprintf(caret, sizeof(caret), "^%s", base);
+    (void)snprintf(b, sizeof(b), "%s/prereq.bundle", r.base);
+    (void)snprintf(mo, sizeof(mo), "%s/prereq.bundle.offer.json", r.base);
+    ASSERT(DLT_GIT(NULL, 0, r.sender, "bundle", "create", "--quiet", b,
+                   "HEAD", caret) == 0);
+    /* The fixture: the prerequisite line is over 600 bytes and the byte
+     * after the first 511 is the '-' that used to pass for a header. */
+    (void)snprintf(needle, sizeof(needle), "-%s", base);
+    ASSERT(dlt_slurp(b, blob, sizeof(blob)));
+    ASSERT(strstr(blob, needle) != NULL && strstr(blob, needle)[511] == '-');
+    ASSERT(dlt_sha_file(b, bsha));
+
+    TEST("land.check_offer: a prerequisite over 600 bytes with '-' after "
+         "the 511-byte read counts as one prerequisite") {
+        ASSERT(dlt_manifest(mo, "zcl.dev_land_offer.v1", tip, base, bsha,
+                            "mac"));
+        dlt_check(&c, r.sender, b, mo, r.sender);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "verdict")), "ok");
+        dlt_end(&c);
+        PASS();
+    }
+
+_test_next:;
+    dlt_done(&r);
+    return failures;
+}
 
 static int dlt_receipt_cases(void)
 {
@@ -1029,7 +1082,8 @@ int test_dev_land_remote(void);
 int test_dev_land_remote(void)
 {
     int failures = dlt_receive_cases() + dlt_send_cases() + dlt_single_cases() +
-                   dlt_offer_cases() + dlt_receipt_cases() +
+                   dlt_offer_cases() + dlt_prereq_cases() +
+                   dlt_receipt_cases() +
                    dlt_reverify_cases() + dlq_remote_cases();
     if (failures == 0)
         printf("test_dev_land_remote: all passed\n");
