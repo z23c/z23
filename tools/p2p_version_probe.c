@@ -24,6 +24,7 @@
  *   usage                  rc 2
  */
 
+#include "base/serialize_le.h"
 #include "crypto/sha256.h"
 #include "platform/rng.h"
 
@@ -80,22 +81,6 @@ static uint64_t now_ms(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
-}
-
-static void put_le(uint8_t *dst, uint64_t v, size_t n)
-{
-    for (size_t i = 0; i < n; i++) {
-        dst[i] = (uint8_t)(v >> (8 * i));
-    }
-}
-
-static uint64_t get_le(const uint8_t *src, size_t n)
-{
-    uint64_t v = 0;
-    for (size_t i = n; i-- > 0;) {
-        v = (v << 8) | src[i];
-    }
-    return v;
 }
 
 /* Strict decimal: digits only, no overflow, value at most max. */
@@ -287,11 +272,11 @@ static void put_addr_localhost(uint8_t *p)
 static void build_payload(uint8_t *p, uint64_t now, const uint8_t nonce[8])
 {
     size_t o = 0;
-    put_le(p + o, PROTOCOL_VERSION, 4);
+    zcl_write_u32_le(p + o, PROTOCOL_VERSION);
     o += 4;
-    put_le(p + o, 0, 8);
+    zcl_write_u64_le(p + o, 0);
     o += 8;
-    put_le(p + o, now, 8);
+    zcl_write_u64_le(p + o, now);
     o += 8;
     put_addr_localhost(p + o);
     o += ADDR_LEN;
@@ -302,7 +287,7 @@ static void build_payload(uint8_t *p, uint64_t now, const uint8_t nonce[8])
     p[o++] = (uint8_t)USER_AGENT_LEN;
     memcpy(p + o, USER_AGENT, USER_AGENT_LEN);
     o += USER_AGENT_LEN;
-    put_le(p + o, 0, 4);
+    zcl_write_u32_le(p + o, 0);
     o += 4;
     p[o] = 0;
 }
@@ -333,7 +318,7 @@ static size_t build_message(uint8_t *msg, const uint8_t magic[4])
 
     memcpy(msg, magic, 4);
     memcpy(msg + 4, cmd_version, COMMAND_LEN);
-    put_le(msg + 16, sizeof payload, 4);
+    zcl_write_u32_le(msg + 16, (uint32_t)sizeof payload);
     memcpy(msg + 20, digest, 4);
     memcpy(msg + HEADER_LEN, payload, sizeof payload);
     return HEADER_LEN + sizeof payload;
@@ -348,7 +333,7 @@ static int parse_version_body(const uint8_t *body, size_t len, uint32_t *height)
     if (ualen >= VERSION_UA_LIMIT || len < VERSION_MIN_BODY + ualen) {
         return RC_NO_HANDSHAKE;
     }
-    *height = (uint32_t)get_le(body + 81 + ualen, 4);
+    *height = zcl_read_u32_le(body + 81 + ualen);
     return RC_OK;
 }
 
@@ -362,7 +347,7 @@ static int read_peer_version(int fd, const uint8_t magic[4], uint64_t deadline, 
         if (memcmp(hdr, magic, 4) != 0) {
             break;
         }
-        uint64_t len = get_le(hdr + 16, 4);
+        uint64_t len = zcl_read_u32_le(hdr + 16);
         if (len > MAX_BODY_LEN || recv_exact(fd, body_buf, (size_t)len, deadline) != len) {
             break;
         }
