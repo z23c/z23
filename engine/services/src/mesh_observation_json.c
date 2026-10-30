@@ -72,30 +72,40 @@ const char *mesh_obs_outcome_name(enum mesh_obs_outcome o)
     return k_outcome_tok[o];
 }
 
+/* Index of `name` in one static token table, or -1 when it is absent. Both
+ * *_from_name() readers share this scan; only the table, its length and the
+ * enum they return differ. */
+static int mo_find_token(const char *name, const char *const *toks, int n)
+{
+    for (int i = 0; i < n; i++) {
+        if (strcmp(name, toks[i]) == 0)
+            return i;
+    }
+    return -1;   // raw-return-ok:token-miss-is-lookup-result
+}
+
 bool mesh_obs_stage_from_name(const char *name, enum mesh_obs_stage *out)
 {
+    int idx;
     if (!name || !out)
         return false;
-    for (int i = 0; i < MESH_STAGE_NUM; i++) {
-        if (strcmp(name, k_stage_tok[i]) == 0) {
-            *out = (enum mesh_obs_stage)i;
-            return true;
-        }
-    }
-    return false;
+    idx = mo_find_token(name, k_stage_tok, MESH_STAGE_NUM);
+    if (idx < 0)
+        return false;
+    *out = (enum mesh_obs_stage)idx;
+    return true;
 }
 
 bool mesh_obs_outcome_from_name(const char *name, enum mesh_obs_outcome *out)
 {
+    int idx;
     if (!name || !out)
         return false;
-    for (int i = 0; i < MESH_OBS_OUTCOME_NUM; i++) {
-        if (strcmp(name, k_outcome_tok[i]) == 0) {
-            *out = (enum mesh_obs_outcome)i;
-            return true;
-        }
-    }
-    return false;
+    idx = mo_find_token(name, k_outcome_tok, MESH_OBS_OUTCOME_NUM);
+    if (idx < 0)
+        return false;
+    *out = (enum mesh_obs_outcome)idx;
+    return true;
 }
 
 /* ── build-target tokens ────────────────────────────────────────────────
