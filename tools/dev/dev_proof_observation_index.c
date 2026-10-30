@@ -10,9 +10,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
+#include "platform/file_sync.h"
+#include "platform/path_replace.h"
+#include "platform/private_file.h"
 #include <sys/stat.h>
 #include <unistd.h>
+
+#if defined(_WIN32)
+#define INDEX_BINARY_MODE O_BINARY
+#else
+#define INDEX_BINARY_MODE 0
+#endif
 
 #define INDEX_MAGIC "Z23OIDX"
 #define INDEX_MAGIC_BYTES 8u
@@ -56,7 +64,7 @@ static bool oi_read_file(const char *index_path, uint8_t **buf_out,
     *buf_out = NULL;
     *len_out = 0;
     *present_out = false;
-    int fd = open(index_path, O_RDONLY);
+    int fd = open(index_path, O_RDONLY | INDEX_BINARY_MODE);
     if (fd < 0) {
         if (errno == ENOENT) return true;
         return oi_fail(why, why_len, ZCL_DEV_OBSERVATION_INDEX_WHY_INVALID);
@@ -170,7 +178,7 @@ static bool oi_write_atomic(const char *index_path, const uint8_t *rows,
                      (long)getpid());
     if (n < 0 || n >= (int)sizeof(tmp))
         return oi_fail(why, why_len, ZCL_DEV_OBSERVATION_INDEX_WHY_ARGUMENTS);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | INDEX_BINARY_MODE, 0600);
     if (fd < 0)
         return oi_fail(why, why_len, ZCL_DEV_OBSERVATION_INDEX_WHY_INVALID);
     uint8_t header[ZCL_DEV_OBSERVATION_INDEX_WIRE_BYTES] = {0};
@@ -181,9 +189,9 @@ static bool oi_write_atomic(const char *index_path, const uint8_t *rows,
     bool ok = write(fd, header, sizeof(header)) == (ssize_t)sizeof(header) &&
               (rows_len == 0 ||
                write(fd, rows, rows_len) == (ssize_t)rows_len);
-    if (ok && fsync(fd) != 0) ok = false;
+    if (ok && platform_file_sync(fd) != 0) ok = false;
     if (close(fd) != 0) ok = false;
-    if (!ok || rename(tmp, index_path) != 0) {
+    if (!ok || platform_path_replace(tmp, index_path) != 0) {
         (void)unlink(tmp);
         return oi_fail(why, why_len, ZCL_DEV_OBSERVATION_INDEX_WHY_INVALID);
     }
@@ -196,7 +204,7 @@ static int oi_root_cmp(const void *a, const void *b)
 }
 
 /* Exclusive merge lock: one read-modify-write at a time box-wide. */
-static bool oi_lock(const char *index_path, int *lock_fd_out,
+static bool oi_lock(const char *index_path, struct platform_private_file *lock,
     char *why, size_t why_len)
 {
     char lock_path[4096];
@@ -204,20 +212,10 @@ static bool oi_lock(const char *index_path, int *lock_fd_out,
     if (n < 0 || n >= (int)sizeof(lock_path))
         return oi_fail(why, why_len,
                        ZCL_DEV_OBSERVATION_INDEX_WHY_ARGUMENTS);
-    int fd = open(lock_path, O_RDWR | O_CREAT, 0600);
-    if (fd < 0 || flock(fd, LOCK_EX) != 0) {
-        if (fd >= 0) (void)close(fd);
+    if (!platform_private_file_open_locked_create_wait(lock_path, lock))
         return oi_fail(why, why_len,
                        ZCL_DEV_OBSERVATION_INDEX_WHY_INVALID);
-    }
-    *lock_fd_out = fd;
     return true;
-}
-
-static void oi_unlock(int lock_fd)
-{
-    (void)flock(lock_fd, LOCK_UN);
-    (void)close(lock_fd);
 }
 
 /* Inputs of one merge: the verified existing rows and a fresh enumeration.
@@ -316,8 +314,9 @@ bool zcl_dev_observation_index_merge(const char *index_path,
     if (!index_path || !index_path[0] || !store_root || !store_root[0])
         return oi_fail(why, why_len,
                        ZCL_DEV_OBSERVATION_INDEX_WHY_ARGUMENTS);
-    int lock_fd = -1;
-    if (!oi_lock(index_path, &lock_fd, why, why_len))
+    struct platform_private_file lock;
+    platform_private_file_init(&lock);
+    if (!oi_lock(index_path, &lock, why, why_len))
         return false;
 
     uint8_t *existing = NULL;
@@ -331,7 +330,7 @@ bool zcl_dev_observation_index_merge(const char *index_path,
     if (ok && noop) {
         zcl_dev_observation_release(fresh);
         free(existing);
-        oi_unlock(lock_fd);
+        platform_private_file_close(&lock);
         return true;
     }
 
@@ -345,7 +344,7 @@ bool zcl_dev_observation_index_merge(const char *index_path,
     free(merged);
     zcl_dev_observation_release(fresh);
     free(existing);
-    oi_unlock(lock_fd);
+    platform_private_file_close(&lock);
     if (ok && why && why_len) why[0] = 0;
     return ok;
 }

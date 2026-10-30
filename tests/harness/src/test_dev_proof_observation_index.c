@@ -29,29 +29,36 @@
 #include <stdlib.h>
 #include <string.h>
 
-static char g_dpoi_state[4096];
-static char g_dpoi_saved_xdg[4096];
-static bool g_dpoi_had_xdg;
+#if defined(_WIN32)
+#define DPOI_STATE_ENV "ZCL_STATE_ROOT"
+#else
+#define DPOI_STATE_ENV "XDG_STATE_HOME"
+#endif
 
-static void dpoi_isolate(const char *tag)
+static char g_dpoi_state[4096];
+static char g_dpoi_saved_state[4096];
+static bool g_dpoi_had_state;
+
+static bool dpoi_isolate(const char *tag)
 {
     char base[4096 - 64];
     test_make_tmpdir(base, sizeof(base), "dev_proof_obs_index", tag);
     (void)snprintf(g_dpoi_state, sizeof(g_dpoi_state), "%s/state", base);
-    if (!g_dpoi_had_xdg && getenv("XDG_STATE_HOME")) {
-        g_dpoi_had_xdg = true;
-        (void)snprintf(g_dpoi_saved_xdg, sizeof(g_dpoi_saved_xdg), "%s",
-                       getenv("XDG_STATE_HOME"));
+    if (!g_dpoi_had_state && getenv(DPOI_STATE_ENV)) {
+        g_dpoi_had_state = true;
+        (void)snprintf(g_dpoi_saved_state, sizeof(g_dpoi_saved_state), "%s",
+                       getenv(DPOI_STATE_ENV));
     }
-    setenv("XDG_STATE_HOME", g_dpoi_state, 1);
+    if (!platform_directory_ensure(g_dpoi_state, 0700)) return false;
+    return setenv(DPOI_STATE_ENV, g_dpoi_state, 1) == 0;
 }
 
 static void dpoi_restore(void)
 {
-    if (g_dpoi_had_xdg)
-        setenv("XDG_STATE_HOME", g_dpoi_saved_xdg, 1);
+    if (g_dpoi_had_state)
+        setenv(DPOI_STATE_ENV, g_dpoi_saved_state, 1);
     else
-        unsetenv("XDG_STATE_HOME");
+        unsetenv(DPOI_STATE_ENV);
 }
 
 static void dpoi_key(uint8_t key[ZCL_DEV_VERDICT_LEAF_KEY_BYTES], uint8_t seed)
@@ -147,7 +154,7 @@ static int test_dpoi_union_at_cap(void)
     int failures = 0;
     char root[4096], store[4096], novel[4096], index_path[4096];
     test_make_tmpdir(root, sizeof(root), "dev_proof_obs_index", "cap");
-    dpoi_isolate("cap");
+    if (!dpoi_isolate("cap")) return 1;
     (void)snprintf(store, sizeof(store), "%s/store", root);
     (void)snprintf(novel, sizeof(novel), "%s/novel", root);
     (void)snprintf(index_path, sizeof(index_path), "%s/index", root);
@@ -192,7 +199,7 @@ static int test_dpoi_merge_and_load(void)
     int failures = 0;
     char root[4096], store[4096], index_path[4096];
     test_make_tmpdir(root, sizeof(root), "dev_proof_obs_index", "merge");
-    dpoi_isolate("merge");
+    if (!dpoi_isolate("merge")) return 1;
     (void)snprintf(store, sizeof(store), "%s/store", root);
     (void)snprintf(index_path, sizeof(index_path), "%s/index", root);
     uint8_t emitted[3][32];
@@ -234,7 +241,8 @@ static int test_dpoi_merge_and_load(void)
         (void)snprintf(store_b, sizeof(store_b), "%s/store_b", root);
         ASSERT(platform_directory_ensure(store_b, 0700));
         uint8_t root_b1[32], root_b2[32];
-        ASSERT(dpoi_record(store_b, 7, "test_obs_index_delta", root_b1));
+        /* Seed 9 includes LF and Ctrl-Z in the exact serialized key. */
+        ASSERT(dpoi_record(store_b, 9, "test_obs_index_delta", root_b1));
         ASSERT(dpoi_record(store_b, 8, "test_obs_index_epsilon", root_b2));
         ASSERT(zcl_dev_observation_index_merge(index_path, store_b,
                                                why, sizeof(why)));
@@ -243,6 +251,17 @@ static int test_dpoi_merge_and_load(void)
                                               sizeof(why)));
         ASSERT(present && count == 5);
         ASSERT(dpoi_sorted_unique(leaves, count));
+        uint8_t expected_key[ZCL_DEV_VERDICT_LEAF_KEY_BYTES];
+        dpoi_key(expected_key, 9);
+        bool found_binary_key = false;
+        for (size_t i = 0; i < count; i++) {
+            if (memcmp(leaves[i].root, root_b1, 32) == 0) {
+                ASSERT(memcmp(leaves[i].leaf.key, expected_key,
+                              sizeof(expected_key)) == 0);
+                found_binary_key = true;
+            }
+        }
+        ASSERT(found_binary_key);
         zcl_dev_observation_release(leaves);
 
         /* Merging an absent store changes nothing. */
@@ -253,6 +272,8 @@ static int test_dpoi_merge_and_load(void)
                                               sizeof(why)));
         ASSERT(present && count == 5);
         zcl_dev_observation_release(leaves);
+        ASSERT(zcl_dev_observation_index_merge(index_path, store_b,
+                                               why, sizeof(why)));
     }
     TEST_END
     dpoi_restore();
@@ -265,7 +286,7 @@ static int test_dpoi_refusals(void)
     int failures = 0;
     char root[4096], store[4096], index_path[4096];
     test_make_tmpdir(root, sizeof(root), "dev_proof_obs_index", "refuse");
-    dpoi_isolate("refuse");
+    if (!dpoi_isolate("refuse")) return 1;
     (void)snprintf(store, sizeof(store), "%s/store", root);
     (void)snprintf(index_path, sizeof(index_path), "%s/index", root);
     uint8_t emitted[3][32];
@@ -296,6 +317,10 @@ static int test_dpoi_refusals(void)
         ASSERT(!zcl_dev_observation_index_merge(index_path, store,
                                                 why, sizeof(why)));
         ASSERT(strcmp(why, ZCL_DEV_OBSERVATION_INDEX_WHY_INVALID) == 0);
+        /* A refused merge must release its lock for the next writer. */
+        ASSERT(remove(index_path) == 0);
+        ASSERT(zcl_dev_observation_index_merge(index_path, store,
+                                               why, sizeof(why)));
     }
     TEST_END
     dpoi_restore();
@@ -308,7 +333,7 @@ static int test_dpoi_lookup_parity(void)
     int failures = 0;
     char root[4096], store[4096], index_path[4096];
     test_make_tmpdir(root, sizeof(root), "dev_proof_obs_index", "lookup");
-    dpoi_isolate("lookup");
+    if (!dpoi_isolate("lookup")) return 1;
     (void)snprintf(store, sizeof(store), "%s/store", root);
     (void)snprintf(index_path, sizeof(index_path), "%s/index", root);
     uint8_t emitted[3][32];
@@ -390,11 +415,11 @@ static int test_dpoi_query(void)
     int failures = 0;
     char root[4096], store[4096], index_path[4096];
     test_make_tmpdir(root, sizeof(root), "dev_proof_obs_index", "query");
-    dpoi_isolate("query");
     (void)snprintf(store, sizeof(store), "%s/store", root);
     (void)snprintf(index_path, sizeof(index_path), "%s/index", root);
     uint8_t emitted[3][32];
     TEST_CASE("dev_proof_obs_index: box-level query over empty, full and conflicting indexes") {
+        ASSERT(dpoi_isolate("query"));
         char why[128] = {0};
         struct zcl_dev_observation_query_report report = {0};
 
