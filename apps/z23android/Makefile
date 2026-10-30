@@ -186,3 +186,5 @@ test-host:
 	  ../../platform/modules/encoding/src/utilstrencodings.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
 	  $(SPEECH_JSON) -o '$(BUILD_DIR)/assistant-test'
 	'$(BUILD_DIR)/assistant-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/thermal_test.c thermal.c -o '$(BUILD_DIR)/thermal-test'
+	'$(BUILD_DIR)/thermal-test'

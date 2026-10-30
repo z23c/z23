@@ -18,7 +18,7 @@ endif()
 
 add_library(z23android SHARED
     android_main.c node_service.c node_watch.c camera.c native_ui.c controller.c conversation.c bridge_client.c operations.c fleet.c
-    audio.c speech_client.c voice.c hosts.c pairing.c
+    audio.c speech_client.c voice.c hosts.c pairing.c thermal.c
     "${Z23_ROOT}/platform/modules/sha3/src/sha3.c"
     "${Z23_ROOT}/contexts/commons/packages/zutf8/src/zutf8.c"
     "${Z23_ROOT}/vendor/qrcodegen/qrcodegen.c"

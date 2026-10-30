@@ -142,6 +142,13 @@ client connection and discards late answers. It does not stop the full node
 or establish that remote model generation stopped. Cancellation during the
 initial node refresh waits for the bounded observation commands to finish.
 
+Thermal pace. `thermal.c` maps the Android thermal status to a node pace with
+hysteresis: NONE and LIGHT give normal pace, MODERATE and SEVERE give gentle
+pace, and CRITICAL or above pauses the node. A paused node leaves the pause at
+MODERATE or below, and returns to normal pace only at LIGHT or below. `zapp_thermal_start`
+registers the platform listener through the NDK thermal API; the node does not yet
+apply this pace.
+
 ## Private voice and fleet host
 
 A laptop connected over USB runs the private assistant. The C23 host
