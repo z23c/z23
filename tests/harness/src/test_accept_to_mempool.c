@@ -559,6 +559,349 @@ static int atm_detail_branches(const struct atm_ctx *c)
     return failures;
 }
 
+static int atm_report(bool ok)
+{
+    if (ok) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+
+static bool atm_gate_bad_sig(const struct atm_ctx *c)
+{
+    struct tx_mempool pool;
+    tx_mempool_init(&pool, 0);
+
+    struct coins_view null_view;
+    memset(&null_view, 0, sizeof(null_view));
+    struct coins_view_cache coins;
+    coins_view_cache_init(&coins, &null_view);
+
+    struct uint256 utxo;
+    memset(utxo.data, 0xD1, 32);
+    bool ok = atm_add_p2pkh_utxo(&coins, &utxo, atm_det_utxo, c->kid);
+
+    struct transaction tx;
+    atm_build_spend(&tx, &utxo, 50 * COIN_VALUE);
+    atm_sign_input(&tx, c->spk, atm_det_utxo, c->key, c->pub,
+                   /*corrupt=*/true);
+
+    enum mempool_accept_result r =
+        accept_to_mempool(&pool, &coins, c->state, c->params, &tx);
+
+    ok = ok && (r == MEMPOOL_ACCEPT_INVALID);
+    ok = ok && (tx_mempool_size(&pool) == 0);
+
+    transaction_free(&tx);
+    coins_view_cache_free(&coins);
+    tx_mempool_free(&pool);
+    return ok;
+}
+
+static bool atm_gate_valid_sig(const struct atm_ctx *c)
+{
+    struct tx_mempool pool;
+    tx_mempool_init(&pool, 0);
+
+    struct coins_view null_view;
+    memset(&null_view, 0, sizeof(null_view));
+    struct coins_view_cache coins;
+    coins_view_cache_init(&coins, &null_view);
+
+    struct uint256 utxo;
+    memset(utxo.data, 0xD2, 32);
+    bool ok = atm_add_p2pkh_utxo(&coins, &utxo, atm_det_utxo, c->kid);
+
+    struct transaction tx;
+    atm_build_spend(&tx, &utxo, 50 * COIN_VALUE);
+    atm_sign_input(&tx, c->spk, atm_det_utxo, c->key, c->pub,
+                   /*corrupt=*/false);
+
+    enum mempool_accept_result r =
+        accept_to_mempool(&pool, &coins, c->state, c->params, &tx);
+
+    ok = ok && (r == MEMPOOL_ACCEPT_OK);
+    ok = ok && (tx_mempool_size(&pool) == 1);
+    ok = ok && tx_mempool_exists(&pool, &tx.hash);
+
+    transaction_free(&tx);
+    coins_view_cache_free(&coins);
+    tx_mempool_free(&pool);
+    return ok;
+}
+
+static bool atm_gate_missing_input(const struct atm_ctx *c)
+{
+    struct tx_mempool pool;
+    tx_mempool_init(&pool, 0);
+
+    struct coins_view null_view;
+    memset(&null_view, 0, sizeof(null_view));
+    struct coins_view_cache coins;
+    coins_view_cache_init(&coins, &null_view);
+
+    struct uint256 utxo;
+    memset(utxo.data, 0xD3, 32); /* never added to the view */
+
+    struct transaction tx;
+    atm_build_spend(&tx, &utxo, 50 * COIN_VALUE);
+    atm_sign_input(&tx, c->spk, atm_det_utxo, c->key, c->pub,
+                   /*corrupt=*/false);
+
+    enum mempool_accept_result r =
+        accept_to_mempool(&pool, &coins, c->state, c->params, &tx);
+
+    bool ok = (r == MEMPOOL_ACCEPT_MISSING_INPUTS);
+    ok = ok && (tx_mempool_size(&pool) == 0);
+
+    transaction_free(&tx);
+    coins_view_cache_free(&coins);
+    tx_mempool_free(&pool);
+    return ok;
+}
+
+static bool atm_gate_incomplete_ctx(const struct atm_ctx *c)
+{
+    struct tx_mempool pool;
+    tx_mempool_init(&pool, 0);
+    struct coins_view null_view;
+    memset(&null_view, 0, sizeof(null_view));
+    struct coins_view_cache coins;
+    coins_view_cache_init(&coins, &null_view);
+    struct uint256 utxo;
+    memset(utxo.data, 0xD8, 32);
+    bool ok = atm_add_p2pkh_utxo(&coins, &utxo, atm_det_utxo, c->kid);
+    struct transaction tx;
+    atm_build_spend(&tx, &utxo, 50 * COIN_VALUE);
+    atm_sign_input(&tx, c->spk, atm_det_utxo, c->key, c->pub,
+                   /*corrupt=*/false);
+
+    enum mempool_accept_result r =
+        accept_to_mempool(&pool, &coins, NULL, c->params, &tx);
+    ok = ok && r == MEMPOOL_ACCEPT_INTERNAL_ERROR;
+    ok = ok && tx_mempool_size(&pool) == 0;
+
+    transaction_free(&tx);
+    coins_view_cache_free(&coins);
+    tx_mempool_free(&pool);
+    return ok;
+}
+
+static bool atm_gate_nonfinal(const struct atm_ctx *c)
+{
+    struct tx_mempool pool;
+    tx_mempool_init(&pool, 0);
+
+    struct coins_view null_view;
+    memset(&null_view, 0, sizeof(null_view));
+    struct coins_view_cache coins;
+    coins_view_cache_init(&coins, &null_view);
+
+    struct uint256 utxo;
+    memset(utxo.data, 0xD4, 32);
+    bool ok = atm_add_p2pkh_utxo(&coins, &utxo, atm_det_utxo, c->kid);
+
+    struct transaction tx;
+    atm_build_spend(&tx, &utxo, 50 * COIN_VALUE);
+    /* Make the tx NON-FINAL: future height-domain lock_time + a
+     * non-final input sequence (so the lock is not overridden). Set
+     * BEFORE signing so the sighash commits to them. */
+    tx.lock_time = 10000000u;          /* height domain, far future */
+    tx.vin[0].sequence = 0xFFFFFFFEu;  /* NOT 0xFFFFFFFF → lock active */
+    atm_sign_input(&tx, c->spk, atm_det_utxo, c->key, c->pub,
+                   /*corrupt=*/false);
+
+    enum mempool_accept_result r =
+        accept_to_mempool(&pool, &coins, c->state, c->params, &tx);
+
+    ok = ok && (r == MEMPOOL_ACCEPT_NONFINAL);
+    ok = ok && (tx_mempool_size(&pool) == 0);
+
+    transaction_free(&tx);
+    coins_view_cache_free(&coins);
+    tx_mempool_free(&pool);
+    return ok;
+}
+
+static bool atm_gate_expiring(const struct atm_ctx *c)
+{
+    struct tx_mempool pool;
+    tx_mempool_init(&pool, 0);
+
+    struct coins_view null_view;
+    memset(&null_view, 0, sizeof(null_view));
+    struct coins_view_cache coins;
+    coins_view_cache_init(&coins, &null_view);
+
+    struct uint256 utxo;
+    memset(utxo.data, 0xD7, 32);
+    bool ok = atm_add_p2pkh_utxo(&coins, &utxo, atm_det_utxo, c->kid);
+
+    struct transaction tx;
+    atm_build_spend(&tx, &utxo, 50 * COIN_VALUE);
+    tx.overwintered = true;
+    tx.version = OVERWINTER_TX_VERSION;
+    tx.version_group_id = OVERWINTER_VERSION_GROUP_ID;
+    /* Empty test chain: next_height=0; 0+3 > 2, so relay policy
+     * classifies this as expiring soon before expensive proof/script work. */
+    tx.expiry_height = 2;
+    transaction_compute_hash(&tx);
+
+    enum mempool_accept_result r =
+        accept_to_mempool(&pool, &coins, c->state, c->params, &tx);
+
+    ok = ok && (r == MEMPOOL_ACCEPT_EXPIRING_SOON);
+    ok = ok && (tx_mempool_size(&pool) == 0);
+
+    transaction_free(&tx);
+    coins_view_cache_free(&coins);
+    tx_mempool_free(&pool);
+    return ok;
+}
+
+static bool atm_gate_wallet_committed(struct wallet *wallet,
+                                      struct wallet_tx *wtx,
+                                      struct tx_mempool *pool,
+                                      const struct uint256 *utxo, bool ok)
+{
+    ok = ok && tx_mempool_size(pool) == 1;
+    ok = ok && tx_mempool_exists(pool, &wtx->tx.hash);
+    ok = ok && wallet->num_wallet_tx == 1;
+    ok = ok && wallet->num_spent == 1;
+    ok = ok && wallet_is_outpoint_spent(wallet, utxo, 0);
+    return ok;
+}
+
+static bool atm_gate_wallet_rolled_back(struct wallet *wallet,
+                                        struct tx_mempool *pool,
+                                        const struct uint256 *utxo, bool ok)
+{
+    ok = ok && tx_mempool_size(pool) == 0;
+    ok = ok && wallet->num_wallet_tx == 0;
+    ok = ok && wallet->num_spent == 0;
+    ok = ok && !wallet_is_outpoint_spent(wallet, utxo, 0);
+    return ok;
+}
+
+static bool atm_gate_wallet_reaccepted(struct wallet *wallet,
+                                       struct wallet_tx *wtx,
+                                       struct tx_mempool *pool, bool ok)
+{
+    ok = ok && tx_mempool_exists(pool, &wtx->tx.hash);
+    ok = ok && wallet->num_wallet_tx == 0;
+    ok = ok && wallet->num_spent == 0;
+    return ok;
+}
+
+static bool atm_gate_wallet_bad_sig(const struct atm_ctx *c)
+{
+    struct tx_mempool pool;
+    tx_mempool_init(&pool, 0);
+
+    struct coins_view null_view;
+    memset(&null_view, 0, sizeof(null_view));
+    struct coins_view_cache coins;
+    coins_view_cache_init(&coins, &null_view);
+
+    struct uint256 utxo;
+    memset(utxo.data, 0xD5, 32);
+    bool ok = atm_add_p2pkh_utxo(&coins, &utxo, atm_det_utxo, c->kid);
+
+    struct wallet *wallet = zcl_calloc(1, sizeof(*wallet),
+                                       "atm_bad_sig_wallet");
+    ok = ok && wallet != NULL;
+    if (wallet) {
+        wallet_init(wallet);
+        struct wallet_tx wtx;
+        memset(&wtx, 0, sizeof(wtx));
+        atm_build_spend(&wtx.tx, &utxo, 50 * COIN_VALUE);
+        atm_sign_input(&wtx.tx, c->spk, atm_det_utxo, c->key, c->pub,
+                       /*corrupt=*/true);
+
+        struct wallet_tx_admission admission = {
+            .mempool = &pool,
+            .coins_tip = &coins,
+            .main_state = c->state,
+            .params = c->params,
+        };
+        struct zcl_result r =
+            wallet_commit_transaction(wallet, &wtx, &admission);
+
+        ok = ok && !r.ok;
+        ok = ok && tx_mempool_size(&pool) == 0;
+        ok = ok && wallet->num_wallet_tx == 0;
+        ok = ok && wallet->num_spent == 0;
+
+        transaction_free(&wtx.tx);
+        wallet_free(wallet);
+        free(wallet);
+    }
+    coins_view_cache_free(&coins);
+    tx_mempool_free(&pool);
+    return ok;
+}
+
+static bool atm_gate_wallet_valid(const struct atm_ctx *c)
+{
+    struct tx_mempool pool;
+    tx_mempool_init(&pool, 0);
+
+    struct coins_view null_view;
+    memset(&null_view, 0, sizeof(null_view));
+    struct coins_view_cache coins;
+    coins_view_cache_init(&coins, &null_view);
+
+    struct uint256 utxo;
+    memset(utxo.data, 0xD6, 32);
+    bool ok = atm_add_p2pkh_utxo(&coins, &utxo, atm_det_utxo, c->kid);
+
+    struct wallet *wallet = zcl_calloc(1, sizeof(*wallet),
+                                       "atm_valid_wallet");
+    ok = ok && wallet != NULL;
+    if (wallet) {
+        wallet_init(wallet);
+        struct wallet_tx wtx;
+        memset(&wtx, 0, sizeof(wtx));
+        atm_build_spend(&wtx.tx, &utxo, 50 * COIN_VALUE);
+        atm_sign_input(&wtx.tx, c->spk, atm_det_utxo, c->key, c->pub,
+                       /*corrupt=*/false);
+
+        struct wallet_tx_admission admission = {
+            .mempool = &pool,
+            .coins_tip = &coins,
+            .main_state = c->state,
+            .params = c->params,
+        };
+        struct zcl_result r =
+            wallet_commit_transaction(wallet, &wtx, &admission);
+
+        ok = ok && r.ok;
+        ok = atm_gate_wallet_committed(wallet, &wtx, &pool, &utxo, ok);
+
+        struct zcl_result rollback =
+            wallet_rollback_transaction(wallet, &wtx, &pool);
+        ok = ok && rollback.ok;
+        ok = atm_gate_wallet_rolled_back(wallet, &pool, &utxo, ok);
+
+        /* Restart recovery re-admits the same signed bytes without
+         * recreating the already-durable wallet mutation. */
+        struct zcl_result reaccepted =
+            wallet_reaccept_transaction(&wtx, &admission);
+        ok = ok && reaccepted.ok;
+        ok = atm_gate_wallet_reaccepted(wallet, &wtx, &pool, ok);
+        tx_mempool_remove(&pool, &wtx.tx.hash);
+
+        transaction_free(&wtx.tx);
+        wallet_free(wallet);
+        free(wallet);
+    }
+    coins_view_cache_free(&coins);
+    tx_mempool_free(&pool);
+    return ok;
+}
+
 int test_accept_to_mempool(void)
 {
     int failures = 0;
@@ -579,6 +922,10 @@ int test_accept_to_mempool(void)
     struct script prev_spk;
     script_for_p2pkh(&prev_spk, &kid);
     const int64_t utxo_value = 100 * COIN_VALUE;
+    struct atm_ctx ctx = {
+        .state = &main_state, .params = params, .kid = &kid,
+        .spk = &prev_spk, .key = &key, .pub = &pub,
+    };
 
     /* ================================================================
      * 1. BAD signature → REJECTED before relay.
@@ -587,35 +934,7 @@ int test_accept_to_mempool(void)
      *    leaves the mempool empty.
      * ================================================================ */
     printf("accept_to_mempool: bad-sig tx REJECTED before relay... ");
-    {
-        struct tx_mempool pool;
-        tx_mempool_init(&pool, 0);
-
-        struct coins_view null_view;
-        memset(&null_view, 0, sizeof(null_view));
-        struct coins_view_cache coins;
-        coins_view_cache_init(&coins, &null_view);
-
-        struct uint256 utxo;
-        memset(utxo.data, 0xD1, 32);
-        bool ok = atm_add_p2pkh_utxo(&coins, &utxo, utxo_value, &kid);
-
-        struct transaction tx;
-        atm_build_spend(&tx, &utxo, 50 * COIN_VALUE);
-        atm_sign_input(&tx, &prev_spk, utxo_value, &key, &pub,
-                       /*corrupt=*/true);
-
-        enum mempool_accept_result r =
-            accept_to_mempool(&pool, &coins, &main_state, params, &tx);
-
-        ok = ok && (r == MEMPOOL_ACCEPT_INVALID);
-        ok = ok && (tx_mempool_size(&pool) == 0);
-
-        transaction_free(&tx);
-        coins_view_cache_free(&coins);
-        tx_mempool_free(&pool);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += atm_report(atm_gate_bad_sig(&ctx));
 
     /* ================================================================
      * 2. VALID signature → ACCEPTED (so it can be relayed).
@@ -623,36 +942,7 @@ int test_accept_to_mempool(void)
      *    (MEMPOOL_ACCEPT_OK) and the mempool holds it.
      * ================================================================ */
     printf("accept_to_mempool: valid-sig tx ACCEPTED... ");
-    {
-        struct tx_mempool pool;
-        tx_mempool_init(&pool, 0);
-
-        struct coins_view null_view;
-        memset(&null_view, 0, sizeof(null_view));
-        struct coins_view_cache coins;
-        coins_view_cache_init(&coins, &null_view);
-
-        struct uint256 utxo;
-        memset(utxo.data, 0xD2, 32);
-        bool ok = atm_add_p2pkh_utxo(&coins, &utxo, utxo_value, &kid);
-
-        struct transaction tx;
-        atm_build_spend(&tx, &utxo, 50 * COIN_VALUE);
-        atm_sign_input(&tx, &prev_spk, utxo_value, &key, &pub,
-                       /*corrupt=*/false);
-
-        enum mempool_accept_result r =
-            accept_to_mempool(&pool, &coins, &main_state, params, &tx);
-
-        ok = ok && (r == MEMPOOL_ACCEPT_OK);
-        ok = ok && (tx_mempool_size(&pool) == 1);
-        ok = ok && tx_mempool_exists(&pool, &tx.hash);
-
-        transaction_free(&tx);
-        coins_view_cache_free(&coins);
-        tx_mempool_free(&pool);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += atm_report(atm_gate_valid_sig(&ctx));
 
     /* The real progress mutex must be acquired before the input-dependent
      * cs_main section. Simulate the finalizer holding progress and needing
@@ -668,63 +958,12 @@ int test_accept_to_mempool(void)
      *    signature the gate reports the input is unknown.
      * ================================================================ */
     printf("accept_to_mempool: missing-input tx → MISSING_INPUTS... ");
-    {
-        struct tx_mempool pool;
-        tx_mempool_init(&pool, 0);
-
-        struct coins_view null_view;
-        memset(&null_view, 0, sizeof(null_view));
-        struct coins_view_cache coins;
-        coins_view_cache_init(&coins, &null_view);
-
-        struct uint256 utxo;
-        memset(utxo.data, 0xD3, 32); /* never added to the view */
-
-        struct transaction tx;
-        atm_build_spend(&tx, &utxo, 50 * COIN_VALUE);
-        atm_sign_input(&tx, &prev_spk, utxo_value, &key, &pub,
-                       /*corrupt=*/false);
-
-        enum mempool_accept_result r =
-            accept_to_mempool(&pool, &coins, &main_state, params, &tx);
-
-        bool ok = (r == MEMPOOL_ACCEPT_MISSING_INPUTS);
-        ok = ok && (tx_mempool_size(&pool) == 0);
-
-        transaction_free(&tx);
-        coins_view_cache_free(&coins);
-        tx_mempool_free(&pool);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += atm_report(atm_gate_missing_input(&ctx));
 
     /* The shared gate is a production boundary, not a best-effort helper:
      * missing chain context must never skip crypto/input checks and admit. */
     printf("accept_to_mempool: incomplete context fails closed... ");
-    {
-        struct tx_mempool pool;
-        tx_mempool_init(&pool, 0);
-        struct coins_view null_view;
-        memset(&null_view, 0, sizeof(null_view));
-        struct coins_view_cache coins;
-        coins_view_cache_init(&coins, &null_view);
-        struct uint256 utxo;
-        memset(utxo.data, 0xD8, 32);
-        bool ok = atm_add_p2pkh_utxo(&coins, &utxo, utxo_value, &kid);
-        struct transaction tx;
-        atm_build_spend(&tx, &utxo, 50 * COIN_VALUE);
-        atm_sign_input(&tx, &prev_spk, utxo_value, &key, &pub,
-                       /*corrupt=*/false);
-
-        enum mempool_accept_result r =
-            accept_to_mempool(&pool, &coins, NULL, params, &tx);
-        ok = ok && r == MEMPOOL_ACCEPT_INTERNAL_ERROR;
-        ok = ok && tx_mempool_size(&pool) == 0;
-
-        transaction_free(&tx);
-        coins_view_cache_free(&coins);
-        tx_mempool_free(&pool);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += atm_report(atm_gate_incomplete_ctx(&ctx));
 
     /* ================================================================
      * 4. D5 PARITY: NON-FINAL tx REJECTED without punishing the peer.
@@ -739,210 +978,30 @@ int test_accept_to_mempool(void)
      *    set BEFORE signing so the signature covers them.
      * ================================================================ */
     printf("accept_to_mempool: NON-FINAL tx rejected by policy... ");
-    {
-        struct tx_mempool pool;
-        tx_mempool_init(&pool, 0);
-
-        struct coins_view null_view;
-        memset(&null_view, 0, sizeof(null_view));
-        struct coins_view_cache coins;
-        coins_view_cache_init(&coins, &null_view);
-
-        struct uint256 utxo;
-        memset(utxo.data, 0xD4, 32);
-        bool ok = atm_add_p2pkh_utxo(&coins, &utxo, utxo_value, &kid);
-
-        struct transaction tx;
-        atm_build_spend(&tx, &utxo, 50 * COIN_VALUE);
-        /* Make the tx NON-FINAL: future height-domain lock_time + a
-         * non-final input sequence (so the lock is not overridden). Set
-         * BEFORE signing so the sighash commits to them. */
-        tx.lock_time = 10000000u;          /* height domain, far future */
-        tx.vin[0].sequence = 0xFFFFFFFEu;  /* NOT 0xFFFFFFFF → lock active */
-        atm_sign_input(&tx, &prev_spk, utxo_value, &key, &pub,
-                       /*corrupt=*/false);
-
-        enum mempool_accept_result r =
-            accept_to_mempool(&pool, &coins, &main_state, params, &tx);
-
-        ok = ok && (r == MEMPOOL_ACCEPT_NONFINAL);
-        ok = ok && (tx_mempool_size(&pool) == 0);
-
-        transaction_free(&tx);
-        coins_view_cache_free(&coins);
-        tx_mempool_free(&pool);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += atm_report(atm_gate_nonfinal(&ctx));
 
     /* ================================================================
      * 5. L5 PARITY: a transaction expiring inside the three-block relay
      *    horizon is rejected. This is mempool policy, not block consensus.
      * ================================================================ */
     printf("accept_to_mempool: expiring-soon tx rejected by policy... ");
-    {
-        struct tx_mempool pool;
-        tx_mempool_init(&pool, 0);
-
-        struct coins_view null_view;
-        memset(&null_view, 0, sizeof(null_view));
-        struct coins_view_cache coins;
-        coins_view_cache_init(&coins, &null_view);
-
-        struct uint256 utxo;
-        memset(utxo.data, 0xD7, 32);
-        bool ok = atm_add_p2pkh_utxo(&coins, &utxo, utxo_value, &kid);
-
-        struct transaction tx;
-        atm_build_spend(&tx, &utxo, 50 * COIN_VALUE);
-        tx.overwintered = true;
-        tx.version = OVERWINTER_TX_VERSION;
-        tx.version_group_id = OVERWINTER_VERSION_GROUP_ID;
-        /* Empty test chain: next_height=0; 0+3 > 2, so relay policy
-         * classifies this as expiring soon before expensive proof/script work. */
-        tx.expiry_height = 2;
-        transaction_compute_hash(&tx);
-
-        enum mempool_accept_result r =
-            accept_to_mempool(&pool, &coins, &main_state, params, &tx);
-
-        ok = ok && (r == MEMPOOL_ACCEPT_EXPIRING_SOON);
-        ok = ok && (tx_mempool_size(&pool) == 0);
-
-        transaction_free(&tx);
-        coins_view_cache_free(&coins);
-        tx_mempool_free(&pool);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += atm_report(atm_gate_expiring(&ctx));
 
     /* ================================================================
      * 6. Wallet commit with a forged signature fails atomically: an
      *    invalid transaction changes neither wallet nor mempool state.
      * ================================================================ */
     printf("wallet commit: bad-sig tx rejected with no state mutation... ");
-    {
-        struct tx_mempool pool;
-        tx_mempool_init(&pool, 0);
-
-        struct coins_view null_view;
-        memset(&null_view, 0, sizeof(null_view));
-        struct coins_view_cache coins;
-        coins_view_cache_init(&coins, &null_view);
-
-        struct uint256 utxo;
-        memset(utxo.data, 0xD5, 32);
-        bool ok = atm_add_p2pkh_utxo(&coins, &utxo, utxo_value, &kid);
-
-        struct wallet *wallet = zcl_calloc(1, sizeof(*wallet),
-                                           "atm_bad_sig_wallet");
-        ok = ok && wallet != NULL;
-        if (wallet) {
-            wallet_init(wallet);
-            struct wallet_tx wtx;
-            memset(&wtx, 0, sizeof(wtx));
-            atm_build_spend(&wtx.tx, &utxo, 50 * COIN_VALUE);
-            atm_sign_input(&wtx.tx, &prev_spk, utxo_value, &key, &pub,
-                           /*corrupt=*/true);
-
-            struct wallet_tx_admission admission = {
-                .mempool = &pool,
-                .coins_tip = &coins,
-                .main_state = &main_state,
-                .params = params,
-            };
-            struct zcl_result r =
-                wallet_commit_transaction(wallet, &wtx, &admission);
-
-            ok = ok && !r.ok;
-            ok = ok && tx_mempool_size(&pool) == 0;
-            ok = ok && wallet->num_wallet_tx == 0;
-            ok = ok && wallet->num_spent == 0;
-
-            transaction_free(&wtx.tx);
-            wallet_free(wallet);
-            free(wallet);
-        }
-        coins_view_cache_free(&coins);
-        tx_mempool_free(&pool);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += atm_report(atm_gate_wallet_bad_sig(&ctx));
 
     /* ================================================================
      * 7. Wallet commit accepts a valid transaction only after the shared
      *    gate, then updates the mempool and wallet together.
      * ================================================================ */
     printf("wallet commit: valid tx admitted through shared gate... ");
-    {
-        struct tx_mempool pool;
-        tx_mempool_init(&pool, 0);
+    failures += atm_report(atm_gate_wallet_valid(&ctx));
 
-        struct coins_view null_view;
-        memset(&null_view, 0, sizeof(null_view));
-        struct coins_view_cache coins;
-        coins_view_cache_init(&coins, &null_view);
-
-        struct uint256 utxo;
-        memset(utxo.data, 0xD6, 32);
-        bool ok = atm_add_p2pkh_utxo(&coins, &utxo, utxo_value, &kid);
-
-        struct wallet *wallet = zcl_calloc(1, sizeof(*wallet),
-                                           "atm_valid_wallet");
-        ok = ok && wallet != NULL;
-        if (wallet) {
-            wallet_init(wallet);
-            struct wallet_tx wtx;
-            memset(&wtx, 0, sizeof(wtx));
-            atm_build_spend(&wtx.tx, &utxo, 50 * COIN_VALUE);
-            atm_sign_input(&wtx.tx, &prev_spk, utxo_value, &key, &pub,
-                           /*corrupt=*/false);
-
-            struct wallet_tx_admission admission = {
-                .mempool = &pool,
-                .coins_tip = &coins,
-                .main_state = &main_state,
-                .params = params,
-            };
-            struct zcl_result r =
-                wallet_commit_transaction(wallet, &wtx, &admission);
-
-            ok = ok && r.ok;
-            ok = ok && tx_mempool_size(&pool) == 1;
-            ok = ok && tx_mempool_exists(&pool, &wtx.tx.hash);
-            ok = ok && wallet->num_wallet_tx == 1;
-            ok = ok && wallet->num_spent == 1;
-            ok = ok && wallet_is_outpoint_spent(wallet, &utxo, 0);
-
-            struct zcl_result rollback =
-                wallet_rollback_transaction(wallet, &wtx, &pool);
-            ok = ok && rollback.ok;
-            ok = ok && tx_mempool_size(&pool) == 0;
-            ok = ok && wallet->num_wallet_tx == 0;
-            ok = ok && wallet->num_spent == 0;
-            ok = ok && !wallet_is_outpoint_spent(wallet, &utxo, 0);
-
-            /* Restart recovery re-admits the same signed bytes without
-             * recreating the already-durable wallet mutation. */
-            struct zcl_result reaccepted =
-                wallet_reaccept_transaction(&wtx, &admission);
-            ok = ok && reaccepted.ok;
-            ok = ok && tx_mempool_exists(&pool, &wtx.tx.hash);
-            ok = ok && wallet->num_wallet_tx == 0;
-            ok = ok && wallet->num_spent == 0;
-            tx_mempool_remove(&pool, &wtx.tx.hash);
-
-            transaction_free(&wtx.tx);
-            wallet_free(wallet);
-            free(wallet);
-        }
-        coins_view_cache_free(&coins);
-        tx_mempool_free(&pool);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
-
-    struct atm_ctx detail_ctx = {
-        .state = &main_state, .params = params, .kid = &kid,
-        .spk = &prev_spk, .key = &key, .pub = &pub,
-    };
-    failures += atm_detail_branches(&detail_ctx);
+    failures += atm_detail_branches(&ctx);
 
     main_state_free(&main_state);
 
