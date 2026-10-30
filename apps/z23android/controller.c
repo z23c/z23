@@ -152,10 +152,11 @@ static void observe_node(struct controller *c)
     free(output);
     bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
     bool wanted = zapp_node_wanted(&c->runtime);
+    bool onion = n.responding && zapp_onion_ready(&c->runtime);
     char status[1024], line[96];
     zapp_sync_line(n.responding, process_running, n.height, n.target, status, sizeof(status));
     if (stopping) copy_text(status, sizeof(status), "The node is saving its data before it exits.");
-    zapp_node_line(n.responding, process_running, stopping, n.height, n.target, n.peers, line, sizeof(line));
+    zapp_node_line(n.responding, process_running, stopping, onion, n.height, n.target, n.peers, line, sizeof(line));
     pthread_mutex_lock(&c->lock);
     c->view.node_running = n.responding;
     c->view.node_process_running = process_running;
@@ -697,7 +698,7 @@ static void *worker(void *opaque)
             c->view.node_wanted = wanted;
             if (!c->view.node_running) {
                 zapp_sync_line(false, process_running, -1, -1, c->view.sync_status, sizeof(c->view.sync_status));
-                zapp_node_line(false, process_running, stopping, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
+                zapp_node_line(false, process_running, stopping, false, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
             }
             c->view.busy = false;
             pthread_mutex_unlock(&c->lock);
@@ -729,7 +730,7 @@ bool zapp_controller_start(const char *files, const char *libs, bool preview, vo
     c->view.node_wanted = zapp_node_wanted(&c->runtime);
     copy_text(c->files, sizeof(c->files), files); c->notify = notify;
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), "Start the node to begin synchronization.");
-    zapp_node_line(false, c->view.node_process_running, false, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
+    zapp_node_line(false, c->view.node_process_running, false, false, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
     c->view.fleet_paired = zapp_speech_client_has_host(files);
     copy_text(c->view.connection, sizeof(c->view.connection), c->view.fleet_paired ?
               "Laptop host paired. Connecting." : "Private assistant: pair your laptop host over USB.");

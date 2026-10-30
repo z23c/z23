@@ -52,17 +52,18 @@ const char *zapp_grouped(int64_t value, char out[32])
     out[at] = 0;
     return out;
 }
-const char *zapp_node_line(bool responding, bool process_running, bool stopping, int64_t height,
-                           int64_t target, int64_t peers, char *out, size_t cap)
+const char *zapp_node_line(bool responding, bool process_running, bool stopping, bool onion_ready,
+                           int64_t height, int64_t target, int64_t peers, char *out, size_t cap)
 {
     char at[32], top[32], count[40] = "";
+    const char *onion = responding ? (onion_ready ? " · onion ready" : " · onion starting") : "";
     if (peers >= 0) snprintf(count, sizeof(count), " · %lld %s", (long long)peers, peers == 1 ? "peer" : "peers");
     if (stopping) snprintf(out, cap, "Node stopping");
     else if (!responding) snprintf(out, cap, "Node %s", process_running ? "starting" : "stopped");
-    else if (height < 0) snprintf(out, cap, "Node running%s", count);
-    else if (target <= 0) snprintf(out, cap, "Node waiting for peers · %s", zapp_grouped(height, at));
-    else if (height >= target) snprintf(out, cap, "Node in sync · %s%s", zapp_grouped(height, at), count);
-    else snprintf(out, cap, "Node catching up · %s of %s", zapp_grouped(height, at), zapp_grouped(target, top));
+    else if (height < 0) snprintf(out, cap, "Node running%s%s", count, onion);
+    else if (target <= 0) snprintf(out, cap, "Node waiting for peers · %s%s", zapp_grouped(height, at), onion);
+    else if (height >= target) snprintf(out, cap, "Node in sync · %s%s%s", zapp_grouped(height, at), count, onion);
+    else snprintf(out, cap, "Node catching up · %s of %s%s", zapp_grouped(height, at), zapp_grouped(target, top), onion);
     return out;
 }
 enum zapp_pace zapp_status_pace(const char *status)

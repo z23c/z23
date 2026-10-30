@@ -20,9 +20,9 @@ const char *zapp_fleet_line(const char *report, bool stale, bool paired, char *o
 const char *zapp_grouped(int64_t value, char out[32]);
 /* One line for the phone node on the main screen. stopping wins until the node exits; height,
  * target and peers are negative when unknown; target is the highest height reported by peers.
- * Returns out. */
-const char *zapp_node_line(bool responding, bool process_running, bool stopping, int64_t height,
-                           int64_t target, int64_t peers, char *out, size_t cap);
+ * onion_ready adds the onion service state, shown only while the node responds. Returns out. */
+const char *zapp_node_line(bool responding, bool process_running, bool stopping, bool onion_ready,
+                           int64_t height, int64_t target, int64_t peers, char *out, size_t cap);
 /* The sentence under More that adds what the node line does not say: how many blocks are left,
  * or that none are. Arguments as for zapp_node_line. Returns out. */
 /* The pace the node reports in a status reply (data.pace), normal when the reply lacks it, the word is

@@ -210,18 +210,21 @@ int main(void)
     assert(zapp_pair_code("{\"port\":8771,\"token\":\"00\"}", b) && strcmp(a, b));
     assert(!zapp_pair_code("", a) && !zapp_pair_code(NULL, a));
     char line[96];
-    assert(!strcmp(zapp_node_line(false, false, false, -1, -1, -1, line, sizeof(line)), "Node stopped"));
-    assert(!strcmp(zapp_node_line(true, true, true, 3301553, 3301553, 4, line, sizeof(line)), "Node stopping"));
-    assert(!strcmp(zapp_node_line(false, true, false, -1, -1, -1, line, sizeof(line)), "Node starting"));
-    assert(!strcmp(zapp_node_line(true, true, false, -1, -1, 2, line, sizeof(line)), "Node running · 2 peers"));
-    assert(!strcmp(zapp_node_line(true, true, false, 3301133, 0, 0, line, sizeof(line)),
-                   "Node waiting for peers · 3,301,133"));
-    assert(!strcmp(zapp_node_line(true, true, false, 3301133, 3301537, 1, line, sizeof(line)),
-                   "Node catching up · 3,301,133 of 3,301,537"));
-    assert(!strcmp(zapp_node_line(true, false, false, 3301553, 3301553, 1, line, sizeof(line)),
-                   "Node in sync · 3,301,553 · 1 peer"));
-    assert(!strcmp(zapp_node_line(true, true, false, 3301554, 3301553, -1, line, sizeof(line)),
-                   "Node in sync · 3,301,554"));
+    assert(!strcmp(zapp_node_line(false, false, false, false, -1, -1, -1, line, sizeof(line)), "Node stopped"));
+    assert(!strcmp(zapp_node_line(true, true, true, true, 3301553, 3301553, 4, line, sizeof(line)), "Node stopping"));
+    assert(!strcmp(zapp_node_line(false, true, false, true, -1, -1, -1, line, sizeof(line)), "Node starting"));
+    assert(!strcmp(zapp_node_line(true, true, false, false, -1, -1, 2, line, sizeof(line)),
+                   "Node running · 2 peers · onion starting"));
+    assert(!strcmp(zapp_node_line(true, true, false, true, -1, -1, 2, line, sizeof(line)),
+                   "Node running · 2 peers · onion ready"));
+    assert(!strcmp(zapp_node_line(true, true, false, false, 3301133, 0, 0, line, sizeof(line)),
+                   "Node waiting for peers · 3,301,133 · onion starting"));
+    assert(!strcmp(zapp_node_line(true, true, false, true, 3301133, 3301537, 1, line, sizeof(line)),
+                   "Node catching up · 3,301,133 of 3,301,537 · onion ready"));
+    assert(!strcmp(zapp_node_line(true, false, false, true, 3301553, 3301553, 1, line, sizeof(line)),
+                   "Node in sync · 3,301,553 · 1 peer · onion ready"));
+    assert(!strcmp(zapp_node_line(true, true, false, false, 3301554, 3301553, -1, line, sizeof(line)),
+                   "Node in sync · 3,301,554 · onion starting"));
     const char *sync_text = "Node catching up · 3,301,133 of 3,301,537";
     const char *gentle_reply = "{\"ok\":true,\"data\":{\"provable_tip\":5,\"pace\":\"gentle\"}}";
     const char *old_reply = "{\"ok\":true,\"data\":{\"provable_tip\":5}}";
