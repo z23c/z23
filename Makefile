@@ -15508,9 +15508,10 @@ check-zcc-cache: $(LINTC_TOOL)
 	@./build/bin/z23-lint check-zcc-cache --selftest
 	@./build/bin/z23-lint check-zcc-cache
 
-check-zcc-epoch-object:
+check-zcc-epoch-object: $(LINTC_TOOL)
 	@echo "══ LINT: native epoch object depfile parity and publication safety ══"
-	@./tools/lint/check_zcc_epoch_object.sh
+	@./build/bin/z23-lint check-zcc-epoch-object --selftest
+	@./build/bin/z23-lint check-zcc-epoch-object
 
 check-zcc-epoch-batch: $(LINTC_TOOL)
 	@echo "══ LINT: epoch batch manifests refuse incomplete authority ══"

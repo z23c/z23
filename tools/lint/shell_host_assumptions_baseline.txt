@@ -71,7 +71,6 @@ stat	tools/dev/transaction-lab.sh	2
 stat	tools/dev/transaction-micro-lab-wallets.sh	1
 stat	tools/dev/transaction-micro-lab.sh	2
 stat	tools/dev/zcode_async_proof_acceptance_hook.sh	1
-stat	tools/lint/check_zcc_epoch_object.sh	1
 stat	tools/scripts/binary_size.sh	1
 stat	tools/scripts/build_bench.sh	3
 stat	tools/scripts/build_drift_probe.sh	1
