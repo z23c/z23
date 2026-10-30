@@ -180,7 +180,7 @@ static bool snapsync_exit_receive_mode_write(struct node_db *ndb, void *ctx)
     }
 
     if (!node_db_exec(ndb, "PRAGMA synchronous=NORMAL") ||
-        !node_db_exec(ndb, "PRAGMA cache_size=-65536") ||
+        !node_db_restore_cache_size(ndb) ||
         !node_db_exec(ndb, "PRAGMA wal_autocheckpoint=1000")) {
         if (ok)
             *ok = false;

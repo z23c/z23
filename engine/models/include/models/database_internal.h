@@ -200,8 +200,9 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
 int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
                                     int *floor);
 
-/* SQLite page-cache size in KiB for this process's effective memory budget
- * (the open-time value). Constrained lanes (<=4 GiB) get 16 MiB. */
+/* SQLite page-cache size in KiB for the memory budget read at call time
+ * (measured RAM, capped by cgroup limits). Lanes with 4 GiB or less get
+ * 16 MiB; an unreadable RAM size also yields the 16 MiB floor. */
 int64_t node_db_budget_cache_kib(void);
 
 /* Execute `sql`, logging any error with `where` context. Returns the

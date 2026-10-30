@@ -156,6 +156,11 @@ bool node_db_open_existing_runtime(struct node_db *ndb, const char *path,
  * should use this instead of hard-coding a window that can force reclaim. */
 int64_t node_db_recommended_mmap_bytes(void);
 
+/* Restore the steady-state page cache (PRAGMA cache_size) on an open handle to
+ * the budget for this process's memory lane. Used when leaving bulk-sync
+ * modes so a constrained lane never keeps a bulk-sized cache. */
+bool node_db_restore_cache_size(struct node_db *ndb);
+
 /* Apply the cgroup-aware mmap recommendation to an already-open read-only
  * SQLite projection handle. This keeps controllers/views out of raw PRAGMA
  * policy and gives every developer-created explorer reader one tuning path. */

@@ -200,8 +200,7 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb)
         LOG_WARN("db", "[db] ibd_turbo_mode: one or more PRAGMAs failed; " "falling back to safe defaults (IBD will be slower " "but correct)");
         db_exec_checked(ndb->db, "PRAGMA synchronous=NORMAL",
                         "turbo_fallback synchronous");
-        db_exec_checked(ndb->db, "PRAGMA cache_size=-65536",
-                        "turbo_fallback cache_size");
+        node_db_restore_cache_size(ndb);
         db_exec_checked(ndb->db, "PRAGMA wal_autocheckpoint="
                         ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_WAL_AUTOCKPT_PAGES),
                         "turbo_fallback wal_autocheckpoint");
@@ -219,15 +218,21 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb)
     return true;
 }
 
+bool node_db_restore_cache_size(struct node_db *ndb)
+{
+    if (!ndb || !ndb->open) return false;
+    char sql[48];
+    snprintf(sql, sizeof(sql), "PRAGMA cache_size=-%lld",
+             (long long)node_db_budget_cache_kib());
+    return db_exec_checked(ndb->db, sql, "restore_cache_size") == SQLITE_OK;
+}
+
 bool node_db_normal_mode(struct node_db *ndb)
 {
     if (!ndb || !ndb->open) return false;
-    char cache_sql[48];
-    snprintf(cache_sql, sizeof(cache_sql), "PRAGMA cache_size=-%lld",
-             (long long)node_db_budget_cache_kib());
     db_exec_checked(ndb->db, "PRAGMA synchronous=NORMAL",
                     "normal_mode synchronous");
-    db_exec_checked(ndb->db, cache_sql, "normal_mode cache_size");
+    node_db_restore_cache_size(ndb);
     db_exec_checked(ndb->db, "PRAGMA wal_autocheckpoint="
                     ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_WAL_AUTOCKPT_PAGES),
                     "normal_mode wal_autocheckpoint");

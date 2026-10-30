@@ -2627,6 +2627,30 @@ static void check_sqlite_46_sqlite_pragma_tuning_cache_size_and_mmap(int *failur
            (*failures)++; }
 }
 
+static int64_t sqlite_test_cache_pages(struct node_db *ndb)
+{
+    sqlite3_stmt *s = NULL;
+    int64_t pages = 0;
+    if (sqlite3_prepare_v2(ndb->db, "PRAGMA cache_size", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW)
+        pages = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    return pages;
+}
+
+/* Bulk-mode exits (normal mode, turbo fallback, snapshot receive exit) all
+ * restore through node_db_restore_cache_size; none may leave a larger cache. */
+static bool sqlite_test_restore_keeps_budget(struct node_db *ndb)
+{
+    if (!node_db_exec(ndb, "PRAGMA cache_size=-524288") ||
+        !node_db_restore_cache_size(ndb) ||
+        sqlite_test_cache_pages(ndb) != -(16 * 1024))
+        return false;
+    return node_db_exec(ndb, "PRAGMA cache_size=-524288") &&
+           node_db_normal_mode(ndb) &&
+           sqlite_test_cache_pages(ndb) == -(16 * 1024);
+}
+
 static void check_sqlite_47_sqlite_pragma_tuning_honors_constrained_(int *failures)
 {
     /* A large host does not make a 4 GiB cgroup a large lane. Reproduce
@@ -2646,24 +2670,10 @@ static void check_sqlite_47_sqlite_pragma_tuning_honors_constrained_(int *failur
     os_proc_mem_set_override(&constrained);
     struct node_db ndb;
     bool ok = node_db_open(&ndb, ":memory:");
-    sqlite3_stmt *s = NULL;
-    int64_t cache_pages = 0;
-    if (ok && sqlite3_prepare_v2(ndb.db, "PRAGMA cache_size",
-                                 -1, &s, NULL) == SQLITE_OK &&
-        sqlite3_step(s) == SQLITE_ROW)
-        cache_pages = sqlite3_column_int64(s, 0);
-    else
-        ok = false;
-    sqlite3_finalize(s);
+    int64_t cache_pages = ok ? sqlite_test_cache_pages(&ndb) : 0;
     ok = ok && cache_pages == -(16 * 1024);
-    /* normal_mode must not raise a constrained lane above its budget. */
-    ok = ok && node_db_normal_mode(&ndb);
-    cache_pages = 0;
-    if (ok && sqlite3_prepare_v2(ndb.db, "PRAGMA cache_size", -1, &s, NULL) == SQLITE_OK &&
-        sqlite3_step(s) == SQLITE_ROW)
-        cache_pages = sqlite3_column_int64(s, 0);
-    sqlite3_finalize(s);
-    ok = ok && cache_pages == -(16 * 1024);
+    ok = ok && sqlite_test_restore_keeps_budget(&ndb);
+    cache_pages = sqlite_test_cache_pages(&ndb);
     ok = ok && node_db_recommended_mmap_bytes() == 0;
     if (ndb.open) node_db_close(&ndb);
     os_proc_mem_set_override(NULL);
