@@ -519,6 +519,35 @@ static void utxo_apply_unwind_txn_sql(bool batched, const char **open,
                     : "COMMIT";
 }
 
+/* The lowest height the fork walk may scan: C-1 - ZCL_FINALITY_DEPTH, never
+ * below height 0. */
+static int utxo_apply_reorg_clamped_floor(int C)
+{
+    int floor_h = C - 1 - ZCL_FINALITY_DEPTH;
+    if (floor_h < 0)
+        floor_h = 0;
+    return floor_h;
+}
+
+/* Bookkeeping after the unwind txn has committed or enrolled in the open drain
+ * batch: flag the batch dirty, rebaseline the batch invariants, count the unwind. */
+static void utxo_apply_reorg_note_unwound(bool ua_batched,
+                                          _Atomic uint64_t *unwound_counter,
+                                          _Atomic int64_t *last_blocked_unix)
+{
+    if (ua_batched) stage_batch_mark_dirty();
+
+    /* This unwind mutated coins/anchors/nullifiers (inverse deltas + range
+     * deletes) inside the open drain batch. Its inverse-delta arithmetic
+     * invalidates the pure-forward conservation baseline, so rebaseline the
+     * batch-commit invariants: verify() passes loudly instead of false-refusing
+     * (no-op unless a batch is open). */
+    reducer_commit_invariants_note_reorg();
+
+    atomic_fetch_add(unwound_counter, 1);
+    atomic_store(last_blocked_unix, wall_now_s());
+}
+
 bool utxo_apply_reorg_unwind_if_needed(sqlite3 *db,
                                        struct stage *stage,
                                        struct main_state *ms,
@@ -559,9 +588,7 @@ bool utxo_apply_reorg_unwind_if_needed(sqlite3 *db,
      * every input: a fork at/above the floor is found exactly as before; no
      * fork at/above it means the unclamped walk could only have produced the
      * finality refusal, which we emit directly. */
-    int floor_h = C - 1 - ZCL_FINALITY_DEPTH;
-    if (floor_h < 0)
-        floor_h = 0;
+    int floor_h = utxo_apply_reorg_clamped_floor(C);
     int fork = -1;
     {
         sqlite3_stmt *walk_st = NULL;
@@ -656,17 +683,7 @@ bool utxo_apply_reorg_unwind_if_needed(sqlite3 *db,
      * (the SAVEPOINT/RELEASE path above), flag the batch dirty so
      * stage_batch_end COMMITs it — a drain that ends with advanced==0 would
      * otherwise ROLLBACK the completed unwind and oscillate. */
-    if (ua_batched) stage_batch_mark_dirty();
-
-    /* This unwind mutated coins/anchors/nullifiers (inverse deltas + range
-     * deletes) inside the open drain batch. Its inverse-delta arithmetic
-     * invalidates the pure-forward conservation baseline, so rebaseline the
-     * batch-commit invariants: verify() passes loudly instead of false-refusing
-     * (no-op unless a batch is open). */
-    reducer_commit_invariants_note_reorg();
-
-    atomic_fetch_add(unwound_counter, 1);
-    atomic_store(last_blocked_unix, wall_now_s());
+    utxo_apply_reorg_note_unwound(ua_batched, unwound_counter, last_blocked_unix);
     event_emitf(EV_BLOCK_REJECTED, 0,
                 "utxo_apply reorg_unwind from=%d to=%d depth=%d",
                 C, fork_plus1, (C - 1) - fork);
