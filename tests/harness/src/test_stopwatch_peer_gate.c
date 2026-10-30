@@ -2,7 +2,7 @@
  *
  * test_stopwatch_peer_gate — executed regression for the C3 stopwatch's
  * pre-flight peer gate (tools/scripts/cold_start_to_tip_stopwatch.sh +
- * tools/scripts/p2p_version_probe.sh).
+ * build/bin/p2p_version_probe, built from tools/p2p_version_probe.c).
  *
  * The defect: a silent or stale named peer let the stopwatch burn its whole
  * 600 s budget and label the run "stalled-named", indistinguishable from a

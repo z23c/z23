@@ -480,7 +480,7 @@ Z23_FLAG("ZCL_CS_MAX_BOOTS", "env_build", "12", "-",
 Z23_FLAG("ZCL_CS_NODE_BIN", "env_build", "-", "-",
           "undocumented; first use tools/scripts/c3_stopwatch_triple_run.sh:auto")
 Z23_FLAG("ZCL_CS_P2P_VERSION_PROBE", "env_build", "-", "-",
-          "first use tools/scripts/cold_start_to_tip_stopwatch.sh:auto; documented at tools/scripts/cold_start_to_tip_stopwatch.sh: path of the version-handshake probe script")
+          "first use tools/scripts/cold_start_to_tip_stopwatch.sh:auto; documented at tools/scripts/cold_start_to_tip_stopwatch.sh: path of the version-handshake probe binary (build/bin/p2p_version_probe)")
 Z23_FLAG("ZCL_CS_PARAMS_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/cold_start_to_tip_stopwatch.sh:auto")
 Z23_FLAG("ZCL_CS_PEER", "env_build", "-", "-",

@@ -156,7 +156,8 @@ EXPECTED_TIP="${ZCL_CS_EXPECTED_TIP:-}"
 PEER_TIP_TOLERANCE="${ZCL_CS_PEER_TIP_TOLERANCE:-1000}"
 PEER_HANDSHAKE_SECS="${ZCL_CS_PEER_HANDSHAKE_SECS:-12}"
 PEER_MAGIC="${ZCL_CS_PEER_MAGIC:-24e92764}"
-P2P_VERSION_PROBE="${ZCL_CS_P2P_VERSION_PROBE:-$REPO_ROOT/tools/scripts/p2p_version_probe.sh}"
+# Built from tools/p2p_version_probe.c by `make p2p-version-probe`.
+P2P_VERSION_PROBE="${ZCL_CS_P2P_VERSION_PROBE:-$REPO_ROOT/build/bin/p2p_version_probe}"
 # The node leads its own process group, launched natively: macOS has no setsid(1).
 PROCESS_GROUP_EXEC="${ZCL_PROCESS_GROUP_EXEC:-$REPO_ROOT/build/bin/process-group-exec}"
 BUDGET="${ZCL_CS_BUDGET_SECS:-600}"     # 10-minute MVP C3 target
@@ -2660,7 +2661,7 @@ if [ "${#PEERS[@]}" -eq 0 ]; then
 fi
 
 # ── PRE-FLIGHT peer gate: a real P2P version handshake ──────────────────────
-# Dials each stated peer with p2p_version_probe.sh (bounded <= 15 s) and
+# Dials each stated peer with p2p_version_probe (bounded <= 15 s) and
 # records its advertised start_height. When no peer can serve, the run ends as
 # a SKIP with ENVIRONMENT_BLOCKED (peer_unreachable | peer_no_handshake |
 # peer_tip_stale): the node under test never ran, so it is never FAIL or
@@ -2676,7 +2677,7 @@ peer_gate_rank() {
 peer_gate_one() {  # host port -> "token height"
     local out rc h
     out="$(timeout "$PEER_HANDSHAKE_SECS" env ZCL_CS_PEER_MAGIC="$PEER_MAGIC" \
-        bash "$P2P_VERSION_PROBE" "$1" "$2" "$PEER_HANDSHAKE_SECS" 2>/dev/null)"
+        "$P2P_VERSION_PROBE" "$1" "$2" "$PEER_HANDSHAKE_SECS" 2>/dev/null)"
     rc=$?
     case "$rc:$out" in
         0:ok\ [0-9]*)
@@ -2696,7 +2697,7 @@ if [ "$PEER_PRECHECK_ENABLED" = "1" ]; then
     case "$EXPECTED_TIP$PEER_TIP_TOLERANCE" in *[!0-9]*)
         skip "invalid ZCL_CS_EXPECTED_TIP / ZCL_CS_PEER_TIP_TOLERANCE (must be non-negative integers)" ;;
     esac
-    [ -r "$P2P_VERSION_PROBE" ] || skip "p2p version probe absent: $P2P_VERSION_PROBE"
+    [ -x "$P2P_VERSION_PROBE" ] || skip "p2p version probe absent: $P2P_VERSION_PROBE"
     PEER_GATE="peer_unreachable"; gate_best_rank=-1; gate_best_detail=""
     for gate_peer in "${PEERS[@]}"; do
         gate_host="${gate_peer%:*}"; gate_port="${gate_peer##*:}"

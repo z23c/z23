@@ -307,7 +307,6 @@ tools/scripts/network_disruption_recovery_stopwatch.sh
 tools/scripts/new_app.sh
 tools/scripts/onion_pair_watch.sh
 tools/scripts/onion_pair_watch_loop.sh
-tools/scripts/p2p_version_probe.sh
 tools/scripts/port_probe.sh
 tools/scripts/pr_security_scan.sh
 tools/scripts/produce_anchor_snapshot.sh

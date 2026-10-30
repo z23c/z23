@@ -329,7 +329,7 @@ AGENT_IMPACT_RULE("engine/services/src/stopwatch_skip_watch.c|engine/services/in
  * Self-contained (loopback listeners, no node), so it maps to its own group;
  * the skip-class rows that file the ENVIRONMENT_BLOCKED reasons are covered
  * by the stopwatch_skip_watch rule above. */
-AGENT_IMPACT_RULE("tests/harness/src/test_stopwatch_peer_gate.c|tools/scripts/p2p_version_probe.sh|tools/scripts/cold_start_to_tip_stopwatch.sh", "stopwatch_peer_gate")
+AGENT_IMPACT_RULE("tests/harness/src/test_stopwatch_peer_gate.c|tools/p2p_version_probe.c|tools/scripts/cold_start_to_tip_stopwatch.sh", "stopwatch_peer_gate")
 /* External uptime evidence: one bounded C23 reader owns both the node-free
  * typed leaf and dumpstate projection; the old whole-ledger awk reader is
  * deliberately absent. */

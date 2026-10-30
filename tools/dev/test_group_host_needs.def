@@ -158,6 +158,16 @@ ZCL_TEST_GROUP_BUILD_NEED("test_toolgen", "build/bin/z23-toolgen",
                           "build/bin/z23-toolgen")
 #endif
 
+/* The peer gate runs the version-handshake probe the stopwatch gate execs. */
+#if !defined(_WIN32)
+ZCL_TEST_GROUP_BUILD_NEED("test_stopwatch_peer_gate", "build/bin/p2p_version_probe",
+                          "p2p-version-probe")
+/* The same gate execs build/bin/process-group-exec to launch the node; no
+ * default target builds it on Linux, so without this row the group self-skips. */
+ZCL_TEST_GROUP_BUILD_NEED("test_stopwatch_peer_gate",
+                          "build/bin/process-group-exec", "process-group-exec")
+#endif
+
 /* Exercise the game's actual aircraft object without window-system headers. */
 ZCL_TEST_GROUP_BUILD_NEED("test_skycombat_fp_contract",
                           "build/bin/skycombat-fp-contract", "skycombat-fp-contract")
