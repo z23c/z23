@@ -18,6 +18,7 @@
 #include "test/test_core.h"
 #include "util/boot_status.h"
 #include "util/boot_phase.h"
+#include "platform/private_file.h"
 #include "base/log_level.h"
 
 #include <stdio.h>
@@ -269,6 +270,25 @@ int test_boot_status(void)
          * this scratch dir (which we remove below). */
         boot_status_init(NULL);
     }
+
+    /* One durable publication = one file flush (inside the replace) plus one
+     * parent-directory flush. A duplicate explicit flush cost a third
+     * journal commit per boot stage. */
+    {
+        boot_status_init(dir);
+        unsigned long base = platform_private_flush_events();
+        boot_status_note_stage((int)BOOT_STAGE_DB_OPEN);
+        unsigned long used = platform_private_flush_events() - base;
+        printf("boot_status: flushes per publish = %lu\n", used);
+        BS_CHECK("publish uses exactly two flushes", used == 2);
+        struct boot_status_snapshot pub;
+        char pwhy[128];
+        BS_CHECK("published beacon is complete and readable",
+                 boot_status_read(dir, &pub, pwhy, sizeof(pwhy)) &&
+                 strcmp(pub.stage, "db_open") == 0);
+        boot_status_init(NULL);
+    }
+
 
     /* Intra-stage heartbeat: long block-index work must refresh
      * updated_unix without pretending the stage advanced. */

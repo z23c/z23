@@ -109,5 +109,6 @@ bool platform_private_file_link_no_clobber(
     bool *already_same);
 bool platform_private_file_unlink_missing_ok(const char *path);
 bool platform_private_parent_flush(const char *parent);
+unsigned long platform_private_flush_events(void);
 
 #endif

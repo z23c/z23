@@ -227,7 +227,10 @@ static void boot_status_publish_locked(void)
 
     bool ok = platform_private_file_write_at(&staging, json, n, 0) &&
               platform_private_file_truncate(&staging, n) &&
-              platform_private_file_flush(&staging) &&
+              /* platform_private_file_replace flushes the staged file
+               * before the rename on every platform; a second explicit
+               * flush here only repeated that fsync (a full journal commit
+               * per boot stage on a loaded host) with no added durability. */
               platform_private_file_replace(&staging, tmp_path, resolved);
     platform_private_file_close(&staging);
     if (ok)

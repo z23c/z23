@@ -17,6 +17,7 @@
 #include "platform/rename_compat.h"
 #include "base/safe_alloc.h"
 
+#include <stdatomic.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -24,6 +25,8 @@
 #include <string.h>
 #include <wchar.h>
 #include <wctype.h>
+
+static atomic_ulong g_pf_flush_events;
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -369,6 +372,7 @@ bool platform_private_file_write_at(struct platform_private_file *f,
   return pf_io(f, (void *)d, s, o, true);
 }
 bool platform_private_file_flush(struct platform_private_file *f) {
+  atomic_fetch_add(&g_pf_flush_events, 1);
   return FlushFileBuffers(pf_handle(f)) != 0;
 }
 bool platform_private_file_mark_executable(struct platform_private_file *f) {
@@ -685,6 +689,7 @@ bool platform_private_file_unlink_missing_ok(const char *path) {
 }
 
 bool platform_private_parent_flush(const char *parent) {
+  atomic_fetch_add(&g_pf_flush_events, 1);
   wchar_t w[32768];
   if (!pf_wide(parent, w))
     return false;
@@ -889,6 +894,7 @@ bool platform_private_file_write_at(struct platform_private_file *f,
   return pf_io(f, (void *)d, s, o, true);
 }
 bool platform_private_file_flush(struct platform_private_file *f) {
+  atomic_fetch_add(&g_pf_flush_events, 1);
   return fsync(pf_fd(f)) == 0;
 }
 bool platform_private_file_mark_executable(struct platform_private_file *f) {
@@ -1061,6 +1067,7 @@ bool platform_private_file_unlink_missing_ok(const char *p) {
   return unlink(p) == 0 || errno == ENOENT;
 }
 bool platform_private_parent_flush(const char *p) {
+  atomic_fetch_add(&g_pf_flush_events, 1);
   int fd = open(p, O_RDONLY | O_CLOEXEC | O_DIRECTORY);
   if (fd < 0)
     return false;
@@ -1105,4 +1112,11 @@ bool platform_private_file_create_locked(const char *path,
 bool platform_private_file_validate_owner_private(
     const struct platform_private_file *file) {
   return pf_validate_owner_private(file);
+}
+
+/* Flush barriers requested through this module (file and parent flushes,
+ * successful or not). Test seam: lets a caller prove how many durability
+ * barriers one operation costs without interposing libc. */
+unsigned long platform_private_flush_events(void) {
+  return atomic_load(&g_pf_flush_events);
 }
