@@ -128,7 +128,9 @@ static bool inherited_environment(const char *entry)
     return strncmp(entry, "XDG_STATE_HOME=", 15) != 0 &&
            strncmp(entry, "TMPDIR=", 7) != 0 &&
            strncmp(entry, "ZCL_CATCHUP_DRAIN_BUDGET_MS=",
-                   sizeof("ZCL_CATCHUP_DRAIN_BUDGET_MS=") - 1) != 0;
+                   sizeof("ZCL_CATCHUP_DRAIN_BUDGET_MS=") - 1) != 0 &&
+           strncmp(entry, "ZCL_BIP_PAGE_CACHE_KIB=",
+                   sizeof("ZCL_BIP_PAGE_CACHE_KIB=") - 1) != 0;
 }
 
 static int spawn_environment(struct zapp_runtime *r, char *const argv[], pid_t *pid,
@@ -140,7 +142,7 @@ static int spawn_environment(struct zapp_runtime *r, char *const argv[], pid_t *
     int temp_written = snprintf(temp, sizeof(temp), "TMPDIR=%s", r->temporary_root);
     size_t count = 0;
     rc = environment_count(&count);
-    char **env = rc ? NULL : calloc(count + 4, sizeof(*env));
+    char **env = rc ? NULL : calloc(count + 5, sizeof(*env));
     if (!rc && (!env || written < 0 || (size_t)written >= sizeof(state) ||
                 r->state_root[0] != '/' || temp_written < 0 ||
                 (size_t)temp_written >= sizeof(temp) || r->temporary_root[0] != '/')) rc = EINVAL;
@@ -151,6 +153,7 @@ static int spawn_environment(struct zapp_runtime *r, char *const argv[], pid_t *
         env[used++] = state;
         env[used++] = temp;
         env[used++] = "ZCL_CATCHUP_DRAIN_BUDGET_MS=100";
+        env[used++] = "ZCL_BIP_PAGE_CACHE_KIB=32768";
         env[used] = NULL;
         rc = posix_spawn(pid, r->executable, actions, attr, argv, env);
     }

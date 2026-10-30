@@ -155,6 +155,8 @@ writes, replacing a file left by an earlier run. A missing file means normal. Th
 cooling down" for `pause`. A node that does not apply the pace file reports no pace, so the plain node
 line stays.
 
+The phone caps the node's block-index cache at 32 MiB (`ZCL_BIP_PAGE_CACHE_KIB=32768`) to lower memory pressure.
+
 ## Private voice and fleet host
 
 A laptop connected over USB runs the private assistant. The C23 host

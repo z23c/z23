@@ -18,10 +18,18 @@ int __wrap_clock_gettime(clockid_t id, struct timespec *out)
     return __real_clock_gettime(id, out);
 }
 
+extern char **environ;
+
 static bool child_environment(void)
 {
     const char *batch = getenv("ZCL_CATCHUP_DRAIN_BUDGET_MS");
     if (!batch || strcmp(batch, "100")) return false;
+    size_t cache_entries = 0;
+    for (char **e = environ; *e; ++e)
+        if (!strncmp(*e, "ZCL_BIP_PAGE_CACHE_KIB=", sizeof("ZCL_BIP_PAGE_CACHE_KIB=") - 1))
+            ++cache_entries;
+    const char *cache = getenv("ZCL_BIP_PAGE_CACHE_KIB");
+    if (cache_entries != 1 || !cache || strcmp(cache, "32768")) return false;
     const char *temp = getenv("TMPDIR");
     if (!temp || strcmp(temp, "/tmp/private-tmp")) return false;
     const char *state = getenv("XDG_STATE_HOME");
@@ -374,6 +382,7 @@ int main(int argc, char **argv)
     assert(setenv("ZAPP_TEST_PRESERVED", "yes", 1) == 0);
     assert(setenv("ZAPP_TEST_STATE", "/tmp/private-state", 1) == 0);
     assert(setenv("ZCL_CATCHUP_DRAIN_BUDGET_MS", "77", 1) == 0);
+    assert(setenv("ZCL_BIP_PAGE_CACHE_KIB", "999", 1) == 0);
     command_cases(&r);
     char directory[] = "/tmp/zapp-ops-test-XXXXXX", log[256], out[128];
     assert(mkdtemp(directory));
