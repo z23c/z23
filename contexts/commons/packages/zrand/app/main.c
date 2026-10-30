@@ -88,6 +88,48 @@ static int stream_shuffle(zrand *r, char **items, int n)
     return output_status();
 }
 
+static int run_draws(int argc, char **argv, zrand *r)
+{
+    int ok = 0;
+    uint64_t count = 1;
+    if (argc > 3) {
+        count = parse_u64(argv[3], &ok);
+        if (!ok || count > 1000000) return usage();
+    }
+    return stream_draws(r, count, argv[1][0] == 'd');
+}
+
+static int run_zrand_bounded(int argc, char **argv, zrand *r)
+{
+    if (argc < 4) return usage();
+    int ok = 0;
+    uint64_t bound = parse_u64(argv[3], &ok);
+    if (!ok) return usage();
+    uint64_t count = 1;
+    if (argc > 4) {
+        count = parse_u64(argv[4], &ok);
+        if (!ok || count > 1000000) return usage();
+    }
+    return stream_bounded(r, bound, count);
+}
+
+static int run_bytes(int argc, char **argv, zrand *r)
+{
+    if (argc < 4) return usage();
+    int ok = 0;
+    uint64_t n = parse_u64(argv[3], &ok);
+    if (!ok || n > 1u << 24) return usage();
+    return stream_bytes(r, n);
+}
+
+static int run_shuffle(int argc, char **argv, zrand *r)
+{
+    if (argc < 4) return usage();
+    int n = argc - 3;
+    char **items = argv + 3;
+    return stream_shuffle(r, items, n);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) return usage();
@@ -99,40 +141,17 @@ int main(int argc, char **argv)
     zrand r;
     zrand_seed(&r, seed);
 
-    if (strcmp(argv[1], "u64") == 0 || strcmp(argv[1], "double") == 0) {
-        uint64_t count = 1;
-        if (argc > 3) {
-            count = parse_u64(argv[3], &ok);
-            if (!ok || count > 1000000) return usage();
-        }
-        return stream_draws(&r, count, argv[1][0] == 'd');
-    }
+    if (strcmp(argv[1], "u64") == 0 || strcmp(argv[1], "double") == 0)
+        return run_draws(argc, argv, &r);
 
-    if (strcmp(argv[1], "bounded") == 0) {
-        if (argc < 4) return usage();
-        uint64_t bound = parse_u64(argv[3], &ok);
-        if (!ok) return usage();
-        uint64_t count = 1;
-        if (argc > 4) {
-            count = parse_u64(argv[4], &ok);
-            if (!ok || count > 1000000) return usage();
-        }
-        return stream_bounded(&r, bound, count);
-    }
+    if (strcmp(argv[1], "bounded") == 0)
+        return run_zrand_bounded(argc, argv, &r);
 
-    if (strcmp(argv[1], "bytes") == 0) {
-        if (argc < 4) return usage();
-        uint64_t n = parse_u64(argv[3], &ok);
-        if (!ok || n > 1u << 24) return usage();
-        return stream_bytes(&r, n);
-    }
+    if (strcmp(argv[1], "bytes") == 0)
+        return run_bytes(argc, argv, &r);
 
-    if (strcmp(argv[1], "shuffle") == 0) {
-        if (argc < 4) return usage();
-        int n = argc - 3;
-        char **items = argv + 3;
-        return stream_shuffle(&r, items, n);
-    }
+    if (strcmp(argv[1], "shuffle") == 0)
+        return run_shuffle(argc, argv, &r);
 
     return usage();
 }

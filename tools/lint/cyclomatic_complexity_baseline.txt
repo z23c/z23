@@ -14,7 +14,6 @@ contexts/commons/packages/zdiff/tests/test_zdiff.c:verify_script:25
 contexts/commons/packages/zotpcli/app/main.c:cmd_add:21
 contexts/commons/packages/zotpcli/app/main.c:parse_options:23
 contexts/commons/packages/zotpcli/src/zotpcli.c:json_str_decode:32
-contexts/commons/packages/zrand/app/main.c:main:20
 contexts/commons/packages/zscrypt/src/zscrypt.c:zscrypt:19
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_fuzz:18
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_kat:17
