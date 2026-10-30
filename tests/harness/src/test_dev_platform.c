@@ -1904,21 +1904,6 @@ static bool failure_record_path(char out[PATH_MAX], const char *home,
     return n > 0 && n < PATH_MAX;
 }
 
-static bool run_failure_store_fixture(void)
-{
-    bool ok = false;
-    char home[PATH_MAX], repo1[PATH_MAX], repo2[PATH_MAX], repo3[PATH_MAX];
-    char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
-    if (getenv("HOME") && !saved_home)
-        return false;
-    test_make_tmpdir(home, sizeof(home), "dev_platform", "failure_store");
-    if (snprintf(repo1, sizeof(repo1), "%s/repo1", home) <= 0 ||
-        snprintf(repo2, sizeof(repo2), "%s/repo2", home) <= 0 ||
-        snprintf(repo3, sizeof(repo3), "%s/repo3", home) <= 0 ||
-        mkdir(repo1, 0700) != 0 || mkdir(repo2, 0700) != 0 ||
-        mkdir(repo3, 0700) != 0 || platform_environment_set("HOME", home, 1) != 0)
-        goto cleanup;
-
 #define FS_REQUIRE(expr)                                                     \
     do {                                                                     \
         if (!(expr)) {                                                       \
@@ -1928,6 +1913,39 @@ static bool run_failure_store_fixture(void)
         }                                                                    \
     } while (0)
 
+static bool dp_failure_store_workspaces(const char *home, char *repo1,
+                                        char *repo2, char *repo3)
+{
+    if (snprintf(repo1, PATH_MAX, "%s/repo1", home) <= 0 ||
+        snprintf(repo2, PATH_MAX, "%s/repo2", home) <= 0 ||
+        snprintf(repo3, PATH_MAX, "%s/repo3", home) <= 0 ||
+        mkdir(repo1, 0700) != 0 || mkdir(repo2, 0700) != 0 ||
+        mkdir(repo3, 0700) != 0 || platform_environment_set("HOME", home, 1) != 0)
+        return false;
+    return true;
+}
+
+    static const char cycle[] =
+        "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"test\","
+        "\"status\":\"passed\",\"action\":\"check\","
+        "\"reason\":\"fixture\",\"phase\":\"verify\","
+        "\"runtime_published\":false,\"elapsed_ms\":1,\"files\":[]}";
+    static const char cycle_impact[] =
+        "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"test\","
+        "\"status\":\"impact_ready\",\"action\":\"reflex\","
+        "\"reason\":\"fixture\",\"phase\":\"IMPACT_READY\","
+        "\"runtime_published\":false,\"elapsed_ms\":2,\"files\":[]}";
+    static const char cycle_compile[] =
+        "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"test\","
+        "\"status\":\"compile_green\",\"action\":\"reflex\","
+        "\"reason\":\"fixture\",\"phase\":\"COMPILE_GREEN\","
+        "\"runtime_published\":false,\"elapsed_ms\":3,\"files\":[]}";
+
+static bool dp_failure_store_records(const char *repo1, const char *repo2,
+                                     char *state_dir_out,
+                                     struct zcl_dev_failure_record *record_out)
+{
+    char state_dir[PATH_MAX];
     char source[65], mutation1[65], mutation2[65], execution1[65],
          execution2[65], why[192] = {0};
     fill_hex(source, 'a');
@@ -1940,7 +1958,6 @@ static bool run_failure_store_fixture(void)
     FS_REQUIRE(zcl_dev_failure_read_latest(repo1, &readback, why,
                                            sizeof(why)) ==
                ZCL_DEV_FAILURE_LOOKUP_ABSENT);
-    char state_dir[PATH_MAX];
     FS_REQUIRE(zcl_devloop_workspace_state_dir(repo1, state_dir,
                                                sizeof(state_dir)));
     FS_REQUIRE(access(state_dir, F_OK) != 0); /* reads create no state */
@@ -2024,23 +2041,25 @@ static bool run_failure_store_fixture(void)
                                            sizeof(why)) ==
                ZCL_DEV_FAILURE_LOOKUP_ABSENT);
 
+    memcpy(state_dir_out, state_dir, sizeof(state_dir));
+    *record_out = record;
+    return true;
+cleanup:
+    return false;
+}
+
     /* Cycle verdicts share the exact worktree scope and distinguish absent,
      * found, and invalid sealed state. */
-    static const char cycle[] =
-        "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"test\","
-        "\"status\":\"passed\",\"action\":\"check\","
-        "\"reason\":\"fixture\",\"phase\":\"verify\","
-        "\"runtime_published\":false,\"elapsed_ms\":1,\"files\":[]}";
-    static const char cycle_impact[] =
-        "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"test\","
-        "\"status\":\"impact_ready\",\"action\":\"reflex\","
-        "\"reason\":\"fixture\",\"phase\":\"IMPACT_READY\","
-        "\"runtime_published\":false,\"elapsed_ms\":2,\"files\":[]}";
-    static const char cycle_compile[] =
-        "{\"schema\":\"zcl.dev_cycle.v1\",\"producer\":\"test\","
-        "\"status\":\"compile_green\",\"action\":\"reflex\","
-        "\"reason\":\"fixture\",\"phase\":\"COMPILE_GREEN\","
-        "\"runtime_published\":false,\"elapsed_ms\":3,\"files\":[]}";
+static bool dp_failure_store_cycle_capture(const char *repo1,
+                                           const char *repo2,
+                                           const char *state_dir, char *path_out,
+                                           char *sealed_out,
+                                           size_t *sealed_cycle_len_out,
+                                           int64_t *first_epoch_out)
+{
+    char why[192] = {0};
+    char path[PATH_MAX];
+    char sealed_cycle_record[32768];
     FS_REQUIRE(zcl_devloop_cycle_state_write(
         repo1, cycle, sizeof(cycle) - 1, why, sizeof(why)));
     char cycle_out[4096];
@@ -2064,10 +2083,8 @@ static bool run_failure_store_fixture(void)
         repo2, cycle_out, sizeof(cycle_out), &cycle_len, &cycle_epoch,
         why, sizeof(why)) == ZCL_DEVLOOP_STATE_ABSENT);
 
-    char path[PATH_MAX];
     FS_REQUIRE(snprintf(path, sizeof(path), "%s/native-cycle.json",
                         state_dir) > 0);
-    char sealed_cycle_record[32768];
     FILE *cycle_file = fopen(path, "r");
     FS_REQUIRE(cycle_file != NULL);
     size_t sealed_cycle_len =
@@ -2083,6 +2100,27 @@ static bool run_failure_store_fixture(void)
     FS_REQUIRE(!zcl_devloop_cycle_state_write(
         repo1, cycle, sizeof(cycle) - 1, why, sizeof(why)));
 
+    memcpy(path_out, path, sizeof(path));
+    memcpy(sealed_out, sealed_cycle_record, sealed_cycle_len);
+    *sealed_cycle_len_out = sealed_cycle_len;
+    *first_epoch_out = first_cycle_epoch;
+    return true;
+cleanup:
+    return false;
+}
+
+static bool dp_failure_store_cycle_restore(const char *repo1, char *path,
+                                           const char *sealed_cycle_record,
+                                           size_t sealed_cycle_len,
+                                           int64_t first_cycle_epoch,
+                                           int64_t *second_epoch_out,
+                                           int64_t *third_epoch_out)
+{
+    char why[192] = {0};
+    char cycle_out[4096];
+    size_t cycle_len = 0;
+    int64_t cycle_epoch = 0;
+    FILE *cycle_file = NULL;
     /* Publication fails closed on corrupt current state. Physical restoration
      * of the exact prior sealed generation recovers without lowering epoch. */
     cycle_file = fopen(path, "w");
@@ -2176,6 +2214,24 @@ static bool run_failure_store_fixture(void)
                ZCL_DEVLOOP_STATE_FOUND);
     FS_REQUIRE(timestamp_tamper_epoch == third_epoch);
 
+    *second_epoch_out = second_epoch;
+    *third_epoch_out = third_epoch;
+    return true;
+cleanup:
+    return false;
+}
+
+static bool dp_failure_store_concurrent(const char *repo1,
+                                        const char *state_dir,
+                                        int64_t first_cycle_epoch,
+                                        int64_t second_epoch,
+                                        int64_t third_epoch)
+{
+    char why[192] = {0};
+    char cycle_out[4096];
+    size_t cycle_len = 0;
+    int64_t cycle_epoch = 0;
+    int fd;
     /* Concurrent writers serialize through the workspace capability lock. */
     pid_t cycle_children[8];
     for (size_t i = 0; i < 8; i++) {
@@ -2212,7 +2268,26 @@ static bool run_failure_store_fixture(void)
         repo1, first_cycle_epoch, cycle_out, sizeof(cycle_out), &cycle_len,
         &cycle_epoch, why, sizeof(why)) == ZCL_DEVLOOP_STATE_INVALID);
     FS_REQUIRE(strcmp(why, "cycle_event_integrity_invalid") == 0);
+    return true;
+cleanup:
+    return false;
+}
 
+static bool dp_failure_store_seal_observations(
+    const char *home, const char *repo1, const char *repo2,
+    struct zcl_dev_failure_record record)
+{
+    char why[192] = {0};
+    char source[65], mutation1[65], execution1[65];
+    struct zcl_dev_failure_record readback;
+    char path[PATH_MAX];
+    int fd;
+    fill_hex(source, 'a');
+    fill_hex(mutation1, 'b');
+    fill_hex(execution1, 'c');
+    const char *error = "foo.c:12:5: error: bad token";
+    const char *capsule =
+        "first_error=foo.c:12:5: error: bad token\n\"quoted\"\\tail";
     /* A syntactically valid-looking counter edit still breaks its SHA3 seal. */
     FS_REQUIRE(failure_record_path(path, home, &record,
                                    "observations.json"));
@@ -2262,7 +2337,25 @@ static bool run_failure_store_fixture(void)
     FS_REQUIRE(zcl_dev_failure_read(repo2, record2.failure_id, &readback,
                                     why, sizeof(why)) ==
                ZCL_DEV_FAILURE_LOOKUP_INVALID);
+    return true;
+cleanup:
+    return false;
+}
 
+static bool dp_failure_store_third_workspace(const char *home,
+                                             const char *repo3)
+{
+    char why[192] = {0};
+    char source[65], mutation1[65], execution1[65];
+    struct zcl_dev_failure_record readback;
+    char path[PATH_MAX];
+    int fd;
+    fill_hex(source, 'a');
+    fill_hex(mutation1, 'b');
+    fill_hex(execution1, 'c');
+    const char *error = "foo.c:12:5: error: bad token";
+    const char *capsule =
+        "first_error=foo.c:12:5: error: bad token\n\"quoted\"\\tail";
     /* Third workspace: an unsealed extra JSON field is rejected. */
     struct zcl_dev_failure_record record3;
     FS_REQUIRE(zcl_dev_failure_record_failure(
@@ -2291,7 +2384,43 @@ static bool run_failure_store_fixture(void)
     FS_REQUIRE(zcl_dev_failure_read(repo3, record3.failure_id, &readback,
                                     why, sizeof(why)) ==
                ZCL_DEV_FAILURE_LOOKUP_INVALID);
+    return true;
+cleanup:
+    return false;
+}
 
+static bool run_failure_store_fixture(void)
+{
+    bool ok = false;
+    char home[PATH_MAX], repo1[PATH_MAX], repo2[PATH_MAX], repo3[PATH_MAX];
+    char state_dir[PATH_MAX], path[PATH_MAX];
+    char sealed_cycle_record[32768];
+    size_t sealed_cycle_len = 0;
+    int64_t first_cycle_epoch = 0, second_epoch = 0, third_epoch = 0;
+    struct zcl_dev_failure_record record;
+    char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+    if (getenv("HOME") && !saved_home)
+        return false;
+    test_make_tmpdir(home, sizeof(home), "dev_platform", "failure_store");
+    if (!dp_failure_store_workspaces(home, repo1, repo2, repo3))
+        goto cleanup;
+    if (!dp_failure_store_records(repo1, repo2, state_dir, &record))
+        goto cleanup;
+    if (!dp_failure_store_cycle_capture(repo1, repo2, state_dir, path,
+                                        sealed_cycle_record, &sealed_cycle_len,
+                                        &first_cycle_epoch))
+        goto cleanup;
+    if (!dp_failure_store_cycle_restore(repo1, path, sealed_cycle_record,
+                                        sealed_cycle_len, first_cycle_epoch,
+                                        &second_epoch, &third_epoch))
+        goto cleanup;
+    if (!dp_failure_store_concurrent(repo1, state_dir, first_cycle_epoch,
+                                     second_epoch, third_epoch))
+        goto cleanup;
+    if (!dp_failure_store_seal_observations(home, repo1, repo2, record))
+        goto cleanup;
+    if (!dp_failure_store_third_workspace(home, repo3))
+        goto cleanup;
     ok = true;
 
 cleanup:
@@ -3568,6 +3697,262 @@ static bool dp_ar_unlink_in(const char *root, const char *rel)
            (unlink(path) == 0 || errno == ENOENT);
 }
 
+struct dp_fixture_env {
+    bool had_cache, had_process, had_force_copy;
+    char cache[PATH_MAX];
+    char process[32];
+    char force_copy[32];
+};
+
+static void dp_fixture_env_save(struct dp_fixture_env *env)
+{
+    const char *prior_cache = getenv("ZCL_DEV_ARTIFACT_CACHE");
+    const char *prior_process = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    const char *prior_force_copy =
+        getenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY");
+    env->had_cache = prior_cache && prior_cache[0];
+    env->had_process = prior_process && prior_process[0];
+    env->had_force_copy = prior_force_copy && prior_force_copy[0];
+    if (env->had_cache)
+        (void)snprintf(env->cache, sizeof(env->cache), "%s", prior_cache);
+    if (env->had_process)
+        (void)snprintf(env->process, sizeof(env->process), "%s",
+                       prior_process);
+    if (env->had_force_copy)
+        (void)snprintf(env->force_copy, sizeof(env->force_copy), "%s",
+                       prior_force_copy);
+}
+
+static void dp_fixture_env_restore(const struct dp_fixture_env *env)
+{
+    if (env->had_cache)
+        (void)platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", env->cache, 1);
+    else
+        (void)dp_environment_unset("ZCL_DEV_ARTIFACT_CACHE");
+    if (env->had_process)
+        (void)platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", env->process, 1);
+    else
+        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS");
+    if (env->had_force_copy)
+        (void)platform_environment_set("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", env->force_copy, 1);
+    else
+        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY");
+}
+
+static bool dp_hotswap_fixture_prepare(const char *root_a, const char *root_b,
+                                       const char *cache_rel,
+                                       const char *compiler_rel,
+                                       const char *cache,
+                                       const char *fake_compiler)
+{
+    test_rm_rf_recursive(root_a);
+    test_rm_rf_recursive(root_b);
+    test_rm_rf_recursive(cache_rel);
+    (void)unlink(compiler_rel);
+    if (!dp_hotswap_cache_fixture_init(root_a, fake_compiler) ||
+        !dp_hotswap_cache_fixture_init(root_b, fake_compiler) ||
+        platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", cache, 1) != 0 ||
+        platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0 ||
+        platform_environment_set("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "1", 1) != 0)
+        return false;
+    return true;
+}
+
+static bool dp_hotswap_cold_publish(const char *root_a, const char *owner,
+                                    struct zcl_devloop_hotswap_build_receipt *built,
+                                    struct zcl_devloop_process_result *process,
+                                    char *why, size_t why_cap)
+{
+    bool cold_build_ok = zcl_devloop_hotswap_build(root_a, owner, built, process,
+                                                  why, why_cap);
+    if (!cold_build_ok ||
+        built->artifact_cache_hit || built->compiler_processes != 2 ||
+        built->linker_processes != 1 || strlen(built->artifact_cache_key) != 64 ||
+        strlen(built->candidate_object_sha256) != 64) {
+        fprintf(stderr, "hotswap cold publish: build_ok=%d hit=%d cc=%u ld=%u key_len=%zu object_hash_len=%zu cache_miss=%.39s cache_action_root=%.64s action_cause=%.23s action_miss=%.39s action_detail=%.191s\n",
+            cold_build_ok, built->artifact_cache_hit, built->compiler_processes,
+            built->linker_processes, strlen(built->artifact_cache_key),
+            strlen(built->candidate_object_sha256), built->cache_key_miss,
+            built->cache_key_action_root, built->action_root_cause,
+            built->action_root_miss, built->action_root_miss_detail);
+        fprintf(stderr, "hotswap cold process: exit=%d signal=%d timeout=%d cancelled=%d output_len=%zu truncated=%d output=%.4096s\n",
+            process->exit_code, process->term_signal, process->timed_out,
+            process->cancelled, process->output_len, process->output_truncated,
+            process->output);
+        return false;
+    }
+    return true;
+}
+
+static bool dp_hotswap_cross_device_inode(const char *cache,
+                                          struct zcl_devloop_hotswap_build_receipt *built,
+                                          struct stat *cache_st_out)
+{
+    char cache_artifact[PATH_MAX];
+    struct stat cache_st = {0}, published_st = {0};
+    int cache_n = snprintf(cache_artifact, sizeof(cache_artifact),
+                           "%s/hotswap-v1/%s.so", cache,
+                           built->artifact_cache_key);
+    int cache_stat_rc = cache_n < (int)sizeof(cache_artifact)
+        ? stat(cache_artifact, &cache_st) : -1;
+    int published_stat_rc = stat(built->artifact_path, &published_st);
+    if (cache_n >= (int)sizeof(cache_artifact) || cache_stat_rc != 0 ||
+        published_stat_rc != 0 ||
+        (cache_st.st_dev == published_st.st_dev &&
+         cache_st.st_ino == published_st.st_ino)) {
+        fprintf(stderr,
+                "cross-device proof cache=%s artifact=%s stat=%d/%d "
+                "identity=%llu:%llu/%llu:%llu\n",
+                cache_artifact, built->artifact_path, cache_stat_rc,
+                published_stat_rc, (unsigned long long)cache_st.st_dev,
+                (unsigned long long)cache_st.st_ino,
+                (unsigned long long)published_st.st_dev,
+                (unsigned long long)published_st.st_ino);
+        return false;
+    }
+    if (dp_environment_unset("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY") != 0)
+        return false;
+    *cache_st_out = cache_st;
+    return true;
+}
+
+static bool dp_hotswap_same_worktree(const char *root_a, const char *owner,
+                                     struct zcl_devloop_hotswap_build_receipt *built,
+                                     struct zcl_devloop_hotswap_build_receipt *hit,
+                                     struct zcl_devloop_hotswap_build_receipt *edited,
+                                     struct zcl_devloop_process_result *process,
+                                     char *why, size_t why_cap)
+{
+    if (!zcl_devloop_hotswap_build(root_a, owner, hit, process,
+                                   why, why_cap) ||
+        !hit->artifact_cache_hit || hit->compiler_processes != 0 ||
+        hit->linker_processes != 0 ||
+        strcmp(hit->artifact_cache_key, built->artifact_cache_key) != 0 ||
+        strcmp(hit->artifact_sha256, built->artifact_sha256) != 0 ||
+        strcmp(hit->candidate_object_sha256,
+               built->candidate_object_sha256) != 0)
+        return false;
+
+    if (!dp_mk_write(root_a,
+                     "engine/controllers/src/status_native_handlers.c",
+                     "int zcl_hotswap_fixture_owner(void) { return 9; }\n") ||
+        !zcl_devloop_hotswap_build(root_a, owner, edited, process,
+                                   why, why_cap) ||
+        edited->artifact_cache_hit || edited->compiler_processes != 1 ||
+        edited->linker_processes != 1 ||
+        strcmp(edited->artifact_cache_key, built->artifact_cache_key) == 0)
+        return false;
+    return true;
+}
+
+static bool dp_hotswap_exact_revert(const char *root_a, const char *owner,
+                                    struct zcl_devloop_hotswap_build_receipt *built,
+                                    struct zcl_devloop_hotswap_build_receipt *reverted,
+                                    struct zcl_devloop_process_result *process,
+                                    char *why, size_t why_cap)
+{
+    if (!dp_mk_write(root_a,
+                     "engine/controllers/src/status_native_handlers.c",
+                     "int zcl_hotswap_fixture_owner(void) { return 1; }\n") ||
+        !zcl_devloop_hotswap_build(root_a, owner, reverted, process,
+                                   why, why_cap) ||
+        !reverted->artifact_cache_hit || reverted->compiler_processes != 0 ||
+        reverted->linker_processes != 0 ||
+        strcmp(reverted->artifact_cache_key, built->artifact_cache_key) != 0)
+        return false;
+
+    return true;
+}
+
+static bool dp_hotswap_dependency_mutation(const char *root_b, const char *owner,
+                                           const char *dep_path,
+                                           struct zcl_devloop_hotswap_build_receipt *mutated,
+                                           struct zcl_devloop_process_result *process,
+                                           char *why, size_t why_cap)
+{
+    /* A dependency appearing between the discovery and verification compile
+     * must refuse the cold activation and publish no module. */
+    if (!dp_mk_write(root_b, owner,
+                     "int zcl_hotswap_fixture_owner(void) { return 13; }\n") ||
+        unlink(dep_path) != 0 ||
+        !dp_mk_write(root_b, "build/hotswap-fast/mutate-deps", "1\n") ||
+        zcl_devloop_hotswap_build(root_b, owner, mutated, process,
+                                  why, why_cap) ||
+        !dp_ar_unlink_in(root_b, "build/hotswap-fast/mutate-deps") ||
+        mutated->compiler_processes != 2 || mutated->linker_processes != 0 ||
+        strstr(why, "dependency closure size changed") == NULL)
+        return false;
+
+    return true;
+}
+
+static bool dp_hotswap_service_island(const char *root_a,
+                                      struct zcl_devloop_hotswap_build_receipt *service_built,
+                                      struct zcl_devloop_process_result *process,
+                                      char *why, size_t why_cap)
+{
+    /* A pure service island compiles its owner directly; it has no command
+     * unity-member list. */
+    const char *service =
+        "contexts/commons/services/src/zcode_c23_corpus_service.c";
+    if (!zcl_devloop_hotswap_build(root_a, service, service_built, process,
+                                   why, why_cap) ||
+        service_built->compiler_processes != 2 ||
+        service_built->linker_processes != 1 ||
+        strcmp(service_built->source_tu, service) != 0)
+        return false;
+
+    return true;
+}
+
+static bool dp_hotswap_multi_file(const char *root_a,
+                                  const char *economics_source,
+                                  const char *economics_header,
+                                  struct zcl_devloop_hotswap_build_receipt *batch_built,
+                                  struct zcl_devloop_hotswap_build_receipt *batch_edited,
+                                  struct zcl_devloop_process_result *process,
+                                  char *why, size_t why_cap)
+{
+    if (!zcl_devloop_hotswap_build(root_a, economics_header, batch_built,
+                                   process, why, why_cap) ||
+        batch_built->compiler_processes != 2 ||
+        batch_built->linker_processes != 1 ||
+        strcmp(batch_built->source_tu, economics_source) != 0 ||
+        !dp_mk_write(root_a, economics_source,
+                     "#include \"zcode_c23_economics_internal.h\"\n"
+                     "int zcl_hotswap_fixture_economics(void) { return 5; }\n") ||
+        !dp_mk_write(root_a, economics_header,
+                     "#define ZCL_ECONOMICS_FIXTURE 5\n") ||
+        !zcl_devloop_hotswap_build(root_a, economics_header, batch_edited,
+                                   process, why, why_cap) ||
+        batch_edited->compiler_processes != 1 ||
+        batch_edited->linker_processes != 1 ||
+        strcmp(batch_edited->artifact_cache_key,
+               batch_built->artifact_cache_key) == 0)
+        return false;
+    return true;
+}
+
+static bool dp_hotswap_multi_file_cross(const char *root_b,
+                                        const char *economics_header,
+                                        struct zcl_devloop_hotswap_build_receipt *batch_built,
+                                        struct zcl_devloop_hotswap_build_receipt *batch_cross,
+                                        struct zcl_devloop_process_result *process,
+                                        char *why, size_t why_cap)
+{
+    if (!zcl_devloop_hotswap_build(root_b, economics_header, batch_cross,
+                                   process, why, why_cap) ||
+        !batch_cross->artifact_cache_hit ||
+        batch_cross->compiler_processes != 1 ||
+        batch_cross->linker_processes != 0 ||
+        strcmp(batch_cross->artifact_cache_key,
+               batch_built->artifact_cache_key) != 0 ||
+        strcmp(batch_cross->artifact_sha256,
+               batch_built->artifact_sha256) != 0)
+        return false;
+    return true;
+}
+
 static bool run_hotswap_artifact_cache_fixture(void)
 {
     char root_a[PATH_MAX], root_b[PATH_MAX], cache_rel[PATH_MAX];
@@ -3610,36 +3995,13 @@ static bool run_hotswap_artifact_cache_fixture(void)
     const char *stage = "setup";
     char why[256] = {0};
     char cache[PATH_MAX], compiler[PATH_MAX];
-    char saved_cache[PATH_MAX] = {0};
-    char saved_process[32] = {0};
-    char saved_force_copy[32] = {0};
-    const char *prior_cache = getenv("ZCL_DEV_ARTIFACT_CACHE");
-    const char *prior_process = getenv("ZCL_DEVLOOP_TEST_PROCESS");
-    const char *prior_force_copy =
-        getenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY");
-    bool had_cache = prior_cache && prior_cache[0];
-    bool had_process = prior_process && prior_process[0];
-    bool had_force_copy = prior_force_copy && prior_force_copy[0];
+    struct dp_fixture_env env = {0};
     if (!dp_hotswap_fixture_paths(root_a, root_b, cache_rel, compiler_rel,
                                   dep_path, cache, compiler))
         return false;
-    if (had_cache)
-        (void)snprintf(saved_cache, sizeof(saved_cache), "%s", prior_cache);
-    if (had_process)
-        (void)snprintf(saved_process, sizeof(saved_process), "%s",
-                       prior_process);
-    if (had_force_copy)
-        (void)snprintf(saved_force_copy, sizeof(saved_force_copy), "%s",
-                       prior_force_copy);
-    test_rm_rf_recursive(root_a);
-    test_rm_rf_recursive(root_b);
-    test_rm_rf_recursive(cache_rel);
-    (void)unlink(compiler_rel);
-    if (!dp_hotswap_cache_fixture_init(root_a, fake_compiler) ||
-        !dp_hotswap_cache_fixture_init(root_b, fake_compiler) ||
-        platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", cache, 1) != 0 ||
-        platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0 ||
-        platform_environment_set("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "1", 1) != 0)
+    dp_fixture_env_save(&env);
+    if (!dp_hotswap_fixture_prepare(root_a, root_b, cache_rel, compiler_rel,
+                                    cache, fake_compiler))
         goto out;
 
     struct zcl_devloop_hotswap_build_receipt built = {0};
@@ -3651,115 +4013,37 @@ static bool run_hotswap_artifact_cache_fixture(void)
     struct zcl_devloop_hotswap_build_receipt batch_edited = {0};
     struct zcl_devloop_hotswap_build_receipt batch_cross = {0};
     struct zcl_devloop_process_result process = {0};
+    struct stat cache_st = {0};
     const char *owner = "engine/controllers/src/status_native_handlers.c";
 
     stage = "cold-first-publish";
-    bool cold_build_ok = zcl_devloop_hotswap_build(root_a, owner, &built, &process,
-                                                  why, sizeof(why));
-    if (!cold_build_ok ||
-        built.artifact_cache_hit || built.compiler_processes != 2 ||
-        built.linker_processes != 1 || strlen(built.artifact_cache_key) != 64 ||
-        strlen(built.candidate_object_sha256) != 64) {
-        fprintf(stderr, "hotswap cold publish: build_ok=%d hit=%d cc=%u ld=%u key_len=%zu object_hash_len=%zu cache_miss=%.39s cache_action_root=%.64s action_cause=%.23s action_miss=%.39s action_detail=%.191s\n",
-            cold_build_ok, built.artifact_cache_hit, built.compiler_processes,
-            built.linker_processes, strlen(built.artifact_cache_key),
-            strlen(built.candidate_object_sha256), built.cache_key_miss,
-            built.cache_key_action_root, built.action_root_cause,
-            built.action_root_miss, built.action_root_miss_detail);
-        fprintf(stderr, "hotswap cold process: exit=%d signal=%d timeout=%d cancelled=%d output_len=%zu truncated=%d output=%.4096s\n",
-            process.exit_code, process.term_signal, process.timed_out,
-            process.cancelled, process.output_len, process.output_truncated,
-            process.output);
+    if (!dp_hotswap_cold_publish(root_a, owner, &built, &process, why,
+                                 sizeof(why)))
         goto out;
-    }
     stage = "cross-device-inode-proof";
-    char cache_artifact[PATH_MAX];
-    struct stat cache_st = {0}, published_st = {0};
-    int cache_n = snprintf(cache_artifact, sizeof(cache_artifact),
-                           "%s/hotswap-v1/%s.so", cache,
-                           built.artifact_cache_key);
-    int cache_stat_rc = cache_n < (int)sizeof(cache_artifact)
-        ? stat(cache_artifact, &cache_st) : -1;
-    int published_stat_rc = stat(built.artifact_path, &published_st);
-    if (cache_n >= (int)sizeof(cache_artifact) || cache_stat_rc != 0 ||
-        published_stat_rc != 0 ||
-        (cache_st.st_dev == published_st.st_dev &&
-         cache_st.st_ino == published_st.st_ino)) {
-        fprintf(stderr,
-                "cross-device proof cache=%s artifact=%s stat=%d/%d "
-                "identity=%llu:%llu/%llu:%llu\n",
-                cache_artifact, built.artifact_path, cache_stat_rc,
-                published_stat_rc, (unsigned long long)cache_st.st_dev,
-                (unsigned long long)cache_st.st_ino,
-                (unsigned long long)published_st.st_dev,
-                (unsigned long long)published_st.st_ino);
-        goto out;
-    }
-    if (dp_environment_unset("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY") != 0)
+    if (!dp_hotswap_cross_device_inode(cache, &built, &cache_st))
         goto out;
     stage = "same-worktree-cache-hit";
-    if (!zcl_devloop_hotswap_build(root_a, owner, &hit, &process,
-                                   why, sizeof(why)) ||
-        !hit.artifact_cache_hit || hit.compiler_processes != 0 ||
-        hit.linker_processes != 0 ||
-        strcmp(hit.artifact_cache_key, built.artifact_cache_key) != 0 ||
-        strcmp(hit.artifact_sha256, built.artifact_sha256) != 0 ||
-        strcmp(hit.candidate_object_sha256,
-               built.candidate_object_sha256) != 0)
-        goto out;
-
-    if (!dp_mk_write(root_a,
-                     "engine/controllers/src/status_native_handlers.c",
-                     "int zcl_hotswap_fixture_owner(void) { return 9; }\n") ||
-        !zcl_devloop_hotswap_build(root_a, owner, &edited, &process,
-                                   why, sizeof(why)) ||
-        edited.artifact_cache_hit || edited.compiler_processes != 1 ||
-        edited.linker_processes != 1 ||
-        strcmp(edited.artifact_cache_key, built.artifact_cache_key) == 0)
+    if (!dp_hotswap_same_worktree(root_a, owner, &built, &hit, &edited,
+                                  &process, why, sizeof(why)))
         goto out;
     stage = "exact-revert";
-    if (!dp_mk_write(root_a,
-                     "engine/controllers/src/status_native_handlers.c",
-                     "int zcl_hotswap_fixture_owner(void) { return 1; }\n") ||
-        !zcl_devloop_hotswap_build(root_a, owner, &reverted, &process,
-                                   why, sizeof(why)) ||
-        !reverted.artifact_cache_hit || reverted.compiler_processes != 0 ||
-        reverted.linker_processes != 0 ||
-        strcmp(reverted.artifact_cache_key, built.artifact_cache_key) != 0)
+    if (!dp_hotswap_exact_revert(root_a, owner, &built, &reverted, &process,
+                                 why, sizeof(why)))
         goto out;
-
     stage = "cross-checkout-hit";
     if (!dp_second_checkout_hit_is_single_link(root_b, owner, &built, &cache_st,
                                                &cross, &process, why,
                                                sizeof(why)))
         goto out;
-
-    /* A dependency appearing between the discovery and verification compile
-     * must refuse the cold activation and publish no module. */
     stage = "cold-dependency-mutation";
-    if (!dp_mk_write(root_b, owner,
-                     "int zcl_hotswap_fixture_owner(void) { return 13; }\n") ||
-        unlink(dep_path) != 0 ||
-        !dp_mk_write(root_b, "build/hotswap-fast/mutate-deps", "1\n") ||
-        zcl_devloop_hotswap_build(root_b, owner, &mutated, &process,
-                                  why, sizeof(why)) ||
-        !dp_ar_unlink_in(root_b, "build/hotswap-fast/mutate-deps") ||
-        mutated.compiler_processes != 2 || mutated.linker_processes != 0 ||
-        strstr(why, "dependency closure size changed") == NULL)
+    if (!dp_hotswap_dependency_mutation(root_b, owner, dep_path, &mutated,
+                                        &process, why, sizeof(why)))
         goto out;
-
-    /* A pure service island compiles its owner directly; it has no command
-     * unity-member list. */
-    const char *service =
-        "contexts/commons/services/src/zcode_c23_corpus_service.c";
     stage = "service-island";
-    if (!zcl_devloop_hotswap_build(root_a, service, &service_built, &process,
-                                   why, sizeof(why)) ||
-        service_built.compiler_processes != 2 ||
-        service_built.linker_processes != 1 ||
-        strcmp(service_built.source_tu, service) != 0)
+    if (!dp_hotswap_service_island(root_a, &service_built, &process, why,
+                                   sizeof(why)))
         goto out;
-
     /* A source + private-header epoch maps back to one owner, compiles that
      * exact dependency closure once, and yields one candidate artifact. */
     const char *economics_source =
@@ -3767,32 +4051,13 @@ static bool run_hotswap_artifact_cache_fixture(void)
     const char *economics_header =
         "contexts/commons/services/src/zcode_c23_economics_internal.h";
     stage = "multi-file-island";
-    if (!zcl_devloop_hotswap_build(root_a, economics_header, &batch_built,
-                                   &process, why, sizeof(why)) ||
-        batch_built.compiler_processes != 2 ||
-        batch_built.linker_processes != 1 ||
-        strcmp(batch_built.source_tu, economics_source) != 0 ||
-        !dp_mk_write(root_a, economics_source,
-                     "#include \"zcode_c23_economics_internal.h\"\n"
-                     "int zcl_hotswap_fixture_economics(void) { return 5; }\n") ||
-        !dp_mk_write(root_a, economics_header,
-                     "#define ZCL_ECONOMICS_FIXTURE 5\n") ||
-        !zcl_devloop_hotswap_build(root_a, economics_header, &batch_edited,
-                                   &process, why, sizeof(why)) ||
-        batch_edited.compiler_processes != 1 ||
-        batch_edited.linker_processes != 1 ||
-        strcmp(batch_edited.artifact_cache_key,
-               batch_built.artifact_cache_key) == 0)
+    if (!dp_hotswap_multi_file(root_a, economics_source, economics_header,
+                               &batch_built, &batch_edited, &process, why,
+                               sizeof(why)))
         goto out;
-    if (!zcl_devloop_hotswap_build(root_b, economics_header, &batch_cross,
-                                   &process, why, sizeof(why)) ||
-        !batch_cross.artifact_cache_hit ||
-        batch_cross.compiler_processes != 1 ||
-        batch_cross.linker_processes != 0 ||
-        strcmp(batch_cross.artifact_cache_key,
-               batch_built.artifact_cache_key) != 0 ||
-        strcmp(batch_cross.artifact_sha256,
-               batch_built.artifact_sha256) != 0)
+    if (!dp_hotswap_multi_file_cross(root_b, economics_header, &batch_built,
+                                     &batch_cross, &process, why,
+                                     sizeof(why)))
         goto out;
     ok = true;
 
@@ -3801,18 +4066,7 @@ out:
     if (!ok)
         fprintf(stderr, "hotswap cache fixture failed at %s: %s\n", stage,
                 why[0] ? why : "no build reason");
-    if (had_cache)
-        (void)platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", saved_cache, 1);
-    else
-        (void)dp_environment_unset("ZCL_DEV_ARTIFACT_CACHE");
-    if (had_process)
-        (void)platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", saved_process, 1);
-    else
-        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS");
-    if (had_force_copy)
-        (void)platform_environment_set("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", saved_force_copy, 1);
-    else
-        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY");
+    dp_fixture_env_restore(&env);
     test_rm_rf_recursive(root_a);
     test_rm_rf_recursive(root_b);
     test_rm_rf_recursive(cache_rel);
@@ -7519,6 +7773,34 @@ static int test_resident_restart_builder(void)
 }
 
 #if defined(__APPLE__)
+static int dp_darwin_open_executable(char executable[PATH_MAX])
+{
+    char unresolved[PATH_MAX];
+    uint32_t unresolved_len = sizeof(unresolved);
+    if (_NSGetExecutablePath(unresolved, &unresolved_len) != 0 ||
+        realpath(unresolved, executable) == NULL)
+        return -1;
+    return open(executable, O_RDONLY | O_CLOEXEC);
+}
+
+static bool dp_darwin_source_record_ok(const char *executable, int fd)
+{
+    struct zcl_devloop_process_result result = {0};
+    const char *argv[] = { executable, "--source-record", NULL };
+    bool ok = zcl_devloop_process_run_fd(".", fd, argv, 30000, &result) &&
+              result.exit_code == 0 && result.term_signal == 0 &&
+              !result.timed_out && !result.cancelled &&
+              result.output_len >= 131 && result.startup_us > 0;
+    char source_id[65] = {0}, mutation_id[65] = {0}, extra = 0;
+    int complete = 0;
+    if (ok)
+        ok = sscanf(result.output, "%64[0-9a-f] %d %64[0-9a-f] %c",
+                    source_id, &complete, mutation_id, &extra) == 3 &&
+             strlen(source_id) == 64 && strlen(mutation_id) == 64 &&
+             complete == 1;
+    return ok;
+}
+
 static bool run_darwin_attested_descriptor_fixture(void)
 {
     const char *saved = getenv("ZCL_DEVLOOP_TEST_PROCESS");
@@ -7526,32 +7808,15 @@ static bool run_darwin_attested_descriptor_fixture(void)
     if (saved && !saved_copy)
         return false;
 
-    char unresolved[PATH_MAX], executable[PATH_MAX];
-    uint32_t unresolved_len = sizeof(unresolved);
-    bool ok = _NSGetExecutablePath(unresolved, &unresolved_len) == 0 &&
-              realpath(unresolved, executable) != NULL;
-    int fd = ok ? open(executable, O_RDONLY | O_CLOEXEC) : -1;
-    if (fd < 0)
-        ok = false;
+    char executable[PATH_MAX];
+    int fd = dp_darwin_open_executable(executable);
+    bool ok = fd >= 0;
     if (ok && platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1)
                   != 0)
         ok = false;
 
-    struct zcl_devloop_process_result result = {0};
-    const char *argv[] = { executable, "--source-record", NULL };
-    if (ok) {
-        ok = zcl_devloop_process_run_fd(".", fd, argv, 30000, &result) &&
-             result.exit_code == 0 && result.term_signal == 0 &&
-             !result.timed_out && !result.cancelled &&
-             result.output_len >= 131 && result.startup_us > 0;
-        char source_id[65] = {0}, mutation_id[65] = {0}, extra = 0;
-        int complete = 0;
-        if (ok)
-            ok = sscanf(result.output, "%64[0-9a-f] %d %64[0-9a-f] %c",
-                        source_id, &complete, mutation_id, &extra) == 3 &&
-                 strlen(source_id) == 64 && strlen(mutation_id) == 64 &&
-                 complete == 1;
-    }
+    if (ok)
+        ok = dp_darwin_source_record_ok(executable, fd);
 
     if (fd >= 0)
         close(fd);
