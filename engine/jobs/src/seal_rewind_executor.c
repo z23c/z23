@@ -43,6 +43,33 @@ static bool seal_rewind_refuse(struct seal_rewind_result *out,
     return true;
 }
 
+/* Inverse-apply the retained deltas for [G, C-1], newest first. On the first
+ * failure *failed_h names that height and false is returned; *unwound counts
+ * the heights applied so far. The caller logs and rolls back. */
+static bool seal_rewind_unwind_inverse_deltas(sqlite3 *db, int32_t G, int32_t C,
+                                              int32_t *failed_h, int32_t *unwound)
+{
+    for (int32_t h = C - 1; h >= G; h--) {
+        if (!utxo_apply_emit_inverse_delta(db, h)) {
+            *failed_h = h;
+            return false; // raw-return-ok:caller_logs_unwind_failure
+        }
+        (*unwound)++;
+    }
+    return true;
+}
+
+/* Land the reducer rows and cursors at the verified seal G, in the caller's
+ * txn: drop the rows above G, force both stage cursors to G and pull
+ * coins_applied_height back to G. Stops at the first failed write. */
+static bool seal_rewind_reset_rows_and_cursors(sqlite3 *db, int32_t G, int32_t C)
+{
+    return utxo_apply_delete_rows_above(db, G, C - 1) &&
+           stage_repair_force_stage_cursor(db, "utxo_apply", G) &&
+           stage_repair_force_stage_cursor(db, "tip_finalize", G) &&
+           utxo_apply_frontier_set_in_tx(db, G);
+}
+
 bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
                             struct seal_rewind_result *out)
 {
@@ -119,18 +146,16 @@ bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
      * first (disconnect order), so the set unwinds to coins_applied_height==G.
      * Read the delta rows BEFORE deleting them below. */
     int32_t unwound = 0;
-    for (int32_t h = C - 1; h >= G; h--) {
-        if (!utxo_apply_emit_inverse_delta(db, h)) {
-            LOG_WARN("seal_rewind",
-                     "[seal_rewind] inverse delta unwind failed h=%d "
-                     "(range [%d,%d])", h, G, C - 1);
-            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
-            progress_store_tx_unlock();
-            out->unwound_heights = unwound;
-            out->refusal = SEAL_REWIND_STORE_ERROR;
-            return true;
-        }
-        unwound++;
+    int32_t h = 0;
+    if (!seal_rewind_unwind_inverse_deltas(db, G, C, &h, &unwound)) {
+        LOG_WARN("seal_rewind",
+                 "[seal_rewind] inverse delta unwind failed h=%d "
+                 "(range [%d,%d])", h, G, C - 1);
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        progress_store_tx_unlock();
+        out->unwound_heights = unwound;
+        out->refusal = SEAL_REWIND_STORE_ERROR;
+        return true;
     }
     out->unwound_heights = unwound;
 
@@ -171,10 +196,7 @@ bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
      * utxo_apply re-consumes them on the forward re-fold. tip_finalize_log rows
      * are NEVER deleted — only its cursor moves — preserving served-floor
      * evidence, exactly as the header-poison rewind does. */
-    if (!utxo_apply_delete_rows_above(db, G, C - 1) ||
-        !stage_repair_force_stage_cursor(db, "utxo_apply", G) ||
-        !stage_repair_force_stage_cursor(db, "tip_finalize", G) ||
-        !utxo_apply_frontier_set_in_tx(db, G)) {
+    if (!seal_rewind_reset_rows_and_cursors(db, G, C)) {
         LOG_WARN("seal_rewind",
                  "[seal_rewind] reset writes failed at G=%d — rolling back", G);
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
