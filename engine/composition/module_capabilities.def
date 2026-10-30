@@ -1395,6 +1395,7 @@ ZCL_MODULE_CAPABILITY("tools/dev/dev_proof_coverage.c", CAP_FS_READ|CAP_FS_WRITE
 ZCL_MODULE_CAPABILITY("tools/dev/dev_proof_observation_lookup.c", CAP_FS_WRITE, "reports invalid or missing local observation objects on the diagnostic stream")
 ZCL_MODULE_CAPABILITY("tools/dev/dev_proof_receipt.c", CAP_FS_WRITE, "encodes and verifies the signed exact-key verdict-leaf and child-receipt wire formats; verdict_fail() names every refusal on stderr")
 ZCL_MODULE_CAPABILITY("tools/dev/dev_proof_signer.c", CAP_FS_WRITE, "custodies this box's Ed25519 push-proof signing key and its signers.allow trust list under the state root, and names key creation and every refusal on stderr")
+ZCL_MODULE_CAPABILITY("tools/dev/fleet_enrol_codec.c", CAP_FS_READ, "reads the persistent onion hostname a node keeps under its datadir so a join receipt can record it")
 ZCL_MODULE_CAPABILITY("tools/dev/fleet_enrol_facts.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("tools/dev/fleet_enrol_store.c", CAP_FS_WRITE|CAP_CLOCK, "custodies this owner's machine roster and spent-invite list under the state root, and appends the ONE restricted port-forwarding line the ssh bridge adds to the operator's authorized_keys; the fleet state lock polls with a bounded sleep")
 ZCL_MODULE_CAPABILITY("tools/dev/fleet_roster_gate.c", CAP_FS_WRITE, "reads the roster head, operator pin and roster lines through the fleet store, whose write class comes with those calls; this gate writes nothing and loads the fleet key with create=false")
