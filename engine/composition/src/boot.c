@@ -80,6 +80,7 @@
 #include "util/boot_scan.h"
 #include "util/sysinit.h"
 #include "platform/os_sandbox.h"
+#include "platform/private_directory.h"
 #include "util/util.h"
 #include "net/msgprocessor.h"
 #include "chain/chainparams.h"
@@ -705,9 +706,23 @@ static bool boot_wallet_backup_service_start(void *ctx)
     /* Defaults apply the WALLET_BACKUP_PASSWORD encryption policy. */
     wallet_backup_config_defaults(&g_wallet_backup_cfg);
     if (!g_wallet_backup_cfg.backup_dir) {
-        const char *home = getenv("HOME");
-        snprintf(backup_dir, sizeof(backup_dir), "%s/wallet_backups",
-                 home && home[0] ? home : ".");
+        /* Non-mainnet networks get their own subdirectory so their
+         * rotation can never delete mainnet backups. */
+        char parent[1024];
+        if (!wallet_backup_default_dir(getenv("HOME"),
+                                       chain_params_get()->strNetworkID,
+                                       backup_dir, sizeof(backup_dir),
+                                       parent, sizeof(parent))) {
+            fprintf(stderr, "[boot] wallet backup dir refused: invalid"
+                            " network id or path too long\n");
+            return false;
+        }
+        /* mkdir is not recursive: make the shared parent private first. */
+        if (parent[0] && !platform_private_directory_ensure(parent)) {
+            fprintf(stderr, "[boot] cannot create private backup dir %s\n",
+                    parent);
+            return false;
+        }
         g_wallet_backup_cfg.backup_dir = backup_dir;
     }
     struct zcl_result br = wallet_backup_start(&g_wallet_backup_cfg, db);

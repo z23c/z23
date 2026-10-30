@@ -73,6 +73,49 @@ void wallet_backup_config_defaults(struct wallet_backup_config *cfg)
     wbs_config_apply_env_password(cfg);
 }
 
+static bool wbs_fmt(char *out, size_t cap, const char *base, const char *sub)
+{
+    int n = sub ? snprintf(out, cap, "%s/wallet_backups/%s", base, sub)
+                : snprintf(out, cap, "%s/wallet_backups", base);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool wbs_is_mainnet(const char *network_id)
+{
+    return network_id && strcmp(network_id, "main") == 0;
+}
+
+/* A non-mainnet id becomes ONE path component: 1-15 chars of [a-z0-9] only,
+ * so "", ".", "..", "a/b" or "Test" can never resolve to (or above) the
+ * mainnet directory. */
+static bool wbs_network_char_ok(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+}
+
+static bool wbs_valid_network_component(const char *id)
+{
+    size_t n = id ? strlen(id) : 0;
+    size_t i = 0;
+    while (i < n && wbs_network_char_ok(id[i])) i++;
+    return n >= 1 && n <= 15 && i == n; // raw-return-ok:pure-validator-no-io
+}
+
+bool wallet_backup_default_dir(const char *home, const char *network_id,
+                               char *out, size_t cap,
+                               char *parent_out, size_t parent_cap)
+{
+    if (!out || !cap) return false;
+    if (parent_out && parent_cap) parent_out[0] = '\0';
+    const char *base = home && home[0] ? home : ".";
+    if (wbs_is_mainnet(network_id)) return wbs_fmt(out, cap, base, NULL);
+    if (!wbs_valid_network_component(network_id))
+        return false; // raw-return-ok:pure-validator-caller-logs
+    if (!wbs_fmt(out, cap, base, network_id)) return false;
+    if (!parent_out || !parent_cap) return true;
+    return wbs_fmt(parent_out, parent_cap, base, NULL);
+}
+
 #ifdef ZCL_TESTING
 static _Atomic(wbs_stop_test_observer) g_wbs_stop_observer;
 

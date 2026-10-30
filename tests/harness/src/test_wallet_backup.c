@@ -1910,6 +1910,145 @@ static int t_authority_sync_backend(void)
     return failures;
 }
 
+static int t_default_dir_per_network(void)
+{
+    int failures = 0;
+    char out[128], parent[128];
+    bool ok = wallet_backup_default_dir("/h", "main", out, sizeof out,
+                                        parent, sizeof parent);
+    WB_RUN("wb: mainnet default dir is $HOME/wallet_backups",
+           ok && strcmp(out, "/h/wallet_backups") == 0 && parent[0] == '\0');
+    ok = wallet_backup_default_dir("/h", NULL, out, sizeof out, NULL, 0);
+    WB_RUN("wb: NULL network is refused, never mapped to mainnet", !ok);
+    ok = wallet_backup_default_dir("/h", "", out, sizeof out, NULL, 0);
+    WB_RUN("wb: empty network id is refused", !ok);
+    static const char *const bad_ids[] = {"..", ".", "a/b", "Test",
+                                          "main/..", "0123456789abcdef"};
+    for (size_t i = 0; i < sizeof(bad_ids) / sizeof(bad_ids[0]); i++) {
+        out[0] = '\0';
+        ok = wallet_backup_default_dir("/h", bad_ids[i], out, sizeof out,
+                                       NULL, 0);
+        char label[96];
+        snprintf(label, sizeof(label), "wb: network id '%s' is refused",
+                 bad_ids[i]);
+        WB_RUN(label, !ok);
+    }
+    ok = wallet_backup_default_dir("/h", "regtest", out, sizeof out,
+                                   parent, sizeof parent);
+    WB_RUN("wb: regtest default dir is nested per network",
+           ok && strcmp(out, "/h/wallet_backups/regtest") == 0 &&
+               strcmp(parent, "/h/wallet_backups") == 0);
+    ok = wallet_backup_default_dir("/h", "test", out, sizeof out,
+                                   parent, sizeof parent);
+    WB_RUN("wb: testnet default dir is nested per network",
+           ok && strcmp(out, "/h/wallet_backups/test") == 0);
+    ok = wallet_backup_default_dir("", "regtest", out, sizeof out,
+                                   parent, sizeof parent);
+    WB_RUN("wb: empty HOME falls back to '.' (nested)",
+           ok && strcmp(out, "./wallet_backups/regtest") == 0);
+    ok = wallet_backup_default_dir(NULL, "main", out, sizeof out, NULL, 0);
+    WB_RUN("wb: NULL HOME falls back to '.' (mainnet)",
+           ok && strcmp(out, "./wallet_backups") == 0);
+    char tiny[8];
+    WB_RUN("wb: too-small buffer is refused",
+           !wallet_backup_default_dir("/h", "regtest", tiny, sizeof tiny,
+                                      NULL, 0));
+    return failures;
+}
+
+static bool wb_iso_touch(const char *dir, long ts)
+{
+    char p[1024];
+    int n = snprintf(p, sizeof(p), "%s/wallet_backup_%ld_000001.sqlite",
+                     dir, ts);
+    if (n < 0 || (size_t)n >= sizeof(p)) return false;
+    FILE *fp = fopen(p, "wb");
+    if (!fp) return false;
+    bool wrote = fputs("x", fp) != EOF;
+    return fclose(fp) == 0 && wrote;
+}
+
+static bool wb_iso_has(const char *dir, long ts)
+{
+    char p[1024];
+    struct stat st;
+    snprintf(p, sizeof(p), "%s/wallet_backup_%ld_000001.sqlite", dir, ts);
+    return stat(p, &st) == 0;
+}
+
+static bool wb_iso_seed(const char *dir, long first, long last)
+{
+    for (long ts = first; ts <= last; ts++)
+        if (!wb_iso_touch(dir, ts)) return false;
+    return true;
+}
+
+/* True when exactly the backups ts >= keep_from in [first,last] remain. */
+static bool wb_iso_kept_from(const char *dir, long first, long last,
+                             long keep_from)
+{
+    for (long ts = first; ts <= last; ts++)
+        if (wb_iso_has(dir, ts) != (ts >= keep_from)) return false;
+    return true;
+}
+
+static bool wb_iso_is_dir(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static bool wb_iso_setup(const char *home, char *main_dir, size_t main_cap,
+                         char *reg_dir, size_t reg_cap,
+                         char *parent, size_t parent_cap)
+{
+    return wallet_backup_default_dir(home, "main", main_dir, main_cap,
+                                     NULL, 0) &&
+           wallet_backup_default_dir(home, "regtest", reg_dir, reg_cap,
+                                     parent, parent_cap) &&
+           strcmp(parent, main_dir) == 0 &&
+           platform_private_directory_ensure(main_dir) &&
+           platform_private_directory_ensure(reg_dir) &&
+           wb_iso_seed(main_dir, 101, 104) &&   /* max_versions + 2 */
+           wb_iso_seed(reg_dir, 201, 203);
+}
+
+/* Rotation of a nested per-network dir must never touch the mainnet dir
+ * that contains it, and rotating the mainnet dir must leave the nested
+ * network directory and its backups alone. */
+static int t_rotation_isolated_between_networks(void)
+{
+    int failures = 0;
+    char home[512], main_dir[600] = "", reg_dir[700] = "", parent[600] = "";
+    if (!test_ensure_tmproot()) {
+        printf("wb: fixture setup failed\n");
+        return 1;
+    }
+    test_fmt_tmpdir(home, sizeof(home), "zcl_wb_home", "iso");
+    platform_directory_create(home, 0755);
+    bool seeded = wb_iso_setup(home, main_dir, sizeof(main_dir), reg_dir,
+                               sizeof(reg_dir), parent, sizeof(parent));
+
+    int del_reg = seeded ? wallet_backup_rotate(reg_dir, 2) : -1;
+    WB_RUN("wb: rotating the regtest dir leaves mainnet backups untouched",
+           seeded && del_reg == 1 &&
+               wb_iso_kept_from(main_dir, 101, 104, 101) &&
+               wb_iso_kept_from(reg_dir, 201, 203, 202));
+
+    int del_main = seeded ? wallet_backup_rotate(main_dir, 2) : -1;
+    WB_RUN("wb: rotating the mainnet dir leaves the regtest subdir untouched",
+           seeded && del_main == 2 && wb_iso_is_dir(reg_dir) &&
+               wb_iso_kept_from(reg_dir, 201, 203, 202) &&
+               wb_iso_kept_from(main_dir, 101, 104, 103));
+
+    /* test_cleanup_tmpdir is flat: remove the nested dirs innermost first
+     * (an unresolved path stays "" and is skipped). */
+    test_cleanup_tmpdir(reg_dir);
+    test_cleanup_tmpdir(main_dir);
+    test_cleanup_tmpdir(home);
+    return failures;
+}
+
 int test_wallet_backup(void)
 {
     printf("\n=== wallet_backup tests ===\n");
@@ -1918,6 +2057,8 @@ int test_wallet_backup(void)
     failures += t_private_descriptor_lifetime();
 #endif
     failures += t_authority_sync_backend();
+    failures += t_default_dir_per_network();
+    failures += t_rotation_isolated_between_networks();
     failures += t_happy();
     failures += t_small_output_path_is_refused_before_backup();
     failures += t_missing_dir_created();

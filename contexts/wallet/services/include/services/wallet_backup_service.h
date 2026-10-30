@@ -121,6 +121,18 @@ struct wallet_backup_config {
  * start requires refreshing defaults. Start retains its own password copy. */
 void wallet_backup_config_defaults(struct wallet_backup_config *cfg);
 
+/* Default backup directory choice (pure; no filesystem access).
+ * Mainnet (network_id exactly "main"): "<home>/wallet_backups".
+ * Any other network: "<home>/wallet_backups/<network_id>", so a test
+ * network's rotation can never delete mainnet backups. The id must be
+ * 1-15 chars of [a-z0-9] (else false). An empty/NULL home
+ * falls back to ".". Returns false if the result does not fit `cap`.
+ * `parent_out` (optional) receives the mainnet directory when the result is
+ * nested, else "" -- the caller creates it private before the child. */
+bool wallet_backup_default_dir(const char *home, const char *network_id,
+                               char *out, size_t cap,
+                               char *parent_out, size_t parent_cap);
+
 #ifdef ZCL_TESTING
 /* Observe the full service-owned allocation after cleansing, before release. */
 void wallet_backup_test_password_retirement_reset(void);
