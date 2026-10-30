@@ -13,13 +13,6 @@ contexts/commons/packages/zdiff/tests/test_zdiff.c:test_kat:22
 contexts/commons/packages/zdiff/tests/test_zdiff.c:verify_script:25
 contexts/commons/packages/zotpcli/app/main.c:cmd_add:21
 contexts/commons/packages/zotpcli/app/main.c:parse_options:23
-contexts/commons/packages/zotpcli/src/zotpcli.c:json_str_decode:32
-contexts/commons/packages/zotpcli/src/zotpcli.c:parse_entry_record:37
-contexts/commons/packages/zotpcli/src/zotpcli.c:parse_header:36
-contexts/commons/packages/zotpcli/src/zotpcli.c:rec_next:16
-contexts/commons/packages/zotpcli/src/zotpcli.c:zotpcli_b32_decode_secret:19
-contexts/commons/packages/zotpcli/src/zotpcli.c:zotpcli_otpauth_format:16
-contexts/commons/packages/zotpcli/src/zotpcli.c:zotpcli_store_decode:20
 contexts/commons/packages/zrand/app/main.c:main:20
 contexts/commons/packages/zscrypt/src/zscrypt.c:zscrypt:19
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_fuzz:18
