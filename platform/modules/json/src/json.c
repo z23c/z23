@@ -368,31 +368,41 @@ const char *json_get_str(const struct json_value *v)
 
 /* --- JSON writer --- */
 
+static char json_short_escape(char c)
+{
+    switch (c) {
+    case '"':  return '"';
+    case '\\': return '\\';
+    case '\b': return 'b';
+    case '\f': return 'f';
+    case '\n': return 'n';
+    case '\r': return 'r';
+    case '\t': return 't';
+    default: return 0;
+    }
+}
+
+static size_t json_escape_unicode(unsigned char c, char *buf, size_t buflen, size_t pos)
+{
+    char tmp[8];
+    int n = snprintf(tmp, sizeof(tmp), "\\u%04x", c);
+    for (int i = 0; i < n; i++) {
+        if (pos < buflen) { buf[pos] = tmp[i]; } pos++;
+    }
+    return pos;
+}
+
 static size_t json_escape_str(const char *s, char *buf, size_t buflen)
 {
     size_t pos = 0;
     if (pos < buflen) { buf[pos] = '"'; } pos++;
     for (const char *p = s; *p; p++) {
-        char esc = 0;
-        switch (*p) {
-        case '"':  esc = '"'; break;
-        case '\\': esc = '\\'; break;
-        case '\b': esc = 'b'; break;
-        case '\f': esc = 'f'; break;
-        case '\n': esc = 'n'; break;
-        case '\r': esc = 'r'; break;
-        case '\t': esc = 't'; break;
-        default: break;
-        }
+        char esc = json_short_escape(*p);
         if (esc) {
             if (pos < buflen) { buf[pos] = '\\'; } pos++;
             if (pos < buflen) { buf[pos] = esc; } pos++;
         } else if ((unsigned char)*p < 0x20) {
-            char tmp[8];
-            int n = snprintf(tmp, sizeof(tmp), "\\u%04x", (unsigned char)*p);
-            for (int i = 0; i < n; i++) {
-                if (pos < buflen) { buf[pos] = tmp[i]; } pos++;
-            }
+            pos = json_escape_unicode((unsigned char)*p, buf, buflen, pos);
         } else {
             if (pos < buflen) { buf[pos] = *p; } pos++;
         }
