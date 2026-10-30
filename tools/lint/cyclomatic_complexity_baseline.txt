@@ -232,7 +232,7 @@ engine/entry/main_cli_modes.c:importblockindex_cli_mode:20
 engine/entry/main_cli_modes.c:importchainstate_mode:19
 engine/entry/main_cli_modes.c:legacy_utxo_run:21
 engine/entry/main_cli_modes.c:mintutxocommitment_mode:26
-engine/jobs/src/proof_validate_stage.c:step_validate:33
+engine/jobs/src/proof_validate_stage.c:step_validate:26
 engine/jobs/src/seal_rewind_executor.c:seal_rewind_to_nearest:23
 engine/jobs/src/stage_anchor.c:stage_anchor_cap_target_at_log_frontier:24
 engine/jobs/src/stage_repair_coin_backfill.c:backfill_run:28

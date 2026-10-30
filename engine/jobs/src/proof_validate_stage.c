@@ -439,6 +439,80 @@ static job_result_t pv_record_verdict(struct stage_step_ctx *c, sqlite3 *db,
     return JOB_ADVANCED;
 }
 
+/* Upstream verdict gate for next_h. Returns true when the stage may continue
+ * with the upstream row; false with *ret set when it must return now. */
+static bool pv_upstream_verdict_pass(struct stage_step_ctx *c,
+                                     const struct block_index *bi, int next_h,
+                                     struct script_validate_row *upstream,
+                                     job_result_t *ret)
+{
+    bool verdict_canonical = upstream->ok == 0 || upstream->ok == 1;
+    if (verdict_canonical)
+        proof_validate_upstream_verdict_clear();
+    if (!proof_validate_upstream_hash_ready(
+            next_h, bi->phashBlock, upstream->has_block_hash,
+            &upstream->block_hash)) {
+        atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+        *ret = JOB_IDLE;
+        return false;
+    }
+    if (!verdict_canonical) {
+        *ret = proof_validate_upstream_verdict_refuse(c, next_h, upstream->ok);
+        return false;
+    }
+    return true;
+}
+
+/* Verdict for the block at next_h: a lookahead hit when one is cached, else
+ * inline verification. Returns true when the stage must return *early_ret now. */
+static bool pv_verify_or_hit(struct stage_step_ctx *c, struct block_index *bi,
+                             int next_h, bool skip_crypto,
+                             struct proof_verify_summary *summary,
+                             job_result_t *early_ret)
+{
+    struct pv_lookahead_verdict cached;
+    if (!skip_crypto &&
+        pv_lookahead_take(next_h, bi->phashBlock, g_tx_verifier,
+                          g_tx_verifier_user, &cached)) {
+        /* LOOKAHEAD HIT (jobs/pv_lookahead.h; the pool is started by the
+         * -mint-anchor drive and, under -pv-lookahead, by the live/replay
+         * boot path): a worker already verified this exact
+         * (height, block_hash) with the same effective verifier, so the verdict
+         * IS what the serial sweep below would compute (proof verification is a
+         * pure function of block bytes + verifying keys). internal_error is
+         * never cached, so the TL-2 HOLD path below stays inline-only. The
+         * block read and its params wait gate are not needed on a hit: the
+         * worker proved the body readable, and a shielded block can only be
+         * cached after the keys loaded (the worker mirrors the gate). */
+        pv_apply_lookahead_hit(summary, &cached);
+        return false;
+    }
+    return pv_verify_block_inline(c, bi, next_h, skip_crypto, summary, early_ret);
+}
+
+/* Settle a completed summary: TL-2 HOLD for internal_error, else record the
+ * verdict row. */
+static job_result_t pv_settle_verdict(struct stage_step_ctx *c, sqlite3 *db,
+                                      const struct block_index *bi, int next_h,
+                                      bool skip_crypto,
+                                      const struct proof_verify_summary *summary)
+{
+    /* TL-2: the internal_error class is a TRANSIENT "could not complete proof
+     * verification yet" (a sapling_ctx allocation failure under memory pressure
+     * on <8GB targets, or a transient verifier/decode fault) — NOT a permanent
+     * bad-proof reject. Mirror the script path STEP-2A: HOLD the cursor and
+     * re-derive next tick — do NOT insert a terminal ok=0 row, do NOT advance the
+     * cursor, do NOT emit EV_BLOCK_REJECTED. A bounded blocked-since budget turns
+     * a genuinely irreducible internal_error into one named PERMANENT blocker
+     * (pv_hold_unresolved), never a silent loop and never a transient frozen as a
+     * false ok=0 reject (the very wedge the script path already cured). */
+    if (!summary->ok && summary->internal_error)
+        return pv_hold_unresolved(c, next_h, &summary->first_failure_txid,
+                                  summary->first_failure_proof_type);
+
+    return pv_record_verdict(c, db, bi, next_h, skip_crypto, summary);
+}
+
 static job_result_t step_validate(struct stage_step_ctx *c)
 {
     atomic_store(&g_last_step_unix, platform_time_wall_unix());
@@ -533,17 +607,9 @@ static job_result_t step_validate(struct stage_step_ctx *c)
         atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
         return JOB_IDLE;
     }
-    bool verdict_canonical = upstream.ok == 0 || upstream.ok == 1;
-    if (verdict_canonical)
-        proof_validate_upstream_verdict_clear();
-    if (!proof_validate_upstream_hash_ready(
-            next_h, bi->phashBlock, upstream.has_block_hash,
-            &upstream.block_hash)) {
-        atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
-        return JOB_IDLE;
-    }
-    if (!verdict_canonical)
-        return proof_validate_upstream_verdict_refuse(c, next_h, upstream.ok);
+    job_result_t gate_ret;
+    if (!pv_upstream_verdict_pass(c, bi, next_h, &upstream, &gate_ret))
+        return gate_ret;
     if (upstream.ok == 1 && upstream.evidence != expected_evidence) {
         if (pv_trace)
             LOG_WARN(STAGE_NAME,
@@ -559,42 +625,11 @@ static job_result_t step_validate(struct stage_step_ctx *c)
     if (upstream.ok == 0)
         return pv_advance_upstream_failed(c, db, bi, next_h);
     struct proof_verify_summary summary;
-    struct pv_lookahead_verdict cached;
-    if (!skip_crypto &&
-        pv_lookahead_take(next_h, bi->phashBlock, g_tx_verifier,
-                          g_tx_verifier_user, &cached)) {
-        /* LOOKAHEAD HIT (jobs/pv_lookahead.h; the pool is started by the
-         * -mint-anchor drive and, under -pv-lookahead, by the live/replay
-         * boot path): a worker already verified this exact
-         * (height, block_hash) with the same effective verifier, so the verdict
-         * IS what the serial sweep below would compute (proof verification is a
-         * pure function of block bytes + verifying keys). internal_error is
-         * never cached, so the TL-2 HOLD path below stays inline-only. The
-         * block read and its params wait gate are not needed on a hit: the
-         * worker proved the body readable, and a shielded block can only be
-         * cached after the keys loaded (the worker mirrors the gate). */
-        pv_apply_lookahead_hit(&summary, &cached);
-    } else {
-        job_result_t early_ret;
-        if (pv_verify_block_inline(c, bi, next_h, skip_crypto, &summary,
-                                   &early_ret))
-            return early_ret;
-    }
+    job_result_t early_ret;
+    if (pv_verify_or_hit(c, bi, next_h, skip_crypto, &summary, &early_ret))
+        return early_ret;
 
-    /* TL-2: the internal_error class is a TRANSIENT "could not complete proof
-     * verification yet" (a sapling_ctx allocation failure under memory pressure
-     * on <8GB targets, or a transient verifier/decode fault) — NOT a permanent
-     * bad-proof reject. Mirror the script path STEP-2A: HOLD the cursor and
-     * re-derive next tick — do NOT insert a terminal ok=0 row, do NOT advance the
-     * cursor, do NOT emit EV_BLOCK_REJECTED. A bounded blocked-since budget turns
-     * a genuinely irreducible internal_error into one named PERMANENT blocker
-     * (pv_hold_unresolved), never a silent loop and never a transient frozen as a
-     * false ok=0 reject (the very wedge the script path already cured). */
-    if (!summary.ok && summary.internal_error)
-        return pv_hold_unresolved(c, next_h, &summary.first_failure_txid,
-                                  summary.first_failure_proof_type);
-
-    return pv_record_verdict(c, db, bi, next_h, skip_crypto, &summary);
+    return pv_settle_verdict(c, db, bi, next_h, skip_crypto, &summary);
 }
 bool proof_validate_stage_init(struct main_state *ms)
 {
