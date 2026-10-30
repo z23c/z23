@@ -129,6 +129,7 @@ tools/lint/lintc/gate_installed_acceptance_tools.c 1
 tools/lint/lintc/gate_landing_proof.c 8
 tools/lint/lintc/gate_markdown_links.c 2
 tools/lint/lintc/gate_model_column_drift_workers.c 1
+tools/lint/lintc/gate_platform_header_guards_selftest.c 1
 tools/lint/lintc/gate_no_adx_overclaim.c 1
 tools/lint/lintc/gate_no_adx_overclaim_selftest.c 1
 tools/lint/lintc/gate_pattern_guard.c 2

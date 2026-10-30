@@ -14331,8 +14331,9 @@ check-windows-cross-syntax:
 # class in all three directions (Apple, Win32, Linux) on whatever host is
 # running lint. Zero baseline: the tree is clean and stays clean.
 .PHONY: check-platform-header-guards
-check-platform-header-guards:
-	@./tools/lint/check_platform_header_guards.sh --self-test && ./tools/lint/check_platform_header_guards.sh
+check-platform-header-guards: $(LINTC_TOOL)
+	@./build/bin/z23-lint check-platform-header-guards --selftest
+	@./build/bin/z23-lint check-platform-header-guards
 
 # The STATIC half of tools/scripts/macos_acceptance.sh: the closed darwin-arm64
 # capability matrix must validate and every capability must name a REGISTERED

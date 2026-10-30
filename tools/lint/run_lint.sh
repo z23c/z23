@@ -160,6 +160,7 @@ gate_command() {
         check-standalone-tools-link)       echo './tools/lint/check_standalone_tools_link.sh' ;;
         check-no-operator-paths)           echo './tools/lint/check_no_operator_paths.sh --selftest && ./tools/lint/check_no_operator_paths.sh' ;;
         check-fleet-source-status)         echo './tools/scripts/check_fleet_source_status.sh' ;;
+        check-platform-header-guards)      echo 'build/bin/z23-lint check-platform-header-guards --selftest && build/bin/z23-lint check-platform-header-guards' ;;
         check-no-raw-sqlite-in-controllers) echo 'ZCL_LINT_MODE=RATCHET ./build/bin/z23-lint check-no-raw-sqlite-in-controllers' ;;
         check-model-column-drift)          echo './build/bin/z23-lint check-model-column-drift --selftest && ZCL_LINT_MODE=RATCHET ./build/bin/z23-lint check-model-column-drift' ;;
         check-file-purpose)                echo 'ZCL_LINT_MODE=RATCHET ./build/bin/z23-lint check-file-purpose' ;;
@@ -214,7 +215,6 @@ gate_command() {
         check-windows-platform-seam)       echo './tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh' ;;
         check-windows-acceptance)          echo './tools/lint/check_windows_acceptance.sh --self-test && ./tools/lint/check_windows_acceptance.sh' ;;
         check-windows-cross-syntax)        echo './tools/lint/check_windows_cross_syntax.sh' ;;
-        check-platform-header-guards)      echo './tools/lint/check_platform_header_guards.sh --self-test && ./tools/lint/check_platform_header_guards.sh' ;;
         check-result-discard)              echo 'ZCL_LINT_MODE=FAIL ./build/bin/z23-lint check-result-discard' ;;
         *) "$BIN_DIR/z23-lint" --gate-command "$1" 2>/dev/null || return 1 ;;
     esac
