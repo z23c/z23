@@ -32,13 +32,9 @@ int t_e14_condition_cooldown_gate(void)
 {
     int failures = 0;
     int baseline_rc = run_gate_script(CONDITION_COOLDOWN_SCRIPT_REL, NULL);
-    int env_rc = setenv("ZCL_CONDITION_COOLDOWN_SELFTEST", "1", 1);
-    int selftest_rc =
-        env_rc == 0 ? run_gate_script(CONDITION_COOLDOWN_SCRIPT_REL, NULL) : -1;
-    (void)unsetenv("ZCL_CONDITION_COOLDOWN_SELFTEST");
+    int selftest_rc = run_gate_script_selftest(CONDITION_COOLDOWN_SCRIPT_REL);
     TEST("[lint-gate] E14 condition cooldown: baseline and selftest pass") {
         ASSERT(baseline_rc == 0);
-        ASSERT(env_rc == 0);
         ASSERT(selftest_rc == 0);
         PASS();
     } _test_next:;

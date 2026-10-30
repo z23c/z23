@@ -418,11 +418,9 @@ Z23_FLAG("ZCL_COMMONS_DEMO_RECORD", "env_build", "0", "-",
 Z23_FLAG("ZCL_COMMONS_MULTIHOST", "env_build", "0", "-",
           "undocumented; first use tools/dev/commons_journey_acceptance.sh:auto")
 Z23_FLAG("ZCL_CONDITION_COOLDOWN_SCAN_DIR", "env_build", "engine/conditions/src", "-",
-          "undocumented; first use tools/scripts/check_condition_cooldown.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_condition_cooldown.c:auto")
 Z23_FLAG("ZCL_CONDITION_COOLDOWN_SELFTEST", "env_build", "0", "-",
-          "first use tools/scripts/check_condition_cooldown.sh:auto; documented at docs/DEFENSIVE_CODING.md:1011: | **E14: check-condition-cooldown** | HARD | Closes the multi-hour page-storm bug class...")
-Z23_FLAG("ZCL_CONDITION_COOLDOWN_SELFTEST_ACTIVE", "env_build", "0", "-",
-          "undocumented; first use tools/scripts/check_condition_cooldown.sh:auto")
+          "first use tools/lint/lintc/gate_condition_cooldown.c:auto; documented at docs/DEFENSIVE_CODING.md:1011: | **E14: check-condition-cooldown** | HARD | Closes the multi-hour page-storm bug class...")
 Z23_FLAG("ZCL_CONSENSUS_RULE_SWEEP_BIN", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_consensus_rule_sweep.c:auto")
 Z23_FLAG("ZCL_CONTAINMENT_GREP", "env_build", "-", "-",

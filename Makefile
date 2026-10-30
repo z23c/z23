@@ -14694,11 +14694,12 @@ check-systemd-memory-budget: $(LINTC_TOOL)
 # must set cooldown_secs > 0 or wire a .progressing callback, so it re-arms
 # instead of permanently latching at max_attempts. The 2026-07-13 27h-page
 # bug class (sync_violation_lag / tip_wedged_resnapshot shipped without
-# cooldown_secs) made this unrepresentable. See tools/scripts/
-# check_condition_cooldown.sh for the full rule + self-test.
-check-condition-cooldown:
+# cooldown_secs) made this unrepresentable. See tools/lint/lintc/
+# gate_condition_cooldown.c for the full rule + self-test.
+check-condition-cooldown: $(LINTC_TOOL)
 	@echo "══ LINT: condition cooldown re-arm (E14) ══"
-	@./tools/scripts/check_condition_cooldown.sh
+	@./build/bin/z23-lint check-condition-cooldown --selftest
+	@./build/bin/z23-lint check-condition-cooldown
 
 # Gate E11 — doc accuracy: the gate list in DEFENSIVE_CODING.md must match
 # the actual check-* dependencies of the lint: target (count + names).

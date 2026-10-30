@@ -26,7 +26,6 @@ tools/dev/recover-dev-lane-selftest.sh 1
 tools/dev/zcode_adapter_benchmark.sh 1
 tools/dev/zcode_dht_acceptance.sh 1
 tools/mvp_gate.sh 6
-tools/scripts/check_condition_cooldown.sh 1
 tools/scripts/check_reproducible_build.sh 1
 tools/scripts/ci_install_gate.sh 2
 tools/scripts/ci_install_linger_gate.sh 1

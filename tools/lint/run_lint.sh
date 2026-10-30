@@ -164,7 +164,6 @@ gate_command() {
         check-file-size-ceiling)           echo '"$ZCL_LINT_BIN_DIR/file_size_policy"' ;;
         check-operator-needed-sink)        echo './build/bin/z23-lint check-operator-needed-sink' ;;
         check-systemd-memory-budget)       echo './tools/scripts/check_systemd_memory_budget.sh --selftest && ./tools/scripts/check_systemd_memory_budget.sh' ;;
-        check-condition-cooldown)          echo './tools/scripts/check_condition_cooldown.sh' ;;
         check-doc-accuracy)                echo './tools/scripts/check_doc_accuracy.sh' ;;
         check-doc-counts)                  echo './tools/scripts/check_doc_counts.sh' ;;
         check-no-stale-pinned-facts)       echo './build/bin/z23-lint check-no-stale-pinned-facts --selftest && ./build/bin/z23-lint check-no-stale-pinned-facts .' ;;

@@ -211,7 +211,7 @@
  * isolated tmp-dir fixture: a network-dependent COND_CRITICAL condition
  * without cooldown_secs trips exit 2; cooldown-bearing, .progressing-exempt,
  * local-only, WARN-severity and hollow-scan cases stay clean. */
-#define CONDITION_COOLDOWN_SCRIPT_REL "tools/scripts/check_condition_cooldown.sh"
+#define CONDITION_COOLDOWN_SCRIPT_REL "build/bin/z23-lint check-condition-cooldown"
 #define MARKDOWN_LINK_GATE_BIN "build/bin/z23-lint"
 #define FUZZ_ARTIFACT_REPLAY_SCRIPT_REL "build/bin/z23-lint check-fuzz-artifact-ledger"
 #define E10_SHAPE_SCRIPT_REL "build/bin/z23-lint check-framework-shape"
