@@ -269,8 +269,11 @@ bool zapp_assistant_speak(const struct zapp_assistant *a, const char *text,
 #define THINK_CAP 8192u
 #define MIN_CHUNK 24u
 #define MAX_CHUNK 160u
-/* The first chunk is short: synthesis returns a chunk's audio in blocks, each only once it is
- * complete, so a short first chunk is heard sooner. */
+/* Synthesis returns a chunk's audio in blocks, each only once it is complete, so the first chunk is
+ * short: it ends at a clause (FIRST_WORDS words or more) or after FIRST_WORD_CAP words. FIRST_CHUNK is
+ * the byte allowance later chunks start from. */
+#define FIRST_WORDS 4u
+#define FIRST_WORD_CAP 10u
 #define FIRST_CHUNK 32u
 #define PCM_RATE 24000
 #define PCM_EVENT_MAX 24000u
@@ -431,27 +434,53 @@ static bool speak_pending(struct respond *r, size_t n)
     memmove(r->pending, r->pending + lead, r->pending_len - lead + 1); r->pending_len -= lead;
     return !chunk[0] || (append_text(r, chunk) && speak(r, chunk));
 }
-/* Length of the next chunk to speak: up to the first sentence or clause end that leaves at
- * least MIN_CHUNK bytes and is followed by a space, or a forced split once cap is exceeded. After
- * the first chunk a forced split ends at the last word that fits rather than at an earlier clause
- * end, so each chunk holds more text and an answer needs fewer chunks; the first chunk keeps the
- * clause so speech starts sooner. Text without spaces splits at the cap. */
+/* A word-length token of dashes separates two clauses: "-", an en dash or an em dash. */
+static bool dash_token(const char *s, size_t n)
+{
+    return (n == 1 && s[0] == '-') || (n == 3 && !memcmp(s, "\xe2\x80", 2) && (s[2] == '\x93' || s[2] == '\x94'));
+}
+/* Length of the first chunk: it ends at the first clause or sentence end (or a dash between words)
+ * once it holds FIRST_WORDS words, or at a word break after FIRST_WORD_CAP words, so speech starts
+ * before the first sentence is complete. A word counts only once the space after it has arrived. */
+static size_t first_len(const char *pending, size_t len)
+{
+    size_t words = 0;
+    for (size_t i = 0; i < len;) {
+        size_t start = i;
+        while (i < len && pending[i] != ' ') i++;
+        if (i >= len) break;
+        bool dash = dash_token(pending + start, i - start);
+        words += !dash;
+        if (words >= FIRST_WORD_CAP || (words >= FIRST_WORDS && (dash || strchr(",;:.!?", pending[i - 1])))) return i;
+        while (i < len && pending[i] == ' ') i++;
+    }
+    return 0;
+}
+/* Length of the next chunk to speak. The first chunk follows first_len and is forced to split only
+ * when it outgrows MAX_CHUNK. Later chunks end at the first sentence or clause end that leaves at
+ * least MIN_CHUNK bytes and is followed by a space, or are forced to split once cap is exceeded at
+ * the last word that fits rather than at an earlier clause end, so each chunk holds more text and
+ * an answer needs fewer chunks. Text without spaces splits at the cap. */
 static size_t ready_len(const char *pending, size_t len, size_t cap, bool first)
 {
+    if (first) {
+        size_t n = first_len(pending, len);
+        return n ? n : len > MAX_CHUNK ? zapp_voice_chunk(pending, MAX_CHUNK) : 0;
+    }
     for (size_t i = MIN_CHUNK - 1; i + 1 < len && i < cap; i++)
         if (pending[i + 1] == ' ' && strchr(".!?,;:", pending[i])) return i + 1;
     if (len <= cap) return 0;
     size_t n = zapp_voice_chunk(pending, cap), word = cap;
-    if (first || !strchr(",;:", pending[n - 1])) return n;
+    if (!strchr(",;:", pending[n - 1])) return n;
     while (word > 0 && pending[word] != ' ') word--;
     return word ? word : n;
 }
-/* Each chunk is synthesized while the audio already sent plays. With text length proportional to
- * audio length and a first chunk of FIRST_CHUNK bytes, a later chunk of at most FIRST_CHUNK plus a
- * quarter of the text already spoken is ready before that audio runs out whenever synthesis takes
- * at most 0.8 of real time; the 0.6B speech model takes 0.66-0.77 on the measured laptop with its
- * GPU clocked up. A shorter first chunk leaves less audio ahead, so the chunk after it may start
- * late. */
+/* Each later chunk is synthesized while the audio already sent plays. With text length proportional
+ * to audio length, a later chunk of at most FIRST_CHUNK plus a quarter of the text already spoken is
+ * ready before that audio runs out whenever synthesis takes at most 0.8 of real time for a first
+ * chunk of FIRST_CHUNK bytes; the 0.6B speech model takes 0.66-0.77 on the measured laptop with its
+ * GPU clocked up. A first chunk longer than FIRST_CHUNK leaves more audio ahead, a shorter one
+ * less, so the chunk after it may start late. */
 static size_t chunk_cap(const struct respond *r)
 {
     size_t cap = FIRST_CHUNK + r->text_len / 4;

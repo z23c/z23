@@ -147,7 +147,7 @@ static size_t words_in(const char *line)
 /* Unpunctuated text splits at words, each chunk within the cap the text already spoken allows. */
 static void split_cases(const struct zapp_assistant *a)
 {
-    static const size_t counts[] = {6, 8, 10, 12, 15, 9};
+    static const size_t counts[] = {10, 9, 11, 14, 16};
     char words[400] = "", delta[512], sse[1024];
     for (int i = 0; i < 60; i++) memcpy(words + 5 * i, "word ", 5);
     snprintf(delta, sizeof(delta), "%s", words);
@@ -155,18 +155,18 @@ static void split_cases(const struct zapp_assistant *a)
     reset_log();
     struct respond *r = new_respond(a, true);
     assert(feed(r, sse, 1000) && respond_finish(r));
-    assert(emitted_count == 6 && strlen(r->text) == strlen(words) - 1);
+    assert(emitted_count == 5 && strlen(r->text) == strlen(words) - 1);
     assert(!strncmp(emitted[0], "{\"event\":\"text\",\"data\":\"word word", 33));
-    for (size_t i = 0; i < 6; i++) assert(words_in(emitted[i]) == counts[i]);
+    for (size_t i = 0; i < 5; i++) assert(words_in(emitted[i]) == counts[i]);
     free_respond(r);
     const char *sentence = "Hello there, my friend. The fleet is fine. More";
     assert(ready_len("Short one.", 10, MAX_CHUNK, false) == 0 && ready_len(sentence, strlen(sentence), MAX_CHUNK, false) == 42);
     assert(ready_len("aaaaaaaaaaaaaaaaaaaaaaa. b", 26, MAX_CHUNK, false) == 24 && ready_len("aaaaaaaaaaaaaaaaaaaaaa. b", 25, MAX_CHUNK, false) == 0);
     char run[200]; memset(run, 'a', sizeof(run)); run[199] = 0; run[100] = ' ';
     assert(ready_len(run, 199, MAX_CHUNK, false) == 100 && ready_len(run, 100, MAX_CHUNK, false) == 0);
-    assert(ready_len(sentence, strlen(sentence), FIRST_CHUNK, true) == 23 && ready_len(run, 199, FIRST_CHUNK, true) == 32);
+    assert(ready_len(sentence, strlen(sentence), FIRST_CHUNK, true) == 23 && ready_len(run, 199, FIRST_CHUNK, true) == 100);
     const char *counting = "one two three four five six seven eight nine ten eleven";
-    assert(ready_len(counting, strlen(counting), FIRST_CHUNK, true) == 27 && ready_len(counting, 32, FIRST_CHUNK, true) == 0);
+    assert(ready_len(counting, strlen(counting), FIRST_CHUNK, true) == 48 && ready_len(counting, 32, FIRST_CHUNK, true) == 0);
 }
 static void cap_cases(const struct zapp_assistant *a)
 {
@@ -179,7 +179,7 @@ static void cap_cases(const struct zapp_assistant *a)
     r->text_len = 600; assert(chunk_cap(r) == MAX_CHUNK);
     free_respond(r);
 }
-/* A short first sentence speaks at once; later forced splits end at words, not short clauses. */
+/* The first chunk ends at its first clause; later forced splits end at words, not short clauses. */
 static void clause_cases(const struct zapp_assistant *a)
 {
     static const char answer[] =
@@ -188,18 +188,19 @@ static void clause_cases(const struct zapp_assistant *a)
     snprintf(sse, sizeof(sse), "data: {\"choices\":[{\"delta\":{\"content\":\"%s\"}}]}\ndata: [DONE]\n", answer);
     reset_log();
     struct respond *r = new_respond(a, true);
-    assert(feed(r, sse, 7) && respond_finish(r) && emitted_count == 4 && !strcmp(r->text, answer));
-    expect_line(0, "text", "Yes.");
-    expect_line(1, "text", "The node is synchronized and");
-    expect_line(2, "text", "healthy, and the wallet balance is");
-    expect_line(3, "text", "unchanged since this morning.");
+    assert(feed(r, sse, 7) && respond_finish(r) && emitted_count == 3 && !strcmp(r->text, answer));
+    expect_line(0, "text", "Yes. The node is synchronized and healthy,");
+    expect_line(1, "text", "and the wallet balance is unchanged since");
+    expect_line(2, "text", "this morning.");
     free_respond(r);
-    const char *clause = "Yes, the node is synchronized and healthy";
-    assert(ready_len(clause, strlen(clause), 33, true) == 4 && ready_len(clause, strlen(clause), 33, false) == 33);
+    const char *clause = "Yes, the node is synchronized, and healthy";
+    const char *plain = "Yes, the node is synchronized and healthy";
+    assert(ready_len(clause, strlen(clause), 33, true) == 30 && ready_len(plain, strlen(plain), 33, true) == 0 &&
+           ready_len(plain, strlen(plain), 33, false) == 33);
     char run[48] = {0};
     memset(run, 'a', sizeof(run) - 1);
     run[32] = ',';
-    assert(ready_len(run, strlen(run), 33, false) == 33 && ready_len(run, strlen(run), 33, true) == 33);
+    assert(ready_len(run, strlen(run), 33, false) == 33 && ready_len(run, strlen(run), 33, true) == 0);
 }
 static void rejected_cases(const struct zapp_assistant *a)
 {
@@ -381,6 +382,53 @@ static void respond_streamed(void)
     text[3] = emitted_count;
     for (size_t t = 0; t < 3; t++) assert(text[t + 1] > text[t] + 1 && audio_between(text[t] + 1, text[t + 1]) == 2000);
     close(chat.listener); close(tts.listener);
+}
+/* The first spoken chunk ends at the first clause once it holds four words; the chunks joined
+ * reproduce the whole answer. */
+static void respond_first_clause(void)
+{
+    static const char script[] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"The fleet is healthy, and\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\" all is well.\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    struct mock chat = {.chat = true, .connections = 1, .script = {script}}, tts = {.connections = 2};
+    pthread_t chat_thread, tts_thread;
+    start_mock(&chat, &chat_thread); start_mock(&tts, &tts_thread);
+    struct zapp_assistant a = {.chat_port = chat.port, .tts_port = tts.port, .speaker_b64 = "c3BlYWtlcg=="};
+    char answer[512];
+    reset_log();
+    assert(zapp_assistant_respond(&a, "How is the fleet?", NULL, "ctx", -1, answer, sizeof(answer)));
+    pthread_join(chat_thread, NULL); pthread_join(tts_thread, NULL);
+    assert(!strcmp(answer, "The fleet is healthy, and all is well."));
+    expect_line(0, "text", "The fleet is healthy,");
+    expect_tts(tts.body[0], "The fleet is healthy,");
+    expect_tts(tts.body[1], "and all is well.");
+    char joined[512] = "";
+    size_t texts = 0;
+    for (size_t i = 0; i < emitted_count; i++) {
+        const char *at = strstr(emitted[i], "\"event\":\"text\",\"data\":\"");
+        if (!at) continue;
+        size_t used = strlen(joined);
+        const char *body = at + strlen("\"event\":\"text\",\"data\":\"");
+        snprintf(joined + used, sizeof(joined) - used, "%s%.*s", texts++ ? " " : "", (int)(strlen(body) - 2), body);
+    }
+    assert(texts == 2 && !strcmp(joined, answer));
+    close(chat.listener); close(tts.listener);
+}
+/* The first chunk ends at a clause, dash or sentence end after four words and at a word break after
+ * ten; partial words never count. */
+static void first_len_cases(void)
+{
+    assert(first_len("The fleet is healthy, and", 25) == 21 && first_len("The fleet is healthy,", 21) == 0);
+    assert(first_len("A b c, d e", 10) == 0 && first_len("A b c d; e", 10) == 8);
+    assert(first_len("One two three four - five", 25) == 20 && first_len("One two three four -", 20) == 0);
+    assert(first_len("One two three four.", 19) == 0 && first_len("One two three four. Five", 24) == 19);
+    const char *ten = "a b c d e f g h i j k";
+    assert(first_len(ten, strlen(ten)) == 19 && first_len(ten, 19) == 0);
+    char run[200];
+    memset(run, 'a', sizeof(run)); run[199] = 0;
+    assert(ready_len("abc", 3, FIRST_CHUNK, true) == 0 && ready_len(run, 160, FIRST_CHUNK, true) == 0 &&
+           ready_len(run, 199, FIRST_CHUNK, true) == MAX_CHUNK);
 }
 /* A failed synthesis silences the answer; its text still streams and completes. */
 static void respond_muted(void)
@@ -592,7 +640,7 @@ int main(void)
     struct zapp_assistant a = {.speaker_b64 = NULL};
     sentence_cases(&a); think_cases(&a); split_cases(&a); cap_cases(&a); clause_cases(&a);
     rejected_cases(&a); tool_cases(&a); underscore_cases(&a);
-    pcm_cases(&a); type_cases(&a); respond_streamed(); respond_muted(); respond_tool(true); respond_tool(false); respond_wanted();
+    pcm_cases(&a); type_cases(&a); respond_streamed(); respond_first_clause(); first_len_cases(); respond_muted(); respond_tool(true); respond_tool(false); respond_wanted();
     chat_quiet();
     message_cases(); grounding_cases(&a);
     reset_log();

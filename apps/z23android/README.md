@@ -308,6 +308,13 @@ the new rule, four had one gap each of 0.24-1.28 s; the GPU clock was not
 recorded. Two later answers of 10.5 s and 11.4 s, synthesized with the GPU at
 1.4-2.4 GHz, played without a gap.
 
+The first spoken chunk of an answer ends at the first clause end (a comma,
+semicolon, colon, sentence end, or a dash between words) once it holds 4 words,
+or at a word break after 10 words when none has come, instead of at a 32-byte
+cap. Speech can start before the first sentence is complete. Later chunks keep
+the rule above, and typed answers are not spoken. The change to time to first
+audio has not been measured.
+
 Synthesis speed depends on the integrated GPU clock. Under the `auto` power
 level, seven of eight identical requests ran with the GPU at its lowest clock,
 800 MHz, and took 2.2-2.3 times real time; the eighth reached 1.8-2.7 GHz and
