@@ -29,6 +29,7 @@ struct controller {
     struct zapp_view view;
     struct zapp_history history;
     char files[1024], action[32], argument[24000];
+    char ops_scope[64];
     uint64_t camera_ticket;
     void (*notify)(void);
     bool pending, autostart_checked, hidden, shown;
@@ -244,6 +245,57 @@ static bool conversation_chat(struct controller *c, const char *question, char *
 {
     return ask_assistant(c, question, out, &c->reply_cancel);
 }
+/* Caller holds c->lock. Keeps the selected host among the report's rows, else selects the first. */
+static void ops_track(struct controller *c, const char *report)
+{
+    char label[16] = "";
+    for (size_t i = 0; zapp_hosts_label(report, i, label); i++)
+        if (!strcmp(label, c->view.ops_host)) return;
+    if (!zapp_hosts_label(report, 0, label)) label[0] = 0;
+    copy_text(c->view.ops_host, sizeof(c->view.ops_host), label);
+    c->view.ops_text[0] = 0; c->view.ops_plan[0] = 0;
+}
+/* Caller holds c->lock. Selects the host after the current one, wrapping to the first. */
+static void ops_next(struct controller *c)
+{
+    char label[16], first[16] = "", next[16] = "";
+    bool found = false;
+    for (size_t i = 0; zapp_hosts_label(c->view.fleet_status, i, label); i++) {
+        if (!i) copy_text(first, sizeof(first), label);
+        if (found && !next[0]) copy_text(next, sizeof(next), label);
+        found = found || !strcmp(label, c->view.ops_host);
+    }
+    copy_text(c->view.ops_host, sizeof(c->view.ops_host), next[0] ? next : first);
+    c->view.ops_text[0] = 0; c->view.ops_plan[0] = 0;
+}
+/* Caller holds c->lock. Builds the request for the selected host; a restart is confirmed only with
+ * the plan id its own planning step returned, which is spent here. */
+static bool ops_scope(struct controller *c, const char *action, const char **arg)
+{
+    const char *host = c->view.ops_host;
+    bool confirm = !strcmp(action, "ops_confirm");
+    int n = !host[0] ? -1 : confirm ? snprintf(c->ops_scope, sizeof(c->ops_scope), "confirm %s %s", host, c->view.ops_plan) :
+        snprintf(c->ops_scope, sizeof(c->ops_scope), "%s %s", !strcmp(action, "ops_errors") ? "errors" : "plan", host);
+    if (n < 0 || (size_t)n >= sizeof(c->ops_scope) || (confirm && !c->view.ops_plan[0])) return false;
+    snprintf(c->view.ops_text, sizeof(c->view.ops_text), "Asking %s…", host);
+    c->view.ops_plan[0] = 0;
+    *arg = c->ops_scope;
+    return true;
+}
+/* Sends the request to the laptop host and shows its reply under the host controls. */
+static bool execute_ops(struct controller *c, const char *scope, char *out)
+{
+    char text[sizeof(c->view.ops_text)], plan[33] = "";
+    bool answered = zapp_speech_client_ops(c->files, scope, out, ZAPP_TEXT_CAP, NULL);
+    bool ok = answered && zapp_ops_view(out, text, sizeof(text), plan);
+    if (!answered) copy_text(text, sizeof(text), out);
+    pthread_mutex_lock(&c->lock);
+    copy_text(c->view.ops_text, sizeof(c->view.ops_text), text);
+    copy_text(c->view.ops_plan, sizeof(c->view.ops_plan), plan);
+    pthread_mutex_unlock(&c->lock);
+    copy_text(out, ZAPP_TEXT_CAP, text);
+    return ok;
+}
 static bool fleet_hosts(struct controller *c, bool refresh, char *out)
 {
     char *formatted = calloc(1, sizeof(c->view.fleet_status));
@@ -253,6 +305,7 @@ static bool fleet_hosts(struct controller *c, bool refresh, char *out)
     if (ok) {
         copy_text(c->view.fleet_status, sizeof(c->view.fleet_status), formatted);
         c->view.fleet_stale = false;
+        ops_track(c, formatted);
         /* An answered fleet request proves the paired host is reachable. */
         c->view.fleet_paired = true;
         copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected.");
@@ -494,6 +547,7 @@ static bool execute_action(struct controller *c, const char *action, const char 
                            uint64_t ticket, char *out)
 {
     if (!strncmp(action, "fleet_", 6)) return execute_fleet(c, action, arg, ticket, out);
+    if (!strncmp(action, "ops_", 4)) return execute_ops(c, arg, out);
     if (!strcmp(action, "node_start")) return zapp_node_start(&c->runtime, out, ZAPP_TEXT_CAP);
     if (!strcmp(action, "node_stop")) return zapp_node_stop(&c->runtime, out, ZAPP_TEXT_CAP);
     if (!strcmp(action, "chat")) return conversation_chat(c, arg, out);
@@ -553,9 +607,9 @@ static bool node_choice_saved(struct controller *c, const char *action)
  * screen; a success already shown by the node line, transcript or host list leaves no notice. */
 static void report(struct controller *c, const char *action, bool ok, const char *out)
 {
-    bool more = !strncmp(action, "fleet_", 6) || !strcmp(action, "voice_pair");
-    bool shown = ok && (!strcmp(action, "chat") || !strcmp(action, "voice_start") ||
-                        !strcmp(action, "fleet_hosts") || node_choice_saved(c, action));
+    bool more = !strncmp(action, "fleet_", 6) || !strncmp(action, "ops_", 4) || !strcmp(action, "voice_pair");
+    bool shown = !strncmp(action, "ops_", 4) || (ok && (!strcmp(action, "chat") || !strcmp(action, "voice_start") ||
+                        !strcmp(action, "fleet_hosts") || node_choice_saved(c, action)));
     copy_text(more ? c->view.result : c->view.notice, ZAPP_NOTICE_CAP,
               shown ? "" : out[0] ? out : "Operation could not complete.");
 }
@@ -703,7 +757,7 @@ void zapp_controller_snapshot(struct zapp_view *view)
 }
 static bool action_allowed(const char *action)
 {
-    static const char *const allowed[] = {"node_start", "node_stop", "fleet_join", "fleet_preview", "fleet_scan", "chat", "voice_start", "voice_confirm", "fleet_hosts", "pair_accept"};
+    static const char *const allowed[] = {"node_start", "node_stop", "fleet_join", "fleet_preview", "fleet_scan", "chat", "voice_start", "voice_confirm", "fleet_hosts", "pair_accept", "ops_errors", "ops_restart", "ops_confirm"};
     for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); ++i)
         if (!strcmp(action, allowed[i])) return true;
     return false;
@@ -730,7 +784,7 @@ static bool cancel_reply(void)
 static bool valid_action_request(const char *action, const char *arg)
 {
     return action && arg && strlen(action) < 32 && strlen(arg) < 24000 &&
-        (!strcmp(action, "chat_cancel") || !strcmp(action, "voice_finish") || !strcmp(action, "voice_cancel") || !strcmp(action, "pair_offer") || !strcmp(action, "pair_reject") ||
+        (!strcmp(action, "chat_cancel") || !strcmp(action, "voice_finish") || !strcmp(action, "voice_cancel") || !strcmp(action, "pair_offer") || !strcmp(action, "pair_reject") || !strcmp(action, "ops_next") ||
         action_allowed(action));
 }
 
@@ -777,6 +831,7 @@ static bool resolve_action(struct controller *c, const char **action, const char
         *action = "voice_pair"; *arg = c->view.pair_offer;
     }
     if (!strcmp(*action, "voice_confirm") && !(*action = confirmed_action(c))) return false;
+    if (!strncmp(*action, "ops_", 4)) return ops_scope(c, *action, arg);
     if (!strcmp(*action, "fleet_join")) *arg = c->view.fleet_token;
     return (*arg)[0] || (strcmp(*action, "chat") && strcmp(*action, "fleet_join"));
 }
@@ -810,6 +865,7 @@ bool zapp_controller_action(const char *action, const char *arg, const char *mod
     bool control = is_voice_control(action), pairing = is_pair_control(action);
     bool ok = true;
     if (control) voice_control(c, action);
+    else if (!strcmp(action, "ops_next")) { ok = !c->view.busy; if (ok) ops_next(c); }
     else if (pairing) ok = pair_control(c, action, arg);
     else if ((ok = resolve_action(c, &action, &arg))) queue_action(c, action, arg);
     pthread_mutex_unlock(&c->lock); pthread_mutex_unlock(&startup_lock);

@@ -30,4 +30,9 @@ bool zapp_speech_client_respond(const char *files, const char *prompt, const str
 /* Writes the host's fleet snapshot as JSON; refresh probes the hosts again first. */
 bool zapp_speech_client_fleet(const char *files, bool refresh, char *out, size_t cap,
     const atomic_bool *cancel);
+/* Sends "errors <host>", "plan <host>" or "confirm <host> <plan id>" to the laptop host and writes its
+ * reply object ({"host","action","text"[,"plan_id"]} or {"host","error"}). False when the host did not
+ * answer; out then holds a sentence for the owner. */
+bool zapp_speech_client_ops(const char *files, const char *scope, char *out, size_t cap,
+    const atomic_bool *cancel);
 #endif

@@ -253,3 +253,37 @@ const char *zapp_suggestion(bool paired, bool responding, int64_t height, int64_
     if (paired) next_question(ask, sizeof(ask) / sizeof(ask[0]), asked, out, cap);
     return out;
 }
+static const char *str_of(const struct json_value *root, const char *key)
+{
+    const char *s = json_get_str(json_get(root, key));
+    return s ? s : "";
+}
+bool zapp_hosts_label(const char *report, size_t index, char label[16])
+{
+    const char *line = report ? strchr(report, '\n') : NULL;
+    for (size_t row = 0; line; line = strchr(line + 1, '\n')) {
+        const char *start = line + 1, *dot = strstr(start, " \xc2\xb7 "), *end = strchr(start, '\n');
+        size_t n = dot ? (size_t)(dot - start) : 0;
+        if (*start == '\n' || *start == ' ' || !dot || (end && dot > end) || !n || n >= 16) continue;
+        if (row++ == index) { memcpy(label, start, n); label[n] = 0; return true; }
+    }
+    return false;
+}
+bool zapp_ops_view(const char *json, char *text, size_t cap, char plan[33])
+{
+    struct json_value root = {0};
+    plan[0] = 0;
+    bool ok = json && json_read(&root, json, strlen(json)) && root.type == JSON_OBJ;
+    const char *host = str_of(&root, "host"), *error = str_of(&root, "error"), *body = str_of(&root, "text"),
+        *action = str_of(&root, "action"), *id = str_of(&root, "plan_id");
+    if (!ok) snprintf(text, cap, "The host's reply could not be read.");
+    else if (error[0]) { snprintf(text, cap, "%s%s%s", host, host[0] ? ": " : "", error); ok = false; }
+    else if (!strcmp(action, "errors")) snprintf(text, cap, "%s · recent errors\n%s", host, body);
+    else if (!strcmp(action, "plan") && strlen(id) == 32) {
+        snprintf(plan, 33, "%s", id);
+        snprintf(text, cap, "%s\nTap Confirm restart to restart it, or leave it.", body);
+    } else if (!strcmp(action, "confirm")) snprintf(text, cap, "%s · %s", host, body);
+    else { snprintf(text, cap, "The host's reply was not understood."); ok = false; }
+    json_cleanse_strings(&root); json_free(&root);
+    return ok;
+}

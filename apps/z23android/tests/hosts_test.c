@@ -129,6 +129,35 @@ static void suggestion_tests(void)
                                    "  Low on disk · 3 GB free\n", "Which hosts need attention?", q, sizeof(q)),
                    "How is my fleet?"));
 }
+/* The host controls pick a host from the report's rows and show the host's reply as text. */
+static void ops_view_tests(void)
+{
+    static const char report[] = "1 of 3 hosts in sync\n\nr1 · in sync · 3,302,089\n\n"
+        "r2 · 10 blocks behind · 3,302,000\n  Low on disk · 23 GB free\n\nmac · host not answering after 25.0 s\n";
+    char label[16];
+    assert(zapp_hosts_label(report, 0, label) && !strcmp(label, "r1"));
+    assert(zapp_hosts_label(report, 1, label) && !strcmp(label, "r2"));
+    assert(zapp_hosts_label(report, 2, label) && !strcmp(label, "mac"));
+    assert(!zapp_hosts_label(report, 3, label) && !zapp_hosts_label(NULL, 0, label) && !zapp_hosts_label("", 0, label));
+}
+static void ops_reply_tests(void)
+{
+    char text[512], plan[33];
+    assert(zapp_ops_view("{\"host\":\"r1\",\"action\":\"errors\",\"text\":\"a ERROR\\nb ERROR\"}", text, sizeof(text), plan));
+    assert(!strcmp(text, "r1 · recent errors\na ERROR\nb ERROR") && !plan[0]);
+    assert(zapp_ops_view("{\"host\":\"r1\",\"action\":\"plan\",\"plan_id\":\"0123456789abcdef0123456789abcdef\","
+        "\"text\":\"Restart the z23 node on r1? It is at height 5.\"}", text, sizeof(text), plan));
+    assert(!strcmp(plan, "0123456789abcdef0123456789abcdef") && strstr(text, "Restart the z23 node on r1?") &&
+           strstr(text, "Tap Confirm restart"));
+    assert(zapp_ops_view("{\"host\":\"r1\",\"action\":\"confirm\",\"text\":\"restarted, answering at height 6\"}",
+                         text, sizeof(text), plan) && !strcmp(text, "r1 · restarted, answering at height 6") && !plan[0]);
+    assert(!zapp_ops_view("{\"host\":\"r2\",\"error\":\"The host did not answer.\"}", text, sizeof(text), plan) &&
+           !strcmp(text, "r2: The host did not answer.") && !plan[0]);
+    assert(!zapp_ops_view("{\"error\":\"That request is not allowed.\"}", text, sizeof(text), plan) &&
+           !strcmp(text, "That request is not allowed."));
+    assert(!zapp_ops_view("{\"host\":\"r1\",\"action\":\"plan\",\"plan_id\":\"short\",\"text\":\"x\"}", text, sizeof(text), plan) && !plan[0]);
+    assert(!zapp_ops_view("nope", text, sizeof(text), plan) && !zapp_ops_view(NULL, text, sizeof(text), plan));
+}
 int main(void)
 {
     static const char snapshot[] = "{\"hosts\":["
@@ -150,6 +179,8 @@ int main(void)
     sync_rule_tests();
     unverified_host_tests();
     verdict_tests();
+    ops_view_tests();
+    ops_reply_tests();
     fleet_line_tests();
     suggestion_tests();
     static const char skew[] = "{\"hosts\":["

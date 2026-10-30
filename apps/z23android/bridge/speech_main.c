@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "assistant.h"
 #include "fleet_probe.h"
+#include "host_ops.h"
 #include "host.h"
 #include "hosts.h"
 #include "relay.h"
@@ -19,6 +20,7 @@
 #define REPLY_WAV_CAP 2880044u
 #define TEXT_CAP 65536u
 #define FLEET_CAP 65536u
+#define OPS_CAP 4096
 struct options {
     const char *dir, *llama, *models, *speaker, *fleet, *adb, *serial, *app;
     uint16_t port;
@@ -143,11 +145,33 @@ static bool fleet(const struct json_value *request, struct json_value *response)
     json_free(&snapshot);
     return ok;
 }
-static const char *const ops[] = {"transcribe", "chat", "synthesize", "fleet", "respond"};
+static bool ops_exec(const struct zapp_fleet_host *host, const char *command, int timeout_ms,
+                     char *out, size_t cap, void *unused)
+{
+    (void)unused;
+    return zapp_fleet_run(host, command, timeout_ms, out, cap);
+}
+static struct zapp_ops host_ops = {.exec = ops_exec};
+static pthread_mutex_t host_ops_lock = PTHREAD_MUTEX_INITIALIZER;
+/* The phone's request for one host's recent errors or restart steps; the table in host_ops.c is
+ * the only thing it can reach. A refusal is answered in the reply, not as a failed request. */
+static bool host_op(const struct json_value *request, struct json_value *response)
+{
+    char *text = fleet_count ? malloc(OPS_CAP) : NULL;
+    struct json_value reply = {0};
+    pthread_mutex_lock(&host_ops_lock);
+    bool ok = text && zapp_ops_handle(&host_ops, fleet_hosts, fleet_count,
+        json_get_str(json_get(request, "scope")), (int64_t)time(NULL), text, OPS_CAP);
+    pthread_mutex_unlock(&host_ops_lock);
+    ok = ok && json_read(&reply, text, strlen(text)) && json_push_kv(response, "ops", &reply);
+    json_free(&reply); free(text);
+    return ok;
+}
+static const char *const ops[] = {"transcribe", "chat", "synthesize", "fleet", "respond", "hostops"};
 static size_t find_op(const struct json_value *request)
 {
     size_t op = 0;
-    while (op < 5 && !string_is(request, "op", ops[op])) op++;
+    while (op < 6 && !string_is(request, "op", ops[op])) op++;
     return op;
 }
 static bool run_op(size_t op, const struct json_value *request, int client, struct json_value *response)
@@ -156,6 +180,7 @@ static bool run_op(size_t op, const struct json_value *request, int client, stru
     if (op == 1 || op == 4) return chat(request, client, response, op == 4);
     if (op == 2) return synthesize(request, client, response);
     if (op == 3) return fleet(request, response);
+    if (op == 5) return host_op(request, response);
     return false;
 }
 static bool timed_op(size_t op, const struct json_value *request, int client, struct json_value *response)
@@ -164,7 +189,7 @@ static bool timed_op(size_t op, const struct json_value *request, int client, st
     clock_gettime(CLOCK_MONOTONIC, &start);
     bool ok = run_op(op, request, client, response);
     clock_gettime(CLOCK_MONOTONIC, &end);
-    if (op < 5) fprintf(stderr, "%s %s in %lld ms\n", ops[op], ok ? "answered" : "failed",
+    if (op < 6) fprintf(stderr, "%s %s in %lld ms\n", ops[op], ok ? "answered" : "failed",
         (long long)(end.tv_sec - start.tv_sec) * 1000 + (end.tv_nsec - start.tv_nsec) / 1000000);
     return ok;
 }

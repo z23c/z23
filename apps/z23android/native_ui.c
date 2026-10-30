@@ -11,8 +11,8 @@
 
 static jobject root, status_view, result_view, prompt_view, invite_view, camera_view, balance_view;
 static jobject connection_view, transcript_view, fleet_view, receipt_view, details_view, notice_view;
-static jobject voice_view, pair_view, hosts_view, sync_view;
-static jobject buttons[16];
+static jobject voice_view, pair_view, hosts_view, sync_view, ops_view;
+static jobject buttons[20];
 static enum zapp_voice_state voice_state;
 static bool details_open;
 static enum zapp_reply_state reply_state;
@@ -287,7 +287,7 @@ static bool add_text(JNIEnv *env, jobject layout, jobject activity, const char *
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
-static bool primary_button(size_t i) { return i == 0 || i == 9 || i == 10; }
+static bool primary_button(size_t i) { return i == 0 || i == 9 || i == 10 || i == 19; }
 static bool style_button(JNIEnv *env, jobject view, size_t i)
 {
     int min_height = dp(i == 9 ? 64.0f : i == 15 ? 40.0f : 48.0f);
@@ -302,7 +302,7 @@ static bool shape_button(JNIEnv *env, jobject view, size_t i)
 {
     switch (i) {
     case 9: return pill(env, view, (jint)0xff235e50, 32.0f) && flatten(env, view) && place(env, view, -1, -2, 0.0f, 0);
-    case 10: return pill(env, view, (jint)0xff235e50, 32.0f) && flatten(env, view);
+    case 10: case 19: return pill(env, view, (jint)0xff235e50, 32.0f) && flatten(env, view);
     case 15: return pill(env, view, (jint)0xffe4ebe7, 20.0f) && flatten(env, view) && place(env, view, -2, -2, 0.0f, 8);
     case 8: return int_property(env, view, "setBackgroundColor", 0);
     case 0: return int_property(env, view, "setBackgroundColor", (jint)0xff235e50);
@@ -323,7 +323,7 @@ void zapp_native_ui_destroy(JNIEnv *env)
         if (buttons[i]) (*env)->DeleteGlobalRef(env, buttons[i]);
         buttons[i] = NULL;
     }
-    jobject *views[] = {&root, &status_view, &balance_view, &result_view, &notice_view, &details_view, &prompt_view, &invite_view, &camera_view, &connection_view, &transcript_view, &fleet_view, &receipt_view, &voice_view, &pair_view, &hosts_view, &sync_view};
+    jobject *views[] = {&root, &status_view, &balance_view, &result_view, &notice_view, &details_view, &prompt_view, &invite_view, &camera_view, &connection_view, &transcript_view, &fleet_view, &receipt_view, &voice_view, &pair_view, &hosts_view, &sync_view, &ops_view};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) {
         if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
         *views[i] = NULL;
@@ -351,6 +351,12 @@ static bool bar_widgets(JNIEnv *env, jobject bar, jobject activity)
         add_button(env, bar, activity, "Confirm", 10) &&
         add_button(env, bar, activity, "Talk", 9);
 }
+static bool ops_widgets(JNIEnv *env, jobject layout, jobject activity)
+{
+    return add_button(env, layout, activity, "Host", 16) && add_button(env, layout, activity, "Show errors", 17) &&
+        add_button(env, layout, activity, "Restart node", 18) && add_text(env, layout, activity, "", &ops_view) &&
+        add_button(env, layout, activity, "Confirm restart", 19);
+}
 static bool chat_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject camera, jobject receipt, jobject scroll)
 {
     (void)invite; (void)camera; (void)receipt; (void)scroll;
@@ -361,6 +367,7 @@ static bool chat_widgets(JNIEnv *env, jobject layout, jobject activity, jobject 
         !add_text(env, layout, activity, "Fleet", NULL) ||
         !add_text(env, layout, activity, "Ask by voice, or refresh to check every host.", &hosts_view) ||
         !add_button(env, layout, activity, "Refresh fleet", 14) ||
+        !ops_widgets(env, layout, activity) ||
         !add_text(env, layout, activity, "Phone node", NULL) ||
         !add_text(env, layout, activity, "", &sync_view) ||
         !add_text(env, layout, activity, "Balance appears when your node is ready", &balance_view));
@@ -569,6 +576,10 @@ static bool fixed_action(int index, const char **action, const char **arg)
     case 13: *action = "pair_reject"; return true;
     case 14: *action = "fleet_hosts"; *arg = "refresh"; return true;
     case 15: *action = "chat"; *arg = suggestion; return suggestion[0] != 0;
+    case 16: *action = "ops_next"; return true;
+    case 17: *action = "ops_errors"; return true;
+    case 18: *action = "ops_restart"; return true;
+    case 19: *action = "ops_confirm"; return true;
     default: return false;
     }
 }
@@ -715,6 +726,18 @@ static void render_status(JNIEnv *env, const struct zapp_view *view)
     /* Stop node also clears a saved Start node choice when that node has exited on its own. */
     if (buttons[1]) (void)set_visible(env, buttons[1], shown && (running || view->node_wanted));
 }
+/* The host controls show only while a laptop host is paired and has reported a host; Confirm restart
+ * only for a plan the host returned. */
+static void render_ops(JNIEnv *env, const struct zapp_view *view)
+{
+    char label[40];
+    bool shown = view->fleet_paired && view->ops_host[0] && !voice_preview;
+    snprintf(label, sizeof(label), "Host: %s", view->ops_host);
+    if (buttons[16]) (void)text(env, buttons[16], label);
+    for (int i = 16; i <= 18; ++i) if (buttons[i]) (void)set_visible(env, buttons[i], shown);
+    if (buttons[19]) (void)set_visible(env, buttons[19], shown && view->ops_plan[0] && !view->busy);
+    if (ops_view) { (void)text(env, ops_view, view->ops_text); (void)set_visible(env, ops_view, shown && view->ops_text[0]); }
+}
 static void render_fleet(JNIEnv *env, const struct zapp_view *view)
 {
     char fleet[10272], pairing[160];
@@ -747,5 +770,6 @@ void zapp_native_ui_render(JNIEnv *env, const struct zapp_view *view)
     render_status(env, view);
     render_node(env, view);
     render_fleet(env, view);
+    render_ops(env, view);
     receipt_qr(env, view->fleet_receipt);
 }

@@ -101,6 +101,15 @@ has every block its peers report. The balance is one line without trailing
 zeros ("Balance 1.25 ZCL"); the shielded and transparent split follows only
 when there is a balance, and a reserved amount only when one exists.
 
+Under the fleet list in **More**, **Host** selects one fleet host, **Show errors**
+lists its last five `ERROR` log lines from the past 24 hours (`z23 ops logs`, read-only) and
+**Restart node** shows what a restart of its `z23-node.service` would do (`z23 ops node restart`
+without confirmation; nothing changes). Only then does **Confirm restart** appear; it restarts the
+unit with the plan id that step returned. The laptop host maps the phone's request to one of three
+fixed commands on a host from its own `--fleet` list, accepts a plan id once, for its host, for 280
+seconds, and answers anything else with a refusal. The restart leaf refuses on hosts that are not
+Linux. Confirm restart needs a host whose `z23` has `ops node restart`.
+
 **Start node** records the choice in the app's private state, and the app
 starts the node each time it opens until **Stop node** clears the choice.
 **Stop node** shows while the node runs or while that choice is saved, so a

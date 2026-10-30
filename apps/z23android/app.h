@@ -45,5 +45,8 @@ struct zapp_view {
     enum zapp_pace pace; /* Pace the node reports in its status, normal when it reports none. */
     char suggestion[96]; /* One question for the current state, or empty. */
     char pending_question[ZAPP_PENDING_CAP]; /* Question being answered, shown until its answer or cancel. */
+    char ops_host[16];   /* Fleet host the host controls act on. */
+    char ops_text[1536]; /* Errors, restart plan or outcome last shown for that host. */
+    char ops_plan[33];   /* Plan id awaiting Confirm restart, or empty. */
 };
 #endif

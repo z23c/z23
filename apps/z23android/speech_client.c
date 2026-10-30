@@ -207,6 +207,17 @@ bool zapp_speech_client_fleet(const char *files, bool refresh, char *out, size_t
     ok = fleet && fleet->type == JSON_OBJ && json_write(fleet, out, cap) < cap;
     json_cleanse_strings(&response); json_free(&response); return ok;
 }
+bool zapp_speech_client_ops(const char *files, const char *scope, char *out, size_t cap,
+    const atomic_bool *cancel)
+{
+    if (!files || !scope || !out || !cap) return false;
+    snprintf(out, cap, "The laptop host did not answer.");
+    struct json_value response = {0};
+    bool ok = request(files, "hostops", "scope", scope, NULL, &response, cancel, out, cap);
+    const struct json_value *ops = ok ? json_get(&response, "ops") : NULL;
+    ok = ops && ops->type == JSON_OBJ && json_write(ops, out, cap) < cap;
+    json_cleanse_strings(&response); json_free(&response); return ok;
+}
 #define PCM_EVENT_SAMPLES 24000u
 struct respond_state {
     void (*on_text)(const char *text, void *ctx);

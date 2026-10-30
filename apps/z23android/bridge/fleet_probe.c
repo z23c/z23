@@ -241,18 +241,29 @@ bool zapp_fleet_blockers_summary(const char *label, const char *output, char *ou
     json_cleanse_strings(&doc); json_free(&doc); json_free(&list); json_free(&root);
     return ok;
 }
-bool zapp_fleet_blockers(const struct zapp_fleet_host *host, int timeout_ms, char *out, size_t cap)
+bool zapp_fleet_run(const struct zapp_fleet_host *host, const char *command, int timeout_ms,
+                    char *out, size_t cap)
 {
-    if (!host || timeout_ms <= 0 || !out || !cap) return false;
+    if (!host || !command || timeout_ms <= 0 || !out || !cap) return false;
     struct probe *p = calloc(1, sizeof(*p));
     if (!p) return false;
     p->fd = -1;
-    if (!spawn(host, blockers_command, p)) p->pid = -1;
+    if (!spawn(host, command, p)) p->pid = -1;
     collect(p, 1, now_ms() + timeout_ms);
     reap(p, 1);
     p->output[p->used] = 0;
-    bool ok = zapp_fleet_blockers_summary(host->label, p->end > 0 && p->used ? p->output : NULL, out, cap);
+    bool ok = p->end > 0 && p->used && p->used < cap;
+    if (ok) memcpy(out, p->output, p->used + 1);
     free(p);
+    return ok;
+}
+bool zapp_fleet_blockers(const struct zapp_fleet_host *host, int timeout_ms, char *out, size_t cap)
+{
+    if (!host || timeout_ms <= 0) return false;
+    char *output = malloc(PROBE_BYTES);
+    bool ran = output && zapp_fleet_run(host, blockers_command, timeout_ms, output, PROBE_BYTES);
+    bool ok = zapp_fleet_blockers_summary(host->label, ran ? output : NULL, out, cap);
+    free(output);
     return ok;
 }
 const char zapp_fleet_tool_guide[] = "The fleet rows never list a host's blockers. Whenever a question asks about a host's "

@@ -19,6 +19,11 @@ bool zapp_fleet_probe(const struct zapp_fleet_host *hosts, size_t count, int tim
  * "class","reason"}]} with at most six blockers, or {"host","error"}; output is NULL when the host
  * did not answer. */
 bool zapp_fleet_blockers_summary(const char *label, const char *output, char *out, size_t cap);
+/* Runs one command over SSH on one host within timeout_ms and copies its NUL-terminated output to
+ * out. False unless the command finished in time with non-empty output that fits cap; the exit status
+ * is not checked because the leaves report failures as JSON on standard output. Callers pass fixed text. */
+bool zapp_fleet_run(const struct zapp_fleet_host *host, const char *command, int timeout_ms,
+                    char *out, size_t cap);
 /* Runs `z23 core sync blockers`, a fixed read-only command, on one host over SSH within timeout_ms. */
 bool zapp_fleet_blockers(const struct zapp_fleet_host *host, int timeout_ms, char *out, size_t cap);
 /* The model's one tool, host_blockers, as an OpenAI tools array naming the configured labels,
