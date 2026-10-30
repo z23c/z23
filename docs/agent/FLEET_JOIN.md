@@ -124,6 +124,8 @@ is bound to. To record a different one, pass it explicitly; `--onion` wins:
 z23 fleet join <token> --onion=<56-characters>.onion
 ```
 
+The value may also carry an optional `:port`, such as `:9050`.
+
 A computer whose node has no persistent onion yet joins without one and the
 column is empty.
 

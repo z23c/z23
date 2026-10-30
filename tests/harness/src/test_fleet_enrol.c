@@ -3196,6 +3196,97 @@ static int test_fe_head_leaves(void)
     return failures;
 }
 
+/* ── fleet join records the onion of the bound datadir ──────────────────── */
+
+/* A second valid v3 locator, distinct from FE_ONION. */
+#define FE_ONION_OTHER \
+    "zyxwvutsrqponmlkjihgfedcba234567zyxwvutsrqponmlkjihgfedc.onion"
+
+/* The shipped `fleet.join` leaf. A NULL `onion` omits the field, so the
+ * handler falls back to the datadir the command is bound to. */
+static bool fe_join_call(const char *token, const char *onion,
+                         struct zcl_command_reply *reply)
+{
+    char body[FLEET_ENROL_MACHINE_TEXT_MAX + 256];
+    int n = onion
+                ? snprintf(body, sizeof(body),
+                           "{\"token\":\"%s\",\"onion\":\"%s\"}", token, onion)
+                : snprintf(body, sizeof(body), "{\"token\":\"%s\"}", token);
+    return n > 0 && (size_t)n < sizeof(body) &&
+           fe_leaf_call("fleet.join", "zcl.fleet.join.v1", body, reply);
+}
+
+/* Join against `datadir` and read the onion back out of the signed receipt
+ * the reply carries, decoded by the receipt parser. */
+static bool fe_join_onion_at(const char *token, const char *datadir,
+                             const char *onion, char *out, size_t cap)
+{
+    struct zcl_command_reply reply;
+    const char *receipt = NULL;
+    struct fleet_receipt parsed;
+    uint8_t wire[FLEET_ENROL_RECEIPT_WIRE_MAX];
+    size_t wire_len = 0;
+    const char *why = NULL;
+    bool ok = false;
+    zcl_native_bridge_bind_rpc(datadir, 0);
+    if (!fe_join_call(token, onion, &reply))
+        return false;
+    receipt = json_get_str(json_get(&reply.data, "receipt"));
+    if (reply.exit_code == ZCL_COMMAND_EXIT_OK && receipt &&
+        fleet_receipt_parse(receipt, &parsed, wire, sizeof(wire), &wire_len,
+                            &why)) {
+        (void)snprintf(out, cap, "%s", parsed.onion);
+        ok = true;
+    }
+    zcl_command_reply_free(&reply);
+    return ok;
+}
+
+static int test_fe_join_onion_from_datadir(void)
+{
+    int failures = 0;
+    TEST("fleet join: the receipt records the onion of the bound datadir; an "
+         "explicit --onion wins; a missing or invalid hostname leaves the "
+         "column empty") {
+        char token[FLEET_ENROL_MACHINE_TEXT_MAX];
+        char a[PATH_MAX - 64], b[PATH_MAX - 64], c[PATH_MAX - 64];
+        char onion[FLEET_ENROL_ONION_MAX + 1];
+        uint8_t op_seed[32], op_pub[32];
+        struct fleet_invite invite;
+        const char *why = NULL;
+        fe_isolate("join-onion");
+        ASSERT(fe_manager_key(op_seed, op_pub));
+        ASSERT(fleet_invite_mint("studio", FE_TTL, "", op_seed, op_pub,
+                                 (int64_t)time(NULL), token, sizeof(token),
+                                 &invite, &why));
+        test_make_tmpdir(a, sizeof(a), "fleet_enrol", "join-onion-a");
+        test_make_tmpdir(b, sizeof(b), "fleet_enrol", "join-onion-b");
+        test_make_tmpdir(c, sizeof(c), "fleet_enrol", "join-onion-c");
+        /* The persisted onion is read, with its trailing newline dropped. */
+        ASSERT(fe_write_hostname(a, FE_ONION "\n"));
+        ASSERT(fe_join_onion_at(token, a, NULL, onion, sizeof(onion)));
+        ASSERT_STR_EQ(onion, FE_ONION);
+        /* An explicit --onion wins over the file and may carry a :port. */
+        ASSERT(fe_join_onion_at(token, a, FE_ONION_OTHER ":9050", onion,
+                                sizeof(onion)));
+        ASSERT_STR_EQ(onion, FE_ONION_OTHER ":9050");
+        /* The binding decides which datadir is read, not an earlier one. */
+        ASSERT(fe_write_hostname(b, FE_ONION_OTHER "\n"));
+        ASSERT(fe_join_onion_at(token, b, NULL, onion, sizeof(onion)));
+        ASSERT_STR_EQ(onion, FE_ONION_OTHER);
+        /* No file at all: the column is empty, and the join still succeeds. */
+        ASSERT(fe_join_onion_at(token, c, NULL, onion, sizeof(onion)));
+        ASSERT_STR_EQ(onion, "");
+        /* A file that is not a v3 locator: the column is empty. */
+        ASSERT(fe_write_hostname(c, "abcdefghijklmnop.onion\n"));
+        ASSERT(fe_join_onion_at(token, c, NULL, onion, sizeof(onion)));
+        ASSERT_STR_EQ(onion, "");
+        zcl_native_bridge_bind_rpc("", 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_fleet_enrol(void)
 {
     int failures = 0;
@@ -3216,6 +3307,7 @@ int test_fleet_enrol(void)
     failures += test_fe_onion_grammar();
     failures += test_fe_onion_from_datadir();
     failures += test_fe_onion_refused_at_mint();
+    failures += test_fe_join_onion_from_datadir();
     failures += test_fe_machines_page();
     failures += test_fe_render();
     failures += test_fd_empty_datadir();
