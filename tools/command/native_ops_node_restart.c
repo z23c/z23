@@ -60,8 +60,8 @@
 #endif
 
 #ifdef NR_PLATFORM
-void zcl_native_handle_ops_node_restart(const struct zcl_command_request *request,
-                                        struct zcl_command_reply *reply)
+static void nr_handle(const struct zcl_command_request *request,
+                      struct zcl_command_reply *reply)
 {
     (void)request;
     if (reply)
@@ -408,8 +408,8 @@ static void nr_plan_reply(int wait_s, struct zcl_command_reply *reply)
     nr_reply_plan(&p, &o, reply);
 }
 
-void zcl_native_handle_ops_node_restart(const struct zcl_command_request *request,
-                                        struct zcl_command_reply *reply)
+static void nr_handle(const struct zcl_command_request *request,
+                      struct zcl_command_reply *reply)
 {
     const struct json_value *in = request ? request->input : NULL;
     int wait_s;
@@ -436,3 +436,10 @@ void zcl_native_handle_ops_node_restart(const struct zcl_command_request *reques
 }
 
 #endif /* NR_PLATFORM */
+
+/* One public entry; each platform arm above supplies its own static nr_handle. */
+void zcl_native_handle_ops_node_restart(const struct zcl_command_request *request,
+                                        struct zcl_command_reply *reply)
+{
+    nr_handle(request, reply);
+}
