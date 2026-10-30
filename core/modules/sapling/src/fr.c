@@ -184,11 +184,12 @@ bool fr_from_bytes(struct fr *r, const uint8_t s[32])
             raw[i] |= (uint64_t)s[i * 8 + j] << (j * 8);
     }
 
-    /* Check < p */
-    bool ok = true;
+    /* Check < p strictly: an encoding equal to p is not canonical, and
+     * zclassicd's Fr::from_repr rejects it (consensus parity). */
+    bool ok = false;
     for (int i = 3; i >= 0; i--) {
-        if (raw[i] > FR_P[i]) { ok = false; break; }
-        if (raw[i] < FR_P[i]) break;
+        if (raw[i] > FR_P[i]) break;
+        if (raw[i] < FR_P[i]) { ok = true; break; }
     }
 
     /* Convert to Montgomery form: r = raw * R^2 * R^{-1} = raw * R mod p */

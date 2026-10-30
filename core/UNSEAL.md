@@ -396,3 +396,7 @@ later lane flips it HARD.
 - 2026-10-31T05:08:08Z — REASON: core/modules/net/src/header_serve_repair.c: split 2 function(s) under the complexity cap;  behaviour-preserving; core/modules/net/src/header_serve_repair.c: split 2 function(s) under the complexity cap;  behaviour-preserving (throttle helper); core/modules/net/src/header_serve_repair.c: split 2 function(s) under the complexity cap;  behaviour-preserving (comment fidelity)
   old ROOT: 11927b8274d8049b699ead31639d1be747a91b2ba181ab8cc2fb1f823bd01fcf
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T09:36:18Z — REASON: sapling consensus parity: reject non-canonical Fr encodings (cm, anchor, Fr == r, Jubjub y == r) exactly as zclassicd's librustzcash does;  closes a split where Z23 accepted an output zclassicd rejects. Owner approved 2026-10-30 ('you have authority, do it').
+  old ROOT: d9bd425d5f66793bdf253ce2717af74e90aa19681b561cd2be83d5d37a6048e8
+  by: owner unseal ritual (make core-unseal)

@@ -1001,6 +1001,43 @@ int groth16_merkle_path_gate(void);
 int groth16_spend_adversarial_gate(void);
 
 int test_groth16_selfverify(void);
+
+/* r, the BLS12-381 scalar field modulus, as 32 little-endian bytes. */
+static const uint8_t FR_MODULUS_LE[32] = {
+    0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+    0xfe, 0x5b, 0xfe, 0xff, 0x02, 0xa4, 0xbd, 0x53,
+    0x05, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33,
+    0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73,
+};
+
+/* out = in + r over 256-bit little-endian bytes (in < r, so no overflow). */
+static void fr_le_add_modulus(uint8_t out[32], const uint8_t in[32])
+{
+    unsigned carry = 0;
+    for (size_t i = 0; i < 32; i++) {
+        unsigned s = (unsigned)in[i] + FR_MODULUS_LE[i] + carry;
+        out[i] = (uint8_t)s;
+        carry = s >> 8;
+    }
+}
+
+/* Canonical Fr encodings, as zclassicd's Fr::from_repr and Point::read take
+ * them: r itself and the point encoding y = r are refused, r - 1 is not. */
+static int fr_canonical_encoding_checks(void)
+{
+    int failures = 0;
+    struct fr f;
+    uint8_t below[32];
+    memcpy(below, FR_MODULUS_LE, sizeof(below));
+    below[0] = 0x00;
+    PROVER_CHECK("fr_from_bytes refuses r", !fr_from_bytes(&f, FR_MODULUS_LE));
+    PROVER_CHECK("fr_from_bytes accepts r - 1", fr_from_bytes(&f, below));
+    struct jub_point p;
+    PROVER_CHECK("jub_from_bytes refuses y = r",
+                 !jub_from_bytes(&p, FR_MODULUS_LE));
+    return failures;
+}
+
 /* Output proof built through the public proving API, checked by the independent
  * consensus verifier and against a tampered copy. Runs only when the prover is
  * ready. Returns the failure count. */
@@ -1043,6 +1080,15 @@ static int prover_output_roundtrip_checks(void)
         PROVER_CHECK("tampered proof is rejected",
                      !sapling_check_output(
                          &vctx, cv, cm, epk, bad_proof));
+
+        /* cm + r encodes the same field element, so Groth16 alone would
+         * accept it; zclassicd's Fr::from_repr rejects it (parity). */
+        uint8_t cm_plus_r[32];
+        fr_le_add_modulus(cm_plus_r, cm);
+        sapling_verification_ctx_init(&vctx);
+        PROVER_CHECK("non-canonical cm (cm + r) is rejected",
+                     !sapling_check_output(
+                         &vctx, cv, cm_plus_r, epk, proof));
     }
     if (pctx)
         zclassic_sapling_proving_ctx_free(pctx);
@@ -1249,6 +1295,7 @@ int test_groth16_selfverify(void)
     printf("\n=== Sapling prover -> consensus verifier capability ===\n");
     int failures = 0;
 
+    failures += fr_canonical_encoding_checks();
     failures += output_circuit_shape_gate();
     failures += groth16_spend_reference_oracle();
     failures += spend_circuit_shape_gate();

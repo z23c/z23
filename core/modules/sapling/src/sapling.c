@@ -628,6 +628,12 @@ bool sapling_spend_prepare(struct sapling_verification_ctx *ctx,
     /* Accumulate cv into bvk */
     jub_add(&ctx->bvk, &ctx->bvk, &cv_point);
 
+    /* anchor must be a canonical Fr encoding (< r), as zclassicd's
+     * Fr::from_repr requires. */
+    struct fr anchor_fr;
+    if (!fr_from_bytes(&anchor_fr, anchor))
+        LOG_FAIL("sapling", "check_spend: anchor is not a canonical Fr encoding");
+
     /* Small order check on rk */
     if (is_small_order(rk))
         LOG_FAIL("sapling", "check_spend: rk is small-order (attack or malformed tx)");
@@ -721,6 +727,12 @@ bool sapling_output_prepare(struct sapling_verification_ctx *ctx,
     struct jub_point neg_cv;
     jub_neg(&neg_cv, &cv_point);
     jub_add(&ctx->bvk, &ctx->bvk, &neg_cv);
+
+    /* cm must be a canonical Fr encoding (< r), as zclassicd's
+     * Fr::from_repr requires; Groth16 would reduce cm and cm + r alike. */
+    struct fr cm_fr;
+    if (!fr_from_bytes(&cm_fr, cm))
+        LOG_FAIL("sapling", "check_output: cm is not a canonical Fr encoding");
 
     /* Small order check on epk */
     if (is_small_order(epk))
