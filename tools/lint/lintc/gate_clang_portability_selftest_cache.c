@@ -398,6 +398,11 @@ static int cpt_disabled(struct cpt_st *st)
     setenv("ZCL_TU_CACHE_SELFTEST_FORCE", "1", 1);
     if (rc == 0 && c->cache_on)
         return cpt_fail("ZCL_LINT_TU_CACHE=0 did not disable the cache");
+    if (cp_cache_plan(c) != 0 || c->nmiss != c->nsrc || c->nsrc < 1 ||
+        strcmp(c->miss[0], c->srcs[0]) != 0 ||
+        strcmp(c->miss[c->nsrc - 1], c->srcs[c->nsrc - 1]) != 0)
+        return cpt_fail("a disabled cache did not plan every source as a "
+                        "miss");
     int rb = cpt_runfile_count(st->runs);
     cps_snp(one, "%s/src/u0.c", st->root);
     cp_compile_one(c, one);

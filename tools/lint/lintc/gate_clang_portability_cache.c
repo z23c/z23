@@ -421,13 +421,19 @@ static int cp_hit_replay(struct cp_ctx *c, const char *src, const char *ent,
     return 0;
 }
 
+/* Cache off or unusable: every source is a miss and gets compiled. */
+static int cp_all_miss(struct cp_ctx *c)
+{
+    memcpy(c->miss, c->srcs, (size_t)c->nsrc * sizeof c->srcs[0]);
+    c->nmiss = c->nsrc;
+    return 0;
+}
+
 int cp_cache_plan(struct cp_ctx *c)
 {
     c->nmiss = 0;
-    if (!c->cache_on) {
-        c->nmiss = c->nsrc;
-        return 0;
-    }
+    if (!c->cache_on)
+        return cp_all_miss(c);
     int hashed = 0, hits = 0;
     for (int i = 0; i < c->nsrc; i++) {
         char sha[CP_SHA];
@@ -440,8 +446,7 @@ int cp_cache_plan(struct cp_ctx *c)
         snprintf(reason, sizeof reason, "hashed %d of %d source(s)", hashed,
                  c->nsrc);
         cp_cache_off(c, "%s", reason);
-        c->nmiss = c->nsrc;
-        return 0;
+        return cp_all_miss(c);
     }
     for (int i = 0; i < c->nsrc; i++) {
         char sha[CP_SHA], ent[CP_PATH * 2];
