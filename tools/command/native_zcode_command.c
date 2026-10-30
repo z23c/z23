@@ -1472,33 +1472,23 @@ static void zc_recipe_list_json(struct json_value *out, const char *key,
     (void)json_push_kv_bool(out, trunc_key, list->count > shown);
 }
 
+static bool zc_root_inputs(const struct zcl_command_request *request,
+                           struct zcl_command_reply *reply, const char *command,
+                           const char **datadir, const char **root_hex,
+                           uint8_t root[32]);
+
 void zcl_native_handle_zcode_package_recipe(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
 {
     if (!request || !reply)
         return;
-    const char *datadir = zc_datadir(request);
-    if (!datadir) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "MISSING_DATADIR",
-                               "normalize", false, false,
-                               "no datadir given (input datadir or --datadir)",
-                               "zcode.package.recipe");
-        return;
-    }
-    const char *root_hex = zc_input_str(request->input, "root");
+    const char *datadir = NULL;
+    const char *root_hex = NULL;
     uint8_t root[32];
-    size_t root_len = 0;
-    if (!root_hex || !zcl_hex_decode_n(root_hex, root, 32, &root_len) ||
-        root_len != 32) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "BAD_ROOT",
-                               "normalize", false, false,
-                               "root must be a 64-hex package root",
-                               root_hex ? root_hex : "");
+    if (!zc_root_inputs(request, reply, "zcode.package.recipe", &datadir,
+                        &root_hex, root))
         return;
-    }
     char zcode_dir[4400];
     int n = snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", datadir);
     if (n < 0 || (size_t)n >= sizeof(zcode_dir)) {
@@ -1954,6 +1944,75 @@ void zcl_native_handle_zcode_package_verify(
 
 /* ── zcode package attest import ────────────────────────────────────── */
 
+static bool zc_attest_check(struct zcl_command_reply *reply, uint8_t *wire,
+                            size_t wire_len, struct vcs_package_attest *att,
+                            uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES])
+{
+    /* The codec names the failed rule: grammar/consistency first, then the
+     * embedded secp256k1 signature over the attestation id. */
+    enum vcs_package_attest_error aerr =
+        vcs_package_attest_parse(wire, wire_len, att);
+    if (aerr != VCS_PACKAGE_ATTEST_OK) {
+        free(wire);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "ATTEST_INVALID",
+                               "execute", false, false,
+                               "the wire is not a canonical attestation",
+                               vcs_package_attest_error_string(aerr));
+        return false;
+    }
+    aerr = vcs_package_attest_verify(att);
+    if (aerr != VCS_PACKAGE_ATTEST_OK) {
+        free(wire);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "ATTEST_SIGNATURE",
+                               "execute", false, false,
+                               "the embedded verifier signature does not "
+                               "verify",
+                               vcs_package_attest_error_string(aerr));
+        return false;
+    }
+    aerr = vcs_package_attest_id(att, id);
+    if (aerr != VCS_PACKAGE_ATTEST_OK) {
+        free(wire);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "ATTEST_ID",
+                               "execute", false, false,
+                               "a verified attestation has no id",
+                               vcs_package_attest_error_string(aerr));
+        return false;
+    }
+    return true;
+}
+
+static void zc_attest_file_fail(struct zcl_command_reply *reply,
+                                enum vcs_package_attest_transport_result tr,
+                                const char *datadir, const char *id_hex)
+{
+    if (tr == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_PATH) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID,
+                               "DATADIR_TOO_LONG", "normalize", false,
+                               false, "datadir path too long", datadir);
+        return;
+    }
+    if (tr == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_CONFLICT) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL,
+                               "STORE_CONFLICT", "execute", false, false,
+                               "a different or unreadable object already "
+                               "occupies this attestation id",
+                               id_hex);
+        return;
+    }
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                           ZCL_COMMAND_EXIT_INTERNAL, "STORE_WRITE",
+                           "execute", false, false,
+                           "the attestation could not be filed",
+                           vcs_package_attest_transport_result_string(
+                               tr));
+}
+
 /* Filing discipline (mkdir -p, tmp+fsync+rename, idempotence, and the
  * fail-closed same-name conflict) lives in ONE place:
  * vcs_package_attest_transport_file(). The operator import path below and
@@ -2017,42 +2076,10 @@ void zcl_native_handle_zcode_package_attest_import(
         return;
     }
 
-    /* The codec names the failed rule: grammar/consistency first, then the
-     * embedded secp256k1 signature over the attestation id. */
     struct vcs_package_attest att;
-    enum vcs_package_attest_error aerr =
-        vcs_package_attest_parse(wire, wire_len, &att);
-    if (aerr != VCS_PACKAGE_ATTEST_OK) {
-        free(wire);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "ATTEST_INVALID",
-                               "execute", false, false,
-                               "the wire is not a canonical attestation",
-                               vcs_package_attest_error_string(aerr));
-        return;
-    }
-    aerr = vcs_package_attest_verify(&att);
-    if (aerr != VCS_PACKAGE_ATTEST_OK) {
-        free(wire);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "ATTEST_SIGNATURE",
-                               "execute", false, false,
-                               "the embedded verifier signature does not "
-                               "verify",
-                               vcs_package_attest_error_string(aerr));
-        return;
-    }
     uint8_t id[VCS_PACKAGE_ATTEST_ID_BYTES];
-    aerr = vcs_package_attest_id(&att, id);
-    if (aerr != VCS_PACKAGE_ATTEST_OK) {
-        free(wire);
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "ATTEST_ID",
-                               "execute", false, false,
-                               "a verified attestation has no id",
-                               vcs_package_attest_error_string(aerr));
+    if (!zc_attest_check(reply, wire, wire_len, &att, id))
         return;
-    }
     char id_hex[65];
     zcl_hex_encode(id, sizeof(id), id_hex);
 
@@ -2077,28 +2104,7 @@ void zcl_native_handle_zcode_package_attest_import(
                                           &filed, &already_present);
     free(wire);
     if (tr != VCS_PACKAGE_ATTEST_TRANSPORT_OK) {
-        if (tr == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_PATH) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID,
-                                   "DATADIR_TOO_LONG", "normalize", false,
-                                   false, "datadir path too long", datadir);
-            return;
-        }
-        if (tr == VCS_PACKAGE_ATTEST_TRANSPORT_ERR_CONFLICT) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INTERNAL,
-                                   "STORE_CONFLICT", "execute", false, false,
-                                   "a different or unreadable object already "
-                                   "occupies this attestation id",
-                                   id_hex);
-            return;
-        }
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "STORE_WRITE",
-                               "execute", false, false,
-                               "the attestation could not be filed",
-                               vcs_package_attest_transport_result_string(
-                                   tr));
+        zc_attest_file_fail(reply, tr, datadir, id_hex);
         return;
     }
 
@@ -2141,6 +2147,38 @@ static void zc_search_row_json(struct json_value *row,
     (void)json_push_kv_int(row, "bytes", (int64_t)e->total_bytes);
 }
 
+static int64_t zc_request_limit(const struct zcl_command_request *request,
+                                int64_t max_rows)
+{
+    int64_t limit = 0;
+    const struct json_value *lv = json_get(request->input, "limit");
+    if (lv)
+        limit = json_get_int(lv);
+    if (limit <= 0)
+        limit = max_rows;
+    if (limit > max_rows)
+        limit = max_rows;
+    return limit;
+}
+
+static bool zc_search_render_rows(
+    const struct zcode_package_view_service_v1 *view_service,
+    const struct vcs_package_index_entry *const *rows, size_t rendered,
+    struct json_value *arr)
+{
+    for (size_t i = 0; i < rendered; i++) {
+        struct zcode_package_view_entry_v1 view;
+        if (!view_service->render_entry(rows[i], &view) || !view.valid)
+            return false;
+        struct json_value row;
+        json_init(&row);
+        zc_search_row_json(&row, &view);
+        (void)json_push_back(arr, &row);
+        json_free(&row);
+    }
+    return true;
+}
+
 void zcl_native_handle_zcode_package_search(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -2156,14 +2194,7 @@ void zcl_native_handle_zcode_package_search(
                                "zcode.package.search");
         return;
     }
-    int64_t limit = 0;
-    const struct json_value *lv = json_get(request->input, "limit");
-    if (lv)
-        limit = json_get_int(lv);
-    if (limit <= 0)
-        limit = ZC_SEARCH_MAX_ROWS;
-    if (limit > (int64_t)ZC_SEARCH_MAX_ROWS)
-        limit = ZC_SEARCH_MAX_ROWS;
+    int64_t limit = zc_request_limit(request, (int64_t)ZC_SEARCH_MAX_ROWS);
 
     char zcode_dir[4400];
     int n = snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", datadir);
@@ -2201,19 +2232,7 @@ void zcl_native_handle_zcode_package_search(
         zcl_hotswap_service_acquire(ZCODE_PACKAGE_VIEW_SERVICE_ID, &lease);
     if (!view_service)
         view_service = zcode_package_view_service_builtin();
-    bool view_ok = true;
-    for (size_t i = 0; i < rendered; i++) {
-        struct zcode_package_view_entry_v1 view;
-        if (!view_service->render_entry(rows[i], &view) || !view.valid) {
-            view_ok = false;
-            break;
-        }
-        struct json_value row;
-        json_init(&row);
-        zc_search_row_json(&row, &view);
-        (void)json_push_back(&arr, &row);
-        json_free(&row);
-    }
+    bool view_ok = zc_search_render_rows(view_service, rows, rendered, &arr);
     zcl_hotswap_service_release(&lease);
     if (!view_ok) {
         json_free(&arr);
@@ -2414,110 +2433,62 @@ static void zc_library_row_reproduction(
     json_free(&repro);
 }
 
-void zcl_native_handle_zcode_package_library(
-    const struct zcl_command_request *request,
-    struct zcl_command_reply *reply)
+/* Opens the datadir's own package store for the library listing. Returns
+ * false when the reply is already complete (emitted or failed) and the
+ * caller must return without touching the store. */
+static bool zc_library_open_own(struct zcl_command_reply *reply,
+                                struct json_value *arr, const char *datadir,
+                                const char *zcode_dir, int64_t limit,
+                                struct vcs_package_store **store)
 {
-    if (!request || !reply)
-        return;
-    const char *datadir = zc_datadir(request);
-    if (!datadir) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "MISSING_DATADIR",
-                               "normalize", false, false,
-                               "no datadir given (input datadir or --datadir)",
-                               "zcode.package.library");
-        return;
+    struct stat st;
+    if (stat(zcode_dir, &st) != 0) {
+        zc_library_emit(reply, arr, 0, false, limit, 0, 0);
+        json_free(arr);
+        return false;
     }
-    int64_t limit = 0;
-    const struct json_value *lv = json_get(request->input, "limit");
-    if (lv)
-        limit = json_get_int(lv);
-    if (limit <= 0)
-        limit = (int64_t)ZC_LIBRARY_MAX_ROWS;
-    if (limit > (int64_t)ZC_LIBRARY_MAX_ROWS)
-        limit = (int64_t)ZC_LIBRARY_MAX_ROWS;
-
-    char zcode_dir[4400];
-    int n = snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", datadir);
-    if (n < 0 || (size_t)n >= sizeof(zcode_dir)) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "DATADIR_TOO_LONG",
-                               "normalize", false, false,
-                               "datadir path too long", datadir);
-        return;
+    if (!S_ISDIR(st.st_mode)) {
+        json_free(arr);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "STORE_UNREADABLE", "execute", false, false,
+            "zcode path exists and is not a directory", zcode_dir);
+        return false;
     }
-
-    struct json_value arr;
-    json_init(&arr);
-    json_set_array(&arr);
-
-    /* A running node already owns the store this datadir maps to. Borrow
-     * that handle so a one-shot open does not run recovery against a live
-     * shelf. Any other datadir stays one-shot — and an absent or empty
-     * manifests tree is a passed empty list, never a mkdir/lock/GC. */
-    struct vcs_package_store *resident = vcs_package_store_global();
-    const char *resident_root = vcs_package_store_root_dir(resident);
-    bool own_store = !(resident_root && strcmp(resident_root, zcode_dir) == 0);
-    struct vcs_package_store *store = NULL;
-    if (!own_store) {
-        store = resident;
-    } else {
-        struct stat st;
-        if (stat(zcode_dir, &st) != 0) {
-            zc_library_emit(reply, &arr, 0, false, limit, 0, 0);
-            json_free(&arr);
-            return;
-        }
-        if (!S_ISDIR(st.st_mode)) {
-            json_free(&arr);
+    bool unreadable = false;
+    if (!zc_library_has_manifests(zcode_dir, &unreadable)) {
+        if (unreadable) {
+            json_free(arr);
             zcl_command_reply_fail(
-                reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "STORE_UNREADABLE", "execute", false, false,
-                "zcode path exists and is not a directory", zcode_dir);
-            return;
+                reply, ZCL_COMMAND_STATUS_FAILED,
+                ZCL_COMMAND_EXIT_INVALID, "STORE_UNREADABLE",
+                "execute", false, false,
+                "package manifests path exists and is not enumerable",
+                zcode_dir);
+            return false;
         }
-        bool unreadable = false;
-        if (!zc_library_has_manifests(zcode_dir, &unreadable)) {
-            if (unreadable) {
-                json_free(&arr);
-                zcl_command_reply_fail(
-                    reply, ZCL_COMMAND_STATUS_FAILED,
-                    ZCL_COMMAND_EXIT_INVALID, "STORE_UNREADABLE",
-                    "execute", false, false,
-                    "package manifests path exists and is not enumerable",
-                    zcode_dir);
-                return;
-            }
-            zc_library_emit(reply, &arr, 0, false, limit, 0, 0);
-            json_free(&arr);
-            return;
-        }
-        store = vcs_package_store_open(datadir,
-                                       vcs_package_store_quota_bytes());
-        if (!store) {
-            json_free(&arr);
-            zcl_command_reply_fail(
-                reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                "STORE_OPEN", "execute", false, false,
-                "the package store failed to open", zcode_dir);
-            return;
-        }
+        zc_library_emit(reply, arr, 0, false, limit, 0, 0);
+        json_free(arr);
+        return false;
     }
+    *store = vcs_package_store_open(datadir, vcs_package_store_quota_bytes());
+    if (!*store) {
+        json_free(arr);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+            "STORE_OPEN", "execute", false, false,
+            "the package store failed to open", zcode_dir);
+        return false;
+    }
+    return true;
+}
 
-    /* Probe one extra slot so a full cap can still flag truncation. */
-    struct vcs_package_store_summary summaries[ZC_LIBRARY_MAX_ROWS + 1u];
-    size_t want = (size_t)limit + 1u;
-    if (want > ZC_LIBRARY_MAX_ROWS + 1u)
-        want = ZC_LIBRARY_MAX_ROWS + 1u;
-    size_t total = vcs_package_store_list_summaries(store, true, summaries,
-                                                    want);
-    size_t rendered = total < (size_t)limit ? total : (size_t)limit;
-    bool truncated = total > rendered;
-
-    struct vcs_package_index *index = vcs_package_index_build(zcode_dir);
-    size_t evaluated = 0;
-    size_t reproduced = 0;
+static void zc_library_render_rows(
+    struct json_value *arr, struct vcs_package_store *store,
+    const struct vcs_package_store_summary *summaries, size_t rendered,
+    const char *zcode_dir, struct vcs_package_index *index, size_t *evaluated,
+    size_t *reproduced)
+{
     for (size_t i = 0; i < rendered; i++) {
         char root_hex[65];
         zcl_hex_encode(summaries[i].root, 32, root_hex);
@@ -2543,10 +2514,73 @@ void zcl_native_handle_zcode_package_library(
         (void)json_push_kv_bool(&row, "public_serveable",
                                 shape != VCS_PACKAGE_PUBLIC_REFUSED);
         zc_library_row_reproduction(&row, zcode_dir, summaries[i].root,
-                                    named, &evaluated, &reproduced);
-        (void)json_push_back(&arr, &row);
+                                    named, evaluated, reproduced);
+        (void)json_push_back(arr, &row);
         json_free(&row);
     }
+}
+
+void zcl_native_handle_zcode_package_library(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply)
+{
+    if (!request || !reply)
+        return;
+    const char *datadir = zc_datadir(request);
+    if (!datadir) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_DATADIR",
+                               "normalize", false, false,
+                               "no datadir given (input datadir or --datadir)",
+                               "zcode.package.library");
+        return;
+    }
+    int64_t limit = zc_request_limit(request, (int64_t)ZC_LIBRARY_MAX_ROWS);
+
+    char zcode_dir[4400];
+    int n = snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", datadir);
+    if (n < 0 || (size_t)n >= sizeof(zcode_dir)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "DATADIR_TOO_LONG",
+                               "normalize", false, false,
+                               "datadir path too long", datadir);
+        return;
+    }
+
+    struct json_value arr;
+    json_init(&arr);
+    json_set_array(&arr);
+
+    /* A running node already owns the store this datadir maps to. Borrow
+     * that handle so a one-shot open does not run recovery against a live
+     * shelf. Any other datadir stays one-shot — and an absent or empty
+     * manifests tree is a passed empty list, never a mkdir/lock/GC. */
+    struct vcs_package_store *resident = vcs_package_store_global();
+    const char *resident_root = vcs_package_store_root_dir(resident);
+    bool own_store = !(resident_root && strcmp(resident_root, zcode_dir) == 0);
+    struct vcs_package_store *store = NULL;
+    if (!own_store) {
+        store = resident;
+    } else if (!zc_library_open_own(reply, &arr, datadir, zcode_dir, limit,
+                                    &store)) {
+        return;
+    }
+
+    /* Probe one extra slot so a full cap can still flag truncation. */
+    struct vcs_package_store_summary summaries[ZC_LIBRARY_MAX_ROWS + 1u];
+    size_t want = (size_t)limit + 1u;
+    if (want > ZC_LIBRARY_MAX_ROWS + 1u)
+        want = ZC_LIBRARY_MAX_ROWS + 1u;
+    size_t total = vcs_package_store_list_summaries(store, true, summaries,
+                                                    want);
+    size_t rendered = total < (size_t)limit ? total : (size_t)limit;
+    bool truncated = total > rendered;
+
+    struct vcs_package_index *index = vcs_package_index_build(zcode_dir);
+    size_t evaluated = 0;
+    size_t reproduced = 0;
+    zc_library_render_rows(&arr, store, summaries, rendered, zcode_dir, index,
+                           &evaluated, &reproduced);
     vcs_package_index_free(index);
     zc_store_release(store, own_store);
     zc_library_emit(reply, &arr, rendered, truncated, limit, evaluated,
