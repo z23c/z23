@@ -64,6 +64,131 @@ static void ref_slp_copy_str_field(const uint8_t *data, size_t len,
     out[len] = '\0';
 }
 
+/* Reads OP_RETURN, the LOKAD push, the token-type push and the command push.
+ * Returns the cursor after the command push, or NULL on any refusal. */
+static const uint8_t *ref_slp_read_command(const uint8_t *p,
+                                           const uint8_t *end,
+                                           struct slp_message *msg,
+                                           const uint8_t **data, size_t *len)
+{
+    if (p >= end || *p != 0x6a) return NULL;
+    p++;
+
+    p = read_push(p, end, data, len);
+    if (!p || *len != 4 || memcmp(*data, SLP_LOKAD_BYTES, 4) != 0)
+        return NULL;
+
+    p = read_push(p, end, data, len);
+    if (!p || *len < 1 || *len > 2) return NULL;
+    msg->token_type = (uint8_t)ref_be_to_u64(*data, *len);
+    if (msg->token_type != SLP_TOKEN_TYPE_1) return NULL;
+
+    return read_push(p, end, data, len);
+}
+
+/* GENESIS text fields: ticker, name, document URL, then the optional hash. */
+static const uint8_t *ref_slp_parse_genesis_text(const uint8_t *p,
+                                                 const uint8_t *end,
+                                                 struct slp_message *msg)
+{
+    const uint8_t *data; size_t len;
+
+    p = read_push(p, end, &data, &len);
+    if (!p) return NULL;
+    ref_slp_copy_str_field(data, len, msg->ticker, sizeof(msg->ticker));
+
+    p = read_push(p, end, &data, &len);
+    if (!p) return NULL;
+    ref_slp_copy_str_field(data, len, msg->name, sizeof(msg->name));
+
+    p = read_push(p, end, &data, &len);
+    if (!p) return NULL;
+    ref_slp_copy_str_field(data, len, msg->document_url,
+                           sizeof(msg->document_url));
+
+    p = read_push(p, end, &data, &len);
+    if (!p) return NULL;
+    if (len == 32) {
+        memcpy(msg->document_hash, data, 32);
+        msg->has_document_hash = true;
+    }
+    return p;
+}
+
+static bool ref_slp_parse_genesis(const uint8_t *p, const uint8_t *end,
+                                  struct slp_message *msg)
+{
+    const uint8_t *data; size_t len;
+
+    p = ref_slp_parse_genesis_text(p, end, msg);
+    if (!p) return false;
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len != 1 || data[0] > 9) return false;
+    msg->decimals = data[0];
+
+    p = read_push(p, end, &data, &len);
+    if (!p) return false;
+    if (len == 1) {
+        if (data[0] < 2) return false;
+        msg->mint_baton_vout = data[0];
+    }
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len != 8) return false;
+    msg->initial_quantity = ref_be_to_u64(data, 8);
+
+    return true;
+}
+
+static bool ref_slp_parse_mint(const uint8_t *p, const uint8_t *end,
+                               struct slp_message *msg)
+{
+    const uint8_t *data; size_t len;
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len != 32) return false;
+    memcpy(msg->token_id.data, data, 32);
+
+    p = read_push(p, end, &data, &len);
+    if (!p) return false;
+    if (len == 1) {
+        if (data[0] < 2) return false;
+        msg->mint_baton_vout = data[0];
+    }
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len != 8) return false;
+    msg->additional_quantity = ref_be_to_u64(data, 8);
+
+    return true;
+}
+
+static bool ref_slp_parse_send(const uint8_t *p, const uint8_t *end,
+                               struct slp_message *msg)
+{
+    const uint8_t *data; size_t len;
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len != 32) return false;
+    memcpy(msg->token_id.data, data, 32);
+
+    msg->num_outputs = 0;
+    while (msg->num_outputs < 19) {
+        const uint8_t *saved = p;
+        p = read_push(p, end, &data, &len);
+        if (!p || len != 8) {
+            p = saved;
+            break;
+        }
+        msg->output_quantities[msg->num_outputs++] =
+            ref_be_to_u64(data, 8);
+    }
+    if (msg->num_outputs < 1) return false;
+
+    return true;
+}
+
 static bool ref_slp_parse(const uint8_t *script, size_t script_len,
                           struct slp_message *msg)
 {
@@ -75,106 +200,41 @@ static bool ref_slp_parse(const uint8_t *script, size_t script_len,
     const uint8_t *p = script;
     const uint8_t *end = script + script_len;
 
-    if (p >= end || *p != 0x6a) return false;
-    p++;
-
     const uint8_t *data; size_t len;
-    p = read_push(p, end, &data, &len);
-    if (!p || len != 4 || memcmp(data, SLP_LOKAD_BYTES, 4) != 0)
-        return false;
-
-    p = read_push(p, end, &data, &len);
-    if (!p || len < 1 || len > 2) return false;
-    msg->token_type = (uint8_t)ref_be_to_u64(data, len);
-    if (msg->token_type != SLP_TOKEN_TYPE_1) return false;
-
-    p = read_push(p, end, &data, &len);
+    p = ref_slp_read_command(p, end, msg, &data, &len);
     if (!p) return false;
 
     if (len == 7 && memcmp(data, "GENESIS", 7) == 0) {
         msg->type = SLP_TX_GENESIS;
-
-        p = read_push(p, end, &data, &len);
-        if (!p) return false;
-        ref_slp_copy_str_field(data, len, msg->ticker, sizeof(msg->ticker));
-
-        p = read_push(p, end, &data, &len);
-        if (!p) return false;
-        ref_slp_copy_str_field(data, len, msg->name, sizeof(msg->name));
-
-        p = read_push(p, end, &data, &len);
-        if (!p) return false;
-        ref_slp_copy_str_field(data, len, msg->document_url,
-                               sizeof(msg->document_url));
-
-        p = read_push(p, end, &data, &len);
-        if (!p) return false;
-        if (len == 32) {
-            memcpy(msg->document_hash, data, 32);
-            msg->has_document_hash = true;
-        }
-
-        p = read_push(p, end, &data, &len);
-        if (!p || len != 1 || data[0] > 9) return false;
-        msg->decimals = data[0];
-
-        p = read_push(p, end, &data, &len);
-        if (!p) return false;
-        if (len == 1) {
-            if (data[0] < 2) return false;
-            msg->mint_baton_vout = data[0];
-        }
-
-        p = read_push(p, end, &data, &len);
-        if (!p || len != 8) return false;
-        msg->initial_quantity = ref_be_to_u64(data, 8);
-
-        return true;
-
+        return ref_slp_parse_genesis(p, end, msg);
     } else if (len == 4 && memcmp(data, "MINT", 4) == 0) {
         msg->type = SLP_TX_MINT;
-
-        p = read_push(p, end, &data, &len);
-        if (!p || len != 32) return false;
-        memcpy(msg->token_id.data, data, 32);
-
-        p = read_push(p, end, &data, &len);
-        if (!p) return false;
-        if (len == 1) {
-            if (data[0] < 2) return false;
-            msg->mint_baton_vout = data[0];
-        }
-
-        p = read_push(p, end, &data, &len);
-        if (!p || len != 8) return false;
-        msg->additional_quantity = ref_be_to_u64(data, 8);
-
-        return true;
-
+        return ref_slp_parse_mint(p, end, msg);
     } else if (len == 4 && memcmp(data, "SEND", 4) == 0) {
         msg->type = SLP_TX_SEND;
-
-        p = read_push(p, end, &data, &len);
-        if (!p || len != 32) return false;
-        memcpy(msg->token_id.data, data, 32);
-
-        msg->num_outputs = 0;
-        while (msg->num_outputs < 19) {
-            const uint8_t *saved = p;
-            p = read_push(p, end, &data, &len);
-            if (!p || len != 8) {
-                p = saved;
-                break;
-            }
-            msg->output_quantities[msg->num_outputs++] =
-                ref_be_to_u64(data, 8);
-        }
-        if (msg->num_outputs < 1) return false;
-
-        return true;
+        return ref_slp_parse_send(p, end, msg);
     }
 
     return false;
+}
+
+/* An optional string field: its bytes when non-empty, else an empty push. */
+static bool ref_slp_push_str_field(uint8_t *out, size_t *off, size_t out_len,
+                                   const char *s)
+{
+    if (s && s[0])
+        return push_data_checked(out, off, out_len, (const uint8_t *)s,
+                                 strlen(s));
+    return push_empty_checked(out, off, out_len);
+}
+
+/* The optional baton vout: one byte when at least 2, else an empty push. */
+static bool ref_slp_push_baton(uint8_t *out, size_t *off, size_t out_len,
+                               uint8_t mint_baton_vout)
+{
+    if (mint_baton_vout >= 2)
+        return push_data_checked(out, off, out_len, &mint_baton_vout, 1);
+    return push_empty_checked(out, off, out_len);
 }
 
 static size_t ref_slp_build_genesis(uint8_t *out, size_t out_len,
@@ -196,24 +256,9 @@ static size_t ref_slp_build_genesis(uint8_t *out, size_t out_len,
     ok = ok && push_data_checked(out, &off, out_len,
                                  (const uint8_t *)"GENESIS", 7);
 
-    if (ticker && ticker[0])
-        ok = ok && push_data_checked(out, &off, out_len,
-                                     (const uint8_t *)ticker, strlen(ticker));
-    else
-        ok = ok && push_empty_checked(out, &off, out_len);
-
-    if (name && name[0])
-        ok = ok && push_data_checked(out, &off, out_len,
-                                     (const uint8_t *)name, strlen(name));
-    else
-        ok = ok && push_empty_checked(out, &off, out_len);
-
-    if (document_url && document_url[0])
-        ok = ok && push_data_checked(out, &off, out_len,
-                                     (const uint8_t *)document_url,
-                                     strlen(document_url));
-    else
-        ok = ok && push_empty_checked(out, &off, out_len);
+    ok = ok && ref_slp_push_str_field(out, &off, out_len, ticker);
+    ok = ok && ref_slp_push_str_field(out, &off, out_len, name);
+    ok = ok && ref_slp_push_str_field(out, &off, out_len, document_url);
 
     if (document_hash)
         ok = ok && push_data_checked(out, &off, out_len, document_hash, 32);
@@ -222,10 +267,7 @@ static size_t ref_slp_build_genesis(uint8_t *out, size_t out_len,
 
     ok = ok && push_data_checked(out, &off, out_len, &decimals, 1);
 
-    if (mint_baton_vout >= 2)
-        ok = ok && push_data_checked(out, &off, out_len, &mint_baton_vout, 1);
-    else
-        ok = ok && push_empty_checked(out, &off, out_len);
+    ok = ok && ref_slp_push_baton(out, &off, out_len, mint_baton_vout);
 
     uint8_t qty[8];
     ref_u64_to_be(qty, initial_quantity);
@@ -292,6 +334,105 @@ static size_t ref_slp_build_send(uint8_t *out, size_t out_len,
     return ok ? off : 0;
 }
 
+/* Reads OP_RETURN, the LOKAD, version and command pushes and checks the command
+ * range. Returns the cursor after the command push, or NULL on any refusal. */
+static const uint8_t *ref_znam_read_head(const uint8_t *p, const uint8_t *end,
+                                         struct znam_message *msg)
+{
+    const uint8_t *data;
+    size_t len;
+
+    if (p >= end || *p != 0x6a) return NULL;
+    p++;
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len != 4 || memcmp(data, ZNAM_LOKAD_BYTES, 4) != 0)
+        return NULL;
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len != 1 || data[0] != 1) return NULL;
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len != 1) return NULL;
+
+    uint8_t cmd = data[0];
+    if (cmd < 1 || cmd > 6) return NULL;
+    msg->command = (enum znam_command)cmd;
+    return p;
+}
+
+/* The name push: copies it into msg->name and checks the name grammar. Returns
+ * the cursor after the name push, or NULL. */
+static const uint8_t *ref_znam_read_name(const uint8_t *p, const uint8_t *end,
+                                         struct znam_message *msg)
+{
+    const uint8_t *data;
+    size_t len;
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len == 0 || len > ZNAM_NAME_MAX) return NULL;
+    memcpy(msg->name, data, len);
+    msg->name[len] = '\0';
+
+    if (!znam_validate_name(msg->name)) {
+        msg->command = ZNAM_CMD_INVALID;
+        return NULL;
+    }
+    return p;
+}
+
+/* REGISTER, UPDATE and SET_RECORD: the target type, then the target value. */
+static bool ref_znam_parse_target(const uint8_t *p, const uint8_t *end,
+                                  struct znam_message *msg)
+{
+    const uint8_t *data;
+    size_t len;
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len != 1) return false;
+    if (data[0] < 1 || data[0] > ZNAM_TYPE_CONTENT) return false;
+    msg->target_type = data[0];
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len == 0 || len > ZNAM_VALUE_MAX) return false;
+    memcpy(msg->target_value, data, len);
+    msg->target_value[len] = '\0';
+    return true;
+}
+
+/* TRANSFER: the new owner. */
+static bool ref_znam_parse_transfer(const uint8_t *p, const uint8_t *end,
+                                    struct znam_message *msg)
+{
+    const uint8_t *data;
+    size_t len;
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len == 0 || len > 63) return false;
+    memcpy(msg->new_owner, data, len);
+    msg->new_owner[len] = '\0';
+    return true;
+}
+
+/* SET_TEXT: the key, then the value. */
+static bool ref_znam_parse_text(const uint8_t *p, const uint8_t *end,
+                                struct znam_message *msg)
+{
+    const uint8_t *data;
+    size_t len;
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len == 0 || len > ZNAM_TEXT_KEY_MAX) return false;
+    memcpy(msg->text_key, data, len);
+    msg->text_key[len] = '\0';
+
+    p = read_push(p, end, &data, &len);
+    if (!p || len > ZNAM_TEXT_VAL_MAX) return false;
+    memcpy(msg->text_value, data, len);
+    msg->text_value[len] = '\0';
+    return true;
+}
+
 static bool ref_znam_parse(const uint8_t *script, size_t script_len,
                            struct znam_message *msg)
 {
@@ -303,71 +444,25 @@ static bool ref_znam_parse(const uint8_t *script, size_t script_len,
     const uint8_t *p = script;
     const uint8_t *end = script + script_len;
 
-    if (p >= end || *p != 0x6a) return false;
-    p++;
-
-    const uint8_t *data;
-    size_t len;
-    p = read_push(p, end, &data, &len);
-    if (!p || len != 4 || memcmp(data, ZNAM_LOKAD_BYTES, 4) != 0)
-        return false;
-
-    p = read_push(p, end, &data, &len);
-    if (!p || len != 1 || data[0] != 1) return false;
-
-    p = read_push(p, end, &data, &len);
-    if (!p || len != 1) return false;
-
-    uint8_t cmd = data[0];
-    if (cmd < 1 || cmd > 6) return false;
-    msg->command = (enum znam_command)cmd;
-
-    p = read_push(p, end, &data, &len);
-    if (!p || len == 0 || len > ZNAM_NAME_MAX) return false;
-    memcpy(msg->name, data, len);
-    msg->name[len] = '\0';
-
-    if (!znam_validate_name(msg->name)) {
-        msg->command = ZNAM_CMD_INVALID;
-        return false;
-    }
+    p = ref_znam_read_head(p, end, msg);
+    if (!p) return false;
+    p = ref_znam_read_name(p, end, msg);
+    if (!p) return false;
 
     switch (msg->command) {
     case ZNAM_CMD_REGISTER:
     case ZNAM_CMD_UPDATE:
     case ZNAM_CMD_SET_RECORD:
-        p = read_push(p, end, &data, &len);
-        if (!p || len != 1) return false;
-        if (data[0] < 1 || data[0] > ZNAM_TYPE_CONTENT) return false;
-        msg->target_type = data[0];
-
-        p = read_push(p, end, &data, &len);
-        if (!p || len == 0 || len > ZNAM_VALUE_MAX) return false;
-        memcpy(msg->target_value, data, len);
-        msg->target_value[len] = '\0';
-        return true;
+        return ref_znam_parse_target(p, end, msg);
 
     case ZNAM_CMD_TRANSFER:
-        p = read_push(p, end, &data, &len);
-        if (!p || len == 0 || len > 63) return false;
-        memcpy(msg->new_owner, data, len);
-        msg->new_owner[len] = '\0';
-        return true;
+        return ref_znam_parse_transfer(p, end, msg);
 
     case ZNAM_CMD_RENEW:
         return true;
 
     case ZNAM_CMD_SET_TEXT:
-        p = read_push(p, end, &data, &len);
-        if (!p || len == 0 || len > ZNAM_TEXT_KEY_MAX) return false;
-        memcpy(msg->text_key, data, len);
-        msg->text_key[len] = '\0';
-
-        p = read_push(p, end, &data, &len);
-        if (!p || len > ZNAM_TEXT_VAL_MAX) return false;
-        memcpy(msg->text_value, data, len);
-        msg->text_value[len] = '\0';
-        return true;
+        return ref_znam_parse_text(p, end, msg);
 
     default:
         return false;
@@ -671,6 +766,56 @@ static int blog_take_hostname(const uint8_t *p, const uint8_t *end,
     return 0;
 }
 
+/* Moves one cursor past an output-quantity push of eight bytes. A null cursor
+ * stays null. A missing or non-eight-byte push leaves the cursor at its value
+ * from before the read and ends the run. */
+static void blog_quantity_step(const uint8_t **cur, const uint8_t *saved,
+                               const uint8_t *next, size_t len, bool *run)
+{
+    if (!*run) return;
+    if (!*cur) *run = false;
+    else if (!next || len != 8) { *cur = saved; *run = false; }
+    else *cur = next;
+}
+
+/* Skip: lokad_id, token_type, "SEND", token_id */
+static void blog_skip_fixed_fields(const uint8_t **pf, const uint8_t **pr,
+                                   const uint8_t *end, long *step_diffs)
+{
+    const uint8_t *df = NULL, *dr = NULL;
+    size_t lf = 0, lr = 0;
+
+    for (int i = 0; i < 4; i++) {
+        const uint8_t *nf = *pf ? ref_blog_read_push_field(*pf, end, &df, &lf)
+                                : NULL;
+        const uint8_t *nr = read_push(*pr, end, &dr, &lr);
+        if (*pf == *pr && nf != nr) (*step_diffs)++;
+        *pf = nf;
+        *pr = nr;
+    }
+}
+
+/* Skip output quantities */
+static void blog_skip_quantities(const uint8_t **pf, const uint8_t **pr,
+                                 const uint8_t *end, long *step_diffs)
+{
+    const uint8_t *df = NULL, *dr = NULL;
+    size_t lf = 0, lr = 0;
+    bool run_f = true, run_r = true;
+
+    for (int i = 0; i < 19; i++) {
+        const uint8_t *sf = *pf, *sr = *pr;
+        const uint8_t *nf = NULL, *nr = NULL;
+        if (run_f && *pf) nf = ref_blog_read_push_field(*pf, end, &df, &lf);
+        if (run_r && *pr) nr = read_push(*pr, end, &dr, &lr);
+        if (run_f && run_r && *pf == *pr && *pf && nf != nr) (*step_diffs)++;
+
+        blog_quantity_step(pf, sf, nf, lf, &run_f);
+        blog_quantity_step(pr, sr, nr, lr, &run_r);
+        if (!run_f && !run_r) break;
+    }
+}
+
 /* The onion-hostname scan from blog_discover_onion_peers_wallet, run with both
  * push primitives in lockstep. Fills host_fork/host_real and adds to *step_diffs
  * for every read where the two primitives differ, counted only at cursor
@@ -689,44 +834,405 @@ static int blog_scan_both(const uint8_t *script, size_t script_len,
     const uint8_t *end = script + script_len;
     const uint8_t *pf = script + 1;   /* fork cursor */
     const uint8_t *pr = script + 1;   /* real read_push cursor */
-    const uint8_t *df = NULL, *dr = NULL;
-    size_t lf = 0, lr = 0;
 
-    /* Skip: lokad_id, token_type, "SEND", token_id */
-    for (int i = 0; i < 4; i++) {
-        const uint8_t *nf = pf ? ref_blog_read_push_field(pf, end, &df, &lf)
-                               : NULL;
-        const uint8_t *nr = read_push(pr, end, &dr, &lr);
-        if (pf == pr && nf != nr) (*step_diffs)++;
-        pf = nf;
-        pr = nr;
-    }
-
-    /* Skip output quantities */
-    bool run_f = true, run_r = true;
-    for (int i = 0; i < 19; i++) {
-        const uint8_t *sf = pf, *sr = pr;
-        const uint8_t *nf = NULL, *nr = NULL;
-        if (run_f && pf) nf = ref_blog_read_push_field(pf, end, &df, &lf);
-        if (run_r && pr) nr = read_push(pr, end, &dr, &lr);
-        if (run_f && run_r && pf == pr && pf && nf != nr) (*step_diffs)++;
-
-        if (run_f) {
-            if (!pf) run_f = false;
-            else if (!nf || lf != 8) { pf = sf; run_f = false; }
-            else pf = nf;
-        }
-        if (run_r) {
-            if (!pr) run_r = false;
-            else if (!nr || lr != 8) { pr = sr; run_r = false; }
-            else pr = nr;
-        }
-        if (!run_f && !run_r) break;
-    }
+    blog_skip_fixed_fields(&pf, &pr, end, step_diffs);
+    blog_skip_quantities(&pf, &pr, end, step_diffs);
 
     int found_f = blog_take_hostname(pf, end, host_fork, host_cap);
     int found_r = blog_take_hostname(pr, end, host_real, host_cap);
     return found_f == found_r ? found_r : -1;
+}
+
+/* Seed corpus shape: every seed must encode, and there must be 17 of them. */
+static int check_seed_corpus(const struct script_case *seeds, size_t nseeds)
+{
+    int failures = 0;
+
+    printf("overlay parse parity: seed corpus... ");
+    {
+        bool ok = true;
+        for (size_t i = 0; i < nseeds; i++)
+            if (seeds[i].len == 0) { ok = false; break; }
+        if (ok && nseeds == 17) printf("OK (%zu records)\n", nseeds);
+        else { printf("FAIL (nseeds=%zu)\n", nseeds); failures++; }
+    }
+    return failures;
+}
+
+static int randomized_parity_sweep(long *checked)
+{
+    int failures = 0;
+
+    /* ── Part 3: pseudo-random scripts, lokad-prefixed and not ── */
+    printf("overlay parse parity: randomized sweep... ");
+    {
+        prng_state = 0x9E3779B97F4A7C15ULL;
+        long before = *checked;
+        int rsplits = 0;
+        uint8_t buf[96];
+        for (int iter = 0; iter < 120000; iter++) {
+            size_t n = 1 + (size_t)(prng_next() % (sizeof(buf) - 1));
+            for (size_t i = 0; i < n; i++) buf[i] = (uint8_t)prng_next();
+            /* Half the samples get real framing so deep field paths are reached. */
+            if (iter % 2 == 0 && n >= 8) {
+                buf[0] = 0x6a;
+                buf[1] = 0x04;
+                if (iter % 4 == 0)
+                    memcpy(buf + 2, ZNAM_LOKAD_BYTES, 4);
+                else
+                    memcpy(buf + 2, SLP_LOKAD_BYTES, 4);
+                buf[6] = 0x01;
+                buf[7] = 0x01;
+            } else {
+                buf[0] = 0x6a;
+            }
+            rsplits += znam_compare_one(buf, n, checked);
+            rsplits += slp_compare_one(buf, n, checked);
+            if (rsplits) break;
+        }
+        if (rsplits == 0) printf("OK (%ld inputs, 0 splits)\n",
+                                 *checked - before);
+        else { printf("FAIL (%d splits)\n", rsplits); failures++; }
+    }
+    return failures;
+}
+
+/* GENESIS builder: every optional field present and absent. */
+static bool builders_genesis_fields_identical(const uint8_t *dh)
+{
+    bool ok = true;
+    uint8_t a[CORPUS_MAX], b[CORPUS_MAX];
+
+    static const char *strs[] = { NULL, "", "Z", "ZClassic Token",
+        "https://zclassic.org/a/very/long/document/url/that/keeps/going" };
+
+    /* GENESIS: every optional field present and absent. */
+    for (size_t t = 0; t < 5; t++)
+    for (size_t nm = 0; nm < 5; nm++)
+    for (size_t du = 0; du < 5; du++)
+    for (int hh = 0; hh < 2; hh++)
+    for (int baton = 0; baton < 4; baton++) {
+        size_t la = ref_slp_build_genesis(a, sizeof(a), strs[t], strs[nm],
+            strs[du], hh ? dh : NULL, 9, (uint8_t)baton, 0xdeadbeefULL);
+        size_t lb = slp_build_genesis(b, sizeof(b), strs[t], strs[nm],
+            strs[du], hh ? dh : NULL, 9, (uint8_t)baton, 0xdeadbeefULL);
+        if (la != lb || (la && memcmp(a, b, la) != 0)) { ok = false; }
+    }
+    return ok;
+}
+
+/* GENESIS into a too-small buffer at every capacity. */
+static bool builders_genesis_capacity_identical(const uint8_t *dh)
+{
+    bool ok = true;
+    uint8_t a[CORPUS_MAX], b[CORPUS_MAX];
+
+    for (size_t cap = 0; cap <= 80 && ok; cap++) {
+        size_t la = ref_slp_build_genesis(a, cap, "ZCL", "n", "u", dh,
+                                          1, 2, 7);
+        size_t lb = slp_build_genesis(b, cap, "ZCL", "n", "u", dh,
+                                      1, 2, 7);
+        if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
+    }
+    return ok;
+}
+
+static bool builders_genesis_identical(void)
+{
+    uint8_t dh[32];
+    for (int i = 0; i < 32; i++) dh[i] = (uint8_t)(i ^ 0x5a);
+
+    bool ok = builders_genesis_fields_identical(dh);
+    ok = ok && builders_genesis_capacity_identical(dh);
+    return ok;
+}
+
+/* MINT builder for batons 0 through 3. */
+static bool builders_mint_identical(const struct uint256 *tid)
+{
+    bool ok = true;
+    uint8_t a[CORPUS_MAX], b[CORPUS_MAX];
+
+    for (int baton = 0; baton < 4 && ok; baton++) {
+        size_t la = ref_slp_build_mint(a, sizeof(a), tid,
+                                       (uint8_t)baton, 42);
+        size_t lb = slp_build_mint(b, sizeof(b), tid,
+                                   (uint8_t)baton, 42);
+        if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
+    }
+    return ok;
+}
+
+/* SEND builder for 0 through 20 outputs, and for capacities 0 through 64. */
+static bool builders_send_identical(const struct uint256 *tid)
+{
+    bool ok = true;
+    uint8_t a[CORPUS_MAX], b[CORPUS_MAX];
+    uint64_t q[19];
+    for (int i = 0; i < 19; i++) q[i] = 0x0102030405060708ULL + i;
+
+    for (int n = 0; n <= 20 && ok; n++) {
+        size_t la = ref_slp_build_send(a, sizeof(a), tid, q, n);
+        size_t lb = slp_build_send(b, sizeof(b), tid, q, n);
+        if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
+    }
+    for (size_t cap = 0; cap <= 64 && ok; cap++) {
+        size_t la = ref_slp_build_send(a, cap, tid, q, 3);
+        size_t lb = slp_build_send(b, cap, tid, q, 3);
+        if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
+    }
+    return ok;
+}
+
+/* MINT + SEND across baton and output counts. */
+static bool builders_mint_send_identical(void)
+{
+    struct uint256 tid;
+    for (int i = 0; i < 32; i++) tid.data[i] = (uint8_t)(i * 3 + 5);
+
+    bool ok = builders_mint_identical(&tid);
+    ok = ok && builders_send_identical(&tid);
+    return ok;
+}
+
+/* The register, update and set-record builders for target types 0 through
+ * 8. */
+static bool builders_znam_targeted_identical(const char *name, const char *val)
+{
+    bool ok = true;
+    uint8_t a[CORPUS_MAX], b[CORPUS_MAX];
+
+    for (int ty = 0; ty <= 8 && ok; ty++) {
+        size_t la = ref_znam_build_targeted(a, sizeof(a),
+            ZNAM_CMD_REGISTER, name, (uint8_t)ty, val);
+        size_t lb = znam_build_register(b, sizeof(b), name,
+            (uint8_t)ty, val);
+        if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
+
+        la = ref_znam_build_targeted(a, sizeof(a),
+            ZNAM_CMD_UPDATE, name, (uint8_t)ty, val);
+        lb = znam_build_update(b, sizeof(b), name, (uint8_t)ty, val);
+        if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
+
+        la = ref_znam_build_targeted(a, sizeof(a),
+            ZNAM_CMD_SET_RECORD, name, (uint8_t)ty, val);
+        lb = znam_build_set_record(b, sizeof(b), name, (uint8_t)ty, val);
+        if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
+    }
+    return ok;
+}
+
+/* The transfer and set-text builders for one name and value. */
+static bool builders_znam_text_identical(const char *name, const char *val)
+{
+    bool ok = true;
+    uint8_t a[CORPUS_MAX], b[CORPUS_MAX];
+
+    size_t la = ref_znam_build_transfer(a, sizeof(a), name, val);
+    size_t lb = znam_build_transfer(b, sizeof(b), name, val);
+    if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
+
+    la = ref_znam_build_set_text(a, sizeof(a), name, "email", val);
+    lb = znam_build_set_text(b, sizeof(b), name, "email", val);
+    if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
+
+    la = ref_znam_build_set_text(a, sizeof(a), name, "email", NULL);
+    lb = znam_build_set_text(b, sizeof(b), name, "email", NULL);
+    if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
+    return ok;
+}
+
+/* One name and value through the targeted builders, then the text builders. */
+static bool builders_znam_pair_identical(const char *name, const char *val)
+{
+    bool ok = builders_znam_targeted_identical(name, val);
+    if (!builders_znam_text_identical(name, val)) ok = false;
+    return ok;
+}
+
+/* ZNAM builders over a grid of names, values and target types. */
+static bool builders_znam_identical(void)
+{
+    bool ok = true;
+    uint8_t a[CORPUS_MAX], b[CORPUS_MAX];
+
+    /* ZNAM: every builder, including the over-relay-cap refusal. */
+    static const char *names[] = { "a", "alice", "node-7",
+        "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeeffffffffffabc",
+        "-bad", "", "UPPER" };
+    static const char *vals[] = { "", "t1abc", "1BitcoinAddr",
+        ("0123456789012345678901234567890123456789012345678901234567890123"
+         "4567890123456789012345678901234567890123456789012345678901234567") };
+    for (size_t n = 0; n < 7 && ok; n++) {
+        for (size_t v = 0; v < 4 && ok; v++)
+            if (!builders_znam_pair_identical(names[n], vals[v])) ok = false;
+
+        size_t la = ref_znam_build_renew(a, sizeof(a), names[n]);
+        size_t lb = znam_build_renew(b, sizeof(b), names[n]);
+        if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
+    }
+    for (size_t cap = 0; cap <= 64 && ok; cap++) {
+        size_t la = ref_znam_build_renew(a, cap, "alice");
+        size_t lb = znam_build_renew(b, cap, "alice");
+        if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
+    }
+    return ok;
+}
+
+static int builders_byte_identity_check(void)
+{
+    /* ── Builder byte-identity ── */
+    printf("overlay parse parity: builders byte-identical... ");
+    bool ok = builders_genesis_identical();
+    ok = ok && builders_mint_send_identical();
+    ok = ok && builders_znam_identical();
+
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
+/* Part 4 totals over every scan: the scan count and the fork/real read
+ * disagreements. */
+struct blog_tally {
+    long scans;
+    long step_diffs;
+};
+
+#define BLOG_CMP(S, N)                                                        \
+        do {                                                                  \
+            scans++;                                                          \
+            if (blog_scan_both((S), (N), hf, hr, sizeof(hf), &step_diffs) < 0 \
+                || strcmp(hf, hr) != 0)                                       \
+                ok = false;                                                   \
+        } while (0)
+
+/* Every truncation of one seed, then every single-byte overwrite with an
+ * interesting push opcode. */
+static bool blog_fork_seed_reads(struct blog_tally *t,
+                                 const struct script_case *seed)
+{
+    static const uint8_t opcodes[] = {
+        0x00, 0x01, 0x08, 0x4b, 0x4c, 0x4d, 0x4e, 0xff
+    };
+    uint8_t buf[CORPUS_MAX + 8];
+    char hf[128], hr[128];
+    long scans = 0, step_diffs = 0;
+    bool ok = true;
+
+    for (size_t n = 0; n <= seed->len && ok; n++)
+        BLOG_CMP(seed->bytes, n);
+
+    for (size_t i = 0; i < seed->len && ok; i++)
+        for (size_t k = 0; k < sizeof(opcodes) && ok; k++) {
+            memcpy(buf, seed->bytes, seed->len);
+            buf[i] = opcodes[k];
+            BLOG_CMP(buf, seed->len);
+        }
+
+    t->scans += scans;
+    t->step_diffs += step_diffs;
+    return ok;
+}
+
+/* An OP_0 spliced in at every offset — the exact byte the fork
+ * did not understand. */
+static bool blog_fork_seed_splices(struct blog_tally *t,
+                                   const struct script_case *seed)
+{
+    uint8_t buf[CORPUS_MAX + 8];
+    char hf[128], hr[128];
+    long scans = 0, step_diffs = 0;
+    bool ok = true;
+
+    for (size_t i = 1; i <= seed->len && ok; i++) {
+        memcpy(buf, seed->bytes, i);
+        buf[i] = 0x00;
+        memcpy(buf + i + 1, seed->bytes + i, seed->len - i);
+        BLOG_CMP(buf, seed->len + 1);
+    }
+
+    t->scans += scans;
+    t->step_diffs += step_diffs;
+    return ok;
+}
+
+static bool blog_fork_seed(struct blog_tally *t,
+                           const struct script_case *seed)
+{
+    bool ok = blog_fork_seed_reads(t, seed);
+    if (ok) ok = blog_fork_seed_splices(t, seed);
+    return ok;
+}
+
+static bool blog_fork_seeds(struct blog_tally *t,
+                            const struct script_case *seeds, size_t nseeds)
+{
+    bool ok = true;
+    for (size_t si = 0; si < nseeds && ok; si++)
+        ok = blog_fork_seed(t, &seeds[si]);
+    return ok;
+}
+
+/* Randomized scripts framed as SEND, so the quantity loop is fed
+ * adversarial terminators it was never built for. */
+static bool blog_fork_random(struct blog_tally *t, bool ok)
+{
+    uint8_t buf[CORPUS_MAX + 8];
+    char hf[128], hr[128];
+    long scans = 0, step_diffs = 0;
+
+    prng_state = 0xD1B54A32D192ED03ULL;
+    for (int iter = 0; iter < 60000 && ok; iter++) {
+        struct uint256 tid;
+        for (int i = 0; i < 32; i++) tid.data[i] = (uint8_t)prng_next();
+        uint64_t q[4] = { prng_next(), prng_next(), prng_next(), 7 };
+        size_t base = ref_slp_build_send(buf, sizeof(buf), &tid, q,
+                                         1 + (int)(prng_next() % 4));
+        if (!base) continue;
+        size_t extra = (size_t)(prng_next() % 40);
+        if (base + extra > sizeof(buf)) continue;
+        for (size_t i = 0; i < extra; i++) {
+            uint64_t r = prng_next();
+            /* Bias hard toward the bytes that matter: push opcodes. */
+            buf[base + i] = (r % 3 == 0) ? 0x00
+                          : (r % 3 == 1) ? (uint8_t)(0x4b + (r >> 8) % 4)
+                                         : (uint8_t)(r >> 16);
+        }
+        BLOG_CMP(buf, base + extra);
+    }
+
+    t->scans += scans;
+    t->step_diffs += step_diffs;
+    return ok;
+}
+
+#undef BLOG_CMP
+
+static int blog_fork_parity_check(const struct script_case *seeds,
+                                  size_t nseeds)
+{
+    int failures = 0;
+    struct blog_tally t = { 0 };
+
+    printf("overlay parse parity: deleted blog push fork equivalent... ");
+    bool ok = blog_fork_seeds(&t, seeds, nseeds);
+    ok = blog_fork_random(&t, ok);
+
+    /* The equivalence is only meaningful if the corpus actually drove the
+     * two primitives apart ON A READ THE SCAN PERFORMS. */
+    if (t.step_diffs == 0) {
+        printf("FAIL (corpus never exercised the missing branch)\n");
+        failures++;
+    } else if (!ok) {
+        printf("FAIL (scan verdicts differ — the fork WAS reachable)\n");
+        failures++;
+    } else {
+        printf("OK (%ld scans, %ld reads where the fork and the real "
+               "decoder disagreed, 0 recovered-hostname differences)\n",
+               t.scans, t.step_diffs);
+    }
+    return failures;
 }
 
 /* ══ The group ══════════════════════════════════════════════════════════ */
@@ -827,14 +1333,7 @@ int test_overlay_parse_parity(void)
         nseeds++;
     }
 
-    printf("overlay parse parity: seed corpus... ");
-    {
-        bool ok = true;
-        for (size_t i = 0; i < nseeds; i++)
-            if (seeds[i].len == 0) { ok = false; break; }
-        if (ok && nseeds == 17) printf("OK (%zu records)\n", nseeds);
-        else { printf("FAIL (nseeds=%zu)\n", nseeds); failures++; }
-    }
+    failures += check_seed_corpus(seeds, nseeds);
 
     /* ── Parts 1+2: mutate every seed, compare both parsers ── */
     printf("overlay parse parity: znam+zslp mutation sweep... ");
@@ -843,154 +1342,9 @@ int test_overlay_parse_parity(void)
     if (splits == 0) printf("OK (%ld inputs, 0 splits)\n", checked);
     else { printf("FAIL (%d splits)\n", splits); failures++; }
 
-    /* ── Part 3: pseudo-random scripts, lokad-prefixed and not ── */
-    printf("overlay parse parity: randomized sweep... ");
-    {
-        prng_state = 0x9E3779B97F4A7C15ULL;
-        long before = checked;
-        int rsplits = 0;
-        uint8_t buf[96];
-        for (int iter = 0; iter < 120000; iter++) {
-            size_t n = 1 + (size_t)(prng_next() % (sizeof(buf) - 1));
-            for (size_t i = 0; i < n; i++) buf[i] = (uint8_t)prng_next();
-            /* Half the samples get real framing so deep field paths are reached. */
-            if (iter % 2 == 0 && n >= 8) {
-                buf[0] = 0x6a;
-                buf[1] = 0x04;
-                if (iter % 4 == 0)
-                    memcpy(buf + 2, ZNAM_LOKAD_BYTES, 4);
-                else
-                    memcpy(buf + 2, SLP_LOKAD_BYTES, 4);
-                buf[6] = 0x01;
-                buf[7] = 0x01;
-            } else {
-                buf[0] = 0x6a;
-            }
-            rsplits += znam_compare_one(buf, n, &checked);
-            rsplits += slp_compare_one(buf, n, &checked);
-            if (rsplits) break;
-        }
-        if (rsplits == 0) printf("OK (%ld inputs, 0 splits)\n",
-                                 checked - before);
-        else { printf("FAIL (%d splits)\n", rsplits); failures++; }
-    }
+    failures += randomized_parity_sweep(&checked);
 
-    /* ── Builder byte-identity ── */
-    printf("overlay parse parity: builders byte-identical... ");
-    {
-        bool ok = true;
-        uint8_t a[CORPUS_MAX], b[CORPUS_MAX];
-        struct uint256 tid;
-        for (int i = 0; i < 32; i++) tid.data[i] = (uint8_t)(i * 3 + 5);
-        uint8_t dh[32];
-        for (int i = 0; i < 32; i++) dh[i] = (uint8_t)(i ^ 0x5a);
-
-        static const char *strs[] = { NULL, "", "Z", "ZClassic Token",
-            "https://zclassic.org/a/very/long/document/url/that/keeps/going" };
-
-        /* GENESIS: every optional field present and absent. */
-        for (size_t t = 0; t < 5; t++)
-        for (size_t nm = 0; nm < 5; nm++)
-        for (size_t du = 0; du < 5; du++)
-        for (int hh = 0; hh < 2; hh++)
-        for (int baton = 0; baton < 4; baton++) {
-            size_t la = ref_slp_build_genesis(a, sizeof(a), strs[t], strs[nm],
-                strs[du], hh ? dh : NULL, 9, (uint8_t)baton, 0xdeadbeefULL);
-            size_t lb = slp_build_genesis(b, sizeof(b), strs[t], strs[nm],
-                strs[du], hh ? dh : NULL, 9, (uint8_t)baton, 0xdeadbeefULL);
-            if (la != lb || (la && memcmp(a, b, la) != 0)) { ok = false; }
-        }
-
-        /* GENESIS into a too-small buffer at every capacity. */
-        for (size_t cap = 0; cap <= 80 && ok; cap++) {
-            size_t la = ref_slp_build_genesis(a, cap, "ZCL", "n", "u", dh,
-                                              1, 2, 7);
-            size_t lb = slp_build_genesis(b, cap, "ZCL", "n", "u", dh,
-                                          1, 2, 7);
-            if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
-        }
-
-        /* MINT + SEND across baton and output counts. */
-        for (int baton = 0; baton < 4 && ok; baton++) {
-            size_t la = ref_slp_build_mint(a, sizeof(a), &tid,
-                                           (uint8_t)baton, 42);
-            size_t lb = slp_build_mint(b, sizeof(b), &tid,
-                                       (uint8_t)baton, 42);
-            if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
-        }
-        {
-            uint64_t q[19];
-            for (int i = 0; i < 19; i++) q[i] = 0x0102030405060708ULL + i;
-            for (int n = 0; n <= 20 && ok; n++) {
-                size_t la = ref_slp_build_send(a, sizeof(a), &tid, q, n);
-                size_t lb = slp_build_send(b, sizeof(b), &tid, q, n);
-                if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
-            }
-            for (size_t cap = 0; cap <= 64 && ok; cap++) {
-                size_t la = ref_slp_build_send(a, cap, &tid, q, 3);
-                size_t lb = slp_build_send(b, cap, &tid, q, 3);
-                if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
-            }
-        }
-
-        /* ZNAM: every builder, including the over-relay-cap refusal. */
-        static const char *names[] = { "a", "alice", "node-7",
-            "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeeffffffffffabc",
-            "-bad", "", "UPPER" };
-        static const char *vals[] = { "", "t1abc", "1BitcoinAddr",
-            ("0123456789012345678901234567890123456789012345678901234567890123"
-             "4567890123456789012345678901234567890123456789012345678901234567") };
-        for (size_t n = 0; n < 7 && ok; n++) {
-            for (size_t v = 0; v < 4 && ok; v++) {
-                for (int ty = 0; ty <= 8 && ok; ty++) {
-                    size_t la = ref_znam_build_targeted(a, sizeof(a),
-                        ZNAM_CMD_REGISTER, names[n], (uint8_t)ty, vals[v]);
-                    size_t lb = znam_build_register(b, sizeof(b), names[n],
-                        (uint8_t)ty, vals[v]);
-                    if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
-
-                    la = ref_znam_build_targeted(a, sizeof(a),
-                        ZNAM_CMD_UPDATE, names[n], (uint8_t)ty, vals[v]);
-                    lb = znam_build_update(b, sizeof(b), names[n],
-                        (uint8_t)ty, vals[v]);
-                    if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
-
-                    la = ref_znam_build_targeted(a, sizeof(a),
-                        ZNAM_CMD_SET_RECORD, names[n], (uint8_t)ty, vals[v]);
-                    lb = znam_build_set_record(b, sizeof(b), names[n],
-                        (uint8_t)ty, vals[v]);
-                    if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
-                }
-                size_t la = ref_znam_build_transfer(a, sizeof(a), names[n],
-                                                    vals[v]);
-                size_t lb = znam_build_transfer(b, sizeof(b), names[n],
-                                                vals[v]);
-                if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
-
-                la = ref_znam_build_set_text(a, sizeof(a), names[n],
-                                             "email", vals[v]);
-                lb = znam_build_set_text(b, sizeof(b), names[n],
-                                         "email", vals[v]);
-                if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
-
-                la = ref_znam_build_set_text(a, sizeof(a), names[n],
-                                             "email", NULL);
-                lb = znam_build_set_text(b, sizeof(b), names[n],
-                                         "email", NULL);
-                if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
-            }
-            size_t la = ref_znam_build_renew(a, sizeof(a), names[n]);
-            size_t lb = znam_build_renew(b, sizeof(b), names[n]);
-            if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
-        }
-        for (size_t cap = 0; cap <= 64 && ok; cap++) {
-            size_t la = ref_znam_build_renew(a, cap, "alice");
-            size_t lb = znam_build_renew(b, cap, "alice");
-            if (la != lb || (la && memcmp(a, b, la) != 0)) ok = false;
-        }
-
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-    }
+    failures += builders_byte_identity_check();
 
     /* ── ZSLP empty fields still encode as OP_PUSHDATA1/0, not OP_0 ── */
     printf("overlay parse parity: zslp empty push stays 0x4c 0x00... ");
@@ -1013,87 +1367,7 @@ int test_overlay_parse_parity(void)
     }
 
     /* ── Part 4: the deleted blog fork could not have mattered ── */
-    printf("overlay parse parity: deleted blog push fork equivalent... ");
-    {
-        bool ok = true;
-        long step_diffs = 0;
-        long scans = 0;
-        uint8_t buf[CORPUS_MAX + 8];
-        char hf[128], hr[128];
-
-        static const uint8_t opcodes[] = {
-            0x00, 0x01, 0x08, 0x4b, 0x4c, 0x4d, 0x4e, 0xff
-        };
-
-#define BLOG_CMP(S, N)                                                        \
-        do {                                                                  \
-            scans++;                                                          \
-            if (blog_scan_both((S), (N), hf, hr, sizeof(hf), &step_diffs) < 0 \
-                || strcmp(hf, hr) != 0)                                       \
-                ok = false;                                                   \
-        } while (0)
-
-        for (size_t si = 0; si < nseeds && ok; si++) {
-            const struct script_case *seed = &seeds[si];
-
-            for (size_t n = 0; n <= seed->len && ok; n++)
-                BLOG_CMP(seed->bytes, n);
-
-            for (size_t i = 0; i < seed->len && ok; i++)
-                for (size_t k = 0; k < sizeof(opcodes) && ok; k++) {
-                    memcpy(buf, seed->bytes, seed->len);
-                    buf[i] = opcodes[k];
-                    BLOG_CMP(buf, seed->len);
-                }
-
-            /* An OP_0 spliced in at every offset — the exact byte the fork
-             * did not understand. */
-            for (size_t i = 1; i <= seed->len && ok; i++) {
-                memcpy(buf, seed->bytes, i);
-                buf[i] = 0x00;
-                memcpy(buf + i + 1, seed->bytes + i, seed->len - i);
-                BLOG_CMP(buf, seed->len + 1);
-            }
-        }
-
-        /* Randomized scripts framed as SEND, so the quantity loop is fed
-         * adversarial terminators it was never built for. */
-        prng_state = 0xD1B54A32D192ED03ULL;
-        for (int iter = 0; iter < 60000 && ok; iter++) {
-            struct uint256 tid;
-            for (int i = 0; i < 32; i++) tid.data[i] = (uint8_t)prng_next();
-            uint64_t q[4] = { prng_next(), prng_next(), prng_next(), 7 };
-            size_t base = ref_slp_build_send(buf, sizeof(buf), &tid, q,
-                                             1 + (int)(prng_next() % 4));
-            if (!base) continue;
-            size_t extra = (size_t)(prng_next() % 40);
-            if (base + extra > sizeof(buf)) continue;
-            for (size_t i = 0; i < extra; i++) {
-                uint64_t r = prng_next();
-                /* Bias hard toward the bytes that matter: push opcodes. */
-                buf[base + i] = (r % 3 == 0) ? 0x00
-                              : (r % 3 == 1) ? (uint8_t)(0x4b + (r >> 8) % 4)
-                                             : (uint8_t)(r >> 16);
-            }
-            BLOG_CMP(buf, base + extra);
-        }
-
-#undef BLOG_CMP
-
-        /* The equivalence is only meaningful if the corpus actually drove the
-         * two primitives apart ON A READ THE SCAN PERFORMS. */
-        if (step_diffs == 0) {
-            printf("FAIL (corpus never exercised the missing branch)\n");
-            failures++;
-        } else if (!ok) {
-            printf("FAIL (scan verdicts differ — the fork WAS reachable)\n");
-            failures++;
-        } else {
-            printf("OK (%ld scans, %ld reads where the fork and the real "
-                   "decoder disagreed, 0 recovered-hostname differences)\n",
-                   scans, step_diffs);
-        }
-    }
+    failures += blog_fork_parity_check(seeds, nseeds);
 
     printf("overlay parse parity: %ld differential inputs compared\n", checked);
     return failures;
