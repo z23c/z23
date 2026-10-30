@@ -433,6 +433,7 @@ void register_blockchain_rpc_commands(struct rpc_table *t)
         { "blockchain", "getblockchaininfo", rpc_getblockchaininfo, true },
         { "blockchain", "getmempoolinfo",    rpc_getmempoolinfo,    true },
         { "blockchain", "getrawmempool",     rpc_getrawmempool,     true },
+        { "blockchain", "getnodepace",       rpc_getnodepace,       true },
         { "blockchain", "getmempoolfeestats", rpc_getmempoolfeestats, true },
         { "blockchain", "gettxoutsetinfo",      rpc_gettxoutsetinfo,      true },
         /* HODL wave commands in hodl_controller.c */

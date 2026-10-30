@@ -11,6 +11,7 @@
  * their read retries cannot storm; see g_strikes. */
 
 #include "jobs/pv_lookahead.h"
+#include "jobs/node_pace.h"
 
 #include "jobs/proof_validate_verify.h"
 #include "platform/time_compat.h"
@@ -39,6 +40,8 @@
  * be verified until a block connects, and take() broadcasts on every consumed
  * block. Must stay well under the liveness deadline of the pool child. */
 #define PVLA_IDLE_WAIT_MS 1000
+/* Re-check interval for a worker parked by node_pace. */
+#define PVLA_PACE_PARK_WAIT_MS 500
 
 struct pvla_slot {
     int32_t height;                 /* -1 = empty */
@@ -420,14 +423,33 @@ static void pvla_note_verify_attempt_locked(enum pvla_attempt r, int64_t h,
     }
 }
 
+/* g_mu held. Whether worker idx may verify under the current pace: all at
+ * normal, worker 0 at gentle, none at pause. A parked worker waits a bounded
+ * interval and polls the pace file itself, so a resume needs no wake-up.
+ * True means the caller re-evaluates its loop. */
+static bool pvla_park_for_pace_locked(int idx)
+{
+    node_pace_poll();
+    enum node_pace pace = node_pace_get();
+    if (pace == NODE_PACE_NORMAL || (pace == NODE_PACE_GENTLE && idx == 0))
+        return false;
+    pvla_timed_wait_locked(PVLA_PACE_PARK_WAIT_MS);
+    return true;
+}
+
 static void *pvla_worker_entry(void *arg)
 {
-    (void)arg;
+    const int idx = (int)(intptr_t)arg;
     int child = atomic_load(&g_pool_child_id);
     if (child != SUPERVISOR_INVALID_ID)
         supervisor_worker_alive(child);
     pthread_mutex_lock(&g_mu);
     while (!g_stop) {
+        if (pvla_park_for_pace_locked(idx)) {
+            if (child != SUPERVISOR_INVALID_ID)
+                supervisor_tick(child);
+            continue;
+        }
         if (child != SUPERVISOR_INVALID_ID) {
             supervisor_tick(child);
             supervisor_progress(child,
@@ -563,7 +585,7 @@ bool pv_lookahead_start(struct main_state *ms, const char *datadir,
         char name[32];
         snprintf(name, sizeof(name), "pv.lookahead.%d", i);
         // thread-supervision-ok:bounded-worker-pool joined in pv_lookahead_stop; idle-blocked on g_cv, verifies bounded lookahead window
-        int rc = thread_registry_spawn(name, pvla_worker_entry, NULL,
+        int rc = thread_registry_spawn(name, pvla_worker_entry, (void *)(intptr_t)i,
                                        &g_threads[i]);
         if (rc != 0) {
             LOG_WARN("pv_lookahead",

@@ -27,6 +27,7 @@
 #include "storage/body_history.h"
 #include "storage/progress_store.h"
 #include "jobs/body_fetch_stage.h"
+#include "jobs/node_pace.h"
 #include "jobs/validate_headers_stage.h"
 #include "json/json.h"
 #include "util/log_macros.h"
@@ -682,12 +683,25 @@ static void gap_fill_await_kick_or_tick(void)
     pthread_mutex_unlock(&g_gf.mu);
 }
 
+/* node_pace (jobs/node_pace.h): a paused node queues no block downloads, so
+ * the pass is skipped; the tick or the next kick re-checks the pace. */
+static bool gap_fill_paused(void)
+{
+    node_pace_poll();
+    return node_pace_get() == NODE_PACE_PAUSE;
+}
+
 static void *gap_fill_thread_main(void *arg)
 {
     (void)arg;
     printf("[gap-fill] service started\n");
     gap_fill_supervisor_heartbeat();
     while (!atomic_load(&g_gf.stop_requested)) {
+        if (gap_fill_paused()) {
+            gap_fill_supervisor_heartbeat();
+            gap_fill_await_kick_or_tick();
+            continue;
+        }
         int n = gap_fill_pass();
         /* The below-tip census runs every tick so the coverage verdict is
          * never stale; its backfill only enqueues on a pass where the

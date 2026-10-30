@@ -29,6 +29,7 @@
 #include "core/uint256.h"
 #include "encoding/utilstrencodings.h"
 #include "event/event.h"
+#include "jobs/node_pace.h"
 #include "jobs/reducer_frontier.h"
 #include "json/json.h"
 #include "net/connman.h"
@@ -314,6 +315,18 @@ bool rpc_getmempoolinfo(const struct json_value *params, bool help,
     json_push_kv_int(result, "removed_for_branch_total",
                      (int64_t)stats.removed_for_branch_total);
     json_push_kv_int(result, "cleared_total", (int64_t)stats.cleared_total);
+    return true;
+}
+
+bool rpc_getnodepace(const struct json_value *params, bool help,
+                     struct json_value *result)
+{
+    (void)params;
+    RPC_HELP(help, result,
+        "getnodepace\nReturns the node pace: normal, gentle or pause.");
+
+    json_set_object(result);
+    json_push_kv_str(result, "pace", node_pace_name(node_pace_get()));
     return true;
 }
 

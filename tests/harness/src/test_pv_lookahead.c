@@ -27,6 +27,7 @@
 #include "core/uint256.h"
 #include "jobs/catchup_cadence.h"
 #include "jobs/proof_validate_stage.h"
+#include "jobs/node_pace.h"
 #include "jobs/pv_lookahead.h"
 #include "platform/time_compat.h"
 #include "primitives/block.h"
@@ -776,6 +777,95 @@ static int la_test_chain_end_idle(void)
     return failures;
 }
 
+/* Write one pace word to <dir>/pace. */
+static bool la_write_pace_file(const char *dir, const char *word)
+{
+    char path[320];
+    snprintf(path, sizeof(path), "%s/pace", dir);
+    FILE *f = fopen(path, "w");
+    if (!f)
+        return false;
+    fprintf(f, "%s\n", word);
+    return fclose(f) == 0;
+}
+
+static bool la_wait_pace(enum node_pace want, int timeout_ms)
+{
+    for (int waited = 0; waited < timeout_ms; waited += 50) {
+        node_pace_poll();
+        if (node_pace_get() == want)
+            return true;
+        platform_sleep_ms(50);
+    }
+    return node_pace_get() == want;
+}
+
+/* Pace parsing and file polling, no pool. */
+static int la_test_pace_file(void)
+{
+    int failures = 0;
+    enum node_pace p = NODE_PACE_NORMAL;
+    PVLA_CHECK("pace: words parse and unknown words are refused",
+               node_pace_parse("gentle\n", &p) && p == NODE_PACE_GENTLE &&
+               node_pace_parse("pause", &p) && p == NODE_PACE_PAUSE &&
+               node_pace_parse("normal", &p) && p == NODE_PACE_NORMAL &&
+               !node_pace_parse("gentlest", &p) && !node_pace_parse("", &p));
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "pv_lookahead", "pace_file");
+    node_pace_set_datadir(dir);
+    PVLA_CHECK("pace: a missing file is normal", la_wait_pace(NODE_PACE_NORMAL, 100));
+    PVLA_CHECK("pace: file pause is applied within the poll interval",
+               la_write_pace_file(dir, "pause") &&
+               la_wait_pace(NODE_PACE_PAUSE, 3000));
+    PVLA_CHECK("pace: file gentle is applied",
+               la_write_pace_file(dir, "gentle") &&
+               la_wait_pace(NODE_PACE_GENTLE, 3000));
+    PVLA_CHECK("pace: gentle sleeps a bounded share of the round",
+               node_pace_gentle_sleep_ms(40000) == 40 &&
+               node_pace_gentle_sleep_ms(9000000) == 250 &&
+               node_pace_gentle_sleep_ms(0) == 0);
+    PVLA_CHECK("pace: garbage in the file is normal",
+               la_write_pace_file(dir, "turbo") &&
+               la_wait_pace(NODE_PACE_NORMAL, 3000));
+    node_pace_set_datadir(NULL);
+    node_pace_set(NODE_PACE_NORMAL);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* The pool parks at pause, resumes at gentle, and the pace file alone drives
+ * both. Verdicts are unaffected: only when they are produced changes. */
+static int la_test_pace_pool(void)
+{
+    int failures = 0;
+    setenv("ZCL_PV_WORKERS", "2", 1);
+    struct la_pool_fixture fx;
+    la_pool_fixture_init(&fx, "pace_pool", 8);
+    const uint64_t claims0 = pv_lookahead_test_claims_total();
+    node_pace_set(NODE_PACE_PAUSE);
+    bool started = fx.ok &&
+        pv_lookahead_start(&fx.ms, fx.dir, la_reader, &fx.sc, la_verifier,
+                           &fx.sc);
+    PVLA_CHECK("pace pool: starts while paused", started);
+    if (started) {
+        platform_sleep_ms(1200);
+        PVLA_CHECK("pace pool: paused workers verify nothing",
+                   pv_lookahead_populated() == 0 &&
+                   pv_lookahead_test_claims_total() == claims0);
+        node_pace_set_datadir(fx.dir);
+        PVLA_CHECK("pace pool: file gentle resumes the pool",
+                   la_write_pace_file(fx.dir, "gentle") &&
+                   la_wait_populated(8, 10000));
+        PVLA_CHECK("pace pool: file pause is applied again",
+                   la_write_pace_file(fx.dir, "pause") &&
+                   la_wait_pace(NODE_PACE_PAUSE, 3000));
+        node_pace_set_datadir(NULL);
+    }
+    node_pace_set(NODE_PACE_NORMAL);
+    la_pool_fixture_destroy(&fx);
+    return failures;
+}
+
 /* ── the tests ───────────────────────────────────────────────────────────── */
 
 static bool la_params_available(void)
@@ -996,6 +1086,8 @@ int test_pv_lookahead(void)
     failures += la_test_bodiless_heal();
     failures += la_test_bodiless_reset();
     failures += la_test_chain_end_idle();
+    failures += la_test_pace_file();
+    failures += la_test_pace_pool();
 
     printf("pv_lookahead tests: %s\n", failures ? "FAILED" : "PASSED");
     return failures;

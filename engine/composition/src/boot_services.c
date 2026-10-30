@@ -36,6 +36,7 @@
  * teardown relocated to the staged-sync supervisor unit, which owns the
  * stages' init + registration too. boot_services.c reaches the pipeline only
  * through supervisors/staged_sync_supervisor.h now. */
+#include "jobs/node_pace.h"
 #include "jobs/refold_progress.h"      /* refold_from_anchor_active (-load-verify-boot skip) */
 #include "config/boot_fast_restart.h"  /* boot_fast_restart_capture_shutdown_facts (P2) */
 #include "services/chain_tip_watchdog.h"
@@ -467,6 +468,7 @@ static void boot_register_core_liveness_and_reducer(
      * named stall event, and lets the condition loop handle recovery. */
     chain_tip_watchdog_register(svc->state);
     /* Always-terminating remedy escalator (sticky-node #1): register AFTER the watchdog, BEFORE self_heal. */
+    node_pace_set_datadir(svc->datadir);
     sticky_escalator_set_datadir(svc->datadir);
     sticky_escalator_register(svc->state);
     /* Unified recovery organ (chain domain): cheapest-sufficient-rung selector. */

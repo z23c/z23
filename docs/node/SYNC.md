@@ -470,6 +470,22 @@ continuity-checked against compiled anchors; failures discard the runtime file.
 
 ---
 
+## Sync pace
+
+A host that needs the node to use less CPU (the phone app reacting to thermal
+status) writes one word to `<datadir>/pace`:
+
+| Word     | Effect |
+| -------- | ------ |
+| `normal` | Default. Identical to a node that never reads the file. |
+| `gentle` | One proof pre-verification worker; the reducer drain sleeps for as long as each round took (at most 250 ms). |
+| `pause`  | No pre-verification workers; the reducer drain does nothing, so block fetch and validation stop. P2P stays connected. |
+
+The node re-reads the file at most once per second; a missing, empty or
+unrecognised file means `normal`. The pace never changes a validation verdict.
+`z23 status` reports the applied pace as `pace`, and the `getnodepace` RPC
+returns it as `{"pace":"gentle"}`.
+
 ## Check sync status
 
 Use `z23 status`, `z23 core sync status`, and

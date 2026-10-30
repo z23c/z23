@@ -71,6 +71,8 @@ bool rpc_getmempoolinfo(const struct json_value *params, bool help,
                         struct json_value *result);
 bool rpc_getrawmempool(const struct json_value *params, bool help,
                        struct json_value *result);
+bool rpc_getnodepace(const struct json_value *params, bool help,
+                     struct json_value *result);
 bool rpc_getmempoolfeestats(const struct json_value *params, bool help,
                             struct json_value *result);
 bool rpc_gettxoutsetinfo(const struct json_value *params, bool help,

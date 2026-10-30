@@ -32,6 +32,7 @@
 #include "storage/memory_profile.h"
 #include "storage/block_index_projection.h"
 #include "util/rss_trim.h"
+#include "jobs/node_pace.h"
 #include "jobs/refold_cadence.h"   /* accelerated drain batch + tick, mint/refold only */
 #include "jobs/catchup_cadence.h"  /* accelerated drain batch, live catch-up only */
 #include "jobs/header_admit_stage.h"
@@ -477,6 +478,29 @@ static int stage_effective_batch(int normal_batch, int per_step_fanout)
     return catchup_batch;
 }
 
+/* node_pace (jobs/node_pace.h). Steps one tick may drain: 0 at pause, an
+ * eighth of the batch (at least one step) at gentle, unchanged at normal. The
+ * batch only sets how much work one tick does, never what a stage checks. */
+static int staged_paced_batch(int batch)
+{
+    node_pace_poll();
+    switch (node_pace_get()) {
+    case NODE_PACE_PAUSE:  return 0;
+    case NODE_PACE_GENTLE: return batch > 8 ? batch / 8 : 1;
+    default:               return batch;
+    }
+}
+
+/* Tick period (us) for the next sweep: gentle never ticks faster than the
+ * default 2 s period; 0 keeps the normal period_secs. */
+static int64_t staged_paced_period_us(int64_t eff)
+{
+    const int64_t gentle_floor_us = 2000000;
+    if (node_pace_get() == NODE_PACE_GENTLE && eff < gentle_floor_us)
+        return gentle_floor_us;
+    return eff;
+}
+
 /* Generic per-stage tick: drain a bounded batch each tick — keeps
  * progress.kv churn low and avoids starving other supervisor children —
  * then publish the cursor and heartbeat. Recovers its stage from the
@@ -544,11 +568,20 @@ static void staged_stage_tick(struct liveness_contract *c)
      * fsync barriers per step ON this shared tick runner, which is what
      * turned a ~55 ms consensus crawl into ~10 s ticks. At tip (gap <= 1)
      * both gates close, so each write keeps its normal immediate sync. */
+    const int batch =
+        staged_paced_batch(stage_effective_batch(d->batch, d->per_step_fanout));
+    if (batch <= 0) {
+        /* Paused: publish a moving marker so neither the supervisor nor the
+         * stall escalation reads the idle stage as wedged. */
+        supervisor_progress(d->id, platform_time_monotonic_us());
+        supervisor_tick(d->id);
+        return;
+    }
     const bool batch_catchup_sync = catchup_cadence_active() ||
                                     catchup_cadence_deferred_sync_active();
     if (batch_catchup_sync)
         reducer_enter_batched_body_sync();
-    (void)d->drain(stage_effective_batch(d->batch, d->per_step_fanout));
+    (void)d->drain(batch);
     if (batch_catchup_sync)
         reducer_exit_batched_body_sync();
 
@@ -573,6 +606,7 @@ static void staged_stage_tick(struct liveness_contract *c)
      * atomic_store takes effect on the very next sweep. */
     int64_t eff = refold_cadence_tick_period_us();
     if (eff <= 0) eff = catchup_cadence_tick_period_us();
+    eff = staged_paced_period_us(eff);
     atomic_store(&d->contract.period_us, eff);
 
     uint64_t cur = d->cursor();

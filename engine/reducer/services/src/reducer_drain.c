@@ -49,6 +49,8 @@
 #include "jobs/utxo_apply_stage.h"
 #include "jobs/tip_finalize_stage.h"
 #include "jobs/refold_cadence.h"   /* refold_cadence_drain_batch (mint/refold) */
+#include "jobs/node_pace.h"
+#include "platform/time_compat.h"
 #include "jobs/catchup_cadence.h"  /* peer-gap-gated live-sync batch */
 #include "jobs/reducer_frontier.h" /* reducer_frontier_provable_tip_cached (H* gate) */
 #include "storage/coins_kv.h"
@@ -464,6 +466,39 @@ static void reducer_drain_observe_stage_spins(const int *adv_per_stage,
     }
 }
 
+/* Page the operator on a FATAL latched during this drain regardless of
+ * which exit fired - convergence (adv==0) OR the budget timeout. A stage
+ * can return JOB_FATAL every pass while another keeps advancing, so
+ * total>0 and the loop exits on the budget, not on adv==0; gating the page
+ * on the adv==0 break alone let that masked-FATAL recur unpaged. */
+static void reducer_drain_page_fatal(uint64_t fatal_gen0)
+{
+    char st[STAGE_NAME_MAX] = {0}, why[128] = {0};
+    if (stage_fatal_generation() != fatal_gen0 &&
+        stage_last_fatal(st, sizeof(st), why, sizeof(why)))
+        event_emitf(EV_OPERATOR_NEEDED, 0,
+                    "condition=reducer_stage_fatal stage=%s reason=%s",
+                    st, why);
+}
+
+/* Pace gate for the live drain (node_pace.h). At pause it refuses the round;
+ * at gentle it sleeps for as long as the finished round took (capped), so the
+ * drain thread runs about half the time. The offline -mint-anchor fold
+ * (converge_on_frontier_stall) is never paced. True means stop draining. */
+static bool reducer_drain_pace_stop(bool paced, int64_t round_start_us)
+{
+    if (!paced)
+        return false;
+    node_pace_poll();
+    if (node_pace_get() == NODE_PACE_PAUSE)
+        return true;
+    int ms = round_start_us > 0
+        ? node_pace_gentle_sleep_ms(GetTimeMicros() - round_start_us) : 0;
+    if (ms > 0)
+        platform_sleep_ms(ms);
+    return false;
+}
+
 /* Shared drain core. `budget_us <= 0` means NO latency budget: keep draining
  * until convergence (a no-advance pass) or the round hard cap, whichever first.
  * The supervisor/FSM path passes a 2s budget so it yields its 2s stage ticks.
@@ -497,8 +532,11 @@ static int reducer_drain_core(int64_t budget_us, int hard_cap,
      * false) still lands in the "ran out of allotted capacity" bucket —
      * the correct classification, not an omission. */
     enum { DRAIN_EXIT_BUDGET = 0, DRAIN_EXIT_CONVERGED, DRAIN_EXIT_SHUTDOWN,
-          DRAIN_EXIT_FRONTIER_STALL } exit_reason = DRAIN_EXIT_BUDGET;
+          DRAIN_EXIT_FRONTIER_STALL, DRAIN_EXIT_PACED }
+        exit_reason = DRAIN_EXIT_BUDGET;
     if (per_stage_batch <= 0) per_stage_batch = 100;
+    const bool paced = !converge_on_frontier_stall;
+    int64_t   round_start_us  = 0;
     for (int round = 0; round < hard_cap; round++) {
         /* On shutdown, return at this round boundary (a safe, committed point —
          * each stage's batch has already COMMITted) so the P2P message thread's
@@ -509,6 +547,11 @@ static int reducer_drain_core(int64_t budget_us, int hard_cap,
             exit_reason = DRAIN_EXIT_SHUTDOWN;
             break;
         }
+        if (reducer_drain_pace_stop(paced, round_start_us)) {
+            exit_reason = DRAIN_EXIT_PACED;
+            break;
+        }
+        round_start_us = GetTimeMicros();
         /* Snapshot every stage's cursor at the round boundary (cheap in-memory
          * reads). Each stage only ever moves its OWN cursor, so a round-boundary
          * before/after diff is correctly attributed per stage even though the
@@ -545,19 +588,7 @@ static int reducer_drain_core(int64_t budget_us, int hard_cap,
             break;
         }
     }
-    /* Page the operator on a FATAL latched during this drain regardless of
-     * which exit fired — convergence (adv==0) OR the budget timeout. A stage
-     * can return JOB_FATAL every pass while another keeps advancing, so
-     * total>0 and the loop exits on the budget, not on adv==0; gating the page
-     * on the adv==0 break alone let that masked-FATAL recur unpaged. */
-    {
-        char st[STAGE_NAME_MAX] = {0}, why[128] = {0};
-        if (stage_fatal_generation() != fatal_gen0 &&
-            stage_last_fatal(st, sizeof(st), why, sizeof(why)))
-            event_emitf(EV_OPERATOR_NEEDED, 0,
-                        "condition=reducer_stage_fatal stage=%s reason=%s",
-                        st, why);
-    }
+    reducer_drain_page_fatal(fatal_gen0);
 
     /* Drain-exit telemetry (see the counters' doc comment above): record the
      * outcome of THIS drain call. Shutdown and frontier-stall exits update
