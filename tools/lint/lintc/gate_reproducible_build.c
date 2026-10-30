@@ -407,7 +407,7 @@ static int rpb_build_once(char *const envp[], FILE *out, const char *label,
     rpb_info(out, line);
     if (rpb_make_argv(argv, args, bdir, binary, buildcmd, v, jobs))
         return 2;
-    time_t t0 = time(NULL);
+    time_t t0 = time(NULL); // platform-ok: standalone z23-lint links no platform library; elapsed seconds for the report line only
     int code;
     if (rpb_spawn(argv, envp, RPB_OUT_STDERR, NULL, 0, &code))
         return 2;
@@ -430,7 +430,7 @@ static int rpb_build_once(char *const envp[], FILE *out, const char *label,
         return 1;
     }
     if (ovf(snprintf(m, sizeof m, "Build %s done in %llds (%lld bytes)", label,
-                     (long long)(time(NULL) - t0), (long long)sb.st_size),
+                     (long long)(time(NULL) - t0), (long long)sb.st_size), // platform-ok: standalone z23-lint links no platform library; elapsed seconds for the report line only
              sizeof m))
         return 2;
     rpb_info(out, m);
