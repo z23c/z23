@@ -186,6 +186,7 @@ static const struct rpc_timeout_method_budget k_method_budgets[] = {
     { "storebuy_remote_order",     RPC_MARKET_DELIVERY_TIMEOUT_MS },
     { "storebuy_status",           RPC_MARKET_DELIVERY_TIMEOUT_MS },
     { "storebuy_collect",          RPC_MARKET_DELIVERY_TIMEOUT_MS },
+    { "onionremotestatus",         RPC_ONION_REMOTE_STATUS_TIMEOUT_MS },
     { "mesh_machines",             RPC_MESH_COLLECT_TIMEOUT_MS },
     { "generatetoaddress",         RPC_MINING_TIMEOUT_MS },
     { "generate",                  RPC_MINING_TIMEOUT_MS },

@@ -94,6 +94,12 @@ extern "C" {
  * waits exactly this long, and the server budget matches it — extend, never
  * shorten. Plain status reads on this method still finish in milliseconds. */
 #define RPC_ZCODE_DHT_PUBLISH_TIMEOUT_MS 120000
+/* onionremotestatus fetches one peer's /status over embedded Tor. The
+ * handler accepts timeout_secs up to 60 and bounds its own node-side call at
+ * timeout_secs + 10 s, so the worst case is 70 s. The generic 10 s ceiling
+ * would shutdown() the socket mid-fetch and surface a truncated reply, so
+ * this method gets 70 s — extend, never shorten. */
+#define RPC_ONION_REMOTE_STATUS_TIMEOUT_MS 70000
 
 struct rpc_timeout_slot {
     bool     in_use;

@@ -241,6 +241,32 @@ static int test_proof_methods_receive_bounded_extension(void)
         close(generic_pair[1]);
         PASS();
     }
+    TEST("rpc_timeout: onionremotestatus outlasts the generic ceiling") {
+        fresh_mgr();
+        int onion_pair[2] = { -1, -1 };
+        int generic_pair[2] = { -1, -1 };
+        ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, onion_pair) == 0);
+        ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, generic_pair) == 0);
+        int onion = rpc_timeout_register(&mgr, onion_pair[0], 0);
+        int generic = rpc_timeout_register(&mgr, generic_pair[0], 0);
+        ASSERT(onion >= 0 && generic >= 0);
+        rpc_timeout_set_method(&mgr, onion, "onionremotestatus");
+        rpc_timeout_set_method(&mgr, generic, "getwalletinfo");
+        /* The caller may ask for timeout_secs up to 60 and the handler
+         * allows 10 s on top of that, so the slot must cover at least 70 s. */
+        ASSERT(RPC_ONION_REMOTE_STATUS_TIMEOUT_MS >= 70000);
+        ASSERT(mgr.slots[onion].timeout_ms >= 60000);
+        ASSERT(mgr.slots[onion].timeout_ms ==
+               RPC_ONION_REMOTE_STATUS_TIMEOUT_MS);
+        ASSERT(mgr.slots[generic].timeout_ms == 10000);
+        rpc_timeout_unregister(&mgr, onion);
+        rpc_timeout_unregister(&mgr, generic);
+        close(onion_pair[0]);
+        close(onion_pair[1]);
+        close(generic_pair[0]);
+        close(generic_pair[1]);
+        PASS();
+    }
     TEST("rpc_timeout: zcode DHT publish outlasts the generic ceiling") {
         fresh_mgr();
         int publish_pair[2] = { -1, -1 };
