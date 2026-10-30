@@ -1,4 +1,7 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0 */
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * Purpose: per-height block census that lets self-heal conditions find blocks
+ * at tip+1 without scanning the whole block map on every poll. */
 
 #ifndef ZCL_CONDITIONS_BLOCK_HEIGHT_CENSUS_H
 #define ZCL_CONDITIONS_BLOCK_HEIGHT_CENSUS_H

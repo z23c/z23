@@ -1765,6 +1765,7 @@ int main(int argc, char **argv)
     failures += test_stale_validate_headers_repair_condition();
     failures += test_orphan_utxo_above_tip();
     failures += test_tip_fork_stale();
+    failures += test_block_height_census();
     failures += test_tip_stall_oracle_rebuild_condition();
     failures += test_active_chain_extend();
     failures += test_rebuild_recent();
