@@ -47,15 +47,27 @@ static int nbs_has(const struct nbs_set *s, const char *path)
     return 0;
 }
 
+/* Shared by the nbs_set and sbe_set adders: items is a flat array of
+ * max slots, each width bytes wide. */
+static int set_add_flat(char *items, int *count, int max, size_t width,
+    const char *key)
+{
+    size_t n = strlen(key);
+    for (int i = 0; i < *count; i++) {
+        if (strcmp(items + (size_t)i * width, key) == 0)
+            return 0;
+    }
+    if (*count >= max || n >= width)
+        return die("z23-lint: derived buffer overflow\n", "");
+    char *slot = items + (size_t)*count * width;
+    *count += 1;
+    memcpy(slot, key, n + 1);
+    return 0;
+}
+
 static int nbs_add(struct nbs_set *s, const char *path)
 {
-    size_t n = strlen(path);
-    if (nbs_has(s, path))
-        return 0;
-    if (s->count >= NBS_MAX || n >= NBS_PATH)
-        return die("z23-lint: derived buffer overflow\n", "");
-    memcpy(s->n[s->count++], path, n + 1);
-    return 0;
+    return set_add_flat((char *)s->n, &s->count, NBS_MAX, NBS_PATH, path);
 }
 
 static int nbs_cmp(const void *a, const void *b)
@@ -63,9 +75,12 @@ static int nbs_cmp(const void *a, const void *b)
     return strcmp((const char *)a, (const char *)b);
 }
 
-static int nbs_load_list(const char *path, struct nbs_set *s)
+/* Shared by the nbs_set and sbe_set loaders: one key per line, '#'
+ * starts a comment, surrounding whitespace is trimmed. */
+static int set_load_lines(const char *path, char *items, int *count, int max,
+    size_t width)
 {
-    s->count = 0;
+    *count = 0;
     FILE *f = fopen(path, "r");
     if (!f)
         return 0;
@@ -82,9 +97,14 @@ static int nbs_load_list(const char *path, struct nbs_set *s)
         while (n && isspace((unsigned char)p[n - 1]))
             p[--n] = '\0';
         if (n)
-            rc = nbs_add(s, p);
+            rc = set_add_flat(items, count, max, width, p);
     }
     return fin(f, line, path, rc);
+}
+
+static int nbs_load_list(const char *path, struct nbs_set *s)
+{
+    return set_load_lines(path, (char *)s->n, &s->count, NBS_MAX, NBS_PATH);
 }
 
 static int nbs_text_has_sym(const char *text, const char *sym)
@@ -367,13 +387,7 @@ static int sbe_has(const struct sbe_set *s, const char *key)
 
 static int sbe_add(struct sbe_set *s, const char *key)
 {
-    size_t n = strlen(key);
-    if (sbe_has(s, key))
-        return 0;
-    if (s->count >= SBE_MAX || n >= SBE_KEY)
-        return die("z23-lint: derived buffer overflow\n", "");
-    memcpy(s->n[s->count++], key, n + 1);
-    return 0;
+    return set_add_flat((char *)s->n, &s->count, SBE_MAX, SBE_KEY, key);
 }
 
 static int sbe_cmp(const void *a, const void *b)
@@ -389,26 +403,7 @@ static void sbe_sort(struct sbe_set *s)
 
 static int sbe_load(struct sbe_set *s, const char *path)
 {
-    s->count = 0;
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return 0;
-    char *line = NULL;
-    size_t cap = 0;
-    int rc = 0;
-    while (rc == 0 && getline(&line, &cap, f) >= 0) {
-        char *h = strchr(line, '#'), *p = line;
-        if (h)
-            *h = '\0';
-        while (*p && isspace((unsigned char)*p))
-            p++;
-        size_t n = strlen(p);
-        while (n && isspace((unsigned char)p[n - 1]))
-            p[--n] = '\0';
-        if (n)
-            rc = sbe_add(s, p);
-    }
-    return fin(f, line, path, rc);
+    return set_load_lines(path, (char *)s->n, &s->count, SBE_MAX, SBE_KEY);
 }
 
 static int sbe_split_ws(const char *s, char out[][RS_PATH], int max, int *n)
