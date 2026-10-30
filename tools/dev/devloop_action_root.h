@@ -178,7 +178,7 @@ struct zcl_action_root_request {
     /* NULL-terminated NAME=value list: exactly the child's environment
      * (zcl_action_root_child_env). Allowlisted names are bound by value,
      * PATH/HOME/TMPDIR pass through; any other name misses (env_unbound). */
-    const char *const *environ;
+    const char *const *child_env;
     uint8_t toolchain_root[32];
     uint32_t abi_generation;
     const struct vcs_action_abi_v2 *abi;

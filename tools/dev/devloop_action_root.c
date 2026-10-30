@@ -1962,7 +1962,7 @@ static long ar_env_entry(struct ar_state *s, const char *entry,
  * child sees depends on the libc) and is refused, not normalized. */
 static bool ar_env_build(struct ar_state *s)
 {
-    const char *const *env = s->c.req->environ;
+    const char *const *env = s->c.req->child_env;
     unsigned seen = 0;
     for (size_t i = 0; env && env[i]; i++) {
         long slot = ar_env_entry(s, env[i], &seen);

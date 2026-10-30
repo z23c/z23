@@ -2794,6 +2794,7 @@ static bool hs_resident_call(const char *artifact, bool activate,
  * one digest computation, which now happens once in this process before the
  * runner ever sees the artifact (zcl_reflex_runner_outcome.seal_us) rather
  * than again inside a resident fork. */
+#if !defined(_WIN32)
 static void hs_shadow_append_metrics(struct json_value *response,
                                      const struct zcl_reflex_runner_outcome *run,
                                      bool valid)
@@ -2806,6 +2807,7 @@ static void hs_shadow_append_metrics(struct json_value *response,
     (void)json_push_kv_int(response, "module_hash_us",
                            valid ? run->seal_us : 0);
 }
+#endif
 static void hs_sha3_root(const char *text, char out[65])
 {
     uint8_t digest[32];

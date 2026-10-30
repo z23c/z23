@@ -222,7 +222,7 @@ static void fx_request(struct fx *x)
     ar_fill(r->sysroot_objects_sha3, 44);
     r->producers = x->producers;
     r->producer_count = 0;
-    r->environ = x->env;
+    r->child_env = x->env;
     ar_fill(r->toolchain_root, 40);
     r->abi_generation = 1;
     r->abi = x->abi;

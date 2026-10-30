@@ -350,8 +350,10 @@ struct ars_ask {
     const struct zcl_action_root_child_env *env;
 };
 
+#if !defined(_WIN32)
 static pthread_mutex_t g_driver_mu = PTHREAD_MUTEX_INITIALIZER;
 static struct ars_driver g_driver;
+#endif
 
 /* Admit one built-in search entry of `n` bytes at `p`, or name why not:
  * an entry that will not fit a path buffer or the caller's array is an
@@ -430,6 +432,7 @@ bool zcl_action_root_parse_builtin_dirs(const char *out,
     return count > 0;
 }
 
+#if !defined(_WIN32)
 static void ars_absent_parse(const char *out, const char *end,
                              struct ars_driver *sd)
 {
@@ -456,6 +459,8 @@ static bool ars_system_parse(const char *out, struct ars_driver *sd,
                                               ARS_SYSTEM_DIR_MAX, &sd->count,
                                               miss);
 }
+
+#endif
 
 /* ---- the programs the driver runs --------------------------------------- */
 
@@ -1930,7 +1935,7 @@ static void ars_hook_request(struct ars_hook *h, const struct ars_compile *k)
         .collect2 = h->driver.collect2[0] ? h->driver.collect2 : NULL,
         .argv = h->argv.link, .argc = h->argv.link_n,
     };
-    r->environ = h->envp->v;
+    r->child_env = h->envp->v;
     if (k->t0)
         r->compile_t0 = *k->t0;
     r->abi_generation = st->abi_generation;

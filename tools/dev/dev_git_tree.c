@@ -1119,6 +1119,7 @@ struct zcl_result zcl_dev_git_publication_check_with_dependencies(
             timeout_ms, out) || (dependency_count && !dependencies))
         return ZCL_ERR(-1, "git-publication: missing bounded inputs");
 #ifdef _WIN32
+    (void)expected_closure_root;
     return ZCL_ERR(-1, "git-publication: native Git observation unavailable on Windows");
 #else
     int64_t deadline = platform_time_monotonic_ms() + timeout_ms;
