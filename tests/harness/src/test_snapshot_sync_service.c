@@ -2141,6 +2141,53 @@ static int test_snapshot_global_post_init_fallback(void)
     return failures;
 }
 
+/* Counts statements that name snapshot_staging_utxos (sqlite3_trace_v2). */
+static int staging_stmt_trace_hits;
+
+static int staging_stmt_trace_cb(unsigned type, void *ctx, void *p, void *x)
+{
+    (void)type;
+    (void)ctx;
+    (void)p;
+    const char *sql = (const char *)x;
+    if (sql && strstr(sql, "snapshot_staging_utxos"))
+        staging_stmt_trace_hits++;
+    return 0;
+}
+
+static int test_failed_status_counts_staging_only_when_failed(void)
+{
+    int failures = 0;
+    TEST("failed status reads staging rows only for a FAILED service") {
+        struct node_db ndb;
+        struct snapshot_sync_service svc;
+        struct snapsync_failed_status st;
+
+        memset(&svc, 0, sizeof(svc));
+        ASSERT(node_db_open(&ndb, ":memory:"));
+        snapsync_init(&svc, &ndb);
+
+        staging_stmt_trace_hits = 0;
+        sqlite3_trace_v2(ndb.db, SQLITE_TRACE_STMT, staging_stmt_trace_cb, NULL);
+        snapsync_get_failed_status(&svc, &st);
+        ASSERT(!st.failed);
+        ASSERT(st.staged_row_count == 0);
+        ASSERT(staging_stmt_trace_hits == 0);
+
+        svc.state = SNAPSYNC_FAILED;
+        snapsync_get_failed_status(&svc, &st);
+        ASSERT(st.failed);
+        ASSERT(st.staged_row_count == 0);
+        ASSERT(staging_stmt_trace_hits == 1);
+
+        sqlite3_trace_v2(ndb.db, 0, NULL, NULL);
+        snapsync_reset(&svc);
+        node_db_close(&ndb);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_snapshot_sync_service(void)
 {
     int failures = 0;
@@ -2196,6 +2243,7 @@ int test_snapshot_sync_service(void)
     failures += test_snapshot_blacklist_survives_reset();
     failures += test_snapshot_global_ensure_init_completes();
     failures += test_snapshot_global_post_init_fallback();
+    failures += test_failed_status_counts_staging_only_when_failed();
     progress_store_close();
     test_cleanup_tmpdir(progress_dir);
     return failures;

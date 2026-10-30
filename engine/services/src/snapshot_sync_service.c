@@ -517,9 +517,11 @@ void snapsync_get_failed_status(struct snapshot_sync_service *svc,
     out->offered_utxos = svc->offered_count;
     out->serving_peer_id = svc->serving_peer_id;
     out->turbo_active = svc->turbo_active;
-    out->staged_row_count =
-        (svc->ndb && svc->ndb->open) ? snapsync_staging_count_internal(svc->ndb)
-                                     : 0;
+    /* Only a FAILED service consumes the staged count (failed-reset detect,
+     * witness and event). Skipping the scan otherwise keeps the periodic
+     * condition poll off the staging table on idle nodes. */
+    if (out->failed && svc->ndb && svc->ndb->open)
+        out->staged_row_count = snapsync_staging_count_internal(svc->ndb);
     if (out->failed && svc->start_time_us > 0) {
         int64_t elapsed_us = snapsync_now_us_internal() - svc->start_time_us;
         out->elapsed_secs = elapsed_us > 0 ? elapsed_us / 1000000LL : 0;
