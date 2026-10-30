@@ -156,7 +156,6 @@ gate_command() {
         check-shell-host-assumptions)      echo './build/bin/z23-lint check-shell-host-assumptions --selftest && ./tools/scripts/port_probe.sh --selftest && ./tools/scripts/commons_fix_admit.sh --selftest && ./tools/scripts/isolated_node_env_selftest.sh && ./tools/scripts/service_args_selftest.sh && bash tools/scripts/two_node_peer_tip_selftest.sh && ./build/bin/z23-lint check-shell-host-assumptions' ;;
         check-framework-shape)             echo 'ZCL_LINT_MODE=RATCHET ./build/bin/z23-lint check-framework-shape' ;;
         check-standalone-tools-link)       echo './tools/lint/check_standalone_tools_link.sh' ;;
-        check-no-operator-paths)           echo './tools/lint/check_no_operator_paths.sh --selftest && ./tools/lint/check_no_operator_paths.sh' ;;
         check-fleet-source-status)         echo './tools/scripts/check_fleet_source_status.sh' ;;
         check-platform-header-guards)      echo 'build/bin/z23-lint check-platform-header-guards --selftest && build/bin/z23-lint check-platform-header-guards' ;;
         check-no-raw-sqlite-in-controllers) echo 'ZCL_LINT_MODE=RATCHET ./build/bin/z23-lint check-no-raw-sqlite-in-controllers' ;;

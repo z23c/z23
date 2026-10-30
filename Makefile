@@ -15449,10 +15449,10 @@ check-live-datadir-isolation: $(LINTC_TOOL)
 # hostname. The repository ships no operator identity: a stranger cloning it
 # must not learn where our machines are. Shrink-only ratchet; the selftest
 # plants a violation per prong so the gate is never trusted unproven.
-check-no-operator-paths:
+check-no-operator-paths: $(LINTC_TOOL)
 	@echo "══ LINT: no operator path/username/hostname in tracked files ══"
-	@./tools/lint/check_no_operator_paths.sh --selftest
-	@./tools/lint/check_no_operator_paths.sh
+	@./build/bin/z23-lint check-no-operator-paths --selftest
+	@./build/bin/z23-lint check-no-operator-paths
 
 # Publishing is a deliberate act a person performs, never a side effect of a
 # background loop. A timer that can move `main` moves it for every checkout

@@ -10,7 +10,7 @@
 # how the ratchet tightens. Raising a number is never a fix.
 #
 # Regenerate after removing some:
-#   ZCL_LINT_MODE=UPDATE ./tools/lint/check_no_operator_paths.sh
+#   ZCL_LINT_MODE=UPDATE ./build/bin/z23-lint check-no-operator-paths
 A contexts/commons/corpus/evidence-000002.json 6
 A contexts/commons/corpus/evidence-000003.json 6
 A contexts/commons/corpus/evidence-000004.json 8
@@ -77,15 +77,15 @@ A contexts/commons/corpus/factory/zhtml.report.json 2
 A contexts/commons/corpus/factory/zhuman.report.json 2
 A contexts/commons/corpus/factory/zini.report.json 2
 A contexts/commons/corpus/factory/zintern.report.json 2
-A contexts/commons/corpus/factory/zjsonp.report.json 2
 A contexts/commons/corpus/factory/zjson.report.json 2
+A contexts/commons/corpus/factory/zjsonp.report.json 2
 A contexts/commons/corpus/factory/zlev.report.json 2
 A contexts/commons/corpus/factory/zlog.report.json 2
 A contexts/commons/corpus/factory/zlru.report.json 2
 A contexts/commons/corpus/factory/zmap.report.json 2
 A contexts/commons/corpus/factory/zmath.report.json 2
-A contexts/commons/corpus/factory/zmd5.report.json 2
 A contexts/commons/corpus/factory/zmd.report.json 3
+A contexts/commons/corpus/factory/zmd5.report.json 2
 A contexts/commons/corpus/factory/zmime.report.json 2
 A contexts/commons/corpus/factory/znetstring.report.json 2
 A contexts/commons/corpus/factory/zotp.report.json 2
@@ -237,15 +237,15 @@ B contexts/commons/corpus/factory/zhtml.report.json 2
 B contexts/commons/corpus/factory/zhuman.report.json 2
 B contexts/commons/corpus/factory/zini.report.json 2
 B contexts/commons/corpus/factory/zintern.report.json 2
-B contexts/commons/corpus/factory/zjsonp.report.json 2
 B contexts/commons/corpus/factory/zjson.report.json 2
+B contexts/commons/corpus/factory/zjsonp.report.json 2
 B contexts/commons/corpus/factory/zlev.report.json 2
 B contexts/commons/corpus/factory/zlog.report.json 2
 B contexts/commons/corpus/factory/zlru.report.json 2
 B contexts/commons/corpus/factory/zmap.report.json 2
 B contexts/commons/corpus/factory/zmath.report.json 2
-B contexts/commons/corpus/factory/zmd5.report.json 2
 B contexts/commons/corpus/factory/zmd.report.json 3
+B contexts/commons/corpus/factory/zmd5.report.json 2
 B contexts/commons/corpus/factory/zmime.report.json 2
 B contexts/commons/corpus/factory/znetstring.report.json 2
 B contexts/commons/corpus/factory/zotp.report.json 2

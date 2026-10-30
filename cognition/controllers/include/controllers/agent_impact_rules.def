@@ -1699,7 +1699,7 @@ AGENT_IMPACT_RULE("docs/node/JOIN.md|docs/README.md|docs/commons/C23_COMMONS_QUI
  * label rule in one producer while the other still refuses a path splits the
  * def format in half, and a baseline edited without re-running the gate is
  * how a shrink-only ledger silently starts growing. */
-AGENT_IMPACT_RULE("tools/corpus_census.c|tools/package_factory.c|contexts/commons/corpus/scopes.def|tools/lint/check_no_operator_paths.sh|tools/lint/operator_paths_baseline.txt", "make_lint_gates")
+AGENT_IMPACT_RULE("tools/corpus_census.c|tools/package_factory.c|contexts/commons/corpus/scopes.def|tools/lint/lintc/gate_no_operator_paths.c|tools/lint/lintc/gate_no_operator_paths_report.c|tools/lint/lintc/gate_no_operator_paths_selftest.c|tools/lint/lintc/gate_no_operator_paths_priv.h|tools/lint/operator_paths_baseline.txt", "make_lint_gates")
 
 /* LANE: deploy-docs-truth. The shipped unit and its env template both told a
  * new operator that a node without an env file "falls back to DNS seeds".

@@ -1697,9 +1697,9 @@ Z23_FLAG("ZCL_OPERATOR_ACK_FILE", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_OPERATOR_LANE", "env_runtime", "-", "-",
           "first use engine/entry/main.c:auto; documented at docs/agent/AGENT_API.md:837: ZCL_OPERATOR_LANE) and reports the lane name, runtime profile, datadir, ports,")
 Z23_FLAG("ZCL_OPERATOR_PATHS_SCAN_FILES", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_no_operator_paths.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_no_operator_paths.c:auto")
 Z23_FLAG("ZCL_OPERATOR_PATHS_TEST_IDENTITIES", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_no_operator_paths.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_no_operator_paths.c:auto")
 Z23_FLAG("ZCL_ORACLE_TIP_MARGIN", "env_runtime", "-", "-",
           "test-only override of the oracle tip safety margin so a tiny synthetic "
           "chain still exercises the periodic-tick path; production never sets it")
