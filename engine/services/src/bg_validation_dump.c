@@ -53,5 +53,8 @@ bool bg_validation_dump_state_json(struct json_value *out, const char *key)
     json_push_kv_int (out, "reverify_passes", p.reverify_passes);
     json_push_kv_int (out, "reverify_fails", p.reverify_fails);
     json_push_kv_int (out, "reverify_height", p.reverify_height);
+    /* Sampler draws skipped: no body held by design (seeded node). */
+    json_push_kv_int (out, "reverify_skipped_no_data",
+                      p.reverify_skipped_no_data);
     return true;
 }

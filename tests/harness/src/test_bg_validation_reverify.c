@@ -17,6 +17,7 @@
 #include "core/serialize.h"
 #include "jobs/reducer_frontier.h"
 #include "mining/miner.h"
+#include "platform/rng.h"
 #include "platform/time_compat.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
@@ -1074,6 +1075,178 @@ static int test_bg_validation_restart_keeps_reverify_worker(void)
     return failures;
 }
 
+/* Seeded-node fixture: heights 1 and 2 lack BLOCK_HAVE_DATA (history below the
+ * snapshot base, absent by design); height 3 is held. The rng tape draws the
+ * absent heights first, so a sampler that reads them is caught at once. */
+#define ABSENT_FIXTURE_TIP 3
+
+static _Atomic uint64_t g_tape_next;
+static _Atomic int g_read_heights_mask;
+static _Atomic int g_read_succeeds;
+static _Atomic int g_sleep_calls;
+
+static uint64_t tape_u64(void *user)
+{
+    (void)user;
+    return atomic_fetch_add(&g_tape_next, 1);
+}
+
+static bool body_read_records_height(
+    struct block *block, const struct block_index *index, const char *datadir)
+{
+    (void)block;
+    (void)datadir;
+    atomic_fetch_or(&g_read_heights_mask, 1 << index->nHeight);
+    (void)body_read_count_increment();
+    return atomic_load(&g_read_succeeds);
+}
+
+static void body_repair_count_and_stop(int ms)
+{
+    atomic_fetch_add(&g_sleep_calls, 1);
+    body_repair_stop_on_sleep(ms);
+}
+
+static bool validate_stub_passes(
+    const struct block *block, struct block_index *index, const char *datadir,
+    const struct chain_params *params, int num_workers,
+    size_t max_script_batch, int64_t *sigs_out, int64_t *proofs_out,
+    int64_t *skips_out)
+{
+    (void)block; (void)index; (void)datadir; (void)params;
+    (void)num_workers; (void)max_script_batch;
+    *sigs_out = *proofs_out = *skips_out = 0;
+    return true;
+}
+
+static bool absent_fixture_chain(struct main_state *ms, bool all_held)
+{
+    struct uint256 hash;
+    struct block_index *prev = make_repair_index(ms, &hash);
+    for (int h = 1; prev && h <= ABSENT_FIXTURE_TIP; h++) {
+        memset(&hash, 0, sizeof(hash));
+        hash.data[0] = 0x40;
+        hash.data[1] = (unsigned char)h;
+        struct block_index *index =
+            chainstate_insert_block_index((struct chainstate *)ms, &hash);
+        if (!index)
+            return false;
+        index->nHeight = h;
+        index->pprev = prev;
+        index->nStatus = BLOCK_VALID_SCRIPTS |
+            (all_held || h == ABSENT_FIXTURE_TIP ? BLOCK_HAVE_DATA : 0);
+        index->nFile = 51;
+        index->nDataPos = 8;
+        arith_uint256_set_u64(&index->nChainWork, 10 + h);
+        active_chain_move_window_tip(&ms->chain_active, index);
+        prev = index;
+    }
+    return prev != NULL;
+}
+
+/* Runs the sampler once over the fixture until the first body read, stops it,
+ * and leaves the service for the caller to inspect. */
+static bool absent_fixture_run(struct bg_validation_service *svc,
+                               struct main_state *ms, bool read_ok,
+                               bool all_held)
+{
+    main_state_init(ms);
+    if (!absent_fixture_chain(ms, all_held))
+        return false;
+    walk_svc_init(svc, ms);
+    g_restart_progress = ABSENT_FIXTURE_TIP;
+    atomic_store(&g_tape_next, 0);
+    atomic_store(&g_read_heights_mask, 0);
+    atomic_store(&g_read_succeeds, read_ok);
+    atomic_store(&g_sleep_calls, 0);
+    static struct platform_rng_source tape = { .u64 = tape_u64 };
+    platform_rng_set_source(&tape);
+    bg_validation_test_set_validate_stub(validate_stub_passes);
+    bg_validation_test_set_body_repair_stubs(body_read_records_height,
+                                             body_repair_count_and_stop);
+    bool ok = bg_validation_start(svc) && body_read_count_wait_at_least(1);
+    for (int i = 0; ok && !read_ok && i < 1000 &&
+                    atomic_load(&g_sleep_calls) == 0; i++)
+        platform_sleep_ms(10);
+    bg_validation_stop(svc);
+    platform_rng_clear_source();
+    bg_validation_test_set_validate_stub(NULL);
+    bg_validation_test_set_body_repair_stubs(NULL, NULL);
+    reducer_frontier_body_read_note_reset_for_testing();
+    g_restart_progress = 1;
+    return ok;
+}
+
+static int test_bg_validation_reverify_skips_absent_by_design(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: sampler skips heights with no body by design") {
+        struct bg_validation_service svc;
+        struct main_state ms;
+        ASSERT(absent_fixture_run(&svc, &ms, true, false));
+        ASSERT_EQ(atomic_load(&g_read_heights_mask), 1 << 3);
+        ASSERT_EQ((int)atomic_load(&svc.progress.reverify_skipped_no_data), 2);
+        ASSERT_EQ((int)atomic_load(&svc.progress.reverify_passes), 1);
+        ASSERT_EQ(atomic_load(&svc.progress.reverify_height), 3);
+        ASSERT_EQ(atomic_load(&g_sleep_calls), 0);
+        main_state_free(&ms);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_bg_validation_reverify_held_unreadable_still_repairs(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: a held but unreadable sampled body takes the repair "
+         "path") {
+        struct bg_validation_service svc;
+        struct main_state ms;
+        ASSERT(absent_fixture_run(&svc, &ms, false, false));
+        ASSERT_EQ(atomic_load(&g_read_heights_mask), 1 << 3);
+        ASSERT_EQ((int)atomic_load(&svc.progress.reverify_skipped_no_data), 2);
+        ASSERT_EQ(atomic_load(&g_sleep_calls), 1);
+        ASSERT_EQ((int)atomic_load(&svc.progress.reverify_passes), 0);
+        main_state_free(&ms);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* The history floor bounds the draw: every height 1..3 holds data, the seed
+ * floor is 2, and the tape's first draw would pick height 1 without it. */
+static int test_bg_validation_reverify_draws_above_seed_floor(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "bg_validation", "seed_floor");
+    bool store_open = false;
+
+    TEST("bg_validation: sampler never draws at or below the seed floor") {
+        ASSERT(progress_store_open(dir));
+        store_open = true;
+        progress_store_tx_lock();
+        bool declared = reducer_seed_floor_declare_if_absent(
+            progress_store_db(), 2);
+        progress_store_tx_unlock();
+        ASSERT(declared);
+        struct bg_validation_service svc;
+        struct main_state ms;
+        ASSERT(absent_fixture_run(&svc, &ms, true, true));
+        ASSERT_EQ(atomic_load(&g_read_heights_mask), 1 << 3);
+        ASSERT_EQ((int)atomic_load(&svc.progress.reverify_skipped_no_data), 0);
+        ASSERT_EQ((int)atomic_load(&svc.progress.reverify_passes), 1);
+        main_state_free(&ms);
+        PASS();
+    } _test_next:;
+    if (store_open)
+        progress_store_close();
+    test_rm_rf(dir);
+    return failures;
+}
+
 static bool body_read_always_succeeds(
     struct block *block, const struct block_index *index, const char *datadir)
 {
@@ -1430,6 +1603,9 @@ int test_bg_validation_reverify(void)
     failures += test_bg_validation_body_repair_reproves_reorg();
     failures += test_bg_validation_post_verify_reorg_is_orphan();
     failures += test_bg_validation_restart_keeps_reverify_worker();
+    failures += test_bg_validation_reverify_skips_absent_by_design();
+    failures += test_bg_validation_reverify_held_unreadable_still_repairs();
+    failures += test_bg_validation_reverify_draws_above_seed_floor();
     failures += test_bg_validation_legacy_cursor_restarts_walk();
     failures += test_bg_validation_v1_cursor_drops_skip_census();
     failures += test_bg_validation_current_cursor_keeps_census();

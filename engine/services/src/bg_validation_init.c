@@ -61,6 +61,7 @@ void bg_validation_init(struct bg_validation_service *svc,
     atomic_store(&svc->progress.blocks_per_sec, 0);
     atomic_store(&svc->progress.reverify_active, false);
     atomic_store(&svc->progress.reverify_passes, 0);
+    atomic_store(&svc->progress.reverify_skipped_no_data, 0);
     atomic_store(&svc->progress.reverify_fails, 0);
     atomic_store(&svc->progress.reverify_height, 0);
 }

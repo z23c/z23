@@ -89,6 +89,9 @@ struct bg_validation_progress {
     _Atomic int64_t reverify_passes;   /* sampled heights that re-verified OK */
     _Atomic int64_t reverify_fails;    /* sampled heights that FAILED re-verify */
     _Atomic int     reverify_height;   /* last height sampled */
+    /* Sampled draws skipped because the node holds no body there by design
+     * (snapshot-seeded history, pace-gated backfill): no read, no repair. */
+    _Atomic int64_t reverify_skipped_no_data;
 };
 
 struct bg_validation_service {

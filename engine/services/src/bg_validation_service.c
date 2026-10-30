@@ -571,6 +571,31 @@ static int bg_validation_reverify_ceiling(struct main_state *ms,
     return ceiling;
 }
 
+/* Draws a height this node is meant to hold: at or above the history floor
+ * `lo` and with BLOCK_HAVE_DATA on its active index entry. A snapshot-seeded
+ * node holds no bodies below its seed by design, so a draw that lands on one
+ * is counted and redrawn (bounded) instead of being read: reading would enter
+ * the resilient repair loop and queue a fetch for history nobody asked for.
+ * Returns false when every try missed; the caller waits one interval. */
+#define BG_REVERIFY_DRAW_TRIES 8
+static bool bg_validation_reverify_draw(struct bg_validation_service *svc,
+                                        int lo, int ceiling, int *h_out)
+{
+    for (int t = 0; t < BG_REVERIFY_DRAW_TRIES; t++) {
+        int h = lo + (int)(rng_u64() % (uint64_t)(ceiling - lo + 1));
+        zcl_mutex_lock(&svc->ms->cs_main);
+        struct block_index *index = active_chain_at(&svc->ms->chain_active, h);
+        bool held = index && (block_index_status_load(index) & BLOCK_HAVE_DATA);
+        zcl_mutex_unlock(&svc->ms->cs_main);
+        if (held) {
+            *h_out = h;
+            return true;
+        }
+        atomic_fetch_add(&svc->progress.reverify_skipped_no_data, 1);
+    }
+    return false;
+}
+
 /* Low-rate, always-on re-verification of RANDOM already-verified heights.
  * Re-runs the SAME read-only proof/script verification under the SAME
  * sched_yield/idle throttle the forward walk uses — it changes NO validity
@@ -581,16 +606,17 @@ static int bg_validation_reverify_ceiling(struct main_state *ms,
 static void bg_validation_sampled_reverify_loop(
     struct bg_validation_service *svc, int chain_height,
     const char *datadir, const struct chain_params *params, int num_workers,
-    bool external_seeded, bool published)
+    bool external_seeded, int32_t seed_floor, bool published)
 {
     struct main_state *ms = svc->ms;
     if (chain_height < 1)
         return;
 
     unsigned cycle = 1; /* the caller just tried; first retry is later */
+    int lo = external_seeded ? seed_floor + 1 : 1;
     atomic_store(&svc->progress.reverify_active, true);
-    printf("[bg-valid] entering always-on sampled re-verify loop (1..%d)\n",
-           chain_height);
+    printf("[bg-valid] entering always-on sampled re-verify loop (%d..%d)\n",
+           lo, chain_height);
     event_emitf(EV_SYNC_STATE_CHANGE, 0,
                 "bg_validation reverify start ceiling=%d", chain_height);
 
@@ -602,13 +628,13 @@ static void bg_validation_sampled_reverify_loop(
             break;
 
         int ceiling = bg_validation_reverify_ceiling(ms, chain_height);
-        if (ceiling < 1) {
+        int h = 0;
+        if (ceiling < lo || !bg_validation_reverify_draw(svc, lo, ceiling, &h)) {
             for (int i = 0; i < BG_REVERIFY_IDLE_SECS &&
                             !atomic_load(&svc->stop_requested); i++)
                 platform_sleep_ms(1000);
             continue;
         }
-        int h = 1 + (int)(rng_u64() % (uint64_t)ceiling);
 
         struct block_index *pindex = NULL;
         struct block blk;
@@ -909,7 +935,8 @@ static bool bg_validation_pause_if_incomplete(
 
 /* Finishes a walk that ran to the end (complete, or stopped early). */
 static void bg_validation_finish_run(struct bg_validation_service *svc,
-    bool external_seeded, int start_height, int chain_height, int64_t t_start,
+    bool external_seeded, int32_t seed_floor,
+    int start_height, int chain_height, int64_t t_start,
     int64_t total_sigs, int64_t total_proofs, int64_t total_skips,
     const char *datadir, const struct chain_params *params, int num_workers)
 {
@@ -951,7 +978,8 @@ static void bg_validation_finish_run(struct bg_validation_service *svc,
         bg_validation_supervisor_done();
         bg_validation_sampled_reverify_loop(svc, chain_height, datadir,
                                             params, num_workers,
-                                            external_seeded, authority.ok);
+                                            external_seeded, seed_floor,
+                                            authority.ok);
     } else {
         /* Stopped early — save where we got to */
         int verified = atomic_load(&svc->progress.verified_height);
@@ -1077,7 +1105,8 @@ static void *bg_validation_thread(void *arg)
                                           external_seeded))
         return NULL;
 
-    bg_validation_finish_run(svc, external_seeded, start_height, chain_height,
+    bg_validation_finish_run(svc, external_seeded, seed_floor,
+                             start_height, chain_height,
                              t_start, total_sigs, total_proofs, total_skips,
                              datadir, params, num_workers);
     bg_validation_supervisor_done();
@@ -1172,6 +1201,8 @@ struct bg_validation_progress bg_validation_get_progress(
     p.reverify_passes = atomic_load(&svc->progress.reverify_passes);
     p.reverify_fails = atomic_load(&svc->progress.reverify_fails);
     p.reverify_height = atomic_load(&svc->progress.reverify_height);
+    p.reverify_skipped_no_data =
+        atomic_load(&svc->progress.reverify_skipped_no_data);
     return p;
 }
 
@@ -1237,6 +1268,7 @@ void bg_validation_reset(struct bg_validation_service *svc)
     atomic_store(&svc->progress.blocks_per_sec, 0);
     atomic_store(&svc->progress.reverify_active, false);
     atomic_store(&svc->progress.reverify_passes, 0);
+    atomic_store(&svc->progress.reverify_skipped_no_data, 0);
     atomic_store(&svc->progress.reverify_fails, 0);
     atomic_store(&svc->progress.reverify_height, 0);
     atomic_store(&svc->progress.state, BG_VALIDATION_IDLE);
