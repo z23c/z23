@@ -1897,6 +1897,28 @@ static int tgs_runner_make_api_missing(const struct tgs_runner_probe *p)
     return failures;
 }
 
+/* A comma list reaching the substring selector is refused at parse time,
+ * before any build, and the refusal names the exact-set goal. */
+static int tgs_runner_make_comma_list(const struct tgs_runner_probe *p)
+{
+    int failures = 0;
+    int n = snprintf(p->command, p->command_cap,
+                     "make -n t-fast ONLY=api,zvec "
+                     "TEST_PARALLEL_ARGS= "
+                     "TEST_PARALLEL_FAST_CANDIDATE=%s "
+                     "TEST_PARALLEL_FAST_ACTIVE=%s "
+                     "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
+                     p->true_bin, p->true_bin, zcl_build_source_id_sha256(),
+                     zcl_build_source_mutation_sha256());
+    ASSERT(n > 0 && (size_t)n < p->command_cap);
+    int rc = capture_command_ends(p->command, p->head, p->head_cap, p->tail,
+                                  p->tail_cap);
+    ASSERT(rc == 2);
+    ASSERT(strstr(p->head, "ONLY=api,zvec is a list; use make t-fast-exact ONLY=api,zvec or one substring") != NULL);
+    _test_next:;
+    return failures;
+}
+
 static int test_runner_exact_selection(void)
 {
     int failures = 0;
@@ -1971,6 +1993,7 @@ static int test_runner_exact_selection(void)
         /* The refusal is a parse-time $(error): make stops before printing
          * any recipe, so this leg is small and the head alone carries it. */
         ASSERT(tgs_runner_make_api_missing(&probe) == 0);
+        ASSERT(tgs_runner_make_comma_list(&probe) == 0);
         PASS();
     } _test_next:;
     return failures;

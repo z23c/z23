@@ -4572,6 +4572,13 @@ ifneq ($(ONLY_ACTIVE_GOALS),)
     ifneq ($(findstring ',$(ONLY)),)
       $(error make $(ONLY_GOAL): ONLY= must not contain a single quote)
     endif
+    # The runner's --only= takes one substring, so a comma list has no
+    # single-run meaning here. Name the exact-set goal instead of reporting
+    # a list as an unmatched group.
+    ONLY_COMMA := ,
+    ifneq ($(findstring $(ONLY_COMMA),$(ONLY)),)
+      $(error make $(ONLY_GOAL): ONLY=$(ONLY) is a list; use make t-fast-exact ONLY=$(ONLY) or one substring)
+    endif
     ONLY_MATCHED := $(shell $(T_LIST_TOOL) --match '$(ONLY)' 2>/dev/null)
     ifeq ($(strip $(ONLY_MATCHED)),)
       ONLY_NEAR := $(shell $(T_LIST_TOOL) --suggest '$(ONLY)' 2>/dev/null | tr '\n' ' ')
