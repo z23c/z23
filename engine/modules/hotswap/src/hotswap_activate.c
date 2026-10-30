@@ -2039,6 +2039,166 @@ bool hotswap_rollback(const char *source_tu,
     return ok;
 }
 
+/* Opens the artifact read-only; returns its fd, or -1 with report->stage and
+ * report->error set. */
+static int verify_open_artifact(const char *so_path,
+                                struct hotswap_activate_report *report)
+{
+    int vsrc_fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat vst;
+    if (vsrc_fd < 0 || fstat(vsrc_fd, &vst) != 0 || !S_ISREG(vst.st_mode)) {
+        if (vsrc_fd >= 0)
+            (void)close(vsrc_fd);
+        act_copy(report->stage, sizeof(report->stage), "dlopen");
+        act_copy(report->error, sizeof(report->error),
+                 "not a regular readable module artifact");
+        return -1;
+    }
+    return vsrc_fd;
+}
+
+/* Seals the open artifact, runs the probe-and-admit gate, then SHA3-hashes the
+ * sealed image. Returns the sealed fd, or -1 with report->stage and
+ * report->error set. */
+static int verify_seal_probe_hash(int vsrc_fd,
+                                  struct hotswap_activate_report *report)
+{
+    char vseal_err[200];
+    int fd = hotswap_sealed_image_from_fd(vsrc_fd, vseal_err, sizeof(vseal_err));
+    (void)close(vsrc_fd);
+    if (fd < 0) {
+        act_copy(report->stage, sizeof(report->stage), "seal");
+        act_copy(report->error, sizeof(report->error), vseal_err);
+        return -1;
+    }
+
+    {
+        char vprobe_err[200];
+        if (!HOTSWAP_PROBE_AND_ADMIT_FD(
+                fd, ZCL_CORE_SEAL_ROOT,
+                ZCL_HOTSWAP_MODULE_ABI_V3, vprobe_err,
+                sizeof(vprobe_err))) {
+            (void)close(fd);
+            act_copy(report->stage, sizeof(report->stage), "shape");
+            act_copy(report->error, sizeof(report->error), vprobe_err);
+            return -1;
+        }
+    }
+
+    if (!hotswap_artifact_sha3_fd(fd, report->artifact_sha3_256)) {
+        (void)close(fd);
+        act_copy(report->stage, sizeof(report->stage), "dlopen");
+        act_copy(report->error, sizeof(report->error),
+                 "could not SHA3-hash the sealed module image");
+        return -1;
+    }
+    return fd;
+}
+
+/* Maps the sealed fd through its pinned descriptor path and returns the dlopen
+ * handle, or NULL with report->stage and report->error set. Closes fd on both
+ * paths. */
+static void *verify_map_sealed_image(int fd,
+                                     struct hotswap_activate_report *report)
+{
+    char vpinned[64];
+    (void)snprintf(vpinned, sizeof(vpinned), HOTSWAP_PINNED_FMT, fd);
+
+    /* RTLD_LOCAL so the candidate's symbols never join the global scope and
+     * interpose on anything the verifying process later resolves. The shared
+     * pre-map policy has proved that no artifact callback runs at load time.
+     * RTLD_LAZY defers function imports the resident node would satisfy, which is exactly
+     * what lets a build-time verifier open an artifact with no node running.
+     * Data and address-taken relocations still resolve eagerly, so a module
+     * that references a body defined in a TU outside its own island still
+     * fails here — correctly, since re-pointing such a leaf would dispatch
+     * into resident code and the swap would silently do nothing for it. */
+    void *handle = dlopen(vpinned, RTLD_LAZY | RTLD_LOCAL);
+    (void)close(fd);
+    if (!handle) {
+        const char *e = dlerror();
+        act_copy(report->stage, sizeof(report->stage), "dlopen");
+        act_copy(report->error, sizeof(report->error), e ? e : "dlopen failed");
+        return NULL;
+    }
+    return handle;
+}
+
+/* Reads the module descriptor symbol and returns it, or NULL with report->stage
+ * and report->error set. The caller owns the handle and closes it. */
+static const struct zcl_hotswap_module *verify_module_symbol(
+    void *handle, struct hotswap_activate_report *report)
+{
+    (void)dlerror();
+    const struct zcl_hotswap_module *module =
+        (const struct zcl_hotswap_module *)dlsym(handle,
+                                                 ZCL_HOTSWAP_MODULE_SYMBOL);
+    const char *sym_err = dlerror();
+    if (!module || sym_err) {
+        act_copy(report->stage, sizeof(report->stage), "symbol");
+        snprintf(report->error, sizeof(report->error),
+                 "'%s' not exported (%s)", ZCL_HOTSWAP_MODULE_SYMBOL,
+                 sym_err ? sym_err : "resolved to NULL");
+        return NULL;
+    }
+    return module;
+}
+
+/* Joins the declared leaf names into report->leaves, comma-separated. NULL names
+ * are skipped; the list stops at the first name that does not fit. */
+static void verify_join_leaf_names(const struct zcl_hotswap_module *module,
+                                   struct hotswap_activate_report *report)
+{
+    if (module->leaves) {
+        size_t used = 0;
+        for (uint32_t i = 0; i < module->leaf_count &&
+                             i < ZCL_HOTSWAP_MODULE_MAX_LEAVES; i++) {
+            const char *nm = module->leaves[i].name;
+            if (!nm)
+                continue;
+            int w = snprintf(report->leaves + used,
+                             sizeof(report->leaves) - used, "%s%s",
+                             used ? "," : "", nm);
+            if (w < 0 || (size_t)w >= sizeof(report->leaves) - used)
+                break;
+            used += (size_t)w;
+        }
+    }
+}
+
+/* Copies the module's source_tu, leaf count and leaves into the report, then
+ * the probe leaf that the loader's probe map derives for that source_tu. */
+static void verify_fill_declared_identity(
+    const struct zcl_hotswap_module *module,
+    struct hotswap_activate_report *report)
+{
+    act_copy(report->source_tu, sizeof(report->source_tu),
+             module->source_tu ? module->source_tu : "");
+    report->leaf_count = module->leaf_count;
+    verify_join_leaf_names(module, report);
+    const char *probe = hotswap_module_probe_leaf(
+        module->source_tu ? module->source_tu : "");
+    act_copy(report->probe_leaf, sizeof(report->probe_leaf),
+             probe ? probe : "");
+}
+
+/* Returns true when expect_tu is empty or matches the module's source_tu.
+ * Otherwise sets report->stage and report->error and returns false. */
+static bool verify_expect_tu_ok(const struct zcl_hotswap_module *module,
+                                const char *expect_tu,
+                                struct hotswap_activate_report *report)
+{
+    if (expect_tu && expect_tu[0] &&
+        strcmp(expect_tu, module->source_tu ? module->source_tu : "") != 0) {
+        act_copy(report->stage, sizeof(report->stage), "source_tu");
+        snprintf(report->error, sizeof(report->error),
+                 "artifact declares '%s', expected '%s'",
+                 module->source_tu ? module->source_tu : "(null)", expect_tu);
+        return false;
+    }
+    return true;
+}
+
 bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
                               struct hotswap_activate_report *report)
 {
@@ -2074,113 +2234,28 @@ bool hotswap_verify_module_so(const char *so_path, const char *expect_tu,
      * matters here as much as the resident does: it is the tool a human runs
      * to decide whether a packaged artifact is worth mounting, so it must not
      * form that opinion by running the artifact's constructors first. */
-    int vsrc_fd = open(so_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    struct stat vst;
-    if (vsrc_fd < 0 || fstat(vsrc_fd, &vst) != 0 || !S_ISREG(vst.st_mode)) {
-        if (vsrc_fd >= 0)
-            (void)close(vsrc_fd);
-        act_copy(report->stage, sizeof(report->stage), "dlopen");
-        act_copy(report->error, sizeof(report->error),
-                 "not a regular readable module artifact");
+    int vsrc_fd = verify_open_artifact(so_path, report);
+    if (vsrc_fd < 0)
         return false;
-    }
-
-    char vseal_err[200];
-    int fd = hotswap_sealed_image_from_fd(vsrc_fd, vseal_err, sizeof(vseal_err));
-    (void)close(vsrc_fd);
-    if (fd < 0) {
-        act_copy(report->stage, sizeof(report->stage), "seal");
-        act_copy(report->error, sizeof(report->error), vseal_err);
+    int fd = verify_seal_probe_hash(vsrc_fd, report);
+    if (fd < 0)
         return false;
-    }
-
-    {
-        char vprobe_err[200];
-        if (!HOTSWAP_PROBE_AND_ADMIT_FD(
-                fd, ZCL_CORE_SEAL_ROOT,
-                ZCL_HOTSWAP_MODULE_ABI_V3, vprobe_err,
-                sizeof(vprobe_err))) {
-            (void)close(fd);
-            act_copy(report->stage, sizeof(report->stage), "shape");
-            act_copy(report->error, sizeof(report->error), vprobe_err);
-            return false;
-        }
-    }
-
-    if (!hotswap_artifact_sha3_fd(fd, report->artifact_sha3_256)) {
-        (void)close(fd);
-        act_copy(report->stage, sizeof(report->stage), "dlopen");
-        act_copy(report->error, sizeof(report->error),
-                 "could not SHA3-hash the sealed module image");
+    void *handle = verify_map_sealed_image(fd, report);
+    if (!handle)
         return false;
-    }
-    char vpinned[64];
-    (void)snprintf(vpinned, sizeof(vpinned), HOTSWAP_PINNED_FMT, fd);
-
-    /* RTLD_LOCAL so the candidate's symbols never join the global scope and
-     * interpose on anything the verifying process later resolves. The shared
-     * pre-map policy has proved that no artifact callback runs at load time.
-     * RTLD_LAZY defers function imports the resident node would satisfy, which is exactly
-     * what lets a build-time verifier open an artifact with no node running.
-     * Data and address-taken relocations still resolve eagerly, so a module
-     * that references a body defined in a TU outside its own island still
-     * fails here — correctly, since re-pointing such a leaf would dispatch
-     * into resident code and the swap would silently do nothing for it. */
-    void *handle = dlopen(vpinned, RTLD_LAZY | RTLD_LOCAL);
-    (void)close(fd);
-    if (!handle) {
-        const char *e = dlerror();
-        act_copy(report->stage, sizeof(report->stage), "dlopen");
-        act_copy(report->error, sizeof(report->error), e ? e : "dlopen failed");
-        return false;
-    }
-
-    (void)dlerror();
     const struct zcl_hotswap_module *module =
-        (const struct zcl_hotswap_module *)dlsym(handle,
-                                                 ZCL_HOTSWAP_MODULE_SYMBOL);
-    const char *sym_err = dlerror();
-    if (!module || sym_err) {
-        act_copy(report->stage, sizeof(report->stage), "symbol");
-        snprintf(report->error, sizeof(report->error),
-                 "'%s' not exported (%s)", ZCL_HOTSWAP_MODULE_SYMBOL,
-                 sym_err ? sym_err : "resolved to NULL");
+        verify_module_symbol(handle, report);
+    if (!module) {
         dlclose(handle);
         return false;
     }
 
-    act_copy(report->source_tu, sizeof(report->source_tu),
-             module->source_tu ? module->source_tu : "");
-    report->leaf_count = module->leaf_count;
-    if (module->leaves) {
-        size_t used = 0;
-        for (uint32_t i = 0; i < module->leaf_count &&
-                             i < ZCL_HOTSWAP_MODULE_MAX_LEAVES; i++) {
-            const char *nm = module->leaves[i].name;
-            if (!nm)
-                continue;
-            int w = snprintf(report->leaves + used,
-                             sizeof(report->leaves) - used, "%s%s",
-                             used ? "," : "", nm);
-            if (w < 0 || (size_t)w >= sizeof(report->leaves) - used)
-                break;
-            used += (size_t)w;
-        }
-    }
-    const char *probe = hotswap_module_probe_leaf(
-        module->source_tu ? module->source_tu : "");
-    act_copy(report->probe_leaf, sizeof(report->probe_leaf),
-             probe ? probe : "");
+    verify_fill_declared_identity(module, report);
 
     /* A module cannot mislabel its allowlist row: the build recipe stamps
      * -DZCL_HOTSWAP_MODULE_SOURCE_TU, so a mismatch means the artifact and the
      * file the caller believes it built have diverged. */
-    if (expect_tu && expect_tu[0] &&
-        strcmp(expect_tu, module->source_tu ? module->source_tu : "") != 0) {
-        act_copy(report->stage, sizeof(report->stage), "source_tu");
-        snprintf(report->error, sizeof(report->error),
-                 "artifact declares '%s', expected '%s'",
-                 module->source_tu ? module->source_tu : "(null)", expect_tu);
+    if (!verify_expect_tu_ok(module, expect_tu, report)) {
         dlclose(handle);
         return false;
     }
