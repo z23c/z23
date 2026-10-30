@@ -439,7 +439,7 @@ static bool pc_ship_ready(struct pc_run *r)
 #else
     static const char *const required[] = {
         "tools/ship.sh", "tools/ship_selftest.sh",
-        "tools/lint/check_ship_remote_transaction.sh", "build/bin/jsonq",
+        "build/bin/z23-lint", "build/bin/jsonq",
         "build/bin/z23-tor-provenance", "build/bin/check_no_hardlink_seeding"
     };
     char path[4096 + 80];
@@ -463,10 +463,12 @@ static int pc_ship_run(struct pc_run *r)
 {
     static const char *const commands[] = {
         "./tools/ship.sh", "./tools/ship_selftest.sh",
-        "./tools/lint/check_ship_remote_transaction.sh"
+        "./build/bin/z23-lint"
     };
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
-        int rc = pc_run(r->wt, commands[i], i == 0 ? "--selftest" : NULL,
+        int rc = pc_run(r->wt, commands[i],
+                        i == 0 ? "--selftest"
+                               : (i == 2 ? "check-ship-remote-transaction" : NULL),
                         r->deadline, r->out, PC_OUT_CAP);
         if (rc != 0) return rc;
     }

@@ -14780,11 +14780,12 @@ check-promotion-receipt-chain: $(LINTC_TOOL)
 # and its systemd identity intent; the success case must qualify the /proc
 # executable bytes and status command before considering activation complete.
 # jsonq: ship.sh's release-candidate real-Tor gate reads candidate JSON with it.
-check-ship-remote-transaction: jsonq $(TOR_PROVENANCE_BIN) build/bin/check_no_hardlink_seeding
+check-ship-remote-transaction: $(LINTC_TOOL) jsonq $(TOR_PROVENANCE_BIN) build/bin/check_no_hardlink_seeding
 	@echo "══ LINT: remote ship transaction rollback + process qualification ══"
 	@./tools/ship.sh --selftest
 	@./tools/ship_selftest.sh
-	@./tools/lint/check_ship_remote_transaction.sh
+	@./build/bin/z23-lint check-ship-remote-transaction --selftest
+	@./build/bin/z23-lint check-ship-remote-transaction
 
 # Fail-closed Z23 release packager + installer: checksum mismatch never
 # installs, and the packager never invokes docker.

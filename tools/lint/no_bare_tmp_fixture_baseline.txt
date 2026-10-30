@@ -140,6 +140,7 @@ tools/lint/lintc/gate_projection_purity_fences.c 1
 tools/lint/lintc/gate_release_no_dev_symbols_selftest.c 1
 tools/lint/lintc/gate_route_command_parity.c 1
 tools/lint/lintc/gate_rule_vocabulary.c 1
+tools/lint/lintc/gate_ship_remote_transaction.c 1
 tools/lint/lintc/gate_systemd_memory_budget.c 1
 tools/lint/lintc/gate_tor_full_default.c 1
 tools/lint/lintc/gate_tree_walk_selftests.c 2

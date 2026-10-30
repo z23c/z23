@@ -2108,7 +2108,7 @@ AGENT_IMPACT_RULE("tests/harness/src/test_sprout_phgr13_kat.c", "sprout_phgr13_k
  * tree where a wrong verdict is remote, destructive and fleet-wide, and a
  * library edit with no harness run is exactly how a duration verdict comes
  * back in. tools/ship.sh had no selftest of any kind before this lane. */
-AGENT_IMPACT_RULE("tools/ship.sh|tools/ship_selftest.sh|tools/scripts/ship_progress_lib.sh|tools/lint/check_ship_remote_transaction.sh", "make_lint_gates")
+AGENT_IMPACT_RULE("tools/ship.sh|tools/ship_selftest.sh|tools/scripts/ship_progress_lib.sh|tools/lint/lintc/gate_ship_remote_transaction.c|tools/lint/lintc/gate_ship_remote_transaction_priv.h|tools/lint/lintc/gate_ship_remote_transaction_phases.c|tools/lint/lintc/gate_ship_remote_transaction_selftest.c|tools/lint/lintc/gate_ship_remote_transaction_util.c", "make_lint_gates")
 
 /* Native macOS compatibility surfaces used to share one catch-all group list
  * (dev_platform os_proc os_sandbox self_backtrace thread_qos hw_profile

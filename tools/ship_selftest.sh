@@ -1013,7 +1013,7 @@ fi
 
 # ── 7. the shipped script text ──────────────────────────────────────────────
 # ship.sh's two remote scripts are extracted the same way
-# tools/lint/check_ship_remote_transaction.sh extracts them, and must still
+# the check-ship-remote-transaction gate extracts them, and must still
 # parse once the library is prepended — that concatenation IS the wire format.
 printf '\nship-selftest: 7. the wire format\n'
 awk '

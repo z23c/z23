@@ -1019,13 +1019,23 @@ static bool dlx_pc_ship_files(const struct dlx_rig *rig, bool ready)
     static const char script[] = "#!/bin/sh\n"
         "echo \"ship-adapter:$0 $*\" >> build/precheck-ran\n"
         "if [ -f build/ship-exit ]; then exit \"$(cat build/ship-exit)\"; fi\nexit 0\n";
-    const char *scripts[] = {"tools/ship.sh", "tools/ship_selftest.sh",
-                             "tools/lint/check_ship_remote_transaction.sh"};
+    /* The remote-transaction gate is native: the fixture's z23-lint answers
+     * --list and logs the gate like DLX_PC_SCRIPT, and for the ship gate it
+     * logs a ship-adapter line and exits by build/ship-exit. */
+    static const char lint_stub[] = "#!/bin/sh\n"
+        "if [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\n"
+        "if [ \"$1\" = check-ship-remote-transaction ]; then\n"
+        "  echo \"ship-adapter:$0 $*\" >> build/precheck-ran\n"
+        "  if [ -f build/ship-exit ]; then exit \"$(cat build/ship-exit)\"; fi\n"
+        "  exit 0\nfi\n"
+        "echo \"$1\" >> build/precheck-ran\nexit 0\n";
+    const char *scripts[] = {"tools/ship.sh", "tools/ship_selftest.sh"};
     const char *tools[] = {"build/bin/z23-tor-provenance", "build/bin/check_no_hardlink_seeding"};
     for (size_t i = 0; i < sizeof(scripts) / sizeof(scripts[0]); i++)
         if (!dlx_pc_owned_file(rig->clone, scripts[i], script, 0755)) return false;
     for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++)
         if (!dlx_pc_owned_file(rig->clone, tools[i], "#!/bin/sh\nexit 0\n", 0755)) return false;
+    if (!dlx_pc_owned_file(rig->clone, "build/bin/z23-lint", lint_stub, 0755)) return false;
     if (ready && !dlx_pc_owned_file(rig->clone, "build/bin/jsonq", "#!/bin/sh\nexit 0\n", 0755))
         return false;
     return dlx_pc_owned_file(rig->clone, "tools/scripts/ship_progress_lib.sh", "# isolated fixture\n", 0600);

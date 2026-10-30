@@ -150,7 +150,7 @@ gate_command() {
         check-blocker-escape-registered)   echo './build/bin/z23-lint check-blocker-escape-registered --selftest && ./build/bin/z23-lint check-blocker-escape-registered' ;;
         check-blocker-remedy)              echo './build/bin/z23-lint check-blocker-remedy' ;;
         check-blocker-handoff-declared)    echo './build/bin/z23-lint check-blocker-handoff-declared --selftest && ./build/bin/z23-lint check-blocker-handoff-declared' ;;
-        check-ship-remote-transaction)     echo './tools/ship.sh --selftest && ./tools/ship_selftest.sh && ./tools/lint/check_ship_remote_transaction.sh' ;;
+        check-ship-remote-transaction)     echo './tools/ship.sh --selftest && ./tools/ship_selftest.sh && ./build/bin/z23-lint check-ship-remote-transaction --selftest && ./build/bin/z23-lint check-ship-remote-transaction' ;;
         check-z23-release-install)         echo 'make --no-print-directory -s z23-bootstrap install-selftest && "$ZCL_LINT_BIN_DIR/install_selftest" --selftest && bash platform/packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest && bash tools/scripts/deploy_z23_release.sh --selftest' ;;
         check-published-platforms)         echo 'build/bin/z23-lint check-published-platforms --selftest && build/bin/z23-lint check-published-platforms' ;;
         check-shell-host-assumptions)      echo './build/bin/z23-lint check-shell-host-assumptions --selftest && ./tools/scripts/port_probe.sh --selftest && ./tools/scripts/commons_fix_admit.sh --selftest && ./tools/scripts/isolated_node_env_selftest.sh && ./tools/scripts/service_args_selftest.sh && bash tools/scripts/two_node_peer_tip_selftest.sh && ./build/bin/z23-lint check-shell-host-assumptions' ;;
