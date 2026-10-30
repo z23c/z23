@@ -8968,6 +8968,7 @@ static int test_fleet_board_roster_relay(void)
 #define FBD_ONION_A "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion"
 #define FBD_ONION_B "bcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxa.onion"
 #define FBD_ONION_C "cdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxab.onion"
+#define FBD_ONION_D "defghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxabc.onion"
 #define FBD_NOW INT64_C(2500)
 
 static struct {
@@ -9004,18 +9005,24 @@ static bool fbd_verify_cb(const char *line, const uint8_t root[32],
     return true;
 }
 
+/* The onion a stub line claims by its first character; a second character
+ * of - makes the same box claim none (the pre-onion row of a machine). */
 static bool fbd_endpoint_cb(const char *line, const uint8_t root[32],
                             char *onion, size_t cap, bool *self, void *ctx)
 {
+    const char *claim = NULL;
     (void)root; (void)ctx;
     *self = line[0] == g_fbd_self;
     switch (line[0]) {
-    case 'A': (void)snprintf(onion, cap, "%s", FBD_ONION_A); return true;
-    case 'B': (void)snprintf(onion, cap, "%s", FBD_ONION_B); return true;
-    case 'C': (void)snprintf(onion, cap, "%s", FBD_ONION_C); return true;
-    case 'E': onion[0] = '\0'; return true;
+    case 'A': claim = FBD_ONION_A; break;
+    case 'B': claim = FBD_ONION_B; break;
+    case 'C': claim = FBD_ONION_C; break;
+    case 'D': claim = FBD_ONION_D; break;
+    case 'E': claim = ""; break;
     default: return false;
     }
+    (void)snprintf(onion, cap, "%s", line[1] == '-' ? "" : claim);
+    return true;
 }
 
 static bool fbd_each_cb(void (*visit)(const char *line, void *user),
@@ -9118,6 +9125,89 @@ static int test_fleet_board_roster_dial_board(void)
     return failures;
 }
 
+static const struct zcl_fleet_roster_provider g_fbd_board_provider = {
+    .root = fbr_root_cb, .verify = fbd_verify_cb, .head = fbr_head_cb,
+    .each_line = NULL, .endpoint = fbd_endpoint_cb, .ctx = NULL,
+    .name = "fleet-dial-guard-test" };
+
+/* A board-only roster of `rows` (each stored as a fleet-scope note), this
+ * box being no listed member, with the given box or signing key revoked. */
+static bool fbd_guard_open(struct node_db *db, const char *const *rows,
+                           size_t n, uint8_t revoked_box, uint8_t revoked_signer)
+{
+    memset(db, 0, sizeof *db);
+    if (!node_db_open(db, ":memory:"))
+        return false;
+    fbr_install(FBR_ROOT, false);
+    zcl_fleet_roster_provider_install(&g_fbd_board_provider);
+    g_fbd_self = 'Z';
+    g_fbr.head.state = ZCL_FLEET_HEAD_OK;
+    g_fbr.head.count = revoked_box || revoked_signer;
+    memset(g_fbr.head.revoked, 0, sizeof g_fbr.head.revoked);
+    g_fbr.head.revoked[0][0] = revoked_box ? revoked_box : revoked_signer;
+    memset(&g_fbd, 0, sizeof g_fbd);
+    for (size_t i = 0; i < n; i++)
+        if (!fbr_store_row(db, 1, rows[i], 2400, 3600))
+            return false;
+    return true;
+}
+
+static void fbd_guard_close(struct node_db *db)
+{
+    g_fbd_self = 'B';
+    fbr_uninstall();
+    node_db_close(db);
+}
+
+static int test_fleet_board_roster_dial_guards(void)
+{
+    int failures = 0;
+    struct node_db db;
+    TEST("fleet roster dial: a board row that fails root verification is "
+         "never dialled") {
+        const char *rows[] = { "A", "D" }; /* the stub refuses D */
+        ASSERT(fbd_guard_open(&db, rows, 2, 0, 0));
+        ASSERT_EQ(boot_fleet_roster_dial(&db, FBD_NOW, fbd_dial), 1);
+        ASSERT(fbd_has(FBD_ONION_A));
+        ASSERT(!fbd_has(FBD_ONION_D));
+        fbd_guard_close(&db);
+        PASS();
+    }
+    TEST("fleet roster dial: a board row whose box key is revoked is never "
+         "dialled") {
+        const char *rows[] = { "A", "C" };
+        ASSERT(fbd_guard_open(&db, rows, 2, 'C', 0)); /* box[0] = line[0] */
+        ASSERT_EQ(boot_fleet_roster_dial(&db, FBD_NOW, fbd_dial), 1);
+        ASSERT(fbd_has(FBD_ONION_A));
+        ASSERT(!fbd_has(FBD_ONION_C));
+        fbd_guard_close(&db);
+        PASS();
+    }
+    TEST("fleet roster dial: a board row whose signing key is revoked is "
+         "never dialled") {
+        const char *rows[] = { "A", "C" };
+        ASSERT(fbd_guard_open(&db, rows, 2, 0, 0x80 | 'C')); /* signer[0] */
+        ASSERT_EQ(boot_fleet_roster_dial(&db, FBD_NOW, fbd_dial), 1);
+        ASSERT(fbd_has(FBD_ONION_A));
+        ASSERT(!fbd_has(FBD_ONION_C));
+        fbd_guard_close(&db);
+        PASS();
+    }
+    TEST("fleet roster dial: a machine re-admitted with an onion beside its "
+         "old empty-onion row is dialled once and the empty row adds nothing") {
+        const char *rows[] = { "A-", "A" }; /* same box key, two rows */
+        ASSERT(fbd_guard_open(&db, rows, 2, 0, 0));
+        ASSERT_EQ(boot_fleet_roster_dial(&db, FBD_NOW, fbd_dial), 1);
+        ASSERT_EQ(g_fbd.n, 1);
+        ASSERT_STR_EQ(g_fbd.host[0], FBD_ONION_A);
+        fbd_guard_close(&db);
+        PASS();
+    }
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
 int test_fleet_board(void)
 {
     int failures = 0;
@@ -9182,6 +9272,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_roster_relay();
     failures += test_fleet_board_roster_dial();
     failures += test_fleet_board_roster_dial_board();
+    failures += test_fleet_board_roster_dial_guards();
     failures += test_fleet_board_public_no_grant_needed();
     /* Leave the process as this group found it: the next group in the same
      * binary must not inherit an open gate. */
