@@ -647,12 +647,42 @@ static void read_usage(const struct json_value *root, struct engine_usage *u)
     }
 }
 
+/* Shape tests for read_text's refusals: the caller keeps each LOG_FAIL and
+ * its order, so only the predicate lives here. */
+static bool reply_is_type(const struct json_value *v, enum json_type t)
+{
+    return v && v->type == t;
+}
+
+static const char *reply_finish_reason_text(const struct json_value *choice)
+{
+    const struct json_value *fr = json_get(choice, "finish_reason");
+    return (fr && fr->type == JSON_STR) ? json_get_str(fr) : NULL;
+}
+
+/* A reasoning model's thought sits in reasoning_content (Z.ai), else in
+ * reasoning. */
+static const struct json_value *
+reply_reasoning_field(const struct json_value *msg)
+{
+    const struct json_value *rc = json_get(msg, "reasoning_content");
+    if (!rc)
+        rc = json_get(msg, "reasoning");
+    return rc;
+}
+
+static bool reply_reasoning_present(const struct json_value *rc)
+{
+    return rc && rc->type == JSON_STR && json_get_str(rc) &&
+           json_get_str(rc)[0];
+}
+
 /* Pull choices[0].message.content out of an already-parsed root. Every step
  * is a refusal point; none of them tolerates a wrong type. */
 static bool read_text(const struct json_value *root, struct engine_reply *out)
 {
     const struct json_value *choices = json_get(root, "choices");
-    if (!choices || choices->type != JSON_ARR)
+    if (!reply_is_type(choices, JSON_ARR))
         LOG_FAIL("engine", "refusing a response with no `choices` array");
     if (json_size(choices) == 0)
         LOG_FAIL("engine", "refusing a response with zero choices");
@@ -661,15 +691,15 @@ static bool read_text(const struct json_value *root, struct engine_reply *out)
                  json_size(choices));
 
     const struct json_value *choice = json_at(choices, 0);
-    if (!choice || choice->type != JSON_OBJ)
+    if (!reply_is_type(choice, JSON_OBJ))
         LOG_FAIL("engine", "refusing a choice that is not an object");
 
     const struct json_value *msg = json_get(choice, "message");
-    if (!msg || msg->type != JSON_OBJ)
+    if (!reply_is_type(msg, JSON_OBJ))
         LOG_FAIL("engine", "refusing a choice with no `message` object");
 
     const struct json_value *content = json_get(msg, "content");
-    if (!content || content->type != JSON_STR)
+    if (!reply_is_type(content, JSON_STR))
         LOG_FAIL("engine", "refusing a message whose `content` is not a string");
 
     const char *text = json_get_str(content);
@@ -687,13 +717,9 @@ static bool read_text(const struct json_value *root, struct engine_reply *out)
          * empty message points an operator at the vendor when the answer is
          * the token budget, so it is named. It is still a refusal — there is
          * no answer to act on — but a refusal with the repair in it. */
-        const struct json_value *fr = json_get(choice, "finish_reason");
-        const char *fs = (fr && fr->type == JSON_STR) ? json_get_str(fr) : NULL;
-        const struct json_value *rc = json_get(msg, "reasoning_content");
-        if (!rc)
-            rc = json_get(msg, "reasoning");
-        if (rc && rc->type == JSON_STR && json_get_str(rc)
-            && json_get_str(rc)[0])
+        const char *fs = reply_finish_reason_text(choice);
+        const struct json_value *rc = reply_reasoning_field(msg);
+        if (reply_reasoning_present(rc))
             LOG_FAIL("engine",
                      "refusing an empty assistant message: this model wrote "
                      "%zu bytes of reasoning and no answer (finish_reason=%s) "

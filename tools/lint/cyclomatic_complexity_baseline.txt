@@ -245,7 +245,6 @@ engine/jobs/src/utxo_apply_delta_repair.c:utxo_apply_repair_value_overflow_hole:
 engine/jobs/src/validate_headers_stage.c:recheck_failed_rows:26
 engine/models/src/database_migrate_features.c:node_db_migrate_features:31
 engine/models/src/database_migrate_features_v67_up.c:node_db_migrate_features_v67_up:51
-engine/modules/engine/src/engine_wire_response.c:read_text:24
 engine/modules/hotswap/src/hotswap_activate.c:hotswap_verify_module_so:33
 engine/modules/storage/src/block_index_db.c:disk_block_index_deserialize:32
 engine/modules/storage/src/block_index_db.c:disk_block_index_serialize:29
