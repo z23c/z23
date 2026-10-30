@@ -253,16 +253,36 @@ static void mind_retire_checkouts(const struct zcl_mind_heartbeat *beat,
     }
 }
 
+/* The two refusals a mind cannot start past. The serve entry logs each one. */
+enum mind_preflight {
+    MIND_PREFLIGHT_OK,
+    MIND_PREFLIGHT_NO_STATE_DIR,
+    MIND_PREFLIGHT_NO_CHECKOUT,
+};
+
+static enum mind_preflight mind_serve_preflight(char *lock_path,
+                                                size_t lock_cap,
+                                                struct zcl_mind_registry *reg)
+{
+    if (!zcl_mind_lock_path(lock_path, lock_cap))
+        return MIND_PREFLIGHT_NO_STATE_DIR;
+    if (!zcl_mind_registry_load(reg) || reg->count == 0)
+        return MIND_PREFLIGHT_NO_CHECKOUT;
+    return MIND_PREFLIGHT_OK;
+}
+
 static int mind_serve_posix(zcl_mind_stop_predicate stop, void *stop_opaque,
                             long long max_cycles)
 {
     char lock_path[ZCL_MIND_PATH_MAX];
     struct zcl_mind_registry reg;
-    if (!zcl_mind_lock_path(lock_path, sizeof(lock_path))) {
+    enum mind_preflight pre =
+        mind_serve_preflight(lock_path, sizeof(lock_path), &reg);
+    if (pre == MIND_PREFLIGHT_NO_STATE_DIR) {
         LOG_ERROR("mind", "serve: cannot resolve the mind state directory");
         return 1;
     }
-    if (!zcl_mind_registry_load(&reg) || reg.count == 0) {
+    if (pre == MIND_PREFLIGHT_NO_CHECKOUT) {
         /* A mind with no registered checkout owns nothing. Starting anyway
          * would publish a heartbeat that claims a node is covered when no
          * index on it has an owner. */
