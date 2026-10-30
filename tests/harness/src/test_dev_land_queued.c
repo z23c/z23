@@ -1265,6 +1265,20 @@ static void dlx_plan_call(struct dlx_call *c, const struct dlx_rig *rig,
     zcl_native_handle_dev_land_submit(&c->request, &c->reply);
 }
 
+/* Nothing queued. A plan or a refusal writes no land state, so until the
+ * first confirmed submit the isolated land directory does not exist, and
+ * dev.land.status (which reads only an existing state root) refuses with
+ * STATE_DIR_FAILED. A missing land directory holds no queue row; once it
+ * exists, status must report an empty queue. */
+static bool dlx_nothing_queued(void)
+{
+    char dir[1100];
+    dlx_landdir(dir, sizeof(dir));
+    if (access(dir, F_OK) != 0)
+        return errno == ENOENT;
+    return dlx_queue_empty();
+}
+
 /* One call that must refuse with `code` and queue nothing. */
 static bool dlx_plan_refused(const struct dlx_rig *rig, const char *plan_id,
                              bool confirm, const char *note, const char *code)
@@ -1272,7 +1286,7 @@ static bool dlx_plan_refused(const struct dlx_rig *rig, const char *plan_id,
     struct dlx_call c;
     dlx_plan_call(&c, rig, true, plan_id, confirm, note);
     bool ok = !dlx_ok(&c) && strcmp(dlx_err_code(&c), code) == 0 &&
-              dlx_queue_empty();
+              dlx_nothing_queued();
     dlx_end(&c);
     return ok;
 }
@@ -1296,7 +1310,7 @@ int test_dev_land_submit_plan_flow(void)
         ASSERT(!json_get_bool(json_get(&c.reply.data, "mutated")));
         (void)snprintf(plan, sizeof(plan), "%s", dlx_str(&c, "plan_id"));
         dlx_end(&c);
-        ASSERT(dlx_queue_empty());
+        ASSERT(dlx_nothing_queued());
         ASSERT(dlx_plan_refused(&rig, NULL, true, NULL, "PLAN_MISMATCH"));
         ASSERT(dlx_plan_refused(&rig, plan, false, NULL, "CONFIRM_REQUIRED"));
         ASSERT(dlx_plan_refused(&rig, plan, true, "changed", "PLAN_MISMATCH"));
@@ -1306,7 +1320,7 @@ int test_dev_land_submit_plan_flow(void)
         ASSERT(dlx_ok(&c));
         (void)snprintf(plan, sizeof(plan), "%s", dlx_str(&c, "plan_id"));
         dlx_end(&c);
-        ASSERT(dlx_queue_empty());
+        ASSERT(dlx_nothing_queued());
         dlx_plan_call(&c, &rig, true, plan, true, NULL);
         ASSERT(dlx_ok(&c));
         ASSERT_EQ(dlx_int(&c, "seq"), 1);
