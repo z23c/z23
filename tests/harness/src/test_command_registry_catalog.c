@@ -12,6 +12,7 @@
 #include "config/command_handler_index.h"
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
+#include "command/native_code_brief.h"
 #include "json/json.h"
 #include "controllers/agent_impact_rules.h"
 #include "controllers/diagnostics_internal.h"
@@ -859,6 +860,89 @@ static int test_code_guide_brief_edges(void)
                           sizeof(why)));
         zcl_command_reply_free(&reply);
         test_rm_rf_recursive(root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+enum { POOL_FIXTURE_FAILED = -1, POOL_REFUSED = 0, POOL_ACCEPTED = 1 };
+
+/* Build the entry first, so a fixture allocation failure is its own result,
+ * then arm `fault` (if any) so it lands on the pool's copy and nowhere else. */
+static int pool_offer_entry(struct json_value *pool, size_t max, const char *slug,
+                            const char *updated, const char *fault)
+{
+    struct json_value e;
+    int result;
+    json_init(&e);
+    json_set_object(&e);
+    if (!json_push_kv_str(&e, "slug", slug) ||
+        !json_push_kv_str(&e, "updated", updated)) {
+        json_free(&e);
+        return POOL_FIXTURE_FAILED;
+    }
+    if (fault)
+        zcl_alloc_fault_fail_next(fault);
+    result = zcl_code_brief_pool_offer(pool, max, &e) ? POOL_ACCEPTED : POOL_REFUSED;
+    zcl_alloc_fault_clear();
+    json_free(&e);
+    return result;
+}
+
+static bool pool_has_slug(const struct json_value *pool, const char *slug)
+{
+    for (size_t i = 0; i < json_size(pool); i++)
+        if (strcmp(json_get_str(json_get(json_at(pool, i), "slug")), slug) == 0)
+            return true;
+    return false;
+}
+
+static int test_code_guide_pool_keeps_newest(void)
+{
+    int failures = 0;
+    struct json_value pool;
+    TEST("code.guide lesson pool keeps the newest entries when it is full") {
+        json_init(&pool);
+        json_set_array(&pool);
+        ASSERT_EQ(pool_offer_entry(&pool, 3, "a-old", "2026-01-01T00:00:00Z", NULL), POOL_ACCEPTED);
+        ASSERT_EQ(pool_offer_entry(&pool, 3, "b-mid", "2026-02-01T00:00:00Z", NULL), POOL_ACCEPTED);
+        ASSERT_EQ(pool_offer_entry(&pool, 3, "c-mid", "2026-03-01T00:00:00Z", NULL), POOL_ACCEPTED);
+        ASSERT_EQ(pool_offer_entry(&pool, 3, "d-new", "2026-09-01T00:00:00Z", NULL), POOL_ACCEPTED);
+        ASSERT_EQ(pool_offer_entry(&pool, 3, "e-ancient", "2025-01-01T00:00:00Z", NULL), POOL_ACCEPTED);
+        ASSERT_EQ(pool_offer_entry(&pool, 3, "f-newest", "2026-10-01T00:00:00Z", NULL), POOL_ACCEPTED);
+        ASSERT_EQ(json_size(&pool), 3u);
+        ASSERT(pool_has_slug(&pool, "d-new"));
+        ASSERT(pool_has_slug(&pool, "f-newest"));
+        ASSERT(pool_has_slug(&pool, "c-mid"));
+        ASSERT(!pool_has_slug(&pool, "a-old"));
+        ASSERT(!pool_has_slug(&pool, "b-mid"));
+        ASSERT(!pool_has_slug(&pool, "e-ancient"));
+        /* A repeat of the newest lesson from another search takes no slot. */
+        ASSERT_EQ(pool_offer_entry(&pool, 3, "f-newest", "2026-10-01T00:00:00Z", NULL), POOL_ACCEPTED);
+        ASSERT_EQ(json_size(&pool), 3u);
+        ASSERT(pool_has_slug(&pool, "c-mid"));
+        json_free(&pool);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_guide_pool_offer_edges(void)
+{
+    int failures = 0;
+    struct json_value pool;
+    TEST("code.guide lesson pool reports a lost entry and keeps nothing at max 0") {
+        json_init(&pool);
+        json_set_array(&pool);
+        ASSERT_EQ(pool_offer_entry(&pool, 0, "z-none", "2026-01-01T00:00:00Z", NULL), POOL_ACCEPTED);
+        ASSERT_EQ(json_size(&pool), 0u);
+        ASSERT_EQ(pool_offer_entry(&pool, 2, "a-lost", "2026-01-01T00:00:00Z", "json_copy_key"), POOL_REFUSED);
+        ASSERT_EQ(json_size(&pool), 0u);
+        ASSERT_EQ(pool_offer_entry(&pool, 1, "b-held", "2026-01-01T00:00:00Z", NULL), POOL_ACCEPTED);
+        ASSERT_EQ(pool_offer_entry(&pool, 1, "c-lost", "2026-09-01T00:00:00Z", "json_copy_key"), POOL_REFUSED);
+        ASSERT_EQ(json_size(&pool), 1u);
+        ASSERT(pool_has_slug(&pool, "b-held"));
+        json_free(&pool);
         PASS();
     } _test_next:;
     return failures;
@@ -7059,6 +7143,8 @@ int test_command_registry_catalog(void)
     failures += test_code_guide_lint_catalog();
     failures += test_code_guide_lint_catalog_exclusions();
     failures += test_code_guide_brief_edges();
+    failures += test_code_guide_pool_keeps_newest();
+    failures += test_code_guide_pool_offer_edges();
     failures += test_root_menu_budget();
     failures += test_branch_menus_shallow();
     failures += test_search_bounded();

@@ -74,6 +74,7 @@ struct cb_brief {
     size_t nnext;
     bool cut_lessons, cut_tests, cut_rules, cut_owners, cut_next;
     bool lessons_capped;
+    bool lesson_lost; /* a pooled lesson could not be copied: the query fails */
     int64_t deadline_ms;
     const char *root;
 };
@@ -522,6 +523,52 @@ static void cb_wiki_run(const struct zcl_command_request *request,
     json_free(&input);
 }
 
+/* Newer first by the ISO-8601 `updated` string, ties by slug. */
+static bool cb_pool_before(const struct json_value *a,
+                           const struct json_value *c)
+{
+    int cmp = strcmp(json_get_str(json_get(a, "updated")),
+                     json_get_str(json_get(c, "updated")));
+    if (cmp != 0)
+        return cmp > 0;
+    return strcmp(json_get_str(json_get(a, "slug")),
+                  json_get_str(json_get(c, "slug"))) < 0;
+}
+
+/* Offer one entry to the ranking pool, bounded at `max`. A full pool keeps
+ * the newest `max` entries seen: the entry replaces the pool's oldest one
+ * when it ranks before it, else it is the one dropped. An entry whose slug
+ * is already pooled is a repeat from another search and takes no slot, so
+ * repeats never push out distinct lessons. A pool that keeps nothing (max 0)
+ * drops every entry. False when the entry should have been kept but could
+ * not be copied. */
+bool zcl_code_brief_pool_offer(struct json_value *pool, size_t max,
+                               const struct json_value *entry)
+{
+    size_t n = json_size(pool);
+    size_t oldest = 0;
+    const char *slug = json_get_str(json_get(entry, "slug"));
+    struct json_value copy;
+    if (max == 0)
+        return true;
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(json_get_str(json_get(json_at(pool, i), "slug")), slug) == 0)
+            return true;
+        if (cb_pool_before(json_at(pool, oldest), json_at(pool, i)))
+            oldest = i;
+    }
+    if (n < max)
+        return json_push_back(pool, entry);
+    if (!cb_pool_before(entry, json_at(pool, oldest)))
+        return true;
+    json_init(&copy);
+    if (!json_copy_checked(&copy, entry))
+        return false;
+    json_free(&pool->children[oldest]);
+    pool->children[oldest] = copy;
+    return true;
+}
+
 /* One page of one search. With a pool the entries are collected for
  * ranking, else taken in the order the wiki gave them; *next is the
  * after_slug to resume from, empty when the wiki has no more. False when it
@@ -542,8 +589,12 @@ static bool cb_wiki_find(const struct zcl_command_request *request,
     for (size_t i = 0; entries && i < json_size(entries); i++) {
         if (!pool)
             cb_take_lesson(b, json_at(entries, i));
-        else if (json_size(pool) < CB_POOL_MAX)
-            (void)json_push_back(pool, json_at(entries, i));
+        else if (!zcl_code_brief_pool_offer(pool, CB_POOL_MAX,
+                                            json_at(entries, i))) {
+            b->lesson_lost = true; /* the query is not answered */
+            ok = false;
+            break;
+        }
     }
     more = json_get_str(json_get(&reply.data, "after_slug"));
     next[0] = '\0';
@@ -567,7 +618,8 @@ static bool cb_wiki_find(const struct zcl_command_request *request,
 
 /* A directory query matches broadly: read up to CB_DIR_PAGES pages (while
  * the wiki says more and the deadline allows) into the pool. A page that
- * fails after the first still leaves the query answered. */
+ * fails after the first still leaves the query answered, unless a lesson
+ * could not be kept: a partial pool would rank the wrong lessons first. */
 static bool cb_wiki_dir(const struct zcl_command_request *request,
                         struct cb_brief *b, const char *q,
                         struct json_value *pool)
@@ -576,24 +628,12 @@ static bool cb_wiki_dir(const struct zcl_command_request *request,
     char next[CB_TOPIC_MAX + 1];
     for (int page = 0; page < CB_DIR_PAGES; page++) {
         if (!cb_wiki_find(request, b, q, after, pool, next))
-            return page > 0;
+            return page > 0 && !b->lesson_lost;
         if (!next[0] || platform_time_monotonic_ms() >= b->deadline_ms)
             break;
         memcpy(after, next, strlen(next) + 1);
     }
     return true;
-}
-
-/* Newer first by the ISO-8601 `updated` string, ties by slug. */
-static bool cb_pool_before(const struct json_value *a,
-                           const struct json_value *c)
-{
-    int cmp = strcmp(json_get_str(json_get(a, "updated")),
-                     json_get_str(json_get(c, "updated")));
-    if (cmp != 0)
-        return cmp > 0;
-    return strcmp(json_get_str(json_get(a, "slug")),
-                  json_get_str(json_get(c, "slug"))) < 0;
 }
 
 /* Take every pooled entry best first; the slots fill in that order and the
@@ -637,7 +677,7 @@ static void cb_collect_lessons(const struct zcl_command_request *request,
     }
     cb_take_pool(b, &pool);
     json_free(&pool);
-    if (answered > 0)
+    if (answered > 0 && !b->lesson_lost)
         b->unavailable[0] = '\0';
 }
 
