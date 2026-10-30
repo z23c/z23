@@ -64,14 +64,6 @@ struct snapsync_finalize_ctx {
 void snapsync_service_lock_internal(void);
 void snapsync_service_unlock_internal(void);
 
-/* ── State accessor (defined in snapshot_sync_service.c) ───────── */
-/* Reads svc->state under the service lock. State only: it never touches the
- * staging table, so a periodic condition poll can decide on the state before
- * any staged-row count is read. Deliberately NOT the global snapsync_get_state()
- * in core/, which can diverge from svc->state. */
-enum snapshot_sync_state snapsync_get_state_internal(
-    const struct snapshot_sync_service *svc);
-
 /* ── Misc shared helpers (defined in snapshot_sync_service.c) ──── */
 int64_t snapsync_now_us_internal(void);
 bool snapsync_run_write_internal(struct snapshot_sync_service *svc,

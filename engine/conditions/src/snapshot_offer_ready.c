@@ -7,7 +7,7 @@
 #include "config/runtime.h"
 #include "event/event.h"
 #include "net/snapshot_sync_contract.h"
-#include "../../services/src/snapshot_sync_internal.h"
+#include "services/snapshot_sync_state.h"
 #include "services/sync_monitor.h"
 #include "sync/sync_state.h"
 #include "validation/chainstate.h"
@@ -94,7 +94,7 @@ static bool detect_snapshot_offer_ready(void)
         return false;
 
     /* State first: the staged-row count is read only for an active offer. */
-    if (!snapshot_offer_is_active(snapsync_get_state_internal(svc)))
+    if (!snapshot_offer_is_active(snapsync_get_service_state(svc)))
         return false; // raw-return-ok:snapsync-offer-not-active-is-normal-steady-state
     snapshot_offer_read_status(svc, &status);
     if (!snapshot_offer_is_active(status.state) ||
@@ -128,7 +128,7 @@ static bool snapshot_offer_currently_active(void)
     if (!svc)
         return false;
     /* State only: this runs on every witness poll and must not count rows. */
-    return snapshot_offer_is_active(snapsync_get_state_internal(svc));
+    return snapshot_offer_is_active(snapsync_get_service_state(svc));
 }
 
 static enum condition_remedy_result remedy_snapshot_offer_ready(void)
@@ -203,7 +203,7 @@ static bool witness_snapshot_offer_ready(int64_t target_at_detect)
         return false;
 
     /* State first: the staged-row count is read only for an active offer. */
-    enum snapshot_sync_state state = snapsync_get_state_internal(svc);
+    enum snapshot_sync_state state = snapsync_get_service_state(svc);
     if (!snapshot_offer_is_active(state)) {
         LOG_WARN("condition",
                  "[condition:snapshot_offer_ready] witness: snapsync offer "

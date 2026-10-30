@@ -2193,9 +2193,26 @@ static int test_failed_status_counts_staging_only_when_failed(void)
 void register_snapshot_complete_resume(void);
 void snapshot_complete_resume_test_reset(void);
 
+/* One condition tick with a fresh registry. Returns the staging COUNT
+ * statements the tick issued. */
+static int staging_hits_for_condition_tick(struct node_db *ndb)
+{
+    condition_engine_reset_for_testing();
+    snapshot_offer_ready_test_reset();
+    snapshot_complete_resume_test_reset();
+    register_snapshot_offer_ready();
+    register_snapshot_complete_resume();
+
+    staging_stmt_trace_hits = 0;
+    sqlite3_trace_v2(ndb->db, SQLITE_TRACE_STMT, staging_stmt_trace_cb, NULL);
+    condition_engine_tick();
+    sqlite3_trace_v2(ndb->db, 0, NULL, NULL);
+    return staging_stmt_trace_hits;
+}
+
 /* An idle service must not reach the staging table from the periodic
- * condition polls: detect of snapshot_offer_ready and snapshot_complete_resume
- * reads the state first and counts staged rows only for an offer that needs it. */
+ * condition polls. The positive control: one active offer must count, so the
+ * zero result cannot pass vacuously. Every cleanup runs before any assert. */
 static int test_idle_condition_detect_skips_staging_count(void)
 {
     int failures = 0;
@@ -2203,6 +2220,8 @@ static int test_idle_condition_detect_skips_staging_count(void)
         struct node_db ndb;
         struct snapshot_sync_service svc;
         struct app_runtime_context runtime = {0};
+        int idle_hits = -1;
+        int active_hits = -1;
 
         memset(&svc, 0, sizeof(svc));
         ASSERT(node_db_open(&ndb, ":memory:"));
@@ -2210,17 +2229,11 @@ static int test_idle_condition_detect_skips_staging_count(void)
         runtime.snapshot_sync = &svc;
         app_runtime_set_current(&runtime);
 
-        condition_engine_reset_for_testing();
-        snapshot_offer_ready_test_reset();
-        snapshot_complete_resume_test_reset();
-        register_snapshot_offer_ready();
-        register_snapshot_complete_resume();
-
-        staging_stmt_trace_hits = 0;
-        sqlite3_trace_v2(ndb.db, SQLITE_TRACE_STMT, staging_stmt_trace_cb, NULL);
-        condition_engine_tick();
-        sqlite3_trace_v2(ndb.db, 0, NULL, NULL);
-        ASSERT(staging_stmt_trace_hits == 0);
+        idle_hits = staging_hits_for_condition_tick(&ndb);
+        svc.state = SNAPSYNC_NEGOTIATING;
+        svc.offered_height = 5000;
+        svc.offered_count = 1;
+        active_hits = staging_hits_for_condition_tick(&ndb);
 
         condition_engine_reset_for_testing();
         snapshot_offer_ready_test_reset();
@@ -2228,6 +2241,9 @@ static int test_idle_condition_detect_skips_staging_count(void)
         app_runtime_set_current(NULL);
         snapsync_reset(&svc);
         node_db_close(&ndb);
+
+        ASSERT(idle_hits == 0);
+        ASSERT(active_hits >= 1);
         PASS();
     } _test_next:;
     return failures;

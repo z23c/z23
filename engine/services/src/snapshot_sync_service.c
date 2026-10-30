@@ -58,6 +58,7 @@
 #include "platform/time_compat.h"
 
 #include "snapshot_sync_internal.h"
+#include "services/snapshot_sync_state.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -85,7 +86,7 @@ void snapsync_service_unlock_internal(void)
     pthread_mutex_unlock(&g_snapsync_service_lock);
 }
 
-enum snapshot_sync_state snapsync_get_state_internal(
+enum snapshot_sync_state snapsync_get_service_state(
     const struct snapshot_sync_service *svc)
 {
     if (!svc)

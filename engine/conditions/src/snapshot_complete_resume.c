@@ -6,7 +6,7 @@
 #include "config/runtime.h"
 #include "event/event.h"
 #include "net/snapshot_sync_contract.h"
-#include "../../services/src/snapshot_sync_internal.h"
+#include "services/snapshot_sync_state.h"
 #include "services/sync_monitor.h"
 #include "sync/sync_state.h"
 #include "validation/main_state.h"
@@ -70,7 +70,7 @@ static bool detect_snapshot_complete_resume(void)
         return false; // raw-return-ok:snapsync-service-not-active-is-normal-steady-state
     /* State first: the full status read counts staged rows, which only a
      * COMPLETE offer consumes. An idle node must not scan the staging table. */
-    if (snapsync_get_state_internal(svc) != SNAPSYNC_COMPLETE)
+    if (snapsync_get_service_state(svc) != SNAPSYNC_COMPLETE)
         return false;
     if (!snapshot_complete_status(svc, &st))
         return false; // raw-return-ok:snapsync-service-not-active-is-normal-steady-state
