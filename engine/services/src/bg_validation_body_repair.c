@@ -216,11 +216,16 @@ static void bg_validation_note_body_read_failure(
 #endif
         if (failures >= BG_VALIDATION_BODY_REPORT_AFTER)
             bg_validation_name_body_blocker(height, index, failures);
+        /* Below the threshold no report fires until failure REPORT_AFTER, so
+         * the next report is that many retry ticks away, not one interval. */
+        unsigned next_secs = failures < BG_VALIDATION_BODY_REPORT_AFTER
+            ? (BG_VALIDATION_BODY_REPORT_AFTER - failures) *
+                  BG_VALIDATION_BODY_RETRY_SECS
+            : pace->interval_secs;
         LOG_WARN("bg_validation",
                  "[bg-valid] unreadable body h=%d failures=%u; repair "
                  "queued, re-reading every %us (next report in %us)",
-                 height, failures, BG_VALIDATION_BODY_RETRY_SECS,
-                 pace->interval_secs);
+                 height, failures, BG_VALIDATION_BODY_RETRY_SECS, next_secs);
     }
     bg_validation_pause_before_body_retry(svc);
 }
