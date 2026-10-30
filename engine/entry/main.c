@@ -1029,7 +1029,9 @@ int main(int argc, char **argv)
         return rc;
 
     main_wire_explicit_addnodes(argc, argv);
-    (void)boot_fleet_roster_dial(app_runtime_node_db(), app_add_configured_node);
+    (void)boot_fleet_roster_dial(app_runtime_node_db(),
+                                  (int64_t)time(NULL),
+                                  app_add_configured_node);
     main_auto_addnode_local_zclassicd(argc, argv, &ctx);
     main_run_service_loop(&ctx, show_metrics);
 

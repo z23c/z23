@@ -472,12 +472,10 @@ static enum snap_state scan_fold(const struct db_fleet_board_post *rows, int n,
     return SNAP_READY;
 }
 
-/* Read every stored roster note and fold the roster rows. A read that fails
- * is UNVERIFIABLE, never "no roster": the store may hold the very rows that
- * name the members. */
-static enum snap_state roster_scan(struct node_db *ndb, int64_t now,
-                                   const struct root_view *rv,
-                                   struct roster_snap *snap)
+/* Every stored roster note: the fleet-scope notes the roster agent wrote.
+ * `*complete` is false when the store could not be read in full. */
+static int roster_rows_read(struct node_db *ndb, int64_t now,
+                            struct db_fleet_board_post *rows, bool *complete)
 {
     struct fleet_board_filter filter;
     memset(&filter, 0, sizeof filter);
@@ -486,6 +484,17 @@ static enum snap_state roster_scan(struct node_db *ndb, int64_t now,
                    BOOT_FLEET_ROSTER_AGENT);
     filter.scope_set = true;
     filter.scope = FLEET_BOARD_SCOPE_FLEET;
+    return db_fleet_board_list_checked(ndb, &filter, now, rows,
+                                       BOOT_FLEET_ROSTER_SCAN_ROWS, complete);
+}
+
+/* Read every stored roster note and fold the roster rows. A read that fails
+ * is UNVERIFIABLE, never "no roster": the store may hold the very rows that
+ * name the members. */
+static enum snap_state roster_scan(struct node_db *ndb, int64_t now,
+                                   const struct root_view *rv,
+                                   struct roster_snap *snap)
+{
     struct db_fleet_board_post *rows = zcl_calloc(
         BOOT_FLEET_ROSTER_SCAN_ROWS, sizeof *rows, "fleet_roster_scan");
     struct scan_acc *acc = zcl_calloc(1, sizeof *acc, "fleet_roster_acc");
@@ -507,9 +516,7 @@ static enum snap_state roster_scan(struct node_db *ndb, int64_t now,
         return SNAP_UNVERIFIABLE;
     }
     bool complete = false;
-    int n = db_fleet_board_list_checked(ndb, &filter, now, rows,
-                                        BOOT_FLEET_ROSTER_SCAN_ROWS,
-                                        &complete);
+    int n = roster_rows_read(ndb, now, rows, &complete);
     enum snap_state out = SNAP_UNVERIFIABLE;
     if (!complete) {
         LOG_WARN(ROSTER_LOG, "the roster notes could not be read from the "
@@ -956,7 +963,28 @@ static void dial_line(const char *line, void *user)
     memset(signer, 0, sizeof signer);
 }
 
-size_t boot_fleet_roster_dial(struct node_db *ndb,
+/* The same verified rows enforcement folds, read from the board store: the
+ * roster notes the manager published, so a box that never imported a line
+ * still dials it. */
+static void dial_board_rows(struct node_db *ndb, int64_t now,
+                            struct dial_acc *a)
+{
+    struct db_fleet_board_post *rows = zcl_calloc(
+        BOOT_FLEET_ROSTER_SCAN_ROWS, sizeof *rows, "fleet_roster_dial_rows");
+    bool complete = false;
+    if (!rows)
+        return;
+    int n = roster_rows_read(ndb, now, rows, &complete);
+    for (int i = 0; complete && i < n; i++) {
+        const struct fleet_board_post *p = &rows[i].post;
+        if (boot_fleet_roster_is_row(p) && p->text_len > 0 &&
+            p->text_len < ZCL_FLEET_ROSTER_LINE_MAX)
+            dial_line(p->text, a);
+    }
+    free(rows);
+}
+
+size_t boot_fleet_roster_dial(struct node_db *ndb, int64_t now,
                               void (*dial)(const char *host, int port))
 {
     struct root_view rv;
@@ -977,6 +1005,7 @@ size_t boot_fleet_roster_dial(struct node_db *ndb,
             a->head = head;
             a->dial = dial;
             (void)zcl_fleet_roster_each_line(dial_line, a);
+            dial_board_rows(ndb, now, a);
             n = a->n;
         }
         LOG_INFO(ROSTER_LOG, "fleet roster: dialling %zu other machine(s) "

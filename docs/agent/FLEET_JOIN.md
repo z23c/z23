@@ -129,6 +129,16 @@ The value may also carry an optional `:port`, such as `:9050`.
 A computer whose node has no persistent onion yet joins without one and the
 column is empty.
 
+At node start every member opens a configured connection to the onion of each
+other machine on its roster: the lines in its local roster file and the roster
+rows the manager published to the board. A line must verify under the fleet
+root, name a box the head does not revoke, and not be this box. Dialling is how
+the claim gets tested, not a grant: a peer is admitted to fleet scope by its
+key, never by the address it answered on. A machine that enrolled before join
+recorded onions re-runs `fleet join` with a fresh invite of the same name;
+`fleet admit` then appends a second row for the same box key and port, and the
+row carrying the onion is the one the others dial.
+
 It is **self-reported**, exactly like the hardware facts. The joining
 computer signs the string, so the record proves that computer claimed that
 address; nobody has dialled it, so the record proves nothing about whether
