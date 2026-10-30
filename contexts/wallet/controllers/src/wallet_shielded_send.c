@@ -36,6 +36,253 @@ bool wallet_addr_is_sapling(const char *addr)
     return strncmp(addr, hrp, hrp_len) == 0 && addr[hrp_len] == '1';
 }
 
+enum z_sendmany_memo_status {
+    Z_SENDMANY_MEMO_OK = 0,
+    Z_SENDMANY_MEMO_BAD_LEN,
+    Z_SENDMANY_MEMO_BAD_HEX
+};
+
+/* Memo of one Sapling recipient into memo[512]. Leaves *has_memo untouched on
+ * a failure status; *hlen / *got are the values the caller logs. */
+static int z_sendmany_parse_memo(const struct json_value *r, uint8_t *memo,
+                                 bool *has_memo, size_t *hlen, size_t *got)
+{
+    /* Parse memo if present. "memo_hex" carries an arbitrary BINARY
+     * memo (hex-encoded, <=1024 hex chars → <=512 bytes) — used by the
+     * on-chain ZMSG channel whose header bytes are not printable text;
+     * "memo" is the plain-UTF-8 form. memo_hex wins if both are given. */
+    const struct json_value *memohex_val = json_get(r, "memo_hex");
+    const char *memohex = memohex_val ? json_get_str(memohex_val) : NULL;
+    const struct json_value *memo_val = json_get(r, "memo");
+    if (memohex && memohex[0]) {
+        *hlen = strlen(memohex);
+        if (*hlen % 2 != 0 || *hlen > 1024)
+            return Z_SENDMANY_MEMO_BAD_LEN;
+        memset(memo, 0xF6, 512);
+        *got = ParseHex(memohex, memo, 512);
+        if (*got != *hlen / 2)
+            return Z_SENDMANY_MEMO_BAD_HEX;
+        *has_memo = true;
+    } else if (memo_val && json_get_str(memo_val)) {
+        /* A TEXT memo is zero-padded, not 0xF6-padded. 0xF6 is the
+         * "no memo" sentinel (a memo of 0xF6 then zeros); for a UTF-8
+         * memo the spec pads with 0x00, and every reader in this tree
+         * treats 0x00 as the text terminator. Padding text with 0xF6
+         * produced "<text>" immediately followed by 0xF6, which the
+         * store's order-binding matcher (memo[len] must be NUL or ';',
+         * db_store_received_payment_for_memo) rejects — so a buyer who
+         * typed the memo exactly as the payment page instructs was
+         * never credited. memo_hex is untouched: binary callers (the
+         * on-chain ZMSG codec) own their own padding. */
+        const char *memo_str = json_get_str(memo_val);
+        size_t memo_len = strlen(memo_str);
+        if (memo_len > 512) memo_len = 512;
+        memset(memo, 0x00, 512);
+        memcpy(memo, memo_str, memo_len);
+        *has_memo = true;
+    } else {
+        *has_memo = false;
+    }
+    return Z_SENDMANY_MEMO_OK;
+}
+
+/* Coin selection rows for the from-address; *num_selected / *selected_value
+ * accumulate onto the caller's initial values. */
+static void z_sendmany_select_coins(struct wallet_rpc_context *ctx,
+                                    int64_t target, int tip,
+                                    const uint8_t *from_addr_hash,
+                                    struct db_wallet_utxo *db_selected,
+                                    size_t *num_selected,
+                                    int64_t *selected_value)
+{
+    if (wallet_ctx_db_ready(ctx)) {
+        int n_sel = db_wallet_utxo_select_coins_for_address(ctx->node_db,
+            target, tip, from_addr_hash, db_selected, 256);
+        for (int i = 0; i < n_sel; i++) {
+            (*num_selected)++;
+            *selected_value += db_selected[i].value;
+        }
+    }
+}
+
+static void z_sendmany_fill_t_outputs(struct wallet_rpc_context *ctx,
+                                      struct wallet_tx *wtx,
+                                      const struct tx_destination *t_dests,
+                                      const int64_t *t_amounts,
+                                      size_t num_t_out, int64_t change,
+                                      const struct tx_destination *from_dest)
+{
+    /* Fill transparent outputs */
+    for (size_t i = 0; i < num_t_out; i++) {
+        struct script dest_script;
+        script_for_destination(&dest_script, &t_dests[i]);
+        wtx->tx.vout[i].value = t_amounts[i];
+        wtx->tx.vout[i].script_pub_key = dest_script;
+    }
+
+    /* Change output — send back to the FROM address (no keypool needed) */
+    if (change > 0) {
+        struct pubkey change_pk;
+        bool got_key = wallet_get_key_from_pool(ctx->wallet, &change_pk);
+        if (!got_key) {
+            /* Keypool exhausted — use the from_address as change address */
+            struct tx_destination change_dest = *from_dest;
+            struct script change_script;
+            script_for_destination(&change_script, &change_dest);
+            wtx->tx.vout[num_t_out].value = change;
+            wtx->tx.vout[num_t_out].script_pub_key = change_script;
+        } else {
+            struct key_id change_kid = pubkey_get_id(&change_pk);
+            struct tx_destination change_dest;
+            change_dest.type = DEST_KEY_ID;
+            change_dest.id.key = change_kid;
+            struct script change_script;
+            script_for_destination(&change_script, &change_dest);
+            wtx->tx.vout[num_t_out].value = change;
+            wtx->tx.vout[num_t_out].script_pub_key = change_script;
+        }
+    }
+}
+
+static void z_sendmany_get_ovk(struct wallet_rpc_context *ctx, uint8_t *ovk)
+{
+    zcl_mutex_lock(&ctx->wallet->sapling_keys.cs);
+    if (ctx->wallet->sapling_keys.num_keys > 0) {
+        memcpy(ovk, ctx->wallet->sapling_keys.keys[0].xfvk.fvk.ovk, 32);
+        zcl_mutex_unlock(&ctx->wallet->sapling_keys.cs);
+    } else {
+        zcl_mutex_unlock(&ctx->wallet->sapling_keys.cs);
+        GetRandBytes(ovk, 32);
+    }
+}
+
+/* Sapling output descriptions for the t->z path; *fail_idx is the output that
+ * failed to build (set only when false is returned). */
+static bool z_sendmany_build_outputs(void *proving_ctx, struct wallet_tx *wtx,
+                                     const uint8_t *ovk,
+                                     uint8_t (*z_diversifiers)[11],
+                                     uint8_t (*z_pk_ds)[32],
+                                     const int64_t *z_amounts,
+                                     uint8_t (*z_memos)[512],
+                                     const bool *z_has_memo,
+                                     size_t num_z_out, size_t *fail_idx)
+{
+    for (size_t i = 0; i < num_z_out; i++) {
+        struct output_description *od = &wtx->tx.v_shielded_output[i];
+
+        if (!sapling_build_output_with_ctx(
+                proving_ctx,
+                ovk, z_diversifiers[i], z_pk_ds[i],
+                (uint64_t)z_amounts[i],
+                z_has_memo[i] ? z_memos[i] : NULL,
+                od->cv.data, od->cm.data, od->ephemeral_key.data,
+                od->enc_ciphertext, od->out_ciphertext, od->zkproof)) {
+            *fail_idx = i;
+            return false;
+        }
+    }
+    return true;
+}
+
+static void z_sendmany_fill_inputs(struct wallet_tx *wtx,
+                                   const struct db_wallet_utxo *db_selected,
+                                   size_t num_selected)
+{
+    for (size_t i = 0; i < num_selected; i++) {
+        memcpy(wtx->tx.vin[i].prevout.hash.data, db_selected[i].txid, 32);
+        wtx->tx.vin[i].prevout.n = db_selected[i].vout;
+        wtx->tx.vin[i].sequence = UINT32_MAX - 1;
+    }
+}
+
+enum z_sendmany_sign_status {
+    Z_SENDMANY_SIGN_OK = 0,
+    Z_SENDMANY_SIGN_NO_DEST,
+    Z_SENDMANY_SIGN_NO_KEY,
+    Z_SENDMANY_SIGN_SIGHASH,
+    Z_SENDMANY_SIGN_SIGN
+};
+
+/* Signs every selected transparent input under wallet->cs. The lock is
+ * released, and the private key wiped once it was loaded, before any
+ * failure status returns;
+ * *fail_idx is the failing input (set only on a failure status). */
+static int z_sendmany_sign_inputs(struct wallet_rpc_context *ctx,
+                                  const struct chain_params *cp,
+                                  struct wallet_tx *wtx,
+                                  const struct db_wallet_utxo *db_selected,
+                                  size_t num_selected, int height,
+                                  size_t *fail_idx)
+{
+    zcl_mutex_lock(&ctx->wallet->cs);
+    for (size_t i = 0; i < num_selected; i++) {
+        /* Reconstruct prevout script from SQLite data */
+        struct script prev_script;
+        script_init(&prev_script);
+        if (db_selected[i].script && db_selected[i].script_len > 0) {
+            memcpy(prev_script.data, db_selected[i].script,
+                   db_selected[i].script_len);
+            prev_script.size = db_selected[i].script_len;
+        }
+
+        struct tx_destination prev_dest;
+        if (!script_extract_destination(&prev_script, &prev_dest)) {
+            zcl_mutex_unlock(&ctx->wallet->cs);
+            *fail_idx = i;
+            return Z_SENDMANY_SIGN_NO_DEST;
+        }
+
+        struct privkey skey;
+        if (!keystore_get_key(&ctx->wallet->keystore, &prev_dest.id.key, &skey)) {
+            zcl_mutex_unlock(&ctx->wallet->cs);
+            *fail_idx = i;
+            return Z_SENDMANY_SIGN_NO_KEY;
+        }
+
+        struct pubkey spk;
+        privkey_get_pubkey(&skey, &spk);
+
+        uint32_t branch_id = consensus_current_epoch_branch_id(height + 1, &cp->consensus);
+        struct sighash_type ht;
+        ht.raw = SIGHASH_ALL;
+        struct precomputed_tx_data txdata;
+        precompute_tx_data(&wtx->tx, &txdata);
+
+        struct uint256 sighash;
+        if (!signature_hash(&prev_script, &wtx->tx,
+                            (unsigned int)i, ht, db_selected[i].value,
+                            branch_id, &txdata, &sighash)) {
+            memory_cleanse(skey.vch, 32);
+            zcl_mutex_unlock(&ctx->wallet->cs);
+            *fail_idx = i;
+            return Z_SENDMANY_SIGN_SIGHASH;
+        }
+
+        unsigned char sig[SIGNATURE_SIZE + 1];
+        size_t siglen = 0;
+        if (!privkey_sign(&skey, &sighash, sig, &siglen)) {
+            memory_cleanse(skey.vch, 32);
+            zcl_mutex_unlock(&ctx->wallet->cs);
+            *fail_idx = i;
+            return Z_SENDMANY_SIGN_SIGN;
+        }
+        sig[siglen++] = 0x01;
+
+        struct script *ss = &wtx->tx.vin[i].script_sig;
+        ss->size = 0;
+        ss->data[ss->size++] = (unsigned char)siglen;
+        memcpy(&ss->data[ss->size], sig, siglen);
+        ss->size += siglen;
+        ss->data[ss->size++] = (unsigned char)spk.size;
+        memcpy(&ss->data[ss->size], spk.vch, spk.size);
+        ss->size += spk.size;
+
+        memory_cleanse(skey.vch, 32);
+    }
+    zcl_mutex_unlock(&ctx->wallet->cs);
+    return Z_SENDMANY_SIGN_OK;
+}
+
 
 static bool z_sendmany_run(const struct json_value *params, bool help,
                            struct wallet_tx *prepared,
@@ -164,45 +411,18 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
                 LOG_FAIL("wallet_shielded", "z_sendmany: cannot decode sapling recipient addr=%s", addr);
             }
             z_amounts[num_z_out] = amount;
-            /* Parse memo if present. "memo_hex" carries an arbitrary BINARY
-             * memo (hex-encoded, <=1024 hex chars → <=512 bytes) — used by the
-             * on-chain ZMSG channel whose header bytes are not printable text;
-             * "memo" is the plain-UTF-8 form. memo_hex wins if both are given. */
-            const struct json_value *memohex_val = json_get(r, "memo_hex");
-            const char *memohex = memohex_val ? json_get_str(memohex_val) : NULL;
-            const struct json_value *memo_val = json_get(r, "memo");
-            if (memohex && memohex[0]) {
-                size_t hlen = strlen(memohex);
-                if (hlen % 2 != 0 || hlen > 1024) {
-                    json_set_str(result, "Invalid memo_hex (even-length hex, <=1024 chars)");
-                    LOG_FAIL("wallet_shielded", "z_sendmany: bad memo_hex len=%zu", hlen);
-                }
-                memset(z_memos[num_z_out], 0xF6, 512);
-                size_t got = ParseHex(memohex, z_memos[num_z_out], 512);
-                if (got != hlen / 2) {
-                    json_set_str(result, "Invalid memo_hex (non-hex characters)");
-                    LOG_FAIL("wallet_shielded", "z_sendmany: memo_hex parse got=%zu want=%zu", got, hlen / 2);
-                }
-                z_has_memo[num_z_out] = true;
-            } else if (memo_val && json_get_str(memo_val)) {
-                /* A TEXT memo is zero-padded, not 0xF6-padded. 0xF6 is the
-                 * "no memo" sentinel (a memo of 0xF6 then zeros); for a UTF-8
-                 * memo the spec pads with 0x00, and every reader in this tree
-                 * treats 0x00 as the text terminator. Padding text with 0xF6
-                 * produced "<text>" immediately followed by 0xF6, which the
-                 * store's order-binding matcher (memo[len] must be NUL or ';',
-                 * db_store_received_payment_for_memo) rejects — so a buyer who
-                 * typed the memo exactly as the payment page instructs was
-                 * never credited. memo_hex is untouched: binary callers (the
-                 * on-chain ZMSG codec) own their own padding. */
-                const char *memo_str = json_get_str(memo_val);
-                size_t memo_len = strlen(memo_str);
-                if (memo_len > 512) memo_len = 512;
-                memset(z_memos[num_z_out], 0x00, 512);
-                memcpy(z_memos[num_z_out], memo_str, memo_len);
-                z_has_memo[num_z_out] = true;
-            } else {
-                z_has_memo[num_z_out] = false;
+            size_t hlen = 0;
+            size_t got = 0;
+            int memo_st = z_sendmany_parse_memo(r, z_memos[num_z_out],
+                                                &z_has_memo[num_z_out],
+                                                &hlen, &got);
+            if (memo_st == Z_SENDMANY_MEMO_BAD_LEN) {
+                json_set_str(result, "Invalid memo_hex (even-length hex, <=1024 chars)");
+                LOG_FAIL("wallet_shielded", "z_sendmany: bad memo_hex len=%zu", hlen);
+            }
+            if (memo_st == Z_SENDMANY_MEMO_BAD_HEX) {
+                json_set_str(result, "Invalid memo_hex (non-hex characters)");
+                LOG_FAIL("wallet_shielded", "z_sendmany: memo_hex parse got=%zu want=%zu", got, hlen / 2);
             }
             num_z_out++;
         } else {
@@ -270,14 +490,8 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
     size_t num_selected = 0;
     int64_t selected_value = 0;
 
-    if (wallet_ctx_db_ready(ctx)) {
-        int n_sel = db_wallet_utxo_select_coins_for_address(ctx->node_db,
-            total_amount + fee, tip, from_addr_hash, db_selected, 256);
-        for (int i = 0; i < n_sel; i++) {
-            num_selected++;
-            selected_value += db_selected[i].value;
-        }
-    }
+    z_sendmany_select_coins(ctx, total_amount + fee, tip, from_addr_hash,
+                            db_selected, &num_selected, &selected_value);
 
     if (selected_value < total_amount + fee) {
         for (size_t i = 0; i < num_selected; i++)
@@ -308,36 +522,8 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
                  num_selected, total_t_out);
     }
 
-    /* Fill transparent outputs */
-    for (size_t i = 0; i < num_t_out; i++) {
-        struct script dest_script;
-        script_for_destination(&dest_script, &t_dests[i]);
-        wtx.tx.vout[i].value = t_amounts[i];
-        wtx.tx.vout[i].script_pub_key = dest_script;
-    }
-
-    /* Change output — send back to the FROM address (no keypool needed) */
-    if (change > 0) {
-        struct pubkey change_pk;
-        bool got_key = wallet_get_key_from_pool(ctx->wallet, &change_pk);
-        if (!got_key) {
-            /* Keypool exhausted — use the from_address as change address */
-            struct tx_destination change_dest = from_dest;
-            struct script change_script;
-            script_for_destination(&change_script, &change_dest);
-            wtx.tx.vout[num_t_out].value = change;
-            wtx.tx.vout[num_t_out].script_pub_key = change_script;
-        } else {
-            struct key_id change_kid = pubkey_get_id(&change_pk);
-            struct tx_destination change_dest;
-            change_dest.type = DEST_KEY_ID;
-            change_dest.id.key = change_kid;
-            struct script change_script;
-            script_for_destination(&change_script, &change_dest);
-            wtx.tx.vout[num_t_out].value = change;
-            wtx.tx.vout[num_t_out].script_pub_key = change_script;
-        }
-    }
+    z_sendmany_fill_t_outputs(ctx, &wtx, t_dests, t_amounts, num_t_out,
+                              change, &from_dest);
 
     /* value_balance = -(sum of shielded outputs) for shielding (negative = transparent→shielded) */
     int64_t shielded_total = 0;
@@ -357,14 +543,7 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
 
         /* Get OVK from sapling keystore */
         uint8_t ovk[32];
-        zcl_mutex_lock(&ctx->wallet->sapling_keys.cs);
-        if (ctx->wallet->sapling_keys.num_keys > 0) {
-            memcpy(ovk, ctx->wallet->sapling_keys.keys[0].xfvk.fvk.ovk, 32);
-            zcl_mutex_unlock(&ctx->wallet->sapling_keys.cs);
-        } else {
-            zcl_mutex_unlock(&ctx->wallet->sapling_keys.cs);
-            GetRandBytes(ovk, 32);
-        }
+        z_sendmany_get_ovk(ctx, ovk);
 
         /* Use Sapling proving context for output proofs + binding sig.
          * The declarations come from sapling/sapling_prover.h via
@@ -389,109 +568,52 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
                      zclassic_sapling_prover_status());
         }
 
-        for (size_t i = 0; i < num_z_out; i++) {
-            struct output_description *od = &wtx.tx.v_shielded_output[i];
-
-            if (!sapling_build_output_with_ctx(
-                    proving_ctx,
-                    ovk, z_diversifiers[i], z_pk_ds[i],
-                    (uint64_t)z_amounts[i],
-                    z_has_memo[i] ? z_memos[i] : NULL,
-                    od->cv.data, od->cm.data, od->ephemeral_key.data,
-                    od->enc_ciphertext, od->out_ciphertext, od->zkproof)) {
-                zclassic_sapling_proving_ctx_free(proving_ctx);
-                transaction_free(&wtx.tx);
-                json_set_str(result, "Failed to build Sapling output");
-                LOG_FAIL("wallet_shielded", "z_sendmany: sapling_build_output failed for output %zu", i);
-            }
+        size_t i = 0;
+        if (!z_sendmany_build_outputs(proving_ctx, &wtx, ovk, z_diversifiers,
+                                      z_pk_ds, z_amounts, z_memos,
+                                      z_has_memo, num_z_out,
+                                      &i)) {
+            zclassic_sapling_proving_ctx_free(proving_ctx);
+            transaction_free(&wtx.tx);
+            json_set_str(result, "Failed to build Sapling output");
+            LOG_FAIL("wallet_shielded", "z_sendmany: sapling_build_output failed for output %zu", i);
         }
 
         /* Fill transparent inputs from SQLite model (needed for sighash) */
-        for (size_t i = 0; i < num_selected; i++) {
-            memcpy(wtx.tx.vin[i].prevout.hash.data, db_selected[i].txid, 32);
-            wtx.tx.vin[i].prevout.n = db_selected[i].vout;
-            wtx.tx.vin[i].sequence = UINT32_MAX - 1;
-        }
+        z_sendmany_fill_inputs(&wtx, db_selected, num_selected);
 
         /* Sign transparent inputs */
-        zcl_mutex_lock(&ctx->wallet->cs);
-        for (size_t i = 0; i < num_selected; i++) {
-            /* Reconstruct prevout script from SQLite data */
-            struct script prev_script;
-            script_init(&prev_script);
-            if (db_selected[i].script && db_selected[i].script_len > 0) {
-                memcpy(prev_script.data, db_selected[i].script,
-                       db_selected[i].script_len);
-                prev_script.size = db_selected[i].script_len;
-            }
-
-            struct tx_destination prev_dest;
-            if (!script_extract_destination(&prev_script, &prev_dest)) {
-                zcl_mutex_unlock(&ctx->wallet->cs);
-                transaction_free(&wtx.tx);
-                json_set_str(result, "Cannot determine input destination");
-                for (size_t j = 0; j < num_selected; j++)
-                    db_wallet_utxo_free(&db_selected[j]);
-                LOG_FAIL("wallet_shielded", "z_sendmany: script_extract_destination failed for input %zu (t->z path)", i);
-            }
-
-            struct privkey skey;
-            if (!keystore_get_key(&ctx->wallet->keystore, &prev_dest.id.key, &skey)) {
-                zcl_mutex_unlock(&ctx->wallet->cs);
-                transaction_free(&wtx.tx);
-                json_set_str(result, "Private key not available");
-                for (size_t j = 0; j < num_selected; j++)
-                    db_wallet_utxo_free(&db_selected[j]);
-                LOG_FAIL("wallet_shielded", "z_sendmany: private key not found for input %zu (t->z path)", i);
-            }
-
-            struct pubkey spk;
-            privkey_get_pubkey(&skey, &spk);
-
-            uint32_t branch_id = consensus_current_epoch_branch_id(height + 1, &cp->consensus);
-            struct sighash_type ht;
-            ht.raw = SIGHASH_ALL;
-            struct precomputed_tx_data txdata;
-            precompute_tx_data(&wtx.tx, &txdata);
-
-            struct uint256 sighash;
-            if (!signature_hash(&prev_script, &wtx.tx,
-                                (unsigned int)i, ht, db_selected[i].value,
-                                branch_id, &txdata, &sighash)) {
-                memory_cleanse(skey.vch, 32);
-                zcl_mutex_unlock(&ctx->wallet->cs);
-                transaction_free(&wtx.tx);
-                json_set_str(result, "Sighash computation failed");
-                for (size_t j = 0; j < num_selected; j++)
-                    db_wallet_utxo_free(&db_selected[j]);
-                LOG_FAIL("wallet_shielded", "z_sendmany: signature_hash failed for input %zu (t->z path)", i);
-            }
-
-            unsigned char sig[SIGNATURE_SIZE + 1];
-            size_t siglen = 0;
-            if (!privkey_sign(&skey, &sighash, sig, &siglen)) {
-                memory_cleanse(skey.vch, 32);
-                zcl_mutex_unlock(&ctx->wallet->cs);
-                transaction_free(&wtx.tx);
-                json_set_str(result, "Signing failed");
-                for (size_t j = 0; j < num_selected; j++)
-                    db_wallet_utxo_free(&db_selected[j]);
-                LOG_FAIL("wallet_shielded", "z_sendmany: privkey_sign failed for input %zu (t->z path)", i);
-            }
-            sig[siglen++] = 0x01;
-
-            struct script *ss = &wtx.tx.vin[i].script_sig;
-            ss->size = 0;
-            ss->data[ss->size++] = (unsigned char)siglen;
-            memcpy(&ss->data[ss->size], sig, siglen);
-            ss->size += siglen;
-            ss->data[ss->size++] = (unsigned char)spk.size;
-            memcpy(&ss->data[ss->size], spk.vch, spk.size);
-            ss->size += spk.size;
-
-            memory_cleanse(skey.vch, 32);
+        int sign_st = z_sendmany_sign_inputs(ctx, cp, &wtx, db_selected,
+                                             num_selected, height,
+                                             &i);
+        if (sign_st == Z_SENDMANY_SIGN_NO_DEST) {
+            transaction_free(&wtx.tx);
+            json_set_str(result, "Cannot determine input destination");
+            for (size_t j = 0; j < num_selected; j++)
+                db_wallet_utxo_free(&db_selected[j]);
+            LOG_FAIL("wallet_shielded", "z_sendmany: script_extract_destination failed for input %zu (t->z path)", i);
         }
-        zcl_mutex_unlock(&ctx->wallet->cs);
+        if (sign_st == Z_SENDMANY_SIGN_NO_KEY) {
+            transaction_free(&wtx.tx);
+            json_set_str(result, "Private key not available");
+            for (size_t j = 0; j < num_selected; j++)
+                db_wallet_utxo_free(&db_selected[j]);
+            LOG_FAIL("wallet_shielded", "z_sendmany: private key not found for input %zu (t->z path)", i);
+        }
+        if (sign_st == Z_SENDMANY_SIGN_SIGHASH) {
+            transaction_free(&wtx.tx);
+            json_set_str(result, "Sighash computation failed");
+            for (size_t j = 0; j < num_selected; j++)
+                db_wallet_utxo_free(&db_selected[j]);
+            LOG_FAIL("wallet_shielded", "z_sendmany: signature_hash failed for input %zu (t->z path)", i);
+        }
+        if (sign_st == Z_SENDMANY_SIGN_SIGN) {
+            transaction_free(&wtx.tx);
+            json_set_str(result, "Signing failed");
+            for (size_t j = 0; j < num_selected; j++)
+                db_wallet_utxo_free(&db_selected[j]);
+            LOG_FAIL("wallet_shielded", "z_sendmany: privkey_sign failed for input %zu (t->z path)", i);
+        }
 
         /* Compute binding signature using Sapling proving context */
         transaction_compute_hash(&wtx.tx);
@@ -525,88 +647,40 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
         zclassic_sapling_proving_ctx_free(proving_ctx);
     } else {
         /* No shielded outputs — just transparent */
-        for (size_t i = 0; i < num_selected; i++) {
-            memcpy(wtx.tx.vin[i].prevout.hash.data, db_selected[i].txid, 32);
-            wtx.tx.vin[i].prevout.n = db_selected[i].vout;
-            wtx.tx.vin[i].sequence = UINT32_MAX - 1;
+        z_sendmany_fill_inputs(&wtx, db_selected, num_selected);
+
+        size_t i = 0;
+        int sign_st = z_sendmany_sign_inputs(ctx, cp, &wtx, db_selected,
+                                             num_selected, height,
+                                             &i);
+        if (sign_st == Z_SENDMANY_SIGN_NO_DEST) {
+            transaction_free(&wtx.tx);
+            json_set_str(result, "Cannot determine input destination");
+            for (size_t j = 0; j < num_selected; j++)
+                db_wallet_utxo_free(&db_selected[j]);
+            LOG_FAIL("wallet_shielded", "z_sendmany: script_extract_destination failed for input %zu (t->t path)", i);
         }
-
-        zcl_mutex_lock(&ctx->wallet->cs);
-        for (size_t i = 0; i < num_selected; i++) {
-            struct script prev_script;
-            script_init(&prev_script);
-            if (db_selected[i].script && db_selected[i].script_len > 0) {
-                memcpy(prev_script.data, db_selected[i].script,
-                       db_selected[i].script_len);
-                prev_script.size = db_selected[i].script_len;
-            }
-
-            struct tx_destination prev_dest;
-            if (!script_extract_destination(&prev_script, &prev_dest)) {
-                zcl_mutex_unlock(&ctx->wallet->cs);
-                transaction_free(&wtx.tx);
-                json_set_str(result, "Cannot determine input destination");
-                for (size_t j = 0; j < num_selected; j++)
-                    db_wallet_utxo_free(&db_selected[j]);
-                LOG_FAIL("wallet_shielded", "z_sendmany: script_extract_destination failed for input %zu (t->t path)", i);
-            }
-
-            struct privkey skey;
-            if (!keystore_get_key(&ctx->wallet->keystore, &prev_dest.id.key, &skey)) {
-                zcl_mutex_unlock(&ctx->wallet->cs);
-                transaction_free(&wtx.tx);
-                json_set_str(result, "Private key not available");
-                for (size_t j = 0; j < num_selected; j++)
-                    db_wallet_utxo_free(&db_selected[j]);
-                LOG_FAIL("wallet_shielded", "z_sendmany: private key not found for input %zu (t->t path)", i);
-            }
-
-            struct pubkey spk;
-            privkey_get_pubkey(&skey, &spk);
-            uint32_t branch_id = consensus_current_epoch_branch_id(height + 1, &cp->consensus);
-            struct sighash_type ht;
-            ht.raw = SIGHASH_ALL;
-            struct precomputed_tx_data txdata;
-            precompute_tx_data(&wtx.tx, &txdata);
-
-            struct uint256 sighash;
-            if (!signature_hash(&prev_script, &wtx.tx,
-                                (unsigned int)i, ht, db_selected[i].value,
-                                branch_id, &txdata, &sighash)) {
-                memory_cleanse(skey.vch, 32);
-                zcl_mutex_unlock(&ctx->wallet->cs);
-                transaction_free(&wtx.tx);
-                json_set_str(result, "Sighash computation failed");
-                for (size_t j = 0; j < num_selected; j++)
-                    db_wallet_utxo_free(&db_selected[j]);
-                LOG_FAIL("wallet_shielded", "z_sendmany: signature_hash failed for input %zu (t->t path)", i);
-            }
-
-            unsigned char sig[SIGNATURE_SIZE + 1];
-            size_t siglen = 0;
-            if (!privkey_sign(&skey, &sighash, sig, &siglen)) {
-                memory_cleanse(skey.vch, 32);
-                zcl_mutex_unlock(&ctx->wallet->cs);
-                transaction_free(&wtx.tx);
-                json_set_str(result, "Signing failed");
-                for (size_t j = 0; j < num_selected; j++)
-                    db_wallet_utxo_free(&db_selected[j]);
-                LOG_FAIL("wallet_shielded", "z_sendmany: privkey_sign failed for input %zu (t->t path)", i);
-            }
-            sig[siglen++] = 0x01;
-
-            struct script *ss = &wtx.tx.vin[i].script_sig;
-            ss->size = 0;
-            ss->data[ss->size++] = (unsigned char)siglen;
-            memcpy(&ss->data[ss->size], sig, siglen);
-            ss->size += siglen;
-            ss->data[ss->size++] = (unsigned char)spk.size;
-            memcpy(&ss->data[ss->size], spk.vch, spk.size);
-            ss->size += spk.size;
-
-            memory_cleanse(skey.vch, 32);
+        if (sign_st == Z_SENDMANY_SIGN_NO_KEY) {
+            transaction_free(&wtx.tx);
+            json_set_str(result, "Private key not available");
+            for (size_t j = 0; j < num_selected; j++)
+                db_wallet_utxo_free(&db_selected[j]);
+            LOG_FAIL("wallet_shielded", "z_sendmany: private key not found for input %zu (t->t path)", i);
         }
-        zcl_mutex_unlock(&ctx->wallet->cs);
+        if (sign_st == Z_SENDMANY_SIGN_SIGHASH) {
+            transaction_free(&wtx.tx);
+            json_set_str(result, "Sighash computation failed");
+            for (size_t j = 0; j < num_selected; j++)
+                db_wallet_utxo_free(&db_selected[j]);
+            LOG_FAIL("wallet_shielded", "z_sendmany: signature_hash failed for input %zu (t->t path)", i);
+        }
+        if (sign_st == Z_SENDMANY_SIGN_SIGN) {
+            transaction_free(&wtx.tx);
+            json_set_str(result, "Signing failed");
+            for (size_t j = 0; j < num_selected; j++)
+                db_wallet_utxo_free(&db_selected[j]);
+            LOG_FAIL("wallet_shielded", "z_sendmany: privkey_sign failed for input %zu (t->t path)", i);
+        }
     }
 
     /* Free SQLite UTXO data — no longer needed after building inputs */
