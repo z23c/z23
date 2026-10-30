@@ -493,7 +493,15 @@ static void shi_abort_source(void *h)
     shi_progress_end();
 }
 
-static bool shi_sprout_pass_incomplete(int64_t n, bool best_present,
+/* Open the chainstate source; false when the open fails or yields no handle. */
+static bool shi_source_open(const char *path, void **h)
+{
+    return chainstate_legacy_open(path, h) && *h != NULL;
+}
+
+/* A pass is incomplete on a negative count or, when a best pointer exists, a
+ * best row that was never delivered. */
+static bool shi_anchor_pass_incomplete(int64_t n, bool best_present,
                                        bool saw_best)
 {
     return n < 0 || (best_present && !saw_best);
@@ -564,7 +572,7 @@ bool shielded_history_import_from_chainstate(
 
     /* Open the (already point-in-time / fixture) chainstate copy. */
     void *h = NULL;
-    if (!chainstate_legacy_open(chainstate_src_path, &h) || !h) {
+    if (!shi_source_open(chainstate_src_path, &h)) {
         shi_progress_end();
         LOG_FAIL(SHI_SUBSYS, "chainstate_legacy_open(%s) failed",
                  chainstate_src_path);
@@ -659,7 +667,7 @@ bool shielded_history_import_from_chainstate(
     int64_t n = shi_run_anchor_pass(progress_db, h, ANCHOR_POOL_SAPLING, true,
                                     &best_sapling, expected_tip_height,
                                     &sap_count, &sap_saw_best);
-    if (n < 0 || !sap_saw_best) {
+    if (shi_anchor_pass_incomplete(n, true, sap_saw_best)) {
         shi_rollback(progress_db);
         chainstate_legacy_close(h);
         LOG_FAIL(SHI_SUBSYS,
@@ -674,7 +682,7 @@ bool shielded_history_import_from_chainstate(
     n = shi_run_anchor_pass(progress_db, h, ANCHOR_POOL_SPROUT,
                             sprout_best_present, &best_sprout,
                             expected_tip_height, &spr_count, &spr_saw_best);
-    if (shi_sprout_pass_incomplete(n, sprout_best_present, spr_saw_best)) {
+    if (shi_anchor_pass_incomplete(n, sprout_best_present, spr_saw_best)) {
         shi_rollback(progress_db);
         chainstate_legacy_close(h);
         LOG_FAIL(SHI_SUBSYS,

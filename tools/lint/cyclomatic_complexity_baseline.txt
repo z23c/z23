@@ -280,7 +280,7 @@ engine/services/src/node_db_catchup_service.c:node_db_catchup_service_run:80
 engine/services/src/node_db_import_service.c:node_db_import_service_run:38
 engine/services/src/nullifier_backfill_service.c:nullifier_backfill_service_run:16
 engine/services/src/property_grant_commit.c:commit_attempt:24
-engine/services/src/shielded_history_import_service.c:shielded_history_import_from_chainstate:31
+engine/services/src/shielded_history_import_service.c:shielded_history_import_from_chainstate:29
 engine/services/src/shielded_history_promote_service.c:shielded_history_promote_run:20
 engine/services/src/utxo_mirror_delta.c:utxo_mirror_delta_apply:20
 engine/services/src/utxo_recovery_restore.c:utxo_recovery_import_ldb:20
