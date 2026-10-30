@@ -114,6 +114,7 @@ static void condition_state_reset(struct condition_state *s)
         atomic_store(&pl->pages, 0);
     }
     atomic_store(&s->first_detect_unix, 0);
+    atomic_store(&s->held_since_unix, 0);
     atomic_store(&s->last_poll_unix, 0);
     atomic_store(&s->last_remedy_unix, 0);
     atomic_store(&s->last_operator_needed_unix, 0);
@@ -471,6 +472,32 @@ static void condition_tick_one(const struct condition *cond, int64_t now)
         condition_emit_operator_page(cond, s, now);
 }
 
+/* An operator hold (node pace pause) stalls sync on purpose and no remedy
+ * runs meanwhile, so held time must not age an active episode toward the
+ * age-budget page. Mark when the hold first covered the episode... */
+static void condition_note_held(const struct condition *cond, int64_t now)
+{
+    struct condition_state *s = (struct condition_state *)&cond->state;
+    if (atomic_load(&s->currently_active) &&
+        atomic_load(&s->held_since_unix) == 0)
+        atomic_store(&s->held_since_unix, now);
+}
+
+/* ...and on release push first_detect_unix forward by the held span, keeping
+ * the pre-pause age. Episodes never held are untouched. */
+static void condition_credit_held_time(const struct condition *cond,
+                                       int64_t now)
+{
+    struct condition_state *s = (struct condition_state *)&cond->state;
+    int64_t held = atomic_load(&s->held_since_unix);
+    if (held == 0)
+        return;
+    atomic_store(&s->held_since_unix, 0);
+    int64_t first = atomic_load(&s->first_detect_unix);
+    if (first != 0 && now > held)
+        atomic_store(&s->first_detect_unix, first + (now - held));
+}
+
 void condition_engine_set_skip_filter(condition_skip_fn fn)
 {
     atomic_store(&g_skip_filter, fn);
@@ -490,8 +517,12 @@ void condition_engine_tick(void)
     void (*hook)(void) = atomic_load(&g_progress_hook);
     condition_skip_fn skip = atomic_load(&g_skip_filter);
     for (int i = 0; i < count; i++) {
-        if (!skip || !skip(snapshot[i]))
+        if (!skip || !skip(snapshot[i])) {
+            condition_credit_held_time(snapshot[i], now);
             condition_tick_one(snapshot[i], now);
+        } else {
+            condition_note_held(snapshot[i], now);
+        }
         /* Refresh the runner's heartbeat between conditions so a long pass
          * over many heavy detect()/remedy() probes never lapses the runner's
          * stall deadline — only a single remedy that never returns can. */

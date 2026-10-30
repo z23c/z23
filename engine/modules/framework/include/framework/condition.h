@@ -46,6 +46,9 @@ typedef bool (*condition_detail_fn)(struct json_value *out);
 
 struct condition_state {
     _Atomic int64_t first_detect_unix;
+    /* Wall time the skip filter first held this active episode; 0 when not
+     * held. Held time is credited back to first_detect_unix on release. */
+    _Atomic int64_t held_since_unix;
     _Atomic int64_t last_poll_unix;
     _Atomic int64_t last_remedy_unix;
     _Atomic int64_t last_operator_needed_unix;

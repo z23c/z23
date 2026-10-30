@@ -331,6 +331,37 @@ static bool ce_aged_episode_pages_operator(struct condition *cond)
     return ok;
 }
 
+static bool ce_hold_all(const struct condition *cond)
+{
+    (void)cond;
+    return true;
+}
+
+static bool ce_pause_time_not_counted_in_age(struct condition *cond)
+{
+    /* Time held by an operator pause must not age an active episode. The
+     * 20000s shifts stand in for a pause longer than the age budget. */
+    reset_fixture();
+    event_observe(EV_OPERATOR_NEEDED, operator_observer, NULL);
+    bool ok = condition_register(cond);
+    atomic_store(&g_detect, true);
+    condition_engine_tick();            /* activates, attempt 1 */
+    condition_engine_set_skip_filter(ce_hold_all);
+    condition_engine_tick();            /* held: marks hold start */
+    atomic_fetch_sub(&cond->state.first_detect_unix, 20000);
+    atomic_fetch_sub(&cond->state.held_since_unix, 20000);
+    condition_engine_set_skip_filter(NULL);
+    condition_engine_tick();            /* resume: no page */
+    ok = ok && !atomic_load(&cond->state.operator_needed_emitted);
+    ok = ok && atomic_load(&g_operator_events) == 0;
+    /* Still bad after resume: the full budget elapsing again pages. */
+    atomic_fetch_sub(&cond->state.first_detect_unix, 20000);
+    condition_engine_tick();
+    ok = ok && atomic_load(&cond->state.operator_needed_emitted);
+    ok = ok && atomic_load(&g_operator_events) >= 1;
+    return ok;
+}
+
 static bool ce_witness_resets_limbo_episode(struct condition *cond)
 {
     /* Witness-clear still ends a limbo episode and resets its state. */
@@ -711,6 +742,9 @@ int test_condition_engine(void)
 
     ok = ce_aged_episode_pages_operator(&c_aged);
     CE_CHECK("age budget pages operator at attempts below max", ok);
+
+    ok = ce_pause_time_not_counted_in_age(&c_aged);
+    CE_CHECK("operator pause time does not age the episode toward a page", ok);
 
     ok = ce_witness_resets_limbo_episode(&c_limbo);
     CE_CHECK("witness clear resets active undetected episode", ok);
