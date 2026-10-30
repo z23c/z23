@@ -213,33 +213,43 @@ static void znin_run(const struct zcl_command_request *request,
     znin_finalize_success(reply, &body, scope, confirm);
 }
 
-void zcl_native_handle_name_register(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+static void znin_name_record_run(const struct zcl_command_request *request,
+                                 struct zcl_command_reply *reply,
+                                 const char *operation)
 {
     const struct json_value *input = request ? request->input : NULL;
     bool present = input && json_get_str(json_get(input, "name")) &&
         json_get_str(json_get(input, "type")) &&
         json_get_str(json_get(input, "value"));
-    znin_run(request, reply, "register", present);
+    znin_run(request, reply, operation, present);
+}
+
+static void znin_name_field_run(const struct zcl_command_request *request,
+                                struct zcl_command_reply *reply,
+                                const char *operation, const char *field)
+{
+    const struct json_value *input = request ? request->input : NULL;
+    bool present = input && json_get_str(json_get(input, "name")) &&
+        json_get_str(json_get(input, field));
+    znin_run(request, reply, operation, present);
+}
+
+void zcl_native_handle_name_register(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    znin_name_record_run(request, reply, "register");
 }
 
 void zcl_native_handle_name_update(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    const struct json_value *input = request ? request->input : NULL;
-    bool present = input && json_get_str(json_get(input, "name")) &&
-        json_get_str(json_get(input, "type")) &&
-        json_get_str(json_get(input, "value"));
-    znin_run(request, reply, "update", present);
+    znin_name_record_run(request, reply, "update");
 }
 
 void zcl_native_handle_name_transfer(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    const struct json_value *input = request ? request->input : NULL;
-    bool present = input && json_get_str(json_get(input, "name")) &&
-        json_get_str(json_get(input, "new_owner"));
-    znin_run(request, reply, "transfer", present);
+    znin_name_field_run(request, reply, "transfer", "new_owner");
 }
 
 void zcl_native_handle_name_renew(
@@ -253,18 +263,11 @@ void zcl_native_handle_name_renew(
 void zcl_native_handle_name_set_record(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    const struct json_value *input = request ? request->input : NULL;
-    bool present = input && json_get_str(json_get(input, "name")) &&
-        json_get_str(json_get(input, "type")) &&
-        json_get_str(json_get(input, "value"));
-    znin_run(request, reply, "set_record", present);
+    znin_name_record_run(request, reply, "set_record");
 }
 
 void zcl_native_handle_name_set_text(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    const struct json_value *input = request ? request->input : NULL;
-    bool present = input && json_get_str(json_get(input, "name")) &&
-        json_get_str(json_get(input, "key"));
-    znin_run(request, reply, "set_text", present);
+    znin_name_field_run(request, reply, "set_text", "key");
 }
