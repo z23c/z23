@@ -2656,6 +2656,14 @@ static void check_sqlite_47_sqlite_pragma_tuning_honors_constrained_(int *failur
         ok = false;
     sqlite3_finalize(s);
     ok = ok && cache_pages == -(16 * 1024);
+    /* normal_mode must not raise a constrained lane above its budget. */
+    ok = ok && node_db_normal_mode(&ndb);
+    cache_pages = 0;
+    if (ok && sqlite3_prepare_v2(ndb.db, "PRAGMA cache_size", -1, &s, NULL) == SQLITE_OK &&
+        sqlite3_step(s) == SQLITE_ROW)
+        cache_pages = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    ok = ok && cache_pages == -(16 * 1024);
     ok = ok && node_db_recommended_mmap_bytes() == 0;
     if (ndb.open) node_db_close(&ndb);
     os_proc_mem_set_override(NULL);

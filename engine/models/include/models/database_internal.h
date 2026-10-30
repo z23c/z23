@@ -200,6 +200,10 @@ int node_db_migrate_features_v49_up(struct node_db *ndb, int *version,
 int node_db_migrate_features_v67_up(struct node_db *ndb, int *version,
                                     int *floor);
 
+/* SQLite page-cache size in KiB for this process's effective memory budget
+ * (the open-time value). Constrained lanes (<=4 GiB) get 16 MiB. */
+int64_t node_db_budget_cache_kib(void);
+
 /* Execute `sql`, logging any error with `where` context. Returns the
  * sqlite3 rc so callers can make tolerance decisions. (Defined in
  * database.c; used by migrations and performance-mode helpers.) */
