@@ -1,15 +1,3 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
- *
- * purpose: --selftest for check-fortify-masked-decls
- * (gate_fortify_masked_decls.c). Measures the real masked set in a scratch
- * tree under $HOME/.local/state/zclassic23/scratch (never /tmp), falling
- * back to a synthetic masked name on hosts that truthfully measure none,
- * then proves the three --selftest cases of the shell original: an
- * unguarded caller of a masked function is flagged; a caller with the
- * feature-test guard before its first #include is not; a function named
- * only in a comment is not. Returns 0 only when every case answers as
- * expected.
- */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -21,8 +9,8 @@
 
 /* Exported by gate_fortify_masked_decls.c (opaque here). */
 struct fmd_meas;
-int fmd_meas_create(const char *work, struct fmd_meas **out);
-void fmd_meas_free(struct fmd_meas *m);
+struct fmd_meas *fmd_meas_static(void);
+int fmd_meas_create(const char *work, struct fmd_meas *m);
 int fmd_meas_nmasked(const struct fmd_meas *m);
 const char *fmd_meas_masked_first(const struct fmd_meas *m);
 void fmd_meas_force_synthetic(struct fmd_meas *m);
@@ -31,26 +19,11 @@ int fmd_scan_file(const char *path, const struct fmd_meas *m, char *hits,
                   size_t cap);
 
 enum { FMDS_PATH = 1024, FMDS_TEXT = 1024, FMDS_HITS = 512,
-       FMDS_SET = 1024 };
+       FMDS_SET = 1024, FMDS_WHY = 256 };
 
 static int fmds_fixture_root(char *out, size_t cap)
 {
-    const char *home = getenv("HOME");
-    if (!home || !home[0])
-        return die("z23-lint: HOME unset; cannot place selftest scratch\n",
-                   "");
-    char base[FMDS_PATH];
-    if (ovf(snprintf(base, sizeof base, "%s/.local/state/zclassic23/scratch",
-                     home), sizeof base))
-        return 2;
-    int rc = csr_mkdirs(base);
-    if (rc)
-        return rc;
-    if (ovf(snprintf(out, cap, "%s/fortify-masked-decls.XXXXXX", base), cap))
-        return 2;
-    if (!mkdtemp(out))
-        return die("z23-lint: mkdtemp failed for selftest scratch\n", "");
-    return 0;
+    return lint_mkdtemp(out, cap, "fmd-selftest");
 }
 
 static int fmds_write_cases(const char *root, const char *fn)
@@ -93,14 +66,56 @@ static int fmds_write_cases(const char *root, const char *fn)
     return csr_write(com, t);
 }
 
+/* Scans one fixture and expects a given verdict; on mismatch prints the
+ * pre-formatted reason. Returns 0 as expected, 1 failed. */
+static int fmds_check(const char *root, const char *leaf, int want,
+                      const struct fmd_meas *m, const char *why)
+{
+    char path[FMDS_PATH], hits[FMDS_HITS];
+    if (ovf(snprintf(path, sizeof path, "%s/st/%s", root, leaf),
+            sizeof path)) {
+        fprintf(stderr, "selftest: FAILED — %s\n", why);
+        return 1;
+    }
+    if (fmd_scan_file(path, m, hits, sizeof hits) != want) {
+        fprintf(stderr, "selftest: FAILED — %s\n", why);
+        return 1;
+    }
+    return 0;
+}
+
+static int fmds_case_bad(const char *root, const struct fmd_meas *m,
+                         const char *fn)
+{
+    char why[FMDS_WHY];
+    snprintf(why, sizeof why, "unguarded caller of %s was not flagged", fn);
+    return fmds_check(root, "bad.c", 1, m, why);
+}
+
+static int fmds_case_good(const char *root, const struct fmd_meas *m,
+                          const char *fn)
+{
+    char why[FMDS_WHY];
+    snprintf(why, sizeof why, "guarded caller of %s was flagged", fn);
+    return fmds_check(root, "good.c", 0, m, why);
+}
+
+static int fmds_case_comment(const char *root, const struct fmd_meas *m,
+                             const char *fn)
+{
+    char why[FMDS_WHY];
+    snprintf(why, sizeof why, "a comment mentioning %s was flagged", fn);
+    return fmds_check(root, "comment.c", 0, m, why);
+}
+
 int check_fortify_masked_decls_selftest(void)
 {
     char root[FMDS_PATH];
     int rc = fmds_fixture_root(root, sizeof root);
     if (rc)
         return rc;
-    struct fmd_meas *m = NULL;
-    rc = fmd_meas_create(root, &m);
+    struct fmd_meas *m = fmd_meas_static();
+    rc = fmd_meas_create(root, m);
     if (rc) {
         rap_rm_rf(root);
         return die("z23-lint: check-fortify-masked-decls selftest cannot "
@@ -114,38 +129,16 @@ int check_fortify_masked_decls_selftest(void)
     const char *fn = fmd_meas_masked_first(m);
     rc = fmds_write_cases(root, fn);
     if (rc) {
-        fmd_meas_free(m);
         rap_rm_rf(root);
         return rc;
     }
-    int bad = 0;
-    char path[FMDS_PATH], hits[FMDS_HITS];
-    if (ovf(snprintf(path, sizeof path, "%s/st/bad.c", root), sizeof path))
-        bad = 1;
-    if (!bad && fmd_scan_file(path, m, hits, sizeof hits) != 1) {
-        fprintf(stderr, "selftest: FAILED — unguarded caller of %s was not "
-                "flagged\n", fn);
-        bad = 1;
-    }
-    if (!bad && ovf(snprintf(path, sizeof path, "%s/st/good.c", root),
-                    sizeof path))
-        bad = 1;
-    if (!bad && fmd_scan_file(path, m, hits, sizeof hits) != 0) {
-        fprintf(stderr, "selftest: FAILED — guarded caller of %s was "
-                "flagged\n", fn);
-        bad = 1;
-    }
-    if (!bad && ovf(snprintf(path, sizeof path, "%s/st/comment.c", root),
-                    sizeof path))
-        bad = 1;
-    if (!bad && fmd_scan_file(path, m, hits, sizeof hits) != 0) {
-        fprintf(stderr, "selftest: FAILED — a comment mentioning %s was "
-                "flagged\n", fn);
-        bad = 1;
-    }
+    int bad = fmds_case_bad(root, m, fn);
+    if (!bad)
+        bad = fmds_case_good(root, m, fn);
+    if (!bad)
+        bad = fmds_case_comment(root, m, fn);
     if (bad) {
         fputs("check-fortify-masked-decls: SELFTEST FAILED\n", stderr);
-        fmd_meas_free(m);
         rap_rm_rf(root);
         return 1;
     }
@@ -153,7 +146,6 @@ int check_fortify_masked_decls_selftest(void)
     fmd_meas_masked_str(m, mset, sizeof mset);
     printf("check-fortify-masked-decls: selftest PASSED (masked set measured "
            "as:%s)\n", mset);
-    fmd_meas_free(m);
     rap_rm_rf(root);
     return st_ok(0, "check-fortify-masked-decls selftest: OK\n");
 }

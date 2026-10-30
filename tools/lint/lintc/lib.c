@@ -1465,6 +1465,21 @@ const char *env_or(const char *name, const char *fallback)
     return (e && e[0]) ? e : fallback;
 }
 
+/* The one place a gate's scratch directory is named: $TMPDIR (else /tmp)
+ * plus z23-lint-<tag>.XXXXXX, created by mkdtemp. Gates call this instead
+ * of repeating the literal, so check-no-bare-tmp-fixture pins it once. */
+int lint_mkdtemp(char *out, size_t cap, const char *tag)
+{
+    int n = snprintf(out, cap, "%s/z23-lint-%s.XXXXXX",
+                     env_or("TMPDIR", "/tmp"), tag);
+    if (n < 0 || (size_t)n >= cap)
+        return die("z23-lint: scratch path too long for %s\n", tag);
+    if (!mkdtemp(out))
+        return die("z23-lint: cannot create a scratch directory for %s\n",
+                   tag);
+    return 0;
+}
+
 /* ZCL_LINT_REPO_ROOT, when set, names the tree to lint and wins over the
  * executable's own path: `precheck` sets it per tree so a gate that resolves
  * its root here (and a cic_invoke child, which inherits it) sees that tree. */

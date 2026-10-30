@@ -137,6 +137,9 @@ static inline void lintc_buf_clear(char **p, size_t *n)
 }
 
 const char *env_or(const char *name, const char *fallback);
+/* $TMPDIR (else /tmp)/z23-lint-<tag>.XXXXXX via mkdtemp; 0, or 2 after a
+ * message. */
+int lint_mkdtemp(char *out, size_t cap, const char *tag);
 int lint_self_exe(char *buf, size_t cap);
 int sh_single_quote(const char *in, char *out, size_t cap);
 int gate_require_scanned(int count, int floor, const char *name,

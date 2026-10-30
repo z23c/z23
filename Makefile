@@ -13231,7 +13231,8 @@ check-arm-symbol-single: $(LINTC_TOOL)
 # this tree. Baseline is empty by design and must stay empty.
 check-fortify-masked-decls: $(LINTC_TOOL)
 	@echo "══ LINT: no declaration that depends on optimisation ══"
-	@./build/bin/z23-lint check-fortify-masked-decls --selftest && ./build/bin/z23-lint check-fortify-masked-decls
+	@./build/bin/z23-lint check-fortify-masked-decls --selftest
+	@./build/bin/z23-lint check-fortify-masked-decls
 
 check-coins-lookup-nullcheck:
 	@echo "══ LINT: guarded controller coin lookups ══"

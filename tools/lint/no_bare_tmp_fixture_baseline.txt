@@ -145,3 +145,4 @@ tools/lint/lintc/gate_wire_dial.c 1
 tools/lint/lintc/gate_wiring_presence_fences.c 1
 tools/lint/lintc/gate_zclassicd_reach.c 1
 tools/lint/lintc/gate_zcode_packages.c 2
+tools/lint/lintc/lib.c 1

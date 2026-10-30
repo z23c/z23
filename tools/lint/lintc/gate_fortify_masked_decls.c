@@ -1,30 +1,3 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
- *
- * purpose: gate check-fortify-masked-decls — a .c file may not call a
- * POSIX/GNU function whose declaration reaches it ONLY through a fortify
- * inline (i.e. only when optimisation is on), unless the file sets a
- * feature-test macro before its first #include. Ported from
- * tools/lint/check_fortify_masked_decls.sh (deleted). Selftest:
- * gate_fortify_masked_decls_selftest.c.
- *
- * WHY (bug class found live 2026-08-30). The build compiles with
- * -std=c23 -D_POSIX_C_SOURCE=200809L -D_FORTIFY_SOURCE=2. Under glibc some
- * declarations (realpath et al.) arrive ONLY via the fortify inline, which
- * glibc activates only under optimisation. Such files compile purely as a
- * side effect of -O1+, and in C23 an implicit declaration is a hard error:
- * they break at -O0, under -U_FORTIFY_SOURCE, and on any non-glibc libc.
- *
- * The gate MEASURES the masked set instead of hardcoding it: for each
- * candidate it compiles a tiny TU with the project's real flags at -O0 and
- * at -O2 (fork + execvp, never a shell string); MASKED means fails at -O0
- * and succeeds at -O2. A control probe must compile or the gate refuses
- * (exit 2) rather than passing vacuously. Comments and string bodies are
- * blanked in-process with the shared cstrip_line (lib.c), so prose naming
- * a function does not trip the scan.
- *
- * The baseline is empty by design: if this gate fails, add the feature-test
- * guard, never a baseline row.
- */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -93,20 +66,19 @@ struct fmd_off { char path[FMD_PATH]; char hits[FMD_HITS]; };
 struct fmd_run_ctx {
     const struct fmd_meas *m;
     const char *root;
-    struct fmd_off *offs;
-    size_t n, cap;
+    struct fmd_off offs[FMD_OFF_CAP];
+    size_t n;
     int err;
 };
 
+/* No heap anywhere in this gate: the measurement lives in one static
+ * instance (the tool is single-threaded and measures once per process). */
+static struct fmd_meas g_fmd_meas;
+
 /* ---------------------------------------------------------------- helpers */
 
-static void fmd_cc_init(struct fmd_cc *cc)
+static void fmd_cc_split(struct fmd_cc *cc)
 {
-    const char *e = getenv("CC");
-    if (!e || !*e)
-        e = "cc";
-    if (ovf(snprintf(cc->buf, sizeof cc->buf, "%s", e), sizeof cc->buf))
-        cc->buf[0] = '\0';
     cc->argc = 0;
     char *p = cc->buf;
     while (cc->argc < FMD_CC_MAX) {
@@ -121,6 +93,10 @@ static void fmd_cc_init(struct fmd_cc *cc)
             *p++ = '\0';
     }
     cc->argv[cc->argc] = NULL;
+}
+
+static void fmd_cc_shown(struct fmd_cc *cc)
+{
     size_t o = 0;
     for (int i = 0; i < cc->argc; i++) {
         if (i && o + 1 < sizeof cc->shown)
@@ -132,6 +108,17 @@ static void fmd_cc_init(struct fmd_cc *cc)
         o += l;
     }
     cc->shown[o] = '\0';
+}
+
+static void fmd_cc_init(struct fmd_cc *cc)
+{
+    const char *e = getenv("CC");
+    if (!e || !*e)
+        e = "cc";
+    if (ovf(snprintf(cc->buf, sizeof cc->buf, "%s", e), sizeof cc->buf))
+        cc->buf[0] = '\0';
+    fmd_cc_split(cc);
+    fmd_cc_shown(cc);
 }
 
 static int fmd_write_file(const char *path, const char *text)
@@ -208,25 +195,17 @@ static int fmd_name_called(const char *code, const char *name)
 
 /* ------------------------------------------------------------ measurement */
 
-int fmd_meas_create(const char *work, struct fmd_meas **out)
+/* Compiles the control probe; on failure prints the script's refuse message
+ * and returns nonzero. */
+static int fmd_ctl_probe(const char *work, struct fmd_meas *m)
 {
-    *out = NULL;
-    struct fmd_meas *m = calloc(1, sizeof *m);
-    if (!m)
-        return 2;
-    memset(m, 0, sizeof *m);
-    fmd_cc_init(&m->cc);
     char ctl[FMD_PATH], obj[FMD_PATH];
     if (ovf(snprintf(ctl, sizeof ctl, "%s/control.c", work), sizeof ctl) ||
-        ovf(snprintf(obj, sizeof obj, "%s/control.o", work), sizeof obj)) {
-        free(m);
+        ovf(snprintf(obj, sizeof obj, "%s/control.o", work), sizeof obj))
         return 2;
-    }
     if (fmd_write_file(ctl,
-            "#include <stdlib.h>\nint main(void){return 0;}\n") != 0) {
-        free(m);
+            "#include <stdlib.h>\nint main(void){return 0;}\n") != 0)
         return 2;
-    }
     if (fmd_compile(ctl, obj, "-O0", &m->cc) != 0) {
         fprintf(stderr,
                 "%s: FAIL — the control probe does not compile with\n"
@@ -234,42 +213,41 @@ int fmd_meas_create(const char *work, struct fmd_meas **out)
                 "-D_FORTIFY_SOURCE=2 -O0\n"
                 "  The gate cannot measure anything, so it refuses rather "
                 "than passing vacuously.\n", k_fmd_gate, m->cc.shown);
-        free(m);
         return 2;
     }
-    for (size_t i = 0; i < sizeof k_fmd_candidates /
-                            sizeof k_fmd_candidates[0]; i++) {
-        const char *fn = k_fmd_candidates[i];
-        char src[FMD_PATH], pobj[FMD_PATH], text[640];
-        if (ovf(snprintf(src, sizeof src, "%s/probe.c", work), sizeof src) ||
-            ovf(snprintf(pobj, sizeof pobj, "%s/probe.o", work),
-                sizeof pobj) ||
-            ovf(snprintf(text, sizeof text,
-                         "#include <stdlib.h>\n#include <stdio.h>\n"
-                         "#include <string.h>\n#include <unistd.h>\n"
-                         "#include <wchar.h>\n"
-                         "void *zcl_probe_sink;\n"
-                         "void zcl_probe(void) { zcl_probe_sink = "
-                         "(void *)&%s; }\n", fn),
-                sizeof text)) {
-            free(m);
-            return 2;
-        }
-        if (fmd_write_file(src, text) != 0) {
-            free(m);
-            return 2;
-        }
-        int rc0 = fmd_compile(src, pobj, "-O0", &m->cc);
-        int rc2 = fmd_compile(src, pobj, "-O2", &m->cc);
-        if (rc0 < 0 || rc2 < 0) {
-            free(m);
-            return 2;
-        }
-        if (rc0 != 0 && rc2 == 0 && m->nmasked < FMD_MAX_MASKED) {
-            snprintf(m->masked[m->nmasked], FMD_NAME, "%s", fn);
-            m->nmasked++;
-        }
-    }
+    return 0;
+}
+
+/* Measures one candidate. Returns 0 measured (masked flag in *masked),
+ * 2 internal error. */
+static int fmd_probe_one(const char *work, const char *fn,
+                         const struct fmd_cc *cc, int *masked)
+{
+    *masked = 0;
+    char src[FMD_PATH], pobj[FMD_PATH], text[640];
+    if (ovf(snprintf(src, sizeof src, "%s/probe.c", work), sizeof src) ||
+        ovf(snprintf(pobj, sizeof pobj, "%s/probe.o", work), sizeof pobj) ||
+        ovf(snprintf(text, sizeof text,
+                     "#include <stdlib.h>\n#include <stdio.h>\n"
+                     "#include <string.h>\n#include <unistd.h>\n"
+                     "#include <wchar.h>\n"
+                     "void *zcl_probe_sink;\n"
+                     "void zcl_probe(void) { zcl_probe_sink = "
+                     "(void *)&%s; }\n", fn),
+            sizeof text))
+        return 2;
+    if (fmd_write_file(src, text) != 0)
+        return 2;
+    int rc0 = fmd_compile(src, pobj, "-O0", cc);
+    int rc2 = fmd_compile(src, pobj, "-O2", cc);
+    if (rc0 < 0 || rc2 < 0)
+        return 2;
+    *masked = (rc0 != 0 && rc2 == 0);
+    return 0;
+}
+
+static int fmd_meas_regexes(struct fmd_meas *m)
+{
     int e1 = regcomp(&m->re_inc,
                      "^[[:space:]]*#[[:space:]]*include", REG_EXTENDED);
     int e2 = regcomp(&m->re_def,
@@ -281,23 +259,40 @@ int fmd_meas_create(const char *work, struct fmd_meas **out)
             regfree(&m->re_inc);
         if (e2 == 0)
             regfree(&m->re_def);
-        free(m);
         return 2;
     }
     m->re_ok = 1;
-    *out = m;
     return 0;
 }
 
-void fmd_meas_free(struct fmd_meas *m)
+struct fmd_meas *fmd_meas_static(void)
 {
-    if (!m)
-        return;
-    if (m->re_ok) {
-        regfree(&m->re_inc);
-        regfree(&m->re_def);
+    return &g_fmd_meas;
+}
+
+int fmd_meas_create(const char *work, struct fmd_meas *m)
+{
+    memset(m, 0, sizeof *m);
+    fmd_cc_init(&m->cc);
+    if (fmd_ctl_probe(work, m))
+        return 2;
+    for (size_t i = 0; i < sizeof k_fmd_candidates /
+                            sizeof k_fmd_candidates[0]; i++) {
+        int masked = 0;
+        if (fmd_probe_one(work, k_fmd_candidates[i], &m->cc, &masked))
+            return 2;
+        if (masked) {
+            if (m->nmasked >= FMD_MAX_MASKED) {
+                fprintf(stderr, "%s: masked set exceeds %d\n", k_fmd_gate,
+                        FMD_MAX_MASKED);
+                return 2;
+            }
+            snprintf(m->masked[m->nmasked], FMD_NAME, "%s",
+                     k_fmd_candidates[i]);
+            m->nmasked++;
+        }
     }
-    free(m);
+    return fmd_meas_regexes(m);
 }
 
 int fmd_meas_nmasked(const struct fmd_meas *m) { return m->nmasked; }
@@ -372,24 +367,21 @@ static int fmd_scan_cb(void *vp, const char *line, size_t len)
 int fmd_scan_file(const char *path, const struct fmd_meas *m, char *hits,
                   size_t cap)
 {
-    struct fmd_scan1 *s = calloc(1, sizeof *s);
-    if (!s)
-        return 2;
-    memset(s, 0, sizeof *s);
-    s->m = m;
-    int rc = lc_each_line(path, fmd_scan_cb, s, 1);
+    static struct fmd_scan1 s;
+    memset(&s, 0, sizeof s);
+    s.m = m;
+    int rc = lc_each_line(path, fmd_scan_cb, &s, 1);
     int out = 2;
     if (rc != 0) {
         fprintf(stderr, "%s: cannot read %s — refusing to report it clean\n",
                 k_fmd_gate, path);
-    } else if (s->any && !s->guarded) {
+    } else if (s.any && !s.guarded) {
         if (hits)
-            snprintf(hits, cap, "%s", s->hits);
+            snprintf(hits, cap, "%s", s.hits);
         out = 1;
     } else {
         out = 0;
     }
-    free(s);
     return out;
 }
 
@@ -398,16 +390,10 @@ int fmd_scan_file(const char *path, const struct fmd_meas *m, char *hits,
 static int fmd_off_add(struct fmd_run_ctx *c, const char *path,
                        const char *hits)
 {
-    if (c->n == c->cap) {
-        size_t ncap = c->cap ? c->cap * 2 : FMD_OFF_CAP;
-        struct fmd_off *no = malloc(ncap * sizeof *no);
-        if (!no)
-            return -1;
-        if (c->n)
-            memcpy(no, c->offs, c->n * sizeof *no);
-        free(c->offs);
-        c->offs = no;
-        c->cap = ncap;
+    if (c->n >= FMD_OFF_CAP) {
+        fprintf(stderr, "%s: offenders exceed %d\n", k_fmd_gate,
+                FMD_OFF_CAP);
+        return -1;
     }
     snprintf(c->offs[c->n].path, FMD_PATH, "%s", path);
     snprintf(c->offs[c->n].hits, FMD_HITS, "%s", hits);
@@ -470,13 +456,11 @@ static void fmd_report_fail(const struct fmd_run_ctx *c, const char *mset,
 int check_fortify_masked_decls_run(int argc, char **argv)
 {
     const char *root = (argc >= 1 && argv[0] && argv[0][0]) ? argv[0] : ".";
-    char work[] = "/tmp/fortify-masked-decls.XXXXXX";
-    if (!mkdtemp(work)) {
-        fprintf(stderr, "%s: cannot create work dir\n", k_fmd_gate);
+    static char work[FMD_PATH];
+    if (lint_mkdtemp(work, sizeof work, "fmd") != 0)
         return 2;
-    }
-    struct fmd_meas *m = NULL;
-    int rc = fmd_meas_create(work, &m);
+    struct fmd_meas *m = fmd_meas_static();
+    int rc = fmd_meas_create(work, m);
     rap_rm_rf(work);
     if (rc)
         return 2;
@@ -487,29 +471,22 @@ int check_fortify_masked_decls_run(int argc, char **argv)
                "  declaration behind optimisation (control probe compiled, "
                "so the\n  measurement ran). CC=\"%s\"\n",
                k_fmd_gate, m->cc.shown);
-        fmd_meas_free(m);
         return 0;
     }
-    struct fmd_run_ctx c;
+    static struct fmd_run_ctx c;
     memset(&c, 0, sizeof c);
     c.m = m;
     c.root = root;
     char bad[8] = {0};
     int grc = lint_git_index_foreach(fmd_index_cb, &c, bad);
     if (c.err || grc) {
-        free(c.offs);
-        fmd_meas_free(m);
         fprintf(stderr, "%s: index scan failed\n", k_fmd_gate);
         return 2;
     }
     if (c.n > 0) {
         fmd_report_fail(&c, mset, m->cc.shown);
-        free(c.offs);
-        fmd_meas_free(m);
         return 1;
     }
-    free(c.offs);
-    fmd_meas_free(m);
     printf("%s: PASSED (masked set:%s; no unguarded caller)\n", k_fmd_gate,
            mset);
     return 0;
