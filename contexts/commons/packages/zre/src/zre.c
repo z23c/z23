@@ -839,6 +839,30 @@ typedef struct {
   uint32_t *seen, gen;
 } vm;
 
+/* Push a continuation thread with its pc advanced by rel, if the work
+ * stack has room. */
+static void push_thread(vm *v, thread t, int32_t rel) {
+  if (v->nstack < v->capstack) {
+    v->stack[v->nstack] = t;
+    v->stack[v->nstack].pc += rel;
+    v->nstack++;
+  }
+}
+
+/* Push both branches of a split onto the work stack. */
+static void push_split(vm *v, thread t, const inst *in) {
+  /* Push the fallback first so the preferred x branch pops first:
+   * depth-first in priority order, like recursive addthread. */
+  if (v->nstack + 2 > v->capstack)
+    return; /* unreachable by sizing */
+  v->stack[v->nstack] = t;
+  v->stack[v->nstack].pc += in->y;
+  v->nstack++;
+  v->stack[v->nstack] = t;
+  v->stack[v->nstack].pc += in->x;
+  v->nstack++;
+}
+
 /* Expand epsilon closures (SPLIT/JMP/SAVE/BOL/EOL) of (pc, slots) at input
  * position pos, appending real (CHAR/CLASS/ANY/MATCH) threads to list.
  * Split x-branches are pushed last so they pop first: depth-first in
@@ -859,45 +883,22 @@ static void addthread(vm *v, const zre_prog *p, thread **list, size_t *nl,
     const inst *in = &p->code[t.pc];
     switch (in->op) {
     case OP_SPLIT:
-      /* Push the fallback first so the preferred x branch pops first:
-       * depth-first in priority order, like recursive addthread. */
-      if (v->nstack + 2 > v->capstack)
-        break; /* unreachable by sizing */
-      v->stack[v->nstack] = t;
-      v->stack[v->nstack].pc += in->y;
-      v->nstack++;
-      v->stack[v->nstack] = t;
-      v->stack[v->nstack].pc += in->x;
-      v->nstack++;
+      push_split(v, t, in);
       break;
     case OP_SAVE:
       t.slots[in->x] = pos;
-      if (v->nstack < v->capstack) {
-        v->stack[v->nstack] = t;
-        v->stack[v->nstack].pc += 1;
-        v->nstack++;
-      }
+      push_thread(v, t, 1);
       break;
     case OP_JMP:
-      if (v->nstack < v->capstack) {
-        v->stack[v->nstack] = t;
-        v->stack[v->nstack].pc += in->x;
-        v->nstack++;
-      }
+      push_thread(v, t, in->x);
       break;
     case OP_BOL:
-      if (pos == 0 && v->nstack < v->capstack) {
-        v->stack[v->nstack] = t;
-        v->stack[v->nstack].pc += 1;
-        v->nstack++;
-      }
+      if (pos == 0)
+        push_thread(v, t, 1);
       break;
     case OP_EOL:
-      if (pos == textlen && v->nstack < v->capstack) {
-        v->stack[v->nstack] = t;
-        v->stack[v->nstack].pc += 1;
-        v->nstack++;
-      }
+      if (pos == textlen)
+        push_thread(v, t, 1);
       break;
     default: /* CHAR, CLASS, ANY, MATCH */
       (*list)[(*nl)++] = t;
