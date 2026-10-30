@@ -1898,19 +1898,19 @@ Z23_FLAG("ZCL_R1CS_REF", "env_test", "-", "-",
 Z23_FLAG("ZCL_RAM_SCRATCH_ROOT", "env_runtime", "-", "-",
           "undocumented; first use platform/modules/platform/src/ram_scratch.c:auto")
 Z23_FLAG("ZCL_READ_LEAF_BASELINE", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_read_leaf_no_boot_ceremony.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_read_leaf_no_boot_ceremony.c:auto")
 Z23_FLAG("ZCL_READ_LEAF_CORPUS_FLOOR", "env_build", "300", "-",
-          "undocumented; first use tools/lint/check_read_leaf_no_boot_ceremony.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_read_leaf_no_boot_ceremony.c:auto")
 Z23_FLAG("ZCL_READ_LEAF_DEF_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_read_leaf_no_boot_ceremony.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_read_leaf_no_boot_ceremony.c:auto")
 Z23_FLAG("ZCL_READ_LEAF_FN_FLOOR", "env_build", "2000", "-",
-          "undocumented; first use tools/lint/check_read_leaf_no_boot_ceremony.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_read_leaf_no_boot_ceremony.c:auto")
 Z23_FLAG("ZCL_READ_LEAF_LEAF_FLOOR", "env_build", "160", "-",
-          "undocumented; first use tools/lint/check_read_leaf_no_boot_ceremony.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_read_leaf_no_boot_ceremony.c:auto")
 Z23_FLAG("ZCL_READ_LEAF_READ_FLOOR", "env_build", "60", "-",
-          "undocumented; first use tools/lint/check_read_leaf_no_boot_ceremony.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_read_leaf_no_boot_ceremony.c:auto")
 Z23_FLAG("ZCL_READ_LEAF_RESOLVED_FLOOR", "env_build", "40", "-",
-          "undocumented; first use tools/lint/check_read_leaf_no_boot_ceremony.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_read_leaf_no_boot_ceremony.c:auto")
 Z23_FLAG("ZCL_REAL_CLOCK_GATE_FILE_FLOOR", "env_build", "1", "-",
           "undocumented; first use tools/lint/lintc/gate_no_real_clock_test_deadline.c:auto")
 Z23_FLAG("ZCL_REAL_CLOCK_GATE_SCAN_GLOB", "env_build", "-", "-",

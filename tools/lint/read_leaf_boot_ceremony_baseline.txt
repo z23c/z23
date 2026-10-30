@@ -1,4 +1,4 @@
-# Baseline for tools/lint/check_read_leaf_no_boot_ceremony.sh — SHRINK-ONLY.
+# Baseline for check-read-leaf-no-boot-ceremony (z23-lint) — SHRINK-ONLY.
 #
 # One line per grandfathered violation:  <leaf-path> <banned-symbol>
 #

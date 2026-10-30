@@ -202,7 +202,6 @@ gate_command() {
         check-mint-skip-crypto-offline-only) echo './build/bin/z23-lint check-mint-skip-crypto-offline-only .' ;;
         check-vcs-no-sha1)                 echo './build/bin/z23-lint check-vcs-no-sha1 && tools/dev/source-identity-selftest.sh' ;;
         check-vendor-provenance)           echo 'tools/scripts/test_vendor_provenance.sh' ;;
-        check-read-leaf-no-boot-ceremony)  echo './tools/lint/check_read_leaf_no_boot_ceremony.sh' ;;
         check-telemetry-ontology)          echo './tools/lint/check_telemetry_ontology.sh' ;;
         check-sync-state-no-ordinal)     echo './tools/scripts/check_sync_state_no_ordinal.sh' ;;
         check-no-snapshot-struct-memcmp)   echo './build/bin/z23-lint check-no-snapshot-struct-memcmp --self-test && ./build/bin/z23-lint check-no-snapshot-struct-memcmp' ;;

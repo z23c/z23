@@ -14467,9 +14467,10 @@ check-command-input-keys: $(LINTC_TOOL)
 # files, which is why this gate follows the CALL GRAPH from the declaration
 # instead of policing one source file. node_db_open_runtime does not escape
 # it: the closure walks on to create_schema.
-check-read-leaf-no-boot-ceremony:
+check-read-leaf-no-boot-ceremony: $(LINTC_TOOL)
 	@echo "══ LINT: read leaf must not reach the boot ceremony ══"
-	@./tools/lint/check_read_leaf_no_boot_ceremony.sh
+	@./build/bin/z23-lint check-read-leaf-no-boot-ceremony --selftest
+	@./build/bin/z23-lint check-read-leaf-no-boot-ceremony
 
 # Gate — telemetry-ontology coverage. Every network telemetry field a covered
 # dumpstate function emits must carry a machine-readable meaning row (what it

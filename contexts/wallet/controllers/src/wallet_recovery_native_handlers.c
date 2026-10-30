@@ -17,7 +17,7 @@
  * rename() of the operator's node.db to node.db.corrupt-<ts> followed by a
  * fresh empty one — and `datadir` defaults to the LIVE datadir, so the
  * documented invocation of a read command destroyed the wallet it was
- * asked about. Gated by tools/lint/check_read_leaf_no_boot_ceremony.sh and
+ * asked about. Gated by check-read-leaf-no-boot-ceremony (z23-lint) and
  * proven on disk by tests/harness/src/test_read_leaf_no_datadir_write.c.
  * `restore` is a COMMAND and writes on purpose; it is not held to this.
  *

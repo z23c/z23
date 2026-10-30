@@ -153,6 +153,7 @@ LINT_GATE("check-promotion-receipt-chain", check_promotion_receipt_chain, LINT_C
 LINT_GATE("check-platform-header-guards", check_platform_header_guards, LINT_CMD_PAIR)
 LINT_GATE("check-object-reproducible", check_object_reproducible, LINT_CMD_NONE)
 LINT_GATE("riscv64-universal", riscv64_universal, LINT_CMD_NONE)
+LINT_GATE("check-read-leaf-no-boot-ceremony", check_read_leaf_no_boot_ceremony, LINT_CMD_PAIR)
 LINT_GATE("check-tor-full-default", check_tor_full_default, LINT_CMD_PAIR)
 LINT_GATE("check-installed-acceptance-tools", check_installed_acceptance_tools, LINT_CMD_PLAIN)
 LINT_GATE("check-ship-remote-transaction", check_ship_remote_transaction, LINT_CMD_NONE)
