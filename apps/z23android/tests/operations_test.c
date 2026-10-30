@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 
@@ -240,6 +241,63 @@ static void node_cases(struct zapp_runtime *r, const char *self, const char *dir
     assert(zapp_node_stop(r, out, sizeof(out)) && !strcmp(out, "The local node is stopped.") && !zapp_node_wanted(r));
     earlier_cases(r, self, directory);
 }
+static bool pace_file_is(const char *directory, const char *word)
+{
+    char file[300], got[16] = "";
+    snprintf(file, sizeof(file), "%s/pace", directory);
+    FILE *f = fopen(file, "r");
+    if (!f) return false;
+    size_t n = fread(got, 1, sizeof(got) - 1, f);
+    fclose(f);
+    return n == strlen(word) && !strcmp(got, word);
+}
+static void pace_failure_tests(struct zapp_runtime *r, const char *directory)
+{
+    char temporary[300];
+    snprintf(temporary, sizeof(temporary), "%s/pace.tmp", directory);
+    /* A planted symlink at the temporary name is refused and the recorded pace is kept. */
+    assert(symlink("/nonexistent", temporary) == 0);
+    assert(!zapp_node_pace_write(r, ZAPP_PACE_NORMAL) && zapp_node_pace(r) == ZAPP_PACE_PAUSE);
+    assert(pace_file_is(directory, "pause") && unlink(temporary) == 0);
+    /* A read-only directory fails without changing the recorded pace or the file. */
+    assert(chmod(directory, 0500) == 0);
+    if (geteuid() != 0) {
+        assert(!zapp_node_pace_write(r, ZAPP_PACE_NORMAL) && zapp_node_pace(r) == ZAPP_PACE_PAUSE);
+        assert(pace_file_is(directory, "pause"));
+    }
+    assert(chmod(directory, 0700) == 0);
+    struct zapp_runtime missing = {0};
+    assert(snprintf(missing.directory, sizeof(missing.directory), "%s/absent", directory) > 0);
+    assert(!zapp_node_pace_write(&missing, ZAPP_PACE_GENTLE));
+    assert(zapp_node_pace(&missing) == ZAPP_PACE_NORMAL);
+}
+static void pace_tests(void)
+{
+    char directory[] = "/tmp/zapp-pace-test-XXXXXX", file[300], temporary[300];
+    assert(mkdtemp(directory));
+    struct zapp_runtime r = {0};
+    assert(snprintf(r.directory, sizeof(r.directory), "%s", directory) > 0);
+    snprintf(file, sizeof(file), "%s/pace", directory);
+    snprintf(temporary, sizeof(temporary), "%s/pace.tmp", directory);
+    assert(zapp_node_pace(&r) == ZAPP_PACE_NORMAL && access(file, F_OK) != 0);
+    /* A file left by an earlier run is replaced by the first write even when it says normal. */
+    FILE *stale = fopen(file, "w");
+    assert(stale && fputs("pause", stale) >= 0 && fclose(stale) == 0);
+    assert(zapp_node_pace_write(&r, ZAPP_PACE_NORMAL) && pace_file_is(directory, "normal"));
+    assert(zapp_node_pace_write(&r, ZAPP_PACE_GENTLE) && pace_file_is(directory, "gentle"));
+    assert(zapp_node_pace(&r) == ZAPP_PACE_GENTLE && access(temporary, F_OK) != 0);
+    struct stat st;
+    assert(stat(file, &st) == 0 && (st.st_mode & 0777) == 0600);
+    /* An unchanged pace does not touch the file. */
+    assert(unlink(file) == 0);
+    assert(zapp_node_pace_write(&r, ZAPP_PACE_GENTLE) && access(file, F_OK) != 0);
+    assert(zapp_node_pace_write(&r, ZAPP_PACE_PAUSE) && pace_file_is(directory, "pause"));
+    assert(!zapp_node_pace_write(&r, (enum zapp_pace)7) && zapp_node_pace(&r) == ZAPP_PACE_PAUSE);
+    pace_failure_tests(&r, directory);
+    assert(zapp_node_pace_write(&r, ZAPP_PACE_NORMAL) && pace_file_is(directory, "normal"));
+    assert(unlink(file) == 0 && rmdir(directory) == 0);
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 3 && (!strcmp(argv[2], "orphan") || !strcmp(argv[2], "saving"))) return orphan(argv[2], argv[1]);
@@ -247,6 +305,7 @@ int main(int argc, char **argv)
     if (argc > 1) return child(argc, argv);
     balance_tests();
     plain_text_tests();
+    pace_tests();
     struct zapp_runtime r = {0};
     assert(pthread_mutex_init(&r.mutex, NULL) == 0);
     assert(snprintf(r.executable, sizeof(r.executable), "%s", argv[0]) > 0);

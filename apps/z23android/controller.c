@@ -38,6 +38,7 @@ struct controller {
     char asked[96];                               /* Question last answered by the model. */
     atomic_bool reply_cancel;
     atomic_bool voice_cancel, voice_stop;
+    pthread_mutex_t pace_lock; /* Serializes thermal callbacks: previous pace, file write, view. */
 };
 static pthread_mutex_t startup_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct controller *current;
@@ -129,6 +130,21 @@ static void refresh_suggestion(struct controller *c)
                     c->view.fleet_stale ? NULL : c->view.fleet_status, c->asked,
                     c->view.suggestion, sizeof(c->view.suggestion));
 }
+/* Runs on a platform binder thread; the pace file write is small and done inline. */
+#ifdef __ANDROID__
+static void thermal_status(int status, void *ctx)
+{
+    struct controller *c = ctx;
+    pthread_mutex_lock(&c->pace_lock);
+    enum zapp_pace next = zapp_pace_next(zapp_node_pace(&c->runtime), status);
+    bool changed = next != zapp_node_pace(&c->runtime);
+    if (zapp_node_pace_write(&c->runtime, next) && changed) {
+        pthread_mutex_lock(&c->lock); c->view.pace = next; pthread_mutex_unlock(&c->lock);
+        notify_view(c);
+    }
+    pthread_mutex_unlock(&c->pace_lock);
+}
+#endif
 static void observe_node(struct controller *c)
 {
     char *output = calloc(1, ZAPP_TEXT_CAP);
@@ -630,6 +646,7 @@ bool zapp_controller_start(const char *files, const char *libs, bool preview, vo
     atomic_init(&c->reply_cancel, false);
     atomic_init(&c->voice_cancel, false);
     atomic_init(&c->voice_stop, false);
+    c->pace_lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
     if (pthread_mutex_init(&c->lock, NULL)) goto fail;
     if (pthread_cond_init(&c->changed, NULL)) { pthread_mutex_destroy(&c->lock); goto fail; }
     if (!zapp_runtime_init(&c->runtime, files, libs, preview)) { pthread_cond_destroy(&c->changed); pthread_mutex_destroy(&c->lock); goto fail; }
@@ -646,6 +663,11 @@ bool zapp_controller_start(const char *files, const char *libs, bool preview, vo
         zapp_runtime_destroy(&c->runtime); pthread_cond_destroy(&c->changed); pthread_mutex_destroy(&c->lock); goto fail;
     }
     pthread_detach(thread); current = c;
+#ifdef __ANDROID__
+    /* The listener outlives the activity: the foreground service keeps the process, and so the pace,
+     * alive while the app is hidden. The controller lives as long as the process. */
+    (void)zapp_thermal_start(thermal_status, c);
+#endif
     pthread_mutex_unlock(&startup_lock); return true;
 fail:
     free(c); pthread_mutex_unlock(&startup_lock); return false;

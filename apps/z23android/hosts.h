@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "thermal.h"
 /* Formats the laptop host's fleet snapshot as a headline and one block per host.
  * Unknown or missing values are shown as unknown, never as zero. */
 bool zapp_hosts_format(const char *json, char *out, size_t cap);
@@ -24,6 +25,11 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
                            int64_t target, int64_t peers, char *out, size_t cap);
 /* The sentence under More that adds what the node line does not say: how many blocks are left,
  * or that none are. Arguments as for zapp_node_line. Returns out. */
+/* The main-screen node line for the pace in effect: while the phone is warm the node says so instead
+ * of its sync progress. node_line is used for a normal pace or when the node process is not running.
+ * Returns out. */
+const char *zapp_paced_line(enum zapp_pace pace, bool process_running, const char *node_line,
+                            char *out, size_t cap);
 const char *zapp_sync_line(bool responding, bool process_running, int64_t height, int64_t target,
                            char *out, size_t cap);
 /* Hosts not in sync in a zapp_hosts_format report, read from its headline; 0 for an empty or

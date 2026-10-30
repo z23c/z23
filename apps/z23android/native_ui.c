@@ -703,10 +703,11 @@ static void render_node(JNIEnv *env, const struct zapp_view *view)
 /* Two lines at the top: the phone node and, while a laptop host is paired, the fleet headline. */
 static void render_status(JNIEnv *env, const struct zapp_view *view)
 {
-    char fleet[160], status[320];
+    char fleet[160], status[320], node[96];
     zapp_fleet_line(view->fleet_status, view->fleet_stale, view->fleet_paired, fleet, sizeof(fleet));
     snprintf(status, sizeof(status), "%s%s%s", voice_preview ?
-             "Preview · separate from your main node" : view->node_line, fleet[0] ? "\n" : "", fleet);
+             "Preview · separate from your main node" :
+             zapp_paced_line(view->pace, view->node_running || view->node_process_running, view->node_line, node, sizeof(node)), fleet[0] ? "\n" : "", fleet);
     (void)text(env, status_view, status);
     bool running = view->node_running || view->node_process_running;
     bool shown = !voice_preview && !view->busy;

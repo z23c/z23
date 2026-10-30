@@ -146,8 +146,13 @@ Thermal pace. `thermal.c` maps the Android thermal status to a node pace with
 hysteresis: NONE and LIGHT give normal pace, MODERATE and SEVERE give gentle
 pace, and CRITICAL or above pauses the node. A paused node leaves the pause at
 MODERATE or below, and returns to normal pace only at LIGHT or below. `zapp_thermal_start`
-registers the platform listener through the NDK thermal API; the node does not yet
-apply this pace.
+registers the platform listener through the NDK thermal API. The app registers it when it
+starts and keeps it while hidden, because the foreground service keeps the process alive. When the pace
+changes the app replaces the one-word file `pace` (`normal`, `gentle` or `pause`) in the node data
+directory by writing a temporary file, syncing it and renaming it; the first status after start always
+writes, replacing a file left by an earlier run. A missing file means normal. The main status line reads
+"Syncing gently · phone is warm" at gentle pace and "Sync paused · phone is cooling down" at pause
+while the node runs. The node applies the pace in a separate change.
 
 ## Private voice and fleet host
 

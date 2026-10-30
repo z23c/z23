@@ -3,6 +3,9 @@
 #include "operations.h"
 #include "json/json.h"
 #include "base/cleanse.h"
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -189,6 +192,54 @@ bool zapp_node_wanted(const struct zapp_runtime *r)
 {
     char marker[1100];
     return !r->preview && path(marker, sizeof(marker), r->state_root, "node-on") && access(marker, F_OK) == 0;
+}
+enum zapp_pace zapp_node_pace(const struct zapp_runtime *r)
+{
+    return r->pace_set ? r->pace : ZAPP_PACE_NORMAL;
+}
+static void pace_error(const char *step, const char *file)
+{
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_ERROR, "z23", "node pace: %s %s failed: %s", step, file, strerror(errno));
+#else
+    fprintf(stderr, "z23: node pace: %s %s failed: %s\n", step, file, strerror(errno));
+#endif
+}
+static bool write_all(int fd, const char *text, size_t length)
+{
+    while (length) {
+        ssize_t n = write(fd, text, length);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return false;
+        text += n; length -= (size_t)n;
+    }
+    return true;
+}
+/* Writes word to a temporary file beside final and renames it into place. */
+static bool replace_file(const char *final, const char *temporary, const char *word)
+{
+    int fd = open(temporary, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) { pace_error("open", temporary); return false; }
+    bool ok = write_all(fd, word, strlen(word));
+    if (!ok) pace_error("write", temporary);
+    if (ok && fsync(fd) != 0) { pace_error("fsync", temporary); ok = false; }
+    if (close(fd) != 0 && ok) { pace_error("close", temporary); ok = false; }
+    if (ok && rename(temporary, final) != 0) { pace_error("rename", final); ok = false; }
+    if (!ok) (void)unlink(temporary);
+    return ok;
+}
+bool zapp_node_pace_write(struct zapp_runtime *r, enum zapp_pace pace)
+{
+    static const char *const words[] = {"normal", "gentle", "pause"};
+    if (pace < ZAPP_PACE_NORMAL || pace > ZAPP_PACE_PAUSE) return false;
+    if (r->pace_set && r->pace == pace) return true;
+    char final[1100], temporary[1100];
+    if (!path(final, sizeof(final), r->directory, "pace") || !path(temporary, sizeof(temporary), r->directory, "pace.tmp")) {
+        errno = ENAMETOOLONG; pace_error("path", "pace"); return false;
+    }
+    if (!replace_file(final, temporary, words[pace])) return false;
+    r->pace = pace; r->pace_set = true;
+    return true;
 }
 /* Starts the node with its console in app-console.log and begins forwarding what it writes there. */
 static int spawn_node(struct zapp_runtime *r)

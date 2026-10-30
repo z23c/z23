@@ -3,6 +3,7 @@
 #define ZAPP_OPERATIONS_H
 #include "app.h"
 #include "nodelog.h"
+#include "thermal.h"
 #include <pthread.h>
 #include <sys/types.h>
 struct zapp_runtime {
@@ -17,6 +18,9 @@ struct zapp_runtime {
     bool preview;
     /* Shutdown was requested from a node that has not exited yet. */
     bool stop_sent;
+    /* Last pace written to <directory>/pace; unset until the first write. Callers serialize. */
+    bool pace_set;
+    enum zapp_pace pace;
     /* Forwards the node console log to logcat and tracks its boot stage. */
     struct zapp_nodelog log;
 };
@@ -33,6 +37,13 @@ bool zapp_node_stop(struct zapp_runtime *r, char *out, size_t cap);
 const char *zapp_node_stage(struct zapp_runtime *r);
 /* True after the owner chose Start node, until Stop node runs; always false in the preview package. */
 bool zapp_node_wanted(const struct zapp_runtime *r);
+/* The pace last written by zapp_node_pace_write, normal before the first write. */
+enum zapp_pace zapp_node_pace(const struct zapp_runtime *r);
+/* Tells the node how hard to sync by atomically replacing <directory>/pace with the pace word
+ * (normal, gentle or pause). The first call always writes, replacing a file left by an earlier run;
+ * later calls with an unchanged pace do nothing. Returns false and logs when the file cannot be
+ * replaced, leaving the recorded pace unchanged. Not thread safe; callers serialize. */
+bool zapp_node_pace_write(struct zapp_runtime *r, enum zapp_pace pace);
 bool zapp_operation_run(struct zapp_runtime *r, const char *id, char *out, size_t cap);
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
 bool zapp_balance_format(const char *json, char *out, size_t cap);

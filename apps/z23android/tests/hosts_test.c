@@ -191,6 +191,14 @@ int main(void)
                    "Node in sync · 3,301,553 · 1 peer"));
     assert(!strcmp(zapp_node_line(true, true, false, 3301554, 3301553, -1, line, sizeof(line)),
                    "Node in sync · 3,301,554"));
+    const char *sync_text = "Node catching up · 3,301,133 of 3,301,537";
+    assert(!strcmp(zapp_paced_line(ZAPP_PACE_NORMAL, true, sync_text, line, sizeof(line)), sync_text));
+    assert(!strcmp(zapp_paced_line(ZAPP_PACE_GENTLE, true, sync_text, line, sizeof(line)),
+                   "Syncing gently · phone is warm"));
+    assert(!strcmp(zapp_paced_line(ZAPP_PACE_PAUSE, true, sync_text, line, sizeof(line)),
+                   "Sync paused · phone is cooling down"));
+    assert(!strcmp(zapp_paced_line(ZAPP_PACE_PAUSE, false, "Node stopped", line, sizeof(line)), "Node stopped"));
+    assert(!strcmp(zapp_paced_line(ZAPP_PACE_GENTLE, true, sync_text, line, 8), "Syncing"));
     assert(!strcmp(zapp_sync_line(false, false, -1, -1, line, sizeof(line)),
                    "Start the node to begin synchronization."));
     assert(!strcmp(zapp_sync_line(false, true, -1, -1, line, sizeof(line)), "Waiting for the node to answer."));

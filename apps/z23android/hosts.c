@@ -65,6 +65,15 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
     else snprintf(out, cap, "Node catching up · %s of %s", zapp_grouped(height, at), zapp_grouped(target, top));
     return out;
 }
+const char *zapp_paced_line(enum zapp_pace pace, bool process_running, const char *node_line,
+                            char *out, size_t cap)
+{
+    const char *text = node_line;
+    if (process_running && pace == ZAPP_PACE_GENTLE) text = "Syncing gently · phone is warm";
+    else if (process_running && pace == ZAPP_PACE_PAUSE) text = "Sync paused · phone is cooling down";
+    snprintf(out, cap, "%s", text ? text : "");
+    return out;
+}
 const char *zapp_sync_line(bool responding, bool process_running, int64_t height, int64_t target,
                            char *out, size_t cap)
 {
