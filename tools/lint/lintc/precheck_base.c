@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/auxv.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -170,9 +171,24 @@ static int pb_ensure_tree(const struct precheck_base *b)
     return precheck_base_git(NULL, add, NULL, 0) == 0 ? 0 : -1;
 }
 
+/* The base gates run in-process, so cached rcs are only valid for the lint
+ * binary that produced them: key the cache on this binary's size and mtime. */
+static const char *pb_binary_tag(char *out, size_t cap)
+{
+    struct stat st;
+    const char *exe = (const char *)getauxval(AT_EXECFN);
+    if (!exe || stat(exe, &st) != 0)
+        snprintf(out, cap, "unknown-%ld", (long)getpid());
+    else
+        snprintf(out, cap, "%llx-%llx%llx", (unsigned long long)st.st_size,
+                 (unsigned long long)st.st_mtim.tv_sec,
+                 (unsigned long long)st.st_mtim.tv_nsec);
+    return out;
+}
+
 int precheck_base_open(struct precheck_base *b, char *why, size_t wcap)
 {
-    char cache[PATH_MAX - 64];
+    char cache[PATH_MAX - 64], tag[48];
     memset(b, 0, sizeof *b);
     b->lock_fd = -1;
     if (pb_resolve_sha(b, why, wcap) != 0)
@@ -182,8 +198,8 @@ int precheck_base_open(struct precheck_base *b, char *why, size_t wcap)
         return 2;
     }
     snprintf(b->tree, sizeof b->tree, "%s/base-tree", cache);
-    snprintf(b->results, sizeof b->results, "%s/base-native-%s.txt", cache,
-             b->sha);
+    snprintf(b->results, sizeof b->results, "%s/base-native-%s-%s.txt", cache,
+             b->sha, pb_binary_tag(tag, sizeof tag));
     b->lock_fd = pb_lock(cache);
     if (b->lock_fd < 0) {
         snprintf(why, wcap, "cannot lock the precheck cache");
@@ -213,7 +229,8 @@ int precheck_base_lookup(const struct precheck_base *b, const char *name,
     if (!f)
         return 1;
     while (hit && fgets(line, sizeof line, f)) {
-        if (sscanf(line, "%255s %d", key, &got) == 2 && strcmp(key, name) == 0) {
+        if (sscanf(line, "%255s %d", key, &got) == 2
+            && strcmp(key, name) == 0) {
             *rc = got;
             hit = 0;
         }

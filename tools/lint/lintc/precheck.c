@@ -54,7 +54,8 @@ struct pc_slot {
 };
 
 static const char k_pc_usage[] =
-    "z23-lint: usage: z23-lint precheck [--base=DIR] [--jobs=N] [--gates=a,b]\n";
+    "z23-lint: usage: z23-lint precheck [--base=DIR] [--jobs=N] "
+    "[--gates=a,b]\n";
 
 static bool pc_parse_jobs(const char *s, int *out)
 {

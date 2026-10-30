@@ -6,7 +6,8 @@
  * precheck_base_close), and leaves <cache>/base-tree checked out detached at
  * that sha. <cache> is $ZCL_PRECHECK_CACHE, default
  * $HOME/.cache/development-scratch/z23/precheck. Base gate results are kept in
- * <cache>/base-native-<sha>.txt, one `gate rc` line each.
+ * <cache>/base-native-<sha>-<binary>.txt (binary = lint exe size+mtime), one
+ * `gate rc` line each.
  */
 #ifndef LINTC_PRECHECK_BASE_H
 #define LINTC_PRECHECK_BASE_H
