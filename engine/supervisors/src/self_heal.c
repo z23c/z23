@@ -79,10 +79,10 @@ static const char *const k_hold_exempt[] = {
 static bool self_heal_hold_skips(const struct condition *cond)
 {
     if (!node_pace_hold_recovery())
-        return false;
+        return false;  // raw-return-ok:hold-predicate-not-a-failure
     for (size_t i = 0; i < sizeof(k_hold_exempt) / sizeof(k_hold_exempt[0]); i++)
         if (strcmp(cond->name, k_hold_exempt[i]) == 0)
-            return false;
+            return false;  // raw-return-ok:hold-predicate-not-a-failure
     return true;
 }
 
