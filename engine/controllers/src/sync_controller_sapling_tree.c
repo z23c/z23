@@ -572,6 +572,75 @@ static int sapling_rebuild_replayed_blocks(int start_height, int chain_tip)
     return (chain_tip >= start_height) ? (chain_tip - start_height + 1) : 0;
 }
 
+/* Locate the block at h and read it into blk. A SKIP is accounted here; a
+ * FAIL names the reason. A failed read frees blk before the skip is noted, so
+ * blk is only valid when the result is SAPLING_LOCATE_OK. */
+static enum sapling_locate_result sapling_rebuild_locate_and_read(
+        const struct active_chain *chain, const char *datadir, int h,
+        bool fatal, struct sapling_rebuild_skips *sk, int *cached_file,
+        struct sync_block_file_mapping *mapping,
+        const struct block_index **bi_out, const char **fail_reason,
+        struct block *blk)
+{
+    enum sapling_locate_result loc = sapling_rebuild_locate_block(
+        chain, datadir, h, fatal, sk, cached_file, mapping, bi_out,
+        fail_reason);
+    if (loc != SAPLING_LOCATE_OK)
+        return loc;
+    if (sapling_rebuild_read_block(mapping, *bi_out, blk))
+        return SAPLING_LOCATE_OK;
+    block_free(blk);
+    return sapling_rebuild_note_skip(sk, SAPLING_SKIP_DESERIALIZE, h, fatal,
+                                     fail_reason)
+               ? SAPLING_LOCATE_FAIL : SAPLING_LOCATE_SKIP;
+}
+
+/* Every 100 blocks: tick boot progress, then report whether shutdown was
+ * requested so the replay can stop at this height. */
+static bool sapling_rebuild_poll_abort(int h)
+{
+    if ((h % 100) != 0)
+        return false;
+    boot_progress_tick("sapling_tree_rebuild");
+    return sapling_tree_rebuild_shutdown_requested();
+}
+
+/* Name the endpoint root failure: a mismatch when the root is known, else a
+ * missing root. */
+static void sapling_rebuild_tip_failure(const struct block_index *tip,
+                                        bool tip_root_known,
+                                        const char **fail_reason,
+                                        int *fail_height)
+{
+    *fail_reason = tip_root_known ? "tip_sapling_root_mismatch"
+                                  : "tip_missing_sapling_root";
+    *fail_height = tip ? tip->nHeight : -1;
+}
+
+/* Final persist for the success path. A serialize or persist failure sets
+ * the fail reason and height and returns FAILED; DEFERRED is returned as is
+ * for the caller's busy blocker. */
+static enum sapling_persist_status sapling_rebuild_persist_final_checked(
+        struct node_db *ndb, const struct incremental_merkle_tree *tree,
+        int chain_tip, const char **fail_reason, int *fail_height)
+{
+    bool serialized = false;
+    enum sapling_persist_status ps = sapling_rebuild_persist_final(
+        ndb, tree, chain_tip, &serialized);
+    if (!serialized) {
+        *fail_reason = "serialize_final_tree_failed";
+        *fail_height = chain_tip;
+        return ps;
+    }
+    if (ps == SAPLING_PERSIST_DEFERRED)
+        return ps;
+    if (ps == SAPLING_PERSIST_FAILED) {
+        *fail_reason = "persist_final_pair_failed";
+        *fail_height = chain_tip;
+    }
+    return ps;
+}
+
 int sapling_tree_rebuild(struct node_db *ndb,
                          const struct active_chain *chain,
                          const char *datadir)
@@ -717,12 +786,9 @@ int sapling_tree_rebuild(struct node_db *ndb,
 
     int abort_height = -1;
     for (int h = start_height; h <= chain_tip; h++) {
-        if ((h % 100) == 0) {
-            boot_progress_tick("sapling_tree_rebuild");
-            if (sapling_tree_rebuild_shutdown_requested()) {
-                abort_height = h;
-                goto aborted;
-            }
+        if (sapling_rebuild_poll_abort(h)) {
+            abort_height = h;
+            goto aborted;
         }
         if (sapling_rebuild_heartbeat(sup_id, h, &last_heartbeat_ms,
                                       total_commitments))
@@ -731,27 +797,16 @@ int sapling_tree_rebuild(struct node_db *ndb,
                     "commitments_folded=%d", h, chain_tip,
                     total_commitments);
         const struct block_index *bi = NULL;
-        enum sapling_locate_result loc = sapling_rebuild_locate_block(
+        struct block blk;
+        enum sapling_locate_result loc = sapling_rebuild_locate_and_read(
             chain, datadir, h, endpoint_is_coins_applied, &skips,
-            &cached_file, &cached_mapping, &bi, &fail_reason);
+            &cached_file, &cached_mapping, &bi, &fail_reason, &blk);
         if (loc == SAPLING_LOCATE_FAIL) {
             fail_height = h;
             goto fail;
         }
         if (loc == SAPLING_LOCATE_SKIP)
             continue;
-
-        struct block blk;
-        if (!sapling_rebuild_read_block(&cached_mapping, bi, &blk)) {
-            block_free(&blk);
-            if (sapling_rebuild_note_skip(&skips, SAPLING_SKIP_DESERIALIZE, h,
-                                          endpoint_is_coins_applied,
-                                          &fail_reason)) {
-                fail_height = h;
-                goto fail;
-            }
-            continue;
-        }
 
         int appended_this_block =
             sapling_rebuild_fold_block(&tree, &blk, &total_commitments);
@@ -819,21 +874,14 @@ int sapling_tree_rebuild(struct node_db *ndb,
     fflush(stderr);
 
     if (!match) {
-        fail_reason = tip_root_known ? "tip_sapling_root_mismatch"
-                                     : "tip_missing_sapling_root";
-        fail_height = tip ? tip->nHeight : -1;
+        sapling_rebuild_tip_failure(tip, tip_root_known, &fail_reason,
+                                    &fail_height);
         goto fail;
     }
 
     {
-        bool serialized = false;
-        enum sapling_persist_status ps = sapling_rebuild_persist_final(
-            ndb, &tree, chain_tip, &serialized);
-        if (!serialized) {
-            fail_reason = "serialize_final_tree_failed";
-            fail_height = chain_tip;
-            goto fail;
-        }
+        enum sapling_persist_status ps = sapling_rebuild_persist_final_checked(
+            ndb, &tree, chain_tip, &fail_reason, &fail_height);
         if (ps == SAPLING_PERSIST_DEFERRED) {
             /* Busy past the budget: a transient lock condition, not a
              * derived-state disagreement. Name the persist_busy TRANSIENT
@@ -849,11 +897,8 @@ int sapling_tree_rebuild(struct node_db *ndb,
             sapling_rebuild_complete_child(sup_id);
             return -1; // raw-return-ok:logged_above_and_persist_busy_blocker_set
         }
-        if (ps == SAPLING_PERSIST_FAILED) {
-            fail_reason = "persist_final_pair_failed";
-            fail_height = chain_tip;
+        if (ps == SAPLING_PERSIST_FAILED)
             goto fail;
-        }
     }
 
     (void)tree;
