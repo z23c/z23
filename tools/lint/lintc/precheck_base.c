@@ -173,28 +173,37 @@ static int pb_ensure_tree(const struct precheck_base *b)
     return precheck_base_git(NULL, add, NULL, 0) == 0 ? 0 : -1;
 }
 
+/* The running binary's stat, taken before main(). AT_EXECFN may be relative
+ * to the directory the program was started in, and the precheck (and its
+ * tests) chdir into trees later, so a stat at tag time missed the file and
+ * fell back to a pid tag the cache could never match (10-30, r1 verify). */
+static struct stat g_exe_st;
+static bool g_exe_st_ok;
+
+__attribute__((constructor)) static void precheck_base_stat_exe(void)
+{
+#if defined(__linux__)
+    const char *exe = (const char *)getauxval(AT_EXECFN);
+    g_exe_st_ok = exe && stat(exe, &g_exe_st) == 0;
+#endif
+}
+
 /* The base gates run in-process, so cached rcs are only valid for the lint
  * binary that produced them: key the cache on this binary's size and mtime. */
 const char *precheck_base_binary_tag(char *out, size_t cap)
 {
-    struct stat st;
-#if defined(__linux__)
-    const char *exe = (const char *)getauxval(AT_EXECFN);
-#else
-    const char *exe = NULL; /* no AT_EXECFN: pid-keyed tag, never reused */
-#endif
-    if (!exe || stat(exe, &st) != 0)
+    if (!g_exe_st_ok) {
+        /* no AT_EXECFN, or it could not be read: pid-keyed tag, never reused */
         snprintf(out, cap, "unknown-%ld", (long)getpid());
-    else {
-#if defined(__APPLE__)
-        const struct timespec *mt = &st.st_mtimespec;
-#else
-        const struct timespec *mt = &st.st_mtim;
-#endif
-        snprintf(out, cap, "%llx-%llx%llx", (unsigned long long)st.st_size,
-                 (unsigned long long)mt->tv_sec,
-                 (unsigned long long)mt->tv_nsec);
+        return out;
     }
+#if defined(__APPLE__)
+    const struct timespec *mt = &g_exe_st.st_mtimespec;
+#else
+    const struct timespec *mt = &g_exe_st.st_mtim;
+#endif
+    snprintf(out, cap, "%llx-%llx%llx", (unsigned long long)g_exe_st.st_size,
+             (unsigned long long)mt->tv_sec, (unsigned long long)mt->tv_nsec);
     return out;
 }
 
