@@ -490,8 +490,8 @@ job_result_t stage_run_once(stage_t *s, sqlite3 *db)
     }
 
     int64_t run_t0 = GetTimeMicros();
-    pthread_mutex_lock(&s->lock);
     progress_store_tx_lock();
+    pthread_mutex_lock(&s->lock);
 
     /* Load the persisted cursor before invoking the step. We don't
      * trust the cached `s->cursor` because a sibling process (cold
@@ -500,8 +500,8 @@ job_result_t stage_run_once(stage_t *s, sqlite3 *db)
     uint64_t cur = 0;
     bool cursor_existed = false;
     if (!cursor_read(db, s->name, &cur, &cursor_existed)) {
-        progress_store_tx_unlock();
         pthread_mutex_unlock(&s->lock);
+        progress_store_tx_unlock();
         return stage_note_fatal(s, "cursor_read failed (sqlite)");
     }
     s->cursor = cur;
@@ -533,8 +533,8 @@ job_result_t stage_run_once(stage_t *s, sqlite3 *db)
         fprintf(stderr, "[stage] BEGIN: %s\n",  // obs-ok:stage-begin-failure
                 err ? err : "(no message)");
         if (err) sqlite3_free(err);
-        progress_store_tx_unlock();
         pthread_mutex_unlock(&s->lock);
+        progress_store_tx_unlock();
         return stage_note_fatal(s, "BEGIN IMMEDIATE failed");
     }
 
@@ -556,15 +556,15 @@ job_result_t stage_run_once(stage_t *s, sqlite3 *db)
                 (unsigned long long)ctx.cursor_out,
                 (unsigned long long)cur);
             stage_step_rollback(db, batched);
-            progress_store_tx_unlock();
             pthread_mutex_unlock(&s->lock);
+            progress_store_tx_unlock();
             return stage_note_fatal(s, "ADVANCED but cursor did not move");
         }
         if (!cursor_write_locked_known_prev(db, s->name, ctx.cursor_out, cur,
                                             batched, cursor_existed)) {
             stage_step_rollback(db, batched);
-            progress_store_tx_unlock();
             pthread_mutex_unlock(&s->lock);
+            progress_store_tx_unlock();
             return stage_note_fatal(s, "cursor_write failed (sqlite)");
         }
         /* Test-only crash-point seam (see util/stage.h): the cursor write and
@@ -578,8 +578,8 @@ job_result_t stage_run_once(stage_t *s, sqlite3 *db)
                     err ? err : "(no message)");
             if (err) sqlite3_free(err);
             stage_step_rollback(db, batched);
-            progress_store_tx_unlock();
             pthread_mutex_unlock(&s->lock);
+            progress_store_tx_unlock();
             return stage_note_fatal(s, "COMMIT failed");
         }
         s->cursor = ctx.cursor_out;
@@ -612,8 +612,8 @@ job_result_t stage_run_once(stage_t *s, sqlite3 *db)
                     (enum reducer_profile_domain)prof_domain, RPF_BLOCKS, 1);
             }
         }
-        progress_store_tx_unlock();
         pthread_mutex_unlock(&s->lock);
+        progress_store_tx_unlock();
         return JOB_ADVANCED;
     }
 
@@ -621,8 +621,8 @@ job_result_t stage_run_once(stage_t *s, sqlite3 *db)
      * touched scratch state) and surface the result. Batched: undo only this
      * block's savepoint, leaving earlier advanced blocks in the open batch. */
     stage_step_rollback(db, batched);
-    progress_store_tx_unlock();
     pthread_mutex_unlock(&s->lock);
+    progress_store_tx_unlock();
 
     if (r == JOB_BLOCKED) {
         /* Record the blocker if the step filled out an id. Empty id
@@ -692,22 +692,22 @@ static void cursor_txn_rollback(sqlite3 *db, bool batched)
 bool stage_set_cursor(stage_t *s, sqlite3 *db, uint64_t value)
 {
     if (!s || !db) LOG_FAIL("stage", "set_cursor: null arg");
-    pthread_mutex_lock(&s->lock);
     progress_store_tx_lock();
+    pthread_mutex_lock(&s->lock);
     bool batched = stage_batch_active();
     char *err = NULL;
     if (cursor_txn_begin(db, batched, &err) != SQLITE_OK) {
         fprintf(stderr, "[stage] set_cursor BEGIN: %s\n",  // obs-ok:stage-begin-failure
                 err ? err : "(no message)");
         if (err) sqlite3_free(err);
-        progress_store_tx_unlock();
         pthread_mutex_unlock(&s->lock);
+        progress_store_tx_unlock();
         return false;
     }
     if (!cursor_write_locked(db, s->name, value)) {
         cursor_txn_rollback(db, batched);
-        progress_store_tx_unlock();
         pthread_mutex_unlock(&s->lock);
+        progress_store_tx_unlock();
         return false;
     }
     if (cursor_txn_commit(db, batched, &err) != SQLITE_OK) {
@@ -715,8 +715,8 @@ bool stage_set_cursor(stage_t *s, sqlite3 *db, uint64_t value)
                 err ? err : "(no message)");
         if (err) sqlite3_free(err);
         cursor_txn_rollback(db, batched);
-        progress_store_tx_unlock();
         pthread_mutex_unlock(&s->lock);
+        progress_store_tx_unlock();
         return false;
     }
     s->cursor = value;
@@ -726,8 +726,8 @@ bool stage_set_cursor(stage_t *s, sqlite3 *db, uint64_t value)
      * advanced==0 commits instead of rolling the rewind back (the "persists
      * immediately" contract above; same class as the utxo_apply unwind). */
     if (batched) stage_batch_mark_dirty();
-    progress_store_tx_unlock();
     pthread_mutex_unlock(&s->lock);
+    progress_store_tx_unlock();
     return true;
 }
 

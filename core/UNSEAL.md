@@ -400,3 +400,7 @@ later lane flips it HARD.
 - 2026-10-31T09:36:18Z — REASON: sapling consensus parity: reject non-canonical Fr encodings (cm, anchor, Fr == r, Jubjub y == r) exactly as zclassicd's librustzcash does;  closes a split where Z23 accepted an output zclassicd rejects. Owner approved 2026-10-30 ('you have authority, do it').
   old ROOT: d9bd425d5f66793bdf253ce2717af74e90aa19681b561cd2be83d5d37a6048e8
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T09:48:12Z — REASON: sync stage lock order: take progress_store_tx_lock before s->lock in stage_run_once and stage_set_cursor (TSAN lock-order-inversion in test_boot_matrix, 10-30);  behaviour-preserving, no consensus predicate change
+  old ROOT: 9bb1a940f2057c9298832184249a06d8143a2617a06b11740493c201b4ad91e1
+  by: owner unseal ritual (make core-unseal)
