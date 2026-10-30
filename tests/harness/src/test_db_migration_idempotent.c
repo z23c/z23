@@ -1387,49 +1387,6 @@ static int t_supported_current_schema_reopens_normally(void)
     return failures;
 }
 
-static int t_v29_incompatible_schema_fails_without_stamp(void)
-{
-    int failures = 0;
-    char dir[256];
-    db_mig_path(dir, sizeof(dir), "v29_incompatible");
-    mkdir_p(dir);
-    char dbpath[512];
-    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
-
-    TEST("db_mig: v29 incompatible AppEvent schema fails without stamp") {
-        struct node_db seed;
-        ASSERT(node_db_open(&seed, dbpath));
-        node_db_close(&seed);
-
-        sqlite3 *raw = NULL;
-        ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
-        ASSERT(db_mig_exec_raw(raw,
-            "DELETE FROM schema_migrations WHERE version='029';"
-            "DROP INDEX idx_app_events_topic_cursor;"
-            "DROP INDEX idx_app_events_author_sequence;"
-            "DROP INDEX idx_app_events_previous;"
-            "DROP TABLE app_events;"
-            "CREATE TABLE app_events(event_id BLOB)"));
-        ASSERT(db_mig_stamp_schema(raw, 28));
-        sqlite3_close(raw);
-        raw = NULL;
-
-        struct node_db rejected;
-        ASSERT(!node_db_open(&rejected, dbpath));
-        ASSERT(!rejected.open && rejected.db == NULL);
-
-        ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
-        ASSERT(db_mig_count(raw,
-            "SELECT count(*) FROM schema_migrations "
-            "WHERE version='029'") == 0);
-        ASSERT(!db_mig_column_exists(raw, "app_events", "app_id"));
-        sqlite3_close(raw);
-        PASS();
-    } _test_next:;
-    test_cleanup_tmpdir(dir);
-    return failures;
-}
-
 /* The v29 app_events table exactly as sqlite_master stores it: keyword
  * case and IF NOT EXISTS normalised by SQLite, body verbatim (see
  * k_app_events_table_stored in database_migrate_features.c). */
@@ -1605,6 +1562,48 @@ static int t_v29_schema_match_table(void)
         } _test_next:;
         test_cleanup_tmpdir(dir);
     }
+    return failures;
+}
+
+/* Incompatible app_events table, driven through the v29 migration on a raw
+ * handle. Opening with node_db_open() would not reach the schema check: its
+ * preflight refuses the seed first (schema_version 28 contradicts the 030..087
+ * ledger rows, database_schema_preflight.c:346), so the stamp would be absent
+ * whatever the schema. Here only the table's kind column type differs, so the
+ * v29 index DDL still runs and migration_schema_object_matches() refuses the
+ * table (database_migrate_features.c:69-160); the transaction then rolls back
+ * before the '029' stamp is inserted. node_db_migrate() still returns the
+ * applied count for this path, so the refusal is observed through the stamp. */
+static int t_v29_incompatible_schema_fails_without_stamp(void)
+{
+    int failures = 0;
+    char dir[256];
+    db_mig_path(dir, sizeof(dir), "v29_incompatible");
+    mkdir_p(dir);
+    char dbpath[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", dir);
+
+    TEST("db_mig: v29 incompatible AppEvent schema fails without stamp") {
+        char table_sql[1200];
+        ASSERT(db_mig_v29_replace(table_sql, sizeof(table_sql),
+                                  k_v29_mig_std_table,
+                                  "kind INTEGER", "kind TEXT"));
+        ASSERT(db_mig_v29_seed(dbpath, "DROP TABLE app_events;", table_sql));
+
+        int opened = 0;
+        int stamp = -1;
+        ASSERT(db_mig_v29_outcome(dbpath, &opened, &stamp));
+        ASSERT_EQ(stamp, 0);
+
+        sqlite3 *raw = NULL;
+        ASSERT(sqlite3_open(dbpath, &raw) == SQLITE_OK);
+        ASSERT(db_mig_count(raw,
+            "SELECT count(*) FROM sqlite_master WHERE type='table' "
+            "AND name='app_events' AND sql LIKE '%kind TEXT%'") == 1);
+        sqlite3_close(raw);
+        PASS();
+    } _test_next:;
+    test_cleanup_tmpdir(dir);
     return failures;
 }
 
