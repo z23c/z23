@@ -790,7 +790,7 @@ assert green).
   that explicitly denies the claim, is the intended alternative to building the
   chains. Both files are repaired today (inline asm in `mont_adx.h` pins the two
   chains to the two flags); this gate keeps them that way and grades anything
-  that joins them. Impl: `tools/lint/check_no_adx_overclaim.sh`.
+  that joins them. Impl: `tools/lint/lintc/gate_no_adx_overclaim.c`.
 
 - **`check-simd-os-support`** (HARD) — CPUID reports what the SILICON can
   decode. It does not report whether the OS agreed to save the corresponding
