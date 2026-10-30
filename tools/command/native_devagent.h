@@ -353,6 +353,10 @@ bool zcl_devagent_worker_read_file(const char *path, char *out, size_t cap);
  * The returned refusal is static; refusal empties job->task. */
 const char *zcl_devagent_worker_test_compose_task(const char *brief,
                                                 struct wkr_job *job);
+/* Called by the drive loop after a step that processed nothing (an empty
+ * claim), before it idles. NULL (the default) does nothing. Lets a fixture
+ * order a post after the first empty claim. */
+extern void (*zcl_devagent_worker_test_after_empty_claim)(void);
 #endif
 bool zcl_devagent_worker_write_atomic(const char *path, const char *text,
                                       size_t len);

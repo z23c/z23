@@ -1717,6 +1717,10 @@ static void wkr_lock_drop(struct wkr_lock *lk)
 #endif
 }
 
+#ifdef ZCL_TESTING
+void (*zcl_devagent_worker_test_after_empty_claim)(void) = NULL;
+#endif
+
 long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
                                     wkr_executor_fn exec)
 {
@@ -1761,6 +1765,10 @@ long long zcl_devagent_worker_drive(const struct wkr_drive_opts *opts,
             wait_s = opts->idle_start_s > 0 ? opts->idle_start_s : 1;
             continue;
         }
+#ifdef ZCL_TESTING
+        if (zcl_devagent_worker_test_after_empty_claim)
+            zcl_devagent_worker_test_after_empty_claim();
+#endif
         if (wkr_drive_idle(opts, &idle, &idle_ms, &wait_s))
             break;
     }

@@ -975,11 +975,34 @@ static void wtx_opts(struct wkr_drive_opts *o, const char *worker,
  * system-wide monotonic clock. */
 
 #if !defined(_WIN32)
-static pid_t wtx_post_later(const char *name, int delay_ms, int post_fd)
+/* The drive's first empty claim tells the poster, through this pipe's write
+ * end, that the ledger was observed empty. The poster waits for that byte
+ * before its delay, so the row can never be present at the first claim,
+ * however long a loaded host takes to set the drive up. */
+static int g_wtx_claim_fd = -1;
+
+static void wtx_note_empty_claim(void)
+{
+    if (g_wtx_claim_fd >= 0) {
+        char b = 1;
+        TEST_DISCARD(write(g_wtx_claim_fd, &b, 1));
+        (void)close(g_wtx_claim_fd);
+        g_wtx_claim_fd = -1;
+    }
+}
+
+static pid_t wtx_post_later(const char *name, int delay_ms, int post_fd,
+                            int claim_rd, int claim_wr)
 {
     pid_t pid = fork();
     if (pid == 0) {
         long long posted_ms;
+        char b;
+        (void)close(claim_wr);
+        /* EOF without a byte: the drive ended with no empty claim. */
+        if (read(claim_rd, &b, 1) != 1)
+            _exit(0);
+        (void)close(claim_rd);
         platform_sleep_ms(delay_ms);
         wtx_queue_post(name);
         posted_ms = (long long)platform_time_monotonic_ms();
@@ -1004,22 +1027,37 @@ static long long wtx_drive_late_post(struct wkr_drive_opts *o,
 {
     long long jobs, posted_ms = -1, start_ms, done_ms;
     int st = 0;
-    int post_pipe[2];
+    int post_pipe[2], claim_pipe[2];
     pid_t pid;
     /* Initialize the empty queue through a mutating verb, never a read. */
     if (!wtx_queue_verb("reap", NULL, NULL))
         return -1;
     if (pipe(post_pipe) != 0)
         return -1;
-    pid = wtx_post_later(name, delay_ms, post_pipe[1]);
-    (void)close(post_pipe[1]);
-    if (pid < 0) {
+    if (pipe(claim_pipe) != 0) {
         (void)close(post_pipe[0]);
+        (void)close(post_pipe[1]);
         return -1;
     }
+    pid = wtx_post_later(name, delay_ms, post_pipe[1], claim_pipe[0],
+                         claim_pipe[1]);
+    (void)close(post_pipe[1]);
+    (void)close(claim_pipe[0]);
+    if (pid < 0) {
+        (void)close(post_pipe[0]);
+        (void)close(claim_pipe[1]);
+        return -1;
+    }
+    g_wtx_claim_fd = claim_pipe[1];
+    zcl_devagent_worker_test_after_empty_claim = wtx_note_empty_claim;
     start_ms = (long long)platform_time_monotonic_ms();
     jobs = zcl_devagent_worker_drive(o, wtx_fixture);
     done_ms = (long long)platform_time_monotonic_ms();
+    zcl_devagent_worker_test_after_empty_claim = NULL;
+    /* Closing the write end frees a poster still waiting for a claim. */
+    if (g_wtx_claim_fd >= 0)
+        (void)close(g_wtx_claim_fd);
+    g_wtx_claim_fd = -1;
     if (read(post_pipe[0], &posted_ms, sizeof(posted_ms)) !=
         (ssize_t)sizeof(posted_ms))
         jobs = -1;
