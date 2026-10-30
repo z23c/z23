@@ -21,6 +21,7 @@
 #include "utxo_apply_delta_internal.h"
 
 #include "core/uint256.h"
+#include "platform/time_compat.h"
 #include "util/log_macros.h"
 #include "validation/main_state.h"
 
@@ -475,14 +476,14 @@ bool reducer_frontier_replay_stale_script_tx(
     (void)backfill_top;
 
     /* TX2 (created_outputs backfill) is a SEPARATE post-commit call the caller
-     * makes AFTER releasing the kernel progress lock — see
+     * makes AFTER releasing both replay locks — see
      * reducer_frontier_replay_backfill_created_outputs_projection below. After
      * the A3 flip created_outputs lives in consensus.db (the kernel store), so
      * that call runs on the kernel handle, not projection_store. */
     return true;
 }
 
-static bool replay_backfill_created_outputs_with_main_locked(
+static bool replay_backfill_created_outputs_locked(
     struct main_state *ms, int replay_first, int backfill_top)
 {
     if (backfill_top < replay_first)
@@ -490,8 +491,8 @@ static bool replay_backfill_created_outputs_with_main_locked(
     /* created_outputs is a kernel-store table (consensus.db) written by
      * body_persist and read by script_validate through the kernel handle; this
      * separate post-commit backfill therefore uses the kernel connection too.
-     * The caller has already released the kernel progress lock, so re-acquiring
-     * it here (recursive) for the bounded backfill cannot stall a live fold. */
+     * TX1 released both replay locks, so a live fold may run between the two
+     * transactions; the caller owns them again and this acquisition recurses. */
     sqlite3 *pdb = progress_store_db();
     if (!pdb) {
         LOG_WARN("stage_repair",
@@ -542,17 +543,32 @@ void reducer_frontier_replay_set_main_hook_for_testing(
 }
 #endif
 
-/* Observation is immediately before the real acquisition, never a replacement
- * for it. Test owners install/clear only while no replay worker is running. */
-void reducer_frontier_replay_lock_main(struct main_state *ms)
+/* Progress, then main, never waiting for one while owning the other. The tree
+ * nests both orders (LOCK ORDER in jobs/stage_repair.h): the reducer drain holds
+ * progress and takes main, and boot-window main holders read the progress
+ * store. A busy main therefore releases progress before the retry. The hook
+ * observes each attempt while this thread owns neither; test owners
+ * install/clear it only while no replay worker is running. */
+void reducer_frontier_replay_lock(struct main_state *ms)
 {
-    if (!ms)
-        return;
+    for (;;) {
 #ifdef ZCL_TESTING
-    if (g_replay_main_hook)
-        g_replay_main_hook(g_replay_main_hook_ctx);
+        if (g_replay_main_hook)
+            g_replay_main_hook(g_replay_main_hook_ctx);
 #endif
-    zcl_mutex_lock(&ms->cs_main);
+        progress_store_tx_lock();
+        if (!ms || zcl_mutex_trylock(&ms->cs_main))
+            return;
+        progress_store_tx_unlock();
+        platform_sleep_ms(1);
+    }
+}
+
+void reducer_frontier_replay_unlock(struct main_state *ms)
+{
+    if (ms)
+        zcl_mutex_unlock(&ms->cs_main);
+    progress_store_tx_unlock();
 }
 
 bool reducer_frontier_replay_backfill_created_outputs_projection(
@@ -560,11 +576,10 @@ bool reducer_frontier_replay_backfill_created_outputs_projection(
 {
     if (backfill_top < replay_first)
         return true;
-    reducer_frontier_replay_lock_main(ms);
-    bool ok = replay_backfill_created_outputs_with_main_locked(
+    reducer_frontier_replay_lock(ms);
+    bool ok = replay_backfill_created_outputs_locked(
         ms, replay_first, backfill_top);
-    if (ms)
-        zcl_mutex_unlock(&ms->cs_main);
+    reducer_frontier_replay_unlock(ms);
     return ok;
 }
 

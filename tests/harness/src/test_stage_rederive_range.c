@@ -85,41 +85,65 @@ bool reducer_frontier_replay_backfill_created_outputs_projection(
 void reducer_frontier_replay_tx_commit_seqs(uint64_t *kernel_out,
                                             uint64_t *projection_out);
 
-/* Real replay acquisition boundary, with a five-second holder backstop. */
+/* Real replay acquisition boundary. The hook runs at the top of every
+ * acquisition attempt, while the worker owns neither replay lock, so the second
+ * call follows a busy-main retry. The parked worker waits at most five seconds. */
 void reducer_frontier_replay_set_main_hook_for_testing(
     void (*hook)(void *), void *ctx);
 
 struct sr_main_cycle {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
-    bool attempted;
+    int attempts;
+    bool parked;
+    bool released;
     struct main_state *ms;
     bool ok;
     int first;
     int top;
 };
 
+static void sr_deadline(struct timespec *until)
+{
+    platform_time_realtime_timespec(until);
+    until->tv_sec += 5;
+}
+
 static void sr_main_attempt(void *arg)
 {
     struct sr_main_cycle *cycle = arg;
+    struct timespec until;
+    sr_deadline(&until);
     pthread_mutex_lock(&cycle->mutex);
-    cycle->attempted = true;
-    pthread_cond_signal(&cycle->cond);
+    if (++cycle->attempts == 2) {
+        cycle->parked = true;
+        pthread_cond_broadcast(&cycle->cond);
+        int rc = 0;
+        while (!cycle->released && rc == 0)
+            rc = pthread_cond_timedwait(&cycle->cond, &cycle->mutex, &until);
+    }
     pthread_mutex_unlock(&cycle->mutex);
 }
 
-static bool sr_wait_attempt(struct sr_main_cycle *cycle)
+static bool sr_wait_parked(struct sr_main_cycle *cycle)
 {
     struct timespec until;
-    platform_time_realtime_timespec(&until);
-    until.tv_sec += 5;
+    sr_deadline(&until);
     pthread_mutex_lock(&cycle->mutex);
     int rc = 0;
-    while (!cycle->attempted && rc == 0)
+    while (!cycle->parked && rc == 0)
         rc = pthread_cond_timedwait(&cycle->cond, &cycle->mutex, &until);
-    bool attempted = cycle->attempted;
+    bool parked = cycle->parked;
     pthread_mutex_unlock(&cycle->mutex);
-    return attempted;
+    return parked;
+}
+
+static void sr_release_parked(struct sr_main_cycle *cycle)
+{
+    pthread_mutex_lock(&cycle->mutex);
+    cycle->released = true;
+    pthread_cond_broadcast(&cycle->cond);
+    pthread_mutex_unlock(&cycle->mutex);
 }
 
 static void *sr_replay_worker(void *arg)
@@ -139,10 +163,11 @@ static bool sr_run_main_cycle(struct sr_main_cycle *cycle)
         sr_main_attempt, cycle);
     pthread_t worker;
     bool started = pthread_create(&worker, NULL, sr_replay_worker, cycle) == 0;
-    bool reached = started && sr_wait_attempt(cycle);
+    bool reached = started && sr_wait_parked(cycle);
     bool progress_free = reached && progress_store_tx_trylock();
     if (progress_free)
         progress_store_tx_unlock();
+    sr_release_parked(cycle);
     /* Release even when a baseline/timeout fails, before joining the worker. */
     zcl_mutex_unlock(&cycle->ms->cs_main);
     if (started)
@@ -613,15 +638,15 @@ static int sr_check_a1_rewind(sqlite3 *db, struct main_state *ms)
         uint64_t k0 = 0, p0 = 0;
         reducer_frontier_replay_tx_commit_seqs(&k0, &p0);
 
-        /* TX1's private API inherits main-before-progress from its caller. */
-        zcl_mutex_lock(&ms->cs_main);
+        /* TX1's private API inherits progress-before-main from its caller. */
         progress_store_tx_lock();
+        zcl_mutex_lock(&ms->cs_main);
         bool tx_ok = reducer_frontier_replay_stale_script_tx(
             db, ms, /*height*/2, /*replay_first*/2, /*script_cursor*/TIP + 1,
             /*proof_cursor*/TIP + 1, /*utxo_cursor*/TIP + 1,
             /*tip_cursor*/TIP + 1, /*backfill_top*/TIP, /*rewind_headers*/false);
-        progress_store_tx_unlock();
         zcl_mutex_unlock(&ms->cs_main);
+        progress_store_tx_unlock();
         SR_CHECK("A1: stale_script_tx kernel TX1 ok", tx_ok);
         /* Wave A2 (D4): TX2 is now a SEPARATE projection-store call the driver
          * makes AFTER releasing the kernel lock (LOCK ORDER LAW). */

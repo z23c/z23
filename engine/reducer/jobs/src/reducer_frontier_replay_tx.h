@@ -18,10 +18,13 @@ struct script_validate_dry_run_report;
 struct sqlite3;
 struct uint256;
 
-/* Internal outer acquisition: main before any progress lock/BEGIN. Callers
- * already owning progress must already own this same recursive main mutex.
- * Dry-run/TX1 below inherit that ownership; they must not acquire main late. */
-void reducer_frontier_replay_lock_main(struct main_state *ms);
+/* Internal outer acquisition: progress, then main, before any BEGIN. A busy
+ * main releases progress and retries. Callers owning progress must already own
+ * this same recursive main mutex; callers must never own main without
+ * progress. Dry-run/TX1 below inherit both; release with
+ * reducer_frontier_replay_unlock. */
+void reducer_frontier_replay_lock(struct main_state *ms);
+void reducer_frontier_replay_unlock(struct main_state *ms);
 #ifdef ZCL_TESTING
 void reducer_frontier_replay_set_main_hook_for_testing(
     void (*hook)(void *), void *ctx);

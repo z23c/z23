@@ -69,41 +69,104 @@ enum condition_remedy_result
 reducer_frontier_reconcile_light_test_remedy_outcome(
     const struct stage_reducer_frontier_reconcile_result *rr);
 
-/* Real replay acquisition boundary, with a five-second holder backstop. */
+/* Real replay acquisition boundary. The hook runs at the top of every
+ * acquisition attempt, while the worker owns neither replay lock, so a second
+ * call follows a busy-main retry. A parked worker waits at most five seconds. */
 void reducer_frontier_replay_set_main_hook_for_testing(
     void (*hook)(void *), void *ctx);
+
+/* The lock the test thread holds while the replay acquires: main (another
+ * main owner), or progress (the reducer drain, whose tip finalization then
+ * takes main). */
+enum rfrl_holder { RFRL_HOLD_MAIN, RFRL_HOLD_PROGRESS };
 
 struct rfrl_main_cycle {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
-    bool attempted;
+    int attempts;
+    int park_at;
+    bool parked;
+    bool released;
     struct main_state *ms;
     sqlite3 *db;
     bool ok;
     struct stage_reducer_frontier_reconcile_result result;
 };
 
+static void rfrl_deadline(struct timespec *until)
+{
+    platform_time_realtime_timespec(until);
+    until->tv_sec += 5;
+}
+
 static void rfrl_main_attempt(void *arg)
 {
     struct rfrl_main_cycle *cycle = arg;
+    struct timespec until;
+    rfrl_deadline(&until);
     pthread_mutex_lock(&cycle->mutex);
-    cycle->attempted = true;
-    pthread_cond_signal(&cycle->cond);
+    if (++cycle->attempts == cycle->park_at) {
+        cycle->parked = true;
+        pthread_cond_broadcast(&cycle->cond);
+        int rc = 0;
+        while (!cycle->released && rc == 0)
+            rc = pthread_cond_timedwait(&cycle->cond, &cycle->mutex, &until);
+    }
     pthread_mutex_unlock(&cycle->mutex);
 }
 
-static bool rfrl_wait_attempt(struct rfrl_main_cycle *cycle)
+static bool rfrl_wait_parked(struct rfrl_main_cycle *cycle)
 {
     struct timespec until;
-    platform_time_realtime_timespec(&until);
-    until.tv_sec += 5;
+    rfrl_deadline(&until);
     pthread_mutex_lock(&cycle->mutex);
     int rc = 0;
-    while (!cycle->attempted && rc == 0)
+    while (!cycle->parked && rc == 0)
         rc = pthread_cond_timedwait(&cycle->cond, &cycle->mutex, &until);
-    bool attempted = cycle->attempted;
+    bool parked = cycle->parked;
     pthread_mutex_unlock(&cycle->mutex);
-    return attempted;
+    return parked;
+}
+
+static void rfrl_release_parked(struct rfrl_main_cycle *cycle)
+{
+    pthread_mutex_lock(&cycle->mutex);
+    cycle->released = true;
+    pthread_cond_broadcast(&cycle->cond);
+    pthread_mutex_unlock(&cycle->mutex);
+}
+
+/* At the parked attempt the worker owns neither lock: holding main, it has met
+ * busy main and released progress; holding progress, it is about to wait for
+ * progress and must not own main. */
+static bool rfrl_other_lock_free(struct rfrl_main_cycle *cycle,
+                                 enum rfrl_holder holder)
+{
+    if (holder == RFRL_HOLD_MAIN) {
+        if (!progress_store_tx_trylock())
+            return false;
+        progress_store_tx_unlock();
+        return true;
+    }
+    if (!zcl_mutex_trylock(&cycle->ms->cs_main))
+        return false;
+    zcl_mutex_unlock(&cycle->ms->cs_main);
+    return true;
+}
+
+/* Tip finalization's order: progress held, then main. After the replay resumes
+ * toward its acquisition, every main acquisition in a 200 ms window must
+ * succeed; a replay that takes main and then waits for progress owns it here.
+ * Correct ordering cannot fail this check. */
+static bool rfrl_main_stays_free(struct main_state *ms)
+{
+    for (int i = 0; i < 200; i++) {
+        if (!zcl_mutex_trylock(&ms->cs_main))
+            return false;
+        zcl_mutex_unlock(&ms->cs_main);
+        platform_sleep_ms(1);
+    }
+    return true;
 }
 
 static void *rfrl_replay_worker(void *arg)
@@ -114,27 +177,40 @@ static void *rfrl_replay_worker(void *arg)
     return NULL;
 }
 
-static bool rfrl_run_main_cycle(struct rfrl_main_cycle *cycle)
+static bool rfrl_run_lock_cycle(struct rfrl_main_cycle *cycle,
+                                enum rfrl_holder holder)
 {
     pthread_mutex_init(&cycle->mutex, NULL);
     pthread_cond_init(&cycle->cond, NULL);
-    zcl_mutex_lock(&cycle->ms->cs_main);
+    cycle->park_at = holder == RFRL_HOLD_MAIN ? 2 : 1;
+    if (holder == RFRL_HOLD_MAIN)
+        zcl_mutex_lock(&cycle->ms->cs_main);
     reducer_frontier_replay_set_main_hook_for_testing(
         rfrl_main_attempt, cycle);
     pthread_t worker;
     bool started = pthread_create(&worker, NULL, rfrl_replay_worker, cycle) == 0;
-    bool reached = started && rfrl_wait_attempt(cycle);
-    bool progress_free = reached && progress_store_tx_trylock();
-    if (progress_free)
-        progress_store_tx_unlock();
+    bool parked = started && rfrl_wait_parked(cycle);
+    /* The drain claims progress while the replay is about to acquire: the
+     * earlier reconcile steps need progress themselves, so holding it from
+     * the start would stop the worker before the replay boundary. */
+    bool drain_held = holder == RFRL_HOLD_PROGRESS && parked;
+    if (drain_held)
+        progress_store_tx_lock();
+    bool other_free = parked && rfrl_other_lock_free(cycle, holder);
+    rfrl_release_parked(cycle);
+    bool ordered = holder == RFRL_HOLD_MAIN ||
+                   (other_free && rfrl_main_stays_free(cycle->ms));
     /* Release even when a baseline/timeout fails, before joining the worker. */
-    zcl_mutex_unlock(&cycle->ms->cs_main);
+    if (holder == RFRL_HOLD_MAIN)
+        zcl_mutex_unlock(&cycle->ms->cs_main);
+    if (drain_held)
+        progress_store_tx_unlock();
     if (started)
         pthread_join(worker, NULL);
     reducer_frontier_replay_set_main_hook_for_testing(NULL, NULL);
     pthread_cond_destroy(&cycle->cond);
     pthread_mutex_destroy(&cycle->mutex);
-    return started && reached && progress_free && cycle->ok;
+    return started && parked && other_free && ordered && cycle->ok;
 }
 
 struct rfrl_fixture {
@@ -1742,12 +1818,12 @@ static bool rfrl_stale_script_replay_b_ok(const struct stage_reducer_frontier_re
                count_range(db, "validate_headers_log", A + 2, A + 4) == 2;
 }
 
-static int rfrl_check_readable_stale_script(void)
+static int rfrl_check_readable_stale_script_under(enum rfrl_holder holder,
+                                                  const char *tag)
 {
     int failures = 0;
     struct rfrl_fixture fx;
-    RFRL_CHECK("setup readable stale-script fixture",
-               setup_fixture(&fx, "stale_script_readable"));
+    RFRL_CHECK("setup readable stale-script fixture", setup_fixture(&fx, tag));
     sqlite3 *db = progress_store_db();
     RFRL_CHECK("readable stale-script: canonical body is readable",
                make_fixture_block_readable(&fx, 2));
@@ -1766,8 +1842,10 @@ static int rfrl_check_readable_stale_script(void)
 
     struct stage_reducer_frontier_reconcile_result rr;
     struct rfrl_main_cycle cycle = {.ms = &fx.ms, .db = db};
-    RFRL_CHECK("readable stale-script: main waiter leaves progress available",
-               rfrl_run_main_cycle(&cycle));
+    RFRL_CHECK(holder == RFRL_HOLD_MAIN
+                   ? "readable stale-script: main waiter leaves progress available"
+                   : "readable stale-script: progress waiter leaves main available",
+               rfrl_run_lock_cycle(&cycle, holder));
     rr = cycle.result;
     RFRL_CHECK("readable stale-script: production replay rewinds rows",
                rfrl_stale_script_replay_a_ok(&rr) &&
@@ -1775,6 +1853,14 @@ static int rfrl_check_readable_stale_script(void)
 
     teardown_fixture(&fx);
     return failures;
+}
+
+static int rfrl_check_readable_stale_script(void)
+{
+    return rfrl_check_readable_stale_script_under(
+               RFRL_HOLD_MAIN, "stale_script_readable") +
+           rfrl_check_readable_stale_script_under(
+               RFRL_HOLD_PROGRESS, "stale_script_readable_progress");
 }
 
 static bool rfrl_stale_proof_dry_run_ok(const struct stage_reducer_frontier_reconcile_result *dry,

@@ -335,14 +335,21 @@ static bool reducer_frontier_replay_stale_script_hole_is_unactionable(
  * the hash from the SAME canonical body. Termination is by the body-vs-row delta
  * (STEP 3) — there is NO write-once marker; the rewind + STEP-1's dry==real
  * guarantee make each pass end as progress (rewind/rewrite) XOR named
- * escalation. */
-static bool replay_stale_script_with_main_locked(
+ * escalation. A committed rewind returns its created_outputs span in
+ * `backfill` for the caller's TX2. */
+struct rf_backfill_span {
+    int first;
+    int top;
+};
+
+static bool replay_stale_script_locked(
     sqlite3 *db,
     struct main_state *ms,
     bool apply,
     struct stage_reducer_frontier_reconcile_result *out,
     stale_script_detector_fn detect,
-    bool rewind_headers)
+    bool rewind_headers,
+    struct rf_backfill_span *backfill)
 {
     int script_cursor = -1;
     int proof_cursor = -1;
@@ -488,10 +495,8 @@ static bool replay_stale_script_with_main_locked(
     block_free(&blk);
     if (!ok)
         return false;
-    /* Wave A2 (D4): created_outputs backfill (TX2) on the projection store,
-     * after the kernel lock release (LOCK ORDER LAW); best-effort. */
-    (void)reducer_frontier_replay_backfill_created_outputs_projection(
-        ms, replay_first, backfill_top);
+    backfill->first = replay_first;
+    backfill->top = backfill_top;
     out->stale_script_repaired = true;
     out->stale_script_cursor_after = replay_first;
     out->refused_coin_tear = false;
@@ -502,19 +507,24 @@ static bool replay_stale_script_with_main_locked(
     return true;
 }
 
-/* Own main before the snapshot/TX1 progress scope, including recursive checked
- * body reads. Keep TX1 and best-effort TX2 separate, with their existing progress
- * unlock gap. Do not widen this ownership over the dispatch/creator ladder. */
+/* Own progress, then main, over the snapshot and TX1, including recursive
+ * checked body reads. Release both before the best-effort TX2 so a live fold
+ * can run between the two transactions. Do not widen this ownership over the
+ * dispatch/creator ladder. */
 bool maybe_replay_stale_script_via(
     sqlite3 *db, struct main_state *ms, bool apply,
     struct stage_reducer_frontier_reconcile_result *out,
     stale_script_detector_fn detect, bool rewind_headers)
 {
-    reducer_frontier_replay_lock_main(ms);
-    bool ok = replay_stale_script_with_main_locked(
-        db, ms, apply, out, detect, rewind_headers);
-    if (ms)
-        zcl_mutex_unlock(&ms->cs_main);
+    struct rf_backfill_span backfill = { .first = 0, .top = -1 };
+    reducer_frontier_replay_lock(ms);
+    bool ok = replay_stale_script_locked(
+        db, ms, apply, out, detect, rewind_headers, &backfill);
+    reducer_frontier_replay_unlock(ms);
+    /* Wave A2 (D4): created_outputs backfill (TX2), best-effort. */
+    if (ok)
+        (void)reducer_frontier_replay_backfill_created_outputs_projection(
+            ms, backfill.first, backfill.top);
     return ok;
 }
 
