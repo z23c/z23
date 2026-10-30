@@ -928,6 +928,31 @@ static char *wallet_stub_raw_rpc(const char *method)
     return NULL;
 }
 
+/* Send-family stub answers, split out of wallet_stub_rpc to keep that
+ * dispatcher under the cyclomatic cap. */
+static bool wallet_stub_send_rpc(const char *method, const char *params_json,
+                                 char **reply)
+{
+    if (method && strcmp(method, "sendtoaddress") == 0) {
+        g_wallet_send_calls++;
+        *reply = strdup(
+            "\"aa11bb22cc33dd44ee55ff66aa77bb88"
+            "cc99dd00ee11ff22aa33bb44cc55dd66\"");
+        return true;
+    }
+    if (method && strcmp(method, "z_sendmany") == 0) {
+        g_wallet_z_sendmany_calls++;
+        (void)snprintf(g_wallet_z_sendmany_params,
+                       sizeof(g_wallet_z_sendmany_params), "%s",
+                       params_json ? params_json : "");
+        *reply = strdup(
+            "\"cc11bb22cc33dd44ee55ff66aa77bb88"
+            "cc99dd00ee11ff22aa33bb44cc55dd88\"");
+        return true;
+    }
+    return false;
+}
+
 static char *wallet_stub_rpc(const char *method, const char *params_json)
 {
     if (method && strcmp(method, "rescanwitnesses") == 0)
@@ -948,21 +973,9 @@ static char *wallet_stub_rpc(const char *method, const char *params_json)
             "\"pubkey\":\"02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
             "\"iscompressed\":true}");
-    if (method && strcmp(method, "sendtoaddress") == 0) {
-        g_wallet_send_calls++;
-        return strdup(
-            "\"aa11bb22cc33dd44ee55ff66aa77bb88"
-            "cc99dd00ee11ff22aa33bb44cc55dd66\"");
-    }
-    if (method && strcmp(method, "z_sendmany") == 0) {
-        g_wallet_z_sendmany_calls++;
-        (void)snprintf(g_wallet_z_sendmany_params,
-                       sizeof(g_wallet_z_sendmany_params), "%s",
-                       params_json ? params_json : "");
-        return strdup(
-            "\"cc11bb22cc33dd44ee55ff66aa77bb88"
-            "cc99dd00ee11ff22aa33bb44cc55dd88\"");
-    }
+    char *sent = NULL;
+    if (wallet_stub_send_rpc(method, params_json, &sent))
+        return sent;
     char *raw = wallet_stub_raw_rpc(method);
     if (raw)
         return raw;
@@ -2144,6 +2157,22 @@ struct raw_simnet_bridge {
 
 static struct raw_simnet_bridge *g_raw_simnet_bridge;
 
+static void raw_simnet_note_anchor(struct raw_simnet_bridge *bridge,
+                                   const struct transaction *tx)
+{
+    if (tx->num_vout == 2) {
+        struct zanc_message anchor;
+        const struct script *script = &tx->vout[1].script_pub_key;
+        bridge->generic_anchor_seen =
+            tx->vout[1].value == 0 &&
+            zanc_parse(script->data, script->size, &anchor) &&
+            strcmp(anchor.label, "lab-proof@1") == 0;
+        if (bridge->generic_anchor_seen)
+            memcpy(bridge->generic_anchor_digest, anchor.digest,
+                   ZANC_DIGEST_LEN);
+    }
+}
+
 static char *raw_simnet_rpc(const char *method, const char *params_json)
 {
     struct raw_simnet_bridge *bridge = g_raw_simnet_bridge;
@@ -2172,17 +2201,7 @@ static char *raw_simnet_rpc(const char *method, const char *params_json)
             ok = false;
         } else {
             bridge->txid = tx.hash;
-            if (tx.num_vout == 2) {
-                struct zanc_message anchor;
-                const struct script *script = &tx.vout[1].script_pub_key;
-                bridge->generic_anchor_seen =
-                    tx.vout[1].value == 0 &&
-                    zanc_parse(script->data, script->size, &anchor) &&
-                    strcmp(anchor.label, "lab-proof@1") == 0;
-                if (bridge->generic_anchor_seen)
-                    memcpy(bridge->generic_anchor_digest, anchor.digest,
-                           ZANC_DIGEST_LEN);
-            }
+            raw_simnet_note_anchor(bridge, &tx);
             /* simnet_mint_txs takes ownership after a valid decoded request,
              * whether admission succeeds or not. */
             ok = simnet_mint_txs(bridge->sim, &tx, 1);
@@ -2486,9 +2505,13 @@ static int g_app_market_purchase_commit_calls;
 static int g_app_market_purchase_status_calls;
 static int g_app_market_purchase_retrieve_calls;
 
-static char *app_write_stub_rpc(const char *method, const char *params_json)
+/* Name, blog, messaging and token-send stub answers, split out of
+ * app_write_stub_rpc to keep that dispatcher under the cyclomatic cap. */
+static char *app_write_chain_rpc(const char *method, const char *params_json,
+                                 bool *matched)
 {
     if (method && strcmp(method, "znam_intent") == 0) {
+        *matched = true;
         g_app_name_register_calls++;
         bool commit = params_json &&
             strstr(params_json, "\"confirm\":true") != NULL;
@@ -2510,6 +2533,7 @@ static char *app_write_stub_rpc(const char *method, const char *params_json)
                       "\"actual_fee_zat\":500}");
     }
     if (method && strcmp(method, "blog_anchor") == 0) {
+        *matched = true;
         g_app_blog_anchor_calls++;
         if (g_app_blog_anchor_calls == 1)
             return strdup("{\"schema\":\"zcl.app_blog_anchor.v1\","
@@ -2534,12 +2558,14 @@ static char *app_write_stub_rpc(const char *method, const char *params_json)
                       "22222222222222222222222222222222\",\"fee\":1000}");
     }
     if (method && strcmp(method, "msg_send") == 0) {
+        *matched = true;
         g_app_msg_send_calls++;
         return strdup("{\"msg_id\":\"00112233445566778899aabbccddeeff"
                       "00112233445566778899aabbccddeeff\","
                       "\"peer_id\":7,\"status\":\"sent\"}");
     }
     if (method && strcmp(method, "zslp_intent") == 0) {
+        *matched = true;
         g_app_token_send_calls++;
         if (g_app_token_send_calls == 1)
             return strdup("{\"schema\":\"zcl.app_token_txresult.v1\","
@@ -2559,7 +2585,16 @@ static char *app_write_stub_rpc(const char *method, const char *params_json)
                       "22222222222222222222222222222222\","
                       "\"units\":\"25\",\"actual_fee_zat\":10000}");
     }
+    return NULL;
+}
+
+/* Market content and purchase stub answers, split out of app_write_stub_rpc
+ * to keep that dispatcher under the cyclomatic cap. */
+static char *app_write_market_rpc(const char *method, const char *params_json,
+                                  bool *matched)
+{
     if (method && strcmp(method, "zmarket_content_register") == 0) {
+        *matched = true;
         g_app_market_content_calls++;
         if (g_app_market_content_malformed)
             return strdup("{\"schema\":\"zcl.market_content.v1\","
@@ -2590,6 +2625,7 @@ static char *app_write_stub_rpc(const char *method, const char *params_json)
                       "\"registered_at\":1700000000}");
     }
     if (method && strcmp(method, "zmarket_purchase_plan") == 0) {
+        *matched = true;
         g_app_market_purchase_plan_calls++;
         return strdup("{\"ok\":true,\"schema\":\"zcl.market_purchase.v1\","
                       "\"plan_id\":\"11111111111111111111111111111111"
@@ -2606,6 +2642,7 @@ static char *app_write_stub_rpc(const char *method, const char *params_json)
                       "\"payment_notification_queued\":false}");
     }
     if (method && strcmp(method, "zmarket_purchase_commit") == 0) {
+        *matched = true;
         g_app_market_purchase_commit_calls++;
         return strdup("{\"ok\":true,\"schema\":\"zcl.market_purchase.v1\","
                       "\"plan_id\":\"11111111111111111111111111111111"
@@ -2627,6 +2664,7 @@ static char *app_write_stub_rpc(const char *method, const char *params_json)
                       "\"payment_notification_queued\":true}");
     }
     if (method && strcmp(method, "zmarket_purchase_status") == 0) {
+        *matched = true;
         g_app_market_purchase_status_calls++;
         return strdup("{\"ok\":true,\"schema\":\"zcl.market_purchase.v1\","
                       "\"plan_id\":\"11111111111111111111111111111111"
@@ -2648,6 +2686,7 @@ static char *app_write_stub_rpc(const char *method, const char *params_json)
                       "\"payment_notification_queued\":false}");
     }
     if (method && strcmp(method, "zmarket_purchase_retrieve") == 0) {
+        *matched = true;
         g_app_market_purchase_retrieve_calls++;
         return strdup("{\"ok\":true,\"schema\":\"zcl.market_purchase.v1\","
                       "\"plan_id\":\"11111111111111111111111111111111"
@@ -2666,6 +2705,18 @@ static char *app_write_stub_rpc(const char *method, const char *params_json)
                       "\"bytes_received\":8193,\"size_bytes\":8193,"
                       "\"destination_published\":true}");
     }
+    return NULL;
+}
+
+static char *app_write_stub_rpc(const char *method, const char *params_json)
+{
+    bool matched = false;
+    char *reply = app_write_chain_rpc(method, params_json, &matched);
+    if (matched)
+        return reply;
+    reply = app_write_market_rpc(method, params_json, &matched);
+    if (matched)
+        return reply;
     if (method && strcmp(method, "swap_initiate") == 0)
         return strdup("{\"swap_id\":\"stub\",\"role\":\"initiator\","
                       "\"state\":\"pending\",\"p2sh_address\":\"t3Stub\"}");

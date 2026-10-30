@@ -256,10 +256,7 @@ tests/harness/src/test_engine.c:case_state:19
 tests/harness/src/test_explorer.c:test_explorer:362
 tests/harness/src/test_merkle_tree.c:test_merkle_tree:22
 tests/harness/src/test_merkle_tree.c:test_merkle_tree_scale:149
-tests/harness/src/test_native_api_contract.c:app_write_stub_rpc:28
-tests/harness/src/test_native_api_contract.c:raw_simnet_rpc:17
 tests/harness/src/test_native_api_contract.c:run_dev_failure_api_fixture:33
-tests/harness/src/test_native_api_contract.c:wallet_stub_rpc:17
 tests/harness/src/test_parallel.c:exact_selector_set_valid:18
 tests/harness/src/test_parallel.c:main:178
 tests/harness/src/test_parallel.c:rerun_load_flaky_groups:20
