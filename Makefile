@@ -2709,12 +2709,12 @@ windows-acceptance-wine: windows-acceptance-compile
 # Mandatory Linux-hosted acceptance aggregate. Individual lint gates retain an
 # explicit UNOBSERVED mode for contributors without MinGW; this acceptance,
 # pre-push and hosted-CI path does not.
-windows-portability-acceptance:
+windows-portability-acceptance: $(LINTC_TOOL)
 	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_platform_seam.sh --self-test
 	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_platform_seam.sh
 	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_cross_syntax.sh
-	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_acceptance.sh --self-test
-	@ZCL_REQUIRE_MINGW=1 ./tools/lint/check_windows_acceptance.sh
+	@ZCL_REQUIRE_MINGW=1 ./build/bin/z23-lint check-windows-acceptance --selftest
+	@ZCL_REQUIRE_MINGW=1 ./build/bin/z23-lint check-windows-acceptance
 ifeq ($(ZCL_HOST_WINDOWS),1)
 	@printf '%s\n' 'windows-portability-acceptance: PASS (cross-compiled and contained native Windows acceptance executed)'
 else
@@ -14259,7 +14259,7 @@ check-windows-platform-seam:
 # test_watcher_record.c sat under platform/modules/platform/tests read by nothing at all --
 # no catalog row, no Makefile rule, not in platform/modules/platform/zcode-package.json --
 # while this target printed a clean PASS. So the work is now in
-# tools/lint/check_windows_acceptance.sh, which does TWO steps in this order:
+# tools/lint/lintc/gate_windows_acceptance.c, which does TWO steps in this order:
 #
 #   1. RECONCILE — every acceptance program on disk must be a source in a
 #      ZCL_WINDOWS_ACCEPTANCE_*_SOURCES row, or the entry point of a group
@@ -14294,8 +14294,9 @@ check-windows-platform-seam:
 # together, because a half-wired gate makes `make lint` exit 2 for EVERY
 # gate, not just this one.
 .PHONY: check-windows-acceptance
-check-windows-acceptance:
-	@./tools/lint/check_windows_acceptance.sh --self-test && ./tools/lint/check_windows_acceptance.sh
+check-windows-acceptance: $(LINTC_TOOL)
+	@./build/bin/z23-lint check-windows-acceptance --selftest
+	@./build/bin/z23-lint check-windows-acceptance
 
 # The off-Windows guard-shape half of the lane above: a tests/-rooted Windows
 # acceptance TU that defines main() must open with `#if defined(_WIN32)` and

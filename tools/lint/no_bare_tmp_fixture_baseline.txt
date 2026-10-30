@@ -147,6 +147,7 @@ tools/lint/lintc/gate_tree_walk_selftests.c 2
 tools/lint/lintc/gate_typed_blocker_ratchets.c 1
 tools/lint/lintc/gate_vcs_sha1_fence.c 2
 tools/lint/lintc/gate_wire_dial.c 1
+tools/lint/lintc/gate_windows_acceptance_selftest.c 1
 tools/lint/lintc/gate_wiring_presence_fences.c 1
 tools/lint/lintc/gate_zcc_epoch_batch.c 1
 tools/lint/lintc/gate_zclassicd_reach.c 1

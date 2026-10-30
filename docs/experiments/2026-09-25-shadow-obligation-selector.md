@@ -473,7 +473,7 @@ mechanism:
 
 #### Splitting check-windows-acceptance
 
-`tools/lint/check_windows_acceptance.sh` now has two parts. Run with no
+`tools/lint/lintc/gate_windows_acceptance.c` now has two parts. Run with no
 argument it still does both, so the full gate's verdict is unchanged.
 
 - **Global part (`--global`)**: the thirteen-case self-test, the reconcile
@@ -551,7 +551,7 @@ The z23-lint binary was built at `b089f792ba`, sha256 `9a2a7176…94d2`.
   - An id added to the list without sources. The global part FAILS in
     both runs, and the new id is fresh as `unit-new`.
 - **(d) Gate-code-only edits** (real-01). All 68 finite rows went fresh
-  with `gate-code:<file>` for each of `tools/lint/check_windows_acceptance.sh`,
+  with `gate-code:<file>` for each of `tools/lint/lintc/gate_windows_acceptance.c`,
   `tools/scripts/sh_str.sh`, `Makefile`, `tools/lint/run_lint.sh` and
   `engine/composition/lib_module_order.def`. Edits to the catalog itself:
   - a new shared variable made all 68 fresh as `catalog-residue`;

@@ -130,7 +130,7 @@ SELECTION_GATE("check-raw-sqlite", SELECTION_UNITS_FILES,
     "check-raw-sqlite:",
     "")
 
-/* Per catalog row: check_windows_acceptance.sh --row=ID cross-links one
+/* Per catalog row: z23-lint check-windows-acceptance --row=ID cross-links one
  * program in an emptied output directory, one mingw compile-and-link of
  * the row's sources. A row reads its own four variables (<P>ID_SOURCES,
  * _FLAGS, _LIBS, _LIBDEPS), every tree path they name with its include
@@ -146,7 +146,7 @@ SELECTION_GATE("check-raw-sqlite", SELECTION_UNITS_FILES,
  * remakes before any goal) always runs; it is priced separately. */
 SELECTION_GATE("check-windows-acceptance", SELECTION_UNITS_CATALOG_ROWS,
     "platform/modules/platform/tests/windows_acceptance.mk",
-    "tools/lint/check_windows_acceptance.sh tools/scripts/sh_str.sh Makefile "
+    "tools/lint/lintc/gate_windows_acceptance.c tools/lint/lintc/gate_windows_acceptance_parse.c tools/lint/lintc/gate_windows_acceptance_reconcile.c tools/lint/lintc/gate_windows_acceptance_steps.c tools/lint/lintc/gate_windows_acceptance_selftest.c tools/lint/lintc/gate_windows_acceptance_priv.h Makefile "
     "engine/composition/lib_module_order.def "
     SELECTION_DRIVER,
     "check-windows-acceptance:",

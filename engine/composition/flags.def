@@ -2054,7 +2054,7 @@ Z23_FLAG("ZCL_REPRO_REFERENCE_BIN", "env_build", "-", "-",
 Z23_FLAG("ZCL_REQUIRE_BACKUP_VERIFIED", "env_runtime", "-", "-",
           "undocumented; first use engine/services/src/recovery_policy.c:auto")
 Z23_FLAG("ZCL_REQUIRE_MINGW", "env_build", "0", "-",
-          "first use tools/lint/check_windows_acceptance.sh:auto; documented at docs/DEFENSIVE_CODING.md:1018: | **check-windows-platform-seam** | RATCHET | Windows portability of the platform seam:...")
+          "first use tools/lint/lintc/gate_windows_acceptance_steps.c:auto; documented at docs/DEFENSIVE_CODING.md:1018: | **check-windows-platform-seam** | RATCHET | Windows portability of the platform seam:...")
 Z23_FLAG("ZCL_RESULT_DISCARD_SCAN_DIRS_FOR_TEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_source_patterns.c:auto")
 Z23_FLAG("ZCL_RETRIEVAL_BENCH_KEEP", "env_build", "0", "-",
@@ -2647,13 +2647,13 @@ Z23_FLAG("ZCL_WAL_MAX_BYTES", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_WATCH_TEST_LOG", "env_build", "-", "-",
           "undocumented; first use tools/dev/watch-dev-lane.sh:auto")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_CC", "env_build", "x86_64-w64-mingw32-gcc", "-",
-          "undocumented; first use tools/lint/check_windows_acceptance.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_windows_acceptance_steps.c:auto")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_GUARD_ROOT", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_windows_acceptance_guard.c:auto")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_GUARD_SCRATCH", "env_build", "-", "-",
           "first use tools/lint/lintc/gate_windows_acceptance_guard_selftest.c:auto; documented at docs/experiments/2026-09-03-muse-vs-glm-lint-gate.md:27: | /tmp, python, jq, perl | none used; fixtures under $HOME/.local/state/zclassic23/scra...")
 Z23_FLAG("ZCL_WINDOWS_ACCEPTANCE_ROOT", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_windows_acceptance.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_windows_acceptance.c:auto")
 Z23_FLAG("ZCL_WIN_CROSS_JOBS", "env_build", "ZCL_CC_JOBS", "-",
           "undocumented; first use tools/lint/check_windows_cross_syntax.sh:auto")
 Z23_FLAG("ZCL_WRS_DIR", "env_test", "-", "-",

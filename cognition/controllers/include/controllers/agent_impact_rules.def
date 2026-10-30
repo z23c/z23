@@ -2377,7 +2377,7 @@ AGENT_IMPACT_RULE("tests/harness/src/test_store_buyer.c", "store_buyer make_lint
  * platform/modules/platform/tests/windows_acceptance.mk. Changes that still name the OLD
  * path are deletions from that rename, and the thing that observes them is
  * the lint tier: check-windows-acceptance cross-compiles every program the
- * catalog declares, and -- since tools/lint/check_windows_acceptance.sh
+ * catalog declares, and -- since tools/lint/lintc/gate_windows_acceptance.c
  * landed -- RECONCILES the other direction too, failing closed on any program on disk that the catalog does
  * not declare, that is not a registered suite group, and that carries no
  * written exemption. Until that reconcile step existed the second half of
@@ -3045,7 +3045,7 @@ AGENT_IMPACT_RULE("platform/modules/platform/src/process_lock.c|platform/modules
  * files under tests/harness/src mention the catalog in a PROSE COMMENT and none
  * opens it, nothing under tests/harness/src names check-windows-acceptance, and
  * the catalog declares no ZCL_TEST_GROUP row. What reads it is
- * tools/lint/check_windows_acceptance.sh, which mingw-cross-links every
+ * tools/lint/lintc/gate_windows_acceptance.c, which mingw-cross-links every
  * program the catalog declares and reconciles the two directions, and the
  * top-level Makefile, which includes the catalog so the
  * ZCL_WINDOWS_ACCEPTANCE_ variables reach that gate. check-windows-acceptance
