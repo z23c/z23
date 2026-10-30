@@ -551,6 +551,61 @@ static void note_session_closed(const struct p2p_node *node, uint8_t reason,
         blocks, bw, node->avg_latency_us, last_useful);
 }
 
+static bool note_terminal_record_locked(struct peer_lifecycle_entry *e,
+                                        const char *reason, bool timeout,
+                                        bool reject, bool *emit_session,
+                                        int64_t *sess_connected_at,
+                                        int64_t *sess_now)
+{
+    bool recorded = false;
+    /* A timeout/reject marks the connection terminal before connman's
+     * normal cleanup sweep calls note_disconnected() for the same node.
+     * Count and emit exactly one causal terminal outcome per connected
+     * generation; otherwise every timed-out pre-handshake connection is
+     * reported twice and cleanup overwrites the useful first reason.
+     * connected_seq advances on reconnect, re-arming the next generation.
+     * terminal_seq==0 deliberately admits a first terminal observation
+     * even when a caller did not publish note_connected() beforehand. */
+    bool terminal_already_recorded =
+        e->terminal_seq > 0 && e->terminal_seq >= e->connected_seq;
+    if (!terminal_already_recorded) {
+        int64_t now = GetTime();
+        bool pre_handshake =
+            e->handshake_complete_seq <= e->connected_seq;
+        e->last_seen = now;
+        snprintf(e->last_reason, sizeof(e->last_reason), "%s",
+                 reason ? reason : "");
+        e->terminal_seq = ++g_pl.seq;
+        if (timeout) {
+            e->timeout++;
+            e->timeout_at = now;
+            g_pl.totals.timeout++;
+        } else if (reject) {
+            e->rejected++;
+            e->rejected_at = now;
+            g_pl.totals.rejected++;
+        } else {
+            e->disconnected++;
+            e->disconnected_at = now;
+            g_pl.totals.disconnected++;
+        }
+        if (pre_handshake) {
+            g_pl.totals.pre_handshake_disconnects++;
+            e->pre_handshake_disconnects++;
+        }
+        /* Bank the session's reputation exactly once, but only for a
+         * session that actually handshaked (a failed pre-handshake dial is
+         * not a peer session worth remembering). */
+        if (!pre_handshake) {
+            *emit_session = true;
+            *sess_connected_at = e->connected_at;
+            *sess_now = now;
+        }
+        recorded = true;
+    }
+    return recorded;
+}
+
 static void note_terminal(const struct p2p_node *node, const char *reason,
                           const char *event_name, bool timeout, bool reject)
 {
@@ -562,53 +617,11 @@ static void note_terminal(const struct p2p_node *node, const char *reason,
     addr_key_from_node(node, addr, sizeof(addr));
     pthread_mutex_lock(&g_pl.lock);
     struct peer_lifecycle_entry *e = entry_for_node_locked(node, true);
-    if (e) {
-        /* A timeout/reject marks the connection terminal before connman's
-         * normal cleanup sweep calls note_disconnected() for the same node.
-         * Count and emit exactly one causal terminal outcome per connected
-         * generation; otherwise every timed-out pre-handshake connection is
-         * reported twice and cleanup overwrites the useful first reason.
-         * connected_seq advances on reconnect, re-arming the next generation.
-         * terminal_seq==0 deliberately admits a first terminal observation
-         * even when a caller did not publish note_connected() beforehand. */
-        bool terminal_already_recorded =
-            e->terminal_seq > 0 && e->terminal_seq >= e->connected_seq;
-        if (!terminal_already_recorded) {
-            int64_t now = GetTime();
-            bool pre_handshake =
-                e->handshake_complete_seq <= e->connected_seq;
-            e->last_seen = now;
-            snprintf(e->last_reason, sizeof(e->last_reason), "%s",
-                     reason ? reason : "");
-            e->terminal_seq = ++g_pl.seq;
-            if (timeout) {
-                e->timeout++;
-                e->timeout_at = now;
-                g_pl.totals.timeout++;
-            } else if (reject) {
-                e->rejected++;
-                e->rejected_at = now;
-                g_pl.totals.rejected++;
-            } else {
-                e->disconnected++;
-                e->disconnected_at = now;
-                g_pl.totals.disconnected++;
-            }
-            if (pre_handshake) {
-                g_pl.totals.pre_handshake_disconnects++;
-                e->pre_handshake_disconnects++;
-            }
-            /* Bank the session's reputation exactly once, but only for a
-             * session that actually handshaked (a failed pre-handshake dial is
-             * not a peer session worth remembering). */
-            if (!pre_handshake) {
-                emit_session = true;
-                sess_connected_at = e->connected_at;
-                sess_now = now;
-            }
-            recorded = true;
-        }
-    }
+    if (e)
+        recorded = note_terminal_record_locked(e, reason, timeout, reject,
+                                               &emit_session,
+                                               &sess_connected_at,
+                                               &sess_now);
     pthread_mutex_unlock(&g_pl.lock);
     if (recorded && node) {
         event_emitf(timeout ? EV_PEER_CONNECT_TIMEOUT :
@@ -914,49 +927,77 @@ static struct peer_lifecycle_host_group *find_host_group(
     return free_slot;
 }
 
+static void host_group_bump_by_source(enum peer_lifecycle_source source,
+                                      int64_t *inbound, int64_t *outbound,
+                                      int64_t *unknown)
+{
+    int64_t *slot = unknown;
+    if (source_is_inbound(source))
+        slot = inbound;
+    else if (source_is_outbound(source))
+        slot = outbound;
+    (*slot)++;
+}
+
+static void host_group_add_handshaked(struct peer_lifecycle_host_group *group,
+                                      const struct peer_lifecycle_entry *e)
+{
+    group->handshaked_open_connections++;
+    host_group_bump_by_source(e->source,
+                              &group->handshaked_inbound_connections,
+                              &group->handshaked_outbound_connections,
+                              &group->handshaked_unknown_connections);
+    if ((e->services & NODE_NETWORK) != 0)
+        group->handshaked_network_connections++;
+    if (e->start_height > 0) {
+        group->handshaked_advertised_height_connections++;
+        if (entry_advertised_height_trusted(e))
+            group->handshaked_trusted_advertised_height_connections++;
+        else
+            group->handshaked_untrusted_advertised_height_connections++;
+    }
+    if (subver_is_zcl23(e->subver, e->services))
+        group->handshaked_zclassic23_connections++;
+}
+
+static void host_group_add_reconnect(struct peer_lifecycle_host_group *group,
+                                     const struct peer_lifecycle_entry *e)
+{
+    if (group->min_reconnect_interval_secs == 0 ||
+        e->last_reconnect_interval_secs <
+            group->min_reconnect_interval_secs)
+        group->min_reconnect_interval_secs =
+            e->last_reconnect_interval_secs;
+    if (e->last_reconnect_interval_secs >
+        group->max_reconnect_interval_secs)
+        group->max_reconnect_interval_secs =
+            e->last_reconnect_interval_secs;
+    if (e->last_reconnect_at >= group->last_reconnect_at) {
+        group->last_reconnect_at = e->last_reconnect_at;
+        group->last_reconnect_interval_secs =
+            e->last_reconnect_interval_secs;
+    }
+}
+
 static void host_group_add_entry(struct peer_lifecycle_host_group *group,
                                  const struct peer_lifecycle_entry *e)
 {
     if (!group || !e)
         return;
     group->entries++;
-    if (source_is_inbound(e->source))
-        group->inbound_entries++;
-    else if (source_is_outbound(e->source))
-        group->outbound_entries++;
-    else
-        group->unknown_entries++;
+    host_group_bump_by_source(e->source, &group->inbound_entries,
+                              &group->outbound_entries,
+                              &group->unknown_entries);
     bool open = entry_connection_open(e);
     bool handshaked = entry_current_connection_handshaked(e);
     if (open) {
         group->open_connections++;
-        if (source_is_inbound(e->source))
-            group->open_inbound_connections++;
-        else if (source_is_outbound(e->source))
-            group->open_outbound_connections++;
-        else
-            group->open_unknown_connections++;
+        host_group_bump_by_source(e->source, &group->open_inbound_connections,
+                                  &group->open_outbound_connections,
+                                  &group->open_unknown_connections);
     }
-    if (handshaked) {
-        group->handshaked_open_connections++;
-        if (source_is_inbound(e->source))
-            group->handshaked_inbound_connections++;
-        else if (source_is_outbound(e->source))
-            group->handshaked_outbound_connections++;
-        else
-            group->handshaked_unknown_connections++;
-        if ((e->services & NODE_NETWORK) != 0)
-            group->handshaked_network_connections++;
-        if (e->start_height > 0) {
-            group->handshaked_advertised_height_connections++;
-            if (entry_advertised_height_trusted(e))
-                group->handshaked_trusted_advertised_height_connections++;
-            else
-                group->handshaked_untrusted_advertised_height_connections++;
-        }
-        if (subver_is_zcl23(e->subver, e->services))
-            group->handshaked_zclassic23_connections++;
-    }
+    if (handshaked)
+        host_group_add_handshaked(group, e);
     if (entry_bootstrap_useful(e))
         group->bootstrap_useful_connections++;
     if (entry_fast_sync_useful(e))
@@ -969,22 +1010,8 @@ static void host_group_add_entry(struct peer_lifecycle_host_group *group,
     group->rejected += e->rejected;
     group->reconnects += entry_reconnects(e);
     group->pre_handshake_disconnects += e->pre_handshake_disconnects;
-    if (e->last_reconnect_interval_secs > 0) {
-        if (group->min_reconnect_interval_secs == 0 ||
-            e->last_reconnect_interval_secs <
-                group->min_reconnect_interval_secs)
-            group->min_reconnect_interval_secs =
-                e->last_reconnect_interval_secs;
-        if (e->last_reconnect_interval_secs >
-            group->max_reconnect_interval_secs)
-            group->max_reconnect_interval_secs =
-                e->last_reconnect_interval_secs;
-        if (e->last_reconnect_at >= group->last_reconnect_at) {
-            group->last_reconnect_at = e->last_reconnect_at;
-            group->last_reconnect_interval_secs =
-                e->last_reconnect_interval_secs;
-        }
-    }
+    if (e->last_reconnect_interval_secs > 0)
+        host_group_add_reconnect(group, e);
     group->services_or |= e->services;
     if (e->start_height > group->max_advertised_height)
         group->max_advertised_height = e->start_height;
@@ -1016,47 +1043,43 @@ static int64_t build_host_groups_locked(
     return overflow;
 }
 
-bool peer_lifecycle_incidents_json(struct json_value *out)
+struct peer_incidents_counts {
+    int64_t incident_count;
+    int64_t host_incident_count;
+    int64_t duplicate_group_count;
+    int64_t duplicate_open_group_count;
+    int64_t duplicate_handshaked_group_count;
+    int64_t open_connection_count;
+    int64_t handshaked_open_connection_count;
+    int64_t bootstrap_useful_count;
+    int64_t fast_sync_useful_count;
+};
+
+static void peer_incidents_scan_groups(
+    const struct peer_lifecycle_host_group *groups,
+    struct peer_lifecycle_host_pick *host_picks, size_t *host_pick_count,
+    struct peer_incidents_counts *c)
 {
-    if (!out)
-        return false;
-    pthread_mutex_lock(&g_pl.lock);
-    int64_t now = GetTime();
-    struct peer_lifecycle_host_group groups[PEER_LIFECYCLE_GROUP_LIMIT];
-    memset(groups, 0, sizeof(groups));
-    int64_t group_overflow = build_host_groups_locked(groups);
-
-    struct peer_lifecycle_incident_pick picks[PEER_LIFECYCLE_INCIDENT_LIMIT];
-    memset(picks, 0, sizeof(picks));
-    struct peer_lifecycle_host_pick host_picks[
-        PEER_LIFECYCLE_HOST_INCIDENT_LIMIT];
-    memset(host_picks, 0, sizeof(host_picks));
-    size_t pick_count = 0;
-    size_t host_pick_count = 0;
-    int64_t incident_count = 0;
-    int64_t host_incident_count = 0;
-    int64_t duplicate_group_count = 0;
-    int64_t duplicate_open_group_count = 0;
-    int64_t duplicate_handshaked_group_count = 0;
-    int64_t open_connection_count = 0;
-    int64_t handshaked_open_connection_count = 0;
-    int64_t bootstrap_useful_count = 0;
-    int64_t fast_sync_useful_count = 0;
-
     for (size_t i = 0; i < PEER_LIFECYCLE_GROUP_LIMIT; i++) {
         if (!groups[i].used)
             continue;
         if (groups[i].entries > 1)
-            duplicate_group_count++;
+            c->duplicate_group_count++;
         if (groups[i].open_connections > 1)
-            duplicate_open_group_count++;
+            c->duplicate_open_group_count++;
         if (groups[i].handshaked_open_connections > 1)
-            duplicate_handshaked_group_count++;
+            c->duplicate_handshaked_group_count++;
         if (host_group_incident_score(&groups[i]) > 0)
-            host_incident_count++;
-        host_pick_consider(host_picks, &host_pick_count, &groups[i]);
+            c->host_incident_count++;
+        host_pick_consider(host_picks, host_pick_count, &groups[i]);
     }
+}
 
+static void peer_incidents_scan_entries(
+    const struct peer_lifecycle_host_group *groups,
+    struct peer_lifecycle_incident_pick *picks, size_t *pick_count,
+    struct peer_incidents_counts *c)
+{
     for (size_t i = 0; i < PEER_LIFECYCLE_MAX; i++) {
         const struct peer_lifecycle_entry *e = &g_pl.entries[i];
         if (!e->used)
@@ -1066,34 +1089,40 @@ bool peer_lifecycle_incidents_json(struct json_value *out)
         int64_t duplicate_entries = duplicate_entries_for_host(groups, host);
         int64_t score = entry_incident_score(e, duplicate_entries);
         if (score > 0)
-            incident_count++;
+            c->incident_count++;
         if (entry_connection_open(e))
-            open_connection_count++;
+            c->open_connection_count++;
         if (entry_current_connection_handshaked(e))
-            handshaked_open_connection_count++;
+            c->handshaked_open_connection_count++;
         if (entry_bootstrap_useful(e))
-            bootstrap_useful_count++;
+            c->bootstrap_useful_count++;
         if (entry_fast_sync_useful(e))
-            fast_sync_useful_count++;
-        incident_pick_consider(picks, &pick_count, e, score,
+            c->fast_sync_useful_count++;
+        incident_pick_consider(picks, pick_count, e, score,
                                duplicate_entries, host);
     }
+}
 
+static void peer_incidents_push_summary(
+    struct json_value *out, const struct peer_incidents_counts *c,
+    size_t pick_count, size_t host_pick_count, int64_t group_overflow,
+    const struct peer_lifecycle_host_pick *host_picks)
+{
     const char *bootstrap_readiness =
-        peer_incidents_bootstrap_readiness(open_connection_count,
-                                           handshaked_open_connection_count,
-                                           bootstrap_useful_count);
+        peer_incidents_bootstrap_readiness(c->open_connection_count,
+                                           c->handshaked_open_connection_count,
+                                           c->bootstrap_useful_count);
     const char *fast_sync_readiness =
-        peer_incidents_fast_sync_readiness(bootstrap_useful_count,
-                                           fast_sync_useful_count,
+        peer_incidents_fast_sync_readiness(c->bootstrap_useful_count,
+                                           c->fast_sync_useful_count,
                                            bootstrap_readiness);
     bool bootstrap_blocked = strcmp(bootstrap_readiness, "ready") != 0;
     bool fast_sync_blocked = strcmp(fast_sync_readiness, "ready") != 0;
     const char *incident_severity =
-        peer_incidents_severity(incident_count, host_incident_count,
-                                duplicate_group_count);
+        peer_incidents_severity(c->incident_count, c->host_incident_count,
+                                c->duplicate_group_count);
     const char *next_action =
-        peer_incidents_next_action(host_pick_count, incident_count,
+        peer_incidents_next_action(host_pick_count, c->incident_count,
                                    bootstrap_blocked, fast_sync_blocked);
     const struct peer_lifecycle_host_pick *primary_pick =
         host_pick_count > 0 ? &host_picks[0] : NULL;
@@ -1108,25 +1137,25 @@ bool peer_lifecycle_incidents_json(struct json_value *out)
     json_push_kv_int(out, "group_limit", PEER_LIFECYCLE_GROUP_LIMIT);
     json_push_kv_int(out, "host_incident_limit",
                      PEER_LIFECYCLE_HOST_INCIDENT_LIMIT);
-    json_push_kv_int(out, "incident_count", incident_count);
+    json_push_kv_int(out, "incident_count", c->incident_count);
     json_push_kv_int(out, "count_returned", (int64_t)pick_count);
-    json_push_kv_int(out, "host_incident_count", host_incident_count);
+    json_push_kv_int(out, "host_incident_count", c->host_incident_count);
     json_push_kv_int(out, "host_count_returned",
                      (int64_t)host_pick_count);
     json_push_kv_int(out, "duplicate_host_group_count",
-                     duplicate_group_count);
+                     c->duplicate_group_count);
     json_push_kv_int(out, "duplicate_open_host_group_count",
-                     duplicate_open_group_count);
+                     c->duplicate_open_group_count);
     json_push_kv_int(out, "duplicate_handshaked_host_group_count",
-                     duplicate_handshaked_group_count);
+                     c->duplicate_handshaked_group_count);
     json_push_kv_int(out, "current_open_connection_count",
-                     open_connection_count);
+                     c->open_connection_count);
     json_push_kv_int(out, "current_handshaked_connection_count",
-                     handshaked_open_connection_count);
+                     c->handshaked_open_connection_count);
     json_push_kv_int(out, "host_group_overflow", group_overflow);
     json_push_kv_int(out, "bootstrap_useful_count",
-                     bootstrap_useful_count);
-    json_push_kv_int(out, "fast_sync_useful_count", fast_sync_useful_count);
+                     c->bootstrap_useful_count);
+    json_push_kv_int(out, "fast_sync_useful_count", c->fast_sync_useful_count);
     json_push_kv_str(out, "bootstrap_readiness", bootstrap_readiness);
     json_push_kv_str(out, "fast_sync_readiness", fast_sync_readiness);
     json_push_kv_bool(out, "bootstrap_blocked", bootstrap_blocked);
@@ -1150,14 +1179,24 @@ bool peer_lifecycle_incidents_json(struct json_value *out)
                      primary_group ? host_group_next_action(primary_group)
                                    : "monitor_peer_lifecycle");
     append_primary_host_issue_json(primary_pick, out);
+}
 
+static void peer_incidents_push_top_incidents(
+    struct json_value *out, const struct peer_lifecycle_incident_pick *picks,
+    size_t pick_count, int64_t now)
+{
     struct json_value incidents = {0};
     json_set_array(&incidents);
     for (size_t i = 0; i < pick_count; i++)
         append_incident_peer_json(&picks[i], now, &incidents);
     json_push_kv(out, "top_incidents", &incidents);
     json_free(&incidents);
+}
 
+static void peer_incidents_push_top_hosts(
+    struct json_value *out, const struct peer_lifecycle_host_pick *host_picks,
+    size_t host_pick_count)
+{
     struct json_value host_incidents = {0};
     json_set_array(&host_incidents);
     for (size_t i = 0; i < host_pick_count; i++)
@@ -1165,7 +1204,11 @@ bool peer_lifecycle_incidents_json(struct json_value *out)
                                &host_incidents);
     json_push_kv(out, "top_host_incidents", &host_incidents);
     json_free(&host_incidents);
+}
 
+static void peer_incidents_push_duplicate_groups(
+    struct json_value *out, const struct peer_lifecycle_host_group *groups)
+{
     struct json_value duplicate_groups = {0};
     json_set_array(&duplicate_groups);
     for (size_t i = 0; i < PEER_LIFECYCLE_GROUP_LIMIT; i++) {
@@ -1181,7 +1224,10 @@ bool peer_lifecycle_incidents_json(struct json_value *out)
     }
     json_push_kv(out, "duplicate_host_groups", &duplicate_groups);
     json_free(&duplicate_groups);
+}
 
+static void peer_incidents_push_drilldowns(struct json_value *out)
+{
     struct json_value drilldowns = {0};
     json_set_array(&drilldowns);
     struct json_value d = {0};
@@ -1194,6 +1240,35 @@ bool peer_lifecycle_incidents_json(struct json_value *out)
     json_free(&d);
     json_push_kv(out, "recommended_drilldowns", &drilldowns);
     json_free(&drilldowns);
+}
+
+bool peer_lifecycle_incidents_json(struct json_value *out)
+{
+    if (!out)
+        return false;
+    pthread_mutex_lock(&g_pl.lock);
+    int64_t now = GetTime();
+    struct peer_lifecycle_host_group groups[PEER_LIFECYCLE_GROUP_LIMIT];
+    memset(groups, 0, sizeof(groups));
+    int64_t group_overflow = build_host_groups_locked(groups);
+
+    struct peer_lifecycle_incident_pick picks[PEER_LIFECYCLE_INCIDENT_LIMIT];
+    memset(picks, 0, sizeof(picks));
+    struct peer_lifecycle_host_pick host_picks[
+        PEER_LIFECYCLE_HOST_INCIDENT_LIMIT];
+    memset(host_picks, 0, sizeof(host_picks));
+    size_t pick_count = 0;
+    size_t host_pick_count = 0;
+    struct peer_incidents_counts counts = {0};
+
+    peer_incidents_scan_groups(groups, host_picks, &host_pick_count, &counts);
+    peer_incidents_scan_entries(groups, picks, &pick_count, &counts);
+    peer_incidents_push_summary(out, &counts, pick_count, host_pick_count,
+                                group_overflow, host_picks);
+    peer_incidents_push_top_incidents(out, picks, pick_count, now);
+    peer_incidents_push_top_hosts(out, host_picks, host_pick_count);
+    peer_incidents_push_duplicate_groups(out, groups);
+    peer_incidents_push_drilldowns(out);
     pthread_mutex_unlock(&g_pl.lock);
     return true;
 }

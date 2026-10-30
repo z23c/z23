@@ -168,9 +168,6 @@ core/modules/net/src/noise_transport.c:noise_transport_feed:37
 core/modules/net/src/params_service.c:mp_handle_param_chunk:18
 core/modules/net/src/params_service.c:mp_handle_param_info:17
 core/modules/net/src/peer_eviction.c:peer_eviction_select:18
-core/modules/net/src/peer_lifecycle.c:host_group_add_entry:26
-core/modules/net/src/peer_lifecycle.c:note_terminal:17
-core/modules/net/src/peer_lifecycle.c:peer_lifecycle_incidents_json:31
 core/modules/net/src/rom_fetch.c:rf_download_verified_core:23
 core/modules/net/src/rom_fetch.c:rom_fetch_download:18
 core/modules/net/src/state_offer.c:offer_shape:17
