@@ -965,6 +965,58 @@ static int test_lab_run_render(void)
         ASSERT(strstr(out, "receipt") == NULL);
         PASS();
     }
+    TEST("lab.run failed compile with only a warning does not label it error") {
+        size_t n = cr_lab_render(
+            "\"compile\":{\"ok\":false,\"wall_us\":368000,\"diagnostics\":["
+            "{\"line\":1,\"col\":25,\"severity\":\"warning\","
+            "\"message\":\"'unused_value' set but not used\"}]},"
+            "\"run\":{\"ran\":false,\"exit_code\":-1,\"signal\":0,"
+            "\"signal_name\":\"\",\"timed_out\":false,\"wall_us\":0,"
+            "\"max_rss_kb\":0,\"stdout\":\"\",\"stderr\":\"\"},"
+            "\"sanitizer\":{\"enabled\":false,\"findings\":0},"
+            "\"confinement\":{},\"cache\":{\"hit\":false}}}", true, out,
+            sizeof(out));
+        ASSERT(n > 0);
+        ASSERT(strstr(out, "did not run") != NULL);
+        char *m = strstr(out, "1:25 'unused_value' set but not used");
+        ASSERT(m != NULL);
+        char seg[256];
+        const char *ls = m;
+        while (ls > out && ls[-1] != '\n')
+            ls--;
+        (void)snprintf(seg, sizeof(seg), "%.*s", (int)(m - ls), ls);
+        ASSERT(strstr(seg, "warning") != NULL);
+        ASSERT(strstr(seg, "error") == NULL);
+        PASS();
+    }
+    TEST("lab.run labels every diagnostic row with its own severity") {
+        size_t n = cr_lab_render(
+            "\"compile\":{\"ok\":false,\"wall_us\":368000,\"diagnostics\":["
+            "{\"line\":1,\"col\":2,\"severity\":\"error\",\"message\":\"first_problem\"},"
+            "{\"line\":3,\"col\":4,\"severity\":\"warning\",\"message\":\"second_problem\"},"
+            "{\"line\":5,\"col\":6,\"severity\":\"note\",\"message\":\"third_problem\"}]},"
+            "\"run\":{\"ran\":false,\"exit_code\":-1,\"signal\":0,"
+            "\"signal_name\":\"\",\"timed_out\":false,\"wall_us\":0,"
+            "\"max_rss_kb\":0,\"stdout\":\"\",\"stderr\":\"\"},"
+            "\"sanitizer\":{\"enabled\":false,\"findings\":0},"
+            "\"confinement\":{},\"cache\":{\"hit\":false}}}", true, out,
+            sizeof(out));
+        ASSERT(n > 0);
+        static const char *const msg[] = {"1:2 first_problem",
+                                          "3:4 second_problem", "5:6 third_problem"};
+        static const char *const label[] = {"error", "warning", "note"};
+        for (int i = 0; i < 3; i++) {
+            const char *m = strstr(out, msg[i]);
+            ASSERT(m != NULL);
+            const char *ls = m;
+            while (ls > out && ls[-1] != '\n')
+                ls--;
+            char seg[256];
+            (void)snprintf(seg, sizeof(seg), "%.*s", (int)(m - ls), ls);
+            ASSERT(strstr(seg, label[i]) != NULL);
+        }
+        PASS();
+    }
     TEST("lab.run nonzero exit is stated with stderr, long stdout cut") {
         size_t n = cr_lab_render(
             "\"compile\":{\"ok\":true,\"wall_us\":2000,\"diagnostics\":[]},"

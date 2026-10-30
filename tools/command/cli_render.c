@@ -1524,6 +1524,20 @@ static void lab_emit_text(struct buf *b, const struct zcl_cli_render_env *e,
         emit_kv(b, e, 7, "", "… (more output not shown)");
 }
 
+/* The label every diagnostic row carries: its own severity. */
+static const char *lab_sev_label(const char *sev)
+{
+    if (!sev)
+        return "diagnostic";
+    if (strcmp(sev, "error") == 0)
+        return "error";
+    if (strcmp(sev, "warning") == 0)
+        return "warning";
+    if (strcmp(sev, "note") == 0)
+        return "note";
+    return "diagnostic";
+}
+
 /* The first diagnostics of a failed compile, errors before notes. */
 static int lab_emit_diagnostics(struct buf *b,
                                 const struct zcl_cli_render_env *e,
@@ -1542,7 +1556,7 @@ static int lab_emit_diagnostics(struct buf *b,
             (void)snprintf(line, sizeof(line), "%lld:%lld %s",
                            (long long)json_get_int(json_get(d, "line")),
                            (long long)json_get_int(json_get(d, "col")), msg);
-            emit_kv(b, e, 7, shown == 0 ? "error" : "", line);
+            emit_kv(b, e, 7, lab_sev_label(sev), line);
             shown++;
         }
     }
