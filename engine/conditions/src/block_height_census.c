@@ -7,6 +7,7 @@
 
 #include "chain/chain.h"
 #include "platform/time_compat.h"
+#include "util/log_macros.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
@@ -58,13 +59,42 @@ static int64_t mono_secs(void)
     return platform_time_monotonic_ms() / 1000;
 }
 
+/* The map's bucket array, capacity and size, read together under its read
+ * lock. insert and grow write them under the write lock, so a plain load would
+ * race with them. The lock is released before the caller walks the map.
+ * Returns false, reading nothing, when the read lock cannot be taken. */
+struct census_map_view {
+    const struct block_map_entry *buckets;
+    size_t capacity;
+    size_t size;
+};
+
+static bool census_map_view_read(const struct block_map *m,
+                                 struct census_map_view *v)
+{
+    int rc = pthread_rwlock_rdlock((pthread_rwlock_t *)&m->rwlock);
+    if (rc != 0)
+        LOG_RETURN(false, "condition",
+                   "height census: block map read lock failed: rc=%d", rc);
+    v->buckets = m->buckets;
+    v->capacity = m->capacity;
+    v->size = m->size;
+    pthread_rwlock_unlock((pthread_rwlock_t *)&m->rwlock);
+    return true;
+}
+
 static bool census_current(const struct census *c, struct main_state *ms,
                            int height, const struct block_index *tip)
 {
     const struct block_map *m = &ms->map_block_index;
-    return c->valid && c->map == m && c->buckets == m->buckets &&
-           c->capacity == m->capacity && c->size == block_map_count(m) &&
-           c->tip == tip && c->best_header == ms->pindex_best_header &&
+    if (!c->valid || c->map != m)
+        return false;
+    struct census_map_view v;
+    if (!census_map_view_read(m, &v))
+        return false;  // raw-return-ok:census_map_view_read logged it; stale census
+    return c->buckets == v.buckets && c->capacity == v.capacity &&
+           c->size == v.size && c->tip == tip &&
+           c->best_header == ms->pindex_best_header &&
            c->height == height &&
            mono_secs() - c->born < CENSUS_MAX_AGE_SECS;
 }
@@ -77,11 +107,18 @@ static bool census_current(const struct census *c, struct main_state *ms,
 static void census_fill(struct census *c, struct main_state *ms, int height,
                         const struct block_index *tip)
 {
+    struct census_map_view v;
     c->valid = false;
     c->map = &ms->map_block_index;
-    c->buckets = c->map->buckets;
-    c->capacity = c->map->capacity;
-    c->size = block_map_count(c->map);
+    if (!census_map_view_read(c->map, &v)) {
+        /* No census without a consistent fingerprint: the caller scans. */
+        c->n = 0;
+        c->overflow = true;
+        return;
+    }
+    c->buckets = v.buckets;
+    c->capacity = v.capacity;
+    c->size = v.size;
     c->tip = tip;
     c->best_header = ms->pindex_best_header;
     c->height = height;
