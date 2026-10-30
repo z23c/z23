@@ -231,6 +231,9 @@ struct engine_vendor {
     enum engine_wire wire;
     enum engine_delivery delivery;
     bool             costs_money;    /* false only for the fixture engine */
+    /* The row's model spends the output budget on reasoning unless the
+     * request disables it. tools/engine_unit.c turns that off per run. */
+    bool             no_thinking;
     /* Exactly one row carries this. It is what a caller gets when they name
      * no engine. A flag rather than an id string elsewhere: a string can name
      * a row that does not exist, a flag cannot, and a test asserts that

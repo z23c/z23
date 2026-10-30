@@ -201,6 +201,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .wire          = ENGINE_WIRE_OPENAI_CHAT,
         .delivery      = ENGINE_DELIVERS_ENVELOPE,
         .costs_money   = true,
+        .no_thinking   = true,
         .max_retries   = 3,
     },
     {

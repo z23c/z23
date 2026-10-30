@@ -2848,6 +2848,32 @@ static void contract_gate_or_exit(char *task, size_t task_len, bool dry_run)
     exit(fail_setup(why));
 }
 
+/* A row marked no_thinking gets the request's thinking field disabled for
+ * this run. An operator who exported ZCL_ENGINE_NO_THINKING themselves
+ * (0 keeps thinking on) is obeyed, so only an unset variable is filled. */
+static bool unit_no_thinking_setup(const struct engine_vendor *v)
+{
+    if (!v->no_thinking || getenv("ZCL_ENGINE_NO_THINKING"))
+        return true;
+    return unit_environment_set("ZCL_ENGINE_NO_THINKING", "1") == 0;
+}
+
+/* Option refusals, then the per-run environment for the chosen row. One
+ * helper rather than a second branch in main(), whose complexity is pinned
+ * by the ratchet. */
+static const char *unit_vendor_refusal(const struct engine_vendor *v,
+                                       const struct unit_opts *o)
+{
+    const char *why = unit_option_refusal(v, o);
+    if (why)
+        return why;
+    if (!unit_no_thinking_setup(v))
+        return "cannot turn thinking off for this engine: setenv "
+               "ZCL_ENGINE_NO_THINKING failed; export "
+               "ZCL_ENGINE_NO_THINKING=0 to keep thinking on";
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     struct unit_opts o;
@@ -2878,7 +2904,7 @@ int main(int argc, char **argv)
     if (!v)
         return fail_setup(o.engine_id ? "unknown --engine; see --list"
                                       : "this build has no default engine");
-    const char *option_why = unit_option_refusal(v, &o);
+    const char *option_why = unit_vendor_refusal(v, &o);
     if (option_why)
         return fail_setup(option_why);
     if (!engine_resume_session_id_valid(o.resume_session_id))

@@ -91,7 +91,8 @@ static bool write_disabled_thinking(struct json_value *doc)
     /* GLM models spend the whole output budget on reasoning unless the
      * request disables it: against max_tokens 32768, glm-5.3-flash wrote
      * 127,536 bytes of reasoning_content and no answer, and the harness
-     * refused the empty message. tools/engine_unit.c sets ZCL_ENGINE_NO_THINKING=1 per run; the resident node never dispatches. */
+     * refused the empty message. tools/engine_unit.c sets ZCL_ENGINE_NO_THINKING=1
+     * per run for rows marked no_thinking; the resident node never dispatches. */
     const char *no_thinking = getenv("ZCL_ENGINE_NO_THINKING");
     if (no_thinking && strcmp(no_thinking, "1") == 0) {
         struct json_value thinking;

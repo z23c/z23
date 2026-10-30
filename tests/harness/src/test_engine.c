@@ -131,6 +131,14 @@ static int case_registry(void)
              !engine_by_id("glm-cli")->cli_needs_tty);
     EN_CHECK("an HTTPS engine needs one",
              engine_needs_key(engine_by_id("glm")));
+    /* grok and openai share GLM's wire dialect, so the field must not leak
+     * to them: an OpenAI endpoint may reject an unknown parameter. */
+    EN_CHECK("glm turns thinking off per engine_unit run",
+             engine_by_id("glm")->no_thinking);
+    EN_CHECK("grok leaves thinking alone",
+             !engine_by_id("grok")->no_thinking);
+    EN_CHECK("openai leaves thinking alone",
+             !engine_by_id("openai")->no_thinking);
 
     /* The retry budget differs by engine on purpose: a CLI already retries
      * internally, and stacking a loop on one multiplies the wall clock. */
