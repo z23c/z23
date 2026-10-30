@@ -88,12 +88,49 @@ static int lsel_pc_count_run(int argc, char **argv)
     return fclose(f) != 0;
 }
 
+/* Fail like check-no-python and say why: a blank line, then the message the
+ * report must keep as first_line, then a second line it must drop. */
+static int lsel_pc_noisy_run(int argc, char **argv)
+{
+    int rc = lsel_pc_no_python_run(argc, argv);
+    if (rc != 0)
+        (void)fputs("\n   boom: first line\nsecond line\n", stderr);
+    return rc;
+}
+
+/* Fail with the words that mean this tree lacks a build, on the second line. */
+static int lsel_pc_unbuilt_run(int argc, char **argv)
+{
+    int rc = lsel_pc_no_python_run(argc, argv);
+    if (rc != 0)
+        (void)fputs("note\nz23-lint: cannot execute a child: x is missing\n",
+                    stderr);
+    return rc;
+}
+
+/* Fail with one 300-byte line. */
+static int lsel_pc_long_run(int argc, char **argv)
+{
+    char line[302];
+    int rc = lsel_pc_no_python_run(argc, argv);
+    if (rc != 0) {
+        memset(line, 'x', 300);
+        line[300] = '\n';
+        line[301] = '\0';
+        (void)fputs(line, stderr);
+    }
+    return rc;
+}
+
 static const struct lint_gate k_lsel_pc_gates[] = {
     { "check-no-python", lsel_pc_no_python_run, NULL },
     { "check-clean", lsel_pc_clean_run, NULL },
     { "check-argv-no-python", lsel_pc_argv_run, NULL },
     { "check-root-marker", lsel_pc_root_marker_run, NULL },
     { "check-count", lsel_pc_count_run, NULL },
+    { "check-noisy", lsel_pc_noisy_run, NULL },
+    { "check-unbuilt", lsel_pc_unbuilt_run, NULL },
+    { "check-long", lsel_pc_long_run, NULL },
 };
 
 const struct lint_gate *lint_gate_table(size_t *n)
@@ -350,6 +387,110 @@ static int test_lsel_precheck_auto_base(void)
 }
 
 
+/* Runs precheck with --base=clean over the given extra options (cwd = dirty
+ * or clean) and returns its exit code with stdout in out. */
+static int lsel_pc_opt_run(const struct lsel_pc_fx *fx, const char *tree,
+                           const char *opt1, const char *opt2, char *out,
+                           size_t cap)
+{
+    char base_arg[PATH_MAX + 16];
+    char *argv[3] = { base_arg, (char *)opt1, (char *)opt2 };
+    (void)snprintf(base_arg, sizeof(base_arg), "--base=%s", fx->clean);
+    return lsel_pc_run(fx, tree, argv, opt2 ? 3 : 2, out, cap);
+}
+
+static int test_lsel_precheck_first_line(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_precheck: --json keeps the first non-empty line of a failing gate, 200 bytes at most") {
+        struct lsel_pc_fx fx;
+        char out[2048], want[320];
+        ASSERT(lsel_pc_plant(&fx));
+        ASSERT_EQ(lsel_pc_opt_run(&fx, fx.dirty, "--gates=check-noisy",
+                                  "--json", out, sizeof(out)), 1);
+        ASSERT(strstr(out, "\"first_line\":\"boom: first line\"}") != NULL);
+        ASSERT(strstr(out, "second line") == NULL);
+        ASSERT_EQ(lsel_pc_opt_run(&fx, fx.dirty, "--gates=check-long",
+                                  "--json", out, sizeof(out)), 1);
+        want[0] = ':';
+        want[1] = '"';
+        memset(want + 2, 'x', 200);
+        (void)snprintf(want + 202, sizeof(want) - 202, "\"}");
+        ASSERT(strstr(out, want) != NULL);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
+static int test_lsel_precheck_unbuilt(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_precheck: a lane failure that needs a missing build is UNBUILT, not NEW, exit 0") {
+        struct lsel_pc_fx fx;
+        char out[1024];
+        ASSERT(lsel_pc_plant(&fx));
+        ASSERT_EQ(lsel_pc_opt_run(&fx, fx.dirty, "--gates=check-unbuilt",
+                                  NULL, out, sizeof(out)), 0);
+        ASSERT(strstr(out, "UNBUILT check-unbuilt\n") != NULL);
+        ASSERT(strstr(out, "NEW ") == NULL);
+        ASSERT(strstr(out, "precheck: 0 new failure(s) of 1 gates\n") != NULL);
+        ASSERT_EQ(lsel_pc_opt_run(&fx, fx.dirty,
+                                  "--gates=check-unbuilt", "--json", out,
+                                  sizeof(out)), 0);
+        ASSERT(strstr(out, "\"verdict\":\"UNBUILT\"") != NULL);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
+static int test_lsel_precheck_skip(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_precheck: --skip leaves a gate out of both trees and the count; an unknown name is a usage error") {
+        struct lsel_pc_fx fx;
+        char out[1024];
+        ASSERT(lsel_pc_plant(&fx));
+        ASSERT_EQ(lsel_pc_opt_run(&fx, fx.dirty,
+                                  "--gates=check-no-python,check-clean",
+                                  "--skip=check-no-python", out,
+                                  sizeof(out)), 0);
+        ASSERT(strstr(out, "NEW ") == NULL);
+        ASSERT(strstr(out, "precheck: 0 new failure(s) of 1 gates\n") != NULL);
+        ASSERT_EQ(lsel_pc_opt_run(&fx, fx.dirty, "--gates=check-clean",
+                                  "--skip=check-nope", out, sizeof(out)), 2);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
+static int test_lsel_precheck_json(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_precheck: --json prints one object per gate and a summary") {
+        struct lsel_pc_fx fx;
+        char base_arg[PATH_MAX + 16], out[2048];
+        ASSERT(lsel_pc_plant(&fx));
+        (void)snprintf(base_arg, sizeof(base_arg), "--base=%s", fx.clean);
+        char *argv[] = { base_arg, (char *)"--json", (char *)"--skip=check-count",
+            (char *)"--gates=check-no-python,check-clean,check-count" };
+        ASSERT_EQ(lsel_pc_run(&fx, fx.dirty, argv, 4, out, sizeof(out)), 1);
+        ASSERT(strstr(out, "{\"gate\":\"check-no-python\",\"lane_rc\":1,"
+                           "\"base_rc\":0,\"verdict\":\"NEW\","
+                           "\"first_line\":\"\"}\n") != NULL);
+        ASSERT(strstr(out, "{\"gate\":\"check-clean\",\"lane_rc\":0,"
+                           "\"base_rc\":0,\"verdict\":\"PASS\","
+                           "\"first_line\":\"\"}\n") != NULL);
+        ASSERT(strstr(out, "{\"gate\":\"check-count\",\"lane_rc\":-1,"
+                           "\"base_rc\":-1,\"verdict\":\"SKIPPED\","
+                           "\"first_line\":\"\"}\n") != NULL);
+        ASSERT(strstr(out, "{\"summary\":{\"gates\":2,\"new\":1,\"unbuilt\":0,"
+                           "\"skipped\":1}}\n") != NULL);
+        ASSERT(strstr(out, "NEW check") == NULL);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
 int test_lint_precheck(void)
 {
     int failures = 0;
@@ -359,6 +500,10 @@ int test_lint_precheck(void)
     failures += test_lsel_precheck_auto_base();
     failures += test_lsel_precheck_argv();
     failures += test_lsel_precheck_repo_root();
+    failures += test_lsel_precheck_first_line();
+    failures += test_lsel_precheck_unbuilt();
+    failures += test_lsel_precheck_skip();
+    failures += test_lsel_precheck_json();
     return failures;
 }
 
