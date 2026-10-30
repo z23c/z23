@@ -8,7 +8,7 @@
 #
 # This ledger is what makes that impossible to repeat. Every artifact-prefixed
 # seed in this corpus MUST have exactly one line here, and
-# tools/lint/check_fuzz_artifact_replay.sh compares every line against what the
+# tools/lint/lintc/gate_fuzz_artifact_replay.c compares every line against what the
 # artifact actually does today. There is no directory-wide exemption: an
 # artifact nobody has triaged fails the build, and so does a line that has
 # stopped being true.
@@ -66,7 +66,7 @@
 # reason names EITHER a fix ("fixed by <commit>" / "root cause: ...") OR an
 # explicit pattern-init replay that ALSO came back clean ("pattern-init:
 # clean (Nx)"). "It replayed clean" with neither is not enough, and
-# tools/lint/check_fuzz_artifact_replay.sh now enforces this — a
+# tools/lint/lintc/gate_fuzz_artifact_replay.c now enforces this — a
 # regression-seed line missing both is a violation, not a pass.
 # `timeout-`/`oom-`/`slow-unit-` kinds are not held to this rule.
 #

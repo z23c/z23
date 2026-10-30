@@ -213,7 +213,7 @@
  * local-only, WARN-severity and hollow-scan cases stay clean. */
 #define CONDITION_COOLDOWN_SCRIPT_REL "tools/scripts/check_condition_cooldown.sh"
 #define MARKDOWN_LINK_GATE_BIN "build/bin/z23-lint"
-#define FUZZ_ARTIFACT_REPLAY_SCRIPT_REL "tools/lint/check_fuzz_artifact_replay.sh"
+#define FUZZ_ARTIFACT_REPLAY_SCRIPT_REL "build/bin/z23-lint check-fuzz-artifact-ledger"
 #define E10_SHAPE_SCRIPT_REL "build/bin/z23-lint check-framework-shape"
 /* Same direct-selftest convention as NODE_DB_EXEC_FIXTURE_DST_REL. */
 #define E10_SHAPE_FIXTURE_DST \

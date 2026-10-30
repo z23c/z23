@@ -10896,7 +10896,7 @@ FUZZ_LIBS = $(TOR_LIBS) $(LIBS)
 
 FUZZ_TARGETS = $(BIN_DIR)/fuzz_block $(BIN_DIR)/fuzz_script $(BIN_DIR)/fuzz_p2p $(BIN_DIR)/fuzz_http $(BIN_DIR)/fuzz_compactblock $(BIN_DIR)/fuzz_snapshot $(BIN_DIR)/fuzz_tx_bundle $(BIN_DIR)/fuzz_rom_manifest $(BIN_DIR)/fuzz_overlay $(BIN_DIR)/fuzz_ecdsa $(BIN_DIR)/fuzz_zcode_commons $(BIN_DIR)/fuzz_zcode_dht $(BIN_DIR)/fuzz_zcode_science $(BIN_DIR)/fuzz_mesh_status_proto $(BIN_DIR)/fuzz_semantic_manifest
 # Keep the line above literal and keep one `$(BIN_DIR)/fuzz_<kind>:` rule per
-# harness below: check_fuzz_artifact_replay.sh derives the corpus<->binary map
+# harness below: the fuzz-artifact-ledger gate (gate_fuzz_artifact_replay.c) derives the corpus<->binary map
 # from those rule lines, and background_quality_lane.sh derives its kind list
 # from this variable's text. Both are deliberate "a new harness is covered the
 # day its rule lands" scrapes; a `$(patsubst ...)` spelling blinds them.
@@ -11072,10 +11072,10 @@ fuzz-ci: check-fuzz-ci-tools $(FUZZ_TARGETS)
 # still trips AND still names the file, so a "0 violations" line below can never
 # be a gate that has quietly stopped being able to fail.
 .PHONY: fuzz-replay
-fuzz-replay: check-fuzz-ci-tools $(FUZZ_TARGETS)
+fuzz-replay: $(LINTC_TOOL) check-fuzz-ci-tools $(FUZZ_TARGETS)
 	@echo "══ FUZZ-REPLAY: every saved finding, replayed against its verdict ══"
-	@./tools/lint/check_fuzz_artifact_replay.sh --selftest
-	@./tools/lint/check_fuzz_artifact_replay.sh
+	@./build/bin/z23-lint check-fuzz-artifact-ledger --selftest
+	@./build/bin/z23-lint check-fuzz-artifact-ledger
 
 # Same binaries with leak detection ON. Separate target so CI stays
 # green while known-pre-existing leaks are being triaged; developers
@@ -14072,9 +14072,9 @@ check-flag-registry: $(LINTC_TOOL)
 # which `make ci` and the fuzz-replay CI job run. A 2026-07-14 hang sat unread
 # for two weeks because no build ever read a fuzz verdict; this is the half of
 # that route that is cheap enough for the inner loop.
-check-fuzz-artifact-ledger:
+check-fuzz-artifact-ledger: $(LINTC_TOOL)
 	@echo "→ Gate: fuzz_artifact_ledger (every saved finding has a verdict)"
-	@./tools/lint/check_fuzz_artifact_replay.sh --ledger-only
+	@./build/bin/z23-lint check-fuzz-artifact-ledger --ledger-only
 
 # Every standalone tool rule in this file must actually build. lint/
 # test-parallel/ci build the node, the test runners, the fuzzers and two lint

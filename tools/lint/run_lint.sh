@@ -106,7 +106,7 @@ gate_command() {
     case "$1" in
         check-toolchain)                   echo './tools/dev/check-toolchain.sh --selftest && ./tools/dev/check-toolchain.sh' ;;
         check-dev-linker-threads)          echo 'make check-dev-linker-threads' ;;
-        check-fuzz-artifact-ledger)        echo './tools/lint/check_fuzz_artifact_replay.sh --ledger-only' ;;
+        check-fuzz-artifact-ledger)        echo './build/bin/z23-lint check-fuzz-artifact-ledger --ledger-only' ;;
         check-build-epoch-integrity)       echo 'tools/dev/build-epoch-integrity-cached.sh' ;;
         check-checkout-lock)               echo 'tools/dev/checkout-lock-selftest.sh' ;;
         check-host-gc-selftest)            echo 'tools/scripts/host_gc_selftest.sh' ;;

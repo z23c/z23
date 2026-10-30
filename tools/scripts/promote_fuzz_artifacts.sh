@@ -100,7 +100,7 @@ mkdir -p "$SEED_ROOT" 2>/dev/null || { echo "promote-fuzz-artifacts: cannot crea
 # The prefix before the FIRST of these (with its own trailing '-') is the
 # harness name. "slow-unit" and "minimized-from" themselves contain a '-', so
 # they must be checked before a naive single-token split would misparse them.
-# Kept in step with ARTIFACT_RE in tools/lint/check_fuzz_artifact_replay.sh:
+# Kept in step with ARTIFACT_RE in tools/lint/lintc/gate_fuzz_artifact_replay.c:
 # these are the six prefixes libFuzzer writes. "minimized-from" is what
 # `-minimize_crash=1` produces — the natural next step after a crash- lands,
 # and until 2026-07-29 neither this script nor the gate could name it.

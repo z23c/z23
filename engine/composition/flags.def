@@ -1011,15 +1011,15 @@ Z23_FLAG("ZCL_FUZZ_DURATION", "env_build", "900", "-",
 Z23_FLAG("ZCL_FUZZ_OVERLAY_ARM_STATS", "env_runtime", "-", "-",
           "undocumented; first use tools/fuzz/fuzz_overlay.c:auto")
 Z23_FLAG("ZCL_FUZZ_REPLAY_CONFIRM_TIMEOUT", "env_build", "15", "-",
-          "undocumented; first use tools/lint/check_fuzz_artifact_replay.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_fuzz_artifact_replay.c:auto")
 Z23_FLAG("ZCL_FUZZ_REPLAY_JOBS", "env_build", "6", "-",
-          "undocumented; first use tools/lint/check_fuzz_artifact_replay.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_fuzz_artifact_replay.c:auto")
 Z23_FLAG("ZCL_FUZZ_REPLAY_LEDGER_ONLY", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_fuzz_artifact_replay.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_fuzz_artifact_replay.c:auto")
 Z23_FLAG("ZCL_FUZZ_REPLAY_SELFTEST", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_fuzz_artifact_replay.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_fuzz_artifact_replay.c:auto")
 Z23_FLAG("ZCL_FUZZ_REPLAY_TIMEOUT", "env_build", "5", "-",
-          "undocumented; first use tools/lint/check_fuzz_artifact_replay.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_fuzz_artifact_replay.c:auto")
 Z23_FLAG("ZCL_FUZZ_TIMEOUT", "env_build", "2", "-",
           "undocumented; first use tools/scripts/background_quality_lane.sh:auto")
 Z23_FLAG("ZCL_GATE_CC", "env_build", "-", "-",
@@ -1465,7 +1465,7 @@ Z23_FLAG("ZCL_BUILD_MAX_JOBS", "env_build", "-", "-",
 Z23_FLAG("ZCL_LINT_MODE", "env_runtime", "FAIL", "-",
           "first use tools/lint/lintc/gate_ratchet_ports.c:auto; documented at docs/agent/AI_SAFETY_GATES.md:153: invokes it as ZCL_LINT_MODE=FAIL, which fails on any violation and ignores the")
 Z23_FLAG("ZCL_LINT_PATTERNINIT_BIN_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_fuzz_artifact_replay.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_fuzz_artifact_replay.c:auto")
 Z23_FLAG("ZCL_LINT_PRODUCTION_SCAN", "env_runtime", "0", "-",
           "undocumented; first use tools/file_size_policy.c:auto")
 Z23_FLAG("ZCL_LINT_REPO_ROOT", "env_build", "-", "-",
