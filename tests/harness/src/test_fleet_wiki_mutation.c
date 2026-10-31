@@ -959,6 +959,31 @@ static bool fwm_write_file(const char *path, const char *bytes, size_t n)
     return ok;
 }
 
+/* Bind a unix socket at path, by its form relative to the working directory
+ * when the path lives under it: a long worktree path can push the absolute one
+ * past sun_path's 108 bytes (10-31, rhett2 lane r1lane-core-batch-1031g).
+ * open(2) on a bound socket fails with ENXIO; no listener is needed. */
+static bool fwm_bind_socket_file(const char *sock_path)
+{
+    char cwd[PATH_MAX];
+    const char *bind_path = sock_path;
+    size_t cwd_len = getcwd(cwd, sizeof(cwd)) ? strlen(cwd) : 0;
+    if (cwd_len && !strncmp(sock_path, cwd, cwd_len) && sock_path[cwd_len] == '/')
+        bind_path = sock_path + cwd_len + 1;
+    struct sockaddr_un sun;
+    memset(&sun, 0, sizeof(sun));
+    sun.sun_family = AF_UNIX;
+    if (strlen(bind_path) >= sizeof(sun.sun_path))
+        return false;
+    (void)snprintf(sun.sun_path, sizeof(sun.sun_path), "%s", bind_path);
+    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0)
+        return false;
+    bool ok = bind(sock_fd, (struct sockaddr *)&sun, sizeof(sun)) == 0;
+    (void)close(sock_fd);
+    return ok;
+}
+
 /* CLI `@path` reads the body from a regular file; the same literal text over
  * MCP (plan_first) stays literal, so a remote caller cannot read local files. */
 static int fwm_atfile_cli(void)
@@ -1034,23 +1059,7 @@ static int fwm_atfile_cli(void)
         zcl_command_reply_free(&reply);
         char sock_path[320];
         (void)snprintf(sock_path, sizeof(sock_path), "%s/sock.md", dir);
-        /* Bind by the path relative to the working directory when the fixture
-         * lives under it: a long worktree path can push the absolute one past
-         * sun_path's 108 bytes (10-31, rhett2 lane r1lane-core-batch-1031g). */
-        char cwd[PATH_MAX];
-        const char *bind_path = sock_path;
-        size_t cwd_len = getcwd(cwd, sizeof(cwd)) ? strlen(cwd) : 0;
-        if (cwd_len && !strncmp(sock_path, cwd, cwd_len) && sock_path[cwd_len] == '/')
-            bind_path = sock_path + cwd_len + 1;
-        int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-        struct sockaddr_un sun;
-        memset(&sun, 0, sizeof(sun));
-        sun.sun_family = AF_UNIX;
-        ASSERT(sock_fd >= 0 && strlen(bind_path) < sizeof(sun.sun_path));
-        (void)snprintf(sun.sun_path, sizeof(sun.sun_path), "%s", bind_path);
-        /* open(2) on a bound socket fails with ENXIO; no listener is needed. */
-        ASSERT(bind(sock_fd, (struct sockaddr *)&sun, sizeof(sun)) == 0);
-        (void)close(sock_fd);
+        ASSERT(fwm_bind_socket_file(sock_path));
         (void)snprintf(arg, sizeof(arg), "@%s", sock_path);
         ASSERT(fwm_plan_call(NULL, "atfile-write", arg, NULL, false, &reply));
         ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_FAILED);
