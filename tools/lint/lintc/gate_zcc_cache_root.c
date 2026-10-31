@@ -6,7 +6,8 @@
  * include directory and source are spelled as ABSOLUTE paths under the root.
  * It must stay unshared when no map covers the root, must keep a path outside
  * the mapped root raw, and must still key on environment variables a compiler
- * reads while ignoring ones it cannot.
+ * reads while ignoring ones it cannot, only under the ZCC_PORTABLE_ENV=1 opt-in
+ * and a stock driver name; and must decline root sharing for profiling flags.
  */
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE 1
@@ -14,6 +15,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include "lintc_text.h"
 #include "lintc.h"
@@ -23,12 +26,21 @@
  * map != 0 adds -ffile-prefix-map=<dir>=/zcl; `inc2` is an extra absolute -I
  * (NULL for none). */
 static const char *pk_extra; /* one extra compiler flag for the next pk_cc */
+static const char *pk_driver = "cc"; /* compiler argv[0] for the next pk_cc */
+static int pk_portable = 1;          /* export ZCC_PORTABLE_ENV=1 to zcc */
 
 static int pk_cc(const char *dir, const char *src, const char *obj, int map,
                  const char *inc2, const char *dep,
-                 const char *const *env)
+                 const char *const *caller_env)
 {
-    const char *av[20] = { zc.zcc, "cc", "-std=c23", "-O1", "-g", "-Wall", "-c" };
+    /* The opt-in goes first so a caller entry could still override it. */
+    const char *env[8] = { pk_portable ? "ZCC_PORTABLE_ENV=1"
+                                       : "ZCC_PORTABLE_ENV" };
+    size_t ne = 1;
+    for (; caller_env && *caller_env && ne < 7; caller_env++)
+        env[ne++] = *caller_env;
+    env[ne] = NULL;
+    const char *av[20] = { zc.zcc, pk_driver, "-std=c23", "-O1", "-g", "-Wall", "-c" };
     size_t n = 7;
     av[n++] = zcf("%s/%s", dir, src);
     av[n++] = "-o";
@@ -138,6 +150,118 @@ static int pk_env(void)
     return pk_env_specs();
 }
 
+/* Locate `cc` on PATH, resolved through symlinks, into out. */
+static int pk_find_cc(char out[PATH_MAX])
+{
+    const char *path = getenv("PATH");
+    char cand[PATH_MAX];
+    while (path && *path) {
+        size_t n = strcspn(path, ":");
+        if (n > 0 && n < sizeof cand - 4u) {
+            snprintf(cand, sizeof cand, "%.*s/cc", (int)n, path);
+            if (access(cand, X_OK) == 0 && realpath(cand, out))
+                return 0;
+        }
+        path += n + (path[n] ? 1u : 0u);
+    }
+    return 1;
+}
+
+/* A byte copy of the real driver under the non-stock name x-gcc. A copy (not a
+ * symlink, which resolves back to the stock name) is a launcher the name test
+ * must not trust; COMPILER_PATH lets the relocated copy still find cc1. */
+static const char *pk_make_xgcc(const char **cpath)
+{
+    char real[PATH_MAX], out[PATH_MAX] = "";
+    if (pk_find_cc(real) || csr_mkdirs(zcw("portable.x")))
+        return NULL;
+    const char *dst = zcw("portable.x/x-gcc");
+    if (zc_copy(real, dst, 0) || chmod(dst, 0755) != 0)
+        return NULL;
+    const char *const qa[] = { real, "-print-prog-name=cc1", NULL };
+    struct zc_cmd q = { .argv = qa, .out = out, .cap = sizeof out };
+    if (zc_run(&q) != 0)
+        return NULL;
+    out[strcspn(out, "\r\n")] = '\0';
+    char *slash = strrchr(out, '/');
+    if (slash) {
+        *slash = '\0';
+        *cpath = zcf("COMPILER_PATH=%s", out);
+    }
+    return dst;
+}
+
+/* (h) without the ZCC_PORTABLE_ENV opt-in the whole environment is keyed. */
+static int pk_env_default(void)
+{
+    const char *a = zcw("portable.a"), *b = zcw("portable.b");
+    const char *const h1[] = { "ZCC_PORTABLE_NOISE=1", "HOME=/nonexistent-a", NULL };
+    const char *const h2[] = { "ZCC_PORTABLE_NOISE=2", "HOME=/nonexistent-b", NULL };
+    pk_portable = 0;
+    int rc = pk_cc(a, "h.c", zcw("h.1.o"), 1, NULL, NULL, h1) != 0 ||
+             pk_cc(b, "h.c", zcw("h.2.o"), 1, NULL, NULL, h2) != 0;
+    pk_portable = 1;
+    if (rc)
+        zc_fail("portable key (h): default-environment compile failed");
+    zc_disp("MISS", "portable key (h): without ZCC_PORTABLE_ENV an unrelated "
+                    "variable did not change the key");
+    return 0;
+}
+
+/* (i) a driver that is not named exactly like a stock one keys everything. */
+static int pk_env_nonstock(void)
+{
+    const char *a = zcw("portable.a"), *b = zcw("portable.b");
+    const char *cpath = NULL;
+    const char *drv = pk_make_xgcc(&cpath);
+    if (!drv)
+    {
+        zc_fail("portable key (i): could not stage the x-gcc driver");
+        return 0;
+    }
+    const char *const x1[] = { "ZCC_PORTABLE_NOISE=1", cpath, NULL };
+    const char *const x2[] = { "ZCC_PORTABLE_NOISE=2", cpath, NULL };
+    pk_driver = drv;
+    int rc = pk_cc(a, "x.c", zcw("x.1.o"), 1, NULL, NULL, x1) != 0 ||
+             pk_cc(b, "x.c", zcw("x.2.o"), 1, NULL, NULL, x2) != 0;
+    pk_driver = "cc";
+    if (rc)
+        zc_fail("portable key (i): x-gcc compile failed");
+    zc_disp("MISS", "portable key (i): a driver named x-gcc was keyed on the "
+                    "allowlist only");
+    return 0;
+}
+
+/* (j) profiling and side-file flags write beside the object and can name the
+ * root: two roots must not share a key. -fprofile-arcs and --coverage already
+ * bypass the cache outright (never a HIT); the rest reach root_map(). */
+static int pk_one_flag(const char *flag, const char *src, int must_miss)
+{
+    const char *a = zcw("portable.a"), *b = zcw("portable.b");
+    pk_extra = flag;
+    int rc = pk_cc(a, src, zcw("%s.1.o", src), 1, NULL, NULL, NULL) != 0 ||
+             pk_cc(b, src, zcw("%s.2.o", src), 1, NULL, NULL, NULL) != 0;
+    pk_extra = NULL;
+    if (rc)
+        zc_fail(zcf("portable key (j): %s compile failed", flag));
+    else if (must_miss)
+        zc_disp("MISS", zcf("portable key (j): %s compiles from two roots "
+                            "shared a key", flag));
+    else
+        zc_disp_not_in(zc.log, "HIT", zcf("portable key (j): %s compiles "
+                                          "from two roots were a HIT", flag));
+    return 0;
+}
+
+static int pk_side_flags(void)
+{
+    return pk_one_flag("-save-temps", "j1.c", 1) ||
+           pk_one_flag("-fstack-usage", "j2.c", 1) ||
+           pk_one_flag("-pg", "j3.c", 1) ||
+           pk_one_flag("-fprofile-arcs", "j4.c", 0) ||
+           pk_one_flag("--coverage", "j5.c", 0);
+}
+
 /* (f) a depfile or a stored warning would name this root's absolute paths, so
  * neither may be replayed into another root. */
 static int pk_side_artifacts(void)
@@ -160,7 +284,8 @@ static int pk_fixture(void)
     if (csr_mkdirs(zcw("portable.a/inc")) || csr_mkdirs(zcw("portable.b/inc")) ||
         csr_mkdirs(zcw("portable.s1/inc")) || csr_mkdirs(zcw("portable.s2/inc")))
         return 1;
-    static const char *const srcs[] = { "p.c", "np.c", "out.c", "e.c", "n.c", "d.c", "s.c" };
+    static const char *const srcs[] = { "p.c", "np.c", "out.c", "e.c", "n.c", "d.c", "s.c",
+                                      "h.c", "x.c", "j1.c", "j2.c", "j3.c", "j4.c", "j5.c" };
     for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++)
         if (pk_put_pair(srcs[i],
                         zcf("#include \"p.h\"\nint pk_%zu(void) { return "
@@ -176,5 +301,6 @@ static int pk_fixture(void)
 int zc_sec_portable(void)
 {
     return pk_fixture() || pk_shared() || pk_unshared() || pk_env() ||
+           pk_env_default() || pk_env_nonstock() || pk_side_flags() ||
            pk_side_artifacts();
 }

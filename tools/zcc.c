@@ -46,6 +46,19 @@
  *   first, so the objects one link names through it are keyed exactly like
  *   objects spelled on the command line.
  *
+ * THE ENVIRONMENT IN THE KEY. By default the WHOLE environment (minus the
+ * orchestration entries) is hashed. The narrower key_env_allowed() allowlist
+ * applies ONLY when BOTH hold: (a) ZCC_PORTABLE_ENV=1 is set in zcc's own
+ * environment (opt-in; the variable itself is part of the key), and (b) the
+ * resolved driver's file name is exactly a stock driver name: cc, gcc, clang,
+ * gcc-N, clang-N, or <triplet>-gcc, <triplet>-gcc-N, <triplet>-clang,
+ * <triplet>-clang-N (triplet = three or four [a-z0-9_]+ parts joined by '-',
+ * N = digits; no substring match). Anything else — a script, a vendor wrapper
+ * such as x-gcc, a plugin/specs/-wrapper invocation, a response file — keys
+ * the whole environment. root_map() (cross-root sharing) declines, keeping raw
+ * paths, for -fprofile*, -p, -pg, -fdump*, -fcallgraph-info*, -fstack-usage,
+ * -save-temps*, --coverage, -ftest-coverage, depfiles, LTO and response files.
+ *
  * ZCC_STRICT=1 skips level 1, and ZCC_AUDIT=1 checks it empirically: every
  * hit is recompiled
  * for real and byte-compared, and a divergence is reported loudly and served
@@ -1050,6 +1063,18 @@ struct rootmap {
     char repl[PATH_MAX];
 };
 
+/* Flags whose side files (profile data, dumps, call graphs, stack usage,
+ * saved temporaries) are written beside the object and can name the root. */
+static bool root_map_flag_declines(const char *a)
+{
+    return strncmp(a, "-fprofile", 9) == 0 || strcmp(a, "-p") == 0 ||
+           strcmp(a, "-pg") == 0 || strncmp(a, "-fdump", 6) == 0 ||
+           strncmp(a, "-fcallgraph-info", 16) == 0 ||
+           strcmp(a, "-fstack-usage") == 0 ||
+           strncmp(a, "-save-temps", 11) == 0 ||
+           strcmp(a, "--coverage") == 0 || strcmp(a, "-ftest-coverage") == 0;
+}
+
 static bool root_map(const struct plan *pl, const char *cwd,
                      struct rootmap *rm)
 {
@@ -1064,7 +1089,8 @@ static bool root_map(const struct plan *pl, const char *cwd,
     for (int i = 1; i < pl->argc; i++) {
         const char *a = pl->argv[i];
         if (strncmp(a, "-fdebug-prefix-map=", 19) == 0 ||
-            strncmp(a, "-fmacro-prefix-map=", 19) == 0)
+            strncmp(a, "-fmacro-prefix-map=", 19) == 0 ||
+            root_map_flag_declines(a))
             return false;
         if (strncmp(a, "-ffile-prefix-map=", 18) != 0)
             continue;
@@ -1290,7 +1316,8 @@ static bool tmpdir_may_reach_object(const struct plan *pl)
  * Hashing the whole environment made every host and account its own key space
  * (HOME, USER, LOGNAME, the per-session variables orchestration_env() lists
  * one at a time, and whatever a shell happens to export): a fleet host and a
- * lane could never share a compile result. The key now binds an ALLOWLIST —
+ * lane could never share a compile result. When ZCC_PORTABLE_ENV=1 and the
+ * driver is a stock one (see env_key_mode_for), the key binds an ALLOWLIST —
  * the variables a compiler driver, its preprocessor, assembler or linker
  * actually read — and every other entry stays out of the key. The child
  * environment is NOT narrowed by this: compiler_child_env() filters exactly
@@ -1328,7 +1355,7 @@ static bool key_env_allowed(const char *entry, bool keep_tmp, bool with_path)
         "DEVELOPER_DIR=", "TOOLCHAINS=", "MACOSX_DEPLOYMENT_TARGET=",
         "IPHONEOS_DEPLOYMENT_TARGET=", "TVOS_DEPLOYMENT_TARGET=",
         "WATCHOS_DEPLOYMENT_TARGET=", "INCLUDE=", "LIB=", "LIBPATH=",
-        "MSYSTEM=",
+        "MSYSTEM=", "ZCC_PORTABLE_ENV=",
     };
     static const char *const prefixes[] = {
         "LC_", "LD_", "GCC_", "COLLECT_", "CCC_", "CC_PRINT_", "CLANG_", "RC_",
@@ -1940,9 +1967,62 @@ static bool compiler_is_script(const char *path)
     return n != (ssize_t)sizeof magic || (magic[0] == '#' && magic[1] == '!');
 }
 
-/* Only a GCC or Clang driver is known to read just the allowlisted names. A
- * native launcher (ccache, distcc, a vendor wrapper) can read any variable,
- * so judge by the file the compiler path finally resolves to (symlinks followed). */
+/* "gcc", "clang", optionally followed by "-" and digits (a version suffix). */
+static bool stock_driver_tail(const char *s)
+{
+    size_t n = strncmp(s, "gcc", 3) == 0 ? 3u :
+               strncmp(s, "clang", 5) == 0 ? 5u : 0u;
+    if (n == 0)
+        return false;
+    if (s[n] == '\0')
+        return true;
+    if (s[n] != '-' || s[n + 1u] == '\0')
+        return false;
+    for (const char *p = s + n + 1u; *p; p++)
+        if (*p < '0' || *p > '9')
+            return false;
+    return true;
+}
+
+/* A target triplet: three or four non-empty [a-z0-9_]+ parts joined by '-'. */
+static bool stock_triplet(const char *s, size_t len)
+{
+    int parts = 0;
+    size_t part_len = 0;
+    for (size_t i = 0; i <= len; i++) {
+        if (i == len || s[i] == '-') {
+            if (part_len == 0)
+                return false;
+            parts++;
+            part_len = 0;
+            continue;
+        }
+        bool ok = (s[i] >= 'a' && s[i] <= 'z') ||
+                  (s[i] >= '0' && s[i] <= '9') || s[i] == '_';
+        if (!ok)
+            return false;
+        part_len++;
+    }
+    return parts == 3 || parts == 4;
+}
+
+/* EXACT stock driver file names: cc, gcc, clang, gcc-N, clang-N and
+ * <triplet>-gcc / <triplet>-gcc-N / <triplet>-clang / <triplet>-clang-N. No
+ * substring match: a vendor launcher named x-gcc is not on this list. */
+static bool stock_driver_name(const char *base)
+{
+    if (strcmp(base, "cc") == 0 || stock_driver_tail(base))
+        return true;
+    for (const char *p = strchr(base, '-'); p; p = strchr(p + 1, '-'))
+        if (stock_driver_tail(p + 1) && stock_triplet(base, (size_t)(p - base)))
+            return true;
+    return false;
+}
+
+/* Only a stock GCC or Clang driver is known to read just the allowlisted
+ * names. A native launcher (ccache, distcc, a vendor wrapper) can read any
+ * variable, so judge by the file the compiler path finally resolves to
+ * (symlinks followed), and by its exact name. */
 static bool compiler_is_known_driver(const char *path)
 {
     char cur[PATH_MAX], next[PATH_MAX];
@@ -1964,8 +2044,7 @@ static bool compiler_is_known_driver(const char *path)
         }
     }
     const char *base = strrchr(cur, '/');
-    base = base ? base + 1 : cur;
-    return strstr(base, "gcc") != NULL || strstr(base, "clang") != NULL;
+    return stock_driver_name(base ? base + 1 : cur);
 }
 
 /* Does the invocation load code into the driver that could read anything: a
@@ -1984,7 +2063,9 @@ static bool driver_extended(const struct plan *pl)
 static enum env_key_mode env_key_mode_for(const struct plan *pl,
                                           const char *ccpath)
 {
-    if (compiler_is_script(ccpath) || !compiler_is_known_driver(ccpath) ||
+    const char *opt_in = getenv("ZCC_PORTABLE_ENV");
+    if (!opt_in || strcmp(opt_in, "1") != 0 ||
+        compiler_is_script(ccpath) || !compiler_is_known_driver(ccpath) ||
         driver_extended(pl) || pl->rsp_n > 0)
         return ENV_KEY_FULL;
 #if defined(__linux__)
