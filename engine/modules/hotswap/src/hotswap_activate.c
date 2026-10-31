@@ -32,6 +32,7 @@
 #include "hotswap/hotswap.h"
 #include "hotswap/hotswap_retire_blocker.h"
 #include "hotswap/hotswap_shelf.h"
+#include "hotswap_activate_internal.h"
 
 #include "json/json.h"
 #include "platform/fd_path.h"
@@ -439,94 +440,6 @@ bool hotswap_module_admit(const struct zcl_hotswap_module *module,
     return true;
 }
 
-/* ── activation flag + gate (pure; compiled in every build) ─────────────── */
-static _Atomic bool g_activate_flag = false;
-
-void hotswap_set_activate_flag(bool enabled)
-{
-    atomic_store_explicit(&g_activate_flag, enabled, memory_order_release);
-}
-
-bool hotswap_activate_flag(void)
-{
-    return atomic_load_explicit(&g_activate_flag, memory_order_acquire);
-}
-
-static bool env_opt_in(void)
-{
-    const char *v = getenv("ZCL_HOTSWAP_ACTIVATE");
-    return v && strcmp(v, "1") == 0;
-}
-
-static bool dir_equals(const char *a, const char *b)
-{
-    if (!a || !a[0] || !b || !b[0])
-        return false;
-#if defined(_WIN32)
-    /* Native activation is refused below before this comparison can grant
-     * authority. Do not approximate canonical identity with string folding. */
-    return false;
-#else
-    char ra[PATH_MAX], rb[PATH_MAX];
-    const char *pa = realpath(a, ra) ? ra : a;
-    const char *pb = realpath(b, rb) ? rb : b;
-    size_t la = strlen(pa), lb = strlen(pb);
-    if (la && pa[la - 1] == '/') la--;
-    if (lb && pb[lb - 1] == '/') lb--;
-    return la == lb && strncmp(pa, pb, la) == 0;
-#endif
-}
-
-static bool datadir_is_canonical(const char *datadir)
-{
-    if (!datadir || !datadir[0])
-        return false;
-    const char *home = getenv("HOME");
-    if (!home || home[0] != '/')
-        return false;
-    char canonical[PATH_MAX];
-    snprintf(canonical, sizeof(canonical), "%s/.zclassic-c23", home);
-    return dir_equals(datadir, canonical);
-}
-
-bool hotswap_activation_authorized(const char *resolved_datadir,
-                                   char *why, size_t why_sz)
-{
-    if (why && why_sz)
-        why[0] = '\0';
-#if defined(_WIN32)
-    (void)resolved_datadir;
-    if (why && why_sz)
-        snprintf(why, why_sz,
-                 "activation refused: native Windows module loading awaits "
-                 "PE import validation and immutable directory staging");
-    return false;
-#endif
-    if (!hotswap_activate_flag()) {
-        if (why) snprintf(why, why_sz,
-            "activation refused: -hotswap-activate flag is not set");
-        return false;
-    }
-    if (!env_opt_in()) {
-        if (why) snprintf(why, why_sz,
-            "activation refused: ZCL_HOTSWAP_ACTIVATE=1 is not set");
-        return false;
-    }
-    if (datadir_is_canonical(resolved_datadir)) {
-        if (why) snprintf(why, why_sz,
-            "activation refused on the canonical datadir ~/.zclassic-c23 "
-            "(canonical activation stays behind the owner's Phase-3 ritual)");
-        return false;
-    }
-    if (!hotswap_datadir_is_dev(resolved_datadir)) {
-        if (why) snprintf(why, why_sz,
-            "activation requires the exact dev datadir ~/.zclassic-c23-dev, got '%s'",
-            resolved_datadir ? resolved_datadir : "");
-        return false;
-    }
-    return true;
-}
-
 /* ── activation telemetry state (written only on the dev activate path) ──── */
 #define HOTSWAP_ACT_MAX_SLOTS 32
 
@@ -703,7 +616,7 @@ void hotswap_activate_dump_json(struct json_value *out)
     if (!hotswap_native_activation_available())
         json_push_kv_str(&act, "note", hotswap_native_unavailable_reason());
     bool flag = hotswap_activate_flag();
-    bool env = env_opt_in();
+    bool env = hotswap_env_opt_in();
     json_push_kv_bool(&act, "activate_flag", flag);
     json_push_kv_bool(&act, "env_opt_in", env);
     /* Containment state: only "armed" once BOTH gates are on; the datadir/

@@ -788,6 +788,7 @@ ZCL_MODULE_CAPABILITY("engine/modules/framework/src/app_runtime.c", CAP_FS_WRITE
 ZCL_MODULE_CAPABILITY("engine/modules/framework/src/condition.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/health/src/heartbeat.c", CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/modules/hotswap/src/hotswap_activate.c", CAP_DYNLOAD|CAP_FS_WRITE|CAP_FS_READ|CAP_CLOCK, "the real, activatable multi-leaf module loader: dlopen()s a vetted hot-swap module and reads its sealed image from disk")
+ZCL_MODULE_CAPABILITY("engine/modules/hotswap/src/hotswap_activate_gate.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/hotswap/src/hotswap_artifact_digest.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/hotswap/src/hotswap_elf_probe.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/hotswap/src/hotswap_loader.c", CAP_FS_READ|CAP_DYNLOAD, "loads a dev-only hot-swap generation's shared object with dlopen() after reading it from the module directory")
