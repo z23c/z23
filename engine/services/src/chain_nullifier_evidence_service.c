@@ -95,13 +95,19 @@ struct zcl_result chain_nullifier_evidence_lookup_set(
     return ZCL_OK;
 }
 
-bool chain_nullifier_evidence_history_complete(void)
+struct zcl_result chain_nullifier_evidence_history_complete(bool *complete)
 {
+    if (!complete)
+        return ZCL_ERR(-1, "nullifier history: NULL output");
+    *complete = false;
     progress_store_tx_lock();
     sqlite3 *db = progress_store_db();
     int64_t cursor = -1;
     bool found = false;
     bool read = db && nullifier_kv_activation_cursor(db, &cursor, &found);
     progress_store_tx_unlock();
-    return read && found && cursor == 0;
+    if (!read)
+        return ZCL_ERR(-2, "nullifier history: activation cursor unreadable");
+    *complete = found && cursor == 0;
+    return ZCL_OK;
 }

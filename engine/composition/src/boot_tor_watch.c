@@ -324,7 +324,7 @@ void boot_tor_watch_status(const struct boot_tor_watch *w,
         snprintf(out, cap, "tor=off");
         return;
     }
-    if (tor_integration_is_usable()) {
+    if (tor_integration_is_ready() || tor_integration_is_usable()) {
         snprintf(out, cap, "tor=ok");
         return;
     }

@@ -39,9 +39,10 @@ struct zcl_result chain_nullifier_evidence_lookup_set(
     enum chain_nullifier_pool pool,
     struct chain_nullifier_set_evidence *out);
 
-/* True when the nullifier set covers every block since genesis, so a nullifier
- * that is absent from it is genuinely unrevealed. False when the kernel is
- * unavailable or the history has a gap: absence proves nothing then. */
-bool chain_nullifier_evidence_history_complete(void);
+/* Sets *complete when the nullifier set covers every block since genesis, so a
+ * nullifier that is absent from it is genuinely unrevealed. An error means the
+ * kernel is unavailable; *complete is false on any error or history gap, and
+ * absence proves nothing then. */
+struct zcl_result chain_nullifier_evidence_history_complete(bool *complete);
 
 #endif /* ZCL_SERVICES_CHAIN_NULLIFIER_EVIDENCE_SERVICE_H */

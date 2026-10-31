@@ -96,7 +96,7 @@ bool boot_sd_watchdog_onion_blocks_ready(void)
 {
     if (!tor_integration_is_requested() && !tor_integration_is_enabled())
         return false;
-    return !tor_integration_is_usable();
+    return !tor_integration_is_ready() && !tor_integration_is_usable();
 }
 
 static bool    boot_sd_watchdog_supervisor_alive(void);

@@ -7,6 +7,7 @@
 
 #define _GNU_SOURCE  /* pthread_timedjoin_np */
 #define _DEFAULT_SOURCE
+#include "platform/clock.h"
 #include "platform/time_compat.h"
 #include "platform/thread_compat.h"
 #include "platform/socket_compat.h"
@@ -672,9 +673,7 @@ static _Atomic int64_t g_network_enabled_ms = -1;
 
 static int64_t tor_wall_ms(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return clock_now_wall_ms();
 }
 
 extern void tor_shutdown_event_loop_and_exit(int exitcode);

@@ -95,7 +95,8 @@ static bool wpb_nullifiers_unseen(const struct transaction *tx)
     size_t n = tx->num_shielded_spend;
     if (n == 0)
         return true;
-    if (!chain_nullifier_evidence_history_complete()) {
+    bool complete = false;
+    if (!chain_nullifier_evidence_history_complete(&complete).ok || !complete) {
         LOG_WARN("wallet_pbcast", "nullifier history incomplete; spend cannot be proved unseen");
         return false;
     }

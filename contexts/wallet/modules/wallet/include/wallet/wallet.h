@@ -356,6 +356,10 @@ struct zcl_result wallet_commit_transaction(
 void wallet_require_admission_pool(const struct tx_mempool *pool);
 struct zcl_result wallet_admission_pool_check(
     const struct wallet_tx_admission *admission);
+/* The pool requirement, then a complete validation context; `op` names the
+ * caller in the message. `admission` must not be NULL. */
+struct zcl_result wallet_admission_check(
+    const struct wallet_tx_admission *admission, const char *op);
 
 /* Re-admit exact bytes already durably recorded in the wallet. This is the
  * restart/rebroadcast seam: it performs full current mempool validation but
