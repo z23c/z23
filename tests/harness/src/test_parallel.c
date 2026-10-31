@@ -95,19 +95,15 @@ static void tmpfs_cleanup(void)
         test_rm_rf_recursive(g_tmpfs_root) != 0)
         fprintf(stderr, "test_parallel: tmpfs cleanup failed: %s\n", strerror(errno));
 }
-static void tmpfs_setup(void)
+static bool tmpfs_create_root(void)
 {
-    const char *enabled = getenv("ZCL_TEST_TMPFS");
-    const char *existing = getenv("ZCL_TEST_TMPROOT");
-    if (existing && *existing) return;
-    if (!enabled) return;
     struct statfs fs;
-    if (!strcmp(enabled, "0") || statfs("/dev/shm", &fs) != 0 ||
-        (unsigned long)fs.f_type != (unsigned long)TMPFS_MAGIC) goto fallback;
-    if (mkdir("/dev/shm/z23t", 0700) != 0 && errno != EEXIST) goto fallback;
-    if (!test_tmpfs_parent_safe("/dev/shm/z23t")) goto fallback;
+    if (statfs("/dev/shm", &fs) != 0 ||
+        (unsigned long)fs.f_type != (unsigned long)TMPFS_MAGIC) return false;
+    if (mkdir("/dev/shm/z23t", 0700) != 0 && errno != EEXIST) return false;
+    if (!test_tmpfs_parent_safe("/dev/shm/z23t")) return false;
     char cwd[PATH_MAX];
-    if (!getcwd(cwd, sizeof(cwd))) goto fallback;
+    if (!getcwd(cwd, sizeof(cwd))) return false;
     uint32_t hash = 2166136261u;
     for (const unsigned char *p = (const unsigned char *)cwd; *p; ++p)
         hash = (hash ^ *p) * 16777619u;
@@ -115,9 +111,19 @@ static void tmpfs_setup(void)
                      "/dev/shm/z23t/%08x.XXXXXX", hash);
     if (n < 0 || (size_t)n >= sizeof(g_tmpfs_root) || !mkdtemp(g_tmpfs_root)) {
         g_tmpfs_root[0] = '\0';
-        goto fallback;
+        return false;
     }
     g_tmpfs_owner = getpid();
+    return true;
+}
+
+static void tmpfs_setup(void)
+{
+    const char *enabled = getenv("ZCL_TEST_TMPFS");
+    const char *existing = getenv("ZCL_TEST_TMPROOT");
+    if (existing && *existing) return;
+    if (!enabled) return;
+    if (!strcmp(enabled, "0") || !tmpfs_create_root()) goto fallback;
     if (setenv("ZCL_TEST_TMPROOT", g_tmpfs_root, 1) != 0 ||
         setenv("ZCL_TEST_TMPFS_ACTIVE", g_tmpfs_root, 1) != 0 ||
         atexit(tmpfs_cleanup) != 0) {

@@ -2470,7 +2470,7 @@ Z23_FLAG("ZCL_TEST_TMPFS", "env_test", "-", "-",
 Z23_FLAG("ZCL_TEST_TMPFS_ACTIVE", "env_test", "-", "-",
           "runner identifies its automatic tmpfs root for fixture size checks; first use tests/harness/include/test/test_core.h:auto")
 Z23_FLAG("ZCL_TEST_TMPFS_MAX_MB", "env_test", "-", "-",
-          "maximum allocated tmpfs fixture megabytes before new attempts use disk; first use tests/harness/src/test_parallel.c:auto")
+          "maximum allocated tmpfs fixture megabytes before new attempts use disk; first use tests/harness/include/test/test_core.h:auto")
 Z23_FLAG("ZCL_TEST_TMPROOT", "env_test", "-", "-",
           "absolute private test fixture root; first use tests/harness/src/test_parallel.c:auto")
 Z23_FLAG("ZCL_TEST_PRIVATE_HOME", "env_test", "-", "-",
