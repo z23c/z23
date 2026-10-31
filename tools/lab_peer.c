@@ -493,34 +493,49 @@ static const char *lp_merge(struct lp_ctx *c, struct json_value *dst,
     return NULL;
 }
 
+struct lp_listq {
+    char room[96], limit[32], kind[32];
+};
+
+/* One page at cursor: its posts are merged into posts and *next is the cursor
+ * after it. NULL, or the typed code of a failed listing. */
+static const char *lp_list_page(struct lp_ctx *c, const struct lp_listq *q,
+                                int64_t cursor, struct json_value *posts,
+                                int64_t *next)
+{
+    char cur[32];
+    const char *argv[10] = {c->v[LP_O_Z23], "fleet", "board", "list", q->room,
+                            q->kind, q->limit, NULL, NULL, NULL};
+    struct json_value root;
+    if (cursor > 0 && lp_fmt(cur, sizeof(cur), "--cursor=%lld", (long long)cursor))
+        argv[7] = cur;
+    if (!lp_run(argv, NULL, LP_QUICK_S, &root)) {
+        json_free(&root);
+        return "BOARD_LIST_FAILED";
+    }
+    const struct json_value *data = lp_data(&root);
+    const struct json_value *arr = json_get(data, "posts");
+    const char *err = arr && arr->type == JSON_ARR ? lp_merge(c, posts, arr)
+                                                   : "BOARD_LIST_FAILED";
+    *next = lp_next_cursor(&root, data);
+    json_free(&root);
+    return err;
+}
+
 /* The room's posts of one kind, following the list cursor page by page up to
  * LP_PAGES_MAX pages; a cap or an unusable cursor sets c->truncated. posts is
  * an initialised array. NULL, or the typed code of a failed listing. */
 static const char *lp_list_posts(struct lp_ctx *c, const char *kind,
                                  struct json_value *posts)
 {
-    char room[96], limit[32], kind_arg[32], cur[32];
-    int64_t cursor = 0;
-    if (!lp_fmt(room, sizeof(room), "--room=%s", c->v[LP_O_ROOM]) ||
-        !lp_fmt(limit, sizeof(limit), "--limit=%d", LP_POSTS_MAX) ||
-        !lp_fmt(kind_arg, sizeof(kind_arg), "--kind=%s", kind))
+    struct lp_listq q;
+    int64_t cursor = 0, next = 0;
+    if (!lp_fmt(q.room, sizeof(q.room), "--room=%s", c->v[LP_O_ROOM]) ||
+        !lp_fmt(q.limit, sizeof(q.limit), "--limit=%d", LP_POSTS_MAX) ||
+        !lp_fmt(q.kind, sizeof(q.kind), "--kind=%s", kind))
         return "BOARD_LIST_FAILED";
     for (int page = 0; page < LP_PAGES_MAX; page++) {
-        const char *argv[10] = {c->v[LP_O_Z23], "fleet", "board", "list", room,
-                                kind_arg, limit, NULL, NULL, NULL};
-        struct json_value root;
-        if (cursor > 0 && lp_fmt(cur, sizeof(cur), "--cursor=%lld", (long long)cursor))
-            argv[7] = cur;
-        if (!lp_run(argv, NULL, LP_QUICK_S, &root)) {
-            json_free(&root);
-            return "BOARD_LIST_FAILED";
-        }
-        const struct json_value *data = lp_data(&root);
-        const struct json_value *arr = json_get(data, "posts");
-        const char *err = arr && arr->type == JSON_ARR ? lp_merge(c, posts, arr)
-                                                       : "BOARD_LIST_FAILED";
-        const int64_t next = lp_next_cursor(&root, data);
-        json_free(&root);
+        const char *err = lp_list_page(c, &q, cursor, posts, &next);
         if (err || next == 0 || c->truncated)
             return err;
         if (next < 0 || next <= cursor || page + 1 == LP_PAGES_MAX)
