@@ -444,8 +444,9 @@ static bool tool_authority(void *ctx, const struct mcp_tool *tool,
 
 /* scope=wiki: the whole query goes to fleet.wiki.find, which keeps the
  * entries holding every word of it in any searched field. This reads its
- * pages in slug order, up to WIKI_PAGES pages (and about WIKI_MS of wall
- * time), until `limit` entries arrive. The after_slug it returns is exact:
+ * pages in slug order, up to WIKI_PAGES pages, until `limit` entries arrive.
+ * No page starts after WIKI_MS; a page already running is bounded by the
+ * leaf's verification budget, not a clock. The after_slug it returns is exact:
  * when the limit fills mid-page it stops at the entry that filled it, so a
  * resume loses nothing. A page that says more but cannot move the cursor
  * (the leaf's verification budget) ends the scan as stalled, passing the

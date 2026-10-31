@@ -149,7 +149,8 @@ bool mcp_select_valid(const struct json_value *select, const char **why);
 /* Project a command reply onto a valid select:
  *   {"ok":..,"status":..,"select":{"<path>":<value>,..}}
  * with null where a path does not resolve. False, with out untouched, when
- * text is not a JSON object. */
+ * text is not a JSON object; false with out->oom set when text is valid JSON
+ * that could not be parsed for lack of memory. */
 bool mcp_select_reply(struct mcp_buf *out, const char *text, size_t n,
                       const struct json_value *select);
 

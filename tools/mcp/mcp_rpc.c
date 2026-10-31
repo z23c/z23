@@ -311,7 +311,13 @@ bool mcp_select_reply(struct mcp_buf *out, const char *text, size_t n,
 {
     struct json_value doc;
     json_init(&doc);
-    if (!json_read(&doc, text, n) || doc.type != JSON_OBJ) {
+    if (!json_read(&doc, text, n)) {
+        /* A reply json_valid accepts but json_read refused could not be
+         * allocated: out of memory, not "not an object". */
+        out->oom = out->oom || json_valid(text, n);
+        return false;
+    }
+    if (doc.type != JSON_OBJ) {
         json_free(&doc);
         return false;
     }
