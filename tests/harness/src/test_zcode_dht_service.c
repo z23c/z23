@@ -2956,7 +2956,10 @@ static int test_record_transport_and_restart(void) {
     ASSERT(mkdtemp(ack_tmp) != NULL);
     /* /tmp is a symlink on macOS (/private/tmp); the store takes the real
      * path, so resolve it here rather than relaxing the store's refusal. */
-    ASSERT(realpath(ack_tmp, ack_dir) != NULL);
+    bool ack_resolved = realpath(ack_tmp, ack_dir) != NULL;
+    if (!ack_resolved)
+        (void)rmdir(ack_tmp);
+    ASSERT(ack_resolved);
     struct vcs_package_store *ack_store =
         vcs_package_store_open(ack_dir, UINT64_C(4) * 1024 * 1024);
     ASSERT(ack_store != NULL);
@@ -4077,9 +4080,11 @@ static bool space16_setup_nodes(struct space16_case *c) {
   for (size_t i = 0; i < SPACE16_NODES; i++) {
     char tmpl[PATH_MAX];
     (void)snprintf(tmpl, sizeof(tmpl), "/tmp/zcl_space16_%zu_XXXXXX", i);
-    if (!space16_expect(mkdtemp(tmpl) != NULL &&
-                            realpath(tmpl, c->net.dir[i]) != NULL,
-                        "mkdtemp(net.dir[i]) != NULL", __LINE__))
+    bool made = mkdtemp(tmpl) != NULL;
+    bool resolved = made && realpath(tmpl, c->net.dir[i]) != NULL;
+    if (made && !resolved)
+      (void)rmdir(tmpl);
+    if (!space16_expect(resolved, "mkdtemp(net.dir[i]) != NULL", __LINE__))
       return false;
     c->created_dirs++;
     memset(c->net.noise[i], (int)(0x20 + i), 32);
