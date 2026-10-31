@@ -25,7 +25,7 @@ engine/modules/hotswap/src/hotswap_activate.c 2314
 core/modules/net/src/connman.c 3010
 core/modules/net/src/download.c 1672
 core/modules/net/src/fast_sync.c 1616
-core/modules/net/src/msg_headers.c 2370
+core/modules/net/src/msg_headers.c 2284
 core/modules/net/src/msgprocessor.c 3031
 core/modules/net/src/msgprocessor_snapshot.c 1810
 core/modules/net/src/net.c 2373
