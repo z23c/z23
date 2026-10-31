@@ -148,6 +148,20 @@ bool boot_full_fold_finish(struct sqlite3 *pdb, int32_t through, int64_t count,
 bool boot_full_fold_export_bundle(struct sqlite3 *pdb, const char *datadir,
                                   int32_t target);
 
+/* Drive the trailing tip_finalize stage to the -full-fold target before the tip
+ * bundle export (boot_full_fold.c): tip_finalize finalizes N only with N+1 as
+ * witness, so when utxo_apply lands on the target H* reads target-1 and the
+ * export proof (H* == target) would refuse. Kicks the reducer to convergence,
+ * then publishes the fully-applied target as the trusted tip. Must run inside
+ * the mint drive bracket. Returns true iff H* == target afterwards; the export
+ * proof stays the fail-closed authority either way. */
+struct chain_activation_controller;
+bool boot_full_fold_drain_trailing(struct chain_activation_controller *ctl,
+                                   struct sqlite3 *pdb, int32_t target,
+                                   const uint8_t target_hash[32]);
+bool boot_full_fold_drain_for_export(struct chain_activation_controller *ctl,
+                                     struct sqlite3 *pdb, int32_t target);
+
 /* The whole -full-fold terminal path (verdict + conditional tip bundle
  * export), called by boot_mint_anchor_run in place of the checkpoint
  * ceremony. Returns the REACHED verdict; an export refusal turns it false. */

@@ -33,6 +33,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>          /* getenv, EXIT_FAILURE */
+#include <string.h>          /* memcmp */
 #include <unistd.h>          /* _exit */
 #include <sqlite3.h>
 
@@ -44,6 +45,12 @@
 #include "storage/coins_kv.h"            /* coins_kv_get_applied_height */
 #include "jobs/mint_fold_ceiling.h"      /* mint_fold_ceiling_set */
 #include "jobs/refold_progress.h"        /* refold_progress_mark_started */
+#include "jobs/reducer_frontier.h"       /* reducer_frontier_compute_hstar */
+#include "jobs/tip_finalize_stage.h"     /* tip_finalize_stage_set_authoritative_tip */
+#include "jobs/utxo_apply_stage.h"       /* utxo_apply_stage_succeeded_at */
+#include "jobs/stage_helpers.h"          /* stage_cursor_persisted */
+#include "services/chain_activation_service.h" /* reducer_kick_unbudgeted */
+#include "storage/coins_ram.h"           /* coins_ram_flush_final */
 #include "validation/main_state.h"       /* struct main_state */
 #include "event/event.h"                 /* event_emitf, EV_BOOT_VALIDATION_FAILED */
 #include "util/ar_step_readonly.h"       /* AR_STEP_ROW_READONLY */
@@ -166,6 +173,164 @@ bool boot_full_fold_export_bundle(sqlite3 *pdb, const char *datadir,
     }
 
     return boot_mint_anchor_export_bundle(pdb, datadir, target, blk.hash);
+}
+
+/* H* read under the progress-store lock (the frontier walk's contract). */
+static bool full_fold_read_hstar(sqlite3 *pdb, int32_t *hstar)
+{
+    int32_t served_floor = 0;
+    progress_store_tx_lock();
+    bool ok = reducer_frontier_compute_hstar(pdb, hstar, &served_floor);
+    progress_store_tx_unlock();
+    return ok;
+}
+
+/* True iff the ONLY thing holding H* at target-1 is tip_finalize's missing
+ * lookahead witness for the target: every upstream stage cursor already covers
+ * the target (next-height cursors >= target+1), utxo_apply verifiably folded
+ * the target block, and the finalized tip_finalize row at target-1 exists and
+ * names THIS header hash as its successor witness. Anything else (a lagging
+ * upstream stage, a hash mismatch, a missing row) is a real defect the trusted
+ * tip must never paper over. */
+static bool full_fold_upstream_covers_target(sqlite3 *pdb, int32_t target)
+{
+    /* {stage cursor, success-checked log table or NULL}. Mirrors the H*
+     * stage set (reducer_frontier k_logs) plus the two log-less stages. */
+    static const struct { const char *stage; const char *log; } upstream[7] = {
+        { "header_admit", NULL }, { "validate_headers", "validate_headers_log" },
+        { "body_fetch", NULL }, { "body_persist", "body_persist_log" },
+        { "script_validate", "script_validate_log" },
+        { "proof_validate", "proof_validate_log" },
+        { "utxo_apply", "utxo_apply_log" } };
+    for (int i = 0; i < 7; i++) {
+        /* Log-backed stages: the SAME contiguous ok=1 prefix walk H* uses
+         * must reach the target (a cursor alone proves nothing). The two
+         * log-less stages (header_admit, body_fetch) keep the cursor test. */
+        const char *log_table = upstream[i].log;
+        if (!log_table) {
+            if (stage_cursor_persisted(pdb, upstream[i].stage, "full_fold") <
+                (uint64_t)target + 1) {
+                fprintf(stderr, "[full-fold] trailing drain: stage %s cursor "
+                        "short of target h=%d\n", upstream[i].stage, target);
+                return false;
+            }
+            continue;
+        }
+        int32_t contig = -1;
+        if (!reducer_frontier_log_frontier(pdb, log_table, upstream[i].stage,
+                                           &contig))
+            LOG_FAIL("full_fold", "[full-fold] trailing drain: %s contiguity "
+                     "read failed", log_table);
+        if (contig < target) {
+            fprintf(stderr, "[full-fold] trailing drain: %s ok=1 rows reach "
+                    "h=%d only, target h=%d\n", log_table, contig, target);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool full_fold_gap_is_lookahead_only(sqlite3 *pdb, int32_t target,
+                                            const uint8_t target_hash[32])
+{
+    if (!full_fold_upstream_covers_target(pdb, target) ||
+        !utxo_apply_stage_succeeded_at(target))
+        return false;
+
+    /* tip_finalize: the row at target-1 must be a genuine finalized ok=1 row
+     * (not an anchor, not a failure) naming THIS header as its witness, and
+     * NO row may exist at the target yet — a drain only fills an absent row
+     * and never replaces a recorded one (a failed row stays a failure). */
+    struct tip_finalize_row_probe prev, own;
+    if (!tip_finalize_stage_row_probe(pdb, target - 1, &prev) ||
+        !tip_finalize_stage_row_probe(pdb, target, &own))
+        LOG_FAIL("full_fold", "[full-fold] trailing drain: tip_finalize row "
+                 "read failed near target h=%d", target);
+    if (!prev.found || !prev.ok || !prev.is_finalized || !prev.has_hash ||
+        memcmp(prev.hash, target_hash, 32) != 0) {
+        fprintf(stderr, "[full-fold] trailing drain: no finalized ok=1 "
+                "tip_finalize row at h=%d naming the target\n", target - 1);
+        return false;
+    }
+    if (own.found) {
+        fprintf(stderr, "[full-fold] trailing drain: tip_finalize row already "
+                "present at target h=%d — not overwriting\n", target);
+        return false;
+    }
+    return true;
+}
+
+/* Drive the trailing tip_finalize stage to the fold target before the tip
+ * bundle export.
+ *
+ * WHY IT TRAILS. The mint drive loop stops the instant utxo_apply's cursor
+ * reaches the target, but tip_finalize is the LAST stage and finalizes height
+ * N only with N+1 as its canonicity witness (one-block lookahead; its log row
+ * at N carries hash(N+1)). So when utxo_apply lands on the target, the
+ * tip_finalize_log is contiguous only to target-1 and H* (the MIN over the
+ * success-checked logs) reads target-1, while the export proof
+ * (export_check_generation) requires H* == target exactly. The target block
+ * itself has no successor under the fold ceiling, so no amount of stage
+ * stepping can write its finalized row.
+ *
+ * THE DRAIN. (1) Kick the reducer until it converges, so every trailing stage
+ * folds whatever its lookahead allows. (2) If H* is then exactly one short of
+ * the target and utxo_apply verifiably folded the target block, publish the
+ * target as the trusted tip with its header hash — the same authority anchor
+ * the at-tip regtest follower and the clean-restart restore use — after
+ * flushing the coins overlay (the authority write is coin-frontier guarded on
+ * the DURABLE applied height). export_check_generation is untouched: anything
+ * short of H* == target still refuses there. Called inside the mint drive
+ * bracket, before the drive is left. Returns true iff H* == target. */
+bool boot_full_fold_drain_trailing(struct chain_activation_controller *ctl,
+                                   sqlite3 *pdb, int32_t target,
+                                   const uint8_t target_hash[32])
+{
+    if (!ctl || !pdb || target <= 0 || !target_hash)
+        LOG_FAIL("full_fold", "[full-fold] drain trailing: bad args");
+
+    /* Bounded: a converged reducer returns 0 advances immediately. */
+    for (int round = 0; round < 64; round++)
+        if (reducer_kick_unbudgeted(ctl) == 0)
+            break;
+
+    int32_t hstar = -1;
+    if (!full_fold_read_hstar(pdb, &hstar))
+        LOG_FAIL("full_fold", "[full-fold] drain trailing: H* read failed");
+    if (hstar == target)
+        return true;
+    if (hstar != target - 1 ||
+        !full_fold_gap_is_lookahead_only(pdb, target, target_hash)) {
+        fprintf(stderr,
+                "[full-fold] trailing drain: H*=%d short of target h=%d and "
+                "not the lookahead-only gap — not publishing the tip\n",
+                hstar, target);
+        return false;
+    }
+    if (coins_ram_active() && !coins_ram_flush_final())
+        LOG_FAIL("full_fold",
+                 "[full-fold] drain trailing: coins overlay flush failed");
+    tip_finalize_stage_set_authoritative_tip(target, target_hash);
+    if (!full_fold_read_hstar(pdb, &hstar))
+        LOG_FAIL("full_fold", "[full-fold] drain trailing: H* re-read failed");
+    fprintf(stderr,
+            "[full-fold] trailing drain: tip_finalize published the fold "
+            "target h=%d as the trusted tip (lookahead-only gap); H*=%d\n",
+            target, hstar);
+    return hstar == target;
+}
+
+/* Resolve the header hash at the fold target and drain (see above). Called by
+ * boot_mint_anchor_run for a -full-fold run that will export. */
+bool boot_full_fold_drain_for_export(struct chain_activation_controller *ctl,
+                                     sqlite3 *pdb, int32_t target)
+{
+    struct db_block blk;
+    if (!g_ff_ndb || !db_block_find_by_height(g_ff_ndb, target, &blk))
+        LOG_FAIL("full_fold",
+                 "[full-fold] drain trailing: no header row at target h=%d",
+                 target);
+    return boot_full_fold_drain_trailing(ctl, pdb, target, blk.hash);
 }
 
 /* The -full-fold terminal path, called by boot_mint_anchor_run in place of the

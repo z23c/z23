@@ -283,6 +283,28 @@ bool tip_finalize_stage_finalized_tip_at(sqlite3 *db, int height,
     return true;
 }
 
+bool tip_finalize_stage_row_probe(sqlite3 *db, int height,
+                                  struct tip_finalize_row_probe *out)
+{
+    if (!db || !out || height < 0)
+        return false;
+    memset(out, 0, sizeof(*out));
+    progress_store_tx_lock();
+    struct finalized_tip_row row;
+    bool read_ok = finalized_tip_row_at(db, height, &row);
+    progress_store_tx_unlock();
+    if (!read_ok)
+        return false;
+    out->found = row.found;
+    out->ok = row.ok;
+    out->is_anchor = row.is_anchor;
+    out->is_finalized = row.is_finalized;
+    out->has_hash = row.has_tip_hash;
+    if (row.has_tip_hash)
+        memcpy(out->hash, row.tip_hash.data, 32);
+    return true;
+}
+
 bool tip_finalize_stage_block_hash_at(sqlite3 *db, int height,
                                       uint8_t out_hash[32])
 {

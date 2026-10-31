@@ -33,7 +33,7 @@
 #include "chain/pow.h"
 #include "chain/subsidy.h"
 #include "config/boot.h"
-#include "config/boot_internal.h"   /* boot_full_fold_resolve_target */
+#include "config/boot_internal.h"   /* boot_full_fold_resolve_target, boot_full_fold_drain_trailing */
 #include "consensus/validation.h"
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
@@ -59,6 +59,7 @@
 #include "jobs/tip_finalize_stage.h"
 #include "jobs/stage_helpers.h"
 #include "jobs/mint_fold_ceiling.h"
+#include "jobs/reducer_frontier.h"       /* reducer_frontier_compute_hstar */
 #include "util/blocker.h"
 #include "util/safe_alloc.h"
 #include "util/util.h"
@@ -454,6 +455,65 @@ static bool mfd_build_regtest_block(struct block *blk, int height,
 
 #define MFD_C_BUDGET_US (15ll * 1000 * 1000)  /* 15s: one Equihash-mined block */
 
+static bool mfd_exec(const char *sql)
+{
+    return sqlite3_exec(progress_store_db(), sql, NULL, NULL, NULL) ==
+           SQLITE_OK;
+}
+
+/* Fail-closed drain refusals at target 1 (log state corrupted, drain called,
+ * state restored). Each refusal must leave NO new tip_finalize row at the
+ * target and keep H* short. Returns the number of failed checks. */
+static int mfd_drain_refusals(struct chain_activation_controller *ctl,
+                              const struct uint256 *h1)
+{
+    int failures = 0;
+    struct tip_finalize_row_probe pr;
+
+    /* (1) an upstream stage whose CURSOR covers the target but whose log row
+     * at the target is missing: refused. */
+    bool ok1 = mfd_exec("CREATE TABLE mfd_bk AS SELECT * FROM "
+                        "script_validate_log WHERE height=1;"
+                        "DELETE FROM script_validate_log WHERE height=1;");
+    bool r1 = boot_full_fold_drain_trailing(ctl, progress_store_db(), 1,
+                                            h1->data);
+    bool probe1 = tip_finalize_stage_row_probe(progress_store_db(), 1, &pr);
+    bool rest1 = mfd_exec("INSERT INTO script_validate_log SELECT * FROM "
+                          "mfd_bk; DROP TABLE mfd_bk;");
+    MFD_CHECK("(c) refusal: missing upstream log row at target -> refused, "
+              "no tip row published",
+              ok1 && !r1 && probe1 && !pr.found && rest1);
+
+    /* (2) a FAILED tip_finalize row at target-1: refused. */
+    bool ok2 = mfd_exec("CREATE TABLE mfd_bk AS SELECT * FROM "
+                        "tip_finalize_log WHERE height=0;"
+                        "UPDATE tip_finalize_log SET ok=0, status='failed' "
+                        "WHERE height=0;");
+    bool r2 = boot_full_fold_drain_trailing(ctl, progress_store_db(), 1,
+                                            h1->data);
+    bool probe2 = tip_finalize_stage_row_probe(progress_store_db(), 1, &pr);
+    bool rest2 = mfd_exec("DELETE FROM tip_finalize_log WHERE height=0;"
+                          "INSERT INTO tip_finalize_log SELECT * FROM "
+                          "mfd_bk; DROP TABLE mfd_bk;");
+    MFD_CHECK("(c) refusal: failed tip_finalize row at target-1 -> refused, "
+              "no trusted anchor row replaces it",
+              ok2 && !r2 && probe2 && !pr.found && rest2);
+
+    /* (3) an existing (failed) row at the target is never overwritten. */
+    bool ok3 = mfd_exec("INSERT INTO tip_finalize_log (height, status, ok, "
+                        "work_delta_high, work_delta_low, utxo_size_after, "
+                        "reorg_depth, finalized_at, tip_hash, itag) VALUES "
+                        "(1,'failed',0,0,0,0,0,0,NULL,NULL);");
+    bool r3 = boot_full_fold_drain_trailing(ctl, progress_store_db(), 1,
+                                            h1->data);
+    bool probe3 = tip_finalize_stage_row_probe(progress_store_db(), 1, &pr);
+    bool rest3 = mfd_exec("DELETE FROM tip_finalize_log WHERE height=1;");
+    MFD_CHECK("(c) refusal: existing row at target -> not overwritten",
+              ok3 && !r3 && probe3 && pr.found && !pr.ok && !pr.is_anchor &&
+              rest3);
+    return failures;
+}
+
 static int test_mfd_scenario_c_headers_and_bodies_reaches_ceiling(void)
 {
     int failures = 0;
@@ -558,6 +618,39 @@ static int test_mfd_scenario_c_headers_and_bodies_reaches_ceiling(void)
         blocker_absent_at_end = !blocker_exists("mint_fold.frontier_walled");
         MFD_CHECK("(c) NO frontier_walled blocker (no false-fire on a "
                   "healthy fold)", blocker_absent_at_end);
+
+        /* -full-fold export gate (export_check_generation requires
+         * H* == target): at the ceiling the fold has applied the target but
+         * tip_finalize (one-block lookahead, no successor under the ceiling)
+         * leaves the contiguous log at target-1. The trailing drain must lift
+         * H* to the target; without it the tip bundle export refuses with
+         * "hstar=target-1 expected=target". */
+        int32_t hs_before = -1, sf_before = -1;
+        progress_store_tx_lock();
+        bool hs_before_ok = reducer_frontier_compute_hstar(
+            progress_store_db(), &hs_before, &sf_before);
+        progress_store_tx_unlock();
+        MFD_CHECK("(c) before the drain H* trails the target by one "
+                  "(the live hstar=target-1 symptom)",
+                  hs_before_ok && hs_before == 0);
+        failures += mfd_drain_refusals(&ctl, &h1);
+        MFD_CHECK("(c) trailing drain reports H* == target",
+                  boot_full_fold_drain_trailing(&ctl, progress_store_db(), 1,
+                                                h1.data));
+        int32_t hs_after = -1, sf_after = -1;
+        progress_store_tx_lock();
+        bool hs_after_ok = reducer_frontier_compute_hstar(
+            progress_store_db(), &hs_after, &sf_after);
+        progress_store_tx_unlock();
+        MFD_CHECK("(c) after the drain H* == target (export gate satisfied)",
+                  hs_after_ok && hs_after == 1);
+        MFD_CHECK("(c) served floor covers the target",
+                  sf_after >= 1);
+        uint8_t served_hash[32] = {0};
+        MFD_CHECK("(c) served tip witness at the target is block 1",
+                  tip_finalize_stage_block_hash_at(progress_store_db(), 1,
+                                                   served_hash) &&
+                  memcmp(served_hash, h1.data, 32) == 0);
 
         mint_fold_ceiling_set(MINT_FOLD_NO_CEILING);
         activation_controller_destroy(&ctl);

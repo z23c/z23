@@ -543,6 +543,20 @@ static void mint_bundle_export_skipped_note(void)
             "checkpoint-fold state is non-serving and not canonically "
             "publishable (verified anchor snapshot produced)\n");
 }
+/* -full-fold that will export: tip_finalize trails the fold by its one-block
+ * lookahead; drive it to the target while the drive bracket is still held. The
+ * export proof stays the fail-closed authority. No-op for a plain mint. */
+static void mint_full_fold_drain_trailing(bool full_fold,
+                                          struct chain_activation_controller *ctl,
+                                          sqlite3 *pdb, int32_t anchor)
+{
+    if (!full_fold || mint_skip_crypto_get())
+        return;
+    if (!boot_full_fold_drain_for_export(ctl, pdb, anchor))
+        fprintf(stderr,
+                "[mint-anchor] full-fold: trailing stage drain did not reach "
+                "h=%d; the export proof will decide\n", anchor);
+}
 bool boot_mint_anchor_run(const char *datadir)
 {
     const struct sha3_utxo_checkpoint *cp = mint_require_checkpoint();
@@ -621,6 +635,7 @@ bool boot_mint_anchor_run(const char *datadir)
      * commit. SQLite default when the overlay is opted out (ZCL_FOLD_INRAM=0). */
     if (!mint_drive_until_anchor(&ds))
         return false;
+    mint_full_fold_drain_trailing(full_fold, ctl, pdb, anchor);
     mint_drive_leave(ds.lookahead);
     int32_t through = mint_frontier_through();
     int64_t count = coins_kv_count_quiesced(pdb); /* drive left: overlay unflushed */

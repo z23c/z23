@@ -280,6 +280,9 @@ bool finalized_tip_row_at(sqlite3 *db, int height,
         out->is_anchor = status &&
                          sqlite3_column_bytes(st, 2) == 6 &&
                          memcmp(status, "anchor", 6) == 0;
+        out->is_finalized = status &&
+                            sqlite3_column_bytes(st, 2) == 9 &&
+                            memcmp(status, "finalized", 9) == 0;
     } else if (rc != SQLITE_DONE) {
         LOG_WARN("tip_finalize", "[tip_finalize] finalized row step failed rc=%d: %s", rc, sqlite3_errmsg(db));
         sqlite3_finalize(st);

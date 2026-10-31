@@ -59,6 +59,22 @@ bool tip_finalize_stage_finalized_tip_at(struct sqlite3 *db, int height,
 bool tip_finalize_stage_block_hash_at(struct sqlite3 *db, int height,
                                       uint8_t out_hash[32]);
 
+/* Raw state of the tip_finalize_log row at `height` (no convention
+ * discrimination): found / ok=1 / status 'anchor' / status 'finalized' and
+ * the stored 32-byte tip_hash when present. Returns false ONLY on a real DB
+ * read error (a missing row is success with found=false). SELECT-only;
+ * acquires progress_store_tx_lock() itself (recursive). */
+struct tip_finalize_row_probe {
+    bool found;
+    bool ok;
+    bool is_anchor;
+    bool is_finalized;
+    bool has_hash;
+    uint8_t hash[32];
+};
+bool tip_finalize_stage_row_probe(struct sqlite3 *db, int height,
+                                  struct tip_finalize_row_probe *out);
+
 /* Resolve the durable served-tip (height, own-hash) pair from the persisted
  * tip_finalize cursor, SELF-CONSISTENTLY across both log conventions. The
  * naive `tip = cursor-1` + finalized_tip_at(tip) read pairs cursor-1 with a

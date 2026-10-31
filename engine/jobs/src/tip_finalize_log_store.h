@@ -34,6 +34,8 @@ struct finalized_tip_row {
      * (row H -> hash H+1). The reorg-rewind must skip these or it false-detects
      * a divergence comparing hash(H) to active_chain_at(H+1). */
     bool is_anchor;
+    /* True when status=="finalized" exactly (the lookahead-witness row). */
+    bool is_finalized;
     struct uint256 tip_hash;
 };
 
