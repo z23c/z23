@@ -185,6 +185,12 @@ void vcs_swarm_cancel_outstanding(struct vcs_swarm_engine *engine,
 void vcs_swarm_record_delete_dl(struct vcs_swarm_engine *engine,
                                 const struct swarm_download *dl);
 
+/* Implemented in package_swarm_download.c: release, reset, and
+ * build of a download's manifest-derived coordinate maps. */
+void dl_free_maps(struct swarm_download *dl);
+void dl_reset(struct swarm_download *dl);
+bool dl_build_maps(struct swarm_download *dl);
+
 /* Lock held. Implemented in package_swarm_complete.c. */
 bool vcs_swarm_rebuild_have(struct vcs_swarm_engine *engine,
                             struct swarm_download *dl);
