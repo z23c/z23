@@ -231,6 +231,27 @@ static bool receipt_same_owner(
         prior->validation_profile == expected->validation_profile;
 }
 
+/* The prior row equals the expected receipt in cursor, corpus and digest,
+ * i.e. this finalize is an exact retry. */
+static bool receipt_exact_retry(
+    const struct consensus_state_source_receipt *prior,
+    const struct consensus_state_source_receipt *expected)
+{
+    return prior->fold_cursor == expected->fold_cursor &&
+        memcmp(prior->chain_corpus_digest, expected->chain_corpus_digest, 32) ==
+            0 &&
+        memcmp(prior->receipt_digest, expected->receipt_digest, 32) == 0;
+}
+
+/* Step the receipt SELECT one more time and finalize it; returns the step
+ * result so the caller can detect extra rows. */
+static int receipt_confirm_single_row(sqlite3_stmt *st)
+{
+    int rc = sqlite3_step(st); // raw-sql-ok:progress-kv-kernel-store
+    sqlite3_finalize(st);
+    return rc;
+}
+
 /* A finalized receipt is a monotonic ownership record.  An exact retry is
  * idempotent.  A cryptographically valid row owned by the same binary/session
  * may advance to a strictly higher fold cursor; malformed, foreign, equal-
@@ -265,18 +286,14 @@ enum final_receipt_state final_receipt_state(
     bool prior_shape = receipt_row_shape(st, expected, schema, commit_len);
     if (prior_shape)
         receipt_row_load(st, &prior);
-    rc = sqlite3_step(st); // raw-sql-ok:progress-kv-kernel-store
-    sqlite3_finalize(st);
+    rc = receipt_confirm_single_row(st);
     if (rc != SQLITE_DONE)
         return FINAL_RECEIPT_READ_ERROR;
     if (!prior_shape)
         return FINAL_RECEIPT_CONFLICT;
     if (!receipt_same_owner(&prior, expected))
         return FINAL_RECEIPT_CONFLICT;
-    if (prior.fold_cursor == expected->fold_cursor &&
-        memcmp(prior.chain_corpus_digest, expected->chain_corpus_digest, 32) ==
-            0 &&
-        memcmp(prior.receipt_digest, expected->receipt_digest, 32) == 0)
+    if (receipt_exact_retry(&prior, expected))
         return FINAL_RECEIPT_IDENTICAL;
     if (prior.fold_cursor < expected->fold_cursor)
         return FINAL_RECEIPT_MONOTONIC_PREDECESSOR;
