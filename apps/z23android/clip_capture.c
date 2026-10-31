@@ -68,7 +68,9 @@ int64_t zapp_clip_sample_end_us(bool video, int64_t pts_us)
 
 int64_t zapp_clip_span_ms(int64_t first_us, int64_t end_us)
 {
-    return first_us >= 0 && end_us > first_us ? (end_us - first_us + 500) / 1000 : 0;
+    if (first_us < 0 || end_us <= first_us) return 0;
+    int64_t ms = (end_us - first_us + 500) / 1000;
+    return ms < zapp_clip_profile.max_ms ? ms : zapp_clip_profile.max_ms;
 }
 
 int64_t zapp_clip_bitrate_kbps(int64_t bytes, int64_t duration_ms)
@@ -100,6 +102,8 @@ int64_t zapp_clip_bitrate_kbps(int64_t bytes, int64_t duration_ms)
 #define AAC_OBJECT_LC 2
 #define BITRATE_MODE_CBR 2
 
+#define OWNED_MAX 8
+
 struct sample {
     int track;
     int64_t pts;
@@ -126,6 +130,8 @@ struct zapp_clip_recorder {
     int video_track, audio_track;
     bool muxing, video_done, audio_done;
     int64_t base_us, first_video_us, audio_frames, audio_start_us, first_us, end_us;
+    int64_t track_first_us[2], track_end_us[2]; /* audio, video: the sample times written, for the log */
+    int claim;
     int32_t staged;
     int16_t stage[AUDIO_BLOCK_FRAMES];
     struct sample pending[PENDING_SAMPLES];
@@ -139,6 +145,39 @@ struct zapp_clip_recorder {
     char message[160];
     size_t bytes;
 };
+
+/* Paths of recordings a recorder is still writing; the store keeps these when it cleans up. */
+static pthread_mutex_t owned_lock = PTHREAD_MUTEX_INITIALIZER;
+static char owned_paths[OWNED_MAX][512];
+
+static int claim_path(const char *path)
+{
+    int slot = -1;
+    (void)pthread_mutex_lock(&owned_lock);
+    for (int i = 0; i < OWNED_MAX && slot < 0; ++i)
+        if (owned_paths[i][0] == '\0') slot = i;
+    if (slot >= 0) (void)snprintf(owned_paths[slot], sizeof(owned_paths[slot]), "%s", path);
+    (void)pthread_mutex_unlock(&owned_lock);
+    return slot;
+}
+
+static void release_claim(struct zapp_clip_recorder *r)
+{
+    if (r->claim < 0) return;
+    (void)pthread_mutex_lock(&owned_lock);
+    owned_paths[r->claim][0] = '\0';
+    (void)pthread_mutex_unlock(&owned_lock);
+    r->claim = -1;
+}
+
+bool zapp_clip_recorder_path_owned(const char *path)
+{
+    bool owned = false;
+    (void)pthread_mutex_lock(&owned_lock);
+    for (int i = 0; i < OWNED_MAX; ++i) owned = owned || (owned_paths[i][0] != '\0' && strcmp(owned_paths[i], path) == 0);
+    (void)pthread_mutex_unlock(&owned_lock);
+    return owned;
+}
 
 static int64_t clock_us(clockid_t id)
 {
@@ -370,6 +409,7 @@ struct zapp_clip_recorder *zapp_clip_recorder_open(ANativeWindow *preview, const
     r->preview = preview;
     ANativeWindow_acquire(preview);
     r->fd = -1;
+    r->claim = -1;
     r->video_track = r->audio_track = -1;
     (void)snprintf(r->encoder_name, sizeof(r->encoder_name), "%s", encoder);
     ACameraDevice_StateCallbacks callbacks = {.context = r, .onDisconnected = device_gone, .onError = device_error};
@@ -502,6 +542,9 @@ static void write_sample(struct zapp_clip_recorder *r, int track, const unsigned
     else {
         int64_t end = zapp_clip_sample_end_us(is_video, info.presentationTimeUs);
         if (r->first_us < 0 || info.presentationTimeUs < r->first_us) r->first_us = info.presentationTimeUs;
+        int t = is_video ? 1 : 0;
+        if (r->track_first_us[t] < 0) r->track_first_us[t] = info.presentationTimeUs;
+        r->track_end_us[t] = end;
         if (end > r->end_us) r->end_us = end;
     }
 }
@@ -627,9 +670,13 @@ static void *record_loop(void *arg)
     finish_inputs(r);
     release_codecs(r);
     r->duration_ms = finalize_file(r);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "clip times us: audio first %lld end %lld, video first %lld end %lld, span %lld..%lld",
+                        (long long)r->track_first_us[0], (long long)r->track_end_us[0], (long long)r->track_first_us[1],
+                        (long long)r->track_end_us[1], (long long)r->first_us, (long long)r->end_us);
     __android_log_print(ANDROID_LOG_INFO, TAG, "clip capture stopped: %lld ms, %zu bytes, %lld kbit/s, %s",
                         (long long)r->duration_ms, r->bytes, (long long)zapp_clip_bitrate_kbps((int64_t)r->bytes, r->duration_ms),
                         atomic_load(&r->failed) ? r->message : "ok");
+    release_claim(r);
     if (!atomic_load(&r->camera_lost) && !atomic_load(&r->closing)) (void)session_open(r, false);
     atomic_store(&r->active, false);
     return NULL;
@@ -638,6 +685,8 @@ static void *record_loop(void *arg)
 static bool prepare(struct zapp_clip_recorder *r, const char *path, char *error, size_t error_cap)
 {
     (void)snprintf(r->path, sizeof(r->path), "%s", path);
+    r->claim = claim_path(r->path);
+    if (r->claim < 0) return failure(error, error_cap, "Too many recordings are still being saved.");
     r->pending_data = malloc(PENDING_BYTES);
     r->fd = open(path, O_CREAT | O_TRUNC | O_RDWR | O_CLOEXEC, 0600);
     r->muxer = r->fd >= 0 ? AMediaMuxer_new(r->fd, AMEDIAMUXER_OUTPUT_FORMAT_MPEG_4) : NULL;
@@ -654,6 +703,7 @@ static void abandon(struct zapp_clip_recorder *r)
 {
     release_codecs(r);
     (void)finalize_file(r);
+    release_claim(r);
     if (!atomic_load(&r->camera_lost)) (void)session_open(r, false);
 }
 
@@ -664,6 +714,8 @@ static void reset_run(struct zapp_clip_recorder *r)
     r->muxing = r->video_done = r->audio_done = false;
     r->audio_frames = r->end_us = r->duration_ms = 0;
     r->first_us = -1;
+    r->track_first_us[0] = r->track_first_us[1] = -1;
+    r->track_end_us[0] = r->track_end_us[1] = 0;
     r->staged = 0;
     r->pending_count = r->pending_used = r->bytes = 0;
     atomic_store(&r->stop, false);

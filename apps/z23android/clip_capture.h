@@ -28,6 +28,10 @@ struct zapp_codec_info {
 /* Index of the first hardware AVC encoder, or -1: recording never falls back to a software encode. */
 int zapp_clip_pick_encoder(const struct zapp_codec_info *list, size_t count);
 
+/* The pace to start from when the node's pace is not known: pause, so recording is refused until the
+ * status is below 3. */
+#define ZAPP_CLIP_PACE_UNKNOWN ZAPP_PACE_PAUSE
+
 /* Advances *pace with the node's thermal hysteresis and returns whether recording may start. Once the
  * pace is pause (status 4 or above) it stays pause until the status drops below 3, so a status of 3
  * right after 4 still refuses. */
@@ -52,8 +56,8 @@ bool zapp_clip_pick_size(const int32_t *configs, size_t count, int *width, int *
  * frame of 1024 samples (audio). */
 int64_t zapp_clip_sample_end_us(bool video, int64_t pts_us);
 
-/* Duration of a clip in milliseconds, from its first sample to the end of its last, as the MP4 track
- * durations measure it; 0 when there is no first sample or no span. */
+/* Duration of a clip in milliseconds: the span from its first sample to the end of its last, rounded to a
+ * millisecond and never above the 60 s cap; 0 when there is no first sample or no span. */
 int64_t zapp_clip_span_ms(int64_t first_us, int64_t end_us);
 
 /* Average bitrate of bytes over duration_ms in kbit/s, 0 for an empty duration. */
@@ -103,6 +107,9 @@ const char *zapp_clip_recorder_message(const struct zapp_clip_recorder *r);
 
 /* Whether the camera was taken by another app or stopped; the recorder must then be closed and reopened. */
 bool zapp_clip_recorder_camera_lost(const struct zapp_clip_recorder *r);
+
+/* Whether a recorder is still writing the file at path. */
+bool zapp_clip_recorder_path_owned(const char *path);
 
 /* Frees the recorder and closes the camera. A recording still running is told to stop and a background
  * thread finishes and frees it, so the call does not wait for the worker. */

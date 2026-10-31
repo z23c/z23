@@ -67,7 +67,7 @@ bool zapp_clip_meta_valid(const struct zapp_clip_meta *meta)
     return meta != NULL && meta->level >= 1 && meta->level <= ZAPP_CLIP_LEVEL_MAX &&
         (meta->descriptors & ~ZAPP_CLIP_DESCRIPTOR_MASK) == 0 &&
         memchr(meta->caption, '\0', sizeof(meta->caption)) != NULL &&
-        meta->duration_ms > 0 && meta->created_at >= 0;
+        meta->duration_ms > 0 && meta->duration_ms <= ZAPP_CLIP_DURATION_MAX_MS && meta->created_at >= 0;
 }
 
 static bool entry_path(const char *dir, const char *id, const char *ext, char *out, size_t cap)
@@ -117,6 +117,14 @@ static bool exists(const char *path)
     return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 }
 
+static bool sync_directory(const char *dir)
+{
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return false;
+    bool ok = fsync(fd) == 0;
+    return close(fd) == 0 && ok;
+}
+
 static bool sync_file(const char *path)
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -142,6 +150,11 @@ bool zapp_clip_store_commit(const char *dir, const char *source, const struct za
     if (!write_atomic(sidecar, text)) {
         if (created) (void)rename(media, source);
         return fail(error, error_cap, "Could not store the clip details.");
+    }
+    if (!sync_directory(dir)) {
+        (void)unlink(sidecar);
+        if (created) (void)rename(media, source);
+        return fail(error, error_cap, "Could not write the clip to storage.");
     }
     return true;
 }
@@ -225,10 +238,19 @@ size_t zapp_clip_store_list(const char *dir, struct zapp_clip *out, size_t max, 
     return count;
 }
 
-/* Whether name is an <id>.mp4 without its <id>.json or a leftover <id>.json.tmp. */
-static bool stale_entry(const char *dir, const char *name)
+static bool has_suffix(const char *name, const char *suffix)
 {
-    char id[ZAPP_CLIP_ID_CAP], sidecar[1100];
+    size_t length = strlen(name), tail = strlen(suffix);
+    return length >= tail && strcmp(name + length - tail, suffix) == 0;
+}
+
+/* Whether name is an <id>.mp4 without its <id>.json, a leftover <id>.json.tmp, or a recording file
+ * that no recorder owns. */
+static bool stale_entry(const char *dir, const char *name, bool (*owned)(const char *path))
+{
+    char id[ZAPP_CLIP_ID_CAP], sidecar[1100], path[1100];
+    if (strncmp(name, ZAPP_CLIP_PENDING_PREFIX, strlen(ZAPP_CLIP_PENDING_PREFIX)) == 0 && has_suffix(name, ".mp4"))
+        return snprintf(path, sizeof(path), "%s/%s", dir, name) < (int)sizeof(path) && !(owned != NULL && owned(path));
     if (strlen(name) < ZAPP_CLIP_ID_LEN) return false;
     memcpy(id, name, ZAPP_CLIP_ID_LEN);
     id[ZAPP_CLIP_ID_LEN] = '\0';
@@ -238,14 +260,14 @@ static bool stale_entry(const char *dir, const char *name)
         !exists(sidecar);
 }
 
-size_t zapp_clip_store_clean(const char *dir)
+size_t zapp_clip_store_clean(const char *dir, bool (*owned)(const char *path))
 {
     DIR *handle = opendir(dir);
     char path[1100];
     size_t removed = 0;
     if (handle == NULL) return 0;
     for (const struct dirent *entry; (entry = readdir(handle)) != NULL;) {
-        if (!stale_entry(dir, entry->d_name)) continue;
+        if (!stale_entry(dir, entry->d_name, owned)) continue;
         if (snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name) < (int)sizeof(path) && unlink(path) == 0) ++removed;
     }
     (void)closedir(handle);

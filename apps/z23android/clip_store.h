@@ -13,6 +13,8 @@
 #define ZAPP_CLIP_LEVEL_MAX 5
 #define ZAPP_CLIP_DESCRIPTOR_MASK 0x7fu
 #define ZAPP_CLIP_LIST_MAX 64
+#define ZAPP_CLIP_DURATION_MAX_MS 60000
+#define ZAPP_CLIP_PENDING_PREFIX "recording" /* a recording not yet saved: recording*.mp4 in the clips folder */
 
 struct zapp_clip_meta {
     uint8_t level;       /* 1 General, 2 Mild, 3 Sensitive, 4 Mature, 5 Explicit; 0 is unset and refused */
@@ -37,12 +39,12 @@ bool zapp_clip_hash_fd(int fd, char id[ZAPP_CLIP_ID_CAP]);
 bool zapp_clip_hash_file(const char *path, char id[ZAPP_CLIP_ID_CAP]);
 
 /* Whether the metadata may be saved: a level 1 to 5, only defined descriptor bits, a caption that
- * fits and a duration above zero. Level 0 is refused. */
+ * fits and a duration from 1 to 60000 ms. Level 0 is refused. */
 bool zapp_clip_meta_valid(const struct zapp_clip_meta *meta);
 
 /* Moves the recording at source (inside dir, same filesystem) to dir/<id>.mp4 and writes the sidecar,
- * both by atomic rename after the mp4 is synced to storage. Nothing is stored when the metadata is
- * invalid or a step fails. */
+ * both by atomic rename, after the mp4 is synced and followed by a sync of the folder. Nothing is
+ * stored when the metadata is invalid or a step fails. */
 bool zapp_clip_store_commit(const char *dir, const char *source, const struct zapp_clip_meta *meta,
                             char id[ZAPP_CLIP_ID_CAP], char *error, size_t error_cap);
 
@@ -51,9 +53,10 @@ bool zapp_clip_store_commit(const char *dir, const char *source, const struct za
  * say that older ones exist. Entries without a valid sidecar and mp4 pair are skipped. */
 size_t zapp_clip_store_list(const char *dir, struct zapp_clip *out, size_t max, size_t *total);
 
-/* Removes mp4 files left without a sidecar by an interrupted save, and leftover temporary sidecars.
+/* Removes mp4 files left without a sidecar by an interrupted save, leftover temporary sidecars and
+ * unsaved recording files, except those for which owned(path) is true (a recorder still writes them).
  * Call it when the store is opened, never while a save is running. Returns how many files it removed. */
-size_t zapp_clip_store_clean(const char *dir);
+size_t zapp_clip_store_clean(const char *dir, bool (*owned)(const char *path));
 
 bool zapp_clip_store_path(const char *dir, const char *id, char *out, size_t cap);
 

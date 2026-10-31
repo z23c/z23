@@ -47,7 +47,7 @@ static const char *const level_meanings[5] = {
 };
 
 static struct {
-    bool active, paused, left, keyboard, sized, error_shown, camera_wait, hot;
+    bool active, paused, left, keyboard, sized, error_shown, camera_wait, hot, unsaved;
     enum zapp_clip_mode mode;
     enum phase phase;
     JavaVM *vm;
@@ -61,6 +61,7 @@ static struct {
     size_t count, total, index;
     int level;
     enum zapp_pace pace;
+    int thermal;
     int64_t duration_ms, health_at_ms, stop_asked_ms;
     ALooper *looper;
     int timer;
@@ -410,11 +411,24 @@ static int64_t now_ms(void)
     return clock_gettime(CLOCK_MONOTONIC, &now) == 0 ? (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000 : 0;
 }
 
-/* Advances the thermal latch from the current status; false while recording must stay refused. */
+/* Advances the thermal latch from a fresh status; false while recording must stay refused. */
 static bool thermal_allows(JNIEnv *env)
 {
     int status = zapp_clip_thermal_status(env, s.activity);
     return zapp_clip_thermal_track(&s.pace, status < 0 ? 0 : status);
+}
+
+static const char *ready_text(void)
+{
+    return s.unsaved ? "The last recording was not saved" : "Ready";
+}
+
+static void new_pending(void)
+{
+    struct timespec now;
+    (void)clock_gettime(CLOCK_REALTIME, &now);
+    (void)snprintf(s.pending, sizeof(s.pending), "%s/%s-%lld.mp4", s.dir, ZAPP_CLIP_PENDING_PREFIX,
+                   (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000);
 }
 
 static void enter_ready(JNIEnv *env)
@@ -427,9 +441,8 @@ static void enter_ready(JNIEnv *env)
     int pick = zapp_clip_pick_encoder(codecs, count);
     if (pick < 0) { refuse(env, ZAPP_CLIP_NO_ENCODER); return; }
     (void)snprintf(s.encoder, sizeof(s.encoder), "%s", codecs[pick].name);
-    if (!thermal_allows(env)) { refuse(env, ZAPP_CLIP_TOO_HOT); return; }
     s.phase = PHASE_READY;
-    (void)set_text(env, s.status, "Ready");
+    (void)set_text(env, s.status, ready_text());
 }
 
 static void enter_review(JNIEnv *env, int64_t duration_ms)
@@ -473,13 +486,15 @@ static void settle_recording(JNIEnv *env)
     bool done = zapp_clip_recorder_wait(s.recorder, PAUSE_WAIT_MS);
     __android_log_print(ANDROID_LOG_INFO, TAG, "clip pause waited %lld ms, finished %d", (long long)(now_ms() - s.stop_asked_ms), done);
     if (done) collect_recording(env);
-    else s.phase = PHASE_READY;
+    else { s.phase = PHASE_READY; s.unsaved = true; }
 }
 
 static void start_recording(JNIEnv *env)
 {
     char error[160] = "";
     if (!thermal_allows(env)) { (void)set_text(env, s.status, ZAPP_CLIP_TOO_HOT); return; }
+    new_pending();
+    s.unsaved = false;
     if (!zapp_clip_recorder_start(s.recorder, s.pending, error, sizeof(error))) { (void)set_text(env, s.status, error); return; }
     s.phase = PHASE_RECORDING;
     s.health_at_ms = 0;
@@ -608,9 +623,7 @@ static void tick_recording(JNIEnv *env)
         log_health(env);
         s.health_at_ms = (ms / HEALTH_EVERY_MS + 1) * HEALTH_EVERY_MS;
     }
-    int status = zapp_clip_thermal_status(env, s.activity);
-    (void)zapp_clip_thermal_track(&s.pace, status < 0 ? 0 : status);
-    if (zapp_clip_thermal_stops(status)) __android_log_print(ANDROID_LOG_WARN, TAG, "clip recording stopped by thermal status");
+    if (zapp_clip_thermal_stops(s.thermal)) __android_log_print(ANDROID_LOG_WARN, TAG, "clip recording stopped by thermal status");
     else if (zapp_clip_recorder_running(s.recorder)) return;
     finish_recording(env);
 }
@@ -627,11 +640,21 @@ static bool open_camera(JNIEnv *env)
     if (!acquire_window(env)) return false;
     s.recorder = zapp_clip_recorder_open(s.window, s.encoder, error, sizeof(error));
     s.camera_wait = s.recorder == NULL;
-    (void)set_text(env, s.status, s.recorder ? "Ready" : error[0] ? error : "The camera is not available. Tap Record to try again.");
+    (void)set_text(env, s.status, s.recorder ? ready_text() : error[0] ? error : "The camera is not available. Tap Record to try again.");
     return s.recorder != NULL;
 }
 
 /* The camera went away while idle: say so and wait for the person to ask again. */
+/* A recorder whose camera was lost is replaced, so the first tap after the loss works. */
+static bool ensure_camera(JNIEnv *env)
+{
+    if (s.recorder && zapp_clip_recorder_camera_lost(s.recorder)) {
+        zapp_clip_recorder_close(s.recorder);
+        s.recorder = NULL;
+    }
+    return s.recorder != NULL || open_camera(env);
+}
+
 static void lose_camera(JNIEnv *env)
 {
     (void)set_text(env, s.status, zapp_clip_recorder_message(s.recorder)[0] ? zapp_clip_recorder_message(s.recorder) :
@@ -644,8 +667,8 @@ static void lose_camera(JNIEnv *env)
 static void tick_ready(JNIEnv *env)
 {
     if (s.recorder && zapp_clip_recorder_camera_lost(s.recorder)) { lose_camera(env); return; }
-    bool allowed = thermal_allows(env);
-    if (!allowed || s.hot) (void)set_text(env, s.status, allowed ? "Ready" : ZAPP_CLIP_TOO_HOT);
+    bool allowed = s.pace != ZAPP_PACE_PAUSE;
+    if (!allowed || s.hot) (void)set_text(env, s.status, allowed ? ready_text() : ZAPP_CLIP_TOO_HOT);
     s.hot = !allowed;
     if (!s.recorder && !s.camera_wait) (void)open_camera(env);
 }
@@ -654,6 +677,9 @@ static void tick(JNIEnv *env)
 {
     if (!s.active || s.paused) return;
     layout_surface(env);
+    int status = zapp_clip_thermal_status(env, s.activity);
+    s.thermal = status < 0 ? 0 : status;
+    (void)zapp_clip_thermal_track(&s.pace, s.thermal);
     switch (s.phase) {
     case PHASE_PERMISSION: if (recording_permitted(env)) enter_ready(env); break;
     case PHASE_READY: tick_ready(env); break;
@@ -746,11 +772,10 @@ bool zapp_clip_screen_open(JNIEnv *env, jobject activity, const char *files_dir,
     s.mode = mode;
     s.activity = keep(env, activity);
     int n = snprintf(s.dir, sizeof(s.dir), "%s/clips", files_dir);
-    int m = snprintf(s.pending, sizeof(s.pending), "%s/recording.mp4", s.dir);
-    bool ok = s.activity && n > 0 && m > 0 && (size_t)m < sizeof(s.pending) && (*env)->GetJavaVM(env, &s.vm) == JNI_OK &&
+    s.pace = ZAPP_CLIP_PACE_UNKNOWN;
+    bool ok = s.activity && n > 0 && (size_t)n + 48 < sizeof(s.pending) && (*env)->GetJavaVM(env, &s.vm) == JNI_OK &&
         (mkdir(s.dir, 0700) == 0 || access(s.dir, W_OK) == 0) && read_density(env) && build_views(env) && attach(env) && start_timer();
-    (void)unlink(s.pending);
-    (void)zapp_clip_store_clean(s.dir);
+    (void)zapp_clip_store_clean(s.dir, zapp_clip_recorder_path_owned);
     s.active = ok;
     if (ok) begin(env);
     else { stop_timer(); drop_views(env); if (s.activity) (*env)->DeleteGlobalRef(env, s.activity); s.activity = NULL; }
@@ -766,7 +791,7 @@ void zapp_clip_screen_close(JNIEnv *env)
     (*env)->PushLocalFrame(env, 16);
     stop_timer();
     release_media(env);
-    (void)unlink(s.pending);
+    if (s.pending[0] != '\0') (void)unlink(s.pending);
     hide_keyboard(env);
     jobject parent = call_object(env, s.root, "getParent", "()Landroid/view/ViewParent;");
     if (parent) (void)call_void(env, parent, "removeView", "(Landroid/view/View;)V", s.root);
@@ -796,12 +821,14 @@ void zapp_clip_screen_pause(JNIEnv *env)
     settle_recording(env);
     release_media(env);
     s.camera_wait = false;
+    s.pace = ZAPP_CLIP_PACE_UNKNOWN;
 }
 
 void zapp_clip_screen_resume(JNIEnv *env)
 {
     if (!s.active) return;
     s.paused = false;
+    if (s.unsaved && s.phase == PHASE_READY) (void)set_text(env, s.status, ready_text());
     if (s.phase != PHASE_PERMISSION) return;
     if (recording_permitted(env)) enter_ready(env);
     else if (s.left) refuse(env, "Camera and microphone access are needed to record a clip. "
@@ -828,7 +855,7 @@ static void press(JNIEnv *env, float x, float y)
     for (int i = 0; i < C_COUNT; ++i) {
         if (!s.controls[i] || !hit(env, s.controls[i], x, y)) continue;
         if (i != C_CAPTION) hide_keyboard(env);
-        if (i == C_RECORD && s.phase == PHASE_READY) { if (s.recorder || open_camera(env)) start_recording(env); }
+        if (i == C_RECORD && s.phase == PHASE_READY) { if (ensure_camera(env)) start_recording(env); }
         else if (i == C_RECORD && s.phase == PHASE_RECORDING) finish_recording(env);
         else if (i == C_CAPTION) focus_caption(env);
         else if (i >= C_LEVEL && i < C_SAVE) select_level(env, i - C_LEVEL);

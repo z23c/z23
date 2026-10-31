@@ -319,7 +319,7 @@ platform widgets (`apps/z23android/native_ui.c`). Clips adds only NDK C APIs.
 - `camera.c` already opens the rear camera, creates an `AImageReader` and
   reads YUV planes for QR scanning. Recording adds the encoder's input surface
   (`AMediaCodec_createInputSurface`, API 26) as a second capture output. The
-  encoder, muxer and audio-encode code is **new**.
+  encoder, muxer and audio-encode code is in `apps/z23android/clip_capture.c`.
 - Without a hardware AVC encoder the app refuses to record and says why,
   instead of burning CPU on a software encode.
 - Camera and microphone permissions are declared today in

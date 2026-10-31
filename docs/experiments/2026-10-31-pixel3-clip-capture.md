@@ -44,21 +44,17 @@ run exceeded the cap by 0.9 s because the cap clock started before the camera
 session; it now starts when the session opens and samples at or after 60 s are
 dropped.
 
-## Duration: sidecar and container
+## Open: sidecar duration against container duration
 
-The pulled 60 s file has an audio track of 2775 AAC frames, 59.200 s, starting at
-0, and a video track that starts 0.1536 s later and ends at 58.89 s, so the
-container duration is 59.2 s. The sidecar of that run read 59.973 s, which is the
-container duration plus about 0.77 s: it was counted from the start of the
-recording clock, which is set before the camera session opens, while the first
-samples arrive later. The run log was not kept, so this cause is inferred from
-the file's track times. The
-sidecar duration (`duration_ms`, carried into the signed format) is now the
-span from the first sample to the end of the last sample, where a sample ends
-at its presentation time plus one video frame or one AAC frame of 1024 samples.
-For the pulled file that is 59,200 ms, equal to the container duration; the host
-test `clip_span` checks this arithmetic with the audio and video times from
-that file.
+The pulled 60 s file has an audio track of 2775 AAC frames (59.200 s, starting at
+0) and a video track that starts 0.1536 s later and ends at 58.89 s; its
+container duration is 59.2 s. The log of that run reported 59.973 s as the clip
+duration. The cause is not established. The recorder now logs, per track, the
+first sample time and the end of the last sample, and the span it stores
+(`clip times us: ...`); the next phone run measures them, including a clip whose
+video starts late, and this section is then replaced by what they show. The
+stored duration is also capped at 60,000 ms, the ceiling of `duration_ms` in
+the signed format.
 
 ## E11 - 60 s playback
 

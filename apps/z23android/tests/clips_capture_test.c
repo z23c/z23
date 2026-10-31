@@ -37,12 +37,23 @@ static void thermal_latch(void)
     assert(!zapp_clip_thermal_track(&pace, 3) && zapp_clip_thermal_track(&pace, 0));
 }
 
+/* A pace that is not known starts at pause: status 3 does not reopen recording, status 2 does. */
+static void thermal_unknown(void)
+{
+    enum zapp_pace pace = ZAPP_CLIP_PACE_UNKNOWN;
+    assert(!zapp_clip_thermal_track(&pace, 3) && !zapp_clip_thermal_track(&pace, 3));
+    assert(zapp_clip_thermal_track(&pace, 2));
+    pace = ZAPP_CLIP_PACE_UNKNOWN;
+    assert(zapp_clip_thermal_track(&pace, 0) && zapp_clip_thermal_track(&pace, 3));
+}
+
 static void clip_span(void)
 {
-    assert(zapp_clip_sample_end_us(false, 59178667) == 59200000);
-    assert(zapp_clip_sample_end_us(true, 58858544) == 58891877);
-    assert(zapp_clip_span_ms(0, 59200000) == 59200);
-    assert(zapp_clip_span_ms(770000, 59970000) == 59200);
+    assert(zapp_clip_sample_end_us(false, 1000000) == 1000000 + 1024 * 1000000 / 48000);
+    assert(zapp_clip_sample_end_us(true, 1000000) == 1000000 + 1000000 / 30);
+    assert(zapp_clip_span_ms(1000, 5001000) == 5000 && zapp_clip_span_ms(250000, 1250000) == 1000);
+    assert(zapp_clip_span_ms(0, 60000000) == 60000 && zapp_clip_span_ms(0, 60400000) == 60000);
+    assert(zapp_clip_span_ms(0, 59999499) == 59999 && zapp_clip_span_ms(0, 61000000) == 60000);
     assert(zapp_clip_span_ms(0, 1499) == 1 && zapp_clip_span_ms(0, 1500) == 2);
     assert(zapp_clip_span_ms(-1, 5000000) == 0 && zapp_clip_span_ms(5, 5) == 0 && zapp_clip_span_ms(9, 5) == 0);
 }
@@ -98,6 +109,7 @@ int main(void)
     time_cap();
     thermal_gate();
     thermal_latch();
+    thermal_unknown();
     clip_span();
     rotation();
     encoder_choice();
