@@ -507,6 +507,27 @@ static bool shi_anchor_pass_incomplete(int64_t n, bool best_present,
     return n < 0 || (best_present && !saw_best);
 }
 
+static void shi_publish_report(struct shielded_import_report *out,
+                               const struct shielded_import_report *report)
+{
+    if (out)
+        *out = *report;
+}
+
+static void shi_publish_already_complete(struct shielded_import_report *out)
+{
+    if (out) {
+        out->committed = false;
+        out->tip_anchor_bound = true;
+    }
+}
+
+static void shi_free_exec_err(char *err)
+{
+    if (err)
+        sqlite3_free(err);
+}
+
 bool shielded_history_import_from_chainstate(
     sqlite3 *progress_db, const char *chainstate_src_path,
     int64_t expected_tip_height, const struct uint256 *expected_tip_block_hash,
@@ -514,8 +535,7 @@ bool shielded_history_import_from_chainstate(
     struct shielded_import_report *out)
 {
     struct shielded_import_report report = {0};
-    if (out)
-        *out = report;
+    shi_publish_report(out, &report);
 
     if (!shi_import_args_ok(progress_db, chainstate_src_path,
                             expected_tip_height, expected_tip_block_hash,
@@ -547,10 +567,7 @@ bool shielded_history_import_from_chainstate(
         LOG_INFO(SHI_SUBSYS,
                  "cursors already zero — shielded history complete, nothing "
                  "to import");
-        if (out) {
-            out->committed = false;
-            out->tip_anchor_bound = true;
-        }
+        shi_publish_already_complete(out);
         return true;
     }
     report.anchor_boundary = anchor_boundary;
@@ -649,13 +666,14 @@ bool shielded_history_import_from_chainstate(
             != SQLITE_OK) {
         LOG_WARN(SHI_SUBSYS, "BEGIN IMMEDIATE failed: %s",
                  err ? err : sqlite3_errmsg(progress_db));
-        if (err) sqlite3_free(err);
+        shi_free_exec_err(err);
         progress_store_tx_unlock();
         chainstate_legacy_close(h);
         shi_progress_end();
         return false;
     }
-    if (err) { sqlite3_free(err); err = NULL; }
+    shi_free_exec_err(err);
+    err = NULL;
 
     int64_t nf_sentinel = anchor_boundary - 1; /* highest historical height */
 
@@ -740,11 +758,11 @@ bool shielded_history_import_from_chainstate(
     if (sqlite3_exec(progress_db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
         LOG_WARN(SHI_SUBSYS, "COMMIT failed: %s",
                  err ? err : sqlite3_errmsg(progress_db));
-        if (err) sqlite3_free(err);
+        shi_free_exec_err(err);
         shi_rollback(progress_db);
         return false;
     }
-    if (err) sqlite3_free(err);
+    shi_free_exec_err(err);
     progress_store_tx_unlock();
     shi_progress_end();
 
@@ -765,8 +783,7 @@ bool shielded_history_import_from_chainstate(
              (long long)report.sprout_nullifiers,
              (long long)anchor_boundary);
 
-    if (out)
-        *out = report;
+    shi_publish_report(out, &report);
     return true;
 }
 
