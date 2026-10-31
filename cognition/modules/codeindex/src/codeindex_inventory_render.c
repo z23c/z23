@@ -283,6 +283,7 @@ bool codeindex_inventory_render(FILE *out,
         "\"unresolved_symbol_definitions\":%d,"
         "\"scanner_partial_symbols\":%d,\"arm_baseline_symbols\":%d,"
         "\"multi_arm_symbols\":%d,\"definition_arms\":%d,\"duplicates\":%d,"
+        "\"duplicate_tag_led_excluded\":%d,"
         "\"untested_invariants\":%d,\"test_root_gaps\":%d}\n",
         report->files_scanned, report->production_files, report->test_files,
         report->capability_count, report->symbol_count,
@@ -297,7 +298,8 @@ bool codeindex_inventory_render(FILE *out,
         report->arm_baseline_symbols,
         report->multi_arm_symbol_count,
         report->definition_arm_count,
-        report->duplicate_count, report->invariant_count,
+        report->duplicate_count, report->duplicate_tag_led_excluded,
+        report->invariant_count,
         report->test_root_gap_count);
     for (int i = 0; i < report->capability_count; i++)
         render_capability(out, report, &report->capabilities[i]);

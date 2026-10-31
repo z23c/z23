@@ -117,7 +117,9 @@ static bool ci_fixture(void)
         "/** Must validate the selected platform implementation. */\n"
         "bool demo_platform(int value);\n"
         "static inline int local_pick(int value) { return value + 1; }\n"
-        "int demo_use_local(int value);\n#endif\n") &&
+        "int demo_use_local(int value);\n"
+        "enum demo_mode { DEMO_MODE_OFF, DEMO_MODE_ON };\n"
+        "enum demo_mode demo_mode_of(int value);\n#endif\n") &&
         ci_write(CI_FIX "/platform/modules/demo/include/demo/other.h",
         "/* purpose: Exercise a same-named, path-distinct inline. */\n"
         "#ifndef OTHER_H\n#define OTHER_H\n#include <stdbool.h>\n"
@@ -137,6 +139,8 @@ static bool ci_fixture(void)
         "bool demo_platform(int value) { return value > 0; }\n"
         "#endif\n"
         "int demo_use_local(int value) { return local_pick(value); }\n"
+        "enum demo_mode demo_mode_of(int value)\n{\n"
+        "    return value > 0 ? DEMO_MODE_ON : DEMO_MODE_OFF;\n}\n"
         "static int alpha_one(int value)\n{\n"
         "    int result = first_call(value, 7);\n"
         "    if (result < 0) return result;\n"
@@ -161,7 +165,8 @@ static bool ci_fixture(void)
         ci_write(CI_FIX "/tests/harness/src/test_fixture.c",
         "#include \"demo/demo.h\"\n"
         "int test_code_inventory_fixture(void)\n{\n"
-        "    return demo_validate(2) && demo_use_local(2) == 3 ? 0 : 1;\n}\n") &&
+        "    return demo_validate(2) && demo_use_local(2) == 3 &&\n"
+        "        demo_mode_of(2) == DEMO_MODE_ON ? 0 : 1;\n}\n") &&
         ci_write(CI_FIX "/contexts/commons/packages/zmini/include/zmini/zmini.h",
         "/* purpose: Tiny package fixture. */\n"
         "#ifndef ZMINI_H\n#define ZMINI_H\n"
@@ -1133,6 +1138,21 @@ static void ci_symbol_checks(const struct ci_inventory_symbol *validate,
               "multiple_preprocessor_arms_UNPROVEN") == 0);
 }
 
+/* A function whose return type is a tag (`enum demo_mode demo_mode_of(`) has
+ * a body the registered root reaches; the body walker must not drop it. */
+static void ci_tagged_return_checks(
+    const struct ci_inventory_report *first,
+    const struct ci_inventory_capability *demo)
+{
+    const struct ci_inventory_symbol *mode = ci_symbol(
+        first, demo, "demo_mode_of");
+    CI_ASSERT(mode != NULL);
+    CI_ASSERT(mode && mode->test_evidence ==
+              CI_INVENTORY_TEST_REGISTERED_REACHABLE);
+    CI_ASSERT(mode && strcmp(mode->registered_test_group,
+                             "code_inventory_fixture") == 0);
+}
+
 static void ci_local_symbol_checks(
     const struct ci_inventory_report *first,
     const struct ci_inventory_symbol *demo_local,
@@ -1209,6 +1229,86 @@ static void ci_definition_arm_scan(const struct ci_inventory_report *first,
     }
 }
 
+#define CI_TAG_FIX "test-tmp/code-inventory-tagged-fixture"
+
+/* Two identical tag-led functions, plus a typedef and a tag definition that
+ * carry the same kind of body but must stay rejected. */
+static bool ci_tagged_fixture(void)
+{
+    if (system("rm -rf " CI_TAG_FIX " && mkdir -p "
+               CI_TAG_FIX "/platform/modules/demo/include/demo "
+               CI_TAG_FIX "/platform/modules/demo/src "
+               CI_TAG_FIX "/tests/harness/src "
+               CI_TAG_FIX "/tools/dev "
+               CI_TAG_FIX "/tools/lint") != 0) return false;
+    return ci_write(CI_TAG_FIX "/platform/modules/demo/include/demo/tagged.h",
+        "/* purpose: Expose tag-led functions for the fixture. */\n"
+        "#ifndef TAGGED_H\n#define TAGGED_H\n"
+        "enum tagged_mode { TAGGED_OFF, TAGGED_ON };\n"
+        "enum tagged_mode tagged_check_a(int value);\n"
+        "enum tagged_mode tagged_check_b(int value);\n#endif\n") &&
+        ci_write(CI_TAG_FIX "/platform/modules/demo/src/tagged.c",
+        "#include \"demo/tagged.h\"\n"
+        "enum tagged_mode tagged_check_a(int value)\n{\n"
+        "    if (value <= 0) return TAGGED_OFF;\n"
+        "    if (value > 1000) return TAGGED_OFF;\n"
+        "    if ((value % 2) == 0) return TAGGED_ON;\n"
+        "    return TAGGED_OFF;\n}\n"
+        "enum tagged_mode tagged_check_b(int value)\n{\n"
+        "    if (value <= 0) return TAGGED_OFF;\n"
+        "    if (value > 1000) return TAGGED_OFF;\n"
+        "    if ((value % 2) == 0) return TAGGED_ON;\n"
+        "    return TAGGED_OFF;\n}\n"
+        "typedef struct __attribute__((x)) {\n"
+        "    int lead;\n    int first;\n    int second;\n    int third;\n"
+        "    int fourth;\n    int fifth;\n    int sixth;\n"
+        "} tagged_pair_t;\n"
+        "struct __attribute__((x)) tagged_box {\n"
+        "    int lead;\n    int first;\n    int second;\n    int third;\n"
+        "    int fourth;\n    int fifth;\n    int sixth;\n"
+        "};\n") &&
+        ci_write(CI_TAG_FIX "/tests/harness/src/test_tagged.c",
+        "#include \"demo/tagged.h\"\n"
+        "int test_tagged_fixture(void)\n{\n"
+        "    return tagged_check_a(2) == TAGGED_ON &&\n"
+        "        tagged_check_b(3) == TAGGED_OFF ? 0 : 1;\n}\n") &&
+        ci_write(CI_TAG_FIX "/tools/dev/test_group_catalog.def",
+        "/* Include with ZCL_TEST_GROUP(name) and ZCL_SPEC_GROUP(name). */\n"
+        "ZCL_TEST_GROUP(tagged_fixture)\n") &&
+        ci_write(CI_TAG_FIX "/tools/lint/arm_symbol_single_baseline.txt",
+        "# z23-generated-artifact: zcl.generated_artifact.v1\n"
+        "# artifact-id: zcl.arm_symbol_single_baseline.v1\n"
+        "# asserts: multi_arm_definition(path,symbol)\n"
+        "# generated-by: build/bin/z23-lint check-arm-symbol-single\n"
+        "# regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-arm-symbol-single\n");
+}
+
+/* A tag-led function is reachable from its registered root. The duplicate pass
+ * skips tag-led bodies, so the identical pair adds no record; the count of
+ * skipped bodies is exactly the two functions, so the typedef and the tag
+ * definition were rejected and never became bodies. */
+static void ci_tag_led_checks(void)
+{
+    struct ci_inventory_report *report = codeindex_inventory_analyze(CI_TAG_FIX);
+    CI_ASSERT(report != NULL);
+    if (!report) return;
+    CI_ASSERT(report->registered_test_roots_found == 1);
+    const struct ci_inventory_capability *cap = ci_cap(
+        report, "platform/modules/demo/include/demo/tagged.h");
+    const struct ci_inventory_symbol *a = ci_symbol(report, cap, "tagged_check_a");
+    CI_ASSERT(a != NULL);
+    CI_ASSERT(a && a->test_evidence == CI_INVENTORY_TEST_REGISTERED_REACHABLE);
+    CI_ASSERT(report->duplicate_tag_led_excluded == 2);
+    CI_ASSERT(report->duplicate_count == 0);
+    for (int i = 0; i < report->duplicate_count; i++) {
+        const struct ci_inventory_duplicate *d = &report->duplicates[i];
+        CI_ASSERT(!ci_pair_names(d->symbol_a, d->symbol_b,
+                                 "tagged_check_a", "tagged_check_b"));
+    }
+    codeindex_inventory_free(report);
+    if (!ci_failures) TEST_DISCARD(system("rm -rf " CI_TAG_FIX));
+}
+
 int test_code_inventory(void)
 {
     ci_failures = 0;
@@ -1239,6 +1339,7 @@ int test_code_inventory(void)
     const struct ci_inventory_symbol *platform = ci_symbol(
         first, demo, "demo_platform");
     ci_symbol_checks(validate, stub, platform);
+    ci_tagged_return_checks(first, demo);
     ci_local_symbol_checks(first, demo_local, other_local);
 
     bool exact = false, shape = false, stub_gap = false, platform_gap = false;
@@ -1253,6 +1354,8 @@ int test_code_inventory(void)
     CI_ASSERT(platform_constant_arm);
     CI_ASSERT(platform_real_arm);
     ci_semantic_known_answers(first);
+    CI_ASSERT(ci_tagged_fixture());
+    ci_tag_led_checks();
 
     struct ci_inventory_report *same = codeindex_inventory_analyze(CI_FIX);
     CI_ASSERT(same != NULL);

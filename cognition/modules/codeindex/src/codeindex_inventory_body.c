@@ -442,14 +442,37 @@ static bool inv_call_name_span(const char *clean, size_t start, size_t end,
     return true;
 }
 
-static bool inv_function_name(const char *clean, size_t start, size_t end,
-                              char name[128])
+/* True when the tag-led declaration [start, name) names a return type before
+ * its function name, as in `enum clips_error f(...) {`. A tag followed by no
+ * further identifier, as in `struct __attribute__((x)) S {`, is a tag
+ * definition, and typedef never introduces a function body. */
+static bool inv_tag_return_type(const char *clean, size_t start, size_t name)
 {
+    int words = 0;
+    size_t i = start;
+    while (i < name) {
+        if (!inv_ident_start((unsigned char)clean[i])) { i++; continue; }
+        size_t e = i;
+        while (e < name && inv_ident_char((unsigned char)clean[e])) e++;
+        if (words == 0 && e - i == 7 && memcmp(clean + i, "typedef", 7) == 0)
+            return false;
+        words++;
+        i = e;
+    }
+    return words >= 2;
+}
+
+/* Sets *tag_led when the accepted declaration is tag-led (`enum e f(...)`). */
+static bool inv_function_name(const char *clean, size_t start, size_t end,
+                              char name[128], bool *tag_led)
+{
+    *tag_led = false;
     start = inv_skip_space(clean, start, end);
     if (start == end || inv_has_top_eq(clean, start, end)) return false;
-    if (inv_tagged_decl(clean, start, end)) return false;
     size_t p = 0, name_end = 0;
     if (!inv_call_name_span(clean, start, end, &p, &name_end)) return false;
+    *tag_led = inv_tagged_decl(clean, start, end);
+    if (*tag_led && !inv_tag_return_type(clean, start, p)) return false;
     size_t before = inv_skip_space(clean, start, p);
     if (before == p) return false; /* macro invocation, no return type */
     size_t n = name_end - p;
@@ -635,6 +658,7 @@ struct inv_body_walk {
     int brace;        /* brace depth; 0 means outside every body */
     int paren;        /* paren depth */
     char active[128]; /* name of the function being walked, "" when none */
+    bool active_tag_led; /* the active body was found through the tag path */
 };
 
 /* True when the newline at clean[i] ends a top-level macro invocation line. */
@@ -655,7 +679,8 @@ static void inv_walk_outside(struct inv_body_walk *w, const char *clean,
     if (c == ')') { if (w->paren > 0) w->paren--; return; }
     if (w->paren == 0 && c == '{') {
         w->active[0] = '\0';
-        (void)inv_function_name(clean, w->segment, i, w->active);
+        (void)inv_function_name(clean, w->segment, i, w->active,
+                                &w->active_tag_led);
         w->open = i;
         w->open_line = cur_line;
         w->brace = 1;
@@ -703,6 +728,8 @@ static void inv_walk_bodies(struct inv_scan *s, int file_index,
                     s->failed = true;
                     break;
                 }
+                if (w.active[0])
+                    s->bodies[s->body_count - 1].tag_led = w.active_tag_led;
                 w.active[0] = '\0';
                 w.segment = i + 1;
             }

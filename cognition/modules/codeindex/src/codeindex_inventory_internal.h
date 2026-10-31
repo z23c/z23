@@ -63,6 +63,12 @@ struct inv_body {
     bool constant_return;
     char constant_value[16];
     char preprocessor_guard[128];
+    /* True when the body was found through the tag-led declaration path, as in
+     * `enum clips_error f(...) {`. Such bodies serve reachability and invariant
+     * rows, but the duplicate pass skips them: duplicate detection does not yet
+     * cover tag-led functions. Each skipped body is counted in the report as
+     * duplicate_tag_led_excluded so a later change can deduplicate and widen. */
+    bool tag_led;
 };
 
 struct inv_arm_symbol {

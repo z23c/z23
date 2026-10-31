@@ -142,6 +142,10 @@ struct ci_inventory_report {
     int symbol_count;
     struct ci_inventory_duplicate *duplicates;
     int duplicate_count;
+    /* Tag-led bodies in exact-pass scope that the duplicate pass skips. Duplicate
+     * detection does not yet cover tag-led functions; this count names what is
+     * excluded so a later change can deduplicate and widen. */
+    int duplicate_tag_led_excluded;
     int duplicate_cap;        /* allocated capacity of `duplicates`, doubled
                                * on growth; NOT part of the report content */
     struct ci_inventory_invariant *invariants;

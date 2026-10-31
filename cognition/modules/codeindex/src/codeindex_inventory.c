@@ -629,16 +629,30 @@ static bool inv_body_in_scope(const struct inv_scan *scan,
         body->end_line - body->line + 1 >= min_lines;
 }
 
+/* Tag-led bodies are skipped: duplicate detection does not yet cover them. */
 static int inv_collect_scoped_bodies(const struct inv_scan *scan,
                                      struct inv_body_order *order,
                                      int min_tokens, int min_lines)
 {
     int count = 0;
     for (int i = 0; i < scan->body_count; i++)
-        if (inv_body_in_scope(scan, &scan->bodies[i], min_tokens, min_lines)) {
+        if (!scan->bodies[i].tag_led &&
+            inv_body_in_scope(scan, &scan->bodies[i], min_tokens, min_lines)) {
             order[count].index = i;
             order[count++].body = &scan->bodies[i];
         }
+    return count;
+}
+
+/* Counts the tag-led bodies the exact pass would have compared. */
+static int inv_count_tag_led_scoped(const struct inv_scan *scan,
+                                    int min_tokens, int min_lines)
+{
+    int count = 0;
+    for (int i = 0; i < scan->body_count; i++)
+        if (scan->bodies[i].tag_led &&
+            inv_body_in_scope(scan, &scan->bodies[i], min_tokens, min_lines))
+            count++;
     return count;
 }
 
@@ -690,6 +704,8 @@ static bool inv_derive_duplicates(const struct inv_scan *scan,
     struct inv_body_order *order = zcl_malloc(
         (size_t)scan->body_count * sizeof(*order), "ci_inventory_body_order");
     if (scan->body_count && !order) return false;
+    report->duplicate_tag_led_excluded =
+        inv_count_tag_led_scoped(scan, 20, 3);
     int count = inv_collect_scoped_bodies(scan, order, 20, 3);
     inv_body_order_sort_exact(order, count);
     if (!inv_push_duplicate_groups(report, order, count, false)) {
