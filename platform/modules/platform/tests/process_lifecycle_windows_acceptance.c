@@ -150,10 +150,9 @@ static int child_mode(int argc, char **argv)
         return 20;
     if (!child_mode_paths_ok(argv)) return 21;
     uintptr_t inherited = (uintptr_t)_strtoui64(argv[7], NULL, 10);
-    DWORD flags = 0;
-    if (GetHandleInformation((HANDLE)inherited, &flags) ||
-        GetLastError() != ERROR_INVALID_HANDLE)
-        return 22;
+    /* A child may reuse this numeric slot for a different object. Probe the
+     * capability; the parent checks whether its original event was signaled. */
+    (void)SetEvent((HANDLE)inherited);
     if (!child_mode_capability_ok(argv[8])) return 25;
     FILE *proof = fopen("process-lifecycle.proof", "wb");
     if (!proof) return 23;
@@ -341,6 +340,7 @@ struct child_mode_session {
     bool timed_tree_reaped;
     bool relative_refused;
     bool relative_cwd_refused;
+    bool event_control_ok;
     bool ok;
 };
 
@@ -386,6 +386,26 @@ static int child_mode_prepare(struct child_mode_session *s)
     return status != 0 ? status : child_mode_open_handles(s);
 }
 
+static bool child_mode_event_control(struct child_mode_session *s)
+{
+    if (!ResetEvent(s->inherited)) return false;
+    const char *const argv[] = {s->image, "--signal-event", s->handle_text, NULL};
+    const uintptr_t allowed[] = {(uintptr_t)s->inherited};
+    struct platform_process_options options = {
+        .image = s->image, .argv = argv, .cwd = s->cwd,
+        .env = child_mode_env, .inherited = allowed, .inherited_count = 1};
+    struct platform_process process;
+    platform_process_init(&process);
+    bool started = platform_process_start_hidden(&process, &options);
+    uint32_t code = UINT32_MAX;
+    enum platform_process_wait_result waited = started
+        ? platform_process_wait(&process, 10000, &code)
+        : PLATFORM_PROCESS_WAIT_FAILED;
+    platform_process_close(&process);
+    return waited == PLATFORM_PROCESS_WAIT_EXITED && code == 0 &&
+           WaitForSingleObject(s->inherited, 0) == WAIT_OBJECT_0;
+}
+
 static void child_mode_run_hidden(struct child_mode_session *s)
 {
     const char *const child_argv[] = {
@@ -405,11 +425,16 @@ static void child_mode_run_hidden(struct child_mode_session *s)
         ? platform_process_wait(&process, 10000, &s->code)
         : PLATFORM_PROCESS_WAIT_FAILED;
     platform_process_close(&process);
+    DWORD event_state = WaitForSingleObject(s->inherited, 0);
+    if (s->code == 0 && event_state != WAIT_TIMEOUT)
+        s->code = event_state == WAIT_OBJECT_0 ? 22 : 27;
+    s->event_control_ok = child_mode_event_control(s);
     CloseHandle(s->inherited);
     CloseHandle(s->pipe_read);
     (void)swprintf(s->proof, 32768, L"%ls\\process-lifecycle.proof", s->temp_w);
     DWORD attributes = GetFileAttributesW(s->proof);
     s->ok = s->waited == PLATFORM_PROCESS_WAIT_EXITED && s->code == 0 &&
+            s->event_control_ok &&
             attributes != INVALID_FILE_ATTRIBUTES;
 }
 
@@ -658,6 +683,8 @@ static void child_mode_run_checks(struct child_mode_session *s)
 
 int main(int argc, char **argv)
 {
+    if (argc == 3 && strcmp(argv[1], "--signal-event") == 0)
+        return SetEvent((HANDLE)(uintptr_t)_strtoui64(argv[2], NULL, 10)) ? 0 : 26;
     int capture_code = capture_mode(argc, argv);
     if (capture_code >= 0) return capture_code;
     if (argc == 2 && strcmp(argv[1], "--tree-child") == 0)
@@ -682,13 +709,14 @@ int main(int argc, char **argv)
                 "detached_started=%d detached_released=%d "
                 "detached_parent_exited=%d detached_tree_reaped=%d "
                 "capture=%d empty=%d boundary=%d large=%d timed_tree=%d "
-                "relative=%d relative_cwd=%d\n",
+                "relative=%d relative_cwd=%d event_control=%d\n",
                 s.started, (int)s.waited, (unsigned long)s.code,
                 s.tree_started, (int)s.tree_waited, (unsigned long)s.tree_code,
                 s.tree_reaped, s.detached_started, s.detached_released,
                 s.detached_parent_exited, s.detached_tree_reaped,
                 s.captured_ok, s.empty_ok, s.boundary_ok, s.large_ok,
-                s.timed_tree_reaped, s.relative_refused, s.relative_cwd_refused);
+                s.timed_tree_reaped, s.relative_refused, s.relative_cwd_refused,
+                s.event_control_ok);
         return 4;
     }
     puts("process-lifecycle-acceptance: ok");
