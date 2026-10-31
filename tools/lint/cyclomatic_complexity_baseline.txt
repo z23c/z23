@@ -17,7 +17,6 @@ contexts/commons/packages/zotpcli/src/zotpcli.c:json_str_decode:32
 contexts/commons/packages/zscrypt/src/zscrypt.c:zscrypt:19
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_fuzz:18
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_kat:17
-contexts/explorer/controllers/src/explorer_controller.c:rpc_call:22
 contexts/explorer/models/src/explorer_index_overlays.c:apply_znam:16
 contexts/wallet/controllers/src/wallet_rescan_controller_coins.c:rpc_coinanalysis:22
 contexts/wallet/controllers/src/wallet_rescan_controller_witness.c:rpc_rescanwitnesses:23

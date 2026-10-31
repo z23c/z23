@@ -271,6 +271,12 @@ void explorer_set_state(struct main_state *ms, struct tx_mempool *mp,
     explorer_start_once(&g_prewarm_started, prewarm_thread, "prewarm");
 }
 
+/* snprintf result fits the destination: non-negative and below the cap. */
+static bool rpc_fits_buffer(int written, size_t cap)
+{
+    return written >= 0 && (size_t)written < cap;
+}
+
 /* ── RPC proxy to local zclassicd ─────────────────────────── */
 
 int rpc_call(const char *method, const char *params_json,
@@ -310,7 +316,7 @@ int rpc_call(const char *method, const char *params_json,
     int blen = snprintf(body, sizeof(body),
         "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"%s\",\"params\":%s}",
         method, params_json);
-    if (blen < 0 || (size_t)blen >= sizeof(body)) {
+    if (!rpc_fits_buffer(blen, sizeof(body))) {
         platform_socket_close(fd);
         LOG_ERR("explorer", "rpc_call(%s): request body too large (%d bytes)", method, blen);
     }
@@ -319,25 +325,15 @@ int rpc_call(const char *method, const char *params_json,
     char auth_plain[256];
     int auth_len = snprintf(auth_plain, sizeof(auth_plain), "%s:%s",
                             explorer_rpc()->user, explorer_rpc()->pass);
-    if (auth_len < 0 || (size_t)auth_len >= sizeof(auth_plain)) {
+    if (!rpc_fits_buffer(auth_len, sizeof(auth_plain))) {
         platform_socket_close(fd);
         LOG_ERR("explorer", "rpc_call(%s): credentials exceed local limit",
                 method);
     }
     /* Simple base64 */
-    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     char auth_b64[512];
-    size_t alen = (size_t)auth_len, bo = 0;
-    for (size_t i = 0; i < alen; i += 3) {
-        uint32_t n = ((uint32_t)(uint8_t)auth_plain[i]) << 16;
-        if (i + 1 < alen) n |= ((uint32_t)(uint8_t)auth_plain[i+1]) << 8;
-        if (i + 2 < alen) n |= (uint32_t)(uint8_t)auth_plain[i+2];
-        auth_b64[bo++] = b64[(n >> 18) & 63];
-        auth_b64[bo++] = b64[(n >> 12) & 63];
-        auth_b64[bo++] = (i + 1 < alen) ? b64[(n >> 6) & 63] : '=';
-        auth_b64[bo++] = (i + 2 < alen) ? b64[n & 63] : '=';
-    }
-    auth_b64[bo] = '\0';
+    (void)EncodeBase64((const unsigned char *)auth_plain, (size_t)auth_len,
+                       auth_b64, sizeof(auth_b64));
 
     char req[8192];
     int rlen = snprintf(req, sizeof(req),
@@ -348,7 +344,7 @@ int rpc_call(const char *method, const char *params_json,
         "Content-Length: %d\r\n"
         "Connection: close\r\n\r\n%s",
         auth_b64, blen, body);
-    if (rlen < 0 || (size_t)rlen >= sizeof(req)) {
+    if (!rpc_fits_buffer(rlen, sizeof(req))) {
         platform_socket_close(fd);
         LOG_ERR("explorer", "rpc_call(%s): request too large (%d bytes)", method, rlen);
     }
