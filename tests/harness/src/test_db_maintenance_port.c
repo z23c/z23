@@ -23,6 +23,8 @@
 #include "ports/db_maintenance_port.h"
 #include "util/wal_checkpoint_stats.h"
 
+#include <limits.h>
+#include <errno.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -397,7 +399,20 @@ static int t_wal_path_case(const char *dir, size_t length, const char *vfs_name)
      * boundary, including 1020 where truncation leaves the suffix '-wa'.
      * sqlite3_open_v2 does not read the schema; no SQL is run on witnesses. */
     DBMP_CHECK("main size witness created", long_path_seed(path, ""));
-    DBMP_CHECK("WAL size witness created", long_path_seed(path, "-wal"));
+#if defined(__APPLE__)
+    /* Darwin PATH_MAX is 1024 including the NUL: a -wal name longer than 1023
+     * bytes cannot exist, and creating it must be refused by the kernel. */
+    bool wal_can_exist = length + strlen("-wal") < (size_t)PATH_MAX;
+#else
+    bool wal_can_exist = true;
+#endif
+    errno = 0;
+    bool wal_seeded = long_path_seed(path, "-wal");
+    int wal_errno = errno;
+    DBMP_CHECK("WAL size witness created exactly when the name can exist",
+               wal_seeded == wal_can_exist);
+    DBMP_CHECK("an impossible WAL witness is refused for its path length",
+               wal_can_exist || wal_errno == ENAMETOOLONG);
     memcpy(truncated, path, length);
     size_t suffix = 1023 - length;
     memcpy(truncated + length, "-wal", suffix);
