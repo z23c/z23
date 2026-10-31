@@ -460,3 +460,7 @@ later lane flips it HARD.
 - 2026-10-31T10:26:28Z — REASON: https_server: race-free listener fds (TSAN g_http_fd stop vs accept);  behaviour-preserving; https_server: race-free listener fds;  split stop helpers to stay under complexity cap; https_server: review round: pass listener fd by arg, handle shutdown failure; https_server: review round 2: bounded accept wait so stop join cannot hang on shutdown failure; https_server: review round 3: nonblocking listen sockets so accept never blocks; https_server: review round 4: check restore of blocking mode on accepted sockets; https_server: review round 5: drain client queue only after listeners are joined; https_server: review round 6: back off on listener poll errors
   old ROOT: 83d3660fa21e9e18c639f12ef6e0be69e52910a62d4f2d70162d3e5f82be1b36
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T10:28:01Z — REASON: Owner-authorized 2026-10-19 hardening program, behaviour-preserving: move the https_server.c certificate section unchanged into https_server_cert.c so the listener fd-race fix fits the 1500-line ceiling;  no validity predicate touched
+  old ROOT: ea2dbcfcba22bee3aee326ffa3038d241d6310e4839420d4a156680e342126dd
+  by: owner unseal ritual (make core-unseal)

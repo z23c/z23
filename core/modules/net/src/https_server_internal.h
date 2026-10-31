@@ -1,10 +1,11 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Seam between the two translation units of the public front door.
- * https_server.c owns TLS, the listeners, the bounded worker pool and the
- * operator configuration; https_server_redirect.c owns the plain-HTTP port
- * (ACME http-01 passthrough plus the 301 to HTTPS). Nothing outside those
- * two files includes this header — the module's public surface stays
+ * Seam between the translation units of the public front door.
+ * https_server.c owns the listeners, the bounded worker pool and the
+ * operator configuration; https_server_cert.c owns the TLS contexts and
+ * certificate reload; https_server_redirect.c owns the plain-HTTP port
+ * (ACME http-01 passthrough plus the 301 to HTTPS). Nothing outside these
+ * files includes this header — the module's public surface stays
  * net/https_server.h. */
 
 #ifndef ZCL_NET_HTTPS_SERVER_INTERNAL_H
@@ -42,5 +43,19 @@ const char *https_front_root_target(void);
 const char *https_front_start_target(const char *path);
 const char *https_front_home_first(const char *path, bool script_client);
 void https_write_redirect(struct ssl_st *ssl, const char *location);
+
+/* The certificate half, https_server_cert.c. Build and acquire return a
+ * counted reference the caller drops with SSL_CTX_free. Build makes a new
+ * one and touches nothing global; acquire returns the one in service (NULL
+ * when none); start_serving takes ownership of a built one, puts it in
+ * service and records the watched pair, once per start before any listener
+ * exists; retire_all frees every context at stop. */
+struct ssl_ctx_st;
+struct ssl_ctx_st *https_ssl_ctx_build(const char *cert_path,
+                                       const char *key_path);
+struct ssl_ctx_st *https_ssl_ctx_acquire(void);
+void https_ssl_ctx_start_serving(struct ssl_ctx_st *ctx, const char *cert_path,
+                                 const char *key_path);
+void https_ssl_ctx_retire_all(void);
 
 #endif /* ZCL_NET_HTTPS_SERVER_INTERNAL_H */
