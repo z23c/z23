@@ -64,7 +64,7 @@ test-bridge: bridge
 
 SPEECH_JSON := ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c ../../platform/modules/base/src/safe_alloc.c
 SPEECH_INCLUDES := -I. -Ibridge -I../../platform/modules/json/include -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include -I../../platform/modules/encoding/include -I../../platform/modules/sha3/include
-HOST_SOURCES := bridge/assistant.c bridge/http.c bridge/fleet_probe.c bridge/host_ops.c bridge/host.c bridge/relay.c hosts.c pairing.c voice.c \
+HOST_SOURCES := bridge/assistant.c bridge/http.c bridge/fleet_probe.c private.c bridge/host_ops.c bridge/host.c bridge/relay.c hosts.c pairing.c voice.c \
   ../../platform/modules/sha3/src/sha3.c \
   ../../platform/modules/encoding/src/utilstrencodings.c ../../contexts/commons/packages/zutf8/src/zutf8.c
 .PHONY: speech-bridge speech-probe test-voice test-host preview-apk
@@ -254,14 +254,14 @@ test-host:
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. tests/nodelog_test.c nodelog.c -o '$(BUILD_DIR)/nodelog-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/nodelog-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/nodelog-test' "$$scratch"
-	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/fleet_probe_test.c bridge/fleet_probe.c \
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/fleet_probe_test.c bridge/fleet_probe.c private.c \
 	  ../../contexts/commons/packages/zutf8/src/zutf8.c $(SPEECH_JSON) -o '$(BUILD_DIR)/fleet-probe-test'
 	'$(BUILD_DIR)/fleet-probe-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/host_ops_test.c bridge/host_ops.c $(SPEECH_JSON) -o '$(BUILD_DIR)/host-ops-test'
 	'$(BUILD_DIR)/host-ops-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/http_test.c bridge/http.c $(SPEECH_JSON) -o '$(BUILD_DIR)/http-test'
 	'$(BUILD_DIR)/http-test'
-	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/assistant_test.c bridge/http.c bridge/fleet_probe.c voice.c \
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/assistant_test.c bridge/http.c bridge/fleet_probe.c private.c voice.c \
 	  ../../platform/modules/encoding/src/utilstrencodings.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
 	  $(SPEECH_JSON) -o '$(BUILD_DIR)/assistant-test'
 	'$(BUILD_DIR)/assistant-test'

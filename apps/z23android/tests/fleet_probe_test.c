@@ -39,6 +39,49 @@ static void check_row(void)
     assert(strstr(text, "\"reachable\":false") && strstr(text, "\"load1\":-1"));
     json_free(&row);
 }
+static const char onion_address[] = "kfs4ogq3dtwseahgzz2grizug2wiwey2jhxmmnjeuqh64rs7fkl666qd";
+/* Row JSON for a probe whose onion status reply has the given readiness, address, route and port. */
+static void onion_row(bool ok, bool service, bool publish, const char *address, const char *route,
+                      bool installed, int port, char *text, size_t cap)
+{
+    char output[2048];
+    snprintf(output, sizeof(output), "status=node=ready synced=yes\nheight=5\nreference=5\nonion={\"ok\":%s,"
+        "\"data\":{\"onion_service_ready\":%s,\"p2p_publish_ready\":%s,\"onion_address\":\"%s\",\"port_mapping\":"
+        "{\"routes\":[{\"name\":\"application_dynhost\",\"virtual_port\":80,\"installed\":true},"
+        "{\"name\":\"%s\",\"virtual_port\":%d,\"installed\":%s}]}}}\ndisk_kb=1\n",
+        ok ? "true" : "false", service ? "true" : "false", publish ? "true" : "false", address, route, port,
+        installed ? "true" : "false");
+    struct json_value row = {0};
+    assert(zapp_fleet_row("r1", output, 5, &row) && json_write(&row, text, cap) < cap);
+    json_free(&row);
+}
+static void check_onion(void)
+{
+    char text[1024], want[160];
+    snprintf(want, sizeof(want), "\"onion\":\"%s.onion:8033\"", onion_address);
+    char address[80];
+    snprintf(address, sizeof(address), "%s.onion", onion_address);
+    onion_row(true, true, true, address, "p2p_tcp", true, 8033, text, sizeof(text));
+    assert(strstr(text, want));
+    onion_row(true, true, true, address, "p2p_tcp", true, 18033, text, sizeof(text));
+    assert(strstr(text, ".onion:18033\""));
+    onion_row(false, true, true, address, "p2p_tcp", true, 8033, text, sizeof(text)); assert(!strstr(text, "onion\""));
+    onion_row(true, false, true, address, "p2p_tcp", true, 8033, text, sizeof(text)); assert(!strstr(text, "onion\""));
+    onion_row(true, true, false, address, "p2p_tcp", true, 8033, text, sizeof(text)); assert(!strstr(text, "onion\""));
+    onion_row(true, true, true, address, "p2p_tcp", false, 8033, text, sizeof(text)); assert(!strstr(text, "onion\""));
+    onion_row(true, true, true, address, "other", true, 8033, text, sizeof(text)); assert(!strstr(text, "onion\""));
+    onion_row(true, true, true, address, "p2p_tcp", true, 0, text, sizeof(text)); assert(!strstr(text, "onion\""));
+    onion_row(true, true, true, address, "p2p_tcp", true, 65536, text, sizeof(text)); assert(!strstr(text, "onion\""));
+    onion_row(true, true, true, "short.onion", "p2p_tcp", true, 8033, text, sizeof(text)); assert(!strstr(text, "onion\""));
+    snprintf(address, sizeof(address), "%.55sA.onion", onion_address);
+    onion_row(true, true, true, address, "p2p_tcp", true, 8033, text, sizeof(text)); assert(!strstr(text, "onion\""));
+    snprintf(address, sizeof(address), "%s.onion:8033\"}", onion_address);
+    onion_row(true, true, true, address, "p2p_tcp", true, 8033, text, sizeof(text)); assert(!strstr(text, "onion\""));
+    struct json_value row = {0};
+    assert(zapp_fleet_row("r1", "status=node=ready\nonion=\ndisk_kb=1\n", 5, &row) && json_write(&row, text, sizeof(text)) < sizeof(text));
+    assert(!strstr(text, "onion\""));
+    json_free(&row);
+}
 static void check_blockers(void)
 {
     char report[4096], want[2048], out[2048];
@@ -112,6 +155,7 @@ int main(void)
 {
     check_parse();
     check_row();
+    check_onion();
     check_blockers();
     check_tool();
     check_wanted();

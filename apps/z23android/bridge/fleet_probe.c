@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _GNU_SOURCE
 #include "fleet_probe.h"
+#include "private.h"
 #include "zutf8/zutf8.h"
 #include <ctype.h>
 #include <errno.h>
@@ -23,6 +24,7 @@ static const char probe_command[] =
     "echo \"height=$(z23 getblockcount 2>/dev/null | head -n 1)\"; "
     "echo \"reference=$(zclassic-cli getblockcount 2>/dev/null | head -n 1)\"; "
     "echo \"uptime=$(uptime)\"; "
+    "echo \"onion=$(z23 core network onion status 2>/dev/null | head -n 1)\"; "
     "echo \"disk_kb=$(df -Pk \"$HOME\" | awk 'NR==2{print $4}')\"";
 static const char blockers_command[] = "z23 core sync blockers 2>/dev/null";
 
@@ -109,6 +111,42 @@ static bool push_disk(struct json_value *row, const char *disk)
         json_push_kv_int(row, "disk_free_gb", strtoll(disk, NULL, 10) / 1048576) :
         json_push_kv(row, "disk_free_gb", &json_null);
 }
+/* The virtual port of the installed p2p_tcp route in a port_mapping route list; 0 for none. */
+static int64_t p2p_route_port(const struct json_value *routes)
+{
+    for (size_t i = 0; routes && routes->type == JSON_ARR && i < routes->num_children; i++) {
+        const struct json_value *route = json_at(routes, i);
+        const char *name = json_get_str(json_get(route, "name"));
+        if (name && !strcmp(name, "p2p_tcp") && json_get_bool(json_get(route, "installed")))
+            return json_get_int(json_get(route, "virtual_port"));
+    }
+    return 0;
+}
+/* The host's own P2P onion peer as "host:port", from the output of `z23 core network onion status`.
+ * Empty unless the node reports its onion service and P2P publication ready and an installed p2p_tcp
+ * route, and the result passes the same check the phone applies before it dials. */
+static void onion_peer(const char *reply, char *out, size_t cap)
+{
+    struct json_value doc = {0};
+    out[0] = 0;
+    if (!reply || !json_read(&doc, reply, strlen(reply))) return;
+    const struct json_value *data = json_get(&doc, "data");
+    const char *address = json_get_str(json_get(data, "onion_address"));
+    bool ready = json_get_bool(json_get(&doc, "ok")) && json_get_bool(json_get(data, "onion_service_ready")) &&
+        json_get_bool(json_get(data, "p2p_publish_ready"));
+    char peer[ZAPP_ONION_PEER_MAX + 8];
+    int n = ready && address ? snprintf(peer, sizeof(peer), "%s:%lld", address,
+        (long long)p2p_route_port(json_get(json_get(data, "port_mapping"), "routes"))) : -1;
+    if (n > 0 && (size_t)n < sizeof(peer) && (size_t)n < cap && zapp_onion_peer_valid(peer)) memcpy(out, peer, (size_t)n + 1);
+    json_free(&doc);
+}
+static bool push_onion(struct json_value *row, const char *output)
+{
+    char reply[4096] = "", peer[ZAPP_ONION_PEER_MAX + 8];
+    output_value(output, "onion", reply, sizeof(reply));
+    onion_peer(reply, peer, sizeof(peer));
+    return !peer[0] || json_push_kv_str(row, "onion", peer);
+}
 bool zapp_fleet_row(const char *label, const char *output, int64_t elapsed_ms, struct json_value *row)
 {
     char status[512] = "", value[160] = "", uptime[256] = "", disk[32] = "";
@@ -123,7 +161,7 @@ bool zapp_fleet_row(const char *label, const char *output, int64_t elapsed_ms, s
     output_value(output, "reference", value, sizeof(value));
     ok = ok && push_count(row, "reference_height", value);
     output_value(output, "disk_kb", disk, sizeof(disk));
-    return ok && push_load(row, uptime) && push_disk(row, disk);
+    return ok && push_load(row, uptime) && push_disk(row, disk) && push_onion(row, output);
 }
 static bool spawn(const struct zapp_fleet_host *host, const char *command, struct probe *p)
 {
