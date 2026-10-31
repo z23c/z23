@@ -355,7 +355,9 @@ static int test_merkle_tree_serdes_25k(void)
         incremental_tree_root(&t, &r1);
         struct byte_stream s; stream_init(&s, 4096);
         incremental_tree_serialize(&t, &s);
+        /* Deserialize sets content only; init supplies the hash functions. */
         struct incremental_merkle_tree t2;
+        sapling_tree_init(&t2);
         struct byte_stream rs; stream_init_from_data(&rs, s.data, s.size);
         bool ok = incremental_tree_deserialize(&t2, &rs);
         struct uint256 r2;
