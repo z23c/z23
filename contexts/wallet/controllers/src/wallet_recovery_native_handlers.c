@@ -49,12 +49,16 @@
 #include "services/wallet_recovery_service.h"
 #include "support/cleanse.h"
 #include "util/boot_phase.h"
+
 #include "util/log_macros.h"
 
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#include <unistd.h>
 
 #define WRP_TAG "native.wallet.recovery"
 
@@ -459,6 +463,17 @@ void zcl_native_handle_wallet_recovery_restore(
  * registry keeps only latency for a reply, and this handler pushes the phrase
  * after every other field so a failure path cannot carry it. */
 
+/* A create that committed but whose reply never arrived cannot be repeated
+ * here: the phrase was shown once and is stored nowhere. The caller holds the
+ * way back, so the refusal says what it is (the reply caps this at 255). */
+#define WRP_CREATE_LOST_REPLY_HINT                                          \
+    "If an earlier create here lost its reply, no command can show that "   \
+    "phrase again. Delete a datadir made only for that attempt and never "  \
+    "started, then create in a new one. A used datadir is restored from "   \
+    "the written phrase."
+_Static_assert(sizeof(WRP_CREATE_LOST_REPLY_HINT) <= 256,
+               "next_action holds 255 bytes");
+
 static const char *wrp_create_failure_code(int code, enum zcl_command_exit *ex)
 {
     *ex = ZCL_COMMAND_EXIT_BLOCKED;
@@ -494,8 +509,45 @@ static void wrp_push_created(struct zcl_command_reply *reply,
         "the same words as a different, empty wallet");
 }
 
-void zcl_native_handle_wallet_create(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+/* A crash must not write the phrase or the passphrase to a core file. The
+ * process is one-shot and this does not make its memory secret; it closes the
+ * one path that outlives it. */
+static void wrp_disable_core_dumps(void)
+{
+    struct rlimit none = { 0, 0 };
+    (void)setrlimit(RLIMIT_CORE, &none);
+#ifdef __linux__
+    (void)prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
+#endif
+}
+
+/* Everything the datadir open prints to standard output is moved to standard
+ * error for the length of the call, so standard output holds the reply
+ * document and nothing else: a strict parser must not fail after the wallet is
+ * committed, because a lost reply cannot be repeated. Returns the saved
+ * descriptor, or -1 when standard output could not be moved. */
+static int wrp_stdout_to_stderr(void)
+{
+    (void)fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    if (saved >= 0 && dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
+        (void)close(saved);
+        saved = -1;
+    }
+    return saved;
+}
+
+static void wrp_stdout_restore(int saved)
+{
+    if (saved < 0)
+        return;
+    (void)fflush(stdout);
+    (void)dup2(saved, STDOUT_FILENO);
+    (void)close(saved);
+}
+
+static void wrp_create_body(const struct zcl_command_request *request,
+                            struct zcl_command_reply *reply)
 {
     wrp_select_chain_params_if_standalone();
     if (!zcl_native_input_was_stdin()) {
@@ -519,7 +571,13 @@ void zcl_native_handle_wallet_create(
     if (!r.ok) {
         enum zcl_command_exit ex;
         const char *code = wrp_create_failure_code(r.code, &ex);
-        wnh_fail(reply, ex, code, r.message, datadir);
+        wnh_fail(reply, ex, code,
+                 r.code == -62 ? "this datadir already holds a wallet. "
+                                 "Nothing was written" : r.message, datadir);
+        if (r.code == -62)
+            (void)snprintf(reply->error.next_action,
+                           sizeof(reply->error.next_action), "%s",
+                           WRP_CREATE_LOST_REPLY_HINT);
         wallet_create_report_cleanse(&rep);
         return;
     }
@@ -527,6 +585,22 @@ void zcl_native_handle_wallet_create(
     (void)json_push_kv_str(&reply->data, "phrase", rep.phrase);
     wallet_create_report_cleanse(&rep);
     reply->error.mutated = true;
+}
+
+void zcl_native_handle_wallet_create(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    wrp_disable_core_dumps();
+    int saved = wrp_stdout_to_stderr();
+    if (saved < 0) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "STDOUT_UNAVAILABLE",
+                 "standard output could not be kept clear of log lines, so "
+                 "the reply could not be delivered whole. Nothing was written",
+                 "core.wallet.create");
+        return;
+    }
+    wrp_create_body(request, reply);
+    wrp_stdout_restore(saved);
 }
 
 /* ── Hot-swappable leaves ──────────────────────────────────────────────────

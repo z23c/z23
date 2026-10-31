@@ -7,6 +7,7 @@
 #include "event/event.h"
 #include "models/database.h"
 #include "support/cleanse.h"
+#include "util/ar_step_readonly.h"
 #include "util/blocker.h"
 #include "util/boot_status.h"
 #include "util/log_macros.h"
@@ -422,4 +423,46 @@ bool boot_wallet_seed_row_present(struct wallet_sqlite *ws)
         return false;
     return wallet_seed_state_row_present(
         wallet_sqlite_sapling_seed_state(ws, NULL));
+}
+
+static int64_t boot_wallet_table_rows(sqlite3 *db, const char *sql)
+{
+    sqlite3_stmt *s = NULL;
+    int64_t n = 0;
+    if (db && sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s &&
+        AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
+        n = sqlite3_column_int64(s, 0);
+    sqlite3_finalize(s);
+    return n;
+}
+
+/* A missing table counts as empty: a datadir that never held a wallet has
+ * none of them. */
+int64_t boot_wallet_rows_at_risk(struct node_db *ndb, int64_t key_rows)
+{
+    sqlite3 *db = ndb && ndb->open ? ndb->db : NULL;
+    return (key_rows > 0 ? key_rows : 0) +
+           boot_wallet_table_rows(db, "SELECT count(*) FROM wallet_seed") +
+           boot_wallet_table_rows(db,
+                                  "SELECT count(*) FROM wallet_sapling_keys");
+}
+
+bool boot_wallet_is_first_run(struct wallet_sqlite *ws, size_t transparent_keys)
+{
+    return ws && ws->open && transparent_keys == 0 &&
+           !boot_wallet_seed_row_present(ws) &&
+           boot_wallet_table_rows(ws->db,
+               "SELECT count(*) FROM wallet_sapling_keys") == 0;
+}
+
+bool boot_wallet_may_mint(struct wallet_sqlite *ws, size_t transparent_keys)
+{
+    if (!ws || !ws->open) {
+        fprintf(stderr,
+            "Wallet: the persistence layer is not open, so no key can be kept. "
+            "Minting nothing; the node runs keyless.\n");
+        event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "wallet_mint_store_closed");
+        return false;
+    }
+    return boot_wallet_is_first_run(ws, transparent_keys);
 }

@@ -168,6 +168,22 @@ static int wrc_boot_catch_up_body_root(struct wallet *w,
     WRC_CHECK("E: a wallet already at the tip runs no rescan",
               boot_wallet_catch_up(w, &ms->chain_active, datadir, NULL) == -1);
 
+    /* H. A wallet that has scanned nothing starts at the birthday floor
+     * boot gave it; a wallet that has scanned does not, whatever the floor. */
+    w->best_block_height = 0;
+    w->initial_scan_floor = 100;
+    memset(&rep, 0, sizeof(rep));
+    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
+    WRC_CHECK("H: a first scan starts at the birthday floor, not at genesis",
+              rep.start_height == 100 && rep.stop_height == WRC_NBLOCKS - 1);
+    w->best_block_height = 149;
+    memset(&rep, 0, sizeof(rep));
+    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
+    WRC_CHECK("H: a wallet that has scanned continues from its scan height",
+              rep.start_height == 150);
+    w->initial_scan_floor = 0;
+    w->best_block_height = WRC_NBLOCKS - 1;
+
     if (relaid)
         (void)rename(moved_to, moved_from);
     SetDataDir("");

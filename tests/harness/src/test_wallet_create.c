@@ -16,10 +16,18 @@
  *      nothing the process wrote to stderr; the reply carries the phrase once.
  *   4. The seed is encrypted at rest: its raw bytes are in no file, it reads
  *      back as LOCKED without the passphrase and as the phrase's seed with it.
- *   5. The tip height is stored as the birthday and scans start there.
+ *   5. The active tip (height and hash, never a reorganised-away row) is the
+ *      birthday; only the first scan of the wallet starts below it, and only
+ *      while its block is still active. No other scan range is raised.
  *   6. An empty, short or missing passphrase is refused and nothing is made.
  *   7. An agent-ceiling caller is refused before the handler, and a caller
  *      that did not use standard input is refused by the handler.
+ *   8. Standard output is one JSON document; log lines go to stderr.
+ *   9. Core dumps are off. 10. A wallet/ directory refuses create.
+ *  11. Boot reads seed and Sapling rows, so it never mints or imports over a
+ *      created wallet; a closed store mints nothing.
+ *  12. A wrong passphrase is refused and a payment is found while locked
+ *      (these two depend on the wallet-lock work).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -27,6 +35,8 @@
 #include "test/test_core.h"
 
 #include "chain/chainparams.h"
+#include "config/boot_internal.h"
+#include "config/boot_wallet_phrase.h"
 #include "command/native_command.h"
 #include "config/command_catalog.h"
 #include "controllers/wallet_scan.h"
@@ -38,7 +48,12 @@
 #include "services/wallet_recovery_service.h"
 #include "support/cleanse.h"
 #include "validation/chainstate.h"
+#include "sapling/constants.h"
+#include "sapling/note_encryption.h"
+#include "sapling/sapling.h"
+#include "primitives/transaction.h"
 #include "wallet/mnemonic.h"
+#include "wallet/sapling_keys.h"
 #include "wallet/wallet.h"
 #include "wallet/wallet_lock.h"
 #include "wallet/wallet_sqlite.h"
@@ -48,6 +63,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -163,12 +180,10 @@ static bool wcr_create(const char *datadir, const char *pass,
     return wcr_cli(text, run);
 }
 
-/* The reply document inside stdout. Opening the database prints boot lines
- * ahead of it, so the document starts at its schema key. */
+/* The reply document is the whole of stdout: no log line precedes it. */
 static const char *wcr_doc(const struct wcr_run *run)
 {
-    const char *d = strstr(run->wire, "{\"schema\":");
-    return d ? d : run->wire;
+    return run->wire;
 }
 
 /* Copy a string field of the reply's data object. */
@@ -474,11 +489,29 @@ static int t_phrase_not_captured_and_encrypted(void)
     return failures;
 }
 
-/* ── case 5: the birthday is stored and honoured ───────────────────── */
+/* ── case 5: the birthday is stored, verified and used by the first scan ── */
 
-/* An empty wallet scanning 0..500 against a birthday of 1000 has nothing
- * left to do, and the scanner says its range is empty from 900. */
-static bool birthday_scan_skips(struct node_db *ndb, int start)
+#define WCR_BLOCK_INSERT                                                    \
+    "INSERT INTO blocks(hash,height,prev_hash,version,merkle_root,time,"    \
+    "bits,nonce,solution,chain_work,status) VALUES(%s,%d,zeroblob(32),4,"   \
+    "zeroblob(32),0,0,zeroblob(32),zeroblob(1),zeroblob(32),%d)"
+#define WCR_HASH_ZERO "zeroblob(32)"
+#define WCR_HASH_ONE  "X'0101010101010101010101010101010101010101010101010101010101010101'"
+#define WCR_HASH_TWO  "X'0202020202020202020202020202020202020202020202020202020202020202'"
+
+static bool wcr_block(const char *dir, const char *hash, int height, int status)
+{
+    char sql[512];
+    snprintf(sql, sizeof(sql), WCR_BLOCK_INSERT, hash, height, status);
+    return wcr_sql(dir, sql);
+}
+
+/* A scan of 0..500 must be asked for its whole range, whatever the birthday:
+ * a transparent scan, a rescan and the full scan an imported key triggers
+ * cover every block, because a key imported later can own a coin from before
+ * the wallet was made. The scanner reaches its no-keys path (and not the
+ * empty-range one a raised start of 900 would hit) only when the start stays 0. */
+static bool scan_is_not_raised(struct node_db *ndb)
 {
     struct active_chain chain;
     active_chain_init(&chain);
@@ -489,11 +522,27 @@ static bool birthday_scan_skips(struct node_db *ndb, int start)
         (void)wallet_scan_blocks(ndb, &chain, w, "/nonexistent", 0, 500);
     char log[4096] = {0};
     ok = wcr_cap_end(&cap, log, sizeof(log)) && ok;
-    char want[64];
-    snprintf(want, sizeof(want), "range empty (start=%d > end=500)", start);
     active_chain_free(&chain);
     free(w);
-    return ok && strstr(log, want) != NULL;
+    return ok && strstr(log, "range empty") == NULL &&
+           strstr(log, "no wallet keys") != NULL;
+}
+
+/* boot_wallet_boot_catch_up sets the wallet floor from the datadir before it
+ * scans; an empty chain makes the scan itself a no-op. */
+static bool boot_floor_is(struct node_db *ndb, int want)
+{
+    struct active_chain chain;
+    active_chain_init(&chain);
+    struct wallet *w = calloc(1, sizeof(*w));
+    if (w)
+        w->initial_scan_floor = -1;
+    if (w)
+        (void)boot_wallet_boot_catch_up(w, &chain, "/nonexistent", ndb);
+    bool ok = w && w->initial_scan_floor == want;
+    active_chain_free(&chain);
+    free(w);
+    return ok;
 }
 
 static int birthday_stored(const char *dir, const struct wcr_run *run)
@@ -503,24 +552,47 @@ static int birthday_stored(const char *dir, const struct wcr_run *run)
     json_init(&v);
     bool parsed = json_read(&v, wcr_doc(run), strlen(wcr_doc(run)));
     const struct json_value *data = json_get(&v, "data");
-    WCR_CHECK("the reply names the birthday",
+    WCR_CHECK("the reply names the birthday: the active tip, not a stale row",
               parsed && json_get_bool_or(data, "birthday_recorded", false) &&
               json_get_int(json_get(data, "birthday_height")) == 1000);
     json_free(&v);
 
     struct node_db ndb;
     int64_t b = 0;
+    uint8_t hash[32], zero[32] = {0};
     bool open = wcr_open(&ndb, dir);
-    WCR_CHECK("the birthday is stored in the wallet",
-              open && db_wallet_birthday_get(&ndb, &b) && b == 1000);
-    WCR_CHECK("a scan from 0 starts at the birthday less the margin",
-              open && wallet_scan_start_height(&ndb, 0) ==
+    WCR_CHECK("a row above the tip left by a reorganisation is not the birthday",
+              open && db_wallet_birthday_get(&ndb, &b, hash) && b == 1000);
+    WCR_CHECK("the birthday stores the hash of the tip block",
+              open && memcmp(hash, zero, 32) == 0);
+    WCR_CHECK("the first scan of the wallet starts at the birthday less 100",
+              open && wallet_birthday_scan_floor(&ndb) ==
                           1000 - WALLET_SCAN_BIRTHDAY_MARGIN);
-    WCR_CHECK("a later start is left alone",
-              open && wallet_scan_start_height(&ndb, 990) == 990);
-    WCR_CHECK("wallet_scan_blocks skips blocks below the birthday",
-              open && birthday_scan_skips(&ndb,
-                                          1000 - WALLET_SCAN_BIRTHDAY_MARGIN));
+    WCR_CHECK("boot hands its first catch-up the same floor",
+              open && boot_floor_is(&ndb, 1000 - WALLET_SCAN_BIRTHDAY_MARGIN));
+    WCR_CHECK("wallet_scan_blocks never raises a start: a key imported later "
+              "scans its whole range", open && scan_is_not_raised(&ndb));
+    if (open)
+        node_db_close(&ndb);
+    return failures;
+}
+
+/* The birthday block leaves the active chain: its row is demoted and another
+ * block takes the height. The birthday no longer describes the chain. */
+static int birthday_reorganised(const char *dir)
+{
+    int failures = 0;
+    struct node_db ndb;
+    bool open = wcr_open(&ndb, dir);
+    int before = open ? wallet_birthday_scan_floor(&ndb) : -1;
+    if (open)
+        node_db_close(&ndb);
+    bool swapped = wcr_sql(dir, "UPDATE blocks SET status=1 WHERE height=1000")
+                   && wcr_block(dir, WCR_HASH_TWO, 1000, 3);
+    open = wcr_open(&ndb, dir);
+    WCR_CHECK("a birthday whose block left the active chain is ignored",
+              before == 900 && swapped && open &&
+              wallet_birthday_scan_floor(&ndb) == 0);
     if (open)
         node_db_close(&ndb);
     return failures;
@@ -537,10 +609,11 @@ static int birthday_absent_when_restored(void)
                          "about", &rep);
     struct node_db ndb;
     int64_t b = 0;
+    uint8_t hash[32];
     bool open = r && wcr_open(&ndb, dir);
     WCR_CHECK("a restored wallet has no birthday and scans from 0",
-              open && !db_wallet_birthday_get(&ndb, &b) &&
-              wallet_scan_start_height(&ndb, 0) == 0);
+              open && !db_wallet_birthday_get(&ndb, &b, hash) &&
+              wallet_birthday_scan_floor(&ndb) == 0);
     if (open)
         node_db_close(&ndb);
     return failures;
@@ -551,16 +624,16 @@ static int t_birthday(void)
     int failures = 0;
     char dir[1024];
     wcr_fixture(dir, sizeof(dir), "birthday");
-    bool seeded = wcr_sql(dir,
-        "INSERT INTO blocks(hash,height,prev_hash,version,merkle_root,time,"
-        "bits,nonce,solution,chain_work,status) VALUES(zeroblob(32),1000,"
-        "zeroblob(32),4,zeroblob(32),0,0,zeroblob(32),zeroblob(1),"
-        "zeroblob(32),3)");
+    /* Tip 1000 is active (status 3); 5000 is a reorganised-away row. */
+    bool seeded = wcr_block(dir, WCR_HASH_ZERO, 1000, 3) &&
+                  wcr_block(dir, WCR_HASH_ONE, 5000, 1);
     struct wcr_run run;
     memset(&run, 0, sizeof(run));
-    WCR_CHECK("a datadir with a chain tip at 1000 creates a wallet",
+    WCR_CHECK("a datadir with an active tip at 1000 and a stale row at 5000 "
+              "creates a wallet",
               seeded && wcr_create(dir, WCR_PASS, &run) && run.rc == 0);
     failures += birthday_stored(dir, &run);
+    failures += birthday_reorganised(dir);
     failures += birthday_absent_when_restored();
     return failures;
 }
@@ -646,6 +719,273 @@ static int t_authority(void)
     return failures;
 }
 
+/* ── case 8: standard output is the document and nothing else ─────────── */
+
+/* A strict parser reads the whole of stdout. Log lines ahead of the document
+ * would fail it after the wallet was committed, and the phrase would be lost:
+ * the shown-once phrase cannot be fetched again and a retry is refused. */
+static bool wcr_wire_is_one_document(const struct wcr_run *run)
+{
+    struct json_value v;
+    json_init(&v);
+    size_t len = strlen(run->wire);
+    while (len > 0 && (run->wire[len - 1] == '\n' || run->wire[len - 1] == ' '))
+        len--;
+    bool ok = run->wire[0] == '{' && json_read(&v, run->wire, len);
+    json_free(&v);
+    return ok;
+}
+
+static int t_stdout_is_the_document(void)
+{
+    int failures = 0;
+    char dir[1024], phrase[600];
+    wcr_fixture(dir, sizeof(dir), "stdout");
+    struct wcr_run run;
+    memset(&run, 0, sizeof(run));
+    bool got = wcr_create(dir, WCR_PASS, &run) &&
+               wcr_field(&run, "phrase", phrase, sizeof(phrase));
+    WCR_CHECK("create succeeds", got);
+    WCR_CHECK("stdout is exactly one JSON document, no log line before it",
+              got && wcr_wire_is_one_document(&run));
+    WCR_CHECK("the log lines of opening the datadir went to stderr",
+              got && run.err[0] != '\0');
+    memory_cleanse(phrase, sizeof(phrase));
+
+    struct wcr_run again;
+    memset(&again, 0, sizeof(again));
+    WCR_CHECK("a refusal is also exactly one document",
+              wcr_create(dir, WCR_PASS, &again) && again.rc != 0 &&
+              wcr_wire_is_one_document(&again) &&
+              strstr(again.wire, "no command can show that phrase again"));
+    return failures + !got;
+}
+
+/* ── case 9: core dumps are off once the handler runs ──────────────────── */
+
+static int t_core_dumps_disabled(void)
+{
+    int failures = 0;
+    struct rlimit saved, now;
+    bool have_limit = getrlimit(RLIMIT_CORE, &saved) == 0;
+    if (have_limit) {
+        struct rlimit raised = { saved.rlim_max < 1048576 ? saved.rlim_max
+                                                          : 1048576,
+                                 saved.rlim_max };
+        (void)setrlimit(RLIMIT_CORE, &raised);
+    }
+    (void)prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+    char dir[1024];
+    wcr_fixture(dir, sizeof(dir), "core");
+    struct wcr_run run;
+    memset(&run, 0, sizeof(run));
+    bool ran = wcr_create(dir, WCR_PASS, &run);
+    WCR_CHECK("the handler makes the process undumpable",
+              ran && prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 0);
+    /* A host whose hard limit is already zero cannot tell the two apart. */
+    WCR_CHECK("the handler sets the core dump limit to zero",
+              ran && getrlimit(RLIMIT_CORE, &now) == 0 && now.rlim_cur == 0);
+    if (have_limit)
+        (void)setrlimit(RLIMIT_CORE, &saved);
+    return failures;
+}
+
+/* ── case 10: a legacy wallet directory is not an empty datadir ────────── */
+
+static int t_legacy_wallet_directory(void)
+{
+    int failures = 0;
+    char dir[1024], legacy[1100], dummy[600];
+    wcr_fixture(dir, sizeof(dir), "legacy");
+    snprintf(legacy, sizeof(legacy), "%s/wallet", dir);
+    bool made = mkdir(legacy, 0700) == 0;
+    struct wcr_run run;
+    memset(&run, 0, sizeof(run));
+    WCR_CHECK("a datadir holding a wallet/ directory is refused by name and "
+              "nothing is made",
+              made && wcr_create(dir, WCR_PASS, &run) && run.rc != 0 &&
+              wcr_error_is(&run, "WALLET_ALREADY_PRESENT") &&
+              !wcr_field(&run, "phrase", dummy, sizeof(dummy)) &&
+              !wcr_exists(dir, "node.db"));
+    return failures;
+}
+
+/* ── case 11: boot never mints or imports over a created wallet ───────── */
+
+/* A created wallet holds a seed and Sapling keys and no transparent key. The
+ * boot decisions below read those rows; a count of transparent keys alone
+ * calls the wallet empty and draws a second seed over it, or lets a legacy
+ * import replace it. */
+static int t_boot_guards(void)
+{
+    int failures = 0;
+    char made[1024], fresh[1024], seed_only[1024], sapling_only[1024];
+    wcr_fixture(made, sizeof(made), "guard_made");
+    wcr_fixture(fresh, sizeof(fresh), "guard_fresh");
+    wcr_fixture(seed_only, sizeof(seed_only), "guard_seed");
+    wcr_fixture(sapling_only, sizeof(sapling_only), "guard_sapling");
+    struct wcr_run run;
+    memset(&run, 0, sizeof(run));
+    bool created = wcr_create(made, WCR_PASS, &run) && run.rc == 0;
+    bool seeded = wcr_sql(seed_only,
+        "INSERT INTO wallet_seed(id,seed) VALUES(1,zeroblob(32))");
+    bool keyed = wcr_sql(sapling_only,
+        "INSERT INTO wallet_sapling_keys(ivk,xsk,xfvk,diversifier,pk_d,"
+        "child_index) VALUES(zeroblob(32),zeroblob(169),zeroblob(169),"
+        "zeroblob(11),zeroblob(32),0)");
+    WCR_CHECK("fixtures: a created wallet, a lone seed, a lone Sapling key",
+              created && seeded && keyed);
+
+    struct { const char *dir; const char *name; bool first_run; } cases[] = {
+        { fresh, "an empty datadir", true },
+        { made, "a created wallet (seed and Sapling keys, no transparent key)",
+          false },
+        { seed_only, "a lone seed row", false },
+        { sapling_only, "a lone Sapling key", false },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct node_db ndb;
+        struct wallet_sqlite ws;
+        char label[200];
+        bool open = wcr_open(&ndb, cases[i].dir) &&
+                    wallet_sqlite_open_r(&ws, ndb.db).ok;
+        snprintf(label, sizeof(label), "%s: first run is %s, the legacy "
+                 "import and the mint agree", cases[i].name,
+                 cases[i].first_run ? "yes" : "no");
+        WCR_CHECK(label, open &&
+                  boot_wallet_is_first_run(&ws, 0) == cases[i].first_run &&
+                  boot_wallet_may_mint(&ws, 0) == cases[i].first_run);
+        snprintf(label, sizeof(label), "%s: the rows at risk %s", cases[i].name,
+                 cases[i].first_run ? "are none" : "are counted");
+        WCR_CHECK(label, open &&
+                  (boot_wallet_rows_at_risk(&ndb, 0) == 0) ==
+                      cases[i].first_run);
+        if (open) {
+            wallet_sqlite_close(&ws);
+            node_db_close(&ndb);
+        }
+    }
+
+    struct wallet_sqlite closed;
+    memset(&closed, 0, sizeof(closed));
+    WCR_CHECK("a closed persistence layer mints nothing", 
+              !boot_wallet_may_mint(&closed, 0) &&
+              !boot_wallet_is_first_run(&closed, 0));
+    struct node_db ndb;
+    bool open = wcr_open(&ndb, made);
+    WCR_CHECK("a transparent key count alone also blocks a mint",
+              open && boot_wallet_rows_at_risk(&ndb, 3) >= 5);
+    if (open)
+        node_db_close(&ndb);
+    return failures;
+}
+
+/* ── case 12: dependent on the wallet-lock worker ──────────────────────── */
+
+/* A payment to a created wallet, built by the production payer path. */
+static bool wcr_payment_tx(struct transaction *tx, const char *address,
+                           uint64_t value)
+{
+    uint8_t d[ZC_DIVERSIFIER_SIZE], pk_d[32], ovk[32];
+    uint8_t cv[32] = {0}, cm[32] = {0}, epk[32] = {0};
+    uint8_t enc[ZC_SAPLING_ENCCIPHERTEXT_SIZE] = {0};
+    uint8_t out[ZC_SAPLING_OUTCIPHERTEXT_SIZE] = {0};
+    uint8_t proof[GROTH_PROOF_SIZE] = {0};
+    memset(ovk, 0x5a, sizeof(ovk));
+    if (!sapling_decode_payment_address(address, d, pk_d) ||
+        !sapling_build_output_description(ovk, d, pk_d, value, NULL, cv, cm,
+                                          epk, enc, out, proof, NULL))
+        return false;
+    transaction_init(tx);
+    tx->version = 4;
+    tx->overwintered = true;
+    tx->value_balance = -(int64_t)value;
+    tx->v_shielded_output = calloc(1, sizeof(struct output_description));
+    if (!tx->v_shielded_output) {
+        transaction_free(tx);
+        return false;
+    }
+    tx->num_shielded_output = 1;
+    struct output_description *od = &tx->v_shielded_output[0];
+    memcpy(od->cv.data, cv, 32);
+    memcpy(od->cm.data, cm, 32);
+    memcpy(od->ephemeral_key.data, epk, 32);
+    memcpy(od->enc_ciphertext, enc, sizeof(enc));
+    memcpy(od->out_ciphertext, out, sizeof(out));
+    memcpy(od->zkproof, proof, sizeof(proof));
+    return true;
+}
+
+/* A payment to the created address, read by a wallet that was loaded without
+ * its passphrase. */
+static bool wcr_locked_payment_found(struct wallet *w, struct wallet_sqlite *ws,
+                                     const char *address)
+{
+    bool read = wallet_sqlite_read_sapling_keys(ws, w);
+    struct transaction tx;
+    bool built = wcr_payment_tx(&tx, address, 125000000ULL);
+    struct uint256 txid;
+    memset(&txid, 0, sizeof(txid));
+    txid.data[0] = 0xC7;
+    int found = built ? wallet_try_sapling_decrypt(w, &tx, &txid) : 0;
+    printf("    locked-payment facts: keys_read=%d built=%d unlocked=%d "
+           "keystore_keys=%zu found=%d\n", read, built,
+           wallet_lock_is_unlocked(), w->sapling_keys.num_keys, found);
+    if (built)
+        transaction_free(&tx);
+    return read && built && !wallet_lock_is_unlocked() && found == 1 &&
+           w->num_sapling_notes == 1;
+}
+
+/* DEPENDS ON THE WALLET-LOCK WORK (lane claude-app-status: wallet_lock.c and
+ * wallet_sqlite.c). Until it lands the two checks named "needs wallet-lock"
+ * fail: they assert behaviour of the lock layer on a created wallet, not of
+ * the create command, and nothing here edits that layer. */
+static int t_locked_wallet(void)
+{
+    int failures = 0;
+    char dir[1024], address[200];
+    wcr_fixture(dir, sizeof(dir), "locked");
+    struct wcr_run run;
+    memset(&run, 0, sizeof(run));
+    bool created = wcr_create(dir, WCR_PASS, &run) && run.rc == 0 &&
+                   wcr_field(&run, "first_shielded_address", address,
+                             sizeof(address));
+    WCR_CHECK("create succeeds", created);
+    if (!created)
+        return failures + 1;
+
+    wallet_lock_reset_for_test();
+    struct node_db ndb;
+    struct wallet_sqlite ws;
+    bool open = wcr_open(&ndb, dir) && wallet_sqlite_open_r(&ws, ndb.db).ok;
+    struct wallet *w = open ? calloc(1, sizeof(*w)) : NULL;
+    if (w)
+        wallet_init(w);
+    WCR_CHECK("the created wallet opens", open && w);
+    if (!w) {
+        if (open) {
+            wallet_sqlite_close(&ws);
+            node_db_close(&ndb);
+        }
+        return failures + 1;
+    }
+
+    struct zcl_result bad = wallet_lock_unlock(w, &ws, "not-the-passphrase-0");
+    WCR_CHECK("needs wallet-lock: a wrong passphrase is refused for a created "
+              "wallet", !bad.ok);
+    wallet_lock_lock(w);
+    WCR_CHECK("needs wallet-lock: a payment to the created address is found "
+              "while the wallet is locked",
+              wcr_locked_payment_found(w, &ws, address));
+    wallet_lock_lock(w);
+    wallet_free(w);
+    free(w);
+    wallet_sqlite_close(&ws);
+    node_db_close(&ndb);
+    return failures;
+}
+
 int test_wallet_create(void);
 int test_wallet_create(void)
 {
@@ -657,6 +997,11 @@ int test_wallet_create(void)
     failures += t_birthday();
     failures += t_weak_passphrases();
     failures += t_authority();
+    failures += t_stdout_is_the_document();
+    failures += t_core_dumps_disabled();
+    failures += t_legacy_wallet_directory();
+    failures += t_boot_guards();
+    failures += t_locked_wallet();
     if (failures == 0)
         printf("wallet_create: OK (all wallet creation gates pass)\n");
     else

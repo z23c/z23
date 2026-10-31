@@ -5,6 +5,7 @@
  * range leaves a pending retry instead of recording the range as scanned. */
 
 #include "config/boot_internal.h"
+#include "controllers/wallet_scan.h"
 #include "wallet/wallet.h"
 #include "validation/chainstate.h"
 #include "util/log_macros.h"
@@ -28,6 +29,10 @@ static int boot_wallet_catch_up_start(const struct wallet *w,
     if (!w->scan_retry.pending && w->best_block_height >= tip_height)
         return -1;
     int scan_from = w->best_block_height > 0 ? w->best_block_height + 1 : 0;
+    /* A wallet that has scanned nothing starts at its verified birthday floor;
+     * a pending retry below it still wins. */
+    if (scan_from == 0 && w->initial_scan_floor > 0)
+        scan_from = w->initial_scan_floor;
     if (w->scan_retry.pending && w->scan_retry.from < scan_from)
         scan_from = w->scan_retry.from > 0 ? w->scan_retry.from : 0;
     /* A pending range that starts above this tip cannot be read yet. */
@@ -112,4 +117,11 @@ int boot_wallet_catch_up(struct wallet *w, const struct active_chain *chain,
                                      body_root[0] ? body_root : datadir, r);
     boot_wallet_catch_up_settle(w, r);
     return found;
+}
+
+int boot_wallet_boot_catch_up(struct wallet *w, const struct active_chain *chain,
+                              const char *datadir, struct node_db *ndb)
+{
+    w->initial_scan_floor = wallet_birthday_scan_floor(ndb);
+    return boot_wallet_catch_up(w, chain, datadir, NULL);
 }

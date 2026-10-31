@@ -172,6 +172,12 @@ struct wallet {
         char blocker[48];         /* WALLET_RESCAN_BLOCKER_* name */
     } scan_retry;
 
+    /* First height the initial scan of a wallet created by `core wallet create`
+     * may start at (its birthday less a margin, 0 = scan from genesis). Set
+     * by boot from the verified birthday; used only while best_block_height
+     * is 0 and no retry is pending. Never persisted. */
+    int initial_scan_floor;
+
     struct sapling_keystore sapling_keys;
 
     struct sapling_received_note *sapling_notes;

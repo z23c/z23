@@ -7,7 +7,20 @@
 
 #include "support/cleanse.h"
 
+#include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+
+/* A <datadir>/wallet directory is a pre-SQLite wallet that boot would import
+ * on its next start. It holds keys this command cannot see, so the datadir is
+ * not empty. */
+static bool wcs_legacy_wallet_present(const char *datadir)
+{
+    char legacy[2048];
+    struct stat st;
+    int n = snprintf(legacy, sizeof(legacy), "%s/wallet", datadir);
+    return n <= 0 || (size_t)n >= sizeof(legacy) || lstat(legacy, &st) == 0;
+}
 
 void wallet_create_report_cleanse(struct wallet_create_report *rep)
 {
@@ -30,6 +43,12 @@ struct zcl_result wallet_create_run(const struct wallet_create_request *req,
             "is encrypted from its first write, so it cannot be created "
             "without one. Nothing was written",
             WALLET_CREATE_MIN_PASSPHRASE);
+
+    if (wcs_legacy_wallet_present(req->datadir))
+        return ZCL_ERR(-62,
+            "%s holds a wallet directory from an earlier version, so it is not "
+            "an empty datadir. Nothing was written. Create into a new datadir",
+            req->datadir);
 
     char phrase[MNEMONIC_MAX_PHRASE_SIZE];
     if (!mnemonic_generate(MNEMONIC_24_WORDS, phrase, sizeof(phrase))) {

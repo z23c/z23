@@ -234,22 +234,30 @@ int db_sapling_key_count(struct node_db *ndb)
 }
 
 #define WALLET_BIRTHDAY_STATE_KEY "wallet_birthday_height"
+#define WALLET_BIRTHDAY_HASH_KEY "wallet_birthday_hash"
 
-bool db_wallet_birthday_get(struct node_db *ndb, int64_t *height)
+bool db_wallet_birthday_get(struct node_db *ndb, int64_t *height,
+                            uint8_t hash[32])
 {
     int64_t h = 0;
-    if (!ndb || !ndb->open || !height ||
-        !node_db_state_get_int(ndb, WALLET_BIRTHDAY_STATE_KEY, &h) || h < 0)
+    size_t len = 0;
+    if (!ndb || !ndb->open || !height || !hash ||
+        !node_db_state_get_int(ndb, WALLET_BIRTHDAY_STATE_KEY, &h) || h < 0 ||
+        !node_db_state_get(ndb, WALLET_BIRTHDAY_HASH_KEY, hash, 32, &len) ||
+        len != 32)
         return false;
     *height = h;
     return true;
 }
 
-bool db_wallet_birthday_set(struct node_db *ndb, int64_t height)
+/* Hash first: a birthday is readable only when both rows exist. */
+bool db_wallet_birthday_set(struct node_db *ndb, int64_t height,
+                            const uint8_t hash[32])
 {
-    if (!ndb || !ndb->open || height < 0)
+    if (!ndb || !ndb->open || !hash || height < 0)
         return false;
-    return node_db_state_set_int(ndb, WALLET_BIRTHDAY_STATE_KEY, height);
+    return node_db_state_set(ndb, WALLET_BIRTHDAY_HASH_KEY, hash, 32) &&
+           node_db_state_set_int(ndb, WALLET_BIRTHDAY_STATE_KEY, height);
 }
 
 /* ── Wallet Seed ──────────────────────────────────────────────── *

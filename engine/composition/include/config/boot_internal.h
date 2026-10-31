@@ -338,6 +338,12 @@ bool app_init_services(struct app_context *ctx,
 int boot_wallet_catch_up(struct wallet *w, const struct active_chain *chain,
                          const char *datadir,
                          struct wallet_rescan_report *report);
+
+/* The boot-time catch-up: gives a wallet made by `core wallet create` the
+ * verified birthday floor for its first scan (wallet_birthday_scan_floor), then
+ * runs boot_wallet_catch_up. */
+int boot_wallet_boot_catch_up(struct wallet *w, const struct active_chain *chain,
+                              const char *datadir, struct node_db *ndb);
 void boot_stop_db_service_kernel(void);
 
 /* K3 block-body read-ahead worker wiring (engine/composition/src/boot_block_prefetch.c).

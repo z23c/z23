@@ -20,6 +20,7 @@
 #include "controllers/wallet_scan.h"
 #include "controllers/sync_controller.h"
 #include "services/wallet_scan_service.h"
+#include "models/block.h"
 #include "models/wallet_key.h"
 #include "models/wallet_tx.h"
 #include "primitives/block.h"
@@ -335,15 +336,18 @@ static int wallet_scan_count_matched(const bool *file_has_match, int num_files)
     return matched_files;
 }
 
-int wallet_scan_start_height(struct node_db *ndb, int start_height)
+int wallet_birthday_scan_floor(struct node_db *ndb)
 {
     int64_t birthday = 0;
-    if (!db_wallet_birthday_get(ndb, &birthday) || birthday > INT_MAX)
-        return start_height;
-    int64_t lowest = birthday - WALLET_SCAN_BIRTHDAY_MARGIN;
-    return lowest > start_height ? (int)lowest : start_height;
+    uint8_t hash[32];
+    struct db_block at;
+    if (!db_wallet_birthday_get(ndb, &birthday, hash) || birthday > INT_MAX ||
+        !db_block_find_by_height(ndb, (int)birthday, &at) ||
+        memcmp(at.hash, hash, sizeof(hash)) != 0)
+        return 0;
+    return birthday > WALLET_SCAN_BIRTHDAY_MARGIN
+               ? (int)birthday - WALLET_SCAN_BIRTHDAY_MARGIN : 0;
 }
-
 /* --- Main entry point --- */
 
 int wallet_scan_blocks(struct node_db *ndb,
@@ -367,8 +371,6 @@ int wallet_scan_blocks(struct node_db *ndb,
     GetDataDir(true, net_dir, sizeof(net_dir));
     if (net_dir[0])
         datadir = net_dir;
-
-    start_height = wallet_scan_start_height(ndb, start_height);
 
     /* range fast-path. Empty range = nothing to do. */
     if (start_height > end_height) {

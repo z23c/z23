@@ -110,15 +110,42 @@ Two typed commands read and use this, both `AUTH_OWNER`:
 `AUTH_OWNER`, local, and never available to agents or MCP. Send
 `{"datadir","passphrase"}` on standard input with `--input=-`; a passphrase
 in argv or the environment is refused (`STDIN_REQUIRED`). The datadir must be
-empty and unheld by a node. The reply carries a 24-word phrase **once**: it is
-not stored, logged or journaled, and no command prints it again. The seed and
-Sapling keys are written under the passphrase (WKS1, WKD1) from the first
-write, at least 12 bytes. No transparent address is made. The datadir's chain
-tip is stored as the wallet birthday (`wallet_birthday_height` in `node_state`)
-and scans start 100 blocks below it. Any existing seed, key or note refuses
-the command with `WALLET_ALREADY_PRESENT`; it never overwrites or merges.
-Boot recognises a seeded wallet with no transparent key and does not mint a
-keypool over it. `tests/harness/src/test_wallet_create.c` holds the proof.
+empty (no seed, key, note or `<datadir>/wallet` directory) and unheld by a
+node. The reply carries a 24-word phrase **once**: it is not stored, logged or
+journaled, and no command prints it again. Standard output holds only the
+reply document; the log lines of opening the datadir go to standard error. The
+command disables core dumps on entry. The seed and Sapling keys are written
+under the passphrase (WKS1, WKD1) from the first write, at least 12 bytes. No
+transparent address is made.
+
+Birthday. The active chain tip the datadir holds (the highest block with
+status 3 or more, the rows the chain projection reads) is stored with its hash
+as `wallet_birthday_height` and `wallet_birthday_hash` in `node_state`. Only
+the first boot catch-up of a wallet that has scanned nothing uses it: it starts
+100 blocks below the birthday, and only while the block at that height is
+still the stored hash. If the chain was replaced and the hash left it, the
+birthday is ignored and the scan starts at genesis. Every other scan covers its
+whole range: transparent scans, `rescanblockchain` and the full scan an
+imported key triggers never raise their start, so a coin received before the
+birthday by a key imported later is found.
+
+Boot. A seed row, a Sapling key row or a transparent key means a wallet exists:
+boot mints no keypool over it and the legacy `<datadir>/wallet` import does not
+run over it, whether the seed is readable or locked. If the persistence layer
+will not open while any of those rows are on disk, boot refuses (STATE D). A
+closed persistence layer mints nothing.
+
+Lost reply. If the process dies or the reply never arrives after the commit,
+the phrase is gone and a second create is refused (`WALLET_ALREADY_PRESENT`).
+There is deliberately no discard flag: whether a wallet holds no coins cannot
+be proved from its own rows, because a payment sits on the chain until a scan
+finds it. The caller keeps the way back: it creates in a datadir made only for
+that attempt, deletes that datadir whole if the reply did not arrive (the
+wallet was never started as a node and its address never shown), and moves it
+into use only after the phrase is on screen. A datadir that was ever used is
+restored from the written phrase with `core wallet recovery restore`.
+
+`tests/harness/src/test_wallet_create.c` holds the proof.
 
 ---
 

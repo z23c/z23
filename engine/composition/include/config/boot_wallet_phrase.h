@@ -160,4 +160,20 @@ void boot_wallet_adopt_seed_if_it_governs(struct wallet *w);
  * would draw a second seed. */
 bool boot_wallet_seed_row_present(struct wallet_sqlite *ws);
 
+/* Wallet rows on disk before the persistence layer opens, for the refusal that
+ * stops a boot from going on past a wallet it cannot read: `key_rows` (the
+ * wallet_keys count, <= 0 when unknown) plus the seed and Sapling key rows. A
+ * wallet made by `core wallet create` holds only the last two. */
+int64_t boot_wallet_rows_at_risk(struct node_db *ndb, int64_t key_rows);
+
+/* True only for a wallet that holds nothing: an open persistence layer with no
+ * transparent key, no seed row (readable or locked) and no Sapling key. The
+ * legacy import and the first-run mint both require it. */
+bool boot_wallet_is_first_run(struct wallet_sqlite *ws,
+                              size_t transparent_keys);
+
+/* boot_wallet_is_first_run, and a closed persistence layer is named on stderr
+ * and refused: keys minted into it could not be kept. */
+bool boot_wallet_may_mint(struct wallet_sqlite *ws, size_t transparent_keys);
+
 #endif /* ZCL_CONFIG_BOOT_WALLET_PHRASE_H */

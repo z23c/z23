@@ -1341,17 +1341,17 @@ static void boot_wallet_open_persistence(struct app_context *ctx,
         wsql_open_r = wallet_sqlite_open_r(&g_wallet_sqlite, g_node_db.db);
         sqlite_open = wsql_open_r.ok;
     }
-    if (!sqlite_open && pre_open_key_rows > 0) {
-        /* STATE D: wallet has user keys on disk but we cannot open the
-         * persistence layer. The ONLY safe action is to refuse the
-         * boot and preserve the datadir for the operator to
-         * investigate. Silently generating a fresh keypool here is
-         * what caused 0.4 ZCL to become unspendable. */
+    const int64_t held = boot_wallet_rows_at_risk(&g_node_db, pre_open_key_rows);
+    if (!sqlite_open && held > 0) {
+        /* STATE D: keys, a seed or Sapling keys on disk but the persistence
+         * layer will not open. The ONLY safe action is to refuse the boot
+         * and preserve the datadir. Silently generating a fresh keypool
+         * here is what caused 0.4 ZCL to become unspendable. */
         boot_report_wallet_persistence_open_failed(
-            ctx->datadir, &wsql_open_r, (long long)pre_open_key_rows);
+            ctx->datadir, &wsql_open_r, (long long)held);
         event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
                     "wallet_persistence_open_failed code=%d rows=%lld",
-                    wsql_open_r.code, (long long)pre_open_key_rows);
+                    wsql_open_r.code, (long long)held);
         exit(1);
     }
     *out_key_rows = pre_open_key_rows;
@@ -1446,7 +1446,8 @@ static void boot_wallet_migrate_from_leveldb(struct app_context *ctx)
      * wallet/ directory exists, import keys/txs from LevelDB. Only
      * runs when pre_open_key_rows <= 0 (no existing user keys), so no
      * conflict with the state machine. */
-    if (g_wallet.keystore.num_keys == 0 && !boot_wallet_is_sealed(&g_wallet)) {
+    if (boot_wallet_is_first_run(&g_wallet_sqlite, g_wallet.keystore.num_keys) &&
+        !boot_wallet_is_sealed(&g_wallet)) {
         char wallet_path[1024];
         snprintf(wallet_path, sizeof(wallet_path), "%s/wallet", ctx->datadir);
         struct stat wst;
@@ -1495,7 +1496,8 @@ static void boot_wallet_migrate_from_leveldb(struct app_context *ctx)
 /* First run — mint a keypool only on an explicit passphrase or opt-in. */
 static void boot_wallet_mint_first_keypool(struct app_context *ctx)
 {
-    if (g_wallet.keystore.num_keys == 0 && !boot_wallet_is_sealed(&g_wallet)) {
+    if (boot_wallet_may_mint(&g_wallet_sqlite, g_wallet.keystore.num_keys) &&
+        !boot_wallet_is_sealed(&g_wallet)) {
         /* Genuinely empty wallet — first-run. A wallet decision must NOT be a
          * precondition for syncing, and plaintext keys must NEVER be minted
          * silently. So REFUSE (no passphrase, no -allow-plaintext-wallet opt-in

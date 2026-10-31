@@ -9,7 +9,7 @@
 #include "command/native_command.h"            /* the ONE read-only db open */
 #include "keys/key.h"                          /* ecc_start_once */
 #include "models/database.h"
-#include "models/store.h"                       /* chain tip for the birthday */
+#include "models/block.h"                       /* active tip for the birthday */
 #include "models/utxo.h"                /* gap-scan history oracle */
 #include "models/wallet_key.h"
 #include "models/wallet_tx.h"                    /* note count */
@@ -411,15 +411,19 @@ static struct zcl_result wrc_load_passphrase(
     return ZCL_OK;
 }
 
-/* Store the chain tip this datadir holds as the wallet birthday. No tip
+/* Store the active-chain tip this datadir holds (status >= 3, the same rows
+ * the chain projection reads; reorganised-away rows above it do not count) and
+ * its hash as the wallet birthday. No tip
  * (a datadir with no chain yet) records nothing and the wallet scans from
  * the beginning, which is slower and never misses a payment. */
 static void wrc_record_birthday(const struct wallet_recovery_request *req,
                                 struct node_db *ndb,
                                 struct wallet_recovery_report *out)
 {
-    int64_t tip = req->record_birthday ? db_store_chain_tip_height(ndb) : 0;
-    out->birthday_recorded = tip > 0 && db_wallet_birthday_set(ndb, tip);
+    struct db_block at;
+    int tip = req->record_birthday ? db_block_max_height(ndb) : -1;
+    out->birthday_recorded = tip > 0 && db_block_find_by_height(ndb, tip, &at) &&
+                             db_wallet_birthday_set(ndb, tip, at.hash);
     out->birthday_height = out->birthday_recorded ? tip : 0;
 }
 
