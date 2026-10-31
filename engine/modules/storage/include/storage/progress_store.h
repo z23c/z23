@@ -106,6 +106,11 @@ bool progress_store_tx_trylock(void);
  * snapshot. Observational: never lock through it. */
 const void *progress_store_tx_lock_addr(void);
 void progress_store_tx_unlock(void);
+/* Who holds the tx lock right now (outermost acquirer), for hang evidence.
+ * True with *tid (kernel thread id) and *held_us (monotonic, since the
+ * outermost acquire) when held; false when free. Lock-free and racy by
+ * design: observational only, either out pointer may be NULL. */
+bool progress_store_tx_holder(long *tid, int64_t *held_us);
 
 /* Switch the durability PRAGMA on the open consensus.db handle.
  *

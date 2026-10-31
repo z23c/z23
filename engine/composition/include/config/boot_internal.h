@@ -599,6 +599,21 @@ bool boot_sd_watchdog_format_task_line(char *out, size_t cap, long tid,
                                        const char *stat, const char *wchan,
                                        const char *syscall_text);
 void boot_sd_watchdog_log_thread_snapshot(void);
+/* One line naming the progress_store_tx_lock holder ("free" when !held). */
+bool boot_sd_watchdog_format_holder_line(char *out, size_t cap, bool held,
+                                         long tid, const char *comm,
+                                         int64_t held_us);
+/* 0 = never truncate (state D, or a futex wait whose a0 is one of `locks`),
+ * 1 = ordinary. Pure over the same stat/syscall text the snapshot reads. */
+unsigned boot_sd_watchdog_task_priority(const char *stat,
+                                        const char *syscall_text,
+                                        const void *const *locks,
+                                        size_t nlocks);
+/* Fill order[] with the indices to print: every priority-0 task first, then
+ * ordinary tasks until `cap` lines in total (priority ones are never cut).
+ * Returns the count written. */
+size_t boot_sd_watchdog_order_snapshot(const unsigned char *prio, size_t n,
+                                       size_t cap, size_t *order);
 
 #ifdef ZCL_TESTING
 /* Pillar 7's own refusal: a root supervisor sweep that has stopped advancing

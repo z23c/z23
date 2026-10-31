@@ -19,7 +19,9 @@
 #include "storage/progress_store.h"
 #include "services/chain_activation_service.h"
 #include "validation/process_block.h"
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define EVIDENCE_MAX_THREADS 128
@@ -110,7 +112,83 @@ bool boot_sd_watchdog_format_task_line(char *out, size_t cap, long tid,
     return true;
 }
 
-static void snapshot_one_task(long tid)
+/* The watchdog snapshot reads every thread (not just the first
+ * EVIDENCE_MAX_THREADS) so a D-state or lock-waiting thread past the print
+ * cap is still found and printed first. */
+#define EVIDENCE_SCAN_THREADS 1024
+
+bool boot_sd_watchdog_format_holder_line(char *out, size_t cap, bool held,
+                                         long tid, const char *comm,
+                                         int64_t held_us)
+{
+    if (!out || cap == 0)
+        return false;
+    if (!held)
+        snprintf(out, cap, "progress_store_tx_lock holder=free");
+    else
+        snprintf(out, cap,
+                 "progress_store_tx_lock holder tid=%ld comm=%s held_ms=%lld",
+                 tid, (comm && comm[0]) ? comm : "?",
+                 (long long)(held_us / 1000));
+    return true;
+}
+
+unsigned boot_sd_watchdog_task_priority(const char *stat,
+                                        const char *syscall_text,
+                                        const void *const *locks,
+                                        size_t nlocks)
+{
+    char comm[32];
+    char state = '?';
+    if (stat && task_parse_stat(stat, comm, sizeof(comm), &state) &&
+        state == 'D')
+        return 0;
+    if (!syscall_text || !locks)
+        return 1;
+    char nr[24] = "", a0[32] = "";
+    if (sscanf(syscall_text, "%23s %31s", nr, a0) != 2)
+        return 1;
+    char *end = NULL;
+    unsigned long long v = strtoull(a0, &end, 0);
+    if (end == a0 || *end != '\0' || v == 0)
+        return 1;
+    for (size_t i = 0; i < nlocks; i++)
+        if (locks[i] && (unsigned long long)(uintptr_t)locks[i] == v)
+            return 0;
+    return 1;
+}
+
+size_t boot_sd_watchdog_order_snapshot(const unsigned char *prio, size_t n,
+                                       size_t cap, size_t *order)
+{
+    size_t w = 0;
+    if (!prio || !order)
+        return 0;
+    for (size_t i = 0; i < n; i++)
+        if (prio[i] == 0)
+            order[w++] = i;
+    for (size_t i = 0; i < n && w < cap; i++)
+        if (prio[i] != 0)
+            order[w++] = i;
+    return w;
+}
+
+/* /proc/self/task/<tid>/stack is normally root-only; say so and move on. */
+static void snapshot_task_stack(long tid)
+{
+    char stack[EVIDENCE_FILE_MAX];
+    if (!os_proc_self_task_read(tid, "stack", stack, sizeof(stack)) ||
+        stack[0] == '\0') {
+        LOG_WARN("boot", "[sd_watchdog] thread tid=%ld stack unreadable", tid);
+        return;
+    }
+    size_t line = 0;
+    for (char *s = strtok(stack, "\n"); s && line < 8; s = strtok(NULL, "\n"),
+         line++)
+        LOG_WARN("boot", "[sd_watchdog] thread tid=%ld stack %s", tid, s);
+}
+
+static void snapshot_one_task(long tid, bool priority)
 {
     char stat[EVIDENCE_FILE_MAX], wchan[64], sc[EVIDENCE_FILE_MAX];
     char line[192];
@@ -122,31 +200,73 @@ static void snapshot_one_task(long tid)
         LOG_WARN("boot", "[sd_watchdog] thread %s", line);
     else
         LOG_WARN("boot", "[sd_watchdog] thread tid=%ld unreadable", tid);
+    if (ok && priority && strstr(line, " st=D "))
+        snapshot_task_stack(tid);
 }
 
-static void log_lock_addresses(void)
+static void known_locks(const void **locks)
 {
     struct chain_activation_controller *ctl = process_block_activation_controller();
+    locks[0] = ctl ? (const void *)&ctl->mutex : NULL;
+    locks[1] = progress_store_tx_lock_addr();
+}
+
+static void log_lock_addresses(const void *const *locks)
+{
     LOG_WARN("boot",
              "[sd_watchdog] lock addresses (match a futex a0): "
              "activation_mutex=%p progress_store_tx_lock=%p",
-             ctl ? (const void *)&ctl->mutex : NULL,
-             progress_store_tx_lock_addr());
+             locks[0], locks[1]);
+}
+
+static void log_tx_lock_holder(void)
+{
+    long tid = 0;
+    int64_t held_us = 0;
+    bool held = progress_store_tx_holder(&tid, &held_us);
+    char stat[EVIDENCE_FILE_MAX], comm[32] = "?", line[160];
+    char state = '?';
+    if (held && os_proc_self_task_read(tid, "stat", stat, sizeof(stat)))
+        (void)task_parse_stat(stat, comm, sizeof(comm), &state);
+    if (boot_sd_watchdog_format_holder_line(line, sizeof(line), held, tid,
+                                            comm, held_us))
+        LOG_WARN("boot", "[sd_watchdog] %s", line);
+}
+
+static void classify_tasks(const long *tids, size_t n, const void *const *locks,
+                           unsigned char *prio)
+{
+    for (size_t i = 0; i < n; i++) {
+        char stat[EVIDENCE_FILE_MAX], sc[EVIDENCE_FILE_MAX];
+        bool ok = os_proc_self_task_read(tids[i], "stat", stat, sizeof(stat));
+        bool has_sc = os_proc_self_task_read(tids[i], "syscall", sc,
+                                             sizeof(sc));
+        prio[i] = (unsigned char)boot_sd_watchdog_task_priority(
+            ok ? stat : NULL, has_sc ? sc : NULL, locks, 2);
+    }
 }
 
 void boot_sd_watchdog_log_thread_snapshot(void)
 {
-    long tids[EVIDENCE_MAX_THREADS];
+    long tids[EVIDENCE_SCAN_THREADS];
+    unsigned char prio[EVIDENCE_SCAN_THREADS];
+    size_t order[EVIDENCE_SCAN_THREADS];
+    const void *locks[2];
     size_t total = 0;
-    log_lock_addresses();
-    size_t n = os_proc_self_task_ids(tids, EVIDENCE_MAX_THREADS, &total);
+    known_locks(locks);
+    log_lock_addresses(locks);
+    log_tx_lock_holder();
+    size_t n = os_proc_self_task_ids(tids, EVIDENCE_SCAN_THREADS, &total);
     if (n == 0) {
         LOG_WARN("boot", "[sd_watchdog] thread snapshot unavailable "
                  "(no per-thread procfs on this platform)");
         return;
     }
-    for (size_t i = 0; i < n; i++)
-        snapshot_one_task(tids[i]);
+    classify_tasks(tids, n, locks, prio);
+    size_t shown = boot_sd_watchdog_order_snapshot(prio, n,
+                                                   EVIDENCE_MAX_THREADS, order);
+    for (size_t i = 0; i < shown; i++)
+        snapshot_one_task(tids[order[i]], prio[order[i]] == 0);
     LOG_WARN("boot", "[sd_watchdog] thread snapshot: threads=%zu "
-             "truncated=%zu", n, total - n);
+             "truncated=%zu", shown, total - shown);
 }

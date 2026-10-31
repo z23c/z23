@@ -11,6 +11,7 @@
  * module sits below the AR lifecycle — the stage_cursor row is not a
  * model. */
 
+#include "platform/os_proc.h"
 #include "platform/time_compat.h"
 #include "storage/progress_store.h"
 #include "progress_store_directory.h"
@@ -702,10 +703,43 @@ bool progress_store_directory_matches_fd(sqlite3 *db, int dir_fd)
     return ok;
 }
 
+/* Holder evidence for the watchdog: the outermost acquirer's tid and the
+ * monotonic acquire time. g_tx_depth is only touched by the thread that owns
+ * g_tx_lock, so it needs no atomicity. The publish order (time, then tid with
+ * release) lets a lock-free reader that sees the tid also see its time. */
+static int g_tx_depth;
+static _Atomic long g_tx_owner_tid;
+static _Atomic int64_t g_tx_acquired_us;
+
+static void progress_store_tx_note_acquired(void)
+{
+    if (g_tx_depth++ != 0)
+        return;
+    atomic_store_explicit(&g_tx_acquired_us, platform_time_monotonic_us(),
+                          memory_order_relaxed);
+    atomic_store_explicit(&g_tx_owner_tid, os_proc_self_tid(),
+                          memory_order_release);
+}
+
 void progress_store_tx_lock(void)
 {
     pthread_once(&g_tx_lock_once, progress_store_tx_lock_init);
     pthread_mutex_lock(&g_tx_lock);
+    progress_store_tx_note_acquired();
+}
+
+bool progress_store_tx_holder(long *tid, int64_t *held_us)
+{
+    long owner = atomic_load_explicit(&g_tx_owner_tid, memory_order_acquire);
+    if (owner == 0)
+        return false;
+    int64_t since = atomic_load_explicit(&g_tx_acquired_us,
+                                         memory_order_relaxed);
+    if (tid)
+        *tid = owner;
+    if (held_us)
+        *held_us = platform_time_monotonic_us() - since;
+    return true;
 }
 
 const void *progress_store_tx_lock_addr(void)
@@ -716,11 +750,16 @@ const void *progress_store_tx_lock_addr(void)
 bool progress_store_tx_trylock(void)
 {
     pthread_once(&g_tx_lock_once, progress_store_tx_lock_init);
-    return pthread_mutex_trylock(&g_tx_lock) == 0;
+    if (pthread_mutex_trylock(&g_tx_lock) != 0)
+        return false;
+    progress_store_tx_note_acquired();
+    return true;
 }
 
 void progress_store_tx_unlock(void)
 {
+    if (g_tx_depth > 0 && --g_tx_depth == 0)
+        atomic_store_explicit(&g_tx_owner_tid, 0, memory_order_release);
     pthread_mutex_unlock(&g_tx_lock);
 }
 

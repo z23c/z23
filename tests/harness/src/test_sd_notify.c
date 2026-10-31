@@ -35,6 +35,8 @@
 #include "platform/time_compat.h"
 #include "util/sd_notify.h"
 #include "config/boot_internal.h"   /* boot_sd_watchdog_test_pet_decide */
+#include "storage/progress_store.h"
+#include "platform/os_proc.h"
 #include "net/tor_integration.h"
 #include "util/thread_work_probe.h"
 
@@ -1123,7 +1125,76 @@ static int test_sd_watchdog_evidence(void)
     return failures;
 }
 
+/* progress_store_tx_lock names its holder; the snapshot never truncates D-state
+ * or lock-waiting threads. */
+static int test_sd_watchdog_holder_and_order(void)
+{
+    int failures = 0;
+    long tid = 0;
+    int64_t held_us = -1;
+    char out[200];
+    SDN_CHECK("holder: free before lock",
+              !progress_store_tx_holder(&tid, &held_us));
+    progress_store_tx_lock();
+    progress_store_tx_lock();
+    SDN_CHECK("holder: recorded as this thread",
+              progress_store_tx_holder(&tid, &held_us) &&
+              tid == os_proc_self_tid() && held_us >= 0);
+    progress_store_tx_unlock();
+    SDN_CHECK("holder: still held after inner unlock",
+              progress_store_tx_holder(NULL, NULL));
+    progress_store_tx_unlock();
+    SDN_CHECK("holder: cleared after outer unlock",
+              !progress_store_tx_holder(&tid, &held_us));
+    SDN_CHECK("holder: trylock records",
+              progress_store_tx_trylock() &&
+              progress_store_tx_holder(&tid, NULL) &&
+              tid == os_proc_self_tid());
+    progress_store_tx_unlock();
+    SDN_CHECK("holder: cleared after trylock unlock",
+              !progress_store_tx_holder(NULL, NULL));
+
+    SDN_CHECK("holder line: free",
+              boot_sd_watchdog_format_holder_line(out, sizeof(out), false, 0,
+                                                  NULL, 0) &&
+              strstr(out, "holder=free"));
+    SDN_CHECK("holder line: names tid comm age",
+              boot_sd_watchdog_format_holder_line(out, sizeof(out), true, 77,
+                                                  "zcl_gap_fill", 2500000) &&
+              strstr(out, "tid=77") && strstr(out, "comm=zcl_gap_fill") &&
+              strstr(out, "held_ms=2500"));
+
+    int a, b;
+    const void *locks[2] = { &a, &b };
+    char sc[80];
+    SDN_CHECK("priority: D state first",
+              boot_sd_watchdog_task_priority("5 (x) D 1\n", "17 0x1 0x2\n",
+                                             locks, 2) == 0);
+    snprintf(sc, sizeof(sc), "202 %p 0x80\n", (void *)&b);
+    SDN_CHECK("priority: futex on known lock first",
+              boot_sd_watchdog_task_priority("5 (x) S 1\n", sc, locks, 2) == 0);
+    SDN_CHECK("priority: futex on unknown address ordinary",
+              boot_sd_watchdog_task_priority("5 (x) S 1\n",
+                                             "202 0x1234 0x80\n", locks, 2) == 1);
+    SDN_CHECK("priority: running ordinary",
+              boot_sd_watchdog_task_priority("5 (x) R 1\n", "running\n",
+                                             locks, 2) == 1);
+
+    /* 200 tasks, cap 128; the D-state ones sit at 150, 199 and 3. */
+    unsigned char prio[200];
+    size_t order[200];
+    memset(prio, 1, sizeof(prio));
+    prio[150] = prio[199] = prio[3] = 0;
+    size_t n = boot_sd_watchdog_order_snapshot(prio, 200, 128, order);
+    SDN_CHECK("order: capped at 128", n == 128);
+    SDN_CHECK("order: priority tasks first, none cut",
+              order[0] == 3 && order[1] == 150 && order[2] == 199 &&
+              order[3] == 0 && order[4] == 1);
+    return failures;
+}
+
 int test_sd_notify(void)
 {
-    return test_sd_notify_platform_arm() + test_sd_watchdog_evidence();
+    return test_sd_notify_platform_arm() + test_sd_watchdog_evidence() +
+           test_sd_watchdog_holder_and_order();
 }

@@ -1405,7 +1405,8 @@ bool os_proc_visit_paths(os_proc_path_visitor visitor, void *opaque)
 static bool os_proc_task_file_allowed(const char *name)
 {
     return name && (strcmp(name, "stat") == 0 || strcmp(name, "wchan") == 0 ||
-                    strcmp(name, "syscall") == 0);
+                    strcmp(name, "syscall") == 0 ||
+                    strcmp(name, "stack") == 0);
 }
 
 static size_t os_proc_task_ids_scan(DIR *d, long *out, size_t max,
