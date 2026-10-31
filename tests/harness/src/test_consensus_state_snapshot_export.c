@@ -2076,7 +2076,8 @@ static int cse_check_missing_and_malformed(struct cse_pf *pf)
     return failures;
 }
 
-static int cse_check_composed_prefix(struct cse_pf *pf)
+static int cse_check_composed_prefix(struct cse_pf *pf,
+                                     sqlite3 **base_slot)
 {
     int failures = 0;
     sqlite3 *db = pf->db;
@@ -2086,7 +2087,7 @@ static int cse_check_composed_prefix(struct cse_pf *pf)
      * prefix, remove the local genesis header, prove one new linked suffix
      * height under a fresh producer epoch, and require the emitted artifact to
      * disclose a validator-recomputable composition boundary. */
-    sqlite3 *base_bundle = NULL;
+    sqlite3 *base_bundle = *base_slot;
     struct consensus_state_bundle_manifest base_manifest;
     struct consensus_state_install_result base_validation;
     memset(&base_manifest, 0, sizeof(base_manifest));
@@ -2105,6 +2106,7 @@ static int cse_check_composed_prefix(struct cse_pf *pf)
     if (base_bundle)
         sqlite3_close(base_bundle);
     CSE_CHECK("composed: admitted base proof retained", prefix_installed);
+    *base_slot = base_bundle;
 
     return failures;
 }
@@ -2211,11 +2213,13 @@ static int cse_check_composed_export(struct cse_pf *pf, const uint8_t composed_h
     return failures;
 }
 
-static int cse_check_composed_lineage(struct cse_pf *pf, const uint8_t composed_hash[32])
+static int cse_check_composed_lineage(struct cse_pf *pf,
+                                      const uint8_t composed_hash[32],
+                                      sqlite3 **base_slot)
 {
     int failures = 0;
     const char *composed_output = pf->composed_output;
-    sqlite3 *base_bundle = NULL;
+    sqlite3 *base_bundle = *base_slot;
     bool lineage_tampered = chmod(composed_output, 0600) == 0 &&
         sqlite3_open_v2(composed_output, &base_bundle,
                         SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK &&
@@ -2471,13 +2475,14 @@ static int test_consensus_state_snapshot_export_platform_arm(void)
     failures += cse_check_checkpoint_content_default(&pf, &cse_sapling_root);
     failures += cse_check_checkpoint_content_refusals(&pf, &cse_sapling_root);
     failures += cse_check_missing_and_malformed(&pf);
-    failures += cse_check_composed_prefix(&pf);
+    sqlite3 *base_bundle = NULL;
+    failures += cse_check_composed_prefix(&pf, &base_bundle);
     uint8_t composed_hash[32];
     for (size_t i = 0; i < sizeof(composed_hash); i++)
         composed_hash[i] = (uint8_t)(0xd1u + i);
     failures += cse_check_composed_suffix(&pf, composed_hash);
     failures += cse_check_composed_export(&pf, composed_hash);
-    failures += cse_check_composed_lineage(&pf, composed_hash);
+    failures += cse_check_composed_lineage(&pf, composed_hash, &base_bundle);
     reducer_frontier_test_set_compiled_anchor(-1);
     checkpoints_reset_sha3_override_for_test();
     progress_store_close();
