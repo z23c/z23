@@ -23,6 +23,7 @@
 #ifndef ZCL_NET_CONNMAN_INTERNAL_H
 #define ZCL_NET_CONNMAN_INTERNAL_H
 
+#include "platform/socket_compat.h"
 #include "net/connman.h"
 #include "util/thread_liveness.h"
 #include <stdbool.h>
@@ -141,5 +142,61 @@ void connman_release_connect_node_ref(struct connman *cm,
 /* The outbound-dialer thread body (connman_dialer.c). Spawned from
  * connman_start() in connman.c. */
 void *thread_open_connections(void *arg);
+
+/* ── Socket-reactor steps (connman_reactor.c) ─────────────────────────────
+ * The per-iteration pieces of thread_socket_handler in connman.c. Every
+ * LOG_* call stays in the thread function; these return the status it
+ * logs from. The dispatch, stats and unlink steps run with cs_nodes held
+ * by the caller, exactly as the inline blocks did. */
+
+/* Recv-size cap that leaves room for the queue's remaining slots. */
+size_t connman_recv_cap_for_queue(size_t queued, size_t base_cap);
+
+struct connman_reactor_node_fd {
+    zcl_socket_t fd;
+    size_t node_idx;
+};
+
+/* Fill pfds with the listen sockets then the connected nodes (snapshot of
+ * fd + index under cs_nodes, taken and released here) and count the
+ * Noise-advertising census in the same hold. Returns the pfds used. */
+size_t connman_reactor_build_pollset(struct connman *cm, size_t listen_count,
+                                     platform_socket_pollfd *pfds,
+                                     struct connman_reactor_node_fd *node_fds,
+                                     size_t *n_node_fds,
+                                     size_t *noise_advertising,
+                                     size_t *noise_handshaked);
+void connman_reactor_accept_ready(struct connman *cm,
+                                  const platform_socket_pollfd *pfds,
+                                  size_t listen_count);
+/* Caller holds cs_nodes. */
+void connman_reactor_dispatch_ready(
+    struct connman *cm, const platform_socket_pollfd *pfds, size_t npfds,
+    const struct connman_reactor_node_fd *node_fds, size_t n_node_fds,
+    size_t listen_count);
+/* Caller holds cs_nodes. */
+void connman_reactor_log_peer_stats(struct connman *cm);
+/* P2P_DISCONNECT_NONE, or the keepalive reason with *timeout_name and
+ * *silent_secs set (the event and lifecycle note are already recorded;
+ * the caller logs and requests the disconnect). */
+enum p2p_disconnect_reason connman_reactor_liveness_timeout(
+    struct p2p_node *n, int64_t now_mono_us, const char **timeout_name,
+    int64_t *silent_secs);
+/* True when the outbound connect timed out and a disconnect was requested. */
+bool connman_reactor_connect_timeout(struct connman *cm, struct p2p_node *n,
+                                     int64_t now_check, bool is_addnode,
+                                     size_t addnode_index);
+
+enum connman_reactor_park {
+    CONNMAN_REACTOR_PARK_DONE,
+    CONNMAN_REACTOR_PARK_REALLOC_FAILED,
+    CONNMAN_REACTOR_PARK_HARDCAP_LOG,
+};
+/* Terminal record, state reset and queue cleanup of a flagged node. */
+void connman_reactor_close_flagged_node(struct p2p_node *node);
+/* Remove nodes[i], drop the manager ref and free or park the node. */
+enum connman_reactor_park connman_reactor_unlink_node(
+    struct connman *cm, size_t i, struct p2p_node *node,
+    uint64_t *hardcap_leaked);
 
 #endif /* ZCL_NET_CONNMAN_INTERNAL_H */

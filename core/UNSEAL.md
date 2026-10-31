@@ -464,3 +464,7 @@ later lane flips it HARD.
 - 2026-10-31T10:28:01Z — REASON: Owner-authorized 2026-10-19 hardening program, behaviour-preserving: move the https_server.c certificate section unchanged into https_server_cert.c so the listener fd-race fix fits the 1500-line ceiling;  no validity predicate touched
   old ROOT: ea2dbcfcba22bee3aee326ffa3038d241d6310e4839420d4a156680e342126dd
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T16:38:08Z — REASON: Split the socket reactor's per-iteration steps out of connman.c; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: a401d49d6554176329c7868cc66350b8d4b27b26079585d73a49ffc4edd471b5
+  by: owner unseal ritual (make core-unseal)

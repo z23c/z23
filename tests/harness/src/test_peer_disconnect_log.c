@@ -344,6 +344,7 @@ static int test_null_node_is_inert(void)
 /* Walk up from the test binary to the tree holding the Makefile and the two
  * net sources; bounded. */
 #define CONNMAN_REL "core/modules/net/src/connman.c"
+#define CONNMAN_REACTOR_REL "core/modules/net/src/connman_reactor.c"
 #define NETSRC_REL  "core/modules/net/src/net.c"
 #define NETLISTEN_REL "core/modules/net/src/net_listen.c"
 
@@ -414,8 +415,12 @@ static int test_sweep_is_the_only_removal_and_it_logs(void)
 {
     int failures = 0;
     TEST("peer_disconnect_log: the nodes[] removal path emits the terminal line") {
-        char *src = slurp(CONNMAN_REL);
+        /* The sweep's per-iteration steps live in connman_reactor.c; the
+         * handshake-deadline sweep stays in connman.c. */
+        char *src = slurp(CONNMAN_REACTOR_REL);
         ASSERT(src != NULL);
+        char *conn_src = slurp(CONNMAN_REL);
+        ASSERT(conn_src != NULL);
 
         /* One removal site; a second needs its own terminal line. */
         ASSERT(count_occurrences(src, "cm->manager.num_nodes--") == 1);
@@ -436,11 +441,29 @@ static int test_sweep_is_the_only_removal_and_it_logs(void)
         ASSERT(count_occurrences(src, "p2p_node_close_socket(") == 1);
         ASSERT(strstr(src, "p2p_node_close_socket(") > emit);
 
+        /* connman.c must not carry a second removal or socket close, and the
+         * reactor loop must run the close step before the unlink step. */
+        ASSERT(count_occurrences(conn_src, "cm->manager.num_nodes--") == 0);
+        ASSERT(count_occurrences(conn_src, "p2p_node_close_socket(") == 0);
+        const char *conn_close =
+            strstr(conn_src, "connman_reactor_close_flagged_node(node);");
+        ASSERT(conn_close != NULL);
+        const char *conn_unlink =
+            strstr(conn_src, "connman_reactor_unlink_node(cm, i, node,");
+        ASSERT(conn_unlink != NULL);
+        ASSERT(conn_close < conn_unlink);
+        ASSERT(count_occurrences(conn_src,
+                                 "connman_reactor_close_flagged_node(") == 1);
+        ASSERT(count_occurrences(conn_src,
+                                 "connman_reactor_unlink_node(") == 1);
+
         /* Both timeout incidents are machine-readable JSON lines. */
-        ASSERT(count_occurrences(src, "\"peer_handshake_timeout\"") == 1);
+        ASSERT(count_occurrences(conn_src, "\"peer_handshake_timeout\"") == 1);
         ASSERT(count_occurrences(src, "\"peer_connect_timeout\"") == 1);
         ASSERT(!contains(src, "handshake timeout after"));
+        ASSERT(!contains(conn_src, "handshake timeout after"));
 
+        free(conn_src);
         free(src);
         PASS();
     } _test_next:;
