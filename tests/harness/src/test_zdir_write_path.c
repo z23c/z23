@@ -1012,3 +1012,4 @@ int test_zdir_write_path(void)
     node_rpc_client_set_test_hook(NULL);
     return failures;
 }
+
