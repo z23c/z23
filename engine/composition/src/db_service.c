@@ -245,20 +245,60 @@ static struct db_service_job *db_service_pop_plain_job(struct db_service *svc)
     return job;
 }
 
-size_t db_service_run_pending(struct db_service *svc)
+/* Pop the first queued plain write submitted bulk-safe, wherever it sits.
+ * The ring closes over the gap so the order of the others is unchanged. */
+static struct db_service_job *db_service_pop_bulk_safe_job(
+    struct db_service *svc)
+{
+    struct db_service_job *job = NULL;
+
+    zcl_mutex_lock(&svc->queue_mutex);
+    for (size_t k = 0; !svc->stop_requested && k < svc->queue_count; k++) {
+        size_t at = (svc->queue_head + k) % DB_SERVICE_QUEUE_CAP;
+        struct db_service_job *cand = svc->queue[at];
+        if (cand->type != DB_SERVICE_JOB_NONE || !cand->bulk_safe)
+            continue;
+        job = cand;
+        for (size_t j = k; j + 1 < svc->queue_count; j++)
+            svc->queue[(svc->queue_head + j) % DB_SERVICE_QUEUE_CAP] =
+                svc->queue[(svc->queue_head + j + 1) % DB_SERVICE_QUEUE_CAP];
+        svc->queue_tail =
+            (svc->queue_tail + DB_SERVICE_QUEUE_CAP - 1) % DB_SERVICE_QUEUE_CAP;
+        svc->queue[svc->queue_tail] = NULL;
+        svc->queue_count--;
+        zcl_cond_broadcast(&svc->queue_cond);
+        break;
+    }
+    zcl_mutex_unlock(&svc->queue_mutex);
+    return job;
+}
+
+static size_t db_service_run_queued(struct db_service *svc, bool bulk_safe)
 {
     size_t ran = 0;
 
     if (!db_service_is_worker_thread(svc))
         return 0;
     while (ran < DB_SERVICE_QUEUE_CAP) {
-        struct db_service_job *job = db_service_pop_plain_job(svc);
+        struct db_service_job *job = bulk_safe
+            ? db_service_pop_bulk_safe_job(svc)
+            : db_service_pop_plain_job(svc);
         if (!job)
             break;
         (void)db_service_dispatch(svc, job, true);
         ran++;
     }
     return ran;
+}
+
+size_t db_service_run_pending_bulk_safe(struct db_service *svc)
+{
+    return db_service_run_queued(svc, true);
+}
+
+size_t db_service_run_pending(struct db_service *svc)
+{
+    return db_service_run_queued(svc, false);
 }
 
 static void *db_service_worker_main(void *arg)
@@ -688,10 +728,10 @@ bool db_service_try_run_write(struct db_service *svc,
     return db_service_run_write_mode(svc, fn, ctx, true);
 }
 
-bool db_service_enqueue_write(struct db_service *svc,
-                              db_service_write_fn fn,
-                              void *ctx,
-                              db_service_free_fn free_ctx)
+static bool db_service_enqueue_write_mode(struct db_service *svc,
+                                           db_service_write_fn fn, void *ctx,
+                                           db_service_free_fn free_ctx,
+                                           bool bulk_safe)
 {
     struct db_service_job *job;
     bool queued;
@@ -729,6 +769,7 @@ bool db_service_enqueue_write(struct db_service *svc,
     job->ctx = ctx;
     job->free_ctx = free_ctx;
     job->async = true;
+    job->bulk_safe = bulk_safe;
     queued = db_service_submit_job(svc, job);
     if (!queued) {
         if (free_ctx)
@@ -736,6 +777,19 @@ bool db_service_enqueue_write(struct db_service *svc,
         free(job);
     }
     return queued;
+}
+
+bool db_service_enqueue_write(struct db_service *svc, db_service_write_fn fn,
+                              void *ctx, db_service_free_fn free_ctx)
+{
+    return db_service_enqueue_write_mode(svc, fn, ctx, free_ctx, false);
+}
+
+bool db_service_enqueue_write_bulk_safe(struct db_service *svc,
+                                        db_service_write_fn fn, void *ctx,
+                                        db_service_free_fn free_ctx)
+{
+    return db_service_enqueue_write_mode(svc, fn, ctx, free_ctx, true);
 }
 
 bool db_service_is_worker_thread(const struct db_service *svc)

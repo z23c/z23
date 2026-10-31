@@ -187,6 +187,36 @@ bool sync_wallet_note_nullifier_refresh_for_test(
     const uint8_t nf[32]);
 #endif
 
+/* Tip-time wallet witness maintenance for the production path, independent of
+ * the catchup walk. Creates witnesses for wallet notes in blk, advances those
+ * saved at the parent height, and replays up to 256 blocks for notes whose
+ * witness is further behind (a missed block, a rewind, a late-found note),
+ * starting from the reducer frontier, which must equal the header root at the
+ * start. Every witness stored at the tip is checked against the tip header
+ * root and dropped when it differs. False (logged) when no such frontier
+ * exists; the witnesses then stay behind and the witness summary says so. */
+struct sync_block_reader { // hardening-ok: a block-body callback, not a byte-stream reader
+    bool (*read)(void *ctx, const struct block_index *bi, struct block *out);
+    void *ctx;
+};
+bool node_db_sync_advance_tip_witnesses_with(
+    struct node_db *ndb, const struct block *blk,
+    const struct block_index *pindex, struct wallet *wallet,
+    const struct sync_block_reader *reader);
+bool node_db_sync_advance_tip_witnesses(struct node_db *ndb,
+                                        const struct block *blk,
+                                        const struct block_index *pindex,
+                                        struct wallet *wallet);
+/* Queue the same work on the db service writer; blk and pindex are copied. */
+bool node_db_sync_advance_tip_witnesses_async(struct node_db *ndb,
+                                              const struct block *blk,
+                                              const struct block_index *pindex,
+                                              struct wallet *wallet);
+#ifdef ZCL_TESTING
+/* Number of queued tip witness jobs that have started running. */
+int node_db_sync_tip_witness_test_job_runs(void);
+#endif
+
 /* Called after a block is successfully connected to the active chain.
  * Indexes the block header, all transactions, and updates the UTXO set.
  * Runs inside a SQLite transaction for atomicity. */
@@ -247,6 +277,24 @@ bool node_db_sync_sapling_note(struct node_db *ndb,
                                const uint8_t nullifier[32],
                                int block_height);
 
+/* Same row as node_db_sync_sapling_note, for the reducer thread at the tip:
+ * written at once when the db worker is idle, otherwise queued bulk-safe so it
+ * runs between the batches of a running catchup walk. The caller never waits
+ * for a walk. False when the write failed or the queue refused it. */
+bool node_db_sync_sapling_note_at_tip(struct node_db *ndb,
+                                      const uint8_t txid[32],
+                                      uint32_t output_index,
+                                      int64_t value,
+                                      const uint8_t rcm[32],
+                                      const uint8_t memo[512],
+                                      size_t memo_len,
+                                      const uint8_t ivk[32],
+                                      const uint8_t diversifier[11],
+                                      const uint8_t pk_d[32],
+                                      const uint8_t cm[32],
+                                      const uint8_t nullifier[32],
+                                      int block_height);
+
 /* Mark Sapling nullifiers as spent (from a confirmed tx).
  *
  * The canonical API returns a tri-state: OK (matched an indexed note),
@@ -298,10 +346,12 @@ bool node_db_sync_wallet_tx_delete(struct node_db *ndb,
 
 /* Retract wallet-derived rows created by an exact disconnected block.  The
  * per-transaction keep_pending flags are true only when ordinary mempool
- * admission accepted that non-coinbase transaction after the coin unwind. */
+ * admission accepted that non-coinbase transaction after the coin unwind.
+ * Note witnesses at or above height (the disconnected block) are dropped. */
 bool node_db_sync_wallet_disconnect_block(struct node_db *ndb,
                                            const struct block *blk,
-                                           const bool *keep_pending);
+                                           const bool *keep_pending,
+                                           int height);
 
 /* Persist a peer address we learned about. */
 bool node_db_sync_peer(struct node_db *ndb,

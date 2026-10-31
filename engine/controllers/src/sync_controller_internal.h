@@ -112,6 +112,15 @@ bool advance_wallet_witnesses(struct node_db *ndb,
                               const struct block *blk,
                               struct incremental_merkle_tree *tree,
                               int height, struct wallet *wallet);
+/* One block of witness maintenance on tree (the frontier at height - 1). Only
+ * witnesses saved at height - 1 advance. persist_tree also stores the
+ * node_state tree copy; the caller owns the open transaction. */
+bool sync_advance_witnesses_core(struct node_db *ndb, const struct block *blk,
+                                 struct incremental_merkle_tree *tree,
+                                 int height, struct wallet *wallet,
+                                 bool persist_tree);
+/* Deep copy of a block for a queued write. */
+bool node_db_sync_copy_block(struct block *dst, const struct block *src);
 /* Own the descriptor and mapping as one lifetime.  This is required on
  * Windows and avoids relying on POSIX's close-after-mmap behavior. */
 struct sync_block_file_mapping {

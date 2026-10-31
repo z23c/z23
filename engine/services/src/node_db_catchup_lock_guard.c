@@ -32,6 +32,7 @@ extern volatile sig_atomic_t g_shutdown_requested;
 /* ── Commit cadence ─────────────────────────────────────────────── */
 #ifdef ZCL_TESTING
 static _Atomic int g_test_batch_size = 0;
+static _Atomic int g_test_bulk_threshold = 0;
 static _Atomic int g_test_batch_max_secs = -1;
 static _Atomic int g_test_height_delay_ms = 0;
 static _Atomic bool g_test_fake_clock = false;
@@ -80,13 +81,22 @@ int node_db_catchup_lock_guard_batch_max_secs(void)
     return NODE_DB_CATCHUP_COMMIT_BATCH_MAX_SECS;
 }
 
+int node_db_catchup_lock_guard_bulk_threshold(void)
+{
+#ifdef ZCL_TESTING
+    int override = atomic_load(&g_test_bulk_threshold);
+    if (override > 0)
+        return override;
+#endif
+    return NODE_DB_CATCHUP_BULK_THRESHOLD;
+}
+
 void node_db_catchup_lock_guard_yield_to_writers(struct db_service *svc,
                                                   bool drain_queue)
 {
-    bool drain = drain_queue && svc;
-
-    if (drain)
-        (void)db_service_run_pending(svc);
+    if (svc)
+        (void)(drain_queue ? db_service_run_pending(svc)
+                           : db_service_run_pending_bulk_safe(svc));
     if (node_db_detached_writer_waiting() && !g_shutdown_requested) {
 #ifdef ZCL_TESTING
         atomic_fetch_add(&g_yield_sleeps, 1);
@@ -96,8 +106,9 @@ void node_db_catchup_lock_guard_yield_to_writers(struct db_service *svc,
         if (atomic_load(&g_test_fake_clock))
             atomic_fetch_add(&g_test_clock_ms, NODE_DB_CATCHUP_YIELD_MS);
 #endif
-        if (drain)
-            (void)db_service_run_pending(svc);
+        if (svc)
+            (void)(drain_queue ? db_service_run_pending(svc)
+                               : db_service_run_pending_bulk_safe(svc));
     }
 }
 
@@ -210,6 +221,11 @@ void node_db_catchup_lock_guard_test_set_batch_size(int blocks)
     atomic_store(&g_test_batch_size, blocks);
 }
 
+void node_db_catchup_lock_guard_test_set_bulk_threshold(int blocks)
+{
+    atomic_store(&g_test_bulk_threshold, blocks);
+}
+
 void node_db_catchup_lock_guard_test_set_batch_max_secs(int secs)
 {
     atomic_store(&g_test_batch_max_secs, secs);
@@ -301,6 +317,7 @@ int node_db_catchup_lock_guard_test_snapshot_restarts(void)
 void node_db_catchup_lock_guard_test_reset(void)
 {
     atomic_store(&g_test_batch_size, 0);
+    atomic_store(&g_test_bulk_threshold, 0);
     atomic_store(&g_test_batch_max_secs, -1);
     atomic_store(&g_test_height_delay_ms, 0);
     atomic_store(&g_test_fake_clock, false);

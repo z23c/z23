@@ -217,11 +217,11 @@ static bool boot_restore_wallet_retract_tx(
 
 /* True when there is no node db or the durable retract succeeded. */
 static bool boot_restore_node_db_retract(
-    struct boot_svc_ctx *svc, struct block *blk, bool *keep_pending)
+    struct boot_svc_ctx *svc, struct block *blk, bool *keep_pending, int height)
 {
     return !svc->node_db ||
-           node_db_sync_wallet_disconnect_block(svc->node_db, blk,
-                                                keep_pending);
+           node_db_sync_wallet_disconnect_block(
+               svc->node_db, blk, keep_pending, height);
 }
 
 static void boot_restore_rewind_wallet(
@@ -320,7 +320,8 @@ static bool boot_process_block_restore_mempool(
                 complete = false;
             }
         }
-        if (!boot_restore_node_db_retract(svc, &blk, keep_pending)) {
+        if (!boot_restore_node_db_retract(svc, &blk, keep_pending,
+                                          path[i]->nHeight)) {
             LOG_WARN("validation",
                      "invalidate: durable wallet retract failed h=%d",
                      path[i]->nHeight);

@@ -13,6 +13,7 @@ struct wallet_disconnect_block_ctx {
     const struct block *blk;
     const bool *keep_pending;
     bool ok;
+    int height;
 };
 
 static bool wallet_disconnect_block_ctx_invalid(
@@ -63,6 +64,11 @@ static bool wallet_disconnect_block_write(struct node_db *ndb, void *opaque)
     if (!txn)
         LOG_FAIL("sync", "wallet disconnect block: transaction begin failed");
 
+    /* Witnesses that already contain this block (or a later one) describe a
+     * chain that no longer exists; the tip path rebuilds them. */
+    if (!db_sapling_note_clear_witnesses_from(ndb, ctx->height))
+        LOG_FAIL("sync", "wallet disconnect witness clear failed h=%d",
+                 ctx->height);
     for (size_t i = 0; i < ctx->blk->num_vtx; i++) {
         const struct transaction *tx = &ctx->blk->vtx[i];
         bool found = false;
@@ -89,10 +95,12 @@ static bool wallet_disconnect_block_write(struct node_db *ndb, void *opaque)
 
 bool node_db_sync_wallet_disconnect_block(struct node_db *ndb,
                                            const struct block *blk,
-                                           const bool *keep_pending)
+                                           const bool *keep_pending,
+                                           int height)
 {
     struct wallet_disconnect_block_ctx ctx = {
         .blk = blk, .keep_pending = keep_pending, .ok = false,
+        .height = height,
     };
     if (!ndb || !ndb->open || !blk || !keep_pending)
         LOG_FAIL("sync", "wallet disconnect block: invalid arguments");

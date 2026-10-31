@@ -45,6 +45,7 @@ struct db_service_job {
     db_service_free_fn free_ctx;
     bool async;
     bool require_idle;
+    bool bulk_safe; /* may run between batches of a bulk catchup walk */
     bool done;
     bool success;
     zcl_cond_t done_cond;
@@ -132,6 +133,13 @@ bool db_service_enqueue_write(struct db_service *svc,
                               db_service_write_fn fn,
                               void *ctx,
                               db_service_free_fn free_ctx);
+/* Same as db_service_enqueue_write, for a write that is safe to run between the
+ * batches of a bulk (turbo) catchup walk: it touches only rows the walk does
+ * not depend on and tolerates synchronous=OFF. Such a job runs while the walk
+ * is still going, so its submitter never waits for the whole pass. */
+bool db_service_enqueue_write_bulk_safe(struct db_service *svc,
+                                        db_service_write_fn fn, void *ctx,
+                                        db_service_free_fn free_ctx);
 bool db_service_is_worker_thread(const struct db_service *svc);
 
 /* Worker-thread only: run the plain write functions already queued by other
@@ -143,5 +151,10 @@ bool db_service_is_worker_thread(const struct db_service *svc);
  * for the worker loop. Returns the number of jobs run; 0 off the worker
  * thread. */
 size_t db_service_run_pending(struct db_service *svc);
+/* Worker-thread only: like db_service_run_pending, but runs only the queued
+ * jobs submitted bulk-safe, in queue order, wherever they sit in the queue.
+ * Other jobs stay queued. Returns the number of jobs run; 0 off the worker
+ * thread. */
+size_t db_service_run_pending_bulk_safe(struct db_service *svc);
 
 #endif

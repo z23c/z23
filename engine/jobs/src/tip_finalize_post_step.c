@@ -277,12 +277,14 @@ static void tip_finalize_wallet_sapling_outputs(struct wallet *wallet,
             wallet_copy_sapling_notes(wallet, &n_notes);
         for (size_t ni = notes_before; ni < n_notes; ni++) {
             struct sapling_received_note *note = &snap[ni];
-            node_db_sync_sapling_note(ndb,
+            if (!node_db_sync_sapling_note_at_tip(ndb,
                 note->txid.data, note->output_index,
                 (int64_t)note->value, note->rcm,
                 note->memo, 512, note->ivk,
                 note->diversifier, note->pk_d,
-                note->cm, note->nf, pindex_new->nHeight);
+                note->cm, note->nf, pindex_new->nHeight))
+                LOG_WARN("tip_finalize", "wallet note record failed at "
+                         "height %d", pindex_new->nHeight);
             zmsg_ingest_onchain_note(ndb, note->memo,
                                      note->txid.data);
         }
@@ -297,6 +299,21 @@ static bool tip_finalize_regtest_connect_enqueue_failed(
     return ndb && regtest_on_demand &&
            !node_db_sync_connect_block_async_with_wallet(
                ndb, blk, pindex_new, wallet);
+}
+
+/* Production path: keep wallet note witnesses current at the tip, independent
+ * of the catchup walk. Queued on the db service writer so the reducer thread
+ * never waits on the database; the regtest connect path does it there. */
+static void tip_finalize_advance_witnesses(bool regtest_on_demand,
+                                           struct node_db *ndb,
+                                           const struct block *blk,
+                                           struct block_index *pindex_new,
+                                           struct wallet *wallet)
+{
+    if (!regtest_on_demand && ndb &&
+        !node_db_sync_advance_tip_witnesses_async(ndb, blk, pindex_new, wallet))
+        LOG_WARN("tip_finalize", "wallet witness advance failed at height %d",
+                 pindex_new->nHeight);
 }
 
 /* Idempotent wallet subset of post-finalize publication. A body can become
@@ -341,6 +358,8 @@ static void tip_finalize_reconcile_wallet_body(
         if (tx->num_shielded_spend > 0)
             wallet_mark_sapling_nullifiers_spent(wallet, tx);
     }
+    tip_finalize_advance_witnesses(regtest_on_demand, ndb, blk, pindex_new,
+                                   wallet);
     zcl_mutex_lock(&wallet->cs);
     wallet->best_block_height = pindex_new->nHeight;
     zcl_mutex_unlock(&wallet->cs);

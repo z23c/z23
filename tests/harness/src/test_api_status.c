@@ -868,6 +868,9 @@ static bool api_status_sapling_check(
     };
     ok = api_status_match_fields(s, fields, sizeof(fields) / sizeof(fields[0]),
                                  ok);
+    /* The route is public: it must not tie a wallet note to a height. */
+    ok = ok && s && !json_get(s, "witness_ready") &&
+         !json_get(s, "witness_missing") && !json_get(s, "witness_stale");
     json_free(&root);
     return ok;
 }

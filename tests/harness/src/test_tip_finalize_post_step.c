@@ -35,6 +35,15 @@
 #include "platform/private_directory.h"
 #include "storage/coins_kv.h"
 #include "storage/coins_ram.h"
+#include "controllers/sync_controller.h"
+#include "config/db_service.h"
+#include "core/serialize.h"
+#include "models/database.h"
+#include "models/wallet_tx.h"
+#include "sapling/incremental_merkle_tree.h"
+#include "storage/anchor_kv.h"
+#include "sapling/sapling.h"
+#include "wallet/sapling_keys.h"
 #include "storage/progress_store.h"
 #include "util/stage.h"
 #include "validation/chainstate.h"
@@ -375,6 +384,282 @@ static int tp_boundary_root_probe(const char *dir, const struct block_index *bi)
     return failures;
 }
 
+static bool tp_noop_write(struct node_db *ndb, void *ctx)
+{
+    (void)ndb;
+    (void)ctx;
+    return true;
+}
+
+/* The note's stored witness: at height, with the given root. */
+static bool tp_witness_is(struct node_db *ndb, const uint8_t txid[32],
+                          int height, const struct uint256 *root)
+{
+    uint8_t *blob = NULL;
+    size_t len = 0;
+    int wh = -1;
+    struct incremental_merkle_tree proto;
+    struct incremental_witness w;
+    struct byte_stream s;
+    struct uint256 got = {0};
+    sapling_tree_init(&proto);
+    if (!db_sapling_note_load_witness(ndb, txid, 0, &blob, &len, &wh) || !blob)
+        return false;
+    stream_init_from_data(&s, blob, len);
+    bool ok = incremental_witness_deserialize(
+        &w, &s, SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH, proto.combine,
+        proto.uncommitted);
+    free(blob);
+    if (!ok)
+        return false;
+    incremental_witness_root(&w, &got);
+    return wh == height && uint256_eq(&got, root);
+}
+
+struct tp_wit {
+    struct block blk[2];
+    struct block_index bi[3];
+    struct uint256 cm[3], root[3];
+    bool built, on_disk, have_data;
+};
+
+/* Commitments, roots and the two blocks that carry the second and third. */
+static void tp_wit_blocks(struct tp_wit *t)
+{
+    struct incremental_merkle_tree tree;
+    uint8_t marker[2][32];
+    memset(marker[0], 0x5b, 32);
+    memset(marker[1], 0x5c, 32);
+    sapling_tree_init(&tree);
+    for (int i = 0; i < 3; i++) {
+        t->cm[i].data[0] = (uint8_t)(0x31 + i);
+        incremental_tree_append(&tree, &t->cm[i]);
+        incremental_tree_root(&tree, &t->root[i]);
+    }
+    t->built = tp_build_block(&t->blk[0], marker[0]) &&
+               tp_build_block(&t->blk[1], marker[1]);
+    for (int i = 0; t->built && i < 2; i++) {
+        struct transaction *tx = &t->blk[i].vtx[1];
+        tx->v_shielded_output =
+            zcl_calloc(1, sizeof(struct output_description), "tp_output");
+        tx->num_shielded_output = tx->v_shielded_output ? 1 : 0;
+        if (tx->v_shielded_output)
+            tx->v_shielded_output[0].cm = t->cm[i + 1];
+        transaction_compute_hash(tx);
+        t->blk[i].header.hashFinalSaplingRoot = t->root[i + 1];
+    }
+}
+
+/* Block index entries for heights 1..3 and the two bodies written to disk. */
+static bool tp_wit_bodies(struct tp_wit *t, const char *netdir)
+{
+    const struct chain_params *cp = chain_params_get();
+    t->on_disk = t->built;
+    t->have_data = t->on_disk;
+    for (int i = 0; i < 3; i++)
+        block_index_init(&t->bi[i]);
+    for (int i = 0; i < 3; i++) {
+        t->bi[i].nHeight = i + 1;
+        t->bi[i].hashFinalSaplingRoot = t->root[i];
+        t->bi[i].pprev = i ? &t->bi[i - 1] : NULL;
+    }
+    for (int i = 0; t->built && i < 2; i++) {
+        struct block_index *bi = &t->bi[i + 1];
+        struct disk_block_pos pos;
+        disk_block_pos_init(&pos);
+        t->on_disk = t->on_disk && t->blk[i].vtx[1].num_shielded_output == 1 &&
+                     write_block_to_disk(&t->blk[i], &pos, netdir,
+                                         cp->pchMessageStart);
+        block_get_hash(&t->blk[i], &bi->hashBlock);
+        bi->phashBlock = &bi->hashBlock;
+        bi->nTime = t->blk[i].header.nTime;
+        bi->nBits = t->blk[i].header.nBits;
+        t->have_data = t->have_data && t->on_disk &&
+                       block_index_set_have_data_verified(bi, &pos, netdir);
+    }
+    return t->built && t->have_data;
+}
+
+/* Heights 1..3: a reducer anchor row at 1, block 2 carrying one output and
+ * block 3 another, both bodies on disk. */
+static bool tp_wit_build(struct tp_wit *t, const char *netdir)
+{
+    tp_wit_blocks(t);
+    return tp_wit_bodies(t, netdir);
+}
+
+static void tp_wit_free(struct tp_wit *t)
+{
+    if (t->built)
+        for (int i = 0; i < 2; i++)
+            block_free(&t->blk[i]);
+}
+
+/* The note's nullifier the wallet key derives for a commitment at position. */
+static bool tp_wit_expected_nf(const struct sapling_key_entry *key,
+                               const uint8_t rcm[32], uint64_t position,
+                               uint8_t nf[32])
+{
+    uint8_t ak[32], nk[32];
+    sapling_ask_to_ak(key->xsk.expsk.ask, ak);
+    sapling_nsk_to_nk(key->xsk.expsk.nsk, nk);
+    return sapling_compute_nf(key->diversifier, key->pk_d, 1000, rcm, ak, nk,
+                              position, nf);
+}
+
+/* A stored note's nullifier equals nf. */
+static bool tp_wit_note_nf_is(struct node_db *ndb, const uint8_t txid[32],
+                              const uint8_t nf[32])
+{
+    struct db_sapling_note *notes = NULL;
+    int n = db_sapling_note_list_unspent_alloc(ndb, &notes);
+    bool ok = false;
+    for (int i = 0; i < n; i++)
+        if (memcmp(notes[i].txid, txid, 32) == 0)
+            ok = memcmp(notes[i].nullifier, nf, 32) == 0;
+    free(notes);
+    return ok;
+}
+
+struct tp_wire {
+    char dir[256], netdir[512];
+    struct tp_wit t;
+    struct node_db ndb;
+    struct db_service svc;
+    struct app_runtime_context rt;
+    struct wallet *w;
+    const struct sapling_key_entry *key;
+    uint8_t txid[2][32], rcm[2][32];
+    bool db_open, svc_up;
+};
+
+/* Data directory, both block bodies on disk and the reducer anchor row at 1. */
+static bool tp_wire_chain(struct tp_wire *x)
+{
+    char blocksdir[640];
+    struct incremental_merkle_tree t1;
+    test_make_tmpdir(x->dir, sizeof(x->dir), "tip_post", "wit");
+    SetDataDir(x->dir);
+    GetDataDir(true, x->netdir, sizeof(x->netdir));
+    tp_mkdir_p(x->netdir);
+    snprintf(blocksdir, sizeof(blocksdir), "%s/blocks", x->netdir);
+    tp_mkdir_p(blocksdir);
+    memset(&x->t, 0, sizeof(x->t));
+    bool built = tp_wit_build(&x->t, x->netdir);
+    sapling_tree_init(&t1);
+    incremental_tree_append(&t1, &x->t.cm[0]);
+    progress_store_close();
+    return built && progress_store_open(x->dir) &&
+           anchor_kv_ensure_schema(progress_store_db()) &&
+           anchor_kv_initialize_history(progress_store_db(), 1) &&
+           anchor_kv_add_tree(progress_store_db(), ANCHOR_POOL_SAPLING, &t1, 1);
+}
+
+/* A wallet holding a real Sapling key and one note per block, recorded in
+ * node.db with a placeholder nullifier, and the db service running. */
+static bool tp_wire_wallet(struct tp_wire *x)
+{
+    char dbpath[640];
+    uint8_t seed[32], dv[11], pk[32], memo[512] = {0};
+    uint8_t nf_old[2][32] = {{0x99}, {0x98}};
+    uint8_t ids[2] = {0x44, 0x45}, rcms[2] = {0x51, 0x52};
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", x->dir);
+    memset(seed, 0x2a, sizeof(seed));
+    x->w = zcl_calloc(1, sizeof(*x->w), "tp_wit_wallet");
+    x->db_open = x->w && node_db_open(&x->ndb, dbpath);
+    if (!x->db_open)
+        return false;
+    wallet_init(x->w);
+    x->w->sapling_notes = zcl_calloc(2, sizeof(*x->w->sapling_notes), "tp_notes");
+    if (!x->w->sapling_notes ||
+        !sapling_keystore_set_seed(&x->w->sapling_keys, seed) ||
+        !sapling_keystore_new_address(&x->w->sapling_keys, dv, pk))
+        return false;
+    x->key = &x->w->sapling_keys.keys[0];
+    db_service_init(&x->svc);
+    x->svc_up = db_service_attach(&x->svc, &x->ndb) &&
+                db_service_start_test_worker(&x->svc);
+    for (int i = 0; x->svc_up && i < 2; i++) {
+        x->txid[i][0] = ids[i];
+        x->rcm[i][0] = rcms[i];
+        x->svc_up = node_db_sync_sapling_note(
+            &x->ndb, x->txid[i], 0, 1000, x->rcm[i], memo, 512, x->key->ivk,
+            x->key->diversifier, x->key->pk_d, x->t.cm[i + 1].data, nf_old[i],
+            i + 2);
+        x->w->sapling_notes[i].used = true;
+        memcpy(x->w->sapling_notes[i].txid.data, x->txid[i], 32);
+        memcpy(x->w->sapling_notes[i].nf, nf_old[i], 32);
+    }
+    x->w->num_sapling_notes = 2;
+    x->w->sapling_notes_cap = 2;
+    x->rt.db_service = &x->svc;
+    x->rt.wallet = x->w;
+    app_runtime_set_current(&x->rt);
+    return x->svc_up;
+}
+
+static int tp_wire_check(struct tp_wire *x, bool up)
+{
+    int failures = 0;
+    uint8_t nf[2][32];
+    TP_CHECK("witness wiring: fixture up", up);
+    TP_CHECK("witness wiring: reconcile runs",
+             up && tip_finalize_run_wallet_reconcile(&x->t.bi[2]));
+    TP_CHECK("witness wiring: queue drains",
+             up && db_service_run_write(&x->svc, tp_noop_write, NULL));
+    TP_CHECK("witness wiring: the note in the tip block has a witness equal "
+             "to the header root",
+             up && tp_witness_is(&x->ndb, x->txid[1], 3, &x->t.root[2]));
+    TP_CHECK("witness wiring: the note in block 2 is replayed from disk to "
+             "the same root",
+             up && tp_witness_is(&x->ndb, x->txid[0], 3, &x->t.root[2]));
+    TP_CHECK("witness wiring: both notes hold the nullifier of their position",
+             up && tp_wit_expected_nf(x->key, x->rcm[0], 1, nf[0]) &&
+             tp_wit_expected_nf(x->key, x->rcm[1], 2, nf[1]) &&
+             tp_wit_note_nf_is(&x->ndb, x->txid[0], nf[0]) &&
+             tp_wit_note_nf_is(&x->ndb, x->txid[1], nf[1]));
+    TP_CHECK("witness wiring: the live wallet note holds it too",
+             up && memcmp(x->w->sapling_notes[0].nf, nf[0], 32) == 0 &&
+             memcmp(x->w->sapling_notes[1].nf, nf[1], 32) == 0);
+    return failures;
+}
+
+static void tp_wire_close(struct tp_wire *x)
+{
+    app_runtime_set_current(NULL);
+    if (x->svc_up)
+        db_service_stop(&x->svc);
+    if (x->db_open)
+        node_db_close(&x->ndb);
+    if (x->w) {
+        wallet_free(x->w);
+        free(x->w);
+    }
+    tp_wit_free(&x->t);
+    progress_store_close();
+    SetDataDir("");
+    ClearDataDirCache();
+    test_rm_rf(x->dir);
+}
+
+/* Tip finalize with a started db service, a wallet holding a real Sapling
+ * key, two notes (one in block 2, one in block 3), a reducer anchor row at
+ * height 1 and both bodies on disk. The wallet reconcile of block 3 must
+ * queue the witness maintenance: the note in block 2 has no witness, so its
+ * block is read back from disk and replayed, and both notes end with a
+ * witness equal to the header root at 3 and the nullifier their key derives
+ * for their position. Removing the call from the reconcile, the disk read,
+ * the replay or the wallet argument leaves a note without. */
+static int tp_witness_wiring(void)
+{
+    static struct tp_wire x;
+    memset(&x, 0, sizeof(x));
+    bool up = tp_wire_chain(&x) && tp_wire_wallet(&x);
+    int failures = tp_wire_check(&x, up);
+    tp_wire_close(&x);
+    return failures;
+}
+
 int test_tip_finalize_post_step(void);
 int test_tip_finalize_post_step(void)
 {
@@ -661,6 +946,7 @@ out_early:
     ClearDataDirCache();
     test_rm_rf(dir);
 
+    failures += tp_witness_wiring();
     printf("tip_finalize_post_step tests: %s\n",
            failures ? "FAILED" : "PASSED");
     return failures;

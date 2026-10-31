@@ -145,6 +145,7 @@ ZCL_MODULE_CAPABILITY("engine/controllers/src/sync_controller_catchup_jobs.c", C
 ZCL_MODULE_CAPABILITY("engine/controllers/src/sync_controller_sapling_tree.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/sync_controller_sapling_tree_persist.c", CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/sync_controller_sapling_tree_resume.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/controllers/src/sync_controller_tip_witness.c", CAP_FS_WRITE, "reads the reducer anchor store through sqlite, whose open can create the wal and shm files")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/sync_controller_writers.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/transaction_controller.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/transaction_controller_sign.c", CAP_FS_WRITE, "")

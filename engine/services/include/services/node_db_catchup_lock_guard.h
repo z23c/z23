@@ -50,6 +50,9 @@ struct db_service;
  * shared handle's 10 s busy timeout (ZCL_NODE_DB_BUSY_TIMEOUT_MS) so a
  * contending writer's busy-handler wait can still land. */
 #define NODE_DB_CATCHUP_COMMIT_BATCH_MAX_SECS 5
+
+/* A pass over more blocks than this runs in bulk (turbo) mode. */
+#define NODE_DB_CATCHUP_BULK_THRESHOLD 50000
 /* Pause after every batch COMMIT with no write transaction open. SQLite
  * WAL grants the write lock to whichever writer asks first, and a busy
  * handler only polls, so a walk that re-issues BEGIN IMMEDIATE the instant
@@ -83,11 +86,16 @@ int node_db_catchup_lock_guard_batch_max_secs(void);
  * waiting pays no pause.
  *
  * Bulk (turbo) walks pass drain_queue=false: they run with synchronous=OFF
- * and the txo/txi indexes dropped, and a queued job must not execute in that
- * mode, so queued jobs keep waiting for the walk as before and only detached
- * writers get the lock window. */
+ * and the txo/txi indexes dropped, and an arbitrary queued job must not
+ * execute in that mode. Only jobs submitted with
+ * db_service_enqueue_write_bulk_safe run (the wallet note and tip witness
+ * writes, so a note received at the tip does not wait for the whole pass);
+ * the rest keep waiting for the walk and detached writers get the lock window. */
 void node_db_catchup_lock_guard_yield_to_writers(struct db_service *svc,
                                                   bool drain_queue);
+
+/* Number of blocks a pass must cover to run in bulk (turbo) mode. */
+int node_db_catchup_lock_guard_bulk_threshold(void);
 
 /* Record one mid-walk batch COMMIT (test/diagnostic counter). */
 void node_db_catchup_lock_guard_note_batch_commit(void);
@@ -133,6 +141,8 @@ void node_db_catchup_lock_guard_note_outcome(bool pass_failed);
 #ifdef ZCL_TESTING
 /* Commit-cadence override: blocks <= 0 restores the default. */
 void node_db_catchup_lock_guard_test_set_batch_size(int blocks);
+/* Lower the bulk-mode threshold so a short fixture walk runs in bulk mode. */
+void node_db_catchup_lock_guard_test_set_bulk_threshold(int blocks);
 /* Batch time cap override in seconds; negative restores the default. */
 void node_db_catchup_lock_guard_test_set_batch_max_secs(int secs);
 /* Per-height walk delay so a short fixture behaves like a long walk. */

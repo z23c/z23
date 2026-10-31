@@ -21,8 +21,10 @@
 #include "storage/disk_block_io.h"
 #include "storage/anchor_kv.h"
 #include "storage/progress_store.h"
+#include "models/wallet_tx.h"
 #include "sapling/incremental_merkle_tree.h"
 #include "core/serialize.h"
+#include "core/utiltime.h"
 #include <sqlite3.h>
 
 #include <errno.h>
@@ -1042,6 +1044,255 @@ static int ndc_check_walk_yields_to_writers(struct ndc_fix_ctx *fx)
     return failures;
 }
 
+/* Tip jobs during a bulk walk.
+ *
+ * With the threshold lowered the fixture walk runs in bulk mode, the mode a
+ * seeded phone is in for hours. A job submitted bulk-safe (the wallet note and
+ * the tip witness writes) must run between the batches of that walk and its
+ * submitter must not wait for the pass; an ordinary queued job must still wait
+ * for the walk, because bulk mode runs with synchronous=OFF. */
+struct ndc_bulk {
+    struct ndc_starve st;
+    _Atomic bool safe_ran;
+    _Atomic bool safe_saw_walk;
+    _Atomic bool plain_ran_during_walk;
+    _Atomic bool note_returned;
+    _Atomic bool note_during_walk;
+    _Atomic bool tip_job_during_walk;
+    int64_t note_ms;
+};
+
+static bool ndc_bulk_safe_job(struct node_db *ndb, void *ctx)
+{
+    struct ndc_bulk *b = ctx;
+    (void)ndb;
+    atomic_store(&b->safe_saw_walk, node_db_catchup_service_active() &&
+                                    !atomic_load(&b->st.walk_done));
+    atomic_store(&b->safe_ran, true);
+    return true;
+}
+
+static bool ndc_bulk_plain_job(struct node_db *ndb, void *ctx)
+{
+    struct ndc_bulk *b = ctx;
+    (void)ndb;
+    if (!atomic_load(&b->st.walk_done))
+        atomic_store(&b->plain_ran_during_walk, true);
+    return true;
+}
+
+/* Queue the production tip witness job and record whether it started while
+ * the walk was still running. */
+static void ndc_bulk_queue_tip_job(struct ndc_bulk *b)
+{
+    struct block_index parent, tipbi;
+    struct uint256 hash = {{9}};
+    struct block blk;
+    block_init(&blk);
+    memset(&parent, 0, sizeof(parent));
+    memset(&tipbi, 0, sizeof(tipbi));
+    parent.nHeight = 1;
+    tipbi.nHeight = 2;
+    tipbi.pprev = &parent;
+    tipbi.phashBlock = &hash;
+    int runs = node_db_sync_tip_witness_test_job_runs();
+    bool queued = node_db_sync_advance_tip_witnesses_async(b->st.ndb, &blk,
+                                                           &tipbi, NULL);
+    for (int i = 0; i < 100 && queued &&
+         node_db_sync_tip_witness_test_job_runs() == runs; i++)
+        platform_sleep_ms(5);
+    atomic_store(&b->tip_job_during_walk,
+                 queued && node_db_sync_tip_witness_test_job_runs() > runs &&
+                 !atomic_load(&b->st.walk_done));
+}
+
+static void *ndc_bulk_reducer_thread(void *arg)
+{
+    struct ndc_bulk *b = arg;
+    uint8_t txid[32] = {0x66}, rcm[32] = {1}, memo[512] = {0};
+    uint8_t ivk[32] = {2}, div[11] = {3}, pk[32] = {4}, cm[32] = {5};
+    uint8_t nf[32] = {6};
+    int64_t t0 = GetTimeMillis();
+    (void)db_service_enqueue_write(b->st.svc, ndc_bulk_plain_job, b, NULL);
+    (void)db_service_enqueue_write_bulk_safe(b->st.svc, ndc_bulk_safe_job, b,
+                                             NULL);
+    bool ok = node_db_sync_sapling_note_at_tip(
+        b->st.ndb, txid, 0, 1000, rcm, memo, 512, ivk, div, pk, cm, nf, 5);
+    b->note_ms = GetTimeMillis() - t0;
+    atomic_store(&b->note_during_walk, !atomic_load(&b->st.walk_done));
+    atomic_store(&b->note_returned, ok);
+    ndc_bulk_queue_tip_job(b);
+    return NULL;
+}
+
+static bool ndc_flush_job(struct node_db *ndb, void *ctx)
+{
+    (void)ndb;
+    (void)ctx;
+    return true;
+}
+
+/* Run a bulk walk and, while it runs, the reducer-side calls under test. */
+static void ndc_bulk_run(struct ndc_bulk *b, struct db_service *svc,
+                         struct app_runtime_context *rt)
+{
+    app_runtime_set_current(rt);
+    node_db_catchup_lock_guard_test_reset();
+    node_db_catchup_lock_guard_test_set_batch_size(2);
+    node_db_catchup_lock_guard_test_set_bulk_threshold(2);
+    node_db_catchup_lock_guard_test_set_height_delay_ms(
+        NDC_YIELD_HEIGHT_DELAY_MS);
+    pthread_t walk, reducer;
+    bool w = pthread_create(&walk, NULL, ndc_starve_walk_thread, &b->st) == 0;
+    for (int i = 0; i < 200 && !node_db_catchup_service_active(); i++)
+        platform_sleep_ms(5);
+    platform_sleep_ms(100);
+    bool q = pthread_create(&reducer, NULL, ndc_bulk_reducer_thread, b) == 0;
+    if (q)
+        pthread_join(reducer, NULL);
+    if (w)
+        pthread_join(walk, NULL);
+    (void)db_service_run_write(svc, ndc_flush_job, NULL);
+    app_runtime_set_current(NULL);
+    node_db_catchup_lock_guard_test_reset();
+}
+
+static int ndc_bulk_verify(struct ndc_bulk *b, bool up, struct node_db *ndb)
+{
+    int failures = 0;
+    printf("bulk walk: up=%d walk=%d note_ms=%lld during=%d safe_ran=%d "
+           "safe_saw_walk=%d plain_during=%d\n", up,
+           atomic_load(&b->st.walk_result), (long long)b->note_ms,
+           atomic_load(&b->note_during_walk), atomic_load(&b->safe_ran),
+           atomic_load(&b->safe_saw_walk),
+           atomic_load(&b->plain_ran_during_walk));
+    NDC_CHECK("the bulk walk indexes every block",
+              up && atomic_load(&b->st.walk_result) == NDC_FIX_N);
+    NDC_CHECK("recording a note at the tip returns while the walk runs",
+              up && atomic_load(&b->note_returned) &&
+              atomic_load(&b->note_during_walk) && b->note_ms < 400);
+    NDC_CHECK("a bulk-safe job runs between the batches of the walk",
+              up && atomic_load(&b->safe_ran) &&
+              atomic_load(&b->safe_saw_walk));
+    NDC_CHECK("the queued tip witness job runs while the walk runs",
+              up && atomic_load(&b->tip_job_during_walk));
+    NDC_CHECK("an ordinary queued job waits for the walk",
+              up && !atomic_load(&b->plain_ran_during_walk));
+    NDC_CHECK("the note row exists once the queue drained",
+              up && db_sapling_note_count_unspent(ndb) == 1);
+    return failures;
+}
+
+static int ndc_check_bulk_walk_tip_jobs(struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    static struct ndc_bulk b;
+    struct db_service svc;
+    struct app_runtime_context rt = {.db_service = &svc};
+    struct node_db ndb;
+    char dir[256], path[512];
+
+    memset(&b, 0, sizeof(b));
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "bulk");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    db_service_init(&svc);
+    bool up = fx->built && node_db_open(&ndb, path) &&
+              db_service_attach(&svc, &ndb) &&
+              db_service_start_test_worker(&svc);
+    b.st.ac = &fx->ac;
+    b.st.datadir = fx->dirF;
+    b.st.svc = &svc;
+    b.st.ndb = &ndb;
+    if (up)
+        ndc_bulk_run(&b, &svc, &rt);
+    failures += ndc_bulk_verify(&b, up, &ndb);
+    if (up) {
+        db_service_stop(&svc);
+        node_db_close(&ndb);
+    }
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+enum { NDC_QR_HOLD_MS = 5000 };
+
+struct ndc_qr {
+    _Atomic bool started;
+    _Atomic bool release;
+};
+
+static bool ndc_qr_hold(struct node_db *ndb, void *ctx)
+{
+    struct ndc_qr *q = ctx;
+    (void)ndb;
+    atomic_store(&q->started, true);
+    for (int i = 0; i < NDC_QR_HOLD_MS && !atomic_load(&q->release); i++)
+        platform_sleep_ms(1);
+    return true;
+}
+
+/* A full db queue refuses the tip jobs at once; the reducer thread that
+ * submits them never waits. */
+static int ndc_check_tip_queue_refusal(void)
+{
+    int failures = 0;
+    static struct ndc_qr q;
+    struct db_service svc;
+    struct app_runtime_context rt = {.db_service = &svc};
+    struct node_db ndb;
+    char dir[256], path[512];
+
+    atomic_store(&q.started, false);
+    atomic_store(&q.release, false);
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "qfull");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    db_service_init(&svc);
+    bool up = node_db_open(&ndb, path) && db_service_attach(&svc, &ndb) &&
+              db_service_start_test_worker(&svc);
+    bool filled = false;
+    if (up) {
+        app_runtime_set_current(&rt);
+        up = db_service_enqueue_write(&svc, ndc_qr_hold, &q, NULL);
+        for (int i = 0; up && i < 500 && !atomic_load(&q.started); i++)
+            platform_sleep_ms(2);
+        for (int i = 0; i < 2 * DB_SERVICE_QUEUE_CAP && !filled; i++)
+            filled = !db_service_enqueue_write(&svc, ndc_flush_job, NULL, NULL);
+    }
+    NDC_CHECK("the queue is full behind a running job", up && filled);
+    struct block_index parent, tipbi;
+    struct uint256 hash = {{9}};
+    struct block blk;
+    block_init(&blk);
+    memset(&parent, 0, sizeof(parent));
+    memset(&tipbi, 0, sizeof(tipbi));
+    parent.nHeight = 1;
+    tipbi.nHeight = 2;
+    tipbi.pprev = &parent;
+    tipbi.phashBlock = &hash;
+    int64_t t0 = GetTimeMillis();
+    NDC_CHECK("the tip witness job is refused",
+              up && !node_db_sync_advance_tip_witnesses_async(&ndb, &blk,
+                                                              &tipbi, NULL));
+    uint8_t txid[32] = {0x67}, rcm[32] = {1}, memo[512] = {0};
+    uint8_t ivk[32] = {2}, div[11] = {3}, pk[32] = {4}, cm[32] = {5};
+    uint8_t nf[32] = {6};
+    NDC_CHECK("the note write is refused",
+              up && !node_db_sync_sapling_note_at_tip(
+                        &ndb, txid, 0, 1000, rcm, memo, 512, ivk, div, pk, cm,
+                        nf, 5));
+    NDC_CHECK("neither call waited for the running job",
+              up && GetTimeMillis() - t0 < NDC_QR_HOLD_MS / 2);
+    atomic_store(&q.release, true);
+    if (up) {
+        (void)db_service_run_write(&svc, ndc_flush_job, NULL);
+        app_runtime_set_current(NULL);
+        db_service_stop(&svc);
+        node_db_close(&ndb);
+    }
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 /* A stretch of heights that index nothing must still release the lock. */
 static int ndc_check_hole_stretch_releases_lock(struct ndc_fix_ctx *fx)
 {
@@ -1817,6 +2068,386 @@ static int ndc_check_sapling_tree_not_extended_by_old_heights(void)
     return failures;
 }
 
+static bool ndc_tip_note(struct node_db *ndb, uint8_t tag,
+                         const struct uint256 *cm, int height)
+{
+    uint8_t txid[32] = {tag}, rcm[32] = {tag, 1}, memo[512] = {0};
+    uint8_t ivk[32] = {9, tag}, div[11] = {tag}, pk_d[32] = {7, tag};
+    uint8_t nf[32] = {5, tag};
+    return node_db_sync_sapling_note(ndb, txid, 0, 1000, rcm, memo, 512, ivk,
+                                     div, pk_d, cm->data, nf, height);
+}
+
+static bool ndc_tip_witness(struct node_db *ndb, uint8_t tag, int *height,
+                            struct uint256 *root, uint8_t **blob, size_t *len)
+{
+    uint8_t txid[32] = {tag};
+    struct incremental_merkle_tree proto;
+    sapling_tree_init(&proto);
+    if (!db_sapling_note_load_witness(ndb, txid, 0, blob, len, height) || !*blob)
+        return false;
+    struct incremental_witness w;
+    struct byte_stream ws;
+    stream_init_from_data(&ws, *blob, *len);
+    if (!incremental_witness_deserialize(&w, &ws,
+            SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH, proto.combine,
+            proto.uncommitted))
+        return false;
+    incremental_witness_root(&w, root);
+    return true;
+}
+
+/* ── Wallet witnesses at the tip, independent of the catchup walk ─────
+ * A seeded node: anchor history starts at the seed (height 3) and the
+ * projection cursor is far behind. Chain A has four blocks with outputs at
+ * 4 (three outputs over two transactions, the wallet note in the middle),
+ * 5, and 7; chain B replaces block 6 and 7 of A. Block bodies come from a
+ * table through the reader seam, as the disk reader does in production. */
+enum { NT_A3, NT_A4, NT_A5, NT_A6, NT_A7, NT_B6, NT_B7, NT_NODES };
+enum { NT_NOTE = 0x60, NT_LATE = 0x70 };
+
+struct nt_node {
+    struct block_index bi;
+    struct block blk;
+    struct transaction tx[2];
+    struct uint256 root;
+};
+
+struct nt_fix {
+    struct nt_node n[NT_NODES];
+    struct uint256 cm[48];
+    int refuse; /* node whose body the reader refuses, or -1 */
+    bool with_b; /* store the replacement chain's anchor row */
+};
+
+static bool nt_outputs(struct nt_node *nd, int tx, int count,
+                       struct uint256 *cms, struct incremental_merkle_tree *t)
+{
+    transaction_init(&nd->tx[tx]);
+    if (count == 0)
+        return true;
+    nd->tx[tx].v_shielded_output =
+        calloc((size_t)count, sizeof(struct output_description)); // raw-alloc-ok:test-fixture
+    if (!nd->tx[tx].v_shielded_output)
+        return false;
+    nd->tx[tx].num_shielded_output = (size_t)count;
+    for (int i = 0; i < count; i++) {
+        nd->tx[tx].v_shielded_output[i].cm = cms[i];
+        incremental_tree_append(t, &cms[i]);
+    }
+    return true;
+}
+
+/* One block: out0 + out1 outputs over up to two transactions, taking
+ * commitments from cm[first..]; appended to t; anchor row at its height. */
+static bool nt_block(struct nt_fix *f, int id, int prev, int h, int out0,
+                     int out1, int first, struct incremental_merkle_tree *t,
+                     sqlite3 *db)
+{
+    struct nt_node *nd = &f->n[id];
+    bool ok = nt_outputs(nd, 0, out0, &f->cm[first], t) &&
+              nt_outputs(nd, 1, out1, &f->cm[first + out0], t);
+    incremental_tree_root(t, &nd->root);
+    nd->bi.nHeight = h;
+    nd->bi.hashFinalSaplingRoot = nd->root;
+    nd->bi.pprev = prev < 0 ? NULL : &f->n[prev].bi;
+    block_init(&nd->blk);
+    nd->blk.vtx = nd->tx;
+    nd->blk.num_vtx = 2;
+    if (out0 + out1 > 0 && h != 7 && (f->with_b || id != NT_B6))
+        ok = ok && anchor_kv_add_tree(db, ANCHOR_POOL_SAPLING, t, h);
+    return ok;
+}
+
+static bool nt_build(struct nt_fix *f, sqlite3 *db)
+{
+    struct incremental_merkle_tree t, after5;
+    sapling_tree_init(&t);
+    for (int i = 1; i < 48; i++) {
+        f->cm[i].data[0] = (uint8_t)i;
+        f->cm[i].data[1] = 0x77;
+    }
+    f->refuse = -1;
+    incremental_tree_append(&t, &f->cm[1]);
+    incremental_tree_append(&t, &f->cm[2]);
+    bool ok = anchor_kv_ensure_schema(db) && anchor_kv_initialize_history(db, 3);
+    ok = ok && nt_block(f, NT_A3, -1, 3, 0, 0, 0, &t, db) &&
+         anchor_kv_add_tree(db, ANCHOR_POOL_SAPLING, &t, 3);
+    ok = ok && nt_block(f, NT_A4, NT_A3, 4, 1, 2, 3, &t, db);
+    ok = ok && nt_block(f, NT_A5, NT_A4, 5, 1, 0, 6, &t, db);
+    after5 = t;
+    ok = ok && nt_block(f, NT_A6, NT_A5, 6, 0, 0, 0, &t, db);
+    ok = ok && nt_block(f, NT_A7, NT_A6, 7, 1, 0, 7, &t, db);
+    t = after5;
+    ok = ok && nt_block(f, NT_B6, NT_A5, 6, 1, 0, 40, &t, db);
+    ok = ok && nt_block(f, NT_B7, NT_B6, 7, 0, 0, 0, &t, db);
+    return ok;
+}
+
+static void nt_free(struct nt_fix *f)
+{
+    for (int i = 0; i < NT_NODES; i++)
+        for (int j = 0; j < 2; j++)
+            free(f->n[i].tx[j].v_shielded_output);
+}
+
+static bool nt_read(void *ctx, const struct block_index *bi, struct block *out)
+{
+    struct nt_fix *f = ctx;
+    for (int i = 0; i < NT_NODES; i++) {
+        const struct nt_node *nd = &f->n[i];
+        if (i == f->refuse || nd->bi.nHeight != bi->nHeight ||
+            !uint256_eq(&nd->root, &bi->hashFinalSaplingRoot))
+            continue;
+        block_init(out);
+        out->vtx = calloc(2, sizeof(*out->vtx)); // raw-alloc-ok:test-fixture
+        if (!out->vtx)
+            return false;
+        out->num_vtx = 2;
+        return transaction_copy(&out->vtx[0], &nd->tx[0]) &&
+               transaction_copy(&out->vtx[1], &nd->tx[1]);
+    }
+    return false;
+}
+
+struct nt_run {
+    struct nt_fix *f;
+    struct node_db *ndb;
+    char label[64];
+};
+
+static bool nt_tip(struct nt_run *r, int id)
+{
+    struct sync_block_reader rd = { nt_read, r->f };
+    struct block blk = r->f->n[id].blk;
+    return node_db_sync_advance_tip_witnesses_with(
+        r->ndb, &blk, &r->f->n[id].bi, NULL, &rd);
+}
+
+/* The note's witness: stored at the node's height and equal to its root. */
+static bool nt_current(struct nt_run *r, uint8_t tag, int id)
+{
+    int wh = -1;
+    struct uint256 root = {0};
+    uint8_t *blob = NULL;
+    size_t len = 0;
+    bool got = ndc_tip_witness(r->ndb, tag, &wh, &root, &blob, &len);
+    free(blob);
+    return got && wh == r->f->n[id].bi.nHeight &&
+           uint256_eq(&root, &r->f->n[id].root);
+}
+
+static int nt_summary(struct nt_run *r, int id, int ready, int missing,
+                      int stale)
+{
+    struct db_sapling_witness_summary s;
+    return db_sapling_note_witness_summary(r->ndb, r->f->n[id].bi.nHeight,
+                                           &s) &&
+           s.ready_notes == ready && s.missing_notes == missing &&
+           s.stale_notes == stale;
+}
+
+/* A node.db, a progress store, and the wallet notes of a scenario. */
+static bool nt_open(struct nt_run *r, struct node_db *ndb, char *dir,
+                    const char *name, bool late_note)
+{
+    char path[512];
+    test_make_tmpdir(dir, 256, "node_db_catchup", name);
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    r->ndb = ndb;
+    snprintf(r->label, sizeof(r->label), "%s", name);
+    return node_db_open(ndb, path) && progress_store_open(dir) &&
+           nt_build(r->f, progress_store_db()) &&
+           ndc_tip_note(ndb, NT_NOTE, &r->f->cm[4], 4) &&
+           (!late_note || ndc_tip_note(ndb, NT_LATE, &r->f->cm[6], 5)) &&
+           node_db_sync_set_tip(ndb, r->f->n[NT_A3].root.data, 1);
+}
+
+static void nt_close(struct nt_run *r, char *dir)
+{
+    progress_store_close();
+    node_db_close(r->ndb);
+    nt_free(r->f);
+    test_cleanup_tmpdir(dir);
+}
+
+#define NT_SCENARIO(NAME, LATE, WITH_B) \
+    static struct nt_fix f; \
+    struct node_db ndb; \
+    struct nt_run r = { &f, &ndb, {0} }; \
+    char dir[256]; \
+    int failures = 0; \
+    memset(&f, 0, sizeof(f)); \
+    f.with_b = (WITH_B); \
+    bool up = nt_open(&r, &ndb, dir, NAME, LATE); \
+    NDC_CHECK(NAME " fixture builds", up);
+
+/* Three outputs over two transactions, the note in the middle, then later
+ * blocks with and without outputs. */
+static int nt_check_three_outputs(void)
+{
+    NT_SCENARIO("tip_three_outputs", true, false)
+    static const int steps[] = { NT_A4, NT_A5, NT_A6, NT_A7 };
+    for (size_t i = 0; i < 4 && up; i++) {
+        NDC_CHECK("tip step succeeds", nt_tip(&r, steps[i]));
+        NDC_CHECK("the note's witness equals the header root",
+                  nt_current(&r, NT_NOTE, steps[i]));
+        if (steps[i] >= NT_A5)
+            NDC_CHECK("a note found one block later is witnessed too",
+                      nt_current(&r, NT_LATE, steps[i]));
+    }
+    NDC_CHECK("the walk's cursor did not move",
+              up && node_db_sync_get_tip_height(&ndb) == 1);
+    NDC_CHECK("no note is missing or stale", up && nt_summary(&r, NT_A7, 2, 0, 0));
+    nt_close(&r, dir);
+    return failures;
+}
+
+/* Blocks 5 and 6 never reached the tip path; block 7 replays them, and a
+ * note whose block was missed gets its witness. */
+static int nt_check_missed_blocks(void)
+{
+    NT_SCENARIO("tip_missed_blocks", true, false)
+    NDC_CHECK("block 4 witnessed", up && nt_tip(&r, NT_A4));
+    NDC_CHECK("block 7 after a gap succeeds", up && nt_tip(&r, NT_A7));
+    NDC_CHECK("the note catches up to 7", up && nt_current(&r, NT_NOTE, NT_A7));
+    NDC_CHECK("the missed note is witnessed", up && nt_current(&r, NT_LATE, NT_A7));
+    NDC_CHECK("nothing is stale", up && nt_summary(&r, NT_A7, 2, 0, 0));
+    nt_close(&r, dir);
+    return failures;
+}
+
+/* An unreadable body leaves witnesses behind, the summary says so, and the
+ * next call with the body readable repairs them. */
+static int nt_check_unreadable_body(void)
+{
+    NT_SCENARIO("tip_unreadable_body", true, false)
+    NDC_CHECK("block 4 witnessed", up && nt_tip(&r, NT_A4));
+    f.refuse = NT_A5;
+    NDC_CHECK("block 7 still advances the tip", up && nt_tip(&r, NT_A7));
+    NDC_CHECK("one note is stale and one missing",
+              up && nt_summary(&r, NT_A7, 0, 1, 1));
+    f.refuse = -1;
+    NDC_CHECK("a later call replays", up && nt_tip(&r, NT_A7));
+    NDC_CHECK("both repaired", up && nt_summary(&r, NT_A7, 2, 0, 0) &&
+              nt_current(&r, NT_NOTE, NT_A7));
+    nt_close(&r, dir);
+    return failures;
+}
+
+/* Block A6 is replaced by B6: the wallet drops its witnesses at the
+ * disconnected height and the tip path rebuilds them on chain B. */
+static int nt_check_reorg_disconnect(void)
+{
+    NT_SCENARIO("tip_reorg_disconnect", false, true)
+    for (int id = NT_A4; id <= NT_A6 && up; id++)
+        NDC_CHECK("chain A witnessed", nt_tip(&r, id) && nt_current(&r, NT_NOTE, id));
+    bool keep[2] = { false, false };
+    struct block lost = f.n[NT_A6].blk;
+    NDC_CHECK("disconnect succeeds",
+              up && node_db_sync_wallet_disconnect_block(&ndb, &lost, keep, 6));
+    NDC_CHECK("the witness at the disconnected height is gone",
+              up && nt_summary(&r, NT_A6, 0, 1, 0));
+    NDC_CHECK("chain B block succeeds", up && nt_tip(&r, NT_B7));
+    NDC_CHECK("the witness is rebuilt on chain B",
+              up && nt_current(&r, NT_NOTE, NT_B7));
+    nt_close(&r, dir);
+    return failures;
+}
+
+/* The same reorg when the disconnect hook never ran: the witness at the old
+ * tip has the right height but the wrong root, and is dropped. */
+static int nt_check_reorg_without_disconnect(void)
+{
+    NT_SCENARIO("tip_reorg_unhooked", false, true)
+    for (int id = NT_A4; id <= NT_A6 && up; id++)
+        NDC_CHECK("chain A witnessed", nt_tip(&r, id));
+    NDC_CHECK("chain B block succeeds", up && nt_tip(&r, NT_B7));
+    NDC_CHECK("the witness from the abandoned chain is not kept",
+              up && !nt_current(&r, NT_NOTE, NT_B7) &&
+              nt_summary(&r, NT_B7, 0, 1, 0));
+    NDC_CHECK("it is rebuilt on the next call",
+              up && nt_tip(&r, NT_B7) && nt_current(&r, NT_NOTE, NT_B7));
+    nt_close(&r, dir);
+    return failures;
+}
+
+/* Bodies for the long-chain scenario: the fixture's blocks up to height 5,
+ * empty blocks above. */
+static bool nt_read_long(void *ctx, const struct block_index *bi,
+                         struct block *out)
+{
+    block_init(out);
+    if (bi->nHeight < 6)
+        return nt_read(ctx, bi, out);
+    out->vtx = calloc(2, sizeof(*out->vtx)); // raw-alloc-ok:test-fixture
+    if (!out->vtx)
+        return false;
+    out->num_vtx = 2;
+    transaction_init(&out->vtx[0]);
+    transaction_init(&out->vtx[1]);
+    return true;
+}
+
+enum { NT_LONG_FIRST = 6, NT_LONG_BLOCKS = 300 };
+
+/* A note found at height 4 whose witness a reorg cleared, with the tip 301
+ * blocks later: more than one replay call covers. Every call advances the
+ * witness by a bounded number of blocks and the second reaches the tip. */
+static int nt_check_long_reorg(void)
+{
+    NT_SCENARIO("tip_long_reorg", false, false)
+    static struct block_index lc[NT_LONG_BLOCKS];
+    static struct transaction empty[2];
+    struct block tipblk;
+    block_init(&tipblk);
+    tipblk.vtx = empty;
+    tipblk.num_vtx = 2;
+    transaction_init(&empty[0]);
+    transaction_init(&empty[1]);
+    memset(lc, 0, sizeof(lc));
+    for (int i = 0; i < NT_LONG_BLOCKS; i++) {
+        lc[i].nHeight = NT_LONG_FIRST + i;
+        lc[i].hashFinalSaplingRoot = f.n[NT_A5].root;
+        lc[i].pprev = i == 0 ? &f.n[NT_A5].bi : &lc[i - 1];
+    }
+    const struct block_index *tip = &lc[NT_LONG_BLOCKS - 1];
+    struct sync_block_reader rd = { nt_read_long, &f };
+    NDC_CHECK("blocks 4 and 5 witnessed", up && nt_tip(&r, NT_A4) &&
+              nt_tip(&r, NT_A5));
+    NDC_CHECK("the reorg clears the witness",
+              up && db_sapling_note_clear_witnesses_from(&ndb, 4));
+    NDC_CHECK("the first call after the reorg succeeds",
+              up && node_db_sync_advance_tip_witnesses_with(
+                        &ndb, &tipblk, tip, NULL, &rd));
+    int wh = -1;
+    struct uint256 root = {0};
+    uint8_t *blob = NULL;
+    size_t len = 0;
+    bool got = up && ndc_tip_witness(&ndb, NT_NOTE, &wh, &root, &blob, &len);
+    free(blob);
+    NDC_CHECK("it moved forward by a bounded number of blocks, not to the tip",
+              got && wh > 5 && wh < tip->nHeight);
+    NDC_CHECK("the second call reaches the tip",
+              up && node_db_sync_advance_tip_witnesses_with(
+                        &ndb, &tipblk, tip, NULL, &rd));
+    blob = NULL;
+    got = up && ndc_tip_witness(&ndb, NT_NOTE, &wh, &root, &blob, &len);
+    free(blob);
+    NDC_CHECK("the witness is at the tip and equals its header root",
+              got && wh == tip->nHeight &&
+              uint256_eq(&root, &f.n[NT_A5].root));
+    nt_close(&r, dir);
+    return failures;
+}
+
+static int ndc_check_tip_witnesses(void)
+{
+    return nt_check_three_outputs() + nt_check_missed_blocks() +
+           nt_check_unreadable_body() + nt_check_reorg_disconnect() +
+           nt_check_reorg_without_disconnect() + nt_check_long_reorg();
+}
+
 int test_node_db_catchup_service(void)
 {
     int failures = 0;
@@ -1835,6 +2466,7 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_shielded_values(-11, "negative");
     failures += ndc_check_torn_hashless_walk();
     failures += ndc_check_sapling_tree_not_extended_by_old_heights();
+    failures += ndc_check_tip_witnesses();
 
     /* ── Commit cadence / BUSY_SNAPSHOT restart / abort-streak park ────
      * Five real on-disk blocks + active-chain slots drive three fresh
@@ -1849,6 +2481,8 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_reopen_busy_never_clears(&fx);
     failures += ndc_check_idle_walk_never_sleeps(&fx);
     failures += ndc_check_walk_yields_to_writers(&fx);
+    failures += ndc_check_bulk_walk_tip_jobs(&fx);
+    failures += ndc_check_tip_queue_refusal();
     failures += ndc_check_hole_stretch_releases_lock(&fx);
     failures += ndc_check_holes_after_rows_release_lock(&fx);
     failures += ndc_check_waiting_writer_cycles_batch(&fx);

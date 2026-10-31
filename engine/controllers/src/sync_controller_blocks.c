@@ -282,10 +282,10 @@ static bool sync_append_block_outputs(
 /* Advance Sapling commitment tree and all wallet witnesses for one block.
  * Creates initial witnesses for wallet notes whose cm appears in this block.
  * Saves updated tree and witnesses to SQLite. */
-bool advance_wallet_witnesses(struct node_db *ndb,
-                                     const struct block *blk,
-                                     struct incremental_merkle_tree *tree,
-                                     int height, struct wallet *wallet)
+bool sync_advance_witnesses_core(struct node_db *ndb, const struct block *blk,
+                                  struct incremental_merkle_tree *tree,
+                                  int height, struct wallet *wallet,
+                                  bool persist_tree)
 {
     /* Load ALL unspent notes that may need initial witnesses. A fixed 256-cap
      * would leave notes ranked below it without a witness (unspendable) and
@@ -340,7 +340,7 @@ bool advance_wallet_witnesses(struct node_db *ndb,
      * transaction while intentionally leaving that reducer-specific flag
      * false. Treating its own transaction as foreign made every post-bundle
      * catchup abort at its first block. */
-    {
+    if (persist_tree) {
         struct byte_stream ts;
         stream_init(&ts, 4096);
         incremental_tree_serialize(tree, &ts);
@@ -355,6 +355,13 @@ bool advance_wallet_witnesses(struct node_db *ndb,
     free(has_witness);
     free(wnotes);
     return ok;
+}
+
+bool advance_wallet_witnesses(struct node_db *ndb, const struct block *blk,
+                              struct incremental_merkle_tree *tree,
+                              int height, struct wallet *wallet)
+{
+    return sync_advance_witnesses_core(ndb, blk, tree, height, wallet, true);
 }
 
 static bool node_db_sync_connect_block_args_invalid(
@@ -651,7 +658,7 @@ static bool node_db_sync_connect_block_write(struct node_db *ndb, void *ctx)
     return sync->ok;
 }
 
-static bool node_db_sync_copy_block(struct block *dst, const struct block *src)
+bool node_db_sync_copy_block(struct block *dst, const struct block *src)
 {
     if (!dst || !src)
         return false;

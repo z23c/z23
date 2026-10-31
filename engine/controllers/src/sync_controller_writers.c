@@ -503,6 +503,55 @@ static bool node_db_sync_sapling_note_write(struct node_db *ndb, void *ctx)
     return note->ok;
 }
 
+static void sapling_note_ctx_fill(
+    struct sapling_note_sync_ctx *ctx, const uint8_t txid[32],
+    uint32_t output_index, int64_t value, const uint8_t rcm[32],
+    const uint8_t memo[512], size_t memo_len, const uint8_t ivk[32],
+    const uint8_t diversifier[11], const uint8_t pk_d[32],
+    const uint8_t cm[32], const uint8_t nullifier[32], int block_height)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    memcpy(ctx->note.txid, txid, 32);
+    ctx->note.output_index = output_index;
+    ctx->note.value = value;
+    memcpy(ctx->note.rcm, rcm, 32);
+    if (memo && memo_len > 0) {
+        size_t ml = memo_len < 512 ? memo_len : 512;
+        memcpy(ctx->note.memo, memo, ml);
+        ctx->note.memo_len = ml;
+    }
+    memcpy(ctx->note.ivk, ivk, 32);
+    memcpy(ctx->note.diversifier, diversifier, 11);
+    memcpy(ctx->note.pk_d, pk_d, 32);
+    memcpy(ctx->note.cm, cm, 32);
+    memcpy(ctx->note.nullifier, nullifier, 32);
+    ctx->note.block_height = block_height;
+}
+
+bool node_db_sync_sapling_note_at_tip(
+    struct node_db *ndb, const uint8_t txid[32], uint32_t output_index,
+    int64_t value, const uint8_t rcm[32], const uint8_t memo[512],
+    size_t memo_len, const uint8_t ivk[32], const uint8_t diversifier[11],
+    const uint8_t pk_d[32], const uint8_t cm[32], const uint8_t nullifier[32],
+    int block_height)
+{
+    struct db_service *svc = sync_db_service_for(ndb);
+    struct sapling_note_sync_ctx ctx;
+    sapling_note_ctx_fill(&ctx, txid, output_index, value, rcm, memo, memo_len,
+                          ivk, diversifier, pk_d, cm, nullifier, block_height);
+    if (!svc)
+        return node_db_sync_sapling_note_write(ndb, &ctx) && ctx.ok;
+    if (db_service_try_run_write(svc, node_db_sync_sapling_note_write, &ctx))
+        return ctx.ok;
+    struct sapling_note_sync_ctx *heap =
+        zcl_calloc(1, sizeof(*heap), "tip sapling note");
+    if (!heap)
+        return false;
+    *heap = ctx;
+    return db_service_enqueue_write_bulk_safe(
+        svc, node_db_sync_sapling_note_write, heap, free);
+}
+
 bool node_db_sync_sapling_note(struct node_db *ndb,
                                const uint8_t txid[32],
                                uint32_t output_index,
@@ -519,22 +568,8 @@ bool node_db_sync_sapling_note(struct node_db *ndb,
 {
     struct sapling_note_sync_ctx ctx;
 
-    memset(&ctx, 0, sizeof(ctx));
-    memcpy(ctx.note.txid, txid, 32);
-    ctx.note.output_index = output_index;
-    ctx.note.value = value;
-    memcpy(ctx.note.rcm, rcm, 32);
-    if (memo && memo_len > 0) {
-        size_t ml = memo_len < 512 ? memo_len : 512;
-        memcpy(ctx.note.memo, memo, ml);
-        ctx.note.memo_len = ml;
-    }
-    memcpy(ctx.note.ivk, ivk, 32);
-    memcpy(ctx.note.diversifier, diversifier, 11);
-    memcpy(ctx.note.pk_d, pk_d, 32);
-    memcpy(ctx.note.cm, cm, 32);
-    memcpy(ctx.note.nullifier, nullifier, 32);
-    ctx.note.block_height = block_height;
+    sapling_note_ctx_fill(&ctx, txid, output_index, value, rcm, memo, memo_len,
+                          ivk, diversifier, pk_d, cm, nullifier, block_height);
     return sync_run_write(ndb, node_db_sync_sapling_note_write, &ctx) && ctx.ok;
 }
 

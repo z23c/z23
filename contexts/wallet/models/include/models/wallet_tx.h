@@ -372,6 +372,14 @@ bool db_sapling_note_save_witness(struct node_db *ndb,
 bool db_sapling_note_advance_witness_height(struct node_db *ndb,
                                             int from_height, int to_height);
 
+/* Drop the witness of every unspent note whose witness height is at or above
+ * from_height: it contains outputs of a block that is no longer on the chain.
+ * Returns false on a database error. */
+bool db_sapling_note_clear_witnesses_from(struct node_db *ndb, int from_height);
+/* Drop one note witness. */
+bool db_sapling_note_clear_witness(struct node_db *ndb, const uint8_t txid[32],
+                                   uint32_t output_index);
+
 /* Witness creation reveals the note's exact commitment-tree position.  Persist
  * the position-derived nullifier in the SAME row update so subsequent atomic
  * reservation matches the SpendDescription rather than the decrypt-time

@@ -861,7 +861,8 @@ static void catchup_pass_init(struct catchup_pass *ps, struct node_db *ndb,
     fflush(stdout);
 
     /* Turbo mode: disable fsync, drop indexes, enlarge cache. */
-    ps->cb.bulk_mode = (ps->total > 50000);
+    ps->cb.bulk_mode =
+        ps->total > node_db_catchup_lock_guard_bulk_threshold();
 }
 
 /* Leave turbo mode and close the pass after a failed transaction open. */
