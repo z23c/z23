@@ -41,6 +41,12 @@
 #include <unistd.h>
 
 #define GATE_SCRIPT_REL "tools/scripts/cold_start_to_tip_stopwatch.sh"
+/* macOS ships no /bin/true; its stand-in node binary lives in /usr/bin. */
+#if defined(__APPLE__)
+#define SPG_TRUE_BIN "ZCL_CS_NODE_BIN=/usr/bin/true"
+#else
+#define SPG_TRUE_BIN "ZCL_CS_NODE_BIN=/bin/true"
+#endif
 
 #define SPG_CHECK(name, expr) do { \
     printf("stopwatch_peer_gate: %s... ", (name)); \
@@ -192,7 +198,7 @@ static int run_gate(const char *root, const char *artifacts, int port,
     argv[n++] = "/usr/bin/env";
     argv[n++] = peer;
     argv[n++] = art;
-    argv[n++] = "ZCL_CS_NODE_BIN=/bin/true";
+    argv[n++] = SPG_TRUE_BIN;
     argv[n++] = "ZCL_CS_PEER_HANDSHAKE_SECS=3";
     argv[n++] = "ZCL_CS_PEER_TIP_TOLERANCE=1000";
     if (expected_tip[0]) argv[n++] = tip;
