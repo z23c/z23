@@ -53,9 +53,9 @@ static struct {
     float down_x, down_y;
     /* Obscured touches are dropped while the wallet is shown, whatever the window gate does. */
     struct zapp_touch_gate gate;
-    /* The app went out of view on a wallet screen: the wallet data is gone and the window protection is kept until a
-     * screen without wallet data has been drawn after the app returns. parking is set while that move is made. */
-    bool held, parking;
+    /* Set while the app goes out of view on a wallet screen: the wallet data goes and the window protection stays
+     * until wallet_screens_settle() runs on a tick after the app returns. */
+    bool parking;
 } shell;
 
 static void go(JNIEnv *env, enum screen next);
@@ -369,14 +369,14 @@ static void enter_wallet(JNIEnv *env)
 }
 static void leave_wallet(JNIEnv *env)
 {
-    if (shell.parking) { wallet_screens_pause(); shell.held = true; }
+    if (shell.parking) wallet_screens_pause();
     else wallet_screens_close();
     zapp_wallet_ui_clear(env);
 }
 static void go(JNIEnv *env, enum screen next)
 {
     if (shell.current == SCREEN_WALLET) leave_wallet(env);
-    if (next == SCREEN_WALLET) { shell.gate.protect = true; shell.held = false; }
+    if (next == SCREEN_WALLET) shell.gate.protect = true;
     else zapp_touch_gate_release(&shell.gate);
     shell.current = next;
     shell.action_notice[0] = 0;
@@ -588,12 +588,10 @@ void zapp_shell_dropped(JNIEnv *env)
 void zapp_shell_tick(JNIEnv *env)
 {
     if (!shell.activity) return;
+    /* Off the wallet screens, the first tick after the app returned finds Home on screen: the protection a pause
+     * kept can go. */
     if (shell.current == SCREEN_WALLET) zapp_wallet_ui_tick(env);
-    else if (shell.held) {
-        /* The first tick after the app returned: Home has been on screen for at least one frame. */
-        shell.held = false;
-        wallet_screens_close();
-    }
+    else wallet_screens_settle();
 }
 void zapp_shell_resume(JNIEnv *env)
 {

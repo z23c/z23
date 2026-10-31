@@ -29,6 +29,8 @@ struct summary {
     int64_t pending_confirmations;
     int64_t public_zat;
     int64_t tip;
+    int64_t header;
+    int64_t scanned;
     int64_t blocks_behind;
     bool current;
     bool send_allowed;
@@ -98,9 +100,8 @@ static bool parse_pending(const struct json_value *data, struct summary *s)
 
 static bool parse_chain(const struct json_value *data, struct summary *s)
 {
-    int64_t header = 0, scanned = 0;
-    return read_int(data, "tip_height", &s->tip) && read_int(data, "header_height", &header) &&
-           read_int(data, "scanned_through_height", &scanned) &&
+    return read_int(data, "tip_height", &s->tip) && read_int(data, "header_height", &s->header) &&
+           read_int(data, "scanned_through_height", &s->scanned) &&
            read_count(data, "blocks_behind", &s->blocks_behind) &&
            read_flag(data, "current", &s->current) && (!s->current || s->tip >= 0);
 }
@@ -157,17 +158,22 @@ static void render_balance(const struct summary *s, struct wallet_view *out)
     snprintf(out->balance, sizeof(out->balance), "%s ZCL", amount);
 }
 
+/* pending_min_confirmations_needed is when the first pending note arrives, not the rest. A single note arrives
+ * whole at that time, so only then is the whole amount said to arrive in it. */
 static void render_pending(const struct summary *s, struct wallet_view *out)
 {
     char amount[32];
     out->pending[0] = '\0';
     if (s->pending == 0 || !zapp_zat_format((uint64_t)s->pending, amount, sizeof(amount))) return;
-    if (s->pending_notes > 0 && s->pending_confirmations > 0)
-        snprintf(out->pending, sizeof(out->pending), "%s ZCL arriving, %lld more confirmation%s",
-                 amount, (long long)s->pending_confirmations,
-                 s->pending_confirmations == 1 ? "" : "s");
+    const char *unit = s->pending_confirmations == 1 ? "" : "s";
+    if (s->pending_notes == 1 && s->pending_confirmations > 0)
+        snprintf(out->pending, sizeof(out->pending), "%s ZCL arriving in %lld confirmation%s", amount,
+                 (long long)s->pending_confirmations, unit);
+    else if (s->pending_notes > 1 && s->pending_confirmations > 0)
+        snprintf(out->pending, sizeof(out->pending), "%s ZCL pending. The next arrives in %lld confirmation%s.", amount,
+                 (long long)s->pending_confirmations, unit);
     else
-        snprintf(out->pending, sizeof(out->pending), "%s ZCL arriving", amount);
+        snprintf(out->pending, sizeof(out->pending), "%s ZCL pending", amount);
 }
 
 static void render_public(const struct summary *s, struct wallet_view *out)
@@ -219,6 +225,7 @@ static void render_known(const struct summary *s, struct wallet_view *out)
     render_balance(s, out);
     render_pending(s, out);
     render_public(s, out);
+    out->scanning = s->blocks_behind > 0 || s->scanned < s->header;
     render_sync(s, out);
     render_send(s, out);
     out->send_allowed = s->send_allowed;

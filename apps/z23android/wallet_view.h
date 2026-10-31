@@ -16,7 +16,8 @@ struct wallet_view {
     bool known;
     /* "1.23456789 ZCL", or "Balance unknown". */
     char balance[WALLET_VIEW_LINE];
-    /* "0.5 ZCL arriving, 7 more confirmations", or "" when nothing is arriving. */
+    /* "0.5 ZCL pending. The next arrives in 7 confirmations.", "0.5 ZCL arriving in 7 confirmations" for a single
+     * note, or "" when nothing is pending. */
     char pending[WALLET_VIEW_LINE];
     /* "0.1 ZCL public", or "" when there is no public balance. */
     char public_line[WALLET_VIEW_LINE];
@@ -25,6 +26,8 @@ struct wallet_view {
     /* "" when sending is allowed, otherwise one plain sentence. */
     char send[WALLET_VIEW_LINE];
     bool send_allowed;
+    /* The wallet has not yet scanned every block the node knows, so a list of its transactions may be incomplete. */
+    bool scanning;
 };
 
 /* Parse the reply and fill out. Returns false, with out set to the unknown

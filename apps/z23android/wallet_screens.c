@@ -31,7 +31,7 @@ struct entry {
     enum direction direction;
     enum pool pool;
     enum status status;
-    bool amount_known, time_known, memo_present;
+    bool amount_known, time_known, memo_present, all_shielded;
     uint64_t amount_zat;
     int64_t time;
     char txid[TXID_MAX]; /* empty when the node gave none that is a transaction id */
@@ -67,7 +67,7 @@ struct flight { bool running, queued; struct job next; };
 static struct {
     pthread_mutex_t lock;
     struct wallet_env env;
-    bool ready, secure, blocked;
+    bool ready, secure, blocked, held;
     unsigned epoch, version, dropped;
     enum wallet_page page;
     struct data d;
@@ -229,9 +229,14 @@ static const char *direction_label(enum direction direction)
     return direction == DIR_SENT ? "Sent" : direction == DIR_RECEIVED ? "Received" :
            direction == DIR_INTERNAL ? "Moved inside your wallet" : "Direction unknown";
 }
-static const char *pool_label(enum pool pool)
+/* What the entry says about privacy, or "" when the node makes no claim. A payment sent from a private balance may
+ * still have public outputs, so an entry that spent from the wallet is called private only when the node reports every
+ * output shielded; a received or internal move needs no such report. */
+static const char *pool_label(const struct entry *e)
 {
-    return pool == POOL_PRIVATE ? "Private" : pool == POOL_PUBLIC ? "Public" : "Privacy unknown";
+    if (e->pool == POOL_PUBLIC) return "Public";
+    if (e->pool == POOL_PRIVATE) return e->direction == DIR_RECEIVED || e->direction == DIR_INTERNAL || e->all_shielded ? "Private" : "";
+    return "Privacy unknown";
 }
 static const char *state_label(enum status status)
 {
@@ -261,7 +266,8 @@ static void row_text(const struct entry *e, char *out, size_t cap)
     char amount[48], date[32];
     amount_label(e, amount, sizeof(amount));
     date_label(e, false, date, sizeof(date));
-    snprintf(out, cap, "%s · %s · %s · %s · %s", direction_label(e->direction), pool_label(e->pool), amount, state_label(e->status), date);
+    const char *pool = pool_label(e);
+    snprintf(out, cap, "%s%s%s · %s · %s · %s", direction_label(e->direction), pool[0] ? " · " : "", pool, amount, state_label(e->status), date);
 }
 
 static void history_items(struct wallet_screen *s)
@@ -271,7 +277,8 @@ static void history_items(struct wallet_screen *s)
     title(s, "History");
     if (d->history_pending) line(s, "Loading…");
     else if (d->history_failed) note(s, "History could not be read. Check that your node is running, then open History again.");
-    else if (!d->rows) line(s, "No transactions yet.");
+    else if (!d->rows) line(s, !d->funds_loaded || !d->view.known ? "None found so far." :
+                              d->view.scanning ? "None found so far. The wallet is still scanning the chain." : "No transactions yet.");
     for (size_t i = 0; i < d->rows; ++i) {
         row_text(&d->entry[i], text, sizeof(text));
         struct wallet_item *item = add(s, WALLET_ITEM_BUTTON, WALLET_ACT_DETAIL, text);
@@ -302,7 +309,8 @@ static void detail_items(struct wallet_screen *s)
     const struct entry *e = &d->entry[d->detail < d->rows ? d->detail : 0];
     char text[WALLET_TEXT_MAX];
     title(s, direction_label(e->direction));
-    line(s, e->pool == POOL_PUBLIC ? "Public: the amount and addresses are visible to everyone." : pool_label(e->pool));
+    line(s, e->pool == POOL_PUBLIC ? "Public: the amount and addresses are visible to everyone." :
+            pool_label(e)[0] ? pool_label(e) : "The node does not say whether every part of this payment was private.");
     amount_label(e, text, sizeof(text));
     (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, text);
     line(s, state_label(e->status));
@@ -469,7 +477,7 @@ static void apply_address(bool ok, bool missing, bool latest, const char *json)
     else if (missing) {
         st.d.no_receive = true;
         copy(st.d.note, sizeof(st.d.note), "This build cannot make a new address.");
-    } else copy(st.d.note, sizeof(st.d.note), "No address was made. The node may not be running, the wallet may be locked, or it may already hold 256 keys, the most it can. The reply did not say which.");
+    } else copy(st.d.note, sizeof(st.d.note), "No address was made. Check that your node is running.");
     drop_tree(&root);
 }
 
@@ -480,7 +488,7 @@ static enum direction read_direction(const char *text)
 static void read_entry(const struct json_value *row, struct entry *e)
 {
     const struct json_value *amount = typed(row, "amount_zat", JSON_INT), *time = typed(row, "time", JSON_INT);
-    const struct json_value *memo = typed(row, "memo_present", JSON_BOOL);
+    const struct json_value *memo = typed(row, "memo_present", JSON_BOOL), *shielded = typed(row, "all_outputs_shielded", JSON_BOOL);
     const char *kind = text_of(row, "kind"), *status = text_of(row, "status"), *txid = text_of(row, "txid");
     memset(e, 0, sizeof(*e));
     e->direction = read_direction(text_of(row, "direction"));
@@ -496,6 +504,7 @@ static void read_entry(const struct json_value *row, struct entry *e)
     }
     if (wallet_txid_valid(txid)) copy(e->txid, sizeof(e->txid), txid);
     e->memo_present = memo && json_get_bool(memo);
+    e->all_shielded = shielded && json_get_bool(shielded);
 }
 /* Reads the page. False when the reply is not exactly the typed frame, which is an error and not an empty wallet. */
 static bool read_page(const struct json_value *data)
@@ -682,7 +691,11 @@ static size_t enter(enum wallet_page page, struct job *jobs)
         (void)submit(jobs, &count, K_FLEET, "fleet", "");
     }
     if (page == WALLET_PAGE_RECEIVE) { st.d.address_pending = true; (void)submit(jobs, &count, K_LATEST, "latest", ""); }
-    if (page == WALLET_PAGE_HISTORY) { st.d.history_pending = true; (void)submit(jobs, &count, K_HISTORY, "history", ""); }
+    if (page == WALLET_PAGE_HISTORY) {
+        st.d.history_pending = true;
+        (void)submit(jobs, &count, K_HISTORY, "history", "");
+        (void)submit(jobs, &count, K_SUMMARY, "summary", "");
+    }
     touch();
     return count;
 }
@@ -703,6 +716,7 @@ bool wallet_screens_init(const struct wallet_env *env)
 
 static void leave_locked(bool keep_protection)
 {
+    st.held = keep_protection && st.secure;
     ++st.epoch;
     wipe();
     drop_queued();
@@ -897,6 +911,14 @@ void wallet_screens_tick(void)
     }
     pthread_mutex_unlock(&st.lock);
     dispatch(jobs, count);
+}
+
+/* The caller has drawn a screen without wallet data since the pause. */
+void wallet_screens_settle(void)
+{
+    pthread_mutex_lock(&st.lock);
+    if (st.ready && st.held && st.page == WALLET_PAGE_NONE) leave_locked(false);
+    pthread_mutex_unlock(&st.lock);
 }
 
 bool wallet_screens_active(void)

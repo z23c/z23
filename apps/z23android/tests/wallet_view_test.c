@@ -49,6 +49,7 @@ static void assert_unknown(const struct wallet_view *v)
     assert(!strcmp(v->pending, "Pending amount unknown"));
     assert(!strcmp(v->public_line, "Public amount unknown"));
     assert(!strcmp(v->sync, "Sync state unknown"));
+    assert(!v->scanning);
     assert(!strcmp(v->send, "Sending is unavailable until the wallet state loads."));
 }
 
@@ -58,7 +59,8 @@ static void test_valid_reply(void)
     assert(wallet_view_from_summary(VALID_REPLY, &v));
     assert(v.known);
     assert(!strcmp(v.balance, "1.23456789 ZCL"));
-    assert(!strcmp(v.pending, "0.5 ZCL arriving, 7 more confirmations"));
+    assert(!v.scanning);
+    assert(!strcmp(v.pending, "0.5 ZCL pending. The next arrives in 7 confirmations."));
     assert(!strcmp(v.public_line, "0.1 ZCL public"));
     assert(!strcmp(v.sync, "Up to date at block 3000000"));
     assert(v.send[0] == '\0');
@@ -81,14 +83,28 @@ static void test_empty_lines_and_singular(void)
     replace_once(json, sizeof(json), VALID_REPLY, "\"pending_min_confirmations_needed\":7",
                  "\"pending_min_confirmations_needed\":1");
     assert(wallet_view_from_summary(json, &v) && v.known);
-    assert(!strcmp(v.pending, "0.5 ZCL arriving, 1 more confirmation"));
+    assert(!strcmp(v.pending, "0.5 ZCL pending. The next arrives in 1 confirmation."));
 
     replace_once(json, sizeof(json), VALID_REPLY, "\"pending_notes\":2", "\"pending_notes\":0");
     replace_once(json2, sizeof(json2), json, "\"pending_min_confirmations_needed\":7",
                  "\"pending_min_confirmations_needed\":0");
     assert(wallet_view_from_summary(json2, &v) && v.known);
-    assert(!strcmp(v.pending, "0.5 ZCL arriving"));
-    printf("  empty pending and public lines, singular confirmation\n");
+    assert(!strcmp(v.pending, "0.5 ZCL pending"));
+
+    /* Five notes of 1 ZCL and one of 5 ZCL need 1 and 10 confirmations: only the next one arrives in 1, so the
+     * sum is never said to arrive in it. */
+    replace_once(json, sizeof(json), VALID_REPLY, "\"pending_zat\":50000000,\"pending\":\"0.50000000\"",
+                 "\"pending_zat\":600000000,\"pending\":\"6.00000000\"");
+    replace_once(json2, sizeof(json2), json, "\"pending_min_confirmations_needed\":7",
+                 "\"pending_min_confirmations_needed\":1");
+    assert(wallet_view_from_summary(json2, &v) && v.known);
+    assert(!strcmp(v.pending, "6 ZCL pending. The next arrives in 1 confirmation.") && !strstr(v.pending, "arriving"));
+
+    /* One note arrives whole. */
+    replace_once(json, sizeof(json), VALID_REPLY, "\"pending_notes\":2", "\"pending_notes\":1");
+    assert(wallet_view_from_summary(json, &v) && v.known);
+    assert(!strcmp(v.pending, "0.5 ZCL arriving in 7 confirmations"));
+    printf("  empty pending and public lines, singular confirmation, one note and several\n");
 }
 
 static void test_amount_format(void)
@@ -117,6 +133,22 @@ static void test_amount_format(void)
     assert(wallet_view_from_summary(json2, &v) && v.known);
     assert(!strcmp(v.balance, "0.00000000 ZCL"));
     printf("  zatoshi to 8-decimal balance, no floating point\n");
+}
+
+/* The scan state tells a list of transactions that it may be incomplete. */
+static void test_scan_state(void)
+{
+    char json[2048], json2[2048];
+    struct wallet_view v;
+    replace_once(json, sizeof(json), VALID_REPLY, "\"scanned_through_height\":3000000",
+                 "\"scanned_through_height\":2999000");
+    assert(wallet_view_from_summary(json, &v) && v.known && v.scanning);
+    replace_once(json2, sizeof(json2), VALID_REPLY, "\"blocks_behind\":0,\"current\":true", "\"blocks_behind\":3,\"current\":true");
+    assert(wallet_view_from_summary(json2, &v) && v.known && v.scanning);
+    /* A node that is not current, with every block scanned, says it is not up to date and does not claim a scan. */
+    replace_once(json2, sizeof(json2), VALID_REPLY, "\"blocks_behind\":0,\"current\":true", "\"blocks_behind\":0,\"current\":false");
+    assert(wallet_view_from_summary(json2, &v) && v.known && !v.scanning && !strstr(v.sync, "Up to date"));
+    printf("  scan state, a node that is not current\n");
 }
 
 static void test_sync_lines(void)
@@ -322,6 +354,7 @@ int main(void)
     test_valid_reply();
     test_empty_lines_and_singular();
     test_amount_format();
+    test_scan_state();
     test_sync_lines();
     test_zat_limit();
     test_send_reasons();

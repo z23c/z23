@@ -37,7 +37,8 @@
  *            sentence saying this build cannot make a new address, and no New address button.
  *   history  zcl.wallet_history.v1: entries[] of {txid, status (confirmed | pending), time, direction
  *            (received | sent | internal | unknown), kind (private | public), amount_zat | null,
- *            memo_present}, count and next_cursor (a string, or null on the last page).
+ *            memo_present, all_outputs_shielded}. A sent entry is called private only when the node says
+ *            all_outputs_shielded is true; a missing field makes no claim of privacy, count and next_cursor (a string, or null on the last page).
  *   detail   zcl.wallet_history.v1 with entry: the same row plus memo (text) or memo_hex. */
 
 #define WALLET_PAGE_ROWS 10u
@@ -115,6 +116,9 @@ void wallet_screens_close(void);
  * protection in force, so a capture taken before the next frame still shows nothing. The caller removes it
  * with wallet_screens_close() once a screen that holds no wallet data has been drawn. */
 void wallet_screens_pause(void);
+/* Call on the UI thread once a screen that holds no wallet data has been drawn after a pause: removes the
+ * protection the pause kept. Does nothing when no pause is waiting or the owner went back into the wallet. */
+void wallet_screens_settle(void);
 /* Back one step inside the wallet; false when already on Funds, where Back leaves for Home. */
 bool wallet_screens_back(void);
 /* A tap on an item. */

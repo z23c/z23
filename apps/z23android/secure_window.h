@@ -13,9 +13,17 @@ struct zapp_secure_ops {
     void *ctx;
     bool (*flag_secure)(void *ctx, bool on);
     bool (*filter_touches)(void *ctx, bool on);
+    /* An overlay window cannot be drawn over the app (Window.setHideOverlayWindows, needs the HIDE_OVERLAY_WINDOWS
+     * permission). A tap filter cannot see an overlay that covers a code and takes no tap. */
+    bool (*hide_overlays)(void *ctx, bool on);
+    /* The recents thumbnail is not captured (Activity.setRecentsScreenshotEnabled). */
+    bool (*recents)(void *ctx, bool on);
+    /* Accessibility services that do not declare access to sensitive data cannot read the window. */
+    bool (*accessibility)(void *ctx, bool on);
 };
-/* Applies both protections, or removes both, and attempts each even when the other fails. False
- * means a protection is not in force: the caller must not show wallet content. */
+/* Applies every protection, or removes every one, and attempts each even when another fails. A NULL
+ * member is not applied; the Android constructor sets all five. False means a protection is not in force:
+ * the caller must not show wallet content. */
 bool zapp_secure_window_apply(const struct zapp_secure_ops *ops, bool on);
 
 /* AMOTION_EVENT_FLAG_WINDOW_IS_OBSCURED (0x1) and MotionEvent.FLAG_WINDOW_IS_PARTIALLY_OBSCURED (0x2,
