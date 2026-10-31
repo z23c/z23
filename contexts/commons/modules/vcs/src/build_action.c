@@ -210,6 +210,15 @@ static bool build_resolve_file(const char *candidate, char resolved[PATH_MAX],
               platform_positioned_file_open_resolved(&file, candidate) &&
               platform_positioned_file_path(&file, resolved, PATH_MAX) &&
               (!stamp || platform_positioned_file_snapshot(&file, stamp));
+#if defined(__APPLE__)
+    /* F_GETPATH names an arbitrary hard link of the inode: /usr/bin/cc,
+     * c++ and git share one file, so the handle path flips between them
+     * from call to call and the cache staleness comparison failed at random.
+     * The name realpath() resolved is stable; bytes and stamp stay bound to
+     * the handle opened above. */
+    if (ok && strlen(candidate) < PATH_MAX)
+        memcpy(resolved, candidate, strlen(candidate) + 1u);
+#endif
     platform_positioned_file_close(&file);
     return ok;
 }

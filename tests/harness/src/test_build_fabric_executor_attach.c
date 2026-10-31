@@ -1819,6 +1819,26 @@ static int test_bf_attach_runtime_closure_platform(void)
     return failures;
 }
 
+/* The process-wide capsule cache must stay current while nothing changes.
+ * On macOS the compiler path is one of many hard links to a single inode and
+ * the handle path used to flip between them, so the cache reported itself
+ * stale at random and the attach refused as executor-toolchain-cache-*. */
+static int test_bf_attach_toolchain_cache_stable(void)
+{
+    int failures = 0;
+    TEST("build_fabric_attach: toolchain capsule cache stays current while the host is unchanged") {
+        struct vcs_toolchain_capsule_v1 capsule, cached;
+        struct platform_toolchain_descriptor descriptor;
+        ASSERT(vcs_toolchain_capsule_v1_capture(&capsule));
+        for (int i = 0; i < 200; i++) {
+            ASSERT(vcs_toolchain_capsule_v1_cached(&cached, &descriptor));
+            ASSERT_EQ(memcmp(&cached, &capsule, sizeof(capsule)), 0);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_build_fabric_attach(void)
 {
     int failures = 0;
@@ -1829,6 +1849,7 @@ int test_build_fabric_attach(void)
     failures += test_bf_worker_owner_cases();
 #endif
     failures += test_bf_attach_executor_key_binds_tool_bytes();
+    failures += test_bf_attach_toolchain_cache_stable();
     failures += test_bf_attach_runtime_closure_platform();
     failures += test_bf_attach_miss_and_poisoned_record();
     failures += test_bf_attach_input_cas_refusals();
