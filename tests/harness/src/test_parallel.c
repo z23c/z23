@@ -91,6 +91,11 @@ static pid_t g_tmpfs_owner;
 static bool g_tmpfs_green;
 static bool g_tmpfs_retained;
 
+static void tmpfs_finish(int exit_code, int load_flaky_groups)
+{
+    g_tmpfs_green = exit_code == 0 && load_flaky_groups == 0;
+}
+
 static void tmpfs_cleanup(void)
 {
     if (g_tmpfs_owner != getpid() || !g_tmpfs_root[0]) return;
@@ -3706,7 +3711,7 @@ int main(int argc, char **argv)
     free(results);
     int exit_code = retry_probe_exit(failed_groups, audit_diverged, observation_refused);
 #if defined(__linux__)
-    g_tmpfs_green = exit_code == 0 && load_flaky_groups == 0;
+    tmpfs_finish(exit_code, load_flaky_groups);
 #endif
     return exit_code;
 }
