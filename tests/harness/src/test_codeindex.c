@@ -992,9 +992,9 @@ static int test_codeindex_platform_arm_context_map(void)
 
     struct ci_context_assignment assignment;
     size_t context_count = 0;
-    CI_CHECK("context taxonomy has exactly ten target contexts",
+    CI_CHECK("context taxonomy has exactly eleven target contexts",
              codeindex_context_names(&context_count) != NULL &&
-             context_count == 10);
+             context_count == 11);
     CI_CHECK("messaging file has one physical context and model shape",
              codeindex_context_classify("contexts/messaging/models/src/zmsg.c", &assignment) &&
              assignment.production && !assignment.overlap && !assignment.orphan &&
