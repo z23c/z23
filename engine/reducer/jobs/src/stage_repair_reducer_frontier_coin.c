@@ -178,6 +178,52 @@ static enum coin_backfill_disposition coin_backfill_disposition(
     return COIN_BACKFILL_DISP_NEXT;
 }
 
+/* Both out-parameters must be present for the replay chain to run. */
+static bool replay_outputs_present(
+    struct stage_reducer_frontier_reconcile_result *out,
+    bool *handled)
+{
+    return out && handled;
+}
+
+/* The caller initialises *cb. false is an infrastructure failure the callee
+ * already logged (the caller returns false); named refusals arrive as
+ * cb->status with a true return. */
+static bool replay_run_coin_backfill(sqlite3 *db, struct main_state *ms,
+                                     bool apply,
+                                     struct coin_backfill_result *cb)
+{
+    struct coin_backfill_io io = {
+        .read_block = repair_read_block_thunk,
+        .user = ms,
+        .ndb = app_runtime_node_db(),
+    };
+    return stage_repair_coin_backfill_try(db, ms, &io, apply, cb);
+}
+
+/* Outcome of the value_overflow and coin-backfill prefix of the replay. */
+enum replay_prefix_status {
+    REPLAY_PREFIX_FAILED,
+    REPLAY_PREFIX_VALUE_OVERFLOW_REPAIRED,
+    REPLAY_PREFIX_COIN_BACKFILL_RAN,
+};
+
+static enum replay_prefix_status replay_run_prefix_repairs(
+    sqlite3 *db,
+    struct main_state *ms,
+    bool apply,
+    struct stage_reducer_frontier_reconcile_result *out,
+    struct coin_backfill_result *cb)
+{
+    if (!maybe_repair_value_overflow(db, ms, apply, out))
+        return REPLAY_PREFIX_FAILED;
+    if (out->value_overflow_repaired)
+        return REPLAY_PREFIX_VALUE_OVERFLOW_REPAIRED;
+    if (!replay_run_coin_backfill(db, ms, apply, cb))
+        return REPLAY_PREFIX_FAILED;
+    return REPLAY_PREFIX_COIN_BACKFILL_RAN;
+}
+
 bool stage_reducer_frontier_try_replay_repairs(
     sqlite3 *db,
     struct main_state *ms,
@@ -185,13 +231,16 @@ bool stage_reducer_frontier_try_replay_repairs(
     struct stage_reducer_frontier_reconcile_result *out,
     bool *handled)
 {
-    if (!out || !handled)
+    if (!replay_outputs_present(out, handled))
         LOG_FAIL("stage_repair", "replay repair: NULL output");
     *handled = false;
 
-    if (!maybe_repair_value_overflow(db, ms, apply, out))
+    struct coin_backfill_result cb = {0};
+    enum replay_prefix_status prefix =
+        replay_run_prefix_repairs(db, ms, apply, out, &cb);
+    if (prefix == REPLAY_PREFIX_FAILED)
         return false;
-    if (out->value_overflow_repaired) {
+    if (prefix == REPLAY_PREFIX_VALUE_OVERFLOW_REPAIRED) {
         LOG_WARN("stage_repair",
                  "[stage_repair] reducer_frontier repaired stale "
                  "value_overflow hole h=%d utxo_apply=%d->%d; "
@@ -209,14 +258,6 @@ bool stage_reducer_frontier_try_replay_repairs(
      * REPAIRED claim the tick as progress. Refusals claim the tick as a named
      * blocker without setting `repaired`; falling through lets unrelated cursor
      * clamps masquerade as success while the coin hole remains unresolved. */
-    struct coin_backfill_result cb = {0};
-    struct coin_backfill_io io = {
-        .read_block = repair_read_block_thunk,
-        .user = ms,
-        .ndb = app_runtime_node_db(),
-    };
-    if (!stage_repair_coin_backfill_try(db, ms, &io, apply, &cb))
-        return false;
     out->coin_backfill_attempted = cb.status != COIN_BACKFILL_NOT_APPLICABLE;
     out->coin_backfill_status = (int)cb.status;
     out->coin_backfill_hole_height = cb.hole_height;
