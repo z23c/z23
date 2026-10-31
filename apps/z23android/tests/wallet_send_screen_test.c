@@ -672,16 +672,21 @@ static void outcome_mapping_is_pinned(void)
 {
     assert(wss_commit_outcome_of(true, true, NULL) == WSS_COMMITTED);
     assert(wss_commit_outcome_of(true, true, "WALLET_RPC_ERROR") == WSS_COMMITTED);
-    assert(wss_commit_outcome_of(true, false, "SEND_KEY_RELEASED") == WSS_KEY_RELEASED);
+    assert(wss_commit_outcome_of(true, false, "SEND_REFUSED_KEY_RELEASED") == WSS_KEY_RELEASED);
     assert(wss_commit_outcome_of(true, false, "FEE_CHANGED") == WSS_FEE_CHANGED);
     /* WALLET_RPC_ERROR also covers an admitted transaction whose compensation failed: unknown */
     assert(wss_commit_outcome_of(true, false, "WALLET_RPC_ERROR") == WSS_UNKNOWN);
     assert(wss_commit_outcome_of(true, false, "PLAN_REQUIRED") == WSS_UNKNOWN);
+    /* none of these moved money, but a key reuse proves an earlier send exists: all read as unknown */
+    static const char *const unknown[] = {"SEND_IN_PROGRESS", "SEND_OUTCOME_UNKNOWN", "IDEMPOTENCY_KEY_REUSED",
+        "MISSING_IDEMPOTENCY_KEY", "INVALID_IDEMPOTENCY_KEY", "SEND_KEY_RELEASED"};
+    for (size_t i = 0; i < sizeof(unknown) / sizeof(unknown[0]); ++i)
+        assert(wss_commit_outcome_of(true, false, unknown[i]) == WSS_UNKNOWN);
     assert(wss_commit_outcome_of(true, false, "PLAN_TOKEN_MISMATCH") == WSS_UNKNOWN);
     assert(wss_commit_outcome_of(true, false, "SHIELDED_SEND_FAILED") == WSS_UNKNOWN);
     assert(wss_commit_outcome_of(true, false, "") == WSS_UNKNOWN);
     assert(wss_commit_outcome_of(true, false, NULL) == WSS_UNKNOWN);
-    assert(wss_commit_outcome_of(false, true, "SEND_KEY_RELEASED") == WSS_UNKNOWN);   /* no answer */
+    assert(wss_commit_outcome_of(false, true, "SEND_REFUSED_KEY_RELEASED") == WSS_UNKNOWN);   /* no answer */
     assert(wss_commit_outcome_of(false, false, NULL) == WSS_UNKNOWN);
 }
 /* Every status name zapp_devkey_status_name can return, as the screen reads it and what the owner sees. */

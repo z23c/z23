@@ -491,7 +491,7 @@ enum wss_commit_outcome wss_commit_outcome_of(bool answered, bool committed, con
 {
     if (!answered) return WSS_UNKNOWN;
     if (committed) return WSS_COMMITTED;
-    if (error_code && !strcmp(error_code, "SEND_KEY_RELEASED")) return WSS_KEY_RELEASED;
+    if (error_code && !strcmp(error_code, "SEND_REFUSED_KEY_RELEASED")) return WSS_KEY_RELEASED;
     if (error_code && !strcmp(error_code, "FEE_CHANGED")) return WSS_FEE_CHANGED;
     return WSS_UNKNOWN;
 }

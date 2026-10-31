@@ -33,9 +33,12 @@ struct wss_send_req {
 };
 /* How a commit answer reads. This table is the mapping the node adapter must apply to the commit reply:
  *   committed true (a replay of an earlier commit of the same key included)  -> WSS_COMMITTED
- *   error code SEND_KEY_RELEASED (the node released the key: nothing was sent) -> WSS_KEY_RELEASED
+ *   error code SEND_REFUSED_KEY_RELEASED (the node released the key: nothing was sent) -> WSS_KEY_RELEASED
  *   error code FEE_CHANGED (refused before any build)                         -> WSS_FEE_CHANGED
  *   anything else, including WALLET_RPC_ERROR, a timeout and no answer       -> WSS_UNKNOWN
+ *     (SEND_IN_PROGRESS, SEND_OUTCOME_UNKNOWN, IDEMPOTENCY_KEY_REUSED, PLAN_REQUIRED, PLAN_TOKEN_MISMATCH,
+ *     MISSING_IDEMPOTENCY_KEY and INVALID_IDEMPOTENCY_KEY are pinned to it by a table test; a key reuse proves
+ *     an earlier send exists. The code is WALLET_SEND_ONCE_CODE_RELEASED in wallet_send_once.h.)
  * WALLET_RPC_ERROR is unknown because it also covers an admitted transaction whose compensation failed and
  * whose row was kept. Only WSS_KEY_RELEASED and WSS_FEE_CHANGED may say "Nothing was sent". */
 enum wss_commit_outcome { WSS_COMMITTED, WSS_KEY_RELEASED, WSS_FEE_CHANGED, WSS_UNKNOWN };
