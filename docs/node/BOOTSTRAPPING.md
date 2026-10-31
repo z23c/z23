@@ -291,7 +291,7 @@ session, still spaces requests out instead.
 
 Query `bootstrapstatus` (native RPC) or `GET /api/v1/bootstrap` (REST; `GET
 /api/v1/bootstrapstatus` is a compatibility alias). The response's
-`beta6_snapshot_bootstrap` object carries `source_dir`, `in_band`,
+`beta6_snapshot_bootstrap` object carries `in_band`,
 `listen_port`, `manifest_version`, `manifest_height`, `manifest_files`,
 `manifest_bytes`, `advertised`, `serving`, `params_served`, and
 `current_blocker`; the top-level `p2p` object separately carries

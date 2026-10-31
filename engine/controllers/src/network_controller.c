@@ -422,7 +422,6 @@ static const char *beta6_current_blocker(bool serving, const char *posture_block
 static void network_push_beta6_source(struct json_value *beta6)
 {
     const struct beta6_bs_manifest *manifest = beta6_bs_manifest();
-    json_push_kv_str(beta6, "source_dir", beta6_bs_source_dir());
     /* Which wire is actually answering. `in_band` is the production path (the
      * node's own P2P port); `listen_port` is the optional side socket, 0 when
      * none was configured. */

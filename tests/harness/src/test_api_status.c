@@ -63,6 +63,8 @@ static bool api_status_match_fields(const struct json_value *obj,
     return ok;
 }
 
+static bool api_status_public_paths_absent(uint8_t *resp, size_t cap);
+
 static bool api_status_load_response(uint8_t *resp, size_t n, size_t cap,
                                      struct json_value *root, bool ok)
 {
@@ -710,12 +712,52 @@ static bool api_status_agent_alias_summary_ok(uint8_t *resp, size_t cap)
                                  sizeof(alias_fields[0]), ok);
     json_free(&root);
 
+    ok = ok && api_status_public_paths_absent(resp, cap);
+
     api_set_state(NULL, NULL, NULL, NULL, NULL);
     rpc_agent_set_boot_context(NULL, NULL, NULL, 0, 0, 0, 0);
     node_health_test_set_chain_advance_decision_override(NULL);
     reducer_frontier_provable_tip_reset();
     main_state_free(&ms);
     test_reset_shared_globals();
+    return ok;
+}
+
+/* No unauthenticated body carries a host path: not the datadir, the
+ * auto-reindex marker, the snapshot bundle, the active loader or the anchor
+ * snapshot. The authenticated lane contract still does, so the check is not
+ * vacuous. Boot context datadir: /tmp/zcl-canonical. */
+static bool api_status_public_paths_absent(uint8_t *resp, size_t cap)
+{
+    static const char *const routes[] = {
+        "/api/v1/agent", "/api/status", "/api/v1/bootstrap", "/api/refold",
+    };
+    static const char *const forbidden[] = {
+        "/tmp/zcl-canonical", "\"datadir\"", "auto_reindex_marker_path",
+        "\"bundle_path\"", "\"active_loader_path\"", "\"source_dir\"",
+    };
+    struct json_value full;
+    const struct json_value *lane;
+    bool ok = true;
+
+    for (size_t r = 0; ok && r < sizeof(routes) / sizeof(routes[0]); r++) {
+        size_t n = api_handle_request("GET", routes[r], NULL, 0, resp, cap);
+        ok = n > 0 && n < cap;
+        if (!ok)
+            break;
+        resp[n] = 0;
+        for (size_t f = 0; f < sizeof(forbidden) / sizeof(forbidden[0]); f++)
+            ok = ok && strstr((const char *)resp, forbidden[f]) == NULL;
+        if (strcmp(routes[r], "/api/refold") == 0)
+            ok = ok && strstr((const char *)resp, "\"path\":") == NULL;
+    }
+    json_init(&full);
+    json_set_object(&full);
+    agent_push_operator_lane_json(&full, "operator_lane");
+    lane = json_get(&full, "operator_lane");
+    ok = ok && lane && json_get(lane, "datadir") &&
+         json_get(json_get(lane, "recovery_state"), "auto_reindex_marker_path");
+    json_free(&full);
     return ok;
 }
 

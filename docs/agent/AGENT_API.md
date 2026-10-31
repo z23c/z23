@@ -863,8 +863,10 @@ host or peer worth drilling into.
 `z23 agent` and REST `GET /api/v1/agent` include `operator_lane`
 (`zcl.operator_lane.v1`). The lane is normally declared by the node's own boot
 context (`-operator-lane=canonical|soak|dev|test|copy`, or
-`ZCL_OPERATOR_LANE`) and reports the lane name, runtime profile, datadir, ports,
-and machine-readable restart policy. If a systemd override drops the explicit
+`ZCL_OPERATOR_LANE`) and reports the lane name, runtime profile, ports, and
+machine-readable restart policy. The REST `operator_lane` (public) carries no
+datadir and no recovery marker path; `z23 agent` and the lane registry commands
+over the authenticated RPC still report the datadir. If a systemd override drops the explicit
 lane flag, the agent API can still classify a first-class lane by an exact match
 against the C-owned topology registry (`datadir + rpcport + p2p_port`). That
 fallback reports `lane_source="inferred_exact_topology"`,
@@ -922,7 +924,8 @@ readiness probe that verifies the declared lanes are actually running.
 Each lane also embeds `recovery_state`
 (`zcl.operator_lane_recovery.v1`), a cheap C-native view over boot-owned
 recovery sentinels that affect deploy safety. Today it reports the lane
-datadir, `auto_reindex_request` marker path, marker presence, well-formed
+marker presence (the datadir and `auto_reindex_request` marker path only over the
+authenticated RPC, never in the REST view), well-formed
 status, anchor/count, `auto_reindex_pending`, `auto_reindex_terminal`,
 `auto_reindex_malformed`, `deploy_blocker`, `deploy_blocker_reason`,
 `explicit_recovery_env`, and `safe_next_action`. A pending marker is a deploy
@@ -1157,9 +1160,9 @@ normal ZClassic L1 consensus.
 
 The same response also includes `snapshot_loader` (`zcl.snapshot_loader.v1`),
 the binary-owned recovery contract for the node's own fast-start bundle:
-datadir, highest `utxo-seed-<h>.snapshot`, seed height, matching
-`block_index.bin`, failed marker, active `-load-snapshot-at-own-height` path,
-and `recovery_hint` (`loader_active`,
+highest `utxo-seed-<h>.snapshot` name, seed height, matching
+`block_index.bin`, failed marker, whether `-load-snapshot-at-own-height` is
+active, and `recovery_hint`. It carries no absolute path (`loader_active`,
 `restart_with_load_snapshot_at_own_height`, `install_tip_seed_snapshot`, etc.).
 Its nested `authority` object (`zcl.snapshot_loader_authority.v1`) reports the
 durable progress-store side of the proof: whether `coins_kv` is a proven local

@@ -165,8 +165,8 @@ an observability check, not automatic failover.
 
 Its bounded report includes height and lag from the live lane, peer and
 restart posture, memory pressure, role readiness, soak-evidence eligibility,
-and `bootstrapstatus.snapshot_loader` details: snapshot seed height, active
-loader path, and `recovery_hint`.
+and `bootstrapstatus.snapshot_loader` details: snapshot seed height, whether
+the loader is active, and `recovery_hint`.
 
 `make lane-recover LANE=dev|soak` is a read-only bounded recovery planner
 emitting `zcl.lane_recovery_plan.v1`. Public `--apply` and

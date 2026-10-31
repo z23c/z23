@@ -197,20 +197,16 @@ void network_push_snapshot_loader_status(struct json_value *result,
     json_set_object(&loader);
     json_push_kv_str(&loader, "schema", "zcl.snapshot_loader.v1");
     json_push_kv_int(&loader, "schema_version", 1);
-    json_push_kv_str(&loader, "datadir", datadir);
     json_push_kv_bool(&loader, "bundle_present", bundle_present);
     json_push_kv_int(&loader, "bundle_count", bundle_count);
     json_push_kv_int(&loader, "bundle_seed_height", seed_h);
     json_push_kv_str(&loader, "bundle_name", best_name);
-    json_push_kv_str(&loader, "bundle_path",
-                     bundle_path_ready ? bundle_path : "");
     json_push_kv_bool(&loader, "block_index_present",
                       block_index_present);
     json_push_kv_bool(&loader, "failed_marker", failed_marker);
     json_push_kv_bool(&loader, "bootable_bundle", bootable_bundle);
     json_push_kv_bool(&loader, "active_loader_configured",
                       loader_configured);
-    json_push_kv_str(&loader, "active_loader_path", loader_path);
     json_push_kv_bool(&loader, "active_loader_matches_bundle",
                       loader_configured && bundle_path_ready &&
                       strcmp(loader_path, bundle_path) == 0);

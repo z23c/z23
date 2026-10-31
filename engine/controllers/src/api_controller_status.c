@@ -736,7 +736,6 @@ static void api_refold_snapshot_json(struct json_value *result, bool status_ok,
     json_push_kv_bool(&snap, "path_resolved", status_ok &&
                       st->path_resolved);
     json_push_kv_str(&snap, "source", status_ok ? st->path_source : "");
-    json_push_kv_str(&snap, "path", status_ok ? st->path : "");
     json_push_kv_bool(&snap, "stat_present", status_ok &&
                       st->stat_present);
     json_push_kv_int(&snap, "stat_size",

@@ -402,7 +402,7 @@ static int api_refold_anchor_readiness_case(uint8_t *resp, size_t cap)
     const struct json_value *snap = json_get(&root, "anchor_snapshot");
     const struct json_value *commands = json_get(&root, "commands");
     ok = ok && api_refold_status_text(&root);
-    ok = ok && snap && json_get(snap, "path") != NULL;
+    ok = ok && snap && json_get(snap, "path") == NULL;
     ok = ok && api_refold_missing_snapshot(snap);
     ok = ok && commands &&
          strcmp(json_get_str(json_get(commands, "native")), "z23 refold") == 0;
