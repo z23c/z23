@@ -32,11 +32,13 @@
 #include "storage/nullifier_kv.h"
 #include "storage/progress_store.h"
 #include "storage/projection_store.h"
+#include "storage/seal_kv.h"
 #include "util/blocker.h"
 #include "util/safe_alloc.h"
 #include "util/stage.h"
 #include "util/util.h"
 #include "validation/chainstate.h"
+#include "validation/main_logic.h"
 #include "validation/main_state.h"
 
 /* src-private: the select-idle reason enum + note fn under test (Task A #1). */
@@ -3340,6 +3342,63 @@ static int uv_apply_candidate_anomaly_cases(void)
     return failures;
 }
 
+
+/* ── Seal key height through the production apply step ────────────────
+ * ua_commit_applied_frontier hands seal_candidate_hook_in_tx the height of the
+ * block it just applied (w->next_h), NOT the next cursor. Block 999's apply
+ * must therefore leave no seal; block 1000's apply seals key 1000 over the
+ * set that INCLUDES block 1000 and the hash of block 1000. The original
+ * cursor_in + 1 argument sealed during block 999's apply (set through 999). */
+static int uv_seal_key_height_cases(void)
+{
+    int failures = 0;
+    enum { G = 1000 };
+    char dir[256]; struct main_state ms; struct synth_chain_uv sc;
+    int rc = uv_setup("seal_key", G + 1, UV_FAIL_NONE, -1, dir, sizeof(dir),
+                      &ms, &sc);
+    UV_CHECK("seal key: setup", rc == 0);
+    if (rc != 0) {
+        if (rc >= 2) uv_teardown(dir, &ms, &sc);
+        else { SetDataDir(""); ClearDataDirCache(); test_cleanup_tmpdir(dir); }
+        return failures;
+    }
+    /* Make the published tip look synced so the hook's IBD gate lets it emit. */
+    struct block_index *tip = &sc.blocks[G];
+    memset(&tip->nChainWork, 0xFF, sizeof(tip->nChainWork));
+    tip->nTime = (uint32_t)GetTime() + 3600u;
+    UV_CHECK("seal key: tip is past IBD", !is_initial_block_download(&ms));
+
+    sqlite3 *db = progress_store_db();
+    struct seal_record r;
+    bool found = true;
+    memset(&r, 0, sizeof(r));
+    UV_CHECK("seal key: drain applies blocks 0..G-1",
+             utxo_apply_stage_drain(G) == G);
+    UV_CHECK("seal key: cursor at G", utxo_apply_stage_cursor() == G);
+    UV_CHECK("seal key: no seal after block G-1 applied",
+             seal_kv_newest(db, &r, &found) && !found);
+
+    uint8_t through_prev[32], through_g[32];
+    UV_CHECK("seal key: commitment through G-1",
+             coins_kv_commitment(db, through_prev) == 0);
+    UV_CHECK("seal key: step applies block G",
+             utxo_apply_stage_step_once() == JOB_ADVANCED);
+    UV_CHECK("seal key: commitment through G",
+             coins_kv_commitment(db, through_g) == 0);
+    UV_CHECK("seal key: sets through G-1 and G differ",
+             memcmp(through_prev, through_g, 32) != 0);
+
+    memset(&r, 0, sizeof(r));
+    found = false;
+    UV_CHECK("seal key: seal stored", seal_kv_newest(db, &r, &found) && found);
+    UV_CHECK("seal key: seal height == applied height G", r.height == G);
+    UV_CHECK("seal key: block_hash == hash of block G",
+             memcmp(r.block_hash, sc.hashes[G].data, 32) == 0);
+    UV_CHECK("seal key: commitment == set THROUGH G",
+             memcmp(r.coins_sha3, through_g, 32) == 0);
+    uv_teardown(dir, &ms, &sc);
+    return failures;
+}
 int test_utxo_apply_stage(void);
 int test_utxo_apply_stage(void)
 {
@@ -3575,6 +3634,8 @@ int test_utxo_apply_stage(void)
      * directly against utxo_apply_select_idle_note (the classification), which
      * is what every NULL-return in select_apply_block routes through. */
     failures += uv_apply_candidate_anomaly_cases();
+
+    failures += uv_seal_key_height_cases();
 
     failures += inverse_order_cases();
 
