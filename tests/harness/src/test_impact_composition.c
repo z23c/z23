@@ -6660,9 +6660,12 @@ static bool ic_split_edit_split_deleted(void)
 
 static bool ic_split_edit_split_nobase(void)
 {
-    /* The sibling gained the function instead of losing it. */
-    return ic_split_w("core/a/big.c", "/* big.c - base */\n#include \"a.h\"\n"
-                      "int added_here(int x)\n{\n    return x;\n}\n") &&
+    /* The sibling keeps every function and gains one: it lost nothing. */
+    static char grown[1024];
+    return snprintf(grown, sizeof(grown), "%s\nint added_here(int x)\n{\n"
+                    "    return x;\n}\n", ic_split_big_base) <
+               (int)sizeof(grown) &&
+           ic_split_w("core/a/big.c", grown) &&
            ic_split_w("core/a/big_part.c", ic_split_part) &&
            ic_split_w("Makefile", ic_split_make_after);
 }
