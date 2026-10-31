@@ -1233,6 +1233,11 @@ bool wallet_sync_transaction(struct wallet *w, const struct transaction *tx,
 bool wallet_import_key(struct wallet *w, const struct privkey *key)
 {
     zcl_mutex_lock(&w->cs);
+    /* Checked under w->cs for the reason given in wallet_add_generated_key. */
+    if (wallet_lock_is_locked()) {
+        zcl_mutex_unlock(&w->cs);
+        LOG_FAIL("wallet", "import_key: refused, wallet is locked");
+    }
     bool ok = keystore_add_key(&w->keystore, key);
     zcl_mutex_unlock(&w->cs);
     return ok;

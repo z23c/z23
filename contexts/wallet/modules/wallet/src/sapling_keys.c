@@ -3,6 +3,7 @@
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
 #include "wallet/sapling_keys.h"
+#include "wallet/wallet_lock.h"
 #include "core/random.h"
 #include "domain/encoding/bech32.h"
 #include "encoding/utilstrencodings.h"
@@ -174,7 +175,10 @@ bool sapling_keystore_new_address_transactional(
     if (undo_out)
         memset(undo_out, 0, sizeof(*undo_out));
     zcl_mutex_lock(&sks->cs);
-    if (sks->locked) {
+    /* The lock is published before the wipe sets sks->locked. The wipe runs
+     * under this mutex, so a mint that passes the published-lock check is
+     * wiped afterwards and one that starts later refuses. */
+    if (sks->locked || wallet_lock_is_locked()) {
         zcl_mutex_unlock(&sks->cs);
         LOG_FAIL("sapling_keys",
                  "new_address: refused, keystore is locked");
@@ -395,7 +399,7 @@ bool sapling_keystore_import_xsk(struct sapling_keystore *sks,
 {
     zcl_mutex_lock(&sks->cs);
 
-    if (sks->locked) {
+    if (sks->locked || wallet_lock_is_locked()) {
         zcl_mutex_unlock(&sks->cs);
         LOG_FAIL("sapling_keys", "import_xsk: refused, keystore is locked");
     }

@@ -1784,6 +1784,22 @@ static int test_send_past_the_timer_still_persists(void)
     return failures;
 }
 
+/* Sleep for `ms` milliseconds; a real thread race has no injected clock. */
+static void wls_nap_ms(long ms)
+{
+    struct timespec nap = { .tv_sec = 0, .tv_nsec = ms * 1000000L };
+    while (nanosleep(&nap, &nap) != 0) { /* real-clock: waits on a real thread; no injected clock exists */ }
+}
+
+/* True when transparent keystore entry `i` is sealed. */
+static bool wls_entry_sealed(struct wallet *w, size_t i)
+{
+    zcl_mutex_lock(&w->keystore.cs);
+    bool sealed = w->keystore.keys[i].sealed;
+    zcl_mutex_unlock(&w->keystore.cs);
+    return sealed;
+}
+
 /* A mint that passed its lock check holds w->cs while it adds a key. The
  * test stands in for it: a lock lands, the seal has to wait for w->cs, and
  * only then does the key arrive. The seal must still cover that key, the
@@ -1796,16 +1812,27 @@ static int test_lock_waits_for_a_mint_holding_the_wallet_mutex(void)
     TEST("wallet_lock_shielded: a lock during a mint seals the key it adds") {
         ASSERT(wls_provision(&f, true, true));
         ASSERT(wls_boot(&f));
+        struct privkey held;
+        privkey_init(&held);
+        memset(held.vch, 0x3c, 32);
+        held.vch[4] = 0x11;
+        held.fValid = true;
+        held.fCompressed = true;
+        struct pubkey held_pub;
+        ASSERT(keystore_add_key(&f.w->keystore, &held));
+        ASSERT(privkey_get_pubkey(&held, &held_pub));
+        ASSERT(wallet_sqlite_write_key_r(&f.ws, &held_pub, &held).ok);
         size_t keys = wls_used_keys(f.w);
         struct wls_midlock m = { .f = &f };
         zcl_mutex_lock(&f.w->cs);
         ASSERT(pthread_create(&m.th, NULL, wls_lock_once, &m) == 0);
-        for (int i = 0; i < 2000 && !wls_locked(); i++) {
-            struct timespec nap = { .tv_sec = 0, .tv_nsec = 1000000L };
-            while (nanosleep(&nap, &nap) != 0) { /* real-clock: waits for a real thread to publish the lock; no injected clock exists */ }
-        }
-        struct timespec settle = { .tv_sec = 0, .tv_nsec = 100000000L };
-        while (nanosleep(&settle, &settle) != 0) { /* retry */ }
+        /* Wait for the published lock, then for the seal to reach the key
+         * held above. With the seal under w->cs it cannot, so the wait runs
+         * to its bound; a seal outside w->cs seals it at once. */
+        for (int i = 0; i < 2000 && !wls_locked(); i++)
+            wls_nap_ms(1);
+        for (int i = 0; i < 2000 && !wls_entry_sealed(f.w, 0); i++)
+            wls_nap_ms(1);
         bool locked = wls_locked();
         bool added = locked && wls_mint_unstored_transparent(&f);
         zcl_mutex_unlock(&f.w->cs);
@@ -1821,6 +1848,101 @@ static int test_lock_waits_for_a_mint_holding_the_wallet_mutex(void)
         ASSERT(!wallet_sqlite_flush_r(&f.ws, f.w).ok);
         wallet_key_pool_discard_unpersisted(f.w);
         ASSERT(wls_pool_clean_and_restartable(&f, keys));
+        wls_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Publish the lock without wiping the fixture wallet: the lock runs on a
+ * stand-in wallet. This is the state between the published lock and the wipe
+ * that the timer and a lock request pass through. */
+static void wls_publish_lock_only(void)
+{
+    struct wallet *other = wls_alloc_wallet();
+    if (!other)
+        return;
+    wallet_lock_lock(other);
+    wls_free_wallet(other);
+}
+
+static int test_sapling_mint_and_import_refuse_once_the_lock_is_published(void)
+{
+    int failures = 0;
+    struct wls_fixture f;
+    TEST("wallet_lock_shielded: a Sapling mint or import after the published lock is refused") {
+        ASSERT(wls_provision(&f, true, true));
+        ASSERT(wls_boot(&f));
+        size_t n = f.w->sapling_keys.num_keys;
+        wls_publish_lock_only();
+        ASSERT(wls_locked());
+        ASSERT(!f.w->sapling_keys.locked);
+        uint8_t d[ZC_DIVERSIFIER_SIZE], pk[32];
+        ASSERT(!sapling_keystore_new_address(&f.w->sapling_keys, d, pk));
+        uint8_t material[32];
+        memset(material, 0x31, sizeof(material));
+        struct zip32_xsk xsk;
+        zip32_xsk_master(&xsk, material, sizeof(material));
+        ASSERT(!sapling_keystore_import_xsk(&f.w->sapling_keys, &xsk));
+        memory_cleanse(&xsk, sizeof(xsk));
+        ASSERT(f.w->sapling_keys.num_keys == n);
+        wls_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_locked_flush_needs_a_row_for_an_unwiped_sapling_entry(void)
+{
+    int failures = 0;
+    struct wls_fixture f;
+    TEST("wallet_lock_shielded: a locked flush refuses an unwiped Sapling entry without a row") {
+        ASSERT(wls_provision(&f, true, true));
+        ASSERT(wls_boot(&f));
+        ASSERT(wls_mint_unstored_sapling(&f));
+        wls_publish_lock_only();
+        ASSERT(!wallet_sqlite_flush_r(&f.ws, f.w).ok);
+        wls_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_locked_flush_needs_the_sapling_seed_row(void)
+{
+    int failures = 0;
+    struct wls_fixture f;
+    TEST("wallet_lock_shielded: a locked flush refuses a held Sapling seed without a row") {
+        ASSERT(wls_provision(&f, true, true));
+        ASSERT(wls_boot(&f));
+        ASSERT(f.w->sapling_keys.has_seed);
+        ASSERT(sqlite3_exec(f.db, "DELETE FROM wallet_seed", NULL, NULL,
+                            NULL) == SQLITE_OK);
+        wls_publish_lock_only();
+        ASSERT(!wallet_sqlite_flush_r(&f.ws, f.w).ok);
+        wls_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_import_key_refuses_once_the_lock_is_published(void)
+{
+    int failures = 0;
+    struct wls_fixture f;
+    TEST("wallet_lock_shielded: a transparent key import after the published lock is refused") {
+        ASSERT(wls_provision(&f, true, false));
+        ASSERT(wls_boot(&f));
+        size_t keys = wls_used_keys(f.w);
+        wls_publish_lock_only();
+        struct privkey k;
+        privkey_init(&k);
+        memset(k.vch, 0x4b, 32);
+        k.vch[5] = 0x29;
+        k.fValid = true;
+        k.fCompressed = true;
+        ASSERT(!wallet_import_key(f.w, &k));
+        ASSERT(wls_used_keys(f.w) == keys);
         wls_teardown(&f);
         PASS();
     } _test_next:;
@@ -1913,6 +2035,10 @@ int test_wallet_lock_shielded(void)
     failures += test_lock_waits_for_a_mint_holding_the_wallet_mutex();
     failures += test_legacy_key_add_rechecks_the_lock_under_the_wallet_mutex();
     failures += test_locked_flush_refuses_an_unsealed_key_without_a_row();
+    failures += test_sapling_mint_and_import_refuse_once_the_lock_is_published();
+    failures += test_locked_flush_needs_a_row_for_an_unwiped_sapling_entry();
+    failures += test_locked_flush_needs_the_sapling_seed_row();
+    failures += test_import_key_refuses_once_the_lock_is_published();
     wallet_lock_reset_for_test();
     return failures;
 }

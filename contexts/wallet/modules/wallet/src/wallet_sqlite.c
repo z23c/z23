@@ -1047,14 +1047,14 @@ bool wallet_sqlite_read_watch_only(struct wallet_sqlite *ws, struct wallet *w)
 
 /* ── Flush all wallet state to SQLite ──────────────────────────── */
 
-/* A full flush that cannot write secrets must find a row for every transparent
- * key and every wiped Sapling entry. An entry minted in RAM and sealed before
- * its first flush has a public identifier and no secret anywhere; a
- * transparent key still holding its secret has nothing stored either.
- * Reporting the flush clean would mark it persisted, and a restart would find
- * a pool entry without its key. Only an unsealed transparent key that this
- * flush writes itself (writes_secrets) needs no row yet. A Sapling mint
- * refuses while locked, so no unwiped Sapling entry exists in that case. The caller
+/* A full flush that cannot write secrets must find a row for every used key,
+ * transparent or Sapling, and a seed row when a Sapling seed is held. An
+ * entry minted in RAM and sealed before its first flush has a public
+ * identifier and no secret anywhere; one still holding its secret has
+ * nothing stored either. Reporting the flush clean would mark it persisted,
+ * and a restart would find a pool entry or address without its key. Only an
+ * unsealed entry that this flush writes itself (writes_secrets) needs no row
+ * yet. The caller
  * holds the keystore mutexes and runs this inside the write transaction,
  * after the last point a lock could land unseen. */
 static bool wsql_used_entries_stored(struct wallet_sqlite *ws,
@@ -1069,10 +1069,14 @@ static bool wsql_used_entries_stored(struct wallet_sqlite *ws,
     }
     for (size_t i = 0; i < w->sapling_keys.num_keys; i++) {
         const struct sapling_key_entry *e = &w->sapling_keys.keys[i];
-        if (e->used && e->secret_wiped &&
+        if (e->used && !(writes_secrets && !e->secret_wiped) &&
             !wsql_sapling_key_row_exists(ws, e->ivk))
             return false;
     }
+    if (!writes_secrets && w->sapling_keys.has_seed &&
+        !wallet_seed_state_row_present(
+            wallet_sqlite_sapling_seed_state(ws, NULL)))
+        return false;
     return true;
 }
 
