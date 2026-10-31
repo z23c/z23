@@ -339,7 +339,9 @@ static bool intent_pairing(JNIEnv *env, jobject activity, char *out, size_t cap)
     if (value) (*env)->CallVoidMethod(env, intent, remove, key);
     (void)clean(env); (*env)->PopLocalFrame(env, NULL); return ok;
 }
-/* Reads and removes the org.z23.clips launch extra so that it is read once; false when it is absent. */
+/* Reads the org.z23.clips launch extra and removes it from the in-process intent, so a later resume or
+ * configuration change does not see it. After the process is killed the system can deliver the original
+ * intent again; the screen then returns with the camera closed. False when the extra is absent. */
 static bool take_clips_extra(JNIEnv *env, jobject intent, char *out, size_t cap)
 {
     jclass intent_cls = clean(env) && intent ? (*env)->GetObjectClass(env, intent) : NULL;

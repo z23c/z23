@@ -254,9 +254,11 @@ The phone caps the node's block-index cache at 32 MiB (`ZCL_BIP_PAGE_CACHE_KIB=3
 `clip_screen` records and plays short vertical clips on the phone. The launch
 extra `org.z23.clips` selects the screen: `record` or `watch`
 (`am start -n <package>/android.app.NativeActivity -e org.z23.clips record`). The
-extra is read when the activity is created and then removed; sending it to an
-activity that already exists does nothing, so stop the app first. The camera
-stays closed until the first Record tap.
+extra is read when the activity is created and removed from the in-process
+intent; sending it to an activity that already exists does nothing, so stop the
+app first, and after the process is killed the system can deliver it again. The
+camera stays closed until the first Record tap, which opens the preview; the next
+tap records.
 
 - Recording uses the rear camera, the hardware AVC encoder (the screen refuses
   to record without one), and the microphone through AAudio (AAC-LC). The

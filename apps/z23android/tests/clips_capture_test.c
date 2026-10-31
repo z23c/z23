@@ -55,8 +55,9 @@ static void camera_gate(void)
     assert(!zapp_clip_gate_may_open(&gate));
     zapp_clip_gate_pause(&gate);
     assert(!zapp_clip_gate_may_open(&gate));
-    zapp_clip_gate_tap(&gate);
+    assert(!zapp_clip_gate_tap(&gate, false));
     assert(zapp_clip_gate_may_open(&gate));
+    assert(zapp_clip_gate_tap(&gate, true));
     zapp_clip_gate_pause(&gate);
     assert(zapp_clip_gate_may_open(&gate));
     zapp_clip_gate_wait(&gate);

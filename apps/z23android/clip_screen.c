@@ -432,7 +432,7 @@ static bool thermal_allows(JNIEnv *env)
 static const char *ready_text(void)
 {
     if (s.unsaved) return "The last recording was not saved";
-    return s.recorder ? "Ready" : "Tap Record to open the camera";
+    return s.recorder ? "Ready" : "Tap Record to open the camera preview";
 }
 
 static void new_pending(void)
@@ -551,10 +551,11 @@ static void save_clip(JNIEnv *env)
     (void)set_text(env, s.status, "Saved");
 }
 
-static void discard_clip(void)
+static void discard_clip(JNIEnv *env)
 {
     (void)unlink(s.pending);
     s.phase = PHASE_READY;
+    (void)set_text(env, s.status, ready_text());
 }
 
 static void hide_keyboard(JNIEnv *env)
@@ -656,14 +657,15 @@ static bool open_camera(JNIEnv *env)
     return s.recorder != NULL;
 }
 
-/* A recorder whose camera was lost is replaced, so the first tap after the loss works. */
-static bool ensure_camera(JNIEnv *env)
+/* A Record tap: the first one opens the preview (a lost camera is replaced the same way), the next one records. */
+static void tap_record(JNIEnv *env)
 {
     if (s.recorder && zapp_clip_recorder_camera_lost(s.recorder)) {
         zapp_clip_recorder_close(s.recorder);
         s.recorder = NULL;
     }
-    return s.recorder != NULL || open_camera(env);
+    if (zapp_clip_gate_tap(&s.gate, s.recorder != NULL)) start_recording(env);
+    else if (open_camera(env)) (void)set_text(env, s.status, "Preview is on. Tap Record again to start recording.");
 }
 
 /* The camera went away while idle: say so and wait for the person to ask again. */
@@ -827,7 +829,7 @@ bool zapp_clip_screen_back(JNIEnv *env)
     if (s.keyboard) { hide_keyboard(env); return true; }
     if (s.phase == PHASE_FINISHING) return true;
     if (s.phase == PHASE_RECORDING) { finish_recording(env); show_phase(env); return true; }
-    if (s.phase == PHASE_REVIEW) { discard_clip(); show_phase(env); return true; }
+    if (s.phase == PHASE_REVIEW) { discard_clip(env); show_phase(env); return true; }
     zapp_clip_screen_close(env);
     return true;
 }
@@ -874,12 +876,12 @@ static void press(JNIEnv *env, float x, float y)
     for (int i = 0; i < C_COUNT; ++i) {
         if (!s.controls[i] || !hit(env, s.controls[i], x, y)) continue;
         if (i != C_CAPTION) hide_keyboard(env);
-        if (i == C_RECORD && s.phase == PHASE_READY) { zapp_clip_gate_tap(&s.gate); if (ensure_camera(env)) start_recording(env); }
+        if (i == C_RECORD && s.phase == PHASE_READY) tap_record(env);
         else if (i == C_RECORD && s.phase == PHASE_RECORDING) finish_recording(env);
         else if (i == C_CAPTION) focus_caption(env);
         else if (i >= C_LEVEL && i < C_SAVE) select_level(env, i - C_LEVEL);
         else if (i == C_SAVE) save_clip(env);
-        else if (i == C_DISCARD) discard_clip();
+        else if (i == C_DISCARD) discard_clip(env);
         return;
     }
 }

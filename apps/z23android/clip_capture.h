@@ -35,7 +35,9 @@ struct zapp_clip_camera_gate {
 };
 void zapp_clip_gate_init(struct zapp_clip_camera_gate *gate);
 bool zapp_clip_gate_may_open(const struct zapp_clip_camera_gate *gate);
-void zapp_clip_gate_tap(struct zapp_clip_camera_gate *gate);
+/* A Record tap. Returns whether recording starts now: only when the camera is already open, so the first
+ * tap opens the preview and the next one records. */
+bool zapp_clip_gate_tap(struct zapp_clip_camera_gate *gate, bool camera_open);
 void zapp_clip_gate_pause(struct zapp_clip_camera_gate *gate);
 void zapp_clip_gate_wait(struct zapp_clip_camera_gate *gate); /* the camera failed or was lost: wait for the next tap */
 

@@ -71,10 +71,11 @@ bool zapp_clip_gate_may_open(const struct zapp_clip_camera_gate *gate)
     return !gate->waiting;
 }
 
-void zapp_clip_gate_tap(struct zapp_clip_camera_gate *gate)
+bool zapp_clip_gate_tap(struct zapp_clip_camera_gate *gate, bool camera_open)
 {
     gate->tapped = true;
     gate->waiting = false;
+    return camera_open;
 }
 
 void zapp_clip_gate_pause(struct zapp_clip_camera_gate *gate)
