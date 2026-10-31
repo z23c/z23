@@ -2304,6 +2304,298 @@ static int za_installed_plan_evidence(const char *base, const uint8_t root[32],
     return failures;
 }
 
+/* The fixture facts the split e2e checks share, passed by pointer so each
+ * check group can run as its own helper. */
+struct za_e2e_env {
+    const char *base;
+    const char *zcode;
+    const char *root_hex;
+    const char *archive;
+    const uint8_t *ring_root;
+    const uint8_t *ring_receipt;
+    const uint8_t *recipe_root;
+    int64_t t0;
+};
+
+static int za_e2e_reproduce_command_refiles(const char *base,
+                                            const char *repro_id_hex)
+{
+    int failures = 0;
+    /* The native command is idempotent: a re-run re-files the same
+     * deterministic receipt and reports both ids. */
+    struct json_value repro_input;
+    json_init(&repro_input);
+    json_set_object(&repro_input);
+    bool repro_input_ready =
+        json_push_kv_str(&repro_input, "name_or_root", "alice/ringbuffer") &&
+        json_push_kv_str(&repro_input, "datadir", base);
+    struct zcl_command_request repro_request = {
+        .input = &repro_input,
+    };
+    struct zcl_command_reply repro_reply;
+    zcl_command_reply_init(&repro_reply, "zcl.zcode_package_reproduce.v1");
+    if (repro_input_ready)
+        zcl_native_handle_zcode_package_reproduce(&repro_request,
+                                                  &repro_reply);
+    const char *repro_cmd_id = json_get_str(
+        json_get(&repro_reply.data, "receipt_id"));
+    ZA_CHECK("the reproduce command re-files the same receipt id",
+             repro_input_ready &&
+                 repro_reply.status == ZCL_COMMAND_STATUS_PASSED &&
+                 json_get_bool(json_get(&repro_reply.data, "reproduced")) &&
+                 repro_cmd_id &&
+                 strcmp(repro_cmd_id, repro_id_hex) == 0);
+    zcl_command_reply_free(&repro_reply);
+    json_free(&repro_input);
+    return failures;
+}
+
+static int za_e2e_receipt_scan_reproduced(const char *zcode,
+                                          const uint8_t *ring_root,
+                                          const uint8_t *recipe_root)
+{
+    int failures = 0;
+    char receipts_dir[4400];
+    snprintf(receipts_dir, sizeof(receipts_dir), "%s/receipts", zcode);
+    struct vcs_reproduce_report scan;
+    bool scanned = vcs_package_reproduce_scan(receipts_dir, ring_root,
+                                              recipe_root,
+                                              &scan);
+    ZA_CHECK("two distinct byte-identical receipts report reproduced",
+             scanned && scan.reproduced && scan.matching == 2);
+    return failures;
+}
+
+static int za_e2e_reproduce_identity(const struct za_e2e_env *env,
+                                     struct package_lifecycle_reproduce_report *repro)
+{
+    int failures = 0;
+    const char *base = env->base;
+    const char *zcode = env->zcode;
+    const char *root_hex = env->root_hex;
+    const uint8_t *ring_root = env->ring_root;
+    const uint8_t *ring_receipt = env->ring_receipt;
+    const uint8_t *recipe_root = env->recipe_root;
+    const int64_t t0 = env->t0;
+    uint8_t active[32];
+    size_t gens = 0;
+    bool present = false;
+    struct zcl_result ar;
+    /* Exact identity is the cache key: reopening an installed root must
+     * revalidate its receipt and outputs, then reuse that exact evidence
+     * without rebuilding or appending a fake generation. */
+    struct package_lifecycle_plan_report repeat_plan;
+    struct zcl_result repeat_planned =
+        package_lifecycle_plan(base, root_hex, t0 + 2, &repeat_plan);
+    struct package_lifecycle_commit_report repeat_commit;
+    struct zcl_result repeat_committed = package_lifecycle_commit(
+        base, repeat_plan.plan_id, t0 + 3, &repeat_commit);
+    ar = package_lifecycle_active(base, "alice/ringbuffer", active, &gens,
+                                  &present);
+    ZA_CHECK("an exact installed root reuses its verified build evidence",
+             repeat_planned.ok && repeat_committed.ok &&
+                 repeat_commit.step_count == 1 &&
+                 repeat_commit.steps[0].already_installed &&
+                 repeat_commit.steps[0].has_receipt &&
+                 repeat_commit.steps[0].receipt_reused &&
+                 memcmp(repeat_commit.steps[0].receipt_id, ring_receipt, 32) ==
+                     0);
+    ZA_CHECK("exact reuse does not append a generation",
+             ar.ok && present && gens == 1 &&
+                 memcmp(active, ring_root, 32) == 0);
+
+    /* --- the installed node reproduces its own install build ------------
+     * A standard-profile rebuild of the same committed inputs must emit
+     * byte-identical outputs, hash to a DISTINCT receipt id, and file it —
+     * which is exactly what the receipts scan needs to report reproduced.
+     *
+     * Both Linux seccomp/Landlock and macOS Seatbelt qualify as full package
+     * isolation, so the complete reproduction/cache transcript is mandatory
+     * on both native paths. */
+    struct zcl_result repr =
+        package_lifecycle_reproduce(base, "alice/ringbuffer", NULL, repro);
+    if (!repr.ok)
+        printf("  zcode_add: reproduce failed rule=%s detail=%s msg=%s\n",
+               repro->rule, repro->detail, repr.message);
+    ZA_CHECK("the standard-profile rebuild reproduces the install build",
+             repr.ok && repro->matched && repro->filed &&
+                 memcmp(repro->reference_receipt_id, ring_receipt, 32) == 0 &&
+                 memcmp(repro->receipt_id, ring_receipt, 32) != 0);
+    char repro_id_hex[65];
+    za_hex(repro->receipt_id, 32, repro_id_hex);
+    char repro_filed[4500];
+    snprintf(repro_filed, sizeof(repro_filed), "%s/receipts/%s", zcode,
+             repro_id_hex);
+    ZA_CHECK("the second, distinct receipt is filed by its exact id",
+             za_exists(repro_filed));
+    failures += za_e2e_receipt_scan_reproduced(zcode, ring_root, recipe_root);
+
+    failures += za_e2e_reproduce_command_refiles(base, repro_id_hex);
+    return failures;
+}
+
+static int za_e2e_dependent_package(const struct za_e2e_env *env)
+{
+    int failures = 0;
+    const char *base = env->base;
+    const char *zcode = env->zcode;
+    const uint8_t *ring_root = env->ring_root;
+    const uint8_t *ring_receipt = env->ring_receipt;
+    const int64_t t0 = env->t0;
+    /* --- a dependent package, locked to its dependency's root ----------- */
+    char deps_json[256];
+    char base_root_hex[65];
+    za_hex(ring_root, 32, base_root_hex);
+    snprintf(deps_json, sizeof(deps_json),
+             "{\"schema\":1,\"dependencies\":[{\"root\":\"%s\","
+             "\"name\":\"alice/ringbuffer\",\"semver\":\"1.0.0\"}]}",
+             base_root_hex);
+    struct za_file q_files[] = {
+        { "LICENSE", ZA_LICENSE },
+        { "src/queue.h",
+          "#pragma once\n#include \"ring.h\"\nint queue_probe(void);\n" },
+        { "src/queue.c",
+          "#include \"queue.h\"\n"
+          "int queue_probe(void){ struct ring r; ring_init(&r);\n"
+          "  return ring_push(&r, 7) ? 7 : -1; }\n" },
+        { "test/test_queue.c",
+          "#include \"queue.h\"\nint main(void){ return queue_probe()==7?0:1; }\n" },
+        { VCS_PACKAGE_DEPS_META_PATH, deps_json },
+    };
+    uint8_t q_root[32];
+    bool pq = za_publish(zcode, "alice/queue", "1.0.0", 3, q_files, 5,
+                         "src/queue.h", "src/queue.c", "test/test_queue.c",
+                         "src", q_root);
+    struct package_lifecycle_plan_report qplan;
+    struct zcl_result qr =
+        package_lifecycle_plan(base, "alice/queue", t0 + 5, &qplan);
+    ZA_CHECK("the dependent's plan locks its dependency, deps first",
+             pq && qr.ok && qplan.plan.step_count == 2 &&
+                 memcmp(qplan.plan.steps[0].root, ring_root, 32) == 0 &&
+                 qplan.plan.steps[0].depth == 1 &&
+                 memcmp(qplan.plan.steps[1].root, q_root, 32) == 0 &&
+                 qplan.plan.steps[1].depth == 0);
+    struct package_lifecycle_commit_report qcommit;
+    struct zcl_result qcr =
+        package_lifecycle_commit(base, qplan.plan_id, t0 + 6, &qcommit);
+    if (!qcr.ok)
+        printf("  zcode_add: dependent commit failed rule=%s detail=%s "
+               "msg=%s\n", qcommit.rule, qcommit.detail, qcr.message);
+    char q_installed[4400];
+    char q_hex[65];
+    za_hex(q_root, 32, q_hex);
+    snprintf(q_installed, sizeof(q_installed), "%s/installed/%s", zcode,
+             q_hex);
+    char q_archive[4600];
+    snprintf(q_archive, sizeof(q_archive), "%s/lib/libqueue.a", q_installed);
+    ZA_CHECK("the dependent builds AGAINST its locked dependency and installs",
+             qcr.ok && qcommit.installed && za_exists(q_archive) &&
+                 qcommit.steps[0].already_installed &&
+                 qcommit.steps[0].has_receipt &&
+                 qcommit.steps[0].receipt_reused &&
+                 memcmp(qcommit.steps[0].receipt_id, ring_receipt, 32) == 0);
+    return failures;
+}
+
+static int za_e2e_damaged_reuse_refused(const char *base,
+                                          const uint8_t *ring_root)
+{
+    int failures = 0;
+    bool reuse_installed;
+    struct package_lifecycle_step reuse_inspection;
+    struct zcl_result reuse_inspected;
+    reuse_installed = true;
+    reuse_inspected = package_lifecycle_installed_inspect(
+        base, ring_root, &reuse_inspection, &reuse_installed);
+    ZA_CHECK("reuse inspection refuses a tampered installed output",
+             !reuse_inspected.ok && !reuse_installed);
+    return failures;
+}
+
+static int za_e2e_tampered_objects_and_outputs(const struct za_e2e_env *env)
+{
+    int failures = 0;
+    const char *base = env->base;
+    const char *zcode = env->zcode;
+    const char *root_hex = env->root_hex;
+    const char *archive = env->archive;
+    const uint8_t *ring_root = env->ring_root;
+    const int64_t t0 = env->t0;
+    /* --- a tampered CAS object must never reach a build ----------------- */
+    struct za_file evil_files[] = {
+        { "LICENSE", ZA_LICENSE },
+        { "src/ring.h", ZA_RING_H },
+        { "src/ring.c", ZA_RING_C "/* v3 */\n" },
+        { "test/test_ring.c", ZA_RING_TEST },
+    };
+    uint8_t evil_root[32];
+    bool pe = za_publish(zcode, "bob/ringbuffer", "1.0.0", 4, evil_files, 4,
+                         "src/ring.h", "src/ring.c", "test/test_ring.c",
+                         "src", evil_root);
+    struct package_lifecycle_plan_report eplan;
+    struct zcl_result er =
+        package_lifecycle_plan(base, "bob/ringbuffer", t0 + 7, &eplan);
+    /* Published is not installed: reproduction without an install receipt
+     * is a named refusal, not a build. */
+    struct package_lifecycle_reproduce_report ni_repro;
+    struct zcl_result nir =
+        package_lifecycle_reproduce(base, "bob/ringbuffer", NULL, &ni_repro);
+    ZA_CHECK("reproduce of a package that was never installed is refused",
+             pe && !nir.ok &&
+                 strcmp(ni_repro.rule, "not-installed") == 0);
+    bool tampered_ok = pe && er.ok &&
+                       za_tamper_chunk(zcode, ZA_RING_C "/* v3 */\n");
+    /* Re-plan AFTER the tamper: the plan itself must now refuse to be
+     * ready, and a commit must refuse too. */
+    struct package_lifecycle_plan_report eplan2;
+    struct zcl_result er2 =
+        package_lifecycle_plan(base, "bob/ringbuffer", t0 + 8, &eplan2);
+    ZA_CHECK("a tampered CAS object makes the plan not-ready and names it",
+             tampered_ok && er2.ok && !eplan2.ready &&
+                 eplan2.plan.steps[0].state ==
+                     VCS_PACKAGE_LIFECYCLE_DISCOVERED &&
+                 strcmp(eplan2.rule, "chunk-hash-mismatch") == 0);
+    struct package_lifecycle_commit_report ecommit;
+    struct zcl_result ecr =
+        package_lifecycle_commit(base, eplan2.plan_id, t0 + 9, &ecommit);
+    char evil_installed[4400];
+    char evil_hex[65];
+    za_hex(evil_root, 32, evil_hex);
+    snprintf(evil_installed, sizeof(evil_installed), "%s/installed/%s", zcode,
+             evil_hex);
+    ZA_CHECK("commit refuses tampered content and installs nothing",
+             !ecr.ok && strcmp(ecommit.rule, "chunk-hash-mismatch") == 0 &&
+                 !za_exists(evil_installed));
+
+    /* --- an unknown plan id is a named refusal, not a crash ------------- */
+    uint8_t bogus[32];
+    memset(bogus, 0x5a, 32);
+    struct package_lifecycle_commit_report bcommit;
+    struct zcl_result bcr =
+        package_lifecycle_commit(base, bogus, t0 + 10, &bcommit);
+    ZA_CHECK("an unknown plan_id is named, never guessed at",
+             !bcr.ok && strcmp(bcommit.rule, "plan-unknown") == 0);
+
+    /* Installed status alone is not proof. Corrupting a declared output
+     * must invalidate the resident receipt before activation can succeed. */
+    bool damaged = za_write_file(archive, "corrupt", 7, 0600);
+    struct package_lifecycle_plan_report damaged_plan;
+    struct zcl_result damaged_planned =
+        package_lifecycle_plan(base, root_hex, t0 + 11, &damaged_plan);
+    failures += za_installed_plan_refusal(
+        "planning refuses a tampered installed output before reuse",
+        damaged, damaged_planned, &damaged_plan);
+    struct package_lifecycle_commit_report damaged_commit;
+    struct zcl_result damaged_result = package_lifecycle_commit(
+        base, damaged_plan.plan_id, t0 + 12, &damaged_commit);
+    ZA_CHECK("an installed output that differs from its receipt is refused",
+             damaged && damaged_planned.ok && !damaged_result.ok &&
+                 strcmp(damaged_commit.rule,
+                        "installed-receipt-invalid") == 0);
+    failures += za_e2e_damaged_reuse_refused(base, ring_root);
+    return failures;
+}
+
 // long-function-ok:one-lifecycle-transcript — this is a single ordered
 // transcript (publish, plan, commit, upgrade, roll back, then the three
 // refusals) against ONE fixture datadir; splitting it would either
@@ -2836,89 +3128,14 @@ static int t_e2e(void)
              ar.ok && present && gens == 1 &&
                  memcmp(active, ring_root, 32) == 0);
 
-    /* Exact identity is the cache key: reopening an installed root must
-     * revalidate its receipt and outputs, then reuse that exact evidence
-     * without rebuilding or appending a fake generation. */
-    struct package_lifecycle_plan_report repeat_plan;
-    struct zcl_result repeat_planned =
-        package_lifecycle_plan(base, root_hex, t0 + 2, &repeat_plan);
-    struct package_lifecycle_commit_report repeat_commit;
-    struct zcl_result repeat_committed = package_lifecycle_commit(
-        base, repeat_plan.plan_id, t0 + 3, &repeat_commit);
-    ar = package_lifecycle_active(base, "alice/ringbuffer", active, &gens,
-                                  &present);
-    ZA_CHECK("an exact installed root reuses its verified build evidence",
-             repeat_planned.ok && repeat_committed.ok &&
-                 repeat_commit.step_count == 1 &&
-                 repeat_commit.steps[0].already_installed &&
-                 repeat_commit.steps[0].has_receipt &&
-                 repeat_commit.steps[0].receipt_reused &&
-                 memcmp(repeat_commit.steps[0].receipt_id, ring_receipt, 32) ==
-                     0);
-    ZA_CHECK("exact reuse does not append a generation",
-             ar.ok && present && gens == 1 &&
-                 memcmp(active, ring_root, 32) == 0);
-
-    /* --- the installed node reproduces its own install build ------------
-     * A standard-profile rebuild of the same committed inputs must emit
-     * byte-identical outputs, hash to a DISTINCT receipt id, and file it —
-     * which is exactly what the receipts scan needs to report reproduced.
-     *
-     * Both Linux seccomp/Landlock and macOS Seatbelt qualify as full package
-     * isolation, so the complete reproduction/cache transcript is mandatory
-     * on both native paths. */
-    struct package_lifecycle_reproduce_report repro;
-    struct zcl_result repr =
-        package_lifecycle_reproduce(base, "alice/ringbuffer", NULL, &repro);
-    if (!repr.ok)
-        printf("  zcode_add: reproduce failed rule=%s detail=%s msg=%s\n",
-               repro.rule, repro.detail, repr.message);
-    ZA_CHECK("the standard-profile rebuild reproduces the install build",
-             repr.ok && repro.matched && repro.filed &&
-                 memcmp(repro.reference_receipt_id, ring_receipt, 32) == 0 &&
-                 memcmp(repro.receipt_id, ring_receipt, 32) != 0);
-    char repro_id_hex[65];
-    za_hex(repro.receipt_id, 32, repro_id_hex);
-    char repro_filed[4500];
-    snprintf(repro_filed, sizeof(repro_filed), "%s/receipts/%s", zcode,
-             repro_id_hex);
-    ZA_CHECK("the second, distinct receipt is filed by its exact id",
-             za_exists(repro_filed));
-    char receipts_dir[4400];
-    snprintf(receipts_dir, sizeof(receipts_dir), "%s/receipts", zcode);
-    struct vcs_reproduce_report scan;
-    bool scanned = vcs_package_reproduce_scan(receipts_dir, ring_root,
-                                              inspected_receipt.recipe_root,
-                                              &scan);
-    ZA_CHECK("two distinct byte-identical receipts report reproduced",
-             scanned && scan.reproduced && scan.matching == 2);
-
-    /* The native command is idempotent: a re-run re-files the same
-     * deterministic receipt and reports both ids. */
-    struct json_value repro_input;
-    json_init(&repro_input);
-    json_set_object(&repro_input);
-    bool repro_input_ready =
-        json_push_kv_str(&repro_input, "name_or_root", "alice/ringbuffer") &&
-        json_push_kv_str(&repro_input, "datadir", base);
-    struct zcl_command_request repro_request = {
-        .input = &repro_input,
+    struct za_e2e_env env = {
+        .base = base, .zcode = zcode, .root_hex = root_hex,
+        .archive = archive, .ring_root = ring_root,
+        .ring_receipt = ring_receipt, .recipe_root = inspected_receipt.recipe_root,
+        .t0 = t0,
     };
-    struct zcl_command_reply repro_reply;
-    zcl_command_reply_init(&repro_reply, "zcl.zcode_package_reproduce.v1");
-    if (repro_input_ready)
-        zcl_native_handle_zcode_package_reproduce(&repro_request,
-                                                  &repro_reply);
-    const char *repro_cmd_id = json_get_str(
-        json_get(&repro_reply.data, "receipt_id"));
-    ZA_CHECK("the reproduce command re-files the same receipt id",
-             repro_input_ready &&
-                 repro_reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 json_get_bool(json_get(&repro_reply.data, "reproduced")) &&
-                 repro_cmd_id &&
-                 strcmp(repro_cmd_id, repro_id_hex) == 0);
-    zcl_command_reply_free(&repro_reply);
-    json_free(&repro_input);
+    struct package_lifecycle_reproduce_report repro;
+    failures += za_e2e_reproduce_identity(&env, &repro);
 
     /* --- an optional fastobj cache rides along to the worker ------------
      * The confined worker is the cache's only writer: a directory that did
@@ -3109,135 +3326,9 @@ static int t_e2e(void)
 
     failures += za_user_data_after_rollback(&user_data);
 
-    /* --- a dependent package, locked to its dependency's root ----------- */
-    char deps_json[256];
-    char base_root_hex[65];
-    za_hex(ring_root, 32, base_root_hex);
-    snprintf(deps_json, sizeof(deps_json),
-             "{\"schema\":1,\"dependencies\":[{\"root\":\"%s\","
-             "\"name\":\"alice/ringbuffer\",\"semver\":\"1.0.0\"}]}",
-             base_root_hex);
-    struct za_file q_files[] = {
-        { "LICENSE", ZA_LICENSE },
-        { "src/queue.h",
-          "#pragma once\n#include \"ring.h\"\nint queue_probe(void);\n" },
-        { "src/queue.c",
-          "#include \"queue.h\"\n"
-          "int queue_probe(void){ struct ring r; ring_init(&r);\n"
-          "  return ring_push(&r, 7) ? 7 : -1; }\n" },
-        { "test/test_queue.c",
-          "#include \"queue.h\"\nint main(void){ return queue_probe()==7?0:1; }\n" },
-        { VCS_PACKAGE_DEPS_META_PATH, deps_json },
-    };
-    uint8_t q_root[32];
-    bool pq = za_publish(zcode, "alice/queue", "1.0.0", 3, q_files, 5,
-                         "src/queue.h", "src/queue.c", "test/test_queue.c",
-                         "src", q_root);
-    struct package_lifecycle_plan_report qplan;
-    struct zcl_result qr =
-        package_lifecycle_plan(base, "alice/queue", t0 + 5, &qplan);
-    ZA_CHECK("the dependent's plan locks its dependency, deps first",
-             pq && qr.ok && qplan.plan.step_count == 2 &&
-                 memcmp(qplan.plan.steps[0].root, ring_root, 32) == 0 &&
-                 qplan.plan.steps[0].depth == 1 &&
-                 memcmp(qplan.plan.steps[1].root, q_root, 32) == 0 &&
-                 qplan.plan.steps[1].depth == 0);
-    struct package_lifecycle_commit_report qcommit;
-    struct zcl_result qcr =
-        package_lifecycle_commit(base, qplan.plan_id, t0 + 6, &qcommit);
-    if (!qcr.ok)
-        printf("  zcode_add: dependent commit failed rule=%s detail=%s "
-               "msg=%s\n", qcommit.rule, qcommit.detail, qcr.message);
-    char q_installed[4400];
-    char q_hex[65];
-    za_hex(q_root, 32, q_hex);
-    snprintf(q_installed, sizeof(q_installed), "%s/installed/%s", zcode,
-             q_hex);
-    char q_archive[4600];
-    snprintf(q_archive, sizeof(q_archive), "%s/lib/libqueue.a", q_installed);
-    ZA_CHECK("the dependent builds AGAINST its locked dependency and installs",
-             qcr.ok && qcommit.installed && za_exists(q_archive) &&
-                 qcommit.steps[0].already_installed &&
-                 qcommit.steps[0].has_receipt &&
-                 qcommit.steps[0].receipt_reused &&
-                 memcmp(qcommit.steps[0].receipt_id, ring_receipt, 32) == 0);
+    failures += za_e2e_dependent_package(&env);
 
-    /* --- a tampered CAS object must never reach a build ----------------- */
-    struct za_file evil_files[] = {
-        { "LICENSE", ZA_LICENSE },
-        { "src/ring.h", ZA_RING_H },
-        { "src/ring.c", ZA_RING_C "/* v3 */\n" },
-        { "test/test_ring.c", ZA_RING_TEST },
-    };
-    uint8_t evil_root[32];
-    bool pe = za_publish(zcode, "bob/ringbuffer", "1.0.0", 4, evil_files, 4,
-                         "src/ring.h", "src/ring.c", "test/test_ring.c",
-                         "src", evil_root);
-    struct package_lifecycle_plan_report eplan;
-    struct zcl_result er =
-        package_lifecycle_plan(base, "bob/ringbuffer", t0 + 7, &eplan);
-    /* Published is not installed: reproduction without an install receipt
-     * is a named refusal, not a build. */
-    struct package_lifecycle_reproduce_report ni_repro;
-    struct zcl_result nir =
-        package_lifecycle_reproduce(base, "bob/ringbuffer", NULL, &ni_repro);
-    ZA_CHECK("reproduce of a package that was never installed is refused",
-             pe && !nir.ok &&
-                 strcmp(ni_repro.rule, "not-installed") == 0);
-    bool tampered_ok = pe && er.ok &&
-                       za_tamper_chunk(zcode, ZA_RING_C "/* v3 */\n");
-    /* Re-plan AFTER the tamper: the plan itself must now refuse to be
-     * ready, and a commit must refuse too. */
-    struct package_lifecycle_plan_report eplan2;
-    struct zcl_result er2 =
-        package_lifecycle_plan(base, "bob/ringbuffer", t0 + 8, &eplan2);
-    ZA_CHECK("a tampered CAS object makes the plan not-ready and names it",
-             tampered_ok && er2.ok && !eplan2.ready &&
-                 eplan2.plan.steps[0].state ==
-                     VCS_PACKAGE_LIFECYCLE_DISCOVERED &&
-                 strcmp(eplan2.rule, "chunk-hash-mismatch") == 0);
-    struct package_lifecycle_commit_report ecommit;
-    struct zcl_result ecr =
-        package_lifecycle_commit(base, eplan2.plan_id, t0 + 9, &ecommit);
-    char evil_installed[4400];
-    char evil_hex[65];
-    za_hex(evil_root, 32, evil_hex);
-    snprintf(evil_installed, sizeof(evil_installed), "%s/installed/%s", zcode,
-             evil_hex);
-    ZA_CHECK("commit refuses tampered content and installs nothing",
-             !ecr.ok && strcmp(ecommit.rule, "chunk-hash-mismatch") == 0 &&
-                 !za_exists(evil_installed));
-
-    /* --- an unknown plan id is a named refusal, not a crash ------------- */
-    uint8_t bogus[32];
-    memset(bogus, 0x5a, 32);
-    struct package_lifecycle_commit_report bcommit;
-    struct zcl_result bcr =
-        package_lifecycle_commit(base, bogus, t0 + 10, &bcommit);
-    ZA_CHECK("an unknown plan_id is named, never guessed at",
-             !bcr.ok && strcmp(bcommit.rule, "plan-unknown") == 0);
-
-    /* Installed status alone is not proof. Corrupting a declared output
-     * must invalidate the resident receipt before activation can succeed. */
-    bool damaged = za_write_file(archive, "corrupt", 7, 0600);
-    struct package_lifecycle_plan_report damaged_plan;
-    struct zcl_result damaged_planned =
-        package_lifecycle_plan(base, root_hex, t0 + 11, &damaged_plan);
-    failures += za_installed_plan_refusal(
-        "planning refuses a tampered installed output before reuse",
-        damaged, damaged_planned, &damaged_plan);
-    struct package_lifecycle_commit_report damaged_commit;
-    struct zcl_result damaged_result = package_lifecycle_commit(
-        base, damaged_plan.plan_id, t0 + 12, &damaged_commit);
-    ZA_CHECK("an installed output that differs from its receipt is refused",
-             damaged && damaged_planned.ok && !damaged_result.ok &&
-                 strcmp(damaged_commit.rule,
-                        "installed-receipt-invalid") == 0);
-    reuse_installed = true;
-    reuse_inspected = package_lifecycle_installed_inspect(
-        base, ring_root, &reuse_inspection, &reuse_installed);
-    ZA_CHECK("reuse inspection refuses a tampered installed output",
-             !reuse_inspected.ok && !reuse_installed);
+    failures += za_e2e_tampered_objects_and_outputs(&env);
 
     za_rm_rf(base);
     return failures;
