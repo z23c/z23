@@ -2581,6 +2581,9 @@ struct rung_act_ctx {
     struct consensus_state_activate_request areq;
     struct consensus_state_publication_decision_record rdec;
     struct rom_state_rung rung;
+    /* The ROM override borrows this pointer until teardown resets it, so it
+     * lives here, not on rung_act_setup's stack. */
+    struct rom_state_checkpoint keystone;
     sqlite3_int64 base_changes;
     int base_backups;
 };
@@ -2678,12 +2681,11 @@ static int rung_act_setup(struct rung_act_ctx *c, const char *dir, bool *built)
 
     /* A keystone at a LOWER height (so the keystone cannot authorise this
      * bundle) and the rung at the bundle height. */
-    struct rom_state_checkpoint keystone;
-    rom_keystone_from_fixture(&c->kb, &keystone);
-    keystone.height = c->kb.height - 50;
+    rom_keystone_from_fixture(&c->kb, &c->keystone);
+    c->keystone.height = c->kb.height - 50;
     rom_keystone_from_fixture(&c->kb, &c->rung.cp);
     c->rung.chainwork[31] = 5;
-    checkpoints_set_rom_state_override_for_test(&keystone);
+    checkpoints_set_rom_state_override_for_test(&c->keystone);
     c->base_changes = sqlite3_total_changes64(c->pdb);
     c->base_backups = prior_generation_count(c->rdir);
     *built = true;
