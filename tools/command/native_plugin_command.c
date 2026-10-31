@@ -416,6 +416,24 @@ static void plg_gate_push(struct json_value *data, const struct plugin_gate_repo
     json_free(&value);
 }
 
+static enum plugin_attest_status plg_add_paths(const char *root, const char *name,
+                                               const struct json_value *paths,
+                                               const char *single, char path[4096],
+                                               const char **source, size_t *added)
+{
+    size_t count = paths && paths->type == JSON_ARR ? json_size(paths) : single ? 1 : 0;
+    if (!count || (paths && (paths->type != JSON_ARR || single)) ||
+        count > PLUGIN_ATTEST_FILES_MAX) return PLUGIN_ATTEST_ARGUMENT;
+    for (size_t i = 0; i < count; i++) {
+        const struct json_value *item = paths ? json_at(paths, i) : NULL;
+        *source = paths ? (item && item->type == JSON_STR ? json_get_str(item) : NULL) : single;
+        enum plugin_attest_status st = plugin_store_attest_add(root, name, *source, path);
+        if (st != PLUGIN_ATTEST_OK) return st;
+        (*added)++;
+    }
+    return PLUGIN_ATTEST_OK;
+}
+
 void zcl_native_handle_plugin_attest_add(const struct zcl_command_request *request,
                                          struct zcl_command_reply *reply)
 {
@@ -424,20 +442,10 @@ void zcl_native_handle_plugin_attest_add(const struct zcl_command_request *reque
     const char *name = plg_str(request, "name");
     const struct json_value *paths = request->input ? json_get(request->input, "paths") : NULL;
     const char *single = plg_str(request, "path");
-    size_t count = paths && paths->type == JSON_ARR ? json_size(paths) : single ? 1 : 0;
-    if ((paths && (paths->type != JSON_ARR || single)) || count > PLUGIN_ATTEST_FILES_MAX)
-        count = 0;
-    enum plugin_attest_status st = PLUGIN_ATTEST_ARGUMENT;
     const char *source = NULL;
     size_t added = 0;
-    for (size_t i = 0; i < count; i++) {
-        const struct json_value *item = paths ? json_at(paths, i) : NULL;
-        source = paths ? (item && item->type == JSON_STR ? json_get_str(item) : NULL) : single;
-        st = plugin_store_attest_add(root, name, source, path);
-        if (st != PLUGIN_ATTEST_OK) break;
-        added++;
-    }
-    if (st != PLUGIN_ATTEST_OK || !count) {
+    enum plugin_attest_status st = plg_add_paths(root, name, paths, single, path, &source, &added);
+    if (st != PLUGIN_ATTEST_OK) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
                                plugin_attest_status_code(st), "attest_add", added != 0 || path[0], false,
                                "plugin attest_add refused", source ? source : "");

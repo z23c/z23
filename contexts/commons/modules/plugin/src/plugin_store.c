@@ -601,10 +601,24 @@ static enum plugin_attest_status ps_attest_duplicate(const char *dir,
     return st;
 }
 
+static enum plugin_attest_status ps_attest_add_locked(const char *plugdir,
+                                                      const struct plugin_attest_record *rec,
+                                                      const char *bytes, size_t len,
+                                                      char out[4096], bool *published)
+{
+    char dir[PLUGIN_PATH_MAX], leaf[256];
+    snprintf(leaf, sizeof(leaf), "%s-%s%s", rec->builder_key, rec->image, PLUGIN_ATTEST_SUFFIX);
+    if (!plugin_join(dir, sizeof(dir), plugdir, "attestations", NULL, NULL) ||
+        !plugin_mkdirs(dir) || plugin_check_dir(dir) != PLUGIN_OK ||
+        !plugin_join(out, 4096, dir, leaf, NULL, NULL)) return PLUGIN_ATTEST_IO;
+    enum plugin_attest_status st = ps_attest_duplicate(dir, rec);
+    return st == PLUGIN_ATTEST_OK ? ps_attest_write(dir, out, bytes, len, published) : st;
+}
+
 enum plugin_attest_status plugin_store_attest_add(const char *root, const char *name,
                                                  const char *path, char out[4096])
 {
-    char plugdir[PLUGIN_PATH_MAX], dir[PLUGIN_PATH_MAX], leaf[256], *bytes = NULL;
+    char plugdir[PLUGIN_PATH_MAX], *bytes = NULL;
     size_t len = 0;
     struct plugin_attest_record rec;
     if (!out || !path || ps_plugin_dir(root, name, plugdir, sizeof(plugdir)) != PLUGIN_OK)
@@ -622,16 +636,8 @@ enum plugin_attest_status plugin_store_attest_add(const char *root, const char *
         locked = plugin_lock_acquire(plugdir, &lock) == PLUGIN_OK;
         if (!locked) st = PLUGIN_ATTEST_IO;
     }
-    if (st == PLUGIN_ATTEST_OK) {
-        snprintf(leaf, sizeof(leaf), "%s-%s%s", rec.builder_key, rec.image, PLUGIN_ATTEST_SUFFIX);
-        if (!plugin_join(dir, sizeof(dir), plugdir, "attestations", NULL, NULL) ||
-            !plugin_mkdirs(dir) || plugin_check_dir(dir) != PLUGIN_OK ||
-            !plugin_join(out, 4096, dir, leaf, NULL, NULL)) st = PLUGIN_ATTEST_IO;
-        else {
-            st = ps_attest_duplicate(dir, &rec);
-            if (st == PLUGIN_ATTEST_OK) st = ps_attest_write(dir, out, bytes, len, &published);
-        }
-    }
+    if (st == PLUGIN_ATTEST_OK)
+        st = ps_attest_add_locked(plugdir, &rec, bytes, len, out, &published);
     if (locked) plugin_lock_release(&lock);
     free(bytes);
     if (!published) out[0] = '\0';
@@ -666,26 +672,27 @@ struct ps_policy {
     bool has_builders, has_threshold;
 };
 
+static bool ps_policy_threshold(struct ps_policy *p, const char *s)
+{
+    unsigned n = 0;
+    if (!*s || p->has_threshold) return false;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9' || n > PLUGIN_ATTEST_PINS_MAX / 10)
+            return false;
+        n = n * 10 + (unsigned)(*s - '0');
+    }
+    if (!n || n > PLUGIN_ATTEST_PINS_MAX) return false;
+    p->threshold = n;
+    p->has_threshold = true;
+    return true;
+}
+
 static bool ps_policy_line(struct ps_policy *p, const char *root, char *line)
 {
     if (!*line || *line == '#')
         return true;
-    if (strncmp(line, "threshold=", 10) == 0 && !p->has_threshold) {
-        const char *s = line + 10;
-        unsigned n = 0;
-        if (!*s)
-            return false;
-        for (; *s; s++) {
-            if (*s < '0' || *s > '9' || n > PLUGIN_ATTEST_PINS_MAX / 10)
-                return false;
-            n = n * 10 + (unsigned)(*s - '0');
-        }
-        if (!n || n > PLUGIN_ATTEST_PINS_MAX)
-            return false;
-        p->threshold = n;
-        p->has_threshold = true;
-        return true;
-    }
+    if (strncmp(line, "threshold=", 10) == 0)
+        return ps_policy_threshold(p, line + 10);
     if (strncmp(line, "builders=", 9) == 0 && !p->has_builders && line[9]) {
         const char *path = line + 9;
         int n = path[0] == '/' ? snprintf(p->builders, sizeof(p->builders), "%s", path)
@@ -694,6 +701,25 @@ static bool ps_policy_line(struct ps_policy *p, const char *root, char *line)
         return p->has_builders;
     }
     return false;
+}
+
+static bool ps_policy_scan(struct ps_policy *p, const char *root, char *bytes,
+                           size_t len, struct plugin_gate_report *report)
+{
+    unsigned line = 1;
+    char *start = bytes;
+    for (size_t i = 0; i <= len; i++) {
+        if (i < len && bytes[i] == '\0') { report->line = line; return false; }
+        if (i != len && bytes[i] != '\n') continue;
+        bytes[i] = '\0';
+        bool had_builders = p->has_builders;
+        if (!ps_policy_line(p, root, start)) { report->line = line; return false; }
+        if (!had_builders && p->has_builders) p->builders_line = line;
+        start = bytes + i + 1;
+        line++;
+    }
+    if (!p->has_threshold || !p->has_builders) { report->line = line; return false; }
+    return true;
 }
 
 static enum plugin_status ps_policy_load(const char *root, struct ps_policy *p,
@@ -707,30 +733,10 @@ static enum plugin_status ps_policy_load(const char *root, struct ps_policy *p,
                           &bytes, &len))
         return errno == ENOENT ? PLUGIN_OK : PLUGIN_ERR_ATTEST_POLICY_INVALID;
     report->required = true;
-    unsigned line = 1;
-    char *start = bytes;
-    bool ok = true;
-    for (size_t i = 0; ok && i <= len; i++) {
-        if (i < len && bytes[i] == '\0') {
-            report->line = line;
-            ok = false;
-            break;
-        }
-        if (i != len && bytes[i] != '\n')
-            continue;
-        bytes[i] = '\0';
-        bool had_builders = p->has_builders;
-        ok = ps_policy_line(p, root, start);
-        if (!had_builders && p->has_builders) p->builders_line = line;
-        if (!ok) report->line = line;
-        start = bytes + i + 1;
-        line++;
-    }
+    bool ok = ps_policy_scan(p, root, bytes, len, report);
     free(bytes);
-    if (!ok || !p->has_threshold || !p->has_builders) {
-        if (!report->line) report->line = line;
+    if (!ok)
         return PLUGIN_ERR_ATTEST_POLICY_INVALID;
-    }
     char *pins = NULL;
     size_t pins_len = 0;
     if (!plugin_read_file(p->builders, PLUGIN_FILE_MAX,
@@ -827,6 +833,14 @@ enum plugin_status plugin_store_current(const char *root, const char *name,
     return st;
 }
 
+static enum plugin_status ps_rollback_verify(const char *root, const char *name,
+                                             const char *restored,
+                                             struct plugin_gate_report *report)
+{
+    enum plugin_status st = plugin_verify_generation(root, name, restored);
+    return st == PLUGIN_OK ? ps_attest_gate(root, name, restored, report) : st;
+}
+
 static enum plugin_status ps_rollback(const char *root, const char *name,
                                       const char *expected,
                                       char restored[PLUGIN_HEX_SHA3_512 + 1], bool *changed,
@@ -865,9 +879,7 @@ static enum plugin_status ps_rollback(const char *root, const char *name,
         plugin_lock_release(&lock);
         return PLUGIN_OK;
     } else
-        st = plugin_verify_generation(root, name, restored);
-    if (st == PLUGIN_OK)
-        st = ps_attest_gate(root, name, restored, report);
+        st = ps_rollback_verify(root, name, restored, report);
     if (st == PLUGIN_OK)
         st = ps_point(plugdir, "current", restored);
     if (st == PLUGIN_OK && changed)
