@@ -143,6 +143,207 @@ static bool rf_purge_clamp_cursor(sqlite3 *db, bool apply,
     return true;
 }
 
+static void rf_note_lowest_height(int *lowest, int h)
+{
+    if (*lowest < 0 || h < *lowest)
+        *lowest = h;
+}
+
+/* Count one non-canonical row at `h` and track the lowest such height. */
+static void rf_purge_note_noncanonical(
+    struct stage_reducer_frontier_reconcile_result *out, int h)
+{
+    out->noncanonical_found++;
+    rf_note_lowest_height(&out->lowest_noncanonical, h);
+}
+
+/* The [lo, hi] window of heights this pass judges; false when it is empty. */
+static bool rf_purge_window(
+    const struct stage_reducer_frontier_reconcile_result *out, int tip_h,
+    int *lo, int *hi)
+{
+    *lo = out->hstar + 1;
+    *hi = out->sweep_top < tip_h ? out->sweep_top : tip_h;
+    if (*lo < 0 || *hi < *lo)
+        return false;
+    if (*hi - *lo + 1 > RF_NONCANON_MAX_PER_PASS)
+        *hi = *lo + RF_NONCANON_MAX_PER_PASS - 1;
+    return true;
+}
+
+/* Keep active-chain writes out of the SQL decision window: copy exactly the
+ * canonical hashes this pass will judge under the writer lock, then do all
+ * DB reads/deletes against that immutable local snapshot. */
+static void rf_purge_snapshot_canonical(struct main_state *ms,
+                                        struct rf_canonical_hash *canon,
+                                        int lo, int hi)
+{
+    zcl_mutex_lock(&ms->chain_active.write_lock);
+    for (int h = lo; h <= hi; h++) {
+        struct block_index *bi = active_chain_at(&ms->chain_active, h);
+        if (!bi || !bi->phashBlock)
+            continue;
+        size_t i = (size_t)(h - lo);
+        canon[i].present = true;
+        canon[i].hash = *bi->phashBlock;
+    }
+    zcl_mutex_unlock(&ms->chain_active.write_lock);
+}
+
+/* Decide whether height `h` is left to the stale-script replay (*skip): a
+ * validate-vs-script ok=1/ok=1 hash_split BELOW the coins frontier. Returns
+ * false only on a DB read error. */
+static bool rf_purge_vs_split_gate(
+    sqlite3 *db, int h, bool frontier_known,
+    struct stage_reducer_frontier_reconcile_result *out, bool *skip)
+{
+    *skip = false;
+    /* A validate-vs-script ok=1/ok=1 hash_split BELOW the coins frontier is
+     * owned by the coins-rewinding stale-script replay, which needs BOTH
+     * ok=1 rows intact to detect (its JOIN) and re-derive against the
+     * canonical body. Deleting either side here would blind that detector
+     * and strand a rowless hole the refill REFUSES below the coins frontier
+     * (refill_target_in_unapplied_domain). COUNT it so the condition stays
+     * actionable (and the peer-gate bypass / sticky_escalator can arm), but
+     * leave the evidence rows intact for the replay owner. */
+    bool below_frontier = frontier_known &&
+                          h < out->coins_applied_height;
+    if (below_frontier) {
+        bool vs_split = false;
+        if (!rf_height_is_vs_hash_split(db, h, &vs_split))
+            return false;
+        if (vs_split) {
+            rf_purge_note_noncanonical(out, h);
+            *skip = true; /* leave evidence rows for the stale-script replay */
+        }
+    }
+    return true;
+}
+
+/* True when the hash read at column 0 of a hash-log row does not match the
+ * canonical block hash. */
+static bool rf_purge_row_hash_mismatch(sqlite3_stmt *st,
+                                       const struct rf_canonical_hash *ch)
+{
+    int type = sqlite3_column_type(st, 0);
+    const void *blob = type == SQLITE_BLOB
+        ? sqlite3_column_blob(st, 0) : NULL;
+    return type != SQLITE_BLOB || !blob ||
+        sqlite3_column_bytes(st, 0) != 32 ||
+        memcmp(blob, ch->hash.data, 32) != 0;
+}
+
+/* Judge the UTXO apply rows at `h` against the canonical hash and, when
+ * allowed and applying, delete them. Returns false on any failure. */
+static bool rf_purge_utxo_branch(
+    sqlite3 *db, int h, bool apply, bool purge_allowed,
+    const struct rf_canonical_hash *ch,
+    struct stage_reducer_frontier_reconcile_result *out,
+    bool *tx_open, int *lowest_stale_utxo_unapplied, bool *stale_here)
+{
+    bool utxo_present = false;
+    bool utxo_matches = false;
+    if (!rf_utxo_branch_evidence_at(db, h, &ch->hash, &utxo_present,
+                                    &utxo_matches))
+        return false;  // raw-return-ok:callee logs its own failures
+    if (utxo_present && !utxo_matches) {
+        *stale_here = true;
+        rf_purge_note_noncanonical(out, h);
+        if (purge_allowed) {
+            if (*lowest_stale_utxo_unapplied < 0)
+                *lowest_stale_utxo_unapplied = h;
+            if (apply) {
+                if (!rf_purge_tx_begin(db, tx_open))
+                    return false;
+                static const char *const tables[] = {
+                    "utxo_apply_log", "utxo_apply_delta",
+                };
+                for (size_t t = 0; t < sizeof(tables) / sizeof(tables[0]);
+                     t++) {
+                    char sql[96];
+                    snprintf(sql, sizeof(sql),
+                             "DELETE FROM %s WHERE height=?", tables[t]);
+                    sqlite3_stmt *del = NULL;
+                    if (sqlite3_prepare_v2(db, sql, -1, &del, NULL) !=
+                        SQLITE_OK)
+                        return false;
+                    sqlite3_bind_int(del, 1, h);
+                    int drc = sqlite3_step(del); // raw-sql-ok:progress-kv-kernel-store
+                    if (drc != SQLITE_DONE) {
+                        sqlite3_finalize(del);
+                        return false;
+                    }
+                    int purged_here = sqlite3_changes(db);
+                    out->noncanonical_purged += purged_here > 0;
+                    /* Keep the published row counter honest (stage_log_rows.h). */
+                    stage_log_rows_note_delete(tables[t], (int64_t)purged_here);
+                    sqlite3_finalize(del);
+                }
+            }
+        }
+    }
+    return true;
+}
+
+/* The loop ascends, so the first stale height per domain is the
+ * lowest. Domain split mirrors refill_target_in_unapplied_domain
+ * (stage_repair_reducer_frontier_refill.c): unknown coins
+ * frontier or h below it => replay domain, never a clamp. */
+static void rf_purge_note_stale_domain(bool purge_allowed, int h,
+                                       int *lowest_stale_unapplied,
+                                       int *lowest_stale_replay_domain)
+{
+    if (purge_allowed) {
+        if (*lowest_stale_unapplied < 0)
+            *lowest_stale_unapplied = h;
+    } else if (*lowest_stale_replay_domain < 0) {
+        *lowest_stale_replay_domain = h;
+    }
+}
+
+/* Clamp the script_validate / proof_validate cursors to the lowest purged
+ * height, opening the purge transaction first when applying. */
+static bool rf_purge_clamp_script_proof(
+    sqlite3 *db, bool apply, int lowest_stale_unapplied, bool *tx_open,
+    struct stage_reducer_frontier_reconcile_result *out)
+{
+    if (apply && !rf_purge_tx_begin(db, tx_open))
+        return false;
+    return rf_purge_clamp_cursor(db, apply, "script_validate",
+                                 lowest_stale_unapplied,
+                                 &out->script_validate_cursor_before,
+                                 &out->script_validate_cursor_after,
+                                 &out->clamped_script_validate) &&
+           rf_purge_clamp_cursor(db, apply, "proof_validate",
+                                 lowest_stale_unapplied,
+                                 &out->proof_validate_cursor_before,
+                                 &out->proof_validate_cursor_after,
+                                 &out->clamped_proof_validate);
+}
+
+/* Remove the abandoned utxo_apply kernel suffix and align the utxo_apply
+ * cursor to the durable coins frontier (the caller logs the result). */
+static bool rf_purge_utxo_suffix(
+    sqlite3 *db, int hi,
+    struct stage_reducer_frontier_reconcile_result *out, bool *tx_open,
+    int *before, int *after, int *suffix_last)
+{
+    bool clamped = false;
+    int target = out->coins_applied_height;
+    *suffix_last = target;
+    if (!stage_repair_cursor_at_unlocked(db, "utxo_apply", before))
+        return false;
+    /* Remove the whole abandoned kernel suffix. The coin frontier proves
+     * it unapplied, so no inverse is needed. */
+    *suffix_last = *before > 0 ? *before - 1 : target;
+    if (hi > *suffix_last)
+        *suffix_last = hi;
+    return rf_purge_tx_begin(db, tx_open) &&
+           utxo_apply_delete_rows_above(db, target, *suffix_last) &&
+           rf_purge_clamp_cursor(db, true, "utxo_apply", target,
+                                 before, after, &clamped);
+}
+
 bool stage_reducer_frontier_purge_noncanonical(
     sqlite3 *db,
     struct main_state *ms,
@@ -186,28 +387,14 @@ bool stage_reducer_frontier_purge_noncanonical(
     out->coins_applied_found = live_coins_found;
 
     int tip_h = active_chain_height(&ms->chain_active);
-    int lo = out->hstar + 1;
-    int hi = out->sweep_top < tip_h ? out->sweep_top : tip_h;
-    if (lo < 0 || hi < lo)
+    int lo = 0;
+    int hi = -1;
+    if (!rf_purge_window(out, tip_h, &lo, &hi))
         goto done_locked;
-    if (hi - lo + 1 > RF_NONCANON_MAX_PER_PASS)
-        hi = lo + RF_NONCANON_MAX_PER_PASS - 1;
     bool frontier_known = out->coins_applied_found &&
                           out->coins_applied_height >= 0;
 
-    /* Keep active-chain writes out of the SQL decision window: copy exactly the
-     * canonical hashes this pass will judge under the writer lock, then do all
-     * DB reads/deletes against that immutable local snapshot. */
-    zcl_mutex_lock(&ms->chain_active.write_lock);
-    for (int h = lo; h <= hi; h++) {
-        struct block_index *bi = active_chain_at(&ms->chain_active, h);
-        if (!bi || !bi->phashBlock)
-            continue;
-        size_t i = (size_t)(h - lo);
-        canon[i].present = true;
-        canon[i].hash = *bi->phashBlock;
-    }
-    zcl_mutex_unlock(&ms->chain_active.write_lock);
+    rf_purge_snapshot_canonical(ms, canon, lo, hi);
 
     static const struct {
         const char *table;
@@ -227,30 +414,14 @@ bool stage_reducer_frontier_purge_noncanonical(
         if (!ch->present)
             continue;
 
-        /* A validate-vs-script ok=1/ok=1 hash_split BELOW the coins frontier is
-         * owned by the coins-rewinding stale-script replay, which needs BOTH
-         * ok=1 rows intact to detect (its JOIN) and re-derive against the
-         * canonical body. Deleting either side here would blind that detector
-         * and strand a rowless hole the refill REFUSES below the coins frontier
-         * (refill_target_in_unapplied_domain). COUNT it so the condition stays
-         * actionable (and the peer-gate bypass / sticky_escalator can arm), but
-         * leave the evidence rows intact for the replay owner. */
-        bool below_frontier = frontier_known &&
-                              h < out->coins_applied_height;
-        if (below_frontier) {
-            bool vs_split = false;
-            if (!rf_height_is_vs_hash_split(db, h, &vs_split)) {
-                ok = false;
-                goto done_locked;
-            }
-            if (vs_split) {
-                out->noncanonical_found++;
-                if (out->lowest_noncanonical < 0 ||
-                    h < out->lowest_noncanonical)
-                    out->lowest_noncanonical = h;
-                continue; /* leave evidence rows for the stale-script replay */
-            }
+        bool skip_vs_split = false;
+        if (!rf_purge_vs_split_gate(db, h, frontier_known, out,
+                                    &skip_vs_split)) {
+            ok = false;
+            goto done_locked;
         }
+        if (skip_vs_split)
+            continue;
         bool purge_allowed = frontier_known &&
                              h >= out->coins_applied_height;
 
@@ -271,12 +442,7 @@ bool stage_reducer_frontier_purge_noncanonical(
             bool mismatch = false;
             int step_rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
             if (step_rc == SQLITE_ROW) {
-                int type = sqlite3_column_type(st, 0);
-                const void *blob = type == SQLITE_BLOB
-                    ? sqlite3_column_blob(st, 0) : NULL;
-                mismatch = type != SQLITE_BLOB || !blob ||
-                    sqlite3_column_bytes(st, 0) != 32 ||
-                    memcmp(blob, ch->hash.data, 32) != 0;
+                mismatch = rf_purge_row_hash_mismatch(st, ch);
             } else if (step_rc != SQLITE_DONE) {
                 LOG_WARN("stage_repair",
                          "purge_noncanonical: scan %s h=%d rc=%d: %s",
@@ -289,10 +455,7 @@ bool stage_reducer_frontier_purge_noncanonical(
             if (!mismatch)
                 continue;
             stale_here = true;
-            out->noncanonical_found++;
-            if (out->lowest_noncanonical < 0 ||
-                h < out->lowest_noncanonical)
-                out->lowest_noncanonical = h;
+            rf_purge_note_noncanonical(out, h);
             if (!purge_allowed)
                 continue;
             if (!apply)
@@ -320,56 +483,11 @@ bool stage_reducer_frontier_purge_noncanonical(
             }
             out->noncanonical_purged++;
         }
-        bool utxo_present = false;
-        bool utxo_matches = false;
-        if (!rf_utxo_branch_evidence_at(db, h, &ch->hash, &utxo_present,
-                                        &utxo_matches)) {
+        if (!rf_purge_utxo_branch(db, h, apply, purge_allowed, ch, out,
+                                  &tx_open, &lowest_stale_utxo_unapplied,
+                                  &stale_here)) {
             ok = false;
             goto done_locked;
-        }
-        if (utxo_present && !utxo_matches) {
-            stale_here = true;
-            out->noncanonical_found++;
-            if (out->lowest_noncanonical < 0 ||
-                h < out->lowest_noncanonical)
-                out->lowest_noncanonical = h;
-            if (purge_allowed) {
-                if (lowest_stale_utxo_unapplied < 0)
-                    lowest_stale_utxo_unapplied = h;
-                if (apply) {
-                    if (!rf_purge_tx_begin(db, &tx_open)) {
-                        ok = false;
-                        goto done_locked;
-                    }
-                    static const char *const tables[] = {
-                        "utxo_apply_log", "utxo_apply_delta",
-                    };
-                    for (size_t t = 0; t < sizeof(tables) / sizeof(tables[0]);
-                         t++) {
-                        char sql[96];
-                        snprintf(sql, sizeof(sql),
-                                 "DELETE FROM %s WHERE height=?", tables[t]);
-                        sqlite3_stmt *del = NULL;
-                        if (sqlite3_prepare_v2(db, sql, -1, &del, NULL) !=
-                            SQLITE_OK) {
-                            ok = false;
-                            goto done_locked;
-                        }
-                        sqlite3_bind_int(del, 1, h);
-                        int drc = sqlite3_step(del); // raw-sql-ok:progress-kv-kernel-store
-                        if (drc != SQLITE_DONE) {
-                            sqlite3_finalize(del);
-                            ok = false;
-                            goto done_locked;
-                        }
-                        int purged_here = sqlite3_changes(db);
-                        out->noncanonical_purged += purged_here > 0;
-                        /* Keep the published row counter honest (stage_log_rows.h). */
-                        stage_log_rows_note_delete(tables[t], (int64_t)purged_here);
-                        sqlite3_finalize(del);
-                    }
-                }
-            }
         }
         if (stale_here && apply && purge_allowed) {
             /* Hashless downstream rows at this height describe the same
@@ -399,18 +517,10 @@ bool stage_reducer_frontier_purge_noncanonical(
                 sqlite3_finalize(st);
             }
         }
-        if (stale_here) {
-            /* The loop ascends, so the first stale height per domain is the
-             * lowest. Domain split mirrors refill_target_in_unapplied_domain
-             * (stage_repair_reducer_frontier_refill.c): unknown coins
-             * frontier or h below it => replay domain, never a clamp. */
-            if (purge_allowed) {
-                if (lowest_stale_unapplied < 0)
-                    lowest_stale_unapplied = h;
-            } else if (lowest_stale_replay_domain < 0) {
-                lowest_stale_replay_domain = h;
-            }
-        }
+        if (stale_here)
+            rf_purge_note_stale_domain(purge_allowed, h,
+                                       &lowest_stale_unapplied,
+                                       &lowest_stale_replay_domain);
     }
 
     /* The deletes above turned the stale heights into rowless holes. A
@@ -427,20 +537,8 @@ bool stage_reducer_frontier_purge_noncanonical(
      * it is removed only at/above the durable coins frontier, then utxo_apply is
      * aligned to that exact next-unapplied height so no coin can double-apply. */
     if (lowest_stale_unapplied >= 0) {
-        if (apply && !rf_purge_tx_begin(db, &tx_open)) {
-            ok = false;
-            goto done_locked;
-        }
-        if (!rf_purge_clamp_cursor(db, apply, "script_validate",
-                                   lowest_stale_unapplied,
-                                   &out->script_validate_cursor_before,
-                                   &out->script_validate_cursor_after,
-                                   &out->clamped_script_validate) ||
-            !rf_purge_clamp_cursor(db, apply, "proof_validate",
-                                   lowest_stale_unapplied,
-                                   &out->proof_validate_cursor_before,
-                                   &out->proof_validate_cursor_after,
-                                   &out->clamped_proof_validate)) {
+        if (!rf_purge_clamp_script_proof(db, apply, lowest_stale_unapplied,
+                                         &tx_open, out)) {
             ok = false;
             goto done_locked;
         }
@@ -459,21 +557,10 @@ bool stage_reducer_frontier_purge_noncanonical(
     if (lowest_stale_utxo_unapplied >= 0 && apply) {
         int before = -1;
         int after = -1;
-        bool clamped = false;
         int target = out->coins_applied_height;
-        if (!stage_repair_cursor_at_unlocked(db, "utxo_apply", &before)) {
-            ok = false;
-            goto done_locked;
-        }
-        /* Remove the whole abandoned kernel suffix. The coin frontier proves
-         * it unapplied, so no inverse is needed. */
-        int suffix_last = before > 0 ? before - 1 : target;
-        if (hi > suffix_last)
-            suffix_last = hi;
-        if (!rf_purge_tx_begin(db, &tx_open) ||
-            !utxo_apply_delete_rows_above(db, target, suffix_last) ||
-            !rf_purge_clamp_cursor(db, true, "utxo_apply", target,
-                                   &before, &after, &clamped)) {
+        int suffix_last = target;
+        if (!rf_purge_utxo_suffix(db, hi, out, &tx_open, &before, &after,
+                                  &suffix_last)) {
             ok = false;
             goto done_locked;
         }
@@ -548,6 +635,13 @@ enum rf_tipfin_state {
     RF_TIPFIN_FAIL,
 };
 
+/* A tip_finalize status column value is usable when it is non-NULL TEXT of a
+ * length that fits status_out[64] and carries no embedded NUL. */
+static bool rf_tipfin_status_fits(const unsigned char *s, int n)
+{
+    return s && n >= 0 && n < 64 && !memchr(s, '\0', (size_t)n);
+}
+
 static bool rf_tipfin_state_at(sqlite3 *db, int height,
                                enum rf_tipfin_state *out_state,
                                char status_out[64])
@@ -582,7 +676,7 @@ static bool rf_tipfin_state_at(sqlite3 *db, int height,
             const unsigned char *s = status_type == SQLITE_TEXT
                 ? sqlite3_column_text(st, 1) : NULL;
             int n = s ? sqlite3_column_bytes(st, 1) : -1;
-            if (!s || n < 0 || n >= 64 || memchr(s, '\0', (size_t)n)) {
+            if (!rf_tipfin_status_fits(s, n)) {
                 LOG_WARN("stage_repair",
                          "[stage_repair] malformed reorg-residue status h=%d",
                          height);
@@ -681,6 +775,77 @@ static bool rf_tipfin_status_is_reorg_residue(const char *status)
  * purge above; a contiguous reorg-residue run heals one window per tick. */
 #define RF_REORG_RESIDUE_MAX_PER_PASS 8192
 
+/* The [lo, hi] height window the reorg-residue replacement may judge; false
+ * when there is nothing to do (unknown coins frontier or an empty window). */
+static bool rf_reorg_residue_window(
+    const struct stage_reducer_frontier_reconcile_result *out,
+    int *lo, int *hi)
+{
+    *lo = 0;
+    *hi = -1;
+    /* Eligibility ceiling: only heights ALREADY covered by coins
+     * (h <= coins_applied_height - 1) qualify — there the coins are applied
+     * and replacing the verdict cannot tear a coin. Unknown coins frontier =>
+     * nothing to do here (the unknown path refuses upstream). */
+    if (!out->coins_applied_found || out->coins_applied_height <= 0)
+        return false;
+
+    *lo = out->hstar + 1;
+    *hi = out->coins_applied_height - 1;
+    if (out->sweep_top < *hi)
+        *hi = out->sweep_top;
+    if (*hi - *lo + 1 > RF_REORG_RESIDUE_MAX_PER_PASS)
+        *hi = *lo + RF_REORG_RESIDUE_MAX_PER_PASS - 1;
+    if (*lo < 0 || *hi < *lo)
+        return false;
+    return true;
+}
+
+/* Judge one height for the reorg-residue replacement. Returns false only on a
+ * DB read error; *eligible says whether the row at `h` may be replaced (and
+ * `status` / `lookahead` are then filled). */
+static bool rf_reorg_residue_candidate(sqlite3 *db, int h,
+                                       uint64_t header_admit_cursor,
+                                       char status[64],
+                                       struct uint256 *lookahead,
+                                       bool *eligible)
+{
+    *eligible = false;
+    enum rf_tipfin_state state = RF_TIPFIN_ABSENT;
+    if (!rf_tipfin_state_at(db, h, &state, status))
+        return false;
+    /* Gate 1: the row must be PRESENT with ok=0 and one of the stale
+     * residue statuses. Other ok=0 statuses are live consensus / upstream
+     * blockers and must never be rewritten into ok=1 finalize_backfill. */
+    if (state != RF_TIPFIN_FAIL)
+        return true;
+    if (!rf_tipfin_status_is_reorg_residue(status))
+        return true;
+
+    /* Gate 2: re-evidenced upstream — header_admit_log present at h with
+     * a 32-byte hash, AND the lookahead binder hash(h+1) is available so
+     * the replacement carries the row-H -> hash-H+1 finalized convention
+     * (finalized_row_active_match compares row.tip_hash to
+     * active_chain_at(h+1) — reorg-correct). The residue verdict pins H*
+     * one below h, so the column at h+1 is precisely the rowless gap the
+     * existing header_admit-keyed refill re-derives. A missing binder
+     * leaves the row alone (no fabricated hash). A binder row at or above
+     * the durable header_admit cursor is also ignored: after a forward-fork
+     * rewind, stale H+1 rows remain in replay territory until header_admit
+     * re-admits the canonical child and advances past them. */
+    if ((uint64_t)(h + 1) >= header_admit_cursor)
+        return true;
+
+    bool admit_here = false;
+    bool admit_next = false;
+    struct uint256 admit_dummy;
+    if (!rf_header_admit_hash_at(db, h, &admit_dummy, &admit_here) ||
+        !rf_header_admit_hash_at(db, h + 1, lookahead, &admit_next))
+        return false;
+    *eligible = admit_here && admit_next;
+    return true;
+}
+
 bool stage_reducer_frontier_purge_stale_reorg_tipfin(
     sqlite3 *db,
     bool apply,
@@ -689,20 +854,9 @@ bool stage_reducer_frontier_purge_stale_reorg_tipfin(
     if (!db || !out)
         LOG_FAIL("stage_repair", "purge_stale_reorg_tipfin: invalid args");
 
-    /* Eligibility ceiling: only heights ALREADY covered by coins
-     * (h <= coins_applied_height - 1) qualify — there the coins are applied
-     * and replacing the verdict cannot tear a coin. Unknown coins frontier =>
-     * nothing to do here (the unknown path refuses upstream). */
-    if (!out->coins_applied_found || out->coins_applied_height <= 0)
-        return true;
-
-    int lo = out->hstar + 1;
-    int hi = out->coins_applied_height - 1;
-    if (out->sweep_top < hi)
-        hi = out->sweep_top;
-    if (hi - lo + 1 > RF_REORG_RESIDUE_MAX_PER_PASS)
-        hi = lo + RF_REORG_RESIDUE_MAX_PER_PASS - 1;
-    if (lo < 0 || hi < lo)
+    int lo = 0;
+    int hi = -1;
+    if (!rf_reorg_residue_window(out, &lo, &hi))
         return true;
 
     progress_store_tx_lock();
@@ -723,49 +877,18 @@ bool stage_reducer_frontier_purge_stale_reorg_tipfin(
     bool rc_ok = true;
     for (int h = lo; h <= hi; h++) {
         char status[64];
-        enum rf_tipfin_state state = RF_TIPFIN_ABSENT;
-        if (!rf_tipfin_state_at(db, h, &state, status)) {
+        struct uint256 lookahead = {0};
+        bool eligible = false;
+        if (!rf_reorg_residue_candidate(db, h, header_admit_cursor, status,
+                                        &lookahead, &eligible)) {
             rc_ok = false;
             break;
         }
-        /* Gate 1: the row must be PRESENT with ok=0 and one of the stale
-         * residue statuses. Other ok=0 statuses are live consensus / upstream
-         * blockers and must never be rewritten into ok=1 finalize_backfill. */
-        if (state != RF_TIPFIN_FAIL)
-            continue;
-        if (!rf_tipfin_status_is_reorg_residue(status))
-            continue;
-
-        /* Gate 2: re-evidenced upstream — header_admit_log present at h with
-         * a 32-byte hash, AND the lookahead binder hash(h+1) is available so
-         * the replacement carries the row-H -> hash-H+1 finalized convention
-         * (finalized_row_active_match compares row.tip_hash to
-         * active_chain_at(h+1) — reorg-correct). The residue verdict pins H*
-         * one below h, so the column at h+1 is precisely the rowless gap the
-         * existing header_admit-keyed refill re-derives. A missing binder
-         * leaves the row alone (no fabricated hash). A binder row at or above
-         * the durable header_admit cursor is also ignored: after a forward-fork
-         * rewind, stale H+1 rows remain in replay territory until header_admit
-         * re-admits the canonical child and advances past them. */
-        if ((uint64_t)(h + 1) >= header_admit_cursor)
-            continue;
-
-        struct uint256 lookahead;
-        bool admit_here = false;
-        bool admit_next = false;
-        struct uint256 admit_dummy;
-        if (!rf_header_admit_hash_at(db, h, &admit_dummy, &admit_here) ||
-            !rf_header_admit_hash_at(db, h + 1, &lookahead, &admit_next)) {
-            rc_ok = false;
-            break;
-        }
-        if (!admit_here || !admit_next)
+        if (!eligible)
             continue;
 
         out->reorg_residue_tipfin_found++;
-        if (out->lowest_reorg_residue_tipfin < 0 ||
-            h < out->lowest_reorg_residue_tipfin)
-            out->lowest_reorg_residue_tipfin = h;
+        rf_note_lowest_height(&out->lowest_reorg_residue_tipfin, h);
         if (!apply)
             continue;
 

@@ -161,9 +161,7 @@ engine/modules/storage/src/coins_ram.c:coins_ram_flush:27
 engine/modules/storage/src/coins_ram_boot_reconcile.c:coins_ram_reconcile_boot:31
 engine/reducer/conditions/src/reducer_frontier_reconcile_light.c:remedy_reducer_frontier_reconcile_light:26
 engine/reducer/jobs/src/stage_repair_reducer_frontier_coin.c:stage_reducer_frontier_try_replay_repairs:18
-engine/reducer/jobs/src/stage_repair_reducer_frontier_purge.c:rf_tipfin_state_at:16
-engine/reducer/jobs/src/stage_repair_reducer_frontier_purge.c:stage_reducer_frontier_purge_noncanonical:90
-engine/reducer/jobs/src/stage_repair_reducer_frontier_purge.c:stage_reducer_frontier_purge_stale_reorg_tipfin:27
+engine/reducer/jobs/src/stage_repair_reducer_frontier_purge.c:stage_reducer_frontier_purge_noncanonical:52
 engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_stages_from_cold_import:18
 engine/services/src/legacy_import_service.c:legacy_import_service_run:22
 engine/services/src/node_db_catchup_service.c:node_db_catchup_service_run:80
