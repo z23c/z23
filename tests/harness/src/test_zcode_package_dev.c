@@ -1466,6 +1466,14 @@ static bool zpd_benchmark_project(const char *root, const char *name,
     return zpd_write(path, text);
 }
 
+/* A small project is walked whole; nothing was left unread. */
+static bool zpd_context_walked_whole(const struct json_value *context)
+{
+    const struct json_value *walk = context->type == JSON_OBJ
+        ? json_get(context, "budget_exhausted") : NULL;
+    return walk && walk->type == JSON_BOOL && !json_get_bool(walk);
+}
+
 static bool zpd_expert_root(const struct json_value *expert,
                             const char *key, uint8_t out[32])
 {
@@ -1940,7 +1948,7 @@ static __attribute__((unused)) int zpd_test_twelve_task_benchmark(void)
             ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
             const struct json_value *context =
                 json_get(&reply.data, "selected_context");
-            ASSERT(context && context->type == JSON_OBJ);
+            ASSERT(context && zpd_context_walked_whole(context));
             selected_bytes += (uint64_t)json_get_int(
                 json_get(context, "selected_context_bytes"));
             total_bytes += (uint64_t)json_get_int(
