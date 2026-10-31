@@ -20,6 +20,9 @@
 #include "services/chain_activation_service.h"
 #include "validation/process_block.h"
 #include <stdint.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -115,7 +118,7 @@ bool boot_sd_watchdog_format_task_line(char *out, size_t cap, long tid,
 /* The watchdog snapshot reads every thread (not just the first
  * EVIDENCE_MAX_THREADS) so a D-state or lock-waiting thread past the print
  * cap is still found and printed first. */
-#define EVIDENCE_SCAN_THREADS 1024
+#define EVIDENCE_SCAN_THREADS 2048
 
 bool boot_sd_watchdog_format_holder_line(char *out, size_t cap, bool held,
                                          long tid, const char *comm,
@@ -133,6 +136,20 @@ bool boot_sd_watchdog_format_holder_line(char *out, size_t cap, bool held,
     return true;
 }
 
+/* True when the syscall number is futex (any number where the platform has no
+ * SYS_futex: the address match below is then the only filter). */
+static bool syscall_nr_is_futex(const char *nr)
+{
+#if defined(SYS_futex)
+    char *end = NULL;
+    long v = strtol(nr, &end, 10);
+    return end != nr && *end == '\0' && v == (long)SYS_futex;
+#else
+    (void)nr;
+    return true;
+#endif
+}
+
 unsigned boot_sd_watchdog_task_priority(const char *stat,
                                         const char *syscall_text,
                                         const void *const *locks,
@@ -146,7 +163,8 @@ unsigned boot_sd_watchdog_task_priority(const char *stat,
     if (!syscall_text || !locks)
         return 1;
     char nr[24] = "", a0[32] = "";
-    if (sscanf(syscall_text, "%23s %31s", nr, a0) != 2)
+    if (sscanf(syscall_text, "%23s %31s", nr, a0) != 2 ||
+        !syscall_nr_is_futex(nr))
         return 1;
     char *end = NULL;
     unsigned long long v = strtoull(a0, &end, 0);
@@ -182,25 +200,35 @@ static void snapshot_task_stack(long tid)
         LOG_WARN("boot", "[sd_watchdog] thread tid=%ld stack unreadable", tid);
         return;
     }
-    size_t line = 0;
-    for (char *s = strtok(stack, "\n"); s && line < 8; s = strtok(NULL, "\n"),
-         line++)
+    /* Walk lines by hand: strtok keeps hidden global state other threads
+     * (the log path, supervisors) may also use. */
+    char *s = stack;
+    for (size_t lines = 0; *s != '\0' && lines < 8; lines++) {
+        char *nl = strchr(s, '\n');
+        if (nl)
+            *nl = '\0';
         LOG_WARN("boot", "[sd_watchdog] thread tid=%ld stack %s", tid, s);
+        if (!nl)
+            break;
+        s = nl + 1;
+    }
 }
 
 static void snapshot_one_task(long tid, bool priority)
 {
     char stat[EVIDENCE_FILE_MAX], wchan[64], sc[EVIDENCE_FILE_MAX];
-    char line[192];
+    char line[192] = "";
+    stat[0] = wchan[0] = sc[0] = '\0';
     bool ok = os_proc_self_task_read(tid, "stat", stat, sizeof(stat));
     (void)os_proc_self_task_read(tid, "wchan", wchan, sizeof(wchan));
     (void)os_proc_self_task_read(tid, "syscall", sc, sizeof(sc));
-    if (ok && boot_sd_watchdog_format_task_line(line, sizeof(line), tid, stat,
-                                                wchan, sc))
+    bool fmt = ok && boot_sd_watchdog_format_task_line(line, sizeof(line), tid,
+                                                       stat, wchan, sc);
+    if (fmt)
         LOG_WARN("boot", "[sd_watchdog] thread %s", line);
     else
         LOG_WARN("boot", "[sd_watchdog] thread tid=%ld unreadable", tid);
-    if (ok && priority && strstr(line, " st=D "))
+    if (fmt && priority && strstr(line, " st=D "))
         snapshot_task_stack(tid);
 }
 
@@ -224,7 +252,7 @@ static void log_tx_lock_holder(void)
     long tid = 0;
     int64_t held_us = 0;
     bool held = progress_store_tx_holder(&tid, &held_us);
-    char stat[EVIDENCE_FILE_MAX], comm[32] = "?", line[160];
+    char stat[EVIDENCE_FILE_MAX] = "", comm[32] = "?", line[160];
     char state = '?';
     if (held && os_proc_self_task_read(tid, "stat", stat, sizeof(stat)))
         (void)task_parse_stat(stat, comm, sizeof(comm), &state);
@@ -268,5 +296,6 @@ void boot_sd_watchdog_log_thread_snapshot(void)
     for (size_t i = 0; i < shown; i++)
         snapshot_one_task(tids[order[i]], prio[order[i]] == 0);
     LOG_WARN("boot", "[sd_watchdog] thread snapshot: threads=%zu "
-             "truncated=%zu", shown, total - shown);
+             "truncated=%zu unscanned=%zu", shown, n - shown,
+             total - n);
 }

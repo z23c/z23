@@ -717,7 +717,10 @@ static void progress_store_tx_note_acquired(void)
         return;
     atomic_store_explicit(&g_tx_acquired_us, platform_time_monotonic_us(),
                           memory_order_relaxed);
-    atomic_store_explicit(&g_tx_owner_tid, os_proc_self_tid(),
+    /* Platforms without a kernel thread id report 0, which would read as
+     * "free"; -1 keeps the lock visibly held by an unknown thread. */
+    long tid = os_proc_self_tid();
+    atomic_store_explicit(&g_tx_owner_tid, tid != 0 ? tid : -1,
                           memory_order_release);
 }
 

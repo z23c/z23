@@ -36,6 +36,9 @@
 #include "util/sd_notify.h"
 #include "config/boot_internal.h"   /* boot_sd_watchdog_test_pet_decide */
 #include "storage/progress_store.h"
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 #include "platform/os_proc.h"
 #include "net/tor_integration.h"
 #include "util/thread_work_probe.h"
@@ -1167,15 +1170,25 @@ static int test_sd_watchdog_holder_and_order(void)
     int a, b;
     const void *locks[2] = { &a, &b };
     char sc[80];
+#if defined(SYS_futex)
+    long futex_nr = (long)SYS_futex;
+#else
+    long futex_nr = 202;
+#endif
     SDN_CHECK("priority: D state first",
               boot_sd_watchdog_task_priority("5 (x) D 1\n", "17 0x1 0x2\n",
                                              locks, 2) == 0);
-    snprintf(sc, sizeof(sc), "202 %p 0x80\n", (void *)&b);
+    snprintf(sc, sizeof(sc), "%ld %p 0x80\n", futex_nr, (void *)&b);
     SDN_CHECK("priority: futex on known lock first",
               boot_sd_watchdog_task_priority("5 (x) S 1\n", sc, locks, 2) == 0);
     SDN_CHECK("priority: futex on unknown address ordinary",
               boot_sd_watchdog_task_priority("5 (x) S 1\n",
                                              "202 0x1234 0x80\n", locks, 2) == 1);
+#if defined(SYS_futex)
+    snprintf(sc, sizeof(sc), "%ld %p 0x80\n", futex_nr + 1000, (void *)&b);
+    SDN_CHECK("priority: non-futex syscall on a lock address ordinary",
+              boot_sd_watchdog_task_priority("5 (x) S 1\n", sc, locks, 2) == 1);
+#endif
     SDN_CHECK("priority: running ordinary",
               boot_sd_watchdog_task_priority("5 (x) R 1\n", "running\n",
                                              locks, 2) == 1);
