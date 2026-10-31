@@ -49,7 +49,7 @@ static void assert_unknown(const struct wallet_view *v)
     assert(!strcmp(v->pending, "Pending amount unknown"));
     assert(!strcmp(v->public_line, "Public amount unknown"));
     assert(!strcmp(v->sync, "Sync state unknown"));
-    assert(!v->immature_line[0] && !v->scanning);
+    assert(!v->immature_line[0] && !v->scanning && !v->current);
     assert(!strcmp(v->send, "Sending is unavailable until the wallet state loads."));
 }
 
@@ -59,7 +59,7 @@ static void test_valid_reply(void)
     assert(wallet_view_from_summary(VALID_REPLY, &v));
     assert(v.known);
     assert(!strcmp(v.balance, "1.23456789 ZCL"));
-    assert(!v.immature_line[0] && !v.scanning);
+    assert(!v.immature_line[0] && !v.scanning && v.current);
     assert(!strcmp(v.pending, "0.5 ZCL pending. The next arrives in 7 confirmations."));
     assert(!strcmp(v.public_line, "0.1 ZCL public"));
     assert(!strcmp(v.sync, "Up to date at block 3000000"));
@@ -153,7 +153,7 @@ static void test_immature_and_scan(void)
     assert(wallet_view_from_summary(json2, &v) && v.known && v.scanning);
     /* A node that is not current, with every block scanned, says it is not up to date and does not claim a scan. */
     replace_once(json2, sizeof(json2), VALID_REPLY, "\"blocks_behind\":0,\"current\":true", "\"blocks_behind\":0,\"current\":false");
-    assert(wallet_view_from_summary(json2, &v) && v.known && !v.scanning && !strstr(v.sync, "Up to date"));
+    assert(wallet_view_from_summary(json2, &v) && v.known && !v.scanning && !v.current && !strstr(v.sync, "Up to date"));
     printf("  immature coins, scan state, a node that is not current\n");
 }
 

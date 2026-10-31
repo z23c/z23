@@ -37,8 +37,9 @@
  *            sentence saying this build cannot make a new address, and no New address button.
  *   history  zcl.wallet_history.v1: entries[] of {txid, status (confirmed | pending), time, direction
  *            (received | sent | internal | unknown), kind (private | public), amount_zat | null,
- *            memo_present, all_outputs_shielded}. A sent entry is called private only when the node says
- *            all_outputs_shielded is true; a missing field makes no claim of privacy, count and next_cursor (a string, or null on the last page).
+ *            memo_present, fully_shielded}. An entry is called private only when the node says fully_shielded
+ *            is true (every input and output shielded) and public when it says false; null or a missing
+ *            field makes no claim of privacy, count and next_cursor (a string, or null on the last page).
  *   detail   zcl.wallet_history.v1 with entry: the same row plus memo (text) or memo_hex. */
 
 #define WALLET_PAGE_ROWS 10u
@@ -103,6 +104,9 @@ struct wallet_env {
     uint64_t (*now_ms)(void *ctx);
     /* Run each command on its own thread; false runs it in the caller, for tests. */
     bool async;
+    /* In plain words, what the protection that was just refused could not do, as the end of "this phone would not
+     * let the app ...". Optional (NULL). Called on the UI thread right after secure returned false. */
+    const char *(*refusal)(void *ctx);
 };
 
 bool wallet_screens_init(const struct wallet_env *env);

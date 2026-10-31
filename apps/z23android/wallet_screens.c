@@ -23,15 +23,16 @@
 #define TOKEN_MAX 16u
 
 enum direction { DIR_UNKNOWN, DIR_SENT, DIR_RECEIVED, DIR_INTERNAL };
-enum pool { POOL_UNKNOWN, POOL_PRIVATE, POOL_PUBLIC };
+/* What the node reports in fully_shielded: true, false, or null (or nothing) when the wallet cannot tell. */
+enum shield { SHIELD_UNKNOWN, SHIELD_FULL, SHIELD_PART };
 enum status { STATUS_UNKNOWN, STATUS_CONFIRMED, STATUS_PENDING };
 enum kind { K_SUMMARY, K_FLEET, K_LATEST, K_NEW, K_HISTORY, K_DETAIL, K_COUNT };
 
 struct entry {
     enum direction direction;
-    enum pool pool;
+    enum shield shield;
     enum status status;
-    bool amount_known, time_known, memo_present, all_shielded;
+    bool amount_known, time_known, memo_present;
     uint64_t amount_zat;
     int64_t time;
     char txid[TXID_MAX]; /* empty when the node gave none that is a transaction id */
@@ -68,6 +69,7 @@ static struct {
     pthread_mutex_t lock;
     struct wallet_env env;
     bool ready, secure, blocked, held;
+    char why[96]; /* what the refused protection could not do, for the notice shown instead of the wallet */
     unsigned epoch, version, dropped;
     enum wallet_page page;
     struct data d;
@@ -235,14 +237,12 @@ static const char *direction_label(enum direction direction)
     return direction == DIR_SENT ? "Sent" : direction == DIR_RECEIVED ? "Received" :
            direction == DIR_INTERNAL ? "Moved inside your wallet" : "Direction unknown";
 }
-/* What the entry says about privacy, or "" when the node makes no claim. A payment sent from a private balance may
- * still have public outputs, so an entry that spent from the wallet is called private only when the node reports every
- * output shielded; a received or internal move needs no such report. */
+/* What the entry says about privacy, or "" when the node makes no claim. Only the node's fully_shielded says: true
+ * when every input and output of the transaction is shielded, false when any is transparent. A payment from a
+ * private balance to a public address, or from a public sender to a private one, is not private in either direction. */
 static const char *pool_label(const struct entry *e)
 {
-    if (e->pool == POOL_PUBLIC) return "Public";
-    if (e->pool == POOL_PRIVATE) return e->direction == DIR_RECEIVED || e->direction == DIR_INTERNAL || e->all_shielded ? "Private" : "";
-    return "Privacy unknown";
+    return e->shield == SHIELD_FULL ? "Private" : e->shield == SHIELD_PART ? "Public" : "";
 }
 static const char *state_label(enum status status)
 {
@@ -284,7 +284,8 @@ static void history_items(struct wallet_screen *s)
     if (d->history_pending) line(s, "Loading…");
     else if (d->history_failed) note(s, "History could not be read. Check that your node is running, then open History again.");
     else if (!d->rows) line(s, !d->funds_loaded || !d->view.known ? "None found so far." :
-                              d->view.scanning ? "None found so far. The wallet is still scanning the chain." : "No transactions yet.");
+                              d->view.scanning ? "None found so far. The wallet is still scanning the chain." :
+                              !d->view.current ? "None found so far. The node is not up to date." : "No transactions yet.");
     for (size_t i = 0; i < d->rows; ++i) {
         row_text(&d->entry[i], text, sizeof(text));
         struct wallet_item *item = add(s, WALLET_ITEM_BUTTON, WALLET_ACT_DETAIL, text);
@@ -315,8 +316,8 @@ static void detail_items(struct wallet_screen *s)
     const struct entry *e = &d->entry[d->detail < d->rows ? d->detail : 0];
     char text[WALLET_TEXT_MAX];
     title(s, direction_label(e->direction));
-    line(s, e->pool == POOL_PUBLIC ? "Public: the amount and addresses are visible to everyone." :
-            pool_label(e)[0] ? pool_label(e) : "The node does not say whether every part of this payment was private.");
+    line(s, e->shield == SHIELD_PART ? "Public: at least one amount or address in this payment is visible to everyone." :
+            e->shield == SHIELD_FULL ? "Private" : "The node does not say whether every part of this payment was private.");
     amount_label(e, text, sizeof(text));
     (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, text);
     line(s, state_label(e->status));
@@ -336,7 +337,10 @@ unsigned wallet_screens_snapshot(struct wallet_screen *out)
     out->count = 0;
     if (st.blocked) {
         (void)add(out, WALLET_ITEM_TITLE, WALLET_ACT_NONE, "Wallet");
-        note(out, "This screen cannot be hidden from screenshots on this phone, so the wallet is not shown.");
+        char notice[WALLET_TEXT_MAX];
+        snprintf(notice, sizeof(notice), "The wallet is not shown because this phone would not let the app %s.",
+                 st.why[0] ? st.why : "protect the screen");
+        note(out, notice);
         button(out, WALLET_ACT_BACK, "Home");
     } else if (st.page == WALLET_PAGE_FUNDS) funds_items(out);
     else if (st.page == WALLET_PAGE_RECEIVE) receive_items(out);
@@ -349,11 +353,12 @@ unsigned wallet_screens_snapshot(struct wallet_screen *out)
 
 /* ---- replies ---- */
 
-static void apply_summary(bool ok, const char *json)
+/* silent: the node did not answer at all, as opposed to answering with an error of its own. */
+static void apply_summary(bool ok, bool silent, const char *json)
 {
     st.d.funds_loaded = true;
     st.d.funds_fresh = true;
-    st.d.node_silent = !ok;
+    st.d.node_silent = !ok && silent;
     st.d.summary_at = now();
     if (!ok || !json) json = "";
     (void)wallet_view_from_summary(json, &st.d.view);
@@ -495,11 +500,10 @@ static enum direction read_direction(const char *text)
 static void read_entry(const struct json_value *row, struct entry *e)
 {
     const struct json_value *amount = typed(row, "amount_zat", JSON_INT), *time = typed(row, "time", JSON_INT);
-    const struct json_value *memo = typed(row, "memo_present", JSON_BOOL), *shielded = typed(row, "all_outputs_shielded", JSON_BOOL);
-    const char *kind = text_of(row, "kind"), *status = text_of(row, "status"), *txid = text_of(row, "txid");
+    const struct json_value *memo = typed(row, "memo_present", JSON_BOOL), *shielded = typed(row, "fully_shielded", JSON_BOOL);
+    const char *status = text_of(row, "status"), *txid = text_of(row, "txid");
     memset(e, 0, sizeof(*e));
     e->direction = read_direction(text_of(row, "direction"));
-    e->pool = is(kind, "private") ? POOL_PRIVATE : is(kind, "public") ? POOL_PUBLIC : POOL_UNKNOWN;
     e->status = is(status, "confirmed") ? STATUS_CONFIRMED : is(status, "pending") ? STATUS_PENDING : STATUS_UNKNOWN;
     if (amount && json_get_int(amount) >= 0 && (uint64_t)json_get_int(amount) <= ZAPP_PAY_MAX_ZAT) {
         e->amount_known = true;
@@ -511,7 +515,7 @@ static void read_entry(const struct json_value *row, struct entry *e)
     }
     if (wallet_txid_valid(txid)) copy(e->txid, sizeof(e->txid), txid);
     e->memo_present = memo && json_get_bool(memo);
-    e->all_shielded = shielded && json_get_bool(shielded);
+    e->shield = !shielded ? SHIELD_UNKNOWN : json_get_bool(shielded) ? SHIELD_FULL : SHIELD_PART;
 }
 /* Reads the page. False when the reply is not exactly the typed frame, which is an error and not an empty wallet. */
 static bool read_page(const struct json_value *data)
@@ -580,11 +584,11 @@ static void apply_detail(bool ok, const char *json)
 
 /* ---- commands ---- */
 
-struct reply { bool ok, missing; const char *json; };
+struct reply { bool ok, missing, silent; const char *json; };
 
 static void apply(const struct job *j, const struct reply *r)
 {
-    if (!strcmp(j->op, "summary")) apply_summary(r->ok, r->json);
+    if (!strcmp(j->op, "summary")) apply_summary(r->ok, r->silent, r->json);
     else if (!strcmp(j->op, "fleet")) apply_fleet(r->ok, r->json);
     else if (!strcmp(j->op, "history")) apply_history(r->ok, r->json);
     else if (!strcmp(j->op, "detail")) apply_detail(r->ok, r->json);
@@ -607,6 +611,7 @@ static void run_job(const struct job *j)
     struct reply r = {0};
     r.ok = out && j->env.run && j->env.run(j->env.ctx, j->op, j->arg, out, OUT_CAP);
     r.missing = out && !r.ok && strstr(out, "UNKNOWN_COMMAND");
+    r.silent = out && !r.ok && (strstr(out, "NODE_UNAVAILABLE") || strstr(out, "The command timed out."));
     r.json = json_start(out ? out : "");
     finish(j, &r);
     if (out) memory_cleanse(out, OUT_CAP);
@@ -763,6 +768,11 @@ bool wallet_screens_open(enum wallet_page page)
     if (!st.secure) {
         st.secure = st.env.secure(st.env.ctx, true);
         st.blocked = !st.secure;
+        st.why[0] = '\0';
+        if (st.blocked && st.env.refusal) {
+            const char *words = st.env.refusal(st.env.ctx);
+            if (words) copy(st.why, sizeof(st.why), words);
+        }
         if (st.blocked) (void)st.env.secure(st.env.ctx, false);
     }
     if (st.blocked) { ++st.epoch; wipe(); st.page = page; touch(); }

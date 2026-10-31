@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "secure_window.h"
+#include <stddef.h>
 
 static struct zapp_touch_gate gate;
 
@@ -29,19 +30,25 @@ bool zapp_secure_window_drops_motion(int32_t action, int32_t flags)
     return zapp_touch_gate_drops(&gate, action, flags);
 }
 
-/* A member the caller left NULL is not applied. */
-static bool attempt(bool (*protect)(void *ctx, bool on), void *ctx, bool on)
+/* The first protection the last apply could not give, in words that end "this phone would not let the app ...". */
+static const char *refusal;
+const char *zapp_secure_window_refusal(void) { return refusal; }
+/* A member the caller left NULL cannot be given, so it is refused. */
+static bool attempt(bool (*protect)(void *ctx, bool on), void *ctx, bool on, const char *what)
 {
-    return !protect || protect(ctx, on);
+    bool ok = protect && protect(ctx, on);
+    if (!ok && !refusal) refusal = what;
+    return ok;
 }
 bool zapp_secure_window_apply(const struct zapp_secure_ops *ops, bool on)
 {
+    refusal = NULL;
     if (on) gate.protect = true;
-    bool flagged = ops->flag_secure(ops->ctx, on);
-    bool filtered = ops->filter_touches(ops->ctx, on);
-    bool covered = attempt(ops->hide_overlays, ops->ctx, on);
-    bool hidden = attempt(ops->recents, ops->ctx, on);
-    bool guarded = attempt(ops->accessibility, ops->ctx, on);
+    bool flagged = attempt(ops->flag_secure, ops->ctx, on, "hide the screen from screenshots and recordings");
+    bool filtered = attempt(ops->filter_touches, ops->ctx, on, "ignore touches that pass through another window");
+    bool covered = attempt(ops->hide_overlays, ops->ctx, on, "stop other apps from drawing over the screen");
+    bool hidden = attempt(ops->recents, ops->ctx, on, "hide the screen in the list of recent apps");
+    bool guarded = attempt(ops->accessibility, ops->ctx, on, "keep out screen readers that are not allowed sensitive data");
     if (!on) zapp_secure_window_release();
     return flagged && filtered && covered && hidden && guarded;
 }
@@ -51,8 +58,7 @@ bool zapp_secure_window_apply(const struct zapp_secure_ops *ops, bool on)
 #include <assert.h>
 
 #define WINDOW_FLAG_SECURE 0x2000 /* WindowManager.LayoutParams.FLAG_SECURE */
-/* WindowManager.LayoutParams.PRIVATE_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS, set by Window.setHideOverlayWindows. */
-#define WINDOW_PRIVATE_HIDE_OVERLAYS 0x00080000
+#define PERMISSION_GRANTED 0 /* PackageManager.PERMISSION_GRANTED */
 #define ACCESSIBILITY_DATA_SENSITIVE_AUTO 0
 #define ACCESSIBILITY_DATA_SENSITIVE_YES 1
 
@@ -83,16 +89,19 @@ static bool jni_flag_secure(void *context, bool on)
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }
-/* Windows of other apps are not drawn over this one; the attribute is read back. */
+/* Windows of other apps are not drawn over this one. The platform has no public getter for this setting, and the
+ * attribute that holds it is a hidden field, so the confirmation is that the app holds HIDE_OVERLAY_WINDOWS (which
+ * the setting needs) and that the call returned without an exception. */
 static bool jni_hide_overlays(void *context, bool on)
 {
     ANativeActivity *activity = context;
     JNIEnv *env = activity->env;
-    jint flags = 0;
     if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return false; }
-    jobject window = window_of(env, activity);
-    bool ok = window && zj_bool_property(env, window, "setHideOverlayWindows", on) &&
-        window_attribute(env, window, "privateFlags", &flags) && ((flags & WINDOW_PRIVATE_HIDE_OVERLAYS) != 0) == on;
+    jmethodID check = zj_method(env, activity->clazz, "checkSelfPermission", "(Ljava/lang/String;)I");
+    jstring permission = check ? zj_string(env, "android.permission.HIDE_OVERLAY_WINDOWS") : NULL;
+    bool granted = permission && (*env)->CallIntMethod(env, activity->clazz, check, permission) == PERMISSION_GRANTED;
+    jobject window = zj_clean(env) && granted ? window_of(env, activity) : NULL;
+    bool ok = window && zj_bool_property(env, window, "setHideOverlayWindows", on);
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }

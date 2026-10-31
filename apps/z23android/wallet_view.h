@@ -30,6 +30,8 @@ struct wallet_view {
     bool send_allowed;
     /* The wallet has not yet scanned every block the node knows, so a list of its transactions may be incomplete. */
     bool scanning;
+    /* The node reports that it is at the tip of the chain. A list read from a node that is not current is not complete. */
+    bool current;
 };
 
 /* Parse the reply and fill out. Returns false, with out set to the unknown

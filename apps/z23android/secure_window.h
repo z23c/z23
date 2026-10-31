@@ -21,10 +21,14 @@ struct zapp_secure_ops {
     /* Accessibility services that do not declare access to sensitive data cannot read the window. */
     bool (*accessibility)(void *ctx, bool on);
 };
-/* Applies every protection, or removes every one, and attempts each even when another fails. A NULL
- * member is not applied; the Android constructor sets all five. False means a protection is not in force:
- * the caller must not show wallet content. */
+/* Applies every protection, or removes every one, and attempts each even when another fails. False means a
+ * protection is not in force: the caller must not show wallet content. A member left NULL is a protection
+ * the caller cannot give, so it is a refusal too; the Android constructor sets all five. */
 bool zapp_secure_window_apply(const struct zapp_secure_ops *ops, bool on);
+
+/* In plain words, what the first refused protection of the last zapp_secure_window_apply could not do, as the end of
+ * "this phone would not let the app ...", or NULL when none was refused. UI thread only. */
+const char *zapp_secure_window_refusal(void);
 
 /* AMOTION_EVENT_FLAG_WINDOW_IS_OBSCURED (0x1) and MotionEvent.FLAG_WINDOW_IS_PARTIALLY_OBSCURED (0x2,
  * API 29; the NDK header has no name for it, but the raw flags carry it). */

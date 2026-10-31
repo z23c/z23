@@ -241,6 +241,7 @@ static void render_known(const struct summary *s, struct wallet_view *out)
     render_public(s, out);
     render_immature(s, out);
     out->scanning = s->blocks_behind > 0 || s->scanned < s->header;
+    out->current = s->current;
     render_sync(s, out);
     render_send(s, out);
     out->send_allowed = s->send_allowed;

@@ -71,6 +71,7 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
     "\"send_allowed\":true,\"send_blocked_reason\":\"\"}}"
 #define GOOD_SUMMARY SUMMARY("123456789", "1.23456789", "50000000", "0.50000000", "10000000", "0.10000000")
 #define UNKNOWN_COMMAND_ERROR "{\"ok\":false,\"error\":{\"code\":\"UNKNOWN_COMMAND\"}}"
+#define NODE_UNAVAILABLE_ERROR "{\"ok\":false,\"error\":{\"code\":\"NODE_UNAVAILABLE\"}}"
 #define OTHER_ERROR "{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\"}}"
 
 /* The fleet status worker's frame, with its machines. */
@@ -106,7 +107,7 @@ struct fake {
     char ops[1024][16];
     char args[1024][WALLET_CURSOR_MAX];
     int op_count, counts[8];
-    const char *summary, *fleet, *latest, *receive, *detail;
+    const char *summary, *fleet, *latest, *receive, *detail, *refusal;
     const char *history[3]; /* by page: the first, the one after CURSOR_1 */
     void (*during)(const char *op, const char *arg);
     uint64_t now;
@@ -122,6 +123,7 @@ static bool fake_secure(void *ctx, bool on)
     if (fake.secure_ok) fake.secure_on = on;
     return fake.secure_ok;
 }
+static const char *fake_refusal(void *ctx) { (void)ctx; return fake.refusal; }
 static bool reply(const char *text, char *out, size_t cap)
 {
     bool ok = text && (fake.always_ok || strncmp(text, "{\"ok\":false", 11) != 0);
@@ -174,7 +176,7 @@ static uint64_t fake_now(void *ctx) { (void)ctx; return fake.now; }
 
 static void start(bool async)
 {
-    struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async};
+    struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async, fake_refusal};
     wallet_screens_shutdown();
     memset(&fake, 0, sizeof(fake));
     pthread_mutex_init(&fake.lock, NULL);
@@ -267,7 +269,7 @@ static void test_funds_replies(void)
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     CHECK(!has("arriving") && !has("public") && has("0.00000005 ZCL"));
 
-    fake.summary = OTHER_ERROR;               /* a node that does not answer: one line and Start node, never a zero that was not read */
+    fake.summary = NODE_UNAVAILABLE_ERROR;    /* a node that does not answer: one line and Start node, never a zero that was not read */
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     CHECK(has("The node is not answering. Start it to see your funds.") && !has("unknown") && !has("ZCL") && !has("could not be read"));
     CHECK(find(snap(), WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) < 0 && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) >= 0);
@@ -275,6 +277,17 @@ static void test_funds_replies(void)
     tap(WALLET_ACT_START_NODE, 0, WALLET_START_NODE);              /* the shell hands the start to the controller; nothing else runs */
     CHECK(fake.op_count == silent_ops);
 
+    fake.summary = "{\"ok\":false}\nThe command timed out.";                       /* so does one that takes too long */
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("The node is not answering. Start it to see your funds.") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) >= 0);
+    static const char *const answering[] = {                       /* a node that answers, even with an error, is running: Start would only say so */
+        OTHER_ERROR, UNKNOWN_COMMAND_ERROR, "{\"ok\":false,\"error\":{\"code\":\"WALLET_DB_UNREADABLE\",\"message\":\"Wallet database unreadable\"}}",
+    };
+    for (size_t i = 0; i < sizeof(answering) / sizeof(answering[0]); ++i) {
+        fake.summary = answering[i];
+        CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+        CHECK(has("Balance unknown") && !has("not answering") && !has("0 ZCL") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) < 0);
+    }
     fake.summary = "{\"ok\":true,\"data\":{\"x\":1}}";             /* a node that answers with something else: unknown, never zero */
     fake.always_ok = true;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
@@ -378,7 +391,7 @@ static void test_refresh_and_stale(void)
     wallet_screens_tick();
     CHECK(count_ops("summary") == 1);
     fake.now += 1;
-    fake.summary = NULL;                           /* the node answers with an error */
+    fake.summary = NODE_UNAVAILABLE_ERROR;         /* the node stops answering */
     wallet_screens_tick();
     CHECK(count_ops("summary") == 2 && has("not answering") && !has("Up to date"));
     fake.summary = GOOD_SUMMARY;
@@ -533,6 +546,7 @@ static void test_receive_without_new_address(void)
     tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);
     s = snap();
     CHECK(find(s, WALLET_ITEM_QR, WALLET_ACT_NONE) < 0 && has("No address was made") && !has("WALLET_LOCKED"));
+    CHECK(!has("256") && !has("locked") && !has("which"));                      /* receive makes no key: no reason about keys or locks */
     CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0 && !has("cannot make a new address"));
     wallet_screens_close();
 }
@@ -548,8 +562,8 @@ static void test_history(void)
     CHECK(s->page == WALLET_PAGE_HISTORY && count_ops("history") == 1 && !fake.args[fake.op_count - 1][0]);
     long row0 = find_text(s, "Sent ·");
     CHECK(row0 >= 0 && !strcmp(text_at(s, row0), "1.5 ZCL\nSent · Confirmed · 2023-11-14"));
-    CHECK(!strcmp(text_at(s, row0 + 1), "Amount unknown\nReceived · Public · Pending · 2023-11-14"));
-    CHECK(!strcmp(text_at(s, row0 + 2), "0.00000001 ZCL\nMoved inside your wallet · Private · State unknown · Date unknown"));
+    CHECK(!strcmp(text_at(s, row0 + 1), "Amount unknown\nReceived · Pending · 2023-11-14"));
+    CHECK(!strcmp(text_at(s, row0 + 2), "0.00000001 ZCL\nMoved inside your wallet · State unknown · Date unknown"));
     CHECK(!has(TX_A) && !has("MEMO"));
     CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_OLDER) >= 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEWER) < 0);
     wallet_screens_close();
@@ -572,7 +586,7 @@ static void test_history_detail(void)
     CHECK(!wallet_screens_residue("MEMO-MARKER", 11));                              /* nor does the screen keep it */
     tap(WALLET_ACT_DETAIL, 1, WALLET_STAY);                                           /* a row without a memo asks for none */
     s = snap();
-    CHECK(count_ops("detail") == 1 && has("Public: the amount and addresses are visible to everyone") && has("Amount unknown"));
+    CHECK(count_ops("detail") == 1 && has("The node does not say whether every part of this payment was private.") && !has("Public") && has("Amount unknown"));
     CHECK(find(s, WALLET_ITEM_MEMO, WALLET_ACT_NONE) < 0 && !has("Memo"));
     CHECK(wallet_screens_back());
     tap(WALLET_ACT_DETAIL, 9, WALLET_STAY);                                           /* a row that is not there changes nothing */
@@ -587,7 +601,7 @@ static void test_history_pages(void)
     tap(WALLET_ACT_OLDER, 0, WALLET_STAY);
     struct wallet_screen *s = snap();
     CHECK(count_ops("history") == 2 && !strcmp(fake.args[fake.op_count - 1], CURSOR_1));
-    CHECK(has("21000000 ZCL\nReceived · Private · Confirmed · 2023-11-15"));
+    CHECK(has("21000000 ZCL\nReceived · Confirmed · 2023-11-15"));
     CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_OLDER) < 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEWER) >= 0);
     tap(WALLET_ACT_NEWER, 0, WALLET_STAY);
     CHECK(count_ops("history") == 3 && !fake.args[fake.op_count - 1][0] && has("Sent ·"));
@@ -632,7 +646,7 @@ static void test_history_replies(void)
     struct wallet_screen *s = snap();
     long row0 = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_DETAIL);
     CHECK(row0 >= 0);
-    CHECK(!strcmp(text_at(s, row0), "Amount unknown\nDirection unknown · Privacy unknown · State unknown · Date unknown"));
+    CHECK(!strcmp(text_at(s, row0), "Amount unknown\nDirection unknown · State unknown · Date unknown"));
     CHECK(!strcmp(text_at(s, row0 + 1), "Amount unknown\nDirection unknown · State unknown · Date unknown"));
     CHECK(!strcmp(text_at(s, row0 + 2), text_at(s, row0)) && !strcmp(text_at(s, row0 + 3), text_at(s, row0)));
     tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
@@ -642,7 +656,7 @@ static void test_history_replies(void)
     start(false);                                     /* the supply is the limit of an amount */
     fake.history[0] = PAGE(ROW("received", "private", "confirmed", "2100000000000000", "1700000000", TX_A, "false") ","
                            ROW("received", "private", "confirmed", "2100000000000001", "1700000000", TX_B, "false"), "2", "null");
-    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY) && has("21000000 ZCL") && has("Amount unknown\nReceived · Private"));
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY) && has("21000000 ZCL") && has("Amount unknown\nReceived · Confirmed") && !has("Private"));
     wallet_screens_close();
 }
 
@@ -782,11 +796,17 @@ static void test_secure(void)
     wallet_screens_shutdown();
     CHECK(!fake.secure_on);
 
-    start(false);                                                         /* no protection, no wallet content, no command */
+    start(false);                                                         /* no protection, no wallet content, no command, and the words name what failed */
+    fake.secure_ok = false;
+    fake.refusal = "stop other apps from drawing over the screen";
+    CHECK(!wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("would not let the app stop other apps from drawing over the screen.") && !has("screenshots") && fake.op_count == 0);
+    wallet_screens_close();
+    start(false);
     fake.secure_ok = false;
     CHECK(!wallet_screens_open(WALLET_PAGE_FUNDS));
     struct wallet_screen *s = snap();
-    CHECK(fake.op_count == 0 && find_text(s, "cannot be hidden from screenshots") >= 0);
+    CHECK(fake.op_count == 0 && find_text(s, "would not let the app protect the screen") >= 0);    /* no callback: the general words */
     CHECK(find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) < 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_RECEIVE) < 0);
     tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
     tap(WALLET_ACT_HISTORY, 0, WALLET_STAY);
@@ -866,28 +886,39 @@ static void test_settle(void)
     CHECK(!fake.secure_on);
 }
 
-/* A payment that spent from the wallet is called private only when the node says every output was shielded. */
-static void test_sent_privacy(void)
+/* Only the node's fully_shielded says whether a transaction was private: true is Private and false is Public, in every
+ * direction; null, a missing field and the old kind alone make no claim. */
+static void test_privacy_claims(void)
 {
     static const char *const unclaimed = "The node does not say whether every part of this payment was private.";
     start(false);
     fake.history[0] = PAGE(ROW("sent", "private", "confirmed", "100000000", "1700000000", TX_A, "false") ","
-                           ROWX("sent", "private", "confirmed", "200000000", "1700000000", TX_B, "false", "\"all_outputs_shielded\":true") ","
-                           ROWX("sent", "private", "confirmed", "300000000", "1700000000", TX_C, "false", "\"all_outputs_shielded\":false") ","
-                           ROW("sent", "public", "confirmed", "400000000", "1700000000", TX_D, "false") ","
-                           ROW("received", "private", "confirmed", "500000000", "1700000000", TX_A, "false"), "5", "null");
+                           ROWX("sent", "private", "confirmed", "200000000", "1700000000", TX_B, "false", "\"fully_shielded\":true") ","
+                           ROWX("sent", "private", "confirmed", "300000000", "1700000000", TX_C, "false", "\"fully_shielded\":false") ","
+                           ROWX("received", "private", "confirmed", "500000000", "1700000000", TX_A, "false", "\"fully_shielded\":null") ","
+                           ROW("received", "private", "confirmed", "600000000", "1700000000", TX_B, "false") ","
+                           ROWX("received", "public", "confirmed", "700000000", "1700000000", TX_C, "false", "\"fully_shielded\":true") ","
+                           ROWX("internal", "private", "confirmed", "800000000", "1700000000", TX_D, "false", "\"fully_shielded\":false") ","
+                           ROWX("internal", "public", "confirmed", "900000000", "1700000000", TX_A, "false", "\"fully_shielded\":true"),
+                           "8", "null");
     CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
     struct wallet_screen *s = snap();
-    CHECK(find_text(s, "1 ZCL\nSent · Confirmed") >= 0);                          /* the node said nothing */
-    CHECK(find_text(s, "2 ZCL\nSent · Private · Confirmed") >= 0);                 /* the node said so */
-    CHECK(find_text(s, "3 ZCL\nSent · Confirmed") >= 0);                          /* the node said not */
-    CHECK(find_text(s, "4 ZCL\nSent · Public · Confirmed") >= 0);
-    CHECK(find_text(s, "5 ZCL\nReceived · Private · Confirmed") >= 0);
+    CHECK(find_text(s, "1 ZCL\nSent · Confirmed") >= 0);                             /* a private-looking kind alone is no claim */
+    CHECK(find_text(s, "2 ZCL\nSent · Private · Confirmed") >= 0);                    /* the node said so */
+    CHECK(find_text(s, "3 ZCL\nSent · Public · Confirmed") >= 0);                     /* a z-to-t payment */
+    CHECK(find_text(s, "5 ZCL\nReceived · Confirmed") >= 0);                         /* null: the wallet cannot tell */
+    CHECK(find_text(s, "6 ZCL\nReceived · Confirmed") >= 0);                         /* a t-to-z payment is not private either */
+    CHECK(find_text(s, "7 ZCL\nReceived · Private · Confirmed") >= 0);               /* the field decides, not the old kind */
+    CHECK(find_text(s, "8 ZCL\nMoved inside your wallet · Public · Confirmed") >= 0);  /* a z-to-own-t move */
+    CHECK(find_text(s, "9 ZCL\nMoved inside your wallet · Private · Confirmed") >= 0);
     tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
-    CHECK(has(unclaimed) && !has("Private"));
+    CHECK(has(unclaimed) && !has("Private") && !has("Public"));
     CHECK(wallet_screens_back());
     tap(WALLET_ACT_DETAIL, 1, WALLET_STAY);
     CHECK(has("Private") && !has(unclaimed));
+    CHECK(wallet_screens_back());
+    tap(WALLET_ACT_DETAIL, 2, WALLET_STAY);
+    CHECK(has("Public: at least one amount or address in this payment is visible to everyone.") && !has(unclaimed));
     wallet_screens_close();
 }
 
@@ -903,7 +934,10 @@ static void test_history_while_scanning(void)
     CHECK(has("None found so far. The wallet is still scanning the chain.") && !has("No transactions yet."));
     fake.summary = OTHER_ERROR;                                                  /* no summary: nothing says the scan is done */
     CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
-    CHECK(has("None found so far.") && !has("No transactions yet.") && !has("still scanning"));
+    CHECK(has("None found so far.") && !has("No transactions yet.") && !has("still scanning") && !has("not up to date"));
+    fake.summary = SUMMARY_OFFLINE;                                              /* a node that is not at the tip has not seen everything */
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    CHECK(has("None found so far. The node is not up to date.") && !has("No transactions yet.") && !has("still scanning"));
     wallet_screens_close();
 }
 
@@ -1119,7 +1153,7 @@ int main(int argc, char **argv)
     test_secure();
     test_pause();
     test_settle();
-    test_sent_privacy();
+    test_privacy_claims();
     test_history_while_scanning();
     test_funds_lines();
     test_receive_order();

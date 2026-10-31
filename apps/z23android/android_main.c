@@ -127,9 +127,9 @@ static void allow_background_network(JNIEnv *env, jobject activity)
     jobject intent = clean(env) && package && start && !background_exempt(env, activity, package) ?
         background_request(env, package) : NULL;
     if (intent && !battery_asked()) {
-        battery_remember();
         zapp_native_ui_update(env, "Z23 asks to run in the background so your node keeps its connections while the app is hidden. Choose Allow on the next screen.", NULL);
         (*env)->CallVoidMethod(env, activity, start, intent);
+        if (clean(env)) battery_remember();
     }
     (void)clean(env); (*env)->PopLocalFrame(env, NULL);
 }

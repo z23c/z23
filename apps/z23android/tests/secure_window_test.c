@@ -6,6 +6,7 @@
 
 struct fake { bool secure, filtered, flag_ok, filter_ok; int calls; };
 static bool f_flag(void *c, bool on) { struct fake *f = c; f->calls++; if (f->flag_ok) f->secure = on; return f->flag_ok; }
+static bool f_extra(void *c, bool on) { (void)c; (void)on; return true; }
 static bool f_filter(void *c, bool on) { struct fake *f = c; f->calls++; if (f->filter_ok) f->filtered = on; return f->filter_ok; }
 
 /* A screen that arms on DOWN and acts on UP, like the shell. */
@@ -122,11 +123,43 @@ static void every_protection_is_needed(void)
     }
     zapp_secure_window_release();
 }
+/* A protection the caller cannot give is a refusal, and the refusal says in words which one. */
+static void a_missing_protection_is_a_refusal(void)
+{
+    struct window w;
+    struct zapp_secure_ops full = {.ctx = &w, .flag_secure = w_flag, .filter_touches = w_filter, .hide_overlays = w_overlays,
+                                   .recents = w_recents, .accessibility = w_a11y};
+    static const char *const words[P_COUNT] = {
+        "hide the screen from screenshots and recordings", "ignore touches that pass through another window",
+        "stop other apps from drawing over the screen", "hide the screen in the list of recent apps",
+        "keep out screen readers that are not allowed sensitive data"};
+    for (int p = 0; p < P_COUNT; ++p) w.ok[p] = true;
+    assert(zapp_secure_window_apply(&full, true) && !zapp_secure_window_refusal());
+    for (int missing = 0; missing < P_COUNT; ++missing) {
+        struct zapp_secure_ops ops = full;
+        bool (**member[P_COUNT])(void *, bool) = {&ops.flag_secure, &ops.filter_touches, &ops.hide_overlays, &ops.recents, &ops.accessibility};
+        *member[missing] = NULL;
+        memset(&w.on, 0, sizeof(w.on));
+        assert(!zapp_secure_window_apply(&ops, true));
+        assert(zapp_secure_window_refusal() && !strcmp(zapp_secure_window_refusal(), words[missing]));
+        for (int p = 0; p < P_COUNT; ++p) assert(w.on[p] == (p != missing));
+    }
+    for (int refused = 0; refused < P_COUNT; ++refused) {       /* a refusal by the platform is named the same way */
+        for (int p = 0; p < P_COUNT; ++p) w.ok[p] = p != refused;
+        assert(!zapp_secure_window_apply(&full, false) && !strcmp(zapp_secure_window_refusal(), words[refused]));
+    }
+    for (int p = 0; p < P_COUNT; ++p) w.ok[p] = p != 3 && p != 4;   /* several refusals: the first is named */
+    assert(!zapp_secure_window_apply(&full, false) && !strcmp(zapp_secure_window_refusal(), words[3]));
+    for (int p = 0; p < P_COUNT; ++p) w.ok[p] = true;
+    assert(zapp_secure_window_apply(&full, false) && !zapp_secure_window_refusal());
+    zapp_secure_window_release();
+}
 
 int main(void)
 {
     struct fake f = {.flag_ok = true, .filter_ok = true};
-    struct zapp_secure_ops ops = {.ctx = &f, .flag_secure = f_flag, .filter_touches = f_filter};
+    struct zapp_secure_ops ops = {.ctx = &f, .flag_secure = f_flag, .filter_touches = f_filter,
+                                  .hide_overlays = f_extra, .recents = f_extra, .accessibility = f_extra};
     assert(zapp_secure_window_apply(&ops, true) && f.secure && f.filtered);
     assert(zapp_secure_window_apply(&ops, false) && !f.secure && !f.filtered);
     f.flag_ok = false;
@@ -146,6 +179,7 @@ int main(void)
     cut_gestures_are_counted_once();
     unprotected_windows_pass_everything();
     every_protection_is_needed();
+    a_missing_protection_is_a_refusal();
     puts("secure_window_test: ok");
     return 0;
 }

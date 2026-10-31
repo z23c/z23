@@ -203,6 +203,7 @@ static void h_redraw(void *c)
 }
 static void h_private(void *c) { ((struct fake *)c)->make_private++; }
 static bool s_flag(void *c, bool on) { struct fake *f = c; if (f->flag_ok) f->flag_on = on; return f->flag_ok; }
+static bool s_granted(void *c, bool on) { (void)c; (void)on; return true; }
 static bool s_filter(void *c, bool on) { struct fake *f = c; if (f->filter_ok) f->filter_on = on; return f->filter_ok; }
 
 /* Runs queued worker jobs until none is left. Nothing runs on its own: the UI thread never waits. */
@@ -235,7 +236,7 @@ static struct wss *screen_of(struct fake *f)
         .node = {f, n_validate, n_gate, n_plan, n_unlock, n_lock, n_commit, n_route},
         .device = {f, d_unwrap},
         .host = {f, h_random, h_now, h_spawn, h_redraw, h_private},
-        .secure = {f, s_flag, s_filter},
+        .secure = {f, s_flag, s_filter, s_granted, s_granted, s_granted},
     };
     struct wss *s = wss_create(&d);
     assert(s);
