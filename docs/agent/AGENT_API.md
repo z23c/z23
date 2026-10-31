@@ -1162,8 +1162,9 @@ The same response also includes `snapshot_loader` (`zcl.snapshot_loader.v1`),
 the binary-owned recovery contract for the node's own fast-start bundle:
 highest `utxo-seed-<h>.snapshot` name, seed height, matching
 `block_index.bin`, failed marker, whether `-load-snapshot-at-own-height` is
-active, and `recovery_hint`. It carries no absolute path (`loader_active`,
+active, and `recovery_hint` (`loader_active`,
 `restart_with_load_snapshot_at_own_height`, `install_tip_seed_snapshot`, etc.).
+It carries no absolute path.
 Its nested `authority` object (`zcl.snapshot_loader_authority.v1`) reports the
 durable progress-store side of the proof: whether `coins_kv` is a proven local
 authority, the `coins_applied_height`, the current reducer H*, whether the coin

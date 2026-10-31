@@ -12,6 +12,8 @@
  * started without the option must still hold its public listeners.
  *
  * The process cases need build/bin/zclassic23 and fail when it is missing.
+ * They boot with -no-tor, so the Tor SOCKS port and the onion forward target
+ * are covered by source reading and the device test, not by this test.
  *
  * make t-fast ONLY=private_listeners */
 
