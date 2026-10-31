@@ -6644,6 +6644,7 @@ LINT_FAST_GATES := \
     check-wallet-raw-prepare-log \
     check-wallet-log-privacy \
     check-zcc-cache \
+    check-fortify-masked-decls \
     check-dev-proof-native-fast-path \
     check-equihash-params \
     check-framework-shape \
@@ -6694,6 +6695,9 @@ endif
 # check-hardening-ratchet (835 ms median) failed 1 lane full-lint run on 2026-10-23.
 # check-error-doc-refs (331 ms median) failed 1 lane full-lint run on 2026-10-23.
 # check-accel-oracle-pinned (2426 ms median) failed 1 lane full-lint run on 2026-10-23.
+# check-fortify-masked-decls (~30 s on a loaded host, run in parallel) dropped
+# realpath callers from two stacked gates on 2026-10-31 (s385, s387): lanes
+# passed lint-fast, the stack fast check failed. It is in LINT_FAST_GATES.
 LINT_LAND_EXTRA_GATES := \
     check-core-seal \
     check-remote-command-classes \
