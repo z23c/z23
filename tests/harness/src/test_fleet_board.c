@@ -9537,6 +9537,8 @@ static const struct zcl_fleet_roster_provider g_fst_provider = {
     .ctx = NULL, .name = "fleet-status-test" };
 
 static struct fleet_status g_fst;
+/* The database the open fixture stores standing refusals in. */
+static struct node_db *g_fst_db;
 
 /* A chain whose block at height h has a hash only this node holds, and a
  * forked chain that differs at every height. */
@@ -9576,7 +9578,7 @@ static void fst_check_above(const char *onion, int64_t h, bool forked,
     if (!fleet_status_onion_key(onion, key, sizeof key))
         return;
     fleet_tip_cache_put(key, &t);
-    fleet_status_note_check(key, &t, &g_fst_local);
+    fleet_status_note_check(g_fst_db, key, &t, &g_fst_local);
 }
 
 static void fst_check(const char *onion, int64_t h, bool forked, int64_t at)
@@ -9629,6 +9631,7 @@ static bool fst_open(struct node_db *db, bool revoke_bravo,
     memset(db, 0, sizeof *db);
     if (!node_db_open(db, ":memory:"))
         return false;
+    g_fst_db = db;
     fleet_tip_cache_reset();
     fbr_install(FBR_ROOT, false);
     zcl_fleet_roster_provider_install(&g_fst_provider);
@@ -9657,6 +9660,7 @@ static bool fst_open(struct node_db *db, bool revoke_bravo,
 
 static void fst_close(struct node_db *db)
 {
+    g_fst_db = NULL;
     fbr_uninstall();
     fleet_tip_cache_reset();
     node_db_close(db);
@@ -9825,6 +9829,14 @@ static int test_fleet_status_agreement(void)
         ASSERT_EQ(fst_machine("alpha")->agreement, FLEET_STATUS_MACHINE_DISAGREES);
         ASSERT_EQ(g_fst.verdict, FLEET_STATUS_DISAGREE);
         ASSERT(g_fst.refuses_send);
+        /* alpha's refusal stands with alpha gone; charlie alone, on a fork
+         * below our tip, refuses nothing. */
+        fst_apply(&peers[1], 1);
+        ASSERT(g_fst.refuses_send);
+        fst_close(&db);
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_check(FST_CHARLIE, FST_LOCAL - 3, true, FST_NOW - 5);
         fst_apply(&peers[1], 1);
         ASSERT_EQ(fst_machine("charlie")->agreement, FLEET_STATUS_MACHINE_DISAGREES);
         ASSERT_EQ(g_fst.verdict, FLEET_STATUS_DISAGREE);
@@ -9974,37 +9986,37 @@ static int test_fleet_status_schedule(void)
         fst_apply(peers, 2); /* bravo is not connected */
         g_fst_asked = 0;
         g_fst_answer = true;
-        ASSERT(!fleet_tip_poll_step(&g_fst, &g_fst_local, FST_NOW, true, fst_fetch));
+        ASSERT(!fleet_tip_poll_step(&g_fst, &g_fst_local, g_fst_db, FST_NOW, true, fst_fetch));
         ASSERT_EQ(g_fst_asked, 0);
-        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, FST_NOW, false, fst_fetch));
+        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, g_fst_db, FST_NOW, false, fst_fetch));
         ASSERT_EQ(g_fst_asked, 1);
         ASSERT_STR_EQ(g_fst_asked_key[0], FST_ALPHA);
         ASSERT(fleet_status_onion_key(FST_ALPHA, key, sizeof key));
         ASSERT(fleet_tip_cache_get(key, &t));
         ASSERT_EQ(t.height, (int64_t)FST_LOCAL);
         ASSERT_EQ(t.fetched_at, (int64_t)FST_NOW);
-        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, FST_NOW + 1, false, fst_fetch));
+        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, g_fst_db, FST_NOW + 1, false, fst_fetch));
         ASSERT_STR_EQ(g_fst_asked_key[1], FST_CHARLIE);
-        ASSERT(!fleet_tip_poll_step(&g_fst, &g_fst_local, FST_NOW + 2, false, fst_fetch));
-        ASSERT(!fleet_tip_poll_step(&g_fst, &g_fst_local,
+        ASSERT(!fleet_tip_poll_step(&g_fst, &g_fst_local, g_fst_db, FST_NOW + 2, false, fst_fetch));
+        ASSERT(!fleet_tip_poll_step(&g_fst, &g_fst_local, g_fst_db,
                                     FST_NOW + FLEET_TIP_REFRESH_SECS - 1,
                                     false, fst_fetch));
         ASSERT_EQ(g_fst_asked, 2);
-        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, FST_NOW + FLEET_TIP_REFRESH_SECS,
+        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, g_fst_db, FST_NOW + FLEET_TIP_REFRESH_SECS,
                                    false, fst_fetch));
         ASSERT_STR_EQ(g_fst_asked_key[2], FST_ALPHA);
         /* A failed ask is still a try: the machine asked longest ago goes
          * first, so a dead machine is not asked again ahead of the others. */
         g_fst_answer = false;
-        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local,
+        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, g_fst_db,
                                    FST_NOW + 2 * FLEET_TIP_REFRESH_SECS,
                                    false, fst_fetch));
         ASSERT_STR_EQ(g_fst_asked_key[3], FST_CHARLIE);
-        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local,
+        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, g_fst_db,
                                    FST_NOW + 2 * FLEET_TIP_REFRESH_SECS + 1,
                                    false, fst_fetch));
         ASSERT_EQ(g_fst_asked, 5);
-        ASSERT(!fleet_tip_poll_step(&g_fst, &g_fst_local,
+        ASSERT(!fleet_tip_poll_step(&g_fst, &g_fst_local, g_fst_db,
                                     FST_NOW + 2 * FLEET_TIP_REFRESH_SECS + 2,
                                     false, fst_fetch));
         ASSERT_EQ(g_fst_asked, 5);
@@ -10245,6 +10257,22 @@ static int test_fleet_status_ahead(void)
     return failures;
 }
 
+/* The node restarts: the cache is gone, node_state stays. */
+static void fst_restart(struct node_db *db)
+{
+    fleet_tip_cache_reset();
+    fleet_status_collect(db, FBD_NOW, &g_fst);
+    fleet_status_load_refusals(db, &g_fst);
+}
+
+static bool fst_hash_none(int64_t h, char hex[65], void *ctx)
+{
+    (void)h;
+    (void)hex;
+    (void)ctx;
+    return false;
+}
+
 static int test_fleet_status_standing_refusal(void)
 {
     int failures = 0;
@@ -10262,7 +10290,7 @@ static int test_fleet_status_standing_refusal(void)
         g_fst_answer = false;
         g_fst_asked = 0;
         for (int64_t at = FST_NOW; at <= FST_NOW + 3600; at += 60)
-            (void)fleet_tip_poll_step(&g_fst, &g_fst_local, at, false,
+            (void)fleet_tip_poll_step(&g_fst, &g_fst_local, g_fst_db, at, false,
                                       fst_fetch);
         ASSERT(g_fst_asked > 50);
         fleet_status_apply(&g_fst, peers, 1, &g_fst_local, FST_NOW + 3600);
@@ -10270,21 +10298,94 @@ static int test_fleet_status_standing_refusal(void)
                   FLEET_STATUS_MACHINE_DISAGREES);
         ASSERT_EQ(g_fst.verdict, FLEET_STATUS_DISAGREE);
         ASSERT(g_fst.refuses_send);
-        /* Not connected: a machine that is gone holds nothing back. */
+        /* The link drops, as when the phone changes network: the refusal
+         * stands, because no check has agreed. */
         fleet_status_apply(&g_fst, peers, 0, &g_fst_local, FST_NOW + 3600);
-        ASSERT(!g_fst.refuses_send);
+        ASSERT(!fst_machine("alpha")->connected);
+        ASSERT_EQ(fst_machine("alpha")->agreement,
+                  FLEET_STATUS_MACHINE_DISAGREES);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_DISAGREE);
+        ASSERT(g_fst.refuses_send);
         /* A check on a fork below our tip is no agreement. */
         fst_check(FST_ALPHA, FST_LOCAL - 3, true, FST_NOW + 3600);
         fleet_status_apply(&g_fst, peers, 1, &g_fst_local, FST_NOW + 3601);
         ASSERT(g_fst.refuses_send);
+        /* Nor is a check that stops below the refused height, on our chain
+         * or not: it says nothing of the block that was refused. */
+        fst_check(FST_ALPHA, FST_LOCAL - 3, false, FST_NOW + 3600);
+        fleet_status_apply(&g_fst, peers, 1, &g_fst_local, FST_NOW + 3601);
+        ASSERT(g_fst.refuses_send);
         /* A later check that lands on our chain lifts it. */
         g_fst_answer = true;
-        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, FST_NOW + 3700,
+        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, g_fst_db, FST_NOW + 3700,
                                    false, fst_fetch));
         fleet_status_apply(&g_fst, peers, 1, &g_fst_local, FST_NOW + 3701);
         ASSERT_EQ(fst_machine("alpha")->agreement, FLEET_STATUS_AGREES);
         ASSERT(!g_fst.refuses_send);
         ASSERT_EQ(g_fst.verdict, FLEET_STATUS_AGREE);
+        fst_close(&db);
+        PASS();
+    }
+    TEST("fleet status: a refusal survives a restart of the node and its "
+         "lifting is stored too") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_peer(&peers[0], FST_ALPHA, false);
+        fst_check(FST_ALPHA, FST_LOCAL, true, FST_NOW - 5);
+        /* Android kills the node: memory is gone, node_state is kept, and
+         * every ask of the machine fails after the restart. */
+        fst_restart(&db);
+        fst_apply(peers, 1);
+        ASSERT(fst_machine("alpha")->connected);
+        ASSERT_EQ(fst_machine("alpha")->agreement,
+                  FLEET_STATUS_MACHINE_DISAGREES);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_DISAGREE);
+        ASSERT(g_fst.refuses_send);
+        fst_apply(peers, 0);
+        ASSERT(g_fst.refuses_send);
+        /* An agreeing check at the refused height lifts it for good. */
+        fst_check(FST_ALPHA, FST_LOCAL, false, FST_NOW - 5);
+        fst_apply(peers, 1);
+        ASSERT(!g_fst.refuses_send);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_AGREE);
+        fst_restart(&db);
+        fst_apply(peers, 1);
+        ASSERT(!g_fst.refuses_send);
+        fst_close(&db);
+        PASS();
+    }
+    TEST("fleet status: a check judged against no chain, no tip, no block "
+         "or a block above the tip neither raises nor lifts a refusal") {
+        char key[BOOT_FLEET_ROSTER_ONION_MAX];
+        struct fleet_tip fork, same, above;
+        const struct fleet_status_local notip = {
+            .tip = 0, .hash_at = fst_hash_at };
+        const struct fleet_status_local noblock = {
+            .tip = FST_LOCAL, .hash_at = fst_hash_none };
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        ASSERT(fleet_status_onion_key(FST_ALPHA, key, sizeof key));
+        memset(&fork, 0, sizeof fork);
+        fork.height = FST_LOCAL;
+        fst_hash(FST_LOCAL, true, fork.hash);
+        same = fork;
+        fst_hash(FST_LOCAL, false, same.hash);
+        memset(&above, 0, sizeof above);
+        above.height = FST_LOCAL + 1;
+        fst_hash(above.height, true, above.hash);
+        above.has_at = true;
+        above.at_height = FST_LOCAL + 5; /* a height this node does not hold */
+        fst_hash(above.at_height, true, above.at_hash);
+        fleet_status_note_check(&db, key, &fork, NULL);
+        fleet_status_note_check(&db, key, &fork, &notip);
+        fleet_status_note_check(&db, key, &fork, &noblock);
+        fleet_status_note_check(&db, key, &above, &g_fst_local);
+        ASSERT_EQ(fleet_tip_cache_refusal(key), (int64_t)0);
+        fleet_status_note_check(&db, key, &fork, &g_fst_local);
+        ASSERT_EQ(fleet_tip_cache_refusal(key), (int64_t)FST_LOCAL);
+        fleet_status_note_check(&db, key, &same, NULL);
+        fleet_status_note_check(&db, key, &same, &notip);
+        fleet_status_note_check(&db, key, &same, &noblock);
+        ASSERT_EQ(fleet_tip_cache_refusal(key), (int64_t)FST_LOCAL);
         fst_close(&db);
         PASS();
     }
@@ -10347,7 +10448,7 @@ static int test_fleet_status_fairness(void)
         g_fst_asked = 0;
         g_fst_answer = true;
         for (int i = 0; i < 4; i++)
-            ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local,
+            ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, g_fst_db,
                                        FST_NOW + i * FLEET_TIP_REFRESH_SECS,
                                        false, fst_fetch));
         ASSERT_STR_EQ(g_fst_asked_key[0], FST_ALPHA);
@@ -10366,14 +10467,30 @@ static int test_fleet_status_fairness(void)
 extern int unshare(int flags);
 enum { FST_CLONE_NEWUSER = 0x10000000, FST_CLONE_NEWTIME = 0x00000080 };
 
+enum {
+    FST_SKEW_SEEN = 0,    /* the age clock shows the shift */
+    FST_SKEW_MISSED = 1,  /* it does not */
+    FST_SKEW_NAMESPACE = 3, /* 3 to 5: the host forbids the namespaces */
+    FST_SKEW_BROKEN = 6   /* the observer itself failed */
+};
+
+/* Exit status of `pid`, or FST_SKEW_BROKEN when it did not exit normally. */
+static int fst_exit_of(pid_t pid)
+{
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st))
+        return FST_SKEW_BROKEN;
+    return WEXITSTATUS(st);
+}
+
 /* In a child with CLOCK_BOOTTIME shifted six hours ahead of CLOCK_MONOTONIC,
- * as after a suspend, the age clock must show the shift. 0: it does; 1: it
- * does not; 2: the shift could not be set up on this host. */
+ * as after a suspend, the age clock must show the shift. Returns an
+ * FST_SKEW_* value; only FST_SKEW_SEEN observed it. */
 static int fst_suspend_child(void)
 {
     char map[64];
     int fd;
-    int64_t skew;
+    pid_t pid;
     unsigned uid = (unsigned)getuid(); /* unshare turns it into the overflow id */
     if (unshare(FST_CLONE_NEWUSER | FST_CLONE_NEWTIME) != 0)
         return 3;
@@ -10386,15 +10503,14 @@ static int fst_suspend_child(void)
     if (fd < 0 || write(fd, "boottime 21600 0\n", 17) < 0)
         return 5;
     close(fd);
-    if (fork() == 0) {
-        skew = fleet_tip_now_secs() - clock_now_monotonic_ns() / 1000000000;
-        _exit(skew >= 21600 - 2 ? 0 : 1);
+    pid = fork();
+    if (pid < 0)
+        return FST_SKEW_BROKEN;
+    if (pid == 0) {
+        int64_t skew = fleet_tip_now_secs() - clock_now_monotonic_ns() / 1000000000;
+        _exit(skew >= 21600 - 2 ? FST_SKEW_SEEN : FST_SKEW_MISSED);
     }
-    {
-        int st = 0;
-        (void)wait(&st);
-        return WIFEXITED(st) ? WEXITSTATUS(st) : 2;
-    }
+    return fst_exit_of(pid);
 }
 #endif
 
@@ -10406,16 +10522,20 @@ static int test_fleet_status_clock(void)
         ASSERT(fleet_tip_now_secs() > 0);
 #ifdef __linux__
         pid_t pid = fork();
+        int got;
         ASSERT(pid >= 0);
         if (pid == 0)
             _exit(fst_suspend_child());
-        int st = 0;
-        ASSERT(waitpid(pid, &st, 0) == pid);
-        ASSERT(WIFEXITED(st));
-        /* 3 to 5: a host that forbids user and time namespaces. */
-        ASSERT(WEXITSTATUS(st) != 1);
-        if (WEXITSTATUS(st) >= 2)
-            printf("  note: time namespace setup stage %d refused; suspend skew not exercised\n", WEXITSTATUS(st));
+        got = fst_exit_of(pid);
+        ASSERT(got != FST_SKEW_MISSED);
+        ASSERT(got != FST_SKEW_BROKEN);
+        if (got != FST_SKEW_SEEN) {
+            /* Not observed: reported through the runner's skip channel and
+             * never as a pass. */
+            printf("SKIP (suspend skew not observed: time namespace setup "
+                   "stage %d refused)\n", got);
+            goto _test_next;
+        }
 #endif
         PASS();
     }

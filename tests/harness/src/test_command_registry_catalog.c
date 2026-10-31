@@ -2198,7 +2198,22 @@ static int test_bridge_rpc_success_shapes_fail_closed(void)
           "{\"transparent\":\"1.0\",\"total\":\"1.0\"}", "{}" },
         { "core.wallet.fleet.status",
           "{\"schema\":\"zcl.fleet_status.v1\",\"verdict\":\"agree\","
-          "\"member\":true,\"machines\":[]}", "{}" },
+          "\"member\":true,\"refuses_send\":false,\"machines\":[]}", "{}" },
+        { "core.wallet.fleet.status",
+          "{\"schema\":\"zcl.fleet_status.v1\",\"verdict\":\"agree\","
+          "\"member\":true,\"refuses_send\":false,\"machines\":[]}",
+          "{\"schema\":\"zcl.fleet_status.v1\",\"verdict\":\"disagree\","
+          "\"member\":true,\"machines\":[]}" },
+        { "core.wallet.fleet.status",
+          "{\"schema\":\"zcl.fleet_status.v1\",\"verdict\":\"agree\","
+          "\"member\":true,\"refuses_send\":false,\"machines\":[]}",
+          "{\"schema\":\"zcl.fleet_status.v1\",\"verdict\":\"disagree\","
+          "\"member\":true,\"refuses_send\":\"false\",\"machines\":[]}" },
+        { "core.wallet.fleet.status",
+          "{\"schema\":\"zcl.fleet_status.v1\",\"verdict\":\"agree\","
+          "\"member\":true,\"refuses_send\":false,\"machines\":[]}",
+          "{\"schema\":\"zcl.fleet_status.v1\",\"verdict\":\"disagree\","
+          "\"member\":true,\"refuses_send\":null,\"machines\":[]}" },
         { "core.wallet.backup.status", "{\"running\":false,\"total_runs\":0}",
           "{}" },
         { "core.wallet.audit", "{\"chain_height\":1,\"summary\":{}}",

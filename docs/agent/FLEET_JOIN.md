@@ -318,7 +318,7 @@ this node's chain. It contains no wallet data and never waits on the network.
 | `machines[].agreement` | `agrees`, `phone_behind`, `machine_behind`, `disagree` or `unknown`, below |
 | `machines[].depth` | Blocks the fresh check is below this node's tip, else 0 |
 | `verdict` | `not_member`, `none_connected`, `unchecked`, `agree` or `disagree`, below |
-| `refuses_send` | `true` while a connected machine at or above this node's tip has named a different block at a height this node holds; see below |
+| `refuses_send` | `true` while a roster machine, connected or not, at or above this node's tip has named a different block at a height this node holds; see below |
 | `local_tip` | This node's provable tip height |
 
 A machine counts as connected only when the connection is outbound, past its
@@ -353,8 +353,8 @@ serves every block by height on the same onion.
 | `disagree` | the machine names a block this node does not hold at that height: at or below this node's tip by its own hash, above it by the block it names at this node's tip height |
 | `unknown` | not connected, or no check within 5 minutes and no standing refusal; a machine on this chain more than 6 blocks down (its `depth` says how far); above the tip with no block named at this node's tip height is also unknown. Never agreement |
 
-Verdict: `none_connected` when no roster machine is connected; `disagree` when
-any machine disagrees; `agree` when at least one fresh check is `agrees`, or
+Verdict: `disagree` when any machine disagrees, including a disconnected one
+holding a standing refusal; `none_connected` when none of the others is connected; `agree` when at least one fresh check is `agrees`, or
 `machine_behind`, and none disagrees; otherwise `unchecked`. A machine more
 than 6 blocks down may share only an old ancestor and has checked none of this
 node's top blocks, so it reads `unknown` and never counts toward agreement. A recent reorg and a machine stuck on an old fork both read
@@ -362,12 +362,17 @@ node's top blocks, so it reads `unknown` and never counts toward agreement. A re
 
 `refuses_send` is the narrow signal. A machine that is merely ahead does not
 raise it, since that would refuse during every catch-up. It is raised when a
-connected machine at or above this node's tip names a different block at a
-height this node holds. Once raised it stays while that machine is connected,
-however old the check grows and whether or not later asks fail, so a flooded
-onion or a dead link cannot lift it. A later successful check that lands on
-this node's chain (`agrees`, `phone_behind` or `machine_behind`) lifts it.
-Failing to learn is never agreement.
+roster machine at or above this node's tip names a different block at a
+height this node holds. Once raised it stays, however old the check grows,
+whether or not later asks fail, whether the machine is connected or not and
+across a restart of the node (it is kept in `node_state` as
+`fleet_refusal.<onion>`), so a flooded onion, a dropped link or a killed
+process cannot lift it. Only a later check from that machine lifts it: one
+that lands on this node's chain (`agrees`, `phone_behind` or
+`machine_behind`) at a height at or above the refused one. A machine that
+stays below that height lifts nothing. A refusing machine reads `disagree`
+and the verdict is `disagree` even while it is not connected. Failing to
+learn is never agreement.
 
 ## What comes next
 

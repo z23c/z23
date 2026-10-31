@@ -247,7 +247,7 @@ static const struct bridge_rpc_binding g_bridge_rpc_direct[] = {
       BRIDGE_RPC_ARRAY_NONE },
     { "core.wallet.fleet.status", "fleetstatus", JSON_OBJ,
       {{"schema", JSON_STR}, {"verdict", JSON_STR}, {"member", JSON_BOOL},
-       {"machines", JSON_ARR}},
+       {"refuses_send", JSON_BOOL}, {"machines", JSON_ARR}},
       BRIDGE_RPC_ARRAY_NONE },
     { "core.wallet.backup.status", "walletbackupstatus", JSON_OBJ,
       {{"running", JSON_BOOL}, {"total_runs", JSON_INT}},

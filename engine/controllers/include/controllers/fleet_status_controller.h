@@ -21,9 +21,11 @@
  * A machine above this node's tip is asked for its block at this node's tip
  * height; naming another block there is a disagreement, naming this node's
  * block is only the phone being behind. A send refusal, once raised by a
- * check, outlives that check's age: it stays while the machine is connected
- * until a later successful check lands on this node's chain. Failing to
- * learn is never agreement. */
+ * check, outlives that check's age, the machine's connection and a restart of
+ * the node: it is kept in node_state and counts for every roster machine,
+ * connected or not, until a later check from that machine lands on this
+ * node's chain at a height at or above the refused one. Failing to learn is
+ * never agreement. */
 
 #ifndef ZCL_CONTROLLERS_FLEET_STATUS_CONTROLLER_H
 #define ZCL_CONTROLLERS_FLEET_STATUS_CONTROLLER_H
@@ -103,7 +105,7 @@ struct fleet_status {
     size_t machine_count;   /* other machines on the verified roster */
     size_t connected_count; /* of those, connected over onion */
     int64_t local_tip;      /* this node's provable tip height, <= 0 unknown */
-    bool refuses_send;      /* a connected machine at or above the tip named
+    bool refuses_send;      /* a roster machine at or above the tip named
                                another block there and no later check has
                                landed on this chain */
     enum fleet_status_verdict verdict;
@@ -119,10 +121,19 @@ struct fleet_status_local {
 };
 
 /* Settle the standing send refusal of the machine `key` after a successful
- * check: raised by a disagreement at or above `local`'s tip, cleared by an
- * agreeing or behind check, unchanged by any other. */
-void fleet_status_note_check(const char *key, const struct fleet_tip *t,
+ * check. A disagreement at or above `local`'s tip raises it at `local`'s tip
+ * height; a check that agrees, is behind on this chain or names this node's
+ * block clears it only when the height it speaks for reaches the refused
+ * height; any other check changes nothing. The refusal is written to `ndb`
+ * (NULL: memory only). */
+void fleet_status_note_check(struct node_db *ndb, const char *key,
+                             const struct fleet_tip *t,
                              const struct fleet_status_local *local);
+
+/* Reload the refusals stored in `ndb` for the machines of `s` into the
+ * cache; a stored refusal is only ever added, never cleared. */
+void fleet_status_load_refusals(struct node_db *ndb,
+                                const struct fleet_status *s);
 
 /* `local` over the running node's chain. */
 void fleet_status_node_local(struct fleet_status_local *local);

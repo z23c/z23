@@ -4,6 +4,7 @@
 #include "controllers/fleet_tip.h"
 
 #include "controllers/blockchain_controller.h"
+#include "config/runtime.h"
 #include "controllers/fleet_status_controller.h"
 #include "jobs/node_pace.h"
 #include "json/json.h"
@@ -181,6 +182,7 @@ struct tip_entry {
     char key[BOOT_FLEET_ROSTER_ONION_MAX];
     bool used;
     bool has_tip;
+    int64_t refusal_height; /* 0: no standing refusal */
     int64_t last_try;
     struct fleet_tip tip;
 };
@@ -221,27 +223,50 @@ static const struct tip_entry *entry_find(const char *key)
 void fleet_tip_cache_put(const char *key, const struct fleet_tip *tip)
 {
     struct tip_entry *e;
-    bool kept;
     if (!key || !tip || !hash_is_hex(tip->hash))
         return;
     pthread_mutex_lock(&g_lock);
     e = entry_for(key);
-    kept = e->has_tip && e->tip.refusal;
     e->tip = *tip;
-    e->tip.refusal = kept;
     e->has_tip = true;
     pthread_mutex_unlock(&g_lock);
 }
 
-void fleet_tip_cache_set_refusal(const char *key, bool refusal)
+void fleet_tip_cache_raise_refusal(const char *key, int64_t height)
+{
+    struct tip_entry *e;
+    if (!key || height <= 0)
+        return;
+    pthread_mutex_lock(&g_lock);
+    e = entry_for(key);
+    if (e->refusal_height == 0 || height < e->refusal_height)
+        e->refusal_height = height;
+    pthread_mutex_unlock(&g_lock);
+}
+
+void fleet_tip_cache_clear_refusal(const char *key)
 {
     struct tip_entry *e;
     if (!key)
         return;
     pthread_mutex_lock(&g_lock);
     e = entry_for(key);
-    e->tip.refusal = refusal;
+    e->refusal_height = 0;
     pthread_mutex_unlock(&g_lock);
+}
+
+int64_t fleet_tip_cache_refusal(const char *key)
+{
+    const struct tip_entry *e;
+    int64_t height = 0;
+    if (!key)
+        return 0;
+    pthread_mutex_lock(&g_lock);
+    e = entry_find(key);
+    if (e)
+        height = e->refusal_height;
+    pthread_mutex_unlock(&g_lock);
+    return height;
 }
 
 bool fleet_tip_cache_get(const char *key, struct fleet_tip *out)
@@ -318,8 +343,9 @@ static bool pick_due(const struct fleet_status *s, int64_t now,
 }
 
 bool fleet_tip_poll_step(const struct fleet_status *s,
-                         const struct fleet_status_local *local, int64_t now,
-                         bool paused, fleet_tip_fetch_fn fetch)
+                         const struct fleet_status_local *local,
+                         struct node_db *ndb, int64_t now, bool paused,
+                         fleet_tip_fetch_fn fetch)
 {
     char key[BOOT_FLEET_ROSTER_ONION_MAX];
     struct fleet_tip t;
@@ -330,7 +356,7 @@ bool fleet_tip_poll_step(const struct fleet_status *s,
     if (fetch(key, local ? local->tip : 0, &t)) {
         t.fetched_at = now;
         fleet_tip_cache_put(key, &t);
-        fleet_status_note_check(key, &t, local);
+        fleet_status_note_check(ndb, key, &t, local);
     }
     return true;
 }
@@ -382,6 +408,7 @@ void fleet_tip_poll_tick(void)
         return;
     fleet_status_node_local(&local);
     if (fleet_status_current(s))
-        (void)fleet_tip_poll_step(s, &local, now, false, fleet_tip_fetch);
+        (void)fleet_tip_poll_step(s, &local, app_runtime_node_db(), now, false,
+                                   fleet_tip_fetch);
     free(s);
 }

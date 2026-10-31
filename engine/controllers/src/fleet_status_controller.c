@@ -17,8 +17,10 @@
 #include "controllers/network_controller.h"
 #include "controllers/strong_params.h"
 #include "json/json.h"
+#include "models/database.h"
 #include "net/connman.h"
 #include "util/fleet_roster_check.h"
+#include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
 #include <ctype.h>
@@ -168,53 +170,121 @@ static bool disagreement_refuses(const struct fleet_tip *t,
     return local && t->height >= local->tip;
 }
 
-void fleet_status_note_check(const char *key, const struct fleet_tip *t,
+/* ── the standing refusal ────────────────────────────────────────────── */
+
+/* The node_state name of the standing refusal of the machine `key`. */
+static bool refusal_name(const char *key, char *out, size_t cap)
+{
+    int n = snprintf(out, cap, "fleet_refusal.%s", key);
+    return n > 0 && (size_t)n < cap;
+}
+
+/* The refused height stored in `ndb` for `key`, 0 when none. */
+static int64_t refusal_load(struct node_db *ndb, const char *key)
+{
+    char name[BOOT_FLEET_ROSTER_ONION_MAX + 16];
+    int64_t height = 0;
+    if (!ndb || !refusal_name(key, name, sizeof name) ||
+        !node_db_state_get_int(ndb, name, &height) || height <= 0)
+        return 0;
+    return height;
+}
+
+/* Write the refused height of `key` to `ndb`; 0 deletes it. A failed write
+ * leaves the in-memory refusal standing. */
+static void refusal_store(struct node_db *ndb, const char *key, int64_t height)
+{
+    char name[BOOT_FLEET_ROSTER_ONION_MAX + 16];
+    bool ok;
+    if (!ndb || !refusal_name(key, name, sizeof name))
+        return;
+    ok = height > 0 ? node_db_state_set_int(ndb, name, height)
+                    : node_db_state_delete(ndb, name);
+    if (!ok)
+        LOG_WARN("fleet.status", "standing send refusal not stored: height=%lld",
+                 (long long)height);
+}
+
+/* The height a check speaks for: the block a machine above the tip named, or
+ * the machine's own best block. */
+static int64_t checked_height(const struct fleet_tip *t,
+                              enum fleet_status_agreement a)
+{
+    return a == FLEET_STATUS_PHONE_BEHIND ? t->at_height : t->height;
+}
+
+void fleet_status_note_check(struct node_db *ndb, const char *key,
+                             const struct fleet_tip *t,
                              const struct fleet_status_local *local)
 {
-    switch (fleet_status_classify(t, local)) {
+    enum fleet_status_agreement a = fleet_status_classify(t, local);
+    fleet_tip_cache_raise_refusal(key, refusal_load(ndb, key));
+    switch (a) {
     case FLEET_STATUS_AGREES:
     case FLEET_STATUS_PHONE_BEHIND:
-    case FLEET_STATUS_MACHINE_BEHIND:
-        fleet_tip_cache_set_refusal(key, false);
+    case FLEET_STATUS_MACHINE_BEHIND: {
+        int64_t held = fleet_tip_cache_refusal(key);
+        if (held > 0 && checked_height(t, a) >= held) {
+            fleet_tip_cache_clear_refusal(key);
+            refusal_store(ndb, key, 0);
+        }
         break;
+    }
     case FLEET_STATUS_MACHINE_DISAGREES:
-        if (disagreement_refuses(t, local))
-            fleet_tip_cache_set_refusal(key, true);
+        if (disagreement_refuses(t, local)) {
+            fleet_tip_cache_raise_refusal(key, local->tip);
+            refusal_store(ndb, key, fleet_tip_cache_refusal(key));
+        }
         break;
     case FLEET_STATUS_UNKNOWN:
         break;
     }
 }
 
-/* The agreement of one connected machine from its cached check at `now`. A
- * standing refusal shows as a disagreement however old the check is. */
+void fleet_status_load_refusals(struct node_db *ndb,
+                                const struct fleet_status *s)
+{
+    for (size_t i = 0; s && i < s->machine_count; i++) {
+        char key[BOOT_FLEET_ROSTER_ONION_MAX];
+        if (fleet_status_onion_key(s->machines[i].onion, key, sizeof key))
+            fleet_tip_cache_raise_refusal(key, refusal_load(ndb, key));
+    }
+}
+
+/* The agreement of one connected machine from its cached check at `now`. */
 static void judge(struct fleet_status_machine *m,
                   const struct fleet_status_local *local, int64_t now)
 {
     char key[BOOT_FLEET_ROSTER_ONION_MAX];
     struct fleet_tip t;
     bool fresh;
-    m->agreement = FLEET_STATUS_UNKNOWN;
-    m->tip_height = 0;
-    m->depth = 0;
-    m->refusing = false;
     if (!fleet_status_onion_key(m->onion, key, sizeof key) ||
         !fleet_tip_cache_get(key, &t))
         return;
     fresh = now >= t.fetched_at && now - t.fetched_at <= FLEET_TIP_MAX_AGE_SECS;
-    if (fresh) {
-        m->agreement = fleet_status_classify(&t, local);
-        m->refusing = m->agreement == FLEET_STATUS_MACHINE_DISAGREES &&
-                      disagreement_refuses(&t, local);
-    }
-    if (t.refusal) {
-        m->agreement = FLEET_STATUS_MACHINE_DISAGREES;
-        m->refusing = true;
-    }
-    if (fresh || m->agreement != FLEET_STATUS_UNKNOWN)
-        m->tip_height = t.height;
-    if (fresh && local && t.height >= 0 && t.height < local->tip)
+    if (!fresh)
+        return;
+    m->agreement = fleet_status_classify(&t, local);
+    m->refusing = m->agreement == FLEET_STATUS_MACHINE_DISAGREES &&
+                  disagreement_refuses(&t, local);
+    m->tip_height = t.height;
+    if (local && t.height >= 0 && t.height < local->tip)
         m->depth = local->tip - t.height;
+}
+
+/* A standing refusal shows as a disagreement of its machine however old its
+ * check is and whether or not the machine is connected. */
+static void standing(struct fleet_status_machine *m)
+{
+    char key[BOOT_FLEET_ROSTER_ONION_MAX];
+    struct fleet_tip t;
+    if (!fleet_status_onion_key(m->onion, key, sizeof key) ||
+        fleet_tip_cache_refusal(key) <= 0)
+        return;
+    m->agreement = FLEET_STATUS_MACHINE_DISAGREES;
+    m->refusing = true;
+    if (m->tip_height == 0 && fleet_tip_cache_get(key, &t))
+        m->tip_height = t.height;
 }
 
 static bool settles_agreement(const struct fleet_status_machine *m)
@@ -228,13 +298,13 @@ static enum fleet_status_verdict verdict_of(const struct fleet_status *s)
     bool settled = false;
     if (!s->member)
         return FLEET_STATUS_NOT_MEMBER;
-    if (s->connected_count == 0)
-        return FLEET_STATUS_NONE_CONNECTED;
-    for (size_t i = 0; i < s->machine_count; i++) {
+    for (size_t i = 0; i < s->machine_count; i++)
         if (s->machines[i].agreement == FLEET_STATUS_MACHINE_DISAGREES)
             return FLEET_STATUS_DISAGREE;
+    if (s->connected_count == 0)
+        return FLEET_STATUS_NONE_CONNECTED;
+    for (size_t i = 0; i < s->machine_count; i++)
         settled = settled || settles_agreement(&s->machines[i]);
-    }
     return settled ? FLEET_STATUS_AGREE : FLEET_STATUS_UNCHECKED;
 }
 
@@ -268,6 +338,8 @@ void fleet_status_apply(struct fleet_status *s,
         judge(m, local, now);
         s->connected_count++;
     }
+    for (size_t i = 0; i < s->machine_count; i++)
+        standing(&s->machines[i]);
     s->verdict = verdict_of(s);
     s->refuses_send = refusal_of(s);
 }
@@ -382,6 +454,7 @@ bool fleet_status_build(struct node_db *ndb, struct connman *cm,
     if (!peers)
         return false;
     fleet_status_collect(ndb, wall_now, out);
+    fleet_status_load_refusals(ndb, out);
     n = fleet_status_peers_snapshot(cm, peers, FLEET_STATUS_PEERS_MAX);
     fleet_status_apply(out, peers, n, local, mono_now);
     free(peers);
