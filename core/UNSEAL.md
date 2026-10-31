@@ -408,3 +408,7 @@ later lane flips it HARD.
 - 2026-10-31T09:57:55Z — REASON: script_num_from_bytes: accumulate in uint64_t so an 8-byte script number (0xff top byte) no longer left-shifts a signed int64 out of range (UBSan, test_script under t-asan, 10-30);  bit-identical results, consensus callers cap at 4-5 bytes
   old ROOT: ac1a3fef849c0598d6aab95265ea3ad47fbfb6c534a2edb4fc7f2f8954e190f8
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T10:02:27Z — REASON: core/net: split 15 networking functions under the complexity cap;  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: 13ecbcd25a9e2c0a7f0d45fe61c67515c8bcc0b8f5636d578a52a23b2344db36
+  by: owner unseal ritual (make core-unseal)

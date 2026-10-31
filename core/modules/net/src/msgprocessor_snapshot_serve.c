@@ -532,6 +532,64 @@ void push_block_manifest_if_ready(struct msg_processor *mp,
         push_block_manifest(mp, node);
 }
 
+/* Appends blk as one payload entry: a compact-size length prefix, then the
+ * serialized bytes. Returns false when the block is oversized or the entry
+ * would exceed max_payload_bytes; the caller then discards payloads. */
+static bool block_payload_append_block(struct byte_stream *payloads,
+                                       struct block *blk,
+                                       size_t max_payload_bytes)
+{
+    struct byte_stream raw;
+    stream_init(&raw, 4096);
+    bool ok = block_serialize(blk, &raw) &&
+              raw.size <= BLOCK_PIECE_MAX_BLOCK_BYTES;
+    if (ok) {
+        size_t len_prefix = block_payload_compact_size_len(raw.size);
+        if (payloads->size > max_payload_bytes ||
+            len_prefix > max_payload_bytes - payloads->size ||
+            raw.size > max_payload_bytes - payloads->size - len_prefix)
+            ok = false;
+    }
+    ok = ok &&
+              stream_write_compact_size(payloads, raw.size) &&
+              stream_write_bytes(payloads, raw.data, raw.size);
+    stream_free(&raw);
+    return ok;
+}
+
+/* Loads the block at height h, requires its bytes to hash to expected_hash,
+ * and appends it as a payload entry. Returns false when the block is missing,
+ * fails the hash check or cannot be appended; the caller then discards
+ * payloads. */
+static bool block_payload_append_height(struct msg_processor *mp, int32_t h,
+                                        const uint8_t *expected_hash,
+                                        size_t max_payload_bytes,
+                                        struct byte_stream *payloads)
+{
+    struct block_index *bi =
+        active_chain_at(&mp->main_state->chain_active, h);
+    if (!bi || !bi->phashBlock || !(bi->nStatus & BLOCK_HAVE_DATA))
+        return false;
+
+    struct block blk;
+    block_init(&blk);
+    if (!read_block_from_disk_index(&blk, bi, mp->datadir)) {
+        block_free(&blk);
+        return false;
+    }
+
+    struct uint256 disk_hash;
+    block_get_hash(&blk, &disk_hash);
+    if (memcmp(disk_hash.data, expected_hash, 32) != 0) {
+        block_free(&blk);
+        return false;
+    }
+
+    bool ok = block_payload_append_block(payloads, &blk, max_payload_bytes);
+    block_free(&blk);
+    return ok;
+}
+
 static bool build_block_piece_payloads(struct msg_processor *mp,
                                        int32_t start_height,
                                        const uint8_t (*hashes)[32],
@@ -546,51 +604,31 @@ static bool build_block_piece_payloads(struct msg_processor *mp,
     stream_init(payloads, (size_t)block_count * 4096);
     for (uint32_t i = 0; i < block_count; i++) {
         int32_t h = start_height + (int32_t)i;
-        struct block_index *bi =
-            active_chain_at(&mp->main_state->chain_active, h);
-        if (!bi || !bi->phashBlock || !(bi->nStatus & BLOCK_HAVE_DATA)) {
-            stream_free(payloads);
-            return false;
-        }
-
-        struct block blk;
-        block_init(&blk);
-        if (!read_block_from_disk_index(&blk, bi, mp->datadir)) {
-            block_free(&blk);
-            stream_free(payloads);
-            return false;
-        }
-
-        struct uint256 disk_hash;
-        block_get_hash(&blk, &disk_hash);
-        if (memcmp(disk_hash.data, hashes[i], 32) != 0) {
-            block_free(&blk);
-            stream_free(payloads);
-            return false;
-        }
-
-        struct byte_stream raw;
-        stream_init(&raw, 4096);
-        bool ok = block_serialize(&blk, &raw) &&
-                  raw.size <= BLOCK_PIECE_MAX_BLOCK_BYTES;
-        if (ok) {
-            size_t len_prefix = block_payload_compact_size_len(raw.size);
-            if (payloads->size > max_payload_bytes ||
-                len_prefix > max_payload_bytes - payloads->size ||
-                raw.size > max_payload_bytes - payloads->size - len_prefix)
-                ok = false;
-        }
-        ok = ok &&
-                  stream_write_compact_size(payloads, raw.size) &&
-                  stream_write_bytes(payloads, raw.data, raw.size);
-        stream_free(&raw);
-        block_free(&blk);
-        if (!ok) {
+        if (!block_payload_append_height(mp, h, hashes[i], max_payload_bytes,
+                                         payloads)) {
             stream_free(payloads);
             return false;
         }
     }
     return true;
+}
+
+/* True when no offer is recorded for this peer (height <= 0 or zero UTXO
+ * count), or the offer last sent to it no longer matches the current offer
+ * and snapshot cache versions or the offer's height, UTXO count and hashes. */
+static bool msg_snapshot_offer_stale(const struct p2p_node *node,
+                                     const struct snapshot_offer *offer,
+                                     uint64_t current_offer_version,
+                                     uint64_t current_snapshot_version)
+{
+    return node->zsync_offered_height <= 0 ||
+           node->zsync_offered_count == 0 ||
+           node->zsync_offer_version != current_offer_version ||
+           node->zsync_snapshot_version != current_snapshot_version ||
+           node->zsync_offered_height != offer->height ||
+           node->zsync_offered_count != offer->num_utxos ||
+           memcmp(node->zsync_offered_root, offer->utxo_root, 32) != 0 ||
+           memcmp(node->zsync_offered_block, offer->block_hash, 32) != 0;
 }
 
 /* Serve a zsnapreq (peer asking for our full snapshot). Extracted from
@@ -623,15 +661,9 @@ void mp_serve_snapshot_req(struct msg_processor *mp, struct p2p_node *node,
                 msg_processor_offer_cache_version();
             uint64_t current_snapshot_version =
                 fast_sync_snapshot_cache_version();
-            bool stale_offer =
-                node->zsync_offered_height <= 0 ||
-                node->zsync_offered_count == 0 ||
-                node->zsync_offer_version != current_offer_version ||
-                node->zsync_snapshot_version != current_snapshot_version ||
-                node->zsync_offered_height != offer.height ||
-                node->zsync_offered_count != offer.num_utxos ||
-                memcmp(node->zsync_offered_root, offer.utxo_root, 32) != 0 ||
-                memcmp(node->zsync_offered_block, offer.block_hash, 32) != 0;
+            bool stale_offer = msg_snapshot_offer_stale(
+                node, &offer, current_offer_version,
+                current_snapshot_version);
             if (stale_offer) {
                 printf("Peer %s: stale snapshot request "
                        "(offered h=%d/%llu offer_v=%llu snap_v=%llu, "
@@ -685,6 +717,28 @@ void mp_serve_snapshot_req(struct msg_processor *mp, struct p2p_node *node,
         break;
     default:
         break;
+    }
+}
+
+/* Writes each UTXO entry of chunk to cs in wire order. */
+static void mp_serve_chunk_entries(struct byte_stream *cs,
+                                   const struct utxo_chunk *chunk)
+{
+    for (uint32_t i = 0; i < chunk->num_entries; i++) {
+        stream_write_bytes(cs, chunk->entries[i].txid, 32);
+        stream_write_i32_le(cs,
+                            (int32_t)chunk->entries[i].vout);
+        stream_write_i64_le(cs, chunk->entries[i].value);
+        stream_write_i32_le(cs, chunk->entries[i].height);
+        stream_write_u8(cs,
+                        chunk->entries[i].is_coinbase
+                            ? 1 : 0);
+        stream_write_u16_le(cs,
+                            chunk->entries[i].script_len);
+        if (chunk->entries[i].script_len > 0)
+            stream_write_bytes(cs,
+                               chunk->entries[i].script,
+                               chunk->entries[i].script_len);
     }
 }
 
@@ -743,22 +797,7 @@ void mp_serve_chunk_req(struct msg_processor *mp, struct p2p_node *node,
                 stream_init(&cs, 65536);
                 stream_write_u32_le(&cs, chunk->chunk_index);
                 stream_write_u32_le(&cs, chunk->num_entries);
-                for (uint32_t i = 0; i < chunk->num_entries; i++) {
-                    stream_write_bytes(&cs, chunk->entries[i].txid, 32);
-                    stream_write_i32_le(&cs,
-                                        (int32_t)chunk->entries[i].vout);
-                    stream_write_i64_le(&cs, chunk->entries[i].value);
-                    stream_write_i32_le(&cs, chunk->entries[i].height);
-                    stream_write_u8(&cs,
-                                    chunk->entries[i].is_coinbase
-                                        ? 1 : 0);
-                    stream_write_u16_le(&cs,
-                                        chunk->entries[i].script_len);
-                    if (chunk->entries[i].script_len > 0)
-                        stream_write_bytes(&cs,
-                                           chunk->entries[i].script,
-                                           chunk->entries[i].script_len);
-                }
+                mp_serve_chunk_entries(&cs, chunk);
 
                 if (msg_snapshot_serving_allowed()) {
                     p2p_node_begin_message(
@@ -783,6 +822,61 @@ void mp_serve_chunk_req(struct msg_processor *mp, struct p2p_node *node,
             free(chunk);
         }
     }
+}
+
+/* Sends one piece's block hashes, followed by its block payloads when they
+ * can be built within the protocol message cap. */
+static void mp_serve_block_piece_hashes(struct msg_processor *mp,
+                                        struct p2p_node *node,
+                                        const struct block_piece_manifest *bm,
+                                        uint32_t piece_index)
+{
+        /* Serve the piece: send block hashes for this piece range.
+         * The requester can then verify against their manifest. */
+        int32_t piece_start = bm->start_height
+            + (int32_t)(piece_index * BLOCKS_PER_PIECE);
+        int32_t piece_end = piece_start + BLOCKS_PER_PIECE - 1;
+        if (piece_end > bm->end_height)
+            piece_end = bm->end_height;
+
+        uint8_t piece_hashes[BLOCKS_PER_PIECE][32];
+        int block_count = mp->block_hashes_range
+            ? mp->block_hashes_range(piece_start, piece_end,
+                                     piece_hashes, BLOCKS_PER_PIECE,
+                                     mp->block_hashes_range_ctx)
+            : 0;
+        if (block_count > 0) {
+            struct byte_stream payloads;
+            size_t fixed_len = 4u + 4u + 32u * (size_t)block_count;
+            size_t max_payload_bytes =
+                fixed_len < MAX_PROTOCOL_MESSAGE_LENGTH
+                    ? MAX_PROTOCOL_MESSAGE_LENGTH - fixed_len
+                    : 0u;
+            bool have_payloads =
+                max_payload_bytes > 0 &&
+                build_block_piece_payloads(
+                    mp, piece_start,
+                    (const uint8_t (*)[32])piece_hashes,
+                    (uint32_t)block_count, max_payload_bytes,
+                    &payloads);
+            struct byte_stream bs_msg;
+            stream_init(&bs_msg, fixed_len +
+                        (have_payloads ? payloads.size : 0));
+            stream_write_u32_le(&bs_msg, piece_index);
+            stream_write_u32_le(&bs_msg, (uint32_t)block_count);
+            for (int bi = 0; bi < block_count; bi++)
+                stream_write_bytes(&bs_msg, piece_hashes[bi], 32);
+            if (have_payloads)
+                stream_write_bytes(&bs_msg, payloads.data,
+                                   payloads.size);
+            p2p_node_begin_message(node, MSG_BLOCK_DATA,
+                                    mp->params->pchMessageStart);
+            p2p_node_write_message_data(node, bs_msg.data, bs_msg.size);
+            p2p_node_end_message(node);
+            stream_free(&bs_msg);
+            if (have_payloads)
+                stream_free(&payloads);
+        }
 }
 
 /* Serve a zblkreq (peer asking for one block piece by index). Extracted
@@ -829,52 +923,7 @@ void mp_serve_block_req(struct msg_processor *mp, struct p2p_node *node,
         printf("Peer %s: zblkreq missing/invalid client puzzle "
                "(armed)\n", node->addr_name);
     } else {
-        /* Serve the piece: send block hashes for this piece range.
-         * The requester can then verify against their manifest. */
-        int32_t piece_start = bm.start_height
-            + (int32_t)(piece_index * BLOCKS_PER_PIECE);
-        int32_t piece_end = piece_start + BLOCKS_PER_PIECE - 1;
-        if (piece_end > bm.end_height)
-            piece_end = bm.end_height;
-
-        uint8_t piece_hashes[BLOCKS_PER_PIECE][32];
-        int block_count = mp->block_hashes_range
-            ? mp->block_hashes_range(piece_start, piece_end,
-                                     piece_hashes, BLOCKS_PER_PIECE,
-                                     mp->block_hashes_range_ctx)
-            : 0;
-        if (block_count > 0) {
-            struct byte_stream payloads;
-            size_t fixed_len = 4u + 4u + 32u * (size_t)block_count;
-            size_t max_payload_bytes =
-                fixed_len < MAX_PROTOCOL_MESSAGE_LENGTH
-                    ? MAX_PROTOCOL_MESSAGE_LENGTH - fixed_len
-                    : 0u;
-            bool have_payloads =
-                max_payload_bytes > 0 &&
-                build_block_piece_payloads(
-                    mp, piece_start,
-                    (const uint8_t (*)[32])piece_hashes,
-                    (uint32_t)block_count, max_payload_bytes,
-                    &payloads);
-            struct byte_stream bs_msg;
-            stream_init(&bs_msg, fixed_len +
-                        (have_payloads ? payloads.size : 0));
-            stream_write_u32_le(&bs_msg, piece_index);
-            stream_write_u32_le(&bs_msg, (uint32_t)block_count);
-            for (int bi = 0; bi < block_count; bi++)
-                stream_write_bytes(&bs_msg, piece_hashes[bi], 32);
-            if (have_payloads)
-                stream_write_bytes(&bs_msg, payloads.data,
-                                   payloads.size);
-            p2p_node_begin_message(node, MSG_BLOCK_DATA,
-                                    mp->params->pchMessageStart);
-            p2p_node_write_message_data(node, bs_msg.data, bs_msg.size);
-            p2p_node_end_message(node);
-            stream_free(&bs_msg);
-            if (have_payloads)
-                stream_free(&payloads);
-        }
+        mp_serve_block_piece_hashes(mp, node, &bm, piece_index);
     }
     }
 }
@@ -895,15 +944,8 @@ bool mp_snapshot_send_tick_serve(struct msg_processor *mp,
         uint64_t current_offer_version = msg_processor_offer_cache_version();
         uint64_t current_snapshot_version =
             fast_sync_snapshot_cache_version();
-        bool stale_offer =
-            node->zsync_offered_height <= 0 ||
-            node->zsync_offered_count == 0 ||
-            node->zsync_offer_version != current_offer_version ||
-            node->zsync_snapshot_version != current_snapshot_version ||
-            node->zsync_offered_height != offer.height ||
-            node->zsync_offered_count != offer.num_utxos ||
-            memcmp(node->zsync_offered_root, offer.utxo_root, 32) != 0 ||
-            memcmp(node->zsync_offered_block, offer.block_hash, 32) != 0;
+        bool stale_offer = msg_snapshot_offer_stale(
+            node, &offer, current_offer_version, current_snapshot_version);
         if (stale_offer) {
             printf("Peer %s: snapshot changed while serving; "
                    "resetting to re-offer latest snapshot\n",

@@ -84,6 +84,20 @@ static bool zcl23_batch_diversity_ok(struct connman *cm,
     return true;
 }
 
+static bool zcl23_candidate_policy_blocked(struct connman *cm,
+                                           const struct net_service *batch_services,
+                                           size_t batch_count,
+                                           struct net_address *addr)
+{
+    return zcl23_endpoint_handshaked(cm, &addr->svc) ||
+           !zcl_net_port_is_reachable_candidate(addr->svc.port) ||
+           is_local(&cm->manager, &addr->svc) ||
+           connman_addr_is_connected(cm, addr) ||
+           zcl23_batch_has_service(batch_services, batch_count, &addr->svc) ||
+           !zcl23_batch_diversity_ok(cm, batch_services, batch_count,
+                                     &addr->svc.addr);
+}
+
 bool connman_gather_known_zcl23_candidate(
     struct connman *cm, const struct net_service *batch_services,
     size_t batch_count, struct connman_dial_candidate *out)
@@ -112,13 +126,8 @@ bool connman_gather_known_zcl23_candidate(
         addr.nServices = peer->services;
         addr.nTime = (uint32_t)now;
 
-        if (zcl23_endpoint_handshaked(cm, &addr.svc) ||
-            !zcl_net_port_is_reachable_candidate(addr.svc.port) ||
-            is_local(&cm->manager, &addr.svc) ||
-            connman_addr_is_connected(cm, &addr) ||
-            zcl23_batch_has_service(batch_services, batch_count, &addr.svc) ||
-            !zcl23_batch_diversity_ok(cm, batch_services, batch_count,
-                                      &addr.svc.addr)) {
+        if (zcl23_candidate_policy_blocked(cm, batch_services, batch_count,
+                                           &addr)) {
             atomic_fetch_add(&cm->zcl23_policy_skips, 1);
             continue;
         }

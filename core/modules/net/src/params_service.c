@@ -487,6 +487,30 @@ void param_service_offer_peer(struct msg_processor *mp, struct p2p_node *node)
     push_msg(mp, node, MSG_PARAM_INFO_REQ, NULL, 0);
 }
 
+/* Walks the peer's zparamhave entries. Returns -1 on a short read, 1 when an
+ * entry matches our pin for the file we are fetching (`want`), else 0. */
+static int mp_param_info_scan(struct byte_stream *s, uint8_t count, int want)
+{
+    bool serves_ours = false;
+    for (uint8_t i = 0; i < count; i++) {
+        uint8_t idx8 = 0;
+        uint64_t bytes = 0;
+        uint32_t cc = 0;
+        if (!stream_read_u8(s, &idx8) || !stream_read_u64_le(s, &bytes) ||
+            !stream_read_u32_le(s, &cc))
+            return -1;
+        if ((int)idx8 >= ZCL_PARAM_FILE_COUNT)
+            continue;
+        const struct zcl_param_pin *p = &zcl_param_pins[idx8];
+        /* Disagreement with the pin is the peer's problem, not ours. */
+        if (bytes != p->bytes || cc != p->chunk_count)
+            continue;
+        if ((int)idx8 == want)
+            serves_ours = true;
+    }
+    return serves_ours ? 1 : 0;
+}
+
 /* A peer's answer to zparaminfo. Every field is a hint, and a hint that
  * disagrees with the compiled-in pin means we simply do not ask this peer —
  * it is never a reason to change what we believe the file is. */
@@ -500,28 +524,11 @@ bool mp_handle_param_info(struct msg_processor *mp, struct p2p_node *node,
                           node->addr_name))
         return true;
 
-    bool serves_ours = false;
     pthread_mutex_lock(&g_fetch_lock);
     int want = g_fetch.active ? g_fetch.file_idx : -1;
     pthread_mutex_unlock(&g_fetch_lock);
 
-    for (uint8_t i = 0; i < count; i++) {
-        uint8_t idx8 = 0;
-        uint64_t bytes = 0;
-        uint32_t cc = 0;
-        if (!stream_read_u8(s, &idx8) || !stream_read_u64_le(s, &bytes) ||
-            !stream_read_u32_le(s, &cc))
-            return true;
-        if ((int)idx8 >= ZCL_PARAM_FILE_COUNT)
-            continue;
-        const struct zcl_param_pin *p = &zcl_param_pins[idx8];
-        /* Disagreement with the pin is the peer's problem, not ours. */
-        if (bytes != p->bytes || cc != p->chunk_count)
-            continue;
-        if ((int)idx8 == want)
-            serves_ours = true;
-    }
-    if (!serves_ours)
+    if (mp_param_info_scan(s, count, want) != 1)
         return true;
 
     pthread_mutex_lock(&g_fetch_lock);
@@ -585,6 +592,17 @@ bool mp_handle_param_manifest(struct msg_processor *mp, struct p2p_node *node,
     return true;
 }
 
+/* True when a fetch of this file index is active with a session, this node
+ * asked this peer for this chunk, and the peer is not written off. Called
+ * with g_fetch_lock held. */
+static bool mp_param_chunk_admitted_locked(struct p2p_node *node, uint8_t idx8,
+                                           uint32_t chunk)
+{
+    if (!g_fetch.active || !g_fetch.session || (int)idx8 != g_fetch.file_idx)
+        return false;
+    return chunk_admitted_locked(node->id, chunk);
+}
+
 bool mp_handle_param_chunk(struct msg_processor *mp, struct p2p_node *node,
                            struct byte_stream *s)
 {
@@ -613,16 +631,12 @@ bool mp_handle_param_chunk(struct msg_processor *mp, struct p2p_node *node,
     s->read_pos += want;
 
     pthread_mutex_lock(&g_fetch_lock);
-    if (!g_fetch.active || !g_fetch.session || (int)idx8 != g_fetch.file_idx) {
-        pthread_mutex_unlock(&g_fetch_lock);
-        return true;
-    }
     /* A response has authority to consume CPU and touch the partial file only
      * when this node requested this exact chunk from this exact peer. Check
      * both predicates before the chunk hash in zcl_param_fetch_accept_chunk.
      * Unsolicited traffic and peers that exhausted their waste budget are
      * discarded at constant cost. */
-    if (!chunk_admitted_locked(node->id, chunk)) {
+    if (!mp_param_chunk_admitted_locked(node, idx8, chunk)) {
         pthread_mutex_unlock(&g_fetch_lock);
         return true;
     }

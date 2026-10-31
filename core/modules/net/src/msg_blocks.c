@@ -228,6 +228,42 @@ static void send_notfound_batch(struct msg_processor *mp, struct p2p_node *node,
     stream_free(&nf);
 }
 
+static void msg_getdata_add_notfound(struct msg_processor *mp,
+                                     struct p2p_node *node,
+                                     struct inv_item *not_found,
+                                     size_t *not_found_count,
+                                     const struct inv_item *inv)
+{
+    not_found[(*not_found_count)++] = *inv;
+    if (*not_found_count == 64) {
+        send_notfound_batch(mp, node, not_found, *not_found_count);
+        *not_found_count = 0;
+    }
+}
+
+static bool msg_getdata_serve_tx(struct msg_processor *mp,
+                                 struct p2p_node *node,
+                                 const struct inv_item *inv)
+{
+    bool sent = false;
+    struct transaction tx;
+    transaction_init(&tx);
+    if (tx_mempool_lookup(mp->mempool, &inv->hash, &tx)) {
+        struct byte_stream tx_data;
+        stream_init(&tx_data, 512);
+        transaction_serialize(&tx, &tx_data);
+
+        p2p_node_begin_message(node, "tx",
+                               mp->params->pchMessageStart);
+        p2p_node_write_message_data(node, tx_data.data, tx_data.size);
+        p2p_node_end_message(node);
+        stream_free(&tx_data);
+        sent = true;
+    }
+    transaction_free(&tx);
+    return sent;
+}
+
 bool process_getdata(struct msg_processor *mp, struct p2p_node *node,
                      struct byte_stream *s)
 {
@@ -322,21 +358,7 @@ bool process_getdata(struct msg_processor *mp, struct p2p_node *node,
             skip_block_serve:
             (void)0;
         } else if (inv.type == MSG_TX) {
-            struct transaction tx;
-            transaction_init(&tx);
-            if (tx_mempool_lookup(mp->mempool, &inv.hash, &tx)) {
-                struct byte_stream tx_data;
-                stream_init(&tx_data, 512);
-                transaction_serialize(&tx, &tx_data);
-
-                p2p_node_begin_message(node, "tx",
-                                       mp->params->pchMessageStart);
-                p2p_node_write_message_data(node, tx_data.data, tx_data.size);
-                p2p_node_end_message(node);
-                stream_free(&tx_data);
-                sent = true;
-            }
-            transaction_free(&tx);
+            sent = msg_getdata_serve_tx(mp, node, &inv);
         }
 
         if (!sent) {
@@ -351,11 +373,8 @@ bool process_getdata(struct msg_processor *mp, struct p2p_node *node,
              * the reply forces it to sit out the full per-block timeout
              * instead, precisely when the unservable span is long enough
              * to matter. Flush a batch instead of dropping once one fills. */
-            not_found[not_found_count++] = inv;
-            if (not_found_count == 64) {
-                send_notfound_batch(mp, node, not_found, not_found_count);
-                not_found_count = 0;
-            }
+            msg_getdata_add_notfound(mp, node, not_found, &not_found_count,
+                                     &inv);
         }
     }
 
@@ -516,19 +535,12 @@ struct self_suspicion_entry {
 static struct self_suspicion_entry g_ss_table[SELF_SUSPICION_SLOTS];
 static pthread_mutex_t g_ss_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* Record that `peer_id` served the body-valid more-work block `hash` that
- * we locally rejected; return the count of DISTINCT peers seen for it
- * (>=1). Sets *escalated_now true exactly once, when the distinct count
- * first reaches SELF_SUSPICION_ESCALATE_K. Fixed-size table, LRU-evicted
- * by oldest last_ms. */
-static int self_suspicion_record(const struct uint256 *hash,
-                                 node_id_t peer_id, bool *escalated_now)
+/* Return the table entry for `hash`, claiming one when absent: the first
+ * free slot, else the least-recently-seen entry, reset for this hash.
+ * Caller holds g_ss_lock. */
+static struct self_suspicion_entry *self_suspicion_entry_for(
+    const struct uint256 *hash)
 {
-    if (escalated_now) *escalated_now = false;
-    int64_t now = peer_scoring_now_ms();
-
-    pthread_mutex_lock(&g_ss_lock);
-
     struct self_suspicion_entry *e = NULL;
     struct self_suspicion_entry *free_slot = NULL;
     struct self_suspicion_entry *oldest = &g_ss_table[0];
@@ -544,6 +556,23 @@ static int self_suspicion_record(const struct uint256 *hash,
         e->hash = *hash;
         e->used = true;
     }
+    return e;
+}
+
+/* Record that `peer_id` served the body-valid more-work block `hash` that
+ * we locally rejected; return the count of DISTINCT peers seen for it
+ * (>=1). Sets *escalated_now true exactly once, when the distinct count
+ * first reaches SELF_SUSPICION_ESCALATE_K. Fixed-size table, LRU-evicted
+ * by oldest last_ms. */
+static int self_suspicion_record(const struct uint256 *hash,
+                                 node_id_t peer_id, bool *escalated_now)
+{
+    if (escalated_now) *escalated_now = false;
+    int64_t now = peer_scoring_now_ms();
+
+    pthread_mutex_lock(&g_ss_lock);
+
+    struct self_suspicion_entry *e = self_suspicion_entry_for(hash);
 
     bool known = false;
     for (int i = 0; i < e->n_peers; i++)
@@ -646,6 +675,140 @@ static bool msg_block_reject_self_suspected(struct msg_processor *mp,
     return true;
 }
 
+static void msg_block_note_unrequested(struct msg_processor *mp,
+                                       struct p2p_node *node,
+                                       struct download_manager *dm)
+{
+    int64_t now_s = (int64_t)platform_time_wall_time_t();
+    int64_t last_settle = dl_last_forced_settle_time(dm);
+    bool within_settle_grace =
+        last_settle != 0 && (now_s - last_settle) < DL_STALL_TIMEOUT_SECS;
+    /* An orderly respawn can begin after getdata was sent but before its
+     * reply arrives.  Shutdown drains/tears down request bookkeeping
+     * ahead of the socket reader, so UINT32_MAX no longer proves
+     * an unsolicited push in that window.  Never turn our own lifecycle
+     * transition into a peer offence. */
+    if (!within_settle_grace &&
+        !thread_registry_shutdown_requested()) {
+        peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_UNREQUESTED,
+                            "block body we never requested");
+    }
+}
+
+static void msg_block_apply_caught_up(struct p2p_node *node,
+                                      const struct msg_block_acceptance *acceptance,
+                                      const struct block_index *new_tip)
+{
+    if (acceptance->should_set_sync_state) {
+        sync_set_state(acceptance->next_sync_state,
+                       "caught up to peer");
+    }
+    if (acceptance->should_set_flush_policy)
+        set_flush_policy(3600, 500000, 100);
+    if (acceptance->should_update_peer_state) {
+        peer_set_state_checked((uint32_t)node->id, &node->state,
+                               acceptance->next_peer_state,
+                               "chain caught up");
+    }
+    /* Start deferred HTTPS server now that it's safe */
+    https_deferred_check();
+    if (acceptance->should_emit_tip_updated)
+        event_emitf(EV_TIP_UPDATED, 0,
+                    "AT_TIP height=%d",
+                    new_tip->nHeight);
+}
+
+static void msg_block_refresh_manifest_at_tip(struct msg_processor *mp,
+                                              const struct block_index *new_tip)
+{
+    /* Refresh block manifest when chain grows beyond cached range.
+     * Only at tip — during IBD, SQLite is still catching up and
+     * manifest build can crash on partial data. We're a client
+     * during IBD, not serving pieces to peers. */
+    bool should_refresh_manifest = false;
+    if (sync_get_state() == SYNC_AT_TIP && new_tip->nHeight > 1000) {
+        struct block_piece_manifest header;
+        int32_t built_at = 0;
+        bool has_manifest =
+            msg_processor_get_block_manifest_header(&header,
+                                                    &built_at);
+        should_refresh_manifest =
+            block_piece_manifest_should_refresh(
+                &mp->main_state->chain_active, has_manifest,
+                has_manifest ? &header : NULL, built_at,
+                new_tip->nHeight, MANIFEST_REFRESH_BLOCKS);
+    }
+    if (should_refresh_manifest) {
+        /* Rebuild in a detached thread to avoid blocking message processing */
+        static _Atomic bool g_manifest_rebuilding = false;
+        if (!atomic_exchange(&g_manifest_rebuilding, true)) {
+            struct block_piece_manifest new_m;
+            memset(&new_m, 0, sizeof(new_m));
+            if (block_piece_manifest_build_active_chain(
+                    &mp->main_state->chain_active, 1,
+                    new_tip->nHeight, &new_m)) {
+                uint32_t num_pieces = new_m.num_pieces;
+                msg_processor_publish_block_manifest(
+                    &new_m, new_tip->nHeight);
+                event_emitf(EV_SYNC_STATE_CHANGE, 0, "manifest refreshed to h=%d (%u pieces)",
+                            new_tip->nHeight, num_pieces);
+            }
+            atomic_store(&g_manifest_rebuilding, false);
+        }
+    }
+}
+
+static void msg_block_send_compact_to_peer(struct msg_processor *mp,
+                                           struct p2p_node *peer,
+                                           struct block_index *new_tip)
+{
+    struct block blk_cmp;
+    block_init(&blk_cmp);
+    if (read_block_from_disk_index(&blk_cmp, new_tip, mp->datadir)) {
+        struct compact_block_msg cb;
+        uint64_t nonce = (uint64_t)platform_time_wall_time_t() ^ (uint64_t)peer->id;
+        if (compact_block_from_block(&cb, &blk_cmp, nonce)) {
+            struct byte_stream cs;
+            stream_init(&cs, 4096);
+            if (compact_block_msg_serialize(&cb, &cs)) {
+                p2p_node_begin_message(peer, "cmpctblock",
+                                       mp->params->pchMessageStart);
+                p2p_node_write_message_data(peer, cs.data, cs.size);
+                p2p_node_end_message(peer);
+            }
+            stream_free(&cs);
+            compact_block_msg_free(&cb);
+        }
+        block_free(&blk_cmp);
+    }
+}
+
+static void msg_block_penalize_invalid(struct msg_processor *mp,
+                                       struct p2p_node *node,
+                                       const struct validation_state *state,
+                                       int dos, const char *rr)
+{
+    event_emitf(EV_BLOCK_REJECTED, (uint32_t)node->id,
+                "dos=%d %s", dos, state->reject_reason);
+    printf("Peer %s: invalid block (dos=%d): %s\n",
+           node->addr_name, dos, state->reject_reason);
+    /* DoS from validation is graded: treat the common [50, 100]
+     * range as the two typed categories so peer_offence_weight()
+     * drives the score increment. Anything else (graded 1..49)
+     * falls through to the raw peer_misbehaving() path so we
+     * still honour the validator's exact grade — a constant
+     * enum can't represent it. */
+    if (dos >= 100) {
+        peer_scoring_record(mp->net_mgr, node,
+                            PEER_OFFENCE_INVALID_BLOCK, rr);
+    } else if (dos >= 50) {
+        peer_scoring_record(mp->net_mgr, node,
+                            PEER_OFFENCE_INVALID_HEADER, rr);
+    } else {
+        peer_misbehaving(mp->net_mgr, node, dos, rr);
+    }
+}
+
 bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
                        struct byte_stream *s)
 {
@@ -697,22 +860,8 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
      * risk banning an honest-but-slow peer. */
     struct download_manager *dm = get_download_mgr();
     uint32_t requester_id = dl_mark_received(dm, &hash);
-    if (requester_id == UINT32_MAX) {
-        int64_t now_s = (int64_t)platform_time_wall_time_t();
-        int64_t last_settle = dl_last_forced_settle_time(dm);
-        bool within_settle_grace =
-            last_settle != 0 && (now_s - last_settle) < DL_STALL_TIMEOUT_SECS;
-        /* An orderly respawn can begin after getdata was sent but before its
-         * reply arrives.  Shutdown drains/tears down request bookkeeping
-         * ahead of the socket reader, so UINT32_MAX no longer proves
-         * an unsolicited push in that window.  Never turn our own lifecycle
-         * transition into a peer offence. */
-        if (!within_settle_grace &&
-            !thread_registry_shutdown_requested()) {
-            peer_scoring_record(mp->net_mgr, node, PEER_OFFENCE_UNREQUESTED,
-                                "block body we never requested");
-        }
-    }
+    if (requester_id == UINT32_MAX)
+        msg_block_note_unrequested(mp, node, dm);
 
     /* Track block bytes for MB/s throughput reporting */
     dl_add_bytes_received(dm, s->size);
@@ -836,63 +985,12 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
              * making protocol handling depend on app-service ownership. */
             msg_processor_note_block_connected(mp, new_tip->nHeight);
 
-            if (acceptance.reached_peer_tip) {
-                if (acceptance.should_set_sync_state) {
-                    sync_set_state(acceptance.next_sync_state,
-                                   "caught up to peer");
-                }
-                if (acceptance.should_set_flush_policy)
-                    set_flush_policy(3600, 500000, 100);
-                if (acceptance.should_update_peer_state) {
-                    peer_set_state_checked((uint32_t)node->id, &node->state,
-                                           acceptance.next_peer_state,
-                                           "chain caught up");
-                }
-                /* Start deferred HTTPS server now that it's safe */
-                https_deferred_check();
-                if (acceptance.should_emit_tip_updated)
-                    event_emitf(EV_TIP_UPDATED, 0,
-                                "AT_TIP height=%d",
-                                new_tip->nHeight);
-            }
+            if (acceptance.reached_peer_tip)
+                msg_block_apply_caught_up(node, &acceptance, new_tip);
 
             /* Progress logged by IBD progress timer (every 30s) */
 
-            /* Refresh block manifest when chain grows beyond cached range.
-             * Only at tip — during IBD, SQLite is still catching up and
-             * manifest build can crash on partial data. We're a client
-             * during IBD, not serving pieces to peers. */
-            bool should_refresh_manifest = false;
-            if (sync_get_state() == SYNC_AT_TIP && new_tip->nHeight > 1000) {
-                struct block_piece_manifest header;
-                int32_t built_at = 0;
-                bool has_manifest =
-                    msg_processor_get_block_manifest_header(&header,
-                                                            &built_at);
-                should_refresh_manifest =
-                    block_piece_manifest_should_refresh(
-                        &mp->main_state->chain_active, has_manifest,
-                        has_manifest ? &header : NULL, built_at,
-                        new_tip->nHeight, MANIFEST_REFRESH_BLOCKS);
-            }
-            if (should_refresh_manifest) {
-                /* Rebuild in a detached thread to avoid blocking message processing */
-                static _Atomic bool g_manifest_rebuilding = false;
-                if (!atomic_exchange(&g_manifest_rebuilding, true)) {
-                    struct block_piece_manifest new_m;
-                    memset(&new_m, 0, sizeof(new_m));
-                    if (block_piece_manifest_build_active_chain(
-                            &mp->main_state->chain_active, 1,
-                            new_tip->nHeight, &new_m)) {
-                        uint32_t num_pieces = new_m.num_pieces;
-                        msg_processor_publish_block_manifest(
-                            &new_m, new_tip->nHeight);
-                        event_emitf(EV_SYNC_STATE_CHANGE, 0, "manifest refreshed to h=%d (%u pieces)",
-                                    new_tip->nHeight, num_pieces);
-                    }
-                    atomic_store(&g_manifest_rebuilding, false);
-                }
-            }
+            msg_block_refresh_manifest_at_tip(mp, new_tip);
 
             /* Relay accepted block to all connected peers (not during IBD).
              * At the tip, we act as a full relay node. During IBD, relaying
@@ -931,25 +1029,8 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
                             !peer->disconnect) {
                             if (peer->send_compact) {
                                 /* BIP 152: send compact block directly */
-                                struct block blk_cmp;
-                                block_init(&blk_cmp);
-                                if (read_block_from_disk_index(&blk_cmp, new_tip, mp->datadir)) {
-                                    struct compact_block_msg cb;
-                                    uint64_t nonce = (uint64_t)platform_time_wall_time_t() ^ (uint64_t)peer->id;
-                                    if (compact_block_from_block(&cb, &blk_cmp, nonce)) {
-                                        struct byte_stream cs;
-                                        stream_init(&cs, 4096);
-                                        if (compact_block_msg_serialize(&cb, &cs)) {
-                                            p2p_node_begin_message(peer, "cmpctblock",
-                                                                   mp->params->pchMessageStart);
-                                            p2p_node_write_message_data(peer, cs.data, cs.size);
-                                            p2p_node_end_message(peer);
-                                        }
-                                        stream_free(&cs);
-                                        compact_block_msg_free(&cb);
-                                    }
-                                    block_free(&blk_cmp);
-                                }
+                                msg_block_send_compact_to_peer(mp, peer,
+                                                               new_tip);
                             } else if (peer->prefer_headers) {
                                 /* BIP 130: direct verified header. If local
                                  * bytes are unavailable, fall back to inv so
@@ -992,25 +1073,7 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
                          "reject, dos=%d): %s",
                          node->addr_name, dos, rr);
             } else {
-                event_emitf(EV_BLOCK_REJECTED, (uint32_t)node->id,
-                            "dos=%d %s", dos, state.reject_reason);
-                printf("Peer %s: invalid block (dos=%d): %s\n",
-                       node->addr_name, dos, state.reject_reason);
-                /* DoS from validation is graded: treat the common [50, 100]
-                 * range as the two typed categories so peer_offence_weight()
-                 * drives the score increment. Anything else (graded 1..49)
-                 * falls through to the raw peer_misbehaving() path so we
-                 * still honour the validator's exact grade — a constant
-                 * enum can't represent it. */
-                if (dos >= 100) {
-                    peer_scoring_record(mp->net_mgr, node,
-                                        PEER_OFFENCE_INVALID_BLOCK, rr);
-                } else if (dos >= 50) {
-                    peer_scoring_record(mp->net_mgr, node,
-                                        PEER_OFFENCE_INVALID_HEADER, rr);
-                } else {
-                    peer_misbehaving(mp->net_mgr, node, dos, rr);
-                }
+                msg_block_penalize_invalid(mp, node, &state, dos, rr);
             }
         } else if (!validation_state_is_valid(&state)) {
             /* DoS=0 but invalid: orphan block or parent-failed.

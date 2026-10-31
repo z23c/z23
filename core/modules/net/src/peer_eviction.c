@@ -21,6 +21,23 @@ static int cmp_sort_entry(const void *a, const void *b)
     return 0;
 }
 
+static void peer_eviction_protect_recent_relayers(
+    const struct peer_eviction_candidate *candidates,
+    const struct sort_entry *entries, size_t inbound_count, int64_t now,
+    bool *is_protected)
+{
+    /* Protect recent novel block/tx relayers regardless of connection age. */
+    for (size_t i = 0; i < inbound_count; i++) {
+        size_t idx = entries[i].idx;
+        const struct peer_eviction_candidate *c = &candidates[idx];
+        if ((c->last_block_time > 0 &&
+             now - c->last_block_time < PEER_EVICTION_RECENT_RELAY_SECS) ||
+            (c->last_tx_time > 0 &&
+             now - c->last_tx_time < PEER_EVICTION_RECENT_RELAY_SECS))
+            is_protected[idx] = true;
+    }
+}
+
 int peer_eviction_select(const struct peer_eviction_candidate *candidates,
                           size_t n, int64_t now)
 {
@@ -50,16 +67,8 @@ int peer_eviction_select(const struct peer_eviction_candidate *candidates,
     for (size_t i = 0; i < quartile; i++)
         is_protected[entries[i].idx] = true;
 
-    /* Protect recent novel block/tx relayers regardless of connection age. */
-    for (size_t i = 0; i < inbound_count; i++) {
-        size_t idx = entries[i].idx;
-        const struct peer_eviction_candidate *c = &candidates[idx];
-        if ((c->last_block_time > 0 &&
-             now - c->last_block_time < PEER_EVICTION_RECENT_RELAY_SECS) ||
-            (c->last_tx_time > 0 &&
-             now - c->last_tx_time < PEER_EVICTION_RECENT_RELAY_SECS))
-            is_protected[idx] = true;
-    }
+    peer_eviction_protect_recent_relayers(candidates, entries, inbound_count,
+                                          now, is_protected);
 
     /* Evict the newest (largest connected_time) unprotected candidate;
      * entries[] is sorted ascending so the last unprotected entry wins. */

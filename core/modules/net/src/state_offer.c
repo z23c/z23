@@ -28,26 +28,30 @@ static const char offer_signature_domain[] = "zcl.state.offer.signature.v1";
 _Static_assert(STATE_OFFER_MAX_PER_PEER <= ROM_SEED_MAX_ARTIFACTS,
                "a peer cannot offer more artifacts than it can hold");
 
+static const char *const state_offer_error_names[] = {
+    [STATE_OFFER_OK] = "ok",
+    [STATE_OFFER_NULL] = "null",
+    [STATE_OFFER_SIZE] = "size",
+    [STATE_OFFER_MAGIC] = "magic",
+    [STATE_OFFER_VERSION_INVALID] = "version",
+    [STATE_OFFER_FLAGS] = "flags",
+    [STATE_OFFER_FIELD] = "field",
+    [STATE_OFFER_HEIGHT] = "height",
+    [STATE_OFFER_STALE] = "stale",
+    [STATE_OFFER_CHUNKING] = "chunking",
+    [STATE_OFFER_CONTENT] = "content",
+    [STATE_OFFER_NAME] = "name",
+    [STATE_OFFER_KIND] = "kind",
+    [STATE_OFFER_TIME] = "time",
+    [STATE_OFFER_COUNT] = "count",
+    [STATE_OFFER_SIGNATURE] = "signature",
+};
+
 const char *state_offer_error_string(enum state_offer_error error)
 {
-    switch (error) {
-    case STATE_OFFER_OK: return "ok";
-    case STATE_OFFER_NULL: return "null";
-    case STATE_OFFER_SIZE: return "size";
-    case STATE_OFFER_MAGIC: return "magic";
-    case STATE_OFFER_VERSION_INVALID: return "version";
-    case STATE_OFFER_FLAGS: return "flags";
-    case STATE_OFFER_FIELD: return "field";
-    case STATE_OFFER_HEIGHT: return "height";
-    case STATE_OFFER_STALE: return "stale";
-    case STATE_OFFER_CHUNKING: return "chunking";
-    case STATE_OFFER_CONTENT: return "content";
-    case STATE_OFFER_NAME: return "name";
-    case STATE_OFFER_KIND: return "kind";
-    case STATE_OFFER_TIME: return "time";
-    case STATE_OFFER_COUNT: return "count";
-    case STATE_OFFER_SIGNATURE: return "signature";
-    }
+    if ((size_t)error < sizeof(state_offer_error_names) / sizeof(state_offer_error_names[0]) &&
+        state_offer_error_names[error] != NULL)
+        return state_offer_error_names[error];
     return "unknown";
 }
 
@@ -121,6 +125,33 @@ static enum state_offer_error chunking_shape(const struct state_offer_v1 *offer)
     return STATE_OFFER_OK;
 }
 
+/* Every commitment an all-zero value would silently disable. chunk_tree_root
+ * is in this list on purpose: it is the RMF serve-request key, so a zero
+ * root is not "chunking not used yet", it is an unfetchable offer. */
+static enum state_offer_error offer_commitments_shape(const struct state_offer_v1 *offer)
+{
+    const uint8_t *critical[] = {
+        offer->header_hash, offer->content_digest, offer->chunk_tree_root,
+        offer->mmb_peaks_digest, offer->producer_receipt_id,
+        offer->offerer_online_pubkey,
+    };
+    for (size_t i = 0; i < sizeof(critical) / sizeof(critical[0]); i++)
+        if (!zcl_bytes_any_set(critical[i], 32))
+            return STATE_OFFER_FIELD;
+    return STATE_OFFER_OK;
+}
+
+static enum state_offer_error offer_height_shape(const struct state_offer_v1 *offer)
+{
+    if (offer->bundle_height <= 0 || offer->offerer_tip_height <= 0 ||
+        offer->bundle_height > offer->offerer_tip_height)
+        return STATE_OFFER_HEIGHT;
+    if (!state_offer_height_is_fresh(offer->bundle_height,
+                                     offer->offerer_tip_height))
+        return STATE_OFFER_STALE;
+    return STATE_OFFER_OK;
+}
+
 static enum state_offer_error offer_shape(const struct state_offer_v1 *offer,
                                           bool require_signature)
 {
@@ -131,30 +162,19 @@ static enum state_offer_error offer_shape(const struct state_offer_v1 *offer,
     if (offer->flags != STATE_OFFER_FLAGS_NONE)
         return STATE_OFFER_FLAGS;
 
-    /* Every commitment an all-zero value would silently disable. chunk_tree_root
-     * is in this list on purpose: it is the RMF serve-request key, so a zero
-     * root is not "chunking not used yet", it is an unfetchable offer. */
-    const uint8_t *critical[] = {
-        offer->header_hash, offer->content_digest, offer->chunk_tree_root,
-        offer->mmb_peaks_digest, offer->producer_receipt_id,
-        offer->offerer_online_pubkey,
-    };
-    for (size_t i = 0; i < sizeof(critical) / sizeof(critical[0]); i++)
-        if (!zcl_bytes_any_set(critical[i], 32))
-            return STATE_OFFER_FIELD;
+    enum state_offer_error error = offer_commitments_shape(offer);
+    if (error != STATE_OFFER_OK)
+        return error;
 
     if (offer->kind != (uint16_t)ROM_ARTIFACT_CONSENSUS_BUNDLE &&
         offer->kind != (uint16_t)ROM_ARTIFACT_HEADER_SEED)
         return STATE_OFFER_KIND;
 
-    if (offer->bundle_height <= 0 || offer->offerer_tip_height <= 0 ||
-        offer->bundle_height > offer->offerer_tip_height)
-        return STATE_OFFER_HEIGHT;
-    if (!state_offer_height_is_fresh(offer->bundle_height,
-                                     offer->offerer_tip_height))
-        return STATE_OFFER_STALE;
+    error = offer_height_shape(offer);
+    if (error != STATE_OFFER_OK)
+        return error;
 
-    enum state_offer_error error = chunking_shape(offer);
+    error = chunking_shape(offer);
     if (error != STATE_OFFER_OK)
         return error;
     error = name_shape(offer);

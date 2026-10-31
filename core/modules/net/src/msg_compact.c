@@ -125,6 +125,103 @@ bool process_sendcmpct(struct msg_processor *mp, struct p2p_node *node,
     return true;
 }
 
+/* ── Helper: snapshot mempool tx hashes for reconstruction ─────── */
+
+static struct uint256 *compact_collect_mempool_hashes(struct msg_processor *mp,
+                                                      size_t *out_num)
+{
+    struct uint256 *mp_hashes = NULL;
+    size_t max_mp = tx_mempool_size(mp->mempool);
+    if (max_mp > 0) {
+        mp_hashes = zcl_malloc(max_mp * sizeof(struct uint256), "compact_mp_hashes");
+        if (mp_hashes) {
+            tx_mempool_query_hashes(mp->mempool, mp_hashes, max_mp, out_num);
+        }
+    }
+    return mp_hashes;
+}
+
+/* ── Helper: copy the mempool txs named by hashes (misses are skipped) ── */
+
+static struct transaction *compact_load_mempool_txs(struct msg_processor *mp,
+                                                    struct uint256 *mp_hashes,
+                                                    size_t num_mp,
+                                                    size_t *out_num_txs)
+{
+    struct transaction *mp_txs = NULL;
+    size_t num_mp_txs = 0;
+    if (num_mp > 0) {
+        mp_txs = zcl_calloc(num_mp, sizeof(struct transaction), "compact_mp_txs");
+        if (mp_txs) {
+            for (size_t i = 0; i < num_mp; i++) {
+                transaction_init(&mp_txs[num_mp_txs]);
+                if (tx_mempool_lookup(mp->mempool, &mp_hashes[i], &mp_txs[num_mp_txs])) {
+                    transaction_compute_hash(&mp_txs[num_mp_txs]);
+                    num_mp_txs++;
+                }
+            }
+        }
+    }
+    *out_num_txs = num_mp_txs;
+    return mp_txs;
+}
+
+/* ── Helper: free the mempool tx copies made for reconstruction ── */
+
+static void compact_free_mempool_txs(struct transaction *mp_txs, size_t num_mp_txs)
+{
+    if (mp_txs) {
+        for (size_t i = 0; i < num_mp_txs; i++)
+            transaction_free(&mp_txs[i]);
+        free(mp_txs);
+    }
+}
+
+/* ── Helper: move a partial block into per-peer pending state ──── */
+
+static bool compact_stash_partial_block(struct msg_processor *mp,
+                                        struct p2p_node *node,
+                                        const struct uint256 *block_hash,
+                                        const struct block *out_block,
+                                        uint64_t *missing_indices,
+                                        size_t num_missing)
+{
+    node->compact_pending_block = zcl_malloc(sizeof(struct block),
+                                              "compact_pending_block");
+    if (!node->compact_pending_block)
+        return false;
+
+    *node->compact_pending_block = *out_block; /* move ownership */
+    node->compact_pending_hash = *block_hash;
+    node->compact_missing_indices = missing_indices;
+    node->compact_num_missing = num_missing;
+    node->compact_request_time = (int64_t)platform_time_wall_time_t();
+
+    /* Send getblocktxn for the missing transactions. Only a
+     * stashed peer can complete the reply, so the request is
+     * built here, inside the stash-success branch; pre-fix it
+     * ran unconditionally and read NULL indices when the
+     * stash allocation above failed. */
+    struct block_txn_request req;
+    block_txn_request_init(&req);
+    req.block_hash = *block_hash;
+    req.indices = node->compact_missing_indices;
+    req.num_indices = num_missing;
+
+    struct byte_stream rs;
+    stream_init(&rs, 256);
+    if (block_txn_request_serialize(&req, &rs)) {
+        p2p_node_begin_message(node, "getblocktxn",
+                               mp->params->pchMessageStart);
+        p2p_node_write_message_data(node, rs.data, rs.size);
+        p2p_node_end_message(node);
+    }
+    stream_free(&rs);
+    /* Don't free req — indices are owned by
+     * node->compact_missing_indices */
+    return true;
+}
+
 bool process_cmpctblock(struct msg_processor *mp, struct p2p_node *node,
                         struct byte_stream *s)
 {
@@ -165,31 +262,13 @@ bool process_cmpctblock(struct msg_processor *mp, struct p2p_node *node,
     compact_pending_clear(node);
 
     /* Collect mempool transactions for reconstruction */
-    struct uint256 *mp_hashes = NULL;
     size_t num_mp = 0;
-    size_t max_mp = tx_mempool_size(mp->mempool);
-    if (max_mp > 0) {
-        mp_hashes = zcl_malloc(max_mp * sizeof(struct uint256), "compact_mp_hashes");
-        if (mp_hashes) {
-            tx_mempool_query_hashes(mp->mempool, mp_hashes, max_mp, &num_mp);
-        }
-    }
+    struct uint256 *mp_hashes = compact_collect_mempool_hashes(mp, &num_mp);
 
     /* Look up each mempool hash to get the full transaction */
-    struct transaction *mp_txs = NULL;
     size_t num_mp_txs = 0;
-    if (num_mp > 0) {
-        mp_txs = zcl_calloc(num_mp, sizeof(struct transaction), "compact_mp_txs");
-        if (mp_txs) {
-            for (size_t i = 0; i < num_mp; i++) {
-                transaction_init(&mp_txs[num_mp_txs]);
-                if (tx_mempool_lookup(mp->mempool, &mp_hashes[i], &mp_txs[num_mp_txs])) {
-                    transaction_compute_hash(&mp_txs[num_mp_txs]);
-                    num_mp_txs++;
-                }
-            }
-        }
-    }
+    struct transaction *mp_txs = compact_load_mempool_txs(mp, mp_hashes, num_mp,
+                                                          &num_mp_txs);
     free(mp_hashes);
 
     /* Attempt reconstruction. out_block is initialized here as well as in
@@ -215,38 +294,9 @@ bool process_cmpctblock(struct msg_processor *mp, struct p2p_node *node,
                  node->addr_name, num_missing);
 
         /* Stash the partial block in per-peer state for blocktxn completion */
-        node->compact_pending_block = zcl_malloc(sizeof(struct block),
-                                                  "compact_pending_block");
-        if (node->compact_pending_block) {
-            *node->compact_pending_block = out_block; /* move ownership */
-            node->compact_pending_hash = block_hash;
-            node->compact_missing_indices = missing_indices;
-            node->compact_num_missing = num_missing;
-            node->compact_request_time = (int64_t)platform_time_wall_time_t();
+        if (compact_stash_partial_block(mp, node, &block_hash, &out_block,
+                                        missing_indices, num_missing)) {
             missing_indices = NULL; /* ownership transferred */
-
-            /* Send getblocktxn for the missing transactions. Only a
-             * stashed peer can complete the reply, so the request is
-             * built here, inside the stash-success branch; pre-fix it
-             * ran unconditionally and read NULL indices when the
-             * stash allocation above failed. */
-            struct block_txn_request req;
-            block_txn_request_init(&req);
-            req.block_hash = block_hash;
-            req.indices = node->compact_missing_indices;
-            req.num_indices = num_missing;
-
-            struct byte_stream rs;
-            stream_init(&rs, 256);
-            if (block_txn_request_serialize(&req, &rs)) {
-                p2p_node_begin_message(node, "getblocktxn",
-                                       mp->params->pchMessageStart);
-                p2p_node_write_message_data(node, rs.data, rs.size);
-                p2p_node_end_message(node);
-            }
-            stream_free(&rs);
-            /* Don't free req — indices are owned by
-             * node->compact_missing_indices */
         } else {
             /* Stash allocation failed: there is no pending state a
              * blocktxn reply could complete, so no request is sent.
@@ -263,11 +313,7 @@ bool process_cmpctblock(struct msg_processor *mp, struct p2p_node *node,
     free(missing_indices);
 
     /* Clean up mempool tx copies */
-    if (mp_txs) {
-        for (size_t i = 0; i < num_mp_txs; i++)
-            transaction_free(&mp_txs[i]);
-        free(mp_txs);
-    }
+    compact_free_mempool_txs(mp_txs, num_mp_txs);
 
     compact_block_msg_free(&cb);
     return true;

@@ -86,6 +86,51 @@ void block_swarm_free(struct block_swarm *bs)
     bs->first_incomplete_hint = 0;
 }
 
+static bool block_swarm_piece_offerable(const struct block_swarm *bs,
+                                        uint32_t i, int peer_id,
+                                        const uint8_t *peer_bitmap,
+                                        size_t peer_bitmap_bytes)
+{
+    if (!block_swarm_piece_assignable(bs->piece_states[i]))
+        return false;
+
+    /* In endgame, also consider INFLIGHT pieces for duplicate requests */
+    if (bs->endgame && bs->piece_states[i] == CHUNK_INFLIGHT) {
+        /* Allow re-request in endgame, but not from same peer */
+        if (bs->piece_peer[i] == peer_id) return false;
+    } else if (bs->piece_states[i] == CHUNK_INFLIGHT) {
+        return false;
+    }
+
+    /* Check peer bitmap if available. Bits past the buffer's span count
+     * as NOT held, so a short bitmap can never be indexed out of bounds
+     * (same bound as block_swarm_update_availability). */
+    if (peer_bitmap && !(i / 8 < peer_bitmap_bytes &&
+                         (peer_bitmap[i / 8] & (1 << (i % 8)))))
+        return false;
+    return true;
+}
+
+static void block_swarm_mark_piece_inflight(struct block_swarm *bs,
+                                            uint32_t piece, int peer_id)
+{
+    bs->piece_states[piece] = CHUNK_INFLIGHT;
+    bs->piece_peer[piece] = peer_id;
+    bs->piece_request_time[piece] = (int64_t)platform_time_wall_time_t();
+    bs->pieces_inflight++;
+    if (piece == bs->next_assign_hint)
+        block_swarm_advance_assign_hint(bs);
+}
+
+static void block_swarm_update_endgame(struct block_swarm *bs)
+{
+    /* Endgame mode: if few pieces remain, use broadcast strategy.
+     * Caller should request all remaining from all peers. */
+    uint32_t remaining = bs->manifest.num_pieces - bs->pieces_complete;
+    if (remaining <= ENDGAME_THRESHOLD && remaining > 0)
+        bs->endgame = true;
+}
+
 static int32_t block_swarm_assign_piece_capped(struct block_swarm *bs,
                                                 int peer_id,
                                                 const uint8_t *peer_bitmap,
@@ -108,32 +153,14 @@ static int32_t block_swarm_assign_piece_capped(struct block_swarm *bs,
     if (bs->next_assign_hint > max_piece_index)
         return -1;
 
-    /* Endgame mode: if few pieces remain, use broadcast strategy.
-     * Caller should request all remaining from all peers. */
-    uint32_t remaining = bs->manifest.num_pieces - bs->pieces_complete;
-    if (remaining <= ENDGAME_THRESHOLD && remaining > 0)
-        bs->endgame = true;
+    block_swarm_update_endgame(bs);
 
     int32_t best = -1;
     uint32_t best_avail = UINT32_MAX;
 
     for (uint32_t i = bs->next_assign_hint; i <= max_piece_index; i++) {
-        if (!block_swarm_piece_assignable(bs->piece_states[i]))
-            continue;
-
-        /* In endgame, also consider INFLIGHT pieces for duplicate requests */
-        if (bs->endgame && bs->piece_states[i] == CHUNK_INFLIGHT) {
-            /* Allow re-request in endgame, but not from same peer */
-            if (bs->piece_peer[i] == peer_id) continue;
-        } else if (bs->piece_states[i] == CHUNK_INFLIGHT) {
-            continue;
-        }
-
-        /* Check peer bitmap if available. Bits past the buffer's span count
-         * as NOT held, so a short bitmap can never be indexed out of bounds
-         * (same bound as block_swarm_update_availability). */
-        if (peer_bitmap && !(i / 8 < peer_bitmap_bytes &&
-                             (peer_bitmap[i / 8] & (1 << (i % 8)))))
+        if (!block_swarm_piece_offerable(bs, i, peer_id, peer_bitmap,
+                                         peer_bitmap_bytes))
             continue;
 
         /* Rarest-first: prefer pieces fewer peers have */
@@ -151,14 +178,8 @@ static int32_t block_swarm_assign_piece_capped(struct block_swarm *bs,
         }
     }
 
-    if (best >= 0) {
-        bs->piece_states[best] = CHUNK_INFLIGHT;
-        bs->piece_peer[best] = peer_id;
-        bs->piece_request_time[best] = (int64_t)platform_time_wall_time_t();
-        bs->pieces_inflight++;
-        if ((uint32_t)best == bs->next_assign_hint)
-            block_swarm_advance_assign_hint(bs);
-    }
+    if (best >= 0)
+        block_swarm_mark_piece_inflight(bs, (uint32_t)best, peer_id);
     return best;
 }
 
