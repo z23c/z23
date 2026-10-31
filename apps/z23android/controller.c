@@ -41,7 +41,8 @@ struct controller {
     bool seen_responding;
     int64_t seen_height, seen_target, seen_peers; /* Latest node reading, for the suggestion. */
     int64_t fleet_height;                         /* Highest height the last fleet report named, or -1. */
-    time_t height_moved_at;                       /* When seen_height last changed, or 0 when unknown. */
+    int64_t height_moved_at;                      /* Monotonic seconds when seen_height last changed, or 0 when unknown. */
+    int64_t fleet_height_at;                      /* Monotonic seconds when fleet_height was taken from a current snapshot. */
     char asked[96];                               /* Question last answered by the model. */
     atomic_bool reply_cancel;
     atomic_bool voice_cancel, voice_stop;
@@ -54,6 +55,12 @@ static struct controller *current;
 static void copy_text(char *out, size_t cap, const char *text)
 {
     if (cap) snprintf(out, cap, "%s", text ? text : "");
+}
+/* Seconds on a clock that wall-time changes cannot move; never 0. */
+static int64_t monotonic_secs(void)
+{
+    struct timespec now;
+    return clock_gettime(CLOCK_MONOTONIC, &now) ? 1 : (int64_t)now.tv_sec + 1;
 }
 /* Records the question being answered for display; a long one is cut on a character boundary. */
 static void set_pending(char *out, const char *question)
@@ -171,12 +178,13 @@ static void observe_node(struct controller *c)
     bool onion = n.responding && zapp_onion_ready(&c->runtime);
     char status[1024], line[96];
     /* Evidence outside the node: how long its tip has been still, and the fleet's height while that report is current. */
-    time_t now = time(NULL);
+    const int64_t now = monotonic_secs();
     pthread_mutex_lock(&c->lock);
+    const bool fleet_current = !c->view.fleet_stale && c->fleet_height_at && now - c->fleet_height_at <= ZAPP_FLEET_MAX_AGE_SECS;
     if (!n.responding) c->height_moved_at = 0;
     else if (n.height != c->seen_height || !c->height_moved_at) c->height_moved_at = now;
-    struct zapp_chain_evidence evidence = {.fleet_height = c->view.fleet_stale ? -1 : c->fleet_height,
-        .quiet_secs = n.responding && c->height_moved_at ? (int64_t)(now - c->height_moved_at) : -1};
+    struct zapp_chain_evidence evidence = {.fleet_height = fleet_current ? c->fleet_height : -1,
+        .quiet_secs = n.responding && c->height_moved_at ? now - c->height_moved_at : -1};
     pthread_mutex_unlock(&c->lock);
     zapp_sync_line(n.responding, process_running, n.height, n.target, n.peers, &evidence, status, sizeof(status));
     if (stopping) copy_text(status, sizeof(status), "The node is saving its data before it exits.");
@@ -332,7 +340,8 @@ static bool fleet_hosts(struct controller *c, bool refresh, char *out)
     pthread_mutex_lock(&c->lock);
     if (ok) {
         copy_text(c->view.fleet_status, sizeof(c->view.fleet_status), formatted);
-        c->fleet_height = zapp_fleet_height(out);
+        c->fleet_height = zapp_fleet_height(out, (int64_t)time(NULL));
+        c->fleet_height_at = monotonic_secs();
         c->view.fleet_stale = false;
         ops_track(c, formatted);
         /* An answered fleet request proves the paired host is reachable. */

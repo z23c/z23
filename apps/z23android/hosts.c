@@ -127,7 +127,7 @@ const char *zapp_sync_line(bool responding, bool process_running, int64_t height
         "Waiting for the node to answer." : "Start the node to begin synchronization.");
     else if (height < 0) snprintf(out, cap, "Waiting for the node to report its height.");
     else if (v.state == CHAIN_WAITING) snprintf(out, cap, "Waiting for a peer that reports the current chain.");
-    else if (v.reference > height) snprintf(out, cap, "%s %s to go.", zapp_grouped(v.reference - height, gap),
+    else if (v.state == CHAIN_BEHIND) snprintf(out, cap, "%s %s to go.", zapp_grouped(v.reference - height, gap),
                                             v.reference - height == 1 ? "block" : "blocks");
     else if (v.state == CHAIN_UNCONFIRMED)
         snprintf(out, cap, "Your node has every block it can see, but with %s it cannot confirm it is current.", v.reason);
@@ -135,12 +135,19 @@ const char *zapp_sync_line(bool responding, bool process_running, int64_t height
     return out;
 }
 /* The highest height any reachable host of a zapp_hosts_format snapshot reports, from its node or its
- * zclassicd; -1 when none does. The fleet's height is evidence the chain has reached that far. */
-int64_t zapp_fleet_height(const char *json)
+ * zclassicd; -1 when none does. The fleet's height is evidence the chain has reached that far, so a snapshot
+ * counts only when its observed_at (unix seconds, set by the host that probed) is at most ZAPP_FLEET_MAX_AGE_SECS
+ * old and at most ZAPP_FLEET_FUTURE_SECS ahead of now_unix; the laptop host serves its last snapshot after its
+ * refreshes fail. */
+int64_t zapp_fleet_height(const char *json, int64_t now_unix)
 {
     struct json_value root = {0};
-    int64_t best = -1;
-    const struct json_value *hosts = json && json_read(&root, json, strlen(json)) ? json_get(&root, "hosts") : NULL;
+    int64_t best = -1, observed = 0;
+    const bool read = json && json_read(&root, json, strlen(json));
+    const struct json_value *hosts = read ? json_get(&root, "hosts") : NULL;
+    if (read && (!count_of(&root, "observed_at", &observed) || observed <= 0 ||
+                 observed < now_unix - ZAPP_FLEET_MAX_AGE_SECS || observed > now_unix + ZAPP_FLEET_FUTURE_SECS))
+        hosts = NULL;
     for (size_t i = 0; hosts && hosts->type == JSON_ARR && i < hosts->num_children; i++) {
         const struct json_value *row = json_at(hosts, i), *reachable = json_get(row, "reachable");
         int64_t value;

@@ -201,11 +201,31 @@ static void chain_evidence_tests(void)
                        "Your node has every block it can see, but with no new block for 15 min it cannot confirm it is current."));
     }
     {
-        static const char fleet[] = "{\"hosts\":[{\"host\":\"r1\",\"reachable\":true,\"height\":3304010,\"reference_height\":3304011},"
-            "{\"host\":\"r2\",\"reachable\":true,\"height\":3304009},{\"host\":\"mac\",\"reachable\":false,\"height\":9999999}]}";
-        assert(zapp_fleet_height(fleet) == 3304011);
-        assert(zapp_fleet_height("{\"hosts\":[{\"host\":\"r1\",\"reachable\":false,\"height\":5}]}") == -1);
-        assert(zapp_fleet_height("not json") == -1 && zapp_fleet_height(NULL) == -1 && zapp_fleet_height("{}") == -1);
+        static const char rows[] = "\"hosts\":[{\"host\":\"r1\",\"reachable\":true,\"height\":3304010,\"reference_height\":3304011},"
+            "{\"host\":\"r2\",\"reachable\":true,\"height\":3304009},{\"host\":\"mac\",\"reachable\":false,\"height\":9999999}]";
+        char fleet[400];
+        const int64_t now = 1793250000;
+        snprintf(fleet, sizeof(fleet), "{%s,\"observed_at\":%lld}", rows, (long long)now - 10);
+        assert(zapp_fleet_height(fleet, now) == 3304011);
+        /* A snapshot the laptop host keeps serving after its refreshes fail is no evidence: old, missing or dated ahead. */
+        snprintf(fleet, sizeof(fleet), "{%s,\"observed_at\":%lld}", rows, (long long)now - ZAPP_FLEET_MAX_AGE_SECS);
+        assert(zapp_fleet_height(fleet, now) == 3304011);
+        snprintf(fleet, sizeof(fleet), "{%s,\"observed_at\":%lld}", rows, (long long)now - ZAPP_FLEET_MAX_AGE_SECS - 1);
+        assert(zapp_fleet_height(fleet, now) == -1);
+        snprintf(fleet, sizeof(fleet), "{%s}", rows);
+        assert(zapp_fleet_height(fleet, now) == -1);
+        snprintf(fleet, sizeof(fleet), "{%s,\"observed_at\":%lld}", rows, (long long)now + ZAPP_FLEET_FUTURE_SECS);
+        assert(zapp_fleet_height(fleet, now) == 3304011);
+        snprintf(fleet, sizeof(fleet), "{%s,\"observed_at\":%lld}", rows, (long long)now + ZAPP_FLEET_FUTURE_SECS + 1);
+        assert(zapp_fleet_height(fleet, now) == -1);
+        snprintf(fleet, sizeof(fleet), "{\"hosts\":[{\"host\":\"r1\",\"reachable\":false,\"height\":5}],\"observed_at\":%lld}", (long long)now);
+        assert(zapp_fleet_height(fleet, now) == -1);
+        assert(zapp_fleet_height("not json", now) == -1 && zapp_fleet_height(NULL, now) == -1 && zapp_fleet_height("{}", now) == -1);
+        /* The node line and the sentence under More agree inside the skew: two blocks short is in sync, three is behind. */
+        assert(!strncmp(zapp_node_line(true, true, false, false, 3304001, 3304003, 5, NULL, line, sizeof(line)), "Node in sync", 12));
+        assert(!strcmp(zapp_sync_line(true, true, 3304001, 3304003, 5, NULL, long_line, sizeof(long_line)),
+                       "Your node has every block its peers report."));
+        assert(!strcmp(zapp_sync_line(true, true, 3304001, 3304004, 5, NULL, long_line, sizeof(long_line)), "3 blocks to go."));
     }
 }
 int main(void)
@@ -310,7 +330,8 @@ int main(void)
     assert(!strcmp(zapp_sync_line(true, true, 3301900, 3301812, 4, NULL, line, sizeof(line)),
                    "Your node has every block its peers report."));
     assert(!strcmp(zapp_sync_line(true, true, 3300133, 3301537, 4, NULL, line, sizeof(line)), "1,404 blocks to go."));
-    assert(!strcmp(zapp_sync_line(true, true, 3301536, 3301537, 4, NULL, line, sizeof(line)), "1 block to go."));
+    assert(!strcmp(zapp_sync_line(true, true, 3301536, 3301537, 4, NULL, line, sizeof(line)),
+                   "Your node has every block its peers report."));
     puts("hosts tests passed");
     return 0;
 }

@@ -26,8 +26,11 @@ struct zapp_chain_evidence { int64_t fleet_height, quiet_secs; };
  * agrees. With fewer peers, or a tip silent for more than ZAPP_CHAIN_QUIET_SECS (about six block
  * times), it says what it knows and that it cannot confirm. */
 enum { ZAPP_CHAIN_SKEW = 2, ZAPP_CHAIN_MIN_PEERS = 2, ZAPP_CHAIN_QUIET_SECS = 900 };
-/* The highest height any reachable host of a fleet snapshot (the laptop host's JSON) reports; -1 for none. */
-int64_t zapp_fleet_height(const char *json);
+/* A fleet snapshot is evidence for this long after the host observed it, and for this long ahead of the phone clock. */
+enum { ZAPP_FLEET_MAX_AGE_SECS = 180, ZAPP_FLEET_FUTURE_SECS = 60 };
+/* The highest height any reachable host of a current fleet snapshot (the laptop host's JSON) reports; -1 for none
+ * or when the snapshot is missing its observed_at, old, or dated ahead. now_unix is the phone clock in seconds. */
+int64_t zapp_fleet_height(const char *json, int64_t now_unix);
 /* One line for the phone node on the main screen. stopping wins until the node exits; height,
  * target and peers are negative when unknown; target is the highest height reported by peers.
  * onion_ready adds the onion service state, shown only while the node responds. evidence may be NULL.
