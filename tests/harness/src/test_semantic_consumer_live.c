@@ -249,6 +249,24 @@ static int scl_check(struct scl_run *r, enum scx_variant v)
     return failures;
 }
 
+/* __attribute__((alias)) is an error on Darwin ("aliases are not supported
+ * on darwin": Mach-O has no weak/alias symbol form for it), so the F6 alias
+ * pair cannot be compiled there. Skip it explicitly; every other variant
+ * still runs, and on Linux nothing is skipped. */
+static bool scl_unsupported(enum scx_variant v)
+{
+#if defined(__APPLE__)
+    if (v == SCX_P_ALIAS || v == SCX_ALIAS) {
+        printf("semantic_consumer_live: SKIP %s (aliases are not supported "
+               "on darwin)\n", k_scx_edits[v].name);
+        return true;
+    }
+#else
+    (void)v;
+#endif
+    return false;
+}
+
 int test_semantic_consumer_live(void)
 {
     int failures = 0;
@@ -266,10 +284,11 @@ int test_semantic_consumer_live(void)
         (void)snprintf(r->root, sizeof(r->root), "%s/tree", r->out);
         ASSERT(scx_mkdir(r->root));
         for (int v = 0; v < SCX_VARIANT_COUNT; v++)
-            ASSERT(scl_produce(r, (enum scx_variant)v));
+            ASSERT(scl_unsupported((enum scx_variant)v) ||
+                   scl_produce(r, (enum scx_variant)v));
     } TEST_END
     for (int v = 1; failures == 0 && v < SCX_VARIANT_COUNT; v++)
-        if (!k_scx_edits[v].pre)
+        if (!k_scx_edits[v].pre && !scl_unsupported((enum scx_variant)v))
             failures += scl_check(r, (enum scx_variant)v);
     if (r != NULL)
         printf("semantic_consumer_live: %zu TU(s) predicted affected with an "
