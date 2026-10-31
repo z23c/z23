@@ -1784,6 +1784,90 @@ static int test_send_past_the_timer_still_persists(void)
     return failures;
 }
 
+/* A mint that passed its lock check holds w->cs while it adds a key. The
+ * test stands in for it: a lock lands, the seal has to wait for w->cs, and
+ * only then does the key arrive. The seal must still cover that key, the
+ * flush must refuse a key without a row, and the pool must read back after a
+ * restart. */
+static int test_lock_waits_for_a_mint_holding_the_wallet_mutex(void)
+{
+    int failures = 0;
+    struct wls_fixture f;
+    TEST("wallet_lock_shielded: a lock during a mint seals the key it adds") {
+        ASSERT(wls_provision(&f, true, true));
+        ASSERT(wls_boot(&f));
+        size_t keys = wls_used_keys(f.w);
+        struct wls_midlock m = { .f = &f };
+        zcl_mutex_lock(&f.w->cs);
+        ASSERT(pthread_create(&m.th, NULL, wls_lock_once, &m) == 0);
+        for (int i = 0; i < 2000 && !wls_locked(); i++) {
+            struct timespec nap = { .tv_sec = 0, .tv_nsec = 1000000L };
+            while (nanosleep(&nap, &nap) != 0) { /* retry */ }
+        }
+        struct timespec settle = { .tv_sec = 0, .tv_nsec = 100000000L };
+        while (nanosleep(&settle, &settle) != 0) { /* retry */ }
+        bool locked = wls_locked();
+        bool added = locked && wls_mint_unstored_transparent(&f);
+        zcl_mutex_unlock(&f.w->cs);
+        pthread_join(m.th, NULL);
+        ASSERT(locked && added);
+        ASSERT(wls_secrets_absent(f.w));
+        ASSERT(f.w->keystore.keys[f.w->keystore.num_keys - 1].sealed);
+        /* The refill that minted it: one pool entry, no stored row. */
+        struct key_id kid = f.w->keystore.keys[f.w->keystore.num_keys - 1].keyid;
+        f.w->key_pool[0].keyid = kid;
+        f.w->key_pool[0].persisted = false;
+        f.w->key_pool_size = 1;
+        ASSERT(!wallet_sqlite_flush_r(&f.ws, f.w).ok);
+        wallet_key_pool_discard_unpersisted(f.w);
+        ASSERT(wls_pool_clean_and_restartable(&f, keys));
+        wls_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_legacy_key_add_rechecks_the_lock_under_the_wallet_mutex(void)
+{
+    int failures = 0;
+    struct wls_fixture f;
+    TEST("wallet_lock_shielded: a legacy key added after a lock is refused") {
+        ASSERT(wls_provision(&f, true, false));
+        ASSERT(wls_boot(&f));
+        ASSERT(!wallet_has_hd(f.w));
+        size_t keys = wls_used_keys(f.w);
+        wallet_lock_lock(f.w);
+        struct privkey k;
+        privkey_init(&k);
+        memset(k.vch, 0x6e, 32);
+        k.vch[3] = 0x17;
+        k.fValid = true;
+        k.fCompressed = true;
+        ASSERT(!wallet_add_generated_key(f.w, &k));
+        ASSERT(wls_used_keys(f.w) == keys);
+        ASSERT(wls_secrets_absent(f.w));
+        wls_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_locked_flush_refuses_an_unsealed_key_without_a_row(void)
+{
+    int failures = 0;
+    struct wls_fixture f;
+    TEST("wallet_lock_shielded: a locked flush refuses an unsealed key without a row") {
+        ASSERT(wls_provision(&f, true, true));
+        ASSERT(wls_boot(&f));
+        wallet_lock_lock(f.w);
+        ASSERT(wls_mint_unstored_transparent(&f));
+        ASSERT(!wallet_sqlite_flush_r(&f.ws, f.w).ok);
+        wls_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_wallet_lock_shielded(void);
 int test_wallet_lock_shielded(void)
 {
@@ -1826,6 +1910,9 @@ int test_wallet_lock_shielded(void)
     failures += test_import_from_reloads_under_the_transition_mutex();
     failures += test_wrong_passphrase_does_not_hold_off_a_lock();
     failures += test_locked_boot_is_not_reported_as_plaintext();
+    failures += test_lock_waits_for_a_mint_holding_the_wallet_mutex();
+    failures += test_legacy_key_add_rechecks_the_lock_under_the_wallet_mutex();
+    failures += test_locked_flush_refuses_an_unsealed_key_without_a_row();
     wallet_lock_reset_for_test();
     return failures;
 }

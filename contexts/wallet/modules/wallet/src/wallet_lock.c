@@ -86,12 +86,20 @@ static bool wallet_lock_apply_locked(void)
  * keystore and wallet mutexes, and persistence code holding those calls back
  * into this module. An encrypted wallet keeps only viewing material; a
  * plaintext wallet has no passphrase to restore from, so its Sapling keys
- * stay as they were. */
+ * stay as they were.
+ *
+ * The transparent seal runs under w->cs, the mutex a key mint holds from its
+ * lock check through keystore_add_key. A mint therefore either finishes
+ * before the seal and is sealed by it, or starts after the lock was published
+ * and refuses; it can never add a key the seal has already passed. The order
+ * is wallet -> keystore, as in every mint and flush. */
 static void wallet_lock_wipe_memory(struct wallet *w, bool encrypted)
 {
     if (!w)
         return;
+    zcl_mutex_lock(&w->cs);
     keystore_seal_private_keys(&w->keystore);
+    zcl_mutex_unlock(&w->cs);
     if (!encrypted)
         return;
     sapling_keystore_wipe_secrets(&w->sapling_keys);

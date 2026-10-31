@@ -193,6 +193,10 @@ void wallet_verify_utxos(struct wallet *w, struct coins_view_cache *coins_tip);
 void wallet_free(struct wallet *w);
 
 bool wallet_generate_new_key(struct wallet *w, struct pubkey *pk_out);
+/* Add a freshly generated legacy key under w->cs. Refuses once the wallet
+ * is locked, so a lock that lands after the caller's own check cannot leave
+ * an unsealed key behind. */
+bool wallet_add_generated_key(struct wallet *w, const struct privkey *key);
 bool wallet_get_new_address(struct wallet *w, char *addr_out, size_t addr_size);
 /* Same operation, also returning the exact generated/consumed key id. The
  * token lets a durability failure remove its own HD key rather than guessing

@@ -1047,19 +1047,23 @@ bool wallet_sqlite_read_watch_only(struct wallet_sqlite *ws, struct wallet *w)
 
 /* ── Flush all wallet state to SQLite ──────────────────────────── */
 
-/* A full flush of a sealed wallet writes nothing secret, but every sealed
- * entry must already have its row. An entry minted in RAM and sealed before
- * its first flush has a public identifier and no secret anywhere; reporting
- * the flush clean would mark it persisted, and later change or receipts would
- * go to a key that can never sign. The caller holds the keystore mutexes and
- * runs this inside the write transaction, after the last point a lock could
- * land unseen. */
-static bool wsql_sealed_entries_stored(struct wallet_sqlite *ws,
-                                       const struct wallet *w)
+/* A full flush that cannot write secrets must find a row for every transparent
+ * key and every wiped Sapling entry. An entry minted in RAM and sealed before
+ * its first flush has a public identifier and no secret anywhere; a
+ * transparent key still holding its secret has nothing stored either.
+ * Reporting the flush clean would mark it persisted, and a restart would find
+ * a pool entry without its key. Only an unsealed transparent key that this
+ * flush writes itself (writes_secrets) needs no row yet. A Sapling mint
+ * refuses while locked, so no unwiped Sapling entry exists in that case. The caller
+ * holds the keystore mutexes and runs this inside the write transaction,
+ * after the last point a lock could land unseen. */
+static bool wsql_used_entries_stored(struct wallet_sqlite *ws,
+                                     const struct wallet *w,
+                                     bool writes_secrets)
 {
     for (size_t i = 0; i < w->keystore.num_keys; i++) {
         const struct key_entry *e = &w->keystore.keys[i];
-        if (e->used && e->sealed &&
+        if (e->used && !(writes_secrets && !e->sealed) &&
             !wsql_wallet_key_row_exists(ws, &e->keyid))
             return false;
     }
@@ -1219,7 +1223,7 @@ static struct zcl_result wallet_sqlite_flush_scope_r(
     int n_script_fail = 0;
     int n_scanh_fail = 0;
 
-    if (held && !wsql_sealed_entries_stored(ws, w)) {
+    if (held && !wsql_used_entries_stored(ws, w, full_state)) {
         n_key_fail++;
         first_fail = ZCL_ERR(WSQL_WRITE_FAIL,
             "flush: a sealed key has no stored row; refusing to report it "

@@ -215,6 +215,21 @@ bool wallet_mint_next_hd_key(struct wallet *w, uint32_t change,
     return ok;
 }
 
+bool wallet_add_generated_key(struct wallet *w, const struct privkey *key)
+{
+    zcl_mutex_lock(&w->cs);
+    /* Checked again under w->cs: the lock seals the keystore under the same
+     * mutex after publishing the locked state, so a key added past this check
+     * is sealed by that seal and never outlives it unsealed. */
+    if (wallet_cannot_derive(w)) {
+        zcl_mutex_unlock(&w->cs);
+        LOG_FAIL("wallet", "add_generated_key: refused, wallet is locked");
+    }
+    bool ok = keystore_add_key(&w->keystore, key);
+    zcl_mutex_unlock(&w->cs);
+    return ok;
+}
+
 bool wallet_generate_new_key(struct wallet *w, struct pubkey *pk_out)
 {
     /* A locked wallet has no seed in memory and must not mint an unrelated
@@ -240,9 +255,7 @@ bool wallet_generate_new_key(struct wallet *w, struct pubkey *pk_out)
         return false;
     }
 
-    zcl_mutex_lock(&w->cs);
-    bool ok = keystore_add_key(&w->keystore, &key);
-    zcl_mutex_unlock(&w->cs);
+    bool ok = wallet_add_generated_key(w, &key);
 
     memory_cleanse(key.vch, 32);
 
