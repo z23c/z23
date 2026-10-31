@@ -736,6 +736,17 @@ enum fb_body_file_result {
     FB_BODY_FILE_NOT_REGULAR,
 };
 
+/* Classify a failed open of the body path: a UNIX socket opens with ENXIO
+ * before fstat (Darwin: EOPNOTSUPP) and is not a regular file. */
+static enum fb_body_file_result fb_open_failure(int err)
+{
+    bool not_regular = err == ENXIO;
+#if defined(__APPLE__)
+    not_regular = not_regular || err == EOPNOTSUPP;
+#endif
+    return not_regular ? FB_BODY_FILE_NOT_REGULAR : FB_BODY_FILE_INVALID;
+}
+
 /* Reads the body through the fd that fstat checked, so the type test and the
  * read see the same object. O_NONBLOCK stops open() from waiting for a FIFO
  * writer; it does not change reads from a regular file. */
@@ -744,10 +755,11 @@ static enum fb_body_file_result fb_read_body_file(const char *path, char **body,
 {
     *body = NULL;
     *len = 0;
-    /* A UNIX socket opens with ENXIO, before fstat: it is not a regular file. */
+    /* A UNIX socket opens with ENXIO, before fstat: it is not a regular file.
+     * Darwin refuses the same open with EOPNOTSUPP. */
     int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0)
-        return errno == ENXIO ? FB_BODY_FILE_NOT_REGULAR : FB_BODY_FILE_INVALID;
+        return fb_open_failure(errno);
     struct stat st;
     if (fstat(fd, &st) != 0) {
         close(fd);
