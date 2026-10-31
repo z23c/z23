@@ -700,9 +700,11 @@ static int t_undeclared_import_refused_before_map(void)
         /* The loader confines images to /tmp or a build/hotswap dir, and the
          * fixture lint keeps new tests off bare /tmp: mint beside the images. */
         char dir[] = "build/hotswap/hs_import_policy_XXXXXX";
+        char abs_dir[PATH_MAX] = {0};
         char bad[PATH_MAX] = {0};
         bool have_dir = mkdtemp(dir) != NULL;
-        bool wrote = have_dir && rb_write_bad_image(dir, bad);
+        bool wrote = have_dir && realpath(dir, abs_dir) != NULL &&
+                     rb_write_bad_image(abs_dir, bad);
 
         struct hotswap_activate_report refused = {0}, ok = {0};
         uint32_t gen_before = zcl_command_registry_active_generation();
