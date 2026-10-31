@@ -154,13 +154,14 @@ static bool vi_decode_header(struct byte_stream *s, struct vi_payload *p)
     return ok;
 }
 
-[[gnu::noinline]] static bool vi_decode_effect(struct byte_stream *s, struct vi_effect *e)
+/* No terminator write: vi_decode zeroes the payload first and n stays within
+ * VI_ADDR_MAX, so to[n] is already NUL. */
+static bool vi_decode_effect(struct byte_stream *s, struct vi_effect *e)
 {
     uint8_t n = 0;
     bool ok = stream_read_u8(s, &n) && n > 0 && n <= VI_ADDR_MAX &&
          stream_read(s, e->to, n) &&
          stream_read_i64_le(s, &e->amount);
-    e->to[n] = '\0';
     return ok;
 }
 
