@@ -339,21 +339,25 @@ static bool intent_pairing(JNIEnv *env, jobject activity, char *out, size_t cap)
     if (value) (*env)->CallVoidMethod(env, intent, remove, key);
     (void)clean(env); (*env)->PopLocalFrame(env, NULL); return ok;
 }
-/* Opens the clips screen named by the org.z23.clips launch extra (record or watch) and removes the
- * extra so that it is read once. */
+/* Reads and removes the org.z23.clips launch extra so that it is read once; false when it is absent. */
+static bool take_clips_extra(JNIEnv *env, jobject intent, char *out, size_t cap)
+{
+    jclass intent_cls = clean(env) && intent ? (*env)->GetObjectClass(env, intent) : NULL;
+    jmethodID extra = intent_cls ? (*env)->GetMethodID(env, intent_cls, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;") : NULL;
+    jmethodID remove = intent_cls ? (*env)->GetMethodID(env, intent_cls, "removeExtra", "(Ljava/lang/String;)V") : NULL;
+    jstring key = clean(env) ? (*env)->NewStringUTF(env, "org.z23.clips") : NULL;
+    jstring value = clean(env) && extra && remove && key ? (*env)->CallObjectMethod(env, intent, extra, key) : NULL;
+    bool ok = copy_utf(env, value, out, cap);
+    if (value) (*env)->CallVoidMethod(env, intent, remove, key);
+    return ok;
+}
+/* Opens the clips screen named by the org.z23.clips launch extra: record or watch. */
 static void intent_clips(JNIEnv *env, jobject activity, const char *files)
 {
     char word[16];
     if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)clean(env); return; }
-    jobject intent = launch_intent(env, activity);
-    jclass intent_cls = clean(env) && intent ? (*env)->GetObjectClass(env, intent) : NULL;
-    jmethodID extra = intent_cls ? (*env)->GetMethodID(env, intent_cls, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;") : NULL;
-    jstring key = clean(env) ? (*env)->NewStringUTF(env, "org.z23.clips") : NULL;
-    jmethodID remove = intent_cls ? (*env)->GetMethodID(env, intent_cls, "removeExtra", "(Ljava/lang/String;)V") : NULL;
-    jstring value = clean(env) && extra && remove && key ? (*env)->CallObjectMethod(env, intent, extra, key) : NULL;
-    if (copy_utf(env, value, word, sizeof(word)) && (!strcmp(word, "record") || !strcmp(word, "watch")))
+    if (take_clips_extra(env, launch_intent(env, activity), word, sizeof(word)) && (!strcmp(word, "record") || !strcmp(word, "watch")))
         (void)zapp_clip_screen_open(env, activity, files, strcmp(word, "record") ? ZAPP_CLIP_WATCH : ZAPP_CLIP_RECORD);
-    if (value) (*env)->CallVoidMethod(env, intent, remove, key);
     (void)clean(env); (*env)->PopLocalFrame(env, NULL);
 }
 static bool release_surface(JNIEnv *env, jobject activity)
