@@ -212,34 +212,45 @@ which rows are which (§8).
 `core.wallet.shielded.send` requires an `idempotency_key` (1 to 128 characters
 of letters, digits, `.`, `_`, `:`, `-`) on the plan and on the commit. The plan
 quotes the wallet fee and binds wallet scope, `from`, `to`, amount, fee, memo
-and key into `plan_token` and `commit_input`. The commit refuses with
-`FEE_CHANGED` or `PLAN_TOKEN_MISMATCH` before any RPC when a bound value differs,
-and `z_sendmany` re-checks the fee on the node before it builds.
+and key into `plan_token`; `commit_input` carries the token and the commit
+refuses without it (`PLAN_REQUIRED`) or with a different request
+(`PLAN_TOKEN_MISMATCH`) before any RPC. The commit sends the planned fee to the
+node; the node reads the send record first and only then compares the fee with
+the wallet fee (`FEE_CHANGED`, key free).
 
 The node records the key in `node.db` (`wallet_send_once`) before it builds
-anything, advances the row to the finished txid inside
-`wallet_commit_from_context` before the wallet admits the transaction, and
-marks it committed afterwards. The row holds two SHA3-256 values (the key hash
-and a request digest bound to the key), a state, the txid and two timestamps; it
-never holds the key, an address, an amount or a memo. A repeat of a key is
-answered from the row and never builds or broadcasts:
+anything. The built txid is written with `synchronous=FULL` (the level found is
+restored afterwards) before the wallet admits the transaction, so a relayed
+transaction always has a durable row. The row is marked committed only after the
+send returned. It holds two SHA3-256 values (the key hash and a request digest
+bound to the key), a state, the txid and two timestamps; never the key, an
+address, an amount or a memo. A repeat of a key reads the row first and never
+builds or broadcasts:
 
 | Row | Repeat returns |
 |---|---|
-| committed | the earlier txid, `replayed=true` |
-| built and the wallet holds the txid | the earlier txid, `replayed=true` |
+| committed and the wallet holds the txid | the earlier txid, `replayed=true` |
+| committed and the wallet lost the txid | `SEND_OUTCOME_UNKNOWN` with the txid |
+| built (wallet holds the txid or not) | `SEND_OUTCOME_UNKNOWN` with the txid |
+| started only (no txid was ever durable, so nothing was admitted) | the row is freed and the send runs once |
 | a run of this key is executing | `SEND_IN_PROGRESS` (transient) |
-| started or built, nothing running, wallet lacks the txid (a crash) | `SEND_OUTCOME_UNKNOWN`, nothing is sent |
-| any state, different request under the same key | `IDEMPOTENCY_KEY_REUSED` |
+| different request under the same key | `IDEMPOTENCY_KEY_REUSED` |
 
-A run that fails before anything was built, or whose transaction left the
-wallet again, releases its key so the same key can be retried. After
+A built row is never answered as committed: the wallet holding a transaction
+does not prove it was relayed. Rebroadcasting held, unrelayed transactions at
+boot is a separate follow-up. A failed run frees its key
+(`SEND_REFUSED_KEY_RELEASED`) only when the wallet never admitted the
+transaction; once admission succeeded the row stays whatever fails afterwards,
+and the caller sees a plain error then `SEND_OUTCOME_UNKNOWN`. A record that
+cannot be read or written is a plain error, never a release. After
 `SEND_OUTCOME_UNKNOWN` the caller must not resend under the same key and checks
-the wallet transaction list before paying again under a new key. One keyed send
-can admit exactly one transaction.
+the wallet transaction list before paying under a new key. One keyed send can
+admit exactly one transaction. A node that predates send-once ignores the key
+and returns a bare txid, which the handler reports as sent.
 
 Retention: committed keys 90 days, keys without a known outcome 365 days; at
 100000 rows a new keyed send is refused rather than an older key forgotten.
+Retention uses wall-clock time: a forward clock jump ages rows early.
 Unkeyed `z_sendmany` (JSON-RPC, in-process callers) is unchanged and unrecorded.
 
 The spending paths also use two independent runtime gates:

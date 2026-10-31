@@ -188,7 +188,12 @@ struct zcl_result wallet_commit_from_context(
     struct zcl_result recorded = wallet_send_once_before_commit(&wtx->tx.hash);
     if (!recorded.ok)
         return recorded;
-    return wallet_commit_transaction(ctx->wallet, wtx, &admission);
+    struct zcl_result admitted =
+        wallet_commit_transaction(ctx->wallet, wtx, &admission);
+    /* Code -3: the pool accepted the transaction before the wallet record
+     * failed, so it was briefly visible to peers. */
+    wallet_send_once_after_commit(admitted.ok || admitted.code == -3);
+    return admitted;
 }
 
 struct zcl_result wallet_reaccept_from_context(

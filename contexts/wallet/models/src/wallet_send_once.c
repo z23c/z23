@@ -122,3 +122,19 @@ bool db_wallet_send_once_prune(struct node_db *ndb, int64_t now)
         AR_BIND_INT(s, 1, now - WALLET_SEND_ONCE_COMMITTED_RETAIN_SEC);
         AR_BIND_INT(s, 2, now - WALLET_SEND_ONCE_UNRESOLVED_RETAIN_SEC));
 }
+
+int db_wallet_send_once_sync_level(struct node_db *ndb)
+{
+    if (!ndb || !ndb->open)
+        return -1;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(ndb->db, "PRAGMA synchronous", -1, &s, NULL) !=
+        SQLITE_OK) {
+        LOG_ERROR("wallet_send_once", "sync level: %s",
+                  sqlite3_errmsg(ndb->db));
+        return -1;
+    }
+    int level = sqlite3_step(s) == SQLITE_ROW ? sqlite3_column_int(s, 0) : -1;
+    sqlite3_finalize(s);
+    return level;
+}

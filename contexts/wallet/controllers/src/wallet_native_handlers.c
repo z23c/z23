@@ -780,9 +780,11 @@ static bool wnh_shielded_send_inputs(struct zcl_command_reply *reply,
     return wnh_shielded_memos_valid(reply, request, &in->memo, &in->memo_hex);
 }
 
-/* One document binds every field executed by either stage. */
+/* One document binds every field executed by either stage. The plan token is
+ * computed over the document without it; the commit input carries both. */
 static bool wnh_shielded_commit_input(const struct wnh_shielded_send_in *in,
-                                      char *commit, size_t commit_size)
+                                      char *commit, size_t commit_size,
+                                      const char *token)
 {
     struct json_value ci;
     json_init(&ci);
@@ -798,6 +800,8 @@ static bool wnh_shielded_commit_input(const struct wnh_shielded_send_in *in,
         (void)json_push_kv_str(&ci, "memo", in->memo);
     (void)json_push_kv_str(&ci, "idempotency_key", in->idem);
     (void)json_push_kv_bool(&ci, "confirm", true);
+    if (token)
+        (void)json_push_kv_str(&ci, "plan_token", token);
     bool encoded = wnh_commit_input(&ci, commit, commit_size);
     json_free(&ci);
     return encoded;
@@ -883,12 +887,18 @@ static bool wnh_shielded_send_state_ok(struct zcl_command_reply *reply,
         wnh_fail(reply, ZCL_COMMAND_EXIT_TRANSIENT, "SEND_IN_PROGRESS",
                  "a send with this idempotency_key is still running; repeat "
                  "the same request later to read its result", "z_sendmany");
+    } else if (state && strcmp(state, WALLET_SEND_ONCE_STATE_FEE_CHANGED) == 0) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "FEE_CHANGED",
+                 "the wallet fee changed since the plan; nothing was sent "
+                 "and the idempotency_key is free to retry. Plan the send "
+                 "again", "fee_zat");
     } else if (state && strcmp(state, "outcome_unknown") == 0) {
+        const char *tx = json_get_str(json_get(body, "txid"));
         wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "SEND_OUTCOME_UNKNOWN",
-                 "a send with this idempotency_key started but its result was "
-                 "not recorded; nothing was sent again. Check the wallet "
-                 "transaction list before making a new payment with a new key",
-                 "z_sendmany");
+                 "a send with this idempotency_key may have been made but is "
+                 "not confirmed; nothing was sent again. Check the wallet "
+                 "transaction list before making a new payment with a new "
+                 "key", tx && tx[0] ? tx : "z_sendmany");
     } else if (state && strcmp(state, "key_conflict") == 0) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "IDEMPOTENCY_KEY_REUSED",
                  "this idempotency_key was already used for a different "
@@ -911,8 +921,14 @@ static bool wnh_shielded_send_committed(struct zcl_command_reply *reply,
                                         const char *token)
 {
     const char *txid = json_get_str(json_get(body, "txid"));
-    if (!wnh_shielded_send_state_ok(reply, body))
+    const char *bare = body && body->type == JSON_STR ? json_get_str(body) : NULL;
+    /* A node that predates send-once ignores the key, sends, and returns the
+     * bare txid: that is a sent transaction, never a failure. */
+    if (bare && strlen(bare) == 64 && IsHex(bare)) {
+        txid = bare;
+    } else if (!wnh_shielded_send_state_ok(reply, body)) {
         return false; // raw-return-ok:state_ok logged the refusal
+    }
     if (!txid || strlen(txid) != 64 || !IsHex(txid)) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "SHIELDED_SEND_FAILED",
                  "z_sendmany did not return a transaction result",
@@ -936,34 +952,27 @@ static bool wnh_shielded_send_committed(struct zcl_command_reply *reply,
 }
 
 /* The plan reads the wallet fee and carries it in the commit input. The
- * commit re-reads it and refuses, before any RPC that could build, when it
- * differs from the quoted fee. */
+ * commit sends the planned fee to the node, which reads the send record first
+ * and only then compares it with the wallet fee (answer fee_changed). */
 static bool wnh_shielded_fee_bound(struct zcl_command_reply *reply,
                                    struct wnh_shielded_send_in *in,
                                    bool confirm)
 {
-    CAmount current = 0;
-    if (!wnh_shielded_fee_zat(reply, &current)) {
-        LOG_WARN(WNH_TAG, "shielded send: wallet fee unavailable");
-        return false;
-    }
-    if (!confirm) {
-        in->fee_zats = current;
-        in->has_fee = true;
-        return true;
-    }
-    if (!in->has_fee) {
+    if (confirm) {
+        if (in->has_fee)
+            return true;
         wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "PLAN_REQUIRED",
                  "commit with the commit_input from the plan; fee_zat is "
                  "missing", "fee_zat");
         return false;
     }
-    if (in->fee_zats != current) {
-        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "FEE_CHANGED",
-                 "the wallet fee changed since the plan; nothing was sent. "
-                 "Plan the send again", "fee_zat");
+    CAmount current = 0;
+    if (!wnh_shielded_fee_zat(reply, &current)) {
+        LOG_WARN(WNH_TAG, "shielded send: wallet fee unavailable");
         return false;
     }
+    in->fee_zats = current;
+    in->has_fee = true;
     return true;
 }
 
@@ -977,7 +986,7 @@ void zcl_native_handle_wallet_shielded_send(
     if (!wnh_shielded_fee_bound(reply, &in, confirm))
         return;
     char commit[2048];
-    if (!wnh_shielded_commit_input(&in, commit, sizeof(commit))) {
+    if (!wnh_shielded_commit_input(&in, commit, sizeof(commit), NULL)) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "PLAN_TOO_LARGE",
                  "exact shielded commit input exceeds its response budget",
                  "memo");
@@ -986,12 +995,25 @@ void zcl_native_handle_wallet_shielded_send(
     char token[17];
     wnh_plan_token(token, "shielded-send", commit, "");
     if (!confirm) {
+    char signed_commit[2304];
+        if (!wnh_shielded_commit_input(&in, signed_commit,
+                                       sizeof(signed_commit), token)) {
+            wnh_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "PLAN_TOO_LARGE",
+                     "exact shielded commit input exceeds its response budget",
+                     "memo");
+            return;
+        }
         wnh_shielded_send_plan(reply, request->spec->path, &in, token,
-                               commit);
+                               signed_commit);
         return;
     }
-    if (in.plan_token && in.plan_token[0] &&
-        strcmp(in.plan_token, token) != 0) {
+    if (!in.plan_token || !in.plan_token[0]) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "PLAN_REQUIRED",
+                 "commit with the commit_input from the plan; plan_token is "
+                 "missing", "plan_token");
+        return;
+    }
+    if (strcmp(in.plan_token, token) != 0) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "PLAN_TOKEN_MISMATCH",
                  "the request differs from the plan it names; nothing was "
                  "sent", "plan_token");

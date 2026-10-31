@@ -39,7 +39,8 @@
 struct wso_scope {
     struct node_db *ndb;
     uint8_t key_hash[32];
-    bool built;
+    bool built;      /* txid made durable */
+    bool admitted;   /* the wallet admitted the transaction: never release */
     struct uint256 txid;
 };
 
@@ -63,6 +64,7 @@ struct wso_op {
     const uint8_t *txid;
     enum wallet_send_once_state state;
     int64_t now;
+    bool durable;   /* fsync the write-ahead log before the commit returns */
     bool ok;
 };
 
@@ -72,6 +74,18 @@ static bool wso_op_run(struct node_db *ndb, void *opaque)
     op->ok = false;
     if (ndb->sync_in_batch && !node_db_sync_flush(ndb)) {
         LOG_ERROR(WSO_TAG, "pending node.db batch could not be committed");
+        return true;
+    }
+    int prev_sync = -1;
+    if (op->durable) {
+        /* Restore the level found (turbo import runs with OFF), not a constant. */
+        prev_sync = db_wallet_send_once_sync_level(ndb);
+        if (prev_sync < 0)
+            LOG_ERROR(WSO_TAG, "cannot read node.db synchronous level");
+    }
+    if (op->durable && (prev_sync < 0 ||
+                        !node_db_exec(ndb, "PRAGMA synchronous=FULL"))) {
+        LOG_ERROR(WSO_TAG, "cannot raise node.db to synchronous=FULL");
         return true;
     }
     switch (op->kind) {
@@ -88,6 +102,13 @@ static bool wso_op_run(struct node_db *ndb, void *opaque)
     case WSO_OP_PRUNE:
         op->ok = db_wallet_send_once_prune(ndb, op->now);
         break;
+    }
+    if (op->durable) {
+        char restore[40];
+        (void)snprintf(restore, sizeof(restore), "PRAGMA synchronous=%d",
+                       prev_sync);
+        if (!node_db_exec(ndb, restore))
+            LOG_ERROR(WSO_TAG, "cannot restore node.db synchronous level");
     }
     return true;
 }
@@ -115,10 +136,11 @@ static bool wso_insert(struct node_db *ndb,
 
 static bool wso_advance(struct node_db *ndb, const uint8_t kh[32],
                         enum wallet_send_once_state state, const uint8_t *txid,
-                        int64_t now)
+                        int64_t now, bool durable)
 {
     struct wso_op op = { .kind = WSO_OP_ADVANCE, .key_hash = kh,
-                         .state = state, .txid = txid, .now = now };
+                         .state = state, .txid = txid, .now = now,
+                         .durable = durable };
     return wso_write(ndb, &op);
 }
 
@@ -236,48 +258,87 @@ static void wso_answer(struct json_value *result, const char *state,
     (void)json_push_kv_bool(result, "replayed", replayed);
 }
 
-static void wso_released(struct json_value *result, const char *message)
+static void wso_released(struct json_value *result, const char *state,
+                         const char *message)
 {
     json_set_object(result);
-    (void)json_push_kv_str(result, "state", WALLET_SEND_ONCE_STATE_RELEASED);
+    (void)json_push_kv_str(result, "state", state);
     (void)json_push_kv_str(result, "message", message);
 }
 
-enum wso_begin { WSO_RUN, WSO_ANSWERED };
+static bool wso_fee_ok(const struct json_value *params,
+                       const struct wallet_rpc_context *ctx)
+{
+    const struct json_value *f = json_at(params, WALLET_SEND_ONCE_FEE_PARAM);
+    if (!f || json_is_null(f))
+        return true;
+    if (!ctx->wallet || parse_amount(f) != ctx->wallet->default_fee) {
+        LOG_WARN(WSO_TAG, "wallet fee differs from the planned fee");
+        return false; // raw-return-ok:logged; caller answers fee_changed
+    }
+    return true;
+}
 
-/* Answer a key that already has a row. */
-static void wso_known(struct wallet_rpc_context *ctx,
-                      const struct wallet_send_once_row *row,
-                      const uint8_t digest[32], int64_t now,
-                      struct json_value *result)
+enum wso_begin { WSO_RUN, WSO_ANSWERED, WSO_ERROR, WSO_RERUN };
+
+/* Answer a key that already has a row. A committed row replays only while the
+ * wallet still holds its transaction; a built row never replays, because the
+ * wallet holding a transaction does not prove it was relayed. */
+static enum wso_begin wso_known(struct wallet_rpc_context *ctx,
+                                const struct wallet_send_once_row *row,
+                                const uint8_t digest[32],
+                                struct json_value *result)
 {
     if (memcmp(row->digest, digest, 32) != 0) {
         LOG_WARN(WSO_TAG, "key reused with different parameters");
         wso_answer(result, "key_conflict", NULL, true);
-        return;
+        return WSO_ANSWERED;
     }
-    if (row->state == WALLET_SEND_ONCE_BUILT) {
-        struct uint256 id;
-        memcpy(id.data, row->txid, 32);
-        if (wso_wallet_has(ctx, &id)) {
-            (void)wso_advance(ctx->node_db, row->key_hash,
-                WALLET_SEND_ONCE_COMMITTED, row->txid, now);
-            wso_answer(result, "committed", row->txid, true);
-            return;
-        }
-    }
-    if (row->state == WALLET_SEND_ONCE_COMMITTED) {
+    if (row->state == WALLET_SEND_ONCE_STARTED)
+        return WSO_RERUN; /* no txid was ever made durable: never admitted */
+    struct uint256 id;
+    memcpy(id.data, row->txid, 32);
+    if (row->state == WALLET_SEND_ONCE_COMMITTED && wso_wallet_has(ctx, &id)) {
         wso_answer(result, "committed", row->txid, true);
-        return;
+        return WSO_ANSWERED;
     }
-    LOG_WARN(WSO_TAG, "repeat of a key with no known outcome");
-    wso_answer(result, "outcome_unknown", row->has_txid ? row->txid : NULL,
-               true);
+    LOG_WARN(WSO_TAG, "repeat of a key with no confirmed send");
+    wso_answer(result, "outcome_unknown", row->txid, true);
+    return WSO_ANSWERED;
 }
 
+static enum wso_begin wso_error(struct json_value *result, const char *msg)
+{
+    json_set_str(result, msg);
+    return WSO_ERROR;
+}
+
+static enum wso_begin wso_insert_new(struct wallet_rpc_context *ctx,
+                                     const uint8_t kh[32],
+                                     const uint8_t digest[32], int64_t now,
+                                     struct json_value *result)
+{
+    struct wallet_send_once_row row;
+    memset(&row, 0, sizeof(row));
+    memcpy(row.key_hash, kh, 32);
+    memcpy(row.digest, digest, 32);
+    row.state = WALLET_SEND_ONCE_STARTED;
+    row.created_at = row.updated_at = now;
+    if (wso_insert(ctx->node_db, &row))
+        return WSO_RUN;
+    /* A failed insert may mean the row exists: read it. If it still cannot be
+     * read, say so plainly; never claim the key is free. */
+    if (db_wallet_send_once_find(ctx->node_db, kh, &row))
+        return wso_known(ctx, &row, digest, result);
+    return wso_error(result, "Send record unreadable; nothing was changed "
+                             "but the outcome of an earlier send is unknown");
+}
+
+/* The row is read first. Only a key with no row is checked against the fee. */
 static enum wso_begin wso_begin_send(struct wallet_rpc_context *ctx,
                                      const uint8_t kh[32],
                                      const uint8_t digest[32], int64_t now,
+                                     const struct json_value *params,
                                      struct json_value *result)
 {
     if (wso_is_active(kh)) {
@@ -289,30 +350,35 @@ static enum wso_begin wso_begin_send(struct wallet_rpc_context *ctx,
         g_last_prune = now;
     }
     struct wallet_send_once_row row;
+    enum wso_begin b;
     if (db_wallet_send_once_find(ctx->node_db, kh, &row)) {
-        wso_known(ctx, &row, digest, now, result);
-        return WSO_ANSWERED;
+        b = wso_known(ctx, &row, digest, result);
+        if (b != WSO_RERUN)
+            return b;
+        if (!wso_release(ctx->node_db, kh))
+            return wso_error(result, "Send record cannot be released");
     }
-    if (db_wallet_send_once_count(ctx->node_db) >= WALLET_SEND_ONCE_MAX_ROWS ||
-        g_active_n >= WSO_ACTIVE_MAX) {
-        wso_released(result, "Too many keyed sends on record");
-        return WSO_ANSWERED;
-    }
-    memset(&row, 0, sizeof(row));
-    memcpy(row.key_hash, kh, 32);
-    memcpy(row.digest, digest, 32);
-    row.state = WALLET_SEND_ONCE_STARTED;
-    row.created_at = row.updated_at = now;
-    if (!wso_insert(ctx->node_db, &row)) {
-        wso_released(result, "Cannot record the send key");
+    if (g_active_n >= WSO_ACTIVE_MAX ||
+        db_wallet_send_once_count(ctx->node_db) >= WALLET_SEND_ONCE_MAX_ROWS)
+        return wso_error(result, "Too many keyed sends on record; send refused");
+    b = wso_insert_new(ctx, kh, digest, now, result);
+    if (b != WSO_RUN)
+        return b == WSO_RERUN ? wso_error(result, "Send record is inconsistent")
+                              : b;
+    if (!wso_fee_ok(params, ctx)) {
+        if (!wso_release(ctx->node_db, kh))
+            return wso_error(result, "Send record cannot be released");
+        wso_released(result, WALLET_SEND_ONCE_STATE_FEE_CHANGED,
+                     "Fee changed since the plan; plan the send again");
         return WSO_ANSWERED;
     }
     memcpy(g_active[g_active_n++], kh, 32);
     return WSO_RUN;
 }
 
-/* Settle the row after the send ran. Success commits it; a failure keeps the
- * key only when the transaction may exist. */
+/* Settle the row after the send ran. Success commits it. A failure frees the
+ * key only when the wallet never admitted the transaction: once admitted the
+ * transaction may be in the mempool or relayed whatever happens next. */
 static bool wso_finish(struct wallet_rpc_context *ctx, struct wso_scope *sc,
                        bool ok, const struct json_value *inner,
                        struct json_value *result)
@@ -329,32 +395,19 @@ static bool wso_finish(struct wallet_rpc_context *ctx, struct wso_scope *sc,
             return true;
         }
         (void)wso_advance(ctx->node_db, sc->key_hash,
-            WALLET_SEND_ONCE_COMMITTED, sc->txid.data, GetTime());
+                          WALLET_SEND_ONCE_COMMITTED, sc->txid.data, GetTime(),
+                          false);
         wso_answer(result, "committed", sc->txid.data, false);
         return true;
     }
     const char *why = json_get_str(inner);
-    if ((!sc->built || !wso_wallet_has(ctx, &sc->txid)) &&
-        wso_release(ctx->node_db, sc->key_hash)) {
-        wso_released(result, why ? why : "Shielded send failed");
+    if (!sc->admitted && wso_release(ctx->node_db, sc->key_hash)) {
+        wso_released(result, WALLET_SEND_ONCE_STATE_RELEASED,
+                     why ? why : "Shielded send failed");
         return true;
     }
     json_set_str(result, why ? why : "Shielded send failed");
     return false;
-}
-
-static bool wso_check_fee(const struct json_value *params,
-                          struct wallet_rpc_context *ctx,
-                          struct json_value *result)
-{
-    const struct json_value *f = json_at(params, WALLET_SEND_ONCE_FEE_PARAM);
-    if (!f || json_is_null(f))
-        return true;
-    if (!ctx->wallet || parse_amount(f) != ctx->wallet->default_fee) {
-        wso_released(result, "Fee changed since the plan; plan the send again");
-        LOG_FAIL(WSO_TAG, "wallet fee differs from the planned fee");
-    }
-    return true;
 }
 
 bool wallet_send_once_dispatch(const struct json_value *params, bool help,
@@ -372,20 +425,19 @@ bool wallet_send_once_dispatch(const struct json_value *params, bool help,
         return false;
     }
     if (!ctx->node_db || !ctx->node_db->open || !ctx->wallet) {
-        wso_released(result, "Send record unavailable");
-        return true;
+        json_set_str(result, "Send record unavailable; send refused");
+        return false;
     }
-    if (!wso_check_fee(params, ctx, result))
-        return true; // released answer already set
     if (!wso_digest(key, params, digest)) {
-        wso_released(result, "Send request too large");
-        return true;
+        json_set_str(result, "Send request too large; send refused");
+        return false;
     }
     wso_key_hash(key, kh);
 
     (void)zcl_once_call(&g_once, wso_init);
     zcl_mutex_lock(&g_lock);
-    enum wso_begin b = wso_begin_send(ctx, kh, digest, GetTime(), result);
+    enum wso_begin b = wso_begin_send(ctx, kh, digest, GetTime(), params,
+                                      result);
     zcl_mutex_unlock(&g_lock);
     if (b != WSO_RUN)
         return b == WSO_ANSWERED;
@@ -414,10 +466,19 @@ struct zcl_result wallet_send_once_before_commit(const struct uint256 *txid)
     if (sc->built)
         return memcmp(sc->txid.data, txid->data, 32) == 0 ? ZCL_OK
             : ZCL_ERR(-1, "a keyed send may admit only one transaction");
-    if (!wso_advance(sc->ndb, sc->key_hash,
-            WALLET_SEND_ONCE_BUILT, txid->data, GetTime()))
-        return ZCL_ERR(-1, "send record could not be advanced; send refused");
+    /* Durable before admission: after power loss a relayed transaction must
+     * still have its row. */
+    if (!wso_advance(sc->ndb, sc->key_hash, WALLET_SEND_ONCE_BUILT, txid->data,
+                     GetTime(), true))
+        return ZCL_ERR(-1, "send record could not be made durable; send refused");
     sc->txid = *txid;
     sc->built = true;
     return ZCL_OK;
+}
+
+void wallet_send_once_after_commit(bool admitted)
+{
+    struct wso_scope *sc = g_scope;
+    if (sc && admitted)
+        sc->admitted = true;
 }

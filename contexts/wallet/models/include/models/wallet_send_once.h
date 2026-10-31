@@ -60,5 +60,7 @@ bool db_wallet_send_once_release(struct node_db *ndb,
 int db_wallet_send_once_count(struct node_db *ndb);
 /* Delete rows older than their retention. */
 bool db_wallet_send_once_prune(struct node_db *ndb, int64_t now);
+/* The connection's PRAGMA synchronous level (0 OFF, 1 NORMAL, 2 FULL), -1 on error. */
+int db_wallet_send_once_sync_level(struct node_db *ndb);
 
 #endif
