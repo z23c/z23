@@ -301,12 +301,15 @@ static inline bool script_num_from_bytes(struct script_num *out,
         }
     }
     if (len == 0) { out->value = 0; return true; }
-    int64_t result = 0;
+    /* Accumulate unsigned: shifting a byte >= 0x80 into bit 63 of a signed
+     * int64 is undefined. The sign bit is cleared before the int64 cast. */
+    uint64_t bits = 0;
     for (size_t i = 0; i < len; i++)
-        result |= (int64_t)data[i] << (8 * i);
+        bits |= (uint64_t)data[i] << (8 * i);
     if (data[len - 1] & 0x80)
-        result = -(int64_t)(result & ~((int64_t)0x80 << (8 * (len - 1))));
-    out->value = result;
+        out->value = -(int64_t)(bits & ~((uint64_t)0x80 << (8 * (len - 1))));
+    else
+        out->value = (int64_t)bits;
     return true;
 }
 

@@ -404,3 +404,7 @@ later lane flips it HARD.
 - 2026-10-31T09:48:12Z — REASON: sync stage lock order: take progress_store_tx_lock before s->lock in stage_run_once and stage_set_cursor (TSAN lock-order-inversion in test_boot_matrix, 10-30);  behaviour-preserving, no consensus predicate change
   old ROOT: 9bb1a940f2057c9298832184249a06d8143a2617a06b11740493c201b4ad91e1
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T09:57:55Z — REASON: script_num_from_bytes: accumulate in uint64_t so an 8-byte script number (0xff top byte) no longer left-shifts a signed int64 out of range (UBSan, test_script under t-asan, 10-30);  bit-identical results, consensus callers cap at 4-5 bytes
+  old ROOT: ac1a3fef849c0598d6aab95265ea3ad47fbfb6c534a2edb4fc7f2f8954e190f8
+  by: owner unseal ritual (make core-unseal)
