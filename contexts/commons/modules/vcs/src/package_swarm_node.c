@@ -1604,11 +1604,19 @@ static enum vcs_swarm_fetch_result swarm_fetch_rebind_locked(
         }
     }
     if (restricted) {
-        /* Memory keeps the tighter posture; the caller learns it is not
-         * durable, so no acknowledged restriction is lost on restart. */
+        uint64_t old_peers[VCS_SWARM_PROVIDER_MAX];
+        size_t old_count = dl->provider_count;
+        bool old_restricted = dl->provider_restricted;
+        memcpy(old_peers, dl->provider_peers, sizeof(old_peers));
         dl->provider_restricted = true;
         dl_set_providers(dl, provider_peers, provider_count);
         if (!record_persist(engine, dl)) {
+            /* A failed rebind changes nothing: memory stays equal to the
+             * durable record, and the caller learns the restriction did
+             * not take. */
+            dl->provider_restricted = old_restricted;
+            dl->provider_count = old_count;
+            memcpy(dl->provider_peers, old_peers, sizeof(old_peers));
             LOG_WARN(SWARM_LOG, "fetch %s: restricted rebind record I/O "
                      "failed", dl->root_hex);
             return VCS_SWARM_FETCH_RECORD_IO;

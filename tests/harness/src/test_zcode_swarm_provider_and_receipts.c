@@ -705,10 +705,17 @@ static int rebind_case_record_io(void)
     sw_key(96, key);
     const uint64_t peer = 906;
     const uint64_t bound = 1;
-    if (!sw_node_open(&n, "rebind_io", sw_score_contributor) ||
-        !sw_make_package(&scout, 1, 36) ||
-        !sw_make_package(&ordinary, 2, 37)) /* 1-file roots are seed-blind */
+    if (!sw_node_open(&n, "rebind_io", sw_score_contributor))
         return 1;
+    bool have_scout = sw_make_package(&scout, 1, 36);
+    /* 1-file roots are seed-blind, so the ordinary package has two. */
+    if (!have_scout || !sw_make_package(&ordinary, 2, 37)) {
+        if (have_scout)
+            sw_free_package(&scout);
+        sw_node_close(&n);
+        test_rm_rf_recursive(n.datadir);
+        return 1;
+    }
     SW_CHECK("rebind io: provider registers",
              vcs_swarm_engine_peer_add(n.engine, peer, key));
     sw_announce(n.engine, peer, &scout);
