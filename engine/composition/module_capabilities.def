@@ -323,6 +323,7 @@ ZCL_MODULE_CAPABILITY("contexts/wallet/models/src/wallet_backup_receipt.c", CAP_
 ZCL_MODULE_CAPABILITY("contexts/wallet/models/src/wallet_identity.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/models/src/wallet_key.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/models/src/wallet_label.c", CAP_FS_WRITE|CAP_FS_READ, "")
+ZCL_MODULE_CAPABILITY("contexts/wallet/models/src/wallet_send_once.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/models/src/wallet_metadata_crypto.c", CAP_FS_WRITE|CAP_RANDOM|CAP_FS_READ, "draws RAND_bytes for wallet metadata encryption")
 ZCL_MODULE_CAPABILITY("contexts/wallet/models/src/wallet_tx.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("contexts/wallet/models/src/wallet_tx_reads.c", CAP_FS_WRITE|CAP_FS_READ, "")
