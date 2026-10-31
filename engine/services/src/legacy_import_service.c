@@ -923,8 +923,6 @@ int legacy_import_service_run(const char *legacy_datadir,
         goto legacy_import_run_abort_p2;
     case LEGACY_IMPORT_UNSTABLE:
         goto legacy_import_run_unstable;
-    case LEGACY_IMPORT_PERSIST:
-        goto cleanup;
     case LEGACY_IMPORT_FCTX_OOM:
         goto legacy_import_run_fctx_oom;
     case LEGACY_IMPORT_ABORT_P3A:
@@ -939,12 +937,8 @@ int legacy_import_service_run(const char *legacy_datadir,
         goto legacy_import_run_abort_p3b;
     case LEGACY_IMPORT_THREAD_P3B:
         goto legacy_import_run_thread_p3b;
-    case LEGACY_IMPORT_BEGIN:
-        goto cleanup;
     case LEGACY_IMPORT_SAVE_OPEN:
         goto legacy_import_run_save_open;
-    case LEGACY_IMPORT_COMMIT:
-        goto cleanup;
     default:
         goto cleanup;
     }
