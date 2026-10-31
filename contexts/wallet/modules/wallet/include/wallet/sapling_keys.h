@@ -187,6 +187,14 @@ const struct sapling_key_entry *sapling_keystore_find_by_address(
     const uint8_t diversifier[ZC_DIVERSIFIER_SIZE],
     const uint8_t pk_d[32]);
 
+/* The key whose incoming viewing key owns the address: ivk * g_d == pk_d for
+ * the address's own diversifier, so an address diversified from any account
+ * key matches, not only its default address. */
+const struct sapling_key_entry *sapling_keystore_find_by_owned_address(
+    const struct sapling_keystore *sks,
+    const uint8_t diversifier[ZC_DIVERSIFIER_SIZE],
+    const uint8_t pk_d[32]);
+
 /* Import a fully-derived extended spending key into the keystore.
  * Returns false if the key is already present, the keystore is full or
  * the keystore is locked. */

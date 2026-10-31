@@ -323,20 +323,26 @@ bool wallet_sqlite_write_sapling_key(struct wallet_sqlite *ws,
 bool wallet_sqlite_read_sapling_keys(struct wallet_sqlite *ws,
                                        struct wallet *w);
 
-/* Unused diversifier indexes of the account are searched this many addresses
- * past the last one a note was received on. */
-#define WALLET_DIVERSIFIER_GAP 100
+/* Diversifier indexes at or past this are never issued. */
+#define WALLET_DIVERSIFIER_INDEX_MAX ((uint64_t)1 << 62)
 
 /* Choose the next unused ZIP-32 diversified address of `acct` (a copy from
  * sapling_keystore_copy_account) and record its index in the wallet database
  * BEFORE returning it, so no address is ever returned twice from this
- * datadir. The index starts past the default diversifier, the stored index and
- * the highest diversifier any note of the account was received on. Needs no
- * spending key. Refuses inside an open transaction. The caller must hold the
- * node.db write lane. */
+ * datadir. The record is synced to disk (synchronous=FULL for this write,
+ * whatever the connection mode); when the sync fails no address is returned.
+ * An account with no record starts at a random high index from the system
+ * CSPRNG, so an address issued by an earlier copy of the wallet is not
+ * reissued; when randomness fails no address is returned. Needs no spending
+ * key. Refuses inside an open transaction. Serialized in-process. */
 bool wallet_sqlite_diversifier_reserve(
     struct wallet_sqlite *ws, const struct sapling_key_entry *acct,
     uint8_t diversifier_out[ZC_DIVERSIFIER_SIZE], uint8_t pk_d_out[32]);
+
+#ifdef ZCL_TESTING
+/* Replace the CSPRNG that picks a starting index; NULL restores it. */
+void wallet_sqlite_diversifier_set_rng_for_test(bool (*fn)(uint8_t *, size_t));
+#endif
 
 /* The address most recently returned by wallet_sqlite_diversifier_reserve for
  * `acct`; false when none was issued. Creates and writes nothing. */

@@ -373,7 +373,7 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
             json_set_str(result, "Invalid shielded from address");
             LOG_FAIL("wallet_shielded", "z_sendmany: cannot decode shielded from address %s", from_addr);
         }
-        from_z_key = sapling_keystore_find_by_address(
+        from_z_key = sapling_keystore_find_by_owned_address(
             &ctx->wallet->sapling_keys, from_z_diversifier, from_z_pk_d);
         if (!from_z_key) {
             json_set_str(result, "Shielded from address not in wallet");

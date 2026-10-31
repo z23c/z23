@@ -259,7 +259,7 @@ bool rpc_z_getbalance(const struct json_value *params, bool help,
         int64_t balance = 0;
         if (ctx->node_db) {
             const struct sapling_key_entry *ske =
-                sapling_keystore_find_by_address(&ctx->wallet->sapling_keys, z_d, z_pkd);
+                sapling_keystore_find_by_owned_address(&ctx->wallet->sapling_keys, z_d, z_pkd);
             if (ske) {
                 int tip = ctx->wallet->best_block_height;
                 if (tip == 0 && ctx->main_state)

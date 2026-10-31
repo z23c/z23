@@ -16,8 +16,12 @@
 #include "encoding/utilstrencodings.h"
 #include "storage/event_log_payloads.h"
 #include "event/event.h"
+#include "crypto/random_secret.h"
+#include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <threads.h>
 
 /* A secret row must never be written in the clear while a passphrase is
  * loaded or the wallet wraps its secrets at rest. */
@@ -468,17 +472,41 @@ bool wallet_sqlite_read_sapling_keys(struct wallet_sqlite *ws,
 /* ── Diversified receive addresses ────────────────────────────────────
  *
  * wallet_sapling_diversifier(ivk, next_index) holds, per account, the first
- * ZIP-32 diversifier index that no address handed out by this datadir has
- * used. */
+ * ZIP-32 diversifier index that this datadir has not handed out. A datadir
+ * with no row for the account (a new wallet, a restore, a backup restore)
+ * cannot know which addresses an earlier copy issued, and notes are found by
+ * the incoming viewing key at any index, so it starts at a random high index:
+ * an earlier sequential run is not reissued, and the choice needs no scan. */
 
-#define WSQL_DIV_NOTE_CAP 4096
-#define WSQL_DIV_INDEX_MAX ((uint64_t)1 << 62)
+#define WSQL_DIV_START_MIN ((uint64_t)1 << 40)
+#define WSQL_DIV_START_SPAN ((uint64_t)1 << 60)
 
-/* The stored next index for `ivk`; 0 when the account has none. */
+static atomic_flag g_div_busy = ATOMIC_FLAG_INIT;
+
+#ifdef ZCL_TESTING
+static bool (*g_div_rng)(uint8_t *buf, size_t n);
+
+void wallet_sqlite_diversifier_set_rng_for_test(bool (*fn)(uint8_t *, size_t))
+{
+    g_div_rng = fn;
+}
+#endif
+
+static bool wsql_div_random(uint8_t *buf, size_t n)
+{
+#ifdef ZCL_TESTING
+    if (g_div_rng)
+        return g_div_rng(buf, n);
+#endif
+    return zcl_random_secret_bytes(buf, n, "diversifier_start");
+}
+
+/* The stored next index for `ivk`; *have is false when the account has no row. */
 static bool wsql_div_read(struct wallet_sqlite *ws, const uint8_t ivk[32],
-                          uint64_t *next)
+                          uint64_t *next, bool *have)
 {
     *next = 0;
+    *have = false;
     sqlite3_stmt *s = NULL;
     if (sqlite3_prepare_v2(ws->db,
             "SELECT next_index FROM wallet_sapling_diversifier WHERE ivk=?",
@@ -490,6 +518,7 @@ static bool wsql_div_read(struct wallet_sqlite *ws, const uint8_t ivk[32],
     if (rc == SQLITE_ROW) {
         sqlite3_int64 v = sqlite3_column_int64(s, 0);
         *next = v > 0 ? (uint64_t)v : 0;
+        *have = true;
     }
     sqlite3_finalize(s);
     if (rc != SQLITE_ROW && rc != SQLITE_DONE)
@@ -497,94 +526,97 @@ static bool wsql_div_read(struct wallet_sqlite *ws, const uint8_t ivk[32],
     return true;
 }
 
-/* Every distinct diversifier the account's notes were received on. The
- * caller frees *out. */
-static bool wsql_div_note_diversifiers(struct wallet_sqlite *ws,
-                                       const uint8_t ivk[32],
-                                       uint8_t (**out)[11], size_t *count)
+/* The connection's synchronous level (0 OFF, 1 NORMAL, 2 FULL, 3 EXTRA), or
+ * -1 when it cannot be read. */
+static int wsql_synchronous_level(sqlite3 *db)
 {
-    *out = NULL;
-    *count = 0;
     sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(ws->db,
-            "SELECT DISTINCT diversifier FROM wallet_sapling_notes"
-            " WHERE ivk=? LIMIT ?",
-            -1, &s, NULL) != SQLITE_OK || !s)
-        LOG_FAIL("wallet_sqlite", "diversifier notes: prepare failed: %s",
-                 sqlite3_errmsg(ws->db));
-    uint8_t (*rows)[11] = zcl_calloc(WSQL_DIV_NOTE_CAP, 11,
-                                     "wallet_sqlite.div_notes");
-    if (!rows) {
-        sqlite3_finalize(s);
-        return false;
-    }
-    sqlite3_bind_blob(s, 1, ivk, 32, SQLITE_STATIC);
-    sqlite3_bind_int(s, 2, WSQL_DIV_NOTE_CAP);
-    int rc;
-    while ((rc = AR_STEP_ROW_READONLY(s)) == SQLITE_ROW) {
-        if (sqlite3_column_bytes(s, 0) == 11)
-            memcpy(rows[(*count)++], sqlite3_column_blob(s, 0), 11);
-    }
+    if (sqlite3_prepare_v2(db, "PRAGMA synchronous", -1, &s, NULL) !=
+            SQLITE_OK || !s)
+        return -1;
+    int level = sqlite3_step(s) == SQLITE_ROW ? sqlite3_column_int(s, 0) : -1;
     sqlite3_finalize(s);
-    if (rc != SQLITE_DONE) {
-        free(rows);
-        LOG_FAIL("wallet_sqlite", "diversifier notes: step failed rc=%d", rc);
-    }
-    *out = rows;
-    return true;
+    return level;
 }
 
-static bool wsql_div_listed(const uint8_t (*list)[11], size_t n,
-                            const uint8_t d[11])
+static bool wsql_set_synchronous(sqlite3 *db, int level)
 {
-    for (size_t i = 0; i < n; i++)
-        if (memcmp(list[i], d, 11) == 0)
-            return true;
-    return false;
+    char sql[32];
+    snprintf(sql, sizeof(sql), "PRAGMA synchronous=%d", level);
+    return sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK &&
+           wsql_synchronous_level(db) == level;
 }
 
-/* The next index to issue from: past the default diversifier, past the stored
- * index and past the highest diversifier any note of the account was
- * received on, found by walking the account's addresses upward and stopping
- * after WALLET_DIVERSIFIER_GAP unused ones. A restored wallet has no stored
- * index; this walk is what finds the addresses it already handed out. */
+/* The first index to issue from: past the default diversifier and the stored
+ * index, or a random high start when the account has no stored index. */
 static bool wsql_div_first_free(struct wallet_sqlite *ws,
                                 const struct sapling_key_entry *acct,
                                 uint64_t *first_free)
 {
     uint64_t stored = 0;
-    if (!wsql_div_read(ws, acct->ivk, &stored))
+    bool have = false;
+    if (!wsql_div_read(ws, acct->ivk, &stored, &have))
         return false;
     uint8_t d[11], pk_d[32];
     uint64_t slot = 0;
     if (!sapling_account_diversified_address(acct, 0, &slot, d, pk_d))
         return false;
     uint64_t start = slot + 1;
-    if (stored > start)
-        start = stored;
-
-    uint8_t (*notes)[11] = NULL;
-    size_t note_count = 0;
-    if (!wsql_div_note_diversifiers(ws, acct->ivk, &notes, &note_count))
-        return false;
-    uint64_t next = start;
-    uint64_t probe = start;
-    unsigned unused = 0;
-    while (note_count > 0 && unused < WALLET_DIVERSIFIER_GAP) {
-        if (probe >= WSQL_DIV_INDEX_MAX ||
-            !sapling_account_diversified_address(acct, probe, &slot, d, pk_d))
-            break;
-        if (wsql_div_listed((const uint8_t (*)[11])notes, note_count, d)) {
-            next = slot + 1;
-            unused = 0;
-        } else {
-            unused++;
-        }
-        probe = slot + 1;
+    if (!have) {
+        uint8_t r[8];
+        if (!wsql_div_random(r, sizeof(r)))
+            LOG_FAIL("wallet_sqlite", "diversifier reserve: no randomness; "
+                     "no address issued");
+        uint64_t v = 0;
+        for (int k = 0; k < 8; k++)
+            v |= (uint64_t)r[k] << (8 * k);
+        memory_cleanse(r, sizeof(r));
+        stored = WSQL_DIV_START_MIN + v % WSQL_DIV_START_SPAN;
     }
-    free(notes);
-    *first_free = next;
+    *first_free = stored > start ? stored : start;
     return true;
+}
+
+/* Record next_index = `next` and return only once it is synced to disk: the
+ * write runs at synchronous=FULL whatever the connection's mode (NORMAL syncs
+ * the log only at checkpoints, OFF never), so power loss cannot take back an
+ * index whose address was shown. */
+static bool wsql_div_write_durable(struct wallet_sqlite *ws,
+                                   const uint8_t ivk[32], uint64_t next)
+{
+    int prev = wsql_synchronous_level(ws->db);
+    if (prev < 0)
+        LOG_FAIL("wallet_sqlite", "diversifier reserve: cannot read the "
+                 "synchronous level");
+    if (!wsql_set_synchronous(ws->db, 2)) {
+        (void)wsql_set_synchronous(ws->db, prev);
+        LOG_FAIL("wallet_sqlite", "diversifier reserve: cannot raise "
+                 "synchronous to FULL; no address issued");
+    }
+    sqlite3_stmt *s = NULL;
+    bool ok = false;
+    if (sqlite3_prepare_v2(ws->db,
+            "INSERT INTO wallet_sapling_diversifier(ivk,next_index)"
+            " VALUES(?,?) ON CONFLICT(ivk) DO UPDATE SET"
+            " next_index=MAX(next_index,excluded.next_index)",
+            -1, &s, NULL) == SQLITE_OK && s) {
+        sqlite3_bind_blob(s, 1, ivk, 32, SQLITE_STATIC);
+        sqlite3_bind_int64(s, 2, (sqlite3_int64)next);
+        int rc = AR_STEP_WRITE(s);
+        ok = rc == SQLITE_DONE;
+        if (!ok)
+            LOG_WARN("wallet_sqlite", "diversifier reserve: write failed "
+                     "rc=%d: %s", rc, sqlite3_errmsg(ws->db));
+    } else {
+        LOG_WARN("wallet_sqlite", "diversifier reserve: prepare failed: %s",
+                 sqlite3_errmsg(ws->db));
+    }
+    if (s)
+        sqlite3_finalize(s);
+    if (!wsql_set_synchronous(ws->db, prev))
+        LOG_WARN("wallet_sqlite", "diversifier reserve: synchronous level "
+                 "not restored");
+    return ok;
 }
 
 bool wallet_sqlite_diversifier_reserve(
@@ -598,30 +630,26 @@ bool wallet_sqlite_diversifier_reserve(
     if (!sqlite3_get_autocommit(ws->db))
         LOG_FAIL("wallet_sqlite", "diversifier reserve: refused inside an open "
                  "transaction");
+    /* Read, derive and write are one step: two callers must not read one
+     * index, and the synchronous level is restored by whoever raised it. */
+    while (atomic_flag_test_and_set_explicit(&g_div_busy,
+                                             memory_order_acquire))
+        thrd_yield();
+    bool ok = false;
     uint64_t first_free = 0;
-    if (!wsql_div_first_free(ws, acct, &first_free))
-        return false;
     uint64_t slot = 0;
     uint8_t d[ZC_DIVERSIFIER_SIZE], pk_d[32];
-    if (!sapling_account_diversified_address(acct, first_free, &slot, d, pk_d) ||
-        slot >= WSQL_DIV_INDEX_MAX - 1)
-        LOG_FAIL("wallet_sqlite", "diversifier reserve: no address available");
-
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(ws->db,
-            "INSERT INTO wallet_sapling_diversifier(ivk,next_index)"
-            " VALUES(?,?) ON CONFLICT(ivk) DO UPDATE SET"
-            " next_index=MAX(next_index,excluded.next_index)",
-            -1, &s, NULL) != SQLITE_OK || !s)
-        LOG_FAIL("wallet_sqlite", "diversifier reserve: prepare failed: %s",
-                 sqlite3_errmsg(ws->db));
-    sqlite3_bind_blob(s, 1, acct->ivk, 32, SQLITE_STATIC);
-    sqlite3_bind_int64(s, 2, (sqlite3_int64)(slot + 1));
-    int rc = AR_STEP_WRITE(s);
-    sqlite3_finalize(s);
-    if (rc != SQLITE_DONE)
-        LOG_FAIL("wallet_sqlite", "diversifier reserve: write failed rc=%d: %s",
-                 rc, sqlite3_errmsg(ws->db));
+    if (wsql_div_first_free(ws, acct, &first_free)) {
+        if (!sapling_account_diversified_address(acct, first_free, &slot, d,
+                                                 pk_d) ||
+            slot >= WALLET_DIVERSIFIER_INDEX_MAX - 1)
+            LOG_WARN("wallet_sqlite", "diversifier reserve: no address available");
+        else if (wsql_div_write_durable(ws, acct->ivk, slot + 1))
+            ok = true;
+    }
+    atomic_flag_clear_explicit(&g_div_busy, memory_order_release);
+    if (!ok)
+        return false;
     memcpy(diversifier_out, d, ZC_DIVERSIFIER_SIZE);
     memcpy(pk_d_out, pk_d, 32);
     return true;
@@ -634,7 +662,8 @@ bool wallet_sqlite_diversifier_latest(
     if (!ws || !ws->open || !acct || !acct->used)
         return false;
     uint64_t next = 0;
-    if (!wsql_div_read(ws, acct->ivk, &next) || next == 0)
+    bool have = false;
+    if (!wsql_div_read(ws, acct->ivk, &next, &have) || next == 0)
         return false;
     uint64_t slot = 0;
     return sapling_account_diversified_address(acct, next - 1, &slot,

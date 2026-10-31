@@ -362,10 +362,13 @@ lowest child index). All such addresses share one incoming viewing key, so a
 single key finds every note sent to any of them, and a payer cannot link two of
 them on chain. The reply is `{"address":"zs1..."}`.
 
-- **Recorded first.** The diversifier index is written to
+- **Recorded first, synced to disk.** The diversifier index is written to
   `wallet_sapling_diversifier` and committed before the address is returned.
-  A crash between the write and the reply burns that index; an index is never
-  issued twice from one datadir.
+  The write runs at `synchronous=FULL` whatever the connection mode (normal
+  mode syncs the log only at checkpoints, bulk-sync mode never), so power loss
+  after the address is shown cannot take the index back. When the sync fails no
+  address is returned. A crash between the write and the reply burns that
+  index; an index is never issued twice from one datadir.
 - **Works while locked.** The address comes from the viewing key and the
   diversifier key, both resident while locked. No seed or spending key is read
   or written, and the leaf is not on the agent surface: an agent session is
@@ -377,13 +380,17 @@ them on chain. The reply is `{"address":"zs1..."}`.
   spendable note of the account, across its addresses, in one transaction.
   Change returns to the account's default address: a change output is
   encrypted on chain, so a fresh address there adds no privacy.
-- **Restore.** A restore has no record of issued indexes. The next index
-  starts past the highest diversifier any found note of the account was
-  received on, searching `WALLET_DIVERSIFIER_GAP` (100) unused addresses past
-  each hit. An address issued but never paid may be issued again after a
-  restore. That links nothing unless two payers each used it. A note received
-  on an address more than 100 addresses past the last one used is found by the
-  scan of the chain but does not move the next index.
+- **Restore.** The index record is not in the wallet backup, and a restored
+  wallet has not read the chain, so it cannot know which addresses an earlier
+  copy issued. A wallet with no record, new or restored, starts at a random
+  index in `[2^40, 2^40 + 2^60)` drawn from the system CSPRNG and records it
+  before the address is returned; no address is returned when randomness
+  fails. It then counts up from there. A restored wallet therefore does not
+  hand out an address the earlier copy issued, except by a chance of about
+  2^-60 per issued address. Notes sent to any index are found by trial
+  decryption with the one incoming viewing key, so no address list is needed,
+  and a balance query on any address of the account reports the account's
+  notes.
 
 ---
 

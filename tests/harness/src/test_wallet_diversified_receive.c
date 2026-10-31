@@ -64,11 +64,13 @@
 
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #define WDR_PASS "wdr-fixture-passphrase"
@@ -214,13 +216,17 @@ static bool wdr_encode(const uint8_t d[11], const uint8_t pk_d[32], char *out,
         d, pk_d, cp->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS], out, size);
 }
 
-/* The address `n` steps after the default diversifier, derived here from the
- * diversifier key alone: n = 0 is the default address. */
-static bool wdr_expected(const struct sapling_key_entry *acct, unsigned n,
-                         char *out, size_t size)
+/* The address the n-th receive (n = 0 is the first) returns when the random
+ * start index is `start`: derived here from the diversifier key alone, the
+ * (n+1)-th valid diversifier index counting from `start`. */
+static bool wdr_expected_from(const struct sapling_key_entry *acct,
+                              uint64_t start, unsigned n, char *out,
+                              size_t size)
 {
     uint8_t j[11] = {0};
     uint8_t d[11], pk_d[32];
+    for (int b = 0; b < 8; b++)
+        j[b] = (uint8_t)(start >> (8 * b));
     for (unsigned k = 0; k <= n; k++) {
         if (k > 0) {
             for (int b = 0; b < 11 && ++j[b] == 0; b++) {}
@@ -230,6 +236,60 @@ static bool wdr_expected(const struct sapling_key_entry *acct, unsigned n,
     }
     return sapling_ivk_to_pkd(acct->ivk, d, pk_d) &&
            wdr_encode(d, pk_d, out, size);
+}
+
+/* The default address, derived the same way: index 0. */
+static bool wdr_default(const struct sapling_key_entry *acct, char *out,
+                        size_t size)
+{
+    return wdr_expected_from(acct, 0, 0, out, size);
+}
+
+/* A fixed random source: the starting index is WDR_START_MIN + g_wdr_draw. */
+#define WDR_START_MIN ((uint64_t)1 << 40)
+static uint64_t g_wdr_draw;
+static bool g_wdr_rng_fails;
+
+static bool wdr_rng(uint8_t *buf, size_t n)
+{
+    if (g_wdr_rng_fails)
+        return false;
+    for (size_t i = 0; i < n; i++)
+        buf[i] = i < 8 ? (uint8_t)(g_wdr_draw >> (8 * i)) : 0;
+    return true;
+}
+
+static uint64_t wdr_use_start(uint64_t draw)
+{
+    g_wdr_draw = draw;
+    g_wdr_rng_fails = false;
+    wallet_sqlite_diversifier_set_rng_for_test(wdr_rng);
+    return WDR_START_MIN + draw;
+}
+
+static void wdr_use_system_rng(void)
+{
+    g_wdr_rng_fails = false;
+    wallet_sqlite_diversifier_set_rng_for_test(NULL);
+}
+
+/* The stored next index for the account; false when none is recorded. */
+static bool wdr_stored_next(struct wdr *f, const struct sapling_key_entry *acct,
+                            uint64_t *next)
+{
+    sqlite3_stmt *s = NULL;
+    bool have = false;
+    if (sqlite3_prepare_v2(f->ndb.db,
+            "SELECT next_index FROM wallet_sapling_diversifier WHERE ivk=?",
+            -1, &s, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_blob(s, 1, acct->ivk, 32, SQLITE_STATIC);
+    if (sqlite3_step(s) == SQLITE_ROW) {
+        *next = (uint64_t)sqlite3_column_int64(s, 0);
+        have = true;
+    }
+    sqlite3_finalize(s);
+    return have;
 }
 
 /* ── Notes ───────────────────────────────────────────────────────── */
@@ -332,8 +392,34 @@ static bool wdr_note_on(const struct wdr *f, const struct sapling_key_entry *acc
 
 /* ── Tests ───────────────────────────────────────────────────────── */
 
-/* Three receives, three payments, then a restore that finds all three with
- * no list and continues past the highest. */
+/* The unspent notes the database holds for the account, as a restarted
+ * process reads them: count and total, with each on its own diversifier. */
+static bool wdr_db_notes(struct wdr *f, const struct sapling_key_entry *acct,
+                         const char got[WDR_PAYERS][128], int *count,
+                         uint64_t *total)
+{
+    struct db_sapling_note rows[16];
+    int n = db_sapling_note_list_unspent_for_ivk(&f->ndb, acct->ivk, rows, 16);
+    if (n < 0)
+        return false;
+    *count = n;
+    *total = 0;
+    int matched = 0;
+    for (int i = 0; i < n; i++) {
+        *total += (uint64_t)rows[i].value;
+        for (unsigned k = 0; k < WDR_PAYERS; k++) {
+            uint8_t d[11], pk_d[32];
+            if (sapling_decode_payment_address(got[k], d, pk_d) &&
+                memcmp(rows[i].diversifier, d, 11) == 0 &&
+                memcmp(rows[i].pk_d, pk_d, 32) == 0)
+                matched++;
+        }
+    }
+    return matched == WDR_PAYERS;
+}
+
+/* Three receives, three payments, a restart that still holds the notes, then
+ * a restore that finds all three with no list and never reissues one. */
 static int test_receive_find_and_restore(void)
 {
     int failures = 0;
@@ -345,7 +431,7 @@ static int test_receive_find_and_restore(void)
         struct sapling_key_entry acct;
         ASSERT(wdr_account(&f, &acct));
         char def[128], got[WDR_PAYERS][128], want[128];
-        ASSERT(wdr_expected(&acct, 0, def, sizeof(def)));
+        ASSERT(wdr_default(&acct, def, sizeof(def)));
         ASSERT(wdr_encode(acct.diversifier, acct.pk_d, want, sizeof(want)));
         ASSERT_STR_EQ(def, want);
 
@@ -353,9 +439,10 @@ static int test_receive_find_and_restore(void)
         uint8_t ld[11], lpk[32];
         ASSERT(!wallet_sqlite_diversifier_latest(&f.ws, &acct, ld, lpk));
 
+        uint64_t start = wdr_use_start(0x123456789ULL);
         for (unsigned k = 0; k < WDR_PAYERS; k++) {
             ASSERT(wdr_receive(&f, got[k], sizeof(got[k])));
-            ASSERT(wdr_expected(&acct, k + 1, want, sizeof(want)));
+            ASSERT(wdr_expected_from(&acct, start, k, want, sizeof(want)));
             ASSERT_STR_EQ(got[k], want);
             ASSERT(strcmp(got[k], def) != 0);
             for (unsigned j = 0; j < k; j++)
@@ -385,16 +472,41 @@ static int test_receive_find_and_restore(void)
         ASSERT_EQ(wdr_deliver(&f, def, 7 * WDR_UNIT, 9), 1);
         char fourth[128];
         ASSERT(wdr_receive(&f, fourth, sizeof(fourth)));
-        ASSERT(wdr_expected(&acct, WDR_PAYERS + 1, want, sizeof(want)));
+        ASSERT(wdr_expected_from(&acct, start, WDR_PAYERS, want,
+                                 sizeof(want)));
+        ASSERT_STR_EQ(fourth, want);
+
+        /* A restart: the database still holds all four notes, each on its
+         * own diversifier, and the next address continues the sequence. */
+        wdr_close(&f);
+        ASSERT(wdr_boot(&f));
+        int count = 0;
+        uint64_t db_total = 0;
+        ASSERT(wdr_db_notes(&f, &acct, (const char (*)[128])got, &count,
+                            &db_total));
+        ASSERT_EQ(count, WDR_PAYERS + 1);
+        ASSERT(db_total == sum + 7 * WDR_UNIT);
+        ASSERT(wdr_receive(&f, fourth, sizeof(fourth)));
+        ASSERT(wdr_expected_from(&acct, start, WDR_PAYERS + 1, want,
+                                 sizeof(want)));
         ASSERT_STR_EQ(fourth, want);
 
         /* Restore the same phrase into a new datadir: no index, no address
-         * list. The scan finds every note, and the next address is past the
-         * highest one a note was received on. */
+         * list, no chain history read. It draws a new random start, so the
+         * first address it issues is none of the three already paid. */
         ASSERT(wdr_restore(&g));
         struct sapling_key_entry acct2;
         ASSERT(wdr_account(&g, &acct2));
         ASSERT(memcmp(acct.ivk, acct2.ivk, 32) == 0);
+        uint64_t start2 = wdr_use_start(0x7edcba987ULL);
+        char first_after[128];
+        ASSERT(wdr_receive(&g, first_after, sizeof(first_after)));
+        ASSERT(wdr_expected_from(&acct2, start2, 0, want, sizeof(want)));
+        ASSERT_STR_EQ(first_after, want);
+        for (unsigned k = 0; k < WDR_PAYERS; k++)
+            ASSERT(strcmp(first_after, got[k]) != 0);
+
+        /* The scan then finds every note with no list. */
         for (unsigned k = 0; k < WDR_PAYERS; k++)
             ASSERT_EQ(wdr_deliver(&g, got[k], (k + 1) * WDR_UNIT,
                                   (uint8_t)(k + 1)), 1);
@@ -403,7 +515,7 @@ static int test_receive_find_and_restore(void)
             ASSERT(wdr_note_on(&g, &acct2, got[k], (k + 1) * WDR_UNIT));
         char next[128];
         ASSERT(wdr_receive(&g, next, sizeof(next)));
-        ASSERT(wdr_expected(&acct2, WDR_PAYERS + 1, want, sizeof(want)));
+        ASSERT(wdr_expected_from(&acct2, start2, 1, want, sizeof(want)));
         ASSERT_STR_EQ(next, want);
         for (unsigned k = 0; k < WDR_PAYERS; k++)
             ASSERT(strcmp(next, got[k]) != 0);
@@ -411,6 +523,7 @@ static int test_receive_find_and_restore(void)
         memory_cleanse(&acct2, sizeof(acct2));
         PASS();
     } _test_next:;
+    wdr_use_system_rng();
     wdr_teardown(&f);
     wdr_teardown(&g);
     return failures;
@@ -428,8 +541,9 @@ static int test_crash_after_index_write(void)
         struct sapling_key_entry acct;
         ASSERT(wdr_account(&f, &acct));
         char first[128], burnt[128], again[128], want[128];
+        uint64_t start = wdr_use_start(0x2468ace0ULL);
         ASSERT(wdr_receive(&f, first, sizeof(first)));
-        ASSERT(wdr_expected(&acct, 1, want, sizeof(want)));
+        ASSERT(wdr_expected_from(&acct, start, 0, want, sizeof(want)));
         ASSERT_STR_EQ(first, want);
 
         wallet_receive_fault_after_reserve_for_test(true);
@@ -441,14 +555,15 @@ static int test_crash_after_index_write(void)
         wdr_close(&f);
         ASSERT(wdr_boot(&f));
         ASSERT(wdr_receive(&f, again, sizeof(again)));
-        ASSERT(wdr_expected(&acct, 3, want, sizeof(want)));
+        ASSERT(wdr_expected_from(&acct, start, 2, want, sizeof(want)));
         ASSERT_STR_EQ(again, want);
-        ASSERT(wdr_expected(&acct, 2, want, sizeof(want)));
+        ASSERT(wdr_expected_from(&acct, start, 1, want, sizeof(want)));
         ASSERT(strcmp(again, want) != 0);
         ASSERT(strcmp(again, first) != 0);
         memory_cleanse(&acct, sizeof(acct));
         PASS();
     } _test_next:;
+    wdr_use_system_rng();
     wdr_teardown(&f);
     return failures;
 }
@@ -489,12 +604,13 @@ static int test_receive_while_locked(void)
         struct sapling_key_entry acct;
         ASSERT(wdr_account(&f, &acct));
         char a[128], b[128], want[128];
+        uint64_t start = wdr_use_start(0x13572468ULL);
 
         wallet_lock_lock(f.w);
         ASSERT(!wallet_lock_is_unlocked());
         ASSERT(wdr_secrets_absent(f.w));
         ASSERT(wdr_receive(&f, a, sizeof(a)));
-        ASSERT(wdr_expected(&acct, 1, want, sizeof(want)));
+        ASSERT(wdr_expected_from(&acct, start, 0, want, sizeof(want)));
         ASSERT_STR_EQ(a, want);
         ASSERT(wdr_secrets_absent(f.w));
 
@@ -505,12 +621,13 @@ static int test_receive_while_locked(void)
         ASSERT(!wallet_lock_is_unlocked());
         ASSERT(wdr_secrets_absent(f.w));
         ASSERT(wdr_receive(&f, b, sizeof(b)));
-        ASSERT(wdr_expected(&acct, 2, want, sizeof(want)));
+        ASSERT(wdr_expected_from(&acct, start, 1, want, sizeof(want)));
         ASSERT_STR_EQ(b, want);
         ASSERT(wdr_secrets_absent(f.w));
         memory_cleanse(&acct, sizeof(acct));
         PASS();
     } _test_next:;
+    wdr_use_system_rng();
     wdr_teardown(&f);
     wallet_lock_reset_for_test();
     if (old)
@@ -684,6 +801,520 @@ static int test_no_address_in_logs(void)
     return failures;
 }
 
+/* ── Randomness, durability, exhaustion, concurrency, recognition ───── */
+
+/* A wallet with no record draws its start from the system CSPRNG: far above
+ * any sequential run, different for two restores, recorded at once. */
+static int test_random_start(void)
+{
+    int failures = 0;
+    struct wdr f, g;
+    memset(&f, 0, sizeof(f));
+    memset(&g, 0, sizeof(g));
+    TEST("wallet_diversified_receive: a wallet with no record starts at random") {
+        wdr_use_system_rng();
+        ASSERT(wdr_restore(&f));
+        struct sapling_key_entry acct;
+        ASSERT(wdr_account(&f, &acct));
+        uint64_t next = 0;
+        ASSERT(!wdr_stored_next(&f, &acct, &next));
+        char a[128], b[128], a2[128];
+        ASSERT(wdr_receive(&f, a, sizeof(a)));
+        ASSERT(wdr_stored_next(&f, &acct, &next));
+        ASSERT(next > WDR_START_MIN);
+        ASSERT(next < WALLET_DIVERSIFIER_INDEX_MAX);
+
+        /* The RPC state follows the most recent restore. */
+        ASSERT(wdr_restore(&g));
+        ASSERT(wdr_receive(&g, b, sizeof(b)));
+        ASSERT(strcmp(a, b) != 0);
+        uint64_t next_g = 0;
+        ASSERT(wdr_stored_next(&g, &acct, &next_g));
+        ASSERT(next_g > WDR_START_MIN);
+        ASSERT(next_g != next);
+        ASSERT(wdr_receive(&g, a2, sizeof(a2)));
+        ASSERT(strcmp(b, a2) != 0);
+        memory_cleanse(&acct, sizeof(acct));
+        PASS();
+    } _test_next:;
+    wdr_teardown(&f);
+    wdr_teardown(&g);
+    return failures;
+}
+
+/* When the CSPRNG fails no address is issued and nothing is recorded. */
+static int test_random_failure_refuses(void)
+{
+    int failures = 0;
+    struct wdr f;
+    memset(&f, 0, sizeof(f));
+    TEST("wallet_diversified_receive: no address when randomness fails") {
+        ASSERT(wdr_restore(&f));
+        struct sapling_key_entry acct;
+        ASSERT(wdr_account(&f, &acct));
+        uint64_t start = wdr_use_start(0x99ULL);
+        g_wdr_rng_fails = true;
+        char a[128] = "", want[128];
+        ASSERT(!wdr_receive(&f, a, sizeof(a)));
+        ASSERT_STR_EQ(a, "");
+        uint64_t next = 0;
+        ASSERT(!wdr_stored_next(&f, &acct, &next));
+        uint8_t ld[11], lpk[32];
+        ASSERT(!wallet_sqlite_diversifier_latest(&f.ws, &acct, ld, lpk));
+        g_wdr_rng_fails = false;
+        ASSERT(wdr_receive(&f, a, sizeof(a)));
+        ASSERT(wdr_expected_from(&acct, start, 0, want, sizeof(want)));
+        ASSERT_STR_EQ(a, want);
+        memory_cleanse(&acct, sizeof(acct));
+        PASS();
+    } _test_next:;
+    wdr_use_system_rng();
+    wdr_teardown(&f);
+    return failures;
+}
+
+/* A file wrapper that counts the syncs of the write-ahead log and can fail
+ * them: it sees what a clean close cannot, whether the index was synced. */
+struct wdr_vfs_file {
+    sqlite3_file base;
+    sqlite3_file *real;
+    bool wal;
+};
+
+static sqlite3_vfs g_wdr_vfs;
+static sqlite3_vfs *g_wdr_real_vfs;
+static atomic_int g_wdr_wal_syncs;
+static atomic_bool g_wdr_sync_fails;
+static const sqlite3_io_methods g_wdr_io;
+
+#define WDR_REAL(f) (((struct wdr_vfs_file *)(f))->real)
+
+static int wdr_io_close(sqlite3_file *f)
+{
+    return WDR_REAL(f)->pMethods->xClose(WDR_REAL(f));
+}
+static int wdr_io_read(sqlite3_file *f, void *p, int n, sqlite3_int64 o)
+{
+    return WDR_REAL(f)->pMethods->xRead(WDR_REAL(f), p, n, o);
+}
+static int wdr_io_write(sqlite3_file *f, const void *p, int n, sqlite3_int64 o)
+{
+    return WDR_REAL(f)->pMethods->xWrite(WDR_REAL(f), p, n, o);
+}
+static int wdr_io_truncate(sqlite3_file *f, sqlite3_int64 s)
+{
+    return WDR_REAL(f)->pMethods->xTruncate(WDR_REAL(f), s);
+}
+static int wdr_io_sync(sqlite3_file *f, int flags)
+{
+    if (((struct wdr_vfs_file *)f)->wal) {
+        if (atomic_load(&g_wdr_sync_fails))
+            return SQLITE_IOERR_FSYNC;
+        atomic_fetch_add(&g_wdr_wal_syncs, 1);
+    }
+    return WDR_REAL(f)->pMethods->xSync(WDR_REAL(f), flags);
+}
+static int wdr_io_size(sqlite3_file *f, sqlite3_int64 *s)
+{
+    return WDR_REAL(f)->pMethods->xFileSize(WDR_REAL(f), s);
+}
+static int wdr_io_lock(sqlite3_file *f, int l)
+{
+    return WDR_REAL(f)->pMethods->xLock(WDR_REAL(f), l);
+}
+static int wdr_io_unlock(sqlite3_file *f, int l)
+{
+    return WDR_REAL(f)->pMethods->xUnlock(WDR_REAL(f), l);
+}
+static int wdr_io_reserved(sqlite3_file *f, int *r)
+{
+    return WDR_REAL(f)->pMethods->xCheckReservedLock(WDR_REAL(f), r);
+}
+static int wdr_io_control(sqlite3_file *f, int op, void *a)
+{
+    return WDR_REAL(f)->pMethods->xFileControl(WDR_REAL(f), op, a);
+}
+static int wdr_io_sector(sqlite3_file *f)
+{
+    return WDR_REAL(f)->pMethods->xSectorSize(WDR_REAL(f));
+}
+static int wdr_io_device(sqlite3_file *f)
+{
+    return WDR_REAL(f)->pMethods->xDeviceCharacteristics(WDR_REAL(f));
+}
+static int wdr_io_shm_map(sqlite3_file *f, int pg, int sz, int ext,
+                          void volatile **pp)
+{
+    return WDR_REAL(f)->pMethods->xShmMap(WDR_REAL(f), pg, sz, ext, pp);
+}
+static int wdr_io_shm_lock(sqlite3_file *f, int off, int n, int flags)
+{
+    return WDR_REAL(f)->pMethods->xShmLock(WDR_REAL(f), off, n, flags);
+}
+static void wdr_io_shm_barrier(sqlite3_file *f)
+{
+    WDR_REAL(f)->pMethods->xShmBarrier(WDR_REAL(f));
+}
+static int wdr_io_shm_unmap(sqlite3_file *f, int del)
+{
+    return WDR_REAL(f)->pMethods->xShmUnmap(WDR_REAL(f), del);
+}
+
+static const sqlite3_io_methods g_wdr_io = {
+    2, wdr_io_close, wdr_io_read, wdr_io_write, wdr_io_truncate, wdr_io_sync,
+    wdr_io_size, wdr_io_lock, wdr_io_unlock, wdr_io_reserved, wdr_io_control,
+    wdr_io_sector, wdr_io_device, wdr_io_shm_map, wdr_io_shm_lock,
+    wdr_io_shm_barrier, wdr_io_shm_unmap, NULL, NULL,
+};
+
+static int wdr_vfs_open(sqlite3_vfs *v, const char *name, sqlite3_file *f,
+                        int flags, int *out_flags)
+{
+    (void)v;
+    struct wdr_vfs_file *w = (struct wdr_vfs_file *)f;
+    w->base.pMethods = NULL;
+    w->real = (sqlite3_file *)(w + 1);
+    w->wal = (flags & SQLITE_OPEN_WAL) != 0;
+    int rc = g_wdr_real_vfs->xOpen(g_wdr_real_vfs, name, w->real, flags,
+                                   out_flags);
+    if (rc == SQLITE_OK)
+        w->base.pMethods = &g_wdr_io;
+    return rc;
+}
+
+static bool wdr_vfs_install(void)
+{
+    g_wdr_real_vfs = sqlite3_vfs_find(NULL);
+    if (!g_wdr_real_vfs)
+        return false;
+    g_wdr_vfs = *g_wdr_real_vfs;
+    g_wdr_vfs.zName = "wdr_sync_probe";
+    g_wdr_vfs.szOsFile = (int)sizeof(struct wdr_vfs_file) +
+                         g_wdr_real_vfs->szOsFile;
+    g_wdr_vfs.xOpen = wdr_vfs_open;
+    g_wdr_vfs.pNext = NULL;
+    atomic_store(&g_wdr_wal_syncs, 0);
+    atomic_store(&g_wdr_sync_fails, false);
+    return sqlite3_vfs_register(&g_wdr_vfs, 1) == SQLITE_OK;
+}
+
+static int wdr_sync_level(struct wdr *f)
+{
+    sqlite3_stmt *s = NULL;
+    int level = -1;
+    if (sqlite3_prepare_v2(f->ndb.db, "PRAGMA synchronous", -1, &s, NULL) ==
+            SQLITE_OK && sqlite3_step(s) == SQLITE_ROW)
+        level = sqlite3_column_int(s, 0);
+    if (s)
+        sqlite3_finalize(s);
+    return level;
+}
+
+/* The index reaches the disk before the address leaves: in normal mode and in
+ * the bulk-sync mode that turns syncing off, the write-ahead log is synced by
+ * the receive itself, the connection's mode is put back afterwards, and when
+ * the sync fails no address is returned. */
+static int test_index_synced_before_return(void)
+{
+    int failures = 0;
+    struct wdr f;
+    memset(&f, 0, sizeof(f));
+    bool vfs_on = false;
+    TEST("wallet_diversified_receive: the index is synced before the address") {
+        ASSERT(wdr_vfs_install());
+        vfs_on = true;
+        ASSERT(wdr_restore(&f));
+        wdr_use_start(0x5151ULL);
+        char a[128], b[128], c[128], d[128];
+        ASSERT_EQ(wdr_sync_level(&f), 1);
+        ASSERT(sqlite3_exec(f.ndb.db, "PRAGMA wal_checkpoint(TRUNCATE)", NULL,
+                            NULL, NULL) == SQLITE_OK);
+
+        int before = atomic_load(&g_wdr_wal_syncs);
+        ASSERT(wdr_receive(&f, a, sizeof(a)));
+        ASSERT(atomic_load(&g_wdr_wal_syncs) > before);
+        ASSERT_EQ(wdr_sync_level(&f), 1);
+
+        ASSERT(node_db_ibd_turbo_mode(&f.ndb));
+        ASSERT_EQ(wdr_sync_level(&f), 0);
+        before = atomic_load(&g_wdr_wal_syncs);
+        ASSERT(wdr_receive(&f, b, sizeof(b)));
+        ASSERT(atomic_load(&g_wdr_wal_syncs) > before);
+        ASSERT_EQ(wdr_sync_level(&f), 0);
+
+        atomic_store(&g_wdr_sync_fails, true);
+        c[0] = '\0';
+        bool failed = !wdr_receive(&f, c, sizeof(c));
+        atomic_store(&g_wdr_sync_fails, false);
+        ASSERT(failed);
+        ASSERT_STR_EQ(c, "");
+        ASSERT_EQ(wdr_sync_level(&f), 0);
+
+        ASSERT(wdr_receive(&f, d, sizeof(d)));
+        ASSERT(strcmp(d, a) != 0);
+        ASSERT(strcmp(d, b) != 0);
+        PASS();
+    } _test_next:;
+    atomic_store(&g_wdr_sync_fails, false);
+    wdr_use_system_rng();
+    wdr_teardown(&f);
+    if (vfs_on)
+        (void)sqlite3_vfs_unregister(&g_wdr_vfs);
+    return failures;
+}
+
+#define WDR_THREADS 2
+#define WDR_PER_THREAD 20
+
+struct wdr_worker {
+    struct wdr *f;
+    const struct sapling_key_entry *acct;
+    uint8_t d[WDR_PER_THREAD][11];
+    int done;
+};
+
+static void *wdr_worker_run(void *arg)
+{
+    struct wdr_worker *w = arg;
+    for (int i = 0; i < WDR_PER_THREAD; i++) {
+        uint8_t pk_d[32];
+        if (!wallet_sqlite_diversifier_reserve(&w->f->ws, w->acct, w->d[i],
+                                               pk_d))
+            return NULL;
+        w->done++;
+    }
+    return NULL;
+}
+
+/* Two callers at once never share an address. */
+static int test_concurrent_receives(void)
+{
+    int failures = 0;
+    struct wdr f;
+    memset(&f, 0, sizeof(f));
+    TEST("wallet_diversified_receive: concurrent receives differ") {
+        ASSERT(wdr_restore(&f));
+        wdr_use_start(0x777ULL);
+        struct sapling_key_entry acct;
+        ASSERT(wdr_account(&f, &acct));
+        struct wdr_worker w[WDR_THREADS];
+        pthread_t th[WDR_THREADS];
+        memset(w, 0, sizeof(w));
+        for (int t = 0; t < WDR_THREADS; t++) {
+            w[t].f = &f;
+            w[t].acct = &acct;
+            ASSERT_EQ(pthread_create(&th[t], NULL, wdr_worker_run, &w[t]), 0);
+        }
+        for (int t = 0; t < WDR_THREADS; t++)
+            pthread_join(th[t], NULL);
+        for (int t = 0; t < WDR_THREADS; t++)
+            ASSERT_EQ(w[t].done, WDR_PER_THREAD);
+        for (int a = 0; a < WDR_THREADS * WDR_PER_THREAD; a++)
+            for (int b = a + 1; b < WDR_THREADS * WDR_PER_THREAD; b++)
+                ASSERT(memcmp(w[a / WDR_PER_THREAD].d[a % WDR_PER_THREAD],
+                              w[b / WDR_PER_THREAD].d[b % WDR_PER_THREAD],
+                              11) != 0);
+        memory_cleanse(&acct, sizeof(acct));
+        PASS();
+    } _test_next:;
+    wdr_use_system_rng();
+    wdr_teardown(&f);
+    return failures;
+}
+
+/* Past the last issuable index the leaf refuses; it never wraps or repeats. */
+static int test_index_exhaustion(void)
+{
+    int failures = 0;
+    struct wdr f;
+    memset(&f, 0, sizeof(f));
+    TEST("wallet_diversified_receive: the index space ends in a refusal") {
+        ASSERT(wdr_restore(&f));
+        struct sapling_key_entry acct;
+        ASSERT(wdr_account(&f, &acct));
+        sqlite3_stmt *s = NULL;
+        ASSERT(sqlite3_prepare_v2(f.ndb.db,
+            "INSERT OR REPLACE INTO wallet_sapling_diversifier"
+            "(ivk,next_index) VALUES(?,?)", -1, &s, NULL) == SQLITE_OK);
+        sqlite3_bind_blob(s, 1, acct.ivk, 32, SQLITE_STATIC);
+        sqlite3_bind_int64(s, 2,
+                           (sqlite3_int64)(WALLET_DIVERSIFIER_INDEX_MAX - 40));
+        ASSERT(sqlite3_step(s) == SQLITE_DONE);
+        sqlite3_finalize(s);
+
+        char seen[64][128];
+        int issued = 0;
+        bool refused = false;
+        for (int i = 0; i < 64; i++) {
+            char a[128];
+            if (wdr_receive(&f, a, sizeof(a))) {
+                ASSERT(!refused);
+                for (int j = 0; j < issued; j++)
+                    ASSERT(strcmp(seen[j], a) != 0);
+                snprintf(seen[issued++], sizeof(seen[0]), "%s", a);
+            } else {
+                refused = true;
+            }
+        }
+        ASSERT(issued >= 1);
+        ASSERT(refused);
+        uint64_t next = 0;
+        ASSERT(wdr_stored_next(&f, &acct, &next));
+        ASSERT(next < WALLET_DIVERSIFIER_INDEX_MAX);
+        memory_cleanse(&acct, sizeof(acct));
+        PASS();
+    } _test_next:;
+    wdr_teardown(&f);
+    return failures;
+}
+
+/* An issued address is owned: its balance is the account's funded notes, and
+ * a send from it is not refused as foreign. */
+static int test_issued_address_is_owned(void)
+{
+    int failures = 0;
+    struct wdr f;
+    memset(&f, 0, sizeof(f));
+    TEST("wallet_diversified_receive: balance and send know an issued address") {
+        ASSERT(wdr_restore(&f));
+        struct sapling_key_entry acct;
+        ASSERT(wdr_account(&f, &acct));
+        uint64_t start = wdr_use_start(0xabcdefULL);
+        char x[128], def[128], payee[128];
+        ASSERT(wdr_receive(&f, x, sizeof(x)));
+        ASSERT(wdr_default(&acct, def, sizeof(def)));
+        ASSERT(wdr_expected_from(&acct, start, 9, payee, sizeof(payee)));
+        ASSERT_EQ(wdr_deliver(&f, x, 3 * WDR_UNIT, 1), 1);
+
+        for (int which = 0; which < 2; which++) {
+            struct json_value params, minconf, result;
+            json_init(&params);
+            json_set_array(&params);
+            json_init(&minconf);
+            json_set_str(&minconf, which == 0 ? x : def);
+            ASSERT(json_push_back(&params, &minconf));
+            json_free(&minconf);
+            json_init(&minconf);
+            json_set_int(&minconf, 0);
+            ASSERT(json_push_back(&params, &minconf));
+            json_free(&minconf);
+            json_init(&result);
+            ASSERT(rpc_table_execute(f.tbl, "z_getbalance", &params, &result));
+            ASSERT_STR_EQ(json_get_str(&result), "3.00000000");
+            json_free(&params);
+            json_free(&result);
+        }
+
+        struct json_value params, recips, rcp, result;
+        json_init(&params);
+        json_set_array(&params);
+        json_init(&rcp);
+        json_set_str(&rcp, x);
+        ASSERT(json_push_back(&params, &rcp));
+        json_free(&rcp);
+        json_init(&recips);
+        json_set_array(&recips);
+        json_init(&rcp);
+        json_set_object(&rcp);
+        ASSERT(json_push_kv_str(&rcp, "address", payee));
+        ASSERT(json_push_kv_str(&rcp, "amount", "0.10000000"));
+        ASSERT(json_push_back(&recips, &rcp));
+        ASSERT(json_push_back(&params, &recips));
+        json_free(&rcp);
+        json_free(&recips);
+        json_init(&result);
+        (void)rpc_table_execute(f.tbl, "z_sendmany", &params, &result);
+        const char *msg = json_get_str(&result);
+        ASSERT(!msg || strstr(msg, "not in wallet") == NULL);
+        json_free(&params);
+        json_free(&result);
+        memory_cleanse(&acct, sizeof(acct));
+        PASS();
+    } _test_next:;
+    wdr_use_system_rng();
+    wdr_teardown(&f);
+    return failures;
+}
+
+static char g_wdr_send_params[1024];
+
+static char *wdr_stub_send(const char *method, const char *params_json)
+{
+    if (method && strcmp(method, "getwalletinfo") == 0)
+        return strdup("{\"paytxfee\":\"0.00010000\"}");
+    if (method && strcmp(method, "z_sendmany") == 0) {
+        snprintf(g_wdr_send_params, sizeof(g_wdr_send_params), "%s",
+                 params_json ? params_json : "");
+        return strdup("\"00112233445566778899aabbccddeeff"
+                      "00112233445566778899aabbccddeeff\"");
+    }
+    return strdup("null");
+}
+
+/* The native send leaf passes the whole-account from form through to the
+ * node's send unchanged. */
+static int test_native_send_from_account(void)
+{
+    int failures = 0;
+    TEST("wallet_diversified_receive: native send accepts from=account") {
+        const struct zcl_command_registry *reg = zcl_command_catalog();
+        ASSERT(reg != NULL);
+        const struct zcl_command_spec *spec = zcl_command_registry_find(
+            reg, "core.wallet.shielded.send", NULL);
+        ASSERT(spec != NULL);
+        struct json_value in;
+        json_init(&in);
+        json_set_object(&in);
+        ASSERT(json_push_kv_str(&in, "wallet_scope", "dev"));
+        ASSERT(json_push_kv_str(&in, "from", "account"));
+        ASSERT(json_push_kv_str(&in, "to", "zs1payee"));
+        ASSERT(json_push_kv_str(&in, "amount", "1.00000000"));
+        ASSERT(json_push_kv_bool(&in, "confirm", true));
+        struct zcl_command_request req = {
+            .spec = spec, .input = &in, .view = "normal",
+        };
+        struct zcl_command_reply reply;
+        node_rpc_client_set_test_hook(wdr_stub_send);
+        g_wdr_send_params[0] = '\0';
+        zcl_command_reply_init(&reply, spec->output_schema);
+        zcl_native_handle_wallet_shielded_send(&req, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "from")), "account");
+        ASSERT(strncmp(g_wdr_send_params, "[\"account\",", 11) == 0);
+        zcl_command_reply_free(&reply);
+        node_rpc_client_set_test_hook(NULL);
+        json_free(&in);
+        PASS();
+    } _test_next:;
+    node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
+/* The measured cost of a synced receive, printed with the run's evidence. */
+static int test_receive_cost(void)
+{
+    int failures = 0;
+    struct wdr f;
+    memset(&f, 0, sizeof(f));
+    TEST("wallet_diversified_receive: cost of a synced receive") {
+        ASSERT(wdr_restore(&f));
+        enum { N = 40 };
+        char a[128];
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (int i = 0; i < N; i++)
+            ASSERT(wdr_receive(&f, a, sizeof(a)));
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3 +
+                    (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+        printf("(%d receives, %.2f ms each) ", N, ms / N);
+        PASS();
+    } _test_next:;
+    wdr_teardown(&f);
+    return failures;
+}
+
+
 int test_wallet_diversified_receive(void)
 {
     int failures = 0;
@@ -693,6 +1324,14 @@ int test_wallet_diversified_receive(void)
     failures += test_agent_session_refused();
     failures += test_native_reply_shape();
     failures += test_no_address_in_logs();
+    failures += test_random_start();
+    failures += test_random_failure_refuses();
+    failures += test_index_synced_before_return();
+    failures += test_concurrent_receives();
+    failures += test_index_exhaustion();
+    failures += test_issued_address_is_owned();
+    failures += test_native_send_from_account();
+    failures += test_receive_cost();
     return failures;
 }
 
@@ -908,10 +1547,17 @@ static bool wds_nf(const struct sapling_key_entry *key, const char *address,
                               key->xfvk.fvk.nk, position, nf);
 }
 
+/* What the wallet recorded for one note before the process restarted. */
+struct wds_note {
+    uint8_t rcm[32];
+    uint64_t value;
+};
+
 /* Every check after the three notes are in the wallet: build the `account`
  * send, then verify and confirm it. */
 static int wds_spend_all(struct wdr *f, struct simnet *s,
-                         const char addrs[WDR_PAYERS][128])
+                         const char addrs[WDR_PAYERS][128],
+                         const struct wds_note snap[WDR_PAYERS])
 {
     int failures = 0;
     TEST("simnet_wallet_diversified_send: one account send spends all three") {
@@ -969,15 +1615,14 @@ static int wds_spend_all(struct wdr *f, struct simnet *s,
         ASSERT_EQ((int)tx->num_shielded_spend, WDR_PAYERS);
         ASSERT_EQ((int)tx->num_shielded_output, 2);
         int64_t total = 0;
-        for (size_t i = 0; i < f->w->num_sapling_notes; i++)
-            total += (int64_t)f->w->sapling_notes[i].value;
+        for (unsigned i = 0; i < WDR_PAYERS; i++)
+            total += (int64_t)snap[i].value;
         ASSERT_EQ(tx->value_balance, f->w->default_fee);
 
         /* Each spend's nullifier is the one the note's own diversifier gives. */
         for (unsigned k = 0; k < WDR_PAYERS; k++) {
             uint8_t nf[32];
-            const struct sapling_received_note *n = &f->w->sapling_notes[k];
-            ASSERT(wds_nf(key, addrs[k], n->rcm, n->value, k, nf));
+            ASSERT(wds_nf(key, addrs[k], snap[k].rcm, snap[k].value, k, nf));
             ASSERT(wds_spends(tx, nf));
         }
         for (size_t a = 0; a < tx->num_shielded_spend; a++)
@@ -1091,6 +1736,18 @@ int test_simnet_wallet_diversified_send(void)
         for (unsigned k = 0; k < WDR_PAYERS; k++)
             sum += (k + 1) * (uint64_t)100000000 - (uint64_t)WDS_FEE;
         ASSERT(wdr_total(&f) == sum);
+        struct wds_note snap[WDR_PAYERS];
+        ASSERT_EQ((int)f.w->num_sapling_notes, WDR_PAYERS);
+        for (unsigned k = 0; k < WDR_PAYERS; k++) {
+            memcpy(snap[k].rcm, f.w->sapling_notes[k].rcm, 32);
+            snap[k].value = f.w->sapling_notes[k].value;
+        }
+
+        /* A restart: the spend reads the notes from the database, not from
+         * the process that found them. */
+        wdr_close(&f);
+        ASSERT(wdr_boot(&f));
+        ASSERT_EQ((int)f.w->num_sapling_notes, 0);
 
         ASSERT(wds_trust(f.dir, height));
         trusted = true;
@@ -1100,7 +1757,7 @@ int test_simnet_wallet_diversified_send(void)
         rpc_wallet_set_state(f.w, &ms, f.dir, &f.ws, NULL, NULL);
         wallet_rpc_context_set_node_db(&f.ndb);
         PASS();
-        failures += wds_spend_all(&f, &s, (const char (*)[128])addrs);
+        failures += wds_spend_all(&f, &s, (const char (*)[128])addrs, snap);
     } _test_next:;
     if (ms_open)
         main_state_free(&ms);
