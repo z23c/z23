@@ -208,48 +208,84 @@ static int elf_collect_needed(FILE *f, const unsigned char *dyn, size_t dyn_sz,
  * and an ELF host simply never reaches it. Thin little-endian 64-bit only,
  * which is what a native build links. Returns 1 when `f` is such an image
  * (names filled, or -1 on a malformed one), 0 when it is not Mach-O. */
-static int macho_needed(FILE *f, char *names, size_t cap)
+/* Read the load-command block of such an image into *cmds (the caller frees
+ * it): 1 when read, 0 when `f` is not Mach-O, -1 when malformed. */
+static int macho_read_cmds(FILE *f, unsigned char **cmds, uint32_t *ncmds,
+                           uint32_t *sizeofcmds)
 {
-    unsigned char hdr[32], *cmds;
-    uint32_t ncmds, sizeofcmds, off = 0, i;
-    size_t used = 0;
-    int rc = -1;
+    unsigned char hdr[32];
 
+    *cmds = NULL;
+    *ncmds = 0;
+    *sizeofcmds = 0;
     if (!host_is_le() || elf_read(f, hdr, sizeof hdr, 0) != 0 ||
         rd32(hdr) != 0xfeedfacfu)
         return 0;
-    ncmds = rd32(hdr + 16);
-    sizeofcmds = rd32(hdr + 20);
-    if (sizeofcmds == 0 || sizeofcmds > (16u << 20))
+    *ncmds = rd32(hdr + 16);
+    *sizeofcmds = rd32(hdr + 20);
+    if (*sizeofcmds == 0 || *sizeofcmds > (16u << 20))
         return -1;
-    cmds = malloc(sizeofcmds);
-    if (cmds == NULL || elf_read(f, cmds, sizeofcmds, sizeof hdr) != 0)
-        goto out;
+    *cmds = malloc(*sizeofcmds);
+    if (*cmds == NULL || elf_read(f, *cmds, *sizeofcmds, sizeof hdr) != 0)
+        return -1;
+    return 1;
+}
+
+/* LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB, LC_LAZY_LOAD_DYLIB
+ * (0x20) and LC_LOAD_UPWARD_DYLIB. */
+static bool macho_is_dylib_cmd(uint32_t cmd)
+{
+    return cmd == 0xcu || cmd == 0x20u || cmd == 0x80000018u ||
+           cmd == 0x8000001fu ||
+           cmd == 0x80000023u;
+}
+
+/* Append the dylib name of the `size`-byte load command at `lc` to names;
+ * -1 when the command is malformed or names is full. */
+static int macho_append_dylib(const unsigned char *lc, uint32_t size,
+                              char *names, size_t cap, size_t *used)
+{
+    uint32_t name_off;
+    size_t len;
+
+    if (size < 24)
+        return -1;
+    name_off = rd32(lc + 8);
+    if (name_off < 24 || name_off >= size)
+        return -1;
+    len = strnlen((const char *)lc + name_off, size - name_off);
+    if (len == size - name_off || *used + len + 2 > cap)
+        return -1;
+    memcpy(names + *used, lc + name_off, len);
+    *used += len;
+    names[(*used)++] = '\n';
+    names[*used] = '\0';
+    return 0;
+}
+
+static int macho_needed(FILE *f, char *names, size_t cap)
+{
+    unsigned char *cmds;
+    uint32_t ncmds, sizeofcmds, off = 0, i;
+    size_t used = 0;
+    int rc = macho_read_cmds(f, &cmds, &ncmds, &sizeofcmds);
+
+    if (rc <= 0) {
+        free(cmds);
+        return rc;
+    }
+    rc = -1;
     for (i = 0; i < ncmds; i++) {
-        uint32_t cmd, size, name_off;
-        size_t len;
+        uint32_t cmd, size;
         if (off > sizeofcmds || sizeofcmds - off < 8)
             goto out;
         cmd = rd32(cmds + off);
         size = rd32(cmds + off + 4);
         if (size < 8 || size > sizeofcmds - off)
             goto out;
-        if (cmd == 0xcu || cmd == 0x20u || cmd == 0x80000018u ||
-            cmd == 0x8000001fu ||
-            cmd == 0x80000023u) {
-            if (size < 24)
-                goto out;
-            name_off = rd32(cmds + off + 8);
-            if (name_off < 24 || name_off >= size)
-                goto out;
-            len = strnlen((const char *)cmds + off + name_off, size - name_off);
-            if (len == size - name_off || used + len + 2 > cap)
-                goto out;
-            memcpy(names + used, cmds + off + name_off, len);
-            used += len;
-            names[used++] = '\n';
-            names[used] = '\0';
-        }
+        if (macho_is_dylib_cmd(cmd) &&
+            macho_append_dylib(cmds + off, size, names, cap, &used) != 0)
+            goto out;
         off += size;
     }
     rc = (used > 0 && off == sizeofcmds) ? 1 : -1;
