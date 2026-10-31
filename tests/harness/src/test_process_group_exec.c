@@ -14,9 +14,9 @@
  * can end is the one this launcher created, so no pid is ever reused
  * into a kill and no held port ever authorizes termination.
  *
- * Non-Linux POSIX hosts have no PR_SET_PDEATHSIG; there the launcher
- * must say so on stderr (an explicit limitation, never a silent
- * pretend-fix) and the armed case degrades to survival. The lease mode
+ * Non-Linux POSIX hosts have no PR_SET_PDEATHSIG; there the launcher stays
+ * resident as the group leader and supervises the fixture, ending the whole
+ * group when its driver dies, so the same reaping contract is observed. The lease mode
  * is fully POSIX and is exercised everywhere. Windows runs the stronger
  * Job Object acceptance binary instead of this group.
  */
@@ -49,26 +49,95 @@ static const char *pge_launcher(void)
     return NULL;
 }
 
-/* Run one launcher invocation under a disposable shell parent that
- * records the launcher pid. Returns the shell pid; the launcher pid is
- * written to pidfile by the shell. */
+/* Run one launcher invocation under a disposable driver process that records
+ * the launcher pid. Returns the driver pid; the launcher pid is written to
+ * pidfile by the driver. Pure C: the driver forks and execs the launcher
+ * directly, with no shell, and then waits on it. */
 static pid_t pge_spawn(const char *launcher, const char *flag,
                        const char *pidfile)
 {
-    char script[1024];
-    int n = snprintf(script, sizeof(script),
-                     "'%s' %s sleep 60 & echo $! > '%s'; wait", launcher,
-                     flag ? flag : "", pidfile);
-    if (n <= 0 || (size_t)n >= sizeof(script))
+    pid_t driver = fork();
+    if (driver < 0)
         return 0;
-    pid_t shell = fork();
-    if (shell < 0)
-        return 0;
-    if (shell == 0) {
-        execl("/bin/sh", "sh", "-c", script, (char *)NULL);
+    if (driver > 0)
+        return driver;
+    pid_t child = fork();
+    if (child < 0)
+        _exit(126);
+    if (child == 0) {
+        if (flag)
+            execl(launcher, launcher, flag, "sleep", "60", (char *)NULL);
+        else
+            execl(launcher, launcher, "sleep", "60", (char *)NULL);
         _exit(127);
     }
-    return shell;
+    FILE *f = fopen(pidfile, "w");
+    if (!f || fprintf(f, "%ld\n", (long)child) < 0 || fclose(f) != 0) {
+        kill(child, SIGKILL);
+        _exit(125);
+    }
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR)
+        ;
+    _exit(0);
+}
+
+/* Like pge_spawn with --die-with-parent, but the fixture is `tee READY` fed
+ * from a pipe whose write end the TEST keeps open (returned in *hold): tee
+ * creates READY before it reads, so the file proves the fixture itself is
+ * running, and it cannot exit on stdin EOF when the driver dies. */
+static pid_t pge_spawn_ready(const char *launcher, const char *pidfile,
+                             const char *ready, int *hold)
+{
+    int fds[2];
+    if (pipe(fds) != 0)
+        return 0;
+    pid_t driver = fork();
+    if (driver < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return 0;
+    }
+    if (driver > 0) {
+        close(fds[0]);
+        *hold = fds[1];
+        return driver;
+    }
+    close(fds[1]);
+    pid_t child = fork();
+    if (child < 0)
+        _exit(126);
+    if (child == 0) {
+        if (dup2(fds[0], STDIN_FILENO) < 0)
+            _exit(126);
+        if (fds[0] != STDIN_FILENO)
+            close(fds[0]);
+        execl(launcher, launcher, "--die-with-parent", "tee", ready,
+              (char *)NULL);
+        _exit(127);
+    }
+    close(fds[0]);
+    FILE *f = fopen(pidfile, "w");
+    if (!f || fprintf(f, "%ld\n", (long)child) < 0 || fclose(f) != 0) {
+        kill(child, SIGKILL);
+        _exit(125);
+    }
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0 && errno == EINTR)
+        ;
+    _exit(0);
+}
+
+static int pge_wait_path(const char *path, int seconds)
+{
+    for (int i = 0; i < seconds * 10; i++) {
+        if (access(path, F_OK) == 0)
+            return 1;
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 100 * 1000 * 1000};
+        nanosleep(&ts, NULL); /* real-clock: the fixture is a real process
+                               * creating a real file; no seam spans it */
+    }
+    return access(path, F_OK) == 0;
 }
 
 static int pge_read_pid(const char *pidfile, pid_t *out)
@@ -102,6 +171,37 @@ static int pge_wait_gone(pid_t p, int seconds)
     return !pge_alive(p);
 }
 
+/* True while any process is still a member of process group `group`. */
+static int pge_group_alive(pid_t group)
+{
+    return group > 1 && (kill(-group, 0) == 0 || errno != ESRCH);
+}
+
+static int pge_wait_group_alive(pid_t group, int seconds)
+{
+    for (int i = 0; i < seconds * 10; i++) {
+        if (pge_group_alive(group))
+            return 1;
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 100 * 1000 * 1000};
+        nanosleep(&ts, NULL); /* real-clock: the child runs setsid in its own
+                               * process; no fake-clock seam spans processes */
+    }
+    return pge_group_alive(group);
+}
+
+static int pge_wait_group_gone(pid_t group, int seconds)
+{
+    for (int i = 0; i < seconds * 10; i++) {
+        if (!pge_group_alive(group))
+            return 1;
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 100 * 1000 * 1000};
+        nanosleep(&ts, NULL); /* real-clock: observing the kernel deliver a
+                               * parent-death SIGTERM to a real group; no
+                               * fake-clock seam spans processes */
+    }
+    return !pge_group_alive(group);
+}
+
 static int pge_wait_file(const char *pidfile, pid_t *out)
 {
     for (int i = 0; i < 50; i++) {
@@ -115,55 +215,73 @@ static int pge_wait_file(const char *pidfile, pid_t *out)
     return 0;
 }
 
+/* One --die-with-parent observation. Every resource is released on every
+ * path, including a failed expectation: the descriptor, the driver, and any
+ * fixture group left running. */
+static bool pge_dwp_observe(const char *launcher, const char *dir)
+{
+    char pidfile[300], ready[320];
+    int hold = -1;
+    pid_t driver = 0, group = 0;
+    bool driver_reaped = false, ok = false;
+    if (snprintf(pidfile, sizeof(pidfile), "%s/pid", dir) <= 0 ||
+        snprintf(ready, sizeof(ready), "%s/ready", dir) <= 0)
+        return false;
+    driver = pge_spawn_ready(launcher, pidfile, ready, &hold);
+    if (driver <= 0)
+        goto out;
+    /* The launcher is the leader of its own session and group, so its pid is
+     * the group id of the launcher and the fixture it runs: Linux execs the
+     * fixture in place, elsewhere the launcher stays resident as the
+     * fixture's supervisor. Watching the group observes the fixture itself,
+     * not only the launcher. The pid is recorded at fork; the group exists
+     * once the launcher has run setsid, so wait for it rather than race. */
+    if (!pge_wait_file(pidfile, &group) || !pge_wait_group_alive(group, 5))
+        goto out;
+    /* The fixture (tee) creates its ready file only once it is running under
+     * the launcher; it stays blocked on the pipe this test holds open. */
+    if (!pge_wait_path(ready, 10))
+        goto out;
+    /* The fixture must be living on its own until the driver dies: if it
+     * exits independently the reaping below would prove nothing. */
+    if (pge_wait_group_gone(group, 1))
+        goto out;
+    /* Kill the driver exactly as a crashed harness dies. */
+    int status = 0;
+    if (kill(driver, SIGKILL) != 0 || waitpid(driver, &status, 0) != driver)
+        goto out;
+    driver_reaped = true;
+    ok = pge_wait_group_gone(group, 10);
+out:
+    /* Closing the held pipe also ends the tee fixture on stdin EOF, so a
+     * failed expectation cannot leave it running; no group is signalled by
+     * id, which could name a reused id. */
+    if (hold >= 0)
+        close(hold);
+    if (driver > 0 && !driver_reaped) {
+        kill(driver, SIGKILL);
+        (void)waitpid(driver, &(int){0}, 0);
+    }
+    unlink(ready);
+    unlink(pidfile);
+    return ok;
+}
+
 static int test_die_with_parent_reaps_fixture(void)
 {
     int failures = 0;
-#if defined(__linux__)
-    TEST("process-group-exec: --die-with-parent reaps the fixture when "
-         "the launching shell dies") {
+    TEST("process-group-exec: --die-with-parent reaps the whole fixture "
+         "group when the launching driver dies") {
         const char *launcher = pge_launcher();
         ASSERT(launcher != NULL);
         char dir[] = "test-tmp/pge_dwp_XXXXXX";
         ASSERT(mkdtemp(dir) != NULL);
-        char pidfile[300];
-        ASSERT(snprintf(pidfile, sizeof(pidfile), "%s/pid", dir) > 0);
-        pid_t shell = pge_spawn(launcher, "--die-with-parent", pidfile);
-        ASSERT(shell > 0);
-        pid_t fixture = 0;
-        ASSERT(pge_wait_file(pidfile, &fixture));
-        ASSERT(pge_alive(fixture));
-        /* Kill the driver exactly as a crashed harness dies. */
-        ASSERT(kill(shell, SIGKILL) == 0);
-        int status = 0;
-        ASSERT(waitpid(shell, &status, 0) == shell);
-        ASSERT(pge_wait_gone(fixture, 5));
-        unlink(pidfile);
+        bool reaped = pge_dwp_observe(launcher, dir);
         rmdir(dir);
+        ASSERT(reaped);
         PASS();
     }
     _test_next:;
-#else
-    TEST("process-group-exec: --die-with-parent reports the platform "
-         "limitation instead of pretending") {
-        const char *launcher = pge_launcher();
-        ASSERT(launcher != NULL);
-        char line[512];
-        int n = snprintf(line, sizeof(line),
-                         "'%s' --die-with-parent true 2>&1", launcher);
-        ASSERT(n > 0 && (size_t)n < sizeof(line));
-        FILE *p = popen(line, "r");
-        ASSERT(p != NULL);
-        bool named = false;
-        while (fgets(line, sizeof(line), p))
-            if (strstr(line, "unavailable on this platform"))
-                named = true;
-        int rc = pclose(p);
-        ASSERT(named);
-        ASSERT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0);
-        PASS();
-    }
-    _test_next:;
-#endif
     return failures;
 }
 
