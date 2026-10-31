@@ -4,6 +4,7 @@
  * rewinds the utxo_apply cursor and purges the stale replay tail. Moved out of
  * engine/modules/storage/src/coins_ram.c unchanged; behaviour is identical.
  */
+#include "base/serialize_le.h"
 #include "storage/coins_ram.h"
 #include "coins_ram_internal.h"
 #include "storage/progress_store.h"
@@ -96,9 +97,7 @@ bool coins_ram_reconcile_boot(
                  wlen);
         return false;
     } else {
-        uint64_t u = 0;
-        for (int i = 0; i < 8; i++) u |= (uint64_t)wm[i] << (8 * i);
-        watermark = (int32_t)u;
+        watermark = (int32_t)zcl_read_u64_le(wm);
     }
 
     /* Read the persisted utxo_apply cursor. */
