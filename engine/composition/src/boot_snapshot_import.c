@@ -816,6 +816,55 @@ static bool snapshot_import_checkpoint_mismatch(struct node_db *ndb,
     return true;
 }
 
+static const char *snapshot_import_open_reason(sqlite3 *src)
+{
+    return src ? sqlite3_errmsg(src) : "n/a";
+}
+
+static void snapshot_import_close_if_open(sqlite3 *src)
+{
+    if (src)
+        sqlite3_close(src);
+}
+
+/* True when the installed set is rejected at the checkpoint; the caller logs.
+ * The checkpoint is looked up only after a successful bulk copy (ok), as
+ * before the split; *cp stays NULL otherwise. */
+static bool snapshot_import_checkpoint_rejects(struct node_db *ndb,
+    const struct sha3_utxo_checkpoint **cp, int64_t snap_height, bool ok,
+    uint64_t *cnt)
+{
+    if (!ok)
+        return false;
+    *cp = get_sha3_utxo_checkpoint();
+    return snapshot_import_checkpoint_mismatch(ndb, *cp, snap_height, cnt);
+}
+
+static bool snapshot_import_mirror_unless_rejected(struct node_db *ndb,
+    struct snapshot_import_pending *pending, int64_t expected_count,
+    bool ok, bool rejected)
+{
+    return ok && !rejected && snapshot_import_record_mirror(ndb, pending, expected_count);
+}
+
+static bool snapshot_import_commit_failed(struct node_db *ndb, bool ok)
+{
+    if (!ok)
+        return false;
+    return sqlite3_exec(ndb->db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK;
+}
+
+static bool snapshot_import_settle_txn(struct node_db *ndb, bool ok,
+    bool commit_failed)
+{
+    bool committed = ok && !commit_failed;
+    if (!committed)
+        sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL);
+    sqlite3_exec(ndb->db, "DETACH DATABASE snapsrc", NULL, NULL, NULL);
+    sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
+    return committed;
+}
+
 bool boot_import_snapshot_db(struct node_db *ndb,
                               const char *snapshot_path,
                               int64_t *out_utxo_count,
@@ -839,8 +888,8 @@ bool boot_import_snapshot_db(struct node_db *ndb,
     sqlite3 *src = NULL;
     if (sqlite3_open_v2(snapshot_path, &src,
                         SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
-        const char *m = src ? sqlite3_errmsg(src) : "n/a";
-        if (src) sqlite3_close(src);
+        const char *m = snapshot_import_open_reason(src);
+        snapshot_import_close_if_open(src);
         LOG_FAIL("boot_snapshot_import", "open ro %s: %s",
                  snapshot_path, m);
     }
@@ -935,40 +984,34 @@ bool boot_import_snapshot_db(struct node_db *ndb,
      * snapshot path writes no cold-import seed, so the boot torn-gate cannot
      * see it) is a documented follow-up — the checkpoint reject is the
      * load-bearing half and closes the fabricate-at-the-checkpoint hole. */
-    if (ok) {
-        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-        uint64_t cnt = 0;
-        if (snapshot_import_checkpoint_mismatch(ndb, cp, snap_height, &cnt)) {
+    const struct sha3_utxo_checkpoint *cp = NULL;
+    uint64_t cnt = 0;
+    bool rejected = snapshot_import_checkpoint_rejects(ndb, &cp, snap_height, ok, &cnt);
+    {
+        if (rejected) {
             LOG_WARN("boot_snapshot_import",
                      "checkpoint SHA3 MISMATCH at h=%lld (count=%llu "
                      "want=%llu) — snapshot REJECTED, not installed as "
                      "ground truth",
                      (long long)snap_height, (unsigned long long)cnt,
                      (unsigned long long)cp->utxo_count);
-            ok = false;
         }
     }
-    if (ok) {
-        ok = snapshot_import_record_mirror(ndb, &pending, snap_utxos);
-    }
-    if (ok) {
+    ok = snapshot_import_mirror_unless_rejected(ndb, &pending, snap_utxos, ok, rejected);
+    bool commit_failed = snapshot_import_commit_failed(ndb, ok);
+    {
         /* A failed COMMIT (SQLITE_FULL / IO error) leaves the bulk-copy txn
          * uncommitted — we must NOT then stamp coins_best_block at the
          * snapshot tip (that is the snapshot-path coin-tear class). Capture
          * the rc, roll back, and propagate failure so the caller falls back
          * to normal sync instead of trusting a half-installed set. */
-        if (sqlite3_exec(ndb->db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+        if (commit_failed) {
             LOG_WARN("boot_snapshot_import",
                      "COMMIT failed (%s) — rolling back snapshot install",
                      sqlite3_errmsg(ndb->db));
-            sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL);
-            ok = false;
         }
-    } else {
-        sqlite3_exec(ndb->db, "ROLLBACK", NULL, NULL, NULL);
     }
-    sqlite3_exec(ndb->db, "DETACH DATABASE snapsrc", NULL, NULL, NULL);
-    sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
+    ok = snapshot_import_settle_txn(ndb, ok, commit_failed);
 
     if (!ok) {
         LOG_FAIL("boot_snapshot_import",
