@@ -66,6 +66,12 @@ static bool blob_exists(const char *path)
     struct stat st;
     return lstat(path, &st) == 0;
 }
+/* Why a key may not hold the wallet secret: software-only, or not authenticated for every use. */
+static enum zapp_devkey_status key_refusal(enum zapp_devkey_level level, bool per_use)
+{
+    if (level != ZAPP_DEVKEY_LEVEL_SECURE_HARDWARE && level != ZAPP_DEVKEY_LEVEL_STRONGBOX) return ZAPP_DEVKEY_NOT_HARDWARE;
+    return per_use ? ZAPP_DEVKEY_OK : ZAPP_DEVKEY_NOT_PER_USE;
+}
 enum zapp_devkey_status zapp_devkey_prepare(const struct zapp_devkey_ops *ops, const char *path, struct zapp_devkey_info *out)
 {
     struct zapp_devkey_info info = {ZAPP_DEVKEY_LEVEL_UNKNOWN, false};
@@ -80,13 +86,10 @@ enum zapp_devkey_status zapp_devkey_prepare(const struct zapp_devkey_ops *ops, c
         if (created) st = ops->key_policy(ops->ctx, &info.level, &per_use);
     }
     if (st != ZAPP_DEVKEY_OK) return st == ZAPP_DEVKEY_INVALIDATED ? st : ZAPP_DEVKEY_ERROR;
-    if (info.level != ZAPP_DEVKEY_LEVEL_SECURE_HARDWARE && info.level != ZAPP_DEVKEY_LEVEL_STRONGBOX) {
+    st = key_refusal(info.level, per_use);
+    if (st != ZAPP_DEVKEY_OK) {
         if (created) ops->delete_key(ops->ctx);
-        return ZAPP_DEVKEY_NOT_HARDWARE;
-    }
-    if (!per_use) {
-        if (created) ops->delete_key(ops->ctx);
-        return ZAPP_DEVKEY_NOT_PER_USE;
+        return st;
     }
     if (out) *out = info;
     return ZAPP_DEVKEY_OK;

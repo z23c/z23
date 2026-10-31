@@ -265,10 +265,8 @@ static bool info_flag(JNIEnv *env, jobject info, const char *name, bool *value)
     *value = get && (*env)->CallBooleanMethod(env, info, get);
     return get && zj_clean(env);
 }
-/* Reads the security level and the authentication policy of the stored key from its KeyInfo. The key
- * is per-use only when authentication is required with no validity window, for both sources, and
- * the secure hardware enforces it. */
-static bool key_info_policy(JNIEnv *env, jobject key, enum zapp_devkey_level *level, bool *per_use)
+/* The KeyInfo of a stored key, or NULL. */
+static jobject key_info_of(JNIEnv *env, jobject key)
 {
     jclass factory = (*env)->FindClass(env, "javax/crypto/SecretKeyFactory");
     jclass info_cls = zj_clean(env) && factory ? (*env)->FindClass(env, "android/security/keystore/KeyInfo") : NULL;
@@ -278,9 +276,17 @@ static bool key_info_policy(JNIEnv *env, jobject key, enum zapp_devkey_level *le
         "(Ljava/lang/String;Ljava/lang/String;)Ljavax/crypto/SecretKeyFactory;", algorithm, provider) : NULL;
     jobject info = zj_clean(env) && maker ? call_object(env, maker, "getKeySpec",
         "(Ljavax/crypto/SecretKey;Ljava/lang/Class;)Ljava/security/spec/KeySpec;", key, info_cls) : NULL;
+    return zj_clean(env) ? info : NULL;
+}
+/* Reads the security level and the authentication policy of the stored key from its KeyInfo. The key
+ * is per-use only when authentication is required with no validity window, for both sources, and
+ * the secure hardware enforces it. */
+static bool key_info_policy(JNIEnv *env, jobject key, enum zapp_devkey_level *level, bool *per_use)
+{
+    jobject info = key_info_of(env, key);
     jint security = 0, seconds = 0, types = 0;
     bool required = false, enforced = false;
-    bool read = zj_clean(env) && info && info_int(env, info, "getSecurityLevel", &security) &&
+    bool read = info && info_int(env, info, "getSecurityLevel", &security) &&
         info_flag(env, info, "isUserAuthenticationRequired", &required) &&
         info_int(env, info, "getUserAuthenticationValidityDurationSeconds", &seconds) &&
         info_int(env, info, "getUserAuthenticationType", &types) &&
@@ -400,39 +406,34 @@ static jobject build_prompt(JNIEnv *env, jobject activity, enum zapp_devkey_purp
     jobject prompt = ok ? call_object(env, builder, "build", "()Landroid/hardware/biometrics/BiometricPrompt;") : NULL;
     return zj_clean(env) ? prompt : NULL;
 }
-/* Shows one BiometricPrompt over a CryptoObject that holds the initialised cipher and waits for the
- * owner. OK means Keystore has bound this one operation to a fresh authentication; the caller then
- * runs the operation on the same cipher. Nothing the callbacks do touches key material. */
-static status_t authenticate_once(JNIEnv *env, jobject activity, jobject cipher, enum zapp_devkey_purpose purpose)
+struct prompt_parts { jobject prompt, crypto, cancel, executor, callback; };
+/* Builds everything one prompt needs. On failure the executor, if made, is already shut down. */
+static bool prompt_parts_new(JNIEnv *env, jobject activity, jobject cipher, enum zapp_devkey_purpose purpose, struct prompt_parts *p)
 {
     jclass klass = load_prompt_class(env, activity);
-    jobject prompt = klass ? build_prompt(env, activity, purpose) : NULL;
-    jobject crypto = prompt ? new_object(env, "android/hardware/biometrics/BiometricPrompt$CryptoObject", "(Ljavax/crypto/Cipher;)V", cipher) : NULL;
-    jobject cancel = crypto ? new_object(env, "android/os/CancellationSignal", "()V") : NULL;
-    jclass pool = cancel ? (*env)->FindClass(env, "java/util/concurrent/Executors") : NULL;
-    jobject executor = zj_clean(env) && pool ? call_static(env, pool, "newSingleThreadExecutor", "()Ljava/util/concurrent/ExecutorService;") : NULL;
-    jmethodID construct = executor ? (*env)->GetMethodID(env, klass, "<init>", "()V") : NULL;
-    jobject callback = zj_clean(env) && construct ? (*env)->NewObject(env, klass, construct) : NULL;
-    if (!zj_clean(env) || !callback) {
-        if (executor) (void)call_void(env, executor, "shutdown", "()V");
-        return ZAPP_DEVKEY_ERROR;
-    }
-    unsigned long ticket = zapp_devkey_wait_begin(&prompt_wait);
-    if (!ticket) { (void)call_void(env, executor, "shutdown", "()V"); return ZAPP_DEVKEY_ERROR; }
+    p->prompt = klass ? build_prompt(env, activity, purpose) : NULL;
+    p->crypto = p->prompt ? new_object(env, "android/hardware/biometrics/BiometricPrompt$CryptoObject", "(Ljavax/crypto/Cipher;)V", cipher) : NULL;
+    p->cancel = p->crypto ? new_object(env, "android/os/CancellationSignal", "()V") : NULL;
+    jclass pool = p->cancel ? (*env)->FindClass(env, "java/util/concurrent/Executors") : NULL;
+    p->executor = zj_clean(env) && pool ? call_static(env, pool, "newSingleThreadExecutor", "()Ljava/util/concurrent/ExecutorService;") : NULL;
+    jmethodID construct = p->executor ? (*env)->GetMethodID(env, klass, "<init>", "()V") : NULL;
+    p->callback = zj_clean(env) && construct ? (*env)->NewObject(env, klass, construct) : NULL;
+    if (zj_clean(env) && p->callback) return true;
+    if (p->executor) (void)call_void(env, p->executor, "shutdown", "()V");
+    return false;
+}
+/* Makes this prompt the one that callbacks and the abandon hook act on. */
+static void prompt_publish(JNIEnv *env, const struct prompt_parts *p, unsigned long ticket)
+{
     pthread_mutex_lock(&refs_lock);
-    current_callback = (*env)->NewGlobalRef(env, callback);
-    current_cancel = (*env)->NewGlobalRef(env, cancel);
+    current_callback = (*env)->NewGlobalRef(env, p->callback);
+    current_cancel = (*env)->NewGlobalRef(env, p->cancel);
     current_ticket = ticket;
     pthread_mutex_unlock(&refs_lock);
-    if (!call_void(env, prompt, "authenticate",
-            "(Landroid/hardware/biometrics/BiometricPrompt$CryptoObject;Landroid/os/CancellationSignal;"
-            "Ljava/util/concurrent/Executor;Landroid/hardware/biometrics/BiometricPrompt$AuthenticationCallback;)V",
-            crypto, cancel, executor, callback)) {
-        (void)zj_clean(env);
-        (void)zapp_devkey_wait_answer(&prompt_wait, ticket, ZAPP_DEVKEY_ANSWER_FAILED);
-    }
-    enum zapp_devkey_answer answer = zapp_devkey_wait_end(&prompt_wait, ticket, PROMPT_TIMEOUT_MS);
-    if (answer == ZAPP_DEVKEY_ANSWER_TIMED_OUT) (void)call_void(env, cancel, "cancel", "()V");
+}
+/* Drops the references of the finished prompt and stops its executor. */
+static void prompt_retire(JNIEnv *env, const struct prompt_parts *p)
+{
     pthread_mutex_lock(&refs_lock);
     jobject stale_callback = current_callback, stale_cancel = current_cancel;
     current_callback = current_cancel = NULL;
@@ -440,8 +441,29 @@ static status_t authenticate_once(JNIEnv *env, jobject activity, jobject cipher,
     pthread_mutex_unlock(&refs_lock);
     if (stale_callback) (*env)->DeleteGlobalRef(env, stale_callback);
     if (stale_cancel) (*env)->DeleteGlobalRef(env, stale_cancel);
-    (void)call_void(env, executor, "shutdown", "()V");
+    (void)call_void(env, p->executor, "shutdown", "()V");
     (void)zj_clean(env);
+}
+/* Shows one BiometricPrompt over a CryptoObject that holds the initialised cipher and waits for the
+ * owner. OK means Keystore has bound this one operation to a fresh authentication; the caller then
+ * runs the operation on the same cipher. Nothing the callbacks do touches key material. */
+static status_t authenticate_once(JNIEnv *env, jobject activity, jobject cipher, enum zapp_devkey_purpose purpose)
+{
+    struct prompt_parts p;
+    if (!prompt_parts_new(env, activity, cipher, purpose, &p)) return ZAPP_DEVKEY_ERROR;
+    unsigned long ticket = zapp_devkey_wait_begin(&prompt_wait);
+    if (!ticket) { (void)call_void(env, p.executor, "shutdown", "()V"); return ZAPP_DEVKEY_ERROR; }
+    prompt_publish(env, &p, ticket);
+    if (!call_void(env, p.prompt, "authenticate",
+            "(Landroid/hardware/biometrics/BiometricPrompt$CryptoObject;Landroid/os/CancellationSignal;"
+            "Ljava/util/concurrent/Executor;Landroid/hardware/biometrics/BiometricPrompt$AuthenticationCallback;)V",
+            p.crypto, p.cancel, p.executor, p.callback)) {
+        (void)zj_clean(env);
+        (void)zapp_devkey_wait_answer(&prompt_wait, ticket, ZAPP_DEVKEY_ANSWER_FAILED);
+    }
+    enum zapp_devkey_answer answer = zapp_devkey_wait_end(&prompt_wait, ticket, PROMPT_TIMEOUT_MS);
+    if (answer == ZAPP_DEVKEY_ANSWER_TIMED_OUT) (void)call_void(env, p.cancel, "cancel", "()V");
+    prompt_retire(env, &p);
     return zapp_devkey_status_for_answer(answer);
 }
 void zapp_devkey_jni_abandon(JNIEnv *env)
