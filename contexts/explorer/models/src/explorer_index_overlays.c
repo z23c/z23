@@ -185,6 +185,27 @@ static int apply_znam_renew(struct node_db *ndb, const struct transaction *tx,
     return !db_znam_save(ndb, &e);
 }
 
+/* SET_TEXT: owner-gated text record write, then the sovereign-identity feed.
+ * Extracted verbatim from apply_znam's SET_TEXT case; behaviour unchanged. */
+static void apply_znam_set_text_op(struct node_db *ndb,
+                                   const struct transaction *tx,
+                                   const struct znam_message *zm, int height,
+                                   bool have_owner, const char *owner)
+{
+    int rc = apply_znam_set_text(ndb, zm, have_owner, owner);
+    if (rc < 0)
+        return;
+    if (rc > 0)
+        LOG_WARN("explorer", "apply_znam: SET_TEXT %s save failed",
+                 zm->name);
+    /* Sovereign-identity feed 1: text key "zid" carries a 64-hex ed25519
+     * master pubkey. Runs AFTER the owner check above, so a non-owner
+     * never reaches it. Any other key, or a value that is not 64 hex
+     * chars, projects nothing. */
+    explorer_index_apply_znam_zid_text(ndb, tx, zm->name, zm->text_key,
+                                       zm->text_value, owner, height);
+}
+
 /* Apply one parsed ZNAM op into the node.db registry tables (path A).
  * Stateful commands (REGISTER FCFS, UPDATE, TRANSFER, RENEW, SET_RECORD,
  * SET_TEXT) are correct only under the genesis-ascending walk the catchup
@@ -224,21 +245,9 @@ static void apply_znam(struct node_db *ndb, const struct transaction *tx,
             LOG_WARN("explorer", "apply_znam: SET_RECORD %s save failed",
                      zm->name);
         break;
-    case ZNAM_CMD_SET_TEXT: {
-        int rc = apply_znam_set_text(ndb, zm, have_owner, owner);
-        if (rc < 0)
-            break;
-        if (rc > 0)
-            LOG_WARN("explorer", "apply_znam: SET_TEXT %s save failed",
-                     zm->name);
-        /* Sovereign-identity feed 1: text key "zid" carries a 64-hex ed25519
-         * master pubkey. Runs AFTER the owner check above, so a non-owner
-         * never reaches it. Any other key, or a value that is not 64 hex
-         * chars, projects nothing. */
-        explorer_index_apply_znam_zid_text(ndb, tx, zm->name, zm->text_key,
-                                           zm->text_value, owner, height);
+    case ZNAM_CMD_SET_TEXT:
+        apply_znam_set_text_op(ndb, tx, zm, height, have_owner, owner);
         break;
-    }
     case ZNAM_CMD_RENEW:
         if (apply_znam_renew(ndb, tx, zm, height))
             LOG_WARN("explorer", "apply_znam: RENEW %s save failed",
