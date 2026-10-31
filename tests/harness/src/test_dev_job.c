@@ -674,6 +674,7 @@ int test_dev_job(void)
 
     TEST("dev.job: wait after exit returns the exact rc and tail") {
         dj_wait(&w, id, NULL, 30, 0);
+        dj_join_all(); /* the slow job's thread has exited: join it */
         ASSERT(dj_ok(&w));
         ASSERT_STR_EQ(dj_str(&w, "state"), "passed");
         ASSERT_EQ(dj_int(&w, "rc"), (int64_t)0);
@@ -696,6 +697,7 @@ int test_dev_job(void)
         ASSERT(dj_ok(&c));
         (void)snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id"));
         dj_wait(&w, id, NULL, 30, 0);
+        dj_join_all(); /* the failing job's thread has exited: join it */
         ASSERT_STR_EQ(dj_str(&w, "state"), "failed");
         ASSERT_EQ(dj_int(&w, "rc"), (int64_t)2);
         ASSERT(dj_array_has(&w, "fail_lines", "error: boom"));
@@ -709,6 +711,7 @@ int test_dev_job(void)
         ASSERT(dj_ok(&c));
         (void)snprintf(id, sizeof(id), "%s", dj_str(&c, "job_id"));
         dj_wait(&w, id, NULL, 30, 9999);
+        dj_join_all(); /* the big job's thread has exited: join it */
         ASSERT_STR_EQ(dj_str(&w, "state"), "passed");
         ASSERT(dj_array_size(&w, "tail") <= ZCL_DEV_JOB_TAIL_MAX);
         ASSERT(dj_array_size(&w, "tail") >= 1);
