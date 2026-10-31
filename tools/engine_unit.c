@@ -308,9 +308,14 @@ static bool attempt_option_valid(const char *id)
 /* The options whose value is numeric; parse_numeric_option() reads it. */
 static bool numeric_flag(const char *a)
 {
-    return strcmp(a, "--turns") == 0 || strcmp(a, "--rounds") == 0
-        || strcmp(a, "--timeout") == 0 || strcmp(a, "--gate-timeout") == 0
-        || strcmp(a, "--max-cost-usd") == 0 || strcmp(a, "--max-turns") == 0;
+    static const char *const flags[] = {
+        "--turns", "--rounds", "--timeout", "--gate-timeout",
+        "--max-cost-usd", "--max-turns",
+    };
+    for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++)
+        if (strcmp(a, flags[i]) == 0)
+            return true;
+    return false;
 }
 
 /* One numeric value. False when it is refused, and the caller reports it.
