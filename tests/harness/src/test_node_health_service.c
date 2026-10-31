@@ -1951,6 +1951,75 @@ static int health_test_completeness_predicate_fail_closed(void)
     return failures;
 }
 
+/* Headers ahead of the active tip while the only handshaked peer reports a
+ * stale starting height at or below the tip. The peer estimate cannot see
+ * the header gap, so tip_lag must still count it. */
+static int health_test_stale_peer_heights_keep_header_lag(void)
+{
+    static const int peer_heights[] = {100, 90};
+    int failures = 0;
+
+    printf("node_health_service: stale peer heights keep header lag... ");
+    for (size_t i = 0; i < sizeof(peer_heights) / sizeof(peer_heights[0]); i++) {
+        struct node_health_snapshot health;
+        struct main_state ms;
+        struct connman cm;
+        struct net_address addr;
+        struct p2p_node *node = NULL;
+        struct block_index tip, header;
+        struct uint256 h_tip = {0}, h_hdr = {0};
+
+        memset(&health, 0, sizeof(health));
+        memset(&cm, 0, sizeof(cm));
+        memset(&addr, 0, sizeof(addr));
+        memset(&tip, 0, sizeof(tip));
+        memset(&header, 0, sizeof(header));
+        main_state_init(&ms);
+        net_manager_init(&cm.manager);
+        block_index_init(&tip);
+        block_index_init(&header);
+
+        h_tip.data[0] = 1;
+        h_hdr.data[0] = 2;
+        tip.phashBlock = &h_tip;
+        tip.nHeight = 100;
+        tip.nTime = (uint32_t)platform_time_wall_time_t();
+        header.phashBlock = &h_hdr;
+        header.nHeight = 125;
+        header.pprev = &tip;
+        header.nTime = tip.nTime;
+        bool ok = active_chain_move_window_tip(&ms.chain_active, &tip);
+        ms.pindex_best_header = &header;
+
+        cm.manager.nodes = zcl_calloc(1, sizeof(*cm.manager.nodes), "test_nodes");
+        ok = ok && (cm.manager.nodes != NULL);
+        node = p2p_node_create(&cm.manager, ZCL_INVALID_SOCKET, &addr,
+                               "test-peer", false);
+        ok = ok && (node != NULL);
+        if (ok) {
+            node->starting_height = peer_heights[i];
+            node->state = PEER_HANDSHAKE_COMPLETE;
+            node->services = NODE_NETWORK;
+            cm.manager.nodes[0] = node;
+            cm.manager.num_nodes = 1;
+            rpc_net_set_connman(&cm);
+            node_health_collect(&health, NULL, &ms);
+
+            ok = health.tip_height == 100 && health.header_height == 125 &&
+                 health.peer_best_height == peer_heights[i] &&
+                 health.tip_lag == 25;
+        }
+
+        main_state_free(&ms);
+        rpc_net_set_connman(NULL);
+        net_manager_free(&cm.manager);
+        if (!ok) failures++;
+    }
+    if (failures == 0) printf("OK\n");
+    else printf("FAIL\n");
+    return failures;
+}
+
 int test_node_health_service(void)
 {
     int failures = 0;
@@ -1960,6 +2029,7 @@ int test_node_health_service(void)
     failures += health_test_at_tip_without_peers();
     failures += health_test_at_tip_missing_active_tip();
     failures += health_test_headers_ahead_degraded();
+    failures += health_test_stale_peer_heights_keep_header_lag();
     failures += health_test_small_gap_serving();
     failures += health_test_log_head_gap_degrades();
     failures += health_test_unknown_log_head_blocks();

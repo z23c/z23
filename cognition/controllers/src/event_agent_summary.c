@@ -185,6 +185,20 @@ static int agent_fast_tip_finalize_log_head(void)
     return -1; // raw-return-ok:sentinel
 }
 
+/* Log-head gap against the best height we know: the larger of our best
+ * header and the peer estimate. Peer heights are stale handshake starting
+ * heights, so a peer at or below our header must not hide a header gap.
+ * -1 when the log head or the best known height is unknown. */
+int agent_fast_log_head_gap(int header_height, int peer_best_height,
+                            int log_head)
+{
+    int best = header_height > peer_best_height ? header_height
+                                                : peer_best_height;
+    if (best < 0 || log_head < 0)
+        return -1;
+    return best - log_head;
+}
+
 static void agent_fast_collect_errors(struct agent_fast_snapshot *s)
 {
     if (!s)
@@ -656,8 +670,8 @@ static void agent_fast_collect(struct agent_fast_snapshot *s,
     agent_fast_collect_peers(s);
 
     s->log_head = agent_fast_tip_finalize_log_head();
-    if (s->peer_best_height >= 0 && s->log_head >= 0)
-        s->log_head_gap = s->peer_best_height - s->log_head;
+    s->log_head_gap = agent_fast_log_head_gap(
+        s->header_height, s->peer_best_height, s->log_head);
 
     agent_fast_collect_downloads(s);
     agent_fast_collect_message_cycles(s);

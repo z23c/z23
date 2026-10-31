@@ -19,6 +19,8 @@
 #include "command/native_command.h"
 #include "controllers/agent_operator_contracts.h"
 #include "controllers/agent_security_posture.h"
+#include "event_agent_readiness.h"
+#include "event_agent_summary_internal.h"
 #include "json/json.h"
 #include "controllers/rpc_client.h"
 #include "util/boot_phase.h"
@@ -365,6 +367,25 @@ static int test_bootstrap_ready_is_not_replay(void)
     return failures;
 }
 
+/* A peer estimate is a stale handshake height, so a header ahead of it must
+ * still open the log-head gap that tip-follow reads. */
+static int test_agent_log_head_gap_counts_header_lag(void)
+{
+    int failures = 0;
+
+    TEST("log-head gap counts a header ahead of a stale peer estimate") {
+        int gap = agent_fast_log_head_gap(16, 10, 10);
+        ASSERT_EQ(gap, 6);
+        ASSERT(!agent_tip_follow(0, gap));
+        ASSERT_EQ(agent_fast_log_head_gap(10, 4, 10), 0);
+        ASSERT_EQ(agent_fast_log_head_gap(-1, 12, 10), 2);
+        ASSERT_EQ(agent_fast_log_head_gap(-1, -1, 10), -1);
+        ASSERT_EQ(agent_fast_log_head_gap(16, 10, -1), -1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_status_readiness_truth(void)
 {
     int failures = 0;
@@ -373,5 +394,6 @@ int test_status_readiness_truth(void)
     failures += test_status_readiness_facts_vary_independently();
     failures += test_status_readiness_v2_reader_retained();
     failures += test_status_readiness_archive_fails_closed_to_unknown();
+    failures += test_agent_log_head_gap_counts_header_lag();
     return failures;
 }

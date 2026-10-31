@@ -556,9 +556,9 @@ size_t api_serve_node_status(uint8_t *response, size_t response_max)
      * height we know: the larger of our best header and the peer floor.
      * peer_best_height is a floor, not a tip: the highest handshake height
      * our peers gave us, never below our own tip, and it can stay below the
-     * network tip until a peer reports a newer one. tip_lag is narrower: it
-     * is only the peer floor's excess over our tip, 0 when no peer claims
-     * more, and it ignores our header. Use blocks_behind for the distance. */
+     * network tip until a peer reports a newer one. tip_lag is the health
+     * gate's value of the same distance: max(header, peer) minus our tip,
+     * 0 when neither is ahead. Use blocks_behind for the distance. */
     int64_t peer_best = api_chain_peer_best_floor(health.peer_best_height,
                                                   tip_height);
     json_push_kv_int(&chain, "peer_best_height", peer_best);

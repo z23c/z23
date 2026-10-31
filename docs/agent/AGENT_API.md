@@ -990,10 +990,10 @@ peer_best_height) - tip_height`, never below 0. A lying peer can inflate
 `peer_best_height`: a lone peer claiming more than 10,000 blocks above our
 header is clamped to that bound, but two or more such peers are not. The value
 is for display: the chain block shows it and no remedy reads it. The health
-gates keep the unfloored peer value they always read.
-`tip_lag` is narrower and unchanged: only the peer floor's excess over
-`tip_height`, 0 when no peer claims more. It ignores our header, so it can read
-0 while `blocks_behind` is positive. `sync.state` comes from the sync state
+gates read the unfloored peer height.
+`tip_lag` is the health gate's value of the same distance, read from the
+unfloored peer height: `max(header_height, peer_best_height) - tip_height`,
+never below 0. `sync.state` comes from the sync state
 machine and can read `at_tip` while `blocks_behind` is positive; read
 `blocks_behind` for the distance.
 

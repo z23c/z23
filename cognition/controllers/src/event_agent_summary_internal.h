@@ -198,4 +198,10 @@ void agent_summary_trust_tier_collect_bounded(
  * an older consumer that predates this key simply does not see it. */
 void agent_push_trust_tier_json(struct json_value *out, const char *key);
 
+/* Log-head gap against the best height we know: the larger of our best
+ * header and the peer estimate. -1 when the log head or the best known
+ * height is unknown. */
+int agent_fast_log_head_gap(int header_height, int peer_best_height,
+                            int log_head);
+
 #endif

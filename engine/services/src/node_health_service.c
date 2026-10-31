@@ -685,11 +685,20 @@ static void health_collect_peer_heights(struct node_health_snapshot *snapshot,
     (void)newest_peer_block_time;
 }
 
+/* Best height this node knows: the larger of its header height and the peer
+ * estimate. Peer heights are handshake starting heights and go stale, so a
+ * peer estimate at or below the tip must not hide a header gap. */
+static int health_best_known_height(const struct node_health_snapshot *snapshot)
+{
+    return snapshot->header_height > snapshot->peer_best_height
+        ? snapshot->header_height : snapshot->peer_best_height;
+}
+
 static void health_collect_tip_lag(struct node_health_snapshot *snapshot)
 {
-    if (snapshot->peer_best_height >= 0 && snapshot->tip_height >= 0 &&
-        snapshot->peer_best_height > snapshot->tip_height) {
-        snapshot->tip_lag = snapshot->peer_best_height - snapshot->tip_height;
+    int best = health_best_known_height(snapshot);
+    if (best >= 0 && snapshot->tip_height >= 0 && best > snapshot->tip_height) {
+        snapshot->tip_lag = best - snapshot->tip_height;
     }
 }
 
@@ -708,9 +717,9 @@ static void health_collect_log_head(struct node_health_snapshot *snapshot)
     {
         snapshot->log_head = health_tip_finalize_log_head();
     }
-    if (snapshot->peer_best_height >= 0 && snapshot->log_head >= 0)
+    if (health_best_known_height(snapshot) >= 0 && snapshot->log_head >= 0)
         snapshot->log_head_gap =
-            snapshot->peer_best_height - snapshot->log_head;
+            health_best_known_height(snapshot) - snapshot->log_head;
 }
 
 static void health_collect_chain_advance(
