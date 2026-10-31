@@ -519,6 +519,49 @@ static const char *otpauth_kind_name(const zotpcli_entry *e)
     return e->kind == ZOTPCLI_HOTP ? "hotp" : "totp";
 }
 
+/* Append the path part: optional "issuer:" prefix plus the label. */
+static zotpcli_err otpauth_format_path(const zotpcli_entry *e, zfmt *f,
+                                       char *tmp, size_t tmp_cap)
+{
+    if (e->issuer[0]) {
+        size_t need = 0;
+        if (otpauth_encode_field(e->issuer, tmp, tmp_cap, &need) !=
+            ZOTPCLI_OK)
+            return ZOTPCLI_ERR_TRUNC;
+        zfmt_span(f, tmp, need);
+        zfmt_char(f, ':');
+    }
+    size_t need = 0;
+    if (otpauth_encode_field(e->label, tmp, tmp_cap, &need) !=
+        ZOTPCLI_OK)
+        return ZOTPCLI_ERR_TRUNC;
+    zfmt_span(f, tmp, need);
+    return ZOTPCLI_OK;
+}
+
+/* Append the trailing parameters: issuer, digits, period, counter. */
+static zotpcli_err otpauth_format_params(const zotpcli_entry *e, zfmt *f,
+                                         char *tmp, size_t tmp_cap)
+{
+    if (e->issuer[0]) {
+        zfmt_str(f, "&issuer=");
+        size_t need = 0;
+        if (otpauth_encode_field(e->issuer, tmp, tmp_cap, &need) !=
+            ZOTPCLI_OK)
+            return ZOTPCLI_ERR_TRUNC;
+        zfmt_span(f, tmp, need);
+    }
+    zfmt_str(f, "&digits=");
+    zfmt_u64(f, e->digits);
+    zfmt_str(f, "&period=");
+    zfmt_u64(f, e->period);
+    if (e->kind == ZOTPCLI_HOTP) {
+        zfmt_str(f, "&counter=");
+        zfmt_u64(f, e->counter);
+    }
+    return ZOTPCLI_OK;
+}
+
 zotpcli_err zotpcli_otpauth_format(const zotpcli_entry *e, char *out,
                                    size_t cap)
 {
@@ -537,36 +580,12 @@ zotpcli_err zotpcli_otpauth_format(const zotpcli_entry *e, char *out,
     zfmt_str(&f, "otpauth://");
     zfmt_str(&f, otpauth_kind_name(e));
     zfmt_char(&f, '/');
-    if (e->issuer[0]) {
-        size_t need = 0;
-        if (otpauth_encode_field(e->issuer, tmp, sizeof tmp, &need) !=
-            ZOTPCLI_OK)
-            return ZOTPCLI_ERR_TRUNC;
-        zfmt_span(&f, tmp, need);
-        zfmt_char(&f, ':');
-    }
-    size_t need = 0;
-    if (otpauth_encode_field(e->label, tmp, sizeof tmp, &need) !=
-        ZOTPCLI_OK)
-        return ZOTPCLI_ERR_TRUNC;
-    zfmt_span(&f, tmp, need);
+    zotpcli_err pe = otpauth_format_path(e, &f, tmp, sizeof tmp);
+    if (pe != ZOTPCLI_OK) return pe;
     zfmt_str(&f, "?secret=");
     zfmt_str(&f, b32);
-    if (e->issuer[0]) {
-        zfmt_str(&f, "&issuer=");
-        if (otpauth_encode_field(e->issuer, tmp, sizeof tmp, &need) !=
-            ZOTPCLI_OK)
-            return ZOTPCLI_ERR_TRUNC;
-        zfmt_span(&f, tmp, need);
-    }
-    zfmt_str(&f, "&digits=");
-    zfmt_u64(&f, e->digits);
-    zfmt_str(&f, "&period=");
-    zfmt_u64(&f, e->period);
-    if (e->kind == ZOTPCLI_HOTP) {
-        zfmt_str(&f, "&counter=");
-        zfmt_u64(&f, e->counter);
-    }
+    pe = otpauth_format_params(e, &f, tmp, sizeof tmp);
+    if (pe != ZOTPCLI_OK) return pe;
     return zfmt_ok(&f) ? ZOTPCLI_OK : ZOTPCLI_ERR_TRUNC;
 }
 
@@ -733,79 +752,6 @@ static int hex_dig(char c)
     return -1;
 }
 
-/* Decode four hex digits at p[0..3] into *out. */
-static zotpcli_err json_hex4(const char *p, uint32_t *out)
-{
-    uint32_t v = 0;
-    for (size_t k = 0; k < 4; k++) {
-        int d = hex_dig(p[k]);
-        if (d < 0) return ZOTPCLI_ERR_FORMAT;
-        v = (v << 4) | (uint32_t)d;
-    }
-    *out = v;
-    return ZOTPCLI_OK;
-}
-
-/* Combine a \uXXXX high surrogate v with the following \uXXXX low. */
-static zotpcli_err json_surrogate_pair(const char *text, size_t i,
-                                       size_t end, uint32_t v,
-                                       uint32_t *cp, size_t *adv)
-{
-    if (i + 11 >= end || text[i + 6] != '\\' ||
-        text[i + 7] != 'u')
-        return ZOTPCLI_ERR_FORMAT;
-    uint32_t lo = 0;
-    if (json_hex4(text + i + 8, &lo) != ZOTPCLI_OK)
-        return ZOTPCLI_ERR_FORMAT;
-    if (lo < 0xdc00 || lo > 0xdfff) return ZOTPCLI_ERR_FORMAT;
-    *cp = 0x10000u + ((v - 0xd800u) << 10) + (lo - 0xdc00u);
-    *adv = 12;
-    return ZOTPCLI_OK;
-}
-
-/* Decode a \uXXXX escape (incl. surrogate pairs) at text[i]. */
-static zotpcli_err json_decode_uesc(const char *text, size_t i, size_t end,
-                                    uint32_t *cp, size_t *adv)
-{
-    if (i + 5 >= end) return ZOTPCLI_ERR_FORMAT;
-    uint32_t v = 0;
-    if (json_hex4(text + i + 2, &v) != ZOTPCLI_OK)
-        return ZOTPCLI_ERR_FORMAT;
-    *adv = 6;
-    if (v >= 0xd800 && v <= 0xdbff) /* high surrogate */
-        return json_surrogate_pair(text, i, end, v, cp, adv);
-    if (v >= 0xdc00 && v <= 0xdfff)
-        return ZOTPCLI_ERR_FORMAT; /* lone low surrogate */
-    *cp = v;
-    return ZOTPCLI_OK;
-}
-
-/* Decode the escape sequence at text[i]: sets *cp and the number of
- * source bytes it consumed in *adv. */
-static zotpcli_err json_decode_escape(const char *text, size_t i,
-                                      size_t end, uint32_t *cp,
-                                      size_t *adv)
-{
-    if (i + 1 >= end) return ZOTPCLI_ERR_FORMAT;
-    char e = text[i + 1];
-    *adv = 2;
-    switch (e) {
-    case '"': *cp = '"'; break;
-    case '\\': *cp = '\\'; break;
-    case '/': *cp = '/'; break;
-    case 'b': *cp = 0x08; break;
-    case 'f': *cp = 0x0c; break;
-    case 'n': *cp = 0x0a; break;
-    case 'r': *cp = 0x0d; break;
-    case 't': *cp = 0x09; break;
-    case 'u':
-        return json_decode_uesc(text, i, end, cp, adv);
-    default:
-        return ZOTPCLI_ERR_FORMAT;
-    }
-    return ZOTPCLI_OK;
-}
-
 /* Decode a KEY/STR payload into buf[0..cap), NUL-terminated. Raw bytes
  * (already validated UTF-8 by the parser) are copied VERBATIM; only
  * the RFC 8259 escapes are resolved, \uXXXX (incl. surrogate pairs)
@@ -829,10 +775,51 @@ static zotpcli_err json_str_decode(const char *text,
             i++;
             continue;
         }
+        if (i + 1 >= end) return ZOTPCLI_ERR_FORMAT;
+        char e = text[i + 1];
         uint32_t cp = 0;
         size_t adv = 2;
-        if (json_decode_escape(text, i, end, &cp, &adv) != ZOTPCLI_OK)
+        switch (e) {
+        case '"': cp = '"'; break;
+        case '\\': cp = '\\'; break;
+        case '/': cp = '/'; break;
+        case 'b': cp = 0x08; break;
+        case 'f': cp = 0x0c; break;
+        case 'n': cp = 0x0a; break;
+        case 'r': cp = 0x0d; break;
+        case 't': cp = 0x09; break;
+        case 'u': {
+            if (i + 5 >= end) return ZOTPCLI_ERR_FORMAT;
+            uint32_t v = 0;
+            for (size_t k = 2; k <= 5; k++) {
+                int d = hex_dig(text[i + k]);
+                if (d < 0) return ZOTPCLI_ERR_FORMAT;
+                v = (v << 4) | (uint32_t)d;
+            }
+            adv = 6;
+            if (v >= 0xd800 && v <= 0xdbff) { /* high surrogate */
+                if (i + 11 >= end || text[i + 6] != '\\' ||
+                    text[i + 7] != 'u')
+                    return ZOTPCLI_ERR_FORMAT;
+                uint32_t lo = 0;
+                for (size_t k = 8; k <= 11; k++) {
+                    int d = hex_dig(text[i + k]);
+                    if (d < 0) return ZOTPCLI_ERR_FORMAT;
+                    lo = (lo << 4) | (uint32_t)d;
+                }
+                if (lo < 0xdc00 || lo > 0xdfff) return ZOTPCLI_ERR_FORMAT;
+                cp = 0x10000u + ((v - 0xd800u) << 10) + (lo - 0xdc00u);
+                adv = 12;
+            } else if (v >= 0xdc00 && v <= 0xdfff) {
+                return ZOTPCLI_ERR_FORMAT; /* lone low surrogate */
+            } else {
+                cp = v;
+            }
+            break;
+        }
+        default:
             return ZOTPCLI_ERR_FORMAT;
+        }
         char enc[4];
         size_t en = zutf8_encode(cp, enc);
         if (en == 0 || n + en > cap) return ZOTPCLI_ERR_FORMAT;
@@ -849,8 +836,8 @@ static zotpcli_err json_str_decode(const char *text,
 /* Validate a container event's parser state (depth 1, no dangling key). */
 static bool rec_container_ok(const rec_parser *r, const zjsonp_event *ev)
 {
-    if (r->have_key) return false;
     if (ev->kind == ZJRP_OBJ_OPEN && r->p.depth != 1) return false;
+    if (r->have_key) return false;
     return true;
 }
 
@@ -925,83 +912,73 @@ static bool rec_done(rec_parser *r)
     return zjsonp_next(&r->p, &ev) == ZJRP_DONE && !r->have_key;
 }
 
-/* Numeric header fields and their required values (v, n, r, p). */
-static const struct { const char *key; uint64_t val; } header_num_fields[] = {
-    { "v", 1 },
-    { "n", ZOTPCLI_SCRYPT_N },
-    { "r", ZOTPCLI_SCRYPT_R },
-    { "p", ZOTPCLI_SCRYPT_P },
-};
+/* Header fields seen so far: v, kdf, salt, n, r, p. */
+struct header_have { bool v, kdf, salt, n, r, p; };
 
-/* Decode the numeric value of the already-matched header field k and
- * check it against its required value; records presence in have[k]. */
-static zotpcli_err parse_header_numeric(const rec_parser *r,
-                                        const zjsonp_event *ev,
-                                        bool have[4], size_t k)
+/* Decode a numeric header value and check it against its required value. */
+static zotpcli_err parse_header_num(const rec_parser *r,
+                                    const zjsonp_event *ev, uint64_t want,
+                                    bool *have)
 {
     uint64_t num;
-    zotpcli_err e = rec_u64(r, ev, &num);
-    if (e != ZOTPCLI_OK) return e;
-    if (num != header_num_fields[k].val)
-        return ZOTPCLI_ERR_FORMAT;
-    have[k] = true;
+    zotpcli_err e;
+    if ((e = rec_u64(r, ev, &num)) != ZOTPCLI_OK) return e;
+    if (num != want) return ZOTPCLI_ERR_FORMAT;
+    *have = true;
     return ZOTPCLI_OK;
 }
 
 /* Decode the "kdf" string value; only "scrypt" is accepted. */
 static zotpcli_err parse_header_kdf(const rec_parser *r,
-                                    const zjsonp_event *ev)
+                                    const zjsonp_event *ev, bool *have)
 {
     char sbuf[64];
-    if (rec_str(r, ev, sbuf, sizeof sbuf, NULL) != ZOTPCLI_OK)
-        return ZOTPCLI_ERR_FORMAT;
+    zotpcli_err e;
+    if ((e = rec_str(r, ev, sbuf, sizeof sbuf, NULL)) != ZOTPCLI_OK)
+        return e;
     if (strcmp(sbuf, "scrypt") != 0) return ZOTPCLI_ERR_FORMAT;
+    *have = true;
     return ZOTPCLI_OK;
 }
 
 /* Decode the "salt" string value from base64 into salt. */
 static zotpcli_err parse_header_salt(const rec_parser *r,
                                      const zjsonp_event *ev,
-                                     uint8_t salt[ZOTPCLI_SALT_LEN])
+                                     uint8_t salt[ZOTPCLI_SALT_LEN],
+                                     bool *have)
 {
     char sbuf[64];
     size_t slen = 0;
-    if (rec_str(r, ev, sbuf, sizeof sbuf, &slen) != ZOTPCLI_OK)
-        return ZOTPCLI_ERR_FORMAT;
+    zotpcli_err e;
+    if ((e = rec_str(r, ev, sbuf, sizeof sbuf, &slen)) != ZOTPCLI_OK)
+        return e;
     size_t blen = 0;
     if (!zbase64_decode(sbuf, slen, salt, ZOTPCLI_SALT_LEN, &blen) ||
         blen != ZOTPCLI_SALT_LEN)
         return ZOTPCLI_ERR_FORMAT;
+    *have = true;
     return ZOTPCLI_OK;
 }
 
-/* Apply one header field: validate the key first, then its value kind;
- * records presence in have[0..5] (v, n, r, p, kdf, salt). */
+/* Apply one header field: key and value kind are matched together, in
+ * the same order as the header record grammar. */
 static zotpcli_err parse_header_field(rec_parser *r,
                                       const zjsonp_event *ev,
                                       uint8_t salt[ZOTPCLI_SALT_LEN],
-                                      bool have[6])
+                                      struct header_have *have)
 {
-    zotpcli_err e;
-    if (strcmp(r->key, "kdf") == 0) {
-        if (ev->kind != ZJRP_STR) return ZOTPCLI_ERR_FORMAT;
-        e = parse_header_kdf(r, ev);
-        if (e != ZOTPCLI_OK) return e;
-        have[4] = true;
-        return ZOTPCLI_OK;
-    }
-    if (strcmp(r->key, "salt") == 0) {
-        if (ev->kind != ZJRP_STR) return ZOTPCLI_ERR_FORMAT;
-        e = parse_header_salt(r, ev, salt);
-        if (e != ZOTPCLI_OK) return e;
-        have[5] = true;
-        return ZOTPCLI_OK;
-    }
-    for (size_t k = 0; k < 4; k++)
-        if (strcmp(r->key, header_num_fields[k].key) == 0) {
-            if (ev->kind != ZJRP_NUM) return ZOTPCLI_ERR_FORMAT;
-            return parse_header_numeric(r, ev, have, k);
-        }
+    if (strcmp(r->key, "v") == 0 && ev->kind == ZJRP_NUM)
+        return parse_header_num(r, ev, 1, &have->v);
+    if (strcmp(r->key, "kdf") == 0 && ev->kind == ZJRP_STR)
+        return parse_header_kdf(r, ev, &have->kdf);
+    if (strcmp(r->key, "n") == 0 && ev->kind == ZJRP_NUM)
+        return parse_header_num(r, ev, ZOTPCLI_SCRYPT_N, &have->n);
+    if (strcmp(r->key, "r") == 0 && ev->kind == ZJRP_NUM)
+        return parse_header_num(r, ev, ZOTPCLI_SCRYPT_R, &have->r);
+    if (strcmp(r->key, "p") == 0 && ev->kind == ZJRP_NUM)
+        return parse_header_num(r, ev, ZOTPCLI_SCRYPT_P, &have->p);
+    if (strcmp(r->key, "salt") == 0 && ev->kind == ZJRP_STR)
+        return parse_header_salt(r, ev, salt, &have->salt);
     return ZOTPCLI_ERR_FORMAT; /* unexpected key/kind */
 }
 
@@ -1013,19 +990,19 @@ static zotpcli_err parse_header(const char *text, size_t len,
     rec_parser r = { text, len, {0}, "", false };
     zjsonp_init(&r.p, text, len);
 
-    bool have[6] = { false };
+    struct header_have have = { false, false, false, false, false, false };
     zjsonp_event ev;
     zotpcli_err e;
 
     while ((e = rec_next(&r, &ev)) == ZOTPCLI_OK) {
         if (ev.kind == ZJRP_OBJ_OPEN) continue;
         if (ev.kind == ZJRP_OBJ_CLOSE) break;
-        e = parse_header_field(&r, &ev, salt, have);
+        e = parse_header_field(&r, &ev, salt, &have);
         if (e != ZOTPCLI_OK) return e;
         rec_value_done(&r);
     }
-    for (size_t k = 0; k < 6; k++)
-        if (!have[k]) return ZOTPCLI_ERR_FORMAT;
+    if (!have.v || !have.kdf || !have.salt || !have.n || !have.r || !have.p)
+        return ZOTPCLI_ERR_FORMAT;
     return rec_done(&r) ? ZOTPCLI_OK : ZOTPCLI_ERR_FORMAT;
 }
 
@@ -1061,27 +1038,43 @@ static zotpcli_err parse_mac_record(const char *text, size_t len,
 /* Decode the "secret" base64 string value into e0. */
 static zotpcli_err parse_entry_secret(const rec_parser *r,
                                       const zjsonp_event *ev,
-                                      zotpcli_entry *e0)
+                                      zotpcli_entry *e0, bool *have_secret)
 {
     char sbuf[SECRET_B64_CAP];
     size_t slen = 0;
-    if (rec_str(r, ev, sbuf, sizeof sbuf, &slen) != ZOTPCLI_OK)
-        return ZOTPCLI_ERR_FORMAT;
+    zotpcli_err e;
+    if ((e = rec_str(r, ev, sbuf, sizeof sbuf, &slen)) != ZOTPCLI_OK)
+        return e;
     if (!zbase64_decode(sbuf, slen, e0->secret, sizeof e0->secret,
                         &e0->secret_len) ||
         e0->secret_len == 0)
         return ZOTPCLI_ERR_FORMAT;
+    *have_secret = true;
+    return ZOTPCLI_OK;
+}
+
+/* Decode the "label" string value into e0. */
+static zotpcli_err parse_entry_label(const rec_parser *r,
+                                     const zjsonp_event *ev,
+                                     zotpcli_entry *e0, bool *have_label)
+{
+    zotpcli_err e;
+    if ((e = rec_str(r, ev, e0->label, sizeof e0->label, NULL)) !=
+        ZOTPCLI_OK)
+        return e;
+    *have_label = true;
     return ZOTPCLI_OK;
 }
 
 /* Decode the "type" string value into e0->kind. */
 static zotpcli_err parse_entry_type(const rec_parser *r,
                                     const zjsonp_event *ev,
-                                    zotpcli_entry *e0)
+                                    zotpcli_entry *e0, bool *have_type)
 {
     char sbuf[SECRET_B64_CAP];
-    if (rec_str(r, ev, sbuf, sizeof sbuf, NULL) != ZOTPCLI_OK)
-        return ZOTPCLI_ERR_FORMAT;
+    zotpcli_err e;
+    if ((e = rec_str(r, ev, sbuf, sizeof sbuf, NULL)) != ZOTPCLI_OK)
+        return e;
     if (strcmp(sbuf, "totp") == 0) {
         e0->kind = ZOTPCLI_TOTP;
     } else if (strcmp(sbuf, "hotp") == 0) {
@@ -1089,84 +1082,61 @@ static zotpcli_err parse_entry_type(const rec_parser *r,
     } else {
         return ZOTPCLI_ERR_FORMAT;
     }
+    *have_type = true;
     return ZOTPCLI_OK;
 }
 
-/* Decode the numeric digits/period/counter values into e0; the key is
- * validated before the value is decoded. */
-static zotpcli_err parse_entry_numeric(rec_parser *r,
-                                       const zjsonp_event *ev,
-                                       zotpcli_entry *e0)
+/* Decode the "digits" numeric value into e0. */
+static zotpcli_err parse_entry_digits(const rec_parser *r,
+                                      const zjsonp_event *ev,
+                                      zotpcli_entry *e0)
 {
-    zotpcli_err e;
     uint64_t num;
-    if (strcmp(r->key, "digits") != 0 &&
-        strcmp(r->key, "period") != 0 &&
-        strcmp(r->key, "counter") != 0)
-        return ZOTPCLI_ERR_FORMAT;
-    if (strcmp(r->key, "digits") == 0) {
-        if ((e = rec_u64(r, ev, &num)) != ZOTPCLI_OK) return e;
-        if (num < ZOTP_MIN_DIGITS || num > ZOTPCLI_MAX_DIGITS)
-            return ZOTPCLI_ERR_FORMAT;
-        e0->digits = (unsigned)num;
-    } else if (strcmp(r->key, "period") == 0) {
-        if ((e = rec_u64(r, ev, &num)) != ZOTPCLI_OK) return e;
-        if (num == 0 || num > ZOTPCLI_MAX_PERIOD)
-            return ZOTPCLI_ERR_FORMAT;
-        e0->period = (unsigned)num;
-    } else if (strcmp(r->key, "counter") == 0) {
-        if ((e = rec_u64(r, ev, &e0->counter)) != ZOTPCLI_OK) return e;
-    }
-    return ZOTPCLI_OK;
-}
-
-/* Apply one string-valued entry field (label, issuer, secret, type);
- * records presence flags as fields are seen. */
-static zotpcli_err parse_entry_str_field(rec_parser *r,
-                                         const zjsonp_event *ev,
-                                         zotpcli_entry *e0,
-                                         bool *have_label,
-                                         bool *have_secret,
-                                         bool *have_type)
-{
     zotpcli_err e;
-    if (strcmp(r->key, "label") == 0) {
-        if ((e = rec_str(r, ev, e0->label, sizeof e0->label, NULL)) !=
-            ZOTPCLI_OK)
-            return e;
-        *have_label = true;
-    } else if (strcmp(r->key, "issuer") == 0) {
-        if ((e = rec_str(r, ev, e0->issuer, sizeof e0->issuer, NULL)) !=
-            ZOTPCLI_OK)
-            return e;
-    } else if (strcmp(r->key, "secret") == 0) {
-        if ((e = parse_entry_secret(r, ev, e0)) != ZOTPCLI_OK)
-            return e;
-        *have_secret = true;
-    } else if (strcmp(r->key, "type") == 0) {
-        if ((e = parse_entry_type(r, ev, e0)) != ZOTPCLI_OK)
-            return e;
-        *have_type = true;
-    } else {
+    if ((e = rec_u64(r, ev, &num)) != ZOTPCLI_OK) return e;
+    if (num < ZOTP_MIN_DIGITS || num > ZOTPCLI_MAX_DIGITS)
         return ZOTPCLI_ERR_FORMAT;
-    }
+    e0->digits = (unsigned)num;
     return ZOTPCLI_OK;
 }
 
-/* Apply one entry field by kind: strings to the string fields,
- * numbers to the numeric parameters. */
+/* Decode the "period" numeric value into e0. */
+static zotpcli_err parse_entry_period(const rec_parser *r,
+                                      const zjsonp_event *ev,
+                                      zotpcli_entry *e0)
+{
+    uint64_t num;
+    zotpcli_err e;
+    if ((e = rec_u64(r, ev, &num)) != ZOTPCLI_OK) return e;
+    if (num == 0 || num > ZOTPCLI_MAX_PERIOD)
+        return ZOTPCLI_ERR_FORMAT;
+    e0->period = (unsigned)num;
+    return ZOTPCLI_OK;
+}
+
+/* Apply one entry field: each key is matched together with its value
+ * kind, in the same order as the entry record grammar. */
 static zotpcli_err parse_entry_field(rec_parser *r,
                                      const zjsonp_event *ev,
                                      zotpcli_entry *e0,
                                      bool *have_label, bool *have_secret,
                                      bool *have_type)
 {
-    if (ev->kind == ZJRP_STR)
-        return parse_entry_str_field(r, ev, e0, have_label, have_secret,
-                                     have_type);
-    if (ev->kind == ZJRP_NUM)
-        return parse_entry_numeric(r, ev, e0);
-    return ZOTPCLI_ERR_FORMAT;
+    if (strcmp(r->key, "label") == 0 && ev->kind == ZJRP_STR)
+        return parse_entry_label(r, ev, e0, have_label);
+    if (strcmp(r->key, "issuer") == 0 && ev->kind == ZJRP_STR)
+        return rec_str(r, ev, e0->issuer, sizeof e0->issuer, NULL);
+    if (strcmp(r->key, "secret") == 0 && ev->kind == ZJRP_STR)
+        return parse_entry_secret(r, ev, e0, have_secret);
+    if (strcmp(r->key, "type") == 0 && ev->kind == ZJRP_STR)
+        return parse_entry_type(r, ev, e0, have_type);
+    if (strcmp(r->key, "digits") == 0 && ev->kind == ZJRP_NUM)
+        return parse_entry_digits(r, ev, e0);
+    if (strcmp(r->key, "period") == 0 && ev->kind == ZJRP_NUM)
+        return parse_entry_period(r, ev, e0);
+    if (strcmp(r->key, "counter") == 0 && ev->kind == ZJRP_NUM)
+        return rec_u64(r, ev, &e0->counter);
+    return ZOTPCLI_ERR_FORMAT; /* unexpected key/kind */
 }
 
 static zotpcli_err parse_entry_record(const char *text, size_t len,
@@ -1190,9 +1160,9 @@ static zotpcli_err parse_entry_record(const char *text, size_t len,
         if (e != ZOTPCLI_OK) return e;
         rec_value_done(&r);
     }
-    if (!rec_done(&r)) return ZOTPCLI_ERR_FORMAT;
     if (!have_label || !have_secret || !have_type)
         return ZOTPCLI_ERR_FORMAT;
+    if (!rec_done(&r)) return ZOTPCLI_ERR_FORMAT;
     *out = e0;
     return ZOTPCLI_OK;
 }
