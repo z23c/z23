@@ -57,10 +57,6 @@ core/modules/crypto/src/sha3_256_x4.c:sha3_256_x4_neon:17
 core/modules/crypto_registry/src/crypto_registry.c:crypto_registry_register:16
 core/modules/mining/src/gen.c:try_solve_equihash:16
 core/modules/net/src/addrman_codec.c:addrman_deserialize:19
-core/modules/net/src/connman.c:connman_get_outbound_health:33
-core/modules/net/src/connman.c:connman_pick_next_outbound_target:18
-core/modules/net/src/connman.c:connman_run_message_cycle:17
-core/modules/net/src/connman.c:thread_dns_seed:28
 core/modules/net/src/connman.c:thread_socket_handler:89
 core/modules/net/src/connman_onion_seeds.c:apply_onion_seed_directory:35
 core/modules/net/src/connman_onion_seeds.c:connman_run_onion_seed_pass:42

@@ -361,6 +361,67 @@ int connman_seed_discovery_interval_for_test(size_t healthy_outbound)
 }
 #endif
 
+static int connman_dns_seed_discover_onion(struct connman *cm,
+                                           struct onion_peer *discovered)
+{
+    int n_discovered = 0;
+    if (!g_stop && cm->onion_peer_discover) {
+        const char *datadir = cm->onion_peer_datadir;
+        if (datadir) {
+            n_discovered = cm->onion_peer_discover(datadir, discovered, 64);
+            if (n_discovered < 0) n_discovered = 0;
+            if (n_discovered > 0) {
+                printf("onion discovery: %d .onion peers\n", n_discovered);
+                for (int i = 0; i < n_discovered; i++)
+                    printf("  .onion peer: %s (h=%d)\n",
+                           discovered[i].hostname, discovered[i].height);
+            }
+        }
+    }
+    return n_discovered;
+}
+
+static void connman_dns_seed_fetch_onion(struct connman *cm,
+                                         struct onion_peer *discovered,
+                                         int n_discovered)
+{
+    if (!g_stop && n_discovered > 0 && tor_integration_is_dial_ready()) {
+        for (int i = 0; i < n_discovered && i < 3 && !g_stop; i++)
+            connman_onion_seed_fetch_one(cm, discovered[i].hostname);
+    }
+}
+
+static void connman_dns_seed_floor_round(struct connman *cm, size_t cur,
+                                         int64_t now, int64_t start_ts,
+                                         int peer_floor_min,
+                                         int64_t grace_secs,
+                                         int64_t *floor_below_since,
+                                         int64_t *last_addrman_flush)
+{
+    if (*floor_below_since == 0) *floor_below_since = now;
+    int64_t below_for = now - *floor_below_since;
+    int64_t since_start = now - start_ts;
+    if (since_start > grace_secs) {
+        event_emitf(EV_PEER_FLOOR_BREACH, 0,
+                    "healthy=%zu min=%d since=%llds",
+                    cur, peer_floor_min, (long long)below_for);
+    }
+    printf("Peer discovery: %zu peers (need %d+)\n",
+           cur, peer_floor_min);
+    seed_from_fixed(cm);
+    dns_seed_resolve(cm);
+    /* Onion-directory fallback: Tor may not have been ready
+     * during the boot-time pass, so retry the chainparams
+     * + operator + known-peer seeds while below the floor.
+     * Blocking fetches are fine on this dedicated discovery
+     * thread. */
+    connman_run_onion_seed_pass(cm);
+    /* Persist immediately after a seed round: we just learned a
+     * fresh host set and the node is degraded — protect it. */
+    connman_save_addrman(cm);
+    *last_addrman_flush = (int64_t)platform_time_wall_time_t();
+}
+
 static void *thread_dns_seed(void *arg)
 {
     struct connman *cm = (struct connman *)arg;
@@ -416,20 +477,7 @@ static void *thread_dns_seed(void *arg)
     /* Onion peer discovery, ADD-only: the ZDIR on-chain directory projection
      * merged with the legacy wallet scrape (controllers/blog_controller.h). */
     struct onion_peer discovered[64];
-    int n_discovered = 0;
-    if (!g_stop && cm->onion_peer_discover) {
-        const char *datadir = cm->onion_peer_datadir;
-        if (datadir) {
-            n_discovered = cm->onion_peer_discover(datadir, discovered, 64);
-            if (n_discovered < 0) n_discovered = 0;
-            if (n_discovered > 0) {
-                printf("onion discovery: %d .onion peers\n", n_discovered);
-                for (int i = 0; i < n_discovered; i++)
-                    printf("  .onion peer: %s (h=%d)\n",
-                           discovered[i].hostname, discovered[i].height);
-            }
-        }
-    }
+    int n_discovered = connman_dns_seed_discover_onion(cm, discovered);
 
     /* Onion-directory bootstrap: operator-curated seeds
      * (~/.config/zclassic23/onion-seeds), then the chainparams onionSeeds,
@@ -463,10 +511,7 @@ static void *thread_dns_seed(void *arg)
      * connman_run_onion_seed_pass() already fetches from this same source when we
      * are below the floor, so this pass is the above-floor case and the
      * dedupe ring keeps a host from being fetched twice in a window. */
-    if (!g_stop && n_discovered > 0 && tor_integration_is_dial_ready()) {
-        for (int i = 0; i < n_discovered && i < 3 && !g_stop; i++)
-            connman_onion_seed_fetch_one(cm, discovered[i].hostname);
-    }
+    connman_dns_seed_fetch_onion(cm, discovered, n_discovered);
 
     /* If still no peers after 15s, retry everything.
      *
@@ -513,28 +558,11 @@ static void *thread_dns_seed(void *arg)
         size_t cur = connman_outbound_healthy_count(cm);
         int64_t now = (int64_t)platform_time_wall_time_t();
         if (connman_seed_discovery_needed(cur)) {
-            if (floor_below_since == 0) floor_below_since = now;
-            int64_t below_for = now - floor_below_since;
-            int64_t since_start = now - start_ts;
-            if (since_start > PEER_FLOOR_GRACE_SECS) {
-                event_emitf(EV_PEER_FLOOR_BREACH, 0,
-                            "healthy=%zu min=%d since=%llds",
-                            cur, PEER_FLOOR_MIN, (long long)below_for);
-            }
-            printf("Peer discovery: %zu peers (need %d+)\n",
-                   cur, PEER_FLOOR_MIN);
-            seed_from_fixed(cm);
-            dns_seed_resolve(cm);
-            /* Onion-directory fallback: Tor may not have been ready
-             * during the boot-time pass, so retry the chainparams
-             * + operator + known-peer seeds while below the floor.
-             * Blocking fetches are fine on this dedicated discovery
-             * thread. */
-            connman_run_onion_seed_pass(cm);
-            /* Persist immediately after a seed round: we just learned a
-             * fresh host set and the node is degraded — protect it. */
-            connman_save_addrman(cm);
-            last_addrman_flush = (int64_t)platform_time_wall_time_t();
+            connman_dns_seed_floor_round(cm, cur, now, start_ts,
+                                         PEER_FLOOR_MIN,
+                                         PEER_FLOOR_GRACE_SECS,
+                                         &floor_below_since,
+                                         &last_addrman_flush);
         } else {
             floor_below_since = 0;
         }
@@ -949,6 +977,31 @@ static bool connman_ready_addnode_from_other_group(struct connman *cm,
     return false;
 }
 
+static bool connman_addnode_ready_to_dial(struct connman *cm, size_t ai,
+                                          int64_t now)
+{
+    if (cm->addnode_retired[ai])
+        return false;
+    const int cooldown = cm->addnode_backoff_sec[ai] > 0
+                       ? cm->addnode_backoff_sec[ai] : 30;
+
+    if (connman_addnode_is_connected(cm, ai)) {
+        cm->addnode_backoff_sec[ai] = 0;
+        return false;
+    }
+    if (now - cm->addnode_last_attempt[ai] < cooldown)
+        return false;
+
+    if (net_addr_is_ipv4(&cm->addnodes[ai].svc.addr)) {
+        uint16_t group = ipv4_group16(cm->addnodes[ai].svc.addr.ip);
+        if (connman_outbound_group_count(cm, group) >=
+                MAX_OUTBOUND_PER_GROUP16 &&
+            connman_ready_addnode_from_other_group(cm, group, now))
+            return false;
+    }
+    return true;
+}
+
 bool connman_pick_next_outbound_target(
     struct connman *cm,
     size_t *addnode_cursor,
@@ -970,25 +1023,8 @@ bool connman_pick_next_outbound_target(
 
         for (size_t offset = 0; offset < (size_t)cm->num_addnodes; offset++) {
             const size_t ai = (start + offset) % (size_t)cm->num_addnodes;
-            if (cm->addnode_retired[ai])
+            if (!connman_addnode_ready_to_dial(cm, ai, now))
                 continue;
-            const int cooldown = cm->addnode_backoff_sec[ai] > 0
-                               ? cm->addnode_backoff_sec[ai] : 30;
-
-            if (connman_addnode_is_connected(cm, ai)) {
-                cm->addnode_backoff_sec[ai] = 0;
-                continue;
-            }
-            if (now - cm->addnode_last_attempt[ai] < cooldown)
-                continue;
-
-            if (net_addr_is_ipv4(&cm->addnodes[ai].svc.addr)) {
-                uint16_t group = ipv4_group16(cm->addnodes[ai].svc.addr.ip);
-                if (connman_outbound_group_count(cm, group) >=
-                        MAX_OUTBOUND_PER_GROUP16 &&
-                    connman_ready_addnode_from_other_group(cm, group, now))
-                    continue;
-            }
 
             result->addr = cm->addnodes[ai];
             *source = CONNMAN_TARGET_ADDNODE;
@@ -1792,6 +1828,69 @@ static void *thread_socket_handler(void *arg)
     return NULL;
 }
 
+static struct p2p_node **connman_message_cycle_snapshot(
+    struct connman *cm, size_t *snap_count, size_t *trickle_denom)
+{
+    zcl_mutex_lock(&cm->manager.cs_nodes);
+    size_t num_nodes = cm->manager.num_nodes;
+    size_t count = 0;
+    struct p2p_node **snap = NULL;
+    if (num_nodes > 0) {
+        snap = zcl_malloc(num_nodes * sizeof(*snap),
+                          "message_cycle_snapshot");
+        if (snap) {
+            for (size_t i = 0; i < num_nodes; i++) {
+                struct p2p_node *n = cm->manager.nodes[i];
+                if (n->disconnect) continue;
+                snap[count++] = n;
+                p2p_node_add_ref(n);
+            }
+        }
+    }
+    /* Capture num_nodes for the trickle ratio. Stale is fine — the
+     * read just picks the random-peer probability. */
+    *trickle_denom = num_nodes;
+    zcl_mutex_unlock(&cm->manager.cs_nodes);
+    *snap_count = count;
+    return snap;
+}
+
+static bool connman_message_cycle_send_peer(struct connman *cm,
+                                            struct p2p_node *node,
+                                            size_t trickle_denom)
+{
+    if (!cm->manager.signals.send_messages)
+        return false;
+    bool trickle = trickle_denom > 0 &&
+                   (GetRand(trickle_denom) == 0);
+    atomic_fetch_add_explicit(&cm->message_send_calls, 1,
+                              memory_order_relaxed);
+    cm->manager.signals.send_messages(
+        cm->manager.signals.ctx, node, trickle);
+    /* Keep tight loop when serving snapshot — don't sleep */
+    return node->state == PEER_SNAPSHOT_SERVING ||
+           node->state == PEER_SNAPSHOT_RECEIVING;
+}
+
+static bool connman_message_cycle_process_peer(struct connman *cm,
+                                               struct p2p_node *node)
+{
+    bool has_recv_messages = false;
+    zcl_mutex_lock(&node->cs_recv);
+    has_recv_messages = node->recv_msg_count > 0;
+    zcl_mutex_unlock(&node->cs_recv);
+
+    if (!has_recv_messages || !cm->manager.signals.process_messages)
+        return false;
+    atomic_fetch_add_explicit(&cm->message_recv_ready, 1,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&cm->message_process_calls, 1,
+                              memory_order_relaxed);
+    cm->manager.signals.process_messages(
+        cm->manager.signals.ctx, node);
+    return true;
+}
+
 bool connman_run_message_cycle(struct connman *cm)
 {
     /* snapshot-then-iterate breaks the "cs_nodes held across
@@ -1814,26 +1913,10 @@ bool connman_run_message_cycle(struct connman *cm)
                               memory_order_relaxed);
 
     /* Phase 1: snapshot + add_ref under cs_nodes. */
-    zcl_mutex_lock(&cm->manager.cs_nodes);
-    size_t num_nodes = cm->manager.num_nodes;
     size_t snap_count = 0;
-    struct p2p_node **snap = NULL;
-    if (num_nodes > 0) {
-        snap = zcl_malloc(num_nodes * sizeof(*snap),
-                          "message_cycle_snapshot");
-        if (snap) {
-            for (size_t i = 0; i < num_nodes; i++) {
-                struct p2p_node *n = cm->manager.nodes[i];
-                if (n->disconnect) continue;
-                snap[snap_count++] = n;
-                p2p_node_add_ref(n);
-            }
-        }
-    }
-    /* Capture num_nodes for the trickle ratio. Stale is fine — the
-     * read just picks the random-peer probability. */
-    size_t trickle_denom = num_nodes;
-    zcl_mutex_unlock(&cm->manager.cs_nodes);
+    size_t trickle_denom = 0;
+    struct p2p_node **snap = connman_message_cycle_snapshot(
+        cm, &snap_count, &trickle_denom);
 
     if (!snap) return false;
     atomic_fetch_add_explicit(&cm->message_nodes_snapshotted,
@@ -1860,18 +1943,8 @@ bool connman_run_message_cycle(struct connman *cm)
          * dead socket. */
         if (node->disconnect) continue;
 
-        if (cm->manager.signals.send_messages) {
-            bool trickle = trickle_denom > 0 &&
-                           (GetRand(trickle_denom) == 0);
-            atomic_fetch_add_explicit(&cm->message_send_calls, 1,
-                                      memory_order_relaxed);
-            cm->manager.signals.send_messages(
-                cm->manager.signals.ctx, node, trickle);
-            /* Keep tight loop when serving snapshot — don't sleep */
-            if (node->state == PEER_SNAPSHOT_SERVING ||
-                node->state == PEER_SNAPSHOT_RECEIVING)
-                did_work = true;
-        }
+        if (connman_message_cycle_send_peer(cm, node, trickle_denom))
+            did_work = true;
     }
 
     /* Phase 3: then process bounded inbound work, NO lock held. */
@@ -1882,20 +1955,8 @@ bool connman_run_message_cycle(struct connman *cm)
                               memory_order_relaxed);
         if (node->disconnect) continue;
 
-        bool has_recv_messages = false;
-        zcl_mutex_lock(&node->cs_recv);
-        has_recv_messages = node->recv_msg_count > 0;
-        zcl_mutex_unlock(&node->cs_recv);
-
-        if (has_recv_messages && cm->manager.signals.process_messages) {
-            atomic_fetch_add_explicit(&cm->message_recv_ready, 1,
-                                      memory_order_relaxed);
-            atomic_fetch_add_explicit(&cm->message_process_calls, 1,
-                                      memory_order_relaxed);
-            cm->manager.signals.process_messages(
-                cm->manager.signals.ctx, node);
+        if (connman_message_cycle_process_peer(cm, node))
             did_work = true;
-        }
     }
 
     /* Release refs under cs_nodes and drain deferred_free here. The socket
@@ -2890,14 +2951,9 @@ int connman_force_outbound_rotation(struct connman *cm, const char *reason)
     return disconnected;
 }
 
-void connman_get_outbound_health(struct connman *cm,
-                                 struct connman_outbound_health *out)
+static void connman_outbound_health_count_addnodes(
+    struct connman *cm, struct connman_outbound_health *out)
 {
-    if (!out) return;
-    memset(out, 0, sizeof(*out));
-    if (!cm) return;
-
-    out->addnode_count = cm->num_addnodes > 0 ? (size_t)cm->num_addnodes : 0;
     for (int i = 0; i < cm->num_addnodes; i++) {
         out->addnode_tcp_failures += cm->addnode_tcp_failures[i];
         out->addnode_protocol_failures +=
@@ -2910,6 +2966,66 @@ void connman_get_outbound_health(struct connman *cm,
         if (cm->addnode_retired[i])
             out->addnode_retired_count++;
     }
+}
+
+/* Counts one peer in the /16 group table. Returns the group's new size,
+ * or 0 when the table is full and the group is not already tracked. */
+static size_t connman_outbound_health_group_bump(uint16_t *groups,
+                                                 size_t *group_counts,
+                                                 size_t *num_groups,
+                                                 uint16_t group)
+{
+    size_t gi = 0;
+    for (; gi < *num_groups; gi++) {
+        if (groups[gi] == group)
+            break;
+    }
+    if (gi == *num_groups &&
+        *num_groups < DEFAULT_MAX_PEER_CONNECTIONS) {
+        groups[*num_groups] = group;
+        group_counts[*num_groups] = 0;
+        (*num_groups)++;
+    }
+    if (gi >= *num_groups)
+        return 0;
+    group_counts[gi]++;
+    return group_counts[gi];
+}
+
+/* Counts one peer into the inbound or outbound totals. Returns true for
+ * an inbound peer, which the caller skips for the outbound group tables. */
+static bool connman_outbound_health_count_node(
+    struct connman_outbound_health *out, const struct p2p_node *n,
+    bool handshaked, bool block_serving)
+{
+    if (n->inbound) {
+        out->inbound_total++;
+        if (block_serving)
+            out->inbound_healthy++;
+        else if (!handshaked)
+            out->inbound_handshake_incomplete++;
+        return true;
+    }
+
+    out->outbound_total++;
+    if (n->state == PEER_CONNECTING)
+        out->connecting++;
+    if (!handshaked)
+        out->handshake_incomplete++;
+    else if (block_serving)
+        out->healthy++;
+    return false;
+}
+
+void connman_get_outbound_health(struct connman *cm,
+                                 struct connman_outbound_health *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (!cm) return;
+
+    out->addnode_count = cm->num_addnodes > 0 ? (size_t)cm->num_addnodes : 0;
+    connman_outbound_health_count_addnodes(cm, out);
 
     uint16_t groups[DEFAULT_MAX_PEER_CONNECTIONS];
     size_t group_counts[DEFAULT_MAX_PEER_CONNECTIONS];
@@ -2931,60 +3047,22 @@ void connman_get_outbound_health(struct connman *cm,
         bool handshaked = n->state >= PEER_HANDSHAKE_COMPLETE;
         bool block_serving = handshaked &&
             (n->services & NODE_NETWORK) != 0;
-        if (n->inbound) {
-            out->inbound_total++;
-            if (block_serving)
-                out->inbound_healthy++;
-            else if (!handshaked)
-                out->inbound_handshake_incomplete++;
+        if (connman_outbound_health_count_node(out, n, handshaked,
+                                               block_serving))
             continue;
-        }
-
-        out->outbound_total++;
-        if (n->state == PEER_CONNECTING)
-            out->connecting++;
-        if (!handshaked)
-            out->handshake_incomplete++;
-        else if (block_serving)
-            out->healthy++;
 
         if (net_addr_is_ipv4(&n->addr.svc.addr)) {
             uint16_t group = ipv4_group16(n->addr.svc.addr.ip);
-            size_t gi = 0;
-            for (; gi < num_groups; gi++) {
-                if (groups[gi] == group)
-                    break;
-            }
-            if (gi == num_groups &&
-                num_groups < DEFAULT_MAX_PEER_CONNECTIONS) {
-                groups[num_groups] = group;
-                group_counts[num_groups] = 0;
-                num_groups++;
-            }
-            if (gi < num_groups) {
-                group_counts[gi]++;
-                if (group_counts[gi] > out->ipv4_max_group_size)
-                    out->ipv4_max_group_size = group_counts[gi];
-            }
+            size_t count = connman_outbound_health_group_bump(
+                groups, group_counts, &num_groups, group);
+            if (count > out->ipv4_max_group_size)
+                out->ipv4_max_group_size = count;
             if (block_serving) {
-                size_t hgi = 0;
-                for (; hgi < healthy_num_groups; hgi++) {
-                    if (healthy_groups[hgi] == group)
-                        break;
-                }
-                if (hgi == healthy_num_groups &&
-                    healthy_num_groups < DEFAULT_MAX_PEER_CONNECTIONS) {
-                    healthy_groups[healthy_num_groups] = group;
-                    healthy_group_counts[healthy_num_groups] = 0;
-                    healthy_num_groups++;
-                }
-                if (hgi < healthy_num_groups) {
-                    healthy_group_counts[hgi]++;
-                    if (healthy_group_counts[hgi] >
-                        out->healthy_ipv4_max_group_size)
-                        out->healthy_ipv4_max_group_size =
-                            healthy_group_counts[hgi];
-                }
+                size_t healthy_count = connman_outbound_health_group_bump(
+                    healthy_groups, healthy_group_counts,
+                    &healthy_num_groups, group);
+                if (healthy_count > out->healthy_ipv4_max_group_size)
+                    out->healthy_ipv4_max_group_size = healthy_count;
             }
         }
     }

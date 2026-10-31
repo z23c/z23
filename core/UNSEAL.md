@@ -412,3 +412,7 @@ later lane flips it HARD.
 - 2026-10-31T10:02:27Z — REASON: core/net: split 15 networking functions under the complexity cap;  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: 13ecbcd25a9e2c0a7f0d45fe61c67515c8bcc0b8f5636d578a52a23b2344db36
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T10:06:59Z — REASON: refactor(connman.c): split 4 function(s) under the complexity cap;  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: 8a193556934b96042ebca06feded86699f5a3d799903ee6d0d9f8bcdfa17c024
+  by: owner unseal ritual (make core-unseal)
