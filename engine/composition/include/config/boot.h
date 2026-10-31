@@ -237,6 +237,12 @@ struct app_context {
                                   * clearnet endpoints imported from onion
                                   * directories, loopback-only listener.
                                   * Default OFF. See app_onlynet_onion_refusal(). */
+    bool private_listeners;      /* -private-listeners : every socket this node
+                                  * binds is loopback; the HTTPS explorer, the
+                                  * file service, ROM seeding, the NAT probe and
+                                  * the RPC TLS listener do not start. Tor and
+                                  * the loopback RPC are unchanged. Default OFF.
+                                  * See app_private_listeners_refusal(). */
     bool observation_off;        /* -observation=0 : /observation.json answers
                                   * 404 on the onion. Default OFF (served). */
     bool allow_tor_stub_dev;     /* -allow-tor-stub-dev : let a stub-linked
@@ -540,6 +546,11 @@ bool app_tor_should_start(bool real_tor_linked, bool no_tor);
  * port; a public listener would accept inbound clearnet connections). */
 const char *app_onlynet_onion_refusal(const struct app_context *ctx,
                                     bool real_tor_linked);
+
+/* -private-listeners admission, pure. NULL when the argv may boot, else a
+ * short operator-facing reason: an explicit -bind= must be 127.0.0.1 or ::1.
+ * Without -bind=, args_parse resolves the P2P bind to 127.0.0.1. */
+const char *app_private_listeners_refusal(const struct app_context *ctx);
 
 /* The whole fail-closed Tor admission decision, in one pure function.
  * Returns NULL when this argv may boot, or the stable boot_error code the

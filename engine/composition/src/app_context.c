@@ -403,6 +403,15 @@ static bool onlynet_bind_is_loopback(const char *bind)
                     strcmp(bind, "::1") == 0);
 }
 
+const char *app_private_listeners_refusal(const struct app_context *ctx)
+{
+    if (!ctx || !ctx->private_listeners || !ctx->p2p_bind_address)
+        return NULL;
+    if (!onlynet_bind_is_loopback(ctx->p2p_bind_address))
+        return "-private-listeners refuses a -bind= that is not 127.0.0.1 or ::1";
+    return NULL;
+}
+
 /* -onlynet=onion: the operator flags that make the node dial a clearnet
  * file-service host (fs_client_sync: getaddrinfo + connect). */
 static const char *onlynet_clearnet_flag_refusal(const struct app_context *ctx)

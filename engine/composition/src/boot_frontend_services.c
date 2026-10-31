@@ -37,6 +37,7 @@
 #include "net/acme_challenge.h"
 #include "net/acme_selfsigned.h"
 #include "platform/directory_compat.h"
+#include "platform/environment_compat.h"
 #include "util/util.h"
 #include "net/onion_service.h"
 #include "net/tor_integration.h"
@@ -142,6 +143,12 @@ static bool boot_rpc_http_start(void *ctx)
     struct boot_svc_ctx *svc = ctx;
     if (!svc || !svc->app_ctx)
         return false;
+    /* The RPC TLS listener binds every interface; the loopback listener is the
+     * only one a private-listeners node keeps. */
+    if (svc->app_ctx->private_listeners) {
+        (void)platform_environment_set("ZCL_RPC_TLS_CERT", "", 1);
+        (void)platform_environment_set("ZCL_RPC_TLS_KEY", "", 1);
+    }
     if (!rpc_http_start(svc->rpc_table,
                         (uint16_t)svc->app_ctx->rpc_port,
                         svc->app_ctx->rpc_user,

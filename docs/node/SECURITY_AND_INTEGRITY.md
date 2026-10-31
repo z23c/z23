@@ -148,6 +148,14 @@ height. Anchor membership is checked independently on both paths.
   explicitly managed self-hosted runners. Mainline build/test observations and
   the base-branch pull-request security scan are supplementary; exact local
   receipts remain admission authority.
+- **Private listeners:** `-private-listeners` (the Android app passes it)
+  makes every socket the node binds loopback: P2P defaults to `-bind=127.0.0.1`
+  and a non-loopback `-bind=` is refused; the HTTPS explorer and HTTP redirect,
+  the file service, ROM seeding, the NAT probe and the RPC TLS listener do not
+  start. Tor is unchanged: the onion service forwards to the loopback P2P port
+  and outbound P2P keeps its SOCKS route. `make t-fast ONLY=private_listeners`
+  starts a node and reads its listening sockets from `/proc/net/tcp` and
+  `tcp6`. Nodes started without the option bind as before.
 - **Operator-private HTTP routes:** `/api/wallet`, `/api/messages`, and
   `/api/swaps` are classified operator-private (`api_route_is_operator_private`,
   `core/modules/net/src/https_server.c`) and 403'd before dispatch on the

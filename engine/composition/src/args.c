@@ -76,6 +76,10 @@ void print_usage_all(const char *prog)
     printf("                      onion directories. Needs real Tor and -bind=127.0.0.1;\n");
     printf("                      REFUSED with -no-tor, a clearnet -addnode=/-connect=, or\n");
     printf("                      a `tor: stub` build. Default off.\n");
+    printf("  -private-listeners  Bind only loopback: P2P listens on 127.0.0.1 unless -bind= names\n");
+    printf("                      ::1; the HTTPS explorer, file service, ROM seeding, NAT\n");
+    printf("                      probe and RPC TLS listener do not start. Tor and the\n");
+    printf("                      loopback RPC are unchanged. Default off.\n");
     printf("  -observation=0      /observation.json on the onion answers 404 (hides\n");
     printf("                      hardware and peer telemetry). Default on (=1).\n");
     printf("  -no-tor             Turn Tor off: no hidden service, clearnet\n");
@@ -799,6 +803,7 @@ static int args_arm_tor(const char *arg,
     if (strcmp(arg, "-tor") == 0) ctx->tor = true;
     else if (strcmp(arg, "-no-tor") == 0) ctx->no_tor = true;
     else if (strcmp(arg, "-onlynet=onion") == 0) ctx->onlynet_onion = true;
+    else if (strcmp(arg, "-private-listeners") == 0) ctx->private_listeners = true;
     else if (strcmp(arg, "-observation=0") == 0) ctx->observation_off = true;
     else if (strcmp(arg, "-observation=1") == 0) ctx->observation_off = false;
     else if (strncmp(arg, "-onlynet=", 9) == 0 ||
@@ -1268,6 +1273,15 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
     if (!ctx->onion_persist && !ctx->onion_persist_forced_off)
         ctx->onion_persist = args_onion_persist_default(
             ctx->tor, ctx->addnode_peers, ctx->n_addnode_peers);
+    if (ctx->private_listeners && !ctx->p2p_bind_address)
+        ctx->p2p_bind_address = "127.0.0.1";
+    {
+        const char *private_refusal = app_private_listeners_refusal(ctx);
+        if (private_refusal) {
+            fprintf(stderr, "Refused: %s\n", private_refusal);
+            return 1;
+        }
+    }
     {
         const char *onlynet_refusal =
             app_onlynet_onion_refusal(ctx, app_tor_real_build_linked());

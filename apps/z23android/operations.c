@@ -289,8 +289,9 @@ static int spawn_node(struct zapp_runtime *r)
     int fd = ok ? open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
     off_t offset = fd >= 0 ? lseek(fd, 0, SEEK_END) : 0;
     int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
-    char params[1200], *argv[7] = {r->executable, data, "-operator-lane=canonical", "-tor", "-onion-persist"};
-    if (zapp_params_arg(r->files, params, sizeof(params))) argv[5] = params;
+    char params[1200], *argv[8] = {r->executable, data, "-operator-lane=canonical", "-tor", "-onion-persist",
+                                    "-private-listeners"};
+    if (zapp_params_arg(r->files, params, sizeof(params))) argv[6] = params;
     int rc = fd >= 0 && in >= 0 ? spawn_redirect(r, argv, in, fd, &r->node) : EIO;
     if (fd >= 0) close(fd);
     if (in >= 0) close(in);

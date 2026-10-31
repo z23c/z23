@@ -206,6 +206,8 @@ bool boot_profile_has_explorer(const struct app_context *ctx)
 {
     if (!ctx)
         return true;
+    if (ctx->private_listeners)
+        return false;
     return app_runtime_profile_has_explorer(ctx->runtime_profile);
 }
 
@@ -238,6 +240,8 @@ bool boot_profile_has_file_service(const struct app_context *ctx)
 {
     if (!ctx)
         return true;
+    if (ctx->private_listeners)
+        return false;
     return app_runtime_profile_has_file_service(ctx->runtime_profile);
 }
 
@@ -1259,6 +1263,10 @@ static void boot_start_nat_probe(struct boot_svc_ctx *svc, const struct app_cont
      * self row when it completes (structured `nat_probe_complete` log),
      * and re-arms the 7200 s mapping lease at half-life so it no longer
      * silently expires. Boot reports the honest intermediate state. */
+    if (ctx->private_listeners) {
+        printf("Reachability: probe off (-private-listeners)\n");
+        return;
+    }
     peer_strategy_worker_init(&svc->nat_probe_worker, (uint16_t)ctx->p2p_port);
     if (peer_strategy_worker_start(&svc->nat_probe_worker)) {
         printf("Reachability: probing in background (NAT-PMP/UPnP + Tor)\n");

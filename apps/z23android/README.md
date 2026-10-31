@@ -400,12 +400,15 @@ change hosts or spend funds.
   `--app org.z23.voicepreview` when testing the preview package, or the pairing
   offer reopens the production app.
 - The phone screen shows plain sentences only; inspect a running phone node
-  over adb instead. `adb forward tcp:28443 tcp:8443`, then
-  `curl -sk https://127.0.0.1:28443/api/status` reads the node status;
-  `/api/v1/sync/detail`, `/api/v1/peers`, `/api/v1/bootstrap` and
-  `/api/v1/syncstate` read sync detail, peers, bootstrap state and sync
-  state. The phone node listens on P2P 8033, RPC 18232, HTTPS 8443, file
-  service 18034 and Tor SOCKS 19999.
+  over adb instead. The app starts the node with `-private-listeners`, so it
+  binds loopback only: P2P 127.0.0.1:8033 (the onion service forwards to it),
+  RPC 127.0.0.1:18232 and Tor SOCKS 127.0.0.1:19999. The HTTPS explorer and its
+  HTTP redirect (8443, 8080), the file service (18034), ROM seeding, the NAT
+  probe and the RPC TLS listener do not start, so nothing on the Wi-Fi reaches
+  the phone and the HTTP status routes (`/api/status`, `/api/v1/peers`, ...)
+  are not served there. `adb logcat -s z23node` shows the node log; the app's
+  own commands use the loopback RPC with the credentials in its private data
+  directory.
 - `org.z23.nativeapp` is not debuggable, so `run-as` refuses it. For the
   preview package, pipe a script: `adb shell 'run-as org.z23.voicepreview sh
   -s' < script.sh`. A `run-as … sh -c '…'` command passed through `adb shell`
