@@ -185,16 +185,25 @@ enum zapp_devkey_status zapp_devkey_wrap_new(const struct zapp_devkey_ops *ops, 
     return st;
 }
 
+/* Checks, before any prompt, that the screen lock is set and that the stored key is hardware backed and
+ * authenticates every use: an unwrap never trusts that prepare ran or that the key is still the one it checked. */
+static enum zapp_devkey_status open_precheck(const struct zapp_devkey_ops *ops)
+{
+    enum zapp_devkey_status st = ops->device_secure(ops->ctx);
+    if (st != ZAPP_DEVKEY_OK) return st == ZAPP_DEVKEY_NO_SCREEN_LOCK ? st : ZAPP_DEVKEY_ERROR;
+    enum zapp_devkey_level level = ZAPP_DEVKEY_LEVEL_UNKNOWN;
+    bool per_use = false;
+    st = ops->key_policy(ops->ctx, &level, &per_use);
+    if (st == ZAPP_DEVKEY_NOT_FOUND || st == ZAPP_DEVKEY_INVALIDATED) return ZAPP_DEVKEY_INVALIDATED;
+    return st == ZAPP_DEVKEY_OK ? key_refusal(level, per_use) : ZAPP_DEVKEY_ERROR;
+}
 enum zapp_devkey_status zapp_devkey_unwrap(const struct zapp_devkey_ops *ops, const char *path,
                                            enum zapp_devkey_purpose purpose, uint8_t secret[ZAPP_DEVKEY_SECRET])
 {
     uint8_t blob[BLOB_SIZE];
     memory_cleanse(secret, ZAPP_DEVKEY_SECRET);
-    enum zapp_devkey_status st = blob_load(path, blob);
-    if (st == ZAPP_DEVKEY_OK) {
-        st = ops->device_secure(ops->ctx);
-        if (st != ZAPP_DEVKEY_OK && st != ZAPP_DEVKEY_NO_SCREEN_LOCK) st = ZAPP_DEVKEY_ERROR;
-    }
+    enum zapp_devkey_status st = purpose == ZAPP_DEVKEY_PURPOSE_UNLOCK || purpose == ZAPP_DEVKEY_PURPOSE_PAYMENT ? blob_load(path, blob) : ZAPP_DEVKEY_ERROR;
+    if (st == ZAPP_DEVKEY_OK) st = open_precheck(ops);
     if (st == ZAPP_DEVKEY_OK) {
         st = ops->open(ops->ctx, purpose, blob + BLOB_HEADER, blob + BLOB_HEADER + ZAPP_DEVKEY_IV, secret, ZAPP_DEVKEY_SECRET);
         st = st == ZAPP_DEVKEY_NOT_FOUND ? ZAPP_DEVKEY_INVALIDATED : refusal_or_ok(st);

@@ -65,6 +65,37 @@ static void test_map(const uint8_t *d, size_t n)
         if (rd16(item) == 0x2001) CHECK(rd32(item + 4) == C_COUNT && at % 4 == 0);
     }
 }
+/* True when the dexdump listing contains every needle. */
+static bool listing_has(const char *listing, const char *const *needles, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        if (strstr(listing, needles[i])) continue;
+        fprintf(stderr, "dexgen_test: dexdump listing lacks %s\n", needles[i]);
+        return false;
+    }
+    return true;
+}
+/* The KeyPrompt methods the JNI backend registers and constructs must be in the dex, with the
+ * signatures it passes to RegisterNatives: a missing or retyped method is a link failure on the phone. */
+static void test_key_prompt_methods(const char *dexdump, const char *path, const char *scratch)
+{
+    static const char *const needles[] = {
+        "Lorg/z23/nativeapp/KeyPrompt;", "'onAuthenticationSucceeded'",
+        "(Landroid/hardware/biometrics/BiometricPrompt$AuthenticationResult;)V", "'onAuthenticationError'",
+        "(ILjava/lang/CharSequence;)V", "'<init>'"};
+    char listing_path[512], cmd[1400];
+    static char listing[1 << 16];
+    snprintf(listing_path, sizeof(listing_path), "%s/listing.txt", scratch);
+    snprintf(cmd, sizeof(cmd), "'%s' -d '%s' > '%s'", dexdump, path, listing_path);
+    CHECK(system(cmd) == 0);
+    FILE *f = fopen(listing_path, "rb");
+    size_t got = f ? fread(listing, 1, sizeof(listing) - 1, f) : 0;
+    CHECK(f && got > 0);
+    if (f) (void)fclose(f);
+    listing[got] = '\0';
+    CHECK(listing_has(listing, needles, sizeof(needles) / sizeof(needles[0])));
+    remove(listing_path);
+}
 static void test_dexdump(const uint8_t *d, size_t n, const char *scratch, const char *dexdump)
 {
     char path[512], cmd[1200];
@@ -75,6 +106,7 @@ static void test_dexdump(const uint8_t *d, size_t n, const char *scratch, const 
     if (!dexdump) { puts("dexdump not available; skipped"); return; }
     snprintf(cmd, sizeof(cmd), "'%s' -c '%s' && '%s' -d '%s'", dexdump, path, dexdump, path);
     CHECK(system(cmd) == 0);
+    test_key_prompt_methods(dexdump, path, scratch);
     remove(path);
 }
 int main(int argc, char **argv)

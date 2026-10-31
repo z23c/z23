@@ -101,8 +101,9 @@ static long elapsed_ms(const struct timespec *from)
     clock_gettime(CLOCK_MONOTONIC, &to);
     return (long)((to.tv_sec - from->tv_sec) * 1000 + (to.tv_nsec - from->tv_nsec) / 1000000);
 }
-/* Unwraps twice in a row. Every unwrap must show its own prompt: a second `ok` that arrives within a
- * few milliseconds of the first means Keystore accepted an earlier authentication. */
+/* Unwraps twice in a row. The owner must see two prompts, one per call: the second call never rides
+ * on the first authentication. Whether Keystore itself enforces this is shown by noprompt and
+ * othercipher, which the timing of this command cannot show because every call waits for a prompt. */
 static enum zapp_devkey_status twice(const struct zapp_devkey_ops *ops, const char *blob, char *detail, size_t cap)
 {
     uint8_t secret[ZAPP_DEVKEY_SECRET];
@@ -116,6 +117,20 @@ static enum zapp_devkey_status twice(const struct zapp_devkey_ops *ops, const ch
              zapp_devkey_status_name(second), elapsed_ms(&start));
     memory_cleanse(secret, sizeof(secret));
     return second;
+}
+/* Operations Keystore must refuse. noprompt initialises a cipher and finishes it with no prompt;
+ * othercipher authenticates one cipher and finishes a different one. Reports ok when Keystore refused
+ * the operation, and error with accepted=1 when it ran: the key does not enforce per-use authentication. */
+static enum zapp_devkey_status misuse(const struct zapp_devkey_ops *ops, struct zapp_devkey_jni *state, bool other_cipher, char *detail, size_t cap)
+{
+    struct zapp_devkey_misuse result;
+    struct zapp_devkey_info info;
+    enum zapp_devkey_status st = zapp_devkey_prepare(ops, NULL, &info);
+    if (st == ZAPP_DEVKEY_OK) st = zapp_devkey_jni_misuse(state, other_cipher, &result);
+    if (st != ZAPP_DEVKEY_OK) return st;
+    snprintf(detail, cap, "accepted=%d refusal=%s%s%d", result.accepted, zapp_devkey_status_name(result.refusal),
+             other_cipher ? " authenticated_cipher_ok=" : "", other_cipher ? result.control_ok : 0);
+    return result.accepted || (other_cipher && !result.control_ok) ? ZAPP_DEVKEY_ERROR : ZAPP_DEVKEY_OK;
 }
 /* Plants a blob of the 30 second window design and unwraps it: expected old_format with no prompt. */
 static enum zapp_devkey_status old_blob(const struct zapp_devkey_ops *ops, const char *dir, char *detail, size_t cap)
@@ -133,69 +148,88 @@ static enum zapp_devkey_status old_blob(const struct zapp_devkey_ops *ops, const
     memory_cleanse(secret, sizeof(secret));
     return st;
 }
-static enum zapp_devkey_status run(ANativeActivity *activity, JNIEnv *env, const char *dir, const char *cmd, char *detail, size_t cap)
+static enum zapp_devkey_status simple(const struct zapp_devkey_ops *ops, const char *blob, const char *cmd, char *detail, size_t cap)
 {
-    struct zapp_devkey_jni state = {env, activity->clazz};
-    struct zapp_devkey_ops ops;
-    char blob[512];
     uint8_t secret[ZAPP_DEVKEY_SECRET];
     struct zapp_devkey_info info = {0};
     bool match = false;
     enum zapp_devkey_status st = ZAPP_DEVKEY_ERROR;
-    zapp_devkey_jni_ops(&ops, &state);
-    snprintf(blob, sizeof(blob), "%s/probe.blob", dir);
-    detail[0] = '\0';
     if (!strcmp(cmd, "prepare")) {
-        st = zapp_devkey_prepare(&ops, blob, &info);
+        st = zapp_devkey_prepare(ops, blob, &info);
         if (st == ZAPP_DEVKEY_OK) snprintf(detail, cap, "level=%s strongbox_fallback=%d per_use=1", zapp_devkey_level_name(info.level), info.strongbox_fallback);
-    } else if (!strcmp(cmd, "wrap")) st = zapp_devkey_wrap_new(&ops, blob, secret);
-    else if (!strcmp(cmd, "unwrap")) st = zapp_devkey_unwrap(&ops, blob, ZAPP_DEVKEY_PURPOSE_UNLOCK, secret);
-    else if (!strcmp(cmd, "pay")) st = zapp_devkey_unwrap(&ops, blob, ZAPP_DEVKEY_PURPOSE_PAYMENT, secret);
-    else if (!strcmp(cmd, "twice")) st = twice(&ops, blob, detail, cap);
-    else if (!strcmp(cmd, "oldblob")) st = old_blob(&ops, dir, detail, cap);
-    else if (!strcmp(cmd, "roundtrip")) { st = roundtrip(&ops, blob, &match); snprintf(detail, cap, "match=%d", match); }
-    else if (!strcmp(cmd, "store")) st = store_probe(dir, detail, cap);
-    else if (!strcmp(cmd, "discard")) { zapp_devkey_discard(&ops, blob); st = ZAPP_DEVKEY_OK; }
-    else if (!strncmp(cmd, "secure ", 7)) {
-        bool on = !strcmp(cmd + 7, "on");
-        st = zapp_secure_window(activity, on) ? ZAPP_DEVKEY_OK : ZAPP_DEVKEY_ERROR;
-        snprintf(detail, cap, "secure=%d", on);
-    }
+    } else if (!strcmp(cmd, "wrap")) st = zapp_devkey_wrap_new(ops, blob, secret);
+    else if (!strcmp(cmd, "unwrap")) st = zapp_devkey_unwrap(ops, blob, ZAPP_DEVKEY_PURPOSE_UNLOCK, secret);
+    else if (!strcmp(cmd, "pay")) st = zapp_devkey_unwrap(ops, blob, ZAPP_DEVKEY_PURPOSE_PAYMENT, secret);
+    else if (!strcmp(cmd, "twice")) st = twice(ops, blob, detail, cap);
+    else if (!strcmp(cmd, "roundtrip")) { st = roundtrip(ops, blob, &match); snprintf(detail, cap, "match=%d", match); }
+    else if (!strcmp(cmd, "discard")) { zapp_devkey_discard(ops, blob); st = ZAPP_DEVKEY_OK; }
     memory_cleanse(secret, sizeof(secret));
     return st;
 }
-struct job { ANativeActivity *activity; char cmd[64]; };
+/* The worker owns everything it touches: the JVM, the data directory and a global reference to the
+ * activity object are copied when the job starts, because the ANativeActivity is freed once onDestroy
+ * returns and a prompt can outlive it. */
+struct job { JavaVM *vm; jobject activity; char dir[256]; char cmd[64]; };
+static enum zapp_devkey_status run(struct job *job, JNIEnv *env, char *detail, size_t cap)
+{
+    struct zapp_devkey_jni state = {env, job->activity};
+    struct zapp_devkey_ops ops;
+    char blob[512];
+    const char *cmd = job->cmd;
+    zapp_devkey_jni_ops(&ops, &state);
+    snprintf(blob, sizeof(blob), "%s/probe.blob", job->dir);
+    detail[0] = '\0';
+    if (!strcmp(cmd, "noprompt") || !strcmp(cmd, "othercipher")) return misuse(&ops, &state, cmd[0] == 'o', detail, cap);
+    if (!strcmp(cmd, "oldblob")) return old_blob(&ops, job->dir, detail, cap);
+    if (!strcmp(cmd, "store")) return store_probe(job->dir, detail, cap);
+    return simple(&ops, blob, cmd, detail, cap);
+}
 /* Runs one command on its own thread attached to the JVM: a prompt blocks until the owner answers
  * and the UI thread must stay free to show it. */
 static void *job_main(void *arg)
 {
     struct job *job = arg;
-    ANativeActivity *activity = job->activity;
     JNIEnv *env = NULL;
-    const char *dir = activity->internalDataPath;
     char detail[96], tag[256];
-    if ((*activity->vm)->AttachCurrentThread(activity->vm, &env, NULL) == JNI_OK) {
-        enum zapp_devkey_status st = run(activity, env, dir, job->cmd, detail, sizeof(detail));
+    if ((*job->vm)->AttachCurrentThread(job->vm, &env, NULL) == JNI_OK) {
+        enum zapp_devkey_status st = run(job, env, detail, sizeof(detail));
         snprintf(tag, sizeof(tag), "%s %s %s", job->cmd, zapp_devkey_status_name(st), detail);
-        note(dir, tag);
-        (*activity->vm)->DetachCurrentThread(activity->vm);
-    } else note(dir, "attach failed");
+        note(job->dir, tag);
+        (*env)->DeleteGlobalRef(env, job->activity);
+        (*job->vm)->DetachCurrentThread(job->vm);
+    } else note(job->dir, "attach failed");
     free(job);
     atomic_flag_clear(&busy);
     return NULL;
 }
+/* Starts the command on a worker; false when the job could not be built. The caller clears busy. */
+static bool start_job(ANativeActivity *activity, const char *cmd)
+{
+    struct job *job = calloc(1, sizeof(*job));
+    pthread_t thread;
+    if (!job) return false;
+    job->vm = activity->vm;
+    job->activity = (*activity->env)->NewGlobalRef(activity->env, activity->clazz);
+    bool named = snprintf(job->dir, sizeof(job->dir), "%s", activity->internalDataPath) < (int)sizeof(job->dir) &&
+        snprintf(job->cmd, sizeof(job->cmd), "%s", cmd) < (int)sizeof(job->cmd);
+    if (job->activity && named && pthread_create(&thread, NULL, job_main, job) == 0) { pthread_detach(thread); return true; }
+    if (job->activity) (*activity->env)->DeleteGlobalRef(activity->env, job->activity);
+    free(job);
+    return false;
+}
 void zapp_devkey_probe(ANativeActivity *activity, enum zapp_devkey_probe_event event)
 {
     const char *dir = activity->internalDataPath;
-    char path[512];
+    char path[512], cmd[64];
     if (event == ZAPP_DEVKEY_PROBE_PAUSE || !dir || atomic_flag_test_and_set(&busy)) return;
-    struct job *job = calloc(1, sizeof(*job));
-    pthread_t thread;
-    if (!job) { atomic_flag_clear(&busy); return; }
-    job->activity = activity;
-    if (!read_command(dir, job->cmd, sizeof(job->cmd))) { free(job); atomic_flag_clear(&busy); return; }
+    if (!read_command(dir, cmd, sizeof(cmd))) { atomic_flag_clear(&busy); return; }
     snprintf(path, sizeof(path), "%s/probe.cmd", dir);
     (void)unlink(path);
-    if (pthread_create(&thread, NULL, job_main, job) != 0) { free(job); atomic_flag_clear(&busy); return; }
-    pthread_detach(thread);
+    if (!strncmp(cmd, "secure ", 7)) {
+        bool on = !strcmp(cmd + 7, "on");
+        char tag[96];
+        snprintf(tag, sizeof(tag), "%s %s secure=%d", cmd, zapp_secure_window(activity, on) ? "ok" : "error", on);
+        note(dir, tag);
+        atomic_flag_clear(&busy);
+    } else if (!start_job(activity, cmd)) atomic_flag_clear(&busy);
 }

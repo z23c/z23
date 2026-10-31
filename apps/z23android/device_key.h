@@ -110,8 +110,10 @@ enum zapp_devkey_status zapp_devkey_prepare(const struct zapp_devkey_ops *ops, c
 enum zapp_devkey_status zapp_devkey_wrap_new(const struct zapp_devkey_ops *ops, const char *path,
                                              uint8_t secret[ZAPP_DEVKEY_SECRET]);
 /* Reads the blob and unwraps it into secret with one prompt, which is zero unless the result is OK.
- * Without a secure lock screen it refuses before any prompt. A blob from an earlier format is
- * OLD_FORMAT and never opened. */
+ * Only the unlock and payment purposes open a blob; any other purpose is an ERROR before any prompt.
+ * Before the prompt it reads the stored key's policy itself and refuses a key that is not hardware
+ * backed or does not authenticate every use, so it does not rely on an earlier prepare. Without a secure
+ * lock screen it refuses before any prompt. A blob from an earlier format is OLD_FORMAT and never opened. */
 enum zapp_devkey_status zapp_devkey_unwrap(const struct zapp_devkey_ops *ops, const char *path,
                                            enum zapp_devkey_purpose purpose,
                                            uint8_t secret[ZAPP_DEVKEY_SECRET]);
@@ -164,5 +166,18 @@ void zapp_devkey_jni_ops(struct zapp_devkey_ops *ops, struct zapp_devkey_jni *st
 /* Ends a pending prompt with DECLINED and dismisses it; call from the activity's onDestroy. The
  * waiting thread returns at once and nothing stays referenced. */
 void zapp_devkey_jni_abandon(JNIEnv *env);
+#ifdef ZAPP_DEVKEY_PROBE
+/* Outcome of an operation attempted without the authentication Keystore requires. */
+struct zapp_devkey_misuse {
+    bool accepted;                   /* Keystore ran the operation: the key is not enforcing per-use authentication. */
+    bool control_ok;                 /* other_cipher only: the cipher the owner authenticated finished normally. */
+    enum zapp_devkey_status refusal; /* How Keystore refused the unauthenticated operation. */
+};
+/* Probe only. Encrypts zeros with the stored key on a cipher that no prompt covers. With other_cipher
+ * false the cipher is initialised and used with no prompt at all; with it true, one prompt
+ * authenticates a first cipher and the operation runs on a second one that was initialised too. The
+ * result is OK when the attempt was made, whatever Keystore answered. */
+enum zapp_devkey_status zapp_devkey_jni_misuse(struct zapp_devkey_jni *state, bool other_cipher, struct zapp_devkey_misuse *result);
+#endif
 #endif
 #endif

@@ -22,6 +22,7 @@ enum owner { OWNER_ACCEPTS, OWNER_DECLINES, OWNER_DESTROYS_ACTIVITY, OWNER_NO_LO
  * through the module's wait primitives from a second thread, as it does in the JNI backend. */
 struct fake {
     bool secure, has_key, invalidated, strongbox_ok, random_ok, per_use, wait_mode;
+    bool vanish_after_policy;    /* The key is deleted right after the policy read, before the prompt. */
     enum owner owner;
     int prompts;
     enum zapp_devkey_purpose last_purpose;
@@ -65,6 +66,7 @@ static enum zapp_devkey_status f_policy(void *c, enum zapp_devkey_level *level, 
     if (f->level_error != ZAPP_DEVKEY_OK) return f->level_error;
     *level = f->level_if_created;
     *per_use = f->per_use;
+    if (f->vanish_after_policy) f->has_key = false;
     return ZAPP_DEVKEY_OK;
 }
 static void f_delete(void *c) { struct fake *f = c; f->has_key = false; f->deletes++; }
@@ -302,6 +304,9 @@ static void key_gone_or_invalidated_is_distinct(const char *dir)
     f.invalidated = false; f.has_key = false; memset(secret, 0xAA, sizeof(secret));
     assert(zapp_devkey_unwrap(&ops, path, ZAPP_DEVKEY_PURPOSE_PAYMENT, secret) == ZAPP_DEVKEY_INVALIDATED && all_zero(secret, sizeof(secret)));
     assert(f.prompts == prompts);
+    f.has_key = true; f.vanish_after_policy = true; memset(secret, 0xAA, sizeof(secret));
+    assert(zapp_devkey_unwrap(&ops, path, ZAPP_DEVKEY_PURPOSE_PAYMENT, secret) == ZAPP_DEVKEY_INVALIDATED && all_zero(secret, sizeof(secret)));
+    assert(f.prompts == prompts);
     assert(strcmp(zapp_devkey_status_name(ZAPP_DEVKEY_INVALIDATED), zapp_devkey_status_name(ZAPP_DEVKEY_DECLINED)));
 }
 /* Rule: the owner losing the lock screen or a backend failure are typed, leave no secret, and
@@ -361,6 +366,39 @@ static void garbage_never_reaches_the_caller(const char *dir)
         assert(zapp_devkey_unwrap(&ops, path, ZAPP_DEVKEY_PURPOSE_UNLOCK, secret) != ZAPP_DEVKEY_OK);
         assert(all_zero(secret, sizeof(secret)));
     }
+}
+/* Rule: unwrap checks the stored key's policy itself, before any prompt: a key that is not per-use
+ * (or not hardware) never opens a blob, even when prepare was skipped or the key was replaced. */
+static void unwrap_checks_key_policy_before_prompt(const char *dir)
+{
+    struct fake f = fake_new(); struct zapp_devkey_ops ops = ops_for(&f);
+    char path[PATH_MAX]; blob_path(path, dir, "policy.blob");
+    uint8_t made[ZAPP_DEVKEY_SECRET], secret[ZAPP_DEVKEY_SECRET];
+    assert(zapp_devkey_wrap_new(&ops, path, made) == ZAPP_DEVKEY_OK);
+    int prompts = f.prompts;
+    f.per_use = false; memset(secret, 0xAA, sizeof(secret));
+    assert(zapp_devkey_unwrap(&ops, path, ZAPP_DEVKEY_PURPOSE_PAYMENT, secret) == ZAPP_DEVKEY_NOT_PER_USE);
+    assert(f.prompts == prompts && all_zero(secret, sizeof(secret)) && f.has_key && f.deletes == 0);
+    f.per_use = true; f.level_if_created = ZAPP_DEVKEY_LEVEL_SOFTWARE;
+    assert(zapp_devkey_unwrap(&ops, path, ZAPP_DEVKEY_PURPOSE_PAYMENT, secret) == ZAPP_DEVKEY_NOT_HARDWARE);
+    assert(f.prompts == prompts && all_zero(secret, sizeof(secret)));
+    f.level_if_created = ZAPP_DEVKEY_LEVEL_STRONGBOX; f.level_error = ZAPP_DEVKEY_ERROR;
+    assert(zapp_devkey_unwrap(&ops, path, ZAPP_DEVKEY_PURPOSE_PAYMENT, secret) == ZAPP_DEVKEY_ERROR && f.prompts == prompts);
+    f.level_error = ZAPP_DEVKEY_OK;
+    assert(zapp_devkey_unwrap(&ops, path, ZAPP_DEVKEY_PURPOSE_PAYMENT, secret) == ZAPP_DEVKEY_OK && !memcmp(secret, made, sizeof(made)));
+}
+/* Rule: only unlock and payment may open a blob; the create purpose names a different action and is
+ * refused before any prompt, so the owner is never told "Protect this wallet" while a secret is read. */
+static void unwrap_refuses_the_create_purpose(const char *dir)
+{
+    struct fake f = fake_new(); struct zapp_devkey_ops ops = ops_for(&f);
+    char path[PATH_MAX]; blob_path(path, dir, "purpose.blob");
+    uint8_t secret[ZAPP_DEVKEY_SECRET];
+    assert(zapp_devkey_wrap_new(&ops, path, secret) == ZAPP_DEVKEY_OK);
+    int prompts = f.prompts; memset(secret, 0xAA, sizeof(secret));
+    assert(zapp_devkey_unwrap(&ops, path, ZAPP_DEVKEY_PURPOSE_CREATE, secret) == ZAPP_DEVKEY_ERROR);
+    assert(f.prompts == prompts && all_zero(secret, sizeof(secret)));
+    assert(zapp_devkey_unwrap(&ops, path, (enum zapp_devkey_purpose)7, secret) == ZAPP_DEVKEY_ERROR && f.prompts == prompts);
 }
 /* Rule: a blob from the 30 second window design is refused with its own reason and never opened. */
 static void old_format_blob_is_refused(const char *dir)
@@ -567,6 +605,8 @@ int main(int argc, char **argv)
     failures_leave_no_secret_and_no_file(argv[1]);
     garbage_never_reaches_the_caller(argv[1]);
     old_format_blob_is_refused(argv[1]);
+    unwrap_checks_key_policy_before_prompt(argv[1]);
+    unwrap_refuses_the_create_purpose(argv[1]);
     existing_blob_is_never_replaced(argv[1]);
     malformed_blobs_are_corrupt(argv[1]);
     discard_removes_blob_and_key(argv[1]);

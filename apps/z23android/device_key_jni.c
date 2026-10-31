@@ -422,22 +422,32 @@ static bool prompt_parts_new(JNIEnv *env, jobject activity, jobject cipher, enum
     if (p->executor) (void)call_void(env, p->executor, "shutdown", "()V");
     return false;
 }
-/* Makes this prompt the one that callbacks and the abandon hook act on. */
+/* Makes this prompt the one that callbacks and the abandon hook act on. A prompt whose references are
+ * still published (its worker has not retired them yet) loses them here, so none leaks. */
 static void prompt_publish(JNIEnv *env, const struct prompt_parts *p, unsigned long ticket)
 {
-    pthread_mutex_lock(&refs_lock);
-    current_callback = (*env)->NewGlobalRef(env, p->callback);
-    current_cancel = (*env)->NewGlobalRef(env, p->cancel);
-    current_ticket = ticket;
-    pthread_mutex_unlock(&refs_lock);
-}
-/* Drops the references of the finished prompt and stops its executor. */
-static void prompt_retire(JNIEnv *env, const struct prompt_parts *p)
-{
+    jobject callback = (*env)->NewGlobalRef(env, p->callback), cancel = (*env)->NewGlobalRef(env, p->cancel);
     pthread_mutex_lock(&refs_lock);
     jobject stale_callback = current_callback, stale_cancel = current_cancel;
-    current_callback = current_cancel = NULL;
-    current_ticket = 0;
+    current_callback = callback;
+    current_cancel = cancel;
+    current_ticket = ticket;
+    pthread_mutex_unlock(&refs_lock);
+    if (stale_callback) (*env)->DeleteGlobalRef(env, stale_callback);
+    if (stale_cancel) (*env)->DeleteGlobalRef(env, stale_cancel);
+}
+/* Drops the references this ticket published and stops its executor. The ticket retires before this
+ * runs, so another worker may already have published its own prompt: those references are not ours
+ * and stay. */
+static void prompt_retire(JNIEnv *env, const struct prompt_parts *p, unsigned long ticket)
+{
+    jobject stale_callback = NULL, stale_cancel = NULL;
+    pthread_mutex_lock(&refs_lock);
+    if (current_ticket == ticket) {
+        stale_callback = current_callback; stale_cancel = current_cancel;
+        current_callback = current_cancel = NULL;
+        current_ticket = 0;
+    }
     pthread_mutex_unlock(&refs_lock);
     if (stale_callback) (*env)->DeleteGlobalRef(env, stale_callback);
     if (stale_cancel) (*env)->DeleteGlobalRef(env, stale_cancel);
@@ -462,8 +472,8 @@ static status_t authenticate_once(JNIEnv *env, jobject activity, jobject cipher,
         (void)zapp_devkey_wait_answer(&prompt_wait, ticket, ZAPP_DEVKEY_ANSWER_FAILED);
     }
     enum zapp_devkey_answer answer = zapp_devkey_wait_end(&prompt_wait, ticket, PROMPT_TIMEOUT_MS);
-    if (answer == ZAPP_DEVKEY_ANSWER_TIMED_OUT) (void)call_void(env, p.cancel, "cancel", "()V");
-    prompt_retire(env, &p);
+    if (answer == ZAPP_DEVKEY_ANSWER_TIMED_OUT || answer == ZAPP_DEVKEY_ANSWER_ABANDONED) (void)call_void(env, p.cancel, "cancel", "()V");
+    prompt_retire(env, &p, ticket);
     return zapp_devkey_status_for_answer(answer);
 }
 void zapp_devkey_jni_abandon(JNIEnv *env)
@@ -537,6 +547,40 @@ static void jni_delete_key(void *context)
     }
     frame_end(env);
 }
+#ifdef ZAPP_DEVKEY_PROBE
+/* Runs one encryption of zeros on the cipher; true when Keystore let it finish, else *refusal holds why. */
+static bool misuse_attempt(JNIEnv *env, jobject cipher, status_t *refusal)
+{
+    uint8_t zeros[ZAPP_DEVKEY_SECRET] = {0};
+    jbyteArray input = bytes_new(env, zeros, sizeof(zeros));
+    jbyteArray output = input ? cipher_run(env, cipher, input) : NULL;
+    *refusal = output ? ZAPP_DEVKEY_OK : failed(env);
+    bytes_wipe(env, input);
+    bytes_wipe(env, output);
+    return output != NULL;
+}
+status_t zapp_devkey_jni_misuse(struct zapp_devkey_jni *state, bool other_cipher, struct zapp_devkey_misuse *result)
+{
+    JNIEnv *env = state->env;
+    status_t st = ZAPP_DEVKEY_ERROR;
+    *result = (struct zapp_devkey_misuse){false, false, ZAPP_DEVKEY_ERROR};
+    if (!frame_begin(env)) return st;
+    jobject key = stored_key(env, &st);
+    jobject shown = key ? cipher_for(env, 1, key, NULL) : NULL;
+    jobject used = shown && other_cipher ? cipher_for(env, 1, key, NULL) : shown;
+    if (key && !used) st = failed(env);
+    if (used) st = other_cipher ? authenticate_once(env, state->activity, shown, ZAPP_DEVKEY_PURPOSE_CREATE) : ZAPP_DEVKEY_OK;
+    if (st == ZAPP_DEVKEY_OK) {
+        result->accepted = misuse_attempt(env, used, &result->refusal);
+        if (other_cipher) {
+            status_t ignored;
+            result->control_ok = misuse_attempt(env, shown, &ignored);
+        }
+    }
+    frame_end(env);
+    return st;
+}
+#endif
 void zapp_devkey_jni_ops(struct zapp_devkey_ops *ops, struct zapp_devkey_jni *state)
 {
     /* No random hook: the module draws from getrandom. */

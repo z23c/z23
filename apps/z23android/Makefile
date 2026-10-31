@@ -287,6 +287,7 @@ test-devkey:
 	  ../../platform/modules/base/src/cleanse.c -o '$(BUILD_DIR)/device-key-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/device-key-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/device-key-test' "$$scratch"
+	@grep -q 'android:name="android.permission.USE_BIOMETRIC"' AndroidManifest.xml || { echo "AndroidManifest.xml lacks USE_BIOMETRIC: BiometricPrompt.authenticate would throw SecurityException and every wallet key use would fail" >&2; exit 1; }
 	@if $(MAKE) --no-print-directory check-probe DEVKEY_PROBE=ON 2>/dev/null; then echo "production manifest accepted DEVKEY_PROBE=ON" >&2; exit 1; fi
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/secure_window_test.c secure_window.c -o '$(BUILD_DIR)/secure-window-test'
 	'$(BUILD_DIR)/secure-window-test'

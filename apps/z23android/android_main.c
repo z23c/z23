@@ -417,10 +417,11 @@ static void detach_activity(JNIEnv *env)
 static void destroy(ANativeActivity *activity)
 {
     JNIEnv *env = activity->env;
-    zapp_devkey_jni_abandon(env);
     pthread_mutex_lock(&lock);
     bool owner = active && (*env)->IsSameObject(env, active, activity->clazz);
+    bool newer = active && !owner;
     pthread_mutex_unlock(&lock);
+    if (!newer) zapp_devkey_jni_abandon(env);
     if (owner) detach_activity(env);
 }
 static void pause_activity(ANativeActivity *activity)
