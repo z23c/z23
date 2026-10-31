@@ -656,7 +656,30 @@ static int case_verify_duplicate_post_in_run(void)
         ASSERT_EQ(lpt_verify_run(&e), 0);
         ASSERT_EQ(lpt_count(e.calls, "\tfetch\n"), 1);
         ASSERT_EQ(lpt_count(e.calls, "\tresult\n"), 1);
-        ASSERT(lpt_run_has("ALREADY_HANDLED"));
+        ASSERT(lpt_run_has("DUPLICATE_IN_RUN"));
+    } TEST_END
+    return failures;
+}
+
+static int case_verify_duplicate_retry_in_run(void)
+{
+    int failures = 0;
+    struct lpt e;
+    char posts[16 * 1024] = "", ha[65], handled[800];
+    TEST_CASE("lab_peer: a retryable failure listed twice in one run spends one try") {
+        lpt_hex(ha, 'a', 64);
+        ASSERT(lpt_verify_env(&e, "verify_dup_retry"));
+        ASSERT(lpt_resp(&e, "fleet.bundle.fetch", "{\"ok\":false,\"error\":{\"code\":\"FETCH_FAILED\"}}"));
+        lpt_offer_post(posts, sizeof(posts), '1', ha, NULL, NULL, LPT_FUTURE);
+        lpt_offer_post(posts, sizeof(posts), '1', ha, NULL, NULL, LPT_FUTURE);
+        lpt_offer_post(posts, sizeof(posts), '1', ha, NULL, NULL, LPT_FUTURE);
+        ASSERT(lpt_list(&e, posts));
+        (void)snprintf(handled, sizeof(handled), "%s/handled.tsv", e.state);
+        ASSERT_EQ(lpt_verify_run(&e), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\tfetch\n"), 1);
+        ASSERT_EQ(lpt_count(handled, "\tretry\tFETCH_FAILED\t"), 1);
+        ASSERT_EQ(lpt_count(handled, "\tfailed\t"), 0);
+        ASSERT(lpt_run_has("DUPLICATE_IN_RUN"));
     } TEST_END
     return failures;
 }
@@ -903,6 +926,7 @@ int test_lab_peer(void)
     failures += case_verify_handled_unreadable();
     failures += case_verify_handled_unwritable();
     failures += case_verify_duplicate_post_in_run();
+    failures += case_verify_duplicate_retry_in_run();
     failures += case_verify_overlapping_run();
     failures += case_verify_authors_unreadable();
     failures += case_collect();

@@ -123,6 +123,8 @@ static char g_file[LP_BUF];    /* the last state file read */
 static char g_out[LP_BUF];     /* the document printed */
 static char g_handled[LP_BUF]; /* handled.tsv, loaded once per verify run */
 static char g_qual[LP_BUF];    /* qualified.tsv as it will be written */
+static char g_seen[LP_MERGED_MAX][65]; /* offer ids met this verify run */
+static size_t g_n_seen;
 
 /* ── small helpers ─────────────────────────────────────────────────────── */
 
@@ -1097,6 +1099,19 @@ static bool lp_verify_args(struct lp_ctx *c, int64_t *max)
            lp_decimal(c->v[LP_O_MAX], LP_VERIFY_MAX, max);
 }
 
+/* True the first time this run meets id; a repeat (a post listed twice) is
+ * never processed again, even when its ledger row is a retry: one attempt
+ * per offer per run, so a duplicate cannot spend the retry budget. */
+static bool lp_first_in_run(const char *id)
+{
+    for (size_t i = 0; i < g_n_seen; i++)
+        if (strcmp(g_seen[i], id) == 0)
+            return false;
+    if (g_n_seen < LP_MERGED_MAX)
+        (void)snprintf(g_seen[g_n_seen++], sizeof(g_seen[0]), "%s", id);
+    return true;
+}
+
 static void lp_verify_post(struct lp_ctx *c, const struct json_value *post,
                            int *done)
 {
@@ -1112,7 +1127,9 @@ static void lp_verify_post(struct lp_ctx *c, const struct json_value *post,
     const char *id = lp_str(post, "id");
     if (why && !why[0])
         return;
-    if (why) {
+    if (lp_hex(id, 64) && !lp_first_in_run(id)) {
+        lp_item(c, id, "skipped", "DUPLICATE_IN_RUN");
+    } else if (why) {
         lp_item(c, id, "skipped", why);
     } else if (!lp_parse_offer(lp_str(post, "text"), &o)) {
         lp_item(c, id, "skipped", "OFFER_MALFORMED");
