@@ -28,8 +28,10 @@ struct zapp_codec_info {
 /* Index of the first hardware AVC encoder, or -1: recording never falls back to a software encode. */
 int zapp_clip_pick_encoder(const struct zapp_codec_info *list, size_t count);
 
-/* Whether recording may start: refused when the thermal status holds the pace at pause. */
-bool zapp_clip_thermal_allows(enum zapp_pace previous, int thermal_status);
+/* Advances *pace with the node's thermal hysteresis and returns whether recording may start. Once the
+ * pace is pause (status 4 or above) it stays pause until the status drops below 3, so a status of 3
+ * right after 4 still refuses. */
+bool zapp_clip_thermal_track(enum zapp_pace *pace, int thermal_status);
 
 /* Whether a recording in progress must stop and keep its file: critical thermal status (4) or above. */
 bool zapp_clip_thermal_stops(int thermal_status);
@@ -45,6 +47,14 @@ int zapp_clip_rotation_hint(int sensor_orientation);
  * (format, width, height, is_input): the profile size when offered, else the closest landscape
  * output of aspect 1.6 to 1.9 in the private-format list. */
 bool zapp_clip_pick_size(const int32_t *configs, size_t count, int *width, int *height);
+
+/* End of a sample on the recording clock: its presentation time plus one frame (video) or one AAC
+ * frame of 1024 samples (audio). */
+int64_t zapp_clip_sample_end_us(bool video, int64_t pts_us);
+
+/* Duration of a clip in milliseconds, from its first sample to the end of its last, as the MP4 track
+ * durations measure it; 0 when there is no first sample or no span. */
+int64_t zapp_clip_span_ms(int64_t first_us, int64_t end_us);
 
 /* Average bitrate of bytes over duration_ms in kbit/s, 0 for an empty duration. */
 int64_t zapp_clip_bitrate_kbps(int64_t bytes, int64_t duration_ms);
@@ -71,15 +81,31 @@ struct zapp_clip_recorder *zapp_clip_recorder_open(ANativeWindow *preview, const
 /* Starts recording MPEG-4 to path with sound. The camera keeps showing the preview. */
 bool zapp_clip_recorder_start(struct zapp_clip_recorder *r, const char *path, char *error, size_t error_cap);
 
-/* Milliseconds recorded so far; recording ends by itself at the cap, see zapp_clip_recorder_running. */
+/* Milliseconds recorded so far. Recording ends by itself at the cap. */
 int64_t zapp_clip_recorder_elapsed_ms(const struct zapp_clip_recorder *r);
+
+/* True from a successful start until the worker has finished the file. */
 bool zapp_clip_recorder_running(const struct zapp_clip_recorder *r);
 
-/* Ends the recording and closes the file. Returns the duration in milliseconds, or 0 and no file
- * when nothing playable was written. */
-int64_t zapp_clip_recorder_stop(struct zapp_clip_recorder *r);
+/* Asks a recording to end. It returns at once; the worker closes the file and
+ * zapp_clip_recorder_running then turns false. */
+void zapp_clip_recorder_request_stop(struct zapp_clip_recorder *r);
 
-/* Stops any recording, closes the camera and frees the recorder. */
+/* Waits up to timeout_ms for the worker to finish; true when it has. */
+bool zapp_clip_recorder_wait(const struct zapp_clip_recorder *r, int timeout_ms);
+
+/* After running turned false: the duration in milliseconds, or 0 and no file when nothing playable
+ * was written. Call it once per recording. */
+int64_t zapp_clip_recorder_collect(struct zapp_clip_recorder *r);
+
+/* The sentence for the person when the last recording failed, or an empty string. */
+const char *zapp_clip_recorder_message(const struct zapp_clip_recorder *r);
+
+/* Whether the camera was taken by another app or stopped; the recorder must then be closed and reopened. */
+bool zapp_clip_recorder_camera_lost(const struct zapp_clip_recorder *r);
+
+/* Frees the recorder and closes the camera. A recording still running is told to stop and a background
+ * thread finishes and frees it, so the call does not wait for the worker. */
 void zapp_clip_recorder_close(struct zapp_clip_recorder *r);
 #endif
 #endif

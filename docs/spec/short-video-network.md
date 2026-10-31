@@ -64,14 +64,15 @@ the content-addressed package swarm with flag-gated hosting
 (`docs/commons/P2P_SOURCE_HOSTING.md`), zid identity documents and signed
 endpoint records (`docs/spec/sovereign-identity-layer.md`), embedded Tor onion
 streams, the signed fleet roster, the node pace, and the app's NDK camera
-code. **New**: the video encoder, muxer, decoder and player, the Clips
+code, its local MP4 recorder and player (hardware AVC encoder, muxer, extractor,
+decoder; `apps/z23android/clip_*.c`). **New**: the Clips
 records, frames, API and UI.
 
 <!-- claim: symbol-present node_pace_get engine/jobs/src/node_pace.c # the pace word is read by the node -->
 <!-- claim: symbol-present zapp_pace_next apps/z23android/thermal.c # the app maps thermal status to a pace -->
 <!-- claim: file-present apps/z23android/camera.c # NDK camera code exists for QR scanning -->
-<!-- claim: symbol-absent AMediaCodec_createInputSurface apps/z23android # no video encoder exists yet -->
-<!-- claim: symbol-absent AMediaMuxer_new apps/z23android # no muxer exists yet -->
+<!-- claim: symbol-present AMediaCodec_createInputSurface apps/z23android/clip_capture.c # the app records through a hardware encoder input surface -->
+<!-- claim: symbol-present AMediaMuxer_new apps/z23android/clip_capture.c # the app writes MP4 files with the platform muxer -->
 <!-- claim: file-absent contexts/clips # the room is not created by this specification -->
 
 ---

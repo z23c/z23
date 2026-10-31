@@ -43,6 +43,16 @@ static bool commit(const char *bytes, const struct zapp_clip_meta *meta, char id
     put(source, bytes);
     return zapp_clip_store_commit(root, source, meta, id, error, sizeof(error));
 }
+static bool verified(const char *id, char *error, size_t cap)
+{
+    char path[600];
+    assert(snprintf(path, sizeof(path), "%s/%s.mp4", root, id) < (int)sizeof(path));
+    int fd = open(path, O_RDONLY);
+    assert(fd >= 0);
+    bool ok = zapp_clip_store_verify(fd, id, error, cap);
+    close(fd);
+    return ok;
+}
 static size_t entries_ending(const char *suffix)
 {
     DIR *d = opendir(root);
@@ -64,13 +74,19 @@ static void id_cases(void)
     assert(!zapp_clip_id_valid(ABC_ID "0"));
     assert(!zapp_clip_id_valid(&ABC_ID[1]));
     char upper[ZAPP_CLIP_ID_CAP], odd[ZAPP_CLIP_ID_CAP];
-    strcpy(upper, ABC_ID); upper[0] = 'B';
-    strcpy(odd, ABC_ID); odd[5] = 'g';
+    memcpy(upper, ABC_ID, sizeof(ABC_ID)); upper[0] = 'B';
+    memcpy(odd, ABC_ID, sizeof(ABC_ID)); odd[5] = 'g';
     assert(!zapp_clip_id_valid(upper) && !zapp_clip_id_valid(odd));
     char path[600], id[ZAPP_CLIP_ID_CAP];
     path_of(path, sizeof(path), "abc.bin");
     put(path, "abc");
     assert(zapp_clip_hash_file(path, id) && !strcmp(id, ABC_ID));
+    int fd = open(path, O_RDONLY);
+    assert(fd >= 0 && zapp_clip_hash_fd(fd, id) && !strcmp(id, ABC_ID));
+    close(fd);
+    fd = open(root, O_RDONLY);
+    assert(fd >= 0 && !zapp_clip_hash_fd(fd, id));
+    close(fd);
     path_of(path, sizeof(path), "missing.bin");
     assert(!zapp_clip_hash_file(path, id));
 }
@@ -113,17 +129,17 @@ static void commit_and_tamper_cases(void)
     assert(present(path));
     assert(entries_ending(".tmp") == 0);
     struct zapp_clip list[4];
-    assert(zapp_clip_store_list(root, list, 4) == 1);
+    assert(zapp_clip_store_list(root, list, 4, NULL) == 1);
     assert(!strcmp(list[0].id, ABC_ID) && list[0].meta.level == 3 && list[0].meta.descriptors == 0x09);
     assert(list[0].meta.created_at == 1000 && list[0].meta.duration_ms == 1500);
     assert(!strcmp(list[0].meta.caption, m.caption));
-    assert(zapp_clip_store_verify(root, ABC_ID, error, sizeof(error)));
+    assert(verified(ABC_ID, error, sizeof(error)));
     path_of(path, sizeof(path), ABC_ID ".mp4");
     put(path, "abd");
-    assert(!zapp_clip_store_verify(root, ABC_ID, error, sizeof(error)) && strstr(error, "changed"));
+    assert(!verified(ABC_ID, error, sizeof(error)) && strstr(error, "changed"));
     put(path, "abc");
-    assert(zapp_clip_store_verify(root, ABC_ID, error, sizeof(error)));
-    assert(!zapp_clip_store_verify(root, "../etc", error, sizeof(error)));
+    assert(verified(ABC_ID, error, sizeof(error)));
+    assert(!zapp_clip_store_verify(-1, "../etc", error, sizeof(error)));
 }
 
 static void order_and_bound_cases(void)
@@ -135,21 +151,22 @@ static void order_and_bound_cases(void)
         assert(commit(body, &m, id));
     }
     struct zapp_clip list[16];
-    assert(zapp_clip_store_list(root, list, 16) == 6);
+    assert(zapp_clip_store_list(root, list, 16, NULL) == 6);
     for (size_t i = 1; i < 6; ++i) assert(list[i - 1].meta.created_at >= list[i].meta.created_at);
     assert(list[0].meta.created_at == 1000 && list[1].meta.created_at == 500);
-    assert(zapp_clip_store_list(root, list, 3) == 3);
+    size_t total = 0;
+    assert(zapp_clip_store_list(root, list, 3, &total) == 3 && total == 6);
     assert(list[0].meta.created_at == 1000 && list[1].meta.created_at == 500 && list[2].meta.created_at == 400);
-    assert(zapp_clip_store_list(root, list, 1) == 1 && list[0].meta.created_at == 1000);
+    assert(zapp_clip_store_list(root, list, 1, NULL) == 1 && list[0].meta.created_at == 1000);
     for (size_t max = 1; max <= 3; max += 2) {
         for (size_t i = 0; i < 16; ++i) list[i].id[0] = 'S';
-        assert(zapp_clip_store_list(root, list, max) == max);
+        assert(zapp_clip_store_list(root, list, max, NULL) == max);
         for (size_t i = max; i < 16; ++i) assert(list[i].id[0] == 'S');
     }
-    assert(zapp_clip_store_list(root, list, 0) == 0);
+    assert(zapp_clip_store_list(root, list, 0, NULL) == 0);
     struct zapp_clip_meta tie = meta_of(2, 500);
     assert(commit("tied", &tie, id));
-    assert(zapp_clip_store_list(root, list, 16) == 7);
+    assert(zapp_clip_store_list(root, list, 16, NULL) == 7);
     assert(list[1].meta.created_at == 500 && list[2].meta.created_at == 500 && strcmp(list[1].id, list[2].id) < 0);
 }
 
@@ -164,21 +181,48 @@ static void skip_and_delete_cases(void)
     path_of(path, sizeof(path), "notes.json");
     put(path, "{}");
     struct zapp_clip list[16];
-    assert(zapp_clip_store_list(root, list, 16) == 7);
+    assert(zapp_clip_store_list(root, list, 16, NULL) == 7);
     snprintf(name, sizeof(name), "%s.mp4", orphan);
     path_of(path, sizeof(path), name);
     put(path, "x");
-    assert(zapp_clip_store_list(root, list, 16) == 8 && list[0].meta.created_at == 9999);
+    assert(zapp_clip_store_list(root, list, 16, NULL) == 8 && list[0].meta.created_at == 9999);
     snprintf(name, sizeof(name), "%s.json", orphan);
     path_of(path, sizeof(path), name);
     put(path, "{\"level\":0,\"descriptors\":0,\"caption\":\"\",\"created_at\":9999,\"duration_ms\":10}");
-    assert(zapp_clip_store_list(root, list, 16) == 7);
+    assert(zapp_clip_store_list(root, list, 16, NULL) == 7);
     assert(zapp_clip_store_delete(root, orphan));
     assert(zapp_clip_store_delete(root, ABC_ID));
-    assert(zapp_clip_store_list(root, list, 16) == 6);
+    assert(zapp_clip_store_list(root, list, 16, NULL) == 6);
     path_of(path, sizeof(path), ABC_ID ".mp4");
     assert(!present(path));
     assert(!zapp_clip_store_delete(root, "short"));
+}
+
+static void name_of(char *out, size_t cap, char letter, const char *suffix)
+{
+    char id[ZAPP_CLIP_ID_CAP], name[200];
+    memset(id, letter, ZAPP_CLIP_ID_LEN);
+    id[ZAPP_CLIP_ID_LEN] = '\0';
+    snprintf(name, sizeof(name), "%s%s", id, suffix);
+    path_of(out, cap, name);
+}
+
+static void clean_cases(void)
+{
+    char orphan[600], temp[600], notes[600], pending[600], paired[600];
+    struct zapp_clip list[16];
+    name_of(orphan, sizeof(orphan), 'b', ".mp4");
+    name_of(temp, sizeof(temp), 'c', ".json.tmp");
+    path_of(notes, sizeof(notes), "notes.txt");
+    path_of(pending, sizeof(pending), "pending.mp4");
+    put(orphan, "x"); put(temp, "{}"); put(notes, "n"); put(pending, "p");
+    assert(zapp_clip_store_list(root, list, 16, NULL) == 6);
+    assert(zapp_clip_store_clean(root) == 2);
+    assert(!present(orphan) && !present(temp) && present(notes) && present(pending));
+    assert(zapp_clip_store_list(root, list, 16, NULL) == 6 && zapp_clip_store_clean(root) == 0);
+    snprintf(paired, sizeof(paired), "%s/%s.mp4", root, list[0].id);
+    assert(present(paired));
+    assert(unlink(notes) == 0 && unlink(pending) == 0);
 }
 
 static void rollback_case(void)
@@ -212,6 +256,7 @@ int main(int argc, char **argv)
     commit_and_tamper_cases();
     order_and_bound_cases();
     skip_and_delete_cases();
+    clean_cases();
     rollback_case();
     puts("clip_store_test ok");
     return 0;

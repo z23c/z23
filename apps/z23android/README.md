@@ -260,16 +260,23 @@ extra `org.z23.clips` selects the screen: `record` or `watch`
   profile is 30 fps, 800 kbit/s constant bitrate, a key frame every 2 s,
   64 kbit/s audio and a 60 s cap. The file carries a rotation hint so it plays
   upright. Recording stops when the phone reaches critical thermal status or
-  the activity pauses.
+  the activity pauses. Stopping never blocks the main thread: a worker closes
+  the file and the screen shows "Saving..." until it is done. If another app takes
+  the camera, the screen says so and Record opens it again.
 - After stop, the person chooses a content level: 1 General, 2 Mild,
   3 Sensitive, 4 Mature, 5 Explicit (General is highlighted). Nothing is saved
   until Save; Discard deletes the recording. A caption is optional.
 - `files/clips/<SHA3-512 hex of the bytes>.mp4` holds the clip and
-  `<same name>.json` holds level, caption, creation time and duration. Writes
-  are temporary-file-then-rename.
+  `<same name>.json` holds level, caption, creation time and duration. The
+  recording is synced to storage, then both files are renamed into place; the
+  clips folder is cleaned of interrupted saves each time the screen opens. The
+  level in the sidecar is private to the app: nothing outside it reads or
+  enforces it until a signed post carries it.
 - Watching plays clips newest first, full screen. A vertical swipe moves to
   the next or previous clip, a tap pauses. Before playing, the player hashes
-  the file again and refuses a clip whose bytes no longer match its name.
+  the opened file again and refuses a clip whose bytes no longer match its
+  name, then plays that same descriptor. The screen lists the newest 64 clips
+  and says when older ones exist.
 
 Host tests: `clip_store_test`, `clips_capture_test`, `clips_player_test`
 (run by `make test`). Measurements are in the

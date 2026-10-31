@@ -12,7 +12,7 @@ const struct zapp_clip_profile zapp_clip_profile = {
 };
 
 /* ImageFormat.PRIVATE and the Android thermal status CRITICAL. */
-enum { FORMAT_PRIVATE = 0x22, THERMAL_CRITICAL = 4 };
+enum { FORMAT_PRIVATE = 0x22, THERMAL_CRITICAL = 4, AAC_FRAME_SAMPLES = 1024 };
 
 int zapp_clip_pick_encoder(const struct zapp_codec_info *list, size_t count)
 {
@@ -21,9 +21,10 @@ int zapp_clip_pick_encoder(const struct zapp_codec_info *list, size_t count)
     return -1;
 }
 
-bool zapp_clip_thermal_allows(enum zapp_pace previous, int thermal_status)
+bool zapp_clip_thermal_track(enum zapp_pace *pace, int thermal_status)
 {
-    return zapp_pace_next(previous, thermal_status) != ZAPP_PACE_PAUSE;
+    *pace = zapp_pace_next(*pace, thermal_status);
+    return *pace != ZAPP_PACE_PAUSE;
 }
 
 bool zapp_clip_thermal_stops(int thermal_status)
@@ -59,6 +60,17 @@ bool zapp_clip_pick_size(const int32_t *configs, size_t count, int *width, int *
     return best >= 0;
 }
 
+int64_t zapp_clip_sample_end_us(bool video, int64_t pts_us)
+{
+    const struct zapp_clip_profile *p = &zapp_clip_profile;
+    return pts_us + (video ? 1000000 / p->fps : (int64_t)AAC_FRAME_SAMPLES * 1000000 / p->audio_rate);
+}
+
+int64_t zapp_clip_span_ms(int64_t first_us, int64_t end_us)
+{
+    return first_us >= 0 && end_us > first_us ? (end_us - first_us + 500) / 1000 : 0;
+}
+
 int64_t zapp_clip_bitrate_kbps(int64_t bytes, int64_t duration_ms)
 {
     return duration_ms > 0 ? bytes * 8 / duration_ms : 0;
@@ -82,7 +94,7 @@ int64_t zapp_clip_bitrate_kbps(int64_t bytes, int64_t duration_ms)
 #define PENDING_SAMPLES 256
 #define PENDING_BYTES (512 * 1024)
 #define AUDIO_BLOCK_FRAMES 1024
-#define DRAIN_TIMEOUT_US 3000000
+#define DRAIN_TIMEOUT_US 2000000
 #define COLOR_FORMAT_SURFACE 0x7f000789
 #define AVC_PROFILE_MAIN 2
 #define AAC_OBJECT_LC 2
@@ -121,8 +133,9 @@ struct zapp_clip_recorder {
     size_t pending_count, pending_used;
     pthread_t thread;
     bool thread_started;
-    atomic_bool stop, active, failed;
+    atomic_bool stop, active, failed, camera_lost, closing;
     _Atomic int64_t elapsed_ms;
+    int64_t duration_ms;
     char message[160];
     size_t bytes;
 };
@@ -258,7 +271,9 @@ size_t zapp_clip_list_codecs(JNIEnv *env, struct zapp_codec_info *list, size_t c
 static void device_gone(void *context, ACameraDevice *device)
 {
     (void)device;
-    note_failure(context, "The camera stopped. Try again.");
+    struct zapp_clip_recorder *r = context;
+    note_failure(r, "The camera stopped or was taken by another app. Tap Record to try again.");
+    atomic_store(&r->camera_lost, true);
 }
 static void device_error(void *context, ACameraDevice *device, int error)
 {
@@ -353,6 +368,7 @@ struct zapp_clip_recorder *zapp_clip_recorder_open(ANativeWindow *preview, const
     struct zapp_clip_recorder *r = calloc(1, sizeof(*r));
     if (r == NULL) { (void)failure(error, error_cap, "Out of memory."); return NULL; }
     r->preview = preview;
+    ANativeWindow_acquire(preview);
     r->fd = -1;
     r->video_track = r->audio_track = -1;
     (void)snprintf(r->encoder_name, sizeof(r->encoder_name), "%s", encoder);
@@ -484,8 +500,9 @@ static void write_sample(struct zapp_clip_recorder *r, int track, const unsigned
     if (zapp_clip_time_up(info.presentationTimeUs / 1000)) return;
     if (!emit(r, track, data, &info)) note_failure(r, "The recording could not be written.");
     else {
+        int64_t end = zapp_clip_sample_end_us(is_video, info.presentationTimeUs);
         if (r->first_us < 0 || info.presentationTimeUs < r->first_us) r->first_us = info.presentationTimeUs;
-        if (info.presentationTimeUs > r->end_us) r->end_us = info.presentationTimeUs;
+        if (end > r->end_us) r->end_us = end;
     }
 }
 
@@ -569,20 +586,6 @@ static bool should_stop(struct zapp_clip_recorder *r)
     return atomic_load(&r->stop) || atomic_load(&r->failed) || zapp_clip_time_up(elapsed);
 }
 
-static void *record_loop(void *arg)
-{
-    struct zapp_clip_recorder *r = arg;
-    while (!should_stop(r)) {
-        bool moved = drain(r, r->video, &r->video_track, &r->video_done, true);
-        moved = drain(r, r->audio, &r->audio_track, &r->audio_done, false) || moved;
-        moved = feed_audio(r) || moved;
-        if (!moved) { struct timespec ts = {.tv_nsec = 5000000}; (void)nanosleep(&ts, NULL); }
-    }
-    finish_inputs(r);
-    atomic_store(&r->active, false);
-    return NULL;
-}
-
 static void release_codecs(struct zapp_clip_recorder *r)
 {
     if (r->video != NULL) { (void)AMediaCodec_stop(r->video); (void)AMediaCodec_delete(r->video); }
@@ -592,63 +595,6 @@ static void release_codecs(struct zapp_clip_recorder *r)
     r->video = r->audio = NULL; r->encoder_window = NULL; r->mic = NULL;
     free(r->pending_data);
     r->pending_data = NULL;
-}
-
-static bool prepare(struct zapp_clip_recorder *r, const char *path, char *error, size_t error_cap)
-{
-    (void)snprintf(r->path, sizeof(r->path), "%s", path);
-    r->pending_data = malloc(PENDING_BYTES);
-    r->fd = open(path, O_CREAT | O_TRUNC | O_RDWR | O_CLOEXEC, 0600);
-    r->muxer = r->fd >= 0 ? AMediaMuxer_new(r->fd, AMEDIAMUXER_OUTPUT_FORMAT_MPEG_4) : NULL;
-    if (r->pending_data == NULL || r->muxer == NULL) return failure(error, error_cap, "Could not create the clip file.");
-    if (!microphone(r)) return failure(error, error_cap, "The microphone is not available.");
-    if (!video_encoder(r) || !audio_encoder(r)) return failure(error, error_cap, "The video encoder could not start.");
-    r->base_us = clock_us(CLOCK_BOOTTIME);
-    if (!session_open(r, true)) return failure(error, error_cap, "The camera could not start recording.");
-    return true;
-}
-
-static void reset_run(struct zapp_clip_recorder *r)
-{
-    r->first_video_us = -1;
-    r->video_track = r->audio_track = -1;
-    r->muxing = r->video_done = r->audio_done = false;
-    r->audio_frames = r->end_us = 0;
-    r->first_us = -1;
-    r->staged = 0;
-    r->pending_count = r->pending_used = r->bytes = 0;
-    atomic_store(&r->stop, false);
-    atomic_store(&r->failed, false);
-    atomic_store(&r->elapsed_ms, 0);
-}
-
-bool zapp_clip_recorder_start(struct zapp_clip_recorder *r, const char *path, char *error, size_t error_cap)
-{
-    if (r == NULL || r->thread_started || atomic_load(&r->active)) return failure(error, error_cap, "Already recording.");
-    reset_run(r);
-    if (!prepare(r, path, error, error_cap)) {
-        (void)zapp_clip_recorder_stop(r);
-        return false;
-    }
-    (void)AAudioStream_requestStart(r->mic);
-    atomic_store(&r->active, true);
-    if (pthread_create(&r->thread, NULL, record_loop, r) != 0) {
-        atomic_store(&r->active, false);
-        (void)zapp_clip_recorder_stop(r);
-        return failure(error, error_cap, "Could not start recording.");
-    }
-    r->thread_started = true;
-    return true;
-}
-
-int64_t zapp_clip_recorder_elapsed_ms(const struct zapp_clip_recorder *r)
-{
-    return r != NULL ? atomic_load(&r->elapsed_ms) : 0;
-}
-
-bool zapp_clip_recorder_running(const struct zapp_clip_recorder *r)
-{
-    return r != NULL && atomic_load(&r->active);
 }
 
 /* Closes the file; a recording that never reached the muxer leaves nothing behind. */
@@ -665,39 +611,155 @@ static int64_t finalize_file(struct zapp_clip_recorder *r)
         r->path[0] = '\0';
         return 0;
     }
-    return (r->end_us - r->first_us) / 1000;
+    return zapp_clip_span_ms(r->first_us, r->end_us);
 }
 
-/* Joins the worker, releases the codecs and closes the file; 0 when there was no recording. */
-static int64_t end_recording(struct zapp_clip_recorder *r)
+/* Runs on the worker: records until asked to stop, then finishes the file and restores the preview. */
+static void *record_loop(void *arg)
 {
-    if (r->muxer == NULL && r->fd < 0 && !r->thread_started) return 0;
-    atomic_store(&r->stop, true);
-    if (r->thread_started) (void)pthread_join(r->thread, NULL);
-    r->thread_started = false;
+    struct zapp_clip_recorder *r = arg;
+    while (!should_stop(r)) {
+        bool moved = drain(r, r->video, &r->video_track, &r->video_done, true);
+        moved = drain(r, r->audio, &r->audio_track, &r->audio_done, false) || moved;
+        moved = feed_audio(r) || moved;
+        if (!moved) { struct timespec ts = {.tv_nsec = 5000000}; (void)nanosleep(&ts, NULL); }
+    }
+    finish_inputs(r);
     release_codecs(r);
-    int64_t duration_ms = finalize_file(r);
+    r->duration_ms = finalize_file(r);
     __android_log_print(ANDROID_LOG_INFO, TAG, "clip capture stopped: %lld ms, %zu bytes, %lld kbit/s, %s",
-                        (long long)duration_ms, r->bytes, (long long)zapp_clip_bitrate_kbps((int64_t)r->bytes, duration_ms),
+                        (long long)r->duration_ms, r->bytes, (long long)zapp_clip_bitrate_kbps((int64_t)r->bytes, r->duration_ms),
                         atomic_load(&r->failed) ? r->message : "ok");
-    return duration_ms;
+    if (!atomic_load(&r->camera_lost) && !atomic_load(&r->closing)) (void)session_open(r, false);
+    atomic_store(&r->active, false);
+    return NULL;
 }
 
-int64_t zapp_clip_recorder_stop(struct zapp_clip_recorder *r)
+static bool prepare(struct zapp_clip_recorder *r, const char *path, char *error, size_t error_cap)
 {
-    if (r == NULL) return 0;
-    int64_t duration_ms = end_recording(r);
-    if (r->device != NULL) (void)session_open(r, false);
-    return duration_ms;
+    (void)snprintf(r->path, sizeof(r->path), "%s", path);
+    r->pending_data = malloc(PENDING_BYTES);
+    r->fd = open(path, O_CREAT | O_TRUNC | O_RDWR | O_CLOEXEC, 0600);
+    r->muxer = r->fd >= 0 ? AMediaMuxer_new(r->fd, AMEDIAMUXER_OUTPUT_FORMAT_MPEG_4) : NULL;
+    if (r->pending_data == NULL || r->muxer == NULL) return failure(error, error_cap, "Could not create the clip file.");
+    if (!microphone(r)) return failure(error, error_cap, "The microphone is not available.");
+    if (!video_encoder(r) || !audio_encoder(r)) return failure(error, error_cap, "The video encoder could not start.");
+    r->base_us = clock_us(CLOCK_BOOTTIME);
+    if (!session_open(r, true)) return failure(error, error_cap, "The camera could not start recording.");
+    return true;
+}
+
+/* Undoes a start that failed before the worker ran: frees what prepare made and removes the file. */
+static void abandon(struct zapp_clip_recorder *r)
+{
+    release_codecs(r);
+    (void)finalize_file(r);
+    if (!atomic_load(&r->camera_lost)) (void)session_open(r, false);
+}
+
+static void reset_run(struct zapp_clip_recorder *r)
+{
+    r->first_video_us = -1;
+    r->video_track = r->audio_track = -1;
+    r->muxing = r->video_done = r->audio_done = false;
+    r->audio_frames = r->end_us = r->duration_ms = 0;
+    r->first_us = -1;
+    r->staged = 0;
+    r->pending_count = r->pending_used = r->bytes = 0;
+    atomic_store(&r->stop, false);
+    atomic_store(&r->failed, false);
+    atomic_store(&r->elapsed_ms, 0);
+}
+
+bool zapp_clip_recorder_start(struct zapp_clip_recorder *r, const char *path, char *error, size_t error_cap)
+{
+    if (r == NULL || r->thread_started || atomic_load(&r->active)) return failure(error, error_cap, "Already recording.");
+    if (atomic_load(&r->camera_lost)) return failure(error, error_cap, "The camera stopped. Tap Record to open it again.");
+    reset_run(r);
+    if (!prepare(r, path, error, error_cap)) {
+        abandon(r);
+        return false;
+    }
+    (void)AAudioStream_requestStart(r->mic);
+    atomic_store(&r->active, true);
+    if (pthread_create(&r->thread, NULL, record_loop, r) != 0) {
+        atomic_store(&r->active, false);
+        abandon(r);
+        return failure(error, error_cap, "Could not start recording.");
+    }
+    r->thread_started = true;
+    return true;
+}
+
+int64_t zapp_clip_recorder_elapsed_ms(const struct zapp_clip_recorder *r)
+{
+    return r != NULL ? atomic_load(&r->elapsed_ms) : 0;
+}
+
+bool zapp_clip_recorder_running(const struct zapp_clip_recorder *r)
+{
+    return r != NULL && atomic_load(&r->active);
+}
+
+void zapp_clip_recorder_request_stop(struct zapp_clip_recorder *r)
+{
+    if (r != NULL) atomic_store(&r->stop, true);
+}
+
+bool zapp_clip_recorder_wait(const struct zapp_clip_recorder *r, int timeout_ms)
+{
+    struct timespec ts = {.tv_nsec = 10000000};
+    for (int waited = 0; zapp_clip_recorder_running(r); waited += 10) {
+        if (waited >= timeout_ms) return false;
+        (void)nanosleep(&ts, NULL);
+    }
+    return true;
+}
+
+int64_t zapp_clip_recorder_collect(struct zapp_clip_recorder *r)
+{
+    if (r == NULL || !r->thread_started || atomic_load(&r->active)) return 0;
+    (void)pthread_join(r->thread, NULL);
+    r->thread_started = false;
+    return r->duration_ms;
+}
+
+const char *zapp_clip_recorder_message(const struct zapp_clip_recorder *r)
+{
+    return r != NULL && atomic_load(&r->failed) ? r->message : "";
+}
+
+bool zapp_clip_recorder_camera_lost(const struct zapp_clip_recorder *r)
+{
+    return r != NULL && atomic_load(&r->camera_lost);
+}
+
+static void teardown(struct zapp_clip_recorder *r)
+{
+    if (r->thread_started) (void)pthread_join(r->thread, NULL);
+    session_close(r);
+    if (r->device != NULL) ACameraDevice_close(r->device);
+    if (r->manager != NULL) ACameraManager_delete(r->manager);
+    ANativeWindow_release(r->preview);
+    free(r);
+}
+
+static void *reap(void *arg)
+{
+    teardown(arg);
+    return NULL;
 }
 
 void zapp_clip_recorder_close(struct zapp_clip_recorder *r)
 {
     if (r == NULL) return;
-    (void)end_recording(r);
-    session_close(r);
-    if (r->device != NULL) ACameraDevice_close(r->device);
-    if (r->manager != NULL) ACameraManager_delete(r->manager);
-    free(r);
+    atomic_store(&r->closing, true);
+    atomic_store(&r->stop, true);
+    pthread_t thread;
+    if (r->thread_started && atomic_load(&r->active) && pthread_create(&thread, NULL, reap, r) == 0) {
+        (void)pthread_detach(thread);
+        return;
+    }
+    teardown(r);
 }
 #endif

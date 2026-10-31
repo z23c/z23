@@ -32,8 +32,9 @@ void zapp_clip_fit(int screen_width, int screen_height, int clip_width, int clip
 
 struct zapp_clip_player;
 
-/* Starts playing the clip dir/<id>.mp4 onto window. The file is hashed first and refused when its
- * bytes differ from its name; zapp_clip_player_error then holds the reason. */
+/* Starts playing the clip dir/<id>.mp4 onto window. The file is opened once, hashed through that
+ * descriptor and refused when its bytes differ from its name, then played from that same descriptor.
+ * zapp_clip_player_error then holds the reason. */
 struct zapp_clip_player *zapp_clip_player_open(const char *dir, const char *id, ANativeWindow *window);
 
 void zapp_clip_player_set_paused(struct zapp_clip_player *player, bool paused);

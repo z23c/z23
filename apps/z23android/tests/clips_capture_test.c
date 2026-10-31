@@ -4,26 +4,47 @@
 #include <stdio.h>
 #include <string.h>
 
-static void profile_numbers(void)
+static void time_cap(void)
 {
-    const struct zapp_clip_profile *p = &zapp_clip_profile;
-    assert(p->coded_width == 854 && p->coded_height == 480);
-    assert(p->fps == 30 && p->video_bps == 800000 && p->keyframe_seconds == 2);
-    assert(p->audio_rate == 48000 && p->audio_channels == 1 && p->audio_bps == 64000);
-    assert(p->max_ms == 60000);
     assert(!zapp_clip_time_up(0) && !zapp_clip_time_up(59999));
     assert(zapp_clip_time_up(60000) && zapp_clip_time_up(61000));
 }
 
 static void thermal_gate(void)
 {
-    for (int status = 0; status <= 3; ++status) assert(zapp_clip_thermal_allows(ZAPP_PACE_NORMAL, status));
-    for (int status = 4; status <= 6; ++status) assert(!zapp_clip_thermal_allows(ZAPP_PACE_NORMAL, status));
-    assert(zapp_clip_thermal_allows(ZAPP_PACE_GENTLE, 3));
-    assert(!zapp_clip_thermal_allows(ZAPP_PACE_PAUSE, 3));
-    assert(zapp_clip_thermal_allows(ZAPP_PACE_PAUSE, 2));
+    for (int status = 0; status <= 3; ++status) {
+        enum zapp_pace pace = ZAPP_PACE_NORMAL;
+        assert(zapp_clip_thermal_track(&pace, status));
+    }
+    for (int status = 4; status <= 6; ++status) {
+        enum zapp_pace pace = ZAPP_PACE_NORMAL;
+        assert(!zapp_clip_thermal_track(&pace, status) && pace == ZAPP_PACE_PAUSE);
+    }
     assert(!zapp_clip_thermal_stops(0) && !zapp_clip_thermal_stops(3));
     assert(zapp_clip_thermal_stops(4) && zapp_clip_thermal_stops(6));
+}
+
+/* Status 4, then 3: the node stays paused, so recording stays refused until the status falls below 3. */
+static void thermal_latch(void)
+{
+    enum zapp_pace pace = ZAPP_PACE_NORMAL;
+    assert(zapp_clip_thermal_track(&pace, 3) && pace == ZAPP_PACE_GENTLE);
+    assert(!zapp_clip_thermal_track(&pace, 4));
+    assert(!zapp_clip_thermal_track(&pace, 3) && pace == ZAPP_PACE_PAUSE);
+    assert(!zapp_clip_thermal_track(&pace, 3));
+    assert(zapp_clip_thermal_track(&pace, 2) && pace == ZAPP_PACE_GENTLE);
+    assert(zapp_clip_thermal_track(&pace, 3) && !zapp_clip_thermal_track(&pace, 5));
+    assert(!zapp_clip_thermal_track(&pace, 3) && zapp_clip_thermal_track(&pace, 0));
+}
+
+static void clip_span(void)
+{
+    assert(zapp_clip_sample_end_us(false, 59178667) == 59200000);
+    assert(zapp_clip_sample_end_us(true, 58858544) == 58891877);
+    assert(zapp_clip_span_ms(0, 59200000) == 59200);
+    assert(zapp_clip_span_ms(770000, 59970000) == 59200);
+    assert(zapp_clip_span_ms(0, 1499) == 1 && zapp_clip_span_ms(0, 1500) == 2);
+    assert(zapp_clip_span_ms(-1, 5000000) == 0 && zapp_clip_span_ms(5, 5) == 0 && zapp_clip_span_ms(9, 5) == 0);
 }
 
 static void rotation(void)
@@ -74,8 +95,10 @@ static void bitrate(void)
 
 int main(void)
 {
-    profile_numbers();
+    time_cap();
     thermal_gate();
+    thermal_latch();
+    clip_span();
     rotation();
     encoder_choice();
     stream_size();

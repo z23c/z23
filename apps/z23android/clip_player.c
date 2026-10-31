@@ -157,10 +157,15 @@ static void trace_read(void *user, int64_t offset, size_t size, ssize_t result)
                             *count, (long long)offset, size, result);
 }
 
-static bool open_source(struct zapp_clip_player *p)
+static bool open_file(struct zapp_clip_player *p)
 {
     char path[600];
-    if (!zapp_clip_store_path(p->dir, p->id, path, sizeof(path)) || !zapp_clip_source_open(&p->source, path)) return false;
+    return zapp_clip_store_path(p->dir, p->id, path, sizeof(path)) && zapp_clip_source_open(&p->source, path);
+}
+
+/* Reads through the descriptor open_file opened and zapp_clip_store_verify hashed. */
+static bool open_extractor(struct zapp_clip_player *p)
+{
     p->source.trace = trace_read;
     p->source.trace_user = &p->traced;
     p->data = AMediaDataSource_new();
@@ -179,7 +184,8 @@ static bool make_decoder(struct zapp_clip_player *p, size_t track, const char *m
 {
     bool is_video = starts_with(mime, "video/");
     AMediaCodec *codec = AMediaCodec_createDecoderByType(mime);
-    if (codec == NULL || AMediaExtractor_selectTrack(p->extractor, track) != AMEDIA_OK) return false;
+    if (codec == NULL) return false;
+    if (AMediaExtractor_selectTrack(p->extractor, track) != AMEDIA_OK) { (void)AMediaCodec_delete(codec); return false; }
     if (is_video) { p->video = codec; p->video_track = (int)track; } else { p->audio = codec; p->audio_track = (int)track; }
     return AMediaCodec_configure(codec, format, is_video ? p->window : NULL, NULL, 0) == AMEDIA_OK &&
         AMediaCodec_start(codec) == AMEDIA_OK;
@@ -400,8 +406,9 @@ static void *run(void *arg)
 {
     struct zapp_clip_player *p = arg;
     char error[160];
-    if (!zapp_clip_store_verify(p->dir, p->id, error, sizeof(error))) refuse(p, error);
-    else if (!open_source(p) || !open_tracks(p)) refuse(p, "This clip cannot be played.");
+    if (!open_file(p)) refuse(p, "This clip cannot be read.");
+    else if (!zapp_clip_store_verify(p->source.fd, p->id, error, sizeof(error))) refuse(p, error);
+    else if (!open_extractor(p) || !open_tracks(p)) refuse(p, "This clip cannot be played.");
     else play_loop(p);
     if (!p->failed) log_stats(p, "end");
     release(p);

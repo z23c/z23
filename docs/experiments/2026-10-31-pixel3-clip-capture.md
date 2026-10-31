@@ -5,6 +5,10 @@
 Local recording and playback of short clips on a Pixel 3 with the
 `org.z23.voicepreview.clips` preview build of `apps/z23android`.
 
+Measurements below come from the first build (commit a0c5e05be6). The build with the
+review fixes is re-measured on the phone before this change lands; its numbers
+replace these.
+
 ## Environment
 
 - Device: Pixel 3 (blueline), LineageOS 22.2-20261026-NIGHTLY, SoC SDM845.
@@ -26,7 +30,7 @@ rotation 90.
 
 | Quantity | Value |
 | --- | --- |
-| Duration, sidecar | 59.973 s |
+| Duration, sidecar (first build) | 59.973 s |
 | Payload | 6,347,597 bytes, 846 kbit/s |
 | File | 6,372,509 bytes, container 59.2 s, 861,149 bit/s |
 | Video | H.264 Main, 800x480, rotation -90, 29.96 fps, 1760 frames, 30 key frames, 799,995 bit/s |
@@ -39,6 +43,22 @@ Shorter runs measured 691 to 792 kbit/s (5.1, 9.6 and 13.3 s). An earlier 60.9 s
 run exceeded the cap by 0.9 s because the cap clock started before the camera
 session; it now starts when the session opens and samples at or after 60 s are
 dropped.
+
+## Duration: sidecar and container
+
+The pulled 60 s file has an audio track of 2775 AAC frames, 59.200 s, starting at
+0, and a video track that starts 0.1536 s later and ends at 58.89 s, so the
+container duration is 59.2 s. The sidecar of that run read 59.973 s, which is the
+container duration plus about 0.77 s: it was counted from the start of the
+recording clock, which is set before the camera session opens, while the first
+samples arrive later. The run log was not kept, so this cause is inferred from
+the file's track times. The
+sidecar duration (`duration_ms`, carried into the signed format) is now the
+span from the first sample to the end of the last sample, where a sample ends
+at its presentation time plus one video frame or one AAC frame of 1024 samples.
+For the pulled file that is 59,200 ms, equal to the container duration; the host
+test `clip_span` checks this arithmetic with the audio and video times from
+that file.
 
 ## E11 - 60 s playback
 
