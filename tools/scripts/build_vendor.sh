@@ -319,7 +319,7 @@ RECIPE_OPENSSL="openssl-r5"
 # patch is a semantic input to the compile, so the revision moves with it.
 RECIPE_LIBEVENT="libevent-r6"
 RECIPE_LEVELDB="leveldb-r7"
-RECIPE_SECP_NATIVE="secp-native-r1"
+RECIPE_SECP_NATIVE="secp-native-r2"
 
 # --- logging (to stderr; stdout is reserved for fetch() to echo a path) -----
 say()  { printf '\033[36m[vendor]\033[0m %s\n' "$*" >&2; }
@@ -1169,12 +1169,12 @@ build_secp_native() {
             windows) secp_cross=(-DCMAKE_SYSTEM_NAME=Windows) ;;
             darwin) secp_cross=(-DCMAKE_SYSTEM_NAME=Darwin) ;;
         esac
-        secp_cross+=(-DCMAKE_RANLIB="$(command -v "$VENDOR_RANLIB")")
+        secp_cross+=(-DCMAKE_RANLIB="$VENDOR_RANLIB")
     fi
     cmake -S "$d" -B "$WORK/secp-native-build" \
         ${secp_cross[@]+"${secp_cross[@]}"} \
-        -DCMAKE_C_COMPILER="$(command -v "$VENDOR_CC")" \
-        -DCMAKE_AR="$(command -v "$VENDOR_AR")" \
+        -DCMAKE_C_COMPILER="$VENDOR_CC" \
+        -DCMAKE_AR="$VENDOR_AR" \
         -DBUILD_SHARED_LIBS=OFF \
         -DSECP256K1_ENABLE_MODULE_RECOVERY=ON \
         -DSECP256K1_ENABLE_MODULE_ECDH=ON \
