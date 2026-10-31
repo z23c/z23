@@ -333,23 +333,21 @@ static int x4_pin_empty_literal_fails(x4_entry_fn fn)
     return fails;
 }
 
-/* Direct AVX-512 lane against scalar. The row is skipped (not failed) when the
- * host CPU lacks the lane, or on a non-x86-64 target that has no such symbol. */
+#if defined(__x86_64__)
+/* Direct AVX-512 lane against scalar. The row exists only on x86-64, the one
+ * target with the symbol; it is skipped (not failed) when the host CPU lacks
+ * the lane. Like the aarch64-only NEON row, it is not a skip elsewhere. */
 static int x4_check_avx512_lane(void)
 {
     printf("sha3_256_x4: direct AVX-512 lane vs scalar (pinned rows, empty literal)... ");
-#if defined(__x86_64__)
     if (!keccak_x4_available()) {
         printf("SKIP (host has no AVX-512 lane)\n");
         return 0;
     }
     return x4_report_fails(x4_pin_empty_literal_fails(sha3_256_x4_avx512) +
                            x4_pin_rows_run(sha3_256_x4_avx512));
-#else
-    printf("SKIP (not x86-64)\n");
-    return 0;
-#endif
 }
+#endif
 
 /* The public dispatcher under the shipped AUTO selection, against scalar. */
 static int x4_check_dispatch_pinned(void)
@@ -431,7 +429,9 @@ int test_sha3_256_x4(void)
     failures += x4_check_kat(have_vec);
 
     /* ── 1b. Pinned rows: direct AVX-512 lane and public dispatcher ──── */
+#if defined(__x86_64__)
     failures += x4_check_avx512_lane();
+#endif
     failures += x4_check_dispatch_pinned();
 
     /* ── 2. Parity: all four lanes share every length 0..1100 ───────── */

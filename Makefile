@@ -2969,6 +2969,7 @@ Z23RAYLIB_CFLAGS := -std=$(ZCL_C_STD) -O2 -Wall -Wextra $(Z23RAYLIB_CPPFLAGS)
 SKYCOMBAT_CFLAGS := -std=$(ZCL_C_STD) -O2 -Wall -Wextra -Werror -pedantic \
 	$(filter-out -Wdouble-promotion,$(ZCL_WARN_EXTRA_GATES)) \
 	$(ZCL_WARN_STRINGOP_OVERFLOW) -D_POSIX_C_SOURCE=200809L \
+	$(ZCL_PLATFORM_CPPFLAGS) \
 	-DRAYMATH_USE_SIMD_INTRINSICS=0 $(Z23RAYLIB_CPPFLAGS) \
 	-I$(SKYCOMBAT_DIR)/include -I$(SKYCOMBAT_DIR)/specifications \
 	-I$(SKYCOMBAT_DIR)/modules/compile_time_gdb_proof/include \
@@ -9555,7 +9556,7 @@ CRASH_RECOVERY_TEST_SRCS = tools/crash_recovery_test.c platform/modules/platform
     platform/modules/base/src/log_level.c
 $(CRASH_RECOVERY_TEST_BIN): $(CRASH_RECOVERY_TEST_SRCS) platform/modules/json/include/json/json.h engine/modules/storage/include/storage/consensus_db.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pthread \
+	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pthread $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include -Iplatform/modules/json/include -Iengine/modules/storage/include -Iengine/services/include -Icontexts/commons/packages/zsha256/include -Ivendor/include -o $@ \
 	    $(CRASH_RECOVERY_TEST_SRCS) \
 	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
