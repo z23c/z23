@@ -475,26 +475,30 @@ static enum condition_remedy_result rfrl_remedy_outcome(
     }
 }
 
-static enum condition_remedy_result remedy_reducer_frontier_reconcile_light(void)
+/* True when the remedy has a database and main_state to work with and no
+ * staged refold is running. */
+static bool rfrl_remedy_prepare(sqlite3 **db, struct main_state **ms)
 {
+    *db = NULL;
+    *ms = NULL;
     /* detect() suspends during a staged refold, but the condition engine
      * keeps remedying an ACTIVE episode even when detect() reads false
      * (limbo fix in engine/modules/framework/src/condition.c), so the remedy needs the
      * same guard: the apply pass would drag below-anchor cursors back up
      * and fight the in-progress fold. The fold IS the recovery work. */
     if (refold_in_progress())
-        return COND_REMEDY_SKIP;
+        return false;
 
-    sqlite3 *db = progress_store_db();
-    struct main_state *ms = sync_monitor_main_state();
-    if (!db || !ms)
-        return COND_REMEDY_SKIP;
+    *db = progress_store_db();
+    *ms = sync_monitor_main_state();
+    return *db && *ms;
+}
 
-    /* Reclaim settled repair markers below the retention margin (best-effort). */
-    if (repair_marker_gc_settled(db, reducer_frontier_provable_tip_cached()) < 0)
-        LOG_WARN("condition", "[condition:reducer_frontier_reconcile_light] "
-                 "repair_marker GC failed");
-
+/* Run the apply-mode reconcile and snapshot its result. */
+static bool rfrl_remedy_reconcile(
+    sqlite3 *db, struct main_state *ms,
+    struct stage_reducer_frontier_reconcile_result *rr)
+{
     rfrl_increment_remedy_calls();
 #ifdef ZCL_TESTING
     /* Stands in for the TIPFIN backfill's in-remedy progress-record bump
@@ -503,50 +507,35 @@ static enum condition_remedy_result remedy_reducer_frontier_reconcile_light(void
         g_test_post_remedy_hook();
 #endif
 
-    struct stage_reducer_frontier_reconcile_result rr;
-    if (!stage_reducer_frontier_reconcile_light(db, ms, &rr))
-        return COND_REMEDY_FAILED;
-    rfrl_snapshot_reconcile_result(RFRL_RR_PHASE_REMEDY, &rr);
+    if (!stage_reducer_frontier_reconcile_light(db, ms, rr))
+        return false;
+    rfrl_snapshot_reconcile_result(RFRL_RR_PHASE_REMEDY, rr);
+    return true;
+}
 
-    /* One classification drives BOTH the observability WARN and the returned
-     * outcome (rfrl_remedy_outcome is the single source of truth). The cases
-     * are in strict precedence order; label-splice re-bind outranks the coin
-     * refusals below it so a successful re-bind is never masked. */
-    switch (rfrl_remedy_classify(&rr)) {
+/* Whether the per-cause de-storm throttle admits the remedy's WARN for
+ * `cause`; *reps is the suppressed repeat count for that WARN. A cause with no
+ * WARN (RFRL_CAUSE_REPAIRED_OR_SKIP) never emits and never touches a throttle. */
+static bool rfrl_remedy_cause_emit(
+    enum rfrl_remedy_cause cause,
+    const struct stage_reducer_frontier_reconcile_result *rr, uint64_t *reps)
+{
+    switch (cause) {
     case RFRL_CAUSE_COIN_UNKNOWN: {
         static struct log_throttle t = LOG_THROTTLE_INIT;
-        uint64_t reps = 0;
-        if (rfrl_throttle_emit(&t, 1, &reps))
-            LOG_WARN("condition",
-                     "[condition:reducer_frontier_reconcile_light] refused "
-                     "coins_applied_height absent repeats=%llu",
-                     (unsigned long long)reps);
-        return COND_REMEDY_SKIP;
+        return rfrl_throttle_emit(&t, 1, reps);
     }
     case RFRL_CAUSE_TIPFIN_PENDING: {
         /* Keyed on refused height + coins_applied/hstar/reason so a moving
          * refusal re-emits but a stuck one collapses to keepalive. */
         static struct log_throttle t = LOG_THROTTLE_INIT;
         uint64_t key =
-            ((uint64_t)(uint32_t)rr.tipfin_backfill_refused_height << 32) |
-            (uint32_t)(((uint32_t)rr.coins_applied_height << 16) ^
-                       ((uint32_t)rr.hstar << 8) ^
-                       ((uint32_t)rr.tipfin_backfill_refused_reason << 4) ^
-                       (uint32_t)rr.tipfin_backfill_refused_log);
-        uint64_t reps = 0;
-        if (rfrl_throttle_emit(&t, key, &reps))
-            LOG_WARN("condition",
-                     "[condition:reducer_frontier_reconcile_light] pending "
-                     "tipfin backfill reason=%s binding_log=%s h=%d "
-                     "coins_applied=%d hstar=%d repeats=%llu",
-                     stage_repair_tipfin_refused_reason_label(
-                         rr.tipfin_backfill_refused_reason),
-                     stage_repair_tipfin_refused_log_label(
-                         rr.tipfin_backfill_refused_log),
-                     rr.tipfin_backfill_refused_height,
-                     rr.coins_applied_height, rr.hstar,
-                     (unsigned long long)reps);
-        return COND_REMEDY_SKIP;
+            ((uint64_t)(uint32_t)rr->tipfin_backfill_refused_height << 32) |
+            (uint32_t)(((uint32_t)rr->coins_applied_height << 16) ^
+                       ((uint32_t)rr->hstar << 8) ^
+                       ((uint32_t)rr->tipfin_backfill_refused_reason << 4) ^
+                       (uint32_t)rr->tipfin_backfill_refused_log);
+        return rfrl_throttle_emit(&t, key, reps);
     }
     case RFRL_CAUSE_LABEL_SPLICE_REBOUND: {
         /* Coins-untouching forward progress: report success independent of any
@@ -555,117 +544,187 @@ static enum condition_remedy_result remedy_reducer_frontier_reconcile_light(void
          * re-bind re-emits but a stuck repeat collapses to keepalive. */
         static struct log_throttle t = LOG_THROTTLE_INIT;
         uint64_t key =
-            ((uint64_t)(uint32_t)rr.hstar << 32) |
-            (uint32_t)(((uint32_t)rr.label_splice_rebind_lowest << 4) ^
-                       (uint32_t)rr.label_splice_rebound);
-        uint64_t reps = 0;
-        if (rfrl_throttle_emit(&t, key, &reps))
-            LOG_WARN("condition",
-                     "[condition:reducer_frontier_reconcile_light] label_splice "
-                     "RE-BOUND hstar=%d lowest_null=%d cursors_rewound=%d "
-                     "deleted_null_rows=%lld coin_backfill_status=%d "
-                     "(re-bind is progress regardless of any coin refusal) "
-                     "repeats=%llu",
-                     rr.hstar, rr.label_splice_rebind_lowest,
-                     rr.label_splice_rebound,
-                     (long long)rr.label_splice_deleted_rows,
-                     rr.coin_backfill_status, (unsigned long long)reps);
-        return COND_REMEDY_OK;
+            ((uint64_t)(uint32_t)rr->hstar << 32) |
+            (uint32_t)(((uint32_t)rr->label_splice_rebind_lowest << 4) ^
+                       (uint32_t)rr->label_splice_rebound);
+        return rfrl_throttle_emit(&t, key, reps);
     }
     case RFRL_CAUSE_COIN_TEAR: {
         /* Keyed on (coins_applied_height, hstar), mirroring
          * stage_repair_reducer_frontier.c's l1_refuse_throttle. */
         static struct log_throttle t = LOG_THROTTLE_INIT;
-        uint64_t key = ((uint64_t)(uint32_t)rr.coins_applied_height << 32) |
-                       (uint32_t)rr.hstar;
-        uint64_t reps = 0;
-        if (rfrl_throttle_emit(&t, key, &reps))
-            LOG_WARN("condition",
-                     "[condition:reducer_frontier_reconcile_light] refused "
-                     "coins_applied_height=%d hstar=%d repeats=%llu",
-                     rr.coins_applied_height, rr.hstar,
-                     (unsigned long long)reps);
-        return COND_REMEDY_FAILED;
+        uint64_t key = ((uint64_t)(uint32_t)rr->coins_applied_height << 32) |
+                       (uint32_t)rr->hstar;
+        return rfrl_throttle_emit(&t, key, reps);
     }
     case RFRL_CAUSE_VALUE_OVERFLOW_REFUSED: {
         static struct log_throttle t = LOG_THROTTLE_INIT;
-        uint64_t reps = 0, h = (uint64_t)(uint32_t)rr.value_overflow_repair_height;
-        if (rfrl_throttle_emit(&t, h, &reps))
-            LOG_WARN("condition",
-                     "[condition:reducer_frontier_reconcile_light] refused "
-                     "value_overflow repair h=%d: owner ack missing "
-                     "repeats=%llu",
-                     rr.value_overflow_repair_height,
-                     (unsigned long long)reps);
-        return COND_REMEDY_FAILED;
+        uint64_t h = (uint64_t)(uint32_t)rr->value_overflow_repair_height;
+        return rfrl_throttle_emit(&t, h, reps);
     }
-    /* Belt-and-suspenders engine accounting: the backfill Job pages the
-     * operator directly on every refusal status; never delete — coin_backfill
-     * owner-ack env gate — this surfacing must never be the paging path. */
     case RFRL_CAUSE_COIN_BACKFILL_OWNER_REFUSED: {
         static struct log_throttle t = LOG_THROTTLE_INIT;
-        uint64_t reps = 0, h = (uint64_t)(uint32_t)rr.coin_backfill_hole_height;
-        if (rfrl_throttle_emit(&t, h, &reps))
-            LOG_WARN("condition",
-                     "[condition:reducer_frontier_reconcile_light] refused "
-                     "coin backfill h=%d: owner ack missing repeats=%llu",
-                     rr.coin_backfill_hole_height,
-                     (unsigned long long)reps);
-        return COND_REMEDY_FAILED;
+        uint64_t h = (uint64_t)(uint32_t)rr->coin_backfill_hole_height;
+        return rfrl_throttle_emit(&t, h, reps);
     }
     case RFRL_CAUSE_COIN_BACKFILL_REFUSED: {
         /* Keyed on hole height + status/unresolved/inserted/scan_next. */
         static struct log_throttle t = LOG_THROTTLE_INIT;
         uint64_t key =
-            ((uint64_t)(uint32_t)rr.coin_backfill_hole_height << 32) |
-            (uint32_t)(((uint32_t)rr.coin_backfill_status << 24) ^
-                       ((uint32_t)rr.coin_backfill_unresolved << 16) ^
-                       ((uint32_t)rr.coin_backfill_inserted << 8) ^
-                       (uint32_t)rr.coin_backfill_scan_next);
-        uint64_t reps = 0;
-        if (rfrl_throttle_emit(&t, key, &reps))
-            LOG_WARN("condition",
-                     "[condition:reducer_frontier_reconcile_light] refused "
-                     "coin backfill h=%d status=%s unresolved=%d inserted=%d "
-                     "scan_next=%d repeats=%llu",
-                     rr.coin_backfill_hole_height,
-                     rfrl_coin_backfill_status_label(rr.coin_backfill_status),
-                     rr.coin_backfill_unresolved, rr.coin_backfill_inserted,
-                     rr.coin_backfill_scan_next, (unsigned long long)reps);
-        return COND_REMEDY_FAILED;
+            ((uint64_t)(uint32_t)rr->coin_backfill_hole_height << 32) |
+            (uint32_t)(((uint32_t)rr->coin_backfill_status << 24) ^
+                       ((uint32_t)rr->coin_backfill_unresolved << 16) ^
+                       ((uint32_t)rr->coin_backfill_inserted << 8) ^
+                       (uint32_t)rr->coin_backfill_scan_next);
+        return rfrl_throttle_emit(&t, key, reps);
     }
     case RFRL_CAUSE_STALE_SCRIPT_INVALID: {
         static struct log_throttle t = LOG_THROTTLE_INIT;
-        uint64_t reps = 0, h = (uint64_t)(uint32_t)rr.stale_script_repair_height;
-        if (rfrl_throttle_emit(&t, h, &reps))
-            LOG_WARN("condition",
-                     "[condition:reducer_frontier_reconcile_light] refused "
-                     "stale script replay h=%d: dry-run still invalid "
-                     "repeats=%llu",
-                     rr.stale_script_repair_height,
-                     (unsigned long long)reps);
-        return COND_REMEDY_FAILED;
+        uint64_t h = (uint64_t)(uint32_t)rr->stale_script_repair_height;
+        return rfrl_throttle_emit(&t, h, reps);
     }
     case RFRL_CAUSE_REPAIRED_OR_SKIP:
     default:
-        break;
+        return false;
     }
+}
 
-    if (!rr.repaired)
-        return COND_REMEDY_SKIP;
+/* `cause` when its WARN is admitted this pass, else
+ * RFRL_CAUSE_REPAIRED_OR_SKIP (no WARN). */
+static enum rfrl_remedy_cause rfrl_remedy_cause_to_log(
+    enum rfrl_remedy_cause cause,
+    const struct stage_reducer_frontier_reconcile_result *rr, uint64_t *reps)
+{
+    return rfrl_remedy_cause_emit(cause, rr, reps)
+               ? cause : RFRL_CAUSE_REPAIRED_OR_SKIP;
+}
 
+/* Whether the throttled "repaired" WARN is admitted for this result. */
+static bool rfrl_repaired_should_emit(
+    const struct stage_reducer_frontier_reconcile_result *rr,
+    uint64_t *repaired_reps)
+{
     /* A wedged node can re-derive the SAME clamp every remedy retry — key
      * on hstar + coins_applied_height + the mutation counts, mirroring
      * stage_repair_reducer_frontier.c's l1_repaired_throttle, so genuine
      * forward progress still re-emits. */
     static struct log_throttle repaired_throttle = LOG_THROTTLE_INIT;
     uint64_t repaired_key =
-        ((uint64_t)(uint32_t)rr.hstar << 32) |
-        (uint32_t)(((uint32_t)rr.coins_applied_height << 12) ^
-                   (uint32_t)(rr.have_data_cleared + rr.failed_mask_cleared +
-                              rr.have_data_set + rr.scripts_set));
+        ((uint64_t)(uint32_t)rr->hstar << 32) |
+        (uint32_t)(((uint32_t)rr->coins_applied_height << 12) ^
+                   (uint32_t)(rr->have_data_cleared + rr->failed_mask_cleared +
+                              rr->have_data_set + rr->scripts_set));
+    return rfrl_throttle_emit(&repaired_throttle, repaired_key, repaired_reps);
+}
+
+static enum condition_remedy_result remedy_reducer_frontier_reconcile_light(void)
+{
+    sqlite3 *db = NULL;
+    struct main_state *ms = NULL;
+    if (!rfrl_remedy_prepare(&db, &ms))
+        return COND_REMEDY_SKIP;
+
+    /* Reclaim settled repair markers below the retention margin (best-effort). */
+    if (repair_marker_gc_settled(db, reducer_frontier_provable_tip_cached()) < 0)
+        LOG_WARN("condition", "[condition:reducer_frontier_reconcile_light] "
+                 "repair_marker GC failed");
+
+    struct stage_reducer_frontier_reconcile_result rr;
+    if (!rfrl_remedy_reconcile(db, ms, &rr))
+        return COND_REMEDY_FAILED;
+
+    /* One classification drives BOTH the observability WARN and the returned
+     * outcome (rfrl_remedy_outcome is the single source of truth). The cases
+     * are in strict precedence order; label-splice re-bind outranks the coin
+     * refusals below it so a successful re-bind is never masked. */
+    enum rfrl_remedy_cause cause = rfrl_remedy_classify(&rr);
+    uint64_t reps = 0;
+    switch (rfrl_remedy_cause_to_log(cause, &rr, &reps)) {
+    case RFRL_CAUSE_COIN_UNKNOWN:
+        LOG_WARN("condition",
+                 "[condition:reducer_frontier_reconcile_light] refused "
+                 "coins_applied_height absent repeats=%llu",
+                 (unsigned long long)reps);
+        break;
+    case RFRL_CAUSE_TIPFIN_PENDING:
+        LOG_WARN("condition",
+                 "[condition:reducer_frontier_reconcile_light] pending "
+                 "tipfin backfill reason=%s binding_log=%s h=%d "
+                 "coins_applied=%d hstar=%d repeats=%llu",
+                 stage_repair_tipfin_refused_reason_label(
+                     rr.tipfin_backfill_refused_reason),
+                 stage_repair_tipfin_refused_log_label(
+                     rr.tipfin_backfill_refused_log),
+                 rr.tipfin_backfill_refused_height,
+                 rr.coins_applied_height, rr.hstar,
+                 (unsigned long long)reps);
+        break;
+    case RFRL_CAUSE_LABEL_SPLICE_REBOUND:
+        LOG_WARN("condition",
+                 "[condition:reducer_frontier_reconcile_light] label_splice "
+                 "RE-BOUND hstar=%d lowest_null=%d cursors_rewound=%d "
+                 "deleted_null_rows=%lld coin_backfill_status=%d "
+                 "(re-bind is progress regardless of any coin refusal) "
+                 "repeats=%llu",
+                 rr.hstar, rr.label_splice_rebind_lowest,
+                 rr.label_splice_rebound,
+                 (long long)rr.label_splice_deleted_rows,
+                 rr.coin_backfill_status, (unsigned long long)reps);
+        break;
+    case RFRL_CAUSE_COIN_TEAR:
+        LOG_WARN("condition",
+                 "[condition:reducer_frontier_reconcile_light] refused "
+                 "coins_applied_height=%d hstar=%d repeats=%llu",
+                 rr.coins_applied_height, rr.hstar,
+                 (unsigned long long)reps);
+        break;
+    case RFRL_CAUSE_VALUE_OVERFLOW_REFUSED:
+        LOG_WARN("condition",
+                 "[condition:reducer_frontier_reconcile_light] refused "
+                 "value_overflow repair h=%d: owner ack missing "
+                 "repeats=%llu",
+                 rr.value_overflow_repair_height,
+                 (unsigned long long)reps);
+        break;
+    /* Belt-and-suspenders engine accounting: the backfill Job pages the
+     * operator directly on every refusal status; never delete — coin_backfill
+     * owner-ack env gate — this surfacing must never be the paging path. */
+    case RFRL_CAUSE_COIN_BACKFILL_OWNER_REFUSED:
+        LOG_WARN("condition",
+                 "[condition:reducer_frontier_reconcile_light] refused "
+                 "coin backfill h=%d: owner ack missing repeats=%llu",
+                 rr.coin_backfill_hole_height,
+                 (unsigned long long)reps);
+        break;
+    case RFRL_CAUSE_COIN_BACKFILL_REFUSED:
+        LOG_WARN("condition",
+                 "[condition:reducer_frontier_reconcile_light] refused "
+                 "coin backfill h=%d status=%s unresolved=%d inserted=%d "
+                 "scan_next=%d repeats=%llu",
+                 rr.coin_backfill_hole_height,
+                 rfrl_coin_backfill_status_label(rr.coin_backfill_status),
+                 rr.coin_backfill_unresolved, rr.coin_backfill_inserted,
+                 rr.coin_backfill_scan_next, (unsigned long long)reps);
+        break;
+    case RFRL_CAUSE_STALE_SCRIPT_INVALID:
+        LOG_WARN("condition",
+                 "[condition:reducer_frontier_reconcile_light] refused "
+                 "stale script replay h=%d: dry-run still invalid "
+                 "repeats=%llu",
+                 rr.stale_script_repair_height,
+                 (unsigned long long)reps);
+        break;
+    default:
+        break;
+    }
+    if (cause != RFRL_CAUSE_REPAIRED_OR_SKIP)
+        return rfrl_remedy_outcome(&rr);
+
+    if (!rr.repaired)
+        return COND_REMEDY_SKIP;
+
     uint64_t repaired_reps = 0;
-    if (rfrl_throttle_emit(&repaired_throttle, repaired_key, &repaired_reps))
+    if (rfrl_repaired_should_emit(&rr, &repaired_reps))
         LOG_WARN("condition",
                  "[condition:reducer_frontier_reconcile_light] hstar=%d "
                  "coins_applied=%d sweep_top=%d validate_headers=%d->%d "
