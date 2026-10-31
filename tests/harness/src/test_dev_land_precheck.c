@@ -429,6 +429,21 @@ static int dlx_pc_mode_cases(void)
         ASSERT(dlx_pc_deadline_one(false));
         PASS();
     }
+    TEST("land: the precheck budget scales with host oversubscription, floored and capped") {
+        const int64_t base = ZCL_LAND_PRECHECK_BUDGET_MS;
+        ASSERT(zcl_land_precheck_budget_ms(32, 1000) == base);  /* idle */
+        ASSERT(zcl_land_precheck_budget_ms(32, 3200) == base);  /* exactly full */
+        ASSERT(zcl_land_precheck_budget_ms(32, 4800) == base * 3 / 2);
+        ASSERT(zcl_land_precheck_budget_ms(32, 6400) == base * 2);
+        ASSERT(zcl_land_precheck_budget_ms(32, 1000000) ==
+               base * ZCL_LAND_PRECHECK_BUDGET_MAX_SCALE);
+        ASSERT(zcl_land_precheck_budget_ms(32, INT64_MAX) ==
+               base * ZCL_LAND_PRECHECK_BUDGET_MAX_SCALE);
+        ASSERT(zcl_land_precheck_budget_ms(-1, 4800) == base); /* unknown cpus */
+        ASSERT(zcl_land_precheck_budget_ms(0, 4800) == base);
+        ASSERT(zcl_land_precheck_budget_ms(32, -1) == base);   /* unknown load */
+        PASS();
+    }
     TEST("land: canonical file-purpose rejects WARN false success and accepts repair") {
         ASSERT(dlx_pc_canonical_mode());
         PASS();

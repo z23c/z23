@@ -27,6 +27,14 @@
 struct zcl_command_reply;
 
 #define ZCL_LAND_PRECHECK_BUDGET_MS (180 * 1000)
+/* The budget is the 180 s base times the host's oversubscription: the learned
+ * gates run one after another under one shared deadline, and on a host whose
+ * 5-minute load average is N times its CPU count a single link-heavy gate
+ * (check-standalone-tools-link: 169 s inside a green `make lint`) uses the
+ * whole base. Scaling is monotone, never below the base, and capped at four
+ * times it so a wedged gate still fails. */
+#define ZCL_LAND_PRECHECK_BUDGET_MAX_SCALE 4
+
 #define ZCL_LAND_PRECHECK_MAX_GATES 48u
 #define ZCL_LAND_PRECHECK_GATE_MAX 64u
 #define ZCL_LAND_PRECHECK_WINDOW_S (7 * 24 * 3600)
@@ -43,6 +51,12 @@ struct zcl_land_precheck_gates {
  * missing or unreadable ledger leaves the core list. */
 void zcl_land_precheck_gate_set(const char *outcomes_path, int64_t now_s,
                                 struct zcl_land_precheck_gates *out);
+
+/* The precheck budget in ms for a host with `cpus` logical CPUs and a
+ * 5-minute load average of load5_centi/100: base * load5/cpus, clamped to
+ * [base, base * ZCL_LAND_PRECHECK_BUDGET_MAX_SCALE]. An unknown (negative or
+ * zero) input gives the base. Pure. */
+int64_t zcl_land_precheck_budget_ms(int64_t cpus, int64_t load5_centi);
 
 /* Run the precheck for `leaf` ("dev.land" or "dev.land.send") in the lane
  * worktree `wt`. `mode` is the caller's precheck input: NULL or "run" runs

@@ -10,6 +10,7 @@
 
 #include "command/native_command.h"
 #include "command/native_dev_land_internal.h"
+#include "command/native_fleet.h"
 #include "dev_proof.h"
 #include "platform/directory_compat.h"
 
@@ -240,6 +241,29 @@ void zcl_land_precheck_gate_set(const char *outcomes_path, int64_t now_s,
     free(text);
 }
 
+/* ── budget ────────────────────────────────────────────────────────────── */
+
+int64_t zcl_land_precheck_budget_ms(int64_t cpus, int64_t load5_centi)
+{
+    const int64_t base = ZCL_LAND_PRECHECK_BUDGET_MS;
+    const int64_t cap = base * ZCL_LAND_PRECHECK_BUDGET_MAX_SCALE;
+    if (cpus <= 0 || load5_centi <= 0)
+        return base;
+    if (cpus > INT32_MAX)
+        return base;
+    if (load5_centi > (int64_t)INT32_MAX)
+        load5_centi = INT32_MAX; /* far past the cap; keeps the product exact */
+    int64_t scaled = base / 100 * load5_centi / cpus;
+    return scaled < base ? base : scaled > cap ? cap : scaled;
+}
+
+static int64_t pc_budget_ms(void)
+{
+    struct zcl_fleet_vitals_now now;
+    zcl_fleet_vitals_measure(&now);
+    return zcl_land_precheck_budget_ms(now.cpus, now.load5_centi);
+}
+
 /* ── running ───────────────────────────────────────────────────────────── */
 
 static void pc_fail(struct zcl_command_reply *reply, const char *leaf,
@@ -322,7 +346,7 @@ struct pc_run {
     const char *leaf, *wt;
     char bin[4096 + 32];
     char *out;
-    int64_t deadline;
+    int64_t deadline, budget_ms;
     const char *skipped[ZCL_LAND_PRECHECK_MAX_GATES];
     const char *ran[ZCL_LAND_PRECHECK_MAX_GATES];
     char unproven[PC_EVIDENCE_CAP];
@@ -510,7 +534,7 @@ static void pc_gate_failed(struct pc_run *r, const char *gate, int rc,
         (void)snprintf(msg, sizeof(msg),
                        "the precheck ran past its %d s budget at %s; fix the "
                        "slow gate or resubmit with --precheck=skip",
-                       ZCL_LAND_PRECHECK_BUDGET_MS / 1000, gate);
+                       (int)(r->budget_ms / 1000), gate);
         pc_fail(reply, r->leaf, "PRECHECK_TIMEOUT", msg, gate);
         return;
     }
@@ -710,10 +734,11 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     zcl_land_precheck_gate_set(ledger[0] ? ledger : NULL,
                                pc_now(), g);
     r->out = zcl_malloc(PC_OUT_CAP, "dev_land_precheck.out");
-    int64_t budget_ms = ZCL_LAND_PRECHECK_BUDGET_MS;
+    int64_t budget_ms = pc_budget_ms();
+    r->budget_ms = budget_ms;
 #if defined(ZCL_TESTING)
     if (g_pc_budget_ms > 0)
-        budget_ms = g_pc_budget_ms;
+        budget_ms = r->budget_ms = g_pc_budget_ms;
 #endif
     r->deadline = platform_time_monotonic_ms() + budget_ms;
     if (ledger[0]) pc_history_learn(r, dir, g);
