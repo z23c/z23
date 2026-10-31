@@ -527,31 +527,37 @@ void p2p_node_close_socket(struct p2p_node *node)
         close_socket(&node->socket);
 }
 
+/* Indexed by enum p2p_disconnect_reason. P2P_DISCONNECT_NONE has no name and
+ * falls through to "unknown", as does any value outside the table. */
+static const char *const g_p2p_disconnect_reason_names[P2P_DISCONNECT_REASON_COUNT] = {
+    [P2P_DISCONNECT_REMOTE_CLOSE] = "remote_close",
+    [P2P_DISCONNECT_IO_ERROR] = "io_error",
+    [P2P_DISCONNECT_TRANSPORT_ERROR] = "transport_error",
+    [P2P_DISCONNECT_MESSAGE_PARSE] = "message_parse",
+    [P2P_DISCONNECT_CONNECT_TIMEOUT] = "connect_timeout",
+    [P2P_DISCONNECT_HANDSHAKE_TIMEOUT] = "handshake_timeout",
+    [P2P_DISCONNECT_PONG_TIMEOUT] = "pong_timeout",
+    [P2P_DISCONNECT_HARD_SILENCE] = "hard_silence",
+    [P2P_DISCONNECT_PROTOCOL_VIOLATION] = "protocol_violation",
+    [P2P_DISCONNECT_RESOURCE_LIMIT] = "resource_limit",
+    [P2P_DISCONNECT_SYNC_STALL] = "sync_stall",
+    [P2P_DISCONNECT_POLICY_ROTATION] = "policy_rotation",
+    [P2P_DISCONNECT_FEELER_COMPLETE] = "feeler_complete",
+    [P2P_DISCONNECT_FEELER_TIMEOUT] = "feeler_timeout",
+    [P2P_DISCONNECT_SELF_CONNECTION] = "self_connection",
+    [P2P_DISCONNECT_NOISE_UPGRADE] = "noise_upgrade",
+    [P2P_DISCONNECT_EVICTED] = "evicted",
+    [P2P_DISCONNECT_APPLICATION] = "application",
+    [P2P_DISCONNECT_LOCAL_SHUTDOWN] = "local_shutdown",
+};
+
 const char *p2p_disconnect_reason_name(enum p2p_disconnect_reason reason)
 {
-    switch (reason) {
-    case P2P_DISCONNECT_REMOTE_CLOSE: return "remote_close";
-    case P2P_DISCONNECT_IO_ERROR: return "io_error";
-    case P2P_DISCONNECT_TRANSPORT_ERROR: return "transport_error";
-    case P2P_DISCONNECT_MESSAGE_PARSE: return "message_parse";
-    case P2P_DISCONNECT_CONNECT_TIMEOUT: return "connect_timeout";
-    case P2P_DISCONNECT_HANDSHAKE_TIMEOUT: return "handshake_timeout";
-    case P2P_DISCONNECT_PONG_TIMEOUT: return "pong_timeout";
-    case P2P_DISCONNECT_HARD_SILENCE: return "hard_silence";
-    case P2P_DISCONNECT_PROTOCOL_VIOLATION: return "protocol_violation";
-    case P2P_DISCONNECT_RESOURCE_LIMIT: return "resource_limit";
-    case P2P_DISCONNECT_SYNC_STALL: return "sync_stall";
-    case P2P_DISCONNECT_POLICY_ROTATION: return "policy_rotation";
-    case P2P_DISCONNECT_FEELER_COMPLETE: return "feeler_complete";
-    case P2P_DISCONNECT_FEELER_TIMEOUT: return "feeler_timeout";
-    case P2P_DISCONNECT_SELF_CONNECTION: return "self_connection";
-    case P2P_DISCONNECT_NOISE_UPGRADE: return "noise_upgrade";
-    case P2P_DISCONNECT_EVICTED: return "evicted";
-    case P2P_DISCONNECT_APPLICATION: return "application";
-    case P2P_DISCONNECT_LOCAL_SHUTDOWN: return "local_shutdown";
-    case P2P_DISCONNECT_NONE:
-    default: return "unknown";
-    }
+    if ((int)reason <= P2P_DISCONNECT_NONE ||
+        (int)reason >= P2P_DISCONNECT_REASON_COUNT)
+        return "unknown";
+    const char *name = g_p2p_disconnect_reason_names[reason];
+    return name ? name : "unknown";
 }
 
 const char *p2p_disconnect_source_name(enum p2p_disconnect_source source)
@@ -632,6 +638,54 @@ bool p2p_node_request_disconnect(
     return true;
 }
 
+/* Next capacity for the receive queue: double, clamped to the hard cap. */
+static size_t p2p_recv_next_cap(const struct p2p_node *node)
+{
+    size_t newcap = node->recv_msg_cap ? node->recv_msg_cap * 2 : 16;
+    if (newcap > MAX_RECV_MESSAGES) newcap = MAX_RECV_MESSAGES;
+    return newcap;
+}
+
+/* Tags a framing-layer parse failure for peer scoring and prints the parse
+ * dump. The caller logs the failure and refuses the frame. */
+static void p2p_recv_record_parse_fail(struct p2p_node *node,
+                                       const struct net_message *msg,
+                                       int msg_idx, unsigned int nbytes,
+                                       unsigned int orig_nbytes,
+                                       const char *data, int handled)
+{
+    /* Tag the framing offence for peer scoring. The parse functions
+     * have no net_manager back-pointer, so classification happens here
+     * from the message phase: read_header returns -1 BEFORE setting
+     * msg->in_data (bad start-magic / size > MAX_SIZE => a header-level
+     * offence, weight 50), whereas read_data returns -1 with in_data
+     * already set (payload over MAX_PROTOCOL_MESSAGE_LENGTH => a
+     * payload offence, weight 20). The connman receive caller drains +
+     * scores this exactly once.
+     *
+     * NET_FRAME_ERR_LOCAL is deliberately NOT tagged: the recv budget
+     * is shared process-wide and realloc answers to the whole machine,
+     * so those two failures say something about this box, not about
+     * this peer. Previously they were folded in here, and a node under
+     * memory pressure — or simply one with many busy connections —
+     * handed INVALID_PAYLOAD to whichever honest peers happened to be
+     * mid-message. The frame is still refused either way. */
+    if (handled != NET_FRAME_ERR_LOCAL)
+        atomic_store(&node->framing_offence,
+                     msg->in_data ? (int)PEER_OFFENCE_INVALID_PAYLOAD
+                                  : (int)PEER_OFFENCE_INVALID_HEADER);
+    printf("  PARSE FAIL at msg_idx=%d offset=%u/%u in_data=%d "
+           "hdr_pos=%u data_pos=%u nMessageSize=%u "
+           "next4: %02x%02x%02x%02x\n",
+           msg_idx, orig_nbytes - nbytes, orig_nbytes,
+           msg->in_data, msg->hdr_pos, msg->data_pos,
+           msg->hdr.nMessageSize,
+           (unsigned char)data[0],
+           nbytes>1?(unsigned char)data[1]:0,
+           nbytes>2?(unsigned char)data[2]:0,
+           nbytes>3?(unsigned char)data[3]:0);
+}
+
 bool p2p_node_receive_bytes(struct p2p_node *node, const char *data,
                              unsigned int nbytes,
                              const unsigned char msgstart[MESSAGE_START_SIZE])
@@ -653,8 +707,7 @@ bool p2p_node_receive_bytes(struct p2p_node *node, const char *data,
                 LOG_FAIL("net", "recv queue full after recheck: count=%zu", node->recv_msg_count);
             }
             if (node->recv_msg_count >= node->recv_msg_cap) {
-                size_t newcap = node->recv_msg_cap ? node->recv_msg_cap * 2 : 16;
-                if (newcap > MAX_RECV_MESSAGES) newcap = MAX_RECV_MESSAGES;
+                size_t newcap = p2p_recv_next_cap(node);
                 struct net_message *tmp = zcl_realloc(node->recv_msgs,
                                                    newcap * sizeof(*tmp), "recv_msgs");
                 if (!tmp) LOG_FAIL("net", "realloc failed for recv_msgs: newcap=%zu", newcap);
@@ -673,36 +726,8 @@ bool p2p_node_receive_bytes(struct p2p_node *node, const char *data,
             handled = net_message_read_data(msg, data, nbytes);
 
         if (handled < 0) {
-            /* Tag the framing offence for peer scoring. The parse functions
-             * have no net_manager back-pointer, so classification happens here
-             * from the message phase: read_header returns -1 BEFORE setting
-             * msg->in_data (bad start-magic / size > MAX_SIZE => a header-level
-             * offence, weight 50), whereas read_data returns -1 with in_data
-             * already set (payload over MAX_PROTOCOL_MESSAGE_LENGTH => a
-             * payload offence, weight 20). The connman receive caller drains +
-             * scores this exactly once.
-             *
-             * NET_FRAME_ERR_LOCAL is deliberately NOT tagged: the recv budget
-             * is shared process-wide and realloc answers to the whole machine,
-             * so those two failures say something about this box, not about
-             * this peer. Previously they were folded in here, and a node under
-             * memory pressure — or simply one with many busy connections —
-             * handed INVALID_PAYLOAD to whichever honest peers happened to be
-             * mid-message. The frame is still refused either way. */
-            if (handled != NET_FRAME_ERR_LOCAL)
-                atomic_store(&node->framing_offence,
-                             msg->in_data ? (int)PEER_OFFENCE_INVALID_PAYLOAD
-                                          : (int)PEER_OFFENCE_INVALID_HEADER);
-            printf("  PARSE FAIL at msg_idx=%d offset=%u/%u in_data=%d "
-                   "hdr_pos=%u data_pos=%u nMessageSize=%u "
-                   "next4: %02x%02x%02x%02x\n",
-                   msg_idx, orig_nbytes - nbytes, orig_nbytes,
-                   msg->in_data, msg->hdr_pos, msg->data_pos,
-                   msg->hdr.nMessageSize,
-                   (unsigned char)data[0],
-                   nbytes>1?(unsigned char)data[1]:0,
-                   nbytes>2?(unsigned char)data[2]:0,
-                   nbytes>3?(unsigned char)data[3]:0);
+            p2p_recv_record_parse_fail(node, msg, msg_idx, nbytes,
+                                       orig_nbytes, data, handled);
             LOG_FAIL("net", "message parse failed at msg_idx=%d offset=%u/%u", msg_idx, orig_nbytes - nbytes, orig_nbytes);
         }
 
@@ -1591,6 +1616,57 @@ bool is_banned(struct net_manager *nm, const struct net_addr *addr)
     return found;
 }
 
+/* Expiry for a ban: the 24h default unless ban_offset is positive, in which
+ * case it is ban_offset from now (or from the epoch when since_epoch). */
+static int64_t ban_addr_until(int64_t ban_offset, bool since_epoch)
+{
+    int64_t ban_time = GetTime() + 24 * 60 * 60;
+    if (ban_offset > 0)
+        ban_time = (since_epoch ? 0 : GetTime()) + ban_offset;
+    return ban_time;
+}
+
+static void ban_set_reason(struct ban_entry *entry, const char *reason)
+{
+    snprintf(entry->reason, sizeof(entry->reason), "%s", reason ? reason : "");
+}
+
+/* Refreshes the entry for addr when one exists and reports true; reports
+ * false and leaves the table alone when addr is not banned yet. The caller
+ * holds nm->cs_banned. */
+static bool ban_refresh_existing_locked(struct net_manager *nm,
+                                        const struct net_addr *addr,
+                                        int64_t ban_time, int32_t score_at_ban,
+                                        const char *reason)
+{
+    for (size_t i = 0; i < nm->num_banned; i++) {
+        if (net_addr_eq(&nm->banned[i].addr, addr)) {
+            if (nm->banned[i].ban_until < ban_time)
+                nm->banned[i].ban_until = ban_time;
+            nm->banned[i].score_at_ban = score_at_ban;
+            ban_set_reason(&nm->banned[i], reason);
+            nm->ban_db_generation++;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Writes a new entry at the end of the table. The caller has checked that
+ * there is room and holds nm->cs_banned. */
+static void ban_append_locked(struct net_manager *nm, const struct net_addr *addr,
+                              int64_t ban_time, int32_t score_at_ban,
+                              const char *reason)
+{
+    nm->banned[nm->num_banned].addr = *addr;
+    nm->banned[nm->num_banned].prefix_len = net_addr_is_ipv4(addr) ? 32 : 128;
+    nm->banned[nm->num_banned].ban_until = ban_time;
+    nm->banned[nm->num_banned].score_at_ban = score_at_ban;
+    ban_set_reason(&nm->banned[nm->num_banned], reason);
+    nm->num_banned++;
+    nm->ban_db_generation++;
+}
+
 /* Shared implementation behind ban_addr() (external/manual bans, score=0)
  * and peer_misbehaving()'s auto-ban (real score + offence reason). Persists
  * to banlist.dat when nm->datadir is set (see connman_load_addrman()).
@@ -1607,24 +1683,14 @@ static void ban_addr_ex(struct net_manager *nm, const struct net_addr *addr,
                         int64_t ban_offset, bool since_epoch,
                         int32_t score_at_ban, const char *reason)
 {
-    int64_t ban_time = GetTime() + 24 * 60 * 60;
-    if (ban_offset > 0)
-        ban_time = (since_epoch ? 0 : GetTime()) + ban_offset;
+    int64_t ban_time = ban_addr_until(ban_offset, since_epoch);
 
     zcl_mutex_lock(&nm->cs_banned);
-    for (size_t i = 0; i < nm->num_banned; i++) {
-        if (net_addr_eq(&nm->banned[i].addr, addr)) {
-            if (nm->banned[i].ban_until < ban_time)
-                nm->banned[i].ban_until = ban_time;
-            nm->banned[i].score_at_ban = score_at_ban;
-            snprintf(nm->banned[i].reason, sizeof(nm->banned[i].reason),
-                     "%s", reason ? reason : "");
-            nm->ban_db_generation++;
-            bool write_now = ban_db_write_due_locked(nm, score_at_ban);
-            zcl_mutex_unlock(&nm->cs_banned);
-            if (nm->datadir && write_now) ban_db_write(nm, nm->datadir);
-            return;
-        }
+    if (ban_refresh_existing_locked(nm, addr, ban_time, score_at_ban, reason)) {
+        bool write_now = ban_db_write_due_locked(nm, score_at_ban);
+        zcl_mutex_unlock(&nm->cs_banned);
+        if (nm->datadir && write_now) ban_db_write(nm, nm->datadir);
+        return;
     }
 
     if (nm->num_banned >= NET_BAN_TABLE_MAX) {
@@ -1660,14 +1726,7 @@ static void ban_addr_ex(struct net_manager *nm, const struct net_addr *addr,
         nm->banned = tmp;
         nm->banned_cap = newcap;
     }
-    nm->banned[nm->num_banned].addr = *addr;
-    nm->banned[nm->num_banned].prefix_len = net_addr_is_ipv4(addr) ? 32 : 128;
-    nm->banned[nm->num_banned].ban_until = ban_time;
-    nm->banned[nm->num_banned].score_at_ban = score_at_ban;
-    snprintf(nm->banned[nm->num_banned].reason,
-             sizeof(nm->banned[nm->num_banned].reason), "%s", reason ? reason : "");
-    nm->num_banned++;
-    nm->ban_db_generation++;
+    ban_append_locked(nm, addr, ban_time, score_at_ban, reason);
     bool write_now = ban_db_write_due_locked(nm, score_at_ban);
     zcl_mutex_unlock(&nm->cs_banned);
 
@@ -1824,16 +1883,22 @@ static void raise_last_peer_ban_blocker(void)
     (void)blocker_set(&rec);
 }
 
-void peer_misbehaving(struct net_manager *nm, struct p2p_node *node,
-                      int howmuch, const char *reason)
+/* Whether a misbehaviour report should be scored at all. */
+static bool peer_misbehaving_applies(struct net_manager *nm,
+                                     struct p2p_node *node, int howmuch)
 {
-    if (!nm || !node || howmuch <= 0) return;
+    if (!nm || !node || howmuch <= 0) return false;
 
     /* NEVER penalize trusted peers — see is_trusted_peer() above for exactly
      * which peers that is (whitelisted, and same-host loopback that is not
      * Tor-forwarded ingress; NOT addnode). */
-    if (is_trusted_peer(node))
-        return;
+    return !is_trusted_peer(node);
+}
+
+void peer_misbehaving(struct net_manager *nm, struct p2p_node *node,
+                      int howmuch, const char *reason)
+{
+    if (!peer_misbehaving_applies(nm, node, howmuch)) return;
 
     int new_score = atomic_fetch_add(&node->misbehavior, howmuch) + howmuch;
     event_emitf(EV_PEER_MISBEHAVE, (uint32_t)node->id,
@@ -2087,6 +2152,66 @@ struct ban_db_flush_state ban_db_flush_state_read(struct net_manager *nm)
     return st;
 }
 
+/* Reads the verified banlist payload at path into a fresh buffer and stores
+ * its length in *payload_size. Returns NULL on any I/O failure, with the file
+ * closed and nothing allocated. */
+static uint8_t *ban_db_read_payload(const char *path, uint64_t payload_off,
+                                    size_t *payload_size)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long total = ftell(f);
+    if (total < 0 || (uint64_t)total < payload_off) { fclose(f); return NULL; }
+    size_t size = (size_t)total - (size_t)payload_off;
+    if (fseek(f, (long)payload_off, SEEK_SET) != 0) { fclose(f); return NULL; }
+
+    uint8_t *buf = zcl_malloc(size > 0 ? size : 1, "ban_db_read_buf");
+    if (!buf) { fclose(f); return NULL; }
+    size_t rd = size > 0 ? fread(buf, 1, size, f) : 0;
+    fclose(f);
+    if (rd != size) { free(buf); return NULL; }
+    *payload_size = size;
+    return buf;
+}
+
+/* Reads one serialized ban entry. Returns false when the stream runs short
+ * or a read fails; the caller stops parsing and keeps what already loaded. */
+static bool ban_db_read_record(struct byte_stream *s, struct ban_entry *b)
+{
+    bool ok = true;
+    uint8_t has_torv3 = 0;
+    memset(b, 0, sizeof(*b));
+    ok = ok && stream_read(s, b->addr.ip, 16);
+    ok = ok && stream_read(s, b->addr.torv3, TORV3_ADDR_SIZE);
+    ok = ok && stream_read_u8(s, &has_torv3);
+    ok = ok && stream_read_u8(s, &b->prefix_len);
+    ok = ok && stream_read_i64_le(s, &b->ban_until);
+    ok = ok && stream_read_i32_le(s, &b->score_at_ban);
+    ok = ok && stream_read(s, (unsigned char *)b->reason, sizeof(b->reason));
+    if (!ok) return false;
+    b->addr.has_torv3 = has_torv3 != 0;
+    b->reason[sizeof(b->reason) - 1] = '\0';
+    return true;
+}
+
+/* Appends a loaded entry if the in-memory table can take it, growing the
+ * table first when needed. Returns false when the entry was not stored. */
+static bool ban_db_read_insert(struct net_manager *nm, const struct ban_entry *b)
+{
+    zcl_mutex_lock(&nm->cs_banned);
+    if (nm->num_banned >= nm->banned_cap) {
+        size_t newcap = nm->banned_cap ? nm->banned_cap * 2 : 64;
+        struct ban_entry *tmp = zcl_realloc(nm->banned, newcap * sizeof(*tmp), "ban_list");
+        if (tmp) { nm->banned = tmp; nm->banned_cap = newcap; }
+    }
+    bool inserted = nm->num_banned < nm->banned_cap;
+    if (inserted)
+        nm->banned[nm->num_banned++] = *b;
+    zcl_mutex_unlock(&nm->cs_banned);
+    return inserted;
+}
+
 bool ban_db_read(struct net_manager *nm, const char *datadir)
 {
     if (!nm || !datadir) return false;
@@ -2107,19 +2232,9 @@ bool ban_db_read(struct net_manager *nm, const char *datadir)
 
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", datadir, g_ban_db_spec.body_name);
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return false; }
-    long total = ftell(f);
-    if (total < 0 || (uint64_t)total < payload_off) { fclose(f); return false; }
-    size_t payload_size = (size_t)total - (size_t)payload_off;
-    if (fseek(f, (long)payload_off, SEEK_SET) != 0) { fclose(f); return false; }
-
-    uint8_t *buf = zcl_malloc(payload_size > 0 ? payload_size : 1, "ban_db_read_buf");
-    if (!buf) { fclose(f); return false; }
-    size_t rd = payload_size > 0 ? fread(buf, 1, payload_size, f) : 0;
-    fclose(f);
-    if (rd != payload_size) { free(buf); return false; }
+    size_t payload_size = 0;
+    uint8_t *buf = ban_db_read_payload(path, payload_off, &payload_size);
+    if (!buf) return false;
 
     struct byte_stream s;
     stream_init_from_data(&s, buf, payload_size);
@@ -2136,18 +2251,8 @@ bool ban_db_read(struct net_manager *nm, const char *datadir)
     uint32_t loaded = 0, expired_skipped = 0, cap_dropped = 0;
     for (uint32_t i = 0; ok && i < count; i++) {
         struct ban_entry b;
-        memset(&b, 0, sizeof(b));
-        uint8_t has_torv3 = 0;
-        ok = ok && stream_read(&s, b.addr.ip, 16);
-        ok = ok && stream_read(&s, b.addr.torv3, TORV3_ADDR_SIZE);
-        ok = ok && stream_read_u8(&s, &has_torv3);
-        ok = ok && stream_read_u8(&s, &b.prefix_len);
-        ok = ok && stream_read_i64_le(&s, &b.ban_until);
-        ok = ok && stream_read_i32_le(&s, &b.score_at_ban);
-        ok = ok && stream_read(&s, (unsigned char *)b.reason, sizeof(b.reason));
+        ok = ban_db_read_record(&s, &b);
         if (!ok) break;
-        b.addr.has_torv3 = has_torv3 != 0;
-        b.reason[sizeof(b.reason) - 1] = '\0';
 
         if (b.ban_until <= now) {
             expired_skipped++;
@@ -2163,17 +2268,8 @@ bool ban_db_read(struct net_manager *nm, const char *datadir)
             continue;
         }
 
-        zcl_mutex_lock(&nm->cs_banned);
-        if (nm->num_banned >= nm->banned_cap) {
-            size_t newcap = nm->banned_cap ? nm->banned_cap * 2 : 64;
-            struct ban_entry *tmp = zcl_realloc(nm->banned, newcap * sizeof(*tmp), "ban_list");
-            if (tmp) { nm->banned = tmp; nm->banned_cap = newcap; }
-        }
-        if (nm->num_banned < nm->banned_cap) {
-            nm->banned[nm->num_banned++] = b;
+        if (ban_db_read_insert(nm, &b))
             loaded++;
-        }
-        zcl_mutex_unlock(&nm->cs_banned);
     }
 
     stream_free(&s);

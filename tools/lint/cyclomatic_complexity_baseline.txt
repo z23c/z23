@@ -77,11 +77,6 @@ core/modules/net/src/msgprocessor_snapshot.c:mp_handle_zcl23_sync:174
 core/modules/net/src/msgprocessor_snapshot.c:mp_snapshot_maybe_offer:17
 core/modules/net/src/msgprocessor_snapshot.c:mp_snapshot_send_tick:33
 core/modules/net/src/msgprocessor_snapshot_payload.c:mp_block_payload_submit_all:25
-core/modules/net/src/net.c:ban_addr_ex:21
-core/modules/net/src/net.c:ban_db_read:33
-core/modules/net/src/net.c:p2p_disconnect_reason_name:21
-core/modules/net/src/net.c:p2p_node_receive_bytes:21
-core/modules/net/src/net.c:peer_misbehaving:16
 core/modules/net/src/noise_transport.c:noise_transport_feed:37
 core/modules/net/src/rom_fetch.c:rf_download_verified_core:23
 core/modules/net/src/rom_fetch.c:rom_fetch_download:18
