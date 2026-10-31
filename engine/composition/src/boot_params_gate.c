@@ -19,7 +19,7 @@
  * a serving gate), and let the node sync, validate and
  * serve. Proving stays fail-closed on its own — with no proving keys loaded
  * the native prover remains NATIVE_PROVER_UNINITIALIZED, and both
- * shielded-send paths refuse on zclassic_sapling_prover_is_ready() rather
+ * shielded-send paths refuse on sapling_proving_available() rather
  * than emitting an unproven output.
  *
  * Parking remains correct in exactly one case: the compiled-in keys failing
@@ -36,6 +36,7 @@
 #include "chain/chainparams.h"
 #include "controllers/event_controller.h"
 #include "event/event.h"
+#include "sapling/params_init.h"
 #include "sapling/params_vk_embedded.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
@@ -81,6 +82,11 @@ boot_params_gate_evaluate(const struct app_context *ctx,
                           const struct chain_params *params,
                           const char *params_dir)
 {
+    /* Record the directory for Sapling-only proving on every network. Nothing
+     * is read: the pair is pinned, self-tested and loaded at the first proof
+     * of a send, so a node that never sends holds none of it. */
+    sapling_note_proving_pair_dir(ctx && ctx->params_dir ? params_dir : NULL);
+
     /* -mint-anchor-fast passes the crypto stages through without running
      * (jobs/mint_skip_crypto.h), so offline self-mint legitimately needs no zk
      * params. Non-mainnet never enforced this gate. */
@@ -111,6 +117,19 @@ boot_params_gate_evaluate(const struct app_context *ctx,
                  "NOT advancing CRYPTO_READY, parking alive-degraded after "
                  "paging the operator");
         return BOOT_PARAMS_GATE_PARK;
+    }
+
+    /* The full set is incomplete but the Sapling pair is there: a device that
+     * cannot carry the Sprout parameters can still prove Sapling spends. The
+     * pair is checked and loaded at the first shielded send, and a refusal
+     * there fails that send only. */
+    if (sapling_proving_status() == SAPLING_PROVING_PAIR_PRESENT) {
+        LOG_INFO("crypto.params",
+                 "[crypto.params] full proving parameter set incomplete "
+                 "(%s missing/unreadable); Sapling proving pair present — "
+                 "shielded VALIDATION active; it is pinned, self-tested "
+                 "and loaded at the first shielded send", missing);
+        return BOOT_PARAMS_GATE_PAIR;
     }
 
     /* Validation is armed. Name the one capability that is not, so "cannot

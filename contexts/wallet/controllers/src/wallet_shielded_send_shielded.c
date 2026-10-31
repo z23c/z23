@@ -330,7 +330,7 @@ bool z_sendmany_shielded(
          * above is read-only and preserves the more specific no-funds/view-only
          * diagnostics; fail here before witness/proof work or spent-state
          * mutation. */
-        if (!zclassic_sapling_prover_is_ready()) {
+        if (!sapling_proving_available()) {
             char err[320];
             snprintf(err, sizeof(err),
                      "Shielded proving unavailable (backend=%s, status=%s)",
@@ -435,7 +435,12 @@ bool z_sendmany_shielded(
         if (!proving_ctx) {
             free(witnesses);
             transaction_free(&wtx.tx);
-            json_set_str(result, "Failed to init proving context");
+            char err[320];
+            snprintf(err, sizeof(err),
+                     "Failed to init proving context (backend=%s, status=%s)",
+                     zclassic_sapling_prover_backend(),
+                     zclassic_sapling_prover_status());
+            json_set_str(result, err);
             LOG_FAIL("wallet_shielded", "z_sendmany: sapling_proving_ctx_init failed (shielded spend path)");
         }
 

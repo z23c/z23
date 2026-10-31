@@ -947,6 +947,7 @@ ZCL_MODULE_CAPABILITY("core/modules/sapling/src/incremental_merkle_tree.c", CAP_
 ZCL_MODULE_CAPABILITY("core/modules/sapling/src/msm_parallel.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("core/modules/sapling/src/params_fetch.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("core/modules/sapling/src/params_fetch_session.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("core/modules/sapling/src/params_init.c", CAP_FS_READ, "Reads the Sapling proving parameter files named by the parameter directory: size checks at start and the pinned-hash load at the first proving context of a send. Opens no socket and writes nothing.")
 ZCL_MODULE_CAPABILITY("core/modules/sapling/src/sapling.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("core/modules/sapling/src/sapling_circuit.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("core/modules/sapling/src/sapling_prover_c23.c", CAP_FS_WRITE, "")

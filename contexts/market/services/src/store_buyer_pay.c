@@ -23,6 +23,7 @@
 #include "net/tor_integration.h" // shape-layer-ok:remote-buyer-rides-the-onion-fetch
 #include "platform/private_file.h"
 #include "sapling/sapling_prover.h"
+#include "sapling/params_init.h"
 #include "util/safe_alloc.h"
 #include "wallet/sapling_keys.h"
 #include "wallet/wallet.h"
@@ -145,7 +146,7 @@ static struct zcl_result sb_pay_refuse_without_prover(
     const struct db_store_purchase *purchase, int64_t purchase_id)
 {
     if (sb_purchase_addr_is_sapling(purchase->payment_addr) &&
-        !zclassic_sapling_prover_is_ready()) {
+        !sapling_proving_available()) {
         LOG_WARN(SB_TAG, "pay: refusing purchase %lld — no Sapling proving "
                  "backend (backend=%s status=%s); native C23 proving remains "
                  "disabled until its full self-test passes",

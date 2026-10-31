@@ -456,7 +456,7 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
      * name the backend + status so a build with no proving backend explains
      * itself instead of surfacing a bare "Failed to init proving context"
      * hundreds of lines later. Pure t→t sends are unaffected. */
-    if (num_z_out > 0 && !zclassic_sapling_prover_is_ready()) {
+    if (num_z_out > 0 && !sapling_proving_available()) {
         char err[320];
         snprintf(err, sizeof(err),
                  "Shielded proving unavailable (backend=%s, status=%s)",
@@ -588,6 +588,7 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
                                              num_selected, height,
                                              &i);
         if (sign_st == Z_SENDMANY_SIGN_NO_DEST) {
+            zclassic_sapling_proving_ctx_free(proving_ctx);
             transaction_free(&wtx.tx);
             json_set_str(result, "Cannot determine input destination");
             for (size_t j = 0; j < num_selected; j++)
@@ -595,6 +596,7 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
             LOG_FAIL("wallet_shielded", "z_sendmany: script_extract_destination failed for input %zu (t->z path)", i);
         }
         if (sign_st == Z_SENDMANY_SIGN_NO_KEY) {
+            zclassic_sapling_proving_ctx_free(proving_ctx);
             transaction_free(&wtx.tx);
             json_set_str(result, "Private key not available");
             for (size_t j = 0; j < num_selected; j++)
@@ -602,6 +604,7 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
             LOG_FAIL("wallet_shielded", "z_sendmany: private key not found for input %zu (t->z path)", i);
         }
         if (sign_st == Z_SENDMANY_SIGN_SIGHASH) {
+            zclassic_sapling_proving_ctx_free(proving_ctx);
             transaction_free(&wtx.tx);
             json_set_str(result, "Sighash computation failed");
             for (size_t j = 0; j < num_selected; j++)
@@ -609,6 +612,7 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
             LOG_FAIL("wallet_shielded", "z_sendmany: signature_hash failed for input %zu (t->z path)", i);
         }
         if (sign_st == Z_SENDMANY_SIGN_SIGN) {
+            zclassic_sapling_proving_ctx_free(proving_ctx);
             transaction_free(&wtx.tx);
             json_set_str(result, "Signing failed");
             for (size_t j = 0; j < num_selected; j++)

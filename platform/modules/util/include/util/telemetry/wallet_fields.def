@@ -140,7 +140,9 @@ TL_LEAF(security, keys_unlocked, TLC_BOOL, TFU_BOOL, TLV_SUMMARY,
 TL_LEAF(security, can_spend_shielded, TLC_BOOL, TFU_BOOL, TLV_SUMMARY,
     TFR_INFO, TL_NONE, 0, TFS_INFO,
     "whether this binary can CREATE a Sapling proof, which is what sending "
-    "shielded value requires. False is the expected state of a default "
+    "shielded value requires: true when proving is armed or an installed "
+    "Sapling parameter pair would be loaded by the first proof of a send. "
+    "False is the expected state of a default "
     "build and is therefore not a fault: consensus verification, mining and "
     "shielded RECEIVE are all unaffected and remain native. It reports what "
     "this build can do, never what the code aspires to; read "

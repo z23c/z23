@@ -70,7 +70,7 @@ project controls.
 
 With no proving keys loaded, the native prover reports itself
 `NATIVE_PROVER_UNINITIALIZED` and `zclassic_sapling_prover_is_ready()`
-returns false. Transparent shielding checks readiness before coin selection;
+returns false. Transparent shielding checks `sapling_proving_available()` before coin selection;
 the shielded-spend path checks it after note selection and before witness/proof
 construction. If readiness is false, it refuses the send with a named error —
 `Shielded proving unavailable (backend=..., status=...)` — instead of ever
@@ -88,6 +88,33 @@ public serving, or set `operator_needed`.
 
 Regtest and testnet never enforced the old params gate and still do not;
 none of the above is new for those networks.
+
+## Sending from the Sapling pair alone (phones)
+
+Creating a shielded transaction needs only `sapling-spend.params` and
+`sapling-output.params` (about 51 MB). The 725 MB `sprout-groth16.params` and
+`sprout-verifying.key` are used for Sprout, and nothing in this tree creates a
+Sprout proof. A device that cannot carry the Sprout files can therefore send
+shielded funds from the pair.
+
+- **Boot** only records the parameter directory and checks the two files for
+  their exact sizes. It reads no byte of them, so a node that never sends holds
+  none of the 51 MB and runs no prover self-test.
+- **The first proof of a send** checks each file against its pinned SHA-512 and
+  checks that each begins with this build's compiled-in verifying key, then
+  arms the prover and runs its self-test: a real Spend, Output and binding
+  bundle that this node's own consensus verifier must accept.
+- **When the send ends** the proving bytes are freed and the prover is disarmed;
+  the next send repeats the checks. Files copied in or replaced after boot are
+  used with no restart.
+- **A failed check refuses that one send** with a short reason code in the
+  error's `status=` field and leaves the node validating on the compiled-in
+  keys.
+
+`wallet readiness` reports `sapling.proving_status`: `none`, `pair_present`
+(both files present at their sizes, nothing loaded), `pair_armed` (a send is
+in progress) or `full_set` (the four-file set is loaded). It carries no path or
+key material. A directory with the full set loads exactly as before.
 
 ## If the parameter files are present but corrupt
 

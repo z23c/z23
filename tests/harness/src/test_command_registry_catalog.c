@@ -20,6 +20,9 @@
 #include "controllers/chain_native_handlers.h"
 #include "controllers/rpc_client.h"
 #include "controllers/wallet_native_handlers.h"
+#include "controllers/wallet_controller_internal.h"
+#include "sapling/params_init.h"
+#include "sapling/sapling_prover.h"
 #include "util/clientversion.h"
 #include "util/safe_alloc.h"
 #include "util/boot_status.h"
@@ -2351,6 +2354,58 @@ static char *status_brief_mock_rpc(const char *method,
 static bool g_status_journey_plaintext;
 static bool g_status_journey_typed_blocker;
 static bool g_status_journey_witness_ready = true;
+static bool g_status_journey_live_prover;
+
+/* The prover_ready the wallet readiness controller reports now, when the
+ * test asks for the live answer; otherwise a fixed true. */
+static bool status_journey_prover_ready(void)
+{
+    if (!g_status_journey_live_prover)
+        return true;
+    struct json_value res;
+    json_init(&res);
+    json_set_object(&res);
+    wallet_readiness_append_sapling(&res);
+    bool ready = json_get_bool(
+        json_get(json_get(&res, "sapling"), "prover_ready"));
+    json_free(&res);
+    return ready;
+}
+
+/* Directory holding both Sapling proving files at their exact sizes with no
+ * content: enough for the pair to be present, nothing is ever read. */
+static bool status_journey_pair_dir(char *dir, size_t cap)
+{
+    static const struct { const char *name; off_t size; } files[] = {
+        {"sapling-spend.params", 47958396},
+        {"sapling-output.params", 3592860},
+    };
+    if (!test_mkdtemp(dir, cap, "journey_pair"))
+        return false;
+    for (size_t i = 0; i < 2; i++) {
+        char p[1400];
+        snprintf(p, sizeof(p), "%s/%s", dir, files[i].name);
+        int fd = open(p, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+        if (fd < 0 || ftruncate(fd, files[i].size) != 0) {
+            if (fd >= 0) close(fd);
+            return false;
+        }
+        close(fd);
+    }
+    return true;
+}
+
+static void status_journey_pair_dir_remove(const char *dir)
+{
+    static const char *const names[] = {"sapling-spend.params",
+                                        "sapling-output.params"};
+    for (size_t i = 0; i < 2; i++) {
+        char p[1400];
+        snprintf(p, sizeof(p), "%s/%s", dir, names[i]);
+        (void)unlink(p);
+    }
+    (void)rmdir(dir);
+}
 
 static char *status_journey_mock_rpc(const char *method,
                                      const char *params_json)
@@ -2407,10 +2462,11 @@ static char *status_journey_mock_rpc(const char *method,
         (void)snprintf(body, sizeof(body),
             "{\"persistence\":{\"healthy\":true},"
             "\"lock\":{\"encrypted_at_rest\":%s,\"unlocked\":true},"
-            "\"sapling\":{\"prover_ready\":true,"
+            "\"sapling\":{\"prover_ready\":%s,"
             "\"checkpoint_healthy\":true,\"witness_ready\":%s,"
             "\"witness_state\":\"%s\"}}",
             g_status_journey_plaintext ? "false" : "true",
+            status_journey_prover_ready() ? "true" : "false",
             g_status_journey_witness_ready ? "true" : "false",
             g_status_journey_witness_ready ? "ready"
                                            : "rescan_required_stale");
@@ -2603,6 +2659,35 @@ static int test_status_journey_safe_money_frontdoor(void)
                       "z23 core wallet rescan-witnesses");
         json_free(&root);
 
+        /* A node holding only the Sapling pair is unarmed between sends yet
+         * a send would arm it: the journey must say it can send. With no
+         * pair noted it must say it cannot. */
+        g_status_journey_witness_ready = true;
+        g_status_journey_live_prover = true;
+        char pair_dir[1200];
+        ASSERT(status_journey_pair_dir(pair_dir, sizeof(pair_dir)));
+        sapling_note_proving_pair_dir(pair_dir);
+        ASSERT(!zclassic_sapling_prover_is_ready());
+        code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
+        ASSERT(json_read(&root, out, strlen(out)) && root.type == JSON_OBJ);
+        data = json_get(&root, "data");
+        ASSERT(json_get_bool(json_get(data, "can_send_sapling")));
+        ASSERT(json_get_bool(json_get(data, "can_send")));
+        json_free(&root);
+
+        sapling_note_proving_pair_dir(NULL);
+        code = ZCL_COMMAND_EXIT_INTERNAL;
+        ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
+        ASSERT(json_read(&root, out, strlen(out)) && root.type == JSON_OBJ);
+        data = json_get(&root, "data");
+        ASSERT(!json_get_bool(json_get(data, "can_send_sapling")));
+        ASSERT_STR_EQ(json_get_str(json_get(data, "current_state")),
+                      "SHIELDED_SPEND_BLOCKED");
+        json_free(&root);
+        status_journey_pair_dir_remove(pair_dir);
+        g_status_journey_live_prover = false;
+
         g_status_journey_witness_ready = true;
         g_status_journey_typed_blocker = true;
         code = ZCL_COMMAND_EXIT_INTERNAL;
@@ -2621,6 +2706,9 @@ static int test_status_journey_safe_money_frontdoor(void)
         json_free(&root);
         PASS();
     } _test_next:;
+    g_status_journey_witness_ready = true;
+    g_status_journey_live_prover = false;
+    sapling_note_proving_pair_dir(NULL);
     g_status_journey_plaintext = false;
     g_status_journey_typed_blocker = false;
     g_status_journey_witness_ready = true;

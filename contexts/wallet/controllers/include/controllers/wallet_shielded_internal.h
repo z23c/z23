@@ -34,6 +34,7 @@
 #include "sapling/fr.h"
 #include "sapling/incremental_merkle_tree.h"
 #include "sapling/sapling_prover.h"
+#include "sapling/params_init.h"
 #include "consensus/upgrades.h"
 #include "services/wallet_backup_service.h"
 #include "models/database.h"

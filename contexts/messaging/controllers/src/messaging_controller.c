@@ -179,7 +179,7 @@ static bool msg_send_onchain(const char *to_addr, const char *body,
      * would report ready on a build with no proving backend (params load fine
      * there; only proving is absent) and then fail deep in the stack with a
      * vaguer message. */
-    if (!zclassic_sapling_prover_is_ready()) {
+    if (!sapling_proving_available()) {
         char err[320];
         snprintf(err, sizeof(err),
                  "On-chain ZMSG unavailable: cannot build a shielded "
@@ -637,7 +637,7 @@ bool messaging_dump_state_json(struct json_value *out, const char *key)
      * proving backend compiled into this binary. Reporting only the former
      * advertised a channel that cannot send on a build with no proving
      * backend. */
-    bool onchain_ready = zclassic_sapling_prover_is_ready();
+    bool onchain_ready = sapling_proving_available();
 
     json_push_kv_bool(out, "controller_wired", db_open && net_up);
     json_push_kv_bool(out, "db_open", db_open);

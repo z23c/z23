@@ -21,6 +21,12 @@ enum boot_params_gate_result {
      * shielded_spend_unavailable blocker names that. The caller must NOT
      * start the loader — there is nothing for it to load. */
     BOOT_PARAMS_GATE_EMBEDDED,
+    /* The full set is incomplete but sapling-spend.params and
+     * sapling-output.params are present; the compiled-in verifying keys are
+     * installed. The caller must NOT start the loader: the pair is loaded
+     * lazily at the first shielded send (sapling_proving_session_acquire), with no Sprout
+     * proving capability, and a refusal fails that send only. */
+    BOOT_PARAMS_GATE_PAIR,
     /* The compiled-in keys failed their integrity check: this binary cannot
      * verify shielded proofs. The caller must park alive-degraded without
      * advancing CRYPTO_READY. */

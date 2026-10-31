@@ -54,12 +54,16 @@
 #include "util/safe_alloc.h"
 
 #include "storage/nullifier_kv.h"
+#include "storage/coins_kv.h"
+#include "storage/progress_store.h"
+#include "jobs/reducer_frontier.h"
 #include "jobs/utxo_apply_nullifiers.h"
 #include "jobs/utxo_apply_delta.h"
 
 /* PART B wallet RPC surface */
 #include "platform/time_compat.h"
 #include "controllers/wallet_controller.h"
+#include "controllers/wallet_helpers.h"
 #include "controllers/wallet_shielded_controller.h"
 #include "wallet/wallet.h"
 #include "wallet/keystore.h"
@@ -197,6 +201,14 @@ struct we_a_note {
 };
 
 /* Flip one proof byte of a copy of tz; the REAL verifier must reject it. */
+/* Optional observer run after each send's proving context is freed; set only
+ * by simnet_shielded_wallet_e2e_run_parts. Returns its failure count. */
+static int (*g_after_send)(const char *send) = NULL;
+static int we_after_send(const char *send)
+{
+    return g_after_send ? g_after_send(send) : 0;
+}
+
 static int part_a_tz_tamper(struct transaction *tz,
                             const struct consensus_params *cp, int tz_height)
 {
@@ -613,16 +625,19 @@ static int part_a_consensus_accept(void)
     struct we_a_note note0; memset(&note0, 0, sizeof(note0));
     failures += part_a_t_to_z(&s, &id, cp, &cb_txid, SHIELDED_VALUE,
                               tz_height, &note0);
+    failures += we_after_send("t->z");
 
     /* ── (2) z->z ─────────────────────────────────────────────────────── */
     uint8_t zz_spend_nf[32]; memset(zz_spend_nf, 0, 32);
     struct we_a_note note1; memset(&note1, 0, sizeof(note1));
     failures += part_a_z_to_z(&s, &id, cp, SHIELDED_VALUE, zz_height,
                               &note0, &note1, zz_spend_nf);
+    failures += we_after_send("z->z");
 
     /* ── (3) z->t ─────────────────────────────────────────────────────── */
     failures += part_a_z_to_t(&s, &id, cp, SHIELDED_VALUE, zt_height,
                               &note1, zz_spend_nf);
+    failures += we_after_send("z->t");
 
     simnet_free(&s);
     return failures;
@@ -750,6 +765,92 @@ static int part_b_spend_checks(struct node_db *ndb, struct rpc_table *tbl,
     return failures;
 }
 
+/* z_sendmany refuses a spend unless the tip is self-derived. Seed a store the
+ * guard accepts: one coin, applied height 51, provable tip 50. Returns the
+ * temporary directory (to clean up) or "" on failure. */
+static bool part_b_seed_spend_guard(char *dir, size_t cap, bool *opened_here)
+{
+    *opened_here = false;
+    sqlite3 *db = progress_store_db();
+    if (!db) {
+        if (!test_mkdtemp(dir, cap, "we_progress") || !progress_store_open(dir))
+            return false;
+        *opened_here = true;
+        db = progress_store_db();
+    }
+    struct uint256 t; memset(&t, 0x51, sizeof(t));
+    unsigned char sc[4] = {0xE0, 0xE0, 0xE0, 0xE0};
+    char *err = NULL;
+    bool ok = db && coins_kv_ensure_schema(db) &&
+              coins_kv_add(db, t.data, 0, 1234, 50, true, sc, sizeof(sc)) &&
+              sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) == SQLITE_OK &&
+              coins_kv_set_applied_height_in_tx(db, 51) &&
+              sqlite3_exec(db, "COMMIT", NULL, NULL, &err) == SQLITE_OK;
+    if (err) sqlite3_free(err);
+    reducer_frontier_provable_tip_set(50);
+    return ok;
+}
+
+/* A t->z send from a UTXO whose key is not in the wallet fails at signing,
+ * after the proving context exists. The failure must release it. */
+static int part_b_keyless_tz(struct node_db *ndb, struct rpc_table *tbl,
+                             const char *zaddr, int tip_height)
+{
+    int failures = 0;
+    uint8_t script[25] = {0x76, 0xa9, 0x14};
+    memset(script + 3, 0x42, 20);
+    script[23] = 0x88;
+    script[24] = 0xac;
+
+    struct db_wallet_utxo u; memset(&u, 0, sizeof(u));
+    memset(u.txid, 0xC4, 32);
+    u.vout = 0;
+    u.value = 100000000;
+    memset(u.address_hash, 0x42, 20);
+    u.script = script;
+    u.script_len = sizeof(script);
+    char pdir[512] = {0};
+    bool opened_here = false;
+    WE_CHECK("Part B: keyless t->z spend guard seeded",
+             part_b_seed_spend_guard(pdir, sizeof(pdir), &opened_here));
+    u.height = tip_height - 10;
+    WE_CHECK("Part B: keyless t->z fixture UTXO saved",
+             db_wallet_utxo_save(ndb, &u));
+
+    struct tx_destination from; memset(&from, 0, sizeof(from));
+    from.type = DEST_KEY_ID;
+    memset(from.id.key.id.data, 0x42, 20);
+    char from_addr[128] = {0};
+    WE_CHECK("Part B: keyless t->z from address encodes",
+             wallet_encode_destination(&from, from_addr, sizeof(from_addr)));
+
+    struct json_value p; json_init(&p); json_set_array(&p);
+    struct json_value a; json_init(&a); json_set_str(&a, from_addr);
+    json_push_back(&p, &a); json_free(&a);
+    struct json_value recips; json_init(&recips); json_set_array(&recips);
+    struct json_value r; json_init(&r); json_set_object(&r);
+    json_push_kv_str(&r, "address", zaddr);
+    json_push_kv_real(&r, "amount", 0.5);
+    json_push_back(&recips, &r); json_free(&r);
+    json_push_back(&p, &recips); json_free(&recips);
+
+    char msg[256] = {0};
+    bool ok = we_rpc_str(tbl, "z_sendmany", &p, msg, sizeof(msg));
+    json_free(&p);
+    printf("  Part B: keyless t->z result: ok=%d msg=%s\n", (int)ok, msg);
+    WE_CHECK("Part B: keyless t->z is refused for the missing key",
+             !ok || strstr(msg, "Private key not available") != NULL);
+    WE_CHECK("Part B: keyless t->z names the missing key",
+             strstr(msg, "Private key not available") != NULL);
+    failures += we_after_send("keyless t->z");
+    reducer_frontier_provable_tip_reset();
+    if (opened_here) {
+        progress_store_close();
+        test_cleanup_tmpdir(pdir);
+    }
+    return failures;
+}
+
 static int part_b_wallet_rpc(void)
 {
     int failures = 0;
@@ -858,6 +959,7 @@ static int part_b_wallet_rpc(void)
 
     failures += part_b_receive_views(&tbl, zaddr);
     failures += part_b_memo_check(&tbl, note_saved);
+    failures += part_b_keyless_tz(&ndb, &tbl, zaddr, TIP_H);
 
     /* Mark the note spent (note-selection view): balance + unspent drop to 0. */
     if (note_saved)
@@ -874,6 +976,29 @@ static int part_b_wallet_rpc(void)
     wallet_free(wallet);
     free(wallet);
     test_cleanup_tmpdir(tmpdir);
+    return failures;
+}
+
+/* Parts A (consensus ACCEPT over simnet) and B (wallet RPC) against whichever
+ * proving parameters the caller armed. after_send, when set, runs after each
+ * Part A send has freed its proving context. Returns the failure count. */
+int simnet_shielded_wallet_e2e_run_parts(int (*after_send)(const char *send));
+int simnet_shielded_wallet_e2e_run_parts(int (*after_send)(const char *send))
+{
+    g_after_send = after_send;
+    /* Pin proof-deferral to -1 (verify everything) for the whole test and
+     * restore on exit, so a leaked deferral height from an earlier serial
+     * test cannot silently skip proofs. */
+    int saved_defer = atomic_load(&g_deferred_proof_validation_below_height);
+    atomic_store(&g_deferred_proof_validation_below_height, -1);
+
+    int failures = 0;
+    failures += part_a_consensus_accept();
+    failures += part_b_wallet_rpc();
+
+    atomic_store(&g_deferred_proof_validation_below_height, saved_defer);
+
+    g_after_send = NULL;
     return failures;
 }
 
@@ -910,17 +1035,7 @@ int test_simnet_shielded_wallet_e2e(void)
     printf("  production prover READY (backend=%s) — running ACCEPT E2E\n",
            zclassic_sapling_prover_backend());
 
-    /* Pin proof-deferral to -1 (verify everything) for the whole test and
-     * restore on exit, so a leaked deferral height from an earlier serial
-     * test cannot silently skip proofs. */
-    int saved_defer = atomic_load(&g_deferred_proof_validation_below_height);
-    atomic_store(&g_deferred_proof_validation_below_height, -1);
-
-    int failures = 0;
-    failures += part_a_consensus_accept();
-    failures += part_b_wallet_rpc();
-
-    atomic_store(&g_deferred_proof_validation_below_height, saved_defer);
+    int failures = simnet_shielded_wallet_e2e_run_parts(NULL);
 
     printf("W1-d shielded wallet E2E: %s (%d failures)\n",
            failures == 0 ? "OK" : "FAIL", failures);

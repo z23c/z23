@@ -35,6 +35,7 @@
 #include "services/wallet_telemetry.h"
 
 #include "platform/time_compat.h"
+#include "sapling/params_init.h"
 #include "sapling/sapling_prover.h"
 #include "services/utxo_mirror_sync_service.h"
 #include "services/wallet_backup_service.h"
@@ -147,14 +148,12 @@ static void wt_fill_security(struct wallet_snapshot *s)
     TELEMETRY_SET_BOOL(s, keys_unlocked, wallet_lock_is_unlocked(),
                        TELEMETRY_SRC_IN_PROCESS);
 
-    /* A BUILD fact, not a runtime one, and the only pair in this domain that
-     * answers identically in the node and in a one-shot CLI process. It
-     * reports what this binary can actually do: the default build links the
-     * no-proving-backend translation unit and cannot create a Sapling proof
-     * at all, so `can_spend_shielded` is false there however the rest of the
-     * shielded stack is configured. */
+    /* Whether a send could arm proving: it is armed, or the Sapling pair is
+     * installed and the first proof of a send loads it. A pair-only node is
+     * unarmed between sends, so the armed state alone would report a node
+     * that can send as unable to. */
     TELEMETRY_SET_BOOL(s, can_spend_shielded,
-                       zclassic_sapling_prover_is_ready(),
+                       sapling_proving_available(),
                        TELEMETRY_SRC_CONFIG);
     TELEMETRY_SET_TEXT(s, shielded_prover_status,
                        zclassic_sapling_prover_status(),

@@ -1938,7 +1938,7 @@ AGENT_IMPACT_RULE("tools/scripts/check_fleet_source_status.sh|tools/scripts/flee
  * states the contract a fetcher calls. Changing the readiness latch without
  * re-running the group is exactly how a fail-closed send guard turns into a
  * 192-byte all-zero proof. */
-AGENT_IMPACT_RULE("core/modules/sapling/src/params_init.c|core/modules/sapling/include/sapling/params_init.h|core/modules/sapling/src/sapling_prover_native.c|core/modules/sapling/include/sapling/sapling_prover.h|tests/harness/src/test_params_vk_embedded.c", "params_vk_embedded native_spend_proof sapling_prover_rng_determinism shielded_payment_gate")
+AGENT_IMPACT_RULE("core/modules/sapling/src/params_init.c|core/modules/sapling/include/sapling/params_init.h|core/modules/sapling/src/sapling_prover_native.c|core/modules/sapling/include/sapling/sapling_prover.h|tests/harness/src/test_params_vk_embedded.c|tests/harness/src/test_sapling_proving_pair.c", "params_vk_embedded sapling_proving_pair native_spend_proof sapling_prover_rng_determinism shielded_payment_gate")
 /* LANE dos-fairness: "this transaction is invalid" and "I could not check
  * this transaction" are two different answers, and every shielded verifier
  * below fail-closes to the same `false` for both. While the verifying keys

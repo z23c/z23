@@ -57,7 +57,11 @@ bool zclassic_sapling_prover_is_ready(void)
 
 const char *zclassic_sapling_prover_status(void)
 {
-    return native_state_name(atomic_load(&g_native_state));
+    int state = atomic_load(&g_native_state);
+    const char *why = sapling_proving_last_refusal();
+    if (why && state == NATIVE_PROVER_UNINITIALIZED)
+        return why;
+    return native_state_name(state);
 }
 
 const char *zclassic_sapling_prover_backend(void)
@@ -73,19 +77,30 @@ static struct native_proving_ctx *native_ctx_new(void)
 
 void *zclassic_sapling_proving_ctx_init(void)
 {
-    if (!zclassic_sapling_prover_is_ready())
+    if (!sapling_proving_session_acquire())
         LOG_NULL("sapling_prover",
                  "native proving context refused: status=%s",
                  zclassic_sapling_prover_status());
-    return native_ctx_new();
+    void *ctx = native_ctx_new();
+    if (!ctx)
+        sapling_proving_session_release();
+    return ctx;
+}
+
+static void native_ctx_free(void *ctx)
+{
+    if (!ctx)
+        return;
+    memory_cleanse(ctx, sizeof(struct native_proving_ctx));
+    free(ctx);
 }
 
 void zclassic_sapling_proving_ctx_free(void *ctx)
 {
     if (!ctx)
         return;
-    memory_cleanse(ctx, sizeof(struct native_proving_ctx));
-    free(ctx);
+    native_ctx_free(ctx);
+    sapling_proving_session_release();
 }
 
 static bool native_accumulate_rcv(struct native_proving_ctx *ctx,
@@ -363,7 +378,7 @@ cleanup:
     if (!ok)
         LOG_WARN("sapling_prover", "native self-test failed at stage=%s",
                  failed_at);
-    zclassic_sapling_proving_ctx_free(pctx);
+    native_ctx_free(pctx);
     memory_cleanse(ask, sizeof(ask));
     memory_cleanse(nsk, sizeof(nsk));
     memory_cleanse(ak, sizeof(ak));
@@ -417,6 +432,12 @@ void zclassic_init_zksnark_params(
     }
     atomic_store(&g_native_params_initialized, true);
     atomic_store(&g_native_state, NATIVE_PROVER_INITIALIZED);
+}
+
+void zclassic_sapling_prover_unarm(void)
+{
+    atomic_store(&g_native_state, NATIVE_PROVER_UNINITIALIZED);
+    atomic_store(&g_native_params_initialized, false);
 }
 
 #ifdef ZCL_TESTING

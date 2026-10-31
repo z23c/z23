@@ -27,6 +27,10 @@ void zclassic_init_zksnark_params(
  * context can be created until it returns true. */
 bool zclassic_sapling_prover_run_self_test(void);
 bool zclassic_sapling_prover_is_ready(void);
+/* Return the backend to "no parameters, not ready" and allow a fresh
+ * zclassic_init_zksnark_params. Used when an on-demand pair load ends or
+ * fails; the full-set path never calls it. */
+void zclassic_sapling_prover_unarm(void);
 const char *zclassic_sapling_prover_status(void);
 const char *zclassic_sapling_prover_backend(void);
 

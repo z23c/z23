@@ -488,3 +488,44 @@ later lane flips it HARD.
 - 2026-10-31T18:13:20Z — REASON: duplicate audit fix on the core-net splits: the build identity prefix check reuses build_identity_hex_run with a length parameter instead of a second copy of its loop (behaviour-preserving, owner 10-19 hardening authority)
   old ROOT: 06cd5c203992129d41999286d02900009071a70068d56e0152450b7728a0bbda
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T08:54:54Z — REASON: Owner unseal grant 2026-10-30 (you have authority to unseal core): add a proving-only Sapling-pair path loaded on demand at the first proof of a send (sapling_note_proving_pair_dir, sapling_proving_session_acquire/release, sapling_proving_status, zclassic_sapling_prover_unarm) so a phone holding only the two pinned Sapling proving files can send; same SHA-512 pins, verifying-key prefix check and self-test; no Sprout proving; sapling_init_params first/late loaders, verifying keys and every consensus predicate unchanged
+  old ROOT: d9bd425d5f66793bdf253ce2717af74e90aa19681b561cd2be83d5d37a6048e8
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T12:19:02Z — REASON: Owner unseal grant 2026-10-30 (you have authority to unseal core): make Sapling fixed-generator first use thread-safe with pthread_once in sapling.c. TSan showed concurrent first use racing and disagreeing; the Sapling pair self-test on a send thread can enter the same path as validation. Results and consensus predicates unchanged.
+  old ROOT: 24987fe04f09e7491ee0b07da08f7c09d53f55d57960920de10929ecc87afdb8
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T19:08:57Z — REASON: Sapling proving pair: read failures report their own reason code instead of the SHA-512 pin code and a standing refusal ends readiness until the refused files change (params_init.c); owner grant 2026-10-30 (you have authority to unseal core), behaviour-scoped, wallet-side proving only, no verifier or consensus predicate touched; lane prove-sapling-pair
+  old ROOT: 806115f0f47b525b33ae72dcb9a12443ae57834e48fc85437b7c58bb63679cb5
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T19:18:45Z — REASON: Sapling proving pair review follow-up: sapling_proving_available and sapling_proving_status report not-ready while a refusal stands for unchanged pair files (params_init.c); owner unseal grant 2026-10-30 (you have authority to unseal core), wallet-side proving only, no verifier or consensus predicate touched
+  old ROOT: 355e0a349c7b2ee1f9f7bd2ea974e210fd22406e97110e94b55a95a8f9105176
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T21:19:07Z — REASON: Sapling proving pair review follow-up: only lasting refusals (pin, prefix, self-test, missing or forbidden file) stand for unchanged pair files, transient read failures retry; remember-refusal path initialised (params_init.c); owner unseal grant 2026-10-30 (you have authority to unseal core), wallet-side proving only, no verifier or consensus predicate touched
+  old ROOT: 86cc2f0444493f991e90fb76ab23feacf84bf7271c54322e589322075acbe2a5
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T21:20:05Z — REASON: records the rebase reseal of the Sapling proving pair commit 1fe947e5ac onto origin/main 3f02a64ffb (ROOT a401d49d, which changed core); written at this time, after the reseal, no sealed file touched by this entry; owner unseal grant 2026-10-30 (you have authority to unseal core)
+  old ROOT: a401d49d6554176329c7868cc66350b8d4b27b26079585d73a49ffc4edd471b5
+  by: owner unseal ritual record (appended by hand: make core-unseal records only the current ROOT)
+
+- 2026-10-31T21:49:41Z — REASON: Sapling proving pair review follow-up: a failed proving self-test (memory on a phone) is temporary and the next send retries, status says it will retry (params_init.c); owner unseal grant 2026-10-30 (you have authority to unseal core), wallet-side proving only, no verifier or consensus predicate touched
+  old ROOT: 467bd9d7f92dbdbc0120b962779eb82efe088dbbef5e402c348f1ab43261be07
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T00:10:56Z — REASON: Sapling proving pair gate follow-up: read the pair files through zcl_read_whole_file so params_init.c holds no write-capable libc call (capability closure), keep the file identity portable to Windows, and let a failed read stand only for a missing, forbidden or non-regular file (params_init.c); owner unseal grant 2026-10-30 (you have authority to unseal core), wallet-side proving only, no verifier or consensus predicate touched
+  old ROOT: ad79c439e51554d9605ff666d7a5890b766b1453ccdb4759f07ba60d91aecf5d
+  by: owner unseal ritual (make core-unseal)
+
+
+- 2026-11-01T00:12:25Z — REASON: records the rebase reseal of the Sapling proving pair commit onto origin/main 5c1d134912 (ROOT ab77ad2d, which changed core/modules/net); ROOT before this entry was written: 47c3d39238ae44aa7070e017a059bd642f6b38aecd09d3b7788a7cca9d2145ad; this entry touches no sealed source; owner unseal grant 2026-10-30 (you have authority to unseal core)
+  old ROOT: ab77ad2dca2a69f3758177f5bfeb27c2dc19b4e03fc620fcf018674a73b1858e
+  by: owner unseal ritual record (appended by hand: make core-unseal records only the current ROOT)
+
+- 2026-11-01T00:44:56Z — REASON: Sapling proving pair: include unistd.h for the access check in pair_unreadable_is_transient (params_init.c); owner unseal grant 2026-10-30 (you have authority to unseal core), wallet-side proving only, no verifier or consensus predicate touched
+  old ROOT: d201db1f59cbf926503d1fb889c045587aa58d45e0c94fc505dee22c2c1fff5a
+  by: owner unseal ritual (make core-unseal)

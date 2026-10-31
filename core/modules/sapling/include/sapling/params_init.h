@@ -42,6 +42,48 @@
  * published and the node keeps validating. */
 bool sapling_init_params(const char *params_dir);
 
+
+/* Proving readiness, for an app to show. Carries no path, key or file content.
+ *   none          no proving parameters installed
+ *   pair_present  both Sapling proving files are in the noted directory at
+ *                 their exact sizes; nothing is loaded yet
+ *   pair_armed    a send is in progress with the pair loaded and self-tested
+ *   full_set      the four-file set is loaded by sapling_init_params */
+enum sapling_proving_status {
+    SAPLING_PROVING_NONE = 0,
+    SAPLING_PROVING_PAIR_PRESENT,
+    SAPLING_PROVING_PAIR_ARMED,
+    SAPLING_PROVING_FULL_SET,
+};
+
+enum sapling_proving_status sapling_proving_status(void);
+const char *sapling_proving_status_name(void);
+
+/* Sapling-only proving for devices that cannot carry the 725 MB Sprout Groth16
+ * parameters. Nothing is loaded at boot.
+ *
+ * sapling_note_proving_pair_dir records the directory and nothing else; call
+ * it at boot and whenever the directory changes. sapling_proving_available is
+ * true when proving is armed or both Sapling files are in the noted directory
+ * at their exact sizes; it reads no file content, so it is the cheap check a
+ * send path makes before any work.
+ *
+ * The session pair brackets a send. Acquire arms proving if it is not armed:
+ * SHA-512 pin of each file, compiled-in verifying-key prefix of each, then the
+ * prover self-test. It returns false with sapling_proving_last_refusal() set
+ * to a short reason code when any step fails, leaving the node running.
+ * Release frees the proving bytes and disarms a pair-armed backend once the
+ * last session ends. A full set loaded by sapling_init_params is unaffected.
+ * zclassic_sapling_proving_ctx_init/_free call these, so a send needs nothing
+ * more. Verifying keys, verification and consensus paths are untouched. */
+void sapling_note_proving_pair_dir(const char *params_dir);
+bool sapling_proving_available(void);
+bool sapling_proving_session_acquire(void);
+void sapling_proving_session_release(void);
+
+/* Why the last pair arming was refused, or NULL. A static string. */
+const char *sapling_proving_last_refusal(void);
+
 /* True once the VERIFYING keys are published and shielded proof VALIDATION is
  * armed — by a parameter directory or by the compiled-in fallback. It says
  * nothing about proving: use zclassic_sapling_prover_is_ready() for that.
@@ -56,5 +98,13 @@ const uint8_t *sapling_get_spend_pk(size_t *len);
 
 /* Free all loaded verification keys. */
 void sapling_free_params(void);
+
+#ifdef ZCL_TESTING
+/* Test-only: the pair loader's verifying-key prefix comparison. */
+bool sapling_test_pair_arm_buffers(const uint8_t *spend, size_t spend_len,
+                                   const uint8_t *output, size_t output_len);
+bool sapling_test_pair_prefix_ok(const uint8_t *spend, size_t spend_len,
+                                 const uint8_t *output, size_t output_len);
+#endif
 
 #endif

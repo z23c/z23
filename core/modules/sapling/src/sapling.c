@@ -18,6 +18,7 @@
 #include "core/random.h"
 #include "support/cleanse.h"
 #include "util/log_macros.h"
+#include <pthread.h>
 #include <string.h>
 #include <stdlib.h>
 /* Global verifying keys — set by sapling_init_vk() at startup */
@@ -87,7 +88,10 @@ enum {
 };
 
 static struct jub_point fixed_generators[GEN_MAX];
-static bool fixed_generators_loaded = false;
+/* Written once, by pthread_once: every reader of fixed_generators[] passes
+ * through ensure_fixed_generators(), so it sees the finished table and no
+ * thread can race the derivation. */
+static pthread_once_t fixed_generators_once = PTHREAD_ONCE_INIT;
 
 /* One row per GEN_* generator: the name that appears in the abort message, the
  * find_group_hash message, and the 8-byte personalization. Designated
@@ -109,9 +113,8 @@ static const struct {
 /* Derive every fixed generator or abort: these are hard-coded inputs with
  * hard-coded personalizations; failure means the Jubjub group_hash machinery
  * is broken and every subsequent scalar mul would silently produce garbage. */
-static void ensure_fixed_generators(void)
+static void fixed_generators_init(void)
 {
-    if (fixed_generators_loaded) return;
     for (size_t i = 0; i < GEN_MAX; i++) {
         const char *tag = FIXED_GENERATOR_SPEC[i].tag;
         if (find_group_hash(&fixed_generators[i], (const uint8_t *)tag,
@@ -124,7 +127,11 @@ static void ensure_fixed_generators(void)
                 __FILE__, __LINE__, __func__, FIXED_GENERATOR_SPEC[i].name);
         abort(); // abort-ok: a zero-initialized fixed generator makes every later scalar mul silently produce garbage commitments
     }
-    fixed_generators_loaded = true;
+}
+
+static void ensure_fixed_generators(void)
+{
+    pthread_once(&fixed_generators_once, fixed_generators_init);
 }
 
 bool sapling_check_diversifier(const uint8_t diversifier[11])

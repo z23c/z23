@@ -15,11 +15,15 @@
 #include "encoding/utilstrencodings.h"
 #include "util/file_io.h"
 #include "util/log_macros.h"
+#include "util/safe_alloc.h"
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Expected SHA-512 digests of the full Zcash parameter files, as produced
  * by Zcash's canonical fetch-params.sh distribution (MPC-ceremony output,
@@ -118,6 +122,8 @@ static _Atomic bool vks_embedded = false;
  * when its parameters finally arrived: shielded sending stayed dead, with a
  * fully verified parameter set sitting on disk, until the process restarted. */
 static _Atomic bool proving_params_loaded = false;
+/* Which parameter set armed proving; see sapling_proving_status(). */
+static _Atomic int proving_mode = SAPLING_PROVING_NONE;
 
 static uint8_t *spend_pk_data = NULL;
 static size_t spend_pk_len = 0;
@@ -585,8 +591,10 @@ static bool params_init_locked(const char *params_dir)
      * the proving keys absent. A prover whose self-test failed still sets it:
      * the parameters ARE loaded, re-reading the identical bytes cannot change
      * the verdict, and zclassic_sapling_prover_status() reports the failure. */
-    if (spend_pk_data && output_pk_data)
+    if (spend_pk_data && output_pk_data) {
         atomic_store(&proving_params_loaded, true);
+        atomic_store(&proving_mode, SAPLING_PROVING_FULL_SET);
+    }
     return true;
 }
 
@@ -642,6 +650,7 @@ void sapling_free_params(void)
     spend_pk_data = NULL; spend_pk_len = 0;
     output_pk_data = NULL; output_pk_len = 0;
     atomic_store(&proving_params_loaded, false);
+    atomic_store(&proving_mode, SAPLING_PROVING_NONE);
     atomic_store(&vks_embedded, false);
     atomic_store(&params_loaded, false);
     pthread_mutex_unlock(&params_mu);
@@ -786,6 +795,415 @@ bool sapling_install_embedded_vks(void)
     return ok;
 }
 
+/* ── Sapling-pair proving, loaded on demand ──────────────────────────────
+ *
+ * A phone ships the two Sapling proving files (about 51 MB) and cannot carry
+ * the 725 MB Sprout Groth16 parameters. Shielded SENDING is Sapling-only: the
+ * native prover reads neither sprout-groth16.params nor sprout-verifying.key
+ * (zclassic_init_zksnark_params checks its Sprout arguments only for presence),
+ * and nothing in this tree creates a Sprout proof. So the Sprout files gate
+ * nothing a Sapling spend needs.
+ *
+ * Holding 51 MB resident and running a Groth16 self-test at every node start
+ * costs a phone memory and heat for a capability used rarely, so nothing here
+ * runs at boot. Boot only NOTES the directory (sapling_note_proving_pair_dir).
+ * Status checks stat the two files for their exact sizes and read no byte of
+ * them. The first proving context of a send (sapling_proving_session_acquire,
+ * reached from zclassic_sapling_proving_ctx_init) does the work, in order:
+ * pin each file's SHA-512, check each begins with this build's compiled-in
+ * verifying key, arm the backend and pass the prover self-test, a real
+ * Spend + Output + binding bundle accepted by this node's consensus verifier.
+ * When the last proving context of the send is freed the proving bytes are
+ * released and the backend is disarmed, so the next send repeats the checks.
+ * Files copied in after boot are picked up with no restart.
+ *
+ * Any failure refuses that one send with a short reason code and leaves the
+ * node running on its published verifying keys. The load is proving-only: it
+ * never parses, replaces or frees a verifying key, and no consensus predicate
+ * reads anything it sets. Sprout proving is never armed: the Sprout path
+ * handed to the backend is a sentinel that names no file.
+ * params_load_first_locked and params_load_late_proving_locked are untouched. */
+#define SAPLING_PAIR_SPROUT_SENTINEL "(sprout-proving-unavailable)"
+#define SAPLING_SPEND_PARAMS_SIZE 47958396
+#define SAPLING_OUTPUT_PARAMS_SIZE 3592860
+
+static pthread_mutex_t pair_mu = PTHREAD_MUTEX_INITIALIZER;
+static char pair_dir[1024];
+/* Static reason codes only: never a path, a key or a byte of either file. */
+static _Atomic(const char *) pair_refusal = NULL;
+static int proving_sessions; /* guarded by params_mu */
+/* The standing refusal came from a passing condition (no memory, a descriptor
+ * limit, an interrupted or failed read), so the next send retries. */
+static bool pair_refusal_transient; /* guarded by params_mu */
+
+static bool pair_refuse(const char *code)
+{
+    pair_refusal_transient = false;
+    atomic_store(&pair_refusal, code);
+    LOG_WARN("sapling_params",
+             "pair proving refused: %s; this send is refused, the node keeps "
+             "validating", code);
+    return false;
+}
+
+const char *sapling_proving_last_refusal(void)
+{
+    return atomic_load(&pair_refusal);
+}
+
+void sapling_note_proving_pair_dir(const char *dir)
+{
+    pthread_mutex_lock(&pair_mu);
+    if (dir && *dir && strlen(dir) < sizeof(pair_dir))
+        snprintf(pair_dir, sizeof(pair_dir), "%s", dir);
+    else
+        pair_dir[0] = '\0';
+    pthread_mutex_unlock(&pair_mu);
+    atomic_store(&pair_refusal, NULL);
+}
+
+static bool pair_dir_copy(char *out, size_t cap)
+{
+    pthread_mutex_lock(&pair_mu);
+    snprintf(out, cap, "%s", pair_dir);
+    pthread_mutex_unlock(&pair_mu);
+    return out[0] != '\0';
+}
+
+static bool pair_file_sized(const char *dir, const char *name, off_t want)
+{
+    char path[1400];
+    struct stat st;
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == want;
+}
+
+/* Both Sapling files exist at their exact sizes. Reads no content. */
+static bool pair_files_present(const char *dir)
+{
+    return pair_file_sized(dir, "sapling-spend.params",
+                           SAPLING_SPEND_PARAMS_SIZE) &&
+           pair_file_sized(dir, "sapling-output.params",
+                           SAPLING_OUTPUT_PARAMS_SIZE);
+}
+
+/* Identity of the two pair files at the moment a load was refused: a refusal
+ * stands for these exact files and ends when either is replaced or changed. */
+struct pair_identity {
+    bool valid;
+    ino_t ino[2];
+    off_t size[2];
+    time_t mtime[2];
+    time_t ctime[2];
+    long mtime_ns[2];
+    long ctime_ns[2];
+};
+
+/* Sub-second file times where the platform reports them. */
+#if defined(__APPLE__)
+#define PAIR_MTIME_NS(st) ((long)(st).st_mtimespec.tv_nsec)
+#define PAIR_CTIME_NS(st) ((long)(st).st_ctimespec.tv_nsec)
+#elif defined(_WIN32)
+#define PAIR_MTIME_NS(st) 0L
+#define PAIR_CTIME_NS(st) 0L
+#else
+#define PAIR_MTIME_NS(st) ((long)(st).st_mtim.tv_nsec)
+#define PAIR_CTIME_NS(st) ((long)(st).st_ctim.tv_nsec)
+#endif
+
+static struct pair_identity pair_refused_id; /* guarded by pair_mu */
+
+static bool pair_identity_read(const char *dir, struct pair_identity *id)
+{
+    static const char *const names[2] = {"sapling-spend.params",
+                                         "sapling-output.params"};
+    memset(id, 0, sizeof(*id));
+    for (int i = 0; i < 2; i++) {
+        char path[1400];
+        struct stat st;
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+        if (stat(path, &st) != 0)
+            return false;
+        id->ino[i] = st.st_ino;
+        id->size[i] = st.st_size;
+        id->mtime[i] = st.st_mtime;
+        id->ctime[i] = st.st_ctime;
+        id->mtime_ns[i] = PAIR_MTIME_NS(st);
+        id->ctime_ns[i] = PAIR_CTIME_NS(st);
+    }
+    id->valid = true;
+    return true;
+}
+
+static bool pair_identity_same(const struct pair_identity *a,
+                               const struct pair_identity *b)
+{
+    return a->valid && b->valid && memcmp(a, b, sizeof(*a)) == 0;
+}
+
+/* Remember the files a refused load saw, so the refusal stands until they
+ * change. A transient refusal is not remembered. Caller holds params_mu. */
+static void pair_remember_refusal(const char *dir)
+{
+    struct pair_identity id;
+    if (!dir || !*dir || !atomic_load(&pair_refusal) ||
+        pair_refusal_transient || !pair_identity_read(dir, &id))
+        return;
+    pthread_mutex_lock(&pair_mu);
+    pair_refused_id = id;
+    pthread_mutex_unlock(&pair_mu);
+}
+
+/* The pair is installed at its exact sizes and no refusal stands for these
+ * exact files, so the first proof of a send would load it. Reads no content. */
+static bool pair_loadable(const char *dir)
+{
+    if (!pair_files_present(dir))
+        return false;
+    struct pair_identity now;
+    if (!atomic_load(&pair_refusal) || !pair_identity_read(dir, &now))
+        return true;
+    pthread_mutex_lock(&pair_mu);
+    bool refused = pair_identity_same(&pair_refused_id, &now);
+    pthread_mutex_unlock(&pair_mu);
+    return !refused;
+}
+
+/* Both files must begin with this build's compiled-in verifying key. */
+static bool params_pair_prefix_matches(const uint8_t *spend, size_t spend_len,
+                                       const uint8_t *output, size_t output_len)
+{
+    const struct zcl_embedded_vk *es = &zcl_embedded_vks[0];
+    const struct zcl_embedded_vk *eo = &zcl_embedded_vks[1];
+    return spend_len >= es->len && output_len >= eo->len &&
+           memcmp(spend, es->bytes, es->len) == 0 &&
+           memcmp(output, eo->bytes, eo->len) == 0;
+}
+
+static void params_discard_proving_keys_locked(void)
+{
+    free(spend_pk_data);
+    free(output_pk_data);
+    spend_pk_data = NULL; spend_pk_len = 0;
+    output_pk_data = NULL; output_pk_len = 0;
+}
+
+/* A full set was loaded and its self-test failed: its keys are resident and
+ * the prover is latched, so a pair load must not overwrite them. */
+static bool full_set_failed_locked(void)
+{
+    return atomic_load(&proving_params_loaded) &&
+           !zclassic_sapling_prover_is_ready();
+}
+
+/* Takes ownership of both buffers, which have already passed their pinned
+ * SHA-512. Checks the verifying-key prefix, arms the backend and runs its
+ * self-test; on any refusal the buffers are freed and nothing stays resident.
+ * Caller holds params_mu. */
+static bool params_pair_arm_locked(const char *params_dir,
+                                   uint8_t *spend_bytes, size_t spend_len,
+                                   uint8_t *output_bytes, size_t output_len)
+{
+    if (!params_pair_prefix_matches(spend_bytes, spend_len, output_bytes,
+                                    output_len)) {
+        free(output_bytes); free(spend_bytes);
+        return pair_refuse("params_do_not_match_compiled_in_verifying_keys");
+    }
+
+    spend_pk_data = spend_bytes;
+    spend_pk_len = spend_len;
+    output_pk_data = output_bytes;
+    output_pk_len = output_len;
+
+    zclassic_init_zksnark_params(
+        (const uint8_t *)params_dir, strlen(params_dir),
+        SAPLING_SPEND_PARAMS_BLAKE2B,
+        (const uint8_t *)params_dir, strlen(params_dir),
+        SAPLING_OUTPUT_PARAMS_BLAKE2B,
+        (const uint8_t *)SAPLING_PAIR_SPROUT_SENTINEL,
+        strlen(SAPLING_PAIR_SPROUT_SENTINEL), "none");
+
+    if (!zclassic_sapling_prover_run_self_test()) {
+        zclassic_sapling_prover_unarm();
+        params_discard_proving_keys_locked();
+        /* The bytes passed their SHA-512 pin, so remembering their identity
+         * proves nothing. The self-test fails for passing reasons too (memory
+         * for the proving context and the Groth16 buffers on a phone), so the
+         * next send tries again. Status polls only stat the files and never
+         * rerun it. */
+        pair_refuse("proving_could_not_start_self_test_failed_try_again");
+        pair_refusal_transient = true;
+        return false;
+    }
+
+    atomic_store(&proving_mode, SAPLING_PROVING_PAIR_ARMED);
+    atomic_store(&proving_params_loaded, true);
+    atomic_store(&pair_refusal, NULL);
+    LOG_INFO("sapling_params",
+             "proving armed: mode=pair_armed spend=%zu output=%zu bytes; "
+             "Sprout proving unavailable", spend_pk_len, output_pk_len);
+    return true;
+}
+
+/* One pair file and the reason code for each way reading it can be refused,
+ * so a send reports what actually went wrong. */
+struct pair_file {
+    const char *name;
+    const char *sha512;
+    size_t size;
+    const char *unreadable;
+    const char *bad_pin;
+};
+
+static const struct pair_file PAIR_OUTPUT = {
+    "sapling-output.params", SAPLING_OUTPUT_PARAMS_SHA512,
+    SAPLING_OUTPUT_PARAMS_SIZE, "sapling_output_params_unreadable",
+    "sapling_output_params_failed_sha512_pin",
+};
+
+static const struct pair_file PAIR_SPEND = {
+    "sapling-spend.params", SAPLING_SPEND_PARAMS_SHA512,
+    SAPLING_SPEND_PARAMS_SIZE, "sapling_spend_params_unreadable",
+    "sapling_spend_params_failed_sha512_pin",
+};
+
+/* Whether a failed read is a passing condition (no memory, a descriptor limit,
+ * an interrupted or failed read) that the next send retries, rather than a
+ * missing, forbidden or non-regular file, which stands until it changes. */
+static bool pair_unreadable_is_transient(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return !(errno == ENOENT || errno == EACCES || errno == EPERM ||
+                 errno == ENOTDIR);
+    if (!S_ISREG(st.st_mode))
+        return false;
+    if (access(path, R_OK) != 0)
+        return !(errno == EACCES || errno == EPERM || errno == ENOENT);
+    return true;
+}
+
+/* Reads the whole file, then checks its pinned SHA-512 before handing the
+ * bytes back. Returns NULL with the refusal reason set: an unreadable file or
+ * one of the wrong size, or a pin mismatch, each with its own code. Caller
+ * holds params_mu. */
+static uint8_t *pair_read_pinned(const char *dir, const struct pair_file *pf)
+{
+    char path[1400];
+    snprintf(path, sizeof(path), "%s/%s", dir, pf->name);
+
+    uint8_t *buf = NULL;
+    size_t got = 0;
+    if (!zcl_read_whole_file(path, pf->size, &buf, &got, "sapling_params")) {
+        pair_refuse(pf->unreadable);
+        pair_refusal_transient = pair_unreadable_is_transient(path);
+        return NULL;
+    }
+    if (got != pf->size || !params_sha512_matches(buf, pf->size, pf->sha512,
+                                                  path)) {
+        free(buf);
+        pair_refuse(pf->bad_pin);
+        return NULL;
+    }
+    return buf;
+}
+
+/* Caller holds params_mu. */
+static bool params_load_pair_locked(const char *params_dir)
+{
+    if (full_set_failed_locked())
+        return pair_refuse("full_set_loaded_but_self_test_failed");
+
+    /* The self-test verifies through the published keys, so they must exist.
+     * On a node that has not published any, publish the compiled-in set; a
+     * node that already published keys keeps them untouched. */
+    if (!atomic_load(&params_loaded) && !params_install_embedded_locked())
+        return pair_refuse("verifying_keys_unavailable");
+
+    uint8_t *output_bytes = pair_read_pinned(params_dir, &PAIR_OUTPUT);
+    if (!output_bytes)
+        return false;
+
+    uint8_t *spend_bytes = pair_read_pinned(params_dir, &PAIR_SPEND);
+    if (!spend_bytes) {
+        free(output_bytes);
+        return false;
+    }
+
+    return params_pair_arm_locked(params_dir, spend_bytes, PAIR_SPEND.size,
+                                  output_bytes, PAIR_OUTPUT.size);
+}
+
+bool sapling_proving_available(void)
+{
+    if (zclassic_sapling_prover_is_ready())
+        return true;
+    if (atomic_load(&proving_params_loaded))
+        return false; /* a full set whose self-test failed */
+    char dir[sizeof(pair_dir)];
+    return pair_dir_copy(dir, sizeof(dir)) && pair_loadable(dir);
+}
+
+bool sapling_proving_session_acquire(void)
+{
+    pthread_mutex_lock(&params_mu);
+    bool ok = zclassic_sapling_prover_is_ready();
+    if (!ok) {
+        char dir[sizeof(pair_dir)] = "";
+        if (full_set_failed_locked())
+            ok = pair_refuse("full_set_loaded_but_self_test_failed");
+        else if (!pair_dir_copy(dir, sizeof(dir)))
+            ok = pair_refuse("no_proving_parameters_installed");
+        else if (!pair_files_present(dir))
+            ok = pair_refuse("sapling_proving_files_missing_or_wrong_size");
+        else {
+            ok = params_load_pair_locked(dir);
+            if (!ok)
+                pair_remember_refusal(dir);
+        }
+    }
+    if (ok) proving_sessions++;
+    pthread_mutex_unlock(&params_mu);
+    return ok;
+}
+
+void sapling_proving_session_release(void)
+{
+    pthread_mutex_lock(&params_mu);
+    if (proving_sessions > 0 && --proving_sessions == 0 &&
+        atomic_load(&proving_mode) == SAPLING_PROVING_PAIR_ARMED) {
+        zclassic_sapling_prover_unarm();
+        params_discard_proving_keys_locked();
+        atomic_store(&proving_mode, SAPLING_PROVING_NONE);
+        atomic_store(&proving_params_loaded, false);
+    }
+    pthread_mutex_unlock(&params_mu);
+}
+
+enum sapling_proving_status sapling_proving_status(void)
+{
+    if (zclassic_sapling_prover_is_ready())
+        return atomic_load(&proving_mode) == SAPLING_PROVING_PAIR_ARMED
+                   ? SAPLING_PROVING_PAIR_ARMED : SAPLING_PROVING_FULL_SET;
+    if (atomic_load(&proving_params_loaded))
+        return SAPLING_PROVING_NONE; /* a full set whose self-test failed */
+    char dir[sizeof(pair_dir)];
+    if (pair_dir_copy(dir, sizeof(dir)) && pair_loadable(dir))
+        return SAPLING_PROVING_PAIR_PRESENT;
+    return SAPLING_PROVING_NONE;
+}
+
+const char *sapling_proving_status_name(void)
+{
+    switch (sapling_proving_status()) {
+    case SAPLING_PROVING_PAIR_PRESENT: return "pair_present";
+    case SAPLING_PROVING_PAIR_ARMED: return "pair_armed";
+    case SAPLING_PROVING_FULL_SET: return "full_set";
+    case SAPLING_PROVING_NONE: break;
+    }
+    return "none";
+}
+
 #ifdef ZCL_TESTING
 /* Exposes the embedded-blob integrity check so a test can hand it a planted
  * bad blob and prove the refusal is real, rather than asserting on a
@@ -795,5 +1213,42 @@ bool sapling_test_embedded_vk_sha256_ok(const char *name, const uint8_t *bytes,
 {
     struct zcl_embedded_vk e = { name, bytes, len, sha256_hex };
     return embedded_vk_sha256_ok(&e);
+}
+#endif
+
+#ifdef ZCL_TESTING
+/* Exposes the pair loader's verifying-key prefix comparison so a test can hand
+ * it a planted buffer and prove the refusal is real. */
+bool sapling_test_pair_prefix_ok(const uint8_t *spend, size_t spend_len,
+                                 const uint8_t *output, size_t output_len)
+{
+    return params_pair_prefix_matches(spend, spend_len, output, output_len);
+}
+#endif
+
+#ifdef ZCL_TESTING
+/* Hands the arming step buffers that have passed no pin, so a test can show
+ * the verifying-key prefix check refuses on its own. The buffers are copied.
+ * Leaves the session count untouched; the caller resets the process. */
+bool sapling_test_pair_arm_buffers(const uint8_t *spend, size_t spend_len,
+                                   const uint8_t *output, size_t output_len)
+{
+    uint8_t *s = zcl_malloc(spend_len, "pair_test_spend");
+    uint8_t *o = zcl_malloc(output_len, "pair_test_output");
+    if (!s || !o) {
+        free(s); free(o);
+        return false;
+    }
+    memcpy(s, spend, spend_len);
+    memcpy(o, output, output_len);
+    pthread_mutex_lock(&params_mu);
+    bool ok = false;
+    if (atomic_load(&params_loaded) || params_install_embedded_locked())
+        ok = params_pair_arm_locked("(test)", s, spend_len, o, output_len);
+    else {
+        free(s); free(o);
+    }
+    pthread_mutex_unlock(&params_mu);
+    return ok;
 }
 #endif

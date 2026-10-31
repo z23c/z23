@@ -612,7 +612,7 @@ static bool boot_step_init_crypto_and_state(struct app_context *ctx,
     case BOOT_PARAMS_GATE_PARK:
         /* This binary cannot verify shielded proofs at all. */
         return boot_park_until_shutdown("crypto_params_missing");
-    case BOOT_PARAMS_GATE_EMBEDDED:
+    case BOOT_PARAMS_GATE_EMBEDDED: case BOOT_PARAMS_GATE_PAIR:
         params_files_present = false;
         break;
     case BOOT_PARAMS_GATE_PRESENT:

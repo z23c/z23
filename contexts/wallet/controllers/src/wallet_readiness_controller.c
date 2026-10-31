@@ -8,6 +8,7 @@
 #include "controllers/wallet_controller_internal.h"
 
 #include "jobs/reducer_frontier.h"
+#include "sapling/params_init.h"
 #include "sapling/sapling_prover.h"
 #include "validation/process_block.h"
 
@@ -63,10 +64,15 @@ void wallet_readiness_append_sapling(struct json_value *result)
     struct json_value sapling = {0};
     json_init(&sapling);
     json_set_object(&sapling);
+    /* Whether a send could arm proving now: armed, or the pair is installed
+     * and the first proof loads it. Between sends a pair-only node is idle,
+     * not unable to send. */
     (void)json_push_kv_bool(&sapling, "prover_ready",
-                            zclassic_sapling_prover_is_ready());
+                            sapling_proving_available());
     (void)json_push_kv_str(&sapling, "prover_backend",
                            zclassic_sapling_prover_backend());
+    (void)json_push_kv_str(&sapling, "proving_status",
+                           sapling_proving_status_name());
     (void)json_push_kv_str(&sapling, "prover_status",
                            zclassic_sapling_prover_status());
 
