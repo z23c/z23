@@ -224,6 +224,41 @@ static int64_t frontier_next_cursor(const struct frontier_log *fl,
     return (fl && fl->served_tip && cursor > 0) ? cursor + 1 : cursor;
 }
 
+/* Decode one *_log result row (ok at ok_col, then status when profile_bound,
+ * then itag when present) into "this row counts as ok". `verify_itag` says
+ * whether the integrity tag of a row that would otherwise count is checked. */
+static bool log_row_decode_ok(sqlite3_stmt *st, int ok_col, bool profile_bound,
+                              bool verify_itag, const char *log_table,
+                              int64_t h)
+{
+    int ok_raw = sqlite3_column_type(st, ok_col) == SQLITE_INTEGER
+                     ? sqlite3_column_int(st, ok_col) : 0;
+    const void *status = NULL;
+    size_t status_len = 0;
+    if (profile_bound && sqlite3_column_type(st, ok_col + 1) == SQLITE_TEXT) {
+        status = sqlite3_column_text(st, ok_col + 1);
+        status_len = (size_t)sqlite3_column_bytes(st, ok_col + 1);
+    }
+    bool row_ok = ok_raw == 1;
+    if (row_ok && profile_bound)
+        row_ok = status &&
+            mint_validation_evidence_parse(status, status_len) ==
+                reducer_frontier_required_evidence();
+    /* Integrity tag (only for a row that would otherwise count): a MISMATCH
+     * forces FAIL (corruption LOWERS H*); ABSENT trusts ok but WARNs+counts.
+     * UNTAGGED-ROW POLICY lives in reducer_frontier_itag.[ch]. */
+    if (verify_itag && row_ok) {
+        int itag_col = profile_bound ? ok_col + 2 : ok_col + 1;  /* only valid when have_itag */
+        const void *tag = sqlite3_column_type(st, itag_col) == SQLITE_BLOB
+                              ? sqlite3_column_blob(st, itag_col) : NULL;
+        size_t tag_len = tag ? (size_t)sqlite3_column_bytes(st, itag_col) : 0;
+        if (reducer_frontier_itag_row_fails(log_table, h, ok_raw, status,
+                                            status_len, tag, tag_len))
+            row_ok = false;
+    }
+    return row_ok;
+}
+
 /* Read the ok column of a *_log row at `height`. *out is set to one of the
  * tri-states. Returns false ONLY on a real SQLite prepare/step error
  * (caller propagates as a DB read failure). A missing row is success with
@@ -253,32 +288,8 @@ static bool log_ok_at(sqlite3 *db, const char *log_table, int32_t height,
     bool rc_ok = true;
     int rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
     if (rc == SQLITE_ROW) {
-        int ok_raw = sqlite3_column_type(st, 0) == SQLITE_INTEGER
-                         ? sqlite3_column_int(st, 0) : 0;
-        const void *status = NULL;
-        size_t status_len = 0;
-        if (profile_bound && sqlite3_column_type(st, 1) == SQLITE_TEXT) {
-            status = sqlite3_column_text(st, 1);
-            status_len = (size_t)sqlite3_column_bytes(st, 1);
-        }
-        bool row_ok = ok_raw == 1;
-        if (row_ok && profile_bound)
-            row_ok = status &&
-                mint_validation_evidence_parse(status, status_len) ==
-                    reducer_frontier_required_evidence();
-        /* Integrity tag (only for a row that would otherwise count): a MISMATCH
-         * forces FAIL (corruption LOWERS H*); ABSENT trusts ok but WARNs+counts.
-         * UNTAGGED-ROW POLICY lives in reducer_frontier_itag.[ch]. */
-        if (have_itag && row_ok) {
-            int itag_col = profile_bound ? 2 : 1;
-            const void *tag = sqlite3_column_type(st, itag_col) == SQLITE_BLOB
-                                  ? sqlite3_column_blob(st, itag_col) : NULL;
-            size_t tag_len = tag ? (size_t)sqlite3_column_bytes(st, itag_col) : 0;
-            if (reducer_frontier_itag_row_fails(log_table, (int64_t)height,
-                                                ok_raw, status, status_len,
-                                                tag, tag_len))
-                row_ok = false;
-        }
+        bool row_ok = log_row_decode_ok(st, 0, profile_bound, have_itag,
+                                        log_table, (int64_t)height);
         *out = row_ok ? LOG_ROW_OK : LOG_ROW_FAIL;
     } else if (rc != SQLITE_DONE) {
         LOG_WARN("reducer", "step %s at h=%d failed: %s",
@@ -349,7 +360,6 @@ static bool log_contiguous_prefix(sqlite3 *db, const char *log_table,
      * per log invocation (8×/compute), NOT per row — the hot loop only bumps. */
     atomic_uint_least64_t *scan_ctr =
         boot_scan_counter("reducer_frontier.contiguity_rows");
-    int itag_col = profile_bound ? 3 : 2;  /* only valid when have_itag */
     bool rc_ok = true;
     int64_t expect = scan_floor + 1;
     while (true) {
@@ -357,33 +367,13 @@ static bool log_contiguous_prefix(sqlite3 *db, const char *log_table,
         if (rc == SQLITE_ROW) {
             boot_scan_bump(scan_ctr);
             int64_t h = sqlite3_column_int64(st, 0);
-            int ok_raw = sqlite3_column_type(st, 1) == SQLITE_INTEGER
-                             ? sqlite3_column_int(st, 1) : 0;
-            const void *status = NULL;
-            size_t status_len = 0;
-            if (profile_bound && sqlite3_column_type(st, 2) == SQLITE_TEXT) {
-                status = sqlite3_column_text(st, 2);
-                status_len = (size_t)sqlite3_column_bytes(st, 2);
-            }
-            bool row_ok = ok_raw == 1;
-            if (row_ok && profile_bound)
-                row_ok = status &&
-                    mint_validation_evidence_parse(status, status_len) ==
-                        reducer_frontier_required_evidence();
             /* Integrity tag: verify rows above the per-boot watermark. A
              * MISMATCH terminates contiguity exactly like an ok=0 row (caps H*,
              * never raises it); an ABSENT (NULL) tag is trusted but WARNed +
              * counted (UNTAGGED-ROW POLICY, reducer_frontier_itag.[ch]). */
-            if (row_ok && have_itag && h > (int64_t)verify_above) {
-                const void *tag =
-                    sqlite3_column_type(st, itag_col) == SQLITE_BLOB
-                        ? sqlite3_column_blob(st, itag_col) : NULL;
-                size_t tag_len =
-                    tag ? (size_t)sqlite3_column_bytes(st, itag_col) : 0;
-                if (reducer_frontier_itag_row_fails(log_table, h, ok_raw, status,
-                                                    status_len, tag, tag_len))
-                    row_ok = false;
-            }
+            bool row_ok = log_row_decode_ok(
+                st, 1, profile_bound,
+                have_itag && h > (int64_t)verify_above, log_table, h);
             if (h != expect || !row_ok)
                 break;  /* hole, ok=0, or tag mismatch — contiguity ends */
             *h_contiguous = (int32_t)h;
@@ -479,6 +469,24 @@ static bool reducer_anchor_candidate_ok(sqlite3 *db, int32_t height,
     return true;
 }
 
+static bool reducer_trusted_anchor_raise_base(sqlite3 *db,
+                                              int32_t covered_floor,
+                                              int32_t *out)
+{
+    /* The durable trusted-base declaration outlives its (pipeline-consumed)
+     * anchor row — see REDUCER_TRUSTED_BASE_HEIGHT_KEY. Same vetting as a
+     * row candidate; only ever RAISES the anchor. */
+    int32_t base_h = 0;
+    bool base_found = false;
+    if (!reducer_frontier_trusted_base_height_read(db, &base_h, &base_found))
+        return false; /* raw-return-ok:trusted-base reader logged failure */
+    if (base_found && base_h >= covered_floor && base_h > *out &&
+        reducer_frontier_coin_authority_covers(db, base_h) &&
+        reducer_anchor_candidate_ok(db, base_h, true))
+        *out = base_h;
+    return true;
+}
+
 static bool reducer_trusted_anchor(sqlite3 *db, int32_t compiled_anchor,
                                    int32_t *out)
 {
@@ -523,18 +531,7 @@ static bool reducer_trusted_anchor(sqlite3 *db, int32_t compiled_anchor,
     if (!rc_ok)
         return false;
 
-    /* The durable trusted-base declaration outlives its (pipeline-consumed)
-     * anchor row — see REDUCER_TRUSTED_BASE_HEIGHT_KEY. Same vetting as a
-     * row candidate; only ever RAISES the anchor. */
-    int32_t base_h = 0;
-    bool base_found = false;
-    if (!reducer_frontier_trusted_base_height_read(db, &base_h, &base_found))
-        return false; /* raw-return-ok:trusted-base reader logged failure */
-    if (base_found && base_h >= covered_floor && base_h > *out &&
-        reducer_frontier_coin_authority_covers(db, base_h) &&
-        reducer_anchor_candidate_ok(db, base_h, true))
-        *out = base_h;
-    return true;
+    return reducer_trusted_anchor_raise_base(db, covered_floor, out);
 }
 
 /* served_floor = MAX(height FROM tip_finalize_log WHERE ok=1), or 0.
@@ -658,6 +655,52 @@ static bool frontier_schema_gate(sqlite3 *db)
     return false;
 }
 
+static int32_t frontier_min_i32(int32_t a, int32_t b)
+{
+    return b < a ? b : a;
+}
+
+static int32_t frontier_max_i32(int32_t a, int32_t b)
+{
+    return a < b ? b : a;
+}
+
+enum frontier_coin_tear_verdict {
+    FRONTIER_COIN_TEAR_NONE,
+    FRONTIER_COIN_TEAR_DISARMED,
+    FRONTIER_COIN_TEAR_TORN,
+};
+
+/* Decide the C4 coin-tear diagnostic for compute_hstar: NONE (nothing to
+ * report), DISARMED (the coins read errored and the throttle admits a WARN) or
+ * TORN (coins ran above utxo_apply's frontier and the throttle admits a WARN).
+ * *coins_applied and *reps feed the caller's WARN. */
+static enum frontier_coin_tear_verdict frontier_coin_tear_verdict(
+    sqlite3 *progress_db, int32_t ua_contig, int32_t *coins_applied,
+    uint64_t *reps)
+{
+    bool coins_found = false;
+    bool coins_read_ok =
+        coins_kv_get_applied_height(progress_db, coins_applied, &coins_found);
+    if (!coins_read_ok) {
+        /* A read ERROR (not an absent key) silently disarms the tear
+         * diagnostic — surface it so the messenger going quiet is itself
+         * visible. Throttled like the tear WARN below; caller holds the lock. */
+        static struct log_throttle disarm_throttle = LOG_THROTTLE_INIT;
+        int64_t now = platform_time_wall_unix();
+        if (log_throttle_should_emit(&disarm_throttle, 1, now, 300, reps))
+            return FRONTIER_COIN_TEAR_DISARMED;
+    } else if (coins_found && *coins_applied > ua_contig + 1) {
+        static struct log_throttle tear_throttle = LOG_THROTTLE_INIT;
+        uint64_t pair = ((uint64_t)(uint32_t)*coins_applied << 32)
+                        | (uint32_t)ua_contig;
+        int64_t now = platform_time_wall_unix();
+        if (log_throttle_should_emit(&tear_throttle, pair, now, 300, reps))
+            return FRONTIER_COIN_TEAR_TORN;
+    }
+    return FRONTIER_COIN_TEAR_NONE;
+}
+
 bool reducer_frontier_compute_hstar(sqlite3 *progress_db,
                                     int32_t *hstar,
                                     int32_t *served_floor)
@@ -730,8 +773,7 @@ bool reducer_frontier_compute_hstar(sqlite3 *progress_db,
             LOG_FAIL("reducer", "contiguity walk failed: %s",
                      k_logs[i].log_table);
 
-        if (h_contig < hs)
-            hs = h_contig;  /* H* = MIN over all logs */
+        hs = frontier_min_i32(hs, h_contig);  /* H* = MIN over all logs */
         if (strcmp(k_logs[i].log_table, "utxo_apply_log") == 0)
             ua_contig = h_contig;  /* captured free for the C4 tear check */
     }
@@ -758,37 +800,23 @@ bool reducer_frontier_compute_hstar(sqlite3 *progress_db,
      * suppressed count. Caller holds progress_store_tx_lock(); the throttle's
      * atomics keep the counters torn-read-safe regardless. */
     int32_t coins_applied = 0;
-    bool coins_found = false;
-    bool coins_read_ok =
-        coins_kv_get_applied_height(progress_db, &coins_applied, &coins_found);
-    if (!coins_read_ok) {
-        /* A read ERROR (not an absent key) silently disarms the tear
-         * diagnostic — surface it so the messenger going quiet is itself
-         * visible. Throttled like the tear WARN below; caller holds the lock. */
-        static struct log_throttle disarm_throttle = LOG_THROTTLE_INIT;
-        int64_t now = platform_time_wall_unix();
-        uint64_t reps = 0;
-        if (log_throttle_should_emit(&disarm_throttle, 1, now, 300, &reps))
-            LOG_WARN("reducer",
-                     "coins_applied_height read failed — coin-tear diagnostic "
-                     "disarmed this pass repeated=%llu",
-                     (unsigned long long)reps);
-    } else if (coins_found && coins_applied > ua_contig + 1) {
-        static struct log_throttle tear_throttle = LOG_THROTTLE_INIT;
-        uint64_t pair = ((uint64_t)(uint32_t)coins_applied << 32)
-                        | (uint32_t)ua_contig;
-        int64_t now = platform_time_wall_unix();
-        uint64_t reps = 0;
-        if (log_throttle_should_emit(&tear_throttle, pair, now, 300, &reps))
-            LOG_WARN("reducer",
-                     "coins_applied=%d > utxo_apply_frontier=%d "
-                     "(coin tear vs own applied log) repeated=%llu",
-                     coins_applied, ua_contig + 1, (unsigned long long)reps);
-    }
+    uint64_t reps = 0;
+    enum frontier_coin_tear_verdict tear =
+        frontier_coin_tear_verdict(progress_db, ua_contig, &coins_applied,
+                                   &reps);
+    if (tear == FRONTIER_COIN_TEAR_DISARMED)
+        LOG_WARN("reducer",
+                 "coins_applied_height read failed — coin-tear diagnostic "
+                 "disarmed this pass repeated=%llu",
+                 (unsigned long long)reps);
+    else if (tear == FRONTIER_COIN_TEAR_TORN)
+        LOG_WARN("reducer",
+                 "coins_applied=%d > utxo_apply_frontier=%d "
+                 "(coin tear vs own applied log) repeated=%llu",
+                 coins_applied, ua_contig + 1, (unsigned long long)reps);
 
     /* HARD GUARD — never rewind across finality. */
-    if (hs < anchor)
-        hs = anchor;
+    hs = frontier_max_i32(hs, anchor);
 
     /* Advance the watermark to the resolved H*: [anchor+1 .. hs] is now
      * tag-verified in every log (hs <= each log's verified prefix), so later
