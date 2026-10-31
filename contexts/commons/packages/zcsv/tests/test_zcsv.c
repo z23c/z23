@@ -271,7 +271,12 @@ static void test_input_bound(void) {
 #if !defined(_WIN32)
   char data[] = "a\nb\nx";
   for (size_t bytes = 0; bytes <= 5; bytes++) {
+#if defined(__APPLE__)
+    /* Darwin fmemopen rejects a zero-length buffer; /dev/null reads empty. */
+    FILE *in = bytes == 0 ? fopen("/dev/null", "r") : fmemopen(data, bytes, "r");
+#else
     FILE *in = fmemopen(data, bytes, "r");
+#endif
     CHECK(in != NULL);
     if (!in) continue;
     char input[6];

@@ -162,19 +162,22 @@ static void test_interleaved_churn(void) {
 }
 
 static void test_small_blocks(void) {
-  /* 8-byte requests still get aligned, link-sized blocks. */
+  /* 8-byte requests still get aligned, link-sized blocks: one
+   * max_align_t unit each (16 bytes on x86-64 Linux, 8 on Apple arm64). */
+  const size_t unit = _Alignof(max_align_t);
   _Alignas(16) unsigned char small[4 * 16];
+  const size_t n = sizeof(small) / unit;
   zpool p;
   CHECK(zpool_init(&p, small, sizeof(small), 8));
-  CHECK(p.block_size == 16);
-  CHECK(p.block_count == 4);
-  void *b[4];
-  for (int i = 0; i < 4; i++)
+  CHECK(p.block_size == unit);
+  CHECK(p.block_count == n);
+  void *b[sizeof(small) / 8];
+  for (size_t i = 0; i < n; i++)
     CHECK((b[i] = zpool_alloc(&p)) != NULL);
   CHECK(zpool_alloc(&p) == NULL);
-  for (int i = 0; i < 4; i++)
+  for (size_t i = 0; i < n; i++)
     CHECK(zpool_free(&p, b[i]));
-  CHECK(zpool_available(&p) == 4);
+  CHECK(zpool_available(&p) == n);
 }
 
 static void test_foreign_pointer_ownership(void) {

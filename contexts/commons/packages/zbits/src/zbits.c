@@ -1,7 +1,12 @@
 /* zbits — fixed-size bitset. See include/zbits/zbits.h. */
 #include "zbits/zbits.h"
 
+#if __has_include(<stdbit.h>)
 #include <stdbit.h>
+#else /* Apple clang ships no C23 <stdbit.h>: same results via the builtins */
+#define stdc_count_ones_ull(x) ((unsigned)__builtin_popcountll(x))
+#define stdc_trailing_zeros_ull(x) ((unsigned)__builtin_ctzll(x))
+#endif
 
 const char *zbits_err_str(zbits_err e) {
   switch (e) {

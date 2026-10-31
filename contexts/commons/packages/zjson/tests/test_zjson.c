@@ -40,6 +40,9 @@
     }                                                                        \
   } while (0)
 
+#ifdef snprintf
+#undef snprintf /* Darwin <stdio.h> fortify macro; zjson.c redefines it */
+#endif
 #include "../src/zjson.c"
 #undef snprintf
 #undef localeconv

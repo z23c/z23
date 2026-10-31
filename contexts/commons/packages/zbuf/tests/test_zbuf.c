@@ -327,6 +327,9 @@ static int fixture_vsnprintf(char *out, size_t cap, const char *fmt, va_list ap)
 #define realloc moving_realloc
 #define malloc fixture_malloc
 #define free fixture_release
+#ifdef vsnprintf
+#undef vsnprintf /* Darwin <stdio.h> fortify defines vsnprintf as a macro */
+#endif
 #define vsnprintf fixture_vsnprintf
 #include "../src/zbuf.c"
 #undef vsnprintf
