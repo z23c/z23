@@ -1643,6 +1643,141 @@ struct vcs_swarm_frame_result vcs_swarm_engine_handle_frame(
     return res;
 }
 
+static enum vcs_swarm_fetch_result swarm_fetch_rebind_locked(
+    struct vcs_swarm_engine *engine, struct swarm_download *dl,
+    const uint64_t *provider_peers, size_t provider_count, bool restricted,
+    uint64_t maximum_package_bytes)
+{
+        /* Never tighten shared work; ordinary demand lifts a scout bound.
+         * Restricted demand never lifts: fetch_from carries no bound of
+         * its own, so an unguarded pass here would let a restricted
+         * rebind silently un-bound — and persist — a scout ceiling,
+         * exactly the widening the restricted posture exists to prevent
+         * ("a restart cannot silently widen it"). */
+    if (maximum_package_bytes > 0 &&
+        (dl->maximum_package_bytes == 0 ||
+         maximum_package_bytes < dl->maximum_package_bytes)) {
+        return VCS_SWARM_FETCH_BOUND_NOT_OWNED;
+    }
+    if (!restricted && maximum_package_bytes == 0 &&
+        dl->maximum_package_bytes > 0) {
+        dl->maximum_package_bytes = 0;
+        (void)record_persist(engine, dl);
+    }
+    if (restricted) {
+        dl->provider_restricted = true;
+        dl_set_providers(dl, provider_peers, provider_count);
+        (void)record_persist(engine, dl);
+    }
+    return VCS_SWARM_FETCH_OK;
+}
+
+static int swarm_fetch_slot_locked(const struct vcs_swarm_engine *engine)
+{
+    /* Prefer a free, then durable-complete, then failed slot. */
+    int slot = -1, complete_slot = -1, failed_slot = -1;
+    for (size_t i = 0; i < VCS_SWARM_MAX_DOWNLOADS; i++) {
+        if (!engine->dls[i].used) {
+            slot = (int)i;
+            break;
+        }
+        if (engine->dls[i].state == VCS_SWARM_DL_COMPLETE &&
+            complete_slot < 0)
+            complete_slot = (int)i;
+        if (engine->dls[i].state == VCS_SWARM_DL_FAILED && failed_slot < 0)
+            failed_slot = (int)i;
+    }
+    if (slot < 0)
+        slot = complete_slot >= 0 ? complete_slot : failed_slot;
+    return slot;
+}
+
+static enum vcs_swarm_fetch_result swarm_fetch_register_locked(
+    struct vcs_swarm_engine *engine, const uint8_t package_root[32],
+    int64_t day, const uint64_t *provider_peers, size_t provider_count,
+    bool restricted, uint64_t maximum_package_bytes, bool already_tracked)
+{
+    int slot = swarm_fetch_slot_locked(engine);
+    if (slot < 0) {
+        return VCS_SWARM_FETCH_FULL;
+    }
+    struct swarm_download *dl = &engine->dls[slot];
+    dl_reset(dl);
+    dl->used = true;
+    memcpy(dl->root, package_root, 32);
+    zcl_hex_encode(dl->root, 32, dl->root_hex);
+    dl->state = VCS_SWARM_DL_WANT_MANIFEST;
+    dl->created_day = day;
+    dl->provider_restricted = restricted;
+    dl->maximum_package_bytes = maximum_package_bytes;
+    dl_set_providers(dl, provider_peers, provider_count);
+    /* The resumable record lands FIRST — a crash after this point
+     * resumes the fetch. */
+    if (engine->persist && !record_persist(engine, dl)) {
+        dl_reset(dl);
+        return VCS_SWARM_FETCH_RECORD_IO;
+    }
+    /* A tracked-but-incomplete package (staged manifest from an earlier
+     * publish/fetch) resumes directly in CHUNKS. */
+    if (already_tracked && dl_load_manifest_from_store(engine, dl)) {
+        dl->state = dl->have_count == dl->total_chunks
+                        ? VCS_SWARM_DL_COMPLETE
+                        : VCS_SWARM_DL_CHUNKS;
+        if (dl->state == VCS_SWARM_DL_COMPLETE)
+            vcs_swarm_record_delete_dl(engine, dl);
+    }
+    /* No scheduling here: the tick owns assignment order (deterministic
+     * rarest-first across downloads). */
+    return VCS_SWARM_FETCH_OK;
+}
+
+static enum vcs_swarm_fetch_result swarm_fetch_locked(
+    struct vcs_swarm_engine *engine, const uint8_t package_root[32],
+    int64_t day, const uint64_t *provider_peers, size_t provider_count,
+    bool restricted, uint64_t maximum_package_bytes)
+{
+    if (!engine->store) {
+        return VCS_SWARM_FETCH_NO_STORE;
+    }
+    struct swarm_download *dl = dl_find(engine, package_root);
+    if (dl && dl->state == VCS_SWARM_DL_COMPLETE) {
+        enum vcs_swarm_fetch_result cached = vcs_swarm_local_complete_result(
+            engine, package_root, maximum_package_bytes);
+        if (cached != VCS_SWARM_FETCH_NO_PROVIDER) {
+            return cached;
+        }
+        /* COMPLETE is a possession cache, never authority. A verified read
+         * may have quarantined a corrupt CAS object since this slot last ran;
+         * discard the stale scheduler state so the tracked manifest can
+         * rebuild its have-bitmap and fetch the missing coordinate. */
+        dl_reset(dl);
+        dl = NULL;
+    }
+    if (dl && dl->state == VCS_SWARM_DL_FAILED) {
+        /* Operator retry after a named failure: start clean. */
+        dl_reset(dl);
+        dl = NULL;
+    }
+    if (dl)
+        return swarm_fetch_rebind_locked(engine, dl, provider_peers,
+            provider_count, restricted, maximum_package_bytes);
+    struct vcs_package_store_status st;
+    memset(&st, 0, sizeof(st));
+    bool already_tracked =
+        vcs_package_store_package_status(engine->store, package_root,
+                                         &st) && st.tracked;
+    if (already_tracked && st.complete) {
+        enum vcs_swarm_fetch_result cached = vcs_swarm_local_complete_result(
+            engine, package_root, maximum_package_bytes);
+        if (cached != VCS_SWARM_FETCH_NO_PROVIDER) {
+            return cached;
+        }
+    }
+    return swarm_fetch_register_locked(engine, package_root, day,
+        provider_peers, provider_count, restricted, maximum_package_bytes,
+        already_tracked);
+}
+
 static enum vcs_swarm_fetch_result swarm_fetch(
     struct vcs_swarm_engine *engine, const uint8_t package_root[32],
     int64_t day, uint64_t now, const uint64_t *provider_peers,
@@ -1662,118 +1797,11 @@ static enum vcs_swarm_fetch_result swarm_fetch(
             return input;
     }
     pthread_mutex_lock(&engine->lock);
-    if (!engine->store) {
-        pthread_mutex_unlock(&engine->lock);
-        return VCS_SWARM_FETCH_NO_STORE;
-    }
-    struct swarm_download *dl = dl_find(engine, package_root);
-    if (dl && dl->state == VCS_SWARM_DL_COMPLETE) {
-        enum vcs_swarm_fetch_result cached = vcs_swarm_local_complete_result(
-            engine, package_root, maximum_package_bytes);
-        if (cached != VCS_SWARM_FETCH_NO_PROVIDER) {
-            pthread_mutex_unlock(&engine->lock);
-            return cached;
-        }
-        /* COMPLETE is a possession cache, never authority. A verified read
-         * may have quarantined a corrupt CAS object since this slot last ran;
-         * discard the stale scheduler state so the tracked manifest can
-         * rebuild its have-bitmap and fetch the missing coordinate. */
-        dl_reset(dl);
-        dl = NULL;
-    }
-    if (dl && dl->state == VCS_SWARM_DL_FAILED) {
-        /* Operator retry after a named failure: start clean. */
-        dl_reset(dl);
-        dl = NULL;
-    }
-    if (dl) {
-        /* Never tighten shared work; ordinary demand lifts a scout bound.
-         * Restricted demand never lifts: fetch_from carries no bound of
-         * its own, so an unguarded pass here would let a restricted
-         * rebind silently un-bound — and persist — a scout ceiling,
-         * exactly the widening the restricted posture exists to prevent
-         * ("a restart cannot silently widen it"). */
-        if (maximum_package_bytes > 0 &&
-            (dl->maximum_package_bytes == 0 ||
-             maximum_package_bytes < dl->maximum_package_bytes)) {
-            pthread_mutex_unlock(&engine->lock);
-            return VCS_SWARM_FETCH_BOUND_NOT_OWNED;
-        }
-        if (!restricted && maximum_package_bytes == 0 &&
-            dl->maximum_package_bytes > 0) {
-            dl->maximum_package_bytes = 0;
-            (void)record_persist(engine, dl);
-        }
-        if (restricted) {
-            dl->provider_restricted = true;
-            dl_set_providers(dl, provider_peers, provider_count);
-            (void)record_persist(engine, dl);
-        }
-        pthread_mutex_unlock(&engine->lock);
-        return VCS_SWARM_FETCH_OK;
-    }
-    struct vcs_package_store_status st;
-    memset(&st, 0, sizeof(st));
-    bool already_tracked =
-        vcs_package_store_package_status(engine->store, package_root,
-                                         &st) && st.tracked;
-    if (already_tracked && st.complete) {
-        enum vcs_swarm_fetch_result cached = vcs_swarm_local_complete_result(
-            engine, package_root, maximum_package_bytes);
-        if (cached != VCS_SWARM_FETCH_NO_PROVIDER) {
-            pthread_mutex_unlock(&engine->lock);
-            return cached;
-        }
-    }
-    /* Prefer a free, then durable-complete, then failed slot. */
-    int slot = -1, complete_slot = -1, failed_slot = -1;
-    for (size_t i = 0; i < VCS_SWARM_MAX_DOWNLOADS; i++) {
-        if (!engine->dls[i].used) {
-            slot = (int)i;
-            break;
-        }
-        if (engine->dls[i].state == VCS_SWARM_DL_COMPLETE &&
-            complete_slot < 0)
-            complete_slot = (int)i;
-        if (engine->dls[i].state == VCS_SWARM_DL_FAILED && failed_slot < 0)
-            failed_slot = (int)i;
-    }
-    if (slot < 0)
-        slot = complete_slot >= 0 ? complete_slot : failed_slot;
-    if (slot < 0) {
-        pthread_mutex_unlock(&engine->lock);
-        return VCS_SWARM_FETCH_FULL;
-    }
-    dl = &engine->dls[slot];
-    dl_reset(dl);
-    dl->used = true;
-    memcpy(dl->root, package_root, 32);
-    zcl_hex_encode(dl->root, 32, dl->root_hex);
-    dl->state = VCS_SWARM_DL_WANT_MANIFEST;
-    dl->created_day = day;
-    dl->provider_restricted = restricted;
-    dl->maximum_package_bytes = maximum_package_bytes;
-    dl_set_providers(dl, provider_peers, provider_count);
-    /* The resumable record lands FIRST — a crash after this point
-     * resumes the fetch. */
-    if (engine->persist && !record_persist(engine, dl)) {
-        dl_reset(dl);
-        pthread_mutex_unlock(&engine->lock);
-        return VCS_SWARM_FETCH_RECORD_IO;
-    }
-    /* A tracked-but-incomplete package (staged manifest from an earlier
-     * publish/fetch) resumes directly in CHUNKS. */
-    if (already_tracked && dl_load_manifest_from_store(engine, dl)) {
-        dl->state = dl->have_count == dl->total_chunks
-                        ? VCS_SWARM_DL_COMPLETE
-                        : VCS_SWARM_DL_CHUNKS;
-        if (dl->state == VCS_SWARM_DL_COMPLETE)
-            vcs_swarm_record_delete_dl(engine, dl);
-    }
-    /* No scheduling here: the tick owns assignment order (deterministic
-     * rarest-first across downloads). */
+    enum vcs_swarm_fetch_result result = swarm_fetch_locked(
+        engine, package_root, day, provider_peers, provider_count, restricted,
+        maximum_package_bytes);
     pthread_mutex_unlock(&engine->lock);
-    return VCS_SWARM_FETCH_OK;
+    return result;
 }
 
 enum vcs_swarm_fetch_result vcs_swarm_engine_fetch(
