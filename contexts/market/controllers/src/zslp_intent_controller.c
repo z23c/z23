@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Wallet adapter and RPC for durable ZSLP transaction intents. */
 
+#include "controllers/wallet_private_broadcast.h"
 #include "zslp_controller_internal.h"
 
 #include "controllers/native_handler_body.h"
@@ -188,6 +189,9 @@ static struct zcl_result ztic_publish(
     struct wallet_rpc_context *ctx = opaque;
     if (!ctx || !ctx->wallet || !raw_tx || raw_tx_len == 0 || !expected_txid)
         return ZCL_ERR(-1, "ZSLP publish context is incomplete");
+    struct zcl_result private_refusal = wallet_private_broadcast_unsupported("a ZSLP intent");
+    if (!private_refusal.ok)
+        return private_refusal;
     struct wallet_tx wtx; memset(&wtx, 0, sizeof(wtx));
     struct byte_stream stream;
     stream_init_from_data(&stream, raw_tx, raw_tx_len);

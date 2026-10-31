@@ -94,3 +94,14 @@ struct zcl_result chain_nullifier_evidence_lookup_set(
     out->height = any_found ? common_height : -1;
     return ZCL_OK;
 }
+
+bool chain_nullifier_evidence_history_complete(void)
+{
+    progress_store_tx_lock();
+    sqlite3 *db = progress_store_db();
+    int64_t cursor = -1;
+    bool found = false;
+    bool read = db && nullifier_kv_activation_cursor(db, &cursor, &found);
+    progress_store_tx_unlock();
+    return read && found && cursor == 0;
+}

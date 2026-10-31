@@ -5,6 +5,7 @@
 #include "controllers/zslp_controller.h"
 #include "zslp_controller_internal.h"
 #include "controllers/wallet_helpers.h"
+#include "controllers/wallet_private_broadcast.h"
 #include "controllers/sync_controller.h"
 #include "core/uint256.h"
 #include "wallet/wallet.h"
@@ -89,6 +90,12 @@ static bool zslp_open_runtime_db(const char *datadir, sqlite3 **db_out,
 bool zslp_controller_publish(struct wallet_tx *wtx, char txid_out[65],
                              char *error_out, size_t error_size)
 {
+    struct zcl_result private_refusal =
+        wallet_private_broadcast_unsupported("a ZSLP transaction");
+    if (!private_refusal.ok) {
+        snprintf(error_out, error_size, "%s", private_refusal.message);
+        LOG_FAIL("zslp", "publish: private wallet broadcast is active");
+    }
     struct wallet_rpc_context *ctx = wallet_rpc_context_current();
     if (!ctx || !ctx->wallet || !ctx->mempool || !ctx->coins_tip ||
         !ctx->main_state || !wtx) {

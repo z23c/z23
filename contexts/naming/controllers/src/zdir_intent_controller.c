@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Wallet adapter and RPC for durable ZDIR overlay intents. */
 
+#include "controllers/wallet_private_broadcast.h"
 #include "controllers/zdir_controller.h"
 #include "controllers/native_handler_body.h"
 #include "controllers/vault_intent_controller.h"
@@ -252,6 +253,9 @@ static struct zcl_result zdic_publish(
     struct wallet_rpc_context *ctx = opaque;
     if (!ctx || !ctx->wallet || !raw_tx || raw_tx_len == 0 || !expected_txid)
         return ZCL_ERR(-17, "ZDIR publish context is incomplete");
+    struct zcl_result private_refusal = wallet_private_broadcast_unsupported("a ZDIR intent");
+    if (!private_refusal.ok)
+        return private_refusal;
     struct wallet_tx wtx; memset(&wtx, 0, sizeof(wtx));
     struct byte_stream stream;
     stream_init_from_data(&stream, raw_tx, raw_tx_len);

@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: expose the Blog MVC resource and its read-only public HTTP routes. */
 
+#include "controllers/wallet_private_broadcast.h"
 #include "controllers/blog_post_controller.h"
 #include "controllers/native_handler_body.h"
 #include "controllers/sync_controller.h"
@@ -209,6 +210,9 @@ static struct zcl_result blog_anchor_publish_wallet(
     if (!ctx || !ctx->wallet || !ctx->mempool || !ctx->main_state ||
         !ctx->coins_tip || !raw_tx || raw_tx_len == 0 || !expected_txid)
         return ZCL_ERR(-1, "Blog anchor wallet publish context is incomplete");
+    struct zcl_result private_refusal = wallet_private_broadcast_unsupported("a blog anchor");
+    if (!private_refusal.ok)
+        return private_refusal;
     struct wallet_tx wtx;
     struct zcl_result decoded = blog_anchor_decode_prepared_tx(
         raw_tx, raw_tx_len, expected_txid, &wtx);

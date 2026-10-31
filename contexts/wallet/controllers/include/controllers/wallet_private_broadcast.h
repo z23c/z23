@@ -7,6 +7,8 @@
 #ifndef ZCL_CONTROLLERS_WALLET_PRIVATE_BROADCAST_H
 #define ZCL_CONTROLLERS_WALLET_PRIVATE_BROADCAST_H
 
+#include "base/result.h"
+#include "json/json.h"
 #include "rpc/server.h"
 #include "services/wallet_private_relay.h"
 
@@ -47,9 +49,29 @@ void wallet_private_broadcast_tick(void);
 /* The same with an explicit wallet height (-1 when unknown). */
 void wallet_private_broadcast_tick_at(int wallet_height);
 /* Roll back one expired send through the wallet's persisted rollback and keep a
- * terminal expired record. A send the wallet shows confirmed is marked seen
- * instead and false is returned. */
+ * terminal expired record. Returns false, leaving the record, when the wallet
+ * shows the send confirmed (marked seen), when the chain view shows an input
+ * spent or cannot show it unspent (held: it may be on chain), or when the
+ * database row could not be deleted yet (retried). */
 bool wallet_private_broadcast_expire(const struct uint256 *txid);
+
+/* Called by the wallet commit funnel BEFORE the wallet admits a send. In
+ * private mode it records the send durably so a crash after the wallet write
+ * still leaves a record to resume. Fails closed: when the record cannot be
+ * made durable the send is refused. A public-mode context passes. */
+struct zcl_result wallet_private_broadcast_before_commit(
+    const struct wallet_rpc_context *ctx, const struct uint256 *txid);
+
+/* Transactions authored outside the wallet send paths (vault intents, ZSLP,
+ * ZDIR, ZNAM, ZID, blog anchors, swaps, sendrawtransaction, yardsale) are
+ * announced to every peer. In private mode they are refused with the typed
+ * error PRIVATE_BROADCAST_UNSUPPORTED rather than leak the sender. */
+#define WALLET_PBCAST_UNSUPPORTED_CODE (-9301)
+struct zcl_result wallet_private_broadcast_unsupported(const char *what);
+/* The same for handlers that answer with a JSON string: sets the error and
+ * returns true when the refusal applies. */
+bool wallet_private_broadcast_refuse_json(const char *what,
+                                          struct json_value *result);
 /* Stop the tick thread; waits briefly for it to exit. */
 void wallet_private_broadcast_stop(void);
 

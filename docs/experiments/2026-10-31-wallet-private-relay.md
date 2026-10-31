@@ -61,8 +61,12 @@ payment to this node's IP address?
 
 Only the wallet's own sends: `sendtoaddress`, `sendmany`, `z_sendmany`
 (transparent and shielded legs). Vault intents, ZSLP, ZDIR, ZNAM, ZID, blog,
-swap, multisig and raw transaction paths keep public relay. A send prepared by
-the vault route reaches `z_sendmany` already prepared and stays public.
+swap, yardsale and `sendrawtransaction` are refused in private mode with the
+typed error `PRIVATE_BROADCAST_UNSUPPORTED`; none reaches a peer. Both
+`vault.send-shielded` and `vault.intent.*` publish through
+`vault_intent_publish_prepared`, which is refused. Behaviorally tested:
+`sendrawtransaction`; the other sites are guarded by the same helper and not
+individually exercised.
 
 ## Measured
 

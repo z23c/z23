@@ -3,6 +3,7 @@
  * Distributed under the MIT software license, see the accompanying
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
+#include "controllers/wallet_private_broadcast.h"
 #include "controllers/transaction_controller_internal.h"
 #include "models/tx_index.h"
 #include "services/txindex_projection_service.h"
@@ -451,6 +452,8 @@ static bool rpc_sendrawtransaction(const struct json_value *params, bool help,
     rpc_params_expect(&p, 1, 2);
     const char *hex_str = rpc_require_str(&p, 0, "hexstring");
     if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); return false; }
+    if (wallet_private_broadcast_refuse_json("sendrawtransaction", result))
+        return false;
 
     struct transaction tx;
     transaction_init(&tx);

@@ -20,6 +20,7 @@
 #include "consensus/upgrades.h"
 #include "controllers/wallet_controller.h"
 #include "controllers/wallet_helpers.h"
+#include "controllers/transaction_controller.h"
 #include "controllers/wallet_private_broadcast.h"
 #include "core/serialize.h"
 #include "crypto/random_secret.h"
@@ -1215,8 +1216,8 @@ static void wprt_expiry_status(struct wprt_fx *f, const struct uint256 *id,
     bool have = ok && wprt_status_json(f, &st);
     const struct json_value *e = have ? wprt_status_entry(&st, id) : NULL;
     wprt_report("the status read reports the terminal expired state and says "
-                "the payment may be sent again",
-                ok && wprt_status_says(f, id, "expired", "may be sent again"),
+                "the payment may be sent again with a new key",
+                ok && wprt_status_says(f, id, "expired", "new key"),
                 failures);
     wprt_report("the status read carries no amount or address",
                 e && !json_get(e, "amount") && !json_get(e, "address") &&
@@ -1424,6 +1425,248 @@ static int wprt_case_boot(void)
     wallet_private_broadcast_stop();
     wprt_report("the default is public relay, with or without onion-only",
                 default_ok && m2 == WPR_MODE_PUBLIC, &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* ── a send the chain may already hold ──────────────────────────────── */
+
+/* The chain consumed the funding coin in a block the wallet never read. */
+static void wprt_chain_consumes(struct wprt_fx *f, const struct outpoint *spent)
+{
+    struct coins_cache_entry *e =
+        coins_view_cache_modify(&f->coins, &spent->hash);
+    if (e)
+        coins_spend(&e->coins, spent->n);
+}
+
+static bool wprt_status_next_has(struct wprt_fx *f, const struct uint256 *id,
+                                 const char *part)
+{
+    struct json_value st;
+    bool have = wprt_status_json(f, &st);
+    const struct json_value *e = have ? wprt_status_entry(&st, id) : NULL;
+    const char *n = e ? wprt_jstr(json_get(e, "next_step")) : NULL;
+    bool ok = n && strstr(n, part);
+    if (have)
+        json_free(&st);
+    return ok;
+}
+
+static bool wprt_record_kept(struct wprt_fx *f, const struct uint256 *id,
+                             const struct outpoint *spent)
+{
+    bool found = false;
+    struct wallet_tx still;
+    bool in_wallet = wprt_copy_tx(f, id, &still);
+    if (in_wallet)
+        transaction_free(&still.tx);
+    return in_wallet && wprt_state(id, &found) != WPR_EXPIRED && found &&
+           wallet_is_outpoint_spent(f->wallet, &spent->hash, spent->n);
+}
+
+/* Sent, the node went off, the send was mined, the wallet skipped the block
+ * and later reads past the margin with no confirmation: the coins must not
+ * come back, because the payment could be made twice. */
+static int wprt_case_expiry_unverified(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
+    wprt_overwinter_on(&f);
+    struct uint256 id;
+    struct outpoint spent;
+    memset(&spent, 0, sizeof(spent));
+    ok = ok && wprt_add_peer(&f, WPRT_ONION_OUT) &&
+         wprt_rpc_send(&f, false, 10.0, &id);
+    int e = (int)wprt_expiry_of(&f, &id, &spent);
+    wprt_chain_consumes(&f, &spent);
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 1);
+    wprt_report("a send whose input the chain has spent is not rolled back, "
+                "though the wallet never read the block",
+                ok && wprt_record_kept(&f, &id, &spent), &failures);
+    wprt_report("the status says it may be on chain and not to pay again",
+                ok && wprt_status_next_has(&f, &id,
+                                           "Do not send the payment again"),
+                &failures);
+    wprt_now += (WPR_RETRY_S + 1) * 1000;
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 500);
+    wprt_report("a later tick, far past the margin, still keeps the record",
+                ok && wprt_record_kept(&f, &id, &spent), &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* ── disk full at expiry ────────────────────────────────────────────── */
+
+/* The database refuses the row delete. Memory is rolled back, so the next tick
+ * must not mistake that for a finished rollback. */
+static int wprt_case_expiry_disk_full(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, true);
+    wprt_overwinter_on(&f);
+    struct uint256 id;
+    struct outpoint spent;
+    memset(&spent, 0, sizeof(spent));
+    ok = ok && wprt_add_peer(&f, WPRT_ONION_OUT) &&
+         wprt_rpc_send(&f, false, 10.0, &id);
+    int e = (int)wprt_expiry_of(&f, &id, &spent);
+    f.ndb.open = false;
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 1);
+    bool found = false;
+    wprt_report("a failed row delete does not mark the send expired",
+                ok && wprt_state(&id, &found) != WPR_EXPIRED && found,
+                &failures);
+    wprt_now += (WPR_RETRY_S + 1) * 1000;
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 2);
+    wprt_report("a second tick with the database still refusing does not "
+                "either, and the status says it is retried",
+                ok && wprt_state(&id, &found) != WPR_EXPIRED && found &&
+                    wprt_status_next_has(&f, &id, "retried"),
+                &failures);
+    f.ndb.open = true;
+    wprt_now += (WPR_RETRY_S + 1) * 1000;
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 3);
+    struct db_wallet_tx row;
+    memset(&row, 0, sizeof(row));
+    wprt_report("once the database accepts writes the retry deletes the row, "
+                "releases the coin and marks the send expired",
+                ok && wprt_state(&id, &found) == WPR_EXPIRED && found &&
+                    !db_wallet_tx_find(&f.ndb, id.data, &row) &&
+                    wprt_db_coin_state(&f, &spent.hash, &id, false),
+                &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* ── record before the wallet writes ────────────────────────────────── */
+
+/* The same funnel the send paths use, stopped before anything queues it:
+ * the state a power loss leaves behind. */
+static bool wprt_commit_unqueued(struct wprt_fx *f, struct uint256 *id,
+                                 struct zcl_result *commit)
+{
+    char addr[128];
+    struct tx_destination dest;
+    struct wallet_tx wtx;
+    int64_t fee = 0;
+    const char *error = NULL;
+    if (!wprt_self_address(f, addr, sizeof(addr)) ||
+        !wallet_decode_address(addr, &dest) ||
+        !wallet_create_transaction(f->wallet, &dest, 10 * COIN_VALUE, &wtx,
+                                   &fee, &error))
+        return false;
+    struct wallet_rpc_context sv;
+    struct wallet_rpc_context *ctx = wallet_send_view(
+        wallet_rpc_context_current(), &sv);
+    *id = wtx.tx.hash;
+    *commit = wallet_commit_from_context(ctx, &wtx);
+    transaction_free(&wtx.tx);
+    return true;
+}
+
+static int wprt_case_prepared_before_wallet(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
+    struct p2p_node *clear = ok ? wprt_add_peer(&f, WPRT_CLEAR_OUT) : NULL;
+    struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
+    struct uint256 id;
+    struct zcl_result commit = ZCL_OK;
+    ok = ok && clear && onion && wprt_commit_unqueued(&f, &id, &commit) &&
+         commit.ok;
+    bool found = false;
+    wprt_report("the send is already recorded when the wallet has admitted it, "
+                "before anything queued it",
+                ok && wprt_state(&id, &found) == WPR_PREPARED && found,
+                &failures);
+    /* Power loss here: the wallet holds the send, the queue never saw it. */
+    wprt_restart_relay(&f);
+    wprt_resume_reports(&f, wpr_global(), &id, clear, onion, ok, &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* When the record cannot be made durable the wallet must not admit the send. */
+static int wprt_case_record_refused(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
+    snprintf(wpr_global()->datadir, sizeof(wpr_global()->datadir), "%s",
+             "/nonexistent/wallet-private-relay");
+    struct uint256 id;
+    struct zcl_result commit = ZCL_OK;
+    bool ran = ok && wprt_commit_unqueued(&f, &id, &commit);
+    struct wallet_tx held;
+    bool in_wallet = ran && wprt_copy_tx(&f, &id, &held);
+    if (in_wallet)
+        transaction_free(&held.tx);
+    wprt_report("a send whose record cannot be made durable is refused: not "
+                "admitted to the wallet or either pool",
+                ran && !commit.ok && !in_wallet && wprt_pending() == 0 &&
+                    tx_mempool_size(&f.main_pool) == 0 &&
+                    tx_mempool_size(wpr_pool(wpr_global())) == 0,
+                &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* ── transactions the private mode cannot protect ───────────────────── */
+
+static bool wprt_error_is_typed(const struct json_value *r)
+{
+    const char *s = wprt_jstr(r);
+    return s && strncmp(s, "PRIVATE_BROADCAST_UNSUPPORTED", 29) == 0;
+}
+
+static bool wprt_raw_send(struct wprt_fx *f, struct json_value *result)
+{
+    struct json_value params;
+    json_init(&params);
+    json_set_array(&params);
+    wprt_json_str(&params, "00");
+    json_init(result);
+    bool ok = rpc_table_execute(&f->tbl, "sendrawtransaction", &params,
+                                result);
+    json_free(&params);
+    return ok;
+}
+
+static int wprt_case_unsupported(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 1, false);
+    register_rawtransaction_rpc_commands(&f.tbl);
+    struct p2p_node *clear = ok ? wprt_add_peer(&f, WPRT_CLEAR_OUT) : NULL;
+    struct json_value r1, r2;
+    bool ran1 = ok && !wprt_raw_send(&f, &r1);
+    wprt_report("sendrawtransaction is refused with a typed error in private "
+                "mode and nothing reaches a peer",
+                ran1 && wprt_error_is_typed(&r1) &&
+                    wprt_total_bytes(clear) == 0 &&
+                    tx_mempool_size(&f.main_pool) == 0,
+                &failures);
+    wprt_report("the refusal helper is typed in private mode",
+                !wallet_private_broadcast_unsupported("a swap").ok &&
+                    wallet_private_broadcast_unsupported("a swap").code ==
+                        WALLET_PBCAST_UNSUPPORTED_CODE,
+                &failures);
+    struct wpr_env env = wpr_global()->env;
+    wpr_configure(wpr_global(), WPR_MODE_PUBLIC, &env);
+    bool ran2 = ok && !wprt_raw_send(&f, &r2);
+    wprt_report("in public mode the same call is not refused for that reason",
+                ran2 && !wprt_error_is_typed(&r2) &&
+                    wallet_private_broadcast_unsupported("a swap").ok,
+                &failures);
+    if (ran1)
+        json_free(&r1);
+    if (ran2)
+        json_free(&r2);
     wprt_close(&f);
     return failures;
 }
@@ -1772,6 +2015,11 @@ int test_wallet_private_relay(void)
     failures += wprt_case_expiry_margin();
     failures += wprt_case_expiry_confirmed();
     failures += wprt_case_expiry_database();
+    failures += wprt_case_expiry_unverified();
+    failures += wprt_case_expiry_disk_full();
+    failures += wprt_case_prepared_before_wallet();
+    failures += wprt_case_record_refused();
+    failures += wprt_case_unsupported();
     failures += wprt_case_restart();
     failures += wprt_case_public_restart();
     failures += wprt_case_boot();

@@ -6,6 +6,7 @@
 #include "controllers/wallet_helpers.h"
 #include "controllers/sync_controller.h"
 #include "controllers/wallet_send_once.h"
+#include "controllers/wallet_private_broadcast.h"
 #include "views/format_helpers.h"
 #include "wallet/wallet.h"
 #include "wallet/wallet_sqlite.h"
@@ -178,6 +179,11 @@ struct zcl_result wallet_commit_from_context(
 {
     if (!ctx || !wtx)
         return ZCL_ERR(-1, "wallet commit context: NULL context or transaction");
+    /* Private mode: the send is recorded durably before the wallet admits it. */
+    struct zcl_result recorded =
+        wallet_private_broadcast_before_commit(ctx, &wtx->tx.hash);
+    if (!recorded.ok)
+        return recorded;
     struct wallet_tx_admission admission = {
         .mempool = ctx->mempool,
         .coins_tip = ctx->coins_tip,

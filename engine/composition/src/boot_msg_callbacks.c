@@ -8,6 +8,7 @@
  * S-accessor-free, so it relocates out of boot_services.c without touching any
  * boot-state static. */
 
+#include "controllers/wallet_private_broadcast.h"
 #include "config/boot_msg_callbacks.h"
 #include "config/boot_file_market_delivery.h"
 #include "config/boot_internal.h"
@@ -548,6 +549,11 @@ static bool boot_yardsale_broadcast(const struct transaction *tx, void *ctx)
     if (!tx || !svc || !svc->mempool || !svc->coins_tip || !svc->state ||
         !svc->params) {
         LOG_WARN("boot", "yardsale broadcast adapter missing node context");
+        return false;
+    }
+    if (!wallet_private_broadcast_unsupported("a yardsale transaction").ok) {
+        LOG_WARN("boot", "yardsale broadcast refused: private wallet "
+                 "broadcast is active");
         return false;
     }
 

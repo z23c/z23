@@ -711,14 +711,31 @@ z23 -tor -onlynet=onion -walletbroadcast=private ...
 z23 core wallet broadcast status   # mode, pending, expired, eligible onion peers, per-txid state and next step
 ```
 
-Covered: `sendtoaddress`, `sendmany` and `z_sendmany`. Vault, ZSLP, ZDIR, ZNAM,
-ZID, blog, swap and raw transaction paths keep public relay.
+Covered: `sendtoaddress`, `sendmany` and `z_sendmany`. Every other path that
+would put a transaction in the main mempool and announce it to all peers is
+refused in private mode with `PRIVATE_BROADCAST_UNSUPPORTED`: vault intents
+(`vault.send-shielded` and `vault.intent.*`), ZSLP, ZDIR, ZNAM, ZID, blog
+anchors, swap settlement, yardsale and `sendrawtransaction`. Nothing reaches a
+peer on those paths.
+
+A send is recorded in the pending file (state `preparing`) before the wallet
+admits it, so a power loss between the wallet write and the queue leaves a
+record that restart resumes. The record is written atomically before the
+wallet row, ahead of the send-once BUILT row in the same funnel.
 
 An unconfirmed send expires only when the wallet's scanned height is more than
 20 blocks past the transaction's expiry height and the wallet does not show it
 confirmed. Its coins then return to the wallet, the record stays as `expired`
-for seven days, and the log carries a count-only WARN. The payment may be sent
-again once the status read says `expired`; before that, waiting is safe. A
+for seven days, and the log carries a count-only WARN. Before any rollback the
+node checks the chain: a send whose transparent input is spent or unknown in
+the coin view, or whose Sapling nullifier is revealed or cannot be proved
+unrevealed, is held, not rolled back, and the status says not to pay again
+(the chain may already hold it, for example a block the wallet never read).
+If the database refuses the row delete, the send stays pending and the delete
+is retried each tick; it is marked expired only after the delete succeeds. The
+payment may be sent again, with a new key, once the status read says
+`expired`; the old key keeps answering that the earlier outcome is unknown.
+Before that, waiting is safe. A
 node restarted in public mode still resumes, expires and releases held sends,
 but pushes nothing.
 

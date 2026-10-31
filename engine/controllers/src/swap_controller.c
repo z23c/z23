@@ -3,6 +3,7 @@
  * Atomic Swap RPC controller.
  * Cross-chain: ZCL <-> BTC, LTC, DOGE via HTLC. */
 
+#include "controllers/wallet_private_broadcast.h"
 #include "platform/time_compat.h"
 #include "controllers/swap_controller.h"
 #include "controllers/rpc_chainstate_guard.h"
@@ -536,6 +537,8 @@ static bool swap_key_for_pkh(const uint8_t pkh[20], struct privkey *key,
 static bool swap_broadcast(struct transaction *tx, char *txid_hex,
                            struct json_value *result)
 {
+    if (wallet_private_broadcast_refuse_json("a swap settlement", result))
+        return false;
     enum mempool_accept_result r = accept_to_mempool(
         g_swap_mempool, g_swap_coins_tip, g_swap_main_state,
         chain_params_get(), tx);

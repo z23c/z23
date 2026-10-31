@@ -6,7 +6,12 @@
 #include "controllers/wallet_private_broadcast.h"
 
 #include "controllers/strong_params.h"
+#include "coins/coins_view.h"
+#include "controllers/sync_controller.h"
 #include "controllers/wallet_helpers.h"
+#include "models/database.h"
+#include "primitives/transaction.h"
+#include "services/chain_nullifier_evidence_service.h"
 #include "json/json.h"
 #include "net/connman.h"
 #include "platform/clock.h"
@@ -59,10 +64,93 @@ bool wallet_send_relay(struct wallet_rpc_context *ctx, struct wallet_tx *wtx)
     return false;
 }
 
-/* The wallet has read blocks through a height past the send's expiry and
- * margin and no block holds it: return its coins, and keep a terminal record
- * for the status. A send the wallet now shows confirmed is not rolled back. */
-bool wallet_private_broadcast_expire(const struct uint256 *txid)
+enum wpb_expiry {
+    WPB_EXPIRY_RETURNED,   /* coins back, terminal record kept */
+    WPB_EXPIRY_HELD,       /* the chain may hold it: not rolled back */
+    WPB_EXPIRY_DEFERRED,   /* confirmed, or the database write is retried */
+};
+
+/* No Sapling nullifier of the send is revealed on chain. */
+static bool wpb_nullifiers_unseen(const struct transaction *tx)
+{
+    size_t n = tx->num_shielded_spend;
+    if (n == 0)
+        return true;
+    if (!chain_nullifier_evidence_history_complete()) {
+        LOG_WARN("wallet_pbcast", "nullifier history incomplete; spend cannot be proved unseen");
+        return false;
+    }
+    struct chain_nullifier_query *q = zcl_calloc(n, sizeof(*q), "wpb_nf");
+    if (!q) {
+        LOG_WARN("wallet_pbcast", "nullifier query allocation failed");
+        return false;
+    }
+    for (size_t i = 0; i < n; i++)
+        q[i].bytes = tx->v_shielded_spend[i].nullifier.data;
+    struct chain_nullifier_set_evidence ev;
+    struct zcl_result r = chain_nullifier_evidence_lookup_set(
+        q, n, CHAIN_NULLIFIER_POOL_SAPLING, &ev);
+    free(q);
+    return r.ok && !ev.any_found;
+}
+
+/* True only when the chain view PROVES every input still unspent. An input
+ * that is spent or that the view cannot show means the send may be on chain,
+ * so the answer is false. */
+static bool wpb_chain_shows_unspent(struct wallet_rpc_context *base,
+                                    const struct transaction *tx)
+{
+    if (!base->coins_tip || !base->main_state)
+        return false;
+    zcl_mutex_lock(&base->main_state->cs_main);
+    bool inputs = coins_view_cache_have_inputs(base->coins_tip, tx);
+    zcl_mutex_unlock(&base->main_state->cs_main);
+    return inputs && wpb_nullifiers_unseen(tx);
+}
+
+static enum wpb_expiry wpb_roll_back(struct wpr *relay,
+                                     const struct wallet_rpc_context *view,
+                                     const struct wallet_tx *wtx)
+{
+    struct zcl_result rolled = wallet_rollback_persisted_commit(view, wtx);
+    if (rolled.ok)
+        return WPB_EXPIRY_RETURNED;
+    LOG_WARN("wallet", "expired private send rollback failed (code=%d): %s",
+             rolled.code, rolled.message);
+    /* Code -3: memory is rolled back, the database row remains. */
+    if (rolled.code == -3)
+        wpr_set_disk_retry(relay, &wtx->tx.hash, true);
+    return WPB_EXPIRY_DEFERRED;
+}
+
+static enum wpb_expiry wpb_expire_held_tx(struct wpr *relay,
+                                          struct wallet_rpc_context *base,
+                                          const struct wallet_rpc_context *view,
+                                          const struct wallet_tx *wtx)
+{
+    if (wtx->confirms > 0) {
+        wpr_note_seen(relay, &wtx->tx.hash);
+        return WPB_EXPIRY_DEFERRED;
+    }
+    if (!wpb_chain_shows_unspent(base, &wtx->tx)) {
+        wpr_mark_held(relay, &wtx->tx.hash, true);
+        return WPB_EXPIRY_HELD;
+    }
+    return wpb_roll_back(relay, view, wtx);
+}
+
+/* The wallet memory no longer holds the send but its database row survived an
+ * earlier failed delete: finish the delete. */
+static bool wpb_finish_disk_delete(struct wallet_rpc_context *base,
+                                   const struct uint256 *txid)
+{
+    if (!base->wallet_db)
+        return true;
+    return base->node_db && base->node_db->open &&
+           node_db_sync_wallet_tx_delete(base->node_db, txid->data);
+}
+
+static enum wpb_expiry wpb_expire(const struct uint256 *txid)
 {
     struct wpr *relay = wpr_global();
     struct wallet_rpc_context *base = wallet_rpc_context_current();
@@ -70,23 +158,62 @@ bool wallet_private_broadcast_expire(const struct uint256 *txid)
     view.mempool = wpr_pool(relay);
     view.connman = NULL;
 
+    enum wpb_expiry out;
     struct wallet_tx wtx;
     memset(&wtx, 0, sizeof(wtx));
     if (base->wallet && wallet_get_tx_copy(base->wallet, txid, &wtx)) {
-        if (wtx.confirms > 0) {
-            transaction_free(&wtx.tx);
-            wpr_note_seen(relay, txid);
-            return false;
-        }
-        struct zcl_result rolled = wallet_rollback_persisted_commit(&view, &wtx);
+        out = wpb_expire_held_tx(relay, base, &view, &wtx);
         transaction_free(&wtx.tx);
-        if (!rolled.ok) {
-            LOG_WARN("wallet", "expired private send rollback failed "
-                     "(code=%d): %s", rolled.code, rolled.message);
-            return false;
-        }
+    } else if (wpr_disk_retry(relay, txid)) {
+        out = wpb_finish_disk_delete(base, txid) ? WPB_EXPIRY_RETURNED
+                                                 : WPB_EXPIRY_DEFERRED;
+    } else {
+        out = WPB_EXPIRY_RETURNED;  /* the wallet never held it */
     }
-    wpr_mark_expired(relay, txid);
+    if (out == WPB_EXPIRY_RETURNED)
+        wpr_mark_expired(relay, txid);
+    return out;
+}
+
+/* The wallet has read blocks through a height past the send's expiry and
+ * margin and no block holds it. The coins return only when the chain view
+ * proves every input unspent; otherwise the record stays. */
+bool wallet_private_broadcast_expire(const struct uint256 *txid)
+{
+    return wpb_expire(txid) == WPB_EXPIRY_RETURNED;
+}
+
+struct zcl_result wallet_private_broadcast_before_commit(
+    const struct wallet_rpc_context *ctx, const struct uint256 *txid)
+{
+    struct wpr *relay = wpr_global();
+    if (!ctx || !txid || ctx->mempool != wpr_pool(relay))
+        return ZCL_OK;
+    if (!wpr_prepare(relay, txid).ok)
+        return ZCL_ERR(-1, "private send record could not be made durable; "
+                           "send refused");
+    return ZCL_OK;
+}
+
+struct zcl_result wallet_private_broadcast_unsupported(const char *what)
+{
+    if (wpr_get_mode(wpr_global()) != WPR_MODE_PRIVATE)
+        return ZCL_OK;
+    return ZCL_ERR(WALLET_PBCAST_UNSUPPORTED_CODE,
+                   "PRIVATE_BROADCAST_UNSUPPORTED: %s would be announced to "
+                   "every peer, which private wallet broadcast forbids. "
+                   "Restart without -walletbroadcast=private to use it.",
+                   what);
+}
+
+bool wallet_private_broadcast_refuse_json(const char *what,
+                                          struct json_value *result)
+{
+    struct zcl_result r = wallet_private_broadcast_unsupported(what);
+    if (r.ok)
+        return false;
+    json_set_str(result, r.message);
+    LOG_WARN("wallet", "%s refused: private wallet broadcast is active", what);
     return true;
 }
 
@@ -115,14 +242,22 @@ void wallet_private_broadcast_tick_at(int wallet_height)
     struct wpr *relay = wpr_global();
     struct wpr_tick_result res;
     wpr_tick(relay, wallet_height, &res);
-    size_t returned = 0;
-    for (size_t i = 0; i < res.num_expired; i++)
-        if (wallet_private_broadcast_expire(&res.expired[i]))
-            returned++;
+    size_t returned = 0, held = 0;
+    for (size_t i = 0; i < res.num_expired; i++) {
+        enum wpb_expiry e = wpb_expire(&res.expired[i]);
+        returned += e == WPB_EXPIRY_RETURNED;
+        held += e == WPB_EXPIRY_HELD;
+    }
+    if (held)
+        LOG_WARN("wallet", "%zu private send(s) are past their expiry but "
+                 "the chain may already hold them: an input is spent or "
+                 "unknown to this node. They were not rolled back. Do not "
+                 "send the payment again; rescan and check the wallet "
+                 "history.", held);
     if (returned)
         LOG_WARN("wallet", "%zu private send(s) expired unconfirmed and were "
-                 "returned to the wallet: the coins are available again and "
-                 "the payment may be sent again.", returned);
+                 "returned to the wallet: the coins are available again. To "
+                 "pay again, send it again with a new key.", returned);
     wallet_private_broadcast_warn_held(res.held);
 }
 
@@ -182,10 +317,21 @@ bool wallet_private_broadcast_start(enum wpr_mode mode,
 
 /* What the owner can safely do for a send in this state. No amounts or
  * addresses. */
-static const char *wallet_private_broadcast_next_step(enum wpr_mode mode,
-                                                      enum wpr_state state)
+static const char *wallet_private_broadcast_next_step(
+    enum wpr_mode mode, const struct wpr_status_entry *e)
 {
-    switch (state) {
+    if (e->held)
+        return "Past its expiry, but the chain may already hold it: an input "
+               "is spent or unknown to this node. It was not rolled back. Do "
+               "not send the payment again; rescan and check the wallet "
+               "history.";
+    if (e->disk_retry)
+        return "Expiry in progress: the wallet database could not be "
+               "updated yet and it is retried. Do not send the payment "
+               "again.";
+    switch (e->state) {
+    case WPR_PREPARED:
+        return "Being created. No action needed.";
     case WPR_WAITING_FOR_ROUTE:
         return mode == WPR_MODE_PRIVATE
             ? "Waiting for a connected onion peer. Nothing was sent. The "
@@ -201,8 +347,9 @@ static const char *wallet_private_broadcast_next_step(enum wpr_mode mode,
     case WPR_SEEN:
         return "Seen on the network or confirmed. No action needed.";
     case WPR_EXPIRED:
-        return "Expired unconfirmed. The coins are available again and the "
-               "payment may be sent again.";
+        return "Expired unconfirmed. The coins are available again. To pay "
+               "again, send it again with a new key; the old key keeps "
+               "answering that the earlier outcome is unknown.";
     }
     return "";
 }
@@ -245,7 +392,7 @@ bool rpc_walletbroadcaststatus(const struct json_value *params, bool help,
         json_push_kv_str(&item, "state", wpr_state_name(st->entries[i].state));
         json_push_kv_str(&item, "next_step",
                          wallet_private_broadcast_next_step(
-                             st->mode, st->entries[i].state));
+                             st->mode, &st->entries[i]));
         json_push_kv_int(&item, "attempts", st->entries[i].attempts);
         json_push_kv_int(&item, "seconds_since_last_attempt",
                          st->entries[i].seconds_since_attempt);

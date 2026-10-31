@@ -53,9 +53,12 @@ struct wallet;
 #define WPR_SEEN_RETAIN_S 600
 /* A send is rolled back only when the wallet has read through a height more
  * than this many blocks past its expiry height. The margin absorbs wallet
- * confirmation lag and a reorg of that depth: a mined send must never lose
- * its record. */
+ * a reorg of that depth and the gap between the chain tip and the wallet's
+ * scanned height. Whether the chain shows the send spent is checked
+ * separately before any rollback. */
 #define WPR_EXPIRY_MARGIN_BLOCKS 20
+/* A recorded send the wallet never admitted is dropped after this long. */
+#define WPR_PREPARE_GRACE_S 120
 /* An expired record stays visible in the status for this long. */
 #define WPR_EXPIRED_RETAIN_S (7 * 24 * 3600)
 #define WPR_MAX_ENTRIES 256
@@ -72,6 +75,7 @@ enum wpr_state {
     WPR_SENT = 2,
     WPR_SEEN = 3,
     WPR_EXPIRED = 4,   /* rolled back unconfirmed; the coins are free again */
+    WPR_PREPARED = 5,  /* recorded before the wallet admits it; not yet queued */
 };
 
 /* Chain and peer authorities. Every pointer must outlive the relay. */
@@ -89,6 +93,8 @@ struct wpr_entry {
     bool used;
     bool in_pool;     /* validated into the private pool */
     bool expired;     /* reported for wallet rollback */
+    bool held;        /* past expiry but the chain may hold it: not rolled back */
+    bool disk_retry;  /* memory rolled back, the database row still to delete */
     bool has_expiry;
     uint32_t expiry_height;
     uint32_t attempts;
@@ -128,6 +134,8 @@ struct wpr_status_entry {
     enum wpr_state state;
     uint32_t attempts;
     int64_t seconds_since_attempt;  /* -1 before the first push */
+    bool held;                      /* past expiry; chain check not clear */
+    bool disk_retry;                /* rollback waiting on the database */
 };
 
 struct wpr_status {
@@ -161,6 +169,18 @@ size_t wpr_count_eligible_peers(struct connman *cm);
 /* Track a transaction already admitted to the private pool. Schedules the
  * first push after a random delay and records it durably. */
 struct zcl_result wpr_enqueue(struct wpr *r, const struct transaction *tx);
+
+/* Record a send durably BEFORE the wallet admits it, so a crash between the
+ * wallet write and the queueing still leaves a record to resume. Idempotent.
+ * Fails closed: the caller must not admit the send. */
+struct zcl_result wpr_prepare(struct wpr *r, const struct uint256 *txid);
+
+/* Mark a send past expiry that the chain may already hold, or clear it. */
+void wpr_mark_held(struct wpr *r, const struct uint256 *txid, bool held);
+
+/* The wallet memory was rolled back but the database row remains. */
+void wpr_set_disk_retry(struct wpr *r, const struct uint256 *txid, bool on);
+bool wpr_disk_retry(struct wpr *r, const struct uint256 *txid);
 
 /* The network offered the transaction back and the node accepted it. */
 void wpr_note_seen(struct wpr *r, const struct uint256 *txid);

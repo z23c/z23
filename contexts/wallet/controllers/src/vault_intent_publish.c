@@ -6,6 +6,7 @@
 #include "controllers/sync_controller.h"
 #include "controllers/vault_intent_controller.h"
 #include "controllers/wallet_helpers.h"
+#include "controllers/wallet_private_broadcast.h"
 #include "core/serialize.h"
 #include "json/json.h"
 #include "models/database.h"
@@ -167,6 +168,13 @@ bool vault_intent_publish_prepared(struct wallet_rpc_context *ctx,
                                    struct wallet_tx *wtx, int64_t now,
                                    struct json_value *result)
 {
+    struct zcl_result private_refusal =
+        wallet_private_broadcast_unsupported("a vault intent");
+    if (!private_refusal.ok) {
+        vipub_error(result, "PRIVATE_BROADCAST_UNSUPPORTED",
+                    private_refusal.message);
+        return false;
+    }
     if (wtx->tx.num_shielded_spend > 0 &&
         !vipub_preflight_sapling_notes(ctx, id, wtx, now, result))
         return false;
