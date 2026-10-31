@@ -1805,58 +1805,46 @@ static void preserve_retry_first(const char *name, const char *first,
     fflush(stdout);
 }
 
-static int rerun_first_unobserved_lines(const struct group_result *r)
+/* The "[rerun-alone]" announcement that opens one alone retry. */
+static void rerun_announce(size_t i, const char *name, bool first_unobserved,
+                           bool first_wedged)
 {
-    return r->out_path[0]
-        ? count_marker_lines(r->out_path, "UNOBSERVED (") : 0;
-}
-
-static void rerun_copy_first_log(struct group_result *r,
-                                 const char *preserved_log)
-{
-    snprintf(r->flaky_first_log, sizeof(r->flaky_first_log), "%s",
-             preserved_log[0] ? preserved_log : "(unavailable)");
-}
-
-/* A first attempt that printed UNOBSERVED: the alone rerun must pass and
- * observe every leg before the group is marked load_unobserved. */
-static void rerun_settle_unobserved(struct group_result *r, const char *name,
-                                    const char *preserved_log, bool alone_pass)
-{
-    int alone_unobserved = rerun_first_unobserved_lines(r);
-    if (!(alone_pass && alone_unobserved == 0))
-        return;
-    r->load_flaky = 1;
-    r->load_unobserved = 1;
-    rerun_copy_first_log(r, preserved_log);
-    printf("LOAD-UNOBSERVED %s first=UNOBSERVED alone=OBSERVED "
-          "first_log=%s alone_log=%s\n",
-          name, r->flaky_first_log,
-          r->out_path[0] ? r->out_path : "(none)");
+    printf("[rerun-alone] [%zu] %s — first attempt %s under the shared "
+           "pool; retrying alone with the pool idle (at most once)\n",
+           i, name,
+           first_unobserved ? "printed UNOBSERVED"
+                             : (first_wedged ? "was WEDGED" : "FAILED"));
     fflush(stdout);
 }
 
-/* A first attempt that FAILED or WEDGED: an alone PASS is load-flaky. */
-static void rerun_settle_failed(struct group_result *r, const char *name,
-                                const char *preserved_log, bool first_wedged,
-                                bool alone_pass)
+/* One clean, independent alone attempt at group i, with fresh state. */
+static void rerun_attempt_alone(struct group_result *results, size_t i,
+                                pid_t parent_pid, int timeout_secs,
+                                bool verbose, bool activate_proof_contracts)
 {
-    if (alone_pass) {
-        r->load_flaky = 1;
-        r->flaky_first_wedged = first_wedged;
-        rerun_copy_first_log(r, preserved_log);
-        printf("LOAD-FLAKY %s first=%s alone=PASS first_log=%s "
-              "alone_log=%s\n",
-              name, first_wedged ? "WEDGED" : "FAIL",
-              r->flaky_first_log,
-              r->out_path[0] ? r->out_path : "(none)");
-        fflush(stdout);
-    } else {
-        /* Still a hard failure alone too: record whether the first
-         * attempt was a deadline kill so the failed-groups report can
-         * say "timed out ... retried alone" instead of a plain FAIL. */
-        r->flaky_first_wedged = first_wedged;
-    }
+    /* Fresh watchdog/result state for a clean, independent attempt. */
+    memset(&results[i], 0, sizeof(results[i]));
+    results[i].status = -1;
+    run_group_exclusive(i, parent_pid, results, timeout_secs, verbose,
+                        activate_proof_contracts);
+}
+
+/* A FAIL or WEDGED first attempt that passed alone: load-flaky, not a fail. */
+static void rerun_settle_flaky_pass(struct group_result *results, size_t i,
+                                    const char *preserved_log,
+                                    bool first_wedged)
+{
+    results[i].load_flaky = 1;
+    results[i].flaky_first_wedged = first_wedged;
+    snprintf(results[i].flaky_first_log,
+            sizeof(results[i].flaky_first_log), "%s",
+            preserved_log[0] ? preserved_log : "(unavailable)");
+    printf("LOAD-FLAKY %s first=%s alone=PASS first_log=%s "
+          "alone_log=%s\n",
+          g_groups[i].name, first_wedged ? "WEDGED" : "FAIL",
+          results[i].flaky_first_log,
+          results[i].out_path[0] ? results[i].out_path : "(none)");
+    fflush(stdout);
 }
 
 static void rerun_load_flaky_groups(struct group_result *results,
@@ -1869,7 +1857,8 @@ static void rerun_load_flaky_groups(struct group_result *results,
         bool first_pass = !results[i].signaled && results[i].exit_code == 0;
         bool first_unobserved = false;
         if (first_pass) {
-            int fu = rerun_first_unobserved_lines(&results[i]);
+            int fu = results[i].out_path[0]
+                ? count_marker_lines(results[i].out_path, "UNOBSERVED (") : 0;
             if (fu == 0) continue; /* an ordinary pass: nothing to rerun */
             first_unobserved = true;
         }
@@ -1880,28 +1869,38 @@ static void rerun_load_flaky_groups(struct group_result *results,
         char preserved_log[144] = "";
         preserve_retry_first(g_groups[i].name, first_log, preserved_log);
 
-        printf("[rerun-alone] [%zu] %s — first attempt %s under the shared "
-               "pool; retrying alone with the pool idle (at most once)\n",
-               i, g_groups[i].name,
-               first_unobserved ? "printed UNOBSERVED"
-                                 : (first_wedged ? "was WEDGED" : "FAILED"));
-        fflush(stdout);
-
-        /* Fresh watchdog/result state for a clean, independent attempt. */
-        memset(&results[i], 0, sizeof(results[i]));
-        results[i].status = -1;
-        run_group_exclusive(i, parent_pid, results, timeout_secs, verbose,
+        rerun_announce(i, g_groups[i].name, first_unobserved, first_wedged);
+        rerun_attempt_alone(results, i, parent_pid, timeout_secs, verbose,
                             activate_proof_contracts);
 
         bool alone_pass = !results[i].signaled && results[i].exit_code == 0;
 
         if (first_unobserved) {
-            rerun_settle_unobserved(&results[i], g_groups[i].name,
-                                    preserved_log, alone_pass);
+            int alone_unobserved = results[i].out_path[0]
+                ? count_marker_lines(results[i].out_path, "UNOBSERVED (") : 0;
+            if (alone_pass && alone_unobserved == 0) {
+                results[i].load_flaky = 1;
+                results[i].load_unobserved = 1;
+                snprintf(results[i].flaky_first_log,
+                        sizeof(results[i].flaky_first_log), "%s",
+                        preserved_log[0] ? preserved_log : "(unavailable)");
+                printf("LOAD-UNOBSERVED %s first=UNOBSERVED alone=OBSERVED "
+                      "first_log=%s alone_log=%s\n",
+                      g_groups[i].name, results[i].flaky_first_log,
+                      results[i].out_path[0] ? results[i].out_path : "(none)");
+                fflush(stdout);
+            }
             continue;
         }
-        rerun_settle_failed(&results[i], g_groups[i].name, preserved_log,
-                            first_wedged, alone_pass);
+
+        if (alone_pass) {
+            rerun_settle_flaky_pass(results, i, preserved_log, first_wedged);
+        } else {
+            /* Still a hard failure alone too: record whether the first
+             * attempt was a deadline kill so the failed-groups report can
+             * say "timed out ... retried alone" instead of a plain FAIL. */
+            results[i].flaky_first_wedged = first_wedged;
+        }
     }
 }
 
@@ -2756,9 +2755,10 @@ struct cache_accounting {
     int observation_refused;
 };
 
-static void store_fresh_pass(const struct group_result *r,
-                             struct testcache_probe *probe,
-                             struct testcache **tc,
+/* Persist one fresh cacheable PASS, opening the store lazily on first use. */
+static void store_fresh_pass(const struct group_result *results,
+                             const struct testcache_probe *probes, size_t i,
+                             struct testcache **tcp,
                              struct cache_accounting *acc)
 {
     /* A flaky pass IS a pass — the group's actual code proved
@@ -2771,21 +2771,24 @@ static void store_fresh_pass(const struct group_result *r,
      * lazily on the first store so all-HIT cycles never pay an
      * open. A failed lazy open only loses future reuse, never
      * correctness — the PASS verdict already stands. */
-    if (!*tc) *tc = testcache_open(NULL);
-    if (*tc) {
-        if (r->load_flaky)
-            testcache_store_pass_flaky(*tc, probe->key);
+    if (!*tcp) *tcp = testcache_open(NULL);
+    struct testcache *tc = *tcp;
+    if (tc) {
+        if (results[i].load_flaky)
+            testcache_store_pass_flaky(tc, probes[i].key);
         else
-            testcache_store_pass(*tc, probe->key);
+            testcache_store_pass(tc, probes[i].key);
         acc->stored++;
     }
 }
 
-static void account_group(const struct group_result *r, const char *name,
-                          struct testcache_probe *probe,
+/* One group the cache did not serve: store it if it is a reusable PASS, and
+ * under cold-audit check a cache hit against this fresh verdict. */
+static void account_group(const struct group_result *results,
+                          const struct testcache_probe *probes, size_t i,
                           struct testcache **tc, struct cache_accounting *acc)
 {
-    bool pass = !r->signaled && r->exit_code == 0;
+    bool pass = !results[i].signaled && results[i].exit_code == 0;
     /* A zero-exit group that printed SKIP did not prove its complete
      * contract. Never persist that partial run as a reusable PASS.
      * UNOBSERVED is the same story for a different reason: the group
@@ -2802,26 +2805,26 @@ static void account_group(const struct group_result *r, const char *name,
      * were reliably observed on this host. Ordinary load-flaky
      * PASSes (FAIL/WEDGED alone->PASS) are still cached, flagged, so
      * they keep reprinting LOAD-FLAKY on every future hit. */
-    if (pass && r->skip_markers == 0 &&
-        r->env_unobserved == 0 &&
-        !r->load_unobserved && probe &&
-        probe->cacheable) {
-        store_fresh_pass(r, probe, tc, acc);
+    if (pass && results[i].skip_markers == 0 &&
+        results[i].env_unobserved == 0 &&
+        !results[i].load_unobserved && probes &&
+        probes[i].cacheable) {
+        store_fresh_pass(results, probes, i, tc, acc);
     }
-    if (acc->mode == CACHE_COLD_AUDIT && probe &&
-        probe->cacheable && probe->hit) {
+    if (acc->mode == CACHE_COLD_AUDIT && probes &&
+        probes[i].cacheable && probes[i].hit) {
         acc->audit_hits++;
         if (!pass) {
             acc->audit_diverged++;
             printf("COLD-AUDIT DIVERGENCE: %s carried a cached PASS at "
                    "its current key but FAILED a fresh run — the "
-                   "closure/cache is UNSOUND\n", name);
+                   "closure/cache is UNSOUND\n", g_groups[i].name);
         }
     }
 }
 
 static void account_cache_run(const struct group_result *results,
-                              struct testcache_probe *probes,
+                              const struct testcache_probe *probes,
                               struct testcache **tc,
                               struct cache_accounting *acc)
 {
@@ -2829,8 +2832,7 @@ static void account_cache_run(const struct group_result *results,
         if (results[i].skipped) continue;
         if (results[i].cached) { acc->cached_n++; continue; }
         acc->ran++;
-        account_group(&results[i], g_groups[i].name,
-                      probes ? &probes[i] : NULL, tc, acc);
+        account_group(results, probes, i, tc, acc);
     }
 }
 
