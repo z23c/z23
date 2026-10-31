@@ -71,6 +71,7 @@ LINT_GATE("check-hotswap-candidates-ledger", check_hotswap_candidates_ledger, LI
 LINT_GATE("check-sync-state-no-ordinal", check_sync_state_no_ordinal, LINT_CMD_PAIR)
 LINT_GATE("check-result-discard", check_result_discard, LINT_CMD_NONE)
 LINT_GATE("check-wallet-raw-prepare-log", check_wallet_raw_prepare_log, LINT_CMD_NONE)
+LINT_GATE("check-wallet-log-privacy", check_wallet_log_privacy, LINT_CMD_PAIR)
 LINT_GATE("check-persona-resolves", check_persona_resolves, LINT_CMD_PAIR)
 LINT_GATE("check-prompt-templates", check_prompt_templates, LINT_CMD_PAIR)
 LINT_GATE("check-zcode-package-registry", check_zcode_package_registry, LINT_CMD_PLAIN)

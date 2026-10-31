@@ -83,7 +83,7 @@ bool rpc_z_getnewaddress(const struct json_value *params, bool help,
         (void)sapling_keystore_rollback_address(
             &ctx->wallet->sapling_keys, &undo);
         json_set_str(result, "Failed to encode address");
-        LOG_FAIL("wallet_shielded", "sapling_encode_payment_address failed for HRP=%s",
+        LOG_FAIL("wallet_shielded", "sapling_encode_payment_address failed for HRP=%s", // wallet-log-ok:bech32-hrp-constant
                  cp->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS]);
     }
 
@@ -196,7 +196,7 @@ bool rpc_z_getbalance(const struct json_value *params, bool help,
     struct tx_destination dest;
     if (!wallet_decode_address(addr_str, &dest)) {
         json_set_str(result, "Invalid address");
-        LOG_FAIL("wallet_shielded", "z_getbalance: decode_destination failed for addr=%s", addr_str);
+        LOG_FAIL("wallet_shielded", "z_getbalance: decode_destination failed");
     }
 
     int64_t balance = 0;
@@ -385,7 +385,7 @@ bool rpc_z_listreceivedbyaddress(const struct json_value *params,
     uint8_t z_d[11], z_pkd[32];
     if (!sapling_decode_payment_address(addr_str, z_d, z_pkd)) {
         json_set_str(result, "Not a valid Sapling address");
-        LOG_FAIL("wallet_shielded", "z_listreceivedbyaddress: invalid sapling address %s", addr_str);
+        LOG_FAIL("wallet_shielded", "z_listreceivedbyaddress: invalid sapling address");
     }
 
     json_set_array(result);

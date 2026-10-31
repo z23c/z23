@@ -134,6 +134,7 @@ gate_command() {
         check-silent-errors-conditions)    echo './build/bin/z23-lint check-silent-error-returns engine/conditions/src conditions condition "use LOG_ERR/LOG_FAIL/LOG_RETURN, prev-line error log, or mark // raw-return-ok:<reason>"' ;;
         check-silent-errors-bool)          echo 'ZCL_LINT_MODE=FAIL ./build/bin/z23-lint check-silent-errors-bool' ;;
         check-wallet-raw-prepare-log)      echo 'ZCL_LINT_MODE=FAIL ./build/bin/z23-lint check-wallet-raw-prepare-log' ;;
+        check-wallet-log-privacy)          echo './build/bin/z23-lint check-wallet-log-privacy --selftest && ZCL_LINT_MODE=FAIL ./build/bin/z23-lint check-wallet-log-privacy' ;;
         check-model-ar-lifecycle)          echo './tools/scripts/check_model_ar_lifecycle.sh --selftest && ./tools/scripts/check_model_ar_lifecycle.sh' ;;
         check-long-functions)              echo './tools/scripts/check_long_functions.sh --selftest && ./tools/scripts/check_long_functions.sh' ;;
         check-lib-layering)                echo './tools/scripts/check_lib_layering.sh --selftest && ./tools/scripts/check_lib_layering.sh' ;;

@@ -363,18 +363,20 @@ bool z_sendmany_shielded(
             authoritative_tip, &i, &wheight);
         if (wstat == 1) {
             json_set_str(result, "Witness not available (run rescanwitnesses)");
-            LOG_FAIL("wallet_shielded", "z_sendmany: witness not available for note %zu", i);
+            LOG_FAIL("wallet_shielded", // wallet-log-ok:note-index-label
+                     "z_sendmany: witness not available for note %zu", i);
         }
         if (wstat == 2) {
             json_set_str(result,
                          "Witness stale (run rescanwitnesses)");
-            LOG_FAIL("wallet_shielded",
+            LOG_FAIL("wallet_shielded", // wallet-log-ok:note-index-label
                      "z_sendmany: witness height=%d authoritative_tip=%d note=%zu",
                      wheight, authoritative_tip, i);
         }
         if (wstat == 3) {
             json_set_str(result, "Failed to deserialize witness");
-            LOG_FAIL("wallet_shielded", "z_sendmany: witness deserialize failed for note %zu", i);
+            LOG_FAIL("wallet_shielded", // wallet-log-ok:note-index-label
+                     "z_sendmany: witness deserialize failed for note %zu", i);
         }
 
         /* Anchor = witness root at chain tip.

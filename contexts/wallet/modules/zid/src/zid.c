@@ -199,7 +199,7 @@ bool zid_doc_sign(struct zid_doc *doc, const uint8_t *body, uint16_t body_len,
                   uint64_t seq, uint64_t expiry, const uint8_t seed[32])
 {
     if (!doc || !seed)
-        LOG_FAIL("zid", "sign: NULL argument (doc=%p seed=%p)",
+        LOG_FAIL("zid", "sign: NULL argument (doc=%p seed=%p)", // wallet-log-ok:pointer-values-only
                  (void *)doc, (const void *)seed);
     if (body_len > ZID_BODY_MAX)
         LOG_FAIL("zid", "sign: body_len %u exceeds ZID_BODY_MAX %d",

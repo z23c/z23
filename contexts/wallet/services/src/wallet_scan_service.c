@@ -370,21 +370,17 @@ static int wallet_scan_pass2_nonempty(struct node_db *ndb,
     double total_ms = (double)(ts_p2.tv_sec - ts_start->tv_sec) * 1000.0 +
                       (double)(ts_p2.tv_nsec - ts_start->tv_nsec) / 1e6;
 
-    /* Compute balance */
-    int64_t balance = 0;
     int unspent = 0;
     for (int i = 0; i < uset.count; i++) {
         if (!uset.items[i].spent) {
-            balance += uset.items[i].value;
             unspent++;
         }
     }
 
     printf("wallet_scan: pass 2 done in %.1f ms — %d blocks deserialized, "
            "%d wallet txs\n", p2_ms, blocks_deserialized, wl.count);
-    printf("wallet_scan: TOTAL %.1f ms — %d unspent UTXOs, "
-           "balance %.8f ZCL\n",
-           total_ms, unspent, (double)balance / (double)ZATOSHI_PER_ZCL);
+    printf("wallet_scan: TOTAL %.1f ms — %d unspent UTXOs\n",
+           total_ms, unspent);
     fflush(stdout);
 
     int result = wallet_scan_store_results(ndb, &uset, &wl);
@@ -408,7 +404,7 @@ int wallet_scan_pass2_execute(struct node_db *ndb,
                               const struct timespec *ts_p1)
 {
     if (matched_files < 0)
-        LOG_ERR("wallet_scan", "negative matched-file evidence: %d",
+        LOG_ERR("wallet_scan", "negative matched-file count: %d",
                 matched_files);
 
     /* Keep the empty replacement outside the nonempty worker's large stack

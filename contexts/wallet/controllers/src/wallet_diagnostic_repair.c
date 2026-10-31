@@ -168,8 +168,8 @@ bool rpc_reindexdb(const struct json_value *params, bool help,
     int utxo_count = db_wallet_utxo_list_unspent(ctx->node_db, utxos, 256);
     json_push_kv_int(result, "unspent_utxos", utxo_count);
 
-    printf("reindexdb: complete — balance %s ZCL (%d UTXOs)\n",
-           tot_str, utxo_count);
+    printf("reindexdb: complete — %d UTXOs\n",
+           utxo_count);
     fflush(stdout);
 
     return true;

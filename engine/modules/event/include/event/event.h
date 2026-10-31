@@ -117,10 +117,10 @@ enum event_type {
     EV_MODEL_VALIDATION_FAILED,  /* payload: "model=peer errors=..." */
     EV_UTXO_SAVED,               /* payload: "height=N value=N" */
     EV_BLOCK_SAVED,              /* payload: "height=N ntx=N" */
-    EV_WALLET_KEY_SAVED,         /* payload: "kind=transparent|sapling addr_hash=..." */
-    EV_SAPLING_KEY_SAVED,        /* payload: "fvk_hash=..." */
-    EV_WALLET_TX_SAVED,          /* payload: "txid=... category=..." */
-    EV_WALLET_UTXO_SAVED,        /* payload: "vout=N value=N" */
+    EV_WALLET_KEY_SAVED,         /* payload: "kind=transparent|sapling" */
+    EV_SAPLING_KEY_SAVED,        /* payload: "kind=sapling" */
+    EV_WALLET_TX_SAVED,          /* payload: "category=..." (no txid) */
+    EV_WALLET_UTXO_SAVED,        /* payload: "vout=N" (no value) */
 
     /* ── Recovery actions ──────────────────────────── */
     EV_RECOVERY_ACTION,          /* payload: "action=... reason=..." */

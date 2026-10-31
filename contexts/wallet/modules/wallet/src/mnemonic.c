@@ -54,7 +54,8 @@ bool mnemonic_generate(int word_count, char *phrase_out, size_t phrase_size)
             entropy, entropy_len, phrase_out, phrase_size, &written);
     memory_cleanse(entropy, sizeof(entropy));
     if (!r.ok)
-        LOG_FAIL(DOMAIN, "mnemonic_generate: %s", r.message);
+        LOG_FAIL(DOMAIN, // wallet-log-ok:function-name-label
+                 "mnemonic_generate: %s", r.message);
     return true;
 }
 
@@ -68,7 +69,8 @@ bool mnemonic_from_entropy(const uint8_t *entropy, size_t entropy_len,
     struct zcl_result r = domain_wallet_mnemonic_from_entropy(
             entropy, entropy_len, phrase_out, phrase_size, &written);
     if (!r.ok)
-        LOG_FAIL(DOMAIN, "mnemonic_from_entropy: %s", r.message);
+        LOG_FAIL(DOMAIN, // wallet-log-ok:function-name-label
+                 "mnemonic_from_entropy: %s", r.message);
     return true;
 }
 
@@ -80,7 +82,8 @@ bool mnemonic_validate(const char *phrase)
 
     struct zcl_result r = domain_wallet_mnemonic_validate(phrase);
     if (!r.ok)
-        LOG_FAIL(DOMAIN, "mnemonic_validate: %s", r.message);
+        LOG_FAIL(DOMAIN, // wallet-log-ok:function-name-label
+                 "mnemonic_validate: %s", r.message);
     return true;
 }
 
@@ -95,7 +98,8 @@ bool mnemonic_to_seed(const char *phrase, const char *passphrase,
     struct zcl_result r = domain_wallet_mnemonic_to_seed(
             phrase, passphrase, seed_out, MNEMONIC_SEED_SIZE);
     if (!r.ok)
-        LOG_FAIL(DOMAIN, "mnemonic_to_seed: %s", r.message);
+        LOG_FAIL(DOMAIN, // wallet-log-ok:function-name-label
+                 "mnemonic_to_seed: %s", r.message);
     return true;
 }
 
@@ -112,7 +116,8 @@ bool mnemonic_to_wallet_seed(const char *phrase, const char *passphrase,
         memory_cleanse(full, sizeof(full));
         /* r.message describes the shape that was wrong (word count,
          * checksum) and never contains the phrase itself. */
-        LOG_FAIL(DOMAIN, "mnemonic_to_wallet_seed: %s", r.message);
+        LOG_FAIL(DOMAIN, // wallet-log-ok:function-name-label
+                 "mnemonic_to_wallet_seed: %s", r.message);
     }
 
     memcpy(seed_out, full, MNEMONIC_WALLET_SEED_SIZE);

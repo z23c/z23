@@ -266,7 +266,7 @@ bool zendp_sign(struct zid_doc *doc, const struct zendp *ep, uint64_t seq,
                 uint64_t expiry, const uint8_t seed[32])
 {
     if (!doc || !ep || !seed)
-        LOG_FAIL(ZENDP_LOG, "sign: NULL argument (doc=%p ep=%p seed=%p)",
+        LOG_FAIL(ZENDP_LOG, "sign: NULL argument (doc=%p ep=%p seed=%p)", // wallet-log-ok:pointer-values-only
                  (void *)doc, (const void *)ep, (const void *)seed);
     enum zendp_window w = zendp_window_check(ep->not_before, expiry);
     if (w != ZENDP_WINDOW_OK) {

@@ -627,7 +627,7 @@ struct zcl_result wallet_sqlite_scrub_plaintext_r(struct wallet_sqlite *ws)
         return wkey_scrub_fail(ws, result);
     }
     if (transparent + sapling + seed > 0)
-        printf("wallet_sqlite: upgraded %d secret row(s) "
+        printf("wallet_sqlite: upgraded %d secret row(s) " // wallet-log-ok:row-count
                "(transparent_wkd1=%d sapling_wks1=%d seed_wks1=%d)\n",
                transparent + sapling + seed,
                transparent, sapling, seed);

@@ -197,6 +197,7 @@ explicit `// raw-return-ok:<reason>` marker (no space after the colon):
 | `check-silent-errors-conditions` | `engine/conditions/src/` |
 | `check-silent-errors-bool` | `app/{controllers,services,jobs,conditions,models}/src/` (RATCHET) |
 | `check-wallet-raw-prepare-log` | raw `sqlite3_prepare_v2()` + unlogged NULL-check in `app/`, `lib/` (RATCHET) |
+| `check-wallet-log-privacy` | log and event calls under `contexts/wallet/` that pass a wallet address, amount, balance, memo, txid, note value, viewing key, diversifier or seed (RATCHET; `// wallet-log-ok:<reason>` marker) |
 
 The service/controller/job/condition gates accept only an *error-level*
 preceding log (`LOG_ERR`, `LOG_FAIL`, `LOG_RETURN`, or `log_json` at error
@@ -1367,6 +1368,7 @@ add/remove a gate.
 - `check-service-result-convergence`
 - `check-silent-errors-bool`
 - `check-wallet-raw-prepare-log`
+- `check-wallet-log-privacy`
 - `check-silent-errors-conditions`
 - `check-silent-errors-controllers`
 - `check-silent-errors-jobs`

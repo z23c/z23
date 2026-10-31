@@ -73,18 +73,18 @@ bool rpc_setlabel(const struct json_value *params, bool help,
     struct tx_destination dest;
     if (!wallet_decode_address(addr_str, &dest)) {
         json_set_str(result, "Invalid address");
-        LOG_FAIL("wallet", "setlabel: invalid address %s", addr_str);
+        LOG_FAIL("wallet", "setlabel: invalid address");
     }
 
     if (!wallet_ctx_db_ready(ctx)) {
         json_set_str(result,
             "Error: wallet database unavailable; label not saved");
-        LOG_FAIL("wallet", "setlabel: node_db unavailable for %s", addr_str);
+        LOG_FAIL("wallet", "setlabel: node_db unavailable");
     }
 
     if (strlen(label) > WALLET_LABEL_MAX) {
         json_set_str(result, "Label too long");
-        LOG_FAIL("wallet", "setlabel: label too long for %s", addr_str);
+        LOG_FAIL("wallet", "setlabel: label too long");
     }
 
     struct db_wallet_label l;
@@ -93,7 +93,7 @@ bool rpc_setlabel(const struct json_value *params, bool help,
     snprintf(l.label, sizeof(l.label), "%s", label);
     if (!db_wallet_label_save(ctx->node_db, &l)) {
         json_set_str(result, "Error: label did not validate or persist");
-        LOG_FAIL("wallet", "setlabel: save failed for %s", addr_str);
+        LOG_FAIL("wallet", "setlabel: save failed");
     }
 
     json_set_null(result);
@@ -182,8 +182,8 @@ static void wl_fail(struct zcl_command_reply *reply,
     enum zcl_command_status status =
         exit_code == ZCL_COMMAND_EXIT_BLOCKED ? ZCL_COMMAND_STATUS_BLOCKED
                                               : ZCL_COMMAND_STATUS_FAILED;
-    LOG_ERROR("wallet.label", "%s: %s (%s)", code, message,
-              evidence && evidence[0] ? evidence : "-");
+    /* The evidence is the caller's address or label: it stays in the reply. */
+    LOG_ERROR("wallet.label", "%s: %s", code, message);
     zcl_command_reply_fail(reply, status, exit_code, code, "handle",
                            false, false, message, evidence ? evidence : "");
 }
@@ -249,8 +249,7 @@ void zcl_native_handle_wallet_address_label(
         return;
     }
     if (!db_wallet_label_find(ndb, address, &l))
-        LOG_WARN("wallet.label", "label row missing right after save: %s",
-                 address);
+        LOG_WARN("wallet.label", "label row missing right after save");
     wl_render(&reply->data, &l);
     reply->error.mutated = true;
 }

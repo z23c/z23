@@ -44,7 +44,8 @@ bool hd_master_from_seed(struct ext_key *master_out,
     struct zcl_result r =
             domain_wallet_master_from_seed(master_out, seed, seed_len);
     if (!r.ok)
-        LOG_FAIL(DOMAIN, "hd_master_from_seed: %s", r.message);
+        LOG_FAIL(DOMAIN, // wallet-log-ok:function-name-label
+                 "hd_master_from_seed: %s", r.message);
     return true;
 }
 

@@ -331,13 +331,13 @@ static int rescan_check_witness_roots(
             char wr_hex[65]; uint256_get_hex(&wr, wr_hex);
             if (memcmp(wr.data, final_tree_root->data, 32) != 0) {
                 witness_root_mismatches++;
-                printf("rescanwitnesses: WITNESS ROOT MISMATCH for note %d!\n"
+                printf("rescanwitnesses: WITNESS ROOT MISMATCH for note %d!\n" // wallet-log-ok:note-index-label
                     "  tree root:    %s (size=%zu)\n"
                     "  witness root: %s (fills=%zu)\n",
                     ni, tr_hex, incremental_tree_size(tree),
                     wr_hex, witnesses[ni].num_filled);
             } else {
-                printf("rescanwitnesses: note %d witness root MATCHES tree ✓\n", ni);
+                printf("rescanwitnesses: note %d witness root MATCHES tree ✓\n", ni); // wallet-log-ok:note-index-label
             }
         }
         fflush(stdout);

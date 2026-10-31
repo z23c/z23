@@ -125,7 +125,7 @@ bool rpc_gettransaction(const struct json_value *params, bool help,
             if (!wallet_db_tx_deserialize(&dbtx, &tx)) {
                 db_wallet_tx_free(&dbtx);
                 json_set_str(result, "Failed to decode wallet transaction");
-                LOG_FAIL("wallet", "gettransaction: failed to deserialize tx %s", txid_str);
+                LOG_FAIL("wallet", "gettransaction: failed to deserialize tx");
             }
 
             json_set_object(result);
@@ -175,7 +175,7 @@ bool rpc_gettransaction(const struct json_value *params, bool help,
     const struct wallet_tx *wtx = wallet_get_tx(ctx->wallet, &txid);
     if (!wtx) {
         json_set_str(result, "Invalid or non-wallet transaction id");
-        LOG_FAIL("wallet", "gettransaction: tx %s not found in wallet", txid_str);
+        LOG_FAIL("wallet", "gettransaction: tx not found in wallet");
     }
 
     json_set_object(result);

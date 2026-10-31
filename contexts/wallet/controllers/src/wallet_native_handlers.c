@@ -277,8 +277,8 @@ void wnh_fail(struct zcl_command_reply *reply,
     enum zcl_command_status status =
         exit_code == ZCL_COMMAND_EXIT_BLOCKED ? ZCL_COMMAND_STATUS_BLOCKED
                                               : ZCL_COMMAND_STATUS_FAILED;
-    LOG_ERROR(WNH_TAG, "%s: %s (%s)", code, message,
-              evidence && evidence[0] ? evidence : "-");
+    /* The evidence is the caller's address or amount: it stays in the reply. */
+    LOG_ERROR(WNH_TAG, "%s: %s", code, message);
     zcl_command_reply_fail(reply, status, exit_code, code, "handle", false,
                            false, message, evidence ? evidence : "");
 }

@@ -58,11 +58,9 @@ static void wallet_tx_after_save(void *record, void *ctx)
 {
     (void)ctx;
     const struct db_wallet_tx *t = record;
-    char txid_hex[65];
-    HexStr(t->txid, 32, false, txid_hex, sizeof(txid_hex));
     const char *category = t->from_me ? "send" : "receive";
     event_emitf(EV_WALLET_TX_SAVED, 0,
-                "txid=%s category=%s", txid_hex, category);
+                "category=%s", category);
     if (!wallet_projection_emit_tx_seen(t->txid,
             t->has_block ? t->block_height : -1,
             t->fee, t->from_me ? 1u : 0u)) {
@@ -90,8 +88,7 @@ static bool wallet_utxo_before_save(void *record, void *ctx)
         LOG_FAIL("wallet_utxo", "before_save REJECTED: null txid");
     }
     if (u->value < 0 || u->value > 2100000000000000LL) {
-        LOG_FAIL("wallet_utxo", "before_save REJECTED: value %lld out of range",
-                 (long long)u->value);
+        LOG_FAIL("wallet_utxo", "before_save REJECTED: value out of range");
     }
     return true;
 }
@@ -101,8 +98,7 @@ static void wallet_utxo_after_save(void *record, void *ctx)
 {
     (void)ctx;
     const struct db_wallet_utxo *u = record;
-    event_emitf(EV_WALLET_UTXO_SAVED, 0, "vout=%u value=%lld",
-                u->vout, (long long)u->value);
+    event_emitf(EV_WALLET_UTXO_SAVED, 0, "vout=%u", u->vout);
     if (!wallet_projection_emit_utxo_seen(u->txid, u->vout, u->value,
             u->address_hash, u->height, u->is_coinbase ? 1u : 0u)) {
         LOG_WARN("wallet_projection", "[wallet_projection] utxo seen projection emit failed");

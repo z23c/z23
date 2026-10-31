@@ -40,7 +40,7 @@ SPECIALIST("storage",
            "storage,sqlite")
 SPECIALIST("wallet",
            "contexts/wallet",
-           "check-wallet-raw-prepare-log|check-before-save-hooks|check-model-ar-lifecycle",
+           "check-wallet-raw-prepare-log|check-wallet-log-privacy|check-before-save-hooks|check-model-ar-lifecycle",
            "wallet|wallet_view|wallet_metadata_encryption",
            "wallet,keys")
 SPECIALIST("explorer",

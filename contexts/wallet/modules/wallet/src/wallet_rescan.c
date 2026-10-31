@@ -157,7 +157,7 @@ static void wallet_rescan_log_done(const struct wallet_rescan_report *r,
                                    int start_height, int stop_height,
                                    int64_t t0_ms)
 {
-    LOG_INFO("wallet",
+    LOG_INFO("wallet",  // wallet-log-ok:note-count
              "[wallet_rescan] op=wallet_rescan start_height=%d end_height=%d "
              "blocks_scanned=%lld items=%lld elapsed_ms=%lld result=%s",
              start_height, stop_height, (long long)r->blocks_scanned,
@@ -238,7 +238,7 @@ int wallet_rescan_report(struct wallet *w, const struct active_chain *chain,
     wallet_rescan_classify(r);
 
     int64_t elapsed = GetTime() - t_start;
-    LOG_INFO("wallet",
+    LOG_INFO("wallet",  // wallet-log-ok:note-count
              "Rescan complete: %d..%d, %"PRId64" of %"PRId64" indexed blocks read "
              "in %"PRId64"s, %"PRId64" outputs + %"PRId64" shielded notes found "
              "(%"PRId64" missing body, %"PRId64" unreadable, %"PRId64" unindexed).",
@@ -254,7 +254,7 @@ int wallet_rescan_report(struct wallet *w, const struct active_chain *chain,
                  r->shielded_txs_unscanned, start_height, stop_height);
 
     if (!r->coverage_ok)
-        LOG_ERROR("wallet",
+        LOG_ERROR("wallet",  // wallet-log-ok:note-count
                   "%s: rescan of %d..%d read only %"PRId64" of %"PRId64" indexed "
                   "blocks (%"PRId64" have no block body on this node). The result "
                   "(%"PRId64" outputs, %"PRId64" notes) does NOT mean the wallet is "

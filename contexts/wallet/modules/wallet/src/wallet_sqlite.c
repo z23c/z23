@@ -182,10 +182,7 @@ static bool wallet_decrypt_blob(const uint8_t *envelope, size_t env_len,
 
 static void wsql_emit_transparent_key_add(const struct key_id *kid)
 {
-    char addr_hex[41];
-    HexStr(kid->id.data, 20, false, addr_hex, sizeof(addr_hex));
-    event_emitf(EV_WALLET_KEY_SAVED, 0,
-                "kind=transparent addr_hash=%s", addr_hex);
+    event_emitf(EV_WALLET_KEY_SAVED, 0, "kind=transparent");
 
     char address[EV_WALLET_ADDRESS_MAX + 1];
     memset(address, 0, sizeof(address));
@@ -213,16 +210,10 @@ static void wsql_emit_transparent_key_add(const struct key_id *kid)
     }
 }
 
-static void wsql_emit_sapling_key_add(const struct sapling_key_entry *entry)
+static void wsql_emit_sapling_key_add(void)
 {
-    char fvk_hex[33];
-    HexStr((const uint8_t *)&entry->xfvk, 16, false, fvk_hex,
-           sizeof(fvk_hex));
-    char addr_hex[33];
-    HexStr(entry->ivk, 16, false, addr_hex, sizeof(addr_hex));
-    event_emitf(EV_WALLET_KEY_SAVED, 0,
-                "kind=sapling addr_hash=%s", addr_hex);
-    event_emitf(EV_SAPLING_KEY_SAVED, 0, "fvk_hash=%s", fvk_hex);
+    event_emitf(EV_WALLET_KEY_SAVED, 0, "kind=sapling");
+    event_emitf(EV_SAPLING_KEY_SAVED, 0, "kind=sapling");
 }
 
 /* Row-existence probes for the emit-once gate.  A failed probe is
@@ -1121,7 +1112,7 @@ bool wallet_sqlite_write_sapling_key(struct wallet_sqlite *ws,
                  step_rc, child_index, sqlite3_errmsg(ws->db));
     }
     if (!existed)
-        wsql_emit_sapling_key_add(entry);
+        wsql_emit_sapling_key_add();
     return true;
 }
 

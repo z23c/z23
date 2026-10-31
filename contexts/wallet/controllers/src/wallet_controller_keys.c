@@ -34,18 +34,18 @@ bool rpc_dumpprivkey(const struct json_value *params, bool help,
     struct tx_destination dest;
     if (!wallet_decode_address(addr_str, &dest)) {
         json_set_str(result, "Invalid address");
-        LOG_FAIL("wallet", "dumpprivkey: invalid address %s", addr_str);
+        LOG_FAIL("wallet", "dumpprivkey: invalid address");
     }
 
     if (dest.type != DEST_KEY_ID) {
         json_set_str(result, "Address does not refer to a key");
-        LOG_FAIL("wallet", "dumpprivkey: address %s is not a key (type=%d)", addr_str, dest.type);
+        LOG_FAIL("wallet", "dumpprivkey: address is not a key (type=%d)", dest.type);
     }
 
     struct privkey key;
     if (!wallet_dump_key(ctx->wallet, &dest.id.key, &key)) {
         json_set_str(result, "Private key for address is not known");
-        LOG_FAIL("wallet", "dumpprivkey: private key not found for %s", addr_str);
+        LOG_FAIL("wallet", "dumpprivkey: private key not found");
     }
 
     const struct chain_params *cp = chain_params_get();
@@ -59,7 +59,7 @@ bool rpc_dumpprivkey(const struct json_value *params, bool help,
 
     if (!wallet_rpc_set_secret_string(result, wif, sizeof(wif), ok)) {
         json_set_str(result, "Encoding failed");
-        LOG_FAIL("wallet", "dumpprivkey: WIF encoding failed for %s", addr_str);
+        LOG_FAIL("wallet", "dumpprivkey: WIF encoding failed");
     }
 
     return true;
@@ -204,9 +204,7 @@ bool rpc_importprivkey(const struct json_value *params, bool help,
             db_utxo_free(&full);
         }
 
-        int64_t bal = db_utxo_balance_for_address(ctx->node_db, addr_hash);
-        printf("importprivkey: %d UTXOs, balance %.8f ZCL (instant)\n",
-               found, (double)bal / 1e8);
+        printf("importprivkey: %d UTXOs imported (instant)\n", found);
     }
 
     json_set_null(result);
@@ -234,18 +232,18 @@ bool rpc_importaddress(const struct json_value *params, bool help,
     struct tx_destination dest;
     if (!wallet_decode_address(addr_str, &dest)) {
         json_set_str(result, "Invalid address");
-        LOG_FAIL("wallet", "importaddress: invalid address %s", addr_str);
+        LOG_FAIL("wallet", "importaddress: invalid address");
     }
 
     if (dest.type != DEST_KEY_ID) {
         json_set_str(result, "Only transparent P2PKH addresses supported");
-        LOG_FAIL("wallet", "importaddress: address %s is not P2PKH (type=%d)", addr_str, dest.type);
+        LOG_FAIL("wallet", "importaddress: address is not P2PKH (type=%d)", dest.type);
     }
 
     /* Already have the private key? Skip — nothing to do. */
     if (keystore_have_key(&ctx->wallet->keystore, &dest.id.key)) {
         json_set_str(result, "Address already in wallet with private key");
-        LOG_FAIL("wallet", "importaddress: address %s already has private key", addr_str);
+        LOG_FAIL("wallet", "importaddress: address already has private key");
     }
 
     /* Add as watch-only to keystore. */
@@ -255,7 +253,7 @@ bool rpc_importaddress(const struct json_value *params, bool help,
 
     if (!ok) {
         json_set_str(result, "Error: watch-only keystore full");
-        LOG_FAIL("wallet", "importaddress: watch-only keystore full for %s", addr_str);
+        LOG_FAIL("wallet", "importaddress: watch-only keystore full");
     }
 
     /* Persist to wallet DB. On failure, roll back the keystore add
@@ -270,7 +268,7 @@ bool rpc_importaddress(const struct json_value *params, bool help,
                 "Error: wallet persistence failed. Watch-only address NOT saved. "
                 "Check getwalletinfo.persistence and node.log.");
             LOG_FAIL("wallet", "importaddress: wallet_sqlite_write_watch_only failed "
-                                "for %s — rolled back keystore", addr_str);
+                                "(rolled back keystore)");
         }
         wallet_backup_service_on_key_change();
     }
@@ -309,8 +307,8 @@ bool rpc_importaddress(const struct json_value *params, bool help,
         bal = db_utxo_balance_for_address(ctx->node_db, addr_hash);
     }
 
-    printf("importaddress: %s watch-only, %d UTXOs, balance %.8f ZCL\n",
-           addr_str, found, (double)bal / 1e8);
+    printf("importaddress: watch-only, %d UTXOs\n",
+           found);
 
     json_set_object(result);
     json_push_kv_str(result, "address", addr_str);

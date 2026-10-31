@@ -506,13 +506,13 @@ static bool rpc_sendtoaddress(const struct json_value *params, bool help,
 
     if (amount <= 0) {
         json_set_str(result, "Invalid amount");
-        LOG_FAIL("wallet", "sendtoaddress: invalid amount %lld", (long long)amount);
+        LOG_FAIL("wallet", "sendtoaddress: invalid amount");
     }
 
     struct tx_destination dest;
     if (!wallet_decode_address(addr_str, &dest)) {
         json_set_str(result, "Invalid address");
-        LOG_FAIL("wallet", "sendtoaddress: invalid address %s", addr_str);
+        LOG_FAIL("wallet", "sendtoaddress: invalid address");
     }
 
     struct wallet_tx wtx;
@@ -614,13 +614,13 @@ bool wallet_direct_sendtoaddress(const char *address, int64_t amount_sat,
     }
     if (amount_sat <= 0) {
         snprintf(error_out, error_out_size, "Invalid amount");
-        LOG_FAIL("wallet", "direct_sendtoaddress: invalid amount %lld", (long long)amount_sat);
+        LOG_FAIL("wallet", "direct_sendtoaddress: invalid amount");
     }
 
     struct tx_destination dest;
     if (!wallet_decode_address(address, &dest)) {
         snprintf(error_out, error_out_size, "Invalid address");
-        LOG_FAIL("wallet", "direct_sendtoaddress: invalid address %s", address);
+        LOG_FAIL("wallet", "direct_sendtoaddress: invalid address");
     }
 
     struct wallet_tx wtx;

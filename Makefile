@@ -3254,7 +3254,7 @@ $(filter-out $(ZCL_VENDOR_LIB)/libsecp256k1.a,$(VENDOR_LIBS)):
         check-silent-errors-services check-silent-errors-controllers \
         check-silent-errors-jobs check-silent-errors-conditions check-silent-errors-bool \
         check-log-macro-return-type \
-        check-wallet-raw-prepare-log check-blob-read-bounds \
+        check-wallet-raw-prepare-log check-wallet-log-privacy check-blob-read-bounds \
         check-outparam-init-before-return \
         check-before-save-hooks check-pthread-create check-model-validation \
         check-model-sql-literals \
@@ -6639,6 +6639,7 @@ LINT_FAST_GATES := \
     check-pthread-create \
     check-log-macro-return-type \
     check-wallet-raw-prepare-log \
+    check-wallet-log-privacy \
     check-zcc-cache \
     check-dev-proof-native-fast-path \
     check-equihash-params \
@@ -13721,6 +13722,13 @@ check-wallet-raw-prepare-log: $(LINTC_TOOL)
 	@echo "══ LINT: raw sqlite3_prepare_v2 unlogged NULL-check (RATCHET) ══"
 	@ZCL_LINT_MODE=FAIL ./build/bin/z23-lint check-wallet-raw-prepare-log
 
+# Ratchet over wallet log calls: none may pass a wallet address, amount,
+# balance, memo, txid, note value, viewing key, diversifier or seed.
+check-wallet-log-privacy: $(LINTC_TOOL)
+	@echo "══ LINT: wallet log calls pass no wallet-private field (RATCHET) ══"
+	@./build/bin/z23-lint check-wallet-log-privacy --selftest
+	@ZCL_LINT_MODE=FAIL ./build/bin/z23-lint check-wallet-log-privacy
+
 check-before-save-hooks: $(LINTC_TOOL)
 	@echo "══ LINT: critical models wire before_save hooks ══"
 	@./build/bin/z23-lint check-before-save-hooks
@@ -15787,6 +15795,7 @@ LINT_GATES := \
     check-no-runtime-abort \
     check-hardening-ratchet \
     check-wallet-raw-prepare-log \
+    check-wallet-log-privacy \
     check-zcc-cache \
     check-zcc-epoch-object \
     check-zcc-epoch-batch \

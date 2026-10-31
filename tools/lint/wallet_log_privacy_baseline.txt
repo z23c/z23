@@ -1,0 +1,10 @@
+# check-wallet-log-privacy RATCHET baseline (exact pins, shrink-only).
+# key = <relpath>::<enclosing function>, value = log calls in that
+# function that pass a wallet-private field. Regenerate after fixing
+# some: ZCL_LINT_MODE=UPDATE ./build/bin/z23-lint check-wallet-log-privacy
+contexts/wallet/controllers/src/wallet_native_read_bodies.c::zcl_native_z_getbalance_body:2
+contexts/wallet/controllers/src/wallet_shielded_keys.c::rpc_z_exportkey:2
+contexts/wallet/controllers/src/wallet_shielded_keys.c::rpc_z_exportviewingkey:2
+contexts/wallet/controllers/src/wallet_shielded_keys.c::rpc_z_getmemo:3
+contexts/wallet/controllers/src/wallet_shielded_send.c::z_sendmany_run:7
+contexts/wallet/controllers/src/wallet_shielded_send_shielded.c::z_sendmany_shielded:1
