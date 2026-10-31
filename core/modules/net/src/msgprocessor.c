@@ -456,6 +456,13 @@ static void msg_block_intake_drain_locked(struct msg_block_intake *in)
     }
 }
 
+static void msg_block_intake_close_scope(struct msg_block_intake *in,
+                                         bool batch_scope_open)
+{
+    if (batch_scope_open && in->mp && in->mp->catchup_batch_end)
+        in->mp->catchup_batch_end(in->mp->catchup_batch_scope_ctx);
+}
+
 static void *msg_block_intake_worker(void *arg)
 {
     struct msg_block_intake *in = arg;
@@ -476,8 +483,7 @@ static void *msg_block_intake_worker(void *arg)
         if (in->stopping || thread_registry_shutdown_requested()) {
             in->running = false;
             pthread_mutex_unlock(&in->mu);
-            if (batch_scope_open && in->mp && in->mp->catchup_batch_end)
-                in->mp->catchup_batch_end(in->mp->catchup_batch_scope_ctx);
+            msg_block_intake_close_scope(in, batch_scope_open);
             break;
         }
 
@@ -501,8 +507,7 @@ static void *msg_block_intake_worker(void *arg)
         pthread_mutex_unlock(&in->mu);
         if (processed_since_drain >= MSG_BLOCK_INTAKE_DRAIN_BATCH ||
             queued == 0) {
-            if (batch_scope_open && in->mp && in->mp->catchup_batch_end)
-                in->mp->catchup_batch_end(in->mp->catchup_batch_scope_ctx);
+            msg_block_intake_close_scope(in, batch_scope_open);
             batch_scope_open = false;
         }
         msg_block_intake_maybe_drain_catchup(in, &processed_since_drain);
@@ -940,6 +945,35 @@ static bool mp_offer_relay_allowed(struct msg_processor *mp,
     return allowed;
 }
 
+static void handle_zfilelist_regossip(struct msg_processor *mp,
+                                      struct p2p_node *node,
+                                      const struct file_offer *offer)
+{
+    struct file_offer fwd = *offer;
+    fwd.ttl--;
+
+    struct byte_stream os;
+    stream_init(&os, 512);
+    stream_write_compact_size(&os, 1);
+    file_offer_serialize(&fwd, &os);
+
+    zcl_mutex_lock(&mp->net_mgr->cs_nodes);
+    for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
+        struct p2p_node *peer = mp->net_mgr->nodes[pi];
+        if (peer->id != node->id &&
+            peer->state >= PEER_HANDSHAKE_COMPLETE &&
+            !peer->disconnect &&
+            peer_supports_fast_sync(peer->services)) {
+            p2p_node_begin_message(peer, MSG_FILE_LIST,
+                                   mp->params->pchMessageStart);
+            p2p_node_write_message_data(peer, os.data, os.size);
+            p2p_node_end_message(peer);
+        }
+    }
+    zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
+    stream_free(&os);
+}
+
 static bool handle_zfilelist(struct msg_processor *mp, struct p2p_node *node,
                              struct byte_stream *s)
 {
@@ -982,31 +1016,8 @@ static bool handle_zfilelist(struct msg_processor *mp, struct p2p_node *node,
          * relay rule allows it (it does by default). A refusal keeps the
          * stored copy and only stops the rebroadcast. */
         if (is_new && offer.ttl > 1 && mp->net_mgr &&
-            mp_offer_relay_allowed(mp, &offer)) {
-            struct file_offer fwd = offer;
-            fwd.ttl--;
-
-            struct byte_stream os;
-            stream_init(&os, 512);
-            stream_write_compact_size(&os, 1);
-            file_offer_serialize(&fwd, &os);
-
-            zcl_mutex_lock(&mp->net_mgr->cs_nodes);
-            for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
-                struct p2p_node *peer = mp->net_mgr->nodes[pi];
-                if (peer->id != node->id &&
-                    peer->state >= PEER_HANDSHAKE_COMPLETE &&
-                    !peer->disconnect &&
-                    peer_supports_fast_sync(peer->services)) {
-                    p2p_node_begin_message(peer, MSG_FILE_LIST,
-                                           mp->params->pchMessageStart);
-                    p2p_node_write_message_data(peer, os.data, os.size);
-                    p2p_node_end_message(peer);
-                }
-            }
-            zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
-            stream_free(&os);
-        }
+            mp_offer_relay_allowed(mp, &offer))
+            handle_zfilelist_regossip(mp, node, &offer);
 
         printf("market: %s offer '%s' (%.1f MB, %lld zat/MB) from peer %s\n",
                is_new ? "new" : "updated",
@@ -2173,6 +2184,164 @@ int msg_get_height(void *ctx)
 
 /* ── msg_process_messages: dispatch loop ─────────────────────── */
 
+enum msg_dispatch_result {
+    MSG_DISPATCH_NONE,
+    MSG_DISPATCH_HANDLED,
+    MSG_DISPATCH_DISCONNECT,
+};
+
+static enum msg_dispatch_result
+msg_disconnect_before_version(struct p2p_node *node, const char *cmd)
+{
+    printf("Peer %s: received %s before version\n",
+           node->addr_name, cmd);
+    (void)p2p_node_request_disconnect(
+        node, P2P_DISCONNECT_PROTOCOL_VIOLATION,
+        P2P_DISCONNECT_SOURCE_MESSAGE_HANDLER,
+        node->endpoint_generation);
+    return MSG_DISPATCH_DISCONNECT;
+}
+
+static enum msg_dispatch_result
+msg_dispatch_table(struct msg_processor *mp, struct p2p_node *node,
+                   struct byte_stream *s, const char *cmd, bool *ok)
+{
+    for (const struct msg_dispatch_entry *e = g_msg_dispatch;
+         e->handler; e++) {
+        if (strcmp(cmd, e->command) != 0)
+            continue;
+
+        if (e->requires_handshake && node->version == 0)
+            return msg_disconnect_before_version(node, cmd);
+        if (e->zcl23_only && !peer_supports_fast_sync(node->services)) {
+            event_emitf(EV_BACKPRESSURE_REJECT, (uint32_t)node->id,
+                        "%s requires NODE_ZCL23", cmd);
+            printf("Peer %s: ignoring ZCL23-only %s without NODE_ZCL23\n",
+                   node->addr_name, cmd);
+            *ok = true;
+            return MSG_DISPATCH_HANDLED;
+        }
+
+        *ok = e->handler(mp, node, s);
+        return MSG_DISPATCH_HANDLED;
+    }
+    return MSG_DISPATCH_NONE;
+}
+
+static enum msg_dispatch_result
+msg_dispatch_zcl23(struct msg_processor *mp, struct p2p_node *node,
+                   struct byte_stream *s, struct net_message *msg,
+                   const char *cmd, bool *ok)
+{
+    if (node->version == 0)
+        return msg_disconnect_before_version(node, cmd);
+    if (!peer_supports_fast_sync(node->services)) {
+        event_emitf(EV_BACKPRESSURE_REJECT, (uint32_t)node->id,
+                    "%s requires NODE_ZCL23", cmd);
+        printf("Peer %s: ignoring ZCL23-only %s without NODE_ZCL23\n",
+               node->addr_name, cmd);
+        *ok = true;
+        return MSG_DISPATCH_HANDLED;
+    }
+    if (strcmp(cmd, MSG_CHUNK_REQ) == 0)
+        printf("Peer %s: dispatch %s size=%u\n",
+               node->addr_name, cmd, msg->hdr.nMessageSize);
+    *ok = mp_handle_zcl23_sync(mp, node, s, cmd);
+    return MSG_DISPATCH_HANDLED;
+}
+
+static bool msg_dispatch_popped_message(struct msg_processor *mp,
+                                        struct p2p_node *node,
+                                        struct byte_stream *s,
+                                        struct net_message *msg,
+                                        const char *cmd)
+{
+    bool ok = true;
+
+    /* ── Dispatch via table ──────────────────────────────── */
+    enum msg_dispatch_result r = msg_dispatch_table(mp, node, s, cmd, &ok);
+
+    /* ZCL23 sync messages handled by a combined handler */
+    if (r == MSG_DISPATCH_NONE && cmd[0] == 'z')
+        r = msg_dispatch_zcl23(mp, node, s, msg, cmd, &ok);
+
+    /* Reject any pre-handshake message not in the table */
+    if (r == MSG_DISPATCH_NONE && node->version == 0)
+        r = msg_disconnect_before_version(node, cmd);
+
+    stream_free(s);
+    net_message_free(msg);
+    if (r == MSG_DISPATCH_DISCONNECT)
+        return false;
+    if (!ok) {
+        printf("Peer %s: error processing %s\n", node->addr_name, cmd);
+    }
+    return true;
+}
+
+/* Verify message checksum (first 4 bytes of double-SHA256) */
+static bool msg_checksum_matches(struct net_message *msg,
+                                 unsigned int *expected)
+{
+    struct uint256 msg_hash;
+    hash256(msg->recv_data ? msg->recv_data : (const unsigned char *)"",
+            msg->data_pos, msg_hash.data);
+    memcpy(expected, msg_hash.data, 4);
+    return *expected == msg->hdr.nChecksum;
+}
+
+static bool msg_pop_complete_message(struct p2p_node *node,
+                                     struct net_message *msg)
+{
+    zcl_mutex_lock(&node->cs_recv);
+    if (node->recv_msg_count == 0 ||
+        !net_message_complete(&node->recv_msgs[0])) {
+        zcl_mutex_unlock(&node->cs_recv);
+        return false;
+    }
+
+    *msg = node->recv_msgs[0];
+    memmove(&node->recv_msgs[0], &node->recv_msgs[1],
+            (node->recv_msg_count - 1) * sizeof(struct net_message));
+    node->recv_msg_count--;
+    zcl_mutex_unlock(&node->cs_recv);
+    return true;
+}
+
+static bool msg_handle_received(struct msg_processor *mp,
+                                struct p2p_node *node,
+                                struct net_message *msg)
+{
+    char cmd[COMMAND_SIZE + 1];
+    msg_header_get_command(&msg->hdr, cmd, sizeof(cmd));
+
+    /* Log every message received */
+    event_emitf(EV_MSG_RECEIVED, (uint32_t)node->id,
+                "%s size=%u", cmd, msg->hdr.nMessageSize);
+
+    if (net_partition_active_at((int64_t)platform_time_wall_time_t())) {
+        event_emitf(EV_BACKPRESSURE_REJECT, (uint32_t)node->id,
+                    "cmd=%s reason=partition", cmd);
+        net_message_free(msg);
+        return true;
+    }
+
+    struct byte_stream s;
+    stream_init_from_data(&s, msg->recv_data, msg->data_pos);
+
+    /* post-parse pre-dispatch backpressure rejection.
+     * When the watchdog is active we drop inv + block messages
+     * without dispatching the handler — emits EV_BACKPRESSURE_REJECT
+     * but does not bump ban-score. */
+    if (tip_watchdog_should_reject((uint32_t)node->id, cmd)) {
+        stream_free(&s);
+        net_message_free(msg);
+        return true;
+    }
+
+    return msg_dispatch_popped_message(mp, node, &s, msg, cmd);
+}
+
 bool msg_process_messages(void *ctx, struct p2p_node *node)
 {
     struct msg_processor *mp = (struct msg_processor *)ctx;
@@ -2191,27 +2360,13 @@ bool msg_process_messages(void *ctx, struct p2p_node *node)
     size_t processed = 0;
     while (!p2p_node_processing_halted(node) &&
            processed < ZCL_MSG_PROCESS_MAX_PER_CYCLE) {
-        zcl_mutex_lock(&node->cs_recv);
-        if (node->recv_msg_count == 0 ||
-            !net_message_complete(&node->recv_msgs[0])) {
-            zcl_mutex_unlock(&node->cs_recv);
+        struct net_message msg;
+        if (!msg_pop_complete_message(node, &msg))
             break;
-        }
-
-        struct net_message msg = node->recv_msgs[0];
-        memmove(&node->recv_msgs[0], &node->recv_msgs[1],
-                (node->recv_msg_count - 1) * sizeof(struct net_message));
-        node->recv_msg_count--;
-        zcl_mutex_unlock(&node->cs_recv);
         processed++;
 
-        /* Verify message checksum (first 4 bytes of double-SHA256) */
-        struct uint256 msg_hash;
-        hash256(msg.recv_data ? msg.recv_data : (const unsigned char *)"",
-                msg.data_pos, msg_hash.data);
         unsigned int expected;
-        memcpy(&expected, msg_hash.data, 4);
-        if (expected != msg.hdr.nChecksum) {
+        if (!msg_checksum_matches(&msg, &expected)) {
             char ccmd[COMMAND_SIZE + 1];
             msg_header_get_command(&msg.hdr, ccmd, sizeof(ccmd));
             event_emitf(EV_MSG_CHECKSUM_FAIL, (uint32_t)node->id,
@@ -2225,685 +2380,657 @@ bool msg_process_messages(void *ctx, struct p2p_node *node)
             continue;
         }
 
-        char cmd[COMMAND_SIZE + 1];
-        msg_header_get_command(&msg.hdr, cmd, sizeof(cmd));
-
-        /* Log every message received */
-        event_emitf(EV_MSG_RECEIVED, (uint32_t)node->id,
-                    "%s size=%u", cmd, msg.hdr.nMessageSize);
-
-        if (net_partition_active_at((int64_t)platform_time_wall_time_t())) {
-            event_emitf(EV_BACKPRESSURE_REJECT, (uint32_t)node->id,
-                        "cmd=%s reason=partition", cmd);
-            net_message_free(&msg);
-            continue;
-        }
-
-        struct byte_stream s;
-        stream_init_from_data(&s, msg.recv_data, msg.data_pos);
-
-        /* post-parse pre-dispatch backpressure rejection.
-         * When the watchdog is active we drop inv + block messages
-         * without dispatching the handler — emits EV_BACKPRESSURE_REJECT
-         * but does not bump ban-score. */
-        if (tip_watchdog_should_reject((uint32_t)node->id, cmd)) {
-            stream_free(&s);
-            net_message_free(&msg);
-            continue;
-        }
-
-        bool ok = true;
-
-        /* ── Dispatch via table ──────────────────────────────── */
-        bool dispatched = false;
-        for (const struct msg_dispatch_entry *e = g_msg_dispatch;
-             e->handler; e++) {
-            if (strcmp(cmd, e->command) != 0)
-                continue;
-
-            if (e->requires_handshake && node->version == 0) {
-                printf("Peer %s: received %s before version\n",
-                       node->addr_name, cmd);
-                (void)p2p_node_request_disconnect(
-                    node, P2P_DISCONNECT_PROTOCOL_VIOLATION,
-                    P2P_DISCONNECT_SOURCE_MESSAGE_HANDLER,
-                    node->endpoint_generation);
-                stream_free(&s);
-                net_message_free(&msg);
-                goto _msg_loop_exit;
-            }
-            if (e->zcl23_only && !peer_supports_fast_sync(node->services)) {
-                event_emitf(EV_BACKPRESSURE_REJECT, (uint32_t)node->id,
-                            "%s requires NODE_ZCL23", cmd);
-                printf("Peer %s: ignoring ZCL23-only %s without NODE_ZCL23\n",
-                       node->addr_name, cmd);
-                ok = true;
-                dispatched = true;
-                break;
-            }
-
-            ok = e->handler(mp, node, &s);
-            dispatched = true;
+        if (!msg_handle_received(mp, node, &msg))
             break;
-        }
-
-        /* ZCL23 sync messages handled by a combined handler */
-        if (!dispatched && cmd[0] == 'z') {
-            if (node->version == 0) {
-                printf("Peer %s: received %s before version\n",
-                       node->addr_name, cmd);
-                (void)p2p_node_request_disconnect(
-                    node, P2P_DISCONNECT_PROTOCOL_VIOLATION,
-                    P2P_DISCONNECT_SOURCE_MESSAGE_HANDLER,
-                    node->endpoint_generation);
-                stream_free(&s);
-                net_message_free(&msg);
-                goto _msg_loop_exit;
-            }
-            if (!peer_supports_fast_sync(node->services)) {
-                event_emitf(EV_BACKPRESSURE_REJECT, (uint32_t)node->id,
-                            "%s requires NODE_ZCL23", cmd);
-                printf("Peer %s: ignoring ZCL23-only %s without NODE_ZCL23\n",
-                       node->addr_name, cmd);
-                dispatched = true;
-                ok = true;
-                stream_free(&s);
-                net_message_free(&msg);
-                continue;
-            }
-            if (strcmp(cmd, MSG_CHUNK_REQ) == 0)
-                printf("Peer %s: dispatch %s size=%u\n",
-                       node->addr_name, cmd, msg.hdr.nMessageSize);
-            ok = mp_handle_zcl23_sync(mp, node, &s, cmd);
-            dispatched = true;
-        }
-
-        /* Reject any pre-handshake message not in the table */
-        if (!dispatched && node->version == 0) {
-            printf("Peer %s: received %s before version\n",
-                   node->addr_name, cmd);
-            (void)p2p_node_request_disconnect(
-                node, P2P_DISCONNECT_PROTOCOL_VIOLATION,
-                P2P_DISCONNECT_SOURCE_MESSAGE_HANDLER,
-                node->endpoint_generation);
-            stream_free(&s);
-            net_message_free(&msg);
-            goto _msg_loop_exit;
-        }
-
-        stream_free(&s);
-        net_message_free(&msg);
-
-        if (!ok) {
-            printf("Peer %s: error processing %s\n", node->addr_name, cmd);
-        }
     }
-    _msg_loop_exit:
     return true;
 }
 
 /* ── msg_send_messages: per-peer trickle ─────────────────────── */
 
-bool msg_send_messages(void *ctx, struct p2p_node *node, bool send_trickle)
+static void msg_send_pre_handshake(struct msg_processor *mp,
+                                   struct p2p_node *node)
 {
-    struct msg_processor *mp = (struct msg_processor *)ctx;
-    bool snapshot_active = mp_snapshot_is_active();
+    /* A Noise initiator has already sent its 32-byte msg1 before the
+     * message loop sees the node, so send_bytes is not a handshake-state
+     * predicate.  PEER_CONNECTING is: advance it exactly once after the
+     * version has been queued (or buffered by the transport). */
+    if (!node->inbound && node->state == PEER_CONNECTING) {
+        push_version(mp, node);
+        peer_set_state_checked((uint32_t)node->id, &node->state,
+                               PEER_VERSION_SENT, "outbound version sent");
+    }
+}
 
-    /* Outbound nodes: send version to initiate handshake */
-    if (node->state < PEER_HANDSHAKE_COMPLETE) {
-        /* A Noise initiator has already sent its 32-byte msg1 before the
-         * message loop sees the node, so send_bytes is not a handshake-state
-         * predicate.  PEER_CONNECTING is: advance it exactly once after the
-         * version has been queued (or buffered by the transport). */
-        if (!node->inbound && node->state == PEER_CONNECTING) {
-            push_version(mp, node);
-            peer_set_state_checked((uint32_t)node->id, &node->state,
-                                   PEER_VERSION_SENT, "outbound version sent");
+static void msg_send_track_header_advance(struct msg_processor *mp,
+                                          int64_t now_send)
+{
+    /* ── Track pindex_best_header advance for stall detection ── */
+    int best_h = mp->main_state->pindex_best_header
+               ? mp->main_state->pindex_best_header->nHeight : 0;
+    if (best_h > g_header_stall_last_height) {
+        g_header_stall_last_height = best_h;
+        g_header_stall_last_advance = now_send;
+    }
+    if (g_header_stall_last_advance == 0)
+        g_header_stall_last_advance = now_send;
+}
+
+static bool msg_send_zero_outbound_recovery(struct msg_processor *mp,
+                                            struct p2p_node *node,
+                                            int our_height, bool header_stall)
+{
+    /* ── Zero-outbound recovery ──────────────────────────────
+     * If we have ONLY inbound peers and are behind, the normal
+     * sync path never fires (syncsvc_begin_peer_sync rejects
+     * inbound peers) and sync state never reaches
+     * SYNC_HEADERS_DOWNLOAD, so stall detection never triggers.
+     * Fix: when all peers are inbound and we're behind, force
+     * the sync state transition and treat it as a stall so
+     * inbound peers can serve headers. */
+    if (!mp_swarm_is_active() &&
+        !header_stall && node->inbound &&
+        node->starting_height > our_height + 144) {
+        bool have_outbound = false;
+        zcl_mutex_lock(&mp->net_mgr->cs_nodes);
+        for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
+            if (!mp->net_mgr->nodes[pi]->inbound &&
+                !mp->net_mgr->nodes[pi]->disconnect &&
+                mp->net_mgr->nodes[pi]->state >= PEER_ACTIVE) {
+                have_outbound = true;
+                break;
+            }
         }
+        zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
+
+        if (!have_outbound) {
+            enum sync_state ss = sync_get_state();
+            if (ss == SYNC_IDLE || ss == SYNC_FINDING_PEERS) {
+                sync_set_state(SYNC_HEADERS_DOWNLOAD,
+                               "no outbound peers, using inbound");
+            }
+            header_stall = true;
+        }
+    }
+    return header_stall;
+}
+
+static bool msg_send_rule_a_stale_header(struct p2p_node *node,
+                                         int our_height,
+                                         int best_header_height,
+                                         int64_t last_body_time,
+                                         int64_t now_send,
+                                         bool stall_peer_trusted)
+{
+    /* ── Rule A: per-peer stale header disconnect (IBD only) ── */
+    if (!mp_swarm_is_active() && !stall_peer_trusted &&
+        syncsvc_should_disconnect_stale_header_peer(node, our_height,
+                                                    best_header_height,
+                                                    last_body_time,
+                                                    now_send)) {
+        int64_t last_useful = atomic_load_explicit(
+            &node->last_useful_headers_time, memory_order_relaxed);
+        printf("HEADER STALL: peer %s delivered 0 useful headers in "
+               "%llds (total_delivered=%llu), disconnecting\n",
+               node->addr_name,
+               (long long)(now_send - (last_useful
+                   ? last_useful
+                   : node->time_connected)),
+               (unsigned long long)node->total_headers_delivered);
+        (void)p2p_node_request_disconnect(
+            node, P2P_DISCONNECT_SYNC_STALL,
+            P2P_DISCONNECT_SOURCE_SYNC, node->endpoint_generation);
         return true;
     }
+    return false;
+}
 
-    /* Transition to ACTIVE if still at HANDSHAKE_COMPLETE */
-    if (node->state == PEER_HANDSHAKE_COMPLETE) {
-        peer_set_state_checked((uint32_t)node->id, &node->state,
-                               PEER_ACTIVE, "ready for sync");
-        peer_lifecycle_note_active(node);
-    }
-
-    /* Answer the one getheaders this peer's serve window deferred, if its
-     * window has rolled — a legacy client has no retry timer and would
-     * otherwise sit silent until an unrelated inv woke it. No-op otherwise. */
-    (void)getheaders_replay_deferred(mp, node);
-
-    /* Offer fast sync to ZCL23 peers that are behind us */
-    mp_snapshot_maybe_offer(mp, node);
-
-    /* Snapshot stall detection — if no chunk for 60s, reset and accept new peer */
-    if (mp_snapshot_check_stall()) {
-        printf("[sync] Snapshot stall detected — will accept new offer\n");
-    }
-
-    /* Initiate sync, and periodically re-request if behind. */
-    {
-        int our_height = msg_get_height(mp);
-        int best_header_height = mp->main_state->pindex_best_header
-            ? mp->main_state->pindex_best_header->nHeight
-            : our_height;
-        bool should_sync = syncsvc_begin_peer_sync(node, our_height,
-                                                   best_header_height);
-        struct sync_getheaders_action periodic = {0};
-
-        bool in_ibd = syncsvc_is_initial_block_download(node, our_height);
-        int64_t now_send = (int64_t)platform_time_wall_time_t();
-
-        if (syncsvc_should_mark_peer_caught_up(node, our_height,
-                                               best_header_height)) {
-            peer_set_state_checked((uint32_t)node->id, &node->state,
-                                   PEER_ACTIVE, "headers caught up");
-        }
-
-        /* ── Track pindex_best_header advance for stall detection ── */
-        {
-            int best_h = mp->main_state->pindex_best_header
-                       ? mp->main_state->pindex_best_header->nHeight : 0;
-            if (best_h > g_header_stall_last_height) {
-                g_header_stall_last_height = best_h;
-                g_header_stall_last_advance = now_send;
-            }
-            if (g_header_stall_last_advance == 0)
-                g_header_stall_last_advance = now_send;
-        }
-
-        bool header_stall = syncsvc_is_header_sync_stalled(
-            sync_get_state(), g_header_stall_last_height,
-            g_header_stall_last_advance, now_send);
-
-        /* ── Zero-outbound recovery ──────────────────────────────
-         * If we have ONLY inbound peers and are behind, the normal
-         * sync path never fires (syncsvc_begin_peer_sync rejects
-         * inbound peers) and sync state never reaches
-         * SYNC_HEADERS_DOWNLOAD, so stall detection never triggers.
-         * Fix: when all peers are inbound and we're behind, force
-         * the sync state transition and treat it as a stall so
-         * inbound peers can serve headers. */
-        if (!mp_swarm_is_active() &&
-            !header_stall && node->inbound &&
-            node->starting_height > our_height + 144) {
-            bool have_outbound = false;
-            zcl_mutex_lock(&mp->net_mgr->cs_nodes);
-            for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
-                if (!mp->net_mgr->nodes[pi]->inbound &&
-                    !mp->net_mgr->nodes[pi]->disconnect &&
-                    mp->net_mgr->nodes[pi]->state >= PEER_ACTIVE) {
-                    have_outbound = true;
-                    break;
-                }
-            }
-            zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
-
-            if (!have_outbound) {
-                enum sync_state ss = sync_get_state();
-                if (ss == SYNC_IDLE || ss == SYNC_FINDING_PEERS) {
-                    sync_set_state(SYNC_HEADERS_DOWNLOAD,
-                                   "no outbound peers, using inbound");
-                }
-                header_stall = true;
-            }
-        }
-
-        /* ── Stale-header disconnect rules A and B ─────────────────
+static bool msg_send_rule_b_header_stall(struct p2p_node *node,
+                                         int64_t now_send,
+                                         bool stall_peer_trusted,
+                                         bool header_frontier_at_peer_tip,
+                                         bool header_stall)
+{
+    /* ── Rule B: header sync stall — disconnect worst outbound
+     * peer. Skipped for trusted peers (P3) and at frontier parity
+     * (P2) — see the comment block above rule A. */
+    if (!mp_swarm_is_active() && !stall_peer_trusted &&
+        !header_frontier_at_peer_tip &&
+        header_stall && !node->inbound &&
+        node->state >= PEER_SYNCING_HEADERS) {
+        /* grace period for fresh peers.
          *
-         * P3: trusted peers are exempt from BOTH rules — localhost is
-         * unspoofable (the co-located zclassicd lifeline) and the
-         * whitelist is explicit operator intent; same predicate as the
-         * misbehavior ban exemption (is_trusted_peer, net.c). Remote
-         * default peers keep full stall discipline. P2 (rule B below): skip
-         * eviction at frontier parity — when
-         * our header frontier has reached the peer's claimed tip, no
-         * peer can be "useful" by construction (new headers arrive at
-         * ~150s block cadence), so evicting the worst peer is pure
-         * churn. node->starting_height is handshake-static, so the
-         * parity gate progressively relaxes stale-header discipline
-         * for long-lived peers as the chain grows past their
-         * connect-time claim — accepted consciously given IBD gating,
-         * the loopback lifeline, rule B's per-stall-cycle rotation,
-         * and the peer-floor conditions. */
-        bool stall_peer_trusted = net_addr_is_local(&node->addr.svc.addr) ||
-                                  node->whitelisted;
-        bool header_frontier_at_peer_tip = node->starting_height > 0 &&
-                                           best_header_height >= node->starting_height - 144;
-        int64_t last_body_time = 0;
-        dl_peer_body_staleness(get_download_mgr(), (uint32_t)node->id, NULL,
-                               NULL, &last_body_time);
-        /* ── Rule A: per-peer stale header disconnect (IBD only) ── */
-        if (!mp_swarm_is_active() && !stall_peer_trusted &&
-            syncsvc_should_disconnect_stale_header_peer(node, our_height,
-                                                        best_header_height, last_body_time,
-                                                        now_send)) {
-            int64_t last_useful = atomic_load_explicit(
-                &node->last_useful_headers_time, memory_order_relaxed);
-            printf("HEADER STALL: peer %s delivered 0 useful headers in "
-                   "%llds (total_delivered=%llu), disconnecting\n",
+         * Without this, a header stall disconnects EVERY outbound
+         * peer with total_delivered=0 on the same tick (the old
+         * `<=` comparison plus a per-second reset of worst_delivered
+         * meant the first 5 peers in the loop all matched
+         * worst_delivered=0 and all got the disconnect flag). The
+         * peers reconnect immediately and the cycle repeats —
+         * net effect: outbound peers churn forever and never get
+         * to deliver headers. Live evidence: 5 ESTAB sockets to
+         * seed peers, all stuck at state=connecting after the
+         * disconnect/reconnect loop.
+         *
+         * Fix: give every newly-connected outbound peer 60s
+         * before they're eligible for stall-disconnect, and
+         * disconnect at most ONE peer per stall cycle (strict
+         * `<` + return after the first match). */
+        const int64_t GRACE_SECS = 60;
+        int64_t connected_for =
+            now_send - (node->time_connected ? node->time_connected
+                                             : now_send);
+        if (connected_for < GRACE_SECS)
+            goto skip_stall_disconnect;
+
+        /* Log stall once per detection cycle */
+        static int64_t last_stall_log = 0;
+        if (now_send - last_stall_log >= 30) {
+            last_stall_log = now_send;
+            printf("HEADER STALL: best_header stuck at %d for %llds, "
+                   "disconnecting worst peer\n",
+                   g_header_stall_last_height,
+                   (long long)(now_send - g_header_stall_last_advance));
+        }
+        /* Find if this peer is the worst outbound by headers delivered.
+         * Strict `<` so a single tick disconnects at most one peer
+         * even when many tie at total_headers_delivered=0. */
+        static uint64_t worst_delivered = UINT64_MAX;
+        static int64_t worst_check_time = 0;
+        if (now_send != worst_check_time) {
+            worst_delivered = UINT64_MAX;
+            worst_check_time = now_send;
+        }
+        if (node->total_headers_delivered < worst_delivered) {
+            worst_delivered = node->total_headers_delivered;
+            printf("HEADER STALL: disconnecting %s "
+                   "(total_headers_delivered=%llu, connected_for=%llds)\n",
                    node->addr_name,
-                   (long long)(now_send - (last_useful
-                       ? last_useful
-                       : node->time_connected)),
-                   (unsigned long long)node->total_headers_delivered);
+                   (unsigned long long)node->total_headers_delivered,
+                   (long long)connected_for);
             (void)p2p_node_request_disconnect(
                 node, P2P_DISCONNECT_SYNC_STALL,
                 P2P_DISCONNECT_SOURCE_SYNC, node->endpoint_generation);
             return true;
         }
+    }
+skip_stall_disconnect:;
+    return false;
+}
 
-        /* ── Rule B: header sync stall — disconnect worst outbound
-         * peer. Skipped for trusted peers (P3) and at frontier parity
-         * (P2) — see the comment block above rule A. */
-        if (!mp_swarm_is_active() && !stall_peer_trusted &&
-            !header_frontier_at_peer_tip &&
-            header_stall && !node->inbound &&
-            node->state >= PEER_SYNCING_HEADERS) {
-            /* grace period for fresh peers.
-             *
-             * Without this, a header stall disconnects EVERY outbound
-             * peer with total_delivered=0 on the same tick (the old
-             * `<=` comparison plus a per-second reset of worst_delivered
-             * meant the first 5 peers in the loop all matched
-             * worst_delivered=0 and all got the disconnect flag). The
-             * peers reconnect immediately and the cycle repeats —
-             * net effect: outbound peers churn forever and never get
-             * to deliver headers. Live evidence: 5 ESTAB sockets to
-             * seed peers, all stuck at state=connecting after the
-             * disconnect/reconnect loop.
-             *
-             * Fix: give every newly-connected outbound peer 60s
-             * before they're eligible for stall-disconnect, and
-             * disconnect at most ONE peer per stall cycle (strict
-             * `<` + return after the first match). */
-            const int64_t GRACE_SECS = 60;
-            int64_t connected_for =
-                now_send - (node->time_connected ? node->time_connected
-                                                 : now_send);
-            if (connected_for < GRACE_SECS)
-                goto skip_stall_disconnect;
+static bool msg_send_rule_c_body_stall(struct p2p_node *node, int our_height,
+                                       int64_t now_send, bool snapshot_active,
+                                       bool stall_peer_trusted)
+{
+    /* ── Rule C: body-download stall — disconnect a peer that serves
+     * headers but never delivers block bodies. It passes rules A/B (it
+     * keeps delivering headers, so total_headers_delivered climbs and
+     * last_useful_headers_time refreshes) yet holds an outbound slot
+     * forever while the body cursor never advances — the measured
+     * "connected peer delivers no block data" wedge. Trusted/loopback
+     * peers (the co-located zclassicd lifeline) and inbound peers are
+     * exempt, exactly like rules A/B. Disconnecting lets connman fail
+     * over to a peer that will serve bodies. Fires only after the peer
+     * has had SYNC_BODY_STALL_MIN_TIMEOUTS block requests time out with
+     * zero bodies delivered over a full stall window (predicate). */
+    if (!mp_swarm_is_active() && !snapshot_active && !stall_peer_trusted &&
+        !node->inbound && node->state >= PEER_SYNCING_HEADERS) {
+        uint64_t body_recv = 0, body_timeout = 0;
+        dl_peer_body_progress(get_download_mgr(), (uint32_t)node->id,
+                              NULL, &body_recv, &body_timeout);
+        if (syncsvc_should_disconnect_body_stalled_peer(
+                node, our_height, body_recv, body_timeout, now_send)) {
+            printf("BODY STALL: peer %s delivered 0 block bodies "
+                   "(%llu getdata timed out) in %llds, disconnecting\n",
+                   node->addr_name,
+                   (unsigned long long)body_timeout,
+                   (long long)(now_send - (node->time_connected
+                       ? node->time_connected : now_send)));
+            (void)p2p_node_request_disconnect(
+                node, P2P_DISCONNECT_SYNC_STALL,
+                P2P_DISCONNECT_SOURCE_SYNC, node->endpoint_generation);
+            return true;
+        }
+    }
+    return false;
+}
 
-            /* Log stall once per detection cycle */
-            static int64_t last_stall_log = 0;
-            if (now_send - last_stall_log >= 30) {
-                last_stall_log = now_send;
-                printf("HEADER STALL: best_header stuck at %d for %llds, "
-                       "disconnecting worst peer\n",
-                       g_header_stall_last_height,
-                       (long long)(now_send - g_header_stall_last_advance));
-            }
-            /* Find if this peer is the worst outbound by headers delivered.
-             * Strict `<` so a single tick disconnects at most one peer
-             * even when many tie at total_headers_delivered=0. */
-            static uint64_t worst_delivered = UINT64_MAX;
-            static int64_t worst_check_time = 0;
-            if (now_send != worst_check_time) {
-                worst_delivered = UINT64_MAX;
-                worst_check_time = now_send;
-            }
-            if (node->total_headers_delivered < worst_delivered) {
-                worst_delivered = node->total_headers_delivered;
-                printf("HEADER STALL: disconnecting %s "
-                       "(total_headers_delivered=%llu, connected_for=%llds)\n",
-                       node->addr_name,
-                       (unsigned long long)node->total_headers_delivered,
-                       (long long)connected_for);
-                (void)p2p_node_request_disconnect(
-                    node, P2P_DISCONNECT_SYNC_STALL,
-                    P2P_DISCONNECT_SOURCE_SYNC, node->endpoint_generation);
-                return true;
+static bool msg_send_rule_d_body_dark(struct p2p_node *node, int our_height,
+                                      int64_t now_send, bool snapshot_active,
+                                      bool stall_peer_trusted)
+{
+    /* ── Rule D: delivered-then-dark body stall — the complement of
+     * Rule C. Rule C exempts any peer with body_received > 0, so a peer
+     * that serves a few bodies and then goes silent holds its outbound
+     * slot forever while the body cursor never advances again (and
+     * DL_STALL_TIMEOUT_SECS, the download manager's own stall constant,
+     * was defined-but-unenforced). This evicts it once its last body is
+     * >= the stall window old AND it has accrued the same timed-out floor
+     * Rule C uses, so connman fails over to a peer that keeps serving
+     * bodies. The body_received > 0 (Rule D) vs == 0 (Rule C) split makes
+     * the two mutually exclusive — no peer is double-evicted. Same
+     * trusted/loopback/inbound exemptions as rules A/B/C. */
+    if (!mp_swarm_is_active() && !snapshot_active && !stall_peer_trusted &&
+        !node->inbound && node->state >= PEER_SYNCING_HEADERS) {
+        uint64_t dark_recv = 0, dark_timeout = 0;
+        int64_t dark_last_body = 0;
+        dl_peer_body_staleness(get_download_mgr(), (uint32_t)node->id,
+                               &dark_recv, &dark_timeout, &dark_last_body);
+        if (syncsvc_should_disconnect_body_dark_peer(
+                node, our_height, dark_recv, dark_timeout,
+                dark_last_body, now_send)) {
+            printf("BODY DARK: peer %s delivered %llu block bodies then "
+                   "went silent %llds (%llu getdata timed out), "
+                   "disconnecting\n",
+                   node->addr_name,
+                   (unsigned long long)dark_recv,
+                   (long long)(now_send - dark_last_body),
+                   (unsigned long long)dark_timeout);
+            (void)p2p_node_request_disconnect(
+                node, P2P_DISCONNECT_SYNC_STALL,
+                P2P_DISCONNECT_SOURCE_SYNC, node->endpoint_generation);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void msg_send_log_header_request(struct p2p_node *node,
+                                        struct block_index *tip, bool in_ibd)
+{
+    switch (syncsvc_header_log_mode(node, tip, in_ibd)) {
+    case SYNC_HEADER_LOG_IBD:
+        printf("IBD getheaders to %s (height=%d, peer=%d, "
+               "behind=%d)\n",
+               node->addr_name, tip->nHeight,
+               node->starting_height,
+               node->starting_height - tip->nHeight);
+        break;
+    case SYNC_HEADER_LOG_TIP:
+        printf("Sending getheaders to %s (height=%d, peer=%d)\n",
+               node->addr_name, tip->nHeight,
+               node->starting_height);
+        break;
+    case SYNC_HEADER_LOG_NONE:
+    default:
+        break;
+    }
+}
+
+static void msg_send_header_requests(struct msg_processor *mp,
+                                     struct p2p_node *node, int our_height,
+                                     int best_header_height, bool in_ibd,
+                                     int64_t now_send, bool header_stall,
+                                     bool snapshot_active, bool should_sync)
+{
+    struct sync_getheaders_action periodic = {0};
+
+    /* Re-request headers aggressively during IBD (10s), slower at tip (60s).
+     * This is critical: legacy zclassicd sends at most 2000 headers per
+     * getheaders response — for a 3M block chain, we need ~1500 rounds. */
+
+    /* Use fallback (inbound peers) during header stall */
+    if (header_stall) {
+        bool ok = syncsvc_should_request_headers_with_fallback(
+            node, our_height, now_send, true);
+        if (ok && !snapshot_active) {
+            should_sync = true;
+            syncsvc_note_headers_requested(node, now_send);
+        }
+    }
+    if (!snapshot_active) {
+        syncsvc_plan_periodic_getheaders(&periodic, node, our_height,
+                                         now_send);
+        if (periodic.should_send) {
+            should_sync = true;
+            syncsvc_note_headers_requested(node, now_send);
+        }
+    }
+
+    /* All-rejected (bad-prevblk) recovery probe continuation. The
+     * receive-side probe (process_headers, msg_headers.c) fires once
+     * per all-rejected batch, but when the announcement burst ends no
+     * incoming message remains to trigger it and the peer's real tip is
+     * never learned (rejected headers carry no height we accept). While
+     * reject_probe_pending is armed, re-fire from this periodic per-peer
+     * tick under the same per-peer rate limit until a batch connects
+     * again (any accepted header disarms it). */
+    if (!snapshot_active &&
+        syncsvc_should_fire_reject_probe(node, now_send)) {
+        atomic_store_explicit(&node->last_reject_probe_time, now_send,
+                              memory_order_relaxed);
+        printf("Peer %s: reject-probe pending — re-probing with "
+               "getheaders from our best header h=%d\n",
+               node->addr_name, best_header_height);
+        push_getheaders_from(mp, node,
+                             mp->main_state->pindex_best_header);
+    }
+    if (should_sync && !snapshot_active) {
+        struct block_index *tip = active_chain_tip(
+            &mp->main_state->chain_active);
+        msg_send_log_header_request(node, tip, in_ibd);
+        /* NET-3 range-parallel header acquisition: when >=2 fast-sync
+         * peers are connected and the header gap exceeds one batch,
+         * give this peer its own disjoint checkpoint-anchored span
+         * instead of racing every peer for the same next batch. Returns
+         * false (leaving the single-peer path below untouched) for a
+         * single peer, a small gap, a legacy peer, or an open header
+         * band — so existing behavior is a strict regression-safe
+         * fallback. Validation and band closure are unchanged; this
+         * only changes WHICH peer is asked for WHICH range. */
+        if (!msg_try_range_parallel_getheaders(mp, node, our_height,
+                                               now_send))
+            exec_getheaders_action(mp, node, &periodic);
+    }
+
+    /* Checkpoint-header-solution cure: when the app-layer repair condition
+     * has armed a fetch (a staged checkpoint bundle needs the one missing
+     * checkpoint-header Equihash solution), send ONE bounded getheaders span
+     * to this peer so it returns exactly that header. Cheap no-op when not
+     * armed; globally throttled so only one request goes out per interval. */
+    if (!snapshot_active)
+        checkpoint_header_fetch_maybe_send(mp, node, now_send);
+    if (!snapshot_active)
+        header_serve_repair_maybe_send(mp, node, now_send);
+}
+
+static bool msg_send_header_sync(struct msg_processor *mp,
+                                 struct p2p_node *node, bool snapshot_active)
+{
+    int our_height = msg_get_height(mp);
+    int best_header_height = mp->main_state->pindex_best_header
+        ? mp->main_state->pindex_best_header->nHeight
+        : our_height;
+    bool should_sync = syncsvc_begin_peer_sync(node, our_height,
+                                               best_header_height);
+
+    bool in_ibd = syncsvc_is_initial_block_download(node, our_height);
+    int64_t now_send = (int64_t)platform_time_wall_time_t();
+
+    if (syncsvc_should_mark_peer_caught_up(node, our_height,
+                                           best_header_height)) {
+        peer_set_state_checked((uint32_t)node->id, &node->state,
+                               PEER_ACTIVE, "headers caught up");
+    }
+
+    msg_send_track_header_advance(mp, now_send);
+
+    bool header_stall = syncsvc_is_header_sync_stalled(
+        sync_get_state(), g_header_stall_last_height,
+        g_header_stall_last_advance, now_send);
+    header_stall = msg_send_zero_outbound_recovery(mp, node, our_height,
+                                                   header_stall);
+
+    /* ── Stale-header disconnect rules A and B ─────────────────
+     *
+     * P3: trusted peers are exempt from BOTH rules — localhost is
+     * unspoofable (the co-located zclassicd lifeline) and the
+     * whitelist is explicit operator intent; same predicate as the
+     * misbehavior ban exemption (is_trusted_peer, net.c). Remote
+     * default peers keep full stall discipline. P2 (rule B below): skip
+     * eviction at frontier parity — when
+     * our header frontier has reached the peer's claimed tip, no
+     * peer can be "useful" by construction (new headers arrive at
+     * ~150s block cadence), so evicting the worst peer is pure
+     * churn. node->starting_height is handshake-static, so the
+     * parity gate progressively relaxes stale-header discipline
+     * for long-lived peers as the chain grows past their
+     * connect-time claim — accepted consciously given IBD gating,
+     * the loopback lifeline, rule B's per-stall-cycle rotation,
+     * and the peer-floor conditions. */
+    bool stall_peer_trusted = net_addr_is_local(&node->addr.svc.addr) ||
+                              node->whitelisted;
+    bool header_frontier_at_peer_tip = node->starting_height > 0 &&
+                                       best_header_height >= node->starting_height - 144;
+    int64_t last_body_time = 0;
+    dl_peer_body_staleness(get_download_mgr(), (uint32_t)node->id, NULL,
+                           NULL, &last_body_time);
+
+    if (msg_send_rule_a_stale_header(node, our_height, best_header_height,
+                                     last_body_time, now_send,
+                                     stall_peer_trusted))
+        return true;
+    if (msg_send_rule_b_header_stall(node, now_send, stall_peer_trusted,
+                                     header_frontier_at_peer_tip,
+                                     header_stall))
+        return true;
+    if (msg_send_rule_c_body_stall(node, our_height, now_send,
+                                   snapshot_active, stall_peer_trusted))
+        return true;
+    if (msg_send_rule_d_body_dark(node, our_height, now_send,
+                                  snapshot_active, stall_peer_trusted))
+        return true;
+
+    msg_send_header_requests(mp, node, our_height, best_header_height,
+                             in_ibd, now_send, header_stall, snapshot_active,
+                             should_sync);
+    return false;
+}
+
+static void msg_send_assign_blocks(struct msg_processor *mp,
+                                   struct p2p_node *node,
+                                   struct download_manager *dm)
+{
+    struct uint256 assign_hashes[DL_WINDOW_SIZE];
+    struct sync_block_batch batch;
+    /* our_height for the behind-peer gate (sibling scope; recompute
+     * the same way as the sync block above, msgprocessor.c:1330). */
+    int our_height = msg_get_height(mp);
+    /* Request no more bodies than the intake ring can still absorb:
+     * the surplus is received, destroyed, and re-requested on a 15 s
+     * timeout. dl_inflight is read BEFORE assignment on purpose. */
+    uint64_t inflight_now = 0;
+    dl_get_stats(dm, NULL, NULL, NULL, &inflight_now, NULL);
+    size_t assign_room = msg_processor_block_intake_request_room(
+        mp, inflight_now, DL_WINDOW_SIZE);
+    if (assign_room == 0) {
+        memset(&batch, 0, sizeof(batch));
+        msg_processor_log_block_intake_backpressure(node);
+    } else {
+        syncsvc_assign_peer_blocks(&batch, dm, node, assign_hashes,
+                                   assign_room, our_height);
+    }
+    if (batch.assigned > 0) {
+        struct byte_stream getdata_msg;
+        stream_init(&getdata_msg, batch.assigned * 36 + 8);
+        if (getdata_blocks_serialize(&getdata_msg, assign_hashes,
+                                     batch.assigned)) {
+            p2p_node_begin_message(node, "getdata",
+                                   mp->params->pchMessageStart);
+            p2p_node_write_message_data(node, getdata_msg.data,
+                                        getdata_msg.size);
+            p2p_node_end_message(node);
+        }
+        stream_free(&getdata_msg);
+
+        {
+            char hex[65];
+            uint256_get_hex(&assign_hashes[0], hex);
+            printf("getdata: %zu blocks to %s (first=%s)\n",
+                   batch.assigned, node->addr_name, hex);
+        }
+        event_emitf(EV_BLOCK_REQUESTED, (uint32_t)node->id,
+                    "assigned=%zu inflight=%zu",
+                    batch.assigned,
+                    batch.in_flight_before + batch.assigned);
+    }
+}
+
+static void msg_send_stall_recovery(struct msg_processor *mp,
+                                    struct p2p_node *node,
+                                    struct download_manager *dm,
+                                    int64_t now_dl)
+{
+    /* Stall detection: if queue is empty, in-flight is zero,
+     * and we're not at tip — find alternative blocks to download.
+     * Scan block_map for blocks at tip+1 with header data but
+     * no block data, that aren't failed. Queue them. */
+    uint64_t dl_queued = 0, dl_inflight = 0;
+    dl_get_stats(dm, NULL, NULL, NULL, &dl_inflight, &dl_queued);
+    struct sync_stall_recovery recovery;
+    if (syncsvc_build_stall_recovery(&recovery, mp->main_state, node,
+                                     dl_queued, dl_inflight, now_dl)) {
+        if (recovery.should_log) {
+            printf("STALL: h=%d entries_at_%d=%zu (data=%zu fail=%zu)\n",
+                   recovery.chain_height, recovery.next_height,
+                   recovery.entries_at_next, recovery.entries_with_data,
+                   recovery.entries_failed);
+        }
+        {
+            int cleared = 0;
+            syncsvc_apply_stall_recovery(&recovery, mp->main_state,
+                                         dm, &cleared);
+            if (recovery.alt_count > 0) {
+                /* Clear re-queued blocks from the "recently seen"
+                 * dedup buffer. Without this, blocks that were
+                 * received but failed validation are permanently
+                 * stuck: stall recovery re-downloads them, but
+                 * block_already_seen silently drops them. */
+                for (size_t ri = 0; ri < recovery.alt_count; ri++)
+                    block_clear_seen(&recovery.alt_hashes[ri]);
+                printf("Stall recovery: queued %zu alt blocks\n",
+                       recovery.alt_count);
+            } else if (cleared > 0) {
+                printf("Stall recovery: reset %d blocks at h=%d for re-download\n",
+                       cleared, recovery.next_height);
             }
         }
-        skip_stall_disconnect:;
-
-        /* ── Rule C: body-download stall — disconnect a peer that serves
-         * headers but never delivers block bodies. It passes rules A/B (it
-         * keeps delivering headers, so total_headers_delivered climbs and
-         * last_useful_headers_time refreshes) yet holds an outbound slot
-         * forever while the body cursor never advances — the measured
-         * "connected peer delivers no block data" wedge. Trusted/loopback
-         * peers (the co-located zclassicd lifeline) and inbound peers are
-         * exempt, exactly like rules A/B. Disconnecting lets connman fail
-         * over to a peer that will serve bodies. Fires only after the peer
-         * has had SYNC_BODY_STALL_MIN_TIMEOUTS block requests time out with
-         * zero bodies delivered over a full stall window (predicate). */
-        if (!mp_swarm_is_active() && !snapshot_active && !stall_peer_trusted &&
-            !node->inbound && node->state >= PEER_SYNCING_HEADERS) {
-            uint64_t body_recv = 0, body_timeout = 0;
-            dl_peer_body_progress(get_download_mgr(), (uint32_t)node->id,
-                                  NULL, &body_recv, &body_timeout);
-            if (syncsvc_should_disconnect_body_stalled_peer(
-                    node, our_height, body_recv, body_timeout, now_send)) {
-                printf("BODY STALL: peer %s delivered 0 block bodies "
-                       "(%llu getdata timed out) in %llds, disconnecting\n",
-                       node->addr_name,
-                       (unsigned long long)body_timeout,
-                       (long long)(now_send - (node->time_connected
-                           ? node->time_connected : now_send)));
-                (void)p2p_node_request_disconnect(
-                    node, P2P_DISCONNECT_SYNC_STALL,
-                    P2P_DISCONNECT_SOURCE_SYNC, node->endpoint_generation);
-                return true;
-            }
-        }
-
-        /* ── Rule D: delivered-then-dark body stall — the complement of
-         * Rule C. Rule C exempts any peer with body_received > 0, so a peer
-         * that serves a few bodies and then goes silent holds its outbound
-         * slot forever while the body cursor never advances again (and
-         * DL_STALL_TIMEOUT_SECS, the download manager's own stall constant,
-         * was defined-but-unenforced). This evicts it once its last body is
-         * >= the stall window old AND it has accrued the same timed-out floor
-         * Rule C uses, so connman fails over to a peer that keeps serving
-         * bodies. The body_received > 0 (Rule D) vs == 0 (Rule C) split makes
-         * the two mutually exclusive — no peer is double-evicted. Same
-         * trusted/loopback/inbound exemptions as rules A/B/C. */
-        if (!mp_swarm_is_active() && !snapshot_active && !stall_peer_trusted &&
-            !node->inbound && node->state >= PEER_SYNCING_HEADERS) {
-            uint64_t dark_recv = 0, dark_timeout = 0;
-            int64_t dark_last_body = 0;
-            dl_peer_body_staleness(get_download_mgr(), (uint32_t)node->id,
-                                   &dark_recv, &dark_timeout, &dark_last_body);
-            if (syncsvc_should_disconnect_body_dark_peer(
-                    node, our_height, dark_recv, dark_timeout,
-                    dark_last_body, now_send)) {
-                printf("BODY DARK: peer %s delivered %llu block bodies then "
-                       "went silent %llds (%llu getdata timed out), "
-                       "disconnecting\n",
-                       node->addr_name,
-                       (unsigned long long)dark_recv,
-                       (long long)(now_send - dark_last_body),
-                       (unsigned long long)dark_timeout);
-                (void)p2p_node_request_disconnect(
-                    node, P2P_DISCONNECT_SYNC_STALL,
-                    P2P_DISCONNECT_SOURCE_SYNC, node->endpoint_generation);
-                return true;
-            }
-        }
-
-        /* Re-request headers aggressively during IBD (10s), slower at tip (60s).
-         * This is critical: legacy zclassicd sends at most 2000 headers per
-         * getheaders response — for a 3M block chain, we need ~1500 rounds. */
-
-        /* Use fallback (inbound peers) during header stall */
-        if (header_stall) {
-            bool ok = syncsvc_should_request_headers_with_fallback(
-                node, our_height, now_send, true);
-            if (ok && !snapshot_active) {
-                should_sync = true;
-                syncsvc_note_headers_requested(node, now_send);
-            }
-        }
-        if (!snapshot_active) {
-            syncsvc_plan_periodic_getheaders(&periodic, node, our_height,
-                                             now_send);
-            if (periodic.should_send) {
-                should_sync = true;
-                syncsvc_note_headers_requested(node, now_send);
-            }
-        }
-
-        /* All-rejected (bad-prevblk) recovery probe continuation. The
-         * receive-side probe (process_headers, msg_headers.c) fires once
-         * per all-rejected batch, but when the announcement burst ends no
-         * incoming message remains to trigger it and the peer's real tip is
-         * never learned (rejected headers carry no height we accept). While
-         * reject_probe_pending is armed, re-fire from this periodic per-peer
-         * tick under the same per-peer rate limit until a batch connects
-         * again (any accepted header disarms it). */
-        if (!snapshot_active &&
-            syncsvc_should_fire_reject_probe(node, now_send)) {
-            atomic_store_explicit(&node->last_reject_probe_time, now_send,
-                                  memory_order_relaxed);
-            printf("Peer %s: reject-probe pending — re-probing with "
-                   "getheaders from our best header h=%d\n",
-                   node->addr_name, best_header_height);
-            push_getheaders_from(mp, node,
-                                 mp->main_state->pindex_best_header);
-        }
-        if (should_sync && !snapshot_active) {
+        if (recovery.should_recover) {
             struct block_index *tip = active_chain_tip(
                 &mp->main_state->chain_active);
-            switch (syncsvc_header_log_mode(node, tip, in_ibd)) {
-            case SYNC_HEADER_LOG_IBD:
-                printf("IBD getheaders to %s (height=%d, peer=%d, "
-                       "behind=%d)\n",
-                       node->addr_name, tip->nHeight,
-                       node->starting_height,
-                       node->starting_height - tip->nHeight);
-                break;
-            case SYNC_HEADER_LOG_TIP:
-                printf("Sending getheaders to %s (height=%d, peer=%d)\n",
-                       node->addr_name, tip->nHeight,
-                       node->starting_height);
-                break;
-            case SYNC_HEADER_LOG_NONE:
-            default:
-                break;
-            }
-            /* NET-3 range-parallel header acquisition: when >=2 fast-sync
-             * peers are connected and the header gap exceeds one batch,
-             * give this peer its own disjoint checkpoint-anchored span
-             * instead of racing every peer for the same next batch. Returns
-             * false (leaving the single-peer path below untouched) for a
-             * single peer, a small gap, a legacy peer, or an open header
-             * band — so existing behavior is a strict regression-safe
-             * fallback. Validation and band closure are unchanged; this
-             * only changes WHICH peer is asked for WHICH range. */
-            if (!msg_try_range_parallel_getheaders(mp, node, our_height,
-                                                   now_send))
-                exec_getheaders_action(mp, node, &periodic);
+            struct sync_getheaders_action action = {0};
+            syncsvc_plan_recovery_getheaders(&action, &recovery, tip);
+            exec_getheaders_action(mp, node, &action);
         }
-
-        /* Checkpoint-header-solution cure: when the app-layer repair condition
-         * has armed a fetch (a staged checkpoint bundle needs the one missing
-         * checkpoint-header Equihash solution), send ONE bounded getheaders span
-         * to this peer so it returns exactly that header. Cheap no-op when not
-         * armed; globally throttled so only one request goes out per interval. */
-        if (!snapshot_active)
-            checkpoint_header_fetch_maybe_send(mp, node, now_send);
-        if (!snapshot_active)
-            header_serve_repair_maybe_send(mp, node, now_send);
+        syncsvc_free_stall_recovery(&recovery);
     }
+}
 
-    /* ── Download manager: assign queued blocks to this peer ────── */
-    {
-        struct download_manager *dm = get_download_mgr();
-        int64_t now_dl = (int64_t)platform_time_wall_time_t();
-        bool block_swarm_active = mp_block_swarm_is_active();
-        /* A swarm whose piece completions have gone silent would otherwise
-         * hold body transfer forever: its only exit was full completion,
-         * and legacy getdata stays paused while it is active. Reap it so
-         * the height-sorted legacy queue (frontier at the front) resumes.
-         * No-op at tip, where no swarm exists. */
-        if (block_swarm_active && mp_block_swarm_reap_if_stalled(mp))
-            block_swarm_active = false;
+static void msg_send_block_download(struct msg_processor *mp,
+                                    struct p2p_node *node, bool snapshot_active)
+{
+    struct download_manager *dm = get_download_mgr();
+    int64_t now_dl = (int64_t)platform_time_wall_time_t();
+    bool block_swarm_active = mp_block_swarm_is_active();
+    /* A swarm whose piece completions have gone silent would otherwise
+     * hold body transfer forever: its only exit was full completion,
+     * and legacy getdata stays paused while it is active. Reap it so
+     * the height-sorted legacy queue (frontier at the front) resumes.
+     * No-op at tip, where no swarm exists. */
+    if (block_swarm_active && mp_block_swarm_reap_if_stalled(mp))
+        block_swarm_active = false;
 
-        /* During ZCL23 block-swarm catch-up, zblkreq/zblkdata owns body
-         * transfer. Letting legacy getdata run at the same time fills the
-         * peer window with duplicate requests and timeout churn, slowing the
-         * fast path. Leave queued legacy work untouched; it resumes if the
-         * swarm finishes or never starts. */
-        /* Timeout RECLAIM is not assignment, though, and must run even while
-         * a swarm is active: a legacy getdata already inflight when the
-         * swarm armed would otherwise never be reaped and its window slot
-         * would leak for the swarm's whole lifetime. New assignments stay
-         * swarm-gated below, so this cannot reopen the churn above. */
-        size_t timed_out = dl_check_timeouts(dm, now_dl);
-        if (timed_out > 0)
-            event_emitf(EV_BLOCK_REQUESTED, 0,
-                        "timeouts=%zu reassigned to queue", timed_out);
+    /* During ZCL23 block-swarm catch-up, zblkreq/zblkdata owns body
+     * transfer. Letting legacy getdata run at the same time fills the
+     * peer window with duplicate requests and timeout churn, slowing the
+     * fast path. Leave queued legacy work untouched; it resumes if the
+     * swarm finishes or never starts. */
+    /* Timeout RECLAIM is not assignment, though, and must run even while
+     * a swarm is active: a legacy getdata already inflight when the
+     * swarm armed would otherwise never be reaped and its window slot
+     * would leak for the swarm's whole lifetime. New assignments stay
+     * swarm-gated below, so this cannot reopen the churn above. */
+    size_t timed_out = dl_check_timeouts(dm, now_dl);
+    if (timed_out > 0)
+        event_emitf(EV_BLOCK_REQUESTED, 0,
+                    "timeouts=%zu reassigned to queue", timed_out);
 
-        /* Snapshot receive owns catch-up while active. Normal block assignment,
-         * stall recovery, and recovery getheaders only add churn until the
-         * verified snapshot handoff is complete. */
-        if (!snapshot_active && !block_swarm_active) {
-            struct uint256 assign_hashes[DL_WINDOW_SIZE];
-            struct sync_block_batch batch;
-            /* our_height for the behind-peer gate (sibling scope; recompute
-             * the same way as the sync block above, msgprocessor.c:1330). */
-            int our_height = msg_get_height(mp);
-            /* Request no more bodies than the intake ring can still absorb:
-             * the surplus is received, destroyed, and re-requested on a 15 s
-             * timeout. dl_inflight is read BEFORE assignment on purpose. */
-            uint64_t inflight_now = 0;
-            dl_get_stats(dm, NULL, NULL, NULL, &inflight_now, NULL);
-            size_t assign_room = msg_processor_block_intake_request_room(
-                mp, inflight_now, DL_WINDOW_SIZE);
-            if (assign_room == 0) {
-                memset(&batch, 0, sizeof(batch));
-                msg_processor_log_block_intake_backpressure(node);
-            } else {
-                syncsvc_assign_peer_blocks(&batch, dm, node, assign_hashes,
-                                           assign_room, our_height);
-            }
-            if (batch.assigned > 0) {
-                struct byte_stream getdata_msg;
-                stream_init(&getdata_msg, batch.assigned * 36 + 8);
-                if (getdata_blocks_serialize(&getdata_msg, assign_hashes,
-                                             batch.assigned)) {
-                    p2p_node_begin_message(node, "getdata",
-                                           mp->params->pchMessageStart);
-                    p2p_node_write_message_data(node, getdata_msg.data,
-                                                getdata_msg.size);
-                    p2p_node_end_message(node);
-                }
-                stream_free(&getdata_msg);
-
-                {
-                    char hex[65];
-                    uint256_get_hex(&assign_hashes[0], hex);
-                    printf("getdata: %zu blocks to %s (first=%s)\n",
-                           batch.assigned, node->addr_name, hex);
-                }
-                event_emitf(EV_BLOCK_REQUESTED, (uint32_t)node->id,
-                            "assigned=%zu inflight=%zu",
-                            batch.assigned,
-                            batch.in_flight_before + batch.assigned);
-            }
-
-            /* Stall detection: if queue is empty, in-flight is zero,
-             * and we're not at tip — find alternative blocks to download.
-             * Scan block_map for blocks at tip+1 with header data but
-             * no block data, that aren't failed. Queue them. */
-            uint64_t dl_queued = 0, dl_inflight = 0;
-            dl_get_stats(dm, NULL, NULL, NULL, &dl_inflight, &dl_queued);
-            struct sync_stall_recovery recovery;
-            if (syncsvc_build_stall_recovery(&recovery, mp->main_state, node,
-                                             dl_queued, dl_inflight, now_dl)) {
-                if (recovery.should_log) {
-                    printf("STALL: h=%d entries_at_%d=%zu (data=%zu fail=%zu)\n",
-                           recovery.chain_height, recovery.next_height,
-                           recovery.entries_at_next, recovery.entries_with_data,
-                           recovery.entries_failed);
-                }
-                {
-                    int cleared = 0;
-                    syncsvc_apply_stall_recovery(&recovery, mp->main_state,
-                                                 dm, &cleared);
-                    if (recovery.alt_count > 0) {
-                        /* Clear re-queued blocks from the "recently seen"
-                         * dedup buffer. Without this, blocks that were
-                         * received but failed validation are permanently
-                         * stuck: stall recovery re-downloads them, but
-                         * block_already_seen silently drops them. */
-                        for (size_t ri = 0; ri < recovery.alt_count; ri++)
-                            block_clear_seen(&recovery.alt_hashes[ri]);
-                        printf("Stall recovery: queued %zu alt blocks\n",
-                               recovery.alt_count);
-                    } else if (cleared > 0) {
-                        printf("Stall recovery: reset %d blocks at h=%d for re-download\n",
-                               cleared, recovery.next_height);
-                    }
-                }
-                if (recovery.should_recover) {
-                    struct block_index *tip = active_chain_tip(
-                        &mp->main_state->chain_active);
-                    struct sync_getheaders_action action = {0};
-                    syncsvc_plan_recovery_getheaders(&action, &recovery, tip);
-                    exec_getheaders_action(mp, node, &action);
-                }
-                syncsvc_free_stall_recovery(&recovery);
-            }
-        }
+    /* Snapshot receive owns catch-up while active. Normal block assignment,
+     * stall recovery, and recovery getheaders only add churn until the
+     * verified snapshot handoff is complete. */
+    if (!snapshot_active && !block_swarm_active) {
+        msg_send_assign_blocks(mp, node, dm);
+        msg_send_stall_recovery(mp, node, dm, now_dl);
     }
+}
 
+static void msg_send_ibd_speed_log(struct sync_progress_snapshot *progress,
+                                   int64_t now_prog)
+{
+    /* Compute blocks/sec and ETA */
+    static int64_t ibd_speed_last_time = 0;
+    static int     ibd_speed_last_height = 0;
+    double blk_per_sec = 0;
+    int remaining = progress->header_height - progress->chain_height;
+    int eta_seconds = 0;
+    if (ibd_speed_last_time > 0) {
+        int64_t dt = now_prog - ibd_speed_last_time;
+        int dh = progress->chain_height - ibd_speed_last_height;
+        if (dt > 0 && dh > 0)
+            blk_per_sec = (double)dh / (double)dt;
+        if (blk_per_sec > 0 && remaining > 0)
+            eta_seconds = (int)((double)remaining / blk_per_sec);
+    }
+    ibd_speed_last_time = now_prog;
+    ibd_speed_last_height = progress->chain_height;
+
+    printf("IBD: h=%d/%d  %.1f blk/s  ETA %dm%ds  "
+           "dl[flight=%llu queue=%llu timeout=%llu]  "
+           "%.2f GB @ %.1f MB/s\n",
+           progress->chain_height, progress->header_height,
+           blk_per_sec, eta_seconds / 60, eta_seconds % 60,
+           (unsigned long long)progress->in_flight,
+           (unsigned long long)progress->queued,
+           (unsigned long long)progress->timed_out,
+           progress->gib_received, progress->mbps_avg);
+}
+
+static void msg_send_tip_stale_refresh(struct msg_processor *mp,
+                                       struct p2p_node *node,
+                                       struct sync_progress_snapshot *progress,
+                                       int64_t now_prog)
+{
+    /* Tip-stale watchdog: if we're at the tip but haven't
+     * received a new block in 10 minutes, re-request headers.
+     * Runs on ALL outbound peers, not just id==0, so recovery
+     * works even if the first peer disconnected. */
+    struct sync_getheaders_action stale = {0};
+    syncsvc_plan_tip_stale_getheaders(&stale, progress, node, now_prog);
+    if (stale.should_send) {
+        printf("Tip stale: no new block for %llds, "
+               "re-requesting headers from %s\n",
+               (long long)progress->tip_stale_seconds,
+               node->addr_name);
+        exec_getheaders_action(mp, node, &stale);
+    }
+}
+
+static void msg_send_progress_log(struct msg_processor *mp,
+                                  struct p2p_node *node)
+{
     /* ── IBD progress log (every 30s, first outbound peer only) ── */
-    {
-        static int64_t last_progress_log = 0;
-        int64_t now_prog = (int64_t)platform_time_wall_time_t();
-        bool is_progress_peer = !node->inbound && node->id == 0;
-        bool is_watchdog_peer = !node->inbound;
+    static int64_t last_progress_log = 0;
+    int64_t now_prog = (int64_t)platform_time_wall_time_t();
+    bool is_progress_peer = !node->inbound && node->id == 0;
+    bool is_watchdog_peer = !node->inbound;
 
-        if ((is_progress_peer || is_watchdog_peer) &&
-            now_prog - last_progress_log >= 60) {
-            if (is_progress_peer)
-                last_progress_log = now_prog;
-            struct download_manager *dm2 = get_download_mgr();
-            int h = msg_get_height(mp);
-            int header_tip = mp->main_state->pindex_best_header
-                ? mp->main_state->pindex_best_header->nHeight : h;
-            struct sync_progress_snapshot progress;
-            syncsvc_collect_progress(&progress, dm2, sync_get_state(),
-                                     h, header_tip, node->last_block_time,
-                                     now_prog);
-            if (is_progress_peer && progress.should_log_progress) {
-                /* Compute blocks/sec and ETA */
-                static int64_t ibd_speed_last_time = 0;
-                static int     ibd_speed_last_height = 0;
-                double blk_per_sec = 0;
-                int remaining = progress.header_height - progress.chain_height;
-                int eta_seconds = 0;
-                if (ibd_speed_last_time > 0) {
-                    int64_t dt = now_prog - ibd_speed_last_time;
-                    int dh = progress.chain_height - ibd_speed_last_height;
-                    if (dt > 0 && dh > 0)
-                        blk_per_sec = (double)dh / (double)dt;
-                    if (blk_per_sec > 0 && remaining > 0)
-                        eta_seconds = (int)((double)remaining / blk_per_sec);
-                }
-                ibd_speed_last_time = now_prog;
-                ibd_speed_last_height = progress.chain_height;
+    if ((is_progress_peer || is_watchdog_peer) &&
+        now_prog - last_progress_log >= 60) {
+        if (is_progress_peer)
+            last_progress_log = now_prog;
+        struct download_manager *dm2 = get_download_mgr();
+        int h = msg_get_height(mp);
+        int header_tip = mp->main_state->pindex_best_header
+            ? mp->main_state->pindex_best_header->nHeight : h;
+        struct sync_progress_snapshot progress;
+        syncsvc_collect_progress(&progress, dm2, sync_get_state(),
+                                 h, header_tip, node->last_block_time,
+                                 now_prog);
+        if (is_progress_peer && progress.should_log_progress)
+            msg_send_ibd_speed_log(&progress, now_prog);
 
-                printf("IBD: h=%d/%d  %.1f blk/s  ETA %dm%ds  "
-                       "dl[flight=%llu queue=%llu timeout=%llu]  "
-                       "%.2f GB @ %.1f MB/s\n",
-                       progress.chain_height, progress.header_height,
-                       blk_per_sec, eta_seconds / 60, eta_seconds % 60,
-                       (unsigned long long)progress.in_flight,
-                       (unsigned long long)progress.queued,
-                       (unsigned long long)progress.timed_out,
-                       progress.gib_received, progress.mbps_avg);
-            }
+        msg_send_tip_stale_refresh(mp, node, &progress, now_prog);
 
-            /* Tip-stale watchdog: if we're at the tip but haven't
-             * received a new block in 10 minutes, re-request headers.
-             * Runs on ALL outbound peers, not just id==0, so recovery
-             * works even if the first peer disconnected. */
-            {
-                struct sync_getheaders_action stale = {0};
-                syncsvc_plan_tip_stale_getheaders(&stale, &progress,
-                                                  node, now_prog);
-                if (stale.should_send) {
-                    printf("Tip stale: no new block for %llds, "
-                           "re-requesting headers from %s\n",
-                           (long long)progress.tip_stale_seconds,
-                           node->addr_name);
-                    exec_getheaders_action(mp, node, &stale);
-                }
-            }
-
-            /* Sync watchdog now runs on the engine/modules/health periodic ring
-             * (sync_watchdog_start in boot_services.c). The old
-             * per-peer call here was gated on `node->id == 0`, which
-             * is never true once peer ids rotate past zero — the bug
-             * that left a node 22k blocks behind with checks_run=1. */
-        }
+        /* Sync watchdog now runs on the engine/modules/health periodic ring
+         * (sync_watchdog_start in boot_services.c). The old
+         * per-peer call here was gated on `node->id == 0`, which
+         * is never true once peer ids rotate past zero — the bug
+         * that left a node 22k blocks behind with checks_run=1. */
     }
+}
 
+static void msg_send_keepalive_ping(struct msg_processor *mp,
+                                    struct p2p_node *node)
+{
     /* Send a keepalive ping after 60 seconds without incoming traffic.  The
      * socket thread owns deadlines against these same monotonic stamps. */
     int64_t now_mono_us = platform_time_monotonic_us();
@@ -2932,10 +3059,10 @@ bool msg_send_messages(void *ctx, struct p2p_node *node, bool send_trickle)
         p2p_node_end_message(node);
         stream_free(&ping);
     }
+}
 
-    /* Snapshot serving + swarm + block-swarm coordinators. */
-    mp_snapshot_send_tick(mp, node);
-
+static void msg_send_dandelion_fluff(struct msg_processor *mp, bool send_trickle)
+{
     /* Dandelion++ embargo check: fluff any stemmed txs whose embargo expired.
      * Done once per trickle cycle (not per-peer) via a static timer guard. */
     if (send_trickle && g_dandelion_init && g_dandelion.stempool_count > 0) {
@@ -2956,56 +3083,108 @@ bool msg_send_messages(void *ctx, struct p2p_node *node, bool send_trickle)
             zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
         }
     }
+}
+
+static void msg_send_trickle_inventory(struct msg_processor *mp,
+                                       struct p2p_node *node)
+{
+    zcl_mutex_lock(&node->cs_inventory);
+    if (node->inventory_to_send_count > 0) {
+        struct byte_stream inv_msg;
+        stream_init(&inv_msg, 256);
+        uint64_t count = 0;
+
+        /* Wire-protocol clamp: one inv message carries at most
+         * MAX_INV_SZ items. Anything beyond that stays queued — the
+         * next tick drains the remainder — instead of emitting a
+         * single oversized frame peers may drop wholesale. */
+        size_t emit = node->inventory_to_send_count;
+        bool retained = false;
+        if (emit > MAX_INV_SZ) {
+            emit = MAX_INV_SZ;
+            retained = true;
+        }
+        for (size_t i = 0; i < emit; i++) {
+            inv_item_serialize(&node->inventory_to_send[i], &inv_msg);
+            count++;
+        }
+
+        if (count > 0) {
+            struct byte_stream msg;
+            stream_init(&msg, inv_msg.size + 8);
+            stream_write_compact_size(&msg, count);
+            stream_write(&msg, inv_msg.data, inv_msg.size);
+
+            p2p_node_begin_message(node, "inv",
+                                   mp->params->pchMessageStart);
+            p2p_node_write_message_data(node, msg.data, msg.size);
+            p2p_node_end_message(node);
+            stream_free(&msg);
+        }
+        stream_free(&inv_msg);
+
+        if (!retained) {
+            node->inventory_to_send_count = 0;
+        } else {
+            memmove(&node->inventory_to_send[0],
+                    &node->inventory_to_send[emit],
+                    (node->inventory_to_send_count - emit) *
+                        sizeof(node->inventory_to_send[0]));
+            node->inventory_to_send_count -= emit;
+        }
+    }
+    zcl_mutex_unlock(&node->cs_inventory);
+}
+
+bool msg_send_messages(void *ctx, struct p2p_node *node, bool send_trickle)
+{
+    struct msg_processor *mp = (struct msg_processor *)ctx;
+    bool snapshot_active = mp_snapshot_is_active();
+
+    /* Outbound nodes: send version to initiate handshake */
+    if (node->state < PEER_HANDSHAKE_COMPLETE) {
+        msg_send_pre_handshake(mp, node);
+        return true;
+    }
+
+    /* Transition to ACTIVE if still at HANDSHAKE_COMPLETE */
+    if (node->state == PEER_HANDSHAKE_COMPLETE) {
+        peer_set_state_checked((uint32_t)node->id, &node->state,
+                               PEER_ACTIVE, "ready for sync");
+        peer_lifecycle_note_active(node);
+    }
+
+    /* Answer the one getheaders this peer's serve window deferred, if its
+     * window has rolled — a legacy client has no retry timer and would
+     * otherwise sit silent until an unrelated inv woke it. No-op otherwise. */
+    (void)getheaders_replay_deferred(mp, node);
+
+    /* Offer fast sync to ZCL23 peers that are behind us */
+    mp_snapshot_maybe_offer(mp, node);
+
+    /* Snapshot stall detection — if no chunk for 60s, reset and accept new peer */
+    if (mp_snapshot_check_stall()) {
+        printf("[sync] Snapshot stall detected — will accept new offer\n");
+    }
+
+    /* Initiate sync, and periodically re-request if behind. */
+    if (msg_send_header_sync(mp, node, snapshot_active))
+        return true;
+
+    /* ── Download manager: assign queued blocks to this peer ────── */
+    msg_send_block_download(mp, node, snapshot_active);
+
+    msg_send_progress_log(mp, node);
+    msg_send_keepalive_ping(mp, node);
+
+    /* Snapshot serving + swarm + block-swarm coordinators. */
+    mp_snapshot_send_tick(mp, node);
+
+    msg_send_dandelion_fluff(mp, send_trickle);
 
     /* Send inventory on trickle */
-    if (send_trickle) {
-        zcl_mutex_lock(&node->cs_inventory);
-        if (node->inventory_to_send_count > 0) {
-            struct byte_stream inv_msg;
-            stream_init(&inv_msg, 256);
-            uint64_t count = 0;
-
-            /* Wire-protocol clamp: one inv message carries at most
-             * MAX_INV_SZ items. Anything beyond that stays queued — the
-             * next tick drains the remainder — instead of emitting a
-             * single oversized frame peers may drop wholesale. */
-            size_t emit = node->inventory_to_send_count;
-            bool retained = false;
-            if (emit > MAX_INV_SZ) {
-                emit = MAX_INV_SZ;
-                retained = true;
-            }
-            for (size_t i = 0; i < emit; i++) {
-                inv_item_serialize(&node->inventory_to_send[i], &inv_msg);
-                count++;
-            }
-
-            if (count > 0) {
-                struct byte_stream msg;
-                stream_init(&msg, inv_msg.size + 8);
-                stream_write_compact_size(&msg, count);
-                stream_write(&msg, inv_msg.data, inv_msg.size);
-
-                p2p_node_begin_message(node, "inv",
-                                       mp->params->pchMessageStart);
-                p2p_node_write_message_data(node, msg.data, msg.size);
-                p2p_node_end_message(node);
-                stream_free(&msg);
-            }
-            stream_free(&inv_msg);
-
-            if (!retained) {
-                node->inventory_to_send_count = 0;
-            } else {
-                memmove(&node->inventory_to_send[0],
-                        &node->inventory_to_send[emit],
-                        (node->inventory_to_send_count - emit) *
-                            sizeof(node->inventory_to_send[0]));
-                node->inventory_to_send_count -= emit;
-            }
-        }
-        zcl_mutex_unlock(&node->cs_inventory);
-    }
+    if (send_trickle)
+        msg_send_trickle_inventory(mp, node);
 
     /* Send addresses */
     if (node->addr_to_send_count > 0) {
