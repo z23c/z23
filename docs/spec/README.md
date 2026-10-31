@@ -20,4 +20,5 @@ Commands: `discover.wiki`, `discover.read`
 - [`power-node-contract.md`](./power-node-contract.md): Power-Node Architecture Contract
 - [`schema.sql`](./schema.sql): ZClassic C23 node database schema, a reference dump that is never read at runtime
 - [`shared-focus-protocol.md`](./shared-focus-protocol.md): Shared focus protocol
+- [`short-video-network.md`](./short-video-network.md): Clips, a peer-to-peer short-video network (design)
 - [`sovereign-identity-layer.md`](./sovereign-identity-layer.md): Sovereign Identity Layer — chain-anchored master keys (Design)
