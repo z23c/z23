@@ -19,7 +19,7 @@ struct zapp_app_entry {
     bool same_signature;                  /* Signed with the same key as this app. */
 };
 
-/* zcl.phone_card.v1: node line, sync status, balance when known, and pace. It carries nothing else
+/* zcl.phone_card.v1: node line, sync status, and pace. It carries nothing else
  * from the view: no fleet token, host plan, pairing offer, key or path. preview marks the voice
  * preview package, which never runs a node. Returns the JSON length, or 0 when cap is too small. */
 size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *out, size_t cap);

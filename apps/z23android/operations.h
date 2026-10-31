@@ -58,7 +58,6 @@ enum zapp_onion { ZAPP_ONION_READY, ZAPP_ONION_NODE_STOPPED, ZAPP_ONION_TIMEOUT 
 /* Re-checks once a second for up to the given seconds. waiting runs once, when the address is not
  * yet there. Returns early if the node exits. */
 enum zapp_onion zapp_onion_wait(struct zapp_runtime *r, unsigned seconds, void (*waiting)(void *), void *arg);
-bool zapp_balance_format(const char *json, char *out, size_t cap);
 /* The JSON object in command output: at its start, or on the first line beginning with {, after
  * warnings the command wrote first. NULL when there is none. */
 const char *zapp_json_object(const char *text);

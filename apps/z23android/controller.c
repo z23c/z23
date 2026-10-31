@@ -94,20 +94,6 @@ static bool invitation(struct controller *c, const char *text)
     pthread_mutex_unlock(&c->lock);
     memory_cleanse(token, sizeof(token)); return ok;
 }
-static void observe_balance(struct controller *c, char *output)
-{
-    char balance[512] = "";
-    bool ok = output &&
-        zapp_operation_run(&c->runtime, "wallet_balance", output, ZAPP_TEXT_CAP) &&
-        zapp_balance_format(output, balance, sizeof(balance));
-    pthread_mutex_lock(&c->lock);
-    if (ok) {
-        copy_text(c->view.balance, sizeof(c->view.balance), balance);
-        c->view.balance_known = true;
-    }
-    c->view.balance_stale = !ok && c->view.balance_known;
-    pthread_mutex_unlock(&c->lock);
-}
 /* Heights and peer count from a status reply; values the reply lacks stay negative. */
 struct node_reading { bool responding; int64_t height, target, peers; };
 static struct node_reading read_status(const char *output)
@@ -177,7 +163,6 @@ static void observe_node(struct controller *c)
     bool ran = output && zapp_operation_run(&c->runtime, "status", output, ZAPP_TEXT_CAP);
     struct node_reading n = read_status(ran ? output : NULL);
     enum zapp_pace pace = zapp_status_pace(ran ? output : NULL);
-    observe_balance(c, output);
     free(output);
     bool process_running = zapp_node_running(&c->runtime), stopping = zapp_node_stopping(&c->runtime);
     bool wanted = zapp_node_wanted(&c->runtime);
@@ -250,9 +235,6 @@ static bool ask_with(struct controller *c, const char *question, char *out, cons
     observe_node(c);
     pthread_mutex_lock(&c->lock);
     copy_text(snapshot.sync_status, sizeof(snapshot.sync_status), c->view.sync_status);
-    copy_text(snapshot.balance, sizeof(snapshot.balance), c->view.balance);
-    snapshot.balance_known = c->view.balance_known;
-    snapshot.balance_stale = c->view.balance_stale;
     snapshot.node_running = c->view.node_running;
     const struct json_value *earlier = zapp_history_json(&c->history, &history) ? &history : NULL;
     pthread_mutex_unlock(&c->lock);
@@ -271,8 +253,14 @@ static bool ask_assistant(struct controller *c, const char *question, char *out,
 {
     return ask_with(c, question, out, cancel, NULL);
 }
+/* The wallet is never in the assistant's context, so a balance question, typed or spoken, gets this sentence. */
+#define WALLET_ANSWER "The wallet is shown only on the wallet screen."
 static bool conversation_chat(struct controller *c, const char *question, char *out)
 {
+    if (zapp_voice_interpret(question) == ZAPP_VOICE_BALANCE) {
+        copy_text(out, ZAPP_TEXT_CAP, WALLET_ANSWER);
+        return true;
+    }
     return ask_assistant(c, question, out, &c->reply_cancel);
 }
 /* Caller holds c->lock. Keeps the selected host among the report's rows, else selects the first. */
@@ -361,13 +349,8 @@ static void voice_answer(struct controller *c, enum zapp_voice_intent intent, ch
         copy_text(answer, 120, c->view.node_running ?
             "Node responding. Check sync progress on screen." :
             "Node status is unavailable.");
-    else if (intent == ZAPP_VOICE_BALANCE) {
-        if (!c->view.balance_known || c->view.balance_stale)
-            copy_text(answer, 120, "Current balance is unavailable.");
-        else if (strcspn(c->view.balance, "\n") < 100)
-            snprintf(answer, 120, "%.*s", (int)strcspn(c->view.balance, "\n"), c->view.balance);
-        else copy_text(answer, 120, "The refreshed balance is displayed on screen.");
-    } else if (intent == ZAPP_VOICE_START && c->runtime.preview) {
+    else if (intent == ZAPP_VOICE_BALANCE) copy_text(answer, 120, WALLET_ANSWER);
+    else if (intent == ZAPP_VOICE_START && c->runtime.preview) {
         copy_text(answer, 120, "The preview app does not run a node.");
     } else if (intent == ZAPP_VOICE_START || intent == ZAPP_VOICE_STOP) {
         copy_text(c->view.voice_proposal, sizeof(c->view.voice_proposal),
@@ -406,14 +389,15 @@ static enum listen_result voice_listen(struct controller *c, bool follow_up, cha
     if (!ok || atomic_load(&c->voice_cancel)) return LISTEN_FAILED;
     return heard ? LISTEN_HEARD : LISTEN_SILENT;
 }
-/* Start and stop stay on-screen proposals; everything else goes to the private model, which
+/* Start and stop stay on-screen proposals, and a balance question gets the fixed wallet sentence.
+ * Everything else goes to the private model, which
  * streams its audio when the laptop supports it. Without any audio the caller speaks the text.
  * Returns whether the private model answered. */
 static bool voice_reply(struct controller *c, const char *transcript, char *answer, struct voice_stream *stream)
 {
     enum zapp_voice_intent intent = zapp_voice_interpret(transcript);
     char brief[120] = "";
-    if (intent == ZAPP_VOICE_START || intent == ZAPP_VOICE_STOP) {
+    if (intent == ZAPP_VOICE_START || intent == ZAPP_VOICE_STOP || intent == ZAPP_VOICE_BALANCE) {
         voice_answer(c, intent, brief); copy_text(answer, ZAPP_TEXT_CAP, brief); return false;
     }
     pthread_mutex_lock(&c->lock);

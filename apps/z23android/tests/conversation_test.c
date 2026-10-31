@@ -70,7 +70,7 @@ static const char *format_parts(const char *out, struct json_value *node)
     const char *question = strstr(out, "\n\nQuestion: ");
     assert(!strncmp(out, label, sizeof(label) - 1) && question);
     const char *json = out + sizeof(label) - 1;
-    assert(json_read(node, json, (size_t)(question - json)) && node->type == JSON_OBJ && json_size(node) == 4);
+    assert(json_read(node, json, (size_t)(question - json)) && node->type == JSON_OBJ && json_size(node) == 2);
     return question + 12;
 }
 static void format_cases(void)
@@ -82,16 +82,15 @@ static void format_cases(void)
     assert(zapp_conversation_format(&s, "a \"quote\"\nnext", out, sizeof(out)));
     struct json_value node = {0};
     assert(!strcmp(format_parts(out, &node), "a \"quote\"\nnext"));
-    assert(!json_get_bool(json_get(&node, "running")) && !json_get_bool(json_get(&node, "balance_stale")));
-    assert(!strcmp(json_get_str(json_get(&node, "balance")), "unavailable"));
+    assert(!json_get_bool(json_get(&node, "running")));
     assert(!strcmp(json_get_str(json_get(&node, "sync_status")), s.sync_status));
+    /* No wallet key reaches the prompt: the snapshot has no wallet field and only running and sync_status are written. */
+    assert(!json_get(&node, "balance") && !json_get(&node, "balance_stale") && !json_get(&node, "wallet"));
     json_free(&node);
-    s.balance_known = s.balance_stale = s.node_running = true;
-    memcpy(s.balance, "Total: 1 ZCL (may be stale)", sizeof("Total: 1 ZCL (may be stale)"));
+    s.node_running = true;
     assert(zapp_conversation_format(&s, "balance?", out, sizeof(out)));
     assert(!strcmp(format_parts(out, &node), "balance?"));
-    assert(json_get_bool(json_get(&node, "running")) && json_get_bool(json_get(&node, "balance_stale")));
-    assert(!strcmp(json_get_str(json_get(&node, "balance")), s.balance));
+    assert(json_get_bool(json_get(&node, "running")) && !json_get(&node, "balance"));
     json_free(&node);
     size_t used = (size_t)(strstr(out, "\n\nQuestion: ") - out);
     assert(!zapp_conversation_format(&s, "balance?", out, used + 12) && !out[0]);

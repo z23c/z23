@@ -6,11 +6,11 @@
 #include <string.h>
 
 #define HOME_TILES \
-    "{\"type\":\"action\",\"id\":\"scan\"},{\"type\":\"action\",\"id\":\"assistant\"}"
+    "{\"type\":\"action\",\"id\":\"scan\"},{\"type\":\"action\",\"id\":\"assistant\"}," \
+    "{\"type\":\"action\",\"id\":\"wallet\"}"
 #define HOME_PHONE_TEXT \
     "{\"type\":\"text\",\"field\":\"node_line\",\"style\":\"title\",\"max_lines\":2}," \
-    "{\"type\":\"text\",\"field\":\"sync\",\"style\":\"caption\",\"max_lines\":2}," \
-    "{\"type\":\"text\",\"field\":\"balance\",\"style\":\"caption\",\"max_lines\":2}"
+    "{\"type\":\"text\",\"field\":\"sync\",\"style\":\"caption\",\"max_lines\":2}"
 #define HOME_Z23_APPS(columns) \
     "{\"type\":\"grid\",\"columns\":" columns ",\"card\":\"z23_app\",\"children\":[" \
     "{\"type\":\"action\",\"id\":\"launch\",\"field\":\"label\"}]}"
@@ -23,7 +23,7 @@ static const char default_layout[] =
     "{\"type\":\"column\",\"card\":\"phone\",\"children\":[" HOME_PHONE_TEXT "]},"
     HOME_Z23_APPS("2") ","
     "{\"type\":\"grid\",\"columns\":2,\"children\":[" HOME_TILES "]}]}}}";
-/* Light: the phone card, the Z23 apps, two tiles (Scan, Assistant), then every other launchable app. */
+/* Light: the phone card, the Z23 apps, three tiles (Scan, Assistant, Wallet), then every other launchable app. */
 static const char classic_layout[] =
     "{\"schema\":\"zcl.layout_recipe.v1\",\"id\":\"classic\","
     "\"theme\":{\"background\":\"#f7f5ef\",\"text\":\"#262b2b\",\"muted\":\"#5f6662\",\"accent\":\"#235e50\"},"
@@ -37,7 +37,7 @@ static const struct { const char *name, *document; } layouts[] = {
     {"default", default_layout}, {"classic", classic_layout},
 };
 static const struct { const char *id, *label; } labels[] = {
-    {"scan", "Scan"}, {"assistant", "Assistant"}, {"apps", "Apps"}, {"settings", "Settings"},
+    {"scan", "Scan"}, {"assistant", "Assistant"}, {"wallet", "Wallet"}, {"apps", "Apps"}, {"settings", "Settings"},
 };
 
 size_t zapp_home_layout_count(void) { return sizeof(layouts) / sizeof(layouts[0]); }
@@ -75,12 +75,6 @@ size_t zapp_home_phone_card(const struct zapp_view *view, bool preview, char *ou
         zapp_paced_line(view->pace, running, view->node_line, line, sizeof(line)));
     json_push_kv_str(&card, "sync", preview ? "The preview app does not run a node." :
         view->sync_status[0] ? view->sync_status : "Sync status unknown");
-    if (!preview && view->balance_known && view->balance[0]) {
-        char balance[sizeof(view->balance) + 16];
-        snprintf(balance, sizeof(balance), "%s%s", view->balance_stale ? "Last known: " : "", view->balance);
-        json_push_kv_str(&card, "balance", balance);
-        json_push_kv_bool(&card, "balance_stale", view->balance_stale);
-    }
     json_push_kv_str(&card, "pace", pace_name(view->pace));
     return finish(&card, out, cap);
 }

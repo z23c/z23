@@ -17,30 +17,41 @@ static void fill_secrets(struct zapp_view *view)
     snprintf(view->transcript, sizeof(view->transcript), "TRANSCRIPT-SECRET");
     snprintf(view->connection, sizeof(view->connection), "/data/user/0/org.z23/files/CONNECTION-PATH");
 }
+static void plant_wallet_marker(struct zapp_view *view)
+{
+    /* Each text field the Home card does not show holds the marker, so a wallet value that reaches the card is caught. */
+    static const char marker[] = "WALLET-MARKER 1.25 ZCL";
+    snprintf(view->fleet_status, sizeof(view->fleet_status), "%s", marker);
+    snprintf(view->fleet_preview, sizeof(view->fleet_preview), "%s", marker);
+    snprintf(view->fleet_receipt, sizeof(view->fleet_receipt), "%s", marker);
+    snprintf(view->fleet_token, sizeof(view->fleet_token), "%s", marker);
+    snprintf(view->transcript, sizeof(view->transcript), "%s", marker);
+    snprintf(view->connection, sizeof(view->connection), "%s", marker);
+    snprintf(view->notice, sizeof(view->notice), "%s", marker);
+    snprintf(view->result, sizeof(view->result), "%s", marker);
+    snprintf(view->voice_status, sizeof(view->voice_status), "%s", marker);
+    snprintf(view->scan_text, sizeof(view->scan_text), "%s", marker);
+    snprintf(view->ops_text, sizeof(view->ops_text), "%s", marker);
+    snprintf(view->pair_offer, sizeof(view->pair_offer), "%s", marker);
+}
 static void phone_card_golden(void)
 {
     static struct zapp_view view;
     char card[1024];
     snprintf(view.node_line, sizeof(view.node_line), "Node catching up · 1,200 of 2,000");
     snprintf(view.sync_status, sizeof(view.sync_status), "800 blocks to go.");
-    snprintf(view.balance, sizeof(view.balance), "Balance 1.25 ZCL");
-    view.balance_known = true; view.node_process_running = true;
+    view.node_process_running = true;
     fill_secrets(&view);
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
     assert(!strcmp(card, "{\"schema\":\"zcl.phone_card.v1\",\"node_line\":\"Node catching up · 1,200 of 2,000\","
-        "\"sync\":\"800 blocks to go.\",\"balance\":\"Balance 1.25 ZCL\",\"balance_stale\":false,\"pace\":\"normal\"}"));
-    view.pace = ZAPP_PACE_GENTLE; view.balance_stale = true;
+        "\"sync\":\"800 blocks to go.\",\"pace\":\"normal\"}"));
+    view.pace = ZAPP_PACE_GENTLE;
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
-    assert(strstr(card, "\"node_line\":\"Syncing gently · phone is warm\"") && strstr(card, "\"balance_stale\":true"));
-    assert(strstr(card, "\"balance\":\"Last known: Balance 1.25 ZCL\""));
-    view.balance_stale = false;
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "Last known"));
-    view.balance_stale = true;
-    assert(strstr(card, "\"pace\":\"gentle\""));
+    assert(strstr(card, "\"node_line\":\"Syncing gently · phone is warm\"") && strstr(card, "\"pace\":\"gentle\""));
     view.pace = ZAPP_PACE_PAUSE;
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"pace\":\"pause\""));
 }
-static void phone_card_omits_unknown_balance_and_secrets(void)
+static void phone_card_omits_secrets(void)
 {
     static struct zapp_view view;
     char card[1024];
@@ -50,13 +61,32 @@ static void phone_card_omits_unknown_balance_and_secrets(void)
         "\"pace\":\"normal\"}"));
     static const char *const secrets[] = {"FLEET-TOKEN", "RECEIPT", "PLAN-ID", "OPS-TEXT", "PAIR-OFFER", "PAIRCD",
         "TRANSCRIPT", "CONNECTION-PATH", "/data/", "fleet_token", "ops_plan", "pair_offer", "key"};
-    view.balance_known = true;
-    snprintf(view.balance, sizeof(view.balance), "Balance 2 ZCL");
-    assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
     for (size_t i = 0; i < sizeof(secrets) / sizeof(secrets[0]); ++i) assert(!strstr(card, secrets[i]));
     assert(zapp_home_phone_card(&view, true, card, sizeof(card)));
     assert(strstr(card, "Preview · separate from your main node") && !strstr(card, "Balance"));
     assert(!zapp_home_phone_card(&view, false, card, 20));
+}
+static void phone_card_never_shows_wallet(void)
+{
+    static struct zapp_view view;
+    char card[1024];
+    snprintf(view.node_line, sizeof(view.node_line), "Node synced");
+    snprintf(view.sync_status, sizeof(view.sync_status), "Synced");
+    view.node_process_running = true;
+    plant_wallet_marker(&view);
+    assert(strstr(view.fleet_status, "WALLET-MARKER"));
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
+    assert(strstr(card, "\"sync\":\"Synced\"") && !strstr(card, "WALLET") && !strstr(card, "ZCL"));
+    assert(!strstr(card, "Balance") && !strstr(card, "Wallet") && !strstr(card, "balance"));
+    assert(zapp_home_phone_card(&view, true, card, sizeof(card)) && !strstr(card, "WALLET"));
+}
+static void wallet_tile_has_no_amount(void)
+{
+    const char *layout = zapp_home_layout("default"), *classic = zapp_home_layout("classic");
+    const char *label = zapp_home_action_label("wallet");
+    assert(layout && strstr(layout, "\"id\":\"wallet\"") && !strstr(layout, "balance"));
+    assert(classic && strstr(classic, "\"id\":\"wallet\"") && !strstr(classic, "balance"));
+    assert(label && !strcmp(label, "Wallet"));
 }
 static void app_card_golden(void)
 {
@@ -181,7 +211,9 @@ static void offer_jump(void)
 int main(void)
 {
     phone_card_golden();
-    phone_card_omits_unknown_balance_and_secrets();
+    phone_card_omits_secrets();
+    phone_card_never_shows_wallet();
+    wallet_tile_has_no_amount();
     app_card_golden();
     z23_app_cards();
     unsigned_z23_package_is_plain();

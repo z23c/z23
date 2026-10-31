@@ -59,15 +59,13 @@ is the owner's decision in Android's own Home settings; the app never changes
 that role. The app hides the system bars (a swipe from the edge shows them
 briefly) and the keyboard still works in text fields.
 
-The Home screen shows the phone card (node line, sync status, balance when
-known), a Z23 apps section, and tiles for Scan and Assistant. A fixed bar with **Apps** and
+The Home screen shows the phone card (node line and sync status), a Z23 apps section, and tiles for Scan, Assistant and Wallet. The Wallet tile shows no amount: Home does not read the balance, and the balance appears only on the wallet screen, which a later change adds. A fixed bar with **Apps** and
 **Settings** sits under the layout on every layout. The Z23
 apps section is built from the launcher list: every installed launchable
 package whose name starts with `org.z23.`, except the base app
 `org.z23.nativeapp` and `org.z23.voicepreview*`, and that is signed with the
 same key as this app; any other app stays in the plain app list. Each card opens
-the launcher activity it was listed for. A balance that is out of date reads
-"Last known: ..." on Home.
+the launcher activity it was listed for.
 Back from any screen returns Home; Back on Home does nothing. When Z23 is the
 Home app, the Home button returns to Home from Apps and Settings (measured on a Pixel 3, Android 15);
 on the Assistant it leaves the screen as it is, so use Back there. **Assistant**
@@ -131,7 +129,7 @@ line stays above it; only the default hint gives way. Tapping it asks it as a
 typed question, and it never suggests starting, stopping or joining. When
 the conversation buffer fills, whole older exchanges are dropped first.
 **More** holds typed questions, the host connection, each fleet host,
-synchronization detail, balance, **Stop node** and fleet invitations. Each host
+synchronization detail, **Stop node** and fleet invitations. Each host
 row gives the host's state and height and adds free disk only below 50 GB;
 blockers are left to the voice assistant. A host whose node gives no height
 reads "node not answering", and one that does not answer the probe reads "host
@@ -152,14 +150,7 @@ counted in sync: <reason>") with no heights, so it has no numbers to compare;
 a host one block ahead of its `zclassicd` reads "in sync". Command
 output reaches the screen only as plain sentences; a JSON error shows its
 message alone, and audio failures show one sentence while their cause goes to
-logcat. The app runs only two read-only node commands, the node status and
-the wallet balance, besides starting, stopping and joining a fleet. Failed
-balance refreshes keep the last value, labelled "Last known"; an
-unavailable balance is not displayed as zero. The synchronization line adds
-only what the node line leaves out: the blocks still to go, or that the node
-has every block its peers report. The balance is one line without trailing
-zeros ("Balance 1.25 ZCL"); the shielded and transparent split follows only
-when there is a balance, and a reserved amount only when one exists.
+logcat. The app runs one read-only node command, the node status, besides starting, stopping and joining a fleet. The wallet balance is read on no surface: Home shows a Wallet tile with no amount, the assistant gets no wallet field, and a balance question, typed or spoken, gets one plain sentence that the wallet is shown only on the wallet screen. The synchronization line adds only what the node line leaves out: the blocks still to go, or that the node has every block its peers report.
 
 Under the fleet list in **More**, **Host** selects one fleet host, **Show errors**
 lists its last five `ERROR` log lines from the past 24 hours (`z23 ops logs`, read-only) and
@@ -195,8 +186,7 @@ separate from the main node. When no current fleet report arrives, the fleet
 line says so and **More** labels the last report as old.
 
 Chat refreshes a bounded read-only node summary before asking the private
-model on the paired laptop host. The summary includes synchronization text,
-balance and availability flags. It excludes keys, addresses and raw RPC
+model on the paired laptop host. The summary includes synchronization text and the node running flag. It excludes the wallet, keys, addresses and raw RPC
 output. It travels as data labelled as this phone's own node, apart from the
 fleet hosts, followed by the question. Only answers from the model join the
 history; error messages and answers made on the phone do not. Up to 32 earlier

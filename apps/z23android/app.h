@@ -22,9 +22,6 @@ struct zapp_view {
     char transcript[ZAPP_TEXT_CAP];
     char connection[256];
     char sync_status[1024];
-    char balance[512];
-    bool balance_known;
-    bool balance_stale;
     char fleet_token[8192];
     char fleet_preview[2048];
     char fleet_receipt[8192];

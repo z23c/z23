@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static jobject root, status_view, result_view, prompt_view, invite_view, balance_view;
+static jobject root, status_view, result_view, prompt_view, invite_view;
 static jobject connection_view, transcript_view, fleet_view, receipt_view, details_view, notice_view;
 static jobject voice_view, pair_view, hosts_view, sync_view, ops_view;
 static jobject buttons[20];
@@ -158,7 +158,7 @@ void zapp_native_ui_destroy(JNIEnv *env)
         if (buttons[i]) (*env)->DeleteGlobalRef(env, buttons[i]);
         buttons[i] = NULL;
     }
-    jobject *views[] = {&root, &status_view, &balance_view, &result_view, &notice_view, &details_view, &prompt_view, &invite_view, &connection_view, &transcript_view, &fleet_view, &receipt_view, &voice_view, &pair_view, &hosts_view, &sync_view, &ops_view};
+    jobject *views[] = {&root, &status_view, &result_view, &notice_view, &details_view, &prompt_view, &invite_view, &connection_view, &transcript_view, &fleet_view, &receipt_view, &voice_view, &pair_view, &hosts_view, &sync_view, &ops_view};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) {
         if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
         *views[i] = NULL;
@@ -204,8 +204,7 @@ static bool chat_widgets(JNIEnv *env, jobject layout, jobject activity, jobject 
         !add_button(env, layout, activity, "Refresh fleet", 14) ||
         !ops_widgets(env, layout, activity) ||
         !add_text(env, layout, activity, "Phone node", NULL) ||
-        !add_text(env, layout, activity, "", &sync_view) ||
-        !add_text(env, layout, activity, "Balance appears when your node is ready", &balance_view));
+        !add_text(env, layout, activity, "", &sync_view));
 }
 static bool detail_controls(JNIEnv *env, jobject layout, jobject activity)
 {
@@ -474,11 +473,6 @@ static void render_node(JNIEnv *env, const struct zapp_view *view)
     snprintf(status, sizeof(status), "%s%s", view->sync_status[0] ? view->sync_status : "Sync status unknown",
              view->busy ? "\nWorking…" : "");
     (void)zj_text(env, sync_view, voice_preview ? "The preview app does not run a node." : status);
-    (void)zj_visible(env, balance_view, !voice_preview);
-    char balance[600];
-    snprintf(balance, sizeof(balance), "%s%s", view->balance_stale ? "Last known:\n" : "",
-             view->balance[0] ? view->balance : "Balance appears when your node is ready");
-    (void)zj_text(env, balance_view, balance);
     (void)zj_text(env, connection_view, view->connection[0] ? view->connection : "Connect a laptop to use chat.");
     show_transcript(env, view);
     (void)zj_visible(env, transcript_view, view->transcript[0] || view->pending_question[0]);

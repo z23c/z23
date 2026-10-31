@@ -10,17 +10,14 @@ static bool valid_snapshot(const struct zapp_conversation_snapshot *s, const cha
 {
     return s && question && question[0] &&
         memchr(s->sync_status, 0, sizeof(s->sync_status)) &&
-        memchr(s->balance, 0, sizeof(s->balance)) &&
         strlen(question) <= 16000 && zutf8_validate(question) &&
-        zutf8_validate(s->sync_status) && zutf8_validate(s->balance);
+        zutf8_validate(s->sync_status);
 }
 
 static bool push_snapshot(struct json_value *root, const struct zapp_conversation_snapshot *s)
 {
     return json_push_kv_bool(root, "running", s->node_running) &&
-        json_push_kv_str(root, "sync_status", s->sync_status) &&
-        json_push_kv_str(root, "balance", s->balance_known ? s->balance : "unavailable") &&
-        json_push_kv_bool(root, "balance_stale", s->balance_known && s->balance_stale);
+        json_push_kv_str(root, "sync_status", s->sync_status);
 }
 
 /* The phone's node is labelled apart from the fleet hosts and the question comes last: with the

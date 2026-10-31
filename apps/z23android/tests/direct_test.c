@@ -18,10 +18,6 @@
 #define STATUS_REPLY \
     "{\"result\":{\"subsystem\":\"status_frontdoor\",\"state\":{\"provable_tip\":120,\"max_peer_height\":130," \
     "\"peers\":7,\"pace\":\"gentle\"}},\"error\":null,\"id\":1}"
-#define BALANCE_REPLY \
-    "{\"result\":{\"transparent\":\"0.00000000\",\"private\":\"1.25000000\",\"encumbered\":\"0.00000000\"," \
-    "\"total\":\"1.25000000\",\"transparent_source\":\"durable_projection\",\"transparent_sources_agree\":true," \
-    "\"wallet_height\":20,\"chain_height\":20},\"error\":null,\"id\":1}"
 
 enum mode { SERVE_OK, SERVE_HTTP_401, SERVE_RPC_ERROR, SERVE_GARBAGE, SERVE_SILENT, SERVE_CHUNKED, SERVE_SHORT, SERVE_LARGE, SERVE_KEEPALIVE, SERVE_WRONG_ID };
 static atomic_int mode;
@@ -52,9 +48,9 @@ static bool read_request(int fd, char *request, size_t cap)
 }
 
 /* The JSON-RPC body the current mode sends. */
-static const char *reply_body(int mode_now, const char *request, char *scratch, size_t cap)
+static const char *reply_body(int mode_now, char *scratch, size_t cap)
 {
-    const char *reply = strstr(request, "dumpstate") ? STATUS_REPLY : BALANCE_REPLY;
+    const char *reply = STATUS_REPLY;
     if (mode_now == SERVE_LARGE) {
         assert(cap > 2402);
         memset(scratch, 'x', 2402);
@@ -82,7 +78,7 @@ static void serve(int fd)
     pthread_mutex_unlock(&seen_lock);
     int mode_now = atomic_load(&mode);
     if (mode_now == SERVE_SILENT) { usleep(600000); return; }
-    const char *reply = reply_body(mode_now, request, scratch, sizeof(scratch));
+    const char *reply = reply_body(mode_now, scratch, sizeof(scratch));
     if (mode_now == SERVE_HTTP_401) snprintf(out, sizeof(out), "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
     else if (mode_now == SERVE_GARBAGE) snprintf(out, sizeof(out), "not http at all");
     else if (mode_now == SERVE_CHUNKED)
@@ -199,15 +195,13 @@ static void protocol_cases(const char *directory, unsigned port)
 
 static void operation_cases(struct zapp_runtime *r, const char *directory, unsigned port, const char *log)
 {
-    char out[ZAPP_TEXT_CAP / 8], balance[256];
+    char out[ZAPP_TEXT_CAP / 8];
     announce(directory, port);
     atomic_store(&mode, SERVE_OK);
     int before = atomic_load(&served);
     assert(zapp_operation_run(r, "status", out, sizeof(out)));
     assert(strstr(out, "\"ok\":true") && strstr(out, "\"provable_tip\":120") && strstr(out, "\"peers\":7") && !strstr(out, "\"peers\":9"));
-    assert(zapp_operation_run(r, "wallet_balance", out, sizeof(out)));
-    assert(zapp_balance_format(out, balance, sizeof(balance)) && !strncmp(balance, "Balance 1.25 ZCL", 16));
-    assert(atomic_load(&served) == before + 2 && log_lines(log) == 0);
+    assert(atomic_load(&served) == before + 1 && log_lines(log) == 0);
 }
 
 /* A failing node answer falls back to the CLI and is logged once per failing streak. */

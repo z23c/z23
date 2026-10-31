@@ -14,8 +14,7 @@ struct zapp_history {
 };
 struct zapp_conversation_snapshot {
     char sync_status[1024];
-    char balance[512];
-    bool balance_known, balance_stale, node_running;
+    bool node_running;
 };
 bool zapp_conversation_format(const struct zapp_conversation_snapshot *snapshot,
                               const char *question, char *out, size_t cap);

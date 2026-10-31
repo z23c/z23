@@ -24,7 +24,7 @@
 #include <unistd.h>
 
 /* Per call. Loopback answers in under a millisecond, so a longer wait only delays the CLI fallback;
- * status and balance run back to back, so a silent node costs at most twice this. */
+ * status is the only read per refresh, so a silent node costs this much at most. */
 #define DIRECT_TIMEOUT_MS 2000
 extern char **environ;
 /* The only read-only operations the app runs; start, stop and fleet join have their own paths. args is
@@ -33,7 +33,6 @@ extern char **environ;
 struct operation { const char *id; const char *args[4]; const char *rpc, *params, *member; };
 static const struct operation operations[] = {
     {"status", {"core", "status"}, "dumpstate", "[\"status_frontdoor\"]", "state"},
-    {"wallet_balance", {"core", "wallet", "balance"}, "z_gettotalbalance", "[]", NULL},
 };
 
 static int64_t milliseconds(void)
@@ -445,78 +444,6 @@ static bool command(struct zapp_runtime *r, const char *const *args,
     if (rc) { close(stdin_pipe[1]); close(pipes[0]); snprintf(out, cap, "Unable to run native Z23: %s", strerror(rc)); return false; }
     if (!pump.length) { close(pump.input); pump.input = -1; }
     return pump_command(&pump, out, cap);
-}
-
-static bool balance_amount(const char *s)
-{
-    if (!s || !*s) return false;
-    size_t i = 0;
-    while (s[i] >= '0' && s[i] <= '9' && i < 20) i++;
-    if (!i || s[i++] != '.') return false;
-    for (unsigned j = 0; j < 8; j++, i++)
-        if (s[i] < '0' || s[i] > '9') return false;
-    return s[i] == 0;
-}
-
-static bool balance_fields(const struct json_value *data)
-{
-    const char *source = json_get_str(json_get(data, "transparent_source"));
-    const struct json_value *agree = json_get(data, "transparent_sources_agree");
-    const struct json_value *wh = json_get(data, "wallet_height");
-    const struct json_value *ch = json_get(data, "chain_height");
-    return balance_amount(json_get_str(json_get(data, "total"))) &&
-           balance_amount(json_get_str(json_get(data, "transparent"))) &&
-           balance_amount(json_get_str(json_get(data, "private"))) &&
-           balance_amount(json_get_str(json_get(data, "encumbered"))) &&
-           source && source[0] && agree && agree->type == JSON_BOOL &&
-           wh && wh->type == JSON_INT && ch && ch->type == JSON_INT;
-}
-
-/* A checked eight-decimal amount without trailing zeros: "1.25000000" reads "1.25", "0.00000000" "0". */
-static const char *amount_short(const struct json_value *data, const char *key, char out[32])
-{
-    snprintf(out, 32, "%s", json_get_str(json_get(data, key)));
-    char *dot = strchr(out, '.'), *end = out + strlen(out);
-    while (dot && end > dot + 1 && end[-1] == '0') *--end = 0;
-    if (dot && end == dot + 1) *dot = 0;
-    return out;
-}
-
-/* One line for the total; the shielded and transparent split only when there is a balance, and the
- * reserved amount only when something is reserved. */
-static bool balance_render(const struct json_value *data, char *out, size_t cap)
-{
-    const char *source = json_get_str(json_get(data, "transparent_source"));
-    int64_t wh = json_get_int(json_get(data, "wallet_height"));
-    int64_t ch = json_get_int(json_get(data, "chain_height"));
-    bool stale = !strcmp(source, "unavailable") ||
-        !json_get_bool(json_get(data, "transparent_sources_agree")) ||
-        wh < 0 || ch < 0 || wh < ch;
-    char total[32], shielded[32], open[32], reserved[32];
-    amount_short(data, "total", total);
-    amount_short(data, "private", shielded);
-    amount_short(data, "transparent", open);
-    amount_short(data, "encumbered", reserved);
-    int n = snprintf(out, cap, "Balance %s ZCL%s", total, stale ? ", may be out of date" : "");
-    if (n >= 0 && (size_t)n < cap && strcmp(total, "0"))
-        n += snprintf(out + n, cap - (size_t)n, "\nShielded %s · Transparent %s", shielded, open);
-    if (n >= 0 && (size_t)n < cap && strcmp(reserved, "0"))
-        n += snprintf(out + n, cap - (size_t)n, "\nReserved %s", reserved);
-    return n >= 0 && (size_t)n < cap;
-}
-
-bool zapp_balance_format(const char *json, char *out, size_t cap)
-{
-    if (!json || !out || !cap) return false;
-    struct json_value root = {0};
-    bool ok = json_read(&root, json, strlen(json));
-    const struct json_value *success = json_get(&root, "ok");
-    const struct json_value *data = json_get(&root, "data");
-    ok = ok && success && success->type == JSON_BOOL && json_get_bool(success) &&
-         balance_fields(data) && balance_render(data, out, cap);
-    json_free(&root);
-    if (!ok) out[0] = 0;
-    return ok;
 }
 
 static void direct_note(const char *id, const char *why)
