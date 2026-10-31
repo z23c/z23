@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. Licensed under Apache-2.0.
  * Fresh isolated guests with fixed PUBLIC credentials and bounded execution. */
 #include "test/test_core.h"
+#include "test/test_timing_budget.h"
 #include "base/hex.h"
 #include "crypto/sha256.h"
 #include "platform/clock.h"
@@ -15,6 +16,10 @@
 #define GV_BYTES (UINT64_C(16) << 20)
 #define GV_DATA_BYTE UINT64_C(544)
 #define GMB_SB_DATA_BYTE UINT64_C(73760)
+
+/* Per-child wall cap in ms. Set from the load-scaled budget in the test body;
+ * 120 s is the idle-host nominal (see the deadline derivation there). */
+static int g_gv_child_cap_ms = 120000;
 
 static bool gv_hash(const char *path, char hex[65])
 {
@@ -114,7 +119,8 @@ static bool gv_child(const char *phase, const char *kernel, const char *volume,
         printf("UNOBSERVED: PUBLIC GELI phase=%s shared execution budget exhausted\n", phase);
         return false;
     }
-    int timeout = remaining / 1000000 > 120000 ? 120000 : (int)(remaining / 1000000);
+    int timeout = remaining / 1000000 > g_gv_child_cap_ms ? g_gv_child_cap_ms
+                                                          : (int)(remaining / 1000000);
     if (timeout <= 0) {
         printf("UNOBSERVED: PUBLIC GELI phase=%s execution budget below one millisecond\n", phase);
         return false;
@@ -202,12 +208,26 @@ int test_rvmachine_geli_volume(void)
     /* Clock availability and overflow are execution prerequisites, not a
      * storage-performance assertion. Capture enforces the shared budget;
      * the verdict below requires the observed guest and volume outcomes. */
+    /* The guests are fixed-instruction emulations (work= counts in the proof
+     * lines are deterministic), so their wall time is pure host speed: one
+     * passing run took 114 s with the host at load average ~110 on 32 CPUs,
+     * nearly half the 240 s idle-host budget, and a run twice as slow exhausts
+     * it before the mounted phases (the failure of stacks 334, 353, 357). The nominal 240 s
+     * shared and 120 s per-child budgets are therefore scaled by the measured
+     * host calibration (floor 1x, cap 8x: beyond that the host is wedged).
+     * Every outcome assertion below is unchanged. */
+    struct test_budget total = test_budget_scale(UINT64_C(240) * 1000000u);
+    struct test_budget child = test_budget_scale(UINT64_C(120) * 1000000u);
+    g_gv_child_cap_ms = (int)(child.effective_us / 1000u);
+    int64_t budget_ns = (int64_t)total.effective_us * 1000;
+    printf("geli budget nominal_s=240 effective_s=%llu factor=%.2f\n",
+           (unsigned long long)(total.effective_us / 1000000u), total.factor);
     int64_t now = clock_now_monotonic_ns();
-    if (now <= 0 || now > INT64_MAX - INT64_C(240000000000)) {
+    if (now <= 0 || now > INT64_MAX - budget_ns) {
         printf("UNOBSERVED: PUBLIC GELI execution clock unavailable or deadline overflow\n");
         return 1;
     }
-    int64_t deadline = now + INT64_C(240000000000);
+    int64_t deadline = now + budget_ns;
     char dir[4096];
     char kernel[4096], original[4096], tampered[4096];
     bool created = false;
