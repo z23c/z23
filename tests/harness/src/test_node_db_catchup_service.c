@@ -1949,14 +1949,15 @@ static bool ndc_sap_seed_case(struct ndc_sap_fix *f, struct node_db *ndb,
 /* The reducer frontier goes into the real progress store; the walk reads it
  * through progress_store_open_reader(), the production path. */
 static bool ndc_sap_open_store(struct ndc_sap_fix *f, const char *name,
-                              bool anchor)
+                              bool anchor, int64_t activation)
 {
     sqlite3 *db = NULL;
     char sdir[512];
     snprintf(sdir, sizeof(sdir), "%s/%s.store", f->dir, name);
     mkdir(sdir, 0755);
     if (!progress_store_open(sdir) || !(db = progress_store_db()) ||
-        !anchor_kv_ensure_schema(db) || !anchor_kv_initialize_history(db, 0))
+        !anchor_kv_ensure_schema(db) ||
+        !anchor_kv_initialize_history(db, activation))
         return false;
     if (!anchor)
         return true;
@@ -1999,7 +2000,7 @@ static int ndc_sap_run(struct ndc_sap_fix *f, const struct ndc_sap_case *c)
     snprintf(path, sizeof(path), "%s/%s.db", f->dir, c->name);
     struct node_db ndb;
     bool opened = node_db_open(&ndb, path);
-    bool store = ndc_sap_open_store(f, c->name, c->anchor);
+    bool store = ndc_sap_open_store(f, c->name, c->anchor, 0);
     bool seeded = opened && store && ndc_sap_seed_case(f, &ndb, c) &&
         (c->cursor == 0 ||
          node_db_sync_set_tip(&ndb, f->hashes[c->cursor].data,
@@ -2064,6 +2065,126 @@ static int ndc_check_sapling_tree_not_extended_by_old_heights(void)
     active_chain_free(&f.ac);
     test_cleanup_tmpdir(f.dir);
     failures += ndc_check_sapling_empty_tree_needs_activation();
+    chain_params_select(CHAIN_MAIN);
+    return failures;
+}
+
+/* ── -catchup-from-seed ────────────────────────────────────────────────
+ * The fixture chain has four blocks and the reducer store was adopted at seed
+ * height 2 with the frontier of that height. With the option off a pass walks
+ * every height as before. With it on the pass starts at height 3, leaves the
+ * rows below untouched and absent, moves the cursor to the tip and continues
+ * the Sapling tree from the seed frontier. */
+static int ndc_seed_rows(struct node_db *ndb, const struct ndc_sap_fix *f,
+                         bool want1, bool want2)
+{
+    struct db_block row = {0};
+    int failures = 0;
+    NDC_CHECK("seed walk: the block above the seed is indexed",
+              db_block_find_by_hash(ndb, f->hashes[3].data, &row) &&
+              db_block_find_by_hash(ndb, f->hashes[4].data, &row));
+    NDC_CHECK("seed walk: height 1 row presence",
+              db_block_find_by_hash(ndb, f->hashes[1].data, &row) == want1);
+    NDC_CHECK("seed walk: height 2 row presence",
+              db_block_find_by_hash(ndb, f->hashes[2].data, &row) == want2);
+    return failures;
+}
+
+/* What the store and the option say about the seed before the pass runs. */
+static int ndc_seed_pre(bool store, bool option, int64_t activation)
+{
+    int failures = 0;
+    NDC_CHECK("seed walk: the store reports its seed height",
+              store && node_db_catchup_seed_height() ==
+                           (activation > 0 ? (int)activation : -1));
+    NDC_CHECK("seed walk: the skipped prefix is expected only with the option",
+              store && node_db_catchup_seed_prefix_expected() ==
+                           (option && activation > 0));
+    return failures;
+}
+
+/* What the pass left in node.db. */
+static int ndc_seed_post(struct ndc_sap_fix *f, struct node_db *ndb, int rc,
+                         int want_rc)
+{
+    int failures = 0;
+    size_t size = 0;
+    int64_t height = -1;
+    struct uint256 root = {0};
+    NDC_CHECK("seed walk: the pass indexes the expected blocks",
+              rc == want_rc);
+    NDC_CHECK("seed walk: the cursor reaches the tip",
+              node_db_sync_get_tip_height(ndb) == (int)ndc_sap_h(NDC_SAP_N));
+    NDC_CHECK("seed walk: the Sapling tree is the true tree at the tip",
+              ndc_sap_read(ndb, &size, &root, &height) && size == 1 &&
+              height == ndc_sap_h(NDC_SAP_N) &&
+              memcmp(root.data, f->roots[NDC_SAP_N].data, 32) == 0);
+    return failures;
+}
+
+static int ndc_seed_case(struct ndc_sap_fix *f, const char *name, bool option,
+                         int64_t activation, int cursor, int want_rc,
+                         bool want_low_rows)
+{
+    int failures = 0;
+    /* activation and cursor are fixture-local heights; 0 means none. */
+    activation = activation > 0 ? ndc_sap_h(activation) : 0;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.db", f->dir, name);
+    struct node_db ndb;
+    bool opened = node_db_open(&ndb, path);
+    bool store = ndc_sap_open_store(f, name, true, activation);
+    bool seeded = opened && store &&
+        (cursor == 0 ||
+         node_db_sync_set_tip(&ndb, f->hashes[cursor].data,
+                              (int)ndc_sap_h(cursor)));
+    node_db_catchup_set_from_seed(option);
+    failures += ndc_seed_pre(store, option, activation);
+    int rc = seeded ? node_db_catchup_service_run(&ndb, &f->ac, NULL, f->dir)
+                    : -99;
+    node_db_catchup_set_from_seed(false);
+    printf("seed walk %s: rc=%d\n", name, rc);
+    NDC_CHECK("seed walk: the pass ran", seeded);
+    if (seeded) {
+        failures += ndc_seed_post(f, &ndb, rc, want_rc);
+        if (cursor == 0)
+            failures += ndc_seed_rows(&ndb, f, want_low_rows, want_low_rows);
+    }
+    if (store)
+        progress_store_close();
+    if (opened)
+        node_db_close(&ndb);
+    return failures;
+}
+
+static int ndc_check_start_at_seed(void)
+{
+    int failures = 0;
+    struct ndc_sap_fix f = {0};
+    chain_params_select(CHAIN_TESTNET); /* Sapling active from NDC_SAP_OFF */
+    NDC_CHECK("seed fixture builds", ndc_sap_build(&f, "seed", NDC_MUT_NONE));
+    NDC_CHECK("first height: option off keeps the cursor",
+              node_db_catchup_first_height(0, 2, false) == 0);
+    NDC_CHECK("first height: the seed moves a lower cursor above it",
+              node_db_catchup_first_height(0, 2, true) == 3);
+    NDC_CHECK("first height: a cursor above the seed is kept",
+              node_db_catchup_first_height(5, 2, true) == 5);
+    NDC_CHECK("first height: no seed keeps the cursor",
+              node_db_catchup_first_height(0, -1, true) == 0);
+    if (f.built) {
+        /* Default: all four heights are walked, as before. */
+        failures += ndc_seed_case(&f, "default_off", false, 2, 0, NDC_SAP_N,
+                                  true);
+        /* Option on: heights 3 and 4 only; rows 1 and 2 are never written. */
+        failures += ndc_seed_case(&f, "from_seed", true, 2, 0, 2, false);
+        /* Option on, cursor already above the seed: unchanged. */
+        failures += ndc_seed_case(&f, "cursor_above_seed", true, 2, 3, 1,
+                                  false);
+        /* Option on, store adopted from genesis: nothing to skip. */
+        failures += ndc_seed_case(&f, "no_seed", true, 0, 0, NDC_SAP_N, true);
+    }
+    active_chain_free(&f.ac);
+    test_cleanup_tmpdir(f.dir);
     chain_params_select(CHAIN_MAIN);
     return failures;
 }
@@ -2466,6 +2587,7 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_shielded_values(-11, "negative");
     failures += ndc_check_torn_hashless_walk();
     failures += ndc_check_sapling_tree_not_extended_by_old_heights();
+    failures += ndc_check_start_at_seed();
     failures += ndc_check_tip_witnesses();
 
     /* ── Commit cadence / BUSY_SNAPSHOT restart / abort-streak park ────

@@ -802,6 +802,30 @@ static void catchup_print_summary(bool interrupted, int indexed,
     fflush(stdout);
 }
 
+/* First height a pass walks: the cursor next height, or with
+ * -catchup-from-seed the first height above the shielded seed. */
+static int catchup_first_height(int db_tip)
+{
+    return node_db_catchup_start_height(catchup_start_height(db_tip));
+}
+
+/* The first height to walk, or -1 when the seed is at or above the tip and
+ * there is nothing to walk. */
+static int catchup_walk_start(int db_tip, int chain_tip)
+{
+    int start = catchup_first_height(db_tip);
+    if (start > chain_tip) {
+        LOG_INFO("catchup", "catchup: seed height %d is at or above the tip %d "
+                 "— nothing to walk", start - 1, chain_tip);
+        return -1; // raw-return-ok:logged above; there is nothing to walk
+    }
+    if (start > catchup_start_height(db_tip))
+        LOG_INFO("catchup", "catchup: -catchup-from-seed starts at %d, above "
+                 "the shielded seed; heights %d..%d are not walked",
+                 start, catchup_start_height(db_tip), start - 1);
+    return start;
+}
+
 /* The LOG_*_IN calls below name node_db_catchup_service_run so a line moved
  * into a helper prints the same "fn():" text it printed in the run body. */
 
@@ -847,7 +871,7 @@ static void catchup_pass_init(struct catchup_pass *ps, struct node_db *ndb,
     ps->last_indexed_height = db_tip;
     ps->cb.last_committed_height = db_tip;
 
-    ps->start = catchup_start_height(db_tip);
+    ps->start = catchup_first_height(db_tip);
     ps->chain_tip = chain_tip;
     ps->total = chain_tip - ps->start + 1;
     catchup_active_begin(ps->start, chain_tip);
@@ -1286,7 +1310,7 @@ static int catchup_tips_need_work(struct node_db *ndb,
     *chain_tip = active_chain_height(chain);
     if (*db_tip >= *chain_tip)
         return 0;
-    return 1;
+    return catchup_walk_start(*db_tip, *chain_tip) >= 0;
 }
 
 /* Walk the pass from its start height through its chain tip, and end the

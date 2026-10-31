@@ -33,6 +33,7 @@
 #include "storage/anchor_kv.h"
 #include "storage/progress_store.h"
 #include "validation/chainstate.h"
+#include "services/node_db_catchup_service.h"
 #include "services/node_health_service.h"
 #include "net/snapshot_sync_contract.h"
 #include "validation/contextual_check_tx.h"
@@ -589,6 +590,20 @@ static void api_node_status_push_sapling(struct json_value *body,
     json_free(&sapling);
 }
 
+/* Where the node.db history index begins. With -catchup-from-seed the walk
+ * starts above seed_height, so block, transaction and explorer rows below it
+ * are absent; seed_height is -1 when the node was not seeded. */
+static void api_node_status_push_history_index(struct json_value *body)
+{
+    struct json_value hi;
+    json_init(&hi);
+    json_set_object(&hi);
+    json_push_kv_bool(&hi, "from_seed", node_db_catchup_from_seed());
+    json_push_kv_int(&hi, "seed_height", node_db_catchup_seed_height());
+    json_push_kv(body, "history_index", &hi);
+    json_free(&hi);
+}
+
 /* Route: /api/node/status — comprehensive one-stop diagnostics */
 size_t api_serve_node_status(uint8_t *response, size_t response_max)
 {
@@ -675,6 +690,7 @@ size_t api_serve_node_status(uint8_t *response, size_t response_max)
     json_free(&chain);
 
     api_node_status_push_sapling(&body, sapling_root_hex);
+    api_node_status_push_history_index(&body);
 
     struct json_value network;
     json_init(&network);

@@ -278,6 +278,7 @@ static const char *const k_extra_getarg_flags[] = {
     "-pin-reducer", "-nopin-reducer",
     "-rombundlereplicadir",
     "-romseed", "-noromseed",
+    "-catchup-from-seed", "-nocatchup-from-seed",
     "-netcrawl", "-nonetcrawl",
     "-addressindex", "-noaddressindex",
     "-loglevel",

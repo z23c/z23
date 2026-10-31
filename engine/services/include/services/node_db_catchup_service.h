@@ -67,6 +67,45 @@ struct wallet;
 #define NODE_DB_CATCHUP_REOPEN_BACKOFF_BASE_MS 250
 #define NODE_DB_CATCHUP_REOPEN_BACKOFF_MAX_MS  2000
 
+/* ── Option -catchup-from-seed (default off) ─────────────────────────
+ *
+ * A node installed from a shielded snapshot seed holds the Sapling and
+ * nullifier state at its seed height and needs no block history below it. With
+ * the option on, a catchup pass starts at the first height above the seed
+ * (the Sapling anchor activation cursor) when the projection cursor is lower.
+ * No row is deleted and the cursor is not rewound: the heights between the old
+ * cursor and the seed are simply never walked, and the cursor then moves to
+ * the chain tip. The Sapling tree and wallet witnesses continue from the
+ * reducer frontier at the seed, the same frontier the walk already adopts.
+ *
+ * With the option on:
+ *  - node.db has no block, transaction, explorer or integrity-receipt rows
+ *    for the skipped heights; the receipt chain restarts at the first walked
+ *    height. /api/node/status reports history_index.from_seed and
+ *    history_index.seed_height so a client knows where the history begins.
+ *  - the projection hole scan stays off, because the skipped heights are an
+ *    expected prefix, not a defect.
+ *  - a wallet transaction or note below the seed height that node.db does not
+ *    already hold is not discovered by this walk. A wallet whose birthday is
+ *    below the seed keeps every row it already has and finds new activity
+ *    from the seed onward; receipts it never recorded below the seed stay
+ *    unknown to node.db until the option is turned off and the walk covers
+ *    them.
+ * With the option off nothing changes. */
+void node_db_catchup_set_from_seed(bool enabled);
+bool node_db_catchup_from_seed(void);
+/* Sapling anchor activation cursor of the reducer store (the seed height), or
+ * -1 when the store is absent or was adopted from genesis. */
+int node_db_catchup_seed_height(void);
+/* First height a pass walks: next, or seed_height + 1 when from_seed and that
+ * is higher. */
+int node_db_catchup_first_height(int next, int seed_height, bool from_seed);
+/* node_db_catchup_first_height with the process option and the stored seed. */
+int node_db_catchup_start_height(int next);
+/* True when the option is on and a seed height exists: heights below it are
+ * absent by design. */
+bool node_db_catchup_seed_prefix_expected(void);
+
 /* True while a bulk catchup projection walk is running — it holds the
  * node.db write lock in batch-length bursts, so db_maintenance defers its
  * housekeeping tick on this rather than racing it for the lock. */

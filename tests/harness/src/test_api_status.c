@@ -7,6 +7,7 @@
 #include "controllers/sync_controller.h"
 #include "core/serialize.h"
 #include "sapling/incremental_merkle_tree.h"
+#include "services/node_db_catchup_service.h"
 #include "storage/anchor_kv.h"
 #include "storage/progress_store.h"
 
@@ -893,6 +894,25 @@ static bool api_status_no_witness_counts(uint8_t *resp, size_t cap)
     return ok;
 }
 
+static bool api_status_history_check(uint8_t *resp, size_t cap, bool from_seed,
+                                     int64_t seed_height)
+{
+    struct json_value root;
+    size_t n = api_handle_request("GET", "/api/node/status", NULL, 0, resp,
+                                  cap);
+    bool ok = api_status_load_response(resp, n, cap, &root, true);
+    const struct json_value *h = ok ? json_get(&root, "history_index") : NULL;
+    const struct api_status_field fields[] = {
+        { NULL, API_STATUS_FIELD_PRESENT, NULL, 0, NULL },
+        { "from_seed", API_STATUS_FIELD_BOOL, NULL, from_seed, NULL },
+        { "seed_height", API_STATUS_FIELD_INT, NULL, seed_height, NULL },
+    };
+    ok = api_status_match_fields(h, fields, sizeof(fields) / sizeof(fields[0]),
+                                 ok);
+    json_free(&root);
+    return ok;
+}
+
 static int api_status_sapling_ok(uint8_t *resp, size_t cap)
 {
     int failures = 0;
@@ -929,6 +949,24 @@ static int api_status_sapling_ok(uint8_t *resp, size_t cap)
         node_db_sync_sapling_note(&f.ndb, txid, 0, 1000, k, pad, 512, k, d, k,
                                   k, k, 1) &&
         api_status_no_witness_counts(resp, cap))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    api_status_sapling_close(&f);
+    return failures;
+}
+
+static int api_status_history_ok(uint8_t *resp, size_t cap)
+{
+    int failures = 0;
+    struct api_status_sapling f;
+    printf("api: history index reports the option and the seed height... ");
+    api_status_sapling_open(&f, true);
+    node_db_catchup_set_from_seed(false);
+    bool off = f.up && api_status_history_check(resp, cap, false, 1);
+    node_db_catchup_set_from_seed(true);
+    bool on = f.up && api_status_history_check(resp, cap, true, 1);
+    node_db_catchup_set_from_seed(false);
+    if (off && on)
         printf("OK\n");
     else { printf("FAIL\n"); failures++; }
     api_status_sapling_close(&f);
@@ -998,6 +1036,7 @@ int api_status_focused_tests(void)
     else { printf("FAIL\n"); failures++; }
 
     failures += api_status_sapling_ok(resp, sizeof(resp));
+    failures += api_status_history_ok(resp, sizeof(resp));
 
     return failures;
 }

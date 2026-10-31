@@ -43,6 +43,7 @@
 #include "util/safe_alloc.h"
 #include "util/supervisor.h"
 #include "util/thread_qos.h"
+#include "util/util.h"
 #include <stdatomic.h>
 #include <time.h>
 #include <stdio.h>
@@ -482,6 +483,13 @@ static bool projection_backfill_rewind_to_block(struct node_db *ndb,
     return rewound;
 }
 
+/* The heights below the projection are absent by design: a sparse snapshot
+ * prefix, or a walk started above the shielded seed. */
+static bool projection_backfill_prefix_expected(bool sparse_prefix)
+{
+    return sparse_prefix || node_db_catchup_seed_prefix_expected();
+}
+
 static int projection_backfill_repair_cap(int projection_tip, int chain_tip)
 {
     return projection_tip < chain_tip ? projection_tip : chain_tip;
@@ -663,17 +671,21 @@ static void *projection_backfill_service_thread(void *arg)
                             projection_tip, projection_block_tip);
                 projection_tip = projection_block_tip;
             }
+            /* A walk started above the shielded seed leaves the heights
+             * below it absent by design; the hole scan must not repair them. */
+            bool prefix_expected =
+                projection_backfill_prefix_expected(sparse_prefix);
             int repair_cap =
                 projection_backfill_repair_cap(projection_tip, chain_tip);
             bool hole_scan_ran = false;
             bool hole_scan_ok = boot_projection_hole_scan_if_due(
-                &hole_scan, ndb, repair_cap, sparse_prefix, behind,
+                &hole_scan, ndb, repair_cap, prefix_expected, behind,
                 cursor_frozen, projection_cursor,
                 (int64_t)platform_time_wall_time_t(), &hole_scan_ran,
                 &first_missing_height);
             if (projection_backfill_hole_needs_repair(
                     hole_scan_ran, hole_scan_ok, first_missing_height,
-                    repair_cap, sparse_prefix)) {
+                    repair_cap, prefix_expected)) {
                 if (first_missing_height != last_hole_rewind_height) {
                     last_hole_rewind_height = first_missing_height;
                     hole_rewind_attempts = 0;
@@ -722,7 +734,7 @@ static void *projection_backfill_service_thread(void *arg)
                 }
             } else if (projection_backfill_hole_resolved(
                            hole_scan_ran, hole_scan_ok, first_missing_height,
-                           sparse_prefix)) {
+                           prefix_expected)) {
                 last_hole_rewind_height = -1;
                 hole_rewind_attempts = 0;
                 hole_rewind_gave_up_reported = false;
@@ -791,6 +803,7 @@ bool boot_start_projection_backfill_service(struct boot_svc_ctx *svc)
                                     PROJECTION_BACKFILL_SUPERVISOR_DEADLINE_SEC,
                                     PROJECTION_BACKFILL_PROGRESS_QUIET_US);
     svc->projection_backfill_thread_stop = false;
+    node_db_catchup_set_from_seed(GetBoolArg("-catchup-from-seed", false));
     return boot_start_thread_service(&svc->projection_backfill_thread,
                                      &svc->projection_backfill_thread_started,
                                      projection_backfill_service_thread, svc);
