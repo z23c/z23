@@ -13,4 +13,8 @@ SHA-256 of original upstream files:
 - `lib/version_db.c`: `6764aa2f245085080e1e5cefd9dcd59b9727718a0d4606956e0502a57f5dff30` <!-- doc-path-ok: upstream repository path -->
 - `LICENSE`: `a70ef3ea032998eead2e2c7573a170a809eae08e3ca134611f707eda5932c8a9`
 
-Build-only patch: `identify.c` marks an unused parameter and casts two nonnegative index comparisons. `quirc.c` casts a nonnegative size comparison. These changes address strict compiler warnings. The ISC license is preserved in `LICENSE`.
+Patch: `identify.c` marks an unused parameter and casts two nonnegative index comparisons. `quirc.c` casts a nonnegative size comparison. These changes address strict compiler warnings. The ISC license is preserved in `LICENSE`.
+
+Deviation: `quirc.c` skips the `memcpy` in `quirc_resize()` when `min` is zero, because `memcpy` from a null source is undefined in C23 and a fresh `quirc_new()` has a null image, reached through `quirc_resize()` at camera start.
+
+Deviation: `identify.c` `perspective_map()` rounds each coordinate through `coord_round()`, which maps NaN and values beyond plus or minus 2^20 to plus or minus 2^20, because converting an out-of-range float to `int` is undefined; in-range values round as before, and `read_cell()` and `fitness_cell()` reject the off-frame point.

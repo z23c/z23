@@ -156,6 +156,19 @@ test-qr-window: prepare-quirc
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/qr-window-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/qr-window-test' '$(BUILD_DIR)/z23-qr-dump' "$$scratch"
 
+# Host fuzz of the QR path (quirc, then scan.c and payment_code.c) under ASan and UBSan, no NDK.
+QR_FUZZ_ITERATIONS ?= 2000
+QR_FUZZ_SAN ?= -fsanitize=address,undefined -fno-sanitize-recover=all
+QR_FUZZ_SOURCES := scan.c payment_code.c fleet.c speech_client.c bridge_client.c voice.c \
+  ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c
+.PHONY: test-qr-fuzz
+test-qr-fuzz: prepare-quirc
+	@mkdir -p '$(BUILD_DIR)'
+	clang -std=c23 -O1 -g $(QR_FUZZ_SAN) -Wall -Wextra -Werror -pedantic \
+	  -DQUIRC_MAX_REGIONS=65534 $(SPEECH_INCLUDES) -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' \
+	  tests/qr_fuzz_test.c $(QR_FUZZ_SOURCES) $(QUIRC_SOURCES) $(SPEECH_JSON) -lm -o '$(BUILD_DIR)/qr-fuzz-test'
+	QR_FUZZ_ITERATIONS='$(QR_FUZZ_ITERATIONS)' '$(BUILD_DIR)/qr-fuzz-test'
+
 test-scan:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/scan_test.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(SPEECH_JSON) -o '$(BUILD_DIR)/scan-test'
