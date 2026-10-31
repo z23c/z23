@@ -240,11 +240,9 @@ static bool refuses(const char *body, size_t len)
     return r.text == NULL && r.text_len == 0;
 }
 
-static int case_hostile(void)
+static int case_hostile_usage_control(const struct engine_vendor *v)
 {
     int failures = 0;
-    const struct engine_vendor *v = engine_by_id("glm");
-
     /* The control: a well-formed response decodes, so the refusals below are
      * refusals of the INPUT and not of everything. */
     {
@@ -279,6 +277,12 @@ static int case_hostile(void)
                  r.usage.completion_tokens_known && r.usage.total_tokens_known);
         if (ok) engine_reply_free(&r);
     }
+    return failures;
+}
+
+static int case_hostile_usage_details(const struct engine_vendor *v)
+{
+    int failures = 0;
     {
         static const char partial[] =
             "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
@@ -306,6 +310,12 @@ static int case_hostile(void)
                  !r.usage.cache_creation_input_tokens_known);
         if(ok)engine_reply_free(&r);
     }
+    return failures;
+}
+
+static int case_hostile_usage_fallback(const struct engine_vendor *v)
+{
+    int failures = 0;
     {
         static const char conflicting_details[] =
             "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
@@ -331,6 +341,12 @@ static int case_hostile(void)
                  r.usage.cache_read_input_tokens==31);
         if(ok)engine_reply_free(&r);
     }
+    return failures;
+}
+
+static int case_hostile_usage_malformed(const struct engine_vendor *v)
+{
+    int failures = 0;
     {
         static const char malformed_details[] =
             "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],"
@@ -373,12 +389,12 @@ static int case_hostile(void)
                  r.usage.completion_tokens_known && !r.usage.total_tokens_known);
         if(ok)engine_reply_free(&r);
     }
+    return failures;
+}
 
-    EN_CHECK("an empty body is refused", refuses("", 0));
-    EN_CHECK("a null body is refused", refuses(NULL, 10));
-    EN_CHECK("prose that is not JSON is refused",
-             refuses("I am sorry, I cannot do that.", 29));
-
+static int case_hostile_refusals(void)
+{
+    int failures = 0;
     /* Truncation. This is what an output-token limit or a dropped connection
      * actually looks like, so it is the most likely hostile input of all. */
     {
@@ -416,6 +432,12 @@ static int case_hostile(void)
     EN_CHECK("an empty `content` string is refused",
              refuses("{\"choices\":[{\"message\":{\"content\":\"\"}}]}", 40));
 
+    return failures;
+}
+
+static int case_hostile_limits(void)
+{
+    int failures = 0;
     /* An embedded NUL. The JSON parser is length-driven but stores C strings,
      * so a raw 0x00 inside a string literal silently TRUNCATES the text a
      * caller acts on — showing a reviewer one instruction and a machine
@@ -497,7 +519,12 @@ static int case_hostile(void)
             failures++;
         }
     }
+    return failures;
+}
 
+static int case_hostile_optional_and_error(const struct engine_vendor *v)
+{
+    int failures = 0;
     /* Optional fields with the wrong type must NOT sink a good completion:
      * refusing real work because a vendor sent a string token count would
      * throw away the thing we paid for. It is reported as unknown instead. */
@@ -531,13 +558,34 @@ static int case_hostile(void)
     return failures;
 }
 
+static int case_hostile(void)
+{
+    int failures = 0;
+    const struct engine_vendor *v = engine_by_id("glm");
+
+    failures += case_hostile_usage_control(v);
+    failures += case_hostile_usage_details(v);
+    failures += case_hostile_usage_fallback(v);
+    failures += case_hostile_usage_malformed(v);
+
+    EN_CHECK("an empty body is refused", refuses("", 0));
+    EN_CHECK("a null body is refused", refuses(NULL, 10));
+    EN_CHECK("prose that is not JSON is refused",
+             refuses("I am sorry, I cannot do that.", 29));
+
+    failures += case_hostile_refusals();
+    failures += case_hostile_limits();
+
+    failures += case_hostile_optional_and_error(v);
+    return failures;
+}
+
 /* ── 4. the file envelope ────────────────────────────────────────────── */
 
-static int case_patch(void)
+static int case_patch_envelope_forms(void)
 {
     int failures = 0;
     struct engine_patch p;
-
     {
         static const char reply[] =
             "Sure, here is the change.\n"
@@ -578,6 +626,13 @@ static int case_patch(void)
         EN_CHECK("an END with no open envelope is refused",
                  !engine_patch_parse(stray, sizeof(stray) - 1, &p));
     }
+    return failures;
+}
+
+static int case_patch_repeat_and_delete(void)
+{
+    int failures = 0;
+    struct engine_patch p;
     {
         /* A revised reply for the same path is not malformed: the LAST
          * envelope wins, giving one entry with the second body. */
@@ -618,6 +673,13 @@ static int case_patch(void)
         if (ok)
             engine_patch_free(&p);
     }
+    return failures;
+}
+
+static int case_patch_fenced_forms(void)
+{
+    int failures = 0;
+    struct engine_patch p;
     {
         char nul_reply[] = "Z23-BEGIN-FILE a.c\nxx\nZ23-END-FILE\n";
         nul_reply[20] = '\0';
@@ -643,6 +705,13 @@ static int case_patch(void)
         if (ok)
             engine_patch_free(&p);
     }
+    return failures;
+}
+
+static int case_patch_fence_nesting(void)
+{
+    int failures = 0;
+    struct engine_patch p;
     {
         /* A fence with no language tag, same requirement. */
         static const char fenced_bare[] =
@@ -679,6 +748,102 @@ static int case_patch(void)
         if (ok)
             engine_patch_free(&p);
     }
+    return failures;
+}
+
+static int case_patch_escape_refusal(void)
+{
+    int failures = 0;
+    struct engine_patch p;
+    {
+        char long_path[ENGINE_PATCH_MAX_PATH + 32];
+        memset(long_path, 'a', sizeof(long_path) - 1);
+        long_path[sizeof(long_path) - 1] = '\0';
+        EN_CHECK("an over-long path is refused",
+                 !engine_patch_path_ok(long_path));
+    }
+    {
+        static const char escape[] =
+            "Z23-BEGIN-FILE ../../../etc/cron.d/pwn\nx\nZ23-END-FILE\n";
+        EN_CHECK("an escaping path refuses the whole patch",
+                 !engine_patch_parse(escape, sizeof(escape) - 1, &p)
+                 && p.count == 0);
+    }
+    return failures;
+}
+
+static int case_patch_protocol_text(void)
+{
+    int failures = 0;
+    /* The protocol text the model is given must describe the parser that
+     * reads it, or the two drift and every reply is refused. */
+    {
+        const char *proto = engine_patch_protocol_text();
+        EN_CHECK("the prompt's protocol text names the real markers",
+                 proto && strstr(proto, ENGINE_PATCH_BEGIN) != NULL
+                 && strstr(proto, ENGINE_PATCH_END) != NULL
+                 && strstr(proto, ENGINE_PATCH_DELETE) != NULL);
+    }
+    return failures;
+}
+
+static int case_patch_describe(void)
+{
+    int failures = 0;
+    struct engine_patch p;
+    /* The describe function archives what a parsed patch would apply, so
+     * FAIL(NO-CHANGE) is distinguishable from an accepted parse. */
+    {
+        static const char reply[] =
+            "Z23-BEGIN-FILE lib/foo/src/bar.c\n"
+            "int main(void) { return 0; }\n"
+            "Z23-END-FILE\n"
+            "Z23-DELETE-FILE lib/foo/src/old.c\n";
+        const bool ok = engine_patch_parse(reply, sizeof(reply) - 1, &p);
+        char desc[256];
+        const size_t n = ok ? engine_patch_describe(&p, desc, sizeof(desc)) : 0;
+        EN_CHECK("describe lists a written file with its byte count",
+                 ok && n > 0
+                 && strstr(desc, "lib/foo/src/bar.c: 29 bytes\n") != NULL);
+        EN_CHECK("describe marks a deletion distinctly from a write",
+                 ok && n > 0
+                 && strstr(desc, "lib/foo/src/old.c: DELETE\n") != NULL);
+        if (ok)
+            engine_patch_free(&p);
+    }
+    {
+        struct engine_patch empty;
+        memset(&empty, 0, sizeof(empty));
+        char desc[64] = "unwritten";
+        const size_t n = engine_patch_describe(&empty, desc, sizeof(desc));
+        EN_CHECK("describing an empty patch writes nothing",
+                 n == 0 && desc[0] == '\0');
+    }
+    {
+        /* A buffer too small for even one full line truncates safely rather
+         * than overflowing or leaving the string unterminated. */
+        static const char reply[] =
+            "Z23-BEGIN-FILE lib/foo/src/a_very_long_file_name_here.c\n"
+            "x\nZ23-END-FILE\n";
+        const bool ok = engine_patch_parse(reply, sizeof(reply) - 1, &p);
+        char tiny[8];
+        const size_t n = ok ? engine_patch_describe(&p, tiny, sizeof(tiny)) : 0;
+        EN_CHECK("a too-small buffer stays NUL-terminated",
+                 ok && n < sizeof(tiny) && tiny[n] == '\0');
+        if (ok)
+            engine_patch_free(&p);
+    }
+    return failures;
+}
+
+static int case_patch(void)
+{
+    int failures = 0;
+
+    failures += case_patch_envelope_forms();
+    failures += case_patch_repeat_and_delete();
+    failures += case_patch_fenced_forms();
+    failures += case_patch_fence_nesting();
 
     /* Containment. This is the security-relevant half: the applier writes
      * relative to an isolated worktree, and a path that cannot escape it is
@@ -741,73 +906,11 @@ static int case_patch(void)
              !engine_patch_looks_like_a_path("../../etc/passwd.conf"));
     EN_CHECK("an empty path is refused",
              !engine_patch_path_ok("") && !engine_patch_path_ok(NULL));
-    {
-        char long_path[ENGINE_PATCH_MAX_PATH + 32];
-        memset(long_path, 'a', sizeof(long_path) - 1);
-        long_path[sizeof(long_path) - 1] = '\0';
-        EN_CHECK("an over-long path is refused",
-                 !engine_patch_path_ok(long_path));
-    }
-    {
-        static const char escape[] =
-            "Z23-BEGIN-FILE ../../../etc/cron.d/pwn\nx\nZ23-END-FILE\n";
-        EN_CHECK("an escaping path refuses the whole patch",
-                 !engine_patch_parse(escape, sizeof(escape) - 1, &p)
-                 && p.count == 0);
-    }
+    failures += case_patch_escape_refusal();
 
-    /* The protocol text the model is given must describe the parser that
-     * reads it, or the two drift and every reply is refused. */
-    {
-        const char *proto = engine_patch_protocol_text();
-        EN_CHECK("the prompt's protocol text names the real markers",
-                 proto && strstr(proto, ENGINE_PATCH_BEGIN) != NULL
-                 && strstr(proto, ENGINE_PATCH_END) != NULL
-                 && strstr(proto, ENGINE_PATCH_DELETE) != NULL);
-    }
+    failures += case_patch_protocol_text();
 
-    /* The describe function archives what a parsed patch would apply, so
-     * FAIL(NO-CHANGE) is distinguishable from an accepted parse. */
-    {
-        static const char reply[] =
-            "Z23-BEGIN-FILE lib/foo/src/bar.c\n"
-            "int main(void) { return 0; }\n"
-            "Z23-END-FILE\n"
-            "Z23-DELETE-FILE lib/foo/src/old.c\n";
-        const bool ok = engine_patch_parse(reply, sizeof(reply) - 1, &p);
-        char desc[256];
-        const size_t n = ok ? engine_patch_describe(&p, desc, sizeof(desc)) : 0;
-        EN_CHECK("describe lists a written file with its byte count",
-                 ok && n > 0
-                 && strstr(desc, "lib/foo/src/bar.c: 29 bytes\n") != NULL);
-        EN_CHECK("describe marks a deletion distinctly from a write",
-                 ok && n > 0
-                 && strstr(desc, "lib/foo/src/old.c: DELETE\n") != NULL);
-        if (ok)
-            engine_patch_free(&p);
-    }
-    {
-        struct engine_patch empty;
-        memset(&empty, 0, sizeof(empty));
-        char desc[64] = "unwritten";
-        const size_t n = engine_patch_describe(&empty, desc, sizeof(desc));
-        EN_CHECK("describing an empty patch writes nothing",
-                 n == 0 && desc[0] == '\0');
-    }
-    {
-        /* A buffer too small for even one full line truncates safely rather
-         * than overflowing or leaving the string unterminated. */
-        static const char reply[] =
-            "Z23-BEGIN-FILE lib/foo/src/a_very_long_file_name_here.c\n"
-            "x\nZ23-END-FILE\n";
-        const bool ok = engine_patch_parse(reply, sizeof(reply) - 1, &p);
-        char tiny[8];
-        const size_t n = ok ? engine_patch_describe(&p, tiny, sizeof(tiny)) : 0;
-        EN_CHECK("a too-small buffer stays NUL-terminated",
-                 ok && n < sizeof(tiny) && tiny[n] == '\0');
-        if (ok)
-            engine_patch_free(&p);
-    }
+    failures += case_patch_describe();
     return failures;
 }
 
@@ -1239,11 +1342,10 @@ static int case_verdict_names(void)
 
 /* ── 7. reading the gate's own output ────────────────────────────────── */
 
-static int case_gate_read(void)
+static int case_gate_read_verdicts(void)
 {
     int failures = 0;
     struct engine_gate_reading g;
-
     {
         static const char log[] =
             "some build noise\n"
@@ -1296,6 +1398,13 @@ static int case_gate_read(void)
         EN_CHECK("the last verdict line is the one that counts",
                  engine_gate_read(log, sizeof(log) - 1, &g) && g.groups_ran == 1);
     }
+    return failures;
+}
+
+static int case_gate_read_edge_logs(void)
+{
+    int failures = 0;
+    struct engine_gate_reading g;
     EN_CHECK("an empty log does not crash", engine_gate_read("", 0, &g));
     EN_CHECK("a null log is refused", !engine_gate_read(NULL, 10, &g));
     {
@@ -1323,6 +1432,15 @@ static int case_gate_read(void)
                  engine_gate_read(log, sizeof(log) - 1, &g)
                  && !g.env_epoch_race);
     }
+    return failures;
+}
+
+static int case_gate_read(void)
+{
+    int failures = 0;
+
+    failures += case_gate_read_verdicts();
+    failures += case_gate_read_edge_logs();
     return failures;
 }
 
@@ -1604,15 +1722,9 @@ static char *shape_fixture(enum engine_wire wire, const char *skip_id,
     return buf;
 }
 
-static int case_prompt_shape(void)
+static int case_prompt_shape_registry(void)
 {
     int failures = 0;
-
-    EN_CHECK("the prompt shape registry is not empty",
-             engine_prompt_section_count() > 0);
-    EN_CHECK("an index past the end has no section",
-             engine_prompt_section_at(engine_prompt_section_count()) == NULL);
-
     bool ids_and_markers_present = true;
     for (size_t i = 0; i < engine_prompt_section_count(); i++) {
         const struct engine_prompt_section *s = engine_prompt_section_at(i);
@@ -1641,6 +1753,12 @@ static int case_prompt_shape(void)
     EN_CHECK("and every wire requires at least one section, all found",
              all_wires_require_something);
 
+    return failures;
+}
+
+static int case_prompt_shape_omissions_order(void)
+{
+    int failures = 0;
     /* Drop each required section in turn. Every one must be refused BY NAME:
      * a refusal that cannot say what is wrong sends the operator back to
      * diffing two prompts by eye. */
@@ -1692,7 +1810,15 @@ static int case_prompt_shape(void)
     EN_CHECK("and the refusal names the repeated section",
              dup_refused && dup.repeated != NULL);
     free(cli_shaped);
+    return failures;
+}
 
+static int case_prompt_shape_compose_hash(void)
+{
+    int failures = 0;
+    const enum engine_wire wires[] = { ENGINE_WIRE_OPENAI_CHAT,
+                                       ENGINE_WIRE_LOCAL_CLI,
+                                       ENGINE_WIRE_LOCAL_FIXTURE };
     /* What engine_prompt_compose actually produces must pass its own audit,
      * for every wire. This is the check that binds the two halves: a shape
      * registry nothing composes against is a document, not a gate. */
@@ -1726,6 +1852,22 @@ static int case_prompt_shape(void)
              memcmp(h1, h2, sizeof h1) == 0);
     EN_CHECK("and is not the empty digest of a hash that did nothing",
              nonzero);
+    return failures;
+}
+
+static int case_prompt_shape(void)
+{
+    int failures = 0;
+
+    EN_CHECK("the prompt shape registry is not empty",
+             engine_prompt_section_count() > 0);
+    EN_CHECK("an index past the end has no section",
+             engine_prompt_section_at(engine_prompt_section_count()) == NULL);
+
+    failures += case_prompt_shape_registry();
+    failures += case_prompt_shape_omissions_order();
+
+    failures += case_prompt_shape_compose_hash();
     return failures;
 }
 
@@ -2394,12 +2536,11 @@ static int case_prompt_templates(void)
  * Extraction, omission (carry forward unchanged), last-block-wins,
  * attempt-vs-turn prepend ordering, and compaction. */
 
-static int case_state(void)
+static int case_state_extract_basics(void)
 {
     int failures = 0;
     char out[ENGINE_STATE_MAX_BYTES];
     size_t out_len = 0;
-
     {
         static const char reply[] =
             "Here is my work.\n\n"
@@ -2451,6 +2592,14 @@ static int case_state(void)
                  !engine_state_extract(truncated, sizeof(truncated) - 1, out,
                                        sizeof(out), &out_len));
     }
+    return failures;
+}
+
+static int case_state_extract_absent(void)
+{
+    int failures = 0;
+    char out[ENGINE_STATE_MAX_BYTES];
+    size_t out_len = 0;
     EN_CHECK("a NULL text is not found",
              !engine_state_extract(NULL, 0, out, sizeof(out), &out_len));
     {
@@ -2469,7 +2618,12 @@ static int case_state(void)
         EN_CHECK("an over-long block is truncated, not refused",
                  ok && out_len == sizeof(out) - 1);
     }
+    return failures;
+}
 
+static int case_state_carried_preamble(void)
+{
+    int failures = 0;
     /* ── the carried-state preamble ── */
     {
         char buf[512];
@@ -2509,7 +2663,12 @@ static int case_state(void)
         EN_CHECK("both pieces are present and the attempt's comes first",
                  attempt_at && turn_at && attempt_at < turn_at);
     }
+    return failures;
+}
 
+static int case_state_next_handoff(void)
+{
+    int failures = 0;
     /* ── does `next:` hand off to a human? ── */
     {
         static const char op[] =
@@ -2542,6 +2701,19 @@ static int case_state(void)
                  !engine_state_next_is_operator(mentions_elsewhere,
                                                 sizeof(mentions_elsewhere) - 1));
     }
+    return failures;
+}
+
+static int case_state(void)
+{
+    int failures = 0;
+
+    failures += case_state_extract_basics();
+    failures += case_state_extract_absent();
+
+    failures += case_state_carried_preamble();
+
+    failures += case_state_next_handoff();
     EN_CHECK("an empty state is never an operator ask",
              !engine_state_next_is_operator("", 0)
              && !engine_state_next_is_operator(NULL, 0));
