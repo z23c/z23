@@ -11,7 +11,6 @@
 
 #include "base/cleanse.h"
 #include "platform/clock.h"
-#include "platform/time_compat.h"
 #include "config/runtime.h"
 #include "controllers/blockchain_controller.h"
 #include "controllers/fleet_tip.h"
@@ -124,37 +123,104 @@ static int machine_index_for_peer(const struct fleet_status *s,
 
 /* ── the comparison ──────────────────────────────────────────────────── */
 
-/* Where a fresh check stands against this node's chain. */
-static enum fleet_status_agreement classify(
+/* A machine above this node's tip, by the block it names at the height this
+ * node asked about. Without an answer for a height this node holds, nothing
+ * is learned. */
+static enum fleet_status_agreement classify_above(
+    const struct fleet_tip *t, const struct fleet_status_local *local)
+{
+    char ours[FLEET_TIP_HASH_HEX + 1];
+    if (!t->has_at || t->at_height <= 0 || t->at_height > local->tip ||
+        !local->hash_at ||
+        !local->hash_at(t->at_height, ours, local->ctx))
+        return FLEET_STATUS_UNKNOWN;
+    return strcmp(ours, t->at_hash) == 0 ? FLEET_STATUS_PHONE_BEHIND
+                                         : FLEET_STATUS_MACHINE_DISAGREES;
+}
+
+/* How a check of a machine relates to `local`'s chain. */
+static enum fleet_status_agreement fleet_status_classify(
     const struct fleet_tip *t, const struct fleet_status_local *local)
 {
     char ours[FLEET_TIP_HASH_HEX + 1];
     if (!local || local->tip <= 0 || t->height < 0)
         return FLEET_STATUS_UNKNOWN;
     if (t->height > local->tip)
-        return FLEET_STATUS_PHONE_BEHIND;
+        return classify_above(t, local);
     if (!local->hash_at || !local->hash_at(t->height, ours, local->ctx))
         return FLEET_STATUS_UNKNOWN;
     if (strcmp(ours, t->hash) != 0)
         return FLEET_STATUS_MACHINE_DISAGREES;
-    return t->height == local->tip ? FLEET_STATUS_AGREES
-                                   : FLEET_STATUS_MACHINE_BEHIND;
+    if (t->height == local->tip)
+        return FLEET_STATUS_AGREES;
+    /* Further down it may share only an old ancestor and has checked none of
+     * the top blocks of this node: unknown, never agreement. */
+    return local->tip - t->height <= FLEET_STATUS_AGREE_DEPTH
+               ? FLEET_STATUS_MACHINE_BEHIND
+               : FLEET_STATUS_UNKNOWN;
 }
 
-/* The agreement of one connected machine from its cached check at `now`. */
+/* Does a disagreement hold a send back? Only from a machine at or above
+ * this node's tip: one below it is reported but cannot. */
+static bool disagreement_refuses(const struct fleet_tip *t,
+                                 const struct fleet_status_local *local)
+{
+    return local && t->height >= local->tip;
+}
+
+void fleet_status_note_check(const char *key, const struct fleet_tip *t,
+                             const struct fleet_status_local *local)
+{
+    switch (fleet_status_classify(t, local)) {
+    case FLEET_STATUS_AGREES:
+    case FLEET_STATUS_PHONE_BEHIND:
+    case FLEET_STATUS_MACHINE_BEHIND:
+        fleet_tip_cache_set_refusal(key, false);
+        break;
+    case FLEET_STATUS_MACHINE_DISAGREES:
+        if (disagreement_refuses(t, local))
+            fleet_tip_cache_set_refusal(key, true);
+        break;
+    case FLEET_STATUS_UNKNOWN:
+        break;
+    }
+}
+
+/* The agreement of one connected machine from its cached check at `now`. A
+ * standing refusal shows as a disagreement however old the check is. */
 static void judge(struct fleet_status_machine *m,
                   const struct fleet_status_local *local, int64_t now)
 {
     char key[BOOT_FLEET_ROSTER_ONION_MAX];
     struct fleet_tip t;
+    bool fresh;
     m->agreement = FLEET_STATUS_UNKNOWN;
     m->tip_height = 0;
+    m->depth = 0;
+    m->refusing = false;
     if (!fleet_status_onion_key(m->onion, key, sizeof key) ||
-        !fleet_tip_cache_get(key, &t) || now < t.fetched_at ||
-        now - t.fetched_at > FLEET_TIP_MAX_AGE_SECS)
+        !fleet_tip_cache_get(key, &t))
         return;
-    m->agreement = classify(&t, local);
-    m->tip_height = t.height;
+    fresh = now >= t.fetched_at && now - t.fetched_at <= FLEET_TIP_MAX_AGE_SECS;
+    if (fresh) {
+        m->agreement = fleet_status_classify(&t, local);
+        m->refusing = m->agreement == FLEET_STATUS_MACHINE_DISAGREES &&
+                      disagreement_refuses(&t, local);
+    }
+    if (t.refusal) {
+        m->agreement = FLEET_STATUS_MACHINE_DISAGREES;
+        m->refusing = true;
+    }
+    if (fresh || m->agreement != FLEET_STATUS_UNKNOWN)
+        m->tip_height = t.height;
+    if (fresh && local && t.height >= 0 && t.height < local->tip)
+        m->depth = local->tip - t.height;
+}
+
+static bool settles_agreement(const struct fleet_status_machine *m)
+{
+    return m->agreement == FLEET_STATUS_AGREES ||
+           m->agreement == FLEET_STATUS_MACHINE_BEHIND;
 }
 
 static enum fleet_status_verdict verdict_of(const struct fleet_status *s)
@@ -167,19 +233,15 @@ static enum fleet_status_verdict verdict_of(const struct fleet_status *s)
     for (size_t i = 0; i < s->machine_count; i++) {
         if (s->machines[i].agreement == FLEET_STATUS_MACHINE_DISAGREES)
             return FLEET_STATUS_DISAGREE;
-        settled = settled || s->machines[i].agreement == FLEET_STATUS_AGREES ||
-                  s->machines[i].agreement == FLEET_STATUS_MACHINE_BEHIND;
+        settled = settled || settles_agreement(&s->machines[i]);
     }
     return settled ? FLEET_STATUS_AGREE : FLEET_STATUS_UNCHECKED;
 }
 
-/* A machine at or above this node's tip that names another block there. A
- * machine below it is reported but cannot hold a send back. */
 static bool refusal_of(const struct fleet_status *s)
 {
     for (size_t i = 0; i < s->machine_count; i++)
-        if (s->machines[i].agreement == FLEET_STATUS_MACHINE_DISAGREES &&
-            s->machines[i].tip_height >= s->local_tip)
+        if (s->machines[i].refusing)
             return true;
     return false;
 }
@@ -194,6 +256,8 @@ void fleet_status_apply(struct fleet_status *s,
         s->machines[i].connected = false;
         s->machines[i].agreement = FLEET_STATUS_UNKNOWN;
         s->machines[i].tip_height = 0;
+        s->machines[i].depth = 0;
+        s->machines[i].refusing = false;
     }
     for (size_t i = 0; s->member && peers && i < n; i++) {
         int at = machine_index_for_peer(s, peers[i].host, peers[i].inbound);
@@ -262,6 +326,7 @@ void fleet_status_render(const struct fleet_status *s, struct json_value *out)
         json_push_kv_bool(&row, "connected", s->machines[i].connected);
         json_push_kv_str(&row, "agreement",
                          fleet_status_agreement_name(s->machines[i].agreement));
+        json_push_kv_int(&row, "depth", s->machines[i].depth);
         json_push_back(&list, &row);
         json_free(&row);
     }
@@ -299,6 +364,13 @@ static bool node_hash_at(int64_t height, char hex[65], void *ctx)
     return rpc_blockchain_provable_hash_at(height, hex);
 }
 
+void fleet_status_node_local(struct fleet_status_local *local)
+{
+    memset(local, 0, sizeof *local);
+    local->hash_at = node_hash_at;
+    local->tip = rpc_blockchain_provable_tip_height();
+}
+
 bool fleet_status_build(struct node_db *ndb, struct connman *cm,
                         const struct fleet_status_local *local,
                         int64_t wall_now, int64_t mono_now,
@@ -318,11 +390,11 @@ bool fleet_status_build(struct node_db *ndb, struct connman *cm,
 
 bool fleet_status_current(struct fleet_status *out)
 {
-    struct fleet_status_local local = { .hash_at = node_hash_at };
-    local.tip = rpc_blockchain_provable_tip_height();
+    struct fleet_status_local local;
+    fleet_status_node_local(&local);
     return fleet_status_build(app_runtime_node_db(), rpc_net_get_connman(),
                               &local, clock_now_wall_ms() / 1000,
-                              platform_time_monotonic_ms() / 1000, out);
+                              fleet_tip_now_secs(), out);
 }
 
 bool fleet_status_rpc(const struct json_value *params, bool help,

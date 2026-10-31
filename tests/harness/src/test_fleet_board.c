@@ -22,7 +22,9 @@
 #include "config/runtime.h"
 #include "controllers/fleet_status_controller.h"
 #include "controllers/fleet_tip.h"
+#include "platform/clock.h"
 #include "net/connman.h"
+#include "net/tor_integration.h"
 #include "util/fleet_role_check.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
@@ -50,10 +52,13 @@
 #include "models/mesh_pairing.h"
 #include "net/noise_transport.h"
 
-#include <stdatomic.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* Two distinct, deterministic host identities. A board post is only as
@@ -9553,13 +9558,30 @@ static bool fst_hash_at(int64_t h, char hex[65], void *ctx)
 static const struct fleet_status_local g_fst_local = {
     .tip = FST_LOCAL, .hash_at = fst_hash_at };
 
-/* A check of `onion` made at monotonic time `at`. */
+/* A check of `onion` made at time `at` on the fleet_tip_now_secs() clock,
+ * stored and settled as the background step does. `at_forked` is the block a
+ * machine above our tip names at our tip height: ours, or a fork's. */
+static void fst_check_above(const char *onion, int64_t h, bool forked,
+                            bool has_at, bool at_forked, int64_t at)
+{
+    char key[BOOT_FLEET_ROSTER_ONION_MAX];
+    struct fleet_tip t;
+    memset(&t, 0, sizeof t);
+    t.height = h;
+    fst_hash(h, forked, t.hash);
+    t.has_at = has_at;
+    t.at_height = FST_LOCAL;
+    fst_hash(FST_LOCAL, at_forked, t.at_hash);
+    t.fetched_at = at;
+    if (!fleet_status_onion_key(onion, key, sizeof key))
+        return;
+    fleet_tip_cache_put(key, &t);
+    fleet_status_note_check(key, &t, &g_fst_local);
+}
+
 static void fst_check(const char *onion, int64_t h, bool forked, int64_t at)
 {
-    char key[BOOT_FLEET_ROSTER_ONION_MAX], hex[65];
-    fst_hash(h, forked, hex);
-    if (fleet_status_onion_key(onion, key, sizeof key))
-        fleet_tip_cache_put(key, h, hex, at);
+    fst_check_above(onion, h, forked, false, false, at);
 }
 
 static void fst_peer(struct fleet_status_peer *p, const char *host,
@@ -9771,8 +9793,9 @@ static int test_fleet_status_agreement(void)
         ASSERT(fst_open(&db, false, FST_ONCE));
         fleet_status_collect(&db, FBD_NOW, &g_fst);
         fst_check(FST_ALPHA, FST_LOCAL, false, FST_NOW - 5);
-        fst_check(FST_BRAVO, FST_LOCAL + 40, false, FST_NOW - 5);
-        fst_check(FST_CHARLIE, FST_LOCAL - 40, false, FST_NOW - 5);
+        fst_check_above(FST_BRAVO, FST_LOCAL + 40, false, true, false,
+                        FST_NOW - 5);
+        fst_check(FST_CHARLIE, FST_LOCAL - 3, false, FST_NOW - 5);
         fst_peer(&peers[0], FST_ALPHA ":8033", false);
         fst_peer(&peers[1], FST_BRAVO, false);
         fst_peer(&peers[2], FST_CHARLIE ":8033", false);
@@ -9828,12 +9851,15 @@ static int test_fleet_status_agreement(void)
                   FST_NOW - FLEET_TIP_MAX_AGE_SECS);
         fst_apply(peers, 1);
         ASSERT_EQ(fst_machine("alpha")->agreement, FLEET_STATUS_AGREES);
-        /* A stale fork is not a disagreement either. */
+        /* A fork seen long ago still names another block: the refusal it
+         * raised stands, because failing to learn is not agreement. */
         fst_check(FST_ALPHA, FST_LOCAL, true,
                   FST_NOW - FLEET_TIP_MAX_AGE_SECS - 1);
         fst_apply(peers, 1);
-        ASSERT_EQ(fst_machine("alpha")->agreement, FLEET_STATUS_UNKNOWN);
-        ASSERT(!g_fst.refuses_send);
+        ASSERT_EQ(fst_machine("alpha")->agreement,
+                  FLEET_STATUS_MACHINE_DISAGREES);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_DISAGREE);
+        ASSERT(g_fst.refuses_send);
         fst_close(&db);
         PASS();
     }
@@ -9919,15 +9945,16 @@ static int g_fst_asked;
 static char g_fst_asked_key[4][BOOT_FLEET_ROSTER_ONION_MAX];
 static bool g_fst_answer;
 
-static bool fst_fetch(const char *onion, int64_t *height,
-                      char hash[FLEET_TIP_HASH_HEX + 1])
+static bool fst_fetch(const char *onion, int64_t ask_height,
+                      struct fleet_tip *out)
 {
     if (g_fst_asked < 4)
         (void)snprintf(g_fst_asked_key[g_fst_asked], BOOT_FLEET_ROSTER_ONION_MAX,
                        "%s", onion);
     g_fst_asked++;
-    *height = FST_LOCAL;
-    fst_hash(FST_LOCAL, false, hash);
+    (void)ask_height;
+    out->height = FST_LOCAL;
+    fst_hash(FST_LOCAL, false, out->hash);
     return g_fst_answer;
 }
 
@@ -9947,37 +9974,37 @@ static int test_fleet_status_schedule(void)
         fst_apply(peers, 2); /* bravo is not connected */
         g_fst_asked = 0;
         g_fst_answer = true;
-        ASSERT(!fleet_tip_poll_step(&g_fst, FST_NOW, true, fst_fetch));
+        ASSERT(!fleet_tip_poll_step(&g_fst, &g_fst_local, FST_NOW, true, fst_fetch));
         ASSERT_EQ(g_fst_asked, 0);
-        ASSERT(fleet_tip_poll_step(&g_fst, FST_NOW, false, fst_fetch));
+        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, FST_NOW, false, fst_fetch));
         ASSERT_EQ(g_fst_asked, 1);
         ASSERT_STR_EQ(g_fst_asked_key[0], FST_ALPHA);
         ASSERT(fleet_status_onion_key(FST_ALPHA, key, sizeof key));
         ASSERT(fleet_tip_cache_get(key, &t));
         ASSERT_EQ(t.height, (int64_t)FST_LOCAL);
         ASSERT_EQ(t.fetched_at, (int64_t)FST_NOW);
-        ASSERT(fleet_tip_poll_step(&g_fst, FST_NOW + 1, false, fst_fetch));
+        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, FST_NOW + 1, false, fst_fetch));
         ASSERT_STR_EQ(g_fst_asked_key[1], FST_CHARLIE);
-        ASSERT(!fleet_tip_poll_step(&g_fst, FST_NOW + 2, false, fst_fetch));
-        ASSERT(!fleet_tip_poll_step(&g_fst,
+        ASSERT(!fleet_tip_poll_step(&g_fst, &g_fst_local, FST_NOW + 2, false, fst_fetch));
+        ASSERT(!fleet_tip_poll_step(&g_fst, &g_fst_local,
                                     FST_NOW + FLEET_TIP_REFRESH_SECS - 1,
                                     false, fst_fetch));
         ASSERT_EQ(g_fst_asked, 2);
-        ASSERT(fleet_tip_poll_step(&g_fst, FST_NOW + FLEET_TIP_REFRESH_SECS,
+        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, FST_NOW + FLEET_TIP_REFRESH_SECS,
                                    false, fst_fetch));
         ASSERT_STR_EQ(g_fst_asked_key[2], FST_ALPHA);
-        /* A failed ask is still a try: a dead machine is not asked again
-         * before the minute is out, so the next one is asked instead. */
+        /* A failed ask is still a try: the machine asked longest ago goes
+         * first, so a dead machine is not asked again ahead of the others. */
         g_fst_answer = false;
-        ASSERT(fleet_tip_poll_step(&g_fst,
+        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local,
                                    FST_NOW + 2 * FLEET_TIP_REFRESH_SECS,
                                    false, fst_fetch));
-        ASSERT_STR_EQ(g_fst_asked_key[3], FST_ALPHA);
-        ASSERT(fleet_tip_poll_step(&g_fst,
+        ASSERT_STR_EQ(g_fst_asked_key[3], FST_CHARLIE);
+        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local,
                                    FST_NOW + 2 * FLEET_TIP_REFRESH_SECS + 1,
                                    false, fst_fetch));
         ASSERT_EQ(g_fst_asked, 5);
-        ASSERT(!fleet_tip_poll_step(&g_fst,
+        ASSERT(!fleet_tip_poll_step(&g_fst, &g_fst_local,
                                     FST_NOW + 2 * FLEET_TIP_REFRESH_SECS + 2,
                                     false, fst_fetch));
         ASSERT_EQ(g_fst_asked, 5);
@@ -9985,13 +10012,14 @@ static int test_fleet_status_schedule(void)
         PASS();
     }
     TEST("fleet status: a tip reply must be an object with a height and a "
-         "64-digit hash") {
-        int64_t h = -1;
-        char hash[FLEET_TIP_HASH_HEX + 1];
+         "64-digit hash, and an at-block counts only for the height asked") {
+        struct fleet_tip t;
         const char *const good =
             "{\"schema\":\"zcl.tip.v1\",\"height\":7,\"hash\":\""
             "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-            "\"}";
+            "\",\"at\":{\"height\":5,\"hash\":\""
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            "\"}}";
         const char *const bad[] = {
             "{\"height\":7,\"hash\":\"abc\"}",
             "{\"height\":-1,\"hash\":\"0000000000000000000000000000000000000000"
@@ -10000,34 +10028,422 @@ static int test_fleet_status_schedule(void)
             "00000000000000000000000000\"}",
             "{\"height\":7,\"hash\":\"zz00000000000000000000000000000000"
             "000000000000000000000000000000\"}",
+            "{\"height\":7,\"hash\":\"0000000000000000000000000000000000000000"
+            "000000000000000000000000\",\"at\":{\"height\":5,\"hash\":\"x\"}}",
             "[7]", "" };
-        ASSERT(fleet_tip_parse((const uint8_t *)good, strlen(good), &h, hash));
-        ASSERT_EQ(h, (int64_t)7);
-        ASSERT_STR_EQ(hash, "abcdef0123456789abcdef0123456789abcdef0123456789"
-                            "abcdef0123456789");
+        ASSERT(fleet_tip_parse((const uint8_t *)good, strlen(good), 5, &t));
+        ASSERT_EQ(t.height, (int64_t)7);
+        ASSERT_STR_EQ(t.hash, "abcdef0123456789abcdef0123456789abcdef01234567"
+                              "89abcdef0123456789");
+        ASSERT(t.has_at);
+        ASSERT_EQ(t.at_height, (int64_t)5);
+        ASSERT(fleet_tip_parse((const uint8_t *)good, strlen(good), 6, &t));
+        ASSERT(!t.has_at); /* it answered a height nobody asked */
+        ASSERT(fleet_tip_parse((const uint8_t *)good, strlen(good), 0, &t));
+        ASSERT(!t.has_at);
         for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
             ASSERT(!fleet_tip_parse((const uint8_t *)bad[i], strlen(bad[i]),
-                                    &h, hash));
+                                    5, &t));
         PASS();
     }
-    TEST("fleet status: the tip a node serves is the tip a machine accepts") {
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
+/* The node's chain as the route sees it. */
+static bool fst_hash_at_any(int64_t h, char hex[65], void *ctx)
+{
+    (void)ctx;
+    if (h < 0 || h > 4242)
+        return false;
+    fst_hash(h, false, hex);
+    return true;
+}
+
+static const struct fleet_status_local g_fst_chain = {
+    .tip = 4242, .hash_at = fst_hash_at_any };
+
+static const char *fst_body(const uint8_t *page)
+{
+    const char *body = strstr((const char *)page, "\r\n\r\n");
+    return body ? body + 4 : "";
+}
+
+static int test_fleet_tip_route(void)
+{
+    int failures = 0;
+    TEST("fleet tip: the route answers the tip, the block at an asked "
+         "height at or below it, and nothing for a bad height") {
         uint8_t page[512];
-        char want[65], got[65];
-        int64_t h = -1;
-        const char *body;
-        size_t n;
-        fst_hash(4242, false, want);
-        n = fleet_tip_render(4242, want, page, sizeof page);
+        char want[65];
+        struct fleet_tip t;
+        size_t n = fleet_tip_respond(&g_fst_chain, NULL, page, sizeof page);
         ASSERT(n > 0 && n < sizeof page);
         page[n] = 0;
         ASSERT(strncmp((const char *)page, "HTTP/1.1 200 OK\r\n", 17) == 0);
-        body = strstr((const char *)page, "\r\n\r\n");
-        ASSERT(body != NULL);
-        body += 4;
-        ASSERT(fleet_tip_parse((const uint8_t *)body, strlen(body), &h, got));
-        ASSERT_EQ(h, (int64_t)4242);
-        ASSERT_STR_EQ(got, want);
-        ASSERT_EQ(fleet_tip_render(1, "short", page, sizeof page), (size_t)0);
+        ASSERT(fleet_tip_parse((const uint8_t *)fst_body(page),
+                               strlen(fst_body(page)), 0, &t));
+        fst_hash(4242, false, want);
+        ASSERT_EQ(t.height, (int64_t)4242);
+        ASSERT_STR_EQ(t.hash, want);
+        ASSERT(!t.has_at);
+        n = fleet_tip_respond(&g_fst_chain, "4000", page, sizeof page);
+        ASSERT(n > 0 && n < sizeof page);
+        page[n] = 0;
+        ASSERT(fleet_tip_parse((const uint8_t *)fst_body(page),
+                               strlen(fst_body(page)), 4000, &t));
+        fst_hash(4000, false, want);
+        ASSERT(t.has_at);
+        ASSERT_STR_EQ(t.at_hash, want);
+        n = fleet_tip_respond(&g_fst_chain, "9999", page, sizeof page);
+        page[n] = 0;
+        ASSERT(fleet_tip_parse((const uint8_t *)fst_body(page),
+                               strlen(fst_body(page)), 9999, &t));
+        ASSERT(!t.has_at); /* above our tip: nothing to name */
+        ASSERT_EQ(fleet_tip_respond(&g_fst_chain, "40x0", page, sizeof page),
+                  (size_t)0);
+        ASSERT_EQ(fleet_tip_respond(&g_fst_chain, "", page, sizeof page),
+                  (size_t)0);
+        ASSERT_EQ(fleet_tip_respond(&g_fst_chain, "12345678901", page,
+                                    sizeof page), (size_t)0);
+        ASSERT_EQ(fleet_tip_respond(NULL, NULL, page, sizeof page), (size_t)0);
+        ASSERT_EQ(fleet_tip_respond(&g_fst_chain, NULL, page, 40), (size_t)0);
+        PASS();
+    }
+    TEST("fleet tip: a node with no chain answers nothing, so the caller "
+         "returns 404") {
+        uint8_t page[512];
+        ASSERT_EQ(fleet_tip_serve(page, sizeof page), (size_t)0);
+        ASSERT_EQ(fleet_tip_serve_at("100", page, sizeof page), (size_t)0);
+        PASS();
+    }
+    _test_next:;
+    return failures;
+}
+
+static int g_fst_wire_calls;
+static char g_fst_wire_path[64];
+static int g_fst_wire_status;
+static const char *g_fst_wire_body;
+static int g_fst_wire_rc;
+
+static int fst_wire(const char *onion, const char *path,
+                    struct onion_fetch_result *res, int timeout_secs)
+{
+    (void)onion;
+    (void)timeout_secs;
+    g_fst_wire_calls++;
+    (void)snprintf(g_fst_wire_path, sizeof g_fst_wire_path, "%s", path);
+    res->status = g_fst_wire_status;
+    if (g_fst_wire_body) {
+        res->body_len = strlen(g_fst_wire_body);
+        res->body = malloc(res->body_len);
+        if (!res->body)
+            return -1;
+        memcpy(res->body, g_fst_wire_body, res->body_len);
+    }
+    return g_fst_wire_rc;
+}
+
+static int test_fleet_tip_fetch(void)
+{
+    int failures = 0;
+    char reply[512];
+    TEST("fleet tip: a fetch names the tip height it asks about and takes "
+         "only a 200 with a well-formed tip") {
+        struct fleet_tip t;
+        char h[65], at[65];
+        fst_hash(5001, false, h);
+        fst_hash(5000, true, at);
+        (void)snprintf(reply, sizeof reply,
+                       "{\"schema\":\"zcl.tip.v1\",\"height\":5001,"
+                       "\"hash\":\"%s\",\"at\":{\"height\":5000,"
+                       "\"hash\":\"%s\"}}", h, at);
+        fleet_tip_set_transport(fst_wire);
+        g_fst_wire_calls = 0;
+        g_fst_wire_status = 200;
+        g_fst_wire_body = reply;
+        g_fst_wire_rc = 0;
+        ASSERT(fleet_tip_fetch(FST_ALPHA, 5000, &t));
+        ASSERT_STR_EQ(g_fst_wire_path, "/explorer/tip/5000");
+        ASSERT_EQ(t.height, (int64_t)5001);
+        ASSERT(t.has_at);
+        ASSERT_STR_EQ(t.at_hash, at);
+        ASSERT(fleet_tip_fetch(FST_ALPHA, 0, &t));
+        ASSERT_STR_EQ(g_fst_wire_path, "/explorer/tip");
+        ASSERT(!t.has_at);
+        g_fst_wire_status = 404;
+        ASSERT(!fleet_tip_fetch(FST_ALPHA, 5000, &t));
+        g_fst_wire_status = 200;
+        g_fst_wire_rc = -1;
+        ASSERT(!fleet_tip_fetch(FST_ALPHA, 5000, &t));
+        g_fst_wire_rc = 0;
+        g_fst_wire_body = "{\"height\":1}";
+        ASSERT(!fleet_tip_fetch(FST_ALPHA, 5000, &t));
+        g_fst_wire_body = NULL;
+        ASSERT(!fleet_tip_fetch(FST_ALPHA, 5000, &t));
+        ASSERT(!fleet_tip_fetch(NULL, 5000, &t));
+        fleet_tip_set_transport(NULL);
+        PASS();
+    }
+    TEST("fleet tip: the main-loop tick asks nobody while Tor is not ready") {
+        fleet_tip_set_transport(fst_wire);
+        g_fst_wire_calls = 0;
+        fleet_tip_poll_tick();
+        fleet_tip_poll_tick();
+        ASSERT_EQ(g_fst_wire_calls, 0);
+        fleet_tip_set_transport(NULL);
+        PASS();
+    }
+    _test_next:;
+    fleet_tip_set_transport(NULL);
+    return failures;
+}
+
+static int test_fleet_status_ahead(void)
+{
+    int failures = 0;
+    struct node_db db;
+    struct fleet_status_peer peers[3];
+    TEST("fleet status: a machine above the tip is asked which block it "
+         "holds at our tip height, and another block there disagrees and "
+         "holds a send back") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_check_above(FST_ALPHA, FST_LOCAL + 1, true, true, true,
+                        FST_NOW - 5);
+        fst_peer(&peers[0], FST_ALPHA, false);
+        fst_apply(peers, 1);
+        ASSERT_EQ(fst_machine("alpha")->agreement,
+                  FLEET_STATUS_MACHINE_DISAGREES);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_DISAGREE);
+        ASSERT(g_fst.refuses_send);
+        fst_close(&db);
+        PASS();
+    }
+    TEST("fleet status: a machine above the tip that names our block there "
+         "is only the phone behind, and one that names nothing is unknown") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_check_above(FST_ALPHA, FST_LOCAL + 1, true, true, false,
+                        FST_NOW - 5);
+        fst_check_above(FST_BRAVO, FST_LOCAL + 2, false, false, false,
+                        FST_NOW - 5);
+        fst_peer(&peers[0], FST_ALPHA, false);
+        fst_peer(&peers[1], FST_BRAVO, false);
+        fst_apply(peers, 2);
+        ASSERT_EQ(fst_machine("alpha")->agreement, FLEET_STATUS_PHONE_BEHIND);
+        ASSERT_EQ(fst_machine("bravo")->agreement, FLEET_STATUS_UNKNOWN);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_UNCHECKED);
+        ASSERT(!g_fst.refuses_send);
+        fst_close(&db);
+        PASS();
+    }
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
+static int test_fleet_status_standing_refusal(void)
+{
+    int failures = 0;
+    struct node_db db;
+    struct fleet_status_peer peers[2];
+    TEST("fleet status: a refusal outlives its check's age and a failed "
+         "ask, and lifts only when a later check lands on our chain") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_peer(&peers[0], FST_ALPHA, false);
+        fst_check(FST_ALPHA, FST_LOCAL, true, FST_NOW - 5);
+        fst_apply(peers, 1);
+        ASSERT(g_fst.refuses_send);
+        /* The machine's onion is flooded: every ask fails for an hour. */
+        g_fst_answer = false;
+        g_fst_asked = 0;
+        for (int64_t at = FST_NOW; at <= FST_NOW + 3600; at += 60)
+            (void)fleet_tip_poll_step(&g_fst, &g_fst_local, at, false,
+                                      fst_fetch);
+        ASSERT(g_fst_asked > 50);
+        fleet_status_apply(&g_fst, peers, 1, &g_fst_local, FST_NOW + 3600);
+        ASSERT_EQ(fst_machine("alpha")->agreement,
+                  FLEET_STATUS_MACHINE_DISAGREES);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_DISAGREE);
+        ASSERT(g_fst.refuses_send);
+        /* Not connected: a machine that is gone holds nothing back. */
+        fleet_status_apply(&g_fst, peers, 0, &g_fst_local, FST_NOW + 3600);
+        ASSERT(!g_fst.refuses_send);
+        /* A check on a fork below our tip is no agreement. */
+        fst_check(FST_ALPHA, FST_LOCAL - 3, true, FST_NOW + 3600);
+        fleet_status_apply(&g_fst, peers, 1, &g_fst_local, FST_NOW + 3601);
+        ASSERT(g_fst.refuses_send);
+        /* A later check that lands on our chain lifts it. */
+        g_fst_answer = true;
+        ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local, FST_NOW + 3700,
+                                   false, fst_fetch));
+        fleet_status_apply(&g_fst, peers, 1, &g_fst_local, FST_NOW + 3701);
+        ASSERT_EQ(fst_machine("alpha")->agreement, FLEET_STATUS_AGREES);
+        ASSERT(!g_fst.refuses_send);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_AGREE);
+        fst_close(&db);
+        PASS();
+    }
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
+static int test_fleet_status_depth(void)
+{
+    int failures = 0;
+    struct node_db db;
+    struct fleet_status_peer peers[3];
+    TEST("fleet status: a machine behind by more than the depth bound does "
+         "not count toward agreement") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_peer(&peers[0], FST_ALPHA, false);
+        fst_peer(&peers[1], FST_BRAVO, false);
+        fst_check(FST_ALPHA, FST_LOCAL - FLEET_STATUS_AGREE_DEPTH - 1, false,
+                  FST_NOW - 5);
+        fst_apply(peers, 1);
+        ASSERT_EQ(fst_machine("alpha")->agreement, FLEET_STATUS_UNKNOWN);
+        ASSERT_EQ(fst_machine("alpha")->depth,
+                  (int64_t)FLEET_STATUS_AGREE_DEPTH + 1);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_UNCHECKED);
+        fst_check(FST_ALPHA, FST_LOCAL - FLEET_STATUS_AGREE_DEPTH, false,
+                  FST_NOW - 5);
+        fst_apply(peers, 1);
+        ASSERT_EQ(fst_machine("alpha")->agreement,
+                  FLEET_STATUS_MACHINE_BEHIND);
+        ASSERT_EQ(fst_machine("alpha")->depth,
+                  (int64_t)FLEET_STATUS_AGREE_DEPTH);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_AGREE);
+        fst_check(FST_ALPHA, FST_LOCAL - 40, false, FST_NOW - 5);
+        fst_check(FST_BRAVO, FST_LOCAL, false, FST_NOW - 5);
+        fst_apply(peers, 2);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_AGREE);
+        fst_close(&db);
+        PASS();
+    }
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
+static int test_fleet_status_fairness(void)
+{
+    int failures = 0;
+    struct node_db db;
+    struct fleet_status_peer peers[3];
+    TEST("fleet status: the machine asked longest ago is asked next, so a "
+         "fast ask never starves the last machine") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_peer(&peers[0], FST_ALPHA, false);
+        fst_peer(&peers[1], FST_BRAVO, false);
+        fst_peer(&peers[2], FST_CHARLIE, false);
+        fst_apply(peers, 3);
+        g_fst_asked = 0;
+        g_fst_answer = true;
+        for (int i = 0; i < 4; i++)
+            ASSERT(fleet_tip_poll_step(&g_fst, &g_fst_local,
+                                       FST_NOW + i * FLEET_TIP_REFRESH_SECS,
+                                       false, fst_fetch));
+        ASSERT_STR_EQ(g_fst_asked_key[0], FST_ALPHA);
+        ASSERT_STR_EQ(g_fst_asked_key[1], FST_BRAVO);
+        ASSERT_STR_EQ(g_fst_asked_key[2], FST_CHARLIE);
+        ASSERT_STR_EQ(g_fst_asked_key[3], FST_ALPHA);
+        fst_close(&db);
+        PASS();
+    }
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
+#ifdef __linux__
+extern int unshare(int flags);
+enum { FST_CLONE_NEWUSER = 0x10000000, FST_CLONE_NEWTIME = 0x00000080 };
+
+/* In a child with CLOCK_BOOTTIME shifted six hours ahead of CLOCK_MONOTONIC,
+ * as after a suspend, the age clock must show the shift. 0: it does; 1: it
+ * does not; 2: the shift could not be set up on this host. */
+static int fst_suspend_child(void)
+{
+    char map[64];
+    int fd;
+    int64_t skew;
+    unsigned uid = (unsigned)getuid(); /* unshare turns it into the overflow id */
+    if (unshare(FST_CLONE_NEWUSER | FST_CLONE_NEWTIME) != 0)
+        return 3;
+    (void)snprintf(map, sizeof map, "0 %u 1", uid);
+    fd = open("/proc/self/uid_map", O_WRONLY);
+    if (fd < 0 || write(fd, map, strlen(map)) < 0)
+        return 4;
+    close(fd);
+    fd = open("/proc/self/timens_offsets", O_WRONLY);
+    if (fd < 0 || write(fd, "boottime 21600 0\n", 17) < 0)
+        return 5;
+    close(fd);
+    if (fork() == 0) {
+        skew = fleet_tip_now_secs() - clock_now_monotonic_ns() / 1000000000;
+        _exit(skew >= 21600 - 2 ? 0 : 1);
+    }
+    {
+        int st = 0;
+        (void)wait(&st);
+        return WIFEXITED(st) ? WEXITSTATUS(st) : 2;
+    }
+}
+#endif
+
+static int test_fleet_status_clock(void)
+{
+    int failures = 0;
+    TEST("fleet status: cache ages are read on a clock that counts time "
+         "spent suspended") {
+        ASSERT(fleet_tip_now_secs() > 0);
+#ifdef __linux__
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0)
+            _exit(fst_suspend_child());
+        int st = 0;
+        ASSERT(waitpid(pid, &st, 0) == pid);
+        ASSERT(WIFEXITED(st));
+        /* 3 to 5: a host that forbids user and time namespaces. */
+        ASSERT(WEXITSTATUS(st) != 1);
+        if (WEXITSTATUS(st) >= 2)
+            printf("  note: time namespace setup stage %d refused; suspend skew not exercised\n", WEXITSTATUS(st));
+#endif
+        PASS();
+    }
+    _test_next:;
+    return failures;
+}
+
+static int test_fleet_status_rpc_reply(void)
+{
+    int failures = 0;
+    struct node_db db;
+    TEST("fleet status: the fleetstatus RPC answers help, and a call reads "
+         "the roster and the cache without waiting on a peer") {
+        struct json_value out;
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        json_init(&out);
+        ASSERT(fleet_status_rpc(NULL, true, &out));
+        json_free(&out);
+        json_init(&out);
+        ASSERT(fleet_status_rpc(NULL, false, &out));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "schema")),
+                      "zcl.fleet_status.v1");
+        ASSERT(json_get_bool(json_get(&out, "member")));
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "verdict")),
+                      "none_connected");
+        ASSERT(!json_get_bool(json_get(&out, "refuses_send")));
+        json_free(&out);
+        fst_close(&db);
         PASS();
     }
     _test_next:;
@@ -10060,7 +10476,7 @@ static int test_fleet_status_reply(void)
         const struct json_value *rows = json_get(&out, "machines");
         ASSERT_EQ(json_size(rows), (size_t)3);
         for (size_t i = 0; i < json_size(rows); i++)
-            ASSERT_EQ(json_at(rows, i)->num_children, (size_t)3);
+            ASSERT_EQ(json_at(rows, i)->num_children, (size_t)4);
         json_free(&out);
         fst_close(&db);
         PASS();
@@ -10078,6 +10494,14 @@ static int test_fleet_status(void)
     failures += test_fleet_status_agreement();
     failures += test_fleet_status_snapshot();
     failures += test_fleet_status_schedule();
+    failures += test_fleet_tip_route();
+    failures += test_fleet_tip_fetch();
+    failures += test_fleet_status_ahead();
+    failures += test_fleet_status_standing_refusal();
+    failures += test_fleet_status_depth();
+    failures += test_fleet_status_fairness();
+    failures += test_fleet_status_clock();
+    failures += test_fleet_status_rpc_reply();
     failures += test_fleet_status_reply();
     return failures;
 }

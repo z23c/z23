@@ -8,7 +8,7 @@
 #include "jobs/node_pace.h"
 #include "json/json.h"
 #include "net/tor_integration.h"
-#include "platform/time_compat.h"
+#include "platform/clock.h"
 #include "util/safe_alloc.h"
 
 #include <ctype.h>
@@ -17,73 +17,160 @@
 #include <stdlib.h>
 #include <string.h>
 
+int64_t fleet_tip_now_secs(void)
+{
+    return clock_now_boottime_ms() / 1000;
+}
+
 /* ── the route ───────────────────────────────────────────────────────── */
 
-size_t fleet_tip_render(int64_t height, const char *hash, uint8_t *response,
-                        size_t response_max)
+static bool hash_is_hex(const char *hash)
 {
-    char body[160];
-    int n, blen;
-    if (!response || !hash || strlen(hash) != FLEET_TIP_HASH_HEX)
-        return 0;
+    if (!hash || strlen(hash) != FLEET_TIP_HASH_HEX)
+        return false; // raw-return-ok:not a hash
     for (size_t i = 0; i < FLEET_TIP_HASH_HEX; i++)
         if (!isxdigit((unsigned char)hash[i]))
-            return 0;
-    blen = snprintf(body, sizeof body,
-                    "{\"schema\":\"zcl.tip.v1\",\"height\":%lld,"
-                    "\"hash\":\"%s\"}", (long long)height, hash);
-    if (blen <= 0 || (size_t)blen >= sizeof body)
+            return false; // raw-return-ok:not a hash
+    return true;
+}
+
+/* A decimal height of 1 to 10 digits. */
+static bool height_from_arg(const char *arg, int64_t *out)
+{
+    size_t n = arg ? strlen(arg) : 0;
+    int64_t v = 0;
+    if (n == 0 || n > 10)
+        return false;
+    for (size_t i = 0; i < n; i++) {
+        if (arg[i] < '0' || arg[i] > '9')
+            return false;
+        v = v * 10 + (arg[i] - '0');
+    }
+    *out = v;
+    return true;
+}
+
+static size_t wrap_ok(const char *body, int blen, uint8_t *response,
+                      size_t response_max)
+{
+    int n = snprintf((char *)response, response_max,
+                     "HTTP/1.1 200 OK\r\n"
+                     "Content-Type: application/json\r\n"
+                     "Cache-Control: no-store\r\n"
+                     "Content-Length: %d\r\n"
+                     "Connection: close\r\n\r\n%s", blen, body);
+    return n > 0 && (size_t)n < response_max ? (size_t)n : 0;
+}
+
+/* The JSON body of a tip reply into `body`; its length, or 0. */
+static int tip_body(const struct fleet_status_local *chain, bool has_at,
+                    int64_t at, const char *at_hash, const char *hash,
+                    char *body, size_t cap)
+{
+    int blen = snprintf(body, cap,
+                        "{\"schema\":\"zcl.tip.v1\",\"height\":%lld,"
+                        "\"hash\":\"%s\"", (long long)chain->tip, hash);
+    if (blen > 0 && (size_t)blen < cap && has_at)
+        blen += snprintf(body + blen, cap - (size_t)blen,
+                         ",\"at\":{\"height\":%lld,\"hash\":\"%s\"}",
+                         (long long)at, at_hash);
+    if (blen > 0 && (size_t)blen < cap)
+        blen += snprintf(body + blen, cap - (size_t)blen, "}");
+    return blen > 0 && (size_t)blen < cap ? blen : 0;
+}
+
+/* This node's block hash at `height`, 64 hex digits, or false. */
+static bool chain_hash(const struct fleet_status_local *chain, int64_t height,
+                       char hash[FLEET_TIP_HASH_HEX + 1])
+{
+    return chain->hash_at(height, hash, chain->ctx) && hash_is_hex(hash);
+}
+
+size_t fleet_tip_respond(const struct fleet_status_local *chain,
+                         const char *height_arg, uint8_t *response,
+                         size_t response_max)
+{
+    char hash[FLEET_TIP_HASH_HEX + 1], at_hash[FLEET_TIP_HASH_HEX + 1];
+    char body[FLEET_TIP_BODY_MAX];
+    int64_t at = 0;
+    bool has_at;
+    int blen;
+    if (!chain || !chain->hash_at || !response || chain->tip < 0 ||
+        !chain_hash(chain, chain->tip, hash))
         return 0;
-    n = snprintf((char *)response, response_max,
-                 "HTTP/1.1 200 OK\r\n"
-                 "Content-Type: application/json\r\n"
-                 "Cache-Control: no-store\r\n"
-                 "Content-Length: %d\r\n"
-                 "Connection: close\r\n\r\n%s", blen, body);
-    if (n <= 0 || (size_t)n >= response_max)
+    if (height_arg && !height_from_arg(height_arg, &at))
         return 0;
-    return (size_t)n;
+    has_at = height_arg && at <= chain->tip && chain_hash(chain, at, at_hash);
+    blen = tip_body(chain, has_at, at, at_hash, hash, body, sizeof body);
+    return blen > 0 ? wrap_ok(body, blen, response, response_max) : 0;
+}
+
+static bool node_hash_at(int64_t height, char hex[65], void *ctx)
+{
+    (void)ctx;
+    return rpc_blockchain_provable_hash_at(height, hex);
+}
+
+size_t fleet_tip_serve_at(const char *height_arg, uint8_t *response,
+                          size_t response_max)
+{
+    struct fleet_status_local chain = { .hash_at = node_hash_at };
+    char hex[65];
+    if (!rpc_blockchain_provable_tip(&chain.tip, hex))
+        return 0;
+    return fleet_tip_respond(&chain, height_arg, response, response_max);
 }
 
 size_t fleet_tip_serve(uint8_t *response, size_t response_max)
 {
-    char hash[FLEET_TIP_HASH_HEX + 1];
-    int64_t height = 0;
-    if (!rpc_blockchain_provable_tip(&height, hash))
-        return 0;
-    return fleet_tip_render(height, hash, response, response_max);
+    return fleet_tip_serve_at(NULL, response, response_max);
 }
 
-/* The tip object of a reply: height >= 0 and a 64-digit hex hash. */
-static bool tip_fields(const struct json_value *root, int64_t *height,
-                       char hash[FLEET_TIP_HASH_HEX + 1])
+/* A {height, hash} object: height >= 0 and a 64-digit hex hash, lowercased
+ * into `hash`. */
+static bool pair_fields(const struct json_value *o, int64_t *height,
+                        char hash[FLEET_TIP_HASH_HEX + 1])
 {
-    const struct json_value *h = json_get(root, "height");
-    const struct json_value *x = json_get(root, "hash");
+    const struct json_value *h = o ? json_get(o, "height") : NULL;
+    const struct json_value *x = o ? json_get(o, "hash") : NULL;
     const char *s = x && x->type == JSON_STR ? json_get_str(x) : NULL;
-    if (root->type != JSON_OBJ || !h || h->type != JSON_INT ||
-        json_get_int(h) < 0 || !s || strlen(s) != FLEET_TIP_HASH_HEX)
-        return false;
-    for (size_t i = 0; i < FLEET_TIP_HASH_HEX; i++) {
-        if (!isxdigit((unsigned char)s[i]))
-            return false; // raw-return-ok:not a tip reply
+    if (!o || o->type != JSON_OBJ || !h || h->type != JSON_INT ||
+        json_get_int(h) < 0 || !hash_is_hex(s))
+        return false; // raw-return-ok:not a tip reply
+    for (size_t i = 0; i < FLEET_TIP_HASH_HEX; i++)
         hash[i] = (char)tolower((unsigned char)s[i]);
-    }
     hash[FLEET_TIP_HASH_HEX] = '\0';
     *height = json_get_int(h);
     return true;
 }
 
-bool fleet_tip_parse(const uint8_t *body, size_t len, int64_t *height,
-                     char hash[FLEET_TIP_HASH_HEX + 1])
+/* The optional `at` object. It counts only when it answers the height that
+ * was asked; a malformed one fails the whole reply. */
+static bool at_fields(const struct json_value *root, int64_t ask_height,
+                      struct fleet_tip *out)
+{
+    const struct json_value *at = json_get(root, "at");
+    out->has_at = false;
+    if (!at)
+        return true;
+    if (!pair_fields(at, &out->at_height, out->at_hash))
+        return false; // raw-return-ok:malformed reply, the caller refuses it
+    out->has_at = ask_height > 0 && out->at_height == ask_height;
+    return true;
+}
+
+bool fleet_tip_parse(const uint8_t *body, size_t len, int64_t ask_height,
+                     struct fleet_tip *out)
 {
     struct json_value root;
     bool ok;
-    if (!body || !len || len > FLEET_TIP_BODY_MAX || !height || !hash)
+    if (!body || !len || len > FLEET_TIP_BODY_MAX || !out)
         return false;
+    memset(out, 0, sizeof *out);
     json_init(&root);
     ok = json_read(&root, (const char *)body, len) &&
-         tip_fields(&root, height, hash);
+         pair_fields(&root, &out->height, out->hash) &&
+         at_fields(&root, ask_height, out);
     json_free(&root);
     return ok;
 }
@@ -131,18 +218,29 @@ static const struct tip_entry *entry_find(const char *key)
     return NULL;
 }
 
-void fleet_tip_cache_put(const char *key, int64_t height, const char *hash,
-                         int64_t now)
+void fleet_tip_cache_put(const char *key, const struct fleet_tip *tip)
 {
     struct tip_entry *e;
-    if (!key || !hash || strlen(hash) != FLEET_TIP_HASH_HEX)
+    bool kept;
+    if (!key || !tip || !hash_is_hex(tip->hash))
         return;
     pthread_mutex_lock(&g_lock);
     e = entry_for(key);
+    kept = e->has_tip && e->tip.refusal;
+    e->tip = *tip;
+    e->tip.refusal = kept;
     e->has_tip = true;
-    e->tip.height = height;
-    e->tip.fetched_at = now;
-    memcpy(e->tip.hash, hash, FLEET_TIP_HASH_HEX + 1);
+    pthread_mutex_unlock(&g_lock);
+}
+
+void fleet_tip_cache_set_refusal(const char *key, bool refusal)
+{
+    struct tip_entry *e;
+    if (!key)
+        return;
+    pthread_mutex_lock(&g_lock);
+    e = entry_for(key);
+    e->tip.refusal = refusal;
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -162,17 +260,18 @@ bool fleet_tip_cache_get(const char *key, struct fleet_tip *out)
     return ok;
 }
 
-bool fleet_tip_cache_due(const char *key, int64_t now)
+int64_t fleet_tip_cache_last_try(const char *key)
 {
     const struct tip_entry *e;
-    bool due;
+    int64_t at = 0;
     if (!key)
-        return false;
+        return 0;
     pthread_mutex_lock(&g_lock);
     e = entry_find(key);
-    due = !e || e->last_try == 0 || now - e->last_try >= FLEET_TIP_REFRESH_SECS;
+    if (e)
+        at = e->last_try;
     pthread_mutex_unlock(&g_lock);
-    return due;
+    return at;
 }
 
 void fleet_tip_cache_note_try(const char *key, int64_t now)
@@ -193,39 +292,75 @@ void fleet_tip_cache_reset(void)
 
 /* ── the schedule ────────────────────────────────────────────────────── */
 
-bool fleet_tip_poll_step(const struct fleet_status *s, int64_t now,
-                         bool paused, fleet_tip_fetch_fn fetch)
+/* The connected machine asked longest ago that is due, as its cache key in
+ * `key`; false when none. */
+static bool pick_due(const struct fleet_status *s, int64_t now,
+                     char key[BOOT_FLEET_ROSTER_ONION_MAX])
 {
-    if (paused || !s || !s->member || !fetch)
-        return false;
+    int64_t oldest = 0;
+    bool found = false;
     for (size_t i = 0; i < s->machine_count; i++) {
-        const struct fleet_status_machine *m = &s->machines[i];
-        char key[BOOT_FLEET_ROSTER_ONION_MAX];
-        char hash[FLEET_TIP_HASH_HEX + 1];
-        int64_t height = 0;
-        if (!m->connected || !fleet_status_onion_key(m->onion, key, sizeof key) ||
-            !fleet_tip_cache_due(key, now))
+        char k[BOOT_FLEET_ROSTER_ONION_MAX];
+        int64_t tried;
+        if (!s->machines[i].connected ||
+            !fleet_status_onion_key(s->machines[i].onion, k, sizeof k))
             continue;
-        fleet_tip_cache_note_try(key, now);
-        if (fetch(key, &height, hash))
-            fleet_tip_cache_put(key, height, hash, now);
-        return true;
+        tried = fleet_tip_cache_last_try(k);
+        if (tried != 0 && now - tried < FLEET_TIP_REFRESH_SECS)
+            continue;
+        if (!found || tried < oldest) {
+            memcpy(key, k, sizeof k);
+            oldest = tried;
+            found = true;
+        }
     }
-    return false;
+    return found;
 }
 
-/* One fetch of a machine's tip over Tor, bounded and never retried here. */
-static bool fetch_tip_over_tor(const char *onion, int64_t *height,
-                               char hash[FLEET_TIP_HASH_HEX + 1])
+bool fleet_tip_poll_step(const struct fleet_status *s,
+                         const struct fleet_status_local *local, int64_t now,
+                         bool paused, fleet_tip_fetch_fn fetch)
 {
+    char key[BOOT_FLEET_ROSTER_ONION_MAX];
+    struct fleet_tip t;
+    if (paused || !s || !s->member || !fetch || !pick_due(s, now, key))
+        return false;
+    fleet_tip_cache_note_try(key, now);
+    memset(&t, 0, sizeof t);
+    if (fetch(key, local ? local->tip : 0, &t)) {
+        t.fetched_at = now;
+        fleet_tip_cache_put(key, &t);
+        fleet_status_note_check(key, &t, local);
+    }
+    return true;
+}
+
+static fleet_tip_transport_fn g_transport;
+
+void fleet_tip_set_transport(fleet_tip_transport_fn fn)
+{
+    g_transport = fn;
+}
+
+bool fleet_tip_fetch(const char *onion, int64_t ask_height,
+                     struct fleet_tip *out)
+{
+    char path[sizeof FLEET_TIP_PATH + 24];
     struct onion_fetch_result res;
+    fleet_tip_transport_fn send =
+        g_transport ? g_transport : tor_integration_fetch_onion_blocking;
     bool ok;
+    if (!onion || !out)
+        return false;
+    if (ask_height > 0)
+        (void)snprintf(path, sizeof path, FLEET_TIP_PATH "/%lld",
+                       (long long)ask_height);
+    else
+        (void)snprintf(path, sizeof path, "%s", FLEET_TIP_PATH);
     memset(&res, 0, sizeof res);
-    ok = tor_integration_fetch_onion_blocking(onion, FLEET_TIP_PATH, &res,
-                                              FLEET_TIP_FETCH_TIMEOUT_SECS) ==
-             0 &&
+    ok = send(onion, path, &res, FLEET_TIP_FETCH_TIMEOUT_SECS) == 0 &&
          res.status == 200 &&
-         fleet_tip_parse(res.body, res.body_len, height, hash);
+         fleet_tip_parse(res.body, res.body_len, ask_height, out);
     free(res.body);
     return ok;
 }
@@ -234,7 +369,8 @@ void fleet_tip_poll_tick(void)
 {
     static int64_t next_at;
     struct fleet_status *s;
-    int64_t now = platform_time_monotonic_ms() / 1000;
+    struct fleet_status_local local;
+    int64_t now = fleet_tip_now_secs();
     if (now < next_at)
         return;
     next_at = now + FLEET_TIP_TICK_SECS;
@@ -244,7 +380,8 @@ void fleet_tip_poll_tick(void)
     s = zcl_calloc(1, sizeof *s, "fleet_tip_status");
     if (!s)
         return;
+    fleet_status_node_local(&local);
     if (fleet_status_current(s))
-        (void)fleet_tip_poll_step(s, now, false, fetch_tip_over_tor);
+        (void)fleet_tip_poll_step(s, &local, now, false, fleet_tip_fetch);
     free(s);
 }

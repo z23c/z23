@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * The checked allocator logs a failed allocation on stderr. */
+ZCL_MODULE_CAPABILITY("engine/controllers/src/fleet_tip.c", CAP_FS_WRITE, "")

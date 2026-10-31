@@ -16,12 +16,20 @@
  * Agreement compares block hashes, never heights alone. The best block of a
  * machine comes from fleet_tip.h, a cache refreshed in the background; this
  * file never touches the network. A version message's starting_height is
- * written once at connect and is never used. */
+ * written once at connect and is never used.
+ *
+ * A machine above this node's tip is asked for its block at this node's tip
+ * height; naming another block there is a disagreement, naming this node's
+ * block is only the phone being behind. A send refusal, once raised by a
+ * check, outlives that check's age: it stays while the machine is connected
+ * until a later successful check lands on this node's chain. Failing to
+ * learn is never agreement. */
 
 #ifndef ZCL_CONTROLLERS_FLEET_STATUS_CONTROLLER_H
 #define ZCL_CONTROLLERS_FLEET_STATUS_CONTROLLER_H
 
 #include "config/boot_fleet_roster.h"
+#include "controllers/fleet_tip.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -34,16 +42,22 @@ struct connman;
 /* How one connected machine's best block relates to this node's chain.
  *   agrees          its hash is this node's block at its height, which is
  *                   this node's tip.
- *   phone_behind    its height is above this node's tip. Not a
- *                   disagreement: the ordinary sync path catches up.
- *   machine_behind  its hash is this node's block at a lower height. Not a
- *                   disagreement.
+ *   phone_behind    its height is above this node's tip and it names this
+ *                   node's block at this node's tip height. Not a
+ *                   disagreement: the ordinary sync path catches up. Above
+ *                   the tip with no answer for that height is unknown, and
+ *                   naming another block there is disagree.
+ *   machine_behind  its hash is this node's block at a lower height, at most
+ *                   FLEET_STATUS_AGREE_DEPTH blocks down. Not a disagreement.
  *   disagree        its height is at or below this node's tip and its hash
  *                   is not this node's block there. The chain lookup is exact
  *                   at any depth, so a recent reorg race and a machine stuck
  *                   on an old fork both report this; refuses_send narrows it.
  *   unknown         not connected, or no check within
- *                   FLEET_TIP_MAX_AGE_SECS. Never agreement. */
+ *                   FLEET_TIP_MAX_AGE_SECS and no standing refusal, or a machine
+ *                   behind by more than FLEET_STATUS_AGREE_DEPTH (the
+ *                   row's depth says by how much). Never agreement. */
+#define FLEET_STATUS_AGREE_DEPTH 6
 enum fleet_status_agreement {
     FLEET_STATUS_UNKNOWN = 0,
     FLEET_STATUS_AGREES,
@@ -54,8 +68,9 @@ enum fleet_status_agreement {
 
 /* not_member: no fleet root. none_connected: no roster machine connected.
  * unchecked: some are connected and none has a fresh check that settles it.
- * agree: at least one fresh check agrees or is behind on this chain, and none
- * disagrees. disagree: some connected machine disagrees. */
+ * agree: at least one fresh check agrees or is behind on this chain within
+ * FLEET_STATUS_AGREE_DEPTH blocks of the tip, and none disagrees.
+ * disagree: some connected machine disagrees. */
 enum fleet_status_verdict {
     FLEET_STATUS_NOT_MEMBER = 0,
     FLEET_STATUS_NONE_CONNECTED,
@@ -76,8 +91,10 @@ struct fleet_status_machine {
     char onion[BOOT_FLEET_ROSTER_ONION_MAX];
     uint8_t box[32];
     int64_t enrolled_at;
-    int64_t tip_height; /* height of the fresh check behind `agreement`, or 0 */
+    int64_t tip_height; /* height of the check behind `agreement`, or 0 */
+    int64_t depth;      /* blocks the fresh check is below this node's tip, else 0 */
     bool connected;
+    bool refusing;      /* holds a send back; see refuses_send */
     enum fleet_status_agreement agreement;
 };
 
@@ -86,7 +103,9 @@ struct fleet_status {
     size_t machine_count;   /* other machines on the verified roster */
     size_t connected_count; /* of those, connected over onion */
     int64_t local_tip;      /* this node's provable tip height, <= 0 unknown */
-    bool refuses_send;      /* a machine at or above the tip names another block */
+    bool refuses_send;      /* a connected machine at or above the tip named
+                               another block there and no later check has
+                               landed on this chain */
     enum fleet_status_verdict verdict;
     struct fleet_status_machine machines[BOOT_FLEET_ROSTER_MAX];
 };
@@ -99,6 +118,15 @@ struct fleet_status_local {
     void *ctx;
 };
 
+/* Settle the standing send refusal of the machine `key` after a successful
+ * check: raised by a disagreement at or above `local`'s tip, cleared by an
+ * agreeing or behind check, unchanged by any other. */
+void fleet_status_note_check(const char *key, const struct fleet_tip *t,
+                             const struct fleet_status_local *local);
+
+/* `local` over the running node's chain. */
+void fleet_status_node_local(struct fleet_status_local *local);
+
 /* Fill `out` with membership and the verified, unrevoked, other machines of
  * this box's roster, one per box key (the newest enrolment wins). Nothing is
  * connected yet. */
@@ -107,7 +135,7 @@ void fleet_status_collect(struct node_db *ndb, int64_t now,
 
 /* Match `peers` against the collected machines and set connected, agreement,
  * refuses_send, the counts and the verdict from the cached checks at the
- * monotonic time `now`. */
+ * time `now` on the fleet_tip_now_secs() clock. */
 void fleet_status_apply(struct fleet_status *s,
                         const struct fleet_status_peer *peers, size_t n,
                         const struct fleet_status_local *local, int64_t now);
@@ -120,7 +148,8 @@ size_t fleet_status_peers_snapshot(struct connman *cm,
                                    size_t cap);
 
 /* Collect from `ndb`, snapshot the connections of `cm` and apply, at the wall
- * time `wall_now` (roster) and the monotonic time `mono_now` (cache ages).
+ * time `wall_now` (roster) and `mono_now` on the fleet_tip_now_secs() clock
+ * (cache ages).
  * False when memory is short. */
 bool fleet_status_build(struct node_db *ndb, struct connman *cm,
                         const struct fleet_status_local *local,

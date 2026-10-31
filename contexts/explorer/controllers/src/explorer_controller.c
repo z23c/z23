@@ -584,6 +584,7 @@ static bool explorer_prefix_dispatch(const char *path,uint8_t *out,size_t cap,si
     else if(!strncmp(path,"/explorer/block/",16)) *result=serve_block(path+16,out,cap);
     else if(!strncmp(path,"/explorer/tx/",13)) *result=serve_tx(path+13,out,cap);
     else if(!strncmp(path,"/explorer/address/",18)) *result=serve_address(path+18,out,cap);
+    else if(!strncmp(path,"/explorer/tip/",14)) *result=fleet_tip_serve_at(path+14,out,cap);
     else return false;
     return true;
 }

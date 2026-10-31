@@ -316,8 +316,9 @@ this node's chain. It contains no wallet data and never waits on the network.
 | `machines_total` | Other machines on the verified roster: sealed by the root, not revoked by the head, not this box, one per box key |
 | `machines_connected` | Of those, machines this node dialled over onion and holds a handshaken, not-disconnecting connection to |
 | `machines[].agreement` | `agrees`, `phone_behind`, `machine_behind`, `disagree` or `unknown`, below |
+| `machines[].depth` | Blocks the fresh check is below this node's tip, else 0 |
 | `verdict` | `not_member`, `none_connected`, `unchecked`, `agree` or `disagree`, below |
-| `refuses_send` | `true` only when a connected machine at this node's tip names a different block there |
+| `refuses_send` | `true` while a connected machine at or above this node's tip has named a different block at a height this node holds; see below |
 | `local_tip` | This node's provable tip height |
 
 A machine counts as connected only when the connection is outbound, past its
@@ -332,28 +333,41 @@ nobody.
 Agreement compares block hashes, never heights alone, and never reads the
 height in a peer's version message, which is written once at connect and ages.
 Every node serves its provable tip (height and block hash) at
-`GET /explorer/tip` on its onion. The running node asks one connected machine
-every 10 seconds, each machine at most once per 60 seconds, from the main
-service loop and regardless of wallet activity, so a check never lines up with
-a send. It asks nobody while the pace file says `pause` or Tor is not ready.
-The status call reads that cache and never blocks. The tip is public chain
-data: the height is already in `/status`, and the explorer dashboard lists
-recent block hashes on the same onion.
+`GET /explorer/tip` on its onion, and with `GET /explorer/tip/<height>` also
+its active-chain block at that height. The running node asks one connected
+machine every 10 seconds, the due machine asked longest ago, each machine at
+most once per 60 seconds, from the main service loop and regardless of wallet
+activity, so a check never lines up with a send. Each ask names this node's
+tip height, so a machine that is ahead still says which block it holds there.
+It asks nobody while the pace file says `pause` or Tor is not ready. Check
+ages are read on a clock that keeps counting while the computer is suspended.
+The status call reads the cache and never blocks. The tip and any block hash
+are public chain data: the height is already in `/status`, and the explorer
+serves every block by height on the same onion.
 
 | Agreement | Meaning |
 |---|---|
 | `agrees` | the machine's hash is this node's block at its height, which is this node's tip |
-| `phone_behind` | the machine's height is above this node's tip; the normal sync path catches up |
-| `machine_behind` | the machine's hash is this node's block at a lower height |
-| `disagree` | the machine's height is at or below this node's tip and its hash is not this node's block there |
-| `unknown` | not connected, or no check within 5 minutes; never agreement |
+| `phone_behind` | the machine's height is above this node's tip and it names this node's block at this node's tip height; the normal sync path catches up |
+| `machine_behind` | the machine's hash is this node's block at a lower height, at most 6 blocks (`FLEET_STATUS_AGREE_DEPTH`) down |
+| `disagree` | the machine names a block this node does not hold at that height: at or below this node's tip by its own hash, above it by the block it names at this node's tip height |
+| `unknown` | not connected, or no check within 5 minutes and no standing refusal; a machine on this chain more than 6 blocks down (its `depth` says how far); above the tip with no block named at this node's tip height is also unknown. Never agreement |
 
 Verdict: `none_connected` when no roster machine is connected; `disagree` when
-any machine disagrees; `agree` when at least one fresh check is `agrees` or
-`machine_behind` and none disagrees; otherwise `unchecked`. A recent reorg and
-a machine stuck on an old fork both read `disagree`, because the lookup is
-exact at any depth. `refuses_send` is the narrow signal: true only when the
-differing machine is at or above this node's tip.
+any machine disagrees; `agree` when at least one fresh check is `agrees`, or
+`machine_behind`, and none disagrees; otherwise `unchecked`. A machine more
+than 6 blocks down may share only an old ancestor and has checked none of this
+node's top blocks, so it reads `unknown` and never counts toward agreement. A recent reorg and a machine stuck on an old fork both read
+`disagree`, because the lookup is exact at any depth.
+
+`refuses_send` is the narrow signal. A machine that is merely ahead does not
+raise it, since that would refuse during every catch-up. It is raised when a
+connected machine at or above this node's tip names a different block at a
+height this node holds. Once raised it stays while that machine is connected,
+however old the check grows and whether or not later asks fail, so a flooded
+onion or a dead link cannot lift it. A later successful check that lands on
+this node's chain (`agrees`, `phone_behind` or `machine_behind`) lifts it.
+Failing to learn is never agreement.
 
 ## What comes next
 

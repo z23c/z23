@@ -74,6 +74,12 @@ int64_t clock_now_wall_ms(void);
  * signal it exists to measure. */
 int64_t clock_now_monotonic_raw_us(void);
 
+/* Milliseconds on a clock that keeps counting while the machine is
+ * suspended (CLOCK_BOOTTIME on Linux; CLOCK_MONOTONIC elsewhere, which
+ * already counts sleep on the other supported systems). Use it to age data
+ * that must not look fresh after a suspend. Not injectable. */
+int64_t clock_now_boottime_ms(void);
+
 /* Per-thread CPU time in nanoseconds — only accrues while THIS thread is
  * executing on a core, so it is immune to cross-process scheduler preemption.
  * That is the correct clock for a constant-time work-ratio measurement: it
