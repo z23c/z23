@@ -400,6 +400,17 @@ static void unwrap_refuses_the_create_purpose(const char *dir)
     assert(f.prompts == prompts && all_zero(secret, sizeof(secret)));
     assert(zapp_devkey_unwrap(&ops, path, (enum zapp_devkey_purpose)7, secret) == ZAPP_DEVKEY_ERROR && f.prompts == prompts);
 }
+/* Rule: KeyInfo security levels map as the SDK defines them: StrongBox 2, trusted environment 1 and
+ * UNKNOWN_SECURE -1 are hardware, software 0 and UNKNOWN -2 are not, and no other value is trusted. */
+static void security_levels_follow_the_sdk(void)
+{
+    assert(zapp_devkey_level_of(2) == ZAPP_DEVKEY_LEVEL_STRONGBOX);
+    assert(zapp_devkey_level_of(1) == ZAPP_DEVKEY_LEVEL_SECURE_HARDWARE);
+    assert(zapp_devkey_level_of(-1) == ZAPP_DEVKEY_LEVEL_SECURE_HARDWARE);
+    assert(zapp_devkey_level_of(0) == ZAPP_DEVKEY_LEVEL_SOFTWARE);
+    assert(zapp_devkey_level_of(-2) == ZAPP_DEVKEY_LEVEL_UNKNOWN);
+    assert(zapp_devkey_level_of(3) == ZAPP_DEVKEY_LEVEL_UNKNOWN && zapp_devkey_level_of(-3) == ZAPP_DEVKEY_LEVEL_UNKNOWN);
+}
 /* Rule: a blob from the 30 second window design is refused with its own reason and never opened. */
 static void old_format_blob_is_refused(const char *dir)
 {
@@ -605,6 +616,7 @@ int main(int argc, char **argv)
     failures_leave_no_secret_and_no_file(argv[1]);
     garbage_never_reaches_the_caller(argv[1]);
     old_format_blob_is_refused(argv[1]);
+    security_levels_follow_the_sdk();
     unwrap_checks_key_policy_before_prompt(argv[1]);
     unwrap_refuses_the_create_purpose(argv[1]);
     existing_blob_is_never_replaced(argv[1]);

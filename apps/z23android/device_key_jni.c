@@ -5,6 +5,7 @@
 #include "jni_util.h"
 #include <stdarg.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <string.h>
 
 #define ALIAS "z23.wallet.device-key.v2"
@@ -244,15 +245,6 @@ static jobject stored_key(JNIEnv *env, status_t *status)
     *status = (*env)->ExceptionCheck(env) ? failed(env) : (alias ? ZAPP_DEVKEY_NOT_FOUND : ZAPP_DEVKEY_ERROR);
     return NULL;
 }
-static enum zapp_devkey_level level_of(jint security_level)
-{
-    switch (security_level) {
-    case 2: return ZAPP_DEVKEY_LEVEL_STRONGBOX;
-    case 1: case -2: return ZAPP_DEVKEY_LEVEL_SECURE_HARDWARE;
-    case 0: return ZAPP_DEVKEY_LEVEL_SOFTWARE;
-    default: return ZAPP_DEVKEY_LEVEL_UNKNOWN;
-    }
-}
 static bool info_int(JNIEnv *env, jobject info, const char *name, jint *value)
 {
     jmethodID get = zj_method(env, info, name, "()I");
@@ -292,7 +284,7 @@ static bool key_info_policy(JNIEnv *env, jobject key, enum zapp_devkey_level *le
         info_int(env, info, "getUserAuthenticationType", &types) &&
         info_flag(env, info, "isUserAuthenticationRequirementEnforcedBySecureHardware", &enforced);
     if (!read) return false;
-    *level = level_of(security);
+    *level = zapp_devkey_level_of(security);
     *per_use = required && seconds == AUTH_EVERY_USE && types == AUTH_TYPES && enforced;
     return true;
 }
@@ -548,13 +540,40 @@ static void jni_delete_key(void *context)
     frame_end(env);
 }
 #ifdef ZAPP_DEVKEY_PROBE
-/* Runs one encryption of zeros on the cipher; true when Keystore let it finish, else *refusal holds why. */
-static bool misuse_attempt(JNIEnv *env, jobject cipher, status_t *refusal)
+/* Names the pending exception chain in out ("Class: message" links joined by " > ", at most four) and
+ * clears it. *auth is true when a link says the user is not authenticated, the refusal a per-use key
+ * gives an operation that no prompt covers; any other fault, such as a bad AAD, leaves it false. */
+static void exception_chain(JNIEnv *env, char *out, size_t cap, bool *auth)
+{
+    jthrowable thrown = (*env)->ExceptionOccurred(env);
+    out[0] = '\0'; *auth = false;
+    if (!thrown) return;
+    (*env)->ExceptionClear(env);
+    for (int depth = 0; thrown && depth < 4; ++depth) {
+        char name[96] = "", text[96] = "";
+        jobject cls = zj_object_property(env, thrown, "getClass", "()Ljava/lang/Class;");
+        jobject cname = cls ? zj_object_property(env, cls, "getName", "()Ljava/lang/String;") : NULL;
+        jobject message = zj_object_property(env, thrown, "getMessage", "()Ljava/lang/String;");
+        if (cname) (void)zj_copy_utf(env, cname, name, sizeof(name));
+        if (message) (void)zj_copy_utf(env, message, text, sizeof(text));
+        size_t used = strlen(out);
+        if (used < cap) (void)snprintf(out + used, cap - used, "%s%s: %s", depth ? " > " : "", name, text);
+        *auth = *auth || strcasestr(name, "NotAuthenticated") || strcasestr(text, "not authenticated") || strcasestr(text, "NOT_AUTHENTICATED");
+        jobject cause = zj_object_property(env, thrown, "getCause", "()Ljava/lang/Throwable;");
+        (*env)->DeleteLocalRef(env, thrown);
+        thrown = cause;
+    }
+    if (thrown) (*env)->DeleteLocalRef(env, thrown);
+    (void)zj_clean(env);
+}
+/* Runs one encryption of zeros on the cipher; true when Keystore let it finish, else the refusal is
+ * recorded in *result. */
+static bool misuse_attempt(JNIEnv *env, jobject cipher, struct zapp_devkey_misuse *result)
 {
     uint8_t zeros[ZAPP_DEVKEY_SECRET] = {0};
     jbyteArray input = bytes_new(env, zeros, sizeof(zeros));
     jbyteArray output = input ? cipher_run(env, cipher, input) : NULL;
-    *refusal = output ? ZAPP_DEVKEY_OK : failed(env);
+    if (!output) exception_chain(env, result->exception, sizeof(result->exception), &result->auth_required);
     bytes_wipe(env, input);
     bytes_wipe(env, output);
     return output != NULL;
@@ -563,7 +582,7 @@ status_t zapp_devkey_jni_misuse(struct zapp_devkey_jni *state, bool other_cipher
 {
     JNIEnv *env = state->env;
     status_t st = ZAPP_DEVKEY_ERROR;
-    *result = (struct zapp_devkey_misuse){false, false, ZAPP_DEVKEY_ERROR};
+    *result = (struct zapp_devkey_misuse){0};
     if (!frame_begin(env)) return st;
     jobject key = stored_key(env, &st);
     jobject shown = key ? cipher_for(env, 1, key, NULL) : NULL;
@@ -571,10 +590,10 @@ status_t zapp_devkey_jni_misuse(struct zapp_devkey_jni *state, bool other_cipher
     if (key && !used) st = failed(env);
     if (used) st = other_cipher ? authenticate_once(env, state->activity, shown, ZAPP_DEVKEY_PURPOSE_CREATE) : ZAPP_DEVKEY_OK;
     if (st == ZAPP_DEVKEY_OK) {
-        result->accepted = misuse_attempt(env, used, &result->refusal);
+        result->accepted = misuse_attempt(env, used, result);
         if (other_cipher) {
-            status_t ignored;
-            result->control_ok = misuse_attempt(env, shown, &ignored);
+            struct zapp_devkey_misuse control = {0};
+            result->control_ok = misuse_attempt(env, shown, &control);
         }
     }
     frame_end(env);

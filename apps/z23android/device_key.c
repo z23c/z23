@@ -34,6 +34,15 @@ const char *zapp_devkey_status_name(enum zapp_devkey_status status)
         "not_per_use", "not_found", "exists", "corrupt", "old_format", "strongbox_unavailable", "error"};
     return (unsigned)status < sizeof(names) / sizeof(names[0]) ? names[status] : "error";
 }
+enum zapp_devkey_level zapp_devkey_level_of(int security_level)
+{
+    switch (security_level) {
+    case 2: return ZAPP_DEVKEY_LEVEL_STRONGBOX;
+    case 1: case -1: return ZAPP_DEVKEY_LEVEL_SECURE_HARDWARE;
+    case 0: return ZAPP_DEVKEY_LEVEL_SOFTWARE;
+    default: return ZAPP_DEVKEY_LEVEL_UNKNOWN;
+    }
+}
 const char *zapp_devkey_level_name(enum zapp_devkey_level level)
 {
     static const char *const names[] = {"unknown", "software", "secure_hardware", "strongbox"};

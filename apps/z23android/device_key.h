@@ -62,6 +62,10 @@ enum zapp_devkey_level {
     ZAPP_DEVKEY_LEVEL_SECURE_HARDWARE,
     ZAPP_DEVKEY_LEVEL_STRONGBOX
 };
+/* Maps KeyInfo.getSecurityLevel to a level: 2 StrongBox, 1 trusted environment and -1
+ * SECURITY_LEVEL_UNKNOWN_SECURE are hardware; 0 software, -2 SECURITY_LEVEL_UNKNOWN and any other value
+ * are not. */
+enum zapp_devkey_level zapp_devkey_level_of(int security_level);
 struct zapp_devkey_info {
     enum zapp_devkey_level level;
     bool strongbox_fallback;      /* StrongBox was requested for a new key and was not available. */
@@ -171,7 +175,8 @@ void zapp_devkey_jni_abandon(JNIEnv *env);
 struct zapp_devkey_misuse {
     bool accepted;                   /* Keystore ran the operation: the key is not enforcing per-use authentication. */
     bool control_ok;                 /* other_cipher only: the cipher the owner authenticated finished normally. */
-    enum zapp_devkey_status refusal; /* How Keystore refused the unauthenticated operation. */
+    bool auth_required;              /* The refusal says the user is not authenticated, not some other fault. */
+    char exception[160];             /* The exception chain of the refusal, class and message per link. */
 };
 /* Probe only. Encrypts zeros with the stored key on a cipher that no prompt covers. With other_cipher
  * false the cipher is initialised and used with no prompt at all; with it true, one prompt

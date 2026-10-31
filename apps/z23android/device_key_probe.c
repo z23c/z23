@@ -128,9 +128,10 @@ static enum zapp_devkey_status misuse(const struct zapp_devkey_ops *ops, struct 
     enum zapp_devkey_status st = zapp_devkey_prepare(ops, NULL, &info);
     if (st == ZAPP_DEVKEY_OK) st = zapp_devkey_jni_misuse(state, other_cipher, &result);
     if (st != ZAPP_DEVKEY_OK) return st;
-    snprintf(detail, cap, "accepted=%d refusal=%s%s%d", result.accepted, zapp_devkey_status_name(result.refusal),
-             other_cipher ? " authenticated_cipher_ok=" : "", other_cipher ? result.control_ok : 0);
-    return result.accepted || (other_cipher && !result.control_ok) ? ZAPP_DEVKEY_ERROR : ZAPP_DEVKEY_OK;
+    int len = snprintf(detail, cap, "accepted=%d auth_required=%d", result.accepted, result.auth_required);
+    if (other_cipher && len > 0 && (size_t)len < cap) len += snprintf(detail + len, cap - (size_t)len, " authenticated_cipher_ok=%d", result.control_ok);
+    if (len > 0 && (size_t)len < cap) (void)snprintf(detail + len, cap - (size_t)len, " exception=%s", result.exception);
+    return result.accepted || !result.auth_required || (other_cipher && !result.control_ok) ? ZAPP_DEVKEY_ERROR : ZAPP_DEVKEY_OK;
 }
 /* Plants a blob of the 30 second window design and unwraps it: expected old_format with no prompt. */
 static enum zapp_devkey_status old_blob(const struct zapp_devkey_ops *ops, const char *dir, char *detail, size_t cap)
@@ -190,7 +191,7 @@ static void *job_main(void *arg)
 {
     struct job *job = arg;
     JNIEnv *env = NULL;
-    char detail[96], tag[256];
+    char detail[256], tag[400];
     if ((*job->vm)->AttachCurrentThread(job->vm, &env, NULL) == JNI_OK) {
         enum zapp_devkey_status st = run(job, env, detail, sizeof(detail));
         snprintf(tag, sizeof(tag), "%s %s %s", job->cmd, zapp_devkey_status_name(st), detail);

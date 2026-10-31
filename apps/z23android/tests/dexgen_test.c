@@ -65,24 +65,30 @@ static void test_map(const uint8_t *d, size_t n)
         if (rd16(item) == 0x2001) CHECK(rd32(item + 4) == C_COUNT && at % 4 == 0);
     }
 }
-/* True when the dexdump listing contains every needle. */
-static bool listing_has(const char *listing, const char *const *needles, size_t count)
+/* True when the dexdump listing has a method called name on KeyPrompt with the given type, and when
+ * native is set, with the native flag: the listing shows the class before the name, then the type and
+ * the access flags. A missing or retyped method is a link failure on the phone. */
+static bool key_prompt_method(const char *listing, const char *name, const char *type, bool native)
 {
-    for (size_t i = 0; i < count; ++i) {
-        if (strstr(listing, needles[i])) continue;
-        fprintf(stderr, "dexgen_test: dexdump listing lacks %s\n", needles[i]);
-        return false;
+    char want[160], sig[220];
+    snprintf(want, sizeof(want), "name          : '%s'", name);
+    snprintf(sig, sizeof(sig), "type          : '%s'", type);
+    for (const char *at = strstr(listing, want); at; at = strstr(at + 1, want)) {
+        char window[512];
+        size_t before = (size_t)(at - listing) < 100 ? (size_t)(at - listing) : 100;
+        snprintf(window, sizeof(window), "%.*s", (int)(before + 260), at - before);
+        const char *class_at = strstr(window, "(in Lorg/z23/nativeapp/KeyPrompt;)");
+        const char *name_at = strstr(window, want);
+        const char *type_at = strstr(window, sig);
+        const char *access_at = strstr(window, "access        : ");
+        if (class_at && name_at && type_at && access_at && class_at < name_at && name_at < type_at && type_at < access_at &&
+            (!native || strstr(access_at, "NATIVE"))) return true;
     }
-    return true;
+    fprintf(stderr, "dexgen_test: KeyPrompt lacks %s %s%s\n", name, type, native ? " (native)" : "");
+    return false;
 }
-/* The KeyPrompt methods the JNI backend registers and constructs must be in the dex, with the
- * signatures it passes to RegisterNatives: a missing or retyped method is a link failure on the phone. */
 static void test_key_prompt_methods(const char *dexdump, const char *path, const char *scratch)
 {
-    static const char *const needles[] = {
-        "Lorg/z23/nativeapp/KeyPrompt;", "'onAuthenticationSucceeded'",
-        "(Landroid/hardware/biometrics/BiometricPrompt$AuthenticationResult;)V", "'onAuthenticationError'",
-        "(ILjava/lang/CharSequence;)V", "'<init>'"};
     char listing_path[512], cmd[1400];
     static char listing[1 << 16];
     snprintf(listing_path, sizeof(listing_path), "%s/listing.txt", scratch);
@@ -93,7 +99,9 @@ static void test_key_prompt_methods(const char *dexdump, const char *path, const
     CHECK(f && got > 0);
     if (f) (void)fclose(f);
     listing[got] = '\0';
-    CHECK(listing_has(listing, needles, sizeof(needles) / sizeof(needles[0])));
+    CHECK(key_prompt_method(listing, "onAuthenticationSucceeded", "(Landroid/hardware/biometrics/BiometricPrompt$AuthenticationResult;)V", true));
+    CHECK(key_prompt_method(listing, "onAuthenticationError", "(ILjava/lang/CharSequence;)V", true));
+    CHECK(key_prompt_method(listing, "<init>", "()V", false));
     remove(listing_path);
 }
 static void test_dexdump(const uint8_t *d, size_t n, const char *scratch, const char *dexdump)
@@ -103,7 +111,9 @@ static void test_dexdump(const uint8_t *d, size_t n, const char *scratch, const 
     FILE *f = fopen(path, "wb");
     CHECK(f && fwrite(d, 1, n, f) == n);
     if (f) CHECK(fclose(f) == 0);
-    if (!dexdump) { puts("dexdump not available; skipped"); return; }
+    if (!dexdump && getenv("Z23_NO_DEXDUMP")) { puts("dexgen_test: SKIPPED the dexdump checks (Z23_NO_DEXDUMP is set)"); return; }
+    CHECK(dexdump && "dexdump is required: set DEXDUMP to the SDK build-tools dexdump, or set Z23_NO_DEXDUMP=1 to skip");
+    if (!dexdump) return;
     snprintf(cmd, sizeof(cmd), "'%s' -c '%s' && '%s' -d '%s'", dexdump, path, dexdump, path);
     CHECK(system(cmd) == 0);
     test_key_prompt_methods(dexdump, path, scratch);

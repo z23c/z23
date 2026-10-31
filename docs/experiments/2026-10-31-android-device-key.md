@@ -94,10 +94,10 @@ resume still decrypted, because the app cannot tell a fresh authentication from 
   The prompt callbacks run on a single-thread `java.util.concurrent` executor created per prompt and
   only record the answer and signal the waiting native thread; the waiting thread is a worker, never
   the UI thread, and the UI thread is never blocked. Wallet logic runs on the worker after the wait.
-- Activity destruction: `onDestroy` calls `zapp_devkey_jni_abandon`, which answers the pending prompt
+- Activity destruction: `onDestroy` calls `zapp_devkey_jni_abandon` unless a newer activity already owns the app state (the old activity of a relaunch must not decline the new activity's prompt). It answers the pending prompt
   with abandoned (the wait returns `declined` at once) and cancels the system prompt through its
   `CancellationSignal`. The per-prompt global references and the executor are released when the wait
-  ends, whatever the answer; a late callback of an earlier prompt is ignored (ticket and callback
+  ends, whatever the answer (a timed-out or abandoned prompt is also cancelled); a late callback of an earlier prompt is ignored (ticket and callback
   identity). A prompt that nobody answers ends after 120 s with `error` and is cancelled.
 - Enrolment change: the key keeps `setInvalidatedByBiometricEnrollment(false)`, as before, so enrolling or
   removing a fingerprint does not invalidate it. Removing the secure lock screen still deletes the key
@@ -128,6 +128,28 @@ resume still decrypted, because the app cannot tell a fresh authentication from 
 The credential screen itself also screenshots black, so it is not evidence for
 the app flag; the `secure off` and `secure on` pair is.
 
+### Per-use key run
+
+Date 2026-10-31, Pixel 3 (Android 15, LineageOS, StrongBox), `org.z23.voicepreview`, measured by the lead
+at `d00c3ff280`. The `noprompt` line comes from the probe of that head, which printed `refusal=error0`;
+later heads print `auth_required` and the exception chain instead.
+
+| Step | Result |
+|---|---|
+| `prepare` | `ok level=strongbox strongbox_fallback=0 per_use=1` |
+| `noprompt` (initialised cipher finished with no prompt) | `ok accepted=0 refusal=error0` |
+| `oldblob` | `old_format planted=ZDK1` |
+| `store` | `ok first=ok size=66 race=exists size=10 tmp_left=0` |
+
+`noprompt accepted=0` shows Keystore refused an operation that no prompt covered. At that head the probe
+counted any failure as a refusal, so it did not show which exception refused it.
+
+Not run on hardware, because each needs the owner's credential: `wrap`, `unwrap`, `pay`, `twice`,
+`roundtrip`, `othercipher` (authenticate one cipher, finish another) and invalidation by removing the
+lock screen. The claims that a second authentication is required for every use, that a payment prompt
+reads "Authorise this payment", and that the unwrapped secret matches the wrapped one are host-tested
+against a fake keystore only.
+
 ### Review-fix run
 
 Date 2026-10-31, Pixel 3 (API 35), `org.z23.voicepreview` only, thermal status 1
@@ -150,10 +172,9 @@ keeps its 10 bytes, with no temporary file left behind.
 
 ## Not proved
 
-- A wrap and unwrap round trip after authentication, including the real
-  `renameat2` store of a sealed blob: the owner must enter the PIN or biometric
-  on the confirm screen, then the probe retries on resume. Not done in the
-  review-fix run because the owner was away.
+- A wrap and unwrap round trip after authentication, including the real `renameat2` store of a sealed blob:
+  the owner must answer each system prompt with the PIN or biometric. The earlier confirm-screen retry
+  was removed with the 30 s window; see "Per-use key run" for what has run.
 - Permanent invalidation (removing or changing the lock screen) on a device.
 - A causeless `UnrecoverableKeyException` with any message other than "Key algorithm
   unknown" still reads as invalidated; the message text is taken from the review and
