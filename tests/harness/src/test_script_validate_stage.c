@@ -1032,7 +1032,6 @@ int test_script_validate_stage(void)
     failures += sv_case_torn_cause();
     failures += sv_case_root_cause();
 
-
     printf("script_validate_stage tests: %s\n",
            failures ? "FAILED" : "PASSED");
     return failures;
