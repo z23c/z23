@@ -404,16 +404,25 @@ static void plg_gate_refuse(struct zcl_command_reply *reply, enum plugin_status 
     plg_refuse(reply, st, what, evidence);
 }
 
-static void plg_gate_push(struct json_value *data, const struct plugin_gate_report *report)
+static bool plg_gate_push(struct json_value *data, const struct plugin_gate_report *report)
 {
     struct json_value value;
     json_init(&value);
     json_set_object(&value);
-    (void)json_push_kv_bool(&value, "required", report->required);
-    (void)json_push_kv_int(&value, "threshold", report->threshold);
-    (void)json_push_kv_int(&value, "builders_matched", report->builders_matched);
-    (void)json_push_kv(data, "attestation", &value);
+    bool ok = json_push_kv_bool(&value, "required", report->required) &&
+              json_push_kv_int(&value, "threshold", report->threshold) &&
+              json_push_kv_int(&value, "builders_matched", report->builders_matched) &&
+              json_push_kv(data, "attestation", &value);
     json_free(&value);
+    return ok;
+}
+
+static void plg_response_failed(struct zcl_command_reply *reply, const char *what)
+{
+    json_free(&reply->data);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+                           "PLUGIN_RESPONSE_ALLOC", what, true, false,
+                           "plugin operation completed but response allocation failed", "");
 }
 
 static enum plugin_attest_status plg_add_paths(const char *root, const char *name,
@@ -454,10 +463,13 @@ void zcl_native_handle_plugin_attest_add(const struct zcl_command_request *reque
         return;
     }
     json_set_object(&reply->data);
-    (void)json_push_kv_str(&reply->data, "schema", "zcl.plugin_attest_add.v1");
-    (void)json_push_kv_str(&reply->data, "name", name);
-    (void)json_push_kv_str(&reply->data, "attestation", path);
-    (void)json_push_kv_int(&reply->data, "added", (int64_t)added);
+    if (!json_push_kv_str(&reply->data, "schema", "zcl.plugin_attest_add.v1") ||
+        !json_push_kv_str(&reply->data, "name", name) ||
+        !json_push_kv_str(&reply->data, "attestation", path) ||
+        !json_push_kv_int(&reply->data, "added", (int64_t)added)) {
+        plg_response_failed(reply, "attest_add");
+        return;
+    }
     reply->error.mutated = true;
 }
 
@@ -476,10 +488,13 @@ void zcl_native_handle_plugin_switch(const struct zcl_command_request *request,
         return;
     }
     json_set_object(&reply->data);
-    (void)json_push_kv_str(&reply->data, "schema", "zcl.plugin_switch.v1");
-    (void)json_push_kv_str(&reply->data, "name", name);
-    (void)json_push_kv_str(&reply->data, "current", generation);
-    plg_gate_push(&reply->data, &report);
+    if (!json_push_kv_str(&reply->data, "schema", "zcl.plugin_switch.v1") ||
+        !json_push_kv_str(&reply->data, "name", name) ||
+        !json_push_kv_str(&reply->data, "current", generation) ||
+        !plg_gate_push(&reply->data, &report)) {
+        plg_response_failed(reply, "switch");
+        return;
+    }
     reply->error.mutated = true;
 }
 
@@ -497,10 +512,13 @@ void zcl_native_handle_plugin_rollback(const struct zcl_command_request *request
         return;
     }
     json_set_object(&reply->data);
-    (void)json_push_kv_str(&reply->data, "schema", "zcl.plugin_rollback.v1");
-    (void)json_push_kv_str(&reply->data, "name", name);
-    (void)json_push_kv_str(&reply->data, "current", restored);
-    plg_gate_push(&reply->data, &report);
+    if (!json_push_kv_str(&reply->data, "schema", "zcl.plugin_rollback.v1") ||
+        !json_push_kv_str(&reply->data, "name", name) ||
+        !json_push_kv_str(&reply->data, "current", restored) ||
+        !plg_gate_push(&reply->data, &report)) {
+        plg_response_failed(reply, "rollback");
+        return;
+    }
     reply->error.mutated = true;
 }
 

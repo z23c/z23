@@ -590,7 +590,7 @@ static int pst_case_attest_wrong_builders(void)
         struct pst_opts o = {0};
         struct plugin_attest_result wrong, pinned, unpinned;
         struct plugin_gate_report report;
-        char first[PST_HEX], second[PST_HEX], cur[PST_HEX], out[4096];
+        char first[PST_HEX], second[PST_HEX], cur[PST_HEX], out[4096], wrong_path[4096];
         const char *policy = "threshold=2\nbuilders=builders.pin\n";
         ASSERT(pst_fx_open(&fx, true) && pst_attest_open(&fx, &a));
         ASSERT_EQ(pst_install(&fx, "hello", "version one", &o), PLUGIN_OK);
@@ -602,15 +602,19 @@ static int pst_case_attest_wrong_builders(void)
         ASSERT(pst_attest_make(&fx, &a, 0, &pinned));
         ASSERT(pst_attest_make(&fx, &a, 2, &unpinned));
         ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", wrong.path, out), PLUGIN_ATTEST_OK);
+        memcpy(wrong_path, out, sizeof(wrong_path));
         ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", pinned.path, out), PLUGIN_ATTEST_OK);
         ASSERT(pst_write_private(a.policy, policy, strlen(policy)));
         ASSERT_EQ(plugin_store_switch_report(fx.root, "hello", second, &report),
                   PLUGIN_ERR_SWITCH_UNATTESTED);
+        ASSERT_STR_EQ(report.detail, "PLUGIN_ATTEST_HASH_MISMATCH");
         pst_link(&fx, "hello", "current", cur);
         ASSERT_STR_EQ(cur, first);
+        ASSERT_EQ(unlink(wrong_path), 0);
         ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", unpinned.path, out), PLUGIN_ATTEST_OK);
         ASSERT_EQ(plugin_store_switch_report(fx.root, "hello", second, &report),
                   PLUGIN_ERR_SWITCH_UNATTESTED);
+        ASSERT_STR_EQ(report.detail, "PLUGIN_ATTEST_BUILDER_UNPINNED");
         pst_link(&fx, "hello", "current", cur);
         ASSERT_STR_EQ(cur, first);
         pst_fx_close(&fx);
@@ -658,6 +662,7 @@ static int pst_case_attest_cli(void)
     const char *old_home = getenv("HOME");
     char *saved_home = old_home ? strdup(old_home) : NULL;
     TEST_CASE("attest_add dispatch accepts multiple positional record paths") {
+        ASSERT(!old_home || saved_home);
         ASSERT(pst_fx_open(&fx, true) && pst_attest_open(&fx, &a));
         ASSERT_EQ(pst_install(&fx, "hello", "version one", &o), PLUGIN_OK);
         ASSERT(pst_attest_make(&fx, &a, 0, &one) && pst_attest_make(&fx, &a, 1, &two));
@@ -672,7 +677,7 @@ static int pst_case_attest_cli(void)
                   PLUGIN_ATTEST_DUPLICATE_BUILDER);
     } TEST_END
     if (saved_home) { setenv("HOME", saved_home, 1); free(saved_home); }
-    else unsetenv("HOME");
+    else if (!old_home) unsetenv("HOME");
     pst_fx_close(&fx);
     return failures;
 }
