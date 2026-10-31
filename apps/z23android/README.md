@@ -587,6 +587,7 @@ A scanned payment code opens a review; nothing is sent from a scan. `wallet_send
 
 Not yet wired. Each item must close before Send is drawn:
 
+- The send adapter unwraps with `ZAPP_DEVKEY_PURPOSE_PAYMENT` on a JVM-attached worker, as `device_key.h` requires. With `ZAPP_DEVKEY_PURPOSE_UNLOCK`, the owner would approve a payment under the prompt to unlock the wallet.
 - An adapter test that binds the released code to `WALLET_SEND_ONCE_CODE_RELEASED` in `wallet_send_once.h`.
 - An adapter test over the real `zapp_devkey_status_name` strings.
 - An adapter test against the real handler that plan then commit does not return `PLAN_TOKEN_MISMATCH`: the app holds `amount_zat`, the token hashes the amount string.
