@@ -43,6 +43,9 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "json/json.h"
 #include "platform/clock.h"
 #include "util/spawn.h"
