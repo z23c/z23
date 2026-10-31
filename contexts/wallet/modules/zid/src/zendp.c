@@ -25,6 +25,40 @@ static bool zendp_all_zero(const uint8_t *p, size_t n)
     return acc == 0;
 }
 
+/* Onion shape check: 0 = ok, 1 = flag set but hostname invalid,
+ * 2 = flag set but port 0, 3 = fields set without the flag. */
+static int zendp_onion_check(const struct zendp *ep)
+{
+    if (ep->flags & ZENDP_HAS_ONION) {
+        if (!zdesc_onion_valid(ep->onion))
+            return 1;
+        if (ep->onion_port == 0)
+            return 2;
+        return 0;
+    }
+    if (ep->onion[0] != '\0' || ep->onion_port != 0)
+        return 3;
+    return 0;
+}
+
+/* Address shape check: 0 = ok, 1 = flag set but address all zero,
+ * 2 = flag set but port 0, 3 = fields set without the flag. */
+static int zendp_addr_claim_check(uint8_t flags, uint8_t has_flag,
+                                  const uint8_t *addr, size_t addr_len,
+                                  uint16_t port)
+{
+    if (flags & has_flag) {
+        if (zendp_all_zero(addr, addr_len))
+            return 1;
+        if (port == 0)
+            return 2;
+        return 0;
+    }
+    if (!zendp_all_zero(addr, addr_len) || port != 0)
+        return 3;
+    return 0;
+}
+
 size_t zendp_body_len(uint8_t flags)
 {
     if ((flags & ~(uint8_t)ZENDP_FLAGS_KNOWN) != 0)
@@ -54,39 +88,41 @@ bool zendp_valid(const struct zendp *ep)
                  "valid: no endpoint claimed (flags == 0) — the record names "
                  "no way to reach anything");
 
-    if (ep->flags & ZENDP_HAS_ONION) {
-        if (!zdesc_onion_valid(ep->onion))
+    int r = zendp_onion_check(ep);
+    if (r != 0) {
+        if (r == 1)
             LOG_FAIL(ZENDP_LOG,
                      "valid: onion hostname is not a v3 address (56 base32 "
                      "a-z2-7 chars + \".onion\")");
-        if (ep->onion_port == 0)
+        else if (r == 2)
             LOG_FAIL(ZENDP_LOG, "valid: onion port 0 reaches no service");
-    } else {
-        if (ep->onion[0] != '\0' || ep->onion_port != 0)
+        else
             LOG_FAIL(ZENDP_LOG,
                      "valid: onion fields set without ZENDP_HAS_ONION — a "
                      "field a flag does not claim must be zero");
     }
 
-    if (ep->flags & ZENDP_HAS_IPV4) {
-        if (zendp_all_zero(ep->ipv4, sizeof(ep->ipv4)))
+    r = zendp_addr_claim_check(ep->flags, ZENDP_HAS_IPV4, ep->ipv4,
+                               sizeof(ep->ipv4), ep->ipv4_port);
+    if (r != 0) {
+        if (r == 1)
             LOG_FAIL(ZENDP_LOG, "valid: 0.0.0.0 reaches nobody");
-        if (ep->ipv4_port == 0)
+        else if (r == 2)
             LOG_FAIL(ZENDP_LOG, "valid: ipv4 port 0 reaches no service");
-    } else {
-        if (!zendp_all_zero(ep->ipv4, sizeof(ep->ipv4)) || ep->ipv4_port != 0)
+        else
             LOG_FAIL(ZENDP_LOG,
                      "valid: ipv4 fields set without ZENDP_HAS_IPV4 — a field "
                      "a flag does not claim must be zero");
     }
 
-    if (ep->flags & ZENDP_HAS_IPV6) {
-        if (zendp_all_zero(ep->ipv6, sizeof(ep->ipv6)))
+    r = zendp_addr_claim_check(ep->flags, ZENDP_HAS_IPV6, ep->ipv6,
+                               sizeof(ep->ipv6), ep->ipv6_port);
+    if (r != 0) {
+        if (r == 1)
             LOG_FAIL(ZENDP_LOG, "valid: :: reaches nobody");
-        if (ep->ipv6_port == 0)
+        else if (r == 2)
             LOG_FAIL(ZENDP_LOG, "valid: ipv6 port 0 reaches no service");
-    } else {
-        if (!zendp_all_zero(ep->ipv6, sizeof(ep->ipv6)) || ep->ipv6_port != 0)
+        else
             LOG_FAIL(ZENDP_LOG,
                      "valid: ipv6 fields set without ZENDP_HAS_IPV6 — a field "
                      "a flag does not claim must be zero");
@@ -328,3 +364,4 @@ void zendp_record_key(uint8_t out[32], const uint8_t master_pubkey[32],
     memcpy(buf + 4, blinded, 32);
     sha3_256(buf, sizeof(buf), out);
 }
+
