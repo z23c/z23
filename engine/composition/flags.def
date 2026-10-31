@@ -1190,7 +1190,7 @@ Z23_FLAG("ZCL_HOST_WATCHDOG_USER", "env_build", "-", "-",
 Z23_FLAG("ZCL_HOST_WATCHDOG_WEDGE_CYCLES", "env_build", "5", "-",
           "undocumented; first use platform/deploy/z23-host-watchdog.sh:auto")
 Z23_FLAG("ZCL_HOTSWAP_ACTIVATE", "env_runtime", "-", "-",
-          "first use engine/modules/hotswap/src/hotswap_activate.c:auto; documented at docs/agent/AGENT_API.md:1242: ZCL_HOTSWAP_ACTIVATE=1; canonical refused). make hotswap-module-so")
+          "first use engine/modules/hotswap/src/hotswap_activate_gate.c:auto; documented at docs/agent/AGENT_API.md:1242: ZCL_HOTSWAP_ACTIVATE=1; canonical refused). make hotswap-module-so")
 Z23_FLAG("ZCL_HOTSWAP_BENCH_RUNS", "env_build", "20", "-",
           "undocumented; first use tools/dev/hotswap-resident-bench.sh:auto")
 Z23_FLAG("ZCL_HOTSWAP_BENCH_TARGET_US", "env_build", "250000", "-",
