@@ -1373,36 +1373,34 @@ static bool torrc_has_line(const char *dir, const char *line)
     return strstr(buf, line) != NULL;
 }
 
-/* The network stays disabled until the claim on dynhost's service slot has
- * verified, and stays disabled when the claim is lost. A node that serves an
- * onion is untouched: its torrc has no DisableNetwork and the gate never
- * enables anything. */
-static int test_tor_network_gate_order(void)
+/* No claim yet: the gate waits and enables nothing. A claim lost to a real
+ * service keeps the network off and marks the node violated. */
+static bool gate_waits_and_stays_off(void)
 {
-    int failures = 0;
-    printf("test_tor_network_gate_order: ");
+    struct test_service_head stranger = { (void *)&stranger };
+    bool enabled = false;
+    bool lost_enabled = false;
+    g_gate_head = &stranger;
+    g_gate_enable_calls = 0;
+    int early = tor_integration_network_gate_step_for_test(
+        NULL, false, gate_enable, &enabled);
+    int lost = tor_integration_network_gate_step_for_test(
+        &stranger, false, gate_enable, &lost_enabled);
+    bool ok = early == 0 && !enabled && lost == 2 && !lost_enabled &&
+              g_gate_enable_calls == 0 && tor_integration_service_violated();
+    tor_integration_service_reset_for_test();
+    return ok;
+}
+
+/* The network is enabled only after the slot holds the claim; a refused
+ * enable is retried. */
+static bool gate_enables_after_claim(void)
+{
     struct test_service_head head = { NULL };
     bool enabled = false;
     g_gate_head = &head;
-    g_gate_enable_calls = 0;
-    g_gate_enable_result = true;
-    tor_integration_service_reset_for_test();
-
-    int early = tor_integration_network_gate_step_for_test(
-        NULL, false, gate_enable, &enabled);
-    bool waits = early == 0 && g_gate_enable_calls == 0 && !enabled;
-
-    struct test_service_head stranger = { (void *)&head };
-    bool lost_enabled = false;
-    g_gate_head = (void *)&stranger;
-    int lost = tor_integration_network_gate_step_for_test(
-        &stranger, false, gate_enable, &lost_enabled);
-    bool stays_off = lost == 2 && g_gate_enable_calls == 0 &&
-                     !lost_enabled && tor_integration_service_violated();
-    tor_integration_service_reset_for_test();
-
-    g_gate_head = &head;
     g_gate_enable_result = false;
+    g_gate_enable_calls = 0;
     int refused = tor_integration_network_gate_step_for_test(
         &head, false, gate_enable, &enabled);
     bool retries = refused == 0 && !enabled && g_gate_enable_calls == 1;
@@ -1411,18 +1409,21 @@ static int test_tor_network_gate_order(void)
     g_gate_enable_saw_claim = false;
     int opened = tor_integration_network_gate_step_for_test(
         &head, false, gate_enable, &enabled);
-    bool after_claim = opened == 1 && enabled && g_gate_enable_calls == 1 &&
-                       g_gate_enable_saw_claim;
+    return retries && opened == 1 && enabled && g_gate_enable_calls == 1 &&
+           g_gate_enable_saw_claim;
+}
 
+/* A node that serves an onion is untouched: the gate enables nothing, and
+ * the torrc carries DisableNetwork only on request. */
+static bool gate_serving_node_untouched(void)
+{
     struct test_service_head untouched = { NULL };
     bool serve_enabled = false;
     g_gate_enable_calls = 0;
     int serving = tor_integration_network_gate_step_for_test(
         &untouched, true, gate_enable, &serve_enabled);
-    bool control = serving == 1 && g_gate_enable_calls == 0 &&
+    bool gate_ok = serving == 1 && g_gate_enable_calls == 0 &&
                    !serve_enabled && untouched.hs_service == NULL;
-    tor_integration_service_reset_for_test();
-
     char tmpdir[PATH_MAX];
     bool torrc_ok = test_mkdtemp(tmpdir, sizeof tmpdir, "zcl_test_torgate") &&
         tor_write_torrc_ex(tmpdir, 8033, false, true) &&
@@ -1430,17 +1431,27 @@ static int test_tor_network_gate_order(void)
         tor_write_torrc(tmpdir, 8033, false) &&
         !torrc_has_line(tmpdir, "DisableNetwork");
     remove_tree(tmpdir);
+    return gate_ok && torrc_ok;
+}
 
-    if (!(waits && stays_off && retries && after_claim && control &&
-          torrc_ok)) {
-        printf("FAIL (waits=%d stays_off=%d retries=%d after_claim=%d "
-               "control=%d torrc=%d)\n", waits, stays_off, retries,
-               after_claim, control, torrc_ok);
-        failures++;
-    } else {
-        printf("OK\n");
+/* The network stays disabled until the claim on dynhost's service slot has
+ * verified, and stays disabled when the claim is lost. */
+static int test_tor_network_gate_order(void)
+{
+    printf("test_tor_network_gate_order: ");
+    g_gate_enable_result = true;
+    tor_integration_service_reset_for_test();
+    bool waits = gate_waits_and_stays_off();
+    bool opens = gate_enables_after_claim();
+    bool control = gate_serving_node_untouched();
+    tor_integration_service_reset_for_test();
+    if (!(waits && opens && control)) {
+        printf("FAIL (waits_and_stays_off=%d enables_after_claim=%d "
+               "serving_untouched=%d)\n", waits, opens, control);
+        return 1;
     }
-    return failures;
+    printf("OK\n");
+    return 0;
 }
 
 /* Tor's bootstrap line, and only it, makes a no-service node dial-ready. */

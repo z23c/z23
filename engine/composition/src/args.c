@@ -1306,6 +1306,15 @@ int args_private_mode_onion_policy(struct app_context *ctx)
     return 0;
 }
 
+/* z23.conf reaches here through GetArg: the send mode and the onion
+ * identity it allows are resolved together. */
+static int args_wallet_broadcast_policy(struct app_context *ctx)
+{
+    if (args_resolve_wallet_broadcast(ctx, GetArg("-walletbroadcast", NULL)))
+        return 1;
+    return args_private_mode_onion_policy(ctx);
+}
+
 static void args_apply_buildworker_config(int argc, char **argv,
                                           struct app_context *ctx)
 {
@@ -1373,9 +1382,7 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
     }
     /* z23.conf reaches here through GetArg: a setting that argv did not set
      * must still be honored, never silently dropped. */
-    if (args_resolve_wallet_broadcast(ctx, GetArg("-walletbroadcast", NULL)))
-        return 1;
-    if (args_private_mode_onion_policy(ctx))
+    if (args_wallet_broadcast_policy(ctx))
         return 1;
     /* Resolve the -onion-persist default AFTER the whole loop so flag order
      * never matters (-addnode=/-tor/-onion-persist can appear in any
