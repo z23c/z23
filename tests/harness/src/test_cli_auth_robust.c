@@ -549,11 +549,19 @@ static int car_test_response_timeout_case(const char *home, bool bounded)
         };
         char out[16384] = {0};
         bool timed_out = false;
+        /* The bounded leg proves the harness deadline fires before the CLI's
+         * own RPC timeout, and that the CLI's request reached the fixture
+         * first. A 500 ms deadline raced process start-up (exec, dynamic
+         * link, page-in) on a host at load average ~100 on 32 CPUs, so the
+         * kill could land before the CLI connected. The deadline is now
+         * 5 s, ten times the original, for the same start-up under
+         * load, and the RPC timeout stays 6x above the deadline so the
+         * ordering under test is unchanged. */
         int rc = car_run_bounded(argv,
                          car_build_envp(home, bounded
-                             ? "ZCL_CLI_RPC_TIMEOUT_SEC=2"
+                             ? "ZCL_CLI_RPC_TIMEOUT_SEC=30"
                              : "ZCL_CLI_RPC_TIMEOUT_SEC=1"),
-                         out, sizeof(out), bounded ? 500 : 10000, &timed_out);
+                         out, sizeof(out), bounded ? 5000 : 10000, &timed_out);
         bool received_rpc = false;
 #if !defined(_WIN32)
         if (bounded) received_rpc = car_blackhole_received_rpc(blackhole);
