@@ -19,9 +19,12 @@ struct uint256;
 /* A run that failed before the wallet admitted any transaction answers
  * {"state":"released","message":...}: nothing was sent and the key is free.
  * The native handler maps it to this code. A moved fee answers fee_changed
- * with the key free. A record that cannot be read, written or made durable,
- * and a full table, refuse the call with a plain error string that does not
- * claim the key is free. */
+ * with the key free. A built record that cannot be written before admission
+ * refuses the send and answers released, because nothing was sent. Once a
+ * transaction may have reached the pool the answer is outcome_unknown and the
+ * key is held. A record that cannot be read or created, and a full table,
+ * refuse the call with a plain error string that does not claim the key is
+ * free. */
 #define WALLET_SEND_ONCE_STATE_RELEASED "released"
 #define WALLET_SEND_ONCE_STATE_FEE_CHANGED "fee_changed"
 #define WALLET_SEND_ONCE_CODE_RELEASED "SEND_REFUSED_KEY_RELEASED"

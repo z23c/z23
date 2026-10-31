@@ -243,8 +243,10 @@ boot is a separate follow-up. A failed run frees its key
 transaction. Once admission succeeded the pool may have held the transaction
 and a peer may have fetched it, so every later failure (a wallet flush that
 fails, a rollback, a relay error) answers `SEND_OUTCOME_UNKNOWN` with the txid
-and the row stays. A record that cannot be read, written or made durable is a
-plain error, never a release. The txid is returned in the reply only; the node
+and the row stays. A built record that cannot be written before admission
+refuses the send and releases the key (`SEND_REFUSED_KEY_RELEASED`), because
+nothing was sent. A record that cannot be read or created, and a full table,
+are a plain error, never a release. The txid is returned in the reply only; the node
 log does not carry it.
 
 After `SEND_OUTCOME_UNKNOWN` the caller must not resend under the same key and

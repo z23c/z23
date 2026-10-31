@@ -15,9 +15,11 @@
  * A failed run frees its key only when the wallet never admitted the
  * transaction. After admission the pool may have held it and a peer may have
  * fetched it, so any later failure answers outcome_unknown with the txid and
- * the row stays. A record that cannot be read, written or made durable, and a
- * full table, refuse the send with a plain error: nothing was sent, and the
- * key is not reported free. Logs carry no address, amount, memo, key or txid. */
+ * the row stays. A built record that cannot be written before admission
+ * refuses the send and releases the key, because nothing was sent. A record
+ * that cannot be read or created, and a full table, refuse the send with a
+ * plain error that does not claim the key is free. Logs carry no address,
+ * amount, memo, key or txid. */
 
 #include "controllers/wallet_send_once.h"
 
