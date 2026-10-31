@@ -5,6 +5,11 @@
 
 #include "test/api_test_fixtures.h"
 #include "controllers/diagnostics_controller.h"
+#include "encoding/utilstrencodings.h"
+#include "storage/coins_kv.h"
+
+#include <pthread.h>
+#include <stdatomic.h>
 
 /* Current acceptance follows the native classifier; history stays visible. */
 static void milestone_requires_history_basis(bool *ok,
@@ -720,6 +725,293 @@ static int api_events_envelope_case(uint8_t *resp, size_t cap)
     return 0;
 }
 
+/* ── /api/v1/coins/roots ─────────────────────────────────────────────── */
+
+struct coin_roots_holder {
+    atomic_int held;
+    atomic_int release;
+};
+
+static void *coin_roots_hold_progress_lock(void *arg)
+{
+    struct coin_roots_holder *h = arg;
+    progress_store_tx_lock();
+    atomic_store(&h->held, 1);
+    for (int i = 0; i < 5000 && !atomic_load(&h->release); i++)
+        platform_sleep_ms(1);
+    progress_store_tx_unlock();
+    return NULL;
+}
+
+static char g_coin_roots_last[1100];
+
+static bool coin_roots_get(const char *path, struct json_value *root,
+                           char *status, size_t status_cap)
+{
+    uint8_t resp[16384];
+    size_t n = api_handle_request("GET", path, NULL, 0, resp, sizeof(resp));
+    const char *body = api_test_body(resp, n, sizeof(resp));
+    snprintf(status, status_cap, "%.12s", n > 9 ? (const char *)resp + 9 : "");
+    snprintf(g_coin_roots_last, sizeof(g_coin_roots_last), "%.*s",
+             (int)(n < 1000 ? n : 1000), (const char *)resp);
+    json_init(root);
+    return n > 0 && body && json_read(root, body, strlen(body));
+}
+
+/* Entry i of "roots" has the expected height, found flag and, when found, the
+ * expected root, block hash and active-chain flag. */
+static bool coin_roots_entry_is(const struct json_value *root, size_t i,
+                                int height, const char *want_root,
+                                const char *want_hash, bool want_active)
+{
+    const struct json_value *e = json_at(json_get(root, "roots"), i);
+    const struct json_value *rv = e ? json_get(e, "root") : NULL;
+    const struct json_value *hv = e ? json_get(e, "block_hash") : NULL;
+    if (!e || json_get_int(json_get(e, "height")) != height ||
+        json_get_bool(json_get(e, "found")) != (want_root != NULL))
+        return false;
+    if (!want_root)
+        return rv == NULL && hv == NULL;
+    return rv && hv && strcmp(json_get_str(rv), want_root) == 0 &&
+           strcmp(json_get_str(hv), want_hash) == 0 &&
+           json_get_bool(json_get(e, "on_active_chain")) == want_active;
+}
+
+struct coin_roots_fx {
+    char r100[65], r200[65], h100[65], h200[65], tip_hex[65];
+};
+
+static bool coin_roots_listing_case(const struct coin_roots_fx *fx)
+{
+    struct json_value root;
+    char status[16];
+    bool ok = coin_roots_get("/api/v1/coins/roots", &root, status,
+                             sizeof(status));
+    ok = ok && strncmp(status, "200", 3) == 0;
+    ok = ok && strcmp(json_get_str(json_get(&root, "schema")),
+                      "zcl.coin_roots.v1") == 0;
+    ok = ok && strcmp(json_get_str(json_get(&root, "root_byte_order")),
+                      "internal") == 0;
+    ok = ok && strcmp(json_get_str(json_get(&root, "hash_byte_order")),
+                      "display") == 0;
+    ok = ok && json_get_int(json_get(&root, "tip_height")) == 350;
+    ok = ok && strcmp(json_get_str(json_get(&root, "tip_hash")),
+                      fx->tip_hex) == 0;
+    ok = ok && json_get(&root, "full_history_validation_origin") &&
+         json_get(&root, "snapshot_utxo_sha3_verified") &&
+         strstr(json_get_str(json_get(&root, "comparison_note")),
+                "do not prove") != NULL;
+    /* 300 has only a legacy row (never served); 200 is bound to a hash that is
+     * not the active chain's block; 100 is bound to the active block. */
+    ok = ok && json_size(json_get(&root, "roots")) == 3 &&
+         coin_roots_entry_is(&root, 0, 300, NULL, NULL, false) &&
+         coin_roots_entry_is(&root, 1, 200, fx->r200, fx->h200, false) &&
+         coin_roots_entry_is(&root, 2, 100, fx->r100, fx->h100, true);
+    json_free(&root);
+    return ok;
+}
+
+static bool coin_roots_selection_case(const struct coin_roots_fx *fx)
+{
+    struct json_value root;
+    char status[16];
+    bool ok = coin_roots_get("/api/v1/coins/roots?height=100", &root, status,
+                             sizeof(status)) &&
+              strncmp(status, "200", 3) == 0 &&
+              json_size(json_get(&root, "roots")) == 1 &&
+              coin_roots_entry_is(&root, 0, 100, fx->r100, fx->h100, true);
+    json_free(&root);
+    /* Above the tip: labelled, never read from the store. */
+    ok = ok && coin_roots_get("/api/v1/coins/roots?height=400", &root, status,
+                              sizeof(status)) &&
+         json_size(json_get(&root, "roots")) == 1 &&
+         coin_roots_entry_is(&root, 0, 400, NULL, NULL, false) &&
+         json_get_bool(json_get(json_at(json_get(&root, "roots"), 0),
+                                "above_tip"));
+    json_free(&root);
+    ok = ok && coin_roots_get("/api/v1/coins/roots?count=1", &root, status,
+                              sizeof(status)) &&
+         json_size(json_get(&root, "roots")) == 1 &&
+         json_get_int(json_get(json_at(json_get(&root, "roots"), 0),
+                               "height")) == 300;
+    json_free(&root);
+    return ok;
+}
+
+static bool coin_roots_rejects_case(void)
+{
+    static const char *const bad[] = {
+        "/api/v1/coins/roots?count=0", "/api/v1/coins/roots?count=101",
+        "/api/v1/coins/roots?count=x", "/api/v1/coins/roots?height=150",
+        "/api/v1/coins/roots?height=-100", "/api/v1/coins/roots?height=",
+    };
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        struct json_value root;
+        char status[16];
+        ok = coin_roots_get(bad[i], &root, status, sizeof(status)) && ok &&
+             strncmp(status, "400", 3) == 0 &&
+             json_get_str(json_get(&root, "error")) != NULL;
+        json_free(&root);
+    }
+    struct json_value root;
+    char status[16];
+    ok = coin_roots_get("/api/v1/coins/roots?count=100", &root, status,
+                        sizeof(status)) && ok &&
+         strncmp(status, "200", 3) == 0;
+    json_free(&root);
+    return ok;
+}
+
+static bool coin_roots_busy_case(void)
+{
+    struct coin_roots_holder h = {0};
+    pthread_t t;
+    struct json_value root;
+    char status[16] = "";
+    bool started = pthread_create(&t, NULL, coin_roots_hold_progress_lock,
+                                  &h) == 0;
+    for (int i = 0; started && i < 2000 && !atomic_load(&h.held); i++)
+        platform_sleep_ms(1);
+    bool ok = started && atomic_load(&h.held) &&
+              coin_roots_get("/api/v1/coins/roots", &root, status,
+                             sizeof(status));
+    if (ok) {
+        const char *err = json_get_str(json_get(&root, "error"));
+        ok = strncmp(status, "503", 3) == 0 && err && strstr(err, "busy");
+        json_free(&root);
+    }
+    if (started) {
+        atomic_store(&h.release, 1);
+        pthread_join(t, NULL);
+    }
+    return ok;
+}
+
+/* A record whose height has no block in the active-chain window reports
+ * active_chain_unknown, never on_active_chain=false. */
+static bool coin_roots_unknown_case(void)
+{
+    struct json_value root;
+    char status[16];
+    reducer_frontier_provable_tip_set(400);
+    bool ok = coin_roots_get("/api/v1/coins/roots?height=400", &root, status,
+                             sizeof(status)) &&
+              strncmp(status, "200", 3) == 0;
+    const struct json_value *e = ok ? json_at(json_get(&root, "roots"), 0)
+                                    : NULL;
+    ok = ok && e && json_get_bool(json_get(e, "found")) &&
+         json_get_bool(json_get(e, "active_chain_unknown")) &&
+         json_get(e, "on_active_chain") == NULL;
+    if (status[0])
+        json_free(&root);
+    reducer_frontier_provable_tip_set(350);
+    return ok;
+}
+
+/* A present but malformed record is a read error (500), not absence. */
+static bool coin_roots_unreadable_case(sqlite3 *db)
+{
+    static const uint8_t bad[10] = {1};
+    struct json_value root;
+    char status[16];
+    bool ok = progress_meta_set(db, "coin_root_v2:100", bad, sizeof(bad)) &&
+              coin_roots_get("/api/v1/coins/roots?height=100", &root, status,
+                             sizeof(status)) &&
+              strncmp(status, "500", 3) == 0;
+    json_free(&root);
+    return ok;
+}
+
+static bool coin_roots_stage(bool ok, const char *name)
+{
+    if (!ok)
+        printf("[%s failed; last response: %s] ", name, g_coin_roots_last);
+    return ok;
+}
+
+/* The shared fixture chain holds 16 blocks; boundaries need heights >= 100. */
+static bool coin_roots_build_chain(struct main_state *ms,
+                                   struct block_index **blocks, int count)
+{
+    static struct uint256 hashes[351];
+    struct block_index *prev = NULL;
+    main_state_init(ms);
+    if (count <= 0 || count > (int)(sizeof(hashes) / sizeof(hashes[0])))
+        return false;
+    for (int h = 0; h < count; h++) {
+        prev = api_test_insert_block(ms, &hashes[h], h, prev);
+        if (!prev)
+            return false;
+        blocks[h] = prev;
+    }
+    ms->pindex_best_header = prev;
+    return active_chain_move_window_tip(&ms->chain_active, prev);
+}
+
+static bool coin_roots_seed(sqlite3 *db, struct block_index **blocks,
+                            struct coin_roots_fx *fx)
+{
+    static const uint8_t k_root100[32] = { 0x58, 0x17, 0xf0, 0xec, 0x01 };
+    static const uint8_t k_root200[32] = { 0xde, 0xad, 0xbe, 0xef, 0x02 };
+    static const uint8_t k_legacy300[32] = { 0x99, 0x03 };
+    uint8_t stale[32];
+    memset(stale, 0x77, sizeof(stale));
+    HexStr(k_root100, 32, false, fx->r100, sizeof(fx->r100));
+    HexStr(k_root200, 32, false, fx->r200, sizeof(fx->r200));
+    uint256_get_hex(blocks[100]->phashBlock, fx->h100);
+    uint256_get_hex(blocks[350]->phashBlock, fx->tip_hex);
+    {
+        struct uint256 s;
+        memcpy(s.data, stale, 32);
+        uint256_get_hex(&s, fx->h200);
+    }
+    return coins_kv_boundary_record_set_in_tx(db, 100,
+               blocks[100]->phashBlock->data, k_root100) &&
+           coins_kv_boundary_record_set_in_tx(db, 200, stale, k_root200) &&
+           coins_kv_boundary_root_set(db, 300, k_legacy300) &&
+           coins_kv_boundary_record_set_in_tx(db, 400, stale, k_root200);
+}
+
+static int api_coin_roots_case(void)
+{
+    printf("api: coin roots route reports bound roots, bounds and busy... ");
+    struct coin_roots_fx fx;
+    memset(&fx, 0, sizeof(fx));
+    char dbdir[256];
+    struct main_state ms;
+    struct block_index *blocks[351] = {0};
+
+    test_reset_shared_globals();
+    test_make_tmpdir(dbdir, sizeof(dbdir), "api_routes", "coin_roots");
+    bool ok = coin_roots_stage(coin_roots_build_chain(&ms, blocks, 351),
+                               "chain");
+    ok = ok && coin_roots_stage(api_test_seed_durable_tip(dbdir, 350), "seed");
+    sqlite3 *db = ok ? progress_store_db() : NULL;
+    ok = ok && coin_roots_stage(db && coin_roots_seed(db, blocks, &fx),
+                                "roots");
+    if (ok) {
+        reducer_frontier_provable_tip_set(350);
+        api_set_state(&ms, NULL, NULL, NULL, dbdir);
+    }
+    ok = ok && coin_roots_stage(coin_roots_listing_case(&fx), "listing") &&
+         coin_roots_stage(coin_roots_selection_case(&fx), "selection") &&
+         coin_roots_stage(coin_roots_rejects_case(), "rejects") &&
+         coin_roots_stage(coin_roots_unknown_case(), "unknown") &&
+         coin_roots_stage(coin_roots_busy_case(), "busy") &&
+         coin_roots_stage(coin_roots_unreadable_case(db), "unreadable");
+
+    api_set_state(NULL, NULL, NULL, NULL, NULL);
+    reducer_frontier_provable_tip_reset();
+    progress_store_close();
+    main_state_free(&ms);
+    ok &= test_rm_rf_recursive(dbdir) == 0;
+    test_reset_shared_globals();
+    if (ok) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+    return 0;
+}
+
 static int api_empty_block_id_case(uint8_t *resp, size_t cap)
 {
     printf("api: empty block ID not routed... ");
@@ -765,6 +1057,8 @@ int api_route_table_focused_tests(void)
     failures += api_lookup_rest_freshness_case(resp, sizeof(resp));
 
     failures += api_events_envelope_case(resp, sizeof(resp));
+
+    failures += api_coin_roots_case();
 
     failures += api_empty_block_id_case(resp, sizeof(resp));
     failures += api_zero_length_response_case(resp);

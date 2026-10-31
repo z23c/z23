@@ -33,6 +33,9 @@
 #include "config/runtime.h"
 #include "controllers/blockchain_controller.h"
 #include "platform/private_directory.h"
+#include "storage/coins_kv.h"
+#include "storage/coins_ram.h"
+#include "storage/progress_store.h"
 #include "util/stage.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
@@ -277,6 +280,99 @@ static void tp_vb_fixture_teardown(stage_t *vb_stage, sqlite3 *vbdb,
     if (vbdb) sqlite3_close(vbdb);
     if (vb_ms_live) main_state_free(vb_ms);
     if (blk2_built) block_free(blk2);
+}
+
+
+/* ── Boundary coin-root recording, driven through the real post-finalize ──
+ * The boundary block is finalized at height 100 with the coins applied
+ * frontier at 100 (coins through block 99), 101 (exactly block 100), and 102
+ * (block 101 already applied: utxo_apply runs ahead of tip_finalize). Only
+ * the middle case may carry a bound record; the legacy row is written in all
+ * three and differs between the last two for the same block hash, which is why
+ * it cannot be compared across nodes. With the in-RAM overlay active the fold
+ * misses unflushed coins, so no bound record is written either. */
+struct tp_boundary_result {
+    uint8_t legacy[32];
+    uint8_t bound_hash[32];
+    uint8_t bound_root[32];
+    bool legacy_found;
+    bool bound_found;
+};
+
+static bool tp_boundary_node(const char *dir, const struct block_index *bi,
+                             int32_t frontier, bool inram,
+                             struct tp_boundary_result *out)
+{
+    static const uint8_t script[1] = {0x51};
+    uint8_t txid_a[32], txid_b[32];
+    struct block_index at100 = *bi;
+    memset(txid_a, 0xa1, 32);
+    memset(txid_b, 0xb2, 32);
+    at100.nHeight = 100;
+    at100.pprev = NULL;
+
+    progress_store_close();
+    if (tp_mkdir_p(dir) != 0 || !progress_store_open(dir))
+        return false;
+    sqlite3 *db = progress_store_db();
+    bool ok = db && coins_kv_ensure_schema(db) &&
+              coins_kv_add(db, txid_a, 0, 5000, 99, false, script, 1);
+    if (ok && frontier >= 102)
+        ok = coins_kv_add(db, txid_b, 0, 7000, 101, false, script, 1);
+    ok = ok && coins_kv_set_applied_height_in_tx(db, frontier);
+    if (ok && inram) {
+        setenv("ZCL_FOLD_INRAM", "1", 1);
+        ok = coins_ram_init(db, 0, coins_kv_set_applied_height_in_tx) &&
+             coins_ram_active();
+    }
+    if (ok)
+        tip_finalize_run_post_finalize(&at100);
+    memset(out, 0, sizeof(*out));
+    ok = ok && coins_kv_boundary_root_get(db, 100, out->legacy,
+                                          &out->legacy_found) &&
+         coins_kv_boundary_record_get(db, 100, out->bound_hash,
+                                      out->bound_root, &out->bound_found);
+    if (inram) {
+        coins_ram_shutdown();
+        unsetenv("ZCL_FOLD_INRAM");
+    }
+    return ok;
+}
+
+static int tp_boundary_root_probe(const char *dir, const struct block_index *bi)
+{
+    int failures = 0;
+    char d[4][640];
+    struct tp_boundary_result behind, exact, ahead, overlay;
+    snprintf(d[0], sizeof(d[0]), "%s/boundary_behind", dir);
+    snprintf(d[1], sizeof(d[1]), "%s/boundary_exact", dir);
+    snprintf(d[2], sizeof(d[2]), "%s/boundary_ahead", dir);
+    snprintf(d[3], sizeof(d[3]), "%s/boundary_inram", dir);
+    bool ran = tp_boundary_node(d[0], bi, 100, false, &behind) &&
+               tp_boundary_node(d[1], bi, 101, false, &exact) &&
+               tp_boundary_node(d[2], bi, 102, false, &ahead) &&
+               tp_boundary_node(d[3], bi, 101, true, &overlay);
+    progress_store_close();
+    TP_CHECK("boundary: four fixture nodes finalized height 100", ran);
+    if (!ran)
+        return failures;
+    TP_CHECK("boundary: every node wrote the legacy row",
+             behind.legacy_found && exact.legacy_found &&
+             ahead.legacy_found && overlay.legacy_found);
+    TP_CHECK("boundary: legacy row is not a function of the height "
+             "(same block, frontier 101 vs 102, different roots)",
+             memcmp(exact.legacy, ahead.legacy, 32) != 0);
+    TP_CHECK("boundary: frontier h (coins through h-1) records no bound root",
+             !behind.bound_found);
+    TP_CHECK("boundary: frontier h+1 records a root bound to the block",
+             exact.bound_found &&
+             memcmp(exact.bound_hash, bi->hashBlock.data, 32) == 0 &&
+             memcmp(exact.bound_root, exact.legacy, 32) == 0);
+    TP_CHECK("boundary: frontier h+2 (utxo_apply ahead) records no bound root",
+             !ahead.bound_found);
+    TP_CHECK("boundary: active in-RAM overlay records no bound root",
+             !overlay.bound_found);
+    return failures;
 }
 
 int test_tip_finalize_post_step(void);
@@ -549,6 +645,8 @@ int test_tip_finalize_post_step(void)
                                   vb_stage, vbdb, &vb_ms);
     failures += tp_vb_late_body_probe(w, &blk2.vtx[1], &bi2, &pos2, netdir,
                                       vb_stage, vbdb, &vb_ms);
+
+    failures += tp_boundary_root_probe(dir, &bi);
 
     app_runtime_set_current(NULL);
     tx_mempool_free(&g_tp_pool);

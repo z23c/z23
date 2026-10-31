@@ -6,6 +6,7 @@
  * this table owns exact resource/controller/action dispatch and /api/v1
  * canonicalization. */
 
+#include "api_controller_coins.h"
 #include "api_controller_internal.h"
 
 #include "controllers/file_market_controller.h"
@@ -177,6 +178,7 @@ enum api_dynamic_dispatch_kind {
     API_DYN_SERVICE_OPERATION_SHOW,
     API_DYN_BUILD_SHOW, API_DYN_BUILD_ACTIONS_INDEX, API_DYN_BUILD_RECEIPT_SHOW,
     API_DYN_MARKET_INDEX,
+    API_DYN_COIN_ROOTS_INDEX,
 };
 
 struct api_dynamic_resource_route {
@@ -264,6 +266,9 @@ static const struct api_dynamic_resource_route k_api_dynamic_resource_routes[] =
       "", "build_ledger", "", true, API_DYN_BUILD_SHOW },
     { "GET", "/api/build_receipts/{receipt_id}", "build_receipts", "show",
       "zcl.build_receipts.show.v1", "", "build_ledger", "", true, API_DYN_BUILD_RECEIPT_SHOW },
+    { "GET", "/api/coins/roots", "coin_roots", "index", "zcl.coin_roots.v1",
+      "count,height", "coin_root_boundaries", "", false,
+      API_DYN_COIN_ROOTS_INDEX },
     { "GET", "/api/market", "market", "index", "zcl.market.index.v1",
       "profile", "market_projection", "", false, API_DYN_MARKET_INDEX },
 };
@@ -714,6 +719,9 @@ static bool api_dyn_group_build(
         return true;
     case API_DYN_BUILD_RECEIPT_SHOW:
         *out = api_serve_build_receipt(param, response, response_max);
+        return true;
+    case API_DYN_COIN_ROOTS_INDEX:
+        *out = api_serve_coin_roots(path, response, response_max);
         return true;
     case API_DYN_MARKET_INDEX:
         *out = api_dyn_market_index(route, path, response, response_max);

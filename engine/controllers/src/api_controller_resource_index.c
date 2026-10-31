@@ -63,6 +63,8 @@ void api_rest_index_resources_json(struct json_value *resources)
                                  "/api/v1/address/{address}", false);
     api_rest_index_push_resource(resources, "peers",
                                  "/api/v1/peers", "", false);
+    api_rest_index_push_resource(resources, "coin_roots",
+                                 "/api/v1/coins/roots", "", false);
     api_rest_index_push_resource(resources, "hodl",
                                  "/api/v1/hodl", "", false);
     api_rest_index_push_resource(resources, "factoids",

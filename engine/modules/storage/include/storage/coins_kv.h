@@ -296,6 +296,18 @@ bool coins_kv_boundary_root_set_in_tx(struct sqlite3 *db, int32_t height,
 bool coins_kv_boundary_root_get(struct sqlite3 *db, int32_t height,
                                 uint8_t out_utxo_root[32], bool *found);
 
+/* Block-bound boundary record ("coin_root_v2:<height>", 64 bytes: block hash,
+ * then coins_kv_commitment). Written by tip_finalize only when the applied
+ * frontier equals height + 1, so the root is the coin set after exactly that
+ * block. get: false on a read error or malformed row; *found=false when no
+ * record exists. Hashes are in internal byte order. */
+bool coins_kv_boundary_record_set_in_tx(struct sqlite3 *db, int32_t height,
+                                        const uint8_t block_hash[32],
+                                        const uint8_t root[32]);
+bool coins_kv_boundary_record_get(struct sqlite3 *db, int32_t height,
+                                  uint8_t block_hash_out[32],
+                                  uint8_t root_out[32], bool *found);
+
 /* One-shot idempotent boot migration marker: stamps migration-complete when
  * coins_kv already holds the live set (forward-built / snapshot-seeded), so the
  * read path is recognised as canonical. No-op on an empty coins_kv, which

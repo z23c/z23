@@ -48,6 +48,17 @@ bool tip_finalize_run_wallet_reconcile(struct block_index *pindex_new);
 bool tip_finalize_run_wallet_mempool_reconcile(
     struct block_index *pindex_new);
 
+struct sqlite3;
+
+/* Fold the live coins set into *root_out (zeros on failure) and record it for
+ * the 100-block boundary block `bi`: always under the legacy per-height key
+ * the MMB leaf builders read, and under the block-bound "coin_root_v2" record
+ * only when the coins applied frontier equals bi->nHeight + 1, because
+ * utxo_apply may already have applied later blocks when this runs. */
+void tip_finalize_record_boundary_root(struct sqlite3 *db,
+                                       const struct block_index *bi,
+                                       uint8_t root_out[32]);
+
 /* ── SHA3 golden-window corroboration tripwire (OBSERVE-ONLY) ─────────────
  *
  * At every 1000-block window boundary the post-finalize step recomputes the

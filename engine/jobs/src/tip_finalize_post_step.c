@@ -580,53 +580,20 @@ void tip_finalize_run_post_finalize(struct block_index *pindex_new)
      * consumer (mmb catch-up, leaf-store rebuild, FlyClient prover, legacy
      * oracle, ladder verify) maps a missing entry back to the zero sentinel,
      * so this node's leaf hashes stay internally byte-consistent. At tip both
-     * gates are false and the fold runs exactly as before. */
+     * gates are false and the fold runs exactly as before.
+     *
+     * The fold reads the coins set as it is now, which can already include
+     * blocks above this boundary (utxo_apply runs ahead of this step), so the
+     * legacy per-height row is not a function of the height. The block-bound
+     * record served by /api/v1/coins/roots is written only when the applied
+     * frontier equals height + 1 (tip_finalize_boundary_root.c). */
     if (pindex_new->phashBlock) {
         uint8_t utxo_root[32] = {0};
         if (pindex_new->nHeight > 0 &&
-            pindex_new->nHeight % MMR_COMMITMENT_INTERVAL == 0) {
-            if (tip_finalize_boundary_fold_allowed(pindex_new)) {
-                sqlite3 *pdb = progress_store_db();
-                if (pdb && coins_kv_commitment(pdb, utxo_root) == 0) {
-                    /* Persist before the leaf so a crash between append and
-                     * save still lets the next catch-up reproduce this hash.
-                     * MUST be the in-tx variant: this runs inside the stage's
-                     * batch BEGIN IMMEDIATE + per-step SAVEPOINT, so the
-                     * own-BEGIN _set fails 100% ("cannot start a transaction
-                     * within a transaction") and never persists the root.
-                     * In-tx commits the root atomically with this height's
-                     * finalize log row.
-                     *
-                     * Streak-throttled diagnostic: post_finalize runs on the
-                     * serial reducer drive under progress_store_tx_lock, so the
-                     * statics are race-free. Log the FIRST failure of a streak
-                     * (loud, named) and suppress the rest; the next success
-                     * emits one recovery line with the suppressed count — never
-                     * a per-boundary WARN spam. */
-                    static int s_boundary_fail_streak = 0;
-                    if (!coins_kv_boundary_root_set_in_tx(
-                            pdb, pindex_new->nHeight, utxo_root)) {
-                        if (s_boundary_fail_streak++ == 0)
-                            LOG_WARN("tip_finalize",
-                                     "boundary utxo_root persist failed h=%d "
-                                     "(leaf still carries the computed root; "
-                                     "suppressing repeats until it recovers)",
-                                     pindex_new->nHeight);
-                    } else if (s_boundary_fail_streak > 0) {
-                        LOG_INFO("tip_finalize",
-                                 "boundary utxo_root persist recovered h=%d "
-                                 "after %d suppressed failure(s)",
-                                 pindex_new->nHeight, s_boundary_fail_streak);
-                        s_boundary_fail_streak = 0;
-                    }
-                } else {
-                    memset(utxo_root, 0, 32);
-                    LOG_WARN("tip_finalize",
-                             "coins_kv_commitment failed h=%d; leaf carries "
-                             "zero utxo_root sentinel", pindex_new->nHeight);
-                }
-            }
-        }
+            pindex_new->nHeight % MMR_COMMITMENT_INTERVAL == 0 &&
+            tip_finalize_boundary_fold_allowed(pindex_new))
+            tip_finalize_record_boundary_root(progress_store_db(),
+                                              pindex_new, utxo_root);
 
         struct mmb_leaf leaf;
         mmb_leaf_from_block(&leaf,
