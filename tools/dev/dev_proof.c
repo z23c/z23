@@ -1843,21 +1843,28 @@ static bool dp_split_unreferenced(const struct dp_split_ctx *c,
 }
 
 /* Every line of `listing` (git grep -l output at `local`) names a file other
- * than `added` that also lists `sibling`; counts those files. */
+ * than `added` that also lists `sibling` as a whole word (so `xbig.c`,
+ * `big.cpp` and `big_part` do not count as `big.c`/`big`); counts those
+ * files. A line that is not `local:<safe path>` refuses. */
 static bool dp_split_listing_ok(const struct dp_split_ctx *c, char *listing,
                                 const char *added, const char *sibling,
                                 size_t *listed)
 {
-    size_t prefix = strlen(c->local) + 1;
+    size_t lead = strlen(c->local), prefix = lead + 1;
     char *save = NULL;
     for (char *line = strtok_r(listing, "\n", &save); line;
          line = strtok_r(NULL, "\n", &save)) {
-        if (strlen(line) <= prefix || !dp_split_name_safe(line + prefix))
+        if (strlen(line) <= prefix || memcmp(line, c->local, lead) != 0 ||
+            line[lead] != ':' || !dp_split_name_safe(line + prefix))
             return false;
         const char *file = line + prefix;
         if (strcmp(file, added) == 0) continue;
-        const char *probe[] = {"git", "grep", "-q", "-a", "-F", "-e", sibling,
-                               c->local, "--", file, NULL};
+        char spec[PATH_MAX + 16];
+        if (snprintf(spec, sizeof(spec), ":(literal)%s", file) >=
+            (int)sizeof(spec))
+            return false;
+        const char *probe[] = {"git", "grep", "-q", "-a", "-w", "-F", "-e",
+                               sibling, c->local, "--", spec, NULL};
         if (dp_split_git(c->root, probe, NULL, 0) != 0) return false;
         (*listed)++;
     }
@@ -1924,6 +1931,11 @@ static char *dp_split_diff(const struct dp_split_ctx *c, const char *path)
         char why[64];
         size_t len = 0;
         text = changed_set_read(file, &len, why, sizeof(why));
+        /* A NUL would end every later string read early: unreadable. */
+        if (text && (len == 0 || memchr(text, '\0', len))) {
+            free(text);
+            text = NULL;
+        }
     }
     (void)unlink(file);
     return text;
@@ -1983,16 +1995,47 @@ static bool dp_split_is_comment(const char *l, size_t n)
                                      (l[1] == '*' || l[1] == '/')));
 }
 
-static bool dp_split_is_include(const char *l, size_t n)
+static bool dp_split_contains(const char *l, size_t n, const char *needle)
+{
+    size_t m = strlen(needle);
+    for (size_t i = 0; i + m <= n; i++)
+        if (memcmp(l + i, needle, m) == 0) return true;
+    return false;
+}
+
+/* A line that could carry a preprocessor include, embed or import in any
+ * spelling: a '#', a digraph or a trigraph beside one of the keywords. */
+static bool dp_split_directive_ish(const char *l, size_t n)
+{
+    bool mark = memchr(l, '#', n) || dp_split_contains(l, n, "%:") ||
+                dp_split_contains(l, n, "??=");
+    return mark && (dp_split_contains(l, n, "include") ||
+                    dp_split_contains(l, n, "embed") ||
+                    dp_split_contains(l, n, "import"));
+}
+
+/* The one include spelling the derivation reads: the whole line is
+ * `#include "x"` or `#include <x>`, nothing after the closing delimiter. */
+static bool dp_split_strict_include(const char *l, size_t n)
 {
     if (n == 0 || l[0] != '#') return false;
     size_t i = 1;
     while (i < n && (l[i] == ' ' || l[i] == '\t')) i++;
-    return n - i >= 7 && memcmp(l + i, "include", 7) == 0;
+    if (n - i < 8 || memcmp(l + i, "include", 7) != 0) return false;
+    i += 7;
+    if (l[i] != ' ' && l[i] != '\t') return false;
+    while (i < n && (l[i] == ' ' || l[i] == '\t')) i++;
+    char close = i < n && l[i] == '"' ? '"' : i < n && l[i] == '<' ? '>' : 0;
+    if (!close) return false;
+    for (size_t k = i + 1; k < n; k++)
+        if (l[k] == close) return k == n - 1;
+    return false;
 }
 
-/* Every comment line outside the leading header block, and every #include,
- * of `added` is a line `source` removed or `keep` still holds. */
+/* Every comment line outside the leading header block of `added` is a line
+ * `source` removed; every line that could be a preprocessor include, embed or
+ * import is either exactly `#include "x"`/`<x>` -- and then a line `source`
+ * removed or `keep` still holds -- or the whole derivation is refused. */
 static bool dp_split_lines_derive(const char *added, const char *source,
                                   const char *keep)
 {
@@ -2004,8 +2047,10 @@ static bool dp_split_lines_derive(const char *added, const char *source,
         if (n > 0 && !comment) header = false;
         if (comment && !header && !dp_split_has_line(source, l, n))
             return false;
-        if (dp_split_is_include(l, n) && !dp_split_has_line(source, l, n) &&
-            !(keep && dp_split_has_line(keep, l, n)))
+        if (!dp_split_directive_ish(l, n)) continue;
+        if (!dp_split_strict_include(l, n) ||
+            (!dp_split_has_line(source, l, n) &&
+             !(keep && dp_split_has_line(keep, l, n))))
             return false;
     }
     return true;
@@ -2313,7 +2358,7 @@ static bool dp_split_includes(const struct dp_split_ctx *c,
                               const char *sibling, char *out, size_t size)
 {
     const char *argv[] = {"git", "grep", "-h", "-I", "-E", "-e",
-                          "^[ \t]*#[ \t]*include", c->local, "--", sibling,
+                          "^[[:space:]]*#[[:space:]]*include", c->local, "--", sibling,
                           NULL};
     int rc = dp_split_git(c->root, argv, out, size);
     if (rc == 1) out[0] = '\0';

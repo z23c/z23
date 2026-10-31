@@ -6551,7 +6551,8 @@ static int test_ic_changed_set_widens_structural_changes(void)
 #define IC_SPLIT_REPO IC_FIX_SPLIT "/repo"
 
 static const char ic_split_big_base[] =
-    "/* big.c - base */\n#include \"a.h\"\n#include <stdio.h>\n\n"
+    "/* big.c - base */\n#include \"a.h\"\n#include <stdio.h>\n"
+    "#include \\\n\"a.h\"\n\n"
     "/* first helper does one thing */\nint first_helper(int x)\n{\n"
     "    return x + 1;\n}\n\n"
     "/* second helper does another */\nint second_helper(int x)\n{\n"
@@ -6559,7 +6560,8 @@ static const char ic_split_big_base[] =
     "int keep_main(int x)\n{\n"
     "    return first_helper(x) + second_helper(x);\n}\n";
 static const char ic_split_big_after[] =
-    "/* big.c - base */\n#include \"a.h\"\n#include <stdio.h>\n\n"
+    "/* big.c - base */\n#include \"a.h\"\n#include <stdio.h>\n"
+    "#include \\\n\"a.h\"\n\n"
     "int keep_main(int x)\n{\n"
     "    return first_helper(x) + second_helper(x);\n}\n";
 static const char ic_split_part[] =
@@ -6701,6 +6703,41 @@ static bool ic_split_edit_leaflist(void)
            ic_split_w("mk/extra.mk", "EXTRA = $(D)/other.c $(D)/big_part.c\n");
 }
 
+/* The split part with `extra` inserted after its first (header) line. */
+static bool ic_split_edit_part_extra(const char *extra)
+{
+    static char part[2048];
+    const char *eol = strchr(ic_split_part, '\n');
+    if (!eol || snprintf(part, sizeof(part), "%.*s%s%s",
+                         (int)(eol + 1 - ic_split_part), ic_split_part, extra,
+                         eol + 1) >= (int)sizeof(part))
+        return false;
+    return ic_split_w("core/a/big.c", ic_split_big_after) &&
+           ic_split_w("core/a/big_part.c", part) &&
+           ic_split_w("Makefile", ic_split_make_after);
+}
+
+/* The sibling dropped `#include \` + `"a.h"`, so the line `#include \` is a
+ * removed line: the added file's continuation include rides on it unread. */
+static bool ic_split_edit_incont(void)
+{
+    return ic_split_edit_part_extra("#include \\\n\"zz.h\"\n");
+}
+
+/* An include after a block comment on its own line is no leading `#`. */
+static bool ic_split_edit_increst(void)
+{
+    return ic_split_edit_part_extra("/* c */ #include \"zz.h\"\n");
+}
+
+/* A list naming `xbig.c` holds the sibling's name only as a substring. */
+static bool ic_split_edit_wordlist(void)
+{
+    return ic_split_edit_split() &&
+           ic_split_w("mk/extra.mk",
+                      "EXTRA = $(D)/other.c $(D)/xbig.c $(D)/big_part.c\n");
+}
+
 static bool ic_split_base_build(void)
 {
     if (system("rm -rf " IC_FIX_SPLIT " && mkdir -p " IC_SPLIT_REPO
@@ -6736,6 +6773,9 @@ static bool ic_split_fixture_build(void)
         {"macrofn", ic_split_edit_macrofn},
         {"contref", ic_split_edit_contref},
         {"leaflist", ic_split_edit_leaflist},
+        {"incont", ic_split_edit_incont},
+        {"increst", ic_split_edit_increst},
+        {"wordlist", ic_split_edit_wordlist},
     };
     if (!ic_split_base_build()) return false;
     for (size_t i = 0; i < sizeof branches / sizeof branches[0]; i++)
@@ -6761,6 +6801,9 @@ static const struct ic_split_case ic_split_cases[] = {
     {"macrofn", false},    /* a macro-defined function the reader cannot name */
     {"contref", false},    /* an #include split over a continuation line */
     {"leaflist", false},   /* a build list naming the basename, not the sibling */
+    {"incont", false},     /* #include split over a continuation line */
+    {"increst", false},    /* an #include after a comment on its line */
+    {"wordlist", false},   /* a list naming the sibling only as a substring */
 };
 
 static int test_ic_changed_set_split_sibling_closure(void)
@@ -6781,6 +6824,7 @@ static int test_ic_changed_set_split_sibling_closure(void)
         ASSERT(bf && fgets(base, sizeof(base), bf));
         fclose(bf);
         base[strcspn(base, "\n")] = '\0';
+        bool bad_case = false;
         size_t n = sizeof ic_split_cases / sizeof ic_split_cases[0];
         for (size_t i = 0; i < n; i++) {
             const struct ic_split_case *c = &ic_split_cases[i];
@@ -6811,7 +6855,11 @@ static int test_ic_changed_set_split_sibling_closure(void)
                    universal ? 1 : 0, (unsigned)selected,
                    reason ? reason : "-");
             ASSERT(reason != NULL);
-            ASSERT(universal == !c->exact);
+            if (universal != !c->exact) {
+                bad_case = true;
+                zcl_dev_proof_changed_set_release(&set);
+                continue;
+            }
             if (c->exact) {
                 ASSERT(set.structural_path == NULL);
                 ASSERT(set.split_count == 1 && set.split_path &&
@@ -6824,6 +6872,7 @@ static int test_ic_changed_set_split_sibling_closure(void)
             }
             zcl_dev_proof_changed_set_release(&set);
         }
+        ASSERT(!bad_case);
         PASS();
     } _test_next:;
     (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
