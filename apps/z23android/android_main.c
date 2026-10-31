@@ -208,8 +208,7 @@ static int input_ready(int fd, int events, void *context)
     if (!current_vm || (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return 1;
     while (AInputQueue_getEvent(queue, &event) >= 0) {
         if (AInputQueue_preDispatchEvent(queue, event)) continue;
-        zapp_native_ui_input(env, event);
-        AInputQueue_finishEvent(queue, event, 0);
+        AInputQueue_finishEvent(queue, event, zapp_native_ui_input(env, event));
     }
     return 1;
 }
@@ -376,10 +375,15 @@ static void pause_activity(ANativeActivity *activity)
     zapp_controller_visible(false);
     zapp_camera_stop();
 }
+static void focus_changed(ANativeActivity *activity, int focused)
+{
+    if (focused) zapp_native_ui_focus(activity->env);
+}
 static void resume_activity(ANativeActivity *activity)
 {
     foreground = true;
     zapp_controller_visible(true);
+    zapp_native_ui_resume(activity->env);
     refresh(activity->env);
 }
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size);
@@ -390,6 +394,7 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
     activity->callbacks->onDestroy = destroy;
     activity->callbacks->onPause = pause_activity;
     activity->callbacks->onResume = resume_activity;
+    activity->callbacks->onWindowFocusChanged = focus_changed;
     activity->callbacks->onInputQueueCreated = queue_created;
     activity->callbacks->onInputQueueDestroyed = queue_destroyed;
     JNIEnv *env = activity->env; char native_dir[4096]; bool preview = false;

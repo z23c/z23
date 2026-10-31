@@ -4,6 +4,8 @@
 #include "conversation.h"
 #include "fleet.h"
 #include "hosts.h"
+#include "jni_util.h"
+#include "shell.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -20,100 +22,40 @@ static zapp_native_action callback;
 static int pressed = -1;
 static float down_x, down_y;
 static char last_receipt[8192];
-static float density = 1.0f;
 static bool voice_preview;
 static char suggestion[96]; /* The question on the button, so a tap sends exactly what was shown. */
 static const char *const actions[] = {"node_start", "node_stop", NULL, "chat", "fleet_scan", "fleet_preview", "fleet_join"};
 
-static bool clean(JNIEnv *env)
-{
-    if (!(*env)->ExceptionCheck(env)) return true;
-    (*env)->ExceptionClear(env); return false;
-}
-static int dp(float value) { return (int)(value * density + 0.5f); }
-static bool int_property(JNIEnv *env, jobject view, const char *name, jint value)
-{
-    jclass cls = (*env)->GetObjectClass(env, view);
-    jmethodID method = clean(env) && cls ? (*env)->GetMethodID(env, cls, name, "(I)V") : NULL;
-    bool ok = clean(env) && method;
-    if (ok) { (*env)->CallVoidMethod(env, view, method, value); ok = clean(env); }
-    if (cls) (*env)->DeleteLocalRef(env, cls);
-    return ok;
-}
-static bool bool_property(JNIEnv *env, jobject view, const char *name, bool value)
-{
-    jclass cls = (*env)->GetObjectClass(env, view);
-    jmethodID method = clean(env) && cls ? (*env)->GetMethodID(env, cls, name, "(Z)V") : NULL;
-    bool ok = clean(env) && method;
-    if (ok) { (*env)->CallVoidMethod(env, view, method, (jboolean)value); ok = clean(env); }
-    if (cls) (*env)->DeleteLocalRef(env, cls);
-    return ok;
-}
-static bool padding(JNIEnv *env, jobject view, int horizontal, int vertical)
-{
-    jclass cls = (*env)->GetObjectClass(env, view);
-    jmethodID method = clean(env) && cls ? (*env)->GetMethodID(env, cls, "setPadding", "(IIII)V") : NULL;
-    bool ok = clean(env) && method;
-    if (ok) {
-        (*env)->CallVoidMethod(env, view, method, dp((float)horizontal), dp((float)vertical),
-                              dp((float)horizontal), dp((float)vertical));
-        ok = clean(env);
-    }
-    if (cls) (*env)->DeleteLocalRef(env, cls);
-    return ok;
-}
-static bool typography(JNIEnv *env, jobject view, float sp, jint color)
-{
-    jclass cls = (*env)->GetObjectClass(env, view);
-    jmethodID size = clean(env) && cls ? (*env)->GetMethodID(env, cls, "setTextSize", "(F)V") : NULL;
-    bool ok = clean(env) && size;
-    if (ok) { (*env)->CallVoidMethod(env, view, size, sp); ok = clean(env); }
-    if (cls) (*env)->DeleteLocalRef(env, cls);
-    return ok && int_property(env, view, "setTextColor", color);
-}
-/* Looks up a method on the object's class and releases the class reference. */
-static jmethodID method_of(JNIEnv *env, jobject obj, const char *name, const char *sig)
-{
-    jclass cls = (*env)->GetObjectClass(env, obj);
-    jmethodID method = clean(env) && cls ? (*env)->GetMethodID(env, cls, name, sig) : NULL;
-    bool found = clean(env) && method;
-    if (cls) (*env)->DeleteLocalRef(env, cls);
-    return found ? method : NULL;
-}
-static jobject object_property(JNIEnv *env, jobject obj, const char *name, const char *sig)
-{
-    jmethodID method = method_of(env, obj, name, sig);
-    jobject value = method ? (*env)->CallObjectMethod(env, obj, method) : NULL;
-    return clean(env) ? value : NULL;
-}
 static bool read_density(JNIEnv *env, jobject display)
 {
     jclass cls = (*env)->GetObjectClass(env, display);
-    jfieldID field = clean(env) && cls ? (*env)->GetFieldID(env, cls, "density", "F") : NULL;
-    if (!clean(env) || !field) return false;
-    density = (*env)->GetFloatField(env, display, field);
-    return clean(env) && density > 0.0f && density < 16.0f;
+    jfieldID field = zj_clean(env) && cls ? (*env)->GetFieldID(env, cls, "density", "F") : NULL;
+    if (!zj_clean(env) || !field) return false;
+    jfloat density = (*env)->GetFloatField(env, display, field);
+    if (!zj_clean(env) || density <= 0.0f || density >= 16.0f) return false;
+    zj_set_density(density);
+    return true;
 }
 static bool load_density(JNIEnv *env, jobject activity)
 {
-    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)clean(env); return false; }
-    jobject resources = object_property(env, activity, "getResources", "()Landroid/content/res/Resources;");
-    jobject display = resources ? object_property(env, resources, "getDisplayMetrics", "()Landroid/util/DisplayMetrics;") : NULL;
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return false; }
+    jobject resources = zj_object_property(env, activity, "getResources", "()Landroid/content/res/Resources;");
+    jobject display = resources ? zj_object_property(env, resources, "getDisplayMetrics", "()Landroid/util/DisplayMetrics;") : NULL;
     bool ok = display && read_density(env, display);
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }
 bool zapp_native_ui_package_preview(JNIEnv *env, jobject activity, bool *preview)
 {
-    if ((*env)->PushLocalFrame(env, 4) != JNI_OK) { (void)clean(env); return false; }
+    if ((*env)->PushLocalFrame(env, 4) != JNI_OK) { (void)zj_clean(env); return false; }
     jclass cls = (*env)->GetObjectClass(env, activity);
-    jmethodID get = clean(env) && cls ? (*env)->GetMethodID(env, cls, "getPackageName", "()Ljava/lang/String;") : NULL;
-    jstring package = clean(env) && get ? (*env)->CallObjectMethod(env, activity, get) : NULL;
-    const char *name = clean(env) && package ? (*env)->GetStringUTFChars(env, package, NULL) : NULL;
-    bool ok = clean(env) && name;
+    jmethodID get = zj_clean(env) && cls ? (*env)->GetMethodID(env, cls, "getPackageName", "()Ljava/lang/String;") : NULL;
+    jstring package = zj_clean(env) && get ? (*env)->CallObjectMethod(env, activity, get) : NULL;
+    const char *name = zj_clean(env) && package ? (*env)->GetStringUTFChars(env, package, NULL) : NULL;
+    bool ok = zj_clean(env) && name;
     if (ok) *preview = !strncmp(name, "org.z23.voicepreview", strlen("org.z23.voicepreview"));
     if (name) (*env)->ReleaseStringUTFChars(env, package, name);
-    ok = clean(env) && ok;
+    ok = zj_clean(env) && ok;
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }
@@ -121,62 +63,24 @@ static bool load_identity(JNIEnv *env, jobject activity)
 {
     return zapp_native_ui_package_preview(env, activity, &voice_preview);
 }
-static jobject widget(JNIEnv *env, const char *type, jobject activity)
-{
-    jclass cls = (*env)->FindClass(env, type);
-    if (!clean(env) || !cls) return NULL;
-    jmethodID ctor = (*env)->GetMethodID(env, cls, "<init>", "(Landroid/content/Context;)V");
-    jobject obj = ctor ? (*env)->NewObject(env, cls, ctor, activity) : NULL;
-    if (!clean(env)) obj = NULL;
-    (*env)->DeleteLocalRef(env, cls); return obj;
-}
-static jstring make_string(JNIEnv *env, const char *value)
-{
-    size_t length = strlen(value);
-    jclass cls = (*env)->FindClass(env, "java/lang/String");
-    jmethodID ctor = cls ? (*env)->GetMethodID(env, cls, "<init>", "([BLjava/lang/String;)V") : NULL;
-    jbyteArray bytes = length <= 65536 ? (*env)->NewByteArray(env, (jsize)length) : NULL;
-    jstring encoding = (*env)->NewStringUTF(env, "UTF-8");
-    if (bytes) (*env)->SetByteArrayRegion(env, bytes, 0, (jsize)length, (const jbyte *)value);
-    jstring result = clean(env) && ctor && bytes && encoding ? (*env)->NewObject(env, cls, ctor, bytes, encoding) : NULL;
-    if (encoding) (*env)->DeleteLocalRef(env, encoding);
-    if (bytes) (*env)->DeleteLocalRef(env, bytes);
-    if (cls) (*env)->DeleteLocalRef(env, cls);
-    return result;
-}
-static bool char_sequence(JNIEnv *env, jobject view, const char *method, const char *value)
-{
-    jclass cls = (*env)->GetObjectClass(env, view);
-    if (!clean(env) || !cls) return false;
-    jmethodID set = (*env)->GetMethodID(env, cls, method, "(Ljava/lang/CharSequence;)V");
-    jstring string = make_string(env, value);
-    bool ok = clean(env) && set && string;
-    if (ok) { (*env)->CallVoidMethod(env, view, set, string); ok = clean(env); }
-    if (string) (*env)->DeleteLocalRef(env, string);
-    (*env)->DeleteLocalRef(env, cls); return ok;
-}
-static bool text(JNIEnv *env, jobject view, const char *value)
-{
-    return char_sequence(env, view, "setText", value);
-}
 static bool line_spacing(JNIEnv *env, jobject view, float extra_dp)
 {
-    jmethodID set = method_of(env, view, "setLineSpacing", "(FF)V");
+    jmethodID set = zj_method(env, view, "setLineSpacing", "(FF)V");
     if (!set) return false;
-    (*env)->CallVoidMethod(env, view, set, (jfloat)dp(extra_dp), 1.0f);
-    return clean(env);
+    (*env)->CallVoidMethod(env, view, set, (jfloat)zj_dp(extra_dp), 1.0f);
+    return zj_clean(env);
 }
 /* Shows HTML through android.text.Html.fromHtml; false leaves the view untouched. */
 static bool html_text(JNIEnv *env, jobject view, const char *html)
 {
     jclass cls = (*env)->FindClass(env, "android/text/Html");
-    jmethodID from = clean(env) && cls ?
+    jmethodID from = zj_clean(env) && cls ?
         (*env)->GetStaticMethodID(env, cls, "fromHtml", "(Ljava/lang/String;I)Landroid/text/Spanned;") : NULL;
-    jstring string = clean(env) && from ? make_string(env, html) : NULL;
+    jstring string = zj_clean(env) && from ? zj_string(env, html) : NULL;
     jobject spanned = string ? (*env)->CallStaticObjectMethod(env, cls, from, string, 0) : NULL;
-    jmethodID set = clean(env) && spanned ? method_of(env, view, "setText", "(Ljava/lang/CharSequence;)V") : NULL;
+    jmethodID set = zj_clean(env) && spanned ? zj_method(env, view, "setText", "(Ljava/lang/CharSequence;)V") : NULL;
     bool ok = set != NULL;
-    if (ok) { (*env)->CallVoidMethod(env, view, set, spanned); ok = clean(env); }
+    if (ok) { (*env)->CallVoidMethod(env, view, set, spanned); ok = zj_clean(env); }
     if (spanned) (*env)->DeleteLocalRef(env, spanned);
     if (string) (*env)->DeleteLocalRef(env, string);
     if (cls) (*env)->DeleteLocalRef(env, cls);
@@ -187,21 +91,7 @@ static void show_transcript(JNIEnv *env, const struct zapp_view *view)
 {
     static char html[2 * ZAPP_TEXT_CAP];
     if (!(zapp_transcript_html_pending(view->transcript, view->pending_question, html, sizeof(html)) && html_text(env, transcript_view, html)))
-        (void)text(env, transcript_view, view->transcript);
-}
-static bool append(JNIEnv *env, jobject layout, jobject view)
-{
-    jclass cls = (*env)->GetObjectClass(env, layout);
-    if (!clean(env) || !cls) return false;
-    jmethodID add = (*env)->GetMethodID(env, cls, "addView", "(Landroid/view/View;)V");
-    bool ok = clean(env) && add;
-    if (ok) { (*env)->CallVoidMethod(env, layout, add, view); ok = clean(env); }
-    (*env)->DeleteLocalRef(env, cls); return ok;
-}
-static bool keep(JNIEnv *env, jobject *dest, jobject value)
-{
-    *dest = (*env)->NewGlobalRef(env, value);
-    return clean(env) && *dest;
+        (void)zj_text(env, transcript_view, view->transcript);
 }
 static bool small_label(const char *label, const jobject *save)
 {
@@ -215,110 +105,55 @@ static float label_size(const char *label, const jobject *save)
     if (save == &transcript_view) return 18.0f;
     return small_label(label, save) ? 14.0f : 16.0f;
 }
-static bool padding4(JNIEnv *env, jobject view, int left, int top, int right, int bottom)
-{
-    jmethodID set = method_of(env, view, "setPadding", "(IIII)V");
-    if (!set) return false;
-    (*env)->CallVoidMethod(env, view, set, dp((float)left), dp((float)top), dp((float)right), dp((float)bottom));
-    return clean(env);
-}
-/* Gives a child of a vertical LinearLayout its size, weight and bottom margin (width and height in
- * pixels or a LayoutParams constant). */
-static bool place(JNIEnv *env, jobject view, int width, int height, float weight, int bottom_dp)
-{
-    jclass cls = (*env)->FindClass(env, "android/widget/LinearLayout$LayoutParams");
-    jmethodID ctor = clean(env) && cls ? (*env)->GetMethodID(env, cls, "<init>", "(IIF)V") : NULL;
-    jmethodID margins = ctor ? (*env)->GetMethodID(env, cls, "setMargins", "(IIII)V") : NULL;
-    jobject params = clean(env) && margins ? (*env)->NewObject(env, cls, ctor, width, height, weight) : NULL;
-    jmethodID set = clean(env) && params ? method_of(env, view, "setLayoutParams", "(Landroid/view/ViewGroup$LayoutParams;)V") : NULL;
-    bool ok = set != NULL;
-    if (ok) {
-        (*env)->CallVoidMethod(env, params, margins, 0, 0, 0, dp((float)bottom_dp));
-        (*env)->CallVoidMethod(env, view, set, params);
-        ok = clean(env);
-    }
-    if (params) (*env)->DeleteLocalRef(env, params);
-    if (cls) (*env)->DeleteLocalRef(env, cls);
-    return ok;
-}
-/* Filled buttons are flat: the default elevation shadow is clipped by the bottom bar. */
-static bool flatten(JNIEnv *env, jobject view)
-{
-    jmethodID animator = method_of(env, view, "setStateListAnimator", "(Landroid/animation/StateListAnimator;)V");
-    jmethodID elevation = animator ? method_of(env, view, "setElevation", "(F)V") : NULL;
-    if (!elevation) return false;
-    (*env)->CallVoidMethod(env, view, animator, NULL);
-    (*env)->CallVoidMethod(env, view, elevation, 0.0f);
-    return clean(env);
-}
-/* Fills the view with a rounded rectangle of the given color and corner radius. */
-static bool pill(JNIEnv *env, jobject view, jint color, float radius_dp)
-{
-    jclass cls = (*env)->FindClass(env, "android/graphics/drawable/GradientDrawable");
-    jmethodID ctor = clean(env) && cls ? (*env)->GetMethodID(env, cls, "<init>", "()V") : NULL;
-    jobject shape = ctor ? (*env)->NewObject(env, cls, ctor) : NULL;
-    jmethodID fill = clean(env) && shape ? method_of(env, shape, "setColor", "(I)V") : NULL;
-    jmethodID round = fill ? method_of(env, shape, "setCornerRadius", "(F)V") : NULL;
-    jmethodID back = round ? method_of(env, view, "setBackground", "(Landroid/graphics/drawable/Drawable;)V") : NULL;
-    bool ok = back != NULL;
-    if (ok) {
-        (*env)->CallVoidMethod(env, shape, fill, color);
-        (*env)->CallVoidMethod(env, shape, round, (jfloat)dp(radius_dp));
-        (*env)->CallVoidMethod(env, view, back, shape);
-        ok = clean(env);
-    }
-    if (shape) (*env)->DeleteLocalRef(env, shape);
-    if (cls) (*env)->DeleteLocalRef(env, cls);
-    return ok;
-}
 /* The Talk caption sits centered and muted in the bottom bar; the transcript gets open line spacing. */
 static bool special_text(JNIEnv *env, jobject view, const jobject *save)
 {
     if (save == &transcript_view) return line_spacing(env, view, 4.0f);
-    return save != &voice_view || (int_property(env, view, "setGravity", 1) &&
-        int_property(env, view, "setTextColor", (jint)0xff5f6662));
+    return save != &voice_view || (zj_int_property(env, view, "setGravity", 1) &&
+        zj_int_property(env, view, "setTextColor", (jint)0xff5f6662));
 }
 static bool add_text(JNIEnv *env, jobject layout, jobject activity, const char *label, jobject *save)
 {
-    jobject view = widget(env, "android/widget/TextView", activity);
-    bool ok = view && typography(env, view, label_size(label, save), (jint)0xff262b2b) && padding(env, view, 0, 4) &&
-        text(env, view, label) && special_text(env, view, save) &&
-        append(env, layout, view) && (!save || keep(env, save, view));
+    jobject view = zj_widget(env, "android/widget/TextView", activity);
+    bool ok = view && zj_typography(env, view, label_size(label, save), (jint)0xff262b2b) && zj_padding(env, view, 0, 4) &&
+        zj_text(env, view, label) && special_text(env, view, save) &&
+        zj_append(env, layout, view) && (!save || zj_keep(env, save, view));
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
 static bool primary_button(size_t i) { return i == 0 || i == 9 || i == 10 || i == 19; }
 static bool style_button(JNIEnv *env, jobject view, size_t i)
 {
-    int min_height = dp(i == 9 ? 64.0f : i == 15 ? 40.0f : 48.0f);
-    return typography(env, view, i == 15 || i == 8 ? 15.0f : 16.0f, primary_button(i) ? (jint)0xffffffff : (jint)0xff264a43) &&
-        bool_property(env, view, "setAllCaps", false) &&
-        int_property(env, view, "setMinHeight", min_height) &&
-        int_property(env, view, "setMinimumHeight", min_height) &&
-        padding(env, view, 16, 8);
+    int min_height = zj_dp(i == 9 ? 64.0f : i == 15 ? 40.0f : 48.0f);
+    return zj_typography(env, view, i == 15 || i == 8 ? 15.0f : 16.0f, primary_button(i) ? (jint)0xffffffff : (jint)0xff264a43) &&
+        zj_bool_property(env, view, "setAllCaps", false) &&
+        zj_int_property(env, view, "setMinHeight", min_height) &&
+        zj_int_property(env, view, "setMinimumHeight", min_height) &&
+        zj_padding(env, view, 16, 8);
 }
 /* Talk and Confirm are green pills, the suggestion a pale pill, More plain text, Start node a slab. */
 static bool shape_button(JNIEnv *env, jobject view, size_t i)
 {
     switch (i) {
-    case 9: return pill(env, view, (jint)0xff235e50, 32.0f) && flatten(env, view) && place(env, view, -1, -2, 0.0f, 0);
-    case 10: case 19: return pill(env, view, (jint)0xff235e50, 32.0f) && flatten(env, view);
-    case 15: return pill(env, view, (jint)0xffe4ebe7, 20.0f) && flatten(env, view) && place(env, view, -2, -2, 0.0f, 8);
-    case 8: return int_property(env, view, "setBackgroundColor", 0);
-    case 0: return int_property(env, view, "setBackgroundColor", (jint)0xff235e50);
+    case 9: return zj_pill(env, view, (jint)0xff235e50, 32.0f) && zj_flatten(env, view) && zj_place(env, view, -1, -2, 0.0f, 0);
+    case 10: case 19: return zj_pill(env, view, (jint)0xff235e50, 32.0f) && zj_flatten(env, view);
+    case 15: return zj_pill(env, view, (jint)0xffe4ebe7, 20.0f) && zj_flatten(env, view) && zj_place(env, view, -2, -2, 0.0f, 8);
+    case 8: return zj_int_property(env, view, "setBackgroundColor", 0);
+    case 0: return zj_int_property(env, view, "setBackgroundColor", (jint)0xff235e50);
     default: return true;
     }
 }
 static bool add_button(JNIEnv *env, jobject layout, jobject activity, const char *label, size_t i)
 {
-    jobject view = widget(env, "android/widget/Button", activity);
-    bool ok = view && style_button(env, view, i) && text(env, view, label) &&
-        append(env, layout, view) && keep(env, &buttons[i], view) && shape_button(env, view, i);
+    jobject view = zj_widget(env, "android/widget/Button", activity);
+    bool ok = view && style_button(env, view, i) && zj_text(env, view, label) &&
+        zj_append(env, layout, view) && zj_keep(env, &buttons[i], view) && shape_button(env, view, i);
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
 void zapp_native_ui_destroy(JNIEnv *env)
 {
+    zapp_shell_destroy(env);
     for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); ++i) {
         if (buttons[i]) (*env)->DeleteGlobalRef(env, buttons[i]);
         buttons[i] = NULL;
@@ -361,7 +196,7 @@ static bool chat_widgets(JNIEnv *env, jobject layout, jobject activity, jobject 
 {
     (void)invite; (void)camera; (void)receipt; (void)scroll;
     return !(!add_text(env, layout, activity, "Type a question", NULL) ||
-        !append(env, layout, prompt) || !keep(env, &prompt_view, prompt) ||
+        !zj_append(env, layout, prompt) || !zj_keep(env, &prompt_view, prompt) ||
         !add_button(env, layout, activity, "Send", 3) ||
         !add_text(env, layout, activity, "Not connected", &connection_view) ||
         !add_text(env, layout, activity, "Fleet", NULL) ||
@@ -382,86 +217,60 @@ static bool fleet_widgets(JNIEnv *env, jobject layout, jobject activity, jobject
     (void)prompt; (void)invite; (void)camera; (void)receipt; (void)scroll;
     return !(!detail_controls(env, layout, activity) ||
         !add_button(env, layout, activity, "Scan invitation", 4) ||
-        !append(env, layout, camera) || !keep(env, &camera_view, camera) ||
-        !append(env, layout, invite) || !keep(env, &invite_view, invite) ||
+        !zj_append(env, layout, camera) || !zj_keep(env, &camera_view, camera) ||
+        !zj_append(env, layout, invite) || !zj_keep(env, &invite_view, invite) ||
         !add_button(env, layout, activity, "Review invitation", 5) ||
         !add_button(env, layout, activity, "Join fleet", 6) ||
         !add_text(env, layout, activity, "", &fleet_view));
 }
 static bool finish_widgets(JNIEnv *env, jobject layout, jobject activity, jobject receipt)
 {
-    return append(env, layout, receipt) && keep(env, &receipt_view, receipt) &&
+    return zj_append(env, layout, receipt) && zj_keep(env, &receipt_view, receipt) &&
         add_text(env, layout, activity, "", &result_view);
 }
 static bool orient_layout(JNIEnv *env, jobject layout)
 {
     jclass cls = (*env)->GetObjectClass(env, layout);
     jmethodID method = cls ? (*env)->GetMethodID(env, cls, "setOrientation", "(I)V") : NULL;
-    if (!clean(env) || !method) return false;
+    if (!zj_clean(env) || !method) return false;
     (*env)->CallVoidMethod(env, layout, method, 1);
-    return clean(env);
-}
-static bool set_visible(JNIEnv *env, jobject view, bool visible)
-{
-    jclass cls = (*env)->GetObjectClass(env, view);
-    jmethodID set = cls ? (*env)->GetMethodID(env, cls, "setVisibility", "(I)V") : NULL;
-    bool ok = clean(env) && set;
-    if (ok) { (*env)->CallVoidMethod(env, view, set, visible ? 0 : 8); ok = clean(env); }
-    if (cls) (*env)->DeleteLocalRef(env, cls);
-    return ok;
-}
-static bool show_root(JNIEnv *env, jobject activity, jobject scroll)
-{
-    jclass cls = (*env)->GetObjectClass(env, activity);
-    jmethodID method = cls ? (*env)->GetMethodID(env, cls, "setContentView", "(Landroid/view/View;)V") : NULL;
-    if (!clean(env) || !method) return false;
-    (*env)->CallVoidMethod(env, activity, method, scroll);
-    return clean(env);
-}
-static bool style_system_bars(JNIEnv *env, jobject activity)
-{
-    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)clean(env); return false; }
-    jobject window = object_property(env, activity, "getWindow", "()Landroid/view/Window;");
-    jobject view = window ? object_property(env, window, "getDecorView", "()Landroid/view/View;") : NULL;
-    bool ok = view && int_property(env, view, "setSystemUiVisibility", 0x2010);
-    (*env)->PopLocalFrame(env, NULL);
-    return ok;
+    return zj_clean(env);
 }
 static bool style_prompt(JNIEnv *env, jobject field)
 {
-    return typography(env, field, 16.0f, (jint)0xff262b2b) &&
-           int_property(env, field, "setMinLines", 1) && int_property(env, field, "setMaxLines", 4);
+    return zj_typography(env, field, 16.0f, (jint)0xff262b2b) &&
+           zj_int_property(env, field, "setMinLines", 1) && zj_int_property(env, field, "setMaxLines", 4);
 }
 static bool prepare_layouts(JNIEnv *env, jobject layout, jobject details, jobject prompt, jobject invite,
                             jobject camera, jobject receipt)
 {
     return layout && prompt && invite && camera && receipt && details &&
            orient_layout(env, layout) && orient_layout(env, details) &&
-           padding(env, layout, 20, 20) && style_prompt(env, prompt) && style_prompt(env, invite) &&
-           char_sequence(env, invite, "setHint", "Or paste an invitation");
+           zj_padding(env, layout, 20, 20) && style_prompt(env, prompt) && style_prompt(env, invite) &&
+           zj_char_sequence(env, invite, "setHint", "Or paste an invitation");
 }
 /* The root stacks the scrolling content above a fixed bottom bar for the voice controls. */
 static bool assemble_root(JNIEnv *env, jobject root_layout, jobject scroll, jobject bar)
 {
     return root_layout && scroll && bar && orient_layout(env, root_layout) && orient_layout(env, bar) &&
-           bool_property(env, root_layout, "setFitsSystemWindows", true) &&
-           int_property(env, root_layout, "setBackgroundColor", (jint)0xfff7f5ef) &&
-           int_property(env, bar, "setBackgroundColor", (jint)0xfff7f5ef) &&
-           int_property(env, bar, "setGravity", 1) && padding4(env, bar, 20, 8, 20, 16) &&
-           place(env, scroll, -1, 0, 1.0f, 0) && append(env, root_layout, scroll) &&
-           append(env, root_layout, bar) && keep(env, &root, root_layout);
+           zj_bool_property(env, root_layout, "setFitsSystemWindows", true) &&
+           zj_int_property(env, root_layout, "setBackgroundColor", (jint)0xfff7f5ef) &&
+           zj_int_property(env, bar, "setBackgroundColor", (jint)0xfff7f5ef) &&
+           zj_int_property(env, bar, "setGravity", 1) && zj_padding4(env, bar, 20, 8, 20, 16) &&
+           zj_place(env, scroll, -1, 0, 1.0f, 0) && zj_append(env, root_layout, scroll) &&
+           zj_append(env, root_layout, bar) && zj_keep(env, &root, root_layout);
 }
 static bool attach_details(JNIEnv *env, jobject details, jobject layout, jobject scroll)
 {
-    return set_visible(env, details, false) && append(env, layout, details) &&
-           keep(env, &details_view, details) && append(env, scroll, layout);
+    return zj_visible(env, details, false) && zj_append(env, layout, details) &&
+           zj_keep(env, &details_view, details) && zj_append(env, scroll, layout);
 }
 static bool build_content(JNIEnv *env, jobject activity, jobject layout, jobject details, jobject bar)
 {
-    jobject prompt = widget(env, "android/widget/EditText", activity);
-    jobject invite = widget(env, "android/widget/EditText", activity);
-    jobject camera = widget(env, "android/widget/ImageView", activity);
-    jobject receipt = widget(env, "android/widget/ImageView", activity);
+    jobject prompt = zj_widget(env, "android/widget/EditText", activity);
+    jobject invite = zj_widget(env, "android/widget/EditText", activity);
+    jobject camera = zj_widget(env, "android/widget/ImageView", activity);
+    jobject receipt = zj_widget(env, "android/widget/ImageView", activity);
     return prepare_layouts(env, layout, details, prompt, invite, camera, receipt) &&
         node_widgets(env, layout, activity) && bar_widgets(env, bar, activity) &&
         chat_widgets(env, details, activity, prompt, invite, camera, receipt, NULL) &&
@@ -470,23 +279,22 @@ static bool build_content(JNIEnv *env, jobject activity, jobject layout, jobject
 }
 static bool build_ui(JNIEnv *env, jobject activity)
 {
-    jobject scroll = widget(env, "android/widget/ScrollView", activity);
-    jobject layout = widget(env, "android/widget/LinearLayout", activity);
-    jobject details = widget(env, "android/widget/LinearLayout", activity);
-    jobject bar = widget(env, "android/widget/LinearLayout", activity);
-    jobject outer = widget(env, "android/widget/LinearLayout", activity);
+    jobject scroll = zj_widget(env, "android/widget/ScrollView", activity);
+    jobject layout = zj_widget(env, "android/widget/LinearLayout", activity);
+    jobject details = zj_widget(env, "android/widget/LinearLayout", activity);
+    jobject bar = zj_widget(env, "android/widget/LinearLayout", activity);
+    jobject outer = zj_widget(env, "android/widget/LinearLayout", activity);
     return scroll && build_content(env, activity, layout, details, bar) &&
-        attach_details(env, details, layout, scroll) && assemble_root(env, outer, scroll, bar) &&
-        show_root(env, activity, outer);
+        attach_details(env, details, layout, scroll) && assemble_root(env, outer, scroll, bar);
 }
 bool zapp_native_ui_create(JNIEnv *env, jobject activity, zapp_native_action action)
 {
     if (!env || !activity || !action || root) return false;
-    if ((*env)->PushLocalFrame(env, 32) != JNI_OK) { (void)clean(env); return false; }
+    if ((*env)->PushLocalFrame(env, 32) != JNI_OK) { (void)zj_clean(env); return false; }
     bool ok = load_density(env, activity) && load_identity(env, activity) &&
-        style_system_bars(env, activity) && build_ui(env, activity);
+        build_ui(env, activity) && zapp_shell_create(env, activity, root, voice_preview);
     if (ok) callback = action;
-    (void)clean(env);
+    (void)zj_clean(env);
     (*env)->PopLocalFrame(env, NULL);
     if (!ok) zapp_native_ui_destroy(env);
     return ok;
@@ -517,47 +325,27 @@ static char *string_utf8(JNIEnv *env, jstring string)
     jsize n = (*env)->GetStringLength(env, string);
     const jchar *chars = (*env)->GetStringChars(env, string, NULL);
     char *out = NULL;
-    if (clean(env) && chars && n <= 16000) out = encode_prompt(chars, n);
+    if (zj_clean(env) && chars && n <= 16000) out = encode_prompt(chars, n);
     if (chars) (*env)->ReleaseStringChars(env, string, chars);
     return out;
 }
 static char *prompt_utf8(JNIEnv *env, jobject field)
 {
     jclass cls = (*env)->GetObjectClass(env, field);
-    if (!clean(env) || !cls) return NULL;
+    if (!zj_clean(env) || !cls) return NULL;
     jmethodID get = (*env)->GetMethodID(env, cls, "getText", "()Landroid/text/Editable;");
     jobject editable = get ? (*env)->CallObjectMethod(env, field, get) : NULL;
-    if (!clean(env) || !editable) { (*env)->DeleteLocalRef(env, cls); return NULL; }
+    if (!zj_clean(env) || !editable) { (*env)->DeleteLocalRef(env, cls); return NULL; }
     jclass edit_class = (*env)->GetObjectClass(env, editable);
     jmethodID to_string = edit_class ? (*env)->GetMethodID(env, edit_class, "toString", "()Ljava/lang/String;") : NULL;
     jstring string = to_string ? (*env)->CallObjectMethod(env, editable, to_string) : NULL;
     char *out = NULL;
-    if (clean(env) && string) out = string_utf8(env, string);
-    (void)clean(env);
+    if (zj_clean(env) && string) out = string_utf8(env, string);
+    (void)zj_clean(env);
     if (string) (*env)->DeleteLocalRef(env, string);
     if (edit_class) (*env)->DeleteLocalRef(env, edit_class);
     (*env)->DeleteLocalRef(env, editable); (*env)->DeleteLocalRef(env, cls);
     return out;
-}
-static bool hit(JNIEnv *env, jobject view, float x, float y)
-{
-    jclass cls = (*env)->GetObjectClass(env, view);
-    if (!clean(env) || !cls) return false;
-    jmethodID location = (*env)->GetMethodID(env, cls, "getLocationInWindow", "([I)V");
-    jmethodID width = (*env)->GetMethodID(env, cls, "getWidth", "()I");
-    jmethodID height = (*env)->GetMethodID(env, cls, "getHeight", "()I");
-    jmethodID visible = (*env)->GetMethodID(env, cls, "isShown", "()Z");
-    jintArray pos = (*env)->NewIntArray(env, 2); jint xy[2] = {0};
-    bool ok = clean(env) && location && width && height && visible && pos;
-    if (ok) {
-        (*env)->CallVoidMethod(env, view, location, pos);
-        (*env)->GetIntArrayRegion(env, pos, 0, 2, xy);
-        jint w = (*env)->CallIntMethod(env, view, width), h = (*env)->CallIntMethod(env, view, height);
-        jboolean shown = (*env)->CallBooleanMethod(env, view, visible);
-        ok = clean(env) && shown && x >= xy[0] && y >= xy[1] && x < xy[0] + w && y < xy[1] + h;
-    }
-    if (pos) (*env)->DeleteLocalRef(env, pos);
-    (*env)->DeleteLocalRef(env, cls); return ok;
 }
 static const char *voice_action(void)
 {
@@ -593,10 +381,10 @@ static void text_action(JNIEnv *env, const char *action, jobject field)
 static void input_up(JNIEnv *env, float x, float y)
 {
     int index = pressed; pressed = -1;
-    if (index < 0 || !hit(env, buttons[index], x, y)) return;
+    if (index < 0 || !zj_hit(env, buttons[index], x, y)) return;
     if (index == 8) {
         bool next = !details_open;
-        if (set_visible(env, details_view, next)) { details_open = next; (void)text(env, buttons[8], next ? "Less" : "More"); }
+        if (zj_visible(env, details_view, next)) { details_open = next; (void)zj_text(env, buttons[8], next ? "Less" : "More"); }
         return;
     }
     const char *action, *arg;
@@ -605,61 +393,47 @@ static void input_up(JNIEnv *env, float x, float y)
     if (index == 3 || index == 5) { text_action(env, actions[index], index == 3 ? prompt_view : invite_view); return; }
     callback(actions[index], "");
 }
-void zapp_native_ui_input(JNIEnv *env, const AInputEvent *event)
+static void assistant_touch(JNIEnv *env, const AInputEvent *event)
 {
-    if (!callback || !event || AInputEvent_getType(event) != AINPUT_EVENT_TYPE_MOTION) return;
     int32_t action = AMotionEvent_getAction(event) & AMOTION_EVENT_ACTION_MASK;
     float x = AMotionEvent_getX(event, 0), y = AMotionEvent_getY(event, 0);
     if (action == AMOTION_EVENT_ACTION_DOWN) {
         pressed = -1; down_x = x; down_y = y;
         for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); ++i)
-            if (buttons[i] && hit(env, buttons[i], x, y)) { pressed = (int)i; break; }
+            if (buttons[i] && zj_hit(env, buttons[i], x, y)) { pressed = (int)i; break; }
     } else if (action == AMOTION_EVENT_ACTION_MOVE) {
         if (x - down_x > 20 || down_x - x > 20 || y - down_y > 20 || down_y - y > 20) pressed = -1;
     } else if (action == AMOTION_EVENT_ACTION_CANCEL) pressed = -1;
     else if (action == AMOTION_EVENT_ACTION_UP) input_up(env, x, y);
 }
+bool zapp_native_ui_input(JNIEnv *env, const AInputEvent *event)
+{
+    if (zapp_shell_input(env, event)) return true;
+    if (callback && event && zapp_shell_assistant() && AInputEvent_getType(event) == AINPUT_EVENT_TYPE_MOTION) assistant_touch(env, event);
+    return false;
+}
 void zapp_native_ui_update(JNIEnv *env, const char *status, const char *output)
 {
-    if (voice_view && status) (void)text(env, voice_view, status);
-    if (notice_view && output) { (void)text(env, notice_view, output); (void)set_visible(env, notice_view, true); }
+    if (voice_view && status) (void)zj_text(env, voice_view, status);
+    if (notice_view && output) { (void)zj_text(env, notice_view, output); (void)zj_visible(env, notice_view, true); }
+    if (output) zapp_shell_notice(env, output);
 }
 
-static jobject decode_bitmap(JNIEnv *env, const unsigned char *bmp, size_t len)
-{
-    jclass factory = (*env)->FindClass(env, "android/graphics/BitmapFactory");
-    jmethodID decode = factory ? (*env)->GetStaticMethodID(env, factory, "decodeByteArray", "([BII)Landroid/graphics/Bitmap;") : NULL;
-    jbyteArray data = bmp && len ? (*env)->NewByteArray(env, (jsize)len) : NULL;
-    if (data) (*env)->SetByteArrayRegion(env, data, 0, (jsize)len, (const jbyte *)bmp);
-    jobject bitmap = clean(env) && decode && data ? (*env)->CallStaticObjectMethod(env, factory, decode, data, 0, (jint)len) : NULL;
-    return bitmap;
-}
-static bool set_bitmap(JNIEnv *env, jobject view, const unsigned char *bmp, size_t len)
-{
-    if (!view || len > 1024 * 1024) return false;
-    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)clean(env); return false; }
-    jobject bitmap = decode_bitmap(env, bmp, len);
-    jclass image = (*env)->GetObjectClass(env, view);
-    jmethodID set = image ? (*env)->GetMethodID(env, image, "setImageBitmap", "(Landroid/graphics/Bitmap;)V") : NULL;
-    bool ok = clean(env) && set && (!bmp || bitmap);
-    if (ok) { (*env)->CallVoidMethod(env, view, set, bitmap); ok = clean(env); }
-    (void)clean(env); (*env)->PopLocalFrame(env, NULL); return ok;
-}
 
 void zapp_native_ui_preview(JNIEnv *env, const unsigned char *bmp, size_t len)
-{ (void)set_bitmap(env, camera_view, bmp, len); }
+{ (void)zj_bitmap(env, camera_view, bmp, len); zapp_shell_preview(env, bmp, len); }
 
 static void receipt_qr(JNIEnv *env, const char *value)
 {
     if (!strcmp(last_receipt, value)) return;
     last_receipt[0] = 0;
-    if (!*value) { (void)set_bitmap(env, receipt_view, NULL, 0); return; }
+    if (!*value) { (void)zj_bitmap(env, receipt_view, NULL, 0); return; }
     size_t size = 0;
     unsigned char *bmp = zapp_fleet_qr_bmp(value, &size);
-    bool shown = bmp && set_bitmap(env, receipt_view, bmp, size);
+    bool shown = bmp && zj_bitmap(env, receipt_view, bmp, size);
     free(bmp);
     if (shown && strlen(value) < sizeof(last_receipt)) memcpy(last_receipt, value, strlen(value) + 1);
-    else (void)set_bitmap(env, receipt_view, NULL, 0);
+    else (void)zj_bitmap(env, receipt_view, NULL, 0);
 }
 static const char *talk_label(enum zapp_voice_state voice, enum zapp_reply_state reply)
 {
@@ -682,34 +456,34 @@ static bool suggestion_shown(const struct zapp_view *view)
 /* A voice status line stays above the suggestion; only the default hint gives way to it. */
 static void render_voice(JNIEnv *env, const struct zapp_view *view)
 {
-    if (buttons[9]) (void)text(env, buttons[9], talk_label(voice_state, reply_state));
+    if (buttons[9]) (void)zj_text(env, buttons[9], talk_label(voice_state, reply_state));
     bool offer = suggestion_shown(view);
     snprintf(suggestion, sizeof(suggestion), "%s", offer ? view->suggestion : "");
-    if (buttons[15]) { (void)text(env, buttons[15], suggestion); (void)set_visible(env, buttons[15], offer); }
-    if (voice_view) (void)set_visible(env, voice_view, view->voice_status[0] || !offer);
-    if (voice_view) (void)text(env, voice_view, caption(view));
+    if (buttons[15]) { (void)zj_text(env, buttons[15], suggestion); (void)zj_visible(env, buttons[15], offer); }
+    if (voice_view) (void)zj_visible(env, voice_view, view->voice_status[0] || !offer);
+    if (voice_view) (void)zj_text(env, voice_view, caption(view));
     if (buttons[10]) {
-        (void)text(env, buttons[10], !strcmp(view->voice_proposal, "node_start") ? "Confirm start" : "Confirm stop");
-        (void)set_visible(env, buttons[10], view->voice_proposal[0] && !view->busy);
+        (void)zj_text(env, buttons[10], !strcmp(view->voice_proposal, "node_start") ? "Confirm start" : "Confirm stop");
+        (void)zj_visible(env, buttons[10], view->voice_proposal[0] && !view->busy);
     }
 }
 static void render_node(JNIEnv *env, const struct zapp_view *view)
 {
     const char *send_label = reply_state == ZAPP_REPLY_WAITING ? "Stop reply" :
         reply_state == ZAPP_REPLY_CANCELLING ? "Stopping…" : "Send";
-    if (buttons[3]) (void)text(env, buttons[3], send_label);
+    if (buttons[3]) (void)zj_text(env, buttons[3], send_label);
     char status[1100];
     snprintf(status, sizeof(status), "%s%s", view->sync_status[0] ? view->sync_status : "Sync status unknown",
              view->busy ? "\nWorking…" : "");
-    (void)text(env, sync_view, voice_preview ? "The preview app does not run a node." : status);
-    (void)set_visible(env, balance_view, !voice_preview);
+    (void)zj_text(env, sync_view, voice_preview ? "The preview app does not run a node." : status);
+    (void)zj_visible(env, balance_view, !voice_preview);
     char balance[600];
     snprintf(balance, sizeof(balance), "%s%s", view->balance_stale ? "Last known:\n" : "",
              view->balance[0] ? view->balance : "Balance appears when your node is ready");
-    (void)text(env, balance_view, balance);
-    (void)text(env, connection_view, view->connection[0] ? view->connection : "Connect a laptop to use chat.");
+    (void)zj_text(env, balance_view, balance);
+    (void)zj_text(env, connection_view, view->connection[0] ? view->connection : "Connect a laptop to use chat.");
     show_transcript(env, view);
-    (void)set_visible(env, transcript_view, view->transcript[0] || view->pending_question[0]);
+    (void)zj_visible(env, transcript_view, view->transcript[0] || view->pending_question[0]);
 }
 /* Two lines at the top: the phone node and, while a laptop host is paired, the fleet headline. */
 static void render_status(JNIEnv *env, const struct zapp_view *view)
@@ -719,12 +493,12 @@ static void render_status(JNIEnv *env, const struct zapp_view *view)
     snprintf(status, sizeof(status), "%s%s%s", voice_preview ?
              "Preview · separate from your main node" :
              zapp_paced_line(view->pace, view->node_running || view->node_process_running, view->node_line, node, sizeof(node)), fleet[0] ? "\n" : "", fleet);
-    (void)text(env, status_view, status);
+    (void)zj_text(env, status_view, status);
     bool running = view->node_running || view->node_process_running;
     bool shown = !voice_preview && !view->busy;
-    if (buttons[0]) (void)set_visible(env, buttons[0], shown && !running);
+    if (buttons[0]) (void)zj_visible(env, buttons[0], shown && !running);
     /* Stop node also clears a saved Start node choice when that node has exited on its own. */
-    if (buttons[1]) (void)set_visible(env, buttons[1], shown && (running || view->node_wanted));
+    if (buttons[1]) (void)zj_visible(env, buttons[1], shown && (running || view->node_wanted));
 }
 /* The host controls show only while a laptop host is paired and has reported a host; Confirm restart
  * only for a plan the host returned. */
@@ -733,10 +507,10 @@ static void render_ops(JNIEnv *env, const struct zapp_view *view)
     char label[40];
     bool shown = view->fleet_paired && view->ops_host[0] && !voice_preview;
     snprintf(label, sizeof(label), "Host: %s", view->ops_host);
-    if (buttons[16]) (void)text(env, buttons[16], label);
-    for (int i = 16; i <= 18; ++i) if (buttons[i]) (void)set_visible(env, buttons[i], shown);
-    if (buttons[19]) (void)set_visible(env, buttons[19], shown && view->ops_plan[0] && !view->busy);
-    if (ops_view) { (void)text(env, ops_view, view->ops_text); (void)set_visible(env, ops_view, shown && view->ops_text[0]); }
+    if (buttons[16]) (void)zj_text(env, buttons[16], label);
+    for (int i = 16; i <= 18; ++i) if (buttons[i]) (void)zj_visible(env, buttons[i], shown);
+    if (buttons[19]) (void)zj_visible(env, buttons[19], shown && view->ops_plan[0] && !view->busy);
+    if (ops_view) { (void)zj_text(env, ops_view, view->ops_text); (void)zj_visible(env, ops_view, shown && view->ops_text[0]); }
 }
 static void render_fleet(JNIEnv *env, const struct zapp_view *view)
 {
@@ -747,19 +521,19 @@ static void render_fleet(JNIEnv *env, const struct zapp_view *view)
     if (view->fleet_status[0]) {
         snprintf(fleet, sizeof(fleet), "%s%s", view->fleet_stale ? "No current fleet report. Last report:\n\n" : "",
                  view->fleet_stale || !rows ? view->fleet_status : rows);
-        (void)text(env, hosts_view, fleet);
+        (void)zj_text(env, hosts_view, fleet);
     }
     snprintf(fleet, sizeof(fleet), "%s%s%s", view->fleet_preview,
              view->fleet_receipt[0] ? "\nReceipt: " : "", view->fleet_receipt);
     snprintf(pairing, sizeof(pairing), "Your laptop offers private voice and fleet control. "
              "Accept only if the laptop shows code %s.", view->pair_code);
-    (void)text(env, pair_view, pairing);
-    (void)set_visible(env, pair_view, view->pair_offer[0] != 0);
-    for (int i = 12; i <= 13; ++i) if (buttons[i]) (void)set_visible(env, buttons[i], view->pair_offer[0] && !view->busy);
-    (void)text(env, fleet_view, fleet);
-    (void)text(env, notice_view, view->notice);
-    (void)set_visible(env, notice_view, view->notice[0] != 0);
-    (void)text(env, result_view, view->result);
+    (void)zj_text(env, pair_view, pairing);
+    (void)zj_visible(env, pair_view, view->pair_offer[0] != 0);
+    for (int i = 12; i <= 13; ++i) if (buttons[i]) (void)zj_visible(env, buttons[i], view->pair_offer[0] && !view->busy);
+    (void)zj_text(env, fleet_view, fleet);
+    (void)zj_text(env, notice_view, view->notice);
+    (void)zj_visible(env, notice_view, view->notice[0] != 0);
+    (void)zj_text(env, result_view, view->result);
 }
 void zapp_native_ui_render(JNIEnv *env, const struct zapp_view *view)
 {
@@ -772,4 +546,7 @@ void zapp_native_ui_render(JNIEnv *env, const struct zapp_view *view)
     render_fleet(env, view);
     render_ops(env, view);
     receipt_qr(env, view->fleet_receipt);
+    zapp_shell_render(env, view);
 }
+void zapp_native_ui_resume(JNIEnv *env) { zapp_shell_resume(env); }
+void zapp_native_ui_focus(JNIEnv *env) { zapp_shell_immersive(env); }

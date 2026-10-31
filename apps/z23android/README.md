@@ -51,6 +51,54 @@ make launch SDK_ROOT="$ANDROID_SDK_ROOT" ANDROID_SERIAL="$ANDROID_SERIAL"
 Run these commands from `apps/z23android`. `make install` builds the APK before
 installing it. The node stores its data in the app's private storage.
 
+## Home and layouts
+
+The app can be the phone's Home. Its manifest has a second intent filter
+(`MAIN`, `HOME`, `DEFAULT`) and `singleTask` launch mode. Choosing Z23 as Home
+is the owner's decision in Android's own Home settings; the app never changes
+that role. The app hides the system bars (a swipe from the edge shows them
+briefly) and the keyboard still works in text fields.
+
+The Home screen shows the phone card (node line, sync status, balance when
+known), a Z23 apps section, and tiles for Assistant, Apps and Settings. The Z23
+apps section is built from the launcher list: every installed launchable
+package whose name starts with `org.z23.`, except the base app
+`org.z23.nativeapp` and `org.z23.voicepreview*`. Each card opens its app.
+Back from any screen returns Home; Back on Home does nothing. **Assistant**
+opens the voice and fleet screen described below. A pairing offer from a USB
+host opens that screen once when it arrives, and a camera scan shows the
+camera full screen with **Cancel**.
+
+Home is drawn from two data documents, so the look changes without an app
+release:
+
+- Cards: typed JSON, `zcl.phone_card.v1`, `zcl.z23_app_card.v1` and
+  `zcl.app_card.v1`. They carry no token, plan, pairing offer, key or path.
+- A layout recipe, `zcl.layout_recipe.v1` (see `docs/spec/short-video-network.md`
+  section 5.4), plus an optional `theme` of `background`, `text`, `muted` and
+  `accent`, each `#rrggbb`. Containers: `pager_vertical`, `list`, `grid`;
+  arrangements `row`, `column`, `stack`; leaves `video`, `image`, `text`,
+  `counter`, `action`, `avatar`. A container with `"card": "<kind>"` repeats
+  its children once per card of that kind and is omitted when there is none.
+  An `action` names only an action id (`assistant`, `apps`, `settings`, or
+  `launch` with `"field": "label"` inside an app card); a layout cannot name a
+  URL or a method. Limits: 64 KiB, 8 levels, 256 nodes. An unknown primitive, a
+  bad colour or a document over a limit refuses the whole layout; unknown
+  fields are ignored.
+
+Two layouts are built in, `default` (black) and `classic` (light, with the
+list of other apps). **Settings** switches between them and remembers the
+choice in the app's private files. To use your own layout, put it at
+`Android/data/<package>/files/layouts/home.json` (shared storage, for example
+with `adb push`); the app re-reads it when it resumes. An invalid file shows a
+notice with the reason and the built-in layout. Delete the file to return to a
+built-in layout.
+
+The apps list, the **Android home settings** entry and the footer **Apps** and
+**Settings** buttons are drawn by app code, not by the layout, so a bad layout
+never hides them. To stop using Z23 as Home, open **Settings**, then
+**Android home settings**, and choose another Home app.
+
 ## Current limits
 
 The main screen shows one line for the node, one for the fleet, **Talk** and

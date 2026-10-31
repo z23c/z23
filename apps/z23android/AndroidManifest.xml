@@ -12,18 +12,29 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
     <application android:label="Z23" android:icon="@drawable/ic_z23"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:hasCode="true" android:allowBackup="false"
         android:fullBackupContent="false" android:debuggable="false" android:hardwareAccelerated="true"
-        android:extractNativeLibs="true" android:supportsRtl="true">
+        android:extractNativeLibs="true" android:supportsRtl="true" android:enableOnBackInvokedCallback="false">
         <activity android:name="android.app.NativeActivity"
             android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden"
-            android:windowSoftInputMode="adjustResize">
+            android:launchMode="singleTask" android:windowSoftInputMode="adjustResize">
             <meta-data android:name="android.app.lib_name" android:value="z23android" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
         <service android:name="org.z23.nativeapp.NodeService" android:exported="false"
