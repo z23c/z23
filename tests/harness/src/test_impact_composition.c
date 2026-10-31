@@ -6698,7 +6698,7 @@ static bool ic_split_edit_contref(void)
 static bool ic_split_edit_leaflist(void)
 {
     return ic_split_edit_split() &&
-           ic_split_w("mk/extra.mk", "EXTRA = $(D)/big_part.c\n");
+           ic_split_w("mk/extra.mk", "EXTRA = $(D)/other.c $(D)/big_part.c\n");
 }
 
 static bool ic_split_fixture_build(void)
@@ -6713,6 +6713,7 @@ static bool ic_split_fixture_build(void)
         !ic_split_w("core/a/other.c",
                     "int other(void)\n{\n    return 0;\n}\n") ||
         !ic_split_w("Makefile", ic_split_make_base) ||
+        !ic_split_w("mk/extra.mk", "EXTRA = $(D)/other.c\n") ||
         !ic_split_git("git add -A && git commit -qm base && git checkout -q "
                       "-B base"))
         return false;
