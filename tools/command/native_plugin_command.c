@@ -421,7 +421,7 @@ static void plg_response_failed(struct zcl_command_reply *reply, const char *wha
 {
     json_free(&reply->data);
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                           "PLUGIN_RESPONSE_ALLOC", what, true, false,
+                           "PLUGIN_RESPONSE_ALLOC", what, false, true,
                            "plugin operation completed but response allocation failed", "");
 }
 
@@ -456,7 +456,7 @@ void zcl_native_handle_plugin_attest_add(const struct zcl_command_request *reque
     enum plugin_attest_status st = plg_add_paths(root, name, paths, single, path, &source, &added);
     if (st != PLUGIN_ATTEST_OK) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                               plugin_attest_status_code(st), "attest_add", added != 0 || path[0], false,
+                               plugin_attest_status_code(st), "attest_add", false, added != 0 || path[0] != 0,
                                "plugin attest_add refused", source ? source : "");
         (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s",
                        plugin_attest_status_next_action(st));
