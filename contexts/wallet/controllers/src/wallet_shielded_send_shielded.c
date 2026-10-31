@@ -9,6 +9,242 @@
 #include "controllers/wallet_shielded_internal.h"
 #include "jobs/reducer_frontier.h"
 
+/* Select notes until the running total covers target; returns the running
+ * total through notes_total and the selected count through num_sel_notes. */
+static void z_sendmany_shielded_select_notes(
+    const struct db_sapling_note *notes, int num_notes, int64_t target,
+    struct db_sapling_note *selected_notes, size_t *num_sel_notes,
+    int64_t *notes_total)
+{
+        for (int i = 0; i < num_notes; i++) {
+            selected_notes[(*num_sel_notes)++] = notes[i];
+            *notes_total += notes[i].value;
+            if (*notes_total >= target) break;
+        }
+}
+
+/* Load and deserialize the witness of every selected note. Returns 0 on
+ * success; otherwise 1 (not available), 2 (stale) or 3 (deserialize failed),
+ * with the failing note index in *fail_i and, for 2 (stale) only, the
+ * stored witness height in *fail_height.
+ * On failure the witnesses array is already freed. */
+static int z_sendmany_shielded_load_witnesses(
+    struct wallet_rpc_context *ctx,
+    const struct db_sapling_note *selected_notes, size_t num_sel_notes,
+    struct incremental_witness *witnesses,
+    const struct incremental_merkle_tree *dummy_tree,
+    int authoritative_tip, size_t *fail_i, int *fail_height)
+{
+        for (size_t i = 0; i < num_sel_notes; i++) {
+            uint8_t *wblob = NULL;
+            size_t wlen = 0;
+            int wheight = 0;
+            if (!db_sapling_note_load_witness(ctx->node_db,
+                    selected_notes[i].txid, selected_notes[i].output_index,
+                    &wblob, &wlen, &wheight) || !wblob) {
+                free(witnesses);
+                *fail_i = i;
+                return 1;
+            }
+            if (wheight != authoritative_tip) {
+                free(wblob); free(witnesses);
+                *fail_i = i;
+                *fail_height = wheight;
+                return 2;
+            }
+            struct byte_stream ws;
+            stream_init_from_data(&ws, wblob, wlen);
+            if (!incremental_witness_deserialize(&witnesses[i], &ws,
+                    SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH,
+                    dummy_tree->combine, dummy_tree->uncommitted)) {
+                free(wblob); free(witnesses);
+                *fail_i = i;
+                return 3;
+            }
+            free(wblob);
+        }
+        return 0;
+}
+
+/* Return the index of the first witness (from 1) whose root differs from the
+ * anchor, storing that root in wroot; returns 0 when all roots match. */
+static size_t z_sendmany_shielded_first_root_mismatch(
+    struct incremental_witness *witnesses, size_t num_sel_notes,
+    const uint8_t *anchor, struct uint256 *wroot)
+{
+        for (size_t vi = 1; vi < num_sel_notes; vi++) {
+            incremental_witness_root(&witnesses[vi], wroot);
+            if (memcmp(wroot->data, anchor, 32) != 0)
+                return vi;
+        }
+        return 0;
+}
+
+/* Build one spend description per selected note. Returns an error string or
+ * NULL on success. */
+static const char *z_sendmany_shielded_build_spends(
+    struct wallet_tx *wtx, void *proving_ctx,
+    const struct sapling_key_entry *from_z_key,
+    const struct db_sapling_note *selected_notes, size_t num_sel_notes,
+    struct incremental_witness *witnesses, const uint8_t *anchor,
+    uint8_t (*spend_ars)[32])
+{
+        const char *spend_err = NULL;
+
+        for (size_t i = 0; i < num_sel_notes; i++) {
+            struct spend_description *sd = &wtx->tx.v_shielded_spend[i];
+
+            uint8_t witness_path[1 + 32 * 33];
+            size_t witness_path_len = 0;
+            if (!incremental_witness_merkle_path(&witnesses[i],
+                    witness_path, &witness_path_len)) {
+                spend_err = "Failed to extract Merkle path";
+                break;
+            }
+
+            uint64_t position = incremental_tree_size(&witnesses[i].tree) - 1;
+
+            if (!sapling_build_spend_with_ctx(
+                    proving_ctx,
+                    from_z_key->xsk.expsk.ask,
+                    from_z_key->xsk.expsk.nsk,
+                    selected_notes[i].diversifier,
+                    selected_notes[i].pk_d,
+                    selected_notes[i].rcm,
+                    (uint64_t)selected_notes[i].value,
+                    position,
+                    anchor,
+                    witness_path, witness_path_len,
+                    sd->cv.data, sd->nullifier.data,
+                    sd->rk.data, sd->zkproof,
+                    spend_ars[i])) {
+                spend_err = "Failed to build spend proof (anchor mismatch?)";
+                break;
+            }
+
+            memcpy(sd->anchor.data, anchor, 32);
+        }
+        return spend_err;
+}
+
+/* Build the shielded output descriptions (recipients plus change). Returns an
+ * error string or NULL on success. */
+static const char *z_sendmany_shielded_build_outputs(
+    struct wallet_tx *wtx, void *proving_ctx,
+    const struct sapling_key_entry *from_z_key,
+    const uint8_t (*z_diversifiers)[11], const uint8_t (*z_pk_ds)[32],
+    const int64_t *z_amounts, const uint8_t (*z_memos)[512],
+    const bool *z_has_memo, size_t num_z_out,
+    int64_t shielded_change, size_t total_z_outs)
+{
+        const char *spend_err = NULL;
+
+            wtx->tx.v_shielded_output = zcl_calloc(total_z_outs,
+                sizeof(struct output_description), "shielded_outputs");
+            if (!wtx->tx.v_shielded_output) {
+                /* leave num_shielded_output 0; shielded_cleanup frees
+                 * proving_ctx/witnesses/tx and reports the error. */
+                wtx->tx.num_shielded_output = 0;
+                spend_err = "Out of memory (shielded outputs)";
+                return spend_err;
+            }
+            wtx->tx.num_shielded_output = total_z_outs;
+
+            uint8_t ovk[32];
+            memcpy(ovk, from_z_key->xfvk.fvk.ovk, 32);
+
+            for (size_t i = 0; i < num_z_out && !spend_err; i++) {
+                struct output_description *od = &wtx->tx.v_shielded_output[i];
+                if (!sapling_build_output_with_ctx(
+                        proving_ctx, ovk,
+                        z_diversifiers[i], z_pk_ds[i],
+                        (uint64_t)z_amounts[i],
+                        z_has_memo[i] ? z_memos[i] : NULL,
+                        od->cv.data, od->cm.data, od->ephemeral_key.data,
+                        od->enc_ciphertext, od->out_ciphertext, od->zkproof))
+                    spend_err = "Failed to build Sapling output";
+            }
+
+            if (!spend_err && shielded_change > 0) {
+                struct output_description *od =
+                    &wtx->tx.v_shielded_output[num_z_out];
+                if (!sapling_build_output_with_ctx(
+                        proving_ctx, ovk,
+                        from_z_key->diversifier, from_z_key->pk_d,
+                        (uint64_t)shielded_change, NULL,
+                        od->cv.data, od->cm.data, od->ephemeral_key.data,
+                        od->enc_ciphertext, od->out_ciphertext, od->zkproof))
+                    spend_err = "Failed to build change output";
+            }
+        return spend_err;
+}
+
+/* value_balance = sum(spend) - sum(output) */
+static int64_t z_sendmany_shielded_value_balance(
+    const struct db_sapling_note *selected_notes, size_t num_sel_notes,
+    const int64_t *z_amounts, size_t num_z_out, int64_t shielded_change)
+{
+            int64_t spend_total = 0;
+            for (size_t i = 0; i < num_sel_notes; i++)
+                spend_total += selected_notes[i].value;
+            int64_t output_total = 0;
+            for (size_t i = 0; i < num_z_out; i++)
+                output_total += z_amounts[i];
+            if (shielded_change > 0)
+                output_total += shielded_change;
+            return spend_total - output_total;
+}
+
+/* Compute the sighash and produce the spend-auth and binding signatures.
+ * Returns an error string or NULL on success. */
+static const char *z_sendmany_shielded_sign(
+    struct wallet_tx *wtx, void *proving_ctx,
+    const struct sapling_key_entry *from_z_key, const struct chain_params *cp,
+    int height, size_t num_sel_notes, uint8_t (*spend_ars)[32])
+{
+        const char *spend_err = NULL;
+            uint32_t branch_id = consensus_current_epoch_branch_id(
+                height + 1, &cp->consensus);
+            struct sighash_type ht;
+            ht.raw = SIGHASH_ALL;
+            struct precomputed_tx_data txdata;
+            precompute_tx_data(&wtx->tx, &txdata);
+
+            struct script empty_script;
+            empty_script.size = 0;
+            struct uint256 sighash;
+            if (!signature_hash(&empty_script, &wtx->tx, NOT_AN_INPUT, ht, 0,
+                                branch_id, &txdata, &sighash))
+                spend_err = "Binding sighash computation failed";
+
+            for (size_t i = 0; i < num_sel_notes && !spend_err; i++) {
+                /* rsk = ask + ar in Jubjub scalar field (Fs, NOT Fr).
+                 * ask and ar are Fs scalars — using Fr addition would
+                 * produce a wrong result since Fr.p != Fs.p. */
+                uint8_t rsk[32];
+                struct fs ask_fs, ar_fs, rsk_fs;
+                fs_from_bytes(&ask_fs, from_z_key->xsk.expsk.ask);
+                fs_from_bytes(&ar_fs, spend_ars[i]);
+                fs_add(&rsk_fs, &ask_fs, &ar_fs);
+                fs_to_bytes(rsk, &rsk_fs);
+                memory_cleanse(&ask_fs, sizeof(ask_fs));
+                memory_cleanse(&ar_fs, sizeof(ar_fs));
+                memory_cleanse(&rsk_fs, sizeof(rsk_fs));
+
+                if (!redjubjub_sign(rsk, sighash.data, 32,
+                                    wtx->tx.v_shielded_spend[i].spend_auth_sig,
+                                    5 /* GEN_SPENDING_KEY */))
+                    spend_err = "Spend auth signature failed";
+                memory_cleanse(rsk, 32);
+            }
+
+            if (!spend_err &&
+                !zclassic_sapling_binding_sig(proving_ctx,
+                    wtx->tx.value_balance, sighash.data, wtx->tx.binding_sig))
+                spend_err = "Binding signature failed";
+        return spend_err;
+}
+
 /* Shielded-spend path (from-address is a zaddr): spend selected notes,
  * build spend/output descriptions, sign, broadcast. Recipients have
  * already been parsed into the transparent/shielded output arrays by
@@ -79,11 +315,9 @@ bool z_sendmany_shielded(
         struct db_sapling_note selected_notes[256];
         size_t num_sel_notes = 0;
         int64_t notes_total = 0;
-        for (int i = 0; i < num_notes; i++) {
-            selected_notes[num_sel_notes++] = notes[i];
-            notes_total += notes[i].value;
-            if (notes_total >= total_amount + fee) break;
-        }
+        z_sendmany_shielded_select_notes(notes, num_notes, total_amount + fee,
+                                         selected_notes, &num_sel_notes,
+                                         &notes_total);
         if (notes_total < total_amount + fee) {
             json_set_str(result, "Insufficient shielded funds");
             LOG_FAIL("wallet_shielded", "z_sendmany: insufficient shielded funds: have=%lld need=%lld",
@@ -122,35 +356,25 @@ bool z_sendmany_shielded(
         sapling_tree_init(&dummy_tree);
 
         int authoritative_tip = reducer_frontier_external_tip_height();
-        for (size_t i = 0; i < num_sel_notes; i++) {
-            uint8_t *wblob = NULL;
-            size_t wlen = 0;
-            int wheight = 0;
-            if (!db_sapling_note_load_witness(ctx->node_db,
-                    selected_notes[i].txid, selected_notes[i].output_index,
-                    &wblob, &wlen, &wheight) || !wblob) {
-                free(witnesses);
-                json_set_str(result, "Witness not available (run rescanwitnesses)");
-                LOG_FAIL("wallet_shielded", "z_sendmany: witness not available for note %zu", i);
-            }
-            if (wheight != authoritative_tip) {
-                free(wblob); free(witnesses);
-                json_set_str(result,
-                             "Witness stale (run rescanwitnesses)");
-                LOG_FAIL("wallet_shielded",
-                         "z_sendmany: witness height=%d authoritative_tip=%d note=%zu",
-                         wheight, authoritative_tip, i);
-            }
-            struct byte_stream ws;
-            stream_init_from_data(&ws, wblob, wlen);
-            if (!incremental_witness_deserialize(&witnesses[i], &ws,
-                    SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH,
-                    dummy_tree.combine, dummy_tree.uncommitted)) {
-                free(wblob); free(witnesses);
-                json_set_str(result, "Failed to deserialize witness");
-                LOG_FAIL("wallet_shielded", "z_sendmany: witness deserialize failed for note %zu", i);
-            }
-            free(wblob);
+        size_t i = 0;
+        int wheight = 0;
+        int wstat = z_sendmany_shielded_load_witnesses(
+            ctx, selected_notes, num_sel_notes, witnesses, &dummy_tree,
+            authoritative_tip, &i, &wheight);
+        if (wstat == 1) {
+            json_set_str(result, "Witness not available (run rescanwitnesses)");
+            LOG_FAIL("wallet_shielded", "z_sendmany: witness not available for note %zu", i);
+        }
+        if (wstat == 2) {
+            json_set_str(result,
+                         "Witness stale (run rescanwitnesses)");
+            LOG_FAIL("wallet_shielded",
+                     "z_sendmany: witness height=%d authoritative_tip=%d note=%zu",
+                     wheight, authoritative_tip, i);
+        }
+        if (wstat == 3) {
+            json_set_str(result, "Failed to deserialize witness");
+            LOG_FAIL("wallet_shielded", "z_sendmany: witness deserialize failed for note %zu", i);
         }
 
         /* Anchor = witness root at chain tip.
@@ -162,18 +386,17 @@ bool z_sendmany_shielded(
         }
 
         /* Verify ALL witness roots match the anchor */
-        for (size_t vi = 1; vi < num_sel_notes; vi++) {
-            struct uint256 wroot;
-            incremental_witness_root(&witnesses[vi], &wroot);
-            if (memcmp(wroot.data, anchor, 32) != 0) {
-                char ah[65], wh[65];
-                uint256_get_hex((const struct uint256 *)anchor, ah);
-                uint256_get_hex(&wroot, wh);
-                free(witnesses);
-                json_set_str(result, "Witness roots inconsistent (run rescanwitnesses)");
-                LOG_FAIL("wallet_shielded", "z_sendmany: witness %zu root differs from witness 0 "
-                    "w0=%s w%zu=%s", vi, ah, vi, wh);
-            }
+        struct uint256 wroot;
+        size_t vi = z_sendmany_shielded_first_root_mismatch(
+            witnesses, num_sel_notes, anchor, &wroot);
+        if (vi != 0) {
+            char ah[65], wh[65];
+            uint256_get_hex((const struct uint256 *)anchor, ah);
+            uint256_get_hex(&wroot, wh);
+            free(witnesses);
+            json_set_str(result, "Witness roots inconsistent (run rescanwitnesses)");
+            LOG_FAIL("wallet_shielded", "z_sendmany: witness %zu root differs from witness 0 "
+                "w0=%s w%zu=%s", vi, ah, vi, wh);
         }
 
         /* Build transaction */
@@ -231,39 +454,9 @@ bool z_sendmany_shielded(
 
         const char *spend_err = NULL;
 
-        for (size_t i = 0; i < num_sel_notes; i++) {
-            struct spend_description *sd = &wtx.tx.v_shielded_spend[i];
-
-            uint8_t witness_path[1 + 32 * 33];
-            size_t witness_path_len = 0;
-            if (!incremental_witness_merkle_path(&witnesses[i],
-                    witness_path, &witness_path_len)) {
-                spend_err = "Failed to extract Merkle path";
-                break;
-            }
-
-            uint64_t position = incremental_tree_size(&witnesses[i].tree) - 1;
-
-            if (!sapling_build_spend_with_ctx(
-                    proving_ctx,
-                    from_z_key->xsk.expsk.ask,
-                    from_z_key->xsk.expsk.nsk,
-                    selected_notes[i].diversifier,
-                    selected_notes[i].pk_d,
-                    selected_notes[i].rcm,
-                    (uint64_t)selected_notes[i].value,
-                    position,
-                    anchor,
-                    witness_path, witness_path_len,
-                    sd->cv.data, sd->nullifier.data,
-                    sd->rk.data, sd->zkproof,
-                    spend_ars[i])) {
-                spend_err = "Failed to build spend proof (anchor mismatch?)";
-                break;
-            }
-
-            memcpy(sd->anchor.data, anchor, 32);
-        }
+        spend_err = z_sendmany_shielded_build_spends(
+            &wtx, proving_ctx, from_z_key, selected_notes, num_sel_notes,
+            witnesses, anchor, spend_ars);
 
         if (spend_err) goto shielded_cleanup;
 
@@ -271,105 +464,24 @@ bool z_sendmany_shielded(
         int64_t shielded_change = notes_total - total_amount - fee;
         size_t total_z_outs = num_z_out + (shielded_change > 0 ? 1 : 0);
 
-        if (total_z_outs > 0) {
-            wtx.tx.v_shielded_output = zcl_calloc(total_z_outs,
-                sizeof(struct output_description), "shielded_outputs");
-            if (!wtx.tx.v_shielded_output) {
-                /* leave num_shielded_output 0; shielded_cleanup frees
-                 * proving_ctx/witnesses/tx and reports the error. */
-                wtx.tx.num_shielded_output = 0;
-                spend_err = "Out of memory (shielded outputs)";
-                goto shielded_cleanup;
-            }
-            wtx.tx.num_shielded_output = total_z_outs;
-
-            uint8_t ovk[32];
-            memcpy(ovk, from_z_key->xfvk.fvk.ovk, 32);
-
-            for (size_t i = 0; i < num_z_out && !spend_err; i++) {
-                struct output_description *od = &wtx.tx.v_shielded_output[i];
-                if (!sapling_build_output_with_ctx(
-                        proving_ctx, ovk,
-                        z_diversifiers[i], z_pk_ds[i],
-                        (uint64_t)z_amounts[i],
-                        z_has_memo[i] ? z_memos[i] : NULL,
-                        od->cv.data, od->cm.data, od->ephemeral_key.data,
-                        od->enc_ciphertext, od->out_ciphertext, od->zkproof))
-                    spend_err = "Failed to build Sapling output";
-            }
-
-            if (!spend_err && shielded_change > 0) {
-                struct output_description *od =
-                    &wtx.tx.v_shielded_output[num_z_out];
-                if (!sapling_build_output_with_ctx(
-                        proving_ctx, ovk,
-                        from_z_key->diversifier, from_z_key->pk_d,
-                        (uint64_t)shielded_change, NULL,
-                        od->cv.data, od->cm.data, od->ephemeral_key.data,
-                        od->enc_ciphertext, od->out_ciphertext, od->zkproof))
-                    spend_err = "Failed to build change output";
-            }
-        }
+        if (total_z_outs > 0)
+            spend_err = z_sendmany_shielded_build_outputs(
+                &wtx, proving_ctx, from_z_key, z_diversifiers, z_pk_ds,
+                z_amounts, z_memos, z_has_memo, num_z_out, shielded_change,
+                total_z_outs);
 
         if (spend_err) goto shielded_cleanup;
 
         /* Set value_balance = sum(spend) - sum(output) */
-        {
-            int64_t spend_total = 0;
-            for (size_t i = 0; i < num_sel_notes; i++)
-                spend_total += selected_notes[i].value;
-            int64_t output_total = 0;
-            for (size_t i = 0; i < num_z_out; i++)
-                output_total += z_amounts[i];
-            if (shielded_change > 0)
-                output_total += shielded_change;
-            wtx.tx.value_balance = spend_total - output_total;
-        }
+        wtx.tx.value_balance = z_sendmany_shielded_value_balance(
+            selected_notes, num_sel_notes, z_amounts, num_z_out,
+            shielded_change);
 
         /* Compute sighash for spend_auth_sig and binding_sig */
         transaction_compute_hash(&wtx.tx);
 
-        {
-            uint32_t branch_id = consensus_current_epoch_branch_id(
-                height + 1, &cp->consensus);
-            struct sighash_type ht;
-            ht.raw = SIGHASH_ALL;
-            struct precomputed_tx_data txdata;
-            precompute_tx_data(&wtx.tx, &txdata);
-
-            struct script empty_script;
-            empty_script.size = 0;
-            struct uint256 sighash;
-            if (!signature_hash(&empty_script, &wtx.tx, NOT_AN_INPUT, ht, 0,
-                                branch_id, &txdata, &sighash))
-                spend_err = "Binding sighash computation failed";
-
-            for (size_t i = 0; i < num_sel_notes && !spend_err; i++) {
-                /* rsk = ask + ar in Jubjub scalar field (Fs, NOT Fr).
-                 * ask and ar are Fs scalars — using Fr addition would
-                 * produce a wrong result since Fr.p != Fs.p. */
-                uint8_t rsk[32];
-                struct fs ask_fs, ar_fs, rsk_fs;
-                fs_from_bytes(&ask_fs, from_z_key->xsk.expsk.ask);
-                fs_from_bytes(&ar_fs, spend_ars[i]);
-                fs_add(&rsk_fs, &ask_fs, &ar_fs);
-                fs_to_bytes(rsk, &rsk_fs);
-                memory_cleanse(&ask_fs, sizeof(ask_fs));
-                memory_cleanse(&ar_fs, sizeof(ar_fs));
-                memory_cleanse(&rsk_fs, sizeof(rsk_fs));
-
-                if (!redjubjub_sign(rsk, sighash.data, 32,
-                                    wtx.tx.v_shielded_spend[i].spend_auth_sig,
-                                    5 /* GEN_SPENDING_KEY */))
-                    spend_err = "Spend auth signature failed";
-                memory_cleanse(rsk, 32);
-            }
-
-            if (!spend_err &&
-                !zclassic_sapling_binding_sig(proving_ctx,
-                    wtx.tx.value_balance, sighash.data, wtx.tx.binding_sig))
-                spend_err = "Binding signature failed";
-        }
+        spend_err = z_sendmany_shielded_sign(&wtx, proving_ctx, from_z_key, cp,
+                                             height, num_sel_notes, spend_ars);
 
 shielded_cleanup:
         zclassic_sapling_proving_ctx_free(proving_ctx);
