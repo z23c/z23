@@ -146,8 +146,14 @@ never hides them. To stop using Z23 as Home, open **Settings**, then
 
 The Assistant screen shows one line for the node, one for the fleet, **Talk** and
 the conversation, newest exchange first. The node line says whether the node
-is stopped, starting, waiting for peers, catching up (height of target) or in
-sync, with its peer count. The fleet line repeats the paired host's cached
+is stopped, starting, waiting for peers, behind (height of target) or in sync,
+with its peer count. It says "in sync" only within two blocks of the highest
+height the node has heard of from a peer or the paired fleet, and only with
+proof the chain is live: two or more peers, or a fleet height that agrees. With
+fewer peers, or a tip that has not moved for more than 15 minutes (about six
+block times), it reads "Height N · only 1 peer, cannot confirm it is current"
+instead. One rule in `hosts.c` decides the node line and the sentence under
+More. The fleet line repeats the paired host's cached
 fleet headline, read every 60 seconds without probing the hosts again; while a
 laptop host is paired it reads "Fleet · checking" until the first report, so
 the screen does not shift under a tap when the report arrives. While a laptop

@@ -40,6 +40,8 @@ struct controller {
     time_t fleet_at;
     bool seen_responding;
     int64_t seen_height, seen_target, seen_peers; /* Latest node reading, for the suggestion. */
+    int64_t fleet_height;                         /* Highest height the last fleet report named, or -1. */
+    time_t height_moved_at;                       /* When seen_height last changed, or 0 when unknown. */
     char asked[96];                               /* Question last answered by the model. */
     atomic_bool reply_cancel;
     atomic_bool voice_cancel, voice_stop;
@@ -168,9 +170,17 @@ static void observe_node(struct controller *c)
     bool wanted = zapp_node_wanted(&c->runtime);
     bool onion = n.responding && zapp_onion_ready(&c->runtime);
     char status[1024], line[96];
-    zapp_sync_line(n.responding, process_running, n.height, n.target, status, sizeof(status));
+    /* Evidence outside the node: how long its tip has been still, and the fleet's height while that report is current. */
+    time_t now = time(NULL);
+    pthread_mutex_lock(&c->lock);
+    if (!n.responding) c->height_moved_at = 0;
+    else if (n.height != c->seen_height || !c->height_moved_at) c->height_moved_at = now;
+    struct zapp_chain_evidence evidence = {.fleet_height = c->view.fleet_stale ? -1 : c->fleet_height,
+        .quiet_secs = n.responding && c->height_moved_at ? (int64_t)(now - c->height_moved_at) : -1};
+    pthread_mutex_unlock(&c->lock);
+    zapp_sync_line(n.responding, process_running, n.height, n.target, n.peers, &evidence, status, sizeof(status));
     if (stopping) copy_text(status, sizeof(status), "The node is saving its data before it exits.");
-    zapp_node_line(n.responding, process_running, stopping, onion, n.height, n.target, n.peers, line, sizeof(line));
+    zapp_node_line(n.responding, process_running, stopping, onion, n.height, n.target, n.peers, &evidence, line, sizeof(line));
     pthread_mutex_lock(&c->lock);
     c->view.node_running = n.responding;
     c->view.node_process_running = process_running;
@@ -322,6 +332,7 @@ static bool fleet_hosts(struct controller *c, bool refresh, char *out)
     pthread_mutex_lock(&c->lock);
     if (ok) {
         copy_text(c->view.fleet_status, sizeof(c->view.fleet_status), formatted);
+        c->fleet_height = zapp_fleet_height(out);
         c->view.fleet_stale = false;
         ops_track(c, formatted);
         /* An answered fleet request proves the paired host is reachable. */
@@ -760,8 +771,8 @@ static void *worker(void *opaque)
             c->view.node_process_running = process_running;
             c->view.node_wanted = wanted;
             if (!c->view.node_running) {
-                zapp_sync_line(false, process_running, -1, -1, c->view.sync_status, sizeof(c->view.sync_status));
-                zapp_node_line(false, process_running, stopping, false, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
+                zapp_sync_line(false, process_running, -1, -1, -1, NULL, c->view.sync_status, sizeof(c->view.sync_status));
+                zapp_node_line(false, process_running, stopping, false, -1, -1, -1, NULL, c->view.node_line, sizeof(c->view.node_line));
             }
             c->view.busy = false;
             pthread_mutex_unlock(&c->lock);
@@ -782,6 +793,7 @@ bool zapp_controller_start(const char *files, const char *libs, bool preview, vo
     }
     struct controller *c = calloc(1, sizeof(*c));
     if (!c) { pthread_mutex_unlock(&startup_lock); return false; }
+    c->fleet_height = -1;
     atomic_init(&c->reply_cancel, false);
     atomic_init(&c->voice_cancel, false);
     atomic_init(&c->voice_stop, false);
@@ -793,7 +805,7 @@ bool zapp_controller_start(const char *files, const char *libs, bool preview, vo
     c->view.node_wanted = zapp_node_wanted(&c->runtime);
     copy_text(c->files, sizeof(c->files), files); c->notify = notify;
     copy_text(c->view.sync_status, sizeof(c->view.sync_status), "Start the node to begin synchronization.");
-    zapp_node_line(false, c->view.node_process_running, false, false, -1, -1, -1, c->view.node_line, sizeof(c->view.node_line));
+    zapp_node_line(false, c->view.node_process_running, false, false, -1, -1, -1, NULL, c->view.node_line, sizeof(c->view.node_line));
     c->view.fleet_paired = zapp_speech_client_has_host(files);
     copy_text(c->view.connection, sizeof(c->view.connection), c->view.fleet_paired ?
               "Laptop host paired. Connecting." : "Private assistant: pair your laptop host over USB.");

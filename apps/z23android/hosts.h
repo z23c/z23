@@ -18,11 +18,23 @@ const char *zapp_fleet_line(const char *report, bool stale, bool paired, char *o
 /* Writes value with comma thousands separators, which models copy more reliably than long digit
  * runs; negative values are written plainly. Returns out. */
 const char *zapp_grouped(int64_t value, char out[32]);
+/* Evidence about the chain beyond the node's own height. fleet_height is the highest height a
+ * reachable fleet host reports, or -1; quiet_secs is how long the node's tip has not moved, or -1. */
+struct zapp_chain_evidence { int64_t fleet_height, quiet_secs; };
+/* A node is called in sync only within ZAPP_CHAIN_SKEW blocks of the highest height it has heard of,
+ * and only with proof the chain is live: at least ZAPP_CHAIN_MIN_PEERS peers, or a fleet height that
+ * agrees. With fewer peers, or a tip silent for more than ZAPP_CHAIN_QUIET_SECS (about six block
+ * times), it says what it knows and that it cannot confirm. */
+enum { ZAPP_CHAIN_SKEW = 2, ZAPP_CHAIN_MIN_PEERS = 2, ZAPP_CHAIN_QUIET_SECS = 900 };
+/* The highest height any reachable host of a fleet snapshot (the laptop host's JSON) reports; -1 for none. */
+int64_t zapp_fleet_height(const char *json);
 /* One line for the phone node on the main screen. stopping wins until the node exits; height,
  * target and peers are negative when unknown; target is the highest height reported by peers.
- * onion_ready adds the onion service state, shown only while the node responds. Returns out. */
+ * onion_ready adds the onion service state, shown only while the node responds. evidence may be NULL.
+ * Returns out. */
 const char *zapp_node_line(bool responding, bool process_running, bool stopping, bool onion_ready,
-                           int64_t height, int64_t target, int64_t peers, char *out, size_t cap);
+                           int64_t height, int64_t target, int64_t peers,
+                           const struct zapp_chain_evidence *evidence, char *out, size_t cap);
 /* The sentence under More that adds what the node line does not say: how many blocks are left,
  * or that none are. Arguments as for zapp_node_line. Returns out. */
 /* The pace the node reports in a status reply (data.pace), normal when the reply lacks it, the word is
@@ -33,8 +45,8 @@ enum zapp_pace zapp_status_pace(const char *status);
  * Returns out. */
 const char *zapp_paced_line(enum zapp_pace pace, bool process_running, const char *node_line,
                             char *out, size_t cap);
-const char *zapp_sync_line(bool responding, bool process_running, int64_t height, int64_t target,
-                           char *out, size_t cap);
+const char *zapp_sync_line(bool responding, bool process_running, int64_t height, int64_t target, int64_t peers,
+                           const struct zapp_chain_evidence *evidence, char *out, size_t cap);
 /* Hosts not in sync in a zapp_hosts_format report, read from its headline; 0 for an empty or
  * unreadable report. */
 int zapp_fleet_attention(const char *report);

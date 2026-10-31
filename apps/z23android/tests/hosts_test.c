@@ -103,6 +103,7 @@ static void suggestion_tests(void)
     assert(!strcmp(zapp_suggestion(false, true, 10, 100, 0, trouble, NULL, q, sizeof(q)), ""));
     assert(!strcmp(zapp_suggestion(true, true, 100, 100, 0, calm, NULL, q, sizeof(q)), "Why is my node waiting for peers?"));
     assert(!strcmp(zapp_suggestion(true, true, 100, 0, 3, calm, NULL, q, sizeof(q)), "Why is my node waiting for peers?"));
+    assert(!strcmp(zapp_suggestion(true, true, 100, 100, 1, calm, NULL, q, sizeof(q)), "Why is my node waiting for peers?"));
     assert(!strcmp(zapp_suggestion(true, true, 10, 100, 4, calm, NULL, q, sizeof(q)), "How long until my node catches up?"));
     assert(!strcmp(zapp_suggestion(true, true, 10, 100, 4, trouble, NULL, q, sizeof(q)), "How long until my node catches up?"));
     assert(!strcmp(zapp_suggestion(true, true, 100, 100, 4, trouble, NULL, q, sizeof(q)), "Which hosts need attention?"));
@@ -158,6 +159,55 @@ static void ops_reply_tests(void)
     assert(!zapp_ops_view("{\"host\":\"r1\",\"action\":\"plan\",\"plan_id\":\"short\",\"text\":\"x\"}", text, sizeof(text), plan) && !plan[0]);
     assert(!zapp_ops_view("nope", text, sizeof(text), plan) && !zapp_ops_view(NULL, text, sizeof(text), plan));
 }
+/* Node and sync lines when the chain's liveness is uncertain: peers, a still tip and the fleet's height. */
+static void chain_evidence_tests(void)
+{
+    char line[96];
+    char long_line[160];
+    /* The phone case of 2026-10-31: one stuck peer reports the node's own height and the chain moved on. */
+    assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304001, 1, NULL, line, sizeof(line)),
+                   "Height 3,304,001 · only 1 peer, cannot confirm it is current · onion ready"));
+    assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304001, 0, NULL, line, sizeof(line)),
+                   "Height 3,304,001 · no peers, cannot confirm it is current · onion ready"));
+    assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304001, -1, NULL, line, sizeof(line)),
+                   "Height 3,304,001 · no peer count, cannot confirm it is current · onion ready"));
+    assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304001, 2, NULL, line, sizeof(line)),
+                   "Node in sync · 3,304,001 · 2 peers · onion ready"));
+    {
+        /* Fleet height: behind by it, or confirmed by it when one peer agrees with it. */
+        const struct zapp_chain_evidence ahead = {.fleet_height = 3304010, .quiet_secs = 0};
+        const struct zapp_chain_evidence agrees = {.fleet_height = 3304002, .quiet_secs = 5000};
+        const struct zapp_chain_evidence quiet = {.fleet_height = -1, .quiet_secs = ZAPP_CHAIN_QUIET_SECS + 1};
+        const struct zapp_chain_evidence brief = {.fleet_height = -1, .quiet_secs = ZAPP_CHAIN_QUIET_SECS};
+        assert(!strcmp(zapp_node_line(true, true, false, false, 3304001, 3304001, 1, &ahead, line, sizeof(line)),
+                       "Behind · 3,304,001 of 3,304,010 · onion starting"));
+        assert(!strcmp(zapp_node_line(true, true, false, false, 3304001, 3304001, 1, &agrees, line, sizeof(line)),
+                       "Node in sync · 3,304,001 · 1 peer · onion starting"));
+        assert(!strcmp(zapp_node_line(true, true, false, false, 3304001, 0, 0, &agrees, line, sizeof(line)),
+                       "Node in sync · 3,304,001 · 0 peers · onion starting"));
+        assert(!strcmp(zapp_node_line(true, true, false, false, 3304001, 3304001, 5, &quiet, line, sizeof(line)),
+                       "Height 3,304,001 · no new block for 15 min, cannot confirm it is current · onion starting"));
+        assert(!strcmp(zapp_node_line(true, true, false, false, 3304001, 3304001, 5, &brief, line, sizeof(line)),
+                       "Node in sync · 3,304,001 · 5 peers · onion starting"));
+        /* Two blocks apart is within the skew; three is behind. */
+        assert(!strncmp(zapp_node_line(true, true, false, false, 3304001, 3304003, 5, NULL, line, sizeof(line)),
+                        "Node in sync", 12));
+        assert(!strncmp(zapp_node_line(true, true, false, false, 3304001, 3304004, 5, NULL, line, sizeof(line)),
+                        "Behind · 3,304,001 of 3,304,004", 31));
+        assert(!strcmp(zapp_sync_line(true, true, 3304001, 3304001, 1, NULL, long_line, sizeof(long_line)),
+                       "Your node has every block it can see, but with only 1 peer it cannot confirm it is current."));
+        assert(!strcmp(zapp_sync_line(true, true, 3304001, 3304001, 1, &ahead, long_line, sizeof(long_line)), "9 blocks to go."));
+        assert(!strcmp(zapp_sync_line(true, true, 3304001, 3304001, 5, &quiet, long_line, sizeof(long_line)),
+                       "Your node has every block it can see, but with no new block for 15 min it cannot confirm it is current."));
+    }
+    {
+        static const char fleet[] = "{\"hosts\":[{\"host\":\"r1\",\"reachable\":true,\"height\":3304010,\"reference_height\":3304011},"
+            "{\"host\":\"r2\",\"reachable\":true,\"height\":3304009},{\"host\":\"mac\",\"reachable\":false,\"height\":9999999}]}";
+        assert(zapp_fleet_height(fleet) == 3304011);
+        assert(zapp_fleet_height("{\"hosts\":[{\"host\":\"r1\",\"reachable\":false,\"height\":5}]}") == -1);
+        assert(zapp_fleet_height("not json") == -1 && zapp_fleet_height(NULL) == -1 && zapp_fleet_height("{}") == -1);
+    }
+}
 int main(void)
 {
     static const char snapshot[] = "{\"hosts\":["
@@ -210,22 +260,23 @@ int main(void)
     assert(zapp_pair_code("{\"port\":8771,\"token\":\"00\"}", b) && strcmp(a, b));
     assert(!zapp_pair_code("", a) && !zapp_pair_code(NULL, a));
     char line[96];
-    assert(!strcmp(zapp_node_line(false, false, false, false, -1, -1, -1, line, sizeof(line)), "Node stopped"));
-    assert(!strcmp(zapp_node_line(true, true, true, true, 3301553, 3301553, 4, line, sizeof(line)), "Node stopping"));
-    assert(!strcmp(zapp_node_line(false, true, false, true, -1, -1, -1, line, sizeof(line)), "Node starting"));
-    assert(!strcmp(zapp_node_line(true, true, false, false, -1, -1, 2, line, sizeof(line)),
+    assert(!strcmp(zapp_node_line(false, false, false, false, -1, -1, -1, NULL, line, sizeof(line)), "Node stopped"));
+    assert(!strcmp(zapp_node_line(true, true, true, true, 3301553, 3301553, 4, NULL, line, sizeof(line)), "Node stopping"));
+    assert(!strcmp(zapp_node_line(false, true, false, true, -1, -1, -1, NULL, line, sizeof(line)), "Node starting"));
+    assert(!strcmp(zapp_node_line(true, true, false, false, -1, -1, 2, NULL, line, sizeof(line)),
                    "Node running · 2 peers · onion starting"));
-    assert(!strcmp(zapp_node_line(true, true, false, true, -1, -1, 2, line, sizeof(line)),
+    assert(!strcmp(zapp_node_line(true, true, false, true, -1, -1, 2, NULL, line, sizeof(line)),
                    "Node running · 2 peers · onion ready"));
-    assert(!strcmp(zapp_node_line(true, true, false, false, 3301133, 0, 0, line, sizeof(line)),
+    assert(!strcmp(zapp_node_line(true, true, false, false, 3301133, 0, 0, NULL, line, sizeof(line)),
                    "Node waiting for peers · 3,301,133 · onion starting"));
-    assert(!strcmp(zapp_node_line(true, true, false, true, 3301133, 3301537, 1, line, sizeof(line)),
-                   "Node catching up · 3,301,133 of 3,301,537 · onion ready"));
-    assert(!strcmp(zapp_node_line(true, false, false, true, 3301553, 3301553, 1, line, sizeof(line)),
-                   "Node in sync · 3,301,553 · 1 peer · onion ready"));
-    assert(!strcmp(zapp_node_line(true, true, false, false, 3301554, 3301553, -1, line, sizeof(line)),
-                   "Node in sync · 3,301,554 · onion starting"));
-    const char *sync_text = "Node catching up · 3,301,133 of 3,301,537";
+    assert(!strcmp(zapp_node_line(true, true, false, true, 3301133, 3301537, 4, NULL, line, sizeof(line)),
+                   "Behind · 3,301,133 of 3,301,537 · onion ready"));
+    assert(!strcmp(zapp_node_line(true, false, false, true, 3301553, 3301553, 4, NULL, line, sizeof(line)),
+                   "Node in sync · 3,301,553 · 4 peers · onion ready"));
+    assert(!strcmp(zapp_node_line(true, true, false, false, 3301554, 3301553, 4, NULL, line, sizeof(line)),
+                   "Node in sync · 3,301,554 · 4 peers · onion starting"));
+    chain_evidence_tests();
+    const char *sync_text = "Behind · 3,301,133 of 3,301,537";
     const char *gentle_reply = "{\"ok\":true,\"data\":{\"provable_tip\":5,\"pace\":\"gentle\"}}";
     const char *old_reply = "{\"ok\":true,\"data\":{\"provable_tip\":5}}";
     assert(!strcmp(zapp_paced_line(zapp_status_pace(gentle_reply), true, sync_text, line, sizeof(line)),
@@ -249,17 +300,17 @@ int main(void)
         assert(!strcmp(zapp_paced_line(ZAPP_PACE_GENTLE, true, stopping, line, sizeof(line)), stopping));
         assert(!strcmp(zapp_paced_line(ZAPP_PACE_PAUSE, true, stopping, line, sizeof(line)), stopping));
     }
-    assert(!strcmp(zapp_sync_line(false, false, -1, -1, line, sizeof(line)),
+    assert(!strcmp(zapp_sync_line(false, false, -1, -1, 4, NULL, line, sizeof(line)),
                    "Start the node to begin synchronization."));
-    assert(!strcmp(zapp_sync_line(false, true, -1, -1, line, sizeof(line)), "Waiting for the node to answer."));
-    assert(!strcmp(zapp_sync_line(true, true, -1, 3301553, line, sizeof(line)),
+    assert(!strcmp(zapp_sync_line(false, true, -1, -1, 4, NULL, line, sizeof(line)), "Waiting for the node to answer."));
+    assert(!strcmp(zapp_sync_line(true, true, -1, 3301553, 4, NULL, line, sizeof(line)),
                    "Waiting for the node to report its height."));
-    assert(!strcmp(zapp_sync_line(true, true, 3301133, 0, line, sizeof(line)),
+    assert(!strcmp(zapp_sync_line(true, true, 3301133, 0, 4, NULL, line, sizeof(line)),
                    "Waiting for a peer that reports the current chain."));
-    assert(!strcmp(zapp_sync_line(true, true, 3301900, 3301812, line, sizeof(line)),
+    assert(!strcmp(zapp_sync_line(true, true, 3301900, 3301812, 4, NULL, line, sizeof(line)),
                    "Your node has every block its peers report."));
-    assert(!strcmp(zapp_sync_line(true, true, 3300133, 3301537, line, sizeof(line)), "1,404 blocks to go."));
-    assert(!strcmp(zapp_sync_line(true, true, 3301536, 3301537, line, sizeof(line)), "1 block to go."));
+    assert(!strcmp(zapp_sync_line(true, true, 3300133, 3301537, 4, NULL, line, sizeof(line)), "1,404 blocks to go."));
+    assert(!strcmp(zapp_sync_line(true, true, 3301536, 3301537, 4, NULL, line, sizeof(line)), "1 block to go."));
     puts("hosts tests passed");
     return 0;
 }

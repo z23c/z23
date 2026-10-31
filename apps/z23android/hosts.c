@@ -52,18 +52,46 @@ const char *zapp_grouped(int64_t value, char out[32])
     out[at] = 0;
     return out;
 }
+/* The one rule for "is this node's chain current". A node is current only when it is within the
+ * skew of the highest height it has heard of (a peer's or the fleet's) and has evidence the chain is
+ * live: enough peers, or a fleet height that agrees. Without that evidence, a quiet tip is unconfirmed,
+ * never "in sync". Both the node line and the sync sentence read this, so they cannot disagree. */
+enum chain_state { CHAIN_WAITING, CHAIN_BEHIND, CHAIN_UNCONFIRMED, CHAIN_CURRENT };
+struct chain_verdict { enum chain_state state; int64_t reference; char reason[48]; };
+static int64_t abs_gap(int64_t a, int64_t b) { return a > b ? a - b : b - a; }
+static struct chain_verdict chain_verdict(int64_t height, int64_t target, int64_t peers,
+                                          const struct zapp_chain_evidence *ev)
+{
+    const int64_t fleet = ev ? ev->fleet_height : -1, quiet = ev ? ev->quiet_secs : -1;
+    struct chain_verdict v = {.reference = target > fleet ? target : fleet};
+    if (v.reference <= 0) { v.state = CHAIN_WAITING; return v; }
+    if (v.reference - height > ZAPP_CHAIN_SKEW) { v.state = CHAIN_BEHIND; return v; }
+    const bool fleet_agrees = fleet >= 0 && abs_gap(fleet, height) <= ZAPP_CHAIN_SKEW;
+    v.state = CHAIN_UNCONFIRMED;
+    if (!fleet_agrees && peers < ZAPP_CHAIN_MIN_PEERS)
+        snprintf(v.reason, sizeof(v.reason), peers == 1 ? "only 1 peer" : peers == 0 ? "no peers" : "no peer count");
+    else if (!fleet_agrees && quiet > ZAPP_CHAIN_QUIET_SECS)
+        snprintf(v.reason, sizeof(v.reason), "no new block for %lld min", (long long)(quiet / 60));
+    else v.state = CHAIN_CURRENT;
+    return v;
+}
 const char *zapp_node_line(bool responding, bool process_running, bool stopping, bool onion_ready,
-                           int64_t height, int64_t target, int64_t peers, char *out, size_t cap)
+                           int64_t height, int64_t target, int64_t peers,
+                           const struct zapp_chain_evidence *evidence, char *out, size_t cap)
 {
     char at[32], top[32], count[40] = "";
     const char *onion = responding ? (onion_ready ? " · onion ready" : " · onion starting") : "";
     if (peers >= 0) snprintf(count, sizeof(count), " · %lld %s", (long long)peers, peers == 1 ? "peer" : "peers");
+    const struct chain_verdict v = chain_verdict(height, target, peers, evidence);
     if (stopping) snprintf(out, cap, "Node stopping");
     else if (!responding) snprintf(out, cap, "Node %s", process_running ? "starting" : "stopped");
     else if (height < 0) snprintf(out, cap, "Node running%s%s", count, onion);
-    else if (target <= 0) snprintf(out, cap, "Node waiting for peers · %s%s", zapp_grouped(height, at), onion);
-    else if (height >= target) snprintf(out, cap, "Node in sync · %s%s%s", zapp_grouped(height, at), count, onion);
-    else snprintf(out, cap, "Node catching up · %s of %s%s", zapp_grouped(height, at), zapp_grouped(target, top), onion);
+    else if (v.state == CHAIN_WAITING) snprintf(out, cap, "Node waiting for peers · %s%s", zapp_grouped(height, at), onion);
+    else if (v.state == CHAIN_BEHIND)
+        snprintf(out, cap, "Behind · %s of %s%s", zapp_grouped(height, at), zapp_grouped(v.reference, top), onion);
+    else if (v.state == CHAIN_UNCONFIRMED)
+        snprintf(out, cap, "Height %s · %s, cannot confirm it is current%s", zapp_grouped(height, at), v.reason, onion);
+    else snprintf(out, cap, "Node in sync · %s%s%s", zapp_grouped(height, at), count, onion);
     return out;
 }
 enum zapp_pace zapp_status_pace(const char *status)
@@ -90,18 +118,38 @@ const char *zapp_paced_line(enum zapp_pace pace, bool process_running, const cha
     snprintf(out, cap, "%s", text ? text : "");
     return out;
 }
-const char *zapp_sync_line(bool responding, bool process_running, int64_t height, int64_t target,
-                           char *out, size_t cap)
+const char *zapp_sync_line(bool responding, bool process_running, int64_t height, int64_t target, int64_t peers,
+                           const struct zapp_chain_evidence *evidence, char *out, size_t cap)
 {
     char gap[32];
+    const struct chain_verdict v = chain_verdict(height, target, peers, evidence);
     if (!responding) snprintf(out, cap, "%s", process_running ?
         "Waiting for the node to answer." : "Start the node to begin synchronization.");
     else if (height < 0) snprintf(out, cap, "Waiting for the node to report its height.");
-    else if (target <= 0) snprintf(out, cap, "Waiting for a peer that reports the current chain.");
-    else if (height >= target) snprintf(out, cap, "Your node has every block its peers report.");
-    else snprintf(out, cap, "%s %s to go.", zapp_grouped(target - height, gap),
-                  target - height == 1 ? "block" : "blocks");
+    else if (v.state == CHAIN_WAITING) snprintf(out, cap, "Waiting for a peer that reports the current chain.");
+    else if (v.reference > height) snprintf(out, cap, "%s %s to go.", zapp_grouped(v.reference - height, gap),
+                                            v.reference - height == 1 ? "block" : "blocks");
+    else if (v.state == CHAIN_UNCONFIRMED)
+        snprintf(out, cap, "Your node has every block it can see, but with %s it cannot confirm it is current.", v.reason);
+    else snprintf(out, cap, "Your node has every block its peers report.");
     return out;
+}
+/* The highest height any reachable host of a zapp_hosts_format snapshot reports, from its node or its
+ * zclassicd; -1 when none does. The fleet's height is evidence the chain has reached that far. */
+int64_t zapp_fleet_height(const char *json)
+{
+    struct json_value root = {0};
+    int64_t best = -1;
+    const struct json_value *hosts = json && json_read(&root, json, strlen(json)) ? json_get(&root, "hosts") : NULL;
+    for (size_t i = 0; hosts && hosts->type == JSON_ARR && i < hosts->num_children; i++) {
+        const struct json_value *row = json_at(hosts, i), *reachable = json_get(row, "reachable");
+        int64_t value;
+        if (!reachable || reachable->type != JSON_BOOL || !json_get_bool(reachable)) continue;
+        if (count_of(row, "height", &value) && value > best) best = value;
+        if (count_of(row, "reference_height", &value) && value > best) best = value;
+    }
+    json_free(&root);
+    return best;
 }
 /* "in sync", blocks behind or ahead of the host's zclassicd, then the height. A host that answered the
  * probe without a height has a node that did not answer; a negative height is unknown. Without the
@@ -251,7 +299,7 @@ const char *zapp_suggestion(bool paired, bool responding, int64_t height, int64_
     first_attention_host(report, host, sizeof(host));
     if (host[0]) snprintf(drill, sizeof(drill), "What is wrong with %s?", host);
     const char *const ask[] = {
-        responding && (peers == 0 || target <= 0) ? "Why is my node waiting for peers?" : "",
+        responding && ((peers >= 0 && peers < ZAPP_CHAIN_MIN_PEERS) || target <= 0) ? "Why is my node waiting for peers?" : "",
         responding && height >= 0 && height < target ? "How long until my node catches up?" : "",
         zapp_fleet_attention(report) > 0 ? "Which hosts need attention?" : "", drill, "How is my fleet?"};
     out[0] = 0;
