@@ -6701,35 +6701,46 @@ static bool ic_split_edit_leaflist(void)
            ic_split_w("mk/extra.mk", "EXTRA = $(D)/other.c $(D)/big_part.c\n");
 }
 
-static bool ic_split_fixture_build(void)
+static bool ic_split_base_build(void)
 {
     if (system("rm -rf " IC_FIX_SPLIT " && mkdir -p " IC_SPLIT_REPO
                " && cd " IC_SPLIT_REPO " && git init -q . && git config "
                "user.email f@example.invalid && git config user.name f && "
                "git config commit.gpgsign false >/dev/null 2>&1") != 0)
         return false;
-    if (!ic_split_w("core/a/big.c", ic_split_big_base) ||
-        !ic_split_w("core/a/a.h", "/* a */\n") ||
-        !ic_split_w("core/a/other.c",
-                    "int other(void)\n{\n    return 0;\n}\n") ||
-        !ic_split_w("Makefile", ic_split_make_base) ||
-        !ic_split_w("mk/extra.mk", "EXTRA = $(D)/other.c\n") ||
-        !ic_split_git("git add -A && git commit -qm base && git checkout -q "
-                      "-B base"))
-        return false;
-    return ic_split_branch("split", ic_split_edit_split) &&
-           ic_split_branch("included", ic_split_edit_included) &&
-           ic_split_branch("header", ic_split_edit_header) &&
-           ic_split_branch("lone", ic_split_edit_lone) &&
-           ic_split_branch("deleted", ic_split_edit_deleted) &&
-           ic_split_branch("foreign", ic_split_edit_foreign) &&
-           ic_split_branch("unlisted", ic_split_edit_unlisted) &&
-           ic_split_branch("splitdel", ic_split_edit_split_deleted) &&
-           ic_split_branch("nobase", ic_split_edit_split_nobase) &&
-           ic_split_branch("macrofn", ic_split_edit_macrofn) &&
-           ic_split_branch("contref", ic_split_edit_contref) &&
-           ic_split_branch("leaflist", ic_split_edit_leaflist) &&
-           ic_split_git("git rev-parse base > ../base.sha");
+    return ic_split_w("core/a/big.c", ic_split_big_base) &&
+           ic_split_w("core/a/a.h", "/* a */\n") &&
+           ic_split_w("core/a/other.c",
+                      "int other(void)\n{\n    return 0;\n}\n") &&
+           ic_split_w("Makefile", ic_split_make_base) &&
+           ic_split_w("mk/extra.mk", "EXTRA = $(D)/other.c\n") &&
+           ic_split_git("git add -A && git commit -qm base && git checkout -q "
+                        "-B base");
+}
+
+static bool ic_split_fixture_build(void)
+{
+    static const struct {
+        const char *name;
+        bool (*edit)(void);
+    } branches[] = {
+        {"split", ic_split_edit_split},
+        {"included", ic_split_edit_included},
+        {"header", ic_split_edit_header},
+        {"lone", ic_split_edit_lone},
+        {"deleted", ic_split_edit_deleted},
+        {"foreign", ic_split_edit_foreign},
+        {"unlisted", ic_split_edit_unlisted},
+        {"splitdel", ic_split_edit_split_deleted},
+        {"nobase", ic_split_edit_split_nobase},
+        {"macrofn", ic_split_edit_macrofn},
+        {"contref", ic_split_edit_contref},
+        {"leaflist", ic_split_edit_leaflist},
+    };
+    if (!ic_split_base_build()) return false;
+    for (size_t i = 0; i < sizeof branches / sizeof branches[0]; i++)
+        if (!ic_split_branch(branches[i].name, branches[i].edit)) return false;
+    return ic_split_git("git rev-parse base > ../base.sha");
 }
 
 struct ic_split_case {

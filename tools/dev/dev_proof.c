@@ -2156,18 +2156,31 @@ static void dp_split_stmt_add(struct dp_split_parse *s, char c)
     s->stmt[s->slen] = '\0';
 }
 
+/* The ')' matching the '(' at `open`, or NULL when it never closes. */
+static const char *dp_split_close(const char *open)
+{
+    int nest = 0;
+    for (const char *q = open; *q; q++) {
+        nest += (*q == '(') - (*q == ')');
+        if (nest == 0) return q;
+    }
+    return NULL;
+}
+
+static bool dp_split_has_lower(const char *start, const char *end)
+{
+    for (const char *q = start; q < end; q++)
+        if (*q >= 'a' && *q <= 'z') return true;
+    return false;
+}
+
 /* The name of the function whose declarator is the trimmed text `st`: the
  * identifier before the first '(' when that parameter list closes the
  * declarator, a type token precedes it, and it is not all capitals. */
 static bool dp_split_name(const char *st, size_t n, const char **start,
                           const char **end)
 {
-    const char *open = strchr(st, '('), *close = NULL;
-    int nest = 0;
-    for (const char *q = open; *q && !close; q++) {
-        nest += (*q == '(') - (*q == ')');
-        if (nest == 0) close = q;
-    }
+    const char *open = strchr(st, '('), *close = dp_split_close(open);
     if (!close || close != st + n - 1) return false;
     *end = open;
     while (*end > st && (*end)[-1] == ' ') (*end)--;
@@ -2175,9 +2188,7 @@ static bool dp_split_name(const char *st, size_t n, const char **start,
     while (*start > st && dp_split_ident((*start)[-1])) (*start)--;
     if (*start == st || *start == *end || (**start >= '0' && **start <= '9'))
         return false;
-    for (const char *q = *start; q < *end; q++)
-        if (*q >= 'a' && *q <= 'z') return true;
-    return false;
+    return dp_split_has_lower(*start, *end);
 }
 
 /* The declarator of a '{' at file scope: name it, or fail closed. */
@@ -2377,6 +2388,18 @@ static void dp_changed_set_split_classify(
     }
 }
 
+/* Mark a structural row. With `kinds` the caller settles an added `.c`
+ * itself (it may be a split out of a modified sibling); without it every add
+ * is structural. */
+static void dp_changed_set_mark_row(struct zcl_dev_proof_changed_set *mark,
+                                    const char *path, char status, bool kinds)
+{
+    bool deferred = kinds && status == 'A' && dp_split_is_c(path);
+    if (!dp_changed_set_structural_change(status) || deferred) return;
+    if (!mark->structural_path) mark->structural_path = path;
+    mark->structural_count++;
+}
+
 /* Point one path reference per status row into the buffer. Presence changes
  * to headers can flip __has_include without leaving any old depfile edge, so
  * an added, deleted or type-changed row is kept and marked in `mark`: it
@@ -2408,13 +2431,7 @@ static bool dp_changed_set_rows(char *bytes, size_t len, size_t count, const cha
                        "changed_set_invalid_or_truncated row=%zu", stored + 1);
             return false;
         }
-        /* With `kinds` the caller settles an added `.c` itself (it may be a
-         * split out of a modified sibling); without it every add is structural. */
-        bool deferred = kinds && status == 'A' && dp_split_is_c(path);
-        if (dp_changed_set_structural_change(status) && !deferred) {
-            if (!mark->structural_path) mark->structural_path = path;
-            mark->structural_count++;
-        }
+        dp_changed_set_mark_row(mark, path, status, kinds != NULL);
         if (kinds) kinds[stored] = status;
         refs[stored++] = path;
         if (status != 'D' && mark->current_files)
