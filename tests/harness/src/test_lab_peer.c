@@ -292,8 +292,8 @@ static int case_offer_too_long(void)
     char pad[2200], tsv[800];
     lpt_ids(&i);
     memcpy(pad, ",\"pad\":\"", 8);
-    memset(pad + 8, 'x', 1900);
-    memcpy(pad + 1908, "\"", 2);
+    memset(pad + 8, 'x', 1700);
+    memcpy(pad + 1708, "\"", 2);
     if (!lpt_setup(&e, "offer_long") || !lpt_send_resps(&e, &i, pad))
         return 1;
     const int rc = lpt_offer_run(&e, &i);
