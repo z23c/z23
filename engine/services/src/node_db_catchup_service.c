@@ -670,6 +670,128 @@ static int catchup_advance_sparse_tip(
     return -1; // raw-return-ok:caller logs "final commit missing tip hash" and fails the walk
 }
 
+static bool catchup_args_invalid(const struct node_db *ndb,
+                                 const struct active_chain *chain)
+{
+    return !ndb || !ndb->open || !chain;
+}
+
+static bool catchup_pass_suppressed(void)
+{
+    /* Abort-streak park (node_db_catchup_lock_guard.c): after 8 consecutive
+     * failed passes the worker parks behind the named blocker
+     * "node_db_catchup.abort_storm" and every pass is a no-op until an
+     * operator clears it — a pass that always fails must not be re-run
+     * forever (each pass burns the 10 s busy timeout). Single chokepoint: both
+     * call sites funnel through here. */
+    if (node_db_catchup_lock_guard_parked())
+        return true;
+
+    /* Skip the node.db catchup while a from-genesis refold runs.
+     * The refold re-walks the frozen prefix and indexes ZERO readable blocks
+     * during the window, so every ~5 s re-trigger (boot_background_workers.c)
+     * would take the node.db writer lock, find no tip hash, log
+     * "catchup: final commit missing tip hash", and roll back — pure log spam +
+     * lock contention against the fold. Returning 0 ("no work this pass") here
+     * short-circuits before turbo-mode setup / node_db_begin, the single
+     * chokepoint both call sites (boot loop + sync_controller) funnel through.
+     * Mirrors the proven utxo_mirror_sync_run_once guard. The first post-refold
+     * pass resumes catchup normally once refold_in_progress() clears. */
+    return refold_in_progress();
+}
+
+static int catchup_start_height(int db_tip)
+{
+    int start = db_tip + 1;
+    if (start < 0) start = 0;
+    return start;
+}
+
+static bool catchup_read_proven(int32_t *proven_applied)
+{
+    sqlite3 *progress_db = progress_store_db();
+    if (!progress_db)
+        return false;
+    return node_db_catchup_read_proven_authority(progress_db, proven_applied);
+}
+
+static void catchup_seed_receipt(struct node_db *ndb, int start,
+                                 uint8_t prev_receipt[32])
+{
+    if (start > 0)
+        (void)db_view_integrity_get(ndb, start - 1, prev_receipt);
+}
+
+static void catchup_pump_watchdog(int h)
+{
+    /* Pump systemd watchdog liveness during long node_db sync-catchup
+     * loops (block indexing replay). */
+    if ((h % 100) == 0)
+        boot_progress_tick("node_db_sync_catchup");
+}
+
+static struct zcl_result catchup_map_if_needed(
+    struct node_db_catchup_block_mapping *cache, int *cached_file,
+    const char *datadir, int nfile)
+{
+    if (nfile != *cached_file)
+        return catchup_map_file(cache, cached_file, datadir, nfile);
+    return ZCL_OK;
+}
+
+static bool catchup_batch_due(int indexed, int batch_size,
+                              const struct catchup_batch *cb)
+{
+    int64_t t_now = node_db_catchup_lock_guard_now_ms();
+    return indexed % batch_size == 0 ||
+           node_db_catchup_lock_guard_batch_due(t_now - cb->t_start);
+}
+
+static void catchup_capture_busy_snapshot(struct node_db *ndb, bool failed,
+                                          struct catchup_batch *cb)
+{
+    /* Capture the snapshot class of the first write failure BEFORE any
+     * rollback (a successful ROLLBACK would clobber the handle errcode).
+     * No DB op runs between a failing write and this point on the break
+     * paths above. */
+    if (failed && !cb->busy_snapshot &&
+        node_db_catchup_lock_guard_busy_snapshot(ndb))
+        cb->busy_snapshot = true;
+}
+
+static bool catchup_tip_hashed(const struct block_index *tip)
+{
+    return tip && tip->phashBlock;
+}
+
+static void catchup_final_commit_done(struct catchup_batch *cb,
+                                      int last_indexed_height,
+                                      const struct block_index *last_indexed_tip,
+                                      struct incremental_merkle_tree *sapling_tree)
+{
+    cb->tx_open = false;
+    cb->last_committed_height = last_indexed_height;
+    /* Force a fresh flat-file checkpoint at catchup completion
+     * (including on reaching tip), so the next boot has a
+     * checkpoint at the newest applied height. Guarded on a
+     * resolvable tip block hash for the {height, hash, root} key. */
+    if (catchup_tip_hashed(last_indexed_tip))
+        sapling_tree_flat_checkpoint_note(
+            sapling_tree, cb->last_committed_height,
+            last_indexed_tip->phashBlock->data, true);
+}
+
+static void catchup_print_summary(bool interrupted, int indexed,
+                                  int64_t elapsed, int tip)
+{
+    printf("SQLite catchup %s: %d blocks in %llds (%d blk/s, tip=%d)\n",
+           interrupted ? "stopped" : "complete",
+           indexed, (long long)elapsed,
+           elapsed > 0 ? indexed / (int)elapsed : indexed,
+           tip);
+    fflush(stdout);
+}
+
 int node_db_catchup_service_run(struct node_db *ndb,
                                 const struct active_chain *chain,
                                 struct wallet *w,
@@ -683,29 +805,10 @@ int node_db_catchup_service_run(struct node_db *ndb,
     struct sync_db_turbo_scope turbo_mode = {0};
     bool restore_ok = true;
 
-    if (!ndb || !ndb->open || !chain)
+    if (catchup_args_invalid(ndb, chain))
         LOG_ERR("sync", "catchup: invalid args (ndb=%p, chain=%p)", (void *)ndb, (void *)chain);
 
-    /* Abort-streak park (node_db_catchup_lock_guard.c): after 8 consecutive
-     * failed passes the worker parks behind the named blocker
-     * "node_db_catchup.abort_storm" and every pass is a no-op until an
-     * operator clears it — a pass that always fails must not be re-run
-     * forever (each pass burns the 10 s busy timeout). Single chokepoint: both
-     * call sites funnel through here. */
-    if (node_db_catchup_lock_guard_parked())
-        return 0;
-
-    /* Skip the node.db catchup while a from-genesis refold runs.
-     * The refold re-walks the frozen prefix and indexes ZERO readable blocks
-     * during the window, so every ~5 s re-trigger (boot_background_workers.c)
-     * would take the node.db writer lock, find no tip hash, log
-     * "catchup: final commit missing tip hash", and roll back — pure log spam +
-     * lock contention against the fold. Returning 0 ("no work this pass") here
-     * short-circuits before turbo-mode setup / node_db_begin, the single
-     * chokepoint both call sites (boot loop + sync_controller) funnel through.
-     * Mirrors the proven utxo_mirror_sync_run_once guard. The first post-refold
-     * pass resumes catchup normally once refold_in_progress() clears. */
-    if (refold_in_progress())
+    if (catchup_pass_suppressed())
         return 0;
 
     int db_tip = node_db_sync_get_tip_height(ndb);
@@ -719,17 +822,12 @@ int node_db_catchup_service_run(struct node_db *ndb,
     last_indexed_height = db_tip;
     cb.last_committed_height = db_tip;
 
-    int start = db_tip + 1;
-    if (start < 0) start = 0;
+    int start = catchup_start_height(db_tip);
     int total = chain_tip - start + 1;
     catchup_active_begin(start, chain_tip);
 
-    bool proven_authority = false;
     int32_t proven_applied = -1;
-    sqlite3 *progress_db = progress_store_db();
-    if (progress_db)
-        proven_authority =
-            node_db_catchup_read_proven_authority(progress_db, &proven_applied);
+    bool proven_authority = catchup_read_proven(&proven_applied);
 
     int wallet_keys = catchup_count_wallet_keys(w);
     printf("SQLite catchup: %d blocks (%d..%d), lean index + wallet scan"
@@ -824,8 +922,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
      * threaded into sync_block_lean so the per-height SHA3 receipt chains
      * across the whole ascending walk without a per-block SELECT. */
     uint8_t prev_receipt[32] = {0};
-    if (start > 0)
-        (void)db_view_integrity_get(ndb, start - 1, prev_receipt);
+    catchup_seed_receipt(ndb, start, prev_receipt);
 
     for (int h = start; h <= chain_tip; h++) {
         if (g_shutdown_requested) {
@@ -840,10 +937,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
             failed = true;
             break;
         }
-        /* Pump systemd watchdog liveness during long node_db sync-catchup
-         * loops (block indexing replay). */
-        if ((h % 100) == 0)
-            boot_progress_tick("node_db_sync_catchup");
+        catchup_pump_watchdog(h);
         const struct block_index *pindex = active_chain_at(chain, h);
         if (!pindex) {
             if (catchup_hole_missing_index(&holes, h))
@@ -863,18 +957,16 @@ int node_db_catchup_service_run(struct node_db *ndb,
         }
 
         /* Map a new file if needed. */
-        if (pindex->nFile != cached_file) {
-            struct zcl_result mapped = catchup_map_file(
-                &cached_mapping, &cached_file, datadir, pindex->nFile);
-            if (!mapped.ok) {
-                if (catchup_hole_map_failed(&holes, h, pindex->nFile,
-                                            mapped.code))
-                    LOG_WARN("catchup",
-                             "catchup: mapping failed for blk%05d.dat "
-                             "(errno=%d) — skipping its blocks",
-                             pindex->nFile, mapped.code);
-                continue;
-            }
+        struct zcl_result mapped = catchup_map_if_needed(
+            &cached_mapping, &cached_file, datadir, pindex->nFile);
+        if (!mapped.ok) {
+            if (catchup_hole_map_failed(&holes, h, pindex->nFile,
+                                        mapped.code))
+                LOG_WARN("catchup",
+                         "catchup: mapping failed for blk%05d.dat "
+                         "(errno=%d) — skipping its blocks",
+                         pindex->nFile, mapped.code);
+            continue;
         }
 
         if ((uint64_t)pindex->nDataPos >= cached_mapping.mapping.size) {
@@ -985,9 +1077,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
         }
 #endif
 
-        int64_t t_now = node_db_catchup_lock_guard_now_ms();
-        if (indexed % batch_size == 0 ||
-            node_db_catchup_lock_guard_batch_due(t_now - cb.t_start)) {
+        if (catchup_batch_due(indexed, batch_size, &cb)) {
             if (!catchup_set_batch_tip(ndb, pindex, h, &cb.busy_snapshot)) {
                 failed = true;
                 break;
@@ -1032,13 +1122,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
     int first_missing_file_num = holes.first_missing_file_num;
     int suspicious_lean_holes = holes.suspicious;
 
-    /* Capture the snapshot class of the first write failure BEFORE any
-     * rollback (a successful ROLLBACK would clobber the handle errcode).
-     * No DB op runs between a failing write and this point on the break
-     * paths above. */
-    if (failed && !cb.busy_snapshot &&
-        node_db_catchup_lock_guard_busy_snapshot(ndb))
-        cb.busy_snapshot = true;
+    catchup_capture_busy_snapshot(ndb, failed, &cb);
 
     if (failed) {
         if (cb.tx_open && !node_db_rollback(ndb))
@@ -1048,7 +1132,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
 
     /* Final commit */
     if (cb.tx_open && !failed) {
-        if (last_indexed_tip && last_indexed_tip->phashBlock) {
+        if (catchup_tip_hashed(last_indexed_tip)) {
             if (!node_db_sync_set_tip(ndb,
                                       last_indexed_tip->phashBlock->data,
                                       last_indexed_height)) {
@@ -1089,16 +1173,8 @@ int node_db_catchup_service_run(struct node_db *ndb,
                 failed = true;
                 last_indexed_height = cb.last_committed_height;
             } else {
-                cb.tx_open = false;
-                cb.last_committed_height = last_indexed_height;
-                /* Force a fresh flat-file checkpoint at catchup completion
-                 * (including on reaching tip), so the next boot has a
-                 * checkpoint at the newest applied height. Guarded on a
-                 * resolvable tip block hash for the {height, hash, root} key. */
-                if (last_indexed_tip && last_indexed_tip->phashBlock)
-                    sapling_tree_flat_checkpoint_note(
-                        &sapling_tree, cb.last_committed_height,
-                        last_indexed_tip->phashBlock->data, true);
+                catchup_final_commit_done(&cb, last_indexed_height,
+                                          last_indexed_tip, &sapling_tree);
             }
         }
     }
@@ -1152,12 +1228,8 @@ int node_db_catchup_service_run(struct node_db *ndb,
     }
 
     int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
-    printf("SQLite catchup %s: %d blocks in %llds (%d blk/s, tip=%d)\n",
-           interrupted ? "stopped" : "complete",
-           indexed, (long long)elapsed,
-           elapsed > 0 ? indexed / (int)elapsed : indexed,
-           cb.last_committed_height);
-    fflush(stdout);
+    catchup_print_summary(interrupted, indexed, elapsed,
+                          cb.last_committed_height);
     if (lean_holes > 0) {
         if (suspicious_lean_holes > 0) {
             LOG_WARN("catchup",
