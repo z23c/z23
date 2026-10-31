@@ -14,13 +14,15 @@
 
 struct wallet_view {
     bool known;
-    /* "1.23456789 ZCL", or "Balance unknown". */
+    /* "1.23456789 ZCL" without trailing zeros ("25 ZCL"), or "Balance unknown". */
     char balance[WALLET_VIEW_LINE];
     /* "0.5 ZCL pending. The next arrives in 7 confirmations.", "0.5 ZCL arriving in 7 confirmations" for a single
      * note, or "" when nothing is pending. */
     char pending[WALLET_VIEW_LINE];
     /* "0.1 ZCL public", or "" when there is no public balance. */
     char public_line[WALLET_VIEW_LINE];
+    /* "0.2 ZCL maturing, not yet spendable", or "" when no mined coins are maturing. */
+    char immature_line[WALLET_VIEW_LINE];
     /* "Up to date at block N", or "Catching up, N blocks behind: amounts may change". */
     char sync[WALLET_VIEW_LINE];
     /* "" when sending is allowed, otherwise one plain sentence. */

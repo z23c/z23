@@ -482,6 +482,7 @@ static void run_wallet(JNIEnv *env, size_t button)
 {
     enum wallet_outcome outcome = zapp_wallet_ui_press(env, button);
     if (outcome == WALLET_SCAN) shell.send("scan", "");
+    else if (outcome == WALLET_START_NODE) shell.send("node_start", "");
     else if (outcome == WALLET_LEAVE) go(env, SCREEN_HOME);
 }
 static void tap(JNIEnv *env, float x, float y)

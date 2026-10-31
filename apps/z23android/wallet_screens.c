@@ -39,7 +39,7 @@ struct entry {
 
 /* Everything a wallet screen holds that is wiped when the owner leaves. */
 struct data {
-    bool funds_loaded, fleet_loaded, funds_fresh, fleet_fresh;
+    bool funds_loaded, fleet_loaded, funds_fresh, fleet_fresh, node_silent;
     uint64_t summary_at, fleet_at, requested_at;
     struct wallet_view view;
     char fleet[WALLET_TEXT_MAX];
@@ -184,17 +184,21 @@ static void funds_items(struct wallet_screen *s)
     const struct data *d = &st.d;
     title(s, "Wallet");
     if (!d->funds_loaded) line(s, "Loading…");
-    else {
+    else if (d->node_silent) {
+        line(s, "The node is not answering. Start it to see your funds.");
+        button(s, WALLET_ACT_START_NODE, "Start node");
+    } else {
         line(s, "Spendable");
         (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, d->view.balance);
         if (d->view.pending[0]) line(s, d->view.pending);
         if (d->view.public_line[0]) line(s, d->view.public_line);
+        if (d->view.immature_line[0]) line(s, d->view.immature_line);
         if (d->funds_fresh) line(s, d->view.sync);
         else note(s, "Last read more than 30 seconds ago, so these amounts and the sync state may be out of date. Check that your node is running.");
         if (!d->view.known) note(s, "The wallet could not be read. Check that your node is running, then open this screen again.");
         if (d->view.send[0]) note(s, d->view.send);
     }
-    if (d->fleet_loaded) line(s, d->fleet_fresh ? d->fleet : WALLET_FLEET_UNCHECKED);
+    if (d->fleet_loaded && !d->node_silent) line(s, d->fleet_fresh ? d->fleet : WALLET_FLEET_UNCHECKED);
     button(s, WALLET_ACT_RECEIVE, "Receive");
     button(s, WALLET_ACT_SEND, "Send");
     button(s, WALLET_ACT_HISTORY, "History");
@@ -206,19 +210,21 @@ static void receive_items(struct wallet_screen *s)
     const struct data *d = &st.d;
     char grouped[ZAPP_PAY_ADDRESS_MAX * 2], text[WALLET_TEXT_MAX];
     title(s, "Receive");
-    if (d->address[0] && wallet_view_group_address(d->address, grouped, sizeof(grouped))) {
+    bool shown = d->address[0] && wallet_view_group_address(d->address, grouped, sizeof(grouped));
+    if (shown) {
         (void)add(s, WALLET_ITEM_QR, WALLET_ACT_NONE, d->code);
         (void)add(s, WALLET_ITEM_ADDRESS, WALLET_ACT_NONE, grouped);
         if (d->has_amount && zapp_zat_format(d->amount_zat, grouped, sizeof(grouped))) {
             snprintf(text, sizeof(text), "Asking for %s ZCL", grouped);
             line(s, text);
         }
-        if (d->reused) note(s, "This address may have been shown before. Tap New address for one that has not.");
     } else if (d->address_pending) line(s, "Loading the address…");
+    if (!d->no_receive) button(s, WALLET_ACT_NEW_ADDRESS, "New address");
+    if (shown && d->reused && !d->no_receive) note(s, "This address may have been shown before. Tap New address for one that has not.");
+    else if (shown && d->reused) note(s, "This address may have been shown before.");
     if (d->note[0]) note(s, d->note);
     (void)add(s, WALLET_ITEM_INPUT, WALLET_ACT_NONE, "Amount in ZCL (optional)");
     button(s, WALLET_ACT_SET_AMOUNT, "Set amount");
-    if (!d->no_receive) button(s, WALLET_ACT_NEW_ADDRESS, "New address");
     button(s, WALLET_ACT_BACK, "Back");
 }
 
@@ -267,7 +273,7 @@ static void row_text(const struct entry *e, char *out, size_t cap)
     amount_label(e, amount, sizeof(amount));
     date_label(e, false, date, sizeof(date));
     const char *pool = pool_label(e);
-    snprintf(out, cap, "%s%s%s · %s · %s · %s", direction_label(e->direction), pool[0] ? " · " : "", pool, amount, state_label(e->status), date);
+    snprintf(out, cap, "%s\n%s%s%s · %s · %s", amount, direction_label(e->direction), pool[0] ? " · " : "", pool, state_label(e->status), date);
 }
 
 static void history_items(struct wallet_screen *s)
@@ -347,6 +353,7 @@ static void apply_summary(bool ok, const char *json)
 {
     st.d.funds_loaded = true;
     st.d.funds_fresh = true;
+    st.d.node_silent = !ok;
     st.d.summary_at = now();
     if (!ok || !json) json = "";
     (void)wallet_view_from_summary(json, &st.d.view);
@@ -838,6 +845,7 @@ static size_t from_funds(enum wallet_action action, struct job *jobs, enum walle
     if (action == WALLET_ACT_RECEIVE) return enter(WALLET_PAGE_RECEIVE, jobs);
     if (action == WALLET_ACT_HISTORY) return enter(WALLET_PAGE_HISTORY, jobs);
     if (action == WALLET_ACT_SEND) *outcome = WALLET_SCAN;
+    if (action == WALLET_ACT_START_NODE) *outcome = WALLET_START_NODE;
     return 0;
 }
 /* The jobs a tap on the History page starts. */

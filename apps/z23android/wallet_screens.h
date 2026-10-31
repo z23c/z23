@@ -64,12 +64,14 @@ enum wallet_item_kind {
 };
 enum wallet_action {
     WALLET_ACT_NONE, WALLET_ACT_RECEIVE, WALLET_ACT_SEND, WALLET_ACT_HISTORY, WALLET_ACT_NEW_ADDRESS,
-    WALLET_ACT_SET_AMOUNT, WALLET_ACT_NEWER, WALLET_ACT_OLDER, WALLET_ACT_DETAIL, WALLET_ACT_BACK
+    WALLET_ACT_SET_AMOUNT, WALLET_ACT_NEWER, WALLET_ACT_OLDER, WALLET_ACT_DETAIL, WALLET_ACT_BACK,
+    WALLET_ACT_START_NODE
 };
 enum wallet_outcome {
     WALLET_STAY,  /* the screen changed or nothing happened */
     WALLET_SCAN,  /* open the camera scan screen and nothing else */
-    WALLET_LEAVE  /* leave the wallet for Home */
+    WALLET_LEAVE, /* leave the wallet for Home */
+    WALLET_START_NODE /* ask the controller to start the node, and nothing else */
 };
 
 struct wallet_item {

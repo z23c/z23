@@ -49,7 +49,7 @@ static void assert_unknown(const struct wallet_view *v)
     assert(!strcmp(v->pending, "Pending amount unknown"));
     assert(!strcmp(v->public_line, "Public amount unknown"));
     assert(!strcmp(v->sync, "Sync state unknown"));
-    assert(!v->scanning);
+    assert(!v->immature_line[0] && !v->scanning);
     assert(!strcmp(v->send, "Sending is unavailable until the wallet state loads."));
 }
 
@@ -59,7 +59,7 @@ static void test_valid_reply(void)
     assert(wallet_view_from_summary(VALID_REPLY, &v));
     assert(v.known);
     assert(!strcmp(v.balance, "1.23456789 ZCL"));
-    assert(!v.scanning);
+    assert(!v.immature_line[0] && !v.scanning);
     assert(!strcmp(v.pending, "0.5 ZCL pending. The next arrives in 7 confirmations."));
     assert(!strcmp(v.public_line, "0.1 ZCL public"));
     assert(!strcmp(v.sync, "Up to date at block 3000000"));
@@ -110,10 +110,12 @@ static void test_empty_lines_and_singular(void)
 static void test_amount_format(void)
 {
     static const struct { const char *zat; const char *str; const char *shown; } cases[] = {
-        { "0", "0.00000000", "0.00000000 ZCL" },
+        { "0", "0.00000000", "0 ZCL" },
         { "1", "0.00000001", "0.00000001 ZCL" },
-        { "100000000", "1.00000000", "1.00000000 ZCL" },
-        { "2100000000000000", "21000000.00000000", "21000000.00000000 ZCL" },
+        { "100000000", "1.00000000", "1 ZCL" },
+        { "2500000000", "25.00000000", "25 ZCL" },
+        { "1230000000", "12.30000000", "12.3 ZCL" },
+        { "2100000000000000", "21000000.00000000", "21000000 ZCL" },
     };
     char json[2048], json2[2048], zat_field[64], str_field[64];
     struct wallet_view v;
@@ -131,15 +133,19 @@ static void test_amount_format(void)
     replace_once(json2, sizeof(json2), json, "\"spendable\":\"1.23456789\"",
                  "\"spendable\":\"0.00000000\"");
     assert(wallet_view_from_summary(json2, &v) && v.known);
-    assert(!strcmp(v.balance, "0.00000000 ZCL"));
-    printf("  zatoshi to 8-decimal balance, no floating point\n");
+    assert(!strcmp(v.balance, "0 ZCL"));
+    printf("  zatoshi to balance without trailing zeros, no floating point\n");
 }
 
-/* The scan state tells a list of transactions that it may be incomplete. */
-static void test_scan_state(void)
+/* Mined coins that are still maturing get their own line; the scan state tells a list of transactions it may be incomplete. */
+static void test_immature_and_scan(void)
 {
     char json[2048], json2[2048];
     struct wallet_view v;
+    replace_once(json, sizeof(json), VALID_REPLY, "\"immature_zat\":0,\"immature\":\"0.00000000\"",
+                 "\"immature_zat\":2000000000,\"immature\":\"20.00000000\"");
+    assert(wallet_view_from_summary(json, &v) && v.known);
+    assert(!strcmp(v.immature_line, "20 ZCL maturing, not yet spendable"));
     replace_once(json, sizeof(json), VALID_REPLY, "\"scanned_through_height\":3000000",
                  "\"scanned_through_height\":2999000");
     assert(wallet_view_from_summary(json, &v) && v.known && v.scanning);
@@ -148,7 +154,7 @@ static void test_scan_state(void)
     /* A node that is not current, with every block scanned, says it is not up to date and does not claim a scan. */
     replace_once(json2, sizeof(json2), VALID_REPLY, "\"blocks_behind\":0,\"current\":true", "\"blocks_behind\":0,\"current\":false");
     assert(wallet_view_from_summary(json2, &v) && v.known && !v.scanning && !strstr(v.sync, "Up to date"));
-    printf("  scan state, a node that is not current\n");
+    printf("  immature coins, scan state, a node that is not current\n");
 }
 
 static void test_sync_lines(void)
@@ -189,7 +195,7 @@ static void test_zat_limit(void)
     replace_once(json2, sizeof(json2), json, "\"spendable\":\"1.23456789\"",
                  "\"spendable\":\"21000000.00000000\"");
     assert(wallet_view_from_summary(json2, &v) && v.known);
-    assert(!strcmp(v.balance, "21000000.00000000 ZCL"));
+    assert(!strcmp(v.balance, "21000000 ZCL"));
 
     replace_once(json, sizeof(json), VALID_REPLY, "\"spendable_zat\":123456789",
                  "\"spendable_zat\":2100000000000001");
@@ -354,7 +360,7 @@ int main(void)
     test_valid_reply();
     test_empty_lines_and_singular();
     test_amount_format();
-    test_scan_state();
+    test_immature_and_scan();
     test_sync_lines();
     test_zat_limit();
     test_send_reasons();

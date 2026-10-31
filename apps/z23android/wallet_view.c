@@ -28,6 +28,7 @@ struct summary {
     int64_t pending_notes;
     int64_t pending_confirmations;
     int64_t public_zat;
+    int64_t immature;
     int64_t tip;
     int64_t header;
     int64_t scanned;
@@ -85,11 +86,10 @@ static bool read_zat(const struct json_value *data, const char *zat_key, const c
 
 static bool parse_amounts(const struct json_value *data, struct summary *s)
 {
-    int64_t immature = 0;
     return read_zat(data, "spendable_zat", "spendable", &s->spendable) &&
            read_zat(data, "pending_zat", "pending", &s->pending) &&
            read_zat(data, "public_zat", "public", &s->public_zat) &&
-           read_zat(data, "immature_zat", "immature", &immature);
+           read_zat(data, "immature_zat", "immature", &s->immature);
 }
 
 static bool parse_pending(const struct json_value *data, struct summary *s)
@@ -151,10 +151,16 @@ static void set_unknown(struct wallet_view *out)
     put(out->send, sizeof(out->send), TEXT_SEND_UNAVAILABLE);
 }
 
+/* An amount without trailing zeros, as every other amount on the screens is written. */
+static bool amount_text(int64_t zat, char *out, size_t cap)
+{
+    return zat >= 0 && zapp_zat_format((uint64_t)zat, out, cap);
+}
+
 static void render_balance(const struct summary *s, struct wallet_view *out)
 {
     char amount[32];
-    if (!format_full(s->spendable, amount, sizeof(amount))) return;
+    if (!amount_text(s->spendable, amount, sizeof(amount))) return;
     snprintf(out->balance, sizeof(out->balance), "%s ZCL", amount);
 }
 
@@ -174,6 +180,14 @@ static void render_pending(const struct summary *s, struct wallet_view *out)
                  (long long)s->pending_confirmations, unit);
     else
         snprintf(out->pending, sizeof(out->pending), "%s ZCL pending", amount);
+}
+
+static void render_immature(const struct summary *s, struct wallet_view *out)
+{
+    char amount[32];
+    out->immature_line[0] = '\0';
+    if (s->immature == 0 || !amount_text(s->immature, amount, sizeof(amount))) return;
+    snprintf(out->immature_line, sizeof(out->immature_line), "%s ZCL maturing, not yet spendable", amount);
 }
 
 static void render_public(const struct summary *s, struct wallet_view *out)
@@ -225,6 +239,7 @@ static void render_known(const struct summary *s, struct wallet_view *out)
     render_balance(s, out);
     render_pending(s, out);
     render_public(s, out);
+    render_immature(s, out);
     out->scanning = s->blocks_behind > 0 || s->scanned < s->header;
     render_sync(s, out);
     render_send(s, out);

@@ -40,6 +40,8 @@ static uint64_t permission_ticket;
 static bool foreground = true;
 /* The saved Start node choice has been put to the background-network dialog. */
 static bool background_asked;
+/* The app's private files directory, where the answer to "has the owner been asked" is kept. */
+static char state_dir[256];
 /* The camera permission dialog is up: the pause it causes must not cancel the scan waiting on it. */
 static atomic_bool camera_dialog;
 /* The dialog closed without the permission. */
@@ -96,6 +98,23 @@ static jobject background_request(JNIEnv *env, jstring package)
     jobject intent = clean(env) && ctor && action ? (*env)->NewObject(env, cls, ctor, action, uri) : NULL;
     return clean(env) ? intent : NULL;
 }
+/* The owner is asked once to let the app run in the background, whatever the answer was: the marker stays after
+ * Deny, so the dialog does not return on every node start. Without a directory to keep it in, the app does not ask. */
+static bool battery_prompt_path(char *path, size_t cap)
+{
+    return state_dir[0] && snprintf(path, cap, "%s/battery_prompt_asked", state_dir) < (int)cap;
+}
+static bool battery_asked(void)
+{
+    char path[320];
+    return !battery_prompt_path(path, sizeof(path)) || access(path, F_OK) == 0;
+}
+static void battery_remember(void)
+{
+    char path[320];
+    int fd = battery_prompt_path(path, sizeof(path)) ? open(path, O_WRONLY | O_CREAT | O_CLOEXEC, 0600) : -1;
+    if (fd >= 0) close(fd);
+}
 /* Android withholds the network from a hidden app and from the node it started,
  * unless the owner lets the app run in the background; ask through the system dialog. */
 static void allow_background_network(JNIEnv *env, jobject activity)
@@ -107,7 +126,11 @@ static void allow_background_network(JNIEnv *env, jobject activity)
     jstring package = clean(env) && name ? (*env)->CallObjectMethod(env, activity, name) : NULL;
     jobject intent = clean(env) && package && start && !background_exempt(env, activity, package) ?
         background_request(env, package) : NULL;
-    if (intent) (*env)->CallVoidMethod(env, activity, start, intent);
+    if (intent && !battery_asked()) {
+        battery_remember();
+        zapp_native_ui_update(env, "Z23 asks to run in the background so your node keeps its connections while the app is hidden. Choose Allow on the next screen.", NULL);
+        (*env)->CallVoidMethod(env, activity, start, intent);
+    }
     (void)clean(env); (*env)->PopLocalFrame(env, NULL);
 }
 static bool permission_held(JNIEnv *env, jobject activity, const char *name)
@@ -529,6 +552,7 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
     pthread_mutex_lock(&lock); bool previous = active != NULL; pthread_mutex_unlock(&lock);
     if (previous) { finish_previous(env); detach_activity(env); }
     if (!activity->internalDataPath || !native_directory(env, activity->clazz, native_dir, sizeof(native_dir))) goto fail;
+    snprintf(state_dir, sizeof(state_dir), "%s", activity->internalDataPath);
     looper = ALooper_forThread();
     if (!looper) goto fail;
     ALooper_acquire(looper);

@@ -21,6 +21,9 @@
 #define INPUT_TYPE_DECIMAL 8194 /* TYPE_CLASS_NUMBER | TYPE_NUMBER_FLAG_DECIMAL */
 #define IME_NO_LEARNING 0x1000000 /* IME_FLAG_NO_PERSONALIZED_LEARNING */
 #define AMOUNT_TEXT_CAP 64
+#define GRAVITY_START_CENTER 0x800013 /* Gravity.START | Gravity.CENTER_VERTICAL */
+#define GRAVITY_CENTER_HORIZONTAL 1
+#define ROW_AMOUNT_SCALE 1.5f
 
 static struct {
     jobject activity, container, input, buttons[WALLET_ITEMS_MAX];
@@ -74,13 +77,37 @@ static bool input_view(JNIEnv *env, const char *hint)
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
-static bool button_view(JNIEnv *env, size_t item, const char *text)
+/* A history row: left aligned, the amount on the first line in a larger size, then one line of kind, state and
+ * date. The text is already set; a failure here leaves it plain. */
+static void row_style(JNIEnv *env, jobject view, const char *text)
+{
+    const char *end = strchr(text, '\n');
+    if (!end || (*env)->PushLocalFrame(env, 8) != JNI_OK) return;
+    (void)zj_int_property(env, view, "setGravity", GRAVITY_START_CENTER);
+    jclass spannable = (*env)->FindClass(env, "android/text/SpannableString");
+    jclass span = zj_clean(env) ? (*env)->FindClass(env, "android/text/style/RelativeSizeSpan") : NULL;
+    jmethodID make = spannable ? (*env)->GetMethodID(env, spannable, "<init>", "(Ljava/lang/CharSequence;)V") : NULL;
+    jmethodID size = span ? (*env)->GetMethodID(env, span, "<init>", "(F)V") : NULL;
+    jmethodID put = spannable ? (*env)->GetMethodID(env, spannable, "setSpan", "(Ljava/lang/Object;III)V") : NULL;
+    jmethodID set = zj_method(env, view, "setText", "(Ljava/lang/CharSequence;)V");
+    jstring plain = zj_clean(env) && make && size && put && set ? zj_string(env, text) : NULL;
+    jobject text_span = plain ? (*env)->NewObject(env, spannable, make, plain) : NULL;
+    jobject big = text_span ? (*env)->NewObject(env, span, size, ROW_AMOUNT_SCALE) : NULL;
+    if (big && zj_clean(env)) {
+        (*env)->CallVoidMethod(env, text_span, put, big, 0, (jint)(end - text), 0x11 /* SPAN_EXCLUSIVE_EXCLUSIVE */);
+        if (zj_clean(env)) (*env)->CallVoidMethod(env, view, set, text_span);
+    }
+    (void)zj_clean(env);
+    (*env)->PopLocalFrame(env, NULL);
+}
+static bool button_view(JNIEnv *env, size_t item, const char *text, bool row)
 {
     jobject view = zj_widget(env, "android/widget/Button", ui.activity);
     bool ok = view && ui.button_count < WALLET_ITEMS_MAX && zj_typography(env, view, 16.0f, (jint)WHITE) &&
         zj_bool_property(env, view, "setAllCaps", false) && zj_pill(env, view, (jint)BUTTON_COLOR, 24.0f) &&
         zj_flatten(env, view) && zj_text(env, view, text) && zj_margins(env, view, MATCH, WRAP, 0.0f, 4, 4, 4, 4) &&
         zj_append(env, ui.container, view) && zj_keep(env, &ui.buttons[ui.button_count], view);
+    if (ok && row) row_style(env, view, text);
     if (ok) ui.button_item[ui.button_count++] = item;
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
@@ -98,7 +125,7 @@ static bool draw_item(JNIEnv *env, size_t index)
     case WALLET_ITEM_ADDRESS: return text_view(env, item->text, 18.0f, WHITE);
     case WALLET_ITEM_QR: return qr_view(env, item->text);
     case WALLET_ITEM_INPUT: return input_view(env, item->text);
-    case WALLET_ITEM_BUTTON: return button_view(env, index, item->text);
+    case WALLET_ITEM_BUTTON: return button_view(env, index, item->text, item->action == WALLET_ACT_DETAIL);
     }
     return false;
 }
@@ -190,7 +217,8 @@ bool zapp_wallet_ui_create(JNIEnv *env, jobject activity, jobject container)
     if (ui.container) return false;
     ui.activity = (*env)->NewGlobalRef(env, activity);
     ui.container = (*env)->NewGlobalRef(env, container);
-    if (ui.activity && ui.container) return true;
+    /* A fixed-width child, the receive code, sits in the middle; text and buttons fill the width. */
+    if (ui.activity && ui.container && zj_int_property(env, ui.container, "setGravity", GRAVITY_CENTER_HORIZONTAL)) return true;
     zapp_wallet_ui_destroy(env);
     return false;
 }
