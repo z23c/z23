@@ -48,8 +48,7 @@ static size_t diff_ok(const char *old_t, const char *new_t, zdiff_op *ops,
   return out;
 }
 
-static int test_kat(void) {
-  zdiff_op ops[16];
+static int kat_identical(zdiff_op *ops) {
   {
     size_t n = diff_ok("", "", ops, 16);
     CHECK(n == 0);
@@ -61,60 +60,98 @@ static int test_kat(void) {
       CHECK(ops[i].kind == ZDIFF_KEEP && ops[i].old_line == i &&
             ops[i].new_line == i);
   }
-  {
-    /* classic substitution: b -> d between kept a and c */
-    size_t n = diff_ok("a\nb\nc\n", "a\nd\nc\n", ops, 16);
-    CHECK(n == 4);
-    CHECK(ops[0].kind == ZDIFF_KEEP && ops[0].old_line == 0);
-    CHECK(ops[1].kind == ZDIFF_DEL && ops[1].old_line == 1);
-    CHECK(ops[2].kind == ZDIFF_INS && ops[2].new_line == 1);
-    CHECK(ops[3].kind == ZDIFF_KEEP && ops[3].old_line == 2 &&
-          ops[3].new_line == 2);
-  }
-  {
-    /* insertion into the middle */
-    size_t n = diff_ok("a\nc\n", "a\nb\nc\n", ops, 16);
-    CHECK(n == 3);
-    CHECK(ops[0].kind == ZDIFF_KEEP);
-    CHECK(ops[1].kind == ZDIFF_INS && ops[1].new_line == 1);
-    CHECK(ops[2].kind == ZDIFF_KEEP && ops[2].new_line == 2);
-  }
-  {
-    /* total replacement: deletions first, deterministic tie-break */
-    size_t n = diff_ok("a\n", "b\n", ops, 16);
-    CHECK(n == 2);
-    CHECK(ops[0].kind == ZDIFF_DEL);
-    CHECK(ops[1].kind == ZDIFF_INS);
-  }
-  {
-    /* everything deleted / everything inserted */
-    size_t n = diff_ok("a\nb\n", "", ops, 16);
-    CHECK(n == 2 && ops[0].kind == ZDIFF_DEL && ops[1].kind == ZDIFF_DEL);
-    n = diff_ok("", "x\ny\n", ops, 16);
-    CHECK(n == 2 && ops[0].kind == ZDIFF_INS && ops[1].kind == ZDIFF_INS);
-  }
-  {
-    /* line comparison is content-only: a trailing partial line equals
-     * its newline-terminated twin */
-    size_t n = diff_ok("a\nb", "a\nb\n", ops, 16);
-    CHECK(n == 2 && ops[0].kind == ZDIFF_KEEP && ops[1].kind == ZDIFF_KEEP);
-    /* but different partial content diffs normally */
-    n = diff_ok("a\nb", "a\nc\n", ops, 16);
-    CHECK(n == 3);
-    CHECK(ops[0].kind == ZDIFF_KEEP);
-    CHECK(ops[1].kind == ZDIFF_DEL && ops[1].old_line == 1);
-    CHECK(ops[2].kind == ZDIFF_INS && ops[2].new_line == 1);
-  }
-  {
-    /* repeated lines: LCS keeps the longest run */
-    size_t n = diff_ok("a\na\nb\n", "a\nb\na\n", ops, 16);
-    CHECK(n == 4); /* KEEP a, DEL a, KEEP b, INS a */
-    CHECK(ops[0].kind == ZDIFF_KEEP);
-    CHECK(ops[1].kind == ZDIFF_DEL);
-    CHECK(ops[2].kind == ZDIFF_KEEP && ops[2].old_line == 2 &&
-          ops[2].new_line == 1);
-    CHECK(ops[3].kind == ZDIFF_INS && ops[3].new_line == 2);
-  }
+  return 0;
+}
+
+static int kat_substitution(zdiff_op *ops) {
+  size_t n = diff_ok("a\nb\nc\n", "a\nd\nc\n", ops, 16);
+  CHECK(n == 4);
+  CHECK(ops[0].kind == ZDIFF_KEEP && ops[0].old_line == 0);
+  CHECK(ops[1].kind == ZDIFF_DEL && ops[1].old_line == 1);
+  CHECK(ops[2].kind == ZDIFF_INS && ops[2].new_line == 1);
+  CHECK(ops[3].kind == ZDIFF_KEEP && ops[3].old_line == 2 &&
+        ops[3].new_line == 2);
+  return 0;
+}
+
+static int kat_insertion(zdiff_op *ops) {
+  size_t n = diff_ok("a\nc\n", "a\nb\nc\n", ops, 16);
+  CHECK(n == 3);
+  CHECK(ops[0].kind == ZDIFF_KEEP);
+  CHECK(ops[1].kind == ZDIFF_INS && ops[1].new_line == 1);
+  CHECK(ops[2].kind == ZDIFF_KEEP && ops[2].new_line == 2);
+  return 0;
+}
+
+static int kat_replacement(zdiff_op *ops) {
+  size_t n = diff_ok("a\n", "b\n", ops, 16);
+  CHECK(n == 2);
+  CHECK(ops[0].kind == ZDIFF_DEL);
+  CHECK(ops[1].kind == ZDIFF_INS);
+  return 0;
+}
+
+static int kat_all_deleted_inserted(zdiff_op *ops) {
+  size_t n = diff_ok("a\nb\n", "", ops, 16);
+  CHECK(n == 2 && ops[0].kind == ZDIFF_DEL && ops[1].kind == ZDIFF_DEL);
+  n = diff_ok("", "x\ny\n", ops, 16);
+  CHECK(n == 2 && ops[0].kind == ZDIFF_INS && ops[1].kind == ZDIFF_INS);
+  return 0;
+}
+
+static int kat_partial_line_twin(zdiff_op *ops) {
+  size_t n = diff_ok("a\nb", "a\nb\n", ops, 16);
+  CHECK(n == 2 && ops[0].kind == ZDIFF_KEEP && ops[1].kind == ZDIFF_KEEP);
+  return 0;
+}
+
+static int kat_partial_line_diff(zdiff_op *ops) {
+  size_t n = diff_ok("a\nb", "a\nc\n", ops, 16);
+  CHECK(n == 3);
+  CHECK(ops[0].kind == ZDIFF_KEEP);
+  CHECK(ops[1].kind == ZDIFF_DEL && ops[1].old_line == 1);
+  CHECK(ops[2].kind == ZDIFF_INS && ops[2].new_line == 1);
+  return 0;
+}
+
+static int kat_repeated_lines(zdiff_op *ops) {
+  size_t n = diff_ok("a\na\nb\n", "a\nb\na\n", ops, 16);
+  CHECK(n == 4);
+  CHECK(ops[0].kind == ZDIFF_KEEP);
+  CHECK(ops[1].kind == ZDIFF_DEL);
+  CHECK(ops[2].kind == ZDIFF_KEEP && ops[2].old_line == 2 &&
+        ops[2].new_line == 1);
+  CHECK(ops[3].kind == ZDIFF_INS && ops[3].new_line == 2);
+  return 0;
+}
+
+static int test_kat(void) {
+  zdiff_op ops[16];
+  if (kat_identical(ops))
+    return 1;
+  /* classic substitution: b -> d between kept a and c */
+  if (kat_substitution(ops))
+    return 1;
+  /* insertion into the middle */
+  if (kat_insertion(ops))
+    return 1;
+  /* total replacement: deletions first, deterministic tie-break */
+  if (kat_replacement(ops))
+    return 1;
+  /* everything deleted / everything inserted */
+  if (kat_all_deleted_inserted(ops))
+    return 1;
+  /* line comparison is content-only: a trailing partial line equals
+   * its newline-terminated twin */
+  if (kat_partial_line_twin(ops))
+    return 1;
+  /* but different partial content diffs normally */
+  if (kat_partial_line_diff(ops))
+    return 1;
+  /* repeated lines: LCS keeps the longest run */
+  /* KEEP a, DEL a, KEEP b, INS a */
+  if (kat_repeated_lines(ops))
+    return 1;
   return 0;
 }
 
@@ -203,60 +240,28 @@ static size_t gen_text(char *buf, size_t cap, size_t max_lines) {
   return n;
 }
 
-/* Apply a script: reconstruct old from KEEP/DEL, new from KEEP/INS,
- * and require both to match the inputs exactly. */
-static int verify_script(const char *old_t, size_t old_len,
-                         const char *new_t, size_t new_len,
-                         const zdiff_op *ops, size_t n) {
-  static char re_old[8192], re_new[8192];
-  size_t ro = 0, rn = 0;
-  uint32_t prev_keep_old = 0, prev_keep_new = 0;
-  bool first_keep = true;
-  for (size_t k = 0; k < n; k++) {
-    const zdiff_op *op = &ops[k];
-    if (op->kind == ZDIFF_KEEP || op->kind == ZDIFF_DEL) {
-      /* locate old line op->old_line */
-      size_t idx = 0, off = 0;
-      for (size_t i = 0; i < old_len && idx < op->old_line; i++)
-        if (old_t[i] == '\n')
-          idx++, off = i + 1;
-      size_t eol = off;
-      while (eol < old_len && old_t[eol] != '\n')
-        eol++;
-      size_t l = eol - off;
-      if (ro + l + 1 >= sizeof re_old)
-        return 1;
-      memcpy(re_old + ro, old_t + off, l);
-      ro += l;
-      re_old[ro++] = '\n';
-    }
-    if (op->kind == ZDIFF_KEEP || op->kind == ZDIFF_INS) {
-      size_t idx = 0, off = 0;
-      for (size_t i = 0; i < new_len && idx < op->new_line; i++)
-        if (new_t[i] == '\n')
-          idx++, off = i + 1;
-      size_t eol = off;
-      while (eol < new_len && new_t[eol] != '\n')
-        eol++;
-      size_t l = eol - off;
-      if (rn + l + 1 >= sizeof re_new)
-        return 1;
-      memcpy(re_new + rn, new_t + off, l);
-      rn += l;
-      re_new[rn++] = '\n';
-    }
-    if (op->kind == ZDIFF_KEEP) {
-      if (!first_keep) {
-        CHECK(op->old_line > prev_keep_old);
-        CHECK(op->new_line > prev_keep_new);
-      }
-      first_keep = false;
-      prev_keep_old = op->old_line;
-      prev_keep_new = op->new_line;
-    }
-  }
-  /* reconstruction adds a newline per line; compare line-by-line
-   * against the inputs instead of byte equality. */
+static int script_append_line(const char *t, size_t len, uint32_t line,
+                              char *re, size_t cap, size_t *used) {
+  size_t idx = 0, off = 0;
+  for (size_t i = 0; i < len && idx < line; i++)
+    if (t[i] == '\n')
+      idx++, off = i + 1;
+  size_t eol = off;
+  while (eol < len && t[eol] != '\n')
+    eol++;
+  size_t l = eol - off;
+  if (*used + l + 1 >= cap)
+    return 1;
+  memcpy(re + *used, t + off, l);
+  *used += l;
+  re[(*used)++] = '\n';
+  return 0;
+}
+
+static int verify_reconstruction(const char *old_t, size_t old_len,
+                                 const char *re_old, size_t ro,
+                                 const char *new_t, size_t new_len,
+                                 const char *re_new, size_t rn) {
   static zdiff_line a[512], b[512];
   size_t ca = zdiff_split(old_t, old_len, a, 512);
   size_t cb = zdiff_split(new_t, new_len, b, 512);
@@ -271,6 +276,44 @@ static int verify_script(const char *old_t, size_t old_len,
     CHECK(b[i].len == rb[i].len &&
           memcmp(new_t + b[i].off, re_new + rb[i].off, b[i].len) == 0);
   return 0;
+}
+
+/* Apply a script: reconstruct old from KEEP/DEL, new from KEEP/INS,
+ * and require both to match the inputs exactly. */
+static int verify_script(const char *old_t, size_t old_len,
+                         const char *new_t, size_t new_len,
+                         const zdiff_op *ops, size_t n) {
+  static char re_old[8192], re_new[8192];
+  size_t ro = 0, rn = 0;
+  uint32_t prev_keep_old = 0, prev_keep_new = 0;
+  bool first_keep = true;
+  for (size_t k = 0; k < n; k++) {
+    const zdiff_op *op = &ops[k];
+    if (op->kind == ZDIFF_KEEP || op->kind == ZDIFF_DEL) {
+      /* locate old line op->old_line */
+      if (script_append_line(old_t, old_len, op->old_line, re_old,
+                             sizeof re_old, &ro) != 0)
+        return 1;
+    }
+    if (op->kind == ZDIFF_KEEP || op->kind == ZDIFF_INS) {
+      if (script_append_line(new_t, new_len, op->new_line, re_new,
+                             sizeof re_new, &rn) != 0)
+        return 1;
+    }
+    if (op->kind == ZDIFF_KEEP) {
+      if (!first_keep) {
+        CHECK(op->old_line > prev_keep_old);
+        CHECK(op->new_line > prev_keep_new);
+      }
+      first_keep = false;
+      prev_keep_old = op->old_line;
+      prev_keep_new = op->new_line;
+    }
+  }
+  /* reconstruction adds a newline per line; compare line-by-line
+   * against the inputs instead of byte equality. */
+  return verify_reconstruction(old_t, old_len, re_old, ro, new_t, new_len,
+                               re_new, rn);
 }
 
 static int test_property(void) {
