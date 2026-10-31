@@ -1,16 +1,23 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: make a keyed z_sendmany spend at most once.
  *
- * Order for a keyed send: record the key (STARTED), build, record the txid
- * (BUILT) before the wallet admits it, run the send, record COMMITTED. The
- * wallet's own persist-before-relay rule means a transaction that reached
- * the network is already in the wallet, so a BUILT row whose txid is in the
- * wallet is a known send. After a crash a repeat is answered from the row:
- *   COMMITTED                      -> the earlier txid
- *   BUILT and the wallet holds it  -> the earlier txid
- *   anything else, not running     -> outcome_unknown, nothing is sent
- * A key whose run failed before anything was built is released so the caller
- * can try again with the same key. Logs carry no address, amount, memo, key. */
+ * Order for a keyed send: record the key (STARTED), build, make the txid
+ * durable (BUILT; synchronous=FULL, in its own transaction) before the wallet
+ * admits the transaction, run the rest of the send, record COMMITTED. A repeat
+ * reads the row first and is answered from it:
+ *   COMMITTED and the wallet holds the txid   -> committed, the earlier txid
+ *   COMMITTED and the wallet lost the txid    -> outcome_unknown with the txid
+ *   BUILT, whether or not the wallet holds it -> outcome_unknown with the txid
+ *   STARTED, nobody running it                -> the row is freed, the send runs
+ * The wallet persists a transaction before it relays it, but holding a
+ * transaction does not prove it was relayed, so BUILT never answers committed.
+ *
+ * A failed run frees its key only when the wallet never admitted the
+ * transaction. After admission the pool may have held it and a peer may have
+ * fetched it, so any later failure answers outcome_unknown with the txid and
+ * the row stays. A record that cannot be read, written or made durable, and a
+ * full table, refuse the send with a plain error: nothing was sent, and the
+ * key is not reported free. Logs carry no address, amount, memo, key or txid. */
 
 #include "controllers/wallet_send_once.h"
 
@@ -35,6 +42,7 @@
 #define WSO_TAG "wallet_send_once"
 #define WSO_ACTIVE_MAX 64
 #define WSO_PRUNE_EVERY_SEC 3600
+#define WSO_SYNC_FULL 2
 
 struct wso_scope {
     struct node_db *ndb;
@@ -68,6 +76,56 @@ struct wso_op {
     bool ok;
 };
 
+static bool wso_apply(struct node_db *ndb, const struct wso_op *op)
+{
+    switch (op->kind) {
+    case WSO_OP_INSERT:
+        return db_wallet_send_once_insert(ndb, op->row);
+    case WSO_OP_ADVANCE:
+        return db_wallet_send_once_advance(ndb, op->key_hash, op->state,
+                                           op->txid, op->now);
+    case WSO_OP_RELEASE:
+        return db_wallet_send_once_release(ndb, op->key_hash);
+    case WSO_OP_PRUNE:
+        return db_wallet_send_once_prune(ndb, op->now);
+    }
+    return false; // raw-return-ok:every kind is handled above
+}
+
+/* The synchronous level only changes outside a transaction, so it is raised
+ * first and the write then runs in its own BEGIN IMMEDIATE ... COMMIT. A
+ * writer that opened a transaction on this connection in between makes BEGIN
+ * fail, and the write is refused rather than joining a transaction it does not
+ * own. The level is read back inside the transaction before the write. */
+static bool wso_apply_durable(struct node_db *ndb, const struct wso_op *op)
+{
+    /* Restore the level found (turbo import runs with OFF), not a constant. */
+    int prev_sync = db_wallet_send_once_sync_level(ndb);
+    if (prev_sync < 0) {
+        LOG_ERROR(WSO_TAG, "cannot read node.db synchronous level");
+        return false;
+    }
+    if (!node_db_exec(ndb, "PRAGMA synchronous=FULL")) {
+        LOG_ERROR(WSO_TAG, "cannot raise node.db to synchronous=FULL");
+        return false;
+    }
+    bool ok = false;
+    if (!node_db_begin_immediate(ndb)) {
+        LOG_ERROR(WSO_TAG, "cannot open a node.db transaction for the record");
+    } else {
+        ok = db_wallet_send_once_sync_level(ndb) >= WSO_SYNC_FULL &&
+             wso_apply(ndb, op) && node_db_commit(ndb);
+        if (!ok)
+            (void)node_db_rollback(ndb);
+    }
+    char restore[40];
+    (void)snprintf(restore, sizeof(restore), "PRAGMA synchronous=%d",
+                   prev_sync);
+    if (!node_db_exec(ndb, restore))
+        LOG_ERROR(WSO_TAG, "cannot restore node.db synchronous level");
+    return ok;
+}
+
 static bool wso_op_run(struct node_db *ndb, void *opaque)
 {
     struct wso_op *op = opaque;
@@ -76,40 +134,7 @@ static bool wso_op_run(struct node_db *ndb, void *opaque)
         LOG_ERROR(WSO_TAG, "pending node.db batch could not be committed");
         return true;
     }
-    int prev_sync = -1;
-    if (op->durable) {
-        /* Restore the level found (turbo import runs with OFF), not a constant. */
-        prev_sync = db_wallet_send_once_sync_level(ndb);
-        if (prev_sync < 0)
-            LOG_ERROR(WSO_TAG, "cannot read node.db synchronous level");
-    }
-    if (op->durable && (prev_sync < 0 ||
-                        !node_db_exec(ndb, "PRAGMA synchronous=FULL"))) {
-        LOG_ERROR(WSO_TAG, "cannot raise node.db to synchronous=FULL");
-        return true;
-    }
-    switch (op->kind) {
-    case WSO_OP_INSERT:
-        op->ok = db_wallet_send_once_insert(ndb, op->row);
-        break;
-    case WSO_OP_ADVANCE:
-        op->ok = db_wallet_send_once_advance(ndb, op->key_hash, op->state,
-                                             op->txid, op->now);
-        break;
-    case WSO_OP_RELEASE:
-        op->ok = db_wallet_send_once_release(ndb, op->key_hash);
-        break;
-    case WSO_OP_PRUNE:
-        op->ok = db_wallet_send_once_prune(ndb, op->now);
-        break;
-    }
-    if (op->durable) {
-        char restore[40];
-        (void)snprintf(restore, sizeof(restore), "PRAGMA synchronous=%d",
-                       prev_sync);
-        if (!node_db_exec(ndb, restore))
-            LOG_ERROR(WSO_TAG, "cannot restore node.db synchronous level");
-    }
+    op->ok = op->durable ? wso_apply_durable(ndb, op) : wso_apply(ndb, op);
     return true;
 }
 
@@ -376,9 +401,10 @@ static enum wso_begin wso_begin_send(struct wallet_rpc_context *ctx,
     return WSO_RUN;
 }
 
-/* Settle the row after the send ran. Success commits it. A failure frees the
- * key only when the wallet never admitted the transaction: once admitted the
- * transaction may be in the mempool or relayed whatever happens next. */
+/* Settle the row after the send ran. Success commits it. A failure before
+ * admission frees the key. A failure after admission keeps the row and answers
+ * outcome_unknown: the transaction may be in the mempool or relayed whatever
+ * happens next. */
 static bool wso_finish(struct wallet_rpc_context *ctx, struct wso_scope *sc,
                        bool ok, const struct json_value *inner,
                        struct json_value *result)
@@ -400,8 +426,14 @@ static bool wso_finish(struct wallet_rpc_context *ctx, struct wso_scope *sc,
         wso_answer(result, "committed", sc->txid.data, false);
         return true;
     }
+    if (sc->admitted) {
+        LOG_WARN(WSO_TAG, "send failed after admission; outcome unknown");
+        wso_answer(result, "outcome_unknown", sc->built ? sc->txid.data : NULL,
+                   false);
+        return true;
+    }
     const char *why = json_get_str(inner);
-    if (!sc->admitted && wso_release(ctx->node_db, sc->key_hash)) {
+    if (wso_release(ctx->node_db, sc->key_hash)) {
         wso_released(result, WALLET_SEND_ONCE_STATE_RELEASED,
                      why ? why : "Shielded send failed");
         return true;

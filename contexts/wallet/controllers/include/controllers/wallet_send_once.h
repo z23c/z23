@@ -16,11 +16,12 @@ struct uint256;
 /* Optional fourth z_sendmany parameter: the fee the plan quoted. */
 #define WALLET_SEND_ONCE_FEE_PARAM 3
 
-/* A refusal made before any send was recorded (fee moved, record unavailable,
- * table full) or a run that failed with nothing admitted answers
+/* A run that failed before the wallet admitted any transaction answers
  * {"state":"released","message":...}: nothing was sent and the key is free.
- * The native handler maps it to this code. Any other failure keeps the key
- * and is not reported with this code. */
+ * The native handler maps it to this code. A moved fee answers fee_changed
+ * with the key free. A record that cannot be read, written or made durable,
+ * and a full table, refuse the call with a plain error string that does not
+ * claim the key is free. */
 #define WALLET_SEND_ONCE_STATE_RELEASED "released"
 #define WALLET_SEND_ONCE_STATE_FEE_CHANGED "fee_changed"
 #define WALLET_SEND_ONCE_CODE_RELEASED "SEND_REFUSED_KEY_RELEASED"
@@ -40,8 +41,10 @@ typedef bool (*wallet_send_once_fn)(const struct json_value *params, bool help,
  *   in_progress      another request holds the key
  *   outcome_unknown  a transaction may exist (txid given when known); never
  *                    resent. Covers a recorded transaction that was not
- *                    confirmed as relayed, and a committed one the wallet no
- *                    longer holds
+ *                    confirmed as relayed, a committed one the wallet no
+ *                    longer holds, and any failure after the wallet admitted
+ *                    the transaction (the pool may have held it and a peer
+ *                    may have fetched it, so it can still confirm)
  *   key_conflict     same key, different parameters
  *   released         nothing was admitted; the key is free (state released)
  *   fee_changed      the planned fee differs from the wallet fee; key free
@@ -49,16 +52,18 @@ typedef bool (*wallet_send_once_fn)(const struct json_value *params, bool help,
  * holds the transaction: holding is not relaying. Rebroadcasting held,
  * unrelayed transactions at boot is a separate follow-up. A refusal returns
  * false with an explanatory string and never claims the key is free unless
- * the state is released. Retention uses wall-clock time: a forward clock jump
- * ages rows early. */
+ * the state is released or fee_changed. Retention uses wall-clock time: a
+ * forward clock jump ages rows early. The record lives in node.db and cannot
+ * outlive it: after a database loss or restore an earlier key is not
+ * recognized. */
 bool wallet_send_once_dispatch(const struct json_value *params, bool help,
                                wallet_send_once_fn plain,
                                struct json_value *result);
 
 /* Called by wallet_commit_from_context with the finished transaction id,
  * before the wallet admits it. Inside a keyed send it makes the txid durable
- * (synchronous=FULL for that write) and refuses a second transaction for the
- * same key; elsewhere it is a no-op. A failure refuses the commit. */
+ * (synchronous=FULL, in its own transaction) and refuses a second transaction
+ * for the same key; elsewhere it is a no-op. A failure refuses the commit. */
 struct zcl_result wallet_send_once_before_commit(const struct uint256 *txid);
 
 /* Called after the admission attempt. Once admitted is true the key is never

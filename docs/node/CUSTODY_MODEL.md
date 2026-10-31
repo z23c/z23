@@ -240,12 +240,34 @@ A built row is never answered as committed: the wallet holding a transaction
 does not prove it was relayed. Rebroadcasting held, unrelayed transactions at
 boot is a separate follow-up. A failed run frees its key
 (`SEND_REFUSED_KEY_RELEASED`) only when the wallet never admitted the
-transaction; once admission succeeded the row stays whatever fails afterwards,
-and the caller sees a plain error then `SEND_OUTCOME_UNKNOWN`. A record that
-cannot be read or written is a plain error, never a release. After
-`SEND_OUTCOME_UNKNOWN` the caller must not resend under the same key and checks
-the wallet transaction list before paying under a new key. One keyed send can
-admit exactly one transaction. A node that predates send-once ignores the key
+transaction. Once admission succeeded the pool may have held the transaction
+and a peer may have fetched it, so every later failure (a wallet flush that
+fails, a rollback, a relay error) answers `SEND_OUTCOME_UNKNOWN` with the txid
+and the row stays. A record that cannot be read, written or made durable is a
+plain error, never a release. The txid is returned in the reply only; the node
+log does not carry it.
+
+After `SEND_OUTCOME_UNKNOWN` the caller must not resend under the same key and
+must not pay again under a new key yet. After a crash following pool entry the
+wallet transaction list can be empty, yet the transaction can still confirm
+until it expires: a shielded send expires 20 blocks after the height it was
+built at. Wait until the chain is more than 20 blocks past the send, then check
+the wallet transaction list and History, and only then pay again. One keyed
+send can admit exactly one transaction.
+
+The durable write is its own `BEGIN IMMEDIATE ... COMMIT` with
+`synchronous=FULL` read back inside the transaction; if another writer holds a
+transaction on the connection the send is refused. The `wallet_send_once` test
+group counts write-ahead-log `xSync` calls through a SQLite VFS and fails when
+the built row is written without one.
+
+Limit: the record lives in `node.db` and cannot outlive it. A malformed
+`node.db` is quarantined at boot and a restored one carries only its own rows,
+so after a database loss or restore the node cannot recognize an earlier key.
+The app never retries a payment on its own, and after a restore a payment is a
+new tap on a new review. Before paying again after a database loss or restore,
+the owner checks History and waits past expiry (20 blocks) for any payment that
+had not confirmed. A node that predates send-once ignores the key
 and returns a bare txid, which the handler reports as sent.
 
 Retention: committed keys 90 days, keys without a known outcome 365 days; at

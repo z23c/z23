@@ -896,9 +896,12 @@ static bool wnh_shielded_send_state_ok(struct zcl_command_reply *reply,
         const char *tx = json_get_str(json_get(body, "txid"));
         wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "SEND_OUTCOME_UNKNOWN",
                  "a send with this idempotency_key may have been made but is "
-                 "not confirmed; nothing was sent again. Check the wallet "
-                 "transaction list before making a new payment with a new "
-                 "key", tx && tx[0] ? tx : "z_sendmany");
+                 "not confirmed; nothing was sent again. The transaction can "
+                 "still confirm until it expires, 20 blocks after it was "
+                 "made, and the wallet list may not show it. Do not pay again "
+                 "under a new key until the chain is more than 20 blocks past "
+                 "the send; then check the wallet transaction list",
+                 tx && tx[0] ? tx : "z_sendmany");
     } else if (state && strcmp(state, "key_conflict") == 0) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "IDEMPOTENCY_KEY_REUSED",
                  "this idempotency_key was already used for a different "

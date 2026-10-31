@@ -11,6 +11,9 @@
 
 #include "test/test_core.h"
 
+#include "chain/chainparams.h"
+#include "coins/coins.h"
+#include "coins/coins_view.h"
 #include "command/native_command.h"
 #include "config/command_catalog.h"
 #include "controllers/rpc_client.h"
@@ -19,19 +22,33 @@
 #include "config/db_service.h"
 #include "config/runtime.h"
 #include "controllers/wallet_send_once.h"
+#include "controllers/wallet_shielded_controller.h"
 #include "core/uint256.h"
+#include "core/utiltime.h"
 #include "json/json.h"
+#include "keys/key.h"
+#include "keys/pubkey.h"
 #include "kernel/command_registry.h"
 #include "models/database.h"
 #include "models/wallet_send_once.h"
 #include "primitives/transaction.h"
+#include "script/script.h"
+#include "script/sighashtype.h"
+#include "script/standard.h"
 #include "util/safe_alloc.h"
+#include "validation/main_state.h"
+#include "validation/sighash.h"
+#include "validation/txmempool.h"
 #include "wallet/wallet.h"
+#include "wallet/wallet_sqlite.h"
 
+#include <fcntl.h>
 #include <pthread.h>
+#include <sqlite3.h>
 #include <stdatomic.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 #define WSO_CHECK(name, expr) do {                                         \
     if (expr) { printf("  wallet_send_once: %s... OK\n", (name)); }         \
@@ -44,7 +61,8 @@
 #define WSO_MEMO "wso-private-memo-text"
 
 enum crash_point { CRASH_NONE, CRASH_BEFORE_RECORD, CRASH_AFTER_RECORD,
-                   CRASH_AFTER_BUILT };
+                   CRASH_AFTER_BUILT, CRASH_IN_POOL, CRASH_PERSISTED,
+                   CRASH_RELAYED };
 enum fail_point { FAIL_NONE, FAIL_BEFORE_BUILD, FAIL_AFTER_BUILT,
                   FAIL_AFTER_BUILT_KEPT };
 
@@ -59,6 +77,12 @@ static atomic_int g_double_admitted;
 static int g_delay_ms;
 static uint8_t g_txid_fill = 0xA1;
 static int64_t g_stale_fee = -1;
+static wallet_send_once_fn g_plain;
+static bool g_real_rpc;
+static bool g_foreign_tx;
+static struct node_db *g_ndb;
+static atomic_int g_wal_syncs;
+static int g_sync_delta;
 
 struct fixture {
     struct node_db ndb;
@@ -94,7 +118,13 @@ static bool test_plain_send(const struct json_value *params, bool help,
     }
     struct uint256 id;
     test_txid(&id);
+    if (g_foreign_tx)
+        (void)node_db_begin_immediate(g_ndb);
+    int syncs_before = atomic_load(&g_wal_syncs);
     struct zcl_result r = wallet_send_once_before_commit(&id);
+    g_sync_delta = atomic_load(&g_wal_syncs) - syncs_before;
+    if (g_foreign_tx)
+        (void)node_db_rollback(g_ndb);
     if (!r.ok) {
         json_set_str(result, r.message);
         return false;
@@ -159,8 +189,11 @@ static char *wso_rpc(const char *method, const char *params_json)
     json_init(&result);
     if (!json_read(&params, params_json, strlen(params_json)))
         return test_error_body("bad params");
-    bool ok = wallet_send_once_dispatch(&params, false, test_plain_send,
-                                        &result);
+    bool ok = g_real_rpc
+        ? rpc_z_sendmany(&params, false, &result)
+        : wallet_send_once_dispatch(&params, false,
+                                    g_plain ? g_plain : test_plain_send,
+                                    &result);
     if (ok && g_old_node) {
         char hex[65];
         struct uint256 id;
@@ -191,6 +224,7 @@ static bool fx_open(struct fixture *fx, const char *tag, bool fresh)
     memset(&fx->ndb, 0, sizeof(fx->ndb));
     if (!node_db_open(&fx->ndb, fx->path))
         return false;
+    g_ndb = &fx->ndb;
     g_wallet = zcl_calloc(1, sizeof(*g_wallet), "wso_wallet");
     if (!g_wallet)
         return false;
@@ -208,6 +242,7 @@ static void fx_close(struct fixture *fx, bool remove_dir)
     wallet_rpc_context_set_node_db(NULL);
     wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
     node_db_close(&fx->ndb);
+    g_ndb = NULL;
     if (g_wallet) {
         wallet_free(g_wallet);
         free(g_wallet);
@@ -229,6 +264,10 @@ static void reset_counters(void)
     g_delay_ms = 0;
     g_txid_fill = 0xA1;
     g_stale_fee = -1;
+    g_plain = NULL;
+    g_real_rpc = false;
+    g_foreign_tx = false;
+    g_sync_delta = -1;
 }
 
 /* ── Command helpers ──────────────────────────────────────────────────── */
@@ -310,6 +349,277 @@ static bool replied_committed(const struct zcl_command_reply *r,
            json_get_bool(json_get(&r->data, "committed")) &&
            json_get_bool(json_get(&r->data, "replayed")) == replayed &&
            txid && strcmp(txid, hex) == 0;
+}
+
+/* ── Real admission fixture ───────────────────────────────────────────── */
+
+/* The real mempool gate, wallet and wallet database, with a signed
+ * transparent spend that the gate accepts. */
+struct real_fix {
+    struct tx_mempool pool;
+    struct coins_view null_view;
+    struct coins_view_cache coins;
+    struct main_state ms;
+    struct wallet_sqlite wdb;
+    struct privkey key;
+    struct pubkey pub;
+    struct key_id kid;
+    struct script spk;
+    uint8_t seq;
+};
+
+static struct real_fix g_rfix;
+static struct real_fix *g_rf;
+#define RF_UTXO_VALUE (100 * COIN_VALUE)
+
+static bool rf_open(struct real_fix *rf, struct fixture *fx)
+{
+    memset(rf, 0, sizeof(*rf));
+    tx_mempool_init(&rf->pool, 0);
+    coins_view_cache_init(&rf->coins, &rf->null_view);
+    main_state_init(&rf->ms);
+    privkey_make_new(&rf->key, true);
+    privkey_get_pubkey(&rf->key, &rf->pub);
+    rf->kid = pubkey_get_id(&rf->pub);
+    script_for_p2pkh(&rf->spk, &rf->kid);
+    if (!wallet_sqlite_open_r(&rf->wdb, fx->ndb.db).ok)
+        return false;
+    wallet_rpc_context_set_base(g_wallet, &rf->ms, fx->dir, &rf->wdb,
+                                &rf->pool, NULL);
+    wallet_rpc_context_set_coins_tip(&rf->coins);
+    g_rf = rf;
+    return true;
+}
+
+static void rf_close(struct real_fix *rf)
+{
+    wallet_rpc_context_set_base(g_wallet, NULL, NULL, NULL, NULL, NULL);
+    wallet_rpc_context_set_coins_tip(NULL);
+    wallet_sqlite_close(&rf->wdb);
+    coins_view_cache_free(&rf->coins);
+    tx_mempool_free(&rf->pool);
+    main_state_free(&rf->ms);
+    g_rf = NULL;
+}
+
+static void rf_sign(struct real_fix *rf, struct transaction *tx)
+{
+    struct sighash_type ht = { .raw = SIGHASH_ALL };
+    struct uint256 sighash;
+    uint256_set_null(&sighash);
+    signature_hash(&rf->spk, tx, 0, ht, RF_UTXO_VALUE, 0, NULL, &sighash);
+    unsigned char sig[80];
+    size_t siglen = sizeof(sig);
+    privkey_sign(&rf->key, &sighash, sig, &siglen);
+    if (siglen > 72)
+        siglen = 72;
+    sig[siglen++] = SIGHASH_ALL;
+    unsigned char ss[1 + 73 + 1 + 65];
+    size_t n = 0;
+    ss[n++] = (unsigned char)siglen;
+    memcpy(&ss[n], sig, siglen);
+    n += siglen;
+    size_t pklen = rf->pub.size > 65 ? 65 : rf->pub.size;
+    ss[n++] = (unsigned char)pklen;
+    memcpy(&ss[n], rf->pub.vch, pklen);
+    n += pklen;
+    script_set(&tx->vin[0].script_sig, ss, n);
+    transaction_compute_hash(tx);
+}
+
+/* A fresh funded outpoint and a signed spend of it. */
+static bool rf_make_tx(struct real_fix *rf, struct wallet_tx *wtx)
+{
+    struct uint256 prev;
+    memset(prev.data, 0xE0, 32);
+    prev.data[0] = ++rf->seq;
+    struct coins_cache_entry *e = coins_view_cache_modify_new(&rf->coins, &prev);
+    if (!e)
+        return false;
+    coins_alloc(&e->coins, 1);
+    e->coins.vout[0].value = RF_UTXO_VALUE;
+    script_for_p2pkh(&e->coins.vout[0].script_pub_key, &rf->kid);
+    e->coins.height = 1;
+    e->coins.version = 1;
+    e->coins.is_coinbase = false;
+    memset(wtx, 0, sizeof(*wtx));
+    transaction_init(&wtx->tx);
+    transaction_alloc(&wtx->tx, 1, 1);
+    wtx->tx.version = 1;
+    wtx->tx.vin[0].prevout.hash = prev;
+    wtx->tx.vin[0].prevout.n = 0;
+    wtx->tx.vin[0].sequence = 0xFFFFFFFF;
+    wtx->tx.vout[0].value = RF_UTXO_VALUE - 1000000;
+    uint8_t op1 = 0x51;
+    script_set(&wtx->tx.vout[0].script_pub_key, &op1, 1);
+    rf_sign(rf, &wtx->tx);
+    wtx->time_received = GetTime();
+    wtx->from_me = true;
+    wtx->used = true;
+    return true;
+}
+
+/* The send steps of z_sendmany with the real admission: the gate, the wallet
+ * record, the wallet database flush. There is no relay stage in a test node,
+ * so CRASH_RELAYED dies where the relay call would return. */
+static bool real_admit_plain(const struct json_value *params, bool help,
+                             struct json_value *result)
+{
+    (void)params;
+    (void)help;
+    atomic_fetch_add(&g_builds, 1);
+    struct wallet_tx wtx;
+    if (!g_rf || !rf_make_tx(g_rf, &wtx)) {
+        json_set_str(result, "fixture transaction unavailable");
+        return false;
+    }
+    const struct wallet_rpc_context *ctx = wallet_rpc_context_current();
+    struct zcl_result r = wallet_commit_from_context(ctx, &wtx);
+    if (r.ok) {
+        if (g_crash == CRASH_IN_POOL)
+            _exit(77);
+        r = wallet_persist_commit_before_relay(ctx, &wtx);
+    }
+    if (!r.ok) {
+        json_set_str(result, r.message);
+        transaction_free(&wtx.tx);
+        return false;
+    }
+    if (g_crash == CRASH_PERSISTED || g_crash == CRASH_RELAYED)
+        _exit(77);
+    char hex[65];
+    uint256_get_hex(&wtx.tx.hash, hex);
+    json_set_str(result, hex);
+    transaction_free(&wtx.tx);
+    return true;
+}
+
+/* ── Write-ahead-log sync counting VFS ────────────────────────────────── */
+
+/* Wraps the default VFS and counts xSync on the write-ahead-log file, which
+ * is the only sync a WAL commit under synchronous=FULL performs and a commit
+ * under NORMAL does not. */
+struct cvfs_file {
+    sqlite3_file base;
+    sqlite3_file *real;
+    bool wal;
+};
+
+static sqlite3_vfs *g_real_vfs;
+static sqlite3_vfs g_cvfs;
+static sqlite3_io_methods g_cio;
+
+#define CVFS_REAL(f) (((struct cvfs_file *)(f))->real)
+
+static int cv_close(sqlite3_file *f)
+{
+    return CVFS_REAL(f)->pMethods->xClose(CVFS_REAL(f));
+}
+static int cv_read(sqlite3_file *f, void *b, int n, sqlite3_int64 o)
+{
+    return CVFS_REAL(f)->pMethods->xRead(CVFS_REAL(f), b, n, o);
+}
+static int cv_write(sqlite3_file *f, const void *b, int n, sqlite3_int64 o)
+{
+    return CVFS_REAL(f)->pMethods->xWrite(CVFS_REAL(f), b, n, o);
+}
+static int cv_truncate(sqlite3_file *f, sqlite3_int64 s)
+{
+    return CVFS_REAL(f)->pMethods->xTruncate(CVFS_REAL(f), s);
+}
+static int cv_sync(sqlite3_file *f, int flags)
+{
+    if (((struct cvfs_file *)f)->wal)
+        atomic_fetch_add(&g_wal_syncs, 1);
+    return CVFS_REAL(f)->pMethods->xSync(CVFS_REAL(f), flags);
+}
+static int cv_size(sqlite3_file *f, sqlite3_int64 *s)
+{
+    return CVFS_REAL(f)->pMethods->xFileSize(CVFS_REAL(f), s);
+}
+static int cv_lock(sqlite3_file *f, int l)
+{
+    return CVFS_REAL(f)->pMethods->xLock(CVFS_REAL(f), l);
+}
+static int cv_unlock(sqlite3_file *f, int l)
+{
+    return CVFS_REAL(f)->pMethods->xUnlock(CVFS_REAL(f), l);
+}
+static int cv_reserved(sqlite3_file *f, int *r)
+{
+    return CVFS_REAL(f)->pMethods->xCheckReservedLock(CVFS_REAL(f), r);
+}
+static int cv_control(sqlite3_file *f, int op, void *a)
+{
+    return CVFS_REAL(f)->pMethods->xFileControl(CVFS_REAL(f), op, a);
+}
+static int cv_sector(sqlite3_file *f)
+{
+    return CVFS_REAL(f)->pMethods->xSectorSize(CVFS_REAL(f));
+}
+static int cv_chars(sqlite3_file *f)
+{
+    return CVFS_REAL(f)->pMethods->xDeviceCharacteristics(CVFS_REAL(f));
+}
+static int cv_shm_map(sqlite3_file *f, int pg, int sz, int ext,
+                      void volatile **out)
+{
+    return CVFS_REAL(f)->pMethods->xShmMap(CVFS_REAL(f), pg, sz, ext, out);
+}
+static int cv_shm_lock(sqlite3_file *f, int off, int n, int flags)
+{
+    return CVFS_REAL(f)->pMethods->xShmLock(CVFS_REAL(f), off, n, flags);
+}
+static void cv_shm_barrier(sqlite3_file *f)
+{
+    CVFS_REAL(f)->pMethods->xShmBarrier(CVFS_REAL(f));
+}
+static int cv_shm_unmap(sqlite3_file *f, int del)
+{
+    return CVFS_REAL(f)->pMethods->xShmUnmap(CVFS_REAL(f), del);
+}
+
+static int cv_open(sqlite3_vfs *v, const char *name, sqlite3_file *f,
+                   int flags, int *out)
+{
+    (void)v;
+    struct cvfs_file *c = (struct cvfs_file *)f;
+    memset(c, 0, sizeof(*c));
+    c->real = (sqlite3_file *)(c + 1);
+    int rc = g_real_vfs->xOpen(g_real_vfs, name, c->real, flags, out);
+    if (rc == SQLITE_OK) {
+        c->wal = (flags & SQLITE_OPEN_WAL) != 0;
+        c->base.pMethods = &g_cio;
+    }
+    return rc;
+}
+
+static bool cvfs_install(void)
+{
+    g_real_vfs = sqlite3_vfs_find(NULL);
+    if (!g_real_vfs)
+        return false;
+    g_cvfs = *g_real_vfs;
+    g_cvfs.zName = "wso_wal_sync_count";
+    g_cvfs.szOsFile = (int)(sizeof(struct cvfs_file)) + g_real_vfs->szOsFile;
+    g_cvfs.pNext = NULL;
+    g_cvfs.xOpen = cv_open;
+    g_cio = (sqlite3_io_methods){
+        .iVersion = 2, .xClose = cv_close, .xRead = cv_read,
+        .xWrite = cv_write, .xTruncate = cv_truncate, .xSync = cv_sync,
+        .xFileSize = cv_size, .xLock = cv_lock, .xUnlock = cv_unlock,
+        .xCheckReservedLock = cv_reserved, .xFileControl = cv_control,
+        .xSectorSize = cv_sector, .xDeviceCharacteristics = cv_chars,
+        .xShmMap = cv_shm_map, .xShmLock = cv_shm_lock,
+        .xShmBarrier = cv_shm_barrier, .xShmUnmap = cv_shm_unmap,
+    };
+    return sqlite3_vfs_register(&g_cvfs, 1) == SQLITE_OK;
+}
+
+static void cvfs_remove(void)
+{
+    (void)sqlite3_vfs_register(g_real_vfs, 1);
+    (void)sqlite3_vfs_unregister(&g_cvfs);
 }
 
 /* ── Cases ────────────────────────────────────────────────────────────── */
@@ -405,6 +715,11 @@ static bool crash_child(const struct fixture *fx, int point, const char *key)
         g_crash = point;
         if (!fx_open(&child, "child", false))
             _exit(70);
+        if (point >= CRASH_IN_POOL) {
+            g_plain = real_admit_plain;
+            if (!rf_open(&g_rfix, &child))
+                _exit(70);
+        }
         struct zcl_command_reply r;
         plan_then_commit("0.1", WSO_MEMO, key, &r);
         _exit(71);
@@ -477,7 +792,32 @@ static int case_crash(void)
               strlen(r.error.evidence) == 64 &&
               atomic_load(&g_builds) == 0);
     zcl_command_reply_free(&r);
-    fx_close(&fx, true);
+    fx_close(&fx, false);
+
+    /* Deaths inside the real admission: the pool took the transaction, the
+     * wallet database persisted it, the send finished before the row was
+     * marked committed. The built row is durable before the pool, so each
+     * repeat is unknown with the txid and sends nothing. */
+    static const struct { int point; const char *key; const char *what; } deaths[] = {
+        { CRASH_IN_POOL, "key-in-pool", "in the pool before the wallet persisted it" },
+        { CRASH_PERSISTED, "key-persisted", "after the wallet persisted it, before relay" },
+        { CRASH_RELAYED, "key-relayed", "after relay, before the row was committed" },
+    };
+    for (size_t i = 0; i < sizeof(deaths) / sizeof(deaths[0]); i++) {
+        char what[120];
+        (void)snprintf(what, sizeof(what), "child died %s", deaths[i].what);
+        WSO_CHECK(what, crash_child(&fx, deaths[i].point, deaths[i].key));
+        reset_counters();
+        WSO_CHECK("reopen", fx_open(&fx, "x", false));
+        plan_then_commit("0.1", WSO_MEMO, deaths[i].key, &r);
+        WSO_CHECK("the repeat is outcome_unknown with the txid and sends nothing",
+                  replied_code(&r, "SEND_OUTCOME_UNKNOWN") &&
+                  strlen(r.error.evidence) == 64 &&
+                  atomic_load(&g_builds) == 0);
+        zcl_command_reply_free(&r);
+        fx_close(&fx, false);
+    }
+    (void)test_rm_rf_recursive(fx.dir);
     return failures;
 }
 
@@ -699,10 +1039,10 @@ static int case_failed_run_releases_key(void)
     zcl_command_reply_free(&r);
     g_fail = FAIL_AFTER_BUILT_KEPT;
     plan_then_commit("0.1", "kept memo", "key-kept", &r);
-    WSO_CHECK("a failure with the transaction kept is not the released code",
-              r.exit_code != ZCL_COMMAND_EXIT_OK &&
-              strcmp(r.error.code, "SEND_REFUSED_KEY_RELEASED") != 0 &&
-              strcmp(r.error.code, "WALLET_RPC_ERROR") == 0 &&
+    WSO_CHECK("a failure after admission is outcome_unknown with the txid, "
+              "never released and never a plain error",
+              replied_code(&r, "SEND_OUTCOME_UNKNOWN") &&
+              strlen(r.error.evidence) == 64 &&
               db_wallet_send_once_count(&fx.ndb) == 1);
     zcl_command_reply_free(&r);
     g_fail = FAIL_NONE;
@@ -825,8 +1165,9 @@ static int case_admitted_stays(void)
     struct zcl_command_reply r;
     g_fail = FAIL_AFTER_BUILT_KEPT;
     plan_then_commit("0.1", WSO_MEMO, WSO_KEY, &r);
-    WSO_CHECK("failure after admission is a plain error, not released",
-              strcmp(r.error.code, "WALLET_RPC_ERROR") == 0 &&
+    WSO_CHECK("failure after admission is outcome_unknown, not released",
+              replied_code(&r, "SEND_OUTCOME_UNKNOWN") &&
+              strlen(r.error.evidence) == 64 &&
               db_wallet_send_once_count(&fx.ndb) == 1);
     zcl_command_reply_free(&r);
     g_fail = FAIL_NONE;
@@ -1075,6 +1416,217 @@ static int case_retention(void)
     return failures;
 }
 
+/* Real admission, real wallet database. */
+static int case_real_admission(void)
+{
+    int failures = 0;
+    struct fixture fx;
+    reset_counters();
+    if (!fx_open(&fx, "realadmit", true))
+        return 1;
+    struct real_fix rf;
+    WSO_CHECK("real admission fixture opens", rf_open(&rf, &fx));
+    g_plain = real_admit_plain;
+    struct zcl_command_reply r;
+
+    plan_then_commit("0.1", WSO_MEMO, "key-real-ok", &r);
+    const char *txid = json_get_str(json_get(&r.data, "txid"));
+    char first[65] = "";
+    if (txid && strlen(txid) == 64)
+        memcpy(first, txid, 65);
+    WSO_CHECK("a real admission and wallet flush commit the send",
+              r.exit_code == ZCL_COMMAND_EXIT_OK && first[0] &&
+              tx_mempool_size(&rf.pool) == 1 && g_wallet->num_wallet_tx == 1);
+    zcl_command_reply_free(&r);
+    plan_then_commit("0.1", WSO_MEMO, "key-real-ok", &r);
+    txid = json_get_str(json_get(&r.data, "txid"));
+    WSO_CHECK("the repeat replays it and admits nothing",
+              r.exit_code == ZCL_COMMAND_EXIT_OK && txid &&
+              strcmp(txid, first) == 0 &&
+              json_get_bool(json_get(&r.data, "replayed")) &&
+              atomic_load(&g_builds) == 1 && tx_mempool_size(&rf.pool) == 1);
+    zcl_command_reply_free(&r);
+
+    /* The pool took the transaction, then the wallet flush failed and the
+     * admission was rolled back; a peer may already hold it. */
+    WSO_CHECK("wallet flush made to fail",
+              node_db_exec(&fx.ndb,
+                  "CREATE TRIGGER wso_flush_fails BEFORE INSERT ON "
+                  "wallet_transactions BEGIN SELECT RAISE(ABORT,'wso'); END"));
+    plan_then_commit("0.1", "flush memo", "key-flush-fails", &r);
+    WSO_CHECK("a flush failure after pool entry is outcome_unknown with the "
+              "txid, not a rolled-back error",
+              replied_code(&r, "SEND_OUTCOME_UNKNOWN") &&
+              strlen(r.error.evidence) == 64 &&
+              tx_mempool_size(&rf.pool) == 1 &&
+              db_wallet_send_once_count(&fx.ndb) == 2);
+    zcl_command_reply_free(&r);
+    int builds = atomic_load(&g_builds);
+    plan_then_commit("0.1", "flush memo", "key-flush-fails", &r);
+    WSO_CHECK("the key is not free: the repeat sends nothing",
+              replied_code(&r, "SEND_OUTCOME_UNKNOWN") &&
+              atomic_load(&g_builds) == builds);
+    zcl_command_reply_free(&r);
+    (void)node_db_exec(&fx.ndb, "DROP TRIGGER wso_flush_fails");
+
+    rf_close(&rf);
+    fx_close(&fx, true);
+    return failures;
+}
+
+/* wallet_commit_transaction code -3: the pool accepted the transaction, then
+ * the wallet record failed and the pool entry was removed again. */
+static int case_real_wallet_full(void)
+{
+    int failures = 0;
+    struct fixture fx;
+    reset_counters();
+    if (!fx_open(&fx, "walletfull", true))
+        return 1;
+    struct real_fix rf;
+    WSO_CHECK("fixture opens", rf_open(&rf, &fx));
+    g_plain = real_admit_plain;
+    for (size_t i = 0; i < MAX_WALLET_TX; i++)
+        g_wallet->map_wallet[i].used = true;
+    struct zcl_command_reply r;
+    plan_then_commit("0.1", WSO_MEMO, "key-wallet-full", &r);
+    WSO_CHECK("a wallet record failing after pool entry is outcome_unknown",
+              replied_code(&r, "SEND_OUTCOME_UNKNOWN") &&
+              strlen(r.error.evidence) == 64 && atomic_load(&g_builds) == 1 &&
+              tx_mempool_size(&rf.pool) == 0 &&
+              db_wallet_send_once_count(&fx.ndb) == 1);
+    zcl_command_reply_free(&r);
+    for (size_t i = 0; i < MAX_WALLET_TX; i++)
+        g_wallet->map_wallet[i].used = false;
+    rf_close(&rf);
+    fx_close(&fx, true);
+    return failures;
+}
+
+/* The built row reaches disk before the call returns. The default level of
+ * node.db (NORMAL) never syncs the write-ahead log on commit, so a sync here
+ * can only come from the synchronous=FULL write. */
+static int case_built_row_is_synced(void)
+{
+    int failures = 0;
+    struct fixture fx;
+    reset_counters();
+    WSO_CHECK("sync counting VFS installed", cvfs_install());
+    if (!fx_open(&fx, "walsync", true)) {
+        cvfs_remove();
+        return failures + 1;
+    }
+    int level_before = db_wallet_send_once_sync_level(&fx.ndb);
+    struct zcl_command_reply r;
+    plan_then_commit("0.1", WSO_MEMO, WSO_KEY, &r);
+    WSO_CHECK("the keyed send commits", replied_committed(&r, false, 0xA1));
+    WSO_CHECK("the built row write syncs the write-ahead log",
+              g_sync_delta >= 1);
+    WSO_CHECK("the synchronous level is restored",
+              level_before == 1 &&
+              db_wallet_send_once_sync_level(&fx.ndb) == level_before);
+    zcl_command_reply_free(&r);
+    fx_close(&fx, true);
+    cvfs_remove();
+    return failures;
+}
+
+/* Another writer holds a transaction on the connection when the built row is
+ * written. The write must not join it: if that transaction rolls back or the
+ * machine loses power the row would be gone while the send went on. */
+static int case_built_row_has_own_transaction(void)
+{
+    int failures = 0;
+    struct fixture fx;
+    reset_counters();
+    if (!fx_open(&fx, "owntx", true))
+        return 1;
+    g_foreign_tx = true;
+    struct zcl_command_reply r;
+    plan_then_commit("0.1", WSO_MEMO, WSO_KEY, &r);
+    WSO_CHECK("a busy connection refuses the send before admission",
+              replied_code(&r, WALLET_SEND_ONCE_CODE_RELEASED) &&
+              db_wallet_send_once_count(&fx.ndb) == 0);
+    zcl_command_reply_free(&r);
+    g_foreign_tx = false;
+    plan_then_commit("0.1", WSO_MEMO, WSO_KEY, &r);
+    WSO_CHECK("the same key then sends once",
+              replied_committed(&r, false, 0xA1));
+    zcl_command_reply_free(&r);
+    fx_close(&fx, true);
+    return failures;
+}
+
+/* The real z_sendmany behind the real dispatch, with a wallet that cannot
+ * send: it refuses before building, so the key is released. */
+static int case_real_zsendmany(void)
+{
+    int failures = 0;
+    struct fixture fx;
+    reset_counters();
+    if (!fx_open(&fx, "realz", true))
+        return 1;
+    g_real_rpc = true;
+    struct zcl_command_reply r;
+    plan_then_commit("0.1", WSO_MEMO, WSO_KEY, &r);
+    WSO_CHECK("a keyed z_sendmany that cannot build is released",
+              replied_code(&r, WALLET_SEND_ONCE_CODE_RELEASED) &&
+              db_wallet_send_once_count(&fx.ndb) == 0 &&
+              atomic_load(&g_zsend_calls) == 1);
+    zcl_command_reply_free(&r);
+    plan_then_commit("0.1", WSO_MEMO, WSO_KEY, &r);
+    WSO_CHECK("the released key reaches z_sendmany again",
+              replied_code(&r, WALLET_SEND_ONCE_CODE_RELEASED) &&
+              atomic_load(&g_zsend_calls) == 2);
+    zcl_command_reply_free(&r);
+    fx_close(&fx, true);
+    return failures;
+}
+
+/* The txid of an unknown outcome belongs to the reply, not the log. */
+static int case_txid_not_logged(void)
+{
+    int failures = 0;
+    struct fixture fx;
+    reset_counters();
+    if (!fx_open(&fx, "logtxid", true))
+        return 1;
+    char logpath[340];
+    (void)snprintf(logpath, sizeof(logpath), "%s/captured.log", fx.dir);
+    g_fail = FAIL_AFTER_BUILT_KEPT;
+    struct zcl_command_reply r;
+    fflush(stderr);
+    int saved = dup(STDERR_FILENO);
+    int fd = open(logpath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (saved >= 0 && fd >= 0)
+        (void)dup2(fd, STDERR_FILENO);
+    if (fd >= 0)
+        close(fd);
+    plan_then_commit("0.1", WSO_MEMO, WSO_KEY, &r);
+    fflush(stderr);
+    if (saved >= 0) {
+        (void)dup2(saved, STDERR_FILENO);
+        close(saved);
+    }
+    struct uint256 id;
+    char hex[65];
+    memset(id.data, 0xA1, 32);
+    uint256_get_hex(&id, hex);
+    WSO_CHECK("the reply carries the txid",
+              replied_code(&r, "SEND_OUTCOME_UNKNOWN") &&
+              strcmp(r.error.evidence, hex) == 0);
+    WSO_CHECK("the refusal was logged", file_contains(logpath,
+              "SEND_OUTCOME_UNKNOWN"));
+    WSO_CHECK("the log carries no txid, key, address or memo",
+              !file_contains(logpath, hex) && !file_contains(logpath, WSO_KEY) &&
+              !file_contains(logpath, WSO_FROM) &&
+              !file_contains(logpath, WSO_TO) &&
+              !file_contains(logpath, WSO_MEMO));
+    zcl_command_reply_free(&r);
+    fx_close(&fx, true);
+    return failures;
+}
+
 int test_wallet_send_once(void);
 int test_wallet_send_once(void)
 {
@@ -1100,6 +1652,12 @@ int test_wallet_send_once(void)
     failures += case_unreadable_record();
     failures += case_one_transaction_per_key();
     failures += case_record_privacy();
+    failures += case_real_admission();
+    failures += case_real_wallet_full();
+    failures += case_built_row_is_synced();
+    failures += case_built_row_has_own_transaction();
+    failures += case_real_zsendmany();
+    failures += case_txid_not_logged();
     failures += case_retention();
     if (failures == 0)
         printf("wallet_send_once: OK\n");
