@@ -439,6 +439,11 @@ static int dlx_pc_mode_cases(void)
                base * ZCL_LAND_PRECHECK_BUDGET_MAX_SCALE);
         ASSERT(zcl_land_precheck_budget_ms(32, INT64_MAX) ==
                base * ZCL_LAND_PRECHECK_BUDGET_MAX_SCALE);
+        /* Large valid inputs keep their ratio: no clamp of one side alone. */
+        ASSERT(zcl_land_precheck_budget_ms(100000000, 100000000000) ==
+               base * ZCL_LAND_PRECHECK_BUDGET_MAX_SCALE);
+        ASSERT(zcl_land_precheck_budget_ms(INT32_MAX, (int64_t)INT32_MAX * 150) ==
+               base * 3 / 2);
         ASSERT(zcl_land_precheck_budget_ms(-1, 4800) == base); /* unknown cpus */
         ASSERT(zcl_land_precheck_budget_ms(0, 4800) == base);
         ASSERT(zcl_land_precheck_budget_ms(32, -1) == base);   /* unknown load */

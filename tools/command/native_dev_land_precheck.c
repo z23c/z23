@@ -247,13 +247,13 @@ int64_t zcl_land_precheck_budget_ms(int64_t cpus, int64_t load5_centi)
 {
     const int64_t base = ZCL_LAND_PRECHECK_BUDGET_MS;
     const int64_t cap = base * ZCL_LAND_PRECHECK_BUDGET_MAX_SCALE;
-    if (cpus <= 0 || load5_centi <= 0)
+    if (cpus <= 0 || load5_centi <= 0 || cpus > INT32_MAX)
         return base;
-    if (cpus > INT32_MAX)
-        return base;
-    if (load5_centi > (int64_t)INT32_MAX)
-        load5_centi = INT32_MAX; /* far past the cap; keeps the product exact */
-    int64_t scaled = base / 100 * load5_centi / cpus;
+    /* Decide the cap by ratio first, so the product below stays bounded
+     * (load5_centi < 100 * scale * cpus) for every valid input. */
+    if (load5_centi / cpus >= 100 * (int64_t)ZCL_LAND_PRECHECK_BUDGET_MAX_SCALE)
+        return cap;
+    int64_t scaled = base * load5_centi / (100 * cpus);
     return scaled < base ? base : scaled > cap ? cap : scaled;
 }
 
