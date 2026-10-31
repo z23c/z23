@@ -468,3 +468,7 @@ later lane flips it HARD.
 - 2026-10-31T16:38:08Z — REASON: Split the socket reactor's per-iteration steps out of connman.c; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: a401d49d6554176329c7868cc66350b8d4b27b26079585d73a49ffc4edd471b5
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T16:45:38Z — REASON: Split process_inv and process_tx_msg into per-item and relay helpers; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: 3799c3da4e7eda73277bcdf7e9f9004b8a61d28cb4c5d09b4daa9b7d00c5bc8d
+  by: owner unseal ritual (make core-unseal)

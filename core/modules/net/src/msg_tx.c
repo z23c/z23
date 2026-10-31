@@ -134,6 +134,76 @@ enum tx_accept_result msg_tx_accept(struct msg_processor *mp,
     return ar;
 }
 
+static void inv_handle_block(struct msg_processor *mp, struct p2p_node *node,
+                             struct inv_item inv, struct byte_stream *getdata,
+                             uint64_t *request_count)
+{
+    if (block_already_seen(&inv.hash))
+        return;
+    /* Don't request blocks during snapshot sync */
+    if (msg_processor_snapshot_active(mp))
+        return;
+    struct block_index *bi = block_map_find(
+        &mp->main_state->map_block_index, &inv.hash);
+    struct block_index *tip = active_chain_tip(
+        &mp->main_state->chain_active);
+    /* Match ZClassic C++ IsInitialBlockDownload + inv handling:
+     * Request blocks directly when our tip is recent (within
+     * PoWTargetSpacing*20 = 75*20 = 1500s of now). During IBD,
+     * rely on headers-first sync instead.
+     *
+     * Old logic used node->starting_height - 1000 which kept
+     * the node in headers-only mode too long after catchup. */
+    bool in_ibd = !tip || !tip->nTime ||
+                  ((int64_t)tip->nTime <
+                   (int64_t)platform_time_wall_time_t() - 75 * 20);
+    bool need_data = !bi || !(bi->nStatus & BLOCK_HAVE_DATA);
+    if (need_data && !in_ibd) {
+        /* ZClassic C++: send getheaders FIRST, then getdata.
+         * Headers arrive before (or with) the block, preventing
+         * orphan rejection if the block's parent is unknown. */
+        push_getheaders_from(mp, node, tip);
+        /* Register the request with the download manager so a dropped
+         * or stalled serving peer is caught by dl_check_timeouts (run
+         * every cycle for ALL peers in msg_send_messages) and reassigned
+         * to another peer. Without this the at-tip path was untracked: a
+         * peer drop mid-body stalled new-block ingest until the 600s
+         * tip-stale watchdog. dl_mark_requested returns false when the
+         * hash is already in-flight, de-duping concurrent announces. */
+        struct download_manager *dm = get_download_mgr();
+        int32_t req_height = bi ? (int32_t)bi->nHeight : -1;
+        if (dl_mark_requested(dm, &inv.hash, req_height,
+                              (uint32_t)node->id)) {
+            inv_item_serialize(&inv, getdata);
+            (*request_count)++;
+        }
+    } else if (need_data && in_ibd) {
+        /* Ask for headers instead */
+        push_getheaders_from(mp, node, tip);
+    }
+    if (tip && bi && active_chain_contains(
+            &mp->main_state->chain_active, bi)) {
+        node->hash_continue = inv.hash;
+    }
+}
+
+static void inv_handle_tx(struct msg_processor *mp, struct inv_item inv,
+                          struct byte_stream *getdata,
+                          uint64_t *request_count)
+{
+    /* Dandelion: seeing a tx via inv means it's been fluffed.
+     * Remove from stempool so we don't re-fluff on embargo. */
+    if (g_dandelion_init)
+        dandelion_stempool_remove(&g_dandelion, &inv.hash);
+
+    if (tx_already_seen(&inv.hash))
+        return;
+    if (!tx_mempool_exists(mp->mempool, &inv.hash)) {
+        inv_item_serialize(&inv, getdata);
+        (*request_count)++;
+    }
+}
+
 bool process_inv(struct msg_processor *mp, struct p2p_node *node,
                  struct byte_stream *s)
 {
@@ -175,67 +245,10 @@ bool process_inv(struct msg_processor *mp, struct p2p_node *node,
 
         p2p_node_add_inventory_known(node, &inv);
 
-        if (inv.type == MSG_BLOCK) {
-            if (block_already_seen(&inv.hash))
-                continue;
-            /* Don't request blocks during snapshot sync */
-            if (msg_processor_snapshot_active(mp))
-                continue;
-            struct block_index *bi = block_map_find(
-                &mp->main_state->map_block_index, &inv.hash);
-            struct block_index *tip = active_chain_tip(
-                &mp->main_state->chain_active);
-            /* Match ZClassic C++ IsInitialBlockDownload + inv handling:
-             * Request blocks directly when our tip is recent (within
-             * PoWTargetSpacing*20 = 75*20 = 1500s of now). During IBD,
-             * rely on headers-first sync instead.
-             *
-             * Old logic used node->starting_height - 1000 which kept
-             * the node in headers-only mode too long after catchup. */
-            bool in_ibd = !tip || !tip->nTime ||
-                          ((int64_t)tip->nTime <
-                           (int64_t)platform_time_wall_time_t() - 75 * 20);
-            bool need_data = !bi || !(bi->nStatus & BLOCK_HAVE_DATA);
-            if (need_data && !in_ibd) {
-                /* ZClassic C++: send getheaders FIRST, then getdata.
-                 * Headers arrive before (or with) the block, preventing
-                 * orphan rejection if the block's parent is unknown. */
-                push_getheaders_from(mp, node, tip);
-                /* Register the request with the download manager so a dropped
-                 * or stalled serving peer is caught by dl_check_timeouts (run
-                 * every cycle for ALL peers in msg_send_messages) and reassigned
-                 * to another peer. Without this the at-tip path was untracked: a
-                 * peer drop mid-body stalled new-block ingest until the 600s
-                 * tip-stale watchdog. dl_mark_requested returns false when the
-                 * hash is already in-flight, de-duping concurrent announces. */
-                struct download_manager *dm = get_download_mgr();
-                int32_t req_height = bi ? (int32_t)bi->nHeight : -1;
-                if (dl_mark_requested(dm, &inv.hash, req_height,
-                                      (uint32_t)node->id)) {
-                    inv_item_serialize(&inv, &getdata);
-                    request_count++;
-                }
-            } else if (need_data && in_ibd) {
-                /* Ask for headers instead */
-                push_getheaders_from(mp, node, tip);
-            }
-            if (tip && bi && active_chain_contains(
-                    &mp->main_state->chain_active, bi)) {
-                node->hash_continue = inv.hash;
-            }
-        } else if (inv.type == MSG_TX) {
-            /* Dandelion: seeing a tx via inv means it's been fluffed.
-             * Remove from stempool so we don't re-fluff on embargo. */
-            if (g_dandelion_init)
-                dandelion_stempool_remove(&g_dandelion, &inv.hash);
-
-            if (tx_already_seen(&inv.hash))
-                continue;
-            if (!tx_mempool_exists(mp->mempool, &inv.hash)) {
-                inv_item_serialize(&inv, &getdata);
-                request_count++;
-            }
-        }
+        if (inv.type == MSG_BLOCK)
+            inv_handle_block(mp, node, inv, &getdata, &request_count);
+        else if (inv.type == MSG_TX)
+            inv_handle_tx(mp, inv, &getdata, &request_count);
     }
 
     if (request_count > 0) {
@@ -251,6 +264,76 @@ bool process_inv(struct msg_processor *mp, struct p2p_node *node,
     }
     stream_free(&getdata);
     return true;
+}
+
+static bool tx_try_stem(struct msg_processor *mp, struct p2p_node *node,
+                        struct transaction *tx, struct uint256 *hash,
+                        struct inv_item *inv)
+{
+    bool stemmed = false;
+
+    if (g_dandelion_init) {
+        dandelion_maybe_rotate_epoch(&g_dandelion, mp->net_mgr);
+
+        if (dandelion_should_stem(&g_dandelion, node->id)) {
+            node_id_t stem_id = dandelion_get_stem_peer(
+                &g_dandelion, node->id);
+            if (stem_id != DANDELION_NODE_ID_NONE) {
+                /* Send full tx to stem peer (not inv) */
+                zcl_mutex_lock(&mp->net_mgr->cs_nodes);
+                for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
+                    struct p2p_node *sp = mp->net_mgr->nodes[pi];
+                    if (sp->id == stem_id &&
+                        sp->state >= PEER_HANDSHAKE_COMPLETE &&
+                        !sp->disconnect) {
+                        struct byte_stream bs;
+                        stream_init(&bs, 512);
+                        if (transaction_serialize(tx, &bs)) {
+                            p2p_node_begin_message(
+                                sp, "tx",
+                                mp->params->pchMessageStart);
+                            p2p_node_write_message_data(
+                                sp, bs.data, bs.size);
+                            p2p_node_end_message(sp);
+                            p2p_node_add_inventory_known(sp, inv);
+                            stemmed = true;
+                            g_dandelion.stat_stem_sent++;
+                        }
+                        stream_free(&bs);
+                        break;
+                    }
+                }
+                zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
+
+                if (stemmed) {
+                    dandelion_stempool_add(&g_dandelion, hash,
+                                           node->id);
+                }
+            }
+        }
+    }
+
+    return stemmed;
+}
+
+static void tx_fluff(struct msg_processor *mp, struct p2p_node *node,
+                     struct uint256 *hash, struct inv_item *inv)
+{
+    if (g_dandelion_init)
+        g_dandelion.stat_fluffed++;
+    zcl_mutex_lock(&mp->net_mgr->cs_nodes);
+    for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
+        struct p2p_node *peer = mp->net_mgr->nodes[pi];
+        if (peer->id != node->id &&
+            peer->state >= PEER_HANDSHAKE_COMPLETE &&
+            !peer->disconnect && peer->relay_txes)
+            p2p_node_push_inventory(peer, inv);
+    }
+    zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
+
+    /* If this tx was in the stem pool, remove it (it's now fluffed) */
+    if (g_dandelion_init)
+        dandelion_stempool_remove(&g_dandelion, hash);
 }
 
 bool process_tx_msg(struct msg_processor *mp, struct p2p_node *node,
@@ -299,66 +382,11 @@ bool process_tx_msg(struct msg_processor *mp, struct p2p_node *node,
 
         /* Dandelion++ tx relay: stem (1 peer) or fluff (all peers) */
         if (mp->net_mgr) {
-            bool stemmed = false;
-
-            if (g_dandelion_init) {
-                dandelion_maybe_rotate_epoch(&g_dandelion, mp->net_mgr);
-
-                if (dandelion_should_stem(&g_dandelion, node->id)) {
-                    node_id_t stem_id = dandelion_get_stem_peer(
-                        &g_dandelion, node->id);
-                    if (stem_id != DANDELION_NODE_ID_NONE) {
-                        /* Send full tx to stem peer (not inv) */
-                        zcl_mutex_lock(&mp->net_mgr->cs_nodes);
-                        for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
-                            struct p2p_node *sp = mp->net_mgr->nodes[pi];
-                            if (sp->id == stem_id &&
-                                sp->state >= PEER_HANDSHAKE_COMPLETE &&
-                                !sp->disconnect) {
-                                struct byte_stream bs;
-                                stream_init(&bs, 512);
-                                if (transaction_serialize(&tx, &bs)) {
-                                    p2p_node_begin_message(
-                                        sp, "tx",
-                                        mp->params->pchMessageStart);
-                                    p2p_node_write_message_data(
-                                        sp, bs.data, bs.size);
-                                    p2p_node_end_message(sp);
-                                    p2p_node_add_inventory_known(sp, &inv);
-                                    stemmed = true;
-                                    g_dandelion.stat_stem_sent++;
-                                }
-                                stream_free(&bs);
-                                break;
-                            }
-                        }
-                        zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
-
-                        if (stemmed) {
-                            dandelion_stempool_add(&g_dandelion, &hash,
-                                                   node->id);
-                        }
-                    }
-                }
-            }
+            bool stemmed = tx_try_stem(mp, node, &tx, &hash, &inv);
 
             /* Fluff: broadcast inv to all peers (normal relay) */
             if (!stemmed) {
-                if (g_dandelion_init)
-                    g_dandelion.stat_fluffed++;
-                zcl_mutex_lock(&mp->net_mgr->cs_nodes);
-                for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
-                    struct p2p_node *peer = mp->net_mgr->nodes[pi];
-                    if (peer->id != node->id &&
-                        peer->state >= PEER_HANDSHAKE_COMPLETE &&
-                        !peer->disconnect && peer->relay_txes)
-                        p2p_node_push_inventory(peer, &inv);
-                }
-                zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
-
-                /* If this tx was in the stem pool, remove it (it's now fluffed) */
-                if (g_dandelion_init)
-                    dandelion_stempool_remove(&g_dandelion, &hash);
+                tx_fluff(mp, node, &hash, &inv);
             }
         }
 
