@@ -278,15 +278,6 @@ tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start_license_lifecycle
 tools/acme/tls_client.c:tls_client_fetch:42
 tools/acme/tls_client.c:tls_client_response_parse_bounded:27
 tools/acme/tls_client.c:tls_client_url_parse:17
-tools/command/cli_render.c:emit_tree_array:20
-tools/command/cli_render.c:next_as_shell:20
-tools/command/cli_render.c:render_error:41
-tools/command/cli_render.c:render_peer_list:26
-tools/command/cli_render.c:render_spec:50
-tools/command/cli_render.c:render_statecatalog:18
-tools/command/cli_render.c:render_yardsale_guide:17
-tools/command/cli_render.c:zcl_cli_render_brief:22
-tools/command/cli_render.c:zcl_cli_render_resolve:20
 tools/dev/devloop_hotswap_build.c:hs_hotfork_build:38
 tools/dev/devloop_hotswap_build.c:zcl_devloop_hotswap_build:45
 tools/engine_unit.c:append_unit_receipt:25

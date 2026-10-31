@@ -91,27 +91,17 @@ static bool env_bool(const char *name, bool *decided)
            strcmp(v, "yes") == 0 || strcmp(v, "on") == 0;
 }
 
-struct zcl_cli_render_env zcl_cli_render_resolve(int fd)
+static bool fd_is_tty(int fd)
 {
-    struct zcl_cli_render_env env = {
-        .human = false, .ansi = false, .width = 80, .max_rows = 24,
-    };
-
-    bool decided = false;
-    bool forced = env_bool("ZCL_HUMAN", &decided);
-    env.human = decided ? forced : (
 #if defined(_WIN32)
-        fd >= 0 && _isatty(fd) != 0
+    return fd >= 0 && _isatty(fd) != 0;
 #else
-        isatty(fd) != 0
+    return isatty(fd) != 0;
 #endif
-    );
+}
 
-    const char *term = getenv("TERM");
-    /* NO_COLOR: presence disables, even empty (no-color.org convention). */
-    env.ansi = env.human && !getenv("NO_COLOR") &&
-               !(term && strcmp(term, "dumb") == 0);
-
+static void resolve_width(int fd, struct zcl_cli_render_env *env)
+{
 #if defined(_WIN32)
     if (fd >= 0) {
         intptr_t native = _get_osfhandle(fd);
@@ -123,22 +113,40 @@ struct zcl_cli_render_env zcl_cli_render_resolve(int fd)
             GetConsoleScreenBufferInfo(output, &info)) {
             SHORT columns = info.srWindow.Right - info.srWindow.Left + 1;
             if (columns > 0)
-                env.width = columns;
+                env->width = columns;
         }
     }
 #else
     struct winsize ws;
     if (fd >= 0 && ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
-        env.width = ws.ws_col;
+        env->width = ws.ws_col;
     else {
         const char *cols = getenv("COLUMNS");
         if (cols && cols[0]) {
             int c = atoi(cols);
             if (c > 0)
-                env.width = c;
+                env->width = c;
         }
     }
 #endif
+}
+
+struct zcl_cli_render_env zcl_cli_render_resolve(int fd)
+{
+    struct zcl_cli_render_env env = {
+        .human = false, .ansi = false, .width = 80, .max_rows = 24,
+    };
+
+    bool decided = false;
+    bool forced = env_bool("ZCL_HUMAN", &decided);
+    env.human = decided ? forced : fd_is_tty(fd);
+
+    const char *term = getenv("TERM");
+    /* NO_COLOR: presence disables, even empty (no-color.org convention). */
+    env.ansi = env.human && !getenv("NO_COLOR") &&
+               !(term && strcmp(term, "dumb") == 0);
+
+    resolve_width(fd, &env);
     if (env.width < 40)
         env.width = 40;
     if (env.width > 240)
@@ -581,8 +589,7 @@ static void emit_tree_object(struct tree_ctx *ctx, const struct json_value *obj,
     }
 }
 
-static void emit_tree_array(struct tree_ctx *ctx, const char *key,
-                            const struct json_value *arr, int depth)
+static bool tree_array_all_scalar(const struct json_value *arr)
 {
     bool all_scalar = arr->num_children > 0;
     for (size_t i = 0; i < arr->num_children; i++)
@@ -591,6 +598,68 @@ static void emit_tree_array(struct tree_ctx *ctx, const char *key,
             all_scalar = false;
             break;
         }
+    return all_scalar;
+}
+
+static bool tree_array_fits_csv(const struct json_value *arr, int width)
+{
+    size_t total_len = 0;
+    for (size_t i = 0; i < arr->num_children; i++) {
+        const char *s = json_get_str(&arr->children[i]);
+        total_len += s ? strlen(s) : 16;
+    }
+    return arr->num_children <= 6 &&
+           total_len + 2 * arr->num_children < (size_t)width / 2;
+}
+
+static void emit_tree_csv(struct tree_ctx *ctx, const char *key,
+                          const struct json_value *arr)
+{
+    char joined[512];
+    size_t jl = 0;
+    joined[0] = '\0';
+    for (size_t i = 0; i < arr->num_children; i++) {
+        char item[160];
+        scalar_text(&arr->children[i], item, sizeof(item));
+        int n = snprintf(joined + jl, sizeof(joined) - jl, "%s%s",
+                         i ? ", " : "", item);
+        if (n < 0 || (size_t)n >= sizeof(joined) - jl)
+            break;
+        jl += (size_t)n;
+    }
+    ctx->lines++;
+    emit_kv(ctx->b, ctx->e, 0, key, joined);
+}
+
+static void emit_tree_scalar_lines(struct tree_ctx *ctx, const char *key,
+                                   const struct json_value *arr)
+{
+    for (size_t i = 0; i < arr->num_children; i++) {
+        if (!tree_room(ctx))
+            return;
+        char item[1024];
+        scalar_text(&arr->children[i], item, sizeof(item));
+        ctx->lines++;
+        emit_kv(ctx->b, ctx->e, 0, i == 0 ? key : "", item);
+    }
+}
+
+static void emit_tree_items(struct tree_ctx *ctx, const char *key,
+                            const struct json_value *arr, int depth)
+{
+    for (size_t i = 0; i < arr->num_children; i++) {
+        if (!tree_room(ctx))
+            return;
+        char idx[24];
+        snprintf(idx, sizeof(idx), "%s[%zu]", key ? key : "", i);
+        emit_tree_node(ctx, idx, &arr->children[i], depth);
+    }
+}
+
+static void emit_tree_array(struct tree_ctx *ctx, const char *key,
+                            const struct json_value *arr, int depth)
+{
+    bool all_scalar = tree_array_all_scalar(arr);
     if (arr->num_children == 0) {
         ctx->lines++;
         emit_kv(ctx->b, ctx->e, 0, key, "[]");
@@ -599,47 +668,14 @@ static void emit_tree_array(struct tree_ctx *ctx, const char *key,
     if (all_scalar) {
         /* Short scalar arrays inline as csv; long ones one per line. A log
          * line array (ops.logs "lines") is the natural one-per-line case. */
-        size_t total_len = 0;
-        for (size_t i = 0; i < arr->num_children; i++) {
-            const char *s = json_get_str(&arr->children[i]);
-            total_len += s ? strlen(s) : 16;
-        }
-        if (arr->num_children <= 6 &&
-            total_len + 2 * arr->num_children <
-                (size_t)ctx->e->width / 2) {
-            char joined[512];
-            size_t jl = 0;
-            joined[0] = '\0';
-            for (size_t i = 0; i < arr->num_children; i++) {
-                char item[160];
-                scalar_text(&arr->children[i], item, sizeof(item));
-                int n = snprintf(joined + jl, sizeof(joined) - jl, "%s%s",
-                                 i ? ", " : "", item);
-                if (n < 0 || (size_t)n >= sizeof(joined) - jl)
-                    break;
-                jl += (size_t)n;
-            }
-            ctx->lines++;
-            emit_kv(ctx->b, ctx->e, 0, key, joined);
+        if (tree_array_fits_csv(arr, ctx->e->width)) {
+            emit_tree_csv(ctx, key, arr);
             return;
         }
-        for (size_t i = 0; i < arr->num_children; i++) {
-            if (!tree_room(ctx))
-                return;
-            char item[1024];
-            scalar_text(&arr->children[i], item, sizeof(item));
-            ctx->lines++;
-            emit_kv(ctx->b, ctx->e, 0, i == 0 ? key : "", item);
-        }
+        emit_tree_scalar_lines(ctx, key, arr);
         return;
     }
-    for (size_t i = 0; i < arr->num_children; i++) {
-        if (!tree_room(ctx))
-            return;
-        char idx[24];
-        snprintf(idx, sizeof(idx), "%s[%zu]", key ? key : "", i);
-        emit_tree_node(ctx, idx, &arr->children[i], depth);
-    }
+    emit_tree_items(ctx, key, arr, depth);
 }
 
 static void emit_tree_node(struct tree_ctx *ctx, const char *key,
@@ -709,6 +745,40 @@ static const char *error_suggestion_for(const char *code)
     return NULL;
 }
 
+static void command_words(const char *cmd, char *words, size_t cap)
+{
+    size_t wl = 0;
+    for (const char *p = cmd; *p && wl + 1 < cap; p++)
+        words[wl++] = *p == '.' ? ' ' : *p;
+    words[wl] = '\0';
+}
+
+static bool single_key_positional(const struct json_value *input)
+{
+    return input && input->type == JSON_OBJ && input->num_children == 1 &&
+           (strcmp(input->keys[0], "path") == 0 ||
+            strcmp(input->keys[0], "query") == 0);
+}
+
+static bool input_json_shell(const char *words, const struct json_value *input,
+                             char *out, size_t cap)
+{
+    if (!input || input->type != JSON_OBJ || input->num_children == 0)
+        return false;
+    char ij[384];
+    size_t n = json_write(input, ij, sizeof(ij));
+    if (!(n > 0 && n < sizeof(ij)))
+        return false;
+    int prefix = snprintf(out, cap, "z23 %s --input='", words);
+    if (!(prefix > 0 && (size_t)prefix < cap &&
+          n + 2 <= cap - (size_t)prefix))
+        return false;
+    memcpy(out + prefix, ij, n);
+    out[prefix + n] = '\'';
+    out[prefix + n + 1] = '\0';
+    return true;
+}
+
 /* Render an envelope next[0] ({command, input, reason}) as one executable
  * shell line. discover.* single-key inputs (path/query) render as the
  * documented positional; anything else as --input='<json>'. */
@@ -720,33 +790,16 @@ static void next_as_shell(const struct json_value *next, char *out,
     if (!cmd || !cmd[0])
         return;
     char words[128];
-    size_t wl = 0;
-    for (const char *p = cmd; *p && wl + 1 < sizeof(words); p++)
-        words[wl++] = *p == '.' ? ' ' : *p;
-    words[wl] = '\0';
+    command_words(cmd, words, sizeof(words));
 
     const struct json_value *input = json_get(next, "input");
-    if (input && input->type == JSON_OBJ && input->num_children == 1 &&
-        (strcmp(input->keys[0], "path") == 0 ||
-         strcmp(input->keys[0], "query") == 0)) {
+    if (single_key_positional(input)) {
         const char *v = json_get_str(&input->children[0]);
         snprintf(out, cap, "z23 %s %s", words, v ? v : "");
         return;
     }
-    if (input && input->type == JSON_OBJ && input->num_children > 0) {
-        char ij[384];
-        size_t n = json_write(input, ij, sizeof(ij));
-        if (n > 0 && n < sizeof(ij)) {
-            int prefix = snprintf(out, cap, "z23 %s --input='", words);
-            if (prefix > 0 && (size_t)prefix < cap &&
-                n + 2 <= cap - (size_t)prefix) {
-                memcpy(out + prefix, ij, n);
-                out[prefix + n] = '\'';
-                out[prefix + n + 1] = '\0';
-                return;
-            }
-        }
-    }
+    if (input_json_shell(words, input, out, cap))
+        return;
     snprintf(out, cap, "z23 %s", words);
 }
 
@@ -863,18 +916,10 @@ static void render_search(struct buf *b, const struct zcl_cli_render_env *e,
     }
 }
 
-static void render_spec(struct buf *b, const struct zcl_cli_render_env *e,
-                        const struct json_value *root)
+static void spec_availability(struct buf *b, const struct zcl_cli_render_env *e,
+                              const struct json_value *root)
 {
-    const char *path = json_get_str(json_get(root, "path"));
-    const char *summary = json_get_str(json_get(root, "summary"));
     const char *avail = json_get_str(json_get(root, "availability"));
-
-    char head[256];
-    snprintf(head, sizeof(head), "%s — %s", path ? path : "",
-             summary ? summary : "");
-    emit_header(b, e, head);
-
     char availbuf[160];
     availbuf[0] = '\0';
     if (avail && avail[0]) {
@@ -887,7 +932,11 @@ static void render_spec(struct buf *b, const struct zcl_cli_render_env *e,
     }
     if (availbuf[0])
         emit_kv(b, e, 12, "availability", availbuf);
+}
 
+static void spec_semantics(struct buf *b, const struct zcl_cli_render_env *e,
+                           const struct json_value *root)
+{
     const char *sem = json_get_str(json_get(root, "semantics"));
     if (sem && sem[0]) {
         buf_putc(b, '\n');
@@ -897,7 +946,42 @@ static void render_spec(struct buf *b, const struct zcl_cli_render_env *e,
         buf_putc(b, '\n');
         buf_putc(b, '\n');
     }
+}
 
+static bool spec_is_positional(const struct json_value *positional,
+                               const char *k)
+{
+    bool pos = false;
+    if (!positional || positional->type != JSON_ARR)
+        return false;
+    for (size_t j = 0; j < positional->num_children; j++) {
+        const char *pk = json_get_str(json_at(positional, j));
+        if (k && pk && strcmp(k, pk) == 0)
+            pos = true;
+    }
+    return pos;
+}
+
+static void spec_input_keys(const struct json_value *allowed,
+                            const struct json_value *positional, char *keys,
+                            size_t cap)
+{
+    keys[0] = '\0';
+    size_t kl = 0;
+    for (size_t i = 0; i < allowed->num_children; i++) {
+        const char *k = json_get_str(json_at(allowed, i));
+        bool pos = spec_is_positional(positional, k);
+        int n = snprintf(keys + kl, cap - kl, "%s%s%s", i ? ", " : "",
+                         k ? k : "", pos ? " (positional)" : "");
+        if (n < 0 || (size_t)n >= cap - kl)
+            break;
+        kl += (size_t)n;
+    }
+}
+
+static void spec_input(struct buf *b, const struct zcl_cli_render_env *e,
+                       const struct json_value *root)
+{
     const struct json_value *input = json_get(root, "input_schema");
     const struct json_value *allowed =
         input ? json_get(input, "allowed_keys") : NULL;
@@ -905,31 +989,15 @@ static void render_spec(struct buf *b, const struct zcl_cli_render_env *e,
         input ? json_get(input, "positional_keys") : NULL;
     if (allowed && allowed->type == JSON_ARR) {
         char keys[384];
-        keys[0] = '\0';
-        size_t kl = 0;
-        for (size_t i = 0; i < allowed->num_children; i++) {
-            const char *k = json_get_str(json_at(allowed, i));
-            bool pos = false;
-            if (positional && positional->type == JSON_ARR)
-                for (size_t j = 0; j < positional->num_children; j++) {
-                    const char *pk = json_get_str(json_at(positional, j));
-                    if (k && pk && strcmp(k, pk) == 0)
-                        pos = true;
-                }
-            int n = snprintf(keys + kl, sizeof(keys) - kl, "%s%s%s",
-                             i ? ", " : "", k ? k : "",
-                             pos ? " (positional)" : "");
-            if (n < 0 || (size_t)n >= sizeof(keys) - kl)
-                break;
-            kl += (size_t)n;
-        }
+        spec_input_keys(allowed, positional, keys, sizeof(keys));
         emit_kv(b, e, 12, "input",
                 allowed->num_children ? keys : "(no arguments)");
     }
-    const char *out_schema = json_get_str(json_get(root, "output_schema"));
-    if (out_schema && out_schema[0])
-        emit_kv(b, e, 12, "output", out_schema);
+}
 
+static void spec_policy(struct buf *b, const struct zcl_cli_render_env *e,
+                        const struct json_value *root)
+{
     const struct json_value *policy = json_get(root, "policy");
     if (policy && policy->type == JSON_OBJ) {
         char pol[384];
@@ -953,7 +1021,11 @@ static void render_spec(struct buf *b, const struct zcl_cli_render_env *e,
                  (long long)json_get_int(json_get(policy, "budget_ms")));
         emit_kv(b, e, 12, "policy", pol);
     }
+}
 
+static void spec_aliases(struct buf *b, const struct zcl_cli_render_env *e,
+                         const struct json_value *root)
+{
     const struct json_value *aliases = json_get(root, "aliases");
     if (aliases && aliases->type == JSON_ARR && aliases->num_children > 0) {
         char al[256];
@@ -969,7 +1041,11 @@ static void render_spec(struct buf *b, const struct zcl_cli_render_env *e,
         }
         emit_kv(b, e, 12, "aliases", al);
     }
+}
 
+static void spec_example(struct buf *b, const struct zcl_cli_render_env *e,
+                         const struct json_value *root)
+{
     const char *example = json_get_str(json_get(root, "example"));
     if (example && example[0]) {
         buf_putc(b, '\n');
@@ -983,6 +1059,28 @@ static void render_spec(struct buf *b, const struct zcl_cli_render_env *e,
             buf_puts(b, "\033[0m");
         buf_putc(b, '\n');
     }
+}
+
+static void render_spec(struct buf *b, const struct zcl_cli_render_env *e,
+                        const struct json_value *root)
+{
+    const char *path = json_get_str(json_get(root, "path"));
+    const char *summary = json_get_str(json_get(root, "summary"));
+
+    char head[256];
+    snprintf(head, sizeof(head), "%s — %s", path ? path : "",
+             summary ? summary : "");
+    emit_header(b, e, head);
+
+    spec_availability(b, e, root);
+    spec_semantics(b, e, root);
+    spec_input(b, e, root);
+    const char *out_schema = json_get_str(json_get(root, "output_schema"));
+    if (out_schema && out_schema[0])
+        emit_kv(b, e, 12, "output", out_schema);
+    spec_policy(b, e, root);
+    spec_aliases(b, e, root);
+    spec_example(b, e, root);
 }
 
 static void render_schema_doc(struct buf *b,
@@ -1018,6 +1116,27 @@ static void render_schema_doc(struct buf *b,
             (keys && keys[0]) ? keys : "(no arguments)");
 }
 
+static void state_keys_text(const struct json_value *keys, char *out,
+                            size_t cap)
+{
+    if (keys && keys->type == JSON_ARR && keys->num_children > 0) {
+        size_t kl = 0;
+        out[0] = '\0';
+        for (size_t i = 0; i < keys->num_children; i++) {
+            const char *k = json_get_str(json_at(keys, i));
+            int n = snprintf(out + kl, cap - kl, "%s%s", i ? "," : "",
+                             k ? k : "");
+            if (n < 0 || (size_t)n >= cap - kl)
+                break;
+            kl += (size_t)n;
+        }
+    } else if (keys && keys->type == JSON_STR) {
+        snprintf(out, cap, "%s", json_get_str(keys));
+    } else {
+        snprintf(out, cap, "-");
+    }
+}
+
 static void render_statecatalog(struct buf *b,
                                 const struct zcl_cli_render_env *e,
                                 const struct json_value *root)
@@ -1043,23 +1162,8 @@ static void render_statecatalog(struct buf *b,
         const struct json_value *s = json_at(subs, r);
         cellbuf[r * 4 + 0] = json_get_str(json_get(s, "name"));
         cellbuf[r * 4 + 1] = json_get_str(json_get(s, "cost"));
-        const struct json_value *keys = json_get(s, "accepted_keys");
-        if (keys && keys->type == JSON_ARR && keys->num_children > 0) {
-            size_t kl = 0;
-            keybuf[r][0] = '\0';
-            for (size_t i = 0; i < keys->num_children; i++) {
-                const char *k = json_get_str(json_at(keys, i));
-                int n = snprintf(keybuf[r] + kl, sizeof(keybuf[r]) - kl,
-                                 "%s%s", i ? "," : "", k ? k : "");
-                if (n < 0 || (size_t)n >= sizeof(keybuf[r]) - kl)
-                    break;
-                kl += (size_t)n;
-            }
-        } else if (keys && keys->type == JSON_STR) {
-            snprintf(keybuf[r], sizeof(keybuf[r]), "%s", json_get_str(keys));
-        } else {
-            snprintf(keybuf[r], sizeof(keybuf[r]), "-");
-        }
+        state_keys_text(json_get(s, "accepted_keys"), keybuf[r],
+                        sizeof(keybuf[r]));
         cellbuf[r * 4 + 2] = keybuf[r];
         cellbuf[r * 4 + 3] = json_get_str(json_get(s, "description"));
     }
@@ -1082,15 +1186,9 @@ static void render_error_next_action(struct buf *b,
     buf_putc(b, '\n');
 }
 
-static void render_error(struct buf *b, const struct zcl_cli_render_env *e,
-                         const struct json_value *root)
+static void render_error_head(struct buf *b, const struct zcl_cli_render_env *e,
+                              const char *code, const char *phase)
 {
-    const struct json_value *err = json_get(root, "error");
-    const char *code = err ? json_get_str(json_get(err, "code")) : NULL;
-    const char *message = err ? json_get_str(json_get(err, "message")) : NULL;
-    const char *phase = err ? json_get_str(json_get(err, "phase")) : NULL;
-    const char *command = json_get_str(json_get(root, "command"));
-
     if (e->ansi)
         buf_puts(b, "\033[1;31m");
     buf_puts(b, "error:");
@@ -1101,13 +1199,25 @@ static void render_error(struct buf *b, const struct zcl_cli_render_env *e,
     if (phase && phase[0])
         buf_printf(b, " (%s)", phase);
     buf_putc(b, '\n');
+}
 
+static void render_error_message(struct buf *b,
+                                 const struct zcl_cli_render_env *e,
+                                 const char *message)
+{
     if (message && message[0]) {
         size_t room = (size_t)e->width > 2 ? (size_t)e->width - 2 : 1;
         buf_puts(b, "  ");
         buf_puts_trunc(b, message, room);
         buf_putc(b, '\n');
     }
+}
+
+static void render_error_evidence(struct buf *b,
+                                  const struct zcl_cli_render_env *e,
+                                  const struct json_value *err,
+                                  const char *command)
+{
     const char *evidence = err ? json_get_str(json_get(err, "evidence")) : NULL;
     if (evidence && evidence[0] && command &&
         strcmp(evidence, command) != 0) {
@@ -1117,33 +1227,40 @@ static void render_error(struct buf *b, const struct zcl_cli_render_env *e,
         buf_puts_trunc(b, evidence, room > 4 ? room - 4 : 1);
         buf_putc(b, '\n');
     }
+}
 
-    render_error_next_action(b, e, err);
-
-    char suggestion[512];
-    suggestion[0] = '\0';
-    /* UNKNOWN_COMMAND's envelope next[0] carries the operator's actual
-     * query — a concrete "search <typo>" beats the table's generic one. */
-    const struct json_value *next = json_get(root, "next");
-    const struct json_value *first =
-        next && next->type == JSON_ARR ? json_at(next, 0) : NULL;
+static void error_search_suggestion(const char *code,
+                                    const struct json_value *first,
+                                    char *suggestion, size_t cap)
+{
     if (code && strcmp(code, "UNKNOWN_COMMAND") == 0 && first &&
         first->type == JSON_OBJ) {
         const char *ncmd = json_get_str(json_get(first, "command"));
         if (ncmd && strcmp(ncmd, "discover.search") == 0)
-            next_as_shell(first, suggestion, sizeof(suggestion));
+            next_as_shell(first, suggestion, cap);
     }
+}
+
+static void error_table_suggestion(const char *code, const char *command,
+                                   const struct json_value *first,
+                                   char *suggestion, size_t cap)
+{
     const char *fmt = suggestion[0] ? NULL : error_suggestion_for(code);
     if (fmt) {
         if (strchr(fmt, '%'))
-            snprintf(suggestion, sizeof(suggestion), fmt,
+            snprintf(suggestion, cap, fmt,
                      (command && command[0]) ? command : "<path>");
         else
-            snprintf(suggestion, sizeof(suggestion), "%s", fmt);
+            snprintf(suggestion, cap, "%s", fmt);
     } else if (!suggestion[0]) {
         if (first && first->type == JSON_OBJ)
-            next_as_shell(first, suggestion, sizeof(suggestion));
+            next_as_shell(first, suggestion, cap);
     }
+}
+
+static void render_error_run(struct buf *b, const struct zcl_cli_render_env *e,
+                             const char *suggestion)
+{
     if (suggestion[0]) {
         if (e->ansi)
             buf_puts(b, "\033[32m");
@@ -1159,6 +1276,34 @@ static void render_error(struct buf *b, const struct zcl_cli_render_env *e,
             buf_puts(b, "\033[0m");
         buf_putc(b, '\n');
     }
+}
+
+static void render_error(struct buf *b, const struct zcl_cli_render_env *e,
+                         const struct json_value *root)
+{
+    const struct json_value *err = json_get(root, "error");
+    const char *code = err ? json_get_str(json_get(err, "code")) : NULL;
+    const char *message = err ? json_get_str(json_get(err, "message")) : NULL;
+    const char *phase = err ? json_get_str(json_get(err, "phase")) : NULL;
+    const char *command = json_get_str(json_get(root, "command"));
+
+    render_error_head(b, e, code, phase);
+    render_error_message(b, e, message);
+    render_error_evidence(b, e, err, command);
+
+    render_error_next_action(b, e, err);
+
+    char suggestion[512];
+    suggestion[0] = '\0';
+    /* UNKNOWN_COMMAND's envelope next[0] carries the operator's actual
+     * query — a concrete "search <typo>" beats the table's generic one. */
+    const struct json_value *next = json_get(root, "next");
+    const struct json_value *first =
+        next && next->type == JSON_ARR ? json_at(next, 0) : NULL;
+    error_search_suggestion(code, first, suggestion, sizeof(suggestion));
+    error_table_suggestion(code, command, first, suggestion,
+                           sizeof(suggestion));
+    render_error_run(b, e, suggestion);
 }
 
 /* Leaves whose ok=true envelope data renders as a human tree. Extend by
@@ -1278,6 +1423,20 @@ static void render_zcode_guide(struct buf *b, const struct zcl_cli_render_env *e
         emit_kv(b, e, 4, "keep", keep);
 }
 
+static void yardsale_stories(struct buf *b, const struct zcl_cli_render_env *e,
+                             const struct json_value *layers, size_t rows)
+{
+    for (size_t r = 0; r < rows; r++) {
+        const struct json_value *row = json_at(layers, r);
+        const char *story = json_get_str(json_get(row, "user_story"));
+        const char *id = json_get_str(json_get(row, "id"));
+        if (!story || !story[0] || !id || !id[0])
+            continue;
+        buf_putc(b, '\n');
+        emit_kv(b, e, 4, id, story);
+    }
+}
+
 /* yardsale.guide is the money/content/software layer map: story, plan, test. */
 static void render_yardsale_guide(struct buf *b, const struct zcl_cli_render_env *e,
                                   const struct json_value *root)
@@ -1313,15 +1472,7 @@ static void render_yardsale_guide(struct buf *b, const struct zcl_cli_render_env
         cellbuf[r * 4 + 3] = json_get_str(json_get(row, "expected"));
     }
     emit_table(b, e, 4, headers, cellbuf, rows);
-    for (size_t r = 0; r < rows; r++) {
-        const struct json_value *row = json_at(layers, r);
-        const char *story = json_get_str(json_get(row, "user_story"));
-        const char *id = json_get_str(json_get(row, "id"));
-        if (!story || !story[0] || !id || !id[0])
-            continue;
-        buf_putc(b, '\n');
-        emit_kv(b, e, 4, id, story);
-    }
+    yardsale_stories(b, e, layers, rows);
 }
 
 /* code.guide is a recipe, not a schema dump: four copyable commands. */
@@ -1348,6 +1499,28 @@ static void render_code_guide(struct buf *b, const struct zcl_cli_render_env *e,
 
 /* Who is connected: address, direction, advertised height, kind.
  * Lifecycle, bytes, ping, and services stay behind JSON. */
+static void peer_row_cells(const struct json_value *row, char *dir, char *h,
+                           char *kind, const char **cells)
+{
+    const struct json_value *inb = json_get(row, "inbound");
+    const struct json_value *z23 = json_get(row, "zclassic23");
+    const struct json_value *bean = json_get(row, "magicbean");
+    const struct json_value *ht = json_get(row, "startingheight");
+    bool inbound = inb && inb->type == JSON_BOOL && json_get_bool(inb);
+    bool is_z23 = z23 && z23->type == JSON_BOOL && json_get_bool(z23);
+    bool is_bean = bean && bean->type == JSON_BOOL && json_get_bool(bean);
+    snprintf(dir, 4, "%s", inbound ? "in" : "out");
+    if (ht && ht->type == JSON_INT)
+        snprintf(h, 12, "%lld", (long long)json_get_int(ht));
+    else
+        snprintf(h, 12, "?");
+    snprintf(kind, 8, "%s", is_z23 ? "z23" : (is_bean ? "bean" : "other"));
+    cells[0] = json_get_str(json_get(row, "addr"));
+    cells[1] = dir;
+    cells[2] = h;
+    cells[3] = kind;
+}
+
 static void render_peer_list(struct buf *b, const struct zcl_cli_render_env *e,
                              const struct json_value *root)
 {
@@ -1373,28 +1546,9 @@ static void render_peer_list(struct buf *b, const struct zcl_cli_render_env *e,
     char dirbuf[24][4];
     char hbuf[24][12];
     char kindbuf[24][8];
-    for (size_t r = 0; r < rows; r++) {
-        const struct json_value *row = json_at(items, r);
-        const struct json_value *inb = json_get(row, "inbound");
-        const struct json_value *z23 = json_get(row, "zclassic23");
-        const struct json_value *bean = json_get(row, "magicbean");
-        const struct json_value *ht = json_get(row, "startingheight");
-        bool inbound = inb && inb->type == JSON_BOOL && json_get_bool(inb);
-        bool is_z23 = z23 && z23->type == JSON_BOOL && json_get_bool(z23);
-        bool is_bean = bean && bean->type == JSON_BOOL && json_get_bool(bean);
-        snprintf(dirbuf[r], sizeof(dirbuf[r]), "%s", inbound ? "in" : "out");
-        if (ht && ht->type == JSON_INT)
-            snprintf(hbuf[r], sizeof(hbuf[r]), "%lld",
-                     (long long)json_get_int(ht));
-        else
-            snprintf(hbuf[r], sizeof(hbuf[r]), "?");
-        snprintf(kindbuf[r], sizeof(kindbuf[r]), "%s",
-                 is_z23 ? "z23" : (is_bean ? "bean" : "other"));
-        cellbuf[r * 4 + 0] = json_get_str(json_get(row, "addr"));
-        cellbuf[r * 4 + 1] = dirbuf[r];
-        cellbuf[r * 4 + 2] = hbuf[r];
-        cellbuf[r * 4 + 3] = kindbuf[r];
-    }
+    for (size_t r = 0; r < rows; r++)
+        peer_row_cells(json_at(items, r), dirbuf[r], hbuf[r], kindbuf[r],
+                       &cellbuf[r * 4]);
     if (rows > 0)
         emit_table(b, e, 4, headers, cellbuf, rows);
     if (n > rows)
@@ -1845,11 +1999,36 @@ static const char *brief_val_end(const char *s)
     return s;
 }
 
+static bool brief_args_ok(const char *line, const struct zcl_cli_render_env *env,
+                          const char *out, size_t cap)
+{
+    return line && env && out && cap != 0;
+}
+
+static int brief_field_color(const char *key, const char *val)
+{
+    if (strcmp(key, "sync") == 0)
+        return strcmp(val, "synced") == 0 ? 32 : 33;
+    if (strcmp(key, "blocker") == 0 || strcmp(key, "blocker_head") == 0)
+        return strcmp(val, "none") == 0 ? 32 : 31;
+    return 0;
+}
+
+static void brief_put_value(struct buf *b, const struct zcl_cli_render_env *env,
+                            const char *key, const char *val)
+{
+    int color = brief_field_color(key, val);
+    if (color && env->ansi)
+        ansi_color(b, env, color, val);
+    else
+        buf_puts(b, val);
+}
+
 size_t zcl_cli_render_brief(const char *line,
                             const struct zcl_cli_render_env *env,
                             char *out, size_t cap)
 {
-    if (!line || !env || !out || cap == 0)
+    if (!brief_args_ok(line, env, out, cap))
         return 0;
     struct buf b = { .p = out, .cap = cap, .len = 0, .overflow = false };
     out[0] = '\0';
@@ -1872,16 +2051,7 @@ size_t zcl_cli_render_brief(const char *line,
         snprintf(val, sizeof(val), "%.*s", (int)(end - eq - 1), eq + 1);
         ansi_dim(&b, env, key);
         buf_putc(&b, '=');
-        int color = 0;
-        if (strcmp(key, "sync") == 0)
-            color = strcmp(val, "synced") == 0 ? 32 : 33;
-        else if (strcmp(key, "blocker") == 0 ||
-                 strcmp(key, "blocker_head") == 0)
-            color = strcmp(val, "none") == 0 ? 32 : 31;
-        if (color && env->ansi)
-            ansi_color(&b, env, color, val);
-        else
-            buf_puts(&b, val);
+        brief_put_value(&b, env, key, val);
         if (*end)
             buf_putc(&b, ' ');
         p = *end ? end + 1 : end;
