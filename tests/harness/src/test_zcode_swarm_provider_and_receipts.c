@@ -700,18 +700,19 @@ static int rebind_case_record_io(void)
     }
     int failures = 0;
     struct sw_node n;
-    struct sw_pkg scout, ordinary;
+    /* Zeroed so a build that fails partway, or never runs, frees safely. */
+    struct sw_pkg scout = {0}, ordinary = {0};
     uint8_t key[33];
     sw_key(96, key);
     const uint64_t peer = 906;
     const uint64_t bound = 1;
     if (!sw_node_open(&n, "rebind_io", sw_score_contributor))
         return 1;
-    bool have_scout = sw_make_package(&scout, 1, 36);
     /* 1-file roots are seed-blind, so the ordinary package has two. */
-    if (!have_scout || !sw_make_package(&ordinary, 2, 37)) {
-        if (have_scout)
-            sw_free_package(&scout);
+    if (!sw_make_package(&scout, 1, 36) ||
+        !sw_make_package(&ordinary, 2, 37)) {
+        sw_free_package(&ordinary);
+        sw_free_package(&scout);
         sw_node_close(&n);
         test_rm_rf_recursive(n.datadir);
         return 1;
