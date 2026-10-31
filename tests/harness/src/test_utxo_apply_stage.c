@@ -3380,7 +3380,7 @@ static int uv_seal_key_height_cases(void)
     UV_CHECK("seal key: no seal keyed G after block G-1 applied",
              seal_kv_newest(db, &r, &found) && (!found || r.height < G));
 
-    uint8_t through_prev[32], through_g[32];
+    uint8_t through_prev[32] = { 0 }, through_g[32] = { 0 };
     UV_CHECK("seal key: commitment through G-1",
              coins_kv_commitment(db, through_prev) == 0);
     UV_CHECK("seal key: step applies block G",
