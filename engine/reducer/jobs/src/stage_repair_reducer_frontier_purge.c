@@ -344,13 +344,131 @@ static bool rf_purge_utxo_suffix(
                                  before, after, &clamped);
 }
 
+/* True when a required pointer argument of the purge is NULL. */
+static bool rf_purge_args_invalid(
+    sqlite3 *db, struct main_state *ms,
+    const struct stage_reducer_frontier_reconcile_result *out)
+{
+    return !db || !ms || !out;
+}
+
+/* Reads the live durable coins frontier into out. Returns false on a read
+ * failure and leaves out untouched. */
+static bool rf_purge_read_live_frontier(
+    sqlite3 *db, struct stage_reducer_frontier_reconcile_result *out)
+{
+    int32_t live_coins_applied = -1;
+    bool live_coins_found = false;
+    if (!coins_kv_get_applied_height(db, &live_coins_applied,
+                                     &live_coins_found))
+        return false;
+    out->coins_applied_height = live_coins_applied;
+    out->coins_applied_found = live_coins_found;
+    return true;
+}
+
+static bool rf_purge_frontier_known(
+    const struct stage_reducer_frontier_reconcile_result *out)
+{
+    return out->coins_applied_found && out->coins_applied_height >= 0;
+}
+
+/* True when height h lies at or above a known coins frontier. */
+static bool rf_purge_allowed(
+    bool frontier_known, int h,
+    const struct stage_reducer_frontier_reconcile_result *out)
+{
+    return frontier_known && h >= out->coins_applied_height;
+}
+
+/* Sets *skip when height h is left alone: no canonical hash, or a
+ * validate-vs-script hash_split below the frontier. False on a DB read error. */
+static bool rf_purge_height_skip(
+    sqlite3 *db, int h, const struct rf_canonical_hash *ch,
+    bool frontier_known, struct stage_reducer_frontier_reconcile_result *out,
+    bool *skip)
+{
+    *skip = true;
+    if (!ch->present)
+        return true;
+    return rf_purge_vs_split_gate(db, h, frontier_known, out, skip);
+}
+
+/* A hash-log probe step that neither returned a row nor finished. */
+static bool rf_purge_scan_step_failed(int step_rc)
+{
+    return step_rc != SQLITE_ROW && step_rc != SQLITE_DONE;
+}
+
+/* True when a probe returned a row whose hash differs from the canonical hash. */
+static bool rf_purge_probe_mismatch(sqlite3_stmt *st, int step_rc,
+                                    const struct rf_canonical_hash *ch)
+{
+    return step_rc == SQLITE_ROW && rf_purge_row_hash_mismatch(st, ch);
+}
+
+static bool rf_purge_delete_wanted(bool purge_allowed, bool apply)
+{
+    return purge_allowed && apply;
+}
+
+/* Prepares and binds the DELETE of height h's rows from one table. The caller
+ * steps and finalizes *st. Returns the prepare result. */
+static int rf_purge_delete_height_prepare(sqlite3 *db, const char *table,
+                                          int h, sqlite3_stmt **st)
+{
+    char sql[160];
+    *st = NULL;
+    snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE height = ?", table);
+    int prep_rc = sqlite3_prepare_v2(db, sql, -1, st, NULL);
+    if (prep_rc == SQLITE_OK)
+        sqlite3_bind_int64(*st, 1, h);
+    return prep_rc;
+}
+
+/* Rows changed by a finished dependent-table DELETE, else 0. */
+static int rf_purge_dep_changed(sqlite3 *db, int dep_rc)
+{
+    return dep_rc == SQLITE_DONE ? sqlite3_changes(db) : 0;
+}
+
+static bool rf_purge_dep_wanted(bool stale_here, bool apply, bool purge_allowed)
+{
+    return stale_here && apply && purge_allowed;
+}
+
+static void rf_purge_note_stale_height(
+    bool stale_here, bool purge_allowed, int h, int *lowest_stale_unapplied,
+    int *lowest_stale_replay_domain)
+{
+    if (stale_here)
+        rf_purge_note_stale_domain(purge_allowed, h, lowest_stale_unapplied,
+                                   lowest_stale_replay_domain);
+}
+
+/* True when the script_validate / proof_validate clamp flagged a cursor:
+ * moved it when applying, or found it above the stale height in a dry run. */
+static bool rf_purge_script_proof_clamped(
+    const struct stage_reducer_frontier_reconcile_result *out)
+{
+    return out->clamped_script_validate || out->clamped_proof_validate;
+}
+
+/* True when the utxo_apply suffix must be reconciled: a lowest unapplied
+ * branch-mismatch exists and the pass is applying. */
+static bool rf_purge_utxo_suffix_wanted(int lowest_stale_utxo_unapplied,
+                                        bool apply)
+{
+    return lowest_stale_utxo_unapplied >= 0 && apply;
+}
+
 bool stage_reducer_frontier_purge_noncanonical(
     sqlite3 *db,
     struct main_state *ms,
     bool apply,
     struct stage_reducer_frontier_reconcile_result *out)
 {
-    if (!db || !ms || !out)
+    if (rf_purge_args_invalid(db, ms, out))
         LOG_FAIL("stage_repair", "purge_noncanonical: invalid args");
 
     struct rf_canonical_hash *canon =
@@ -374,25 +492,19 @@ bool stage_reducer_frontier_purge_noncanonical(
 
     /* Re-read the coin frontier under this writer lock: a raced, lower
      * snapshot once stranded a future kernel suffix. Dry-run only observes. */
-    int32_t live_coins_applied = -1;
-    bool live_coins_found = false;
-    if (!coins_kv_get_applied_height(db, &live_coins_applied,
-                                     &live_coins_found)) {
+    if (!rf_purge_read_live_frontier(db, out)) {
         LOG_WARN("stage_repair",
                  "purge_noncanonical: live coins frontier read failed");
         ok = false;
         goto done_locked;
     }
-    out->coins_applied_height = live_coins_applied;
-    out->coins_applied_found = live_coins_found;
 
     int tip_h = active_chain_height(&ms->chain_active);
     int lo = 0;
     int hi = -1;
     if (!rf_purge_window(out, tip_h, &lo, &hi))
         goto done_locked;
-    bool frontier_known = out->coins_applied_found &&
-                          out->coins_applied_height >= 0;
+    bool frontier_known = rf_purge_frontier_known(out);
 
     rf_purge_snapshot_canonical(ms, canon, lo, hi);
 
@@ -411,19 +523,15 @@ bool stage_reducer_frontier_purge_noncanonical(
 
     for (int h = lo; h <= hi; h++) {
         const struct rf_canonical_hash *ch = &canon[h - lo];
-        if (!ch->present)
-            continue;
-
-        bool skip_vs_split = false;
-        if (!rf_purge_vs_split_gate(db, h, frontier_known, out,
-                                    &skip_vs_split)) {
+        bool skip_height = false;
+        if (!rf_purge_height_skip(db, h, ch, frontier_known, out,
+                                  &skip_height)) {
             ok = false;
             goto done_locked;
         }
-        if (skip_vs_split)
+        if (skip_height)
             continue;
-        bool purge_allowed = frontier_known &&
-                             h >= out->coins_applied_height;
+        bool purge_allowed = rf_purge_allowed(frontier_known, h, out);
 
         bool stale_here = false;
         for (size_t t = 0; t < sizeof(hash_logs) / sizeof(hash_logs[0]); t++) {
@@ -439,11 +547,9 @@ bool stage_reducer_frontier_purge_noncanonical(
                 goto done_locked;
             }
             sqlite3_bind_int64(st, 1, h);
-            bool mismatch = false;
             int step_rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
-            if (step_rc == SQLITE_ROW) {
-                mismatch = rf_purge_row_hash_mismatch(st, ch);
-            } else if (step_rc != SQLITE_DONE) {
+            bool mismatch = rf_purge_probe_mismatch(st, step_rc, ch);
+            if (rf_purge_scan_step_failed(step_rc)) {
                 LOG_WARN("stage_repair",
                          "purge_noncanonical: scan %s h=%d rc=%d: %s",
                          hash_logs[t].table, h, step_rc, sqlite3_errmsg(db));
@@ -456,25 +562,22 @@ bool stage_reducer_frontier_purge_noncanonical(
                 continue;
             stale_here = true;
             rf_purge_note_noncanonical(out, h);
-            if (!purge_allowed)
-                continue;
-            if (!apply)
+            if (!rf_purge_delete_wanted(purge_allowed, apply))
                 continue;
             if (!rf_purge_tx_begin(db, &tx_open)) {
                 ok = false;
                 goto done_locked;
             }
-            snprintf(sql, sizeof(sql), "DELETE FROM %s WHERE height = ?",
-                     hash_logs[t].table);
-            if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) {
+            sqlite3_stmt *del = NULL;
+            if (rf_purge_delete_height_prepare(db, hash_logs[t].table, h,
+                                               &del) != SQLITE_OK) {
                 LOG_WARN("stage_repair", "purge_noncanonical: del prepare %s: %s",
                          hash_logs[t].table, sqlite3_errmsg(db));
                 ok = false;
                 goto done_locked;
             }
-            sqlite3_bind_int64(st, 1, h);
-            int rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
-            sqlite3_finalize(st);
+            int rc = sqlite3_step(del);  // raw-sql-ok:progress-kv-kernel-store
+            sqlite3_finalize(del);
             if (rc != SQLITE_DONE) {
                 LOG_WARN("stage_repair", "purge_noncanonical: delete %s h=%d rc=%d",
                          hash_logs[t].table, h, rc);
@@ -489,19 +592,16 @@ bool stage_reducer_frontier_purge_noncanonical(
             ok = false;
             goto done_locked;
         }
-        if (stale_here && apply && purge_allowed) {
+        if (rf_purge_dep_wanted(stale_here, apply, purge_allowed)) {
             /* Hashless downstream rows at this height describe the same
              * wrong block — transitively stale. */
             for (size_t t = 0; t < sizeof(dep_logs) / sizeof(dep_logs[0]); t++) {
-                char sql[96];
-                snprintf(sql, sizeof(sql),
-                         "DELETE FROM %s WHERE height = ?", dep_logs[t]);
                 sqlite3_stmt *st = NULL;
-                if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
+                if (rf_purge_delete_height_prepare(db, dep_logs[t], h, &st) !=
+                    SQLITE_OK)
                     continue; /* table may not exist yet; holes self-heal */
-                sqlite3_bind_int64(st, 1, h);
                 int dep_rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
-                int dep_changed = dep_rc == SQLITE_DONE ? sqlite3_changes(db) : 0;
+                int dep_changed = rf_purge_dep_changed(db, dep_rc);
                 if (dep_rc == SQLITE_DONE && dep_changed > 0) {
                     out->noncanonical_purged++;
                     /* Keep the published row counter honest (stage_log_rows.h). */
@@ -517,10 +617,9 @@ bool stage_reducer_frontier_purge_noncanonical(
                 sqlite3_finalize(st);
             }
         }
-        if (stale_here)
-            rf_purge_note_stale_domain(purge_allowed, h,
-                                       &lowest_stale_unapplied,
-                                       &lowest_stale_replay_domain);
+        rf_purge_note_stale_height(stale_here, purge_allowed, h,
+                                   &lowest_stale_unapplied,
+                                   &lowest_stale_replay_domain);
     }
 
     /* The deletes above turned the stale heights into rowless holes. A
@@ -542,7 +641,7 @@ bool stage_reducer_frontier_purge_noncanonical(
             ok = false;
             goto done_locked;
         }
-        if (out->clamped_script_validate || out->clamped_proof_validate)
+        if (rf_purge_script_proof_clamped(out))
             LOG_WARN("stage_repair",
                      "[stage_repair] purge_noncanonical clamped "
                      "script_validate=%d->%d proof_validate=%d->%d to purged "
@@ -554,7 +653,7 @@ bool stage_reducer_frontier_purge_noncanonical(
                      lowest_stale_unapplied, out->hstar,
                      out->coins_applied_height, apply ? "" : "; dry-run");
     }
-    if (lowest_stale_utxo_unapplied >= 0 && apply) {
+    if (rf_purge_utxo_suffix_wanted(lowest_stale_utxo_unapplied, apply)) {
         int before = -1;
         int after = -1;
         int target = out->coins_applied_height;
