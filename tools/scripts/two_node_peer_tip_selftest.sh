@@ -87,7 +87,9 @@ CHILD
     REQUIRE_SIGKILL=1
     tn_spawn "$fixture" 0 0 0 0 unused
     TN_PID_B="$TN_SPAWN_PID"; TN_PGID_B="$TN_PID_B"
-    for i in $(seq 1 100); do
+    # A loaded host can delay the spawn; the loop still exits as soon as the file appears.
+    peer_tip_ready_tries=3000
+    for i in $(seq 1 "$peer_tip_ready_tries"); do
         [ -f "$fixture_ready" ] && break
         sleep 0.01
     done
