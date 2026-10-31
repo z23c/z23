@@ -513,6 +513,66 @@ static job_result_t pv_settle_verdict(struct stage_step_ctx *c, sqlite3 *db,
     return pv_record_verdict(c, db, bi, next_h, skip_crypto, summary);
 }
 
+/* Entry-trace counter: true for the first three calls and every 5000th. The
+ * caller only invokes it while ZCL_PV_TRACE is on. */
+static bool pv_trace_entry_due(uint64_t *n)
+{
+    static _Atomic uint64_t entries;
+    *n = atomic_fetch_add(&entries, 1u);
+    return *n < 3u || *n % 5000u == 0u;
+}
+
+/* Upstream script_validate frontier. False means the caller returns JOB_FATAL
+ * (negative height or a frontier query failure). */
+static bool pv_upstream_frontier(sqlite3 *db, uint64_t *sv_cursor)
+{
+    int64_t t_upstream = platform_time_monotonic_us();
+    if (!stage_upstream_frontier_or_zero(db, "script_validate", STAGE_NAME,
+                                         sv_cursor))
+        return false;
+    pv_profile_us(RPF_UPSTREAM_US, t_upstream);
+    return true;
+}
+
+/* True when the selected height has no readable body in the block index. */
+static bool pv_body_absent(const struct block_index *bi)
+{
+    return !bi || !(bi->nStatus & BLOCK_HAVE_DATA);
+}
+
+/* True only when next_h differs from the last height noted as held. */
+static bool pv_first_missing_note(int next_h)
+{
+    static _Atomic int64_t last_noted_h = -1;
+    int64_t prev = atomic_exchange(&last_noted_h, (int64_t)next_h);
+    return prev != (int64_t)next_h;
+}
+
+/* True when a canonical upstream verdict carries evidence other than expected. */
+static bool pv_evidence_mismatch(const struct script_validate_row *upstream,
+                                 enum mint_validation_evidence expected)
+{
+    return upstream->ok == 1 && upstream->evidence != expected;
+}
+
+/* After the evidence gate: clear its hold, then write the upstream_failed row
+ * or verify the block and settle its verdict. */
+static job_result_t pv_verdict_after_evidence(struct stage_step_ctx *c, sqlite3 *db,
+                                              struct block_index *bi,
+                                              int next_h, bool skip_crypto,
+                                              const struct script_validate_row *upstream)
+{
+    proof_validate_upstream_evidence_clear();
+    if (upstream->ok == 0)
+        return pv_advance_upstream_failed(c, db, bi, next_h);
+    struct proof_verify_summary summary;
+    job_result_t early_ret;
+    if (pv_verify_or_hit(c, bi, next_h, skip_crypto, &summary, &early_ret))
+        return early_ret;
+
+    return pv_settle_verdict(c, db, bi, next_h, skip_crypto, &summary);
+}
+
 static job_result_t step_validate(struct stage_step_ctx *c)
 {
     atomic_store(&g_last_step_unix, platform_time_wall_unix());
@@ -524,9 +584,8 @@ static job_result_t step_validate(struct stage_step_ctx *c)
      * report blames whichever stage sits lowest instead of this one. */
     const bool pv_trace = pv_trace_enabled();
     if (pv_trace) {
-        static _Atomic uint64_t entries;
-        uint64_t n = atomic_fetch_add(&entries, 1u);
-        if (n < 3u || n % 5000u == 0u)
+        uint64_t n = 0;
+        if (pv_trace_entry_due(&n))
             LOG_WARN(STAGE_NAME, "[pv-trace] step entered (call #%llu)",
                      (unsigned long long)n);
     }
@@ -548,11 +607,8 @@ static job_result_t step_validate(struct stage_step_ctx *c)
     enum mint_validation_evidence expected_evidence =
         mint_validation_evidence_expected(skip_crypto);
     uint64_t sv_cursor = 0;
-    int64_t t_upstream = platform_time_monotonic_us();
-    if (!stage_upstream_frontier_or_zero(db, "script_validate", STAGE_NAME,
-                                   &sv_cursor))
+    if (!pv_upstream_frontier(db, &sv_cursor))
         return JOB_FATAL;
-    pv_profile_us(RPF_UPSTREAM_US, t_upstream);
     if ((uint64_t)next_h >= sv_cursor) {
         if (pv_trace)
             LOG_WARN(STAGE_NAME,
@@ -584,16 +640,14 @@ static job_result_t step_validate(struct stage_step_ctx *c)
     }
     stage_upstream_log_hole_clear(STAGE_NAME);
     struct block_index *bi = stage_body_index_at(ms, next_h);
-    if (!bi || !(bi->nStatus & BLOCK_HAVE_DATA)) {
+    if (pv_body_absent(bi)) {
         /* SAY SO. This was a silent JOB_IDLE, and a silent idle here wedges
          * the whole pipeline without leaving a trace: proof_validate holds its
          * cursor, utxo_apply can never pass it, and the offline mint's stall
          * detector reports the LOWEST cursor — utxo_apply — as "the walled
          * stage", so the log accuses the one stage that is working correctly.
          * Deduplicated on height so a long wait costs one line, not a flood. */
-        static _Atomic int64_t last_noted_h = -1;
-        int64_t prev = atomic_exchange(&last_noted_h, (int64_t)next_h);
-        if (prev != (int64_t)next_h)
+        if (pv_first_missing_note(next_h))
             LOG_WARN(STAGE_NAME,
                      "[proof_validate] holding at height=%d: %s. Upstream "
                      "script_validate is at cursor=%llu, so this is not a "
@@ -610,7 +664,7 @@ static job_result_t step_validate(struct stage_step_ctx *c)
     job_result_t gate_ret;
     if (!pv_upstream_verdict_pass(c, bi, next_h, &upstream, &gate_ret))
         return gate_ret;
-    if (upstream.ok == 1 && upstream.evidence != expected_evidence) {
+    if (pv_evidence_mismatch(&upstream, expected_evidence)) {
         if (pv_trace)
             LOG_WARN(STAGE_NAME,
                      "[pv-trace] height=%d declined: evidence mismatch "
@@ -621,15 +675,7 @@ static job_result_t step_validate(struct stage_step_ctx *c)
         return proof_validate_upstream_evidence_refuse(
             c, next_h, expected_evidence, upstream.evidence);
     }
-    proof_validate_upstream_evidence_clear();
-    if (upstream.ok == 0)
-        return pv_advance_upstream_failed(c, db, bi, next_h);
-    struct proof_verify_summary summary;
-    job_result_t early_ret;
-    if (pv_verify_or_hit(c, bi, next_h, skip_crypto, &summary, &early_ret))
-        return early_ret;
-
-    return pv_settle_verdict(c, db, bi, next_h, skip_crypto, &summary);
+    return pv_verdict_after_evidence(c, db, bi, next_h, skip_crypto, &upstream);
 }
 bool proof_validate_stage_init(struct main_state *ms)
 {
