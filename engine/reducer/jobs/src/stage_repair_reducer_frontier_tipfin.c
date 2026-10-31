@@ -204,6 +204,33 @@ static bool tipfin_log_ok_at(sqlite3 *db, const char *table, int height,
     return rc_ok;
 }
 
+/* Binds the selected row: ok=1, a verified profile status (script and proof
+ * tables only) and a BLOB32 hash. Reads columns only; never logs. */
+static void tipfin_hash_row_bind(sqlite3_stmt *st, bool profile_bound,
+                                 uint8_t out_hash[32], bool *ok_hash)
+{
+    int hash_type = sqlite3_column_type(st, 1);
+    const void *blob = hash_type == SQLITE_BLOB
+        ? sqlite3_column_blob(st, 1) : NULL;
+    int blen = blob ? sqlite3_column_bytes(st, 1) : 0;
+    bool profile_ok = true;
+    if (profile_bound) {
+        int status_type = sqlite3_column_type(st, 2);
+        const void *status = status_type == SQLITE_TEXT
+            ? sqlite3_column_text(st, 2) : NULL;
+        profile_ok = status &&
+            mint_validation_evidence_parse(
+                status, (size_t)sqlite3_column_bytes(st, 2)) ==
+                MINT_VALIDATION_EVIDENCE_VERIFIED;
+    }
+    if (sqlite3_column_type(st, 0) == SQLITE_INTEGER &&
+        sqlite3_column_int(st, 0) == 1 && profile_ok &&
+        blob && blen == 32) {
+        memcpy(out_hash, blob, 32);
+        *ok_hash = true;
+    }
+}
+
 /* *ok_hash is true only when the row exists with ok=1 AND a 32-byte hash. */
 static bool tipfin_log_ok_hash_at(sqlite3 *db, const char *table,
                                   const char *hash_col, int height,
@@ -227,26 +254,7 @@ static bool tipfin_log_ok_hash_at(sqlite3 *db, const char *table,
     bool rc_ok = true;
     int rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
     if (rc == SQLITE_ROW) {
-        int hash_type = sqlite3_column_type(st, 1);
-        const void *blob = hash_type == SQLITE_BLOB
-            ? sqlite3_column_blob(st, 1) : NULL;
-        int blen = blob ? sqlite3_column_bytes(st, 1) : 0;
-        bool profile_ok = true;
-        if (profile_bound) {
-            int status_type = sqlite3_column_type(st, 2);
-            const void *status = status_type == SQLITE_TEXT
-                ? sqlite3_column_text(st, 2) : NULL;
-            profile_ok = status &&
-                mint_validation_evidence_parse(
-                    status, (size_t)sqlite3_column_bytes(st, 2)) ==
-                    MINT_VALIDATION_EVIDENCE_VERIFIED;
-        }
-        if (sqlite3_column_type(st, 0) == SQLITE_INTEGER &&
-            sqlite3_column_int(st, 0) == 1 && profile_ok &&
-            blob && blen == 32) {
-            memcpy(out_hash, blob, 32);
-            *ok_hash = true;
-        }
+        tipfin_hash_row_bind(st, profile_bound, out_hash, ok_hash);
     } else if (rc != SQLITE_DONE) {
         LOG_WARN("stage_repair",
                  "[stage_repair] tipfin hash step failed table=%s h=%d "
@@ -375,39 +383,18 @@ static bool tipfin_dual_binder_at(sqlite3 *db, int height, bool *bound,
     return true;
 }
 
-/* The G2-G5 ladder for one height. Returns false only on a DB read error. */
-static bool tipfin_eval_p(sqlite3 *db, int p, int served_floor,
-                          struct tipfin_p_eval *ev)
+/* G3 — unique binder at p: five logs ok=1, validate/script hashes at p
+ * agree. A miss below the coins frontier is the L2 refusal domain; the
+ * refusal names the binding log + height (delta rows feed conservation
+ * utxo_apply_sums_through and rewindability — never fabricated here). */
+static bool tipfin_g3_evidence_at(sqlite3 *db, int p,
+                                  struct tipfin_p_eval *ev,
+                                  struct uint256 *at_p, bool *passed)
 {
-    memset(ev, 0, sizeof(*ev));
-    ev->verdict = TIPFIN_P_BLOCKED;
-    ev->binding_height = p;
-
-    /* G2 — pin identification: the row at p must be ABSENT. */
-    enum tipfin_row_state row;
-    if (!tipfin_row_state_at(db, p, &row))
-        return false;
-    if (row != TIPFIN_ROW_ABSENT) {
-        ev->verdict = TIPFIN_P_SPAN_END;
-        if (row == TIPFIN_ROW_FAIL) {
-            ev->reason = TIPFIN_REFUSED_G2_EVIDENCE_ROW;
-            ev->guard = "G2_evidence_row";
-        } else {
-            ev->reason = TIPFIN_REFUSED_G2_ROW_PRESENT;
-            ev->guard = "G2_row_present";
-        }
-        ev->binding_log = "tip_finalize_log";
-        return true;
-    }
-
-    /* G3 — unique binder at p: five logs ok=1, validate/script hashes at p
-     * agree. A miss below the coins frontier is the L2 refusal domain; the
-     * refusal names the binding log + height (delta rows feed conservation
-     * utxo_apply_sums_through and rewindability — never fabricated here). */
+    *passed = false;
     bool bound = false;
     const char *missing = NULL;
-    struct uint256 at_p;
-    if (!tipfin_dual_binder_at(db, p, &bound, &at_p, &missing))
+    if (!tipfin_dual_binder_at(db, p, &bound, at_p, &missing))
         return false;
     if (!bound) {
         ev->reason = TIPFIN_REFUSED_G3_MISSING_EVIDENCE;
@@ -433,12 +420,47 @@ static bool tipfin_eval_p(sqlite3 *db, int p, int served_floor,
     if (!tipfin_log_ok_hash_at(db, "proof_validate_log", "block_hash", p,
                                proof_hash, &proof_ok))
         return false;
-    if (!proof_ok || memcmp(proof_hash, at_p.data, 32) != 0) {
+    if (!proof_ok || memcmp(proof_hash, at_p->data, 32) != 0) {
         ev->reason = TIPFIN_REFUSED_G3_MISSING_EVIDENCE;
         ev->guard = "G3_missing_evidence";
         ev->binding_log = "proof_validate_log";
         return true;
     }
+    *passed = true;
+    return true;
+}
+
+/* The G2-G5 ladder for one height. Returns false only on a DB read error. */
+static bool tipfin_eval_p(sqlite3 *db, int p, int served_floor,
+                          struct tipfin_p_eval *ev)
+{
+    memset(ev, 0, sizeof(*ev));
+    ev->verdict = TIPFIN_P_BLOCKED;
+    ev->binding_height = p;
+
+    /* G2 — pin identification: the row at p must be ABSENT. */
+    enum tipfin_row_state row;
+    if (!tipfin_row_state_at(db, p, &row))
+        return false;
+    if (row != TIPFIN_ROW_ABSENT) {
+        ev->verdict = TIPFIN_P_SPAN_END;
+        if (row == TIPFIN_ROW_FAIL) {
+            ev->reason = TIPFIN_REFUSED_G2_EVIDENCE_ROW;
+            ev->guard = "G2_evidence_row";
+        } else {
+            ev->reason = TIPFIN_REFUSED_G2_ROW_PRESENT;
+            ev->guard = "G2_row_present";
+        }
+        ev->binding_log = "tip_finalize_log";
+        return true;
+    }
+
+    struct uint256 at_p;
+    bool g3_passed = false;
+    if (!tipfin_g3_evidence_at(db, p, ev, &at_p, &g3_passed))
+        return false;
+    if (!g3_passed)
+        return true;
     uint8_t utxo_hash[32];
     bool utxo_ok = false;
     if (!tipfin_utxo_ok_hash_at(db, p, utxo_hash, &utxo_ok))
@@ -462,8 +484,8 @@ static bool tipfin_eval_p(sqlite3 *db, int p, int served_floor,
     /* G5 — hash evidence for the ROW (row-H -> hash-H+1 convention). The
      * boundary p+1 == coins_applied is resolved by ORDERING (FIX-2a refills
      * the script/proof rows first), never by weakening this dual binding. */
-    bound = false;
-    missing = NULL;
+    bool bound = false;
+    const char *missing = NULL;
     if (!tipfin_dual_binder_at(db, p + 1, &bound, &ev->tip_hash, &missing))
         return false;
     if (!bound) {
@@ -553,6 +575,79 @@ static bool tipfin_witness_read(sqlite3 *db, bool *found, int32_t *last,
     return true;
 }
 
+/* The per-height loop of the batch: insert rows up to the cap. Returns false
+ * on a DB error; *last_p and *exhausted report how far it got. */
+static bool tipfin_insert_span(sqlite3 *db, int span_first, int served_floor,
+                               struct arith_uint256 *zero_work, int *inserted,
+                               int *last_p, bool *exhausted)
+{
+    bool ok = true;
+    int p = span_first;
+    while (*inserted < TIPFIN_BATCH_CAP) {
+        struct tipfin_p_eval ev;
+        if (!tipfin_eval_p(db, p, served_floor, &ev)) {
+            ok = false;
+            break;
+        }
+        if (ev.verdict == TIPFIN_P_SPAN_END) {
+            *exhausted = true;
+            break;
+        }
+        if (ev.verdict == TIPFIN_P_BLOCKED)
+            break;
+        if (!log_insert(db, p, "finalize_backfill", true, zero_work, -1, 0,
+                        &ev.tip_hash)) {
+            ok = false;
+            break;
+        }
+        (*inserted)++;
+        *last_p = p;
+        p++;
+    }
+    return ok;
+}
+
+static bool tipfin_marker_record_in_tx(sqlite3 *db, int span_first,
+                                       const struct uint256 *marker_hash)
+{
+    return !marker_hash ||
+        stage_reducer_frontier_repair_marker_record_in_tx(
+            db, REPAIR_MARKER_KIND_RF_TIPFIN_BACKFILL, span_first,
+            marker_hash, "tipfin");
+}
+
+enum tipfin_witness_status {
+    TIPFIN_WITNESS_SETTLED = 0,
+    TIPFIN_WITNESS_FORGET_FAILED,
+    TIPFIN_WITNESS_NOTE_FAILED,
+};
+
+/* Settles the witness record in the batch tx: the batch that exhausts the
+ * span deletes it, any other batch upserts it. */
+static enum tipfin_witness_status tipfin_witness_settle_in_tx(
+    sqlite3 *db, bool exhausted, int last_p, int inserted,
+    uint32_t prior_total)
+{
+    if (exhausted) {
+        /* The ONLY deletion in this repair: its own witness record,
+         * in the tx of the batch that exhausts the span. */
+        if (!repair_marker_forget_in_tx(db, TIPFIN_WITNESS_KIND,
+                                        REPAIR_MARKER_TIPFIN_HEIGHT,
+                                        TIPFIN_WITNESS_ZERO_HASH))
+            return TIPFIN_WITNESS_FORGET_FAILED;
+        return TIPFIN_WITNESS_SETTLED;
+    }
+    uint8_t buf[8];
+    tipfin_witness_encode(buf, (int32_t)last_p,
+                          prior_total + (uint32_t)inserted);
+    if (!repair_marker_note_in_tx(db, TIPFIN_WITNESS_KIND,
+                                  REPAIR_MARKER_TIPFIN_HEIGHT,
+                                  TIPFIN_WITNESS_ZERO_HASH, buf,
+                                  sizeof(buf)))
+        return TIPFIN_WITNESS_NOTE_FAILED;
+    return TIPFIN_WITNESS_SETTLED;
+}
+
 /* G6+G8 — the batch transaction: re-evaluate G2-G5 per height INSIDE the
  * BEGIN IMMEDIATE (the absent re-check), insert hash-bound ok=1 rows up to
  * the cap, then settle the marker + witness in the same tx. Zero-progress
@@ -578,54 +673,21 @@ static bool tipfin_batch_tx(sqlite3 *db, int span_first, int served_floor,
     struct arith_uint256 zero_work;
     arith_uint256_set_u64(&zero_work, 0);
 
-    bool ok = true;
-    int p = span_first;
-    while (*inserted < TIPFIN_BATCH_CAP) {
-        struct tipfin_p_eval ev;
-        if (!tipfin_eval_p(db, p, served_floor, &ev)) {
-            ok = false;
-            break;
-        }
-        if (ev.verdict == TIPFIN_P_SPAN_END) {
-            *exhausted = true;
-            break;
-        }
-        if (ev.verdict == TIPFIN_P_BLOCKED)
-            break;
-        if (!log_insert(db, p, "finalize_backfill", true, &zero_work, -1, 0,
-                        &ev.tip_hash)) {
-            ok = false;
-            break;
-        }
-        (*inserted)++;
-        *last_p = p;
-        p++;
-    }
+    bool ok = tipfin_insert_span(db, span_first, served_floor, &zero_work,
+                                 inserted, last_p, exhausted);
 
     if (ok && *inserted > 0) {
-        if (marker_hash &&
-            !stage_reducer_frontier_repair_marker_record_in_tx(
-                db, REPAIR_MARKER_KIND_RF_TIPFIN_BACKFILL, span_first,
-                marker_hash, "tipfin"))
+        if (!tipfin_marker_record_in_tx(db, span_first, marker_hash))
             ok = false;
-        if (ok && *exhausted) {
-            /* The ONLY deletion in this repair: its own witness record,
-             * in the tx of the batch that exhausts the span. */
-            if (!repair_marker_forget_in_tx(db, TIPFIN_WITNESS_KIND,
-                                            REPAIR_MARKER_TIPFIN_HEIGHT,
-                                            TIPFIN_WITNESS_ZERO_HASH)) {
+        if (ok) {
+            enum tipfin_witness_status settled =
+                tipfin_witness_settle_in_tx(db, *exhausted, *last_p, *inserted,
+                                            prior_total);
+            if (settled == TIPFIN_WITNESS_FORGET_FAILED) {
                 LOG_WARN("stage_repair",
                          "[stage_repair] tipfin witness delete failed");
                 ok = false;
-            }
-        } else if (ok) {
-            uint8_t buf[8];
-            tipfin_witness_encode(buf, (int32_t)*last_p,
-                                  prior_total + (uint32_t)*inserted);
-            if (!repair_marker_note_in_tx(db, TIPFIN_WITNESS_KIND,
-                                          REPAIR_MARKER_TIPFIN_HEIGHT,
-                                          TIPFIN_WITNESS_ZERO_HASH, buf,
-                                          sizeof(buf))) {
+            } else if (settled == TIPFIN_WITNESS_NOTE_FAILED) {
                 LOG_WARN("stage_repair",
                          "[stage_repair] tipfin witness write failed");
                 ok = false;
@@ -655,6 +717,94 @@ static bool tipfin_batch_tx(sqlite3 *db, int span_first, int served_floor,
     return true;
 }
 
+/* Returns false when the caller must return true at once; any refusal is
+ * already recorded in *out. */
+static bool tipfin_backfill_proceeds(
+    struct stage_reducer_frontier_reconcile_result *out)
+{
+    /* G1 — coin frontier unknown is returned upstream; refuse defensively
+     * if reached anyway. */
+    if (out->refused_coin_unknown) {
+        tipfin_refuse(out, TIPFIN_REFUSED_G1_COIN_UNKNOWN, "G1_coin_unknown",
+                      NULL, out->hstar + 1);
+        return false;
+    }
+
+    /* Scope: the coin-tear pin, OR a tip_finalize-ONLY rowless hole at a REAL
+     * anchored frontier (hstar > 0), served_floor > hstar, coins applied THROUGH
+     * the span (the live H*-pin class). coins-cover keeps every fill coins-backed;
+     * hstar>0 excludes the phantom-0 floor of a fresh datadir (the generic
+     * cursor-clamp's domain). G2 guards a real ok=0 row at H*+1. */
+    bool tipfin_only_hole = out->hstar > 0 && out->served_floor > out->hstar &&
+        out->coins_applied_found &&
+        out->coins_applied_height - 1 >= out->served_floor;
+    if (!out->refused_coin_tear && !tipfin_only_hole)
+        return false;
+
+    if (out->hstar < 0 || out->hstar >= INT32_MAX - 2) {
+        tipfin_refuse(out, TIPFIN_REFUSED_HSTAR_RANGE, "hstar_out_of_range",
+                      NULL, out->hstar);
+        return false;
+    }
+    return true;
+}
+
+enum tipfin_apply_status {
+    TIPFIN_APPLY_FAILED = 0,  /* DB error: the caller returns false */
+    TIPFIN_APPLY_HANDLED,     /* nothing to report: the caller returns true */
+    TIPFIN_APPLY_WROTE,       /* rows inserted: the caller reports them */
+};
+
+/* G7 marker gate, dry-run or apply, then the batch. Runs under the
+ * progress_store_tx_lock taken by the caller and releases it on every path. */
+static enum tipfin_apply_status tipfin_gate_and_apply(
+    sqlite3 *db, bool apply,
+    struct stage_reducer_frontier_reconcile_result *out, bool *handled,
+    struct tipfin_p_eval *ev, int span_first, bool resuming,
+    uint32_t prior_total, int *inserted, int *last_p, bool *exhausted)
+{
+    if (!resuming) {
+        bool seen = false;
+        if (!stage_reducer_frontier_repair_marker_seen(
+                db, REPAIR_MARKER_KIND_RF_TIPFIN_BACKFILL, span_first,
+                &ev->tip_hash, "tipfin", &seen)) {
+            progress_store_tx_unlock();
+            return TIPFIN_APPLY_FAILED;
+        }
+        if (seen) {
+            out->tipfin_backfill_marker_seen = true;
+            tipfin_refuse(out, TIPFIN_REFUSED_G7_MARKER_SEEN,
+                          "G7_marker_seen", "tip_finalize_log", span_first);
+            progress_store_tx_unlock();
+            return TIPFIN_APPLY_HANDLED;
+        }
+    }
+
+    if (!apply) {
+        progress_store_tx_unlock();
+        out->repaired = true;
+        out->tipfin_backfill_height = span_first;
+        *handled = true;
+        return TIPFIN_APPLY_HANDLED;
+    }
+
+    if (!tipfin_batch_tx(db, span_first, out->served_floor,
+                         resuming ? NULL : &ev->tip_hash, prior_total, inserted,
+                         last_p, exhausted)) {
+        progress_store_tx_unlock();
+        return TIPFIN_APPLY_FAILED;
+    }
+    progress_store_tx_unlock();
+
+    if (*inserted == 0) {
+        /* The pre-check passed but the in-tx re-check refused (G6). */
+        tipfin_refuse(out, TIPFIN_REFUSED_G6_IN_TX_RECHECK,
+                      "G6_in_tx_recheck", "tip_finalize_log", span_first);
+        return TIPFIN_APPLY_HANDLED;
+    }
+    return TIPFIN_APPLY_WROTE;
+}
+
 bool stage_reducer_frontier_try_tipfin_backfill(
     sqlite3 *db,
     bool apply,
@@ -673,30 +823,8 @@ bool stage_reducer_frontier_try_tipfin_backfill(
     if (!db)
         LOG_FAIL("stage_repair", "tipfin backfill: NULL db");
 
-    /* G1 — coin frontier unknown is returned upstream; refuse defensively
-     * if reached anyway. */
-    if (out->refused_coin_unknown) {
-        tipfin_refuse(out, TIPFIN_REFUSED_G1_COIN_UNKNOWN, "G1_coin_unknown",
-                      NULL, out->hstar + 1);
+    if (!tipfin_backfill_proceeds(out))
         return true;
-    }
-
-    /* Scope: the coin-tear pin, OR a tip_finalize-ONLY rowless hole at a REAL
-     * anchored frontier (hstar > 0), served_floor > hstar, coins applied THROUGH
-     * the span (the live H*-pin class). coins-cover keeps every fill coins-backed;
-     * hstar>0 excludes the phantom-0 floor of a fresh datadir (the generic
-     * cursor-clamp's domain). G2 guards a real ok=0 row at H*+1. */
-    bool tipfin_only_hole = out->hstar > 0 && out->served_floor > out->hstar &&
-        out->coins_applied_found &&
-        out->coins_applied_height - 1 >= out->served_floor;
-    if (!out->refused_coin_tear && !tipfin_only_hole)
-        return true;
-
-    if (out->hstar < 0 || out->hstar >= INT32_MAX - 2) {
-        tipfin_refuse(out, TIPFIN_REFUSED_HSTAR_RANGE, "hstar_out_of_range",
-                      NULL, out->hstar);
-        return true;
-    }
 
     progress_store_tx_lock();
 
@@ -741,48 +869,14 @@ bool stage_reducer_frontier_try_tipfin_backfill(
         prior_total = 0;
     }
 
-    if (!resuming) {
-        bool seen = false;
-        if (!stage_reducer_frontier_repair_marker_seen(
-                db, REPAIR_MARKER_KIND_RF_TIPFIN_BACKFILL, span_first,
-                &ev.tip_hash, "tipfin", &seen)) {
-            progress_store_tx_unlock();
-            return false;
-        }
-        if (seen) {
-            out->tipfin_backfill_marker_seen = true;
-            tipfin_refuse(out, TIPFIN_REFUSED_G7_MARKER_SEEN,
-                          "G7_marker_seen", "tip_finalize_log", span_first);
-            progress_store_tx_unlock();
-            return true;
-        }
-    }
-
-    if (!apply) {
-        progress_store_tx_unlock();
-        out->repaired = true;
-        out->tipfin_backfill_height = span_first;
-        *handled = true;
-        return true;
-    }
-
     int inserted = 0;
     int last_p = -1;
     bool exhausted = false;
-    if (!tipfin_batch_tx(db, span_first, out->served_floor,
-                         resuming ? NULL : &ev.tip_hash, prior_total, &inserted,
-                         &last_p, &exhausted)) {
-        progress_store_tx_unlock();
-        return false;
-    }
-    progress_store_tx_unlock();
-
-    if (inserted == 0) {
-        /* The pre-check passed but the in-tx re-check refused (G6). */
-        tipfin_refuse(out, TIPFIN_REFUSED_G6_IN_TX_RECHECK,
-                      "G6_in_tx_recheck", "tip_finalize_log", span_first);
-        return true;
-    }
+    enum tipfin_apply_status applied = tipfin_gate_and_apply(
+        db, apply, out, handled, &ev, span_first, resuming, prior_total,
+        &inserted, &last_p, &exhausted);
+    if (applied != TIPFIN_APPLY_WROTE)
+        return applied == TIPFIN_APPLY_HANDLED;
 
     out->repaired = true;
     out->refused_coin_tear = false;  /* result-reporting only (:449-450) */
