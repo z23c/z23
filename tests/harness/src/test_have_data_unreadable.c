@@ -308,6 +308,36 @@ static bool hdu_body_torn_handoff_retained(
     return ok2;
 }
 
+/* A success snapshot taken before a repeat failure must not clear the newer
+ * failure of the same identity. */
+static bool hdu_stale_snapshot_cannot_clear(const struct uint256 *hash)
+{
+    struct reducer_frontier_body_read_note stale;
+    bool ok = reducer_frontier_body_read_note_snapshot(&stale);
+    reducer_frontier_body_read_note_record(
+        5, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, hash);
+    ok = ok && !reducer_frontier_body_read_note_clear_if(&stale);
+    return ok && reducer_frontier_body_read_note_active();
+}
+
+/* A different hash, then a lower height, each count as a new identity. */
+static bool hdu_new_identity_bumps(const struct uint256 *hash,
+                                   uint64_t base_identity)
+{
+    struct uint256 other = *hash;
+    other.data[0] ^= 0x5a;
+    reducer_frontier_body_read_note_record(
+        5, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, &other);
+    struct reducer_frontier_body_read_note replaced;
+    bool ok = reducer_frontier_body_read_note_snapshot(&replaced);
+    ok = ok && replaced.identity_generation > base_identity;
+    reducer_frontier_body_read_note_record(
+        4, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, &other);
+    struct reducer_frontier_body_read_note lower;
+    ok = ok && reducer_frontier_body_read_note_snapshot(&lower);
+    return ok && lower.identity_generation > replaced.identity_generation;
+}
+
 /* A 5 s retry re-records the same (height, hash) failure. That is the same
  * note, not a new one: the generation stays put and the witness keeps the
  * condition active. A different hash or height at the noted height is new. */
@@ -332,27 +362,8 @@ static bool hdu_body_torn_repeat_is_same_note(
     ok = ok && snap.cleared_count == cleared_before;
     ok = ok && reducer_frontier_body_read_note_active();
 
-    /* A success snapshot taken before a repeat failure must not clear the
-     * newer failure of the same identity. */
-    struct reducer_frontier_body_read_note stale;
-    ok = ok && reducer_frontier_body_read_note_snapshot(&stale);
-    reducer_frontier_body_read_note_record(
-        5, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, hash);
-    ok = ok && !reducer_frontier_body_read_note_clear_if(&stale);
-    ok = ok && reducer_frontier_body_read_note_active();
-
-    struct uint256 other = *hash;
-    other.data[0] ^= 0x5a;
-    reducer_frontier_body_read_note_record(
-        5, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, &other);
-    struct reducer_frontier_body_read_note replaced;
-    ok = ok && reducer_frontier_body_read_note_snapshot(&replaced);
-    ok = ok && replaced.identity_generation > after.identity_generation;
-    reducer_frontier_body_read_note_record(
-        4, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, &other);
-    struct reducer_frontier_body_read_note lower;
-    ok = ok && reducer_frontier_body_read_note_snapshot(&lower);
-    ok = ok && lower.identity_generation > replaced.identity_generation;
+    ok = ok && hdu_stale_snapshot_cannot_clear(hash);
+    ok = ok && hdu_new_identity_bumps(hash, after.identity_generation);
     /* Restore the original identity for the completion step. */
     reducer_frontier_body_read_note_reset_for_testing();
     for (int i = 0; i < REDUCER_FRONTIER_BODY_READ_QUARANTINE_MAX; i++)
