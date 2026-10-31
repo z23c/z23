@@ -93,15 +93,16 @@ static int node_arguments(int argc, char **argv)
     const char *want = getenv("ZAPP_TEST_PARAMS_ARG");
     bool with_params = want && strcmp(want, "none") != 0;
     if (strcmp(argv[2], "-operator-lane=canonical") || strcmp(argv[3], "-tor") ||
-        strcmp(argv[4], "-onion-persist") || strcmp(argv[5], "-private-listeners")) return 4;
-    if (argc != (with_params ? 7 : 6) || (with_params && strcmp(argv[6], want) != 0)) return 7;
+        strcmp(argv[4], "-onion-persist") || strcmp(argv[5], "-private-listeners") ||
+        strcmp(argv[6], "-observation=0")) return 4;
+    if (argc != (with_params ? 8 : 7) || (with_params && strcmp(argv[7], want) != 0)) return 7;
     return 0;
 }
 
 static int child(int argc, char **argv)
 {
     if (!child_environment()) return 3;
-    if ((argc == 6 || argc == 7) && !strncmp(argv[1], "-datadir=", 9)) {
+    if ((argc == 7 || argc == 8) && !strncmp(argv[1], "-datadir=", 9)) {
         int bad = node_arguments(argc, argv);
         if (bad) return bad;
         puts("full node arguments accepted");

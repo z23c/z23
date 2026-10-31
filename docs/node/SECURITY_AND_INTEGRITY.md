@@ -151,8 +151,12 @@ height. Anchor membership is checked independently on both paths.
 - **Private listeners:** `-private-listeners` (the Android app passes it)
   makes every socket the node binds loopback: P2P defaults to `-bind=127.0.0.1`
   and a non-loopback `-bind=` is refused; the HTTPS explorer and HTTP redirect,
-  the file service, ROM seeding, the NAT probe and the RPC TLS listener do not
-  start. Tor is unchanged: the onion service forwards to the loopback P2P port
+  the file service, ROM seeding, the NAT probe, the beta6 bootstrap side listener
+  (even when `ZCL_BETA6_BOOTSTRAP_LISTEN` or the config file names one) and the
+  RPC TLS listener do not start, and `/observation.json` on the onion answers
+  404. `-bind=::1` is refused while Tor runs because the onion service forwards
+  to 127.0.0.1. The public status, `/api/v1/bootstrap` and `/api/refold` carry
+  no datadir, marker, bundle, loader or snapshot path. Tor is unchanged: the onion service forwards to the loopback P2P port
   and outbound P2P keeps its SOCKS route. `make t-fast ONLY=private_listeners`
   starts a node and reads its listening sockets from `/proc/net/tcp` and
   `tcp6`. Nodes started without the option bind as before.

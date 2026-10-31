@@ -403,12 +403,18 @@ static bool onlynet_bind_is_loopback(const char *bind)
                     strcmp(bind, "::1") == 0);
 }
 
-const char *app_private_listeners_refusal(const struct app_context *ctx)
+const char *app_private_listeners_refusal(const struct app_context *ctx,
+                                            bool real_tor_linked)
 {
     if (!ctx || !ctx->private_listeners || !ctx->p2p_bind_address)
         return NULL;
     if (!onlynet_bind_is_loopback(ctx->p2p_bind_address))
         return "-private-listeners refuses a -bind= that is not 127.0.0.1 or ::1";
+    /* The onion service forwards to 127.0.0.1:<p2p port>. */
+    if (strcmp(ctx->p2p_bind_address, "::1") == 0 &&
+        app_tor_should_start(real_tor_linked, ctx->no_tor))
+        return "-private-listeners with Tor needs -bind=127.0.0.1: the onion "
+               "service forwards to 127.0.0.1, not ::1";
     return NULL;
 }
 

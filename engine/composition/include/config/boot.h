@@ -239,8 +239,9 @@ struct app_context {
                                   * Default OFF. See app_onlynet_onion_refusal(). */
     bool private_listeners;      /* -private-listeners : every socket this node
                                   * binds is loopback; the HTTPS explorer, the
-                                  * file service, ROM seeding, the NAT probe and
-                                  * the RPC TLS listener do not start. Tor and
+                                  * file service, ROM seeding, the NAT probe, the
+                                  * beta6 side listener and the RPC TLS listener do
+                                  * not start, and /observation.json is off. Tor and
                                   * the loopback RPC are unchanged. Default OFF.
                                   * See app_private_listeners_refusal(). */
     bool observation_off;        /* -observation=0 : /observation.json answers
@@ -548,9 +549,12 @@ const char *app_onlynet_onion_refusal(const struct app_context *ctx,
                                     bool real_tor_linked);
 
 /* -private-listeners admission, pure. NULL when the argv may boot, else a
- * short operator-facing reason: an explicit -bind= must be 127.0.0.1 or ::1.
- * Without -bind=, args_parse resolves the P2P bind to 127.0.0.1. */
-const char *app_private_listeners_refusal(const struct app_context *ctx);
+ * short operator-facing reason: an explicit -bind= must be 127.0.0.1 or ::1,
+ * and ::1 is refused while Tor runs because the onion service forwards to
+ * 127.0.0.1. Without -bind=, args_parse resolves the P2P bind to 127.0.0.1 and
+ * turns /observation.json off. */
+const char *app_private_listeners_refusal(const struct app_context *ctx,
+                                          bool real_tor_linked);
 
 /* The whole fail-closed Tor admission decision, in one pure function.
  * Returns NULL when this argv may boot, or the stable boot_error code the

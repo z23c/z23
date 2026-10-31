@@ -101,6 +101,13 @@ static struct rpc_http_request_context g_request_context;
 static pthread_t g_worker_threads[RPC_HTTP_WORKERS + RPC_HTTP_FAST_WORKERS];
 static size_t g_workers_started = 0;
 
+static _Atomic bool g_tls_forbidden;
+
+void rpc_http_forbid_tls(bool forbid)
+{
+    atomic_store(&g_tls_forbidden, forbid);
+}
+
 /* ── TLS state ────────────────────────────────────────────────────── */
 static SSL_CTX *g_tls_ctx = NULL;
 static platform_socket_t g_tls_listen_fd = PLATFORM_SOCKET_INVALID;
@@ -574,7 +581,9 @@ bool rpc_http_start(const struct rpc_table *table, uint16_t port,
     {
         const char *cert = getenv("ZCL_RPC_TLS_CERT");
         const char *key  = getenv("ZCL_RPC_TLS_KEY");
-        if (rpc_tls_env_configured(cert, key)) {
+        if (g_tls_forbidden && rpc_tls_env_configured(cert, key))
+            printf("RPC TLS listener not started: forbidden by -private-listeners\n");
+        else if (rpc_tls_env_configured(cert, key)) {
             g_tls_ctx = tls_init(cert, key);
             if (g_tls_ctx) {
                 /* Determine TLS port */

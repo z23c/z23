@@ -78,7 +78,8 @@ void print_usage_all(const char *prog)
     printf("                      a `tor: stub` build. Default off.\n");
     printf("  -private-listeners  Bind only loopback: P2P listens on 127.0.0.1 unless -bind= names\n");
     printf("                      ::1; the HTTPS explorer, file service, ROM seeding, NAT\n");
-    printf("                      probe and RPC TLS listener do not start. Tor and the\n");
+    printf("                      probe, beta6 side listener and RPC TLS listener do not\n");
+    printf("                      start, and /observation.json answers 404. Tor and the\n");
     printf("                      loopback RPC are unchanged. Default off.\n");
     printf("  -observation=0      /observation.json on the onion answers 404 (hides\n");
     printf("                      hardware and peer telemetry). Default on (=1).\n");
@@ -804,6 +805,12 @@ static int args_arm_tor(const char *arg,
     else if (strcmp(arg, "-no-tor") == 0) ctx->no_tor = true;
     else if (strcmp(arg, "-onlynet=onion") == 0) ctx->onlynet_onion = true;
     else if (strcmp(arg, "-private-listeners") == 0) ctx->private_listeners = true;
+    else if (strncmp(arg, "--private-listeners", 19) == 0 ||
+             strncmp(arg, "-private-listeners=", 19) == 0) {
+        fprintf(stderr, "Invalid option: %s (use -private-listeners with no "
+                        "value)\n", arg);
+        return 1;
+    }
     else if (strcmp(arg, "-observation=0") == 0) ctx->observation_off = true;
     else if (strcmp(arg, "-observation=1") == 0) ctx->observation_off = false;
     else if (strncmp(arg, "-onlynet=", 9) == 0 ||
@@ -1275,8 +1282,11 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
             ctx->tor, ctx->addnode_peers, ctx->n_addnode_peers);
     if (ctx->private_listeners && !ctx->p2p_bind_address)
         ctx->p2p_bind_address = "127.0.0.1";
+    if (ctx->private_listeners)
+        ctx->observation_off = true;
     {
-        const char *private_refusal = app_private_listeners_refusal(ctx);
+        const char *private_refusal = app_private_listeners_refusal(
+            ctx, app_tor_real_build_linked());
         if (private_refusal) {
             fprintf(stderr, "Refused: %s\n", private_refusal);
             return 1;

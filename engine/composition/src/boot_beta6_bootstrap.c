@@ -161,6 +161,12 @@ static void start_side_listener(struct boot_svc_ctx *svc)
         flag_or_env("-beta6-bootstrap-listen", getenv("ZCL_BETA6_BOOTSTRAP_LISTEN"));
     if (!listen[0])
         return;
+    if (svc->app_ctx->private_listeners) {
+        LOG_WARN("beta6boot",
+                 "beta6 bootstrap listener %s not started: -private-listeners "
+                 "binds loopback only", listen);
+        return;
+    }
     char ip[64] = { 0 };
     uint16_t port = 0;
     if (!parse_listen(listen, ip, sizeof(ip), &port)) {

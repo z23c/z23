@@ -404,9 +404,10 @@ change hosts or spend funds.
   binds loopback only: P2P 127.0.0.1:8033 (the onion service forwards to it),
   RPC 127.0.0.1:18232 and Tor SOCKS 127.0.0.1:19999. The HTTPS explorer and its
   HTTP redirect (8443, 8080), the file service (18034), ROM seeding, the NAT
-  probe and the RPC TLS listener do not start, so nothing on the Wi-Fi reaches
+  probe, the beta6 side listener and the RPC TLS listener do not start, so nothing on the Wi-Fi reaches
   the phone and the HTTP status routes (`/api/status`, `/api/v1/peers`, ...)
-  are not served there. `adb logcat -s z23node` shows the node log; the app's
+  are not served there. The onion answers 404 for `/observation.json` (`-observation=0`), so a stranger
+  cannot fingerprint the phone. `adb logcat -s z23node` shows the node log; the app's
   own commands use the loopback RPC with the credentials in its private data
   directory.
 - `org.z23.nativeapp` is not debuggable, so `run-as` refuses it. For the

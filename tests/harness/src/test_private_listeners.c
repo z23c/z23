@@ -7,7 +7,8 @@
  * start the real node binary on an isolated regtest datadir, read its
  * listening sockets from /proc/net/tcp and /proc/net/tcp6 by socket inode,
  * and require every one to be loopback, with the HTTPS explorer, the file
- * service and the RPC TLS listener absent and the NAT probe off. A node
+ * service, the beta6 side listener and the RPC TLS listener absent and the
+ * NAT probe off, and re-read them after boot settles. A node
  * started without the option must still hold its public listeners.
  *
  * The process cases need build/bin/zclassic23 and fail when it is missing.
@@ -55,9 +56,9 @@ PL_CASE(pl_args_default_bind, "private_listeners: the option binds P2P to 127.0.
 PL_END
 
 PL_CASE(pl_args_loopback_bind, "private_listeners: a loopback -bind= is kept, in either order")
-    char *loopback6[] = {"z23", "-private-listeners", "-bind=::1"};
+    char *loopback6[] = {"z23", "-private-listeners", "-bind=::1", "-no-tor"};
     char *loopback4[] = {"z23", "-bind=127.0.0.1", "-private-listeners"};
-    ASSERT(pl_parse(loopback6, 3, &ctx) == -1);
+    ASSERT(pl_parse(loopback6, 4, &ctx) == -1);
     ASSERT(!strcmp(ctx.p2p_bind_address, "::1"));
     ASSERT(pl_parse(loopback4, 3, &ctx) == -1);
     ASSERT(!strcmp(ctx.p2p_bind_address, "127.0.0.1"));
@@ -80,17 +81,46 @@ PL_END
 PL_CASE(pl_args_refusal, "private_listeners: the pure refusal ignores a node without the option")
     app_context_defaults(&ctx);
     ctx.p2p_bind_address = "0.0.0.0";
-    ASSERT(app_private_listeners_refusal(&ctx) == NULL);
+    ASSERT(app_private_listeners_refusal(&ctx, true) == NULL);
     ctx.private_listeners = true;
-    ASSERT(app_private_listeners_refusal(&ctx) != NULL);
+    ASSERT(app_private_listeners_refusal(&ctx, true) != NULL);
+    ctx.p2p_bind_address = "127.0.0.1";
+    ASSERT(app_private_listeners_refusal(&ctx, true) == NULL);
+PL_END
+
+PL_CASE(pl_args_ipv6_tor, "private_listeners: -bind=::1 is refused while Tor runs, accepted without it")
+    app_context_defaults(&ctx);
+    ctx.private_listeners = true;
     ctx.p2p_bind_address = "::1";
-    ASSERT(app_private_listeners_refusal(&ctx) == NULL);
+    ASSERT(app_private_listeners_refusal(&ctx, true) != NULL);
+    ASSERT(app_private_listeners_refusal(&ctx, false) == NULL);
+    ctx.no_tor = true;
+    ASSERT(app_private_listeners_refusal(&ctx, true) == NULL);
+PL_END
+
+PL_CASE(pl_args_spellings, "private_listeners: --private-listeners and -private-listeners=1 are refused")
+    char *dashes[] = {"z23", "--private-listeners"};
+    char *value[] = {"z23", "-private-listeners=1"};
+    char *dashes_value[] = {"z23", "--private-listeners=1"};
+    ASSERT(pl_parse(dashes, 2, &ctx) == 1);
+    ASSERT(pl_parse(value, 2, &ctx) == 1);
+    ASSERT(pl_parse(dashes_value, 2, &ctx) == 1);
+PL_END
+
+PL_CASE(pl_args_observation, "private_listeners: the option turns /observation.json off")
+    char *plain[] = {"z23", "-private-listeners"};
+    char *off[] = {"z23"};
+    char *explicit_on[] = {"z23", "-private-listeners", "-observation=1"};
+    ASSERT(pl_parse(off, 1, &ctx) == -1 && !ctx.observation_off);
+    ASSERT(pl_parse(plain, 2, &ctx) == -1 && ctx.observation_off);
+    ASSERT(pl_parse(explicit_on, 3, &ctx) == -1 && ctx.observation_off);
 PL_END
 
 static int test_private_listeners_args(void)
 {
     return pl_args_default_bind() + pl_args_loopback_bind() + pl_args_public_bind() +
-           pl_args_off() + pl_args_refusal();
+           pl_args_off() + pl_args_refusal() + pl_args_ipv6_tor() + pl_args_spellings() +
+           pl_args_observation();
 }
 
 #if defined(__linux__)
@@ -105,11 +135,13 @@ struct pl_socket {
 };
 
 struct pl_ports {
-    uint16_t p2p, rpc, https, http, fs, tls;
+    uint16_t p2p, rpc, https, http, fs, tls, beta6;
 };
 
 struct pl_node {
     pid_t pid;
+    bool private_listeners;
+    int public_seen;
     char directory[PATH_MAX];
     char log[PATH_MAX];
     struct pl_ports ports;
@@ -157,7 +189,8 @@ static bool pl_reserve_ports(struct pl_ports *ports)
         ports->https = https;
         ports->http = http;
         return pl_free_port(&ports->p2p) && pl_free_port(&ports->rpc) &&
-               pl_free_port(&ports->fs) && pl_free_port(&ports->tls);
+               pl_free_port(&ports->fs) && pl_free_port(&ports->tls) &&
+               pl_free_port(&ports->beta6);
     }
     return false;
 }
@@ -293,25 +326,52 @@ static bool pl_write_certificate(const char *cert_path, const char *key_path)
     return ok;
 }
 
+/* A complete beta6 serve tree and its .anchor sidecar, so the node arms and
+ * would open the side listener the environment names. */
+static bool pl_write_beta6_source(const char *root)
+{
+    char path[PATH_MAX + 32];
+    static const char *const files[] = {"blocks", "blocks/index", "chainstate"};
+    for (size_t i = 0; i < 3; i++) {
+        snprintf(path, sizeof(path), "%s/%s", root, files[i]);
+        if (mkdir(path, 0700) && errno != EEXIST) return false;
+    }
+    static const char *const data[] = {"blocks/blk00000.dat", "blocks/index/000001.ldb",
+                                       "chainstate/000001.ldb"};
+    for (size_t i = 0; i < 3; i++) {
+        snprintf(path, sizeof(path), "%s/%s", root, data[i]);
+        FILE *f = fopen(path, "w");
+        if (!f || fputs("x", f) < 0 || fclose(f)) return false;
+    }
+    snprintf(path, sizeof(path), "%s.anchor", root);
+    FILE *f = fopen(path, "w");
+    bool ok = f && fputs("3126937 00000663e40f1fe0bc32a7e7282fac25de5fe8ecefd9c627e2fd948d388f7053\n", f) >= 0;
+    return f && fclose(f) == 0 && ok;
+}
+
 static bool pl_start(struct pl_node *node, bool private_listeners)
 {
     memset(node, 0, sizeof(*node));
+    node->private_listeners = private_listeners;
     if (!test_ensure_tmproot() || !pl_reserve_ports(&node->ports)) return false;
     test_fmt_tmpdir(node->directory, sizeof(node->directory), "zcl_private_listeners",
                     private_listeners ? "private" : "public");
     char data[PATH_MAX + 16], home[PATH_MAX + 16], cert[PATH_MAX + 8], key[PATH_MAX + 8];
+    char beta6[PATH_MAX + 16];
     snprintf(data, sizeof(data), "%s/data", node->directory);
     snprintf(home, sizeof(home), "%s/home", node->directory);
     snprintf(node->log, sizeof(node->log), "%s/console.log", node->directory);
+    snprintf(beta6, sizeof(beta6), "%s/beta6", node->directory);
     snprintf(cert, sizeof(cert), "%s/rpc-cert.pem", node->directory);
     snprintf(key, sizeof(key), "%s/rpc-key.pem", node->directory);
     if ((mkdir(node->directory, 0700) && errno != EEXIST) ||
         (mkdir(data, 0700) && errno != EEXIST) ||
-        (mkdir(home, 0700) && errno != EEXIST) || !pl_write_certificate(cert, key))
+        (mkdir(home, 0700) && errno != EEXIST) || (mkdir(beta6, 0700) && errno != EEXIST) ||
+        !pl_write_beta6_source(beta6) || !pl_write_certificate(cert, key))
         return false;
 
     char datadir[PATH_MAX + 16], rpc[32], p2p[32], https[32], fs[32];
-    char env_home[PATH_MAX + 16], env_cert[PATH_MAX + 32], env_key[PATH_MAX + 32], env_port[48];
+    char env_home[PATH_MAX + 16], env_cert[PATH_MAX + 32], env_key[PATH_MAX + 32], env_port[48], env_source[PATH_MAX + 48], env_listen[64];
     snprintf(datadir, sizeof(datadir), "-datadir=%s", data);
     snprintf(rpc, sizeof(rpc), "-rpcport=%u", node->ports.rpc);
     snprintf(p2p, sizeof(p2p), "-port=%u", node->ports.p2p);
@@ -321,11 +381,14 @@ static bool pl_start(struct pl_node *node, bool private_listeners)
     snprintf(env_cert, sizeof(env_cert), "ZCL_RPC_TLS_CERT=%s", cert);
     snprintf(env_key, sizeof(env_key), "ZCL_RPC_TLS_KEY=%s", key);
     snprintf(env_port, sizeof(env_port), "ZCL_RPC_TLS_PORT=%u", node->ports.tls);
+    snprintf(env_source, sizeof(env_source), "ZCL_BETA6_BOOTSTRAP_SOURCE=%s", beta6);
+    snprintf(env_listen, sizeof(env_listen), "ZCL_BETA6_BOOTSTRAP_LISTEN=0.0.0.0:%u", node->ports.beta6);
     char *argv[] = {(char *)PL_NODE_BIN, datadir, (char *)"-regtest", rpc, p2p, https, fs,
                     (char *)"-no-tor", (char *)"-nolegacyimport", (char *)"-nobgvalidation",
                     (char *)"-private-listeners", NULL};
     if (!private_listeners) argv[10] = NULL;
-    char *envp[] = {env_home, (char *)"PATH=/usr/bin:/bin", env_cert, env_key, env_port, NULL};
+    char *envp[] = {env_home, (char *)"PATH=/usr/bin:/bin", env_cert, env_key, env_port,
+                    env_source, env_listen, NULL};
 
     node->pid = fork();
     if (node->pid < 0) return false;
@@ -362,10 +425,14 @@ static bool pl_log_has(const struct pl_node *node, const char *needle)
     return found;
 }
 
-/* Waits until the RPC port listens and the console reports the reachability
- * decision, the last listener-related boot step. */
+/* Boot is complete when the console prints the services_running -> ready
+ * stage change, the RPC and P2P sockets are open, and the beta6 arming thread
+ * has reached its side-listener decision (it runs after boot, in the
+ * background). */
 static bool pl_wait_ready(const struct pl_node *node)
 {
+    const char *beta6 = node->private_listeners ? "not started: -private-listeners"
+                                                : "serving beta6 bootstrap snapshots on";
     long deadline = pl_now_ms() + PL_BOOT_WAIT_MS;
     struct pl_socket sockets[PL_MAX_SOCKETS];
     while (pl_now_ms() < deadline) {
@@ -373,11 +440,27 @@ static bool pl_wait_ready(const struct pl_node *node)
         if (waitpid(node->pid, &status, WNOHANG) == node->pid) return false;
         size_t n = pl_listeners(node->pid, sockets, PL_MAX_SOCKETS);
         if (pl_find(sockets, n, node->ports.rpc) && pl_find(sockets, n, node->ports.p2p) &&
-            pl_log_has(node, "Reachability:"))
+            pl_log_has(node, "[boot-stage] services_running -> ready") &&
+            pl_log_has(node, beta6))
             return true;
         pl_sleep_ms(250);
     }
     return false;
+}
+
+/* Re-reads the sockets for `ms` after readiness: a listener that opens after
+ * the RPC port, or after the last console line, still lands in the window. */
+static size_t pl_settle(struct pl_node *node, long ms, struct pl_socket *out, size_t cap)
+{
+    long deadline = pl_now_ms() + ms;
+    size_t n = pl_listeners(node->pid, out, cap);
+    while (pl_now_ms() < deadline) {
+        if (pl_public(out, n) > 0) node->public_seen++;
+        pl_sleep_ms(100);
+        n = pl_listeners(node->pid, out, cap);
+    }
+    if (pl_public(out, n) > 0) node->public_seen++;
+    return n;
 }
 
 static bool pl_connects(uint16_t port)
@@ -423,27 +506,30 @@ static struct pl_node g_node;
 static struct pl_socket g_sockets[PL_MAX_SOCKETS];
 static size_t g_count;
 
-PL_CASE(pl_node_private_loopback, "private_listeners: every socket of the running node is loopback")
+PL_CASE(pl_node_private_loopback, "private_listeners: every socket of the running node is loopback, through boot and a settle window")
     ASSERT(pl_start(&g_node, true));
     bool ready = pl_wait_ready(&g_node);
     if (!ready) printf("(console log: %s) ", g_node.log);
     ASSERT(ready);
-    g_count = pl_listeners(g_node.pid, g_sockets, PL_MAX_SOCKETS);
+    g_count = pl_settle(&g_node, 4000, g_sockets, PL_MAX_SOCKETS);
     ASSERT(g_count >= 2);
     ASSERT_EQ(pl_public(g_sockets, g_count), (size_t)0);
+    ASSERT_EQ(g_node.public_seen, 0);
     ASSERT(pl_find(g_sockets, g_count, g_node.ports.rpc) != NULL);
     ASSERT(pl_find(g_sockets, g_count, g_node.ports.p2p) != NULL);
     ASSERT(!pl_find(g_sockets, g_count, g_node.ports.p2p)->v6);
 PL_END
 
-PL_CASE(pl_node_private_absent, "private_listeners: no HTTPS, HTTP, file service or RPC TLS listener")
+PL_CASE(pl_node_private_absent, "private_listeners: no HTTPS, HTTP, file service, beta6 side or RPC TLS listener")
     ASSERT(pl_find(g_sockets, g_count, g_node.ports.https) == NULL);
     ASSERT(pl_find(g_sockets, g_count, g_node.ports.http) == NULL);
     ASSERT(pl_find(g_sockets, g_count, g_node.ports.fs) == NULL);
     ASSERT(pl_find(g_sockets, g_count, g_node.ports.tls) == NULL);
+    ASSERT(pl_find(g_sockets, g_count, g_node.ports.beta6) == NULL);
     ASSERT(!pl_connects(g_node.ports.https));
     ASSERT(!pl_connects(g_node.ports.http));
     ASSERT(!pl_connects(g_node.ports.fs));
+    ASSERT(!pl_connects(g_node.ports.beta6));
 PL_END
 
 PL_CASE(pl_node_private_reads, "private_listeners: an unauthenticated loopback client learns nothing about the wallet")
@@ -469,21 +555,44 @@ PL_CASE(pl_node_private_nat, "private_listeners: the NAT probe stays off")
     ASSERT(pl_log_has(&g_node, "Reachability: probe off (-private-listeners)"));
 PL_END
 
+PL_CASE(pl_node_private_final, "private_listeners: the sockets read again after every probe are still loopback")
+    g_count = pl_settle(&g_node, 1500, g_sockets, PL_MAX_SOCKETS);
+    ASSERT_EQ(pl_public(g_sockets, g_count), (size_t)0);
+    ASSERT_EQ(g_node.public_seen, 0);
+PL_END
+
+/* Polls until every port in `want` is open, so the control does not depend on
+ * which service opens last. */
+static bool pl_wait_ports(struct pl_node *node, const uint16_t *want, size_t count)
+{
+    long deadline = pl_now_ms() + 30000;
+    for (;;) {
+        g_count = pl_listeners(node->pid, g_sockets, PL_MAX_SOCKETS);
+        bool all = true;
+        for (size_t i = 0; i < count; i++) all = all && pl_find(g_sockets, g_count, want[i]);
+        if (all) return true;
+        if (pl_now_ms() > deadline) return false;
+        pl_sleep_ms(250);
+    }
+}
+
 PL_CASE(pl_node_public, "private_listeners: without the option the node keeps its public listeners")
     pl_stop(&g_node);
     ASSERT(pl_start(&g_node, false));
     bool ready = pl_wait_ready(&g_node);
     if (!ready) printf("(console log: %s) ", g_node.log);
     ASSERT(ready);
-    g_count = pl_listeners(g_node.pid, g_sockets, PL_MAX_SOCKETS);
-    const struct pl_socket *p2p = pl_find(g_sockets, g_count, g_node.ports.p2p);
-    ASSERT(p2p != NULL && !pl_loopback(p2p));
-    ASSERT(pl_find(g_sockets, g_count, g_node.ports.rpc) != NULL);
+    const uint16_t want[] = {g_node.ports.p2p, g_node.ports.rpc, g_node.ports.https,
+                             g_node.ports.http, g_node.ports.fs, g_node.ports.tls,
+                             g_node.ports.beta6};
+    ASSERT(pl_wait_ports(&g_node, want, 7));
     ASSERT(pl_loopback(pl_find(g_sockets, g_count, g_node.ports.rpc)));
-    ASSERT(pl_find(g_sockets, g_count, g_node.ports.https) != NULL);
-    ASSERT(pl_find(g_sockets, g_count, g_node.ports.fs) != NULL);
-    ASSERT(pl_find(g_sockets, g_count, g_node.ports.tls) != NULL);
+    ASSERT(!pl_loopback(pl_find(g_sockets, g_count, g_node.ports.p2p)));
+    ASSERT(!pl_loopback(pl_find(g_sockets, g_count, g_node.ports.https)));
+    ASSERT(!pl_loopback(pl_find(g_sockets, g_count, g_node.ports.http)));
+    ASSERT(!pl_loopback(pl_find(g_sockets, g_count, g_node.ports.fs)));
     ASSERT(!pl_loopback(pl_find(g_sockets, g_count, g_node.ports.tls)));
+    ASSERT(!pl_loopback(pl_find(g_sockets, g_count, g_node.ports.beta6)));
     ASSERT(!pl_log_has(&g_node, "probe off (-private-listeners)"));
 PL_END
 
@@ -491,7 +600,8 @@ static int test_private_listeners_node(void)
 {
     if (!pl_binary_present()) return 1;
     int failures = pl_node_private_loopback() + pl_node_private_absent() +
-                   pl_node_private_reads() + pl_node_private_nat() + pl_node_public();
+                   pl_node_private_reads() + pl_node_private_nat() + pl_node_private_final() +
+                   pl_node_public();
     pl_stop(&g_node);
     return failures;
 }

@@ -19,6 +19,10 @@ bool rpc_http_is_running(void);
 
 bool rpc_http_tls_active(void);
 
+/* Forbids the optional TLS listener that ZCL_RPC_TLS_CERT and ZCL_RPC_TLS_KEY
+ * request. Call before rpc_http_start; the setting holds until changed. */
+void rpc_http_forbid_tls(bool forbid);
+
 /* Cookie rotation — call manually for testing; background thread calls
  * automatically every ZCL_RPC_COOKIE_ROTATE_SEC seconds (default 24h). */
 void rpc_http_cookie_rotate(void);
