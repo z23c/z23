@@ -10745,6 +10745,62 @@ static int test_ephemeral_fixture_leaves_source_identity(void)
     return failures;
 }
 
+/* A build whose tree gains a file between capture-record and verify-record is
+ * refused, and the refusal names that file: a log written inside the worktree
+ * is the usual cause, and the path is the only actionable fact in the error. */
+static int test_superseded_build_names_stray_path(void)
+{
+    int failures = 0;
+    TEST("dev platform: superseded build names the stray worktree path") {
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            execlp("bash", "bash", "-c",
+                   "set -eu\n"
+                   "origin=\"$(pwd -P)\"\n"
+                   "scratch=\"$(mktemp -d "
+                   "${TMPDIR:-/tmp}/zcl-superseded.XXXXXX)\"\n"
+                   "tree=\"$scratch/tree\"\n"
+                   "cleanup() {\n"
+                   "  cd \"$origin\"\n"
+                   "  git worktree remove --force \"$tree\" "
+                   ">/dev/null 2>&1 || :\n"
+                   "  rm -rf \"$scratch\"\n"
+                   "}\n"
+                   "trap cleanup EXIT HUP INT TERM\n"
+                   "git worktree add --detach \"$tree\" HEAD >/dev/null\n"
+                   "cd \"$tree\"\n"
+                   "read -r id clean mutation <<< "
+                   "\"$(tools/dev/source-identity.sh capture-record)\"\n"
+                   "printf 'build output\\n' > stray-build-output.txt\n"
+                   "if tools/dev/source-identity.sh verify-record \"$id\" "
+                   "\"$clean\" \"$mutation\" >/dev/null 2> \"$scratch/err\"; then\n"
+                   "  echo 'verify-record accepted a tree changed after"
+                   " capture' >&2\n"
+                   "  exit 1\n"
+                   "fi\n"
+                   "grep -q 'source build superseded' \"$scratch/err\" || {\n"
+                   "  cat \"$scratch/err\" >&2\n"
+                   "  exit 1\n"
+                   "}\n"
+                   "grep -q 'stray-build-output.txt' \"$scratch/err\" || {\n"
+                   "  cat \"$scratch/err\" >&2\n"
+                   "  echo 'superseded build did not name the stray path'"
+                   " >&2\n"
+                   "  exit 1\n"
+                   "}\n",
+                   (char *)NULL);
+            _exit(127);
+        }
+        int status = 0;
+        ASSERT(waitpid(child, &status, 0) == child);
+        ASSERT(WIFEXITED(status));
+        ASSERT(WEXITSTATUS(status) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── Resident watcher session: identity and a stop that leaves nothing ──
  *
  * A stand-in with the resident watcher's process shape: a setsid() session
@@ -12151,6 +12207,7 @@ static const struct dp_shard_case g_dp_cases[] = {
     DP_CASE(test_ephemeral_fixture_leaves_source_identity, 5),
     DP_CASE(test_native_identity_tokens_match_oracle, 6),
     DP_CASE(test_cold_epoch_integrity_gate, 0),
+    DP_CASE(test_superseded_build_names_stray_path, 0),
     DP_CASE(test_menu_and_search, 6),
     DP_CASE(test_change_classification, 6),
     DP_CASE(test_change_plan_closure, 6),
@@ -12282,7 +12339,7 @@ static int test_dev_platform_platform_arm(void)
         owned += counts[i];
         nonempty &= counts[i] > 0;
     }
-    if (DP_CASE_COUNT != 74u + (unsigned)(
+    if (DP_CASE_COUNT != 75u + (unsigned)(
 #if defined(__APPLE__)
             1
 #else

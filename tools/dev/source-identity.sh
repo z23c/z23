@@ -1204,6 +1204,38 @@ fail_racy_diag()
     exit $RACY_EXIT
 }
 
+# Same shape as fail_racy_diag() for a verdict a retry cannot change: print the
+# message, run a diagnostic, then exit 3.
+fail_diag()
+{
+    local msg="$1"
+    shift
+    echo "source-identity: $msg" >&2
+    "$@" || true
+    exit 3
+}
+
+# Names up to 20 worktree paths that differ from HEAD or are untracked, so a
+# stray file (typically a log written inside the tree during the build) is
+# visible in the failure itself. Uses the same Git plumbing as the capture.
+# Runs from $ROOT (see the cd above).
+report_worktree_changes()
+{
+    local paths total
+    paths="$( {
+        git diff --name-only --no-renames -z HEAD --
+        git ls-files --others --exclude-standard -z --
+    } 2>/dev/null | tr '\0' '\n' | LC_ALL=C sort -u)" || paths=""
+    if [ -n "$paths" ]; then
+        total="$(printf '%s\n' "$paths" | wc -l | tr -d ' ')"
+        printf '%s\n' "$paths" | head -n 20 |
+            sed 's/^/source-identity:   /' >&2
+        [ "$total" -le 20 ] ||
+            echo "source-identity:   $total entries differ" >&2
+    fi
+    echo "source-identity: a file changed in the worktree during the build; write logs outside the worktree" >&2
+}
+
 # Diff two "path\0type\0meta\0" mutation-record snapshots that were both
 # derived from the SAME unchanged $WORK/source-paths (so they list identical
 # paths in identical order) and report up to 20 differing entries, naming
@@ -1512,7 +1544,8 @@ case "$MODE" in
         if [ "${actual,,}" != "${EXPECTED,,}" ] ||
            [ "$actual_clean" != "$EXPECTED_CLEAN" ] ||
            [ "${actual_mutation,,}" != "${EXPECTED_MUTATION,,}" ]; then
-            fail "source build superseded: expected=${EXPECTED,,}/clean=${EXPECTED_CLEAN}/mutation=${EXPECTED_MUTATION,,} actual=${actual,,}/clean=${actual_clean}/mutation=${actual_mutation,,}"
+            fail_diag "source build superseded: expected=${EXPECTED,,}/clean=${EXPECTED_CLEAN}/mutation=${EXPECTED_MUTATION,,} actual=${actual,,}/clean=${actual_clean}/mutation=${actual_mutation,,}" \
+                report_worktree_changes
         fi
         printf '%s %s %s\n' "${actual,,}" "$actual_clean" \
             "${actual_mutation,,}"
