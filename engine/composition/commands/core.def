@@ -1166,18 +1166,21 @@ ZCL_COMMAND_READY_COMMAND(
     "core.wallet.shielded.send", "core.wallet.shielded", "",
     "Send a shielded payment",
     "Plan/commit shielded spend: without confirm, a non-mutating plan "
-    "bound to wallet_scope, from, to, exact amount, memo, and idempotency "
-    "key; with confirm:true, the synchronous z_sendmany transaction id "
-    "(stage=committed). memo attaches a UTF-8 Sapling memo to a "
+    "bound to wallet_scope, from, to, exact amount, the wallet fee, memo, "
+    "and idempotency key; with confirm:true, the synchronous z_sendmany "
+    "transaction id (stage=committed). memo attaches a UTF-8 Sapling memo to a "
     "shielded recipient (memo_hex for raw bytes; memo_hex wins if both "
     "are given) and is echoed back as memo_attached — this is how a "
     "payment carries an application binding such as a store order id. "
-    "idempotency_key correlates plan to commit; it "
-    "is not node-side deduplication.", 0,
+    "idempotency_key is required and is recorded durably by the node before "
+    "anything is built: a repeat of the key returns the earlier txid "
+    "(replayed=true), SEND_IN_PROGRESS, or SEND_OUTCOME_UNKNOWN, and never "
+    "sends again; the same key with other parameters is refused. The commit "
+    "refuses with FEE_CHANGED when the wallet fee differs from the plan.", 0,
     "shielded,send,z_sendmany,memo",
     "zcl.core_shielded_send.input.v1", "zcl.shielded_send.v1",
-    "wallet_scope,from,to,amount,memo,memo_hex,idempotency_key,confirm", "",
-    "z23 core wallet shielded send --input='{\"wallet_scope\":\"dev\",\"from\":\"zs1..\",\"to\":\"zs1..\",\"amount\":\"0.01000000\"}'",
+    "wallet_scope,from,to,amount,fee_zat,memo,memo_hex,idempotency_key,plan_token,confirm", "",
+    "z23 core wallet shielded send --input='{\"wallet_scope\":\"dev\",\"from\":\"zs1..\",\"to\":\"zs1..\",\"amount\":\"0.01000000\",\"idempotency_key\":\"order-2026-0001\"}'",
     ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
     ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
     ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_HIGH,

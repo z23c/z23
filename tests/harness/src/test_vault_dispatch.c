@@ -243,6 +243,7 @@ static struct json_value vd_shielded_input(void)
     json_push_kv(&input, "amount", &amt);
     json_push_kv_str(&input, "wallet_scope", "dev");
     json_push_kv_str(&input, "memo_hex", "aabb");
+    json_push_kv_str(&input, "idempotency_key", "vd-shielded-0001");
     return input;
 }
 

@@ -247,6 +247,7 @@ static const struct cr_int_bound *cr_find_int_bound(const char *key)
         { "price_per_mb_zat", 0, 2100000000000000LL },
         { "recipient_value_zat", 1, 2100000000000000LL },
         { "maximum_fee_zat", 0, 2100000000000000LL },
+        { "fee_zat", 0, 2100000000000000LL },
         { "concurrency", 1, 50 },
         { "tokens_per_purchase", 0, INT64_MAX },
         { "timeout_ms", 1, 300000 },

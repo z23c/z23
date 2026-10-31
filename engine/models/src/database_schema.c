@@ -378,6 +378,18 @@ static const char *SCHEMA[] = {
     "height INTEGER PRIMARY KEY,"
     "sha3_hash BLOB NOT NULL)",
 
+    /* Once-only record of keyed wallet sends (models/wallet_send_once.h).
+     * Created idempotently on every open, so it needs no version step. */
+    "CREATE TABLE IF NOT EXISTS wallet_send_once ("
+    "key_hash BLOB PRIMARY KEY CHECK(length(key_hash)=32),"
+    "digest BLOB NOT NULL CHECK(length(digest)=32),"
+    "state INTEGER NOT NULL CHECK(state BETWEEN 1 AND 3),"
+    "txid BLOB CHECK(txid IS NULL OR length(txid)=32),"
+    "created_at INTEGER NOT NULL CHECK(created_at>0),"
+    "updated_at INTEGER NOT NULL CHECK(updated_at>=created_at))",
+    "CREATE INDEX IF NOT EXISTS idx_wallet_send_once_created"
+    " ON wallet_send_once(created_at)",
+
     /* Node state */
     "CREATE TABLE IF NOT EXISTS node_state ("
     "key TEXT PRIMARY KEY,value BLOB)",

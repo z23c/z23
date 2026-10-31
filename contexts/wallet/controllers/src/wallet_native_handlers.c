@@ -13,6 +13,7 @@
 
 #include "controllers/wallet_native_handlers.h"
 #include "controllers/wallet_shielded_controller.h"
+#include "controllers/wallet_send_once.h"
 
 #include "json/json.h"
 #include "controllers/rpc_client.h"
@@ -50,11 +51,11 @@
  * with `confirm:true` broadcasts or reveals. Bound in
  * engine/composition/commands/core.def.
  *
- * `idempotency_key` is a caller-supplied correlation tag: it is folded into
- * the plan token and echoed on the committed reply, so a plan and its commit
- * are provably the same intent. It is NOT node-side deduplication — the
- * wallet RPC layer has no replay ledger, so two identical confirmed commits
- * broadcast twice. */
+ * `idempotency_key` is required on the shielded send. It is folded into the
+ * plan token with the fee, and the commit passes it to z_sendmany, where the
+ * node records it durably before building (controllers/wallet_send_once.h):
+ * a repeat of the key never builds or broadcasts again. The commit refuses
+ * before any RPC when the wallet fee differs from the one the plan quoted. */
 
 #define WNH_TAG "native.wallet"
 
@@ -618,25 +619,6 @@ static bool wnh_shielded_fee_zat(struct zcl_command_reply *reply,
     return ok;
 }
 
-/* Plan quote: the fee the commit will pay and the exact amount plus fee. */
-static bool wnh_shielded_quote(struct zcl_command_reply *reply,
-                               CAmount amount_zats, CAmount *fee_out,
-                               CAmount *total_out)
-{
-    if (!wnh_shielded_fee_zat(reply, fee_out)) {
-        LOG_WARN(WNH_TAG, "shielded quote: wallet fee unavailable");
-        return false;
-    }
-    *total_out = amount_zats + *fee_out;
-    if (!MoneyRange(*total_out)) {
-        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_AMOUNT",
-                 "amount plus the wallet fee exceeds the money range",
-                 "amount");
-        return false;
-    }
-    return true;
-}
-
 static void wnh_emit_shielded_quote(struct zcl_command_reply *reply,
                                     CAmount amount_zats, CAmount fee_zats,
                                     CAmount total_zats)
@@ -673,7 +655,10 @@ struct wnh_shielded_send_in {
     const char *idem;
     const char *memo;
     const char *memo_hex;
+    const char *plan_token;
     CAmount amount_zats;
+    CAmount fee_zats;      /* quoted at plan; carried by the commit input */
+    bool has_fee;
     char amount[32];
 };
 
@@ -715,6 +700,48 @@ static bool wnh_shielded_memos_valid(struct zcl_command_reply *reply,
     return true;
 }
 
+/* The key is required: it is what makes a repeated request safe. */
+static bool wnh_shielded_key_ok(struct zcl_command_reply *reply,
+                                const char *idem)
+{
+    if (!idem || !idem[0]) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "MISSING_IDEMPOTENCY_KEY",
+                 "idempotency_key is required: use one stable key per payment "
+                 "request and repeat it unchanged when retrying that request",
+                 "idempotency_key");
+        return false;
+    }
+    if (!wallet_send_once_key_valid(idem)) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_IDEMPOTENCY_KEY",
+                 "idempotency_key must be 1 to 128 characters of letters, "
+                 "digits, '.', '_', ':' or '-'",
+                 "idempotency_key");
+        return false;
+    }
+    return true;
+}
+
+/* The fee the plan quoted, when the caller supplies it (the commit does). */
+static bool wnh_shielded_fee_input(struct zcl_command_reply *reply,
+                                   const struct zcl_command_request *request,
+                                   struct wnh_shielded_send_in *in)
+{
+    const struct json_value *fee = json_get(request->input, "fee_zat");
+    in->has_fee = false;
+    if (!fee)
+        return true;
+    if (fee->type != JSON_INT || json_get_int(fee) < 0 ||
+        !MoneyRange(json_get_int(fee))) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_FEE",
+                 "fee_zat must be the non-negative fee from the plan",
+                 "fee_zat");
+        return false;
+    }
+    in->fee_zats = json_get_int(fee);
+    in->has_fee = true;
+    return true;
+}
+
 /* Read and validate every shielded.send input field, in the order the
  * handler has always checked them. */
 static bool wnh_shielded_send_inputs(struct zcl_command_reply *reply,
@@ -746,12 +773,10 @@ static bool wnh_shielded_send_inputs(struct zcl_command_reply *reply,
     }
     (void)in->amount_zats; /* exact range proof; the RPC consumes decimal text */
     in->idem = json_get_str(json_get(request->input, "idempotency_key"));
-    if (in->idem && strlen(in->idem) > 128) {
-        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_IDEMPOTENCY_KEY",
-                 "idempotency_key must be at most 128 characters",
-                 "idempotency_key");
+    if (!wnh_shielded_key_ok(reply, in->idem) ||
+        !wnh_shielded_fee_input(reply, request, in))
         return false;
-    }
+    in->plan_token = json_get_str(json_get(request->input, "plan_token"));
     return wnh_shielded_memos_valid(reply, request, &in->memo, &in->memo_hex);
 }
 
@@ -766,12 +791,12 @@ static bool wnh_shielded_commit_input(const struct wnh_shielded_send_in *in,
     (void)json_push_kv_str(&ci, "from", in->from);
     (void)json_push_kv_str(&ci, "to", in->to);
     (void)json_push_kv_str(&ci, "amount", in->amount);
+    (void)json_push_kv_int(&ci, "fee_zat", in->fee_zats);
     if (in->memo_hex)
         (void)json_push_kv_str(&ci, "memo_hex", in->memo_hex);
     else if (in->memo)
         (void)json_push_kv_str(&ci, "memo", in->memo);
-    if (in->idem && in->idem[0])
-        (void)json_push_kv_str(&ci, "idempotency_key", in->idem);
+    (void)json_push_kv_str(&ci, "idempotency_key", in->idem);
     (void)json_push_kv_bool(&ci, "confirm", true);
     bool encoded = wnh_commit_input(&ci, commit, commit_size);
     json_free(&ci);
@@ -785,9 +810,14 @@ static void wnh_shielded_send_plan(struct zcl_command_reply *reply,
                                    const struct wnh_shielded_send_in *in,
                                    const char *token, const char *commit)
 {
-    CAmount quote_fee = 0, quote_total = 0;
-    if (!wnh_shielded_quote(reply, in->amount_zats, &quote_fee, &quote_total))
+    CAmount quote_fee = in->fee_zats;
+    CAmount quote_total = in->amount_zats + quote_fee;
+    if (!MoneyRange(quote_total)) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_AMOUNT",
+                 "amount plus the wallet fee exceeds the money range",
+                 "amount");
         return;
+    }
     (void)json_push_kv_str(&reply->data, "wallet_scope", in->wallet_scope);
     (void)json_push_kv_str(&reply->data, "from", in->from);
     (void)json_push_kv_str(&reply->data, "to", in->to);
@@ -816,38 +846,124 @@ static char *wnh_shielded_send_params(const struct wnh_shielded_send_in *in)
     json_set_array(&recip_arr);
     (void)json_push_back(&recip_arr, &recip);
     rpc_arg_builder_push_value(&p, &recip_arr);
+    rpc_arg_builder_push_int(&p, 1);
+    char fee_text[32];
+    if (!wnh_zat_text(in->fee_zats, fee_text)) {
+        json_free(&recip);
+        json_free(&recip_arr);
+        return NULL;
+    }
+    /* minconf, the quoted fee the node re-checks, and the idempotency key
+     * the node records before it builds. */
+    rpc_arg_builder_push_str(&p, fee_text);
+    rpc_arg_builder_push_str(&p, in->idem);
     json_free(&recip);
     json_free(&recip_arr);
     return rpc_arg_builder_to_json(&p);
 }
 
-/* Render the committed reply from a successful z_sendmany body. */
+/* Refuse a send whose node-side record says it must not run again. Returns
+ * true when the body is a committed send to render. */
+static bool wnh_shielded_send_state_ok(struct zcl_command_reply *reply,
+                                       const struct json_value *body)
+{
+    const char *state = json_get_str(json_get(body, "state"));
+    if (state && strcmp(state, "committed") == 0)
+        return true;
+    if (state && strcmp(state, WALLET_SEND_ONCE_STATE_RELEASED) == 0) {
+        char why[160];
+        const char *node = json_get_str(json_get(body, "message"));
+        (void)snprintf(why, sizeof(why),
+                       "refused before any send was recorded; nothing was sent "
+                       "and the idempotency_key is free to retry: %s",
+                       node ? node : "no reason given");
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, WALLET_SEND_ONCE_CODE_RELEASED,
+                 why, "z_sendmany");
+    } else if (state && strcmp(state, "in_progress") == 0) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_TRANSIENT, "SEND_IN_PROGRESS",
+                 "a send with this idempotency_key is still running; repeat "
+                 "the same request later to read its result", "z_sendmany");
+    } else if (state && strcmp(state, "outcome_unknown") == 0) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "SEND_OUTCOME_UNKNOWN",
+                 "a send with this idempotency_key started but its result was "
+                 "not recorded; nothing was sent again. Check the wallet "
+                 "transaction list before making a new payment with a new key",
+                 "z_sendmany");
+    } else if (state && strcmp(state, "key_conflict") == 0) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "IDEMPOTENCY_KEY_REUSED",
+                 "this idempotency_key was already used for a different "
+                 "request; use a new key for a different payment",
+                 "idempotency_key");
+    } else {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "SHIELDED_SEND_FAILED",
+                 "z_sendmany did not return a transaction result",
+                 "z_sendmany");
+    }
+    return false;
+}
+
+/* Render the committed reply from a keyed z_sendmany answer
+ * {"state","txid","replayed"}. A replay reports the earlier transaction and
+ * mutated=false: this call moved no funds. */
 static bool wnh_shielded_send_committed(struct zcl_command_reply *reply,
                                         const struct json_value *body,
                                         const struct wnh_shielded_send_in *in,
-                                        CAmount fee_zats, const char *token)
+                                        const char *token)
 {
-    /* z_sendmany is synchronous here and returns the broadcast txid. */
-    const char *txid = wnh_string_result(body);
+    const char *txid = json_get_str(json_get(body, "txid"));
+    if (!wnh_shielded_send_state_ok(reply, body))
+        return false; // raw-return-ok:state_ok logged the refusal
     if (!txid || strlen(txid) != 64 || !IsHex(txid)) {
-        const char *failure = txid && txid[0]
-            ? txid
-            : "z_sendmany did not return a transaction result";
         wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "SHIELDED_SEND_FAILED",
-                 failure, "z_sendmany");
+                 "z_sendmany did not return a transaction result",
+                 "z_sendmany");
         return false;
     }
+    bool replayed = json_get_bool(json_get(body, "replayed"));
     (void)json_push_kv_str(&reply->data, "stage", "committed");
     (void)json_push_kv_bool(&reply->data, "committed", true);
+    (void)json_push_kv_bool(&reply->data, "replayed", replayed);
     (void)json_push_kv_str(&reply->data, "txid", txid);
     (void)json_push_kv_str(&reply->data, "wallet_scope", in->wallet_scope);
     (void)json_push_kv_str(&reply->data, "from", in->from);
     (void)json_push_kv_str(&reply->data, "to", in->to);
     (void)json_push_kv_str(&reply->data, "amount", in->amount);
-    (void)json_push_kv_int(&reply->data, "fee_zat", fee_zats);
+    (void)json_push_kv_int(&reply->data, "fee_zat", in->fee_zats);
     wnh_emit_shielded_echo(reply, in->memo, in->memo_hex, in->idem);
     (void)json_push_kv_str(&reply->data, "plan_token", token);
-    reply->error.mutated = true;
+    reply->error.mutated = !replayed;
+    return true;
+}
+
+/* The plan reads the wallet fee and carries it in the commit input. The
+ * commit re-reads it and refuses, before any RPC that could build, when it
+ * differs from the quoted fee. */
+static bool wnh_shielded_fee_bound(struct zcl_command_reply *reply,
+                                   struct wnh_shielded_send_in *in,
+                                   bool confirm)
+{
+    CAmount current = 0;
+    if (!wnh_shielded_fee_zat(reply, &current)) {
+        LOG_WARN(WNH_TAG, "shielded send: wallet fee unavailable");
+        return false;
+    }
+    if (!confirm) {
+        in->fee_zats = current;
+        in->has_fee = true;
+        return true;
+    }
+    if (!in->has_fee) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "PLAN_REQUIRED",
+                 "commit with the commit_input from the plan; fee_zat is "
+                 "missing", "fee_zat");
+        return false;
+    }
+    if (in->fee_zats != current) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "FEE_CHANGED",
+                 "the wallet fee changed since the plan; nothing was sent. "
+                 "Plan the send again", "fee_zat");
+        return false;
+    }
     return true;
 }
 
@@ -856,6 +972,9 @@ void zcl_native_handle_wallet_shielded_send(
 {
     struct wnh_shielded_send_in in = { 0 };
     if (!wnh_shielded_send_inputs(reply, request, &in))
+        return;
+    bool confirm = json_get_bool_or(request->input, "confirm", false);
+    if (!wnh_shielded_fee_bound(reply, &in, confirm))
         return;
     char commit[2048];
     if (!wnh_shielded_commit_input(&in, commit, sizeof(commit))) {
@@ -866,19 +985,18 @@ void zcl_native_handle_wallet_shielded_send(
     }
     char token[17];
     wnh_plan_token(token, "shielded-send", commit, "");
-    bool confirm = json_get_bool_or(request->input, "confirm", false);
-
     if (!confirm) {
         wnh_shielded_send_plan(reply, request->spec->path, &in, token,
                                commit);
         return;
     }
-
-    /* The commit pays the wallet fee the plan quotes. Read it before
-     * z_sendmany so an unreadable fee refuses before any broadcast. */
-    CAmount fee_zats = 0;
-    if (!wnh_shielded_fee_zat(reply, &fee_zats))
+    if (in.plan_token && in.plan_token[0] &&
+        strcmp(in.plan_token, token) != 0) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "PLAN_TOKEN_MISMATCH",
+                 "the request differs from the plan it names; nothing was "
+                 "sent", "plan_token");
         return;
+    }
 
     char *params = wnh_shielded_send_params(&in);
     if (!params) {
@@ -896,10 +1014,7 @@ void zcl_native_handle_wallet_shielded_send(
     free(params);
     if (!ok)
         return;
-    if (!wnh_shielded_send_committed(reply, &body, &in, fee_zats, token)) {
-        json_free(&body);
-        return;
-    }
+    (void)wnh_shielded_send_committed(reply, &body, &in, token);
     json_free(&body);
 }
 

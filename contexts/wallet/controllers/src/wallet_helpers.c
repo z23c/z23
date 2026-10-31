@@ -5,6 +5,7 @@
 
 #include "controllers/wallet_helpers.h"
 #include "controllers/sync_controller.h"
+#include "controllers/wallet_send_once.h"
 #include "views/format_helpers.h"
 #include "wallet/wallet.h"
 #include "wallet/wallet_sqlite.h"
@@ -183,6 +184,10 @@ struct zcl_result wallet_commit_from_context(
         .main_state = ctx->main_state,
         .params = chain_params_get(),
     };
+    /* Inside a keyed send, make the txid durable before admission. */
+    struct zcl_result recorded = wallet_send_once_before_commit(&wtx->tx.hash);
+    if (!recorded.ok)
+        return recorded;
     return wallet_commit_transaction(ctx->wallet, wtx, &admission);
 }
 

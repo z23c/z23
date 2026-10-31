@@ -946,8 +946,9 @@ static bool wallet_stub_send_rpc(const char *method, const char *params_json,
                        sizeof(g_wallet_z_sendmany_params), "%s",
                        params_json ? params_json : "");
         *reply = strdup(
+            "{\"state\":\"committed\",\"replayed\":false,\"txid\":"
             "\"cc11bb22cc33dd44ee55ff66aa77bb88"
-            "cc99dd00ee11ff22aa33bb44cc55dd88\"");
+            "cc99dd00ee11ff22aa33bb44cc55dd88\"}");
         return true;
     }
     return false;
@@ -1864,7 +1865,10 @@ static int test_wallet_mutating_native_e2e(void)
         ASSERT(json_read(&sent_params, g_wallet_z_sendmany_params,
                          strlen(g_wallet_z_sendmany_params)));
         ASSERT(sent_params.type == JSON_ARR);
-        ASSERT_EQ(json_size(&sent_params), 2);
+        ASSERT_EQ(json_size(&sent_params), 5);
+        ASSERT_EQ(json_get_int(json_at(&sent_params, 2)), 1);
+        ASSERT_STR_EQ(json_get_str(json_at(&sent_params, 3)), "0.00000250");
+        ASSERT_STR_EQ(json_get_str(json_at(&sent_params, 4)), "lab-1");
         ASSERT_STR_EQ(json_get_str(json_at(&sent_params, 0)),
                       "zs1StubSource");
         const struct json_value *sent_recipients = json_at(&sent_params, 1);
@@ -1891,6 +1895,7 @@ static int test_wallet_mutating_native_e2e(void)
         (void)json_push_kv_str(&shield_plan, "from", "zs1LabSource");
         (void)json_push_kv_str(&shield_plan, "to", "zs1LabRecipient");
         (void)json_push_kv_str(&shield_plan, "amount", "0.00001000");
+        (void)json_push_kv_str(&shield_plan, "idempotency_key", "lab-test-1");
         shield_req.input = &shield_plan;
         zcl_command_reply_init(&reply, shield_spec->output_schema);
         zcl_native_handle_wallet_shielded_send(&shield_req, &reply);
@@ -1912,6 +1917,7 @@ static int test_wallet_mutating_native_e2e(void)
         (void)json_push_kv_str(&shield_plan, "from", "zs1StubSource");
         (void)json_push_kv_str(&shield_plan, "to", "zs1StubRecipient");
         (void)json_push_kv_str(&shield_plan, "amount", "0.00000001");
+        (void)json_push_kv_str(&shield_plan, "idempotency_key", "lab-memo-1");
         (void)json_push_kv_str(&shield_plan, "memo_hex", max_memo_hex);
         shield_req.input = &shield_plan;
         zcl_command_reply_init(&reply, shield_spec->output_schema);

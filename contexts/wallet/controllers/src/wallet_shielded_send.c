@@ -9,6 +9,7 @@
 
 #include "controllers/wallet_shielded_internal.h"
 #include "wallet/wallet_lock.h"
+#include "controllers/wallet_send_once.h"
 
 
 /* Sapling-vs-transparent routing for one address, against the ACTIVE chain's
@@ -742,10 +743,16 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
     return true;
 }
 
+static bool z_sendmany_plain(const struct json_value *params, bool help,
+                             struct json_value *result)
+{
+    return z_sendmany_run(params, help, NULL, result);
+}
+
 bool rpc_z_sendmany(const struct json_value *params, bool help,
                     struct json_value *result)
 {
-    return z_sendmany_run(params, help, NULL, result);
+    return wallet_send_once_dispatch(params, help, z_sendmany_plain, result);
 }
 
 bool z_sendmany_prepare(const struct json_value *params,
