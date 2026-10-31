@@ -697,9 +697,11 @@ static int t_undeclared_import_refused_before_map(void)
 
         /* Results are computed first; the temp file, temp dir and registry
          * state are released before any assertion, so a failure leaks none. */
-        char dir[PATH_MAX];
+        /* The loader confines images to /tmp or a build/hotswap dir, and the
+         * fixture lint keeps new tests off bare /tmp: mint beside the images. */
+        char dir[] = "build/hotswap/hs_import_policy_XXXXXX";
         char bad[PATH_MAX] = {0};
-        bool have_dir = test_mkdtemp(dir, sizeof(dir), "hs_import_policy") != NULL;
+        bool have_dir = mkdtemp(dir) != NULL;
         bool wrote = have_dir && rb_write_bad_image(dir, bad);
 
         struct hotswap_activate_report refused = {0}, ok = {0};
