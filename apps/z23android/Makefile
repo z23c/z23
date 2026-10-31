@@ -102,7 +102,7 @@ test-voice:
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/speech-client.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/speech-client-test' "$$scratch"
 
-test: prepare-quirc test-bridge test-voice test-host test-dexgen test-watch test-scan test-qr-window
+test: prepare-quirc test-bridge test-voice test-host test-dexgen test-watch test-scan test-qr-window test-payment
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' $(QUIRC_FLAGS) \
 	  tests/fleet_test.c fleet.c ../../vendor/qrcodegen/qrcodegen.c $(QUIRC_SOURCES) \
 	  -lm -o '$(BUILD_DIR)/fleet-test'
@@ -131,7 +131,6 @@ test: prepare-quirc test-bridge test-voice test-host test-dexgen test-watch test
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/bridge-test.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/bridge-client-test' "$$scratch"
 
-
 QR_WINDOW_SOURCES := bridge/qr_window.c ../../vendor/qrcodegen/qrcodegen.c
 .PHONY: qr-window test-qr-window test-scan
 qr-window:
@@ -149,6 +148,13 @@ test-scan:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/scan_test.c scan.c fleet.c speech_client.c bridge_client.c voice.c ../../vendor/qrcodegen/qrcodegen.c $(SPEECH_JSON) -o '$(BUILD_DIR)/scan-test'
 	'$(BUILD_DIR)/scan-test'
+
+test-payment:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../contexts/commons/packages/zutf8/include \
+	  tests/payment_code_test.c payment_code.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
+	  -o '$(BUILD_DIR)/payment-code-test'
+	'$(BUILD_DIR)/payment-code-test'
 
 check-node:
 	@test -x '$(NODE_BIN)' || { echo 'Build the Android node first' >&2; exit 1; }
