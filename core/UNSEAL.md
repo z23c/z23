@@ -448,3 +448,7 @@ later lane flips it HARD.
 - 2026-10-31T10:22:30Z — REASON: refactor(net.c): split 5 function(s) under the complexity cap;  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: 0e8727eac9e97f10034953a2f611d6ab8d1ac347ff82ecff48c1254d27233d3f
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T10:23:46Z — REASON: net.c: move ban persistence (banlist.dat) to a sibling file so the complexity split fits the file-size pin;   behaviour-preserving
+  old ROOT: 35823679a85ecb52ed992815597e41e6c5375f2dbc06e669e2a0c70160f83595
+  by: owner unseal ritual (make core-unseal)
