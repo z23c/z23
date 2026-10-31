@@ -393,6 +393,32 @@ static enum anchor_kv_lookup_result anchor_kv_get_load_row(
     return ANCHOR_KV_FOUND;
 }
 
+enum anchor_kv_get_prep {
+    ANCHOR_GET_PREP_OK,
+    ANCHOR_GET_PREP_SQL_FAILED,
+    ANCHOR_GET_PREP_PREPARE_FAILED,
+    ANCHOR_GET_PREP_BIND_FAILED,
+};
+
+/* Build, prepare and bind the by-anchor SELECT; the caller logs and owns
+ * finalize. */
+static enum anchor_kv_get_prep anchor_kv_get_prepare_stmt(
+    sqlite3 *db, int pool, const struct uint256 *root, sqlite3_stmt **s)
+{
+    char sql[128];
+    int n = snprintf(sql, sizeof(sql),
+                     "SELECT height,tree FROM %s WHERE anchor=?",
+                     anchor_table(pool));
+    if (n <= 0 || (size_t)n >= sizeof(sql))
+        return ANCHOR_GET_PREP_SQL_FAILED;
+    if (sqlite3_prepare_v2(db, sql, -1, s, NULL) != SQLITE_OK)
+        return ANCHOR_GET_PREP_PREPARE_FAILED;
+    if (sqlite3_bind_blob(*s, 1, root->data, 32, SQLITE_TRANSIENT)
+            != SQLITE_OK)
+        return ANCHOR_GET_PREP_BIND_FAILED;
+    return ANCHOR_GET_PREP_OK;
+}
+
 enum anchor_kv_lookup_result anchor_kv_get(
     sqlite3 *db, int pool, const struct uint256 *root,
     struct incremental_merkle_tree *tree_out, int64_t *height_out)
@@ -407,23 +433,20 @@ enum anchor_kv_lookup_result anchor_kv_get(
         return ANCHOR_KV_FOUND;
     }
 
-    char sql[128];
-    int n = snprintf(sql, sizeof(sql),
-                     "SELECT height,tree FROM %s WHERE anchor=?",
-                     anchor_table(pool));
-    if (n <= 0 || (size_t)n >= sizeof(sql))
-        return ANCHOR_KV_ERROR;
     sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) {
+    switch (anchor_kv_get_prepare_stmt(db, pool, root, &s)) {
+    case ANCHOR_GET_PREP_SQL_FAILED:
+        return ANCHOR_KV_ERROR;
+    case ANCHOR_GET_PREP_PREPARE_FAILED:
         LOG_WARN(ANCHOR_SUBSYS, "get prepare failed pool=%d: %s", pool,
                  sqlite3_errmsg(db));
         return ANCHOR_KV_ERROR;
-    }
-    if (sqlite3_bind_blob(s, 1, root->data, 32, SQLITE_TRANSIENT)
-            != SQLITE_OK) {
+    case ANCHOR_GET_PREP_BIND_FAILED:
         LOG_WARN(ANCHOR_SUBSYS, "get bind failed: %s", sqlite3_errmsg(db));
         sqlite3_finalize(s);
         return ANCHOR_KV_ERROR;
+    default:
+        break;
     }
     enum anchor_kv_lookup_result result = ANCHOR_KV_MISSING;
     int rc = sqlite3_step(s);  // raw-sql-ok:progress-kv-kernel-store
@@ -454,6 +477,20 @@ static enum anchor_kv_lookup_result anchor_kv_latest_load_row(
         return ANCHOR_KV_ERROR;
     if (root_out) *root_out = root;
     if (height_out) *height_out = sqlite3_column_int64(s, 1);
+    return ANCHOR_KV_FOUND;
+}
+
+/* History-gate tail for latest_tree: on MISSING publish the pool's implicit
+ * empty tree. */
+static enum anchor_kv_lookup_result anchor_kv_latest_empty_history(
+    sqlite3 *db, int pool, struct incremental_merkle_tree *tree_out,
+    struct uint256 *root_out)
+{
+    enum anchor_kv_lookup_result result = anchor_kv_history_gate(db, pool);
+    if (result != ANCHOR_KV_MISSING)
+        return result;
+    anchor_tree_init(pool, tree_out);
+    if (root_out) incremental_tree_root(tree_out, root_out);
     return ANCHOR_KV_FOUND;
 }
 
@@ -501,12 +538,7 @@ enum anchor_kv_lookup_result anchor_kv_latest_tree(
     if (result != ANCHOR_KV_HISTORY_INCOMPLETE)
         return result;
 
-    result = anchor_kv_history_gate(db, pool);
-    if (result != ANCHOR_KV_MISSING)
-        return result;
-    anchor_tree_init(pool, tree_out);
-    if (root_out) incremental_tree_root(tree_out, root_out);
-    return ANCHOR_KV_FOUND;
+    return anchor_kv_latest_empty_history(db, pool, tree_out, root_out);
 }
 
 bool anchor_kv_add_tree(sqlite3 *db, int pool,
@@ -711,6 +743,12 @@ static int anchor_kv_step_zero_update(sqlite3_stmt *st, int64_t boundary,
     return *bound_ok ? sqlite3_step(st) : SQLITE_ERROR; // raw-sql-ok:progress-kv-kernel-store
 }
 
+/* True when the zeroing UPDATE bound, stepped DONE and changed both rows. */
+static bool anchor_kv_zero_update_applied(sqlite3 *db, bool bound_ok, int rc)
+{
+    return bound_ok && rc == SQLITE_DONE && sqlite3_changes(db) == 2;
+}
+
 bool anchor_kv_publish_full_replay_complete_in_tx(
     sqlite3 *db, int64_t expected_boundary)
 {
@@ -758,7 +796,7 @@ bool anchor_kv_publish_full_replay_complete_in_tx(
     bool ok = false;
     int rc = anchor_kv_step_zero_update(st, expected_boundary, &ok);
     sqlite3_finalize(st);
-    if (!ok || rc != SQLITE_DONE || sqlite3_changes(db) != 2) {
+    if (!anchor_kv_zero_update_applied(db, ok, rc)) {
         LOG_WARN(ANCHOR_SUBSYS,
                  "publish complete update failed rc=%d changed=%d: %s",
                  rc, sqlite3_changes(db), sqlite3_errmsg(db));
@@ -879,3 +917,4 @@ bool anchor_kv_seed_frontier_row(sqlite3 *db, int pool,
     }
     return true;
 }
+
