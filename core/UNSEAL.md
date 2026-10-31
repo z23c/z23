@@ -392,3 +392,7 @@ later lane flips it HARD.
 - 2026-10-31T05:06:36Z — REASON: connman_dialer.c: split 3 function(s) under the complexity cap;  behaviour-preserving
   old ROOT: a3c24d37cd701b53ef70d5e852bca3dccc924c8dd3699880b50effb58962aa46
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T05:08:08Z — REASON: core/modules/net/src/header_serve_repair.c: split 2 function(s) under the complexity cap;  behaviour-preserving; core/modules/net/src/header_serve_repair.c: split 2 function(s) under the complexity cap;  behaviour-preserving (throttle helper); core/modules/net/src/header_serve_repair.c: split 2 function(s) under the complexity cap;  behaviour-preserving (comment fidelity)
+  old ROOT: 11927b8274d8049b699ead31639d1be747a91b2ba181ab8cc2fb1f823bd01fcf
+  by: owner unseal ritual (make core-unseal)

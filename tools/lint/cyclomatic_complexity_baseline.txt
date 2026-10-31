@@ -94,8 +94,6 @@ core/modules/net/src/fast_sync_block_swarm.c:block_swarm_assign_piece_capped:24
 core/modules/net/src/fast_sync_coins_artifact.c:fast_sync_coins_artifact_write:24
 core/modules/net/src/file_service_client.c:fs_client_sync:41
 core/modules/net/src/file_service_client.c:range_worker_fn:34
-core/modules/net/src/header_serve_repair.c:header_serve_repair_arm:16
-core/modules/net/src/header_serve_repair.c:header_serve_repair_maybe_send:24
 core/modules/net/src/msg_blocks.c:process_block_msg:55
 core/modules/net/src/msg_blocks.c:process_getdata:17
 core/modules/net/src/msg_blocks.c:self_suspicion_record:17

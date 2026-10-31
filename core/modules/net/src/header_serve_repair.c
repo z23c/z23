@@ -29,17 +29,11 @@ static bool g_hsr_cached[HSR_BATCH_HEADERS];
 static size_t g_hsr_expected_count;
 static bool g_hsr_span_published;
 
-void header_serve_repair_arm(struct main_state *ms,
-                             const struct block_index *target)
+/* True when target lies on the active chain or the selected best-header path.
+ * Takes cs_main internally; nothing is held on return. */
+static bool hsr_target_authoritative(struct main_state *ms,
+                                     const struct block_index *target)
 {
-    if (!ms || !target || target->nHeight <= 0 || !target->phashBlock)
-        return; // raw-return-ok:invalid-serve-repair-target
-    if (atomic_load_explicit(&g_hsr_armed, memory_order_relaxed))
-        return; // raw-return-ok:single-bounded-repair-already-armed
-
-    /* A remote locator may reach a stale branch, but it must not pin the one
-     * global repair flight on arbitrary map entries. Only the active chain or
-     * the selected best-header path is a local request authority. */
     bool authoritative = false;
     zcl_mutex_lock(&ms->cs_main);
     struct block_index *active =
@@ -55,18 +49,18 @@ void header_serve_repair_arm(struct main_state *ms,
             uint256_eq(best->phashBlock, target->phashBlock);
     }
     zcl_mutex_unlock(&ms->cs_main);
-    if (!authoritative)
-        return; // raw-return-ok:off-authority-serve-request
+    return authoritative;
+}
 
-    int32_t height = target->nHeight;
-    struct uint256 hash = *target->phashBlock;
-
+/* Arms the single repair flight under g_hsr_lock; false if already armed. */
+static bool hsr_try_arm(int32_t height, const struct uint256 *hash)
+{
     bool armed = false;
     pthread_mutex_lock(&g_hsr_lock);
     if (!atomic_load_explicit(&g_hsr_armed, memory_order_relaxed)) {
         g_hsr_target_height = height;
-        g_hsr_target_hash = hash;
-        g_hsr_expected[0] = hash;
+        g_hsr_target_hash = *hash;
+        g_hsr_expected[0] = *hash;
         g_hsr_cached[0] = false;
         g_hsr_expected_count = 1;
         g_hsr_span_published = false;
@@ -76,8 +70,27 @@ void header_serve_repair_arm(struct main_state *ms,
         armed = true;
     }
     pthread_mutex_unlock(&g_hsr_lock);
+    return armed;
+}
 
-    if (armed)
+void header_serve_repair_arm(struct main_state *ms,
+                             const struct block_index *target)
+{
+    if (!ms || !target || target->nHeight <= 0 || !target->phashBlock)
+        return; // raw-return-ok:invalid-serve-repair-target
+    if (atomic_load_explicit(&g_hsr_armed, memory_order_relaxed))
+        return; // raw-return-ok:single-bounded-repair-already-armed
+
+    /* A remote locator may reach a stale branch, but it must not pin the one
+     * global repair flight on arbitrary map entries. Only the active chain or
+     * the selected best-header path is a local request authority. */
+    if (!hsr_target_authoritative(ms, target))
+        return; // raw-return-ok:off-authority-serve-request
+
+    int32_t height = target->nHeight;
+    struct uint256 hash = *target->phashBlock;
+
+    if (hsr_try_arm(height, &hash))
         LOG_INFO(HSR_SUBSYS,
                  "getheaders: armed bounded header-only repair h=%d",
                  height);
@@ -150,6 +163,84 @@ static bool hsr_peer_usable(const struct p2p_node *node, int32_t height)
     return node->starting_height >= height;
 }
 
+static bool hsr_send_throttled(int64_t last_us, int64_t now_us)
+{
+    return last_us != 0 && now_us - last_us < HSR_SEND_INTERVAL_US;
+}
+
+/* Caller holds g_hsr_lock. */
+static bool hsr_target_current_locked(const struct uint256 *target_hash)
+{
+    return atomic_load_explicit(&g_hsr_armed, memory_order_relaxed) &&
+           uint256_eq(&g_hsr_target_hash, target_hash);
+}
+
+/* Caller holds g_hsr_lock. */
+static void hsr_read_span_locked(size_t *count, struct uint256 *stop_hash)
+{
+    *count = g_hsr_expected_count;
+    *stop_hash = g_hsr_expected[*count - 1];
+}
+
+/* Under g_hsr_lock: false if the target changed; otherwise *published says
+ * whether the span exists and, if so, its count and stop hash are read. */
+static bool hsr_read_published_span(const struct uint256 *target_hash,
+                                    bool *published, size_t *count,
+                                    struct uint256 *stop_hash)
+{
+    pthread_mutex_lock(&g_hsr_lock);
+    if (!hsr_target_current_locked(target_hash)) {
+        pthread_mutex_unlock(&g_hsr_lock);
+        return false;
+    }
+    *published = g_hsr_span_published;
+    if (*published)
+        hsr_read_span_locked(count, stop_hash);
+    pthread_mutex_unlock(&g_hsr_lock);
+    return true;
+}
+
+static size_t hsr_build_span(struct msg_processor *mp,
+                             const struct p2p_node *node,
+                             struct block_index *target,
+                             struct block_index **span)
+{
+    size_t count = 0;
+    struct block_index *cursor = target;
+    while (cursor && cursor->phashBlock && count < HSR_BATCH_HEADERS &&
+           cursor->nHeight <= node->starting_height) {
+        span[count++] = cursor;
+        cursor = main_state_best_known_successor(mp->main_state, cursor);
+    }
+    return count;
+}
+
+/* The first usable peer publishes one immutable exact-hash span.
+ * Later peers retry that same span and preserve already verified
+ * members instead of resetting partial progress. */
+/* False if the target changed while the span was built. */
+static bool hsr_publish_span(const struct uint256 *target_hash,
+                             struct block_index **span, size_t span_count,
+                             size_t *count, struct uint256 *stop_hash)
+{
+    pthread_mutex_lock(&g_hsr_lock);
+    if (!hsr_target_current_locked(target_hash)) {
+        pthread_mutex_unlock(&g_hsr_lock);
+        return false;
+    }
+    if (!g_hsr_span_published) {
+        g_hsr_expected_count = span_count;
+        for (size_t i = 0; i < span_count; i++) {
+            g_hsr_expected[i] = *span[i]->phashBlock;
+            g_hsr_cached[i] = false;
+        }
+        g_hsr_span_published = true;
+    }
+    hsr_read_span_locked(count, stop_hash);
+    pthread_mutex_unlock(&g_hsr_lock);
+    return true;
+}
+
 void header_serve_repair_maybe_send(struct msg_processor *mp,
                                     struct p2p_node *node,
                                     int64_t now_seconds)
@@ -170,7 +261,7 @@ void header_serve_repair_maybe_send(struct msg_processor *mp,
     int64_t now_us = now_seconds * 1000000;
     int64_t last = atomic_load_explicit(&g_hsr_last_send_us,
                                         memory_order_relaxed);
-    if (last != 0 && now_us - last < HSR_SEND_INTERVAL_US)
+    if (hsr_send_throttled(last, now_us))
         return; // raw-return-ok:bounded-repair-throttled
 
     struct block_index *target =
@@ -181,50 +272,18 @@ void header_serve_repair_maybe_send(struct msg_processor *mp,
 
     struct uint256 stop_hash;
     size_t count;
-    pthread_mutex_lock(&g_hsr_lock);
-    if (!atomic_load_explicit(&g_hsr_armed, memory_order_relaxed) ||
-        !uint256_eq(&g_hsr_target_hash, &target_hash)) {
-        pthread_mutex_unlock(&g_hsr_lock);
+    bool published = false;
+    if (!hsr_read_published_span(&target_hash, &published, &count,
+                                 &stop_hash))
         return; // raw-return-ok:target-changed-before-span-build
-    }
-    if (g_hsr_span_published) {
-        count = g_hsr_expected_count;
-        stop_hash = g_hsr_expected[count - 1];
-        pthread_mutex_unlock(&g_hsr_lock);
-    } else {
-        pthread_mutex_unlock(&g_hsr_lock);
-
+    if (!published) {
         struct block_index *span[HSR_BATCH_HEADERS];
-        count = 0;
-        struct block_index *cursor = target;
-        while (cursor && cursor->phashBlock && count < HSR_BATCH_HEADERS &&
-               cursor->nHeight <= node->starting_height) {
-            span[count++] = cursor;
-            cursor = main_state_best_known_successor(mp->main_state, cursor);
-        }
-        if (count == 0)
+        size_t span_count = hsr_build_span(mp, node, target, span);
+        if (span_count == 0)
             return; // raw-return-ok:no-bounded-span
-
-        /* The first usable peer publishes one immutable exact-hash span.
-         * Later peers retry that same span and preserve already verified
-         * members instead of resetting partial progress. */
-        pthread_mutex_lock(&g_hsr_lock);
-        if (!atomic_load_explicit(&g_hsr_armed, memory_order_relaxed) ||
-            !uint256_eq(&g_hsr_target_hash, &target_hash)) {
-            pthread_mutex_unlock(&g_hsr_lock);
+        if (!hsr_publish_span(&target_hash, span, span_count, &count,
+                              &stop_hash))
             return; // raw-return-ok:target-changed-during-span-build
-        }
-        if (!g_hsr_span_published) {
-            g_hsr_expected_count = count;
-            for (size_t i = 0; i < count; i++) {
-                g_hsr_expected[i] = *span[i]->phashBlock;
-                g_hsr_cached[i] = false;
-            }
-            g_hsr_span_published = true;
-        }
-        count = g_hsr_expected_count;
-        stop_hash = g_hsr_expected[count - 1];
-        pthread_mutex_unlock(&g_hsr_lock);
     }
 
     if (!atomic_compare_exchange_strong(&g_hsr_last_send_us, &last, now_us))
