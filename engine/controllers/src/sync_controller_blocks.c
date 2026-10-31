@@ -122,8 +122,8 @@ static bool sync_wallet_note_save_witness(
             witness_data, witness_len, height);
 
     uint8_t ak[32], nk[32], nf[32];
-    sapling_ask_to_ak(key->xsk.expsk.ask, ak);
-    sapling_nsk_to_nk(key->xsk.expsk.nsk, nk);
+    memcpy(ak, key->xfvk.fvk.ak, sizeof(ak));
+    memcpy(nk, key->xfvk.fvk.nk, sizeof(nk));
     uint64_t position = incremental_tree_size(&witness->tree) - 1;
     bool computed = sapling_compute_nf(
         note->diversifier, note->pk_d, (uint64_t)note->value, note->rcm,

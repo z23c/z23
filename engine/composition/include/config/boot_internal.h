@@ -48,6 +48,15 @@ void boot_wallet_migrate_envelopes_or_exit(
     struct wallet *wallet);
 void boot_wallet_read_keypool_or_exit(struct wallet_sqlite *wallet_db,
                                       struct wallet *wallet);
+/* True when the wallet booted locked: encrypted rows exist on disk but no
+ * passphrase was loaded, so their secrets are sealed rather than missing.
+ * Nothing may mint, import or generate in this state; the stored seed and
+ * keys stay byte-identical until a real unlock. */
+bool boot_wallet_is_sealed(const struct wallet *wallet);
+/* True when existing key rows are stored in the clear: rows exist, no passphrase
+ * policy applies, and no row carries an at-rest envelope. A wallet that booted
+ * locked has sealed rows and is not plaintext. */
+bool boot_wallet_keys_plaintext_at_rest(int64_t pre_open_key_rows);
 void boot_wallet_top_up_legacy_keypool_or_exit(
     int64_t pre_open_key_rows, struct wallet_sqlite *wallet_db,
     struct wallet *wallet);

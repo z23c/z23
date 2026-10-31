@@ -26,6 +26,19 @@
  * passphrase and still fits the WKS PBKDF2 input. */
 #define WLK_MAX_PASS 512
 
+/* g_transition serialises every lock, unlock and key reload, so a lock can never
+ * land between an unlock's publication of the passphrase and its reload, and a
+ * wipe can never finish after a later unlock. The passphrase check itself runs
+ * before the mutex, so a slow wrong attempt never holds off a lock. Lock order
+ * is fixed:
+ *
+ *   g_transition  ->  wallet / keystore mutexes  ->  g_mu
+ *
+ * Persistence code holding wallet or keystore mutexes calls back into this
+ * module, but only for functions that take g_mu alone. No function that
+ * takes g_transition (lock, unlock, the timer) may be called with a wallet,
+ * keystore or g_mu mutex held. */
+static pthread_mutex_t g_transition = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* All fields guarded by g_mu. */
@@ -60,14 +73,29 @@ static const char *effective_pass_locked(void)
     return NULL;
 }
 
-static void wallet_lock_apply_locked(struct wallet *w)
+static bool wallet_lock_apply_locked(void)
 {
     memory_cleanse(g_runtime_pass, sizeof(g_runtime_pass));
     g_have_runtime_pass = false;
     g_force_locked = true;
     g_timeout_generation++;
-    if (w)
-        keystore_wipe_private_keys(&w->keystore);
+    return g_encrypted_at_rest;
+}
+
+/* Make secret memory non-resident. Runs after g_mu is released: it takes the
+ * keystore and wallet mutexes, and persistence code holding those calls back
+ * into this module. An encrypted wallet keeps only viewing material; a
+ * plaintext wallet has no passphrase to restore from, so its Sapling keys
+ * stay as they were. */
+static void wallet_lock_wipe_memory(struct wallet *w, bool encrypted)
+{
+    if (!w)
+        return;
+    keystore_seal_private_keys(&w->keystore);
+    if (!encrypted)
+        return;
+    sapling_keystore_wipe_secrets(&w->sapling_keys);
+    wallet_hd_wipe_master(w);
 }
 
 static void *wallet_lock_timer_main(void *opaque)
@@ -85,15 +113,20 @@ static void *wallet_lock_timer_main(void *opaque)
             break;
     }
     bool locked_now = false;
+    bool encrypted = false;
+    pthread_mutex_lock(&g_transition);
     pthread_mutex_lock(&g_mu);
     if (!thread_registry_shutdown_requested() && remaining == 0 &&
         timer->generation == g_timeout_generation) {
-        wallet_lock_apply_locked(timer->wallet);
+        encrypted = wallet_lock_apply_locked();
         locked_now = true;
     }
     pthread_mutex_unlock(&g_mu);
-    if (locked_now)
+    if (locked_now) {
+        wallet_lock_wipe_memory(timer->wallet, encrypted);
         wallet_sqlite_key_crypto_reset();
+    }
+    pthread_mutex_unlock(&g_transition);
     free(timer);
     return NULL;
 }
@@ -137,6 +170,14 @@ bool wallet_lock_encrypted_at_rest(void)
     return v;
 }
 
+bool wallet_lock_is_locked(void)
+{
+    pthread_mutex_lock(&g_mu);
+    bool locked = g_encrypted_at_rest && effective_pass_locked() == NULL;
+    pthread_mutex_unlock(&g_mu);
+    return locked;
+}
+
 bool wallet_lock_is_unlocked(void)
 {
     pthread_mutex_lock(&g_mu);
@@ -164,6 +205,118 @@ struct zcl_result wallet_lock_spend_guard(void)
         "passphrase is loaded; unlock before spending");
 }
 
+/* Publish `passphrase` as the live passphrase and report the state it
+ * replaced, so a failed reload can put it back. g_transition is held. */
+struct wlk_prev {
+    bool have;
+    bool force;
+    char pass[WLK_MAX_PASS + 1];
+};
+
+static void wlk_publish(const char *passphrase, size_t plen,
+                        struct wlk_prev *prev)
+{
+    pthread_mutex_lock(&g_mu);
+    prev->have = g_have_runtime_pass;
+    prev->force = g_force_locked;
+    memcpy(prev->pass, g_runtime_pass, sizeof(prev->pass));
+    memcpy(g_runtime_pass, passphrase, plen);
+    g_runtime_pass[plen] = '\0';
+    g_have_runtime_pass = true;
+    g_force_locked = false;
+    pthread_mutex_unlock(&g_mu);
+}
+
+/* Undo wlk_publish. A wallet that was locked before is sealed again. */
+static void wlk_rollback(struct wallet *w, struct wlk_prev *prev)
+{
+    pthread_mutex_lock(&g_mu);
+    memory_cleanse(g_runtime_pass, sizeof(g_runtime_pass));
+    memcpy(g_runtime_pass, prev->pass, sizeof(prev->pass));
+    g_have_runtime_pass = prev->have;
+    g_force_locked = prev->force;
+    bool encrypted = g_encrypted_at_rest;
+    pthread_mutex_unlock(&g_mu);
+    if (!prev->have)
+        wallet_lock_wipe_memory(w, encrypted);
+    wallet_sqlite_key_crypto_reset();
+    memory_cleanse(prev, sizeof(*prev));
+}
+
+/* Restore the HD master from the Sapling seed. An unlock after a locked boot
+ * has no master yet: adopt the seed when it governs the stored keys, exactly
+ * as a passphrase boot does. */
+static void wlk_restore_hd(struct wallet *w)
+{
+    uint8_t seed[32];
+    if (!sapling_keystore_copy_seed(&w->sapling_keys, seed))
+        return;
+    (void)wallet_hd_restore_master(w, seed);
+    if (!wallet_has_hd(w))
+        (void)wallet_hd_adopt_seed(w, seed);
+    memory_cleanse(seed, sizeof(seed));
+}
+
+/* Prove the passphrase against the sealed rows before any live key or lock
+ * state changes: a wrong attempt must leave no trace. Takes no lock of this
+ * module, so a slow attempt (rows x KDF) never holds off a lock. */
+static struct zcl_result wlk_check_passphrase(struct wallet_sqlite *ws,
+                                              const char *passphrase)
+{
+    enum wallet_passphrase_check chk =
+        wallet_sqlite_check_passphrase(ws, passphrase);
+    if (chk == WALLET_PASS_WRONG)
+        return ZCL_ERR(WLK_WRONG_PASS,
+            "unlock: passphrase did not decrypt any sealed on-disk row");
+    if (chk == WALLET_PASS_UNREADABLE)
+        return ZCL_ERR(WLK_STORE_UNREADABLE,
+            "unlock: stored key rows could not be read; wallet unchanged");
+    return ZCL_OK;
+}
+
+/* Reload every key row into the live keystores and restore the HD master.
+ * g_transition is held. */
+static bool wlk_reload(struct wallet *w, struct wallet_sqlite *ws)
+{
+    struct zcl_result rr = wallet_sqlite_read_keys_r(ws, w);
+    bool sapling_ok = wallet_sqlite_read_sapling_keys(ws, w);
+    if (!rr.ok || !sapling_ok)
+        return false;
+    wlk_restore_hd(w);
+    return true;
+}
+
+static struct zcl_result wlk_unlock_locked(struct wallet *w,
+                                           struct wallet_sqlite *ws,
+                                           const char *passphrase, size_t plen)
+{
+    wallet_sqlite_key_crypto_reset();
+    struct wlk_prev prev;
+    wlk_publish(passphrase, plen, &prev);
+
+    if (!wlk_reload(w, ws)) {
+        wlk_rollback(w, &prev);
+        return ZCL_ERR(WLK_STORE_UNREADABLE,
+            "unlock: stored keys could not be read; wallet stays locked");
+    }
+    memory_cleanse(&prev, sizeof(prev));
+    return ZCL_OK;
+}
+
+struct zcl_result wallet_lock_reload_keys(struct wallet *w,
+                                          struct wallet_sqlite *ws)
+{
+    if (!w || !ws)
+        return ZCL_ERR(WLK_NULL_ARG, "reload: wallet or store is NULL");
+    pthread_mutex_lock(&g_transition);
+    bool ok = wlk_reload(w, ws);
+    pthread_mutex_unlock(&g_transition);
+    if (!ok)
+        return ZCL_ERR(WLK_STORE_UNREADABLE,
+            "reload: stored keys could not be read");
+    return ZCL_OK;
+}
+
 struct zcl_result wallet_lock_unlock(struct wallet *w, struct wallet_sqlite *ws,
                                      const char *passphrase)
 {
@@ -181,61 +334,24 @@ struct zcl_result wallet_lock_unlock(struct wallet *w, struct wallet_sqlite *ws,
         return ZCL_ERR(WLK_PASS_TOO_LONG,
                        "unlock: passphrase exceeds %d bytes", WLK_MAX_PASS);
 
-    /* A new unlock attempt must never reuse a DEK cached under an older or
-     * wrong passphrase. The wrapper is authenticated again below. */
-    wallet_sqlite_key_crypto_reset();
-
-    /* Snapshot prior state so a wrong passphrase leaves NO trace. */
-    pthread_mutex_lock(&g_mu);
-    bool  prev_have = g_have_runtime_pass;
-    bool  prev_force = g_force_locked;
-    char  prev_pass[WLK_MAX_PASS + 1];
-    memcpy(prev_pass, g_runtime_pass, sizeof(prev_pass));
-
-    memcpy(g_runtime_pass, passphrase, plen);
-    g_runtime_pass[plen] = '\0';
-    g_have_runtime_pass = true;
-    g_force_locked = false;
-    pthread_mutex_unlock(&g_mu);
-
-    /* Register-only unlock (no keystore wired / unit test): accept. */
+    if (w && ws) {
+        struct zcl_result c = wlk_check_passphrase(ws, passphrase);
+        if (!c.ok)
+            return c;
+    }
+    pthread_mutex_lock(&g_transition);
+    struct zcl_result r;
     if (!w || !ws) {
-        memory_cleanse(prev_pass, sizeof(prev_pass));
-        return ZCL_OK;
+        /* Register-only unlock (no keystore wired / unit test): accept. */
+        struct wlk_prev prev;
+        wlk_publish(passphrase, plen, &prev);
+        memory_cleanse(&prev, sizeof(prev));
+        r = ZCL_OK;
+    } else {
+        r = wlk_unlock_locked(w, ws, passphrase, plen);
     }
-
-    /* Reload transparent + Sapling keys from disk under the new passphrase.
-     * read_keys_r decrypts WKS1/WKD1 via wallet_lock_effective_passphrase
-     * (now the just-cached value); a wrong passphrase drops every encrypted
-     * row and loads zero keys. */
-    struct wallet_sqlite_health before = wallet_sqlite_get_health(ws, 0);
-    int rows = before.row_count;
-
-    keystore_wipe_private_keys(&w->keystore);
-    struct zcl_result rr = wallet_sqlite_read_keys_r(ws, w);
-    (void)wallet_sqlite_read_sapling_keys(ws, w);
-
-    int loaded = (int)w->keystore.num_keys;
-
-    /* Wrong passphrase: rows exist on disk but none decrypted. Roll the
-     * whole subsystem back to its pre-unlock state and scrub. */
-    if (!rr.ok || (rows > 0 && loaded == 0)) {
-        keystore_wipe_private_keys(&w->keystore);
-        pthread_mutex_lock(&g_mu);
-        memory_cleanse(g_runtime_pass, sizeof(g_runtime_pass));
-        memcpy(g_runtime_pass, prev_pass, sizeof(prev_pass));
-        g_have_runtime_pass = prev_have;
-        g_force_locked = prev_force;
-        pthread_mutex_unlock(&g_mu);
-        wallet_sqlite_key_crypto_reset();
-        memory_cleanse(prev_pass, sizeof(prev_pass));
-        return ZCL_ERR(WLK_WRONG_PASS,
-            "unlock: passphrase did not decrypt any of %d on-disk key row(s)",
-            rows);
-    }
-
-    memory_cleanse(prev_pass, sizeof(prev_pass));
-    return ZCL_OK;
+    pthread_mutex_unlock(&g_transition);
+    return r;
 }
 
 /* Format the boot credential path into path; false when it would not fit. */
@@ -362,10 +478,13 @@ struct zcl_result wallet_lock_arm_timeout(struct wallet *w,
 
 void wallet_lock_lock(struct wallet *w)
 {
+    pthread_mutex_lock(&g_transition);
     pthread_mutex_lock(&g_mu);
-    wallet_lock_apply_locked(w);
+    bool encrypted = wallet_lock_apply_locked();
     pthread_mutex_unlock(&g_mu);
+    wallet_lock_wipe_memory(w, encrypted);
     wallet_sqlite_key_crypto_reset();
+    pthread_mutex_unlock(&g_transition);
 }
 
 void wallet_lock_status_json(struct json_value *out)

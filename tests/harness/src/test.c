@@ -2052,6 +2052,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
       *failures += test_wallet_phrase_never_logged(); }
     { extern int test_wallet_recovery_safety(void);
       *failures += test_wallet_recovery_safety(); }
+    *failures += test_wallet_lock_shielded();
     { extern int test_hstar_integrity(void);
       *failures += test_hstar_integrity(); }
     { extern int test_install_verb_warm(void);

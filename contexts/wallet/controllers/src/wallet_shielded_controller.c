@@ -10,6 +10,7 @@
  * controllers/wallet_shielded_internal.h. */
 
 #include "controllers/wallet_shielded_internal.h"
+#include "wallet/wallet_lock.h"
 
 /* Decode a 512-byte Sapling memo into a JSON field on `entry`, matching the
  * three former inline copies in z_listunspent / z_listreceivedbyaddress /
@@ -64,6 +65,19 @@ bool rpc_z_getnewaddress(const struct json_value *params, bool help,
             "Error: wallet durability backend unavailable; address not created");
         LOG_FAIL("wallet_shielded",
                  "z_getnewaddress: refusing RAM-only receive address");
+    }
+
+    /* A locked wallet has no seed in memory. Refuse before the keystore can
+     * mint a replacement seed and overwrite the stored one. */
+    {
+        struct zcl_result lk = wallet_lock_spend_guard();
+        if (!lk.ok || ctx->wallet->sapling_keys.locked) {
+            json_set_str(result, "Error: wallet is locked - run walletunlock "
+                                 "before creating addresses");
+            LOG_FAIL("wallet_shielded",
+                     "z_getnewaddress: refused, wallet locked (code=%d)",
+                     lk.code);
+        }
     }
 
     uint8_t diversifier[11];

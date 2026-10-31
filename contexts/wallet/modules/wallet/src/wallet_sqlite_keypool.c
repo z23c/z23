@@ -47,9 +47,12 @@ struct zcl_result wallet_sqlite_read_keypool_r(struct wallet_sqlite *ws,
 }
 
 /* Called with w->cs held inside the surrounding SQLite transaction. Replacing
- * the full small set prevents a consumed change key returning after restart. */
+ * the full small set prevents a consumed change key returning after restart.
+ * persisted_only skips entries a full flush has not yet stored keys for: a
+ * row naming a key that has no row would fail every later boot. */
 bool wallet_sqlite_replace_keypool_locked(struct wallet_sqlite *ws,
-                                          const struct wallet *w)
+                                          const struct wallet *w,
+                                          bool persisted_only)
 {
     sqlite3_stmt *clear = ws->stmt_keypool_clear;
     sqlite3_reset(clear);
@@ -61,6 +64,8 @@ bool wallet_sqlite_replace_keypool_locked(struct wallet_sqlite *ws,
 
     sqlite3_stmt *write = ws->stmt_keypool_write;
     for (size_t i = 0; i < w->key_pool_size; i++) {
+        if (persisted_only && !w->key_pool[i].persisted)
+            continue;
         sqlite3_reset(write);
         sqlite3_clear_bindings(write);
         sqlite3_bind_blob(write, 1, w->key_pool[i].keyid.id.data,

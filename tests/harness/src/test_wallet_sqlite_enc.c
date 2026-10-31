@@ -223,8 +223,14 @@ static int test_encrypted_unreadable_without_pass(void)
         struct wallet *w = alloc_wallet();
         ASSERT(w);
         ASSERT(wallet_sqlite_read_keys(&ws, w));
-        /* Key should be skipped — no keys loaded. */
-        ASSERT(w->keystore.num_keys == 0);
+        /* The key stays sealed: owned by its public key, no private key
+         * loaded. */
+        ASSERT(w->keystore.num_keys == 1);
+        struct key_id sealed_id = pubkey_get_id(&pk);
+        struct privkey sealed_key;
+        privkey_init(&sealed_key);
+        ASSERT(keystore_have_key(&w->keystore, &sealed_id));
+        ASSERT(!keystore_get_key(&w->keystore, &sealed_id, &sealed_key));
 
         wallet_sqlite_close(&ws);
         free_wallet(w);
@@ -401,7 +407,10 @@ static int test_seed_ops_leave_no_open_txn(void)
         ASSERT(memcmp(seed, got, 32) == 0);
         ASSERT(sqlite3_txn_state(db, NULL) == SQLITE_TXN_NONE);
 
-        /* Same, encrypted envelope. */
+        /* Same, encrypted envelope (a new wallet: a stored seed is never
+         * replaced by a different one). */
+        ASSERT(sqlite3_exec(db, "DELETE FROM wallet_seed", NULL, NULL, NULL)
+               == SQLITE_OK);
         set_passphrase("leak-pass");
         memset(seed, 0x11, 32);
         ASSERT(wallet_sqlite_write_sapling_seed(&ws, seed));
@@ -616,7 +625,8 @@ static int test_runtime_unlock_lock_reload(void)
 
         /* Lock wipes resident spending keys and re-locks the register. */
         wallet_lock_lock(w);
-        ASSERT(w->keystore.num_keys == 0);
+        ASSERT(w->keystore.num_keys == 2);
+        ASSERT(keystore_num_sealed(&w->keystore) == 2);
         ASSERT(!wallet_lock_is_unlocked());
         struct privkey locked_read;
         privkey_init(&locked_read);
@@ -627,7 +637,7 @@ static int test_runtime_unlock_lock_reload(void)
         struct zcl_result bad = wallet_lock_unlock(w, &ws, "WRONG");
         ASSERT(!bad.ok);
         ASSERT(bad.code == WLK_WRONG_PASS);
-        ASSERT(w->keystore.num_keys == 0);
+        ASSERT(keystore_num_sealed(&w->keystore) == 2);
         ASSERT(!wallet_lock_is_unlocked());
 
         /* Correct passphrase reloads again. */

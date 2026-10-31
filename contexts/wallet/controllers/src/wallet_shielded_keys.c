@@ -7,6 +7,7 @@
 
 #include "base/hex.h"
 #include "controllers/wallet_shielded_internal.h"
+#include "wallet/wallet_lock.h"
 
 bool rpc_z_exportkey(const struct json_value *params, bool help,
                              struct json_value *result)
@@ -28,6 +29,18 @@ bool rpc_z_exportkey(const struct json_value *params, bool help,
 
     ENSURE_WALLET(result);
 
+    /* A locked wallet holds no spending key in memory and must not look as if
+     * it can reveal one. */
+    {
+        struct zcl_result lk = wallet_lock_spend_guard();
+        if (!lk.ok) {
+            json_set_str(result, "Error: wallet is locked - run walletunlock "
+                                 "before exporting keys");
+            LOG_FAIL("wallet_shielded", "z_exportkey: refused, wallet locked "
+                     "(code=%d)", lk.code);
+        }
+    }
+
     uint8_t z_d[11], z_pkd[32];
     if (!sapling_decode_payment_address(addr_str, z_d, z_pkd)) {
         json_set_str(result, "Invalid Sapling address");
@@ -41,11 +54,22 @@ bool rpc_z_exportkey(const struct json_value *params, bool help,
         LOG_FAIL("wallet_shielded", "z_exportkey: spending key not found for address %s", addr_str);
     }
 
+    /* Encode from a private copy taken under the keystore mutex: a lock firing
+     * now cannot hand the encoder wiped memory. */
+    struct sapling_key_entry key_copy;
+    if (!sapling_keystore_copy_entry(&ctx->wallet->sapling_keys, ke, &key_copy)) {
+        json_set_str(result, "Error: wallet is locked - run walletunlock "
+                             "before exporting keys");
+        LOG_FAIL("wallet_shielded", "z_exportkey: refused, spending key not "
+                 "resident (wallet locked)");
+    }
+
     const struct chain_params *cp = chain_params_get();
     char encoded[512];
-    bool encoded_ok = sapling_encode_extended_spending_key(&ke->xsk,
+    bool encoded_ok = sapling_encode_extended_spending_key(&key_copy.xsk,
             cp->bech32HRPs[BECH32_SAPLING_EXTENDED_SPEND_KEY],
             encoded, sizeof(encoded));
+    memory_cleanse(&key_copy, sizeof(key_copy));
     if (!wallet_rpc_set_secret_string(result, encoded, sizeof(encoded),
                                       encoded_ok)) {
         json_set_str(result, "Failed to encode spending key");
@@ -80,6 +104,16 @@ bool rpc_z_importkey(const struct json_value *params, bool help,
 
     ENSURE_WALLET(result);
 
+    {
+        struct zcl_result lk = wallet_lock_spend_guard();
+        if (!lk.ok) {
+            json_set_str(result, "Error: wallet is locked - run walletunlock "
+                                 "before importing keys");
+            LOG_FAIL("wallet_shielded", "z_importkey: refused, wallet locked "
+                     "(code=%d)", lk.code);
+        }
+    }
+
     /* Parse rescan option */
     bool do_rescan = true;
     bool ignore_existing = true;
@@ -96,6 +130,16 @@ bool rpc_z_importkey(const struct json_value *params, bool help,
     if (!sapling_decode_extended_spending_key(key_str, &xsk)) {
         json_set_str(result, "Invalid spending key");
         LOG_FAIL("wallet_shielded", "z_importkey: failed to decode spending key");
+    }
+
+    /* A keystore holding no secrets cannot take an import. Reporting that as
+     * success would claim a key was added when it was not. */
+    if (sapling_keystore_is_locked(&ctx->wallet->sapling_keys)) {
+        memory_cleanse(&xsk, sizeof(xsk));
+        json_set_str(result, "Error: Sapling keys are locked - run "
+                             "walletunlock before importing keys");
+        LOG_FAIL("wallet_shielded", "z_importkey: refused, Sapling keystore "
+                 "is locked");
     }
 
     /* Import into keystore */
@@ -162,6 +206,16 @@ bool rpc_z_exportviewingkey(const struct json_value *params, bool help,
     if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); LOG_FAIL("wallet_shielded", "z_exportviewingkey: invalid params"); }
 
     ENSURE_WALLET(result);
+
+    {
+        struct zcl_result lk = wallet_lock_spend_guard();
+        if (!lk.ok) {
+            json_set_str(result, "Error: wallet is locked - run walletunlock "
+                                 "before exporting keys");
+            LOG_FAIL("wallet_shielded", "z_exportviewingkey: refused, wallet "
+                     "locked (code=%d)", lk.code);
+        }
+    }
 
     uint8_t z_d[11], z_pkd[32];
     if (!sapling_decode_payment_address(addr_str, z_d, z_pkd)) {

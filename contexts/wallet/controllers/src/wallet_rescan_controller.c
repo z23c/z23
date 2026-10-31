@@ -6,6 +6,7 @@
  * Wallet rescan, legacy import, and witness management RPCs. */
 
 #include "controllers/wallet_rescan_controller_internal.h"
+#include "wallet/wallet_lock.h"
 
 static bool rpc_replaywalletfromchain(const struct json_value *params,
                                        bool help, struct json_value *result)
@@ -79,6 +80,21 @@ static bool rpc_replaywalletfromchain(const struct json_value *params,
     return true;
 }
 
+/* Re-read the stored wallet into memory. The key rows reload under the lock
+ * module's transition mutex, so a lock that fires during the reload can
+ * neither be undone by it nor leave spending secrets resident. */
+bool wallet_rescan_reload_from_store(struct wallet *w, struct wallet_sqlite *db)
+{
+    struct zcl_result rk = wallet_lock_reload_keys(w, db);
+    if (!rk.ok)
+        LOG_FAIL("wallet", "wallet_repair: key reload failed (code=%d): %s",
+                 rk.code, rk.message);
+    wallet_sqlite_read_txs(db, w);
+    wallet_sqlite_read_scripts(db, w);
+    wallet_sqlite_read_watch_only(db, w);
+    return true;
+}
+
 static bool rpc_import_from(const struct json_value *params, bool help,
                              struct json_value *result)
 {
@@ -125,17 +141,9 @@ static bool rpc_import_from(const struct json_value *params, bool help,
     json_set_object(&phase1);
     json_push_kv_bool(&phase1, "repair_success", repaired);
 
-    if (ctx->wallet_db && ctx->wallet_db->open) {
-        struct zcl_result rk = wallet_sqlite_read_keys_r(ctx->wallet_db, ctx->wallet);
-        if (!rk.ok) {
-            LOG_FAIL("wallet", "wallet_repair: read_keys_r failed "
-                                "(code=%d): %s", rk.code, rk.message);
-        }
-        wallet_sqlite_read_txs(ctx->wallet_db, ctx->wallet);
-        wallet_sqlite_read_sapling_keys(ctx->wallet_db, ctx->wallet);
-        wallet_sqlite_read_scripts(ctx->wallet_db, ctx->wallet);
-        wallet_sqlite_read_watch_only(ctx->wallet_db, ctx->wallet);
-    }
+    if (ctx->wallet_db && ctx->wallet_db->open &&
+        !wallet_rescan_reload_from_store(ctx->wallet, ctx->wallet_db))
+        return false;
 
     size_t keys_after = ctx->wallet->keystore.num_keys;
     size_t txs_after = ctx->wallet->num_wallet_tx;

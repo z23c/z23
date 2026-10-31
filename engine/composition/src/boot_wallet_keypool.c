@@ -4,6 +4,8 @@
 #include "config/boot_internal.h"
 #include "event/event.h"
 #include "wallet/wallet.h"
+#include "wallet/wallet_keystore.h"
+#include "wallet/wallet_lock.h"
 #include "wallet/wallet_sqlite.h"
 
 #include <stdio.h>
@@ -23,13 +25,34 @@ void boot_wallet_read_keypool_or_exit(struct wallet_sqlite *wallet_db,
     exit(1);
 }
 
+bool boot_wallet_is_sealed(const struct wallet *wallet)
+{
+    return wallet_sqlite_read_keys_locked_count() > 0 ||
+           wallet->sapling_keys.locked;
+}
+
+bool boot_wallet_keys_plaintext_at_rest(int64_t pre_open_key_rows)
+{
+    return pre_open_key_rows > 0 &&
+           wallet_at_rest_creation_policy() != WALLET_AT_REST_ENCRYPTED &&
+           !wallet_lock_encrypted_at_rest();
+}
+
 void boot_wallet_top_up_legacy_keypool_or_exit(
     int64_t pre_open_key_rows, struct wallet_sqlite *wallet_db,
     struct wallet *wallet)
 {
+    if (boot_wallet_is_sealed(wallet))
+        printf("Wallet is LOCKED: %d transparent key(s) sealed, %zu shielded "
+               "viewing key(s) loaded; unlock to spend.\n",
+               wallet_sqlite_read_keys_locked_count(),
+               wallet->sapling_keys.num_keys);
     /* v72 cannot infer which historical keys were never issued. An upgraded
      * or exhausted wallet gets a fresh durable pool before WALLET_LOADED. */
-    if (pre_open_key_rows <= 0 || wallet->key_pool_size != 0)
+    /* A wallet booted locked has no key material to extend the pool with; a
+     * top-up would mint unrelated random keys beside the sealed ones. */
+    if (pre_open_key_rows <= 0 || wallet->key_pool_size != 0 ||
+        wallet_lock_is_locked())
         return;
     if (!wallet_top_up_key_pool(wallet, DEFAULT_KEYPOOL_SIZE)) {
         fprintf(stderr, "FATAL: wallet keypool top-up failed during restart.\n");

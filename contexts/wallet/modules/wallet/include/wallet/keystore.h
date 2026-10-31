@@ -23,6 +23,10 @@ struct key_entry {
     struct key_id keyid;
     struct privkey key;
     bool used;
+    /* True while key holds no secret (wallet locked). keyid and pub stay
+     * valid, so the wallet still recognises its own outputs. */
+    bool sealed;
+    struct pubkey pub;
 };
 
 struct script_entry {
@@ -77,6 +81,18 @@ bool keystore_remove_key(struct basic_keystore *ks,
  * (wallet_lock_lock) to make decrypted spend keys non-resident without
  * tearing down the keystore. ks may be NULL (no-op). Takes ks->cs. */
 void keystore_wipe_private_keys(struct basic_keystore *ks);
+/* Lock transition: cleanse every resident private key but keep each entry
+ * by key_id and public key, marked sealed. Sealed entries count toward
+ * ownership (keystore_have_key, keystore_get_pubkey) and the scan key set,
+ * and never yield a private key. keystore_add_key on the same key restores
+ * the secret. Takes ks->cs. ks may be NULL. */
+void keystore_seal_private_keys(struct basic_keystore *ks);
+/* Record a key known only by its public key (its secret is sealed on disk).
+ * No-op when that key_id is present. False when the array is full or pk
+ * is invalid. Takes ks->cs. */
+bool keystore_add_sealed(struct basic_keystore *ks, const struct pubkey *pk);
+/* Count of sealed entries. Takes ks->cs. */
+size_t keystore_num_sealed(struct basic_keystore *ks);
 /* Return true if a live private-key entry matches keyid. Read-only,
  * does NOT take ks->cs. */
 bool keystore_have_key(const struct basic_keystore *ks,

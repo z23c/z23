@@ -167,3 +167,31 @@ bool wallet_hd_adopt_seed(struct wallet *w, const unsigned char seed[32])
     memory_cleanse(&master, sizeof(master));
     return true;
 }
+
+void wallet_hd_wipe_master(struct wallet *w)
+{
+    if (!w)
+        return;
+    zcl_mutex_lock(&w->cs);
+    memory_cleanse(&w->master_key, sizeof(w->master_key));
+    zcl_mutex_unlock(&w->cs);
+}
+
+bool wallet_hd_restore_master(struct wallet *w, const unsigned char seed[32])
+{
+    GUARD_NOT_NULL(w, "wallet", "wallet");
+    GUARD_NOT_NULL(seed, "wallet", "seed");
+
+    struct ext_key master;
+    bool derived = hd_master_from_seed(&master, seed, 32);
+    zcl_mutex_lock(&w->cs);
+    if (w->has_master_key) {
+        if (derived)
+            w->master_key = master;
+        else
+            w->has_master_key = false;
+    }
+    zcl_mutex_unlock(&w->cs);
+    memory_cleanse(&master, sizeof(master));
+    return derived;
+}

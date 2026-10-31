@@ -1394,8 +1394,7 @@ static void boot_wallet_read_persisted_state(struct app_context *ctx,
     /* Backward compat: an existing wallet opens regardless of the
      * at-rest policy, but without a passphrase its keys are plaintext
      * on disk — warn every boot rather than imply it is encrypted. */
-    if (pre_open_key_rows > 0 &&
-        wallet_at_rest_creation_policy() != WALLET_AT_REST_ENCRYPTED)
+    if (boot_wallet_keys_plaintext_at_rest(pre_open_key_rows))
         fprintf(stderr, "WARNING: wallet private keys are stored "
             "UNENCRYPTED at rest in node.db (no ZCL_WALLET_PASSPHRASE); "
             "anyone with datadir read access can drain every coin.\n");
@@ -1447,7 +1446,7 @@ static void boot_wallet_migrate_from_leveldb(struct app_context *ctx)
      * wallet/ directory exists, import keys/txs from LevelDB. Only
      * runs when pre_open_key_rows <= 0 (no existing user keys), so no
      * conflict with the state machine. */
-    if (g_wallet.keystore.num_keys == 0) {
+    if (g_wallet.keystore.num_keys == 0 && !boot_wallet_is_sealed(&g_wallet)) {
         char wallet_path[1024];
         snprintf(wallet_path, sizeof(wallet_path), "%s/wallet", ctx->datadir);
         struct stat wst;
@@ -1496,7 +1495,7 @@ static void boot_wallet_migrate_from_leveldb(struct app_context *ctx)
 /* First run — mint a keypool only on an explicit passphrase or opt-in. */
 static void boot_wallet_mint_first_keypool(struct app_context *ctx)
 {
-    if (g_wallet.keystore.num_keys == 0) {
+    if (g_wallet.keystore.num_keys == 0 && !boot_wallet_is_sealed(&g_wallet)) {
         /* Genuinely empty wallet — first-run. A wallet decision must NOT be a
          * precondition for syncing, and plaintext keys must NEVER be minted
          * silently. So REFUSE (no passphrase, no -allow-plaintext-wallet opt-in

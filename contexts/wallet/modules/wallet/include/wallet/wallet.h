@@ -209,6 +209,10 @@ int64_t wallet_key_pool_generation_ceiling(const struct wallet *w);
 void wallet_key_pool_mark_persisted_through(struct wallet *w,
                                             int64_t generation);
 size_t wallet_key_pool_persisted_size(const struct wallet *w);
+/* Remove every pool entry that is not yet persisted, with its keystore key.
+ * A refill whose flush was refused calls this so no unstored key stays
+ * eligible to receive funds or change. */
+void wallet_key_pool_discard_unpersisted(struct wallet *w);
 bool wallet_get_key_from_pool(struct wallet *w, struct pubkey *pk_out);
 /* Restore one DB-backed unused entry during boot. The key must already exist
  * in the keystore; duplicates, invalid generations, and over-capacity rows
@@ -441,6 +445,15 @@ bool wallet_init_from_recovery_phrase(struct wallet *w, const char *phrase);
  * a NULL/derivation error. */
 bool wallet_hd_adopt_seed(struct wallet *w,
                           const unsigned char seed[32]);
+
+/* Cleanse the HD master key while the wallet is locked. has_master_key stays
+ * set so counters and the wallet kind are kept; key derivation refuses until
+ * wallet_hd_restore_master reinstalls the master. */
+void wallet_hd_wipe_master(struct wallet *w);
+
+/* Reinstall the HD master from the unlocked Sapling seed. A no-op for a
+ * wallet that has no HD master. Returns false on derivation failure. */
+bool wallet_hd_restore_master(struct wallet *w, const unsigned char seed[32]);
 
 /* Encode the transparent address at m/44'/147'/account'/change/index for
  * `seed`, without touching any wallet state. `change` is BIP44_EXTERNAL

@@ -18,6 +18,9 @@ void sapling_keystore_init(struct sapling_keystore *sks)
     memset(sks->seed, 0, 32);
     sks->has_seed = false;
     sks->next_child_index = 0;
+    sks->locked = false;
+    sks->num_unscannable = 0;
+    sks->num_damaged = 0;
     sks->num_keys = 0;
     memset(sks->keys, 0, sizeof(sks->keys));
 }
@@ -36,6 +39,11 @@ void sapling_keystore_free(struct sapling_keystore *sks)
 bool sapling_keystore_generate_seed(struct sapling_keystore *sks)
 {
     zcl_mutex_lock(&sks->cs);
+    if (sks->locked) {
+        zcl_mutex_unlock(&sks->cs);
+        LOG_FAIL("sapling_keys",
+                 "generate_seed: refused, keystore is locked");
+    }
     GetRandBytes(sks->seed, 32);
     sks->has_seed = true;
     zip32_xsk_master(&sks->master_xsk, sks->seed, 32);
@@ -48,12 +56,113 @@ bool sapling_keystore_set_seed(struct sapling_keystore *sks,
                                 const uint8_t seed[32])
 {
     zcl_mutex_lock(&sks->cs);
+    if (sks->locked) {
+        zcl_mutex_unlock(&sks->cs);
+        LOG_FAIL("sapling_keys", "set_seed: refused, keystore is locked");
+    }
     memcpy(sks->seed, seed, 32);
     sks->has_seed = true;
     zip32_xsk_master(&sks->master_xsk, sks->seed, 32);
     sks->next_child_index = 0;
     zcl_mutex_unlock(&sks->cs);
     return true;
+}
+
+bool sapling_keystore_restore_seed(struct sapling_keystore *sks,
+                                    const uint8_t seed[32])
+{
+    zcl_mutex_lock(&sks->cs);
+    memcpy(sks->seed, seed, 32);
+    sks->has_seed = true;
+    zip32_xsk_master(&sks->master_xsk, sks->seed, 32);
+    zcl_mutex_unlock(&sks->cs);
+    return true;
+}
+
+void sapling_keystore_wipe_secrets(struct sapling_keystore *sks)
+{
+    zcl_mutex_lock(&sks->cs);
+    memory_cleanse(sks->seed, sizeof(sks->seed));
+    memory_cleanse(&sks->master_xsk, sizeof(sks->master_xsk));
+    sks->has_seed = false;
+    for (size_t i = 0; i < sks->num_keys; i++) {
+        memory_cleanse(&sks->keys[i].xsk, sizeof(sks->keys[i].xsk));
+        sks->keys[i].secret_wiped = true;
+    }
+    sks->locked = true;
+    zcl_mutex_unlock(&sks->cs);
+}
+
+bool sapling_keystore_is_locked(struct sapling_keystore *sks)
+{
+    zcl_mutex_lock(&sks->cs);
+    bool locked = sks->locked;
+    zcl_mutex_unlock(&sks->cs);
+    return locked;
+}
+
+bool sapling_keystore_copy_entry(struct sapling_keystore *sks,
+                                  const struct sapling_key_entry *src,
+                                  struct sapling_key_entry *dst)
+{
+    memset(dst, 0, sizeof(*dst));
+    zcl_mutex_lock(&sks->cs);
+    bool ok = src && !src->secret_wiped;
+    if (ok)
+        *dst = *src;
+    zcl_mutex_unlock(&sks->cs);
+    return ok;
+}
+
+enum sapling_merge_result sapling_keystore_merge_entry(
+    struct sapling_keystore *sks, const struct sapling_key_entry *row)
+{
+    enum sapling_merge_result result = SAPLING_MERGE_ADDED;
+    zcl_mutex_lock(&sks->cs);
+    for (size_t i = 0; i < sks->num_keys; i++) {
+        struct sapling_key_entry *have = &sks->keys[i];
+        if (!have->used || memcmp(have->ivk, row->ivk, 32) != 0)
+            continue;
+        result = SAPLING_MERGE_PRESENT;
+        if (have->secret_wiped && !row->secret_wiped) {
+            have->xsk = row->xsk;
+            have->secret_wiped = false;
+            result = SAPLING_MERGE_RESTORED;
+        }
+        zcl_mutex_unlock(&sks->cs);
+        return result;
+    }
+    if (sks->num_keys >= MAX_SAPLING_KEYS) {
+        zcl_mutex_unlock(&sks->cs);
+        return SAPLING_MERGE_FULL;
+    }
+    sks->keys[sks->num_keys++] = *row;
+    if (row->child_index >= sks->next_child_index)
+        sks->next_child_index = row->child_index + 1;
+    zcl_mutex_unlock(&sks->cs);
+    return result;
+}
+
+void sapling_keystore_settle_lock(struct sapling_keystore *sks,
+                                   bool seed_unreadable,
+                                   bool passphrase_loaded,
+                                   size_t num_unscannable)
+{
+    zcl_mutex_lock(&sks->cs);
+    bool locked = seed_unreadable;
+    size_t damaged = 0;
+    for (size_t i = 0; i < sks->num_keys; i++) {
+        if (!sks->keys[i].used || !sks->keys[i].secret_wiped)
+            continue;
+        if (passphrase_loaded)
+            damaged++;
+        else
+            locked = true;
+    }
+    sks->locked = locked;
+    sks->num_damaged = damaged;
+    sks->num_unscannable = num_unscannable;
+    zcl_mutex_unlock(&sks->cs);
 }
 
 bool sapling_keystore_new_address_transactional(
@@ -65,6 +174,11 @@ bool sapling_keystore_new_address_transactional(
     if (undo_out)
         memset(undo_out, 0, sizeof(*undo_out));
     zcl_mutex_lock(&sks->cs);
+    if (sks->locked) {
+        zcl_mutex_unlock(&sks->cs);
+        LOG_FAIL("sapling_keys",
+                 "new_address: refused, keystore is locked");
+    }
 
     bool generated_seed = false;
     if (!sks->has_seed) {
@@ -280,6 +394,11 @@ bool sapling_keystore_import_xsk(struct sapling_keystore *sks,
                                   const struct zip32_xsk *xsk)
 {
     zcl_mutex_lock(&sks->cs);
+
+    if (sks->locked) {
+        zcl_mutex_unlock(&sks->cs);
+        LOG_FAIL("sapling_keys", "import_xsk: refused, keystore is locked");
+    }
 
     if (sks->num_keys >= MAX_SAPLING_KEYS) {
         zcl_mutex_unlock(&sks->cs);
@@ -498,4 +617,14 @@ bool sapling_decode_extended_full_viewing_key(const char *str,
         return false;
 
     return xfvk_deserialize(raw, xfvk_out);
+}
+
+bool sapling_keystore_copy_seed(struct sapling_keystore *sks, uint8_t seed[32])
+{
+    zcl_mutex_lock(&sks->cs);
+    bool ok = sks->has_seed && !sks->locked;
+    if (ok)
+        memcpy(seed, sks->seed, 32);
+    zcl_mutex_unlock(&sks->cs);
+    return ok;
 }

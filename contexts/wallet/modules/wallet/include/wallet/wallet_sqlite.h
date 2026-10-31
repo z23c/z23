@@ -118,6 +118,27 @@ struct wallet_sqlite {
  * spend fails.  Reset only by process restart. */
 int wallet_sqlite_read_keys_corrupt_count(void);
 
+/* Encrypted rows the last read_keys_r skipped because no passphrase was
+ * loaded. A wallet booted locked has these on disk and in no keystore; they
+ * are sealed, not corrupt, and are excluded from corrupt_rows. */
+int wallet_sqlite_read_keys_locked_count(void);
+
+/* Verdict of wallet_sqlite_check_passphrase(). */
+enum wallet_passphrase_check {
+    WALLET_PASS_OK,          /* at least one sealed row opened with it */
+    WALLET_PASS_WRONG,       /* sealed rows exist and none opened */
+    WALLET_PASS_NO_SEALED,   /* nothing on disk is sealed: nothing to check */
+    WALLET_PASS_UNREADABLE   /* the database could not be read */
+};
+
+/* Test `passphrase` against the sealed rows on disk without touching any
+ * wallet or lock state: the wrapped data key, the seed row, the Sapling
+ * spending-key rows and legacy passphrase-wrapped transparent rows. One row
+ * that opens is proof; damaged rows do not turn a right passphrase into a
+ * wrong one. Reads only, never writes, never caches. */
+enum wallet_passphrase_check wallet_sqlite_check_passphrase(
+    struct wallet_sqlite *ws, const char *passphrase);
+
 /* Zero *ws, adopt the borrowed db handle, and prepare every cached
  * statement. To reopen, wallet_sqlite_close() first. Returns ZCL_OK on
  * success; WSQL_NULL_ARG if ws or db is NULL; on a prepare failure the
@@ -273,7 +294,7 @@ enum wallet_seed_state {
     WALLET_SEED_UNLOCKED,     /* row present, encrypted, decrypted fine */
     WALLET_SEED_LOCKED,       /* row present, encrypted, WRONG/NO passphrase */
     WALLET_SEED_MALFORMED,    /* row present but not a usable 32-byte seed */
-    WALLET_SEED_UNREADABLE,   /* the wallet_sqlite handle is not open */
+    WALLET_SEED_UNREADABLE,   /* the handle is closed or the read failed */
 };
 
 /* True when the seed row exists at all — i.e. everything except ABSENT and

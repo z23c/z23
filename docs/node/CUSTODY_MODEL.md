@@ -153,14 +153,83 @@ cannot auto-unlock a live encrypted wallet. A headless service instead receives
 the user-scoped systemd credential named `wallet-passphrase`; boot reads its
 private bounded file once before the first WKS1/WKD1 row and registers it in the
 same cleansable runtime buffer used by explicit unlock. A missing credential
-supplies no passphrase; with encrypted transparent rows, failed decryption
-reaches the keystore-count abort guard. Malformed credentials fail boot by
-name, and a wrong passphrase likewise reaches the persistence abort guards.
+supplies no passphrase and the wallet boots locked (see below). Malformed
+credentials fail boot by name, and a wrong passphrase with a configured
+credential reaches the persistence abort guards.
 
 NULL means no active runtime passphrase. Transparent writes to a wallet known
 to be encrypted refuse when wrapping fails; a plaintext wallet can still write
 raw keys. Undecryptable loaded rows are skipped with a counted warning
 (`g_read_keys_corrupt_rows`). A plaintext wallet is always "unlocked".
+
+**What locking does to memory.** An encrypted wallet that is locked, by
+`walletlock`, by the unlock timeout, or by a refused unlock or timeout, holds
+no secret in RAM. `wallet_lock_lock` cleanses the transparent private keys, the
+HD master key, the Sapling seed, the Sapling master key and every Sapling
+spending key (`sapling_keystore_wipe_secrets`). Transparent entries stay in the
+keystore by key id and public key, marked sealed: the wallet still recognises its
+own outputs, and `keystore_get_key` never returns a private key for them. It keeps each shielded entry's
+incoming viewing key, full viewing key, diversifier and `pk_d`, and the address
+list. A locked wallet therefore still finds incoming shielded notes and computes
+their nullifiers from the full viewing key, and `z_listaddresses` still answers.
+Unlock restores the seed and each spending key into the entry that already
+exists, matched by incoming viewing key, so any number of lock and unlock cycles
+leaves the key count and the balances unchanged. A plaintext wallet has no
+passphrase to restore from, so locking leaves its Sapling keys as they were.
+
+**A wallet may boot locked.** With encrypted rows on disk and no passphrase,
+boot continues instead of aborting. Transparent rows that cannot be decrypted
+stay sealed on disk and load as sealed entries (their public key is stored in the
+clear), so the STATE F invariant `loaded == rows` holds, the scan key set equals
+the unlocked one, and the cursor-gated wallet scan never reads a sealed boot as a
+changed key set. Nothing deletes wallet records because keys are sealed, and an
+output paid to a sealed key is recorded when it arrives. Sealed rows are counted
+separately from corruption (`wallet_sqlite_read_keys_locked_count`). Shielded rows
+load as viewing entries. Unlock after a locked boot adopts the stored seed when it
+governs the keys, so new keys derive from the recovery phrase. A shielded row
+that stores no full viewing key cannot scan until unlock; it is counted in
+`getwalletinfo.persistence.sapling_unscannable` and logged, not dropped
+silently. Boot mints nothing while sealed: no first keypool, no legacy-pool
+top-up, no LevelDB import, and no seed adoption.
+
+**A locked wallet cannot replace its seed.** While the in-memory seed is absent,
+`sapling_keystore_new_address`, `_generate_seed`, `_set_seed` and `_import_xsk`
+refuse, as do `z_getnewaddress`, `getnewaddress`, key-pool top-up and any
+transparent key derivation. Without that refusal the keystore would see no seed,
+generate a random one, and a later flush would overwrite the stored seed row.
+Wallet writes also fail closed: an encrypted wallet with no passphrase refuses to
+write a Sapling seed or key row in the clear, and the seed writer refuses to
+store a seed that differs from one already stored. A seed read that fails is
+`WALLET_SEED_UNREADABLE`, never absent, and an unlock that cannot read the seed
+returns an error and leaves the wallet locked. A full flush while sealed writes only
+public rows and succeeds when every sealed key and address already has its row, so
+a sealed shutdown stays clean. It fails when a key was minted in memory and sealed
+before it was stored; the check runs inside the write transaction under the
+keystore mutexes, so a lock landing while the flush waits for the database cannot
+slip past it. A key-pool refill or top-up that a lock refuses, at the mint or at the flush, removes its unstored keys, and a transactions-only flush writes only pool entries whose keys are stored, so a restart can always read the pool back. Flushes of
+transactions only are never refused, so a send whose proof outlives the unlock
+window still records its transaction.
+
+**Unlock.** `walletunlock` first proves the passphrase against the sealed rows (the
+wrapped data key, the seed row, the Sapling key rows, legacy wrapped rows) without
+touching any live key, cached passphrase or lock state; a wrong attempt, including
+one against an unlocked wallet, changes nothing. One row that opens proves the
+passphrase. A damaged row is reported per key (`getwalletinfo.persistence.
+sapling_damaged`), only the funds at that address are unavailable, and a send from
+it says the stored key could not be decrypted. Unlock fails only when sealed rows
+exist and none opens. Lock, timeout lock and unlock share one transition mutex, so
+they never interleave; lock order is transition mutex, then wallet and keystore
+mutexes, then the passphrase mutex.
+
+**Exports.** While locked, `z_exportkey`, `z_exportviewingkey`, `dumpprivkey`
+(and so `core.wallet.address.export-key`) and `z_importkey` refuse with the lock
+error. `z_exportkey` encodes from a private copy of the entry taken under the
+keystore mutex.
+
+**A send that meets the lock.** `z_sendmany` copies the sending key entry under
+the Sapling keystore mutex after the spend guard, signs only with the copy, and
+cleanses it on every exit. The mutex is not held across proving. A lock that
+fires first yields the lock error instead of a signature made with wiped memory.
 
 **Persistence behavior, checked.** The `wallet_sqlite` path uses AES-256-GCM
 when encryption is active and accepts legacy plaintext rows. The first-creation
@@ -281,6 +350,7 @@ The spending paths also use two independent runtime gates:
 
 - **`wallet_lock_spend_guard()`** — a locked wallet cannot spend even when
   verification permits (`contexts/wallet/modules/wallet/include/wallet/wallet_lock.h`).
+  Shielded sends additionally require the spending key to be resident (section 3).
 - **the sync-verified `WALLET_SPEND` capability** — spending is disabled until
   the node's own state is self-verified.
 

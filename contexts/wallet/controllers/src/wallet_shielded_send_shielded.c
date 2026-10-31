@@ -8,6 +8,7 @@
 
 #include "controllers/wallet_shielded_internal.h"
 #include "jobs/reducer_frontier.h"
+#include "wallet/wallet_lock.h"
 
 /* Select notes until the running total covers target; returns the running
  * total through notes_total and the selected count through num_sel_notes. */
@@ -245,13 +246,9 @@ static const char *z_sendmany_shielded_sign(
         return spend_err;
 }
 
-/* Shielded-spend path (from-address is a zaddr): spend selected notes,
- * build spend/output descriptions, sign, broadcast. Recipients have
- * already been parsed into the transparent/shielded output arrays by
- * the caller. Returns
- * true on success (txid set on result) or false on error (error string
- * set on result). */
-bool z_sendmany_shielded(
+/* Body of the shielded spend. `from_z_key` is the caller's private copy of the
+ * keystore entry, never a pointer into the keystore. */
+static bool z_sendmany_shielded_with_key(
     struct wallet_rpc_context *ctx,
     const struct chain_params *cp,
     const struct sapling_key_entry *from_z_key,
@@ -583,4 +580,49 @@ shielded_cleanup:
 
         transaction_free(&wtx.tx);
         return true;
+}
+
+/* Shielded-spend path (from-address is a zaddr): spend selected notes,
+ * build spend/output descriptions, sign, broadcast. Recipients have
+ * already been parsed into the transparent/shielded output arrays by
+ * the caller. Returns
+ * true on success (txid set on result) or false on error (error string
+ * set on result).
+ *
+ * `from_z_key` points into the keystore. The wallet can lock at any moment,
+ * which cleanses the entry's spending key in place, so this copies the entry
+ * under the keystore mutex before any proof work and signs only with the copy.
+ * The mutex is not held across proving. The copy is cleansed on every exit. */
+bool z_sendmany_shielded(
+    struct wallet_rpc_context *ctx,
+    const struct chain_params *cp,
+    const struct sapling_key_entry *from_z_key,
+    int64_t total_amount,
+    const struct tx_destination *t_dests, const int64_t *t_amounts,
+    size_t num_t_out,
+    const uint8_t (*z_diversifiers)[11], const uint8_t (*z_pk_ds)[32],
+    const int64_t *z_amounts, const uint8_t (*z_memos)[512],
+    const bool *z_has_memo, size_t num_z_out,
+    struct wallet_tx *prepared, struct json_value *result)
+{
+    struct sapling_key_entry key_copy;
+    if (!ctx || !ctx->wallet ||
+        !sapling_keystore_copy_entry(&ctx->wallet->sapling_keys, from_z_key,
+                                     &key_copy)) {
+        bool locked = !ctx || !ctx->wallet || wallet_lock_is_locked();
+        json_set_str(result, locked
+            ? "Error: wallet is locked - run walletunlock before spending"
+            : "Error: the spending key for this address could not be "
+              "decrypted (damaged stored key); funds at other addresses "
+              "are unaffected");
+        LOG_FAIL("wallet_shielded",
+                 "z_sendmany: refused, spending key not resident (%s)",
+                 locked ? "wallet locked" : "stored key unreadable");
+    }
+    bool ok = z_sendmany_shielded_with_key(
+        ctx, cp, &key_copy, total_amount, t_dests, t_amounts, num_t_out,
+        z_diversifiers, z_pk_ds, z_amounts, z_memos, z_has_memo, num_z_out,
+        prepared, result);
+    memory_cleanse(&key_copy, sizeof(key_copy));
+    return ok;
 }

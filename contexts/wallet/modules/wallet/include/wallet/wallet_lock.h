@@ -58,6 +58,7 @@ enum wallet_lock_err {
     WLK_TIMER_FAIL      = -206,
     WLK_CREDENTIAL_IO   = -207,
     WLK_CREDENTIAL_MODE = -208,
+    WLK_STORE_UNREADABLE = -209,  /* stored rows could not be read; unchanged */
 };
 
 /* The passphrase the persistence layer must decrypt/encrypt with, per the
@@ -83,20 +84,38 @@ bool wallet_lock_encrypted_at_rest(void);
  * passphrase is available. */
 bool wallet_lock_is_unlocked(void);
 
+/* True iff the wallet is encrypted at rest and no passphrase is loaded. Same
+ * truth as !wallet_lock_is_unlocked() but without the test seam, so internal
+ * checks do not consume an armed seam count. */
+bool wallet_lock_is_locked(void);
+
 /* Spend-authority gate, consulted at every spend entry IN ADDITION TO the
  * sync-trust WALLET_SPEND capability: a locked wallet cannot spend even when
  * trust permits.  Returns ZCL_OK when unlocked; a WLK_LOCKED error otherwise. */
 struct zcl_result wallet_lock_spend_guard(void);
 
-/* Runtime unlock.  Cache `passphrase` in a secured buffer, clear the
- * force-lock, and — when both `w` and `ws` are non-NULL — reload the keystore
- * from `ws` into `w` so decrypted keys become resident.  If on-disk key rows
- * exist but none decrypt under `passphrase`, NO state is committed: the module
- * re-locks, scrubs the attempted passphrase, and returns WLK_WRONG_PASS.
- * `w`/`ws` may be NULL (register-only unlock, e.g. before the keystore is
- * wired, or in unit tests).  Rejects NULL/empty/over-long passphrases. */
+/* Runtime unlock.  When both `w` and `ws` are non-NULL, first test
+ * `passphrase` against the sealed rows on disk; if sealed rows exist and none
+ * opens, return WLK_WRONG_PASS having changed nothing (live keys, cached
+ * passphrase and lock state included).  A right passphrase is established by
+ * the rows that do open: a damaged row is reported per key and never blocks
+ * the others.  Then cache the passphrase, clear the force-lock, reload the
+ * keystores into the existing entries (idempotent), restore the Sapling seed
+ * and the HD master, and adopt the stored seed when it governs the keys (an
+ * unlock after a locked boot).  A read error returns WLK_STORE_UNREADABLE and
+ * leaves the wallet in its prior state.  Lock and unlock are serialised by one
+ * transition mutex.  `w`/`ws` may be NULL (register-only unlock, e.g. before
+ * the keystore is wired, or in unit tests).  Rejects NULL/empty/over-long
+ * passphrases. */
 struct zcl_result wallet_lock_unlock(struct wallet *w, struct wallet_sqlite *ws,
                                      const char *passphrase);
+
+/* Reload every stored key row into the live keystores and restore the HD
+ * master, under the same transition mutex as lock and unlock, so a lock can
+ * neither land inside the reload nor be undone by it. Use this instead of
+ * reading the key rows directly from outside this module. */
+struct zcl_result wallet_lock_reload_keys(struct wallet *w,
+                                          struct wallet_sqlite *ws);
 
 /* Register the systemd `wallet-passphrase` credential before boot reads
  * encrypted rows. Missing CREDENTIALS_DIRECTORY or a missing named credential
@@ -121,8 +140,12 @@ struct zcl_result wallet_lock_arm_timeout(struct wallet *w,
                                           uint32_t timeout_seconds);
 
 /* Runtime lock.  Secure-erase the cached passphrase, set the force-lock, and
- * wipe decrypted private keys from `w`'s in-RAM keystore (`w` may be NULL).
- * Never touches disk; idempotent. */
+ * cleanse the secret material held by `w` (`w` may be NULL): transparent
+ * private keys always; for an encrypted wallet also the Sapling seed, master
+ * key and every spending key, and the HD master key.  Viewing keys,
+ * diversifiers, pk_d and the address list stay resident, so a locked wallet
+ * keeps scanning incoming notes.  Unlock restores the secrets into the
+ * existing entries.  Never touches disk; idempotent. */
 void wallet_lock_lock(struct wallet *w);
 
 /* Render {locked, unlocked, encrypted_at_rest, source} into `out` (which the

@@ -10,4 +10,7 @@ size_t wallet_find_slot_internal(const struct wallet *w,
 void wallet_key_pool_consume_transaction_outputs_locked(
     struct wallet *w, const struct transaction *tx);
 
+bool wallet_add_sapling_note(struct wallet *w,
+                                const struct sapling_received_note *note);
+
 #endif /* ZCL_WALLET_INTERNAL_H */

@@ -114,8 +114,8 @@ static bool catchup_sapling_output_opened_by_key(
         return false; // raw-return-ok:not-mine answer, no error
 
     uint8_t ak[32], nk[32];
-    sapling_ask_to_ak(ke->xsk.expsk.ask, ak);
-    sapling_nsk_to_nk(ke->xsk.expsk.nsk, nk);
+    memcpy(ak, ke->xfvk.fvk.ak, sizeof(ak));
+    memcpy(nk, ke->xfvk.fvk.nk, sizeof(nk));
 
     /* Position-0 placeholder nullifier. As in
      * wallet_try_sapling_decrypt (contexts/wallet/modules/wallet/src/wallet.c), the note's

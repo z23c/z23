@@ -56,6 +56,63 @@ void keystore_wipe_private_keys(struct basic_keystore *ks)
     zcl_mutex_unlock(&ks->cs);
 }
 
+void keystore_seal_private_keys(struct basic_keystore *ks)
+{
+    if (!ks) return;
+    zcl_mutex_lock(&ks->cs);
+    for (size_t i = 0; i < ks->num_keys; i++) {
+        struct key_entry *e = &ks->keys[i];
+        if (!e->used || e->sealed)
+            continue;
+        if (privkey_get_pubkey(&e->key, &e->pub)) {
+            memory_cleanse(&e->key, sizeof(e->key));
+            e->sealed = true;
+        } else {
+            /* No public key to keep: drop the entry rather than keep a secret. */
+            memory_cleanse(&e->key, sizeof(e->key));
+            e->used = false;
+        }
+    }
+    zcl_mutex_unlock(&ks->cs);
+}
+
+bool keystore_add_sealed(struct basic_keystore *ks, const struct pubkey *pk)
+{
+    if (!ks || !pk || !pubkey_is_valid(pk))
+        return false;
+    struct key_id kid = pubkey_get_id(pk);
+    zcl_mutex_lock(&ks->cs);
+    for (size_t i = 0; i < ks->num_keys; i++) {
+        if (ks->keys[i].used && key_id_eq(&ks->keys[i].keyid, &kid)) {
+            zcl_mutex_unlock(&ks->cs);
+            return true;
+        }
+    }
+    if (ks->num_keys >= MAX_KEYSTORE_KEYS) {
+        zcl_mutex_unlock(&ks->cs);
+        return false;
+    }
+    struct key_entry *e = &ks->keys[ks->num_keys++];
+    memset(e, 0, sizeof(*e));
+    e->keyid = kid;
+    e->pub = *pk;
+    e->used = true;
+    e->sealed = true;
+    zcl_mutex_unlock(&ks->cs);
+    return true;
+}
+
+size_t keystore_num_sealed(struct basic_keystore *ks)
+{
+    size_t n = 0;
+    zcl_mutex_lock(&ks->cs);
+    for (size_t i = 0; i < ks->num_keys; i++)
+        if (ks->keys[i].used && ks->keys[i].sealed)
+            n++;
+    zcl_mutex_unlock(&ks->cs);
+    return n;
+}
+
 bool keystore_add_key(struct basic_keystore *ks, const struct privkey *key)
 {
     struct pubkey pk;
@@ -69,6 +126,8 @@ bool keystore_add_key(struct basic_keystore *ks, const struct privkey *key)
     for (size_t i = 0; i < ks->num_keys; i++) {
         if (ks->keys[i].used && key_id_eq(&ks->keys[i].keyid, &kid)) {
             ks->keys[i].key = *key;
+            ks->keys[i].pub = pk;
+            ks->keys[i].sealed = false;
             zcl_mutex_unlock(&ks->cs);
             return true;
         }
@@ -83,6 +142,8 @@ bool keystore_add_key(struct basic_keystore *ks, const struct privkey *key)
     e->keyid = kid;
     e->key = *key;
     e->used = true;
+    e->pub = pk;
+    e->sealed = false;
 
     zcl_mutex_unlock(&ks->cs);
     return true;
@@ -131,6 +192,10 @@ bool keystore_get_key(const struct basic_keystore *ks,
     zcl_mutex_lock((zcl_mutex_t *)&ks->cs);
     for (size_t i = 0; i < ks->num_keys; i++) {
         if (ks->keys[i].used && key_id_eq(&ks->keys[i].keyid, keyid)) {
+            if (ks->keys[i].sealed) {
+                zcl_mutex_unlock((zcl_mutex_t *)&ks->cs);
+                return false;
+            }
             *key_out = ks->keys[i].key;
             zcl_mutex_unlock((zcl_mutex_t *)&ks->cs);
             return true;
@@ -149,7 +214,11 @@ bool keystore_get_pubkey(const struct basic_keystore *ks,
     zcl_mutex_lock((zcl_mutex_t *)&ks->cs);
     for (size_t i = 0; i < ks->num_keys; i++) {
         if (ks->keys[i].used && key_id_eq(&ks->keys[i].keyid, keyid)) {
-            bool ok = privkey_get_pubkey(&ks->keys[i].key, pk_out);
+            bool ok = true;
+            if (ks->keys[i].sealed)
+                *pk_out = ks->keys[i].pub;
+            else
+                ok = privkey_get_pubkey(&ks->keys[i].key, pk_out);
             zcl_mutex_unlock((zcl_mutex_t *)&ks->cs);
             return ok;
         }

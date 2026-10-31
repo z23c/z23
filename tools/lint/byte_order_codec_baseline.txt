@@ -112,7 +112,6 @@ contexts/commons/modules/vcs/src/package_reward.c
 contexts/commons/modules/vcs/src/package_service.c
 contexts/commons/modules/vcs/src/vcs_priv.h
 contexts/wallet/modules/wallet/src/sapling_keys.c
-contexts/wallet/modules/wallet/src/wallet.c
 contexts/wallet/modules/wallet/src/wallet_keystore.c
 engine/entry/main_cli_modes.c
 tools/command/native_dev_command.c

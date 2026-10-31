@@ -32,6 +32,4 @@ core/modules/net/src/net.c 2215
 core/modules/net/src/onion_directory.c 1516
 contexts/commons/modules/vcs/src/package_reward.c 1886
 contexts/commons/modules/vcs/src/package_swarm_node.c 2015
-contexts/wallet/modules/wallet/src/wallet.c 1530
-contexts/wallet/modules/wallet/src/wallet_sqlite.c 1603
 engine/entry/main_cli_modes.c 3993

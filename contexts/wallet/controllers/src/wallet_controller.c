@@ -151,6 +151,14 @@ static bool rpc_getwalletinfo(const struct json_value *params, bool help,
     json_push_kv_int (&persistence, "keystore_count",    h.keystore_count);
     json_push_kv_bool(&persistence, "mismatch",          h.mismatch);
     json_push_kv_int (&persistence, "corrupt_rows",      h.corrupt_rows);
+    /* Shielded rows with no readable spending key and no stored viewing key:
+     * they cannot scan until the wallet is unlocked. */
+    json_push_kv_int (&persistence, "sapling_unscannable",
+                      (int64_t)ctx->wallet->sapling_keys.num_unscannable);
+    /* Rows whose spending key stayed unreadable although the passphrase was
+     * accepted: only the funds at those addresses are unavailable. */
+    json_push_kv_int (&persistence, "sapling_damaged",
+                      (int64_t)ctx->wallet->sapling_keys.num_damaged);
     json_push_kv_str (&persistence, "last_error",        h.last_error);
     json_push_kv(result, "persistence", &persistence);
 
@@ -757,22 +765,24 @@ static bool rpc_keypoolrefill(const struct json_value *params, bool help,
     }
 
     if (!wallet_top_up_key_pool(ctx->wallet, new_size)) {
+        wallet_key_pool_discard_unpersisted(ctx->wallet);
         json_set_str(result, "Error refilling keypool");
         LOG_FAIL("wallet", "keypoolrefill: failed to refill keypool (size=%u)", new_size);
     }
     int64_t pool_generation =
         wallet_key_pool_generation_ceiling(ctx->wallet);
 
-    /* Flush the fresh keypool entries. If persistence fails the
-     * keypool indices still point into the keystore, but the on-disk
-     * rows won't exist — on next restart the node would hand out a
-     * pre-existing address twice. Log and error; canary will flag
-     * the daemon as unhealthy and operator can intervene. */
+    /* Flush the fresh keypool entries. If persistence fails the on-disk rows
+     * do not exist, so the unstored entries and their keys are discarded:
+     * kept, a later flush could mark them durable with no secret behind them,
+     * and a restart would hand out an address twice. Log and error; canary
+     * flags the daemon as unhealthy. */
     if (ctx->wallet_db) {
         struct zcl_result fr = wallet_flush_from_context(ctx);
         if (!fr.ok) {
+            wallet_key_pool_discard_unpersisted(ctx->wallet);
             json_set_str(result,
-                "Error: keypool refilled in memory but persistence flush failed. "
+                "Error: keypool refill was not stored and was discarded. "
                 "Check getwalletinfo.persistence and node.log.");
             LOG_FAIL("wallet", "keypoolrefill: wallet_sqlite_flush_r failed "
                                 "(new_size=%u, code=%d): %s",

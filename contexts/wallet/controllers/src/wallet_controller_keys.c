@@ -7,6 +7,7 @@
  * importprivkey, and importaddress. */
 
 #include "controllers/wallet_controller_internal.h"
+#include "wallet/wallet_lock.h"
 
 bool wallet_rpc_set_secret_string(struct json_value *result, char *secret,
                                   size_t secret_size, bool encoded)
@@ -30,6 +31,16 @@ bool rpc_dumpprivkey(const struct json_value *params, bool help,
     if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); LOG_FAIL("wallet", "dumpprivkey: invalid params"); }
 
     ENSURE_WALLET(result);
+
+    {
+        struct zcl_result lk = wallet_lock_spend_guard();
+        if (!lk.ok) {
+            json_set_str(result, "Error: wallet is locked - run walletunlock "
+                                 "before exporting keys");
+            LOG_FAIL("wallet", "dumpprivkey: refused, wallet locked (code=%d)",
+                     lk.code);
+        }
+    }
 
     struct tx_destination dest;
     if (!wallet_decode_address(addr_str, &dest)) {
@@ -498,6 +509,7 @@ bool wallet_direct_getnewaddresses(
     bool direct_generated = wallet_has_hd(ctx->wallet);
     if (wallet_direct_keypool_needs_topup(ctx, direct_generated)) {
         if (!wallet_top_up_key_pool(ctx->wallet, DEFAULT_KEYPOOL_SIZE)) {
+            wallet_key_pool_discard_unpersisted(ctx->wallet);
             (void)snprintf(err_out, err_max, "keypool top-up failed");
             LOG_FAIL("wallet", "new_durable_address: keypool top-up failed");
         }
@@ -505,6 +517,7 @@ bool wallet_direct_getnewaddresses(
             wallet_key_pool_generation_ceiling(ctx->wallet);
         struct zcl_result topup_flush;
         if (!wallet_direct_topup_flush_ok(ctx, &topup_flush)) {
+            wallet_key_pool_discard_unpersisted(ctx->wallet);
             (void)snprintf(err_out, err_max,
                 "wallet persistence failed. No unpersisted keypool "
                 "address was returned.");

@@ -395,8 +395,8 @@ static int rescan_save_witnesses(const struct wallet_rpc_context *ctx,
         if (!key || incremental_tree_size(&witnesses[ni].tree) == 0)
             continue;
         uint8_t ak[32], nk[32], nf[32];
-        sapling_ask_to_ak(key->xsk.expsk.ask, ak);
-        sapling_nsk_to_nk(key->xsk.expsk.nsk, nk);
+        memcpy(ak, key->xfvk.fvk.ak, sizeof(ak));
+        memcpy(nk, key->xfvk.fvk.nk, sizeof(nk));
         uint64_t position = incremental_tree_size(&witnesses[ni].tree) - 1;
         if (!sapling_compute_nf(notes[ni].diversifier, notes[ni].pk_d,
                                 (uint64_t)notes[ni].value, notes[ni].rcm,

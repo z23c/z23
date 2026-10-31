@@ -67,6 +67,10 @@ static inline struct wallet_rpc_context *wallet_ctx(void)
     return wallet_rpc_context_current();
 }
 
+struct wallet;
+struct wallet_sqlite;
+bool wallet_rescan_reload_from_store(struct wallet *w, struct wallet_sqlite *db);
+
 /* wallet_rescan_controller_coins.c — coinanalysis */
 bool rpc_coinanalysis(const struct json_value *params, bool help,
                       struct json_value *result);
