@@ -397,6 +397,38 @@ static bool pcw_rung1_ancestors(struct pcw_walk *w,
     return true;
 }
 
+/* Decode the supplied header into w->header and run both PoW halves on
+ * it, recording the header fields and the verdict on the rung. On failure
+ * the rung is already marked FAILED and false is returned. */
+static bool pcw_rung1_check_header(struct pcw_walk *w, struct pcw_rung *r,
+                                   const char *hdr_hex,
+                                   const struct chain_params *cp)
+{
+    if (!pcw_decode_header(hdr_hex, &w->header)) {
+        pcw_set(r, PCW_FAILED,
+                "`header` is not exactly one well-formed block header "
+                "(wire layout, solution length, or trailing bytes)");
+        return false;
+    }
+
+    struct uint256 hash;
+    const char *why = NULL;
+    bool ok = pcw_header_pow_ok(&w->header, cp, &hash, &why);
+    pcw_field_uint256(r, "block_hash", &hash);
+    pcw_field_int(r, "nbits", (int64_t)w->header.nBits);
+    pcw_field_int(r, "ntime", (int64_t)w->header.nTime);
+    pcw_field_int(r, "solution_size", (int64_t)w->header.nSolutionSize);
+    /* The header decoded, so rung 2 has a merkle root to compare against
+     * even when the work itself is bad — the rungs stay independent. */
+    w->have_header = true;
+    if (!ok) {
+        pcw_field_int(r, "headers_linked", 0);
+        pcw_set(r, PCW_FAILED, "%s", why);
+        return false;
+    }
+    return true;
+}
+
 static void pcw_rung1_header_pow(struct pcw_walk *w,
                                  const struct json_value *input)
 {
@@ -417,28 +449,8 @@ static void pcw_rung1_header_pow(struct pcw_walk *w,
         return;
     }
 
-    if (!pcw_decode_header(hdr_hex, &w->header)) {
-        pcw_set(r, PCW_FAILED,
-                "`header` is not exactly one well-formed block header "
-                "(wire layout, solution length, or trailing bytes)");
+    if (!pcw_rung1_check_header(w, r, hdr_hex, cp))
         return;
-    }
-
-    struct uint256 hash;
-    const char *why = NULL;
-    bool ok = pcw_header_pow_ok(&w->header, cp, &hash, &why);
-    pcw_field_uint256(r, "block_hash", &hash);
-    pcw_field_int(r, "nbits", (int64_t)w->header.nBits);
-    pcw_field_int(r, "ntime", (int64_t)w->header.nTime);
-    pcw_field_int(r, "solution_size", (int64_t)w->header.nSolutionSize);
-    /* The header decoded, so rung 2 has a merkle root to compare against
-     * even when the work itself is bad — the rungs stay independent. */
-    w->have_header = true;
-    if (!ok) {
-        pcw_field_int(r, "headers_linked", 0);
-        pcw_set(r, PCW_FAILED, "%s", why);
-        return;
-    }
 
     int linked = 0;
     if (!pcw_rung1_ancestors(w, input, cp, &linked))
@@ -517,6 +529,62 @@ static struct uint256 pcw_merkle_fold(struct uint256 acc, int64_t index,
     return acc;
 }
 
+/* Validate the merkle index, branch and fold against the header's merkle
+ * root, recording the verdict on the rung. On failure the rung is already
+ * marked FAILED (or not_checked never happens here) and false is
+ * returned. */
+static bool pcw_rung2_check_merkle(struct pcw_walk *w, struct pcw_rung *r,
+                                   const struct json_value *input)
+{
+    int64_t index = 0;
+    const struct json_value *iv = json_get(input, "merkle_index");
+    if (iv && iv->type == JSON_INT)
+        index = json_get_int(iv);
+    if (index < 0) {
+        pcw_set(r, PCW_FAILED, "`merkle_index` is negative (%lld)",
+                (long long)index);
+        return false;
+    }
+    pcw_field_int(r, "merkle_index", index);
+
+    uint8_t sib[PCW_MAX_BRANCH][32];
+    size_t branch_len = 0;
+    const char *branch_hex = json_get_str(json_get(input, "merkle_branch"));
+    if (!pcw_parse_branch(branch_hex, sib, &branch_len)) {
+        pcw_set(r, PCW_FAILED,
+                "`merkle_branch` must be a multiple of 32 bytes of hex "
+                "(at most %d siblings)", PCW_MAX_BRANCH);
+        return false;
+    }
+    pcw_field_int(r, "branch_len", (int64_t)branch_len);
+
+    /* A branch of length k can only address 2^k leaf positions. */
+    if (branch_len < 63 && index >= ((int64_t)1 << branch_len)) {
+        pcw_set(r, PCW_FAILED,
+                "merkle_index %lld is outside the %lld positions a "
+                "%zu-sibling branch can address",
+                (long long)index, (long long)((int64_t)1 << branch_len),
+                branch_len);
+        return false;
+    }
+
+    struct uint256 acc = pcw_merkle_fold(w->tx.hash, index, sib, branch_len);
+    pcw_field_uint256(r, "computed_root", &acc);
+
+    if (memcmp(acc.data, w->header.hashMerkleRoot.data, 32) != 0) {
+        pcw_set(r, PCW_FAILED,
+                "the merkle path folds to a different root than the "
+                "header commits — wrong branch, wrong index, or wrong "
+                "block for this transaction");
+        return false;
+    }
+    pcw_set(r, PCW_PASSED,
+            "the transaction folds to the header's merkle root through "
+            "%zu sibling(s) at position %lld",
+            branch_len, (long long)index);
+    return true;
+}
+
 static void pcw_rung2_tx_inclusion(struct pcw_walk *w,
                                    const struct json_value *input)
 {
@@ -560,52 +628,7 @@ static void pcw_rung2_tx_inclusion(struct pcw_walk *w,
     }
     pcw_field_uint256(r, "merkle_root", &w->header.hashMerkleRoot);
 
-    int64_t index = 0;
-    const struct json_value *iv = json_get(input, "merkle_index");
-    if (iv && iv->type == JSON_INT)
-        index = json_get_int(iv);
-    if (index < 0) {
-        pcw_set(r, PCW_FAILED, "`merkle_index` is negative (%lld)",
-                (long long)index);
-        return;
-    }
-    pcw_field_int(r, "merkle_index", index);
-
-    uint8_t sib[PCW_MAX_BRANCH][32];
-    size_t branch_len = 0;
-    const char *branch_hex = json_get_str(json_get(input, "merkle_branch"));
-    if (!pcw_parse_branch(branch_hex, sib, &branch_len)) {
-        pcw_set(r, PCW_FAILED,
-                "`merkle_branch` must be a multiple of 32 bytes of hex "
-                "(at most %d siblings)", PCW_MAX_BRANCH);
-        return;
-    }
-    pcw_field_int(r, "branch_len", (int64_t)branch_len);
-
-    /* A branch of length k can only address 2^k leaf positions. */
-    if (branch_len < 63 && index >= ((int64_t)1 << branch_len)) {
-        pcw_set(r, PCW_FAILED,
-                "merkle_index %lld is outside the %lld positions a "
-                "%zu-sibling branch can address",
-                (long long)index, (long long)((int64_t)1 << branch_len),
-                branch_len);
-        return;
-    }
-
-    struct uint256 acc = pcw_merkle_fold(w->tx.hash, index, sib, branch_len);
-    pcw_field_uint256(r, "computed_root", &acc);
-
-    if (memcmp(acc.data, w->header.hashMerkleRoot.data, 32) != 0) {
-        pcw_set(r, PCW_FAILED,
-                "the merkle path folds to a different root than the "
-                "header commits — wrong branch, wrong index, or wrong "
-                "block for this transaction");
-        return;
-    }
-    pcw_set(r, PCW_PASSED,
-            "the transaction folds to the header's merkle root through "
-            "%zu sibling(s) at position %lld",
-            branch_len, (long long)index);
+    (void)pcw_rung2_check_merkle(w, r, input);
 }
 
 /* ── rung 3: anchor decode (first OP_RETURN parses as ZANC) ────────── */
@@ -1085,28 +1108,38 @@ static bool pcw_read_doc_file(const char *doc_file, char *file_hex, size_t cap,
     return true;
 }
 
+/* Resolve the document hex from `doc`, or by reading `doc_file` into
+ * `file_hex`. Returns NULL after filling why/why_size on failure. */
+static const char *pcw_doc_hex_source(const struct json_value *input,
+                                      char *file_hex, char *why,
+                                      size_t why_size)
+{
+    const char *doc_hex = pcw_input_str(input, "doc");
+    if (doc_hex)
+        return doc_hex;
+    const char *doc_file = pcw_input_str(input, "doc_file");
+    if (!doc_file) {
+        (void)snprintf(why, why_size,
+                       "give --doc=<hex> (a zid document, e.g. from "
+                       "`zcode release sign`) or --doc_file=<path to a "
+                       "saved .zid>");
+        return NULL;
+    }
+    return pcw_read_doc_file(doc_file, file_hex, ZID_DOC_MAX * 2 + 2, why,
+                             why_size)
+               ? file_hex
+               : NULL;
+}
+
 /* Load the document wire bytes from `doc` hex or `doc_file`. Fills
  * why/why_size on any failure and returns false. */
 static bool pcw_load_doc(const struct json_value *input, struct pcw_walk *w,
                          char *why, size_t why_size)
 {
-    const char *doc_hex = pcw_input_str(input, "doc");
-    const char *doc_file = pcw_input_str(input, "doc_file");
     char file_hex[ZID_DOC_MAX * 2 + 2];
-
-    if (!doc_hex) {
-        if (!doc_file) {
-            (void)snprintf(why, why_size,
-                           "give --doc=<hex> (a zid document, e.g. from "
-                           "`zcode release sign`) or --doc_file=<path to a "
-                           "saved .zid>");
-            return false;
-        }
-        if (!pcw_read_doc_file(doc_file, file_hex, sizeof(file_hex), why,
-                               why_size))
-            return false;
-        doc_hex = file_hex;
-    }
+    const char *doc_hex = pcw_doc_hex_source(input, file_hex, why, why_size);
+    if (!doc_hex)
+        return false;
 
     size_t len = pcw_unhex(doc_hex, w->doc_wire, sizeof(w->doc_wire));
     if (len == 0) {
@@ -1249,6 +1282,57 @@ static void pcw_emit_rung_entry(const struct pcw_rung *r,
     json_free(&row);
 }
 
+/* Emit the human-readable label and meaning of the verified prefix. */
+static void pcw_emit_prefix_label(const struct pcw_walk *w, int prefix,
+                                  struct json_value *data)
+{
+    char plabel[128];
+    if (prefix == 0)
+        (void)snprintf(plabel, sizeof(plabel),
+                       "none — rung 1 (%s) did not pass", w->rung[0].id);
+    else
+        (void)snprintf(plabel, sizeof(plabel), "rungs 1-%d (%s .. %s)",
+                       prefix, w->rung[0].id, w->rung[prefix - 1].id);
+    (void)json_push_kv_str(data, "verified_prefix_label", plabel);
+    (void)json_push_kv_str(data, "verified_prefix_meaning",
+                           "consecutive passing rungs from 1; a later rung "
+                           "reports its own honest verdict but can never "
+                           "lift this past an earlier break");
+}
+
+/* Emit the passed/failed/not_checked summary object. */
+static void pcw_emit_summary(int passed, int failed, int skipped,
+                             struct json_value *data)
+{
+    struct json_value summary;
+    json_init(&summary);
+    json_set_object(&summary);
+    (void)json_push_kv_int(&summary, "passed", passed);
+    (void)json_push_kv_int(&summary, "failed", failed);
+    (void)json_push_kv_int(&summary, "not_checked", skipped);
+    (void)json_push_kv(data, "summary", &summary);
+    json_free(&summary);
+}
+
+/* Emit the per-rung report lines and rung rows. */
+static void pcw_emit_report_rows(const struct pcw_walk *w,
+                                 struct json_value *data)
+{
+    struct json_value report;
+    json_init(&report);
+    json_set_array(&report);
+    struct json_value rungs;
+    json_init(&rungs);
+    json_set_array(&rungs);
+
+    for (int i = 0; i < PCW_RUNGS; i++)
+        pcw_emit_rung_entry(&w->rung[i], &report, &rungs);
+    (void)json_push_kv(data, "report", &report);
+    json_free(&report);
+    (void)json_push_kv(data, "rungs", &rungs);
+    json_free(&rungs);
+}
+
 static void pcw_emit(const struct pcw_walk *w, struct json_value *data)
 {
     struct pcw_tally t;
@@ -1275,43 +1359,13 @@ static void pcw_emit(const struct pcw_walk *w, struct json_value *data)
     (void)json_push_kv_str(data, "verdict", verdict);
 
     (void)json_push_kv_int(data, "verified_prefix", prefix);
-    char plabel[128];
-    if (prefix == 0)
-        (void)snprintf(plabel, sizeof(plabel),
-                       "none — rung 1 (%s) did not pass", w->rung[0].id);
-    else
-        (void)snprintf(plabel, sizeof(plabel), "rungs 1-%d (%s .. %s)",
-                       prefix, w->rung[0].id, w->rung[prefix - 1].id);
-    (void)json_push_kv_str(data, "verified_prefix_label", plabel);
-    (void)json_push_kv_str(data, "verified_prefix_meaning",
-                           "consecutive passing rungs from 1; a later rung "
-                           "reports its own honest verdict but can never "
-                           "lift this past an earlier break");
+    pcw_emit_prefix_label(w, prefix, data);
 
     pcw_emit_break_gap(w, &t, data);
 
-    struct json_value summary;
-    json_init(&summary);
-    json_set_object(&summary);
-    (void)json_push_kv_int(&summary, "passed", passed);
-    (void)json_push_kv_int(&summary, "failed", t.failed);
-    (void)json_push_kv_int(&summary, "not_checked", skipped);
-    (void)json_push_kv(data, "summary", &summary);
-    json_free(&summary);
+    pcw_emit_summary(passed, t.failed, skipped, data);
 
-    struct json_value report;
-    json_init(&report);
-    json_set_array(&report);
-    struct json_value rungs;
-    json_init(&rungs);
-    json_set_array(&rungs);
-
-    for (int i = 0; i < PCW_RUNGS; i++)
-        pcw_emit_rung_entry(&w->rung[i], &report, &rungs);
-    (void)json_push_kv(data, "report", &report);
-    json_free(&report);
-    (void)json_push_kv(data, "rungs", &rungs);
-    json_free(&rungs);
+    pcw_emit_report_rows(w, data);
 }
 
 /* ── zcode.proof.walk ──────────────────────────────────────────────── */
