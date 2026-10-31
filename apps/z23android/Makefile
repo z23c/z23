@@ -252,6 +252,14 @@ test-host:
 	'$(BUILD_DIR)/layout-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/home_test.c home.c layout.c hosts.c pairing.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
 	'$(BUILD_DIR)/home-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/clip_store_test.c clip_store.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/clip-store-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/clip-store-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/clip-store-test' "$$scratch"
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/clips_capture_test.c clip_capture.c thermal.c -o '$(BUILD_DIR)/clips-capture-test'
+	'$(BUILD_DIR)/clips-capture-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/clips_player_test.c clip_player.c -o '$(BUILD_DIR)/clips-player-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/clips-player-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/clips-player-test' "$$scratch"
 
 .PHONY: test-devkey
 test-devkey:

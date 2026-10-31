@@ -3,6 +3,7 @@
 #include "app.h"
 #include "base/cleanse.h"
 #include "camera.h"
+#include "clip_screen.h"
 #include "controller.h"
 #ifdef ZAPP_DEVKEY_PROBE
 #include "device_key_probe.h"
@@ -217,7 +218,8 @@ static int input_ready(int fd, int events, void *context)
     while (AInputQueue_getEvent(queue, &event) >= 0) {
         if (AInputQueue_preDispatchEvent(queue, event)) continue;
         if (zapp_secure_window_drops(event)) { AInputQueue_finishEvent(queue, event, true); continue; }
-        AInputQueue_finishEvent(queue, event, zapp_native_ui_input(env, event));
+        bool taken = zapp_clip_screen_input(env, event) || zapp_native_ui_input(env, event);
+        AInputQueue_finishEvent(queue, event, taken);
     }
     return 1;
 }
@@ -337,6 +339,20 @@ static bool intent_pairing(JNIEnv *env, jobject activity, char *out, size_t cap)
     if (value) (*env)->CallVoidMethod(env, intent, remove, key);
     (void)clean(env); (*env)->PopLocalFrame(env, NULL); return ok;
 }
+/* Opens the clips screen named by the org.z23.clips launch extra: record or watch. */
+static void intent_clips(JNIEnv *env, jobject activity, const char *files)
+{
+    char word[16];
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)clean(env); return; }
+    jobject intent = launch_intent(env, activity);
+    jclass intent_cls = clean(env) && intent ? (*env)->GetObjectClass(env, intent) : NULL;
+    jmethodID extra = intent_cls ? (*env)->GetMethodID(env, intent_cls, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;") : NULL;
+    jstring key = clean(env) ? (*env)->NewStringUTF(env, "org.z23.clips") : NULL;
+    jstring value = clean(env) && extra && key ? (*env)->CallObjectMethod(env, intent, extra, key) : NULL;
+    if (copy_utf(env, value, word, sizeof(word)) && (!strcmp(word, "record") || !strcmp(word, "watch")))
+        (void)zapp_clip_screen_open(env, activity, files, strcmp(word, "record") ? ZAPP_CLIP_WATCH : ZAPP_CLIP_RECORD);
+    (void)clean(env); (*env)->PopLocalFrame(env, NULL);
+}
 static bool release_surface(JNIEnv *env, jobject activity)
 {
     if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)clean(env); return false; }
@@ -371,6 +387,7 @@ static void finish_previous(JNIEnv *env)
  * destroyed, so the newest activity takes this state over and the old one skips it. */
 static void detach_activity(JNIEnv *env)
 {
+    zapp_clip_screen_close(env);
     zapp_controller_detach();
     zapp_camera_set_frame_notify(NULL);
     zapp_camera_stop();
@@ -395,11 +412,11 @@ static void destroy(ANativeActivity *activity)
 }
 static void pause_activity(ANativeActivity *activity)
 {
-    (void)activity;
 #ifdef ZAPP_DEVKEY_PROBE
     zapp_devkey_probe(activity, ZAPP_DEVKEY_PROBE_PAUSE);
 #endif
     foreground = false;
+    zapp_clip_screen_pause(activity->env);
     zapp_controller_visible(false);
     if (!atomic_load(&camera_dialog)) zapp_camera_stop();
 }
@@ -416,6 +433,7 @@ static void resume_activity(ANativeActivity *activity)
     pthread_mutex_unlock(&lock);
     if (!owner) { ANativeActivity_finish(activity); return; }
     foreground = true;
+    zapp_clip_screen_resume(activity->env);
     zapp_controller_visible(true);
     zapp_native_ui_resume(activity->env);
     refresh(activity->env);
@@ -454,6 +472,7 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
         (void)zapp_controller_action("pair_offer", offer, "");
         memory_cleanse(offer, sizeof(offer));
     }
+    intent_clips(env, activity->clazz, activity->internalDataPath);
     refresh(env); return;
 fail:
     (void)clean(env); ANativeActivity_finish(activity);
