@@ -296,12 +296,9 @@ static bool dump_fsync_cadence_json(struct json_value *out, bool ok)
     return ok;
 }
 
-bool reducer_drive_dump_state_json(struct json_value *out, const char *key)
+/* Scalar watchdog state: the first six keys of the dump. */
+static bool dump_watchdog_head_json(struct json_value *out)
 {
-    (void)key;
-    if (!out)
-        return false;
-    json_set_object(out);
     const char *label = reducer_drive_label();
     bool ok = true;
     ok = ok && json_push_kv_bool(out, "active", reducer_drive_active());
@@ -313,13 +310,17 @@ bool reducer_drive_dump_state_json(struct json_value *out, const char *key)
                                 atomic_load(&g_last_fire_unix));
     ok = ok && json_push_kv_int(out, "utxo_apply_cursor",
                                 (int64_t)reducer_drive_watchdog_read_cursor());
+    return ok;
+}
 
-    /* Advance-or-blocker spin counters (engine/services/src/reducer_drain.c): a
-     * "stage_spin" object naming any stage that reported drain advances while
-     * its own cursor stayed frozen. Emitted only when at least one stage is
-     * nonzero (a healthy drive shows nothing); per-stage nested objects carry
-     * {rounds_frozen, steps_reported}. The accessor does lock-free atomic reads
-     * with no allocation. */
+/* Advance-or-blocker spin counters (engine/services/src/reducer_drain.c): a
+ * "stage_spin" object naming any stage that reported drain advances while
+ * its own cursor stayed frozen. Emitted only when at least one stage is
+ * nonzero (a healthy drive shows nothing); per-stage nested objects carry
+ * {rounds_frozen, steps_reported}. The accessor does lock-free atomic reads
+ * with no allocation. */
+static bool dump_stage_spin_json(struct json_value *out, bool ok)
+{
     struct reducer_stage_spin_entry spin[REDUCER_DRAIN_NUM_STAGES];
     int spin_n = reducer_drain_spin_snapshot(spin, REDUCER_DRAIN_NUM_STAGES);
     int spin_nonzero = 0;
@@ -344,6 +345,159 @@ bool reducer_drive_dump_state_json(struct json_value *out, const char *key)
         ok = ok && json_push_kv(out, "stage_spin", &spin_obj);
         json_free(&spin_obj);
     }
+    return ok;
+}
+
+/* Drain-exit last-round keys (the exit counters and the one-round stage
+ * timings). */
+static bool dump_drain_exit_json(struct json_value *out,
+                                 const struct reducer_drain_exit_stats *des,
+                                 bool ok)
+{
+    ok = ok && json_push_kv_int(out, "drain_exit_converged_total",
+                                (int64_t)des->exit_converged_total);
+    ok = ok && json_push_kv_int(out, "drain_exit_budget_total",
+                                (int64_t)des->exit_budget_total);
+    ok = ok && json_push_kv_int(out, "drain_last_round_advances",
+                                des->last_round_advances);
+    ok = ok && json_push_kv_int(out, "drain_last_elapsed_us",
+                                des->last_elapsed_us);
+    /* Stage names come from reducer_drain.c's own table (the single
+     * authority) rather than a second copy maintained here, which could
+     * drift out of pipeline order and silently mislabel every number. */
+    struct json_value stage_us;
+    json_init(&stage_us);
+    json_set_object(&stage_us);
+    for (int i = 0; i < REDUCER_DRAIN_NUM_STAGES; i++) {
+        const char *n = reducer_drain_stage_name(i);
+        ok = ok && n && json_push_kv_int(&stage_us, n,
+                                         des->last_stage_us[i]);
+    }
+    ok = ok && json_push_kv(out, "drain_last_stage_us", &stage_us);
+    json_free(&stage_us);
+    return ok;
+}
+
+/* Drain cumulative per-stage totals and the round count. */
+static bool dump_drain_totals_json(struct json_value *out,
+                                   const struct reducer_drain_exit_stats *des,
+                                   bool ok)
+{
+    /* CUMULATIVE per-stage totals. drain_last_stage_us above describes one
+     * round and is overwritten every round, so a sampled observer nearly
+     * always catches a converged all-idle round and sees zeros — it cannot
+     * attribute a fold's time. These are monotonic since process start:
+     * difference two samples for an exact interval share, and divide by
+     * the same interval's advances for microseconds per folded block. */
+    ok = ok && json_push_kv_int(out, "drain_rounds_total",
+                                (int64_t)des->rounds_total);
+    struct json_value totals;
+    json_init(&totals);
+    json_set_object(&totals);
+    for (int i = 0; i < REDUCER_DRAIN_NUM_STAGES; i++) {
+        const char *n = reducer_drain_stage_name(i);
+        if (!n) { ok = false; break; }
+        struct json_value one;
+        json_init(&one);
+        json_set_object(&one);
+        json_push_kv_int(&one, "us", (int64_t)des->stage_us_total[i]);
+        json_push_kv_int(&one, "calls", (int64_t)des->stage_calls[i]);
+        json_push_kv_int(&one, "adv", (int64_t)des->stage_advances[i]);
+        /* R2 quiescent-round consumer skips (reducer_drain.c memo):
+         * drains skipped because the round started on the exact converged
+         * cursor vector with nothing advanced earlier in the round. */
+        json_push_kv_int(&one, "skips",
+                         (int64_t)des->stage_quiescent_skips[i]);
+        ok = ok && json_push_kv(&totals, n, &one);
+        json_free(&one);
+    }
+    ok = ok && json_push_kv(out, "drain_stage_totals", &totals);
+    json_free(&totals);
+    return ok;
+}
+
+/* Outer-batch transaction accounting (core/modules/sync/src/stage_batch.c).
+ * STAGE_DRAIN_IMPL opens one write transaction per stage per drain round,
+ * so `empty` — opened, nothing advanced, rolled back — is the measured
+ * size of the converged-round overhead. */
+static bool dump_stage_batch_json(struct json_value *out, bool ok)
+{
+    struct stage_batch_stats sbs;
+    stage_batch_stats_snapshot(&sbs);
+    ok = ok && json_push_kv_int(out, "batch_opened_total",
+                                (int64_t)sbs.opened);
+    ok = ok && json_push_kv_int(out, "batch_committed_total",
+                                (int64_t)sbs.committed);
+    ok = ok && json_push_kv_int(out, "batch_rolled_back_total",
+                                (int64_t)sbs.rolled_back);
+    ok = ok && json_push_kv_int(out, "batch_empty_total",
+                                (int64_t)sbs.empty);
+    ok = ok && json_push_kv_int(out, "batch_commit_us_total",
+                                (int64_t)sbs.commit_us_total);
+    ok = ok && json_push_kv_int(out, "batch_commit_us_ewma",
+                                sbs.commit_us_ewma);
+    return ok;
+}
+
+/* Batched pre-commit durability flush timing (drive+fsync telemetry gap
+ * 2): the fdatasync/event_log flush that brackets every stage-batch
+ * COMMIT (engine/services/src/reducer_body_fsync.c) — see
+ * engine/conditions/src/batch_fsync_slow.c for the condition that watches
+ * fsync_flush_us_ewma against a budget. Both read 0 before the first
+ * batch commit is ever observed. */
+static bool dump_fsync_timing_json(struct json_value *out, bool ok)
+{
+    int64_t last_flush_us = 0, flush_us_ewma = 0;
+    uint64_t flush_count = 0, flush_us_total = 0;
+    unsigned scope_depth = 0;
+    bool event_log_deferred = false;
+    reducer_body_fsync_timing_snapshot(&last_flush_us, &flush_us_ewma);
+    reducer_body_fsync_totals_snapshot(&flush_count, &flush_us_total);
+    reducer_body_fsync_scope_snapshot(&scope_depth, &event_log_deferred);
+    ok = ok && json_push_kv_int(out, "fsync_last_flush_us", last_flush_us);
+    ok = ok && json_push_kv_int(out, "fsync_flush_us_ewma", flush_us_ewma);
+    /* One flush == one durability barrier actually paid — during live
+     * catch-up the pre-commit hook runs at a ROUND cadence (R1, see
+     * reducer_body_fsync.c), so over an interval
+     * d(flush_count) + d(fsync_cadence_deferred_total) == committing
+     * batches, and flush_count / blocks folded is "barriers per block". */
+    ok = ok && json_push_kv_int(out, "fsync_flush_count",
+                                (int64_t)flush_count);
+    ok = ok && json_push_kv_int(out, "fsync_flush_us_total",
+                                (int64_t)flush_us_total);
+    ok = dump_fsync_cadence_json(out, ok);
+    ok = ok && json_push_kv_int(out, "fsync_scope_depth",
+                                (int64_t)scope_depth);
+    ok = ok && json_push_kv_bool(out, "event_log_deferred",
+                                 event_log_deferred);
+    /* event_log_deferred above is the mode RIGHT NOW; these three are the
+     * cumulative split of which append path the fold actually took (see
+     * storage/event_log.h). The batched scope is armed and disarmed per
+     * drain, so "deferred mode exists" does not mean the fold used it:
+     * event_log_barrier_appends / (barrier + deferred) is the fraction of
+     * appends that still paid two ext4 journal commits, and
+     * event_log_barrier_us_total is what that cost in wall time. Divide
+     * barrier_us_total by 2*barrier_appends for this disk's per-barrier
+     * price. */
+    uint64_t el_barrier = 0, el_deferred = 0, el_barrier_us = 0;
+    event_log_append_stats(&el_barrier, &el_deferred, &el_barrier_us);
+    ok = ok && json_push_kv_int(out, "event_log_barrier_appends",
+                                (int64_t)el_barrier);
+    ok = ok && json_push_kv_int(out, "event_log_deferred_appends",
+                                (int64_t)el_deferred);
+    ok = ok && json_push_kv_int(out, "event_log_barrier_us_total",
+                                (int64_t)el_barrier_us);
+    return ok;
+}
+
+bool reducer_drive_dump_state_json(struct json_value *out, const char *key)
+{
+    (void)key;
+    if (!out)
+        return false;
+    json_set_object(out);
+    bool ok = dump_watchdog_head_json(out);
+    ok = dump_stage_spin_json(out, ok);
 
     /* Drain-exit telemetry (drive+fsync telemetry gap 1): deconflates a
      * round loop that genuinely CONVERGED (no more work) from one that hit
@@ -354,130 +508,13 @@ bool reducer_drive_dump_state_json(struct json_value *out, const char *key)
     {
         struct reducer_drain_exit_stats des;
         reducer_drain_exit_stats_snapshot(&des);
-        ok = ok && json_push_kv_int(out, "drain_exit_converged_total",
-                                    (int64_t)des.exit_converged_total);
-        ok = ok && json_push_kv_int(out, "drain_exit_budget_total",
-                                    (int64_t)des.exit_budget_total);
-        ok = ok && json_push_kv_int(out, "drain_last_round_advances",
-                                    des.last_round_advances);
-        ok = ok && json_push_kv_int(out, "drain_last_elapsed_us",
-                                    des.last_elapsed_us);
-        /* Stage names come from reducer_drain.c's own table (the single
-         * authority) rather than a second copy maintained here, which could
-         * drift out of pipeline order and silently mislabel every number. */
-        struct json_value stage_us;
-        json_init(&stage_us);
-        json_set_object(&stage_us);
-        for (int i = 0; i < REDUCER_DRAIN_NUM_STAGES; i++) {
-            const char *n = reducer_drain_stage_name(i);
-            ok = ok && n && json_push_kv_int(&stage_us, n,
-                                             des.last_stage_us[i]);
-        }
-        ok = ok && json_push_kv(out, "drain_last_stage_us", &stage_us);
-        json_free(&stage_us);
-
-        /* CUMULATIVE per-stage totals. drain_last_stage_us above describes one
-         * round and is overwritten every round, so a sampled observer nearly
-         * always catches a converged all-idle round and sees zeros — it cannot
-         * attribute a fold's time. These are monotonic since process start:
-         * difference two samples for an exact interval share, and divide by
-         * the same interval's advances for microseconds per folded block. */
-        ok = ok && json_push_kv_int(out, "drain_rounds_total",
-                                    (int64_t)des.rounds_total);
-        struct json_value totals;
-        json_init(&totals);
-        json_set_object(&totals);
-        for (int i = 0; i < REDUCER_DRAIN_NUM_STAGES; i++) {
-            const char *n = reducer_drain_stage_name(i);
-            if (!n) { ok = false; break; }
-            struct json_value one;
-            json_init(&one);
-            json_set_object(&one);
-            json_push_kv_int(&one, "us", (int64_t)des.stage_us_total[i]);
-            json_push_kv_int(&one, "calls", (int64_t)des.stage_calls[i]);
-            json_push_kv_int(&one, "adv", (int64_t)des.stage_advances[i]);
-            /* R2 quiescent-round consumer skips (reducer_drain.c memo):
-             * drains skipped because the round started on the exact converged
-             * cursor vector with nothing advanced earlier in the round. */
-            json_push_kv_int(&one, "skips",
-                             (int64_t)des.stage_quiescent_skips[i]);
-            ok = ok && json_push_kv(&totals, n, &one);
-            json_free(&one);
-        }
-        ok = ok && json_push_kv(out, "drain_stage_totals", &totals);
-        json_free(&totals);
+        ok = dump_drain_exit_json(out, &des, ok);
+        ok = dump_drain_totals_json(out, &des, ok);
         ok = dump_drain_quiescent_json(out, &des, ok);
     }
 
-    /* Outer-batch transaction accounting (core/modules/sync/src/stage_batch.c).
-     * STAGE_DRAIN_IMPL opens one write transaction per stage per drain round,
-     * so `empty` — opened, nothing advanced, rolled back — is the measured
-     * size of the converged-round overhead. */
-    {
-        struct stage_batch_stats sbs;
-        stage_batch_stats_snapshot(&sbs);
-        ok = ok && json_push_kv_int(out, "batch_opened_total",
-                                    (int64_t)sbs.opened);
-        ok = ok && json_push_kv_int(out, "batch_committed_total",
-                                    (int64_t)sbs.committed);
-        ok = ok && json_push_kv_int(out, "batch_rolled_back_total",
-                                    (int64_t)sbs.rolled_back);
-        ok = ok && json_push_kv_int(out, "batch_empty_total",
-                                    (int64_t)sbs.empty);
-        ok = ok && json_push_kv_int(out, "batch_commit_us_total",
-                                    (int64_t)sbs.commit_us_total);
-        ok = ok && json_push_kv_int(out, "batch_commit_us_ewma",
-                                    sbs.commit_us_ewma);
-    }
-
-    /* Batched pre-commit durability flush timing (drive+fsync telemetry gap
-     * 2): the fdatasync/event_log flush that brackets every stage-batch
-     * COMMIT (engine/services/src/reducer_body_fsync.c) — see
-     * engine/conditions/src/batch_fsync_slow.c for the condition that watches
-     * fsync_flush_us_ewma against a budget. Both read 0 before the first
-     * batch commit is ever observed. */
-    {
-        int64_t last_flush_us = 0, flush_us_ewma = 0;
-        uint64_t flush_count = 0, flush_us_total = 0;
-        unsigned scope_depth = 0;
-        bool event_log_deferred = false;
-        reducer_body_fsync_timing_snapshot(&last_flush_us, &flush_us_ewma);
-        reducer_body_fsync_totals_snapshot(&flush_count, &flush_us_total);
-        reducer_body_fsync_scope_snapshot(&scope_depth, &event_log_deferred);
-        ok = ok && json_push_kv_int(out, "fsync_last_flush_us", last_flush_us);
-        ok = ok && json_push_kv_int(out, "fsync_flush_us_ewma", flush_us_ewma);
-        /* One flush == one durability barrier actually paid — during live
-         * catch-up the pre-commit hook runs at a ROUND cadence (R1, see
-         * reducer_body_fsync.c), so over an interval
-         * d(flush_count) + d(fsync_cadence_deferred_total) == committing
-         * batches, and flush_count / blocks folded is "barriers per block". */
-        ok = ok && json_push_kv_int(out, "fsync_flush_count",
-                                    (int64_t)flush_count);
-        ok = ok && json_push_kv_int(out, "fsync_flush_us_total",
-                                    (int64_t)flush_us_total);
-        ok = dump_fsync_cadence_json(out, ok);
-        ok = ok && json_push_kv_int(out, "fsync_scope_depth",
-                                    (int64_t)scope_depth);
-        ok = ok && json_push_kv_bool(out, "event_log_deferred",
-                                     event_log_deferred);
-        /* event_log_deferred above is the mode RIGHT NOW; these three are the
-         * cumulative split of which append path the fold actually took (see
-         * storage/event_log.h). The batched scope is armed and disarmed per
-         * drain, so "deferred mode exists" does not mean the fold used it:
-         * event_log_barrier_appends / (barrier + deferred) is the fraction of
-         * appends that still paid two ext4 journal commits, and
-         * event_log_barrier_us_total is what that cost in wall time. Divide
-         * barrier_us_total by 2*barrier_appends for this disk's per-barrier
-         * price. */
-        uint64_t el_barrier = 0, el_deferred = 0, el_barrier_us = 0;
-        event_log_append_stats(&el_barrier, &el_deferred, &el_barrier_us);
-        ok = ok && json_push_kv_int(out, "event_log_barrier_appends",
-                                    (int64_t)el_barrier);
-        ok = ok && json_push_kv_int(out, "event_log_deferred_appends",
-                                    (int64_t)el_deferred);
-        ok = ok && json_push_kv_int(out, "event_log_barrier_us_total",
-                                    (int64_t)el_barrier_us);
-    }
+    ok = dump_stage_batch_json(out, ok);
+    ok = dump_fsync_timing_json(out, ok);
 
     /* coins_applied_height is the LAGGING measure (the durable coins_kv
      * frontier vs. the immediate in-memory utxo_apply cursor above) — the
