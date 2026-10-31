@@ -68,13 +68,7 @@ core/modules/net/src/fast_sync_coins_artifact.c:fast_sync_coins_artifact_write:2
 core/modules/net/src/file_service_client.c:fs_client_sync:41
 core/modules/net/src/file_service_client.c:range_worker_fn:34
 core/modules/net/src/msg_blocks.c:process_block_msg:37
-core/modules/net/src/msg_headers.c:exec_getheaders_action:20
-core/modules/net/src/msg_headers.c:getheaders_index_header_servable:25
-core/modules/net/src/msg_headers.c:headers_start_from_locator:17
-core/modules/net/src/msg_headers.c:msg_try_range_parallel_getheaders:35
-core/modules/net/src/msg_headers.c:process_getheaders:19
-core/modules/net/src/msg_headers.c:process_headers:113
-core/modules/net/src/msg_headers.c:push_getheaders_from:37
+core/modules/net/src/msg_headers.c:process_headers:70
 core/modules/net/src/msg_tx.c:process_inv:25
 core/modules/net/src/msg_tx.c:process_tx_msg:24
 core/modules/net/src/msg_version.c:msg_version_parse_build_identity_prefix:16

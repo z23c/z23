@@ -836,6 +836,56 @@ static bool headers_try_node_db_header(struct block_index *iter,
     return true;
 }
 
+/* Retry the flat block file, then the node.db row, when the candidate carries
+ * a rejection reason that headers_bind_reason_can_retry_store accepts. A
+ * store's header replaces the candidate only when it passes the bind check. */
+static const char *headers_retry_store_candidates(struct msg_processor *mp,
+                                                  struct block_index *iter,
+                                                  struct block_header *hdr,
+                                                  struct uint256 *hash,
+                                                  const char *reason)
+{
+    if (reason && headers_bind_reason_can_retry_store(reason)) {
+        struct block_header disk_hdr;
+        if (headers_try_disk_header(mp, iter, &disk_hdr)) {
+            const char *disk_reason =
+                headers_candidate_bind_reason(mp, iter, &disk_hdr, hash);
+            if (!disk_reason) {
+                *hdr = disk_hdr;
+                reason = NULL;
+            } else {
+                reason = disk_reason;
+            }
+        }
+    }
+    if (reason && headers_bind_reason_can_retry_store(reason)) {
+        struct block_header ndb_hdr;
+        if (headers_try_node_db_header(iter, &ndb_hdr)) {
+            const char *ndb_reason =
+                headers_candidate_bind_reason(mp, iter, &ndb_hdr, hash);
+            if (!ndb_reason) {
+                *hdr = ndb_hdr;
+                reason = NULL;
+            } else {
+                reason = ndb_reason;
+            }
+        }
+    }
+    return reason;
+}
+
+/* Settle a servable header's output and its repair bookkeeping. */
+static void headers_note_servable(struct block_index *iter,
+                                  const struct block_header *hdr,
+                                  struct block_header *hdr_out)
+{
+    if (hdr_out)
+        *hdr_out = *hdr;
+    if (header_serve_repair_wants(iter) &&
+        block_index_solution_is_len(iter, hdr->nSolutionSize))
+        header_serve_repair_note_cached(iter);
+}
+
 /* See net/msg_internal.h. */
 bool getheaders_index_header_servable(struct msg_processor *mp,
                                       struct block_index *iter,
@@ -870,32 +920,7 @@ bool getheaders_index_header_servable(struct msg_processor *mp,
     const char *reason = fill_reason ? fill_reason
         : headers_candidate_bind_reason(mp, iter, &hdr, &hash);
 
-    if (reason && headers_bind_reason_can_retry_store(reason)) {
-        struct block_header disk_hdr;
-        if (headers_try_disk_header(mp, iter, &disk_hdr)) {
-            const char *disk_reason =
-                headers_candidate_bind_reason(mp, iter, &disk_hdr, &hash);
-            if (!disk_reason) {
-                hdr = disk_hdr;
-                reason = NULL;
-            } else {
-                reason = disk_reason;
-            }
-        }
-    }
-    if (reason && headers_bind_reason_can_retry_store(reason)) {
-        struct block_header ndb_hdr;
-        if (headers_try_node_db_header(iter, &ndb_hdr)) {
-            const char *ndb_reason =
-                headers_candidate_bind_reason(mp, iter, &ndb_hdr, &hash);
-            if (!ndb_reason) {
-                hdr = ndb_hdr;
-                reason = NULL;
-            } else {
-                reason = ndb_reason;
-            }
-        }
-    }
+    reason = headers_retry_store_candidates(mp, iter, &hdr, &hash, reason);
 
     /* The one full-PoW pass, over the resolved bytes only. */
     if (!reason)
@@ -942,11 +967,7 @@ bool getheaders_index_header_servable(struct msg_processor *mp,
         return false;
     }
 
-    if (hdr_out)
-        *hdr_out = hdr;
-    if (header_serve_repair_wants(iter) &&
-        block_index_solution_is_len(iter, hdr.nSolutionSize))
-        header_serve_repair_note_cached(iter);
+    headers_note_servable(iter, &hdr, hdr_out);
     return true;
 }
 
@@ -992,6 +1013,27 @@ struct block_index *getheaders_next_servable_successor(
     return NULL;
 }
 
+static struct block_index *headers_locator_fork_point(
+    struct main_state *ms,
+    struct active_chain *chain,
+    const struct block_locator *locator,
+    const struct chain_params *params)
+{
+    for (size_t i = 0; i < locator->num_hashes; i++) {
+        struct block_index *found = block_map_find(
+            &ms->map_block_index, &locator->vhave[i]);
+        if (!found || !found->phashBlock)
+            continue;
+
+        struct block_index *active = active_chain_at(chain, found->nHeight);
+        if ((active && active->phashBlock && uint256_eq(active->phashBlock, found->phashBlock)) ||
+            uint256_eq(found->phashBlock, &params->consensus.hashGenesisBlock)) {
+            return found;
+        }
+    }
+    return NULL;
+}
+
 static struct block_index *headers_start_from_locator(
     struct main_state *ms,
     struct active_chain *chain,
@@ -1007,19 +1049,7 @@ static struct block_index *headers_start_from_locator(
     if (locator && locator->num_hashes == 0 && hash_stop) {
         pindex = block_map_find(&ms->map_block_index, hash_stop);
     } else if (locator) {
-        for (size_t i = 0; i < locator->num_hashes; i++) {
-            struct block_index *found = block_map_find(
-                &ms->map_block_index, &locator->vhave[i]);
-            if (!found || !found->phashBlock)
-                continue;
-
-            struct block_index *active = active_chain_at(chain, found->nHeight);
-            if ((active && active->phashBlock && uint256_eq(active->phashBlock, found->phashBlock)) ||
-                uint256_eq(found->phashBlock, &params->consensus.hashGenesisBlock)) {
-                pindex = found;
-                break;
-            }
-        }
+        pindex = headers_locator_fork_point(ms, chain, locator, params);
     }
 
     if (pindex)
@@ -1062,6 +1092,37 @@ void msg_headers_get_stats(struct msg_headers_stats *out)
         atomic_load(&g_getheaders_served_requests);
 }
 
+static void getheaders_roll_serve_window(struct p2p_node *node, int64_t now_unix)
+{
+    if (node->getheaders_rate_window_start == 0 ||
+        now_unix - node->getheaders_rate_window_start >=
+            GETHEADERS_SERVE_WINDOW_SECS) {
+        node->getheaders_rate_window_start = now_unix;
+        node->getheaders_rate_window_count = 0;
+    }
+}
+
+static int getheaders_append_served_run(struct msg_processor *mp,
+                                        struct block_index *it,
+                                        struct block_header *hdr,
+                                        struct byte_stream *body,
+                                        struct uint256 *hash_stop,
+                                        int max_headers)
+{
+    int count = 0;
+
+    while (it && count < max_headers) {
+        if (!getheaders_try_append_header(body, hdr))
+            break;  /* next header would overflow the wire cap */
+        count++;
+        if (!uint256_is_null(hash_stop) && it->phashBlock &&
+            uint256_eq(it->phashBlock, hash_stop))
+            break;
+        it = getheaders_next_servable_successor(mp, it, hdr);
+    }
+    return count;
+}
+
 bool process_getheaders(struct msg_processor *mp, struct p2p_node *node,
                         struct byte_stream *s)
 {
@@ -1081,12 +1142,7 @@ bool process_getheaders(struct msg_processor *mp, struct p2p_node *node,
     /* Per-peer serve window: roll, count, defer past the allowance. The
      * rationale sits with the allowance in msg_getheaders_defer.c. */
     int64_t now_unix = platform_time_wall_unix();
-    if (node->getheaders_rate_window_start == 0 ||
-        now_unix - node->getheaders_rate_window_start >=
-            GETHEADERS_SERVE_WINDOW_SECS) {
-        node->getheaders_rate_window_start = now_unix;
-        node->getheaders_rate_window_count = 0;
-    }
+    getheaders_roll_serve_window(node, now_unix);
     uint32_t allowance = getheaders_serve_request_allowance(node->services);
     if (node->getheaders_rate_window_count >= allowance) {
         /* Park the request rather than dropping it: the send tick replays it
@@ -1174,15 +1230,8 @@ bool process_getheaders(struct msg_processor *mp, struct p2p_node *node,
                     : NULL;
     }
 
-    while (it && count < max_headers) {
-        if (!getheaders_try_append_header(&body, &hdr))
-            break;  /* next header would overflow the wire cap */
-        count++;
-        if (!uint256_is_null(&hash_stop) && it->phashBlock &&
-            uint256_eq(it->phashBlock, &hash_stop))
-            break;
-        it = getheaders_next_servable_successor(mp, it, &hdr);
-    }
+    count = getheaders_append_served_run(mp, it, &hdr, &body, &hash_stop,
+                                         max_headers);
 
     struct byte_stream headers;
     stream_init(&headers, body.size + 16);
@@ -1263,6 +1312,182 @@ bool push_verified_header_announcement(struct msg_processor *mp,
         LOG_FAIL("headers", "tip announcement: send failed h=%d peer=%s",
                  index->nHeight, node->addr_name);
     return true;
+}
+
+static size_t headers_note_sequence_candidate(struct block_index *pindex,
+                                              int pre_tip_height,
+                                              struct uint256 *seq_hashes,
+                                              int32_t *seq_heights,
+                                              size_t seq_count)
+{
+    if (pindex && pindex->phashBlock &&
+        pindex->nHeight > pre_tip_height &&
+        pindex->nHeight <= pre_tip_height + 512 &&
+        !(pindex->nStatus & BLOCK_HAVE_DATA) &&
+        !(pindex->nStatus & BLOCK_FAILED_MASK) &&
+        seq_count < 512) {
+        seq_hashes[seq_count] = *pindex->phashBlock;
+        seq_heights[seq_count] = pindex->nHeight;
+        seq_count++;
+    }
+    return seq_count;
+}
+
+static void headers_penalize_forged_header(struct msg_processor *mp,
+                                           struct p2p_node *node,
+                                           struct validation_state *state)
+{
+    int hdr_dos = 0;
+    if (validation_state_get_dos(state, &hdr_dos) && hdr_dos > 0) {
+        peer_scoring_record(mp->net_mgr, node,
+                            PEER_OFFENCE_INVALID_HEADER,
+                            state->reject_reason[0] ? state->reject_reason
+                                                    : "invalid header");
+    }
+}
+
+static void headers_trace_rejected_header(struct p2p_node *node,
+                                          struct block_header *hdr,
+                                          uint64_t i,
+                                          const struct validation_state *state)
+{
+    if (i < 3) {
+        char hex[65], prevhex[65];
+        struct uint256 hh;
+        block_header_get_hash(hdr, &hh);
+        uint256_get_hex(&hh, hex);
+        uint256_get_hex(&hdr->hashPrevBlock, prevhex);
+        printf("HEADER REJECT[%llu]: hash=%s prev=%s reason=%s\n",
+               (unsigned long long)i, hex, prevhex,
+               state->reject_reason[0] ? state->reject_reason
+                                       : "unknown");
+        event_emitf(EV_HEADERS_REJECTED, (uint32_t)node->id,
+                    "header[%llu] %s reason=%s",
+                    (unsigned long long)i, hex,
+                    state->reject_reason[0] ? state->reject_reason
+                                            : "unknown");
+    }
+}
+
+static void headers_scan_block_files(struct msg_processor *mp)
+{
+    char bfp[576];
+    snprintf(bfp, sizeof(bfp), "%s/blocks/blk00000.dat", mp->datadir);
+    struct stat bfst;
+    if (stat(bfp, &bfst) == 0 && bfst.st_size > 0) {
+        printf("P2P trigger: scanning block files for HAVE_DATA...\n");
+        int scan_m = msg_processor_scan_block_files(mp);
+
+        struct sync_chain_activation activation = {0};
+        syncsvc_build_block_file_scan_activation(&activation, scan_m);
+        if (activation.should_activate && !g_shutdown_requested) {
+            printf("P2P block file scan: %d blocks marked\n", scan_m);
+            msg_processor_request_activation(
+                mp, MSG_ACTIVATE_BLOCK_FILE_SCAN);
+        }
+
+        /* Structural repair (block_map heights, active-tip
+         * restore) belongs in block_index_integrity, not this
+         * P2P handler. */
+        msg_processor_repair_post_activation_anchor(mp);
+    }
+}
+
+static void headers_request_header_activation(struct msg_processor *mp,
+                                              struct sync_header_processing_plan *plan)
+{
+    if (plan->should_activate_chain) {
+        struct sync_chain_activation activation = {0};
+        syncsvc_build_header_processing_activation(&activation, plan);
+        if (activation.should_activate && !g_shutdown_requested) {
+            msg_processor_request_activation(
+                mp, MSG_ACTIVATE_HEADERS_ALL_DATA);
+        }
+    }
+}
+
+static void headers_advance_download_phase(struct p2p_node *node,
+                                           struct sync_header_processing_plan *plan,
+                                           struct uint256 *hashes,
+                                           int32_t *heights,
+                                           int our_height)
+{
+    if (plan->should_set_sync_state)
+        sync_set_state(plan->next_sync_state,
+                       plan->should_queue_needed_blocks
+                           ? "headers ahead, requesting blocks"
+                           : "header probe complete");
+    if (plan->should_queue_needed_blocks) {
+        if (!plan->download.needed_blocks.chains_from_tip)
+            printf("headers: skip block queue — chain doesn't reach "
+                   "tip h=%d\n", our_height);
+
+        {
+            struct download_manager *dm = get_download_mgr();
+            size_t queued = dl_queue_blocks(dm, hashes, heights,
+                                            plan->queue_count);
+            if (queued > 0)
+                event_emitf(EV_BLOCK_REQUESTED, (uint32_t)node->id,
+                            "queued=%zu total_needed=%zu",
+                            queued, plan->queue_count);
+        }
+    }
+}
+
+static void headers_probe_after_reject(struct msg_processor *mp,
+                                       struct p2p_node *node,
+                                       const struct sync_header_processing_plan *plan,
+                                       bool any_bad_prevblk)
+{
+    if (plan->batch.should_probe_after_reject && any_bad_prevblk) {
+        int64_t now_s = (int64_t)platform_time_wall_time_t();
+        int64_t last_probe = atomic_load_explicit(
+            &node->last_reject_probe_time, memory_order_relaxed);
+        if (syncsvc_should_probe_after_reject(now_s, last_probe)) {
+            atomic_store_explicit(&node->last_reject_probe_time, now_s,
+                                  memory_order_relaxed);
+            int best_h = mp->main_state->pindex_best_header
+                ? mp->main_state->pindex_best_header->nHeight : -1;
+            printf("Peer %s: all-rejected batch (bad-prevblk) — probing "
+                   "with getheaders from our best header h=%d\n",
+                   node->addr_name, best_h);
+            push_getheaders_from(mp, node,
+                                 mp->main_state->pindex_best_header);
+        }
+    }
+}
+
+static bool headers_fallback_eligible(const struct uint256 *hashes,
+                                      const int32_t *heights,
+                                      const struct block_index *pindex_last,
+                                      int our_height, size_t queue_count)
+{
+    return hashes && heights && pindex_last &&
+           pindex_last->nHeight > our_height && queue_count == 0;
+}
+
+static bool headers_is_stalled_tip(const struct block_index *pindex_last,
+                                   size_t accepted, int chain_h,
+                                   const struct p2p_node *node)
+{
+    return pindex_last && accepted > 0 &&
+           pindex_last->nHeight < chain_h &&
+           node->starting_height > chain_h + 100;
+}
+
+static bool headers_skip_to_best_header(struct msg_processor *mp,
+                                        struct p2p_node *node,
+                                        struct block_index *pindex_last,
+                                        size_t newly_added, bool band_fill)
+{
+    return !band_fill && newly_added == 0 && pindex_last &&
+           msg_processor_block_index_heights_repaired(mp) &&
+           mp->main_state->pindex_best_header &&
+           mp->main_state->pindex_best_header->phashBlock &&
+           mp->main_state->pindex_best_header->nHeight >
+               pindex_last->nHeight &&
+           node->starting_height >
+               mp->main_state->pindex_best_header->nHeight;
 }
 
 bool process_headers(struct msg_processor *mp, struct p2p_node *node,
@@ -1425,16 +1650,8 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
             pindex_last = pindex;
             if (pindex && pindex->phashBlock)
                 last_hash = *pindex->phashBlock;
-            if (pindex && pindex->phashBlock &&
-                pindex->nHeight > pre_tip_height &&
-                pindex->nHeight <= pre_tip_height + 512 &&
-                !(pindex->nStatus & BLOCK_HAVE_DATA) &&
-                !(pindex->nStatus & BLOCK_FAILED_MASK) &&
-                seq_count < 512) {
-                seq_hashes[seq_count] = *pindex->phashBlock;
-                seq_heights[seq_count] = pindex->nHeight;
-                seq_count++;
-            }
+            seq_count = headers_note_sequence_candidate(
+                pindex, pre_tip_height, seq_hashes, seq_heights, seq_count);
         } else {
             /* Track the unconnectable-rejection signal: a batch rejected
              * with bad-prevblk usually means the peer is AHEAD of us (we
@@ -1442,22 +1659,7 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
              * the all-rejected recovery probe below keys on this. */
             if (strcmp(state.reject_reason, "bad-prevblk") == 0)
                 any_bad_prevblk = true;
-            if (i < 3) {
-                char hex[65], prevhex[65];
-                struct uint256 hh;
-                block_header_get_hash(&hdr, &hh);
-                uint256_get_hex(&hh, hex);
-                uint256_get_hex(&hdr.hashPrevBlock, prevhex);
-                printf("HEADER REJECT[%llu]: hash=%s prev=%s reason=%s\n",
-                       (unsigned long long)i, hex, prevhex,
-                       state.reject_reason[0] ? state.reject_reason
-                                              : "unknown");
-                event_emitf(EV_HEADERS_REJECTED, (uint32_t)node->id,
-                            "header[%llu] %s reason=%s",
-                            (unsigned long long)i, hex,
-                            state.reject_reason[0] ? state.reject_reason
-                                                   : "unknown");
-            }
+            headers_trace_rejected_header(node, &hdr, i, &state);
         }
 
         /* Detective A2 — score the peer for an objectively-forged header page.
@@ -1472,13 +1674,7 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
          * dos>0 so orphans / failed-parent / obsolete-version (dos 0) — all
          * normal during sync — are never penalized. Trusted/localhost peers are
          * exempted inside peer_misbehaving. Mirrors msg_blocks.c grading. */
-        int hdr_dos = 0;
-        if (validation_state_get_dos(&state, &hdr_dos) && hdr_dos > 0) {
-            peer_scoring_record(mp->net_mgr, node,
-                                PEER_OFFENCE_INVALID_HEADER,
-                                state.reject_reason[0] ? state.reject_reason
-                                                       : "invalid header");
-        }
+        headers_penalize_forged_header(mp, node, &state);
     }
 
     /* Update diagnostic counters */
@@ -1556,22 +1752,7 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
          * our best header; the exponential locator lets the peer serve the
          * missing intermediate headers. Keyed on the bad-prevblk signal and
          * rate-limited per peer so a garbage peer cannot make us ping-pong. */
-        if (header_plan.batch.should_probe_after_reject && any_bad_prevblk) {
-            int64_t now_s = (int64_t)platform_time_wall_time_t();
-            int64_t last_probe = atomic_load_explicit(
-                &node->last_reject_probe_time, memory_order_relaxed);
-            if (syncsvc_should_probe_after_reject(now_s, last_probe)) {
-                atomic_store_explicit(&node->last_reject_probe_time, now_s,
-                                      memory_order_relaxed);
-                int best_h = mp->main_state->pindex_best_header
-                    ? mp->main_state->pindex_best_header->nHeight : -1;
-                printf("Peer %s: all-rejected batch (bad-prevblk) — probing "
-                       "with getheaders from our best header h=%d\n",
-                       node->addr_name, best_h);
-                push_getheaders_from(mp, node,
-                                     mp->main_state->pindex_best_header);
-            }
-        }
+        headers_probe_after_reject(mp, node, &header_plan, any_bad_prevblk);
 
         if (header_plan.batch.should_emit_received) {
             event_emitf(EV_HEADERS_RECEIVED, (uint32_t)node->id,
@@ -1589,9 +1770,8 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
                 /* Stall detection: if we accepted headers but the tip
                  * didn't advance past chain height, something is wrong
                  * with the block index heights. Log loudly. */
-                if (pindex_last && accepted > 0 &&
-                    pindex_last->nHeight < chain_h &&
-                    node->starting_height > chain_h + 100) {
+                if (headers_is_stalled_tip(pindex_last, accepted, chain_h,
+                                           node)) {
                     LOG_WARN("sync",
                         "STALL DETECTED: accepted %zu headers but "
                         "header tip=%d < chain tip=%d (peer at %d). "
@@ -1701,57 +1881,18 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
          * file_service) but weren't scanned at boot (empty index at boot),
          * scan them now that we have headers. This marks downloaded blocks
          * as BLOCK_HAVE_DATA so we don't re-download them from P2P. */
-        if (header_plan.should_scan_block_files) {
-            char bfp[576];
-            snprintf(bfp, sizeof(bfp), "%s/blocks/blk00000.dat", mp->datadir);
-            struct stat bfst;
-            if (stat(bfp, &bfst) == 0 && bfst.st_size > 0) {
-                printf("P2P trigger: scanning block files for HAVE_DATA...\n");
-                int scan_m = msg_processor_scan_block_files(mp);
-
-                struct sync_chain_activation activation = {0};
-                syncsvc_build_block_file_scan_activation(&activation, scan_m);
-                if (activation.should_activate && !g_shutdown_requested) {
-                    printf("P2P block file scan: %d blocks marked\n", scan_m);
-                    msg_processor_request_activation(
-                        mp, MSG_ACTIVATE_BLOCK_FILE_SCAN);
-                }
-
-                /* Structural repair (block_map heights, active-tip
-                 * restore) belongs in block_index_integrity, not this
-                 * P2P handler. */
-                msg_processor_repair_post_activation_anchor(mp);
-            }
-        }
+        if (header_plan.should_scan_block_files)
+            headers_scan_block_files(mp);
         /* Header processing owns the HEADERS_DOWNLOAD -> BLOCKS_DOWNLOAD
          * phase edge even when there is no body to enqueue.  The empty-batch
          * case is the positive reply to an equal-height warm-start probe; the
          * all-data case activates from disk.  Keeping this inside the queue
          * branch stranded both cases in HEADERS_DOWNLOAD forever. */
-        if (header_plan.should_set_sync_state)
-            sync_set_state(header_plan.next_sync_state,
-                           header_plan.should_queue_needed_blocks
-                               ? "headers ahead, requesting blocks"
-                               : "header probe complete");
-        if (header_plan.should_queue_needed_blocks) {
-            if (!header_plan.download.needed_blocks.chains_from_tip)
-                printf("headers: skip block queue — chain doesn't reach "
-                       "tip h=%d\n", our_height);
+        headers_advance_download_phase(node, &header_plan, hashes, heights,
+                                       our_height);
 
-            {
-                struct download_manager *dm = get_download_mgr();
-                size_t queued = dl_queue_blocks(dm, hashes, heights,
-                                                header_plan.queue_count);
-                if (queued > 0)
-                    event_emitf(EV_BLOCK_REQUESTED, (uint32_t)node->id,
-                                "queued=%zu total_needed=%zu",
-                                queued, header_plan.queue_count);
-            }
-        }
-
-        if (hashes && heights && pindex_last &&
-            pindex_last->nHeight > our_height &&
-            header_plan.queue_count == 0) {
+        if (headers_fallback_eligible(hashes, heights, pindex_last,
+                                      our_height, header_plan.queue_count)) {
             bool has_data_successor = false;
             size_t fallback_count = collect_active_tip_successors(
                 mp->main_state, hashes, heights, max_collect,
@@ -1783,15 +1924,7 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
          * but should_activate_chain is true.  This MUST run outside the
          * should_queue_needed_blocks guard — that gate requires count>0,
          * which is the opposite of the activation condition. */
-        if (header_plan.should_activate_chain) {
-            struct sync_chain_activation activation = {0};
-            syncsvc_build_header_processing_activation(&activation,
-                                                      &header_plan);
-            if (activation.should_activate && !g_shutdown_requested) {
-                msg_processor_request_activation(
-                    mp, MSG_ACTIVATE_HEADERS_ALL_DATA);
-            }
-        }
+        headers_request_header_activation(mp, &header_plan);
         free(hashes);
         free(heights);
     }
@@ -1858,14 +1991,8 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
                 else
                     push_getheaders(mp, node);
             }
-        } else if (!band_fill && newly_added == 0 && pindex_last &&
-                   msg_processor_block_index_heights_repaired(mp) &&
-                   mp->main_state->pindex_best_header &&
-                   mp->main_state->pindex_best_header->phashBlock &&
-                   mp->main_state->pindex_best_header->nHeight >
-                       pindex_last->nHeight &&
-                   node->starting_height >
-                       mp->main_state->pindex_best_header->nHeight) {
+        } else if (headers_skip_to_best_header(mp, node, pindex_last,
+                                               newly_added, band_fill)) {
             /* The whole batch was already known and our best header sits
              * far above it (boot restored a deep header chain, or a
              * periodic re-anchor pulled the conversation back to the
@@ -1902,6 +2029,81 @@ bool process_headers(struct msg_processor *mp, struct p2p_node *node,
     return true;
 }
 
+static struct block_index *push_getheaders_reanchor_target(struct msg_processor *mp)
+{
+    struct block_index *reanchor = NULL;
+    if (mp && mp->main_state) {
+        if (mp->main_state->pindex_best_header &&
+            mp->main_state->pindex_best_header->phashBlock) {
+            reanchor = mp->main_state->pindex_best_header;
+        } else {
+            struct block_index *tip =
+                active_chain_tip(&mp->main_state->chain_active);
+            if (tip && tip->phashBlock)
+                reanchor = tip;
+        }
+    }
+    return reanchor;
+}
+
+static bool push_getheaders_exp_locator(struct msg_processor *mp,
+                                        struct block_index *from,
+                                        struct block_locator *loc)
+{
+    /* Exponential locator: tip, tip-1, tip-2, tip-4, tip-8, ... genesis.
+     * Walk pprev chain with exponentially increasing steps. */
+    int max_hashes = 32;
+    struct uint256 *tmp = zcl_malloc((size_t)max_hashes * sizeof(struct uint256),
+                                     "exp_locator");
+    if (!tmp) return false;
+    int nh = 0;
+    struct block_index *walk = from;
+    int step = 1;
+    while (walk && nh < max_hashes - 1) {
+        if (walk->phashBlock)
+            tmp[nh++] = *walk->phashBlock;
+        /* Walk back 'step' blocks via pprev */
+        struct block_index *prev_walk = walk;
+        for (int s = 0; s < step && walk->pprev; s++)
+            walk = walk->pprev;
+        /* Stop when the walk made no progress (pprev exhausted — an
+         * island root, not just the first hop): the old `walk == from`
+         * test only caught the first iteration, so a detached-island
+         * anchor degenerated the locator to [island hashes ×31,
+         * genesis]. */
+        if (walk == prev_walk) break;
+        if (nh >= 10)
+            step *= 2;  /* exponential after first 10 entries */
+    }
+    /* Always end with genesis */
+    if (nh > 0 && nh < max_hashes)
+        tmp[nh++] = mp->params->consensus.hashGenesisBlock;
+    loc->vhave = tmp;
+    loc->num_hashes = (size_t)nh;
+    return true;
+}
+
+static bool push_getheaders_build_locator(struct msg_processor *mp,
+                                          struct block_index *from,
+                                          struct block_locator *loc)
+{
+    if (from && from->phashBlock &&
+        msg_processor_block_index_heights_repaired(mp))
+        return push_getheaders_exp_locator(mp, from, loc);
+
+    struct zcl_result _r = syncsvc_build_getheaders_locator(loc,
+                                          &mp->main_state->chain_active,
+                                          (from && from->phashBlock) ? from : NULL,
+                                          mp->main_state->pindex_best_header,
+                                          &mp->params->consensus.hashGenesisBlock);
+    if (!_r.ok) {
+        fprintf(stderr, "[headers] %s:%d push_getheaders_from: build_locator failed: %s\n",
+                _r.source_file, _r.source_line, _r.message);
+        return false;
+    }
+    return true;
+}
+
 void push_getheaders_from(struct msg_processor *mp,
                           struct p2p_node *node,
                           struct block_index *from)
@@ -1914,18 +2116,7 @@ void push_getheaders_from(struct msg_processor *mp,
      * from the highest hashed frontier we hold. Give up only when nothing
      * anywhere has a hash, and then LOUDLY with a counter. */
     if (from && !from->phashBlock) {
-        struct block_index *reanchor = NULL;
-        if (mp && mp->main_state) {
-            if (mp->main_state->pindex_best_header &&
-                mp->main_state->pindex_best_header->phashBlock) {
-                reanchor = mp->main_state->pindex_best_header;
-            } else {
-                struct block_index *tip =
-                    active_chain_tip(&mp->main_state->chain_active);
-                if (tip && tip->phashBlock)
-                    reanchor = tip;
-            }
-        }
+        struct block_index *reanchor = push_getheaders_reanchor_target(mp);
         uint64_t n = atomic_fetch_add(&g_getheaders_suppressed_no_hash, 1) + 1;
         if (getheaders_suppress_rising_edge(&g_no_hash_streak))
             LOG_WARN("headers",
@@ -1967,61 +2158,8 @@ void push_getheaders_from(struct msg_processor *mp,
      * Before repair, fall back to the safe 2-hash locator. */
     struct block_locator loc;
     block_locator_init(&loc);
-    if (from && from->phashBlock &&
-        msg_processor_block_index_heights_repaired(mp)) {
-        /* Exponential locator: tip, tip-1, tip-2, tip-4, tip-8, ... genesis.
-         * Walk pprev chain with exponentially increasing steps. */
-        int max_hashes = 32;
-        struct uint256 *tmp = zcl_malloc((size_t)max_hashes * sizeof(struct uint256),
-                                         "exp_locator");
-        if (!tmp) return;
-        int nh = 0;
-        struct block_index *walk = from;
-        int step = 1;
-        while (walk && nh < max_hashes - 1) {
-            if (walk->phashBlock)
-                tmp[nh++] = *walk->phashBlock;
-            /* Walk back 'step' blocks via pprev */
-            struct block_index *prev_walk = walk;
-            for (int s = 0; s < step && walk->pprev; s++)
-                walk = walk->pprev;
-            /* Stop when the walk made no progress (pprev exhausted — an
-             * island root, not just the first hop): the old `walk == from`
-             * test only caught the first iteration, so a detached-island
-             * anchor degenerated the locator to [island hashes ×31,
-             * genesis]. */
-            if (walk == prev_walk) break;
-            if (nh >= 10)
-                step *= 2;  /* exponential after first 10 entries */
-        }
-        /* Always end with genesis */
-        if (nh > 0 && nh < max_hashes)
-            tmp[nh++] = mp->params->consensus.hashGenesisBlock;
-        loc.vhave = tmp;
-        loc.num_hashes = (size_t)nh;
-    } else if (from && from->phashBlock) {
-        struct zcl_result _r = syncsvc_build_getheaders_locator(&loc,
-                                              &mp->main_state->chain_active,
-                                              from,
-                                              mp->main_state->pindex_best_header,
-                                              &mp->params->consensus.hashGenesisBlock);
-        if (!_r.ok) {
-            fprintf(stderr, "[headers] %s:%d push_getheaders_from: build_locator failed: %s\n",
-                    _r.source_file, _r.source_line, _r.message);
-            return;
-        }
-    } else {
-        struct zcl_result _r = syncsvc_build_getheaders_locator(&loc,
-                                              &mp->main_state->chain_active,
-                                              NULL,
-                                              mp->main_state->pindex_best_header,
-                                              &mp->params->consensus.hashGenesisBlock);
-        if (!_r.ok) {
-            fprintf(stderr, "[headers] %s:%d push_getheaders_from: build_locator failed: %s\n",
-                    _r.source_file, _r.source_line, _r.message);
-            return;
-        }
-    }
+    if (!push_getheaders_build_locator(mp, from, &loc))
+        return;
 
     struct byte_stream s;
     stream_init(&s, 512);
@@ -2168,9 +2306,7 @@ static bool hrs_resolve_anchor_hash(struct msg_processor *mp, int32_t height,
     return false;
 }
 
-bool msg_try_range_parallel_getheaders(struct msg_processor *mp,
-                                       struct p2p_node *node,
-                                       int our_height, int64_t now_seconds)
+static bool hrs_peer_eligible(struct msg_processor *mp, struct p2p_node *node)
 {
     if (!mp || !node || !mp->main_state || !mp->net_mgr || !mp->params)
         return false;
@@ -2186,15 +2322,11 @@ bool msg_try_range_parallel_getheaders(struct msg_processor *mp,
     if (node->inbound || node->state < PEER_SYNCING_HEADERS ||
         !peer_supports_fast_sync(node->services))
         return false;
+    return true;
+}
 
-    struct main_state *ms = mp->main_state;
-    int target = node->starting_height;
-    if (ms->pindex_best_header &&
-        ms->pindex_best_header->nHeight > target)
-        target = ms->pindex_best_header->nHeight;
-    int32_t gap = (int32_t)(target - our_height);
-
-    /* Count connected fast-sync-capable outbound peers. */
+static int hrs_count_fast_peers(struct msg_processor *mp)
+{
     int fast_peers = 0;
     zcl_mutex_lock(&mp->net_mgr->cs_nodes);
     for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
@@ -2205,6 +2337,57 @@ bool msg_try_range_parallel_getheaders(struct msg_processor *mp,
             fast_peers++;
     }
     zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
+    return fast_peers;
+}
+
+static size_t hrs_collect_anchors(const struct checkpoint_data *cpd,
+                                  int our_height, int target,
+                                  int32_t *anchors)
+{
+    size_t n_anchors = 0;
+    for (int i = 0; cpd && cpd->entries && i < cpd->nEntries &&
+                    n_anchors < HRS_MAX_SPANS; i++) {
+        int h = cpd->entries[i].height;
+        if (h > our_height && h < target)
+            anchors[n_anchors++] = (int32_t)h;
+    }
+    return n_anchors;
+}
+
+static void hrs_emit_reclaimed_spans(const int32_t *stalled_ids,
+                                     size_t n_stalled)
+{
+    for (size_t si = 0; si < n_stalled; si++) {
+        int32_t sid = stalled_ids[si];
+        bool dup = false;
+        for (size_t sj = 0; sj < si; sj++) {
+            if (stalled_ids[sj] == sid) { dup = true; break; }
+        }
+        if (dup)
+            continue;
+        event_emitf(EV_HEADERS_REJECTED, (uint32_t)sid,
+                    "header span reclaimed from slow peer %d "
+                    "(deadline missed; span reassigned, not scored)",
+                    (int)sid);
+    }
+}
+
+bool msg_try_range_parallel_getheaders(struct msg_processor *mp,
+                                       struct p2p_node *node,
+                                       int our_height, int64_t now_seconds)
+{
+    if (!hrs_peer_eligible(mp, node))
+        return false;
+
+    struct main_state *ms = mp->main_state;
+    int target = node->starting_height;
+    if (ms->pindex_best_header &&
+        ms->pindex_best_header->nHeight > target)
+        target = ms->pindex_best_header->nHeight;
+    int32_t gap = (int32_t)(target - our_height);
+
+    /* Count connected fast-sync-capable outbound peers. */
+    int fast_peers = hrs_count_fast_peers(mp);
 
     if (!hrs_should_parallelize(fast_peers, gap, 2000))
         return false;
@@ -2215,13 +2398,7 @@ bool msg_try_range_parallel_getheaders(struct msg_processor *mp,
      * peers cover N different checkpoint intervals at once. */
     const struct checkpoint_data *cpd = &mp->params->checkpointData;
     int32_t anchors[HRS_MAX_SPANS];
-    size_t n_anchors = 0;
-    for (int i = 0; cpd && cpd->entries && i < cpd->nEntries &&
-                    n_anchors < HRS_MAX_SPANS; i++) {
-        int h = cpd->entries[i].height;
-        if (h > our_height && h < target)
-            anchors[n_anchors++] = (int32_t)h;
-    }
+    size_t n_anchors = hrs_collect_anchors(cpd, our_height, target, anchors);
 
     struct header_range_scheduler *sched = header_range_scheduler_global();
     hrs_plan(sched, (int32_t)our_height, target, anchors, n_anchors);
@@ -2267,19 +2444,7 @@ bool msg_try_range_parallel_getheaders(struct msg_processor *mp,
      * an operator can still see which peers are slow and we can still
      * learn where the code assumes fast storage. It just no longer counts
      * toward a ban. */
-    for (size_t si = 0; si < n_stalled; si++) {
-        int32_t sid = stalled_ids[si];
-        bool dup = false;
-        for (size_t sj = 0; sj < si; sj++) {
-            if (stalled_ids[sj] == sid) { dup = true; break; }
-        }
-        if (dup)
-            continue;
-        event_emitf(EV_HEADERS_REJECTED, (uint32_t)sid,
-                    "header span reclaimed from slow peer %d "
-                    "(deadline missed; span reassigned, not scored)",
-                    (int)sid);
-    }
+    hrs_emit_reclaimed_spans(stalled_ids, n_stalled);
 
     /* This peer's span: keep an existing live one, else claim a free span. */
     int32_t lo, hi;
@@ -2301,6 +2466,49 @@ bool msg_try_range_parallel_getheaders(struct msg_processor *mp,
              "range-parallel: peer=%d span=[%d,%d] fast_peers=%d gap=%d",
              node->id, lo, hi, fast_peers, gap);
     return true;
+}
+
+static void exec_getheaders_tip_parent(struct msg_processor *mp,
+                                       struct p2p_node *node,
+                                       struct block_index *tip)
+{
+    /* Prefer best_header whenever it leads the active tip — INCLUDING a
+     * NULL tip (full-index boot before the active_chain window/authority
+     * is seated). The old `tip &&` guard discarded best_header on a NULL
+     * tip and fell to a genesis-only locator. */
+    if (mp->main_state->pindex_best_header &&
+        mp->main_state->pindex_best_header->phashBlock &&
+        (!tip ||
+         mp->main_state->pindex_best_header->nHeight > tip->nHeight)) {
+        push_getheaders_from(mp, node, mp->main_state->pindex_best_header);
+    } else if (tip && tip->pprev) {
+        push_getheaders_from(mp, node, tip->pprev);
+    } else {
+        push_getheaders(mp, node);
+    }
+}
+
+static void exec_getheaders_best_header(struct msg_processor *mp,
+                                        struct p2p_node *node,
+                                        struct block_index *tip)
+{
+    /* When the validated header chain already extends above the
+     * active tip, anchor the request at best_header — re-anchoring
+     * at the tip makes the peer re-send known headers (160 per
+     * round trip through the whole known span). The periodic IBD
+     * re-kick fires every 10s, so a tip anchor here permanently
+     * resets the conversation below the known frontier. The
+     * locator includes lower heights, so a stale best_header still
+     * converges on the true fork point. */
+    if (msg_processor_block_index_heights_repaired(mp) &&
+        mp->main_state->pindex_best_header &&
+        mp->main_state->pindex_best_header->phashBlock &&
+        (!tip ||
+         mp->main_state->pindex_best_header->nHeight > tip->nHeight)) {
+        push_getheaders_from(mp, node, mp->main_state->pindex_best_header);
+    } else {
+        push_getheaders(mp, node);
+    }
 }
 
 void exec_getheaders_action(struct msg_processor *mp,
@@ -2330,41 +2538,12 @@ void exec_getheaders_action(struct msg_processor *mp,
 
     switch (action->anchor) {
     case SYNC_HEADER_REQUEST_TIP_PARENT:
-        /* Prefer best_header whenever it leads the active tip — INCLUDING a
-         * NULL tip (full-index boot before the active_chain window/authority
-         * is seated). The old `tip &&` guard discarded best_header on a NULL
-         * tip and fell to a genesis-only locator. */
-        if (mp->main_state->pindex_best_header &&
-            mp->main_state->pindex_best_header->phashBlock &&
-            (!tip ||
-             mp->main_state->pindex_best_header->nHeight > tip->nHeight)) {
-            push_getheaders_from(mp, node, mp->main_state->pindex_best_header);
-        } else if (tip && tip->pprev) {
-            push_getheaders_from(mp, node, tip->pprev);
-        } else {
-            push_getheaders(mp, node);
-        }
+        exec_getheaders_tip_parent(mp, node, tip);
         break;
     case SYNC_HEADER_REQUEST_TIP:
     case SYNC_HEADER_REQUEST_EXPLICIT:
     default:
-        /* When the validated header chain already extends above the
-         * active tip, anchor the request at best_header — re-anchoring
-         * at the tip makes the peer re-send known headers (160 per
-         * round trip through the whole known span). The periodic IBD
-         * re-kick fires every 10s, so a tip anchor here permanently
-         * resets the conversation below the known frontier. The
-         * locator includes lower heights, so a stale best_header still
-         * converges on the true fork point. */
-        if (msg_processor_block_index_heights_repaired(mp) &&
-            mp->main_state->pindex_best_header &&
-            mp->main_state->pindex_best_header->phashBlock &&
-            (!tip ||
-             mp->main_state->pindex_best_header->nHeight > tip->nHeight)) {
-            push_getheaders_from(mp, node, mp->main_state->pindex_best_header);
-        } else {
-            push_getheaders(mp, node);
-        }
+        exec_getheaders_best_header(mp, node, tip);
         break;
     }
 }
