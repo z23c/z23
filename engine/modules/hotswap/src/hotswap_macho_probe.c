@@ -174,12 +174,6 @@ static bool mp_select_magic(const uint8_t *image, size_t image_size,
 #define MP_FIXUPS_IMPORT_ADDEND 2u
 #define MP_FIXUPS_IMPORT_ADDEND64 3u
 
-static uint32_t mp_rd32le(const uint8_t *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
 static size_t mp_import_stride(uint32_t format)
 {
     switch (format) {
@@ -195,8 +189,8 @@ static size_t mp_import_stride(uint32_t format)
 static uint32_t mp_import_name_offset(const uint8_t *rec, uint32_t format)
 {
     if (format == MP_FIXUPS_IMPORT_ADDEND64)
-        return mp_rd32le(rec + 4);
-    return mp_rd32le(rec) >> 9;
+        return zcl_read_u32_le(rec + 4);
+    return zcl_read_u32_le(rec) >> 9;
 }
 
 static bool mp_import_name_ok(const char *name, char *err, size_t err_cap)
@@ -230,11 +224,11 @@ bool hotswap_macho_chained_fixups_check(const uint8_t *blob, size_t size,
     if (!blob || size < MP_FIXUPS_HEADER_BYTES)
         return mp_fail(err, err_cap,
                        "macho admit: truncated chained fixups header");
-    uint32_t imports_offset = mp_rd32le(blob + 8);
-    uint32_t symbols_offset = mp_rd32le(blob + 12);
-    uint32_t count = mp_rd32le(blob + 16);
-    uint32_t format = mp_rd32le(blob + 20);
-    uint32_t symbols_format = mp_rd32le(blob + 24);
+    uint32_t imports_offset = zcl_read_u32_le(blob + 8);
+    uint32_t symbols_offset = zcl_read_u32_le(blob + 12);
+    uint32_t count = zcl_read_u32_le(blob + 16);
+    uint32_t format = zcl_read_u32_le(blob + 20);
+    uint32_t symbols_format = zcl_read_u32_le(blob + 24);
     size_t stride = mp_import_stride(format);
     if (stride == 0)
         return mp_fail(err, err_cap,
@@ -263,8 +257,8 @@ bool hotswap_macho_dyld_info_check(const uint8_t *cmd, size_t cmdsize,
     /* dyld_info_command: cmd cmdsize rebase(2) bind(2) weak(2) lazy(2) export(2) */
     if (!cmd || cmdsize < 48)
         return mp_fail(err, err_cap, "macho admit: truncated LC_DYLD_INFO");
-    if (mp_rd32le(cmd + 20) != 0 || mp_rd32le(cmd + 28) != 0 ||
-        mp_rd32le(cmd + 36) != 0)
+    if (zcl_read_u32_le(cmd + 20) != 0 || zcl_read_u32_le(cmd + 28) != 0 ||
+        zcl_read_u32_le(cmd + 36) != 0)
         return mp_fail(err, err_cap,
                        "macho admit: legacy bind opcodes are not admitted for "
                        "hot-swap; rebuild with chained fixups");
