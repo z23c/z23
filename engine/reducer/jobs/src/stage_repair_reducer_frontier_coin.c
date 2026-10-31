@@ -159,6 +159,25 @@ bool stage_reducer_frontier_try_absent_script_hole_replay(
                                          /*rewind_headers=*/false);
 }
 
+/* What the coin-backfill status means for this tick: PROGRESS (scanning or
+ * repaired: claim the tick), HANDLED (a named refusal owns the tick) or NEXT
+ * (not applicable: continue to the stale-script replays). */
+enum coin_backfill_disposition {
+    COIN_BACKFILL_DISP_NEXT,
+    COIN_BACKFILL_DISP_PROGRESS,
+    COIN_BACKFILL_DISP_HANDLED,
+};
+
+static enum coin_backfill_disposition coin_backfill_disposition(
+    enum coin_backfill_status status)
+{
+    if (status == COIN_BACKFILL_SCANNING || status == COIN_BACKFILL_REPAIRED)
+        return COIN_BACKFILL_DISP_PROGRESS;
+    if (status != COIN_BACKFILL_NOT_APPLICABLE)
+        return COIN_BACKFILL_DISP_HANDLED;
+    return COIN_BACKFILL_DISP_NEXT;
+}
+
 bool stage_reducer_frontier_try_replay_repairs(
     sqlite3 *db,
     struct main_state *ms,
@@ -208,19 +227,18 @@ bool stage_reducer_frontier_try_replay_repairs(
         cb.status == COIN_BACKFILL_OWNER_REFUSED;
     out->coin_backfill_genuinely_invalid =
         cb.status == COIN_BACKFILL_REFUSED_SPENT;
-    if (cb.status == COIN_BACKFILL_SCANNING ||
-        cb.status == COIN_BACKFILL_REPAIRED) {
-        LOG_WARN("stage_repair",
-                 "[stage_repair] reducer_frontier coin backfill %s hole h=%d "
-                 "unresolved=%d inserted=%d scan_next=%d top=%d",
-                 cb.status == COIN_BACKFILL_REPAIRED ? "repaired" : "scanning",
-                 cb.hole_height, cb.unresolved_count, cb.inserted_count,
-                 cb.scan_next_height, cb.scan_top_height);
-        out->repaired = true;
-        *handled = true;
-        return true;
-    }
-    if (cb.status != COIN_BACKFILL_NOT_APPLICABLE) {
+    enum coin_backfill_disposition disp = coin_backfill_disposition(cb.status);
+    if (disp != COIN_BACKFILL_DISP_NEXT) {
+        if (disp == COIN_BACKFILL_DISP_PROGRESS) {
+            LOG_WARN("stage_repair",
+                     "[stage_repair] reducer_frontier coin backfill %s hole h=%d "
+                     "unresolved=%d inserted=%d scan_next=%d top=%d",
+                     cb.status == COIN_BACKFILL_REPAIRED ? "repaired"
+                                                         : "scanning",
+                     cb.hole_height, cb.unresolved_count, cb.inserted_count,
+                     cb.scan_next_height, cb.scan_top_height);
+            out->repaired = true;
+        }
         *handled = true;
         return true;
     }
