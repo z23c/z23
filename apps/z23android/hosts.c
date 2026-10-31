@@ -59,6 +59,17 @@ const char *zapp_grouped(int64_t value, char out[32])
 enum chain_state { CHAIN_WAITING, CHAIN_BEHIND, CHAIN_UNCONFIRMED, CHAIN_CURRENT };
 struct chain_verdict { enum chain_state state; int64_t reference; char reason[48]; bool onion_wait; };
 static int64_t abs_gap(int64_t a, int64_t b) { return a > b ? a - b : b - a; }
+/* Why a node within the skew still cannot confirm its chain is current, or false when it can. */
+static bool unconfirmed_reason(bool fleet_agrees, int64_t peers, int64_t quiet, char *reason, size_t cap)
+{
+    if (fleet_agrees) return false;
+    if (peers < ZAPP_CHAIN_MIN_PEERS)
+        snprintf(reason, cap, peers == 1 ? "only 1 peer" : peers == 0 ? "no peers" : "no peer count");
+    else if (quiet > ZAPP_CHAIN_QUIET_SECS)
+        snprintf(reason, cap, "no new block for %lld min", (long long)(quiet / 60));
+    else return false;
+    return true;
+}
 static struct chain_verdict chain_verdict(int64_t height, int64_t target, int64_t peers,
                                           const struct zapp_chain_evidence *ev)
 {
@@ -69,12 +80,7 @@ static struct chain_verdict chain_verdict(int64_t height, int64_t target, int64_
     v.onion_wait = ev && ev->onion_only && !fleet_agrees && peers < ZAPP_CHAIN_MIN_PEERS;
     if (v.reference <= 0) { v.state = CHAIN_WAITING; return v; }
     if (v.reference - height > ZAPP_CHAIN_SKEW) { v.state = CHAIN_BEHIND; return v; }
-    v.state = CHAIN_UNCONFIRMED;
-    if (!fleet_agrees && peers < ZAPP_CHAIN_MIN_PEERS)
-        snprintf(v.reason, sizeof(v.reason), peers == 1 ? "only 1 peer" : peers == 0 ? "no peers" : "no peer count");
-    else if (!fleet_agrees && quiet > ZAPP_CHAIN_QUIET_SECS)
-        snprintf(v.reason, sizeof(v.reason), "no new block for %lld min", (long long)(quiet / 60));
-    else v.state = CHAIN_CURRENT;
+    v.state = unconfirmed_reason(fleet_agrees, peers, quiet, v.reason, sizeof(v.reason)) ? CHAIN_UNCONFIRMED : CHAIN_CURRENT;
     return v;
 }
 const char *zapp_node_line(bool responding, bool process_running, bool stopping, bool onion_ready,
