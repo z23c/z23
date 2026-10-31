@@ -145,6 +145,12 @@ static void windows_projection_reject_row(char *reason, size_t reason_size, cons
                  table ? table : "(null)");
 }
 
+/* Report whether a sqlite_schema row is an allowed projection-only object. */
+static bool windows_projection_row_allowed(const char *type, const char *name, const char *table) {
+    return windows_projection_table_object(type, name, table) ||
+           windows_projection_index_object(type, table);
+}
+
 static bool windows_projection_snapshot_allowed(sqlite3 *db, char *reason,
                                                  size_t reason_size) {
     sqlite3_stmt *stmt = NULL;
@@ -162,9 +168,7 @@ static bool windows_projection_snapshot_allowed(sqlite3 *db, char *reason,
         const char *type = (const char *)sqlite3_column_text(stmt, 0);
         const char *name = (const char *)sqlite3_column_text(stmt, 1);
         const char *table = (const char *)sqlite3_column_text(stmt, 2);
-        bool table_object = windows_projection_table_object(type, name, table);
-        bool index_object = windows_projection_index_object(type, table);
-        if (!table_object && !index_object) {
+        if (!windows_projection_row_allowed(type, name, table)) {
             windows_projection_reject_row(reason, reason_size, type, name, table);
             ok = false;
             break;
@@ -331,6 +335,22 @@ static bool windows_family_cleanup(struct platform_directory_transaction *copy, 
     return ok;
 }
 
+/* Copy the family to a private temp directory, inspect the copy, and verify
+ * source stability both before and after the inspection. */
+static bool windows_family_copy_and_inspect(struct platform_directory_transaction *source_dir,
+                                            struct platform_directory_transaction *copy, const char *temp,
+                                            const char *base, bool created, enum windows_preflight_family_kind kind,
+                                            struct windows_preflight_source files[3]) {
+    bool ok = windows_family_snapshot_copy(copy, temp, created, base, files);
+    if (ok)
+        ok = windows_family_sources_stable(source_dir, base, files, "source_changed_before_inspect");
+    if (ok)
+        ok = windows_family_inspect_copy(temp, base, kind);
+    if (ok)
+        ok = windows_family_sources_stable(source_dir, base, files, "source_changed_after_inspect");
+    return ok;
+}
+
 static bool windows_family_preflight(struct platform_directory_transaction *source_dir, const char *datadir, const char *base,
                                      enum windows_preflight_family_kind kind,
                                      bool *present) {
@@ -348,18 +368,26 @@ static bool windows_family_preflight(struct platform_directory_transaction *sour
     bool created = windows_family_temp_create(base, temp);
     struct platform_directory_transaction copy;
     platform_directory_transaction_init(&copy);
-    ok = windows_family_snapshot_copy(&copy, temp, created, base, files);
-    if (ok)
-        ok = windows_family_sources_stable(source_dir, base, files, "source_changed_before_inspect");
-    if (ok)
-        ok = windows_family_inspect_copy(temp, base, kind);
-    if (ok)
-        ok = windows_family_sources_stable(source_dir, base, files, "source_changed_after_inspect");
+    ok = windows_family_copy_and_inspect(source_dir, &copy, temp, base, created, kind, files);
     windows_sources_close(files);
 
     if (!windows_family_cleanup(&copy, temp, base, created))
         ok = false;
     (void)datadir;
+    return ok;
+}
+
+/* Run the kernel and projection family preflights in order, stopping after
+ * the first family that fails. */
+static bool windows_run_family_preflights(struct platform_directory_transaction *source, const char *datadir,
+                                          bool *consensus_present, bool *projection_present) {
+    bool ok = windows_family_preflight(
+        source, datadir, CONSENSUS_DB_FILENAME,
+        WINDOWS_PREFLIGHT_KERNEL, consensus_present);
+    if (ok)
+        ok = windows_family_preflight(
+            source, datadir, CONSENSUS_DB_LEGACY_KERNEL_FILENAME,
+            WINDOWS_PREFLIGHT_PROJECTION, projection_present);
     return ok;
 }
 
@@ -374,12 +402,7 @@ bool boot_mint_anchor_normal_boot_preflight(const char *datadir) {
         return false;
     }
     bool consensus_present = false, projection_present = false;
-    bool ok = windows_family_preflight(
-                  &source, datadir, CONSENSUS_DB_FILENAME,
-                  WINDOWS_PREFLIGHT_KERNEL, &consensus_present) &&
-              windows_family_preflight(
-                  &source, datadir, CONSENSUS_DB_LEGACY_KERNEL_FILENAME,
-                  WINDOWS_PREFLIGHT_PROJECTION, &projection_present);
+    bool ok = windows_run_family_preflights(&source, datadir, &consensus_present, &projection_present);
     platform_directory_transaction_close(&source);
     (void)consensus_present;
     (void)projection_present;
@@ -479,13 +502,10 @@ static bool preflight_write_all(int out, const uint8_t *buffer, size_t len) {
     return true;
 }
 
-static bool copy_exact_file(const struct preflight_source_file *source, const char *destination,
-                            const char *copy_mark, const char *fsync_mark) {
-    if (!source->exists)
-        return true;
-    int out = open(destination, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR);
-    if (out < 0)
-        return false;
+/* Stream the source file to an open descriptor, fsync it, and record the
+ * copy and fsync timing submarks; returns false on any I/O failure. */
+static bool copy_exact_stream_body(const struct preflight_source_file *source, int out,
+                                   const char *copy_mark, const char *fsync_mark) {
     uint8_t buffer[64u * 1024u];
     off_t offset = 0;
     bool ok = true;
@@ -514,6 +534,17 @@ static bool copy_exact_file(const struct preflight_source_file *source, const ch
             ok = false;
         (void)boot_submark(fsync_mark, phase);
     }
+    return ok;
+}
+
+static bool copy_exact_file(const struct preflight_source_file *source, const char *destination,
+                            const char *copy_mark, const char *fsync_mark) {
+    if (!source->exists)
+        return true;
+    int out = open(destination, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+    if (out < 0)
+        return false;
+    bool ok = copy_exact_stream_body(source, out, copy_mark, fsync_mark);
     if (close(out) != 0)
         ok = false;
     return ok;
@@ -711,6 +742,14 @@ static bool preflight_missing_main_result(int dirfd, struct preflight_source_fil
     return false;
 }
 
+/* Report a failed preflight on stderr and emit the refusal event. */
+static void preflight_report_refusal(const char *reason) {
+    fprintf(stderr, "FATAL: normal node boot refused before datadir mutation: %s\n",
+            reason[0] ? reason : "producer evidence snapshot could not be proven stable");
+    event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "producer_evidence_preflight_refused reason=%s",
+                reason[0] ? reason : "stable_snapshot_inspection_failed");
+}
+
 bool boot_mint_anchor_normal_boot_preflight(const char *datadir) {
     if (!datadir || !datadir[0])
         LOG_FAIL(PREFLIGHT_SUBSYS, "normal boot preflight: missing datadir");
@@ -739,12 +778,8 @@ bool boot_mint_anchor_normal_boot_preflight(const char *datadir) {
         ok = false;
     if (close(dirfd) != 0)
         ok = false;
-    if (!ok) {
-        fprintf(stderr, "FATAL: normal node boot refused before datadir mutation: %s\n",
-                reason[0] ? reason : "producer evidence snapshot could not be proven stable");
-        event_emitf(EV_BOOT_VALIDATION_FAILED, 0, "producer_evidence_preflight_refused reason=%s",
-                    reason[0] ? reason : "stable_snapshot_inspection_failed");
-    }
+    if (!ok)
+        preflight_report_refusal(reason);
     return ok;
 }
 
@@ -1047,6 +1082,28 @@ static struct {
     size_t count;
     struct preflight_result results[MINT_PREFLIGHT_NUM_CHECKS];
 } g_preflight_last;
+
+/* Run one check, record and print its result, add its report row, and
+ * capture its name on failure; returns the check's outcome. */
+static bool preflight_run_one_check(size_t index, const char *datadir, struct json_value *checks_arr, bool emit_report,
+                                    const char **failed_names, size_t *failed_count) {
+    const struct preflight_check *c = &g_preflight_checks[index];
+    char why[256] = {0};
+    bool ok = c->check(datadir, why, sizeof(why));
+
+    preflight_record_result(&g_preflight_last.results[index], c, ok, why);
+
+    fprintf(stderr, "[mint-preflight] %-38s %-4s %s%s%s\n", c->name, ok ? "OK" : "FAIL", why,
+            ok ? "" : " — remedy: ", ok ? "" : c->remedy);
+
+    if (emit_report)
+        preflight_push_report_row(checks_arr, c, ok, why);
+
+    if (!ok)
+        failed_names[(*failed_count)++] = c->name;
+    return ok;
+}
+
 bool boot_mint_anchor_preflight_run_all(const char *datadir, struct json_value *report) {
     if (!datadir || !datadir[0])
         LOG_FAIL(PREFLIGHT_SUBSYS, "preflight run_all: missing datadir");
@@ -1061,22 +1118,9 @@ bool boot_mint_anchor_preflight_run_all(const char *datadir, struct json_value *
     g_preflight_last.count = MINT_PREFLIGHT_NUM_CHECKS;
 
     for (size_t i = 0; i < MINT_PREFLIGHT_NUM_CHECKS; i++) {
-        const struct preflight_check *c = &g_preflight_checks[i];
-        char why[256] = {0};
-        bool ok = c->check(datadir, why, sizeof(why));
-
-        preflight_record_result(&g_preflight_last.results[i], c, ok, why);
-
-        fprintf(stderr, "[mint-preflight] %-38s %-4s %s%s%s\n", c->name, ok ? "OK" : "FAIL", why,
-                ok ? "" : " — remedy: ", ok ? "" : c->remedy);
-
-        if (report)
-            preflight_push_report_row(&checks_arr, c, ok, why);
-
-        if (!ok) {
+        bool ok = preflight_run_one_check(i, datadir, &checks_arr, report != NULL, failed_names, &failed_count);
+        if (!ok)
             all_ok = false;
-            failed_names[failed_count++] = c->name;
-        }
     }
     g_preflight_last.all_ok = all_ok;
     g_preflight_last.valid = true;
