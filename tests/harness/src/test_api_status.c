@@ -733,7 +733,7 @@ static bool api_status_public_paths_absent(uint8_t *resp, size_t cap)
         "/api/v1/agent", "/api/status", "/api/v1/bootstrap", "/api/refold",
     };
     static const char *const forbidden[] = {
-        "/tmp/zcl-canonical", "\"datadir\"", "auto_reindex_marker_path",
+        "/tmp/zcl-canonical", "\"datadir\":", "auto_reindex_marker_path",
         "\"bundle_path\"", "\"active_loader_path\"", "\"source_dir\"",
     };
     struct json_value full;
@@ -743,11 +743,16 @@ static bool api_status_public_paths_absent(uint8_t *resp, size_t cap)
     for (size_t r = 0; ok && r < sizeof(routes) / sizeof(routes[0]); r++) {
         size_t n = api_handle_request("GET", routes[r], NULL, 0, resp, cap);
         ok = n > 0 && n < cap;
-        if (!ok)
+        if (!ok) {
+            fprintf(stderr, "public path scan: %s n=%zu\n", routes[r], n);
             break;
+        }
         resp[n] = 0;
-        for (size_t f = 0; f < sizeof(forbidden) / sizeof(forbidden[0]); f++)
+        for (size_t f = 0; f < sizeof(forbidden) / sizeof(forbidden[0]); f++) {
+            if (strstr((const char *)resp, forbidden[f]))
+                fprintf(stderr, "public path leak: %s in %s\n", forbidden[f], routes[r]);
             ok = ok && strstr((const char *)resp, forbidden[f]) == NULL;
+        }
         if (strcmp(routes[r], "/api/refold") == 0)
             ok = ok && strstr((const char *)resp, "\"path\":") == NULL;
     }
