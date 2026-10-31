@@ -133,13 +133,12 @@ engine/composition/src/boot_refold_staged.c:boot_load_snapshot_resume_seed_from_
 engine/composition/src/boot_refold_staged.c:boot_snapshot_drop_bodiless_have_data_above_seed:28
 engine/composition/src/boot_snapshot_import.c:boot_import_snapshot_db:23
 engine/controllers/src/sync_controller_sapling_tree.c:sapling_tree_rebuild:31
-engine/entry/main_cli_modes.c:bench_crypto_vs_rust:51
-engine/entry/main_cli_modes.c:cli_main:108
+engine/entry/main_cli_modes.c:bench_crypto_vs_rust:44
+engine/entry/main_cli_modes.c:cli_main:99
 engine/entry/main_cli_modes.c:cli_rpc_call_internal_ex:29
 engine/entry/main_cli_modes.c:import_complete_shielded_mode:39
 engine/entry/main_cli_modes.c:importblockindex_cli_mode:20
 engine/entry/main_cli_modes.c:importchainstate_mode:19
-engine/entry/main_cli_modes.c:legacy_utxo_run:21
 engine/entry/main_cli_modes.c:mintutxocommitment_mode:26
 engine/jobs/src/proof_validate_stage.c:step_validate:26
 engine/jobs/src/seal_rewind_executor.c:seal_rewind_to_nearest:19

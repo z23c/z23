@@ -965,6 +965,17 @@ static void bench_vsr_record(struct bench_row *rows, size_t *nrows,
     (*nrows)++;
 }
 
+/* Times fn with the median-of-samples harness and records a row only when
+ * every sample succeeded; a failed run leaves rows and nrows unchanged. */
+static void bench_vsr_measure(struct bench_row *rows, size_t *nrows,
+                              bool (*fn)(void *), void *arg, const char *key,
+                              const char *human, double budget_ns, int samples)
+{
+    bool ok = true;
+    double ns = bench_median_verify(fn, arg, budget_ns, samples, &ok);
+    if (ok) bench_vsr_record(rows, nrows, key, human, ns);
+}
+
 static int bench_crypto_vs_rust(void)
 {
     const char *path = bench_history_path();
@@ -1011,11 +1022,9 @@ static int bench_crypto_vs_rust(void)
             fprintf(stderr, "[bench-crypto-vs-rust] REFUSING equihash: "
                     "hollow (valid=%d flipped=%d)\n", pos, neg);
         } else {
-            bool ok = true;
-            double ns = bench_median_verify(bench_verify_equihash, &h,
-                                            budget_ns, samples, &ok);
-            if (ok) bench_vsr_record(rows, &nrows, "equihash-200-9",
-                                     "equihash-200-9 verify", ns);
+            bench_vsr_measure(rows, &nrows, bench_verify_equihash, &h,
+                              "equihash-200-9", "equihash-200-9 verify",
+                              budget_ns, samples);
         }
     }
 
@@ -1045,11 +1054,9 @@ static int bench_crypto_vs_rust(void)
                     "teeth failed (sq_consistent=%d nondegen=%d)\n",
                     sq_consistent, nondegen);
         } else {
-            bool ok = true;
-            double ns = bench_median_verify(bench_fpmul, &fa,
-                                            budget_ns, samples, &ok);
-            if (ok) bench_vsr_record(rows, &nrows, "bls12-381-fp-mul",
-                                     "bls12-381 Fp multiply", ns);
+            bench_vsr_measure(rows, &nrows, bench_fpmul, &fa,
+                              "bls12-381-fp-mul", "bls12-381 Fp multiply",
+                              budget_ns, samples);
         }
     }
 
@@ -1085,11 +1092,9 @@ static int bench_crypto_vs_rust(void)
             fprintf(stderr, "[bench-crypto-vs-rust] REFUSING bls-pairing: "
                     "teeth failed (g1=%d g2=%d)\n", g1_ok, g2_ok);
         } else {
-            bool ok = true;
-            double ns = bench_median_verify(bench_pairing, &pa,
-                                            budget_ns, samples, &ok);
-            if (ok) bench_vsr_record(rows, &nrows, "bls12-381-pairing",
-                                     "bls12-381 Ate pairing", ns);
+            bench_vsr_measure(rows, &nrows, bench_pairing, &pa,
+                              "bls12-381-pairing", "bls12-381 Ate pairing",
+                              budget_ns, samples);
         }
     }
 
@@ -1115,11 +1120,9 @@ static int bench_crypto_vs_rust(void)
             fprintf(stderr, "[bench-crypto-vs-rust] REFUSING secp256k1: "
                     "teeth failed (valid=%d corrupted=%d)\n", pos, neg);
         } else {
-            bool ok = true;
-            double ns = bench_median_verify(bench_verify_ecdsa, &ea,
-                                            budget_ns, samples, &ok);
-            if (ok) bench_vsr_record(rows, &nrows, "secp256k1-ecdsa-verify",
-                                     "secp256k1 ECDSA verify", ns);
+            bench_vsr_measure(rows, &nrows, bench_verify_ecdsa, &ea,
+                              "secp256k1-ecdsa-verify", "secp256k1 ECDSA verify",
+                              budget_ns, samples);
         }
         ecc_verify_destroy();
         ecc_stop();
@@ -1153,11 +1156,9 @@ static int bench_crypto_vs_rust(void)
             fprintf(stderr, "[bench-crypto-vs-rust] REFUSING ed25519: "
                     "teeth failed (valid=%d corrupted=%d)\n", pos, neg);
         } else {
-            bool ok = true;
-            double ns = bench_median_verify(bench_verify_ed25519, &ed,
-                                            budget_ns, samples, &ok);
-            if (ok) bench_vsr_record(rows, &nrows, "ed25519-verify",
-                                     "ed25519 verify", ns);
+            bench_vsr_measure(rows, &nrows, bench_verify_ed25519, &ed,
+                              "ed25519-verify", "ed25519 verify",
+                              budget_ns, samples);
         }
     }
 
@@ -1192,10 +1193,8 @@ static int bench_crypto_vs_rust(void)
                 continue;
             }
             struct bench_hash_arg ht = { .buf = msg1k, .len = sizeof(msg1k) };
-            bool ok = true;
-            double ns = bench_median_verify(H[hi].fn, &ht,
-                                            budget_ns, samples, &ok);
-            if (ok) bench_vsr_record(rows, &nrows, H[hi].key, H[hi].human, ns);
+            bench_vsr_measure(rows, &nrows, H[hi].fn, &ht, H[hi].key,
+                              H[hi].human, budget_ns, samples);
         }
     }
 
@@ -1226,12 +1225,10 @@ static int bench_crypto_vs_rust(void)
                     fprintf(stderr, "[bench-crypto-vs-rust] REFUSING groth16: "
                             "hollow (valid=%d flipped=%d)\n", pos, neg);
                 } else {
-                    bool ok = true;
-                    double ns = bench_median_verify(bench_verify_groth16, &ga,
-                                                    budget_ns, samples, &ok);
-                    if (ok) bench_vsr_record(rows, &nrows,
-                                             "groth16-bls12-381-output",
-                                             "groth16 output verify", ns);
+                    bench_vsr_measure(rows, &nrows, bench_verify_groth16, &ga,
+                                      "groth16-bls12-381-output",
+                                      "groth16 output verify", budget_ns,
+                                      samples);
                 }
             }
         }
@@ -2355,6 +2352,19 @@ static bool cli_compose_rpc_params(const char *method, const char **params,
 }
 
 #if !defined(ZCL_TESTING) || !defined(ZCL_RPC_COMPOSER_TEST)
+/* Stores the service field's port in *port when the field reads and parses
+ * to 1..65535; otherwise *port keeps its current value. */
+static void cli_apply_service_port(struct cli_service_snapshot *service,
+                                   const char *field, int *port)
+{
+    char value[32];
+    if (cli_service_exec_arg(service, field, value, sizeof(value))) {
+        int parsed = atoi(value);
+        if (parsed > 0 && parsed < 65536)
+            *port = parsed;
+    }
+}
+
 int cli_main(int argc, char **argv)
 {
     /* Strict operator-target-flag validation FIRST — before datadir/home
@@ -2508,15 +2518,7 @@ int cli_main(int argc, char **argv)
             snprintf(datadir, sizeof(datadir), "%s", service_datadir);
         }
     }
-    if (!rpcport_set) {
-        char service_rpcport[32];
-        if (cli_service_exec_arg(&service, "rpcport", service_rpcport,
-                                 sizeof(service_rpcport))) {
-            int port = atoi(service_rpcport);
-            if (port > 0 && port < 65536)
-                cli_port = port;
-        }
-    }
+    if (!rpcport_set) cli_apply_service_port(&service, "rpcport", &cli_port);
     if (!p2pport_set) {
         char service_p2pport[32];
         if (cli_service_exec_arg(&service, "port", service_p2pport,
@@ -2526,24 +2528,9 @@ int cli_main(int argc, char **argv)
                 cli_p2p_port = port;
         }
     }
-    if (!httpsport_set) {
-        char service_httpsport[32];
-        if (cli_service_exec_arg(&service, "httpsport", service_httpsport,
-                                 sizeof(service_httpsport))) {
-            int port = atoi(service_httpsport);
-            if (port > 0 && port < 65536)
-                cli_https_port = port;
-        }
-    }
-    if (!fsport_set) {
-        char service_fsport[32];
-        if (cli_service_exec_arg(&service, "fsport", service_fsport,
-                                 sizeof(service_fsport))) {
-            int port = atoi(service_fsport);
-            if (port > 0 && port < 65536)
-                cli_fs_port = port;
-        }
-    }
+    if (!httpsport_set)
+        cli_apply_service_port(&service, "httpsport", &cli_https_port);
+    if (!fsport_set) cli_apply_service_port(&service, "fsport", &cli_fs_port);
 
     if (strcmp(method, "--agent") == 0 || strcmp(method, "-agent") == 0)
         method = "agent";
@@ -2927,17 +2914,49 @@ static bool gen_snap_cb(const struct uint256 *txid,
     return true;
 }
 
-/* Shared body for --gen-utxo-snapshot (sidecar writer, out_path != NULL)
- * and --legacy-utxo-commitment (hash-only, out_path == NULL). Hash-only
- * exists to give the C8 consensus-parity gate a BYTE-EXACT reference: the
- * SHA3-256 over zclassicd's own chainstate UTXO serialization, in the same
- * canonical per-record layout getutxocommitment serves (see the encoding
- * note above) — zclassicd cannot compute this itself, but its chainstate
- * carries every field. No sidecar is written and the anchor-checkpoint
- * assert is skipped (a live oracle's tip is never h=3,056,758). The
- * comparison is only meaningful when the legacy best block equals the c23
- * applied-coins tip — the parity doctrine is compare-at-live-height. */
-static int legacy_utxo_run(const char *legacy, const char *out_path)
+/* Re-opens the written snapshot through the boot loader, which verifies its
+ * full body SHA3, and checks the count against the compiled checkpoint.
+ * Returns 0 when the snapshot is shippable, otherwise 1 after printing why. */
+static int legacy_utxo_verify_checkpoint(const char *out_path)
+{
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    if (!cp) {
+        fprintf(stderr, "[gen_utxo] FATAL: no compiled SHA3 UTXO checkpoint "
+                "to verify the snapshot against\n");
+        return 1;
+    }
+    char verr[256] = {0};
+    struct uss_header vhdr;
+    struct uss_handle *vh = uss_open(out_path, /*verify_full_sha3=*/true,
+                                     cp->sha3_hash, &vhdr, verr, sizeof(verr));
+    if (!vh) {
+        fprintf(stderr, "[gen_utxo] FATAL: written snapshot %s FAILED the "
+                "compiled-checkpoint SHA3 verify (%s) — NOT shippable. The "
+                "chainstate likely is not the anchor h=%d set.\n",
+                out_path, verr[0] ? verr : "sha3/header mismatch", cp->height);
+        return 1;
+    }
+    bool count_ok = (vhdr.count == cp->utxo_count);
+    uss_close(vh);
+    if (!count_ok) {
+        fprintf(stderr, "[gen_utxo] FATAL: written snapshot count=%llu != "
+                "compiled checkpoint %llu — NOT shippable.\n",
+                (unsigned long long)vhdr.count,
+                (unsigned long long)cp->utxo_count);
+        return 1;
+    }
+    fprintf(stderr, "[gen_utxo] VERIFIED: snapshot reproduces the compiled "
+            "checkpoint (h=%d, count=%llu, SHA3 OK) — shippable.\n",
+            cp->height, (unsigned long long)cp->utxo_count);
+    return 0;
+}
+
+/* Copies the legacy chainstate to the snapshot at snap_path, opens it and
+ * reads its best block into *best. Returns -1 on success, otherwise the exit
+ * code; once the copy has succeeded, each failure removes the snapshot. */
+static int legacy_utxo_open_snapshot(const char *legacy, char *snap_path,
+                                     size_t snap_cap, void **h,
+                                     struct uint256 *best)
 {
     char chainstate_path[1024];
     snprintf(chainstate_path, sizeof(chainstate_path),
@@ -2957,8 +2976,7 @@ static int legacy_utxo_run(const char *legacy, const char *out_path)
      * WAL. Uses the same signature-proven point-in-time helper as the
      * shielded-history importer and the legacy UTXO import (rm -rf + cp -a +
      * dir-signature equality, retried). */
-    char snap_path[1200];
-    snprintf(snap_path, sizeof(snap_path),
+    snprintf(snap_path, snap_cap,
              "%s.snap_for_utxo_gen", chainstate_path);
     {
         struct zcl_result cpres =
@@ -2976,21 +2994,42 @@ static int legacy_utxo_run(const char *legacy, const char *out_path)
     }
     fprintf(stderr, "[gen_utxo] snapshot built at %s\n", snap_path);
 
-    void *h = NULL;
-    if (!chainstate_legacy_open(snap_path, &h) || !h) {
+    *h = NULL;
+    if (!chainstate_legacy_open(snap_path, h) || !*h) {
         fprintf(stderr, "chainstate_legacy_open failed\n");
         (void)zcl_tree_remove(snap_path);
         return 1;
     }
 
-    struct uint256 best;
-    uint256_set_null(&best);
-    if (!chainstate_legacy_get_best_block(h, &best)) {
+    uint256_set_null(best);
+    if (!chainstate_legacy_get_best_block(*h, best)) {
         fprintf(stderr, "no best block\n");
-        chainstate_legacy_close(h);
+        chainstate_legacy_close(*h);
         (void)zcl_tree_remove(snap_path);
         return 1;
     }
+    return -1;
+}
+
+/* Shared body for --gen-utxo-snapshot (sidecar writer, out_path != NULL)
+ * and --legacy-utxo-commitment (hash-only, out_path == NULL). Hash-only
+ * exists to give the C8 consensus-parity gate a BYTE-EXACT reference: the
+ * SHA3-256 over zclassicd's own chainstate UTXO serialization, in the same
+ * canonical per-record layout getutxocommitment serves (see the encoding
+ * note above) — zclassicd cannot compute this itself, but its chainstate
+ * carries every field. No sidecar is written and the anchor-checkpoint
+ * assert is skipped (a live oracle's tip is never h=3,056,758). The
+ * comparison is only meaningful when the legacy best block equals the c23
+ * applied-coins tip — the parity doctrine is compare-at-live-height. */
+static int legacy_utxo_run(const char *legacy, const char *out_path)
+{
+    char snap_path[1200];
+    void *h = NULL;
+    struct uint256 best;
+    int open_rc = legacy_utxo_open_snapshot(legacy, snap_path,
+                                            sizeof(snap_path), &h, &best);
+    if (open_rc >= 0)
+        return open_rc;
     char hex[65];
     uint256_get_hex(&best, hex);
     fprintf(stderr, "[gen_utxo] chainstate best block: %s\n", hex);
@@ -3087,38 +3126,7 @@ static int legacy_utxo_run(const char *legacy, const char *out_path)
      * advanced past h=3,056,758) FAILS here — we leave the file on disk but exit
      * non-zero so an operator never ships an unverified set. This re-uses the
      * loader's SHA3 verification; it does not reimplement it. */
-    {
-        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-        if (!cp) {
-            fprintf(stderr, "[gen_utxo] FATAL: no compiled SHA3 UTXO checkpoint "
-                    "to verify the snapshot against\n");
-            return 1;
-        }
-        char verr[256] = {0};
-        struct uss_header vhdr;
-        struct uss_handle *vh = uss_open(out_path, /*verify_full_sha3=*/true,
-                                         cp->sha3_hash, &vhdr, verr, sizeof(verr));
-        if (!vh) {
-            fprintf(stderr, "[gen_utxo] FATAL: written snapshot %s FAILED the "
-                    "compiled-checkpoint SHA3 verify (%s) — NOT shippable. The "
-                    "chainstate likely is not the anchor h=%d set.\n",
-                    out_path, verr[0] ? verr : "sha3/header mismatch", cp->height);
-            return 1;
-        }
-        bool count_ok = (vhdr.count == cp->utxo_count);
-        uss_close(vh);
-        if (!count_ok) {
-            fprintf(stderr, "[gen_utxo] FATAL: written snapshot count=%llu != "
-                    "compiled checkpoint %llu — NOT shippable.\n",
-                    (unsigned long long)vhdr.count,
-                    (unsigned long long)cp->utxo_count);
-            return 1;
-        }
-        fprintf(stderr, "[gen_utxo] VERIFIED: snapshot reproduces the compiled "
-                "checkpoint (h=%d, count=%llu, SHA3 OK) — shippable.\n",
-                cp->height, (unsigned long long)cp->utxo_count);
-    }
-    return 0;
+    return legacy_utxo_verify_checkpoint(out_path);
 }
 
 int gen_utxo_snapshot_mode(int argc, char **argv)
