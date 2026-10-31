@@ -628,6 +628,112 @@ static int t_refused_rollback_changes_nothing(void)
     return failures;
 }
 
+/* ── 4. An undeclared import is refused before map or dlopen ─────────────────
+ * The bad image is image A with the imported name json_push_kv_str rewritten,
+ * same length, to a name absent from hotswap_module_imports.def. Everything
+ * else (identity, seal, ABI) is untouched, so the import policy is the only
+ * thing that can refuse it. Written under /tmp, which the loader confines to. */
+#define RB_BAD_IMPORT_OLD "json_push_kv_str"
+#define RB_BAD_IMPORT_NEW "json_push_kv_sxx"
+
+static unsigned char *rb_slurp(const char *path, size_t *n_out)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return NULL;
+    unsigned char *buf = NULL;
+    long len = (fseek(f, 0, SEEK_END) == 0) ? ftell(f) : -1;
+    if (len > 0 && fseek(f, 0, SEEK_SET) == 0 &&
+        (buf = malloc((size_t)len)) != NULL &&
+        fread(buf, 1, (size_t)len, f) != (size_t)len) {
+        free(buf);
+        buf = NULL;
+    }
+    (void)fclose(f);
+    if (buf)
+        *n_out = (size_t)len;
+    return buf;
+}
+
+static size_t rb_patch_name(unsigned char *img, size_t n)
+{
+    const size_t len = sizeof(RB_BAD_IMPORT_OLD) - 1;
+    size_t hits = 0;
+    for (size_t i = 0; i + len <= n; i++) {
+        if (memcmp(img + i, RB_BAD_IMPORT_OLD, len) == 0) {
+            memcpy(img + i, RB_BAD_IMPORT_NEW, len);
+            hits++;
+        }
+    }
+    return hits;
+}
+
+static bool rb_write_bad_image(const char *dir, char path[PATH_MAX])
+{
+    size_t n = 0;
+    unsigned char *img = rb_slurp(g_so_a, &n);
+    if (!img)
+        return false;
+    bool ok = rb_patch_name(img, n) > 0 &&
+              snprintf(path, PATH_MAX, "%s/bad_import.so", dir) > 0;
+    FILE *f = ok ? fopen(path, "wb") : NULL;
+    if (!f)
+        path[0] = '\0';
+    ok = f != NULL && fwrite(img, 1, n, f) == n;
+    if (f)
+        ok = (fclose(f) == 0) && ok;
+    free(img);
+    return ok;
+}
+
+static int t_undeclared_import_refused_before_map(void)
+{
+    int failures = 0;
+    TEST("a module importing an undeclared symbol is refused at activate, nothing published") {
+        ASSERT(g_fixture_ready);
+        rb_reset();
+        struct hotswap_publish_hooks hooks;
+        rb_hooks(&hooks);
+
+        /* Results are computed first; the temp file, temp dir and registry
+         * state are released before any assertion, so a failure leaks none. */
+        char dir[] = "/tmp/hs_import_policy_XXXXXX";
+        char bad[PATH_MAX] = {0};
+        bool have_dir = mkdtemp(dir) != NULL;
+        bool wrote = have_dir && rb_write_bad_image(dir, bad);
+
+        struct hotswap_activate_report refused = {0}, ok = {0};
+        uint32_t gen_before = zcl_command_registry_active_generation();
+        size_t fds_before = rb_open_fd_count();
+        bool activated = wrote && hotswap_activate(bad, g_datadir, true, &hooks, &refused);
+        if (bad[0] != '\0')
+            (void)unlink(bad);
+        if (have_dir)
+            (void)rmdir(dir);
+        uint32_t gen_after = zcl_command_registry_active_generation();
+        size_t shelf = hotswap_shelf_list(NULL, 0);
+        size_t fds_after = rb_open_fd_count();
+
+        /* The same image with its declared import set is admitted as before. */
+        bool good = hotswap_activate(g_so_a, g_datadir, true, &hooks, &ok);
+        bool good_live = good && ok.activated;
+        rb_release();
+
+        ASSERT(wrote);
+        ASSERT(!activated);
+        ASSERT(!refused.activated);
+        ASSERT_STR_EQ(refused.stage, "shape");
+        ASSERT(strstr(refused.error,
+                      "undeclared resident symbol '" RB_BAD_IMPORT_NEW "'") != NULL);
+        ASSERT_EQ((unsigned)gen_after, (unsigned)gen_before);
+        ASSERT_EQ(shelf, (size_t)0);
+        ASSERT_EQ(fds_after, fds_before);
+        ASSERT(good_live);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_hotswap_rollback(void)
 {
     printf("\n=== hot-swap rollback: a real image put back live ===\n");
@@ -643,6 +749,7 @@ int test_hotswap_rollback(void)
     failures += t_images_activate();
     failures += t_rollback_toggles_dispatch();
     failures += t_refused_rollback_changes_nothing();
+    failures += t_undeclared_import_refused_before_map();
 
     rb_release();
     rb_env_end();

@@ -12,6 +12,7 @@
 #if defined(__APPLE__) || (defined(ZCL_TESTING) && !defined(_WIN32))
 
 #include "hotswap/hotswap_macho_probe.h"
+#include "hotswap/hotswap_elf_probe.h"
 #include "base/safe_alloc.h"
 #include "base/serialize_le.h"
 
@@ -109,7 +110,7 @@ static bool mp_read_image(int fd, uint8_t **image, size_t *image_size,
 }
 
 static bool mp_pick_fat(const uint8_t *image, size_t image_size, bool swap,
-                         size_t magic_width, size_t *header_off,
+                         size_t magic_width, size_t *header_off, size_t *slice_len,
                          char *err, size_t err_cap)
 {
     if (image_size < MP_FAT_HEADER_BYTES)
@@ -134,6 +135,7 @@ static bool mp_pick_fat(const uint8_t *image, size_t image_size, bool swap,
             return mp_fail(err, err_cap,
                            "macho probe: fat arch extends past file");
         *header_off = off;
+        *slice_len = size;
         return true;
     }
     return mp_fail(err, err_cap,
@@ -141,7 +143,7 @@ static bool mp_pick_fat(const uint8_t *image, size_t image_size, bool swap,
 }
 
 static bool mp_select_magic(const uint8_t *image, size_t image_size,
-                             size_t *header_off, uint32_t *magic,
+                             size_t *header_off, size_t *slice_len, uint32_t *magic,
                              char *err, size_t err_cap)
 {
     if (image_size < sizeof(*magic))
@@ -150,7 +152,7 @@ static bool mp_select_magic(const uint8_t *image, size_t image_size,
     if (*magic != MP_FAT_MAGIC && *magic != MP_FAT_CIGAM)
         return true;
     if (!mp_pick_fat(image, image_size, *magic == MP_FAT_CIGAM, sizeof(*magic),
-                      header_off, err, err_cap))
+                      header_off, slice_len, err, err_cap))
         return false; // raw-return-ok:propagates_probe_diagnostic
     /* Bound the physical word independently of the declared-slice policy. */
     const uint8_t *p = ptr_at(image, image_size, *header_off, sizeof(*magic));
@@ -158,6 +160,142 @@ static bool mp_select_magic(const uint8_t *image, size_t image_size,
         return mp_fail(err, err_cap, "macho probe: fat arch extends past file");
     memcpy(magic, p, sizeof(*magic));
     return true;
+}
+
+/* ── dyld binds are by NAME, and the symbol table need not list them ─────────
+ * dyld resolves imports from LC_DYLD_CHAINED_FIXUPS (an import table with its
+ * own name pool) or from LC_DYLD_INFO(_ONLY) bind opcodes. Neither has to agree
+ * with LC_SYMTAB, so the symtab check alone fails open. These two functions
+ * read raw load-command payloads, touch no Apple header, and so run (and are
+ * tested) on any host. Chained fixups are parsed and every import name goes
+ * through the same table; legacy bind opcodes are refused outright. */
+#define MP_FIXUPS_HEADER_BYTES 28u
+#define MP_FIXUPS_IMPORT       1u
+#define MP_FIXUPS_IMPORT_ADDEND 2u
+#define MP_FIXUPS_IMPORT_ADDEND64 3u
+
+static uint32_t mp_rd32le(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static size_t mp_import_stride(uint32_t format)
+{
+    switch (format) {
+    case MP_FIXUPS_IMPORT:         return 4;
+    case MP_FIXUPS_IMPORT_ADDEND:  return 8;
+    case MP_FIXUPS_IMPORT_ADDEND64: return 16;
+    default:                       return 0;
+    }
+}
+
+/* name_offset: bits 9..31 of the first word for formats 1 and 2, bits 32..63
+ * (the second word) for format 3. */
+static uint32_t mp_import_name_offset(const uint8_t *rec, uint32_t format)
+{
+    if (format == MP_FIXUPS_IMPORT_ADDEND64)
+        return mp_rd32le(rec + 4);
+    return mp_rd32le(rec) >> 9;
+}
+
+static bool mp_import_name_ok(const char *name, char *err, size_t err_cap)
+{
+    if (name[0] != '_' || !hotswap_module_import_declared(name + 1))
+        return mp_fail(err, err_cap,
+                       "macho admit: module imports undeclared resident symbol '%.100s'",
+                       name);
+    return true;
+}
+
+static bool mp_fixups_one(const uint8_t *blob, size_t size, uint32_t format,
+                          uint32_t symbols_offset, const uint8_t *rec,
+                          char *err, size_t err_cap)
+{
+    uint32_t name_off = mp_import_name_offset(rec, format);
+    if (name_off >= size - symbols_offset)
+        return mp_fail(err, err_cap,
+                       "macho admit: chained import name offset out of bounds");
+    const char *name = (const char *)(blob + symbols_offset + name_off);
+    size_t room = size - symbols_offset - name_off;
+    if (!memchr(name, '\0', room))
+        return mp_fail(err, err_cap,
+                       "macho admit: chained import name is not terminated");
+    return mp_import_name_ok(name, err, err_cap);
+}
+
+bool hotswap_macho_chained_fixups_check(const uint8_t *blob, size_t size,
+                                        char *err, size_t err_cap)
+{
+    if (!blob || size < MP_FIXUPS_HEADER_BYTES)
+        return mp_fail(err, err_cap,
+                       "macho admit: truncated chained fixups header");
+    uint32_t imports_offset = mp_rd32le(blob + 8);
+    uint32_t symbols_offset = mp_rd32le(blob + 12);
+    uint32_t count = mp_rd32le(blob + 16);
+    uint32_t format = mp_rd32le(blob + 20);
+    uint32_t symbols_format = mp_rd32le(blob + 24);
+    size_t stride = mp_import_stride(format);
+    if (stride == 0)
+        return mp_fail(err, err_cap,
+                       "macho admit: unknown chained imports format %u", format);
+    if (symbols_format != 0)
+        return mp_fail(err, err_cap,
+                       "macho admit: compressed chained symbol names are not admitted");
+    if (imports_offset > size || count > (size - imports_offset) / stride)
+        return mp_fail(err, err_cap,
+                       "macho admit: chained imports extend past the fixups blob");
+    if (symbols_offset > size)
+        return mp_fail(err, err_cap,
+                       "macho admit: chained symbol pool starts past the fixups blob");
+    for (uint32_t i = 0; i < count; i++) {
+        if (!mp_fixups_one(blob, size, format, symbols_offset,
+                           blob + imports_offset + (size_t)i * stride,
+                           err, err_cap))
+            return false; // raw-return-ok:propagates_admit_diagnostic
+    }
+    return true;
+}
+
+bool hotswap_macho_dyld_info_check(const uint8_t *cmd, size_t cmdsize,
+                                   char *err, size_t err_cap)
+{
+    /* dyld_info_command: cmd cmdsize rebase(2) bind(2) weak(2) lazy(2) export(2) */
+    if (!cmd || cmdsize < 48)
+        return mp_fail(err, err_cap, "macho admit: truncated LC_DYLD_INFO");
+    if (mp_rd32le(cmd + 20) != 0 || mp_rd32le(cmd + 28) != 0 ||
+        mp_rd32le(cmd + 36) != 0)
+        return mp_fail(err, err_cap,
+                       "macho admit: legacy bind opcodes are not admitted for "
+                       "hot-swap; rebuild with chained fixups");
+    return true;
+}
+
+/* Fat images: every offset a slice's load commands carry (LC_SYMTAB,
+ * LC_DYLD_CHAINED_FIXUPS dataoff, ...) is relative to THAT slice's start and
+ * must be bounded by the slice, not the file. The probe therefore works on the
+ * slice alone; these two entry points expose the same two steps, platform
+ * neutral, for the probe and for tests. */
+bool hotswap_macho_select_slice(const uint8_t *image, size_t image_size,
+                                size_t *slice_off, size_t *slice_len,
+                                char *err, size_t err_cap)
+{
+    uint32_t magic = 0;
+    *slice_off = 0;
+    *slice_len = image_size;
+    return mp_select_magic(image, image_size, slice_off, slice_len, &magic,
+                           err, err_cap);
+}
+
+bool hotswap_macho_slice_fixups_check(const uint8_t *slice, size_t slice_size,
+                                      uint32_t dataoff, uint32_t datasize,
+                                      char *err, size_t err_cap)
+{
+    const uint8_t *blob = ptr_at(slice, slice_size, dataoff, datasize);
+    if (!blob)
+        return mp_fail(err, err_cap,
+                       "macho admit: chained fixups lie outside the Mach-O slice");
+    return hotswap_macho_chained_fixups_check(blob, datasize, err, err_cap);
 }
 
 #if defined(__APPLE__)
@@ -404,6 +542,46 @@ static bool mp_dylib_command(struct mp_thin *p, const uint8_t *cmds,
     return true;
 }
 
+/* Record the first bind-surface refusal; admit turns it into a refusal. */
+static void mp_bind_refuse(struct mp_thin *p, const char *msg)
+{
+    if (p->out->bind_refusal[0] == '\0')
+        snprintf(p->out->bind_refusal, sizeof(p->out->bind_refusal), "%s", msg);
+}
+
+static bool mp_fixups_command(struct mp_thin *p, const uint8_t *cmds,
+                              uint32_t cmdsize)
+{
+    if (cmdsize < sizeof(struct linkedit_data_command))
+        return mp_fail(p->err, p->err_cap,
+                       "macho probe: truncated LC_DYLD_CHAINED_FIXUPS");
+    if (p->swap) {
+        mp_bind_refuse(p, "macho admit: byte-swapped chained fixups are not admitted");
+        return true;
+    }
+    const struct linkedit_data_command *ld =
+        (const struct linkedit_data_command *)cmds;
+    /* p->image is the slice, so dataoff is resolved against the slice. */
+    char why[ZCL_HOTSWAP_MACHO_PROBE_ERR_CAP];
+    if (!hotswap_macho_slice_fixups_check(p->image, p->image_size, ld->dataoff,
+                                          ld->datasize, why, sizeof(why)))
+        mp_bind_refuse(p, why);
+    return true;
+}
+
+static bool mp_dyld_info_command(struct mp_thin *p, const uint8_t *cmds,
+                                 uint32_t cmdsize)
+{
+    char why[ZCL_HOTSWAP_MACHO_PROBE_ERR_CAP];
+    if (p->swap) {
+        mp_bind_refuse(p, "macho admit: byte-swapped dyld info is not admitted");
+        return true;
+    }
+    if (!hotswap_macho_dyld_info_check(cmds, cmdsize, why, sizeof(why)))
+        mp_bind_refuse(p, why);
+    return true;
+}
+
 static bool mp_command(struct mp_thin *p, const uint8_t *cmds,
                         const struct load_command *lc)
 {
@@ -416,6 +594,11 @@ static bool mp_command(struct mp_thin *p, const uint8_t *cmds,
     case LC_LOAD_WEAK_DYLIB:
     case LC_REEXPORT_DYLIB:
         return mp_dylib_command(p, cmds, lc->cmdsize);
+    case LC_DYLD_CHAINED_FIXUPS:
+        return mp_fixups_command(p, cmds, lc->cmdsize);
+    case LC_DYLD_INFO:
+    case LC_DYLD_INFO_ONLY:
+        return mp_dyld_info_command(p, cmds, lc->cmdsize);
     case LC_RPATH:
         p->out->has_rpath = true;
         return true;
@@ -568,19 +751,44 @@ static bool mp_probe_thin(const uint8_t *image, size_t image_size,
 }
 #endif /* __APPLE__: full thin-image facts */
 
+bool hotswap_macho_imports_declared(const struct hotswap_macho_facts *facts,
+                                    char *err, size_t err_cap)
+{
+    if (facts->undefined_symbols_truncated ||
+        facts->undefined_symbol_count > ZCL_HOTSWAP_MACHO_PROBE_MAX_UNDEFINED)
+        return mp_fail(err, err_cap,
+                       "macho admit: module import set cannot be enumerated exactly");
+    /* The dyld bind surface (chained fixups / bind opcodes) binds by name and
+     * need not match LC_SYMTAB; its refusal is part of the same decision. */
+    if (facts->bind_refusal[0] != '\0')
+        return mp_fail(err, err_cap, "%s", facts->bind_refusal);
+    for (size_t i = 0; i < facts->undefined_symbol_count; i++) {
+        /* Mach-O prefixes every C symbol with exactly one '_'; the shared
+         * contract is spelled without it. No prefix means not a C import. */
+        if (!mp_import_name_ok(facts->undefined_symbols[i], err, err_cap))
+            return false; // raw-return-ok:propagates_admit_diagnostic
+    }
+    return true;
+}
+
 bool hotswap_macho_probe_fd(int fd, struct hotswap_macho_facts *out,
                             char *err, size_t err_cap)
 {
     mp_zero(out);
     uint8_t *image = NULL;
-    size_t image_size = 0, header_off = 0;
+    size_t image_size = 0, header_off = 0, slice_len = 0;
     uint32_t magic = 0;
     bool ok = mp_read_image(fd, &image, &image_size, err, err_cap);
-    if (ok)
-        ok = mp_select_magic(image, image_size, &header_off, &magic, err, err_cap);
+    if (ok) {
+        slice_len = image_size;
+        ok = mp_select_magic(image, image_size, &header_off, &slice_len, &magic,
+                             err, err_cap);
+    }
     if (ok) {
 #if defined(__APPLE__)
-        ok = mp_probe_thin(image, image_size, header_off, magic, out, err, err_cap);
+        /* Every offset inside a slice is relative to that slice, so the thin
+         * probe sees only the slice: its bounds are the slice, not the file. */
+        ok = mp_probe_thin(image + header_off, slice_len, 0, magic, out, err, err_cap);
 #else
         ok = mp_fail(err, err_cap, "macho probe: full probe requires macOS");
 #endif
@@ -687,6 +895,9 @@ bool hotswap_macho_pre_map_admit(const struct hotswap_macho_facts *facts,
         return false; // raw-return-ok:propagates_admit_diagnostic
 
     if (!mp_admit_abi(facts, expected_abi, err, err_cap))
+        return false; // raw-return-ok:propagates_admit_diagnostic
+
+    if (!hotswap_macho_imports_declared(facts, err, err_cap))
         return false; // raw-return-ok:propagates_admit_diagnostic
 
     if (expected_core_seal_root && expected_core_seal_root[0] &&

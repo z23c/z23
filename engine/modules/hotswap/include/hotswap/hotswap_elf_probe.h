@@ -344,6 +344,10 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
 bool hotswap_elf_hotfork_pure_fd(int fd,
     struct hotswap_elf_hotfork_pure_facts *out, char *err, size_t err_cap);
 
+/* True when `name` (an ELF-style dynamic symbol, no version suffix) is a row of
+ * engine/composition/hotswap_module_imports.def. Shared by the Mach-O admit. */
+bool hotswap_module_import_declared(const char *name);
+
 /* The one pre-map policy shared by resident activation and offline verify. */
 bool hotswap_elf_pre_map_admit(const struct hotswap_elf_facts *facts,
                                const char expected_core_seal_root[65],

@@ -60,6 +60,10 @@ struct hotswap_macho_facts {
                               [ZCL_HOTSWAP_MACHO_PROBE_SYMBOL_NAME_CAP];
     bool     undefined_symbols_truncated;
 
+    /* First refusal from the dyld bind surface (chained-fixups imports or
+     * legacy bind opcodes); empty when none. Set by the native probe. */
+    char     bind_refusal[ZCL_HOTSWAP_MACHO_PROBE_ERR_CAP];
+
     /* Bytes actually read from the descriptor. */
     uint64_t file_size;
 };
@@ -72,6 +76,28 @@ struct hotswap_macho_facts {
 bool hotswap_macho_probe_fd(int fd, struct hotswap_macho_facts *out,
                             char *err, size_t err_cap);
 
+/* Refuse an undefined-symbol set that is truncated or names anything outside
+ * hotswap_module_imports.def after stripping exactly one leading '_'. Fails
+ * closed naming the first offender. Platform-neutral so it is testable on Linux. */
+bool hotswap_macho_imports_declared(const struct hotswap_macho_facts *facts,
+                                    char *err, size_t err_cap);
+
+/* Raw-payload bind-surface checks (platform-neutral, little-endian). `blob` is
+ * the LC_DYLD_CHAINED_FIXUPS data: every import name must pass the same table
+ * as the symtab check, header offsets/formats are bounds-checked, unknown
+ * formats and compressed name pools are refused. `cmd` is a whole LC_DYLD_INFO
+ * or LC_DYLD_INFO_ONLY command: any bind/weak-bind/lazy-bind bytes are refused.
+ * On refusal `err` names the reason (and the first undeclared symbol). */
+bool hotswap_macho_chained_fixups_check(const uint8_t *blob, size_t size,
+                                        char *err, size_t err_cap);
+bool hotswap_macho_dyld_info_check(const uint8_t *cmd, size_t cmdsize,
+                                   char *err, size_t err_cap);
+bool hotswap_macho_select_slice(const uint8_t *image, size_t image_size,
+                                size_t *slice_off, size_t *slice_len,
+                                char *err, size_t err_cap);
+bool hotswap_macho_slice_fixups_check(const uint8_t *slice, size_t slice_size,
+                                      uint32_t dataoff, uint32_t datasize,
+                                      char *err, size_t err_cap);
 /* The one pre-map policy shared by resident activation and offline verify. */
 bool hotswap_macho_pre_map_admit(const struct hotswap_macho_facts *facts,
                                  const char expected_core_seal_root[65],

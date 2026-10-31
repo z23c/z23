@@ -1185,7 +1185,7 @@ bool hotswap_elf_probe_fd(int fd, struct hotswap_elf_facts *out,
 
 #endif
 
-static bool runtime_import_allowed(const char *name)
+bool hotswap_module_import_declared(const char *name)
 {
 #define HOTSWAP_MODULE_IMPORT(symbol_, group_) \
     if (strcmp(name, (symbol_)) == 0) return true;
@@ -1258,7 +1258,7 @@ static bool pre_map_imports_declared(const struct hotswap_elf_facts *facts,
         return fail(NULL, err, err_cap,
                     "module import set cannot be enumerated exactly");
     for (size_t i = 0; i < facts->undefined_symbol_count; i++) {
-        if (!runtime_import_allowed(facts->undefined_symbols[i]))
+        if (!hotswap_module_import_declared(facts->undefined_symbols[i]))
             return fail(NULL, err, err_cap,
                         "module imports undeclared resident symbol '%s'",
                         facts->undefined_symbols[i]);

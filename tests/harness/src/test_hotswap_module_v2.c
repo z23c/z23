@@ -116,6 +116,290 @@ _test_next:;
     return failures;
 }
 
+/* The Mach-O import policy is the ELF contract after stripping exactly one
+ * leading '_'. A Mach-O fixture cannot be built off macOS, so the name check
+ * is driven directly with crafted undefined-name lists. */
+static void macho_imports_set(struct hotswap_macho_facts *f, size_t n,
+                              const char *const *names)
+{
+    memset(f, 0, sizeof(*f));
+    f->undefined_symbol_count = n;
+    for (size_t i = 0; i < n; i++)
+        snprintf(f->undefined_symbols[i], sizeof(f->undefined_symbols[i]),
+                 "%s", names[i]);
+}
+
+static int t_macho_imports_follow_the_def(void)
+{
+    int failures = 0;
+    TEST("Mach-O imports: one '_' stripped, undeclared or unprefixed names refused") {
+        static struct hotswap_macho_facts f;
+        char err[256];
+        const char *const ok[] = { "_json_push_kv_str", "_memcpy" };
+        macho_imports_set(&f, 2, ok);
+        ASSERT(hotswap_macho_imports_declared(&f, err, sizeof(err)));
+
+        const char *const extra[] = { "_json_push_kv_str",
+                                      "_zcl_forbidden_runtime_import" };
+        macho_imports_set(&f, 2, extra);
+        ASSERT(!hotswap_macho_imports_declared(&f, err, sizeof(err)));
+        ASSERT(strstr(err, "undeclared resident symbol "
+                           "'_zcl_forbidden_runtime_import'") != NULL);
+
+        const char *const bare[] = { "json_push_kv_str" };
+        macho_imports_set(&f, 1, bare);
+        ASSERT(!hotswap_macho_imports_declared(&f, err, sizeof(err)));
+        ASSERT(strstr(err, "'json_push_kv_str'") != NULL);
+
+        const char *const twice[] = { "__json_push_kv_str" };
+        macho_imports_set(&f, 1, twice);
+        ASSERT(!hotswap_macho_imports_declared(&f, err, sizeof(err)));
+
+        macho_imports_set(&f, 1, ok);
+        f.undefined_symbols_truncated = true;
+        ASSERT(!hotswap_macho_imports_declared(&f, err, sizeof(err)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Crafted dyld bind-surface bytes. The chained-fixups blob is the 28-byte
+ * header, one import record per entry and a name pool; every offset is
+ * little-endian, as on arm64. */
+static void mt_put32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+/* Layout: header(28) | imports at 28 | pool right after. Format 1 records are
+ * 4 bytes (name_offset << 9), format 3 records are 16 bytes (name_offset in
+ * the second word). Returns the blob size. */
+static size_t mt_fixups(uint8_t *b, uint32_t format, const char *const *names,
+                        uint32_t count)
+{
+    size_t stride = format == 3 ? 16 : format == 2 ? 8 : 4;
+    memset(b, 0, 512);
+    uint32_t pool = (uint32_t)(28 + stride * count);
+    mt_put32(b + 8, 28);
+    mt_put32(b + 12, pool);
+    mt_put32(b + 16, count);
+    mt_put32(b + 20, format);
+    uint32_t off = 1; /* pool starts with the conventional empty string */
+    for (uint32_t i = 0; i < count; i++) {
+        uint8_t *rec = b + 28 + stride * i;
+        if (format == 3)
+            mt_put32(rec + 4, off);
+        else
+            mt_put32(rec, off << 9);
+        size_t n = strlen(names[i]) + 1;
+        memcpy(b + pool + off, names[i], n);
+        off += (uint32_t)n;
+    }
+    return pool + off;
+}
+
+static int t_macho_bind_surface_follows_the_def(void)
+{
+    int failures = 0;
+    TEST("Mach-O dyld bind surface: chained imports use the table, legacy binds refused") {
+        uint8_t b[512];
+        char err[256];
+        const char *const good[] = { "_json_push_kv_str", "_memcpy" };
+        for (uint32_t fmt = 1; fmt <= 3; fmt++) {
+            size_t n = mt_fixups(b, fmt, good, 2);
+            ASSERT(hotswap_macho_chained_fixups_check(b, n, err, sizeof(err)));
+        }
+
+        const char *const bad[] = { "_memcpy", "_zcl_forbidden_runtime_import" };
+        size_t n = mt_fixups(b, 1, bad, 2);
+        ASSERT(!hotswap_macho_chained_fixups_check(b, n, err, sizeof(err)));
+        ASSERT(strstr(err, "'_zcl_forbidden_runtime_import'") != NULL);
+
+        const char *const bare[] = { "memcpy" };
+        n = mt_fixups(b, 1, bare, 1);
+        ASSERT(!hotswap_macho_chained_fixups_check(b, n, err, sizeof(err)));
+
+        /* malformed headers */
+        n = mt_fixups(b, 1, good, 2);
+        mt_put32(b + 8, (uint32_t)n + 4);            /* imports past blob */
+        ASSERT(!hotswap_macho_chained_fixups_check(b, n, err, sizeof(err)));
+        n = mt_fixups(b, 1, good, 2);
+        mt_put32(b + 20, 9);                         /* unknown format */
+        ASSERT(!hotswap_macho_chained_fixups_check(b, n, err, sizeof(err)));
+        n = mt_fixups(b, 1, good, 2);
+        mt_put32(b + 24, 1);                         /* compressed names */
+        ASSERT(!hotswap_macho_chained_fixups_check(b, n, err, sizeof(err)));
+        n = mt_fixups(b, 1, good, 2);
+        mt_put32(b + 16, 0x40000000u);               /* count overflows */
+        ASSERT(!hotswap_macho_chained_fixups_check(b, n, err, sizeof(err)));
+        n = mt_fixups(b, 1, good, 2);
+        mt_put32(b + 28, 0x7fffffu << 9);            /* name offset past pool */
+        ASSERT(!hotswap_macho_chained_fixups_check(b, n, err, sizeof(err)));
+        n = mt_fixups(b, 1, good, 2);
+        ASSERT(!hotswap_macho_chained_fixups_check(b, n - 1, err, sizeof(err)));
+        ASSERT(!hotswap_macho_chained_fixups_check(b, 27, err, sizeof(err)));
+
+        /* LC_DYLD_INFO_ONLY: only a zero bind/weak/lazy size is admitted */
+        uint8_t cmd[48] = {0};
+        ASSERT(hotswap_macho_dyld_info_check(cmd, sizeof(cmd), err, sizeof(err)));
+        for (size_t at = 20; at <= 36; at += 8) {
+            memset(cmd, 0, sizeof(cmd));
+            mt_put32(cmd + at, 8);
+            ASSERT(!hotswap_macho_dyld_info_check(cmd, sizeof(cmd), err, sizeof(err)));
+            ASSERT(strstr(err, "legacy bind opcodes are not admitted") != NULL);
+        }
+        ASSERT(!hotswap_macho_dyld_info_check(cmd, 47, err, sizeof(err)));
+
+        /* a refusal recorded by the probe reaches the admit decision */
+        static struct hotswap_macho_facts f;
+        memset(&f, 0, sizeof(f));
+        snprintf(f.bind_refusal, sizeof(f.bind_refusal), "macho admit: boom");
+        ASSERT(!hotswap_macho_imports_declared(&f, err, sizeof(err)));
+        ASSERT_STR_EQ(err, "macho admit: boom");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static void mt_put32be(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
+}
+
+/* A one-slice universal file: big-endian fat header, the arm64 slice at 4096
+ * (512 bytes), and the slice's chained-fixups blob at slice offset 256. */
+#define MT_FAT_SLICE_OFF 4096u
+#define MT_FAT_SLICE_LEN 512u
+#define MT_FAT_FIXUPS_OFF 256u
+static size_t mt_fat_file(uint8_t *file, const char *const *names, uint32_t count)
+{
+    memset(file, 0, MT_FAT_SLICE_OFF + MT_FAT_SLICE_LEN);
+    mt_put32be(file, 0xcafebabeu);
+    mt_put32be(file + 4, 1);
+    mt_put32be(file + 8, 0x0100000cu);
+    mt_put32be(file + 12, 0);
+    mt_put32be(file + 16, MT_FAT_SLICE_OFF);
+    mt_put32be(file + 20, MT_FAT_SLICE_LEN);
+    uint8_t *slice = file + MT_FAT_SLICE_OFF;
+    mt_put32(slice, 0xfeedfacfu);
+    /* A real thin arm64 bundle header with two load commands: LC_SYMTAB (no
+     * symbols, a small string table at slice offset 128) and
+     * LC_DYLD_CHAINED_FIXUPS whose blob is slice-relative. */
+    mt_put32(slice + 4, 0x0100000cu);   /* cputype arm64 */
+    mt_put32(slice + 12, 8);            /* MH_BUNDLE */
+    mt_put32(slice + 16, 2);            /* ncmds */
+    mt_put32(slice + 20, 40);           /* sizeofcmds */
+    mt_put32(slice + 32, 2);            /* LC_SYMTAB */
+    mt_put32(slice + 36, 24);
+    mt_put32(slice + 40, 96);           /* symoff */
+    mt_put32(slice + 48, 128);          /* stroff */
+    mt_put32(slice + 52, 8);            /* strsize */
+    mt_put32(slice + 56, 0x80000034u);  /* LC_DYLD_CHAINED_FIXUPS */
+    mt_put32(slice + 60, 16);
+    mt_put32(slice + 64, MT_FAT_FIXUPS_OFF);
+    uint8_t blob[512];
+    size_t n = mt_fixups(blob, 1, names, count);
+    memcpy(slice + MT_FAT_FIXUPS_OFF, blob, n);
+    mt_put32(slice + 68, (uint32_t)n);  /* datasize of the fixups command */
+    return n;
+}
+
+static int t_macho_fat_fixups_are_slice_relative(void)
+{
+    int failures = 0;
+    TEST("Mach-O fat: fixups offsets resolve against the slice and its bounds") {
+        static uint8_t file[MT_FAT_SLICE_OFF + MT_FAT_SLICE_LEN];
+        char err[256];
+        size_t off = 0, len = 0;
+
+        const char *const bad[] = { "_memcpy", "_zcl_forbidden_runtime_import" };
+        size_t n = mt_fat_file(file, bad, 2);
+        ASSERT(hotswap_macho_select_slice(file, sizeof(file), &off, &len,
+                                          err, sizeof(err)));
+        ASSERT_EQ(off, (size_t)MT_FAT_SLICE_OFF);
+        ASSERT_EQ(len, (size_t)MT_FAT_SLICE_LEN);
+        /* undeclared import inside the slice is refused, by name */
+        ASSERT(!hotswap_macho_slice_fixups_check(file + off, len,
+                   MT_FAT_FIXUPS_OFF, (uint32_t)n, err, sizeof(err)));
+        ASSERT(strstr(err, "'_zcl_forbidden_runtime_import'") != NULL);
+        /* the offset read as file-relative lands on the fat header: refused */
+        ASSERT(!hotswap_macho_slice_fixups_check(file, sizeof(file),
+                   MT_FAT_FIXUPS_OFF, (uint32_t)n, err, sizeof(err)));
+        /* a file-valid offset that is outside the slice is refused */
+        ASSERT(!hotswap_macho_slice_fixups_check(file + off, len,
+                   MT_FAT_SLICE_OFF + MT_FAT_FIXUPS_OFF, (uint32_t)n,
+                   err, sizeof(err)));
+        ASSERT(strstr(err, "outside the Mach-O slice") != NULL);
+
+        const char *const good[] = { "_memcpy", "_json_push_kv_str" };
+        n = mt_fat_file(file, good, 2);
+        ASSERT(hotswap_macho_select_slice(file, sizeof(file), &off, &len,
+                                          err, sizeof(err)));
+        ASSERT(hotswap_macho_slice_fixups_check(file + off, len,
+                   MT_FAT_FIXUPS_OFF, (uint32_t)n, err, sizeof(err)));
+
+        /* a slice that runs past the file is refused at selection */
+        mt_put32be(file + 20, MT_FAT_SLICE_LEN + 8);
+        ASSERT(!hotswap_macho_select_slice(file, sizeof(file), &off, &len,
+                                           err, sizeof(err)));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#if defined(__APPLE__)
+/* The production probe on a real fat file: the arm64 slice sits at a nonzero
+ * file offset and its LC_DYLD_CHAINED_FIXUPS dataoff is slice-relative. If the
+ * probe handed the whole file to the thin parser, dataoff would be read from
+ * the fat header and the undeclared import would never be named. Runs only on
+ * a Mach-O host: the thin parser needs the Apple headers. */
+static int t_macho_probe_fat_slice_fixups(void)
+{
+    int failures = 0;
+    TEST("Mach-O probe on a fat file resolves fixups inside the arm64 slice") {
+        static uint8_t file[MT_FAT_SLICE_OFF + MT_FAT_SLICE_LEN];
+        static struct hotswap_macho_facts f;
+        char err_bad[256] = "", err_good[256] = "", path[64] = "";
+        const char *const bad[] = { "_memcpy", "_zcl_forbidden_runtime_import" };
+        const char *const good[] = { "_memcpy", "_json_push_kv_str" };
+        mt_fat_file(file, bad, 2);
+        int fd = test_mkstemp(path, sizeof(path), "hotswap_macho_fat");
+        /* Every result is computed first and the descriptor and temp file are
+         * released before any assertion, so a failure leaks neither. */
+        bool wrote = fd >= 0 &&
+                     write(fd, file, sizeof(file)) == (ssize_t)sizeof(file);
+        bool probed_bad = wrote && hotswap_macho_probe_fd(fd, &f, err_bad,
+                                                          sizeof(err_bad));
+        bool bad_admitted = probed_bad &&
+            hotswap_macho_imports_declared(&f, err_bad, sizeof(err_bad));
+        mt_fat_file(file, good, 2);
+        bool rewrote = wrote && lseek(fd, 0, SEEK_SET) == 0 &&
+                       write(fd, file, sizeof(file)) == (ssize_t)sizeof(file);
+        bool probed_good = rewrote && hotswap_macho_probe_fd(fd, &f, err_good,
+                                                             sizeof(err_good));
+        bool good_admitted = probed_good &&
+            hotswap_macho_imports_declared(&f, err_good, sizeof(err_good));
+        bool closed = fd < 0 || close(fd) == 0;
+        bool unlinked = fd < 0 || unlink(path) == 0;
+        ASSERT(wrote);
+        ASSERT(closed && unlinked);
+        ASSERT(probed_bad);
+        ASSERT(!bad_admitted);
+        ASSERT(strstr(err_bad, "'_zcl_forbidden_runtime_import'") != NULL);
+        ASSERT(rewrote && probed_good);
+        ASSERT(good_admitted);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 static int t_macho_fat_magic_bounds(void)
 {
     int failures = 0;
@@ -1393,6 +1677,12 @@ int test_hotswap_module_v2(void)
     failures += t_allowlist_is_per_file();
 #if !defined(_WIN32)
     failures += t_macho_fat_magic_bounds();
+    failures += t_macho_imports_follow_the_def();
+    failures += t_macho_bind_surface_follows_the_def();
+    failures += t_macho_fat_fixups_are_slice_relative();
+#if defined(__APPLE__)
+    failures += t_macho_probe_fat_slice_fixups();
+#endif
 #endif
     failures += t_parameterized_probe_catalog_is_host_owned();
     failures += t_partial_admit_publishes_nothing();
