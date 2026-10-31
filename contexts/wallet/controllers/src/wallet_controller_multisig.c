@@ -8,6 +8,7 @@
 
 #include "controllers/wallet_controller_internal.h"
 #include "controllers/sovereignty_controller.h"
+#include "controllers/wallet_private_broadcast.h"
 
 bool rpc_createmultisig(const struct json_value *params, bool help,
                                 struct json_value *result)
@@ -122,20 +123,30 @@ static const char *sendmany_error_or_fallback(const char *error,
     return error ? error : fallback;
 }
 
-static void sendmany_sync_and_relay(struct wallet_rpc_context *ctx,
-                                    struct wallet_tx *wtx)
+/* Sync the durable projection, hand the send to the relay (public announce,
+ * or the private queue), and answer with the txid. */
+static bool sendmany_finish(struct wallet_rpc_context *ctx,
+                            struct wallet_tx *wtx, struct json_value *result)
 {
     if (wallet_ctx_db_ready(ctx))
         node_db_sync_wallet_tx(ctx->node_db, &wtx->tx, ctx->wallet, 0);
-
-    if (ctx->connman)
-        connman_relay_transaction(ctx->connman, &wtx->tx.hash);
+    if (!wallet_send_relay(ctx, wtx)) {
+        json_set_str(result, "Private broadcast unavailable; send rolled back");
+        transaction_free(&wtx->tx);
+        LOG_FAIL("wallet", "sendmany: private broadcast not queued");
+    }
+    char txid[65];
+    uint256_get_hex(&wtx->tx.hash, txid);
+    json_set_str(result, txid);
+    transaction_free(&wtx->tx);
+    return true;
 }
 
 bool rpc_sendmany(const struct json_value *params, bool help,
                           struct json_value *result)
 {
-    struct wallet_rpc_context *ctx = wallet_ctx();
+    struct wallet_rpc_context send_view;
+    struct wallet_rpc_context *ctx = wallet_send_view(wallet_ctx(), &send_view);
     RPC_HELP(help, result,
         "sendmany \"\" {\"address\":amount,...}\n"
         "Send to multiple addresses in one transaction.\n"
@@ -220,13 +231,7 @@ bool rpc_sendmany(const struct json_value *params, bool help,
                            persisted.message);
     }
 
-    sendmany_sync_and_relay(ctx, &wtx);
-
-    char txid[65];
-    uint256_get_hex(&wtx.tx.hash, txid);
-    json_set_str(result, txid);
-    transaction_free(&wtx.tx);
-    return true;
+    return sendmany_finish(ctx, &wtx, result);
 }
 
 bool rpc_addmultisigaddress(const struct json_value *params, bool help,

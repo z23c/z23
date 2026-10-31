@@ -49,6 +49,7 @@ const char *wpr_state_name(enum wpr_state state)
 {
     switch (state) {
     case WPR_WAITING_FOR_ROUTE: return "waiting_for_route";
+    case WPR_EXPIRED: return "expired";
     case WPR_SCHEDULED:         return "scheduled";
     case WPR_SENT:              return "sent";
     case WPR_SEEN:              return "seen";
@@ -157,7 +158,7 @@ static bool wpr_persist_locked(const struct wpr *r)
     char path[1100];
     if (!wpr_pending_path(r, path, sizeof(path)))
         return true;
-    char buf[sizeof(WPR_PENDING_HEADER) + WPR_MAX_ENTRIES * 65];
+    char buf[sizeof(WPR_PENDING_HEADER) + WPR_MAX_ENTRIES * 66];
     size_t len = 0;
     memcpy(buf, WPR_PENDING_HEADER, sizeof(WPR_PENDING_HEADER) - 1);
     len = sizeof(WPR_PENDING_HEADER) - 1;
@@ -165,6 +166,8 @@ static bool wpr_persist_locked(const struct wpr *r)
         const struct wpr_entry *e = &r->entries[i];
         if (!e->used || e->state == WPR_SEEN)
             continue;
+        if (e->state == WPR_EXPIRED)
+            buf[len++] = 'x';
         uint256_get_hex(&e->txid, buf + len);
         len += 64;
         buf[len++] = '\n';
@@ -189,7 +192,7 @@ static bool wpr_hex_line_valid(const char *s)
 }
 
 static size_t wpr_read_pending(const struct wpr *r, struct uint256 *out,
-                               size_t cap)
+                               bool *expired, size_t cap)
 {
     char path[1100];
     if (!wpr_pending_path(r, path, sizeof(path)))
@@ -197,7 +200,7 @@ static size_t wpr_read_pending(const struct wpr *r, struct uint256 *out,
     FILE *fp = platform_file_stream_open_read(path);
     if (!fp)
         return 0;
-    char buf[sizeof(WPR_PENDING_HEADER) + WPR_MAX_ENTRIES * 65 + 1];
+    char buf[sizeof(WPR_PENDING_HEADER) + WPR_MAX_ENTRIES * 66 + 1];
     size_t len = fread(buf, 1, sizeof(buf) - 1, fp);
     fclose(fp);
     buf[len] = '\0';
@@ -205,10 +208,13 @@ static size_t wpr_read_pending(const struct wpr *r, struct uint256 *out,
     for (char *line = buf; *line && n < cap;) {
         char *end = strchr(line, '\n');
         size_t line_len = end ? (size_t)(end - line) : strlen(line);
-        if (line_len == 64 && wpr_hex_line_valid(line)) {
+        bool x = line_len == 65 && line[0] == 'x';
+        const char *id = x ? line + 1 : line;
+        if ((line_len == 64 || x) && wpr_hex_line_valid(id)) {
             char hex[65];
-            memcpy(hex, line, 64);
+            memcpy(hex, id, 64);
             hex[64] = '\0';
+            expired[n] = x;
             uint256_set_hex(&out[n++], hex);
         }
         if (!end)
@@ -243,7 +249,8 @@ static struct wpr_entry *wpr_find_locked(struct wpr *r,
     return NULL;
 }
 
-/* A free slot, reclaiming the oldest seen-back record when full. */
+/* A free slot, reclaiming the oldest seen-back record when full, then the
+ * oldest expired record. */
 static struct wpr_entry *wpr_alloc_locked(struct wpr *r)
 {
     struct wpr_entry *oldest_seen = NULL;
@@ -251,8 +258,11 @@ static struct wpr_entry *wpr_alloc_locked(struct wpr *r)
         struct wpr_entry *e = &r->entries[i];
         if (!e->used)
             return e;
-        if (e->state == WPR_SEEN &&
-            (!oldest_seen || e->seen_ms < oldest_seen->seen_ms))
+        bool terminal = e->state == WPR_SEEN || e->state == WPR_EXPIRED;
+        if (terminal && (!oldest_seen ||
+            (e->state == WPR_SEEN && oldest_seen->state == WPR_EXPIRED) ||
+            (e->state == oldest_seen->state &&
+             e->seen_ms < oldest_seen->seen_ms)))
             oldest_seen = e;
     }
     if (oldest_seen)
@@ -326,6 +336,23 @@ void wpr_note_seen(struct wpr *r, const struct uint256 *txid)
     zcl_mutex_unlock(&r->lock);
 }
 
+void wpr_mark_expired(struct wpr *r, const struct uint256 *txid)
+{
+    if (!r || !txid)
+        return;
+    zcl_mutex_lock(&r->lock);
+    struct wpr_entry *e = wpr_find_locked(r, txid);
+    if (e) {
+        tx_mempool_remove(&r->pool, txid);
+        e->state = WPR_EXPIRED;
+        e->in_pool = false;
+        e->expired = false;
+        e->seen_ms = r->now_ms();
+        (void)wpr_persist_locked(r);
+    }
+    zcl_mutex_unlock(&r->lock);
+}
+
 void wpr_forget(struct wpr *r, const struct uint256 *txid)
 {
     if (!r || !txid)
@@ -350,16 +377,39 @@ static bool wpr_admit(struct wpr *r, struct transaction *tx)
     return ar == MEMPOOL_ACCEPT_OK || ar == MEMPOOL_ACCEPT_DUPLICATE;
 }
 
+/* An expired record from before the restart: kept for the status only. */
+static void wpr_restore_expired(struct wpr *r, const struct uint256 *txid)
+{
+    zcl_mutex_lock(&r->lock);
+    struct wpr_entry *e = wpr_find_locked(r, txid);
+    if (!e)
+        e = wpr_alloc_locked(r);
+    if (e) {
+        memset(e, 0, sizeof(*e));
+        e->used = true;
+        e->txid = *txid;
+        e->state = WPR_EXPIRED;
+        e->last_attempt_ms = -1;
+        e->seen_ms = r->now_ms();
+    }
+    zcl_mutex_unlock(&r->lock);
+}
+
 struct zcl_result wpr_resume(struct wpr *r)
 {
     if (!r)
         return ZCL_ERR(-1, "private relay resume: NULL relay");
     struct uint256 ids[WPR_MAX_ENTRIES];
+    bool was_expired[WPR_MAX_ENTRIES];
     zcl_mutex_lock(&r->lock);
-    size_t n = wpr_read_pending(r, ids, WPR_MAX_ENTRIES);
+    size_t n = wpr_read_pending(r, ids, was_expired, WPR_MAX_ENTRIES);
     zcl_mutex_unlock(&r->lock);
 
     for (size_t i = 0; i < n; i++) {
+        if (was_expired[i]) {
+            wpr_restore_expired(r, &ids[i]);
+            continue;
+        }
         struct wallet_tx wtx;
         memset(&wtx, 0, sizeof(wtx));
         if (!r->env.wallet ||
@@ -454,7 +504,7 @@ static enum wpr_push_result wpr_push(struct wpr *r, const struct wpr_entry *e,
                                      uint32_t *peer_out)
 {
     struct connman *cm = r->env.connman;
-    if (!cm || !r->env.params)
+    if (!cm || !r->env.params || wpr_get_mode(r) != WPR_MODE_PRIVATE)
         return WPR_PUSH_NO_ROUTE;
     struct transaction tx;
     transaction_init(&tx);
@@ -501,15 +551,17 @@ static bool wpr_wallet_confirmed(struct wpr *r, const struct uint256 *txid)
 
 /* The expiry test of the consensus predicate, on the exact bytes. */
 static bool wpr_entry_expired(struct wpr *r, const struct wpr_entry *e,
-                              int tip_height)
+                              int wallet_height)
 {
-    if (!e->has_expiry || (int64_t)tip_height + 1 <= (int64_t)e->expiry_height)
+    if (!e->has_expiry || wallet_height < 0 ||
+        (int64_t)wallet_height <=
+            (int64_t)e->expiry_height + WPR_EXPIRY_MARGIN_BLOCKS)
         return false;
     struct wallet_tx wtx;
     memset(&wtx, 0, sizeof(wtx));
     if (!r->env.wallet || !wallet_get_tx_copy(r->env.wallet, &e->txid, &wtx))
         return true;
-    bool expired = is_expired_tx(&wtx.tx, tip_height + 1);
+    bool expired = is_expired_tx(&wtx.tx, wallet_height + 1);
     transaction_free(&wtx.tx);
     return expired;
 }
@@ -586,7 +638,9 @@ static void wpr_tick_live(struct wpr *r, const struct wpr_entry *snap,
         return;
     }
     if (snap->state == WPR_WAITING_FOR_ROUTE) {
-        if (wpr_count_eligible_peers(r->env.connman) > 0) {
+        out->held++;
+        if (wpr_get_mode(r) == WPR_MODE_PRIVATE &&
+            wpr_count_eligible_peers(r->env.connman) > 0) {
             zcl_mutex_lock(&r->lock);
             struct wpr_entry *e = wpr_find_locked(r, &snap->txid);
             if (e)
@@ -602,11 +656,31 @@ static void wpr_tick_live(struct wpr *r, const struct wpr_entry *snap,
             zcl_mutex_unlock(&r->lock);
         }
     } else if (snap->state == WPR_SCHEDULED && now >= snap->due_ms) {
-        wpr_attempt_push(r, snap, now, out);
+        if (wpr_get_mode(r) != WPR_MODE_PRIVATE)
+            out->held++;
+        else
+            wpr_attempt_push(r, snap, now, out);
     }
 }
 
-static void wpr_tick_entry(struct wpr *r, size_t slot, int tip_height,
+/* Drop a finished entry once its retention has passed. */
+static void wpr_prune_terminal(struct wpr *r, const struct wpr_entry *snap,
+                               int64_t now)
+{
+    int64_t keep_s = snap->state == WPR_SEEN ? WPR_SEEN_RETAIN_S
+                                             : WPR_EXPIRED_RETAIN_S;
+    if (now - snap->seen_ms <= keep_s * 1000)
+        return;
+    zcl_mutex_lock(&r->lock);
+    struct wpr_entry *e = wpr_find_locked(r, &snap->txid);
+    if (e && e->state == snap->state) {
+        memset(e, 0, sizeof(*e));
+        (void)wpr_persist_locked(r);
+    }
+    zcl_mutex_unlock(&r->lock);
+}
+
+static void wpr_tick_entry(struct wpr *r, size_t slot, int wallet_height,
                            int64_t now, struct wpr_tick_result *out)
 {
     zcl_mutex_lock(&r->lock);
@@ -615,14 +689,8 @@ static void wpr_tick_entry(struct wpr *r, size_t slot, int tip_height,
     if (!snap.used)
         return;
 
-    if (snap.state == WPR_SEEN) {
-        if (now - snap.seen_ms > (int64_t)WPR_SEEN_RETAIN_S * 1000) {
-            zcl_mutex_lock(&r->lock);
-            struct wpr_entry *e = wpr_find_locked(r, &snap.txid);
-            if (e && e->state == WPR_SEEN)
-                memset(e, 0, sizeof(*e));
-            zcl_mutex_unlock(&r->lock);
-        }
+    if (snap.state == WPR_SEEN || snap.state == WPR_EXPIRED) {
+        wpr_prune_terminal(r, &snap, now);
         return;
     }
     if (wpr_wallet_confirmed(r, &snap.txid)) {
@@ -640,7 +708,7 @@ static void wpr_tick_entry(struct wpr *r, size_t slot, int tip_height,
         }
         return;
     }
-    if (wpr_entry_expired(r, &snap, tip_height)) {
+    if (wpr_entry_expired(r, &snap, wallet_height)) {
         zcl_mutex_lock(&r->lock);
         struct wpr_entry *e = wpr_find_locked(r, &snap.txid);
         if (e) {
@@ -655,14 +723,14 @@ static void wpr_tick_entry(struct wpr *r, size_t slot, int tip_height,
     wpr_tick_live(r, &snap, now, out);
 }
 
-void wpr_tick(struct wpr *r, int tip_height, struct wpr_tick_result *out)
+void wpr_tick(struct wpr *r, int wallet_height, struct wpr_tick_result *out)
 {
     memset(out, 0, sizeof(*out));
     if (!r)
         return;
     int64_t now = r->now_ms();
     for (size_t i = 0; i < WPR_MAX_ENTRIES; i++)
-        wpr_tick_entry(r, i, tip_height, now, out);
+        wpr_tick_entry(r, i, wallet_height, now, out);
 }
 
 /* ── status ─────────────────────────────────────────────────────────── */
@@ -684,7 +752,9 @@ void wpr_status_snapshot(struct wpr *r, struct wpr_status *out)
         s->attempts = e->attempts;
         s->seconds_since_attempt =
             e->last_attempt_ms < 0 ? -1 : (now - e->last_attempt_ms) / 1000;
-        if (e->state != WPR_SEEN)
+        if (e->state == WPR_EXPIRED)
+            out->expired++;
+        else if (e->state != WPR_SEEN)
             out->pending++;
     }
     zcl_mutex_unlock(&r->lock);

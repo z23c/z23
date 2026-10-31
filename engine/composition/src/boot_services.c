@@ -1390,7 +1390,7 @@ bool app_init_services(struct app_context *ctx, const struct chain_params *param
     t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.scrub_plaintext", "svc.init_wallet");
     boot_wire_msg_processor(svc, ctx, params);
     boot_init_connman(svc, ctx, params);
-    boot_start_wallet_broadcast(svc, ctx, params);
+    if (!boot_start_wallet_broadcast(svc, ctx, params)) return boot_step_fail("wallet_broadcast_mode");
     /* NETWORK_READY boundary: connman and addrman ready, listeners bound just
      * below; advances the boot-stage machine via the net record in boot.c. */
     {

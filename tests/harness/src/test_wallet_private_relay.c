@@ -18,12 +18,16 @@
 #include "config/boot_internal.h"
 #include "config/boot_msg_callbacks.h"
 #include "consensus/upgrades.h"
+#include "controllers/wallet_controller.h"
 #include "controllers/wallet_helpers.h"
 #include "controllers/wallet_private_broadcast.h"
 #include "core/serialize.h"
 #include "crypto/random_secret.h"
 #include "keys/key.h"
+#include "json/json.h"
 #include "keys/pubkey.h"
+#include "models/database.h"
+#include "models/wallet_tx.h"
 #include "net/connman.h"
 #include "net/msg_internal.h"
 #include "net/msgprocessor.h"
@@ -31,7 +35,9 @@
 #include "net/netaddr.h"
 #include "net/onion_v3_address.h"
 #include "net/protocol.h"
+#include "platform/time_compat.h"
 #include "primitives/transaction.h"
+#include "rpc/server.h"
 #include "sim/simnet.h"
 #include "script/script.h"
 #include "script/sighashtype.h"
@@ -43,7 +49,14 @@
 #include "validation/sighash.h"
 #include "validation/txmempool.h"
 #include "wallet/wallet.h"
+#include "wallet/wallet_lock.h"
+#include "wallet/wallet_sqlite.h"
+#include "jobs/reducer_frontier.h"
+#include "jobs/reducer_frontier_schema.h"
+#include "storage/coins_kv.h"
+#include "storage/progress_store.h"
 
+#include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -77,6 +90,16 @@ struct wprt_fx {
     size_t num_peers;
     uint8_t next_seed;
     struct p2p_node *doomed;
+    struct rpc_table tbl;
+    struct node_db ndb;
+    struct wallet_sqlite wsql;
+    bool db_open;
+    bool wsql_open;
+    bool trust_open;
+    struct uint256 funding[8];
+    size_t num_funding;
+    struct chain_params saved_params;
+    bool params_saved;
 };
 
 static struct wprt_fx *wprt_cur;
@@ -129,6 +152,14 @@ static bool wprt_open(struct wprt_fx *f, enum wpr_mode mode)
 static void wprt_close(struct wprt_fx *f)
 {
     wprt_cur = NULL;
+    if (f->trust_open)
+        progress_store_close();
+    if (f->wsql_open)
+        wallet_sqlite_close(&f->wsql);
+    if (f->db_open)
+        node_db_close(&f->ndb);
+    if (f->params_saved)
+        *(struct chain_params *)chain_params_get() = f->saved_params;
     wpr_free(wpr_global());
     wpr_init(wpr_global());
     connman_free(&f->cm);
@@ -138,6 +169,16 @@ static void wprt_close(struct wprt_fx *f)
     free(f->wallet);
     main_state_free(&f->ms);
     test_rm_rf(f->dir);
+}
+
+/* Overwinter active from height 0, so wallet sends carry an expiry height.
+ * The saved parameters are restored when the fixture closes. */
+static void wprt_overwinter_on(struct wprt_fx *f)
+{
+    struct chain_params *p = (struct chain_params *)chain_params_get();
+    f->saved_params = *p;
+    f->params_saved = true;
+    p->consensus.vUpgrades[UPGRADE_OVERWINTER].nActivationHeight = 0;
 }
 
 static struct p2p_node *wprt_add_peer(struct wprt_fx *f, enum wprt_kind kind)
@@ -306,35 +347,6 @@ static bool wprt_build(struct wprt_fx *f, uint8_t seed,
     return true;
 }
 
-static void wprt_ctx(struct wprt_fx *f, struct wallet_rpc_context *ctx)
-{
-    memset(ctx, 0, sizeof(*ctx));
-    ctx->wallet = f->wallet;
-    ctx->main_state = &f->ms;
-    ctx->mempool = &f->main_pool;
-    ctx->connman = &f->cm;
-    ctx->coins_tip = &f->coins;
-}
-
-/* The wallet send sequence, exactly as the four send paths run it. */
-static bool wprt_send(struct wprt_fx *f, struct wallet_tx *wtx)
-{
-    struct wallet_rpc_context base, view;
-    wprt_ctx(f, &base);
-    struct wallet_rpc_context *ctx = wallet_send_view(&base, &view);
-    struct zcl_result cr = wallet_commit_from_context(ctx, wtx);
-    if (!cr.ok) {
-        printf("wallet_private_relay: commit refused: %s\n", cr.message);
-        return false;
-    }
-    struct zcl_result pr = wallet_persist_commit_before_relay(ctx, wtx);
-    if (!pr.ok) {
-        printf("wallet_private_relay: persist refused: %s\n", pr.message);
-        return false;
-    }
-    return wallet_send_relay(ctx, wtx);
-}
-
 /* A node without a socket marks itself for disconnect on its first flush
  * attempt, which is a fixture artifact: undo it for every peer except the one
  * the case deliberately disconnects. */
@@ -397,6 +409,267 @@ static void wprt_run(int64_t ms, int tip)
         wprt_tick(1000, tip, &res);
 }
 
+/* ── the wallet send surface: the real RPC handlers ─────────────────── */
+
+static bool wprt_self_address(const struct wprt_fx *f, char *out, size_t cap)
+{
+    struct tx_destination dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.type = DEST_KEY_ID;
+    dest.id.key = f->kid;
+    return wallet_encode_destination(&dest, out, cap);
+}
+
+static bool wprt_db_utxo(struct wprt_fx *f, const struct uint256 *txid)
+{
+    if (!f->db_open)
+        return true;
+    struct db_wallet_utxo u;
+    memset(&u, 0, sizeof(u));
+    memcpy(u.txid, txid->data, sizeof(u.txid));
+    u.value = WPRT_UTXO;
+    memcpy(u.address_hash, f->kid.id.data, sizeof(u.address_hash));
+    u.script = (uint8_t *)f->spk.data;
+    u.script_len = f->spk.size;
+    u.height = 1;
+    return db_wallet_utxo_save(&f->ndb, &u);
+}
+
+static bool wprt_fund_one(struct wprt_fx *f, int i)
+{
+    struct wallet_tx fund;
+    memset(&fund, 0, sizeof(fund));
+    transaction_init(&fund.tx);
+    transaction_alloc(&fund.tx, 0, 1);
+    fund.tx.version = 1;
+    fund.tx.lock_time = (uint32_t)(i + 1);
+    fund.tx.vout[0].value = WPRT_UTXO;
+    fund.tx.vout[0].script_pub_key = f->spk;
+    transaction_compute_hash(&fund.tx);
+    fund.confirms = 10;
+    fund.used = true;
+    bool ok = wallet_add_to_wallet(f->wallet, &fund) &&
+              wprt_add_utxo(f, &fund.tx.hash) &&
+              wprt_db_utxo(f, &fund.tx.hash);
+    if (ok)
+        f->funding[f->num_funding++] = fund.tx.hash;
+    transaction_free(&fund.tx);
+    return ok;
+}
+
+/* Spend RPCs are sovereignty-gated: give them the minimal self-folded
+ * progress projection a running node has. */
+static bool wprt_trust_fixture(const char *dir)
+{
+    if (!progress_store_open(dir))
+        return false;
+    sqlite3 *db = progress_store_db();
+    uint8_t txid[32] = {0x51};
+    uint8_t migrated = 1, hash[32];
+    memset(hash, 0x50, sizeof(hash));
+    if (!db || !coins_kv_ensure_schema(db) || !reducer_frontier_ensure_schema(db))
+        return false;
+    reducer_frontier_provable_tip_set(10);
+    const unsigned char script[4] = {0xE0, 0xE0, 0xE0, 0xE0};
+    if (!coins_kv_add(db, txid, 0, 1234, 10, true, script, sizeof(script)) ||
+        sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_stmt *st = NULL;
+    bool ok = coins_kv_set_applied_height_in_tx(db, 11) &&
+        progress_meta_set_in_tx(db, COINS_KV_MIGRATION_COMPLETE_KEY, &migrated, 1) &&
+        sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO validate_headers_log"
+            "(height,hash,ok,validated_at) VALUES(10,?1,1,0)", -1, &st, NULL) == SQLITE_OK;
+    if (ok) {
+        sqlite3_bind_blob(st, 1, hash, sizeof(hash), SQLITE_STATIC);
+        ok = sqlite3_step(st) == SQLITE_DONE;
+    }
+    sqlite3_finalize(st);
+    ok = sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL) == SQLITE_OK && ok;
+    return ok && coins_kv_mark_self_folded(db);
+}
+
+/* Registers the real wallet RPC table over the fixture, with a real node
+ * database and wallet database when asked. */
+static bool wprt_rpc_start(struct wprt_fx *f, bool with_db)
+{
+    if (!wprt_trust_fixture(f->dir))
+        return false;
+    f->trust_open = true;
+    rpc_table_init(&f->tbl);
+    register_wallet_rpc_commands(&f->tbl);
+    char warm[64];
+    if (rpc_is_in_warmup(warm, sizeof(warm)))
+        set_rpc_warmup_finished();
+    if (with_db) {
+        wallet_lock_reset_for_test();
+        wallet_lock_note_encrypted_at_rest();
+        if (!node_db_open(&f->ndb, ":memory:"))
+            return false;
+        f->db_open = true;
+        if (!wallet_sqlite_open_r(&f->wsql, f->ndb.db).ok)
+            return false;
+        f->wsql_open = true;
+        if (!wallet_lock_unlock(NULL, NULL, "wallet-private-relay").ok)
+            return false;
+    }
+    rpc_wallet_set_state(f->wallet, &f->ms, f->dir,
+                         f->wsql_open ? &f->wsql : NULL, &f->main_pool,
+                         &f->cm);
+    rpc_wallet_set_node_db(f->db_open ? &f->ndb : NULL);
+    rpc_wallet_set_coins_tip(&f->coins);
+    return true;
+}
+
+/* Change keys the wallet may hand out: owned keys registered in the pool. */
+static bool wprt_fill_pool(struct wallet *w, int n)
+{
+    for (int i = 0; i < n; i++) {
+        struct privkey k;
+        struct pubkey pk;
+        privkey_make_new(&k, true);
+        privkey_get_pubkey(&k, &pk);
+        struct key_id kid = pubkey_get_id(&pk);
+        if (!wallet_import_key(w, &k) ||
+            !wallet_key_pool_restore(w, &kid, 1000 + i))
+            return false;
+    }
+    return true;
+}
+
+/* Two or more confirmed 100 ZCL coins owned by the wallet, ready to be sent
+ * through sendtoaddress and sendmany. */
+static bool wprt_wallet_ready(struct wprt_fx *f, enum wpr_mode mode, int coins,
+                              bool with_db)
+{
+    bool ok = wprt_open(f, mode) && wprt_rpc_start(f, with_db) &&
+              wallet_import_key(f->wallet, &f->key) &&
+              wprt_fill_pool(f->wallet, 8);
+    for (int i = 0; ok && i < coins; i++)
+        ok = wprt_fund_one(f, i);
+    return ok;
+}
+
+static void wprt_json_str(struct json_value *arr, const char *s)
+{
+    struct json_value v;
+    json_init(&v);
+    json_set_str(&v, s);
+    json_push_back(arr, &v);
+    json_free(&v);
+}
+
+static void wprt_json_real(struct json_value *arr, double d)
+{
+    struct json_value v;
+    json_init(&v);
+    json_set_real(&v, d);
+    json_push_back(arr, &v);
+    json_free(&v);
+}
+
+static void wprt_send_params(struct json_value *params, bool many,
+                             const char *addr, double zcl)
+{
+    json_set_array(params);
+    if (!many) {
+        wprt_json_str(params, addr);
+        wprt_json_real(params, zcl);
+        return;
+    }
+    wprt_json_str(params, "");
+    struct json_value obj;
+    json_init(&obj);
+    json_set_object(&obj);
+    json_push_kv_real(&obj, addr, zcl);
+    json_push_back(params, &obj);
+    json_free(&obj);
+}
+
+/* One send of `zcl` coins to the wallet's own address through the RPC
+ * handler: sendtoaddress, or sendmany when `many`. */
+static bool wprt_rpc_send(struct wprt_fx *f, bool many, double zcl,
+                          struct uint256 *id)
+{
+    char addr[128];
+    if (!wprt_self_address(f, addr, sizeof(addr)))
+        return false;
+    struct json_value params, result;
+    json_init(&params);
+    json_init(&result);
+    wprt_send_params(&params, many, addr, zcl);
+    bool ok = rpc_table_execute(&f->tbl, many ? "sendmany" : "sendtoaddress",
+                                &params, &result);
+    const char *hex = result.type == JSON_STR ? json_get_str(&result) : NULL;
+    ok = ok && hex && strlen(hex) == 64;
+    if (ok)
+        uint256_set_hex(id, hex);
+    else
+        printf("wallet_private_relay: %s refused: %s\n",
+               many ? "sendmany" : "sendtoaddress", hex ? hex : "(no text)");
+    json_free(&params);
+    json_free(&result);
+    return ok;
+}
+
+static bool wprt_copy_tx(struct wprt_fx *f, const struct uint256 *id,
+                         struct wallet_tx *out)
+{
+    memset(out, 0, sizeof(*out));
+    return wallet_get_tx_copy(f->wallet, id, out);
+}
+
+/* The status read through the real RPC; the caller frees *out. */
+static bool wprt_status_json(struct wprt_fx *f, struct json_value *out)
+{
+    struct json_value params;
+    json_init(&params);
+    json_set_array(&params);
+    json_init(out);
+    bool ok = rpc_table_execute(&f->tbl, "walletbroadcaststatus", &params, out);
+    json_free(&params);
+    return ok;
+}
+
+static const char *wprt_jstr(const struct json_value *v)
+{
+    return v ? json_get_str(v) : NULL;
+}
+
+static const struct json_value *wprt_status_entry(const struct json_value *st,
+                                                  const struct uint256 *id)
+{
+    char hex[65];
+    uint256_get_hex(id, hex);
+    const struct json_value *list = json_get(st, "transactions");
+    for (size_t i = 0; list && i < json_size(list); i++) {
+        const struct json_value *e = json_at(list, i);
+        const char *t = wprt_jstr(json_get(e, "txid"));
+        if (t && strcmp(t, hex) == 0)
+            return e;
+    }
+    return NULL;
+}
+
+static bool wprt_status_says(struct wprt_fx *f, const struct uint256 *id,
+                             const char *state, const char *next_part)
+{
+    struct json_value st;
+    bool ok = wprt_status_json(f, &st);
+    const struct json_value *e = ok ? wprt_status_entry(&st, id) : NULL;
+    const char *s = e ? wprt_jstr(json_get(e, "state")) : NULL;
+    const char *n = e ? wprt_jstr(json_get(e, "next_step")) : NULL;
+    ok = ok && s && n && strcmp(s, state) == 0 && strstr(n, next_part);
+    json_free(&st);
+    return ok;
+}
+
+static void wprt_set_wallet_height(struct wprt_fx *f, int height)
+{
+    zcl_mutex_lock(&f->wallet->cs);
+    f->wallet->best_block_height = height;
+    zcl_mutex_unlock(&f->wallet->cs);
+}
+
 /* ── cases ──────────────────────────────────────────────────────────── */
 
 /* The previous behaviour: this is the witness the private path replaces. */
@@ -404,18 +677,15 @@ static int wprt_case_public_witness(void)
 {
     int failures = 0;
     struct wprt_fx f;
-    bool ok = wprt_open(&f, WPR_MODE_PUBLIC);
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PUBLIC, 1, false);
     struct p2p_node *clear = ok ? wprt_add_peer(&f, WPRT_CLEAR_OUT) : NULL;
-    struct wallet_tx wtx;
-    ok = ok && clear && wprt_build(&f, 0x51, NULL, 0, &wtx) &&
-         wprt_send(&f, &wtx);
+    struct uint256 id;
+    ok = ok && clear && wprt_rpc_send(&f, false, 10.0, &id);
     wprt_report("public mode (old relay) holds the send in the main mempool "
                 "and announces it to a clearnet peer",
-                ok && tx_mempool_exists(&f.main_pool, &wtx.tx.hash) &&
+                ok && tx_mempool_exists(&f.main_pool, &id) &&
                     wprt_count(clear, "inv") == 1,
                 &failures);
-    if (ok)
-        transaction_free(&wtx.tx);
     wprt_close(&f);
     return failures;
 }
@@ -428,7 +698,6 @@ static bool wprt_peer_serves_nothing(struct wprt_fx *f, struct p2p_node *peer,
         return false;
     msg_processor_init(mp, &f->ms, &f->main_pool, &f->coins, f->params,
                        f->dir, &f->cm.manager, NULL);
-    size_t before = wprt_total_bytes(peer);
     bool ok = process_mempool(mp, peer);
     struct byte_stream req;
     stream_init(&req, 64);
@@ -442,21 +711,47 @@ static bool wprt_peer_serves_nothing(struct wprt_fx *f, struct p2p_node *peer,
     stream_free(&rd);
     stream_free(&req);
     ok = ok && wprt_count(peer, "tx") == 0 && wprt_count(peer, "inv") == 0;
-    (void)before;
     free(mp);
     return ok;
 }
 
-static void wprt_private_send_status(struct wprt_fx *f, const struct wallet_tx *wtx,
-                                     bool ok, int *failures)
+static void wprt_private_send_status(struct wprt_fx *f,
+                                     const struct uint256 *a,
+                                     const struct uint256 *b, bool ok,
+                                     int *failures)
 {
     bool found = false;
     wprt_report("nothing is announced or pushed before the delay",
                 ok && wprt_all(f, "inv") == 0 && wprt_all(f, "tx") == 0,
                 failures);
-    wprt_report("status is scheduled with one pending send",
-                ok && wprt_state(&wtx->tx.hash, &found) == WPR_SCHEDULED &&
-                    found && wprt_pending() == 1,
+    wprt_report("status is scheduled with two pending sends",
+                ok && wprt_state(a, &found) == WPR_SCHEDULED && found &&
+                    wprt_state(b, &found) == WPR_SCHEDULED && found &&
+                    wprt_pending() == 2,
+                failures);
+}
+
+/* sendtoaddress and sendmany, through the registered RPC handlers. */
+static void wprt_private_send_pools(struct wprt_fx *f, struct p2p_node *clear,
+                                    struct p2p_node *onion,
+                                    const struct uint256 *a,
+                                    const struct uint256 *b, bool ok,
+                                    int *failures)
+{
+    wprt_report("a private sendtoaddress and a private sendmany leave the "
+                "main mempool empty",
+                ok && tx_mempool_size(&f->main_pool) == 0 &&
+                    !tx_mempool_exists(&f->main_pool, a) &&
+                    !tx_mempool_exists(&f->main_pool, b) &&
+                    tx_mempool_exists(wpr_pool(wpr_global()), a) &&
+                    tx_mempool_exists(wpr_pool(wpr_global()), b),
+                failures);
+    wprt_report("mempool and getdata from a clearnet peer and an onion peer "
+                "reveal neither send",
+                ok && wprt_peer_serves_nothing(f, clear, a) &&
+                    wprt_peer_serves_nothing(f, onion, a) &&
+                    wprt_peer_serves_nothing(f, clear, b) &&
+                    wprt_peer_serves_nothing(f, onion, b),
                 failures);
 }
 
@@ -464,29 +759,17 @@ static int wprt_case_private_send(void)
 {
     int failures = 0;
     struct wprt_fx f;
-    bool ok = wprt_open(&f, WPR_MODE_PRIVATE);
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 3, false);
     struct p2p_node *clear = ok ? wprt_add_peer(&f, WPRT_CLEAR_OUT) : NULL;
     struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
-    struct wallet_tx wtx;
-    ok = ok && clear && onion && wprt_build(&f, 0x52, NULL, 0, &wtx) &&
-         wprt_send(&f, &wtx);
-    wprt_report("a private send leaves the main mempool empty",
-                ok && tx_mempool_size(&f.main_pool) == 0 &&
-                    !tx_mempool_exists(&f.main_pool, &wtx.tx.hash) &&
-                    tx_mempool_exists(wpr_pool(wpr_global()), &wtx.tx.hash),
-                &failures);
-    wprt_report("mempool and getdata from a clearnet peer and an onion peer "
-                "reveal nothing",
-                ok && wprt_peer_serves_nothing(&f, clear, &wtx.tx.hash) &&
-                    wprt_peer_serves_nothing(&f, onion, &wtx.tx.hash),
-                &failures);
-    wprt_private_send_status(&f, &wtx, ok, &failures);
-    if (ok)
-        transaction_free(&wtx.tx);
+    struct uint256 a, b;
+    ok = ok && clear && onion && wprt_rpc_send(&f, false, 10.0, &a) &&
+         wprt_rpc_send(&f, true, 10.0, &b);
+    wprt_private_send_pools(&f, clear, onion, &a, &b, ok, &failures);
+    wprt_private_send_status(&f, &a, &b, ok, &failures);
     wprt_close(&f);
     return failures;
 }
-
 static int64_t wprt_due_delay(const struct uint256 *txid)
 {
     struct wpr *r = wpr_global();
@@ -572,7 +855,7 @@ static void wprt_peer_first_attempt(struct wprt_fx *f, bool ok,
                 failures);
 }
 
-static void wprt_peer_silence(struct wprt_fx *f, const struct wallet_tx *wtx,
+static void wprt_peer_silence(struct wprt_fx *f, const struct uint256 *id,
                               bool ok, int *failures)
 {
     bool found = false;
@@ -584,8 +867,7 @@ static void wprt_peer_silence(struct wprt_fx *f, const struct wallet_tx *wtx,
                     wprt_total_bytes(f->peers[7]) == 0,
                 failures);
     wprt_report("status is sent with one attempt",
-                ok && wprt_state(&wtx->tx.hash, &found) == WPR_SENT && found,
-                failures);
+                ok && wprt_state(id, &found) == WPR_SENT && found, failures);
 }
 
 /* Not seen back: a different onion peer after the resend interval. */
@@ -594,7 +876,9 @@ static void wprt_peer_resend(struct wprt_fx *f, struct p2p_node *first,
 {
     wprt_run((int64_t)WPR_RESEND_AFTER_S * 1000 - 2000, -1);
     bool quiet = wprt_all(f, "tx") == 1;
-    wprt_run(2000 + WPR_DELAY_MAX_MS + 10000, -1);
+    /* Worst case: first push at the maximum delay, then the interval, then a
+     * second maximum delay. */
+    wprt_run(2000 + 2 * WPR_DELAY_MAX_MS + 5000, -1);
     size_t after = wprt_all(f, "tx");
     struct p2p_node *second = NULL;
     bool eligible = wprt_pushed_to_eligible(f, first, &second);
@@ -614,7 +898,7 @@ static int wprt_case_one_peer_per_attempt(void)
 {
     int failures = 0;
     struct wprt_fx f;
-    bool ok = wprt_open(&f, WPR_MODE_PRIVATE);
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 1, false);
     for (int i = 0; ok && i < 3; i++)
         ok = wprt_add_peer(&f, WPRT_ONION_OUT) != NULL;
     ok = ok && wprt_add_peer(&f, WPRT_CLEAR_OUT) &&
@@ -622,20 +906,18 @@ static int wprt_case_one_peer_per_attempt(void)
          wprt_add_peer(&f, WPRT_ONION_IN) &&
          wprt_add_peer(&f, WPRT_ONION_DISCONNECT) &&
          wprt_add_peer(&f, WPRT_ONION_NO_RELAY);
-    struct wallet_tx wtx;
-    ok = ok && wprt_build(&f, 0x54, NULL, 0, &wtx) && wprt_send(&f, &wtx);
+    struct uint256 id;
+    ok = ok && wprt_rpc_send(&f, false, 10.0, &id);
     wprt_fill = -1;
     struct p2p_node *first = NULL;
     wprt_peer_first_attempt(&f, ok, &first, &failures);
-    wprt_peer_silence(&f, &wtx, ok && first, &failures);
+    wprt_peer_silence(&f, &id, ok && first, &failures);
     wprt_peer_resend(&f, first, ok, &failures);
-    if (ok)
-        transaction_free(&wtx.tx);
     wprt_close(&f);
     return failures;
 }
 
-static void wprt_no_route_held(struct wprt_fx *f, const struct wallet_tx *wtx,
+static void wprt_no_route_held(struct wprt_fx *f, const struct uint256 *id,
                                bool ok, int *failures)
 {
     bool found = false;
@@ -645,8 +927,7 @@ static void wprt_no_route_held(struct wprt_fx *f, const struct wallet_tx *wtx,
     wprt_report("with no onion peer the send is held: waiting_for_route, "
                 "zero eligible peers, nothing sent anywhere",
                 ok && st &&
-                    wprt_state(&wtx->tx.hash, &found) ==
-                        WPR_WAITING_FOR_ROUTE &&
+                    wprt_state(id, &found) == WPR_WAITING_FOR_ROUTE &&
                     found && st->eligible_peers == 0 && st->pending == 1 &&
                     tx_mempool_size(&f->main_pool) == 0,
                 failures);
@@ -655,6 +936,10 @@ static void wprt_no_route_held(struct wprt_fx *f, const struct wallet_tx *wtx,
         silent = silent && wprt_total_bytes(f->peers[i]) == 0;
     wprt_report("no peer received any byte while no route existed", ok && silent,
                 failures);
+    wprt_report("the status read tells the owner it is safe to wait",
+                ok && wprt_status_says(f, id, "waiting_for_route",
+                                       "safe to wait"),
+                failures);
     free(st);
 }
 
@@ -662,18 +947,18 @@ static int wprt_case_no_route(void)
 {
     int failures = 0;
     struct wprt_fx f;
-    bool ok = wprt_open(&f, WPR_MODE_PRIVATE);
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 1, false);
     ok = ok && wprt_add_peer(&f, WPRT_CLEAR_OUT) &&
          wprt_add_peer(&f, WPRT_CLEAR_OUT) && wprt_add_peer(&f, WPRT_ONION_IN);
-    struct wallet_tx wtx;
-    ok = ok && wprt_build(&f, 0x55, NULL, 0, &wtx) && wprt_send(&f, &wtx);
+    struct uint256 id;
+    ok = ok && wprt_rpc_send(&f, false, 10.0, &id);
     wprt_run(600 * 1000, -1);
-    wprt_no_route_held(&f, &wtx, ok, &failures);
+    wprt_no_route_held(&f, &id, ok, &failures);
     /* A route appears: a fresh delay is drawn from that moment. */
     struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
     struct wpr_tick_result res;
     wprt_tick(1000, -1, &res);
-    int64_t d = wprt_due_delay(&wtx.tx.hash);
+    int64_t d = wprt_due_delay(&id);
     wprt_report("a route appearing schedules a fresh 2 to 20 s delay",
                 onion && d >= WPR_DELAY_MIN_MS && d <= WPR_DELAY_MAX_MS &&
                     wprt_all(&f, "tx") == 0,
@@ -683,49 +968,55 @@ static int wprt_case_no_route(void)
                 onion && wprt_count(onion, "tx") == 1 &&
                     wprt_receivers(&f) == 1 && wprt_clearnet_silent(&f),
                 &failures);
-    if (ok)
-        transaction_free(&wtx.tx);
     wprt_close(&f);
     return failures;
 }
 
-static void wprt_seen_hook(struct wprt_fx *f, const struct wallet_tx *a,
+static void wprt_seen_hook(struct wprt_fx *f, const struct uint256 *a,
                            bool ok, int *failures)
 {
     /* The network offers it back: the node accepts it and the production
      * wallet hook fires. */
+    struct wallet_tx wtx;
+    bool have = ok && wprt_copy_tx(f, a, &wtx);
     struct boot_svc_ctx *svc = zcl_calloc(1, sizeof(*svc), "wprt_svc");
-    ok = ok && svc;
-    if (svc) {
+    if (have && svc) {
         svc->wallet = f->wallet;
-        boot_wallet_tx_accepted(&a->tx, svc);
+        boot_wallet_tx_accepted(&wtx.tx, svc);
     }
+    if (have)
+        transaction_free(&wtx.tx);
     free(svc);
     bool found = false;
     wprt_report("the wallet tx-accepted hook clears the pending state and "
                 "empties the private pool entry",
-                ok && wprt_state(&a->tx.hash, &found) == WPR_SEEN && found &&
-                    !tx_mempool_exists(wpr_pool(wpr_global()), &a->tx.hash) &&
+                ok && have && svc && wprt_state(a, &found) == WPR_SEEN &&
+                    found && !tx_mempool_exists(wpr_pool(wpr_global()), a) &&
                     wprt_pending() == 1,
                 failures);
 }
 
-static void wprt_seen_block(struct wprt_fx *f, const struct wallet_tx *b,
+static void wprt_seen_block(struct wprt_fx *f, const struct uint256 *b,
                             bool ok, int *failures)
 {
     /* The other transaction appears in a connected block. */
+    struct wallet_tx wtx;
+    bool have = ok && wprt_copy_tx(f, b, &wtx);
     struct uint256 bh;
     memset(bh.data, 0xB1, 32);
     struct block_index bi;
     memset(&bi, 0, sizeof(bi));
     bi.nHeight = 1;
     bi.phashBlock = &bh;
-    wallet_sync_transaction(f->wallet, &b->tx, &bi);
+    if (have) {
+        wallet_sync_transaction(f->wallet, &wtx.tx, &bi);
+        transaction_free(&wtx.tx);
+    }
     wprt_run(1000, -1);
     bool found = false;
     wprt_report("inclusion in a block clears the pending state",
-                ok && wprt_state(&b->tx.hash, &found) == WPR_SEEN && found &&
-                    !tx_mempool_exists(wpr_pool(wpr_global()), &b->tx.hash) &&
+                ok && have && wprt_state(b, &found) == WPR_SEEN && found &&
+                    !tx_mempool_exists(wpr_pool(wpr_global()), b) &&
                     wprt_pending() == 0,
                 failures);
     size_t sent = wprt_all(f, "tx");
@@ -738,76 +1029,228 @@ static int wprt_case_seen_and_block(void)
 {
     int failures = 0;
     struct wprt_fx f;
-    bool ok = wprt_open(&f, WPR_MODE_PRIVATE);
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
     struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
-    struct wallet_tx a, b;
-    ok = ok && onion && wprt_build(&f, 0x56, NULL, 0, &a) &&
-         wprt_build(&f, 0x57, NULL, 0, &b) && wprt_send(&f, &a) &&
-         wprt_send(&f, &b);
+    struct uint256 a, b;
+    ok = ok && onion && wprt_rpc_send(&f, false, 10.0, &a) &&
+         wprt_rpc_send(&f, true, 10.0, &b);
     wprt_run(WPR_DELAY_MAX_MS + 1000, -1);
     ok = ok && wprt_count(onion, "tx") == 2;
     wprt_seen_hook(&f, &a, ok, &failures);
     wprt_seen_block(&f, &b, ok, &failures);
-    if (ok) {
-        transaction_free(&a.tx);
-        transaction_free(&b.tx);
-    }
     wprt_close(&f);
     return failures;
 }
 
-static int wprt_case_expiry(void)
+/* ── expiry: the wallet height, the margin, the real databases ─────── */
+
+static uint32_t wprt_expiry_of(struct wprt_fx *f, const struct uint256 *id,
+                               struct outpoint *spent)
+{
+    struct wallet_tx wtx;
+    uint32_t e = 0;
+    if (wprt_copy_tx(f, id, &wtx)) {
+        e = wtx.tx.expiry_height;
+        if (spent && wtx.tx.num_vin)
+            *spent = wtx.tx.vin[0].prevout;
+        transaction_free(&wtx.tx);
+    }
+    return e;
+}
+
+static void wprt_tick_at_height(struct wprt_fx *f, int height)
+{
+    wprt_set_wallet_height(f, height);
+    wallet_private_broadcast_tick();
+    wprt_revive_peers();
+}
+
+static bool wprt_pending_and_reserved(struct wprt_fx *f,
+                                      const struct uint256 *id,
+                                      const struct outpoint *spent)
+{
+    bool found = false;
+    return wprt_state(id, &found) != WPR_EXPIRED && found &&
+           wprt_pending() == 1 &&
+           wallet_is_outpoint_spent(f->wallet, &spent->hash, spent->n);
+}
+
+/* A wallet send is rolled back only once the wallet has read past its
+ * expiry height plus the margin; the chain's next-block lookahead is not
+ * enough. */
+static int wprt_case_expiry_margin(void)
 {
     int failures = 0;
     struct wprt_fx f;
-    bool ok = wprt_open(&f, WPR_MODE_PRIVATE);
-    /* A parameter set with Overwinter active from height 0, so the
-     * transaction carries an expiry the consensus predicate honours. */
-    struct chain_params p = *chain_params_get();
-    p.consensus.vUpgrades[UPGRADE_OVERWINTER].nActivationHeight = 0;
-    struct wpr_env env = {
-        .wallet = f.wallet, .connman = &f.cm, .coins_tip = &f.coins,
-        .main_state = &f.ms, .params = &p, .datadir = f.dir,
-    };
-    wpr_configure(wpr_global(), WPR_MODE_PRIVATE, &env);
-    f.params = &p;
-    struct wallet_tx wtx;
-    ok = ok && wprt_build(&f, 0x58, &p, 50, &wtx);
-    struct wallet_rpc_context base, view;
-    wprt_ctx(&f, &base);
-    struct wallet_rpc_context *ctx = NULL;
-    wprt_report("private mode gives the send a private-pool view without a "
-                "peer manager",
-                (ctx = wallet_send_view(&base, &view)) == &view &&
-                    ctx->mempool == wpr_pool(wpr_global()) &&
-                    ctx->connman == NULL,
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
+    wprt_overwinter_on(&f);
+    struct uint256 id;
+    struct outpoint spent;
+    memset(&spent, 0, sizeof(spent));
+    ok = ok && wprt_add_peer(&f, WPRT_ONION_OUT) &&
+         wprt_rpc_send(&f, false, 10.0, &id);
+    int e = (int)wprt_expiry_of(&f, &id, &spent);
+    wprt_report("a wallet send carries an expiry height", ok && e > 0,
                 &failures);
-    struct wallet_tx_admission adm = {
-        .mempool = ctx->mempool, .coins_tip = &f.coins, .main_state = &f.ms,
-        .params = &p,
-    };
-    struct zcl_result cr = wallet_commit_transaction(f.wallet, &wtx, &adm);
-    ok = ok && cr.ok && wallet_send_relay(ctx, &wtx);
-    struct uint256 prev = wtx.tx.vin[0].prevout.hash;
-    bool spent_before = ok && wallet_is_outpoint_spent(f.wallet, &prev, 0);
-    wprt_run(WPR_DELAY_MAX_MS + 1000, 10);
-    wallet_private_broadcast_tick_at(60);
-    wprt_report("a send past its expiry height leaves the pending state and "
-                "the wallet returns its input",
-                ok && spent_before && wprt_pending() == 0 &&
-                    !wallet_is_outpoint_spent(f.wallet, &prev, 0) &&
-                    f.wallet->num_wallet_tx == 0 &&
-                    f.wallet->num_spent == 0 &&
-                    !tx_mempool_exists(wpr_pool(wpr_global()), &wtx.tx.hash),
+    wprt_tick_at_height(&f, e + 1);
+    wprt_report("one block past expiry (the chain lookahead) is not enough",
+                ok && wprt_pending_and_reserved(&f, &id, &spent), &failures);
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS);
+    wprt_report("the full margin past expiry is still not enough",
+                ok && wprt_pending_and_reserved(&f, &id, &spent), &failures);
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 1);
+    bool found = false;
+    wprt_report("past the margin the send is rolled back, its input returns "
+                "and a terminal expired record remains",
+                ok && wprt_state(&id, &found) == WPR_EXPIRED && found &&
+                    wprt_pending() == 0 &&
+                    !wallet_is_outpoint_spent(f.wallet, &spent.hash, spent.n) &&
+                    !tx_mempool_exists(wpr_pool(wpr_global()), &id),
                 &failures);
-    if (ok)
-        transaction_free(&wtx.tx);
     wprt_close(&f);
     return failures;
 }
 
+/* A send the wallet shows confirmed is never rolled back, even when the
+ * relay had already flagged it. */
+static int wprt_case_expiry_confirmed(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
+    wprt_overwinter_on(&f);
+    struct uint256 id;
+    struct outpoint spent;
+    memset(&spent, 0, sizeof(spent));
+    ok = ok && wprt_add_peer(&f, WPRT_ONION_OUT) &&
+         wprt_rpc_send(&f, false, 10.0, &id);
+    int e = (int)wprt_expiry_of(&f, &id, &spent);
+    struct wallet_tx wtx;
+    struct uint256 bh;
+    memset(bh.data, 0xB2, 32);
+    struct block_index bi;
+    memset(&bi, 0, sizeof(bi));
+    bi.nHeight = e;
+    bi.phashBlock = &bh;
+    bool have = ok && wprt_copy_tx(&f, &id, &wtx);
+    wprt_set_wallet_height(&f, e);
+    if (have) {
+        wallet_sync_transaction(f.wallet, &wtx.tx, &bi);
+        transaction_free(&wtx.tx);
+    }
+    bool expired_now = wallet_private_broadcast_expire(&id);
+    bool found = false;
+    wprt_report("a send mined at its expiry height is not rolled back, even "
+                "when the expiry path runs for it",
+                ok && have && !expired_now &&
+                    wprt_state(&id, &found) == WPR_SEEN && found &&
+                    wallet_is_outpoint_spent(f.wallet, &spent.hash, spent.n),
+                &failures);
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 50);
+    struct wallet_tx still;
+    bool kept = wprt_copy_tx(&f, &id, &still);
+    if (kept)
+        transaction_free(&still.tx);
+    wprt_report("and the wallet record survives long after the margin", kept,
+                &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+static bool wprt_db_coin_state(struct wprt_fx *f, const struct uint256 *coin,
+                               const struct uint256 *spender, bool want_spent)
+{
+    struct db_wallet_utxo u;
+    memset(&u, 0, sizeof(u));
+    if (!db_wallet_utxo_find(&f->ndb, coin->data, 0, &u))
+        return false;
+    bool spent_by = memcmp(u.spent_txid, spender->data, 32) == 0;
+    bool ok = want_spent ? (u.is_spent && spent_by) : !u.is_spent;
+    db_wallet_utxo_free(&u);
+    return ok;
+}
+
+static bool wprt_db_spendable(struct wprt_fx *f, size_t coins)
+{
+    struct db_wallet_utxo list[8];
+    int n = db_wallet_utxo_list_unspent(&f->ndb, list, 8);
+    int64_t balance = db_wallet_utxo_balance(&f->ndb);
+    for (int i = 0; i < n; i++)
+        db_wallet_utxo_free(&list[i]);
+    return n == (int)coins && balance == (int64_t)coins * WPRT_UTXO;
+}
+
+static void wprt_expiry_db_before(struct wprt_fx *f, const struct uint256 *id,
+                                  const struct outpoint *spent, bool ok,
+                                  int *failures)
+{
+    wprt_report("before expiry the database shows the funding coin spent by "
+                "the send and its output rows",
+                ok && wprt_db_coin_state(f, &spent->hash, id, true) &&
+                    db_wallet_utxo_count_for_tx(&f->ndb, id->data) >= 1 &&
+                    !wprt_db_spendable(f, f->num_funding),
+                failures);
+}
+
+static void wprt_expiry_db_after(struct wprt_fx *f, const struct uint256 *id,
+                                 const struct outpoint *spent, bool ok,
+                                 int *failures)
+{
+    struct db_wallet_tx row;
+    memset(&row, 0, sizeof(row));
+    bool row_gone = !db_wallet_tx_find(&f->ndb, id->data, &row);
+    wprt_report("after expiry the database releases the funding coin and "
+                "drops the send's output rows and wallet row, so "
+                "listunspent sees every coin again",
+                ok && wprt_db_coin_state(f, &spent->hash, id, false) &&
+                    db_wallet_utxo_count_for_tx(&f->ndb, id->data) == 0 &&
+                    row_gone && wprt_db_spendable(f, f->num_funding),
+                failures);
+}
+
+static void wprt_expiry_status(struct wprt_fx *f, const struct uint256 *id,
+                               bool ok, int *failures)
+{
+    struct json_value st;
+    bool have = ok && wprt_status_json(f, &st);
+    const struct json_value *e = have ? wprt_status_entry(&st, id) : NULL;
+    wprt_report("the status read reports the terminal expired state and says "
+                "the payment may be sent again",
+                ok && wprt_status_says(f, id, "expired", "may be sent again"),
+                failures);
+    wprt_report("the status read carries no amount or address",
+                e && !json_get(e, "amount") && !json_get(e, "address") &&
+                    json_get(&st, "mode") && json_get(&st, "expired"),
+                failures);
+    if (have)
+        json_free(&st);
+}
+
+/* A real node database and wallet database behind the real handlers. */
+static int wprt_case_expiry_database(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, true);
+    wprt_overwinter_on(&f);
+    struct uint256 id;
+    struct outpoint spent;
+    memset(&spent, 0, sizeof(spent));
+    ok = ok && wprt_add_peer(&f, WPRT_ONION_OUT) &&
+         wprt_rpc_send(&f, false, 10.0, &id);
+    int e = (int)wprt_expiry_of(&f, &id, &spent);
+    wprt_expiry_db_before(&f, &id, &spent, ok, &failures);
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 1);
+    wprt_expiry_db_after(&f, &id, &spent, ok, &failures);
+    wprt_expiry_status(&f, &id, ok, &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* ── restart ────────────────────────────────────────────────────────── */
+
 static void wprt_resume_reports(struct wprt_fx *f, struct wpr *r,
-                                const struct wallet_tx *wtx,
+                                const struct uint256 *id,
                                 struct p2p_node *clear,
                                 struct p2p_node *onion, bool ok,
                                 int *failures)
@@ -815,11 +1258,11 @@ static void wprt_resume_reports(struct wprt_fx *f, struct wpr *r,
     bool resumed = false;
     wprt_report("resume succeeds for a restarted relay",
                 (resumed = ok && wpr_resume(r).ok), failures);
-    int64_t d = wprt_due_delay(&wtx->tx.hash);
+    int64_t d = wprt_due_delay(id);
     wprt_report("resume revalidates into the private pool with a fresh "
                 "2 to 20 s delay; the main mempool stays empty",
                 resumed && wprt_pending() == 1 &&
-                    tx_mempool_exists(wpr_pool(r), &wtx->tx.hash) &&
+                    tx_mempool_exists(wpr_pool(r), id) &&
                     tx_mempool_size(&f->main_pool) == 0 &&
                     d >= WPR_DELAY_MIN_MS && d <= WPR_DELAY_MAX_MS,
                 failures);
@@ -836,19 +1279,90 @@ static void wprt_resume_reports(struct wprt_fx *f, struct wpr *r,
                 failures);
 }
 
+static void wprt_restart_relay(struct wprt_fx *f)
+{
+    struct wpr_env env = wpr_global()->env;
+    env.datadir = f->dir;
+    struct wpr *r = wpr_global();
+    wpr_free(r);
+    wpr_init(r);
+    r->now_ms = wprt_clock;
+    r->random_bytes = wprt_rng;
+    wpr_configure(r, WPR_MODE_PRIVATE, &env);
+}
+
 static int wprt_case_restart(void)
 {
     int failures = 0;
     struct wprt_fx f;
-    bool ok = wprt_open(&f, WPR_MODE_PRIVATE);
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 1, false);
     struct p2p_node *clear = ok ? wprt_add_peer(&f, WPRT_CLEAR_OUT) : NULL;
     struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
-    struct wallet_tx wtx;
-    ok = ok && clear && onion && wprt_build(&f, 0x59, NULL, 0, &wtx) &&
-         wprt_send(&f, &wtx);
-
+    struct uint256 id;
+    ok = ok && clear && onion && wprt_rpc_send(&f, false, 10.0, &id);
     /* Restart: a fresh relay instance reads the durable pending set. The
      * wallet transaction and chain state persist; peers reconnect. */
+    wprt_restart_relay(&f);
+    wprt_report("a restarted relay holds nothing before it resumes",
+                wprt_pending() == 0 &&
+                    !tx_mempool_exists(wpr_pool(wpr_global()), &id),
+                &failures);
+    wprt_resume_reports(&f, wpr_global(), &id, clear, onion, ok, &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* A held send restarted in public mode: the ticker still runs, nothing is
+ * pushed, and the send still expires and returns its coins. */
+static bool wprt_wait_state(const struct uint256 *id, enum wpr_state want,
+                            int seconds)
+{
+    bool found = false;
+    for (int i = 0; i < seconds * 10; i++) {
+        if (wprt_state(id, &found) == want && found)
+            return true;
+        platform_sleep_ms(100);
+    }
+    return false;
+}
+
+static void wprt_public_restart_steps(struct wprt_fx *f,
+                                      const struct uint256 *id,
+                                      struct p2p_node *onion, int expiry,
+                                      const struct outpoint *spent, bool ok,
+                                      int *failures)
+{
+    wprt_now += 60 * 1000;
+    platform_sleep_ms(2500);
+    wprt_report("a public-mode restart resumes the held send and sends "
+                "nothing, though an onion peer is connected",
+                ok && wpr_get_mode(wpr_global()) == WPR_MODE_PUBLIC &&
+                    wprt_pending() == 1 && wprt_total_bytes(onion) == 0 &&
+                    wprt_all(f, "tx") == 0,
+                failures);
+    wprt_set_wallet_height(f, expiry + WPR_EXPIRY_MARGIN_BLOCKS + 1);
+    bool expired = wprt_wait_state(id, WPR_EXPIRED, 8);
+    wprt_report("the ticker still expires it after a public-mode restart: "
+                "the coins return and no pending record is left",
+                ok && expired && wprt_pending() == 0 &&
+                    !wallet_is_outpoint_spent(f->wallet, &spent->hash,
+                                              spent->n) &&
+                    wprt_total_bytes(onion) == 0,
+                failures);
+}
+
+static int wprt_case_public_restart(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
+    wprt_overwinter_on(&f);
+    struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
+    struct uint256 id;
+    struct outpoint spent;
+    memset(&spent, 0, sizeof(spent));
+    ok = ok && onion && wprt_rpc_send(&f, false, 10.0, &id);
+    int e = (int)wprt_expiry_of(&f, &id, &spent);
     struct wpr_env env = wpr_global()->env;
     env.datadir = f.dir;
     struct wpr *r = wpr_global();
@@ -856,79 +1370,90 @@ static int wprt_case_restart(void)
     wpr_init(r);
     r->now_ms = wprt_clock;
     r->random_bytes = wprt_rng;
-    wpr_configure(r, WPR_MODE_PRIVATE, &env);
-    wprt_report("a restarted relay holds nothing before it resumes",
-                wprt_pending() == 0 &&
-                    !tx_mempool_exists(wpr_pool(r), &wtx.tx.hash),
-                &failures);
-    wprt_resume_reports(&f, r, &wtx, clear, onion, ok, &failures);
-    if (ok)
-        transaction_free(&wtx.tx);
+    ok = ok && wallet_private_broadcast_start(WPR_MODE_PUBLIC, &env);
+    wprt_public_restart_steps(&f, &id, onion, e, &spent, ok, &failures);
+    wallet_private_broadcast_stop();
     wprt_close(&f);
     return failures;
 }
 
-static bool wprt_fund_wallet(struct wprt_fx *f)
+/* ── boot: private broadcast needs onion-only networking ──────────── */
+
+static bool wprt_boot_try(struct wprt_fx *f, int mode, bool onlynet,
+                          const char *external_ip)
 {
-    /* Two confirmed 100 ZCL coins owned by the wallet. */
-    bool ok = wallet_import_key(f->wallet, &f->key);
-    for (int i = 0; ok && i < 2; i++) {
-        struct wallet_tx fund;
-        memset(&fund, 0, sizeof(fund));
-        transaction_init(&fund.tx);
-        transaction_alloc(&fund.tx, 0, 1);
-        fund.tx.version = 1;
-        fund.tx.lock_time = (uint32_t)(i + 1);
-        fund.tx.vout[0].value = WPRT_UTXO;
-        fund.tx.vout[0].script_pub_key = f->spk;
-        transaction_compute_hash(&fund.tx);
-        fund.confirms = 10;
-        fund.used = true;
-        ok = wallet_add_to_wallet(f->wallet, &fund) &&
-             wprt_add_utxo(f, &fund.tx.hash);
-        transaction_free(&fund.tx);
+    struct app_context *ctx = zcl_calloc(1, sizeof(*ctx), "wprt_app");
+    struct boot_svc_ctx *svc = zcl_calloc(1, sizeof(*svc), "wprt_svc");
+    bool started = false;
+    if (ctx && svc) {
+        ctx->wallet_broadcast = mode;
+        ctx->onlynet_onion = onlynet;
+        ctx->external_ip = external_ip;
+        ctx->datadir = f->dir;
+        svc->wallet = f->wallet;
+        svc->connman = &f->cm;
+        svc->coins_tip = &f->coins;
+        svc->state = &f->ms;
+        started = boot_start_wallet_broadcast(svc, ctx, f->params);
     }
-    return ok;
+    free(ctx);
+    free(svc);
+    return started;
 }
 
-struct wprt_chain {
-    struct tx_destination dest;
-    int64_t value;
-    struct wallet_tx tx[3];
-    bool made[3];
-};
-
-static bool wprt_chain_make(struct wprt_fx *f, struct wprt_chain *c, int i,
-                            bool send)
+static int wprt_case_boot(void)
 {
-    const char *err = NULL;
-    int64_t fee = 0;
-    c->made[i] = wallet_create_transaction(f->wallet, &c->dest, c->value,
-                                           &c->tx[i], &fee, &err);
-    return c->made[i] && (!send || wprt_send(f, &c->tx[i]));
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_open(&f, WPR_MODE_PUBLIC);
+    bool no_onlynet = ok && !wprt_boot_try(&f, 1, false, NULL);
+    bool no_extip = ok && !wprt_boot_try(&f, 1, true, "198.51.100.7:8033");
+    wprt_report("private broadcast without -onlynet=onion is refused at boot",
+                no_onlynet && wpr_get_mode(wpr_global()) == WPR_MODE_PUBLIC,
+                &failures);
+    wprt_report("private broadcast with -externalip is refused at boot",
+                no_extip && wpr_get_mode(wpr_global()) == WPR_MODE_PUBLIC,
+                &failures);
+    bool private_ok = ok && wprt_boot_try(&f, 1, true, NULL);
+    enum wpr_mode m1 = wpr_get_mode(wpr_global());
+    wallet_private_broadcast_stop();
+    wprt_report("private broadcast with onion-only networking starts",
+                private_ok && m1 == WPR_MODE_PRIVATE, &failures);
+    bool default_ok = ok && wprt_boot_try(&f, 0, false, NULL);
+    enum wpr_mode m2 = wpr_get_mode(wpr_global());
+    wallet_private_broadcast_stop();
+    wprt_report("the default is public relay, with or without onion-only",
+                default_ok && m2 == WPR_MODE_PUBLIC, &failures);
+    wprt_close(&f);
+    return failures;
 }
 
-static void wprt_chain_reports(struct wprt_fx *f, struct wprt_chain *c,
-                               struct p2p_node *onion, bool ok, int *failures)
+/* ── chained sends ──────────────────────────────────────────────────── */
+
+static void wprt_chain_reports(struct wprt_fx *f, const struct uint256 *a,
+                               const struct uint256 *b, bool ok,
+                               int *failures)
 {
-    bool second = ok && wprt_chain_make(f, c, 1, true);
+    struct wallet_tx s1, s2;
+    bool have = ok && wprt_copy_tx(f, a, &s1);
+    bool have2 = have && wprt_copy_tx(f, b, &s2);
     wprt_report("a second send validates against the private pool and spends "
                 "a different coin",
-                second && memcmp(&c->tx[0].tx.vin[0].prevout,
-                                 &c->tx[1].tx.vin[0].prevout,
-                                 sizeof(struct outpoint)) != 0 &&
+                have2 && memcmp(&s1.tx.vin[0].prevout, &s2.tx.vin[0].prevout,
+                                sizeof(struct outpoint)) != 0 &&
                     tx_mempool_size(wpr_pool(wpr_global())) == 2 &&
                     tx_mempool_size(&f->main_pool) == 0 && wprt_pending() == 2,
                 failures);
-    bool third = ok && wprt_chain_make(f, c, 2, false);
+    struct uint256 c;
+    bool third = ok && wprt_rpc_send(f, false, 60.0, &c);
     wprt_report("a third send does not reselect either reserved coin",
-                ok && second && !third, failures);
+                ok && have2 && !third, failures);
     /* The private pool itself refuses a double spend of a pending input. */
     struct wallet_tx dup;
-    bool built = ok && wprt_build(f, 0x5A, NULL, 0, &dup);
+    bool built = have && wprt_build(f, 0x5A, NULL, 0, &dup);
     enum mempool_accept_result ar = MEMPOOL_ACCEPT_OK;
     if (built) {
-        dup.tx.vin[0].prevout = c->tx[0].tx.vin[0].prevout;
+        dup.tx.vin[0].prevout = s1.tx.vin[0].prevout;
         transaction_compute_hash(&dup.tx);
         ar = accept_to_mempool(wpr_pool(wpr_global()), &f->coins, &f->ms,
                                f->params, &dup.tx);
@@ -937,30 +1462,26 @@ static void wprt_chain_reports(struct wprt_fx *f, struct wprt_chain *c,
     wprt_report("the private pool rejects a conflicting spend of a pending "
                 "input",
                 built && ar != MEMPOOL_ACCEPT_OK, failures);
-    wprt_run(WPR_DELAY_MAX_MS + 1000, -1);
-    wprt_report("both chained sends reach the one onion peer and nobody else",
-                second && wprt_count(onion, "tx") == 2 &&
-                    wprt_clearnet_silent(f),
-                failures);
+    if (have)
+        transaction_free(&s1.tx);
+    if (have2)
+        transaction_free(&s2.tx);
 }
 
 static int wprt_case_chained(void)
 {
     int failures = 0;
     struct wprt_fx f;
-    bool ok = wprt_open(&f, WPR_MODE_PRIVATE);
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
     struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
-    ok = ok && onion && wprt_fund_wallet(&f);
-    struct wprt_chain c;
-    memset(&c, 0, sizeof(c));
-    c.dest.type = DEST_KEY_ID;
-    c.dest.id.key = f.kid;
-    c.value = WPRT_UTXO - WALLET_DEFAULT_FEE_ZAT;
-    ok = ok && wprt_chain_make(&f, &c, 0, true);
-    wprt_chain_reports(&f, &c, onion, ok, &failures);
-    for (int i = 0; i < 3; i++)
-        if (c.made[i])
-            transaction_free(&c.tx[i].tx);
+    struct uint256 a, b;
+    ok = ok && onion && wprt_rpc_send(&f, false, 60.0, &a) &&
+         wprt_rpc_send(&f, true, 60.0, &b);
+    wprt_chain_reports(&f, &a, &b, ok, &failures);
+    wprt_run(WPR_DELAY_MAX_MS + 1000, -1);
+    wprt_report("both chained sends reach the one onion peer and nobody else",
+                ok && wprt_count(onion, "tx") == 2 && wprt_clearnet_silent(&f),
+                &failures);
     wprt_close(&f);
     return failures;
 }
@@ -996,7 +1517,9 @@ static bool wprt_first_payload(const struct p2p_node *n, struct byte_stream *out
 
 /* A second node: its own mempool and main state on the same chain accepts
  * the transaction the onion peer received. */
-static bool wprt_second_node_accepts(struct wprt_fx *f, struct simnet *s,
+static bool wprt_second_node_accepts(struct wprt_fx *f,
+                                     struct coins_view_cache *view,
+                                     struct main_state *ms_in,
                                      const struct chain_params *p,
                                      const struct p2p_node *onion,
                                      const struct transaction *tx)
@@ -1017,7 +1540,7 @@ static bool wprt_second_node_accepts(struct wprt_fx *f, struct simnet *s,
     bool have = mp2 && from && wprt_first_payload(onion, &payload);
     bool accepted = false;
     if (have) {
-        msg_processor_init(mp2, &ms2, &pool2, &s->view, p, f->dir, &nm, NULL);
+        msg_processor_init(mp2, ms_in ? ms_in : &ms2, &pool2, view, p, f->dir, &nm, NULL);
         struct byte_stream rd;
         stream_init_from_data(&rd, payload.data, payload.size);
         accepted = process_tx_msg(mp2, from, &rd) &&
@@ -1034,7 +1557,7 @@ static bool wprt_second_node_accepts(struct wprt_fx *f, struct simnet *s,
     return accepted;
 }
 
-static void wprt_probe_delivery(struct wprt_fx *f, struct simnet *s,
+static void wprt_probe_delivery(struct wprt_fx *f, struct coins_view_cache *view,
                                 const struct chain_params *p,
                                 struct p2p_node *clear,
                                 struct p2p_node *onion,
@@ -1048,7 +1571,7 @@ static void wprt_probe_delivery(struct wprt_fx *f, struct simnet *s,
                 failures);
     wprt_report("shielded send: a second node accepts the pushed transaction "
                 "into its mempool",
-                ok && onion && wprt_second_node_accepts(f, s, p, onion, tx),
+                ok && onion && wprt_second_node_accepts(f, view, NULL, p, onion, tx),
                 failures);
 }
 
@@ -1089,8 +1612,150 @@ int wallet_private_relay_shielded_probe(struct simnet *s,
                 ok && tx_mempool_size(&f.main_pool) == 0, &failures);
     ok = ok && ar == MEMPOOL_ACCEPT_OK && wpr_enqueue(wpr_global(), tx).ok;
     wprt_run(WPR_DELAY_MAX_MS + 1000, -1);
-    wprt_probe_delivery(&f, s, &p, clear, onion, tx, ok, &failures);
+    wprt_probe_delivery(&f, &s->view, &p, clear, onion, tx, ok, &failures);
     wprt_close(&f);
+    return failures;
+}
+
+
+/* ── the real wallet shielded send, private mode ────────────────────── */
+
+static bool wprt_leg_second_coin(const struct wallet_private_relay_leg *l)
+{
+    struct uint256 txid;
+    memset(&txid, 0, sizeof(txid));
+    txid.data[0] = 0x66;
+    txid.data[31] = 0x42;
+    struct db_wallet_utxo u;
+    memset(&u, 0, sizeof(u));
+    memcpy(u.txid, txid.data, sizeof(u.txid));
+    u.value = 3 * 100000000LL;
+    memcpy(u.address_hash, l->funding_kid->id.data, sizeof(u.address_hash));
+    u.script = (uint8_t *)l->funding_script->data;
+    u.script_len = l->funding_script->size;
+    u.height = l->funding_height;
+    u.is_coinbase = true;
+    struct coins_cache_entry *e = db_wallet_utxo_save(l->ndb, &u)
+        ? coins_view_cache_modify_new(l->coins_tip, &txid) : NULL;
+    if (!e)
+        return false;
+    coins_alloc(&e->coins, 1);
+    if (!e->coins.vout)
+        return false;
+    e->coins.vout[0].value = u.value;
+    e->coins.vout[0].script_pub_key = *l->funding_script;
+    e->coins.height = u.height;
+    e->coins.version = 1;
+    e->coins.is_coinbase = true;
+    return true;
+}
+
+static void wprt_leg_say(const char *step, bool rpc_ok,
+                          const struct json_value *r)
+{
+    const char *code = json_get_str(json_get(r, "code"));
+    const char *msg = json_get_str(json_get(r, "message"));
+    if (!msg)
+        msg = json_get_str(r);
+    printf("wallet_private_relay: leg %s rpc=%d code=%s message=%s\n", step,
+           rpc_ok, code ? code : "-", msg ? msg : "-");
+}
+
+/* z_sendmany from the funded transparent address to the shielded address:
+ * the wallet's own RPC handler, not the vault route (which keeps public
+ * relay). The result is the transaction id. */
+static bool wprt_leg_send(const struct wallet_private_relay_leg *l,
+                          struct json_value *result)
+{
+    struct json_value params, list, to;
+    json_init(&params); json_set_array(&params);
+    json_init(&list); json_set_array(&list);
+    json_init(&to); json_set_object(&to);
+    json_push_kv_str(&to, "address", l->zaddr);
+    json_push_kv_real(&to, "amount", 1.0);
+    json_push_back(&list, &to);
+    wprt_json_str(&params, l->from_addr);
+    json_push_back(&params, &list);
+    json_init(result);
+    bool ok = rpc_table_execute(l->tbl, "z_sendmany", &params, result) &&
+              result->type == JSON_STR;
+    if (!ok)
+        wprt_leg_say("z_sendmany", ok, result);
+    json_free(&params);
+    json_free(&list);
+    json_free(&to);
+    return ok;
+}
+
+/* The caller's wallet state, which opening the fixture replaced. */
+static void wprt_leg_rebind(const struct wallet_private_relay_leg *l)
+{
+    rpc_wallet_set_state(l->wallet, l->ms, l->datadir, l->wsql, l->main_pool,
+                         NULL);
+    rpc_wallet_set_node_db(l->ndb);
+    rpc_wallet_set_coins_tip(l->coins_tip);
+}
+
+/* After the delay: the onion peer holds the transaction, the clearnet peer
+ * nothing, and a second node accepts it. */
+static int wprt_leg_delivery(const struct wallet_private_relay_leg *l,
+                             struct wprt_fx *f, struct p2p_node *clear,
+                             struct p2p_node *onion,
+                             const struct json_value *result)
+{
+    int failures = 0;
+    struct transaction sent;
+    transaction_init(&sent);
+    struct uint256 txid;
+    memset(&txid, 0, sizeof(txid));
+    const char *hex = result ? json_get_str(result) : NULL;
+    if (hex)
+        uint256_set_hex(&txid, hex);
+    bool have = hex && wprt_count(onion, "tx") == 1 &&
+        tx_mempool_lookup(wpr_pool(wpr_global()), &txid, &sent);
+    wprt_report("real wallet shielded send: exactly the onion peer receives "
+                "it; the clearnet peer receives nothing",
+                have && wprt_total_bytes(clear) == 0, &failures);
+    wprt_report("real wallet shielded send: a second node accepts the pushed "
+                "transaction",
+                have && wprt_second_node_accepts(f, l->coins_tip, l->ms,
+                    chain_params_get(), onion, &sent), &failures);
+    transaction_free(&sent);
+    return failures;
+}
+
+int wallet_private_relay_gate_leg(const struct wallet_private_relay_leg *l)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_open(&f, WPR_MODE_PRIVATE) && wprt_leg_second_coin(l);
+    wprt_leg_rebind(l);
+    struct p2p_node *clear = ok ? wprt_add_peer(&f, WPRT_CLEAR_OUT) : NULL;
+    struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
+    struct wpr_env env = {
+        .connman = &f.cm, .coins_tip = l->coins_tip, .main_state = l->ms,
+        .params = chain_params_get(), .datadir = l->datadir,
+    };
+    wpr_configure(wpr_global(), WPR_MODE_PRIVATE, &env);
+    size_t main_before = tx_mempool_size(l->main_pool);
+    struct json_value result;
+    json_init(&result);
+    ok = ok && clear && onion && wprt_leg_send(l, &result);
+    wprt_report("real wallet shielded send in private mode: the wallet "
+                "accepts it and holds exactly one pending send",
+                ok && wprt_pending() == 1, &failures);
+    wprt_report("real wallet shielded send: the main mempool is unchanged "
+                "and the private pool holds it",
+                ok && tx_mempool_size(l->main_pool) == main_before &&
+                    tx_mempool_size(wpr_pool(wpr_global())) == 1, &failures);
+    wprt_report("real wallet shielded send: nothing is announced before the "
+                "delay", ok && wprt_count(onion, "tx") == 0 &&
+                    wprt_total_bytes(clear) == 0, &failures);
+    wprt_run(WPR_DELAY_MAX_MS + 1000, -1);
+    failures += wprt_leg_delivery(l, &f, clear, onion, ok ? &result : NULL);
+    json_free(&result);
+    wprt_close(&f);
+    wprt_leg_rebind(l);
     return failures;
 }
 
@@ -1104,8 +1769,12 @@ int test_wallet_private_relay(void)
     failures += wprt_case_one_peer_per_attempt();
     failures += wprt_case_no_route();
     failures += wprt_case_seen_and_block();
-    failures += wprt_case_expiry();
+    failures += wprt_case_expiry_margin();
+    failures += wprt_case_expiry_confirmed();
+    failures += wprt_case_expiry_database();
     failures += wprt_case_restart();
+    failures += wprt_case_public_restart();
+    failures += wprt_case_boot();
     failures += wprt_case_chained();
     return failures;
 }

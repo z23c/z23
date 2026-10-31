@@ -244,9 +244,8 @@ struct app_context {
                                   * not start, and /observation.json is off. Tor and
                                   * the loopback RPC are unchanged. Default OFF.
                                   * See app_private_listeners_refusal(). */
-    int wallet_broadcast;        /* -walletbroadcast=auto|private|public for the
-                                  * wallet's own sends: 0 auto (private when Tor
-                                  * runs, public otherwise), 1 private, 2 public. */
+    int wallet_broadcast;        /* -walletbroadcast=public|private: 0 public
+                                  * (default), 1 private. */
     bool observation_off;        /* -observation=0 : /observation.json answers
                                   * 404 on the onion. Default OFF (served). */
     bool allow_tor_stub_dev;     /* -allow-tor-stub-dev : let a stub-linked

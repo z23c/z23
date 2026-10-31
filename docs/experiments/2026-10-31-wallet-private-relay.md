@@ -25,43 +25,92 @@ payment to this node's IP address?
   allows about seven distinct peers before a 20-block expiry.
 - Seen back through `wallet_tx_accepted`, or included in a block: pending state
   clears and the private pool entry is removed.
-- Expiry: the existing `wallet_rollback_persisted_commit` returns the notes.
+- Expiry: only when the wallet's scanned height is more than
+  `WPR_EXPIRY_MARGIN_BLOCKS` (20) past the transaction expiry height and the
+  wallet shows no confirmation. Then `wallet_rollback_persisted_commit`
+  returns the coins and notes, the database projection releases the input
+  (`db_wallet_utxo_release_spent_by`, note reservation) and a terminal
+  `expired` record stays seven days. A send's record never vanishes while it
+  could still be on chain.
 - Restart: the pending set (`wallet_private_relay.pending`) survives; each
   transaction is revalidated into the private pool and resumed with a fresh
   delay. Nothing is announced or placed in the main mempool.
-- Mode: `-walletbroadcast=auto|private|public`. Auto is private when Tor runs.
+- Mode: `-walletbroadcast=private|public`; default public. Private is
+  explicit and boot refuses it without `-onlynet=onion` or with
+  `-externalip` (see Leaks closed).
 - Status: `z23 core wallet broadcast status` (read-only): mode, pending
   count, eligible onion peers, and per txid state, attempts and seconds since
   the last attempt. No amounts or addresses.
 
+## Leaks closed after custody review
+
+- `sendmany` used the public mempool; it now uses the private-pool view and is
+  tested through the real RPC handlers.
+- `-externalip` was announced to every peer in `version`; boot refuses it in
+  private mode.
+- An echoed unsolicited transaction could be fluffed to a clearnet peer,
+  letting that peer's spy see this node announce first; with `-onlynet=onion`
+  there is no clearnet peer to fluff to.
+- The phone: `apps/z23android/operations.c` launches
+  `-operator-lane=canonical -tor -onion-persist` with no `-onlynet=onion`, no
+  `-externalip` and no `-walletbroadcast`. It is not onion-only today, so the
+  app must also pass `-onlynet=onion` and `-walletbroadcast=private` before
+  private mode boots there.
+
 ## Scope
 
 Only the wallet's own sends: `sendtoaddress`, `sendmany`, `z_sendmany`
-(transparent and shielded legs). Vault, ZSLP, ZDIR, ZNAM, ZID, blog, swap,
-multisig and raw transaction paths keep public relay.
+(transparent and shielded legs). Vault intents, ZSLP, ZDIR, ZNAM, ZID, blog,
+swap, multisig and raw transaction paths keep public relay. A send prepared by
+the vault route reaches `z_sendmany` already prepared and stays public.
 
 ## Measured
 
-Test group `wallet_private_relay` (injected clock and RNG, fake peers):
+Test group `wallet_private_relay` (injected clock and RNG, fake peers, a real
+node database and wallet database where noted). Sends go through the real RPC
+handlers `sendtoaddress` and `sendmany`:
 
 - the old relay puts the transaction in the main mempool and announces it to a
   clearnet peer (witness for the difference);
-- a private send leaves the main mempool empty; `mempool` and `getdata` through
-  a real message processor serve nothing to a clearnet or onion peer;
+- a private `sendtoaddress` and a private `sendmany` leave the main mempool
+  empty; `mempool` and `getdata` through a real message processor serve
+  nothing to a clearnet or onion peer;
 - 400 CSPRNG draws fall within 2 to 20 s, with the extremes exercised;
 - exactly one eligible onion peer receives each attempt among onion, clearnet,
   inbound, disconnecting and no-relay peers; the resend goes to a different
-  peer, never clearnet;
-- with no onion peer the transaction is held with the right status;
+  peer, never clearnet; the resend check covers the worst case of two maximum
+  delays around the 180 s interval;
+- with no onion peer the transaction is held and the status read says it is
+  safe to wait;
 - the acceptance hook and block inclusion clear the pending state;
-- expiry returns the input notes;
-- restart resumes and announces nothing;
+- expiry: one block past expiry at the chain lookahead, and the full margin,
+  do not expire a send; one block past the margin does; a send the wallet
+  shows confirmed is never rolled back, even when the expiry path runs for it;
+- with a real node and wallet database, expiry releases the funding coin
+  (`spent_txid`), drops the send's output rows and wallet row, `listunspent`
+  sees every coin again, and the status read reports `expired` with the next
+  step and no amount or address;
+- restart in private mode resumes with a fresh delay and announces nothing;
+  restart in public mode with an onion peer connected resumes, pushes nothing,
+  and the ticker expires the send after the margin;
+- boot: private mode without `-onlynet=onion` and with `-externalip` is
+  refused, onion-only starts, and the default is public;
 - a second send cannot reselect reserved coins and a conflicting spend is
   refused by the private pool.
 
-The shielded leg runs under `simnet_sapling_shielded_send` (parameter-gated):
-a real prove and verify transaction is admitted into a private pool and is
-accepted by a second node after the delayed push.
+The shielded leg runs two ways. Under `shielded_payment_gate` (sets
+`ZCL_STRESS_TESTS=1`, needs the Sapling parameters) the real wallet RPC
+`z_sendmany` from a funded transparent address to a shielded address runs in
+private mode with the real prover: the main mempool is unchanged, the private
+pool holds the transaction, nothing is announced before the delay, exactly the
+onion peer then receives it with no clearnet byte, and a second node's message
+processor accepts it. The simnet test `simnet_sapling_shielded_send` keeps a
+probe that pushes a built and verified transaction; that probe does not call
+`z_sendmany`. The shielded-spend branch (`z_sendmany_shielded`, notes and
+witnesses) is not driven by either test; its relay call at
+`wallet_shielded_send_shielded.c` shares `wallet_send_relay` with the covered
+paths.
+
 
 ## Not measured, not solved
 
@@ -69,29 +118,46 @@ accepted by a second node after the delayed push.
   network can still correlate the push with the first appearance.
 - A malicious first onion peer learns that this node originated the
   transaction.
+- A resend goes to a different onion peer after 180 s; the two peers can
+  compare notes and learn the origin sent both.
 - Acceptance of an unsolicited `tx` by `zclassicd` peers is from protocol
-  knowledge; it is not verified in this repository.
+  knowledge. A `zclassicd` binary exists on host r1 but only as the live
+  oracle and production nodes; this repository has no regtest `zclassicd`
+  harness, none was built, and no live node was touched.
 - No live network run was made.
 - Chained spends of unconfirmed change are unsupported in public and private
   modes alike: the wallet selects confirmed coins only.
 
 ## Mutants
 
-Each was applied alone to the sources and run against the group; each turns
-the group red (`groups_failed=1`):
+Each was applied alone, with the matching group run, and every one turned the
+group red (`groups_failed=1`), failing the report named:
 
-- clearnet filter removed from `wpr_peer_eligible`: the clearnet-silence,
-  resend, no-route and restart reports fail;
-- public relay called when no onion peer exists: the no-route silence, resend
-  and chained-send reports fail;
-- `wallet_send_view` keeps the main pool: the main-mempool, `mempool`/`getdata`
-  and delay reports fail.
+- `sendmany` on the public context: the private-send, `mempool`/`getdata`,
+  delay and chained-send reports;
+- `-externalip` refusal removed: the externalip boot report;
+- `-onlynet=onion` refusal removed: the onlynet boot report;
+- expiry margin 0: the lookahead and full-margin reports;
+- confirmation recheck removed from the expiry path: the mined-send and
+  record-survival reports;
+- `db_wallet_utxo_release_spent_by` removed: the database release report;
+- `wallet_private_broadcast_start` returns before resume in public mode: the
+  public-restart and default-mode reports;
+- terminal expired record replaced by forgetting it: the expiry, status and
+  public-restart reports;
+- `z_sendmany` on the public context: the five real-send reports of
+  `shielded_payment_gate`.
+
+Earlier, on the first version: clearnet filter removed from
+`wpr_peer_eligible`, public relay when no onion peer exists, and
+`wallet_send_view` keeping the main pool each turned the group red.
 
 ## Run record
 
-Host r1, 2026-10-31. `agent-verify` over `wallet_private_relay`,
-`simnet_sapling_shielded_send`, `shielded_payment_gate`,
-`wallet_funds_safety`, `mempool`, `accept_to_mempool`: groups_failed=0.
-One earlier run reported groups_failed=1 for an unidentified group among the
-six; the isolated rerun of `wallet_private_relay` and
-`simnet_sapling_shielded_send` passed, and the next full run passed.
+See the commit message for the head hash and gate lines. One earlier
+`agent-verify` run reported groups_failed=1 without naming the group. The logs
+do not identify it. The follow-up work found one flaky report in
+`wallet_private_relay`: the resend check ran 210 s of simulated time, which is
+shorter than the worst case of 220 s, so about one run in seven failed it
+under any load. The run window is now 225 s. This may be what failed; it is
+not proved.

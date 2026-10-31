@@ -666,7 +666,10 @@ static bool node_db_sync_wallet_tx_delete_write(struct node_db *ndb, void *ctx)
         LOG_FAIL("sync", "wallet_tx_delete_write: invalid context");
     if (ndb->sync_in_batch && !node_db_sync_flush(ndb))
         LOG_FAIL("sync", "wallet_tx_delete_write: pending batch flush failed");
-    del->ok = db_sapling_note_release_reservation(ndb, del->txid) &&
+    /* Inputs this transaction spent are free again and its own change rows go
+     * with it; without the release the funding coin keeps spent_txid. */
+    del->ok = db_wallet_utxo_release_spent_by(ndb, del->txid) &&
+              db_sapling_note_release_reservation(ndb, del->txid) &&
               db_wallet_tx_delete(ndb, del->txid);
     if (!del->ok)
         LOG_FAIL("sync", "wallet_tx_delete_write: model delete failed");

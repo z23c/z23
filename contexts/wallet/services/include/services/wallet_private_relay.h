@@ -51,6 +51,13 @@ struct wallet;
  * retries. */
 #define WPR_RETRY_S 30
 #define WPR_SEEN_RETAIN_S 600
+/* A send is rolled back only when the wallet has read through a height more
+ * than this many blocks past its expiry height. The margin absorbs wallet
+ * confirmation lag and a reorg of that depth: a mined send must never lose
+ * its record. */
+#define WPR_EXPIRY_MARGIN_BLOCKS 20
+/* An expired record stays visible in the status for this long. */
+#define WPR_EXPIRED_RETAIN_S (7 * 24 * 3600)
 #define WPR_MAX_ENTRIES 256
 #define WPR_MAX_TRIED 8
 
@@ -64,6 +71,7 @@ enum wpr_state {
     WPR_SCHEDULED = 1,
     WPR_SENT = 2,
     WPR_SEEN = 3,
+    WPR_EXPIRED = 4,   /* rolled back unconfirmed; the coins are free again */
 };
 
 /* Chain and peer authorities. Every pointer must outlive the relay. */
@@ -112,6 +120,7 @@ struct wpr_tick_result {
     struct uint256 expired[WPR_MAX_ENTRIES];
     size_t num_expired;
     size_t pushed;
+    size_t held;   /* pending without a route (or in public mode) */
 };
 
 struct wpr_status_entry {
@@ -124,6 +133,7 @@ struct wpr_status_entry {
 struct wpr_status {
     enum wpr_mode mode;
     size_t pending;
+    size_t expired;
     size_t eligible_peers;
     size_t num_entries;
     struct wpr_status_entry entries[WPR_MAX_ENTRIES];
@@ -155,6 +165,10 @@ struct zcl_result wpr_enqueue(struct wpr *r, const struct transaction *tx);
 /* The network offered the transaction back and the node accepted it. */
 void wpr_note_seen(struct wpr *r, const struct uint256 *txid);
 
+/* Record that the wallet rolled a pending transaction back after it expired
+ * unconfirmed. The record stays in the status as `expired`. */
+void wpr_mark_expired(struct wpr *r, const struct uint256 *txid);
+
 /* Drop a pending transaction after the wallet rolled it back. */
 void wpr_forget(struct wpr *r, const struct uint256 *txid);
 
@@ -163,9 +177,13 @@ void wpr_forget(struct wpr *r, const struct uint256 *txid);
  * Nothing is sent here. */
 struct zcl_result wpr_resume(struct wpr *r);
 
-/* Advance the state machine once. Pushes due transactions, clears confirmed
- * ones and reports expired ones for wallet rollback. */
-void wpr_tick(struct wpr *r, int tip_height, struct wpr_tick_result *out);
+/* Advance the state machine once. In private mode pushes due transactions; in
+ * public mode nothing is ever pushed. Clears confirmed ones and reports
+ * expired ones for wallet rollback. `wallet_height` is the height through
+ * which the wallet has read blocks (-1 when unknown, which never expires
+ * anything): a send is reported only once it is more than
+ * WPR_EXPIRY_MARGIN_BLOCKS past its expiry height at that height. */
+void wpr_tick(struct wpr *r, int wallet_height, struct wpr_tick_result *out);
 
 void wpr_status_snapshot(struct wpr *r, struct wpr_status *out);
 

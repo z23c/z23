@@ -692,22 +692,40 @@ publishes `height: null` until the blocks connect — the same store backs the
 
 ## Private Wallet Broadcast
 
-`-walletbroadcast=auto|private|public` selects how this wallet's own sends
-reach the network. `auto` (default) is private when embedded Tor runs and
-public otherwise. In private mode a send is validated into a private pool, never
-enters the node's mempool, and is pushed once, after a random 2 to 20 s delay,
-to one outbound onion peer. With no such peer it waits (`waiting_for_route`) and
-is never sent to a clearnet peer. A send not seen back within 180 s goes to a
-different onion peer; it clears when the network offers it back or a block
-contains it, and an expired send is rolled back through the normal wallet path.
+`-walletbroadcast=private` is an explicit option; the default is `public` and
+behaves as before. In private mode a send is validated into a private pool,
+never enters the node's mempool, and is pushed once, after a random 2 to 20 s
+delay, to one outbound onion peer. With no such peer it waits
+(`waiting_for_route`) and is never sent to a clearnet peer. A send not seen
+back within 180 s goes to a different onion peer; it clears when the network
+offers it back or a block contains it.
+
+Private mode requires onion-only networking. Boot refuses with an explanatory
+message unless `-onlynet=onion` is set, and refuses when `-externalip` is set
+(that address is announced to every peer in the version handshake). With
+clearnet connections closed, a peer that echoes the transaction back cannot
+cause this node to announce it first to a clearnet peer.
 
 ```sh
-z23 core wallet broadcast status   # mode, pending, eligible onion peers, per-txid state
+z23 -tor -onlynet=onion -walletbroadcast=private ...
+z23 core wallet broadcast status   # mode, pending, expired, eligible onion peers, per-txid state and next step
 ```
 
-Scope: `sendtoaddress`, `sendmany` and `z_sendmany` only. Vault, ZSLP, ZDIR,
-ZNAM, ZID, blog, swap and raw transaction paths keep public relay. Timing
-correlation and a malicious first onion peer are not addressed; see
+Covered: `sendtoaddress`, `sendmany` and `z_sendmany`. Vault, ZSLP, ZDIR, ZNAM,
+ZID, blog, swap and raw transaction paths keep public relay.
+
+An unconfirmed send expires only when the wallet's scanned height is more than
+20 blocks past the transaction's expiry height and the wallet does not show it
+confirmed. Its coins then return to the wallet, the record stays as `expired`
+for seven days, and the log carries a count-only WARN. The payment may be sent
+again once the status read says `expired`; before that, waiting is safe. A
+node restarted in public mode still resumes, expires and releases held sends,
+but pushes nothing.
+
+What it does not hide: the first onion peer learns that this node originated
+the transaction; a resend to a second peer lets the two peers correlate that
+both saw it from the same origin; an observer of both this node's Tor circuits
+and the network can correlate the push with the first appearance. See
 [the experiment](experiments/2026-10-31-wallet-private-relay.md).
 
 ## RPC 429 (Rate Limited)

@@ -50,6 +50,7 @@
 #include "storage/progress_store.h"
 #include "jobs/reducer_frontier.h"
 #include "jobs/reducer_frontier_schema.h"
+#include "test/wallet_private_relay_probe.h"
 #include "sim/simnet.h"
 #include "sim/simnet_sapling.h"
 #include "storage/disk_block_io.h"
@@ -946,7 +947,7 @@ static void p11_4_persist_funding_key(bool *ok, const char **fail_step,
 
     if (*ok) {
         *fail_step = "persisted_keypool";
-        *ok = wallet_top_up_key_pool(wallet, 2);
+        *ok = wallet_top_up_key_pool(wallet, 6);
         int64_t generation = wallet_key_pool_generation_ceiling(wallet);
         *ok = *ok && wallet_sqlite_flush_r(wsql, wallet).ok;
         if (*ok)
@@ -1235,6 +1236,16 @@ static void p11_4_exercise_payment(bool *ok, const char **fail_step,
     }
 }
 
+/* The same wallet and chain state, sent a second payment in private mode. */
+static void p11_4_private_leg(bool *ok, const char **fail_step,
+                              const struct wallet_private_relay_leg *leg)
+{
+    if (!*ok)
+        return;
+    *fail_step = "private_relay_leg";
+    *ok = wallet_private_relay_gate_leg(leg) == 0;
+}
+
 static int p11_4_finish_gate(bool ok, const char *fail_step,
                              int previous_defer_height, bool chain_confirmed,
                              struct wallet *recipient,
@@ -1417,6 +1428,15 @@ int test_shielded_payment_gate(void)
                            &funding_script, wallet, recipient, &chain_sim,
                            &accepted_block, &accepted_height,
                            &chain_confirmed, tmpdir);
+
+    struct wallet_private_relay_leg leg = {
+        .tbl = &tbl, .wallet = wallet, .wsql = &wsql, .ndb = &ndb, .coins_tip = &coins_tip, .ms = &ms,
+        .main_pool = &mempool, .funding_kid = &funding_kid,
+        .funding_script = &funding_script, .from_addr = funding_addr,
+        .zaddr = zaddr, .datadir = tmpdir,
+        .funding_height = chain_funding_height,
+    };
+    p11_4_private_leg(&ok, &fail_step, &leg);
 
     return p11_4_finish_gate(ok, fail_step, previous_defer_height,
                              chain_confirmed, recipient, &accepted_block,

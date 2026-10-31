@@ -84,12 +84,12 @@ void print_usage_all(const char *prog)
     printf("                      probe, beta6 side listener and RPC TLS listener do not\n");
     printf("                      start, and /observation.json answers 404. Tor and the\n");
     printf("                      loopback RPC are unchanged. Default off.\n");
-    printf("  -walletbroadcast=M  How this wallet's own sends reach the network: private\n");
-    printf("                      (validated in a private pool, pushed once to one\n");
-    printf("                      outbound onion peer after a 2-20 s random delay, held\n");
-    printf("                      when none is connected, never clearnet), public\n");
-    printf("                      (announced to all peers) or auto (default: private\n");
-    printf("                      when Tor runs, public otherwise).\n");
+    printf("  -walletbroadcast=M  How this wallet's own sends reach the network.\n");
+    printf("                      public (default): announced to all peers.\n");
+    printf("                      private: validated in a private pool and pushed once\n");
+    printf("                      to one outbound onion peer after a random 2-20 s delay;\n");
+    printf("                      held when none is connected, never clearnet. REFUSED\n");
+    printf("                      without -onlynet=onion, or with -externalip.\n");
     printf("  -observation=0      /observation.json on the onion answers 404 (hides\n");
     printf("                      hardware and peer telemetry). Default on (=1).\n");
     printf("  -no-tor             Turn Tor off: no hidden service, clearnet\n");
@@ -860,16 +860,16 @@ static int args_arm_tor(const char *arg,
 static int args_arm_wallet_broadcast(const char *arg,
                                     struct args_arm_state *st)
 {
-    static const char *const modes[] = { "auto", "private", "public" };
+    static const char *const modes[] = { "public", "private" };
     if (strncmp(arg, "-walletbroadcast=", 17) != 0) return ARGS_ARM_NOMATCH;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 2; i++) {
         if (strcmp(arg + 17, modes[i]) == 0) {
             st->ctx->wallet_broadcast = i;
             return ARGS_ARM_TAKEN;
         }
     }
-    fprintf(stderr, "Invalid option: %s (use -walletbroadcast=auto, private "
-                    "or public)\n", arg);
+    fprintf(stderr, "Invalid option: %s (use -walletbroadcast=private or "
+                    "public)\n", arg);
     return 1;
 }
 

@@ -30,14 +30,28 @@ struct wallet_rpc_context *wallet_send_view_unless_prepared(
  * the send is rolled back and false is returned. */
 bool wallet_send_relay(struct wallet_rpc_context *ctx, struct wallet_tx *wtx);
 
-/* Configure the relay, resume the pending set and start the tick thread. */
+#define WALLET_PBCAST_TICK_MS 1000
+/* Spacing of the held-send warning, which carries a count only. */
+#define WALLET_PBCAST_HELD_WARN_S 300
+
+
+/* Configure the relay, resume the pending set and start the tick thread, in
+ * either mode: a send held in private mode must still expire after a restart
+ * in public mode. Nothing is pushed unless the mode is private. */
 bool wallet_private_broadcast_start(enum wpr_mode mode,
                                     const struct wpr_env *env);
 
-/* One relay tick plus wallet rollback of expired transactions. */
+/* One relay tick plus wallet rollback of expired transactions, at the height
+ * through which the wallet has read blocks. */
 void wallet_private_broadcast_tick(void);
-/* The same with an explicit tip height. */
-void wallet_private_broadcast_tick_at(int tip_height);
+/* The same with an explicit wallet height (-1 when unknown). */
+void wallet_private_broadcast_tick_at(int wallet_height);
+/* Roll back one expired send through the wallet's persisted rollback and keep a
+ * terminal expired record. A send the wallet shows confirmed is marked seen
+ * instead and false is returned. */
+bool wallet_private_broadcast_expire(const struct uint256 *txid);
+/* Stop the tick thread; waits briefly for it to exit. */
+void wallet_private_broadcast_stop(void);
 
 void register_wallet_private_broadcast_rpc_commands(struct rpc_table *t);
 
