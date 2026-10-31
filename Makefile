@@ -611,11 +611,11 @@ else ifeq ($(ZCL_EPOCH_SINGLE_GOAL),zcode-package-asan)
 # The sanitizer umbrella also requires the production package verifier, whose
 # objects and lease use the existing node-c23 epoch.
 ZCL_EPOCH_PROFILES := test-asan node-c23
-else ifneq ($(filter t-asan test-asan asan-ci,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter t-asan t-asan-locked test-asan asan-ci,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := test-asan
 else ifneq ($(filter dev-asan z23-dev-asan zclassic23-dev-asan,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev-asan
-else ifneq ($(filter t-tsan test-tsan tsan-ci,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter t-tsan t-tsan-locked test-tsan tsan-ci,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := test-tsan
 else ifneq ($(filter dev-tsan z23-dev-tsan zclassic23-dev-tsan,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev-tsan
@@ -2115,11 +2115,11 @@ else ifneq ($(filter t-fast t-fast-exact t-hotswap hotswap-test-so test_parallel
 ZCL_DEPFILE_PROFILES := $(strip $(if $(filter test-parallel-fast-active-locked ff-test-lint,$(ZCL_DEPFILE_SINGLE_GOAL)),dev) test-fast)
 else ifneq ($(filter t test test_parallel test-parallel test-parallel-active test-parallel-active-locked test-parallel-locked t-locked test-locked secure-release-regressions secure-release-regressions-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := test-strict
-else ifneq ($(filter t-asan test-asan asan-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter t-asan t-asan-locked test-asan asan-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := test-asan
 else ifneq ($(filter dev-asan z23-dev-asan zclassic23-dev-asan,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev-asan
-else ifneq ($(filter t-tsan test-tsan tsan-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter t-tsan t-tsan-locked test-tsan tsan-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := test-tsan
 else ifneq ($(filter dev-tsan z23-dev-tsan zclassic23-dev-tsan,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev-tsan
@@ -5411,10 +5411,22 @@ T_ASAN_GROUPS = $(if $(strip $(ONLY)),$(ONLY),$(ASAN_CI_GROUPS))
 # With ONLY=, run the requested substring exactly as before.  With no selector,
 # run the params-free smoke set plus the positive/negative ADX differential
 # oracles.  This is the public, flagless sanitizer front door.
-t-asan: $(TEST_ASAN_CANDIDATE) dev-package-verifier-ensure
+# Like t-fast, t-asan and t-tsan build what each selected group reads
+# (--list-build-needs) under the checkout lock before running it: without
+# that, test_mesh_terminal_hub failed under t-tsan because build/bin/fbsh was
+# never built. Each group is listed on its own, as each is run on its own,
+# under the same finite stack limit as its run.
+t-asan:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
-	  sh -c 'set -e; ulimit -s 1048576; \
+	  $(MAKE) --no-print-directory $(ZCL_DEFAULT_JOBS) t-asan-locked ONLY='$(ONLY)' \
+	    BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)' \
+	    $(ZCL_FROZEN_TOOLCHAIN_ARGS)
+
+.PHONY: t-asan-locked t-tsan-locked
+t-asan-locked: $(TEST_ASAN_CANDIDATE) dev-package-verifier-ensure
+	+@ulimit -s 1048576 && $(foreach g,$(T_ASAN_GROUPS),( $(call ZCL_TEST_BUILD_NEEDS,$(TEST_ASAN_ACTIVE),--only=$(g)) ) &&) :
+	@sh -c 'set -e; ulimit -s 1048576; \
 	  export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1; \
 	  for g in $(T_ASAN_GROUPS); do \
 	    echo "t-asan: --- $$g ---"; \
@@ -5458,10 +5470,16 @@ zcode-dht-asan:
 # release artifacts, so no-ASLR is an acceptable trade.
 # Checkout-locked — see the `test-parallel` target above for why.
 TSAN_SUPP_FILE = $(CURDIR)/tools/tsan.supp
-t-tsan: $(TEST_TSAN_CANDIDATE) dev-package-verifier-ensure
+t-tsan:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) foreground "$(CHECKOUT_LOCK)" -- \
-	  sh -c 'ulimit -s 1048576 && \
+	  $(MAKE) --no-print-directory $(ZCL_DEFAULT_JOBS) t-tsan-locked ONLY='$(ONLY)' \
+	    BUILD_SOURCE_RECORD='$(BUILD_SOURCE_RECORD)' \
+	    $(ZCL_FROZEN_TOOLCHAIN_ARGS)
+
+t-tsan-locked: $(TEST_TSAN_CANDIDATE) dev-package-verifier-ensure
+	+@ulimit -s 1048576 && ( $(call ZCL_TEST_BUILD_NEEDS,setarch -R $(TEST_TSAN_ACTIVE),--only=$(ONLY)) )
+	@sh -c 'ulimit -s 1048576 && \
 	  TSAN_OPTIONS="suppressions=$(TSAN_SUPP_FILE):print_stacktrace=1" \
 	  exec setarch -R $(TEST_TSAN_ACTIVE) --only=$(ONLY)'
 
