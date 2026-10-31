@@ -441,6 +441,8 @@ Z23_FLAG("ZCL_COOKBOOK_ROW_FLOOR", "env_build", "10", "-",
           "undocumented; first use tools/lint/lintc/gate_cookbook.c:auto")
 Z23_FLAG("ZCL_COOKBOOK_TIMEOUT", "env_build", "120", "-",
           "undocumented; first use tools/lint/lintc/gate_cookbook.c:auto")
+Z23_FLAG("ZCL_COOKBOOK_WARM_TIMEOUT", "env_build", "900", "-",
+          "hang guard for the one warm-up run of the first RECIPE_RUN that rebuilds a stale codeindex; first use tools/lint/lintc/gate_cookbook.c:auto")
 Z23_FLAG("ZCL_COPY_PROVE_CONTINUITY_RETRIES", "env_build", "15", "-",
           "undocumented; first use tools/scripts/import-copy-prove.sh:auto")
 Z23_FLAG("ZCL_COPY_PROVE_STATUS_DIR", "env_runtime", "-", "-",

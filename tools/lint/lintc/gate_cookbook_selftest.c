@@ -61,6 +61,7 @@ static const char k_cks_dev[] =
     "  while :; do sleep 1; done;;\n"
     "orphan) ( trap '' INT TERM HUP; echo \"$$\" >&\"$CKS_READY_FD\"; while :; do sleep 1; done ) &\n"
     "  wait;;\n"
+    "cold) if [ ! -f cold.marker ]; then : > cold.marker; sleep 3; fi;;\n"
     "esac\n"
     "echo \"answer: $*\"\n";
 
@@ -205,7 +206,7 @@ static struct ck_cfg cks_cfg(const struct cks_fx *fx, int fix, const char *floor
 {
     return (struct ck_cfg){ .root = fx->root, .def = "engine/composition/cookbook.def",
                             .doc = "docs/dev/COOKBOOK.md", .bin_dir = "build/bin", .floor = floor,
-                            .timeout = "20", .fix = fix, .grace_ms = grace };
+                            .timeout = "20", .warm_timeout = "20", .fix = fix, .grace_ms = grace };
 }
 
 static pid_t cks_fork(const struct cks_fx *fx, const struct ck_cfg *cfg, const char *mode, int ready[2])
@@ -278,6 +279,31 @@ static int cks_cases(const struct cks_fx *fx)
     if (csr_write(path, drifted) != 0 || cks_case(fx, &drift) || cks_case(fx, &again))
         return cks_fail("document drift cases");
     return unlink(path) != 0 || cks_case(fx, &none);
+}
+
+/* The first RUN command of a checkout whose index is stale takes longer than
+ * a recipe limit. The fixture sleeps past a 1 second recipe limit on its first
+ * call only; the warm-up absorbs that call, so the document is still
+ * generated and the gate is clean. Without the warm-up the first recipe times
+ * out and the gate fails. */
+static int cks_warm(const struct cks_fx *fx)
+{
+    char marker[CK_PATH * 2], out[CKS_BUF], what[CKS_BUF + 256];
+    int st = 0;
+    snprintf(marker, sizeof marker, "%s/cold.marker", fx->root);
+    struct ck_cfg cfg = cks_cfg(fx, 1, "1", CKS_GRACE_MS);
+    cfg.timeout = "1";
+    if (cks_put(fx, "engine/composition/cookbook.def", k_cks_def, 0600) != 0
+        || (unlink(marker) != 0 && errno != ENOENT))
+        return cks_fail("cannot prepare the cold-index case");
+    pid_t pid = cks_fork(fx, &cfg, "cold", NULL);
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || cks_slurp(fx->out, out, sizeof out) != 0)
+        return cks_fail("the gate child did not finish");
+    snprintf(what, sizeof what, "a cold index is warmed before the timed recipes (exit %d, want 0)\n%s",
+             WIFEXITED(st) ? WEXITSTATUS(st) : -1, out);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0 || !strstr(out, "fixed: docs/dev/COOKBOOK.md regenerated"))
+        return cks_fail(what);
+    return 0;
 }
 
 #define CKS_RUN(tool, args, token) "RECIPE_RUN(\"r\", \"q\", " tool ", \"" args "\", \"" token "\")\n"
@@ -425,7 +451,8 @@ int check_cookbook_selftest(void)
     if (rc == 0 && cks_build(&fx) != 0)
         rc = cks_fail("cannot build the fixture root");
     if (rc == 0)
-        rc = cks_cases(&fx) || cks_failures(&fx) || cks_long_args(&fx) || cks_signals(&fx);
+        rc = cks_cases(&fx) || cks_warm(&fx) || cks_failures(&fx) || cks_long_args(&fx)
+             || cks_signals(&fx);
     if (fx.base[0] && access(fx.base, F_OK) == 0)
         rap_rm_rf(fx.base);
     if (rc == 0)

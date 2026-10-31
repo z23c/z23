@@ -111,7 +111,8 @@ static void ck_observed(const char *out)
 
 /* argv for `timeout T z23 [a [b]] <args split on blanks> [last]`, or NULL
  * when memory runs out. args is split in place. */
-static char **ck_argv(const struct ck_run *g, const char *a, const char *b, char *args, char *last)
+static char **ck_argv(const struct ck_run *g, const char *timeout, const char *a, const char *b,
+                      char *args, char *last)
 {
     size_t n = 0, cnt = 8;
     char *p;
@@ -126,7 +127,7 @@ static char **ck_argv(const struct ck_run *g, const char *a, const char *b, char
     if (!v)
         return NULL;
     v[n++] = (char *)"timeout";
-    v[n++] = (char *)g->cfg->timeout;
+    v[n++] = (char *)timeout;
     v[n++] = g->z23;
     if (a)
         v[n++] = (char *)a;
@@ -188,7 +189,7 @@ static void ck_check_run(struct ck_run *g, char *const *f)
     } else if (!g->runnable) {
         ck_bad(g, "recipe '%s' cannot be checked: '%s' is not built", f[1], g->z23);
     } else {
-        char **argv = args ? ck_argv(g, NULL, NULL, args, NULL) : NULL;
+        char **argv = args ? ck_argv(g, g->cfg->timeout, NULL, NULL, args, NULL) : NULL;
         if (argv)
             ck_judge(g, f, argv);
         else
@@ -206,7 +207,7 @@ static void ck_check_ask(struct ck_run *g, char *const *f)
     } else if (!g->runnable) {
         ck_bad(g, "recipe '%s' cannot be checked: '%s' is not built", f[1], g->z23);
     } else {
-        char **argv = ck_argv(g, "discover", "describe", NULL, f[3]);
+        char **argv = ck_argv(g, g->cfg->timeout, "discover", "describe", NULL, f[3]);
         if (argv)
             ck_judge(g, f, argv);
         else
@@ -290,6 +291,33 @@ static void ck_check_rows(struct ck_run *g, const struct ck_recs *recs)
         }
         ck_split(copy, f);
         ck_check_row(g, f);
+        free(copy);
+    }
+}
+
+/* The first RUN recipe runs once with its output discarded, under the
+ * warm-up limit, so a codeindex that is stale for this checkout is rebuilt
+ * before the timed recipes start. The rebuild is a one-time cost of the
+ * checkout, not of any recipe; the recipe limit still applies to every row. */
+static void ck_warm(struct ck_run *g, const struct ck_recs *recs)
+{
+    for (size_t i = 0; i < recs->n && !lsc_pending(); i++) {
+        char *copy = strdup(recs->line[i]), *f[CK_FIELDS];
+        if (!copy)
+            return;
+        ck_split(copy, f);
+        if (strcmp(f[0], "RECIPE_RUN") == 0) {
+            char *args = strdup(f[3]);
+            char **argv = NULL;
+            if (args && ck_args_safe(f[3]))
+                argv = ck_argv(g, g->cfg->warm_timeout, NULL, NULL, args, NULL);
+            if (argv)
+                (void)ck_status(g->cfg, argv);
+            free(argv);
+            free(args);
+            free(copy);
+            return;
+        }
         free(copy);
     }
 }
@@ -381,6 +409,8 @@ static int ck_scan(struct ck_run *g)
     }
     snprintf(g->z23, zn, "%s/z23-dev", cfg->bin_dir);
     g->runnable = access(g->z23, X_OK) == 0;
+    if (g->runnable)
+        ck_warm(g, &recs);
     ck_check_rows(g, &recs);
     rc = lsc_pending() ? 1 : ck_verdict(g, &recs);
     ck_recs_free(&recs);
@@ -432,6 +462,7 @@ int check_cookbook_run(int argc, char **argv)
         .bin_dir = env_or("ZCL_LINT_BIN_DIR", "build/bin"),
         .floor = env_or("ZCL_COOKBOOK_ROW_FLOOR", "10"),
         .timeout = env_or("ZCL_COOKBOOK_TIMEOUT", "120"),
+        .warm_timeout = env_or("ZCL_COOKBOOK_WARM_TIMEOUT", "900"),
         .fix = fix,
         .grace_ms = CK_GRACE_MS,
     };

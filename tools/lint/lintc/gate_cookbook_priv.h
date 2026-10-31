@@ -32,6 +32,7 @@ struct ck_cfg {
     const char *bin_dir;
     const char *floor;
     const char *timeout;
+    const char *warm_timeout;
     int fix;
     int grace_ms;
 };
