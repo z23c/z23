@@ -2014,22 +2014,24 @@ static bool dp_split_directive_ish(const char *l, size_t n)
                     dp_split_contains(l, n, "import"));
 }
 
+static size_t dp_split_skip_blank(const char *l, size_t n, size_t i)
+{
+    while (i < n && (l[i] == ' ' || l[i] == '\t')) i++;
+    return i;
+}
+
 /* The one include spelling the derivation reads: the whole line is
  * `#include "x"` or `#include <x>`, nothing after the closing delimiter. */
 static bool dp_split_strict_include(const char *l, size_t n)
 {
     if (n == 0 || l[0] != '#') return false;
-    size_t i = 1;
-    while (i < n && (l[i] == ' ' || l[i] == '\t')) i++;
+    size_t i = dp_split_skip_blank(l, n, 1);
     if (n - i < 8 || memcmp(l + i, "include", 7) != 0) return false;
-    i += 7;
-    if (l[i] != ' ' && l[i] != '\t') return false;
-    while (i < n && (l[i] == ' ' || l[i] == '\t')) i++;
-    char close = i < n && l[i] == '"' ? '"' : i < n && l[i] == '<' ? '>' : 0;
-    if (!close) return false;
-    for (size_t k = i + 1; k < n; k++)
-        if (l[k] == close) return k == n - 1;
-    return false;
+    size_t after = i + 7, j = dp_split_skip_blank(l, n, after);
+    if (j == after || j >= n) return false;
+    char close = l[j] == '"' ? '"' : l[j] == '<' ? '>' : 0;
+    const char *end = close ? memchr(l + j + 1, close, n - j - 1) : NULL;
+    return end && end == l + n - 1;
 }
 
 /* Every comment line outside the leading header block of `added` is a line
