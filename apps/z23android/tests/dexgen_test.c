@@ -65,6 +65,20 @@ static void test_map(const uint8_t *d, size_t n)
         if (rd16(item) == 0x2001) CHECK(rd32(item + 4) == C_COUNT && at % 4 == 0);
     }
 }
+/* True when window holds one KeyPrompt method in dexdump order: the class, the name, the type, then the
+ * access flags of that method alone, with the native flag on that line when native is set. */
+static bool window_has_method(const char *window, const char *want, const char *sig, bool native)
+{
+    const char *class_at = strstr(window, "(in Lorg/z23/nativeapp/KeyPrompt;)");
+    const char *name_at = strstr(window, want);
+    const char *type_at = strstr(window, sig);
+    const char *access_at = strstr(window, "access        : ");
+    if (!(class_at && name_at && type_at && access_at && class_at < name_at && name_at < type_at && type_at < access_at)) return false;
+    const char *next_method = strstr(name_at + 1, "(in L");
+    const char *eol = strchr(access_at, 0x0a);
+    const char *native_at = strstr(access_at, "NATIVE");
+    return (!next_method || access_at < next_method) && (!native || (native_at && (!eol || native_at < eol)));
+}
 /* True when the dexdump listing has a method called name on KeyPrompt with the given type, and when
  * native is set, with the native flag: the listing shows the class before the name, then the type and
  * the access flags. A missing or retyped method is a link failure on the phone. */
@@ -77,15 +91,7 @@ static bool key_prompt_method(const char *listing, const char *name, const char 
         char window[512];
         size_t before = (size_t)(at - listing) < 100 ? (size_t)(at - listing) : 100;
         snprintf(window, sizeof(window), "%.*s", (int)(before + 260), at - before);
-        const char *class_at = strstr(window, "(in Lorg/z23/nativeapp/KeyPrompt;)");
-        const char *name_at = strstr(window, want);
-        const char *type_at = strstr(window, sig);
-        const char *access_at = strstr(window, "access        : ");
-        const char *next_method = name_at ? strstr(name_at + 1, "(in L") : NULL;
-        const char *eol = access_at ? strchr(access_at, 0x0a) : NULL;
-        const char *native_at = access_at ? strstr(access_at, "NATIVE") : NULL;
-        if (class_at && name_at && type_at && access_at && class_at < name_at && name_at < type_at && type_at < access_at &&
-            (!next_method || access_at < next_method) && (!native || (native_at && (!eol || native_at < eol)))) return true;
+        if (window_has_method(window, want, sig, native)) return true;
     }
     fprintf(stderr, "dexgen_test: KeyPrompt lacks %s %s%s\n", name, type, native ? " (native)" : "");
     return false;
