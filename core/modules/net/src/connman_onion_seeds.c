@@ -114,6 +114,27 @@ static const char *onion_seed_clearnet_scan_start(const uint8_t *body)
     return netbase_onlynet_onion() ? "" : (const char *)body;
 }
 
+static bool onion_seed_copy_quoted_ip(const uint8_t *body, size_t body_len,
+                                      size_t p, char *ip, size_t ip_cap)
+{
+    size_t n = 0;
+    while (p < body_len && body[p] != '"' && n + 1u < ip_cap)
+        ip[n++] = (char)body[p++];
+    if (p >= body_len || body[p] != '"' || n == 0)
+        return false;
+    ip[n] = '\0';
+    return true;
+}
+
+static bool onion_seed_ip_is_concrete_ipv4(const char *ip)
+{
+    unsigned a, b, c, d;
+    char trailing;
+    return sscanf(ip, "%u.%u.%u.%u%c", &a, &b, &c, &d, &trailing) == 4 &&
+           a <= 255 && b <= 255 && c <= 255 && d <= 255 &&
+           !(a == 0 && b == 0 && c == 0 && d == 0);
+}
+
 /* Race admission is stricter than HTTP success: below the peer floor this
  * pass can use only a concrete clearnet endpoint, so an empty/irrelevant 200
  * response must not suppress another seed. Parsing remains side-effect free;
@@ -128,19 +149,12 @@ static bool onion_seed_directory_has_endpoint(const uint8_t *body,
     for (size_t i = 0; i + sizeof(needle) - 1u < body_len; i++) {
         if (memcmp(body + i, needle, sizeof(needle) - 1u) != 0)
             continue;
-        size_t p = i + sizeof(needle) - 1u;
         char ip[64];
-        size_t n = 0;
-        while (p < body_len && body[p] != '"' && n + 1u < sizeof(ip))
-            ip[n++] = (char)body[p++];
-        if (p >= body_len || body[p] != '"' || n == 0)
+        if (!onion_seed_copy_quoted_ip(body, body_len,
+                                       i + sizeof(needle) - 1u, ip,
+                                       sizeof(ip)))
             continue;
-        ip[n] = '\0';
-        unsigned a, b, c, d;
-        char trailing;
-        if (sscanf(ip, "%u.%u.%u.%u%c", &a, &b, &c, &d, &trailing) == 4 &&
-            a <= 255 && b <= 255 && c <= 255 && d <= 255 &&
-            !(a == 0 && b == 0 && c == 0 && d == 0))
+        if (onion_seed_ip_is_concrete_ipv4(ip))
             return true;
     }
     return false;
@@ -228,6 +242,132 @@ static bool onion_seed_hint_to_addrman(struct connman *cm, const char *source,
     return addrman_add(&cm->manager.addrman, &addr, &src, 0);
 }
 
+/* Fallback when a directory response omits/malforms clearnet_port —
+ * the advertising node's OWN configured P2P port, not a literal that
+ * silently assumes mainnet. */
+static uint16_t onion_seed_default_port(const struct connman *cm)
+{
+    return (cm->params && cm->params->nDefaultPort > 0 &&
+            cm->params->nDefaultPort <= 65535)
+               ? (uint16_t)cm->params->nDefaultPort
+               : 8033;
+}
+
+/* The clearnet_port that follows a clearnet_ip, or the default. */
+static uint16_t onion_seed_port_after_ip(const char *p, uint16_t default_port)
+{
+    /* Find clearnet_port */
+    uint16_t port = default_port;
+    const char *pp = strstr(p, "\"clearnet_port\":");
+    if (pp && pp - p < 50) {
+        const char *port_text = pp + 16;
+        char *port_end = NULL;
+        unsigned long parsed_port = strtoul(port_text, &port_end, 10);
+        if (port_end != port_text && parsed_port > 0 &&
+            parsed_port <= 65535)
+            port = (uint16_t)parsed_port;
+    }
+    return port;
+}
+
+/* Offer one clearnet endpoint to the address manager (and pin it when
+ * asked). Returns true when the endpoint parsed and was offered, which the
+ * caller counts; addrman_add's own result is ignored, as before the split. */
+static bool onion_seed_add_clearnet_peer(struct connman *cm, const char *ip,
+                                         uint16_t port, bool pin_endpoints)
+{
+    /* Add to address manager */
+    if (!(ip[0] && strcmp(ip, "0.0.0.0") != 0))
+        return false;
+    struct net_address addr;
+    memset(&addr, 0, sizeof(addr));
+    /* Parse IPv4 */
+    unsigned a, b, c, d;
+    char trailing;
+    if (!(sscanf(ip, "%u.%u.%u.%u%c", &a, &b, &c, &d, &trailing) == 4 &&
+          a <= 255 && b <= 255 && c <= 255 && d <= 255))
+        return false;
+    /* IPv4-mapped IPv6 */
+    unsigned char ip4[4] = {(unsigned char)a, (unsigned char)b,
+                            (unsigned char)c, (unsigned char)d};
+    net_addr_set_ipv4(&addr.svc.addr, ip4);
+    addr.svc.port = port;
+    addr.nServices = NODE_NETWORK;
+    struct net_addr src;
+    net_addr_init(&src);
+    addrman_add(&cm->manager.addrman, &addr, &src, 0);
+    if (pin_endpoints)
+        connman_open_connection(cm, &addr);
+    printf("Onion seed: discovered clearnet peer %s:%d\n", ip, port);
+    return true;
+}
+
+/* Parse minimal JSON: extract clearnet_ip and clearnet_port fields */
+/* (returns the number of endpoints offered to the address manager) */
+static int onion_seed_import_clearnet(struct connman *cm, const uint8_t *body,
+                                      uint16_t default_port,
+                                      bool pin_endpoints)
+{
+    const char *p = onion_seed_clearnet_scan_start(body);
+    int added = 0;
+    while ((p = strstr(p, "\"clearnet_ip\":\"")) != NULL) {
+        p += 15; /* skip "clearnet_ip":" */
+        const char *end = strchr(p, '"');
+        if (!end || end == p) { p++; continue; }
+
+        char ip[64];
+        size_t iplen = (size_t)(end - p);
+        if (iplen >= sizeof(ip)) { p = end; continue; }
+        memcpy(ip, p, iplen);
+        ip[iplen] = '\0';
+        p = end + 1;
+
+        uint16_t port = onion_seed_port_after_ip(p, default_port);
+        if (onion_seed_add_clearnet_peer(cm, ip, port, pin_endpoints))
+            added++;
+    }
+    return added;
+}
+
+/* Offer every relay hint (but the fetched node's own) to our directory and
+ * to addrman. Returns how many the directory accepted; addrman's result is
+ * ignored, as before the split. */
+static int onion_seed_learn_hints(struct connman *cm, const char *onion,
+                                  const struct onion_relay_hint *hints,
+                                  int nh)
+{
+    int learned = 0;
+    for (int i = 0; i < nh; i++) {
+        if (strcmp(hints[i].hostname, onion) == 0)
+            continue;                       /* the node we just fetched */
+        if (onion_service_directory_learn(hints[i].hostname, hints[i].port,
+                                          hints[i].height, hints[i].last_seen,
+                                          hints[i].apps))
+            learned++;
+        (void)onion_seed_hint_to_addrman(cm, onion, &hints[i]);
+    }
+    return learned;
+}
+
+/* Follow a bounded few hints one hop. Returns how many were followed. */
+static int onion_seed_follow_hints(struct connman *cm, const char *onion,
+                                   const struct onion_relay_hint *hints,
+                                   int nh, int depth)
+{
+    int followed = 0;
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    for (int i = 0; i < nh && !g_stop; i++) {
+        if (strcmp(hints[i].hostname, onion) == 0)
+            continue;
+        if (!onion_directory_claim_relay_follow(hints[i].hostname, now))
+            continue;
+        followed++;
+        (void)try_onion_seed_fetch_depth(cm, hints[i].hostname,
+                                         depth + 1, false);
+    }
+    return followed;
+}
+
 static int apply_onion_seed_directory(struct connman *cm, const char *onion,
                                       const uint8_t *body, size_t body_len,
                                       int depth, bool pin_endpoints)
@@ -247,68 +387,9 @@ static int apply_onion_seed_directory(struct connman *cm, const char *onion,
     (void)onion_service_directory_learn(onion, 0, 0, 0, self_apps);
     onion_seed_note_dial(onion, true);
 
-    /* Fallback when a directory response omits/malforms clearnet_port —
-     * the advertising node's OWN configured P2P port, not a literal that
-     * silently assumes mainnet. */
-    uint16_t default_port = (cm->params && cm->params->nDefaultPort > 0 &&
-                             cm->params->nDefaultPort <= 65535)
-                                ? (uint16_t)cm->params->nDefaultPort
-                                : 8033;
-
-    /* Parse minimal JSON: extract clearnet_ip and clearnet_port fields */
-    const char *p = onion_seed_clearnet_scan_start(body);
-    int added = 0;
-    while ((p = strstr(p, "\"clearnet_ip\":\"")) != NULL) {
-        p += 15; /* skip "clearnet_ip":" */
-        const char *end = strchr(p, '"');
-        if (!end || end == p) { p++; continue; }
-
-        char ip[64];
-        size_t iplen = (size_t)(end - p);
-        if (iplen >= sizeof(ip)) { p = end; continue; }
-        memcpy(ip, p, iplen);
-        ip[iplen] = '\0';
-        p = end + 1;
-
-        /* Find clearnet_port */
-        uint16_t port = default_port;
-        const char *pp = strstr(p, "\"clearnet_port\":");
-        if (pp && pp - p < 50) {
-            const char *port_text = pp + 16;
-            char *port_end = NULL;
-            unsigned long parsed_port = strtoul(port_text, &port_end, 10);
-            if (port_end != port_text && parsed_port > 0 &&
-                parsed_port <= 65535)
-                port = (uint16_t)parsed_port;
-        }
-
-        /* Add to address manager */
-        if (ip[0] && strcmp(ip, "0.0.0.0") != 0) {
-            struct net_address addr;
-            memset(&addr, 0, sizeof(addr));
-            /* Parse IPv4 */
-            unsigned a, b, c, d;
-            char trailing;
-            if (sscanf(ip, "%u.%u.%u.%u%c", &a, &b, &c, &d,
-                       &trailing) == 4 &&
-                a <= 255 && b <= 255 && c <= 255 && d <= 255) {
-                /* IPv4-mapped IPv6 */
-                unsigned char ip4[4] = {(unsigned char)a, (unsigned char)b,
-                                        (unsigned char)c, (unsigned char)d};
-                net_addr_set_ipv4(&addr.svc.addr, ip4);
-                addr.svc.port = port;
-                addr.nServices = NODE_NETWORK;
-                struct net_addr src;
-                net_addr_init(&src);
-                addrman_add(&cm->manager.addrman, &addr, &src, 0);
-                if (pin_endpoints)
-                    connman_open_connection(cm, &addr);
-                added++;
-                printf("Onion seed: discovered clearnet peer %s:%d\n",
-                       ip, port);
-            }
-        }
-    }
+    uint16_t default_port = onion_seed_default_port(cm);
+    int added = onion_seed_import_clearnet(cm, body, default_port,
+                                           pin_endpoints);
 
     /* ── Second, ADDITIVE pass: the onion half of the same response ──
      * Runs after the clearnet loop above and cannot alter anything it
@@ -325,16 +406,8 @@ static int apply_onion_seed_directory(struct connman *cm, const char *onion,
         (const char *)body,
         (self_onion && self_onion[0]) ? self_onion : onion,
         hints, ONION_RELAY_PER_RESPONSE);
-    int learned = 0, followed = 0;
-    for (int i = 0; i < nh; i++) {
-        if (strcmp(hints[i].hostname, onion) == 0)
-            continue;                       /* the node we just fetched */
-        if (onion_service_directory_learn(hints[i].hostname, hints[i].port,
-                                          hints[i].height, hints[i].last_seen,
-                                          hints[i].apps))
-            learned++;
-        (void)onion_seed_hint_to_addrman(cm, onion, &hints[i]);
-    }
+    int learned = onion_seed_learn_hints(cm, onion, hints, nh);
+    int followed = 0;
 
     /* GETTING A FIRST PEER OUTRANKS ENRICHING THE GRAPH. The depth-1
      * follow is up to ONION_RELAY_FOLLOW_BUDGET blocking fetches of
@@ -344,18 +417,8 @@ static int apply_onion_seed_directory(struct connman *cm, const char *onion,
      * it is skipped outright rather than delaying the last-resort path by
      * minutes on a cold boot. */
     if (depth < ONION_RELAY_MAX_DEPTH &&
-        cm->manager.num_nodes >= (size_t)ZCL_PEER_FLOOR_HEALTHY) {
-        int64_t now = (int64_t)platform_time_wall_time_t();
-        for (int i = 0; i < nh && !g_stop; i++) {
-            if (strcmp(hints[i].hostname, onion) == 0)
-                continue;
-            if (!onion_directory_claim_relay_follow(hints[i].hostname, now))
-                continue;
-            followed++;
-            (void)try_onion_seed_fetch_depth(cm, hints[i].hostname,
-                                             depth + 1, false);
-        }
-    }
+        cm->manager.num_nodes >= (size_t)ZCL_PEER_FLOOR_HEALTHY)
+        followed = onion_seed_follow_hints(cm, onion, hints, nh, depth);
     printf("Onion seed: added %d clearnet peers, %d onion peers advertised "
            "by %s (%d recorded, %d followed)\n",
            added, nh, onion, learned, followed);
@@ -450,19 +513,11 @@ static int onion_seed_pass_fetch(const char *onion, const char *path,
     return rc;
 }
 
-void connman_run_onion_seed_pass(struct connman *cm)
+/* Tier 1 — operator-curated onion seeds (one .onion per line, #
+ * comments). The zero-rebuild primary: an operator adds a supplier
+ * with no code change and no restart of anybody else. */
+static void onion_pass_claim_operator_file(struct onion_pass_seen *seen)
 {
-    if (!cm || !cm->params || g_stop) return;
-    if (g_connect_only) return;
-    if (!tor_integration_is_dial_ready()) return;
-    atomic_fetch_add(&cm->onion_walk_runs, 1u);
-
-    struct onion_pass_seen seen;
-    seen.n = 0;
-
-    /* Tier 1 — operator-curated onion seeds (one .onion per line, #
-     * comments). The zero-rebuild primary: an operator adds a supplier
-     * with no code change and no restart of anybody else. */
     const char *home = getenv("HOME");
     if (home) {
         char path[512];
@@ -478,68 +533,68 @@ void connman_run_onion_seed_pass(struct connman *cm)
                 if (*p == '#' || *p == '\n' || *p == '\0') continue;
                 char *end = strpbrk(p, " \t\r\n#");
                 if (end) *end = '\0';
-                if (strstr(p, ".onion") && onion_pass_claim(&seen, p))
+                if (strstr(p, ".onion") && onion_pass_claim(seen, p))
                     n++;
             }
             fclose(fp);
         }
     }
+}
 
-    /* Tier 2 — our own persisted directory, measured contacts first.
-     * Bounded by ONION_DIR_DIAL_CANDIDATES / ONION_DIR_DIAL_ENOUGH so a
-     * large directory cannot fill the race with hearsay before the
-     * compiled-in doors get a slot. */
-    {
-        struct onion_dial_candidate cand[ONION_DIR_DIAL_CANDIDATES];
-        memset(cand, 0, sizeof(cand));
-        int n = onion_service_directory_dial_candidates(
-            cand, ONION_DIR_DIAL_CANDIDATES);
-        int claimed = 0;
-        for (int i = 0; i < n && !g_stop && claimed < ONION_DIR_DIAL_ENOUGH; i++) {
-            if (onion_pass_claim(&seen, cand[i].hostname))
-                claimed++;
-        }
-        if (n > 0)
-            LOG_INFO("connman",
-                     "onion bootstrap: own directory offered %d host%s, "
-                     "claimed %d for the seed race",
-                     n, n == 1 ? "" : "s", claimed);
+/* Tier 2 — our own persisted directory, measured contacts first.
+ * Bounded by ONION_DIR_DIAL_CANDIDATES / ONION_DIR_DIAL_ENOUGH so a
+ * large directory cannot fill the race with hearsay before the
+ * compiled-in doors get a slot. */
+static int onion_pass_claim_own_directory(struct onion_pass_seen *seen,
+                                          int *offered)
+{
+    struct onion_dial_candidate cand[ONION_DIR_DIAL_CANDIDATES];
+    memset(cand, 0, sizeof(cand));
+    int n = onion_service_directory_dial_candidates(
+        cand, ONION_DIR_DIAL_CANDIDATES);
+    int claimed = 0;
+    for (int i = 0; i < n && !g_stop && claimed < ONION_DIR_DIAL_ENOUGH; i++) {
+        if (onion_pass_claim(seen, cand[i].hostname))
+            claimed++;
     }
+    *offered = n;
+    return claimed;
+}
 
-    /* Tier 3 — hardcoded chainparams onion seeds. */
-    for (size_t i = 0; i < cm->params->nOnionSeeds && !g_stop; i++)
-        (void)onion_pass_claim(&seen, cm->params->onionSeeds[i]);
-
-    /* Tier 4 — .onion peers discovered on-chain (ZSLP scan) — same
-     * Tor-native source the boot-time discovery pass uses. */
+/* Tier 4 — .onion peers discovered on-chain (ZSLP scan) — same
+ * Tor-native source the boot-time discovery pass uses. */
+static void onion_pass_claim_onchain_peers(struct connman *cm,
+                                           struct onion_pass_seen *seen)
+{
     if (cm->onion_peer_discover && cm->onion_peer_datadir) {
         struct onion_peer peers[16];
         int found = cm->onion_peer_discover(cm->onion_peer_datadir,
                                             peers, 16);
         for (int i = 0; i < found && i < 8 && !g_stop; i++) {
             if (peers[i].hostname[0] && strstr(peers[i].hostname, ".onion"))
-                (void)onion_pass_claim(&seen, peers[i].hostname);
+                (void)onion_pass_claim(seen, peers[i].hostname);
         }
     }
+}
 
-    if (seen.n <= 0 || g_stop)
-        return;
-
+static void onion_seed_pass_race(struct connman *cm,
+                                 const struct onion_pass_seen *seen)
+{
     const char *hostptrs[ONION_PASS_SEEN_MAX];
-    for (int i = 0; i < seen.n; i++)
-        hostptrs[i] = seen.host[i];
+    for (int i = 0; i < seen->n; i++)
+        hostptrs[i] = seen->host[i];
 
     struct onion_fetch_result winner;
     memset(&winner, 0, sizeof(winner));
     size_t winner_index = (size_t)-1;
     struct onion_seed_race_join *join = NULL;
-    int rc = onion_seed_race_first_usable(hostptrs, (size_t)seen.n,
+    int rc = onion_seed_race_first_usable(hostptrs, (size_t)seen->n,
                                           onion_seed_pass_fetch, NULL,
                                           onion_seed_directory_usable,
                                           NULL,
                                           60, &g_stop,
                                           &winner, &winner_index, &join);
-    if (rc == 0 && winner.body && winner_index < (size_t)seen.n && !g_stop) {
+    if (rc == 0 && winner.body && winner_index < (size_t)seen->n && !g_stop) {
         printf("Onion seed: first usable door %s\n", hostptrs[winner_index]);
         fflush(stdout);
         (void)apply_onion_seed_directory(cm, hostptrs[winner_index],
@@ -552,6 +607,37 @@ void connman_run_onion_seed_pass(struct connman *cm)
      * teardown cannot free the fetch path underneath a live worker. */
     onion_seed_race_join_wait(join);
     onion_seed_race_join_free(join);
+}
+
+void connman_run_onion_seed_pass(struct connman *cm)
+{
+    if (!cm || !cm->params || g_stop) return;
+    if (g_connect_only) return;
+    if (!tor_integration_is_dial_ready()) return;
+    atomic_fetch_add(&cm->onion_walk_runs, 1u);
+
+    struct onion_pass_seen seen;
+    seen.n = 0;
+
+    onion_pass_claim_operator_file(&seen);
+    int n = 0;
+    int claimed = onion_pass_claim_own_directory(&seen, &n);
+    if (n > 0)
+        LOG_INFO("connman",
+                 "onion bootstrap: own directory offered %d host%s, "
+                 "claimed %d for the seed race",
+                 n, n == 1 ? "" : "s", claimed);
+
+    /* Tier 3 — hardcoded chainparams onion seeds. */
+    for (size_t i = 0; i < cm->params->nOnionSeeds && !g_stop; i++)
+        (void)onion_pass_claim(&seen, cm->params->onionSeeds[i]);
+
+    onion_pass_claim_onchain_peers(cm, &seen);
+
+    if (seen.n <= 0 || g_stop)
+        return;
+
+    onion_seed_pass_race(cm, &seen);
 }
 
 void connman_kick_onion_seeds(struct connman *cm)

@@ -58,9 +58,6 @@ core/modules/crypto_registry/src/crypto_registry.c:crypto_registry_register:16
 core/modules/mining/src/gen.c:try_solve_equihash:16
 core/modules/net/src/addrman_codec.c:addrman_deserialize:19
 core/modules/net/src/connman.c:thread_socket_handler:89
-core/modules/net/src/connman_onion_seeds.c:apply_onion_seed_directory:35
-core/modules/net/src/connman_onion_seeds.c:connman_run_onion_seed_pass:42
-core/modules/net/src/connman_onion_seeds.c:onion_seed_directory_has_endpoint:20
 core/modules/net/src/download.c:dl_assign_to_peer:90
 core/modules/net/src/download.c:dl_queue_blocks_class:39
 core/modules/net/src/download_diagnostics.c:dl_get_diagnostics:27

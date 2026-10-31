@@ -452,3 +452,7 @@ later lane flips it HARD.
 - 2026-10-31T10:23:46Z — REASON: net.c: move ban persistence (banlist.dat) to a sibling file so the complexity split fits the file-size pin;   behaviour-preserving
   old ROOT: 35823679a85ecb52ed992815597e41e6c5375f2dbc06e669e2a0c70160f83595
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T10:24:52Z — REASON: core/modules/net/src/connman_onion_seeds.c: split 3 function(s) under the complexity cap;  behaviour-preserving
+  old ROOT: c154ccd1fc3452755b78c925cd7564acdcde95c0309911a6a430bc9e4db9ae89
+  by: owner unseal ritual (make core-unseal)
