@@ -594,10 +594,11 @@ static int case_verify_nonzero_exit(void)
     char handled[800];
     TEST_CASE("lab_peer: a nonzero child exit is a failure even if the reply says ok") {
         ASSERT(lpt_verify_env(&e, "verify_rc"));
-        ASSERT(lpt_resp(&e, "dev.land.reverify_offer.rc", "3"));
+        ASSERT(lpt_resp(&e, "fleet.board.post.result.rc", "3"));
         (void)snprintf(handled, sizeof(handled), "%s/handled.tsv", e.state);
         ASSERT_EQ(lpt_verify_run(&e), 0);
-        ASSERT_EQ(lpt_count(handled, "\tretry\tREVERIFY_NO_RESULT\t"), 1);
+        ASSERT_EQ(lpt_count(handled, "\tretry\tRESULT_POST_FAILED\t"), 1);
+        ASSERT_EQ(lpt_count(handled, "\tok\t"), 0);
         ASSERT_EQ(lpt_count(e.calls, "\tresult\n"), 0);
     } TEST_END
     return failures;
