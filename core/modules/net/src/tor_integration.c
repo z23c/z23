@@ -17,6 +17,10 @@
 #include "net/tor_integration.h"
 #include "net/tor_request_state.h"
 #include "net/net.h"      /* net_set_onion_ingress_port() */
+#ifndef _WIN32
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
@@ -651,6 +655,28 @@ extern int tor_main_configuration_set_command_line(
     tor_main_configuration_t *cfg, int argc, char *argv[]);
 extern void tor_main_configuration_free(tor_main_configuration_t *cfg);
 extern int tor_run_main(const tor_main_configuration_t *);
+#ifndef _WIN32
+typedef int tor_control_socket_t;
+#define TOR_CONTROL_SOCKET_NONE (-1)
+#else
+typedef uintptr_t tor_control_socket_t;
+#define TOR_CONTROL_SOCKET_NONE ((tor_control_socket_t)~(uintptr_t)0)
+#endif
+extern tor_control_socket_t tor_main_configuration_setup_control_socket(
+    tor_main_configuration_t *cfg) ZCL_WEAK_IMPORT;
+
+static tor_control_socket_t g_tor_control = TOR_CONTROL_SOCKET_NONE;
+static _Atomic bool g_serve_onion = true;
+static _Atomic int64_t g_claim_ms = -1;
+static _Atomic int64_t g_network_enabled_ms = -1;
+
+static int64_t tor_wall_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
 extern void tor_shutdown_event_loop_and_exit(int exitcode);
 
 /* Dynhost external handler — routes .onion requests to our code */
@@ -683,6 +709,15 @@ static void *tor_thread_fn(void *arg)
     printf("Tor: starting embedded (no ports, no SOCKS, dynhost only)\n");
     fflush(stdout);
 
+    tor_main_configuration_t *cfg = tor_main_configuration_new();
+    char *argv[] = {"tor", "-f", torrc_path};
+    tor_main_configuration_set_command_line(cfg, 3, argv);
+    /* A node that serves no onion starts with the network disabled and clears
+     * it through this pre-authenticated control connection. */
+    if (!atomic_load(&g_serve_onion) &&
+        tor_main_configuration_setup_control_socket)
+        g_tor_control = tor_main_configuration_setup_control_socket(cfg);
+
     /* Monitor for .onion address in parallel when the helper thread starts. */
     if (thread_registry_spawn("zcl_tor_monitor", tor_onion_monitor, NULL,
                                   &g_monitor_thread) == 0) {
@@ -694,9 +729,6 @@ static void *tor_thread_fn(void *arg)
     }
 
     /* Run Tor in this thread (blocks until exit) */
-    tor_main_configuration_t *cfg = tor_main_configuration_new();
-    char *argv[] = {"tor", "-f", torrc_path};
-    tor_main_configuration_set_command_line(cfg, 3, argv);
     int result = tor_run_main(cfg);
     tor_main_configuration_free(cfg);
 
@@ -714,9 +746,216 @@ static void *tor_thread_fn(void *arg)
     return NULL;
 }
 
+/* ── No onion service (private wallet broadcast) ───────────────
+ *
+ * dynhost mints its throwaway service from dynhost_check_and_activate()
+ * only while its global hs_service is NULL. A node that serves no onion
+ * claims that slot with an inert sentinel (a zeroed block no real service
+ * can equal) the moment the global exists, so nothing is minted, no
+ * ADD_ONION-equivalent registration happens and no descriptor is uploaded.
+ *
+ * The claim is a compare-and-swap from NULL, polled every millisecond from
+ * the monitor thread, which starts before tor_run_main(). The global is
+ * allocated and activated inside Tor's own thread and core has no hook
+ * between the two, so the order is made as tight as core can make it, and
+ * not guaranteed. The guarantee is the fail-closed verification: once the
+ * slot holds anything but the sentinel the node is marked violated, dialling
+ * and private sends stop, and Tor is shut down. */
+enum tor_service_claim {
+    TOR_CLAIM_NONE = 0,   /* this node serves an onion: nothing to claim */
+    TOR_CLAIM_HELD = 1,   /* the slot holds the sentinel */
+    TOR_CLAIM_LOST = 2,   /* a real service occupies the slot */
+};
+
+static _Atomic bool g_service_violated = false;
+static struct { _Alignas(64) uint8_t bytes[65536]; } g_no_service_sentinel;
+
+void tor_integration_set_serve_onion(bool serve)
+{
+    atomic_store(&g_serve_onion, serve);
+}
+
+bool tor_integration_serves_onion(void)
+{
+    return atomic_load(&g_serve_onion);
+}
+
+bool tor_integration_service_violated(void)
+{
+    return atomic_load(&g_service_violated);
+}
+
+bool tor_integration_is_usable(void)
+{
+    if (atomic_load(&g_serve_onion))
+        return atomic_load(&g_tor_ready);
+    return atomic_load(&g_tor_dial_ready) &&
+           !atomic_load(&g_service_violated);
+}
+
+static int tor_service_claim_step(void *global, bool serve)
+{
+    if (serve || !global)
+        return TOR_CLAIM_NONE;
+    struct dynhost_service_head_compat *head = global;
+    void *sentinel = g_no_service_sentinel.bytes;
+    void *expected = NULL;
+    if (__atomic_compare_exchange_n(&head->hs_service, &expected, sentinel,
+                                    false, __ATOMIC_ACQ_REL,
+                                    __ATOMIC_ACQUIRE)) {
+        atomic_store(&g_claim_ms, tor_wall_ms());
+        return TOR_CLAIM_HELD;
+    }
+    return expected == sentinel ? TOR_CLAIM_HELD : TOR_CLAIM_LOST;
+}
+
+/* Verify the claim once; a lost slot marks the node violated. */
+static bool tor_service_verify(void *global)
+{
+    if (tor_service_claim_step(global, false) != TOR_CLAIM_LOST)
+        return true;
+    if (!atomic_exchange(&g_service_violated, true))
+        LOG_ERROR("tor", "private mode: dynhost registered an onion service "
+                        "despite the claim; refusing to dial or send and "
+                        "shutting Tor down");
+    atomic_store(&g_tor_dial_ready, false);
+    return false;
+}
+
+#ifdef ZCL_TESTING
+int tor_integration_service_step_for_test(void *global, bool serve)
+{
+    if (serve)
+        return tor_service_claim_step(global, true);
+    return tor_service_verify(global) ? TOR_CLAIM_HELD : TOR_CLAIM_LOST;
+}
+
+void tor_integration_service_reset_for_test(void)
+{
+    atomic_store(&g_serve_onion, true);
+    atomic_store(&g_service_violated, false);
+}
+#endif
+
+/* Order of events for a node that serves no onion. Tor is started with
+ * DisableNetwork 1. Both places that mint dynhost's service run only after a
+ * circuit has completed with the network enabled (mainloop.c: dynhost
+ * scheduled events and hs_service_callback), and Tor opens no socket while
+ * the network is disabled, so nothing can be minted or uploaded yet. The
+ * monitor claims the slot, verifies the claim, and only then clears
+ * DisableNetwork through the owning control connection. A claim that is
+ * already lost leaves the network disabled for good. */
+enum tor_gate {
+    TOR_GATE_WAIT = 0,    /* dynhost is not up yet; the network stays off */
+    TOR_GATE_OPEN = 1,    /* claim verified and the network enabled */
+    TOR_GATE_CLOSED = 2,  /* claim lost; the network was never enabled */
+};
+
+static enum tor_gate tor_network_gate_step(void *global, bool serve,
+                                           bool (*enable)(void),
+                                           bool *enabled)
+{
+    if (serve)
+        return TOR_GATE_OPEN;  /* the network was never disabled */
+    if (!global)
+        return TOR_GATE_WAIT;
+    if (!*enabled) {
+        if (tor_service_claim_step(global, false) != TOR_CLAIM_HELD) {
+            (void)tor_service_verify(global);  /* marks the node violated */
+            return TOR_GATE_CLOSED;
+        }
+        if (!tor_service_verify(global))
+            return TOR_GATE_CLOSED;
+        if (!enable())
+            return TOR_GATE_WAIT;
+        *enabled = true;
+        return TOR_GATE_OPEN;
+    }
+    return tor_service_verify(global) ? TOR_GATE_OPEN : TOR_GATE_CLOSED;
+}
+
+#ifdef ZCL_TESTING
+int tor_integration_network_gate_step_for_test(void *global, bool serve,
+                                               bool (*enable)(void),
+                                               bool *enabled)
+{
+    return (int)tor_network_gate_step(global, serve, enable, enabled);
+}
+#endif
+
+/* Clear DisableNetwork over the owning control connection, which Tor
+ * pre-authenticates. True only on Tor's "250 OK". */
+static bool tor_enable_network(void)
+{
+#ifdef _WIN32
+    LOG_FAIL("tor", "clearing DisableNetwork is not supported on this "
+                    "platform; the network stays disabled");
+#else
+    if (g_tor_control == TOR_CONTROL_SOCKET_NONE)
+        LOG_FAIL("tor", "no control connection to enable the network");
+    static const char cmd[] = "SETCONF DisableNetwork=0\r\n";
+    struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
+    (void)setsockopt(g_tor_control, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    if (send(g_tor_control, cmd, sizeof(cmd) - 1, 0) !=
+        (ssize_t)(sizeof(cmd) - 1))
+        LOG_FAIL("tor", "sending SETCONF DisableNetwork=0 failed");
+    char reply[128];
+    ssize_t n = recv(g_tor_control, reply, sizeof(reply) - 1, 0);
+    if (n < 3)
+        LOG_FAIL("tor", "no reply to SETCONF DisableNetwork=0");
+    reply[n] = '\0';
+    if (strncmp(reply, "250", 3) != 0)
+        LOG_FAIL("tor", "SETCONF DisableNetwork=0 refused: %s", reply);
+    int64_t now = tor_wall_ms();
+    atomic_store(&g_network_enabled_ms, now);
+    printf("Tor: claim verified at %lld ms, network enabled at %lld ms "
+           "(DisableNetwork 0)\n",
+           (long long)atomic_load(&g_claim_ms), (long long)now);
+    fflush(stdout);
+    return true;
+#endif
+}
+
+/* The monitor of a node that serves no onion: run the gate, then wait for
+ * Tor to bootstrap, then keep verifying for as long as Tor runs. */
+static void tor_monitor_without_service(const char *datadir)
+{
+    char log_path[1024];
+    if (!dynhost_get_global_service ||
+        !tor_log_path(datadir, log_path, sizeof(log_path)))
+        return;  /* Tor stub: there is no dynhost to claim */
+    bool enabled = false;
+    bool announced = false;
+    for (unsigned spin = 0; atomic_load(&g_tor_running); spin++) {
+        enum tor_gate gate = tor_network_gate_step(
+            dynhost_get_global_service(), false, tor_enable_network,
+            &enabled);
+        if (gate == TOR_GATE_CLOSED) {
+            tor_shutdown_event_loop_and_exit(0);
+            return;
+        }
+        if (enabled && !announced &&
+            tor_log_has_bootstrap_complete(log_path, g_tor_log_scan_from)) {
+            atomic_store(&g_tor_dial_ready, true);
+            printf("Tor: bootstrapped; outbound only, no onion service\n");
+            fflush(stdout);
+            announced = true;
+        }
+        if (!enabled || (spin & 0xFF) == 0)
+            thread_liveness_beat(&g_tor_monitor_liveness,
+                                 (int64_t)atomic_fetch_add(
+                                     &g_tor_monitor_poll_count, 1) + 1);
+        platform_sleep_ms(enabled ? 1000 : 1);
+    }
+}
+
 static void *tor_onion_monitor(void *arg)
 {
     (void)arg;
+    if (!atomic_load(&g_serve_onion)) {
+        tor_monitor_without_service(g_tor_datadir);
+        return NULL;
+    }
     if (read_onion_address(g_tor_datadir)) {
         atomic_store(&g_tor_ready, true);
 
@@ -842,8 +1081,9 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
     g_tor_log_scan_from = tor_log_scan_offset(datadir, tor_log_path);
     g_tor_rend_log_scan_from = tor_log_scan_offset(datadir, tor_rend_log_path);
 
-    if (!tor_write_torrc(datadir, p2p_port,
-                          tor_reduced_padding_for_platform()))
+    if (!tor_write_torrc_ex(datadir, p2p_port,
+                             tor_reduced_padding_for_platform(),
+                             !atomic_load(&g_serve_onion)))
         LOG_FAIL("tor", "failed to write torrc to %s", datadir);
 
 #ifdef ZCL_TESTING
@@ -899,6 +1139,13 @@ void tor_integration_stop(void)
     }
 
     tor_join_thread_bounded(g_tor_thread, "main", 5);
+#ifndef _WIN32
+    if (g_tor_control != TOR_CONTROL_SOCKET_NONE)
+        (void)close(g_tor_control);
+#endif
+    g_tor_control = TOR_CONTROL_SOCKET_NONE;
+    atomic_store(&g_network_enabled_ms, -1);
+    atomic_store(&g_claim_ms, -1);
     atomic_store(&g_tor_thread_done, false);
     thread_liveness_retire(&g_tor_liveness);
 }
@@ -917,7 +1164,8 @@ bool tor_integration_is_ready(void)
 
 bool tor_integration_is_dial_ready(void)
 {
-    return atomic_load(&g_tor_dial_ready);
+    return atomic_load(&g_tor_dial_ready) &&
+           !atomic_load(&g_service_violated);
 }
 
 #ifdef ZCL_TESTING

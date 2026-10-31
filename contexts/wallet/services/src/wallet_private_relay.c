@@ -12,6 +12,7 @@
 #include "net/connman.h"
 #include "net/net.h"
 #include "net/netaddr.h"
+#include "net/tor_integration.h"
 #include "platform/clock.h"
 #include "util/authority_receipt.h"
 #include "platform/file_stream.h"
@@ -126,7 +127,8 @@ struct tx_mempool *wpr_pool(struct wpr *r)
 
 bool wpr_peer_eligible(const struct p2p_node *n)
 {
-    return !n->inbound && net_addr_is_tor(&n->addr.svc.addr) &&
+    return !tor_integration_service_violated() && !n->inbound &&
+           net_addr_is_tor(&n->addr.svc.addr) &&
            n->state >= PEER_HANDSHAKE_COMPLETE && !n->disconnect &&
            n->relay_txes;
 }

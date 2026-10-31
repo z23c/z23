@@ -36,6 +36,7 @@
 #include "net/net.h"
 #include "net/netaddr.h"
 #include "net/onion_v3_address.h"
+#include "net/tor_integration.h"
 #include "net/protocol.h"
 #include "platform/time_compat.h"
 #include "primitives/transaction.h"
@@ -983,6 +984,36 @@ static int wprt_case_no_route(void)
                 onion && wprt_count(onion, "tx") == 1 &&
                     wprt_receivers(&f) == 1 && wprt_clearnet_silent(&f),
                 &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* Embedded Tor found a service registered in private mode: the one onion
+ * peer stays connected, but nothing is pushed until the node is restarted. */
+static int wprt_case_service_violated(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 1, false);
+    struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
+    struct uint256 id;
+    ok = ok && onion && wprt_rpc_send(&f, false, 10.0, &id);
+    struct { void *hs_service; } minted = { (void *)&f };
+    tor_integration_service_reset_for_test();
+    bool eligible_before = onion && wpr_peer_eligible(onion);
+    (void)tor_integration_service_step_for_test(&minted, false);
+    wprt_run(WPR_DELAY_MAX_MS + 1000, -1);
+    bool found = false;
+    wprt_report("a registered onion service makes the connected onion peer "
+                "ineligible and nothing is pushed",
+                ok && eligible_before && !wpr_peer_eligible(onion) &&
+                    wprt_all(&f, "tx") == 0 &&
+                    wprt_state(&id, &found) == WPR_WAITING_FOR_ROUTE && found,
+                &failures);
+    tor_integration_service_reset_for_test();
+    wprt_run(WPR_DELAY_MAX_MS + 1000, -1);
+    wprt_report("with the violation cleared the same send reaches the peer",
+                ok && onion && wprt_count(onion, "tx") == 1, &failures);
     wprt_close(&f);
     return failures;
 }
@@ -2399,6 +2430,7 @@ int test_wallet_private_relay(void)
     failures += wprt_case_delay();
     failures += wprt_case_one_peer_per_attempt();
     failures += wprt_case_no_route();
+    failures += wprt_case_service_violated();
     failures += wprt_case_seen_and_block();
     failures += wprt_case_expiry_margin();
     failures += wprt_case_expiry_confirmed();

@@ -837,3 +837,7 @@ later lane flips it HARD.
 - 2026-11-02T15:31:33Z — REASON: Follow-up to the 2026-11-02 -bind listener change, same behaviour scope: accept HTTPS and redirect clients into struct sockaddr_storage so an IPv6 -bind listener accepts on every platform (https_server.c accept loops); no consensus predicate; lead-run under the owner grant of 2026-10-30
   old ROOT: bd48b1475612a54c9a4f6e6406bb4dbae0d46b8021b2f6f9f5fd0e654dcb334c
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T17:37:41Z — REASON: Private wallet broadcast runs no onion service: start embedded Tor with DisableNetwork, claim dynhost hs_service, verify, then enable the network; default unchanged for other nodes. Owner grant 2026-10-30 to unseal core for reviewed, behaviour-scoped changes; no consensus predicate touched.
+  old ROOT: d9bd425d5f66793bdf253ce2717af74e90aa19681b561cd2be83d5d37a6048e8
+  by: owner unseal ritual (make core-unseal)

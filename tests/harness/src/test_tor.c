@@ -1308,6 +1308,177 @@ static int test_tor_write_torrc_reduced_padding(void)
     return failures;
 }
 
+/* Stand-in for the head of dynhost's service record. */
+struct test_service_head {
+    void *hs_service;
+};
+
+/* A node that serves no onion claims dynhost's service slot; a node that does
+ * leaves it to dynhost. Drives the shipped claim and verification step over a
+ * stand-in for dynhost's head. */
+static int test_tor_no_service_claim(void)
+{
+    int failures = 0;
+    printf("test_tor_no_service_claim: ");
+    struct test_service_head head = { NULL };
+    tor_integration_service_reset_for_test();
+    int serving = tor_integration_service_step_for_test(&head, true);
+    bool control = serving == 0 && head.hs_service == NULL;
+    int held = tor_integration_service_step_for_test(&head, false);
+    bool claimed = held == 1 && head.hs_service != NULL &&
+                   !tor_integration_service_violated();
+    int again = tor_integration_service_step_for_test(&head, false);
+    bool stable = again == 1 && !tor_integration_service_violated();
+    struct test_service_head minted = { (void *)&head };
+    tor_integration_set_dial_ready_for_test(true);
+    int lost = tor_integration_service_step_for_test(&minted, false);
+    bool fail_closed = lost == 2 && tor_integration_service_violated() &&
+                       !tor_integration_is_dial_ready();
+    tor_integration_set_dial_ready_for_test(false);
+    tor_integration_service_reset_for_test();
+    if (!(control && claimed && stable && fail_closed)) {
+        printf("FAIL (control=%d claimed=%d stable=%d fail_closed=%d "
+               "lost=%d violated=%d dial_ready=%d)\n", control, claimed,
+               stable, fail_closed, lost, tor_integration_service_violated(),
+               tor_integration_is_dial_ready());
+        failures++;
+    } else {
+        printf("OK\n");
+    }
+    return failures;
+}
+
+static int g_gate_enable_calls;
+static bool g_gate_enable_saw_claim;
+static bool g_gate_enable_result = true;
+static struct test_service_head *g_gate_head;
+
+static bool gate_enable(void)
+{
+    g_gate_enable_calls++;
+    g_gate_enable_saw_claim = g_gate_head && g_gate_head->hs_service != NULL;
+    return g_gate_enable_result;
+}
+
+static bool torrc_has_line(const char *dir, const char *line)
+{
+    char path[1100], buf[2048];
+    snprintf(path, sizeof(path), "%s/torrc", dir);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return false;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return strstr(buf, line) != NULL;
+}
+
+/* The network stays disabled until the claim on dynhost's service slot has
+ * verified, and stays disabled when the claim is lost. A node that serves an
+ * onion is untouched: its torrc has no DisableNetwork and the gate never
+ * enables anything. */
+static int test_tor_network_gate_order(void)
+{
+    int failures = 0;
+    printf("test_tor_network_gate_order: ");
+    struct test_service_head head = { NULL };
+    bool enabled = false;
+    g_gate_head = &head;
+    g_gate_enable_calls = 0;
+    g_gate_enable_result = true;
+    tor_integration_service_reset_for_test();
+
+    int early = tor_integration_network_gate_step_for_test(
+        NULL, false, gate_enable, &enabled);
+    bool waits = early == 0 && g_gate_enable_calls == 0 && !enabled;
+
+    struct test_service_head stranger = { (void *)&head };
+    bool lost_enabled = false;
+    g_gate_head = (void *)&stranger;
+    int lost = tor_integration_network_gate_step_for_test(
+        &stranger, false, gate_enable, &lost_enabled);
+    bool stays_off = lost == 2 && g_gate_enable_calls == 0 &&
+                     !lost_enabled && tor_integration_service_violated();
+    tor_integration_service_reset_for_test();
+
+    g_gate_head = &head;
+    g_gate_enable_result = false;
+    int refused = tor_integration_network_gate_step_for_test(
+        &head, false, gate_enable, &enabled);
+    bool retries = refused == 0 && !enabled && g_gate_enable_calls == 1;
+    g_gate_enable_result = true;
+    g_gate_enable_calls = 0;
+    g_gate_enable_saw_claim = false;
+    int opened = tor_integration_network_gate_step_for_test(
+        &head, false, gate_enable, &enabled);
+    bool after_claim = opened == 1 && enabled && g_gate_enable_calls == 1 &&
+                       g_gate_enable_saw_claim;
+
+    struct test_service_head untouched = { NULL };
+    bool serve_enabled = false;
+    g_gate_enable_calls = 0;
+    int serving = tor_integration_network_gate_step_for_test(
+        &untouched, true, gate_enable, &serve_enabled);
+    bool control = serving == 1 && g_gate_enable_calls == 0 &&
+                   !serve_enabled && untouched.hs_service == NULL;
+    tor_integration_service_reset_for_test();
+
+    char tmpdir[PATH_MAX];
+    bool torrc_ok = test_mkdtemp(tmpdir, sizeof tmpdir, "zcl_test_torgate") &&
+        tor_write_torrc_ex(tmpdir, 8033, false, true) &&
+        torrc_has_line(tmpdir, "DisableNetwork 1") &&
+        tor_write_torrc(tmpdir, 8033, false) &&
+        !torrc_has_line(tmpdir, "DisableNetwork");
+    remove_tree(tmpdir);
+
+    if (!(waits && stays_off && retries && after_claim && control &&
+          torrc_ok)) {
+        printf("FAIL (waits=%d stays_off=%d retries=%d after_claim=%d "
+               "control=%d torrc=%d)\n", waits, stays_off, retries,
+               after_claim, control, torrc_ok);
+        failures++;
+    } else {
+        printf("OK\n");
+    }
+    return failures;
+}
+
+/* Tor's bootstrap line, and only it, makes a no-service node dial-ready. */
+static int test_tor_log_has_bootstrap_complete(void)
+{
+    int failures = 0;
+    printf("test_tor_log_has_bootstrap_complete: ");
+    char tmpdir[PATH_MAX];
+    if (!test_mkdtemp(tmpdir, sizeof tmpdir, "zcl_test_torboot")) {
+        printf("FAIL (mkdtemp)\n");
+        return 1;
+    }
+    char path[1100];
+    snprintf(path, sizeof(path), "%s/boot.log", tmpdir);
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        printf("FAIL (open)\n");
+        remove_tree(tmpdir);
+        return 1;
+    }
+    fputs("Jun 11 [notice] Bootstrapped 100% (done): Done\n", f);
+    long old_end = ftell(f);
+    fputs("Jun 12 [notice] Bootstrapped 80% (ap_conn): Connecting\n", f);
+    fclose(f);
+    bool seen = tor_log_has_bootstrap_complete(path, 0);
+    bool only_new = !tor_log_has_bootstrap_complete(path, old_end);
+    bool missing = !tor_log_has_bootstrap_complete("/nonexistent/tor.log", 0);
+    remove_tree(tmpdir);
+    if (!(seen && only_new && missing)) {
+        printf("FAIL (seen=%d only_new=%d missing=%d)\n", seen, only_new,
+               missing);
+        failures++;
+    } else {
+        printf("OK\n");
+    }
+    return failures;
+}
+
 int test_tor(void)
 
 {
@@ -1341,6 +1512,9 @@ int test_tor(void)
     failures += test_tor_set_address_null_clears();
     failures += test_tor_log_last_ephemeral_address();
     failures += test_tor_log_has_descriptor_publication();
+    failures += test_tor_log_has_bootstrap_complete();
+    failures += test_tor_no_service_claim();
+    failures += test_tor_network_gate_order();
 
     /* dynhost reassembly admission cap (vendored handlers under test) */
     failures += test_dynhost_reassembly_cap();

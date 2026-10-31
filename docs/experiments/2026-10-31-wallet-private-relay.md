@@ -177,12 +177,26 @@ notes of a recorded shielded send again; held sends are reported as held by the
 send callers; a seen-back send keeps a status until mined; `walletbroadcast`
 in `z23.conf` is honored and an unknown value stops the boot; private mode
 runs no onion service directory or request handler and refuses
-`-onion-persist` and `-onion-rotate`.
+`-onion-persist` and `-onion-rotate`. Embedded Tor starts with the network
+disabled, the dynhost service slot is claimed and verified, and only then is
+the network enabled; a lost claim keeps the network off and refuses sends
+(`test_tor`: claim, gate order, bootstrap line).
 
 Not covered by a test: the refusal guards on the vault, ZSLP, ZDIR, ZNAM, ZID,
 blog, swap and yardsale call sites are exercised only through the wallet
 commit gate where they reach it; `wpb_nullifiers_unseen` is covered only for
 the history-incomplete branch (hold); `wallet_view_send` and the messaging
 reply are not driven by a test; no live Tor run was done for these items.
+
+Live embedded Tor, 2026-10-31T19:27Z, isolated regtest datadir, built
+binary, `-tor -onlynet=onion -walletbroadcast=private`: torrc carried
+`DisableNetwork 1`; the log recorded `claim verified at 1793474853618 ms,
+network enabled at 1793474853631 ms` (claim 13 ms before the network);
+Tor bootstrapped to 100% over the real network; dynhost's first activation
+check found its slot occupied (`attempted=0`, non-null service) and no line
+`Activating dynhost ephemeral service` appeared in `tor.log` or
+`tor-rend.log`; `tor_data/onion_service` stayed empty; the only listeners
+were the loopback SOCKS, RPC and P2P ports. The run did not exercise a lost
+claim: that path is covered by `test_tor` with a stand-in slot.
 The reservation test builds a transaction whose proofs are not valid, so it
 shows the reservation, not an accepted spend.

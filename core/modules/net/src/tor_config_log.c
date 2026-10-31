@@ -26,6 +26,12 @@
 bool tor_write_torrc(const char *datadir, uint16_t p2p_port,
                     bool reduced_padding)
 {
+    return tor_write_torrc_ex(datadir, p2p_port, reduced_padding, false);
+}
+
+bool tor_write_torrc_ex(const char *datadir, uint16_t p2p_port,
+                       bool reduced_padding, bool network_disabled)
+{
     char torrc_path[1024];
     int pn = snprintf(torrc_path, sizeof(torrc_path), "%s/torrc", datadir);
     if (pn < 0 || (size_t)pn >= sizeof(torrc_path))
@@ -46,9 +52,10 @@ bool tor_write_torrc(const char *datadir, uint16_t p2p_port,
          * on their own and the node never shuts down. Tor is ended by
          * tor_integration_stop(), not by a signal. */
         "__DisableSignalHandlers 1\n"
-        "%s",
+        "%s%s",
         bootstrap_port, datadir, datadir, datadir,
-        reduced_padding ? "ReducedConnectionPadding 1\n" : "");
+        reduced_padding ? "ReducedConnectionPadding 1\n" : "",
+        network_disabled ? "DisableNetwork 1\n" : "");
     if (bn < 0 || (size_t)bn >= sizeof(body))
         LOG_FAIL("tor", "torrc for %s does not fit its %zu-byte buffer",
                  datadir, sizeof(body));
@@ -154,6 +161,26 @@ bool tor_log_last_ephemeral_address(const char *log_path, long scan_from,
         if (tor_log_copy_ephemeral_token(p, out, out_size))
             found = true; /* the latest current-boot line supersedes */
     }
+    fclose(f);
+    return found;
+}
+
+bool tor_log_has_bootstrap_complete(const char *log_path, long scan_from)
+{
+    if (!log_path)
+        return false;
+    FILE *f = fopen(log_path, "r");
+    if (!f)
+        return false;
+    if (scan_from > 0) {
+        if (fseek(f, 0, SEEK_END) != 0 || ftell(f) < scan_from ||
+            fseek(f, scan_from, SEEK_SET) != 0)
+            rewind(f);
+    }
+    char line[512];
+    bool found = false;
+    while (!found && fgets(line, sizeof(line), f))
+        found = strstr(line, "Bootstrapped 100%") != NULL;
     fclose(f);
     return found;
 }

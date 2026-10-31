@@ -587,6 +587,7 @@ bool boot_onion_tor_start_early(const struct app_context *app)
     tor_integration_configure_identity(app->onion_persist, app->onion_rotate);
     /* Private wallet broadcast connects outbound only: no onion service
      * directory and no inbound request handler. */
+    tor_integration_set_serve_onion(app->wallet_broadcast != 1);
     if (app->wallet_broadcast != 1) {
         onion_service_start(app->datadir);
         tor_integration_set_handler(onion_request_adapter, NULL);

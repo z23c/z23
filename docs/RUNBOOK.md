@@ -761,9 +761,16 @@ cannot select them.
 A phone or node in private mode serves no inbound peers: private mode runs no
 onion service directory or request handler, and refuses `-onion-persist` and
 `-onion-rotate`. `-walletbroadcast` is also read from `z23.conf`; an unknown
-value stops the boot. The embedded Tor library inside the sealed core may
-still register its own ephemeral onion service; that is not changed here (see
-the experiment).
+value stops the boot. Embedded Tor starts with `DisableNetwork 1`: it opens no
+socket and builds no circuit, so it cannot mint or publish a service. The node
+then claims the slot where Tor's directory-host feature would register its
+throwaway onion service, verifies the claim, and only then clears
+`DisableNetwork` over Tor's own control connection. The claim cannot be placed
+before Tor allocates that slot, so the guarantee is the order of the network
+enable, not the claim alone. If a service is ever found registered, Tor is shut
+down, dialling stops and private sends are refused and held. The log line
+`Tor: claim verified at ... ms, network enabled at ... ms` records the order;
+no `ADD_ONION`, descriptor or inbound connection exists in this mode.
 
 What it does not hide: the first onion peer learns that this node originated
 the transaction; a resend to a second peer lets the two peers correlate that

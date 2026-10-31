@@ -69,6 +69,20 @@ bool tor_integration_is_dial_ready(void);
 /* Check if Tor was started (may still be bootstrapping). */
 bool tor_integration_is_enabled(void);
 
+/* Whether this node runs an onion service of its own (default true). A node
+ * that only dials out, such as private wallet broadcast, calls
+ * tor_integration_set_serve_onion(false) before tor_integration_start(): no
+ * service is created, no descriptor is published, and the node is usable once
+ * Tor has bootstrapped. If dynhost registers a service anyway,
+ * tor_integration_service_violated() turns true, dialling stops
+ * (tor_integration_is_dial_ready() is false) and Tor is shut down. */
+void tor_integration_set_serve_onion(bool serve);
+bool tor_integration_serves_onion(void);
+bool tor_integration_service_violated(void);
+/* Tor can carry this node's traffic: its onion is published when it serves
+ * one, otherwise Tor has bootstrapped and no service was registered. */
+bool tor_integration_is_usable(void);
+
 /* Operator asked for onion (-tor or onion-node profile). Sticky until
  * tor_integration_stop(). Distinct from is_enabled(): a requested onion
  * that never started or whose thread died must not look like "Tor off". */
@@ -114,6 +128,10 @@ const char *tor_onion_port_map_state_name(
  * Circuit padding stays at Tor's default on purpose: it protects onion
  * circuit setup. false writes the four base lines unchanged.
  * Exposed for testing — normally called by tor_integration_start(). */
+/* The same, optionally with `DisableNetwork 1`: Tor then opens no socket and
+ * builds no circuit until a controller clears it. */
+bool tor_write_torrc_ex(const char *datadir, uint16_t p2p_port,
+                        bool reduced_padding, bool network_disabled);
 bool tor_write_torrc(const char *datadir, uint16_t p2p_port,
                      bool reduced_padding);
 
@@ -134,6 +152,10 @@ bool tor_log_last_ephemeral_address(const char *log_path, long scan_from,
  * read_onion_address() before g_tor_ready flips. */
 bool tor_log_has_descriptor_publication(const char *log_path,
                                         long scan_from);
+
+/* True when THIS boot's tor.log (from scan_from) records Tor's "Bootstrapped
+ * 100%" line: circuits can be built, so outbound dials can start. */
+bool tor_log_has_bootstrap_complete(const char *log_path, long scan_from);
 
 /* The two Tor log destinations, relative to the datadir.
  *
@@ -274,6 +296,20 @@ typedef int (*tor_fetch_dispatch_fn)(const char *onion_address,
                                      const uint8_t *body, size_t body_len,
                                      tor_fetch_callback_fn callback,
                                      void *ctx, int timeout_secs);
+
+#ifdef ZCL_TESTING
+/* Test seam: one claim or verification pass over a dynhost head. Returns 0
+ * when serving, 1 when the slot holds the sentinel, 2 when a real service
+ * occupies it (which also marks the node violated). */
+int tor_integration_service_step_for_test(void *global, bool serve);
+/* Test seam: one pass of the network gate. `enable` stands in for clearing
+ * DisableNetwork; `*enabled` records that it ran. Returns 0 waiting, 1 open,
+ * 2 closed (claim lost). */
+int tor_integration_network_gate_step_for_test(void *global, bool serve,
+                                               bool (*enable)(void),
+                                               bool *enabled);
+void tor_integration_service_reset_for_test(void);
+#endif
 
 #ifdef ZCL_TESTING
 /* Test seam: force the outbound-dial readiness flag without a Tor client. */
