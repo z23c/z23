@@ -336,18 +336,25 @@ static int wallet_scan_count_matched(const bool *file_has_match, int num_files)
     return matched_files;
 }
 
-int wallet_birthday_scan_floor(struct node_db *ndb)
+enum wallet_birthday_state wallet_birthday_check(
+    struct node_db *ndb, const struct active_chain *chain, int *floor)
 {
     int64_t birthday = 0;
     uint8_t hash[32];
-    struct db_block at;
-    if (!db_wallet_birthday_get(ndb, &birthday, hash) || birthday > INT_MAX ||
-        !db_block_find_by_height(ndb, (int)birthday, &at) ||
-        memcmp(at.hash, hash, sizeof(hash)) != 0)
-        return 0;
-    return birthday > WALLET_SCAN_BIRTHDAY_MARGIN
-               ? (int)birthday - WALLET_SCAN_BIRTHDAY_MARGIN : 0;
+    *floor = 0;
+    if (!db_wallet_birthday_get(ndb, &birthday, hash))
+        return WALLET_BIRTHDAY_NONE;
+    if (birthday <= WALLET_BIRTHDAY_MARGIN || birthday > INT_MAX)
+        return WALLET_BIRTHDAY_CHANGED;
+    int at = (int)birthday - WALLET_BIRTHDAY_MARGIN;
+    const struct block_index *bi = chain ? active_chain_at(chain, at) : NULL;
+    if (!bi || !bi->phashBlock || bi->nHeight != at ||
+        memcmp(bi->phashBlock->data, hash, sizeof(hash)) != 0)
+        return WALLET_BIRTHDAY_CHANGED;
+    *floor = at;
+    return WALLET_BIRTHDAY_VALID;
 }
+
 /* --- Main entry point --- */
 
 int wallet_scan_blocks(struct node_db *ndb,

@@ -69,17 +69,21 @@ bool db_sapling_key_find_by_ivk(struct node_db *ndb, const uint8_t ivk[32],
                                 struct db_sapling_key *out);
 int db_sapling_key_count(struct node_db *ndb);
 
-/* Wallet birthday: the active-chain tip a wallet was created at, as a height
- * and the hash of the block at that height. No block below it can hold a
- * payment to the wallet unless the chain it was created on is replaced, so the
- * first scan starts a margin below it, and only while the hash is still the
- * active block at that height. Absent for wallets created before birthdays and
- * for restored wallets, which scan from the beginning. Written once, with the
- * wallet. */
+/* Blocks kept below a wallet's birthday tip. */
+#define WALLET_BIRTHDAY_MARGIN 100
+
+/* Wallet birthday: the tip height a wallet was created at, and the hash of the
+ * block WALLET_BIRTHDAY_MARGIN below it (the floor block). Every block up to
+ * the floor existed when the wallet was made, so none can pay it; the first
+ * scan starts at the floor, and only while the active chain holds that exact
+ * block (which proves every block below it is unchanged). The tip need not be
+ * on the active chain: the floor block is what is checked. Absent for wallets
+ * created before birthdays, for restored wallets and for chains of at most the
+ * margin; those scan from the beginning. Written once, with the wallet. */
 bool db_wallet_birthday_get(struct node_db *ndb, int64_t *height,
-                            uint8_t hash[32]);
+                            uint8_t floor_hash[32]);
 bool db_wallet_birthday_set(struct node_db *ndb, int64_t height,
-                            const uint8_t hash[32]);
+                            const uint8_t floor_hash[32]);
 
 /* Wallet seed (singleton). NOTE: no db_wallet_seed_save — single writer
  * is wallet_sqlite (wallet_sqlite_write_sapling_seed). */

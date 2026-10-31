@@ -411,19 +411,24 @@ static struct zcl_result wrc_load_passphrase(
     return ZCL_OK;
 }
 
-/* Store the active-chain tip this datadir holds (status >= 3, the same rows
- * the chain projection reads; reorganised-away rows above it do not count) and
- * its hash as the wallet birthday. No tip
- * (a datadir with no chain yet) records nothing and the wallet scans from
- * the beginning, which is slower and never misses a payment. */
+/* Store the birthday: the highest connected block (status >= 3) this datadir
+ * holds, and the hash of the block WALLET_BIRTHDAY_MARGIN below it. Rows above
+ * a rewound tip keep their status, so the tip itself may be stale; that is
+ * safe because every row here existed before the wallet did, and boot checks
+ * the floor block, not the tip, against the active chain. A datadir with no
+ * chain, or one no longer than the margin, records nothing and the wallet
+ * scans from the beginning, which is slower and never misses a payment. */
 static void wrc_record_birthday(const struct wallet_recovery_request *req,
                                 struct node_db *ndb,
                                 struct wallet_recovery_report *out)
 {
-    struct db_block at;
+    struct db_block floor_block;
     int tip = req->record_birthday ? db_block_max_height(ndb) : -1;
-    out->birthday_recorded = tip > 0 && db_block_find_by_height(ndb, tip, &at) &&
-                             db_wallet_birthday_set(ndb, tip, at.hash);
+    out->birthday_recorded =
+        tip > WALLET_BIRTHDAY_MARGIN &&
+        db_block_find_by_height(ndb, tip - WALLET_BIRTHDAY_MARGIN,
+                                &floor_block) &&
+        db_wallet_birthday_set(ndb, tip, floor_block.hash);
     out->birthday_height = out->birthday_recorded ? tip : 0;
 }
 

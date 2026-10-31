@@ -119,9 +119,37 @@ int boot_wallet_catch_up(struct wallet *w, const struct active_chain *chain,
     return found;
 }
 
+#define BOOT_BIRTHDAY_CHANGED_BLOCKER "WALLET_BIRTHDAY_CHAIN_CHANGED"
+
+/* The chain the wallet was made on no longer holds its floor block, so nothing
+ * below it can be assumed. Mark the whole chain unread: until a catch-up reads
+ * it the wallet claims no scanned-through height, so a tip that advances over
+ * the gap cannot stand in for the blocks never read. */
+static void boot_wallet_birthday_changed(struct wallet *w)
+{
+    zcl_mutex_lock(&w->cs);
+    w->scan_retry.pending = true;
+    w->scan_retry.from = 0;
+    w->scan_retry.since = GetTime();
+    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
+             BOOT_BIRTHDAY_CHANGED_BLOCKER);
+    zcl_mutex_unlock(&w->cs);
+    LOG_WARN("wallet", "%s: the active chain does not hold this wallet's "
+             "birthday block; the whole chain is rescanned, not just the "
+             "range above it", BOOT_BIRTHDAY_CHANGED_BLOCKER);
+}
+
 int boot_wallet_boot_catch_up(struct wallet *w, const struct active_chain *chain,
                               const char *datadir, struct node_db *ndb)
 {
-    w->initial_scan_floor = wallet_birthday_scan_floor(ndb);
+    int floor = 0;
+    w->initial_scan_floor = 0;
+    if (w->best_block_height == 0 && !w->scan_retry.pending) {
+        enum wallet_birthday_state st = wallet_birthday_check(ndb, chain,
+                                                              &floor);
+        w->initial_scan_floor = st == WALLET_BIRTHDAY_VALID ? floor : 0;
+        if (st == WALLET_BIRTHDAY_CHANGED)
+            boot_wallet_birthday_changed(w);
+    }
     return boot_wallet_catch_up(w, chain, datadir, NULL);
 }

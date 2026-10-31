@@ -63,8 +63,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/prctl.h>
 #include <sys/resource.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -493,56 +495,100 @@ static int t_phrase_not_captured_and_encrypted(void)
 
 #define WCR_BLOCK_INSERT                                                    \
     "INSERT INTO blocks(hash,height,prev_hash,version,merkle_root,time,"    \
-    "bits,nonce,solution,chain_work,status) VALUES(%s,%d,zeroblob(32),4,"   \
+    "bits,nonce,solution,chain_work,status) VALUES(X'%s',%d,zeroblob(32),4,"\
     "zeroblob(32),0,0,zeroblob(32),zeroblob(1),zeroblob(32),%d)"
-#define WCR_HASH_ZERO "zeroblob(32)"
-#define WCR_HASH_ONE  "X'0101010101010101010101010101010101010101010101010101010101010101'"
-#define WCR_HASH_TWO  "X'0202020202020202020202020202020202020202020202020202020202020202'"
 
-static bool wcr_block(const char *dir, const char *hash, int height, int status)
+/* A block whose 32-byte hash is `fill` repeated. */
+static bool wcr_block(const char *dir, uint8_t fill, int height, int status)
 {
-    char sql[512];
-    snprintf(sql, sizeof(sql), WCR_BLOCK_INSERT, hash, height, status);
+    char hex[65], sql[512];
+    for (int i = 0; i < 32; i++)
+        snprintf(hex + 2 * i, 3, "%02x", fill);
+    snprintf(sql, sizeof(sql), WCR_BLOCK_INSERT, hex, height, status);
     return wcr_sql(dir, sql);
+}
+
+/* An in-memory active chain of heights 0..n-1. Every block hashes to 0x01
+ * repeated except the one at `special`, which hashes to `fill` repeated. */
+struct wcr_chain {
+    struct active_chain chain;
+    struct block_index *idx;
+    struct block_index **ptr;
+};
+
+static bool wcr_chain_make(struct wcr_chain *k, int n, int special,
+                           uint8_t fill)
+{
+    active_chain_init(&k->chain);
+    k->idx = calloc((size_t)n, sizeof(*k->idx));
+    k->ptr = calloc((size_t)n, sizeof(*k->ptr));
+    if (!k->idx || !k->ptr)
+        return false;
+    for (int i = 0; i < n; i++) {
+        block_index_init(&k->idx[i]);
+        k->idx[i].nHeight = i;
+        memset(k->idx[i].hashBlock.data, i == special ? fill : 1, 32);
+        k->idx[i].phashBlock = &k->idx[i].hashBlock;
+        k->ptr[i] = &k->idx[i];
+    }
+    free(k->chain.chain);
+    k->chain.chain = k->ptr;
+    k->chain.height = n - 1;
+    k->chain.capacity = n;
+    return true;
+}
+
+static void wcr_chain_free(struct wcr_chain *k)
+{
+    k->chain.chain = NULL;
+    k->chain.capacity = 0;
+    k->chain.height = 0;
+    active_chain_free(&k->chain);
+    free(k->idx);
+    free(k->ptr);
 }
 
 /* A scan of 0..500 must be asked for its whole range, whatever the birthday:
  * a transparent scan, a rescan and the full scan an imported key triggers
  * cover every block, because a key imported later can own a coin from before
  * the wallet was made. The scanner reaches its no-keys path (and not the
- * empty-range one a raised start of 900 would hit) only when the start stays 0. */
-static bool scan_is_not_raised(struct node_db *ndb)
+ * empty-range one a raised start of 900 would hit) only when the start stays
+ * 0, so the chain given holds the birthday's floor block. */
+static bool scan_is_not_raised(struct node_db *ndb, struct wcr_chain *k)
 {
-    struct active_chain chain;
-    active_chain_init(&chain);
     struct wallet *w = calloc(1, sizeof(*w));
     struct wcr_cap cap;
     bool ok = w && wcr_cap_begin(&cap, stdout, NULL);
     if (ok)
-        (void)wallet_scan_blocks(ndb, &chain, w, "/nonexistent", 0, 500);
+        (void)wallet_scan_blocks(ndb, &k->chain, w, "/nonexistent", 0, 500);
     char log[4096] = {0};
     ok = wcr_cap_end(&cap, log, sizeof(log)) && ok;
-    active_chain_free(&chain);
     free(w);
     return ok && strstr(log, "range empty") == NULL &&
            strstr(log, "no wallet keys") != NULL;
 }
 
-/* boot_wallet_boot_catch_up sets the wallet floor from the datadir before it
- * scans; an empty chain makes the scan itself a no-op. */
-static bool boot_floor_is(struct node_db *ndb, int want)
+/* What boot_wallet_boot_catch_up does to a wallet that has `best` scanned,
+ * against `k`. The chains here reach past 1000 blocks, so the catch-up defers
+ * and the wallet is the observation. */
+static struct wallet *wcr_boot_wallet(struct node_db *ndb,
+                                      struct wcr_chain *k, int best)
 {
-    struct active_chain chain;
-    active_chain_init(&chain);
     struct wallet *w = calloc(1, sizeof(*w));
-    if (w)
-        w->initial_scan_floor = -1;
-    if (w)
-        (void)boot_wallet_boot_catch_up(w, &chain, "/nonexistent", ndb);
-    bool ok = w && w->initial_scan_floor == want;
-    active_chain_free(&chain);
-    free(w);
-    return ok;
+    if (!w)
+        return NULL;
+    wallet_init(w);
+    w->best_block_height = best;
+    w->initial_scan_floor = -1;
+    (void)boot_wallet_boot_catch_up(w, &k->chain, "/nonexistent", ndb);
+    return w;
+}
+
+static bool wcr_marked_unread(const struct wallet *w)
+{
+    return w && w->scan_retry.pending && w->scan_retry.from == 0 &&
+           strcmp(w->scan_retry.blocker, "WALLET_BIRTHDAY_CHAIN_CHANGED") == 0 &&
+           wallet_scanned_through_height(w) < 0;
 }
 
 static int birthday_stored(const char *dir, const struct wcr_run *run)
@@ -552,49 +598,137 @@ static int birthday_stored(const char *dir, const struct wcr_run *run)
     json_init(&v);
     bool parsed = json_read(&v, wcr_doc(run), strlen(wcr_doc(run)));
     const struct json_value *data = json_get(&v, "data");
-    WCR_CHECK("the reply names the birthday: the active tip, not a stale row",
+    WCR_CHECK("the reply names the birthday: the connected tip at 1000",
               parsed && json_get_bool_or(data, "birthday_recorded", false) &&
               json_get_int(json_get(data, "birthday_height")) == 1000);
     json_free(&v);
 
     struct node_db ndb;
     int64_t b = 0;
-    uint8_t hash[32], zero[32] = {0};
+    uint8_t hash[32], want[32];
+    memset(want, 0x09, sizeof(want));
     bool open = wcr_open(&ndb, dir);
-    WCR_CHECK("a row above the tip left by a reorganisation is not the birthday",
+    WCR_CHECK("the stored birthday is the tip height",
               open && db_wallet_birthday_get(&ndb, &b, hash) && b == 1000);
-    WCR_CHECK("the birthday stores the hash of the tip block",
-              open && memcmp(hash, zero, 32) == 0);
-    WCR_CHECK("the first scan of the wallet starts at the birthday less 100",
-              open && wallet_birthday_scan_floor(&ndb) ==
-                          1000 - WALLET_SCAN_BIRTHDAY_MARGIN);
-    WCR_CHECK("boot hands its first catch-up the same floor",
-              open && boot_floor_is(&ndb, 1000 - WALLET_SCAN_BIRTHDAY_MARGIN));
+    WCR_CHECK("it stores the hash of the block 100 below the tip, not the tip",
+              open && memcmp(hash, want, 32) == 0);
+    struct wcr_chain k;
+    bool made = open && wcr_chain_make(&k, 1002, 900, 0x09);
     WCR_CHECK("wallet_scan_blocks never raises a start: a key imported later "
-              "scans its whole range", open && scan_is_not_raised(&ndb));
+              "scans its whole range", made && scan_is_not_raised(&ndb, &k));
+    if (made)
+        wcr_chain_free(&k);
     if (open)
         node_db_close(&ndb);
     return failures;
 }
 
-/* The birthday block leaves the active chain: its row is demoted and another
- * block takes the height. The birthday no longer describes the chain. */
-static int birthday_reorganised(const char *dir)
+/* What boot does with a wallet that has `best` scanned, per chain. */
+static int birthday_boot_wallets(struct node_db *ndb, struct wcr_chain *same,
+                                 struct wcr_chain *other)
+{
+    int failures = 0;
+    struct wallet *a = wcr_boot_wallet(ndb, same, 0);
+    WCR_CHECK("boot gives the first catch-up of a valid birthday the floor",
+              a && a->initial_scan_floor == 900 && !wcr_marked_unread(a));
+    struct wallet *b = wcr_boot_wallet(ndb, other, 0);
+    WCR_CHECK("a replaced birthday block marks the whole chain unread: the "
+              "catch-up defers on a long chain and records it",
+              b && b->initial_scan_floor == 0 && wcr_marked_unread(b));
+    struct wallet *c = wcr_boot_wallet(ndb, other, 7);
+    WCR_CHECK("a wallet that has already scanned is left to its scan height",
+              c && c->initial_scan_floor == 0 && !wcr_marked_unread(c));
+    struct wallet *all[] = { a, b, c };
+    for (size_t i = 0; i < 3; i++)
+        if (all[i]) {
+            wallet_free(all[i]);
+            free(all[i]);
+        }
+    return failures;
+}
+
+/* The active chain against the stored birthday of the datadir `dir` (tip 1000,
+ * floor block 900 hashing to 0x09). */
+static int birthday_chain_checks(const char *dir)
 {
     int failures = 0;
     struct node_db ndb;
+    struct wcr_chain same, other, shorter;
     bool open = wcr_open(&ndb, dir);
-    int before = open ? wallet_birthday_scan_floor(&ndb) : -1;
+    bool made = open && wcr_chain_make(&same, 1002, 900, 0x09) &&
+                wcr_chain_make(&other, 1002, 900, 0x77) &&
+                wcr_chain_make(&shorter, 800, 700, 0x09);
+    int floor = -1;
+    WCR_CHECK("a chain holding the floor block makes the birthday valid at 900",
+              made && wallet_birthday_check(&ndb, &same.chain, &floor) ==
+                          WALLET_BIRTHDAY_VALID && floor == 900);
+    WCR_CHECK("a chain with another block at 900 changes the birthday",
+              made && wallet_birthday_check(&ndb, &other.chain, &floor) ==
+                          WALLET_BIRTHDAY_CHANGED);
+    WCR_CHECK("a chain shorter than the floor changes the birthday",
+              made && wallet_birthday_check(&ndb, &shorter.chain, &floor) ==
+                          WALLET_BIRTHDAY_CHANGED);
+    if (made) {
+        failures += birthday_boot_wallets(&ndb, &same, &other);
+        wcr_chain_free(&same);
+        wcr_chain_free(&other);
+        wcr_chain_free(&shorter);
+    }
     if (open)
         node_db_close(&ndb);
-    bool swapped = wcr_sql(dir, "UPDATE blocks SET status=1 WHERE height=1000")
-                   && wcr_block(dir, WCR_HASH_TWO, 1000, 3);
-    open = wcr_open(&ndb, dir);
-    WCR_CHECK("a birthday whose block left the active chain is ignored",
-              before == 900 && swapped && open &&
-              wallet_birthday_scan_floor(&ndb) == 0);
-    if (open)
+    return failures;
+}
+
+/* The datadir held connected rows above a rewound tip: 4900 and 5000 are both
+ * status 3 (the demotion path never touches them), the active chain is back at
+ * 3000. The birthday records 5000 and the floor block 4900; the chain does
+ * not hold it, so the wallet scans everything. A chain that does hold the
+ * block makes the same birthday valid: every block up to it was in the
+ * datadir before the wallet. */
+static int birthday_rewound_chains(struct node_db *ndb)
+{
+    int failures = 0;
+    struct wcr_chain rewound, regrown;
+    bool made = wcr_chain_make(&rewound, 3001, -1, 0) &&
+                wcr_chain_make(&regrown, 5002, 4900, 0x49);
+    struct wallet *w = made ? wcr_boot_wallet(ndb, &rewound, 0) : NULL;
+    WCR_CHECK("a chain rewound to 3000 does not hold the floor block: the "
+              "blocks 3001..4899 are not skipped",
+              w && w->initial_scan_floor == 0 && wcr_marked_unread(w));
+    int floor = 0;
+    WCR_CHECK("a chain that holds block 4900 makes it valid",
+              made && wallet_birthday_check(ndb, &regrown.chain, &floor) ==
+                          WALLET_BIRTHDAY_VALID && floor == 4900);
+    if (w) {
+        wallet_free(w);
+        free(w);
+    }
+    if (made) {
+        wcr_chain_free(&rewound);
+        wcr_chain_free(&regrown);
+    }
+    return failures;
+}
+
+static int birthday_rewound(void)
+{
+    int failures = 0;
+    char dir[1024];
+    wcr_fixture(dir, sizeof(dir), "birthday_rewound");
+    bool seeded = wcr_block(dir, 0x49, 4900, 3) && wcr_block(dir, 0x50, 5000, 3);
+    struct wcr_run run;
+    memset(&run, 0, sizeof(run));
+    bool created = seeded && wcr_create(dir, WCR_PASS, &run) && run.rc == 0;
+    struct node_db ndb;
+    int64_t b = 0;
+    uint8_t hash[32];
+    bool open = created && wcr_open(&ndb, dir);
+    WCR_CHECK("a rewound datadir records its highest connected row as the tip",
+              open && db_wallet_birthday_get(&ndb, &b, hash) && b == 5000);
+    if (open) {
+        failures += birthday_rewound_chains(&ndb);
         node_db_close(&ndb);
+    }
     return failures;
 }
 
@@ -610,10 +744,16 @@ static int birthday_absent_when_restored(void)
     struct node_db ndb;
     int64_t b = 0;
     uint8_t hash[32];
+    struct wcr_chain k;
     bool open = r && wcr_open(&ndb, dir);
+    bool made = open && wcr_chain_make(&k, 1002, -1, 0);
+    int floor = 0;
     WCR_CHECK("a restored wallet has no birthday and scans from 0",
-              open && !db_wallet_birthday_get(&ndb, &b, hash) &&
-              wallet_birthday_scan_floor(&ndb) == 0);
+              made && !db_wallet_birthday_get(&ndb, &b, hash) &&
+              wallet_birthday_check(&ndb, &k.chain, &floor) ==
+                  WALLET_BIRTHDAY_NONE);
+    if (made)
+        wcr_chain_free(&k);
     if (open)
         node_db_close(&ndb);
     return failures;
@@ -624,16 +764,14 @@ static int t_birthday(void)
     int failures = 0;
     char dir[1024];
     wcr_fixture(dir, sizeof(dir), "birthday");
-    /* Tip 1000 is active (status 3); 5000 is a reorganised-away row. */
-    bool seeded = wcr_block(dir, WCR_HASH_ZERO, 1000, 3) &&
-                  wcr_block(dir, WCR_HASH_ONE, 5000, 1);
+    bool seeded = wcr_block(dir, 0x09, 900, 3) && wcr_block(dir, 0x0a, 1000, 3);
     struct wcr_run run;
     memset(&run, 0, sizeof(run));
-    WCR_CHECK("a datadir with an active tip at 1000 and a stale row at 5000 "
-              "creates a wallet",
+    WCR_CHECK("a datadir with a connected tip at 1000 creates a wallet",
               seeded && wcr_create(dir, WCR_PASS, &run) && run.rc == 0);
     failures += birthday_stored(dir, &run);
-    failures += birthday_reorganised(dir);
+    failures += birthday_chain_checks(dir);
+    failures += birthday_rewound();
     failures += birthday_absent_when_restored();
     return failures;
 }
@@ -774,14 +912,18 @@ static int t_core_dumps_disabled(void)
                                  saved.rlim_max };
         (void)setrlimit(RLIMIT_CORE, &raised);
     }
+#ifdef __linux__
     (void)prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);
+#endif
     char dir[1024];
     wcr_fixture(dir, sizeof(dir), "core");
     struct wcr_run run;
     memset(&run, 0, sizeof(run));
     bool ran = wcr_create(dir, WCR_PASS, &run);
+#ifdef __linux__
     WCR_CHECK("the handler makes the process undumpable",
               ran && prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 0);
+#endif
     /* A host whose hard limit is already zero cannot tell the two apart. */
     WCR_CHECK("the handler sets the core dump limit to zero",
               ran && getrlimit(RLIMIT_CORE, &now) == 0 && now.rlim_cur == 0);
@@ -816,6 +958,63 @@ static int t_legacy_wallet_directory(void)
  * boot decisions below read those rows; a count of transparent keys alone
  * calls the wallet empty and draws a second seed over it, or lets a legacy
  * import replace it. */
+/* A table that does not exist holds nothing; one that cannot be read is a row
+ * at risk, never an empty answer. */
+static int t_unreadable_rows(void)
+{
+    int failures = 0;
+    char gone[1024], broken[1024];
+    wcr_fixture(gone, sizeof(gone), "rows_gone");
+    wcr_fixture(broken, sizeof(broken), "rows_broken");
+    struct node_db n1, n2;
+    memset(&n1, 0, sizeof(n1));
+    memset(&n2, 0, sizeof(n2));
+    /* Opening a datadir creates its schema, so the tables go after the open. */
+    bool o1 = wcr_open(&n1, gone) &&
+              sqlite3_exec(n1.db, "DROP TABLE wallet_seed; "
+                           "DROP TABLE wallet_sapling_keys",
+                           NULL, NULL, NULL) == SQLITE_OK;
+    bool o2 = wcr_open(&n2, broken) &&
+              sqlite3_exec(n2.db, "DROP TABLE wallet_seed; CREATE VIEW "
+                           "wallet_seed AS SELECT * FROM nowhere",
+                           NULL, NULL, NULL) == SQLITE_OK;
+    WCR_CHECK("wallet tables that do not exist hold no rows at risk",
+              o1 && boot_wallet_rows_at_risk(&n1, 0) == 0);
+    WCR_CHECK("a wallet table that cannot be read is a row at risk",
+              o2 && boot_wallet_rows_at_risk(&n2, 0) >= 1);
+    if (n1.open)
+        node_db_close(&n1);
+    if (n2.open)
+        node_db_close(&n2);
+    return failures;
+}
+
+static int guard_case(const char *dir, const char *name, bool first_run)
+{
+    int failures = 0;
+    struct node_db ndb;
+    struct wallet_sqlite ws;
+    char label[200];
+    bool open = wcr_open(&ndb, dir) && wallet_sqlite_open_r(&ws, ndb.db).ok;
+    snprintf(label, sizeof(label), "%s: first run is %s, the legacy import "
+             "and the mint agree", name, first_run ? "yes" : "no");
+    WCR_CHECK(label, open && boot_wallet_is_first_run(&ws, 0) == first_run &&
+              boot_wallet_may_mint(&ws, 0) == first_run);
+    snprintf(label, sizeof(label), "%s: any transparent key is not a first "
+             "run", name);
+    WCR_CHECK(label, open && !boot_wallet_is_first_run(&ws, 3) &&
+              !boot_wallet_may_mint(&ws, 3));
+    snprintf(label, sizeof(label), "%s: the rows at risk %s", name,
+             first_run ? "are none" : "are counted");
+    WCR_CHECK(label, open &&
+              (boot_wallet_rows_at_risk(&ndb, 0) == 0) == first_run);
+    if (open) {
+        wallet_sqlite_close(&ws);
+        node_db_close(&ndb);
+    }
+    return failures;
+}
+
 static int t_boot_guards(void)
 {
     int failures = 0;
@@ -836,35 +1035,11 @@ static int t_boot_guards(void)
     WCR_CHECK("fixtures: a created wallet, a lone seed, a lone Sapling key",
               created && seeded && keyed);
 
-    struct { const char *dir; const char *name; bool first_run; } cases[] = {
-        { fresh, "an empty datadir", true },
-        { made, "a created wallet (seed and Sapling keys, no transparent key)",
-          false },
-        { seed_only, "a lone seed row", false },
-        { sapling_only, "a lone Sapling key", false },
-    };
-    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        struct node_db ndb;
-        struct wallet_sqlite ws;
-        char label[200];
-        bool open = wcr_open(&ndb, cases[i].dir) &&
-                    wallet_sqlite_open_r(&ws, ndb.db).ok;
-        snprintf(label, sizeof(label), "%s: first run is %s, the legacy "
-                 "import and the mint agree", cases[i].name,
-                 cases[i].first_run ? "yes" : "no");
-        WCR_CHECK(label, open &&
-                  boot_wallet_is_first_run(&ws, 0) == cases[i].first_run &&
-                  boot_wallet_may_mint(&ws, 0) == cases[i].first_run);
-        snprintf(label, sizeof(label), "%s: the rows at risk %s", cases[i].name,
-                 cases[i].first_run ? "are none" : "are counted");
-        WCR_CHECK(label, open &&
-                  (boot_wallet_rows_at_risk(&ndb, 0) == 0) ==
-                      cases[i].first_run);
-        if (open) {
-            wallet_sqlite_close(&ws);
-            node_db_close(&ndb);
-        }
-    }
+    failures += guard_case(fresh, "an empty datadir", true);
+    failures += guard_case(made, "a created wallet (seed and Sapling keys, "
+                           "no transparent key)", false);
+    failures += guard_case(seed_only, "a lone seed row", false);
+    failures += guard_case(sapling_only, "a lone Sapling key", false);
 
     struct wallet_sqlite closed;
     memset(&closed, 0, sizeof(closed));
@@ -873,10 +1048,11 @@ static int t_boot_guards(void)
               !boot_wallet_is_first_run(&closed, 0));
     struct node_db ndb;
     bool open = wcr_open(&ndb, made);
-    WCR_CHECK("a transparent key count alone also blocks a mint",
+    WCR_CHECK("a transparent key count is added to the rows at risk",
               open && boot_wallet_rows_at_risk(&ndb, 3) >= 5);
     if (open)
         node_db_close(&ndb);
+    failures += t_unreadable_rows();
     return failures;
 }
 

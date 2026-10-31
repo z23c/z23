@@ -56,9 +56,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 #define WRP_TAG "native.wallet.recovery"
 
@@ -537,13 +539,14 @@ static int wrp_stdout_to_stderr(void)
     return saved;
 }
 
-static void wrp_stdout_restore(int saved)
+/* False when standard output could not be put back: it still points at the log
+ * stream, and the reply document, which carries the phrase, must not follow. */
+static bool wrp_stdout_restore(int saved)
 {
-    if (saved < 0)
-        return;
     (void)fflush(stdout);
-    (void)dup2(saved, STDOUT_FILENO);
+    bool ok = dup2(saved, STDOUT_FILENO) >= 0;
     (void)close(saved);
+    return ok;
 }
 
 static void wrp_create_body(const struct zcl_command_request *request,
@@ -600,7 +603,17 @@ void zcl_native_handle_wallet_create(
         return;
     }
     wrp_create_body(request, reply);
-    wrp_stdout_restore(saved);
+    if (!wrp_stdout_restore(saved)) {
+        json_free(&reply->data);
+        json_init(&reply->data);
+        json_set_object(&reply->data);
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "STDOUT_RESTORE_FAILED",
+                 "standard output could not be restored, so the reply was "
+                 "withheld rather than written to the log stream. If a "
+                 "wallet was made its phrase is lost: delete the datadir",
+                 "core.wallet.create");
+        reply->error.mutated = true;
+    }
 }
 
 /* ── Hot-swappable leaves ──────────────────────────────────────────────────

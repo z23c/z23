@@ -7,6 +7,7 @@
 #define ZCL_DB_WALLET_SCAN_H
 
 #include "models/database.h"
+#include "models/wallet_key.h"
 #include "validation/chainstate.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -28,18 +29,28 @@ int wallet_scan_blocks(struct node_db *ndb,
                        int start_height,
                        int end_height);
 
-/* Blocks kept below a wallet birthday when scanning, so a short reorganisation
- * of the chain the wallet was created on cannot hide an early payment. */
-#define WALLET_SCAN_BIRTHDAY_MARGIN 100
+/* Blocks kept below a wallet birthday, so a short reorganisation of the chain
+ * the wallet was created on cannot hide an early payment. */
+#define WALLET_SCAN_BIRTHDAY_MARGIN WALLET_BIRTHDAY_MARGIN
 
-/* First height the initial scan of a wallet made by `core wallet create` may
- * start at: its birthday less the margin, 0 when the wallet has no birthday or
- * when the block recorded at the birthday is no longer the active block at
- * that height (the chain it was created on was replaced). wallet_scan_blocks
- * never applies it: a transparent scan, a rescan and the scan an imported key
- * triggers cover their whole range. Only the boot catch-up of a wallet that has
- * scanned nothing yet uses it. */
-int wallet_birthday_scan_floor(struct node_db *ndb);
+/* What the active chain says about a wallet's birthday:
+ *   NONE    no birthday (old or restored wallet): scan from genesis as usual.
+ *   VALID   the active chain holds the recorded floor block; `*floor` is its
+ *           height and the first scan may start there.
+ *   CHANGED a birthday exists but the active chain does not hold the floor
+ *           block (reorganised away, rewound below it, or chain not loaded):
+ *           nothing about the blocks below it can be assumed, the scan is
+ *           from genesis.
+ * wallet_scan_blocks never applies the floor: a transparent scan, a rescan and
+ * the scan an imported key triggers cover their whole range. Only the boot
+ * catch-up of a wallet that has scanned nothing yet uses it. */
+enum wallet_birthday_state {
+    WALLET_BIRTHDAY_NONE,
+    WALLET_BIRTHDAY_VALID,
+    WALLET_BIRTHDAY_CHANGED,
+};
+enum wallet_birthday_state wallet_birthday_check(
+    struct node_db *ndb, const struct active_chain *chain, int *floor);
 
 /* OS-S2 #4 Pass-1 file-match cache (exposed for unit tests). */
 

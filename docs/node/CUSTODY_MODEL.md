@@ -118,15 +118,23 @@ command disables core dumps on entry. The seed and Sapling keys are written
 under the passphrase (WKS1, WKD1) from the first write, at least 12 bytes. No
 transparent address is made.
 
-Birthday. The active chain tip the datadir holds (the highest block with
-status 3 or more, the rows the chain projection reads) is stored with its hash
-as `wallet_birthday_height` and `wallet_birthday_hash` in `node_state`. Only
-the first boot catch-up of a wallet that has scanned nothing uses it: it starts
-100 blocks below the birthday, and only while the block at that height is
-still the stored hash. If the chain was replaced and the hash left it, the
-birthday is ignored and the scan starts at genesis. Every other scan covers its
-whole range: transparent scans, `rescanblockchain` and the full scan an
-imported key triggers never raise their start, so a coin received before the
+Birthday. The highest connected block the datadir holds (status 3 or more) is
+the wallet's tip, stored as `wallet_birthday_height` in `node_state`, and the
+hash of the block 100 below it is stored as `wallet_birthday_hash`. Rows above
+a rewound tip keep their status, so the tip can be stale; that is safe because
+every row existed before the wallet, and what boot checks is the floor block.
+Only the first boot catch-up of a wallet that has scanned nothing uses it. It
+checks the in-memory active chain: if the chain holds the floor block (which
+fixes every block below it), the scan starts there. If it does not (reorganised
+away, rewound below it, or no chain loaded), nothing below the floor can be
+assumed. Boot then records a pending scan retry from height 0 with blocker
+`WALLET_BIRTHDAY_CHAIN_CHANGED`, so the wallet claims no scanned-through height
+and a tip that advances cannot stand in for blocks never read. The catch-up
+reads the whole chain; above 1000 blocks it defers the way every first catch-up
+does ("use rescanblockchain"), and the marker stays until a boot catch-up reads
+the range. A chain of 100 blocks or fewer records no birthday. Every other scan
+covers its whole range: transparent scans, `rescanblockchain` and the full scan
+an imported key triggers never raise their start, so a coin received before the
 birthday by a key imported later is found.
 
 Boot. A seed row, a Sapling key row or a transparent key means a wallet exists:
