@@ -160,8 +160,22 @@ static const struct onion_stream_backend g_stub_backend = {
     .open = stub_open, .write = stub_write, .close = stub_close,
 };
 
-/* The bridge's pump owns the close; wait for it rather than racing it. */
-static void stub_reset(void)
+static bool stub_dial_active(void)
+{
+    struct onion_stream_dial_snapshot d[ONION_STREAM_RECENT_DIALS_MAX];
+    size_t n = onion_stream_get_recent_dials(d, ONION_STREAM_RECENT_DIALS_MAX);
+    for (size_t i = 0; i < n; i++)
+        if (d[i].active)
+            return true;
+    return false;
+}
+
+/* The bridge's pump owns the close; wait for it rather than racing it.  The
+ * pump ends its dial record after the close, so also wait for no active dial:
+ * that acquire load orders the pump's last telemetry writes before the reset.
+ * A dial still active after the bound resets nothing and returns false, so
+ * the calling check fails instead of racing the pump. */
+static bool stub_reset(void)
 {
     if (g_stub.tid_valid || atomic_load(&g_stub.closed)) {
         for (int i = 0; i < 1200 && !atomic_load(&g_stub.closed); i++)
@@ -172,10 +186,18 @@ static void stub_reset(void)
             g_stub.tid_valid = false;
         }
     }
+    for (int i = 0; i < 1200 && stub_dial_active(); i++)
+        usleep(5 * 1000);
+    if (stub_dial_active()) {
+        fprintf(stderr, "rom_fetch_onion: a dial stayed active past 6 s; "
+                        "stub and telemetry not reset\n");
+        return false;
+    }
     free(g_stub.echo);
     memset(&g_stub, 0, sizeof(g_stub));
     g_stub.echo = malloc(STUB_ECHO_CAP);
     onion_stream_reset_stages_for_test();
+    return true;
 }
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
@@ -242,7 +264,8 @@ static bool loopback_listen(platform_socket_t *fd_out, uint16_t *port_out)
 static bool check_onion_seeder_routes(void)
 {
     {
-        stub_reset();
+        if (!stub_reset())
+            return false;
         rom_fetch_set_onion_backend_for_test(&g_stub_backend);
 
         char host[ONION_V3_ADDRESS_LEN + 1];
@@ -278,7 +301,7 @@ static bool check_onion_seeder_routes(void)
         if (fd != PLATFORM_SOCKET_INVALID)
             platform_socket_close(fd);
         rom_fetch_set_onion_backend_for_test(NULL);
-        stub_reset();
+        ok = stub_reset() && ok;
         return ok;
     }
 }
@@ -286,7 +309,8 @@ static bool check_onion_seeder_routes(void)
 static bool check_clearnet_resolver_path(void)
 {
     {
-        stub_reset();
+        if (!stub_reset())
+            return false;
         rom_fetch_set_onion_backend_for_test(&g_stub_backend);
 
         platform_socket_t lfd = PLATFORM_SOCKET_INVALID;
@@ -323,7 +347,7 @@ static bool check_clearnet_resolver_path(void)
         if (lfd != PLATFORM_SOCKET_INVALID)
             platform_socket_close(lfd);
         rom_fetch_set_onion_backend_for_test(NULL);
-        stub_reset();
+        ok = stub_reset() && ok;
         return ok;
     }
 }
@@ -390,7 +414,8 @@ static bool check_noncanonical_onion_names(bool ok)
 static bool check_malformed_onion_refused(void)
 {
     {
-        stub_reset();
+        if (!stub_reset())
+            return false;
         rom_fetch_set_onion_backend_for_test(&g_stub_backend);
         bool ok = check_bad_onion_names();
         ok = check_noncanonical_onion_names(ok);
@@ -403,7 +428,7 @@ static bool check_malformed_onion_refused(void)
         ok = ok && st.dial_started == 0;
 
         rom_fetch_set_onion_backend_for_test(NULL);
-        stub_reset();
+        ok = stub_reset() && ok;
         return ok;
     }
 }
@@ -459,7 +484,11 @@ int test_rom_fetch_onion(void)
     if (check_onion_budgets()) printf("OK\n");
     else { printf("FAIL\n"); failures++; }
 
-    free(g_stub.echo);
-    g_stub.echo = NULL;
+    /* A dial still active means a pump may still use the echo buffer: keep
+     * it (the failed check already counts) rather than free it under it. */
+    if (!stub_dial_active()) {
+        free(g_stub.echo);
+        g_stub.echo = NULL;
+    }
     return failures;
 }
