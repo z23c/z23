@@ -546,23 +546,68 @@ static job_result_t vh_recheck_settle_floor(const struct vh_job *jobs, int n,
     return (new_floor > start) ? JOB_ADVANCED : JOB_IDLE;
 }
 
+/* Entry guard for the failed-row recheck: validates the inputs, reads the
+ * frontier anchor and publishes the start height. Returns false with *early
+ * set to the result the caller must return. */
+static bool vh_recheck_prologue(struct main_state *ms, sqlite3 *db,
+                                uint64_t validated_cursor, int64_t *start,
+                                job_result_t *early)
+{
+    *early = JOB_IDLE;
+    if (!ms || !db || validated_cursor == 0)
+        return false;
+
+    *start = vh_recheck_initial_start();
+
+    if (!vh_recheck_anchor_start(db, start)) {
+        *early = vh_db_fault(sqlite3_extended_errcode(db), (int)*start,
+                             "recheck frontier cursor read");
+        return false;
+    }
+    atomic_store(&g_last_recheck_start, *start);
+    atomic_store(&g_last_recheck_selected, 0);
+
+    if ((uint64_t)*start >= validated_cursor)
+        return false;
+    return true;
+}
+
+/* A sqlite step result other than DONE or ROW is a failed recheck scan. */
+static bool vh_recheck_step_failed(int rc)
+{
+    return rc != SQLITE_DONE && rc != SQLITE_ROW;
+}
+
+/* Transaction open and commit statements: a SAVEPOINT when a batch is
+ * active, a standalone BEGIN IMMEDIATE / COMMIT otherwise. */
+static const char *vh_recheck_open_sql(bool batched)
+{
+    return batched ? "SAVEPOINT vh_recheck" : "BEGIN IMMEDIATE";
+}
+
+static const char *vh_recheck_commit_sql(bool batched)
+{
+    return batched ? "RELEASE SAVEPOINT vh_recheck" : "COMMIT";
+}
+
+/* Maps a failed recheck write to its result: a blocked write backs off, a
+ * log fault reports the failing height. */
+static job_result_t vh_recheck_write_exit(enum vh_recheck_write wr, int rc,
+                                          int height)
+{
+    if (wr == VH_RW_LOG_FAULT)
+        return vh_db_fault(rc, height, "recheck log insert");
+    return JOB_IDLE;
+}
+
 static job_result_t recheck_failed_rows(struct main_state *ms,
                                           sqlite3 *db,
                                           uint64_t validated_cursor)
 {
-    if (!ms || !db || validated_cursor == 0)
-        return JOB_IDLE;
-
-    int64_t start = vh_recheck_initial_start();
-
-    if (!vh_recheck_anchor_start(db, &start))
-        return vh_db_fault(sqlite3_extended_errcode(db), (int)start,
-                           "recheck frontier cursor read");
-    atomic_store(&g_last_recheck_start, start);
-    atomic_store(&g_last_recheck_selected, 0);
-
-    if ((uint64_t)start >= validated_cursor)
-        return JOB_IDLE;
+    int64_t start = 0;
+    job_result_t early = JOB_IDLE;
+    if (!vh_recheck_prologue(ms, db, validated_cursor, &start, &early))
+        return early;
 
     progress_store_tx_lock();
     sqlite3_stmt *stmt = NULL;
@@ -607,7 +652,7 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
                       (unsigned long long)reps);
         return JOB_FATAL;
     }
-    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+    if (vh_recheck_step_failed(rc)) {
         sqlite3_finalize(stmt);
         progress_store_tx_unlock();
         /* De-storm: keyed on rc, mirrors recheck_prepare_throttle above. */
@@ -647,8 +692,8 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
      * is active (its writes stay enrolled in the batch, committed once by
      * stage_batch_end), a fresh BEGIN IMMEDIATE only when standalone. */
     const bool vh_batched = stage_batch_active();
-    const char *vh_open   = vh_batched ? "SAVEPOINT vh_recheck" : "BEGIN IMMEDIATE";
-    const char *vh_commit = vh_batched ? "RELEASE SAVEPOINT vh_recheck" : "COMMIT";
+    const char *vh_open   = vh_recheck_open_sql(vh_batched);
+    const char *vh_commit = vh_recheck_commit_sql(vh_batched);
     if (sqlite3_exec(db, vh_open, NULL, NULL, &err) != SQLITE_OK) {
         int frc = sqlite3_extended_errcode(db);
         /* De-storm: keyed on frc, mirrors recheck_prepare_throttle above. */
@@ -660,7 +705,7 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
                      "[validate_headers] failed-row recheck BEGIN failed: %s "
                      "repeats=%llu", err ? err : "(no message)",
                      (unsigned long long)reps);
-        if (err) sqlite3_free(err);
+        sqlite3_free(err);
         progress_store_tx_unlock();
         return vh_db_fault(frc, (int)start, "recheck begin/savepoint");
     }
@@ -669,10 +714,8 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
     enum vh_recheck_write wr = vh_recheck_write_rows(db, jobs, n, vh_batched,
                                                      &wfault_rc,
                                                      &wfault_height);
-    if (wr == VH_RW_BLOCKED)
-        return JOB_IDLE;
-    if (wr == VH_RW_LOG_FAULT)
-        return vh_db_fault(wfault_rc, wfault_height, "recheck log insert");
+    if (wr != VH_RW_OK)
+        return vh_recheck_write_exit(wr, wfault_rc, wfault_height);
     if (sqlite3_exec(db, vh_commit, NULL, NULL, &err) != SQLITE_OK) {
         int frc = sqlite3_extended_errcode(db);
         /* De-storm: keyed on frc, mirrors recheck_begin_throttle above. */
@@ -684,7 +727,7 @@ static job_result_t recheck_failed_rows(struct main_state *ms,
                      "[validate_headers] failed-row recheck COMMIT failed: %s "
                      "repeats=%llu", err ? err : "(no message)",
                      (unsigned long long)reps);
-        if (err) sqlite3_free(err);
+        sqlite3_free(err);
         vh_recheck_rollback(db, vh_batched);
         progress_store_tx_unlock();
         return vh_db_fault(frc, (int)last_seen, "recheck commit");
