@@ -112,6 +112,7 @@ struct mcp_serve {
     struct zcl_command_context cmd;
     struct json_value empty_input;
     char code_path[ZCL_COMMAND_MAX_PATH];
+    char cli_path[ZCL_COMMAND_MAX_PATH];
     char *out;
     size_t out_cap;
 };
@@ -358,6 +359,33 @@ static bool refuse(struct mcp_refusal *why, const char *code,
     return false;
 }
 
+/* Accept the CLI spelling of a path ("dev land status", "z23 dev land
+ * status") as well as the dotted one: agents copy commands from the manual
+ * and got UNKNOWN_COMMAND (10-31). Returns path unchanged when it has no
+ * blank, or the dotted form in s->cli_path. */
+static const char *cli_spelling(struct mcp_serve *s, const char *path)
+{
+    if (!path || !strpbrk(path, " \t"))
+        return path;
+    path += strspn(path, " \t");
+    if (!strncmp(path, "z23 ", 4))
+        path += 4;
+    size_t n = 0;
+    /* Each pass starts on a non-blank byte, so every word is non-empty. */
+    for (const char *p = path; *p; p += strspn(p, " \t")) {
+        size_t word = strcspn(p, " \t");
+        if (n + (n > 0) + word >= sizeof(s->cli_path))
+            break; /* too long for a path: let the lookup refuse it */
+        if (n)
+            s->cli_path[n++] = '.';
+        memcpy(s->cli_path + n, p, word);
+        n += word;
+        p += word;
+    }
+    s->cli_path[n] = '\0';
+    return s->cli_path;
+}
+
 /* Resolve the command a z23_run / z23_code call names. */
 static bool resolve_target(struct mcp_serve *s, const struct mcp_tool *tool,
                            const struct json_value *args,
@@ -382,7 +410,7 @@ static bool resolve_target(struct mcp_serve *s, const struct mcp_tool *tool,
         snprintf(s->code_path, sizeof(s->code_path), "code.%s", sub);
         path = s->code_path;
     } else {
-        path = arg_str(args, "path");
+        path = cli_spelling(s, arg_str(args, "path"));
         if (!path)
             return refuse(why, "BAD_ARGUMENT", "path must be a string");
     }
@@ -728,7 +756,7 @@ static bool tool_search(struct mcp_serve *s, const struct json_value *args,
 static bool tool_describe(struct mcp_serve *s, const struct json_value *args,
                           struct mcp_buf *text, bool *is_error)
 {
-    const char *path = arg_str(args, "path");
+    const char *path = cli_spelling(s, arg_str(args, "path"));
     size_t n = path ? zcl_command_registry_describe_json(
                           s->cmd.registry, path, s->out, s->out_cap)
                     : 0;

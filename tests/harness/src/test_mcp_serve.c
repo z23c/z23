@@ -507,6 +507,25 @@ static int case_read_leaf(struct ms *m)
     return failures;
 }
 
+static int case_cli_spelling(struct ms *m)
+{
+    int failures = 0;
+    TEST_CASE("the CLI spelling of a path resolves like the dotted one") {
+        ASSERT(ms_tool(m, 44, "z23_describe",
+                       "{\"path\":\" z23  discover\\tsearch \"}"));
+        ASSERT(has(m, "\"isError\":false"));
+        ASSERT(has(m, "input_schema"));
+        ASSERT(ms_tool(m, 45, "z23_run",
+                       "{\"path\":\"discover search\",\"input\":"
+                       "{\"query\":\"status brief\"}}"));
+        ASSERT(has(m, "\"isError\":false"));
+        ASSERT(has(m, "core.status.brief"));
+        ASSERT(ms_tool(m, 46, "z23_run", "{\"path\":\"no such leaf\"}"));
+        ASSERT(has(m, "UNKNOWN_COMMAND"));
+    } TEST_END
+    return failures;
+}
+
 static int case_refusals(struct ms *m)
 {
     int failures = 0;
@@ -1026,6 +1045,7 @@ static int case_session(const char *home, const char *checkout)
     }
     failures += case_list(&m);
     failures += case_read_leaf(&m);
+    failures += case_cli_spelling(&m);
     failures += case_refusals(&m);
     failures += case_plan_commit(&m, home, checkout);
     failures += case_budget(&m);
