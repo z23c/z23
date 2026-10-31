@@ -216,15 +216,23 @@ static bool cin_capture_unit(struct codeindex *index, const char *unit,
     return ok && cin_capture_call_rows(index, unit, answer, pos);
 }
 
+/* Read one generation's sealed roots and file count into `answer`. */
+static bool cin_capture_generation(struct codeindex *index,
+                                   struct cin_answer *answer)
+{
+    bool ok = codeindex_source_root_sha3(index, answer->source_root) &&
+              codeindex_retrieval_projection_root_sha3(index,
+                                                       answer->projection_root);
+    answer->file_count = ok ? codeindex_file_count(index) : -1;
+    return ok;
+}
+
 static bool cin_capture(const char *root, struct cin_answer *answer)
 {
     memset(answer, 0, sizeof(*answer));
     struct codeindex *index = codeindex_open(root);
     if (!index) return false;
-    bool ok = codeindex_source_root_sha3(index, answer->source_root) &&
-              codeindex_retrieval_projection_root_sha3(index,
-                                                       answer->projection_root);
-    answer->file_count = ok ? codeindex_file_count(index) : -1;
+    bool ok = cin_capture_generation(index, answer);
     size_t pos = 0;
     for (size_t i = 0; ok && i < CIN_UNIT_COUNT; i++)
         ok = cin_capture_unit(index, cin_units[i], answer, &pos);
@@ -828,22 +836,35 @@ static int cin_snapshot_cases(const char *live, const char *reference)
     return failures;
 }
 
+/* Create a fresh temp directory and canonicalise it into `workspace`. */
+static bool cin_create_workspace(char temporary[PLATFORM_TEMP_PATH_MAX],
+                                 char workspace[PLATFORM_TEMP_PATH_MAX])
+{
+    bool ready = platform_temp_directory_create(
+        "z23-codeindex-incremental-", temporary, PLATFORM_TEMP_PATH_MAX);
+    return ready && platform_directory_canonical_real(
+        temporary, workspace, PLATFORM_TEMP_PATH_MAX);
+}
+
+/* Build the live and reference fixture paths and seed both trees. */
+static bool cin_seed_fixture_pair(const char *workspace, char live[PATH_MAX],
+                                  char reference[PATH_MAX])
+{
+    int live_n = snprintf(live, PATH_MAX, "%s/live", workspace);
+    int reference_n = snprintf(reference, PATH_MAX, "%s/reference", workspace);
+    return live_n > 0 && (size_t)live_n < PATH_MAX &&
+           reference_n > 0 && (size_t)reference_n < PATH_MAX &&
+           cin_seed(live) && cin_seed(reference);
+}
+
 int test_codeindex_incremental(void)
 {
     int failures = 0;
     char temporary[PLATFORM_TEMP_PATH_MAX] = {0};
     char workspace[PLATFORM_TEMP_PATH_MAX] = {0};
     char live[PATH_MAX], reference[PATH_MAX];
-    bool ready = platform_temp_directory_create(
-        "z23-codeindex-incremental-", temporary, sizeof(temporary));
-    ready = ready && platform_directory_canonical_real(
-        temporary, workspace, sizeof(workspace));
-    int live_n = ready ? snprintf(live, sizeof(live), "%s/live", workspace) : -1;
-    int reference_n = ready ? snprintf(reference, sizeof(reference),
-                                       "%s/reference", workspace) : -1;
-    ready = ready && live_n > 0 && (size_t)live_n < sizeof(live) &&
-            reference_n > 0 && (size_t)reference_n < sizeof(reference) &&
-            cin_seed(live) && cin_seed(reference);
+    bool ready = cin_create_workspace(temporary, workspace);
+    ready = ready && cin_seed_fixture_pair(workspace, live, reference);
     CIN_CHECK("two identical fixtures are ready", ready);
     if (!ready) return failures;
 
