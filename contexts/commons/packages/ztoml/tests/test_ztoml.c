@@ -47,6 +47,36 @@ static int slice_eq(const ztoml_ev *ev, const char *s) {
 
 /* ---- golden document ----------------------------------------------------- */
 
+/* Takes the log by value so the assertions keep the original log.ev[...]
+ * text and therefore the original stringified failure messages. */
+static void kat_check_scalars(evlog log) {
+  CHECK(log.ev[0].kind == ZTOML_EV_KEY && slice_eq(&log.ev[0], "title"));
+  CHECK(log.ev[1].kind == ZTOML_EV_VALUE &&
+        log.ev[1].vtype == ZTOML_V_STR_BASIC &&
+        slice_eq(&log.ev[1], "TOML Example"));
+  CHECK(log.ev[2].kind == ZTOML_EV_SECTION && slice_eq(&log.ev[2], "owner"));
+  CHECK(log.ev[3].kind == ZTOML_EV_KEY && slice_eq(&log.ev[3], "name"));
+  CHECK(log.ev[4].vtype == ZTOML_V_STR_BASIC && slice_eq(&log.ev[4], "Tom"));
+  CHECK(log.ev[5].kind == ZTOML_EV_KEY && slice_eq(&log.ev[5], "age"));
+  CHECK(log.ev[6].vtype == ZTOML_V_INT && log.ev[6].i64 == 30);
+  CHECK(log.ev[8].vtype == ZTOML_V_FLOAT &&
+        fabs(log.ev[8].f64 - 99.5) < 1e-12);
+  CHECK(log.ev[10].vtype == ZTOML_V_BOOL && log.ev[10].boolean == 1);
+}
+
+static void kat_check_array_tail(evlog log) {
+  CHECK(log.ev[11].kind == ZTOML_EV_KEY && slice_eq(&log.ev[11], "lucky"));
+  CHECK(log.ev[12].kind == ZTOML_EV_ARR_OPEN);
+  CHECK(log.ev[13].vtype == ZTOML_V_INT && log.ev[13].i64 == 1);
+  CHECK(log.ev[14].i64 == 2 && log.ev[15].i64 == 3);
+  CHECK(log.ev[16].kind == ZTOML_EV_ARR_CLOSE);
+  CHECK(log.ev[17].kind == ZTOML_EV_SECTION &&
+        slice_eq(&log.ev[17], "deps.zlib"));
+  CHECK(log.ev[18].kind == ZTOML_EV_KEY && slice_eq(&log.ev[18], "rev"));
+  CHECK(log.ev[19].vtype == ZTOML_V_STR_LIT &&
+        slice_eq(&log.ev[19], "abc123"));
+}
+
 static void test_kat(void) {
   const char *doc =
       "# comment\n"
@@ -63,29 +93,9 @@ static void test_kat(void) {
       "rev = 'abc123'\n";
   evlog log;
   CHECK(parse_all(doc, &log) == ZTOML_OK);
-  CHECK(log.ev[0].kind == ZTOML_EV_KEY && slice_eq(&log.ev[0], "title"));
-  CHECK(log.ev[1].kind == ZTOML_EV_VALUE &&
-        log.ev[1].vtype == ZTOML_V_STR_BASIC &&
-        slice_eq(&log.ev[1], "TOML Example"));
-  CHECK(log.ev[2].kind == ZTOML_EV_SECTION && slice_eq(&log.ev[2], "owner"));
-  CHECK(log.ev[3].kind == ZTOML_EV_KEY && slice_eq(&log.ev[3], "name"));
-  CHECK(log.ev[4].vtype == ZTOML_V_STR_BASIC && slice_eq(&log.ev[4], "Tom"));
-  CHECK(log.ev[5].kind == ZTOML_EV_KEY && slice_eq(&log.ev[5], "age"));
-  CHECK(log.ev[6].vtype == ZTOML_V_INT && log.ev[6].i64 == 30);
-  CHECK(log.ev[8].vtype == ZTOML_V_FLOAT &&
-        fabs(log.ev[8].f64 - 99.5) < 1e-12);
-  CHECK(log.ev[10].vtype == ZTOML_V_BOOL && log.ev[10].boolean == 1);
+  kat_check_scalars(log);
   /* lucky = [1,2,3]: KEY, OPEN, 1, 2, 3, CLOSE */
-  CHECK(log.ev[11].kind == ZTOML_EV_KEY && slice_eq(&log.ev[11], "lucky"));
-  CHECK(log.ev[12].kind == ZTOML_EV_ARR_OPEN);
-  CHECK(log.ev[13].vtype == ZTOML_V_INT && log.ev[13].i64 == 1);
-  CHECK(log.ev[14].i64 == 2 && log.ev[15].i64 == 3);
-  CHECK(log.ev[16].kind == ZTOML_EV_ARR_CLOSE);
-  CHECK(log.ev[17].kind == ZTOML_EV_SECTION &&
-        slice_eq(&log.ev[17], "deps.zlib"));
-  CHECK(log.ev[18].kind == ZTOML_EV_KEY && slice_eq(&log.ev[18], "rev"));
-  CHECK(log.ev[19].vtype == ZTOML_V_STR_LIT &&
-        slice_eq(&log.ev[19], "abc123"));
+  kat_check_array_tail(log);
   CHECK(log.ev[20].kind == ZTOML_EV_DONE);
   CHECK(log.n == 21);
 }
@@ -306,6 +316,34 @@ static uint64_t rng_next(void) {
   return rng_state;
 }
 
+static size_t fuzz_append_pair(char *doc, size_t cap, size_t n, size_t k) {
+  switch (rng_next() % 6) {
+  case 0: n += (size_t)snprintf(doc + n, cap - n,
+                                "k%zu = %lld\n", k,
+                                (long long)(int64_t)rng_next());
+    break;
+  case 1: n += (size_t)snprintf(doc + n, cap - n,
+                                "k%zu = %g\n", k,
+                                (double)(int64_t)(rng_next() % 1000) /
+                                    4.0);
+    break;
+  case 2: n += (size_t)snprintf(doc + n, cap - n,
+                                "k%zu = \"v%zu\"\n", k, k);
+    break;
+  case 3: n += (size_t)snprintf(doc + n, cap - n,
+                                "k%zu = %s\n", k,
+                                (rng_next() & 1) ? "true" : "false");
+    break;
+  case 4: n += (size_t)snprintf(doc + n, cap - n,
+                                "k%zu = [1, 2, [3]]\n", k);
+    break;
+  default: n += (size_t)snprintf(doc + n, cap - n,
+                                 "# comment %zu\n", k);
+    break;
+  }
+  return n;
+}
+
 static void test_fuzz(void) {
   /* Generated documents: random sections/pairs of random scalar types
    * must parse to a balanced event stream. Mutated documents must
@@ -319,32 +357,8 @@ static void test_fuzz(void) {
     ztoml_ev ev;
     n += (size_t)snprintf(doc + n, sizeof(doc) - n, "[s%llu]\n",
                           (unsigned long long)(rng_next() % 1000));
-    for (k = 0; k < pairs; k++) {
-      switch (rng_next() % 6) {
-      case 0: n += (size_t)snprintf(doc + n, sizeof(doc) - n,
-                                    "k%zu = %lld\n", k,
-                                    (long long)(int64_t)rng_next());
-        break;
-      case 1: n += (size_t)snprintf(doc + n, sizeof(doc) - n,
-                                    "k%zu = %g\n", k,
-                                    (double)(int64_t)(rng_next() % 1000) /
-                                        4.0);
-        break;
-      case 2: n += (size_t)snprintf(doc + n, sizeof(doc) - n,
-                                    "k%zu = \"v%zu\"\n", k, k);
-        break;
-      case 3: n += (size_t)snprintf(doc + n, sizeof(doc) - n,
-                                    "k%zu = %s\n", k,
-                                    (rng_next() & 1) ? "true" : "false");
-        break;
-      case 4: n += (size_t)snprintf(doc + n, sizeof(doc) - n,
-                                    "k%zu = [1, 2, [3]]\n", k);
-        break;
-      default: n += (size_t)snprintf(doc + n, sizeof(doc) - n,
-                                     "# comment %zu\n", k);
-        break;
-      }
-    }
+    for (k = 0; k < pairs; k++)
+      n = fuzz_append_pair(doc, sizeof(doc), n, k);
     /* generated: must parse clean and balanced */
     CHECK(ztoml_init(&t, doc, n) == ZTOML_OK);
     for (;;) {
