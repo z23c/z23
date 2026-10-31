@@ -174,15 +174,16 @@ _Static_assert(sizeof(ZCL_PRODUCT_UA_BASE ZCL_BUILD_ID_OPEN ")/") +
                    ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN <= MAX_SUBVERSION_LENGTH,
                "advertised subversion must fit MAX_SUBVERSION_LENGTH");
 
-/* Exactly ZCL_BUILD_IDENTITY_HEX_LEN lowercase hex characters starting at
- * `s`, with no read past the terminator: '\0' is not a hex digit, so a short
- * string fails on its own NUL. Uppercase is deliberately rejected — one
- * spelling keeps peer values directly comparable to the local one. */
-static bool build_identity_hex_run(const char *s)
+/* Exactly `n` lowercase hex characters (ZCL_BUILD_IDENTITY_HEX_LEN, or the
+ * prefix length) starting at `s`, with no read past the terminator: '\0' is
+ * not a hex digit, so a short string fails on its own NUL. Uppercase is
+ * deliberately rejected — one spelling keeps peer values directly comparable
+ * to the local one. */
+static bool build_identity_hex_run(const char *s, size_t n)
 {
     if (!s)
         return false;
-    for (size_t i = 0; i < ZCL_BUILD_IDENTITY_HEX_LEN; i++) {
+    for (size_t i = 0; i < n; i++) {
         char c = s[i];
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
             return false;
@@ -192,7 +193,8 @@ static bool build_identity_hex_run(const char *s)
 
 static bool build_identity_is_exact(const char *s)
 {
-    return build_identity_hex_run(s) && s[ZCL_BUILD_IDENTITY_HEX_LEN] == '\0';
+    return build_identity_hex_run(s, ZCL_BUILD_IDENTITY_HEX_LEN) &&
+           s[ZCL_BUILD_IDENTITY_HEX_LEN] == '\0';
 }
 
 /* Formatted once, then immutable for the process lifetime. It cannot be a
@@ -257,7 +259,7 @@ bool msg_version_parse_build_identity(const char *subver, char *out,
     for (scan = strstr(subver, ZCL_BUILD_ID_OPEN); scan != NULL;
          scan = strstr(scan + 1, ZCL_BUILD_ID_OPEN)) {
         const char *hex = scan + ZCL_BUILD_ID_OPEN_LEN;
-        if (!build_identity_hex_run(hex))
+        if (!build_identity_hex_run(hex, ZCL_BUILD_IDENTITY_HEX_LEN))
             continue;
         if (hex[ZCL_BUILD_IDENTITY_HEX_LEN] != ')')
             continue;
@@ -266,16 +268,6 @@ bool msg_version_parse_build_identity(const char *subver, char *out,
         return true;
     }
     return false;
-}
-
-static bool build_identity_prefix_is_hex(const char *hex)
-{
-    for (size_t i = 0; i < ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN; i++) {
-        char c = hex[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
-            return false;
-    }
-    return true;
 }
 
 bool msg_version_parse_build_identity_prefix(const char *subver, char *out,
@@ -295,11 +287,11 @@ bool msg_version_parse_build_identity_prefix(const char *subver, char *out,
         size_t remaining = strlen(hex);
         if (remaining <= ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN)
             continue;
-        if (!build_identity_prefix_is_hex(hex))
+        if (!build_identity_hex_run(hex, ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN))
             continue;
         if (hex[ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN] != ')' &&
             !(remaining > ZCL_BUILD_IDENTITY_HEX_LEN &&
-              build_identity_hex_run(hex) &&
+              build_identity_hex_run(hex, ZCL_BUILD_IDENTITY_HEX_LEN) &&
               hex[ZCL_BUILD_IDENTITY_HEX_LEN] == ')'))
             continue;
         memcpy(out, hex, ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN);

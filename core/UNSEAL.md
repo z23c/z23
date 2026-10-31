@@ -484,3 +484,7 @@ later lane flips it HARD.
 - 2026-10-31T17:22:16Z — REASON: review fix on the core-net splits: restore the DoS=0 comment to its own else branch (comment-only placement, no behaviour change)
   old ROOT: 5fbb0edc894ec8957a6338810abc79c3404d6bd5bc5bb2843d8421b3b15216e8
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T18:13:20Z — REASON: duplicate audit fix on the core-net splits: the build identity prefix check reuses build_identity_hex_run with a length parameter instead of a second copy of its loop (behaviour-preserving, owner 10-19 hardening authority)
+  old ROOT: 06cd5c203992129d41999286d02900009071a70068d56e0152450b7728a0bbda
+  by: owner unseal ritual (make core-unseal)
