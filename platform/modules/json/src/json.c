@@ -514,8 +514,13 @@ static bool str_put(char **s, size_t *cap, size_t *len, char c)
     if (!*s)
         return true;
     if (*len >= *cap - 1) {
-        char *ns = json_heap_resize(*s, *cap * 2, "json_string");
+        /* A new block, so the old one can be overwritten before it is freed: realloc would leave the
+         * text of a long string in memory that is no longer owned. */
+        char *ns = json_heap_alloc(*cap * 2, "json_string");
         if (!ns) return false;
+        memcpy(ns, *s, *len);
+        memory_cleanse(*s, *cap);
+        json_heap_release(*s);
         *s = ns;
         *cap *= 2;
     }
