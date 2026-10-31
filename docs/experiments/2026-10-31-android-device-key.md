@@ -11,10 +11,10 @@ step of the first run.
 ## What was built
 
 - `device_key.c` (policy and blob file, host-tested), `device_key_jni.c`
-  (AndroidKeyStore backend, plain `startActivity` for the credential screen),
-  `secure_window.c` (FLAG_SECURE, and native dropping of obscured motion events
-  in the app input queue before any screen sees them). No Java class.
-- Key: AES-256-GCM, authentication required with a 30 s window (device
+  (AndroidKeyStore backend and BiometricPrompt), `secure_window.c` (FLAG_SECURE, and
+  native dropping of obscured motion events in the app input queue before any screen
+  sees them). Superseded in part by the per-use key section below.
+- Key (first design, replaced below): AES-256-GCM, authentication required with a 30 s window (device
   credential or strong biometric), unlocked device required, not invalidated by
   biometric enrollment, StrongBox first, secure hardware as the reported fallback.
 - Blob: `ZDK1`, IV length, sealed length, 12 byte IV, 48 byte sealed secret
@@ -66,6 +66,54 @@ ending mid-gesture letting the UP through, no count of cut gestures, a count of
 every event, and the causeless "Key algorithm unknown" form read as a lost key.
 The Java exception classes themselves are matched in
 `device_key_jni.c` and are exercised only on a device.
+
+## Per-use key (supersedes the 30 s window)
+
+Date: 2026-10-31. Source base: `dbc3f3e18a` plus this change. Custody review found that the 30 s
+window let a retry inside it unwrap with no credential, and that Back on the prompt followed by a
+resume still decrypted, because the app cannot tell a fresh authentication from an earlier one.
+
+- Key: AES-256-GCM, alias `z23.wallet.device-key.v2`, generated with
+  `setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG | AUTH_DEVICE_CREDENTIAL)`. Keystore refuses
+  every encrypt and decrypt that is not bound to one fresh authentication of that operation. The
+  combination of per-operation authentication with a device credential needs API 30; the manifest
+  `minSdkVersion` is 35, `make check-config` fails below 30, and the backend refuses to create a key
+  when `Build.VERSION.SDK_INT` is below 30 instead of falling back to a weaker form.
+- One call per operation: `zapp_devkey_unwrap(ops, path, purpose, secret)` and `zapp_devkey_wrap_new`
+  show one platform `BiometricPrompt` (`setAllowedAuthenticators(BIOMETRIC_STRONG | DEVICE_CREDENTIAL)`)
+  over a `CryptoObject` that holds the initialised `Cipher`, wait for the owner, then run `updateAAD` and
+  `doFinal` on that cipher. Creating the wallet is also one prompt, because Keystore requires the
+  authentication for encrypt as well. The result is the secret or one of `declined`, `invalidated`,
+  `no_screen_lock`, `error` (and the blob and key refusals). The `createConfirmDeviceCredentialIntent`
+  path and the 30 s logic are deleted.
+- Prompt text is fixed by the purpose (`Protect this wallet`, `Unlock this wallet`, `Authorise this
+  payment`); no amount, address or caller text reaches the prompt.
+- Callback: `BiometricPrompt.AuthenticationCallback` is an abstract class, so the dex now holds a second
+  class, `org.z23.nativeapp.KeyPrompt`, written by `dexgen.c` (no fields, no logic, two native methods
+  registered with `RegisterNatives` after the class is loaded through the activity's class loader).
+  The prompt callbacks run on a single-thread `java.util.concurrent` executor created per prompt and
+  only record the answer and signal the waiting native thread; the waiting thread is a worker, never
+  the UI thread, and the UI thread is never blocked. Wallet logic runs on the worker after the wait.
+- Activity destruction: `onDestroy` calls `zapp_devkey_jni_abandon`, which answers the pending prompt
+  with abandoned (the wait returns `declined` at once) and cancels the system prompt through its
+  `CancellationSignal`. The per-prompt global references and the executor are released when the wait
+  ends, whatever the answer; a late callback of an earlier prompt is ignored (ticket and callback
+  identity). A prompt that nobody answers ends after 120 s with `error` and is cancelled.
+- Enrolment change: the key keeps `setInvalidatedByBiometricEnrollment(false)`, as before, so enrolling or
+  removing a fingerprint does not invalidate it. Removing the secure lock screen still deletes the key
+  (Keystore behaviour for authentication-bound keys), reported as `no_screen_lock` or `invalidated`.
+- No migration: the blob magic is `ZDK2`; a `ZDK1` blob is refused as `old_format` before any prompt and
+  never opened, and `discard` also deletes the old alias `z23.wallet.device-key.v1`. An existing key is
+  accepted only if `KeyInfo` reports authentication required, validity duration 0, both sources, and
+  enforced by secure hardware; otherwise `not_per_use`.
+- Host proof: `make -C apps/z23android test-devkey` (fake keystore with one prompt per seal and open, and
+  the wait primitives driven from a second thread) and `make test-dexgen` (structure, plus `dexdump`).
+  Unproved without the phone: that Keystore on the Pixel 3 accepts this key and rejects an operation
+  without the prompt, that `Cipher.init` and `updateAAD` before authentication behave as assumed (the
+  code calls `updateAAD` only after the prompt succeeds), that `BiometricPrompt.authenticate` accepts
+  a call from a non-UI thread, that `RegisterNatives` on the class loaded through the activity's loader
+  links, that the activity-destroy path dismisses the prompt, and what the Cipher provider keeps in
+  memory. Probe commands for the preview package are listed in `device_key_probe.h`.
 
 ## Phone measurements
 

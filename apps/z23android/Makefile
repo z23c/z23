@@ -195,6 +195,7 @@ check-config:
 	@test -r '$(ANDROID_JAR)' && test -x '$(TOOLS)/aapt' && test -x '$(TOOLS)/zipalign' && test -x '$(TOOLS)/apksigner' || { echo 'Set SDK_ROOT and BUILD_TOOLS_VERSION to an installed Android SDK' >&2; exit 1; }
 	@test -x '$(JAVA_HOME)/bin/keytool' && test -x '$(JAVA_HOME)/bin/jar' || { echo 'Set JAVA_HOME to an installed JDK' >&2; exit 1; }
 	@test '$(ANDROID_API)' = 35 || { echo 'The current application manifest requires API 35' >&2; exit 1; }
+	@min=$$(sed -n 's/.*minSdkVersion="\([0-9][0-9]*\)".*/\1/p' '$(APP_MANIFEST)'); test -n "$$min" && test "$$min" -ge 30 || { echo 'The device key needs per-use authentication with a device credential: the manifest minSdkVersion must be 30 or higher' >&2; exit 1; }
 
 # The Sapling proving parameters are build inputs kept out of git, like vendor/cross.
 check-params:
@@ -282,7 +283,7 @@ test-host:
 .PHONY: test-devkey
 test-devkey:
 	@mkdir -p '$(BUILD_DIR)'
-	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../platform/modules/base/include tests/device_key_test.c device_key.c \
+	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/base/include tests/device_key_test.c device_key.c \
 	  ../../platform/modules/base/src/cleanse.c -o '$(BUILD_DIR)/device-key-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/device-key-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/device-key-test' "$$scratch"

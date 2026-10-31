@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
-/* Host build tool: writes the classes.dex (format 035) that holds the one Java class the app needs,
+/* Host build tool: writes the classes.dex (format 035) that holds the two Java classes the app needs,
  *
  *   public final class org.z23.nativeapp.NodeService extends android.app.Service {
  *       static { System.loadLibrary("z23android"); }
@@ -9,60 +9,79 @@
  *       private static native int start(Service service, int id);
  *   }
  *
+ *   public final class org.z23.nativeapp.KeyPrompt extends BiometricPrompt.AuthenticationCallback {
+ *       public KeyPrompt() { super(); }
+ *       public native void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result);
+ *       public native void onAuthenticationError(int code, CharSequence text);
+ *   }
+ *
+ * KeyPrompt is the callback of the device key prompt (device_key_jni.c). It has no fields and no
+ * logic: the device key code registers its two native methods with RegisterNatives after loading the
+ * class, so the callback only wakes the native thread that waits for the owner.
  * The output is deterministic. Usage: dexgen <output.dex> */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
-enum { DEX_MAX = 2048, HEADER_SIZE = 0x70, NO_INDEX = -1 };
+enum { DEX_MAX = 4096, HEADER_SIZE = 0x70, NO_INDEX = -1 };
 
 /* String ids, in modified-UTF-8 byte order as the format requires. */
 enum {
-    S_CLINIT, S_INIT, S_I, S_ILI, S_ILII, S_LL, S_SERVICE, S_INTENT, S_IBINDER, S_STRING, S_SYSTEM,
-    S_NODE, S_V, S_VL, S_LOADLIB, S_ONBIND, S_ONSTART, S_START, S_LIB, S_COUNT
+    S_CLINIT, S_INIT, S_I, S_ILI, S_ILII, S_LL, S_SERVICE, S_INTENT, S_CALLBACK, S_RESULT, S_IBINDER,
+    S_CHARSEQ, S_STRING, S_SYSTEM, S_KEYPROMPT, S_NODE, S_V, S_VIL, S_VL, S_LOADLIB, S_ONERROR,
+    S_ONSUCCEEDED, S_ONBIND, S_ONSTART, S_START, S_LIB, S_COUNT
 };
 static const char *const strings[S_COUNT] = {
     "<clinit>", "<init>", "I", "ILI", "ILII", "LL", "Landroid/app/Service;", "Landroid/content/Intent;",
-    "Landroid/os/IBinder;", "Ljava/lang/String;", "Ljava/lang/System;", "Lorg/z23/nativeapp/NodeService;",
-    "V", "VL", "loadLibrary", "onBind", "onStartCommand", "start", "z23android"
+    "Landroid/hardware/biometrics/BiometricPrompt$AuthenticationCallback;",
+    "Landroid/hardware/biometrics/BiometricPrompt$AuthenticationResult;", "Landroid/os/IBinder;",
+    "Ljava/lang/CharSequence;", "Ljava/lang/String;", "Ljava/lang/System;", "Lorg/z23/nativeapp/KeyPrompt;",
+    "Lorg/z23/nativeapp/NodeService;", "V", "VIL", "VL", "loadLibrary", "onAuthenticationError",
+    "onAuthenticationSucceeded", "onBind", "onStartCommand", "start", "z23android"
 };
 
 /* Type ids, ascending by string id. */
-enum { T_I, T_SERVICE, T_INTENT, T_IBINDER, T_STRING, T_SYSTEM, T_NODE, T_V, T_COUNT };
+enum { T_I, T_SERVICE, T_INTENT, T_CALLBACK, T_RESULT, T_IBINDER, T_CHARSEQ, T_STRING, T_SYSTEM, T_KEYPROMPT,
+       T_NODE, T_V, T_COUNT };
 static const uint8_t type_string[T_COUNT] = {
-    S_I, S_SERVICE, S_INTENT, S_IBINDER, S_STRING, S_SYSTEM, S_NODE, S_V
+    S_I, S_SERVICE, S_INTENT, S_CALLBACK, S_RESULT, S_IBINDER, S_CHARSEQ, S_STRING, S_SYSTEM, S_KEYPROMPT,
+    S_NODE, S_V
 };
 
 /* Parameter lists referenced by prototypes. */
-enum { L_NONE = -1, L_STRING, L_SERVICE_I, L_INTENT, L_INTENT_II, L_COUNT };
+enum { L_NONE = -1, L_STRING, L_SERVICE_I, L_INTENT, L_INTENT_II, L_I_CHARSEQ, L_RESULT, L_COUNT };
 static const struct { uint8_t count; uint8_t types[3]; } lists[L_COUNT] = {
-    { 1, { T_STRING } }, { 2, { T_SERVICE, T_I } }, { 1, { T_INTENT } }, { 3, { T_INTENT, T_I, T_I } }
+    { 1, { T_STRING } }, { 2, { T_SERVICE, T_I } }, { 1, { T_INTENT } }, { 3, { T_INTENT, T_I, T_I } },
+    { 2, { T_I, T_CHARSEQ } }, { 1, { T_RESULT } }
 };
 
 /* Prototypes, ascending by return type, then parameter types. */
-enum { P_I_SERVICE_I, P_I_INTENT_II, P_IBINDER_INTENT, P_V, P_V_STRING, P_COUNT };
+enum { P_I_SERVICE_I, P_I_INTENT_II, P_IBINDER_INTENT, P_V, P_V_I_CHARSEQ, P_V_RESULT, P_V_STRING, P_COUNT };
 static const struct { uint8_t shorty, ret; int8_t list; } protos[P_COUNT] = {
     { S_ILI, T_I, L_SERVICE_I }, { S_ILII, T_I, L_INTENT_II }, { S_LL, T_IBINDER, L_INTENT },
-    { S_V, T_V, L_NONE }, { S_VL, T_V, L_STRING }
+    { S_V, T_V, L_NONE }, { S_VIL, T_V, L_I_CHARSEQ }, { S_VL, T_V, L_RESULT }, { S_VL, T_V, L_STRING }
 };
 
 /* Methods, ascending by class, then name, then prototype. */
-enum { M_SERVICE_INIT, M_LOADLIB, M_CLINIT, M_INIT, M_ONBIND, M_ONSTART, M_START, M_COUNT };
+enum { M_SERVICE_INIT, M_CALLBACK_INIT, M_LOADLIB, M_KP_INIT, M_KP_ERROR, M_KP_SUCCEEDED, M_CLINIT, M_INIT,
+       M_ONBIND, M_ONSTART, M_START, M_COUNT };
 static const struct { uint8_t cls, proto, name; } methods[M_COUNT] = {
-    { T_SERVICE, P_V, S_INIT }, { T_SYSTEM, P_V_STRING, S_LOADLIB }, { T_NODE, P_V, S_CLINIT },
-    { T_NODE, P_V, S_INIT }, { T_NODE, P_IBINDER_INTENT, S_ONBIND }, { T_NODE, P_I_INTENT_II, S_ONSTART },
-    { T_NODE, P_I_SERVICE_I, S_START }
+    { T_SERVICE, P_V, S_INIT }, { T_CALLBACK, P_V, S_INIT }, { T_SYSTEM, P_V_STRING, S_LOADLIB },
+    { T_KEYPROMPT, P_V, S_INIT }, { T_KEYPROMPT, P_V_I_CHARSEQ, S_ONERROR }, { T_KEYPROMPT, P_V_RESULT, S_ONSUCCEEDED },
+    { T_NODE, P_V, S_CLINIT }, { T_NODE, P_V, S_INIT }, { T_NODE, P_IBINDER_INTENT, S_ONBIND },
+    { T_NODE, P_I_INTENT_II, S_ONSTART }, { T_NODE, P_I_SERVICE_I, S_START }
 };
 
 /* Dalvik bytecode. */
 static const uint16_t code_clinit[] = { 0x001a, S_LIB, 0x1071, M_LOADLIB, 0x0000, 0x000e };
 static const uint16_t code_init[] = { 0x1070, M_SERVICE_INIT, 0x0000, 0x000e };
+static const uint16_t code_kp_init[] = { 0x1070, M_CALLBACK_INIT, 0x0000, 0x000e };
 static const uint16_t code_onbind[] = { 0x0012, 0x0011 };
 static const uint16_t code_onstart[] = { 0x2071, M_START, 0x0041, 0x000a, 0x000f };
-enum { C_CLINIT, C_INIT, C_ONBIND, C_ONSTART, C_COUNT };
+enum { C_CLINIT, C_INIT, C_KP_INIT, C_ONBIND, C_ONSTART, C_COUNT };
 static const struct { uint16_t regs, ins, outs, units; const uint16_t *insns; } codes[C_COUNT] = {
-    { 1, 0, 1, 6, code_clinit }, { 1, 1, 1, 4, code_init },
+    { 1, 0, 1, 6, code_clinit }, { 1, 1, 1, 4, code_init }, { 1, 1, 1, 4, code_kp_init },
     { 3, 2, 0, 2, code_onbind }, { 5, 4, 2, 5, code_onstart }
 };
 
@@ -164,22 +183,31 @@ static void emit_code(struct out *o, uint32_t at[C_COUNT])
         for (int j = 0; j < codes[i].units; ++j) put(o, codes[i].insns[j], 2);
     }
 }
+struct member { uint8_t method; uint32_t flags; int8_t code; };
 /* Direct methods then virtual methods, each as method-index delta, flags and code offset. */
-static void emit_class_data(struct out *o, const uint32_t code[C_COUNT])
+static void emit_members(struct out *o, const struct member *list, int count, const uint32_t code[C_COUNT])
 {
-    static const struct { uint8_t method; uint32_t flags; int8_t code; } direct[] = {
+    int previous = 0;
+    for (int i = 0; i < count; ++i) {
+        uleb(o, (uint32_t)(list[i].method - previous)); previous = list[i].method;
+        uleb(o, list[i].flags); uleb(o, list[i].code < 0 ? 0 : code[list[i].code]);
+    }
+}
+/* The class_data_item of each class, in class definition order; at[] receives their offsets. */
+static void emit_class_data(struct out *o, const uint32_t code[C_COUNT], uint32_t at[2])
+{
+    static const struct member node_direct[] = {
         { M_CLINIT, ACC_STATIC | ACC_CONSTRUCTOR, C_CLINIT }, { M_INIT, ACC_PUBLIC | ACC_CONSTRUCTOR, C_INIT },
         { M_START, ACC_PRIVATE | ACC_STATIC | ACC_NATIVE, -1 }
-    }, virt[] = { { M_ONBIND, ACC_PUBLIC, C_ONBIND }, { M_ONSTART, ACC_PUBLIC, C_ONSTART } };
+    }, node_virtual[] = { { M_ONBIND, ACC_PUBLIC, C_ONBIND }, { M_ONSTART, ACC_PUBLIC, C_ONSTART } },
+    prompt_direct[] = { { M_KP_INIT, ACC_PUBLIC | ACC_CONSTRUCTOR, C_KP_INIT } },
+    prompt_virtual[] = { { M_KP_ERROR, ACC_PUBLIC | ACC_NATIVE, -1 }, { M_KP_SUCCEEDED, ACC_PUBLIC | ACC_NATIVE, -1 } };
+    at[0] = o->n;
     uleb(o, 0); uleb(o, 0); uleb(o, 3); uleb(o, 2);
-    for (int pass = 0; pass < 2; ++pass) {
-        const typeof(direct[0]) *list = pass ? virt : direct;
-        int count = pass ? 2 : 3, previous = 0;
-        for (int i = 0; i < count; ++i) {
-            uleb(o, (uint32_t)(list[i].method - previous)); previous = list[i].method;
-            uleb(o, list[i].flags); uleb(o, list[i].code < 0 ? 0 : code[list[i].code]);
-        }
-    }
+    emit_members(o, node_direct, 3, code); emit_members(o, node_virtual, 2, code);
+    at[1] = o->n;
+    uleb(o, 0); uleb(o, 0); uleb(o, 1); uleb(o, 2);
+    emit_members(o, prompt_direct, 1, code); emit_members(o, prompt_virtual, 2, code);
 }
 struct section { uint16_t type; uint32_t size, offset; };
 static void emit_map(struct out *o, const struct section *s, int count)
@@ -190,7 +218,7 @@ static void emit_map(struct out *o, const struct section *s, int count)
         put(o, s[i].type, 2); put(o, 0, 2); put(o, s[i].size, 4); put(o, s[i].offset, 4);
     }
 }
-/* s holds the header, string, type, prototype and method sections in that order. */
+/* s holds the header, string, type, prototype, method and class definition sections in that order. */
 static void emit_header(struct out *o, const struct section *s, uint32_t map, uint32_t class_def, uint32_t data)
 {
     memcpy(o->b, "dex\n035", 8);
@@ -199,7 +227,7 @@ static void emit_header(struct out *o, const struct section *s, uint32_t map, ui
     for (int i = 0; i < 2; ++i) { patch32(o, 56 + 8 * (uint32_t)i, s[i + 1].size); patch32(o, 60 + 8 * (uint32_t)i, s[i + 1].offset); }
     patch32(o, 72, s[3].size); patch32(o, 76, s[3].offset);
     patch32(o, 88, s[4].size); patch32(o, 92, s[4].offset);
-    patch32(o, 96, 1); patch32(o, 100, class_def);
+    patch32(o, 96, s[5].size); patch32(o, 100, class_def);
     patch32(o, 104, o->n - data); patch32(o, 108, data);
 }
 
@@ -207,7 +235,7 @@ static void emit_header(struct out *o, const struct section *s, uint32_t map, ui
 size_t dexgen_build(uint8_t *out, size_t cap)
 {
     static struct out o;
-    uint32_t params[P_COUNT], code[C_COUNT], ids[2], lists_at, class_data;
+    uint32_t params[P_COUNT], code[C_COUNT], ids[2], lists_at, class_data[2];
     memset(&o, 0, sizeof(o));
     for (int i = 0; i < HEADER_SIZE; ++i) put(&o, 0, 1);
     uint32_t string_ids = o.n;
@@ -215,21 +243,23 @@ size_t dexgen_build(uint8_t *out, size_t cap)
     uint32_t method_ids = o.n;
     for (int i = 0; i < M_COUNT; ++i) { put(&o, methods[i].cls, 2); put(&o, methods[i].proto, 2); put(&o, methods[i].name, 4); }
     uint32_t class_def = o.n;
-    put(&o, T_NODE, 4); put(&o, ACC_PUBLIC | ACC_FINAL, 4); put(&o, T_SERVICE, 4); put(&o, 0, 4);
-    put(&o, (uint32_t)NO_INDEX, 4); put(&o, 0, 4); put(&o, 0, 4); put(&o, 0, 4);
+    static const struct { uint8_t cls, super; } defs[2] = { { T_NODE, T_SERVICE }, { T_KEYPROMPT, T_CALLBACK } };
+    for (int i = 0; i < 2; ++i) {
+        put(&o, defs[i].cls, 4); put(&o, ACC_PUBLIC | ACC_FINAL, 4); put(&o, defs[i].super, 4); put(&o, 0, 4);
+        put(&o, (uint32_t)NO_INDEX, 4); put(&o, 0, 4); put(&o, 0, 4); put(&o, 0, 4);
+    }
     uint32_t data = o.n, string_data = o.n;
     emit_strings(&o, string_ids);
     emit_lists(&o, params, &lists_at);
     emit_code(&o, code);
-    class_data = o.n;
-    emit_class_data(&o, code);
-    patch32(&o, class_def + 24, class_data);
+    emit_class_data(&o, code, class_data);
+    for (uint32_t i = 0; i < 2; ++i) patch32(&o, class_def + 32 * i + 24, class_data[i]);
     uint32_t map = (o.n + 3) & ~3u;
     const struct section sections[] = {
         { 0x0000, 1, 0 }, { 0x0001, S_COUNT, string_ids }, { 0x0002, T_COUNT, ids[0] },
-        { 0x0003, P_COUNT, ids[1] }, { 0x0005, M_COUNT, method_ids }, { 0x0006, 1, class_def },
+        { 0x0003, P_COUNT, ids[1] }, { 0x0005, M_COUNT, method_ids }, { 0x0006, 2, class_def },
         { 0x2002, S_COUNT, string_data }, { 0x1001, L_COUNT, lists_at }, { 0x2001, C_COUNT, code[0] },
-        { 0x2000, 1, class_data }, { 0x1000, 1, map }
+        { 0x2000, 2, class_data[0] }, { 0x1000, 1, map }
     };
     emit_map(&o, sections, (int)(sizeof(sections) / sizeof(sections[0])));
     emit_header(&o, sections, map, class_def, data);

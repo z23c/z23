@@ -6,6 +6,7 @@
 #include "clip_screen.h"
 #include "controller.h"
 #include "jni_util.h"
+#include "device_key.h"
 #ifdef ZAPP_DEVKEY_PROBE
 #include "device_key_probe.h"
 #endif
@@ -416,6 +417,7 @@ static void detach_activity(JNIEnv *env)
 static void destroy(ANativeActivity *activity)
 {
     JNIEnv *env = activity->env;
+    zapp_devkey_jni_abandon(env);
     pthread_mutex_lock(&lock);
     bool owner = active && (*env)->IsSameObject(env, active, activity->clazz);
     pthread_mutex_unlock(&lock);

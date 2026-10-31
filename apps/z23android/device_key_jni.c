@@ -4,11 +4,20 @@
 #include "base/cleanse.h"
 #include "jni_util.h"
 #include <stdarg.h>
+#include <pthread.h>
 #include <string.h>
 
-#define ALIAS "z23.wallet.device-key.v1"
-#define AAD "z23.wallet.device-key.v1"
-#define AUTH_WINDOW_SECONDS 30
+#define ALIAS "z23.wallet.device-key.v2"
+#define OLD_ALIAS "z23.wallet.device-key.v1"
+#define AAD "z23.wallet.device-key.v2"
+#define PROMPT_CLASS "org.z23.nativeapp.KeyPrompt"
+#define PROMPT_TIMEOUT_MS 120000u
+/* Per-operation authentication: no validity window. Keystore binds each operation to one fresh
+ * authentication or refuses it. */
+#define AUTH_EVERY_USE 0
+#define MIN_API 30
+/* BiometricManager.Authenticators.BIOMETRIC_STRONG | DEVICE_CREDENTIAL, the same two sources as AUTH_TYPES. */
+#define PROMPT_AUTHENTICATORS 0x800F
 /* KeyProperties.PURPOSE_ENCRYPT | PURPOSE_DECRYPT, and AUTH_BIOMETRIC_STRONG | AUTH_DEVICE_CREDENTIAL. */
 #define PURPOSES 3
 #define AUTH_TYPES 3
@@ -78,7 +87,6 @@ static bool message_is(JNIEnv *env, jthrowable thrown, const char *text)
 static unsigned link_kinds(JNIEnv *env, jthrowable thrown)
 {
     static const struct { const char *name; unsigned kind; } known[] = {
-        {"android/security/keystore/UserNotAuthenticatedException", ZAPP_DEVKEY_EX_NOT_AUTHENTICATED},
         {"android/security/keystore/KeyPermanentlyInvalidatedException", ZAPP_DEVKEY_EX_PERMANENTLY_INVALIDATED},
         {"java/security/UnrecoverableKeyException", ZAPP_DEVKEY_EX_UNRECOVERABLE_KEY},
         {"javax/crypto/AEADBadTagException", ZAPP_DEVKEY_EX_BAD_TAG},
@@ -187,18 +195,28 @@ static jobject key_spec(JNIEnv *env, bool strongbox)
         builder_step(env, builder, "setEncryptionPaddings", BUILDER_SIG("[Ljava/lang/String;"), paddings) &&
         builder_step(env, builder, "setKeySize", BUILDER_SIG("I"), 256) &&
         builder_step(env, builder, "setUserAuthenticationRequired", BUILDER_SIG("Z"), JNI_TRUE) &&
-        builder_step(env, builder, "setUserAuthenticationParameters", BUILDER_SIG("II"), AUTH_WINDOW_SECONDS, AUTH_TYPES) &&
+        builder_step(env, builder, "setUserAuthenticationParameters", BUILDER_SIG("II"), AUTH_EVERY_USE, AUTH_TYPES) &&
         builder_step(env, builder, "setUnlockedDeviceRequired", BUILDER_SIG("Z"), JNI_TRUE) &&
         builder_step(env, builder, "setInvalidatedByBiometricEnrollment", BUILDER_SIG("Z"), JNI_FALSE) &&
         builder_step(env, builder, "setIsStrongBoxBacked", BUILDER_SIG("Z"), strongbox ? JNI_TRUE : JNI_FALSE);
     jobject spec = ok ? call_object(env, builder, "build", "()Landroid/security/keystore/KeyGenParameterSpec;") : NULL;
     return zj_clean(env) ? spec : NULL;
 }
+/* Build.VERSION.SDK_INT, or 0 when it cannot be read. */
+static jint api_level(JNIEnv *env)
+{
+    jclass version = (*env)->FindClass(env, "android/os/Build$VERSION");
+    jfieldID field = zj_clean(env) && version ? (*env)->GetStaticFieldID(env, version, "SDK_INT", "I") : NULL;
+    jint level = field ? (*env)->GetStaticIntField(env, version, field) : 0;
+    return zj_clean(env) ? level : 0;
+}
+/* Per-operation authentication with a device credential needs API 30. An older release gets no key. */
 static status_t jni_create_key(void *context, bool strongbox)
 {
     JNIEnv *env = ((struct zapp_devkey_jni *)context)->env;
     status_t st = ZAPP_DEVKEY_ERROR;
     if (!frame_begin(env)) return ZAPP_DEVKEY_ERROR;
+    if (api_level(env) < MIN_API) { frame_end(env); return ZAPP_DEVKEY_ERROR; }
     jclass generator = (*env)->FindClass(env, "javax/crypto/KeyGenerator");
     jstring algorithm = zj_clean(env) ? (*env)->NewStringUTF(env, "AES") : NULL;
     jstring provider = algorithm ? (*env)->NewStringUTF(env, "AndroidKeyStore") : NULL;
@@ -235,8 +253,22 @@ static enum zapp_devkey_level level_of(jint security_level)
     default: return ZAPP_DEVKEY_LEVEL_UNKNOWN;
     }
 }
-/* Reads the security level of the stored key from its KeyInfo. */
-static bool key_info_level(JNIEnv *env, jobject key, enum zapp_devkey_level *level)
+static bool info_int(JNIEnv *env, jobject info, const char *name, jint *value)
+{
+    jmethodID get = zj_method(env, info, name, "()I");
+    *value = get ? (*env)->CallIntMethod(env, info, get) : 0;
+    return get && zj_clean(env);
+}
+static bool info_flag(JNIEnv *env, jobject info, const char *name, bool *value)
+{
+    jmethodID get = zj_method(env, info, name, "()Z");
+    *value = get && (*env)->CallBooleanMethod(env, info, get);
+    return get && zj_clean(env);
+}
+/* Reads the security level and the authentication policy of the stored key from its KeyInfo. The key
+ * is per-use only when authentication is required with no validity window, for both sources, and
+ * the secure hardware enforces it. */
+static bool key_info_policy(JNIEnv *env, jobject key, enum zapp_devkey_level *level, bool *per_use)
 {
     jclass factory = (*env)->FindClass(env, "javax/crypto/SecretKeyFactory");
     jclass info_cls = zj_clean(env) && factory ? (*env)->FindClass(env, "android/security/keystore/KeyInfo") : NULL;
@@ -246,19 +278,25 @@ static bool key_info_level(JNIEnv *env, jobject key, enum zapp_devkey_level *lev
         "(Ljava/lang/String;Ljava/lang/String;)Ljavax/crypto/SecretKeyFactory;", algorithm, provider) : NULL;
     jobject info = zj_clean(env) && maker ? call_object(env, maker, "getKeySpec",
         "(Ljavax/crypto/SecretKey;Ljava/lang/Class;)Ljava/security/spec/KeySpec;", key, info_cls) : NULL;
-    jmethodID get = zj_clean(env) && info ? zj_method(env, info, "getSecurityLevel", "()I") : NULL;
-    jint value = get ? (*env)->CallIntMethod(env, info, get) : 0;
-    if (!get || !zj_clean(env)) return false;
-    *level = level_of(value);
+    jint security = 0, seconds = 0, types = 0;
+    bool required = false, enforced = false;
+    bool read = zj_clean(env) && info && info_int(env, info, "getSecurityLevel", &security) &&
+        info_flag(env, info, "isUserAuthenticationRequired", &required) &&
+        info_int(env, info, "getUserAuthenticationValidityDurationSeconds", &seconds) &&
+        info_int(env, info, "getUserAuthenticationType", &types) &&
+        info_flag(env, info, "isUserAuthenticationRequirementEnforcedBySecureHardware", &enforced);
+    if (!read) return false;
+    *level = level_of(security);
+    *per_use = required && seconds == AUTH_EVERY_USE && types == AUTH_TYPES && enforced;
     return true;
 }
-static status_t jni_key_level(void *context, enum zapp_devkey_level *level)
+static status_t jni_key_policy(void *context, enum zapp_devkey_level *level, bool *per_use)
 {
     JNIEnv *env = ((struct zapp_devkey_jni *)context)->env;
     status_t st = ZAPP_DEVKEY_ERROR;
     if (!frame_begin(env)) return st;
     jobject key = stored_key(env, &st);
-    if (key) st = key_info_level(env, key, level) ? ZAPP_DEVKEY_OK : ZAPP_DEVKEY_ERROR;
+    if (key) st = key_info_policy(env, key, level, per_use) ? ZAPP_DEVKEY_OK : ZAPP_DEVKEY_ERROR;
     frame_end(env);
     return st;
 }
@@ -290,25 +328,159 @@ static bool seal_copy(JNIEnv *env, jobject cipher, jbyteArray output, uint8_t iv
     if (!copied) { memory_cleanse(sealed, ZAPP_DEVKEY_SEALED); memory_cleanse(iv, ZAPP_DEVKEY_IV); }
     return copied;
 }
+
+/* The prompt in flight. The answering callbacks run on a Java executor thread and the abandon hook on
+ * the UI thread; the references and the ticket they match against are guarded by refs_lock. A
+ * callback object that is not the current one belongs to an earlier, finished prompt and is ignored. */
+static struct zapp_devkey_wait prompt_wait = ZAPP_DEVKEY_WAIT_INIT;
+static pthread_mutex_t refs_lock = PTHREAD_MUTEX_INITIALIZER;
+static jclass prompt_class;
+static jobject current_callback, current_cancel;
+static unsigned long current_ticket;
+
+static void answer_from(JNIEnv *env, jobject self, enum zapp_devkey_answer answer)
+{
+    pthread_mutex_lock(&refs_lock);
+    bool mine = current_callback && (*env)->IsSameObject(env, self, current_callback);
+    unsigned long ticket = current_ticket;
+    pthread_mutex_unlock(&refs_lock);
+    if (mine) (void)zapp_devkey_wait_answer(&prompt_wait, ticket, answer);
+}
+/* Implementations of the two native methods of org.z23.nativeapp.KeyPrompt. They only record the
+ * answer and wake the waiting worker: no wallet logic and no key material runs on the callback thread. */
+static void prompt_succeeded(JNIEnv *env, jobject self, jobject result)
+{
+    (void)result;
+    answer_from(env, self, ZAPP_DEVKEY_ANSWER_SUCCEEDED);
+}
+static void prompt_error(JNIEnv *env, jobject self, jint code, jobject text)
+{
+    (void)text;
+    answer_from(env, self, zapp_devkey_answer_for_error(code));
+}
+/* The KeyPrompt class, loaded through the activity's class loader (the dex lives in the app, not on
+ * the system loader that FindClass uses from a native thread) with its natives registered once. */
+static jclass load_prompt_class(JNIEnv *env, jobject activity)
+{
+    static const JNINativeMethod natives[] = {
+        {"onAuthenticationSucceeded", "(Landroid/hardware/biometrics/BiometricPrompt$AuthenticationResult;)V", (void *)prompt_succeeded},
+        {"onAuthenticationError", "(ILjava/lang/CharSequence;)V", (void *)prompt_error}};
+    pthread_mutex_lock(&refs_lock);
+    jclass local = prompt_class ? (*env)->NewLocalRef(env, prompt_class) : NULL;
+    if (!local) {
+        jobject loader = call_object(env, activity, "getClassLoader", "()Ljava/lang/ClassLoader;");
+        jstring name = zj_clean(env) && loader ? (*env)->NewStringUTF(env, PROMPT_CLASS) : NULL;
+        jclass found = name ? (jclass)call_object(env, loader, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;", name) : NULL;
+        if (zj_clean(env) && found && (*env)->RegisterNatives(env, found, natives, 2) == JNI_OK && zj_clean(env)) {
+            prompt_class = (*env)->NewGlobalRef(env, found);
+            local = found;
+        }
+        (void)zj_clean(env);
+    }
+    pthread_mutex_unlock(&refs_lock);
+    return local;
+}
+static const char *purpose_title(enum zapp_devkey_purpose purpose)
+{
+    switch (purpose) {
+    case ZAPP_DEVKEY_PURPOSE_CREATE: return "Protect this wallet";
+    case ZAPP_DEVKEY_PURPOSE_UNLOCK: return "Unlock this wallet";
+    default: return "Authorise this payment";
+    }
+}
+#define PROMPT_BUILDER "android/hardware/biometrics/BiometricPrompt$Builder"
+/* The system prompt for the purpose, over fixed text only. */
+static jobject build_prompt(JNIEnv *env, jobject activity, enum zapp_devkey_purpose purpose)
+{
+    jstring title = (*env)->NewStringUTF(env, purpose_title(purpose));
+    jobject builder = title ? new_object(env, PROMPT_BUILDER, "(Landroid/content/Context;)V", activity) : NULL;
+    bool ok = builder &&
+        builder_step(env, builder, "setTitle", "(Ljava/lang/CharSequence;)L" PROMPT_BUILDER ";", title) &&
+        builder_step(env, builder, "setAllowedAuthenticators", "(I)L" PROMPT_BUILDER ";", PROMPT_AUTHENTICATORS);
+    jobject prompt = ok ? call_object(env, builder, "build", "()Landroid/hardware/biometrics/BiometricPrompt;") : NULL;
+    return zj_clean(env) ? prompt : NULL;
+}
+/* Shows one BiometricPrompt over a CryptoObject that holds the initialised cipher and waits for the
+ * owner. OK means Keystore has bound this one operation to a fresh authentication; the caller then
+ * runs the operation on the same cipher. Nothing the callbacks do touches key material. */
+static status_t authenticate_once(JNIEnv *env, jobject activity, jobject cipher, enum zapp_devkey_purpose purpose)
+{
+    jclass klass = load_prompt_class(env, activity);
+    jobject prompt = klass ? build_prompt(env, activity, purpose) : NULL;
+    jobject crypto = prompt ? new_object(env, "android/hardware/biometrics/BiometricPrompt$CryptoObject", "(Ljavax/crypto/Cipher;)V", cipher) : NULL;
+    jobject cancel = crypto ? new_object(env, "android/os/CancellationSignal", "()V") : NULL;
+    jclass pool = cancel ? (*env)->FindClass(env, "java/util/concurrent/Executors") : NULL;
+    jobject executor = zj_clean(env) && pool ? call_static(env, pool, "newSingleThreadExecutor", "()Ljava/util/concurrent/ExecutorService;") : NULL;
+    jmethodID construct = executor ? (*env)->GetMethodID(env, klass, "<init>", "()V") : NULL;
+    jobject callback = zj_clean(env) && construct ? (*env)->NewObject(env, klass, construct) : NULL;
+    if (!zj_clean(env) || !callback) {
+        if (executor) (void)call_void(env, executor, "shutdown", "()V");
+        return ZAPP_DEVKEY_ERROR;
+    }
+    unsigned long ticket = zapp_devkey_wait_begin(&prompt_wait);
+    if (!ticket) { (void)call_void(env, executor, "shutdown", "()V"); return ZAPP_DEVKEY_ERROR; }
+    pthread_mutex_lock(&refs_lock);
+    current_callback = (*env)->NewGlobalRef(env, callback);
+    current_cancel = (*env)->NewGlobalRef(env, cancel);
+    current_ticket = ticket;
+    pthread_mutex_unlock(&refs_lock);
+    if (!call_void(env, prompt, "authenticate",
+            "(Landroid/hardware/biometrics/BiometricPrompt$CryptoObject;Landroid/os/CancellationSignal;"
+            "Ljava/util/concurrent/Executor;Landroid/hardware/biometrics/BiometricPrompt$AuthenticationCallback;)V",
+            crypto, cancel, executor, callback)) {
+        (void)zj_clean(env);
+        (void)zapp_devkey_wait_answer(&prompt_wait, ticket, ZAPP_DEVKEY_ANSWER_FAILED);
+    }
+    enum zapp_devkey_answer answer = zapp_devkey_wait_end(&prompt_wait, ticket, PROMPT_TIMEOUT_MS);
+    if (answer == ZAPP_DEVKEY_ANSWER_TIMED_OUT) (void)call_void(env, cancel, "cancel", "()V");
+    pthread_mutex_lock(&refs_lock);
+    jobject stale_callback = current_callback, stale_cancel = current_cancel;
+    current_callback = current_cancel = NULL;
+    current_ticket = 0;
+    pthread_mutex_unlock(&refs_lock);
+    if (stale_callback) (*env)->DeleteGlobalRef(env, stale_callback);
+    if (stale_cancel) (*env)->DeleteGlobalRef(env, stale_cancel);
+    (void)call_void(env, executor, "shutdown", "()V");
+    (void)zj_clean(env);
+    return zapp_devkey_status_for_answer(answer);
+}
+void zapp_devkey_jni_abandon(JNIEnv *env)
+{
+    pthread_mutex_lock(&refs_lock);
+    jobject cancel = current_cancel ? (*env)->NewLocalRef(env, current_cancel) : NULL;
+    pthread_mutex_unlock(&refs_lock);
+    (void)zapp_devkey_wait_abandon(&prompt_wait);
+    if (cancel) {
+        (void)call_void(env, cancel, "cancel", "()V");
+        (*env)->DeleteLocalRef(env, cancel);
+    }
+    (void)zj_clean(env);
+}
+
 static status_t jni_seal(void *context, const uint8_t *plain, size_t len, uint8_t iv[ZAPP_DEVKEY_IV], uint8_t sealed[ZAPP_DEVKEY_SEALED])
 {
-    JNIEnv *env = ((struct zapp_devkey_jni *)context)->env;
+    struct zapp_devkey_jni *state = context;
+    JNIEnv *env = state->env;
     status_t st = ZAPP_DEVKEY_ERROR;
     if (!frame_begin(env)) return st;
     jobject key = stored_key(env, &st);
     jobject cipher = key ? cipher_for(env, 1, key, NULL) : NULL;
     if (key && !cipher) st = failed(env);
-    jbyteArray input = cipher ? bytes_new(env, plain, len) : NULL;
+    if (cipher) st = authenticate_once(env, state->activity, cipher, ZAPP_DEVKEY_PURPOSE_CREATE);
+    jbyteArray input = st == ZAPP_DEVKEY_OK ? bytes_new(env, plain, len) : NULL;
     jbyteArray output = input ? cipher_run(env, cipher, input) : NULL;
     if (input && !output) st = failed(env);
     bytes_wipe(env, input);
     if (output) st = seal_copy(env, cipher, output, iv, sealed) ? ZAPP_DEVKEY_OK : ZAPP_DEVKEY_ERROR;
+    else if (st == ZAPP_DEVKEY_OK) st = ZAPP_DEVKEY_ERROR;
     frame_end(env);
     return st;
 }
-static status_t jni_open(void *context, const uint8_t iv[ZAPP_DEVKEY_IV], const uint8_t sealed[ZAPP_DEVKEY_SEALED], uint8_t *plain, size_t cap)
+static status_t jni_open(void *context, enum zapp_devkey_purpose purpose, const uint8_t iv[ZAPP_DEVKEY_IV],
+                         const uint8_t sealed[ZAPP_DEVKEY_SEALED], uint8_t *plain, size_t cap)
 {
-    JNIEnv *env = ((struct zapp_devkey_jni *)context)->env;
+    struct zapp_devkey_jni *state = context;
+    JNIEnv *env = state->env;
     status_t st = ZAPP_DEVKEY_ERROR;
     if (!frame_begin(env)) return st;
     jobject key = stored_key(env, &st);
@@ -317,42 +489,35 @@ static status_t jni_open(void *context, const uint8_t iv[ZAPP_DEVKEY_IV], const 
     bytes_wipe(env, nonce);
     jobject cipher = params ? cipher_for(env, 2, key, params) : NULL;
     if (params && !cipher) st = failed(env);
-    jbyteArray input = cipher ? bytes_new(env, sealed, ZAPP_DEVKEY_SEALED) : NULL;
+    if (cipher) st = authenticate_once(env, state->activity, cipher, purpose);
+    jbyteArray input = st == ZAPP_DEVKEY_OK ? bytes_new(env, sealed, ZAPP_DEVKEY_SEALED) : NULL;
     jbyteArray output = input ? cipher_run(env, cipher, input) : NULL;
     if (input && !output) st = failed(env);
     bytes_wipe(env, input);
     if (output) st = bytes_take(env, output, plain, cap) ? ZAPP_DEVKEY_OK : ZAPP_DEVKEY_ERROR;
+    else if (st == ZAPP_DEVKEY_OK) st = ZAPP_DEVKEY_ERROR;
     frame_end(env);
     return st;
 }
+/* Removes the current key and the key of the earlier 30 second window design, if one is left. */
 static void jni_delete_key(void *context)
 {
+    static const char *const aliases[] = {ALIAS, OLD_ALIAS};
     JNIEnv *env = ((struct zapp_devkey_jni *)context)->env;
     if (!frame_begin(env)) return;
     jclass store = (*env)->FindClass(env, "java/security/KeyStore");
     jstring type = zj_clean(env) ? (*env)->NewStringUTF(env, "AndroidKeyStore") : NULL;
     jobject keystore = type ? call_static(env, store, "getInstance", "(Ljava/lang/String;)Ljava/security/KeyStore;", type) : NULL;
-    jstring alias = keystore && call_void(env, keystore, "load", "(Ljava/security/KeyStore$LoadStoreParameter;)V", NULL) ?
-        (*env)->NewStringUTF(env, ALIAS) : NULL;
-    if (alias) (void)call_void(env, keystore, "deleteEntry", "(Ljava/lang/String;)V", alias);
+    bool loaded = keystore && call_void(env, keystore, "load", "(Ljava/security/KeyStore$LoadStoreParameter;)V", NULL);
+    for (size_t at = 0; loaded && at < sizeof(aliases) / sizeof(aliases[0]); ++at) {
+        jstring alias = (*env)->NewStringUTF(env, aliases[at]);
+        if (alias) (void)call_void(env, keystore, "deleteEntry", "(Ljava/lang/String;)V", alias);
+    }
     frame_end(env);
 }
 void zapp_devkey_jni_ops(struct zapp_devkey_ops *ops, struct zapp_devkey_jni *state)
 {
     /* No random hook: the module draws from getrandom. */
-    *ops = (struct zapp_devkey_ops){state, NULL, jni_device_secure, jni_create_key, jni_key_level,
+    *ops = (struct zapp_devkey_ops){state, NULL, jni_device_secure, jni_create_key, jni_key_policy,
                                     jni_seal, jni_open, jni_delete_key};
-}
-
-bool zapp_devkey_confirm_credential(JNIEnv *env, jobject activity)
-{
-    if (!frame_begin(env)) return false;
-    jstring name = (*env)->NewStringUTF(env, "keyguard");
-    jobject guard = name ? call_object(env, activity, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", name) : NULL;
-    jstring title = zj_clean(env) ? (*env)->NewStringUTF(env, "Unlock Z23 wallet") : NULL;
-    jobject intent = guard && title ? call_object(env, guard, "createConfirmDeviceCredentialIntent",
-        "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/Intent;", title, NULL) : NULL;
-    bool started = zj_clean(env) && intent && call_void(env, activity, "startActivity", "(Landroid/content/Intent;)V", intent);
-    frame_end(env);
-    return started;
 }

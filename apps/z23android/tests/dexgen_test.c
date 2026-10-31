@@ -29,8 +29,8 @@ static void test_header(const uint8_t *d, size_t n)
     dexgen_sha1(d + 32, n - 32, digest);
     CHECK(!memcmp(d + 12, digest, 20));
     CHECK(rd32(d + 56) == S_COUNT && rd32(d + 64) == T_COUNT && rd32(d + 72) == P_COUNT);
-    CHECK(rd32(d + 80) == 0 && rd32(d + 88) == M_COUNT && rd32(d + 96) == 1);
-    CHECK(rd32(d + 108) == rd32(d + 100) + 32 && rd32(d + 104) == n - rd32(d + 108));
+    CHECK(rd32(d + 80) == 0 && rd32(d + 88) == M_COUNT && rd32(d + 96) == 2);
+    CHECK(rd32(d + 108) == rd32(d + 100) + 64 && rd32(d + 104) == n - rd32(d + 108));
 }
 /* The string at index i, read from its string_data item. */
 static const char *string_at(const uint8_t *d, uint32_t i)
@@ -48,6 +48,8 @@ static void test_sorted_ids(const uint8_t *d)
               (rd32(a + 4) == rd32(b + 4) && rd16(a + 2) < rd16(b + 2)))));
     }
     CHECK(!strcmp(string_at(d, rd32(d + rd32(d + 68) + 4 * T_NODE)), "Lorg/z23/nativeapp/NodeService;"));
+    CHECK(!strcmp(string_at(d, rd32(d + rd32(d + 68) + 4 * T_KEYPROMPT)), "Lorg/z23/nativeapp/KeyPrompt;"));
+    CHECK(!strcmp(string_at(d, rd32(d + rd32(d + 68) + 4 * T_CALLBACK)), "Landroid/hardware/biometrics/BiometricPrompt$AuthenticationCallback;"));
 }
 static void test_map(const uint8_t *d, size_t n)
 {
@@ -60,7 +62,7 @@ static void test_map(const uint8_t *d, size_t n)
         previous = at;
         if (rd16(item) == 0x1000) CHECK(at == off && rd32(item + 4) == 1);
         if (rd16(item) == 0x0001) CHECK(at == rd32(d + 60) && rd32(item + 4) == S_COUNT);
-        if (rd16(item) == 0x2001) CHECK(rd32(item + 4) == 4 && at % 4 == 0);
+        if (rd16(item) == 0x2001) CHECK(rd32(item + 4) == C_COUNT && at % 4 == 0);
     }
 }
 static void test_dexdump(const uint8_t *d, size_t n, const char *scratch, const char *dexdump)

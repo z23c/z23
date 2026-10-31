@@ -7,13 +7,15 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <sys/random.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #define BLOB_HEADER 6u
 #define BLOB_SIZE (BLOB_HEADER + ZAPP_DEVKEY_IV + ZAPP_DEVKEY_SEALED)
-static const uint8_t magic[4] = {'Z', 'D', 'K', '1'};
+static const uint8_t magic[4] = {'Z', 'D', 'K', '2'};
+static const uint8_t magic_v1[4] = {'Z', 'D', 'K', '1'};
 
 static bool system_random(uint8_t *out, size_t len)
 {
@@ -28,8 +30,8 @@ static bool system_random(uint8_t *out, size_t len)
 
 const char *zapp_devkey_status_name(enum zapp_devkey_status status)
 {
-    static const char *const names[] = {"ok", "needs_authentication", "invalidated", "no_screen_lock",
-        "not_hardware", "not_found", "exists", "corrupt", "strongbox_unavailable", "error"};
+    static const char *const names[] = {"ok", "declined", "invalidated", "no_screen_lock", "not_hardware",
+        "not_per_use", "not_found", "exists", "corrupt", "old_format", "strongbox_unavailable", "error"};
     return (unsigned)status < sizeof(names) / sizeof(names[0]) ? names[status] : "error";
 }
 const char *zapp_devkey_level_name(enum zapp_devkey_level level)
@@ -52,7 +54,6 @@ enum zapp_devkey_status zapp_devkey_classify_chain(const unsigned kinds[], size_
 {
     for (size_t at = 0; at < depth; ++at) {
         unsigned kind = kinds[at];
-        if (kind & ZAPP_DEVKEY_EX_NOT_AUTHENTICATED) return ZAPP_DEVKEY_NEEDS_AUTH;
         if (kind & ZAPP_DEVKEY_EX_PERMANENTLY_INVALIDATED) return ZAPP_DEVKEY_INVALIDATED;
         if (kind & ZAPP_DEVKEY_EX_UNRECOVERABLE_KEY) return at + 1 == depth && !(kind & ZAPP_DEVKEY_EX_UNKNOWN_ALGORITHM) ? ZAPP_DEVKEY_INVALIDATED : ZAPP_DEVKEY_ERROR;
         if (kind & ZAPP_DEVKEY_EX_BAD_TAG) return ZAPP_DEVKEY_CORRUPT;
@@ -68,20 +69,24 @@ static bool blob_exists(const char *path)
 enum zapp_devkey_status zapp_devkey_prepare(const struct zapp_devkey_ops *ops, const char *path, struct zapp_devkey_info *out)
 {
     struct zapp_devkey_info info = {ZAPP_DEVKEY_LEVEL_UNKNOWN, false};
-    bool created = false;
+    bool created = false, per_use = false;
     enum zapp_devkey_status st = ops->device_secure(ops->ctx);
     if (st != ZAPP_DEVKEY_OK) return st == ZAPP_DEVKEY_NO_SCREEN_LOCK ? st : ZAPP_DEVKEY_ERROR;
-    st = ops->key_level(ops->ctx, &info.level);
+    st = ops->key_policy(ops->ctx, &info.level, &per_use);
     if (st == ZAPP_DEVKEY_NOT_FOUND && path && blob_exists(path)) return ZAPP_DEVKEY_INVALIDATED;
     if (st == ZAPP_DEVKEY_NOT_FOUND) {
         st = create_best(ops, &info);
         created = st == ZAPP_DEVKEY_OK;
-        if (created) st = ops->key_level(ops->ctx, &info.level);
+        if (created) st = ops->key_policy(ops->ctx, &info.level, &per_use);
     }
     if (st != ZAPP_DEVKEY_OK) return st == ZAPP_DEVKEY_INVALIDATED ? st : ZAPP_DEVKEY_ERROR;
     if (info.level != ZAPP_DEVKEY_LEVEL_SECURE_HARDWARE && info.level != ZAPP_DEVKEY_LEVEL_STRONGBOX) {
         if (created) ops->delete_key(ops->ctx);
         return ZAPP_DEVKEY_NOT_HARDWARE;
+    }
+    if (!per_use) {
+        if (created) ops->delete_key(ops->ctx);
+        return ZAPP_DEVKEY_NOT_PER_USE;
     }
     if (out) *out = info;
     return ZAPP_DEVKEY_OK;
@@ -146,8 +151,19 @@ static enum zapp_devkey_status blob_load(const char *path, uint8_t blob[BLOB_SIZ
     bool whole = got == (ssize_t)BLOB_SIZE && read(fd, &extra, 1) == 0;
     (void)close(fd);
     if (!whole) return ZAPP_DEVKEY_CORRUPT;
+    if (!memcmp(blob, magic_v1, sizeof(magic_v1))) return ZAPP_DEVKEY_OLD_FORMAT;
     bool shaped = !memcmp(blob, magic, sizeof(magic)) && blob[4] == ZAPP_DEVKEY_IV && blob[5] == ZAPP_DEVKEY_SEALED;
     return shaped ? ZAPP_DEVKEY_OK : ZAPP_DEVKEY_CORRUPT;
+}
+
+/* The statuses an op may hand back for a prompted operation; anything else is an error. */
+static enum zapp_devkey_status refusal_or_ok(enum zapp_devkey_status st)
+{
+    switch (st) {
+    case ZAPP_DEVKEY_OK: case ZAPP_DEVKEY_DECLINED: case ZAPP_DEVKEY_INVALIDATED: case ZAPP_DEVKEY_NO_SCREEN_LOCK:
+    case ZAPP_DEVKEY_CORRUPT: return st;
+    default: return ZAPP_DEVKEY_ERROR;
+    }
 }
 
 enum zapp_devkey_status zapp_devkey_wrap_new(const struct zapp_devkey_ops *ops, const char *path,
@@ -158,7 +174,7 @@ enum zapp_devkey_status zapp_devkey_wrap_new(const struct zapp_devkey_ops *ops, 
     enum zapp_devkey_status st = blob_exists(path) ? ZAPP_DEVKEY_EXISTS : zapp_devkey_prepare(ops, path, NULL);
     if (st == ZAPP_DEVKEY_OK) {
         bool drawn = ops->random ? ops->random(ops->ctx, secret, ZAPP_DEVKEY_SECRET) : system_random(secret, ZAPP_DEVKEY_SECRET);
-        st = drawn ? ops->seal(ops->ctx, secret, ZAPP_DEVKEY_SECRET, iv, sealed) : ZAPP_DEVKEY_ERROR;
+        st = drawn ? refusal_or_ok(ops->seal(ops->ctx, secret, ZAPP_DEVKEY_SECRET, iv, sealed)) : ZAPP_DEVKEY_ERROR;
     }
     if (st == ZAPP_DEVKEY_OK) { blob_pack(blob, iv, sealed); st = blob_store(path, blob); }
     memory_cleanse(iv, sizeof(iv)); memory_cleanse(sealed, sizeof(sealed)); memory_cleanse(blob, sizeof(blob));
@@ -167,16 +183,18 @@ enum zapp_devkey_status zapp_devkey_wrap_new(const struct zapp_devkey_ops *ops, 
 }
 
 enum zapp_devkey_status zapp_devkey_unwrap(const struct zapp_devkey_ops *ops, const char *path,
-                                           uint8_t secret[ZAPP_DEVKEY_SECRET])
+                                           enum zapp_devkey_purpose purpose, uint8_t secret[ZAPP_DEVKEY_SECRET])
 {
     uint8_t blob[BLOB_SIZE];
     memory_cleanse(secret, ZAPP_DEVKEY_SECRET);
     enum zapp_devkey_status st = blob_load(path, blob);
     if (st == ZAPP_DEVKEY_OK) {
-        st = ops->open(ops->ctx, blob + BLOB_HEADER, blob + BLOB_HEADER + ZAPP_DEVKEY_IV, secret, ZAPP_DEVKEY_SECRET);
-        if (st == ZAPP_DEVKEY_NOT_FOUND) st = ZAPP_DEVKEY_INVALIDATED;
-        else if (st != ZAPP_DEVKEY_OK && st != ZAPP_DEVKEY_NEEDS_AUTH && st != ZAPP_DEVKEY_INVALIDATED &&
-                 st != ZAPP_DEVKEY_CORRUPT) st = ZAPP_DEVKEY_ERROR;
+        st = ops->device_secure(ops->ctx);
+        if (st != ZAPP_DEVKEY_OK && st != ZAPP_DEVKEY_NO_SCREEN_LOCK) st = ZAPP_DEVKEY_ERROR;
+    }
+    if (st == ZAPP_DEVKEY_OK) {
+        st = ops->open(ops->ctx, purpose, blob + BLOB_HEADER, blob + BLOB_HEADER + ZAPP_DEVKEY_IV, secret, ZAPP_DEVKEY_SECRET);
+        st = st == ZAPP_DEVKEY_NOT_FOUND ? ZAPP_DEVKEY_INVALIDATED : refusal_or_ok(st);
     }
     memory_cleanse(blob, sizeof(blob));
     if (st != ZAPP_DEVKEY_OK) memory_cleanse(secret, ZAPP_DEVKEY_SECRET);
@@ -187,4 +205,68 @@ void zapp_devkey_discard(const struct zapp_devkey_ops *ops, const char *path)
 {
     (void)unlink(path);
     ops->delete_key(ops->ctx);
+}
+
+enum zapp_devkey_answer zapp_devkey_answer_for_error(int biometric_error)
+{
+    enum { CANCELED = 5, USER_CANCELED = 10, NO_BIOMETRICS = 11, NEGATIVE_BUTTON = 13, NO_DEVICE_CREDENTIAL = 14 };
+    switch (biometric_error) {
+    case CANCELED: case USER_CANCELED: case NEGATIVE_BUTTON: return ZAPP_DEVKEY_ANSWER_DECLINED;
+    case NO_BIOMETRICS: case NO_DEVICE_CREDENTIAL: return ZAPP_DEVKEY_ANSWER_NO_LOCK;
+    default: return ZAPP_DEVKEY_ANSWER_FAILED;
+    }
+}
+enum zapp_devkey_status zapp_devkey_status_for_answer(enum zapp_devkey_answer answer)
+{
+    switch (answer) {
+    case ZAPP_DEVKEY_ANSWER_SUCCEEDED: return ZAPP_DEVKEY_OK;
+    case ZAPP_DEVKEY_ANSWER_DECLINED: case ZAPP_DEVKEY_ANSWER_ABANDONED: return ZAPP_DEVKEY_DECLINED;
+    case ZAPP_DEVKEY_ANSWER_NO_LOCK: return ZAPP_DEVKEY_NO_SCREEN_LOCK;
+    default: return ZAPP_DEVKEY_ERROR;
+    }
+}
+
+unsigned long zapp_devkey_wait_begin(struct zapp_devkey_wait *wait)
+{
+    pthread_mutex_lock(&wait->lock);
+    unsigned long ticket = 0;
+    if (!wait->ticket) {
+        ticket = wait->ticket = ++wait->next;
+        wait->answer = ZAPP_DEVKEY_ANSWER_NONE;
+    }
+    pthread_mutex_unlock(&wait->lock);
+    return ticket;
+}
+bool zapp_devkey_wait_answer(struct zapp_devkey_wait *wait, unsigned long ticket, enum zapp_devkey_answer answer)
+{
+    pthread_mutex_lock(&wait->lock);
+    bool taken = ticket && wait->ticket == ticket && wait->answer == ZAPP_DEVKEY_ANSWER_NONE;
+    if (taken) { wait->answer = answer; pthread_cond_broadcast(&wait->cond); }
+    pthread_mutex_unlock(&wait->lock);
+    return taken;
+}
+enum zapp_devkey_answer zapp_devkey_wait_end(struct zapp_devkey_wait *wait, unsigned long ticket, unsigned timeout_ms)
+{
+    struct timespec limit;
+    clock_gettime(CLOCK_MONOTONIC, &limit);
+    limit.tv_sec += timeout_ms / 1000u;
+    limit.tv_nsec += (long)(timeout_ms % 1000u) * 1000000L;
+    if (limit.tv_nsec >= 1000000000L) { limit.tv_sec++; limit.tv_nsec -= 1000000000L; }
+    pthread_mutex_lock(&wait->lock);
+    int rc = 0;
+    while (wait->ticket == ticket && wait->answer == ZAPP_DEVKEY_ANSWER_NONE && rc == 0)
+        rc = pthread_cond_clockwait(&wait->cond, &wait->lock, CLOCK_MONOTONIC, &limit);
+    enum zapp_devkey_answer answer = wait->ticket == ticket ? wait->answer : ZAPP_DEVKEY_ANSWER_FAILED;
+    if (answer == ZAPP_DEVKEY_ANSWER_NONE) answer = ZAPP_DEVKEY_ANSWER_TIMED_OUT;
+    if (wait->ticket == ticket) wait->ticket = 0;
+    pthread_mutex_unlock(&wait->lock);
+    return answer;
+}
+bool zapp_devkey_wait_abandon(struct zapp_devkey_wait *wait)
+{
+    pthread_mutex_lock(&wait->lock);
+    bool pending = wait->ticket && wait->answer == ZAPP_DEVKEY_ANSWER_NONE;
+    if (pending) { wait->answer = ZAPP_DEVKEY_ANSWER_ABANDONED; pthread_cond_broadcast(&wait->cond); }
+    pthread_mutex_unlock(&wait->lock);
+    return pending;
 }
