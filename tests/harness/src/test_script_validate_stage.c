@@ -20,6 +20,7 @@
 #include "util/blocker.h"
 #include "util/safe_alloc.h"
 #include "util/stage.h"
+#include "util/sync.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
@@ -328,6 +329,8 @@ static int sv_setup(const char *tag, int n, int upstream_fail_height,
     if (!progress_store_open(dir_out)) return 1;
 
     memset(ms, 0, sizeof(*ms));
+    /* A zeroed pthread mutex is only valid on Linux; Darwin needs it initialized. */
+    zcl_mutex_init(&ms->cs_main);
     active_chain_init(&ms->chain_active);
     if (!synth_chain_sv_build(sc, n)) return 2;
     active_chain_move_window_tip(&ms->chain_active, &sc->blocks[n - 1]);
@@ -345,6 +348,7 @@ static void sv_teardown(const char *dir, struct main_state *ms,
 {
     script_validate_stage_shutdown();
     active_chain_free(&ms->chain_active);
+    zcl_mutex_destroy(&ms->cs_main);
     synth_chain_sv_free(sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);

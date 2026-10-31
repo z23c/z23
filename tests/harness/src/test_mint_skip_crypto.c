@@ -40,6 +40,7 @@
 #include "util/blocker.h"
 #include "util/safe_alloc.h"
 #include "util/stage.h"
+#include "util/sync.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
@@ -594,6 +595,8 @@ static int run_fold(const char *tag, struct synth_chain *sc, bool skip,
     out->count = -1;
 
     memset(&ms, 0, sizeof(ms));
+    /* A zeroed pthread mutex is only valid on Linux; Darwin needs it initialized. */
+    zcl_mutex_init(&ms.cs_main);
     active_chain_init(&ms.chain_active);
     for (int h = 0; h < sc->n; h++)
         sc->blocks[h].nStatus = BLOCK_HAVE_DATA;
@@ -650,6 +653,7 @@ done:
     script_validate_stage_shutdown();
     mint_skip_crypto_set(false);        /* never leak the toggle to other tests */
     active_chain_free(&ms.chain_active);
+    zcl_mutex_destroy(&ms.cs_main);
     progress_store_close();
     test_cleanup_tmpdir(dir);
     return drained;
