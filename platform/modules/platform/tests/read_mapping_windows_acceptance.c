@@ -51,7 +51,7 @@ static bool write_expected_and_sync(int fd, const uint8_t *expected,
                                     size_t size)
 {
 #if defined(_WIN32)
-    if (_write(fd, expected, size) != size ||
+    if (_write(fd, expected, (unsigned)size) != (int)size ||
         _commit(fd) != 0) return false;
 #else
     if (write(fd, expected, size) != (ssize_t)size ||
