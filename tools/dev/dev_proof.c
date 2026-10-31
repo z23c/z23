@@ -1820,20 +1820,25 @@ static int dp_split_git(const char *root, const char *const argv[], char *out,
     return r.exit_code;
 }
 
-/* Nothing in the tree at `local` includes or embeds a file with this name. */
+/* No C-family source, header or include-like file at `local` (other than the
+ * added file itself) names the basename anywhere. A plain substring search, so
+ * an #include whose path sits on a continuation line, #embed, __has_include,
+ * __has_embed or a macro-pasted name are all caught without parsing them. A
+ * file of any other kind that names it is a build list, judged by the
+ * co-listing rule. A git failure answers false. */
 static bool dp_split_unreferenced(const struct dp_split_ctx *c,
-                                  const char *leaf)
+                                  const char *added)
 {
-    char pat[DP_SPLIT_LEAF_MAX * 2 + 24];
-    size_t n = (size_t)snprintf(pat, sizeof(pat), "(include|embed).*");
-    if (strlen(leaf) > DP_SPLIT_LEAF_MAX) return false;
-    for (const char *p = leaf; *p; p++) {
-        if (*p == '.') pat[n++] = '\\';
-        pat[n++] = *p;
-    }
-    pat[n] = '\0';
-    const char *argv[] = {"git", "grep", "-q", "-I", "-E", "-e", pat,
-                          c->local, "--", NULL};
+    char skip[PATH_MAX + 16];
+    const char *leaf = dp_split_leaf(added);
+    if (strlen(leaf) > DP_SPLIT_LEAF_MAX ||
+        snprintf(skip, sizeof(skip), ":(exclude)%s", added) >=
+            (int)sizeof(skip))
+        return false;
+    const char *argv[] = {"git", "grep", "-q", "-a", "-F", "-e", leaf,
+                          c->local, "--", "*.c", "*.h", "*.inc", "*.def",
+                          "*.S", "*.s", "*.i", "*.cc", "*.cpp", "*.hh",
+                          "*.hpp", "*.in", "*.y", "*.l", skip, NULL};
     return dp_split_git(c->root, argv, NULL, 0) == 1;
 }
 
@@ -1851,7 +1856,7 @@ static bool dp_split_listing_ok(const struct dp_split_ctx *c, char *listing,
             return false;
         const char *file = line + prefix;
         if (strcmp(file, added) == 0) continue;
-        const char *probe[] = {"git", "grep", "-q", "-F", "-e", sibling,
+        const char *probe[] = {"git", "grep", "-q", "-a", "-F", "-e", sibling,
                                c->local, "--", file, NULL};
         if (dp_split_git(c->root, probe, NULL, 0) != 0) return false;
         (*listed)++;
@@ -1859,20 +1864,45 @@ static bool dp_split_listing_ok(const struct dp_split_ctx *c, char *listing,
     return true;
 }
 
-/* At least one file lists the added path, and each lists the sibling too. */
+/* Every file other than `added` that names `term` also names `sibling_term`;
+ * with `need`, at least one file does. Any file kind counts, so a build list,
+ * generated list or document that names the new file but not the sibling
+ * keeps the row structural. */
 static bool dp_split_co_listed(const struct dp_split_ctx *c, const char *added,
-                               const char *sibling)
+                               const char *term, const char *sibling_term,
+                               bool need)
 {
     char *listing = zcl_malloc(ZCL_DEVLOOP_OUTPUT_MAX, "proof split listing");
     if (!listing) return false;
-    const char *argv[] = {"git", "grep", "-l", "-I", "-F", "-e", added,
+    const char *argv[] = {"git", "grep", "-l", "-a", "-F", "-e", term,
                           c->local, "--", NULL};
     size_t listed = 0;
-    bool ok = dp_split_git(c->root, argv, listing, ZCL_DEVLOOP_OUTPUT_MAX) == 0 &&
-              dp_split_listing_ok(c, listing, added, sibling, &listed) &&
-              listed > 0;
+    int rc = dp_split_git(c->root, argv, listing, ZCL_DEVLOOP_OUTPUT_MAX);
+    bool ok = rc == 1 ? !need
+                      : rc == 0 &&
+                        dp_split_listing_ok(c, listing, added, sibling_term,
+                                            &listed) &&
+                        (listed > 0 || !need);
     free(listing);
     return ok;
+}
+
+/* The path-less basename and the extension-less stem of the added file are
+ * both build-list spellings (`dir/x.c`, `$(D)/x.c`, `x.o`); each must be
+ * listed wherever the sibling's is, and the basename by at least one file. */
+static bool dp_split_listed_with(const struct dp_split_ctx *c, const char *added,
+                                 const char *sibling)
+{
+    char stem[DP_SPLIT_LEAF_MAX + 1], sstem[DP_SPLIT_LEAF_MAX + 1];
+    const char *leaf = dp_split_leaf(added), *sleaf = dp_split_leaf(sibling);
+    size_t n = strlen(leaf), sn = strlen(sleaf);
+    if (n > DP_SPLIT_LEAF_MAX || sn > DP_SPLIT_LEAF_MAX) return false;
+    memcpy(stem, leaf, n - 2);
+    stem[n - 2] = '\0';
+    memcpy(sstem, sleaf, sn - 2);
+    sstem[sn - 2] = '\0';
+    return dp_split_co_listed(c, added, leaf, sleaf, true) &&
+           dp_split_co_listed(c, added, stem, sstem, false);
 }
 
 /* One path's diff against base as text, read whole from a scratch file. */
@@ -2044,11 +2074,222 @@ static bool dp_split_funcs_has(const struct dp_split_funcs *f, const char *n)
     return false;
 }
 
-/* Every function `added` defines was defined in what the sibling lost. */
+/* ---- Fail-closed reading of the added file's definitions ----
+ *
+ * The added file's text is read whole (it is the '+' side of an added path),
+ * so its definitions are found by brace depth, not by line shape. Anything
+ * the reader cannot name with certainty sets `bad`: a '{' at file scope whose
+ * declarator is not "<type tokens> name(...)" with the first parameter list
+ * closing the declarator, a declarator carrying an attribute, typeof, pragma
+ * or function-pointer form, an all-capitals name (a macro), a macro-style
+ * invocation at file scope, an unterminated comment, string, directive or
+ * statement, an unbalanced brace, or a statement too long to hold. */
+#define DP_SPLIT_STMT_MAX 1024
+
+struct dp_split_parse {
+    const char *p;
+    int depth;
+    bool bol, bad;
+    char stmt[DP_SPLIT_STMT_MAX];
+    size_t slen;
+    struct dp_split_funcs *funcs;
+};
+
+static bool dp_split_blank(char c)
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+/* Pointer at the newline (or end) closing the logical line holding `p`. */
+static const char *dp_split_eol(const char *p)
+{
+    for (;;) {
+        const char *nl = strchr(p, '\n');
+        if (!nl) return p + strlen(p);
+        if (nl > p && nl[-1] == '\\') {
+            p = nl + 1;
+            continue;
+        }
+        return nl;
+    }
+}
+
+static const char *dp_split_skip_directive(const char *p)
+{
+    const char *end = dp_split_eol(p);
+    for (const char *q = p; q + 1 < end; q++)
+        if (q[0] == '/' && q[1] == '*') {
+            for (const char *r = q + 2; r + 1 < end; r++)
+                if (r[0] == '*' && r[1] == '/') return end;
+            return NULL;
+        }
+    return end;
+}
+
+static const char *dp_split_skip_quoted(const char *p)
+{
+    char quote = *p++;
+    while (*p && *p != '\n') {
+        if (*p == '\\' && p[1] && p[1] != '\n')
+            p += 2;
+        else if (*p == quote)
+            return p + 1;
+        else
+            p++;
+    }
+    return NULL;
+}
+
+static const char *dp_split_skip_block(const char *p)
+{
+    const char *end = strstr(p + 2, "*/");
+    return end ? end + 2 : NULL;
+}
+
+static void dp_split_stmt_add(struct dp_split_parse *s, char c)
+{
+    if (s->slen + 1 >= sizeof(s->stmt)) {
+        s->bad = true;
+        return;
+    }
+    s->stmt[s->slen++] = dp_split_blank(c) ? ' ' : c;
+    s->stmt[s->slen] = '\0';
+}
+
+/* The name of the function whose declarator is the trimmed text `st`: the
+ * identifier before the first '(' when that parameter list closes the
+ * declarator, a type token precedes it, and it is not all capitals. */
+static bool dp_split_name(const char *st, size_t n, const char **start,
+                          const char **end)
+{
+    const char *open = strchr(st, '('), *close = NULL;
+    int nest = 0;
+    for (const char *q = open; *q && !close; q++) {
+        nest += (*q == '(') - (*q == ')');
+        if (nest == 0) close = q;
+    }
+    if (!close || close != st + n - 1) return false;
+    *end = open;
+    while (*end > st && (*end)[-1] == ' ') (*end)--;
+    *start = *end;
+    while (*start > st && dp_split_ident((*start)[-1])) (*start)--;
+    if (*start == st || *start == *end || (**start >= '0' && **start <= '9'))
+        return false;
+    for (const char *q = *start; q < *end; q++)
+        if (*q >= 'a' && *q <= 'z') return true;
+    return false;
+}
+
+/* The declarator of a '{' at file scope: name it, or fail closed. */
+static void dp_split_declarator(struct dp_split_parse *s)
+{
+    static const char *const refuse[] = {"__attribute__", "typeof", "_Pragma",
+                                         "__declspec", "(*", "( *"};
+    char *st = s->stmt;
+    while (*st == ' ') st++;
+    size_t n = strlen(st);
+    while (n > 0 && st[n - 1] == ' ') st[--n] = '\0';
+    if (strchr(st, '=') || !strchr(st, '(')) return; /* object or aggregate */
+    for (size_t i = 0; i < sizeof(refuse) / sizeof(refuse[0]); i++)
+        if (strstr(st, refuse[i])) {
+            s->bad = true;
+            return;
+        }
+    const char *start, *end;
+    if (!dp_split_name(st, n, &start, &end))
+        s->bad = true;
+    else
+        dp_split_funcs_add(s->funcs, start, (size_t)(end - start));
+}
+
+/* A file-scope statement ended by ';': an invocation with no type tokens
+ * before the name is a macro that may define a function. */
+static void dp_split_statement(struct dp_split_parse *s)
+{
+    const char *st = s->stmt;
+    while (*st == ' ') st++;
+    const char *q = st;
+    while (dp_split_ident(*q)) q++;
+    size_t id = (size_t)(q - st);
+    while (*q == ' ') q++;
+    bool call = id > 0 && *q == '(';
+    bool assert_ok = (id == 13 && memcmp(st, "static_assert", 13) == 0) ||
+                     (id == 14 && memcmp(st, "_Static_assert", 14) == 0);
+    if (call && !assert_ok) s->bad = true;
+    s->slen = 0;
+    s->stmt[0] = '\0';
+}
+
+static void dp_split_char(struct dp_split_parse *s, char c)
+{
+    if (c == '\n')
+        s->bol = true;
+    else if (c != ' ' && c != '\t')
+        s->bol = false;
+    if (c == '{') {
+        if (s->depth++ == 0) dp_split_declarator(s);
+    } else if (c == '}') {
+        if (--s->depth < 0) s->bad = true;
+        if (s->depth == 0) s->slen = 0, s->stmt[0] = '\0';
+    } else if (s->depth > 0) {
+        return;
+    } else if (c == ';') {
+        dp_split_statement(s);
+    } else {
+        dp_split_stmt_add(s, c);
+    }
+}
+
+/* Consume one token (a comment, literal, directive or character). */
+static void dp_split_step(struct dp_split_parse *s)
+{
+    const char *p = s->p, *next = NULL;
+    if (p[0] == '/' && p[1] == '*')
+        next = dp_split_skip_block(p);
+    else if (p[0] == '/' && p[1] == '/')
+        next = dp_split_eol(p);
+    else if (p[0] == '"' || p[0] == '\'')
+        next = dp_split_skip_quoted(p);
+    else if (p[0] == '#' && s->bol)
+        next = dp_split_skip_directive(p);
+    else if (p[0] == '#' || p[0] == '`' || p[0] == '$')
+        next = NULL; /* a '#' mid-line outside a directive is not C we read */
+    else {
+        dp_split_char(s, p[0]);
+        s->p = p + 1;
+        return;
+    }
+    if (!next) {
+        s->bad = true;
+        return;
+    }
+    if (s->depth == 0) dp_split_stmt_add(s, ' ');
+    s->p = next;
+}
+
+/* Every function defined at file scope in `text`, or false when any part of
+ * the text could not be read with certainty. */
+static bool dp_split_parse_funcs(const char *text, struct dp_split_funcs *f)
+{
+    struct dp_split_parse *s = zcl_calloc(1, sizeof(*s), "proof split parse");
+    if (!s) return false;
+    s->p = text;
+    s->bol = true;
+    s->funcs = f;
+    while (*s->p && !s->bad) dp_split_step(s);
+    bool ok = !s->bad && s->depth == 0;
+    for (size_t i = 0; ok && i < s->slen; i++)
+        ok = dp_split_blank(s->stmt[i]);
+    free(s);
+    return ok;
+}
+
+/* Every function `added` defines (read fail-closed) was defined in what the
+ * sibling lost. */
 static bool dp_split_funcs_derive(const char *added, const char *removed)
 {
     struct dp_split_funcs from = {0}, gone = {0};
-    dp_split_funcs_scan(added, &from);
+    if (!dp_split_parse_funcs(added, &from)) return false;
     dp_split_funcs_scan(removed, &gone);
     if (from.overflow || gone.overflow || from.count == 0) return false;
     for (size_t i = 0; i < from.count; i++)
@@ -2077,7 +2318,7 @@ static bool dp_split_derives(const struct dp_split_ctx *c, const char *added,
     bool ok = removed && kept && dp_split_includes(c, sibling, kept, ZCL_DEVLOOP_OUTPUT_MAX) &&
               dp_split_funcs_derive(added_side, removed) &&
               dp_split_lines_derive(added_side, removed, kept) &&
-              dp_split_co_listed(c, added, sibling);
+              dp_split_listed_with(c, added, sibling);
     free(diff);
     free(removed);
     free(kept);
@@ -2091,7 +2332,7 @@ static bool dp_split_admit(const struct dp_split_ctx *c, const char **refs,
     const char *added = refs[i];
     if (!dp_split_name_safe(added) ||
         strlen(dp_split_leaf(added)) > DP_SPLIT_LEAF_MAX ||
-        !dp_split_unreferenced(c, dp_split_leaf(added)))
+        !dp_split_unreferenced(c, added))
         return false;
     char *diff = dp_split_diff(c, added);
     char *side = diff ? dp_split_side(diff, '+') : NULL;
@@ -9802,8 +10043,8 @@ static bool dp_worker_select(struct dp_worker *w, char *why, size_t why_len)
      * log. Without this a universal selection looks like an unexplained
      * whole-catalog run. */
     if (!proof_note_test_selection(&w->execution, &w->plan,
-                                   w->structure_widened, test_count,
-                                   host_gated)) {
+                                   w->structure_widened, w->split_closure,
+                                   test_count, host_gated)) {
         proof_why(why, why_len, "test_selection_note_unwritable");
         return false;
     }

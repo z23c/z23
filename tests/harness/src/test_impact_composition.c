@@ -6667,6 +6667,37 @@ static bool ic_split_edit_split_nobase(void)
            ic_split_w("Makefile", ic_split_make_after);
 }
 
+/* A function the reader cannot name (a macro-defined one) must keep the row
+ * universal even though every function it CAN name was removed. */
+static bool ic_split_edit_macrofn(void)
+{
+    return ic_split_w("core/a/big.c", ic_split_big_after) &&
+           ic_split_w("core/a/big_part.c",
+                      "/* big_part.c - split out of big.c */\n"
+                      "#include \"a.h\"\n\n"
+                      "/* first helper does one thing */\n"
+                      "int first_helper(int x)\n{\n    return x + 1;\n}\n\n"
+                      "DEFINE_HELPER(second_helper);\n") &&
+           ic_split_w("Makefile", ic_split_make_after);
+}
+
+/* An #include whose path sits on a continuation line is still a reference. */
+static bool ic_split_edit_contref(void)
+{
+    return ic_split_edit_split() &&
+           ic_split_w("core/a/other.c",
+                      "#include \\\n\"big_part.c\"\nint other(void)\n{\n"
+                      "    return 0;\n}\n");
+}
+
+/* A build list that spells the basename without the directory, and does not
+ * list the sibling, is a link the sibling's closure does not cover. */
+static bool ic_split_edit_leaflist(void)
+{
+    return ic_split_edit_split() &&
+           ic_split_w("mk/extra.mk", "EXTRA = $(D)/big_part.c\n");
+}
+
 static bool ic_split_fixture_build(void)
 {
     if (system("rm -rf " IC_FIX_SPLIT " && mkdir -p " IC_SPLIT_REPO
@@ -6691,6 +6722,9 @@ static bool ic_split_fixture_build(void)
            ic_split_branch("unlisted", ic_split_edit_unlisted) &&
            ic_split_branch("splitdel", ic_split_edit_split_deleted) &&
            ic_split_branch("nobase", ic_split_edit_split_nobase) &&
+           ic_split_branch("macrofn", ic_split_edit_macrofn) &&
+           ic_split_branch("contref", ic_split_edit_contref) &&
+           ic_split_branch("leaflist", ic_split_edit_leaflist) &&
            ic_split_git("git rev-parse base > ../base.sha");
 }
 
@@ -6709,6 +6743,9 @@ static const struct ic_split_case ic_split_cases[] = {
     {"unlisted", false},   /* no build list names the added .c */
     {"splitdel", false},   /* a split plus a deletion */
     {"nobase", false},     /* the sibling did not lose what the .c holds */
+    {"macrofn", false},    /* a macro-defined function the reader cannot name */
+    {"contref", false},    /* an #include split over a continuation line */
+    {"leaflist", false},   /* a build list naming the basename, not the sibling */
 };
 
 static int test_ic_changed_set_split_sibling_closure(void)
