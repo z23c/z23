@@ -383,11 +383,11 @@ static bool wls_build_tx(struct transaction *tx, const struct wls_fixture *f,
     uint8_t out[ZC_SAPLING_OUTCIPHERTEXT_SIZE];
     uint8_t proof[GROTH_PROOF_SIZE];
     memset(proof, 0, sizeof(proof));
+    transaction_init(tx);
     if (!sapling_build_output_description(ovk, f->orig[idx].diversifier,
                                           f->orig[idx].pk_d, WLS_VALUE, NULL,
                                           cv, cm, epk, enc, out, proof, NULL))
         return false;
-    transaction_init(tx);
     tx->version = 4;
     tx->overwintered = true;
     tx->value_balance = -(int64_t)WLS_VALUE;
@@ -1802,7 +1802,7 @@ static int test_lock_waits_for_a_mint_holding_the_wallet_mutex(void)
         ASSERT(pthread_create(&m.th, NULL, wls_lock_once, &m) == 0);
         for (int i = 0; i < 2000 && !wls_locked(); i++) {
             struct timespec nap = { .tv_sec = 0, .tv_nsec = 1000000L };
-            while (nanosleep(&nap, &nap) != 0) { /* retry */ }
+            while (nanosleep(&nap, &nap) != 0) { /* real-clock: waits for a real thread to publish the lock; no injected clock exists */ }
         }
         struct timespec settle = { .tv_sec = 0, .tv_nsec = 100000000L };
         while (nanosleep(&settle, &settle) != 0) { /* retry */ }

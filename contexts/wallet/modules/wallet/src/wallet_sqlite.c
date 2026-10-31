@@ -1095,8 +1095,8 @@ static bool wsql_flush_keys_ready(struct wallet_sqlite *ws, bool *full_state)
     return !needed || wallet_sqlite_key_crypto_prepare(ws->db);
 }
 
-static struct zcl_result wallet_sqlite_flush_scope_r(
-    struct wallet_sqlite *ws, struct wallet *w, bool full_state)
+static struct zcl_result wsql_flush_precheck(struct wallet_sqlite *ws,
+                                             const struct wallet *w)
 {
     if (!ws)
         return ZCL_ERR(WSQL_NULL_ARG, "wallet_sqlite pointer is NULL");
@@ -1105,6 +1105,15 @@ static struct zcl_result wallet_sqlite_flush_scope_r(
     if (!ws->open)
         return wsql_fail(ws, ZCL_ERR(WSQL_DB_NOT_OPEN,
             "flush: wallet_sqlite is not open"));
+    return ZCL_OK;
+}
+
+static struct zcl_result wallet_sqlite_flush_scope_r(
+    struct wallet_sqlite *ws, struct wallet *w, bool full_state)
+{
+    struct zcl_result pre = wsql_flush_precheck(ws, w);
+    if (!pre.ok)
+        return pre;
 
     /* Create/load the wallet DEK before BEGIN. Creating it inside this
      * transaction and later rolling back would leave a cached orphan key. */
