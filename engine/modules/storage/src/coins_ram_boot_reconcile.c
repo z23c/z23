@@ -43,6 +43,32 @@ static bool coins_ram_boot_replay_marker_present(sqlite3 *db, bool *present)
     return true;
 }
 
+/* The persisted utxo_apply cursor, -1 when no row exists. A failed read is an
+ * error, not an absent row: treating it as absent skipped reconciliation and
+ * kept rows written past the last durable flush. */
+static bool coins_ram_boot_read_apply_cursor(struct sqlite3 *db,
+                                             int64_t *cursor)
+{
+    *cursor = -1;
+    progress_store_tx_lock();
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT cursor FROM stage_cursor WHERE name='utxo_apply'",
+            -1, &st, NULL) != SQLITE_OK) {
+        progress_store_tx_unlock();
+        LOG_FAIL("coins_ram", "reconcile_boot: cursor read prepare failed");
+    }
+    int rc = sqlite3_step(st);  // raw-sql-ok:progress-kv-kernel-store
+    if (rc == SQLITE_ROW)
+        *cursor = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+    progress_store_tx_unlock();
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        LOG_FAIL("coins_ram", "reconcile_boot: cursor read failed (sqlite %d)",
+                 rc);
+    return true;
+}
+
 bool coins_ram_reconcile_boot(
     struct sqlite3 *db, coins_ram_frontier_writer_fn writer)
 {
@@ -76,20 +102,9 @@ bool coins_ram_reconcile_boot(
     }
 
     /* Read the persisted utxo_apply cursor. */
-    progress_store_tx_lock();
-    sqlite3_stmt *st = NULL;
     int64_t cursor = -1;
-    if (sqlite3_prepare_v2(db,
-            "SELECT cursor FROM stage_cursor WHERE name='utxo_apply'",
-            -1, &st, NULL) == SQLITE_OK) {
-        if (sqlite3_step(st) == SQLITE_ROW)  // raw-sql-ok:progress-kv-kernel-store
-            cursor = sqlite3_column_int64(st, 0);
-        sqlite3_finalize(st);
-    } else {
-        progress_store_tx_unlock();
-        LOG_FAIL("coins_ram", "reconcile_boot: cursor read prepare failed");
-    }
-    progress_store_tx_unlock();
+    if (!coins_ram_boot_read_apply_cursor(db, &cursor))
+        return false;
 
     /* Cursor below the durable watermark (+1) → coins_kv already holds more
      * than the cursor claims. Do not purge durable log evidence in that

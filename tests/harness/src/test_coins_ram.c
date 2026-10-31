@@ -1244,6 +1244,31 @@ int test_coins_ram(void)
                      "SELECT cursor FROM stage_cursor "
                      "WHERE name='tip_finalize'") == 0);
     }
+    /* A cursor read that fails at step time is an error, not an absent row:
+     * reconcile must refuse rather than skip. The view prepares cleanly and
+     * its abs(INT64_MIN) overflows only when stepped. */
+    {
+        progress_store_tx_lock();
+        CR_CHECK("reconcile: cursor read error staged",
+                 sqlite3_exec(db,
+                     "INSERT OR REPLACE INTO progress_meta(key,value) "
+                     "VALUES('refold_in_progress',x'01');"
+                     "ALTER TABLE stage_cursor RENAME TO stage_cursor_saved;"
+                     "CREATE VIEW stage_cursor AS SELECT 'utxo_apply' AS name, "
+                     "abs(-9223372036854775807 - 1) AS cursor;",
+                     NULL, NULL, NULL) == SQLITE_OK);
+        progress_store_tx_unlock();
+        CR_CHECK("reconcile: cursor read error refused",
+                 !coins_ram_reconcile_boot(db, coins_kv_set_applied_height_in_tx));
+        progress_store_tx_lock();
+        CR_CHECK("reconcile: cursor table restored",
+                 sqlite3_exec(db,
+                     "DROP VIEW stage_cursor;"
+                     "ALTER TABLE stage_cursor_saved RENAME TO stage_cursor;"
+                     "DELETE FROM progress_meta WHERE key='refold_in_progress';",
+                     NULL, NULL, NULL) == SQLITE_OK);
+        progress_store_tx_unlock();
+    }
 
     coins_ram_writer_exit();
     coins_ram_shutdown();

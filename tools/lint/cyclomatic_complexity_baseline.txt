@@ -201,7 +201,7 @@ engine/modules/storage/src/block_index_db.c:disk_block_index_serialize:29
 engine/modules/storage/src/boot_auto_refold.c:arf_read:17
 engine/modules/storage/src/boot_auto_refold.c:arf_write:17
 engine/modules/storage/src/coins_ram.c:coins_ram_flush:27
-engine/modules/storage/src/coins_ram_boot_reconcile.c:coins_ram_reconcile_boot:33
+engine/modules/storage/src/coins_ram_boot_reconcile.c:coins_ram_reconcile_boot:32
 engine/reducer/conditions/src/reducer_frontier_reconcile_light.c:remedy_reducer_frontier_reconcile_light:26
 engine/reducer/jobs/src/reducer_frontier.c:log_contiguous_prefix:25
 engine/reducer/jobs/src/reducer_frontier.c:log_ok_at:21
