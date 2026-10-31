@@ -80,6 +80,10 @@ static int64_t g_stale_fee = -1;
 static wallet_send_once_fn g_plain;
 static bool g_real_rpc;
 static bool g_foreign_tx;
+/* Open a transaction on the connection right after the synchronous level is
+ * raised and before the record write begins its own. */
+static bool g_race_tx;
+static bool g_race_opened;
 static struct node_db *g_ndb;
 static atomic_int g_wal_syncs;
 static int g_sync_delta;
@@ -99,6 +103,23 @@ static void test_txid(struct uint256 *id)
 
 /* Same observable steps as z_sendmany_run: build, hand the finished txid to
  * wallet_commit_from_context's pre-admission hook, then answer the txid. */
+static int race_profile(unsigned kind, void *ctx, void *stmt, void *ns)
+{
+    (void)kind;
+    (void)ctx;
+    (void)ns;
+    if (!g_race_tx)
+        return 0;
+    char *sql = sqlite3_expanded_sql((sqlite3_stmt *)stmt);
+    bool hit = sql && strcmp(sql, "PRAGMA synchronous=FULL") == 0;
+    sqlite3_free(sql);
+    if (hit) {
+        g_race_tx = false;
+        g_race_opened = node_db_begin_immediate(g_ndb);
+    }
+    return 0;
+}
+
 static bool test_plain_send(const struct json_value *params, bool help,
                             struct json_value *result)
 {
@@ -123,7 +144,7 @@ static bool test_plain_send(const struct json_value *params, bool help,
     int syncs_before = atomic_load(&g_wal_syncs);
     struct zcl_result r = wallet_send_once_before_commit(&id);
     g_sync_delta = atomic_load(&g_wal_syncs) - syncs_before;
-    if (g_foreign_tx)
+    if (g_foreign_tx || g_race_opened)
         (void)node_db_rollback(g_ndb);
     if (!r.ok) {
         json_set_str(result, r.message);
@@ -267,6 +288,8 @@ static void reset_counters(void)
     g_plain = NULL;
     g_real_rpc = false;
     g_foreign_tx = false;
+    g_race_tx = false;
+    g_race_opened = false;
     g_sync_delta = -1;
 }
 
@@ -1553,6 +1576,23 @@ static int case_built_row_has_own_transaction(void)
     WSO_CHECK("the same key then sends once",
               replied_committed(&r, false, 0xA1));
     zcl_command_reply_free(&r);
+    fx_close(&fx, true);
+
+    /* A writer opens a transaction after the level is raised and before the
+     * record write begins: BEGIN IMMEDIATE must fail rather than join it. */
+    reset_counters();
+    if (!fx_open(&fx, "racetx", true))
+        return failures + 1;
+    (void)sqlite3_trace_v2(g_ndb->db, SQLITE_TRACE_PROFILE, race_profile, NULL);
+    g_race_tx = true;
+    plan_then_commit("0.1", WSO_MEMO, WSO_KEY, &r);
+    WSO_CHECK("a transaction opened mid-write was seen", g_race_opened);
+    WSO_CHECK("a transaction opened before the record write refuses the send",
+              replied_code(&r, WALLET_SEND_ONCE_CODE_RELEASED) &&
+              db_wallet_send_once_count(&fx.ndb) == 0);
+    zcl_command_reply_free(&r);
+    (void)sqlite3_trace_v2(g_ndb->db, 0, NULL, NULL);
+    g_race_tx = false;
     fx_close(&fx, true);
     return failures;
 }
