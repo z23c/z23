@@ -1067,7 +1067,8 @@ static int clock_env_script(const char *cpath, const char *script, const char *b
     FILE *f = fopen(script, "w");
     if (!f) return -1;
 #if defined(__APPLE__)
-    const char *linker = "-Wl,-dead_strip";
+    /* lib.c pins _POSIX_C_SOURCE, which hides mkdtemp on Darwin. */
+    const char *linker = "-D_DARWIN_C_SOURCE -Wl,-dead_strip";
 #else
     const char *linker = "-Wl,--gc-sections";
 #endif
