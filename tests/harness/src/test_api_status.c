@@ -260,6 +260,75 @@ static bool api_status_node_tip_identity_ok(uint8_t *resp, size_t cap)
     return ok;
 }
 
+struct api_status_lag_case {
+    int tip;
+    int header;
+    int peer;
+    int64_t want_blocks_behind;
+    int64_t want_peer_best;
+};
+
+/* Drive GET /api/node/status over a chain whose served tip is `tip`, whose
+ * best header is `header`, and whose only peer claims `peer` through its
+ * handshake starting height. Checks the chain block's distance fields. */
+static bool api_status_lag_case_ok(const struct api_status_lag_case *c,
+                                   uint8_t *resp, size_t cap)
+{
+    struct main_state ms;
+    struct block_index *blocks[16] = {0};
+    struct connman cm = {0};
+    struct net_address addr = {0};
+    struct p2p_node *node = NULL;
+    struct json_value root;
+    const struct json_value *chain;
+    size_t n;
+    bool ok;
+
+    test_reset_shared_globals();
+    ok = api_test_build_chain(&ms, blocks, c->header + 1);
+    ok = ok && api_test_init_connman_peer(&cm, &addr, &node, c->peer);
+    reducer_frontier_provable_tip_set(c->tip);
+    api_set_state(&ms, NULL, NULL, NULL, api_test_datadir());
+
+    n = api_handle_request("GET", "/api/node/status", NULL, 0, resp, cap);
+    api_status_terminate_response(resp, n, cap);
+    ok = api_status_load_response(resp, n, cap, &root, ok);
+    chain = json_get(&root, "chain");
+    ok = ok && chain != NULL;
+    ok = ok && json_get_int(json_get(chain, "tip_height")) == c->tip;
+    ok = ok && json_get_int(json_get(chain, "header_height")) == c->header;
+    ok = ok && json_get_int(json_get(chain, "peer_best_height")) ==
+        c->want_peer_best;
+    ok = ok && json_get_int(json_get(chain, "blocks_behind")) ==
+        c->want_blocks_behind;
+    json_free(&root);
+    api_status_release_provable_chain(&ms);
+    rpc_net_set_connman(NULL);
+    net_manager_free(&cm.manager);
+    return ok;
+}
+
+static bool api_status_blocks_behind_ok(uint8_t *resp, size_t cap)
+{
+    static const struct api_status_lag_case cases[] = {
+        /* Tip equals header and the peer agrees: nothing behind. */
+        { 5, 5, 5, 0, 5 },
+        /* Header 9 ahead of tip while the peer's handshake height is stale
+         * and below our tip. The distance is the header gap, not 0 or 1. */
+        { 3, 9, 4, 6, 4 },
+        /* Peer claim above the header: the claim is the distance. */
+        { 3, 5, 9, 6, 9 },
+        /* Peer claim below our tip: peer_best_height reads at tip, and it
+         * adds no distance of its own. */
+        { 5, 5, 2, 0, 5 },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (!api_status_lag_case_ok(&cases[i], resp, cap))
+            return false;
+    }
+    return true;
+}
+
 static bool api_status_downloadstats_shape_ok(uint8_t *resp, size_t cap)
 {
     static const struct api_status_field before[] = {
@@ -657,6 +726,12 @@ int api_status_focused_tests(void)
 
     printf("api: node status tip identity follows provable tip... ");
     if (api_status_node_tip_identity_ok(resp, sizeof(resp)))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+
+    printf("api: node/status blocks_behind is the real header or peer gap, "
+           "and peer_best_height never reads below our tip... ");
+    if (api_status_blocks_behind_ok(resp, sizeof(resp)))
         printf("OK\n");
     else { printf("FAIL\n"); failures++; }
 

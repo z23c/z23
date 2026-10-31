@@ -154,6 +154,28 @@ static void api_health_public_serving_flags(
         agent_security_posture_allows_public_serving(posture);
     *public_healthy = health->healthy && *public_serving;
 }
+/* peer_best_height as the chain blocks report it. The snapshot value is the
+ * best handshake starting height among our peers (or the modal view), which
+ * goes stale between handshakes and can sit below our own tip. A claim below
+ * the tip says nothing about the chain, so it reads at the tip. -1 (no peer
+ * claim at all) stays unknown. */
+static int64_t api_chain_peer_best_floor(int64_t peer_best, int64_t tip)
+{
+    if (peer_best < 0)
+        return -1; // raw-return-ok:no-peer-claim
+    return peer_best > tip ? peer_best : tip;
+}
+
+/* Blocks between the served tip and the best height we know of: the larger
+ * of our best header and the peer floor, minus the served tip, never below
+ * zero. */
+static int64_t api_chain_blocks_behind(int64_t tip, int64_t header,
+                                       int64_t peer_best)
+{
+    int64_t best = header > peer_best ? header : peer_best;
+    return best > tip ? best - tip : 0;
+}
+
 /* Health check — lightweight, machine-readable */
 size_t api_serve_health(uint8_t *response, size_t response_max)
 {
@@ -199,7 +221,8 @@ size_t api_serve_health(uint8_t *response, size_t response_max)
     json_set_object(&chain);
     json_push_kv_int(&chain, "tip_height", health.tip_height);
     json_push_kv_int(&chain, "header_height", health.header_height);
-    json_push_kv_int(&chain, "peer_best_height", health.peer_best_height);
+    json_push_kv_int(&chain, "peer_best_height",
+        api_chain_peer_best_floor(health.peer_best_height, health.tip_height));
     json_push_kv_int(&chain, "tip_lag", health.tip_lag);
     json_push_kv(&body, "chain", &chain);
     json_free(&chain);
@@ -529,11 +552,19 @@ size_t api_serve_node_status(uint8_t *response, size_t response_max)
     json_push_kv_int(&chain, "header_height", header_height);
     api_json_push_kv_nullable_str(&chain, "best_header_hash",
                                   api_node_status_hex_or_null(best_header_hex));
-    json_push_kv_int(&chain, "peer_best_height", health.peer_best_height);
+    /* blocks_behind is the real distance from the served tip to the best
+     * height we know: the larger of our best header and the peer floor.
+     * peer_best_height is a floor, not a tip: the highest handshake height
+     * our peers gave us, never below our own tip, and it can stay below the
+     * network tip until a peer reports a newer one. tip_lag is narrower: it
+     * is only the peer floor's excess over our tip, 0 when no peer claims
+     * more, and it ignores our header. Use blocks_behind for the distance. */
+    int64_t peer_best = api_chain_peer_best_floor(health.peer_best_height,
+                                                  tip_height);
+    json_push_kv_int(&chain, "peer_best_height", peer_best);
     json_push_kv_int(&chain, "tip_lag", health.tip_lag);
     json_push_kv_int(&chain, "blocks_behind",
-        health.peer_best_height > tip_height ?
-            health.peer_best_height - tip_height : 0);
+        api_chain_blocks_behind(tip_height, header_height, peer_best));
     json_push_kv(&body, "chain", &chain);
     json_free(&chain);
 

@@ -979,6 +979,24 @@ authority anchor used on clean restart; otherwise
 not a peer-connectivity failure. `lagging` means the served gap is material and
 should be diagnosed with `getsyncdiag` / `z23 ops state --subsystem=reducer_frontier`.
 
+The `chain` block of `/api/v1/node/status` carries four height fields that
+must not be read as one number. `tip_height` is the served H*. `header_height`
+is our best header. `peer_best_height` is a floor, not the network tip: the
+highest handshake starting height among our peers, never below `tip_height`.
+A peer that has told us nothing newer keeps it at its handshake height, so it
+can lag the real tip; `-1` means no peer has given a height. `blocks_behind` is
+the real distance to the best height we know: `max(header_height,
+peer_best_height) - tip_height`, never below 0. A lying peer can inflate
+`peer_best_height`: a lone peer claiming more than 10,000 blocks above our
+header is clamped to that bound, but two or more such peers are not. The value
+is for display: the chain block shows it and no remedy reads it. The health
+gates keep the unfloored peer value they always read.
+`tip_lag` is narrower and unchanged: only the peer floor's excess over
+`tip_height`, 0 when no peer claims more. It ignores our header, so it can read
+0 while `blocks_behind` is positive. `sync.state` comes from the sync state
+machine and can read `at_tip` while `blocks_behind` is positive; read
+`blocks_behind` for the distance.
+
 The same response includes `readiness` (`zcl.agent_readiness.v1`) so agents do
 not have to infer operational safety from the top-level status string alone.
 `chain_serving_ready=true` means the chain surface is serving with peers, no
