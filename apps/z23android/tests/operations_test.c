@@ -1,7 +1,9 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _POSIX_C_SOURCE 200809L
 #include "operations.h"
+#include "params.h"
 #include <assert.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -84,12 +86,24 @@ static int orphan(const char *mode, const char *data)
     return 0;
 }
 
+/* The node arguments the app builds. ZAPP_TEST_PARAMS_ARG is the one extra argument it must add;
+ * "none" or unset means none. Returns 0 when they are right. */
+static int node_arguments(int argc, char **argv)
+{
+    const char *want = getenv("ZAPP_TEST_PARAMS_ARG");
+    bool with_params = want && strcmp(want, "none") != 0;
+    if (strcmp(argv[2], "-operator-lane=canonical") || strcmp(argv[3], "-tor") ||
+        strcmp(argv[4], "-onion-persist")) return 4;
+    if (argc != (with_params ? 6 : 5) || (with_params && strcmp(argv[5], want) != 0)) return 7;
+    return 0;
+}
+
 static int child(int argc, char **argv)
 {
     if (!child_environment()) return 3;
-    if (argc == 5 && !strncmp(argv[1], "-datadir=", 9)) {
-        if (strcmp(argv[2], "-operator-lane=canonical") || strcmp(argv[3], "-tor") ||
-            strcmp(argv[4], "-onion-persist")) return 4;
+    if ((argc == 5 || argc == 6) && !strncmp(argv[1], "-datadir=", 9)) {
+        int bad = node_arguments(argc, argv);
+        if (bad) return bad;
         puts("full node arguments accepted");
         return 0;
     }
@@ -227,6 +241,42 @@ static void command_cases(struct zapp_runtime *r)
     assert(unsetenv("ZAPP_TEST_CLOCK_FAIL") == 0);
 }
 /* Start records the owner's choice and Stop clears it; a choice that cannot be saved is reported. */
+static void sized_file(const char *dir, int index, uint64_t size)
+{
+    char file[500];
+    assert(snprintf(file, sizeof(file), "%s/%s", dir, zapp_param_files[index].name) > 0);
+    int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    assert(fd >= 0 && ftruncate(fd, (off_t)size) == 0 && close(fd) == 0);
+}
+static void start_expecting(struct zapp_runtime *r, const char *argument)
+{
+    char out[128];
+    int status;
+    assert(setenv("ZAPP_TEST_PARAMS_ARG", argument, 1) == 0);
+    assert(zapp_node_start(r, out, sizeof(out)));
+    assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    r->node = 0;
+}
+/* The node gets -paramsdir only once both files of the pinned size are in files/params. */
+static void params_argument_cases(struct zapp_runtime *r, const char *directory)
+{
+    char dir[400], file[500], expect[450];
+    assert(snprintf(r->files, sizeof(r->files), "%s", directory) > 0);
+    assert(snprintf(dir, sizeof(dir), "%s/params", directory) > 0 && mkdir(dir, 0700) == 0);
+    start_expecting(r, "none");                                   /* no files */
+    sized_file(dir, 0, zapp_param_files[0].size);
+    start_expecting(r, "none");                                   /* one of two */
+    sized_file(dir, 1, zapp_param_files[1].size - 1);
+    start_expecting(r, "none");                                   /* wrong size */
+    sized_file(dir, 1, zapp_param_files[1].size);
+    assert(snprintf(expect, sizeof(expect), "-paramsdir=%s", dir) > 0);
+    start_expecting(r, expect);                                   /* complete */
+    for (int i = 0; i < ZAPP_PARAMS_COUNT; i++) {
+        assert(snprintf(file, sizeof(file), "%s/%s", dir, zapp_param_files[i].name) > 0 && unlink(file) == 0);
+    }
+    assert(rmdir(dir) == 0);
+    start_expecting(r, "none");
+}
 static void node_cases(struct zapp_runtime *r, const char *self, const char *directory)
 {
     char out[128];
@@ -243,6 +293,7 @@ static void node_cases(struct zapp_runtime *r, const char *self, const char *dir
     assert(zapp_node_start(r, out, sizeof(out)) && zapp_node_wanted(r));
     assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     r->node = 0;
+    params_argument_cases(r, directory);
     preview_cases(r);
     assert(zapp_node_stop(r, out, sizeof(out)) && !strcmp(out, "The local node is stopped.") && !zapp_node_wanted(r));
     earlier_cases(r, self, directory);

@@ -19,12 +19,18 @@ APP_MANIFEST ?= AndroidManifest.xml
 QUIRC_DIR := $(abspath $(BUILD_DIR)/quirc)
 QUIRC_SOURCES := $(QUIRC_DIR)/quirc.c $(QUIRC_DIR)/decode.c $(QUIRC_DIR)/identify.c $(QUIRC_DIR)/version_db.c
 QUIRC_FLAGS := -DQUIRC_MAX_REGIONS=65534
+PARAMS_DIR ?= ../../vendor/params
+PARAMS_SUMS := params.sha256
+# 1 packs the Sapling proving parameters into the package (make apk). A preview build leaves them out
+# unless PREVIEW_PARAMS=1, because a preview runs no node and the files add 51.6 MB.
+PACK_PARAMS ?= 1
+PREVIEW_PARAMS ?= 0
 HOST_CC ?= cc
 HOST_WARNINGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic
 export JAVA_HOME
 export PATH := $(JAVA_HOME)/bin:$(PATH)
 
-.PHONY: check-probe dexgen test-dexgen test-watch apk native install launch check-config check-node prepare-quirc test bridge test-bridge
+.PHONY: check-probe dexgen test-dexgen test-watch apk native install launch check-config check-node check-params prepare-quirc test bridge test-bridge
 prepare-quirc:
 	@mkdir -p '$(QUIRC_DIR)'
 	cp ../../vendor/quirc/*.[ch] '$(QUIRC_DIR)/'
@@ -92,7 +98,7 @@ preview-apk:
 	@mkdir -p '$(BUILD_DIR)/preview'
 	sed -e 's/package="org.z23.nativeapp"/package="org.z23.voicepreview"/' -e 's/android:label="Z23"/android:label="Z23 Voice Preview"/' \
 	  -e 's/android:debuggable="false"/android:debuggable="true"/' AndroidManifest.xml > '$(BUILD_DIR)/preview/AndroidManifest.xml'
-	$(MAKE) apk APP_MANIFEST='$(BUILD_DIR)/preview/AndroidManifest.xml' APK='$(BUILD_DIR)/z23-preview.apk'
+	$(MAKE) apk PACK_PARAMS='$(PREVIEW_PARAMS)' APP_MANIFEST='$(BUILD_DIR)/preview/AndroidManifest.xml' APK='$(BUILD_DIR)/z23-preview.apk'
 
 test-voice:
 	@mkdir -p '$(BUILD_DIR)'
@@ -109,13 +115,13 @@ test: prepare-quirc test-bridge test-voice test-host test-devkey test-dexgen tes
 	  -lm -o '$(BUILD_DIR)/fleet-test'
 	'$(BUILD_DIR)/fleet-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/json/include \
-	  -I../../platform/modules/base/include tests/operations_test.c operations.c rpc.c nodelog.c \
+	  -I../../platform/modules/base/include tests/operations_test.c operations.c params.c rpc.c nodelog.c \
 	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
 	  ../../platform/modules/base/src/safe_alloc.c -Wl,--wrap=clock_gettime \
 	  -o '$(BUILD_DIR)/operations-test'
 	'$(BUILD_DIR)/operations-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. -I../../platform/modules/json/include \
-	  -I../../platform/modules/base/include tests/direct_test.c operations.c rpc.c nodelog.c \
+	  -I../../platform/modules/base/include tests/direct_test.c operations.c params.c rpc.c nodelog.c \
 	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
 	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/direct-test'
 	'$(BUILD_DIR)/direct-test'
@@ -172,6 +178,11 @@ check-config:
 	@test -x '$(JAVA_HOME)/bin/keytool' && test -x '$(JAVA_HOME)/bin/jar' || { echo 'Set JAVA_HOME to an installed JDK' >&2; exit 1; }
 	@test '$(ANDROID_API)' = 35 || { echo 'The current application manifest requires API 35' >&2; exit 1; }
 
+# The Sapling proving parameters are build inputs kept out of git, like vendor/cross.
+check-params:
+	@test -d '$(PARAMS_DIR)' || { echo 'Proving parameters not found: put the files listed in $(PARAMS_SUMS) in $(PARAMS_DIR) or set PARAMS_DIR.' >&2; exit 1; }
+	@out=$$(cd '$(PARAMS_DIR)' && sha256sum -c '$(abspath $(PARAMS_SUMS))' 2>&1) || { printf '%s\n' "$$out" >&2; echo 'Proving parameters in $(PARAMS_DIR) are missing or do not match $(PARAMS_SUMS); refusing to build.' >&2; exit 1; }
+
 native: check-config prepare-quirc
 	cmake -S . -B '$(BUILD_DIR)/native' \
 	  -DCMAKE_TOOLCHAIN_FILE='$(ANDROID_NDK_ROOT)/build/cmake/android.toolchain.cmake' \
@@ -185,12 +196,14 @@ $(KEYSTORE):
 	  -alias z23-development -keypass android -dname 'CN=Z23 Development' \
 	  -keyalg RSA -keysize 3072 -validity 3650 -noprompt
 
-apk: check-probe check-node native dexgen $(KEYSTORE)
+apk: check-probe check-node $(if $(filter 1,$(PACK_PARAMS)),check-params) native dexgen $(KEYSTORE)
 	@test -x '$(NODE_BIN)' || { echo 'Build the Android node with make ZCL_TARGET=android-arm64 z23 first' >&2; exit 1; }
 	@mkdir -p '$(BUILD_DIR)/package/lib/arm64-v8a'
 	cp '$(BUILD_DIR)/native/libz23android.so' '$(BUILD_DIR)/package/lib/arm64-v8a/'
 	cp '$(NODE_BIN)' '$(BUILD_DIR)/package/lib/arm64-v8a/libz23node.so'
-	'$(TOOLS)/aapt' package -f -M '$(APP_MANIFEST)' -S res \
+	rm -rf '$(BUILD_DIR)/assets'
+	$(if $(filter 1,$(PACK_PARAMS)),mkdir -p '$(BUILD_DIR)/assets/params' && cp $(addprefix '$(PARAMS_DIR)'/,$(shell awk '{print $$2}' $(PARAMS_SUMS))) '$(BUILD_DIR)/assets/params/')
+	'$(TOOLS)/aapt' package -f -M '$(APP_MANIFEST)' -S res $(if $(filter 1,$(PACK_PARAMS)),-A '$(BUILD_DIR)/assets' -0 params) \
 	  -I '$(ANDROID_JAR)' -F '$(BUILD_DIR)/resources.apk'
 	'$(BUILD_DIR)/dexgen' '$(BUILD_DIR)/package/classes.dex'
 	cp '$(BUILD_DIR)/resources.apk' '$(BUILD_DIR)/unsigned.apk'
@@ -211,6 +224,10 @@ launch:
 HOST_TEST_BASE := $(SPEECH_JSON) ../../platform/modules/sha3/src/sha3.c
 test-host:
 	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../contexts/commons/packages/zsha256/include tests/params_test.c params.c params_install.c params_job.c \
+	  ../../contexts/commons/packages/zsha256/src/zsha256.c -Wl,--wrap=fsync -Wl,--wrap=write -Wl,--wrap=pread -Wl,--wrap=close -Wl,--wrap=calloc -Wl,--wrap=free -Wl,--wrap=pthread_create -pthread -o '$(BUILD_DIR)/params-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/params-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/params-test' "$$scratch"
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/hosts_test.c hosts.c pairing.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/hosts-test'
 	'$(BUILD_DIR)/hosts-test'
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. tests/nodelog_test.c nodelog.c -o '$(BUILD_DIR)/nodelog-test'

@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _GNU_SOURCE
 #include "operations.h"
+#include "params.h"
 #include "json/json.h"
 #include "base/cleanse.h"
 #include "rpc.h"
@@ -62,7 +63,8 @@ bool zapp_runtime_init(struct zapp_runtime *r, const char *files, const char *li
     r->preview = preview;
     zapp_nodelog_init(&r->log, NULL, NULL);
     if (pthread_mutex_init(&r->mutex, NULL) != 0) return false;
-    bool ok = path(r->directory, sizeof(r->directory), files, "node") &&
+    bool ok = strlen(files) < sizeof(r->files) && snprintf(r->files, sizeof(r->files), "%s", files) > 0 &&
+              path(r->directory, sizeof(r->directory), files, "node") &&
               path(r->executable, sizeof(r->executable), libs, "libz23node.so") &&
               path(r->state_root, sizeof(r->state_root), files, "state") &&
               path(r->temporary_root, sizeof(r->temporary_root), files, "tmp");
@@ -287,8 +289,8 @@ static int spawn_node(struct zapp_runtime *r)
     int fd = ok ? open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
     off_t offset = fd >= 0 ? lseek(fd, 0, SEEK_END) : 0;
     int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
-    char *argv[] = {r->executable, data, "-operator-lane=canonical",
-                    "-tor", "-onion-persist", NULL};
+    char params[1200], *argv[7] = {r->executable, data, "-operator-lane=canonical", "-tor", "-onion-persist"};
+    if (zapp_params_arg(r->files, params, sizeof(params))) argv[5] = params;
     int rc = fd >= 0 && in >= 0 ? spawn_redirect(r, argv, in, fd, &r->node) : EIO;
     if (fd >= 0) close(fd);
     if (in >= 0) close(in);

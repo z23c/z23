@@ -36,6 +36,39 @@ exist. Preserve this key securely: Android requires the same signing key to
 install an update over an existing app. This development key is not a
 production signing process. Preserve and back up wallet state before updates.
 
+## Sapling proving parameters
+
+A shielded send needs `sapling-spend.params` and `sapling-output.params`. They ship inside the
+package as uncompressed assets, so a phone never asks a third party for them and no download
+reveals that it holds a wallet. The two files are build inputs kept out of git, like
+`vendor/cross`: place them in `vendor/params` (or pass `PARAMS_DIR=<dir>`). `make apk` runs
+`check-params` first and refuses to build when a file is missing or does not match the SHA-256
+sums in `params.sha256`, which are the sums in
+[Getting started](../../docs/node/GETTING_STARTED.md). They add
+about 51.6 MB to the package.
+
+A preview build (`make preview-apk`) runs no node and leaves the files out, so it needs neither
+the files nor `check-params`. Pass `PREVIEW_PARAMS=1` to pack them into a wallet preview.
+
+State today: the code exists and is tested on a Linux host, but nothing in the app calls it yet and
+it has not run on a phone. `params_android.c` opens the packaged files on the caller's thread and
+`params_job.c` verifies and copies them on a worker thread to `files/params`: existing files are
+read and checked against their pinned SHA-256 first, a copy that differs (also at the same size) is
+replaced from the package, and each new file goes to `files/params.tmp`, is flushed, read back and
+checked before the directory is renamed into place. After a failed copy no pinned file remains
+under `files/params` (the directory stays only if it holds a file this code did not create). A start
+that is refused or whose thread cannot start changes nothing: the earlier outcome and files stand.
+The result is read by polling `zapp_params_job_state`; no callback runs and the worker
+touches no JNI. The node is started with `-paramsdir=<files>/params` when both files are present
+at their pinned size; the node checks its own pin when it loads them.
+
+`zapp_prover_allowed` is the refusal before a send, not part of the copy. It passes only when the
+copy was verified, the node reports through `zapp_proving_probe` that it can prove, and the
+thermal status is below 3 (severe). A copy took 2.0 to 3.4 seconds on the Linux host and has not been timed on a phone; it is not
+paused for heat. The
+probe has no implementation yet. Two files alone do not arm proving in the node today (see the
+experiment record), so a send cannot be enabled until the node loads the Sapling pair on its own.
+
 ## Install and open
 
 Enable USB debugging, connect the device, and accept the debugging prompt.
@@ -310,7 +343,9 @@ change hosts or spend funds.
 - Host tests run on Linux with `make -C apps/z23android test HOST_CC=clang
   BUILD_DIR=../../build/android-voice`. `preview-apk` needs `NODE_BIN`,
   `ANDROID_NDK_ROOT`, `SDK_ROOT` and `JAVA_HOME`; without them it stops before
-  building and leaves any previous APK in place.
+  building and leaves any previous APK in place. The proving parameters are not a
+  prerequisite: a preview leaves them out unless `PREVIEW_PARAMS=1` (then
+  `vendor/params` or `PARAMS_DIR` must hold them, as for `make apk`).
 - A developer sees why the phone node is stuck without root: the app forwards
   the node console log's boot stage changes, `[boot]` timings, warnings,
   errors and failures, Tor bootstrap progress and peer handshakes to logcat,

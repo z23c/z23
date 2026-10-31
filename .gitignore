@@ -34,6 +34,9 @@ vendor/.build-*.lock
 # so another one needs its own tree; like vendor/lib it is generated, never
 # tracked.
 vendor/cross
+# Sapling proving parameters packed into the Android package (apps/z23android/params.sha256);
+# public ceremony outputs, supplied by the builder and never tracked.
+vendor/params
 # Vendored OpenSSL/zlib/libevent headers installed by `make vendor`
 # (regenerated). event2/ exists for the embedded Tor build (`make tor-full`),
 # which on macOS has no system libevent to discover.

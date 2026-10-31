@@ -9,6 +9,8 @@
 #include <sys/types.h>
 struct zapp_runtime {
     pthread_mutex_t mutex;
+    /* The app files directory; the proving parameters are copied below it. */
+    char files[1024];
     char directory[1024];
     char state_root[1024];
     char temporary_root[1024];

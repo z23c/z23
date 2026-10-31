@@ -18,10 +18,11 @@ endif()
 
 add_library(z23android SHARED
     android_main.c node_service.c node_watch.c camera.c native_ui.c jni_util.c shell.c surface.c launcher.c layout.c home.c controller.c conversation.c bridge_client.c operations.c rpc.c fleet.c
-    audio.c speech_client.c voice.c hosts.c pairing.c scan.c thermal.c nodelog.c
     device_key.c device_key_jni.c secure_window.c
+    audio.c speech_client.c voice.c hosts.c pairing.c scan.c thermal.c nodelog.c params.c params_install.c params_job.c params_android.c
     "${Z23_ROOT}/platform/modules/sha3/src/sha3.c"
     "${Z23_ROOT}/contexts/commons/packages/zutf8/src/zutf8.c"
+    "${Z23_ROOT}/contexts/commons/packages/zsha256/src/zsha256.c"
     "${Z23_ROOT}/vendor/qrcodegen/qrcodegen.c"
     "${Z23_QUIRC_DIR}/quirc.c" "${Z23_QUIRC_DIR}/decode.c"
     "${Z23_QUIRC_DIR}/identify.c" "${Z23_QUIRC_DIR}/version_db.c"
@@ -31,6 +32,7 @@ add_library(z23android SHARED
 target_include_directories(z23android PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${Z23_ROOT}/contexts/commons/packages/zutf8/include"
+    "${Z23_ROOT}/contexts/commons/packages/zsha256/include"
     "${Z23_QUIRC_DIR}"
     "${Z23_ROOT}/vendor/qrcodegen"
     "${Z23_ROOT}/platform/modules/json/include"
