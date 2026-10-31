@@ -813,9 +813,11 @@ static job_result_t ua_commit_applied_frontier(struct ua_apply_work *w)
      * resolver height-ignores them; the next drain re-prunes). */
     seal_candidate_hook_in_tx(w->db, g_ms, (int32_t)next_cursor);
     /* SELF-MINT the SHA3-verified anchor snapshot once, at the compiled
-     * checkpoint height (observe-only, best-effort — see
-     * services/anchor_selfmint.h). */
-    anchor_selfmint_hook_in_tx(w->db, g_datadir, (int32_t)next_cursor);
+     * checkpoint height (observe-only, best-effort). Passed the APPLIED height
+     * (cursor_in), NOT next_cursor: the stage cursor holds the NEXT height to
+     * apply, so next_cursor == applied+1 would mint one block early. See
+     * services/anchor_selfmint.h. */
+    anchor_selfmint_hook_in_tx(w->db, g_datadir, (int32_t)w->next_h);
     /* Bind the checkpoint to THIS cursor, not the catchup lane's pace. */
     sapling_checkpoint_hook_in_tx(w->db, (int64_t)w->next_h,
         w->bi->phashBlock ? w->bi->phashBlock->data : NULL);

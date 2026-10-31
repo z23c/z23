@@ -39,6 +39,9 @@
 #include "jobs/utxo_apply_delta.h"
 #include "jobs/utxo_apply_stage.h"
 #include "storage/coins_kv.h"
+#include "chain/checkpoints.h"
+#include "chain/utxo_snapshot_loader.h"
+#include "services/anchor_selfmint.h"
 #include "storage/event_log.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
@@ -1256,6 +1259,138 @@ static int caf_part_f(void)
     return failures;
 }
 
+/* ── PART H: the anchor self-mint fires after the ANCHOR block, not before. ──
+ *
+ * The stage cursor holds the NEXT height to apply, so the hook must be handed
+ * the applied height (cursor_in). Handing it cursor_in + 1 minted the set after
+ * block anchor-1 and failed the SHA3/count check whenever the anchor block
+ * changes the coin count (live: count 1354768, wanted 1354769). Coinbase-only
+ * blocks add exactly one coin each, so the set after block A has A+1 coins and
+ * the set after block A-1 has A: the two are distinguishable by count AND root.
+ * Pass 1 folds blocks 0..A and takes the real commitment; pass 2 folds a longer
+ * branch with that commitment installed as the compiled-checkpoint override and
+ * asserts the hook minted a snapshot that verifies against it. */
+#define CAF_H_ANCHOR 2
+
+static int caf_h_fold_dir(const char *tag, int nblocks,
+                          uint8_t *root_out, int64_t *count_out,
+                          const char *snap_path)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "coins_applied_frontier", tag);
+    char log_path[512];
+    snprintf(log_path, sizeof(log_path), "%s/events.log", dir);
+    bool opened = progress_store_open(dir);
+    CAF_CHECK("selfmint: progress_store opens", opened);
+    event_log_t *lg = event_log_open(log_path);
+    CAF_CHECK("selfmint: event log opens", lg != NULL);
+    struct caf_branch H;
+    bool built = branch_build(&H, 0x48, nblocks, -1, NULL);
+    CAF_CHECK("selfmint: branch builds", built);
+    sqlite3 *pdb = opened ? progress_store_db() : NULL;
+    bool schema = pdb && coins_kv_ensure_schema(pdb) &&
+                  progress_meta_table_ensure(pdb);
+    CAF_CHECK("selfmint: schema ready", schema);
+    if (lg && built && schema) {
+        struct main_state ms;
+        memset(&ms, 0, sizeof(ms));
+        active_chain_init(&ms.chain_active);
+        active_chain_move_window_tip(&ms.chain_active, &H.blocks[H.n - 1]);
+        struct caf_ctx ctx = { .active = &H, .ext = NULL, .n_ext = 0 };
+        failures += caf_g_fold_branch(pdb, &H, &ms, &ctx);
+        if (root_out) {
+            int64_t ntx = 0, supply = 0;
+            CAF_CHECK("selfmint: commitment computed",
+                      coins_kv_commitment(pdb, root_out) == 0);
+            CAF_CHECK("selfmint: setinfo",
+                      coins_kv_setinfo(pdb, &ntx, count_out, &supply));
+        }
+        if (snap_path) {
+            struct stat st;
+            CAF_CHECK("selfmint: hook minted the anchor artifact",
+                      stat(snap_path, &st) == 0);
+            const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+            char err[128] = {0};
+            struct uss_header hdr;
+            struct uss_handle *h = uss_open(snap_path, true, cp->sha3_hash,
+                                            &hdr, err, sizeof(err));
+            CAF_CHECK("selfmint: artifact verifies vs the anchor-set root "
+                      "(set through the anchor block, not the block before)",
+                      h != NULL);
+            if (h) {
+                CAF_CHECK("selfmint: artifact count == anchor-set count",
+                          hdr.count == cp->utxo_count &&
+                          hdr.count == (uint64_t)(CAF_H_ANCHOR + 1));
+                CAF_CHECK("selfmint: artifact height == anchor",
+                          (int32_t)hdr.height == CAF_H_ANCHOR);
+                uss_close(h);
+            }
+        }
+        utxo_apply_stage_shutdown();
+        active_chain_free(&ms.chain_active);
+    }
+    if (lg)
+        event_log_close(lg);
+    branch_free(&H);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int caf_part_h(void)
+{
+    int failures = 0;
+    char snapdir[256], snap[320];
+    /* A per-run directory: concurrent runs must not share the artifact. */
+    test_make_tmpdir(snapdir, sizeof(snapdir), "coins_applied_frontier",
+                     "selfmint_snap");
+    snprintf(snap, sizeof(snap), "%s/caf_h_anchor.snapshot", snapdir);
+    struct stat dst;
+    CAF_CHECK("selfmint: snapshot dir exists",
+              stat(snapdir, &dst) == 0 && S_ISDIR(dst.st_mode));
+    /* Restore the caller's ZCL_MINT_ANCHOR_OUT afterwards, not just unset it. */
+    const char *outer = getenv("ZCL_MINT_ANCHOR_OUT");
+    char *saved = outer ? strdup(outer) : NULL;
+    CAF_CHECK("selfmint: outer anchor-out saved", !outer || saved);
+    if (outer && !saved) { /* leave the caller's value untouched */
+        test_cleanup_tmpdir(snapdir);
+        return failures;
+    }
+    CAF_CHECK("selfmint: anchor-out cleared",
+              unsetenv("ZCL_MINT_ANCHOR_OUT") == 0);
+
+    /* Pass 1: no checkpoint override at height CAF_H_ANCHOR yet — fold exactly
+     * blocks 0..A and record the true anchor set. */
+    uint8_t root[32] = {0};
+    int64_t count = 0;
+    failures += caf_h_fold_dir("selfmint_ref", CAF_H_ANCHOR + 1, root, &count,
+                               NULL);
+    CAF_CHECK("selfmint: anchor set has A+1 coins", count == CAF_H_ANCHOR + 1);
+
+    struct sha3_utxo_checkpoint cp;
+    memset(&cp, 0, sizeof(cp));
+    cp.height = CAF_H_ANCHOR;
+    memcpy(cp.sha3_hash, root, 32);
+    cp.utxo_count = (uint64_t)count;
+    checkpoints_set_sha3_override_for_test(&cp);
+    bool armed = setenv("ZCL_MINT_ANCHOR_OUT", snap, 1) == 0;
+    CAF_CHECK("selfmint: anchor-out set to the per-run path", armed);
+
+    /* Pass 2: fold past the anchor; the hook must have fired after block A. */
+    if (armed)
+        failures += caf_h_fold_dir("selfmint_run", CAF_H_ANCHOR + 3, NULL,
+                                   NULL, snap);
+
+    checkpoints_set_sha3_override_for_test(NULL);
+    CAF_CHECK("selfmint: anchor-out restored",
+              saved ? setenv("ZCL_MINT_ANCHOR_OUT", saved, 1) == 0
+                    : unsetenv("ZCL_MINT_ANCHOR_OUT") == 0);
+    free(saved);
+    test_cleanup_tmpdir(snapdir);
+    return failures;
+}
+
 int test_coins_applied_frontier(void);
 int test_coins_applied_frontier(void)
 {
@@ -1284,6 +1419,7 @@ int test_coins_applied_frontier(void)
     failures += caf_part_e(ext);
     failures += caf_part_f();
     failures += caf_part_g(ext);
+    failures += caf_part_h();
 
     branch_free(&L);
     branch_free(&W);

@@ -244,7 +244,7 @@ static bool verified_snapshot_present(const char *path,
 }
 
 void anchor_selfmint_hook_in_tx(struct sqlite3 *db, const char *datadir,
-                                int32_t next_cursor)
+                                int32_t applied_height)
 {
     if (!db)
         return;
@@ -253,14 +253,15 @@ void anchor_selfmint_hook_in_tx(struct sqlite3 *db, const char *datadir,
     if (!cp)
         return;  /* no compiled checkpoint to mint toward */
 
-    /* One-shot at the EXACT anchor crossing. next_cursor is the just-applied
-     * frontier (cursor_in + 1); == cp->height is the apply that lands the anchor
+    /* One-shot at the EXACT anchor crossing. applied_height is the height of the
+     * block just applied (cursor_in; the stage cursor itself holds the NEXT
+     * height); == cp->height is the apply that lands the anchor
      * block, when coins_kv provably holds the applied-through-anchor set inside
      * the caller's stage txn. Below or above the anchor coins_kv is NOT the
      * anchor set — never mint then. Gated on the EXACT height, NOT on
      * is_initial_block_download (the anchor crossing is during IBD on a cold
      * sync). */
-    if (next_cursor != cp->height)
+    if (applied_height != cp->height)
         return;
 
     char path[1100];

@@ -85,10 +85,12 @@ struct anchor_snapshot_status {
  * applied-height are stamped (beside seal_candidate_hook_in_tx). `datadir` is
  * the node's data directory (used to resolve <datadir>/utxo-anchor.snapshot when
  * $ZCL_MINT_ANCHOR_OUT is unset); may be NULL/empty (then "." is used).
- * `next_cursor` is the just-applied frontier (cursor_in + 1). No-op unless
- * next_cursor == the compiled SHA3 checkpoint height. Best-effort, void. */
+ * `applied_height` is the height of the block JUST applied (the stage's cursor_in;
+ * NOT the post-apply cursor, which holds the next height to apply). No-op unless
+ * applied_height == the compiled SHA3 checkpoint height, i.e. coins_kv holds the
+ * set applied THROUGH the anchor block. Best-effort, void. */
 void anchor_selfmint_hook_in_tx(struct sqlite3 *db, const char *datadir,
-                                int32_t next_cursor);
+                                int32_t applied_height);
 
 /* Pure path resolver, shared with the boot reachability probe and the test:
  * $ZCL_MINT_ANCHOR_OUT, else <datadir>/utxo-anchor.snapshot (datadir NULL/empty
