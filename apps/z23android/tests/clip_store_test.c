@@ -229,7 +229,7 @@ static bool owns_222(const char *path)
 
 static void clean_cases(void)
 {
-    char orphan[600], temp[600], notes[600], pending[600], paired[600], old_a[600], old_b[600], mine[600];
+    char orphan[600], temp[600], notes[600], pending[600], paired[sizeof(root) + ZAPP_CLIP_ID_CAP + 8], old_a[600], old_b[600], mine[600];
     struct zapp_clip list[16];
     name_of(orphan, sizeof(orphan), 'b', ".mp4");
     name_of(temp, sizeof(temp), 'c', ".json.tmp");
@@ -246,7 +246,8 @@ static void clean_cases(void)
     assert(present(notes) && present(pending) && present(mine));
     assert(zapp_clip_store_list(root, list, 16, NULL) == 6 && zapp_clip_store_clean(root, owns_222) == 0);
     assert(zapp_clip_store_clean(root, NULL) == 1 && !present(mine));
-    snprintf(paired, sizeof(paired), "%s/%s.mp4", root, list[0].id);
+    int n = snprintf(paired, sizeof(paired), "%s/%s.mp4", root, list[0].id);
+    assert(n > 0 && (size_t)n < sizeof(paired));
     assert(present(paired));
     assert(unlink(notes) == 0 && unlink(pending) == 0);
 }
