@@ -1053,7 +1053,10 @@ struct rootmap {
 static bool root_map(const struct plan *pl, const char *cwd,
                      struct rootmap *rm)
 {
-    if (lto_in_effect(pl) || pl->rsp_n > 0)
+    /* A depfile spells every header path the compile found, and a hit restores
+     * those bytes verbatim: with an absolute -I that would hand root B a
+     * depfile naming root A's headers. Keep such a compile per-root. */
+    if (lto_in_effect(pl) || pl->rsp_n > 0 || pl->want_dep || pl->dep_path)
         return false;
     int file_maps = 0;
     size_t old_len = 0;
@@ -1937,10 +1940,38 @@ static bool compiler_is_script(const char *path)
     return n != (ssize_t)sizeof magic || (magic[0] == '#' && magic[1] == '!');
 }
 
+/* Only a GCC or Clang driver is known to read just the allowlisted names. A
+ * native launcher (ccache, distcc, a vendor wrapper) can read any variable,
+ * so judge by the file the compiler path finally resolves to (symlinks followed). */
+static bool compiler_is_known_driver(const char *path)
+{
+    char cur[PATH_MAX], next[PATH_MAX];
+    if (snprintf(cur, sizeof cur, "%s", path) >= (int)sizeof cur)
+        return false;
+    for (int hops = 0; hops < 16; hops++) {
+        ssize_t n = readlink(cur, next, sizeof next - 1u);
+        if (n < 0)
+            break; /* not a symlink: cur is the file itself */
+        next[n] = '\0';
+        if (next[0] == '/') {
+            memcpy(cur, next, (size_t)n + 1u);
+        } else {
+            char *slash = strrchr(cur, '/');
+            size_t dir = slash ? (size_t)(slash - cur) + 1u : 0u;
+            if (dir + (size_t)n >= sizeof cur)
+                return false;
+            memcpy(cur + dir, next, (size_t)n + 1u);
+        }
+    }
+    const char *base = strrchr(cur, '/');
+    base = base ? base + 1 : cur;
+    return strstr(base, "gcc") != NULL || strstr(base, "clang") != NULL;
+}
+
 static enum env_key_mode env_key_mode_for(const struct plan *pl,
                                           const char *ccpath)
 {
-    if (compiler_is_script(ccpath))
+    if (compiler_is_script(ccpath) || !compiler_is_known_driver(ccpath))
         return ENV_KEY_FULL;
 #if defined(__linux__)
     return link_may_run(pl) ? ENV_KEY_ALLOW_PATH : ENV_KEY_ALLOW;
@@ -3641,6 +3672,24 @@ static bool store_sidecar(const struct cache *c, const char *ckey,
     return true;
 }
 
+/* A replayed diagnostic is stored text. When the key shares entries across
+ * roots (struct rootmap), text that names this root would be replayed in
+ * another root as a path that is not there, so such an entry is not stored.
+ * Unreadable diagnostics count as naming it. */
+static bool diagnostics_name_root(const struct plan *pl, const char *errfile)
+{
+    char cwd[PATH_MAX];
+    struct rootmap rm;
+    if (!errfile || !getcwd(cwd, sizeof cwd) || !root_map(pl, cwd, &rm))
+        return false;
+    struct buf b = { 0 };
+    bool names = !read_file(errfile, &b);
+    for (size_t i = 0; !names && i + rm.old_len <= b.len; i++)
+        names = memcmp(b.p + i, rm.old, rm.old_len) == 0;
+    buf_free(&b);
+    return names;
+}
+
 static void store(const struct cache *c, const char *ckey,
                   const struct plan *pl, const char *errfile)
 {
@@ -3648,7 +3697,7 @@ static void store(const struct cache *c, const char *ckey,
     struct buf b = { 0 }, d = { 0 }, e = { 0 };
     struct zcc_result_meta meta = { 0 };
     struct stat st;
-    if (!entry_dir(c, "obj", ckey, dir))
+    if (!entry_dir(c, "obj", ckey, dir) || diagnostics_name_root(pl, errfile))
         return;
     if (stat(pl->out_path, &st) != 0 || !read_file(pl->out_path, &b)) {
         buf_free(&b);
