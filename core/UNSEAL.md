@@ -472,3 +472,7 @@ later lane flips it HARD.
 - 2026-10-31T16:45:38Z — REASON: Split process_inv and process_tx_msg into per-item and relay helpers; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: 3799c3da4e7eda73277bcdf7e9f9004b8a61d28cb4c5d09b4daa9b7d00c5bc8d
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T16:48:37Z — REASON: Split process_version and the build identity prefix parser into helpers; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: 8f9eb0a082b47744789ccacbd6ced776319a30ea8ce044c536781f20471cbc77
+  by: owner unseal ritual (make core-unseal)

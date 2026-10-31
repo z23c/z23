@@ -268,6 +268,16 @@ bool msg_version_parse_build_identity(const char *subver, char *out,
     return false;
 }
 
+static bool build_identity_prefix_is_hex(const char *hex)
+{
+    for (size_t i = 0; i < ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN; i++) {
+        char c = hex[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+    return true;
+}
+
 bool msg_version_parse_build_identity_prefix(const char *subver, char *out,
                                              size_t outlen)
 {
@@ -283,17 +293,9 @@ bool msg_version_parse_build_identity_prefix(const char *subver, char *out,
          scan = strstr(scan + 1, ZCL_BUILD_ID_OPEN)) {
         const char *hex = scan + ZCL_BUILD_ID_OPEN_LEN;
         size_t remaining = strlen(hex);
-        bool prefix_is_hex = true;
         if (remaining <= ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN)
             continue;
-        for (size_t i = 0; i < ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN; i++) {
-            char c = hex[i];
-            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
-                prefix_is_hex = false;
-                break;
-            }
-        }
-        if (!prefix_is_hex)
+        if (!build_identity_prefix_is_hex(hex))
             continue;
         if (hex[ZCL_BUILD_IDENTITY_PREFIX_HEX_LEN] != ')' &&
             !(remaining > ZCL_BUILD_IDENTITY_HEX_LEN &&
@@ -514,6 +516,136 @@ static bool msg_version_enforce_noise(struct msg_processor *mp,
     return true;
 }
 
+static void msg_version_push_zfileaddr(struct msg_processor *mp,
+                                      struct p2p_node *node)
+{
+    if (fs_server_is_running()) {
+        uint8_t faddr[2];
+        uint16_t fport = fs_server_get_port();
+        memcpy(faddr, &fport, 2);
+
+        struct byte_stream fs_msg;
+        stream_init(&fs_msg, 4);
+        stream_write_bytes(&fs_msg, faddr, 2);
+        /* ZRC-0011 phase 1a: say WHICH state we hold, not just that we
+         * serve files. The offer batch is APPENDED after the two-byte
+         * port, so an older peer reads its two bytes and ignores the rest
+         * and we stay readable to every node already deployed. Nothing is
+         * appended when this node has no eligible bundle or registered no
+         * provider — that is the pre-offer message, byte for byte. */
+        uint8_t offers[STATE_OFFER_BATCH_V1_MAX_WIRE_BYTES];
+        size_t offers_len = state_offer_collect_wire(offers,
+                                                     sizeof(offers));
+        if (offers_len > 0)
+            stream_write_bytes(&fs_msg, offers, offers_len);
+        p2p_node_begin_message(node, "zfileaddr",
+                                mp->params->pchMessageStart);
+        p2p_node_write_message_data(node, fs_msg.data, fs_msg.size);
+        p2p_node_end_message(node);
+        stream_free(&fs_msg);
+    }
+}
+
+static void msg_version_start_zcl23_session(struct msg_processor *mp,
+                                            struct p2p_node *node)
+{
+    node->swarm_inflight_chunk = -1;
+    for (int pi = 0; pi < PIECE_PIPELINE_DEPTH; pi++)
+        node->blk_pipeline[pi].piece_index = -1;
+    printf("Peer %s: supports zclassic23 fast sync [ZCL23]\n",
+           node->addr_name);
+
+    /* Exchange UTXO manifests — both peers announce what they have. */
+    push_manifest(mp, node);
+
+    /* Exchange block piece manifests for parallel block sync. */
+    node->blk_manifest_advertise_armed = true;
+    push_block_manifest(mp, node);
+
+    /* Advertise file service port. The peer knows our IP from the
+     * TCP connection — we just tell them which port to connect to
+     * for the fast file service. They cache it in SQLite for
+     * sticky reconnection across restarts.
+     * Message: "zfileaddr" with [2-byte port].
+     *
+     * ONLY WHEN THE LISTENER IS ACTUALLY UP. This used to send
+     * fs_server_get_port() unconditionally, and that getter returns the
+     * compiled FS_PORT default even when no file service is running — so a
+     * node with the service off still told every ZCL23 peer "my file
+     * service is at 18034". That claim now matters: the receiver caches it
+     * (handle_zfileaddr → db_file_service_save) and the instant-on bundle
+     * fetch uses the cache as a seed source
+     * (engine/composition/src/boot_bundle_fetch_peer_seeds.c). An advertisement nobody
+     * can honour costs a fresh node a bounded but real fetch attempt, so
+     * do not make it. Saying nothing is the correct, fail-closed answer;
+     * a node that starts its file service later advertises on its next
+     * handshake. */
+    msg_version_push_zfileaddr(mp, node);
+}
+
+static void msg_version_apply_peer_fields(struct p2p_node *node,
+                                          const struct version_message *ver)
+{
+    node->version = ver->protocol_version;
+    node->services = ver->services;
+    if (node->state < PEER_HANDSHAKE_COMPLETE) {
+        node->advertised_service_valid = false;
+        if (node->inbound && ver->addr_from.svc.port != 0 &&
+            net_addr_is_routable(&ver->addr_from.svc.addr) &&
+            net_addr_eq(&ver->addr_from.svc.addr, &node->addr.svc.addr)) {
+            node->advertised_service = ver->addr_from.svc;
+            node->advertised_service_valid = true;
+        }
+    }
+    strncpy(node->sub_ver, ver->sub_version, MAX_SUBVERSION_LENGTH - 1);
+    node->sub_ver[MAX_SUBVERSION_LENGTH - 1] = '\0';
+    strncpy(node->clean_sub_ver, ver->sub_version, MAX_SUBVERSION_LENGTH - 1);
+    node->clean_sub_ver[MAX_SUBVERSION_LENGTH - 1] = '\0';
+    node->starting_height = ver->start_height;
+    node->time_offset =
+        peer_time_offset(ver->timestamp,
+                         (int64_t)platform_time_wall_time_t());
+    node->relay_txes = ver->relay;
+}
+
+static void msg_version_send_greetings(struct msg_processor *mp,
+                                       struct p2p_node *node)
+{
+    /* Ask outbound peers for their address list */
+    if (!node->inbound && !node->get_addr) {
+        p2p_node_begin_message(node, "getaddr", mp->params->pchMessageStart);
+        p2p_node_end_message(node);
+        node->get_addr = true;
+    }
+
+    /* Send sendheaders — tells peer we prefer headers announcements
+     * over inv. Critical for headers-first sync with legacy zclassicd. */
+    p2p_node_begin_message(node, "sendheaders", mp->params->pchMessageStart);
+    p2p_node_end_message(node);
+
+    /* Advertise our external address to this peer so it can relay us */
+    if (g_has_external_ip) {
+        struct net_address self;
+        memset(&self, 0, sizeof(self));
+        self.nServices = NODE_NETWORK;
+        self.nTime = (uint32_t)platform_time_wall_time_t();
+        net_addr_set_ipv4(&self.svc.addr, g_external_ip);
+        self.svc.port = g_external_port;
+        p2p_node_push_address(node, &self);
+    }
+}
+
+static void msg_version_complete_inbound(struct msg_processor *mp,
+                                         struct p2p_node *node)
+{
+    peer_set_state_checked((uint32_t)node->id, &node->state,
+                           PEER_HANDSHAKE_COMPLETE, "inbound version+verack");
+    peer_lifecycle_note_handshake_complete(node);
+    if (mp->net_mgr && mp->net_mgr->owner)
+        connman_evict_same_ip_inbound_when_outbound(mp->net_mgr->owner,
+                                                    node);
+}
+
 bool process_version(struct msg_processor *mp, struct p2p_node *node,
                      struct byte_stream *s)
 {
@@ -567,26 +699,7 @@ bool process_version(struct msg_processor *mp, struct p2p_node *node,
         LOG_FAIL("net", "self-connection detected for %s", node->addr_name);
     }
 
-    node->version = ver.protocol_version;
-    node->services = ver.services;
-    if (node->state < PEER_HANDSHAKE_COMPLETE) {
-        node->advertised_service_valid = false;
-        if (node->inbound && ver.addr_from.svc.port != 0 &&
-            net_addr_is_routable(&ver.addr_from.svc.addr) &&
-            net_addr_eq(&ver.addr_from.svc.addr, &node->addr.svc.addr)) {
-            node->advertised_service = ver.addr_from.svc;
-            node->advertised_service_valid = true;
-        }
-    }
-    strncpy(node->sub_ver, ver.sub_version, MAX_SUBVERSION_LENGTH - 1);
-    node->sub_ver[MAX_SUBVERSION_LENGTH - 1] = '\0';
-    strncpy(node->clean_sub_ver, ver.sub_version, MAX_SUBVERSION_LENGTH - 1);
-    node->clean_sub_ver[MAX_SUBVERSION_LENGTH - 1] = '\0';
-    node->starting_height = ver.start_height;
-    node->time_offset =
-        peer_time_offset(ver.timestamp,
-                         (int64_t)platform_time_wall_time_t());
-    node->relay_txes = ver.relay;
+    msg_version_apply_peer_fields(node, &ver);
 
     event_emitf(EV_PEER_VERSION, (uint32_t)node->id,
                 "proto=%d h=%d %s", ver.protocol_version,
@@ -647,36 +760,10 @@ bool process_version(struct msg_processor *mp, struct p2p_node *node,
      * verack (handled in process_verack). For inbound, the peer initiated,
      * so mark connected after we send our version+verack. */
     if (node->inbound) {
-        peer_set_state_checked((uint32_t)node->id, &node->state,
-                               PEER_HANDSHAKE_COMPLETE, "inbound version+verack");
-        peer_lifecycle_note_handshake_complete(node);
-        if (mp->net_mgr && mp->net_mgr->owner)
-            connman_evict_same_ip_inbound_when_outbound(mp->net_mgr->owner,
-                                                        node);
+        msg_version_complete_inbound(mp, node);
     }
 
-    /* Ask outbound peers for their address list */
-    if (!node->inbound && !node->get_addr) {
-        p2p_node_begin_message(node, "getaddr", mp->params->pchMessageStart);
-        p2p_node_end_message(node);
-        node->get_addr = true;
-    }
-
-    /* Send sendheaders — tells peer we prefer headers announcements
-     * over inv. Critical for headers-first sync with legacy zclassicd. */
-    p2p_node_begin_message(node, "sendheaders", mp->params->pchMessageStart);
-    p2p_node_end_message(node);
-
-    /* Advertise our external address to this peer so it can relay us */
-    if (g_has_external_ip) {
-        struct net_address self;
-        memset(&self, 0, sizeof(self));
-        self.nServices = NODE_NETWORK;
-        self.nTime = (uint32_t)platform_time_wall_time_t();
-        net_addr_set_ipv4(&self.svc.addr, g_external_ip);
-        self.svc.port = g_external_port;
-        p2p_node_push_address(node, &self);
-    }
+    msg_version_send_greetings(mp, node);
 
     event_emitf(EV_PEER_VERSION, (uint32_t)node->id,
                 "%s v=%d h=%d %s%s",
@@ -687,62 +774,7 @@ bool process_version(struct msg_processor *mp, struct p2p_node *node,
     /* Detect zclassic23 peers via subversion string.
      * Service bit detection is secondary — some peers filter unknown bits. */
     if (is_zcl23) {
-        node->swarm_inflight_chunk = -1;
-        for (int pi = 0; pi < PIECE_PIPELINE_DEPTH; pi++)
-            node->blk_pipeline[pi].piece_index = -1;
-        printf("Peer %s: supports zclassic23 fast sync [ZCL23]\n",
-               node->addr_name);
-
-        /* Exchange UTXO manifests — both peers announce what they have. */
-        push_manifest(mp, node);
-
-        /* Exchange block piece manifests for parallel block sync. */
-        node->blk_manifest_advertise_armed = true;
-        push_block_manifest(mp, node);
-
-        /* Advertise file service port. The peer knows our IP from the
-         * TCP connection — we just tell them which port to connect to
-         * for the fast file service. They cache it in SQLite for
-         * sticky reconnection across restarts.
-         * Message: "zfileaddr" with [2-byte port].
-         *
-         * ONLY WHEN THE LISTENER IS ACTUALLY UP. This used to send
-         * fs_server_get_port() unconditionally, and that getter returns the
-         * compiled FS_PORT default even when no file service is running — so a
-         * node with the service off still told every ZCL23 peer "my file
-         * service is at 18034". That claim now matters: the receiver caches it
-         * (handle_zfileaddr → db_file_service_save) and the instant-on bundle
-         * fetch uses the cache as a seed source
-         * (engine/composition/src/boot_bundle_fetch_peer_seeds.c). An advertisement nobody
-         * can honour costs a fresh node a bounded but real fetch attempt, so
-         * do not make it. Saying nothing is the correct, fail-closed answer;
-         * a node that starts its file service later advertises on its next
-         * handshake. */
-        if (fs_server_is_running()) {
-            uint8_t faddr[2];
-            uint16_t fport = fs_server_get_port();
-            memcpy(faddr, &fport, 2);
-
-            struct byte_stream fs_msg;
-            stream_init(&fs_msg, 4);
-            stream_write_bytes(&fs_msg, faddr, 2);
-            /* ZRC-0011 phase 1a: say WHICH state we hold, not just that we
-             * serve files. The offer batch is APPENDED after the two-byte
-             * port, so an older peer reads its two bytes and ignores the rest
-             * and we stay readable to every node already deployed. Nothing is
-             * appended when this node has no eligible bundle or registered no
-             * provider — that is the pre-offer message, byte for byte. */
-            uint8_t offers[STATE_OFFER_BATCH_V1_MAX_WIRE_BYTES];
-            size_t offers_len = state_offer_collect_wire(offers,
-                                                         sizeof(offers));
-            if (offers_len > 0)
-                stream_write_bytes(&fs_msg, offers, offers_len);
-            p2p_node_begin_message(node, "zfileaddr",
-                                    mp->params->pchMessageStart);
-            p2p_node_write_message_data(node, fs_msg.data, fs_msg.size);
-            p2p_node_end_message(node);
-            stream_free(&fs_msg);
-        }
+        msg_version_start_zcl23_session(mp, node);
     }
 
     return true;

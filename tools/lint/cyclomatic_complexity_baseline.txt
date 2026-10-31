@@ -64,10 +64,6 @@ core/modules/net/src/file_service_client.c:fs_client_sync:41
 core/modules/net/src/file_service_client.c:range_worker_fn:34
 core/modules/net/src/msg_blocks.c:process_block_msg:37
 core/modules/net/src/msg_headers.c:process_headers:70
-core/modules/net/src/msg_tx.c:process_inv:25
-core/modules/net/src/msg_tx.c:process_tx_msg:24
-core/modules/net/src/msg_version.c:msg_version_parse_build_identity_prefix:16
-core/modules/net/src/msg_version.c:process_version:28
 core/modules/net/src/msgprocessor_snapshot.c:mp_handle_zcl23_sync:174
 core/modules/net/src/msgprocessor_snapshot.c:mp_snapshot_maybe_offer:17
 core/modules/net/src/msgprocessor_snapshot.c:mp_snapshot_send_tick:33
