@@ -17,6 +17,8 @@
 #include "util/log_macros.h"
 #include "models/database.h"
 #include "models/database_internal.h"
+#include "platform/time_compat.h"
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +26,36 @@
 /* Health evidence retries this fallback. A single attempt must not spend
  * 30 seconds behind a historical writer before the caller can defer. */
 #define NODE_DB_DETACHED_BUSY_TIMEOUT_MS 100
+
+/* A detached writer that lost the lock is still waiting between its caller's
+ * retries; remember it this long so a long-running writer can hand the lock
+ * over. */
+#define NODE_DB_DETACHED_WAIT_MEMORY_MS 1000
+
+static _Atomic int g_detached_in_flight = 0;
+static _Atomic int64_t g_detached_busy_ms = -1;
+
+bool node_db_detached_writer_waiting(void)
+{
+    if (atomic_load(&g_detached_in_flight) > 0)
+        return true;
+    int64_t at = atomic_load(&g_detached_busy_ms);
+    return at >= 0 && platform_time_monotonic_ms() - at <
+                          NODE_DB_DETACHED_WAIT_MEMORY_MS;
+}
+
+#ifdef ZCL_TESTING
+void node_db_detached_writer_test_force_waiting(bool on)
+{
+    atomic_fetch_add(&g_detached_in_flight, on ? 1 : -1);
+}
+
+void node_db_detached_writer_test_reset(void)
+{
+    atomic_store(&g_detached_in_flight, 0);
+    atomic_store(&g_detached_busy_ms, -1);
+}
+#endif
 
 /* The Campaign-C3 newer-schema refusal banner, shared by the open-time
  * preflight in database.c (which fires before anything writes to the
@@ -176,7 +208,13 @@ bool node_db_state_set_detached(struct node_db *ndb, const char *key,
     }
     sqlite3_busy_timeout(db, NODE_DB_DETACHED_BUSY_TIMEOUT_MS);
 
+    atomic_fetch_add(&g_detached_in_flight, 1);
     rc = node_db_state_set_detached_write(db, key, value, len);
+    if ((rc & 0xff) == SQLITE_BUSY)
+        atomic_store(&g_detached_busy_ms, platform_time_monotonic_ms());
+    atomic_fetch_sub(&g_detached_in_flight, 1);
+    if (rc == SQLITE_DONE)
+        atomic_store(&g_detached_busy_ms, -1);
     if (rc != SQLITE_DONE) {
         LOG_WARN("node_db",
                  "detached state_set failed key=%s path=%s rc=%d: %s",

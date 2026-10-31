@@ -17,7 +17,9 @@
 
 #include "services/node_db_catchup_lock_guard.h"
 
+#include "config/db_service.h"
 #include "models/database.h"
+#include "platform/time_compat.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
 
@@ -30,6 +32,14 @@ extern volatile sig_atomic_t g_shutdown_requested;
 /* ── Commit cadence ─────────────────────────────────────────────── */
 #ifdef ZCL_TESTING
 static _Atomic int g_test_batch_size = 0;
+static _Atomic int g_test_batch_max_secs = -1;
+static _Atomic int g_test_height_delay_ms = 0;
+static _Atomic bool g_test_fake_clock = false;
+static _Atomic int64_t g_test_clock_ms = 0;
+static _Atomic int g_timed_row_commits = 0;
+static _Atomic int64_t g_test_reopen_ms = 0;
+static _Atomic int64_t g_test_min_real_hold = INT64_MAX;
+static _Atomic int g_yield_sleeps = 0;
 static _Atomic int g_batch_commits = 0;
 #endif
 
@@ -43,10 +53,68 @@ int node_db_catchup_lock_guard_batch_size(void)
     return NODE_DB_CATCHUP_COMMIT_BATCH_BLOCKS;
 }
 
+int64_t node_db_catchup_lock_guard_now_ms(void)
+{
+#ifdef ZCL_TESTING
+    if (atomic_load(&g_test_fake_clock))
+        return atomic_load(&g_test_clock_ms);
+#endif
+    return platform_time_monotonic_ms();
+}
+
+bool node_db_catchup_lock_guard_batch_due(int64_t held_ms)
+{
+    if (held_ms >= (int64_t)node_db_catchup_lock_guard_batch_max_secs() * 1000)
+        return true;
+    return held_ms >= NODE_DB_CATCHUP_WAITER_MIN_HOLD_MS &&
+           node_db_detached_writer_waiting();
+}
+
+int node_db_catchup_lock_guard_batch_max_secs(void)
+{
+#ifdef ZCL_TESTING
+    int override = atomic_load(&g_test_batch_max_secs);
+    if (override >= 0)
+        return override;
+#endif
+    return NODE_DB_CATCHUP_COMMIT_BATCH_MAX_SECS;
+}
+
+void node_db_catchup_lock_guard_yield_to_writers(struct db_service *svc,
+                                                  bool drain_queue)
+{
+    bool drain = drain_queue && svc;
+
+    if (drain)
+        (void)db_service_run_pending(svc);
+    if (node_db_detached_writer_waiting() && !g_shutdown_requested) {
+#ifdef ZCL_TESTING
+        atomic_fetch_add(&g_yield_sleeps, 1);
+#endif
+        platform_sleep_ms(NODE_DB_CATCHUP_YIELD_MS);
+#ifdef ZCL_TESTING
+        if (atomic_load(&g_test_fake_clock))
+            atomic_fetch_add(&g_test_clock_ms, NODE_DB_CATCHUP_YIELD_MS);
+#endif
+        if (drain)
+            (void)db_service_run_pending(svc);
+    }
+}
+
 void node_db_catchup_lock_guard_note_batch_commit(void)
 {
 #ifdef ZCL_TESTING
     atomic_fetch_add(&g_batch_commits, 1);
+#endif
+}
+
+void node_db_catchup_lock_guard_note_timed_commit(bool rows)
+{
+#ifdef ZCL_TESTING
+    if (rows)
+        atomic_fetch_add(&g_timed_row_commits, 1);
+#else
+    (void)rows;
 #endif
 }
 
@@ -142,6 +210,60 @@ void node_db_catchup_lock_guard_test_set_batch_size(int blocks)
     atomic_store(&g_test_batch_size, blocks);
 }
 
+void node_db_catchup_lock_guard_test_set_batch_max_secs(int secs)
+{
+    atomic_store(&g_test_batch_max_secs, secs);
+}
+
+void node_db_catchup_lock_guard_test_set_height_delay_ms(int ms)
+{
+    atomic_store(&g_test_height_delay_ms, ms);
+}
+
+int node_db_catchup_lock_guard_test_yield_sleeps(void)
+{
+    return atomic_load(&g_yield_sleeps);
+}
+
+void node_db_catchup_lock_guard_test_height_delay(void)
+{
+    int ms = atomic_load(&g_test_height_delay_ms);
+    if (ms <= 0)
+        return;
+    if (atomic_load(&g_test_fake_clock))
+        atomic_fetch_add(&g_test_clock_ms, ms);
+    else
+        platform_sleep_ms(ms);
+}
+
+void node_db_catchup_lock_guard_test_note_reopen(int64_t ms)
+{
+    atomic_store(&g_test_reopen_ms, ms);
+}
+
+void node_db_catchup_lock_guard_test_note_cycle(int64_t ms)
+{
+    int64_t hold = ms - atomic_load(&g_test_reopen_ms);
+    if (hold < atomic_load(&g_test_min_real_hold))
+        atomic_store(&g_test_min_real_hold, hold);
+}
+
+int64_t node_db_catchup_lock_guard_test_min_real_hold(void)
+{
+    return atomic_load(&g_test_min_real_hold);
+}
+
+void node_db_catchup_lock_guard_test_use_fake_clock(bool on)
+{
+    atomic_store(&g_test_clock_ms, 0);
+    atomic_store(&g_test_fake_clock, on);
+}
+
+int node_db_catchup_lock_guard_test_timed_row_commits(void)
+{
+    return atomic_load(&g_timed_row_commits);
+}
+
 int node_db_catchup_lock_guard_test_batch_commits(void)
 {
     return atomic_load(&g_batch_commits);
@@ -179,6 +301,14 @@ int node_db_catchup_lock_guard_test_snapshot_restarts(void)
 void node_db_catchup_lock_guard_test_reset(void)
 {
     atomic_store(&g_test_batch_size, 0);
+    atomic_store(&g_test_batch_max_secs, -1);
+    atomic_store(&g_test_height_delay_ms, 0);
+    atomic_store(&g_test_fake_clock, false);
+    atomic_store(&g_test_clock_ms, 0);
+    atomic_store(&g_timed_row_commits, 0);
+    atomic_store(&g_test_reopen_ms, 0);
+    atomic_store(&g_test_min_real_hold, INT64_MAX);
+    atomic_store(&g_yield_sleeps, 0);
     atomic_store(&g_batch_commits, 0);
     atomic_store(&g_abort_streak, 0);
     atomic_store(&g_test_force_snapshot_failures, 0);

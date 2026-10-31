@@ -134,4 +134,14 @@ bool db_service_enqueue_write(struct db_service *svc,
                               db_service_free_fn free_ctx);
 bool db_service_is_worker_thread(const struct db_service *svc);
 
+/* Worker-thread only: run the plain write functions already queued by other
+ * threads, then return. A long worker job calls this between its own
+ * transactions (no transaction open) so queued writers are not starved until
+ * the whole job ends. Runs only DB_SERVICE_JOB_NONE jobs from the head of the
+ * queue and stops at the first other job: EXEC_SQL, BEGIN, COMMIT, ROLLBACK,
+ * FLUSH, CLOSE and STOP jobs, and everything queued behind them, stay queued
+ * for the worker loop. Returns the number of jobs run; 0 off the worker
+ * thread. */
+size_t db_service_run_pending(struct db_service *svc);
+
 #endif

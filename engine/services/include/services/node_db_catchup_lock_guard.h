@@ -8,7 +8,7 @@
  * Three small, always-on mechanisms, kept out of the service file so the
  * service stays under the E1 file-size ratchet:
  *
- *   1. Commit cadence — the per-batch COMMIT cap (blocks + wall-clock
+ *   1. Commit cadence — the per-batch COMMIT cap (blocks + monotonic-clock
  *      window) so the single WAL write lock is never held across an
  *      unbounded 100k-block batch (the old shape held it for minutes,
  *      past every other writer's budget, producing "database is locked"
@@ -42,20 +42,58 @@
 #include <stdint.h>
 
 struct node_db;
+struct db_service;
 
 /* ── Commit cadence ─────────────────────────────────────────────── */
 #define NODE_DB_CATCHUP_COMMIT_BATCH_BLOCKS 2000
-/* Wall-clock cap on one open batch transaction, in seconds. Below the
+/* Cap on one open batch transaction, in seconds (monotonic). Below the
  * shared handle's 10 s busy timeout (ZCL_NODE_DB_BUSY_TIMEOUT_MS) so a
  * contending writer's busy-handler wait can still land. */
 #define NODE_DB_CATCHUP_COMMIT_BATCH_MAX_SECS 5
+/* Pause after every batch COMMIT with no write transaction open. SQLite
+ * WAL grants the write lock to whichever writer asks first, and a busy
+ * handler only polls, so a walk that re-issues BEGIN IMMEDIATE the instant
+ * it commits wins every race against a polling writer (detached state
+ * writers wait 100 ms) and holds the lock for the entire walk. The pause
+ * outlasts that 100 ms wait. */
+#define NODE_DB_CATCHUP_YIELD_MS 200
 
 /* The effective per-batch block cap for this run (test override when set,
  * else the default above). */
 int node_db_catchup_lock_guard_batch_size(void);
 
+/* Shortest hold before a batch is cycled early for a waiting detached writer. */
+#define NODE_DB_CATCHUP_WAITER_MIN_HOLD_MS 250
+
+/* Monotonic clock for the batch cap, so a wall-clock step cannot stretch a
+ * hold. Tests substitute a clock their height delay advances. */
+int64_t node_db_catchup_lock_guard_now_ms(void);
+
+/* True when a batch held the write lock for held_ms must be closed: the cap
+ * passed, or a detached writer is waiting and the minimum hold passed. */
+bool node_db_catchup_lock_guard_batch_due(int64_t held_ms);
+
+/* Cap on one open batch transaction, in seconds; test override when set. */
+int node_db_catchup_lock_guard_batch_max_secs(void);
+
+/* Between batches, with no transaction open, hand the write lock to waiting
+ * writers. Plain writes queued on the db worker run right away (drain_queue);
+ * the walk then sleeps NODE_DB_CATCHUP_YIELD_MS only while a detached writer
+ * (own connection, 100 ms busy wait) is waiting, so a walk with nobody
+ * waiting pays no pause.
+ *
+ * Bulk (turbo) walks pass drain_queue=false: they run with synchronous=OFF
+ * and the txo/txi indexes dropped, and a queued job must not execute in that
+ * mode, so queued jobs keep waiting for the walk as before and only detached
+ * writers get the lock window. */
+void node_db_catchup_lock_guard_yield_to_writers(struct db_service *svc,
+                                                  bool drain_queue);
+
 /* Record one mid-walk batch COMMIT (test/diagnostic counter). */
 void node_db_catchup_lock_guard_note_batch_commit(void);
+
+/* Record one time-driven commit; rows is true when the batch held rows. */
+void node_db_catchup_lock_guard_note_timed_commit(bool rows);
 
 /* ── BUSY_SNAPSHOT restart ──────────────────────────────────────── */
 #define NODE_DB_CATCHUP_SNAPSHOT_MAX_RESTARTS 3
@@ -95,6 +133,22 @@ void node_db_catchup_lock_guard_note_outcome(bool pass_failed);
 #ifdef ZCL_TESTING
 /* Commit-cadence override: blocks <= 0 restores the default. */
 void node_db_catchup_lock_guard_test_set_batch_size(int blocks);
+/* Batch time cap override in seconds; negative restores the default. */
+void node_db_catchup_lock_guard_test_set_batch_max_secs(int secs);
+/* Per-height walk delay so a short fixture behaves like a long walk. */
+void node_db_catchup_lock_guard_test_set_height_delay_ms(int ms);
+/* Yield sleeps taken since the last reset. */
+int node_db_catchup_lock_guard_test_yield_sleeps(void);
+/* Substitute the cap clock with one only the height delay advances. */
+void node_db_catchup_lock_guard_test_use_fake_clock(bool on);
+/* Fake-clock instants of the last reopen and each timed commit; the minimum
+ * real hold (commit instant minus the preceding reopen) is INT64_MAX if none. */
+void node_db_catchup_lock_guard_test_note_reopen(int64_t ms);
+void node_db_catchup_lock_guard_test_note_cycle(int64_t ms);
+int64_t node_db_catchup_lock_guard_test_min_real_hold(void);
+/* Time-driven commits that carried rows. */
+int node_db_catchup_lock_guard_test_timed_row_commits(void);
+void node_db_catchup_lock_guard_test_height_delay(void);
 int  node_db_catchup_lock_guard_test_batch_commits(void);
 /* Abort-streak fixtures. */
 void node_db_catchup_lock_guard_test_set_abort_streak(int streak);

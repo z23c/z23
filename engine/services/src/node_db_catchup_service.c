@@ -34,6 +34,7 @@
 #include "controllers/sync_controller.h"
 #include "services/node_db_catchup_service.h"
 #include "services/node_db_catchup_lock_guard.h"
+#include "config/db_service.h"
 #include "services/db_maintenance.h"
 #include "node_db_catchup_internal.h"
 #include "util/boot_progress.h"
@@ -145,6 +146,15 @@ static void catchup_active_finish(void)
 {
     atomic_fetch_sub(&g_catchup_active_depth, 1);
     sync_job_catchup_finish();
+}
+
+/* The serialized writer whose worker thread runs this walk, or NULL when the
+ * walk runs on a plain thread. */
+static struct db_service *catchup_db_service(const struct node_db *ndb)
+{
+    struct db_service *svc = app_runtime_db_service();
+    return svc && db_service_is_started(svc) &&
+           db_service_node_db(svc) == ndb ? svc : NULL;
 }
 
 #ifdef ZCL_TESTING
@@ -514,7 +524,86 @@ static void catchup_note_busy_snapshot(struct node_db *ndb, bool *busy_snapshot)
         *busy_snapshot = true;
 }
 
+/* Record the batch's last indexed block as the projection cursor. */
+static bool catchup_set_batch_tip(struct node_db *ndb,
+                                  const struct block_index *pindex, int h,
+                                  bool *busy_snapshot)
+{
+    if (!pindex->phashBlock) {
+        LOG_WARN("catchup", "catchup: missing hash at batch commit %d", h);
+        return false;
+    }
+    if (node_db_sync_set_tip(ndb, pindex->phashBlock->data, h))
+        return true;
+    LOG_WARN("catchup", "catchup: failed to set tip at batch commit %d", h);
+    catchup_note_busy_snapshot(ndb, busy_snapshot);
+    return false;
+}
+
+/* The open batch plus the cursor facts needed to close it between heights. */
+struct catchup_batch {
+    int64_t t_start;
+    int indexed_at_start;
+    int last_committed_height;
+    bool tx_open;
+    bool busy_snapshot;
+    bool bulk_mode;
+};
+
+/* Close the open batch once it has been held for the time cap, on any height:
+ * BEGIN IMMEDIATE holds the write lock even with nothing written, and a
+ * stretch of holes (absent or unreadable bodies) loops without reaching the
+ * post-index commit check, so without this the lock would be held across the
+ * whole stretch. A batch that holds rows first records the last indexed block
+ * as the cursor (every height up to it is processed; holes are recorded, not
+ * skipped silently); an empty batch just cycles. Then commit, yield, reopen.
+ * The cap is also reached early, after NODE_DB_CATCHUP_WAITER_MIN_HOLD_MS,
+ * while a detached writer is waiting (node_db_catchup_lock_guard_batch_due).
+ * Returns false when the walk must abort; tx_open then says whether the
+ * caller still owns an open transaction to roll back. */
+static bool catchup_cycle_batch(struct node_db *ndb, int h, int indexed,
+                                const struct block_index *tip, int tip_h,
+                                struct catchup_batch *b)
+{
+    int64_t now = node_db_catchup_lock_guard_now_ms();
+    if (!node_db_catchup_lock_guard_batch_due(now - b->t_start))
+        return true;
+    bool rows = indexed != b->indexed_at_start;
+    if (rows && !catchup_set_batch_tip(ndb, tip, tip_h, &b->busy_snapshot))
+        return false;
+    if (!node_db_commit(ndb)) {
+        LOG_WARN("catchup", "catchup: timed batch COMMIT failed at height %d", h);
+        catchup_note_busy_snapshot(ndb, &b->busy_snapshot);
+        node_db_rollback(ndb);
+        b->tx_open = false;
+        return false;
+    }
+    node_db_catchup_lock_guard_note_batch_commit();
+    node_db_catchup_lock_guard_note_timed_commit(rows);
+#ifdef ZCL_TESTING
+    node_db_catchup_lock_guard_test_note_cycle(now);
+#endif
+    b->tx_open = false;
+    b->indexed_at_start = indexed;
+    if (rows)
+        b->last_committed_height = tip_h;
+    node_db_catchup_lock_guard_yield_to_writers(catchup_db_service(ndb),
+                                                !b->bulk_mode);
+    if (!catchup_reopen_batch_txn(ndb, h, &b->busy_snapshot)) {
+        LOG_WARN("catchup", "catchup: failed to reopen transaction after timed batch");
+        return false;
+    }
+    b->t_start = node_db_catchup_lock_guard_now_ms();
+#ifdef ZCL_TESTING
+    node_db_catchup_lock_guard_test_note_reopen(
+        node_db_catchup_lock_guard_now_ms());
+#endif
+    b->tx_open = true;
+    return true;
+}
+
 /* Failure tail shared by the three pre-walk transaction aborts. */
+
 static void catchup_abort_pass(bool *restore_ok)
 {
     *restore_ok = false;
@@ -587,10 +676,9 @@ int node_db_catchup_service_run(struct node_db *ndb,
                                 const char *datadir)
 {
     bool interrupted = false;
-    bool tx_open = false;
+    struct catchup_batch cb = {.last_committed_height = -1};
     bool failed = false;
     int last_indexed_height = 0;
-    int last_committed_height = -1;
     const struct block_index *last_indexed_tip = NULL;
     struct sync_db_turbo_scope turbo_mode = {0};
     bool restore_ok = true;
@@ -629,7 +717,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
 
     /* Keep pre-existing fast path behavior when there is no catchup work. */
     last_indexed_height = db_tip;
-    last_committed_height = db_tip;
+    cb.last_committed_height = db_tip;
 
     int start = db_tip + 1;
     if (start < 0) start = 0;
@@ -650,6 +738,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
 
     /* Turbo mode: disable fsync, drop indexes, enlarge cache. */
     bool bulk_mode = (total > 50000);
+    cb.bulk_mode = bulk_mode;
     if (!sync_db_turbo_scope_begin(&turbo_mode, ndb, bulk_mode)) {
         fprintf(stderr, "catchup: failed to enter turbo mode\n");
         node_db_catchup_lock_guard_note_outcome(true);
@@ -669,7 +758,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
         catchup_abort_pass(&restore_ok);
         return -1; // raw-return-ok:logged-above
     }
-    tx_open = true;
+    cb.tx_open = true;
     if (!node_db_commit(ndb)) {
         LOG_WARN("catchup", "catchup: initial COMMIT failed — aborting");
         node_db_rollback(ndb);
@@ -678,7 +767,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
         catchup_abort_pass(&restore_ok);
         return -1; // raw-return-ok:logged-above
     }
-    tx_open = false;
+    cb.tx_open = false;
 
     int indexed = 0;
     int wallet_hits = 0;
@@ -691,10 +780,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
      * Catchup is an idempotent projection re-run, so finer granularity
      * changes only lock-hold time, never the final state. */
     int batch_size = node_db_catchup_lock_guard_batch_size();
-    int64_t t_batch_start = (int64_t)platform_time_wall_time_t();
-    /* Set when the first failure of this pass carries the extended
-     * SQLITE_BUSY_SNAPSHOT code — see the restart seatbelt at the tail. */
-    bool busy_snapshot = false;
+    cb.t_start = node_db_catchup_lock_guard_now_ms();
     int64_t t_start = (int64_t)platform_time_wall_time_t();
 
     /* Read-only mapping cache.  The cache owns the source descriptor for the
@@ -715,7 +801,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
         catchup_abort_pass(&restore_ok);
         return -1; // raw-return-ok:logged-above
     }
-    tx_open = true;
+    cb.tx_open = true;
 
     /* Unreadable blocks are LOUD HOLES, not abort triggers: on a
      * cold-import datadir the imported index carries the source node's
@@ -744,6 +830,14 @@ int node_db_catchup_service_run(struct node_db *ndb,
     for (int h = start; h <= chain_tip; h++) {
         if (g_shutdown_requested) {
             interrupted = true;
+            break;
+        }
+#ifdef ZCL_TESTING
+        node_db_catchup_lock_guard_test_height_delay();
+#endif
+        if (!catchup_cycle_batch(ndb, h, indexed, last_indexed_tip,
+                                 last_indexed_height, &cb)) {
+            failed = true;
             break;
         }
         /* Pump systemd watchdog liveness during long node_db sync-catchup
@@ -886,50 +980,45 @@ int node_db_catchup_service_run(struct node_db *ndb,
                      "catchup: TEST-INJECTED SQLITE_BUSY_SNAPSHOT write "
                      "failure at height %d", h);
             failed = true;
-            busy_snapshot = true;
+            cb.busy_snapshot = true;
             break;
         }
 #endif
 
-        int64_t t_now = (int64_t)platform_time_wall_time_t();
+        int64_t t_now = node_db_catchup_lock_guard_now_ms();
         if (indexed % batch_size == 0 ||
-            t_now - t_batch_start >= NODE_DB_CATCHUP_COMMIT_BATCH_MAX_SECS) {
-            if (pindex->phashBlock) {
-                if (!node_db_sync_set_tip(ndb, pindex->phashBlock->data, h)) {
-                    LOG_WARN("catchup", "catchup: failed to set tip at batch commit %d", h);
-                    catchup_note_busy_snapshot(ndb, &busy_snapshot);
-                    failed = true;
-                    break;
-                }
-            } else {
-                LOG_WARN("catchup", "catchup: missing hash at batch commit %d", h);
+            node_db_catchup_lock_guard_batch_due(t_now - cb.t_start)) {
+            if (!catchup_set_batch_tip(ndb, pindex, h, &cb.busy_snapshot)) {
                 failed = true;
                 break;
             }
             if (!node_db_commit(ndb)) {
                 LOG_WARN("catchup", "catchup: batch COMMIT failed at height %d", h);
-                catchup_note_busy_snapshot(ndb, &busy_snapshot);
+                catchup_note_busy_snapshot(ndb, &cb.busy_snapshot);
                 node_db_rollback(ndb);
-                tx_open = false;
+                cb.tx_open = false;
                 failed = true;
                 break;
             }
             node_db_catchup_lock_guard_note_batch_commit();
-            tx_open = false;
-            t_batch_start = t_now;
-            last_committed_height = h;
+            cb.tx_open = false;
+            cb.last_committed_height = h;
             catchup_batch_committed(ndb, bulk_mode, &sapling_tree, pindex, h,
                                     indexed, total, wallet_hits, t_start);
+            cb.indexed_at_start = indexed;
+            node_db_catchup_lock_guard_yield_to_writers(catchup_db_service(ndb),
+                                                        !bulk_mode);
             /* The batch just committed is durable no matter what happens
              * next, so a busy reopen is worth waiting out rather than
              * aborting the pass (which stops catchup, withholds the boot
              * watchdog ping, and gets the node killed). */
-            if (!catchup_reopen_batch_txn(ndb, h, &busy_snapshot)) {
+            if (!catchup_reopen_batch_txn(ndb, h, &cb.busy_snapshot)) {
                 LOG_WARN("catchup", "catchup: failed to reopen transaction after batch commit");
                 failed = true;
                 break;
             }
-            tx_open = true;
+            cb.t_start = node_db_catchup_lock_guard_now_ms();
+            cb.tx_open = true;
         }
     }
 
@@ -947,18 +1036,18 @@ int node_db_catchup_service_run(struct node_db *ndb,
      * rollback (a successful ROLLBACK would clobber the handle errcode).
      * No DB op runs between a failing write and this point on the break
      * paths above. */
-    if (failed && !busy_snapshot &&
+    if (failed && !cb.busy_snapshot &&
         node_db_catchup_lock_guard_busy_snapshot(ndb))
-        busy_snapshot = true;
+        cb.busy_snapshot = true;
 
     if (failed) {
-        if (tx_open && !node_db_rollback(ndb))
+        if (cb.tx_open && !node_db_rollback(ndb))
             LOG_WARN("catchup", "catchup: rollback failed after failure");
-        tx_open = false;
+        cb.tx_open = false;
     }
 
     /* Final commit */
-    if (tx_open && !failed) {
+    if (cb.tx_open && !failed) {
         if (last_indexed_tip && last_indexed_tip->phashBlock) {
             if (!node_db_sync_set_tip(ndb,
                                       last_indexed_tip->phashBlock->data,
@@ -972,7 +1061,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
                 proven_authority, proven_applied);
             if (sparse_target >= 0) {
                 last_indexed_height = sparse_target;
-                last_committed_height = sparse_target;
+                cb.last_committed_height = sparse_target;
                 LOG_INFO("catchup",
                          "catchup: sparse proven prefix %d..%d has no block "
                          "bodies; advanced SQLite projection cursor to h=%d "
@@ -993,29 +1082,29 @@ int node_db_catchup_service_run(struct node_db *ndb,
         if (!failed) {
             if (!node_db_commit(ndb)) {
                 LOG_WARN("catchup", "catchup: final COMMIT failed");
-                catchup_note_busy_snapshot(ndb, &busy_snapshot);
+                catchup_note_busy_snapshot(ndb, &cb.busy_snapshot);
                 if (!node_db_rollback(ndb))
                     LOG_WARN("catchup", "catchup: final ROLLBACK failed");
-                tx_open = false;
+                cb.tx_open = false;
                 failed = true;
-                last_indexed_height = last_committed_height;
+                last_indexed_height = cb.last_committed_height;
             } else {
-                tx_open = false;
-                last_committed_height = last_indexed_height;
+                cb.tx_open = false;
+                cb.last_committed_height = last_indexed_height;
                 /* Force a fresh flat-file checkpoint at catchup completion
                  * (including on reaching tip), so the next boot has a
                  * checkpoint at the newest applied height. Guarded on a
                  * resolvable tip block hash for the {height, hash, root} key. */
                 if (last_indexed_tip && last_indexed_tip->phashBlock)
                     sapling_tree_flat_checkpoint_note(
-                        &sapling_tree, last_committed_height,
+                        &sapling_tree, cb.last_committed_height,
                         last_indexed_tip->phashBlock->data, true);
             }
         }
     }
 
     if (failed) {
-        if (tx_open && !node_db_rollback(ndb))
+        if (cb.tx_open && !node_db_rollback(ndb))
             LOG_WARN("catchup", "catchup: final rollback path failed");
         interrupted = false;
     }
@@ -1035,7 +1124,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
      * state), so a bounded recursion is exact. With BEGIN IMMEDIATE this
      * pass's own writes can no longer produce the class; this covers any
      * residual/regressed deferred writer. */
-    if (node_db_catchup_lock_guard_restart_needed(failed, busy_snapshot)) {
+    if (node_db_catchup_lock_guard_restart_needed(failed, cb.busy_snapshot)) {
         catchup_active_finish();
         int r = node_db_catchup_service_run(ndb, chain, w, datadir);
         node_db_catchup_lock_guard_restart_done();
@@ -1067,7 +1156,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
            interrupted ? "stopped" : "complete",
            indexed, (long long)elapsed,
            elapsed > 0 ? indexed / (int)elapsed : indexed,
-           last_committed_height);
+           cb.last_committed_height);
     fflush(stdout);
     if (lean_holes > 0) {
         if (suspicious_lean_holes > 0) {

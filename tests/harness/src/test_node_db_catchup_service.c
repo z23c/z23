@@ -4,6 +4,9 @@
 #include "services/node_db_catchup_service.h"
 #include "services/node_db_catchup_lock_guard.h"
 #include "services/db_maintenance.h"
+#include "config/db_service.h"
+#include "config/runtime.h"
+#include "platform/time_compat.h"
 #include "models/database.h"
 #include "models/block.h"
 #include "models/explorer_index.h"
@@ -17,6 +20,8 @@
 #include "storage/disk_block_io.h"
 
 #include <errno.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -904,6 +909,377 @@ static int ndc_check_resumed_matches_continuous(struct ndc_fix_ctx *fx)
     return failures;
 }
 
+/* Writers get through while a walk runs.
+ *
+ * The walk runs as one db-worker job. A detached state writer (own
+ * connection, 100 ms busy wait) and a plain write queued on the worker must
+ * both complete BEFORE the walk ends: the batch commit hands over the lock
+ * and the worker queue instead of reopening the next batch instantly. */
+#define NDC_YIELD_MAX_ATTEMPTS 12
+#define NDC_YIELD_HEIGHT_DELAY_MS 150
+
+struct ndc_starve {
+    struct db_service *svc;
+    struct node_db *ndb;
+    struct active_chain *ac;
+    const char *datadir;
+    _Atomic bool walk_done;
+    _Atomic int walk_result;
+    int detached_attempts;
+    bool detached_ok_during_walk;
+    bool queued_ok_during_walk;
+    _Atomic bool noop_saw_walk;
+};
+
+static bool ndc_starve_walk(struct node_db *ndb, void *ctx)
+{
+    struct ndc_starve *st = ctx;
+    atomic_store(&st->walk_result,
+                 node_db_catchup_service_run(ndb, st->ac, NULL, st->datadir));
+    atomic_store(&st->walk_done, true);
+    return true;
+}
+
+static bool ndc_starve_noop(struct node_db *ndb, void *ctx)
+{
+    struct ndc_starve *st = ctx;
+
+    (void)ndb;
+    atomic_store(&st->noop_saw_walk, node_db_catchup_service_active());
+    return true;
+}
+
+static void *ndc_starve_walk_thread(void *arg)
+{
+    struct ndc_starve *st = arg;
+    (void)db_service_run_write(st->svc, ndc_starve_walk, st);
+    return NULL;
+}
+
+static void *ndc_starve_queued_thread(void *arg)
+{
+    struct ndc_starve *st = arg;
+    bool ok = db_service_run_write(st->svc, ndc_starve_noop, st);
+    st->queued_ok_during_walk = ok && !atomic_load(&st->walk_done);
+    return NULL;
+}
+
+static void ndc_starve_detached(struct ndc_starve *st)
+{
+    const uint8_t value[1] = {1};
+
+    for (int i = 0; i < NDC_YIELD_MAX_ATTEMPTS; i++) {
+        st->detached_attempts = i + 1;
+        if (node_db_state_set_detached(st->ndb, "ndc.yield", value, 1)) {
+            st->detached_ok_during_walk = !atomic_load(&st->walk_done);
+            return;
+        }
+        platform_sleep_ms(20);
+    }
+}
+
+static int ndc_check_walk_yields_to_writers(struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    struct ndc_starve st = {.ac = &fx->ac, .datadir = fx->dirF};
+    struct db_service svc;
+    struct app_runtime_context rt = {.db_service = &svc};
+    struct node_db ndb;
+    char dir[256], path[512];
+
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "yield");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    db_service_init(&svc);
+    bool up = fx->built && node_db_open(&ndb, path) &&
+              db_service_attach(&svc, &ndb) &&
+              db_service_start_test_worker(&svc);
+    st.svc = &svc;
+    st.ndb = &ndb;
+    if (up) {
+        app_runtime_set_current(&rt);
+        node_db_detached_writer_test_reset();
+        node_db_catchup_lock_guard_test_reset();
+        node_db_catchup_lock_guard_test_set_batch_size(2);
+        node_db_catchup_lock_guard_test_set_height_delay_ms(
+            NDC_YIELD_HEIGHT_DELAY_MS);
+        pthread_t walk, queued;
+        bool w = pthread_create(&walk, NULL, ndc_starve_walk_thread, &st) == 0;
+        for (int i = 0; i < 200 && !node_db_catchup_service_active(); i++)
+            platform_sleep_ms(5);
+        platform_sleep_ms(100);
+        bool q = pthread_create(&queued, NULL, ndc_starve_queued_thread,
+                                &st) == 0;
+        ndc_starve_detached(&st);
+        if (q) pthread_join(queued, NULL);
+        if (w) pthread_join(walk, NULL);
+        app_runtime_set_current(NULL);
+        node_db_catchup_lock_guard_test_reset();
+    }
+    printf("walk yield: up=%d walk=%d detached_attempts=%d "
+           "detached_during_walk=%d queued_during_walk=%d\n", up,
+           atomic_load(&st.walk_result), st.detached_attempts,
+           st.detached_ok_during_walk, st.queued_ok_during_walk);
+    NDC_CHECK("the yielding walk still indexes every block",
+              up && atomic_load(&st.walk_result) == NDC_FIX_N);
+    NDC_CHECK("the detached writer really contended with the walk",
+              up && st.detached_attempts >= 2);
+    NDC_CHECK("a detached state_set lands while the walk is running",
+              up && st.detached_ok_during_walk);
+    NDC_CHECK("a queued worker write ran nested inside the running walk",
+              up && st.queued_ok_during_walk &&
+              atomic_load(&st.noop_saw_walk));
+    if (up) {
+        db_service_stop(&svc);
+        node_db_close(&ndb);
+    }
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* A stretch of heights that index nothing must still release the lock. */
+static int ndc_check_hole_stretch_releases_lock(struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    struct node_db ndb;
+    char dir[256], path[512];
+
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "holes");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool up = fx->built && node_db_open(&ndb, path);
+    for (int h = 1; h <= 3; h++)
+        fx->slots[h].nStatus &= ~BLOCK_HAVE_DATA;
+    node_db_catchup_lock_guard_test_reset();
+    node_db_catchup_lock_guard_test_set_batch_max_secs(0);
+    int res = up ? node_db_catchup_service_run(&ndb, &fx->ac, NULL, fx->dirF)
+                 : -1;
+    int commits = node_db_catchup_lock_guard_test_batch_commits();
+    node_db_catchup_lock_guard_test_reset();
+    for (int h = 1; h <= 3; h++)
+        fx->slots[h].nStatus |= BLOCK_HAVE_DATA;
+    printf("hole stretch: result=%d batch_commits=%d\n", res, commits);
+    NDC_CHECK("blocks past the hole stretch are indexed", up && res == 2);
+    NDC_CHECK("the hole stretch commits and releases the lock",
+              up && commits >= 3);
+    if (up) node_db_close(&ndb);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* With nobody waiting, a walk of several batches takes no yield pause. */
+static int ndc_check_idle_walk_never_sleeps(struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    struct node_db ndb;
+    char dir[256], path[512];
+
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "idle");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool up = fx->built && node_db_open(&ndb, path);
+    node_db_detached_writer_test_reset();
+    node_db_catchup_lock_guard_test_reset();
+    node_db_catchup_lock_guard_test_set_batch_size(1);
+    int res = up ? node_db_catchup_service_run(&ndb, &fx->ac, NULL, fx->dirF)
+                 : -1;
+    int commits = node_db_catchup_lock_guard_test_batch_commits();
+    int sleeps = node_db_catchup_lock_guard_test_yield_sleeps();
+    node_db_catchup_lock_guard_test_reset();
+    printf("idle walk: result=%d batch_commits=%d yield_sleeps=%d\n", res,
+           commits, sleeps);
+    NDC_CHECK("the idle walk commits several batches",
+              up && res == NDC_FIX_N && commits >= 3);
+    NDC_CHECK("an idle walk takes no yield sleep", up && sleeps == 0);
+    if (up) node_db_close(&ndb);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* Holes after an indexed block, in one batch, must still release the lock.
+ * The cap runs on a test clock the height delay advances, so the post-index
+ * check after h=1 (800 ms into a 1 s cap) can never commit by itself. */
+static int ndc_check_holes_after_rows_release_lock(struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    struct node_db ndb;
+    char dir[256], path[512];
+
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "rowsholes");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool up = fx->built && node_db_open(&ndb, path);
+    for (int h = 2; h <= 4; h++)
+        fx->slots[h].nStatus &= ~BLOCK_HAVE_DATA;
+    node_db_detached_writer_test_reset();
+    node_db_catchup_lock_guard_test_reset();
+    node_db_catchup_lock_guard_test_use_fake_clock(true);
+    node_db_catchup_lock_guard_test_set_batch_max_secs(1);
+    node_db_catchup_lock_guard_test_set_height_delay_ms(400);
+    int res = up ? node_db_catchup_service_run(&ndb, &fx->ac, NULL, fx->dirF)
+                 : -1;
+    int row_commits = node_db_catchup_lock_guard_test_timed_row_commits();
+    int tip = up ? node_db_sync_get_tip_height(&ndb) : -1;
+    node_db_catchup_lock_guard_test_reset();
+    for (int h = 2; h <= 4; h++)
+        fx->slots[h].nStatus |= BLOCK_HAVE_DATA;
+    printf("holes after rows: result=%d timed_row_commits=%d tip=%d\n", res,
+           row_commits, tip);
+    NDC_CHECK("the blocks around the hole stretch are indexed",
+              up && res == 2 && tip == NDC_FIX_N);
+    NDC_CHECK("holes after an indexed block commit that batch's rows",
+              up && row_commits >= 1);
+    if (up) node_db_close(&ndb);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* A waiting detached writer lands during a walk whose batch cap is 3600 s:
+ * the walk cycles early for it. */
+
+struct ndc_waiter {
+    struct node_db *ndb;
+    bool ok;
+    int attempts;
+    _Atomic bool *walk_done;
+    bool ok_during_walk;
+};
+
+static void *ndc_waiter_thread(void *arg)
+{
+    struct ndc_waiter *wt = arg;
+    const uint8_t value[1] = {2};
+
+    for (int i = 0; i < 200 && !node_db_catchup_service_active(); i++)
+        platform_sleep_ms(5);
+    platform_sleep_ms(100);
+    while (!wt->ok && !atomic_load(wt->walk_done)) {
+        wt->attempts++;
+        wt->ok = node_db_state_set_detached(wt->ndb, "ndc.waiter", value, 1);
+        if (!wt->ok)
+            platform_sleep_ms(20);
+    }
+    wt->ok_during_walk = wt->ok && !atomic_load(wt->walk_done);
+    return NULL;
+}
+
+static int ndc_check_waiting_writer_cycles_batch(struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    struct node_db ndb;
+    _Atomic bool walk_done = false;
+    struct ndc_waiter wt = {.ndb = &ndb, .walk_done = &walk_done};
+    char dir[256], path[512];
+
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "waiter");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool up = fx->built && node_db_open(&ndb, path);
+    node_db_detached_writer_test_reset();
+    node_db_catchup_lock_guard_test_reset();
+    node_db_catchup_lock_guard_test_set_batch_max_secs(3600);
+    node_db_catchup_lock_guard_test_set_height_delay_ms(600);
+    pthread_t t;
+    bool started = up && pthread_create(&t, NULL, ndc_waiter_thread, &wt) == 0;
+    int res = up ? node_db_catchup_service_run(&ndb, &fx->ac, NULL, fx->dirF)
+                 : -1;
+    atomic_store(&walk_done, true);
+    if (started) pthread_join(t, NULL);
+    int wcommits = node_db_catchup_lock_guard_test_batch_commits();
+    node_db_catchup_lock_guard_test_reset();
+    printf("waiting writer: result=%d attempts=%d ok=%d during_walk=%d\n",
+           res, wt.attempts, wt.ok, wt.ok_during_walk);
+    NDC_CHECK("the walk with a 3600 s cap still indexes every block",
+              up && res == NDC_FIX_N);
+    NDC_CHECK("a waiting detached writer lands during the walk via an early cycle",
+              up && wt.ok_during_walk && wt.attempts >= 2 && wcommits >= 1);
+    if (up) node_db_close(&ndb);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* With a writer always waiting, the sleep must not count as hold time: every
+ * timed commit follows at least NODE_DB_CATCHUP_WAITER_MIN_HOLD_MS of real
+ * hold after the reopen. The yield sleep advances the fake clock. */
+static int ndc_hold_case(struct ndc_fix_ctx *fx, int batch_size)
+{
+    int failures = 0;
+    struct node_db ndb;
+    char dir[256], path[512];
+
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "hold");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool up = fx->built && node_db_open(&ndb, path);
+    node_db_detached_writer_test_reset();
+    node_db_catchup_lock_guard_test_reset();
+    node_db_catchup_lock_guard_test_use_fake_clock(true);
+    if (batch_size > 0)
+        node_db_catchup_lock_guard_test_set_batch_size(batch_size);
+    node_db_catchup_lock_guard_test_set_batch_max_secs(3600);
+    node_db_catchup_lock_guard_test_set_height_delay_ms(100);
+    node_db_detached_writer_test_force_waiting(true);
+    int res = up ? node_db_catchup_service_run(&ndb, &fx->ac, NULL, fx->dirF)
+                 : -1;
+    node_db_detached_writer_test_force_waiting(false);
+    int64_t hold = node_db_catchup_lock_guard_test_min_real_hold();
+    int commits = node_db_catchup_lock_guard_test_batch_commits();
+    node_db_catchup_lock_guard_test_reset();
+    printf("yield hold: batch=%d result=%d commits=%d min_real_hold_ms=%lld\n",
+           batch_size, res, commits, (long long)hold);
+    NDC_CHECK("the walk with a writer always waiting still finishes",
+              up && res == NDC_FIX_N && commits >= 1);
+    if (batch_size > 0)
+        NDC_CHECK("post-index commits re-stamp the hold after the sleep",
+                  up && commits == NDC_FIX_N);
+    else
+        NDC_CHECK("the yield sleep does not count as hold time",
+                  up && hold >= NODE_DB_CATCHUP_WAITER_MIN_HOLD_MS);
+    if (up) node_db_close(&ndb);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int ndc_check_yield_sleep_not_hold_time(struct ndc_fix_ctx *fx)
+{
+    return ndc_hold_case(fx, 0) + ndc_hold_case(fx, 1);
+}
+
+/* A walk that dies right after its first timed commit leaves that batch
+ * durable with the cursor on its last block; the next run resumes from it. */
+static int ndc_check_timed_commit_survives_abort(struct ndc_fix_ctx *fx)
+{
+    int failures = 0;
+    struct node_db ndb;
+    char dir[256], path[512];
+
+    test_make_tmpdir(dir, sizeof(dir), "node_db_catchup", "resume");
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    bool up = fx->built && node_db_open(&ndb, path);
+    node_db_detached_writer_test_reset();
+    node_db_catchup_lock_guard_test_reset();
+    node_db_catchup_test_reset_reopen();
+    node_db_catchup_lock_guard_test_use_fake_clock(true);
+    node_db_catchup_lock_guard_test_set_batch_max_secs(1);
+    node_db_catchup_lock_guard_test_set_height_delay_ms(400);
+    node_db_catchup_test_force_reopen_busy(NODE_DB_CATCHUP_REOPEN_MAX_ATTEMPTS);
+    int first = up ? node_db_catchup_service_run(&ndb, &fx->ac, NULL, fx->dirF)
+                   : 0;
+    int tip1 = up ? node_db_sync_get_tip_height(&ndb) : -1;
+    int max1 = up ? db_block_max_height(&ndb) : -1;
+    node_db_catchup_lock_guard_test_reset();
+    node_db_catchup_test_reset_reopen();
+    blocker_reset_for_testing();
+    int second = up ? node_db_catchup_service_run(&ndb, &fx->ac, NULL, fx->dirF)
+                    : 0;
+    int tip2 = up ? node_db_sync_get_tip_height(&ndb) : -1;
+    printf("timed commit abort: first=%d tip1=%d second=%d tip2=%d\n", first,
+           tip1, second, tip2);
+    NDC_CHECK("the aborted walk left its first timed batch durable at h=1",
+              up && first <= 0 && tip1 == 1);
+    NDC_CHECK("the h=1 block row is durable after the abort",
+              up && max1 == 1);
+    NDC_CHECK("the next walk resumes and reaches the tip",
+              up && second == NDC_FIX_N - 1 && tip2 == NDC_FIX_N);
+    if (up) node_db_close(&ndb);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static void ndc_release_five_block_fixture(struct ndc_fix_ctx *fx)
 {
     node_db_catchup_lock_guard_test_reset();
@@ -1171,6 +1547,13 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_busy_snapshot_restart(&fx);
     failures += ndc_check_transient_reopen_busy(&fx);
     failures += ndc_check_reopen_busy_never_clears(&fx);
+    failures += ndc_check_idle_walk_never_sleeps(&fx);
+    failures += ndc_check_walk_yields_to_writers(&fx);
+    failures += ndc_check_hole_stretch_releases_lock(&fx);
+    failures += ndc_check_holes_after_rows_release_lock(&fx);
+    failures += ndc_check_waiting_writer_cycles_batch(&fx);
+    failures += ndc_check_yield_sleep_not_hold_time(&fx);
+    failures += ndc_check_timed_commit_survives_abort(&fx);
     failures += ndc_check_durable_reopen(&fx);
     failures += ndc_check_maintenance_defers_while_active(&fx);
     failures += ndc_check_abort_storm_parks_worker();

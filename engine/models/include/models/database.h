@@ -268,6 +268,14 @@ bool node_db_state_set(struct node_db *ndb, const char *key,
                        const void *value, size_t len);
 bool node_db_state_set_detached(struct node_db *ndb, const char *key,
                                 const void *value, size_t len);
+/* True while a detached state writer is mid-attempt or lost the write lock
+ * within the last second. A long-running writer on the shared handle polls
+ * this to decide whether handing the lock over is worth a pause. */
+bool node_db_detached_writer_waiting(void);
+#ifdef ZCL_TESTING
+void node_db_detached_writer_test_reset(void);
+void node_db_detached_writer_test_force_waiting(bool on);
+#endif
 bool node_db_state_get(struct node_db *ndb, const char *key,
                        void *value, size_t max_len, size_t *out_len);
 bool node_db_state_set_int(struct node_db *ndb, const char *key, int64_t val);

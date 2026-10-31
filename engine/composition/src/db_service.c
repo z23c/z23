@@ -184,10 +184,86 @@ static bool db_service_wal_checkpoint_write(struct node_db *ndb, void *ctx)
 static struct thread_liveness_child g_dbw_child  = { .id = SUPERVISOR_INVALID_ID };
 static struct thread_liveness_child g_ckpt_child = { .id = SUPERVISOR_INVALID_ID };
 
+static _Atomic int64_t g_dbw_jobs_done = 0;
+
+/* Run one dequeued job to completion and release its submitter. Returns true
+ * when it was the STOP job. A nested run (from inside a running worker job)
+ * leaves worker_busy set: the enclosing job still owns the worker. */
+static bool db_service_dispatch(struct db_service *svc,
+                                struct db_service_job *job, bool nested)
+{
+    job->success = db_service_perform_job(svc, job);
+    /* The direct worker-thread path in db_service_submit_job() skips this
+     * on purpose: nested calls there run inside caller-owned sequences
+     * that manage their own transactions. */
+    if (!job->success &&
+        db_service_recover_poisoned_snapshot(svc, job))
+        job->success = db_service_perform_job(svc, job);
+    /* Heartbeat onto the supervisor tree (atomic-only; zero behavior
+     * change). Job count is the progress marker. */
+    thread_liveness_beat(&g_dbw_child,
+                         atomic_fetch_add(&g_dbw_jobs_done, 1) + 1);
+
+    /* Capture before any free: the async branch frees `job`, so reading
+     * job->type afterward for the STOP check would be a use-after-free. */
+    bool is_stop = (job->type == DB_SERVICE_JOB_STOP);
+    bool async = job->async;
+
+    if (job->async) {
+        if (job->free_ctx)
+            job->free_ctx(job->ctx);
+        free(job);
+    }
+    zcl_mutex_lock(&svc->queue_mutex);
+    if (!nested)
+        svc->worker_busy = false;
+    if (!async) {
+        job->done = true;
+        zcl_cond_signal(&job->done_cond);
+    }
+    zcl_mutex_unlock(&svc->queue_mutex);
+    return is_stop;
+}
+
+/* Pop the head job when it is a plain write function. Other job types
+ * (BEGIN/COMMIT/CLOSE/STOP) belong to multi-job sequences or to shutdown and
+ * stay queued for the worker loop. */
+static struct db_service_job *db_service_pop_plain_job(struct db_service *svc)
+{
+    struct db_service_job *job = NULL;
+
+    zcl_mutex_lock(&svc->queue_mutex);
+    if (svc->queue_count > 0 && !svc->stop_requested &&
+        svc->queue[svc->queue_head]->type == DB_SERVICE_JOB_NONE) {
+        job = svc->queue[svc->queue_head];
+        svc->queue[svc->queue_head] = NULL;
+        svc->queue_head = (svc->queue_head + 1) % DB_SERVICE_QUEUE_CAP;
+        svc->queue_count--;
+        zcl_cond_broadcast(&svc->queue_cond);
+    }
+    zcl_mutex_unlock(&svc->queue_mutex);
+    return job;
+}
+
+size_t db_service_run_pending(struct db_service *svc)
+{
+    size_t ran = 0;
+
+    if (!db_service_is_worker_thread(svc))
+        return 0;
+    while (ran < DB_SERVICE_QUEUE_CAP) {
+        struct db_service_job *job = db_service_pop_plain_job(svc);
+        if (!job)
+            break;
+        (void)db_service_dispatch(svc, job, true);
+        ran++;
+    }
+    return ran;
+}
+
 static void *db_service_worker_main(void *arg)
 {
     struct db_service *svc = arg;
-    int64_t jobs_done = 0;
 
     while (true) {
         struct db_service_job *job = NULL;
@@ -213,37 +289,7 @@ static void *db_service_worker_main(void *arg)
         if (!job)
             continue;
 
-        job->success = db_service_perform_job(svc, job);
-        /* The direct worker-thread path in db_service_submit_job() skips this
-         * on purpose: nested calls there run inside caller-owned sequences
-         * that manage their own transactions. */
-        if (!job->success &&
-            db_service_recover_poisoned_snapshot(svc, job))
-            job->success = db_service_perform_job(svc, job);
-        /* Heartbeat onto the supervisor tree (atomic-only; zero behavior
-         * change). Job count is the progress marker. */
-        thread_liveness_beat(&g_dbw_child, ++jobs_done);
-
-        /* Capture before any free: the async branch frees `job`, so reading
-         * job->type afterward for the STOP check would be a use-after-free. */
-        bool is_stop = (job->type == DB_SERVICE_JOB_STOP);
-
-        if (job->async) {
-            if (job->free_ctx)
-                job->free_ctx(job->ctx);
-            free(job);
-            zcl_mutex_lock(&svc->queue_mutex);
-            svc->worker_busy = false;
-            zcl_mutex_unlock(&svc->queue_mutex);
-        } else {
-            zcl_mutex_lock(&svc->queue_mutex);
-            svc->worker_busy = false;
-            job->done = true;
-            zcl_cond_signal(&job->done_cond);
-            zcl_mutex_unlock(&svc->queue_mutex);
-        }
-
-        if (is_stop)
+        if (db_service_dispatch(svc, job, false))
             break;
     }
 
