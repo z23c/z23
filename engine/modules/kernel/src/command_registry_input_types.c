@@ -98,7 +98,7 @@ static bool cr_bool_key(const char *key)
         "restore",           "release",           "once",
         "dry_run",           "require_existing_watcher", "allow_external",
         "runner_ok_only",    "dedupe",            "route_only",
-        "route-only",
+        "route-only",        "explain",
     };
     return cr_key_in(key, keys, sizeof(keys) / sizeof(keys[0])) ||
            command_registry_devagent_input_extra_bool_key(key);

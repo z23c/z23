@@ -84,7 +84,7 @@ ZCL_COMMAND_READY_READ(
     "ops.state", "ops", "", "Subsystem state",
     "One subsystem's introspection snapshot from the running node's diagnostics "
     "registry (the dumpstate primitive); consistent for that subsystem at "
-    "capture time, shape varies per subsystem. Pass explain=true on a "
+    "capture time, shape varies per subsystem. Pass the boolean explain=true on a "
     "subsystem with a field ontology to have each field judged against its "
     "healthy range instead of returned as a bare number.", 0,
     "state,subsystem,dump,dumpstate,introspect,explain",

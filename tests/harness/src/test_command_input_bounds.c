@@ -1581,10 +1581,36 @@ static int t_discovery_transport_edges(void)
     return failures;
 }
 
+static int t_ops_state_explain_boolean(void)
+{
+    int failures = 0;
+    const struct zcl_command_spec *spec =
+        zcl_command_registry_find(zcl_command_catalog(), "ops.state", NULL);
+    struct zcl_command_input_descriptor d = {0};
+    CIB_CHECK("ops.state explain descriptor is boolean",
+        spec && zcl_command_registry_input_descriptor(spec, "explain", &d) &&
+        d.type == JSON_BOOL);
+    static const struct { const char *input; bool accepted; } cases[] = {
+        { "{\"subsystem\":\"connman\",\"explain\":true}", true },
+        { "{\"subsystem\":\"connman\",\"explain\":false}", true },
+        { "{\"subsystem\":\"connman\",\"explain\":\"true\"}", false },
+        { "{\"subsystem\":\"connman\",\"explain\":1}", false },
+        { "{\"subsystem\":\"connman\",\"explain\":1.0}", false },
+        { "{\"subsystem\":\"connman\",\"explain\":null}", false },
+        { "{\"subsystem\":\"connman\",\"explain\":[]}", false },
+        { "{\"subsystem\":\"connman\",\"explain\":{}}", false },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        CIB_CHECK(cases[i].input,
+            cib_json_shape("ops.state", cases[i].input) == cases[i].accepted);
+    return failures;
+}
+
 int test_command_input_bounds(void)
 {
     printf("\n=== command_input_bounds: per-key input length rules ===\n");
     int failures = 0;
+    failures += t_ops_state_explain_boolean();
     failures += t_discovery_transport_shapes();
     failures += t_discovery_transport_edges();
     failures += t_discovery_descriptor_contract();
