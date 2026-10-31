@@ -379,7 +379,7 @@ static bool write_buf_dest(struct buf *b, const char *dest, mode_t mode)
  * compiles. Keep them out of the compiler CHILD as well as the cache key:
  * a child cannot read a value that the key intentionally ignores. All other
  * environment entries, including search paths and toolchain selectors,
- * remain byte-bound by hash_environment(). */
+ * remain in the child; the key binds the key_env_allowed() subset. */
 static bool orchestration_env(const char *entry)
 {
     static const char *const names[] = {
@@ -1022,6 +1022,113 @@ static bool recorded_cwd(const struct plan *pl, const char *cwd,
     return w > 0 && (size_t)w < PATH_MAX;
 }
 
+/* THE MAPPED ROOT, for paths other than the cwd.
+ *
+ * The recorded cwd above makes two checkouts share a key when every path in
+ * the invocation is relative, which is how the Makefile spells it. A compile
+ * that names an include directory or its source by ABSOLUTE path under the
+ * checkout (a tool, an IDE, a fleet host that launches from another root)
+ * still keyed on the checkout twice more: the -I/-iquote argv string, and the
+ * `# N "/abs/header.h"` line markers cpp writes into the level-2 text. MEASURED
+ * with the real flag set from two roots: relative -I shares a key and hits;
+ * absolute -I produced two keys and two byte-IDENTICAL objects (cmp clean),
+ * the markers and the argv strings being the only differing inputs.
+ *
+ * The prefix map proves that independence only when it is the whole story, so
+ * this is deliberately narrower than recorded_cwd(): exactly ONE
+ * -ffile-prefix-map option, no -fdebug-/-fmacro-prefix-map, no LTO and no
+ * response file (whose flags this scan cannot see), and that one option must
+ * cover the cwd. Then a path that starts with its OLD is hashed as the
+ * NEW-rooted form GCC itself writes into the artifact (raw string prefix, the
+ * remainder appended verbatim, exactly as for the cwd). Anything else — a path
+ * outside the mapped root, a second map, a backslash-escaped marker — is
+ * hashed raw, exactly as before. File CONTENT is never affected: the level-2
+ * text still carries every header's bytes. */
+struct rootmap {
+    char old[PATH_MAX];
+    size_t old_len;
+    char repl[PATH_MAX];
+};
+
+static bool root_map(const struct plan *pl, const char *cwd,
+                     struct rootmap *rm)
+{
+    if (lto_in_effect(pl) || pl->rsp_n > 0)
+        return false;
+    int file_maps = 0;
+    size_t old_len = 0;
+    const char *repl = NULL;
+    for (int i = 1; i < pl->argc; i++) {
+        const char *a = pl->argv[i];
+        if (strncmp(a, "-fdebug-prefix-map=", 19) == 0 ||
+            strncmp(a, "-fmacro-prefix-map=", 19) == 0)
+            return false;
+        if (strncmp(a, "-ffile-prefix-map=", 18) != 0)
+            continue;
+        file_maps++;
+        if (!prefix_map_covers(a + 18, cwd, &old_len, &repl))
+            return false;
+    }
+    if (file_maps != 1 || !repl || old_len >= sizeof rm->old ||
+        strlen(repl) >= sizeof rm->repl)
+        return false;
+    memcpy(rm->old, cwd, old_len);
+    rm->old[old_len] = '\0';
+    rm->old_len = old_len;
+    snprintf(rm->repl, sizeof rm->repl, "%s", repl);
+    return true;
+}
+
+/* Does `p` lie under the mapped root? Then `*rest` is what follows OLD. */
+static bool root_map_covers(const struct rootmap *rm, const char *p,
+                            const char **rest)
+{
+    if (!rm || strncmp(p, rm->old, rm->old_len) != 0)
+        return false;
+    *rest = p + rm->old_len;
+    return true;
+}
+
+/* Hash one path-valued argument: the mapped form when a map covers it, raw
+ * otherwise. `prefix_len` bytes of `a` (an option name such as "-I") precede
+ * the path. */
+static void hash_mapped_path(struct sha3_256_ctx *h, const struct rootmap *rm,
+                             const char *a, size_t prefix_len)
+{
+    const char *rest;
+    if (root_map_covers(rm, a + prefix_len, &rest)) {
+        hstr(h, "zcc:root-path");
+        hfield(h, a, prefix_len);
+        hstr(h, rm->repl);
+        hstr(h, rest);
+    } else
+        hstr(h, a);
+}
+
+/* Length of an include-directory option name at the head of `a` (0: not one),
+ * and whether the path is the NEXT argument (`-isystem dir`) or glued on. */
+static size_t dir_opt_len(const char *a, bool *separate)
+{
+    static const char *const opt[] = { "-I", "-iquote", "-isystem",
+                                       "-idirafter" };
+    for (size_t i = 0; i < sizeof opt / sizeof opt[0]; i++) {
+        size_t n = strlen(opt[i]);
+        if (strncmp(a, opt[i], n) == 0) {
+            *separate = a[n] == '\0';
+            return n;
+        }
+    }
+    return 0;
+}
+
+static bool plan_src_index(const struct plan *pl, int idx)
+{
+    for (int i = 0; i < pl->src_n; i++)
+        if (pl->src[i] == idx)
+            return true;
+    return false;
+}
+
 /* argv with the -o VALUE replaced by a fixed placeholder: the artifact's
  * destination must not change the key, but every other flag must. */
 /* Where an artifact is WRITTEN does not change the bytes written, so the key
@@ -1047,13 +1154,35 @@ static bool recorded_cwd(const struct plan *pl, const char *cwd,
  * what stays here is which option it was (-ffile- also moves __FILE__,
  * -fdebug- does not) and what it maps to. `cwd` is NULL — and every argument
  * hashed verbatim — whenever the caller could not model the maps. */
-static void hash_argv(struct sha3_256_ctx *h, const struct plan *pl,
-                      const char *cwd)
+/* A path-valued argument under the mapped root, hashed in mapped form. False
+ * when the argument is not one (the caller hashes it raw). */
+static bool hash_arg_path(struct sha3_256_ctx *h, const struct plan *pl, int i,
+                          const struct rootmap *rm, bool was_dir_next,
+                          size_t dir_opt, bool sep)
 {
+    if (!rm)
+        return false;
+    if (was_dir_next || plan_src_index(pl, i))
+        hash_mapped_path(h, rm, pl->argv[i], 0u);
+    else if (dir_opt && !sep)
+        hash_mapped_path(h, rm, pl->argv[i], dir_opt);
+    else
+        return false;
+    return true;
+}
+
+static void hash_argv(struct sha3_256_ctx *h, const struct plan *pl,
+                      const char *cwd, const struct rootmap *rm)
+{
+    bool dir_next = false; /* previous argument was a bare -I/-isystem/... */
     for (int i = 1; i < pl->argc; i++) {
         size_t opt = cwd ? prefix_map_opt(pl->argv[i]) : 0u;
         size_t old_len;
         const char *repl;
+        const bool was_dir_next = dir_next;
+        bool sep = false;
+        size_t dir_opt = rm ? dir_opt_len(pl->argv[i], &sep) : 0u;
+        dir_next = dir_opt && sep;
         if (i == pl->out_idx || i == pl->dep_idx || i == pl->mt_idx)
             hstr(h, "<output>");
         else if (i == pl->dep_inline_idx)
@@ -1065,7 +1194,7 @@ static void hash_argv(struct sha3_256_ctx *h, const struct plan *pl,
             hstr(h, "zcc:cwd-prefix-map");
             hfield(h, pl->argv[i], opt);
             hstr(h, repl);
-        } else
+        } else if (!hash_arg_path(h, pl, i, rm, was_dir_next, dir_opt, sep))
             hstr(h, pl->argv[i]);
     }
 }
@@ -1126,8 +1255,8 @@ static bool env_same_name(const char *a, const char *b)
  * temp name can reach the artifact: -save-temps, -dumpdir, -dumpbase, LTO,
  * or a response file whose flags this scan cannot see. -frandom-seed is NOT a
  * trigger: it pins the only seed a temp name could otherwise reach, and every
- * TU in this tree passes it (Makefile ZCL_TU_RANDOM_SEED). HOME and every other
- * entry remain hashed. */
+ * TU in this tree passes it (Makefile ZCL_TU_RANDOM_SEED). Entries outside
+ * key_env_allowed()'s allowlist are not hashed at all. */
 static bool key_env_ignored(const char *entry, bool keep_tmp)
 {
     if (child_env_excluded(entry)) return true;
@@ -1153,7 +1282,83 @@ static bool tmpdir_may_reach_object(const struct plan *pl)
     return false;
 }
 
-static bool hash_environment(struct sha3_256_ctx *h, bool keep_tmp)
+/* WHICH environment entries can change what the compiler writes.
+ *
+ * Hashing the whole environment made every host and account its own key space
+ * (HOME, USER, LOGNAME, the per-session variables orchestration_env() lists
+ * one at a time, and whatever a shell happens to export): a fleet host and a
+ * lane could never share a compile result. The key now binds an ALLOWLIST —
+ * the variables a compiler driver, its preprocessor, assembler or linker
+ * actually read — and every other entry stays out of the key. The child
+ * environment is NOT narrowed by this: compiler_child_env() filters exactly
+ * what it did before, so a compiler still sees HOME and the rest.
+ *   exact names: CPATH, C_INCLUDE_PATH, CPLUS_INCLUDE_PATH, OBJC_INCLUDE_PATH,
+ *     OBJCPLUS_INCLUDE_PATH, LIBRARY_PATH, COMPILER_PATH, SYSROOT (search
+ *     paths and prefixes); DEPENDENCIES_OUTPUT, SUNPRO_DEPENDENCIES (extra
+ *     depfile output); SOURCE_DATE_EPOCH, TZ (__DATE__/__TIME__); LANG,
+ *     LANGUAGE, COLUMNS (diagnostic text and wrapping, which a hit replays);
+ *     GNUTARGET, LDEMULATION (linker); SDKROOT, DEVELOPER_DIR, TOOLCHAINS,
+ *     MACOSX_/IPHONEOS_/TVOS_/WATCHOS_DEPLOYMENT_TARGET, INCLUDE, LIB, LIBPATH,
+ *     MSYSTEM (Apple and Windows toolchain selection).
+ *   prefixes: LC_ (locale), LD_ (loader and linker: LD_PRELOAD,
+ *     LD_LIBRARY_PATH, LD_RUN_PATH), GCC_ (GCC_EXEC_PREFIX, GCC_COLORS,
+ *     GCC_COMPARE_DEBUG ...), COLLECT_, CCC_, CC_PRINT_, CLANG_, RC_.
+ *   TMPDIR, TMP, TEMP only when keep_tmp says a temp name can reach the
+ *     artifact (see key_env_ignored).
+ *   PATH only when ENV_KEY_ALLOW_PATH: a compile-only run resolves cc1 and as
+ *     through -print-prog-name (their bytes are hashed in hash_toolchain), but
+ *     a link finds ld through PATH and nothing else hashes it. */
+enum env_key_mode {
+    ENV_KEY_FULL,           /* every entry not excluded from the child */
+    ENV_KEY_ALLOW,          /* the allowlist above */
+    ENV_KEY_ALLOW_PATH,     /* the allowlist plus PATH */
+};
+
+static bool key_env_allowed(const char *entry, bool keep_tmp, bool with_path)
+{
+    static const char *const names[] = {
+        "CPATH=", "C_INCLUDE_PATH=", "CPLUS_INCLUDE_PATH=",
+        "OBJC_INCLUDE_PATH=", "OBJCPLUS_INCLUDE_PATH=", "LIBRARY_PATH=",
+        "COMPILER_PATH=", "SYSROOT=", "DEPENDENCIES_OUTPUT=",
+        "SUNPRO_DEPENDENCIES=", "SOURCE_DATE_EPOCH=", "TZ=", "LANG=",
+        "LANGUAGE=", "COLUMNS=", "GNUTARGET=", "LDEMULATION=", "SDKROOT=",
+        "DEVELOPER_DIR=", "TOOLCHAINS=", "MACOSX_DEPLOYMENT_TARGET=",
+        "IPHONEOS_DEPLOYMENT_TARGET=", "TVOS_DEPLOYMENT_TARGET=",
+        "WATCHOS_DEPLOYMENT_TARGET=", "INCLUDE=", "LIB=", "LIBPATH=",
+        "MSYSTEM=",
+    };
+    static const char *const prefixes[] = {
+        "LC_", "LD_", "GCC_", "COLLECT_", "CCC_", "CC_PRINT_", "CLANG_", "RC_",
+    };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (strncmp(entry, names[i], strlen(names[i])) == 0)
+            return true;
+    for (size_t i = 0; i < sizeof prefixes / sizeof prefixes[0]; i++)
+        if (strncmp(entry, prefixes[i], strlen(prefixes[i])) == 0)
+            return true;
+    if (with_path && strncmp(entry, "PATH=", 5) == 0)
+        return true;
+    if (keep_tmp)
+        return strncmp(entry, "TMPDIR=", 7) == 0 ||
+               strncmp(entry, "TMP=", 4) == 0 ||
+               strncmp(entry, "TEMP=", 5) == 0;
+    return false;
+}
+
+/* Does this invocation run the linker? Anything not compile-only does, and an
+ * @response file hides the flags, so it counts too. */
+static bool link_may_run(const struct plan *pl)
+{
+    if (pl->rsp_n > 0)
+        return true;
+    for (int i = 1; i < pl->argc; i++)
+        if (strcmp(pl->argv[i], "-c") == 0 || strcmp(pl->argv[i], "-S") == 0)
+            return false;
+    return true;
+}
+
+static bool hash_environment(struct sha3_256_ctx *h, bool keep_tmp,
+                             enum env_key_mode mode)
 {
     size_t n = 0;
     for (char **ep = environ; ep && *ep; ep++)
@@ -1173,6 +1378,9 @@ static bool hash_environment(struct sha3_256_ctx *h, bool keep_tmp)
             break;
         }
         if (key_env_ignored(e, keep_tmp))
+            continue;
+        if (mode != ENV_KEY_FULL &&
+            !key_env_allowed(e, keep_tmp, mode == ENV_KEY_ALLOW_PATH))
             continue;
         hstr(h, e);
     }
@@ -1451,7 +1659,7 @@ static bool apple_tool_selection_key(char *const query[],
     hstr(&h, label); hstr(&h, driver); hstr(&h, digest);
     hstr(&h, developer);
     for (size_t i = 0; query[i]; i++) hstr(&h, query[i]);
-    if (!hash_environment(&h, true) ||
+    if (!hash_environment(&h, true, ENV_KEY_FULL) ||
         !apple_hash_search_dirs(&h, getenv("PATH"), "clang")) return false;
     sha3_256_finalize(&h, root);
     return true;
@@ -1714,6 +1922,34 @@ static bool hash_linux_selected_tool(struct sha3_256_ctx *h,
 }
 #endif
 
+/* The allowlist describes what a compiler DRIVER reads. A script in the
+ * compiler's place (a wrapper, a test double, a launcher) can read anything,
+ * so for one the whole environment stays in the key exactly as before. An
+ * unreadable compiler counts as a script: fail toward more keying. */
+static bool compiler_is_script(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return true;
+    char magic[2];
+    ssize_t n = read(fd, magic, sizeof magic);
+    (void)close(fd);
+    return n != (ssize_t)sizeof magic || (magic[0] == '#' && magic[1] == '!');
+}
+
+static enum env_key_mode env_key_mode_for(const struct plan *pl,
+                                          const char *ccpath)
+{
+    if (compiler_is_script(ccpath))
+        return ENV_KEY_FULL;
+#if defined(__linux__)
+    return link_may_run(pl) ? ENV_KEY_ALLOW_PATH : ENV_KEY_ALLOW;
+#else
+    (void)pl;
+    return ENV_KEY_ALLOW_PATH;
+#endif
+}
+
 static bool hash_toolchain(struct sha3_256_ctx *h, const struct plan *pl,
                            const char *cache_root)
 {
@@ -1742,17 +1978,20 @@ static bool hash_toolchain(struct sha3_256_ctx *h, const struct plan *pl,
      * whole cross-worktree hit rate, and for the fallback rule. */
     char cwd[PATH_MAX], recorded[PATH_MAX];
     const char *real = getcwd(cwd, sizeof cwd) ? cwd : NULL;
+    struct rootmap rm;
     if (real && recorded_cwd(pl, real, recorded)) {
         hstr(h, recorded);
-        hash_argv(h, pl, real);
+        hash_argv(h, pl, real, root_map(pl, real, &rm) ? &rm : NULL);
     } else {
         hstr(h, real ? real : "<nocwd>");
-        hash_argv(h, pl, NULL);
+        hash_argv(h, pl, NULL, NULL);
     }
-    /* Compiler drivers can read CPATH, SDKROOT, LANG, and custom selectors.
+    /* Compiler drivers read CPATH, SDKROOT, LANG, and custom selectors; the
+     * allowlist in key_env_allowed() names the ones that can change output.
      * Environment entry order is irrelevant unless a name is duplicated;
      * reject duplicates rather than guessing which value the compiler sees. */
-    return hash_environment(h, tmpdir_may_reach_object(pl));
+    return hash_environment(h, tmpdir_may_reach_object(pl),
+                            env_key_mode_for(pl, ccpath));
 }
 
 #if defined(__linux__)
@@ -2395,8 +2634,54 @@ static bool preprocess(const struct plan *pl, int src_idx, const char *tmpdir,
  * text — a header reached through an absolute -I, say — still keys the
  * compile to this checkout, which is the conservative answer: such a compile
  * simply is not shared. */
+/* The quoted path of a `# N "<path>" ...` line marker spanning p[i..eol):
+ * [*ps, *pe). False for any other line and for a path with a backslash escape. */
+static bool marker_path_span(const unsigned char *p, size_t i, size_t eol,
+                             size_t *ps, size_t *pe)
+{
+    if (eol - i <= 4u || p[i] != '#' || p[i + 1u] != ' ')
+        return false;
+    size_t q = i + 2u;
+    while (q < eol && p[q] >= '0' && p[q] <= '9')
+        q++;
+    if (q == i + 2u || q + 1u >= eol || p[q] != ' ' || p[q + 1u] != '"')
+        return false;
+    *ps = *pe = q + 2u;
+    while (*pe < eol && p[*pe] != '"' && p[*pe] != '\\')
+        (*pe)++;
+    return *pe < eol && p[*pe] == '"';
+}
+
+/* Hash preprocessed text with every `# N "<path>" ...` line marker whose path
+ * lies under the mapped root hashed in its mapped form (see struct rootmap).
+ * Only the marker's quoted path is touched; a marker whose path carries a
+ * backslash escape, and every other byte of the text, is hashed verbatim. */
+static void hash_pp_text(struct sha3_256_ctx *h, const unsigned char *p,
+                         size_t len, const struct rootmap *rm)
+{
+    if (!rm) {
+        hfield(h, p, len);
+        return;
+    }
+    size_t seg = 0, i = 0;
+    while (i < len) {
+        size_t eol = i, ps, pe;
+        while (eol < len && p[eol] != '\n')
+            eol++;
+        if (marker_path_span(p, i, eol, &ps, &pe) &&
+            pe - ps >= rm->old_len && memcmp(p + ps, rm->old, rm->old_len) == 0) {
+            hfield(h, p + seg, ps - seg);
+            hstr(h, "zcc:root-marker");
+            hstr(h, rm->repl);
+            seg = ps + rm->old_len;
+        }
+        i = eol + 1u;
+    }
+    hfield(h, p + seg, len - seg);
+}
+
 static void hash_pp(struct sha3_256_ctx *h, const unsigned char *p, size_t len,
-                    const char *raw)
+                    const char *raw, const struct rootmap *rm)
 {
     char needle[PATH_MAX + 8u];
     int nw = raw ? snprintf(needle, sizeof needle, "\"%s//\"", raw) : -1;
@@ -2413,14 +2698,14 @@ static void hash_pp(struct sha3_256_ctx *h, const unsigned char *p, size_t len,
                 eol++;
             if (eol - i > nl + 2u && p[i] == '#' && p[i + 1] == ' ' &&
                 memcmp(p + eol - nl, needle, nl) == 0) {
-                hfield(h, p, i);
-                hfield(h, p + eol, len - eol);
+                hash_pp_text(h, p, i, rm);
+                hash_pp_text(h, p + eol, len - eol, rm);
                 return;
             }
             i = eol + 1u;
         }
     }
-    hfield(h, p, len);
+    hash_pp_text(h, p, len, rm);
 }
 
 static bool content_key(const struct plan *pl, const char *tmpdir,
@@ -2436,6 +2721,9 @@ static bool content_key(const struct plan *pl, const char *tmpdir,
     char cwd[PATH_MAX], recorded[PATH_MAX];
     const char *real = getcwd(cwd, sizeof cwd) ? cwd : NULL;
     const char *raw = real && recorded_cwd(pl, real, recorded) ? real : NULL;
+    struct rootmap rm_store;
+    const struct rootmap *rm =
+        real && root_map(pl, real, &rm_store) ? &rm_store : NULL;
     for (int i = 0; i < pl->src_n; i++) {
         struct buf pp = { 0 };
         if (!preprocess(pl, pl->src[i], tmpdir, &pp)) {
@@ -2443,8 +2731,8 @@ static bool content_key(const struct plan *pl, const char *tmpdir,
             return false;
         }
         deps_scan(d, pp.p, pp.len);
-        hstr(&h, pl->argv[pl->src[i]]);
-        hash_pp(&h, pp.p, pp.len, raw);
+        hash_mapped_path(&h, rm, pl->argv[pl->src[i]], 0u);
+        hash_pp(&h, pp.p, pp.len, raw, rm);
         buf_free(&pp);
         if (d->failed)
             return false;

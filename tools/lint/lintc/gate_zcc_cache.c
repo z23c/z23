@@ -24,7 +24,7 @@ static int (*const zc_sections[])(void) = {
     zc_sec_compilerversion, zc_sec_truncated, zc_sec_racing, zc_sec_verified,
     zc_sec_optional, zc_sec_search, zc_sec_named, zc_sec_archive,
     zc_sec_explicit, zc_sec_stage, zc_sec_artifacts, zc_sec_rsp, zc_sec_epoch,
-    zc_sec_unkey, zc_sec_envkey, zc_sec_flight, zc_sec_boot,
+    zc_sec_unkey, zc_sec_envkey, zc_sec_portable, zc_sec_flight, zc_sec_boot,
 };
 
 static int zc_find_zcc(void)

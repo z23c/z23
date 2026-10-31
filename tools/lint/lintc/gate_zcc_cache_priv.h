@@ -111,5 +111,6 @@ int zc_sec_named(void);
 int zc_sec_archive(void);
 int zc_sec_flight(void);
 int zc_sec_boot(void);
+int zc_sec_portable(void);
 
 #endif
