@@ -458,8 +458,11 @@ static int test_sweep_is_the_only_removal_and_it_logs(void)
                                  "connman_reactor_unlink_node(") == 1);
 
         /* Both timeout incidents are machine-readable JSON lines. */
+        /* Exactly one of each across both files, as before the split. */
         ASSERT(count_occurrences(conn_src, "\"peer_handshake_timeout\"") == 1);
+        ASSERT(count_occurrences(src, "\"peer_handshake_timeout\"") == 0);
         ASSERT(count_occurrences(src, "\"peer_connect_timeout\"") == 1);
+        ASSERT(count_occurrences(conn_src, "\"peer_connect_timeout\"") == 0);
         ASSERT(!contains(src, "handshake timeout after"));
         ASSERT(!contains(conn_src, "handshake timeout after"));
 

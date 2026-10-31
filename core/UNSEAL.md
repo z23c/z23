@@ -480,3 +480,7 @@ later lane flips it HARD.
 - 2026-10-31T16:53:55Z — REASON: Split process_block_msg into intake, accept and relay helpers; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: dd429eb15ab28d8dff2031597da23c6167b5610db497bf1923784b95a89aa426
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T17:22:16Z — REASON: review fix on the core-net splits: restore the DoS=0 comment to its own else branch (comment-only placement, no behaviour change)
+  old ROOT: 5fbb0edc894ec8957a6338810abc79c3404d6bd5bc5bb2843d8421b3b15216e8
+  by: owner unseal ritual (make core-unseal)

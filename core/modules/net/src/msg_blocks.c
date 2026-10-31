@@ -1161,9 +1161,10 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
             } else {
                 msg_block_penalize_invalid(mp, node, &state, dos, rr);
             }
+        } else {
+            /* DoS=0 but invalid: orphan block or parent-failed.
+             * Don't penalize peer — this is normal during sync. */
         }
-        /* DoS=0 but invalid: orphan block or parent-failed.
-         * Don't penalize peer — this is normal during sync. */
     }
 
     block_free(&blk);
