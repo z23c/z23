@@ -1135,6 +1135,7 @@ static int test_sd_watchdog_holder_and_order(void)
     int failures = 0;
     long tid = 0;
     int64_t held_us = -1;
+    long expect_tid = os_proc_self_tid() != 0 ? os_proc_self_tid() : -1;
     char out[200];
     SDN_CHECK("holder: free before lock",
               !progress_store_tx_holder(&tid, &held_us));
@@ -1142,7 +1143,7 @@ static int test_sd_watchdog_holder_and_order(void)
     progress_store_tx_lock();
     SDN_CHECK("holder: recorded as this thread",
               progress_store_tx_holder(&tid, &held_us) &&
-              tid == os_proc_self_tid() && held_us >= 0);
+              tid == expect_tid && held_us >= 0);
     progress_store_tx_unlock();
     SDN_CHECK("holder: still held after inner unlock",
               progress_store_tx_holder(NULL, NULL));
@@ -1152,7 +1153,7 @@ static int test_sd_watchdog_holder_and_order(void)
     SDN_CHECK("holder: trylock records",
               progress_store_tx_trylock() &&
               progress_store_tx_holder(&tid, NULL) &&
-              tid == os_proc_self_tid());
+              tid == expect_tid);
     progress_store_tx_unlock();
     SDN_CHECK("holder: cleared after trylock unlock",
               !progress_store_tx_holder(NULL, NULL));
@@ -1183,7 +1184,9 @@ static int test_sd_watchdog_holder_and_order(void)
               boot_sd_watchdog_task_priority("5 (x) S 1\n", sc, locks, 2) == 0);
     SDN_CHECK("priority: futex on unknown address ordinary",
               boot_sd_watchdog_task_priority("5 (x) S 1\n",
-                                             "202 0x1234 0x80\n", locks, 2) == 1);
+                                             "202 0x1234 0x80\n", locks, 2) == 1 &&
+              (snprintf(sc, sizeof(sc), "%ld 0x1234 0x80\n", futex_nr),
+               boot_sd_watchdog_task_priority("5 (x) S 1\n", sc, locks, 2) == 1));
 #if defined(SYS_futex)
     snprintf(sc, sizeof(sc), "%ld %p 0x80\n", futex_nr + 1000, (void *)&b);
     SDN_CHECK("priority: non-futex syscall on a lock address ordinary",
