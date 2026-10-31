@@ -365,8 +365,10 @@ ZCL_TEST_GROUP_BUILD_NEED("test_sqlq", "build/bin/sqlq", "sqlq")
 ZCL_TEST_GROUP_BUILD_NEED("test_p2_invariant_check",
                           "build/bin/p2_invariant_check", "p2_invariant_check")
 
-/* The registered fixture executes this exact host artifact; absence fails. */
+/* The registered fixture executes these exact host artifacts; absence fails.
+ * The multicall case runs build/bin/z23 by argv0 link and as `z23 jsonq`. */
 ZCL_TEST_GROUP_BUILD_NEED("test_jsonq", "build/bin/jsonq", "jsonq")
+ZCL_TEST_GROUP_BUILD_NEED("test_jsonq", "build/bin/z23", "z23")
 ZCL_TEST_GROUP_BUILD_NEED("test_agent_guard", "build/bin/z23-agent-guard", "z23-agent-guard")
 ZCL_TEST_GROUP_BUILD_NEED("test_replay_canary_verdict", "build/bin/jsonq", "jsonq")
 /* Sentinel durability executes the development CLI, independently of the candidate node. */

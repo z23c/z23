@@ -1066,8 +1066,9 @@ static int test_ic_jsonq_exec_contract(void)
         size_t n = 0;
         ASSERT(zcl_test_selection_build_needs("test_jsonq", false, NULL,
                                               needs, 16, &n));
-        ASSERT(n == 1);
+        ASSERT(n == 2);
         ASSERT(ic_needs_have(needs, n, "jsonq", "build/bin/jsonq"));
+        ASSERT(ic_needs_have(needs, n, "z23", "build/bin/z23"));
         PASS();
     } _test_next:;
     return failures;
