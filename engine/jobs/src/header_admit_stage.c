@@ -321,7 +321,8 @@ static bool rewind_forward_child_if_stale(sqlite3 *db, uint64_t cursor,
     int target = -1;
     const char *reason = "none";
     if (!header_admit_forward_rewind_target(
-            db, &g_ms->chain_active, cursor, &target, &reason)) {
+            db, g_ms->pindex_best_header, &g_ms->chain_active, cursor, &target,
+            &reason)) {
         LOG_WARN("header_admit",
                  "[header_admit] forward-fork target audit failed "
                  "cursor=%llu",

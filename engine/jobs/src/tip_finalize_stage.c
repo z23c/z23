@@ -229,13 +229,19 @@ static bool rewind_cursor_if_active_chain_reorged(sqlite3 *db)
      * reorg window re-derives navigation indices above it. fork = rewind_to-1. */
     tip_finalize_hooks_reorg_clamp((int)rewind_to - 1);
 
+    /* Finalize only raises the published authority tip. Left on the abandoned
+     * block it keeps header_admit auditing against that block, so the stale
+     * sibling row is never repaired and the body is never refetched. Republish
+     * the durable tip the lowered cursor resolves to. */
+    (void)tip_finalize_stage_publish_durable_tip(db, "reorg_cursor_rewind");
+
     /* LOWER the external provable-tip cache (H*) on the reorg rewind. This is
-     * the #1 site: stage_set_cursor just dropped the tip_finalize cursor, but
-     * g_last_advance_height (and thus active_chain_height) is raise-only and
-     * stays stale-high until a new finalize republishes. Without this refresh
-     * the external readers (getblockcount / P2P start_height) would serve an
-     * unproven height across the reorg window. We hold progress_store_tx_lock
-     * here (tip_finalize_stage_step_once), and this is the SAME chokepoint every
+     * the #1 site: stage_set_cursor just dropped the tip_finalize cursor and the
+     * republish above lowered the served tip, but the H* cache is a separate
+     * value that only this refresh lowers. Without it the external readers
+     * (getblockcount / P2P start_height) would serve an unproven height
+     * across the reorg window. We hold progress_store_tx_lock here
+     * (tip_finalize_stage_step_once), and this is the SAME chokepoint every
      * other unwind path (process_block_invalidate, utxo_apply_delta_reorg,
      * process_block_self_heal) flows through via reducer_kick -> tip_finalize
      * drain, so refreshing here lowers the cache for ALL of them. */
@@ -251,6 +257,26 @@ static bool rewind_cursor_if_active_chain_reorged(sqlite3 *db)
 static bool live_utxo_count_after(int height_after, int64_t *out_count)
 {
     return tip_finalize_hooks_count_utxos(height_after, out_count);
+}
+
+/* A durable finalized row names its successor by hash. After a reorg rewind the
+ * row at the fork still names the abandoned block, which stays in the block map
+ * with the same parent. Once the best-header chain covers that height, a
+ * candidate off that chain is stale: using it re-finalizes the fork row with the
+ * old hash and re-arms the rewind. */
+static struct block_index *durable_candidate_on_best_header(
+    const struct main_state *ms, struct block_index *cand)
+{
+    const struct block_index *best = ms->pindex_best_header;
+    if (!cand || !cand->phashBlock || !best || cand->nHeight > best->nHeight)
+        return cand;
+    const struct block_index *anc =
+        block_index_get_ancestor((struct block_index *)best, cand->nHeight);
+    /* An ancestor that does not resolve, or has failed, is unknown, not stale. */
+    if (!anc || !anc->phashBlock || block_has_any_failure(anc) ||
+        uint256_eq(anc->phashBlock, cand->phashBlock))
+        return cand;
+    return NULL;
 }
 
 static void step_fin_resolve_tips(struct main_state *ms, sqlite3 *db, int next_h,
@@ -273,12 +299,14 @@ static void step_fin_resolve_tips(struct main_state *ms, sqlite3 *db, int next_h
     if (!old_tip) {
         struct uint256 oh;
         if (tip_finalize_stage_block_hash_at(db, next_h, oh.data))
-            old_tip = block_map_find(&ms->map_block_index, &oh);
+            old_tip = durable_candidate_on_best_header(
+                ms, block_map_find(&ms->map_block_index, &oh));
     }
     if (!new_tip) {
         struct uint256 nh;
         if (tip_finalize_stage_block_hash_at(db, next_h + 1, nh.data))
-            new_tip = block_map_find(&ms->map_block_index, &nh);
+            new_tip = durable_candidate_on_best_header(
+                ms, block_map_find(&ms->map_block_index, &nh));
     }
     /* HEADER-CHAIN SELF-HEAL (deadlock-cure step 3). The lookahead successor
      * N+1 (and, on a deeply-retracted window, even N) can be genuinely on the

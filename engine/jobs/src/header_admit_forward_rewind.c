@@ -217,7 +217,31 @@ int header_admit_rewind_target_above_anchor(int target, uint64_t cursor)
     return (uint64_t)target >= cursor ? HEADER_ADMIT_REWIND_NONE : target;
 }
 
+/* A sibling of the same parent passes the parent audit. When the best-header
+ * chain extends the active tip at next_h with a different hash than the logged
+ * row, the row is a stale fork child (never while the window owns the slot or
+ * when the child failed): nothing else re-requests its body
+ * because the downstream cursors already sit past it. */
+static bool row_names_sibling_of_best_header(sqlite3 *db,
+                                             struct block_index *best_header,
+                                             const struct block_index *tip,
+                                             int next_h)
+{
+    if (!best_header || best_header->nHeight < next_h)
+        return false;
+    const struct block_index *want = block_index_get_ancestor(best_header, next_h);
+    if (!want || !want->phashBlock || block_has_any_failure(want) ||
+        !want->pprev || !want->pprev->phashBlock ||
+        !uint256_eq(want->pprev->phashBlock, tip->phashBlock))
+        return false;
+    bool known = false, matches = false;
+    if (!log_row_hash_match(db, next_h, want->phashBlock, &known, &matches))
+        return false;  // raw-return-ok:logged-above
+    return known && !matches;
+}
+
 bool header_admit_forward_rewind_target(sqlite3 *db,
+                                        struct block_index *best_header,
                                         struct active_chain *chain,
                                         uint64_t cursor,
                                         int *out_target,
@@ -254,12 +278,15 @@ bool header_admit_forward_rewind_target(sqlite3 *db,
                  next_h);
         return false;  // raw-return-ok:logged-above
     }
-    if (row_known && parent_matches)
+    if (row_known && parent_matches &&
+        (active_chain_at(chain, next_h) ||
+         !row_names_sibling_of_best_header(db, best_header, tip, next_h)))
         return true;
 
     /* The rewind height, HEADER_ADMIT_REWIND_NONE, or REFUSED (logged). */
     *out_target = header_admit_rewind_target_above_anchor(next_h, cursor);
-    *out_reason = row_known ? "parent_mismatch" : "missing_row";
+    *out_reason = !row_known ? "missing_row"
+                   : parent_matches ? "hash_mismatch" : "parent_mismatch";
     return true;
 }
 

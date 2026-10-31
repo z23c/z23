@@ -7,6 +7,8 @@
 #include "chain/chain.h"
 #include "json/json.h"
 #include "jobs/stage_repair.h"
+#include "jobs/stage_helpers.h"
+#include "jobs/header_admit_stage.h"
 #include "jobs/tip_finalize_stage.h"
 #include "jobs/reducer_frontier.h"
 #include "platform/private_directory.h"
@@ -2460,6 +2462,354 @@ static int case_sum_cache_kat(void)
     return failures;
 }
 
+/* Stale lookahead row after a reorg rewind. A finalized row at H stores the
+ * hash of H+1 (lookahead). When the reorg rewinds the cursor, row H still names
+ * the pre-reorg block. If the window no longer exposes H+1 (body not yet
+ * downloaded), step_fin_resolve_tips used to resolve H+1 from that durable row,
+ * find the abandoned fork block in the block map and re-finalize H with the
+ * old hash, returning the cursor to H+1 and re-arming the same rewind. */
+static void stale_fork_block(struct block_index *bi, struct uint256 *hash,
+                             struct block_index *parent, int height,
+                             uint8_t tag, uint64_t work, uint32_t status)
+{
+    block_index_init(bi);
+    uint256_set_null(hash);
+    hash->data[0] = tag;
+    hash->data[1] = 0xee;
+    bi->hashBlock = *hash;
+    bi->phashBlock = hash;
+    bi->nHeight = height;
+    bi->nVersion = 4;
+    bi->nTime = (uint32_t)(1700020000u + (uint32_t)height);
+    bi->nBits = 0x1f07ffff;
+    bi->nStatus = status;
+    arith_uint256_set_u64(&bi->nChainWork, work);
+    bi->pprev = parent;
+    block_index_build_skip(bi);
+}
+
+static bool stale_row_is(sqlite3 *db, int height, const struct uint256 *want)
+{
+    struct uint256 got;
+    return log_tip_hash_at(db, height, &got) && uint256_eq(&got, want);
+}
+
+static int case_reorg_stale_row_header_only(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_tf sc;
+    reducer_frontier_test_set_compiled_anchor(0);
+    TF_CHECK("stale_row: setup",
+             tf_setup("stale_row", 3, TF_FAIL_NONE, -1,
+                      dir, sizeof(dir), &ms, &sc) == 0);
+    TF_CHECK("stale_row: drain finalizes rows 0..2",
+             tip_finalize_stage_drain(100) == 3 &&
+             tip_finalize_stage_cursor() == 3);
+    struct uint256 old_hash = sc.hashes[3];
+    int32_t hs_pre = reducer_frontier_provable_tip_cached();
+    TF_CHECK("stale_row: row 2 holds the old lookahead hash",
+             stale_row_is(progress_store_db(), 2, &old_hash));
+
+    struct block_index nb;
+    struct uint256 nh;
+    stale_fork_block(&nb, &nh, &sc.blocks[2], 3, 0xf3, 30, BLOCK_VALID_HEADER);
+    TF_CHECK("stale_row: fork header enters the block map",
+             test_block_map_insert(&ms.map_block_index, &nh, &nb));
+    TF_CHECK("stale_row: window exposes the new header",
+             active_chain_move_window_tip(&ms.chain_active, &nb));
+
+    uint64_t rewinds0 = tip_finalize_stage_reorg_detected_total();
+    tip_finalize_stage_step_once();
+    TF_CHECK("stale_row: rewind fires once",
+             tip_finalize_stage_reorg_detected_total() == rewinds0 + 1);
+    TF_CHECK("stale_row: cursor rewound to 2",
+             tip_finalize_stage_cursor() == 2);
+
+    /* The body is absent: the window falls back to the finalized prefix and
+     * only the header chain knows the new block. */
+    TF_CHECK("stale_row: window collapses to the body frontier",
+             active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]));
+    ms.pindex_best_header = &nb;
+    int32_t hs_rewound = reducer_frontier_provable_tip_cached();
+
+    /* Crash between steps: the stale row survives the restart. */
+    tip_finalize_stage_shutdown();
+    TF_CHECK("stale_row: restart re-inits the stage", tip_finalize_stage_init(&ms));
+    tip_finalize_stage_set_utxo_counter(fake_utxo_count, &sc);
+    rewinds0 = tip_finalize_stage_reorg_detected_total();  /* counters reset on restart */
+
+    for (int i = 0; i < 6; i++)
+        tip_finalize_stage_step_once();
+
+    TF_CHECK("stale_row: no second rewind while the body is absent",
+             tip_finalize_stage_reorg_detected_total() == rewinds0);
+    TF_CHECK("stale_row: row 2 never re-finalized with the old hash",
+             !stale_row_is(progress_store_db(), 2, &old_hash));
+    uint8_t got[32];
+    bool have = tip_finalize_stage_block_hash_at(progress_store_db(), 3, got);
+    TF_CHECK("stale_row: hash_at(3) no longer returns the old block",
+             !have || memcmp(got, old_hash.data, 32) != 0);
+    int32_t hs_now = reducer_frontier_provable_tip_cached();
+    printf("tip_finalize: stale_row: H* observed pre=%d rewound=%d "
+           "after=%d (cursor=%llu)\n", (int)hs_pre, (int)hs_rewound, (int)hs_now,
+           (unsigned long long)tip_finalize_stage_cursor());
+    TF_CHECK("stale_row: H* never falls more than one below the proven tip",
+             hs_rewound >= hs_pre - 1 && hs_now >= hs_pre - 1);
+
+    /* The body arrives; the chain advances onto the new block. */
+    nb.nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+    TF_CHECK("stale_row: body arrives, window exposes the new tip",
+             active_chain_move_window_tip(&ms.chain_active, &nb));
+    for (int i = 0; i < 6; i++)
+        tip_finalize_stage_step_once();
+    TF_CHECK("stale_row: no rewind after the body arrives",
+             tip_finalize_stage_reorg_detected_total() == rewinds0);
+    TF_CHECK("stale_row: row 2 names the new block",
+             stale_row_is(progress_store_db(), 2, &nh));
+    TF_CHECK("stale_row: cursor advanced onto the new tip",
+             tip_finalize_stage_cursor() == 3);
+
+    tf_teardown(dir, &ms, &sc);
+    reducer_frontier_test_set_compiled_anchor(-1);
+    return failures;
+}
+
+/* Unchanged paths: a reorg whose body is present re-finalizes at once with the
+ * new hash, and an unreorged chain with best_header on the same branch keeps
+ * its rows. */
+static int case_reorg_stale_row_unchanged(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_tf sc;
+    TF_CHECK("stale_row_ok: setup",
+             tf_setup("stale_row_ok", 3, TF_FAIL_NONE, -1,
+                      dir, sizeof(dir), &ms, &sc) == 0);
+    ms.pindex_best_header = &sc.blocks[3];
+    TF_CHECK("stale_row_ok: no-reorg drain finalizes 3 rows",
+             tip_finalize_stage_drain(100) == 3 &&
+             tip_finalize_stage_cursor() == 3);
+    TF_CHECK("stale_row_ok: no-reorg row keeps its hash",
+             stale_row_is(progress_store_db(), 2, &sc.hashes[3]));
+    TF_CHECK("stale_row_ok: no-reorg raised no rewind",
+             tip_finalize_stage_reorg_detected_total() == 0);
+
+    struct block_index nb;
+    struct uint256 nh;
+    stale_fork_block(&nb, &nh, &sc.blocks[2], 3, 0xf3, 30,
+                     BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS);
+    TF_CHECK("stale_row_ok: fork enters the block map",
+             test_block_map_insert(&ms.map_block_index, &nh, &nb));
+    ms.pindex_best_header = &nb;
+    TF_CHECK("stale_row_ok: window exposes the body-present fork",
+             active_chain_move_window_tip(&ms.chain_active, &nb));
+    tip_finalize_stage_step_once();
+    TF_CHECK("stale_row_ok: body-present reorg rewinds once",
+             tip_finalize_stage_reorg_detected_total() == 1);
+    TF_CHECK("stale_row_ok: body-present reorg re-finalizes with the new hash",
+             stale_row_is(progress_store_db(), 2, &nh) &&
+             tip_finalize_stage_cursor() == 3);
+    tf_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* A best-header chain whose ancestry does not resolve at the candidate height is
+ * unknown, not stale: the durable candidate is kept and finalize proceeds. */
+static int case_reorg_stale_row_unresolved_ancestor(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_tf sc;
+    TF_CHECK("stale_row_unk: setup",
+             tf_setup("stale_row_unk", 3, TF_FAIL_NONE, -1,
+                      dir, sizeof(dir), &ms, &sc) == 0);
+    TF_CHECK("stale_row_unk: drain finalizes rows 0..2",
+             tip_finalize_stage_drain(100) == 3);
+    struct block_index nb;
+    struct uint256 nh;
+    stale_fork_block(&nb, &nh, &sc.blocks[2], 3, 0xf3, 30, BLOCK_VALID_HEADER);
+    TF_CHECK("stale_row_unk: fork header enters the block map",
+             test_block_map_insert(&ms.map_block_index, &nh, &nb));
+    TF_CHECK("stale_row_unk: window exposes the new header",
+             active_chain_move_window_tip(&ms.chain_active, &nb));
+    tip_finalize_stage_step_once();
+    TF_CHECK("stale_row_unk: rewind lowers the cursor to 2",
+             tip_finalize_stage_cursor() == 2);
+    TF_CHECK("stale_row_unk: window retreats to the body frontier",
+             active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]));
+
+    struct block_index orphan;
+    struct uint256 oh;
+    stale_fork_block(&orphan, &oh, NULL, 4, 0xf4, 40, BLOCK_VALID_HEADER);
+    ms.pindex_best_header = &orphan;
+    TF_CHECK("stale_row_unk: ancestor at 3 does not resolve",
+             block_index_get_ancestor(&orphan, 3) == NULL);
+    sc.blocks[3].nStatus = BLOCK_VALID_SCRIPTS;  /* abandoned body gone: hold, not extend */
+    uint64_t pending0 = tip_finalize_stage_successor_pending_total();
+    for (int i = 0; i < 4; i++)
+        tip_finalize_stage_step_once();
+    TF_CHECK("stale_row_unk: unknown ancestry keeps the durable candidate",
+             tip_finalize_stage_successor_pending_total() > pending0);
+    TF_CHECK("stale_row_unk: cursor held at 2",
+             tip_finalize_stage_cursor() == 2);
+    tf_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* A failed best-header child is not evidence that the durable candidate is
+ * stale (invalidateblock on a non-active branch leaves best at its tip). */
+static int case_reorg_stale_row_failed_best_child(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_tf sc;
+    TF_CHECK("stale_row_fail: setup",
+             tf_setup("stale_row_fail", 3, TF_FAIL_NONE, -1,
+                      dir, sizeof(dir), &ms, &sc) == 0);
+    TF_CHECK("stale_row_fail: drain finalizes rows 0..2",
+             tip_finalize_stage_drain(100) == 3);
+    struct block_index nb, nc;
+    struct uint256 nh, ch;
+    stale_fork_block(&nb, &nh, &sc.blocks[2], 3, 0xf3, 30,
+                     BLOCK_VALID_HEADER | BLOCK_FAILED_VALID);
+    stale_fork_block(&nc, &ch, &nb, 4, 0xf4, 40,
+                     BLOCK_VALID_HEADER | BLOCK_FAILED_CHILD);
+    TF_CHECK("stale_row_fail: fork header enters the block map",
+             test_block_map_insert(&ms.map_block_index, &nh, &nb));
+    TF_CHECK("stale_row_fail: window exposes the new header",
+             active_chain_move_window_tip(&ms.chain_active, &nb));
+    tip_finalize_stage_step_once();
+    TF_CHECK("stale_row_fail: rewind lowers the cursor to 2",
+             tip_finalize_stage_cursor() == 2);
+    TF_CHECK("stale_row_fail: window retreats to the body frontier",
+             active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]));
+    ms.pindex_best_header = &nc;
+    for (int i = 0; i < 4; i++)
+        tip_finalize_stage_step_once();
+    TF_CHECK("stale_row_fail: failed ancestor is unknown, candidate kept",
+             tip_finalize_stage_cursor() == 3);
+    tf_teardown(dir, &ms, &sc);
+    return failures;
+}
+
+/* Published authority tip left on an invalidated block. The incident shape:
+ * the authority names A, A is marked failed, the window falls back to the fork
+ * F, header_admit has admitted A and the best-header chain runs F -> B1 -> B2
+ * with no body for B1. tip_finalize rewinds once and finalizes F against the
+ * header-only B1; header_admit must then repair its A row exactly once and
+ * clamp body_fetch so B1 is requested, never rewinding on every pass. */
+static unsigned long long stale_auth_cursor(sqlite3 *db, const char *name)
+{
+    uint64_t cursor = 0;
+    return stage_cursor_read_or_zero(db, name, name, &cursor) ? cursor : ~0ull;
+}
+
+static int case_reorg_stale_authority(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_tf sc;
+    reducer_frontier_test_set_compiled_anchor(0);
+    TF_CHECK("stale_auth: setup",
+             tf_setup("stale_auth", 3, TF_FAIL_NONE, -1,
+                      dir, sizeof(dir), &ms, &sc) == 0);
+    TF_CHECK("stale_auth: drain finalizes rows 0..2",
+             tip_finalize_stage_drain(100) == 3);
+    TF_CHECK("stale_auth: authority names A",
+             active_chain_tip(&ms.chain_active) == &sc.blocks[3]);
+    TF_CHECK("stale_auth: header_admit init", header_admit_stage_init(&ms));
+    TF_CHECK("stale_auth: header_admit logs A",
+             header_admit_stage_drain(100) == 4 &&
+             header_admit_stage_has_record(3, &sc.hashes[3]));
+
+    struct block_index b1, b2;
+    struct uint256 h1, h2;
+    stale_fork_block(&b1, &h1, &sc.blocks[2], 3, 0xf3, 30, BLOCK_VALID_HEADER);
+    stale_fork_block(&b2, &h2, &b1, 4, 0xf4, 40, BLOCK_VALID_HEADER);
+    TF_CHECK("stale_auth: B1 enters the block map",
+             test_block_map_insert(&ms.map_block_index, &h1, &b1));
+    TF_CHECK("stale_auth: B2 enters the block map",
+             test_block_map_insert(&ms.map_block_index, &h2, &b2));
+    sqlite3 *db = progress_store_db();
+    TF_CHECK("stale_auth: downstream cursors sit past A",
+             seed_cursor_tf(db, "validate_headers", 5) &&
+             seed_cursor_tf(db, "body_fetch", 5));
+    sc.blocks[3].nStatus |= BLOCK_FAILED_VALID;
+    TF_CHECK("stale_auth: window falls back to F",
+             active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]));
+    ms.pindex_best_header = &b2;
+
+    uint64_t tf0 = tip_finalize_stage_reorg_detected_total();
+    uint64_t ha0 = header_admit_stage_reorg_rewind_total();
+    for (int i = 0; i < 2; i++) {
+        tip_finalize_stage_step_once();
+        header_admit_stage_step_once();
+    }
+    uint64_t ha_settled = header_admit_stage_reorg_rewind_total();
+    TF_CHECK("stale_auth: tip_finalize rewinds once",
+             tip_finalize_stage_reorg_detected_total() == tf0 + 1);
+    TF_CHECK("stale_auth: authority leaves the failed block",
+             active_chain_tip(&ms.chain_active) == &sc.blocks[2]);
+    TF_CHECK("stale_auth: header_admit repairs its A row once",
+             ha_settled == ha0 + 1 &&
+             header_admit_stage_has_record(3, &h1) &&
+             !header_admit_stage_has_record(3, &sc.hashes[3]));
+    TF_CHECK("stale_auth: body_fetch is clamped to the missing body",
+             stale_auth_cursor(db, "body_fetch") == 3);
+
+    for (int i = 0; i < 3; i++) {
+        tip_finalize_stage_step_once();
+        header_admit_stage_step_once();
+    }
+    TF_CHECK("stale_auth: no further header_admit rewind",
+             header_admit_stage_reorg_rewind_total() == ha_settled);
+    TF_CHECK("stale_auth: no further tip_finalize rewind",
+             tip_finalize_stage_reorg_detected_total() == tf0 + 1);
+    TF_CHECK("stale_auth: row 2 names B1, not A",
+             stale_row_is(db, 2, &h1));
+
+    header_admit_stage_shutdown();
+    tf_teardown(dir, &ms, &sc);
+    reducer_frontier_test_set_compiled_anchor(-1);
+    return failures;
+}
+
+/* The new block already has its body when the rewind fires: the same step
+ * re-finalizes the fork row and publishes the new block, so the served tip
+ * leaves the failed block for the new one and nothing rewinds again. */
+static int case_reorg_stale_row_body_first(void)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_tf sc;
+    reducer_frontier_test_set_compiled_anchor(0);
+    TF_CHECK("stale_body: setup",
+             tf_setup("stale_body", 3, TF_FAIL_NONE, -1,
+                      dir, sizeof(dir), &ms, &sc) == 0);
+    TF_CHECK("stale_body: drain finalizes rows 0..2",
+             tip_finalize_stage_drain(100) == 3);
+    struct block_index nb;
+    struct uint256 nh;
+    stale_fork_block(&nb, &nh, &sc.blocks[2], 3, 0xf3, 30,
+                     BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS);
+    TF_CHECK("stale_body: fork header enters the block map",
+             test_block_map_insert(&ms.map_block_index, &nh, &nb));
+    sc.blocks[3].nStatus |= BLOCK_FAILED_VALID;
+    TF_CHECK("stale_body: window falls back to F",
+             active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]));
+    ms.pindex_best_header = &nb;
+    tip_finalize_stage_step_once();
+    TF_CHECK("stale_body: rewind lowers the cursor",
+             tip_finalize_stage_cursor() <= 3);
+    uint64_t rewinds = tip_finalize_stage_reorg_detected_total();
+    for (int i = 0; i < 4; i++)
+        tip_finalize_stage_step_once();
+    TF_CHECK("stale_body: served tip is the new block",
+             active_chain_tip(&ms.chain_active) == &nb);
+    TF_CHECK("stale_body: row 2 names the new block",
+             stale_row_is(progress_store_db(), 2, &nh));
+    TF_CHECK("stale_body: no rewind after the body arrives",
+             tip_finalize_stage_reorg_detected_total() == rewinds);
+    tf_teardown(dir, &ms, &sc);
+    reducer_frontier_test_set_compiled_anchor(-1);
+    return failures;
+}
+
 int test_tip_finalize_stage(void);
 int test_tip_finalize_stage(void)
 {
@@ -2625,6 +2975,18 @@ int test_tip_finalize_stage(void)
     failures += case_sum_cache_kat();
 
     failures += case_rung_install_fold_advances_hstar();
+
+    failures += case_reorg_stale_row_header_only();
+
+    failures += case_reorg_stale_row_unchanged();
+
+    failures += case_reorg_stale_row_unresolved_ancestor();
+
+    failures += case_reorg_stale_row_failed_best_child();
+
+    failures += case_reorg_stale_authority();
+
+    failures += case_reorg_stale_row_body_first();
 
     printf("tip_finalize_stage tests: %s\n",
            failures ? "FAILED" : "PASSED");

@@ -36,6 +36,11 @@ static bool publish_resolved_durable_tip(sqlite3 *db, const char *reason)
     return true;
 }
 
+bool tip_finalize_stage_publish_durable_tip(sqlite3 *db, const char *reason)
+{
+    return publish_resolved_durable_tip(db, reason);
+}
+
 static bool has_no_durable_tip_history(sqlite3 *db)
 {
     uint64_t cursor = 0;

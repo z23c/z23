@@ -21,4 +21,8 @@ bool tip_finalize_stage_hydrate_cursor_from_store(sqlite3 *db,
 void tip_finalize_stage_publish_resolved_or_fresh_tip(
     sqlite3 *db, const struct block_index *existing_tip, const char *reason);
 
+/* Re-publish the served-tip authority from the durable cursor. A reorg rewind
+ * calls this so a failed or abandoned published tip does not outlive the rewind. */
+bool tip_finalize_stage_publish_durable_tip(sqlite3 *db, const char *reason);
+
 #endif /* ZCL_JOBS_TIP_FINALIZE_STAGE_DURABLE_H */

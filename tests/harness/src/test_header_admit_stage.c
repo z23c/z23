@@ -871,6 +871,8 @@ void reducer_frontier_test_set_compiled_anchor(int32_t height);
 
 enum ha_floor_mode {
     HA_FLOOR_ANCHOR,       /* forward target 3 sits at the anchor (3): refused */
+    HA_FLOOR_SIB_ANCHOR,   /* sibling row at the anchor: refused, nothing moves */
+    HA_FLOOR_SIB_COINS,    /* sibling row: utxo_apply must not drop below coins_applied */
     HA_FLOOR_COINS,        /* utxo_apply must not drop below coins_applied = 5 */
     HA_FLOOR_COINS_BAD,    /* unreadable coins frontier: no cursor moves at all */
     HA_FLOOR_BAD_TIP,     /* tip nHeight disagrees with its hash-bound ancestry */
@@ -970,13 +972,30 @@ static int ha_floor_apply_bad_tip(enum ha_floor_mode mode, sqlite3 *db,
     return failures;
 }
 
+static int ha_floor_seed_sibling_row3(sqlite3 *db, const struct synth_chain *sc)
+{
+    int failures = 0;
+    struct uint256 sibling = sc->hashes[3];
+    sibling.data[9] ^= 0x66;
+    HA_CHECK("forward_floor: sibling log row with the canonical parent",
+             put_header_row(db, 3, &sibling, &sc->hashes[2]));
+    return failures;
+}
+
 static int ha_floor_apply_mode(enum ha_floor_mode mode, sqlite3 *db,
                                struct synth_chain *sc)
 {
     int failures = 0;
     if (mode == HA_FLOOR_ANCHOR)
         reducer_frontier_test_set_compiled_anchor(3);
-    else if (mode == HA_FLOOR_COINS)
+    else if (mode == HA_FLOOR_SIB_ANCHOR) {
+        failures += ha_floor_seed_sibling_row3(db, sc);
+        reducer_frontier_test_set_compiled_anchor(3);
+    } else if (mode == HA_FLOOR_SIB_COINS) {
+        failures += ha_floor_seed_sibling_row3(db, sc);
+        HA_CHECK("forward_floor: coins_applied=5",
+                 coins_kv_set_applied_height_in_tx(db, 5));
+    } else if (mode == HA_FLOOR_COINS)
         HA_CHECK("forward_floor: coins_applied=5",
                  coins_kv_set_applied_height_in_tx(db, 5));
     else if (mode == HA_FLOOR_COINS_BAD)
@@ -1024,7 +1043,7 @@ static int ha_floor_verify_mode(enum ha_floor_mode mode, sqlite3 *db,
                                 unsigned long long rw0, job_result_t r)
 {
     int failures = 0;
-    if (mode == HA_FLOOR_ANCHOR) {
+    if (mode == HA_FLOOR_ANCHOR || mode == HA_FLOOR_SIB_ANCHOR) {
         HA_CHECK("forward_floor: anchor refusal ends the pass", r == JOB_IDLE);
         failures += ha_floor_verify_untouched(
             "forward_floor: target at the anchor refused, cursors untouched",
@@ -1033,7 +1052,10 @@ static int ha_floor_verify_mode(enum ha_floor_mode mode, sqlite3 *db,
         failures += ha_floor_verify_untouched(
             "forward_floor: unreadable coins frontier moves no cursor",
             db, 5, rw0);
-    } else if (mode == HA_FLOOR_COINS) {
+    } else if (mode == HA_FLOOR_COINS || mode == HA_FLOOR_SIB_COINS) {
+        if (mode == HA_FLOOR_SIB_COINS)
+            HA_CHECK("forward_floor: sibling row rewinds once",
+                     header_admit_stage_reorg_rewind_total() == rw0 + 1);
         HA_CHECK("forward_floor: utxo_apply not below coins_applied",
                  cursor_at(db, "utxo_apply") == 5);
         HA_CHECK("forward_floor: legit downstream still clamped",
@@ -1103,6 +1125,240 @@ static int ha_forward_fork_floor_case(enum ha_floor_mode mode,
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int ha_sibling_row_case(void)
+{
+    int failures = 0;
+    /* A logged child that shares the active tip's parent but differs in hash
+     * (a reorg sibling whose body never arrived) passes the parent audit. The
+     * best-header chain names the canonical child, so the stage must rewind and
+     * clamp the downstream cursors, or nothing re-requests the body. */
+    char dir[256];
+    test_fmt_tmpdir(dir, sizeof(dir), "header_admit", "sibling_row");
+    mkdir_p_ha(dir);
+    HA_CHECK("sibling_row: store opens", progress_store_open(dir));
+
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    zcl_mutex_init(&ms.cs_main);
+    active_chain_init(&ms.chain_active);
+    struct synth_chain sc;
+    synth_chain_build(&sc, 5);
+    active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]);
+
+    HA_CHECK("sibling_row: init", header_admit_stage_init(&ms));
+    HA_CHECK("sibling_row: admit active prefix",
+             header_admit_stage_drain(100) == 3 &&
+             header_admit_stage_cursor() == 3);
+    sqlite3 *db = progress_store_db();
+
+    /* No best-header evidence: the sibling row is not provably stale. */
+    struct uint256 sibling = sc.hashes[3];
+    sibling.data[9] ^= 0x66;
+    HA_CHECK("sibling_row: seed sibling row with the canonical parent",
+             put_header_row(db, 3, &sibling, &sc.hashes[2]));
+    failures += ha_forward_fork_force_all_cursors(db);
+    uint64_t rewinds0 = header_admit_stage_reorg_rewind_total();
+    ms.pindex_best_header = NULL;
+    header_admit_stage_step_once();
+    HA_CHECK("sibling_row: no best header, no rewind",
+             header_admit_stage_reorg_rewind_total() == rewinds0 &&
+             cursor_at(db, "body_fetch") == 5);
+
+    ms.pindex_best_header = &sc.blocks[4];
+    failures += ha_forward_fork_force_all_cursors(db);
+    HA_CHECK("sibling_row: h3 is not canonical",
+             !header_admit_stage_has_record(3, &sc.hashes[3]));
+    HA_CHECK("sibling_row: repair step rewinds and admits h3",
+             header_admit_stage_step_once() == JOB_ADVANCED);
+    HA_CHECK("sibling_row: rewind counted once",
+             header_admit_stage_reorg_rewind_total() == rewinds0 + 1);
+    HA_CHECK("sibling_row: downstream cursors clamped to h3",
+             cursor_at(db, "validate_headers") == 3 &&
+             cursor_at(db, "body_fetch") == 3 &&
+             cursor_at(db, "utxo_apply") == 3);
+    HA_CHECK("sibling_row: h3 holds the canonical hash",
+             header_admit_stage_has_record(3, &sc.hashes[3]));
+    header_admit_stage_step_once();
+    HA_CHECK("sibling_row: no second rewind once the row is canonical",
+             header_admit_stage_reorg_rewind_total() == rewinds0 + 1);
+
+    header_admit_stage_shutdown();
+    active_chain_free(&ms.chain_active);
+    zcl_mutex_destroy(&ms.cs_main);
+    synth_chain_free(&sc);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* Shared fixture for the best-header sibling cases: tip at height 2, a
+ * competing branch B1 (h3) -> B2 (h4) that shares the parent of blocks[3]. */
+struct ha_branch_env {
+    struct main_state ms;
+    struct synth_chain sc;
+    struct block_index b1, b2;
+    struct uint256 b1_hash, b2_hash;
+};
+
+static void ha_branch_env_open(struct ha_branch_env *e, const char *tag,
+                               char *dir, size_t dir_size, int window_top)
+{
+    test_fmt_tmpdir(dir, dir_size, "header_admit", tag);
+    mkdir_p_ha(dir);
+    progress_store_open(dir);
+    memset(&e->ms, 0, sizeof(e->ms));
+    main_state_init(&e->ms);
+    synth_chain_build(&e->sc, 6);
+    for (int i = 0; i < 6; i++)
+        test_block_map_insert(&e->ms.map_block_index, &e->sc.hashes[i],
+                              &e->sc.blocks[i]);
+    active_chain_move_window_tip(&e->ms.chain_active, &e->sc.blocks[window_top]);
+
+    block_index_init(&e->b1);
+    memset(&e->b1_hash, 0, sizeof(e->b1_hash));
+    e->b1_hash.data[0] = 0xb1;
+    e->b1_hash.data[2] = 0xAB;
+    e->b1.phashBlock = &e->b1_hash;
+    e->b1.nHeight = 3;
+    e->b1.pprev = &e->sc.blocks[2];
+    block_index_init(&e->b2);
+    memset(&e->b2_hash, 0, sizeof(e->b2_hash));
+    e->b2_hash.data[0] = 0xb2;
+    e->b2_hash.data[2] = 0xAB;
+    e->b2.phashBlock = &e->b2_hash;
+    e->b2.nHeight = 4;
+    e->b2.pprev = &e->b1;
+}
+
+static void ha_branch_env_close(struct ha_branch_env *e, const char *dir)
+{
+    header_admit_stage_shutdown();
+    main_state_free(&e->ms);
+    synth_chain_free(&e->sc);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+}
+
+static struct ha_branch_env *g_ha_auth_env;
+static int g_ha_auth_height;
+
+static int64_t ha_auth_height(void) { return g_ha_auth_height; }
+static bool ha_auth_hash(uint8_t hash[32])
+{
+    memcpy(hash, g_ha_auth_env->sc.hashes[g_ha_auth_height].data, 32);
+    return true;
+}
+static bool ha_auth_on(void) { return true; }
+
+/* An in-flight window child above the authority tip is the window owner's: the
+ * best-header audit must not rewind it, or ha_resolve_bi re-admits the same
+ * window block and the rewind repeats. */
+static int ha_window_slot_owned_case(void)
+{
+    int failures = 0;
+    char dir[256];
+    struct ha_branch_env e;
+    ha_branch_env_open(&e, "window_owned", dir, sizeof(dir), 3);
+    HA_CHECK("window_owned: init", header_admit_stage_init(&e.ms));
+    HA_CHECK("window_owned: admit through the window top",
+             header_admit_stage_drain(100) == 4 &&
+             header_admit_stage_has_record(3, &e.sc.hashes[3]));
+    sqlite3 *db = progress_store_db();
+    e.ms.pindex_best_header = &e.b2;
+    struct active_chain_authority auth = { ha_auth_height, ha_auth_hash,
+                                           ha_auth_on };
+    g_ha_auth_env = &e;
+    g_ha_auth_height = 2;
+    active_chain_register_authority(&auth);
+    active_chain_register_block_map(&e.ms.map_block_index);
+    HA_CHECK("window_owned: tip is below the window top",
+             active_chain_tip(&e.ms.chain_active) == &e.sc.blocks[2] &&
+             active_chain_at(&e.ms.chain_active, 3) == &e.sc.blocks[3]);
+    HA_CHECK("window_owned: force cursors ahead",
+             force_cursor(db, "header_admit", 5) &&
+             force_cursor(db, "body_fetch", 5));
+    uint64_t rewinds0 = header_admit_stage_reorg_rewind_total();
+    for (int i = 0; i < 3; i++)
+        header_admit_stage_step_once();
+    HA_CHECK("window_owned: no rewind of a window-owned child",
+             header_admit_stage_reorg_rewind_total() == rewinds0);
+    HA_CHECK("window_owned: downstream cursor not clamped",
+             cursor_at(db, "body_fetch") == 5);
+    HA_CHECK("window_owned: row keeps the window block",
+             header_admit_stage_has_record(3, &e.sc.hashes[3]));
+    struct active_chain_authority none = {0};
+    active_chain_register_authority(&none);
+    active_chain_register_block_map(NULL);
+    ha_branch_env_close(&e, dir);
+    return failures;
+}
+
+/* A failed best-header child is not evidence that the logged valid row is
+ * stale: invalidateblock on a non-active branch leaves best at B2. */
+static int ha_failed_best_child_case(void)
+{
+    int failures = 0;
+    char dir[256];
+    struct ha_branch_env e;
+    ha_branch_env_open(&e, "failed_child", dir, sizeof(dir), 2);
+    HA_CHECK("failed_child: init", header_admit_stage_init(&e.ms));
+    HA_CHECK("failed_child: admit active prefix",
+             header_admit_stage_drain(100) == 3);
+    sqlite3 *db = progress_store_db();
+    e.b1.nStatus |= BLOCK_FAILED_VALID;
+    e.b2.nStatus |= BLOCK_FAILED_CHILD;
+    e.ms.pindex_best_header = &e.b2;
+    HA_CHECK("failed_child: valid row at h3",
+             put_header_row(db, 3, &e.sc.hashes[3], &e.sc.hashes[2]));
+    HA_CHECK("failed_child: force cursors ahead",
+             force_cursor(db, "header_admit", 5) &&
+             force_cursor(db, "body_fetch", 5));
+    uint64_t rewinds0 = header_admit_stage_reorg_rewind_total();
+    header_admit_stage_step_once();
+    HA_CHECK("failed_child: no rewind on a failed best-header child",
+             header_admit_stage_reorg_rewind_total() == rewinds0);
+    HA_CHECK("failed_child: valid row is kept",
+             header_admit_stage_has_record(3, &e.sc.hashes[3]));
+    HA_CHECK("failed_child: downstream cursor not clamped",
+             cursor_at(db, "body_fetch") == 5);
+    ha_branch_env_close(&e, dir);
+    return failures;
+}
+
+/* The h+2 fallback must link through the prior admitted row. With canonical h3
+ * logged and a stale h4 row (right parent, wrong hash) the stage holds at h5:
+ * it neither rewinds nor admits h5 through the stale row. */
+static int ha_stale_prior_row_hold_case(void)
+{
+    int failures = 0;
+    char dir[256];
+    struct ha_branch_env e;
+    ha_branch_env_open(&e, "stale_prior", dir, sizeof(dir), 2);
+    HA_CHECK("stale_prior: init", header_admit_stage_init(&e.ms));
+    HA_CHECK("stale_prior: admit active prefix",
+             header_admit_stage_drain(100) == 3);
+    sqlite3 *db = progress_store_db();
+    e.ms.pindex_best_header = &e.sc.blocks[5];
+    struct uint256 stale_h4 = e.sc.hashes[4];
+    stale_h4.data[5] ^= 0x44;
+    HA_CHECK("stale_prior: canonical h3, stale h4 with the right parent",
+             put_header_row(db, 3, &e.sc.hashes[3], &e.sc.hashes[2]) &&
+             put_header_row(db, 4, &stale_h4, &e.sc.hashes[3]) &&
+             force_cursor(db, "header_admit", 5));
+    uint64_t rewinds0 = header_admit_stage_reorg_rewind_total();
+    HA_CHECK("stale_prior: h5 holds on the stale h4 row",
+             header_admit_stage_step_once() == JOB_IDLE);
+    HA_CHECK("stale_prior: cursor stays at h5",
+             header_admit_stage_cursor() == 5 &&
+             cursor_at(db, "header_admit") == 5);
+    HA_CHECK("stale_prior: h5 not admitted through the stale row",
+             !header_admit_stage_has_record(5, &e.sc.hashes[5]));
+    HA_CHECK("stale_prior: no rewind",
+             header_admit_stage_reorg_rewind_total() == rewinds0);
+    ha_branch_env_close(&e, dir);
     return failures;
 }
 
@@ -1203,14 +1459,13 @@ static int ha_prior_hash_guard_case(void)
     HA_CHECK("prior_hash_guard: force cursor to h4",
              force_cursor(db, "header_admit", 4));
 
+    /* The stale h3 sibling is repaired (rewind to h3, canonical h3 admitted)
+     * before h4 is considered; holding forever left the reorg body unfetched. */
     job_result_t r = header_admit_stage_step_once();
-    HA_CHECK("prior_hash_guard: h4 holds on stale h3 hash",
-             r == JOB_IDLE);
-    HA_CHECK("prior_hash_guard: cursor stays at h4",
-             header_admit_stage_cursor() == 4 &&
-             cursor_at(db, "header_admit") == 4);
-    HA_CHECK("prior_hash_guard: stale h3 not treated as canonical",
-             !header_admit_stage_has_record(3, &sc.hashes[3]));
+    HA_CHECK("prior_hash_guard: stale h3 is rewound and re-admitted",
+             r == JOB_ADVANCED && header_admit_stage_cursor() == 4);
+    HA_CHECK("prior_hash_guard: h3 now holds the canonical hash",
+             header_admit_stage_has_record(3, &sc.hashes[3]));
     HA_CHECK("prior_hash_guard: h4 not admitted through stale h3",
              !header_admit_stage_has_record(4, &sc.hashes[4]));
 
@@ -1371,8 +1626,16 @@ int test_header_admit_stage(void)
     failures += ha_pre_init_guard_case();
     failures += ha_reorg_self_heal_case();
     failures += ha_forward_fork_heal_case();
+    failures += ha_sibling_row_case();
+    failures += ha_window_slot_owned_case();
+    failures += ha_failed_best_child_case();
+    failures += ha_stale_prior_row_hold_case();
     failures += ha_forward_fork_floor_case(HA_FLOOR_ANCHOR, "floor_anchor");
     failures += ha_forward_fork_floor_case(HA_FLOOR_COINS, "floor_coins");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_SIB_ANCHOR,
+                                           "floor_sib_anchor");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_SIB_COINS,
+                                           "floor_sib_coins");
     failures += ha_forward_fork_floor_case(HA_FLOOR_COINS_BAD,
                                            "floor_coins_bad");
     failures += ha_forward_fork_floor_case(HA_FLOOR_BAD_TIP, "floor_badtip");

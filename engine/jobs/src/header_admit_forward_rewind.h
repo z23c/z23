@@ -26,6 +26,7 @@ bool header_admit_tip_refused(sqlite3 *db, struct active_chain *chain);
 /* *out_target: the rewind height, HEADER_ADMIT_REWIND_NONE or
  * HEADER_ADMIT_REWIND_REFUSED. */
 bool header_admit_forward_rewind_target(sqlite3 *db,
+                                        struct block_index *best_header,
                                         struct active_chain *chain,
                                         uint64_t cursor,
                                         int *out_target,
