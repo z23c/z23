@@ -141,6 +141,25 @@ static int is_power_of_two(uint64_t v)
     return v > 1 && (v & (v - 1)) == 0;
 }
 
+/* Argument checks for zscrypt(); returns 0 when the call is valid, -1
+ * otherwise. */
+static int zscrypt_check_params(const void *passwd, size_t passwd_len,
+                                const void *salt, size_t salt_len,
+                                uint64_t n, uint32_t r, uint32_t p,
+                                uint8_t *dk, size_t dk_len)
+{
+    if ((!passwd && passwd_len) || (!salt && salt_len) || !dk || !dk_len)
+        return -1;
+    if (!is_power_of_two(n) || !r || !p)
+        return -1;
+    /* Guard the multiplications below against overflow. */
+    if (r > UINT32_MAX / 128 || p > UINT32_MAX / (128 * r))
+        return -1;
+    if (n > SIZE_MAX / (128 * (size_t)r))
+        return -1;
+    return 0;
+}
+
 int zscrypt(const void *passwd, size_t passwd_len,
             const void *salt, size_t salt_len,
             uint64_t n, uint32_t r, uint32_t p,
@@ -150,14 +169,8 @@ int zscrypt(const void *passwd, size_t passwd_len,
     size_t block_span, b_len;
     int rc = -2;
 
-    if ((!passwd && passwd_len) || (!salt && salt_len) || !dk || !dk_len)
-        return -1;
-    if (!is_power_of_two(n) || !r || !p)
-        return -1;
-    /* Guard the multiplications below against overflow. */
-    if (r > UINT32_MAX / 128 || p > UINT32_MAX / (128 * r))
-        return -1;
-    if (n > SIZE_MAX / (128 * (size_t)r))
+    if (zscrypt_check_params(passwd, passwd_len, salt, salt_len, n, r, p,
+                             dk, dk_len) != 0)
         return -1;
 
     block_span = (size_t)r * 128;
