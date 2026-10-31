@@ -15,7 +15,8 @@
  * whole node (listener, RPC, peers, validation, serving).
  *
  * Install the compiled-in verifying keys, name the one capability that
- * really is gone, page the operator once, and let the node sync, validate and
+ * really is gone (a capability-only blocker: listed, never an operator page or
+ * a serving gate), and let the node sync, validate and
  * serve. Proving stays fail-closed on its own — with no proving keys loaded
  * the native prover remains NATIVE_PROVER_UNINITIALIZED, and both
  * shielded-send paths refuse on zclassic_sapling_prover_is_ready() rather
@@ -114,17 +115,17 @@ boot_params_gate_evaluate(const struct app_context *ctx,
 
     /* Validation is armed. Name the one capability that is not, so "cannot
      * send shielded" is a reported state and never a surprise at spend time.
-     * A capability blocker, not a boot blocker: the caller carries on. */
+     * A capability blocker, not a boot blocker: the caller carries on, and the
+     * blocker neither hard-gates public serving nor pages the operator. */
     struct blocker_record rec;
     if (blocker_init(&rec, "shielded_spend_unavailable", "crypto.params",
                      BLOCKER_PERMANENT,
                      "zk PROVING parameters are not installed — this node "
                      "validates every shielded proof but cannot create "
-                     "shielded transactions; see docs/PARAMS.md") &&
-        blocker_set(&rec) == 0)
-        event_emitf(EV_OPERATOR_NEEDED, 0,
-                    "check=shielded_spend_unavailable file=%s path=%s",
-                    missing, missing_path[0] ? missing_path : "");
+                     "shielded transactions; see docs/PARAMS.md")) {
+        rec.capability_only = true;
+        (void)blocker_set(&rec);
+    }
     LOG_WARN("crypto.params",
              "[crypto.params] proving parameter '%s' is missing/unreadable "
              "(dir=%s) — using compiled-in verifying keys: shielded proof "
@@ -171,11 +172,10 @@ bool boot_params_gate_on_load_refused(const char *params_dir)
                              "validates every shielded proof from its "
                              "compiled-in verifying keys but cannot create "
                              "shielded transactions; re-fetch the parameter "
-                             "files, see docs/PARAMS.md") &&
-                blocker_set(&rec) == 0)
-                event_emitf(EV_OPERATOR_NEEDED, 0,
-                            "check=shielded_spend_unavailable reason=params_refused dir=%s",
-                            dir);
+                             "files, see docs/PARAMS.md")) {
+                rec.capability_only = true;
+                (void)blocker_set(&rec);
+            }
         }
         LOG_WARN("crypto.params",
                  "[crypto.params] zk parameter files in %s were REFUSED "

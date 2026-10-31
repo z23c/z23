@@ -234,6 +234,51 @@ static int test_peer_survey_counts_sync_states_as_ready(void)
     return 0;
 }
 
+static bool frontdoor_push_blocker(struct json_value *arr, const char *id,
+                                   const char *cls, bool capability_only,
+                                   int64_t age_us)
+{
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    bool ok = json_push_kv_str(&row, "id", id) &&
+              json_push_kv_str(&row, "class", cls) &&
+              json_push_kv_int(&row, "age_us", age_us) &&
+              json_push_kv_bool(&row, "capability_only", capability_only) &&
+              json_push_back(arr, &row);
+    json_free(&row);
+    return ok;
+}
+
+/* A capability-only blocker is listed but is never named the dominant one
+ * ahead of a DEPENDENCY or TRANSIENT blocker, however old it is. */
+static int test_dominant_blocker_skips_capability_only(void)
+{
+    printf("status_frontdoor: dominant blocker ignores capability-only... ");
+    struct json_value rows;
+    json_init(&rows);
+    json_set_array(&rows);
+    bool ok = frontdoor_push_blocker(&rows, "shielded_spend_unavailable",
+                                     "permanent", true, 9000000) &&
+              frontdoor_push_blocker(&rows, "sync.peer_wait", "transient",
+                                     false, 10);
+    const struct json_value *dominant = status_dominant_blocker(&rows);
+    ok = ok && dominant &&
+         strcmp(json_get_str(json_get(dominant, "id")), "sync.peer_wait") == 0;
+    json_free(&rows);
+    json_init(&rows);
+    json_set_array(&rows);
+    ok = ok && frontdoor_push_blocker(&rows, "shielded_spend_unavailable",
+                                      "permanent", true, 9000000);
+    dominant = status_dominant_blocker(&rows);
+    ok = ok && dominant &&
+         strcmp(json_get_str(json_get(dominant, "id")),
+                "shielded_spend_unavailable") == 0;
+    json_free(&rows);
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok ? 0 : 1;
+}
+
 int test_status_frontdoor(void);
 int test_status_frontdoor(void)
 {
@@ -242,5 +287,6 @@ int test_status_frontdoor(void)
     failures += test_basic_shape();
     failures += test_completes_under_held_lock();
     failures += test_peer_survey_counts_sync_states_as_ready();
+    failures += test_dominant_blocker_skips_capability_only();
     return failures;
 }

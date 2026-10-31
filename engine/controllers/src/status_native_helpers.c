@@ -381,6 +381,8 @@ void status_peer_survey(const struct json_value *peers,
 
 static int status_blocker_causal_priority(const struct json_value *candidate)
 {
+    if (json_get_bool(json_get(candidate, "capability_only")))
+        return BLOCKER_CAPABILITY_PRIORITY;
     const char *class_name = json_get_str(json_get(candidate, "class"));
     enum blocker_class blocker_class;
     if (class_name && strcmp(class_name, "resource") == 0)

@@ -43,6 +43,7 @@ struct blocker_slot {
     bool                    escalated;           /* rule-2 budget exhausted */
     char                    caused_by[BLOCKER_ID_MAX];              /* see blocker.h */
     char                    cause_detail[BLOCKER_CAUSE_DETAIL_MAX];
+    bool                    capability_only;     /* see blocker.h */
 };
 
 struct escape_entry {
@@ -228,6 +229,7 @@ static void blocker_set_refresh_locked(struct blocker_slot *s,
         strcmp(s->cause_detail, r->cause_detail) != 0;
 
     /* Refresh fields except since_us (preserves age semantics). */
+    s->capability_only = r->capability_only;
     s->class = r->class;
     s->retry_budget = r->retry_budget;
     s->ttl_us = r->transient_ttl_secs * 1000000;
@@ -283,6 +285,7 @@ int blocker_set(const struct blocker_record *r)
     snprintf(s->reason, BLOCKER_REASON_MAX, "%s", r->reason);
     snprintf(s->caused_by, BLOCKER_ID_MAX, "%s", r->caused_by);
     snprintf(s->cause_detail, BLOCKER_CAUSE_DETAIL_MAX, "%s", r->cause_detail);
+    s->capability_only = r->capability_only;
     s->class = r->class;
     s->retry_budget = r->retry_budget;
     s->since_us = now;
@@ -414,6 +417,7 @@ static void fill_snapshot(struct blocker_snapshot *out,
     out->deadline_rearm_count = s->rearm_count;
     memcpy(out->caused_by, s->caused_by, BLOCKER_ID_MAX);
     memcpy(out->cause_detail, s->cause_detail, BLOCKER_CAUSE_DETAIL_MAX);
+    out->capability_only = s->capability_only;
 }
 
 int blocker_snapshot_all_with_meta(struct blocker_snapshot *out, int max,
@@ -468,6 +472,14 @@ int blocker_causal_priority(enum blocker_class c, const char *id)
     return 0;
 }
 
+/* A capability-only blocker is shown, but never outranks a blocker that
+ * describes the node itself. */
+static int blocker_snapshot_priority(const struct blocker_snapshot *b)
+{
+    return b->capability_only ? BLOCKER_CAPABILITY_PRIORITY
+        : blocker_causal_priority((enum blocker_class)b->class, b->id);
+}
+
 const struct blocker_snapshot *blocker_select_dominant(
     const struct blocker_snapshot *snapshots, int count)
 {
@@ -478,8 +490,7 @@ const struct blocker_snapshot *blocker_select_dominant(
     int priority = -1;
     for (int i = 0; i < count; i++) {
         const struct blocker_snapshot *candidate = &snapshots[i];
-        int candidate_priority = blocker_causal_priority(
-            (enum blocker_class)candidate->class, candidate->id);
+        int candidate_priority = blocker_snapshot_priority(candidate);
         if (!dominant || candidate_priority > priority ||
             (candidate_priority == priority &&
              candidate->age_us > dominant->age_us)) {
@@ -496,6 +507,19 @@ int blocker_count_by_class(enum blocker_class c)
     int n = 0;
     for (int i = 0; i < BLOCKER_CAP; i++) {
         if (g_slots[i].in_use && g_slots[i].class == c) n++;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return n;
+}
+
+int blocker_count_fault_by_class(enum blocker_class c)
+{
+    pthread_mutex_lock(&g_lock);
+    int n = 0;
+    for (int i = 0; i < BLOCKER_CAP; i++) {
+        if (g_slots[i].in_use && g_slots[i].class == c &&
+            !g_slots[i].capability_only)
+            n++;
     }
     pthread_mutex_unlock(&g_lock);
     return n;

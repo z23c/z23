@@ -878,6 +878,32 @@ static int wd_check_tip_selection_wedge(void)
     return failures;
 }
 
+/* A capability-only PERMANENT blocker (no shielded proving parameters) must
+ * not make a genuine tip stall look deterministic: the bounded restart still
+ * applies. A real PERMANENT blocker still does. */
+static int wd_check_capability_blocker_is_not_a_stall_cause(void)
+{
+    int failures = 0;
+    struct blocker_record rec;
+    blocker_clear("shielded_spend_unavailable");
+    blocker_clear("test.integrity_fault");
+    bool ok = blocker_init(&rec, "shielded_spend_unavailable", "crypto.params",
+                           BLOCKER_PERMANENT, "test");
+    rec.capability_only = ok;
+    ok = ok && blocker_set(&rec) >= 0;
+    const char *cause = chain_tip_watchdog_test_stall_cause();
+    WD_CHECK("capability-only blocker is not a deterministic stall cause",
+             ok && cause == NULL);
+    ok = blocker_init(&rec, "test.integrity_fault", "test", BLOCKER_PERMANENT,
+                      "test") && blocker_set(&rec) >= 0;
+    cause = chain_tip_watchdog_test_stall_cause();
+    WD_CHECK("a real PERMANENT blocker is still a deterministic stall cause",
+             ok && cause && strcmp(cause, "permanent_blocker_active") == 0);
+    blocker_clear("shielded_spend_unavailable");
+    blocker_clear("test.integrity_fault");
+    return failures;
+}
+
 int test_chain_tip_watchdog_bounded_restart(void)
 {
     printf("\n=== chain_tip_watchdog bounded-restart tests ===\n");
@@ -895,6 +921,7 @@ int test_chain_tip_watchdog_bounded_restart(void)
 
     /* Worker stalls are worker-scoped blockers, not chain-tip wedge causes. */
     failures += wd_check_worker_stall_blockers();
+    failures += wd_check_capability_blocker_is_not_a_stall_cause();
 
     /* ── (a) deterministic wedge: K restarts then STOP + page ───────── */
     failures += wd_check_deterministic_wedge_capped_restarts();

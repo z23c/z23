@@ -352,10 +352,10 @@ static const char *wd_deterministic_stall_cause(void)
     if (alerts_operator_needed(NULL, 0, NULL))
         return "operator_needed_latched";
 
-    /* (3) Any active PERMANENT-class typed blocker (bad PoW, malformed
-     * block, consensus reject) — by definition never auto-retryable; only
+    /* (3) Any active PERMANENT-class typed blocker that is not capability-only
+     * (bad PoW, malformed block, consensus reject) — never auto-retryable; only
      * an operator clears it. A restart re-derives the identical reject. */
-    if (blocker_count_by_class(BLOCKER_PERMANENT) > 0)
+    if (blocker_count_fault_by_class(BLOCKER_PERMANENT) > 0)
         return "permanent_blocker_active";
 
     return NULL;  /* no named deterministic cause — genuine liveness loss */

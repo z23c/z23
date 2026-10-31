@@ -82,7 +82,9 @@ The node also names this a standing blocker at boot,
 `shielded_spend_unavailable`, under `crypto.params`. That means the
 condition is visible in the node's own status reporting from the moment it
 starts, not something you only discover the first time you try to send
-shielded funds.
+shielded funds. It is a capability-only blocker: it
+stays listed with its remedy, but it does not mark the node unhealthy, stop
+public serving, or set `operator_needed`.
 
 Regtest and testnet never enforced the old params gate and still do not;
 none of the above is new for those networks.

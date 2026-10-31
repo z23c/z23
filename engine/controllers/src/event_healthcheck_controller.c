@@ -613,7 +613,7 @@ static bool rpc_healthcheck_full(const struct json_value *params,
     const struct blocker_snapshot *dominant =
         blocker_select_dominant(blockers, blocker_count);
     const struct blocker_snapshot *authority_blocker =
-        api_blocker_hard_gates_public_serving(dominant) ? dominant : NULL;
+        api_authority_blocker(blockers, blocker_count);
     const struct blocker_snapshot *warning_blocker =
         dominant && !authority_blocker ? dominant : NULL;
     bool public_serving = health.serving && !authority_blocker &&

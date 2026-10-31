@@ -96,7 +96,8 @@ static int bsm_scan_empty_escape(char out_id[BLOCKER_ID_MAX])
     int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
     int found = 0;
     for (int i = 0; i < n; i++) {
-        if (snaps[i].escape_action[0] == '\0') {
+        if (snaps[i].escape_action[0] == '\0' &&
+            !snaps[i].capability_only) {
             if (found == 0 && out_id)
                 snprintf(out_id, BLOCKER_ID_MAX, "%s", snaps[i].id);
             found++;

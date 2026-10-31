@@ -84,8 +84,9 @@ void alert_rules_seed_locked(void)
         .cooldown_sec = 300,
     };
     g_alert_rules[g_alert_rule_count++] = (struct metric_alert_rule){
-        /* Mirrors the comment at the zcl_blockers_active render site
-         * above: "permanent>0 is always an operator-escalation event". */
+        /* The gauge class="permanent" counts every PERMANENT blocker, capability-only
+         * ones included; this alert reads the count without them (a lost
+         * optional capability is not an escalation). */
         .gauge_name   = "zcl_blockers_active{class=\"permanent\"}",
         .cmp          = METRIC_ALERT_GT,
         .threshold    = 0.0,

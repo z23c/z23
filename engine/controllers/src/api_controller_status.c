@@ -861,13 +861,7 @@ size_t api_serve_unsupported_version(const char *requested_version,
     return n;
 }
 
-struct api_node_summary_reason {
-    enum node_status_reason reason;
-    const char *primary;
-    const char *next_endpoint;
-};
-
-static struct api_node_summary_reason api_node_summary_select_reason(
+struct api_node_summary_reason api_node_summary_select_reason(
     const struct node_health_snapshot *health,
     const struct agent_security_posture *posture,
     const struct blocker_snapshot *authority_blocker,
@@ -933,7 +927,7 @@ size_t api_serve_node_summary(uint8_t *response, size_t response_max)
     struct blocker_snapshot blockers[BLOCKER_CAP];
     int blocker_count = blocker_snapshot_all(blockers, BLOCKER_CAP);
     const struct blocker_snapshot *dominant = blocker_select_dominant(blockers, blocker_count);
-    const struct blocker_snapshot *authority_blocker = api_blocker_hard_gates_public_serving(dominant) ? dominant : NULL;
+    const struct blocker_snapshot *authority_blocker = api_authority_blocker(blockers, blocker_count);
     const struct blocker_snapshot *warning_blocker = dominant && !authority_blocker ? dominant : NULL;
     struct download_stats_snapshot dl_snap;
     download_stats_snapshot_from_health(&dl_snap, &health);

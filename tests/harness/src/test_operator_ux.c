@@ -99,6 +99,51 @@ static int test_explain_sync_names_dominant_blocker(void)
  * verified height (reducer_frontier emits stage_cursors as an ARRAY). Third
  * case: a node that sends no depth field reads "UNAVAILABLE", never an
  * all-clear. */
+/* A catching-up node whose only blocker is a lost optional capability is not
+ * told to clear that blocker. */
+static int test_explain_sync_ignores_capability_blocker(void)
+{
+    int failures = 0;
+    TEST("explain sync does not tell the user to clear a capability-only blocker") {
+        struct json_value frontier, chain, blockers, b;
+        json_init(&frontier);
+        json_set_object(&frontier);
+        json_push_kv_int(&frontier, "hstar", 100);
+        json_push_kv_int(&frontier, "served_floor", 100);
+        json_init(&chain);
+        json_set_object(&chain);
+        json_push_kv_int(&chain, "best_header_height", 200);
+        json_init(&blockers);
+        json_set_array(&blockers);
+        json_init(&b);
+        json_set_object(&b);
+        json_push_kv_str(&b, "id", "shielded_spend_unavailable");
+        json_push_kv_str(&b, "class", "permanent");
+        json_push_kv_str(&b, "reason", "proving parameters not installed");
+        json_push_kv_bool(&b, "capability_only", true);
+        json_push_back(&blockers, &b);
+        json_free(&b);
+
+        struct explain_inputs in = {
+            .frontier = &frontier, .blockers = &blockers, .chain = &chain,
+            .block_height = 100, .block_height_known = true,
+        };
+        struct json_value out;
+        json_init(&out);
+        explain_compose_sync(&in, &out);
+        const char *text = json_get_str(json_get(&out, "text"));
+        ASSERT(text != NULL);
+        ASSERT(strstr(text, "clear the dominant blocker") == NULL);
+        ASSERT(strstr(text, "shielded_spend_unavailable") != NULL);
+        json_free(&out);
+        json_free(&blockers);
+        json_free(&chain);
+        json_free(&frontier);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_explain_sync_marks_run_ahead_cursors(void)
 {
     int failures = 0;
@@ -1397,6 +1442,7 @@ int test_operator_ux(void)
 {
     int failures = 0;
     failures += test_explain_sync_names_dominant_blocker();
+    failures += test_explain_sync_ignores_capability_blocker();
     failures += test_explain_sync_marks_run_ahead_cursors();
     failures += test_explain_topics_and_health();
     failures += test_profile_samples_threads();

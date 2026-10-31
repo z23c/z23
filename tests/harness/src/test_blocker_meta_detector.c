@@ -175,6 +175,27 @@ int test_blocker_meta_detector(void)
                   blocker_stall_meta_detector_test_remedy_calls() == 0);
     }
 
+    /* ── NO-FIRE: a capability-only blocker is not the defect ─────────────── */
+    {
+        /* No proving parameters, behind the header tip, H* frozen past the
+         * window, no other blocker: identical to a node with parameters. */
+        bmd_reset();
+        reducer_frontier_provable_tip_set(3056760);
+        struct blocker_record r;
+        blocker_init(&r, "shielded_spend_unavailable", "crypto.params",
+                     BLOCKER_PERMANENT, "meta-detector fixture");
+        r.capability_only = true;
+        (void)blocker_set(&r);
+
+        const int64_t t0 = 7000000;
+        blocker_stall_meta_detector_test_set_clock_us(t0);
+        (void)blocker_stall_meta_detector_test_detect();          /* prime */
+        blocker_stall_meta_detector_test_set_clock_us(t0 + BMD_WIN_US + 1000000);
+        BMD_CHECK("capability-only blocker with empty escape -> no fire",
+                  !blocker_stall_meta_detector_test_detect() &&
+                  blocker_stall_meta_detector_test_remedy_calls() == 0);
+    }
+
     /* ── NO-FIRE: H* advancing keeps resetting the frozen window ──────────── */
     {
         bmd_reset();

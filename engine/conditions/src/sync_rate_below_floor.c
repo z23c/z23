@@ -164,7 +164,7 @@ static void sr_capture_dominant_blocker(char *id_out, size_t id_cap,
     struct blocker_snapshot snaps[BLOCKER_CAP];
     int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
     const struct blocker_snapshot *dom = blocker_select_dominant(snaps, n);
-    if (!dom)
+    if (!dom || dom->capability_only)
         return;
     if (id_out)
         snprintf(id_out, id_cap, "%s", dom->id);

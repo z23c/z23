@@ -53,6 +53,7 @@ static void push_blockers(struct json_value *out,
                          snaps[i].deadline_rearm_count);
         json_push_kv_str(&child, "caused_by", snaps[i].caused_by);
         json_push_kv_str(&child, "cause_detail", snaps[i].cause_detail);
+        json_push_kv_bool(&child, "capability_only", snaps[i].capability_only);
         /* Hand-off: what the node attempts, or the decision a person owes.
          * `escape_action` above answers only "does the supervisor sweep
          * dispatch something"; it is empty for every condition-healed and
@@ -156,11 +157,17 @@ bool blocker_dump_state_json(struct json_value *out, const char *key)
      * down what the operator is supposed to decide. */
     int automatic_count = 0, human_count = 0;
     int standing_count = 0, undeclared_decision_count = 0;
+    int fault_count = 0, first_fault = -1;
     for (int i = 0; i < count; i++) {
         if (snaps[i].class >= 0 && snaps[i].class < 4)
             counts[snaps[i].class]++;
         if (snaps[i].escalated)
             escalated_count++;
+        if (!snaps[i].capability_only) {
+            if (first_fault < 0)
+                first_fault = i;
+            fault_count++;
+        }
         struct blocker_handoff h;
         (void)blocker_resolve_handoff(snaps[i].id, &h);
         if (h.kind == BLOCKER_HANDOFF_AUTOMATIC) {
@@ -194,7 +201,7 @@ bool blocker_dump_state_json(struct json_value *out, const char *key)
     push_causal_classes(out, snaps, count);
 
     char reason[288] = "";
-    if (count > 0) {
+    if (fault_count > 0) {
         /* Lead with the disposition, not just the count: "3 active, all
          * handed off to a person and standing for hours" and "3 active,
          * remedies running" are the same number and opposite situations. */
@@ -204,10 +211,11 @@ bool blocker_dump_state_json(struct json_value *out, const char *key)
                  "class=%s (%s)",
                  count, automatic_count, human_count, standing_count,
                  BLOCKER_STANDING_AGE_SECS,
-                 snaps[0].id, snaps[0].owner_subsystem,
-                 blocker_class_name((enum blocker_class)snaps[0].class),
-                 snaps[0].reason);
+                 snaps[first_fault].id, snaps[first_fault].owner_subsystem,
+                 blocker_class_name(
+                     (enum blocker_class)snaps[first_fault].class),
+                 snaps[first_fault].reason);
     }
-    diag_push_health(out, count == 0, reason);
+    diag_push_health(out, fault_count == 0, reason);
     return true;
 }

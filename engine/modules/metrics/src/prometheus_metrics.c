@@ -284,7 +284,7 @@ static double alert_rule_fetch_value(const struct metric_alert_rule *r)
     if (strcmp(r->event_name, "mirror_lag_critical") == 0)
         return (double)atomic_load(&g_mirror_lag_critical_seconds);
     if (strcmp(r->event_name, "blocker_permanent_active") == 0)
-        return (double)blocker_count_by_class(BLOCKER_PERMANENT);
+        return (double)blocker_count_fault_by_class(BLOCKER_PERMANENT);
     if (strcmp(r->event_name, "rss_high") == 0)
         return (double)atomic_load(&g_node_rss_mb_x100) / 100.0;
     if (strcmp(r->event_name, "header_gap_growing") == 0)
@@ -866,8 +866,9 @@ size_t metrics_prometheus_render_prometheus(char *buf, size_t cap)
      * Live counts per class + escape-dispatch total. The blocker
      * primitive's own JSON dumper is exposed through native diagnostics;
      * Prometheus gets the numeric gauges so dashboards can
-     * alert on class-level pressure (e.g. permanent>0 is always an
-     * operator-escalation event). */
+     * alert on class-level pressure. The permanent gauge counts every PERMANENT
+     * blocker, capability-only ones included; the permanent-blocker alert rule
+     * reads the count without them. */
     int active_total = blocker_count_active();
     int active_perm  = blocker_count_by_class(BLOCKER_PERMANENT);
     int active_trans = blocker_count_by_class(BLOCKER_TRANSIENT);

@@ -151,6 +151,12 @@ struct blocker_record {
      * are unaffected. Set via `blocker_set_with_cause`. */
     char     caused_by[BLOCKER_ID_MAX];              /* root-cause blocker id, or "" */
     char     cause_detail[BLOCKER_CAUSE_DETAIL_MAX]; /* small stable detail, or "" */
+    /* The blocker names one lost optional capability (for example creating
+     * shielded transactions), not a fault in chain authority. It stays listed
+     * and carries its remedy, but never hard-gates public serving and ranks
+     * below every other blocker as the dominant one. blocker_init clears it;
+     * only the producer that owns the capability sets it. */
+    bool     capability_only;
 };
 
 /* ── Reason-length contract ───────────────────────────────────────────
@@ -279,6 +285,7 @@ struct blocker_snapshot {
     int32_t  deadline_rearm_count;
     char     caused_by[BLOCKER_ID_MAX];              /* root-cause blocker id, or "" */
     char     cause_detail[BLOCKER_CAUSE_DETAIL_MAX]; /* small stable detail, or "" */
+    bool     capability_only;                  /* see blocker_record */
 };
 
 /* Copy up to `max` snapshots into `out`. Returns count actually written. */
@@ -317,6 +324,24 @@ const struct blocker_snapshot *blocker_select_dominant(
 
 /* Count of active blockers in a class. */
 int blocker_count_by_class(enum blocker_class c);
+
+/* Priority a capability-only blocker takes as a dominant-blocker candidate:
+ * below every class, so it is listed but never named ahead of a real fault. */
+#define BLOCKER_CAPABILITY_PRIORITY 500
+
+/* "Hard" blocker: PERMANENT or RESOURCE, and not capability-only. Public
+ * serving and the operator snapshot ask this question of a snapshot. */
+static inline bool blocker_snapshot_is_hard(const struct blocker_snapshot *b)
+{
+    return b && !b->capability_only &&
+           (b->class == BLOCKER_PERMANENT || b->class == BLOCKER_RESOURCE);
+}
+
+/* Count of active blockers in class `c` that are not capability-only (the
+ * class is chosen by the caller). The tip watchdog and the download-starvation
+ * condition use it with BLOCKER_PERMANENT only, so a RESOURCE blocker is not
+ * counted there, exactly as before capability-only existed. */
+int blocker_count_fault_by_class(enum blocker_class c);
 
 /* Total active blockers. */
 int blocker_count_active(void);

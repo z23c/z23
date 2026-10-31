@@ -537,6 +537,30 @@ static int test_blocker_permanent_active_rule(void)
     return failures;
 }
 
+static int test_capability_blocker_does_not_alert(void)
+{
+    int failures = 0;
+    TEST("metric_alerts: a capability-only blocker does not fire blocker_permanent_active") {
+        ma_reset_all();
+        ma_install_observer();
+        blocker_clear("test.metric_alert_capability");
+
+        struct blocker_record r;
+        ASSERT(blocker_init(&r, "test.metric_alert_capability", "test",
+                            BLOCKER_PERMANENT, "hermetic test"));
+        r.capability_only = true;
+        ASSERT(blocker_set(&r) >= 0);
+
+        metrics_prometheus_evaluate_alert_rules();
+        ASSERT(metrics_prometheus_alert_fire_count("blocker_permanent_active") == 0);
+        ASSERT(!ma_captured_contains("name=metric_alert.blocker_permanent_active"));
+
+        blocker_clear("test.metric_alert_capability");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_rss_high_rule(void)
 {
     int failures = 0;
@@ -918,6 +942,7 @@ int test_metric_alerts(void)
     failures += test_mirror_lag_high_rule();
     failures += test_mirror_lag_critical_rule();
     failures += test_blocker_permanent_active_rule();
+    failures += test_capability_blocker_does_not_alert();
     failures += test_rss_high_rule();
     failures += test_rss_tick();
     failures += test_rss_unavailable_episodes();

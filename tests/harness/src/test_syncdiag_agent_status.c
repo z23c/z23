@@ -1268,6 +1268,96 @@ static int syncdiag_cases_agent_status_edge_states(void)
     return failures;
 }
 
+static void syncdiag_set_blocker(struct operator_capture *capture, int i,
+                                 const char *id, bool capability_only)
+{
+    struct blocker_snapshot *b = &capture->blockers[i];
+    memset(b, 0, sizeof(*b));
+    snprintf(b->id, sizeof(b->id), "%s", id);
+    b->class = BLOCKER_PERMANENT;
+    b->capability_only = capability_only;
+    capture->blocker_count = i + 1;
+    capture->blocker_class_count[BLOCKER_PERMANENT] = i + 1;
+}
+
+static int syncdiag_cases_agent_status_capability_blocker(void)
+{
+    int failures = 0;
+
+    printf("api: operator snapshot ignores capability-only blockers... ");
+    {
+        struct operator_capture capture;
+        memset(&capture, 0, sizeof(capture));
+        bool ok = syncdiag_agent_status_edge_1(&capture);
+        capture.mirror.enabled = false;
+        syncdiag_set_blocker(&capture, 0, "shielded_spend_unavailable", true);
+        struct operator_verdict verdict = operator_snapshot_classify(&capture);
+        ok = ok && verdict.healthy && !verdict.operator_needed &&
+             strcmp(verdict.status, "healthy") == 0;
+        syncdiag_set_blocker(&capture, 1, "test.integrity_fault", false);
+        verdict = operator_snapshot_classify(&capture);
+        ok = ok && !verdict.healthy && verdict.operator_needed &&
+             strcmp(verdict.status, "operator_needed") == 0;
+        if (ok) printf("OK\n");
+        else    { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+static bool syncdiag_agent_warning_reasons_contain(struct rpc_table *tbl,
+                                                   const char *id)
+{
+    struct json_value params, result;
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&result);
+    bool found = false;
+    if (rpc_table_execute(tbl, "agent", &params, &result)) {
+        const char *w = json_get_str(json_get(json_get(&result, "health"),
+                                              "warning_reasons"));
+        found = w && strstr(w, id) != NULL;
+    }
+    json_free(&params);
+    json_free(&result);
+    return found;
+}
+
+static int syncdiag_cases_agent_status_capability_warning(void)
+{
+    int failures = 0;
+
+    printf("api: agent summary does not warn on a capability-only blocker... ");
+    {
+        struct rpc_table tbl;
+        rpc_table_init(&tbl);
+        register_event_rpc_commands(&tbl);
+        if (rpc_is_in_warmup(NULL, 0))
+            set_rpc_warmup_finished();
+        blocker_module_shutdown();
+        bool ok = blocker_module_init();
+
+        struct blocker_record r;
+        ok = ok && blocker_init(&r, "shielded_spend_unavailable",
+                                "crypto.params", BLOCKER_PERMANENT, "fixture");
+        r.capability_only = true;
+        ok = ok && blocker_set(&r) >= 0;
+        ok = ok && !syncdiag_agent_warning_reasons_contain(
+                       &tbl, "shielded_spend_unavailable");
+        blocker_clear("shielded_spend_unavailable");
+
+        /* The same shape without the flag still warns (the test can fail). */
+        ok = ok && blocker_init(&r, "test.agent_warn_probe", "test",
+                                BLOCKER_TRANSIENT, "fixture");
+        ok = ok && blocker_set(&r) >= 0;
+        ok = ok && syncdiag_agent_warning_reasons_contain(
+                       &tbl, "test.agent_warn_probe");
+        blocker_clear("test.agent_warn_probe");
+        if (ok) printf("OK\n");
+        else    { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
 int syncdiag_cases_agent_status(void)
 {
     int failures = 0;
@@ -1279,6 +1369,8 @@ int syncdiag_cases_agent_status(void)
     failures += syncdiag_cases_agent_status_operator_snapshot();
     failures += test_operator_snapshot_unavailable_capture();
     failures += syncdiag_cases_agent_status_edge_states();
+    failures += syncdiag_cases_agent_status_capability_blocker();
+    failures += syncdiag_cases_agent_status_capability_warning();
 
     return failures;
 }

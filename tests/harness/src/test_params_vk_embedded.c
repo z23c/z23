@@ -36,6 +36,8 @@
 
 #include "chain/chainparams.h"
 #include "chain/chainparamsbase.h"
+#include "config/boot.h"
+#include "config/boot_params_gate.h"
 #include "core/serialize.h"
 #include "primitives/transaction.h"
 #include "sapling/bls12_381.h"
@@ -46,6 +48,7 @@
 #include "sapling/sapling.h"
 #include "sapling/sapling_prover.h"
 #include "sapling/sprout.h"
+#include "util/blocker.h"
 #include "validation/check_transaction.h"
 #include "validation/contextual_check_tx.h"
 
@@ -415,6 +418,18 @@ static int vk_check_published_match_real_files(const char *real_dir)
     return failures;
 }
 
+/* True when the registry holds shielded_spend_unavailable flagged
+ * capability-only. */
+static bool vk_spend_blocker_is_capability_only(void)
+{
+    struct blocker_snapshot s[BLOCKER_CAP];
+    int n = blocker_snapshot_all(s, BLOCKER_CAP);
+    for (int i = 0; i < n; i++)
+        if (strcmp(s[i].id, "shielded_spend_unavailable") == 0)
+            return s[i].capability_only;
+    return false;
+}
+
 /* Section 1b's staged run on mainnet: the corrupt directory is refused,
  * nothing stays published, then the fallback installs and the A/B proof
  * pair runs. */
@@ -503,6 +518,33 @@ static int vk_refused_dir_mainnet_checks(const char *real_dir,
              sapling_vks_are_embedded());
     VK_CHECK("fallback does NOT arm proving",
              !zclassic_sapling_prover_is_ready());
+
+    /* The named loss of that capability is capability-only: visible, but
+     * never a fault in chain authority. */
+    blocker_clear("shielded_spend_unavailable");
+    VK_CHECK("a refused load names shielded_spend_unavailable as capability-only",
+             boot_params_gate_on_load_refused(scratch) &&
+             vk_spend_blocker_is_capability_only());
+    blocker_clear("shielded_spend_unavailable");
+
+    /* The absent-parameters case (a node with an empty parameter directory)
+     * names the same capability-only blocker. */
+    {
+        char empty[1200];
+        snprintf(empty, sizeof(empty), "%s/empty", scratch);
+        struct app_context ctx = {0};
+        ctx.params_dir = empty;
+        VK_CHECK("an empty parameter directory is a mkdir-able fixture",
+                 mkdir(empty, 0700) == 0 || errno == EEXIST);
+        VK_CHECK("absent parameters name shielded_spend_unavailable as "
+                 "capability-only",
+                 boot_params_gate_evaluate(&ctx, chain_params_get(), empty) ==
+                     BOOT_PARAMS_GATE_EMBEDDED &&
+                 vk_spend_blocker_is_capability_only());
+        blocker_clear("shielded_spend_unavailable");
+        VK_CHECK("the empty parameter fixture directory is removed",
+                 rmdir(empty) == 0);
+    }
 
     failures += vk_check_published_match_real_files(real_dir);
 

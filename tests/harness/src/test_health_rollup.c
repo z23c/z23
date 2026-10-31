@@ -61,6 +61,45 @@ static const struct json_value *hr_find_by_subsystem(
     return NULL;
 }
 
+static int hr_check_capability_only_blockers(void)
+{
+    int failures = 0;
+    blocker_reset_for_testing();
+    struct blocker_record r;
+    blocker_init(&r, "hr_cap_blocker", "health_rollup_test",
+                 BLOCKER_PERMANENT, "hr_cap_reason");
+    r.capability_only = true;
+    blocker_set(&r);
+
+    struct json_value v = {0};
+    json_set_object(&v);
+    bool ok = unhealthy_dump_state_json(&v, NULL);
+    HR_CHECK("capability-only: dump returns true", ok);
+    HR_CHECK("capability-only: blocker subsystem stays healthy",
+             hr_find_by_subsystem(json_get(&v, "unhealthy"),
+                                  "blocker") == NULL);
+    json_free(&v);
+
+    blocker_init(&r, "hr_real_blocker", "health_rollup_test",
+                 BLOCKER_TRANSIENT, "hr_real_reason");
+    blocker_set(&r);
+    json_set_object(&v);
+    ok = unhealthy_dump_state_json(&v, NULL);
+    const struct json_value *entry =
+        hr_find_by_subsystem(json_get(&v, "unhealthy"), "blocker");
+    const char *why = entry && json_get(entry, "reason")
+        ? json_get_str(json_get(entry, "reason")) : "";
+    HR_CHECK("capability-only: a real fault makes blocker unhealthy",
+             ok && entry != NULL);
+    HR_CHECK("capability-only: reason names the real fault, not the "
+             "capability row",
+             strstr(why, "hr_real_reason") != NULL &&
+             strstr(why, "hr_cap_reason") == NULL);
+    json_free(&v);
+    blocker_reset_for_testing();
+    return failures;
+}
+
 int test_health_rollup(void)
 {
     printf("\n=== health_rollup tests ===\n");
@@ -124,6 +163,8 @@ int test_health_rollup(void)
 
         json_free(&v);
     }
+
+    failures += hr_check_capability_only_blockers();
 
     /* ── (b) + (c): seed exactly one dumper unhealthy ──────────────── */
     {

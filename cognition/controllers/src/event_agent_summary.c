@@ -333,7 +333,7 @@ static void agent_fast_collect_blockers(struct agent_fast_snapshot *s)
                  blocker_class_name((enum blocker_class)dominant->class));
         s->hard_typed_blocker =
             api_blocker_hard_gates_public_serving(dominant);
-        if (!s->hard_typed_blocker)
+        if (!s->hard_typed_blocker && !dominant->capability_only)
             agent_fast_add_warning(s, dominant->id);
     }
     const struct blocker_snapshot *overdue_dominant = NULL;

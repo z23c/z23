@@ -546,6 +546,58 @@ static int sync_watchdog_case_starved_refill_detail(void)
     return failures;
 }
 
+static int sync_watchdog_case_starved_ignores_capability_blocker(void)
+{
+    int failures = 0;
+    {
+        /* A capability-only PERMANENT blocker (no shielded proving
+         * parameters) does not hold H*: a genuinely starved queue still
+         * starts an episode and kicks its refill. */
+        struct fake_clock clock;
+        fake_clock_install(&clock, 3200);
+        struct connman cm;
+        struct download_manager dm;
+        struct main_state ms;
+        reset_sync_watchdog(&cm, &dm, &ms);
+        zcl_mutex_destroy(&dm.cs);
+        dl_init(&dm);
+        sync_monitor_set_context(&cm, &dm, &ms);
+        bool ok = true;
+        register_download_queue_starved();
+
+        struct p2p_node peer = {0};
+        struct p2p_node *peers[1] = { &peer };
+        cm.manager.nodes = peers;
+        cm.manager.num_nodes = 1;
+        struct uint256 qh = {0};
+        qh.data[0] = 0xd5;
+        int32_t qheight = 78;
+        ok = ok && dl_queue_blocks(&dm, &qh, &qheight, 1) == 1;
+        sync_set_state(SYNC_HEADERS_DOWNLOAD, "setup");
+        sync_set_state(SYNC_BLOCKS_DOWNLOAD, "test");
+
+        struct blocker_record rec;
+        ok = ok && blocker_init(&rec, "shielded_spend_unavailable",
+                                "crypto.params", BLOCKER_PERMANENT, "fixture");
+        rec.capability_only = true;
+        ok = ok && blocker_set(&rec) >= 0;
+
+        condition_engine_tick();
+        fake_clock_set(&clock, 3321);
+        condition_engine_tick();
+        ok = ok && download_queue_starved_test_remedy_calls() == 1;
+        blocker_clear("shielded_spend_unavailable");
+
+        SYNC_WATCHDOG_CHECK(
+            "download queue starved still kicks refill with only a "
+            "capability-only blocker active", ok);
+        dl_free(&dm);
+        zcl_mutex_destroy(&dm.cs);
+        cleanup_sync_watchdog();
+    }
+    return failures;
+}
+
 static int sync_watchdog_case_starved_permanent_blocker(void)
 {
     int failures = 0;
@@ -1123,6 +1175,7 @@ int test_sync_watchdog_conditions(void)
     failures += sync_watchdog_case_sync_state_stuck();
     failures += sync_watchdog_case_starved_empty_window();
     failures += sync_watchdog_case_starved_refill_detail();
+    failures += sync_watchdog_case_starved_ignores_capability_blocker();
     failures += sync_watchdog_case_starved_permanent_blocker();
     failures += sync_watchdog_case_starved_defer_episode();
     failures += sync_watchdog_case_starved_orphaned_requests();

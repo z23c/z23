@@ -55,11 +55,12 @@ static bool download_work_pending(uint64_t inflight, uint64_t queued)
  * unresolvable page riding on top of the real, already-named wedge. Reuse
  * the SAME class query chain_tip_watchdog.c:wd_deterministic_stall_cause()
  * already uses to classify a stall as deterministic
- * (chain_tip_watchdog.c:304, `blocker_count_by_class(BLOCKER_PERMANENT)`) —
+ * (chain_tip_watchdog.c, `blocker_count_fault_by_class(BLOCKER_PERMANENT)`,
+ * which skips capability-only blockers) —
  * do not invent a second mechanism for the same fact. */
 static bool permanent_fold_blocker_active(void)
 {
-    return blocker_count_by_class(BLOCKER_PERMANENT) > 0;
+    return blocker_count_fault_by_class(BLOCKER_PERMANENT) > 0;
 }
 
 static bool detect_download_queue_starved(void)
@@ -358,7 +359,8 @@ static bool detail_download_queue_starved(struct json_value *out)
         struct blocker_snapshot snaps[BLOCKER_CAP];
         int n = blocker_snapshot_all(snaps, BLOCKER_CAP);
         for (int i = 0; i < n; i++) {
-            if (snaps[i].class == BLOCKER_PERMANENT) {
+            if (snaps[i].class == BLOCKER_PERMANENT &&
+                !snaps[i].capability_only) {
                 snprintf(blocker_id, sizeof(blocker_id), "%s", snaps[i].id);
                 snprintf(blocker_reason, sizeof(blocker_reason), "%s",
                          snaps[i].reason);

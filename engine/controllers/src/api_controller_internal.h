@@ -10,6 +10,10 @@
 
 #include "controllers/agent_operator_contracts.h"
 #include "controllers/api_controller.h"
+#include "controllers/agent_security_posture.h"
+#include "controllers/download_stats_json.h"
+#include "controllers/operator_needed_policy.h"
+#include "services/node_health_service.h"
 #include "controllers/transaction_type_catalog.h"
 #include "models/database.h"
 #include "util/blocker.h"
@@ -29,14 +33,36 @@ extern _Atomic int g_api_cache_thread_running;
  * optional worker or peer is currently perfect.  Permanent consensus/store
  * authority failures and resource failures hard-gate it; transient and
  * dependency blockers remain visible yellow warnings while the last locally
- * validated frontier stays servable. */
+ * validated frontier stays servable. A capability-only blocker (a lost
+ * optional capability such as creating shielded transactions) is a warning
+ * whatever its class. */
 static inline bool api_blocker_hard_gates_public_serving(
     const struct blocker_snapshot *blocker)
 {
-    return blocker &&
-        (blocker->class == BLOCKER_PERMANENT ||
-         blocker->class == BLOCKER_RESOURCE);
+    return blocker_snapshot_is_hard(blocker);
 }
+
+/* The blocker that decides the public status reason: the dominant one, only
+ * when it hard-gates public serving. */
+static inline const struct blocker_snapshot *api_authority_blocker(
+    const struct blocker_snapshot *snapshots, int count)
+{
+    const struct blocker_snapshot *dominant =
+        blocker_select_dominant(snapshots, count);
+    return api_blocker_hard_gates_public_serving(dominant) ? dominant : NULL;
+}
+
+struct api_node_summary_reason {
+    enum node_status_reason reason;
+    const char *primary;
+    const char *next_endpoint;
+};
+
+struct api_node_summary_reason api_node_summary_select_reason(
+    const struct node_health_snapshot *health,
+    const struct agent_security_posture *posture,
+    const struct blocker_snapshot *authority_blocker,
+    bool material_gap, const struct download_stats_snapshot *download);
 
 /* ── Shared context (defined in api_controller.c) ── */
 

@@ -375,8 +375,10 @@ static bool operator_snapshot_is_complete(
 static bool operator_snapshot_hard_blocker(
     const struct operator_capture *capture)
 {
-    return capture->blocker_class_count[BLOCKER_PERMANENT] > 0 ||
-           capture->blocker_class_count[BLOCKER_RESOURCE] > 0;
+    for (int i = 0; i < capture->blocker_count; i++)
+        if (blocker_snapshot_is_hard(&capture->blockers[i]))
+            return true;
+    return false;
 }
 
 static bool operator_snapshot_needs_operator(
@@ -427,6 +429,17 @@ static enum operator_verdict_class operator_snapshot_evidence_class(
     return operator_snapshot_progress_class(capture, verdict);
 }
 
+/* A capability-only blocker stays in the blocker list but does not degrade the
+ * verdict: the node validates and serves exactly as without it. */
+static bool operator_snapshot_has_fault_blocker(
+    const struct operator_capture *capture)
+{
+    for (int i = 0; i < capture->blocker_count; i++)
+        if (!capture->blockers[i].capability_only)
+            return true;
+    return false;
+}
+
 static enum operator_verdict_class operator_snapshot_service_class(
     const struct operator_capture *capture,
     const struct operator_verdict *verdict)
@@ -435,7 +448,7 @@ static enum operator_verdict_class operator_snapshot_service_class(
         return OPERATOR_VERDICT_NOT_SERVING;
     if (operator_mirror_same_height_hash_gap(capture))
         return OPERATOR_VERDICT_MIRROR_GAP;
-    if (capture->blocker_count > 0)
+    if (operator_snapshot_has_fault_blocker(capture))
         return OPERATOR_VERDICT_TYPED_BLOCKER;
     if (capture->conditions.active_count > 0 ||
         capture->conditions.unresolved_count > 0)

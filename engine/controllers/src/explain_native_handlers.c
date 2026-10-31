@@ -268,7 +268,8 @@ void explain_compose_sync(const struct explain_inputs *in,
         action = "wait for headers to validate a sync target, then re-run";
     else if (h.synced)
         action = "none — node is at the validated tip";
-    else if (b.dom && b.dom_id[0])
+    else if (b.dom && b.dom_id[0] &&
+             !json_get_bool(json_get(b.dom, "capability_only")))
         action = "clear the dominant blocker above (see `ops state "
                  "subsystem=blocker`)";
     else if (b.nh_stage[0])

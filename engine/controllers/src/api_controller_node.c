@@ -168,7 +168,7 @@ size_t api_serve_health(uint8_t *response, size_t response_max)
     const struct blocker_snapshot *dominant =
         blocker_select_dominant(blockers, blocker_count);
     const struct blocker_snapshot *authority_blocker =
-        api_blocker_hard_gates_public_serving(dominant) ? dominant : NULL;
+        api_authority_blocker(blockers, blocker_count);
     const struct blocker_snapshot *warning_blocker =
         dominant && !authority_blocker ? dominant : NULL;
     size_t public_warning_count = health.warning_count +
