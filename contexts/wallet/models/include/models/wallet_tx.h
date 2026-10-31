@@ -309,6 +309,9 @@ int db_sapling_note_list_unspent(struct node_db *ndb,
 /* Count of unspent notes (spent_txid IS NULL). 0 on error/empty. */
 int db_sapling_note_count_unspent(struct node_db *ndb);
 
+/* Count of every note row, spent or not. 0 on error/empty. */
+int db_sapling_note_count_all(struct node_db *ndb);
+
 struct db_sapling_witness_summary {
     int local_unspent_notes;
     int ready_notes;

@@ -9,8 +9,10 @@
 #include "command/native_command.h"            /* the ONE read-only db open */
 #include "keys/key.h"                          /* ecc_start_once */
 #include "models/database.h"
-#include "models/utxo.h"                       /* gap-scan history oracle */
+#include "models/store.h"                       /* chain tip for the birthday */
+#include "models/utxo.h"                /* gap-scan history oracle */
 #include "models/wallet_key.h"
+#include "models/wallet_tx.h"                    /* note count */
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
 #include "services/wallet_restore_service.h"   /* datadir single-writer proof */
@@ -98,8 +100,12 @@ struct zcl_result wallet_recovery_test_ensure_datadir(
  * So the same env-driven policy decides here. The lane/mint context boot
  * folds in does NOT apply: this is a one-shot offline CLI invocation, not a
  * declared unattended lane, and there is nobody to wedge. */
-static struct zcl_result wrc_at_rest_gate(void)
+static struct zcl_result wrc_at_rest_gate(const char *passphrase)
 {
+    /* A passphrase handed in by the caller (wallet creation reads it from
+     * standard input) decides the question: the keys are encrypted. */
+    if (passphrase && passphrase[0])
+        return ZCL_OK;
     switch (wallet_at_rest_creation_policy()) {
     case WALLET_AT_REST_ENCRYPTED:
         /* wallet_sqlite_flush_r wraps every key and the seed in a WKS1
@@ -165,9 +171,9 @@ static bool wrc_address_used(const struct key_id *id, void *ctx)
 
 /* Rebuild the key material the phrase determines, into an already-rooted
  * wallet. `chain` may be NULL (no history oracle available). */
-static struct zcl_result wrc_rebuild_keys(struct wallet *w,
-                                          struct node_db *chain,
-                                          struct wallet_recovery_report *out)
+static struct zcl_result wrc_rebuild_transparent(
+    struct wallet *w, struct node_db *chain,
+    struct wallet_recovery_report *out)
 {
     struct wallet_gap_scan scan;
     if (!wallet_derive_gap_limited(w, chain ? wrc_address_used : NULL,
@@ -181,6 +187,19 @@ static struct zcl_result wrc_rebuild_keys(struct wallet *w,
     out->change_keys_used = scan.internal_used;
     out->chain_history_consulted = scan.oracle_consulted;
     out->transparent_scan_truncated = scan.ceiling_hit;
+    return ZCL_OK;
+}
+
+static struct zcl_result wrc_rebuild_keys(struct wallet *w,
+                                          struct node_db *chain,
+                                          bool shielded_only,
+                                          struct wallet_recovery_report *out)
+{
+    if (!shielded_only) {
+        struct zcl_result tr = wrc_rebuild_transparent(w, chain, out);
+        if (!tr.ok)
+            return tr;
+    }
 
     /* The shielded side: a fixed lookahead, not a scan — there is no cheap
      * offline oracle for shielded use. See WALLET_RECOVERY_SHIELDED_LOOKAHEAD. */
@@ -352,6 +371,58 @@ struct zcl_result wallet_recovery_status(const char *datadir,
     return ZCL_OK;
 }
 
+/* ── target inspection and creation extras ───────────────────────── */
+
+/* Everything besides the transparent keys and the seed that makes a target
+ * a wallet: Sapling spending keys and received notes. */
+static void wrc_count_shielded_rows(struct node_db *ndb,
+                                    struct wallet_recovery_report *out)
+{
+    out->sapling_keys_before = db_sapling_key_count(ndb);
+    out->notes_before = db_sapling_note_count_all(ndb);
+}
+
+/* True when the target already is a wallet in any way: a seed row (readable
+ * or not), a transparent key, a Sapling key or a note. */
+static bool wrc_wallet_present(const struct wallet_recovery_report *out)
+{
+    return out->keys_before > 0 || out->seed_present_before ||
+           out->sapling_keys_before > 0 || out->notes_before > 0;
+}
+
+/* Register the caller's passphrase (or the creation-policy environment one)
+ * for the flush that follows, so the seed and keys are wrapped as they are
+ * written. Sets *loaded when the lock module now holds a passphrase. */
+static struct zcl_result wrc_load_passphrase(
+    const struct wallet_recovery_request *req, bool *loaded)
+{
+    const char *pass = req->passphrase;
+    *loaded = false;
+    if (!pass || !pass[0]) {
+        if (wallet_at_rest_creation_policy() != WALLET_AT_REST_ENCRYPTED)
+            return ZCL_OK;
+        pass = getenv("ZCL_WALLET_PASSPHRASE");
+    }
+    struct zcl_result ur = wallet_lock_unlock(NULL, NULL, pass);
+    if (!ur.ok)
+        return ZCL_ERR(-65, "could not load the recovery encryption key: %s",
+                       ur.message);
+    *loaded = true;
+    return ZCL_OK;
+}
+
+/* Store the chain tip this datadir holds as the wallet birthday. No tip
+ * (a datadir with no chain yet) records nothing and the wallet scans from
+ * the beginning, which is slower and never misses a payment. */
+static void wrc_record_birthday(const struct wallet_recovery_request *req,
+                                struct node_db *ndb,
+                                struct wallet_recovery_report *out)
+{
+    int64_t tip = req->record_birthday ? db_store_chain_tip_height(ndb) : 0;
+    out->birthday_recorded = tip > 0 && db_wallet_birthday_set(ndb, tip);
+    out->birthday_height = out->birthday_recorded ? tip : 0;
+}
+
 /* ── recover ─────────────────────────────────────────────────────── */
 
 struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
@@ -410,7 +481,7 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
     /* The at-rest decision, before a directory is created — a refusal that
      * arrives after the datadir exists has already changed the disk. */
     if (!req->dry_run) {
-        struct zcl_result pr = wrc_at_rest_gate();
+        struct zcl_result pr = wrc_at_rest_gate(req->passphrase);
         if (!pr.ok) {
             LOG_WARN(WRC_TAG, "refusing recovery: %s", pr.message);
             return pr;
@@ -532,10 +603,11 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
         out->seed_state_before = wallet_sqlite_sapling_seed_state(&ws, NULL);
         out->seed_present_before =
             wallet_seed_state_row_present(out->seed_state_before);
+        wrc_count_shielded_rows(&ndb, out);
     }
 
     /* Never write a second seed over a wallet that already has keys. */
-    if (out->keys_before > 0 || out->seed_present_before) {
+    if (wrc_wallet_present(out)) {
         if (have_ws) wallet_sqlite_close(&ws);
         if (ro_open) zcl_native_node_db_close_readonly(&ro_db, &ndb);
         wallet_restore_datadir_release(&wlock);
@@ -605,7 +677,7 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
      * in". */
     struct node_db *chain =
         (have_db && db_address_index_populated(&ndb)) ? &ndb : NULL;
-    rc = wrc_rebuild_keys(w, chain, out);
+    rc = wrc_rebuild_keys(w, chain, req->shielded_only, out);
     if (!rc.ok)
         goto done;
 
@@ -617,16 +689,9 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
     /* Creation policy may accept a one-shot environment passphrase, but that
      * variable must never auto-unlock the live wallet. Load it only across
      * this offline flush, then scrub and force-lock before returning. */
-    if (wallet_at_rest_creation_policy() == WALLET_AT_REST_ENCRYPTED) {
-        const char *pass = getenv("ZCL_WALLET_PASSPHRASE");
-        struct zcl_result ur = wallet_lock_unlock(NULL, NULL, pass);
-        if (!ur.ok) {
-            rc = ZCL_ERR(-65, "could not load the recovery encryption key: %s",
-                         ur.message);
-            goto done;
-        }
-        recovery_pass_loaded = true;
-    }
+    rc = wrc_load_passphrase(req, &recovery_pass_loaded);
+    if (!rc.ok)
+        goto done;
 
     /* One writer: the encryption-aware wallet_sqlite layer, in one
      * transaction, exactly as boot flushes a freshly minted keypool. */
@@ -638,6 +703,7 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
     }
     out->keys_after = db_wallet_key_count(&ndb);
     out->seed_installed = true;
+    wrc_record_birthday(req, &ndb, out);
     node_db_wal_checkpoint(&ndb);
     /* Again after the write: the checkpoint can recreate -wal/-shm, and
      * those hold the same key bytes as the database they front. */

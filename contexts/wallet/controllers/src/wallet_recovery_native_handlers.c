@@ -45,6 +45,7 @@
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
 #include "models/database.h"                   /* struct node_db (RO shim) */
+#include "services/wallet_create_service.h"
 #include "services/wallet_recovery_service.h"
 #include "support/cleanse.h"
 #include "util/boot_phase.h"
@@ -308,7 +309,8 @@ void zcl_native_handle_wallet_recovery_status(
  * caller's explicit target byte-for-byte before any filesystem operation. */
 static bool wrp_restore_datadir(const struct json_value *input,
                                 char *datadir, size_t datadir_cap,
-                                struct zcl_command_reply *reply)
+                                struct zcl_command_reply *reply,
+                                const char *leaf)
 {
     const char *dd = json_get_str(json_get(input, "datadir"));
     if (!dd || !dd[0]) {
@@ -320,13 +322,13 @@ static bool wrp_restore_datadir(const struct json_value *input,
                  "--input='{\"datadir\":\"/srv/zcl-recovered\"}'. It is "
                  "deliberately NOT your running node's datadir: recover "
                  "beside it, then move what you need",
-                 "core.wallet.recovery.restore");
+                 leaf);
         return false;
     }
     if (strlen(dd) >= datadir_cap) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "DATADIR_TOO_LONG",
                  "datadir is too long to use without changing its path",
-                 "core.wallet.recovery.restore");
+                 leaf);
         return false;
     }
     (void)snprintf(datadir, datadir_cap, "%s", dd);
@@ -352,7 +354,8 @@ void zcl_native_handle_wallet_recovery_restore(
     }
 
     char datadir[1024];
-    if (!wrp_restore_datadir(request->input, datadir, sizeof(datadir), reply))
+    if (!wrp_restore_datadir(request->input, datadir, sizeof(datadir), reply,
+                             "core.wallet.recovery.restore"))
         return;
 
     bool confirm = json_get_bool_or(request->input, "confirm", false);
@@ -444,6 +447,85 @@ void zcl_native_handle_wallet_recovery_restore(
     (void)json_push_kv_str(&reply->data, "stage", "committed");
     (void)json_push_kv_bool(&reply->data, "committed", true);
     (void)json_push_kv_bool(&reply->data, "recovered", rep.seed_installed);
+    reply->error.mutated = true;
+}
+
+/* ── core.wallet.create ────────────────────────────────────────────────
+ *
+ * A new wallet in an EMPTY datadir. The passphrase arrives only on standard
+ * input (`--input=-`), the way the other custody leaves take theirs, so it is
+ * never in argv or the environment. The 24-word phrase leaves in this reply
+ * and nowhere else: the service stores, logs and journals nothing, the
+ * registry keeps only latency for a reply, and this handler pushes the phrase
+ * after every other field so a failure path cannot carry it. */
+
+static const char *wrp_create_failure_code(int code, enum zcl_command_exit *ex)
+{
+    *ex = ZCL_COMMAND_EXIT_BLOCKED;
+    switch (code) {
+    case -61: return "DATADIR_LOCKED";
+    case -62: return "WALLET_ALREADY_PRESENT";
+    case -66: return "NODE_DB_UNREADABLE";
+    case -68: *ex = ZCL_COMMAND_EXIT_INVALID; return "PASSPHRASE_TOO_SHORT";
+    default:  *ex = ZCL_COMMAND_EXIT_FAILED; return "CREATE_FAILED";
+    }
+}
+
+static void wrp_push_created(struct zcl_command_reply *reply,
+                             const struct wallet_create_report *rep)
+{
+    const struct wallet_recovery_report *rec = &rep->recovery;
+    (void)json_push_kv_str(&reply->data, "datadir", rec->datadir);
+    (void)json_push_kv_str(&reply->data, "first_shielded_address",
+                           rec->first_shielded_address);
+    (void)json_push_kv_bool(&reply->data, "encrypted_at_rest", true);
+    (void)json_push_kv_int(&reply->data, "transparent_addresses",
+                           (int64_t)rec->keys_after);
+    (void)json_push_kv_bool(&reply->data, "birthday_recorded",
+                            rec->birthday_recorded);
+    if (rec->birthday_recorded)
+        (void)json_push_kv_int(&reply->data, "birthday_height",
+                               rec->birthday_height);
+    (void)json_push_kv_str(&reply->data, "phrase_shown_again",
+        "never. The phrase is not stored anywhere and no command can print "
+        "it again. Write it down now: it is the only backup");
+    (void)json_push_kv_str(&reply->data, "phrase_compatibility",
+        "these words work with this node only; other wallet software reads "
+        "the same words as a different, empty wallet");
+}
+
+void zcl_native_handle_wallet_create(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    wrp_select_chain_params_if_standalone();
+    if (!zcl_native_input_was_stdin()) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_DENIED, "STDIN_REQUIRED",
+                 "the passphrase is accepted only through --input=-; it is "
+                 "never taken from arguments or the environment",
+                 "core.wallet.create");
+        return;
+    }
+    char datadir[1024];
+    if (!wrp_restore_datadir(request->input, datadir, sizeof(datadir),
+                             reply, "core.wallet.create"))
+        return;
+    const char *passphrase =
+        json_get_str(json_get(request->input, "passphrase"));
+
+    struct wallet_create_request req = { .datadir = datadir,
+                                         .passphrase = passphrase };
+    struct wallet_create_report rep;
+    struct zcl_result r = wallet_create_run(&req, &rep);
+    if (!r.ok) {
+        enum zcl_command_exit ex;
+        const char *code = wrp_create_failure_code(r.code, &ex);
+        wnh_fail(reply, ex, code, r.message, datadir);
+        wallet_create_report_cleanse(&rep);
+        return;
+    }
+    wrp_push_created(reply, &rep);
+    (void)json_push_kv_str(&reply->data, "phrase", rep.phrase);
+    wallet_create_report_cleanse(&rep);
     reply->error.mutated = true;
 }
 

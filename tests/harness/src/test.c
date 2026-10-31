@@ -2055,6 +2055,8 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_wallet_lock_shielded();
     *failures += test_wallet_diversified_receive();
     *failures += test_simnet_wallet_diversified_send();
+    { extern int test_wallet_create(void);
+      *failures += test_wallet_create(); }
     { extern int test_hstar_integrity(void);
       *failures += test_hstar_integrity(); }
     { extern int test_install_verb_warm(void);

@@ -106,6 +106,20 @@ Two typed commands read and use this, both `AUTH_OWNER`:
   `ZCL_RECOVERY_PHRASE`. Rebuilding installs spending keys, so a rescan over
   block bodies is needed afterwards to see the notes.
 
+`core wallet create` makes a new shielded-only wallet for the phone. It is
+`AUTH_OWNER`, local, and never available to agents or MCP. Send
+`{"datadir","passphrase"}` on standard input with `--input=-`; a passphrase
+in argv or the environment is refused (`STDIN_REQUIRED`). The datadir must be
+empty and unheld by a node. The reply carries a 24-word phrase **once**: it is
+not stored, logged or journaled, and no command prints it again. The seed and
+Sapling keys are written under the passphrase (WKS1, WKD1) from the first
+write, at least 12 bytes. No transparent address is made. The datadir's chain
+tip is stored as the wallet birthday (`wallet_birthday_height` in `node_state`)
+and scans start 100 blocks below it. Any existing seed, key or note refuses
+the command with `WALLET_ALREADY_PRESENT`; it never overwrites or merges.
+Boot recognises a seeded wallet with no transparent key and does not mint a
+keypool over it. `tests/harness/src/test_wallet_create.c` holds the proof.
+
 ---
 
 ## 3. What is encrypted, with what

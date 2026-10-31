@@ -231,6 +231,7 @@ static const struct contract_row contract_rows[] = {
     { "fleet.link.probe", false }, { "fleet.steer.deliver", true },
     { "fleet.steer.drop", true }, { "fleet.vitals.sample", false },
     { "core.epoch.anchor", true }, { "core.wallet.address.label", true },
+    { "core.wallet.create", true },
     { "core.wallet.recovery.restore", true },
     { "core.wallet.security.encrypt", true },
     { "core.wallet.security.lock", false }, { "vault.intent.cancel", false },

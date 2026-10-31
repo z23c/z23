@@ -28,6 +28,16 @@ int wallet_scan_blocks(struct node_db *ndb,
                        int start_height,
                        int end_height);
 
+/* Blocks kept below a wallet birthday when scanning, so a reorganisation of
+ * the chain the wallet was created on cannot hide an early payment. */
+#define WALLET_SCAN_BIRTHDAY_MARGIN 100
+
+/* The height a scan really starts at: `start_height`, raised to the wallet
+ * birthday less the margin when the wallet has a birthday. No birthday (an old
+ * or restored wallet) leaves the request unchanged. wallet_scan_blocks applies
+ * this to every caller. */
+int wallet_scan_start_height(struct node_db *ndb, int start_height);
+
 /* OS-S2 #4 Pass-1 file-match cache (exposed for unit tests). */
 
 /* FNV-1a fold over every live key/script id + counts. Deterministic for a

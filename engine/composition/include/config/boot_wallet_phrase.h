@@ -154,4 +154,10 @@ void boot_wallet_creation_blocked(void);
  * it was found: legacy random key generation, unchanged derivation. */
 void boot_wallet_adopt_seed_if_it_governs(struct wallet *w);
 
+/* True when the wallet database holds a seed row, readable or not. A wallet
+ * made by `core wallet create` has a seed and no transparent key, so a key
+ * count of zero does not make it a first run: minting a keypool over it
+ * would draw a second seed. */
+bool boot_wallet_seed_row_present(struct wallet_sqlite *ws);
+
 #endif /* ZCL_CONFIG_BOOT_WALLET_PHRASE_H */

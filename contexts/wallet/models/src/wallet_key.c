@@ -233,6 +233,25 @@ int db_sapling_key_count(struct node_db *ndb)
     AR_QUERY_COUNT_SQL(ndb, "SELECT COUNT(*) FROM wallet_sapling_keys");
 }
 
+#define WALLET_BIRTHDAY_STATE_KEY "wallet_birthday_height"
+
+bool db_wallet_birthday_get(struct node_db *ndb, int64_t *height)
+{
+    int64_t h = 0;
+    if (!ndb || !ndb->open || !height ||
+        !node_db_state_get_int(ndb, WALLET_BIRTHDAY_STATE_KEY, &h) || h < 0)
+        return false;
+    *height = h;
+    return true;
+}
+
+bool db_wallet_birthday_set(struct node_db *ndb, int64_t height)
+{
+    if (!ndb || !ndb->open || height < 0)
+        return false;
+    return node_db_state_set_int(ndb, WALLET_BIRTHDAY_STATE_KEY, height);
+}
+
 /* ── Wallet Seed ──────────────────────────────────────────────── *
  * There is no db_wallet_seed_save: wallet_seed has a single writer,
  * the encryption-aware wallet_sqlite layer. The read side stays. */

@@ -1416,6 +1416,34 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_wallet_recovery_restore)
 ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.create", "core.wallet", "",
+    "Create a new private wallet and show its 24 words once",
+    /* KEEP THIS UNDER BUDGET (see core.wallet.recovery.restore above). */
+    "Creates a wallet in an EMPTY datadir while no node holds it: a 24-word "
+    "BIP39 phrase drawn from the system random source derives the seed the "
+    "same way a restore does, so the same words rebuild the same shielded "
+    "addresses. Send {\"datadir\",\"passphrase\"} on standard input with "
+    "--input=- and nothing else: the passphrase (at least 12 bytes) is never "
+    "taken from arguments or the environment. The seed and Sapling keys are "
+    "encrypted under it from the first write. No transparent address is "
+    "made. The chain tip the datadir holds is stored as the wallet "
+    "birthday, and scans start there. The phrase is in this reply ONCE: it "
+    "is never stored, logged or journaled, and no command prints it again. "
+    "Refuses WALLET_ALREADY_PRESENT if the datadir holds any seed, key or "
+    "note, and DATADIR_LOCKED while a node holds it; it never overwrites or "
+    "merges. Owner only, local only, never available to agents or MCP.",
+    0, "wallet,create,phrase,seed,mnemonic,shielded",
+    "zcl.wallet_create.input.v1", "zcl.wallet_create.v1",
+    "datadir,passphrase", "",
+    "z23 core wallet create --input=-",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_create)
+ZCL_COMMAND_READY_COMMAND(
     "core.wallet.rescan-witnesses", "core.wallet", "",
     "Rebuild Sapling witnesses for unspent notes",
     "The rescanwitnesses result from the running node at call time "

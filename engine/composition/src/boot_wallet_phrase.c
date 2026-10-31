@@ -415,3 +415,11 @@ void boot_wallet_adopt_seed_if_it_governs(struct wallet *w)
     if (w && w->sapling_keys.has_seed)
         (void)wallet_hd_adopt_seed(w, w->sapling_keys.seed);
 }
+
+bool boot_wallet_seed_row_present(struct wallet_sqlite *ws)
+{
+    if (!ws || !ws->open)
+        return false;
+    return wallet_seed_state_row_present(
+        wallet_sqlite_sapling_seed_state(ws, NULL));
+}

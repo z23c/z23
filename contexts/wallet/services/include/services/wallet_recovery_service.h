@@ -53,6 +53,10 @@ struct wallet_recovery_request {
     const char *phrase;    /* BIP39 recovery phrase; required. Never stored. */
     const char *datadir;   /* target datadir; required */
     bool        dry_run;   /* derive and report, write nothing */
+    /* Wallet creation (wallet_create_service) drives this same writer. */
+    const char *passphrase;     /* at-rest passphrase; NULL = environment policy */
+    bool        shielded_only;  /* mint no transparent key */
+    bool        record_birthday; /* store the datadir chain tip as the birthday */
 };
 
 struct wallet_recovery_report {
@@ -90,6 +94,10 @@ struct wallet_recovery_report {
     uint32_t shielded_children;     /* ZIP32 children 0..n-1 */
     bool     chain_history_consulted; /* a chain was available to scan */
     bool     transparent_scan_truncated;
+    bool     birthday_recorded;
+    int64_t  birthday_height;       /* valid when birthday_recorded */
+    int64_t  sapling_keys_before;   /* wallet_sapling_keys rows in the target */
+    int64_t  notes_before;          /* wallet_sapling_notes rows in the target */
 };
 
 /* Recover a wallet from `req->phrase` into `req->datadir`.

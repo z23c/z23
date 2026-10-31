@@ -446,6 +446,12 @@ int db_sapling_note_count_unspent(struct node_db *ndb)
         "SELECT COUNT(*) FROM wallet_sapling_notes WHERE spent_txid IS NULL");
 }
 
+int db_sapling_note_count_all(struct node_db *ndb)
+{
+    if (!ndb || !ndb->open) return 0;
+    AR_QUERY_COUNT_SQL(ndb, "SELECT COUNT(*) FROM wallet_sapling_notes");
+}
+
 bool db_sapling_note_witness_summary(
     struct node_db *ndb, int tip_height,
     struct db_sapling_witness_summary *out)

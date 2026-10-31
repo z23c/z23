@@ -20,6 +20,7 @@
 #include "controllers/wallet_scan.h"
 #include "controllers/sync_controller.h"
 #include "services/wallet_scan_service.h"
+#include "models/wallet_key.h"
 #include "models/wallet_tx.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
@@ -28,6 +29,7 @@
 #include "wallet/keystore.h"
 #include "core/serialize.h"
 #include "util/util.h"
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -333,6 +335,15 @@ static int wallet_scan_count_matched(const bool *file_has_match, int num_files)
     return matched_files;
 }
 
+int wallet_scan_start_height(struct node_db *ndb, int start_height)
+{
+    int64_t birthday = 0;
+    if (!db_wallet_birthday_get(ndb, &birthday) || birthday > INT_MAX)
+        return start_height;
+    int64_t lowest = birthday - WALLET_SCAN_BIRTHDAY_MARGIN;
+    return lowest > start_height ? (int)lowest : start_height;
+}
+
 /* --- Main entry point --- */
 
 int wallet_scan_blocks(struct node_db *ndb,
@@ -356,6 +367,8 @@ int wallet_scan_blocks(struct node_db *ndb,
     GetDataDir(true, net_dir, sizeof(net_dir));
     if (net_dir[0])
         datadir = net_dir;
+
+    start_height = wallet_scan_start_height(ndb, start_height);
 
     /* range fast-path. Empty range = nothing to do. */
     if (start_height > end_height) {
