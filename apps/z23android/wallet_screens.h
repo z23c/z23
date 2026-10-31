@@ -36,7 +36,7 @@
  *   receive  {"address":"zs1..."} from `core wallet shielded receive`. A node without the command gets one
  *            sentence saying this build cannot make a new address, and no New address button.
  *   history  zcl.wallet_history.v1: entries[] of {txid, status (confirmed | pending), time, direction
- *            (received | sent | internal | unknown), kind (private | public), amount_zat | null,
+ *            (received | sent | internal | unknown), amount_zat | null,
  *            memo_present, fully_shielded}. An entry is called private only when the node says fully_shielded
  *            is true (every input and output shielded) and public when it says false; null or a missing
  *            field makes no claim of privacy, count and next_cursor (a string, or null on the last page).
@@ -89,9 +89,9 @@ struct wallet_screen {
 
 struct wallet_env {
     void *ctx;
-    /* Turns on, or off, the protection that blanks the screen in Recents and screenshots. Called on the
-     * UI thread. Must report true only after reading the protection back as in force: on false nothing is
-     * shown and no command runs. */
+    /* Turns on, or off, the window protection that keeps the wallet out of screenshots, recordings, Recents,
+     * overlays and screen readers. Called on the UI thread. Must report true only when every protection is
+     * in force: on false nothing is shown and no command runs. */
     bool (*secure)(void *ctx, bool on);
     /* Runs one wallet command and leaves its JSON reply in out: "summary", "fleet", "latest", "receive",
      * "history" with arg the cursor of the page ("" for the newest) or "detail" with

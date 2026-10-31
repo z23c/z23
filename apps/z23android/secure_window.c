@@ -66,7 +66,7 @@ static jobject window_of(JNIEnv *env, ANativeActivity *activity)
 {
     return zj_object_property(env, activity->clazz, "getWindow", "()Landroid/view/Window;");
 }
-/* Reads an int field of the window attributes ("flags" or "privateFlags"). */
+/* Reads the int field "flags" of the window attributes. */
 static bool window_attribute(JNIEnv *env, jobject window, const char *name, jint *value)
 {
     jobject attributes = zj_object_property(env, window, "getAttributes", "()Landroid/view/WindowManager$LayoutParams;");

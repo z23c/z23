@@ -283,6 +283,7 @@ static void history_items(struct wallet_screen *s)
     title(s, "History");
     if (d->history_pending) line(s, "Loading…");
     else if (d->history_failed) note(s, "History could not be read. Check that your node is running, then open History again.");
+    else if (!d->rows && d->page) line(s, "No older transactions.");
     else if (!d->rows) line(s, !d->funds_loaded || !d->view.known ? "None found so far." :
                               d->view.scanning ? "None found so far. The wallet is still scanning the chain." :
                               !d->view.current ? "None found so far. The node is not up to date." : "No transactions yet.");

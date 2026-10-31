@@ -605,6 +605,9 @@ static void test_history_pages(void)
     CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_OLDER) < 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEWER) >= 0);
     tap(WALLET_ACT_NEWER, 0, WALLET_STAY);
     CHECK(count_ops("history") == 3 && !fake.args[fake.op_count - 1][0] && has("Sent ·"));
+    fake.history[1] = PAGE("", "0", "null");                                            /* an older page with nothing on it */
+    tap(WALLET_ACT_OLDER, 0, WALLET_STAY);
+    CHECK(has("No older transactions.") && !has("No transactions yet.") && !has("None found"));
     wallet_screens_close();
 }
 
