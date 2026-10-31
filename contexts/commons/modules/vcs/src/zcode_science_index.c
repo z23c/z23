@@ -338,6 +338,100 @@ static enum index_add_status index_add_review(
     return INDEX_ADD_OK;
 }
 
+/* What index_consider_wire found. index_consider_object maps each code to
+ * its log line. */
+enum index_outcome {
+    INDEX_OUT_NONE,
+    INDEX_OUT_UNREADABLE,
+    INDEX_OUT_STUDY_INVALID,
+    INDEX_OUT_STUDY_CAPPED,
+    INDEX_OUT_RESULT_V1_INVALID,
+    INDEX_OUT_RESULT_V2_INVALID,
+    INDEX_OUT_REPRODUCTION_INVALID,
+    INDEX_OUT_REPRODUCTION_CAPPED,
+    INDEX_OUT_FINDINGS_INVALID,
+    INDEX_OUT_FINDINGS_CAPPED,
+    INDEX_OUT_VOTE_INVALID,
+    INDEX_OUT_VOTE_CAPPED,
+    INDEX_OUT_REVIEW_INVALID,
+    INDEX_OUT_REVIEW_CAPPED,
+};
+
+/* A cap is reported once per index build: the first capped object yields
+ * its code; later ones yield none. The caller sets the flag after it logs. */
+static enum index_outcome index_outcome_of(enum index_add_status st,
+                                           enum index_outcome invalid,
+                                           enum index_outcome capped,
+                                           bool *cap_logged)
+{
+    if (st == INDEX_ADD_INVALID)
+        return invalid;
+    if (st == INDEX_ADD_CAPPED) {
+        if (*cap_logged)
+            return INDEX_OUT_NONE;
+        return capped;
+    }
+    return INDEX_OUT_NONE;
+}
+
+static enum index_outcome index_add_wire(
+    struct vcs_zcode_science_index *index, uint8_t *wire, size_t len,
+    const uint8_t address[32], bool *cap_logged)
+{
+    switch (index_wire_kind(wire, len)) {
+    case INDEX_WIRE_STUDY:
+        return index_outcome_of(
+            index_add_study(index, wire, len, address),
+            INDEX_OUT_STUDY_INVALID, INDEX_OUT_STUDY_CAPPED, cap_logged);
+    case INDEX_WIRE_RESULT_V1:
+        return index_outcome_of(
+            index_add_result_v1(index, cap_logged, wire, len, address),
+            INDEX_OUT_RESULT_V1_INVALID, INDEX_OUT_NONE, cap_logged);
+    case INDEX_WIRE_RESULT_V2:
+        return index_outcome_of(
+            index_add_result_v2(index, cap_logged, wire, len, address),
+            INDEX_OUT_RESULT_V2_INVALID, INDEX_OUT_NONE, cap_logged);
+    case INDEX_WIRE_REPRODUCTION:
+        return index_outcome_of(
+            index_add_reproduction(index, wire, len, address),
+            INDEX_OUT_REPRODUCTION_INVALID, INDEX_OUT_REPRODUCTION_CAPPED,
+            cap_logged);
+    case INDEX_WIRE_FINDINGS:
+        return index_outcome_of(
+            index_add_findings(index, wire, len, address),
+            INDEX_OUT_FINDINGS_INVALID, INDEX_OUT_FINDINGS_CAPPED, cap_logged);
+    case INDEX_WIRE_VOTE:
+        return index_outcome_of(
+            index_add_vote(index, wire, len, address),
+            INDEX_OUT_VOTE_INVALID, INDEX_OUT_VOTE_CAPPED, cap_logged);
+    case INDEX_WIRE_REVIEW:
+        return index_outcome_of(
+            index_add_review(index, wire, len, address),
+            INDEX_OUT_REVIEW_INVALID, INDEX_OUT_REVIEW_CAPPED, cap_logged);
+    default:
+        return INDEX_OUT_NONE;
+    }
+}
+
+/* On a loaded object *wire_out and *len_out are set; the caller frees the
+ * wire after it has logged. */
+static enum index_outcome index_consider_wire(
+    const char *repo_root, const char *hex64,
+    struct vcs_zcode_science_index *index, bool *cap_logged,
+    uint8_t **wire_out, size_t *len_out)
+{
+    uint8_t address[32];
+    if (!zcl_hex_decode_lower(hex64, address, 32))
+        return INDEX_OUT_NONE;
+    uint8_t *wire = NULL;
+    size_t len = 0;
+    if (vcs_object_load_raw(repo_root, address, &wire, &len) != 0)
+        return INDEX_OUT_UNREADABLE;
+    *wire_out = wire;
+    *len_out = len;
+    return index_add_wire(index, wire, len, address, cap_logged);
+}
+
 /* Wrong size or wrong magic means the object is another CAS citizen and is
  * skipped silently; right magic with a failed parse/validation/root check
  * is corruption and is logged. */
@@ -345,92 +439,68 @@ static void index_consider_object(const char *repo_root, const char *hex64,
                                   struct vcs_zcode_science_index *index,
                                   bool *cap_logged)
 {
-    uint8_t address[32];
-    if (!zcl_hex_decode_lower(hex64, address, 32))
-        return;
     uint8_t *wire = NULL;
     size_t len = 0;
-    if (vcs_object_load_raw(repo_root, address, &wire, &len) != 0) {
+    switch (index_consider_wire(repo_root, hex64, index, cap_logged,
+                                &wire, &len)) {
+    case INDEX_OUT_UNREADABLE:
         LOG_ERROR(INDEX_LOG, "unreadable CAS object %.8s", hex64);
-        return;
-    }
-    enum index_wire_kind kind = index_wire_kind(wire, len);
-    if (kind == INDEX_WIRE_STUDY) {
-        enum index_add_status st = index_add_study(index, wire, len, address);
-        if (st == INDEX_ADD_INVALID) {
-            LOG_ERROR(INDEX_LOG, "skipping study-magic object %.8s: "
-                      "parse, validation, or root agreement failed", hex64);
-        } else if (st == INDEX_ADD_CAPPED) {
-            if (!*cap_logged) {
-                LOG_ERROR(INDEX_LOG, "study index cap %u reached",
-                          VCS_ZCODE_SCIENCE_INDEX_MAX_STUDIES);
-                *cap_logged = true;
-            }
-        }
-    } else if (kind == INDEX_WIRE_RESULT_V1) {
-        enum index_add_status st =
-            index_add_result_v1(index, cap_logged, wire, len, address);
-        if (st == INDEX_ADD_INVALID) {
-            LOG_ERROR(INDEX_LOG, "skipping result-v1-magic object %.8s: "
-                      "parse, validation, or root agreement failed", hex64);
-        }
-    } else if (kind == INDEX_WIRE_RESULT_V2) {
-        enum index_add_status st =
-            index_add_result_v2(index, cap_logged, wire, len, address);
-        if (st == INDEX_ADD_INVALID) {
-            LOG_ERROR(INDEX_LOG, "skipping result-v2-magic object %.8s: "
-                      "parse, validation, or root agreement failed", hex64);
-        }
-    } else if (kind == INDEX_WIRE_REPRODUCTION) {
-        enum index_add_status st =
-            index_add_reproduction(index, wire, len, address);
-        if (st == INDEX_ADD_INVALID) {
-            LOG_ERROR(INDEX_LOG, "skipping reproduction-magic object %.8s: "
-                      "parse, validation, or root agreement failed", hex64);
-        } else if (st == INDEX_ADD_CAPPED) {
-            if (!*cap_logged) {
-                LOG_ERROR(INDEX_LOG, "reproduction index cap %u reached",
-                          VCS_ZCODE_SCIENCE_INDEX_MAX_REPRODUCTIONS);
-                *cap_logged = true;
-            }
-        }
-    } else if (kind == INDEX_WIRE_FINDINGS) {
-        enum index_add_status st =
-            index_add_findings(index, wire, len, address);
-        if (st == INDEX_ADD_INVALID) {
-            LOG_ERROR(INDEX_LOG, "skipping findings-magic object %.8s: "
-                      "parse, validation, or root agreement failed", hex64);
-        } else if (st == INDEX_ADD_CAPPED) {
-            if (!*cap_logged) {
-                LOG_ERROR(INDEX_LOG, "findings index cap %u reached",
-                          VCS_ZCODE_SCIENCE_INDEX_MAX_FINDINGS);
-                *cap_logged = true;
-            }
-        }
-    } else if (kind == INDEX_WIRE_VOTE) {
-        enum index_add_status st = index_add_vote(index, wire, len, address);
-        if (st == INDEX_ADD_INVALID) {
-            LOG_ERROR(INDEX_LOG, "skipping vote-magic object %.8s: "
-                      "parse, validation, or id agreement failed", hex64);
-        } else if (st == INDEX_ADD_CAPPED) {
-            if (!*cap_logged) {
-                LOG_ERROR(INDEX_LOG, "vote index cap %u reached",
-                          VCS_ZCODE_SCIENCE_INDEX_MAX_VOTES);
-                *cap_logged = true;
-            }
-        }
-    } else if (kind == INDEX_WIRE_REVIEW) {
-        enum index_add_status st = index_add_review(index, wire, len, address);
-        if (st == INDEX_ADD_INVALID) {
-            LOG_ERROR(INDEX_LOG, "skipping review-magic object %.8s: "
-                      "parse, validation, or root agreement failed", hex64);
-        } else if (st == INDEX_ADD_CAPPED) {
-            if (!*cap_logged) {
-                LOG_ERROR(INDEX_LOG, "review index cap %u reached",
-                          VCS_ZCODE_SCIENCE_INDEX_MAX_REVIEWS);
-                *cap_logged = true;
-            }
-        }
+        break;
+    case INDEX_OUT_STUDY_INVALID:
+        LOG_ERROR(INDEX_LOG, "skipping study-magic object %.8s: "
+                  "parse, validation, or root agreement failed", hex64);
+        break;
+    case INDEX_OUT_STUDY_CAPPED:
+        LOG_ERROR(INDEX_LOG, "study index cap %u reached",
+                  VCS_ZCODE_SCIENCE_INDEX_MAX_STUDIES);
+        *cap_logged = true;
+        break;
+    case INDEX_OUT_RESULT_V1_INVALID:
+        LOG_ERROR(INDEX_LOG, "skipping result-v1-magic object %.8s: "
+                  "parse, validation, or root agreement failed", hex64);
+        break;
+    case INDEX_OUT_RESULT_V2_INVALID:
+        LOG_ERROR(INDEX_LOG, "skipping result-v2-magic object %.8s: "
+                  "parse, validation, or root agreement failed", hex64);
+        break;
+    case INDEX_OUT_REPRODUCTION_INVALID:
+        LOG_ERROR(INDEX_LOG, "skipping reproduction-magic object %.8s: "
+                  "parse, validation, or root agreement failed", hex64);
+        break;
+    case INDEX_OUT_REPRODUCTION_CAPPED:
+        LOG_ERROR(INDEX_LOG, "reproduction index cap %u reached",
+                  VCS_ZCODE_SCIENCE_INDEX_MAX_REPRODUCTIONS);
+        *cap_logged = true;
+        break;
+    case INDEX_OUT_FINDINGS_INVALID:
+        LOG_ERROR(INDEX_LOG, "skipping findings-magic object %.8s: "
+                  "parse, validation, or root agreement failed", hex64);
+        break;
+    case INDEX_OUT_FINDINGS_CAPPED:
+        LOG_ERROR(INDEX_LOG, "findings index cap %u reached",
+                  VCS_ZCODE_SCIENCE_INDEX_MAX_FINDINGS);
+        *cap_logged = true;
+        break;
+    case INDEX_OUT_VOTE_INVALID:
+        LOG_ERROR(INDEX_LOG, "skipping vote-magic object %.8s: "
+                  "parse, validation, or id agreement failed", hex64);
+        break;
+    case INDEX_OUT_VOTE_CAPPED:
+        LOG_ERROR(INDEX_LOG, "vote index cap %u reached",
+                  VCS_ZCODE_SCIENCE_INDEX_MAX_VOTES);
+        *cap_logged = true;
+        break;
+    case INDEX_OUT_REVIEW_INVALID:
+        LOG_ERROR(INDEX_LOG, "skipping review-magic object %.8s: "
+                  "parse, validation, or root agreement failed", hex64);
+        break;
+    case INDEX_OUT_REVIEW_CAPPED:
+        LOG_ERROR(INDEX_LOG, "review index cap %u reached",
+                  VCS_ZCODE_SCIENCE_INDEX_MAX_REVIEWS);
+        *cap_logged = true;
+        break;
+    default:
+        break;
     }
     free(wire);
 }
