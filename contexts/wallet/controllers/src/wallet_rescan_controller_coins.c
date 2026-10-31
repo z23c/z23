@@ -8,6 +8,118 @@
 
 #include "controllers/wallet_rescan_controller_internal.h"
 
+/* Check whether a (txid, vout) pair is present in the tracked UTXO list. */
+static bool utxo_list_has(const struct db_wallet_utxo *tracked, int tracked_count,
+                          const uint8_t *txid, uint32_t vout)
+{
+    for (int j = 0; j < tracked_count; j++) {
+        if (memcmp(tracked[j].txid, txid, 32) == 0 &&
+            tracked[j].vout == vout)
+            return true;
+    }
+    return false;
+}
+
+/* Check chainstate whether the given output is an unspent coin. */
+static bool chainstate_output_available(struct wallet_rpc_context *ctx,
+                                        const struct uint256 *txid, size_t vi)
+{
+    struct coins c;
+    coins_init(&c);
+    bool in_chain = coins_view_cache_get_coins(ctx->coins_tip, txid, &c);
+    bool available = in_chain &&
+        coins_is_available(&c, (unsigned int)vi);
+    coins_free(&c);
+    return available;
+}
+
+/* Append one untracked-but-unspent transparent output to the JSON array. */
+static void append_untracked_entry(struct json_value *untracked_arr,
+                                   const struct wallet_tx *wtx, size_t vi,
+                                   const struct tx_out *out,
+                                   const struct tx_destination *dest)
+{
+    char addr[128];
+    wallet_encode_destination(dest, addr, sizeof(addr));
+
+    char txid_hex[65];
+    uint256_get_hex(&wtx->tx.hash, txid_hex);
+
+    struct json_value entry = {0};
+    json_set_object(&entry);
+    json_push_kv_str(&entry, "txid", txid_hex);
+    json_push_kv_int(&entry, "vout", (int64_t)vi);
+    json_push_kv_str(&entry, "address", addr);
+
+    char amt[32];
+    format_amount(out->value, amt, sizeof(amt));
+    json_push_kv_str(&entry, "amount", amt);
+    json_push_kv_int(&entry, "confirmations",
+                      (int64_t)wtx->confirms);
+    json_push_back(untracked_arr, &entry);
+    json_free(&entry);
+}
+
+/* Append one sapling note to the shielded-notes JSON array. */
+static void append_sapling_note_entry(struct json_value *z_arr,
+                                      const struct db_sapling_note *n,
+                                      int64_t nval, bool is_spent)
+{
+    struct json_value ze = {0};
+    json_set_object(&ze);
+
+    char txid_hex[65];
+    wallet_txid_hex_le(n->txid, txid_hex);
+    json_push_kv_str(&ze, "txid", txid_hex);
+    json_push_kv_int(&ze, "output_index", (int)n->output_index);
+
+    json_push_kv_str(&ze, "address", n->address);
+
+    char zamt[32];
+    format_amount(nval, zamt, sizeof(zamt));
+    json_push_kv_str(&ze, "amount", zamt);
+    json_push_kv_int(&ze, "block_height", n->block_height);
+    json_push_kv_str(&ze, "status", is_spent ? "spent" : "unspent");
+
+    if (is_spent) {
+        char spent_hex[65];
+        wallet_txid_hex_le(n->spent_txid, spent_hex);
+        json_push_kv_str(&ze, "spent_by", spent_hex);
+    }
+
+    if (n->witness_height > 0)
+        json_push_kv_int(&ze, "witness_height", n->witness_height);
+
+    json_push_back(z_arr, &ze);
+    json_free(&ze);
+}
+
+/* Summarise all sapling notes into balances, counts and a JSON array. */
+static void scan_sapling_notes(struct wallet_rpc_context *ctx,
+                               struct json_value *z_arr,
+                               int64_t *z_balance, int *z_unspent, int *z_spent,
+                               int64_t *z_total_received)
+{
+    /* Query all sapling notes (both spent and unspent) via the model. */
+    static struct db_sapling_note z_notes[8192];
+    int z_note_count = db_sapling_note_list_all_analysis(ctx->node_db,
+                                                         z_notes, 8192);
+    for (int zi = 0; zi < z_note_count; zi++) {
+        const struct db_sapling_note *n = &z_notes[zi];
+        int64_t nval = n->value;
+        bool is_spent = n->is_spent;
+        *z_total_received += nval;
+        if (!is_spent) {
+            *z_balance += nval;
+            (*z_unspent)++;
+        } else {
+            (*z_spent)++;
+        }
+
+        append_sapling_note_entry(z_arr, n, nval, is_spent);
+    }
+}
+
 bool rpc_coinanalysis(const struct json_value *params, bool help,
                               struct json_value *result)
 {
@@ -68,47 +180,18 @@ bool rpc_coinanalysis(const struct json_value *params, bool help,
             memory_cleanse(test_key.vch, 32);
 
             /* It's ours. Check if tracked in SQLite */
-            bool is_tracked = false;
-            for (int j = 0; j < tracked_count; j++) {
-                if (memcmp(tracked[j].txid, wtx->tx.hash.data, 32) == 0 &&
-                    tracked[j].vout == (uint32_t)vi) {
-                    is_tracked = true;
-                    break;
-                }
-            }
+            bool is_tracked = utxo_list_has(tracked, tracked_count,
+                                            wtx->tx.hash.data,
+                                            (uint32_t)vi);
 
             /* Check chainstate: is it actually unspent? */
-            struct coins c;
-            coins_init(&c);
-            bool in_chain = coins_view_cache_get_coins(
-                ctx->coins_tip, &wtx->tx.hash, &c);
-            bool available = in_chain &&
-                coins_is_available(&c, (unsigned int)vi);
-            coins_free(&c);
+            bool available = chainstate_output_available(ctx, &wtx->tx.hash,
+                                                         vi);
 
             if (available && !is_tracked) {
                 untracked_count++;
                 untracked_balance += out->value;
-
-                char addr[128];
-                wallet_encode_destination(&dest, addr, sizeof(addr));
-
-                char txid_hex[65];
-                uint256_get_hex(&wtx->tx.hash, txid_hex);
-
-                struct json_value entry = {0};
-                json_set_object(&entry);
-                json_push_kv_str(&entry, "txid", txid_hex);
-                json_push_kv_int(&entry, "vout", (int64_t)vi);
-                json_push_kv_str(&entry, "address", addr);
-
-                char amt[32];
-                format_amount(out->value, amt, sizeof(amt));
-                json_push_kv_str(&entry, "amount", amt);
-                json_push_kv_int(&entry, "confirmations",
-                                  (int64_t)wtx->confirms);
-                json_push_back(&untracked_arr, &entry);
-                json_free(&entry);
+                append_untracked_entry(&untracked_arr, wtx, vi, out, &dest);
             }
         }
     }
@@ -121,50 +204,8 @@ bool rpc_coinanalysis(const struct json_value *params, bool help,
     struct json_value z_arr = {0};
     json_set_array(&z_arr);
 
-    /* Query all sapling notes (both spent and unspent) via the model. */
-    static struct db_sapling_note z_notes[8192];
-    int z_note_count = db_sapling_note_list_all_analysis(ctx->node_db,
-                                                         z_notes, 8192);
-    for (int zi = 0; zi < z_note_count; zi++) {
-        const struct db_sapling_note *n = &z_notes[zi];
-        int64_t nval = n->value;
-        bool is_spent = n->is_spent;
-        z_total_received += nval;
-        if (!is_spent) {
-            z_balance += nval;
-            z_unspent++;
-        } else {
-            z_spent++;
-        }
-
-        struct json_value ze = {0};
-        json_set_object(&ze);
-
-        char txid_hex[65];
-        wallet_txid_hex_le(n->txid, txid_hex);
-        json_push_kv_str(&ze, "txid", txid_hex);
-        json_push_kv_int(&ze, "output_index", (int)n->output_index);
-
-        json_push_kv_str(&ze, "address", n->address);
-
-        char zamt[32];
-        format_amount(nval, zamt, sizeof(zamt));
-        json_push_kv_str(&ze, "amount", zamt);
-        json_push_kv_int(&ze, "block_height", n->block_height);
-        json_push_kv_str(&ze, "status", is_spent ? "spent" : "unspent");
-
-        if (is_spent) {
-            char spent_hex[65];
-            wallet_txid_hex_le(n->spent_txid, spent_hex);
-            json_push_kv_str(&ze, "spent_by", spent_hex);
-        }
-
-        if (n->witness_height > 0)
-            json_push_kv_int(&ze, "witness_height", n->witness_height);
-
-        json_push_back(&z_arr, &ze);
-        json_free(&ze);
-    }
+    scan_sapling_notes(ctx, &z_arr, &z_balance, &z_unspent, &z_spent,
+                       &z_total_received);
 
     /* Fee accounting from wallet transactions */
     int tx_count = 0;
