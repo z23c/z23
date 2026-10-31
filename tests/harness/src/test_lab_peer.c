@@ -599,7 +599,7 @@ static int case_verify_nonzero_exit(void)
         ASSERT_EQ(lpt_verify_run(&e), 0);
         ASSERT_EQ(lpt_count(handled, "\tretry\tRESULT_POST_FAILED\t"), 1);
         ASSERT_EQ(lpt_count(handled, "\tok\t"), 0);
-        ASSERT_EQ(lpt_count(e.calls, "\tresult\n"), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\tresult\n"), 1); /* attempted once, not recorded ok */
     } TEST_END
     return failures;
 }
