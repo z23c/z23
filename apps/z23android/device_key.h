@@ -102,6 +102,13 @@ struct zapp_devkey_ops {
  * missing or unreadable entry, and nothing else distinguishes it. A UserNotAuthenticatedException
  * cannot happen for a per-use key and is an error like every unrecognised chain. */
 enum zapp_devkey_status zapp_devkey_classify_chain(const unsigned kinds[], size_t depth);
+/* Keystore2 numeric code of a use that needs an authentication nobody gave (-26, KEY_USER_NOT_AUTHENTICATED). */
+#define ZAPP_DEVKEY_KEYSTORE_USER_NOT_AUTHENTICATED (-26)
+/* True when one exception of a refusal says the user is not authenticated: the Keystore flag or numeric
+ * code, a class name or message naming it. A fault of any other kind, such as a bad AAD, is false. The
+ * flag and code come from android.security.KeyStoreException, so the decision never relies on a
+ * message that may be long; pass 0 and false for an exception of another class. */
+bool zapp_devkey_refusal_is_auth(const char *class_name, int numeric_code, bool requires_auth, const char *text);
 
 /* Refuses without a secure lock screen, creates the key when absent (StrongBox first, then secure
  * hardware) and reports where it lives. A key found in the keystore is never deleted; a key this

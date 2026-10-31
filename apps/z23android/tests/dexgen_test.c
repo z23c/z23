@@ -81,8 +81,11 @@ static bool key_prompt_method(const char *listing, const char *name, const char 
         const char *name_at = strstr(window, want);
         const char *type_at = strstr(window, sig);
         const char *access_at = strstr(window, "access        : ");
+        const char *next_method = name_at ? strstr(name_at + 1, "(in L") : NULL;
+        const char *eol = access_at ? strchr(access_at, 0x0a) : NULL;
+        const char *native_at = access_at ? strstr(access_at, "NATIVE") : NULL;
         if (class_at && name_at && type_at && access_at && class_at < name_at && name_at < type_at && type_at < access_at &&
-            (!native || strstr(access_at, "NATIVE"))) return true;
+            (!next_method || access_at < next_method) && (!native || (native_at && (!eol || native_at < eol)))) return true;
     }
     fprintf(stderr, "dexgen_test: KeyPrompt lacks %s %s%s\n", name, type, native ? " (native)" : "");
     return false;

@@ -540,6 +540,27 @@ static void jni_delete_key(void *context)
     frame_end(env);
 }
 #ifdef ZAPP_DEVKEY_PROBE
+/* Copies at most cap - 1 bytes of value, cutting a long message for printing only. */
+static void copy_prefix(JNIEnv *env, jobject value, char *out, size_t cap)
+{
+    const char *chars = zj_clean(env) && value ? (*env)->GetStringUTFChars(env, value, NULL) : NULL;
+    if (chars) snprintf(out, cap, "%s", chars);
+    if (chars) (*env)->ReleaseStringUTFChars(env, value, chars);
+}
+/* Reads KeyStoreException.getNumericErrorCode and requiresUserAuthentication (API 33) from thrown. */
+static void keystore_fault(JNIEnv *env, jthrowable thrown, int *code, bool *requires_auth)
+{
+    jclass cls = (*env)->FindClass(env, "android/security/KeyStoreException");
+    jmethodID number = cls ? (*env)->GetMethodID(env, cls, "getNumericErrorCode", "()I") : NULL;
+    jmethodID needs = cls ? (*env)->GetMethodID(env, cls, "requiresUserAuthentication", "()Z") : NULL;
+    *code = 0; *requires_auth = false;
+    if (cls && number && needs && (*env)->IsInstanceOf(env, thrown, cls)) {
+        *code = (*env)->CallIntMethod(env, thrown, number);
+        *requires_auth = (*env)->CallBooleanMethod(env, thrown, needs) == JNI_TRUE;
+    }
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    (void)zj_clean(env);
+}
 /* Names the pending exception chain in out ("Class: message" links joined by " > ", at most four) and
  * clears it. *auth is true when a link says the user is not authenticated, the refusal a per-use key
  * gives an operation that no prompt covers; any other fault, such as a bad AAD, leaves it false. */
@@ -550,15 +571,17 @@ static void exception_chain(JNIEnv *env, char *out, size_t cap, bool *auth)
     if (!thrown) return;
     (*env)->ExceptionClear(env);
     for (int depth = 0; thrown && depth < 4; ++depth) {
-        char name[96] = "", text[96] = "";
+        char name[96] = "", text[256] = "";
+        int code; bool requires_auth;
         jobject cls = zj_object_property(env, thrown, "getClass", "()Ljava/lang/Class;");
         jobject cname = cls ? zj_object_property(env, cls, "getName", "()Ljava/lang/String;") : NULL;
         jobject message = zj_object_property(env, thrown, "getMessage", "()Ljava/lang/String;");
-        if (cname) (void)zj_copy_utf(env, cname, name, sizeof(name));
-        if (message) (void)zj_copy_utf(env, message, text, sizeof(text));
+        copy_prefix(env, cname, name, sizeof(name));
+        keystore_fault(env, thrown, &code, &requires_auth);
+        copy_prefix(env, message, text, sizeof(text));
         size_t used = strlen(out);
         if (used < cap) (void)snprintf(out + used, cap - used, "%s%s: %s", depth ? " > " : "", name, text);
-        *auth = *auth || strcasestr(name, "NotAuthenticated") || strcasestr(text, "not authenticated") || strcasestr(text, "NOT_AUTHENTICATED");
+        *auth = *auth || zapp_devkey_refusal_is_auth(name, code, requires_auth, text);
         jobject cause = zj_object_property(env, thrown, "getCause", "()Ljava/lang/Throwable;");
         (*env)->DeleteLocalRef(env, thrown);
         thrown = cause;

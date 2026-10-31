@@ -411,6 +411,17 @@ static void security_levels_follow_the_sdk(void)
     assert(zapp_devkey_level_of(-2) == ZAPP_DEVKEY_LEVEL_UNKNOWN);
     assert(zapp_devkey_level_of(3) == ZAPP_DEVKEY_LEVEL_UNKNOWN && zapp_devkey_level_of(-3) == ZAPP_DEVKEY_LEVEL_UNKNOWN);
 }
+/* Rule: a not-authenticated refusal is recognised by the Keystore flag, code or class however long its message is. */
+static void refusals_are_recognised_without_the_message(void)
+{
+    assert(zapp_devkey_refusal_is_auth("android.security.KeyStoreException", -26, false, ""));
+    assert(zapp_devkey_refusal_is_auth("android.security.KeyStoreException", 0, true, ""));
+    assert(zapp_devkey_refusal_is_auth("android.security.KeyStoreException", 0, false, "Key user not authenticated (internal Keystore code: -26)"));
+    assert(zapp_devkey_refusal_is_auth("android.security.keystore.UserNotAuthenticatedException", 0, false, ""));
+    assert(!zapp_devkey_refusal_is_auth("javax.crypto.AEADBadTagException", 0, false, "bad tag"));
+    assert(!zapp_devkey_refusal_is_auth("android.security.KeyStoreException", -1, false, NULL));
+    assert(!zapp_devkey_refusal_is_auth(NULL, 0, false, NULL));
+}
 /* Rule: a blob from the 30 second window design is refused with its own reason and never opened. */
 static void old_format_blob_is_refused(const char *dir)
 {
@@ -617,6 +628,7 @@ int main(int argc, char **argv)
     garbage_never_reaches_the_caller(argv[1]);
     old_format_blob_is_refused(argv[1]);
     security_levels_follow_the_sdk();
+    refusals_are_recognised_without_the_message();
     unwrap_checks_key_policy_before_prompt(argv[1]);
     unwrap_refuses_the_create_purpose(argv[1]);
     existing_blob_is_never_replaced(argv[1]);
