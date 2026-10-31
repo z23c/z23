@@ -1421,6 +1421,19 @@ static size_t fold_umbrellas_into_shards(struct group_result *results,
     return folded;
 }
 
+/* True when the len bytes at p exactly name a registered group. */
+static bool exact_selector_name_known(const char *p, size_t len)
+{
+    if (len == 0)
+        return false;
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (strlen(g_groups[i].name) == len &&
+            memcmp(g_groups[i].name, p, len) == 0)
+            return true;
+    }
+    return false;
+}
+
 /* Fail before dispatch if an exact set names even one absent group. Without
  * this preflight, "valid,stale" would run the valid member and still report a
  * green suite — the multi-group version of the substring false-green. */
@@ -1439,17 +1452,7 @@ static bool exact_selector_set_valid(const char *selectors,
     while (*p) {
         const char *end = strchr(p, ',');
         size_t len = end ? (size_t)(end - p) : strlen(p);
-        bool found = false;
-        if (len > 0) {
-            for (size_t i = 0; i < g_num_groups; i++) {
-                if (strlen(g_groups[i].name) == len &&
-                    memcmp(g_groups[i].name, p, len) == 0) {
-                    found = true;
-                    break;
-                }
-            }
-        }
-        if (!found) {
+        if (!exact_selector_name_known(p, len)) {
             if (missing) *missing = p;
             if (missing_len) *missing_len = len;
             return false;
@@ -1553,6 +1556,107 @@ static void print_phase_done(enum pool_phase phase, size_t groups,
            groups, (double)elapsed_us / 1e6);
 }
 
+/* Shared state for one phase's dispatch, watchdog and reap steps. */
+struct phase_run {
+    enum pool_phase phase;
+    struct child_slot *slots;
+    int jobs;
+    pid_t parent_pid;
+    struct group_result *results;
+    int timeout_secs;
+    bool verbose;
+    bool activate_proof_contracts;
+};
+
+/* Fill free slots with the next admissible groups. False: a spawn failed. */
+static bool phase_dispatch_ready(const struct phase_run *pr, size_t *next_pos)
+{
+    while (*next_pos < g_num_groups) {
+        size_t next_idx = g_dispatch_order[*next_pos];
+        if (pr->results[next_idx].status != -1 ||
+            !pool_phase_selects(pr->phase, g_groups[next_idx].name)) {
+            (*next_pos)++;
+            continue;
+        }
+        int slot = find_free_slot(pr->slots, pr->jobs);
+        if (slot < 0) break;
+        make_tempfile_path(pr->slots[slot].out_path,
+                           sizeof(pr->slots[slot].out_path),
+                           next_idx, pr->parent_pid);
+        pr->results[next_idx].start = platform_time_wall_time_t();
+        if (child_spawn(next_idx, pr->slots[slot].out_path,
+                        pr->activate_proof_contracts,
+                        &pr->slots[slot].pid) != 0)
+            return false;
+        pr->slots[slot].group_idx = next_idx;
+        if (pr->verbose) {
+            const char *label = pr->phase == POOL_PHASE_QUIET_LINT
+                ? "quiet" : "dispatch";
+#if defined(_WIN32)
+            printf("[%-8s] [%zu/%zu] handle=%p %s\n",
+                   label, next_idx + 1, g_num_groups,
+                   (void *)pr->slots[slot].pid,
+                   g_groups[next_idx].name);
+#else
+            printf("[%-8s] [%zu/%zu] pid=%d %s\n",
+                   label, next_idx + 1, g_num_groups, pr->slots[slot].pid,
+                   g_groups[next_idx].name);
+#endif
+        }
+        (*next_pos)++;
+    }
+    return true;
+}
+
+static void phase_watchdog_sweep(const struct phase_run *pr)
+{
+    time_t now_tick = platform_time_wall_time_t();
+    for (int i = 0; i < pr->jobs; i++) {
+        if (pr->slots[i].pid == ZCL_CHILD_NONE) continue;
+        size_t idx = pr->slots[i].group_idx;
+        if (pr->results[idx].wedged) continue;   /* already killed, awaiting reap */
+        if (!group_watchdog_expired(&pr->results[idx], pr->slots[i].out_path,
+                                    now_tick, pr->timeout_secs))
+            continue;
+        memcpy(pr->results[idx].out_path, pr->slots[i].out_path,
+               sizeof(pr->results[idx].out_path));
+        pr->results[idx].wedged = 1;
+        print_watchdog_kill(idx, g_groups[idx].name, &pr->results[idx],
+                            now_tick, pr->timeout_secs);
+        child_kill(pr->slots[i].pid);
+    }
+}
+
+/* Record one reaped slot's exit status and capture into its group result. */
+static void phase_record_reaped(const struct phase_run *pr, int slot, int status)
+{
+    size_t idx = pr->slots[slot].group_idx;
+    struct group_result *r = &pr->results[idx];
+    child_close(pr->slots[slot].pid);
+    r->status = status;
+    if (WIFSIGNALED(status)) {
+        r->signaled = 1;
+        r->exit_code = WTERMSIG(status);
+    } else {
+        r->signaled = 0;
+        r->exit_code = WIFEXITED(status)
+            ? WEXITSTATUS(status) : -1;
+    }
+    memcpy(r->out_path, pr->slots[slot].out_path,
+           sizeof(r->out_path));
+    time_t now = platform_time_wall_time_t();
+    r->wall_seconds = (double)(now - r->start);
+    r->measured = 1;
+    if (pr->verbose)
+        printf("[done    ] [%zu] %s (%s, %.0fs)\n",
+               idx, g_groups[idx].name,
+               r->wedged ? "WEDGED (no output)" :
+               r->signaled ? "SIGNALED" :
+               (r->exit_code == 0 ? "PASS" : "FAIL"),
+               r->wall_seconds);
+    pr->slots[slot].pid = ZCL_CHILD_NONE;
+}
+
 /* Run one bounded parallel phase. The quiet lint phase and general phase use
  * the same fork, timeout, capture, and accounting machinery; only group
  * admission differs. That makes isolation a scheduling fact, never a timeout
@@ -1569,59 +1673,18 @@ static bool run_parallel_phase(
             remaining++;
     const size_t phase_groups = remaining;
     const int64_t phase_start_us = platform_time_monotonic_us();
+    struct phase_run pr = {
+        .phase = phase, .slots = slots, .jobs = jobs,
+        .parent_pid = parent_pid, .results = results,
+        .timeout_secs = timeout_secs, .verbose = verbose,
+        .activate_proof_contracts = activate_proof_contracts,
+    };
     /* Walk the longest-expected-first permutation, not the catalog. */
     size_t next_pos = 0;
     while (remaining > 0) {
-        while (next_pos < g_num_groups) {
-            size_t next_idx = g_dispatch_order[next_pos];
-            if (results[next_idx].status != -1 ||
-                !pool_phase_selects(phase, g_groups[next_idx].name)) {
-                next_pos++;
-                continue;
-            }
-            int slot = find_free_slot(slots, jobs);
-            if (slot < 0) break;
-            make_tempfile_path(slots[slot].out_path,
-                               sizeof(slots[slot].out_path),
-                               next_idx, parent_pid);
-            results[next_idx].start = platform_time_wall_time_t();
-            if (child_spawn(next_idx, slots[slot].out_path,
-                            activate_proof_contracts,
-                            &slots[slot].pid) != 0)
-                return false;
-            slots[slot].group_idx = next_idx;
-            if (verbose) {
-                const char *label = phase == POOL_PHASE_QUIET_LINT
-                    ? "quiet" : "dispatch";
-#if defined(_WIN32)
-                printf("[%-8s] [%zu/%zu] handle=%p %s\n",
-                       label, next_idx + 1, g_num_groups,
-                       (void *)slots[slot].pid,
-                       g_groups[next_idx].name);
-#else
-                printf("[%-8s] [%zu/%zu] pid=%d %s\n",
-                       label, next_idx + 1, g_num_groups, slots[slot].pid,
-                       g_groups[next_idx].name);
-#endif
-            }
-            next_pos++;
-        }
-
-        time_t now_tick = platform_time_wall_time_t();
-        for (int i = 0; i < jobs; i++) {
-            if (slots[i].pid == ZCL_CHILD_NONE) continue;
-            size_t idx = slots[i].group_idx;
-            if (results[idx].wedged) continue;   /* already killed, awaiting reap */
-            if (!group_watchdog_expired(&results[idx], slots[i].out_path,
-                                        now_tick, timeout_secs))
-                continue;
-            memcpy(results[idx].out_path, slots[i].out_path,
-                   sizeof(results[idx].out_path));
-            results[idx].wedged = 1;
-            print_watchdog_kill(idx, g_groups[idx].name, &results[idx],
-                                now_tick, timeout_secs);
-            child_kill(slots[i].pid);
-        }
+        if (!phase_dispatch_ready(&pr, &next_pos))
+            return false;
+        phase_watchdog_sweep(&pr);
 
         int status = 0;
         int slot = reap_any(slots, jobs, &status);
@@ -1637,30 +1700,7 @@ static bool run_parallel_phase(
                 return false;
             continue;   /* reaped a slot-less child; nothing to record */
         }
-        size_t idx = slots[slot].group_idx;
-        child_close(slots[slot].pid);
-        results[idx].status = status;
-        if (WIFSIGNALED(status)) {
-            results[idx].signaled = 1;
-            results[idx].exit_code = WTERMSIG(status);
-        } else {
-            results[idx].signaled = 0;
-            results[idx].exit_code = WIFEXITED(status)
-                ? WEXITSTATUS(status) : -1;
-        }
-        memcpy(results[idx].out_path, slots[slot].out_path,
-               sizeof(results[idx].out_path));
-        time_t now = platform_time_wall_time_t();
-        results[idx].wall_seconds = (double)(now - results[idx].start);
-        results[idx].measured = 1;
-        if (verbose)
-            printf("[done    ] [%zu] %s (%s, %.0fs)\n",
-                   idx, g_groups[idx].name,
-                   results[idx].wedged ? "WEDGED (no output)" :
-                   results[idx].signaled ? "SIGNALED" :
-                   (results[idx].exit_code == 0 ? "PASS" : "FAIL"),
-                   results[idx].wall_seconds);
-        slots[slot].pid = ZCL_CHILD_NONE;
+        phase_record_reaped(&pr, slot, status);
         remaining--;
         (*reaped)++;
     }
@@ -1765,6 +1805,60 @@ static void preserve_retry_first(const char *name, const char *first,
     fflush(stdout);
 }
 
+static int rerun_first_unobserved_lines(const struct group_result *r)
+{
+    return r->out_path[0]
+        ? count_marker_lines(r->out_path, "UNOBSERVED (") : 0;
+}
+
+static void rerun_copy_first_log(struct group_result *r,
+                                 const char *preserved_log)
+{
+    snprintf(r->flaky_first_log, sizeof(r->flaky_first_log), "%s",
+             preserved_log[0] ? preserved_log : "(unavailable)");
+}
+
+/* A first attempt that printed UNOBSERVED: the alone rerun must pass and
+ * observe every leg before the group is marked load_unobserved. */
+static void rerun_settle_unobserved(struct group_result *r, const char *name,
+                                    const char *preserved_log, bool alone_pass)
+{
+    int alone_unobserved = rerun_first_unobserved_lines(r);
+    if (!(alone_pass && alone_unobserved == 0))
+        return;
+    r->load_flaky = 1;
+    r->load_unobserved = 1;
+    rerun_copy_first_log(r, preserved_log);
+    printf("LOAD-UNOBSERVED %s first=UNOBSERVED alone=OBSERVED "
+          "first_log=%s alone_log=%s\n",
+          name, r->flaky_first_log,
+          r->out_path[0] ? r->out_path : "(none)");
+    fflush(stdout);
+}
+
+/* A first attempt that FAILED or WEDGED: an alone PASS is load-flaky. */
+static void rerun_settle_failed(struct group_result *r, const char *name,
+                                const char *preserved_log, bool first_wedged,
+                                bool alone_pass)
+{
+    if (alone_pass) {
+        r->load_flaky = 1;
+        r->flaky_first_wedged = first_wedged;
+        rerun_copy_first_log(r, preserved_log);
+        printf("LOAD-FLAKY %s first=%s alone=PASS first_log=%s "
+              "alone_log=%s\n",
+              name, first_wedged ? "WEDGED" : "FAIL",
+              r->flaky_first_log,
+              r->out_path[0] ? r->out_path : "(none)");
+        fflush(stdout);
+    } else {
+        /* Still a hard failure alone too: record whether the first
+         * attempt was a deadline kill so the failed-groups report can
+         * say "timed out ... retried alone" instead of a plain FAIL. */
+        r->flaky_first_wedged = first_wedged;
+    }
+}
+
 static void rerun_load_flaky_groups(struct group_result *results,
                                     pid_t parent_pid, int timeout_secs,
                                     bool verbose, bool activate_proof_contracts)
@@ -1775,8 +1869,7 @@ static void rerun_load_flaky_groups(struct group_result *results,
         bool first_pass = !results[i].signaled && results[i].exit_code == 0;
         bool first_unobserved = false;
         if (first_pass) {
-            int fu = results[i].out_path[0]
-                ? count_marker_lines(results[i].out_path, "UNOBSERVED (") : 0;
+            int fu = rerun_first_unobserved_lines(&results[i]);
             if (fu == 0) continue; /* an ordinary pass: nothing to rerun */
             first_unobserved = true;
         }
@@ -1803,41 +1896,12 @@ static void rerun_load_flaky_groups(struct group_result *results,
         bool alone_pass = !results[i].signaled && results[i].exit_code == 0;
 
         if (first_unobserved) {
-            int alone_unobserved = results[i].out_path[0]
-                ? count_marker_lines(results[i].out_path, "UNOBSERVED (") : 0;
-            if (alone_pass && alone_unobserved == 0) {
-                results[i].load_flaky = 1;
-                results[i].load_unobserved = 1;
-                snprintf(results[i].flaky_first_log,
-                        sizeof(results[i].flaky_first_log), "%s",
-                        preserved_log[0] ? preserved_log : "(unavailable)");
-                printf("LOAD-UNOBSERVED %s first=UNOBSERVED alone=OBSERVED "
-                      "first_log=%s alone_log=%s\n",
-                      g_groups[i].name, results[i].flaky_first_log,
-                      results[i].out_path[0] ? results[i].out_path : "(none)");
-                fflush(stdout);
-            }
+            rerun_settle_unobserved(&results[i], g_groups[i].name,
+                                    preserved_log, alone_pass);
             continue;
         }
-
-        if (alone_pass) {
-            results[i].load_flaky = 1;
-            results[i].flaky_first_wedged = first_wedged;
-            snprintf(results[i].flaky_first_log,
-                    sizeof(results[i].flaky_first_log), "%s",
-                    preserved_log[0] ? preserved_log : "(unavailable)");
-            printf("LOAD-FLAKY %s first=%s alone=PASS first_log=%s "
-                  "alone_log=%s\n",
-                  g_groups[i].name, first_wedged ? "WEDGED" : "FAIL",
-                  results[i].flaky_first_log,
-                  results[i].out_path[0] ? results[i].out_path : "(none)");
-            fflush(stdout);
-        } else {
-            /* Still a hard failure alone too: record whether the first
-             * attempt was a deadline kill so the failed-groups report can
-             * say "timed out ... retried alone" instead of a plain FAIL. */
-            results[i].flaky_first_wedged = first_wedged;
-        }
+        rerun_settle_failed(&results[i], g_groups[i].name, preserved_log,
+                            first_wedged, alone_pass);
     }
 }
 
@@ -1918,6 +1982,175 @@ static const char *test_timing_dir_prepare(void)
     return dir;
 }
 
+/* Whole-run facts the timing artifact reports alongside the per-group rows. */
+struct timing_run {
+    double startup_seconds;
+    double wall_seconds;
+    int jobs;
+    size_t group_count;
+    int failed_groups;
+    size_t skipped_count;
+    bool activate_proof_contracts;
+    const struct suite_verdict *v;
+};
+
+static void timing_sort_slowest_first(size_t *order,
+                                      const struct group_result *results,
+                                      size_t group_count)
+{
+    for (size_t i = 0; i < group_count; i++)
+        order[i] = i;
+    /* Insertion sort by wall_seconds descending; skipped groups (never
+     * measured) sort last. */
+    for (size_t a = 1; a < group_count; a++) {
+        size_t key = order[a];
+        double key_w = results[key].skipped ? -1.0 : results[key].wall_seconds;
+        size_t b = a;
+        while (b > 0) {
+            size_t prev = order[b - 1];
+            double prev_w = results[prev].skipped ? -1.0 : results[prev].wall_seconds;
+            if (prev_w >= key_w) break;
+            order[b] = order[b - 1];
+            b--;
+        }
+        order[b] = key;
+    }
+}
+
+static bool timing_write_header(FILE *fp, const char *ts,
+                                const struct timing_run *run)
+{
+    const struct suite_verdict *v = run->v;
+    bool render_failed = false;
+    fprintf(fp, "{\n");
+    fprintf(fp, "  \"schema\":\"zcl.test_timing.v1\",\n");
+    fprintf(fp, "  \"generated_at_utc\":\"%s\",\n", ts);
+    fprintf(fp, "  \"startup_ms\":%lld,\n",
+            (long long)(run->startup_seconds * 1000.0));
+    fprintf(fp, "  \"test_body_ms\":%lld,\n",
+            (long long)(run->wall_seconds * 1000.0));
+    fprintf(fp, "  \"wall_ms\":%lld,\n", (long long)(run->wall_seconds * 1000.0));
+    fprintf(fp, "  \"jobs\":%d,\n", run->jobs);
+    fprintf(fp, "  \"group_count\":%zu,\n", run->group_count);
+    fprintf(fp, "  \"failed_count\":%d,\n", run->failed_groups);
+    fprintf(fp, "  \"skipped_count\":%zu,\n", run->skipped_count);
+    /* The cache facts belong in the artifact, not only on the terminal: a
+     * consumer of this file must be able to tell a run that EXECUTED 743 groups
+     * from one that executed 1 and read 742 out of the cache. */
+    fprintf(fp, "  \"mode\":\"%s\",\n", v->mode);
+    fprintf(fp, "  \"groups_ran\":%zu,\n", v->groups_ran);
+    fprintf(fp, "  \"groups_cached\":%zu,\n", v->groups_cached);
+    fprintf(fp, "  \"groups_cacheable\":%zu,\n", v->groups_cacheable);
+    fprintf(fp, "  \"toolkey\":\"%s\",\n", v->toolkey);
+    fprintf(fp, "  \"self_skips\":%d,\n", v->self_skips);
+    fprintf(fp, "  \"env_unobserved\":%d,\n", v->env_unobserved);
+    fprintf(fp, "  \"load_flaky\":%d,\n", v->load_flaky);
+    fprintf(fp, "  \"toolkey_full\":");
+    if (!timing_json_string(fp, testcache_toolkey()))
+        render_failed = true;
+    return render_failed;
+}
+
+static bool timing_write_hotswap_fields(FILE *fp)
+{
+    bool render_failed = false;
+    fprintf(fp, ",\n  \"hotswap_module_active\":%s,\n",
+            g_hotswap_module_active ? "true" : "false");
+    fprintf(fp, "  \"hotswap_module_sha256\":");
+    if (g_hotswap_module_active) {
+        if (!timing_json_string(fp, g_hotswap_module_sha))
+            render_failed = true;
+    }
+    else
+        fprintf(fp, "null");
+    fprintf(fp, ",\n  \"hotswap_module_source\":");
+    if (g_hotswap_module_active) {
+        if (!timing_json_string(fp, g_hotswap_module_source))
+            render_failed = true;
+    }
+    else
+        fprintf(fp, "null");
+    fprintf(fp, ",\n");
+    return render_failed;
+}
+
+static void timing_write_input_key(FILE *fp,
+                                   const struct testcache_probe *probe,
+                                   bool key_valid)
+{
+    if (!key_valid) {
+        fprintf(fp, "null");
+        return;
+    }
+    fputc('"', fp);
+    for (size_t b = 0; b < sizeof(probe->key); b++)
+        fprintf(fp, "%02x", probe->key[b]);
+    fputc('"', fp);
+}
+
+static void timing_write_group_row(FILE *fp, const struct group_result *r,
+                                   const char *name,
+                                   const struct testcache_probe *probe,
+                                   bool activate_proof_contracts)
+{
+    long long ms = (long long)(r->wall_seconds * 1000.0);
+    int rc = r->signaled ? -r->exit_code : r->exit_code;
+    bool key_valid = !g_hotswap_module_active && probe && probe->key_valid;
+    bool measured = r->measured != 0;
+    enum zcl_test_proof_contract contract = activate_proof_contracts
+        ? zcl_test_group_proof_contract(name)
+        : ZCL_TEST_PROOF_NONE;
+    fprintf(fp,
+            "    {\"name\":\"%s\",\"ms\":%lld,\"rc\":%d,"
+            "\"signaled\":%s,\"cached\":%s,\"measured\":%s,"
+            "\"key_valid\":%s,\"input_key\":",
+            name, ms, rc,
+            r->signaled ? "true" : "false",
+            r->cached ? "true" : "false",
+            measured ? "true" : "false",
+            key_valid ? "true" : "false");
+    timing_write_input_key(fp, probe, key_valid);
+    fprintf(fp,
+            ",\"proof_contract\":%d,\"skip_markers\":%d,"
+            "\"env_unobserved\":%d,\"load_flaky\":%d}",
+            (int)contract, r->skip_markers,
+            r->env_unobserved, r->load_flaky);
+}
+
+static void timing_write_groups(FILE *fp, const struct group_result *results,
+                                const struct testcache_probe *probes,
+                                const size_t *order,
+                                const struct timing_run *run)
+{
+    fprintf(fp, "  \"groups\":[\n");
+    int first = 1;
+    for (size_t k = 0; k < run->group_count; k++) {
+        size_t i = order[k];
+        if (results[i].skipped)
+            continue;
+        if (!first)
+            fprintf(fp, ",\n");
+        first = 0;
+        timing_write_group_row(fp, &results[i], g_groups[i].name,
+                               probes ? &probes[i] : NULL,
+                               run->activate_proof_contracts);
+    }
+    fprintf(fp, "\n  ]\n}\n");
+}
+
+static void timing_publish(const char *tmp_path, const char *final_path)
+{
+#if defined(_WIN32)
+    /* Windows rename() refuses an existing target; the timing artifact is a
+     * best-effort cache, so replacing last run's file is correct. */
+    (void)remove(final_path);
+#endif
+    if (rename(tmp_path, final_path) != 0) {
+        perror("test_parallel: rename timing artifact");
+        (void)remove(tmp_path);
+    }
+}
+
 /* Per-group JSON timing artifact — the same "make results visible so
  * regressions are visible" pattern as tools/lint/run_lint.sh's
  * .cache/lint-timing/last-run.json (schema zcl.lint_timing.v1), applied
@@ -1948,23 +2181,7 @@ static void write_test_timing_json(const struct group_result *results,
         fprintf(stderr, "test_parallel: timing order malloc failed\n");
         return;
     }
-    for (size_t i = 0; i < group_count; i++)
-        order[i] = i;
-    /* Insertion sort by wall_seconds descending; skipped groups (never
-     * measured) sort last. */
-    for (size_t a = 1; a < group_count; a++) {
-        size_t key = order[a];
-        double key_w = results[key].skipped ? -1.0 : results[key].wall_seconds;
-        size_t b = a;
-        while (b > 0) {
-            size_t prev = order[b - 1];
-            double prev_w = results[prev].skipped ? -1.0 : results[prev].wall_seconds;
-            if (prev_w >= key_w) break;
-            order[b] = order[b - 1];
-            b--;
-        }
-        order[b] = key;
-    }
+    timing_sort_slowest_first(order, results, group_count);
 
     char tmp_path[4200], final_path[4200];
     snprintf(tmp_path, sizeof(tmp_path), "%s/last-run.json.tmp", dir);
@@ -1976,7 +2193,6 @@ static void write_test_timing_json(const struct group_result *results,
         free(order);
         return;
     }
-    bool render_failed = false;
 
     time_t now = platform_time_wall_time_t();
     struct tm tm_utc;
@@ -1990,91 +2206,16 @@ static void write_test_timing_json(const struct group_result *results,
     char ts[32];
     strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
 
-    fprintf(fp, "{\n");
-    fprintf(fp, "  \"schema\":\"zcl.test_timing.v1\",\n");
-    fprintf(fp, "  \"generated_at_utc\":\"%s\",\n", ts);
-    fprintf(fp, "  \"startup_ms\":%lld,\n",
-            (long long)(startup_seconds * 1000.0));
-    fprintf(fp, "  \"test_body_ms\":%lld,\n",
-            (long long)(wall_seconds * 1000.0));
-    fprintf(fp, "  \"wall_ms\":%lld,\n", (long long)(wall_seconds * 1000.0));
-    fprintf(fp, "  \"jobs\":%d,\n", jobs);
-    fprintf(fp, "  \"group_count\":%zu,\n", group_count);
-    fprintf(fp, "  \"failed_count\":%d,\n", failed_groups);
-    fprintf(fp, "  \"skipped_count\":%zu,\n", skipped_count);
-    /* The cache facts belong in the artifact, not only on the terminal: a
-     * consumer of this file must be able to tell a run that EXECUTED 743 groups
-     * from one that executed 1 and read 742 out of the cache. */
-    fprintf(fp, "  \"mode\":\"%s\",\n", v->mode);
-    fprintf(fp, "  \"groups_ran\":%zu,\n", v->groups_ran);
-    fprintf(fp, "  \"groups_cached\":%zu,\n", v->groups_cached);
-    fprintf(fp, "  \"groups_cacheable\":%zu,\n", v->groups_cacheable);
-    fprintf(fp, "  \"toolkey\":\"%s\",\n", v->toolkey);
-    fprintf(fp, "  \"self_skips\":%d,\n", v->self_skips);
-    fprintf(fp, "  \"env_unobserved\":%d,\n", v->env_unobserved);
-    fprintf(fp, "  \"load_flaky\":%d,\n", v->load_flaky);
-    fprintf(fp, "  \"toolkey_full\":");
-    if (!timing_json_string(fp, testcache_toolkey()))
+    struct timing_run run = {
+        .startup_seconds = startup_seconds, .wall_seconds = wall_seconds,
+        .jobs = jobs, .group_count = group_count,
+        .failed_groups = failed_groups, .skipped_count = skipped_count,
+        .activate_proof_contracts = activate_proof_contracts, .v = v,
+    };
+    bool render_failed = timing_write_header(fp, ts, &run);
+    if (timing_write_hotswap_fields(fp))
         render_failed = true;
-    fprintf(fp, ",\n  \"hotswap_module_active\":%s,\n",
-            g_hotswap_module_active ? "true" : "false");
-    fprintf(fp, "  \"hotswap_module_sha256\":");
-    if (g_hotswap_module_active) {
-        if (!timing_json_string(fp, g_hotswap_module_sha))
-            render_failed = true;
-    }
-    else
-        fprintf(fp, "null");
-    fprintf(fp, ",\n  \"hotswap_module_source\":");
-    if (g_hotswap_module_active) {
-        if (!timing_json_string(fp, g_hotswap_module_source))
-            render_failed = true;
-    }
-    else
-        fprintf(fp, "null");
-    fprintf(fp, ",\n");
-    fprintf(fp, "  \"groups\":[\n");
-    int first = 1;
-    for (size_t k = 0; k < group_count; k++) {
-        size_t i = order[k];
-        if (results[i].skipped)
-            continue;
-        if (!first)
-            fprintf(fp, ",\n");
-        first = 0;
-        long long ms = (long long)(results[i].wall_seconds * 1000.0);
-        int rc = results[i].signaled ? -results[i].exit_code
-                                     : results[i].exit_code;
-        bool key_valid = !g_hotswap_module_active && probes &&
-                         probes[i].key_valid;
-        bool measured = results[i].measured != 0;
-        enum zcl_test_proof_contract contract = activate_proof_contracts
-            ? zcl_test_group_proof_contract(g_groups[i].name)
-            : ZCL_TEST_PROOF_NONE;
-        fprintf(fp,
-                "    {\"name\":\"%s\",\"ms\":%lld,\"rc\":%d,"
-                "\"signaled\":%s,\"cached\":%s,\"measured\":%s,"
-                "\"key_valid\":%s,\"input_key\":",
-                g_groups[i].name, ms, rc,
-                results[i].signaled ? "true" : "false",
-                results[i].cached ? "true" : "false",
-                measured ? "true" : "false",
-                key_valid ? "true" : "false");
-        if (key_valid) {
-            fputc('"', fp);
-            for (size_t b = 0; b < sizeof(probes[i].key); b++)
-                fprintf(fp, "%02x", probes[i].key[b]);
-            fputc('"', fp);
-        } else {
-            fprintf(fp, "null");
-        }
-        fprintf(fp,
-                ",\"proof_contract\":%d,\"skip_markers\":%d,"
-                "\"env_unobserved\":%d,\"load_flaky\":%d}",
-                (int)contract, results[i].skip_markers,
-                results[i].env_unobserved, results[i].load_flaky);
-    }
-    fprintf(fp, "\n  ]\n}\n");
+    timing_write_groups(fp, results, probes, order, &run);
     bool write_failed = render_failed || ferror(fp) != 0;
     if (fclose(fp) != 0)
         write_failed = true;
@@ -2086,15 +2227,7 @@ static void write_test_timing_json(const struct group_result *results,
         return;
     }
 
-#if defined(_WIN32)
-    /* Windows rename() refuses an existing target; the timing artifact is a
-     * best-effort cache, so replacing last run's file is correct. */
-    (void)remove(final_path);
-#endif
-    if (rename(tmp_path, final_path) != 0) {
-        perror("test_parallel: rename timing artifact");
-        (void)remove(tmp_path);
-    }
+    timing_publish(tmp_path, final_path);
 }
 
 /* Machine-readable verdict of THIS run: build/test-verdict.json (schema
@@ -2612,6 +2745,220 @@ static bool selection_inspection_valid(int argc, char **argv)
     return true;
 }
 
+/* Cache accounting for one run: counters for the summary lines. */
+struct cache_accounting {
+    enum cache_mode mode;
+    size_t cached_n;
+    size_t ran;
+    size_t stored;
+    size_t audit_hits;
+    int audit_diverged;
+    int observation_refused;
+};
+
+static void store_fresh_pass(const struct group_result *r,
+                             struct testcache_probe *probe,
+                             struct testcache **tc,
+                             struct cache_accounting *acc)
+{
+    /* A flaky pass IS a pass — the group's actual code proved
+     * itself, alone. But it must never come back on a later
+     * cache hit looking indistinguishable from an ordinary
+     * uncontended pass: store the flag alongside the verdict so
+     * every future hit reprints LOAD-FLAKY (see the cache-hit
+     * arm above). */
+    /* Capsule-consumed runs arrive with no open handle: open
+     * lazily on the first store so all-HIT cycles never pay an
+     * open. A failed lazy open only loses future reuse, never
+     * correctness — the PASS verdict already stands. */
+    if (!*tc) *tc = testcache_open(NULL);
+    if (*tc) {
+        if (r->load_flaky)
+            testcache_store_pass_flaky(*tc, probe->key);
+        else
+            testcache_store_pass(*tc, probe->key);
+        acc->stored++;
+    }
+}
+
+static void account_group(const struct group_result *r, const char *name,
+                          struct testcache_probe *probe,
+                          struct testcache **tc, struct cache_accounting *acc)
+{
+    bool pass = !r->signaled && r->exit_code == 0;
+    /* A zero-exit group that printed SKIP did not prove its complete
+     * contract. Never persist that partial run as a reusable PASS.
+     * UNOBSERVED is the same story for a different reason: the group
+     * ran and hard-asserted its load-free legs, but one leg never got
+     * an observation. Caching that would let a busy box mint a receipt
+     * a later run reuses as if the leg had been proven, so it is
+     * barred from the cache exactly like a skip. It does NOT fail the
+     * run — the box's spare capacity is not a code verdict. */
+    /* A load-unobserved PASS (see rerun_load_flaky_groups) never
+     * reaches the store at all, even though it passed with
+     * env_unobserved == 0 here: the observation only happened once,
+     * alone, under a busy box's own back-pressure, and a stored
+     * receipt would let a later cache hit reuse it as if the leg
+     * were reliably observed on this host. Ordinary load-flaky
+     * PASSes (FAIL/WEDGED alone->PASS) are still cached, flagged, so
+     * they keep reprinting LOAD-FLAKY on every future hit. */
+    if (pass && r->skip_markers == 0 &&
+        r->env_unobserved == 0 &&
+        !r->load_unobserved && probe &&
+        probe->cacheable) {
+        store_fresh_pass(r, probe, tc, acc);
+    }
+    if (acc->mode == CACHE_COLD_AUDIT && probe &&
+        probe->cacheable && probe->hit) {
+        acc->audit_hits++;
+        if (!pass) {
+            acc->audit_diverged++;
+            printf("COLD-AUDIT DIVERGENCE: %s carried a cached PASS at "
+                   "its current key but FAILED a fresh run — the "
+                   "closure/cache is UNSOUND\n", name);
+        }
+    }
+}
+
+static void account_cache_run(const struct group_result *results,
+                              struct testcache_probe *probes,
+                              struct testcache **tc,
+                              struct cache_accounting *acc)
+{
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (results[i].skipped) continue;
+        if (results[i].cached) { acc->cached_n++; continue; }
+        acc->ran++;
+        account_group(&results[i], g_groups[i].name,
+                      probes ? &probes[i] : NULL, tc, acc);
+    }
+}
+
+static void print_cache_summary(const struct cache_accounting *acc)
+{
+    printf("cached %zu / ran %zu%s\n", acc->cached_n, acc->ran,
+           acc->mode == CACHE_COLD_AUDIT ? " [cold-audit]" : "");
+    if (acc->mode == CACHE_COLD_AUDIT)
+        printf("cold-audit: %zu cache-hit(s) verified against fresh runs, "
+               "%d divergence(s)\n", acc->audit_hits, acc->audit_diverged);
+    else if (acc->stored > 0)
+        printf("cache: stored %zu fresh PASS verdict(s)\n", acc->stored);
+}
+
+/* Per-run counters filled by tally_group for the suite verdict. */
+struct group_tally {
+    int failed;
+    int skip;
+    int unobserved;
+    int load_flaky;
+};
+
+static void print_group_banner(const char *name,
+                               const struct group_result *r, bool pass,
+                               const char *skip_note)
+{
+    printf("\n==================== %s (%s%s, %.0fs) ====================\n",
+           name,
+           r->wedged ? "WEDGED-NO-OUTPUT" :
+           r->signaled ? "SIGNALED" :
+           (pass ? "PASS" : "FAIL"),
+           skip_note, r->wall_seconds);
+}
+
+static void tally_group(struct group_result *r, const char *name,
+                        bool show_output, struct group_tally *t)
+{
+    bool pass = !r->signaled && r->exit_code == 0;
+    r->skip_markers = r->out_path[0]
+        ? count_marker_lines(r->out_path, "SKIP (") : 0;
+    if (r->skip_markers > 0) t->skip++;
+    r->env_unobserved = r->out_path[0]
+        ? count_marker_lines(r->out_path, "UNOBSERVED (") : 0;
+    if (r->env_unobserved > 0) t->unobserved++;
+    if (r->load_flaky) t->load_flaky++;
+    char skip_note[32] = "";
+    if (r->skip_markers > 0)
+        snprintf(skip_note, sizeof(skip_note), ", %d SKIP",
+                 r->skip_markers);
+    if (!pass) t->failed++;
+    if (show_output || !pass) {
+        print_group_banner(name, r, pass, skip_note);
+        print_captured(r->out_path);
+    }
+    /* A load-flaky PASS keeps its alone-run capture on disk (not just its
+     * path string, already printed by the LOAD-FLAKY line above) so a
+     * human can inspect it after the fact instead of only after the
+     * process exits. */
+    if (pass && !r->load_flaky && r->out_path[0])
+        unlink(r->out_path);
+}
+
+static void print_suite_notes(const struct group_result *results,
+                              int skip_groups, int unobserved_groups,
+                              int load_flaky_groups)
+{
+    if (skip_groups > 0) {
+        printf("Skipped coverage (self-skipped groups — most need "
+               "ZCL_STRESS_TESTS=1 + an isolated run):\n");
+        for (size_t i = 0; i < g_num_groups; i++) {
+            if (results[i].skipped || results[i].skip_markers == 0) continue;
+            printf("  - %s: %d skip marker(s)\n",
+                   g_groups[i].name, results[i].skip_markers);
+        }
+    }
+    if (unobserved_groups > 0) {
+        printf("Unobserved legs (the group RAN and hard-asserted its load-free "
+               "contract; an environment-dependent leg did not report "
+               "in-window. Reported, not skipped, and never cached):\n");
+        for (size_t i = 0; i < g_num_groups; i++) {
+            if (results[i].skipped || results[i].env_unobserved == 0) continue;
+            printf("  - %s: %d unobserved leg(s)\n",
+                   g_groups[i].name, results[i].env_unobserved);
+        }
+    }
+    if (load_flaky_groups > 0) {
+        printf("Load-flaky groups (FAIL/WEDGED, or PASS-with-UNOBSERVED, "
+               "under the shared pool; observed clean alone — counted as "
+               "PASS, never a silent cache hit; see the LOAD-FLAKY / "
+               "LOAD-UNOBSERVED lines above):\n");
+        for (size_t i = 0; i < g_num_groups; i++) {
+            if (results[i].skipped || !results[i].load_flaky) continue;
+            printf("  - %s%s\n", g_groups[i].name,
+                   results[i].load_unobserved ? " (was UNOBSERVED, never cached)"
+                                               : "");
+        }
+    }
+}
+
+static void print_failed_groups_report(const struct group_result *results,
+                                       int timeout_secs)
+{
+    printf("Failed groups:\n");
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (results[i].skipped) continue;
+        bool pass =
+            !results[i].signaled && results[i].exit_code == 0;
+        if (pass) continue;
+        print_failed_group_prefix(g_groups[i].name, &results[i],
+                                  timeout_secs);
+        if (results[i].signaled)
+            printf(" signal=%d", results[i].exit_code);
+        else
+            printf(" code=%d", results[i].exit_code);
+        if (results[i].out_path[0])
+            printf(" log=%s", results[i].out_path);
+        printf("\n");
+        /* Exact focused rerun for this group — no whole-group wait.
+         * Params-heavy groups (Groth16 proving; normally gated out
+         * unless ZCL_PARAMS_TESTS/--only opted in) need the same env
+         * opt-in on the rerun. */
+        printf("      repro: %smake t-fast ONLY=%s\n",
+               group_is_params_heavy(g_groups[i].name)
+                   ? "ZCL_PARAMS_TESTS=1 " : "",
+               g_groups[i].name);
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (!selection_inspection_valid(argc, argv)) return 2;
@@ -3118,42 +3465,16 @@ int main(int argc, char **argv)
         (double)(t_end.tv_sec - t_start.tv_sec) +
         (double)(t_end.tv_nsec - t_start.tv_nsec) / 1e9;
 
-    int failed_groups = 0;
-    int skip_groups = 0;
-    int unobserved_groups = 0;
-    int load_flaky_groups = 0;
+    struct group_tally tally = {0};
     for (size_t i = 0; i < g_num_groups; i++) {
         if (results[i].skipped) continue;
-        bool pass =
-            !results[i].signaled && results[i].exit_code == 0;
-        results[i].skip_markers = results[i].out_path[0]
-            ? count_marker_lines(results[i].out_path, "SKIP (") : 0;
-        if (results[i].skip_markers > 0) skip_groups++;
-        results[i].env_unobserved = results[i].out_path[0]
-            ? count_marker_lines(results[i].out_path, "UNOBSERVED (") : 0;
-        if (results[i].env_unobserved > 0) unobserved_groups++;
-        if (results[i].load_flaky) load_flaky_groups++;
-        char skip_note[32] = "";
-        if (results[i].skip_markers > 0)
-            snprintf(skip_note, sizeof(skip_note), ", %d SKIP",
-                     results[i].skip_markers);
-        if (!pass) failed_groups++;
-        if (verbose || only || !pass) {
-            printf("\n==================== %s (%s%s, %.0fs) ====================\n",
-                   g_groups[i].name,
-                   results[i].wedged ? "WEDGED-NO-OUTPUT" :
-                   results[i].signaled ? "SIGNALED" :
-                   (pass ? "PASS" : "FAIL"),
-                   skip_note, results[i].wall_seconds);
-            print_captured(results[i].out_path);
-        }
-        /* A load-flaky PASS keeps its alone-run capture on disk (not just its
-         * path string, already printed by the LOAD-FLAKY line above) so a
-         * human can inspect it after the fact instead of only after the
-         * process exits. */
-        if (pass && !results[i].load_flaky && results[i].out_path[0])
-            unlink(results[i].out_path);
+        tally_group(&results[i], g_groups[i].name, verbose || only != NULL,
+                    &tally);
     }
+    int failed_groups = tally.failed;
+    int skip_groups = tally.skip;
+    int unobserved_groups = tally.unobserved;
+    int load_flaky_groups = tally.load_flaky;
 
     /* ── The verdict ────────────────────────────────────────────────────────
      * The old headline printed "ALL TESTS PASSED — 0/743 groups failed" whether
@@ -3236,63 +3557,10 @@ int main(int argc, char **argv)
            only ? (only_exact ? " [--exact filtered]"
                               : " [--only filtered]")
                 : "");
-    if (skip_groups > 0) {
-        printf("Skipped coverage (self-skipped groups — most need "
-               "ZCL_STRESS_TESTS=1 + an isolated run):\n");
-        for (size_t i = 0; i < g_num_groups; i++) {
-            if (results[i].skipped || results[i].skip_markers == 0) continue;
-            printf("  - %s: %d skip marker(s)\n",
-                   g_groups[i].name, results[i].skip_markers);
-        }
-    }
-    if (unobserved_groups > 0) {
-        printf("Unobserved legs (the group RAN and hard-asserted its load-free "
-               "contract; an environment-dependent leg did not report "
-               "in-window. Reported, not skipped, and never cached):\n");
-        for (size_t i = 0; i < g_num_groups; i++) {
-            if (results[i].skipped || results[i].env_unobserved == 0) continue;
-            printf("  - %s: %d unobserved leg(s)\n",
-                   g_groups[i].name, results[i].env_unobserved);
-        }
-    }
-    if (load_flaky_groups > 0) {
-        printf("Load-flaky groups (FAIL/WEDGED, or PASS-with-UNOBSERVED, "
-               "under the shared pool; observed clean alone — counted as "
-               "PASS, never a silent cache hit; see the LOAD-FLAKY / "
-               "LOAD-UNOBSERVED lines above):\n");
-        for (size_t i = 0; i < g_num_groups; i++) {
-            if (results[i].skipped || !results[i].load_flaky) continue;
-            printf("  - %s%s\n", g_groups[i].name,
-                   results[i].load_unobserved ? " (was UNOBSERVED, never cached)"
-                                               : "");
-        }
-    }
-    if (failed_groups > 0) {
-        printf("Failed groups:\n");
-        for (size_t i = 0; i < g_num_groups; i++) {
-            if (results[i].skipped) continue;
-            bool pass =
-                !results[i].signaled && results[i].exit_code == 0;
-            if (pass) continue;
-            print_failed_group_prefix(g_groups[i].name, &results[i],
-                                      timeout_secs);
-            if (results[i].signaled)
-                printf(" signal=%d", results[i].exit_code);
-            else
-                printf(" code=%d", results[i].exit_code);
-            if (results[i].out_path[0])
-                printf(" log=%s", results[i].out_path);
-            printf("\n");
-            /* Exact focused rerun for this group — no whole-group wait.
-             * Params-heavy groups (Groth16 proving; normally gated out
-             * unless ZCL_PARAMS_TESTS/--only opted in) need the same env
-             * opt-in on the rerun. */
-            printf("      repro: %smake t-fast ONLY=%s\n",
-                   group_is_params_heavy(g_groups[i].name)
-                       ? "ZCL_PARAMS_TESTS=1 " : "",
-                   g_groups[i].name);
-        }
-    }
+    print_suite_notes(results, skip_groups, unobserved_groups,
+                      load_flaky_groups);
+    if (failed_groups > 0)
+        print_failed_groups_report(results, timeout_secs);
 
     /* ── Cache accounting: store fresh cacheable PASSes, report cached/ran,
      * and (cold-audit) assert every stored PASS at a group's CURRENT key would
@@ -3302,73 +3570,15 @@ int main(int argc, char **argv)
     int audit_diverged = 0;
     int observation_refused = 0;
     if (cache_mode != CACHE_OFF) {
-        size_t cached_n = 0, ran = 0, stored = 0, audit_hits = 0;
-        for (size_t i = 0; i < g_num_groups; i++) {
-            if (results[i].skipped) continue;
-            if (results[i].cached) { cached_n++; continue; }
-            ran++;
-            bool pass = !results[i].signaled && results[i].exit_code == 0;
-            /* A zero-exit group that printed SKIP did not prove its complete
-             * contract. Never persist that partial run as a reusable PASS.
-             * UNOBSERVED is the same story for a different reason: the group
-             * ran and hard-asserted its load-free legs, but one leg never got
-             * an observation. Caching that would let a busy box mint a receipt
-             * a later run reuses as if the leg had been proven, so it is
-             * barred from the cache exactly like a skip. It does NOT fail the
-             * run — the box's spare capacity is not a code verdict. */
-            /* A load-unobserved PASS (see rerun_load_flaky_groups) never
-             * reaches the store at all, even though it passed with
-             * env_unobserved == 0 here: the observation only happened once,
-             * alone, under a busy box's own back-pressure, and a stored
-             * receipt would let a later cache hit reuse it as if the leg
-             * were reliably observed on this host. Ordinary load-flaky
-             * PASSes (FAIL/WEDGED alone->PASS) are still cached, flagged, so
-             * they keep reprinting LOAD-FLAKY on every future hit. */
-            if (pass && results[i].skip_markers == 0 &&
-                results[i].env_unobserved == 0 &&
-                !results[i].load_unobserved && probes &&
-                probes[i].cacheable) {
-                /* A flaky pass IS a pass — the group's actual code proved
-                 * itself, alone. But it must never come back on a later
-                 * cache hit looking indistinguishable from an ordinary
-                 * uncontended pass: store the flag alongside the verdict so
-                 * every future hit reprints LOAD-FLAKY (see the cache-hit
-                 * arm above). */
-                /* Capsule-consumed runs arrive with no open handle: open
-                 * lazily on the first store so all-HIT cycles never pay an
-                 * open. A failed lazy open only loses future reuse, never
-                 * correctness — the PASS verdict already stands. */
-                if (!tc) tc = testcache_open(NULL);
-                if (tc) {
-                    if (results[i].load_flaky)
-                        testcache_store_pass_flaky(tc, probes[i].key);
-                    else
-                        testcache_store_pass(tc, probes[i].key);
-                    stored++;
-                }
-            }
-            if (cache_mode == CACHE_COLD_AUDIT && probes &&
-                probes[i].cacheable && probes[i].hit) {
-                audit_hits++;
-                if (!pass) {
-                    audit_diverged++;
-                    printf("COLD-AUDIT DIVERGENCE: %s carried a cached PASS at "
-                           "its current key but FAILED a fresh run — the "
-                           "closure/cache is UNSOUND\n", g_groups[i].name);
-                }
-            }
-        }
-        printf("cached %zu / ran %zu%s\n", cached_n, ran,
-               cache_mode == CACHE_COLD_AUDIT ? " [cold-audit]" : "");
-        if (cache_mode == CACHE_COLD_AUDIT)
-            printf("cold-audit: %zu cache-hit(s) verified against fresh runs, "
-                   "%d divergence(s)\n", audit_hits, audit_diverged);
-        else if (stored > 0)
-            printf("cache: stored %zu fresh PASS verdict(s)\n", stored);
+        struct cache_accounting acc = { .mode = cache_mode };
+        account_cache_run(results, probes, &tc, &acc);
+        print_cache_summary(&acc);
         if (cli_emit_observations)
-            observation_refused = emit_group_observations(results, probes,
+            acc.observation_refused = emit_group_observations(results, probes,
                                         observation_store_root(tc),
                                         cli_collect_observations);
+        audit_diverged = acc.audit_diverged;
+        observation_refused = acc.observation_refused;
         testcache_close(tc);
         free(probes);
     }
