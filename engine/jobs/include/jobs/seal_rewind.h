@@ -4,7 +4,7 @@
  * (storage/seal_kv.h) persists a self-verified coins_sha3 every ~1000 blocks;
  * until now nothing could REWIND to one. This is the executable consumer: given
  * a target height H below the applied frontier, reset the reducer to the NEAREST
- * self-verified seal at/below H so a forward drive re-folds only [G, H] from
+ * self-verified seal at/below H so a forward drive re-folds only (G, H] from
  * on-disk PoW-verified bodies — O(delta from the nearest seal) recovery instead
  * of an O(chain) fold from the single compiled SHA3 checkpoint.
  *
@@ -49,13 +49,13 @@ struct seal_rewind_result {
  * forward drive re-folds [G, H] from on-disk bodies. All steps run under ONE
  * progress.kv BEGIN IMMEDIATE (atomic or nothing):
  *   1. select the nearest self-valid seal G <= H (seal_kv_nearest_rewind_base);
- *   2. replay the retained inverse deltas for [G, cursor-1] into coins_kv so the
- *      set reflects coins_applied_height == G;
+ *   2. replay the retained inverse deltas for [G+1, cursor-1] into coins_kv so the
+ *      set reflects coins_applied_height == G + 1 (the seal at G commits the set through block G);
  *   3. SELF-VERIFY: recompute coins_kv_commitment over the re-derived set and
  *      REFUSE (rollback) unless it reproduces the seal's stored coins_sha3;
  *   4. on match, drop the now-invalid utxo_apply log/delta/nullifier/anchor rows
- *      above G, force the utxo_apply + tip_finalize cursors down to G, and pull
- *      coins_applied_height back to G.
+ *      above G, force the utxo_apply + tip_finalize cursors down to G + 1, and pull
+ *      coins_applied_height back to G + 1.
  *
  * `floor` is the height the rewind may never cross (pass reducer_frontier_floor()
  * in production; 0 in a from-genesis / testnet context). A seal below `floor`

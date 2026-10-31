@@ -63,17 +63,19 @@ bool seal_service_init(struct sqlite3 *db)
 }
 
 void seal_candidate_hook_in_tx(struct sqlite3 *db, struct main_state *ms,
-                               int32_t next_cursor)
+                               int32_t applied_height)
 {
     if (!db || !ms) return;
     /* The stage advances one height at a time, so the only grid point a single
-     * step can cross is G = next_cursor when it lands on a multiple of 1000. G
-     * is the coins_applied_height value, consistent with the cursor convention
-     * the ratify gate compares against. The IBD gate keeps the ~1s coins SHA3
-     * scan off the cold-sync path. Best-effort — never fails the block. */
-    if (next_cursor % (int32_t)SHA3_WINDOW_SIZE != 0) return;
+     * step can cross is G = applied_height when it is a multiple of 1000. G is
+     * the height of the block whose application the sealed set includes, the
+     * same convention as a compiled checkpoint (chain/checkpoints.h), the
+     * block hash captured at G and the rewind executor (frontier G + 1). The
+     * IBD gate keeps the ~1s coins SHA3 scan off the cold-sync path.
+     * Best-effort — never fails the block. */
+    if (applied_height % (int32_t)SHA3_WINDOW_SIZE != 0) return;
     if (is_initial_block_download(ms)) return;
-    (void)seal_candidate_emit_in_tx(db, ms, next_cursor);
+    (void)seal_candidate_emit_in_tx(db, ms, applied_height);
 }
 
 bool seal_candidate_emit_in_tx(struct sqlite3 *db, struct main_state *ms,

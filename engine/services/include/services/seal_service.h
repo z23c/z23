@@ -33,16 +33,20 @@ struct json_value;
  * not open. */
 bool seal_service_init(struct sqlite3 *db);
 
-/* The utxo_apply step_apply hook: gate (next_cursor is a 1000-grid point AND
- * not IBD) + best-effort candidate emit, INSIDE the caller's already-open
- * progress.kv txn. The IBD gate is LOAD-BEARING — it keeps the ~1s O(n) coins
- * SHA3 scan off the cold-sync path (where it would turn ~25 min into hours) and
- * fires only once caught up. A no-op when next_cursor is not a grid point or
- * during IBD. The seal failure path NEVER fails the block (return is void). */
+/* The utxo_apply step_apply hook: gate (applied_height is a 1000-grid point
+ * AND not IBD) + best-effort candidate emit, INSIDE the caller's already-open
+ * progress.kv txn. applied_height is the height of the block this txn just
+ * applied (NOT the stage cursor, which is the next height to apply): the seal
+ * at G commits the set through block G, like a compiled checkpoint. The IBD
+ * gate is LOAD-BEARING — it keeps the ~1s O(n) coins SHA3 scan off the
+ * cold-sync path (where it would turn ~25 min into hours) and fires only once
+ * caught up. A no-op when applied_height is not a grid point or during IBD.
+ * The seal failure path NEVER fails the block (return is void). */
 void seal_candidate_hook_in_tx(struct sqlite3 *db, struct main_state *ms,
-                               int32_t next_cursor);
+                               int32_t applied_height);
 
-/* Candidate: scan coins_kv at applied frontier G, build a seal_record (block
+/* Candidate: scan coins_kv with block G applied (coins_applied_height ==
+ * G + 1), build a seal_record (block
  * hash captured from `ms`'s active chain at G), insert ratified=0. Runs INSIDE
  * the caller's already-open progress.kv txn (utxo_apply step_apply's BEGIN
  * IMMEDIATE) so the candidate co-commits with the coin mutation + cursor.

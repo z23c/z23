@@ -34,7 +34,10 @@ struct sqlite3;
 struct json_value;
 
 #define SEAL_RING_SLOTS      4
-#define SEAL_RECORD_VERSION  1u
+/* Version 2: `height` G is the block whose application the set includes (a
+ * checkpoint-height convention). Version 1 seals keyed the set through G-1; the
+ * bump makes those slots self-invalid so a rewind can never use one. */
+#define SEAL_RECORD_VERSION  2u
 
 /* progress_meta keys. */
 #define SEAL_SLOT_KEY_PREFIX "seal_slot_"   /* + "0".."3" */
@@ -50,9 +53,9 @@ struct json_value;
 
 /* In-memory seal record. */
 struct seal_record {
-    int32_t  height;                 /* grid point G (multiple of 1000) */
+    int32_t  height;                 /* grid point G (multiple of 1000); set includes block G */
     uint8_t  block_hash[32];         /* active-chain hash at G at candidate time */
-    uint8_t  coins_sha3[32];         /* coins_kv_commitment over the set at G */
+    uint8_t  coins_sha3[32];         /* coins_kv_commitment over the set through block G */
     uint8_t  nullifier_sha3[32];     /* RECORDED, all-zero in M1 (see below) */
     uint8_t  anchor_window_sha3[32]; /* rolling_anchor window hash ending at G-1,
                                       * or zero if no such window committed */

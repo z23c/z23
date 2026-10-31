@@ -811,7 +811,7 @@ static job_result_t ua_commit_applied_frontier(struct ua_apply_work *w)
      * crash between the kernel COMMIT and the prune leaves extra
      * created_outputs rows below the retention floor: harmless (the bounded
      * resolver height-ignores them; the next drain re-prunes). */
-    seal_candidate_hook_in_tx(w->db, g_ms, (int32_t)next_cursor);
+    seal_candidate_hook_in_tx(w->db, g_ms, (int32_t)w->next_h);
     /* SELF-MINT the SHA3-verified anchor snapshot once, at the compiled
      * checkpoint height (observe-only, best-effort). Passed the APPLIED height
      * (cursor_in), NOT next_cursor: the stage cursor holds the NEXT height to

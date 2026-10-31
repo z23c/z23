@@ -23,6 +23,14 @@
 #include "jobs/stage_helpers.h"           /* stage_cursor_persisted */
 #include "jobs/utxo_apply_delta.h"        /* utxo_apply_ensure_delta_schema */
 #include "storage/seal_kv.h"
+#include "services/seal_service.h"        /* seal_candidate_hook_in_tx */
+#include "validation/chainstate.h"
+#include "validation/main_state.h"
+#include "validation/main_logic.h"
+#include "core/arith_uint256.h"
+#include "core/uint256.h"
+#include "core/utiltime.h"
+#include "crypto/sha3.h"
 #include "storage/coins_kv.h"
 #include "storage/nullifier_kv.h"
 #include "storage/anchor_kv.h"
@@ -98,7 +106,7 @@ static void sw_apply_block(sqlite3 *db, int h)
 }
 
 /* Insert a candidate seal at grid point G capturing the LIVE coins commitment
- * (coins_applied_height must be == G when called). */
+ * (block G applied, coins_applied_height == G + 1, when called). */
 static void sw_seal_at(sqlite3 *db, int G)
 {
     struct seal_record r;
@@ -154,12 +162,12 @@ static void sw_setup_schema(sqlite3 *db)
 }
 
 /* Fold blocks [0, last] and drop candidate seals at every grid height in
- * `grids` (as coins_applied_height reaches each). */
+ * `grids` (right after block G is applied). */
 static void sw_fold(sqlite3 *db, int last, const int *grids, int ngrids)
 {
     for (int h = 0; h <= last; h++) {
         sw_apply_block(db, h);
-        int G = h + 1;
+        int G = h;   /* seal G commits the set THROUGH block G (checkpoint convention) */
         for (int i = 0; i < ngrids; i++)
             if (grids[i] == G) sw_seal_at(db, G);
     }
@@ -225,18 +233,18 @@ static int sw_test_refold_to_seal(const int *grids, int ngrids)
     SW_CHECK("rewind: refusal == OK", rr.refusal == SEAL_REWIND_OK);
     SW_CHECK("rewind: seal_height == 15", rr.seal_height == 15);
     SW_CHECK("rewind: cursor_before == 25", rr.cursor_before == 25);
-    SW_CHECK("rewind: unwound 10 heights [15,24]", rr.unwound_heights == 10);
+    SW_CHECK("rewind: unwound 9 heights [16,24]", rr.unwound_heights == 9);
     SW_CHECK("rewind: coins_verified", rr.coins_verified);
 
     /* Post-state: exactly the coins set the seal at 15 committed to. */
-    SW_CHECK("rewind: post coins count == 15", coins_kv_count(db) == 15);
-    SW_CHECK("rewind: post utxo_apply cursor == 15",
-             stage_cursor_persisted(db, "utxo_apply", "t") == 15);
-    SW_CHECK("rewind: post tip_finalize cursor == 15",
-             stage_cursor_persisted(db, "tip_finalize", "t") == 15);
+    SW_CHECK("rewind: post coins count == 16 (blocks 0..15)", coins_kv_count(db) == 16);
+    SW_CHECK("rewind: post utxo_apply cursor == 16",
+             stage_cursor_persisted(db, "utxo_apply", "t") == 16);
+    SW_CHECK("rewind: post tip_finalize cursor == 16",
+             stage_cursor_persisted(db, "tip_finalize", "t") == 16);
     int32_t applied = -1; bool af = false;
     coins_kv_get_applied_height(db, &applied, &af);
-    SW_CHECK("rewind: post coins_applied_height == 15", af && applied == 15);
+    SW_CHECK("rewind: post coins_applied_height == 16", af && applied == 16);
 
     uint8_t now[32];
     SW_CHECK("rewind: recomputed commitment == seal_15.coins_sha3",
@@ -325,6 +333,149 @@ static int sw_test_refuse_below_floor(const int *grids, int ngrids)
     return failures;
 }
 
+/* Chain of block_index entries [0..n-1], window tip published at n-1. The tip
+ * is made to look synced (huge work, current time) so the production hook's
+ * IBD gate does not suppress the emit. */
+static bool sw_build_chain(struct main_state *ms, struct block_index **out,
+                           struct uint256 *hashes, int n)
+{
+    struct block_index *prev = NULL;
+    for (int h = 0; h < n; h++) {
+        memset(&hashes[h], 0, sizeof(hashes[h]));
+        hashes[h].data[0] = (uint8_t)(h & 0xFF);
+        hashes[h].data[1] = (uint8_t)((h >> 8) & 0xFF);
+        hashes[h].data[2] = 0x5D;
+        struct block_index *pi =
+            chainstate_insert_block_index((struct chainstate *)ms, &hashes[h]);
+        if (!pi) return false;
+        pi->nHeight = h;
+        pi->nBits = 0x1f07ffff;
+        pi->nTime = (uint32_t)GetTime();
+        pi->nVersion = 4;
+        pi->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+        pi->nTx = 1;
+        pi->nChainTx = (uint32_t)(h + 1);
+        memset(&pi->nChainWork, 0xFF, sizeof(pi->nChainWork));
+        pi->pprev = prev;
+        out[h] = pi;
+        prev = pi;
+    }
+    return active_chain_move_window_tip(&ms->chain_active, out[n - 1]);
+}
+
+static int sw_test_production_hook_height(void)
+{
+    /* ── (E) PRODUCTION HOOK KEYS THE SEAL BY THE APPLIED HEIGHT ──────────
+     * utxo_apply_stage calls seal_candidate_hook_in_tx(db, ms, w->next_h)
+     * inside the txn that applied block next_h. The stored seal must carry
+     * height == that block, block_hash == that block's hash, and a commitment
+     * of the set THROUGH that block (not through the block before it). */
+    int failures = 0;
+    enum { G = 1000 };
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "seal_rewind", "hook");
+    SW_CHECK("hook: store opens", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    sw_setup_schema(db);
+
+    struct main_state ms;
+    main_state_init(&ms);
+    static struct block_index *b[G + 1];
+    static struct uint256 hashes[G + 1];
+    bool chain_ok = sw_build_chain(&ms, b, hashes, G + 1);
+    SW_CHECK("hook: chain built", chain_ok);
+    bool ibd_free = chain_ok && !is_initial_block_download(&ms);
+    SW_CHECK("hook: not IBD", ibd_free);
+    if (!ibd_free) {
+        main_state_free(&ms);
+        progress_store_close();
+        test_cleanup_tmpdir(dir);
+        return failures;
+    }
+
+    uint8_t through_prev[32], through_g[32];
+    for (int h = 0; h < G; h++) sw_apply_block(db, h);
+    coins_kv_commitment(db, through_prev);
+    sw_apply_block(db, G);
+    coins_kv_commitment(db, through_g);
+    SW_CHECK("hook: sets through G-1 and G differ",
+             memcmp(through_prev, through_g, 32) != 0);
+
+    /* Exactly the stage's call: inside the txn, after block G's coins landed. */
+    progress_store_tx_lock();
+    sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+    seal_candidate_hook_in_tx(db, &ms, G);
+    sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    progress_store_tx_unlock();
+
+    struct seal_record r = { 0 };
+    bool found = false;
+    SW_CHECK("hook: seal stored", seal_kv_newest(db, &r, &found) && found);
+    SW_CHECK("hook: seal height == applied height", r.height == G);
+    SW_CHECK("hook: block_hash == hash of the applied block",
+             memcmp(r.block_hash, b[G]->hashBlock.data, 32) == 0);
+    SW_CHECK("hook: commitment == set applied THROUGH G",
+             memcmp(r.coins_sha3, through_g, 32) == 0);
+    SW_CHECK("hook: commitment != set through G-1",
+             memcmp(r.coins_sha3, through_prev, 32) != 0);
+
+    main_state_free(&ms);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static int sw_test_refuse_v1_record(void)
+{
+    /* ── (F) A VERSION-1 SEAL IS NEVER A REWIND BASE ──────────────────────
+     * v1 keyed the set through G-1. Rewrite a genuine seal as a v1 record
+     * with a CORRECT self_sha3 (so only the version distinguishes it). */
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "seal_rewind", "v1");
+    SW_CHECK("v1: store opens", progress_store_open(dir));
+    sqlite3 *db = progress_store_db();
+    sw_setup_schema(db);
+    const int grids[1] = { 10 };
+    sw_fold(db, 14, grids, 1);
+
+    struct seal_record base = { 0 };
+    bool found = false;
+    int slot = -1;
+    SW_CHECK("v1: v2 seal at 10 is a base before downgrade",
+             seal_kv_nearest_rewind_base(db, 12, &base, &found) && found &&
+             base.height == 10);
+    SW_CHECK("v1: slot located",
+             seal_kv_get_at_height(db, 10, &base, &found, &slot) && found);
+
+    uint8_t buf[SEAL_RECORD_BYTES] = { 0 };
+    SW_CHECK("v1: serialize", seal_serialize(&base, buf));
+    buf[0] = 1u;                                        /* version 1 */
+    sha3_256(buf, SEAL_RECORD_BYTES - 32, buf + SEAL_RECORD_BYTES - 32);
+    char key[24];
+    snprintf(key, sizeof(key), "%s%d", SEAL_SLOT_KEY_PREFIX, slot);
+    SW_CHECK("v1: write v1 record into slot", slot >= 0 &&
+             progress_meta_set(db, key, buf, sizeof(buf)));
+
+    struct seal_record parsed;
+    bool self_ok = true;
+    SW_CHECK("v1: deserialize refuses the v1 record",
+             !seal_deserialize(buf, sizeof(buf), &parsed, &self_ok) && !self_ok);
+    SW_CHECK("v1: never selected as a rewind base",
+             seal_kv_nearest_rewind_base(db, 12, &base, &found) && !found);
+
+    struct seal_rewind_result rr;
+    seal_rewind_to_nearest(db, 12, 0, &rr);
+    SW_CHECK("v1: rewind refuses NO_BASE",
+             !rr.rewound && rr.refusal == SEAL_REWIND_NO_BASE);
+    SW_CHECK("v1: reducer untouched (cursor == 15)",
+             stage_cursor_persisted(db, "utxo_apply", "t") == 15);
+
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_seal_rewind(void);
 int test_seal_rewind(void)
 {
@@ -336,6 +487,8 @@ int test_seal_rewind(void)
     failures += sw_test_refold_to_seal(grids, 4);
     failures += sw_test_refuse_torn_seal(grids, 4);
     failures += sw_test_refuse_below_floor(grids, 4);
+    failures += sw_test_production_hook_height();
+    failures += sw_test_refuse_v1_record();
 
     printf("=== seal_rewind tests complete: %d failure(s) ===\n", failures);
     return failures;

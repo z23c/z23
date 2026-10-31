@@ -43,13 +43,14 @@ static bool seal_rewind_refuse(struct seal_rewind_result *out,
     return true;
 }
 
-/* Inverse-apply the retained deltas for [G, C-1], newest first. On the first
- * failure *failed_h names that height and false is returned; *unwound counts
+/* Inverse-apply the retained deltas for [F, C-1] (F = G + 1, the first height
+ * the seal does not include), newest first. On the first failure *failed_h
+ * names that height and false is returned; *unwound counts
  * the heights applied so far. The caller logs and rolls back. */
-static bool seal_rewind_unwind_inverse_deltas(sqlite3 *db, int32_t G, int32_t C,
+static bool seal_rewind_unwind_inverse_deltas(sqlite3 *db, int32_t F, int32_t C,
                                               int32_t *failed_h, int32_t *unwound)
 {
-    for (int32_t h = C - 1; h >= G; h--) {
+    for (int32_t h = C - 1; h >= F; h--) {
         if (!utxo_apply_emit_inverse_delta(db, h)) {
             *failed_h = h;
             return false; // raw-return-ok:caller_logs_unwind_failure
@@ -59,15 +60,16 @@ static bool seal_rewind_unwind_inverse_deltas(sqlite3 *db, int32_t G, int32_t C,
     return true;
 }
 
-/* Land the reducer rows and cursors at the verified seal G, in the caller's
- * txn: drop the rows above G, force both stage cursors to G and pull
- * coins_applied_height back to G. Stops at the first failed write. */
-static bool seal_rewind_reset_rows_and_cursors(sqlite3 *db, int32_t G, int32_t C)
+/* Land the reducer rows and cursors at the verified seal G (the set through
+ * block G, so the frontier F = G + 1), in the caller's
+ * txn: drop the rows from F up, force both stage cursors to F and pull
+ * coins_applied_height back to F. Stops at the first failed write. */
+static bool seal_rewind_reset_rows_and_cursors(sqlite3 *db, int32_t F, int32_t C)
 {
-    return utxo_apply_delete_rows_above(db, G, C - 1) &&
-           stage_repair_force_stage_cursor(db, "utxo_apply", G) &&
-           stage_repair_force_stage_cursor(db, "tip_finalize", G) &&
-           utxo_apply_frontier_set_in_tx(db, G);
+    return utxo_apply_delete_rows_above(db, F, C - 1) &&
+           stage_repair_force_stage_cursor(db, "utxo_apply", F) &&
+           stage_repair_force_stage_cursor(db, "tip_finalize", F) &&
+           utxo_apply_frontier_set_in_tx(db, F);
 }
 
 bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
@@ -109,8 +111,8 @@ bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
 
     /* (2) The applied frontier: the utxo_apply cursor is the next height to
      * apply, so blocks [0, C) are applied and coins_applied_height == C. To
-     * land at coins_applied_height == G we must inverse-apply blocks [G, C-1].
-     * If the seal is at/above C there is nothing above it to unwind. */
+     * land at coins_applied_height == F we must inverse-apply blocks [F, C-1].
+     * If F is at/above C there is nothing above the seal to unwind. */
     uint64_t cursor = stage_cursor_persisted(db, "utxo_apply", "seal_rewind");
     if (cursor > (uint64_t)INT32_MAX) {
         LOG_WARN("seal_rewind",
@@ -121,8 +123,12 @@ bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
     }
     const int32_t C = (int32_t)cursor;
     out->cursor_before = C;
-    if (G >= C)
+    /* The seal at G commits the set THROUGH block G (a checkpoint-height
+     * convention), so its applied frontier is F = G + 1; compared in 64 bits
+     * so G == INT32_MAX cannot overflow (it is simply above the frontier). */
+    if ((int64_t)G + 1 >= C)
         return seal_rewind_refuse(out, SEAL_REWIND_ABOVE_FRONTIER);
+    const int32_t F = G + 1;
 
     /* (3+4) Atomic reset. Ensure the stage tables exist first (a repair path
      * can reach here before stage init on a fresh datadir). */
@@ -142,15 +148,15 @@ bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
         return true;
     }
 
-    /* Replay the retained inverse deltas for [G, C-1] into coins_kv, newest
-     * first (disconnect order), so the set unwinds to coins_applied_height==G.
+    /* Replay the retained inverse deltas for [F, C-1] into coins_kv, newest
+     * first (disconnect order), so the set unwinds to coins_applied_height==F.
      * Read the delta rows BEFORE deleting them below. */
     int32_t unwound = 0;
     int32_t h = 0;
-    if (!seal_rewind_unwind_inverse_deltas(db, G, C, &h, &unwound)) {
+    if (!seal_rewind_unwind_inverse_deltas(db, F, C, &h, &unwound)) {
         LOG_WARN("seal_rewind",
                  "[seal_rewind] inverse delta unwind failed h=%d "
-                 "(range [%d,%d])", h, G, C - 1);
+                 "(range [%d,%d])", h, F, C - 1);
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         progress_store_tx_unlock();
         out->unwound_heights = unwound;
@@ -188,15 +194,15 @@ bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
 
     /* Verified. Drop the now-invalid reducer rows above the seal
      * (utxo_apply_log/delta + nullifiers + Sprout/Sapling anchors), force the
-     * utxo_apply + tip_finalize cursors down to G so the forward drive re-folds
-     * [G, ...], and pull coins_applied_height back to G in this same txn.
+     * utxo_apply + tip_finalize cursors down to F so the forward drive re-folds
+     * [F, ...], and pull coins_applied_height back to F in this same txn.
      *
      * Upstream header/script/proof logs are DELIBERATELY untouched: their
      * [G, H] verdicts stay valid (the seal domain is the UTXO set), so
      * utxo_apply re-consumes them on the forward re-fold. tip_finalize_log rows
      * are NEVER deleted — only its cursor moves — preserving served-floor
      * evidence, exactly as the header-poison rewind does. */
-    if (!seal_rewind_reset_rows_and_cursors(db, G, C)) {
+    if (!seal_rewind_reset_rows_and_cursors(db, F, C)) {
         LOG_WARN("seal_rewind",
                  "[seal_rewind] reset writes failed at G=%d — rolling back", G);
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
@@ -228,6 +234,6 @@ bool seal_rewind_to_nearest(sqlite3 *db, int32_t H, int32_t floor,
              "[seal_rewind] reset reducer to self-verified seal G=%d "
              "(target H=%d, from cursor=%d, unwound=%d heights) — forward "
              "drive re-folds [%d, %d]",
-             G, H, C, unwound, G, H);
+             G, H, C, unwound, F, H);
     return true;
 }
