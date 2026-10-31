@@ -16,8 +16,14 @@ void zapp_native_ui_destroy(JNIEnv *env);
 bool zapp_native_ui_input(JNIEnv *env, const AInputEvent *event);
 /* Shows the assistant's More section, which holds the invitation review. */
 void zapp_native_ui_open_details(JNIEnv *env);
+/* Leaves the wallet screens, wiping what they hold, before the app goes out of view. */
+void zapp_native_ui_pause(JNIEnv *env);
 /* Reapplies immersive mode, re-reads the app list and the layout file. */
 void zapp_native_ui_resume(JNIEnv *env);
+/* Runs about every two seconds while the app is in front. */
+void zapp_native_ui_tick(JNIEnv *env);
+/* A touch was dropped because another window was drawing over the app. */
+void zapp_native_ui_dropped(JNIEnv *env);
 void zapp_native_ui_focus(JNIEnv *env);
 void zapp_native_ui_update(JNIEnv *env, const char *status, const char *output);
 void zapp_native_ui_render(JNIEnv *env, const struct zapp_view *view);

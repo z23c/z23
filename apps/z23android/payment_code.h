@@ -66,4 +66,16 @@ enum zapp_pay_refusal zapp_payment_parse(const char *text, size_t len, enum zapp
 bool zapp_payment_receive_code(const char *address, bool has_amount, uint64_t amount_zat,
                                char *out, size_t cap);
 
+/* Room for any code zapp_payment_receive_code makes: scheme, address, amount parameter and NUL. */
+#define ZAPP_RECEIVE_CODE_MAX 160
+
+/* Writes zat as ZCL: whole amounts without a point, otherwise up to 8 decimals with trailing zeros
+ * dropped ("1.5", "0.00000001"). False, with out empty, when cap is too small. */
+bool zapp_zat_format(uint64_t zat, char *out, size_t cap);
+
+/* Reads an amount typed in ZCL: digits, then optionally a point and 1 to 8 digits, with surrounding
+ * spaces allowed. The same rules as the amount parameter of a payment code, so false for anything
+ * else, including a value above the supply limit; *zat is then left unchanged. */
+bool zapp_zat_parse(const char *text, uint64_t *zat);
+
 #endif

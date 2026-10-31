@@ -12,4 +12,7 @@ void zapp_controller_detach(void);
 void zapp_controller_visible(bool visible);
 /* True while the node process runs; safe from any thread, with or without an activity. */
 bool zapp_controller_node_running(void);
+/* Runs one wallet command on the calling thread (see zapp_wallet_run); the controller worker stays free,
+ * so a slow wallet command never delays the node status. Safe from any thread. */
+bool zapp_controller_wallet_run(const char *op, const char *arg, char *out, size_t cap);
 #endif

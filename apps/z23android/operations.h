@@ -53,6 +53,11 @@ bool zapp_node_pace_write(struct zapp_runtime *r, enum zapp_pace pace);
  * node over its local RPC port; when that fails the same operation runs through the CLI, and the
  * reason is logged once until the next success. */
 bool zapp_operation_run(struct zapp_runtime *r, const char *id, char *out, size_t cap);
+/* Runs one wallet command for the wallet screens and leaves its reply in out: op is "summary", "fleet",
+ * "latest", "receive", "address", "history" (arg is the cursor of the page, "" for the newest) or "detail"
+ * (arg is the transaction id). Command line only, never logged. False, with a plain sentence or the node
+ * error text in out, when the command fails, does not exist or is given an argument that is not valid. */
+bool zapp_wallet_run(struct zapp_runtime *r, const char *op, const char *arg, char *out, size_t cap);
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
 /* True when the node has published its onion address: a valid Tor v3 hostname file. */
 bool zapp_onion_ready(const struct zapp_runtime *r);

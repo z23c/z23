@@ -629,8 +629,35 @@ static void run_receive_code(void)
     CHECK(p.has_amount && p.amount_zat == 150000000);
 }
 
+static void run_zat_format_and_parse(void)
+{
+    static const struct { uint64_t zat; const char *text; } vectors[] = {
+        {0, "0"}, {1, "0.00000001"}, {10, "0.0000001"}, {99999999, "0.99999999"}, {100000000, "1"},
+        {100000001, "1.00000001"}, {150000000, "1.5"}, {1234567890, "12.3456789"}, {2100000000000000ULL, "21000000"},
+    };
+    char out[32];
+    uint64_t zat = 7;
+    for (size_t i = 0; i < sizeof vectors / sizeof vectors[0]; i++) {
+        CHECK(zapp_zat_format(vectors[i].zat, out, sizeof out) && strcmp(out, vectors[i].text) == 0);
+        CHECK(zapp_zat_parse(vectors[i].text, &zat) && zat == vectors[i].zat);
+    }
+    CHECK(!zapp_zat_format(150000000, out, 3) && out[0] == '\0');
+    CHECK(!zapp_zat_format(1, NULL, 8) && !zapp_zat_format(1, out, 0));
+    CHECK(zapp_zat_parse(" 1.5 ", &zat) && zat == 150000000);
+    CHECK(zapp_zat_parse("0021.50000000", &zat) && zat == 2150000000ULL);
+    static const char *const bad[] = {"", " ", ".5", "1.", "1.123456789", "-1", "+1", "1e3", "1,5", "1 5", "0x10",
+        "21000000.00000001", "21000001", "99999999999999999999", "1..5", "abc", "1.5x"};
+    zat = 42;
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+        CHECK(!zapp_zat_parse(bad[i], &zat) && zat == 42);
+    CHECK(!zapp_zat_parse(NULL, &zat) && !zapp_zat_parse("1", NULL));
+    for (uint64_t value = 1; value < 2100000000000000ULL; value = value * 7 + 3)
+        CHECK(zapp_zat_format(value, out, sizeof out) && zapp_zat_parse(out, &zat) && zat == value);
+}
+
 int main(void)
 {
+    run_zat_format_and_parse();
     run_accepts();
     run_refusals();
     run_bad_shapes();

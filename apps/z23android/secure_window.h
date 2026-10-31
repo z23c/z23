@@ -50,8 +50,8 @@ void zapp_secure_window_release(void);
 #ifdef __ANDROID__
 #include <android/input.h>
 #include <android/native_activity.h>
-/* Call from the UI thread on entering (on) and leaving (off) the wallet screens. The window flag
- * takes effect when the UI thread next runs its looper. */
+/* Call from the UI thread on entering (on) and leaving (off) the wallet screens. Both protections are set
+ * through JNI before the call returns and read back; false means one is not in force. */
 bool zapp_secure_window(ANativeActivity *activity, bool on);
 /* True when the input event is a motion event the gate drops. Call on the UI thread. */
 bool zapp_secure_window_drops(const AInputEvent *event);

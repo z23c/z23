@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "wallet_view.h"
 #include "json/json.h"
+#include "payment_code.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -46,19 +47,6 @@ static bool format_full(int64_t zat, char *out, size_t cap)
     int n = snprintf(out, cap, "%lld.%08lld", (long long)(zat / WALLET_VIEW_ZAT_PER_ZCL),
                      (long long)(zat % WALLET_VIEW_ZAT_PER_ZCL));
     return n > 0 && (size_t)n < cap;
-}
-
-/* The same amount with trailing zeros dropped: 50000000 reads "0.5", 100000000 reads "1". */
-static bool format_short(int64_t zat, char *out, size_t cap)
-{
-    char full[32];
-    if (!format_full(zat, full, sizeof(full))) return false;
-    char *dot = strchr(full, '.');
-    char *end = full + strlen(full);
-    while (end > dot + 1 && end[-1] == '0') *--end = '\0';
-    if (end == dot + 1) *dot = '\0';
-    put(out, cap, full);
-    return true;
 }
 
 static bool read_int(const struct json_value *data, const char *key, int64_t *out)
@@ -173,7 +161,7 @@ static void render_pending(const struct summary *s, struct wallet_view *out)
 {
     char amount[32];
     out->pending[0] = '\0';
-    if (s->pending == 0 || !format_short(s->pending, amount, sizeof(amount))) return;
+    if (s->pending == 0 || !zapp_zat_format((uint64_t)s->pending, amount, sizeof(amount))) return;
     if (s->pending_notes > 0 && s->pending_confirmations > 0)
         snprintf(out->pending, sizeof(out->pending), "%s ZCL arriving, %lld more confirmation%s",
                  amount, (long long)s->pending_confirmations,
@@ -186,7 +174,7 @@ static void render_public(const struct summary *s, struct wallet_view *out)
 {
     char amount[32];
     out->public_line[0] = '\0';
-    if (s->public_zat == 0 || !format_short(s->public_zat, amount, sizeof(amount))) return;
+    if (s->public_zat == 0 || !zapp_zat_format((uint64_t)s->public_zat, amount, sizeof(amount))) return;
     snprintf(out->public_line, sizeof(out->public_line), "%s ZCL public", amount);
 }
 
@@ -245,6 +233,7 @@ bool wallet_view_from_summary(const char *json, struct wallet_view *out)
     if (!json || !json_read(&root, json, strlen(json))) return false;
     bool ok = parse_reply(&root, &s);
     if (ok) render_known(&s, out);
+    json_cleanse_strings(&root);
     json_free(&root);
     return ok;
 }

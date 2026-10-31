@@ -481,18 +481,45 @@ static bool plain_address(const char *a)
 }
 
 /* Formats zat as ZCL in decimal: no point for a whole amount, otherwise trailing zeros dropped. */
-static bool format_zcl(uint64_t zat, char out[RECEIVE_AMOUNT_MAX])
+static bool format_into(uint64_t zat, char *out, size_t cap)
 {
     unsigned long long whole = zat / ZAT_PER_ZCL;
     unsigned long long frac = zat % ZAT_PER_ZCL;
     if (frac == 0)
-        return fits(snprintf(out, RECEIVE_AMOUNT_MAX, "%llu", whole), RECEIVE_AMOUNT_MAX);
+        return fits(snprintf(out, cap, "%llu", whole), cap);
     char digits[9];
     (void)snprintf(digits, sizeof digits, "%08llu", frac);
     size_t keep = 8;
     while (digits[keep - 1] == '0')
         keep--;
-    return fits(snprintf(out, RECEIVE_AMOUNT_MAX, "%llu.%.*s", whole, (int)keep, digits), RECEIVE_AMOUNT_MAX);
+    return fits(snprintf(out, cap, "%llu.%.*s", whole, (int)keep, digits), cap);
+}
+
+bool zapp_zat_format(uint64_t zat, char *out, size_t cap)
+{
+    if (out == NULL || cap == 0)
+        return false;
+    out[0] = '\0';
+    if (format_into(zat, out, cap))
+        return true;
+    out[0] = '\0';
+    return false;
+}
+
+bool zapp_zat_parse(const char *text, uint64_t *zat)
+{
+    if (text == NULL || zat == NULL)
+        return false;
+    while (*text == ' ')
+        text++;
+    size_t n = strlen(text);
+    while (n > 0 && text[n - 1] == ' ')
+        n--;
+    uint64_t value = 0;
+    if (amount_value(text, n, &value) != ZAPP_PAY_OK)
+        return false;
+    *zat = value;
+    return true;
 }
 
 bool zapp_payment_receive_code(const char *address, bool has_amount, uint64_t amount_zat, char *out, size_t cap)
@@ -504,7 +531,7 @@ bool zapp_payment_receive_code(const char *address, bool has_amount, uint64_t am
     if (amount_zat > ZAPP_PAY_MAX_ZAT)
         return false;
     char amount[RECEIVE_AMOUNT_MAX];
-    if (!format_zcl(amount_zat, amount))
+    if (!zapp_zat_format(amount_zat, amount, sizeof amount))
         return false;
     return fits(snprintf(out, cap, URI_SCHEME "%s?amount=%s", address, amount), cap);
 }

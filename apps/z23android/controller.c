@@ -991,3 +991,14 @@ bool zapp_controller_node_running(void)
     pthread_mutex_unlock(&startup_lock);
     return c && zapp_node_running(&c->runtime);
 }
+bool zapp_controller_wallet_run(const char *op, const char *arg, char *out, size_t cap)
+{
+    pthread_mutex_lock(&startup_lock);
+    struct controller *c = current;
+    pthread_mutex_unlock(&startup_lock);
+    if (!c) {
+        if (out && cap) snprintf(out, cap, "The app is not ready.");
+        return false;
+    }
+    return zapp_wallet_run(&c->runtime, op, arg, out, cap);
+}

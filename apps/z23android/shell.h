@@ -15,6 +15,12 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view);
 bool zapp_shell_input(JNIEnv *env, const AInputEvent *event);
 /* Whether the assistant tree is the screen in front. */
 bool zapp_shell_assistant(void);
+/* On pause: leaves the wallet screens for Home, which wipes everything they hold and draw. */
+void zapp_shell_pause(JNIEnv *env);
+/* About every two seconds while the app is in front: refreshes the wallet screens when one is shown. */
+void zapp_shell_tick(JNIEnv *env);
+/* A touch was dropped as obscured: tells the wallet screen, which says why nothing happened. */
+void zapp_shell_dropped(JNIEnv *env);
 /* On resume: hides the system bars again, re-reads the app list and the layout file. */
 void zapp_shell_resume(JNIEnv *env);
 void zapp_shell_immersive(JNIEnv *env);

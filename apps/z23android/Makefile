@@ -109,7 +109,7 @@ test-voice:
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/speech-client.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/speech-client-test' "$$scratch"
 
-test: prepare-quirc test-bridge test-voice test-host test-devkey test-dexgen test-watch test-scan test-qr-window test-payment test-wallet-send test-qr-fuzz
+test: prepare-quirc test-bridge test-voice test-host test-devkey test-dexgen test-watch test-scan test-qr-window test-payment test-wallet test-wallet-send test-qr-fuzz
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' $(QUIRC_FLAGS) \
 	  tests/fleet_test.c fleet.c ../../vendor/qrcodegen/qrcodegen.c $(QUIRC_SOURCES) \
 	  -lm -o '$(BUILD_DIR)/fleet-test'
@@ -138,7 +138,7 @@ test: prepare-quirc test-bridge test-voice test-host test-devkey test-dexgen tes
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/bridge-test.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/bridge-client-test' "$$scratch"
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../platform/modules/json/include \
-	  -I../../platform/modules/base/include tests/wallet_view_test.c wallet_view.c \
+	  -I../../platform/modules/base/include -I../../contexts/commons/packages/zutf8/include -Itests tests/wallet_view_test.c wallet_view.c payment_code.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
 	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
 	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/wallet-view-test'
 	'$(BUILD_DIR)/wallet-view-test'
@@ -173,13 +173,34 @@ test-scan:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/scan_test.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(SPEECH_JSON) -o '$(BUILD_DIR)/scan-test'
 	'$(BUILD_DIR)/scan-test'
-
+.PHONY: test-payment test-wallet
 test-payment:
 	@mkdir -p '$(BUILD_DIR)'
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../contexts/commons/packages/zutf8/include \
 	  tests/payment_code_test.c payment_code.c ../../contexts/commons/packages/zutf8/src/zutf8.c \
 	  -o '$(BUILD_DIR)/payment-code-test'
 	'$(BUILD_DIR)/payment-code-test'
+
+# wallet_ui.c and shell.c draw with the Android API and are not built on the host; the NDK build compiles them.
+# What the host proves is the behaviour in wallet_screens.c, the command layer, and that no file that makes Home,
+# the assistant or the controller can reach wallet data.
+WALLET_FREE := home.c layout.c hosts.c pairing.c controller.c conversation.c bridge_client.c native_ui.c surface.c \
+  launcher.c fleet.c voice.c speech_client.c scan.c audio.c nodelog.c rpc.c
+test-wallet:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/wallet_screens_test.c wallet_screens.c payment_code.c wallet_view.c \
+	  ../../contexts/commons/packages/zutf8/src/zutf8.c $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-screens-test'
+	'$(BUILD_DIR)/wallet-screens-test'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) tests/wallet_run_test.c operations.c params.c rpc.c nodelog.c \
+	  $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-run-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/wallet-run.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; ZAPP_TEST_DIR="$$(cd "$$scratch" && pwd)" '$(BUILD_DIR)/wallet-run-test'
+	@if grep -nwE 'printf|fprintf|puts|perror|__android_log_print|__android_log_write' wallet_screens.c wallet_ui.c; then \
+	  echo 'wallet screens must not write to a log or console' >&2; exit 1; fi
+	@if grep -nE '#include "(wallet_screens|wallet_view|wallet_ui|payment_code)\.h"' $(WALLET_FREE); then \
+	  echo 'only the wallet files, the command layer and the shell may include the wallet headers' >&2; exit 1; fi
+	@if grep -nE 'setTextIsSelectable", true|ClipboardManager|setPrimaryClip' wallet_ui.c; then \
+	  echo 'wallet text must not be selectable or copied' >&2; exit 1; fi
 
 check-node:
 	@test -x '$(NODE_BIN)' || { echo 'Build the Android node first' >&2; exit 1; }
@@ -272,7 +293,7 @@ test-host:
 	'$(BUILD_DIR)/thermal-start-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/layout_test.c layout.c $(SPEECH_JSON) -o '$(BUILD_DIR)/layout-test'
 	'$(BUILD_DIR)/layout-test'
-	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/home_test.c home.c layout.c hosts.c pairing.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -pthread -I../../vendor/qrcodegen tests/home_test.c home.c layout.c hosts.c pairing.c scan.c payment_code.c wallet_screens.c wallet_view.c fleet.c speech_client.c bridge_client.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
 	'$(BUILD_DIR)/home-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/clip_store_test.c clip_store.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/clip-store-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/clip-store-test.XXXXXX'); \

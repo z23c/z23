@@ -1,7 +1,10 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+#define _GNU_SOURCE
 #include "home.h"
+#include "residue.h"
 #include "json/json.h"
 #include "layout.h"
+#include "wallet_screens.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -260,6 +263,71 @@ static void dark_by_default(void)
     assert(!strstr(manifest, "Light"));
 }
 
+/* Wallet data that the wallet screens hold for the owner, planted to see whether it survives them. */
+#define MARKER_ADDRESS "zs1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpq"
+#define MARKER_TXID "9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a9f3a"
+#define MARKER_SUMMARY \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"spendable_zat\":123456789,\"spendable\":\"1.23456789\"," \
+    "\"pending_zat\":50000000,\"pending\":\"0.50000000\",\"pending_notes\":2,\"pending_min_confirmations_needed\":7," \
+    "\"sending_zat\":0,\"sending\":\"0.00000000\",\"public_zat\":10000000,\"public\":\"0.10000000\",\"immature_zat\":0," \
+    "\"immature\":\"0.00000000\",\"tip_height\":3000000,\"header_height\":3000000,\"scanned_through_height\":3000000," \
+    "\"blocks_behind\":0,\"current\":true,\"locked\":false,\"encrypted\":true,\"shielded_keys\":1,\"send_allowed\":true," \
+    "\"send_blocked_reason\":\"\"}}"
+#define MARKER_HISTORY \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entries\":[{\"txid\":\"" MARKER_TXID "\",\"status\":\"confirmed\"," \
+    "\"height\":1,\"confirmations\":1,\"time\":1700000000,\"direction\":\"received\",\"kind\":\"private\",\"amount_zat\":777," \
+    "\"memo_present\":true}],\"count\":1,\"next_cursor\":null}}"
+#define MARKER_DETAIL \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entry\":{\"txid\":\"" MARKER_TXID "\",\"memo\":\"padding past the allocator header MEMO-MARKER and then more words, enough to outgrow the first block a JSON string gets\"}}}"
+static bool marker_secure(void *ctx, bool on) { (void)ctx; (void)on; return true; }
+static uint64_t marker_now(void *ctx) { (void)ctx; return 1; }
+static bool marker_run(void *ctx, const char *op, const char *arg, char *out, size_t cap)
+{
+    (void)ctx; (void)arg;
+    snprintf(out, cap, "%s", !strcmp(op, "summary") ? MARKER_SUMMARY : !strcmp(op, "history") ? MARKER_HISTORY :
+             !strcmp(op, "detail") ? MARKER_DETAIL : !strcmp(op, "latest") ? "{\"ok\":true,\"data\":{\"address\":\"" MARKER_ADDRESS "\"}}" : "");
+    return out[0] != 0;
+}
+static bool screen_text_has(const struct wallet_screen *screen, const char *needle)
+{
+    for (size_t i = 0; i < screen->count; ++i) if (strstr(screen->items[i].text, needle)) return true;
+    return false;
+}
+/* The scan finds what the screens hold while they hold it, and finds none of it anywhere in the heap or the
+ * program's data once the owner has left, whichever Home builder ran in between. The Home builders take no
+ * wallet input, and the Makefile rejects any include of the wallet files by the files that make Home. */
+static void wallet_data_does_not_outlive_the_screens(void)
+{
+    static struct wallet_screen screen;
+    static struct zapp_view view;
+    struct wallet_env env = {NULL, marker_secure, marker_run, NULL, marker_now, false};
+    struct zapp_app_entry app = {.label = "Maps", .package = "com.example.maps", .activity = "com.example.maps.Main"};
+    static const char *const markers[] = {"1.23456789", "0.5 ZCL", "MEMO-MARKER", MARKER_TXID, MARKER_ADDRESS, "1700000000", "2023-11-14"};
+    char card[2048];
+    assert(wallet_screens_init(&env));
+    assert(wallet_screens_open(WALLET_PAGE_FUNDS));
+    (void)wallet_screens_snapshot(&screen);
+    assert(screen_text_has(&screen, "1.23456789 ZCL") && process_holds("1.23456789"));
+    assert(wallet_screens_activate(WALLET_ACT_RECEIVE, 0) == WALLET_STAY);
+    (void)wallet_screens_snapshot(&screen);
+    assert(screen_text_has(&screen, "zs1q") && process_holds("qqqqqqqqqqqqqqqq"));
+    assert(wallet_screens_back() && wallet_screens_activate(WALLET_ACT_HISTORY, 0) == WALLET_STAY);
+    assert(wallet_screens_activate(WALLET_ACT_DETAIL, 0) == WALLET_STAY);
+    (void)wallet_screens_snapshot(&screen);
+    assert(screen_text_has(&screen, "MEMO-MARKER") && screen_text_has(&screen, MARKER_TXID) && process_holds("MEMO-MARKER"));
+    snprintf(view.node_line, sizeof(view.node_line), "Node synced");
+    snprintf(view.sync_status, sizeof(view.sync_status), "Synced");
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && zapp_home_app_card(&app, card + strlen(card), sizeof(card) - strlen(card)));
+    wallet_screens_close();
+    memset(&screen, 0, sizeof(screen));
+    for (size_t i = 0; i < sizeof(markers) / sizeof(markers[0]); ++i) {
+        assert(!strstr(card, markers[i]));
+        assert(!strstr(zapp_home_layout("default"), markers[i]) && !strstr(zapp_home_layout("classic"), markers[i]));
+        assert(!wallet_screens_residue(markers[i], strlen(markers[i])));
+        assert(!process_holds(markers[i]));
+    }
+    wallet_screens_shutdown();
+}
 int main(void)
 {
     dark_by_default();
@@ -267,6 +335,7 @@ int main(void)
     phone_card_omits_secrets();
     phone_card_never_shows_wallet();
     wallet_tile_has_no_amount();
+    wallet_data_does_not_outlive_the_screens();
     app_card_golden();
     z23_app_cards();
     unsigned_z23_package_is_plain();

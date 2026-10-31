@@ -40,28 +40,48 @@ bool zapp_secure_window_apply(const struct zapp_secure_ops *ops, bool on)
 
 #ifdef __ANDROID__
 #include "jni_util.h"
-#include <android/window.h>
 #include <assert.h>
 
-static bool ndk_flag_secure(void *context, bool on)
+#define WINDOW_FLAG_SECURE 0x2000 /* WindowManager.LayoutParams.FLAG_SECURE */
+
+static jobject window_of(JNIEnv *env, ANativeActivity *activity)
 {
-    ANativeActivity_setWindowFlags(context, on ? AWINDOW_FLAG_SECURE : 0, on ? 0 : AWINDOW_FLAG_SECURE);
-    return true;
+    return zj_object_property(env, activity->clazz, "getWindow", "()Landroid/view/Window;");
+}
+/* Sets or clears FLAG_SECURE through the Window on the UI thread, where the change is made before the call
+ * returns, and reads the attributes back. A flag that was only queued would leave a first frame unprotected. */
+static bool jni_flag_secure(void *context, bool on)
+{
+    ANativeActivity *activity = context;
+    JNIEnv *env = activity->env;
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return false; }
+    jobject window = window_of(env, activity);
+    bool ok = window && zj_int_property(env, window, on ? "addFlags" : "clearFlags", WINDOW_FLAG_SECURE);
+    jobject attributes = ok ? zj_object_property(env, window, "getAttributes", "()Landroid/view/WindowManager$LayoutParams;") : NULL;
+    jclass type = attributes ? (*env)->GetObjectClass(env, attributes) : NULL;
+    jfieldID field = type && zj_clean(env) ? (*env)->GetFieldID(env, type, "flags", "I") : NULL;
+    jint flags = field ? (*env)->GetIntField(env, attributes, field) : 0;
+    ok = zj_clean(env) && field && ((flags & WINDOW_FLAG_SECURE) != 0) == on;
+    (*env)->PopLocalFrame(env, NULL);
+    return ok;
 }
 static bool jni_filter_touches(void *context, bool on)
 {
     ANativeActivity *activity = context;
     JNIEnv *env = activity->env;
     if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return false; }
-    jobject window = zj_object_property(env, activity->clazz, "getWindow", "()Landroid/view/Window;");
+    jobject window = window_of(env, activity);
     jobject decor = window ? zj_object_property(env, window, "getDecorView", "()Landroid/view/View;") : NULL;
-    bool ok = decor && zj_bool_property(env, decor, "setFilterTouchesWhenObscured", on);
+    jmethodID get = decor ? zj_method(env, decor, "getFilterTouchesWhenObscured", "()Z") : NULL;
+    bool ok = decor && zj_bool_property(env, decor, "setFilterTouchesWhenObscured", on) && get &&
+        (*env)->CallBooleanMethod(env, decor, get) == (jboolean)on;
+    ok = zj_clean(env) && ok;
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }
 bool zapp_secure_window(ANativeActivity *activity, bool on)
 {
-    struct zapp_secure_ops ops = {activity, ndk_flag_secure, jni_filter_touches};
+    struct zapp_secure_ops ops = {activity, jni_flag_secure, jni_filter_touches};
     return zapp_secure_window_apply(&ops, on);
 }
 bool zapp_secure_window_drops(const AInputEvent *event)

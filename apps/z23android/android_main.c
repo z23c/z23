@@ -13,6 +13,7 @@
 #include "native_ui.h"
 #include "node_service.h"
 #include "secure_window.h"
+#include "wallet_ui.h"
 #include <android/input.h>
 #include <android/log.h>
 #include <android/looper.h>
@@ -20,6 +21,7 @@
 #include <fcntl.h>
 #include <jni.h>
 #include <pthread.h>
+#include <sys/timerfd.h>
 #include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -32,6 +34,8 @@ static _Atomic(JavaVM *) vm;
 static jobject active;
 static ALooper *looper;
 static int signal_pipe[2] = {-1, -1};
+/* Fires every two seconds so the wallet screens can refresh and notice an old reading. */
+static int tick_fd = -1;
 static uint64_t permission_ticket;
 static bool foreground = true;
 /* The saved Start node choice has been put to the background-network dialog. */
@@ -212,6 +216,16 @@ static int signal_ready(int fd, int events, void *context)
     if (activity) { refresh(env); (*env)->DeleteLocalRef(env, activity); }
     return 1;
 }
+static int tick_ready(int fd, int events, void *context)
+{
+    uint64_t expirations;
+    JNIEnv *env = NULL; JavaVM *current_vm = atomic_load(&vm);
+    (void)context;
+    if (!(events & ALOOPER_EVENT_INPUT)) return 1;
+    while (read(fd, &expirations, sizeof(expirations)) > 0) {}
+    if (foreground && current_vm && (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK) zapp_native_ui_tick(env);
+    return 1;
+}
 static int input_ready(int fd, int events, void *context)
 {
     (void)fd; (void)events;
@@ -220,7 +234,7 @@ static int input_ready(int fd, int events, void *context)
     if (!current_vm || (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return 1;
     while (AInputQueue_getEvent(queue, &event) >= 0) {
         if (AInputQueue_preDispatchEvent(queue, event)) continue;
-        if (zapp_secure_window_drops(event)) { AInputQueue_finishEvent(queue, event, true); continue; }
+        if (zapp_secure_window_drops(event)) { zapp_native_ui_dropped(env); AInputQueue_finishEvent(queue, event, true); continue; }
         bool taken = zapp_clip_screen_input(env, event) || zapp_native_ui_input(env, event);
         AInputQueue_finishEvent(queue, event, taken);
     }
@@ -406,11 +420,15 @@ static void detach_activity(JNIEnv *env)
     pthread_mutex_lock(&lock);
     jobject retained = active; active = NULL; permission_ticket = 0;
     if (looper && signal_pipe[0] >= 0) ALooper_removeFd(looper, signal_pipe[0]);
+    if (looper && tick_fd >= 0) ALooper_removeFd(looper, tick_fd);
+    if (tick_fd >= 0) close(tick_fd);
+    tick_fd = -1;
     for (int i = 0; i < 2; ++i) { if (signal_pipe[i] >= 0) close(signal_pipe[i]); signal_pipe[i] = -1; }
     if (looper) ALooper_release(looper);
     looper = NULL;
     pthread_mutex_unlock(&lock);
     zapp_secure_window_release();
+    zapp_wallet_detach();
     zapp_native_ui_destroy(env);
     if (retained) (*env)->DeleteGlobalRef(env, retained);
 }
@@ -424,12 +442,21 @@ static void destroy(ANativeActivity *activity)
     if (!newer) zapp_devkey_jni_abandon(env);
     if (owner) detach_activity(env);
 }
+/* Arms the timer that drives the wallet refresh, first firing a quarter second from now and then every two seconds
+ * so a window protection kept through a pause is released soon after Home is drawn, or stops it. */
+static bool arm_tick(bool on)
+{
+    struct itimerspec every = {{on ? 2 : 0, 0}, {0, on ? 250000000L : 0}};
+    return tick_fd >= 0 && !timerfd_settime(tick_fd, 0, &every, NULL);
+}
 static void pause_activity(ANativeActivity *activity)
 {
 #ifdef ZAPP_DEVKEY_PROBE
     zapp_devkey_probe(activity, ZAPP_DEVKEY_PROBE_PAUSE);
 #endif
+    zapp_native_ui_pause(activity->env);
     foreground = false;
+    (void)arm_tick(false);
     zapp_clip_screen_pause(activity->env);
     zapp_controller_visible(false);
     if (!atomic_load(&camera_dialog)) zapp_camera_stop();
@@ -451,6 +478,7 @@ static void resume_activity(ANativeActivity *activity)
     zapp_controller_visible(true);
     zapp_native_ui_resume(activity->env);
     refresh(activity->env);
+    (void)arm_tick(true);
 #ifdef ZAPP_DEVKEY_PROBE
     zapp_devkey_probe(activity, ZAPP_DEVKEY_PROBE_RESUME);
 #endif
@@ -470,6 +498,21 @@ static void request_full_brightness(JNIEnv *env, jobject activity)
     }
     if (!zj_clean(env) || !apply) __android_log_print(ANDROID_LOG_WARN, "z23", "full screen brightness was refused");
     (*env)->PopLocalFrame(env, NULL);
+}
+/* Creates the refresh timer and arms it. */
+static bool start_tick(void)
+{
+    tick_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+    return tick_fd >= 0 && arm_tick(true) &&
+           ALooper_addFd(looper, tick_fd, ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, tick_ready, NULL) == 1;
+}
+/* Hands a pairing offer that started the app to the controller. */
+static void forward_pairing(JNIEnv *env, jobject activity)
+{
+    char offer[256];
+    if (!intent_pairing(env, activity, offer, sizeof(offer))) return;
+    (void)zapp_controller_action("pair_offer", offer, "");
+    memory_cleanse(offer, sizeof(offer));
 }
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size);
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size)
@@ -491,18 +534,16 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
     ALooper_acquire(looper);
     if (pipe2(signal_pipe, O_CLOEXEC | O_NONBLOCK) ||
         ALooper_addFd(looper, signal_pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, signal_ready, NULL) != 1) goto fail;
+    if (!start_tick()) goto fail;
     pthread_mutex_lock(&lock); active = (*env)->NewGlobalRef(env, activity->clazz); pthread_mutex_unlock(&lock);
     if (!clean(env) || !active || !release_surface(env, activity->clazz) ||
         !zapp_native_ui_package_preview(env, activity->clazz, &preview) ||
         !zapp_controller_start(activity->internalDataPath, native_dir, preview, notify) ||
-        !zapp_native_ui_create(env, activity->clazz, action)) goto fail;
+        !zapp_native_ui_create(env, activity->clazz, action) ||
+        !zapp_wallet_attach(activity, notify)) goto fail;
     request_full_brightness(env, activity->clazz);
     zapp_camera_set_frame_notify(notify);
-    char offer[256];
-    if (intent_pairing(env, activity->clazz, offer, sizeof(offer))) {
-        (void)zapp_controller_action("pair_offer", offer, "");
-        memory_cleanse(offer, sizeof(offer));
-    }
+    forward_pairing(env, activity->clazz);
     intent_clips(env, activity->clazz, activity->internalDataPath);
     refresh(env); return;
 fail:

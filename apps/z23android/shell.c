@@ -5,7 +5,9 @@
 #include "jni_util.h"
 #include "launcher.h"
 #include "layout.h"
+#include "secure_window.h"
 #include "surface.h"
+#include "wallet_ui.h"
 #include <android/keycodes.h>
 #include <errno.h>
 #include <stdio.h>
@@ -21,9 +23,9 @@
 #define BUTTON_COLOR 0xff2b2b2bu
 #define WHITE 0xffffffffu
 
-enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_COUNT };
+enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_WALLET, SCREEN_COUNT };
 enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL };
-enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE };
+enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET };
 
 struct nav { jobject view; enum command command; size_t arg; };
 struct target { enum target_kind kind; size_t index; char id[ZAPP_NAME_CAP]; size_t card; };
@@ -49,6 +51,11 @@ static struct {
     size_t nav_count;
     struct target pressed;
     float down_x, down_y;
+    /* Obscured touches are dropped while the wallet is shown, whatever the window gate does. */
+    struct zapp_touch_gate gate;
+    /* The app went out of view on a wallet screen: the wallet data is gone and the window protection is kept until a
+     * screen without wallet data has been drawn after the app returns. parking is set while that move is made. */
+    bool held, parking;
 } shell;
 
 static void go(JNIEnv *env, enum screen next);
@@ -256,6 +263,15 @@ static bool build_scan(JNIEnv *env, jobject root)
     if (image) (*env)->DeleteLocalRef(env, image);
     return ok;
 }
+static bool build_wallet(JNIEnv *env, jobject root)
+{
+    jobject scroll = zj_widget(env, "android/widget/ScrollView", shell.activity), content = column(env, DARK, 16, false);
+    bool ok = scroll && content && zj_margins(env, scroll, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, scroll, content) &&
+        zj_append(env, root, scroll) && zapp_wallet_ui_create(env, shell.activity, content);
+    if (scroll) (*env)->DeleteLocalRef(env, scroll);
+    if (content) (*env)->DeleteLocalRef(env, content);
+    return ok;
+}
 static bool add_screen(JNIEnv *env, jobject stage, enum screen which, jobject root)
 {
     bool ok = root && zj_margins(env, root, MATCH, MATCH, 0.0f, 0, 0, 0, 0) && zj_visible(env, root, which == SCREEN_HOME) &&
@@ -267,11 +283,12 @@ static bool build_stage(JNIEnv *env, jobject assistant)
 {
     jobject stage = zj_widget(env, "android/widget/FrameLayout", shell.activity);
     jobject home = column(env, DARK, 0, false), apps = column(env, DARK, 12, false);
-    jobject settings = column(env, DARK, 20, false), scan = column(env, 0xff000000u, 0, false);
-    bool ok = stage && build_home(env, home) && build_apps(env, apps) && build_settings(env, settings) && build_scan(env, scan) &&
+    jobject settings = column(env, DARK, 20, false), scan = column(env, 0xff000000u, 0, false), wallet = column(env, DARK, 0, false);
+    bool ok = stage && build_home(env, home) && build_apps(env, apps) && build_settings(env, settings) && build_scan(env, scan) && build_wallet(env, wallet) &&
         add_screen(env, stage, SCREEN_HOME, home) && add_screen(env, stage, SCREEN_ASSISTANT, assistant) &&
         add_screen(env, stage, SCREEN_APPS, apps) && add_screen(env, stage, SCREEN_SETTINGS, settings) &&
-        add_screen(env, stage, SCREEN_SCAN, scan);
+        add_screen(env, stage, SCREEN_SCAN, scan) &&
+        add_screen(env, stage, SCREEN_WALLET, wallet);
     if (ok) {
         jmethodID set = zj_method(env, shell.activity, "setContentView", "(Landroid/view/View;)V");
         if (set) (*env)->CallVoidMethod(env, shell.activity, set, stage);
@@ -345,14 +362,29 @@ static void fill_apps(JNIEnv *env)
     shell.row_count = 0;
     for (size_t i = 0; i < shell.app_count && add_app_row(env, i); ++i) {}
 }
+static void enter_wallet(JNIEnv *env)
+{
+    (void)wallet_screens_open(WALLET_PAGE_FUNDS);
+    zapp_wallet_ui_render(env);
+}
+static void leave_wallet(JNIEnv *env)
+{
+    if (shell.parking) { wallet_screens_pause(); shell.held = true; }
+    else wallet_screens_close();
+    zapp_wallet_ui_clear(env);
+}
 static void go(JNIEnv *env, enum screen next)
 {
+    if (shell.current == SCREEN_WALLET) leave_wallet(env);
+    if (next == SCREEN_WALLET) { shell.gate.protect = true; shell.held = false; }
+    else zapp_touch_gate_release(&shell.gate);
     shell.current = next;
     shell.action_notice[0] = 0;
     set_text(env, shell.outcome_view, "");
     if (next == SCREEN_APPS) { refresh_apps(env, true); fill_apps(env); }
     if (next == SCREEN_SETTINGS) settings_status(env);
     if (next == SCREEN_SCAN) zapp_shell_immersive(env);
+    if (next == SCREEN_WALLET) enter_wallet(env);
     for (int i = 0; i < SCREEN_COUNT; ++i) (void)zj_visible(env, shell.roots[i], i == (int)next);
     if (next == SCREEN_HOME) show_home(env);
     show_notice(env);
@@ -375,6 +407,9 @@ static void back(JNIEnv *env)
     if (shell.current == SCREEN_SCAN) {
         zapp_camera_stop(); shell.scan_dismissed = true;
         go(env, shell.before_scan);
+    } else if (shell.current == SCREEN_WALLET) {
+        if (wallet_screens_back()) zapp_wallet_ui_render(env);
+        else go(env, SCREEN_HOME);
     } else if (shell.current != SCREEN_HOME) go(env, SCREEN_HOME);
     else set_text(env, shell.outcome_view, "");
 }
@@ -415,6 +450,7 @@ static void run_tile(JNIEnv *env, const struct target *target)
     char package[ZAPP_APP_PACKAGE_CAP] = "", activity[ZAPP_APP_ACTIVITY_CAP] = "", name[ZAPP_APP_LABEL_CAP] = "";
     if (!strcmp(target->id, "scan")) shell.send("scan", "");
     else if (!strcmp(target->id, "assistant")) go(env, SCREEN_ASSISTANT);
+    else if (!strcmp(target->id, "wallet")) go(env, SCREEN_WALLET);
     else if (!strcmp(target->id, "apps")) go(env, SCREEN_APPS);
     else if (!strcmp(target->id, "settings")) go(env, SCREEN_SETTINGS);
     else if (!strcmp(target->id, "launch") && target->card != ZAPP_NO_CARD && target->card > 0 &&
@@ -429,6 +465,7 @@ static bool find_target(JNIEnv *env, float x, float y, struct target *target)
     memset(target, 0, sizeof(*target));
     for (size_t i = 0; i < shell.nav_count; ++i)
         if (zj_hit(env, shell.navs[i].view, x, y)) { target->kind = TARGET_NAV; target->index = i; return true; }
+    if (shell.current == SCREEN_WALLET && zapp_wallet_ui_hit(env, x, y, &target->index)) { target->kind = TARGET_WALLET; return true; }
     for (size_t i = 0; shell.current == SCREEN_APPS && i < shell.row_count; ++i)
         if (zj_hit(env, shell.rows[i], x, y)) { target->kind = TARGET_ROW; target->index = i; return true; }
     if (shell.current == SCREEN_HOME && zapp_surface_hit(env, x, y, target->id, &target->card)) {
@@ -441,12 +478,19 @@ static bool same_target(const struct target *a, const struct target *b)
 {
     return a->kind == b->kind && a->index == b->index && !strcmp(a->id, b->id);
 }
+static void run_wallet(JNIEnv *env, size_t button)
+{
+    enum wallet_outcome outcome = zapp_wallet_ui_press(env, button);
+    if (outcome == WALLET_SCAN) shell.send("scan", "");
+    else if (outcome == WALLET_LEAVE) go(env, SCREEN_HOME);
+}
 static void tap(JNIEnv *env, float x, float y)
 {
     struct target now, before = shell.pressed;
     memset(&shell.pressed, 0, sizeof(shell.pressed));
     if (before.kind == TARGET_NONE || !find_target(env, x, y, &now) || !same_target(&before, &now)) return;
     if (now.kind == TARGET_NAV) run_nav(env, &shell.navs[now.index]);
+    else if (now.kind == TARGET_WALLET) run_wallet(env, now.index);
     else if (now.kind == TARGET_ROW) launch(env, shell.apps[now.index].entry.package, shell.apps[now.index].entry.activity, shell.apps[now.index].entry.label);
     else run_tile(env, &now);
 }
@@ -468,6 +512,11 @@ bool zapp_shell_input(JNIEnv *env, const AInputEvent *event)
     int32_t type = AInputEvent_getType(event);
     if (type == AINPUT_EVENT_TYPE_KEY && AKeyEvent_getKeyCode(event) == AKEYCODE_BACK) {
         if (AKeyEvent_getAction(event) == AKEY_EVENT_ACTION_UP) back(env);
+        return true;
+    }
+    if (type == AINPUT_EVENT_TYPE_MOTION && zapp_touch_gate_drops(&shell.gate, AMotionEvent_getAction(event), AMotionEvent_getFlags(event))) {
+        memset(&shell.pressed, 0, sizeof(shell.pressed));
+        zapp_shell_dropped(env);
         return true;
     }
     if (type == AINPUT_EVENT_TYPE_MOTION && shell.current != SCREEN_ASSISTANT) touch(env, event);
@@ -523,6 +572,28 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
     if (zapp_home_offer_jump(view->pair_offer[0] != 0, shell.current == SCREEN_SCAN, &shell.pair_seen)) go(env, SCREEN_ASSISTANT);
     set_phone_card(view);
     show_home(env);
+    if (shell.current == SCREEN_WALLET) zapp_wallet_ui_render(env);
+}
+void zapp_shell_pause(JNIEnv *env)
+{
+    if (!shell.activity || shell.current != SCREEN_WALLET) return;
+    shell.parking = true;
+    go(env, SCREEN_HOME);
+    shell.parking = false;
+}
+void zapp_shell_dropped(JNIEnv *env)
+{
+    if (shell.activity && shell.current == SCREEN_WALLET) zapp_wallet_ui_dropped(env, shell.gate.obscured_gestures);
+}
+void zapp_shell_tick(JNIEnv *env)
+{
+    if (!shell.activity) return;
+    if (shell.current == SCREEN_WALLET) zapp_wallet_ui_tick(env);
+    else if (shell.held) {
+        /* The first tick after the app returned: Home has been on screen for at least one frame. */
+        shell.held = false;
+        wallet_screens_close();
+    }
 }
 void zapp_shell_resume(JNIEnv *env)
 {
@@ -530,12 +601,14 @@ void zapp_shell_resume(JNIEnv *env)
     zapp_shell_immersive(env);
     refresh_apps(env, false);
     load_layout();
-    if (shell.current == SCREEN_APPS || shell.current == SCREEN_SETTINGS) go(env, SCREEN_HOME);
+    if (shell.current == SCREEN_APPS || shell.current == SCREEN_SETTINGS || shell.current == SCREEN_WALLET) go(env, SCREEN_HOME);
     else show_home(env);
 }
 void zapp_shell_destroy(JNIEnv *env)
 {
     if (!shell.activity) return;
+    leave_wallet(env);
+    zapp_wallet_ui_destroy(env);
     zapp_surface_destroy(env);
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);

@@ -1,7 +1,11 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+#define _GNU_SOURCE
 #include "wallet_view.h"
+#include "base/cleanse.h"
+#include "residue.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define VALID_REPLY                                                                                  \
@@ -291,6 +295,27 @@ static void test_group_address(void)
     printf("  address grouping in blocks of four, malformed input refused\n");
 }
 
+/* The parsed reply is overwritten before it is freed: text in it is not left in the heap or the program's data. */
+static void test_reply_text_is_wiped(void)
+{
+    static const char marker[] = "wallet-view-tree-marker-4f1c9e";
+    char json[2048], planted[128];
+    struct wallet_view v;
+    snprintf(planted, sizeof(planted), "pad to pass the header %s", marker);
+    replace_once(json, sizeof(json), VALID_REPLY, "\"spendable_zat\"", "\"note\":\"pad to pass the header wallet-view-tree-marker-4f1c9e\",\"spendable_zat\"");
+    static char *volatile held;                       /* escapes, so the copy is really made */
+    held = strdup(planted);
+    assert(held && process_holds(marker));            /* the check sees text that is there */
+    memory_cleanse(held, strlen(held));
+    free(held);
+    held = NULL;
+    assert(!process_holds(marker));
+    assert(wallet_view_from_summary(json, &v) && v.known);
+    memory_cleanse(json, sizeof(json));
+    memory_cleanse(planted, sizeof(planted));
+    assert(!process_holds(marker));
+}
+
 int main(void)
 {
     printf("wallet view model:\n");
@@ -304,6 +329,7 @@ int main(void)
     test_malformed_fields_are_unknown();
     test_bad_input_is_unknown();
     test_group_address();
+    test_reply_text_is_wiped();
     printf("wallet view model: all tests passed\n");
     return 0;
 }

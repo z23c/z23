@@ -6,6 +6,7 @@
 #include "json/json.h"
 #include "base/cleanse.h"
 #include "rpc.h"
+#include "wallet_screens.h"
 #ifdef __ANDROID__
 #include <android/log.h>
 #endif
@@ -520,6 +521,56 @@ bool zapp_operation_run(struct zapp_runtime *r, const char *id, char *out, size_
                command(r, operations[i].args, NULL, out, cap);
     }
     snprintf(out, cap, "This operation is not available in the phone's permission set.");
+    return false;
+}
+
+/* The wallet commands the wallet screens run, by the id they ask with. None has a node RPC form, so
+ * they go through the command line. A history page is chosen by cursor and a transaction by its id; the
+ * argument is checked here as well, because it becomes a command-line argument. */
+enum wallet_arg { ARG_NONE, ARG_CURSOR, ARG_TXID };
+static const struct { const char *id; const char *args[5]; enum wallet_arg arg; } wallet_commands[] = {
+    {"summary", {"core", "wallet", "summary"}, ARG_NONE},
+    {"fleet", {"core", "wallet", "fleet", "status"}, ARG_NONE},
+    {"latest", {"core", "wallet", "shielded", "latest"}, ARG_NONE},
+    {"receive", {"core", "wallet", "shielded", "receive"}, ARG_NONE},
+    {"history", {"core", "wallet", "history"}, ARG_CURSOR},
+    {"detail", {"core", "wallet", "history"}, ARG_TXID},
+};
+
+/* Adds the checked argument to the command line, or says why it is refused. */
+static bool wallet_argument(enum wallet_arg kind, const char *arg, const char **args, size_t *n, char *value, size_t size, char *out, size_t cap)
+{
+    if (kind == ARG_CURSOR) {
+        if (arg[0] && !wallet_cursor_valid(arg)) { snprintf(out, cap, "That is not a history cursor."); return false; }
+        snprintf(value, size, "--limit=%u", WALLET_PAGE_ROWS);
+        args[(*n)++] = value;
+        if (arg[0]) {
+            size_t at = strlen(value) + 1;
+            snprintf(value + at, size - at, "--cursor=%s", arg);
+            args[(*n)++] = value + at;
+        }
+    } else if (kind == ARG_TXID) {
+        if (!wallet_txid_valid(arg)) { snprintf(out, cap, "That is not a transaction id."); return false; }
+        snprintf(value, size, "--txid=%s", arg);
+        args[(*n)++] = value;
+    } else if (arg[0]) { snprintf(out, cap, "This wallet command takes no argument."); return false; }
+    return true;
+}
+
+bool zapp_wallet_run(struct zapp_runtime *r, const char *op, const char *arg, char *out, size_t cap)
+{
+    if (!r || !op || !arg || !out || cap < 64) return false;
+    for (size_t i = 0; i < sizeof(wallet_commands) / sizeof(wallet_commands[0]); ++i) {
+        const char *args[8] = {0};
+        char value[WALLET_CURSOR_MAX + 48];
+        size_t n = 0;
+        if (strcmp(op, wallet_commands[i].id) != 0) continue;
+        if (r->preview) { snprintf(out, cap, "The preview app has no wallet."); return false; }
+        for (size_t a = 0; wallet_commands[i].args[a]; ++a) args[n++] = wallet_commands[i].args[a];
+        if (!wallet_argument(wallet_commands[i].arg, arg, args, &n, value, sizeof(value), out, cap)) return false;
+        return command(r, args, NULL, out, cap);
+    }
+    snprintf(out, cap, "This wallet command is not available in the phone's permission set.");
     return false;
 }
 

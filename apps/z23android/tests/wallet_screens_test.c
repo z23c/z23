@@ -1,0 +1,984 @@
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+#define _GNU_SOURCE
+#include "residue.h"
+#include "wallet_screens.h"
+#include <limits.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+#define CHECK(cond)                                                                              \
+    do {                                                                                         \
+        if (!(cond)) {                                                                           \
+            fprintf(stderr, "wallet_screens_test: %s:%d: failed: %s\n", __FILE__, __LINE__, #cond); \
+            exit(1);                                                                             \
+        }                                                                                        \
+    } while (0)
+
+/* Fixtures hold no key material: only the length and charset of each address form are real. */
+#define Q10 "qqqqqqqqqq"
+#define Q70 Q10 Q10 Q10 Q10 Q10 Q10 Q10
+#define ADDR(n) "zs1" Q70 "qqqq" #n
+#define A1 "zs1" Q70 "qqqqp"
+#define A2 "zs1" Q70 "qqqqz"
+#define PUBLIC_ADDR "t1" "aaaaaaaaaa" "aaaaaaaaaa" "aaaaaaaaaa" "aaa"
+_Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36, "address fixtures have real lengths");
+#define H8(c) c c c c c c c c
+#define TXID(c) H8(c) H8(c) H8(c) H8(c) H8(c) H8(c) H8(c) H8(c)
+#define TX_A TXID("a")
+#define TX_B TXID("b")
+#define TX_C TXID("c")
+#define TX_D TXID("d")
+#define CURSOR_1 "3000000:" TXID("e")
+
+#define SUMMARY_SEND(spendable_zat, spendable, pending_zat, pending, public_zat, public, allowed, why)                   \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"spendable_zat\":" spendable_zat ","  \
+    "\"spendable\":\"" spendable "\",\"pending_zat\":" pending_zat ",\"pending\":\"" pending "\","      \
+    "\"pending_notes\":2,\"pending_min_confirmations_needed\":7,\"sending_zat\":0,\"sending\":\"0.00000000\"," \
+    "\"public_zat\":" public_zat ",\"public\":\"" public "\",\"immature_zat\":0,"                       \
+    "\"immature\":\"0.00000000\",\"tip_height\":3000000,\"header_height\":3000000,"                     \
+    "\"scanned_through_height\":3000000,\"blocks_behind\":0,\"current\":true,\"locked\":false,"         \
+    "\"encrypted\":true,\"shielded_keys\":1,\"send_allowed\":" allowed ",\"send_blocked_reason\":\"" why "\"}}"
+#define SUMMARY(spendable_zat, spendable, pending_zat, pending, public_zat, public) \
+    SUMMARY_SEND(spendable_zat, spendable, pending_zat, pending, public_zat, public, "true", "")
+#define GOOD_SUMMARY SUMMARY("123456789", "1.23456789", "50000000", "0.50000000", "10000000", "0.10000000")
+#define UNKNOWN_COMMAND_ERROR "{\"ok\":false,\"error\":{\"code\":\"UNKNOWN_COMMAND\"}}"
+#define OTHER_ERROR "{\"ok\":false,\"error\":{\"code\":\"WALLET_LOCKED\"}}"
+
+/* The fleet status worker's frame, with its machines. */
+#define FLEET_R(member, verdict, refuses, total, connected, machines)                                  \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet_status.v1\",\"member\":" member ",\"verdict\":\"" verdict "\"," \
+    "\"refuses_send\":" refuses ",\"machines_total\":" total ",\"machines_connected\":" connected ",\"local_tip\":3000000," \
+    "\"machines\":[" machines "]}}"
+#define FLEET(member, verdict, total, connected, machines) FLEET_R(member, verdict, "false", total, connected, machines)
+#define MACHINE(name, up, how) "{\"name\":\"" name "\",\"connected\":" up ",\"agreement\":\"" how "\"}"
+
+#define ROW(direction, kind, status, amount, time, txid, memo)                                          \
+    "{\"txid\":\"" txid "\",\"status\":\"" status "\",\"height\":2999990,\"confirmations\":11,\"time\":" time "," \
+    "\"direction\":\"" direction "\",\"kind\":\"" kind "\",\"amount_zat\":" amount ",\"amount\":null," \
+    "\"fee_zat\":null,\"fee\":null,\"net_zat\":0,\"memo_present\":" memo "}"
+#define PAGE(rows, count, next)                                                                          \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entries\":[" rows "],\"count\":" count "," \
+    "\"next_cursor\":" next "}}"
+#define ROW_SENT ROW("sent", "private", "confirmed", "150000000", "1700000000", TX_A, "true")
+#define ROW_RECEIVED ROW("received", "public", "pending", "null", "1700003600", TX_B, "false")
+#define ROW_INTERNAL ROW("internal", "private", "bogus", "1", "null", TX_C, "false")
+#define HISTORY_PAGE0 PAGE(ROW_SENT "," ROW_RECEIVED "," ROW_INTERNAL, "3", "\"" CURSOR_1 "\"")
+#define HISTORY_PAGE1 PAGE(ROW("received", "private", "confirmed", "2100000000000000", "1700086400", TX_D, "false"), "1", "null")
+#define DETAIL(memo_member) "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entry\":{\"txid\":\"" TX_A "\"," memo_member "}}}"
+
+struct fake {
+    bool secure_ok, secure_on, block, async, always_ok;
+    int secure_on_calls, secure_off_calls, changed, active, active_max, op_active[8];
+    char ops[1024][16];
+    char args[1024][WALLET_CURSOR_MAX];
+    int op_count, counts[8];
+    const char *summary, *fleet, *latest, *receive, *detail;
+    const char *history[3]; /* by page: the first, the one after CURSOR_1 */
+    void (*during)(const char *op, const char *arg);
+    uint64_t now;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+};
+static struct fake fake;
+
+static bool fake_secure(void *ctx, bool on)
+{
+    (void)ctx;
+    if (on) ++fake.secure_on_calls; else ++fake.secure_off_calls;
+    if (fake.secure_ok) fake.secure_on = on;
+    return fake.secure_ok;
+}
+static bool reply(const char *text, char *out, size_t cap)
+{
+    bool ok = text && (fake.always_ok || strncmp(text, "{\"ok\":false", 11) != 0);
+    snprintf(out, cap, "%s", text ? text : UNKNOWN_COMMAND_ERROR);
+    return ok;
+}
+static const char *answer(const char *op, const char *arg)
+{
+    if (!strcmp(op, "summary")) return fake.summary;
+    if (!strcmp(op, "fleet")) return fake.fleet;
+    if (!strcmp(op, "latest")) return fake.latest;
+    if (!strcmp(op, "receive")) return fake.receive;
+    if (!strcmp(op, "detail")) { CHECK(!strcmp(arg, TX_A)); return fake.detail; }
+    CHECK(!strcmp(op, "history"));
+    return !arg[0] ? fake.history[0] : !strcmp(arg, CURSOR_1) ? fake.history[1] : NULL;
+}
+static int op_slot(const char *op)
+{
+    static const char *const names[] = {"summary", "fleet", "latest", "receive", "history", "detail"};
+    for (int i = 0; i < 6; ++i) if (!strcmp(op, names[i])) return i;
+    CHECK(false);
+    return 0;
+}
+static bool fake_run(void *ctx, const char *op, const char *arg, char *out, size_t cap)
+{
+    (void)ctx;
+    int slot = op_slot(op);
+    pthread_mutex_lock(&fake.lock);
+    if (fake.op_count < 1024) {
+        snprintf(fake.ops[fake.op_count], sizeof(fake.ops[0]), "%s", op);
+        snprintf(fake.args[fake.op_count], sizeof(fake.args[0]), "%s", arg);
+    }
+    ++fake.op_count;
+    ++fake.counts[slot];
+    ++fake.op_active[slot];
+    if (++fake.active > fake.active_max) fake.active_max = fake.active;
+    CHECK(!fake.async || fake.op_active[slot] == 1);
+    while (fake.block) pthread_cond_wait(&fake.cond, &fake.lock);
+    pthread_mutex_unlock(&fake.lock);
+    if (fake.during) fake.during(op, arg);
+    bool ok = reply(answer(op, arg), out, cap);
+    pthread_mutex_lock(&fake.lock);
+    --fake.op_active[slot];
+    --fake.active;
+    pthread_mutex_unlock(&fake.lock);
+    return ok;
+}
+static void fake_changed(void *ctx) { (void)ctx; pthread_mutex_lock(&fake.lock); ++fake.changed; pthread_mutex_unlock(&fake.lock); }
+static uint64_t fake_now(void *ctx) { (void)ctx; return fake.now; }
+
+static void start(bool async)
+{
+    struct wallet_env env = {NULL, fake_secure, fake_run, fake_changed, fake_now, async};
+    wallet_screens_shutdown();
+    memset(&fake, 0, sizeof(fake));
+    pthread_mutex_init(&fake.lock, NULL);
+    pthread_cond_init(&fake.cond, NULL);
+    fake.secure_ok = true;
+    fake.async = async;
+    fake.now = 1000000;
+    fake.summary = GOOD_SUMMARY;
+    fake.latest = "{\"ok\":true,\"data\":{\"address\":\"" A1 "\"}}";
+    fake.receive = "{\"ok\":true,\"data\":{\"address\":\"" A2 "\"}}";
+    fake.history[0] = HISTORY_PAGE0;
+    fake.history[1] = HISTORY_PAGE1;
+    CHECK(wallet_screens_init(&env));
+}
+
+static struct wallet_screen screen;
+static struct wallet_screen *snap(void) { (void)wallet_screens_snapshot(&screen); return &screen; }
+static long find(const struct wallet_screen *s, enum wallet_item_kind kind, enum wallet_action action)
+{
+    for (size_t i = 0; i < s->count; ++i) if (s->items[i].kind == kind && s->items[i].action == action) return (long)i;
+    return -1;
+}
+static long find_text(const struct wallet_screen *s, const char *text)
+{
+    for (size_t i = 0; i < s->count; ++i) if (strstr(s->items[i].text, text)) return (long)i;
+    return -1;
+}
+static const char *text_at(const struct wallet_screen *s, long i) { CHECK(i >= 0 && (size_t)i < s->count); return s->items[i].text; }
+static int count_ops(const char *op) { return fake.counts[op_slot(op)]; }
+static void tap(enum wallet_action action, unsigned arg, enum wallet_outcome want) { CHECK(wallet_screens_activate(action, arg) == want); }
+static bool has(const char *text) { return find_text(snap(), text) >= 0; }
+static void wait_for(bool (*done)(void))
+{
+    for (int i = 0; i < 1000 && !done(); ++i) usleep(5000);
+    CHECK(done());
+}
+static bool settled(void)
+{
+    pthread_mutex_lock(&fake.lock);
+    bool idle = fake.active == 0;
+    pthread_mutex_unlock(&fake.lock);
+    return idle;
+}
+static void set_block(void)
+{
+    pthread_mutex_lock(&fake.lock);
+    fake.block = true;
+    pthread_mutex_unlock(&fake.lock);
+}
+/* Whether the commands of a freshly opened Funds screen have all run and none is running. */
+static bool funds_commands_done(void)
+{
+    pthread_mutex_lock(&fake.lock);
+    bool done = fake.counts[0] >= 1 && fake.counts[1] >= 1 && fake.active == 0;
+    pthread_mutex_unlock(&fake.lock);
+    return done;
+}
+static void release_block(void)
+{
+    pthread_mutex_lock(&fake.lock);
+    fake.block = false;
+    pthread_cond_broadcast(&fake.cond);
+    pthread_mutex_unlock(&fake.lock);
+}
+
+/* ---- Funds ---- */
+
+static void test_funds(void)
+{
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && fake.secure_on);
+    struct wallet_screen *s = snap();
+    long amount = find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE), pending = find_text(s, "arriving"), pub = find_text(s, "public");
+    CHECK(amount >= 0 && !strcmp(text_at(s, amount), "1.23456789 ZCL"));
+    CHECK(pending > amount && !strcmp(text_at(s, pending), "0.5 ZCL arriving, 7 more confirmations"));
+    CHECK(pub > pending && !strcmp(text_at(s, pub), "0.1 ZCL public"));
+    CHECK(find_text(s, "Up to date at block 3000000") > pub);
+    CHECK(find_text(s, WALLET_FLEET_UNCHECKED) > 0);     /* the fake node has no fleet command */
+    CHECK(strcmp(text_at(s, amount), text_at(s, pending)) && !strstr(text_at(s, amount), "0.5"));
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_RECEIVE) >= 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SEND) >= 0);
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_HISTORY) >= 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_BACK) >= 0);
+    CHECK(count_ops("summary") == 1 && count_ops("fleet") == 1 && fake.changed == 2);
+    wallet_screens_close();
+}
+
+static void test_funds_replies(void)
+{
+    start(false);
+    fake.summary = SUMMARY("5", "0.00000005", "0", "0.00000000", "0", "0.00000000");   /* nothing arriving and no public funds: no such lines */
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(!has("arriving") && !has("public") && has("0.00000005 ZCL"));
+
+    fake.summary = OTHER_ERROR;               /* never a zero that was not read */
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("Balance unknown") && !has("0 ZCL") && has("could not be read"));
+
+    /* A reply that says ok:false is no reply, whatever data it carries. */
+    fake.summary = "{\"ok\":false,\"data\":\"x\"}";
+    fake.always_ok = true;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && has("Balance unknown"));
+    fake.always_ok = false;
+    fake.summary = GOOD_SUMMARY;
+
+    int before = fake.op_count;               /* Send opens the camera and nothing else */
+    tap(WALLET_ACT_SEND, 0, WALLET_SCAN);
+    CHECK(fake.op_count == before && snap()->page == WALLET_PAGE_FUNDS);
+    tap(WALLET_ACT_BACK, 0, WALLET_LEAVE);
+    wallet_screens_close();
+    CHECK(!fake.secure_on && !wallet_screens_active() && snap()->count == 0);
+}
+
+static void fleet_line(const char *reply_text, const char *want)
+{
+    start(false);
+    fake.fleet = reply_text;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has(want));
+    CHECK(strcmp(want, WALLET_FLEET_UNCHECKED) == 0 || !has(WALLET_FLEET_UNCHECKED));
+    if (strcmp(want, WALLET_FLEET_UNCHECKED)) CHECK(has("fleet machine"));
+    wallet_screens_close();
+}
+static void test_fleet(void)
+{
+    fleet_line(FLEET("true", "agree", "2", "2", MACHINE("r1", "true", "agrees") "," MACHINE("r2", "true", "agrees")), "2 fleet machines agree");
+    fleet_line(FLEET("true", "agree", "2", "1", MACHINE("r1", "true", "agrees") "," MACHINE("mac", "false", "unknown")), "1 fleet machine agrees");
+    fleet_line(FLEET_R("true", "disagree", "true", "3", "3", MACHINE("a", "true", "agrees") "," MACHINE("b", "true", "disagree") "," MACHINE("c", "true", "agrees")),
+               "1 of 3 fleet machines disagree: sending waits");
+    fleet_line(FLEET_R("true", "disagree", "true", "2", "2", MACHINE("a", "true", "disagree") "," MACHINE("b", "true", "disagree")),
+               "2 of 2 fleet machines disagree: sending waits");
+    /* A machine on a fork far below the tip is reported, but the node does not hold sending back for it. */
+    fleet_line(FLEET_R("true", "disagree", "false", "2", "2", MACHINE("a", "true", "agrees") "," MACHINE("b", "true", "disagree")),
+               "1 of 2 fleet machines last reported another chain at a lower height: sending is not held back");
+    fleet_line(FLEET("true", "agree", "3", "3", MACHINE("a", "true", "agrees") "," MACHINE("b", "true", "phone_behind") "," MACHINE("c", "true", "machine_behind")),
+               "2 fleet machines agree");
+    /* One block behind on this chain still agrees with it, so a one-machine fleet reads so after every block. */
+    fleet_line(FLEET("true", "agree", "1", "1", MACHINE("a", "true", "machine_behind")), "1 fleet machine agrees");
+    fleet_line(FLEET("true", "none_connected", "1", "0", MACHINE("a", "false", "unknown")), WALLET_FLEET_UNCHECKED);
+    fleet_line(FLEET("false", "not_member", "0", "0", ""), WALLET_FLEET_UNCHECKED);
+    /* Anything but the exact frame reads as not checked. */
+    static const char *const bad[] = {
+        "{\"ok\":true,\"data\":{\"connected\":2}}",
+        "{\"ok\":true,\"data\":{\"connected\":2,\"disagree\":0}}",
+        "{\"ok\":true,\"data\":{\"connected\":2,\"disagree\":\"1\"}}",
+        "{\"ok\":true,\"data\":{\"connected\":3,\"disagree\":1}}",
+        "{\"ok\":false,\"data\":" FLEET("true", "agree", "1", "1", MACHINE("a", "true", "agrees")) "}",
+        "{\"ok\":true,\"data\":[]}", "[]", "1", "{}", "",
+        FLEET("true", "agree", "1", "1", MACHINE("a", "true", "agrees")) "x",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet_status.v2\",\"member\":true,\"verdict\":\"agree\",\"machines_total\":1,"
+        "\"refuses_send\":false,\"machines_connected\":1,\"local_tip\":1,\"machines\":[" MACHINE("a", "true", "agrees") "]}}",
+        /* the earlier frame: no refuses_send, and local_best_header for local_tip */
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet_status.v1\",\"member\":true,\"verdict\":\"agree\",\"machines_total\":1,\"machines_connected\":1,"
+        "\"local_best_header\":3000000,\"machines\":[" MACHINE("a", "true", "agrees") "]}}",
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.fleet_status.v1\",\"member\":true,\"verdict\":\"agree\",\"refuses_send\":\"false\",\"machines_total\":1,"
+        "\"machines_connected\":1,\"local_tip\":3000000,\"machines\":[" MACHINE("a", "true", "agrees") "]}}",
+        FLEET_R("true", "disagree", "true", "1", "1", MACHINE("a", "true", "agrees")),                      /* a refusal with nobody apart */
+        FLEET_R("true", "agree", "true", "1", "1", MACHINE("a", "true", "agrees")),                         /* agree that refuses sending */
+        FLEET("true", "agree", "1", "1", MACHINE("a", "true", "phone_behind")),                            /* agree with no machine agreeing */
+        FLEET("true", "unchecked", "1", "1", MACHINE("a", "true", "phone_behind")),
+        FLEET_R("true", "disagree", "true", "2", "1", MACHINE("a", "true", "disagree") "," MACHINE("b", "false", "disagree")),   /* a machine that is down cannot disagree */
+        FLEET("true", "agree", "1", "1", MACHINE("a", "true", "ahead")),                                    /* names of the earlier frame */
+        FLEET("true", "agree", "1", "1", MACHINE("a", "true", "behind")),
+        FLEET("true", "agree", "1", "2", MACHINE("a", "true", "agrees")),                                  /* connected count disagrees with the list */
+        FLEET("true", "agree", "2", "1", MACHINE("a", "true", "agrees")),                                  /* total disagrees with the list */
+        FLEET("true", "agree", "2", "2", MACHINE("a", "true", "agrees") "," MACHINE("b", "true", "disagree")), /* agree beside a disagreeing machine */
+        FLEET("true", "agree", "1", "0", MACHINE("a", "false", "unknown")),                                /* agree with nobody connected */
+        FLEET("false", "agree", "1", "1", MACHINE("a", "true", "agrees")),                                 /* agree from a non-member */
+        FLEET("true", "disagree", "1", "1", MACHINE("a", "true", "agrees")),                               /* disagree with nobody apart */
+        FLEET("true", "agree", "1", "1", MACHINE("a", "true", "maybe")),
+        FLEET("true", "agree", "1", "1", MACHINE("a", "false", "agrees")),                                 /* a machine that is down cannot agree */
+        FLEET("true", "agree", "1", "1", "\"x\""),
+        FLEET("true", "agree", "1", "1", "{\"name\":\"a\",\"connected\":1,\"agreement\":\"agrees\"}"),
+        FLEET("\"true\"", "agree", "1", "1", MACHINE("a", "true", "agrees")),
+        FLEET("true", "yes", "1", "1", MACHINE("a", "true", "agrees")),
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        start(false);
+        fake.fleet = bad[i];
+        fake.always_ok = true;
+        CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+        CHECK(has(WALLET_FLEET_UNCHECKED) && !has("agree") && !has("disagree"));
+        wallet_screens_close();
+    }
+}
+
+static void test_refresh_and_stale(void)
+{
+    start(false);                                  /* a stopped node: the next refresh fails, so nothing confident stays */
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && has("Up to date at block 3000000"));
+    fake.now += WALLET_REFRESH_MS - 1;
+    wallet_screens_tick();
+    CHECK(count_ops("summary") == 1);
+    fake.now += 1;
+    fake.summary = NULL;                           /* the node answers with an error */
+    wallet_screens_tick();
+    CHECK(count_ops("summary") == 2 && has("Balance unknown") && !has("Up to date"));
+    fake.summary = GOOD_SUMMARY;
+    fake.now += WALLET_REFRESH_MS;
+    wallet_screens_tick();
+    CHECK(count_ops("summary") == 3 && has("Up to date at block 3000000"));
+    tap(WALLET_ACT_HISTORY, 0, WALLET_STAY);       /* no refresh off Funds */
+    int before = fake.op_count;
+    fake.now += WALLET_REFRESH_MS * 3;
+    wallet_screens_tick();
+    CHECK(fake.op_count == before);
+    wallet_screens_close();
+
+    start(true);                                   /* a node that never answers: the old lines are withdrawn */
+    fake.fleet = FLEET("true", "agree", "1", "1", MACHINE("fleetbox", "true", "agrees"));
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    wait_for(funds_commands_done);                 /* both opening commands have finished before the node is stopped */
+    for (int i = 0; i < 400 && !(has("Up to date") && has("1 fleet machine agrees")); ++i) usleep(5000);
+    CHECK(has("Up to date at block 3000000") && has("1 fleet machine agrees"));
+    set_block();
+    fake.now += WALLET_REFRESH_MS;
+    wallet_screens_tick();
+    fake.now += WALLET_STALE_MS;
+    wallet_screens_tick();
+    CHECK(has("Last read more than 30 seconds ago") && !has("Up to date") && has(WALLET_FLEET_UNCHECKED) && !has("agree"));
+    unsigned before_version = wallet_screens_snapshot(&screen);
+    fake.now += 1000;
+    wallet_screens_tick();
+    CHECK(wallet_screens_snapshot(&screen) == before_version);   /* the notice appears once, not on every tick */
+    release_block();
+    for (int i = 0; i < 1000 && !has("Up to date"); ++i) usleep(5000);
+    CHECK(has("Up to date at block 3000000") && !has("Last read more than"));
+    wallet_screens_close();
+    wait_for(settled);
+}
+
+/* ---- Receive ---- */
+
+static void test_receive(void)
+{
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    struct wallet_screen *s = snap();
+    CHECK(s->page == WALLET_PAGE_RECEIVE && count_ops("latest") == 1);
+    CHECK(count_ops("receive") == 0);          /* opening Receive makes no key */
+    long qr = find(s, WALLET_ITEM_QR, WALLET_ACT_NONE), address = find(s, WALLET_ITEM_ADDRESS, WALLET_ACT_NONE);
+    CHECK(qr >= 0 && !strcmp(text_at(s, qr), A1) && address >= 0);
+    CHECK(!strncmp(text_at(s, address), "zs1q qqqq qqqq", 14) && find_text(s, "diversified") < 0);
+    CHECK(find(s, WALLET_ITEM_INPUT, WALLET_ACT_NONE) >= 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0);
+    CHECK(has("may have been shown before"));                               /* the latest address is not a fresh one */
+
+    wallet_screens_close();
+}
+
+static void test_receive_amount(void)
+{
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(wallet_screens_set_amount("1.5"));
+    struct wallet_screen *s = snap();
+    CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "zclassic:" A1 "?amount=1.5") && find_text(s, "Asking for 1.5 ZCL") >= 0);
+    CHECK(!wallet_screens_set_amount("1.123456789") && has("Enter an amount"));
+    CHECK(!wallet_screens_set_amount("0") && !wallet_screens_set_amount("-1") && !wallet_screens_set_amount("22000000"));
+    CHECK(!wallet_screens_set_amount("21000000.00000001"));                  /* one zatoshi over the supply */
+    s = snap();
+    CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "zclassic:" A1 "?amount=1.5"));
+    CHECK(wallet_screens_set_amount("21000000"));                            /* the supply itself is the limit */
+    CHECK(wallet_screens_set_amount("  ") && !strcmp(text_at(snap(), find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE)), A1));
+    CHECK(wallet_screens_set_amount("0.00000001"));
+    wallet_screens_close();
+}
+
+static void test_receive_new_address(void)
+{
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(wallet_screens_set_amount("0.00000001"));
+    struct wallet_screen *s;
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);                    /* only this makes an address, and the amount stays */
+    s = snap();
+    CHECK(count_ops("receive") == 1 && count_ops("latest") == 1);
+    CHECK(!has("may have been shown before"));                              /* an address made by the tap is fresh */
+    CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), "zclassic:" A2 "?amount=0.00000001") && find_text(s, A1) < 0);
+
+    CHECK(wallet_screens_back() && snap()->page == WALLET_PAGE_FUNDS);   /* leaving wipes the address from the screens */
+    for (size_t i = 0; i < snap()->count; ++i) CHECK(!strstr(snap()->items[i].text, "zs1"));
+    fake.latest = "{\"ok\":true,\"data\":{\"address\":\"" A2 "\"}}";    /* the node now reports the new address as the latest */
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    s = snap();
+    CHECK(count_ops("receive") == 1 && !strcmp(text_at(s, find(s, WALLET_ITEM_QR, WALLET_ACT_NONE)), A2));
+    wallet_screens_close();
+}
+
+static void test_receive_never_makes_keys(void)
+{
+    start(false);
+    for (int i = 0; i < 300; ++i) {                  /* 300 visits make 300 reads and no key */
+        CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+        tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+        CHECK(wallet_screens_back());
+    }
+    CHECK(count_ops("latest") == 300 && count_ops("receive") == 0);
+    for (int i = 0; i < 300; ++i) CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(count_ops("receive") == 0);
+    wallet_screens_close();
+}
+
+static void test_receive_replies(void)
+{
+    start(false);                                     /* a node without the read command: Receive says so, makes nothing */
+    fake.latest = NULL;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    struct wallet_screen *s = snap();
+    CHECK(find(s, WALLET_ITEM_QR, WALLET_ACT_NONE) < 0 && has("cannot report its latest address yet") && count_ops("receive") == 0);
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0);
+
+    fake.latest = "{\"ok\":true,\"data\":{\"address\":null}}";
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE) && has("no receive address yet"));
+    fake.latest = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE) && has("could not be read") && !has("WALLET_LOCKED"));
+    fake.latest = "{\"ok\":false,\"data\":{\"address\":\"" A1 "\"}}";    /* ok:false is no reply, even when the command exited cleanly */
+    fake.always_ok = true;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE) && find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) < 0);
+    fake.always_ok = false;
+    fake.latest = "{\"ok\":true,\"data\":{\"address\":\"" PUBLIC_ADDR "\"}}";   /* a public address is never shown */
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(find(snap(), WALLET_ITEM_QR, WALLET_ACT_NONE) < 0 && !has("aaaa") && has("not private"));
+
+    wallet_screens_close();
+}
+
+static void test_receive_without_new_address(void)
+{
+    struct wallet_screen *s;
+    start(false);                                     /* a node without the receive command: one sentence, nothing offered, no key made */
+    fake.receive = NULL;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    CHECK(count_ops("receive") == 0 && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0);
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);
+    s = snap();
+    CHECK(count_ops("receive") == 1);
+    CHECK(find(s, WALLET_ITEM_QR, WALLET_ACT_NONE) < 0 && find_text(s, "zs1") < 0);
+    CHECK(has("This build cannot make a new address.") && !has("Tap New address") && !has("256") && !has("spending key"));
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) < 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_BACK) >= 0);
+    int before = fake.op_count;                       /* a tap that nothing offers does nothing */
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);
+    CHECK(fake.op_count == before && count_ops("receive") == 1);
+    start(false);                                     /* a failure that is not a missing command keeps the button */
+    fake.receive = OTHER_ERROR;
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);
+    s = snap();
+    CHECK(find(s, WALLET_ITEM_QR, WALLET_ACT_NONE) < 0 && has("No address was made") && !has("WALLET_LOCKED"));
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0 && !has("cannot make a new address"));
+    wallet_screens_close();
+}
+
+/* ---- History ---- */
+
+static void test_history(void)
+{
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    tap(WALLET_ACT_HISTORY, 0, WALLET_STAY);
+    struct wallet_screen *s = snap();
+    CHECK(s->page == WALLET_PAGE_HISTORY && count_ops("history") == 1 && !fake.args[fake.op_count - 1][0]);
+    long row0 = find_text(s, "Sent ·");
+    CHECK(row0 >= 0 && !strcmp(text_at(s, row0), "Sent · Private · 1.5 ZCL · Confirmed · 2023-11-14"));
+    CHECK(!strcmp(text_at(s, row0 + 1), "Received · Public · Amount unknown · Pending · 2023-11-14"));
+    CHECK(!strcmp(text_at(s, row0 + 2), "Moved inside your wallet · Private · 0.00000001 ZCL · State unknown · Date unknown"));
+    CHECK(!has(TX_A) && !has("MEMO"));
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_OLDER) >= 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEWER) < 0);
+    wallet_screens_close();
+}
+
+static void test_history_detail(void)
+{
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    struct wallet_screen *s;
+    fake.detail = DETAIL("\"memo\":\"MEMO-MARKER thanks\"");           /* details on request */
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    s = snap();
+    CHECK(s->page == WALLET_PAGE_DETAIL && count_ops("detail") == 1 && !strcmp(fake.args[fake.op_count - 1], TX_A));
+    long memo = find(s, WALLET_ITEM_MEMO, WALLET_ACT_NONE);
+    CHECK(has(TX_A) && memo >= 0 && !strcmp(text_at(s, memo), "MEMO-MARKER thanks") && find_text(s, "written by the sender") >= 0);
+    CHECK(has("2023-11-14 22:13 UTC") && !has("Public"));
+    CHECK(wallet_screens_back() && snap()->page == WALLET_PAGE_HISTORY && count_ops("history") == 1);
+    CHECK(find_text(snap(), "MEMO-MARKER") < 0);                                    /* leaving a detail forgets its memo */
+    CHECK(!wallet_screens_residue("MEMO-MARKER", 11));                              /* nor does the screen keep it */
+    tap(WALLET_ACT_DETAIL, 1, WALLET_STAY);                                           /* a row without a memo asks for none */
+    s = snap();
+    CHECK(count_ops("detail") == 1 && has("Public: the amount and addresses are visible to everyone") && has("Amount unknown"));
+    CHECK(find(s, WALLET_ITEM_MEMO, WALLET_ACT_NONE) < 0 && !has("Memo"));
+    CHECK(wallet_screens_back());
+    tap(WALLET_ACT_DETAIL, 9, WALLET_STAY);                                           /* a row that is not there changes nothing */
+    CHECK(snap()->page == WALLET_PAGE_HISTORY);
+    wallet_screens_close();
+}
+
+static void test_history_pages(void)
+{
+    start(false);
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    tap(WALLET_ACT_OLDER, 0, WALLET_STAY);
+    struct wallet_screen *s = snap();
+    CHECK(count_ops("history") == 2 && !strcmp(fake.args[fake.op_count - 1], CURSOR_1));
+    CHECK(has("Received · Private · 21000000 ZCL · Confirmed · 2023-11-15"));
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_OLDER) < 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEWER) >= 0);
+    tap(WALLET_ACT_NEWER, 0, WALLET_STAY);
+    CHECK(count_ops("history") == 3 && !fake.args[fake.op_count - 1][0] && has("Sent ·"));
+    wallet_screens_close();
+}
+
+static void history_error(const char *reply_text)
+{
+    start(false);
+    fake.always_ok = true;
+    fake.history[0] = reply_text;
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    CHECK(has("could not be read") && !has("No transactions") && !has("WALLET_LOCKED") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_DETAIL) < 0);
+    wallet_screens_close();
+}
+static void test_history_replies(void)
+{
+    start(false);
+    fake.history[0] = PAGE("", "0", "null");
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY) && has("No transactions yet.") && !has("could not be read"));
+    history_error(OTHER_ERROR);
+    history_error("{\"ok\":true,\"data\":{\"entries\":[]}}");                       /* no frame: an error, not an empty wallet */
+    history_error("{\"ok\":true,\"data\":{\"known\":true,\"has_more\":false,\"entries\":[]}}");   /* the old, absent shape */
+    history_error("{\"ok\":true,\"data\":{\"entries\":[1,2,3]}}");
+    history_error("{\"ok\":true,\"data\":[1,2,3]}");
+    history_error("[1,2,3]");
+    history_error("{\"ok\":false,\"data\":" PAGE("", "0", "null") "}");
+    history_error("{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entries\":[1,2],\"count\":2,\"next_cursor\":null}}");
+    history_error("{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entries\":[],\"count\":1,\"next_cursor\":null}}");
+    history_error("{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entries\":[],\"next_cursor\":null}}");
+    history_error("{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entries\":[],\"count\":0}}");
+    history_error("{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v2\",\"entries\":[],\"count\":0,\"next_cursor\":null}}");
+    history_error("{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entries\":[],\"count\":0,\"next_cursor\":\"not a cursor\"}}");
+    history_error("{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entries\":[],\"count\":0,\"next_cursor\":7}}");
+    history_error(PAGE(ROW_SENT "," ROW_SENT "," ROW_SENT "," ROW_SENT "," ROW_SENT "," ROW_SENT "," ROW_SENT "," ROW_SENT "," ROW_SENT "," ROW_SENT "," ROW_SENT, "11", "null"));
+
+    start(false);                                     /* fields of the wrong type or value read as unknown, never a guess */
+    fake.history[0] = PAGE("{\"direction\":\"sideways\",\"kind\":7,\"amount_zat\":-5,\"status\":3,\"time\":-1,\"txid\":\"x\\ny\",\"memo_present\":\"yes\"},"
+                           "{\"direction\":1,\"kind\":\"private\",\"amount_zat\":2100000000000001,\"time\":253402300800,\"txid\":\"" TX_A "\"},"
+                           "{\"amount_zat\":1.5,\"time\":\"1700000000\"},{}", "4", "null");
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    struct wallet_screen *s = snap();
+    long row0 = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_DETAIL);
+    CHECK(row0 >= 0);
+    CHECK(!strcmp(text_at(s, row0), "Direction unknown · Privacy unknown · Amount unknown · State unknown · Date unknown"));
+    CHECK(!strcmp(text_at(s, row0 + 1), "Direction unknown · Private · Amount unknown · State unknown · Date unknown"));
+    CHECK(!strcmp(text_at(s, row0 + 2), text_at(s, row0)) && !strcmp(text_at(s, row0 + 3), text_at(s, row0)));
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    CHECK(has("unknown") && !has("x\ny"));                                /* a txid that is not one is not shown */
+    wallet_screens_close();
+
+    start(false);                                     /* the supply is the limit of an amount */
+    fake.history[0] = PAGE(ROW("received", "private", "confirmed", "2100000000000000", "1700000000", TX_A, "false") ","
+                           ROW("received", "private", "confirmed", "2100000000000001", "1700000000", TX_B, "false"), "2", "null");
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY) && has("21000000 ZCL") && has("Received · Private · Amount unknown"));
+    wallet_screens_close();
+}
+
+static void test_memo_text(void)
+{
+    start(false);
+    fake.history[0] = PAGE(ROW_SENT, "1", "null");
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    fake.detail = DETAIL("\"memo\":\"Failed\"");      /* a memo that reads like a state line is drawn as a memo */
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    struct wallet_screen *s = snap();
+    long memo = find(s, WALLET_ITEM_MEMO, WALLET_ACT_NONE);
+    CHECK(memo >= 0 && !strcmp(text_at(s, memo), "Failed"));
+    for (size_t i = 0; i < s->count; ++i) CHECK(s->items[i].kind == WALLET_ITEM_MEMO || strcmp(s->items[i].text, "Failed"));
+    wallet_screens_back();
+
+    /* Controls, separators, bidi and zero-width characters, and invalid bytes are shown as what they are. */
+    fake.detail = DETAIL("\"memo\":\"a\\u2028b\\u202ec\\u0085d\\u200be\\u0001f\\n\\u2066g\\ufeffh\"");
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    s = snap();
+    CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_MEMO, WALLET_ACT_NONE)),
+                  "a<U+2028>b<U+202E>c<U+0085>d<U+200B>e<U+0001>f<U+000A><U+2066>g<U+FEFF>h"));
+    wallet_screens_back();
+    fake.detail = DETAIL("\"memo\":\"ok \xff\xfe \xc3\x28 \xed\xa0\x80 \xe2\x80 end\"");
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    s = snap();
+    long bad = find(s, WALLET_ITEM_MEMO, WALLET_ACT_NONE);
+    CHECK(bad < 0 || (strstr(text_at(s, bad), "<xFF>") && strstr(text_at(s, bad), "<xFE>") && strstr(text_at(s, bad), "<xED>")));
+    CHECK(bad >= 0 || has("could not be read"));
+    wallet_screens_back();
+
+    fake.detail = DETAIL("\"memo_hex\":\"00ff10\"");  /* a memo that is not text is shown as hexadecimal */
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    s = snap();
+    CHECK(!strcmp(text_at(s, find(s, WALLET_ITEM_MEMO, WALLET_ACT_NONE)), "00ff10") && has("shown as hexadecimal"));
+    wallet_screens_back();
+    fake.detail = DETAIL("\"memo_hex\":\"0g\"");
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    CHECK(has("could not be read"));
+    wallet_screens_back();
+    fake.detail = DETAIL("\"x\":1");
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    CHECK(has("reports a memo but gave none"));
+    wallet_screens_back();
+    fake.detail = "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entry\":{\"txid\":\"" TX_B "\",\"memo\":\"other\"}}}";
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);                      /* a reply for another transaction is no reply */
+    CHECK(has("could not be read") && !has("other"));
+    wallet_screens_close();
+}
+
+static char long_memo_reply[4400];
+static size_t memo_items_total(const struct wallet_screen *s)
+{
+    size_t total = 0;
+    for (size_t i = 0; i < s->count; ++i) if (s->items[i].kind == WALLET_ITEM_MEMO) total += strlen(s->items[i].text);
+    return total;
+}
+static const struct wallet_screen *long_memo(const char *member, size_t count, const char *piece)
+{
+    char body[4000] = "";
+    for (size_t i = 0; i < count; ++i) strcat(body, piece);
+    snprintf(long_memo_reply, sizeof(long_memo_reply), "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entry\":{\"txid\":\"" TX_A "\",\"%s\":\"%s\"}}}", member, body);
+    fake.detail = long_memo_reply;
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    return snap();
+}
+static void test_memo_length(void)
+{
+    start(false);
+    fake.history[0] = PAGE(ROW_SENT, "1", "null");
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    const struct wallet_screen *s = long_memo("memo", 512, "m");          /* the longest memo shows whole, with no cut */
+    CHECK(memo_items_total(s) == 512 && !has("so it is cut") && !has("longer than this screen"));
+    wallet_screens_back();
+    s = long_memo("memo", 513, "m");                                       /* over what the wallet keeps: cut, and said so */
+    CHECK(memo_items_total(s) == 512 && has("so it is cut"));
+    wallet_screens_back();
+    s = long_memo("memo", 512, "\\u0001");                                 /* expansion beyond the room: cut at the room, and said so */
+    CHECK(memo_items_total(s) < 512 * 8 && has("longer than this screen shows") && find_text(s, "<U+0001>") >= 0);
+    wallet_screens_back();
+    s = long_memo("memo_hex", 512, "ab");
+    CHECK(memo_items_total(s) == 1024 && !has("longer"));
+    for (size_t i = 0; i < s->count; ++i) CHECK(strlen(s->items[i].text) < WALLET_TEXT_MAX);
+    memset(long_memo_reply, 0, sizeof(long_memo_reply));
+    wallet_screens_close();
+}
+
+/* ---- protection ---- */
+
+static void test_dropped_taps(void)
+{
+    start(false);
+    wallet_screens_dropped(1);                                  /* before a wallet screen is in front: nothing to explain */
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && !has("drawing over this screen"));
+    unsigned version = wallet_screens_snapshot(&screen);
+    wallet_screens_dropped(0);
+    CHECK(!has("drawing over this screen") && wallet_screens_snapshot(&screen) == version);
+    wallet_screens_dropped(2);                                  /* an overlay cut two gestures: the screen says why */
+    CHECK(wallet_screens_snapshot(&screen) != version);        /* the drawn screen is replaced, or the notice never shows */
+    struct wallet_screen *s = snap();
+    CHECK(has("Another app is drawing over this screen") && s->items[1].kind == WALLET_ITEM_NOTE && s->items[0].kind == WALLET_ITEM_TITLE);
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_RECEIVE) >= 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_HISTORY) >= 0);
+    version = wallet_screens_snapshot(&screen);
+    tap(WALLET_ACT_SEND, 0, WALLET_SCAN);                       /* a tap that reaches the screen ends the notice, whatever it does */
+    CHECK(snap()->page == WALLET_PAGE_FUNDS && !has("drawing over this screen") && wallet_screens_snapshot(&screen) != version);
+    wallet_screens_dropped(1);
+    CHECK(has("drawing over this screen"));
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    CHECK(snap()->page == WALLET_PAGE_RECEIVE && !has("drawing over this screen"));
+    wallet_screens_dropped(1);
+    CHECK(has("drawing over this screen"));
+    version = wallet_screens_snapshot(&screen);
+    CHECK(wallet_screens_set_amount("1"));                      /* so does the amount field */
+    CHECK(!has("drawing over this screen") && wallet_screens_snapshot(&screen) != version);
+    wallet_screens_dropped(UINT_MAX);                           /* the count never wraps back to nothing */
+    wallet_screens_dropped(1);
+    CHECK(has("drawing over this screen"));
+    wallet_screens_close();                                     /* leaving forgets it */
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && !has("drawing over this screen"));
+    wallet_screens_close();
+}
+
+static void test_secure(void)
+{
+    static const enum wallet_page pages[] = {WALLET_PAGE_FUNDS, WALLET_PAGE_RECEIVE, WALLET_PAGE_HISTORY};
+    for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); ++i) {      /* every page is protected before it shows anything */
+        start(false);
+        CHECK(wallet_screens_open(pages[i]) && fake.secure_on && fake.secure_on_calls == 1);
+        CHECK(wallet_screens_active() && snap()->count > 1);
+        wallet_screens_close();
+        CHECK(!fake.secure_on && fake.secure_off_calls == 1 && snap()->count == 0);
+    }
+    start(false);                                                         /* one protection for a whole visit */
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    tap(WALLET_ACT_HISTORY, 0, WALLET_STAY);
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    CHECK(fake.secure_on && fake.secure_on_calls == 1 && fake.secure_off_calls == 0);
+    wallet_screens_shutdown();
+    CHECK(!fake.secure_on);
+
+    start(false);                                                         /* no protection, no wallet content, no command */
+    fake.secure_ok = false;
+    CHECK(!wallet_screens_open(WALLET_PAGE_FUNDS));
+    struct wallet_screen *s = snap();
+    CHECK(fake.op_count == 0 && find_text(s, "cannot be hidden from screenshots") >= 0);
+    CHECK(find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE) < 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_RECEIVE) < 0);
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    tap(WALLET_ACT_HISTORY, 0, WALLET_STAY);
+    wallet_screens_tick();
+    CHECK(fake.op_count == 0 && !wallet_screens_set_amount("1"));
+    tap(WALLET_ACT_BACK, 0, WALLET_LEAVE);
+    wallet_screens_close();
+}
+
+/* The app goes out of view with a wallet screen in front: what the screens hold goes at once, and the window
+ * protection stays in force until the caller has drawn a screen without wallet data and closes. */
+static void test_pause(void)
+{
+    static const enum wallet_page pages[] = {WALLET_PAGE_FUNDS, WALLET_PAGE_RECEIVE, WALLET_PAGE_HISTORY};
+    for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); ++i) {
+        start(false);
+        CHECK(wallet_screens_open(pages[i]) && fake.secure_on && fake.secure_on_calls == 1);
+        CHECK(wallet_screens_residue("1.23456789", 10) || wallet_screens_residue(A1, sizeof(A1) - 1) || wallet_screens_residue(TX_A, 64));
+        wallet_screens_pause();
+        CHECK(fake.secure_on && fake.secure_off_calls == 0);                  /* still blank in Recents */
+        CHECK(!wallet_screens_active() && snap()->count == 0);
+        CHECK(!wallet_screens_residue("1.23456789", 10) && !wallet_screens_residue(A1, sizeof(A1) - 1) && !wallet_screens_residue(TX_A, 64));
+        wallet_screens_tick();                                               /* nothing runs for a screen that is gone */
+        CHECK(fake.secure_on && fake.secure_off_calls == 0);
+        wallet_screens_close();                                              /* the caller drew a screen without wallet data */
+        CHECK(!fake.secure_on && fake.secure_off_calls == 1 && fake.secure_on_calls == 1);
+    }
+    start(false);                                                            /* back into the wallet before the release */
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    wallet_screens_pause();
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && has("1.23456789 ZCL"));
+    CHECK(fake.secure_on && fake.secure_on_calls == 1 && fake.secure_off_calls == 0);
+    wallet_screens_pause();
+    wallet_screens_shutdown();                                               /* the app is destroyed while held */
+    CHECK(!fake.secure_on && fake.secure_off_calls == 1);
+    start(false);                                                            /* a reply that lands after the pause is dropped */
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    wallet_screens_pause();
+    CHECK(snap()->count == 0 && !wallet_screens_residue(A1, sizeof(A1) - 1));
+    wallet_screens_close();
+}
+
+/* Funds says why the node holds sending back, and says nothing when it does not. */
+static void send_note(const char *summary, const char *want)
+{
+    start(false);
+    fake.summary = summary;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    struct wallet_screen *s = snap();
+    CHECK(find_text(s, "1.23456789 ZCL") >= 0);
+    if (want) CHECK(find(s, WALLET_ITEM_NOTE, WALLET_ACT_NONE) >= 0 && !strcmp(text_at(s, find_text(s, "Sending is")), want));
+    else CHECK(find_text(s, "Sending is") < 0);
+    CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SEND) >= 0);
+    wallet_screens_close();
+}
+static void test_funds_send_paused(void)
+{
+    send_note(SUMMARY_SEND("123456789", "1.23456789", "0", "0.00000000", "0", "0.00000000", "false", "progress_store_unavailable"),
+              "Sending is paused because this node's progress store is not open.");
+    send_note(SUMMARY_SEND("123456789", "1.23456789", "0", "0.00000000", "0", "0.00000000", "false", "release_assisted: tip"),
+              "Sending is paused until this node verifies the chain tip itself.");
+    send_note(SUMMARY_SEND("123456789", "1.23456789", "0", "0.00000000", "0", "0.00000000", "false", "something_new"),
+              "Sending is paused for a reason this app does not recognize.");
+    send_note(SUMMARY("123456789", "1.23456789", "0", "0.00000000", "0", "0.00000000"), NULL);
+}
+
+/* ---- replies that arrive late ---- */
+
+static void leave_during(const char *op, const char *arg)
+{
+    (void)arg;
+    if (!strcmp(op, "summary")) { CHECK(wallet_screens_activate(WALLET_ACT_RECEIVE, 0) == WALLET_STAY); }
+}
+static void older_then_newer(const char *op, const char *arg)
+{
+    if (!strcmp(op, "history") && !strcmp(arg, CURSOR_1)) tap(WALLET_ACT_NEWER, 0, WALLET_STAY);
+}
+static void back_during(const char *op, const char *arg)
+{
+    (void)arg;
+    if (!strcmp(op, "history") || !strcmp(op, "detail")) wallet_screens_back();
+}
+static void close_during(const char *op, const char *arg)
+{
+    (void)op; (void)arg;
+    wallet_screens_close();
+}
+static void test_late_replies(void)
+{
+    start(false);                                     /* a summary that arrives on a later screen is dropped */
+    fake.during = leave_during;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    fake.during = NULL;
+    CHECK(snap()->page == WALLET_PAGE_RECEIVE && !wallet_screens_residue("1.23456789", 10) && !wallet_screens_residue("Up to date", 10));
+    wallet_screens_close();
+
+    start(false);                                     /* a page that arrives after the owner paged back is dropped */
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    fake.during = older_then_newer;
+    tap(WALLET_ACT_OLDER, 0, WALLET_STAY);
+    fake.during = NULL;
+    CHECK(snap()->page == WALLET_PAGE_HISTORY && has("Sent ·") && !has("21000000 ZCL") && !wallet_screens_residue(TX_D, 64));
+    wallet_screens_close();
+
+    start(false);                                     /* a history page that arrives on Funds is dropped */
+    fake.during = back_during;
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    fake.during = NULL;
+    CHECK(snap()->page == WALLET_PAGE_FUNDS && !wallet_screens_residue(TX_A, 64) && !has("Sent ·"));
+    wallet_screens_close();
+
+    start(false);                                     /* a memo that arrives after the owner left the detail is dropped */
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    fake.detail = DETAIL("\"memo\":\"MEMO-MARKER late\"");
+    fake.during = back_during;
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    fake.during = NULL;
+    CHECK(snap()->page == WALLET_PAGE_HISTORY && !wallet_screens_residue("MEMO-MARKER", 11));
+    wallet_screens_close();
+
+    start(false);                                     /* anything that arrives after the wallet was closed is dropped */
+    fake.during = close_during;
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    fake.during = NULL;
+    CHECK(fake.changed == 0 && snap()->page == WALLET_PAGE_NONE && snap()->count == 0 && !wallet_screens_residue(TX_A, 64));
+}
+
+/* Nothing of what a screen showed stays in the state of the screens, in the heap or in program data once the owner leaves. */
+static void test_nothing_left_behind(void)
+{
+    static const char *const markers[] = {"MEMO-MARKER", TX_A, "1.23456789", "0.5 ZCL", A1, "Sent ·"};
+    start(false);
+    fake.fleet = FLEET("true", "agree", "1", "1", MACHINE("fleetbox", "true", "agrees"));
+    fake.detail = DETAIL("\"memo\":\"padding past the allocator header MEMO-MARKER and then more words, enough to outgrow the first block a JSON string gets\"");
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    CHECK(wallet_screens_back());
+    tap(WALLET_ACT_HISTORY, 0, WALLET_STAY);
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    CHECK(has("MEMO-MARKER"));
+    CHECK(process_holds("MEMO-MARKER") && wallet_screens_residue("MEMO-MARKER", 11));   /* the check can see data that is there */
+    memset(&screen, 0, sizeof(screen));
+    wallet_screens_close();
+    CHECK(snap()->count == 0);
+    memset(&screen, 0, sizeof(screen));
+    memset(fake.args, 0, sizeof(fake.args));
+    for (size_t i = 0; i < sizeof(markers) / sizeof(markers[0]); ++i) {
+        if (wallet_screens_residue(markers[i], strlen(markers[i])) || process_holds(markers[i])) {
+            fprintf(stderr, "wallet_screens_test: left behind after close: %s\n", markers[i]);
+            exit(1);
+        }
+    }
+    CHECK(!process_holds("fleetbox"));
+    wallet_screens_shutdown();
+}
+
+/* ---- threads ---- */
+
+static void test_single_flight(void)
+{
+    start(true);
+    set_block();
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    for (int i = 0; i < 500; ++i) { fake.now += WALLET_REFRESH_MS; wallet_screens_tick(); }   /* a refresh due on every tick */
+    for (int i = 0; i < 400; ++i) { tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY); wallet_screens_back(); }
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    for (int i = 0; i < 1000; ++i) usleep(1000);
+    CHECK(fake.active_max <= 6);
+    for (int i = 0; i < 201; ++i) tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);   /* 201 fast taps */
+    release_block();
+    wait_for(settled);
+    for (int i = 0; i < 100; ++i) usleep(2000);
+    wait_for(settled);
+    CHECK(count_ops("receive") == 1);               /* one address, not 201 */
+    CHECK(fake.active_max <= 6 && count_ops("summary") <= 3 && count_ops("fleet") <= 3 && count_ops("latest") <= 3);
+
+    start(true);                                        /* the same taps, one after the other, each make an address */
+    CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+    wait_for(settled);
+    tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY);
+    for (int i = 0; i < 400 && !has(A2); ++i) usleep(5000);
+    CHECK(has(A2) || find_text(snap(), "qqqq") >= 0);
+    for (int i = 0; i < 400 && count_ops("receive") < 2; ++i) { tap(WALLET_ACT_NEW_ADDRESS, 0, WALLET_STAY); usleep(5000); }
+    CHECK(count_ops("receive") >= 2);
+    wallet_screens_close();
+    wait_for(settled);
+    usleep(50000);
+}
+
+static bool funds_shown(void) { return find_text(snap(), "1.23456789 ZCL") >= 0; }
+static void test_async(void)
+{
+    start(true);
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    wait_for(funds_shown);
+    wallet_screens_close();
+    wait_for(settled);
+    usleep(50000);
+    wallet_screens_shutdown();
+    CHECK(!wallet_screens_open(WALLET_PAGE_FUNDS) && snap()->count == 0);
+}
+
+/* With "stale" or "async" as the argument only that test runs, so a thread sanitizer can cover it in reasonable time. */
+int main(int argc, char **argv)
+{
+    if (argc > 1 && !strcmp(argv[1], "stale")) test_refresh_and_stale();
+    else if (argc > 1 && !strcmp(argv[1], "async")) test_async();
+    if (argc > 1) { puts("wallet_screens_test: ok"); return 0; }
+    test_funds();
+    test_funds_replies();
+    test_fleet();
+    test_refresh_and_stale();
+    test_receive();
+    test_receive_amount();
+    test_receive_new_address();
+    test_receive_never_makes_keys();
+    test_receive_replies();
+    test_receive_without_new_address();
+    test_history();
+    test_history_detail();
+    test_history_pages();
+    test_history_replies();
+    test_memo_text();
+    test_memo_length();
+    test_secure();
+    test_pause();
+    test_funds_send_paused();
+    test_dropped_taps();
+    test_late_replies();
+    test_nothing_left_behind();
+    test_single_flight();
+    test_async();
+    puts("wallet_screens_test: ok");
+    return 0;
+}
