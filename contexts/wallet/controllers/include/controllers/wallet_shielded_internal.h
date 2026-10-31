@@ -120,7 +120,7 @@ bool z_sendmany_shielded(
     size_t num_t_out,
     const uint8_t (*z_diversifiers)[11], const uint8_t (*z_pk_ds)[32],
     const int64_t *z_amounts, const uint8_t (*z_memos)[512],
-    const bool *z_has_memo, size_t num_z_out,
+    const bool *z_has_memo, size_t num_z_out, bool spendable_only,
     struct wallet_tx *prepared, struct json_value *result);
 
 /* Witness stage of a shielded send: loads the selected notes witnesses at
@@ -135,6 +135,8 @@ const char *z_sendmany_shielded_witness_gate(
     size_t num, int authoritative_tip,
     struct incremental_witness **witnesses_out, uint8_t anchor[32],
     size_t *fail_i, int *fail_height);
+
+bool z_sendmany_spendable_only(const struct json_value *params);
 
 /* wallet_shielded_keys.c — key/viewing-key import/export + memo */
 bool rpc_z_exportkey(const struct json_value *params, bool help,

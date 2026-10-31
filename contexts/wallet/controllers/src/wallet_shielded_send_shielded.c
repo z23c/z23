@@ -7,6 +7,7 @@
  * build spend/output descriptions, sign, and broadcast. */
 
 #include "controllers/wallet_shielded_internal.h"
+#include "controllers/wallet_activity.h"
 #include "jobs/reducer_frontier.h"
 #include "validation/chainstate.h"
 #include "wallet/wallet_lock.h"
@@ -27,9 +28,8 @@ static void z_sendmany_shielded_select_notes(
         }
 }
 
-/* The one test of a note's stored witness, shared by z_sendmany and the
- * wallet summary so what the summary calls spendable cannot drift from what
- * send accepts. Returns 0 when the witness is present, at the authoritative
+/* The one test of a note's stored witness, used by z_sendmany and the wallet
+ * summary; the depth rule is wallet_note_classify, applied by both. Returns 0 when the witness is present, at the authoritative
  * tip and deserializes; 1 when missing; 2 when stale (*height is the stored
  * witness height); 3 when it cannot be deserialized. The decoded witness goes
  * to `out` when it is not NULL. */
@@ -351,7 +351,7 @@ static bool z_sendmany_shielded_with_key(
     size_t num_t_out,
     const uint8_t (*z_diversifiers)[11], const uint8_t (*z_pk_ds)[32],
     const int64_t *z_amounts, const uint8_t (*z_memos)[512],
-    const bool *z_has_memo, size_t num_z_out,
+    const bool *z_has_memo, size_t num_z_out, bool spendable_only,
     struct wallet_tx *prepared, struct json_value *result)
 {
         if (!wallet_ctx_db_ready(ctx)) {
@@ -400,6 +400,18 @@ static bool z_sendmany_shielded_with_key(
             json_set_str(result, "No unspent shielded notes for this address");
             LOG_FAIL("wallet_shielded",
                      "z_sendmany: no notes remain after canonical reconciliation");
+        }
+
+        /* With spendable_only the inputs are the notes the wallet summary
+         * calls spendable (wallet_note_is_spendable): a note that fails that
+         * rule is skipped, so the send accepts what the summary reports. */
+        if (spendable_only) {
+            num_notes = wallet_send_spendable_notes(ctx, notes, num_notes);
+            if (num_notes < 0) {
+                json_set_str(result, "Spendable note state is unavailable");
+                LOG_FAIL("wallet_shielded",
+                         "z_sendmany: spendable note filter failed");
+            }
         }
 
         /* Coin selection: pick notes until we have enough */

@@ -323,6 +323,14 @@ static bool z_sendmany_shielded_from(struct wallet_rpc_context *ctx,
     return true;
 }
 
+/* z_sendmany selects from the notes the wallet summary calls spendable unless
+ * the caller names a minconf (a third parameter), which keeps the raw RPC's
+ * own selection. */
+bool z_sendmany_spendable_only(const struct json_value *params)
+{
+    return json_size(params) < 3;
+}
+
 static bool z_sendmany_run(const struct json_value *params, bool help,
                            struct wallet_tx *prepared,
                            struct json_value *result)
@@ -475,8 +483,8 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
         return z_sendmany_shielded(ctx, cp, from_z_key, total_amount,
                                    t_dests, t_amounts, num_t_out,
                                    z_diversifiers, z_pk_ds, z_amounts,
-                                   z_memos, z_has_memo, num_z_out, prepared,
-                                   result);
+                                   z_memos, z_has_memo, num_z_out,
+                                   z_sendmany_spendable_only(params), prepared, result);
     }
 
 

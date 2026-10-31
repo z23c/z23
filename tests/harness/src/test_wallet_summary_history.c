@@ -229,6 +229,7 @@ static int test_summary_thresholds(struct node_db *ndb)
         struct wallet_summary s;
         ASSERT(summarize(ndb, (const uint8_t (*)[32])&IVK_A, 1, &s));
         ASSERT_EQ(s.spendable, SPENDABLE_EXPECT);
+        ASSERT_EQ(s.spendable_total, SPENDABLE_EXPECT);
         ASSERT_EQ(s.pending, 1 * ZCL1 + 2 * ZCL1 + 16 * ZCL1);
         ASSERT_EQ(s.pending_count, 3);
         ASSERT_EQ(s.pending_min_confs_needed, 1);
@@ -645,6 +646,7 @@ static int test_unknown_shielded_json(void)
                       "keys_unavailable");
         ASSERT(json_get(&j, "spendable_zat")->type == JSON_NULL);
         ASSERT(json_get(&j, "spendable")->type == JSON_NULL);
+        ASSERT(json_get(&j, "spendable_total_zat")->type == JSON_NULL);
         ASSERT(json_get(&j, "pending_zat")->type == JSON_NULL);
         ASSERT(json_get(&j, "unready_zat")->type == JSON_NULL);
         ASSERT(json_get(&j, "sending_zat")->type == JSON_NULL);

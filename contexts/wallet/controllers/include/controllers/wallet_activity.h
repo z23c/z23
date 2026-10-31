@@ -16,6 +16,8 @@
 #include <stdint.h>
 
 struct json_value;
+struct wallet_rpc_context;
+struct db_sapling_note;
 
 /* Confirmations a shielded note needs before it is spendable. A note the
  * wallet received from elsewhere needs WALLET_CONF_RECEIVED; a note created
@@ -31,10 +33,14 @@ struct json_value;
 #define WALLET_HISTORY_MAX_LIMIT 16
 
 struct wallet_summary {
-    /* Confirmed, unspent shielded notes that send would accept now: past
-     * their threshold, an unspent nullifier on the chain, a witness at the
-     * authoritative tip. */
+    /* The most one send can spend now: a send draws on one key, so this is
+     * the largest per-key sum of confirmed, unspent shielded notes past their
+     * threshold with an unspent nullifier on the chain and a witness at the
+     * authoritative tip. The notes are exactly those wallet_note_classify
+     * calls spendable, which z_sendmany uses to select its inputs. */
     int64_t spendable;
+    /* The same notes summed across every key. */
+    int64_t spendable_total;
     int64_t pending;         /* unspent shielded notes below threshold */
     int pending_count;
     int pending_min_confs_needed; /* smallest remaining; 0 when none */
@@ -48,6 +54,38 @@ struct wallet_summary {
     int64_t public_confirmed;
     int64_t immature;
 };
+
+enum wallet_note_class {
+    WALLET_NOTE_RECONCILING, /* the chain already spent it */
+    WALLET_NOTE_PENDING,     /* below its confirmation threshold */
+    WALLET_NOTE_SPENDABLE,
+    WALLET_NOTE_UNREADY,     /* confirmed, but chain or witness not ready */
+};
+
+/* The one rule for what a shielded note is worth to a send: WALLET_CONF_CHANGE
+ * confirmations for a note a wallet transaction created by spending, else
+ * WALLET_CONF_RECEIVED; spendable also needs the nullifier unspent on the
+ * chain and a current witness. `spenders` is wallet_note_spenders output.
+ * *short_by is the confirmations still missing when pending, else 0. */
+enum wallet_note_class wallet_note_classify(
+    const struct db_wallet_note_fact *n, const uint8_t (*spenders)[32],
+    size_t ns, int tip, int *short_by);
+bool wallet_note_is_spendable(const struct db_wallet_note_fact *n,
+                              const uint8_t (*spenders)[32], size_t ns,
+                              int tip);
+/* Sorted txids of every transaction that spent a wallet note or coin; NULL
+ * when it cannot be allocated. Free with free(). */
+uint8_t (*wallet_note_spenders(const struct db_wallet_note_fact *notes,
+                               size_t nn,
+                               const struct db_wallet_coin_fact *coins,
+                               size_t nc, const uint8_t (*ivks)[32], size_t nk,
+                               size_t *count))[32];
+
+/* The notes z_sendmany would select from: `notes` (one key's unspent notes)
+ * reduced in place to those wallet_note_is_spendable accepts. Returns the new
+ * count, or -1 when the wallet state cannot be read. */
+int wallet_send_spendable_notes(struct wallet_rpc_context *ctx,
+                                struct db_sapling_note *notes, int n);
 
 /* Sum the wallet's holdings. Only notes whose ivk appears in `ivks` count; a
  * repeated ivk and a repeated note row each count once. A note's chain and

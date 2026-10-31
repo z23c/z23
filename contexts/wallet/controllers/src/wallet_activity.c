@@ -45,8 +45,7 @@ static bool wa_coin_same(const struct db_wallet_coin_fact *a,
     return a->vout == b->vout && memcmp(a->txid, b->txid, 32) == 0;
 }
 
-/* Sorted txids of every transaction that spent a wallet note or coin. */
-static uint8_t (*wa_spenders(const struct db_wallet_note_fact *notes,
+uint8_t (*wallet_note_spenders(const struct db_wallet_note_fact *notes,
                              size_t nn,
                              const struct db_wallet_coin_fact *coins,
                              size_t nc, const uint8_t (*ivks)[32], size_t nk,
@@ -83,35 +82,71 @@ static const struct db_wallet_tx_fact *wa_find_tx(
     return NULL;
 }
 
-/* An unspent note lands in exactly one bucket: nowhere when the chain has
- * already spent it, pending below its threshold, spendable when send would
- * accept it, and unready otherwise. */
-static void wa_add_note(const struct db_wallet_note_fact *n,
-                        const uint8_t (*spenders)[32], size_t ns, int tip,
-                        struct wallet_summary *out)
+enum wallet_note_class wallet_note_classify(
+    const struct db_wallet_note_fact *n, const uint8_t (*spenders)[32],
+    size_t ns, int tip, int *short_by)
 {
     bool change = bsearch(n->txid, spenders, ns, 32, wa_cmp32) != NULL;
     int need = change ? WALLET_CONF_CHANGE : WALLET_CONF_RECEIVED;
     int confs = wa_confs(n->block_height, tip);
-    if (n->chain == WALLET_NOTE_SPENT_ON_CHAIN) {
-        out->reconciling_notes++;
-        return;
-    }
+    *short_by = 0;
+    if (n->chain == WALLET_NOTE_SPENT_ON_CHAIN)
+        return WALLET_NOTE_RECONCILING;
     if (confs < need) {
+        *short_by = need - confs;
+        return WALLET_NOTE_PENDING;
+    }
+    if (n->chain == WALLET_NOTE_UNSPENT_ON_CHAIN &&
+        n->witness == WALLET_WITNESS_READY)
+        return WALLET_NOTE_SPENDABLE;
+    return WALLET_NOTE_UNREADY;
+}
+
+bool wallet_note_is_spendable(const struct db_wallet_note_fact *n,
+                              const uint8_t (*spenders)[32], size_t ns,
+                              int tip)
+{
+    int short_by;
+    return !n->spent &&
+           wallet_note_classify(n, spenders, ns, tip, &short_by) ==
+               WALLET_NOTE_SPENDABLE;
+}
+
+/* An unspent note lands in exactly one bucket (see wallet_note_classify).
+ * Spendable notes add to their key's total in *key_sum. */
+static void wa_add_note(const struct db_wallet_note_fact *n,
+                        const uint8_t (*spenders)[32], size_t ns, int tip,
+                        struct wallet_summary *out, int64_t *key_sum)
+{
+    int short_by;
+    switch (wallet_note_classify(n, spenders, ns, tip, &short_by)) {
+    case WALLET_NOTE_RECONCILING:
+        out->reconciling_notes++;
+        break;
+    case WALLET_NOTE_PENDING:
         out->pending += n->value;
         out->pending_count++;
         if (out->pending_min_confs_needed == 0 ||
-            need - confs < out->pending_min_confs_needed)
-            out->pending_min_confs_needed = need - confs;
-        return;
+            short_by < out->pending_min_confs_needed)
+            out->pending_min_confs_needed = short_by;
+        break;
+    case WALLET_NOTE_SPENDABLE:
+        *key_sum += n->value;
+        out->spendable_total += n->value;
+        break;
+    default:
+        out->unready += n->value;
+        out->unready_notes++;
     }
-    if (n->chain == WALLET_NOTE_UNSPENT_ON_CHAIN &&
-        n->witness == WALLET_WITNESS_READY) {
-        out->spendable += n->value;
-        return;
-    }
-    out->unready += n->value;
-    out->unready_notes++;
+}
+
+static size_t wa_ivk_index(const uint8_t (*ivks)[32], size_t nk,
+                           const uint8_t ivk[32])
+{
+    for (size_t i = 0; i < nk; i++)
+        if (memcmp(ivks[i], ivk, 32) == 0)
+            return i;
+    return nk;
 }
 
 static void wa_add_coin(const struct db_wallet_coin_fact *c, int tip,
@@ -144,16 +179,22 @@ bool wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
 {
     memset(out, 0, sizeof(*out));
     size_t ns = 0;
-    uint8_t (*sp)[32] = wa_spenders(notes, nn, coins, nc, ivks, nk, &ns);
-    if (!sp)
+    uint8_t (*sp)[32] = wallet_note_spenders(notes, nn, coins, nc, ivks, nk, &ns);
+    int64_t *per_key = zcl_calloc(nk + 1, sizeof(*per_key), "wallet key sums");
+    if (!sp || !per_key) {
+        free(sp);
+        free(per_key);
         return false; // raw-return-ok:callee-logged
+    }
     for (size_t i = 0; i < nn; i++) {
         if (i > 0 && wa_note_same(&notes[i], &notes[i - 1]))
             continue;
-        if (!wa_ivk_loaded(ivks, nk, notes[i].ivk))
+        size_t ki = wa_ivk_index(ivks, nk, notes[i].ivk);
+        if (ki == nk)
             continue;
         if (!notes[i].spent)
-            wa_add_note(&notes[i], (const uint8_t (*)[32])sp, ns, tip, out);
+            wa_add_note(&notes[i], (const uint8_t (*)[32])sp, ns, tip, out,
+                        &per_key[ki]);
         else if (wa_unconfirmed_spender(txs, nt, notes[i].spent_txid_ok,
                                         notes[i].spent_txid))
             out->sending += notes[i].value;
@@ -167,6 +208,10 @@ bool wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
                                         coins[i].spent_txid))
             out->sending += coins[i].value;
     }
+    for (size_t i = 0; i < nk; i++)
+        if (per_key[i] > out->spendable)
+            out->spendable = per_key[i];
+    free(per_key);
     free(sp);
     return true;
 }

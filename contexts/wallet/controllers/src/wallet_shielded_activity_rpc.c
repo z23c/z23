@@ -109,6 +109,8 @@ void wallet_summary_to_json(const struct wallet_summary *s,
     bool z = v->shielded_known;
     json_push_kv_str(out, "shielded_state", z ? "ok" : "keys_unavailable");
     wa_kv_amount_known(out, "spendable_zat", "spendable", z, s->spendable);
+    wa_kv_amount_known(out, "spendable_total_zat", "spendable_total", z,
+                       s->spendable_total);
     wa_kv_amount_known(out, "pending_zat", "pending", z, s->pending);
     if (z) {
         json_push_kv_int(out, "pending_notes", s->pending_count);
@@ -406,6 +408,44 @@ bool rpc_walletsummary(const struct json_value *params, bool help,
     wallet_summary_to_json(&sum, &st.view, allowed, reason, result);
     wa_state_free(&st);
     return true;
+}
+
+int wallet_send_spendable_notes(struct wallet_rpc_context *ctx,
+                                struct db_sapling_note *notes, int n)
+{
+    struct json_value unused;
+    struct wa_state st;
+    json_init(&unused);
+    if (!wa_state_load(ctx, &st, false, &unused)) {
+        json_free(&unused);
+        return -1; // raw-return-ok:callee-logged
+    }
+    json_free(&unused);
+    const struct wa_facts *f = &st.facts;
+    size_t ns = 0;
+    uint8_t (*sp)[32] = wallet_note_spenders(
+        f->notes, (size_t)f->nn, f->coins, (size_t)f->nc,
+        (const uint8_t (*)[32])st.keys.ivk, st.keys.n, &ns);
+    if (!sp) {
+        wa_state_free(&st);
+        return -1; // raw-return-ok:callee-logged
+    }
+    int kept = 0;
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < f->nn; j++) {
+            const struct db_wallet_note_fact *fact = &f->notes[j];
+            if (fact->output_index != notes[i].output_index ||
+                memcmp(fact->txid, notes[i].txid, 32) != 0)
+                continue;
+            if (wallet_note_is_spendable(fact, (const uint8_t (*)[32])sp, ns,
+                                         st.view.tip_height))
+                notes[kept++] = notes[i];
+            break;
+        }
+    }
+    free(sp);
+    wa_state_free(&st);
+    return kept;
 }
 
 /* ── history ─────────────────────────────────────────────────────── */

@@ -10,6 +10,9 @@
 #include "base/safe_alloc.h"
 #include "controllers/wallet_activity.h"
 #include "controllers/wallet_helpers.h"
+#include "controllers/wallet_shielded_internal.h"
+#include "chain/chainparams.h"
+#include "validation/main_state.h"
 #include "jobs/reducer_frontier.h"
 #include "json/json.h"
 #include "models/wallet_tx.h"
@@ -34,6 +37,7 @@
 #define ADDRESS_TEXT "zs1testaddressnotforlogs"
 
 static uint8_t g_ivk[32];
+static uint8_t g_ivk2[32];
 
 struct rig {
     struct wallet *wallet;
@@ -404,6 +408,152 @@ static int test_log_hygiene(const char *log)
     return failures;
 }
 
+/* One native-path send of `amount` from key `key`, as z_sendmany runs it. The
+ * result string explains a refusal. With spendable_only false it is the raw
+ * z_sendmany call that names an explicit minconf. */
+static void send_try(struct rig *r, size_t key, int64_t amount,
+                     bool spendable_only, struct json_value *res)
+{
+    struct main_state *ms = zcl_calloc(1, sizeof(*ms), "test main state");
+    json_init(res);
+    wallet_rpc_context_set_base(r->wallet, ms, r->dir, NULL, NULL, NULL);
+    (void)z_sendmany_shielded(wallet_ctx(), chain_params_get(),
+                              &r->wallet->sapling_keys.keys[key], amount,
+                              NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, 0,
+                              spendable_only, NULL, res);
+    wallet_rpc_context_set_base(r->wallet, NULL, r->dir, NULL, NULL, NULL);
+    free(ms);
+}
+
+static bool refused_insufficient(const struct json_value *res)
+{
+    const char *s = json_get_str(res);
+    return s && strcmp(s, "Insufficient shielded funds") == 0;
+}
+
+static bool rig_two_keys(struct rig *r)
+{
+    struct sapling_keystore *ks = &r->wallet->sapling_keys;
+    memset(&ks->keys[1], 0, sizeof(ks->keys[1]));
+    memcpy(ks->keys[1].ivk, g_ivk2, 32);
+    ks->keys[1].used = true;
+    ks->num_keys = 2;
+    return true;
+}
+
+/* (a) A ready 1 ZCL note beside a 2 ZCL note whose witness is stale. */
+static int test_send_skips_unready_note(void)
+{
+    int failures = 0;
+    TEST_CASE("send: a note the summary calls unready is skipped") {
+        struct rig r;
+        struct json_value j, res;
+        bool ok;
+        ASSERT(rig_open(&r, true));
+        ASSERT(wsh_put_note(&r.ndb, 0x71, 0, g_ivk, 1 * ZCL1, 280, NULL));
+        ASSERT(wsh_put_note(&r.ndb, 0x72, 0, g_ivk, 2 * ZCL1, 270, NULL));
+        ASSERT(save_witness(&r.ndb, 0x71, TIP) &&
+               save_witness(&r.ndb, 0x72, TIP - 1));
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        ASSERT_EQ(field(&j, "spendable_zat"), 1 * ZCL1);
+        ASSERT_EQ(field(&j, "unready_zat"), 2 * ZCL1);
+        json_free(&j);
+        /* 1.5 ZCL needs the stale note: refused, not "Witness stale". */
+        send_try(&r, 0, ZCL1 + ZCL1 / 2, true, &res);
+        ASSERT(refused_insufficient(&res));
+        json_free(&res);
+        /* The explicit-minconf call keeps selecting every unspent note. */
+        send_try(&r, 0, ZCL1 + ZCL1 / 2, false, &res);
+        ASSERT(!refused_insufficient(&res));
+        json_free(&res);
+        rig_close(&r);
+    } TEST_END
+    return failures;
+}
+
+/* (b) Two keys each hold a ready 1 ZCL note: one send spends from one key. */
+static int test_send_spends_one_key(void)
+{
+    int failures = 0;
+    TEST_CASE("send: spendable is the largest single-key amount") {
+        struct rig r;
+        struct json_value j, res;
+        bool ok;
+        ASSERT(rig_open(&r, true));
+        rig_two_keys(&r);
+        ASSERT(wsh_put_note(&r.ndb, 0x73, 0, g_ivk, 1 * ZCL1, 280, NULL));
+        ASSERT(wsh_put_note(&r.ndb, 0x74, 0, g_ivk2, 1 * ZCL1, 280, NULL));
+        ASSERT(save_witness(&r.ndb, 0x73, TIP) &&
+               save_witness(&r.ndb, 0x74, TIP));
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        ASSERT_EQ(field(&j, "spendable_zat"), 1 * ZCL1);
+        ASSERT_EQ(field(&j, "spendable_total_zat"), 2 * ZCL1);
+        json_free(&j);
+        send_try(&r, 0, ZCL1 + ZCL1 / 2, true, &res);
+        ASSERT(refused_insufficient(&res));
+        json_free(&res);
+        send_try(&r, 1, ZCL1 + ZCL1 / 2, true, &res);
+        ASSERT(refused_insufficient(&res));
+        json_free(&res);
+        rig_close(&r);
+    } TEST_END
+    return failures;
+}
+
+/* (c) A 5 ZCL received note with 2 confirmations is pending, so send does not
+ * spend it either. */
+static int test_send_waits_for_depth(void)
+{
+    int failures = 0;
+    TEST_CASE("send: a pending note is not spent") {
+        struct rig r;
+        struct json_value j, res;
+        bool ok;
+        ASSERT(rig_open(&r, true));
+        ASSERT(wsh_put_note(&r.ndb, 0x75, 0, g_ivk, 5 * ZCL1, TIP - 1, NULL));
+        ASSERT(save_witness(&r.ndb, 0x75, TIP));
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        ASSERT_EQ(field(&j, "spendable_zat"), 0);
+        ASSERT_EQ(field(&j, "pending_zat"), 5 * ZCL1);
+        json_free(&j);
+        send_try(&r, 0, ZCL1, true, &res);
+        ASSERT(refused_insufficient(&res));
+        json_free(&res);
+        send_try(&r, 0, ZCL1, false, &res);
+        ASSERT(!refused_insufficient(&res));
+        json_free(&res);
+        rig_close(&r);
+    } TEST_END
+    return failures;
+}
+
+static int test_send_rule_by_params(void)
+{
+    int failures = 0;
+    TEST_CASE("send: an explicit minconf keeps the raw selection") {
+        struct json_value p, v;
+        json_init(&p);
+        json_set_array(&p);
+        for (int i = 0; i < 2; i++) {
+            json_init(&v);
+            json_set_int(&v, i);
+            json_push_back(&p, &v);
+            json_free(&v);
+        }
+        ASSERT(z_sendmany_spendable_only(&p));
+        json_init(&v);
+        json_set_int(&v, 1);
+        json_push_back(&p, &v);
+        json_free(&v);
+        ASSERT(!z_sendmany_spendable_only(&p));
+        json_free(&p);
+    } TEST_END
+    return failures;
+}
+
 static int run_rig_tests(void)
 {
     struct rig r;
@@ -419,6 +569,10 @@ static int run_rig_tests(void)
     failures += test_sent_amount_from_stored_tx(&r);
     rig_close(&r);
     failures += test_unknown_tip();
+    failures += test_send_skips_unready_note();
+    failures += test_send_spends_one_key();
+    failures += test_send_waits_for_depth();
+    failures += test_send_rule_by_params();
     return failures;
 }
 
@@ -429,6 +583,7 @@ int wallet_summary_handlers_run(void)
     int failures;
     printf("\n=== wallet summary handlers ===\n");
     memset(g_ivk, 0xa1, sizeof(g_ivk));
+    memset(g_ivk2, 0xb2, sizeof(g_ivk2));
     snprintf(path, sizeof(path), "./test-tmp/wsh_%d.log", (int)getpid());
     (void)mkdir("./test-tmp", 0755);
     fflush(stderr);

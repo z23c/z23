@@ -19,6 +19,7 @@
 #include "controllers/sync_controller.h"
 #include "command/native_command.h"
 #include "controllers/rpc_client.h"
+#include "controllers/wallet_activity.h"
 #include "controllers/wallet_controller.h"
 #include "controllers/wallet_helpers.h"
 #include "controllers/wallet_shielded_internal.h"
@@ -1857,6 +1858,17 @@ int test_simnet_wallet_diversified_send(void)
             transaction_free(&seen);
         }
         ASSERT_EQ((int)simnet_sapling_tree_size(&s), WDR_PAYERS);
+        /* The wallet spends notes past the depth its summary reports as
+         * spendable: mine empty blocks until the newest note is that deep. */
+        for (int depth = 1; depth < WALLET_CONF_RECEIVED; depth++) {
+            struct block empty;
+            memset(&empty, 0, sizeof(empty));
+            height++;
+            ASSERT(node_db_begin_immediate(&f.ndb));
+            ASSERT(advance_wallet_witnesses(&f.ndb, &empty, &tree, height,
+                                            f.w));
+            ASSERT(node_db_commit(&f.ndb));
+        }
         uint64_t sum = 0;
         for (unsigned k = 0; k < WDR_PAYERS; k++)
             sum += (k + 1) * (uint64_t)100000000 - (uint64_t)WDS_FEE;
