@@ -208,6 +208,94 @@ static void note_gate_suppressed(
              (unsigned long long)reps);
 }
 
+static void rfrl_refold_clear_edge(void)
+{
+    sqlite3 *db = progress_store_db();
+    if (db) {
+        int ua = -1;
+        if (rfrl_read_reducer_cursor(db, "utxo_apply", &ua) && ua >= 0) {
+            if (refold_from_anchor_active()) {
+                /* CUTOVER DEFECT 1 — the from-anchor resume target is
+                 * captured ONCE at boot, but the chain advances during a
+                 * multi-hour fold. Re-write the durable target to
+                 * MAX(stored, live tip) BEFORE the clear so the clear edge
+                 * keys on the CURRENT tip, not the frozen boot height —
+                 * otherwise utxo_apply crossing the stale boot target
+                 * un-suspends below-anchor self-repair while the fold is
+                 * still climbing to the real tip (the re-wedge surface).
+                 * Touches ONLY progress.kv — no csr->lock, no evidence
+                 * machinery (lock-order-safe on the reducer-drive path). */
+                struct main_state *ms = sync_monitor_main_state();
+                if (ms) {
+                    int live_tip = active_chain_height(&ms->chain_active);
+                    if (live_tip >= 0)
+                        (void)refold_progress_bump_target(db,
+                                                          (int32_t)live_tip);
+                }
+                (void)refold_progress_clear_if_reached(db, (int32_t)ua, -1);
+            } else {
+                (void)refold_progress_clear_if_crossed(db, (int32_t)ua);
+            }
+        }
+    }
+}
+
+static bool rfrl_detect_nothing_actionable(
+    const struct stage_reducer_frontier_reconcile_result *rr)
+{
+    return !rr->refused_coin_tear && !rr->repaired &&
+           !stage_reducer_frontier_result_has_gate_loudness_evidence(rr);
+}
+
+static const char *rfrl_peer_gate_bypass_reason(
+    const struct stage_reducer_frontier_reconcile_result *rr)
+{
+    if (rr->refused_coin_tear)
+        return "refused_coin_tear pending";
+    if (rr->noncanonical_found > 0) {
+        /* Durable below-frontier damage — e.g. a validate/script
+         * hash_split the noncanonical purge PROTECTED for the
+         * coins-rewinding stale-script replay — is peer-independent
+         * evidence exactly like refused_coin_tear: the fold tip H* is
+         * pinned below the header tip with no peer ahead. BYPASS the gate
+         * so the remedy runs and the episode stays active; WITHOUT this the
+         * LIVE node (peers at the tip, none ahead) never arms the
+         * sticky_escalator and the wedge is silent. */
+        return "noncanonical_found pending";
+    }
+    if (rr->lowest_script_validate_refill_hole >= 0 ||
+        rr->lowest_proof_validate_refill_hole >= 0 ||
+        rr->lowest_validate_headers_refill_hole >= 0 ||
+        rr->lowest_body_persist_refill_hole >= 0) {
+        /* A rowless stage-log hole below the stage cursor
+         * (script_validate_log / proof_validate_log /
+         * validate_headers_log / body_persist_log — e.g. the residue of a
+         * noncanonical purge that deleted stale-hash rows without
+         * clamping these cursors) is durable internal damage: the
+         * canonical body is already persisted on disk, so the
+         * re-derivation needs no peer. Gating this repair on "a peer is
+         * ahead" — connman_max_peer_height reads the peers' STATIC
+         * handshake starting_height (core/modules/net/src/connman.c), which near
+         * tip is <= the local height forever — would suppress the only
+         * healer for a rowless script_validate_log/proof_validate_log hole.
+         * body_fetch refill holes stay gated (re-fetching a
+         * body needs a peer to serve it); their suppression is LOUD
+         * via note_gate_suppressed below. */
+        return "stage-log refill hole pending";
+    }
+    if (rr->label_splice_rebind_lowest >= 0) {
+        /* A NULL-block_hash proof/script suffix pinning utxo_apply on
+         * label_splice is durable below-frontier internal damage: the
+         * canonical bodies are already persisted, so re-deriving + re-stamping
+         * block_hash needs no peer. Gating it on "a peer is ahead" would idle
+         * the only healer for the pure label_splice wedge near tip (a
+         * zero/behind-peer copy). Peer-independent, exactly like a stage-log
+         * refill hole. */
+        return "label_splice re-bind pending";
+    }
+    return NULL;
+}
+
 static bool detect_reducer_frontier_reconcile_light(void)
 {
     /* SUSPENDED during a from-genesis staged refold (jobs/refold_progress.h):
@@ -229,35 +317,7 @@ static bool detect_reducer_frontier_reconcile_light(void)
      * climbing to), NOT the trusted anchor (the fold STARTS at the anchor). A
      * from-genesis refold keeps the original anchor-crossing clear edge. */
     if (refold_in_progress()) {
-        sqlite3 *db = progress_store_db();
-        if (db) {
-            int ua = -1;
-            if (rfrl_read_reducer_cursor(db, "utxo_apply", &ua) && ua >= 0) {
-                if (refold_from_anchor_active()) {
-                    /* CUTOVER DEFECT 1 — the from-anchor resume target is
-                     * captured ONCE at boot, but the chain advances during a
-                     * multi-hour fold. Re-write the durable target to
-                     * MAX(stored, live tip) BEFORE the clear so the clear edge
-                     * keys on the CURRENT tip, not the frozen boot height —
-                     * otherwise utxo_apply crossing the stale boot target
-                     * un-suspends below-anchor self-repair while the fold is
-                     * still climbing to the real tip (the re-wedge surface).
-                     * Touches ONLY progress.kv — no csr->lock, no evidence
-                     * machinery (lock-order-safe on the reducer-drive path). */
-                    struct main_state *ms = sync_monitor_main_state();
-                    if (ms) {
-                        int live_tip =
-                            active_chain_height(&ms->chain_active);
-                        if (live_tip >= 0)
-                            (void)refold_progress_bump_target(
-                                db, (int32_t)live_tip);
-                    }
-                    (void)refold_progress_clear_if_reached(db, (int32_t)ua, -1);
-                } else {
-                    (void)refold_progress_clear_if_crossed(db, (int32_t)ua);
-                }
-            }
-        }
+        rfrl_refold_clear_edge();
         if (refold_in_progress())
             return false;
     }
@@ -288,8 +348,7 @@ static bool detect_reducer_frontier_reconcile_light(void)
         log_throttle_reset(&g_gate_suppress);
         return false;
     }
-    if (!rr.refused_coin_tear && !rr.repaired &&
-        !stage_reducer_frontier_result_has_gate_loudness_evidence(&rr)) {
+    if (rfrl_detect_nothing_actionable(&rr)) {
         /* Nothing actionable: both transition memos re-arm.
          * noncanonical_found counts relabel/reorg-residue rows the
          * dry-run judged stale — the apply purge is the remedy.
@@ -301,46 +360,9 @@ static bool detect_reducer_frontier_reconcile_light(void)
     }
 
     if (!peer_lag_allows_repair(ms, rr.hstar)) {
-        if (rr.refused_coin_tear) {
-            note_peer_gate_bypass(&rr, "refused_coin_tear pending");
-        } else if (rr.noncanonical_found > 0) {
-            /* Durable below-frontier damage — e.g. a validate/script
-             * hash_split the noncanonical purge PROTECTED for the
-             * coins-rewinding stale-script replay — is peer-independent
-             * evidence exactly like refused_coin_tear: the fold tip H* is
-             * pinned below the header tip with no peer ahead. BYPASS the gate
-             * so the remedy runs and the episode stays active; WITHOUT this the
-             * LIVE node (peers at the tip, none ahead) never arms the
-             * sticky_escalator and the wedge is silent. */
-            note_peer_gate_bypass(&rr, "noncanonical_found pending");
-        } else if (rr.lowest_script_validate_refill_hole >= 0 ||
-                   rr.lowest_proof_validate_refill_hole >= 0 ||
-                   rr.lowest_validate_headers_refill_hole >= 0 ||
-                   rr.lowest_body_persist_refill_hole >= 0) {
-            /* A rowless stage-log hole below the stage cursor
-             * (script_validate_log / proof_validate_log /
-             * validate_headers_log / body_persist_log — e.g. the residue of a
-             * noncanonical purge that deleted stale-hash rows without
-             * clamping these cursors) is durable internal damage: the
-             * canonical body is already persisted on disk, so the
-             * re-derivation needs no peer. Gating this repair on "a peer is
-             * ahead" — connman_max_peer_height reads the peers' STATIC
-             * handshake starting_height (core/modules/net/src/connman.c), which near
-             * tip is <= the local height forever — would suppress the only
-             * healer for a rowless script_validate_log/proof_validate_log hole.
-             * body_fetch refill holes stay gated (re-fetching a
-             * body needs a peer to serve it); their suppression is LOUD
-             * via note_gate_suppressed below. */
-            note_peer_gate_bypass(&rr, "stage-log refill hole pending");
-        } else if (rr.label_splice_rebind_lowest >= 0) {
-            /* A NULL-block_hash proof/script suffix pinning utxo_apply on
-             * label_splice is durable below-frontier internal damage: the
-             * canonical bodies are already persisted, so re-deriving + re-stamping
-             * block_hash needs no peer. Gating it on "a peer is ahead" would idle
-             * the only healer for the pure label_splice wedge near tip (a
-             * zero/behind-peer copy). Peer-independent, exactly like a stage-log
-             * refill hole. */
-            note_peer_gate_bypass(&rr, "label_splice re-bind pending");
+        const char *bypass_reason = rfrl_peer_gate_bypass_reason(&rr);
+        if (bypass_reason) {
+            note_peer_gate_bypass(&rr, bypass_reason);
         } else {
             /* Gate KEPT for the plain cursor-churn repair class: peers that
              * exist but are not ahead are no staleness evidence. The tear
@@ -722,6 +744,16 @@ static bool witness_reducer_frontier_reconcile_light(int64_t target_at_detect)
     return hstar_now > hstar_at_detect;
 }
 
+static void rfrl_progressing_rebaseline(bool have_hstar, int hstar_now,
+                                        bool coin_present, int coin_next,
+                                        bool tip_present, int tip_progress)
+{
+    rfrl_progressing_raise_hwm(have_hstar ? hstar_now : -1,
+                               coin_present ? coin_next : -1,
+                               tip_present ? tip_progress : -1);
+    rfrl_snapshot_coin_backfill_insert_progress();
+}
+
 /* TL-1 REFRESH-ONLY progress signal. The H* witness above is the SOLE
  * clear/success predicate; this is consulted by the engine ONLY when the
  * witness is still false after a remedy, to decide whether the attempt budget
@@ -803,12 +835,9 @@ static bool progressing_reducer_frontier_reconcile_light(
      * next round measures fresh forward progress. A false return leaves the
      * baselines untouched, so progress accrued over multiple rounds is still
      * detected. */
-    if (progressed) {
-        rfrl_progressing_raise_hwm(have_hstar ? hstar_now : -1,
-                                   coin_present ? coin_next : -1,
-                                   tip_present ? tip_progress : -1);
-        rfrl_snapshot_coin_backfill_insert_progress();
-    }
+    if (progressed)
+        rfrl_progressing_rebaseline(have_hstar, hstar_now, coin_present,
+                                    coin_next, tip_present, tip_progress);
     return progressed;
 }
 
