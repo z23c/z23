@@ -6703,8 +6703,15 @@ static bool ic_split_edit_leaflist(void)
            ic_split_w("mk/extra.mk", "EXTRA = $(D)/other.c $(D)/big_part.c\n");
 }
 
-/* The split part with `extra` inserted after its first (header) line. */
-static bool ic_split_edit_part_extra(const char *extra)
+/* The sibling after the split with its continuation include dropped too. */
+static const char ic_split_big_after_nocont[] =
+    "/* big.c - base */\n#include \"a.h\"\n#include <stdio.h>\n\n"
+    "int keep_main(int x)\n{\n"
+    "    return first_helper(x) + second_helper(x);\n}\n";
+
+/* The split part with `extra` inserted after its first (header) line, and
+ * the sibling rewritten to `big_after`. */
+static bool ic_split_edit_part_with(const char *big_after, const char *extra)
 {
     static char part[2048];
     const char *eol = strchr(ic_split_part, '\n');
@@ -6712,16 +6719,29 @@ static bool ic_split_edit_part_extra(const char *extra)
                          (int)(eol + 1 - ic_split_part), ic_split_part, extra,
                          eol + 1) >= (int)sizeof(part))
         return false;
-    return ic_split_w("core/a/big.c", ic_split_big_after) &&
+    return ic_split_w("core/a/big.c", big_after) &&
            ic_split_w("core/a/big_part.c", part) &&
            ic_split_w("Makefile", ic_split_make_after);
 }
 
-/* The sibling dropped `#include \` + `"a.h"`, so the line `#include \` is a
- * removed line: the added file's continuation include rides on it unread. */
+static bool ic_split_edit_part_extra(const char *extra)
+{
+    return ic_split_edit_part_with(ic_split_big_after, extra);
+}
+
+/* The sibling keeps `#include \` + `"a.h"`, so the line `#include \` is a
+ * kept line: the added file's continuation include rides on it unread. */
 static bool ic_split_edit_incont(void)
 {
     return ic_split_edit_part_extra("#include \\\n\"zz.h\"\n");
+}
+
+/* The sibling dropped `#include \` + `"a.h"`, so the line `#include \` is a
+ * removed line: the added file's continuation include must not ride on it. */
+static bool ic_split_edit_incontrm(void)
+{
+    return ic_split_edit_part_with(ic_split_big_after_nocont,
+                                   "#include \\\n\"zz.h\"\n");
 }
 
 /* An include after a block comment on its own line is no leading `#`. */
@@ -6774,6 +6794,7 @@ static bool ic_split_fixture_build(void)
         {"contref", ic_split_edit_contref},
         {"leaflist", ic_split_edit_leaflist},
         {"incont", ic_split_edit_incont},
+        {"incontrm", ic_split_edit_incontrm},
         {"increst", ic_split_edit_increst},
         {"wordlist", ic_split_edit_wordlist},
     };
@@ -6801,7 +6822,8 @@ static const struct ic_split_case ic_split_cases[] = {
     {"macrofn", false},    /* a macro-defined function the reader cannot name */
     {"contref", false},    /* an #include split over a continuation line */
     {"leaflist", false},   /* a build list naming the basename, not the sibling */
-    {"incont", false},     /* #include split over a continuation line */
+    {"incont", false},     /* #include split over a continuation line (kept) */
+    {"incontrm", false},   /* the same over a line the sibling removed */
     {"increst", false},    /* an #include after a comment on its line */
     {"wordlist", false},   /* a list naming the sibling only as a substring */
 };
