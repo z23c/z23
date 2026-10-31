@@ -73,6 +73,21 @@ static int reorg_depth_from(struct block_index *old_tip,
     return depth > 0 ? depth : 1;
 }
 
+/* True when new_tip is the best-header ancestor at its own height, compared
+ * by block hash (the last check of is_canonical_header_successor below). */
+static bool header_successor_on_best_chain(struct block_index *new_tip,
+                                           struct block_index *best_header)
+{
+    if (new_tip->nHeight > best_header->nHeight)
+        return false;
+    struct block_index *anc =
+        block_index_get_ancestor(best_header, new_tip->nHeight);
+    if (!anc || !anc->phashBlock ||
+        !uint256_eq(anc->phashBlock, new_tip->phashBlock))
+        return false;
+    return true;
+}
+
 /* HEADER-ONLY canonical-successor witness (deadlock cure `a35ca0c8f`).
  *
  * Returns true iff new_tip (N+1) is sufficient HEADER-level evidence that
@@ -94,6 +109,7 @@ static int reorg_depth_from(struct block_index *old_tip,
  * N+1 is NEVER finalized or served on this evidence: tip_finalize still requires
  * N+1's own ok=1 before advancing past it, and H* is capped by the contiguous
  * ok=1 prefix (reducer_frontier), so it climbs only to N. */
+
 static bool is_canonical_header_successor(struct block_index *old_tip,
                                           struct block_index *new_tip,
                                           struct block_index *best_header)
@@ -111,14 +127,7 @@ static bool is_canonical_header_successor(struct block_index *old_tip,
         return false;
     if (arith_uint256_compare(&new_tip->nChainWork, &old_tip->nChainWork) <= 0)
         return false;
-    if (new_tip->nHeight > best_header->nHeight)
-        return false;
-    struct block_index *anc =
-        block_index_get_ancestor(best_header, new_tip->nHeight);
-    if (!anc || !anc->phashBlock ||
-        !uint256_eq(anc->phashBlock, new_tip->phashBlock))
-        return false;
-    return true;
+    return header_successor_on_best_chain(new_tip, best_header);
 }
 
 /* HEADER-LOOKAHEAD RESOLUTION GUARD. best_header ancestry is a useful fallback
@@ -536,6 +545,83 @@ static job_result_t step_fin_load_upstream(sqlite3 *db, int next_h,
     return JOB_IDLE;
 }
 
+/* upstream_failed row: clear the evidence and record the ok=0 advance. */
+static job_result_t step_fin_upstream_failed(struct stage_step_ctx *c, sqlite3 *db,
+                                             int next_h)
+{
+    tip_finalize_evidence_clear();
+    struct arith_uint256 zero;
+    arith_uint256_set_zero(&zero);
+    if (!log_insert(db, next_h, "upstream_failed", false, &zero, -1, 0, NULL))
+        return JOB_FATAL;
+    tip_finalize_observe_inc_upstream_failed();
+    c->cursor_out = c->cursor_in + 1;
+    return JOB_ADVANCED;
+}
+
+/* Served-tip publish gate: new_tip must have its body and must not move the
+ * advertised height backwards. */
+static bool step_fin_publish_wanted(struct block_index *new_tip,
+                                    int64_t published_before)
+{
+    return (new_tip->nStatus & BLOCK_HAVE_DATA) &&
+           (published_before < 0 || new_tip->nHeight >= (int)published_before);
+}
+
+/* The window moves only outside a from-genesis refold and onto a body. */
+static bool step_fin_window_wanted(struct block_index *new_tip)
+{
+    return !refold_in_progress() && (new_tip->nStatus & BLOCK_HAVE_DATA);
+}
+
+static void step_fin_observe_window_us(bool tf_do_window, int64_t tf_win_t0)
+{
+    if (tf_do_window)
+        reducer_stage_profile_observe_us(
+            REDUCER_PROFILE_TIP_FINALIZE, RPF_TF_WINDOW_MOVE_US,
+            (uint64_t)(platform_time_monotonic_us() - tf_win_t0));
+}
+
+/* *stop is set when the returned result must end the step. Checks, in order:
+ * structural reorg (reorg_detected), successor hold (JOB_IDLE), and the
+ * chainwork precondition (precondition_failed). */
+static job_result_t step_fin_linkage_gate(struct stage_step_ctx *c, sqlite3 *db,
+                                          int next_h, struct main_state *ms,
+                                          struct block_index *old_tip,
+                                          struct block_index *new_tip,
+                                          struct arith_uint256 *work_delta,
+                                          bool *stop)
+{
+    *stop = true;
+    if (!new_tip->pprev || !new_tip->pprev->phashBlock || !old_tip->phashBlock ||
+        !uint256_eq(new_tip->pprev->phashBlock, old_tip->phashBlock)) {
+        int depth = reorg_depth_from(old_tip, new_tip);
+        if (!log_insert(db, next_h, "reorg_detected", false, work_delta, -1, depth, NULL))
+            return JOB_FATAL;
+        tip_finalize_observe_inc_reorg_detected();
+        event_emitf(EV_BLOCK_REJECTED, 0,
+                    "tip_finalize reorg_detected height=%d depth=%d", next_h, depth);
+        c->cursor_out = c->cursor_in + 1;
+        return JOB_ADVANCED;
+    }
+    if (step_fin_successor_hold(ms, db, next_h, old_tip, new_tip))
+        return JOB_IDLE;
+    if (arith_uint256_compare(&new_tip->nChainWork, &old_tip->nChainWork) <= 0) {
+        if (!log_insert(db, next_h, "precondition_failed", false, work_delta, -1, 0, NULL))
+            return JOB_FATAL;
+        tip_finalize_observe_inc_precondition_failed();
+        tip_finalize_observe_record_precondition_block(
+            next_h, "chainwork_not_greater");
+        event_emitf(EV_BLOCK_REJECTED, 0,
+                    "tip_finalize precondition_failed height=%d reason=%s",
+                    next_h, "chainwork_not_greater");
+        c->cursor_out = c->cursor_in + 1;
+        return JOB_ADVANCED;
+    }
+    *stop = false;
+    return JOB_IDLE;
+}
+
 static job_result_t step_finalize(struct stage_step_ctx *c)
 {
     tip_finalize_observe_mark_step();
@@ -554,16 +640,8 @@ static job_result_t step_finalize(struct stage_step_ctx *c)
     if (stop)
         return gate;
 
-    if (upstream.ok == 0) {
-        tip_finalize_evidence_clear();
-        struct arith_uint256 zero;
-        arith_uint256_set_zero(&zero);
-        if (!log_insert(db, next_h, "upstream_failed", false, &zero, -1, 0, NULL))
-            return JOB_FATAL;
-        tip_finalize_observe_inc_upstream_failed();
-        c->cursor_out = c->cursor_in + 1;
-        return JOB_ADVANCED;
-    }
+    if (upstream.ok == 0)
+        return step_fin_upstream_failed(c, db, next_h);
 
     struct block_index *old_tip = NULL;
     struct block_index *new_tip = NULL;
@@ -595,32 +673,10 @@ static job_result_t step_finalize(struct stage_step_ctx *c)
      * is the consensus property child.hashPrevBlock == parent.GetBlockHash();
      * test THAT. A genuine fork (different parent hash, or a NULL/severed pprev)
      * still takes the reorg_detected ok=0 advance below — invariant 4 intact. */
-    if (!new_tip->pprev || !new_tip->pprev->phashBlock || !old_tip->phashBlock ||
-        !uint256_eq(new_tip->pprev->phashBlock, old_tip->phashBlock)) {
-        int depth = reorg_depth_from(old_tip, new_tip);
-        if (!log_insert(db, next_h, "reorg_detected", false, &work_delta, -1, depth, NULL))
-            return JOB_FATAL;
-        tip_finalize_observe_inc_reorg_detected();
-        event_emitf(EV_BLOCK_REJECTED, 0,
-                    "tip_finalize reorg_detected height=%d depth=%d", next_h, depth);
-        c->cursor_out = c->cursor_in + 1;
-        return JOB_ADVANCED;
-    }
-
-    if (step_fin_successor_hold(ms, db, next_h, old_tip, new_tip))
-        return JOB_IDLE;
-    if (arith_uint256_compare(&new_tip->nChainWork, &old_tip->nChainWork) <= 0) {
-        if (!log_insert(db, next_h, "precondition_failed", false, &work_delta, -1, 0, NULL))
-            return JOB_FATAL;
-        tip_finalize_observe_inc_precondition_failed();
-        tip_finalize_observe_record_precondition_block(
-            next_h, "chainwork_not_greater");
-        event_emitf(EV_BLOCK_REJECTED, 0,
-                    "tip_finalize precondition_failed height=%d reason=%s",
-                    next_h, "chainwork_not_greater");
-        c->cursor_out = c->cursor_in + 1;
-        return JOB_ADVANCED;
-    }
+    gate = step_fin_linkage_gate(c, db, next_h, ms, old_tip, new_tip,
+                                 &work_delta, &stop);
+    if (stop)
+        return gate;
 
     arith_uint256_sub(&work_delta, &new_tip->nChainWork, &old_tip->nChainWork);
 
@@ -646,8 +702,7 @@ static job_result_t step_finalize(struct stage_step_ctx *c)
      * published separately by tf_refresh_provable_tip below and still climbs to
      * N. For a normal finalize new_tip always has BLOCK_HAVE_DATA (precondition
      * passed), so this is a no-op there. */
-    bool publish = (new_tip->nStatus & BLOCK_HAVE_DATA) &&
-                   (published_before < 0 || new_tip->nHeight >= (int)published_before);
+    bool publish = step_fin_publish_wanted(new_tip, published_before);
 
     /* Durable row first; then move the local chain[] cache/window — EXCEPT
      * during a from-genesis refold. There the stage extend already widened the
@@ -661,8 +716,7 @@ static job_result_t step_finalize(struct stage_step_ctx *c)
      * the watchdog/reconcile are suspended (refold_in_progress()). Normal sync
      * keeps the retraction (the window must track the finalized frontier). See
      * docs/work/refold-fold-rate-bottlenecks.md (#1). */
-    bool tf_do_window =
-        !refold_in_progress() && (new_tip->nStatus & BLOCK_HAVE_DATA);
+    bool tf_do_window = step_fin_window_wanted(new_tip);
     int64_t tf_win_t0 = platform_time_monotonic_us();
     if (tf_do_window &&
         !tip_finalize_batch_window_move(ms, new_tip)) { // one-write-path-ok:reducer-tip-authority
@@ -676,10 +730,7 @@ static job_result_t step_finalize(struct stage_step_ctx *c)
         LOG_WARN("tip_finalize", "[tip_finalize] chain_active set_tip failed height=%d", next_h);
         return JOB_FATAL;
     }
-    if (tf_do_window)
-        reducer_stage_profile_observe_us(
-            REDUCER_PROFILE_TIP_FINALIZE, RPF_TF_WINDOW_MOVE_US,
-            (uint64_t)(platform_time_monotonic_us() - tf_win_t0));
+    step_fin_observe_window_us(tf_do_window, tf_win_t0);
 
     step_fin_publish_and_advance(db, next_h, new_tip, &work_delta, publish);
     c->cursor_out = c->cursor_in + 1;
