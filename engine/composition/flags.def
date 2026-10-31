@@ -2466,9 +2466,13 @@ Z23_FLAG("ZCL_TEST_CANONICAL_DATADIR", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_TEST_HARNESS", "env_runtime", "-", "-",
           "set to 1 by the test runners (tests/harness/src/test_home_isolation.c); arms the canonical-datadir writer guard in storage/boot_auto_reindex.c, absent in production; first use engine/modules/storage/src/boot_auto_reindex.c:auto")
 Z23_FLAG("ZCL_TEST_TMPFS", "env_test", "-", "-",
-          "set to 0 to disable automatic tmpfs fixture roots; first use Makefile:auto")
+          "set to 0 to disable automatic tmpfs fixture roots; first use tests/harness/src/test_parallel.c:auto")
+Z23_FLAG("ZCL_TEST_TMPFS_ACTIVE", "env_test", "-", "-",
+          "runner identifies its automatic tmpfs root for fixture size checks; first use tests/harness/include/test/test_core.h:auto")
+Z23_FLAG("ZCL_TEST_TMPFS_MAX_MB", "env_test", "-", "-",
+          "maximum allocated tmpfs fixture megabytes before new attempts use disk; first use tests/harness/src/test_parallel.c:auto")
 Z23_FLAG("ZCL_TEST_TMPROOT", "env_test", "-", "-",
-          "absolute private test fixture root; first use Makefile:auto")
+          "absolute private test fixture root; first use tests/harness/src/test_parallel.c:auto")
 Z23_FLAG("ZCL_TEST_PRIVATE_HOME", "env_test", "-", "-",
           "set to 1 by the test runners when a group got a private HOME instead of the real one; first use tests/harness/src/test_home_isolation.c:auto")
 Z23_FLAG("ZCL_TEST_REAL_HOME", "env_test", "-", "-",

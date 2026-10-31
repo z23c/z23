@@ -3119,7 +3119,7 @@ static int test_runner_state_setup_refuses(void)
         ASSERT(fclose(f) == 0);
         ASSERT(os_proc_exe_path(exe, sizeof(exe)));
         n = snprintf(command, sizeof(command),
-            "cd '%s' && '%s' --jobs=1 --verbose --no-cache "
+            "cd '%s' && env -u ZCL_TEST_TMPROOT -u ZCL_TEST_TMPFS '%s' --jobs=1 --verbose --no-cache "
             "--exact=test_hex_codec 2>&1", root, exe);
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT(capture_command(command, out, sizeof(out)) != 0);
@@ -3129,6 +3129,81 @@ static int test_runner_state_setup_refuses(void)
     } _test_next:;
     return failures;
 }
+
+#if defined(__linux__)
+static int test_tmpfs_fallback(void)
+{
+    int failures = 0;
+    TEST("runner: disabled tmpfs falls back and unsafe parent is refused") {
+        static char out[1024 * 1024];
+        char root[PATH_MAX], exe[PATH_MAX], command[3 * PATH_MAX];
+        test_make_tmpdir(root, sizeof(root), "tgs_tmpfs", "fallback");
+        ASSERT(test_tmpfs_parent_safe(root));
+        ASSERT(chmod(root, 0777) == 0);
+        ASSERT(!test_tmpfs_parent_safe(root));
+        ASSERT(chmod(root, 0700) == 0);
+        struct stat parent_stat;
+        ASSERT(lstat(root, &parent_stat) == 0);
+        ASSERT(!test_tmpfs_parent_stat_safe(&parent_stat,
+                                            parent_stat.st_uid == 0 ? 1 : 0));
+        const char *old_root = getenv("ZCL_TEST_TMPROOT");
+        const char *old_active = getenv("ZCL_TEST_TMPFS_ACTIVE");
+        const char *old_max = getenv("ZCL_TEST_TMPFS_MAX_MB");
+        char saved_root[PATH_MAX], saved_active[PATH_MAX], saved_max[64];
+        ASSERT(snprintf(saved_root, sizeof(saved_root), "%s", old_root ? old_root : "") < (int)sizeof(saved_root));
+        ASSERT(snprintf(saved_active, sizeof(saved_active), "%s", old_active ? old_active : "") < (int)sizeof(saved_active));
+        ASSERT(snprintf(saved_max, sizeof(saved_max), "%s", old_max ? old_max : "") < (int)sizeof(saved_max));
+        ASSERT(setenv("ZCL_TEST_TMPROOT", root, 1) == 0);
+        ASSERT(setenv("ZCL_TEST_TMPFS_ACTIVE", root, 1) == 0);
+        ASSERT(setenv("ZCL_TEST_TMPFS_MAX_MB", "0", 1) == 0);
+        char selected[PATH_MAX];
+        ASSERT(test_fmt_tmproot(selected, sizeof(selected)) >= 0);
+        ASSERT(strstr(selected, "/test-tmp") != NULL);
+        ASSERT(getenv("ZCL_TEST_TMPROOT") == NULL);
+        if (*saved_root) ASSERT(setenv("ZCL_TEST_TMPROOT", saved_root, 1) == 0);
+        if (*saved_active) ASSERT(setenv("ZCL_TEST_TMPFS_ACTIVE", saved_active, 1) == 0);
+        if (*saved_max) ASSERT(setenv("ZCL_TEST_TMPFS_MAX_MB", saved_max, 1) == 0);
+        else ASSERT(unsetenv("ZCL_TEST_TMPFS_MAX_MB") == 0);
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        int n = snprintf(command, sizeof(command),
+            "cd '%s' && env -u ZCL_TEST_TMPROOT ZCL_TEST_TMPFS=0 '%s' "
+            "--jobs=1 --no-cache --exact=test_hex_codec 2>&1", root, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT(capture_command(command, out, sizeof(out)) == 0);
+        ASSERT(strstr(out, "tmpfs unavailable or disabled; using test-tmp") != NULL);
+        ASSERT(strstr(out, "/test-tmp/runner-state-") != NULL);
+        n = snprintf(command, sizeof(command),
+            "cd '%s' && env -u ZCL_TEST_TMPROOT ZCL_TEST_TMPFS=1 "
+            "ZCL_TEST_TMPFS_MAX_MB=2048 '%s' --jobs=1 --no-cache "
+            "--exact=test_hex_codec 2>&1", root, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT(capture_command(command, out, sizeof(out)) == 0);
+        if (!strstr(out, "tmpfs unavailable or disabled")) {
+            const char *start = strstr(out, "/dev/shm/z23t/");
+            ASSERT(start != NULL);
+            const char *end = strstr(start, "/runner-state-");
+            ASSERT(end != NULL && (size_t)(end - start) < PATH_MAX);
+            char tmpfs_root[PATH_MAX];
+            memcpy(tmpfs_root, start, (size_t)(end - start));
+            tmpfs_root[end - start] = '\0';
+            ASSERT(access(tmpfs_root, F_OK) != 0 && errno == ENOENT);
+        }
+        n = snprintf(command, sizeof(command),
+            "cd '%s' && env -u ZCL_TEST_TMPROOT ZCL_TEST_TMPFS=1 "
+            "ZCL_TEST_TMPFS_MAX_MB=0 '%s' --jobs=1 --no-cache "
+            "--exact=test_hex_codec 2>&1", root, exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT(capture_command(command, out, sizeof(out)) == 0);
+        if (!strstr(out, "tmpfs unavailable or disabled")) {
+            ASSERT(strstr(out, "tmpfs limit reached or usage unavailable") != NULL);
+            ASSERT(strstr(out, "/test-tmp/runner-state-") != NULL);
+        }
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
 
 /* Exercise the compatibility resolver exactly as mapped fast-ci does, then
  * hand its bounded full-ID CSV to this runner without executing scenarios. */
@@ -3384,6 +3459,9 @@ int test_test_group_selector(void)
     }
 #if !defined(_WIN32)
     failures += test_runner_marker_lines();
+#endif
+#if defined(__linux__)
+    failures += test_tmpfs_fallback();
 #endif
     failures += test_runner_private_state();
     failures += test_runner_retry_evidence();

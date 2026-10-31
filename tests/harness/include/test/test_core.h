@@ -35,6 +35,74 @@
  * consensus/params.h for the callers that fill one in. */
 struct consensus_params;
 
+#if !defined(_WIN32)
+/* Do not follow the parent leaf or trust a directory writable by others. */
+static inline bool test_tmpfs_parent_stat_safe(const struct stat *st, uid_t uid)
+{
+    return S_ISDIR(st->st_mode) && st->st_uid == uid && !(st->st_mode & 0022);
+}
+
+static inline bool test_tmpfs_parent_safe(const char *path)
+{
+    struct stat st;
+    return lstat(path, &st) == 0 && test_tmpfs_parent_stat_safe(&st, geteuid());
+}
+#endif
+
+#if defined(__linux__)
+static inline bool test_tmpfs_size(const char *path, uint64_t *bytes)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0) return false;
+    if (st.st_blocks > 0) {
+        uint64_t blocks = (uint64_t)st.st_blocks;
+        if (blocks > (UINT64_MAX - *bytes) / 512) return false;
+        *bytes += blocks * 512;
+    }
+    if (!S_ISDIR(st.st_mode)) return true;
+    DIR *dir = opendir(path);
+    if (!dir) return false;
+    bool ok = true;
+    struct dirent *entry;
+    for (;;) {
+        errno = 0;
+        entry = readdir(dir);
+        if (!entry) { if (errno) ok = false; break; }
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        char child[PATH_MAX];
+        int n = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+        if (n < 0 || (size_t)n >= sizeof(child) || !test_tmpfs_size(child, bytes)) {
+            ok = false;
+            break;
+        }
+    }
+    if (closedir(dir) != 0) ok = false;
+    return ok;
+}
+
+static inline void test_tmpfs_guard(void)
+{
+    const char *root = getenv("ZCL_TEST_TMPROOT");
+    const char *active = getenv("ZCL_TEST_TMPFS_ACTIVE");
+    if (!root || !*root || !active || strcmp(active, root)) return;
+    uint64_t limit = UINT64_C(2048) * 1024 * 1024;
+    const char *max = getenv("ZCL_TEST_TMPFS_MAX_MB");
+    if (max && *max) {
+        char *end;
+        errno = 0;
+        unsigned long long mb = strtoull(max, &end, 10);
+        if (!errno && !*end && max[0] != '-' && mb <= UINT64_MAX / (1024 * 1024))
+            limit = (uint64_t)mb * 1024 * 1024;
+    }
+    uint64_t bytes = 0;
+    if (!test_tmpfs_size(root, &bytes) || bytes >= limit) {
+        fprintf(stderr, "test_parallel: tmpfs limit reached or usage unavailable; using test-tmp for new fixtures\n");
+        (void)unsetenv("ZCL_TEST_TMPROOT");
+        (void)unsetenv("ZCL_TEST_TMPFS_ACTIVE");
+    }
+}
+#endif
+
 /* Inspect the final component without resolving any filesystem path. */
 static inline bool test_cleanup_leaf_valid(const char *normalized, int n)
 {
@@ -121,6 +189,9 @@ static inline void test_cleanup_tmpdir(const char *path)
  * environment root is never silently replaced by the cwd one. */
 static inline int test_fmt_tmproot(char *root, size_t n)
 {
+#if defined(__linux__)
+    test_tmpfs_guard();
+#endif
 #if !defined(_WIN32)
     const char *env = getenv("ZCL_TEST_TMPROOT");
     if (env && env[0]) {

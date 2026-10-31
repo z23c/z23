@@ -119,7 +119,7 @@ ZCL_VENDOR_INC_FLAGS := $(if $(ZCL_CROSS_TRIPLE),-Ivendor/cross/$(ZCL_CROSS_TRIP
 # file it did not change.
 ZCL_OBJCOPY := $(if $(ZCL_CROSS_TRIPLE),$(ZCL_CROSS_TRIPLE)-objcopy,objcopy)
 ZCL_STRIP_TOOL := $(if $(ZCL_CROSS_TRIPLE),$(ZCL_CROSS_TRIPLE)-strip,strip)
-ZCL_TEST_TMPFS_SETUP = :
+ZCL_TEST_TMPFS ?= 1
 ifeq ($(ZCL_HOST_OS),Android)
 ZCL_OBJCOPY := $(ZCL_ANDROID_BIN)/llvm-objcopy
 ZCL_STRIP_TOOL := $(ZCL_ANDROID_BIN)/llvm-strip
@@ -242,25 +242,6 @@ ZCL_PLATFORM_NODE_LIBS =
 ZCL_CXX_RUNTIME_LIB = -lstdc++
 ZCL_WARN_MAYBE_UNINITIALIZED = -Wno-maybe-uninitialized
 ZCL_TEST_STACK_SETUP = ulimit -s unlimited
-# Fixture root on tmpfs (Linux only; every other host keeps <cwd>/test-tmp).
-# The fast test runners keep fixture and sqlite fsync traffic off the root
-# filesystem's shared journal by exporting ZCL_TEST_TMPROOT=/dev/shm/z23t/<8
-# hex of sha256(checkout root)>, a 0700 directory owned by this user under a
-# 0700 parent (short: AF_UNIX paths are 108 bytes). Removed on a green run; a
-# failed run keeps its unique directory as evidence. Opt out with
-# ZCL_TEST_TMPFS=0; an already exported ZCL_TEST_TMPROOT is left alone; no
-# tmpfs /dev/shm, or an unusable parent, leaves the cwd root exactly as before.
-ZCL_TEST_TMPFS_SETUP = { \
-	if [ "$$ZCL_TEST_TMPFS" != 0 ] && [ -z "$$ZCL_TEST_TMPROOT" ] && \
-	   [ "$$(stat -f -c %T /dev/shm 2>/dev/null)" = tmpfs ]; then \
-	  if { [ -d /dev/shm/z23t ] || mkdir -m 0700 /dev/shm/z23t; } && \
-	     [ -O /dev/shm/z23t ] && [ ! -L /dev/shm/z23t ] && \
-	     [ "$$(stat -c %a /dev/shm/z23t)" = 700 ] && \
-	     zr=$$(mktemp -d /dev/shm/z23t/$$(printf %s '$(CURDIR)' | sha256sum | cut -c1-8).XXXXXX); then \
-	    export ZCL_TEST_TMPROOT="$$zr"; \
-	    trap 'rc=$$?; [ $$rc -eq 0 ] && rm -rf "$$zr"; exit $$rc' EXIT; \
-	  fi; \
-	fi; true; }
 endif
 # Generators execute on the build machine, independently of the artifact ABI.
 ZCL_BUILD_CC = $(CC)
@@ -4459,7 +4440,7 @@ test-parallel-fast-active:
 
 test-parallel-fast-active-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
 	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint $(BIN_DIR)/z23-fleet-gateway $(Z23_DEV_BIN)
-	$(ZCL_TEST_STACK_SETUP) && $(ZCL_TEST_TMPFS_SETUP) && Z23_TEST_GATEWAY_BIN="$(BIN_DIR)/z23-fleet-gateway" Z23_TEST_NODE_BIN="$(Z23_DEV_BIN)" $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE)
+	$(ZCL_TEST_STACK_SETUP) && ZCL_TEST_TMPFS="$(ZCL_TEST_TMPFS)" Z23_TEST_GATEWAY_BIN="$(BIN_DIR)/z23-fleet-gateway" Z23_TEST_NODE_BIN="$(Z23_DEV_BIN)" $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE)
 
 .PHONY: test-parallel
 # Checkout-locked (see CHECKOUT_LOCK above): the make_lint_gates exclusive lane
@@ -5190,7 +5171,7 @@ t-fast:
 t-fast-locked: $(TEST_PARALLEL_FAST_CANDIDATE) dev-package-verifier-ensure \
 	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
 	+@$(call ZCL_TEST_BUILD_NEEDS,$(TEST_PARALLEL_FAST_ACTIVE),--only=$(ONLY))
-	$(ZCL_TEST_STACK_SETUP) && $(ZCL_TEST_TMPFS_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY)
+	$(ZCL_TEST_STACK_SETUP) && ZCL_TEST_TMPFS="$(ZCL_TEST_TMPFS)" $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --only=$(ONLY)
 
 # Proof-facing sibling of t-fast. The human convenience target above keeps its
 # documented substring behavior; impact plans and durable receipts use this
@@ -5206,7 +5187,7 @@ t-fast-exact:
 t-fast-exact-locked: $(TEST_PARALLEL_FAST_CANDIDATE) \
 	$(BIN_DIR)/z23-git-hook$(ZCL_HOST_EXEEXT) $(BIN_DIR)/z23-lint
 	+@$(call ZCL_TEST_BUILD_NEEDS,$(TEST_PARALLEL_FAST_ACTIVE),--exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS))
-	$(ZCL_TEST_STACK_SETUP) && $(ZCL_TEST_TMPFS_SETUP) && \
+	$(ZCL_TEST_STACK_SETUP) && ZCL_TEST_TMPFS="$(ZCL_TEST_TMPFS)" \
 	  $(LINKED_TEST_ENV) $(TEST_PARALLEL_FAST_ACTIVE) --exact=$(EXACT_ONLY_MATCHED) $(T_FAST_EXACT_ARGS)
 
 ifeq ($(ZCL_HOST_OS),Darwin)

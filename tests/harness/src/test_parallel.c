@@ -82,6 +82,57 @@
 #endif
 #include <time.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/vfs.h>
+#include <linux/magic.h>
+
+static char g_tmpfs_root[PATH_MAX];
+static pid_t g_tmpfs_owner;
+
+static void tmpfs_cleanup(void)
+{
+    if (g_tmpfs_owner == getpid() && g_tmpfs_root[0] &&
+        test_rm_rf_recursive(g_tmpfs_root) != 0)
+        fprintf(stderr, "test_parallel: tmpfs cleanup failed: %s\n", strerror(errno));
+}
+static void tmpfs_setup(void)
+{
+    const char *enabled = getenv("ZCL_TEST_TMPFS");
+    const char *existing = getenv("ZCL_TEST_TMPROOT");
+    if (existing && *existing) return;
+    if (!enabled) return;
+    struct statfs fs;
+    if (!strcmp(enabled, "0") || statfs("/dev/shm", &fs) != 0 ||
+        (unsigned long)fs.f_type != (unsigned long)TMPFS_MAGIC) goto fallback;
+    if (mkdir("/dev/shm/z23t", 0700) != 0 && errno != EEXIST) goto fallback;
+    if (!test_tmpfs_parent_safe("/dev/shm/z23t")) goto fallback;
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd))) goto fallback;
+    uint32_t hash = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)cwd; *p; ++p)
+        hash = (hash ^ *p) * 16777619u;
+    int n = snprintf(g_tmpfs_root, sizeof(g_tmpfs_root),
+                     "/dev/shm/z23t/%08x.XXXXXX", hash);
+    if (n < 0 || (size_t)n >= sizeof(g_tmpfs_root) || !mkdtemp(g_tmpfs_root)) {
+        g_tmpfs_root[0] = '\0';
+        goto fallback;
+    }
+    g_tmpfs_owner = getpid();
+    if (setenv("ZCL_TEST_TMPROOT", g_tmpfs_root, 1) != 0 ||
+        setenv("ZCL_TEST_TMPFS_ACTIVE", g_tmpfs_root, 1) != 0 ||
+        atexit(tmpfs_cleanup) != 0) {
+        (void)unsetenv("ZCL_TEST_TMPROOT");
+        (void)unsetenv("ZCL_TEST_TMPFS_ACTIVE");
+        tmpfs_cleanup();
+        g_tmpfs_root[0] = '\0';
+        goto fallback;
+    }
+    return;
+fallback:
+    fprintf(stderr, "test_parallel: tmpfs unavailable or disabled; using test-tmp\n");
+}
+
+#endif
 
 /* Required by process_block.c (normally in main.c) */
 volatile sig_atomic_t g_shutdown_requested = 0;
@@ -1083,6 +1134,9 @@ static bool child_state_create(char *out, size_t cap)
 static int child_spawn(size_t idx, const char *out_path,
                        bool activate_proof_contracts, zcl_child_t *out)
 {
+#if defined(__linux__)
+    test_tmpfs_guard();
+#endif
     char state_path[PATH_MAX];
     if (!child_state_create(state_path, sizeof(state_path))) {
         fprintf(stderr, "test_parallel: private state setup failed group=%s: %s\n",
@@ -3080,6 +3134,9 @@ int main(int argc, char **argv)
     /* Before any group forks. Not inside the confined-agent arm above: that
      * child is deliberately sandboxed and must not widen its own limits. */
     raise_stack_limit();
+#if defined(__linux__)
+    tmpfs_setup();
+#endif
 
     int jobs = get_nproc();
     /* Per-group bound on SILENCE, not on runtime — see group_watchdog_expired
