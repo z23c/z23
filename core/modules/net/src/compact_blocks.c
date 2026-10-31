@@ -301,6 +301,163 @@ static bool cb_sid_lookup(const struct cb_sid_entry *tab, size_t slots,
     return false;
 }
 
+/* Outcome of a reconstruct/deserialize step; the caller owns the log call. */
+enum cb_status {
+    CB_ST_OK = 0,
+    CB_ST_RANGE,    /* prefilled index out of range */
+    CB_ST_COPY,     /* transaction copy failed */
+    CB_ST_ALLOC,    /* allocation failed */
+    CB_ST_RUNOUT,   /* ran out of short txids */
+    CB_ST_READ,     /* stream read failed */
+    CB_ST_TX,       /* transaction deserialize failed */
+};
+
+/* Place prefilled transactions at their absolute positions.
+ * BIP152 uses differential encoding, so we convert to absolute.
+ * On failure frees filled and out_block; *i and *abs_idx locate it. */
+static enum cb_status cb_place_prefilled(const struct compact_block_msg *cb,
+                                         struct block *out_block, bool *filled,
+                                         size_t total, size_t *i_out,
+                                         uint64_t *abs_idx_out)
+{
+    uint64_t abs_idx = 0;
+    for (size_t i = 0; i < cb->num_prefilled; i++) {
+        *i_out = i;
+        abs_idx += cb->prefilled[i].index;
+        if (i > 0) abs_idx++;  /* BIP152 differential: add 1 for non-first */
+        *abs_idx_out = abs_idx;
+        if (abs_idx >= total) {
+            free(filled);
+            block_free(out_block);
+            return CB_ST_RANGE;
+        }
+        if (!transaction_copy(&out_block->vtx[abs_idx], &cb->prefilled[i].tx)) {
+            free(filled);
+            block_free(out_block);
+            return CB_ST_COPY;
+        }
+        filled[abs_idx] = true;
+    }
+    return CB_ST_OK;
+}
+
+/* Hash mempool + extra short ids ONCE (table bounded by source
+ * count), then resolve each slot with an O(1) lookup.
+ * On failure frees filled and out_block; *sid_slots_out holds the size. */
+static enum cb_status cb_build_sid_table(const struct compact_block_msg *cb,
+                                         const struct transaction *mempool_txs,
+                                         size_t num_mempool_txs,
+                                         const struct transaction *extra_txs,
+                                         size_t num_extra_txs,
+                                         struct block *out_block, bool *filled,
+                                         struct cb_sid_entry **sid_tab_out,
+                                         size_t *sid_slots_out)
+{
+    size_t num_sources = num_mempool_txs + num_extra_txs;
+    struct cb_sid_entry *sid_tab = NULL;
+    size_t sid_slots = 0;
+    if (num_sources > 0) {
+        sid_slots = 16;
+        while (sid_slots < num_sources * 2)
+            sid_slots <<= 1;
+        *sid_slots_out = sid_slots;
+        sid_tab = zcl_calloc(sid_slots, sizeof(*sid_tab), "compact_sid_table");
+        if (!sid_tab) {
+            free(filled);
+            block_free(out_block);
+            return CB_ST_ALLOC;
+        }
+        for (size_t i = 0; i < num_sources; i++) {
+            const struct transaction *tx =
+                cb_src_tx(i, mempool_txs, num_mempool_txs, extra_txs);
+            uint8_t sidb[SHORT_TXID_LEN];
+            compact_block_short_txid(cb->siphash_key, &tx->hash, sidb);
+            cb_sid_insert(sid_tab, sid_slots, cb_sid_from_bytes(sidb), i,
+                          mempool_txs, num_mempool_txs, extra_txs);
+        }
+    }
+    *sid_tab_out = sid_tab;
+    *sid_slots_out = sid_slots;
+    return CB_ST_OK;
+}
+
+/* Resolve every unfilled slot from the short-id table. On failure frees
+ * sid_tab, filled and out_block; *slot_out / *src_out locate it. */
+static enum cb_status cb_resolve_short_ids(const struct compact_block_msg *cb,
+                                           const struct transaction *mempool_txs,
+                                           size_t num_mempool_txs,
+                                           const struct transaction *extra_txs,
+                                           struct block *out_block, bool *filled,
+                                           size_t total,
+                                           struct cb_sid_entry *sid_tab,
+                                           size_t sid_slots, size_t *slot_out,
+                                           size_t *src_out)
+{
+    size_t short_idx = 0;
+    for (size_t slot = 0; slot < total; slot++) {
+        if (filled[slot])
+            continue;
+
+        if (short_idx >= cb->num_short_txids) {
+            *slot_out = slot;
+            free(sid_tab);
+            free(filled);
+            block_free(out_block);
+            return CB_ST_RUNOUT;
+        }
+
+        const uint8_t *target = &cb->short_txids[short_idx * SHORT_TXID_LEN];
+        size_t src;
+        if (cb_sid_lookup(sid_tab, sid_slots, cb_sid_from_bytes(target), &src)) {
+            const struct transaction *tx =
+                cb_src_tx(src, mempool_txs, num_mempool_txs, extra_txs);
+            if (!transaction_copy(&out_block->vtx[slot], tx)) {
+                *src_out = src;
+                free(sid_tab);
+                free(filled);
+                block_free(out_block);
+                return CB_ST_COPY;
+            }
+            filled[slot] = true;
+        }
+
+        short_idx++;
+    }
+    return CB_ST_OK;
+}
+
+/* Collect missing indices. On allocation failure frees filled and
+ * out_block; *miss_count_out is the count that could not be allocated. */
+static enum cb_status cb_collect_missing(struct block *out_block, bool *filled,
+                                         size_t total,
+                                         uint64_t **missing_indices,
+                                         size_t *num_missing,
+                                         size_t *miss_count_out)
+{
+    size_t miss_count = 0;
+    for (size_t i = 0; i < total; i++) {
+        if (!filled[i])
+            miss_count++;
+    }
+    *miss_count_out = miss_count;
+
+    if (miss_count > 0) {
+        *missing_indices = zcl_malloc(miss_count * sizeof(uint64_t), "compact_missing");
+        if (!*missing_indices) {
+            free(filled);
+            block_free(out_block);
+            return CB_ST_ALLOC;
+        }
+        *num_missing = miss_count;
+        size_t mi = 0;
+        for (size_t i = 0; i < total; i++) {
+            if (!filled[i])
+                (*missing_indices)[mi++] = i;
+        }
+    }
+    return CB_ST_OK;
+}
+
 bool compact_block_reconstruct(const struct compact_block_msg *cb,
                                const struct transaction *mempool_txs,
                                size_t num_mempool_txs,
@@ -312,6 +469,9 @@ bool compact_block_reconstruct(const struct compact_block_msg *cb,
 {
     *missing_indices = NULL;
     *num_missing = 0;
+    uint64_t abs_idx = 0;
+    size_t i = 0, slot = 0, src = 0, sid_slots = 0, miss_count = 0;
+    enum cb_status st;
 
     /* Initialize out_block BEFORE the first thing that can fail. Every
      * caller block_free()s it on the not-complete/no-missing path, so a
@@ -335,8 +495,9 @@ bool compact_block_reconstruct(const struct compact_block_msg *cb,
         LOG_FAIL("compact", "alloc failed for %zu reconstructed txs", total);
 
     /* Initialize all tx slots */
-    for (size_t i = 0; i < total; i++)
+    for (i = 0; i < total; i++)
         transaction_init(&out_block->vtx[i]);
+
 
     /* Place prefilled transactions at their absolute positions.
      * BIP152 uses differential encoding, so we convert to absolute. */
@@ -346,104 +507,41 @@ bool compact_block_reconstruct(const struct compact_block_msg *cb,
         LOG_FAIL("compact", "alloc failed for filled bitmap");
     }
 
-    uint64_t abs_idx = 0;
-    for (size_t i = 0; i < cb->num_prefilled; i++) {
-        abs_idx += cb->prefilled[i].index;
-        if (i > 0) abs_idx++;  /* BIP152 differential: add 1 for non-first */
-        if (abs_idx >= total) {
-            free(filled);
-            block_free(out_block);
-            LOG_FAIL("compact", "prefilled index %lu out of range (total=%zu)",
-                     (unsigned long)abs_idx, total);
-        }
-        if (!transaction_copy(&out_block->vtx[abs_idx], &cb->prefilled[i].tx)) {
-            free(filled);
-            block_free(out_block);
-            LOG_FAIL("compact", "failed to copy prefilled tx %zu", i);
-        }
-        filled[abs_idx] = true;
-    }
+    st = cb_place_prefilled(cb, out_block, filled, total, &i, &abs_idx);
+    if (st == CB_ST_RANGE)
+        LOG_FAIL("compact", "prefilled index %lu out of range (total=%zu)",
+                 (unsigned long)abs_idx, total);
+    if (st == CB_ST_COPY)
+        LOG_FAIL("compact", "failed to copy prefilled tx %zu", i);
 
     /* Hash mempool + extra short ids ONCE (table bounded by source
      * count), then resolve each slot with an O(1) lookup. */
-    size_t num_sources = num_mempool_txs + num_extra_txs;
     struct cb_sid_entry *sid_tab = NULL;
-    size_t sid_slots = 0;
-    if (num_sources > 0) {
-        sid_slots = 16;
-        while (sid_slots < num_sources * 2)
-            sid_slots <<= 1;
-        sid_tab = zcl_calloc(sid_slots, sizeof(*sid_tab), "compact_sid_table");
-        if (!sid_tab) {
-            free(filled);
-            block_free(out_block);
-            LOG_FAIL("compact", "alloc failed for %zu short-id slots", sid_slots);
-        }
-        for (size_t i = 0; i < num_sources; i++) {
-            const struct transaction *tx =
-                cb_src_tx(i, mempool_txs, num_mempool_txs, extra_txs);
-            uint8_t sidb[SHORT_TXID_LEN];
-            compact_block_short_txid(cb->siphash_key, &tx->hash, sidb);
-            cb_sid_insert(sid_tab, sid_slots, cb_sid_from_bytes(sidb), i,
-                          mempool_txs, num_mempool_txs, extra_txs);
-        }
-    }
+    st = cb_build_sid_table(cb, mempool_txs, num_mempool_txs, extra_txs,
+                            num_extra_txs, out_block, filled,
+                            &sid_tab, &sid_slots);
+    if (st == CB_ST_ALLOC)
+        LOG_FAIL("compact", "alloc failed for %zu short-id slots", sid_slots);
 
-    size_t short_idx = 0;
-    for (size_t slot = 0; slot < total; slot++) {
-        if (filled[slot])
-            continue;
-
-        if (short_idx >= cb->num_short_txids) {
-            free(sid_tab);
-            free(filled);
-            block_free(out_block);
-            LOG_FAIL("compact", "ran out of short txids at slot %zu", slot);
-        }
-
-        const uint8_t *target = &cb->short_txids[short_idx * SHORT_TXID_LEN];
-        size_t src;
-        if (cb_sid_lookup(sid_tab, sid_slots, cb_sid_from_bytes(target), &src)) {
-            const struct transaction *tx =
-                cb_src_tx(src, mempool_txs, num_mempool_txs, extra_txs);
-            if (!transaction_copy(&out_block->vtx[slot], tx)) {
-                free(sid_tab);
-                free(filled);
-                block_free(out_block);
-                LOG_FAIL("compact", "failed to copy source tx %zu", src);
-            }
-            filled[slot] = true;
-        }
-
-        short_idx++;
-    }
+    st = cb_resolve_short_ids(cb, mempool_txs, num_mempool_txs, extra_txs,
+                              out_block, filled, total, sid_tab, sid_slots,
+                              &slot, &src);
+    if (st == CB_ST_RUNOUT)
+        LOG_FAIL("compact", "ran out of short txids at slot %zu", slot);
+    if (st == CB_ST_COPY)
+        LOG_FAIL("compact", "failed to copy source tx %zu", src);
     free(sid_tab);
 
     /* Collect missing indices */
-    size_t miss_count = 0;
-    for (size_t i = 0; i < total; i++) {
-        if (!filled[i])
-            miss_count++;
-    }
-
-    if (miss_count > 0) {
-        *missing_indices = zcl_malloc(miss_count * sizeof(uint64_t), "compact_missing");
-        if (!*missing_indices) {
-            free(filled);
-            block_free(out_block);
-            LOG_FAIL("compact", "alloc failed for %zu missing indices", miss_count);
-        }
-        *num_missing = miss_count;
-        size_t mi = 0;
-        for (size_t i = 0; i < total; i++) {
-            if (!filled[i])
-                (*missing_indices)[mi++] = i;
-        }
-    }
+    st = cb_collect_missing(out_block, filled, total, missing_indices,
+                            num_missing, &miss_count);
+    if (st == CB_ST_ALLOC)
+        LOG_FAIL("compact", "alloc failed for %zu missing indices", miss_count);
 
     free(filled);
     return miss_count == 0;
 }
+
 
 bool compact_block_fill_missing(struct block *partial_block,
                                 const struct block_txn_response *resp,
@@ -500,10 +598,67 @@ bool compact_block_msg_serialize(const struct compact_block_msg *cb,
     return true;
 }
 
+/* Read the short txid bodies. Frees cb on failure; *i_out is the index. */
+static enum cb_status cb_read_short_txids(struct compact_block_msg *cb,
+                                          struct byte_stream *s,
+                                          uint64_t num_short, size_t *i_out)
+{
+    if (num_short > 0) {
+        cb->short_txids = zcl_malloc(num_short * SHORT_TXID_LEN, "compact_deser_stxids");
+        if (!cb->short_txids) {
+            compact_block_msg_free(cb);
+            return CB_ST_ALLOC;
+        }
+        for (size_t i = 0; i < (size_t)num_short; i++) {
+            *i_out = i;
+            if (!stream_read_bytes(s, &cb->short_txids[i * SHORT_TXID_LEN], SHORT_TXID_LEN)) {
+                compact_block_msg_free(cb);
+                return CB_ST_READ;
+            }
+        }
+    }
+    return CB_ST_OK;
+}
+
+/* Read the prefilled transactions. Frees cb on failure; *i_out is the index. */
+static enum cb_status cb_read_prefilled(struct compact_block_msg *cb,
+                                        struct byte_stream *s,
+                                        uint64_t num_prefilled, size_t *i_out)
+{
+    if (num_prefilled > 0) {
+        cb->prefilled = zcl_calloc(num_prefilled, sizeof(struct prefilled_tx),
+                                    "compact_deser_prefilled");
+        if (!cb->prefilled) {
+            compact_block_msg_free(cb);
+            return CB_ST_ALLOC;
+        }
+        uint64_t abs_idx = 0;
+        for (size_t i = 0; i < (size_t)num_prefilled; i++) {
+            *i_out = i;
+            uint64_t diff;
+            if (!stream_read_compact_size(s, &diff)) {
+                compact_block_msg_free(cb);
+                return CB_ST_READ;
+            }
+            abs_idx += diff;
+            if (i > 0) abs_idx++;
+            cb->prefilled[i].index = (uint16_t)abs_idx;
+            transaction_init(&cb->prefilled[i].tx);
+            if (!transaction_deserialize(&cb->prefilled[i].tx, s)) {
+                compact_block_msg_free(cb);
+                return CB_ST_TX;
+            }
+        }
+    }
+    return CB_ST_OK;
+}
+
 bool compact_block_msg_deserialize(struct compact_block_msg *cb,
                                    struct byte_stream *s)
 {
     compact_block_msg_init(cb);
+    size_t i = 0;
+    enum cb_status st;
 
     if (!block_header_deserialize(&cb->header, s))
         LOG_FAIL("compact", "failed to deserialize header");
@@ -521,19 +676,11 @@ bool compact_block_msg_deserialize(struct compact_block_msg *cb,
                           MAX_COMPACT_BLOCK_TXNS, NULL))
         return false;
     cb->num_short_txids = (size_t)num_short;
-    if (num_short > 0) {
-        cb->short_txids = zcl_malloc(num_short * SHORT_TXID_LEN, "compact_deser_stxids");
-        if (!cb->short_txids) {
-            compact_block_msg_free(cb);
-            LOG_FAIL("compact", "alloc failed for %lu short txids", (unsigned long)num_short);
-        }
-        for (size_t i = 0; i < (size_t)num_short; i++) {
-            if (!stream_read_bytes(s, &cb->short_txids[i * SHORT_TXID_LEN], SHORT_TXID_LEN)) {
-                compact_block_msg_free(cb);
-                LOG_FAIL("compact", "failed to read short txid %zu", i);
-            }
-        }
-    }
+    st = cb_read_short_txids(cb, s, num_short, &i);
+    if (st == CB_ST_ALLOC)
+        LOG_FAIL("compact", "alloc failed for %lu short txids", (unsigned long)num_short);
+    if (st == CB_ST_READ)
+        LOG_FAIL("compact", "failed to read short txid %zu", i);
 
     /* Prefilled transactions */
     uint64_t num_prefilled;
@@ -547,31 +694,14 @@ bool compact_block_msg_deserialize(struct compact_block_msg *cb,
         return false;
     }
     cb->num_prefilled = (size_t)num_prefilled;
-    if (num_prefilled > 0) {
-        cb->prefilled = zcl_calloc(num_prefilled, sizeof(struct prefilled_tx),
-                                    "compact_deser_prefilled");
-        if (!cb->prefilled) {
-            compact_block_msg_free(cb);
-            LOG_FAIL("compact", "alloc failed for %lu prefilled txs",
-                     (unsigned long)num_prefilled);
-        }
-        uint64_t abs_idx = 0;
-        for (size_t i = 0; i < (size_t)num_prefilled; i++) {
-            uint64_t diff;
-            if (!stream_read_compact_size(s, &diff)) {
-                compact_block_msg_free(cb);
-                LOG_FAIL("compact", "failed to read prefilled diff index %zu", i);
-            }
-            abs_idx += diff;
-            if (i > 0) abs_idx++;
-            cb->prefilled[i].index = (uint16_t)abs_idx;
-            transaction_init(&cb->prefilled[i].tx);
-            if (!transaction_deserialize(&cb->prefilled[i].tx, s)) {
-                compact_block_msg_free(cb);
-                LOG_FAIL("compact", "failed to deserialize prefilled tx %zu", i);
-            }
-        }
-    }
+    st = cb_read_prefilled(cb, s, num_prefilled, &i);
+    if (st == CB_ST_ALLOC)
+        LOG_FAIL("compact", "alloc failed for %lu prefilled txs",
+                 (unsigned long)num_prefilled);
+    if (st == CB_ST_READ)
+        LOG_FAIL("compact", "failed to read prefilled diff index %zu", i);
+    if (st == CB_ST_TX)
+        LOG_FAIL("compact", "failed to deserialize prefilled tx %zu", i);
     return true;
 }
 

@@ -384,3 +384,7 @@ later lane flips it HARD.
 - 2026-10-30T23:35:46Z — REASON: Owner-authorized 2026-10-30 unseal: a Tor-ready node turns onion-directory relay hints with a known P2P port into addrman candidates, walks the seed directories once after Tor is ready, and reserves one outbound slot for an onion peer; no consensus predicate, clearnet behaviour unchanged when Tor is off
   old ROOT: cd527dd7479b71f1606b1bdacc957208ca5feb20e8cb1ee632c6f81a3b2bc156
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T05:02:46Z — REASON: compact_blocks.c: split 2 function(s) under the complexity cap;  behaviour-preserving
+  old ROOT: 31280c3ea6b838e1de3db361aaae809cb07b57ed3870855203a6eda5602f2bdf
+  by: owner unseal ritual (make core-unseal)

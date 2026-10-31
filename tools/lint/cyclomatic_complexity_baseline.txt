@@ -74,8 +74,6 @@ core/modules/crypto/src/sha3_256_x4.c:sha3_256_x4_neon:17
 core/modules/crypto_registry/src/crypto_registry.c:crypto_registry_register:16
 core/modules/mining/src/gen.c:try_solve_equihash:16
 core/modules/net/src/addrman_codec.c:addrman_deserialize:19
-core/modules/net/src/compact_blocks.c:compact_block_msg_deserialize:17
-core/modules/net/src/compact_blocks.c:compact_block_reconstruct:25
 core/modules/net/src/connman.c:connman_get_outbound_health:33
 core/modules/net/src/connman.c:connman_pick_next_outbound_target:18
 core/modules/net/src/connman.c:connman_run_message_cycle:17
