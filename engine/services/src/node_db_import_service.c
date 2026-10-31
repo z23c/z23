@@ -374,6 +374,55 @@ static void import_report_writer_stats(struct import_context *ctx)
                decode_fail, skip_out);
 }
 
+enum import_next {
+    IMPORT_NEXT_FULL,
+    IMPORT_NEXT_STOP,
+    IMPORT_NEXT_END,
+    IMPORT_NEXT_BAD_LEN,
+    IMPORT_NEXT_NOMEM
+};
+
+static enum import_next import_reader_next(struct import_context *ctx,
+                                           struct db_iterator *it,
+                                           struct import_chunk *chunk,
+                                           uint32_t *checked_len,
+                                           struct zcl_result *len_ok,
+                                           int *total_entries)
+{
+    while (chunk->num_entries < IMPORT_CHUNK_ENTRIES && db_iter_valid(it)) {
+        if (import_ctx_should_stop(ctx))
+            return IMPORT_NEXT_STOP;
+        *checked_len = 0;
+        enum import_entry_rc erc =
+            import_reader_take_entry(it, chunk, checked_len, len_ok);
+        if (erc == IMPORT_ENTRY_END) {
+            /* Coins range ended: publish the in-fill chunk first —
+             * a goto here dropped the last ~1500 records (tail). */
+            return IMPORT_NEXT_END;
+        }
+        if (erc == IMPORT_ENTRY_BAD_LEN)
+            return IMPORT_NEXT_BAD_LEN;
+        if (erc == IMPORT_ENTRY_NOMEM)
+            return IMPORT_NEXT_NOMEM;
+        if (erc == IMPORT_ENTRY_ADDED)
+            (*total_entries)++;
+    }
+    return IMPORT_NEXT_FULL;
+}
+
+static int64_t import_existing_rows(struct node_db *ndb)
+{
+    int64_t existing = node_db_utxo_count(ndb);
+    if (existing < 0) existing = 0;
+    return existing;
+}
+
+static void import_publish_rows(int *out_rows, int total_rows)
+{
+    if (out_rows)
+        *out_rows = total_rows;
+}
+
 struct zcl_result node_db_import_service_run(struct node_db *ndb,
                                              struct coins_view_db *cvdb,
                                              int *out_rows)
@@ -419,8 +468,7 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
      * (utxo_recovery_import_ldb) already wiped via the
      * "boot.ldb_import_prepare" wipe in utxo_recovery_restore.c.
      * This was the third redundant wipe that destroyed data. */
-    int64_t existing = node_db_utxo_count(ndb);
-    if (existing < 0) existing = 0;
+    int64_t existing = import_existing_rows(ndb);
 
     if (existing > 0) {
         enum policy_decision pd = import_wipe_policy_decision(existing);
@@ -502,21 +550,21 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
         chunk->num_rows = 0;
 
         bool end_of_range = false;
-        while (chunk->num_entries < IMPORT_CHUNK_ENTRIES &&
-               db_iter_valid(&it)) {
-            if (import_ctx_should_stop(ctx))
-                goto reader_done;
+        for (;;) {
             uint32_t checked_len = 0;
             struct zcl_result len_ok;
-            enum import_entry_rc erc =
-                import_reader_take_entry(&it, chunk, &checked_len, &len_ok);
-            if (erc == IMPORT_ENTRY_END) {
-                /* Coins range ended: publish the in-fill chunk first —
-                 * a goto here dropped the last ~1500 records (tail). */
-                end_of_range = true;
-                break;
+            enum import_next nx = import_reader_next(
+                ctx, &it, chunk, &checked_len, &len_ok, &total_entries);
+            if (nx == IMPORT_NEXT_NOMEM) {
+                LOG_WARN("sync",
+                         "malloc failed for chunk entry value (%u bytes), "
+                         "skipping entry", checked_len);
+                skipped_entries++;
+                continue;
             }
-            if (erc == IMPORT_ENTRY_BAD_LEN) {
+            if (nx == IMPORT_NEXT_STOP)
+                goto reader_done;
+            if (nx == IMPORT_NEXT_BAD_LEN) {
                 LOG_WARN("sync",
                          "UTXO import: rejecting LevelDB CCoins value after "
                          "%d txids: %s", total_entries, len_ok.message);
@@ -524,14 +572,8 @@ struct zcl_result node_db_import_service_run(struct node_db *ndb,
                 import_ctx_request_stop(ctx);
                 goto reader_done;
             }
-            if (erc == IMPORT_ENTRY_NOMEM) {
-                LOG_WARN("sync",
-                         "malloc failed for chunk entry value (%u bytes), "
-                         "skipping entry", checked_len);
-                skipped_entries++;
-            } else if (erc == IMPORT_ENTRY_ADDED) {
-                total_entries++;
-            }
+            end_of_range = (nx == IMPORT_NEXT_END);
+            break;
         }
 
         import_reader_publish_chunk(ctx, chunk);
@@ -653,7 +695,6 @@ reader_done:
     fflush(stdout);
 
     import_job_teardown(ctx, total_rows);
-    if (out_rows)
-        *out_rows = total_rows;
+    import_publish_rows(out_rows, total_rows);
     return ZCL_OK;
 }
