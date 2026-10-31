@@ -1063,26 +1063,6 @@ static bool gw_token_leaks(const char *tok)
     return leaked;
 }
 
-/* steer_brief spends one 250 ms fast-command budget across its mail, queue,
- * land and board sections (FMC_BRIEF_FINISH_RESERVE_MS held back). On a host
- * at load average ~100 the earlier sections can consume all of it, and the
- * board section then refuses with observation_budget_exhausted before it ever
- * reaches the node, so the reason this test pins (node_unavailable) never
- * appears. That refusal is the product's fail-closed answer to a slow host,
- * not the behaviour under test, so repeat the call, bounded, until the board
- * section actually runs. The assertions on the final reply are unchanged. */
-static char *gw_post_brief_with_board_attempt(const char *args, int *status)
-{
-    static const char spent[] =
-        "fleet.board\\\",\\\"reason\\\":\\\"observation_budget_exhausted";
-    char *b = gw_post("/steer", args, status);
-    for (int tries = 0; b != NULL && tries < 8 && gw_body_has(b, spent); tries++) {
-        free(b);
-        b = gw_post("/steer", args, status);
-    }
-    return b;
-}
-
 static int gw_t_calls(void)
 {
     int failures = 0;
@@ -1105,12 +1085,23 @@ static int gw_t_calls(void)
                       "\"arguments\":{\"grant\":\"%s\"}}}",
                       gid);
         ASSERT(sn > 0 && (size_t)sn < sizeof(args));
-        b = gw_post_brief_with_board_attempt(args, &st);
-        ASSERT(b != NULL);
-        ASSERT(gw_body_has(b, "\"isError\":false"));
-        ASSERT(gw_body_has(b, "agents"));
-        ASSERT(gw_store_unchanged(store, &before));
-        ASSERT(gw_observation_stores_absent());
+        /* Earlier sections can spend the brief's 250 ms command budget on
+         * a loaded host before the board runs. Retry that refusal at most
+         * eight times, but validate every reply and its read-only effects
+         * before considering a retry. A malformed reply must fail here. */
+        for (int tries = 0; ; tries++) {
+            b = gw_post("/steer", args, &st);
+            ASSERT(b != NULL);
+            ASSERT(gw_body_has(b, "\"isError\":false"));
+            ASSERT(gw_body_has(b, "agents"));
+            ASSERT(gw_store_unchanged(store, &before));
+            ASSERT(gw_observation_stores_absent());
+            if (tries == 8 ||
+                !gw_body_has(b, "fleet.board\\\",\\\"reason\\\":\\\""
+                                "observation_budget_exhausted"))
+                break;
+            free(b);
+        }
         ASSERT(chmod(store, 0600) == 0);
         /* The board read stays inside the rig: the shard's private datadir
          * has no RPC cookie, so no node outside this test answers it. */
