@@ -291,9 +291,7 @@ bool zapp_devkey_wait_abandon(struct zapp_devkey_wait *wait)
     pthread_mutex_unlock(&wait->lock);
     return pending;
 }
-bool zapp_devkey_refusal_is_auth(const char *class_name, int numeric_code, bool requires_auth, const char *text)
+bool zapp_devkey_code_is_auth(int numeric_code)
 {
-    return requires_auth || numeric_code == ZAPP_DEVKEY_KEYSTORE_USER_NOT_AUTHENTICATED ||
-           (class_name && strcasestr(class_name, "NotAuthenticated")) ||
-           (text && (strcasestr(text, "not authenticated") || strcasestr(text, "NOT_AUTHENTICATED")));
+    return numeric_code == ZAPP_DEVKEY_KEYSTORE_USER_NOT_AUTHENTICATED;
 }

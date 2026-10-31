@@ -16,8 +16,8 @@ enum zapp_devkey_probe_event { ZAPP_DEVKEY_PROBE_PAUSE, ZAPP_DEVKEY_PROBE_RESUME
  *
  * `noprompt` and `othercipher` are the enforcement checks, and each expects Keystore to refuse:
  * `noprompt` finishes an initialised cipher with no prompt, and `othercipher` authenticates one cipher
- * and finishes another. Both answer `ok accepted=0 auth_required=1 exception=...` when Keystore refused
- * with a user-not-authenticated error, and `error` when the key ran the operation (`accepted=1`) or the
+ * and finishes another. Both answer `ok accepted=0 auth_required=1 keystore_code=-26 exception=...` when Keystore refused
+ * with the user-not-authenticated code, and `error` when the key ran the operation (`accepted=1`) or the
  * refusal was some other fault (`auth_required=0`; the exception chain is printed). `othercipher` also
  * reports authenticated_cipher_ok=1 for the cipher the owner did authenticate. */
 void zapp_devkey_probe(ANativeActivity *activity, enum zapp_devkey_probe_event event);

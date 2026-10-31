@@ -544,44 +544,45 @@ static void jni_delete_key(void *context)
 static void copy_prefix(JNIEnv *env, jobject value, char *out, size_t cap)
 {
     const char *chars = zj_clean(env) && value ? (*env)->GetStringUTFChars(env, value, NULL) : NULL;
-    if (chars) snprintf(out, cap, "%s", chars);
-    if (chars) (*env)->ReleaseStringUTFChars(env, value, chars);
+    if (!chars) {
+        (*env)->ExceptionClear(env);
+        return;
+    }
+    snprintf(out, cap, "%s", chars);
+    (*env)->ReleaseStringUTFChars(env, value, chars);
 }
-/* Reads KeyStoreException.getNumericErrorCode and requiresUserAuthentication (API 33) from thrown. */
-static void keystore_fault(JNIEnv *env, jthrowable thrown, int *code, bool *requires_auth)
+/* Reads KeyStoreException.getNumericErrorCode (API 33) from thrown; 0 for any other exception. */
+static int keystore_code(JNIEnv *env, jthrowable thrown)
 {
     jclass cls = (*env)->FindClass(env, "android/security/KeyStoreException");
     jmethodID number = cls ? (*env)->GetMethodID(env, cls, "getNumericErrorCode", "()I") : NULL;
-    jmethodID needs = cls ? (*env)->GetMethodID(env, cls, "requiresUserAuthentication", "()Z") : NULL;
-    *code = 0; *requires_auth = false;
-    if (cls && number && needs && (*env)->IsInstanceOf(env, thrown, cls)) {
-        *code = (*env)->CallIntMethod(env, thrown, number);
-        *requires_auth = (*env)->CallBooleanMethod(env, thrown, needs) == JNI_TRUE;
-    }
+    int code = 0;
+    if (cls && number && (*env)->IsInstanceOf(env, thrown, cls)) code = (*env)->CallIntMethod(env, thrown, number);
     if (cls) (*env)->DeleteLocalRef(env, cls);
-    (void)zj_clean(env);
+    return zj_clean(env) ? code : 0;
 }
 /* Names the pending exception chain in out ("Class: message" links joined by " > ", at most four) and
- * clears it. *auth is true when a link says the user is not authenticated, the refusal a per-use key
- * gives an operation that no prompt covers; any other fault, such as a bad AAD, leaves it false. */
-static void exception_chain(JNIEnv *env, char *out, size_t cap, bool *auth)
+ * clears it. *auth is true when a link carries the Keystore code -26, the refusal a per-use key gives an
+ * operation that no prompt covers; any other fault, such as a bad AAD or a locked device, leaves it
+ * false. *first_code receives the first nonzero Keystore code. */
+static void exception_chain(JNIEnv *env, char *out, size_t cap, bool *auth, int *first_code)
 {
     jthrowable thrown = (*env)->ExceptionOccurred(env);
-    out[0] = '\0'; *auth = false;
+    out[0] = '\0'; *auth = false; *first_code = 0;
     if (!thrown) return;
     (*env)->ExceptionClear(env);
     for (int depth = 0; thrown && depth < 4; ++depth) {
         char name[96] = "", text[256] = "";
-        int code; bool requires_auth;
         jobject cls = zj_object_property(env, thrown, "getClass", "()Ljava/lang/Class;");
         jobject cname = cls ? zj_object_property(env, cls, "getName", "()Ljava/lang/String;") : NULL;
         jobject message = zj_object_property(env, thrown, "getMessage", "()Ljava/lang/String;");
         copy_prefix(env, cname, name, sizeof(name));
-        keystore_fault(env, thrown, &code, &requires_auth);
+        int code = keystore_code(env, thrown);
         copy_prefix(env, message, text, sizeof(text));
         size_t used = strlen(out);
         if (used < cap) (void)snprintf(out + used, cap - used, "%s%s: %s", depth ? " > " : "", name, text);
-        *auth = *auth || zapp_devkey_refusal_is_auth(name, code, requires_auth, text);
+        if (!*first_code) *first_code = code;
+        *auth = *auth || zapp_devkey_code_is_auth(code);
         jobject cause = zj_object_property(env, thrown, "getCause", "()Ljava/lang/Throwable;");
         (*env)->DeleteLocalRef(env, thrown);
         thrown = cause;
@@ -596,7 +597,7 @@ static bool misuse_attempt(JNIEnv *env, jobject cipher, struct zapp_devkey_misus
     uint8_t zeros[ZAPP_DEVKEY_SECRET] = {0};
     jbyteArray input = bytes_new(env, zeros, sizeof(zeros));
     jbyteArray output = input ? cipher_run(env, cipher, input) : NULL;
-    if (!output) exception_chain(env, result->exception, sizeof(result->exception), &result->auth_required);
+    if (!output) exception_chain(env, result->exception, sizeof(result->exception), &result->auth_required, &result->keystore_code);
     bytes_wipe(env, input);
     bytes_wipe(env, output);
     return output != NULL;

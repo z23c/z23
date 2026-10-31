@@ -104,11 +104,10 @@ struct zapp_devkey_ops {
 enum zapp_devkey_status zapp_devkey_classify_chain(const unsigned kinds[], size_t depth);
 /* Keystore2 numeric code of a use that needs an authentication nobody gave (-26, KEY_USER_NOT_AUTHENTICATED). */
 #define ZAPP_DEVKEY_KEYSTORE_USER_NOT_AUTHENTICATED (-26)
-/* True when one exception of a refusal says the user is not authenticated: the Keystore flag or numeric
- * code, a class name or message naming it. A fault of any other kind, such as a bad AAD, is false. The
- * flag and code come from android.security.KeyStoreException, so the decision never relies on a
- * message that may be long; pass 0 and false for an exception of another class. */
-bool zapp_devkey_refusal_is_auth(const char *class_name, int numeric_code, bool requires_auth, const char *text);
+/* True when numeric_code is the Keystore2 code of a use that lacked its authentication (-26). The
+ * code alone decides: KeyStoreException.requiresUserAuthentication is also true when the device is
+ * locked, a refusal that proves nothing about per-use enforcement. */
+bool zapp_devkey_code_is_auth(int numeric_code);
 
 /* Refuses without a secure lock screen, creates the key when absent (StrongBox first, then secure
  * hardware) and reports where it lives. A key found in the keystore is never deleted; a key this
@@ -183,6 +182,7 @@ struct zapp_devkey_misuse {
     bool accepted;                   /* Keystore ran the operation: the key is not enforcing per-use authentication. */
     bool control_ok;                 /* other_cipher only: the cipher the owner authenticated finished normally. */
     bool auth_required;              /* The refusal says the user is not authenticated, not some other fault. */
+    int keystore_code;               /* The first nonzero KeyStoreException numeric code of the refusal, 0 if none. */
     char exception[160];             /* The exception chain of the refusal, class and message per link. */
 };
 /* Probe only. Encrypts zeros with the stored key on a cipher that no prompt covers. With other_cipher

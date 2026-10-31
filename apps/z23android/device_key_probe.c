@@ -128,7 +128,7 @@ static enum zapp_devkey_status misuse(const struct zapp_devkey_ops *ops, struct 
     enum zapp_devkey_status st = zapp_devkey_prepare(ops, NULL, &info);
     if (st == ZAPP_DEVKEY_OK) st = zapp_devkey_jni_misuse(state, other_cipher, &result);
     if (st != ZAPP_DEVKEY_OK) return st;
-    int len = snprintf(detail, cap, "accepted=%d auth_required=%d", result.accepted, result.auth_required);
+    int len = snprintf(detail, cap, "accepted=%d auth_required=%d keystore_code=%d", result.accepted, result.auth_required, result.keystore_code);
     if (other_cipher && len > 0 && (size_t)len < cap) len += snprintf(detail + len, cap - (size_t)len, " authenticated_cipher_ok=%d", result.control_ok);
     if (len > 0 && (size_t)len < cap) (void)snprintf(detail + len, cap - (size_t)len, " exception=%s", result.exception);
     return result.accepted || !result.auth_required || (other_cipher && !result.control_ok) ? ZAPP_DEVKEY_ERROR : ZAPP_DEVKEY_OK;
