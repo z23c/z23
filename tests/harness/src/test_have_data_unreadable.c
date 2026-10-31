@@ -324,11 +324,21 @@ static bool hdu_body_torn_repeat_is_same_note(
     }
     struct condition_runtime_snapshot snap;
     ok = ok && reducer_frontier_body_read_note_snapshot(&after);
-    ok = ok && after.generation == before.generation;
+    ok = ok && after.identity_generation == before.identity_generation;
+    ok = ok && after.generation > before.generation;
     ok = ok && condition_engine_get_registered_snapshot(
         "have_data_unreadable", &snap);
     ok = ok && condition_engine_get_active_count() == 1;
     ok = ok && snap.cleared_count == cleared_before;
+    ok = ok && reducer_frontier_body_read_note_active();
+
+    /* A success snapshot taken before a repeat failure must not clear the
+     * newer failure of the same identity. */
+    struct reducer_frontier_body_read_note stale;
+    ok = ok && reducer_frontier_body_read_note_snapshot(&stale);
+    reducer_frontier_body_read_note_record(
+        5, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, hash);
+    ok = ok && !reducer_frontier_body_read_note_clear_if(&stale);
     ok = ok && reducer_frontier_body_read_note_active();
 
     struct uint256 other = *hash;
@@ -337,12 +347,12 @@ static bool hdu_body_torn_repeat_is_same_note(
         5, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, &other);
     struct reducer_frontier_body_read_note replaced;
     ok = ok && reducer_frontier_body_read_note_snapshot(&replaced);
-    ok = ok && replaced.generation > after.generation;
+    ok = ok && replaced.identity_generation > after.identity_generation;
     reducer_frontier_body_read_note_record(
         4, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, &other);
     struct reducer_frontier_body_read_note lower;
     ok = ok && reducer_frontier_body_read_note_snapshot(&lower);
-    ok = ok && lower.generation > replaced.generation;
+    ok = ok && lower.identity_generation > replaced.identity_generation;
     /* Restore the original identity for the completion step. */
     reducer_frontier_body_read_note_reset_for_testing();
     for (int i = 0; i < REDUCER_FRONTIER_BODY_READ_QUARANTINE_MAX; i++)

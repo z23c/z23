@@ -269,7 +269,8 @@ static bool witness_have_data_unreadable(int64_t target_at_detect)
     struct reducer_frontier_body_read_note current_note;
     bool same_note = note_target &&
         reducer_frontier_body_read_note_snapshot(&current_note) &&
-        current_note.generation == g_note_at_detect.generation &&
+        current_note.identity_generation ==
+            g_note_at_detect.identity_generation &&
         uint256_eq(&current_note.block_hash, &g_note_at_detect.block_hash);
     struct block_index *p = note_target
         ? active_chain_at(&ms->chain_active, target)

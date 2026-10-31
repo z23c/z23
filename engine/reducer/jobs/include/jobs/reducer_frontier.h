@@ -450,6 +450,7 @@ struct reducer_frontier_body_read_note {
     enum reducer_frontier_body_read_reason reason;
     struct uint256 block_hash;
     uint64_t generation;
+    uint64_t identity_generation; /* bumps only when (height, hash) changes */
 };
 
 uint64_t reducer_frontier_body_read_note_record(
