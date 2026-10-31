@@ -238,7 +238,6 @@ engine/reducer/jobs/src/stage_repair_reducer_frontier_coin.c:stage_reducer_front
 engine/reducer/jobs/src/stage_repair_reducer_frontier_purge.c:rf_tipfin_state_at:16
 engine/reducer/jobs/src/stage_repair_reducer_frontier_purge.c:stage_reducer_frontier_purge_noncanonical:90
 engine/reducer/jobs/src/stage_repair_reducer_frontier_purge.c:stage_reducer_frontier_purge_stale_reorg_tipfin:27
-engine/reducer/jobs/src/stage_repair_reducer_frontier_rebind.c:stage_reducer_frontier_try_label_splice_rebind:19
 engine/reducer/jobs/src/stage_repair_reducer_frontier_tipfin.c:stage_reducer_frontier_try_tipfin_backfill:28
 engine/reducer/jobs/src/stage_repair_reducer_frontier_tipfin.c:tipfin_batch_tx:23
 engine/reducer/jobs/src/stage_repair_reducer_frontier_tipfin.c:tipfin_eval_p:19

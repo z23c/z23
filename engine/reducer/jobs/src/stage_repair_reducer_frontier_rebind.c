@@ -78,6 +78,26 @@ static int min_lowest(int a, int b)
     return a < b ? a : b;
 }
 
+/* The wedge gate at gate_h: the blocker is active, or the proof/script verdict
+ * at gate_h carries a NULL block_hash. Evaluated in that order; short-circuits. */
+static bool rebind_gate_open(sqlite3 *db, int gate_h)
+{
+    return blocker_exists(LABEL_SPLICE_BLOCKER_ID) ||
+           rebind_row_null_at(db, "proof_validate_log", gate_h) ||
+           rebind_row_null_at(db, "script_validate_log", gate_h);
+}
+
+/* Lowest pending height across the proof and script re-arms; a side whose
+ * re-arm errored contributes -1 (no pending height). */
+static int label_splice_pending_lowest(enum proof_validate_rearm_outcome po,
+                                       const struct proof_validate_rearm_report *pr,
+                                       enum script_validate_rearm_outcome so,
+                                       const struct script_validate_rearm_report *sr)
+{
+    return min_lowest(po == PV_REARM_ERROR ? -1 : pr->lowest_null_height,
+                      so == SV_REARM_ERROR ? -1 : sr->lowest_null_height);
+}
+
 bool stage_reducer_frontier_try_label_splice_rebind(
     sqlite3 *db,
     bool apply,
@@ -100,9 +120,7 @@ bool stage_reducer_frontier_try_label_splice_rebind(
      * NULL block_hash. On a healthy node both are false and this arm no-ops
      * without touching the schema. */
     int gate_h = out->hstar + 1;
-    bool gate = blocker_exists(LABEL_SPLICE_BLOCKER_ID) ||
-                rebind_row_null_at(db, "proof_validate_log", gate_h) ||
-                rebind_row_null_at(db, "script_validate_log", gate_h);
+    bool gate = rebind_gate_open(db, gate_h);
     if (!gate)
         return true;
 
@@ -136,9 +154,7 @@ bool stage_reducer_frontier_try_label_splice_rebind(
                  "[stage_repair] label_splice rebind: script re-arm errored "
                  "(arm no-op for script this pass)");
 
-    out->label_splice_rebind_lowest =
-        min_lowest(po == PV_REARM_ERROR ? -1 : pr.lowest_null_height,
-                   so == SV_REARM_ERROR ? -1 : sr.lowest_null_height);
+    out->label_splice_rebind_lowest = label_splice_pending_lowest(po, &pr, so, &sr);
 
     if (po == PV_REARM_REARMED) {
         out->label_splice_rebound++;
