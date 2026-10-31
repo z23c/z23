@@ -428,6 +428,11 @@ int64_t os_proc_load1_centi(void)
     if (sscanf(buf, "%u.%2u", &whole, &frac) < 1 || whole > 100000)
         return -1; // raw-return-ok:platform-cannot-answer
     return (int64_t)whole * 100 + (int64_t)frac;
+#elif !defined(_WIN32)
+    double load[1];
+    if (getloadavg(load, 1) != 1 || !(load[0] >= 0.0) || load[0] > 100000.0)
+        return -1; // raw-return-ok:platform-cannot-answer
+    return (int64_t)(load[0] * 100.0);
 #else
     return -1; // raw-return-ok:platform-cannot-answer
 #endif
