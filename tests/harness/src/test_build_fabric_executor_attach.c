@@ -1833,7 +1833,6 @@ static int test_bf_attach_runtime_closure_platform(void)
 #else
         (void)zero;
         ASSERT(!roots.ok);
-        ASSERT(!roots.ok);
         ASSERT_STR_EQ(roots.message,
                       "executor-runtime-closure-missing: unsupported platform");
 #endif
