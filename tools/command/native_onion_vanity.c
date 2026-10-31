@@ -25,6 +25,7 @@
 #include "support/cleanse.h"
 
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -33,12 +34,18 @@
 #define OV_LONG_SEARCH_SECONDS 3600.0
 #define OV_TIMEOUT_MAX_S INT64_C(31536000)
 
-static volatile sig_atomic_t g_ov_interrupt;
+/* Written by the signal handler and read by the worker threads: an atomic
+ * so the handler and the readers are race-free (a plain volatile flag is
+ * still a data race between threads). */
+static atomic_int g_ov_interrupt;
+/* The handler may run on any thread: its store must not take a lock. */
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2,
+               "signal handler needs a lock-free atomic_int");
 
 static void ov_on_signal(int signo)
 {
     (void)signo;
-    g_ov_interrupt = 1;
+    atomic_store(&g_ov_interrupt, 1);
 }
 
 /* Installs ov_on_signal for `signo` and saves what was in force. sigaction,
@@ -374,7 +381,7 @@ static void ov_run(const struct ov_request *req, struct zcl_command_reply *reply
     double rate = onion_vanity_measure_rate(req->threads, OV_CALIBRATION_NS,
                                             &g_ov_interrupt);
     if (rate <= 0.0) {
-        if (g_ov_interrupt)
+        if (atomic_load(&g_ov_interrupt))
             ov_fail(reply, ZCL_COMMAND_EXIT_TRANSIENT, "INTERRUPTED",
                     "interrupted; no file written", "prefix");
         else
@@ -427,7 +434,7 @@ void zcl_native_handle_core_network_onion_vanity(
     memset(&req, 0, sizeof(req));
     if (!ov_parse_request(request->input, &req, reply))
         return;
-    g_ov_interrupt = 0;
+    atomic_store(&g_ov_interrupt, 0);
     ov_sig_saved prev_int, prev_term;
     bool have_int = ov_signal_hold(SIGINT, &prev_int);
     bool have_term = ov_signal_hold(SIGTERM, &prev_term);

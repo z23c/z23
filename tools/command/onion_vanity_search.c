@@ -99,7 +99,7 @@ static void ov_request_stop(struct ov_job *job, enum ov_stop reason)
 static bool ov_limit_reached(struct ov_job *job)
 {
     const struct onion_vanity_params *p = job->params;
-    if (p->interrupt && *p->interrupt) {
+    if (p->interrupt && atomic_load(p->interrupt)) {
         ov_request_stop(job, OV_INTERRUPTED);
         return true;
     }
@@ -201,7 +201,7 @@ void onion_vanity_search(const struct onion_vanity_params *params,
     result->status = ran ? ov_status(atomic_load(&job.stop))
                          : ONION_VANITY_FAILED;
     if (result->status == ONION_VANITY_FOUND &&
-        params->interrupt && *params->interrupt)
+        params->interrupt && atomic_load(params->interrupt))
         result->status = ONION_VANITY_INTERRUPTED;
     if (result->status == ONION_VANITY_FOUND)
         memcpy(result->seed, job.seed, sizeof(result->seed));
@@ -209,7 +209,7 @@ void onion_vanity_search(const struct onion_vanity_params *params,
 }
 
 double onion_vanity_measure_rate(unsigned threads, int64_t duration_ns,
-                                 const volatile sig_atomic_t *interrupt)
+                                 const atomic_int *interrupt)
 {
     struct onion_vanity_params params = {
         .threads = threads, .timeout_ns = duration_ns, .interrupt = interrupt,

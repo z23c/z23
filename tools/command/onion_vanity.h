@@ -8,7 +8,7 @@
 #ifndef ZCL_TOOLS_COMMAND_ONION_VANITY_H
 #define ZCL_TOOLS_COMMAND_ONION_VANITY_H
 
-#include <signal.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -58,7 +58,7 @@ struct onion_vanity_params {
     unsigned threads;                     /* 1..ONION_VANITY_THREADS_MAX */
     uint64_t max_tries;                   /* 0 = unbounded */
     int64_t timeout_ns;                   /* 0 = none */
-    const volatile sig_atomic_t *interrupt; /* may be NULL */
+    const atomic_int *interrupt;          /* may be NULL */
 };
 
 struct onion_vanity_result {
@@ -78,6 +78,6 @@ void onion_vanity_search(const struct onion_vanity_params *params,
 /* Candidates per second across `threads` workers over `duration_ns`;
  * 0.0 when the measurement did not complete. */
 double onion_vanity_measure_rate(unsigned threads, int64_t duration_ns,
-                                 const volatile sig_atomic_t *interrupt);
+                                 const atomic_int *interrupt);
 
 #endif
