@@ -1131,6 +1131,49 @@ static int pd_scenario_bcd(const struct chain_params *cp, const char *dir)
     return failures;
 }
 
+/* Make the test tmpdir, pin it as the datadir and assert the resolved
+ * net-specific path sits inside it; create the blocks directory. */
+static int pd_pin_datadir_fixture(char *dir, size_t dir_len,
+                                  char *netdir, size_t netdir_len)
+{
+    int failures = 0;
+    test_make_tmpdir(dir, dir_len, "gh_pow_dedup", "ok");
+
+    /* Pin the datadir and write the flat-file fixture where the serve path
+     * opens it: msg_processor_init ignores its `datadir` argument and uses the
+     * net-specific GetDataDir(true) (see msgprocessor.c), so without SetDataDir
+     * the fallback reads the host's default datadir. Assert the resolved path
+     * is inside the tmpdir. */
+    SetDataDir(dir);
+    GetDataDir(true, netdir, netdir_len);
+    PD_CHECK("fixture datadir resolves inside the test tmpdir",
+             netdir[0] && strncmp(netdir, dir, strlen(dir)) == 0);
+    {
+        char blocks[576];
+        snprintf(blocks, sizeof(blocks), "%s/blocks", netdir);
+        mkdir(blocks, 0755);
+    }
+    return failures;
+}
+
+/* Open the in-memory node.db fixture, attach and start the db_service,
+ * and install it as the app runtime's current service. */
+static int pd_start_db_service(struct node_db *ndb, struct db_service *dbsvc,
+                               struct app_runtime_context *runtime)
+{
+    int failures = 0;
+    memset(ndb, 0, sizeof(*ndb));
+    memset(dbsvc, 0, sizeof(*dbsvc));
+    memset(runtime, 0, sizeof(*runtime));
+    PD_CHECK("node.db fixture opens", node_db_open(ndb, ":memory:"));
+    db_service_init(dbsvc);
+    PD_CHECK("db_service attaches", db_service_attach(dbsvc, ndb));
+    PD_CHECK("db_service starts", db_service_start(dbsvc));
+    runtime->db_service = dbsvc;
+    app_runtime_set_current(runtime);
+    return failures;
+}
+
 int test_getheaders_serve_pow_dedup(void);
 int test_getheaders_serve_pow_dedup(void)
 {
@@ -1142,36 +1185,14 @@ int test_getheaders_serve_pow_dedup(void)
     const struct chain_params *cp = chain_params_get();
 
     char dir[256];
-    test_make_tmpdir(dir, sizeof(dir), "gh_pow_dedup", "ok");
-
-    /* Pin the datadir and write the flat-file fixture where the serve path
-     * opens it: msg_processor_init ignores its `datadir` argument and uses the
-     * net-specific GetDataDir(true) (see msgprocessor.c), so without SetDataDir
-     * the fallback reads the host's default datadir. Assert the resolved path
-     * is inside the tmpdir. */
-    SetDataDir(dir);
     char netdir[512];
-    GetDataDir(true, netdir, sizeof(netdir));
-    PD_CHECK("fixture datadir resolves inside the test tmpdir",
-             netdir[0] && strncmp(netdir, dir, strlen(dir)) == 0);
-    {
-        char blocks[576];
-        snprintf(blocks, sizeof(blocks), "%s/blocks", netdir);
-        mkdir(blocks, 0755);
-    }
+    failures += pd_pin_datadir_fixture(dir, sizeof(dir),
+                                       netdir, sizeof(netdir));
 
     struct node_db ndb;
     struct db_service dbsvc;
     struct app_runtime_context runtime;
-    memset(&ndb, 0, sizeof(ndb));
-    memset(&dbsvc, 0, sizeof(dbsvc));
-    memset(&runtime, 0, sizeof(runtime));
-    PD_CHECK("node.db fixture opens", node_db_open(&ndb, ":memory:"));
-    db_service_init(&dbsvc);
-    PD_CHECK("db_service attaches", db_service_attach(&dbsvc, &ndb));
-    PD_CHECK("db_service starts", db_service_start(&dbsvc));
-    runtime.db_service = &dbsvc;
-    app_runtime_set_current(&runtime);
+    failures += pd_start_db_service(&ndb, &dbsvc, &runtime);
 
     failures += pd_scenario_a(cp, dir, netdir, &ndb);
     failures += pd_scenario_bcd(cp, dir);
