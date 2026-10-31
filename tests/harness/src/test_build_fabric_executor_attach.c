@@ -352,9 +352,12 @@ static int att_build_work_entries(const char *workspace)
 #if !defined(__linux__)
 /* Off Linux the executor-key compose step refuses by name, after request
  * identity, worker admission, input CAS and capsule checks and before any
- * donor lookup. Returns true only when exactly that typed refusal is
- * reported, no compiler ran, no build-work entry exists, and the action is
- * still durably QUEUED. */
+ * donor lookup. The process-wide toolchain capsule cache is not stable on
+ * every host: when it is invalid the attach refuses earlier with a
+ * toolchain-cache reason, nothing else changed, so the cache is re-primed
+ * and the attach retried (bounded) until the closure refusal is reached.
+ * Returns true only when exactly that typed refusal is reported, no compiler
+ * ran, no build-work entry exists, and the action is still durably QUEUED. */
 static bool att_refused_no_closure(struct node_db *ndb, const char *workspace,
                                    struct db_build_job *job,
                                    struct db_build_action *action,
@@ -364,8 +367,15 @@ static bool att_refused_no_closure(struct node_db *ndb, const char *workspace,
     struct db_build_receipt receipt;
     struct build_fabric_attach_report report;
     struct db_build_action durable;
-    struct zcl_result refused = build_fabric_attach(
-        ndb, workspace, NULL, job, action, secret, pubkey, &receipt, &report);
+    struct vcs_toolchain_capsule_v1 capsule;
+    struct zcl_result refused;
+    for (int attempt = 0; attempt < 50; attempt++) {
+        (void)vcs_toolchain_capsule_v1_capture(&capsule);
+        refused = build_fabric_attach(ndb, workspace, NULL, job, action,
+                                      secret, pubkey, &receipt, &report);
+        if (strncmp(report.refusal, "executor-toolchain-cache-", 25) != 0)
+            break;
+    }
     bool ok = !refused.ok &&
               report.disposition == BUILD_FABRIC_ATTACH_REFUSED &&
               strcmp(report.refusal, "executor-runtime-closure-missing") == 0 &&
@@ -378,7 +388,27 @@ static bool att_refused_no_closure(struct node_db *ndb, const char *workspace,
                refused.ok ? 1 : 0, (int)report.disposition, report.refusal);
     return ok;
 }
+
 #endif
+
+/* Same bounded re-prime for the host-level roots query, whose capsule step
+ * precedes the platform refusal. */
+static struct zcl_result att_host_roots_primed(const char *workspace,
+                                               uint8_t runtime[32],
+                                               uint8_t verifier[32])
+{
+    struct vcs_toolchain_capsule_v1 capsule;
+    struct zcl_result roots = ZCL_OK;
+    for (int attempt = 0; attempt < 50; attempt++) {
+        (void)vcs_toolchain_capsule_v1_capture(&capsule);
+        roots = build_fabric_executor_host_runtime_roots(workspace, runtime,
+                                                         verifier);
+        if (roots.ok || strcmp(roots.message,
+                "executor-runtime-closure-missing: capsule") != 0)
+            break;
+    }
+    return roots;
+}
 
 static bool att_object_path(const char *workspace, const char *hex_id,
                             char *out, size_t cap)
@@ -1794,14 +1824,15 @@ static int test_bf_attach_runtime_closure_platform(void)
         ASSERT(vcs_object_store_init(dir));
         uint8_t runtime[32], verifier[32];
         static const uint8_t zero[32] = {0};
-        struct zcl_result roots = build_fabric_executor_host_runtime_roots(
-            dir, runtime, verifier);
+        struct zcl_result roots = att_host_roots_primed(dir, runtime,
+                                                        verifier);
 #if defined(__linux__)
         ASSERT_RESULT_OK(roots);
         ASSERT(memcmp(runtime, zero, sizeof(zero)) != 0);
         ASSERT(memcmp(verifier, zero, sizeof(zero)) != 0);
 #else
         (void)zero;
+        ASSERT(!roots.ok);
         ASSERT(!roots.ok);
         ASSERT_STR_EQ(roots.message,
                       "executor-runtime-closure-missing: unsupported platform");
