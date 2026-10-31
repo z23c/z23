@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/lab_peer_fake.c", CAP_FS_READ|CAP_FS_WRITE, "Test fixture: logs its argv and prints canned replies from files beside the name it was started under; it never opens the network or starts a program.")

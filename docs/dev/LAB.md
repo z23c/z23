@@ -269,8 +269,12 @@ leaves: `dev land send` / `reverify_offer` / `qualify_offer` and `fleet bundle
 offer` / `fetch` and `fleet board post` / `list`. It adds no store, wire format
 or quorum rule, and it never executes fetched bytes itself (only
 `reverify_offer` builds offered code, under local policy). Each run prints one
-`zcl.lab_peer.v1` JSON document and exits 0 when it completed, 2 on a usage
-error. `--z23=` and `--z23dev=` name the two programs.
+`zcl.lab_peer.v1` JSON document and exits 0 when it completed, 1 when it
+stopped on a typed code (an unreadable or unwritable state file, a failed board
+listing, a refused offer), 2 on a usage error. `--z23=` and `--z23dev=` name
+the two programs. `offer` is idempotent: a rerun after a partial run reuses the
+earlier send and any matching board post. Board listings follow the list cursor
+up to a fixed page cap and report `"truncated":true` if it was hit.
 
 ```
 z23-lab-peer offer   --lane=DIR --commit=SHA --state=DIR [--room=lab] [--agent=NAME]
@@ -292,7 +296,8 @@ z23-lab-peer collect --state=DIR [--room=lab] [--require=1]
   attempts in all.
 - `collect` gathers the `verdict=ok` receipts answering each `offers.tsv` row
   into `STATE/receipts/`, runs `qualify_offer`, and writes
-  `STATE/qualified.tsv` (lane, commit, verdict, qualified count, signers,
+  `STATE/qualified.tsv`, one upserted row per offer post (post id, lane, commit,
+  verdict, qualified count, signers,
   rejected codes).
 
 Shadow mode: `collect` only counts. It never submits to, or changes, the land

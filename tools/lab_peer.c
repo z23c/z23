@@ -23,8 +23,14 @@
  *       STATE/qualified.tsv. SHADOW MODE: it never submits to or changes the
  *       land queue; the only dev land leaf it runs is qualify_offer.
  *
- * One JSON document per run on stdout (zcl.lab_peer.v1); exit 0 when the run
- * completed (items may have failed), 2 on a usage error.
+ * One JSON document per run on stdout (zcl.lab_peer.v1): exit 0 when the run
+ * completed (items may have failed), 1 when it stopped on a typed code (ok
+ * false: a board listing, state read or write failed, a refused offer), 2 on a
+ * usage error. A child that exits nonzero has failed, whatever its JSON says;
+ * only its ok:false reply is read, for the typed refusal code. Board listings
+ * follow the list cursor up to a fixed page cap; "truncated" reports a cap hit.
+ * State is never read fail-open: a missing ledger is empty, an unreadable one
+ * stops the run. offer is idempotent, so a rerun after any partial run converges.
  *
  * A tool, not a node leaf, for the reasons tools/engine_unit.c gives: it
  * launches programs. Every child goes through zcl_spawn_capture* with an argv
@@ -66,6 +72,8 @@ enum {
     LP_KEYS_MAX = 256,
     LP_ROWS_MAX = 256,
     LP_RECEIPTS_MAX = 32,    /* qualify_offer's list cap */
+    LP_PAGES_MAX = 5,        /* board pages followed per listing */
+    LP_MERGED_MAX = 1000,    /* posts kept from those pages */
     LP_ATTEMPTS = 3,         /* fetch attempts before a post is given up */
     LP_QUICK_S = 60,
     LP_FETCH_S = 300,
@@ -105,11 +113,16 @@ struct lp_ctx {
     int n_authors;
     struct json_value items;
     int n_items, n_ok, n_refused, n_failed, n_skipped;
+    bool oom;              /* a result document could not be built */
+    bool truncated;        /* the board listing hit its page cap */
+    const char *stop;      /* typed code that ends the run (persistence) */
 };
 
-static char g_child[LP_BUF]; /* the last child's stdout */
-static char g_file[LP_BUF];  /* the last state file read */
-static char g_out[LP_BUF];   /* the document printed */
+static char g_child[LP_BUF];   /* the last child's stdout */
+static char g_file[LP_BUF];    /* the last state file read */
+static char g_out[LP_BUF];     /* the document printed */
+static char g_handled[LP_BUF]; /* handled.tsv, loaded once per verify run */
+static char g_qual[LP_BUF];    /* qualified.tsv as it will be written */
 
 /* ── small helpers ─────────────────────────────────────────────────────── */
 
@@ -202,20 +215,26 @@ static bool lp_has_prefix(const char *s, const char *prefix)
     return s && strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
-/* The file's bytes in g_file, NUL-terminated; false when unreadable or over
- * the cap (never a truncated read). */
-static bool lp_read(const char *path, size_t *len_out)
+enum { LP_RD_OK, LP_RD_MISSING, LP_RD_ERR };
+
+/* Reads path into buf, NUL-terminated. MISSING is only ENOENT: a read error, or
+ * a file over the cap, is ERR, so a truncated read is never taken as whole. */
+static int lp_read_into(const char *path, char *buf, size_t cap)
 {
     FILE *f = fopen(path, "rb");
     if (!f)
-        return false;
-    const size_t n = fread(g_file, 1, sizeof(g_file) - 1, f);
+        return errno == ENOENT ? LP_RD_MISSING : LP_RD_ERR;
+    const size_t n = fread(buf, 1, cap - 1, f);
     const bool whole = feof(f) && !ferror(f);
     (void)fclose(f);
-    g_file[n] = '\0';
-    if (len_out)
-        *len_out = n;
-    return whole;
+    buf[n] = '\0';
+    return whole ? LP_RD_OK : LP_RD_ERR;
+}
+
+/* The state file in g_file. */
+static int lp_read(const char *path)
+{
+    return lp_read_into(path, g_file, sizeof(g_file));
 }
 
 static bool lp_write(const char *path, const char *text)
@@ -253,6 +272,18 @@ static bool lp_compact(const char *raw, char *out, size_t cap)
 
 /* ── children ──────────────────────────────────────────────────────────── */
 
+static bool lp_ok_true(const struct json_value *root)
+{
+    const struct json_value *ok = json_get(root, "ok");
+    return ok && ok->type == JSON_BOOL && json_get_bool(ok);
+}
+
+/* The data object of an ok reply, else NULL. */
+static const struct json_value *lp_data(const struct json_value *root)
+{
+    return lp_ok_true(root) ? json_get(root, "data") : NULL;
+}
+
 /* Runs one program from argv (no shell); its stdout is parsed into root. True
  * when it ran to completion and printed one JSON document. */
 static bool lp_run(const char *const argv[], const char *cwd, int timeout_s,
@@ -262,18 +293,17 @@ static bool lp_run(const char *const argv[], const char *cwd, int timeout_s,
     json_init(root);
     const int rc = zcl_spawn_capture_in_dir_observed(
         argv, cwd, g_child, sizeof(g_child), timeout_s * 1000, &timed_out);
-    if (rc < 0 || timed_out)
+    if (rc < 0 || timed_out || !json_read(root, g_child, strlen(g_child)))
         return false;
-    return json_read(root, g_child, strlen(g_child));
-}
-
-/* The data object of an ok reply, else NULL. */
-static const struct json_value *lp_data(const struct json_value *root)
-{
-    const struct json_value *ok = json_get(root, "ok");
-    if (!ok || ok->type != JSON_BOOL || !json_get_bool(ok))
-        return NULL;
-    return json_get(root, "data");
+    /* A nonzero exit is a failure. Its typed refusal (ok:false plus
+     * error.code) is still read by the caller; a nonzero exit that claims
+     * ok:true is contradictory and is never trusted. */
+    if (rc != 0 && lp_ok_true(root)) {
+        json_free(root);
+        json_init(root);
+        return false;
+    }
+    return true;
 }
 
 /* A refusal's typed code in out (never free text), or fallback. */
@@ -346,10 +376,11 @@ static void lp_item(struct lp_ctx *c, const char *id, const char *status,
     struct json_value o;
     json_init(&o);
     json_set_object(&o);
-    (void)json_push_kv_str(&o, "id", id ? id : "");
-    (void)json_push_kv_str(&o, "status", status);
-    (void)json_push_kv_str(&o, "code", code ? code : "");
-    (void)json_push_back(&c->items, &o);
+    if (!json_push_kv_str(&o, "id", id ? id : "") ||
+        !json_push_kv_str(&o, "status", status) ||
+        !json_push_kv_str(&o, "code", code ? code : "") ||
+        !json_push_back(&c->items, &o))
+        c->oom = true;
     json_free(&o);
     c->n_items++;
     if (strcmp(status, "ok") == 0)
@@ -368,33 +399,52 @@ static void lp_items_init(struct lp_ctx *c)
     json_set_array(&c->items);
 }
 
-/* The one document of the run. */
-static void lp_emit(const struct lp_ctx *c, const char *cmd, bool ok,
-                    const char *code)
+/* The counts object of the run's document. */
+static bool lp_counts(const struct lp_ctx *c, struct json_value *counts)
+{
+    json_init(counts);
+    json_set_object(counts);
+    return json_push_kv_int(counts, "items", c->n_items) &&
+           json_push_kv_int(counts, "ok", c->n_ok) &&
+           json_push_kv_int(counts, "refused", c->n_refused) &&
+           json_push_kv_int(counts, "failed", c->n_failed) &&
+           json_push_kv_int(counts, "skipped", c->n_skipped);
+}
+
+/* Builds the run's document into g_out; false when it could not be built. */
+static bool lp_build(const struct lp_ctx *c, const char *cmd, bool ok,
+                     const char *code)
 {
     struct json_value d, counts;
     json_init(&d);
-    json_init(&counts);
     json_set_object(&d);
-    json_set_object(&counts);
-    (void)json_push_kv_str(&d, "schema", "zcl.lab_peer.v1");
-    (void)json_push_kv_str(&d, "command", cmd);
-    (void)json_push_kv_bool(&d, "ok", ok);
-    (void)json_push_kv_str(&d, "code", code ? code : "");
-    (void)json_push_kv_int(&counts, "items", c->n_items);
-    (void)json_push_kv_int(&counts, "ok", c->n_ok);
-    (void)json_push_kv_int(&counts, "refused", c->n_refused);
-    (void)json_push_kv_int(&counts, "failed", c->n_failed);
-    (void)json_push_kv_int(&counts, "skipped", c->n_skipped);
-    (void)json_push_kv(&d, "counts", &counts);
-    (void)json_push_kv(&d, "items", &c->items);
-    if (json_write(&d, g_out, sizeof(g_out)) >= sizeof(g_out))
-        (void)snprintf(g_out, sizeof(g_out),
-                       "{\"schema\":\"zcl.lab_peer.v1\",\"ok\":false,"
-                       "\"code\":\"OUTPUT_TOO_LARGE\"}");
-    (void)puts(g_out);
+    json_init(&counts);
+    bool built = !c->oom && lp_counts(c, &counts) &&
+                 json_push_kv_str(&d, "schema", "zcl.lab_peer.v1") &&
+                 json_push_kv_str(&d, "command", cmd) &&
+                 json_push_kv_bool(&d, "ok", ok) &&
+                 json_push_kv_str(&d, "code", code ? code : "") &&
+                 json_push_kv_bool(&d, "truncated", c->truncated) &&
+                 json_push_kv(&d, "counts", &counts) &&
+                 json_push_kv(&d, "items", &c->items) &&
+                 json_write(&d, g_out, sizeof(g_out)) < sizeof(g_out);
     json_free(&counts);
     json_free(&d);
+    return built;
+}
+
+/* Prints the run's one document and returns the exit code: 0 when the run
+ * completed, 1 when it was stopped (ok false) or could not report. */
+static int lp_done(const struct lp_ctx *c, const char *cmd, bool ok,
+                   const char *code)
+{
+    if (!lp_build(c, cmd, ok, code)) {
+        (void)puts("{\"schema\":\"zcl.lab_peer.v1\",\"ok\":false,"
+                   "\"code\":\"OUT_OF_MEMORY_OR_OUTPUT_TOO_LARGE\"}");
+        return 1;
+    }
+    (void)puts(g_out);
+    return ok ? 0 : 1;
 }
 
 static int lp_usage(void)
@@ -411,6 +461,77 @@ static int lp_usage(void)
     return 2;
 }
 
+/* ── board listing ─────────────────────────────────────────────────────── */
+
+/* 0: the page is the last; >0: the next cursor; -1: truncated, no usable cursor. */
+static int64_t lp_next_cursor(const struct json_value *root,
+                              const struct json_value *data)
+{
+    const struct json_value *page = json_get(data, "_page");
+    if (!page)
+        page = json_get(root, "_page");
+    const struct json_value *t = json_get(page, "truncated");
+    const struct json_value *n = json_get(page, "next_cursor");
+    if (!t || t->type != JSON_BOOL || !json_get_bool(t))
+        return 0;
+    return n && n->type == JSON_INT && json_get_int(n) > 0 ? json_get_int(n) : -1;
+}
+
+/* Copies one page's posts into dst up to LP_MERGED_MAX; at the cap the run is
+ * marked truncated. NULL, or a code when a copy could not be made. */
+static const char *lp_merge(struct lp_ctx *c, struct json_value *dst,
+                            const struct json_value *src)
+{
+    for (size_t i = 0; i < json_size(src); i++) {
+        if (json_size(dst) >= LP_MERGED_MAX) {
+            c->truncated = true;
+            return NULL;
+        }
+        if (!json_push_back(dst, json_at(src, i)))
+            return "OUT_OF_MEMORY";
+    }
+    return NULL;
+}
+
+/* The room's posts of one kind, following the list cursor page by page up to
+ * LP_PAGES_MAX pages; a cap or an unusable cursor sets c->truncated. posts is
+ * an initialised array. NULL, or the typed code of a failed listing. */
+static const char *lp_list_posts(struct lp_ctx *c, const char *kind,
+                                 struct json_value *posts)
+{
+    char room[96], limit[32], kind_arg[32], cur[32];
+    int64_t cursor = 0;
+    if (!lp_fmt(room, sizeof(room), "--room=%s", c->v[LP_O_ROOM]) ||
+        !lp_fmt(limit, sizeof(limit), "--limit=%d", LP_POSTS_MAX) ||
+        !lp_fmt(kind_arg, sizeof(kind_arg), "--kind=%s", kind))
+        return "BOARD_LIST_FAILED";
+    for (int page = 0; page < LP_PAGES_MAX; page++) {
+        const char *argv[10] = {c->v[LP_O_Z23], "fleet", "board", "list", room,
+                                kind_arg, limit, NULL, NULL, NULL};
+        struct json_value root;
+        if (cursor > 0 && lp_fmt(cur, sizeof(cur), "--cursor=%lld", (long long)cursor))
+            argv[7] = cur;
+        if (!lp_run(argv, NULL, LP_QUICK_S, &root)) {
+            json_free(&root);
+            return "BOARD_LIST_FAILED";
+        }
+        const struct json_value *data = lp_data(&root);
+        const struct json_value *arr = json_get(data, "posts");
+        const char *err = arr && arr->type == JSON_ARR ? lp_merge(c, posts, arr)
+                                                       : "BOARD_LIST_FAILED";
+        const int64_t next = lp_next_cursor(&root, data);
+        json_free(&root);
+        if (err || next == 0 || c->truncated)
+            return err;
+        if (next < 0 || next <= cursor || page + 1 == LP_PAGES_MAX)
+            c->truncated = true;
+        if (c->truncated)
+            return NULL;
+        cursor = next;
+    }
+    return NULL;
+}
+
 /* ── offer ─────────────────────────────────────────────────────────────── */
 
 struct lp_made {
@@ -423,6 +544,7 @@ struct lp_made {
     int64_t size;
     char text[LP_TEXT_MAX + 512];
     char post_id[65];
+    const char *note; /* why a rerun skipped a step: ALREADY_OFFERED, POST_REUSED */
 };
 
 static const char *lp_basename(const char *path)
@@ -431,25 +553,41 @@ static const char *lp_basename(const char *path)
     return s ? s + 1 : path;
 }
 
-/* Reads the offer manifest the send wrote: one-line copy, base, and the checks
- * that it names this commit and bundle. NULL when fine, else a code. */
-static const char *lp_offer_manifest(struct lp_made *m)
+/* Reads the offer manifest at m->offer_path: one-line copy, sha and base, and
+ * the check that it names this commit (and, with expect_sha, that bundle).
+ * NULL when fine, else a code. */
+static const char *lp_offer_manifest(struct lp_made *m, const char *expect_sha)
 {
     struct json_value doc;
     const char *code = "OFFER_MANIFEST_BAD";
     json_init(&doc);
-    if (lp_read(m->offer_path, NULL) && json_read(&doc, g_file, strlen(g_file)) &&
+    if (lp_read(m->offer_path) == LP_RD_OK &&
+        json_read(&doc, g_file, strlen(g_file)) &&
         lp_compact(g_file, m->offer_json, sizeof(m->offer_json))) {
-        const char *base = lp_str(&doc, "base");
-        const bool same = lp_str(&doc, "commit") &&
-                          strcmp(lp_str(&doc, "commit"), m->commit) == 0 &&
-                          lp_str(&doc, "bundle_sha256") &&
-                          strcmp(lp_str(&doc, "bundle_sha256"), m->sha) == 0;
-        if (lp_commit(base) && same && lp_fmt(m->base, sizeof(m->base), "%s", base))
+        const char *base = lp_str(&doc, "base"), *sha = lp_str(&doc, "bundle_sha256");
+        const char *commit = lp_str(&doc, "commit");
+        const bool same = commit && strcmp(commit, m->commit) == 0 &&
+                          lp_hex(sha, 64) &&
+                          (!expect_sha || strcmp(sha, expect_sha) == 0);
+        if (lp_commit(base) && same && lp_fmt(m->base, sizeof(m->base), "%s", base) &&
+            lp_fmt(m->sha, sizeof(m->sha), "%s", sha))
             code = NULL;
     }
     json_free(&doc);
     return code;
+}
+
+/* A rerun after a send that never reached the post: both files of the earlier
+ * send and a manifest naming this commit are reused as they are. Anything
+ * less (one file, a bad manifest) is removed so the send runs again. */
+static bool lp_offer_reuse(struct lp_made *m)
+{
+    if (access(m->bundle, R_OK) == 0 && access(m->offer_path, R_OK) == 0 &&
+        lp_offer_manifest(m, NULL) == NULL)
+        return true;
+    (void)unlink(m->bundle);
+    (void)unlink(m->offer_path);
+    return false;
 }
 
 /* Step 1: dev land send, in the lane worktree. */
@@ -459,12 +597,10 @@ static const char *lp_offer_send(const struct lp_ctx *c, struct lp_made *m,
     char lane_arg[LP_NAME + 16], commit_arg[96], out_arg[LP_PATH + 96];
     struct json_value root;
     const char *code = "OFFER_SEND_FAILED";
+    if (lp_offer_reuse(m))
+        return NULL;
     if (!lp_fmt(lane_arg, sizeof(lane_arg), "--lane=%s", m->name) ||
-        !lp_fmt(commit_arg, sizeof(commit_arg), "--commit=%s",
-                c->v[LP_O_COMMIT]) ||
-        !lp_fmt(m->bundle, sizeof(m->bundle), "%s/out/%s-%.12s.bundle", c->state,
-                m->name, c->v[LP_O_COMMIT]) ||
-        !lp_fmt(m->offer_path, sizeof(m->offer_path), "%s.offer.json", m->bundle) ||
+        !lp_fmt(commit_arg, sizeof(commit_arg), "--commit=%s", m->commit) ||
         !lp_fmt(out_arg, sizeof(out_arg), "--bundle_out=%s", m->bundle))
         return "OFFER_PATH_TOO_LONG";
     const char *const argv[] = {c->v[LP_O_Z23DEV], "dev", "land", "send",
@@ -475,15 +611,15 @@ static const char *lp_offer_send(const struct lp_ctx *c, struct lp_made *m,
         const char *sha = lp_str(d, "bundle_sha256");
         if (!d)
             (void)lp_err_code(&root, code, why, why_cap);
-        else if (lp_hex(sha, 64) && lp_fmt(m->sha, sizeof(m->sha), "%s", sha) &&
-                 lp_fmt(m->commit, sizeof(m->commit), "%s", c->v[LP_O_COMMIT]))
-            code = lp_offer_manifest(m);
+        else if (lp_hex(sha, 64))
+            code = lp_offer_manifest(m, sha);
     }
     json_free(&root);
     return code;
 }
 
-/* Step 2: put the bundle on the Tor package swarm. */
+/* Step 2: put the bundle on the Tor package swarm (offering twice is the
+ * same root, so a rerun is safe). */
 static const char *lp_offer_swarm(const struct lp_ctx *c, struct lp_made *m)
 {
     char file_arg[LP_PATH + 96];
@@ -538,6 +674,28 @@ static const char *lp_offer_post(const struct lp_ctx *c, struct lp_made *m)
     return code;
 }
 
+/* A post with exactly this text already on the board (posted by an earlier
+ * run that never recorded it): reuse it rather than post a duplicate. */
+static const char *lp_offer_publish(struct lp_ctx *c, struct lp_made *m)
+{
+    struct json_value posts;
+    const char *err;
+    json_init(&posts);
+    json_set_array(&posts);
+    err = lp_list_posts(c, "offer", &posts);
+    for (size_t i = 0; !err && i < json_size(&posts); i++) {
+        const struct json_value *p = json_at(&posts, i);
+        const char *id = lp_str(p, "id"), *text = lp_str(p, "text");
+        if (lp_hex(id, 64) && text && strcmp(text, m->text) == 0 &&
+            lp_fmt(m->post_id, sizeof(m->post_id), "%s", id))
+            m->note = "POST_REUSED";
+    }
+    json_free(&posts);
+    if (err)
+        return "OFFER_BOARD_LIST_FAILED";
+    return m->note ? NULL : lp_offer_post(c, m);
+}
+
 static bool lp_offer_record(const struct lp_ctx *c, const struct lp_made *m)
 {
     char path[LP_PATH + 16], row[4 * LP_PATH];
@@ -546,6 +704,28 @@ static bool lp_offer_record(const struct lp_ctx *c, const struct lp_made *m)
                   m->post_id, m->name, m->commit, m->base, m->sha, m->root,
                   m->bundle, m->offer_path) &&
            lp_append(path, row);
+}
+
+/* offers.tsv already holds this lane and commit: 1 with its post id in m, 0 if
+ * not, -1 when the file cannot be read (a rerun must not guess). */
+static int lp_offer_recorded(const struct lp_ctx *c, struct lp_made *m)
+{
+    char path[LP_PATH + 16], key[LP_NAME + 64];
+    if (!lp_fmt(path, sizeof(path), "%s/offers.tsv", c->state) ||
+        !lp_fmt(key, sizeof(key), "\t%s\t%s\t", m->name, m->commit))
+        return -1;
+    const int rd = lp_read(path);
+    if (rd != LP_RD_OK)
+        return rd == LP_RD_MISSING ? 0 : -1;
+    for (const char *l = g_file; l && *l; l = strchr(l, '\n') ? strchr(l, '\n') + 1 : NULL) {
+        const char *tab = strchr(l, '\t');
+        char id[65];
+        if (tab && tab - l == 64 && strncmp(tab, key, strlen(key)) == 0 &&
+            lp_fmt(id, sizeof(id), "%.64s", l) && lp_hex(id, 64) &&
+            lp_fmt(m->post_id, sizeof(m->post_id), "%s", id))
+            return 1;
+    }
+    return 0;
 }
 
 static bool lp_offer_args(const struct lp_ctx *c, struct lp_made *m)
@@ -558,32 +738,50 @@ static bool lp_offer_args(const struct lp_ctx *c, struct lp_made *m)
         !S_ISDIR(st.st_mode) || !realpath(c->v[LP_O_LANE], real))
         return false;
     return lp_fmt(m->name, sizeof(m->name), "%s", lp_basename(real)) &&
-           lp_name(m->name, LP_NAME);
+           lp_name(m->name, LP_NAME) &&
+           lp_fmt(m->commit, sizeof(m->commit), "%s", c->v[LP_O_COMMIT]);
+}
+
+/* The whole offer, written so a rerun converges after any partial run: an
+ * offers.tsv row ends it, an earlier send's files are reused, a post already
+ * on the board is reused, and each step is idempotent. */
+static const char *lp_offer_run(struct lp_ctx *c, struct lp_made *m, char *why,
+                                size_t why_cap)
+{
+    if (!lp_fmt(m->bundle, sizeof(m->bundle), "%s/out/%s-%.12s.bundle", c->state,
+                m->name, m->commit) ||
+        !lp_fmt(m->offer_path, sizeof(m->offer_path), "%s.offer.json", m->bundle))
+        return "OFFER_PATH_TOO_LONG";
+    const int seen = lp_offer_recorded(c, m);
+    if (seen < 0)
+        return "OFFERS_UNREADABLE";
+    if (seen > 0) {
+        m->note = "ALREADY_OFFERED";
+        return NULL;
+    }
+    const char *code = lp_offer_send(c, m, why, why_cap);
+    code = code ? code : lp_offer_swarm(c, m);
+    code = code ? code : lp_offer_text(m);
+    code = code ? code : lp_offer_publish(c, m);
+    if (!code && !lp_offer_record(c, m))
+        code = "OFFER_RECORD_FAILED";
+    if (why[0] && code && strcmp(code, "OFFER_SEND_FAILED") == 0)
+        code = why;
+    return code;
 }
 
 static int lp_cmd_offer(struct lp_ctx *c)
 {
     static struct lp_made m;
     char why[80] = "";
-    const char *code;
     if (!lp_offer_args(c, &m) || !lp_state_init(c))
         return lp_usage();
-    if (!lp_lock(c)) {
-        lp_emit(c, "offer", false, "LOCKED");
-        return 0;
-    }
+    if (!lp_lock(c))
+        return lp_done(c, "offer", false, "LOCKED");
     lp_items_init(c);
-    code = lp_offer_send(c, &m, why, sizeof(why));
-    code = code ? code : lp_offer_swarm(c, &m);
-    code = code ? code : lp_offer_text(&m);
-    code = code ? code : lp_offer_post(c, &m);
-    if (!code && !lp_offer_record(c, &m))
-        code = "OFFER_RECORD_FAILED";
-    if (why[0] && code && strcmp(code, "OFFER_SEND_FAILED") == 0)
-        code = why;
-    lp_item(c, m.post_id, code ? "failed" : "ok", code);
-    lp_emit(c, "offer", code == NULL, code);
-    return 0;
+    const char *code = lp_offer_run(c, &m, why, sizeof(why));
+    lp_item(c, m.post_id, code ? "failed" : "ok", code ? code : m.note);
+    return lp_done(c, "offer", code == NULL, code);
 }
 
 /* ── verify ────────────────────────────────────────────────────────────── */
@@ -649,12 +847,14 @@ static bool lp_parse_offer(const char *text, struct lp_parsed *o)
     return lp_parse_manifest(o, json);
 }
 
-static void lp_load_authors(struct lp_ctx *c)
+/* The allowlist: one 64-hex key per line, anything else ignored. An unreadable
+ * file or one with no key at all stops the run (every post would be skipped
+ * for a reason the operator should see). */
+static const char *lp_load_authors(struct lp_ctx *c)
 {
-    size_t len;
     c->n_authors = 0;
-    if (!lp_read(c->v[LP_O_AUTHORS], &len))
-        return;
+    if (!c->v[LP_O_AUTHORS] || lp_read(c->v[LP_O_AUTHORS]) != LP_RD_OK)
+        return "AUTHORS_UNREADABLE";
     for (char *line = strtok(g_file, "\n"); line && c->n_authors < LP_KEYS_MAX;
          line = strtok(NULL, "\n")) {
         char key[65];
@@ -666,6 +866,7 @@ static void lp_load_authors(struct lp_ctx *c)
         if (lp_hex(key, 64))
             memcpy(c->authors[c->n_authors++], key, 65);
     }
+    return c->n_authors > 0 ? NULL : "AUTHORS_EMPTY";
 }
 
 static bool lp_author_ok(const struct lp_ctx *c, const char *host)
@@ -676,17 +877,30 @@ static bool lp_author_ok(const struct lp_ctx *c, const char *host)
     return false;
 }
 
-/* handled.tsv: id, verdict, code, seconds. Final when ok/refused/failed;
- * retries counts the retry rows. */
-static bool lp_handled(const struct lp_ctx *c, const char *id, int *retries)
+/* handled.tsv (id, verdict, code, seconds) is read once per run into
+ * g_handled. A missing file is an empty ledger; an unreadable or oversized one
+ * stops the run, so a post is never reprocessed on a guess. */
+static const char *lp_load_handled(const struct lp_ctx *c)
 {
-    char path[LP_PATH + 16], key[72];
+    char path[LP_PATH + 16];
+    if (!lp_fmt(path, sizeof(path), "%s/handled.tsv", c->state))
+        return "HANDLED_UNREADABLE";
+    const int rd = lp_read_into(path, g_handled, sizeof(g_handled));
+    if (rd == LP_RD_MISSING)
+        g_handled[0] = '\0';
+    return rd == LP_RD_ERR ? "HANDLED_UNREADABLE" : NULL;
+}
+
+/* Final when the ledger has an ok/refused/failed row for id; retries counts
+ * its retry rows. */
+static bool lp_handled(const char *id, int *retries)
+{
+    char key[72];
     bool final = false;
     *retries = 0;
-    if (!lp_fmt(path, sizeof(path), "%s/handled.tsv", c->state) ||
-        !lp_fmt(key, sizeof(key), "%s\t", id) || !lp_read(path, NULL))
+    if (!lp_fmt(key, sizeof(key), "%s\t", id))
         return false;
-    for (const char *l = g_file; l && *l; l = strchr(l, '\n') ? strchr(l, '\n') + 1 : NULL) {
+    for (const char *l = g_handled; l && *l; l = strchr(l, '\n') ? strchr(l, '\n') + 1 : NULL) {
         if (strncmp(l, key, strlen(key)) != 0)
             continue;
         if (lp_has_prefix(l + strlen(key), "retry\t"))
@@ -697,14 +911,16 @@ static bool lp_handled(const struct lp_ctx *c, const char *id, int *retries)
     return final;
 }
 
-static void lp_handled_row(const struct lp_ctx *c, const char *id,
-                           const char *verdict, const char *code, int64_t t0)
+/* One ledger row. A row that cannot be written stops the run. */
+static void lp_handled_row(struct lp_ctx *c, const char *id, const char *verdict,
+                           const char *code, int64_t t0)
 {
     char path[LP_PATH + 16], row[256];
-    if (lp_fmt(path, sizeof(path), "%s/handled.tsv", c->state) &&
-        lp_fmt(row, sizeof(row), "%s\t%s\t%s\t%lld\n", id, verdict,
-               code ? code : "", (long long)(clock_now_wall_ms() / 1000 - t0)))
-        (void)lp_append(path, row);
+    if (!lp_fmt(path, sizeof(path), "%s/handled.tsv", c->state) ||
+        !lp_fmt(row, sizeof(row), "%s\t%s\t%s\t%lld\n", id, verdict,
+                code ? code : "", (long long)(clock_now_wall_ms() / 1000 - t0)) ||
+        !lp_append(path, row))
+        c->stop = "HANDLED_WRITE_FAILED";
 }
 
 /* Step 5: fetch into STATE/in/<id>.bundle. */
@@ -753,7 +969,7 @@ static bool lp_reverify(const struct lp_ctx *c, const char *bundle,
     bool ok = lp_data(&root) != NULL;
     if (!ok)
         (void)lp_err_code(&root, "REVERIFY_REFUSED", code, 65);
-    else if (!lp_read(receipt, NULL) || !lp_compact(g_file, line, line_cap))
+    else if (lp_read(receipt) != LP_RD_OK || !lp_compact(g_file, line, line_cap))
         ok = false, *retry = true;
     json_free(&root);
     return ok;
@@ -808,7 +1024,11 @@ static void lp_process(struct lp_ctx *c, const char *id, const struct lp_parsed 
     struct lp_paths p;
     bool retry;
     const int64_t t0 = clock_now_wall_ms() / 1000;
-    if (!lp_stage(c, id, o, &p) || !lp_fetch(c, o, p.bundle)) {
+    if (!lp_stage(c, id, o, &p)) {
+        c->stop = "STATE_WRITE_FAILED";
+        return;
+    }
+    if (!lp_fetch(c, o, p.bundle)) {
         lp_fail(c, id, "FETCH_FAILED", prior, t0);
         return;
     }
@@ -849,26 +1069,11 @@ static const char *lp_gate(const struct lp_ctx *c, const struct json_value *post
     if (exp && exp->type == JSON_INT && json_get_int(exp) > 0 &&
         json_get_int(exp) <= c->now)
         return "EXPIRED";
-    if (lp_handled(c, id, prior))
+    if (lp_handled(id, prior))
         return "ALREADY_HANDLED";
     return NULL;
 }
 
-static bool lp_list_posts(const struct lp_ctx *c, const char *kind,
-                          struct json_value *root, const struct json_value **posts)
-{
-    char room[96], limit[32], kind_arg[32];
-    if (!lp_fmt(room, sizeof(room), "--room=%s", c->v[LP_O_ROOM]) ||
-        !lp_fmt(limit, sizeof(limit), "--limit=%d", LP_POSTS_MAX) ||
-        !lp_fmt(kind_arg, sizeof(kind_arg), "--kind=%s", kind))
-        return false;
-    const char *const argv[] = {c->v[LP_O_Z23], "fleet", "board", "list", room,
-                                kind_arg, limit, NULL};
-    if (!lp_run(argv, NULL, LP_QUICK_S, root))
-        return false;
-    *posts = json_get(lp_data(root), "posts");
-    return *posts && (*posts)->type == JSON_ARR;
-}
 
 static bool lp_verify_args(struct lp_ctx *c, int64_t *max)
 {
@@ -898,28 +1103,23 @@ static void lp_verify_post(struct lp_ctx *c, const struct json_value *post,
 
 static int lp_cmd_verify(struct lp_ctx *c)
 {
-    struct json_value root;
-    const struct json_value *posts;
+    struct json_value posts;
     int64_t max;
     int done = 0;
     if (!lp_verify_args(c, &max) || !lp_state_init(c))
         return lp_usage();
-    if (!lp_lock(c)) {
-        lp_emit(c, "verify", false, "LOCKED");
-        return 0;
-    }
-    lp_load_authors(c);
+    if (!lp_lock(c))
+        return lp_done(c, "verify", false, "LOCKED");
     lp_items_init(c);
-    if (!lp_list_posts(c, "offer", &root, &posts)) {
-        json_free(&root);
-        lp_emit(c, "verify", false, "BOARD_LIST_FAILED");
-        return 0;
-    }
-    for (size_t i = 0; i < json_size(posts) && i < LP_POSTS_MAX && done < max; i++)
-        lp_verify_post(c, json_at(posts, i), &done);
-    lp_emit(c, "verify", true, "");
-    json_free(&root);
-    return 0;
+    json_init(&posts);
+    json_set_array(&posts);
+    c->stop = lp_load_authors(c);
+    c->stop = c->stop ? c->stop : lp_load_handled(c);
+    c->stop = c->stop ? c->stop : lp_list_posts(c, "offer", &posts);
+    for (size_t i = 0; !c->stop && i < json_size(&posts) && done < max; i++)
+        lp_verify_post(c, json_at(&posts, i), &done);
+    json_free(&posts);
+    return lp_done(c, "verify", c->stop == NULL, c->stop);
 }
 
 /* ── collect ───────────────────────────────────────────────────────────── */
@@ -938,10 +1138,12 @@ static const char *lp_receipt_text(const char *text, const char *id)
     return text + strlen(head);
 }
 
-/* Writes one receipt file for a post; appends its path to list. */
-static bool lp_save_receipt(const struct lp_ctx *c, const struct lp_row *r,
-                            const struct json_value *post, char *list,
-                            size_t cap, int *n)
+/* Writes one receipt file for a post and appends its path to list: 1 saved,
+ * 0 not a receipt for this offer (or a repeat host), -1 when it could not be
+ * written (never skipped silently). */
+static int lp_save_receipt(const struct lp_ctx *c, const struct lp_row *r,
+                           const struct json_value *post, char *list,
+                           size_t cap, int *n)
 {
     char path[LP_PATH + 96], one[LP_RECEIPT_JSON + 2];
     const char *host = lp_str(post, "host");
@@ -950,15 +1152,17 @@ static bool lp_save_receipt(const struct lp_ctx *c, const struct lp_row *r,
         !lp_fmt(path, sizeof(path), "%s/receipts/%s-%.12s.json", c->state, r->id,
                 host) ||
         strstr(list, path) || !lp_compact(json, one, sizeof(one) - 1))
-        return false;
+        return 0;
     (void)strcat(one, "\n");
     if (!lp_write(path, one))
-        return false;
+        return -1;
     const size_t used = strlen(list);
-    if (!lp_fmt(list + used, cap - used, "%s%s", used ? "," : "", path))
-        return list[used] = '\0', false;
+    if (!lp_fmt(list + used, cap - used, "%s%s", used ? "," : "", path)) {
+        list[used] = '\0';
+        return -1;
+    }
     (*n)++;
-    return true;
+    return 1;
 }
 
 struct lp_qual {
@@ -1047,73 +1251,136 @@ static bool lp_row_parse(char *line, struct lp_row *r)
            lp_fmt(r->offer, sizeof(r->offer), "%s", f[7]);
 }
 
-static int lp_collect_rows(const struct lp_ctx *c, struct lp_row *rows)
+static bool lp_row_seen(const struct lp_row *rows, int n, const char *id)
+{
+    for (int i = 0; i < n; i++)
+        if (strcmp(rows[i].id, id) == 0)
+            return true;
+    return false;
+}
+
+/* The offers of offers.tsv, one per post id (a repeated id is one offer). A
+ * missing file is no offers; an unreadable one is -1. A malformed line is
+ * reported as a skipped item, not dropped silently. */
+static int lp_collect_rows(struct lp_ctx *c, struct lp_row *rows)
 {
     char path[LP_PATH + 16];
     int n = 0;
-    if (!lp_fmt(path, sizeof(path), "%s/offers.tsv", c->state) ||
-        !lp_read(path, NULL))
-        return 0;
-    for (char *l = strtok(g_file, "\n"); l && n < LP_ROWS_MAX; l = strtok(NULL, "\n"))
-        if (lp_row_parse(l, &rows[n]))
-            n++;
+    if (!lp_fmt(path, sizeof(path), "%s/offers.tsv", c->state))
+        return -1;
+    const int rd = lp_read(path);
+    if (rd != LP_RD_OK)
+        return rd == LP_RD_MISSING ? 0 : -1;
+    for (char *l = strtok(g_file, "\n"); l; l = strtok(NULL, "\n")) {
+        struct lp_row r;
+        if (!lp_row_parse(l, &r))
+            lp_item(c, "", "skipped", "OFFERS_ROW_BAD");
+        else if (!lp_row_seen(rows, n, r.id) && n < LP_ROWS_MAX)
+            rows[n++] = r;
+        else if (n >= LP_ROWS_MAX)
+            c->truncated = true;
+    }
     return n;
 }
 
+/* qualified.tsv is one row per offer post id: post, lane, commit, verdict,
+ * qualified, signers, rejected. g_qual starts as the old file minus the rows
+ * of the offers this run re-derives; each offer then adds its fresh row. */
+static bool lp_qual_add(const char *s, size_t n)
+{
+    const size_t used = strlen(g_qual);
+    if (used + n >= sizeof(g_qual))
+        return false;
+    memcpy(g_qual + used, s, n);
+    g_qual[used + n] = '\0';
+    return true;
+}
+
+static const char *lp_qual_keep(const struct lp_ctx *c, const struct lp_row *rows,
+                                int n)
+{
+    char path[LP_PATH + 16];
+    g_qual[0] = '\0';
+    if (!lp_fmt(path, sizeof(path), "%s/qualified.tsv", c->state))
+        return "QUALIFIED_UNREADABLE";
+    const int rd = lp_read(path);
+    if (rd != LP_RD_OK)
+        return rd == LP_RD_MISSING ? NULL : "QUALIFIED_UNREADABLE";
+    for (const char *l = g_file; *l;) {
+        const char *nl = strchr(l, '\n');
+        const size_t len = nl ? (size_t)(nl - l) + 1 : strlen(l);
+        bool redone = false;
+        for (int i = 0; i < n && !redone; i++)
+            redone = len > 64 && l[64] == '\t' && strncmp(l, rows[i].id, 64) == 0;
+        if (!redone && !lp_qual_add(l, len))
+            return "QUALIFIED_TOO_LARGE";
+        l += len;
+    }
+    return NULL;
+}
+
+static bool lp_qual_write(const struct lp_ctx *c)
+{
+    char tmp[LP_PATH + 32], fin[LP_PATH + 32];
+    return lp_fmt(tmp, sizeof(tmp), "%s/qualified.tsv.tmp", c->state) &&
+           lp_fmt(fin, sizeof(fin), "%s/qualified.tsv", c->state) &&
+           lp_write(tmp, g_qual) && rename(tmp, fin) == 0;
+}
+
 /* The receipts answering one offer, qualified, and its qualified.tsv row. */
-static void lp_collect_one(struct lp_ctx *c, const struct lp_row *r,
-                           const struct json_value *posts, const char *tmp)
+static const char *lp_collect_one(struct lp_ctx *c, const struct lp_row *r,
+                                  const struct json_value *posts)
 {
     static char list[LP_RECEIPTS_MAX * (LP_PATH + 96) + 16];
-    char row[2 * LP_RECEIPTS_MAX * 72 + 512];
+    char row[2 * LP_RECEIPTS_MAX * 72 + 640];
     struct lp_qual q = {.verdict = "NO_RECEIPTS"};
     int n = 0;
+    bool write_failed = false;
     list[0] = '\0';
-    for (size_t i = 0; i < json_size(posts) && i < LP_POSTS_MAX; i++) {
+    for (size_t i = 0; i < json_size(posts); i++) {
         const struct json_value *p = json_at(posts, i);
         const char *kind = lp_str(p, "kind"), *ref = lp_str(p, "ref");
         if (kind && ref && strcmp(kind, "result") == 0 && strcmp(ref, r->id) == 0)
-            (void)lp_save_receipt(c, r, p, list, sizeof(list), &n);
+            write_failed |= lp_save_receipt(c, r, p, list, sizeof(list), &n) < 0;
     }
-    if (n > 0)
+    if (write_failed)
+        (void)lp_fmt(q.verdict, sizeof(q.verdict), "RECEIPT_WRITE_FAILED");
+    else if (n > 0)
         lp_qualify(c, r, list, &q);
-    if (lp_fmt(row, sizeof(row), "%s\t%s\t%s\t%lld\t%s\t%s\n", r->lane, r->commit,
-               q.verdict, (long long)q.qualified, q.signers, q.rejected))
-        (void)lp_append(tmp, row);
-    lp_item(c, r->id, n == 0 ? "skipped" : strcmp(q.verdict, "ready") == 0 ? "ok"
-                                                                          : "refused",
+    lp_item(c, r->id,
+            write_failed ? "failed" : n == 0 ? "skipped"
+                                     : strcmp(q.verdict, "ready") == 0 ? "ok" : "refused",
             q.verdict);
+    if (!lp_fmt(row, sizeof(row), "%s\t%s\t%s\t%s\t%lld\t%s\t%s\n", r->id, r->lane,
+                r->commit, q.verdict, (long long)q.qualified, q.signers, q.rejected) ||
+        !lp_qual_add(row, strlen(row)))
+        return "QUALIFIED_TOO_LARGE";
+    return NULL;
 }
 
 static int lp_cmd_collect(struct lp_ctx *c)
 {
     static struct lp_row rows[LP_ROWS_MAX];
-    struct json_value root;
-    const struct json_value *posts;
-    char tmp[LP_PATH + 32], fin[LP_PATH + 32];
+    struct json_value posts;
     int64_t require;
     if (!c->v[LP_O_STATE] || !lp_name(c->v[LP_O_ROOM], 32) ||
         !lp_decimal(c->v[LP_O_REQUIRE], 16, &require) || !lp_state_init(c))
         return lp_usage();
-    if (!lp_lock(c)) {
-        lp_emit(c, "collect", false, "LOCKED");
-        return 0;
-    }
+    if (!lp_lock(c))
+        return lp_done(c, "collect", false, "LOCKED");
     lp_items_init(c);
+    json_init(&posts);
+    json_set_array(&posts);
     const int n = lp_collect_rows(c, rows);
-    if (!lp_list_posts(c, "result", &root, &posts) ||
-        !lp_fmt(tmp, sizeof(tmp), "%s/qualified.tsv.tmp", c->state) ||
-        !lp_fmt(fin, sizeof(fin), "%s/qualified.tsv", c->state) || !lp_write(tmp, "")) {
-        json_free(&root);
-        lp_emit(c, "collect", false, "BOARD_LIST_FAILED");
-        return 0;
-    }
-    for (int i = 0; i < n; i++)
-        lp_collect_one(c, &rows[i], posts, tmp);
-    const bool renamed = rename(tmp, fin) == 0;
-    lp_emit(c, "collect", renamed, renamed ? "" : "QUALIFIED_WRITE_FAILED");
-    json_free(&root);
-    return 0;
+    c->stop = n < 0 ? "OFFERS_UNREADABLE" : NULL;
+    c->stop = c->stop ? c->stop : lp_list_posts(c, "result", &posts);
+    c->stop = c->stop ? c->stop : lp_qual_keep(c, rows, n);
+    for (int i = 0; !c->stop && i < n; i++)
+        c->stop = lp_collect_one(c, &rows[i], &posts);
+    if (!c->stop && !lp_qual_write(c))
+        c->stop = "QUALIFIED_WRITE_FAILED";
+    json_free(&posts);
+    return lp_done(c, "collect", c->stop == NULL, c->stop);
 }
 
 int main(int argc, char **argv)

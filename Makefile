@@ -13504,7 +13504,15 @@ LAB_PEER_BIN = $(BIN_DIR)/z23-lab-peer
 LAB_PEER_SRCS = tools/lab_peer.c platform/modules/json/src/json.c platform/modules/util/src/spawn.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
 LAB_PEER_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/util/include
 .PHONY: lab-peer
-lab-peer: $(LAB_PEER_BIN)
+# tools/lab_peer_fake.c is the fake z23 / z23-dev the test group runs the tool
+# against (a C program: the test starts no shell).
+LAB_PEER_FAKE_BIN = $(BIN_DIR)/lab-peer-fake
+lab-peer: $(LAB_PEER_BIN) $(LAB_PEER_FAKE_BIN)
+$(LAB_PEER_FAKE_BIN): tools/lab_peer_fake.c
+	mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
+	    -o $@ tools/lab_peer_fake.c
 $(LAB_PEER_BIN): $(LAB_PEER_SRCS)
 	mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
