@@ -90,16 +90,24 @@ static char g_tmpfs_root[PATH_MAX];
 static pid_t g_tmpfs_owner;
 static bool g_tmpfs_green;
 static bool g_tmpfs_retained;
+static bool g_tmpfs_started;   /* a group ran: the root may hold evidence */
 
 static void tmpfs_finish(int exit_code, int load_flaky_groups)
 {
     g_tmpfs_green = exit_code == 0 && load_flaky_groups == 0;
 }
 
+static void tmpfs_note_group_started(void)
+{
+    g_tmpfs_started = true;
+}
+
 static void tmpfs_cleanup(void)
 {
     if (g_tmpfs_owner != getpid() || !g_tmpfs_root[0]) return;
-    if (!g_tmpfs_green || g_tmpfs_retained) {
+    /* An exit before any group ran (usage, listing, empty selection) holds no
+     * evidence: remove the root whatever the exit code. */
+    if (g_tmpfs_started && (!g_tmpfs_green || g_tmpfs_retained)) {
         fprintf(stderr, "test_parallel: retained tmpfs root=%s\n", g_tmpfs_root);
         return;
     }
@@ -151,6 +159,8 @@ fallback:
     fprintf(stderr, "test_parallel: tmpfs unavailable or disabled; using test-tmp\n");
 }
 
+#else
+static inline void tmpfs_note_group_started(void) {}
 #endif
 
 /* Required by process_block.c (normally in main.c) */
@@ -1214,6 +1224,7 @@ static int child_spawn(size_t idx, const char *out_path,
         child_run(idx, out_path, state_path, activate_proof_contracts);
         _exit(2); /* unreachable */
     }
+    tmpfs_note_group_started();
     *out = pid;
     return 0;
 #endif

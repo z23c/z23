@@ -21,6 +21,9 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(__linux__)
+#include <dirent.h>
+#endif
 #if !defined(_WIN32)
 #include <sys/wait.h>
 #endif
@@ -3144,6 +3147,51 @@ static int tgs_tmpfs_launch(const char *root, const char *exe, const char *mode,
     return timed_out ? -1 : rc;
 }
 
+/* Entries under /dev/shm/z23t named for the runner's cwd hash (the same
+ * FNV-1a the runner uses), or -1 when the parent cannot be read. */
+static int tgs_tmpfs_roots_for(const char *cwd)
+{
+    uint32_t hash = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)cwd; *p; ++p)
+        hash = (hash ^ *p) * 16777619u;
+    char prefix[16];
+    snprintf(prefix, sizeof(prefix), "%08x.", hash);
+    DIR *d = opendir("/dev/shm/z23t");
+    if (!d) return errno == ENOENT ? 0 : -1;
+    int n = 0;
+    for (struct dirent *e; (e = readdir(d)) != NULL; )
+        if (strncmp(e->d_name, prefix, strlen(prefix)) == 0) n++;
+    closedir(d);
+    return n;
+}
+
+static int test_tmpfs_early_exit_removed(void)
+{
+    int failures = 0;
+    TEST("runner: tmpfs root of an exit before any group runs is removed") {
+        static char out[1024 * 1024];
+        char root[PATH_MAX], exe[PATH_MAX], real[PATH_MAX];
+        test_make_tmpdir(root, sizeof(root), "tgs_tmpfs", "early");
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        ASSERT(realpath(root, real) != NULL);
+        const char *env = tgs_fixture_executable("/usr/bin/env", "/bin/env");
+        ASSERT(env != NULL);
+        const char *args[] = {env, "-u", "ZCL_TEST_TMPROOT", "-u", "ZCL_TEST_TMPFS_ACTIVE",
+            "ZCL_TEST_TMPFS=1", "ZCL_TEST_TMPFS_MAX_MB=2048", exe, "--list", NULL};
+        bool timed_out = false;
+        int rc = zcl_spawn_capture_merged_in_dir_observed(args, root, out, sizeof(out),
+                                                          60000, &timed_out);
+        ASSERT(!timed_out && rc == 0);
+        if (!strstr(out, "tmpfs unavailable or disabled")) {
+            ASSERT(strstr(out, "test_parallel: retained tmpfs root=") == NULL);
+            ASSERT(tgs_tmpfs_roots_for(real) == 0);
+        }
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_tmpfs_failure_retained(void)
 {
     int failures = 0;
@@ -3491,6 +3539,7 @@ int test_test_group_selector(void)
 #if defined(__linux__)
     failures += test_tmpfs_fallback();
     failures += test_tmpfs_failure_retained();
+    failures += test_tmpfs_early_exit_removed();
 #endif
     failures += test_runner_private_state();
     failures += test_runner_retry_evidence();
