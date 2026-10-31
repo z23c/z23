@@ -5,6 +5,9 @@
 
 #include "test/api_test_fixtures.h"
 
+/* Datadir the agent boot context reports to authenticated callers. */
+#define API_STATUS_BOOT_DATADIR "/tmp/zcl-canonical"
+
 enum {
     API_STATUS_FIELD_PRESENT = 1,
     API_STATUS_FIELD_ABSENT,
@@ -517,7 +520,7 @@ static bool api_status_public_status_shape_ok(uint8_t *resp, size_t cap)
     ok = api_test_build_chain(&ms, blocks, 3);
     reducer_frontier_provable_tip_set(2);
     rpc_agent_set_boot_context("canonical", "full",
-                               "/tmp/zcl-canonical", 18232, 8033,
+                               API_STATUS_BOOT_DATADIR, 18232, 8033,
                                8443, 18034);
     api_set_state(&ms, NULL, NULL, NULL, api_test_datadir());
 
@@ -726,14 +729,14 @@ static bool api_status_agent_alias_summary_ok(uint8_t *resp, size_t cap)
 /* No unauthenticated body carries a host path: not the datadir, the
  * auto-reindex marker, the snapshot bundle, the active loader or the anchor
  * snapshot. The authenticated lane contract still does, so the check is not
- * vacuous. Boot context datadir: /tmp/zcl-canonical. */
+ * vacuous. */
 static bool api_status_public_paths_absent(uint8_t *resp, size_t cap)
 {
     static const char *const routes[] = {
         "/api/v1/agent", "/api/status", "/api/v1/bootstrap", "/api/refold",
     };
     static const char *const forbidden[] = {
-        "/tmp/zcl-canonical", "\"datadir\":", "auto_reindex_marker_path",
+        API_STATUS_BOOT_DATADIR, "\"datadir\":", "auto_reindex_marker_path",
         "\"bundle_path\"", "\"active_loader_path\"", "\"source_dir\"",
     };
     struct json_value full;

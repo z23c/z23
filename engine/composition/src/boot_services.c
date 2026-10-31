@@ -204,11 +204,8 @@ struct db_service *boot_db_service(struct boot_svc_ctx *svc)
  * the TU boundary; they stay beside boot_profile_has_file_service. */
 bool boot_profile_has_explorer(const struct app_context *ctx)
 {
-    if (!ctx)
-        return true;
-    if (ctx->private_listeners)
-        return false;
-    return app_runtime_profile_has_explorer(ctx->runtime_profile);
+    return !ctx || (!ctx->private_listeners &&
+                    app_runtime_profile_has_explorer(ctx->runtime_profile));
 }
 
 bool boot_profile_has_store(const struct app_context *ctx)
@@ -238,11 +235,8 @@ bool boot_loader_owns_seed(const struct app_context *ctx)
 
 bool boot_profile_has_file_service(const struct app_context *ctx)
 {
-    if (!ctx)
-        return true;
-    if (ctx->private_listeners)
-        return false;
-    return app_runtime_profile_has_file_service(ctx->runtime_profile);
+    return !ctx || (!ctx->private_listeners &&
+                    app_runtime_profile_has_file_service(ctx->runtime_profile));
 }
 
 /* Boot timing helper — mirrors boot.c:boot_clock_ms() so sub-stage markers
@@ -1254,15 +1248,12 @@ static void boot_start_offer_if_ready(struct boot_svc_ctx *svc)
 
 static void boot_start_nat_probe(struct boot_svc_ctx *svc, const struct app_context *ctx)
 {
-    /* Discover peer reachability — ASYNC. The NAT-PMP/UPnP probe blocks
-     * for tens of seconds on a host whose gateway ignores it, and running
-     * it here wedged boot ahead of the reducer stage-pipeline init (the
-     * node answered RPC because the frontend had already started, masking
-     * the stall). The tracked worker (core/modules/net/src/peer_strategy_worker.c)
-     * owns the probe now, publishes the profile and the onion-directory
-     * self row when it completes (structured `nat_probe_complete` log),
-     * and re-arms the 7200 s mapping lease at half-life so it no longer
-     * silently expires. Boot reports the honest intermediate state. */
+    /* Reachability is discovered asynchronously: the NAT-PMP/UPnP probe can
+     * block for tens of seconds. The tracked worker
+     * (core/modules/net/src/peer_strategy_worker.c) publishes the profile and
+     * the onion-directory self row when it completes (`nat_probe_complete`)
+     * and re-arms the 7200 s mapping lease at half-life. Under
+     * -private-listeners the probe is not started. */
     if (ctx->private_listeners) {
         printf("Reachability: probe off (-private-listeners)\n");
         return;
