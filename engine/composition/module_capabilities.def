@@ -1006,6 +1006,7 @@ ZCL_MODULE_CAPABILITY("engine/modules/storage/src/coins_kv_boot_rebuild.c", CAP_
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/coins_kv_read_snapshot.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/coins_kv_snapshot_write.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/coins_ram.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/modules/storage/src/coins_ram_boot_reconcile.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/coins_record_codec.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/coins_view_sqlite.c", CAP_FS_WRITE|CAP_CLOCK|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/consensus_db.c", CAP_FS_READ|CAP_FS_WRITE, "")
