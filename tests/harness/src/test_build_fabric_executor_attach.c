@@ -349,6 +349,37 @@ static int att_build_work_entries(const char *workspace)
     return entries;
 }
 
+#if !defined(__linux__)
+/* Off Linux the executor-key compose step refuses by name, after request
+ * identity, worker admission, input CAS and capsule checks and before any
+ * donor lookup. Returns true only when exactly that typed refusal is
+ * reported, no compiler ran, no build-work entry exists, and the action is
+ * still durably QUEUED. */
+static bool att_refused_no_closure(struct node_db *ndb, const char *workspace,
+                                   struct db_build_job *job,
+                                   struct db_build_action *action,
+                                   const uint8_t secret[32],
+                                   const uint8_t pubkey[32])
+{
+    struct db_build_receipt receipt;
+    struct build_fabric_attach_report report;
+    struct db_build_action durable;
+    struct zcl_result refused = build_fabric_attach(
+        ndb, workspace, NULL, job, action, secret, pubkey, &receipt, &report);
+    bool ok = !refused.ok &&
+              report.disposition == BUILD_FABRIC_ATTACH_REFUSED &&
+              strcmp(report.refusal, "executor-runtime-closure-missing") == 0 &&
+              report.compiler_processes == 0 &&
+              att_build_work_entries(workspace) == 0 &&
+              db_build_action_find(ndb, action->action_id, &durable) &&
+              strcmp(durable.state, "QUEUED") == 0;
+    if (!ok)
+        printf("closure refusal mismatch: ok=%d disposition=%d refusal=%s\n",
+               refused.ok ? 1 : 0, (int)report.disposition, report.refusal);
+    return ok;
+}
+#endif
+
 static bool att_object_path(const char *workspace, const char *hex_id,
                             char *out, size_t cap)
 {
@@ -497,11 +528,20 @@ static int test_bf_attach_conflicting_physical_outputs(void)
         ed25519_keypair(pubkey, secret, seed);
         ASSERT(att_approve_worker(&ndb, pubkey,
                                   (int64_t)platform_time_wall_unix()));
-        struct db_build_job job_a, job_b, job_c, job_d, job_e;
-        struct db_build_action action_a, action_b, action_c, action_d, action_e;
+        struct db_build_job job_a;
+        struct db_build_action action_a;
         ASSERT(att_plan_request(&ndb, dir, att_id_b, att_id_c, capsule_hex,
                                 input_root, "dev-x86-64-v3", &job_a,
                                 &action_a));
+#if !defined(__linux__)
+        ASSERT(att_refused_no_closure(&ndb, dir, &job_a, &action_a, secret,
+                                      pubkey));
+        printf("SKIP build_fabric_attach/conflicting_physical_outputs: the "
+               "physical runs, donor qualification and conflict refusals "
+               "need the Linux-only runtime closure\n");
+#else
+        struct db_build_job job_b, job_c, job_d, job_e;
+        struct db_build_action action_b, action_c, action_d, action_e;
         struct db_build_receipt receipt_a = {0};
         att_worker_id_from_pubkey(pubkey, receipt_a.worker_id);
         int64_t wall_us = 0;
@@ -590,6 +630,7 @@ static int test_bf_attach_conflicting_physical_outputs(void)
         struct db_build_action durable_e;
         ASSERT(db_build_action_find(&ndb, action_e.action_id, &durable_e));
         ASSERT_STR_EQ(durable_e.state, "QUEUED");
+#endif
 
         /* A broken read is distinct from an empty history. */
         struct db_build_job scan[2];
@@ -614,6 +655,13 @@ static int test_bf_attach_conflicting_physical_outputs(void)
         ASSERT(att_plan_request(&ndb, dir, att_id_b, att_id_d, capsule_hex,
                                 input_root, "dev-x86-64-v3", &job_overflow,
                                 &action_overflow));
+#if !defined(__linux__)
+        ASSERT(att_refused_no_closure(&ndb, dir, &job_overflow,
+                                      &action_overflow, secret, pubkey));
+        printf("SKIP build_fabric_attach/conflicting_physical_outputs: the "
+               "saturated-history refusal follows the Linux-only runtime "
+               "closure\n");
+#else
         struct db_build_receipt receipt_overflow;
         attached = build_fabric_attach(
             &ndb, dir, NULL, &job_overflow, &action_overflow, secret, pubkey,
@@ -621,6 +669,7 @@ static int test_bf_attach_conflicting_physical_outputs(void)
         ASSERT(!attached.ok);
         ASSERT_STR_EQ(report.refusal, "attach-refused-history-incomplete");
         ASSERT_EQ(report.compiler_processes, 0);
+#endif
         node_db_close(&ndb);
         test_rm_rf(dir);
         PASS();
@@ -654,10 +703,17 @@ static int test_bf_attach_ambiguous_donor_vetoes_other_donor(void)
 
         struct db_build_job jobs[3];
         struct db_build_action actions[3];
-        struct db_build_receipt receipts[3] = {0};
         ASSERT(att_plan_request(&ndb, dir, att_id_b, att_id_c, capsule_hex,
                                 input_root, "dev-x86-64-v3", &jobs[0],
                                 &actions[0]));
+#if !defined(__linux__)
+        ASSERT(att_refused_no_closure(&ndb, dir, &jobs[0], &actions[0], secret,
+                                      pubkey));
+        printf("SKIP build_fabric_attach/ambiguous_donor_vetoes_other_donor: "
+               "donor construction and the history-incomplete veto need the "
+               "Linux-only runtime closure\n");
+#else
+        struct db_build_receipt receipts[3] = {0};
         int64_t wall_us = 0;
         att_worker_id_from_pubkey(pubkey, receipts[0].worker_id);
         ASSERT(att_physical_run(&ndb, dir, actions[0].action_id, att_id_d,
@@ -702,6 +758,7 @@ static int test_bf_attach_ambiguous_donor_vetoes_other_donor(void)
         struct db_build_action durable;
         ASSERT(db_build_action_find(&ndb, actions[2].action_id, &durable));
         ASSERT_STR_EQ(durable.state, "QUEUED");
+#endif
         node_db_close(&ndb);
         test_rm_rf(dir);
         PASS();
@@ -737,6 +794,13 @@ static int test_bf_attach_avoids_second_compile(void)
         ASSERT(att_plan_request(&ndb, dir, att_id_b, att_id_c, capsule_hex,
                                 input_root, "dev-x86-64-v3", &job_a,
                                 &action_a));
+#if !defined(__linux__)
+        ASSERT(att_refused_no_closure(&ndb, dir, &job_a, &action_a, secret,
+                                      pubkey));
+        printf("SKIP build_fabric_attach/avoids_second_compile: the donor "
+               "run, executor-key reconstruction and HIT need the "
+               "Linux-only runtime closure\n");
+#else
         struct db_build_receipt receipt_a;
         memset(&receipt_a, 0, sizeof(receipt_a));
         att_worker_id_from_pubkey(pubkey, receipt_a.worker_id);
@@ -1138,6 +1202,7 @@ static int test_bf_attach_avoids_second_compile(void)
         ASSERT(!repeat.ok);
         ASSERT_EQ(again.disposition, BUILD_FABRIC_ATTACH_REFUSED);
         ASSERT_STR_EQ(again.refusal, "attach-refused-action-state");
+#endif
         node_db_close(&ndb);
         test_rm_rf(dir);
         PASS();
@@ -1277,6 +1342,13 @@ static int test_bf_attach_miss_and_poisoned_record(void)
         struct db_build_action action;
         ASSERT(att_plan_request(&ndb, dir, att_id_b, att_id_c, capsule_hex,
                                 input_root, "dev-x86-64-v3", &job, &action));
+#if !defined(__linux__)
+        ASSERT(att_refused_no_closure(&ndb, dir, &job, &action, secret,
+                                      pubkey));
+        printf("SKIP build_fabric_attach/miss_and_poisoned_record: the MISS, "
+               "reproduction and poisoned-record steps follow the "
+               "Linux-only runtime closure\n");
+#else
         struct db_build_receipt receipt;
         struct build_fabric_attach_report report;
         struct zcl_result miss = build_fabric_attach(
@@ -1317,6 +1389,7 @@ static int test_bf_attach_miss_and_poisoned_record(void)
         ASSERT_STR_EQ(report.refusal, "executor-key-record-poisoned");
         ASSERT(db_build_action_find(&ndb, action.action_id, &durable));
         ASSERT_STR_EQ(durable.state, "QUEUED");
+#endif
         node_db_close(&ndb);
         test_rm_rf(dir);
         PASS();
@@ -1708,23 +1781,36 @@ static int test_bf_worker_owner_cases(void)
     return failures;
 }
 #endif
-
 /* The attach executor key binds a Linux ldd/DT_NEEDED runtime closure and a
- * sealed memfd verifier. Non-Linux hosts refuse with the typed
- * executor-runtime-closure-missing reason, so these end-to-end cases are
- * skipped there, explicitly; Linux always runs them. */
-static int att_run_linux_closure(int (*fn)(void), const char *name)
+ * sealed memfd verifier. Linux produces both roots; every other platform
+ * refuses with the exact typed reason, which this case executes. */
+static int test_bf_attach_runtime_closure_platform(void)
 {
+    int failures = 0;
+    TEST("build_fabric_attach: runtime closure is produced on Linux and refused by name elsewhere") {
+        struct node_db ndb;
+        char dir[256], path[320];
+        ASSERT(att_open(&ndb, dir, sizeof(dir), path, sizeof(path), "closure"));
+        ASSERT(vcs_object_store_init(dir));
+        uint8_t runtime[32], verifier[32];
+        static const uint8_t zero[32] = {0};
+        struct zcl_result roots = build_fabric_executor_host_runtime_roots(
+            dir, runtime, verifier);
 #if defined(__linux__)
-    (void)name;
-    return fn();
+        ASSERT_RESULT_OK(roots);
+        ASSERT(memcmp(runtime, zero, sizeof(zero)) != 0);
+        ASSERT(memcmp(verifier, zero, sizeof(zero)) != 0);
 #else
-    (void)fn;
-    printf("SKIP build_fabric_attach/%s: runtime closure and sealed verifier "
-           "snapshot are Linux-only (refused as "
-           "executor-runtime-closure-missing)\n", name);
-    return 0;
+        (void)zero;
+        ASSERT(!roots.ok);
+        ASSERT_STR_EQ(roots.message,
+                      "executor-runtime-closure-missing: unsupported platform");
 #endif
+        node_db_close(&ndb);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 int test_build_fabric_attach(void)
@@ -1737,18 +1823,13 @@ int test_build_fabric_attach(void)
     failures += test_bf_worker_owner_cases();
 #endif
     failures += test_bf_attach_executor_key_binds_tool_bytes();
-    failures += att_run_linux_closure(test_bf_attach_miss_and_poisoned_record,
-        "miss_and_poisoned_record");
+    failures += test_bf_attach_runtime_closure_platform();
+    failures += test_bf_attach_miss_and_poisoned_record();
     failures += test_bf_attach_input_cas_refusals();
     failures += test_bf_attach_unobserved_assembler_input_refused();
-    failures += att_run_linux_closure(test_bf_attach_avoids_second_compile,
-        "avoids_second_compile");
-    failures += att_run_linux_closure(
-        test_bf_attach_conflicting_physical_outputs,
-        "conflicting_physical_outputs");
-    failures += att_run_linux_closure(
-        test_bf_attach_ambiguous_donor_vetoes_other_donor,
-        "ambiguous_donor_vetoes_other_donor");
+    failures += test_bf_attach_avoids_second_compile();
+    failures += test_bf_attach_conflicting_physical_outputs();
+    failures += test_bf_attach_ambiguous_donor_vetoes_other_donor();
     failures += test_bf_attach_reproduction_never_attaches();
     printf("=== build_fabric_attach: %d failures ===\n", failures);
     return failures;
