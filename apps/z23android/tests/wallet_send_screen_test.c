@@ -32,7 +32,11 @@ struct fake {
     char commit_address[ZAPP_PAY_ADDRESS_MAX];
     uint64_t commit_amount;
     char plan_key[WS_KEY_HEX + 1];
-    int commits, unlocks, locks, prompts, repeated_keys;
+    int commits, unlocks, locks, prompts, repeated_keys, plan_required;
+    uint64_t commit_fee;
+    bool spawn_fail;
+    int ticks_in_lock;            /* Ticks that arrive while a lock call is blocked. */
+    bool lock_ok_after_ticks;
     char stdin_seen[256];
     const char *stdin_ptr;
     uint64_t now;
@@ -42,6 +46,8 @@ struct fake {
     uint64_t rnd;
     /* the node's memory of keys that may have paid */
     char paid[PAID_MAX][WS_KEY_HEX + 1];
+    char paid_token[PAID_MAX][WS_TOKEN_MAX];
+    enum wss_commit_outcome paid_outcome[PAID_MAX];
     int paid_n;
     /* threaded host */
     bool threaded, hold, parked, released;
@@ -95,11 +101,19 @@ static bool n_unlock(void *c, const char *json, size_t len, uint32_t seconds)
     assert(seconds == 300);
     return f->unlock_ok;
 }
-static bool n_lock(void *c) { struct fake *f = c; note(f, 'l', NULL); f->locks++; return f->lock_ok; }
-static bool was_paid(const struct fake *f, const char *key)
+static void tick_ticks(struct fake *f);
+static bool n_lock(void *c)
 {
-    for (int i = 0; i < f->paid_n; ++i) if (!strcmp(f->paid[i], key)) return true;
-    return false;
+    struct fake *f = c;
+    note(f, 'l', NULL); f->locks++;
+    bool ok = f->lock_ok;
+    tick_ticks(f);
+    return ok;
+}
+static int paid_index(const struct fake *f, const char *key)
+{
+    for (int i = 0; i < f->paid_n; ++i) if (!strcmp(f->paid[i], key)) return i;
+    return -1;
 }
 static enum wss_commit_outcome n_commit(void *c, const struct wss_send_req *r, char echo[WS_TOKEN_MAX])
 {
@@ -110,10 +124,23 @@ static enum wss_commit_outcome n_commit(void *c, const struct wss_send_req *r, c
     f->commit_amount = r->amount_zat;
     if (f->commits < 8) memcpy(f->commit_keys[f->commits], r->key, sizeof(r->key));
     f->commits++;
-    if (was_paid(f, r->key)) { f->repeated_keys++; return WSS_REFUSED; }   /* the node refuses a repeated key */
+    f->commit_fee = r->fee_zat;
+    /* The real node: no fee in the commit is PLAN_REQUIRED, a stale fee is FEE_CHANGED, both before any build. */
+    if (r->fee_zat == 0) { f->plan_required++; return WSS_UNKNOWN; }
+    if (r->fee_zat != f->fee) return WSS_FEE_CHANGED;
     node_token(r, f->fee, token);
-    if (strcmp(token, r->plan_token)) return WSS_REFUSED;                   /* and a token that is not this plan's */
-    if (f->commit_outcome != WSS_REFUSED && f->paid_n < PAID_MAX) memcpy(f->paid[f->paid_n++], r->key, sizeof(r->key));
+    if (strcmp(token, r->plan_token)) return WSS_UNKNOWN;
+    int seen = paid_index(f, r->key);
+    if (seen >= 0) {   /* the real node replays the earlier answer for the same key and moves no funds */
+        f->repeated_keys++;
+        snprintf(echo, WS_TOKEN_MAX, "%s", f->paid_token[seen]);
+        return f->paid_outcome[seen];
+    }
+    if (f->commit_outcome != WSS_KEY_RELEASED && f->paid_n < PAID_MAX) {
+        memcpy(f->paid[f->paid_n], r->key, sizeof(r->key));
+        snprintf(f->paid_token[f->paid_n], WS_TOKEN_MAX, "%s", f->commit_outcome == WSS_UNKNOWN ? "" : token);
+        f->paid_outcome[f->paid_n++] = f->commit_outcome;
+    }
     snprintf(echo, WS_TOKEN_MAX, "%s", f->commit_outcome == WSS_UNKNOWN ? "" : token);
     return f->commit_outcome;
 }
@@ -145,6 +172,7 @@ static void *thread_main(void *p)
 static bool h_spawn(void *c, void (*job)(void *), void *arg)
 {
     struct fake *f = c;
+    if (f->spawn_fail) return false;
     if (f->threaded) {
         struct launch *l = malloc(sizeof(*l));
         pthread_t t;
@@ -191,6 +219,14 @@ static void fake_init(struct fake *f)
     f->flag_ok = f->filter_ok = true; f->now = 5000; f->rnd = 42;
     pthread_mutex_init(&f->mu, NULL);
     pthread_cond_init(&f->cv, NULL);
+}
+/* Ticks that arrive while the worker is blocked in a node call, three seconds apart. */
+static void tick_ticks(struct fake *f)
+{
+    int n = f->ticks_in_lock;
+    f->ticks_in_lock = 0;
+    for (int i = 0; i < n; ++i) { f->now += 3000; wss_on_tick(f->screen); }
+    if (n && f->lock_ok_after_ticks) f->lock_ok = true;
 }
 static struct wss *screen_of(struct fake *f)
 {
@@ -266,7 +302,7 @@ static void tap_runs_the_whole_send(void)
     assert(view_of(s).busy);
     drain(&f);
     assert(!strcmp(f.calls, "vgpkuclr"));
-    assert(f.commits == 1 && f.unlocks == 1 && f.locks == 1 && f.prompts == 1);
+    assert(f.commits == 1 && f.unlocks == 1 && f.locks == 1 && f.prompts == 1 && f.commit_fee == 10000 && f.plan_required == 0);
     /* Finding 2: the key the plan was made with is the key the commit used, so the node's answer matches */
     assert(!strcmp(f.plan_key, f.commit_keys[0]) && strlen(f.plan_key) == WS_KEY_HEX);
     /* the passphrase is on standard input only, in the one form, and nowhere else */
@@ -383,7 +419,7 @@ static void secrets_never_survive(void)
         case 2: f.key = WSS_KEY_GONE; break;
         case 3: f.key = WSS_KEY_ERROR; break;
         case 4: f.commit_outcome = WSS_UNKNOWN; break;
-        default: f.commit_outcome = WSS_REFUSED; break;
+        default: f.commit_outcome = WSS_KEY_RELEASED; break;
         }
         tap_and_run(s, &f);
         struct wss_view v = view_of(s);
@@ -423,7 +459,7 @@ static void refused_commit_retries_with_a_new_prompt(void)
 {
     struct zapp_payment p = pay_of(priv, "?amount=1");
     struct fake f; fake_init(&f);
-    f.commit_outcome = WSS_REFUSED;
+    f.commit_outcome = WSS_KEY_RELEASED;
     struct wss *s = reviewed(&f, &p);
     tap_and_run(s, &f);
     assert(f.commits == 1 && view_of(s).can_retry && f.prompts == 1);
@@ -470,7 +506,7 @@ static void progress_shows_the_wait(void)
     f.commit_outcome = WSS_COMMITTED; f.route = WS_ROUTE_WAITING;
     tap_and_run(s, &f);
     v = view_of(s);
-    assert(v.state == WS_BROADCAST && v.busy && strstr(v.status, "private route"));
+    assert(v.state == WS_BROADCAST && v.busy && strstr(v.status, "private route") && !v.can_cancel);
     f.route = WS_ROUTE_SENT; f.now += 4000; wss_on_tick(s); drain(&f);
     assert(view_of(s).state == WS_DONE);
     wss_destroy(s);
@@ -589,6 +625,154 @@ static void memo_cannot_spoof_a_line(void)
     wss_destroy(s);
 }
 
+/* The commit carries the fee the owner saw; a fee that moved since the plan makes a new review. */
+static void the_commit_carries_the_planned_fee(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f);
+    struct wss *s = reviewed(&f, &p);
+    tap_and_run(s, &f);
+    assert(view_of(s).state == WS_DONE && f.commit_fee == 10000 && f.plan_required == 0);
+    wss_destroy(s);
+    fake_init(&f);
+    s = reviewed(&f, &p);
+    uint32_t old = view_of(s).serial;
+    char first[WS_KEY_HEX + 1]; memcpy(first, f.plan_key, sizeof(first));
+    f.fee = 25000;                                          /* the wallet fee moves after the plan */
+    tap_and_run(s, &f);
+    struct wss_view v = view_of(s);
+    assert(v.state == WS_FAILED && v.can_retry && !v.check_history && strstr(v.status, "fee changed"));
+    assert(f.commits == 1 && f.locks == 1);
+    wss_tap_retry(s); drain(&f);
+    v = view_of(s);
+    assert(v.state == WS_REVIEW && v.serial != old && !strcmp(v.fee, "0.00025 ZCL") && strcmp(first, f.plan_key) != 0);
+    tap_and_run(s, &f);
+    assert(view_of(s).state == WS_DONE && f.commits == 2 && f.commit_fee == 25000 && f.repeated_keys == 0);
+    wss_destroy(s);
+}
+/* Finding: only a released key says "Nothing was sent". Any other failure is the unknown result. */
+static void the_node_replay_reads_as_sent(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f);
+    struct wss *s = reviewed(&f, &p);
+    tap_and_run(s, &f);
+    assert(view_of(s).state == WS_DONE);
+    /* the same key committed again is a replay of the first answer, as the real node answers it */
+    struct wss_send_req again = {0};
+    memcpy(again.address, priv, strlen(priv) + 1);
+    again.amount_zat = 100000000; again.fee_zat = 10000;
+    memcpy(again.key, f.plan_key, sizeof(again.key));
+    node_token(&again, f.fee, again.plan_token);
+    char echo[WS_TOKEN_MAX] = "";
+    assert(n_commit(&f, &again, echo) == WSS_COMMITTED && f.repeated_keys == 1 && echo[0]);
+    wss_destroy(s);
+}
+static void outcome_mapping_is_pinned(void)
+{
+    assert(wss_commit_outcome_of(true, true, NULL) == WSS_COMMITTED);
+    assert(wss_commit_outcome_of(true, true, "WALLET_RPC_ERROR") == WSS_COMMITTED);
+    assert(wss_commit_outcome_of(true, false, "SEND_KEY_RELEASED") == WSS_KEY_RELEASED);
+    assert(wss_commit_outcome_of(true, false, "FEE_CHANGED") == WSS_FEE_CHANGED);
+    /* WALLET_RPC_ERROR also covers an admitted transaction whose compensation failed: unknown */
+    assert(wss_commit_outcome_of(true, false, "WALLET_RPC_ERROR") == WSS_UNKNOWN);
+    assert(wss_commit_outcome_of(true, false, "PLAN_REQUIRED") == WSS_UNKNOWN);
+    assert(wss_commit_outcome_of(true, false, "PLAN_TOKEN_MISMATCH") == WSS_UNKNOWN);
+    assert(wss_commit_outcome_of(true, false, "SHIELDED_SEND_FAILED") == WSS_UNKNOWN);
+    assert(wss_commit_outcome_of(true, false, "") == WSS_UNKNOWN);
+    assert(wss_commit_outcome_of(true, false, NULL) == WSS_UNKNOWN);
+    assert(wss_commit_outcome_of(false, true, "SEND_KEY_RELEASED") == WSS_UNKNOWN);   /* no answer */
+    assert(wss_commit_outcome_of(false, false, NULL) == WSS_UNKNOWN);
+}
+/* Every status name zapp_devkey_status_name can return, as the screen reads it and what the owner sees. */
+static void device_statuses_are_mapped(void)
+{
+    static const struct { const char *name; enum wss_key_status want; const char *text; bool retry; } t[] = {
+        {"ok", WSS_KEY_OK, NULL, false},
+        {"declined", WSS_KEY_DECLINED, "not completed", true},
+        {"invalidated", WSS_KEY_GONE, "recovery phrase", false},
+        {"not_found", WSS_KEY_GONE, "recovery phrase", false},
+        {"corrupt", WSS_KEY_GONE, "recovery phrase", false},
+        {"old_format", WSS_KEY_GONE, "recovery phrase", false},
+        {"not_hardware", WSS_KEY_GONE, "recovery phrase", false},
+        {"not_per_use", WSS_KEY_GONE, "recovery phrase", false},
+        {"no_screen_lock", WSS_KEY_NO_SCREEN_LOCK, "screen lock", true},
+        {"exists", WSS_KEY_ERROR, "could not be unlocked", true},
+        {"strongbox_unavailable", WSS_KEY_ERROR, "could not be unlocked", true},
+        {"error", WSS_KEY_ERROR, "could not be unlocked", true},
+        {"a_status_from_the_future", WSS_KEY_ERROR, "could not be unlocked", true},
+    };
+    assert(wss_key_status_of_devkey(NULL) == WSS_KEY_ERROR);
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); ++i) {
+        assert(wss_key_status_of_devkey(t[i].name) == t[i].want);
+        struct fake f; fake_init(&f);
+        f.key = wss_key_status_of_devkey(t[i].name);
+        struct wss *s = reviewed(&f, &p);
+        tap_and_run(s, &f);
+        struct wss_view v = view_of(s);
+        if (!t[i].text) { assert(v.state == WS_DONE); wss_destroy(s); continue; }
+        assert(v.state == WS_FAILED && v.can_retry == t[i].retry && strstr(v.status, t[i].text));
+        assert(f.unlocks == 0 && f.commits == 0);
+        wss_destroy(s);
+    }
+}
+/* The wallet may be open: the screen cannot be left or destroyed until the lock is confirmed. */
+static void an_owed_lock_keeps_the_screen(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f);
+    f.commit_outcome = WSS_KEY_RELEASED; f.lock_ok = false;
+    struct wss *s = reviewed(&f, &p);
+    tap_and_run(s, &f);
+    assert(view_of(s).state == WS_FAILED && f.locks == 3);        /* three attempts, all failed */
+    assert(!wss_end(s) && f.flag_on && f.filter_on);
+    assert(!wss_destroy(s));
+    f.now += 4000; wss_on_tick(s); drain(&f);
+    assert(f.locks == 3 && !wss_end(s));                          /* not yet time to ask again */
+    f.lock_ok = true; f.now += 2000; wss_on_tick(s); drain(&f);
+    assert(f.locks == 4 && wss_end(s) && !f.flag_on);
+    assert(wss_destroy(s));
+}
+/* Ticks pile up while the worker is inside a node call; the lock retry must still run. */
+static void ticks_cannot_starve_a_lock(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f);
+    f.route = WS_ROUTE_WAITING;
+    f.lock_ok = false; f.lock_ok_after_ticks = true; f.ticks_in_lock = 15;
+    struct wss *s = reviewed(&f, &p);
+    tap_and_run(s, &f);
+    assert(f.locks == 2);                                           /* the failed lock was retried */
+    assert(view_of(s).state == WS_BROADCAST && !view_of(s).can_cancel);
+    f.route = WS_ROUTE_SENT; f.now += 4000; wss_on_tick(s); drain(&f);
+    assert(view_of(s).state == WS_DONE && wss_end(s) && wss_destroy(s));
+}
+/* No worker thread: the UI thread runs nothing. The flow fails before any commit and the lock is still owed. */
+static void a_missing_worker_fails_the_flow(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f);
+    f.spawn_fail = true;
+    struct wss *s = screen_of(&f);
+    assert(wss_begin(s, &p));
+    struct wss_view v = view_of(s);
+    assert(v.state == WS_FAILED && strstr(v.status, "could not start") && f.calls[0] == 0 && f.job == NULL);
+    wss_destroy(s);
+    fake_init(&f);
+    s = reviewed(&f, &p);
+    f.spawn_fail = true;
+    wss_tap_send(s, view_of(s).serial);
+    v = view_of(s);
+    assert(v.state == WS_FAILED && strstr(v.status, "Nothing was sent") && v.can_retry);
+    assert(!strchr(f.calls, 'k') && !strchr(f.calls, 'u') && !strchr(f.calls, 'c') && f.prompts == 0);
+    assert(!wss_end(s));                                            /* the unlock was asked for: a lock is owed */
+    f.spawn_fail = false;
+    f.now += 1000; wss_on_tick(s); drain(&f);
+    assert(f.locks == 1 && f.prompts == 0 && wss_end(s));
+    wss_destroy(s);
+}
+
 int main(void)
 {
     memcpy(priv, "zs1", 3); memset(priv + 3, 'q', 75); priv[78] = 0;
@@ -611,6 +795,13 @@ int main(void)
     a_dead_action_does_not_run();
     concurrent_scan_with_the_real_worker();
     memo_cannot_spoof_a_line();
+    the_commit_carries_the_planned_fee();
+    the_node_replay_reads_as_sent();
+    outcome_mapping_is_pinned();
+    device_statuses_are_mapped();
+    an_owed_lock_keeps_the_screen();
+    ticks_cannot_starve_a_lock();
+    a_missing_worker_fails_the_flow();
     puts("wallet_send_screen_test: ok");
     return 0;
 }

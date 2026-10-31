@@ -86,13 +86,24 @@ static bool secret_shaped(const char *payload)
 
 /* ---- payment codes ---- */
 
+static bool starts_ci(const char *text, const char *prefix)
+{
+    for (; *prefix; ++prefix, ++text)
+        if (tolower((unsigned char)*text) != *prefix) return false;
+    return true;
+}
+static const unsigned char *skip_blank(const unsigned char *p)
+{
+    while (*p == ' ' || (*p && *p < 0x20) || *p == 0x7f) ++p;
+    return p;
+}
 /* Copies the letters and digits of a bare payload into run, skipping control bytes and spaces around it. Returns
  * the length, or 0 when anything else is in the way. */
 static size_t bare_run(const char *payload, char run[ZAPP_PAY_ADDRESS_MAX])
 {
     size_t n = 0;
     const unsigned char *p = (const unsigned char *)payload;
-    while (*p == ' ') ++p;
+    p = skip_blank(p);
     for (; *p; ++p) {
         if (*p < 0x20 || *p == 0x7f) continue;
         if (*p == ' ') {
@@ -116,7 +127,7 @@ static bool payment_shaped(const char *payload)
     if (starts_loosely(payload, "zclassic:")) return true;
     if (bare_run(payload, run) < 26) return false;
     for (size_t i = 0; i < sizeof(starts) / sizeof(starts[0]); ++i)
-        if (!strncmp(run, starts[i], strlen(starts[i]))) return true;
+        if (starts_ci(run, starts[i])) return true;
     return false;
 }
 const char *zapp_scan_refusal_text(enum zapp_pay_refusal refusal)

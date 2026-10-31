@@ -197,6 +197,19 @@ static void refused_payments_never_become_text(void)
     assert(scan(uri) == ZAPP_SCAN_PAY_REFUSED);
     /* a bare run that starts like an address but is not one is refused with a reason, not shown */
     assert(scan("zs1qqqqqqqqqqqqqqqqqqqqqqqqqqqq") == ZAPP_SCAN_PAY_REFUSED && !strstr(value, "zs1q"));
+    /* a leading control byte or space, and upper case prefixes, do not turn a payment code into text */
+    snprintf(uri, sizeof(uri), "\n %s", addr);
+    assert(scan(uri) == ZAPP_SCAN_PAY_REFUSED && value[0] && !strstr(value, addr));
+    snprintf(uri, sizeof(uri), "\x01\x02 zclassic:%s?amount=1", addr);
+    assert(scan(uri) == ZAPP_SCAN_PAY_REFUSED && !strstr(value, addr));
+    char upper[ZAPP_PAY_ADDRESS_MAX];
+    memcpy(upper, "ZS1", 3); memset(upper + 3, 'Q', 75); upper[78] = 0;
+    assert(scan(upper) == ZAPP_SCAN_PAY_REFUSED && value[0] && !strstr(value, "ZS1"));
+    snprintf(uri, sizeof(uri), "\n %s\n", upper);
+    assert(scan(uri) == ZAPP_SCAN_PAY_REFUSED && !strstr(value, "ZS1"));
+    char pubup[ZAPP_PAY_ADDRESS_MAX];
+    memcpy(pubup, "T1", 2); memset(pubup + 2, '2', 33); pubup[35] = 0;
+    assert(scan(pubup) == ZAPP_SCAN_PAY_REFUSED);
     /* sentences and short words that happen to start like an address stay text */
     assert(scan("tm is a long sentence with many words in it") == ZAPP_SCAN_TEXT);
     assert(scan("t1 and zs1 are prefixes of addresses") == ZAPP_SCAN_TEXT);

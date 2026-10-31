@@ -498,6 +498,65 @@ static void no_tap_while_a_lock_is_owed(void)
     feed(&v, tap_ev(&v));
     assert(v.ws.state == WS_REVIEW && v.acts.count == 0);
 }
+/* A changed wallet fee is refused by the node before it builds. The stale plan is never tried again: the
+ * flow returns to a new review with a new key. */
+static void fee_changed_returns_to_a_new_review(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct world w; world_init(&w, 40);
+    to_commit(&w, &p);
+    char key[WS_KEY_HEX + 1]; memcpy(key, w.ws.key, sizeof(key));
+    struct ws_event c = tk_ev(&w, WS_EV_COMMIT, false);
+    c.fee_changed = true;
+    feed(&w, c);
+    assert(w.ws.state == WS_FAILED && w.ws.fail == WS_FAIL_FEE_CHANGED && w.ws.retry_ok && emitted(&w, WS_ACT_LOCK));
+    assert(strstr(ws_fail_text(&w.ws), "fee changed"));
+    lock_ok(&w);
+    feed(&w, E(WS_EV_RETRY));
+    assert(w.ws.state == WS_VALIDATING && !w.ws.key[0] && emitted(&w, WS_ACT_VALIDATE_ADDRESS));
+    feed(&w, tk_ev(&w, WS_EV_ADDRESS, true)); feed(&w, gate_ev(&w, good_gate())); feed(&w, plan_ev(&w, 20000));
+    assert(w.ws.state == WS_REVIEW && memcmp(key, w.ws.key, sizeof(key)) != 0 && w.ws.plan.fee_zat == 20000);
+    assert(count(&w, WS_ACT_COMMIT) == 1);
+}
+/* The worker could not be started: before the commit the flow ends and nothing ran; after it the poll waits. */
+static void a_missing_worker_ends_the_flow_before_the_commit(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct world w; world_init(&w, 41);
+    to_review(&w, &p);
+    feed(&w, tap_ev(&w));
+    feed(&w, E(WS_EV_ABORT));
+    assert(w.ws.state == WS_FAILED && w.ws.fail == WS_FAIL_WORKER && w.ws.retry_ok && emitted(&w, WS_ACT_LOCK));
+    assert(strstr(ws_fail_text(&w.ws), "Nothing was sent"));
+    world_init(&w, 42); to_commit(&w, &p);
+    feed(&w, E(WS_EV_ABORT));
+    assert(w.ws.state == WS_FAILED && w.ws.fail == WS_FAIL_WORKER);
+    world_init(&w, 43); to_commit(&w, &p);
+    commit_answer(&w, true, false);
+    feed(&w, E(WS_EV_ABORT));
+    assert(w.ws.state == WS_BROADCAST);
+    /* a phone with no screen lock is told so, and may try again */
+    world_init(&w, 44); to_review(&w, &p);
+    feed(&w, tap_ev(&w)); feed(&w, unlock_ev(&w, false, WS_AUTH_NO_SCREEN_LOCK));
+    assert(w.ws.fail == WS_FAIL_NO_SCREEN_LOCK && w.ws.retry_ok && strstr(ws_fail_text(&w.ws), "screen lock"));
+}
+/* An owed lock whose request or answer never came back is asked for again. */
+static void an_unanswered_lock_is_asked_again(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct world w; world_init(&w, 45);
+    to_commit(&w, &p);
+    commit_answer(&w, true, false);                       /* a lock is asked for; its request is lost */
+    assert(emitted(&w, WS_ACT_LOCK) && w.ws.lock_wanted);
+    struct ws_event t = E(WS_EV_TICK);
+    t.now_ms = w.ws.lock_ms + WS_LOCK_STALE_MS - 1; feed(&w, t);
+    assert(!emitted(&w, WS_ACT_LOCK));
+    t.now_ms = w.ws.lock_ms + WS_LOCK_STALE_MS; feed(&w, t);
+    assert(emitted(&w, WS_ACT_LOCK));
+    lock_ok(&w);
+    assert(!ws_wallet_exposed(&w.ws));
+}
+
 static void leaving_the_app(void)
 {
     struct zapp_payment p = pay_of(priv, "?amount=1");
@@ -605,9 +664,9 @@ static struct ws_event guided(struct world *w, struct rnd *r)
     case WS_REVIEW:
         e.kind = WS_EV_TAP_SEND; e.serial = chance(r, 85) ? w->ws.serial : w->ws.serial - pick(r, 3); break;
     case WS_AUTH:
-        e.kind = WS_EV_UNLOCK; e.ok = chance(r, 80); e.auth = chance(r, 80) ? WS_AUTH_OK : (enum ws_auth_result)(1 + pick(r, 2)); break;
+        e.kind = WS_EV_UNLOCK; e.ok = chance(r, 80); e.auth = chance(r, 80) ? WS_AUTH_OK : (enum ws_auth_result)(1 + pick(r, 3)); break;
     case WS_COMMIT:
-        e.kind = WS_EV_COMMIT; e.ok = chance(r, 60); e.refused = chance(r, 50);
+        e.kind = WS_EV_COMMIT; e.ok = chance(r, 60); e.refused = chance(r, 45); e.fee_changed = chance(r, 8);
         if (chance(r, 90)) memcpy(e.plan.token, w->ws.plan.token, sizeof(e.plan.token));
         break;
     case WS_BROADCAST: e.kind = WS_EV_ROUTE; e.route = chance(r, 60) ? WS_ROUTE_SENT : WS_ROUTE_WAITING; break;
@@ -623,7 +682,8 @@ static struct ws_event noise(struct world *w, struct rnd *r)
     e.ticket = pick_ticket(w, r, e.kind == WS_EV_LOCK);
     e.serial = chance(r, 70) ? w->ws.serial : pick(r, w->ws.serial + 3);
     e.ok = chance(r, 70); e.refused = chance(r, 30);
-    e.auth = (enum ws_auth_result)pick(r, 3);
+    e.auth = (enum ws_auth_result)pick(r, 4);
+    e.fee_changed = chance(r, 10);
     e.route = (enum ws_route)pick(r, 2);
     e.gate = random_gate(r);
     e.plan = plan_ev(w, 1000 + pick(r, 20000)).plan;
@@ -672,7 +732,7 @@ static void model_answers(struct model *m, struct tally *t, const struct ws *pre
     const struct ws *post = &w->ws;
     /* Commit once: a key is committed a second time only after the node proved the first sent nothing. */
     if (e->kind == WS_EV_COMMIT && pre->state == WS_COMMIT && e->ticket == pre->ticket) {
-        if (!e->ok && e->refused) m->commit_refused = true;
+        if (!e->ok && e->refused && !e->fee_changed) m->commit_refused = true;
         if (post->state == WS_FAILED && post->fail == WS_FAIL_COMMIT_UNKNOWN) t->unknown++;
     }
 }
@@ -808,6 +868,9 @@ static void random_sequences(void)
     the_window_and_the_lock_retry();
     no_tap_while_a_lock_is_owed();
     leaving_the_app();
+    fee_changed_returns_to_a_new_review();
+    a_missing_worker_ends_the_flow_before_the_commit();
+    an_unanswered_lock_is_asked_again();
     stale_events_are_ignored();
     public_destination();
     random_sequences();

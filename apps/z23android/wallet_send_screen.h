@@ -27,10 +27,19 @@ struct wss_send_req {
     uint64_t amount_zat;
     uint8_t memo[ZAPP_PAY_MEMO_MAX];
     size_t memo_len;
+    uint64_t fee_zat;                /* The fee the plan quoted. Zero for a plan; a commit must carry it (the node refuses PLAN_REQUIRED without it). */
     char key[WS_KEY_HEX + 1];        /* The idempotency key of this review. */
     char plan_token[WS_TOKEN_MAX];   /* Empty for a plan. */
 };
-enum wss_commit_outcome { WSS_COMMITTED, WSS_REFUSED, WSS_UNKNOWN };
+/* How a commit answer reads. This table is the mapping the node adapter must apply to the commit reply:
+ *   committed true (a replay of an earlier commit of the same key included)  -> WSS_COMMITTED
+ *   error code SEND_KEY_RELEASED (the node released the key: nothing was sent) -> WSS_KEY_RELEASED
+ *   error code FEE_CHANGED (refused before any build)                         -> WSS_FEE_CHANGED
+ *   anything else, including WALLET_RPC_ERROR, a timeout and no answer       -> WSS_UNKNOWN
+ * WALLET_RPC_ERROR is unknown because it also covers an admitted transaction whose compensation failed and
+ * whose row was kept. Only WSS_KEY_RELEASED and WSS_FEE_CHANGED may say "Nothing was sent". */
+enum wss_commit_outcome { WSS_COMMITTED, WSS_KEY_RELEASED, WSS_FEE_CHANGED, WSS_UNKNOWN };
+enum wss_commit_outcome wss_commit_outcome_of(bool answered, bool committed, const char *error_code);
 
 /* Typed node calls. Each returns false when the node could not be asked. */
 struct wss_node_ops {
@@ -46,9 +55,17 @@ struct wss_node_ops {
 };
 /* The device key. unwrap is the only way to the 32 byte wallet secret and it authenticates the owner for
  * this one use: it blocks on the worker while the system shows its prompt and returns the secret or a
- * refusal. The Keystore key needs a credential or strong biometric for each use, with a timeout of 0, so
+ * refusal. It runs only on the worker, never on the UI thread (device_key.h): when the worker cannot be
+ * started the flow fails. The Keystore key needs a credential or strong biometric for each use, with a timeout of 0, so
  * no earlier authentication counts and none is remembered here. */
-enum wss_key_status { WSS_KEY_OK, WSS_KEY_DECLINED, WSS_KEY_GONE, WSS_KEY_ERROR };
+/* The unwrap result as the screen reads it. wss_key_status_of_devkey maps zapp_devkey_status_name() of the
+ * device key onto it; a name it does not know is WSS_KEY_ERROR:
+ *   ok -> OK                       declined -> DECLINED (the owner chose; Retry offered)
+ *   invalidated, not_found, corrupt, old_format, not_hardware, not_per_use -> GONE (restore from the phrase)
+ *   no_screen_lock -> NO_SCREEN_LOCK (set one; Retry offered)
+ *   exists, strongbox_unavailable, error and anything else -> ERROR (the wallet could not be opened; Retry) */
+enum wss_key_status { WSS_KEY_OK, WSS_KEY_DECLINED, WSS_KEY_GONE, WSS_KEY_NO_SCREEN_LOCK, WSS_KEY_ERROR };
+enum wss_key_status wss_key_status_of_devkey(const char *status_name);
 struct wss_device_ops {
     void *ctx;
     enum wss_key_status (*unwrap)(void *ctx, uint8_t secret[32]);
@@ -97,15 +114,17 @@ struct wss_view {
 
 struct wss;
 struct wss *wss_create(const struct wss_deps *deps);
-/* Wipes and frees. Call only when wss_end returned true or the flow never began. */
-void wss_destroy(struct wss *screen);
+/* Wipes and frees. Call only when wss_end returned true or the flow never began. Returns false and keeps the
+ * screen when the wallet may still be open: the lock is owed and ticks must continue. */
+bool wss_destroy(struct wss *screen);
 
 /* Protects the window and opens the review of an accepted payment code. False, with nothing started and
  * the flow in progress untouched, when a send is still in progress or when either protection is not in
  * force. A new code is accepted only once the earlier flow has ended. */
 bool wss_begin(struct wss *screen, const struct zapp_payment *pay);
 /* Leaves the screen: cancels the flow where it can and removes the window protection. False while the
- * send is past the point of cancelling; the screen stays until it finishes. */
+ * send is past the point of cancelling, and while the wallet is exposed or a lock is owed: keep calling
+ * wss_on_tick until it returns true. */
 bool wss_end(struct wss *screen);
 
 void wss_tap_send(struct wss *screen, uint32_t serial);

@@ -223,6 +223,13 @@ static void scanned_text_routes(void)
     assert(kind == ZAPP_SCAN_PAY && zapp_home_scan_target(kind, false) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
     kind = zapp_scan_classify(addr, value, sizeof(value));
     assert(kind == ZAPP_SCAN_PAY && zapp_home_scan_target(kind, true) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
+    snprintf(text, sizeof(text), "\n %s", addr);
+    kind = zapp_scan_classify(text, value, sizeof(value));
+    assert(kind == ZAPP_SCAN_PAY_REFUSED && !strstr(value, "zs1") && zapp_home_scan_target(kind, true) == ZAPP_SCAN_TO_HOME);
+    char upper[ZAPP_PAY_ADDRESS_MAX];
+    memcpy(upper, "ZS1", 3); memset(upper + 3, 'Q', 75); upper[78] = 0;
+    kind = zapp_scan_classify(upper, value, sizeof(value));
+    assert(kind == ZAPP_SCAN_PAY_REFUSED && !strstr(value, "ZS1") && zapp_home_scan_target(kind, false) == ZAPP_SCAN_TO_HOME);
     static const char *const tails[] = {"?amount=1\n", "?amount=1&req-x=1", "?amount=1.123456789", "\n", "\t", "?amount=1\r\n"};
     for (size_t i = 0; i < sizeof(tails) / sizeof(tails[0]); ++i) {
         snprintf(text, sizeof(text), "zclassic:%s%s", addr, tails[i]);

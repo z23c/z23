@@ -29,6 +29,7 @@
 #define WS_UNLOCK_SECONDS 300u   /* A phone proof takes about 101 s; the lock right after the answer closes the window. */
 #define WS_UNLOCK_WINDOW_MS 300000u
 #define WS_LOCK_RETRY_MS 5000u
+#define WS_LOCK_STALE_MS 60000u   /* A lock asked for and not answered by now is asked for again. */
 #define WS_ACTIONS_MAX 4
 #define WS_LOCK_ATTEMPTS 3
 
@@ -61,7 +62,10 @@ enum ws_fail {
     WS_FAIL_WINDOW,         /* The 120 second unlock window ended. */
     WS_FAIL_COMMIT_REFUSED, /* The node answered that nothing was sent. */
     WS_FAIL_COMMIT_UNKNOWN, /* No usable answer: the payment may have been sent. Final, never retried. */
-    WS_FAIL_NO_RANDOM
+    WS_FAIL_NO_RANDOM,
+    WS_FAIL_FEE_CHANGED,    /* The wallet fee moved since the plan; the node sent nothing. A new review follows. */
+    WS_FAIL_WORKER,         /* The phone could not start the background task; nothing ran. */
+    WS_FAIL_NO_SCREEN_LOCK  /* The phone has no screen lock to authenticate with. */
 };
 
 /* What the wallet reports before a send. blocks_behind and spendable come from `core wallet summary`.
@@ -84,7 +88,7 @@ struct ws_plan {
     char token[WS_TOKEN_MAX];
 };
 
-enum ws_auth_result { WS_AUTH_OK, WS_AUTH_DECLINED, WS_AUTH_KEY_GONE };
+enum ws_auth_result { WS_AUTH_OK, WS_AUTH_DECLINED, WS_AUTH_KEY_GONE, WS_AUTH_NO_SCREEN_LOCK };
 enum ws_route { WS_ROUTE_WAITING, WS_ROUTE_SENT };
 
 enum ws_event_kind {
@@ -94,7 +98,9 @@ enum ws_event_kind {
     WS_EV_TAP_SEND,      /* serial: the plan serial the screen was showing. */
     WS_EV_MAKE_PRIVATE,  /* The owner chose Make private on the insufficient funds note. */
     WS_EV_UNLOCK,        /* ticket, ok (authenticated and unlocked), auth (why not). */
-    WS_EV_COMMIT,        /* ticket, ok (committed), refused (the node said nothing was sent), plan.token echoed. */
+    WS_EV_COMMIT,        /* ticket, ok (committed or replayed), refused (the node said the key was released: nothing
+                          * was sent), fee_changed (the node refused before building), plan.token echoed. Any
+                          * other answer is unknown. */
     WS_EV_ROUTE,         /* ticket, route. */
     WS_EV_LOCK,          /* ticket, ok. */
     WS_EV_SET_AMOUNT,    /* amount_zat. */
@@ -104,6 +110,7 @@ enum ws_event_kind {
     WS_EV_CANCEL,
     WS_EV_BACKGROUND,    /* The app left the foreground. */
     WS_EV_RESUME,
+    WS_EV_ABORT,         /* The worker could not be started. Nothing queued has run. */
     WS_EV_TICK           /* now_ms. */
 };
 struct ws_event {
@@ -111,7 +118,8 @@ struct ws_event {
     uint32_t ticket;
     uint32_t serial;
     bool ok;
-    bool refused;
+    bool refused;       /* The node released the key: nothing was sent. */
+    bool fee_changed;   /* The node refused the stale fee before building: nothing was sent. */
     enum ws_auth_result auth;
     enum ws_route route;
     struct ws_gate gate;

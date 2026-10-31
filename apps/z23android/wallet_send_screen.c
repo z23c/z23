@@ -136,7 +136,7 @@ void wss_view(struct wss *s, struct wss_view *v)
     v->can_send = ws_can_send(ws);
     v->can_retry = ws->state == WS_FAILED && ws->retry_ok;
     v->check_history = ws->state == WS_FAILED && ws->fail == WS_FAIL_COMMIT_UNKNOWN;
-    v->can_cancel = ws->state != WS_COMMIT && !ws_terminal(ws);
+    v->can_cancel = ws->state != WS_COMMIT && ws->state != WS_BROADCAST && !ws_terminal(ws);
     if (shows_review(ws->state) && ws->plan.token[0]) fill_review(ws, v);
     fill_status(ws, v);
     pthread_mutex_unlock(&s->lock);
@@ -165,6 +165,58 @@ static bool live(struct wss *s, uint32_t ticket, enum ws_state state)
     return ok;
 }
 static void run_job(void *arg);
+/* Adds the machine's actions to the queue with the lock held. A poll, a gate read and a lock replace the one
+ * already queued, so ticks that arrive while the worker is blocked in a node call cannot fill the queue. A
+ * lock is never dropped: a full queue gives up a poll or a gate read for it. */
+static bool coalesces(enum ws_action_kind k) { return k == WS_ACT_POLL_ROUTE || k == WS_ACT_READ_GATE || k == WS_ACT_LOCK; }
+static void enqueue(struct wss *s, const struct ws_actions *acts)
+{
+    for (size_t i = 0; i < acts->count; ++i) {
+        struct ws_action a = acts->item[i];
+        bool merged = false;
+        for (size_t j = 0; coalesces(a.kind) && j < s->queued; ++j)
+            if (s->queue[j].kind == a.kind) { s->queue[j].ticket = a.ticket; merged = true; }
+        if (merged) continue;
+        for (size_t j = 0; s->queued == QUEUE_MAX && a.kind == WS_ACT_LOCK && j < s->queued; ++j)
+            if (s->queue[j].kind == WS_ACT_POLL_ROUTE || s->queue[j].kind == WS_ACT_READ_GATE) {
+                memmove(s->queue + j, s->queue + j + 1, (s->queued - j - 1) * sizeof(s->queue[0]));
+                s->queued--;
+            }
+        if (s->queued < QUEUE_MAX) s->queue[s->queued++] = a;
+    }
+}
+/* Drops every queued action but the locks the wallet is owed. */
+static void keep_locks(struct wss *s)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < s->queued; ++i)
+        if (s->queue[i].kind == WS_ACT_LOCK) s->queue[n++] = s->queue[i];
+    s->queued = n;
+}
+/* Starts the worker when work is queued. The UI thread never runs a job: unwrap blocks for the prompt and
+ * the proof. When no worker can be started the flow ends before anything ran and only the owed lock stays
+ * queued; the next tick tries to start the worker again. */
+static void kick(struct wss *s)
+{
+    struct ws_actions acts;
+    struct ws_event ev = {.kind = WS_EV_ABORT};
+    pthread_mutex_lock(&s->lock);
+    bool start = s->queued && !s->worker;
+    if (start) s->worker = true;
+    pthread_mutex_unlock(&s->lock);
+    if (!start || s->d.host.spawn(s->d.host.ctx, run_job, s)) return;
+    pthread_mutex_lock(&s->lock);
+    s->worker = false;
+    ev.now_ms = s->d.host.now_ms ? s->d.host.now_ms(s->d.host.ctx) : 0;
+    enum ws_state before = s->ws.state;
+    ws_step(&s->ws, &ev, &acts);
+    if (before != WS_FAILED && s->ws.state == WS_FAILED && s->ws.fail == WS_FAIL_WORKER) {
+        keep_locks(s);
+        memory_cleanse(&s->tapped, sizeof(s->tapped));
+    }
+    enqueue(s, &acts);
+    pthread_mutex_unlock(&s->lock);
+}
 /* Copies the reviewed plan at the moment of the tap. Called with the lock held. */
 static void freeze(struct wss *s)
 {
@@ -172,6 +224,7 @@ static void freeze(struct wss *s)
     memset(r, 0, sizeof(*r));
     memcpy(r->address, s->ws.pay.address, sizeof(r->address));
     r->amount_zat = s->ws.pay.amount_zat;
+    r->fee_zat = s->ws.plan.fee_zat;   /* the fee the owner saw; the node refuses a commit without it */
     memcpy(r->memo, s->ws.pay.memo, sizeof(r->memo));
     r->memo_len = s->ws.pay.memo_len;
     memcpy(r->key, s->ws.key, sizeof(r->key));
@@ -180,17 +233,15 @@ static void freeze(struct wss *s)
 static void post(struct wss *s, struct ws_event *ev)
 {
     struct ws_actions acts;
-    bool start = false;
     pthread_mutex_lock(&s->lock);
     ev->now_ms = s->d.host.now_ms ? s->d.host.now_ms(s->d.host.ctx) : 0;
     enum ws_state before = s->ws.state;
     ws_step(&s->ws, ev, &acts);
     if (ev->kind == WS_EV_TAP_SEND && before == WS_REVIEW && s->ws.state == WS_AUTH) freeze(s);
     if (ws_terminal(&s->ws)) memory_cleanse(&s->tapped, sizeof(s->tapped));
-    for (size_t i = 0; i < acts.count && s->queued < QUEUE_MAX; ++i) s->queue[s->queued++] = acts.item[i];
-    if (s->queued && !s->worker) start = s->worker = true;
+    enqueue(s, &acts);
     pthread_mutex_unlock(&s->lock);
-    if (start && !s->d.host.spawn(s->d.host.ctx, run_job, s)) run_job(s);
+    kick(s);
     if (s->d.host.redraw) s->d.host.redraw(s->d.host.ctx);
 }
 static void cleanse_secrets(struct wss *s)
@@ -213,6 +264,15 @@ static bool build_unlock_json(struct wss *s)
     memory_cleanse(pass, sizeof(pass));
     return n > 0 && (size_t)n < sizeof(s->unlock_json);
 }
+static enum ws_auth_result auth_of(enum wss_key_status key)
+{
+    switch (key) {
+    case WSS_KEY_GONE: return WS_AUTH_KEY_GONE;
+    case WSS_KEY_DECLINED: return WS_AUTH_DECLINED;
+    case WSS_KEY_NO_SCREEN_LOCK: return WS_AUTH_NO_SCREEN_LOCK;
+    default: return WS_AUTH_OK;
+    }
+}
 static void do_unlock(struct wss *s, uint32_t ticket)
 {
     struct ws_event ev = {.kind = WS_EV_UNLOCK, .ticket = ticket};
@@ -221,7 +281,7 @@ static void do_unlock(struct wss *s, uint32_t ticket)
     /* The owner may have cancelled during the prompt: then the wallet is not opened. */
     if (key == WSS_KEY_OK && live(s, ticket, WS_AUTH) && build_unlock_json(s))
         ev.ok = s->d.node.unlock(s->d.node.ctx, s->unlock_json, strlen(s->unlock_json), WS_UNLOCK_SECONDS);
-    ev.auth = key == WSS_KEY_GONE ? WS_AUTH_KEY_GONE : key == WSS_KEY_DECLINED ? WS_AUTH_DECLINED : WS_AUTH_OK;
+    ev.auth = auth_of(key);
     cleanse_secrets(s);
     post(s, &ev);
 }
@@ -239,7 +299,8 @@ static void do_commit(struct wss *s, uint32_t ticket)
     if (!ok) return;
     enum wss_commit_outcome out = s->d.node.commit(s->d.node.ctx, &req, echo);
     ev.ok = out == WSS_COMMITTED;
-    ev.refused = out == WSS_REFUSED;
+    ev.refused = out == WSS_KEY_RELEASED;
+    ev.fee_changed = out == WSS_FEE_CHANGED;
     memcpy(ev.plan.token, echo, sizeof(echo));
     ev.plan.token[WS_TOKEN_MAX - 1] = 0;
     memory_cleanse(&req, sizeof(req));
@@ -335,14 +396,17 @@ struct wss *wss_create(const struct wss_deps *deps)
     s->d = *deps;
     return s;
 }
-void wss_destroy(struct wss *s)
+bool wss_destroy(struct wss *s)
 {
-    if (!s) return;
+    if (!s) return true;
     pthread_mutex_lock(&s->lock);
-    s->dying = true;
+    bool exposed = ws_wallet_exposed(&s->ws);
+    if (!exposed) s->dying = true;
     bool busy = s->worker;
     pthread_mutex_unlock(&s->lock);
+    if (exposed) return false;   /* The wallet may be open: the lock is still owed and ticks must go on. */
     if (!busy) destroy_now(s);
+    return true;
 }
 bool wss_begin(struct wss *s, const struct zapp_payment *pay)
 {
@@ -359,11 +423,9 @@ bool wss_begin(struct wss *s, const struct zapp_payment *pay)
     pthread_mutex_lock(&s->lock);
     s->protected_window = s->begun = true;
     ws_open(&s->ws, &env, pay, s->d.host.now_ms ? s->d.host.now_ms(s->d.host.ctx) : 0, &acts);
-    for (size_t i = 0; i < acts.count && s->queued < QUEUE_MAX; ++i) s->queue[s->queued++] = acts.item[i];
-    bool start = s->queued && !s->worker;
-    if (start) s->worker = true;
+    enqueue(s, &acts);
     pthread_mutex_unlock(&s->lock);
-    if (start && !s->d.host.spawn(s->d.host.ctx, run_job, s)) run_job(s);
+    kick(s);
     if (s->d.host.redraw) s->d.host.redraw(s->d.host.ctx);
     return true;
 }
@@ -372,7 +434,8 @@ bool wss_end(struct wss *s)
     struct ws_event ev = {.kind = WS_EV_CANCEL};
     post(s, &ev);
     pthread_mutex_lock(&s->lock);
-    bool done = ws_terminal(&s->ws);
+    /* An exposed wallet keeps the screen alive: the lock is owed and only ticks can finish it. */
+    bool done = ws_terminal(&s->ws) && !ws_wallet_exposed(&s->ws);
     pthread_mutex_unlock(&s->lock);
     if (done) (void)zapp_secure_window_apply(&s->d.secure, false);
     return done;
@@ -420,4 +483,28 @@ bool wss_secrets_clear(struct wss *s)
     for (size_t i = 0; i < sizeof(s->unlock_json); ++i) any |= (uint8_t)s->unlock_json[i];
     pthread_mutex_unlock(&s->lock);
     return any == 0;
+}
+
+/* ---- mappings ---- */
+
+enum wss_commit_outcome wss_commit_outcome_of(bool answered, bool committed, const char *error_code)
+{
+    if (!answered) return WSS_UNKNOWN;
+    if (committed) return WSS_COMMITTED;
+    if (error_code && !strcmp(error_code, "SEND_KEY_RELEASED")) return WSS_KEY_RELEASED;
+    if (error_code && !strcmp(error_code, "FEE_CHANGED")) return WSS_FEE_CHANGED;
+    return WSS_UNKNOWN;
+}
+enum wss_key_status wss_key_status_of_devkey(const char *name)
+{
+    static const struct { const char *name; enum wss_key_status status; } table[] = {
+        {"ok", WSS_KEY_OK}, {"declined", WSS_KEY_DECLINED},
+        {"invalidated", WSS_KEY_GONE}, {"not_found", WSS_KEY_GONE}, {"corrupt", WSS_KEY_GONE},
+        {"old_format", WSS_KEY_GONE}, {"not_hardware", WSS_KEY_GONE}, {"not_per_use", WSS_KEY_GONE},
+        {"no_screen_lock", WSS_KEY_NO_SCREEN_LOCK},
+        {"exists", WSS_KEY_ERROR}, {"strongbox_unavailable", WSS_KEY_ERROR}, {"error", WSS_KEY_ERROR},
+    };
+    for (size_t i = 0; name && i < sizeof(table) / sizeof(table[0]); ++i)
+        if (!strcmp(name, table[i].name)) return table[i].status;
+    return WSS_KEY_ERROR;
 }

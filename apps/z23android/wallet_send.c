@@ -24,6 +24,7 @@ static void ask_lock(struct ws *ws, struct ws_actions *out)
 {
     if (!ws->unlock_requested) return;
     ws->lock_wanted = true;
+    ws->lock_ms = ws->now_ms;
     ws->lock_ticket = ++ws->seq;
     push(out, WS_ACT_LOCK, ws->lock_ticket);
 }
@@ -59,6 +60,7 @@ void ws_open(struct ws *ws, const struct ws_env *env, const struct zapp_payment 
 {
     uint32_t seq = ws->seq, serial = ws->serial, lock_ticket = ws->lock_ticket;
     unsigned attempts = ws->lock_attempts;
+    uint64_t lock_ms = ws->lock_ms;
     bool exposed = ws->unlock_requested, wanted = ws->lock_wanted;
     memset(ws, 0, sizeof(*ws));
     memset(out, 0, sizeof(*out));
@@ -71,6 +73,7 @@ void ws_open(struct ws *ws, const struct ws_env *env, const struct zapp_payment 
     ws->lock_wanted = wanted;
     ws->lock_ticket = lock_ticket;
     ws->lock_attempts = attempts;
+    ws->lock_ms = lock_ms;
     ws->now_ms = now_ms;
     if (!pay->has_amount) { enter(ws, WS_PARSED); return; }
     begin_validation(ws, out);
@@ -182,8 +185,12 @@ static void on_unlock(struct ws *ws, const struct ws_event *ev, struct ws_action
 {
     if (ws->state != WS_AUTH || ev->ticket != ws->ticket) return;
     if (!ev->ok) {
-        if (ev->auth == WS_AUTH_KEY_GONE) finish(ws, out, WS_FAILED, WS_FAIL_KEY_GONE, false);
-        else finish(ws, out, WS_FAILED, ev->auth == WS_AUTH_DECLINED ? WS_FAIL_AUTH_DECLINED : WS_FAIL_UNLOCK, true);
+        switch (ev->auth) {
+        case WS_AUTH_KEY_GONE: finish(ws, out, WS_FAILED, WS_FAIL_KEY_GONE, false); break;
+        case WS_AUTH_NO_SCREEN_LOCK: finish(ws, out, WS_FAILED, WS_FAIL_NO_SCREEN_LOCK, true); break;
+        case WS_AUTH_DECLINED: finish(ws, out, WS_FAILED, WS_FAIL_AUTH_DECLINED, true); break;
+        default: finish(ws, out, WS_FAILED, WS_FAIL_UNLOCK, true); break;
+        }
         return;
     }
     if (!ws->tapped) { finish(ws, out, WS_CANCELLED, WS_FAIL_NONE, false); return; }
@@ -200,9 +207,11 @@ static void on_commit(struct ws *ws, const struct ws_event *ev, struct ws_action
         ask(ws, out, WS_ACT_POLL_ROUTE);
         return;
     }
-    /* Only a refusal proves that nothing was sent. Any other answer leaves the payment possibly sent, so the
-     * flow ends for good: no retry, no second commit for this review. */
-    if (!ev->ok && ev->refused) finish(ws, out, WS_FAILED, WS_FAIL_COMMIT_REFUSED, true);
+    /* Only the node saying it released the key, or refused the stale fee before building, proves that nothing
+     * was sent. Any other answer leaves the payment possibly sent, so the flow ends for good: no retry, no
+     * second commit for this review. A changed fee needs a new plan, so it returns to a new review. */
+    if (!ev->ok && ev->fee_changed) finish(ws, out, WS_FAILED, WS_FAIL_FEE_CHANGED, true);
+    else if (!ev->ok && ev->refused) finish(ws, out, WS_FAILED, WS_FAIL_COMMIT_REFUSED, true);
     else finish(ws, out, WS_FAILED, WS_FAIL_COMMIT_UNKNOWN, false);
 }
 static void on_route(struct ws *ws, const struct ws_event *ev)
@@ -291,6 +300,15 @@ static void on_cancel(struct ws *ws, struct ws_actions *out)
 }
 /* The system credential screen backgrounds the app, so leaving during authentication is not a cancel: the
  * result belongs to the tap on this review. The owner can still cancel from the screen. */
+/* The worker could not be started, so nothing queued has run: the flow ends before any commit began. After a
+ * commit the poll waits for the next tick instead. */
+static void on_abort(struct ws *ws, struct ws_actions *out)
+{
+    switch (ws->state) {
+    case WS_BROADCAST: case WS_DONE: case WS_FAILED: case WS_CANCELLED: case WS_IDLE: return;
+    default: finish(ws, out, WS_FAILED, WS_FAIL_WORKER, true);
+    }
+}
 static void on_background(struct ws *ws, struct ws_actions *out)
 {
     if (ws->state == WS_AUTH) return;
@@ -309,7 +327,8 @@ static void on_tick(struct ws *ws, struct ws_actions *out)
 {
     on_tick_window(ws, out);
     /* A lock that kept failing is asked for again; the wallet may still be open. */
-    if (ws->lock_wanted && ws->lock_attempts >= WS_LOCK_ATTEMPTS && ws->now_ms - ws->lock_ms >= WS_LOCK_RETRY_MS) {
+    uint64_t since = ws->now_ms - ws->lock_ms;
+    if (ws->lock_wanted && ((ws->lock_attempts >= WS_LOCK_ATTEMPTS && since >= WS_LOCK_RETRY_MS) || since >= WS_LOCK_STALE_MS)) {
         ws->lock_attempts = 0;
         ask_lock(ws, out);
     }
@@ -356,6 +375,7 @@ static void step_owner(struct ws *ws, const struct ws_event *ev, struct ws_actio
     case WS_EV_RETRY: on_retry(ws, out); break;
     case WS_EV_CANCEL: on_cancel(ws, out); break;
     case WS_EV_BACKGROUND: on_background(ws, out); break;
+    case WS_EV_ABORT: on_abort(ws, out); break;
     case WS_EV_RESUME: break;
     case WS_EV_TICK: on_tick(ws, out); break;
     default: break;
@@ -376,6 +396,16 @@ bool ws_terminal(const struct ws *ws)
 bool ws_wallet_exposed(const struct ws *ws) { return ws->unlock_requested; }
 uint32_t ws_serial(const struct ws *ws) { return ws->serial; }
 
+static const char *fail_text_more(enum ws_fail fail)
+{
+    switch (fail) {
+    case WS_FAIL_NO_RANDOM: return "A payment key could not be made. Nothing was sent.";
+    case WS_FAIL_FEE_CHANGED: return "The network fee changed. Nothing was sent. Review the payment again.";
+    case WS_FAIL_WORKER: return "The phone could not start the task for this payment. Nothing was sent.";
+    case WS_FAIL_NO_SCREEN_LOCK: return "Set a screen lock on this phone to send. Nothing was sent.";
+    default: return "";
+    }
+}
 const char *ws_fail_text(const struct ws *ws)
 {
     switch (ws->fail) {
@@ -391,9 +421,8 @@ const char *ws_fail_text(const struct ws *ws)
     case WS_FAIL_WINDOW: return "The unlock time ended and the wallet is locked again. Nothing was sent.";
     case WS_FAIL_COMMIT_REFUSED: return "The node refused this payment. Nothing was sent.";
     case WS_FAIL_COMMIT_UNKNOWN: return "It is not known whether this payment was sent. It will not be sent again from here. Check History.";
-    case WS_FAIL_NO_RANDOM: return "A payment key could not be made. Nothing was sent.";
+    default: return fail_text_more(ws->fail);
     }
-    return "";
 }
 const char *ws_state_name(enum ws_state state)
 {
