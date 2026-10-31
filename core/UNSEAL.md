@@ -424,3 +424,7 @@ later lane flips it HARD.
 - 2026-10-31T10:14:13Z — REASON: refactor(fast_sync.c): split 4 function(s) under the complexity cap;  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: 8bbb4e99da887726d7b2269d3a8812ad893c325283b81d1a49762de8d066335b
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T10:14:34Z — REASON: fast_sync.c: move block_piece_manifest active-chain builder to fast_sync_block_piece_active_chain.c so the complexity split fits the file-size pin;   behaviour-preserving
+  old ROOT: b39206f333eb30a3385477c00feb54353fca9e065b484f9f7055651f1918eddb
+  by: owner unseal ritual (make core-unseal)
