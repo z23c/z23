@@ -440,3 +440,7 @@ later lane flips it HARD.
 - 2026-10-31T10:18:28Z — REASON: refactor(msgprocessor.c): split 4 function(s) under the complexity cap;  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: c2383fecf531b6933e048281fb991ea81f24d75bd527a669d2d63dc57ba8673d
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T10:21:07Z — REASON: msgprocessor.c: move a self-contained function group to a sibling file so the complexity split fits the file-size pin;   behaviour-preserving
+  old ROOT: 52c2a14d9c54b59b7486d85961dabb1fb69472780f4022072fe84989007784e5
+  by: owner unseal ritual (make core-unseal)
