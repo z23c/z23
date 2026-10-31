@@ -135,15 +135,18 @@ uint64_t reducer_frontier_body_read_note_record(
     if (same) {
         g_body_read_note.count++;
     } else {
+        /* Only a new (height, hash) identity is a new note. A retry of the
+         * same failure keeps its generation, so witnesses that compare it
+         * (have_data_unreadable) do not read the repeat as "target gone". */
         g_body_read_note.active = true;
         g_body_read_note.height = height;
         g_body_read_note.count = 1;
+        g_body_read_note.generation++;
     }
     g_body_read_note.file = nFile;
     g_body_read_note.pos = pos;
     g_body_read_note.reason = reason;
     g_body_read_note.block_hash = *block_hash;
-    g_body_read_note.generation++;
     int count = g_body_read_note.count;
     uint64_t generation = g_body_read_note.generation;
     if (count >= REDUCER_FRONTIER_BODY_READ_QUARANTINE_MAX)

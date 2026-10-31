@@ -308,6 +308,49 @@ static bool hdu_body_torn_handoff_retained(
     return ok2;
 }
 
+/* A 5 s retry re-records the same (height, hash) failure. That is the same
+ * note, not a new one: the generation stays put and the witness keeps the
+ * condition active. A different hash or height at the noted height is new. */
+static bool hdu_body_torn_repeat_is_same_note(
+    const struct uint256 *hash, int cleared_before)
+{
+    struct reducer_frontier_body_read_note before;
+    struct reducer_frontier_body_read_note after;
+    bool ok = reducer_frontier_body_read_note_snapshot(&before);
+    for (int i = 0; i < 2; i++) {
+        reducer_frontier_body_read_note_record(
+            5, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, hash);
+        condition_engine_tick();
+    }
+    struct condition_runtime_snapshot snap;
+    ok = ok && reducer_frontier_body_read_note_snapshot(&after);
+    ok = ok && after.generation == before.generation;
+    ok = ok && condition_engine_get_registered_snapshot(
+        "have_data_unreadable", &snap);
+    ok = ok && condition_engine_get_active_count() == 1;
+    ok = ok && snap.cleared_count == cleared_before;
+    ok = ok && reducer_frontier_body_read_note_active();
+
+    struct uint256 other = *hash;
+    other.data[0] ^= 0x5a;
+    reducer_frontier_body_read_note_record(
+        5, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, &other);
+    struct reducer_frontier_body_read_note replaced;
+    ok = ok && reducer_frontier_body_read_note_snapshot(&replaced);
+    ok = ok && replaced.generation > after.generation;
+    reducer_frontier_body_read_note_record(
+        4, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, &other);
+    struct reducer_frontier_body_read_note lower;
+    ok = ok && reducer_frontier_body_read_note_snapshot(&lower);
+    ok = ok && lower.generation > replaced.generation;
+    /* Restore the original identity for the completion step. */
+    reducer_frontier_body_read_note_reset_for_testing();
+    for (int i = 0; i < REDUCER_FRONTIER_BODY_READ_QUARANTINE_MAX; i++)
+        reducer_frontier_body_read_note_record(
+            5, 49, 129998574, REDUCER_FRONTIER_BODY_READ_DISK, hash);
+    return ok;
+}
+
 /* The exact body reader clears the note only after a hash-verified
  * replacement is readable; drive that signal, then prove the condition
  * and blocker retire. */
@@ -818,6 +861,10 @@ static int hdu_case_body_torn_read_repair(void)
     struct condition_runtime_snapshot post;
     bool ok2 = hdu_body_torn_handoff_retained(cleared_before, &post);
     HDU_CHECK("body_read_torn: clear retains refetch handoff note", ok2);
+
+    bool okr = hdu_body_torn_repeat_is_same_note(&hashes[5], cleared_before);
+    HDU_CHECK("body_read_torn: repeated identical record keeps condition "
+              "active; new hash or height still counts as new", okr);
 
     bool ok3 = hdu_body_torn_reader_completion_clears(cleared_before, &post);
     HDU_CHECK("body_read_torn: verified reader completion clears episode",
