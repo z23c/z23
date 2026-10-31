@@ -13494,6 +13494,26 @@ $(CONTRIB_INBOX_BIN): $(CONTRIB_INBOX_SRCS)
 	    -o $@ $(CONTRIB_INBOX_SRCS) -lpthread
 endif
 
+# ── z23-lab-peer: the lab-to-lab offer / verify / collect loop ──────────────
+# A standalone host tool, compiled straight from source like z23-contrib-inbox
+# above. It runs z23 and z23-dev through zcl_spawn_capture (no shell, no vendor
+# library). flock(2) is the per-state-dir run lock, so the rule does not exist
+# on a Windows host.
+ifeq ($(ZCL_HOST_WINDOWS),)
+LAB_PEER_BIN = $(BIN_DIR)/z23-lab-peer
+LAB_PEER_SRCS = tools/lab_peer.c platform/modules/json/src/json.c platform/modules/util/src/spawn.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
+LAB_PEER_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/util/include
+.PHONY: lab-peer
+lab-peer: $(LAB_PEER_BIN)
+$(LAB_PEER_BIN): $(LAB_PEER_SRCS)
+	mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
+	    $(BUILD_IDENTITY_CPPFLAGS) \
+	    $(LAB_PEER_INCLUDES) \
+	    -o $@ $(LAB_PEER_SRCS) -lpthread
+endif
+
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core_seal is a tiny build-time C tool (no external deps: it links the in-tree
 # FIPS-202 SHA3-256 + memory_cleanse) that reads the file list on stdin

@@ -261,6 +261,43 @@ The plugin's stdout `ABC\n` is the first case's `expect_stdout`, and the
 `sha3_512` of the `plugin call` reply equals `release_sha3_512`. Without the
 `switch`, `plugin call` refuses with `PLUGIN_NO_GENERATION`. Through MCP the leaf is `lab.promote`.
 
+## Peer verification over the swarm
+
+`build/bin/z23-lab-peer` (source `tools/lab_peer.c`) turns the P2P candidate
+exchange into a loop between independent labs. It only composes existing
+leaves: `dev land send` / `reverify_offer` / `qualify_offer` and `fleet bundle
+offer` / `fetch` and `fleet board post` / `list`. It adds no store, wire format
+or quorum rule, and it never executes fetched bytes itself (only
+`reverify_offer` builds offered code, under local policy). Each run prints one
+`zcl.lab_peer.v1` JSON document and exits 0 when it completed, 2 on a usage
+error. `--z23=` and `--z23dev=` name the two programs.
+
+```
+z23-lab-peer offer   --lane=DIR --commit=SHA --state=DIR [--room=lab] [--agent=NAME]
+z23-lab-peer verify  --state=DIR --repo=DIR --authors=FILE [--room=lab] [--max=N]
+z23-lab-peer collect --state=DIR [--room=lab] [--require=1]
+```
+
+- `offer` bundles the reviewed commit from the lane worktree, offers it on the
+  Tor package swarm and posts `lab-offer v1 root=<hex> size=<n> onion=<onion>
+  offer=<manifest>` as kind `offer` in public room `lab` (a post over the
+  board's 2048-byte text cap is refused, not posted). One row per offer goes to
+  `STATE/offers.tsv`.
+- `verify` reads the room, and for each offer from a key in the authors file
+  (one 64-hex key per line) that is unexpired, strictly well-formed and not in
+  `STATE/handled.tsv`: fetches the bundle, runs `reverify_offer` in a scratch
+  worktree of `--repo`, and posts `lab-receipt v1 offer=<id> verdict=ok
+  receipt=<json>` (or `verdict=refused code=<CODE>`) as kind `result` with
+  `ref` = the offer post. A failed fetch is retried on later runs, three
+  attempts in all.
+- `collect` gathers the `verdict=ok` receipts answering each `offers.tsv` row
+  into `STATE/receipts/`, runs `qualify_offer`, and writes
+  `STATE/qualified.tsv` (lane, commit, verdict, qualified count, signers,
+  rejected codes).
+
+Shadow mode: `collect` only counts. It never submits to, or changes, the land
+queue; landing stays a separate, reviewed `dev land submit`.
+
 ## Measured latency
 
 2026-10-18 on r1 (AMD Ryzen 9 7950X3D, GCC 14.2.0, Linux 6.8.0-139, load

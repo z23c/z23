@@ -1210,6 +1210,7 @@ static void run_full_suite_foundation(int *failures)
     { extern int test_engine_claude(void); *failures += test_engine_claude(); }
     { extern int test_loop_tick(void); *failures += test_loop_tick(); }
     { extern int test_contrib_inbox(void); *failures += test_contrib_inbox(); }
+    { extern int test_lab_peer(void); *failures += test_lab_peer(); }
     *failures += test_validation();
     { extern int test_consensus_parity(void); *failures += test_consensus_parity(); }
     { extern int test_rom_state_checkpoint(void); *failures += test_rom_state_checkpoint(); }
