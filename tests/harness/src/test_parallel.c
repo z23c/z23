@@ -2852,8 +2852,18 @@ struct group_tally {
     int failed;
     int skip;
     int unobserved;
-    int load_flaky;
 };
+
+/* Load-flaky groups, counted from results so a cache hit that carries the
+ * flag counts the same as a rerun that set it. */
+static int count_load_flaky_groups(const struct group_result *results)
+{
+    int load_flaky_groups = 0;
+    for (size_t i = 0; i < g_num_groups; i++) {
+        if (results[i].load_flaky) load_flaky_groups++;
+    }
+    return load_flaky_groups;
+}
 
 static void print_group_banner(const char *name,
                                const struct group_result *r, bool pass,
@@ -2877,7 +2887,6 @@ static void tally_group(struct group_result *r, const char *name,
     r->env_unobserved = r->out_path[0]
         ? count_marker_lines(r->out_path, "UNOBSERVED (") : 0;
     if (r->env_unobserved > 0) t->unobserved++;
-    if (r->load_flaky) t->load_flaky++;
     char skip_note[32] = "";
     if (r->skip_markers > 0)
         snprintf(skip_note, sizeof(skip_note), ", %d SKIP",
@@ -3476,7 +3485,7 @@ int main(int argc, char **argv)
     int failed_groups = tally.failed;
     int skip_groups = tally.skip;
     int unobserved_groups = tally.unobserved;
-    int load_flaky_groups = tally.load_flaky;
+    int load_flaky_groups = count_load_flaky_groups(results);
 
     /* ── The verdict ────────────────────────────────────────────────────────
      * The old headline printed "ALL TESTS PASSED — 0/743 groups failed" whether
