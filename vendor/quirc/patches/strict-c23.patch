@@ -20,15 +20,19 @@
  	num_vars = (size_t)h * 2 / 3;
 --- a/identify.c
 +++ b/identify.c
-@@ -97,6 +97,18 @@
+@@ -97,6 +97,22 @@
  		hden;
  }
  
-+/* Largest coordinate magnitude kept as is. Any frame is far smaller, so a larger one is off the frame. */
-+#define COORD_LIMIT (1 << 20)
++/* Largest coordinate magnitude kept as is. 2^13 keeps every product of two differences of clamped
++ * coordinates inside int, so the unchecked int arithmetic on capstone centers and corners cannot overflow.
++ * Frames up to 8192 px a side are unaffected. */
++#define COORD_LIMIT (1 << 13)
 +
 +/* Rounds v to the nearest int. A NaN or a value beyond COORD_LIMIT becomes -COORD_LIMIT or COORD_LIMIT,
-+ * which the callers' bounds checks reject, since converting an out-of-range float to int is undefined. */
++ * since converting an out-of-range float to int is undefined. Callers that index pixels check the point
++ * against the frame (read_cell, fitness_cell, find_alignment_pattern). The capstone centers and the
++ * extracted corners are not checked; they are stored or used in int arithmetic that the limit bounds. */
 +static int coord_round(quirc_float_t v)
 +{
 +	if (!(v >= -(quirc_float_t)COORD_LIMIT)) return -COORD_LIMIT;
@@ -39,7 +43,7 @@
  static void perspective_map(const quirc_float_t *c,
  			    quirc_float_t u, quirc_float_t v, struct quirc_point *ret)
  {
-@@ -104,8 +116,8 @@
+@@ -104,8 +120,8 @@
  	quirc_float_t x = (c[0]*u + c[1]*v + c[2]) * den;
  	quirc_float_t y = (c[3]*u + c[4]*v + c[5]) * den;
  
@@ -50,7 +54,7 @@
  }
  
  static void perspective_unmap(const quirc_float_t *c,
-@@ -341,6 +353,7 @@
+@@ -341,6 +357,7 @@
  
  static void area_count(void *user_data, int y, int left, int right)
  {
@@ -58,7 +62,7 @@
  	((struct quirc_region *)user_data)->count += right - left + 1;
  }
  
-@@ -541,7 +554,7 @@
+@@ -541,7 +558,7 @@
  	unsigned int pb[5];
  
  	memset(pb, 0, sizeof(pb));
@@ -67,7 +71,48 @@
  		int color = row[x] ? 1 : 0;
  
  		if (x && color != last_color) {
-@@ -1043,7 +1056,7 @@
+@@ -575,6 +592,12 @@
+ 	}
+ }
+ 
++/* Whether p lies inside the frame, so it can index a pixel. */
++static bool on_frame(const struct quirc *q, const struct quirc_point *p)
++{
++	return p->x >= 0 && p->y >= 0 && p->x < q->w && p->y < q->h;
++}
++
+ static void find_alignment_pattern(struct quirc *q, int index)
+ {
+ 	struct quirc_grid *qr = &q->grids[index];
+@@ -599,6 +622,10 @@
+ 	perspective_unmap(c2->c, &b, &u, &v);
+ 	perspective_map(c2->c, u + (quirc_float_t)1.0, v, &c);
+ 
++	/* A point off the frame, clamped by coord_round, would make the size estimate huge: give up instead. */
++	if (!on_frame(q, &a) || !on_frame(q, &b) || !on_frame(q, &c))
++		return;
++
+ 	size_estimate = abs((a.x - b.x) * -(c.y - b.y) +
+ 			    (a.y - b.y) * (c.x - b.x));
+ 
+@@ -766,7 +793,7 @@
+ {
+ 	const struct quirc_grid *qr = &q->grids[index];
+ 	int version = (qr->grid_size - 17) / 4;
+-	const struct quirc_version_info *info = &quirc_version_db[version];
++	const struct quirc_version_info *info;
+ 	int score = 0;
+ 	int i, j;
+ 	int ap_count;
+@@ -786,6 +813,7 @@
+ 
+ 	if (version < 0 || version > QUIRC_MAX_VERSION)
+ 		return score;
++	info = &quirc_version_db[version];
+ 
+ 	/* Check alignment patterns */
+ 	ap_count = 0;
+@@ -1043,7 +1071,7 @@
  		struct quirc_capstone *c2 = &q->capstones[j];
  		quirc_float_t u, v;
  

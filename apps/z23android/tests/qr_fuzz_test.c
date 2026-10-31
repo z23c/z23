@@ -11,11 +11,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define SEED 0x5A23F0C0DEULL
 #define DEFAULT_ITERATIONS 2000u
 #define MAX_ITERATIONS 10000000ull
-#define FRAME 512
+/* The camera's frame size (apps/z23android/camera.c WIDTH and HEIGHT). */
+#define FRAME_W 1280
+#define FRAME_H 960
+/* A decode slower than this fails the run, so a slowdown in quirc cannot pass as a slow pass. */
+#define DECODE_LIMIT_MS 2000L
 #define RESULT_CAP 4096
 #define VALUE_CAP 512
 #define TEXT_CAP (2 * ZAPP_PAY_INPUT_MAX + 256)
@@ -23,9 +28,6 @@
 #define ZS_LEN 78
 #define T1_LEN 35
 #define CORPUS_N 14
-/* Seed 0x5A23F0C0DE, iteration 612 (zero-based): a camera-shaped frame whose perspective map produced NaN,
- * which identify.c converted to int (UBSan, identify.c:107). Every run executes through it. */
-#define REGRESSION_ITERATION 612
 #define CONTROL_ZAT 150000000ULL
 #define HEX64 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -39,7 +41,7 @@ static char corpus[CORPUS_N][TEXT_CAP];
 static size_t corpus_len[CORPUS_N];
 static uint8_t qr_work[qrcodegen_BUFFER_LEN_MAX];
 static uint8_t qr_code[qrcodegen_BUFFER_LEN_MAX];
-static uint8_t frame_pixels[FRAME * FRAME];
+static uint8_t frame_pixels[FRAME_W * FRAME_H];
 
 [[noreturn]] static void fail(const char *what)
 {
@@ -202,17 +204,18 @@ static bool encode(const char *data, size_t n)
     return qrcodegen_encodeBinary(qr_work, n, qr_code, qrcodegen_Ecc_LOW, 1, 40, qrcodegen_Mask_AUTO, true);
 }
 
-/* Draws qr_code centred on a white FRAME square, dark modules black. */
+/* Draws qr_code centred on a white camera frame, dark modules black, as large as the height allows. */
 static void draw_code(void)
 {
     int size = qrcodegen_getSize(qr_code);
-    int scale = FRAME / (size + 8);
-    int origin = (FRAME - size * scale) / 2;
+    int scale = FRAME_H / (size + 8);
+    int origin_x = (FRAME_W - size * scale) / 2;
+    int origin_y = (FRAME_H - size * scale) / 2;
     memset(frame_pixels, 0xff, sizeof frame_pixels);
     for (int y = 0; y < size * scale; ++y)
         for (int x = 0; x < size * scale; ++x)
             if (qrcodegen_getModule(qr_code, x / scale, y / scale))
-                frame_pixels[(origin + y) * FRAME + origin + x] = 0;
+                frame_pixels[(origin_y + y) * FRAME_W + origin_x + x] = 0;
 }
 
 /* Salt-and-pepper noise, a random rectangle of noise, a band inverted, or nothing. */
@@ -220,24 +223,42 @@ static void mutate_frame(void)
 {
     switch (below(4)) {
     case 0: {
-        for (size_t k = 0, n = 1 + below(256); k < n; ++k) frame_pixels[below(FRAME * FRAME)] = (uint8_t)next_random();
+        for (size_t k = 0, n = 1 + below(256); k < n; ++k) frame_pixels[below(FRAME_W * FRAME_H)] = (uint8_t)next_random();
         break;
     }
     case 1: {
-        size_t x0 = below(FRAME), y0 = below(FRAME), w = 1 + below(96), h = 1 + below(96);
-        for (size_t y = y0; y < FRAME && y < y0 + h; ++y)
-            for (size_t x = x0; x < FRAME && x < x0 + w; ++x) frame_pixels[y * FRAME + x] = (uint8_t)next_random();
+        size_t x0 = below(FRAME_W), y0 = below(FRAME_H), w = 1 + below(96), h = 1 + below(96);
+        for (size_t y = y0; y < FRAME_H && y < y0 + h; ++y)
+            for (size_t x = x0; x < FRAME_W && x < x0 + w; ++x) frame_pixels[y * FRAME_W + x] = (uint8_t)next_random();
         break;
     }
     case 2: {
-        size_t y0 = below(FRAME), band = 1 + below(32);
-        for (size_t y = y0; y < FRAME && y < y0 + band; ++y)
-            for (size_t x = 0; x < FRAME; ++x) frame_pixels[y * FRAME + x] = (uint8_t)(255 - frame_pixels[y * FRAME + x]);
+        size_t y0 = below(FRAME_H), band = 1 + below(32);
+        for (size_t y = y0; y < FRAME_H && y < y0 + band; ++y)
+            for (size_t x = 0; x < FRAME_W; ++x) frame_pixels[y * FRAME_W + x] = (uint8_t)(255 - frame_pixels[y * FRAME_W + x]);
         break;
     }
     default:
         break;
     }
+}
+
+/* Fixed case: three 7-px finder patterns with 1-px modules, 800 px apart. That grid is version 196, past
+ * quirc_version_db, and used to index the table before the version range check (identify.c fitness_all). */
+static void draw_finder(int x0, int y0)
+{
+    for (int dy = 0; dy < 7; ++dy)
+        for (int dx = 0; dx < 7; ++dx) {
+            bool dark = dx == 0 || dx == 6 || dy == 0 || dy == 6 || (dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4);
+            frame_pixels[(y0 + dy) * FRAME_W + x0 + dx] = dark ? 0 : 255;
+        }
+}
+static void craft_version_db_frame(void)
+{
+    memset(frame_pixels, 0xff, sizeof frame_pixels);
+    draw_finder(100, 100);
+    draw_finder(900, 100);
+    draw_finder(100, 900);
 }
 
 /* A copy of decode_frame() in camera.c: the first code that decodes to non-empty text without NUL bytes. */
@@ -255,15 +276,27 @@ static bool decode_frame(const struct quirc *qr, char *result, size_t cap)
     return false;
 }
 
-/* Feeds frame_pixels through quirc the way camera.c's frame() does, minus the AImage plane copy. */
+/* Milliseconds on the wall clock; timespec_get is the portable call under -std=c23. */
+static long now_ms(void)
+{
+    struct timespec ts;
+    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) fail("timespec_get");
+    return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
+
+/* Feeds frame_pixels through quirc the way camera.c's frame() does, minus the AImage plane copy. A decode
+ * that runs past DECODE_LIMIT_MS fails the run. */
 static bool scan_frame(struct quirc *qr, char *result, size_t cap)
 {
     int w, h;
     uint8_t *dst = quirc_begin(qr, &w, &h);
-    if (!dst || w != FRAME || h != FRAME) fail("quirc_begin returned an unexpected buffer");
+    if (!dst || w != FRAME_W || h != FRAME_H) fail("quirc_begin returned an unexpected buffer");
     memcpy(dst, frame_pixels, sizeof frame_pixels);
+    long start = now_ms();
     quirc_end(qr);
-    return decode_frame(qr, result, cap);
+    bool decoded = decode_frame(qr, result, cap);
+    if (now_ms() - start > DECODE_LIMIT_MS) fail("a frame took longer than the decode limit");
+    return decoded;
 }
 
 /* Positive control: an unmodified code must decode to its exact payload, or the run could pass by decoding nothing. */
@@ -308,16 +341,18 @@ static void iteration(struct quirc *qr, struct stats *st)
 int main(void)
 {
     size_t iterations = iterations_from_env();
-    /* The rng is sequential, so the regression iteration is reached only by running up to it. */
-    if (iterations <= REGRESSION_ITERATION) iterations = REGRESSION_ITERATION + 1;
     printf("qr-fuzz seed=0x%llx iterations=%zu\n", (unsigned long long)SEED, iterations);
     make_addresses();
     make_corpus();
     struct quirc *qr = quirc_new();
     if (!qr) fail("quirc_new");
-    if (quirc_resize(qr, FRAME, FRAME) < 0) fail("quirc_resize");
+    if (quirc_resize(qr, FRAME_W, FRAME_H) < 0) fail("quirc_resize");
     struct stats st = {0};
     positive_control(qr, &st);
+    /* The fixed crafted frame runs every time, under the same decode time limit. It has no expected payload. */
+    char crafted[RESULT_CAP];
+    craft_version_db_frame();
+    (void)scan_frame(qr, crafted, sizeof crafted);
     /* QR_FUZZ_TRACE names each iteration on stderr, so a sanitizer report can be traced to its iteration. */
     bool trace = getenv("QR_FUZZ_TRACE") != NULL;
     for (size_t i = 0; i < iterations; ++i) {
@@ -325,8 +360,8 @@ int main(void)
         iteration(qr, &st);
     }
     quirc_destroy(qr);
-    /* Pristine codes must decode in any run long enough to hit them, so the fuzz is not vacuous. */
-    if (iterations >= 100 && st.pristine_decoded == 0) fail("no pristine frame decoded in the run");
+    /* Every pristine code must decode to its bytes: a change that breaks version 10 and up shows here. */
+    if (st.pristine_decoded != st.pristine) fail("a pristine frame failed to decode");
     printf("qr-fuzz texts=%zu frames=%zu pristine_decoded=%zu/%zu decoded=%zu paid=%zu refused=%zu\n",
            st.texts, st.frames, st.pristine_decoded, st.pristine, st.decoded, st.paid, st.refused);
     printf("qr-fuzz PASS iterations=%zu\n", iterations);
