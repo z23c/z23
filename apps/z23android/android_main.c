@@ -4,8 +4,12 @@
 #include "base/cleanse.h"
 #include "camera.h"
 #include "controller.h"
+#ifdef ZAPP_DEVKEY_PROBE
+#include "device_key_probe.h"
+#endif
 #include "native_ui.h"
 #include "node_service.h"
+#include "secure_window.h"
 #include <android/input.h>
 #include <android/looper.h>
 #include <android/native_activity.h>
@@ -212,6 +216,7 @@ static int input_ready(int fd, int events, void *context)
     if (!current_vm || (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return 1;
     while (AInputQueue_getEvent(queue, &event) >= 0) {
         if (AInputQueue_preDispatchEvent(queue, event)) continue;
+        if (zapp_secure_window_drops(event)) { AInputQueue_finishEvent(queue, event, true); continue; }
         AInputQueue_finishEvent(queue, event, zapp_native_ui_input(env, event));
     }
     return 1;
@@ -376,6 +381,7 @@ static void detach_activity(JNIEnv *env)
     if (looper) ALooper_release(looper);
     looper = NULL;
     pthread_mutex_unlock(&lock);
+    zapp_secure_window_release();
     zapp_native_ui_destroy(env);
     if (retained) (*env)->DeleteGlobalRef(env, retained);
 }
@@ -389,7 +395,11 @@ static void destroy(ANativeActivity *activity)
 }
 static void pause_activity(ANativeActivity *activity)
 {
-    (void)activity; foreground = false;
+    (void)activity;
+#ifdef ZAPP_DEVKEY_PROBE
+    zapp_devkey_probe(activity, ZAPP_DEVKEY_PROBE_PAUSE);
+#endif
+    foreground = false;
     zapp_controller_visible(false);
     if (!atomic_load(&camera_dialog)) zapp_camera_stop();
 }
@@ -409,6 +419,9 @@ static void resume_activity(ANativeActivity *activity)
     zapp_controller_visible(true);
     zapp_native_ui_resume(activity->env);
     refresh(activity->env);
+#ifdef ZAPP_DEVKEY_PROBE
+    zapp_devkey_probe(activity, ZAPP_DEVKEY_PROBE_RESUME);
+#endif
 }
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size);
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size)

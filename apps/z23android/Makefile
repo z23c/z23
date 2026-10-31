@@ -3,6 +3,7 @@
 SDK_ROOT ?= $(ANDROID_SDK_ROOT)
 ANDROID_NDK_ROOT ?= $(ANDROID_NDK_HOME)
 ANDROID_API ?= 35
+DEVKEY_PROBE ?= OFF
 BUILD_TOOLS_VERSION ?= 35.0.0
 JAVA_HOME ?= /usr/lib/jvm/default
 ADB ?= $(SDK_ROOT)/platform-tools/adb
@@ -23,7 +24,7 @@ HOST_WARNINGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic
 export JAVA_HOME
 export PATH := $(JAVA_HOME)/bin:$(PATH)
 
-.PHONY: dexgen test-dexgen test-watch apk native install launch check-config check-node prepare-quirc test bridge test-bridge
+.PHONY: check-probe dexgen test-dexgen test-watch apk native install launch check-config check-node prepare-quirc test bridge test-bridge
 prepare-quirc:
 	@mkdir -p '$(QUIRC_DIR)'
 	cp ../../vendor/quirc/*.[ch] '$(QUIRC_DIR)/'
@@ -102,7 +103,7 @@ test-voice:
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/speech-client.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/speech-client-test' "$$scratch"
 
-test: prepare-quirc test-bridge test-voice test-host test-dexgen test-watch test-scan test-qr-window test-payment
+test: prepare-quirc test-bridge test-voice test-host test-devkey test-dexgen test-watch test-scan test-qr-window test-payment
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' $(QUIRC_FLAGS) \
 	  tests/fleet_test.c fleet.c ../../vendor/qrcodegen/qrcodegen.c $(QUIRC_SOURCES) \
 	  -lm -o '$(BUILD_DIR)/fleet-test'
@@ -161,7 +162,11 @@ check-node:
 	@headers="$$(LC_ALL=C readelf -lW '$(NODE_BIN)')" && printf '%s\n' "$$headers" | grep -F '/system/bin/linker64' >/dev/null || { echo 'NODE_BIN must be an Android ARM64 executable' >&2; exit 1; }
 	@../../tools/scripts/check_c23_node_binary.sh '$(NODE_BIN)'
 
+check-probe:
+	@test "$(DEVKEY_PROBE)" = OFF || grep -q 'package="org.z23.voicepreview"' '$(APP_MANIFEST)' || { echo "DEVKEY_PROBE=$(DEVKEY_PROBE) refused: the device key probe is built only into the org.z23.voicepreview manifest (make preview-apk), never into org.z23.nativeapp" >&2; exit 1; }
+
 check-config:
+	@$(MAKE) --no-print-directory check-probe
 	@test -f '$(ANDROID_NDK_ROOT)/build/cmake/android.toolchain.cmake' || { echo 'Set ANDROID_NDK_ROOT to the installed NDK' >&2; exit 1; }
 	@test -r '$(ANDROID_JAR)' && test -x '$(TOOLS)/aapt' && test -x '$(TOOLS)/zipalign' && test -x '$(TOOLS)/apksigner' || { echo 'Set SDK_ROOT and BUILD_TOOLS_VERSION to an installed Android SDK' >&2; exit 1; }
 	@test -x '$(JAVA_HOME)/bin/keytool' && test -x '$(JAVA_HOME)/bin/jar' || { echo 'Set JAVA_HOME to an installed JDK' >&2; exit 1; }
@@ -171,7 +176,7 @@ native: check-config prepare-quirc
 	cmake -S . -B '$(BUILD_DIR)/native' \
 	  -DCMAKE_TOOLCHAIN_FILE='$(ANDROID_NDK_ROOT)/build/cmake/android.toolchain.cmake' \
 	  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-$(ANDROID_API) \
-	  -DZ23_ANDROID_API=$(ANDROID_API) -DZ23_QUIRC_DIR='$(QUIRC_DIR)' -DCMAKE_BUILD_TYPE=Release
+	  -DZ23_ANDROID_API=$(ANDROID_API) -DZ23_QUIRC_DIR='$(QUIRC_DIR)' -DZ23_DEVKEY_PROBE=$(DEVKEY_PROBE) -DCMAKE_BUILD_TYPE=Release
 	cmake --build '$(BUILD_DIR)/native' --parallel 4
 
 $(KEYSTORE):
@@ -180,7 +185,7 @@ $(KEYSTORE):
 	  -alias z23-development -keypass android -dname 'CN=Z23 Development' \
 	  -keyalg RSA -keysize 3072 -validity 3650 -noprompt
 
-apk: check-node native dexgen $(KEYSTORE)
+apk: check-probe check-node native dexgen $(KEYSTORE)
 	@test -x '$(NODE_BIN)' || { echo 'Build the Android node with make ZCL_TARGET=android-arm64 z23 first' >&2; exit 1; }
 	@mkdir -p '$(BUILD_DIR)/package/lib/arm64-v8a'
 	cp '$(BUILD_DIR)/native/libz23android.so' '$(BUILD_DIR)/package/lib/arm64-v8a/'
@@ -230,3 +235,14 @@ test-host:
 	'$(BUILD_DIR)/layout-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/home_test.c home.c layout.c hosts.c pairing.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
 	'$(BUILD_DIR)/home-test'
+
+.PHONY: test-devkey
+test-devkey:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../platform/modules/base/include tests/device_key_test.c device_key.c \
+	  ../../platform/modules/base/src/cleanse.c -o '$(BUILD_DIR)/device-key-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/device-key-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/device-key-test' "$$scratch"
+	@if $(MAKE) --no-print-directory check-probe DEVKEY_PROBE=ON 2>/dev/null; then echo "production manifest accepted DEVKEY_PROBE=ON" >&2; exit 1; fi
+	$(HOST_CC) $(HOST_WARNINGS) -I. tests/secure_window_test.c secure_window.c -o '$(BUILD_DIR)/secure-window-test'
+	'$(BUILD_DIR)/secure-window-test'
