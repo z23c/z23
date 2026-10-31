@@ -18,6 +18,13 @@
 #include <unistd.h>
 #include "platform/clock.h"
 
+/* macOS has no /bin/false; the same utility lives in /usr/bin there. */
+#ifdef __APPLE__
+#define SB_FALSE_PATH "/usr/bin/false"
+#else
+#define SB_FALSE_PATH "/bin/false"
+#endif
+
 enum { SB_CHUNK = 4096, SB_PATTERN = 4097, SB_DIAGNOSTIC = 8192 };
 struct ssh_bridge {
     pid_t pid;
@@ -294,7 +301,7 @@ static bool sb_echo(void)
 static bool sb_nonzero(void)
 {
     struct ssh_bridge b;
-    char *const argv[] = {"/bin/false", NULL};
+    char *const argv[] = {SB_FALSE_PATH, NULL};
     int64_t start = sb_now_ms();
     if (start <= 0 || start > INT64_MAX - 5000) return sb_refuse("CLOCK_UNAVAILABLE");
     if (!sb_spawn(&b, argv[0], argv)) return false;
@@ -359,7 +366,7 @@ static bool sb_low_stdio(void)
 static bool sb_lost_child(void)
 {
     struct ssh_bridge b;
-    char *const argv[] = {"/bin/false", NULL};
+    char *const argv[] = {SB_FALSE_PATH, NULL};
     int64_t start = sb_now_ms();
     if (start <= 0 || start > INT64_MAX - 5000) return sb_refuse("CLOCK_UNAVAILABLE");
     if (!sb_spawn(&b, argv[0], argv)) return false;
