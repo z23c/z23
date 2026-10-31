@@ -955,7 +955,7 @@ static bool rfs_case_fast_lane_repeated_content_length(void)
 {
     static const char body[] =
         "{\"method\":\"dumpstate\",\"params\":[\"status_frontdoor\"]}";
-    char one[512], dup_big[512], dup_equal[512];
+    char one[512], dup_big[512], dup_equal[512], dup_empty[512];
     printf("frontdoor fast lane refuses a repeated Content-Length... ");
     int n1 = snprintf(one, sizeof(one),
         "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: %zu\r\n\r\n%s",
@@ -966,12 +966,18 @@ static bool rfs_case_fast_lane_repeated_content_length(void)
     int n3 = snprintf(dup_equal, sizeof(dup_equal),
         "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: %zu\r\n"
         "Content-Length: %zu\r\n\r\n%s", strlen(body), strlen(body), body);
-    bool ok = n1 > 0 && n2 > 0 && n3 > 0 &&
+    /* A bare `Content-Length:` line (value empty, LF only) is still a
+     * Content-Length header to the dispatch path. */
+    int n4 = snprintf(dup_empty, sizeof(dup_empty),
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: %zu\r\n"
+        "Content-Length:\nX-Pad: 1\r\n\r\n%s", strlen(body), body);
+    bool ok = n1 > 0 && n2 > 0 && n3 > 0 && n4 > 0 &&
         (size_t)n1 < sizeof(one) && (size_t)n2 < sizeof(dup_big) &&
-        (size_t)n3 < sizeof(dup_equal) &&
+        (size_t)n3 < sizeof(dup_equal) && (size_t)n4 < sizeof(dup_empty) &&
         rpc_http_test_fastlane_peek_matches(one) &&
         !rpc_http_test_fastlane_peek_matches(dup_big) &&
-        !rpc_http_test_fastlane_peek_matches(dup_equal);
+        !rpc_http_test_fastlane_peek_matches(dup_equal) &&
+        !rpc_http_test_fastlane_peek_matches(dup_empty);
     printf(ok ? "OK\n" : "FAIL\n");
     return ok;
 }

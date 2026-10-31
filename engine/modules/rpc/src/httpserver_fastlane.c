@@ -53,7 +53,7 @@ static long fastlane_content_length(const char *buf, size_t hdr_len)
         const char *eol = memchr(p, '\n', (size_t)(buf + hdr_len - p));
         if (eol == NULL)
             break;
-        if ((size_t)(eol - p) > 15 && strncasecmp(p, "Content-Length:", 15) == 0) {
+        if ((size_t)(eol - p) >= 15 && strncasecmp(p, "Content-Length:", 15) == 0) {
             if (seen)
                 return -1;
             seen = true;
