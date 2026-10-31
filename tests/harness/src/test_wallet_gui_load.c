@@ -15,6 +15,13 @@
 #define GUI_BIN "build/bin/z23-dev"
 #define GUI_SO "build/bin/libz23walletgui.so"
 #define GUI_CAPTURE (4u * 1024u * 1024u)
+/* The C runtime a dynamic image must name: glibc/musl on ELF hosts, libSystem
+ * on macOS. Selected per platform, never accepted interchangeably. */
+#ifdef __APPLE__
+#define GUI_LIBC_FRAGMENT "libSystem"
+#else
+#define GUI_LIBC_FRAGMENT "libc.so"
+#endif
 
 static uint16_t rd16(const unsigned char *p)
 {
@@ -196,6 +203,61 @@ static int elf_collect_needed(FILE *f, const unsigned char *dyn, size_t dyn_sz,
     return used > 0 ? 0 : -1;
 }
 
+/* A Mach-O image has no DT_NEEDED; its dependencies are the dylib load
+ * commands. Constants are spelled out so the parser needs no Apple header
+ * and an ELF host simply never reaches it. Thin little-endian 64-bit only,
+ * which is what a native build links. Returns 1 when `f` is such an image
+ * (names filled, or -1 on a malformed one), 0 when it is not Mach-O. */
+static int macho_needed(FILE *f, char *names, size_t cap)
+{
+    unsigned char hdr[32], *cmds;
+    uint32_t ncmds, sizeofcmds, off = 0, i;
+    size_t used = 0;
+    int rc = -1;
+
+    if (!host_is_le() || elf_read(f, hdr, sizeof hdr, 0) != 0 ||
+        rd32(hdr) != 0xfeedfacfu)
+        return 0;
+    ncmds = rd32(hdr + 16);
+    sizeofcmds = rd32(hdr + 20);
+    if (sizeofcmds == 0 || sizeofcmds > (16u << 20))
+        return -1;
+    cmds = malloc(sizeofcmds);
+    if (cmds == NULL || elf_read(f, cmds, sizeofcmds, sizeof hdr) != 0)
+        goto out;
+    for (i = 0; i < ncmds; i++) {
+        uint32_t cmd, size, name_off;
+        size_t len;
+        if (off > sizeofcmds || sizeofcmds - off < 8)
+            goto out;
+        cmd = rd32(cmds + off);
+        size = rd32(cmds + off + 4);
+        if (size < 8 || size > sizeofcmds - off)
+            goto out;
+        if (cmd == 0xcu || cmd == 0x20u || cmd == 0x80000018u ||
+            cmd == 0x8000001fu ||
+            cmd == 0x80000023u) {
+            if (size < 24)
+                goto out;
+            name_off = rd32(cmds + off + 8);
+            if (name_off < 24 || name_off >= size)
+                goto out;
+            len = strnlen((const char *)cmds + off + name_off, size - name_off);
+            if (len == size - name_off || used + len + 2 > cap)
+                goto out;
+            memcpy(names + used, cmds + off + name_off, len);
+            used += len;
+            names[used++] = '\n';
+            names[used] = '\0';
+        }
+        off += size;
+    }
+    rc = (used > 0 && off == sizeofcmds) ? 1 : -1;
+out:
+    free(cmds);
+    return rc;
+}
+
 static int elf_needed(const char *path, char *names, size_t cap)
 {
     FILE *f;
@@ -209,6 +271,13 @@ static int elf_needed(const char *path, char *names, size_t cap)
     if (f == NULL) {
         fprintf(stderr, "wallet gui load: cannot open %s\n", path);
         return -1;
+    }
+    rc = macho_needed(f, names, cap);
+    if (rc != 0) {
+        if (rc < 0)
+            fprintf(stderr, "wallet gui load: dylib load commands of %s are unreadable\n", path);
+        fclose(f);
+        return rc < 0 ? -1 : 0;
     }
     if (elf_header(f, &phoff, &phentsize, &phnum) != 0 ||
         elf_dynamic(f, phoff, phnum, phentsize, &dyn_off, &dyn_sz) != 0) {
@@ -243,7 +312,7 @@ static int closed_libs_absent(const char *names)
         "libgtk", "libgdk-3", "libwebkit", "libjavascriptcore"
     };
     size_t i;
-    if (!names_contain(names, "libc.so")) {
+    if (!names_contain(names, GUI_LIBC_FRAGMENT)) {
         fprintf(stderr, "wallet gui load: DT_NEEDED did not name libc\n%s", names);
         return 1;
     }
@@ -341,6 +410,66 @@ static int run_captured(const char *const argv[], char *buf, size_t cap,
     else
         buf[cap - 1] = '\0';
     return 0;
+}
+
+static void put32(unsigned char *p, uint32_t v)
+{
+    memcpy(p, &v, sizeof v);
+}
+
+/* Synthetic thin 64-bit Mach-O: one dylib command of each kind the reader
+ * must see (load, lazy, weak, re-export, upward) between two commands it
+ * must skip. Runs on every little-endian host; it needs no Apple binary. */
+static int test_macho_dylib_commands(const char *dir)
+{
+    static const uint32_t kinds[] = {0xcu, 0x20u, 0x80000018u, 0x8000001fu,
+                                     0x80000023u};
+    static const char *const libs[] = {"/usr/lib/libload.dylib",
+                                       "/usr/lib/liblazy.dylib",
+                                       "/usr/lib/libweak.dylib",
+                                       "/usr/lib/libreexport.dylib",
+                                       "/usr/lib/libupward.dylib"};
+    unsigned char img[1024];
+    char path[600], names[1024];
+    int failures = 0;
+    TEST("Mach-O reader names load, lazy, weak, re-export and upward dylibs") {
+        size_t off = 32;
+        uint32_t ncmds = 0;
+        memset(img, 0, sizeof img);
+        put32(img, 0xfeedfacfu);
+        put32(img + off, 0x1bu);              /* LC_UUID: not a dylib */
+        put32(img + off + 4, 24);
+        off += 24;
+        ncmds++;
+        for (size_t i = 0; i < 5; i++) {
+            size_t len = strlen(libs[i]) + 1;
+            uint32_t size = (uint32_t)((24 + len + 7) & ~(size_t)7);
+            put32(img + off, kinds[i]);
+            put32(img + off + 4, size);
+            put32(img + off + 8, 24);
+            memcpy(img + off + 24, libs[i], len);
+            off += size;
+            ncmds++;
+        }
+        put32(img + off, 0x2au);              /* LC_SOURCE_VERSION: skipped */
+        put32(img + off + 4, 16);
+        off += 16;
+        ncmds++;
+        put32(img + 16, ncmds);
+        put32(img + 20, (uint32_t)(off - 32));
+        ASSERT(snprintf(path, sizeof path, "%s/synthetic.macho", dir) > 0);
+        FILE *f = fopen(path, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fwrite(img, 1, off, f) == off);
+        ASSERT(fclose(f) == 0);
+        if (host_is_le()) {
+            ASSERT(elf_needed(path, names, sizeof names) == 0);
+            for (size_t i = 0; i < 5; i++)
+                ASSERT(names_contain(names, libs[i]));
+        }
+        PASS();
+    } _test_next:;
+    return failures;
 }
 
 static int test_needed_headless(void)
@@ -494,7 +623,8 @@ int test_wallet_gui_load(void)
     char dir[512];
     int failures;
     test_make_tmpdir(dir, sizeof dir, "wallet_gui", "load");
-    failures = test_needed_headless() + test_needed_gui_so() +
+    failures = test_macho_dylib_commands(dir) + test_needed_headless() +
+               test_needed_gui_so() +
                test_gui_launch(dir) + test_headless_boot(dir);
     test_rm_rf(dir);
     return failures;
