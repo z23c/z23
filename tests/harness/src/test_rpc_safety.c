@@ -731,6 +731,216 @@ static int t_listunspent_frees_filtered_rows(void)
 #else
 #endif
 
+static int rs_case_reindex_replay(void)
+{
+    int failures = 0;
+
+    printf("rpc_safety: reindexchainstate rejects runtime replay... ");
+    {
+        ensure_rpc_warmup_finished_once();
+
+        struct rpc_table tbl;
+        rpc_table_init(&tbl);
+        register_blockchain_rpc_commands(&tbl);
+
+        struct json_value params = {0};
+        struct json_value result = {0};
+        json_init(&params);
+        json_set_array(&params);
+        json_init(&result);
+
+        bool ok = !rpc_table_execute(&tbl, "reindexchainstate", &params,
+                                     &result) &&
+                  result_is_retired_reindex_error(&result);
+
+        json_free(&params);
+        json_free(&result);
+
+        if (ok) printf("OK\n");
+        else    { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+static int rs_case_walletbackup_status(void)
+{
+    int failures = 0;
+
+    printf("rpc_safety: wallet backup status never exposes local paths... ");
+    {
+        ensure_rpc_warmup_finished_once();
+        struct rpc_table tbl;
+        rpc_table_init(&tbl);
+        register_wallet_diagnostic_rpc_commands(&tbl);
+
+        struct json_value params, result;
+        json_init(&params);
+        json_set_array(&params);
+        json_init(&result);
+        bool ok = rpc_table_execute(&tbl, "walletbackupstatus", &params,
+                                    &result) &&
+                  json_get(&result, "last_path") == NULL &&
+                  json_get(&result, "last_encrypted_path") == NULL &&
+                  json_get(&result, "last_error") == NULL &&
+                  json_get(&result, "backup_available") != NULL &&
+                  json_get(&result, "encrypted_backup_available") != NULL &&
+                  json_get(&result, "next_action") != NULL;
+        json_free(&params);
+        json_free(&result);
+
+        if (ok) printf("OK\n");
+        else    { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+static int rs_case_getrawmempool_live(void)
+{
+    int failures = 0;
+
+    printf("rpc_safety: getrawmempool returns live transaction ids... ");
+    {
+        ensure_rpc_warmup_finished_once();
+
+        struct tx_mempool pool;
+        tx_mempool_init(&pool, 1000);
+
+        struct transaction tx;
+        transaction_init(&tx);
+        bool ok = transaction_alloc(&tx, 1, 1);
+        if (ok) {
+            memset(tx.vin[0].prevout.hash.data, 0x6d, 32);
+            tx.vin[0].prevout.n = 1;
+            tx.vin[0].sequence = UINT32_MAX;
+            tx.vout[0].value = 1000;
+            transaction_compute_hash(&tx);
+        }
+
+        struct mempool_entry entry;
+        memset(&entry, 0, sizeof(entry));
+        if (ok) {
+            mempool_entry_init(&entry, &tx, 10000, 1700000000, 1e9,
+                               100, true, false, 0);
+            ok = tx_mempool_add_unchecked(&pool, &tx.hash, &entry);
+        }
+
+        struct rpc_table tbl;
+        rpc_table_init(&tbl);
+        rpc_blockchain_set_state(NULL, &pool, NULL);
+        register_blockchain_rpc_commands(&tbl);
+
+        struct json_value params = {0};
+        struct json_value result = {0};
+        json_init(&params);
+        json_set_array(&params);
+        json_init(&result);
+
+        ok = ok && rpc_table_execute(&tbl, "getrawmempool", &params,
+                                     &result);
+        char expected[65] = {0};
+        if (ok)
+            uint256_get_hex(&tx.hash, expected);
+        ok = ok && result.type == JSON_ARR && result.num_children == 1 &&
+             result.children[0].type == JSON_STR &&
+             strcmp(json_get_str(&result.children[0]), expected) == 0;
+
+        json_free(&params);
+        json_free(&result);
+        rpc_blockchain_set_state(NULL, NULL, NULL);
+        if (tx.hash.data[0] || tx.num_vin || tx.num_vout)
+            mempool_entry_free(&entry);
+        transaction_free(&tx);
+        tx_mempool_free(&pool);
+
+        if (ok) printf("OK\n");
+        else    { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
+static int rs_case_rawsign_supplemental(void)
+{
+    int failures = 0;
+
+    printf("rpc_safety: raw-sign supplemental secrets stay request-local... ");
+    {
+        struct basic_keystore *ks = calloc(1, sizeof(*ks));
+        struct rpc_table *tbl = calloc(1, sizeof(*tbl));
+        bool ok = ks && tbl;
+        if (ok) {
+            keystore_init(ks);
+            rpc_table_init(tbl);
+            rpc_rawtx_set_state(NULL, NULL, NULL, "/tmp");
+            rpc_rawtx_set_keystore(ks);
+            register_rawtransaction_rpc_commands(tbl);
+
+            struct transaction tx;
+            transaction_init(&tx);
+            tx.overwintered = true;
+            tx.version = SAPLING_TX_VERSION;
+            tx.version_group_id = SAPLING_VERSION_GROUP_ID;
+            char tx_hex[1024];
+            size_t tx_hex_len = encode_hex_tx(&tx, tx_hex, sizeof(tx_hex));
+            ok = tx_hex_len > 0 && tx_hex_len < sizeof(tx_hex);
+            tx_hex[tx_hex_len] = 0;
+            transaction_free(&tx);
+
+            struct privkey extra = {0};
+            struct pubkey extra_pub;
+            char wif[128];
+            size_t secret_len = 0;
+            const unsigned char *secret = chain_params_base58_prefix(
+                chain_params_get(), B58_SECRET_KEY, &secret_len);
+            privkey_make_new(&extra, true);
+            ok = ok && privkey_get_pubkey(&extra, &extra_pub) &&
+                 encode_secret(&extra, secret, secret_len, wif, sizeof(wif));
+            struct key_id extra_id = pubkey_get_id(&extra_pub);
+
+            struct script redeem = {0};
+            redeem.data[0] = OP_1;
+            redeem.size = 1;
+            struct script_id redeem_id;
+            script_id_from_script(&redeem_id, &redeem);
+
+            struct json_value params, prevs, prev, keys, value, result;
+            json_init(&params); json_set_array(&params);
+            json_init(&value); json_set_str(&value, tx_hex);
+            json_push_back(&params, &value); json_free(&value);
+            json_init(&prevs); json_set_array(&prevs);
+            json_init(&prev); json_set_object(&prev);
+            json_push_kv_str(&prev, "txid",
+                "0000000000000000000000000000000000000000000000000000000000000000");
+            json_push_kv_int(&prev, "vout", 0);
+            json_push_kv_str(&prev, "scriptPubKey", "51");
+            json_push_kv_real(&prev, "amount", 0.0);
+            json_push_kv_str(&prev, "redeemScript", "51");
+            json_push_back(&prevs, &prev); json_free(&prev);
+            json_push_back(&params, &prevs); json_free(&prevs);
+            json_init(&keys); json_set_array(&keys);
+            json_init(&value); json_set_str(&value, wif);
+            json_push_back(&keys, &value); json_free(&value);
+            json_push_back(&params, &keys); json_free(&keys);
+            json_init(&result);
+
+            ok = ok && rpc_table_execute(tbl, "signrawtransaction", &params,
+                                         &result);
+            ok = ok && !keystore_have_key(ks, &extra_id) &&
+                 !keystore_have_cscript(ks, &redeem_id.hash);
+
+            json_free(&params);
+            json_free(&result);
+            memory_cleanse(extra.vch, sizeof(extra.vch));
+            rpc_rawtx_set_keystore(NULL);
+            keystore_free(ks);
+        }
+        free(ks);
+        free(tbl);
+        if (ok) printf("OK\n");
+        else    { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
 int test_rpc_safety(void);
 int test_rpc_safety(void)
 {
@@ -831,114 +1041,9 @@ int test_rpc_safety(void)
         else    { printf("FAIL\n"); failures++; }
     }
 
-    printf("rpc_safety: reindexchainstate rejects runtime replay... ");
-    {
-        ensure_rpc_warmup_finished_once();
-
-        struct rpc_table tbl;
-        rpc_table_init(&tbl);
-        register_blockchain_rpc_commands(&tbl);
-
-        struct json_value params = {0};
-        struct json_value result = {0};
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-
-        bool ok = !rpc_table_execute(&tbl, "reindexchainstate", &params,
-                                     &result) &&
-                  result_is_retired_reindex_error(&result);
-
-        json_free(&params);
-        json_free(&result);
-
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
-
-    printf("rpc_safety: wallet backup status never exposes local paths... ");
-    {
-        ensure_rpc_warmup_finished_once();
-        struct rpc_table tbl;
-        rpc_table_init(&tbl);
-        register_wallet_diagnostic_rpc_commands(&tbl);
-
-        struct json_value params, result;
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-        bool ok = rpc_table_execute(&tbl, "walletbackupstatus", &params,
-                                    &result) &&
-                  json_get(&result, "last_path") == NULL &&
-                  json_get(&result, "last_encrypted_path") == NULL &&
-                  json_get(&result, "last_error") == NULL &&
-                  json_get(&result, "backup_available") != NULL &&
-                  json_get(&result, "encrypted_backup_available") != NULL &&
-                  json_get(&result, "next_action") != NULL;
-        json_free(&params);
-        json_free(&result);
-
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
-
-    printf("rpc_safety: getrawmempool returns live transaction ids... ");
-    {
-        ensure_rpc_warmup_finished_once();
-
-        struct tx_mempool pool;
-        tx_mempool_init(&pool, 1000);
-
-        struct transaction tx;
-        transaction_init(&tx);
-        bool ok = transaction_alloc(&tx, 1, 1);
-        if (ok) {
-            memset(tx.vin[0].prevout.hash.data, 0x6d, 32);
-            tx.vin[0].prevout.n = 1;
-            tx.vin[0].sequence = UINT32_MAX;
-            tx.vout[0].value = 1000;
-            transaction_compute_hash(&tx);
-        }
-
-        struct mempool_entry entry;
-        memset(&entry, 0, sizeof(entry));
-        if (ok) {
-            mempool_entry_init(&entry, &tx, 10000, 1700000000, 1e9,
-                               100, true, false, 0);
-            ok = tx_mempool_add_unchecked(&pool, &tx.hash, &entry);
-        }
-
-        struct rpc_table tbl;
-        rpc_table_init(&tbl);
-        rpc_blockchain_set_state(NULL, &pool, NULL);
-        register_blockchain_rpc_commands(&tbl);
-
-        struct json_value params = {0};
-        struct json_value result = {0};
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&result);
-
-        ok = ok && rpc_table_execute(&tbl, "getrawmempool", &params,
-                                     &result);
-        char expected[65] = {0};
-        if (ok)
-            uint256_get_hex(&tx.hash, expected);
-        ok = ok && result.type == JSON_ARR && result.num_children == 1 &&
-             result.children[0].type == JSON_STR &&
-             strcmp(json_get_str(&result.children[0]), expected) == 0;
-
-        json_free(&params);
-        json_free(&result);
-        rpc_blockchain_set_state(NULL, NULL, NULL);
-        if (tx.hash.data[0] || tx.num_vin || tx.num_vout)
-            mempool_entry_free(&entry);
-        transaction_free(&tx);
-        tx_mempool_free(&pool);
-
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
+    failures += rs_case_reindex_replay();
+    failures += rs_case_walletbackup_status();
+    failures += rs_case_getrawmempool_live();
 
     printf("rpc_safety: confirmed tx uses verified node/wallet locator... ");
     {
@@ -1827,82 +1932,7 @@ int test_rpc_safety(void)
         else    { printf("FAIL\n"); failures++; }
     }
 
-    printf("rpc_safety: raw-sign supplemental secrets stay request-local... ");
-    {
-        struct basic_keystore *ks = calloc(1, sizeof(*ks));
-        struct rpc_table *tbl = calloc(1, sizeof(*tbl));
-        bool ok = ks && tbl;
-        if (ok) {
-            keystore_init(ks);
-            rpc_table_init(tbl);
-            rpc_rawtx_set_state(NULL, NULL, NULL, "/tmp");
-            rpc_rawtx_set_keystore(ks);
-            register_rawtransaction_rpc_commands(tbl);
-
-            struct transaction tx;
-            transaction_init(&tx);
-            tx.overwintered = true;
-            tx.version = SAPLING_TX_VERSION;
-            tx.version_group_id = SAPLING_VERSION_GROUP_ID;
-            char tx_hex[1024];
-            size_t tx_hex_len = encode_hex_tx(&tx, tx_hex, sizeof(tx_hex));
-            ok = tx_hex_len > 0 && tx_hex_len < sizeof(tx_hex);
-            tx_hex[tx_hex_len] = 0;
-            transaction_free(&tx);
-
-            struct privkey extra = {0};
-            struct pubkey extra_pub;
-            char wif[128];
-            size_t secret_len = 0;
-            const unsigned char *secret = chain_params_base58_prefix(
-                chain_params_get(), B58_SECRET_KEY, &secret_len);
-            privkey_make_new(&extra, true);
-            ok = ok && privkey_get_pubkey(&extra, &extra_pub) &&
-                 encode_secret(&extra, secret, secret_len, wif, sizeof(wif));
-            struct key_id extra_id = pubkey_get_id(&extra_pub);
-
-            struct script redeem = {0};
-            redeem.data[0] = OP_1;
-            redeem.size = 1;
-            struct script_id redeem_id;
-            script_id_from_script(&redeem_id, &redeem);
-
-            struct json_value params, prevs, prev, keys, value, result;
-            json_init(&params); json_set_array(&params);
-            json_init(&value); json_set_str(&value, tx_hex);
-            json_push_back(&params, &value); json_free(&value);
-            json_init(&prevs); json_set_array(&prevs);
-            json_init(&prev); json_set_object(&prev);
-            json_push_kv_str(&prev, "txid",
-                "0000000000000000000000000000000000000000000000000000000000000000");
-            json_push_kv_int(&prev, "vout", 0);
-            json_push_kv_str(&prev, "scriptPubKey", "51");
-            json_push_kv_real(&prev, "amount", 0.0);
-            json_push_kv_str(&prev, "redeemScript", "51");
-            json_push_back(&prevs, &prev); json_free(&prev);
-            json_push_back(&params, &prevs); json_free(&prevs);
-            json_init(&keys); json_set_array(&keys);
-            json_init(&value); json_set_str(&value, wif);
-            json_push_back(&keys, &value); json_free(&value);
-            json_push_back(&params, &keys); json_free(&keys);
-            json_init(&result);
-
-            ok = ok && rpc_table_execute(tbl, "signrawtransaction", &params,
-                                         &result);
-            ok = ok && !keystore_have_key(ks, &extra_id) &&
-                 !keystore_have_cscript(ks, &redeem_id.hash);
-
-            json_free(&params);
-            json_free(&result);
-            memory_cleanse(extra.vch, sizeof(extra.vch));
-            rpc_rawtx_set_keystore(NULL);
-            keystore_free(ks);
-        }
-        free(ks);
-        free(tbl);
-        if (ok) printf("OK\n");
-        else    { printf("FAIL\n"); failures++; }
-    }
+    failures += rs_case_rawsign_supplemental();
 
     printf("rpc_safety: raw-sign P2SH 2-of-2 emits both signatures... ");
     {

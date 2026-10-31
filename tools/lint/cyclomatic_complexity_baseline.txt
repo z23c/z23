@@ -265,7 +265,7 @@ tests/harness/src/test_parallel.c:main:178
 tests/harness/src/test_parallel.c:rerun_load_flaky_groups:20
 tests/harness/src/test_parallel.c:run_parallel_phase:25
 tests/harness/src/test_parallel.c:write_test_timing_json:34
-tests/harness/src/test_rpc_safety.c:test_rpc_safety:277
+tests/harness/src/test_rpc_safety.c:test_rpc_safety:247
 tests/harness/src/test_wallet_backup.c:t_force_now_encrypted:27
 tests/harness/src/test_wallet_destruction_drill.c:act1_transparent:73
 tests/harness/src/test_wallet_destruction_drill.c:act2_bodyless_restore_must_fail_loud:29
