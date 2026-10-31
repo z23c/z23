@@ -1968,10 +1968,24 @@ static bool compiler_is_known_driver(const char *path)
     return strstr(base, "gcc") != NULL || strstr(base, "clang") != NULL;
 }
 
+/* Does the invocation load code into the driver that could read anything: a
+ * compiler plugin, a specs file, or a -wrapper program? */
+static bool driver_extended(const struct plan *pl)
+{
+    for (int i = 1; i < pl->argc; i++) {
+        const char *a = pl->argv[i];
+        if (strncmp(a, "-fplugin", 8) == 0 || strncmp(a, "-specs", 6) == 0 ||
+            strncmp(a, "-wrapper", 8) == 0)
+            return true;
+    }
+    return false;
+}
+
 static enum env_key_mode env_key_mode_for(const struct plan *pl,
                                           const char *ccpath)
 {
-    if (compiler_is_script(ccpath) || !compiler_is_known_driver(ccpath))
+    if (compiler_is_script(ccpath) || !compiler_is_known_driver(ccpath) ||
+        driver_extended(pl) || pl->rsp_n > 0)
         return ENV_KEY_FULL;
 #if defined(__linux__)
     return link_may_run(pl) ? ENV_KEY_ALLOW_PATH : ENV_KEY_ALLOW;

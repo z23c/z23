@@ -22,6 +22,8 @@
 /* One compile of `src` from inside root `dir`, every path absolute under it.
  * map != 0 adds -ffile-prefix-map=<dir>=/zcl; `inc2` is an extra absolute -I
  * (NULL for none). */
+static const char *pk_extra; /* one extra compiler flag for the next pk_cc */
+
 static int pk_cc(const char *dir, const char *src, const char *obj, int map,
                  const char *inc2, const char *dep,
                  const char *const *env)
@@ -39,6 +41,8 @@ static int pk_cc(const char *dir, const char *src, const char *obj, int map,
         av[n++] = "-MF";
         av[n++] = dep;
     }
+    if (pk_extra)
+        av[n++] = pk_extra;
     if (map)
         av[n++] = zcf("-ffile-prefix-map=%s=/zcl", dir);
     av[n] = NULL;
@@ -94,6 +98,26 @@ static int pk_unshared(void)
     return 0;
 }
 
+/* A specs file (or plugin, or -wrapper) can make the driver read anything: the
+ * unrelated variable must then be part of the key. */
+static int pk_env_specs(void)
+{
+    const char *a = zcw("portable.a"), *b = zcw("portable.b");
+    if (zc_put("portable.specs", "") != 0)
+        return 1;
+    pk_extra = zcf("-specs=%s", zcw("portable.specs"));
+    const char *const s1[] = { "ZCC_PORTABLE_NOISE=1", NULL };
+    const char *const s2[] = { "ZCC_PORTABLE_NOISE=2", NULL };
+    int sc = pk_cc(a, "s.c", zcw("s.1.o"), 1, NULL, NULL, s1) != 0 ||
+             pk_cc(b, "s.c", zcw("s.2.o"), 1, NULL, NULL, s2) != 0;
+    pk_extra = NULL;
+    if (sc)
+        zc_fail("portable key (e): specs compile failed");
+    zc_disp("MISS", "portable key (e): a specs-extended driver was keyed on the "
+                    "allowlist only");
+    return 0;
+}
+
 /* (e) an allowlisted variable changes the key; an unrelated one does not. */
 static int pk_env(void)
 {
@@ -111,7 +135,7 @@ static int pk_env(void)
         pk_cc(b, "n.c", zcw("n.2.o"), 1, NULL, NULL, n2) != 0)
         zc_fail("portable key (e): unrelated-variable compile failed");
     zc_disp("HIT", "portable key (e): a variable no compiler reads changed the key");
-    return 0;
+    return pk_env_specs();
 }
 
 /* (f) a depfile or a stored warning would name this root's absolute paths, so
@@ -136,7 +160,7 @@ static int pk_fixture(void)
     if (csr_mkdirs(zcw("portable.a/inc")) || csr_mkdirs(zcw("portable.b/inc")) ||
         csr_mkdirs(zcw("portable.s1/inc")) || csr_mkdirs(zcw("portable.s2/inc")))
         return 1;
-    static const char *const srcs[] = { "p.c", "np.c", "out.c", "e.c", "n.c", "d.c" };
+    static const char *const srcs[] = { "p.c", "np.c", "out.c", "e.c", "n.c", "d.c", "s.c" };
     for (size_t i = 0; i < sizeof srcs / sizeof srcs[0]; i++)
         if (pk_put_pair(srcs[i],
                         zcf("#include \"p.h\"\nint pk_%zu(void) { return "
