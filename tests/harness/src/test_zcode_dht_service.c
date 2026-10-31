@@ -2951,8 +2951,12 @@ static int test_record_transport_and_restart(void) {
      * intent survives restart without a private key, but losing the pin
      * makes its next renewal fail closed while the last signed ACK simply
      * ages toward expiry. */
-    char ack_dir[] = "/tmp/zcl_dht_ack_store_XXXXXX";
-    ASSERT(mkdtemp(ack_dir) != NULL);
+    char ack_tmp[] = "/tmp/zcl_dht_ack_store_XXXXXX";
+    char ack_dir[PATH_MAX];
+    ASSERT(mkdtemp(ack_tmp) != NULL);
+    /* /tmp is a symlink on macOS (/private/tmp); the store takes the real
+     * path, so resolve it here rather than relaxing the store's refusal. */
+    ASSERT(realpath(ack_tmp, ack_dir) != NULL);
     struct vcs_package_store *ack_store =
         vcs_package_store_open(ack_dir, UINT64_C(4) * 1024 * 1024);
     ASSERT(ack_store != NULL);
@@ -4071,9 +4075,10 @@ static bool space16_expect(bool ok, const char *expr, int line) {
 
 static bool space16_setup_nodes(struct space16_case *c) {
   for (size_t i = 0; i < SPACE16_NODES; i++) {
-    (void)snprintf(c->net.dir[i], sizeof(c->net.dir[i]),
-                   "/tmp/zcl_space16_%zu_XXXXXX", i);
-    if (!space16_expect(mkdtemp(c->net.dir[i]) != NULL,
+    char tmpl[PATH_MAX];
+    (void)snprintf(tmpl, sizeof(tmpl), "/tmp/zcl_space16_%zu_XXXXXX", i);
+    if (!space16_expect(mkdtemp(tmpl) != NULL &&
+                            realpath(tmpl, c->net.dir[i]) != NULL,
                         "mkdtemp(net.dir[i]) != NULL", __LINE__))
       return false;
     c->created_dirs++;
