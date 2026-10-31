@@ -573,7 +573,7 @@ static bool rpc_sendtoaddress(const struct json_value *params, bool help,
         node_db_sync_wallet_tx(ctx->node_db, &wtx.tx, ctx->wallet, 0);
 
     if (!wallet_send_relay(ctx, &wtx)) {
-        json_set_str(result, "Private broadcast unavailable; send rolled back");
+        json_set_str(result, wallet_send_relay_failure_text());
         transaction_free(&wtx.tx);
         LOG_FAIL("wallet", "sendtoaddress: private broadcast not queued");
     }
@@ -680,8 +680,8 @@ bool wallet_direct_sendtoaddress(const char *address, int64_t amount_sat,
     if (wallet_ctx_db_ready(ctx))
         node_db_sync_wallet_tx(ctx->node_db, &wtx.tx, ctx->wallet, 0);
     if (!wallet_send_relay(ctx, &wtx)) {
-        snprintf(error_out, error_out_size,
-                 "Private broadcast unavailable; send rolled back");
+        snprintf(error_out, error_out_size, "%s",
+                 wallet_send_relay_failure_text());
         transaction_free(&wtx.tx);
         LOG_FAIL("wallet", "direct_sendtoaddress: private broadcast not queued");
     }

@@ -1274,6 +1274,38 @@ static const args_arm_fn k_args_arms[] = {
 };
 #define ARGS_ARM_COUNT (sizeof(k_args_arms) / sizeof(k_args_arms[0]))
 
+int args_resolve_wallet_broadcast(struct app_context *ctx, const char *value)
+{
+    if (!value)
+        return 0;
+    if (strcmp(value, "private") == 0)
+        ctx->wallet_broadcast = 1;
+    else if (strcmp(value, "public") == 0)
+        ctx->wallet_broadcast = 0;
+    else {
+        fprintf(stderr, "Invalid walletbroadcast value \"%s\" (use private "
+                        "or public); refusing to start with a send mode it "
+                        "cannot honor.\n", value);
+        return 1;
+    }
+    return 0;
+}
+
+int args_private_mode_onion_policy(struct app_context *ctx)
+{
+    if (ctx->wallet_broadcast != 1)
+        return 0;
+    if (ctx->onion_persist || ctx->onion_rotate) {
+        fprintf(stderr, "-walletbroadcast=private refuses -onion-persist and "
+                        "-onion-rotate: a node that serves an onion service "
+                        "can be matched to its outbound connections. Private "
+                        "mode connects outbound only.\n");
+        return 1;
+    }
+    ctx->onion_persist_forced_off = true;
+    return 0;
+}
+
 static void args_apply_buildworker_config(int argc, char **argv,
                                           struct app_context *ctx)
 {
@@ -1339,6 +1371,12 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                 "-v2transport is deprecated; use -noisetransport%s\n",
                 noise_new_set ? " (new spelling takes precedence)" : "");
     }
+    /* z23.conf reaches here through GetArg: a setting that argv did not set
+     * must still be honored, never silently dropped. */
+    if (args_resolve_wallet_broadcast(ctx, GetArg("-walletbroadcast", NULL)))
+        return 1;
+    if (args_private_mode_onion_policy(ctx))
+        return 1;
     /* Resolve the -onion-persist default AFTER the whole loop so flag order
      * never matters (-addnode=/-tor/-onion-persist can appear in any
      * order). Only applies when the operator did not name either explicit

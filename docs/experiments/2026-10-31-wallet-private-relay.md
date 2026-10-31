@@ -165,3 +165,24 @@ do not identify it. The follow-up work found one flaky report in
 shorter than the worst case of 220 s, so about one run in seven failed it
 under any load. The run window is now 225 s. This may be what failed; it is
 not proved.
+
+## Second delta review (2026-10-31)
+
+Closed with a test each: every wallet commit and re-admission is gated to the
+private pool in private mode; a send handed to a peer never reads "nothing was
+sent", also after a restart (the fact is persisted); a refused peer queue is
+not an attempt and success is worded as handed to the peer; a failed queue
+write with a failed rollback answers "outcome unknown"; a resume reserves the
+notes of a recorded shielded send again; held sends are reported as held by the
+send callers; a seen-back send keeps a status until mined; `walletbroadcast`
+in `z23.conf` is honored and an unknown value stops the boot; private mode
+runs no onion service directory or request handler and refuses
+`-onion-persist` and `-onion-rotate`.
+
+Not covered by a test: the refusal guards on the vault, ZSLP, ZDIR, ZNAM, ZID,
+blog, swap and yardsale call sites are exercised only through the wallet
+commit gate where they reach it; `wpb_nullifiers_unseen` is covered only for
+the history-incomplete branch (hold); `wallet_view_send` and the messaging
+reply are not driven by a test; no live Tor run was done for these items.
+The reservation test builds a transaction whose proofs are not valid, so it
+shows the reservation, not an accepted spend.

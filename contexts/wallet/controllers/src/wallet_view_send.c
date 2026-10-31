@@ -6,6 +6,8 @@
 #include "controllers/wallet_view_internal.h"
 #include "controllers/wallet_controller.h"
 #include "controllers/sovereignty_controller.h"
+#include "controllers/wallet_private_broadcast.h"
+#include "models/activerecord.h"
 #include "models/contact.h"
 #include "util/log_macros.h"
 
@@ -353,7 +355,10 @@ static bool send_shielded_via_zsendmany(const char *address, double amount,
         if (wv_rpc_call("z_sendmany", zp, rb, sizeof(rb)) > 0) {
             char rv[256] = "";
             zcl_json_extract_str(rb, "result", rv, sizeof(rv));
-            if (strstr(rv, "opid-") || strstr(rb, "opid-")) {
+            /* z_sendmany answers with the transaction id; a legacy node
+             * answers with an operation id. Either is a real send. */
+            if (zcl_is_hex_string(rv, 64) || strstr(rv, "opid-") ||
+                strstr(rb, "opid-")) {
                 snprintf(txid_result, txid_size, "%s",
                     rv[0] ? rv : "submitted");
                 return true;
@@ -388,8 +393,22 @@ static size_t render_send_success_page(uint8_t *r, size_t max, size_t off,
     html_escape(safe_txid, sizeof(safe_txid), txid_result);
 
     bool is_opid = (strncmp(txid_result, "opid-", 5) == 0);
+    struct uint256 sent_id;
+    bool held = false;
+    if (zcl_is_hex_string(txid_result, 64)) {
+        uint256_set_hex(&sent_id, txid_result);
+        held = wallet_private_broadcast_is_held(&sent_id);
+    }
     char txid_html[600] = "";
-    if (is_opid)
+    if (held)
+        snprintf(txid_html, sizeof(txid_html),
+            "<a href='/explorer/tx/%s' class='hash' "
+            "style='word-break:break-all'>%s</a>"
+            "<div style='color:#888;font-size:14px;margin-top:8px'>"
+            "Accepted but not sent: waiting for a connected onion peer. "
+            "The coins stay reserved. Do not send it again.</div>",
+            safe_txid, safe_txid);
+    else if (is_opid)
         snprintf(txid_html, sizeof(txid_html),
             "<div class='hash' style='word-break:break-all;"
             "color:#a78bfa;font-size:14px'>%s</div>"
@@ -407,7 +426,8 @@ static size_t render_send_success_page(uint8_t *r, size_t max, size_t off,
     char amt_s[32];
     snprintf(amt_s, sizeof(amt_s), "%.8f", amount);
     struct template_var sv[] = {
-        { "heading",   is_opid ? "&#x1F512; Send to Private Address Started"
+        { "heading",   held ? "Send Held, Not Sent Yet"
+                     : is_opid ? "&#x1F512; Send to Private Address Started"
                                : "Transaction Sent" },
         { "amount",    amt_s },
         { "address",   address },

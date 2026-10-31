@@ -348,6 +348,15 @@ struct zcl_result wallet_commit_transaction(
     struct wallet *w, struct wallet_tx *wtx,
     const struct wallet_tx_admission *admission);
 
+/* Private wallet broadcast: while a pool is required, every wallet commit and
+ * re-admission must target exactly that pool, so no wallet-originated
+ * transaction can enter the main mempool whatever code path authored it.
+ * NULL lifts the requirement. */
+#define WALLET_ADMISSION_POOL_REFUSED_CODE (-9301)
+void wallet_require_admission_pool(const struct tx_mempool *pool);
+struct zcl_result wallet_admission_pool_check(
+    const struct wallet_tx_admission *admission);
+
 /* Re-admit exact bytes already durably recorded in the wallet. This is the
  * restart/rebroadcast seam: it performs full current mempool validation but
  * never adds a second wallet row or changes selected inputs. */

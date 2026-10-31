@@ -31,6 +31,7 @@
 #include "coins/coins.h"
 #include "coins/coins_view.h"
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1028,12 +1029,36 @@ static const char *wallet_mempool_result_name(enum mempool_accept_result r)
     return "unknown";
 }
 
+static _Atomic(const struct tx_mempool *) g_required_admission_pool;
+
+void wallet_require_admission_pool(const struct tx_mempool *pool)
+{
+    atomic_store(&g_required_admission_pool, pool);
+}
+
+struct zcl_result wallet_admission_pool_check(
+    const struct wallet_tx_admission *admission)
+{
+    const struct tx_mempool *required =
+        atomic_load(&g_required_admission_pool);
+    if (required && admission && admission->mempool != required)
+        return ZCL_ERR(WALLET_ADMISSION_POOL_REFUSED_CODE,
+            "PRIVATE_BROADCAST_UNSUPPORTED: this transaction would enter the "
+            "main mempool and be announced to every peer, which private "
+            "wallet broadcast forbids. Restart without "
+            "-walletbroadcast=private to use it.");
+    return ZCL_OK;
+}
+
 struct zcl_result wallet_commit_transaction(
     struct wallet *w, struct wallet_tx *wtx,
     const struct wallet_tx_admission *admission)
 {
     if (!w || !wtx || !admission)
         return ZCL_ERR(-1, "wallet commit: NULL wallet, tx, or admission context");
+    struct zcl_result pool_ok = wallet_admission_pool_check(admission);
+    if (!pool_ok.ok)
+        return pool_ok;
     if (!admission->mempool || !admission->coins_tip ||
         !admission->main_state || !admission->params) {
         return ZCL_ERR(-2,

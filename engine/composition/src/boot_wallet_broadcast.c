@@ -7,6 +7,8 @@
 #include "controllers/wallet_private_broadcast.h"
 #include "services/wallet_private_relay.h"
 
+#include "util/util.h"
+
 #include <stdio.h>
 
 /* Private broadcast hides the sending IP only if no peer can reach this node
@@ -23,7 +25,7 @@ static bool boot_private_broadcast_allowed(const struct app_context *ctx)
                         "or use -walletbroadcast=public.\n");
         return false;
     }
-    if (ctx->external_ip) {
+    if (ctx->external_ip || GetArg("-externalip", NULL)) {
         fprintf(stderr, "-walletbroadcast=private refuses -externalip: the "
                         "address is sent to every peer in the version "
                         "message, including the onion peer that receives the "

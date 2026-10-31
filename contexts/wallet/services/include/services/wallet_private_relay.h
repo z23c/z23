@@ -87,6 +87,10 @@ struct wpr_env {
     const struct chain_params *params;
     const char *datadir;
     int64_t min_relay_fee;
+    /* Called for a recorded send the wallet holds, on resume, before anything
+     * else: re-reserves the notes it spends, which a crash between the wallet
+     * write and the note reservation leaves free. May be NULL. */
+    void (*reserve)(const struct transaction *tx);
 };
 
 struct wpr_entry {
@@ -95,6 +99,8 @@ struct wpr_entry {
     bool expired;     /* reported for wallet rollback */
     bool held;        /* past expiry but the chain may hold it: not rolled back */
     bool disk_retry;  /* memory rolled back, the database row still to delete */
+    bool handed;      /* queued to an onion peer at least once; persisted */
+    bool mined;       /* the wallet shows it in a block */
     bool has_expiry;
     uint32_t expiry_height;
     uint32_t attempts;
@@ -136,6 +142,8 @@ struct wpr_status_entry {
     int64_t seconds_since_attempt;  /* -1 before the first push */
     bool held;                      /* past expiry; chain check not clear */
     bool disk_retry;                /* rollback waiting on the database */
+    bool handed;                    /* queued to a peer at least once */
+    bool mined;                     /* the wallet shows it in a block */
 };
 
 struct wpr_status {
@@ -206,5 +214,9 @@ struct zcl_result wpr_resume(struct wpr *r);
 void wpr_tick(struct wpr *r, int wallet_height, struct wpr_tick_result *out);
 
 void wpr_status_snapshot(struct wpr *r, struct wpr_status *out);
+
+/* The state of one recorded send. Returns false when no record exists. */
+bool wpr_entry_state(struct wpr *r, const struct uint256 *txid,
+                     enum wpr_state *state, bool *handed);
 
 #endif /* ZCL_WALLET_PRIVATE_RELAY_H */

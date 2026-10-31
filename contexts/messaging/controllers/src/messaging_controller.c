@@ -13,6 +13,7 @@
 #include "net/net.h"
 #include "net/connman.h"
 #include "controllers/network_controller.h"
+#include "controllers/wallet_private_broadcast.h"
 #include "sapling/params_init.h"     /* sapling_params_loaded (diagnostics) */
 #include "sapling/sapling_prover.h"  /* prover readiness = can we send on-chain */
 #include "chain/chainparams.h"
@@ -161,9 +162,22 @@ static bool msg_onchain_store_and_report(const char *to_addr, const char *body,
     json_push_kv_str(result, "recipient", to_addr);
     if (txid_hex)
         json_push_kv_str(result, "txid", txid_hex);
-    json_push_kv_str(result, "status", "sent");
+    /* In private wallet broadcast mode the transaction may be waiting for a
+     * connected onion peer: accepted, not sent. */
+    struct uint256 sent_id;
+    bool held = false;
+    if (txid_hex && zcl_is_hex_string(txid_hex, 64)) {
+        uint256_set_hex(&sent_id, txid_hex);
+        held = wallet_private_broadcast_is_held(&sent_id);
+    }
+    json_push_kv_str(result, "status", held ? "held" : "sent");
+    if (held)
+        json_push_kv_str(result, "note",
+                         "Held: waiting for a connected onion peer. Nothing "
+                         "was sent yet; do not send the message again.");
     json_free(sub);
-    printf("zmsg: sent on-chain message to %s\n", to_addr);
+    printf("zmsg: %s on-chain message to %s\n", held ? "held" : "sent",
+           to_addr);
     return true;
 }
 

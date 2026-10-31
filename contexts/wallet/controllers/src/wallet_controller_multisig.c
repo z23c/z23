@@ -131,7 +131,7 @@ static bool sendmany_finish(struct wallet_rpc_context *ctx,
     if (wallet_ctx_db_ready(ctx))
         node_db_sync_wallet_tx(ctx->node_db, &wtx->tx, ctx->wallet, 0);
     if (!wallet_send_relay(ctx, wtx)) {
-        json_set_str(result, "Private broadcast unavailable; send rolled back");
+        json_set_str(result, wallet_send_relay_failure_text());
         transaction_free(&wtx->tx);
         LOG_FAIL("wallet", "sendmany: private broadcast not queued");
     }

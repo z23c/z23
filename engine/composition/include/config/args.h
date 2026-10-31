@@ -93,6 +93,13 @@ bool args_should_auto_add_local_peer(bool connect_only, int own_p2p_port,
  * existing signal for "this node needs peers to find it at a fixed
  * address" — the same reason -onion-persist exists at all. Pure and
  * exported so the default is covered without booting Tor. */
+/* Resolve -walletbroadcast from argv or z23.conf (NULL when unset). Returns
+ * 0, or 1 after printing a refusal for a value the node cannot honor. */
+int args_resolve_wallet_broadcast(struct app_context *ctx, const char *value);
+/* Private wallet broadcast runs no onion service. Returns 1 after printing a
+ * refusal when -onion-persist or -onion-rotate is set; otherwise keeps the
+ * persistent-identity default off. */
+int args_private_mode_onion_policy(struct app_context *ctx);
 bool args_onion_persist_default(bool tor, const char *const *addnode_peers,
                                 int n_addnode_peers);
 

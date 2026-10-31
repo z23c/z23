@@ -32,6 +32,18 @@ struct wallet_rpc_context *wallet_send_view_unless_prepared(
  * the send is rolled back and false is returned. */
 bool wallet_send_relay(struct wallet_rpc_context *ctx, struct wallet_tx *wtx);
 
+/* Why the last wallet_send_relay failure on this thread failed: either the
+ * send was rolled back, or its outcome is unknown and it must not be paid
+ * again. Valid until the next wallet_send_relay call. */
+const char *wallet_send_relay_failure_text(void);
+
+/* True when a private send is recorded but waiting for a connected onion
+ * peer: accepted, not sent. Callers must say so instead of "sent". */
+bool wallet_private_broadcast_is_held(const struct uint256 *txid);
+
+/* Re-reserve the shielded notes of a recorded send the wallet holds. */
+void wallet_private_broadcast_reserve_spends(const struct transaction *tx);
+
 #define WALLET_PBCAST_TICK_MS 1000
 /* Spacing of the held-send warning, which carries a count only. */
 #define WALLET_PBCAST_HELD_WARN_S 300

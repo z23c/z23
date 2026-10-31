@@ -28,6 +28,9 @@ struct zcl_result wallet_reaccept_transaction(
     if (!wtx || !admission)
         return ZCL_ERR(-1,
             "wallet reaccept: NULL transaction or admission context");
+    struct zcl_result pool_ok = wallet_admission_pool_check(admission);
+    if (!pool_ok.ok)
+        return pool_ok;
     if (!admission->mempool || !admission->coins_tip ||
         !admission->main_state || !admission->params) {
         return ZCL_ERR(-2,

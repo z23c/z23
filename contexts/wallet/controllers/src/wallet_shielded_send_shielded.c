@@ -698,7 +698,7 @@ shielded_cleanup:
                      "z_sendmany: wallet projection write failed after durable reservation");
 
         if (!wallet_send_relay(ctx, &wtx)) {
-            json_set_str(result, "Private broadcast unavailable; send rolled back");
+            json_set_str(result, wallet_send_relay_failure_text());
             transaction_free(&wtx.tx);
             LOG_FAIL("wallet_shielded", "z_sendmany: private broadcast not queued");
         }

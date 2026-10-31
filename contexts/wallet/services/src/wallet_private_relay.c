@@ -33,6 +33,7 @@ enum wpr_push_result {
     WPR_PUSH_OK,
     WPR_PUSH_NO_ROUTE,
     WPR_PUSH_NO_TX,
+    WPR_PUSH_QUEUE_FAILED,
 };
 
 static int64_t wpr_default_now_ms(void)
@@ -169,6 +170,8 @@ static bool wpr_persist_locked(const struct wpr *r)
             continue;
         if (e->state == WPR_EXPIRED)
             buf[len++] = 'x';
+        else if (e->handed)
+            buf[len++] = 'a';
         uint256_get_hex(&e->txid, buf + len);
         len += 64;
         buf[len++] = '\n';
@@ -193,7 +196,7 @@ static bool wpr_hex_line_valid(const char *s)
 }
 
 static size_t wpr_read_pending(const struct wpr *r, struct uint256 *out,
-                               bool *expired, size_t cap)
+                               bool *expired, bool *handed, size_t cap)
 {
     char path[1100];
     if (!wpr_pending_path(r, path, sizeof(path)))
@@ -210,12 +213,14 @@ static size_t wpr_read_pending(const struct wpr *r, struct uint256 *out,
         char *end = strchr(line, '\n');
         size_t line_len = end ? (size_t)(end - line) : strlen(line);
         bool x = line_len == 65 && line[0] == 'x';
-        const char *id = x ? line + 1 : line;
-        if ((line_len == 64 || x) && wpr_hex_line_valid(id)) {
+        bool a = line_len == 65 && line[0] == 'a';
+        const char *id = (x || a) ? line + 1 : line;
+        if ((line_len == 64 || x || a) && wpr_hex_line_valid(id)) {
             char hex[65];
             memcpy(hex, id, 64);
             hex[64] = '\0';
             expired[n] = x;
+            handed[n] = a;
             uint256_set_hex(&out[n++], hex);
         }
         if (!end)
@@ -360,6 +365,11 @@ struct zcl_result wpr_enqueue(struct wpr *r, const struct transaction *tx)
         zcl_mutex_unlock(&r->lock);
         return ZCL_OK;
     }
+    bool existed = e != NULL;
+    struct wpr_entry saved;
+    memset(&saved, 0, sizeof(saved));
+    if (existed)
+        saved = *e;
     if (!e)
         e = wpr_alloc_locked(r);
     if (!e) {
@@ -372,7 +382,11 @@ struct zcl_result wpr_enqueue(struct wpr *r, const struct transaction *tx)
     }
     wpr_fill_entry(e, &tx->hash, tx, r->now_ms() + delay, true);
     if (!wpr_persist_locked(r)) {
-        memset(e, 0, sizeof(*e));
+        /* A recorded send stays recorded: the wallet may still hold it. */
+        if (existed)
+            *e = saved;
+        else
+            memset(e, 0, sizeof(*e));
         zcl_mutex_unlock(&r->lock);
         return ZCL_ERR(-4, "private relay: cannot record the pending set");
     }
@@ -396,6 +410,7 @@ void wpr_note_seen(struct wpr *r, const struct uint256 *txid)
         e->state = WPR_SEEN;
         e->seen_ms = r->now_ms();
         e->in_pool = false;
+        e->mined = false;
         tx_mempool_remove(&r->pool, txid);
         (void)wpr_persist_locked(r);
     }
@@ -466,7 +481,8 @@ static void wpr_restore_expired(struct wpr *r, const struct uint256 *txid)
 /* Bring one recorded send back: the wallet's copy is revalidated into the
  * private pool and scheduled with a fresh delay. A send the wallet does not
  * hold is dropped from the record. Returns true when the wallet holds it. */
-static bool wpr_resume_one(struct wpr *r, const struct uint256 *txid)
+static bool wpr_resume_one(struct wpr *r, const struct uint256 *txid,
+                            bool handed)
 {
     struct wallet_tx wtx;
     memset(&wtx, 0, sizeof(wtx));
@@ -474,6 +490,8 @@ static bool wpr_resume_one(struct wpr *r, const struct uint256 *txid)
         wpr_forget(r, txid);  /* the wallet never admitted it, or lost it */
         return false;
     }
+    if (r->env.reserve)
+        r->env.reserve(&wtx.tx);
     bool done = wtx.confirms > 0;
     bool in_pool = !done && wpr_admit(r, &wtx.tx);
     int64_t delay = 0;
@@ -488,6 +506,7 @@ static bool wpr_resume_one(struct wpr *r, const struct uint256 *txid)
             wpr_fill_entry(e, txid, &wtx.tx, now + (drew ? delay : 0),
                            in_pool && drew);
             e->retry_ms = now + (int64_t)WPR_RETRY_S * 1000;
+            e->handed = handed;
         }
         zcl_mutex_unlock(&r->lock);
     }
@@ -501,8 +520,10 @@ struct zcl_result wpr_resume(struct wpr *r)
         return ZCL_ERR(-1, "private relay resume: NULL relay");
     struct uint256 ids[WPR_MAX_ENTRIES];
     bool was_expired[WPR_MAX_ENTRIES];
+    bool was_handed[WPR_MAX_ENTRIES];
     zcl_mutex_lock(&r->lock);
-    size_t n = wpr_read_pending(r, ids, was_expired, WPR_MAX_ENTRIES);
+    size_t n = wpr_read_pending(r, ids, was_expired, was_handed,
+                                WPR_MAX_ENTRIES);
     zcl_mutex_unlock(&r->lock);
 
     for (size_t i = 0; i < n; i++) {
@@ -510,7 +531,7 @@ struct zcl_result wpr_resume(struct wpr *r)
             wpr_restore_expired(r, &ids[i]);
             continue;
         }
-        wpr_resume_one(r, &ids[i]);
+        wpr_resume_one(r, &ids[i], was_handed[i]);
     }
     zcl_mutex_lock(&r->lock);
     bool ok = wpr_persist_locked(r);
@@ -602,9 +623,11 @@ static enum wpr_push_result wpr_push(struct wpr *r, const struct wpr_entry *e,
         if (peer) {
             p2p_node_begin_message(peer, "tx", r->env.params->pchMessageStart);
             p2p_node_write_message_data(peer, bs.data, bs.size);
-            p2p_node_end_message(peer);
+            /* A refused queue (cap reached, transport failure) is not an
+             * attempt. */
+            res = p2p_node_end_message(peer) ? WPR_PUSH_OK
+                                             : WPR_PUSH_QUEUE_FAILED;
             *peer_out = (uint32_t)peer->id;
-            res = WPR_PUSH_OK;
         }
         zcl_mutex_unlock(&cm->manager.cs_nodes);
     }
@@ -696,6 +719,8 @@ static void wpr_attempt_push(struct wpr *r, const struct wpr_entry *snap,
             e->num_tried++;
         e->state = WPR_SENT;
         e->due_ms = now + (int64_t)WPR_RESEND_AFTER_S * 1000;
+        e->handed = true;
+        (void)wpr_persist_locked(r);
         out->pushed++;
     } else if (e && res == WPR_PUSH_NO_TX) {
         e->in_pool = false;
@@ -767,11 +792,25 @@ static bool wpr_tick_settled(struct wpr *r, const struct wpr_entry *snap,
 {
     if (snap->state == WPR_PREPARED) {
         if (now - snap->seen_ms > (int64_t)WPR_PREPARE_GRACE_S * 1000)
-            (void)wpr_resume_one(r, &snap->txid);
+            (void)wpr_resume_one(r, &snap->txid, snap->handed);
         return true;
     }
     if (snap->state != WPR_SEEN && snap->state != WPR_EXPIRED)
         return false;
+    if (snap->state == WPR_SEEN && !snap->mined) {
+        /* Seen back but not yet in a block: the record stays, with a status,
+         * until the wallet shows it mined. */
+        if (wpr_wallet_confirmed(r, &snap->txid)) {
+            zcl_mutex_lock(&r->lock);
+            struct wpr_entry *e = wpr_find_locked(r, &snap->txid);
+            if (e && e->state == WPR_SEEN) {
+                e->mined = true;
+                e->seen_ms = now;
+            }
+            zcl_mutex_unlock(&r->lock);
+        }
+        return true;
+    }
     wpr_prune_terminal(r, snap, now);
     return true;
 }
@@ -829,6 +868,23 @@ void wpr_tick(struct wpr *r, int wallet_height, struct wpr_tick_result *out)
 
 /* ── status ─────────────────────────────────────────────────────────── */
 
+bool wpr_entry_state(struct wpr *r, const struct uint256 *txid,
+                     enum wpr_state *state, bool *handed)
+{
+    if (!r || !txid)
+        return false;
+    zcl_mutex_lock(&r->lock);
+    const struct wpr_entry *e = wpr_find_locked(r, txid);
+    if (e) {
+        if (state)
+            *state = e->state;
+        if (handed)
+            *handed = e->handed;
+    }
+    zcl_mutex_unlock(&r->lock);
+    return e != NULL;
+}
+
 void wpr_status_snapshot(struct wpr *r, struct wpr_status *out)
 {
     memset(out, 0, sizeof(*out));
@@ -848,6 +904,8 @@ void wpr_status_snapshot(struct wpr *r, struct wpr_status *out)
             e->last_attempt_ms < 0 ? -1 : (now - e->last_attempt_ms) / 1000;
         s->held = e->held;
         s->disk_retry = e->disk_retry;
+        s->handed = e->handed;
+        s->mined = e->mined;
         if (e->state == WPR_EXPIRED)
             out->expired++;
         else if (e->state != WPR_SEEN)

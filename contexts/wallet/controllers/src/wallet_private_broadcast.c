@@ -44,9 +44,23 @@ struct wallet_rpc_context *wallet_send_view_unless_prepared(
     return prepared ? ctx : wallet_send_view(ctx, view);
 }
 
+#define WPB_ROLLED_BACK_TEXT "Private broadcast unavailable; send rolled back"
+#define WPB_UNKNOWN_TEXT \
+    "Private broadcast could not be queued and the send could not be fully " \
+    "rolled back: its outcome is unknown. Do not pay again; check " \
+    "walletbroadcaststatus and the wallet history."
+
+static _Thread_local const char *g_relay_failure = WPB_ROLLED_BACK_TEXT;
+
+const char *wallet_send_relay_failure_text(void)
+{
+    return g_relay_failure;
+}
+
 bool wallet_send_relay(struct wallet_rpc_context *ctx, struct wallet_tx *wtx)
 {
     struct wpr *relay = wpr_global();
+    g_relay_failure = WPB_ROLLED_BACK_TEXT;
     if (ctx->mempool != wpr_pool(relay)) {
         if (ctx->connman)
             connman_relay_transaction(ctx->connman, &wtx->tx.hash);
@@ -58,9 +72,14 @@ bool wallet_send_relay(struct wallet_rpc_context *ctx, struct wallet_tx *wtx)
     LOG_WARN("wallet", "private broadcast not queued (code=%d): %s",
              queued.code, queued.message);
     struct zcl_result rolled = wallet_rollback_persisted_commit(ctx, wtx);
-    if (!rolled.ok)
+    if (!rolled.ok) {
+        /* The wallet may still hold the send and the pending record is kept,
+         * so a later tick or restart can still deliver it. */
+        g_relay_failure = WPB_UNKNOWN_TEXT;
         LOG_FAIL("wallet", "private broadcast rollback failed (code=%d): %s",
                 rolled.code, rolled.message);
+    }
+    wpr_forget(relay, &wtx->tx.hash);
     return false;
 }
 
@@ -289,11 +308,32 @@ void wallet_private_broadcast_stop(void)
         platform_sleep_ms(25);
 }
 
+void wallet_private_broadcast_reserve_spends(const struct transaction *tx)
+{
+    struct wallet_rpc_context *base = wallet_rpc_context_current();
+    if (!tx || tx->num_shielded_spend == 0)
+        return;
+    if (base->node_db && !node_db_sync_wallet_sapling_spends(base->node_db, tx))
+        LOG_WARN("wallet_pbcast", "re-reserving the notes of a recorded "
+                 "send failed");
+    if (base->wallet)
+        wallet_mark_sapling_nullifiers_spent(base->wallet, tx);
+}
+
 bool wallet_private_broadcast_start(enum wpr_mode mode,
                                     const struct wpr_env *env)
 {
     struct wpr *relay = wpr_global();
+    struct wpr_env armed;
+    if (env) {
+        armed = *env;
+        if (!armed.reserve)
+            armed.reserve = wallet_private_broadcast_reserve_spends;
+        env = &armed;
+    }
     wpr_configure(relay, mode, env);
+    wallet_require_admission_pool(mode == WPR_MODE_PRIVATE ? wpr_pool(relay)
+                                                           : NULL);
     /* Always resume and tick: a send held in private mode must still expire
      * and release its coins after a restart in public mode. Nothing is pushed
      * unless the mode is private. */
@@ -315,6 +355,15 @@ bool wallet_private_broadcast_start(enum wpr_mode mode,
     return true;
 }
 
+bool wallet_private_broadcast_is_held(const struct uint256 *txid)
+{
+    enum wpr_state st;
+    struct wpr *relay = wpr_global();
+    return wpr_get_mode(relay) == WPR_MODE_PRIVATE &&
+           wpr_entry_state(relay, txid, &st, NULL) &&
+           (st == WPR_WAITING_FOR_ROUTE || st == WPR_PREPARED);
+}
+
 /* What the owner can safely do for a send in this state. No amounts or
  * addresses. */
 static const char *wallet_private_broadcast_next_step(
@@ -333,6 +382,11 @@ static const char *wallet_private_broadcast_next_step(
     case WPR_PREPARED:
         return "Being created. No action needed.";
     case WPR_WAITING_FOR_ROUTE:
+        if (e->handed)
+            return "Handed to an onion peer earlier; waiting for a connected "
+                   "onion peer to try again. It may already be on the "
+                   "network. Do not send the payment again; the coins stay "
+                   "reserved.";
         return mode == WPR_MODE_PRIVATE
             ? "Waiting for a connected onion peer. Nothing was sent. The "
               "coins stay reserved; it is safe to wait."
@@ -340,12 +394,19 @@ static const char *wallet_private_broadcast_next_step(
               "with -walletbroadcast=private to send it; otherwise it expires "
               "and the coins are released.";
     case WPR_SCHEDULED:
-        return "Will be sent to one onion peer shortly. No action needed.";
+        return e->handed
+            ? "Will be handed to an onion peer again shortly. It may "
+              "already be on the network. Do not send the payment again."
+            : "Will be handed to one onion peer shortly. No action needed.";
     case WPR_SENT:
-        return "Sent to one onion peer; waiting to see it on the network. "
-               "No action needed.";
+        return "Handed to one onion peer (queued on the connection; "
+               "delivery is not confirmed); waiting to see it on the "
+               "network. Do not send the payment again.";
     case WPR_SEEN:
-        return "Seen on the network or confirmed. No action needed.";
+        return e->mined
+            ? "Seen on the network and in a block. No action needed."
+            : "Seen on the network but not in a block yet. No action "
+              "needed; do not send the payment again.";
     case WPR_EXPIRED:
         return "Expired unconfirmed. The coins are available again. To pay "
                "again, send it again with a new key; the old key keeps "
