@@ -19,6 +19,7 @@
 #include "storage/progress_store.h"
 #include "services/chain_activation_service.h"
 #include "validation/process_block.h"
+#include <stdatomic.h>
 #include <stdint.h>
 #if defined(__linux__)
 #include <sys/syscall.h>
@@ -274,28 +275,49 @@ static void classify_tasks(const long *tids, size_t n, const void *const *locks,
     }
 }
 
-void boot_sd_watchdog_log_thread_snapshot(void)
-{
+/* The scan arrays (~35 KB) live in static storage, not on the pet thread's
+ * stack. One snapshot at a time: the pet thread is the only caller, and an
+ * overlapping call is refused rather than sharing the arrays. Static, not
+ * malloc: a stalled thread may hold the allocator's lock. */
+static struct {
     long tids[EVIDENCE_SCAN_THREADS];
     unsigned char prio[EVIDENCE_SCAN_THREADS];
     size_t order[EVIDENCE_SCAN_THREADS];
+} s_scan;
+static atomic_flag s_scan_busy = ATOMIC_FLAG_INIT;
+
+static void log_thread_snapshot_scan(void)
+{
     const void *locks[2];
     size_t total = 0;
     known_locks(locks);
     log_lock_addresses(locks);
     log_tx_lock_holder();
-    size_t n = os_proc_self_task_ids(tids, EVIDENCE_SCAN_THREADS, &total);
+    size_t n = os_proc_self_task_ids(s_scan.tids, EVIDENCE_SCAN_THREADS, &total);
     if (n == 0) {
         LOG_WARN("boot", "[sd_watchdog] thread snapshot unavailable "
                  "(no per-thread procfs on this platform)");
         return;
     }
-    classify_tasks(tids, n, locks, prio);
-    size_t shown = boot_sd_watchdog_order_snapshot(prio, n,
-                                                   EVIDENCE_MAX_THREADS, order);
+    classify_tasks(s_scan.tids, n, locks, s_scan.prio);
+    size_t shown = boot_sd_watchdog_order_snapshot(s_scan.prio, n,
+                                                   EVIDENCE_MAX_THREADS,
+                                                   s_scan.order);
     for (size_t i = 0; i < shown; i++)
-        snapshot_one_task(tids[order[i]], prio[order[i]] == 0);
+        snapshot_one_task(s_scan.tids[s_scan.order[i]],
+                          s_scan.prio[s_scan.order[i]] == 0);
     LOG_WARN("boot", "[sd_watchdog] thread snapshot: threads=%zu "
              "truncated=%zu unscanned=%zu", shown, n - shown,
              total - n);
+}
+
+void boot_sd_watchdog_log_thread_snapshot(void)
+{
+    if (atomic_flag_test_and_set(&s_scan_busy)) {
+        LOG_WARN("boot", "[sd_watchdog] thread snapshot already running; "
+                 "skipped");
+        return;
+    }
+    log_thread_snapshot_scan();
+    atomic_flag_clear(&s_scan_busy);
 }
