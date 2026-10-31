@@ -206,7 +206,7 @@ tests/harness/src/test_yardsale_wallet.c:test_yardsale_wallet:130
 tests/harness/src/test_zcode_add.c:t_e2e:239
 tests/harness/src/test_zcode_package_dev.c:zpd_test_twelve_task_benchmark:30
 tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start:56
-tools/acme/tls_client.c:tls_client_fetch:42
+tools/acme/tls_client.c:tls_client_fetch:36
 tools/acme/tls_client.c:tls_client_response_parse_bounded:27
 tools/acme/tls_client.c:tls_client_url_parse:17
 tools/dev/devloop_hotswap_build.c:hs_hotfork_build:38

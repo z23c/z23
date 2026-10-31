@@ -844,6 +844,7 @@ enum tls_read_status {
     TLS_READ_DEADLINE,
     TLS_READ_CAP,
     TLS_READ_FAILED,
+    TLS_READ_ALLOC,
 };
 
 /* Reads until the framing is complete or the peer closes. The caller logs
@@ -872,53 +873,79 @@ static int tls_client_read_response(SSL *ssl, char *buf, size_t read_cap,
     return TLS_READ_DONE;
 }
 
-bool tls_client_fetch(const struct tls_client_request *req,
-                      struct tls_client_response *out)
+enum tls_fetch_validate_status {
+    TLS_V_OK,
+    TLS_V_NO_URL,
+    TLS_V_BAD_CAP,
+    TLS_V_BODY_OVER_CAP,
+    TLS_V_BODY_MISSING,
+    TLS_V_HEADERS,
+};
+
+/* Checks the caller-supplied request arguments in the order tls_client_fetch
+ * always has; on success sets *body_cap_out to the resolved body cap. */
+static int tls_client_validate_request(const struct tls_client_request *req,
+                                       size_t *body_cap_out)
 {
-    if (!out)
-        return false;
-    memset(out, 0, sizeof(*out));
     if (!req || !req->url)
-        LOG_FAIL("tlsclient", "refusing a request with no URL");
+        return TLS_V_NO_URL;
     const size_t body_cap = effective_body_cap(req->max_body);
     if (body_cap == 0)
-        LOG_FAIL("tlsclient",
-                 "refusing a %zu-byte body cap: over the %u-byte ceiling",
-                 req->max_body, (unsigned)TLS_CLIENT_ABS_MAX_BODY);
+        return TLS_V_BAD_CAP;
     if (req->body_len > body_cap)
-        LOG_FAIL("tlsclient", "refusing a %zu-byte request body: over the cap",
-                 req->body_len);
+        return TLS_V_BODY_OVER_CAP;
     if (req->body_len && !req->body)
-        LOG_FAIL("tlsclient", "refusing a request declaring a body it does not carry");
+        return TLS_V_BODY_MISSING;
     if (!extra_headers_ok(req))
-        return false;
-    const size_t read_cap = body_cap + TLS_CLIENT_MAX_HEADER_BLOB;
+        return TLS_V_HEADERS;
+    *body_cap_out = body_cap;
+    return TLS_V_OK;
+}
 
-    struct tls_client_url url;
-    if (!tls_client_url_parse(req->url, &url))
-        return false;
+static int tls_client_request_timeout_ms(const struct tls_client_request *req)
+{
+    return req->timeout_ms > 0 ? req->timeout_ms : TLS_CLIENT_DEFAULT_TIMEOUT_MS;
+}
 
-    const int timeout_ms = req->timeout_ms > 0 ? req->timeout_ms
-                                               : TLS_CLIENT_DEFAULT_TIMEOUT_MS;
-    const int64_t deadline = now_ms() + timeout_ms;
-
-    SSL_CTX *ctx = client_ctx();
+/* Builds the SSL_CTX and connects the socket for one request; the caller
+ * owns both on success. */
+static platform_socket_t tls_client_open_connection(const struct tls_client_url *url,
+                                                    int64_t deadline,
+                                                    SSL_CTX **ctx_out)
+{
+    SSL_CTX *const ctx = client_ctx();
     if (!ctx)
-        return false;
-
-    platform_socket_t sock = connect_host(url.host, url.port, deadline);
+        return PLATFORM_SOCKET_INVALID;
+    platform_socket_t sock = connect_host(url->host, url->port, deadline);
     if (sock == PLATFORM_SOCKET_INVALID) {
         SSL_CTX_free(ctx);
-        return false;
+        return PLATFORM_SOCKET_INVALID;
     }
+    *ctx_out = ctx;
+    return sock;
+}
 
-    bool ok = false;
+enum tls_handshake_status {
+    TLS_HS_OK,
+    TLS_HS_NEW,
+    TLS_HS_BIND,
+    TLS_HS_SNI,
+    TLS_HS_HOST,
+    TLS_HS_CONNECT,
+    TLS_HS_VERIFY,
+};
+
+/* Creates the SSL object and runs the handshake over an open socket. On
+ * failure returns the status; *ssl_out carries the object for the caller to
+ * free. */
+static int tls_client_handshake(SSL_CTX *ctx, platform_socket_t sock,
+                                const char *host, int timeout_ms,
+                                SSL **ssl_out)
+{
     SSL *ssl = SSL_new(ctx);
-    char *buf = NULL;
-    if (!ssl) {
-        LOG_WARN("tlsclient", "SSL_new failed");
-        goto done;
-    }
+    *ssl_out = ssl;
+    if (!ssl)
+        return TLS_HS_NEW;
     /* Socket-level timeouts bound each individual read/write; the deadline
      * above bounds the whole exchange. Both are needed: a peer that dribbles
      * one byte per second never trips a per-read timeout. */
@@ -928,39 +955,112 @@ bool tls_client_fetch(const struct tls_client_request *req,
         platform_socket_set_send_timeout(sock, per_io_ms);
     }
 #if defined(_WIN32)
-    if ((uintptr_t)sock > INT_MAX || SSL_set_fd(ssl, (int)(uintptr_t)sock) != 1) {
-        LOG_WARN("tlsclient", "cannot bind the socket to the TLS session");
-        goto done;
-    }
+    if ((uintptr_t)sock > INT_MAX || SSL_set_fd(ssl, (int)(uintptr_t)sock) != 1)
+        return TLS_HS_BIND;
 #else
-    if (SSL_set_fd(ssl, sock) != 1) {
-        LOG_WARN("tlsclient", "cannot bind the socket to the TLS session");
-        goto done;
-    }
+    if (SSL_set_fd(ssl, sock) != 1)
+        return TLS_HS_BIND;
 #endif
     /* SNI plus hostname verification. SSL_set1_host() makes the name part of
      * the verification result, so a valid certificate for the wrong name
      * fails the handshake rather than being accepted. */
-    if (SSL_set_tlsext_host_name(ssl, url.host) != 1) {
-        LOG_WARN("tlsclient", "cannot set SNI for %s", url.host);
-        goto done;
-    }
-    if (SSL_set1_host(ssl, url.host) != 1) {
-        LOG_WARN("tlsclient", "cannot pin the verified hostname to %s", url.host);
-        goto done;
-    }
+    if (SSL_set_tlsext_host_name(ssl, host) != 1)
+        return TLS_HS_SNI;
+    if (SSL_set1_host(ssl, host) != 1)
+        return TLS_HS_HOST;
     SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
 
-    if (SSL_connect(ssl) != 1) {
+    if (SSL_connect(ssl) != 1)
+        return TLS_HS_CONNECT;
+    if (SSL_get_verify_result(ssl) != X509_V_OK)
+        return TLS_HS_VERIFY;
+    return TLS_HS_OK;
+}
+
+/* Allocates the bounded response buffer and reads one response into it. */
+static int tls_client_read_alloc(SSL *ssl, char **buf_out, size_t read_cap,
+                                 size_t body_cap, int64_t deadline,
+                                 size_t *used, int *err)
+{
+    *buf_out = zcl_malloc(read_cap + 1, "tls_client_read");
+    if (!*buf_out)
+        return TLS_READ_ALLOC;
+    return tls_client_read_response(ssl, *buf_out, read_cap, body_cap,
+                                    deadline, used, err);
+}
+
+bool tls_client_fetch(const struct tls_client_request *req,
+                      struct tls_client_response *out)
+{
+    if (!out)
+        return false;
+    memset(out, 0, sizeof(*out));
+    size_t body_cap = 0;
+    switch (tls_client_validate_request(req, &body_cap)) {
+    case TLS_V_NO_URL:
+        LOG_FAIL("tlsclient", "refusing a request with no URL");
+    case TLS_V_BAD_CAP:
+        LOG_FAIL("tlsclient",
+                 "refusing a %zu-byte body cap: over the %u-byte ceiling",
+                 req->max_body, (unsigned)TLS_CLIENT_ABS_MAX_BODY);
+    case TLS_V_BODY_OVER_CAP:
+        LOG_FAIL("tlsclient", "refusing a %zu-byte request body: over the cap",
+                 req->body_len);
+    case TLS_V_BODY_MISSING:
+        LOG_FAIL("tlsclient", "refusing a request declaring a body it does not carry");
+    case TLS_V_HEADERS:
+        return false;
+    default:
+        break;
+    }
+    const size_t read_cap = body_cap + TLS_CLIENT_MAX_HEADER_BLOB;
+
+    struct tls_client_url url;
+    if (!tls_client_url_parse(req->url, &url))
+        return false;
+
+    const int timeout_ms = tls_client_request_timeout_ms(req);
+    const int64_t deadline = now_ms() + timeout_ms;
+
+    SSL_CTX *ctx = NULL;
+    const platform_socket_t sock =
+        tls_client_open_connection(&url, deadline, &ctx);
+    if (sock == PLATFORM_SOCKET_INVALID)
+        return false;
+
+    bool ok = false;
+    SSL *ssl = NULL;
+    char *buf = NULL;
+    size_t used = 0;
+    int err = 0;
+    switch (tls_client_handshake(ctx, sock, url.host, timeout_ms, &ssl)) {
+    case TLS_HS_NEW:
+        LOG_WARN("tlsclient", "SSL_new failed");
+        goto done;
+    case TLS_HS_BIND:
+#if defined(_WIN32)
+        LOG_WARN("tlsclient", "cannot bind the socket to the TLS session");
+#else
+        LOG_WARN("tlsclient", "cannot bind the socket to the TLS session");
+#endif
+        goto done;
+    case TLS_HS_SNI:
+        LOG_WARN("tlsclient", "cannot set SNI for %s", url.host);
+        goto done;
+    case TLS_HS_HOST:
+        LOG_WARN("tlsclient", "cannot pin the verified hostname to %s", url.host);
+        goto done;
+    case TLS_HS_CONNECT:
         LOG_WARN("tlsclient", "TLS handshake with %s failed: ssl_error=%d",
                  url.host, SSL_get_error(ssl, -1));
         goto done;
-    }
-    if (SSL_get_verify_result(ssl) != X509_V_OK) {
+    case TLS_HS_VERIFY:
         LOG_WARN("tlsclient",
                  "certificate chain for %s did not verify against the CA trust store",
                  url.host);
         goto done;
+    default:
+        break;
     }
 
     {
@@ -1017,27 +1117,22 @@ bool tls_client_fetch(const struct tls_client_request *req,
             goto done;
     }
 
-    buf = zcl_malloc(read_cap + 1, "tls_client_read");
-    if (!buf) {
+    switch (tls_client_read_alloc(ssl, &buf, read_cap, body_cap, deadline, &used, &err)) {
+    case TLS_READ_ALLOC:
         LOG_WARN("tlsclient", "cannot allocate the bounded response buffer");
         goto done;
-    }
-    size_t used = 0;
-    int err = 0;
-    const int read_status = tls_client_read_response(ssl, buf, read_cap, body_cap,
-                                                     deadline, &used, &err);
-    if (read_status == TLS_READ_DEADLINE) {
+    case TLS_READ_DEADLINE:
         LOG_WARN("tlsclient", "response read exceeded the deadline");
         goto done;
-    }
-    if (read_status == TLS_READ_CAP) {
+    case TLS_READ_CAP:
         LOG_WARN("tlsclient",
                  "refusing a response over the %zu-byte read cap", read_cap);
         goto done;
-    }
-    if (read_status == TLS_READ_FAILED) {
+    case TLS_READ_FAILED:
         LOG_WARN("tlsclient", "TLS read failed: ssl_error=%d", err);
         goto done;
+    default:
+        break;
     }
     ok = tls_client_response_parse_bounded(buf, used, body_cap, out);
 
