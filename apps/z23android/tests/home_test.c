@@ -153,6 +153,9 @@ static void scan_destinations(void)
     assert(zapp_home_scan_target(ZAPP_SCAN_PAIR, false) == ZAPP_SCAN_TO_HOME);
     assert(zapp_home_scan_target(ZAPP_SCAN_TEXT, true) == ZAPP_SCAN_TO_HOME);
     assert(zapp_home_scan_target(ZAPP_SCAN_UNREADABLE, true) == ZAPP_SCAN_TO_HOME);
+    assert(zapp_home_scan_target(ZAPP_SCAN_PAY, false) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
+    assert(zapp_home_scan_target(ZAPP_SCAN_PAY, true) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
+    assert(zapp_home_scan_target(ZAPP_SCAN_PAY_REFUSED, false) == ZAPP_SCAN_TO_HOME);
 }
 /* The largest label, package and activity, with every label character escaped, still make a card. */
 static void worst_case_card_fits(void)
@@ -208,6 +211,32 @@ static void offer_jump(void)
     seen = true;
     assert(!zapp_home_offer_jump(false, true, &seen) && !seen);
 }
+/* From the camera text to the screen: only a payment code the parser accepts opens the send review. A refused
+ * or damaged one is shown on Home as a refusal, and nothing with a payment scheme or an address shape is ever
+ * shown as scanned text. */
+static void scanned_text_routes(void)
+{
+    char addr[ZAPP_PAY_ADDRESS_MAX], text[512], value[512];
+    memcpy(addr, "zs1", 3); memset(addr + 3, 'q', 75); addr[78] = 0;
+    snprintf(text, sizeof(text), "zclassic:%s?amount=1.5", addr);
+    enum zapp_scan_kind kind = zapp_scan_classify(text, value, sizeof(value));
+    assert(kind == ZAPP_SCAN_PAY && zapp_home_scan_target(kind, false) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
+    kind = zapp_scan_classify(addr, value, sizeof(value));
+    assert(kind == ZAPP_SCAN_PAY && zapp_home_scan_target(kind, true) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
+    static const char *const tails[] = {"?amount=1\n", "?amount=1&req-x=1", "?amount=1.123456789", "\n", "\t", "?amount=1\r\n"};
+    for (size_t i = 0; i < sizeof(tails) / sizeof(tails[0]); ++i) {
+        snprintf(text, sizeof(text), "zclassic:%s%s", addr, tails[i]);
+        kind = zapp_scan_classify(text, value, sizeof(value));
+        assert(kind == ZAPP_SCAN_PAY_REFUSED && value[0] && !strstr(value, "zs1"));
+        assert(zapp_home_scan_target(kind, false) == ZAPP_SCAN_TO_HOME);
+    }
+    snprintf(text, sizeof(text), "%s\n", addr);
+    kind = zapp_scan_classify(text, value, sizeof(value));
+    assert(kind == ZAPP_SCAN_PAY_REFUSED && !strstr(value, "zs1") && zapp_home_scan_target(kind, true) == ZAPP_SCAN_TO_HOME);
+    kind = zapp_scan_classify("hello world", value, sizeof(value));
+    assert(kind == ZAPP_SCAN_TEXT && zapp_home_scan_target(kind, true) == ZAPP_SCAN_TO_HOME);
+}
+
 int main(void)
 {
     phone_card_golden();
@@ -219,6 +248,7 @@ int main(void)
     unsigned_z23_package_is_plain();
     label_fits_on_character_boundary();
     scan_destinations();
+    scanned_text_routes();
     worst_case_card_fits();
     built_in_layouts();
     offer_jump();

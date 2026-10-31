@@ -109,7 +109,7 @@ test-voice:
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/speech-client.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/speech-client-test' "$$scratch"
 
-test: prepare-quirc test-bridge test-voice test-host test-devkey test-dexgen test-watch test-scan test-qr-window test-payment
+test: prepare-quirc test-bridge test-voice test-host test-devkey test-dexgen test-watch test-scan test-qr-window test-payment test-wallet-send
 	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' $(QUIRC_FLAGS) \
 	  tests/fleet_test.c fleet.c ../../vendor/qrcodegen/qrcodegen.c $(QUIRC_SOURCES) \
 	  -lm -o '$(BUILD_DIR)/fleet-test'
@@ -158,7 +158,7 @@ test-qr-window: prepare-quirc
 
 test-scan:
 	@mkdir -p '$(BUILD_DIR)'
-	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/scan_test.c scan.c fleet.c speech_client.c bridge_client.c voice.c ../../vendor/qrcodegen/qrcodegen.c $(SPEECH_JSON) -o '$(BUILD_DIR)/scan-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/scan_test.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(SPEECH_JSON) -o '$(BUILD_DIR)/scan-test'
 	'$(BUILD_DIR)/scan-test'
 
 test-payment:
@@ -255,7 +255,7 @@ test-host:
 	'$(BUILD_DIR)/thermal-start-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/layout_test.c layout.c $(SPEECH_JSON) -o '$(BUILD_DIR)/layout-test'
 	'$(BUILD_DIR)/layout-test'
-	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/home_test.c home.c layout.c hosts.c pairing.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/home_test.c home.c layout.c hosts.c pairing.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c voice.c ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
 	'$(BUILD_DIR)/home-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/clip_store_test.c clip_store.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/clip-store-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/clip-store-test.XXXXXX'); \
@@ -276,3 +276,19 @@ test-devkey:
 	@if $(MAKE) --no-print-directory check-probe DEVKEY_PROBE=ON 2>/dev/null; then echo "production manifest accepted DEVKEY_PROBE=ON" >&2; exit 1; fi
 	$(HOST_CC) $(HOST_WARNINGS) -I. tests/secure_window_test.c secure_window.c -o '$(BUILD_DIR)/secure-window-test'
 	'$(BUILD_DIR)/secure-window-test'
+
+WALLET_SEND_INCLUDES := -I. -I../../platform/modules/json/include -I../../platform/modules/base/include \
+  -I../../contexts/commons/packages/zutf8/include
+WALLET_SEND_SOURCES := wallet_send.c payment_code.c ../../contexts/commons/packages/zutf8/src/zutf8.c
+# The send flow: the state machine with its random event sequences, then the screen over fake node, device
+# key and host. No wallet field may reach a log, so the two modules call no logging function.
+test-wallet-send:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) $(WALLET_SEND_INCLUDES) tests/wallet_send_test.c $(WALLET_SEND_SOURCES) \
+	  -o '$(BUILD_DIR)/wallet-send-test'
+	'$(BUILD_DIR)/wallet-send-test'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_send_screen_test.c wallet_send_screen.c \
+	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-send-screen-test'
+	'$(BUILD_DIR)/wallet-send-screen-test'
+	@if grep -nE '(^|[^a-z_])(printf|fprintf|puts|fputs|perror|syslog)\(|nodelog|__android_log' wallet_send.c wallet_send_screen.c; then \
+	  echo 'wallet_send must not log' >&2; exit 1; fi

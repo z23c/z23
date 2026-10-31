@@ -42,9 +42,10 @@ const char *zapp_home_action_label(const char *id);
  * arrives while the scan screen is up is not lost. */
 bool zapp_home_offer_jump(bool offer, bool on_scan_screen, bool *seen);
 /* Where a finished scan takes the owner. */
-enum zapp_scan_target { ZAPP_SCAN_TO_HOME, ZAPP_SCAN_TO_FLEET_REVIEW, ZAPP_SCAN_TO_PAIR_REVIEW };
+enum zapp_scan_target { ZAPP_SCAN_TO_HOME, ZAPP_SCAN_TO_FLEET_REVIEW, ZAPP_SCAN_TO_PAIR_REVIEW, ZAPP_SCAN_TO_PAYMENT_REVIEW };
 /* A fleet invitation opens its review, and a laptop pairing code opens the pairing review when the
- * controller holds an offer for it, whether or not the owner saw an earlier offer. Everything else is
+ * controller holds an offer for it, whether or not the owner saw an earlier offer.
+ * A payment code that payment_code.h accepts opens the send review and nothing more. Everything else is
  * shown on Home. */
 enum zapp_scan_target zapp_home_scan_target(enum zapp_scan_kind kind, bool pair_offer);
 /* Copies text into out (cap bytes), cutting on a character boundary when it does not fit. */

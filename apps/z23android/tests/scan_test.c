@@ -107,8 +107,9 @@ static void other_text(void)
 {
     snprintf(text, sizeof(text), "https://example.com/pay?to=zs1qqqqqqqqqqqqqqqqqqqqqqqq");
     assert(scan(text) == ZAPP_SCAN_TEXT && !strcmp(value, text));
+    /* a bare run with the shape of an address that the parser refuses is a refusal, not shown text */
     snprintf(text, sizeof(text), "zs1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq");
-    assert(scan(text) == ZAPP_SCAN_TEXT && !strcmp(value, text));
+    assert(scan(text) == ZAPP_SCAN_PAY_REFUSED && value[0] && !strstr(value, "zs1q"));
     assert(scan("") == ZAPP_SCAN_TEXT && value[0] == 0);
 }
 static void control_bytes(void)
@@ -130,9 +131,82 @@ static void small_buffers(void)
     assert(zapp_scan_classify(text, small, 0) == ZAPP_SCAN_TEXT);
     assert(zapp_scan_classify(NULL, small, sizeof(small)) == ZAPP_SCAN_TEXT);
 }
+/* A payment code opens the send review and does nothing else; a refused one says why; other text is untouched. */
+static void payment_codes(void)
+{
+    char addr[ZAPP_PAY_ADDRESS_MAX], uri[512];
+    struct zapp_payment pay;
+    memcpy(addr, "zs1", 3); memset(addr + 3, 'q', 75); addr[78] = 0;
+    assert(scan(addr) == ZAPP_SCAN_PAY && !value[0]);
+    snprintf(uri, sizeof(uri), "zclassic:%s?amount=1.5&memo=aGk", addr);
+    assert(scan(uri) == ZAPP_SCAN_PAY && !value[0]);
+    assert(zapp_scan_payment(uri, &pay) == ZAPP_PAY_OK && pay.amount_zat == 150000000);
+    snprintf(uri, sizeof(uri), "ZClassic:%s?amount=1", addr);
+    assert(scan(uri) == ZAPP_SCAN_PAY);
+    char pub[ZAPP_PAY_ADDRESS_MAX];
+    memcpy(pub, "t1", 2); memset(pub + 2, '2', 33); pub[35] = 0;
+    assert(scan(pub) == ZAPP_SCAN_PAY);
+    /* refused, never partly honoured, and the reason holds no part of the code */
+    snprintf(uri, sizeof(uri), "zclassic:%s?amount=1&req-x=1", addr);
+    assert(scan(uri) == ZAPP_SCAN_PAY_REFUSED && strstr(value, "does not support") && !strstr(value, addr));
+    snprintf(uri, sizeof(uri), "zclassic:%s?amount=1.123456789", addr);
+    assert(scan(uri) == ZAPP_SCAN_PAY_REFUSED && strstr(value, "8 decimal places"));
+    snprintf(uri, sizeof(uri), "zclassic:%s?amount=1&memo=aGk", pub);
+    assert(scan(uri) == ZAPP_SCAN_PAY_REFUSED && strstr(value, "memo"));
+    char test[ZAPP_PAY_ADDRESS_MAX];
+    memcpy(test, "ztestsapling1", 13); memset(test + 13, 'q', 75); test[88] = 0;
+    assert(scan(test) == ZAPP_SCAN_PAY_REFUSED && strstr(value, "another network"));
+    assert(scan("zclassic:nonsense") == ZAPP_SCAN_PAY_REFUSED && value[0]);
+    assert(zapp_scan_refusal_text(ZAPP_PAY_OK)[0] == 0);
+    for (int r = ZAPP_PAY_REFUSE_INPUT_TOO_LONG; r <= ZAPP_PAY_REFUSE_MESSAGE_TOO_LONG; ++r)
+        assert(strstr(zapp_scan_refusal_text((enum zapp_pay_refusal)r), "Nothing was done."));
+    /* text that is not a payment code keeps what it was */
+    assert(scan("hello world") == ZAPP_SCAN_TEXT && !strcmp(value, "hello world"));
+    assert(scan("t1 is a short word") == ZAPP_SCAN_TEXT);
+    assert(scan("t1abc") == ZAPP_SCAN_TEXT && !strcmp(value, "t1abc"));
+    assert(scan("https://example.org/zclassic") == ZAPP_SCAN_TEXT);
+    /* a long run that starts like an address is not read as a payment code */
+    repeat("t1", 'a', 200);
+    assert(scan(text) != ZAPP_SCAN_PAY && scan(text) != ZAPP_SCAN_PAY_REFUSED);
+}
+
+/* A payload with the scheme or the shape of an address that the parser refuses stays refused. Control bytes
+ * around or inside it never turn it into text that reaches Home. */
+static void refused_payments_never_become_text(void)
+{
+    char addr[ZAPP_PAY_ADDRESS_MAX], uri[512], mixed[512];
+    memcpy(addr, "zs1", 3); memset(addr + 3, 'q', 75); addr[78] = 0;
+    snprintf(uri, sizeof(uri), "zclassic:%s?amount=1\n", addr);
+    assert(scan(uri) == ZAPP_SCAN_PAY_REFUSED && value[0] && !strstr(value, addr));
+    snprintf(uri, sizeof(uri), "%s\n", addr);
+    assert(scan(uri) == ZAPP_SCAN_PAY_REFUSED && value[0] && !strstr(value, addr));
+    snprintf(uri, sizeof(uri), "%s\t ", addr);
+    assert(scan(uri) == ZAPP_SCAN_PAY_REFUSED && !strstr(value, addr));
+    snprintf(uri, sizeof(uri), " %s", addr);
+    assert(scan(uri) != ZAPP_SCAN_TEXT);
+    snprintf(mixed, sizeof(mixed), "zs1qqqqqqqq\x01%s", addr + 11);
+    assert(scan(mixed) == ZAPP_SCAN_PAY_REFUSED && !strstr(value, "qqqqqqqq"));
+    snprintf(uri, sizeof(uri), "zclassic:\x7f%s?amount=1", addr);
+    assert(scan(uri) == ZAPP_SCAN_PAY_REFUSED);
+    snprintf(uri, sizeof(uri), "ZCLASSIC:%s?amount=1\r\n", addr);
+    assert(scan(uri) == ZAPP_SCAN_PAY_REFUSED && !strstr(value, addr));
+    /* an address the parser knows is for another network is refused, with or without a stray byte */
+    char test[ZAPP_PAY_ADDRESS_MAX];
+    memcpy(test, "ztestsapling1", 13); memset(test + 13, 'q', 75); test[88] = 0;
+    snprintf(uri, sizeof(uri), "%s\n", test);
+    assert(scan(uri) == ZAPP_SCAN_PAY_REFUSED);
+    /* a bare run that starts like an address but is not one is refused with a reason, not shown */
+    assert(scan("zs1qqqqqqqqqqqqqqqqqqqqqqqqqqqq") == ZAPP_SCAN_PAY_REFUSED && !strstr(value, "zs1q"));
+    /* sentences and short words that happen to start like an address stay text */
+    assert(scan("tm is a long sentence with many words in it") == ZAPP_SCAN_TEXT);
+    assert(scan("t1 and zs1 are prefixes of addresses") == ZAPP_SCAN_TEXT);
+}
+
 int main(void)
 {
     typed_addresses();
+    payment_codes();
+    refused_payments_never_become_text();
     wrong_lengths();
     uppercase_hex();
     descriptors();

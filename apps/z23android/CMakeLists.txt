@@ -18,7 +18,7 @@ endif()
 
 add_library(z23android SHARED
     android_main.c node_service.c node_watch.c camera.c native_ui.c jni_util.c shell.c surface.c launcher.c layout.c home.c controller.c conversation.c bridge_client.c operations.c rpc.c fleet.c
-    device_key.c device_key_jni.c secure_window.c
+    device_key.c device_key_jni.c payment_code.c wallet_view.c secure_window.c wallet_send.c wallet_send_screen.c
     audio.c speech_client.c voice.c hosts.c pairing.c scan.c thermal.c nodelog.c params.c params_install.c params_job.c params_android.c
     clip_store.c clip_capture.c clip_player.c clip_screen.c
     "${Z23_ROOT}/platform/modules/sha3/src/sha3.c"

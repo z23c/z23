@@ -513,6 +513,8 @@ static const char *scan_notice(enum zapp_scan_kind kind)
     case ZAPP_SCAN_AUTHOR: return "Found a Z23 author address. Nothing was followed.";
     case ZAPP_SCAN_RATER: return "Found a Z23 rater address. Nothing was submitted.";
     case ZAPP_SCAN_UNREADABLE: return "This looks like a Z23 code but could not be read. Nothing was done.";
+    case ZAPP_SCAN_PAY: return "Payment request scanned. Nothing was sent.";
+    case ZAPP_SCAN_PAY_REFUSED: return "This payment code was refused. Nothing was done.";
     case ZAPP_SCAN_TEXT: break;
     }
     return "Found text, not a Z23 code. Nothing was done.";

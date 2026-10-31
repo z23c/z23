@@ -494,9 +494,12 @@ static void finish_scan(JNIEnv *env, const struct zapp_view *view)
     char text[ZAPP_NOTICE_CAP + sizeof(view->scan_text) + 4];
     enum zapp_scan_target target = zapp_home_scan_target(view->scan_kind, view->pair_offer[0] != 0);
     if (target == ZAPP_SCAN_TO_PAIR_REVIEW) shell.pair_seen = true;
-    if (target != ZAPP_SCAN_TO_HOME) go(env, SCREEN_ASSISTANT);
+    /* The send review screen is drawn by wallet_send_screen once the wallet screens are wired; until then a
+     * payment code is acknowledged on Home with its notice and nothing is started. */
+    bool home = target == ZAPP_SCAN_TO_HOME || target == ZAPP_SCAN_TO_PAYMENT_REVIEW;
+    if (!home) go(env, SCREEN_ASSISTANT);
     if (target == ZAPP_SCAN_TO_FLEET_REVIEW) zapp_native_ui_open_details(env);
-    if (target != ZAPP_SCAN_TO_HOME) return;
+    if (!home) return;
     snprintf(text, sizeof(text), "%s%s%s", view->result, view->scan_text[0] ? "\n\n" : "", view->scan_text);
     go(env, SCREEN_HOME);
     set_text(env, shell.outcome_view, text);

@@ -2,6 +2,7 @@
 #include "scan.h"
 #include "fleet.h"
 #include "speech_client.h"
+#include "base/cleanse.h"
 #include <ctype.h>
 #include <stdbool.h>
 #include <string.h>
@@ -83,6 +84,87 @@ static bool secret_shaped(const char *payload)
     return token_chars && run >= 128;
 }
 
+/* ---- payment codes ---- */
+
+/* Copies the letters and digits of a bare payload into run, skipping control bytes and spaces around it. Returns
+ * the length, or 0 when anything else is in the way. */
+static size_t bare_run(const char *payload, char run[ZAPP_PAY_ADDRESS_MAX])
+{
+    size_t n = 0;
+    const unsigned char *p = (const unsigned char *)payload;
+    while (*p == ' ') ++p;
+    for (; *p; ++p) {
+        if (*p < 0x20 || *p == 0x7f) continue;
+        if (*p == ' ') {
+            while (*p && (*p == ' ' || *p < 0x20 || *p == 0x7f)) ++p;
+            break;
+        }
+        if (!isalnum(*p) || n + 1 >= ZAPP_PAY_ADDRESS_MAX) return 0;
+        run[n++] = (char)*p;
+    }
+    if (*p) return 0;
+    run[n] = 0;
+    return n;
+}
+/* Whether the payload is meant as a payment: a zclassic: request, or a run of letters and digits that starts
+ * as an address does. Control bytes inside the run and spaces around it are skipped, so they cannot hide the
+ * shape. Any other text, including a short word that begins with "t1", is not. */
+static bool payment_shaped(const char *payload)
+{
+    static const char *const starts[] = {"zs1", "ztestsapling1", "zregtestsapling1", "t1", "t2", "t3", "tm"};
+    char run[ZAPP_PAY_ADDRESS_MAX];
+    if (starts_loosely(payload, "zclassic:")) return true;
+    if (bare_run(payload, run) < 26) return false;
+    for (size_t i = 0; i < sizeof(starts) / sizeof(starts[0]); ++i)
+        if (!strncmp(run, starts[i], strlen(starts[i]))) return true;
+    return false;
+}
+const char *zapp_scan_refusal_text(enum zapp_pay_refusal refusal)
+{
+    static const char *const text[] = {
+        [ZAPP_PAY_OK] = "",
+        [ZAPP_PAY_REFUSE_INPUT_TOO_LONG] = "This payment code is too long. Nothing was done.",
+        [ZAPP_PAY_REFUSE_EMBEDDED_NUL] = "This payment code has hidden characters. Nothing was done.",
+        [ZAPP_PAY_REFUSE_MALFORMED] = "This is not a payment code this wallet can read. Nothing was done.",
+        [ZAPP_PAY_REFUSE_BAD_ADDRESS] = "The address in this code is not a ZClassic address. Nothing was done.",
+        [ZAPP_PAY_REFUSE_WRONG_NETWORK] = "The address in this code is for another network. Nothing was done.",
+        [ZAPP_PAY_REFUSE_UNKNOWN_REQUIRED] = "This code asks for something this wallet does not support. Nothing was done.",
+        [ZAPP_PAY_REFUSE_MULTIPLE] = "This code asks for more than one payment. Nothing was done.",
+        [ZAPP_PAY_REFUSE_DUPLICATE] = "This payment code repeats a field. Nothing was done.",
+        [ZAPP_PAY_REFUSE_AMOUNT_FORMAT] = "The amount in this code is not a plain number. Nothing was done.",
+        [ZAPP_PAY_REFUSE_AMOUNT_PRECISION] = "The amount in this code has more than 8 decimal places. Nothing was done.",
+        [ZAPP_PAY_REFUSE_AMOUNT_RANGE] = "The amount in this code is more than can exist. Nothing was done.",
+        [ZAPP_PAY_REFUSE_MEMO_ON_PUBLIC] = "This code puts a memo on a public address, which cannot carry one. Nothing was done.",
+        [ZAPP_PAY_REFUSE_MEMO_ENCODING] = "The memo in this code is not readable. Nothing was done.",
+        [ZAPP_PAY_REFUSE_MEMO_TOO_LONG] = "The memo in this code is too long. Nothing was done.",
+        [ZAPP_PAY_REFUSE_PERCENT] = "This payment code is damaged. Nothing was done.",
+        [ZAPP_PAY_REFUSE_LABEL_INVALID] = "The label or message in this code is not readable. Nothing was done.",
+        [ZAPP_PAY_REFUSE_LABEL_TOO_LONG] = "The label or message in this code is not readable. Nothing was done.",
+        [ZAPP_PAY_REFUSE_MESSAGE_INVALID] = "The label or message in this code is not readable. Nothing was done.",
+        [ZAPP_PAY_REFUSE_MESSAGE_TOO_LONG] = "The label or message in this code is not readable. Nothing was done.",
+    };
+    bool known = (unsigned)refusal < sizeof(text) / sizeof(text[0]) && text[refusal];
+    return known ? text[refusal] : "This payment code was refused. Nothing was done.";
+}
+enum zapp_pay_refusal zapp_scan_payment(const char *payload, struct zapp_payment *out)
+{
+    return zapp_payment_parse(payload, strlen(payload), ZAPP_SCAN_NETWORK, out);
+}
+/* A payment-shaped payload opens the send review when the parser accepts it and is refused, with the reason,
+ * otherwise: it never falls through to plain text. The parser sees the payload as scanned, so a stray
+ * control byte refuses it. A payment code opens the send review and does nothing else. The parsed
+ * payment holds an address, so it is cleansed here and value never carries it. */
+static enum zapp_scan_kind classify_payment(const char *payload, char *value, size_t cap)
+{
+    struct zapp_payment pay;
+    enum zapp_pay_refusal why = zapp_scan_payment(payload, &pay);
+    memory_cleanse(&pay, sizeof(pay));
+    value[0] = 0;
+    if (why == ZAPP_PAY_OK) return ZAPP_SCAN_PAY;
+    (void)fits(value, cap, zapp_scan_refusal_text(why));
+    return ZAPP_SCAN_PAY_REFUSED;
+}
+
 enum zapp_scan_kind zapp_scan_classify(const char *payload, char *value, size_t cap)
 {
     if (!payload || !value || !cap) return ZAPP_SCAN_TEXT;
@@ -94,6 +176,7 @@ enum zapp_scan_kind zapp_scan_classify(const char *payload, char *value, size_t 
         if (typed_pair(payload, value, cap)) return ZAPP_SCAN_PAIR;
         if (zapp_fleet_invite_text(payload, value, cap)) return ZAPP_SCAN_FLEET;
     }
+    if (payment_shaped(payload)) return classify_payment(payload, value, cap);
     if (secret_shaped(payload)) return ZAPP_SCAN_UNREADABLE;
     display_text(value, cap, payload);
     return ZAPP_SCAN_TEXT;

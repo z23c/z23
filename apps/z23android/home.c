@@ -116,5 +116,6 @@ void zapp_home_fit_label(char *out, size_t cap, const char *text)
 enum zapp_scan_target zapp_home_scan_target(enum zapp_scan_kind kind, bool pair_offer)
 {
     if (kind == ZAPP_SCAN_FLEET) return ZAPP_SCAN_TO_FLEET_REVIEW;
+    if (kind == ZAPP_SCAN_PAY) return ZAPP_SCAN_TO_PAYMENT_REVIEW;
     return kind == ZAPP_SCAN_PAIR && pair_offer ? ZAPP_SCAN_TO_PAIR_REVIEW : ZAPP_SCAN_TO_HOME;
 }

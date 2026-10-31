@@ -564,3 +564,19 @@ an app setup or a mainnet payment guide.
 The Scan action reads one QR code with the camera and shows what it is without opening, fetching or paying anything. A fleet invitation goes to the join review. A laptop pairing code goes to the same six-digit review as an offer over USB, and the token is never shown. A clip, author or rater address, or any other text, is shown with a sentence saying nothing was done.
 
 On the laptop, `z23-speech-bridge --qr-window PATH` (an absolute path to `z23-qr-window`) also shows the pairing descriptor as a QR code in a window titled `Z23 pairing` with the six-digit code. The descriptor arrives on the window's standard input, never in its arguments. `make qr-window` builds `$(BUILD_DIR)/z23-qr-window` against X11. `make test` builds the same program without X11 and checks its `--dump` output, a binary PBM, against decoded payloads.
+
+## Sending
+
+A scanned payment code opens a review; nothing is sent from a scan. `wallet_send.c` is the send flow as a pure state machine: events in, typed actions out. `wallet_send_screen.c` carries the actions out on a worker thread through typed node, device key and host interfaces, and turns the machine into the review lines and progress the renderer draws.
+
+- Sending needs a tap on the review of the exact plan. The tap starts one operation that authenticates the owner for that use, unwraps the wallet secret and unlocks the wallet; the Keystore key needs a credential or strong biometric for every use, so no earlier authentication counts and the app remembers none. Any change to the amount, address or memo makes a new review, a new plan and a new idempotency key.
+- The key is made before the plan is requested, because the node binds it into the plan token.
+- An unknown commit is final. If the node does not answer, or answers for another plan, the payment may have been sent: the flow ends, does not offer a retry, and points to History. A refused commit proves that nothing was sent, so only then does Retry return to the same review with the same key, and it needs a new tap and a new authentication.
+- A running commit is never failed by a timer. The screen stays on "Building the payment" until the node answers and the wallet is locked right after the answer. The unlock lasts at most 300 seconds, long enough for a phone proof of about 101 seconds.
+- No tap is accepted while a lock is owed, so a late lock answer can never close the unlock of a newer send.
+- A second scan does not open while a send is in progress. The commit carries the plan that was tapped, only while its ticket is current; actions of an ended flow are dropped.
+- The memo is shown as data in its own labelled field. Control characters, line breaks and bidirectional marks are written out as `<U+XXXX>`, so a memo cannot imitate a review line.
+- A scanned text with a payment scheme or the shape of an address that the parser refuses is shown as a refusal and never as plain text, even with control bytes around it.
+- The wallet is unlocked only inside the send and locked on every way out. The passphrase goes to `core wallet security unlock` on standard input and is cleansed on every path.
+- The screen is protected with `FLAG_SECURE` and obscured-touch filtering before anything is shown, and shows nothing if either is refused. Send must be drawn as an Android View, because touches are read natively and obscured-touch filtering works only on Views.
+- Neither module logs. `make test-wallet-send` runs the directed tests, 100000 or more random event sequences against a model of the rules (commit only after tap and authentication on the same plan, no key committed twice unless refused, no unlock while a lock is owed), the screen over fakes including a real worker thread, and a check that the sources call no logging function.
