@@ -2,6 +2,8 @@
 
 # Clips: a peer-to-peer short-video network (Design)
 
+Status: this specification is not being implemented further. What exists is the record, meta-file and rating codecs in contexts/clips. There is no network, feed, publishing or relay code.
+
 Clips is a short-form video network with no central server and no signup.
 An author's own node and the machines of that owner's fleet host the
 author's videos. Followers' nodes fetch what they follow over the existing
@@ -73,7 +75,7 @@ records, frames, API and UI.
 <!-- claim: file-present apps/z23android/camera.c # NDK camera code exists for QR scanning -->
 <!-- claim: symbol-present AMediaCodec_createInputSurface apps/z23android/clip_capture.c # the app records through a hardware encoder input surface -->
 <!-- claim: symbol-present AMediaMuxer_new apps/z23android/clip_capture.c # the app writes MP4 files with the platform muxer -->
-<!-- claim: file-absent contexts/clips # the room is not created by this specification -->
+<!-- claim: file-present contexts/clips/modules/clips_codec/include/clips_codec/clips_codec.h # the Clips room exists; its first code is the codec header -->
 
 ---
 
@@ -91,6 +93,10 @@ nonzero reserved byte, a length past its ceiling or trailing bytes is a
 refusal. The ZMSG memo decoder refuses wrong magic, unknown version, reserved
 flag bits and an over-ceiling length; Clips adds reserved-byte and
 trailing-byte refusals (`core/modules/net/include/net/zmsg.h`).
+
+Writers normalize text to NFC where they have a table, and receivers do not refuse on NFC form, because that check depends on the Unicode version and could make two nodes disagree about one record.
+
+Each free-text field (caption, comment, profile name, bio and tip, list title, rating note and report note) is well-formed UTF-8 with no control characters except LF, refused on decode and on encode.
 
 <!-- claim: symbol-present ZMSG_MEMO_LEN core/modules/net/include/net/zmsg.h # the strict-decoder precedent -->
 
@@ -189,7 +195,7 @@ manifest_id   64    iff bit0: the video manifest (2.4)
 reply_to      64    iff bit1: the post this clip answers
 reshare_of    64    iff bit2: the post being reshared
 caption_len   2     0..500
-caption       N     UTF-8 NFC, no control characters except LF
+caption       N     well-formed UTF-8, no control characters except LF
 tag_count     1     0..8
 tags          ...   each: len u8 (1..32) then bytes [a-z0-9_]
 ```
@@ -220,7 +226,7 @@ reshare is evaluated at the level of the strictest of itself and its target.
 - *Reaction (10):* `target_id` 64, `reaction u8` (0 retract, 1 like, 2 laugh,
   3 wow, 4 sad, 5 angry; higher refused).
 - *Comment (11):* `target_id` 64 (a post), `parent_id` 64 (zero for top
-  level), `text_len u16` (1..280), UTF-8 NFC text.
+  level), `text_len u16` (1..280), well-formed UTF-8 with no control characters except LF.
 - *Follow (12):* `target_author` 32, `flags u8` (bit0 unfollow).
 - *Block (13):* `target_type u8` (1 author, 2 content id), `target` 64 (an
   author key in the first 32 bytes, rest zero), `flags u8` (bit0 unblock).

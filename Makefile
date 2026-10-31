@@ -845,7 +845,7 @@ endif
 # owning authority and its role: contexts/wallet/services/... is wallet service
 # code; engine/jobs/... is generic orchestration; cognition/... owns the
 # software-understanding loop.  Keep this list small and derived from the tree.
-PRODUCT_CONTEXTS = wallet explorer naming messaging market commons
+PRODUCT_CONTEXTS = wallet explorer naming messaging market commons clips
 PRODUCT_CONTEXT_DIRS = $(addprefix contexts/,$(PRODUCT_CONTEXTS))
 APP_AUTHORITIES = engine cognition $(PRODUCT_CONTEXT_DIRS)
 APP_DIRS = models controllers views services supervisors conditions jobs

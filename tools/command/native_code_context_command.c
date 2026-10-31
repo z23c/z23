@@ -22,6 +22,7 @@ enum {
     CONTEXT_FILE_PAGE_CAP = 256,
     CONTEXT_INCLUDE_PAGE_CAP = 256,
     CONTEXT_COUPLING_CAP = 8,
+    CONTEXT_TAXONOMY_CAP = 16,
 };
 
 struct context_count {
@@ -119,8 +120,8 @@ static bool context_map_warm_hit(const char *root,
 }
 
 struct context_map_acc {
-    int counts[10];
-    int64_t coupling[10][10];
+    int counts[CONTEXT_TAXONOMY_CAP];
+    int64_t coupling[CONTEXT_TAXONOMY_CAP][CONTEXT_TAXONOMY_CAP];
     struct context_count shapes[CONTEXT_SHAPE_CAP];
     int shape_count;
     int production;
@@ -300,7 +301,8 @@ static void context_map_select_failure(
 }
 
 static int context_map_collect_pairs(
-    const int64_t coupling[10][10], size_t context_count,
+    const int64_t coupling[CONTEXT_TAXONOMY_CAP][CONTEXT_TAXONOMY_CAP],
+    size_t context_count,
     struct context_pair *pairs)
 {
     int pair_count = 0;
@@ -452,7 +454,7 @@ static void context_map_derive(
     }
     size_t context_count = 0;
     const char *const *contexts = codeindex_context_names(&context_count);
-    if (context_count != 10) {
+    if (context_count == 0 || context_count > CONTEXT_TAXONOMY_CAP) {
         free(files); free(includes); codeindex_close(index);
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL,

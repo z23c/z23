@@ -103,7 +103,7 @@ The whole-tree counterpart is `z23 code context-map`. It derives one primary
 bounded context and one architectural shape for every indexed production file,
 then reports all unclassified paths, every multiple-context overlap (bounded
 examples plus an exact count), and the strongest observed cross-context include
-edges from compiler depfiles. The ten-context target is deliberately small:
+edges from compiler depfiles. The eleven-context target is deliberately small:
 
 | Context | Product meaning |
 |---------|-----------------|
@@ -113,6 +113,7 @@ edges from compiler depfiles. The ten-context target is deliberately small:
 | `messaging` | ZMSG and message workflows |
 | `market` | exchange, shop, yard-sale, ZSLP, and ZSwap behavior |
 | `commons` | C23 packages, CAS, source distribution, ZVCS, and preservation |
+| `clips` | short-video records, manifests and content-rating decisions |
 | `cognition` | code intelligence, ontology, science, retrieval, and agent-development evidence |
 | `engine` | event/reducer/application orchestration and runtime machinery |
 | `core` | node, chain, validation, cryptography, policy, and consensus-adjacent behavior |

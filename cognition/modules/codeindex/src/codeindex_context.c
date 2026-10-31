@@ -15,7 +15,7 @@ struct ci_module_context {
 
 static const char *const k_contexts[] = {
     "wallet", "explorer", "naming", "messaging", "market",
-    "commons", "cognition", "engine", "core", "platform",
+    "commons", "clips", "cognition", "engine", "core", "platform",
 };
 
 /* Module ownership is the smallest stable taxonomy for lib/: module names are
@@ -25,6 +25,7 @@ static const struct ci_module_context k_modules[] = {
     {"appsync", "engine"},
     {"astro", "platform"}, {"base", "platform"}, {"bloom", "core"},
     {"chain", "core"}, {"chainlog", "engine"}, {"codec", "platform"},
+    {"clips_codec", "clips"}, {"clips_rating", "clips"},
     {"codeindex", "cognition"}, {"coins", "core"},
     {"commons_demo", "commons"}, {"core", "core"},
     {"crypto", "core"}, {"crypto_registry", "core"},
@@ -157,7 +158,8 @@ bool codeindex_module_group_path(const char *module, char out[64])
             strcmp(k_modules[i].context, "naming") == 0 ||
             strcmp(k_modules[i].context, "messaging") == 0 ||
             strcmp(k_modules[i].context, "market") == 0 ||
-            strcmp(k_modules[i].context, "commons") == 0)
+            strcmp(k_modules[i].context, "commons") == 0 ||
+            strcmp(k_modules[i].context, "clips") == 0)
             (void)snprintf(out, 64, "contexts/%s/modules/%s",
                            k_modules[i].context, module);
         else

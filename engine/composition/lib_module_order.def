@@ -257,3 +257,12 @@ LIB_MODULE("rvplat")
  * virtio device models and the device tree writer. It references rvemu,
  * rvplat, rvvirtio, fdt and base, so it ranks above all of them. */
 LIB_MODULE("rvmachine")
+
+/* Pure Clips content-rating decision over plain evidence structs. No I/O and
+ * no codec dependency; it references base only. */
+LIB_MODULE("clips_rating")
+/* Pure Clips record, body and manifest codecs over the codec cursor: signed
+ * record ids, chain checks and strict refusals. No I/O. It includes the rating
+ * header for the level vocabulary, so it ranks above clips_rating, base, codec,
+ * crypto and sha3. */
+LIB_MODULE("clips_codec")

@@ -40,6 +40,7 @@ static const char *const k_app_shapes[] = {
 
 static const char *const k_product_contexts[] = {
     "wallet", "explorer", "naming", "messaging", "market", "commons",
+    "clips",
 };
 
 const char *const *ci_lib_modules(size_t *count)
@@ -334,6 +335,13 @@ static const char *ci_purpose_modules_e(const char *group)
     return "";
 }
 
+static const char *ci_purpose_modules_g(const char *group)
+{
+    if (module_group_is(group, "clips_codec")) return "Clips record, body and manifest codecs: signed record ids, chain checks and strict refusals over the codec cursor; no I/O";
+    if (module_group_is(group, "clips_rating")) return "Clips content-rating decision over plain evidence structs; no I/O and no codec dependency";
+    return "";
+}
+
 /* The built-in RISC-V machine and the parts it composes. */
 static const char *ci_purpose_modules_f(const char *group)
 {
@@ -376,6 +384,7 @@ const char *ci_group_purpose(const char *group)
         ci_purpose_modules_d,
         ci_purpose_modules_e,
         ci_purpose_modules_f,
+        ci_purpose_modules_g,
         ci_purpose_rooms,
     };
     for (size_t i = 0; i < sizeof k_bands / sizeof k_bands[0]; i++) {
@@ -473,6 +482,7 @@ static bool emit_product_context_groups(struct ci_store *s)
         {"controllers", "models", NULL},
         {"controllers", "models", "modules", "services", NULL},
         {"apps", "controllers", "corpus", "models", "modules", "packages", "services", "views", NULL},
+        {"controllers", "models", "modules", "services", NULL},
     };
 
     for (size_t i = 0; i < sizeof(k_product_contexts) /
