@@ -10,8 +10,6 @@ contexts/commons/modules/vcs/src/vcs.c:vcs_snapshot:18
 contexts/commons/modules/vcs/src/zcode_science_index.c:index_consider_object:27
 contexts/commons/packages/zdiff/tests/test_zdiff.c:test_kat:22
 contexts/commons/packages/zdiff/tests/test_zdiff.c:verify_script:25
-contexts/commons/packages/zotpcli/app/main.c:cmd_add:21
-contexts/commons/packages/zotpcli/app/main.c:parse_options:23
 contexts/commons/packages/zotpcli/src/zotpcli.c:json_str_decode:32
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_fuzz:18
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_kat:17

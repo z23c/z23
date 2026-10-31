@@ -166,6 +166,58 @@ typedef struct {
     bool verbose, help, hotp, pem;
 } options;
 
+enum opt_field_kind { OPT_FIELD_STR, OPT_FIELD_U64, OPT_FIELD_BOOL };
+
+typedef struct {
+    size_t spec_index;
+    enum opt_field_kind kind;
+    size_t off;      /* value field offset in options */
+    size_t have_off; /* OPT_FIELD_U64 rows: offset of the have_ flag */
+} opt_field;
+
+static const opt_field g_opt_fields[] = {
+    { O_STORE,   OPT_FIELD_STR,  offsetof(options, store_path), 0 },
+    { O_PASS,    OPT_FIELD_STR,  offsetof(options, passphrase), 0 },
+    { O_NOW,     OPT_FIELD_U64,  offsetof(options, now),
+      offsetof(options, have_now) },
+    { O_VERBOSE, OPT_FIELD_BOOL, offsetof(options, verbose), 0 },
+    { O_HELP,    OPT_FIELD_BOOL, offsetof(options, help), 0 },
+    { O_LABEL,   OPT_FIELD_STR,  offsetof(options, label), 0 },
+    { O_ISSUER,  OPT_FIELD_STR,  offsetof(options, issuer), 0 },
+    { O_SECRET,  OPT_FIELD_STR,  offsetof(options, secret), 0 },
+    { O_DIGITS,  OPT_FIELD_U64,  offsetof(options, digits),
+      offsetof(options, have_digits) },
+    { O_PERIOD,  OPT_FIELD_U64,  offsetof(options, period),
+      offsetof(options, have_period) },
+    { O_COUNTER, OPT_FIELD_U64,  offsetof(options, counter),
+      offsetof(options, have_counter) },
+    { O_HOTP,    OPT_FIELD_BOOL, offsetof(options, hotp), 0 },
+    { O_PEM,     OPT_FIELD_BOOL, offsetof(options, pem), 0 },
+};
+
+/* Stores one parsed option into *o; unknown spec indices are ignored. */
+static void apply_option(options *o, const zarg_item *it)
+{
+    for (size_t i = 0; i < sizeof g_opt_fields / sizeof g_opt_fields[0]; i++) {
+        const opt_field *f = &g_opt_fields[i];
+        if (f->spec_index != it->spec_index) continue;
+        char *base = (char *)o;
+        switch (f->kind) {
+        case OPT_FIELD_STR:
+            *(const char **)(base + f->off) = it->value;
+            break;
+        case OPT_FIELD_U64:
+            *(uint64_t *)(base + f->off) = it->u64;
+            *(bool *)(base + f->have_off) = true;
+            break;
+        case OPT_FIELD_BOOL:
+            *(bool *)(base + f->off) = true;
+            break;
+        }
+        return;
+    }
+}
+
 static int parse_options(int argc, char **argv, options *o)
 {
     memset(o, 0, sizeof *o);
@@ -191,22 +243,7 @@ static int parse_options(int argc, char **argv, options *o)
             }
             continue;
         }
-        switch (it.spec_index) {
-        case O_STORE: o->store_path = it.value; break;
-        case O_PASS: o->passphrase = it.value; break;
-        case O_NOW: o->now = it.u64; o->have_now = true; break;
-        case O_VERBOSE: o->verbose = true; break;
-        case O_HELP: o->help = true; break;
-        case O_LABEL: o->label = it.value; break;
-        case O_ISSUER: o->issuer = it.value; break;
-        case O_SECRET: o->secret = it.value; break;
-        case O_DIGITS: o->digits = it.u64; o->have_digits = true; break;
-        case O_PERIOD: o->period = it.u64; o->have_period = true; break;
-        case O_COUNTER: o->counter = it.u64; o->have_counter = true; break;
-        case O_HOTP: o->hotp = true; break;
-        case O_PEM: o->pem = true; break;
-        default: break;
-        }
+        apply_option(o, &it);
     }
     if (e != ZARG_OK) {
         char msg[96];
@@ -233,6 +270,66 @@ static int64_t current_now(const options *o)
 
 /* --- commands -------------------------------------------------------------- */
 
+/* Which cmd_add entry-field check failed; cmd_add logs per code. */
+enum add_field_err {
+    ADD_FIELD_OK,
+    ADD_FIELD_LABEL,
+    ADD_FIELD_ISSUER,
+    ADD_FIELD_SECRET,
+    ADD_FIELD_DIGITS,
+    ADD_FIELD_PERIOD
+};
+
+/* Fills label, issuer and secret of *e from *o; on ADD_FIELD_SECRET
+ * failure *ze holds the decode error. */
+static enum add_field_err fill_entry_identity(const options *o,
+                                              zotpcli_entry *e,
+                                              zotpcli_err *ze)
+{
+    if (zstr_copy(e->label, sizeof e->label, o->label) >= sizeof e->label)
+        return ADD_FIELD_LABEL;
+    if (o->issuer &&
+        zstr_copy(e->issuer, sizeof e->issuer, o->issuer) >= sizeof e->issuer)
+        return ADD_FIELD_ISSUER;
+    *ze = zotpcli_b32_decode_secret(o->secret, e->secret, sizeof e->secret,
+                                    &e->secret_len);
+    if (*ze != ZOTPCLI_OK)
+        return ADD_FIELD_SECRET;
+    return ADD_FIELD_OK;
+}
+
+/* Applies the hotp, digits, period and counter options to *e; returns the
+ * ADD_FIELD_* code for an out-of-range value. */
+static enum add_field_err fill_entry_params(const options *o, zotpcli_entry *e)
+{
+    if (o->hotp) e->kind = ZOTPCLI_HOTP;
+    if (o->have_digits) {
+        if (o->digits < ZOTPCLI_MIN_DIGITS || o->digits > ZOTPCLI_MAX_DIGITS)
+            return ADD_FIELD_DIGITS;
+        e->digits = (unsigned)o->digits;
+    }
+    if (o->have_period) {
+        if (o->period == 0 || o->period > ZOTPCLI_MAX_PERIOD)
+            return ADD_FIELD_PERIOD;
+        e->period = (unsigned)o->period;
+    }
+    if (o->have_counter) e->counter = o->counter;
+    return ADD_FIELD_OK;
+}
+
+/* Loads the store into *s, adds *e and saves; sets *past_load once the store
+ * loaded (or was absent), marking later errors as add/save failures. */
+static zotpcli_err store_add_entry(const options *o, const zotpcli_entry *e,
+                                   zotpcli_store *s, bool *past_load)
+{
+    zotpcli_err ze = load_store(o->store_path, o->passphrase, s);
+    if (ze != ZOTPCLI_OK && ze != ZOTPCLI_ERR_NOTFOUND) return ze;
+    *past_load = true;
+    ze = zotpcli_store_add(s, e);
+    if (ze == ZOTPCLI_OK) ze = save_store(o->store_path, o->passphrase, s);
+    return ze;
+}
+
 static int cmd_add(const options *o)
 {
     if (!o->label || !o->secret) {
@@ -241,51 +338,38 @@ static int cmd_add(const options *o)
     }
     zotpcli_entry e;
     zotpcli_entry_init(&e);
-    if (zstr_copy(e.label, sizeof e.label, o->label) >= sizeof e.label) {
+    zotpcli_err ze = ZOTPCLI_OK;
+    enum add_field_err fe = fill_entry_identity(o, &e, &ze);
+    if (fe == ADD_FIELD_LABEL) {
         zlog_error(&g_log, "label too long");
         return 2;
     }
-    if (o->issuer &&
-        zstr_copy(e.issuer, sizeof e.issuer, o->issuer) >= sizeof e.issuer) {
+    if (fe == ADD_FIELD_ISSUER) {
         zlog_error(&g_log, "issuer too long");
         return 2;
     }
-    zotpcli_err ze = zotpcli_b32_decode_secret(o->secret, e.secret,
-                                               sizeof e.secret,
-                                               &e.secret_len);
-    if (ze != ZOTPCLI_OK) {
+    if (fe == ADD_FIELD_SECRET) {
         zlog_error(&g_log, zotpcli_err_str(ze));
         return 1;
     }
-    if (o->hotp) e.kind = ZOTPCLI_HOTP;
-    if (o->have_digits) {
-        if (o->digits < ZOTPCLI_MIN_DIGITS || o->digits > ZOTPCLI_MAX_DIGITS) {
-            zlog_error(&g_log, "digits out of range (6..8)");
-            return 2;
-        }
-        e.digits = (unsigned)o->digits;
+    fe = fill_entry_params(o, &e);
+    if (fe == ADD_FIELD_DIGITS) {
+        zlog_error(&g_log, "digits out of range (6..8)");
+        return 2;
     }
-    if (o->have_period) {
-        if (o->period == 0 || o->period > ZOTPCLI_MAX_PERIOD) {
-            zlog_error(&g_log, "period out of range");
-            return 2;
-        }
-        e.period = (unsigned)o->period;
+    if (fe == ADD_FIELD_PERIOD) {
+        zlog_error(&g_log, "period out of range");
+        return 2;
     }
-    if (o->have_counter) e.counter = o->counter;
-
     zotpcli_store s;
     if (zotpcli_store_init(&s) != ZOTPCLI_OK) return 1;
-    ze = load_store(o->store_path, o->passphrase, &s);
-    if (ze != ZOTPCLI_OK && ze != ZOTPCLI_ERR_NOTFOUND) goto fail;
-    ze = zotpcli_store_add(&s, &e);
-    if (ze == ZOTPCLI_OK) ze = save_store(o->store_path, o->passphrase, &s);
+    bool past_load = false;
+    ze = store_add_entry(o, &e, &s, &past_load);
     if (ze == ZOTPCLI_OK) {
         zlog_info(&g_log, "entry added");
-    } else {
+    } else if (past_load) {
         zlog_error(&g_log, zotpcli_err_str(ze));
     }
-fail:
     zotpcli_store_free(&s);
     return ze == ZOTPCLI_OK ? 0 : 1;
 }
