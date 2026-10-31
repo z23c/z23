@@ -6541,6 +6541,244 @@ static int test_ic_changed_set_widens_structural_changes(void)
     return failures;
 }
 
+/* ── an added `.c` split out of a modified sibling stays exact ─────────────
+ *
+ * A complexity split moves functions into a NEW `.c` that nothing includes.
+ * It carries the sibling's impact, so the selection stays the plan, under the
+ * reason split-sibling-closure. Every other added, deleted or type-changed
+ * row stays structural: the full catalog. */
+#define IC_FIX_SPLIT IC_FIX_ROOT "/splitset"
+#define IC_SPLIT_REPO IC_FIX_SPLIT "/repo"
+
+static const char ic_split_big_base[] =
+    "/* big.c - base */\n#include \"a.h\"\n#include <stdio.h>\n\n"
+    "/* first helper does one thing */\nint first_helper(int x)\n{\n"
+    "    return x + 1;\n}\n\n"
+    "/* second helper does another */\nint second_helper(int x)\n{\n"
+    "    return x * 2;\n}\n\n"
+    "int keep_main(int x)\n{\n"
+    "    return first_helper(x) + second_helper(x);\n}\n";
+static const char ic_split_big_after[] =
+    "/* big.c - base */\n#include \"a.h\"\n#include <stdio.h>\n\n"
+    "int keep_main(int x)\n{\n"
+    "    return first_helper(x) + second_helper(x);\n}\n";
+static const char ic_split_part[] =
+    "/* big_part.c - split out of big.c */\n#include \"a.h\"\n\n"
+    "/* first helper does one thing */\nint first_helper(int x)\n{\n"
+    "    return x + 1;\n}\n\n"
+    "/* second helper does another */\nint second_helper(int x)\n{\n"
+    "    return x * 2;\n}\n";
+static const char ic_split_foreign[] =
+    "/* big_part.c - brand new */\n#include \"a.h\"\n\n"
+    "int first_helper(int x)\n{\n    return x + 1;\n}\n\n"
+    "int brand_new_helper(int x)\n{\n    return x - 7;\n}\n";
+static const char ic_split_make_base[] =
+    "SRC = core/a/big.c core/a/other.c\n";
+static const char ic_split_make_after[] =
+    "SRC = core/a/big.c core/a/big_part.c core/a/other.c\n";
+
+static bool ic_split_git(const char *what)
+{
+    char cmd[640];
+    return snprintf(cmd, sizeof(cmd), "cd " IC_SPLIT_REPO " && %s >/dev/null "
+                    "2>&1", what) < (int)sizeof(cmd) &&
+           system(cmd) == 0;
+}
+
+/* One branch off the base: `edit` writes its files, then it is sealed. */
+static bool ic_split_branch(const char *name, bool (*edit)(void))
+{
+    char step[256];
+    if (snprintf(step, sizeof(step), "git checkout -q -B %s base", name) >=
+            (int)sizeof(step) || !ic_split_git(step) || !edit())
+        return false;
+    if (snprintf(step, sizeof(step), "git add -A && git commit -qm %s && "
+                 "git rev-parse HEAD > ../%s.sha", name, name) >=
+            (int)sizeof(step))
+        return false;
+    return ic_split_git(step);
+}
+
+static bool ic_split_w(const char *rel, const char *body)
+{
+    return ic_write(IC_SPLIT_REPO, rel, body);
+}
+
+static bool ic_split_edit_split(void)
+{
+    return ic_split_w("core/a/big.c", ic_split_big_after) &&
+           ic_split_w("core/a/big_part.c", ic_split_part) &&
+           ic_split_w("Makefile", ic_split_make_after);
+}
+
+static bool ic_split_edit_included(void)
+{
+    return ic_split_edit_split() &&
+           ic_split_w("core/a/other.c",
+                      "#include \"big_part.c\"\nint other(void)\n{\n"
+                      "    return 0;\n}\n");
+}
+
+static bool ic_split_edit_header(void)
+{
+    return ic_split_edit_split() && ic_split_w("core/a/new.h", "/* h */\n");
+}
+
+static bool ic_split_edit_lone(void)
+{
+    return ic_split_w("core/b/solo.c", ic_split_part) &&
+           ic_split_w("core/a/other.c",
+                      "int other(void)\n{\n    return 1;\n}\n") &&
+           ic_split_w("Makefile", "SRC = core/a/big.c core/a/other.c "
+                                  "core/b/solo.c\n");
+}
+
+static bool ic_split_edit_deleted(void)
+{
+    return ic_split_git("git rm -q core/a/other.c") &&
+           ic_split_w("Makefile", "SRC = core/a/big.c\n");
+}
+
+static bool ic_split_edit_foreign(void)
+{
+    return ic_split_w("core/a/big.c", ic_split_big_after) &&
+           ic_split_w("core/a/big_part.c", ic_split_foreign) &&
+           ic_split_w("Makefile", ic_split_make_after);
+}
+
+static bool ic_split_edit_unlisted(void)
+{
+    return ic_split_w("core/a/big.c", ic_split_big_after) &&
+           ic_split_w("core/a/big_part.c", ic_split_part);
+}
+
+static bool ic_split_edit_split_deleted(void)
+{
+    return ic_split_edit_split() &&
+           ic_split_git("git rm -q core/a/other.c");
+}
+
+static bool ic_split_edit_split_nobase(void)
+{
+    /* The sibling gained the function instead of losing it. */
+    return ic_split_w("core/a/big.c", "/* big.c - base */\n#include \"a.h\"\n"
+                      "int added_here(int x)\n{\n    return x;\n}\n") &&
+           ic_split_w("core/a/big_part.c", ic_split_part) &&
+           ic_split_w("Makefile", ic_split_make_after);
+}
+
+static bool ic_split_fixture_build(void)
+{
+    if (system("rm -rf " IC_FIX_SPLIT " && mkdir -p " IC_SPLIT_REPO
+               " && cd " IC_SPLIT_REPO " && git init -q . && git config "
+               "user.email f@example.invalid && git config user.name f && "
+               "git config commit.gpgsign false >/dev/null 2>&1") != 0)
+        return false;
+    if (!ic_split_w("core/a/big.c", ic_split_big_base) ||
+        !ic_split_w("core/a/a.h", "/* a */\n") ||
+        !ic_split_w("core/a/other.c",
+                    "int other(void)\n{\n    return 0;\n}\n") ||
+        !ic_split_w("Makefile", ic_split_make_base) ||
+        !ic_split_git("git add -A && git commit -qm base && git checkout -q "
+                      "-B base"))
+        return false;
+    return ic_split_branch("split", ic_split_edit_split) &&
+           ic_split_branch("included", ic_split_edit_included) &&
+           ic_split_branch("header", ic_split_edit_header) &&
+           ic_split_branch("lone", ic_split_edit_lone) &&
+           ic_split_branch("deleted", ic_split_edit_deleted) &&
+           ic_split_branch("foreign", ic_split_edit_foreign) &&
+           ic_split_branch("unlisted", ic_split_edit_unlisted) &&
+           ic_split_branch("splitdel", ic_split_edit_split_deleted) &&
+           ic_split_branch("nobase", ic_split_edit_split_nobase) &&
+           ic_split_git("git rev-parse base > ../base.sha");
+}
+
+struct ic_split_case {
+    const char *name;
+    bool exact;
+};
+
+static const struct ic_split_case ic_split_cases[] = {
+    {"split", true},       /* split out of a modified sibling */
+    {"included", false},   /* something #includes the added .c */
+    {"header", false},     /* an added header beside the split */
+    {"lone", false},       /* an added .c with no modified sibling */
+    {"deleted", false},    /* a deleted file */
+    {"foreign", false},    /* a function the sibling never held */
+    {"unlisted", false},   /* no build list names the added .c */
+    {"splitdel", false},   /* a split plus a deletion */
+    {"nobase", false},     /* the sibling did not lose what the .c holds */
+};
+
+static int test_ic_changed_set_split_sibling_closure(void)
+{
+    int failures = 0;
+    static char saved[4096];
+    bool was_set = ic_host_fixture_save(saved, sizeof(saved));
+    TEST("proof changed set: an added split .c rides its sibling's closure") {
+        ASSERT(ic_split_fixture_build());
+        ASSERT(ic_host_need_full_root(IC_FIX_HOST_FULL));
+        ic_host_fixture_env(true);
+        static char selector[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS *
+                             (ZCL_TEST_GROUP_FULL_MAX + 1)];
+        char gated[PROOF_HOST_GATED_MAX];
+        char base[65];
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        FILE *bf = fopen(IC_FIX_SPLIT "/base.sha", "r");
+        ASSERT(bf && fgets(base, sizeof(base), bf));
+        fclose(bf);
+        base[strcspn(base, "\n")] = '\0';
+        size_t n = sizeof ic_split_cases / sizeof ic_split_cases[0];
+        for (size_t i = 0; i < n; i++) {
+            const struct ic_split_case *c = &ic_split_cases[i];
+            char rel[64], head[65], scratch[640], cwd[512];
+            ASSERT(snprintf(rel, sizeof(rel), IC_FIX_SPLIT "/%s.sha",
+                            c->name) < (int)sizeof(rel));
+            FILE *hf = fopen(rel, "r");
+            ASSERT(hf && fgets(head, sizeof(head), hf));
+            fclose(hf);
+            head[strcspn(head, "\n")] = '\0';
+            ASSERT(snprintf(rel, sizeof(rel), "%s.cap", c->name) > 0);
+            ASSERT(getcwd(cwd, sizeof(cwd)) && snprintf(scratch, sizeof(scratch), "%s/" IC_FIX_SPLIT "/%s", cwd, rel) < (int)sizeof(scratch));
+            struct zcl_dev_proof_changed_set set = {0};
+            char why[256] = {0};
+            ASSERT(zcl_dev_proof_changed_set_capture(
+                IC_SPLIT_REPO, base, head, scratch, NULL, &set, why,
+                sizeof(why)));
+            uint32_t selected = 0;
+            bool universal = false;
+            memset(selector, 0, sizeof(selector));
+            ASSERT(zcl_dev_proof_test_changed_set_selector(
+                &set, IC_FIX_HOST_FULL, selector, sizeof(selector),
+                &selected, &universal, gated, sizeof(gated)));
+            const char *reason = zcl_dev_proof_test_changed_set_reason(&set);
+            printf("invariant=split_closure case=%s rows=%zu structural=%zu "
+                   "split=%zu universal=%d selected=%u reason=%s\n", c->name,
+                   set.count, set.structural_count, set.split_count,
+                   universal ? 1 : 0, (unsigned)selected,
+                   reason ? reason : "-");
+            ASSERT(reason != NULL);
+            ASSERT(universal == !c->exact);
+            if (c->exact) {
+                ASSERT(set.structural_path == NULL);
+                ASSERT(set.split_count == 1 && set.split_path &&
+                       strcmp(set.split_path, "core/a/big_part.c") == 0);
+                ASSERT(strcmp(reason, "split-sibling-closure") == 0);
+                ASSERT((size_t)selected < zcl_test_group_catalog_count());
+            } else {
+                ASSERT(set.structural_path != NULL);
+                ASSERT(strcmp(reason, "changed-input-structure") == 0);
+            }
+            zcl_dev_proof_changed_set_release(&set);
+        }
+        PASS();
+    } _test_next:;
+    (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+    ic_host_fixture_restore(saved, was_set);
+    return failures;
+}
+
 /* `dev proof select` / `make agent-verify ONLY=@changed`: a lane verify runs
  * the proof worker's own selection for base..local. Pinned here: a structural
  * range selects the proof's universal set under the proof's own reason, and a
@@ -15019,6 +15257,7 @@ int test_impact_composition(void)
     failures += test_ic_changed_set_rejects_hidden_bytes();
     failures += test_ic_changed_set_carries_a_landing_batch();
     failures += test_ic_changed_set_widens_structural_changes();
+    failures += test_ic_changed_set_split_sibling_closure();
     failures += test_ic_proof_select_range_matches_proof_selector();
     failures += test_ic_proof_select_route_only();
     failures += test_ic_deleted_input_closes_current_graph();

@@ -306,7 +306,7 @@ bool zcl_dev_proof_build_plan_verify(
  * pointer into `bytes`, NULL when every row is a content change) and
  * `structural_count` how many such rows there are. No old depfile can hold an
  * edge for a formerly absent path, so such a set is never narrowed: the proof
- * runs its full closure instead. */
+ * runs its full closure instead, except for an added split `.c` (below). */
 struct zcl_dev_proof_changed_set {
     char *bytes;
     const char **files;
@@ -317,6 +317,14 @@ struct zcl_dev_proof_changed_set {
     size_t current_count;
     const char *structural_path;
     size_t structural_count;
+    /* An added `.c` row proven a split out of a modified same-directory `.c`
+     * sibling (nothing includes it, it is listed wherever the sibling is, and
+     * the sibling's diff lost every function and comment it carries) is not
+     * structural: it takes the sibling's closure and the selection stays
+     * exact, under the reason split-sibling-closure. `split_path` is the first
+     * such row, `split_count` how many. */
+    const char *split_path;
+    size_t split_count;
 };
 
 #if defined(ZCL_TESTING)
@@ -666,6 +674,10 @@ bool zcl_dev_proof_test_changed_set_selector(
     const struct zcl_dev_proof_changed_set *set, const char *root, char *out,
     size_t out_size, uint32_t *count_out, bool *universal_out,
     char *gated_out, size_t gated_size);
+/* Seam for the selection reason: what the test-selection log would say for
+ * `set` (changed-input-structure, impact-plan, split-sibling-closure, ...). */
+const char *zcl_dev_proof_test_changed_set_reason(
+    const struct zcl_dev_proof_changed_set *set);
 /* Seam for the preflight parser: the exact reader the proof worker uses to
  * turn the runner's --cache-probe-only output into the account above, so a
  * test can prove the counts (and the summary self-check) without driving a

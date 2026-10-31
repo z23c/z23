@@ -1618,6 +1618,8 @@ void zcl_dev_proof_changed_set_release(struct zcl_dev_proof_changed_set *set)
     set->current_count = 0;
     set->structural_path = NULL;
     set->structural_count = 0;
+    set->split_path = NULL;
+    set->split_count = 0;
 }
 
 /* Read a captured list whole. Refuses with the observed byte count rather than
@@ -1740,13 +1742,407 @@ static bool dp_changed_set_structural_change(char status)
     return status == 'A' || status == 'D' || status == 'T';
 }
 
+/* ---- Added `.c` split out of a modified sibling ----
+ *
+ * A complexity split moves functions out of a modified `.c` into a NEW `.c`
+ * that nothing includes and that only the build's source lists pick up. Such
+ * a file adds no include edge and no `__has_include` probe, and its impact is
+ * the impact of the sibling it came from, which is already in the set. It is
+ * admitted as exact only when ALL of these hold, each read by revision:
+ *   - the added row is a `.c` and a modified `.c` sibling shares its directory;
+ *   - no tracked file mentions its basename on an include/embed line;
+ *   - every file that lists its path also lists the sibling's path (it is
+ *     linked wherever the sibling is) and at least one file lists it;
+ *   - the sibling's diff removed every function the added file defines, every
+ *     comment line outside the added file's header block, and every #include
+ *     the added file carries (or the sibling still includes it);
+ *   - the added file defines at least one function and probes no include.
+ * Anything else, and any git failure, leaves the row structural. */
+#define DP_SPLIT_FUNCS_MAX 128
+#define DP_SPLIT_NAME_MAX 64
+#define DP_SPLIT_CANDIDATES_MAX 64
+#define DP_SPLIT_LEAF_MAX 120
+
+struct dp_split_ctx {
+    const char *root, *base, *local, *scratch;
+};
+
+struct dp_split_funcs {
+    char name[DP_SPLIT_FUNCS_MAX][DP_SPLIT_NAME_MAX];
+    size_t count;
+    bool overflow;
+};
+
+static const char *dp_split_leaf(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+static bool dp_split_is_c(const char *path)
+{
+    size_t n = strlen(path);
+    return n > 2 && strcmp(path + n - 2, ".c") == 0;
+}
+
+static bool dp_split_same_dir(const char *a, const char *b)
+{
+    size_t da = (size_t)(dp_split_leaf(a) - a);
+    return da == (size_t)(dp_split_leaf(b) - b) && memcmp(a, b, da) == 0;
+}
+
+/* A name safe to put in a regular expression and a pathspec. */
+static bool dp_split_name_safe(const char *s)
+{
+    if (!s[0]) return false;
+    for (; *s; s++) {
+        bool alnum = (*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+                     (*s >= '0' && *s <= '9');
+        if (!alnum && !strchr("_./-", *s)) return false;
+    }
+    return true;
+}
+
+/* Exit status of one git query, or -1 when it did not run to completion.
+ * `out` (may be NULL) receives the bounded, NUL-terminated stdout. */
+static int dp_split_git(const char *root, const char *const argv[], char *out,
+                        size_t out_size)
+{
+    struct zcl_devloop_process_result r = {0};
+    if (!zcl_devloop_process_run(root, argv, 30000, &r) || r.timed_out ||
+        r.cancelled || r.term_signal != 0 || r.output_truncated)
+        return -1;
+    if (out) {
+        if (r.output_len >= out_size) return -1;
+        memcpy(out, r.output, r.output_len);
+        out[r.output_len] = '\0';
+    }
+    return r.exit_code;
+}
+
+/* Nothing in the tree at `local` includes or embeds a file with this name. */
+static bool dp_split_unreferenced(const struct dp_split_ctx *c,
+                                  const char *leaf)
+{
+    char pat[DP_SPLIT_LEAF_MAX * 2 + 24];
+    size_t n = (size_t)snprintf(pat, sizeof(pat), "(include|embed).*");
+    if (strlen(leaf) > DP_SPLIT_LEAF_MAX) return false;
+    for (const char *p = leaf; *p; p++) {
+        if (*p == '.') pat[n++] = '\\';
+        pat[n++] = *p;
+    }
+    pat[n] = '\0';
+    const char *argv[] = {"git", "grep", "-q", "-I", "-E", "-e", pat,
+                          c->local, "--", NULL};
+    return dp_split_git(c->root, argv, NULL, 0) == 1;
+}
+
+/* Every line of `listing` (git grep -l output at `local`) names a file other
+ * than `added` that also lists `sibling`; counts those files. */
+static bool dp_split_listing_ok(const struct dp_split_ctx *c, char *listing,
+                                const char *added, const char *sibling,
+                                size_t *listed)
+{
+    size_t prefix = strlen(c->local) + 1;
+    char *save = NULL;
+    for (char *line = strtok_r(listing, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        if (strlen(line) <= prefix || !dp_split_name_safe(line + prefix))
+            return false;
+        const char *file = line + prefix;
+        if (strcmp(file, added) == 0) continue;
+        const char *probe[] = {"git", "grep", "-q", "-F", "-e", sibling,
+                               c->local, "--", file, NULL};
+        if (dp_split_git(c->root, probe, NULL, 0) != 0) return false;
+        (*listed)++;
+    }
+    return true;
+}
+
+/* At least one file lists the added path, and each lists the sibling too. */
+static bool dp_split_co_listed(const struct dp_split_ctx *c, const char *added,
+                               const char *sibling)
+{
+    char *listing = zcl_malloc(ZCL_DEVLOOP_OUTPUT_MAX, "proof split listing");
+    if (!listing) return false;
+    const char *argv[] = {"git", "grep", "-l", "-I", "-F", "-e", added,
+                          c->local, "--", NULL};
+    size_t listed = 0;
+    bool ok = dp_split_git(c->root, argv, listing, ZCL_DEVLOOP_OUTPUT_MAX) == 0 &&
+              dp_split_listing_ok(c, listing, added, sibling, &listed) &&
+              listed > 0;
+    free(listing);
+    return ok;
+}
+
+/* One path's diff against base as text, read whole from a scratch file. */
+static char *dp_split_diff(const struct dp_split_ctx *c, const char *path)
+{
+    char output[PATH_MAX + 32], file[PATH_MAX + 8];
+    if (snprintf(file, sizeof(file), "%s.split", c->scratch) >=
+            (int)sizeof(file) ||
+        snprintf(output, sizeof(output), "--output=%s", file) >=
+            (int)sizeof(output))
+        return NULL;
+    const char *argv[] = {"git", "diff", "--no-renames", "--no-ext-diff",
+                          "--no-textconv", "--no-color", "-U0", output,
+                          c->base, c->local, "--", path, NULL};
+    char ignored[2];
+    (void)unlink(file);
+    char *text = NULL;
+    if (dp_split_git(c->root, argv, ignored, sizeof(ignored)) == 0) {
+        char why[64];
+        size_t len = 0;
+        text = changed_set_read(file, &len, why, sizeof(why));
+    }
+    (void)unlink(file);
+    return text;
+}
+
+/* The lines of one side ('+' or '-') of a -U0 diff, hunk bodies only, one per
+ * output line with the marker removed. */
+static char *dp_split_side(const char *diff, char side)
+{
+    char *out = zcl_calloc(strlen(diff) + 1, 1, "proof split side");
+    if (!out) return NULL;
+    size_t used = 0;
+    bool body = false;
+    for (const char *p = diff; *p;) {
+        const char *end = strchr(p, '\n');
+        size_t len = end ? (size_t)(end - p) : strlen(p);
+        if (!body)
+            body = len >= 2 && p[0] == '@' && p[1] == '@';
+        else if (len > 0 && p[0] == side) {
+            memcpy(out + used, p + 1, len - 1);
+            used += len - 1;
+            out[used++] = '\n';
+        }
+        p += len + (end ? 1 : 0);
+    }
+    return out;
+}
+
+/* Next line of `text` with surrounding blanks trimmed; false at the end. */
+static bool dp_split_next(const char **cursor, const char **line, size_t *len)
+{
+    const char *p = *cursor;
+    if (!*p) return false;
+    const char *end = strchr(p, '\n');
+    size_t n = end ? (size_t)(end - p) : strlen(p);
+    *cursor = p + n + (end ? 1 : 0);
+    while (n > 0 && (*p == ' ' || *p == '\t')) { p++; n--; }
+    while (n > 0 && (p[n - 1] == ' ' || p[n - 1] == '\t' || p[n - 1] == '\r'))
+        n--;
+    *line = p;
+    *len = n;
+    return true;
+}
+
+static bool dp_split_has_line(const char *text, const char *line, size_t len)
+{
+    const char *cur = text, *l;
+    size_t n;
+    while (dp_split_next(&cur, &l, &n))
+        if (n == len && memcmp(l, line, len) == 0) return true;
+    return false;
+}
+
+static bool dp_split_is_comment(const char *l, size_t n)
+{
+    return n > 0 && (l[0] == '*' || (n > 1 && l[0] == '/' &&
+                                     (l[1] == '*' || l[1] == '/')));
+}
+
+static bool dp_split_is_include(const char *l, size_t n)
+{
+    if (n == 0 || l[0] != '#') return false;
+    size_t i = 1;
+    while (i < n && (l[i] == ' ' || l[i] == '\t')) i++;
+    return n - i >= 7 && memcmp(l + i, "include", 7) == 0;
+}
+
+/* Every comment line outside the leading header block, and every #include,
+ * of `added` is a line `source` removed or `keep` still holds. */
+static bool dp_split_lines_derive(const char *added, const char *source,
+                                  const char *keep)
+{
+    const char *cur = added, *l;
+    size_t n;
+    bool header = true;
+    while (dp_split_next(&cur, &l, &n)) {
+        bool comment = dp_split_is_comment(l, n);
+        if (n > 0 && !comment) header = false;
+        if (comment && !header && !dp_split_has_line(source, l, n))
+            return false;
+        if (dp_split_is_include(l, n) && !dp_split_has_line(source, l, n) &&
+            !(keep && dp_split_has_line(keep, l, n)))
+            return false;
+    }
+    return true;
+}
+
+static bool dp_split_ident(char ch)
+{
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+           (ch >= '0' && ch <= '9') || ch == '_';
+}
+
+/* Name a column-0 declarator line at `p` introduces, or NULL: the identifier
+ * before its first '(' when the line (up to a '{') holds no ';' or '='. A
+ * definition's declarator qualifies; a prototype, an initialised object and a
+ * single-line body do not, so a name that is not found stays universal. A
+ * -U0 diff may keep a body's braces as context, so '{' is not required. */
+static const char *dp_split_def_at(const char *p, size_t *len)
+{
+    const char *paren = NULL;
+    for (const char *q = p; *q && *q != '\n' && *q != '{'; q++) {
+        if (*q == ';' || *q == '=') return NULL;
+        if (*q == '(' && !paren) paren = q;
+    }
+    if (!paren) return NULL;
+    const char *end = paren;
+    while (end > p && (end[-1] == ' ' || end[-1] == '\t')) end--;
+    const char *start = end;
+    while (start > p && dp_split_ident(start[-1])) start--;
+    *len = (size_t)(end - start);
+    return *len ? start : NULL;
+}
+
+static void dp_split_funcs_add(struct dp_split_funcs *f, const char *name,
+                               size_t len)
+{
+    if (len >= DP_SPLIT_NAME_MAX || f->count >= DP_SPLIT_FUNCS_MAX) {
+        f->overflow = true;
+        return;
+    }
+    memcpy(f->name[f->count], name, len);
+    f->name[f->count++][len] = '\0';
+}
+
+static void dp_split_funcs_scan(const char *text, struct dp_split_funcs *f)
+{
+    bool continued = false;
+    for (const char *p = text; *p;) {
+        const char *end = strchr(p, '\n');
+        size_t line = end ? (size_t)(end - p) : strlen(p);
+        bool tail = line > 0 && p[line - 1] == '\\';
+        bool start = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                     *p == '_';
+        size_t len = 0;
+        const char *name = (!continued && start) ? dp_split_def_at(p, &len)
+                                                 : NULL;
+        if (name) dp_split_funcs_add(f, name, len);
+        continued = (continued || *p == '#') && tail;
+        p += line + (end ? 1 : 0);
+    }
+}
+
+static bool dp_split_funcs_has(const struct dp_split_funcs *f, const char *n)
+{
+    for (size_t i = 0; i < f->count; i++)
+        if (strcmp(f->name[i], n) == 0) return true;
+    return false;
+}
+
+/* Every function `added` defines was defined in what the sibling lost. */
+static bool dp_split_funcs_derive(const char *added, const char *removed)
+{
+    struct dp_split_funcs from = {0}, gone = {0};
+    dp_split_funcs_scan(added, &from);
+    dp_split_funcs_scan(removed, &gone);
+    if (from.overflow || gone.overflow || from.count == 0) return false;
+    for (size_t i = 0; i < from.count; i++)
+        if (!dp_split_funcs_has(&gone, from.name[i])) return false;
+    return true;
+}
+
+/* The #include lines the sibling still carries. */
+static bool dp_split_includes(const struct dp_split_ctx *c,
+                              const char *sibling, char *out, size_t size)
+{
+    const char *argv[] = {"git", "grep", "-h", "-I", "-E", "-e",
+                          "^[ \t]*#[ \t]*include", c->local, "--", sibling,
+                          NULL};
+    int rc = dp_split_git(c->root, argv, out, size);
+    if (rc == 1) out[0] = '\0';
+    return rc == 0 || rc == 1;
+}
+
+static bool dp_split_derives(const struct dp_split_ctx *c, const char *added,
+                             const char *added_side, const char *sibling)
+{
+    char *kept = zcl_malloc(ZCL_DEVLOOP_OUTPUT_MAX, "proof split includes");
+    char *diff = dp_split_diff(c, sibling);
+    char *removed = diff ? dp_split_side(diff, '-') : NULL;
+    bool ok = removed && kept && dp_split_includes(c, sibling, kept, ZCL_DEVLOOP_OUTPUT_MAX) &&
+              dp_split_funcs_derive(added_side, removed) &&
+              dp_split_lines_derive(added_side, removed, kept) &&
+              dp_split_co_listed(c, added, sibling);
+    free(diff);
+    free(removed);
+    free(kept);
+    return ok;
+}
+
+/* Is the added `.c` at refs[i] a split out of a modified sibling row? */
+static bool dp_split_admit(const struct dp_split_ctx *c, const char **refs,
+                           const char *status, size_t count, size_t i)
+{
+    const char *added = refs[i];
+    if (!dp_split_name_safe(added) ||
+        strlen(dp_split_leaf(added)) > DP_SPLIT_LEAF_MAX ||
+        !dp_split_unreferenced(c, dp_split_leaf(added)))
+        return false;
+    char *diff = dp_split_diff(c, added);
+    char *side = diff ? dp_split_side(diff, '+') : NULL;
+    bool ok = false;
+    if (side && !strstr(side, "__has_include") && !strstr(side, "__has_embed") &&
+        !strstr(side, "#embed"))
+        for (size_t j = 0; j < count && !ok; j++)
+            ok = status[j] == 'M' && dp_split_is_c(refs[j]) &&
+                 dp_split_same_dir(added, refs[j]) &&
+                 dp_split_name_safe(refs[j]) &&
+                 dp_split_derives(c, added, side, refs[j]);
+    free(diff);
+    free(side);
+    return ok;
+}
+
+/* Settle every deferred added `.c` row: admitted ones are counted as splits
+ * and leave the closure input (the sibling carries their impact); the rest
+ * become structural exactly as an added path always was. */
+static void dp_changed_set_split_classify(
+    const struct dp_split_ctx *c, const char **refs, const char *status,
+    struct zcl_dev_proof_changed_set *set)
+{
+    size_t candidates = 0, count = set->count;
+    for (size_t i = 0; i < count; i++) {
+        if (status[i] != 'A' || !dp_split_is_c(refs[i])) continue;
+        if (candidates++ < DP_SPLIT_CANDIDATES_MAX &&
+            dp_split_admit(c, refs, status, count, i)) {
+            if (!set->split_path) set->split_path = refs[i];
+            set->split_count++;
+            for (size_t k = 0; k < set->current_count; k++)
+                if (set->current_files[k] == refs[i]) {
+                    memmove(&set->current_files[k], &set->current_files[k + 1],
+                            (set->current_count - k - 1) * sizeof(*refs));
+                    set->current_count--;
+                    break;
+                }
+            continue;
+        }
+        if (!set->structural_path) set->structural_path = refs[i];
+        set->structural_count++;
+    }
+}
+
 /* Point one path reference per status row into the buffer. Presence changes
  * to headers can flip __has_include without leaving any old depfile edge, so
  * an added, deleted or type-changed row is kept and marked in `mark`: it
  * widens the proof to its full closure rather than refusing it. An unknown
  * status, an unsafe path or a short list still refuses the whole set. */
 static bool dp_changed_set_rows(char *bytes, size_t len, size_t count, const char **refs,
-                                size_t *persist_len,
+                                char *kinds, size_t *persist_len,
                                 struct zcl_dev_proof_changed_set *mark,
                                 char *why, size_t why_len)
 {
@@ -1771,10 +2167,14 @@ static bool dp_changed_set_rows(char *bytes, size_t len, size_t count, const cha
                        "changed_set_invalid_or_truncated row=%zu", stored + 1);
             return false;
         }
-        if (dp_changed_set_structural_change(status)) {
+        /* With `kinds` the caller settles an added `.c` itself (it may be a
+         * split out of a modified sibling); without it every add is structural. */
+        bool deferred = kinds && status == 'A' && dp_split_is_c(path);
+        if (dp_changed_set_structural_change(status) && !deferred) {
             if (!mark->structural_path) mark->structural_path = path;
             mark->structural_count++;
         }
+        if (kinds) kinds[stored] = status;
         refs[stored++] = path;
         if (status != 'D' && mark->current_files)
             mark->current_files[mark->current_count++] = path;
@@ -1797,7 +2197,7 @@ bool zcl_dev_proof_test_changed_set_bytes(char *bytes, size_t len,
     size_t count = dp_changed_set_count(bytes, len), persist_len = 0;
     struct zcl_dev_proof_changed_set mark = {0};
     return count > 0 && count <= 2 &&
-           dp_changed_set_rows(bytes, len, count, refs, &persist_len, &mark,
+           dp_changed_set_rows(bytes, len, count, refs, NULL, &persist_len, &mark,
                                why, why_len);
 }
 #endif
@@ -1867,19 +2267,26 @@ bool zcl_dev_proof_changed_set_capture(const char *repo_root, const char *base,
         return false;
     }
     size_t persist_len = 0;
+    char *kinds = zcl_calloc(count, 1, "proof changed-set row kinds");
     out->current_files = refs + count;
-    if (!dp_changed_set_rows(bytes, len, count, refs, &persist_len, out, why,
-                             why_len) ||
+    if (!kinds ||
+        !dp_changed_set_rows(bytes, len, count, refs, kinds, &persist_len, out,
+                             why, why_len) ||
         !dp_changed_set_persist(persist_path, refs, count, persist_len, why,
                                 why_len)) {
+        if (!kinds) proof_why(why, why_len, "changed_set_allocation_failed");
+        free(kinds);
         free((void *)refs);
         free(bytes);
         memset(out, 0, sizeof(*out));
         return false;
     }
+    out->count = count;
+    const struct dp_split_ctx split = {repo_root, base, local, scratch_path};
+    dp_changed_set_split_classify(&split, refs, kinds, out);
+    free(kinds);
     out->bytes = bytes;
     out->files = refs;
-    out->count = count;
     return true;
 }
 
@@ -7144,11 +7551,12 @@ bool zcl_dev_proof_test_needs_argv_for_files(const char *jobs,
  * test-selection.log and `dev proof select`, so a lane verify and the proof
  * cannot word the same decision differently. */
 static const char *dp_selection_reason(const struct zcl_devloop_plan *plan,
-                                       bool widened)
+                                       bool widened, bool split)
 {
     return widened                   ? "changed-input-structure"
            : plan->path_universal    ? "path-group-cap"
            : plan->closure_universal ? "closure-universal"
+           : split                   ? "split-sibling-closure"
                                      : "impact-plan";
 }
 
@@ -7189,18 +7597,20 @@ void zcl_dev_proof_test_capacity_note(FILE *f, const struct zcl_devloop_plan *pl
  * the whole catalog, chosen because the plan's closure was capacity-bounded
  * (reason closure-universal), because its path floor outgrew the group cap
  * (reason path-group-cap), or because an input was added, deleted or
- * type-changed (reason changed-input-structure);
+ * type-changed (reason changed-input-structure), and an exact plan says
+ * split-sibling-closure when an added `.c` rode on its modified sibling;
  * "exact" is the enumerated plan. `host_gated` names every catalog group the
  * universal selector left out because this tree cannot meet the group's
  * declared host need, and which need it was -- so a reader of this file never
  * has to infer a smaller run from a count. "-" means nothing was left out. */
 static bool proof_note_test_selection(const struct proof_paths *paths,
                                       const struct zcl_devloop_plan *plan,
-                                      bool widened, uint32_t selected,
+                                      bool widened, bool split,
+                                      uint32_t selected,
                                       const char *host_gated)
 {
     bool universal = plan->closure_universal;
-    const char *reason = dp_selection_reason(plan, widened);
+    const char *reason = dp_selection_reason(plan, widened, split);
     char path[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s/%s.test-selection.log", paths->logs,
                  paths->key) >= (int)sizeof(path))
@@ -7488,6 +7898,18 @@ bool zcl_dev_proof_test_changed_set_selector(
     return build_test_selector(&plan, root, out, out_size, count_out,
                                gated_out, gated_size);
 }
+
+/* The reason the selector spells for `set` when its plan admits as planned. */
+const char *zcl_dev_proof_test_changed_set_reason(
+    const struct zcl_dev_proof_changed_set *set)
+{
+    static struct zcl_devloop_plan plan;
+    if (!set || !set->files || set->count == 0 ||
+        !zcl_devloop_plan_files(set->files, set->count, &plan))
+        return NULL;
+    bool widened = dp_changed_set_widen(set, &plan);
+    return dp_selection_reason(&plan, widened, set->split_count > 0);
+}
 #endif
 
 static bool dp_changed_set_close(const char *root,
@@ -7595,7 +8017,7 @@ static void dp_select_close(const char *root,
         admitted = dp_changed_set_close(root, set, plan, &refusal);
     bool widened = dp_changed_set_widen(set, plan);
     if (admitted) {
-        out->reason = dp_selection_reason(plan, widened);
+        out->reason = dp_selection_reason(plan, widened, set->split_count > 0);
         dp_select_capacity_detail(out, plan);
         return;
     }
@@ -9008,6 +9430,7 @@ struct dp_worker {
     const struct zcl_dev_proof_changed_set *changed;
     /* The docs-fresh checkers still running beside the read-only steps. */
     struct dp_docs_fresh_run *docs;
+    bool split_closure;
     bool structure_widened;
     struct zcl_devloop_plan plan;
     char plan_json[ZCL_DEVLOOP_PLAN_WIRE_MAX];
@@ -9091,6 +9514,7 @@ static void dp_worker_widen(struct dp_worker *w, size_t file_count)
 {
     w->structure_widened =
         dp_changed_set_widen(w->changed, &w->plan);
+    w->split_closure = w->changed && w->changed->split_count > 0;
     if (!w->paths->phases[0]) return;
     char note[PROOF_CHANGED_PATH_MAX + 96];
     if (w->structure_widened)
@@ -9102,6 +9526,10 @@ static void dp_worker_widen(struct dp_worker *w, size_t file_count)
         (void)snprintf(note, sizeof(note),
                        "widened reason=path_group_cap rows=%zu cap=%d",
                        file_count, ZCL_DEVLOOP_MAX_PLAN_GROUPS);
+    else if (w->split_closure && !w->plan.closure_universal)
+        (void)snprintf(note, sizeof(note),
+                       "split_sibling_closure path=%s rows=%zu",
+                       w->changed->split_path, w->changed->split_count);
     else
         return;
     (void)zcl_dev_proof_phase_note(w->paths->phases, "changed_set", note);
