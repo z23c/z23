@@ -27,7 +27,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <errno.h>
 #include <stdatomic.h>
+#include <platform/time_compat.h>
 #include <stdint.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -46,6 +48,14 @@
 static SSL_CTX *g_ssl_ctx = NULL;
 static platform_socket_t g_https_fd = PLATFORM_SOCKET_INVALID;
 static platform_socket_t g_http_fd = PLATFORM_SOCKET_INVALID;
+/* Listener-thread copies of the bound fds: written only before the listener
+ * thread is spawned and never rewritten until it has been joined, so the
+ * accept loops never race with https_server_stop rewriting g_*_fd. */
+static platform_socket_t g_https_listen_fd = PLATFORM_SOCKET_INVALID;
+static platform_socket_t g_http_listen_fd = PLATFORM_SOCKET_INVALID;
+/* Set (under g_https_state_mutex) from the moment https_server_stop detaches the
+ * listeners until it has joined them; a start in that window is refused. */
+static bool g_stopping = false;
 static pthread_t g_https_thread;
 static pthread_t g_http_thread;
 static pthread_t g_worker_threads[16];
@@ -1116,16 +1126,42 @@ static void handle_https_client_fd(platform_socket_t fd, int64_t deadline_ms)
     atomic_fetch_sub(&g_active_connections, 1);
 }
 
+/* Bounded wait before accept(): a listener re-checks g_running at least every
+ * HTTPS_LISTEN_POLL_MS even if shutdown() could not wake it, so the stop-time
+ * join can never hang on a blocked accept. Hangup counts as ready so the
+ * accept call reports it. */
+#define HTTPS_LISTEN_POLL_MS 500
+static bool https_listen_ready(platform_socket_t fd)
+{
+    int r = platform_socket_wait_readable(fd, HTTPS_LISTEN_POLL_MS);
+    if (r < 0) {
+        /* A persistent poll error must not become a silent busy loop. */
+        LOG_WARN("https", "poll on a listening socket failed (errno %d)", errno);
+        platform_sleep_ms(HTTPS_LISTEN_POLL_MS);
+        return false;
+    }
+    return r > 0;
+}
+
 static void *https_listen_fn(void *arg)
 {
     (void)arg;
     while (g_running) {
+        if (!https_listen_ready(g_https_listen_fd)) {
+            thread_liveness_beat(&g_https_listen_liveness, -1);
+            continue;
+        }
         struct sockaddr_in client_addr;
         size_t addr_len = sizeof(client_addr);
         platform_socket_t client_fd = platform_socket_accept(
-            g_https_fd, (struct sockaddr *)&client_addr, &addr_len);
+            g_https_listen_fd, (struct sockaddr *)&client_addr, &addr_len);
         thread_liveness_beat(&g_https_listen_liveness, -1);
         if (client_fd == PLATFORM_SOCKET_INVALID) {
+            continue;
+        }
+        if (!platform_socket_set_nonblocking(client_fd, false)) {
+            LOG_WARN("https", "dropping an HTTPS connection: cannot restore blocking mode");
+            platform_socket_close(client_fd);
             continue;
         }
 
@@ -1176,12 +1212,21 @@ static void *http_listen_fn(void *arg)
 {
     (void)arg;
     while (g_running) {
+        if (!https_listen_ready(g_http_listen_fd)) {
+            thread_liveness_beat(&g_http_listen_liveness, -1);
+            continue;
+        }
         struct sockaddr_in client_addr;
         size_t addr_len = sizeof(client_addr);
         platform_socket_t client_fd = platform_socket_accept(
-            g_http_fd, (struct sockaddr *)&client_addr, &addr_len);
+            g_http_listen_fd, (struct sockaddr *)&client_addr, &addr_len);
         thread_liveness_beat(&g_http_listen_liveness, -1);
         if (client_fd == PLATFORM_SOCKET_INVALID) {
+            continue;
+        }
+        if (!platform_socket_set_nonblocking(client_fd, false)) {
+            LOG_WARN("https", "dropping an HTTP connection: cannot restore blocking mode");
+            platform_socket_close(client_fd);
             continue;
         }
 
@@ -1258,6 +1303,12 @@ static platform_socket_t bind_port(uint16_t port, bool any_addr)
         platform_socket_close(fd);
         LOG_ERR("https", "listen on port %u failed", port);
     }
+    /* Non-blocking so accept() can never block after a poll wake-up (a peer
+     * that resets between readiness and accept); the listeners poll first. */
+    if (!platform_socket_set_nonblocking(fd, true)) {
+        platform_socket_close(fd);
+        LOG_ERR("https", "non-blocking mode on port %u failed", port);
+    }
     return fd;
 }
 
@@ -1280,6 +1331,7 @@ static unsigned https_spawn_workers(void)
 static void https_spawn_http_listener(void)
 {
     if (g_http_fd == PLATFORM_SOCKET_INVALID) return;
+    g_http_listen_fd = g_http_fd;
     if (thread_registry_spawn("zcl_http_listen", http_listen_fn, NULL, &g_http_thread) != 0) {
         fprintf(stderr, "HTTPS: HTTP redirect thread failed\n");  // obs-ok:thread-spawn-fallback-logged
         platform_socket_close(g_http_fd);
@@ -1301,6 +1353,13 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
     if (atomic_load(&g_running) || g_https_thread_started) {
         pthread_mutex_unlock(&g_https_state_mutex);
         return true;
+    }
+    if (g_stopping) {
+        /* A stop is still joining the previous listeners: they own the
+         * listen-fd copies until it finishes, so a restart must not rebind. */
+        pthread_mutex_unlock(&g_https_state_mutex);
+        LOG_ERROR("https", "the front door is still stopping and cannot restart yet");
+        return false;
     }
 
     if (hostname)
@@ -1387,6 +1446,7 @@ bool https_server_start_on_port(const char *cert_path, const char *key_path,
         return false;
     }
 
+    g_https_listen_fd = g_https_fd;
     if (thread_registry_spawn("zcl_https_listen", https_listen_fn, NULL,
                                   &g_https_thread) != 0) {
         platform_socket_close(g_https_fd);
@@ -1420,6 +1480,23 @@ bool https_server_start(const char *cert_path, const char *key_path,
     return https_server_start_on_port(cert_path, key_path, hostname, 8443, 8080);
 }
 
+/* Wake a listener blocked in accept(). A failed shutdown() is logged; the
+ * listener's bounded accept wait (https_listen_ready) still lets it see
+ * g_running go false, so the join in https_server_stop cannot hang, and the fd
+ * is only closed after that join. */
+static void https_listen_fd_shutdown(platform_socket_t fd)
+{
+    if (fd == PLATFORM_SOCKET_INVALID) return;
+    if (platform_socket_shutdown_both(fd) != 0)
+        LOG_WARN("https", "shutdown of a listening socket failed (errno %d); "
+                          "its accept loop will exit on the next poll", errno);
+}
+
+static void https_listen_fd_close(platform_socket_t fd)
+{
+    if (fd != PLATFORM_SOCKET_INVALID) platform_socket_close(fd);
+}
+
 void https_server_stop(void)
 {
     pthread_t https_thread;
@@ -1439,6 +1516,7 @@ void https_server_stop(void)
     }
     atomic_store(&g_running, false);
     atomic_store(&g_https_port, 0);
+    g_stopping = true;
     https_fd = g_https_fd;
     http_fd = g_http_fd;
     g_https_fd = PLATFORM_SOCKET_INVALID;
@@ -1458,17 +1536,8 @@ void https_server_stop(void)
         worker_threads[i] = g_worker_threads[i];
     g_worker_threads_started = 0;
     pthread_mutex_unlock(&g_https_state_mutex);
-
-    if (https_fd != PLATFORM_SOCKET_INVALID) {
-        platform_socket_shutdown_both(https_fd);
-        platform_socket_close(https_fd);
-    }
-    if (http_fd != PLATFORM_SOCKET_INVALID) {
-        platform_socket_shutdown_both(http_fd);
-        platform_socket_close(http_fd);
-    }
-    pthread_cond_broadcast(&g_client_queue_cv);
-    client_queue_close_all();
+    https_listen_fd_shutdown(https_fd);
+    https_listen_fd_shutdown(http_fd);
 
     if (have_https_thread) {
         pthread_join(https_thread, NULL);
@@ -1478,11 +1547,22 @@ void https_server_stop(void)
         pthread_join(http_thread, NULL);
         thread_liveness_retire(&g_http_listen_liveness);
     }
+    /* Close only after the listeners are joined so a reused fd number can
+     * never be accepted on by a late listener iteration. */
+    https_listen_fd_close(https_fd);
+    https_listen_fd_close(http_fd);
+    /* Drain only now: a listener still running (shutdown failed) could
+     * otherwise enqueue a connection after the queue was closed and leak it. */
+    pthread_cond_broadcast(&g_client_queue_cv);
+    client_queue_close_all();
     for (unsigned i = 0; i < worker_threads_started; i++)
         pthread_join(worker_threads[i], NULL);
     if (worker_threads_started > 0)
         thread_liveness_retire(&g_https_wkr_liveness);
     ssl_ctx_retire_all();
+    pthread_mutex_lock(&g_https_state_mutex);
+    g_stopping = false;
+    pthread_mutex_unlock(&g_https_state_mutex);
     printf("HTTPS server stopped.\n");
 }
 
