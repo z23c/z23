@@ -898,6 +898,16 @@ static int retry_evidence_probe(const char *out_path)
     return ok ? 1 : 2;
 }
 
+#if !defined(_WIN32)
+/* Land's receiver only admits source checkouts under the checkout policy.
+ * Its fixture repositories therefore stay under cwd/test-tmp. */
+static bool child_fixture_root_select(size_t idx)
+{
+    return strncmp(g_groups[idx].name, "test_dev_land", 13) != 0 ||
+           unsetenv("ZCL_TEST_TMPROOT") == 0;
+}
+#endif
+
 static void child_run(size_t idx, const char *out_path, const char *state_path,
                       bool activate_proof_contracts)
 {
@@ -915,6 +925,9 @@ static void child_run(size_t idx, const char *out_path, const char *state_path,
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
 
+#if !defined(_WIN32)
+    if (!child_fixture_root_select(idx)) _exit(2);
+#endif
     if (!state_path || !state_path[0] ||
         setenv("XDG_STATE_HOME", state_path, 1) != 0) {
         fprintf(stderr, "test_parallel: private state activation failed: %s\n",
@@ -1019,18 +1032,39 @@ static bool child_dispatch(int argc, char **argv)
  * those arguments straight to child_run, which does its own stdout/stderr
  * redirection exactly as the forked child does. Returns 0 and fills `out`,
  * or -1 (already logged). */
+/* Validate the externally supplied root before using it for attempt state. */
+#if !defined(_WIN32)
+static bool child_state_env_parent(const char *root, char *parent)
+{
+    struct stat st;
+    return root[0] == '/' && lstat(root, &st) == 0 && S_ISDIR(st.st_mode) &&
+           st.st_uid == geteuid() && (st.st_mode & 07777) == 0700 &&
+           realpath(root, parent) != NULL;
+}
+#endif
+
 /* Attempt roots are retained fixtures, like failed logs in test-tmp. The
  * parent creates them before dispatch; retries never reuse a prior root. */
 static bool child_state_create(char *out, size_t cap)
 {
     char parent[PATH_MAX];
-    if (platform_directory_create("test-tmp", 0755) != 0 && errno != EEXIST)
-        return false;
-#if defined(_WIN32)
-    if (!_fullpath(parent, "test-tmp", sizeof(parent))) return false;
-#else
-    if (!realpath("test-tmp", parent)) return false;
+#if !defined(_WIN32)
+    /* ZCL_TEST_TMPROOT (set by the Makefile runner to a 0700 tmpfs directory)
+     * holds the attempt roots too; an unusable value fails, never falls back. */
+    const char *env_root = getenv("ZCL_TEST_TMPROOT");
+    if (env_root && env_root[0]) {
+        if (!child_state_env_parent(env_root, parent)) return false;
+    } else
 #endif
+    {
+        if (platform_directory_create("test-tmp", 0755) != 0 && errno != EEXIST)
+            return false;
+#if defined(_WIN32)
+        if (!_fullpath(parent, "test-tmp", sizeof(parent))) return false;
+#else
+        if (!realpath("test-tmp", parent)) return false;
+#endif
+    }
     for (unsigned attempt = 0; attempt < 64; ++attempt) {
         uint8_t nonce[9];
         char hex[19];

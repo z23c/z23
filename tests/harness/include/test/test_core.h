@@ -113,6 +113,28 @@ static inline void test_cleanup_tmpdir(const char *path)
         fprintf(stderr, "test flat cleanup rmdir failed: %s\n", strerror(errno));
 }
 
+/* Write the fixture root into root: ZCL_TEST_TMPROOT when set (POSIX only;
+ * the test runner points it at a per-worktree 0700 directory on tmpfs so
+ * fixture and sqlite fsync traffic stays off the shared disk journal), else
+ * "<cwd>/test-tmp". Returns the length, or -1 when the environment root is
+ * not an absolute path, the cwd is unknown, or it does not fit. An invalid
+ * environment root is never silently replaced by the cwd one. */
+static inline int test_fmt_tmproot(char *root, size_t n)
+{
+#if !defined(_WIN32)
+    const char *env = getenv("ZCL_TEST_TMPROOT");
+    if (env && env[0]) {
+        if (env[0] != '/') return -1;
+        int w = snprintf(root, n, "%s", env);
+        return (w < 0 || (size_t)w >= n) ? -1 : w;
+    }
+#endif
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd))) return -1;
+    int w = snprintf(root, n, "%s/test-tmp", cwd);
+    return (w < 0 || (size_t)w >= n) ? -1 : w;
+}
+
 /* Build "<cwd>/test-tmp/<prefix>_<pid>_<tag>" into buf (snprintf-only, no
  * directory creation). Shared by the per-stage *_tmpdir helpers.
  *
@@ -125,9 +147,9 @@ static inline void test_cleanup_tmpdir(const char *path)
 static inline void test_fmt_tmpdir(char *buf, size_t n,
                                    const char *prefix, const char *tag)
 {
-    char cwd[PATH_MAX];
-    int wrote = getcwd(cwd, sizeof(cwd))
-                    ? snprintf(buf, n, "%s/test-tmp/%s_%d_%s", cwd, prefix,
+    char root[PATH_MAX];
+    int wrote = test_fmt_tmproot(root, sizeof(root)) >= 0
+                    ? snprintf(buf, n, "%s/%s_%d_%s", root, prefix,
                                (int)getpid(), tag)
                     : -1;
     /* A truncated tmpdir aliases two fixtures onto one path, or names a parent
@@ -148,6 +170,23 @@ static inline void test_fmt_tmpdir(char *buf, size_t n,
  * already exist. */
 static inline bool test_ensure_tmproot(void)
 {
+#if !defined(_WIN32)
+    const char *env = getenv("ZCL_TEST_TMPROOT");
+    if (env && env[0]) {
+        /* Environment root: absolute, a real directory (never a symlink,
+         * production refuses symlinked datadirs), ours, exactly 0700. A
+         * missing leaf is created 0700 (the parent must already exist); any
+         * other state fails closed rather than falling back to the cwd. */
+        struct stat st;
+        if (env[0] != '/') return false;
+        if (lstat(env, &st) != 0) {
+            if (errno != ENOENT || mkdir(env, 0700) != 0) return false;
+            if (lstat(env, &st) != 0) return false;
+        }
+        return S_ISDIR(st.st_mode) && st.st_uid == geteuid() &&
+               (st.st_mode & 07777) == 0700;
+    }
+#endif
 #if defined(_WIN32)
     /* Use the CRT spelling directly; the test shim maps POSIX mkdir(path,
      * mode) to this one-argument function. */
@@ -166,9 +205,9 @@ static inline bool test_ensure_tmproot(void)
  * Returns the mkdtemp() result: buf on success, NULL on failure. */
 static inline char *test_mkdtemp(char *buf, size_t n, const char *prefix)
 {
-    char cwd[PATH_MAX];
-    int wrote = getcwd(cwd, sizeof(cwd))
-                    ? snprintf(buf, n, "%s/test-tmp/%s_XXXXXX", cwd, prefix)
+    char root[PATH_MAX];
+    int wrote = test_fmt_tmproot(root, sizeof(root)) >= 0
+                    ? snprintf(buf, n, "%s/%s_XXXXXX", root, prefix)
                     : -1;
     if (wrote < 0 || (size_t)wrote >= n) {
         fprintf(stderr, "test_mkdtemp: no absolute path for %s in a "
@@ -184,9 +223,9 @@ static inline char *test_mkdtemp(char *buf, size_t n, const char *prefix)
  * mkstemp()s it in place. Returns the open fd, or -1 on failure. */
 static inline int test_mkstemp(char *buf, size_t n, const char *prefix)
 {
-    char cwd[PATH_MAX];
-    int wrote = getcwd(cwd, sizeof(cwd))
-                    ? snprintf(buf, n, "%s/test-tmp/%s_XXXXXX", cwd, prefix)
+    char root[PATH_MAX];
+    int wrote = test_fmt_tmproot(root, sizeof(root)) >= 0
+                    ? snprintf(buf, n, "%s/%s_XXXXXX", root, prefix)
                     : -1;
     if (wrote < 0 || (size_t)wrote >= n) {
         fprintf(stderr, "test_mkstemp: no absolute path for %s in a "
