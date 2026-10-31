@@ -909,7 +909,9 @@ LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_stub.c \
 	platform/modules/util/src/self_backtrace_stub.c \
 	contexts/commons/modules/vcs/src/vcs_devloop_windows.c,$(LIB_SRCS))
 else ifeq ($(ZCL_HOST_WINDOWS),1)
-LIB_SRCS := $(filter-out platform/modules/platform/src/os_sandbox_linux.c \
+# file_service.c supplies the Windows refusal; the POSIX client is empty there.
+LIB_SRCS := $(filter-out core/modules/net/src/file_service_client.c \
+	platform/modules/platform/src/os_sandbox_linux.c \
 	platform/modules/platform/src/os_sandbox_landlock_linux.c \
 	platform/modules/platform/src/os_sandbox_package_linux.c \
 	platform/modules/platform/src/os_sandbox_terminal_worker.c \
