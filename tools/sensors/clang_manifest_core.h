@@ -264,6 +264,17 @@ char *cm_object_cc_text(struct cm_core *c);
 /* IDENTITY's compiler text is "<front end>; <cm_object_cc_text>". */
 bool cm_emit_identity(struct cm_core *c, const struct cm_identity *id);
 
+/* ---- Mach-O closure (clang_manifest_macho.c, Darwin only) ---------------- */
+
+#if defined(__APPLE__)
+/* The SHA3-256 over the Mach-O driver `exe` (an xcode-select shim followed
+ * to the real compiler), every dylib it loads, transitively, by realpath and
+ * bytes, and the OS build and dyld shared cache identity the cache-resident
+ * dylibs belong to. False, never a partial hash, when any load command,
+ * @rpath, file or identity cannot be read or resolved. */
+bool cm_macho_closure(const char *exe, uint8_t d[32]);
+#endif
+
 /* ---- lookups (clang_manifest_lookup.c) ------------------------------------ */
 
 /* One #include/#include_next directive the front end resolved to `hit`. */

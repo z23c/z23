@@ -9,7 +9,6 @@
 #include "clang_manifest_core.h"
 
 #include "base/safe_alloc.h"
-#include "base/serialize_le.h"
 #include "sha3/sha3.h"
 
 #include <errno.h>
@@ -336,119 +335,6 @@ static bool cm_closure(const char *exe, uint8_t d[32])
     free(buf);
     return ok && count > 0;
 }
-
-#if defined(__APPLE__)
-/* A Mach-O driver has no loader trace mode, so its closure is read from
- * the image: every dylib its load commands name, by install name, and by
- * realpath and bytes too where the file is on disk (the system dylibs live
- * in the dyld shared cache, which is bound to the OS build, not to a file).
- * Thin 64-bit images and fat archives of them; anything else is refused. */
-#define CM_MH_MAGIC_64 0xfeedfacfu
-#define CM_FAT_MAGIC 0xcafebabeu
-#define CM_MH_HDR 32u
-#define CM_MH_CMDS_CAP (1u << 20)
-
-static bool cm_macho_dylib_cmd(uint32_t cmd)
-{
-    return cmd == 0x0c || cmd == 0x20 || cmd == 0x80000018u ||
-           cmd == 0x8000001fu || cmd == 0x80000023u;
-}
-
-/* Fold one dylib_command (name offset at +8): the install name, then the
- * file when the name is an absolute path that exists. */
-static bool cm_macho_fold_dylib(struct sha3_256_ctx *ctx, const char *lc,
-                                uint32_t size, size_t *count)
-{
-    uint32_t off;
-    const char *name;
-    size_t room;
-    if (size < 24)
-        return false;
-    memcpy(&off, lc + 8, sizeof(off));
-    if (off < 24 || off >= size)
-        return false;
-    name = lc + off;
-    room = size - off;
-    if (memchr(name, '\0', room) == NULL)
-        return false;
-    sha3_256_write(ctx, (const unsigned char *)name, strlen(name) + 1);
-    (*count)++;
-    if (name[0] == '/')
-        (void)cm_fold_object(ctx, name, count);
-    return true;
-}
-
-/* The load commands of one slice (cmds, len bytes, ncmds of them). */
-static bool cm_macho_cmds(struct sha3_256_ctx *ctx, const char *cmds,
-                          size_t len, uint32_t ncmds, size_t *count)
-{
-    size_t at = 0;
-    for (uint32_t k = 0; k < ncmds; k++) {
-        uint32_t cmd, size;
-        if (len - at < 8)
-            return false;
-        memcpy(&cmd, cmds + at, sizeof(cmd));
-        memcpy(&size, cmds + at + 4, sizeof(size));
-        if (size < 8 || size > len - at)
-            return false;
-        if (cm_macho_dylib_cmd(cmd) &&
-            !cm_macho_fold_dylib(ctx, cmds + at, size, count))
-            return false;
-        at += size;
-    }
-    return true;
-}
-
-/* The slice of fp at `base`: a 64-bit Mach-O header, then its commands. */
-static bool cm_macho_slice(FILE *fp, long base, struct sha3_256_ctx *ctx,
-                           size_t *count)
-{
-    uint32_t h[8];
-    char *cmds;
-    bool ok;
-    if (fseek(fp, base, SEEK_SET) != 0 || fread(h, sizeof(h), 1, fp) != 1 ||
-        h[0] != CM_MH_MAGIC_64 || h[5] > CM_MH_CMDS_CAP)
-        return false;
-    cmds = zcl_malloc((size_t)h[5] + 1, "clang_manifest.macho_cmds");
-    if (cmds == NULL)
-        return false;
-    ok = fread(cmds, 1, h[5], fp) == h[5] &&
-         cm_macho_cmds(ctx, cmds, h[5], h[4], count);
-    free(cmds);
-    return ok;
-}
-
-/* The SHA3-256 over the dylibs every slice of `exe` names. */
-static bool cm_macho_closure(const char *exe, uint8_t d[32])
-{
-    unsigned char id[8];
-    struct sha3_256_ctx ctx;
-    size_t count = 0;
-    uint32_t nfat = 1;
-    bool fat, ok;
-    FILE *fp = fopen(exe, "rb");
-    if (fp == NULL)
-        return false;
-    sha3_256_init(&ctx);
-    ok = fread(id, sizeof(id), 1, fp) == 1;
-    fat = ok && zcl_read_u32_be(id) == CM_FAT_MAGIC;
-    nfat = fat ? zcl_read_u32_be(id + 4) : 1;
-    ok = ok && nfat >= 1 && nfat <= 16;
-    for (uint32_t k = 0; ok && k < nfat; k++) {
-        unsigned char arch[20];
-        long base = 0;
-        if (fat) {
-            ok = fseek(fp, 8 + (long)k * 20, SEEK_SET) == 0 &&
-                 fread(arch, sizeof(arch), 1, fp) == 1;
-            base = ok ? (long)zcl_read_u32_be(arch + 8) : 0;
-        }
-        ok = ok && cm_macho_slice(fp, base, &ctx, &count);
-    }
-    (void)fclose(fp);
-    sha3_256_finalize(&ctx, d);
-    return ok && count > 0;
-}
-#endif
 
 /* "libs none" for a script or static image, "libs sha3-256 <hex>" over a
  * dynamic image's loaded objects, false when they cannot be established. */

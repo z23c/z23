@@ -802,13 +802,9 @@ static int ssi_t_identity(void)
         ASSERT(ssi_has(m[3], n[3], "; object-cc unknown"));
         ASSERT_EQ(ssi_changed(m[0], n[0], m[3], n[3]),
                   1u << VCS_SEMANTIC_SECTION_V1_IDENTITY);
-#if defined(__APPLE__)
-        /* The object-compiler reader cannot establish a Mach-O loader
-         * closure; the documented fail-closed identity stays unknown. */
-        ASSERT(ssi_has(m[4], n[4], "; object-cc unknown"));
-#else
+        /* A system image: known on Linux (loader trace) and on Darwin (the
+         * Mach-O closure read from its load commands). */
         ASSERT(ssi_has(m[4], n[4], "; object-cc @sys/"));
-#endif
         (void)snprintf(out, sizeof(out), "%s/missing.zsm", root);
         ASSERT(!ssi_emit(root, "ssi.c", out, "zfx-no-such-compiler", SSI_TC,
                          flags, 2, message, sizeof(message)));

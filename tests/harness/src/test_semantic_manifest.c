@@ -1915,6 +1915,8 @@ static int smt_t_darwin_injected_image(void)
 int semantic_sensor_identity_tests(void);
 /* semantic_sensor_probe.c: probes the conditional-lookup scan must see. */
 int semantic_sensor_probe_tests(void);
+/* semantic_sensor_macho.c: a Mach-O compiler's dylib closure (Darwin only). */
+int semantic_sensor_macho_tests(void);
 
 static bool smt_section_limit_result(int rc, const char *message,
                                     const char *out, int expected)
@@ -2167,6 +2169,7 @@ int test_semantic_sensor(void)
     failures += smt_t_sensor_language_aliases();
     failures += semantic_sensor_session_cases();
     failures += semantic_sensor_identity_tests();
+    failures += semantic_sensor_macho_tests();
     failures += semantic_sensor_probe_tests();
     failures += smt_t_sensor_static_assert();
     failures += smt_t_sensor_static_assert_facts();

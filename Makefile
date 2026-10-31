@@ -8142,6 +8142,7 @@ CLANG_MANIFEST_RESOURCE_CPPFLAG ?= -DCM_HOST_RESOURCE_DIR='"$(CLANG_MANIFEST_RES
 endif
 CLANG_MANIFEST_CORE_SRCS := tools/sensors/clang_manifest_core.c \
 	tools/sensors/clang_manifest_cc.c \
+	tools/sensors/clang_manifest_macho.c \
 	tools/sensors/clang_manifest_paths.c \
 	tools/sensors/clang_manifest_lookup.c \
 	tools/sensors/clang_manifest_records.c \
