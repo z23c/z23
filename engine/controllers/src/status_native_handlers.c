@@ -45,6 +45,11 @@ struct status_full_eval {
     bool sync_gap_known, sync_behind;
 };
 
+/* Raw RPC/dumpstate responses gathered by the legacy full composition. */
+struct status_full_rpc {
+    char *h, *p, *s, *v, *hc, *ci, *cac, *rf, *tf, *ce, *bl, *sv;
+};
+
 static const int status_full_sync_behind_threshold_blocks = 144;
 
 static void status_full_parse_inputs(struct status_full_eval *e,
@@ -256,6 +261,51 @@ static void status_full_push_trust_mode(struct json_value *root)
                                              : "unknown");
 }
 
+/* Issues the legacy full composition's TWELVE sequential node_rpc_call()s,
+ * each re-entering the 4-worker RPC pool and racing the fold under a 10s
+ * kill-timeout, in their original order. */
+static void status_full_fetch_rpc_results(struct status_full_rpc *r)
+{
+    r->h  = node_rpc_call("getblockcount", NULL);
+    r->p  = node_rpc_call("getpeerinfo", NULL);
+    r->s  = node_rpc_call("syncstate", NULL);
+    r->v  = node_rpc_call("validationstatus", NULL);
+    r->hc = node_rpc_call("healthcheck", NULL);
+    r->ci = node_rpc_call("getblockchaininfo", NULL);
+    r->cac = node_rpc_call("dumpstate", "[\"chain_advance_coordinator\"]");
+    r->rf = node_rpc_call("dumpstate", "[\"reducer_frontier\"]");
+    r->tf = node_rpc_call("dumpstate", "[\"tip_finalize\"]");
+    r->ce = node_rpc_call("dumpstate", "[\"condition_engine\"]");
+    r->bl = node_rpc_call("dumpstate", "[\"blocker\"]");
+    r->sv = node_rpc_call("dumpstate", "[\"sovereignty\"]");
+}
+
+/* Attaches the six RPC bodies and five drill-down dumpstate bodies to the
+ * full document, in their original order. */
+static void status_full_push_rpc_bodies(struct json_value *root,
+                                        const struct status_full_rpc *r)
+{
+    status_push_rpc_json(root, "sync", r->s, "syncstate");
+    status_push_rpc_json(root, "validation", r->v, "validationstatus");
+    status_push_rpc_json(root, "health", r->hc, "healthcheck");
+    status_push_dumpstate_json(root, "chain_advance",
+                               "chain_advance_coordinator", r->cac);
+    status_push_dumpstate_json(root, "reducer_frontier",
+                               "reducer_frontier", r->rf);
+    status_push_dumpstate_json(root, "tip_finalize", "tip_finalize", r->tf);
+    status_push_dumpstate_json(root, "condition_engine",
+                               "condition_engine", r->ce);
+    status_push_dumpstate_json(root, "sovereignty", "sovereignty", r->sv);
+}
+
+/* Frees the twelve raw RPC/dumpstate response strings. */
+static void status_full_free_rpc_results(struct status_full_rpc *r)
+{
+    free(r->h); free(r->p); free(r->s); free(r->v); free(r->hc);
+    free(r->ci); free(r->cac); free(r->rf); free(r->tf); free(r->ce);
+    free(r->bl); free(r->sv);
+}
+
 /* The legacy full-detail composition: TWELVE sequential node_rpc_call()s,
  * each re-entering the 4-worker RPC pool and racing the fold under a 10s
  * kill-timeout. Kept verbatim behind `status --full` for the cold SQLite
@@ -266,45 +316,25 @@ static char *zcl_native_status_body_full(const struct json_value *args,
                                           struct zcl_native_body_err *err)
 {
     (void)args;
-    char *h  = node_rpc_call("getblockcount", NULL);
-    char *p  = node_rpc_call("getpeerinfo", NULL);
-    char *s  = node_rpc_call("syncstate", NULL);
-    char *v  = node_rpc_call("validationstatus", NULL);
-    char *hc = node_rpc_call("healthcheck", NULL);
-    char *ci = node_rpc_call("getblockchaininfo", NULL);
-    char *cac = node_rpc_call("dumpstate", "[\"chain_advance_coordinator\"]");
-    char *rf = node_rpc_call("dumpstate", "[\"reducer_frontier\"]");
-    char *tf = node_rpc_call("dumpstate", "[\"tip_finalize\"]");
-    char *ce = node_rpc_call("dumpstate", "[\"condition_engine\"]");
-    char *bl = node_rpc_call("dumpstate", "[\"blocker\"]");
-    char *sv = node_rpc_call("dumpstate", "[\"sovereignty\"]");
+    struct status_full_rpc rpc = {0};
+    status_full_fetch_rpc_results(&rpc);
 
     struct status_full_eval ev = {0};
     struct json_value height_j, peers_j, chain_j, health_j;
     status_full_parse_inputs(&ev, &height_j, &peers_j, &chain_j, &health_j,
-                             h, p, ci, hc);
+                             rpc.h, rpc.p, rpc.ci, rpc.hc);
     status_full_derive_gaps(&ev, &height_j);
 
     struct json_value root;
     json_init(&root);
     json_set_object(&root);
     status_full_push_chain(&root, &ev, &health_j);
-    status_full_push_input_errors(&root, &ev, h, p, ci);
+    status_full_push_input_errors(&root, &ev, rpc.h, rpc.p, rpc.ci);
     status_full_push_connections(&root, &ev);
     status_full_push_health(&root, &ev, &health_j);
-    status_push_rpc_json(&root, "sync", s, "syncstate");
-    status_push_rpc_json(&root, "validation", v, "validationstatus");
-    status_push_rpc_json(&root, "health", hc, "healthcheck");
-    status_push_dumpstate_json(&root, "chain_advance",
-                               "chain_advance_coordinator", cac);
-    status_push_dumpstate_json(&root, "reducer_frontier",
-                               "reducer_frontier", rf);
-    status_push_dumpstate_json(&root, "tip_finalize", "tip_finalize", tf);
-    status_push_dumpstate_json(&root, "condition_engine",
-                               "condition_engine", ce);
-    status_push_dumpstate_json(&root, "sovereignty", "sovereignty", sv);
+    status_full_push_rpc_bodies(&root, &rpc);
     status_full_push_trust_mode(&root);
-    bool blocker_fields_attached = status_push_blocker_summary(&root, bl);
+    bool blocker_fields_attached = status_push_blocker_summary(&root, rpc.bl);
 
     char *out = blocker_fields_attached
         ? zcl_json_value_to_body(&root, "status_body") : NULL;
@@ -313,8 +343,7 @@ static char *zcl_native_status_body_full(const struct json_value *args,
     json_free(&chain_j);
     json_free(&peers_j);
     json_free(&height_j);
-    free(h); free(p); free(s); free(v); free(hc); free(ci); free(cac);
-    free(rf); free(tf); free(ce); free(bl); free(sv);
+    status_full_free_rpc_results(&rpc);
     if (!out) {
         err->status = ZCL_NATIVE_BODY_INTERNAL;
         snprintf(err->message, sizeof(err->message),
