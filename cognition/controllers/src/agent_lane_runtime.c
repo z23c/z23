@@ -237,7 +237,8 @@ static bool agent_lane_auto_reindex_path(const char *datadir,
 
 static void agent_lane_push_recovery_state_json(struct json_value *lane_obj,
                                                 const char *lane,
-                                                const char *datadir)
+                                                const char *datadir,
+                                                bool expose_paths)
 {
     struct json_value recovery;
     char expanded[1024];
@@ -279,9 +280,11 @@ static void agent_lane_push_recovery_state_json(struct json_value *lane_obj,
     json_push_kv_int(&recovery, "schema_version", 1);
     json_push_kv_str(&recovery, "status", status);
     json_push_kv_bool(&recovery, "state_available", path_ok);
-    json_push_kv_str(&recovery, "datadir", path_ok ? expanded : datadir);
-    json_push_kv_str(&recovery, "auto_reindex_marker_path",
-                     path_ok ? marker : "");
+    if (expose_paths) {
+        json_push_kv_str(&recovery, "datadir", path_ok ? expanded : datadir);
+        json_push_kv_str(&recovery, "auto_reindex_marker_path",
+                         path_ok ? marker : "");
+    }
     json_push_kv_bool(&recovery, "auto_reindex_marker_present",
                       marker_exists);
     json_push_kv_bool(&recovery, "auto_reindex_status_well_formed",
@@ -342,12 +345,13 @@ void agent_push_operator_lane_safety_fields_json(struct json_value *out,
                      agent_lane_safe_default_action(lane));
 }
 
-void agent_fill_operator_lane_contract_json(struct json_value *lane_obj,
+static void agent_fill_operator_lane_contract(struct json_value *lane_obj,
                                             const char *operator_lane,
                                             const char *runtime_profile,
                                             const char *datadir,
                                             int rpc_port, int p2p_port,
-                                            int https_port, int fs_port)
+                                            int https_port, int fs_port,
+                                            bool expose_paths)
 {
     if (!lane_obj)
         return;
@@ -373,7 +377,8 @@ void agent_fill_operator_lane_contract_json(struct json_value *lane_obj,
     json_push_kv_str(lane_obj, "runtime_profile",
                      runtime_profile && runtime_profile[0]
                          ? runtime_profile : "unknown");
-    json_push_kv_str(lane_obj, "datadir", datadir ? datadir : "");
+    if (expose_paths)
+        json_push_kv_str(lane_obj, "datadir", datadir ? datadir : "");
     json_push_kv_int(lane_obj, "rpcport", rpc_port);
     json_push_kv_int(lane_obj, "p2p_port", p2p_port);
     json_push_kv_int(lane_obj, "https_port", https_port);
@@ -417,7 +422,31 @@ void agent_fill_operator_lane_contract_json(struct json_value *lane_obj,
     json_push_kv(lane_obj, "deployment_safety", &safety);
     json_free(&safety);
 
-    agent_lane_push_recovery_state_json(lane_obj, lane, datadir);
+    agent_lane_push_recovery_state_json(lane_obj, lane, datadir, expose_paths);
+}
+
+void agent_fill_operator_lane_contract_json(struct json_value *lane_obj,
+                                            const char *operator_lane,
+                                            const char *runtime_profile,
+                                            const char *datadir,
+                                            int rpc_port, int p2p_port,
+                                            int https_port, int fs_port)
+{
+    agent_fill_operator_lane_contract(lane_obj, operator_lane, runtime_profile,
+                                      datadir, rpc_port, p2p_port, https_port,
+                                      fs_port, true);
+}
+
+void agent_fill_operator_lane_contract_public_json(struct json_value *lane_obj,
+                                                   const char *operator_lane,
+                                                   const char *runtime_profile,
+                                                   const char *datadir,
+                                                   int rpc_port, int p2p_port,
+                                                   int https_port, int fs_port)
+{
+    agent_fill_operator_lane_contract(lane_obj, operator_lane, runtime_profile,
+                                      datadir, rpc_port, p2p_port, https_port,
+                                      fs_port, false);
 }
 
 bool agent_fill_known_operator_lane_contract_json(struct json_value *lane_obj,

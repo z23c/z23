@@ -486,22 +486,20 @@ void agent_push_operator_lane_fields_json(struct json_value *out)
     agent_push_operator_lane_safety_fields_json(out, lane);
 }
 
-void agent_push_operator_lane_json(struct json_value *out,
-                                   const char *key)
+static void agent_push_operator_lane(struct json_value *out, const char *key,
+                                    bool expose_paths)
 {
     if (!out)
         return;
     const char *out_key = (key && key[0]) ? key : "operator_lane";
     struct json_value lane_obj;
     json_init(&lane_obj);
-    agent_fill_operator_lane_contract_json(&lane_obj,
-                                           g_agent_runtime.operator_lane,
-                                           g_agent_runtime.runtime_profile,
-                                           g_agent_runtime.datadir,
-                                           g_agent_runtime.rpc_port,
-                                           g_agent_runtime.p2p_port,
-                                           g_agent_runtime.https_port,
-                                           g_agent_runtime.fs_port);
+    (expose_paths ? agent_fill_operator_lane_contract_json
+                  : agent_fill_operator_lane_contract_public_json)(
+        &lane_obj, g_agent_runtime.operator_lane,
+        g_agent_runtime.runtime_profile, g_agent_runtime.datadir,
+        g_agent_runtime.rpc_port, g_agent_runtime.p2p_port,
+        g_agent_runtime.https_port, g_agent_runtime.fs_port);
     json_push_kv_str(&lane_obj, "lane_source",
                      g_agent_runtime.operator_lane_source[0]
                          ? g_agent_runtime.operator_lane_source : "unset");
@@ -511,6 +509,17 @@ void agent_push_operator_lane_json(struct json_value *out,
                       g_agent_runtime.operator_lane_inferred);
     json_push_kv(out, out_key, &lane_obj);
     json_free(&lane_obj);
+}
+
+void agent_push_operator_lane_json(struct json_value *out, const char *key)
+{
+    agent_push_operator_lane(out, key, true);
+}
+
+void agent_push_operator_lane_public_json(struct json_value *out,
+                                          const char *key)
+{
+    agent_push_operator_lane(out, key, false);
 }
 
 static const char *agent_env_or_empty(const char *name)

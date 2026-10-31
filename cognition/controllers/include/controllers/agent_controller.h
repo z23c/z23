@@ -53,6 +53,14 @@ void agent_fill_operator_lane_contract_json(struct json_value *lane_obj,
                                             const char *datadir,
                                             int rpc_port, int p2p_port,
                                             int https_port, int fs_port);
+/* The same contract for a public reader: no datadir, no auto-reindex marker
+ * path. The lane, ports and recovery status stay. */
+void agent_fill_operator_lane_contract_public_json(struct json_value *lane_obj,
+                                                   const char *operator_lane,
+                                                   const char *runtime_profile,
+                                                   const char *datadir,
+                                                   int rpc_port, int p2p_port,
+                                                   int https_port, int fs_port);
 size_t agent_operator_lane_topology_count(void);
 const struct agent_operator_lane_topology *
 agent_operator_lane_topology_at(size_t index);
@@ -116,6 +124,8 @@ void agent_print_native_usage(FILE *out, const char *prog);
 void agent_push_operator_lane_fields_json(struct json_value *out);
 void agent_push_operator_lane_json(struct json_value *out,
                                    const char *key);
+void agent_push_operator_lane_public_json(struct json_value *out,
+                                          const char *key);
 void agent_push_runtime_build_json(struct json_value *out,
                                    const char *key);
 void agent_push_runtime_services_json(struct json_value *out,
