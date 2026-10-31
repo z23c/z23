@@ -728,6 +728,38 @@ bool wallet_sign_selected_inputs(struct wallet *w, struct wallet_tx *wtx_out,
     return true;
 }
 
+static bool wallet_set_change_output(struct wallet *w,
+                                     struct wallet_tx *wtx_out, size_t idx,
+                                     int64_t change, const char **error)
+{
+    struct pubkey change_pk;
+    if (!wallet_get_key_from_pool(w, &change_pk)) {
+        transaction_free(&wtx_out->tx);
+        *error = "Cannot get change address";
+        return false;
+    }
+    struct key_id change_kid = pubkey_get_id(&change_pk);
+    struct tx_destination change_dest;
+    change_dest.type = DEST_KEY_ID;
+    change_dest.id.key = change_kid;
+    struct script change_script;
+    script_for_destination(&change_script, &change_dest);
+    wtx_out->tx.vout[idx].value = change;
+    wtx_out->tx.vout[idx].script_pub_key = change_script;
+    return true;
+}
+
+static void wallet_fill_selected_inputs(struct wallet_tx *wtx_out,
+                                        const struct coin_entry *selected,
+                                        size_t num_selected)
+{
+    for (size_t i = 0; i < num_selected; i++) {
+        wtx_out->tx.vin[i].prevout.hash = selected[i].wtx->tx.hash;
+        wtx_out->tx.vin[i].prevout.n = selected[i].i;
+        wtx_out->tx.vin[i].sequence = UINT32_MAX - 1;
+    }
+}
+
 bool wallet_create_transaction(struct wallet *w,
                                 const struct tx_destination *dest,
                                 int64_t value,
@@ -795,29 +827,12 @@ bool wallet_create_transaction(struct wallet *w,
     wtx_out->tx.vout[0].value = value;
     wtx_out->tx.vout[0].script_pub_key = dest_script;
 
-    if (num_out == 2) {
-        int64_t change = selected_value - value - fee;
-        struct pubkey change_pk;
-        if (!wallet_get_key_from_pool(w, &change_pk)) {
-            transaction_free(&wtx_out->tx);
-            *error = "Cannot get change address";
-            return false;
-        }
-        struct key_id change_kid = pubkey_get_id(&change_pk);
-        struct tx_destination change_dest;
-        change_dest.type = DEST_KEY_ID;
-        change_dest.id.key = change_kid;
-        struct script change_script;
-        script_for_destination(&change_script, &change_dest);
-        wtx_out->tx.vout[1].value = change;
-        wtx_out->tx.vout[1].script_pub_key = change_script;
-    }
+    if (num_out == 2 &&
+        !wallet_set_change_output(w, wtx_out, 1, selected_value - value - fee,
+                                  error))
+        return false;
 
-    for (size_t i = 0; i < num_selected; i++) {
-        wtx_out->tx.vin[i].prevout.hash = selected[i].wtx->tx.hash;
-        wtx_out->tx.vin[i].prevout.n = selected[i].i;
-        wtx_out->tx.vin[i].sequence = UINT32_MAX - 1;
-    }
+    wallet_fill_selected_inputs(wtx_out, selected, num_selected);
 
     if (!wallet_sign_selected_inputs(w, wtx_out, selected, num_selected,
                                      height, error))
@@ -915,29 +930,12 @@ bool wallet_create_transaction_multi(struct wallet *w,
         wtx_out->tx.vout[i].script_pub_key = dest_script;
     }
 
-    if (need_change) {
-        int64_t change = selected_value - total_value - fee;
-        struct pubkey change_pk;
-        if (!wallet_get_key_from_pool(w, &change_pk)) {
-            transaction_free(&wtx_out->tx);
-            *error = "Cannot get change address";
-            return false;
-        }
-        struct key_id change_kid = pubkey_get_id(&change_pk);
-        struct tx_destination change_dest;
-        change_dest.type = DEST_KEY_ID;
-        change_dest.id.key = change_kid;
-        struct script change_script;
-        script_for_destination(&change_script, &change_dest);
-        wtx_out->tx.vout[num_outputs].value = change;
-        wtx_out->tx.vout[num_outputs].script_pub_key = change_script;
-    }
+    if (need_change &&
+        !wallet_set_change_output(w, wtx_out, num_outputs,
+                                  selected_value - total_value - fee, error))
+        return false;
 
-    for (size_t i = 0; i < num_selected; i++) {
-        wtx_out->tx.vin[i].prevout.hash = selected[i].wtx->tx.hash;
-        wtx_out->tx.vin[i].prevout.n = selected[i].i;
-        wtx_out->tx.vin[i].sequence = UINT32_MAX - 1;
-    }
+    wallet_fill_selected_inputs(wtx_out, selected, num_selected);
 
     if (!wallet_sign_selected_inputs(w, wtx_out, selected, num_selected,
                                      height, error))
@@ -1091,6 +1089,23 @@ int wallet_advance_confirmations(struct wallet *w, int new_best_height)
     return raised;
 }
 
+/* Caller holds w->cs; true if known, an output is ours, or an input's parent is held. */
+static bool wallet_sync_tx_involves_wallet(struct wallet *w,
+                                           const struct transaction *tx,
+                                           bool already_known)
+{
+    for (size_t i = 0; i < tx->num_vout; i++)
+        if (wallet_is_mine(w, &tx->vout[i]))
+            return true;
+    if (already_known)
+        return true;
+    for (size_t i = 0; i < tx->num_vin; i++)
+        if (wallet_find_slot_internal(w, &tx->vin[i].prevout.hash) <
+            MAX_WALLET_TX)
+            return true;
+    return false;
+}
+
 bool wallet_sync_transaction(struct wallet *w, const struct transaction *tx,
                              const struct block_index *pindex)
 {
@@ -1102,23 +1117,8 @@ bool wallet_sync_transaction(struct wallet *w, const struct transaction *tx,
      * are ours (for example, exact-value shielding with no transparent
      * change). It must still be upgraded from mempool to confirmed state. */
     size_t existing = wallet_find_slot_internal(w, &tx->hash);
-    bool dominated = existing < MAX_WALLET_TX;
-    for (size_t i = 0; i < tx->num_vout; i++) {
-        if (wallet_is_mine(w, &tx->vout[i])) {
-            dominated = true;
-            break;
-        }
-    }
-    if (!dominated) {
-        for (size_t i = 0; i < tx->num_vin; i++) {
-            size_t idx = wallet_find_slot_internal(w,
-                                                   &tx->vin[i].prevout.hash);
-            if (idx < MAX_WALLET_TX) {
-                dominated = true;
-                break;
-            }
-        }
-    }
+    bool dominated = wallet_sync_tx_involves_wallet(w, tx,
+                                                    existing < MAX_WALLET_TX);
 
     if (!dominated) {
         zcl_mutex_unlock(&w->cs);
