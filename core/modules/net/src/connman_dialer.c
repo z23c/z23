@@ -308,43 +308,44 @@ static bool batch_diversity_ok(struct connman *cm,
     return true;
 }
 
-static size_t connman_gather_clearnet_candidates(
-    struct connman *cm, struct connman_dial_candidate *out, size_t max)
+/* Gather phase 1 of the clearnet batch; returns the new fill count. */
+static size_t gather_phase_anchors(struct connman *cm,
+                                   struct connman_dial_candidate *out,
+                                   size_t max, size_t n,
+                                   struct dial_batch_tally *tally)
 {
-    if (!cm || !out || max == 0)
-        return 0;
-    if (max > ZCL_DIAL_BATCH_MAX)
-        max = ZCL_DIAL_BATCH_MAX;
-
-    struct dial_batch_tally tally;
-    tally.n = 0;
-    size_t n = 0;
-
     /* (1) Anchors first — but NOT in -connect-only mode, where the explicit
      * -connect peers are the entire outbound universe. Each anchor gets one
      * attempt (marked tried even when it fails a gate, so a dead/saturated
      * anchor can't make us spin). */
-    if (!g_connect_only) {
-        while (n < max) {
-            struct net_address a;
-            if (!connman_anchor_take_next(cm, &a))
-                break;
-            if (!connman_candidate_addr_dialable(cm, &a,
-                                                 CONNMAN_TARGET_ANCHOR))
-                continue;
-            if (tally_has_service(&tally, &a.svc))
-                continue;
-            if (!batch_diversity_ok(cm, &tally, &a.svc.addr))
-                continue;
-            out[n].addr = a;
-            out[n].source = CONNMAN_TARGET_ANCHOR;
-            out[n].addnode_index = SIZE_MAX;
-            out[n].is_feeler = false;
-            tally.svcs[tally.n++] = a.svc;
-            n++;
-        }
+    if (g_connect_only)
+        return n;
+    while (n < max) {
+        struct net_address a;
+        if (!connman_anchor_take_next(cm, &a))
+            break;
+        if (!connman_candidate_addr_dialable(cm, &a, CONNMAN_TARGET_ANCHOR))
+            continue;
+        if (tally_has_service(tally, &a.svc))
+            continue;
+        if (!batch_diversity_ok(cm, tally, &a.svc.addr))
+            continue;
+        out[n].addr = a;
+        out[n].source = CONNMAN_TARGET_ANCHOR;
+        out[n].addnode_index = SIZE_MAX;
+        out[n].is_feeler = false;
+        tally->svcs[tally->n++] = a.svc;
+        n++;
     }
+    return n;
+}
 
+/* Gather phase 2 of the clearnet batch; returns the new fill count. */
+static size_t gather_phase_dht_hints(struct connman *cm,
+                                     struct connman_dial_candidate *out,
+                                     size_t max, size_t n,
+                                     struct dial_batch_tally *tally)
+{
     /* (2) A chain-bound ZENDP resolution requested by iterative DHT lookup.
      * This queue is honored even in -connect-only mode: the operator's fixed
      * edges remain the initial topology, while a specific authenticated
@@ -354,18 +355,26 @@ static size_t connman_gather_clearnet_candidates(
         if (!connman_take_dht_hint(cm, &a))
             break;
         if (!connman_dht_hint_dialable(cm, &a) ||
-            tally_has_service(&tally, &a.svc) ||
+            tally_has_service(tally, &a.svc) ||
             (!net_addr_is_operator_local(&a.svc.addr) &&
-             !batch_diversity_ok(cm, &tally, &a.svc.addr)))
+             !batch_diversity_ok(cm, tally, &a.svc.addr)))
             continue;
         out[n].addr = a;
         out[n].source = CONNMAN_TARGET_DHT_HINT;
         out[n].addnode_index = SIZE_MAX;
         out[n].is_feeler = false;
-        tally.svcs[tally.n++] = a.svc;
+        tally->svcs[tally->n++] = a.svc;
         n++;
     }
+    return n;
+}
 
+/* Gather phase 3 of the clearnet batch; returns the new fill count. */
+static size_t gather_phase_zcl23(struct connman *cm,
+                                 struct connman_dial_candidate *out,
+                                 size_t max, size_t n,
+                                 struct dial_batch_tally *tally)
+{
     /* (3) Database-discovered ZCL23 peers, on alternating scheduler turns.
      * The alternate turns belong to addnode/addrman so a stale preferred set
      * can never starve healthy general candidates. */
@@ -374,12 +383,20 @@ static size_t connman_gather_clearnet_candidates(
             atomic_fetch_add(&cm->zcl23_preference_round, 1);
         if ((zcl23_round & 1u) == 0 &&
             connman_gather_known_zcl23_candidate(
-                cm, tally.svcs, tally.n, &out[n])) {
-            tally.svcs[tally.n++] = out[n].addr.svc;
+                cm, tally->svcs, tally->n, &out[n])) {
+            tally->svcs[tally->n++] = out[n].addr.svc;
             n++;
         }
     }
+    return n;
+}
 
+/* Gather phase 4 of the clearnet batch; returns the new fill count. */
+static size_t gather_phase_addrman(struct connman *cm,
+                                   struct connman_dial_candidate *out,
+                                   size_t max, size_t n,
+                                   struct dial_batch_tally *tally)
+{
     /* (4) addnode / addrman via the existing selector. Bound the draws so a
      * pool that keeps returning saturated/duplicate picks can't spin, but
      * budget enough draws that a batch still fills with DISTINCT live
@@ -406,7 +423,7 @@ static size_t connman_gather_clearnet_candidates(
                 connman_record_addnode_attempt(cm, idx, true);
             continue;
         }
-        if (tally_has_service(&tally, &info.addr.svc))
+        if (tally_has_service(tally, &info.addr.svc))
             continue;
         /* Multiple explicit loopback -connect targets are distinct local
          * daemons, not a remote /16 concentration. Permit that operator-only
@@ -416,16 +433,34 @@ static size_t connman_gather_clearnet_candidates(
             src == CONNMAN_TARGET_ADDNODE &&
             net_addr_is_operator_local(&info.addr.svc.addr);
         if (!explicit_operator_local &&
-            !batch_diversity_ok(cm, &tally, &info.addr.svc.addr))
+            !batch_diversity_ok(cm, tally, &info.addr.svc.addr))
             continue;
         out[n].addr = info.addr;
         out[n].source = src;
         out[n].addnode_index = idx;
         out[n].is_feeler = false;
-        tally.svcs[tally.n++] = info.addr.svc;
+        tally->svcs[tally->n++] = info.addr.svc;
         n++;
     }
+    return n;
+}
 
+static size_t connman_gather_clearnet_candidates(
+    struct connman *cm, struct connman_dial_candidate *out, size_t max)
+{
+    if (!cm || !out || max == 0)
+        return 0;
+    if (max > ZCL_DIAL_BATCH_MAX)
+        max = ZCL_DIAL_BATCH_MAX;
+
+    struct dial_batch_tally tally;
+    tally.n = 0;
+    size_t n = 0;
+
+    n = gather_phase_anchors(cm, out, max, n, &tally);
+    n = gather_phase_dht_hints(cm, out, max, n, &tally);
+    n = gather_phase_zcl23(cm, out, max, n, &tally);
+    n = gather_phase_addrman(cm, out, max, n, &tally);
     return n;
 }
 
@@ -629,20 +664,13 @@ static enum peer_lifecycle_source dial_lifecycle_source(
                                                  PEER_LIFECYCLE_SOURCE_ADDRMAN;
 }
 
-/* Start each supplied non-blocking connect, then poll the in-progress set
- * against one DEFAULT_CONNECT_TIMEOUT window. The production scheduler
- * supplies one candidate because it has no multi-attempt slot reservation.
- * Immediate (localhost) connects complete inline. The
- * clearnet race runs to completion BEFORE any onion dial: an onion dial
- * blocks this thread for up to ONION_STREAM_CONNECT_TIMEOUT_MS, so in
- * candidate order one leading onion address delayed every clearnet
- * connect(2) in the batch by that budget, and a single unreachable hidden
- * service held the outbound floor down for minutes. */
-static void connman_dial_batch(struct connman *cm,
-                               struct connman_dial_candidate *batch,
-                               size_t count)
+/* Start a non-blocking connect for every clearnet candidate. Immediate
+ * (localhost) connects complete inline. Returns the in-flight count. */
+static size_t dial_start_clearnet(struct connman *cm,
+                                  struct connman_dial_candidate *batch,
+                                  size_t count,
+                                  struct dial_inflight *inflight)
 {
-    struct dial_inflight inflight[ZCL_DIAL_BATCH_MAX + 1];
     size_t nin = 0;
 
     for (size_t i = 0; i < count && !g_stop; i++) {
@@ -664,7 +692,15 @@ static void connman_dial_batch(struct connman *cm,
         inflight[nin].ci = i;
         nin++;
     }
+    return nin;
+}
 
+/* Poll the in-progress set against one DEFAULT_CONNECT_TIMEOUT window,
+ * resolving ready fds. Returns how many are still connecting. */
+static size_t dial_poll_inflight(struct connman *cm,
+                                 struct connman_dial_candidate *batch,
+                                 struct dial_inflight *inflight, size_t nin)
+{
     int64_t deadline_ms = platform_time_monotonic_ms() + DEFAULT_CONNECT_TIMEOUT;
     while (nin > 0 && !g_stop) {
         int64_t remaining = deadline_ms - platform_time_monotonic_ms();
@@ -703,17 +739,16 @@ static void connman_dial_batch(struct connman *cm,
             nin--;
         }
     }
+    return nin;
+}
 
-    /* Deadline / stop: whatever is still connecting lost the race. */
-    for (size_t i = 0; i < nin; i++) {
-        zcl_socket_t s = inflight[i].sock;
-        close_socket(&s);
-        connman_record_dial_failure(cm, &batch[inflight[i].ci]);
-    }
-
-    /* Onion candidates have no fd before circuit creation, so they share one
-     * blocking batch budget. A candidate finding it spent waits for the next
-     * iteration without being dialed or charged. */
+/* Onion candidates have no fd before circuit creation, so they share one
+ * blocking batch budget. A candidate finding it spent waits for the next
+ * iteration without being dialed or charged. */
+static void dial_onion_pass(struct connman *cm,
+                            struct connman_dial_candidate *batch,
+                            size_t count)
+{
     int64_t onion_budget_ms = ONION_STREAM_CONNECT_TIMEOUT_MS;
     for (size_t i = 0; i < count && !g_stop; i++) {
         struct connman_dial_candidate *c = &batch[i];
@@ -735,6 +770,105 @@ static void connman_dial_batch(struct connman *cm,
         thread_bounded_wait_end(&cm->dial_bounded_wait);
         onion_budget_ms -= platform_time_monotonic_ms() - began_ms;
     }
+}
+
+/* Start each supplied non-blocking connect, then poll the in-progress set
+ * against one DEFAULT_CONNECT_TIMEOUT window. The production scheduler
+ * supplies one candidate because it has no multi-attempt slot reservation.
+ * Immediate (localhost) connects complete inline. The
+ * clearnet race runs to completion BEFORE any onion dial: an onion dial
+ * blocks this thread for up to ONION_STREAM_CONNECT_TIMEOUT_MS, so in
+ * candidate order one leading onion address delayed every clearnet
+ * connect(2) in the batch by that budget, and a single unreachable hidden
+ * service held the outbound floor down for minutes. */
+static void connman_dial_batch(struct connman *cm,
+                               struct connman_dial_candidate *batch,
+                               size_t count)
+{
+    struct dial_inflight inflight[ZCL_DIAL_BATCH_MAX + 1];
+    size_t nin = dial_start_clearnet(cm, batch, count, inflight);
+
+    nin = dial_poll_inflight(cm, batch, inflight, nin);
+
+    /* Deadline / stop: whatever is still connecting lost the race. */
+    for (size_t i = 0; i < nin; i++) {
+        zcl_socket_t s = inflight[i].sock;
+        close_socket(&s);
+        connman_record_dial_failure(cm, &batch[inflight[i].ci]);
+    }
+
+    dial_onion_pass(cm, batch, count);
+}
+
+/* Count occupied outbound slots and, separately, those past handshake. */
+static void count_outbound_slots(struct connman *cm, size_t *slot,
+                                 size_t *healthy)
+{
+    size_t outbound_slot = 0;
+    size_t outbound_healthy = 0;
+    zcl_mutex_lock(&cm->manager.cs_nodes);
+    for (size_t i = 0; i < cm->manager.num_nodes; i++) {
+        struct p2p_node *n = cm->manager.nodes[i];
+        if (n->inbound || n->disconnect || n->is_feeler) continue;
+        outbound_slot++;
+        if (n->state >= PEER_HANDSHAKE_COMPLETE)
+            outbound_healthy++;
+    }
+    zcl_mutex_unlock(&cm->manager.cs_nodes);
+    *slot = outbound_slot;
+    *healthy = outbound_healthy;
+}
+
+/* HARVEST: below the healthy floor AND addrman itself is running
+ * dry — pull proven-reachable candidates from the durable network
+ * census into addrman (NEVER as pinned addnodes). Cadence-gated so
+ * a persistently-hungry loop doesn't hammer the census DB every
+ * ~1s tail iteration; the outcome feeds the NEXT gather call, not
+ * necessarily this one. connman doesn't track chain height, so no
+ * min_height filter here (-1). */
+static void maybe_harvest_census(struct connman *cm, bool below_floor,
+                                 int64_t now_oc)
+{
+    if (below_floor &&
+        now_oc - cm->last_census_harvest_ts >=
+            ZCL_ADDNODE_HARVEST_INTERVAL_SECS) {
+        zcl_mutex_lock(&cm->manager.addrman.cs);
+        size_t am_size = addrman_size(&cm->manager.addrman);
+        zcl_mutex_unlock(&cm->manager.addrman.cs);
+        if (am_size < ZCL_ADDNODE_HARVEST_WEAK_ADDRMAN_THRESHOLD) {
+            cm->last_census_harvest_ts = now_oc;
+            connman_harvest_census_candidates(cm, -1);
+        }
+    }
+}
+
+/* Feeler: at most one transient NEW-table validation probe per
+ * interval, appended beyond the slot budget (feelers never occupy an
+ * outbound slot). Skipped in -connect-only mode. */
+static size_t maybe_append_feeler(struct connman *cm,
+                                  struct connman_dial_candidate *batch,
+                                  size_t nbatch, int64_t now_oc)
+{
+    if (!g_connect_only && nbatch == 0) {
+        int64_t feeler_interval = connman_feeler_interval_secs();
+        if (now_oc - cm->last_feeler_ts >= feeler_interval &&
+            !connman_feeler_in_flight(cm)) {
+            struct net_address ftarget;
+            if (connman_pick_feeler_target(cm, &ftarget)) {
+                cm->last_feeler_ts = now_oc;
+                batch[nbatch].addr = ftarget;
+                batch[nbatch].source = CONNMAN_TARGET_ADDRMAN;
+                batch[nbatch].addnode_index = SIZE_MAX;
+                batch[nbatch].is_feeler = true;
+                nbatch++;
+            } else {
+                /* Nothing probeable right now — still back off the timer
+                 * so we don't re-scan the NEW table every loop. */
+                cm->last_feeler_ts = now_oc;
+            }
+        }
+    }
+    return nbatch;
 }
 
 void *thread_open_connections(void *arg)
@@ -788,17 +922,9 @@ void *thread_open_connections(void *arg)
          * for a stalled scheduler. */
         (void)connman_flush_anchors_if_changed(cm);
 
-        size_t outbound_slot = 0;
-        size_t outbound_healthy = 0;
-        zcl_mutex_lock(&cm->manager.cs_nodes);
-        for (size_t i = 0; i < cm->manager.num_nodes; i++) {
-            struct p2p_node *n = cm->manager.nodes[i];
-            if (n->inbound || n->disconnect || n->is_feeler) continue;
-            outbound_slot++;
-            if (n->state >= PEER_HANDSHAKE_COMPLETE)
-                outbound_healthy++;
-        }
-        zcl_mutex_unlock(&cm->manager.cs_nodes);
+        size_t outbound_slot;
+        size_t outbound_healthy;
+        count_outbound_slots(cm, &outbound_slot, &outbound_healthy);
 
         /* RETIRE: cheap (O(MAX_ADDNODES), no I/O) — safe every iteration.
          * Floor-guarded internally against outbound_healthy. */
@@ -833,24 +959,7 @@ void *thread_open_connections(void *arg)
             below_floor, now_oc - s_last_addrman_attempt >= 10,
             connman_dht_hint_pending(cm));
 
-        /* HARVEST: below the healthy floor AND addrman itself is running
-         * dry — pull proven-reachable candidates from the durable network
-         * census into addrman (NEVER as pinned addnodes). Cadence-gated so
-         * a persistently-hungry loop doesn't hammer the census DB every
-         * ~1s tail iteration; the outcome feeds the NEXT gather call, not
-         * necessarily this one. connman doesn't track chain height, so no
-         * min_height filter here (-1). */
-        if (below_floor &&
-            now_oc - cm->last_census_harvest_ts >=
-                ZCL_ADDNODE_HARVEST_INTERVAL_SECS) {
-            zcl_mutex_lock(&cm->manager.addrman.cs);
-            size_t am_size = addrman_size(&cm->manager.addrman);
-            zcl_mutex_unlock(&cm->manager.addrman.cs);
-            if (am_size < ZCL_ADDNODE_HARVEST_WEAK_ADDRMAN_THRESHOLD) {
-                cm->last_census_harvest_ts = now_oc;
-                connman_harvest_census_candidates(cm, -1);
-            }
-        }
+        maybe_harvest_census(cm, below_floor, now_oc);
 
         size_t free_slots = MAX_OUTBOUND_CONNECTIONS - outbound; /* > 0 here */
         /* > 0 here too: the early-out above already returned when num_nodes
@@ -865,28 +974,7 @@ void *thread_open_connections(void *arg)
         if (want > 0)
             nbatch = connman_gather_dial_candidates(cm, batch, want);
 
-        /* Feeler: at most one transient NEW-table validation probe per
-         * interval, appended beyond the slot budget (feelers never occupy an
-         * outbound slot). Skipped in -connect-only mode. */
-        if (!g_connect_only && nbatch == 0) {
-            int64_t feeler_interval = connman_feeler_interval_secs();
-            if (now_oc - cm->last_feeler_ts >= feeler_interval &&
-                !connman_feeler_in_flight(cm)) {
-                struct net_address ftarget;
-                if (connman_pick_feeler_target(cm, &ftarget)) {
-                    cm->last_feeler_ts = now_oc;
-                    batch[nbatch].addr = ftarget;
-                    batch[nbatch].source = CONNMAN_TARGET_ADDRMAN;
-                    batch[nbatch].addnode_index = SIZE_MAX;
-                    batch[nbatch].is_feeler = true;
-                    nbatch++;
-                } else {
-                    /* Nothing probeable right now — still back off the timer
-                     * so we don't re-scan the NEW table every loop. */
-                    cm->last_feeler_ts = now_oc;
-                }
-            }
-        }
+        nbatch = maybe_append_feeler(cm, batch, nbatch, now_oc);
 
         if (nbatch > 0) {
             if (rate_ok)

@@ -388,3 +388,7 @@ later lane flips it HARD.
 - 2026-10-31T05:02:46Z — REASON: compact_blocks.c: split 2 function(s) under the complexity cap;  behaviour-preserving
   old ROOT: 31280c3ea6b838e1de3db361aaae809cb07b57ed3870855203a6eda5602f2bdf
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T05:06:36Z — REASON: connman_dialer.c: split 3 function(s) under the complexity cap;  behaviour-preserving
+  old ROOT: a3c24d37cd701b53ef70d5e852bca3dccc924c8dd3699880b50effb58962aa46
+  by: owner unseal ritual (make core-unseal)
