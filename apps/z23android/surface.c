@@ -160,30 +160,52 @@ static bool set_params(struct build *b, jobject view, const struct zapp_node *no
     return false;
 }
 static jobject make_node(struct build *b, const struct zapp_node *node, size_t card, enum placement where, bool scrolls);
+static enum placement placement_in(const struct zapp_node *parent)
+{
+    if (parent->kind == ZAPP_NODE_GRID) return IN_CELL;
+    return parent->kind == ZAPP_NODE_ROW ? IN_ROW : parent->kind == ZAPP_NODE_STACK ? IN_STACK : IN_COLUMN;
+}
+/* Closes the current grid row into the group and opens the next one. */
+static void next_grid_row(struct build *b, jobject group, struct rows *rows, bool scrolls)
+{
+    JNIEnv *env = b->env;
+    if (rows->row && !zj_append(env, group, rows->row)) b->failed = true;
+    if (rows->row) (*env)->DeleteLocalRef(env, rows->row);
+    rows->row = zj_widget(env, "android/widget/LinearLayout", state.activity);
+    rows->filled = 0;
+    if (!rows->row || !zj_int_property(env, rows->row, "setOrientation", 0) ||
+        !zj_margins(env, rows->row, MATCH, scrolls ? zj_dp(110.0f) : 0, scrolls ? 0.0f : 1.0f, 0, 0, 0, 0)) b->failed = true;
+}
 /* Adds one child to a group; a grid fills rows of its column count. A node with nothing to draw is skipped. */
 static bool add_child(struct build *b, const struct zapp_node *parent, const struct zapp_node *child, size_t card,
                       jobject group, struct rows *rows, bool scrolls)
 {
-    JNIEnv *env = b->env;
     bool grid = parent->kind == ZAPP_NODE_GRID;
-    enum placement where = grid ? IN_CELL : parent->kind == ZAPP_NODE_ROW ? IN_ROW :
-        parent->kind == ZAPP_NODE_STACK ? IN_STACK : IN_COLUMN;
     if (b->views >= VIEW_MAX) return true;
-    jobject view = make_node(b, child, card, where, scrolls);
+    jobject view = make_node(b, child, card, placement_in(parent), scrolls);
     if (b->failed) return false;
     if (!view) return true;
-    if (grid && (rows->filled == parent->columns || !rows->row)) {
-        if (rows->row && !(zj_append(env, group, rows->row))) b->failed = true;
-        if (rows->row) (*env)->DeleteLocalRef(env, rows->row);
-        rows->row = zj_widget(env, "android/widget/LinearLayout", state.activity);
-        rows->filled = 0;
-        if (!rows->row || !zj_int_property(env, rows->row, "setOrientation", 0) ||
-            !zj_margins(env, rows->row, MATCH, scrolls ? zj_dp(110.0f) : 0, scrolls ? 0.0f : 1.0f, 0, 0, 0, 0)) b->failed = true;
-    }
-    if (!b->failed && !zj_append(env, grid ? rows->row : group, view)) b->failed = true;
+    if (grid && (rows->filled == parent->columns || !rows->row)) next_grid_row(b, group, rows, scrolls);
+    if (!b->failed && !zj_append(b->env, grid ? rows->row : group, view)) b->failed = true;
     rows->filled += grid;
-    (*env)->DeleteLocalRef(env, view);
+    (*b->env)->DeleteLocalRef(b->env, view);
     return !b->failed;
+}
+/* Pads the last grid row with empty cells and adds it to the group. */
+static void finish_grid(struct build *b, const struct zapp_node *node, jobject group, struct rows *rows)
+{
+    for (; rows->filled < node->columns && !b->failed; ++rows->filled) {
+        jobject gap = zj_widget(b->env, "android/view/View", state.activity);
+        if (!gap || !zj_margins(b->env, gap, 0, MATCH, 1.0f, 6, 6, 6, 6) || !zj_append(b->env, rows->row, gap)) b->failed = true;
+        if (gap) (*b->env)->DeleteLocalRef(b->env, gap);
+    }
+    if (!b->failed && !zj_append(b->env, group, rows->row)) b->failed = true;
+}
+/* The card a pass draws for; false when a card container skips this pass. */
+static bool pass_card(const struct build *b, const struct zapp_node *node, size_t pass, size_t card, size_t *current)
+{
+    *current = node->card[0] ? pass : card;
+    return !node->card[0] || zapp_card_is(b->cards[pass], node->card);
 }
 /* Children are drawn once, or once per card of the container's card kind. */
 static bool add_children(struct build *b, const struct zapp_node *node, size_t card, jobject group, bool scrolls)
@@ -191,21 +213,11 @@ static bool add_children(struct build *b, const struct zapp_node *node, size_t c
     struct rows rows = {NULL, 0};
     size_t passes = node->card[0] ? b->count : 1;
     for (size_t pass = 0; pass < passes && !b->failed; ++pass) {
-        size_t current = card;
-        if (node->card[0]) {
-            if (!zapp_card_is(b->cards[pass], node->card)) continue;
-            current = pass;
-        }
+        size_t current;
+        if (!pass_card(b, node, pass, card, &current)) continue;
         for (size_t i = 0; i < node->child_count && add_child(b, node, &node->children[i], current, group, &rows, scrolls); ++i) {}
     }
-    if (node->kind == ZAPP_NODE_GRID && rows.row) {
-        for (; rows.filled < node->columns && !b->failed; ++rows.filled) {
-            jobject gap = zj_widget(b->env, "android/view/View", state.activity);
-            if (!gap || !zj_margins(b->env, gap, 0, MATCH, 1.0f, 6, 6, 6, 6) || !zj_append(b->env, rows.row, gap)) b->failed = true;
-            if (gap) (*b->env)->DeleteLocalRef(b->env, gap);
-        }
-        if (!b->failed && !zj_append(b->env, group, rows.row)) b->failed = true;
-    }
+    if (node->kind == ZAPP_NODE_GRID && rows.row) finish_grid(b, node, group, &rows);
     if (rows.row) (*b->env)->DeleteLocalRef(b->env, rows.row);
     return !b->failed;
 }

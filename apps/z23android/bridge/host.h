@@ -17,9 +17,11 @@ void zapp_host_stop(struct zapp_host_servers *servers);
 bool zapp_host_route(const char *adb, const char *serial, uint16_t port);
 /* Maps the phone's loopback port to this host and offers the descriptor to the app.
  * The token reaches adb on standard input, not in laptop process arguments; on the phone
- * it is briefly visible to shell and root in the arguments of the am command. */
+ * it is briefly visible to shell and root in the arguments of the am command. When qr_window is not
+ * NULL, that program also shows the descriptor as a QR code: the six-digit code is its title and the
+ * descriptor arrives on its standard input. */
 bool zapp_host_offer_pairing(const char *adb, const char *serial, const char *app, uint16_t port,
-                             const char *directory);
+                             const char *directory, const char *qr_window);
 /* Reads a regular file of at most cap bytes owned by this user. */
 bool zapp_host_read_file(const char *path, size_t cap, unsigned char **bytes, size_t *size);
 #endif

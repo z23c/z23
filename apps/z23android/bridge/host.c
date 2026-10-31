@@ -176,7 +176,45 @@ bool zapp_host_route(const char *adb, const char *serial, uint16_t port)
     char *reverse[] = {(char *)adb, "-s", (char *)serial, "reverse", route, route, NULL};
     return run_adb(adb, reverse, NULL);
 }
-bool zapp_host_offer_pairing(const char *adb, const char *serial, const char *app, uint16_t port, const char *dir)
+/* Runs the QR window program with the pipe as its standard input. */
+static void start_window(const char *program, char *const argv[], int input)
+{
+    if (dup2(input, 0) < 0) _exit(127);
+    execv(program, argv);
+    static const char failed[] = "Could not start the QR window program.\n";
+    (void)write(2, failed, sizeof(failed) - 1);
+    _exit(127);
+}
+/* Starts the QR window with the six-digit code in its title and "z23:pair:" plus the descriptor on its
+ * standard input, so the token is in no argument. A second fork leaves the window to run unreaped by
+ * this process, and the first child exits at once. */
+static bool spawn_qr_window(const char *program, const char *code, const char *descriptor)
+{
+    char title[64], payload[320];
+    int title_len = snprintf(title, sizeof(title), "--title=Z23 pairing %s", code);
+    int payload_len = snprintf(payload, sizeof(payload), "z23:pair:%s", descriptor);
+    if (title_len < 0 || (size_t)title_len >= sizeof(title) || payload_len < 0 ||
+        (size_t)payload_len >= sizeof(payload)) return false;
+    char *argv[] = {(char *)program, title, "--timeout=120", NULL};
+    int in[2];
+    if (pipe2(in, O_CLOEXEC)) return false;
+    pid_t outer = fork();
+    if (outer == 0) {
+        close(in[1]);
+        pid_t inner = fork();
+        if (inner == 0) start_window(program, argv, in[0]);
+        _exit(inner > 0 ? 0 : 1);
+    }
+    close(in[0]);
+    bool ok = outer > 0 && write_all(in[1], payload);
+    close(in[1]);
+    int status = 0;
+    while (outer > 0 && waitpid(outer, &status, 0) < 0 && errno == EINTR) {}
+    memory_cleanse(payload, sizeof(payload));
+    return ok && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+bool zapp_host_offer_pairing(const char *adb, const char *serial, const char *app, uint16_t port,
+                             const char *dir, const char *qr_window)
 {
     char path[1024], command[512];
     char *shell[] = {(char *)adb, "-s", (char *)serial, "shell", NULL};
@@ -190,8 +228,11 @@ bool zapp_host_offer_pairing(const char *adb, const char *serial, const char *ap
             "-f 0x10008000 --es org.z23.pair '%s'\nexit\n", app, (char *)descriptor);
         ok = n > 0 && (size_t)n < sizeof(command) && run_adb(adb, shell, command);
         char code[7];
-        if (ok && zapp_pair_code((const char *)descriptor, code))
+        if (ok && zapp_pair_code((const char *)descriptor, code)) {
             fprintf(stderr, "Pairing code %s. Accept on the phone only if it shows the same code.\n", code);
+            if (qr_window && !spawn_qr_window(qr_window, code, (const char *)descriptor))
+                fputs("Could not open the pairing QR window. Pair over USB as before.\n", stderr);
+        }
     }
     memory_cleanse(command, sizeof(command));
     if (descriptor) { memory_cleanse(descriptor, size); free(descriptor); }

@@ -512,14 +512,60 @@ static bool voice_conversation(struct controller *c, char *out)
     return true;
 }
 
-static bool scan_invitation(struct controller *c, uint64_t ticket, char *out)
+static bool pair_control(struct controller *c, const char *action, const char *arg);
+static void set_scan(struct controller *c, enum zapp_scan_kind kind, const char *shown)
+{
+    pthread_mutex_lock(&c->lock);
+    c->view.scan_kind = kind;
+    copy_text(c->view.scan_text, sizeof(c->view.scan_text), shown);
+    pthread_mutex_unlock(&c->lock);
+}
+static const char *scan_notice(enum zapp_scan_kind kind)
+{
+    switch (kind) {
+    case ZAPP_SCAN_FLEET: return "Invitation scanned. Review before joining.";
+    case ZAPP_SCAN_PAIR: return "Laptop pairing code scanned. Compare the six digits on the laptop before accepting.";
+    case ZAPP_SCAN_CLIP: return "Found a Z23 clip address. Nothing was opened or paid.";
+    case ZAPP_SCAN_AUTHOR: return "Found a Z23 author address. Nothing was followed.";
+    case ZAPP_SCAN_RATER: return "Found a Z23 rater address. Nothing was submitted.";
+    case ZAPP_SCAN_UNREADABLE: return "This looks like a Z23 code but could not be read. Nothing was done.";
+    case ZAPP_SCAN_TEXT: break;
+    }
+    return "Found text, not a Z23 code. Nothing was done.";
+}
+/* Puts a scanned laptop descriptor through the same review as an offer over USB. */
+static bool offer_pairing(struct controller *c, const char *descriptor)
+{
+    pthread_mutex_lock(&c->lock);
+    bool ok = pair_control(c, "pair_offer", descriptor);
+    pthread_mutex_unlock(&c->lock);
+    return ok;
+}
+/* Reads one code and shows what it is. Only a fleet invitation or a laptop pairing reaches a review,
+ * and its text stays out of scan_text. Nothing scanned is opened, fetched or paid. */
+static bool scan_payload(struct controller *c, uint64_t ticket, char *out)
 {
     char error[256] = "";
+    char *value = calloc(1, ZAPP_TEXT_CAP);
     bool ok = zapp_camera_scan(ticket, out, ZAPP_TEXT_CAP, error, sizeof(error));
-    if (!ok) { copy_text(out, ZAPP_TEXT_CAP, error); return false; }
-    ok = invitation(c, out);
-    copy_text(out, ZAPP_TEXT_CAP, ok ? "Invitation scanned. Review before joining." : "The QR code is not a fleet invitation.");
-    return ok;
+    if (!ok || !value) {
+        set_scan(c, ZAPP_SCAN_TEXT, "");
+        copy_text(out, ZAPP_TEXT_CAP, ok ? "Not enough memory to read that code." : error);
+        free(value);
+        return false;
+    }
+    enum zapp_scan_kind kind = zapp_scan_classify(out, value, ZAPP_TEXT_CAP);
+    const char *notice = NULL;
+    if (kind == ZAPP_SCAN_PAIR && zapp_speech_client_paired(c->files, value)) {
+        kind = ZAPP_SCAN_TEXT; value[0] = 0; notice = "That laptop is already paired.";
+    } else if (kind == ZAPP_SCAN_PAIR && !offer_pairing(c, value)) { kind = ZAPP_SCAN_UNREADABLE; value[0] = 0; }
+    bool secret = kind == ZAPP_SCAN_FLEET || kind == ZAPP_SCAN_PAIR;
+    set_scan(c, kind, secret ? "" : value);
+    if (kind == ZAPP_SCAN_FLEET) (void)invitation(c, value);
+    copy_text(out, ZAPP_TEXT_CAP, notice ? notice : scan_notice(kind));
+    memory_cleanse(value, ZAPP_TEXT_CAP);
+    free(value);
+    return true;
 }
 #define ONION_WAIT_SECONDS 90
 static void onion_waiting(void *arg)
@@ -544,8 +590,7 @@ static bool join_fleet(struct controller *c, const char *token, char *out)
     }
     return zapp_fleet_join_run(&c->runtime, token, out, ZAPP_TEXT_CAP);
 }
-static bool execute_fleet(struct controller *c, const char *action, const char *arg,
-                          uint64_t ticket, char *out)
+static bool execute_fleet(struct controller *c, const char *action, const char *arg, char *out)
 {
     bool ok = false;
     if (!strcmp(action, "fleet_hosts")) ok = fleet_hosts(c, !strcmp(arg, "refresh"), out);
@@ -553,7 +598,7 @@ static bool execute_fleet(struct controller *c, const char *action, const char *
     else if (!strcmp(action, "fleet_preview")) {
         ok = invitation(c, arg);
         copy_text(out, ZAPP_TEXT_CAP, ok ? "Review the manager invitation." : "This is not a valid fleet invitation.");
-    } else if (!strcmp(action, "fleet_scan")) ok = scan_invitation(c, ticket, out);
+    }
     return ok;
 }
 static bool pair_voice_host(struct controller *c, const char *arg, char *out)
@@ -576,13 +621,14 @@ static bool pair_voice_host(struct controller *c, const char *arg, char *out)
 static bool execute_action(struct controller *c, const char *action, const char *arg,
                            uint64_t ticket, char *out)
 {
-    if (!strncmp(action, "fleet_", 6)) return execute_fleet(c, action, arg, ticket, out);
+    if (!strncmp(action, "fleet_", 6)) return execute_fleet(c, action, arg, out);
     if (!strncmp(action, "ops_", 4)) return execute_ops(c, arg, out);
     if (!strcmp(action, "node_start")) return zapp_node_start(&c->runtime, out, ZAPP_TEXT_CAP);
     if (!strcmp(action, "node_stop")) return zapp_node_stop(&c->runtime, out, ZAPP_TEXT_CAP);
     if (!strcmp(action, "chat")) return conversation_chat(c, arg, out);
     if (!strcmp(action, "voice_start")) return voice_conversation(c, out);
     if (!strcmp(action, "voice_pair")) return pair_voice_host(c, arg, out);
+    if (!strcmp(action, "scan")) return scan_payload(c, ticket, out);
     return false;
 }
 
@@ -637,7 +683,8 @@ static bool node_choice_saved(struct controller *c, const char *action)
  * screen; a success already shown by the node line, transcript or host list leaves no notice. */
 static void report(struct controller *c, const char *action, bool ok, const char *out)
 {
-    bool more = !strncmp(action, "fleet_", 6) || !strncmp(action, "ops_", 4) || !strcmp(action, "voice_pair");
+    bool more = !strncmp(action, "fleet_", 6) || !strncmp(action, "ops_", 4) || !strcmp(action, "voice_pair") ||
+                !strcmp(action, "scan");
     bool shown = !strncmp(action, "ops_", 4) || (ok && (!strcmp(action, "chat") || !strcmp(action, "voice_start") ||
                         !strcmp(action, "fleet_hosts") || node_choice_saved(c, action)));
     copy_text(more ? c->view.result : c->view.notice, ZAPP_NOTICE_CAP,
@@ -657,6 +704,7 @@ static void execute_result(struct controller *c, const char *action, const char 
     zapp_plain_text(out, ZAPP_TEXT_CAP);
     report(c, action, ok, out);
     c->view.scanning = false;
+    if (!strcmp(action, "scan")) ++c->view.scans_done;
     pthread_mutex_unlock(&c->lock);
 }
 
@@ -788,7 +836,7 @@ void zapp_controller_snapshot(struct zapp_view *view)
 }
 static bool action_allowed(const char *action)
 {
-    static const char *const allowed[] = {"node_start", "node_stop", "fleet_join", "fleet_preview", "fleet_scan", "chat", "voice_start", "voice_confirm", "fleet_hosts", "pair_accept", "ops_errors", "ops_restart", "ops_confirm"};
+    static const char *const allowed[] = {"node_start", "node_stop", "fleet_join", "fleet_preview", "scan", "chat", "voice_start", "voice_confirm", "fleet_hosts", "pair_accept", "ops_errors", "ops_restart", "ops_confirm"};
     for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); ++i)
         if (!strcmp(action, allowed[i])) return true;
     return false;
@@ -840,12 +888,15 @@ static bool is_pair_control(const char *action)
 static bool pair_control(struct controller *c, const char *action, const char *arg)
 {
     bool known = !strcmp(action, "pair_offer") && zapp_speech_client_paired(c->files, arg);
-    bool offer = !known && !strcmp(action, "pair_offer") && strlen(arg) < sizeof(c->view.pair_offer) &&
+    if (known) {
+        copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected.");
+        return true;
+    }
+    bool offer = !strcmp(action, "pair_offer") && strlen(arg) < sizeof(c->view.pair_offer) &&
         zapp_pair_code(arg, c->view.pair_code);
     copy_text(c->view.pair_offer, sizeof(c->view.pair_offer), offer ? arg : "");
     if (!offer) c->view.pair_code[0] = 0;
-    if (known) copy_text(c->view.connection, sizeof(c->view.connection), "Laptop host connected.");
-    return offer || known || !strcmp(action, "pair_reject");
+    return offer || !strcmp(action, "pair_reject");
 }
 static const char *confirmed_action(const struct controller *c)
 {
@@ -877,7 +928,8 @@ static void queue_action(struct controller *c, const char *action, const char *a
     }
     copy_text(c->action, sizeof(c->action), action); copy_text(c->argument, sizeof(c->argument), arg);
     c->camera_ticket = zapp_camera_ticket(); c->pending = true; c->view.busy = true;
-    c->view.scanning = !strcmp(action, "fleet_scan"); c->view.notice[0] = 0; c->view.result[0] = 0;
+    c->view.scanning = !strcmp(action, "scan"); c->view.notice[0] = 0; c->view.result[0] = 0;
+    if (c->view.scanning) { c->view.scan_kind = ZAPP_SCAN_TEXT; c->view.scan_text[0] = 0; }
     if (!strcmp(action, "chat")) {
         atomic_store(&c->reply_cancel, false);
         c->view.reply_state = ZAPP_REPLY_WAITING;

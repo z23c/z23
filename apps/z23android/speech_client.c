@@ -37,6 +37,13 @@ static bool pairing_descriptor(const char *json, size_t len, struct json_value *
         strlen(token) == 64 && strspn(token, "0123456789abcdef") == 64 &&
         port && port->type == JSON_INT && json_get_int(port) > 0 && json_get_int(port) <= 65535;
 }
+bool zapp_speech_client_descriptor_valid(const char *json, size_t len)
+{
+    struct json_value root = {0};
+    bool ok = json && pairing_descriptor(json, len, &root);
+    json_cleanse_strings(&root); json_free(&root);
+    return ok;
+}
 /* Opens the app files directory when only this user can write to it. */
 static int private_directory(const char *files)
 {

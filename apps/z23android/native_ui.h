@@ -14,6 +14,8 @@ bool zapp_native_ui_create(JNIEnv *env, jobject activity, zapp_native_action act
 void zapp_native_ui_destroy(JNIEnv *env);
 /* Returns true when the event is consumed, as the Back key is. */
 bool zapp_native_ui_input(JNIEnv *env, const AInputEvent *event);
+/* Shows the assistant's More section, which holds the invitation review. */
+void zapp_native_ui_open_details(JNIEnv *env);
 /* Reapplies immersive mode, re-reads the app list and the layout file. */
 void zapp_native_ui_resume(JNIEnv *env);
 void zapp_native_ui_focus(JNIEnv *env);

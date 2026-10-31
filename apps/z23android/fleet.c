@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static bool invite_char(char c)
+bool zapp_fleet_invite_char(char c)
 {
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
            (c >= '0' && c <= '9') || c == '-' || c == '_';
@@ -20,7 +20,7 @@ bool zapp_fleet_invite_text(const char *text, char *token, size_t cap)
     size_t n = strlen(text);
     if (n < 128 || n > 2332 || n >= cap) return false;
     for (size_t i = 0; i < n; ++i) {
-        if (!invite_char(text[i])) return false;
+        if (!zapp_fleet_invite_char(text[i])) return false;
     }
     memcpy(token, text, n + 1);
     return true;

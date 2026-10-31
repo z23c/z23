@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static jobject root, status_view, result_view, prompt_view, invite_view, camera_view, balance_view;
+static jobject root, status_view, result_view, prompt_view, invite_view, balance_view;
 static jobject connection_view, transcript_view, fleet_view, receipt_view, details_view, notice_view;
 static jobject voice_view, pair_view, hosts_view, sync_view, ops_view;
 static jobject buttons[20];
@@ -24,7 +24,7 @@ static float down_x, down_y;
 static char last_receipt[8192];
 static bool voice_preview;
 static char suggestion[96]; /* The question on the button, so a tap sends exactly what was shown. */
-static const char *const actions[] = {"node_start", "node_stop", NULL, "chat", "fleet_scan", "fleet_preview", "fleet_join"};
+static const char *const actions[] = {"node_start", "node_stop", NULL, "chat", "scan", "fleet_preview", "fleet_join"};
 
 static bool read_density(JNIEnv *env, jobject display)
 {
@@ -158,7 +158,7 @@ void zapp_native_ui_destroy(JNIEnv *env)
         if (buttons[i]) (*env)->DeleteGlobalRef(env, buttons[i]);
         buttons[i] = NULL;
     }
-    jobject *views[] = {&root, &status_view, &balance_view, &result_view, &notice_view, &details_view, &prompt_view, &invite_view, &camera_view, &connection_view, &transcript_view, &fleet_view, &receipt_view, &voice_view, &pair_view, &hosts_view, &sync_view, &ops_view};
+    jobject *views[] = {&root, &status_view, &balance_view, &result_view, &notice_view, &details_view, &prompt_view, &invite_view, &connection_view, &transcript_view, &fleet_view, &receipt_view, &voice_view, &pair_view, &hosts_view, &sync_view, &ops_view};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) {
         if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
         *views[i] = NULL;
@@ -192,9 +192,9 @@ static bool ops_widgets(JNIEnv *env, jobject layout, jobject activity)
         add_button(env, layout, activity, "Restart node", 18) && add_text(env, layout, activity, "", &ops_view) &&
         add_button(env, layout, activity, "Confirm restart", 19);
 }
-static bool chat_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject camera, jobject receipt, jobject scroll)
+static bool chat_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject receipt, jobject scroll)
 {
-    (void)invite; (void)camera; (void)receipt; (void)scroll;
+    (void)invite; (void)receipt; (void)scroll;
     return !(!add_text(env, layout, activity, "Type a question", NULL) ||
         !zj_append(env, layout, prompt) || !zj_keep(env, &prompt_view, prompt) ||
         !add_button(env, layout, activity, "Send", 3) ||
@@ -212,12 +212,11 @@ static bool detail_controls(JNIEnv *env, jobject layout, jobject activity)
     return add_button(env, layout, activity, "Stop node", 1) &&
         add_text(env, layout, activity, "Fleet invitation", NULL);
 }
-static bool fleet_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject camera, jobject receipt, jobject scroll)
+static bool fleet_widgets(JNIEnv *env, jobject layout, jobject activity, jobject prompt, jobject invite, jobject receipt, jobject scroll)
 {
-    (void)prompt; (void)invite; (void)camera; (void)receipt; (void)scroll;
+    (void)prompt; (void)invite; (void)receipt; (void)scroll;
     return !(!detail_controls(env, layout, activity) ||
-        !add_button(env, layout, activity, "Scan invitation", 4) ||
-        !zj_append(env, layout, camera) || !zj_keep(env, &camera_view, camera) ||
+        !add_button(env, layout, activity, "Scan a code", 4) ||
         !zj_append(env, layout, invite) || !zj_keep(env, &invite_view, invite) ||
         !add_button(env, layout, activity, "Review invitation", 5) ||
         !add_button(env, layout, activity, "Join fleet", 6) ||
@@ -241,10 +240,9 @@ static bool style_prompt(JNIEnv *env, jobject field)
     return zj_typography(env, field, 16.0f, (jint)0xff262b2b) &&
            zj_int_property(env, field, "setMinLines", 1) && zj_int_property(env, field, "setMaxLines", 4);
 }
-static bool prepare_layouts(JNIEnv *env, jobject layout, jobject details, jobject prompt, jobject invite,
-                            jobject camera, jobject receipt)
+static bool prepare_layouts(JNIEnv *env, jobject layout, jobject details, jobject prompt, jobject invite, jobject receipt)
 {
-    return layout && prompt && invite && camera && receipt && details &&
+    return layout && prompt && invite && receipt && details &&
            orient_layout(env, layout) && orient_layout(env, details) &&
            zj_padding(env, layout, 20, 20) && style_prompt(env, prompt) && style_prompt(env, invite) &&
            zj_char_sequence(env, invite, "setHint", "Or paste an invitation");
@@ -269,12 +267,11 @@ static bool build_content(JNIEnv *env, jobject activity, jobject layout, jobject
 {
     jobject prompt = zj_widget(env, "android/widget/EditText", activity);
     jobject invite = zj_widget(env, "android/widget/EditText", activity);
-    jobject camera = zj_widget(env, "android/widget/ImageView", activity);
     jobject receipt = zj_widget(env, "android/widget/ImageView", activity);
-    return prepare_layouts(env, layout, details, prompt, invite, camera, receipt) &&
+    return prepare_layouts(env, layout, details, prompt, invite, receipt) &&
         node_widgets(env, layout, activity) && bar_widgets(env, bar, activity) &&
-        chat_widgets(env, details, activity, prompt, invite, camera, receipt, NULL) &&
-        fleet_widgets(env, details, activity, prompt, invite, camera, receipt, NULL) &&
+        chat_widgets(env, details, activity, prompt, invite, receipt, NULL) &&
+        fleet_widgets(env, details, activity, prompt, invite, receipt, NULL) &&
         finish_widgets(env, details, activity, receipt);
 }
 static bool build_ui(JNIEnv *env, jobject activity)
@@ -292,7 +289,7 @@ bool zapp_native_ui_create(JNIEnv *env, jobject activity, zapp_native_action act
     if (!env || !activity || !action || root) return false;
     if ((*env)->PushLocalFrame(env, 32) != JNI_OK) { (void)zj_clean(env); return false; }
     bool ok = load_density(env, activity) && load_identity(env, activity) &&
-        build_ui(env, activity) && zapp_shell_create(env, activity, root, voice_preview);
+        build_ui(env, activity) && zapp_shell_create(env, activity, root, action, voice_preview);
     if (ok) callback = action;
     (void)zj_clean(env);
     (*env)->PopLocalFrame(env, NULL);
@@ -408,8 +405,9 @@ static void assistant_touch(JNIEnv *env, const AInputEvent *event)
 }
 bool zapp_native_ui_input(JNIEnv *env, const AInputEvent *event)
 {
+    bool assistant = zapp_shell_assistant();
     if (zapp_shell_input(env, event)) return true;
-    if (callback && event && zapp_shell_assistant() && AInputEvent_getType(event) == AINPUT_EVENT_TYPE_MOTION) assistant_touch(env, event);
+    if (callback && event && assistant && AInputEvent_getType(event) == AINPUT_EVENT_TYPE_MOTION) assistant_touch(env, event);
     return false;
 }
 void zapp_native_ui_update(JNIEnv *env, const char *status, const char *output)
@@ -421,7 +419,7 @@ void zapp_native_ui_update(JNIEnv *env, const char *status, const char *output)
 
 
 void zapp_native_ui_preview(JNIEnv *env, const unsigned char *bmp, size_t len)
-{ (void)zj_bitmap(env, camera_view, bmp, len); zapp_shell_preview(env, bmp, len); }
+{ zapp_shell_preview(env, bmp, len); }
 
 static void receipt_qr(JNIEnv *env, const char *value)
 {
@@ -550,3 +548,9 @@ void zapp_native_ui_render(JNIEnv *env, const struct zapp_view *view)
 }
 void zapp_native_ui_resume(JNIEnv *env) { zapp_shell_resume(env); }
 void zapp_native_ui_focus(JNIEnv *env) { zapp_shell_immersive(env); }
+void zapp_native_ui_open_details(JNIEnv *env)
+{
+    if (details_open || !details_view || !zj_visible(env, details_view, true)) return;
+    details_open = true;
+    if (buttons[8]) (void)zj_text(env, buttons[8], "Less");
+}

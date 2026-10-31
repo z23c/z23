@@ -32,6 +32,10 @@ static void phone_card_golden(void)
     view.pace = ZAPP_PACE_GENTLE; view.balance_stale = true;
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)));
     assert(strstr(card, "\"node_line\":\"Syncing gently · phone is warm\"") && strstr(card, "\"balance_stale\":true"));
+    assert(strstr(card, "\"balance\":\"Last known: Balance 1.25 ZCL\""));
+    view.balance_stale = false;
+    assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && !strstr(card, "Last known"));
+    view.balance_stale = true;
     assert(strstr(card, "\"pace\":\"gentle\""));
     view.pace = ZAPP_PACE_PAUSE;
     assert(zapp_home_phone_card(&view, false, card, sizeof(card)) && strstr(card, "\"pace\":\"pause\""));
@@ -56,10 +60,10 @@ static void phone_card_omits_unknown_balance_and_secrets(void)
 }
 static void app_card_golden(void)
 {
-    struct zapp_app_entry app = {.label = "Maps \"Go\"", .package = "com.example.maps"};
+    struct zapp_app_entry app = {.label = "Maps \"Go\"", .package = "com.example.maps", .activity = "com.example.maps.Main"};
     char card[256];
     assert(zapp_home_app_card(&app, card, sizeof(card)));
-    assert(!strcmp(card, "{\"schema\":\"zcl.app_card.v1\",\"label\":\"Maps \\\"Go\\\"\",\"package\":\"com.example.maps\"}"));
+    assert(!strcmp(card, "{\"schema\":\"zcl.app_card.v1\",\"label\":\"Maps \\\"Go\\\"\",\"package\":\"com.example.maps\",\"activity\":\"com.example.maps.Main\"}"));
     assert(!zapp_home_app_card(&app, card, 30));
 }
 static void z23_app_cards(void)
@@ -70,7 +74,7 @@ static void z23_app_cards(void)
     struct json_value card;
     char text[256];
     for (size_t i = 0; i < sizeof(family) / sizeof(family[0]); ++i) {
-        struct zapp_app_entry app = {.label = "Clips"};
+        struct zapp_app_entry app = {.label = "Clips", .same_signature = true};
         snprintf(app.package, sizeof(app.package), "%s", family[i]);
         assert(zapp_home_is_z23_app(family[i]) && zapp_home_app_card(&app, text, sizeof(text)));
         json_init(&card);
@@ -80,11 +84,6 @@ static void z23_app_cards(void)
     for (size_t i = 0; i < sizeof(other) / sizeof(other[0]); ++i) {
         struct zapp_app_entry app = {.label = "X"};
         snprintf(app.package, sizeof(app.package), "%s", other[i]);
-#ifdef ZAPP_Z23_TEST_PACKAGE
-        assert(zapp_home_is_z23_app("org.z23.voicepreview.clips"));
-#else
-        assert(!zapp_home_is_z23_app("org.z23.voicepreview.clips"));
-#endif
         assert(!zapp_home_is_z23_app(other[i]) && zapp_home_app_card(&app, text, sizeof(text)));
         json_init(&card);
         assert(json_read(&card, text, strlen(text)) && zapp_card_is(&card, "app") && !zapp_card_is(&card, "z23_app"));
@@ -92,9 +91,57 @@ static void z23_app_cards(void)
     }
     assert(!zapp_home_is_z23_app(NULL));
 }
+/* A package that is not signed with this app's key gets a plain app tile, whatever its name. */
+static void unsigned_z23_package_is_plain(void)
+{
+    struct zapp_app_entry app = {.label = "Clips", .package = "org.z23.clips", .same_signature = false};
+    struct json_value card;
+    char text[256];
+    assert(zapp_home_app_card(&app, text, sizeof(text)));
+    json_init(&card);
+    assert(json_read(&card, text, strlen(text)) && zapp_card_is(&card, "app") && !zapp_card_is(&card, "z23_app"));
+    json_free(&card);
+}
+static void label_fits_on_character_boundary(void)
+{
+    char out[8];
+    zapp_home_fit_label(out, sizeof(out), "abc");
+    assert(!strcmp(out, "abc"));
+    zapp_home_fit_label(out, sizeof(out), "abcdefghij");
+    assert(!strcmp(out, "abcdefg"));
+    zapp_home_fit_label(out, sizeof(out), "abcdef\xc3\xa9z");
+    assert(!strcmp(out, "abcdef"));
+    zapp_home_fit_label(out, sizeof(out), "abcde\xc3\xa9z");
+    assert(!strcmp(out, "abcde\xc3\xa9"));
+    zapp_home_fit_label(out, 1, "abc");
+    assert(!out[0]);
+}
+static void scan_destinations(void)
+{
+    assert(zapp_home_scan_target(ZAPP_SCAN_FLEET, false) == ZAPP_SCAN_TO_FLEET_REVIEW);
+    assert(zapp_home_scan_target(ZAPP_SCAN_PAIR, true) == ZAPP_SCAN_TO_PAIR_REVIEW);
+    assert(zapp_home_scan_target(ZAPP_SCAN_PAIR, false) == ZAPP_SCAN_TO_HOME);
+    assert(zapp_home_scan_target(ZAPP_SCAN_TEXT, true) == ZAPP_SCAN_TO_HOME);
+    assert(zapp_home_scan_target(ZAPP_SCAN_UNREADABLE, true) == ZAPP_SCAN_TO_HOME);
+}
+/* The largest label, package and activity, with every label character escaped, still make a card. */
+static void worst_case_card_fits(void)
+{
+    struct zapp_app_entry app = {.same_signature = true};
+    static char card[ZAPP_APP_CARD_CAP];
+    struct json_value parsed;
+    memset(app.label, '\x01', sizeof(app.label) - 1);
+    memset(app.package, 'p', sizeof(app.package) - 1);
+    memset(app.activity, 'a', sizeof(app.activity) - 1);
+    size_t length = zapp_home_app_card(&app, card, sizeof(card));
+    assert(length);
+    json_init(&parsed);
+    assert(json_read(&parsed, card, length));
+    json_free(&parsed);
+}
 static void built_in_layouts(void)
 {
-    static const char *const tiles[] = {"assistant", "apps", "settings"};
+    static const char *const tiles[] = {"scan", "assistant"};
     assert(zapp_home_layout_count() == 2 && !strcmp(zapp_home_layout_name(0), "default"));
     assert(!strcmp(zapp_home_layout_name(1), "classic") && !zapp_home_layout_name(2) && !zapp_home_layout("other"));
     for (size_t i = 0; i < zapp_home_layout_count(); ++i) {
@@ -108,12 +155,28 @@ static void built_in_layouts(void)
             assert(strstr(document, tiles[t]));
             assert(zapp_home_action_label(tiles[t]));
             assert(strstr(document, "\"card\":\"z23_app\""));
-            assert(!strstr(document, "\"scan\"") && !strstr(document, "\"record\"") && !strstr(document, "\"watch\""));
+            assert(!strstr(document, "\"record\"") && !strstr(document, "\"watch\"") && !strstr(document, "\"apps\"") && !strstr(document, "\"settings\""));
         }
         zapp_layout_free(layout);
     }
     assert(strstr(zapp_home_layout("default"), "\"#000000\"") && strstr(zapp_home_layout("classic"), "\"#f7f5ef\""));
-    assert(!strcmp(zapp_home_action_label("apps"), "Apps") && !zapp_home_action_label("launch") && !zapp_home_action_label("scan") && !zapp_home_action_label(NULL));
+    assert(!strcmp(zapp_home_action_label("apps"), "Apps") && !zapp_home_action_label("launch") && !zapp_home_action_label("record") && !zapp_home_action_label(NULL));
+    assert(!strcmp(zapp_home_action_label("scan"), "Scan") && !strcmp(zapp_home_action_label("settings"), "Settings"));
+}
+/* A pairing offer scanned with the camera arrives while the scan screen is still up; the owner must be taken
+ * to its review once the scan screen is gone, not lost. */
+static void offer_jump(void)
+{
+    bool seen = false;
+    assert(!zapp_home_offer_jump(false, false, &seen) && !seen);
+    assert(!zapp_home_offer_jump(true, true, &seen) && !seen);
+    assert(zapp_home_offer_jump(true, false, &seen) && seen);
+    assert(!zapp_home_offer_jump(true, false, &seen) && seen);
+    assert(!zapp_home_offer_jump(true, true, &seen) && seen);
+    assert(!zapp_home_offer_jump(false, false, &seen) && !seen);
+    assert(zapp_home_offer_jump(true, false, &seen) && seen);
+    seen = true;
+    assert(!zapp_home_offer_jump(false, true, &seen) && !seen);
 }
 int main(void)
 {
@@ -121,7 +184,12 @@ int main(void)
     phone_card_omits_unknown_balance_and_secrets();
     app_card_golden();
     z23_app_cards();
+    unsigned_z23_package_is_plain();
+    label_fits_on_character_boundary();
+    scan_destinations();
+    worst_case_card_fits();
     built_in_layouts();
+    offer_jump();
     puts("home tests passed");
     return 0;
 }

@@ -11,10 +11,12 @@
 #include <string.h>
 #include <time.h>
 
-#define WIDTH 640
-#define HEIGHT 480
+#define WIDTH 1280
+#define HEIGHT 960
 #define PREVIEW_W 320
 #define PREVIEW_H 240
+#define PREVIEW_STEP_X (WIDTH / PREVIEW_W)
+#define PREVIEW_STEP_Y (HEIGHT / PREVIEW_H)
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static atomic_bool stopped;
 static bool scanning, preview_ready;
@@ -79,7 +81,7 @@ static void update_preview(const uint8_t *dst)
 {
     pthread_mutex_lock(&lock);
     for (int y = 0; y < PREVIEW_H; ++y) for (int x = 0; x < PREVIEW_W; ++x)
-        preview[y * PREVIEW_W + x] = dst[(y * 2) * WIDTH + x * 2];
+        preview[y * PREVIEW_W + x] = dst[(y * PREVIEW_STEP_Y) * WIDTH + x * PREVIEW_STEP_X];
     preview_ready = true;
     struct timespec now; void (*notify)(void) = NULL;
     if (frame_notify && clock_gettime(CLOCK_MONOTONIC, &now) == 0 &&
@@ -205,8 +207,10 @@ bool zapp_camera_scan(uint64_t ticket, char *result, size_t cap, char *error, si
     pthread_mutex_unlock(&lock);
     bool ok = false;
     struct camera_scan state = {0};
-    if (!zapp_camera_permission(ticket) || atomic_load(&stopped)) {
-        snprintf(error, error_cap, "Camera permission not granted."); goto out;
+    bool allowed = zapp_camera_permission(ticket);
+    if (!allowed || atomic_load(&stopped)) {
+        snprintf(error, error_cap, atomic_load(&stopped) ? "Camera scan cancelled." :
+                 "Camera permission was not given. Allow Camera for this app in Android Settings, under Apps and Permissions, then tap Scan again."); goto out;
     }
     const char *id = rear_camera(&state, error, error_cap);
     if (!id || !open_capture(&state, id, sequence)) goto out;

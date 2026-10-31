@@ -18,7 +18,7 @@ endif()
 
 add_library(z23android SHARED
     android_main.c node_service.c node_watch.c camera.c native_ui.c jni_util.c shell.c surface.c launcher.c layout.c home.c controller.c conversation.c bridge_client.c operations.c rpc.c fleet.c
-    audio.c speech_client.c voice.c hosts.c pairing.c thermal.c nodelog.c
+    audio.c speech_client.c voice.c hosts.c pairing.c scan.c thermal.c nodelog.c
     "${Z23_ROOT}/platform/modules/sha3/src/sha3.c"
     "${Z23_ROOT}/contexts/commons/packages/zutf8/src/zutf8.c"
     "${Z23_ROOT}/vendor/qrcodegen/qrcodegen.c"
@@ -39,7 +39,7 @@ target_include_directories(z23android PRIVATE
     "${Z23_ROOT}/vendor/include")
 target_compile_options(z23android PRIVATE -std=c23 -Wall -Wextra -Werror -pedantic
     -fstack-protector-strong -fvisibility=hidden -ffunction-sections -fdata-sections)
-target_compile_definitions(z23android PRIVATE _POSIX_C_SOURCE=200809L)
+target_compile_definitions(z23android PRIVATE _POSIX_C_SOURCE=200809L QUIRC_MAX_REGIONS=65534)
 target_link_options(z23android PRIVATE -Wl,--no-undefined -Wl,--gc-sections
     -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,-z,max-page-size=16384)
 target_link_libraries(z23android PRIVATE "${Z23_CRYPTO}" android log dl m camera2ndk mediandk aaudio)

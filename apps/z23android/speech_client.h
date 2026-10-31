@@ -7,6 +7,9 @@
 #include <stdatomic.h>
 struct json_value;
 bool zapp_speech_client_pair(const char *files, const char *json, char *error, size_t cap);
+/* True when json is a laptop host pairing descriptor: exactly two members, a 64-digit lowercase hex
+ * token and a port, in len bytes shorter than 256. */
+bool zapp_speech_client_descriptor_valid(const char *json, size_t len);
 /* True when the stored pairing is exactly this descriptor. */
 bool zapp_speech_client_paired(const char *files, const char *json);
 /* True when a laptop host pairing is stored, whatever its descriptor. */

@@ -8,7 +8,7 @@
  * scan camera screen and the assistant tree built by native_ui. Back from any screen returns to the
  * home screen. The apps and settings screens and their entry points are drawn by app code, so no
  * layout can remove them. */
-bool zapp_shell_create(JNIEnv *env, jobject activity, jobject assistant, bool preview);
+bool zapp_shell_create(JNIEnv *env, jobject activity, jobject assistant, zapp_native_action send, bool preview);
 void zapp_shell_destroy(JNIEnv *env);
 void zapp_shell_render(JNIEnv *env, const struct zapp_view *view);
 /* Handles taps on shell screens and the Back key; true when the event was consumed. */

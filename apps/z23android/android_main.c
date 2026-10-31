@@ -28,6 +28,10 @@ static uint64_t permission_ticket;
 static bool foreground = true;
 /* The saved Start node choice has been put to the background-network dialog. */
 static bool background_asked;
+/* The camera permission dialog is up: the pause it causes must not cancel the scan waiting on it. */
+static atomic_bool camera_dialog;
+/* The dialog closed without the permission. */
+static atomic_bool camera_denied;
 /* The foreground service that keeps the node's process above hidden-app priority is running. */
 static bool node_service_on;
 /* Notifications were requested once; the service works without them. */
@@ -94,12 +98,12 @@ static void allow_background_network(JNIEnv *env, jobject activity)
     if (intent) (*env)->CallVoidMethod(env, activity, start, intent);
     (void)clean(env); (*env)->PopLocalFrame(env, NULL);
 }
-static bool notifications_allowed(JNIEnv *env, jobject activity)
+static bool permission_held(JNIEnv *env, jobject activity, const char *name)
 {
     if ((*env)->PushLocalFrame(env, 4) != JNI_OK) { (void)clean(env); return false; }
     jclass cls = (*env)->GetObjectClass(env, activity);
     jmethodID check = cls ? (*env)->GetMethodID(env, cls, "checkSelfPermission", "(Ljava/lang/String;)I") : NULL;
-    jstring permission = (*env)->NewStringUTF(env, "android.permission.POST_NOTIFICATIONS");
+    jstring permission = (*env)->NewStringUTF(env, name);
     bool granted = clean(env) && check && permission && (*env)->CallIntMethod(env, activity, check, permission) == 0;
     (void)clean(env); (*env)->PopLocalFrame(env, NULL);
     return granted;
@@ -113,7 +117,7 @@ static void sync_node_service(JNIEnv *env, const struct zapp_view *view)
     clock_gettime(CLOCK_MONOTONIC, &now);
     if (node_service_on && zapp_node_service_ended()) node_service_on = false;
     if (!node_service_on && foreground && view->node_process_running && now.tv_sec >= service_retry_at) {
-        if (!notifications_asked && !notifications_allowed(env, active)) {
+        if (!notifications_asked && !permission_held(env, active, "android.permission.POST_NOTIFICATIONS")) {
             notifications_asked = true; request_permission(env, active, "android.permission.POST_NOTIFICATIONS");
         }
         node_service_on = zapp_node_service_start(env, active);
@@ -196,7 +200,7 @@ static int signal_ready(int fd, int events, void *context)
     bool request = permission_ticket && permission_ticket == zapp_camera_ticket();
     permission_ticket = 0;
     pthread_mutex_unlock(&lock);
-    if (activity && request) request_permission(env, activity, "android.permission.CAMERA");
+    if (activity && request) { atomic_store(&camera_dialog, true); request_permission(env, activity, "android.permission.CAMERA"); }
     if (activity) { refresh(env); (*env)->DeleteLocalRef(env, activity); }
     return 1;
 }
@@ -230,10 +234,10 @@ static bool permission_wait(JNIEnv *env, jobject activity, jmethodID check,
     for (int i = 0; queued && i < 150; ++i) {
         nanosleep(&pause, NULL);
         pthread_mutex_lock(&lock); bool alive = active && ticket == zapp_camera_ticket(); pthread_mutex_unlock(&lock);
-        if (!alive) break;
+        if (!alive || atomic_load(&camera_denied)) break;
         bool granted = (*env)->CallIntMethod(env, activity, check, permission) == 0;
         if (!clean(env)) break;
-        if (granted) return true;
+        if (granted && !atomic_load(&camera_dialog)) return true;
     }
     return false;
 }
@@ -254,6 +258,8 @@ bool zapp_camera_permission(uint64_t ticket)
 {
     JavaVM *current_vm = atomic_load(&vm); JNIEnv *env = NULL; bool attached = false, granted = false;
     if (!permission_attach(current_vm, &env, &attached)) return false;
+    atomic_store(&camera_denied, false);
+    atomic_store(&camera_dialog, false);
     pthread_mutex_lock(&lock);
     jobject activity = active && ticket == zapp_camera_ticket() ? (*env)->NewLocalRef(env, active) : NULL;
     pthread_mutex_unlock(&lock);
@@ -344,6 +350,18 @@ static bool release_surface(JNIEnv *env, jobject activity)
 out:
     (void)clean(env); (*env)->PopLocalFrame(env, NULL); return ok;
 }
+/* Asks the activity that still owns the state to close; the newest activity takes over. */
+static void finish_previous(JNIEnv *env)
+{
+    pthread_mutex_lock(&lock); jobject old = active ? (*env)->NewLocalRef(env, active) : NULL; pthread_mutex_unlock(&lock);
+    if (!old) return;
+    jclass cls = (*env)->GetObjectClass(env, old);
+    jmethodID finish = cls ? (*env)->GetMethodID(env, cls, "finish", "()V") : NULL;
+    if (finish) (*env)->CallVoidMethod(env, old, finish);
+    (void)clean(env);
+    if (cls) (*env)->DeleteLocalRef(env, cls);
+    (*env)->DeleteLocalRef(env, old);
+}
 /* Releases activity-bound state. A relaunch creates the new activity before the old one is
  * destroyed, so the newest activity takes this state over and the old one skips it. */
 static void detach_activity(JNIEnv *env)
@@ -373,7 +391,7 @@ static void pause_activity(ANativeActivity *activity)
 {
     (void)activity; foreground = false;
     zapp_controller_visible(false);
-    zapp_camera_stop();
+    if (!atomic_load(&camera_dialog)) zapp_camera_stop();
 }
 static void focus_changed(ANativeActivity *activity, int focused)
 {
@@ -381,6 +399,12 @@ static void focus_changed(ANativeActivity *activity, int focused)
 }
 static void resume_activity(ANativeActivity *activity)
 {
+    if (atomic_exchange(&camera_dialog, false) && !permission_held(activity->env, activity->clazz, "android.permission.CAMERA"))
+        atomic_store(&camera_denied, true);
+    pthread_mutex_lock(&lock);
+    bool owner = active && (*activity->env)->IsSameObject(activity->env, active, activity->clazz);
+    pthread_mutex_unlock(&lock);
+    if (!owner) { ANativeActivity_finish(activity); return; }
     foreground = true;
     zapp_controller_visible(true);
     zapp_native_ui_resume(activity->env);
@@ -399,7 +423,7 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
     activity->callbacks->onInputQueueDestroyed = queue_destroyed;
     JNIEnv *env = activity->env; char native_dir[4096]; bool preview = false;
     pthread_mutex_lock(&lock); bool previous = active != NULL; pthread_mutex_unlock(&lock);
-    if (previous) detach_activity(env);
+    if (previous) { finish_previous(env); detach_activity(env); }
     if (!activity->internalDataPath || !native_directory(env, activity->clazz, native_dir, sizeof(native_dir))) goto fail;
     looper = ALooper_forThread();
     if (!looper) goto fail;

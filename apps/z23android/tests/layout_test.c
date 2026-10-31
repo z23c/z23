@@ -8,6 +8,17 @@
 #define HEAD "{\"schema\":\"zcl.layout_recipe.v1\",\"id\":\"t\","
 static char reason[160];
 
+#define JSON_CAP 8192
+/* Appends text to json, which holds JSON_CAP bytes. */
+static void put(char *json, const char *text)
+{
+    size_t used = strlen(json), length = strlen(text);
+    assert(used + length < JSON_CAP);
+    memcpy(json + used, text, length + 1);
+}
+/* Starts json over with text. */
+static void set(char *json, const char *text) { json[0] = 0; put(json, text); }
+
 static struct zapp_layout *parse(const char *json)
 {
     return zapp_layout_parse(json, strlen(json), reason, sizeof(reason));
@@ -74,13 +85,13 @@ static void bad_color_is_refused(void)
 /* A column nested to the given number of levels, the innermost holding one text leaf. */
 static char *nested(int levels)
 {
-    char *json = calloc(1, 4096);
+    char *json = calloc(1, JSON_CAP);
     assert(json);
-    strcat(json, HEAD "\"screens\":{\"home\":");
-    for (int i = 1; i < levels; ++i) strcat(json, "{\"type\":\"column\",\"children\":[");
-    strcat(json, "{\"type\":\"text\"}");
-    for (int i = 1; i < levels; ++i) strcat(json, "]}");
-    strcat(json, "}}");
+    put(json, HEAD "\"screens\":{\"home\":");
+    for (int i = 1; i < levels; ++i) put(json, "{\"type\":\"column\",\"children\":[");
+    put(json, "{\"type\":\"text\"}");
+    for (int i = 1; i < levels; ++i) put(json, "]}");
+    put(json, "}}");
     return json;
 }
 static void depth_limit(void)
@@ -95,32 +106,68 @@ static void depth_limit(void)
 /* A screen named name whose root column holds the given number of text leaves. */
 static void screen(char *json, const char *name, int leaves)
 {
-    strcat(json, name);
-    strcat(json, "\":{\"type\":\"column\",\"children\":[");
-    for (int i = 0; i < leaves; ++i) strcat(json, i ? ",{\"type\":\"text\"}" : "{\"type\":\"text\"}");
-    strcat(json, "]}");
+    put(json, name);
+    put(json, "\":{\"type\":\"column\",\"children\":[");
+    for (int i = 0; i < leaves; ++i) put(json, i ? ",{\"type\":\"text\"}" : "{\"type\":\"text\"}");
+    put(json, "]}");
 }
 static void node_limit(void)
 {
-    char *json = calloc(1, 8192);
+    char *json = calloc(1, JSON_CAP);
     assert(json);
-    strcpy(json, HEAD "\"screens\":{\"");
+    set(json, HEAD "\"screens\":{\"");
     screen(json, "a", 255);
-    strcat(json, "}}");
+    put(json, "}}");
     struct zapp_layout *layout = parse(json);
     assert(layout && layout->node_count == ZAPP_LAYOUT_MAX_NODES);
     zapp_layout_free(layout);
-    strcpy(json, HEAD "\"screens\":{\"");
+    set(json, HEAD "\"screens\":{\"");
     screen(json, "a", 256);
-    strcat(json, "}}");
+    put(json, "}}");
     refused(json, "more than 256 nodes");
-    strcpy(json, HEAD "\"screens\":{\"");
+    set(json, HEAD "\"screens\":{\"");
     screen(json, "a", 255);
-    strcat(json, ",\"");
+    put(json, ",\"");
     screen(json, "b", 0);
-    strcat(json, "}}");
+    put(json, "}}");
     refused(json, "more than 256 nodes");
     free(json);
+}
+static void screens_json(char *json, size_t screens)
+{
+    set(json, HEAD "\"screens\":{");
+    for (size_t i = 0; i < screens; ++i)
+    {
+        char piece[48];
+        snprintf(piece, sizeof(piece), "%s\"s%zu\":{\"type\":\"column\"}", i ? "," : "", i);
+        put(json, piece);
+    }
+    put(json, "}}");
+}
+static void screen_and_name_limits(void)
+{
+    char json[JSON_CAP], name[ZAPP_NAME_CAP + 2];
+    screens_json(json, ZAPP_LAYOUT_MAX_SCREENS);
+    struct zapp_layout *layout = parse(json);
+    assert(layout && layout->screen_count == ZAPP_LAYOUT_MAX_SCREENS);
+    zapp_layout_free(layout);
+    screens_json(json, ZAPP_LAYOUT_MAX_SCREENS + 1);
+    refused(json, "more than 16 screens");
+    memset(name, 'a', ZAPP_NAME_CAP - 1); name[ZAPP_NAME_CAP - 1] = 0;
+    snprintf(json, sizeof(json), HEAD "\"screens\":{\"%s\":{\"type\":\"column\"}}}", name);
+    layout = parse(json);
+    assert(layout);
+    zapp_layout_free(layout);
+    memset(name, 'a', ZAPP_NAME_CAP); name[ZAPP_NAME_CAP] = 0;
+    snprintf(json, sizeof(json), HEAD "\"screens\":{\"%s\":{\"type\":\"column\"}}}", name);
+    refused(json, "a screen name is too long");
+    snprintf(json, sizeof(json), HEAD "\"screens\":{\"home\":{\"type\":\"action\",\"id\":\"%s\"}}}", name);
+    refused(json, "id must be a short name");
+    memset(name, 'a', ZAPP_NAME_CAP - 1); name[ZAPP_NAME_CAP - 1] = 0;
+    snprintf(json, sizeof(json), HEAD "\"screens\":{\"home\":{\"type\":\"action\",\"id\":\"%s\"}}}", name);
+    layout = parse(json);
+    assert(layout);
+    zapp_layout_free(layout);
 }
 static void size_limit(void)
 {
@@ -148,29 +195,38 @@ static void malformed_documents(void)
     refused(HEAD "\"screens\":{\"home\":{\"type\":\"action\",\"id\":\"a/b\"}}}", "not allowed");
     assert(!zapp_layout_parse(NULL, 0, NULL, 0));
 }
+static const char card_text[] = "{\"schema\":\"zcl.clip_card.v1\",\"caption\":\"caf\\u00e9 \\u00e9\\u00e9\\u00e9\","
+        "\"counts\":{\"comments\":3,\"ratio\":0.5,\"live\":true},\"author\":{\"name\":\"Dana\"},\"tags\":[\"a\"],\"gone\":null}";
+static void card_paths(struct json_value *card)
+{
+    char out[16];
+    assert(zapp_card_field(card, "counts.comments", out, sizeof(out)) && !strcmp(out, "3"));
+    assert(zapp_card_field(card, "counts.ratio", out, sizeof(out)) && !strcmp(out, "0.5"));
+    assert(zapp_card_field(card, "counts.live", out, sizeof(out)) && !strcmp(out, "true"));
+    assert(zapp_card_field(card, "author.name", out, sizeof(out)) && !strcmp(out, "Dana"));
+    assert(!zapp_card_field(card, "counts.missing", out, sizeof(out)) && !out[0]);
+    assert(!zapp_card_field(card, "author.name.deeper", out, sizeof(out)) && !out[0]);
+    assert(!zapp_card_field(card, "counts", out, sizeof(out)) && !out[0]);
+    assert(!zapp_card_field(card, "tags", out, sizeof(out)) && !out[0]);
+    assert(!zapp_card_field(card, "gone", out, sizeof(out)) && !out[0]);
+    assert(!zapp_card_field(card, "", out, sizeof(out)) && !zapp_card_field(card, "a..b", out, sizeof(out)));
+    assert(!zapp_card_field(NULL, "caption", out, sizeof(out)) && !zapp_card_field(card, NULL, out, sizeof(out)));
+}
+static void card_cuts(struct json_value *card)
+{
+    char out[16];
+    /* Each é is 2 bytes: a cut inside one drops it whole. */
+    assert(zapp_card_field(card, "caption", out, 10) && !strcmp(out, "caf\xc3\xa9 \xc3\xa9"));
+    assert(zapp_card_field(card, "caption", out, 9) && !strcmp(out, "caf\xc3\xa9 \xc3\xa9"));
+    assert(zapp_card_field(card, "caption", out, 8) && !strcmp(out, "caf\xc3\xa9 "));
+}
 static void card_fields(void)
 {
     struct json_value card;
-    char out[16];
-    static const char text[] = "{\"schema\":\"zcl.clip_card.v1\",\"caption\":\"caf\\u00e9 \\u00e9\\u00e9\\u00e9\","
-        "\"counts\":{\"comments\":3,\"ratio\":0.5,\"live\":true},\"author\":{\"name\":\"Dana\"},\"tags\":[\"a\"],\"gone\":null}";
     json_init(&card);
-    assert(json_read(&card, text, strlen(text)));
-    assert(zapp_card_field(&card, "counts.comments", out, sizeof(out)) && !strcmp(out, "3"));
-    assert(zapp_card_field(&card, "counts.ratio", out, sizeof(out)) && !strcmp(out, "0.5"));
-    assert(zapp_card_field(&card, "counts.live", out, sizeof(out)) && !strcmp(out, "true"));
-    assert(zapp_card_field(&card, "author.name", out, sizeof(out)) && !strcmp(out, "Dana"));
-    assert(!zapp_card_field(&card, "counts.missing", out, sizeof(out)) && !out[0]);
-    assert(!zapp_card_field(&card, "author.name.deeper", out, sizeof(out)) && !out[0]);
-    assert(!zapp_card_field(&card, "counts", out, sizeof(out)) && !out[0]);
-    assert(!zapp_card_field(&card, "tags", out, sizeof(out)) && !out[0]);
-    assert(!zapp_card_field(&card, "gone", out, sizeof(out)) && !out[0]);
-    assert(!zapp_card_field(&card, "", out, sizeof(out)) && !zapp_card_field(&card, "a..b", out, sizeof(out)));
-    assert(!zapp_card_field(NULL, "caption", out, sizeof(out)) && !zapp_card_field(&card, NULL, out, sizeof(out)));
-    /* Each é is 2 bytes: a cut inside one drops it whole. */
-    assert(zapp_card_field(&card, "caption", out, 10) && !strcmp(out, "caf\xc3\xa9 \xc3\xa9"));
-    assert(zapp_card_field(&card, "caption", out, 9) && !strcmp(out, "caf\xc3\xa9 \xc3\xa9"));
-    assert(zapp_card_field(&card, "caption", out, 8) && !strcmp(out, "caf\xc3\xa9 "));
+    assert(json_read(&card, card_text, strlen(card_text)));
+    card_paths(&card);
+    card_cuts(&card);
     assert(zapp_card_is(&card, "clip") && !zapp_card_is(&card, "phone") && !zapp_card_is(NULL, "clip"));
     json_free(&card);
 }
@@ -182,6 +238,7 @@ int main(void)
     bad_color_is_refused();
     depth_limit();
     node_limit();
+    screen_and_name_limits();
     size_limit();
     malformed_documents();
     card_fields();

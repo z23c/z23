@@ -22,7 +22,7 @@
 #define FLEET_CAP 65536u
 #define OPS_CAP 4096
 struct options {
-    const char *dir, *llama, *models, *speaker, *fleet, *adb, *serial, *app;
+    const char *dir, *llama, *models, *speaker, *fleet, *adb, *serial, *app, *qr_window;
     uint16_t port;
 };
 static struct zapp_assistant assistant;
@@ -214,7 +214,7 @@ static void *pairing_loop(void *opaque)
     bool offered = false;
     for (int tick = 0; !zapp_relay_stopping(); tick++) {
         if (!offered && tick % 10 == 0 &&
-            (offered = zapp_host_offer_pairing(o->adb, o->serial, o->app, o->port, o->dir)))
+            (offered = zapp_host_offer_pairing(o->adb, o->serial, o->app, o->port, o->dir, o->qr_window)))
             fputs("Pairing offered to the phone. Confirm it on the phone screen.\n", stderr);
         else if (offered && tick % 100 == 0) (void)zapp_host_route(o->adb, o->serial, o->port);
         usleep(200000);
@@ -236,7 +236,7 @@ static const struct zapp_assistant_tools fleet_tools = {.schema = &tool_schema, 
 static const char usage[] =
     "Usage: z23-speech-bridge --dir DIR --llama-server PATH --models DIR [--port N]\n"
     "         [--speaker WAV] [--fleet label=ssh-destination,...]\n"
-    "         [--adb PATH --serial SERIAL [--app PACKAGE]]\n";
+    "         [--adb PATH --serial SERIAL [--app PACKAGE] [--qr-window PATH]]\n";
 static bool set_option(int c, struct options *o)
 {
     switch (c) {
@@ -248,6 +248,7 @@ static bool set_option(int c, struct options *o)
     case 'a': o->adb = optarg; return true;
     case 'S': o->serial = optarg; return true;
     case 'A': o->app = optarg; return true;
+    case 'q': o->qr_window = optarg; return true;
     case 'p': {
         long v = strtol(optarg, NULL, 10);
         if (v < 1024 || v > 65530) return false;
@@ -260,13 +261,15 @@ static bool options_valid(const struct options *o)
 {
     return o->dir && o->llama && o->models && !o->adb == !o->serial &&
         strspn(o->app, "abcdefghijklmnopqrstuvwxyz0123456789._") == strlen(o->app) &&
+        (!o->qr_window || (o->adb && o->qr_window[0] == '/')) &&
         (!o->fleet || zapp_fleet_hosts_parse(o->fleet, fleet_hosts, 16, &fleet_count));
 }
 static bool parse(int argc, char **argv, struct options *o)
 {
     static const struct option longs[] = {{"dir", 1, 0, 'd'}, {"llama-server", 1, 0, 'l'},
         {"models", 1, 0, 'm'}, {"port", 1, 0, 'p'}, {"speaker", 1, 0, 's'}, {"fleet", 1, 0, 'f'},
-        {"adb", 1, 0, 'a'}, {"serial", 1, 0, 'S'}, {"app", 1, 0, 'A'}, {0, 0, 0, 0}};
+        {"adb", 1, 0, 'a'}, {"serial", 1, 0, 'S'}, {"app", 1, 0, 'A'}, {"qr-window", 1, 0, 'q'},
+        {0, 0, 0, 0}};
     *o = (struct options){.port = 8770, .app = "org.z23.nativeapp"};
     for (int c; (c = getopt_long(argc, argv, "", longs, NULL)) != -1;)
         if (!set_option(c, o)) return false;

@@ -17,8 +17,8 @@ struct zapp_launcher_app {
  * ZAPP_LAUNCHER_MAX). With icons set, each icon is a global reference released by zapp_launcher_release. */
 size_t zapp_launcher_list(JNIEnv *env, jobject activity, struct zapp_launcher_app *apps, size_t max, bool icons);
 void zapp_launcher_release(JNIEnv *env, struct zapp_launcher_app *apps, size_t count);
-/* Starts the launch activity of a package. False when it has none. */
-bool zapp_launcher_start(JNIEnv *env, jobject activity, const char *package);
-/* Opens the system screen that chooses the Home app. */
+/* Starts one launcher activity class of a package. False when it cannot be started. */
+bool zapp_launcher_start(JNIEnv *env, jobject activity, const char *package, const char *activity_class);
+/* Opens the system screen that chooses the Home app, or the main Android settings when no app handles it. */
 bool zapp_launcher_home_settings(JNIEnv *env, jobject activity);
 #endif

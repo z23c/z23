@@ -60,14 +60,26 @@ that role. The app hides the system bars (a swipe from the edge shows them
 briefly) and the keyboard still works in text fields.
 
 The Home screen shows the phone card (node line, sync status, balance when
-known), a Z23 apps section, and tiles for Assistant, Apps and Settings. The Z23
+known), a Z23 apps section, and tiles for Scan and Assistant. A fixed bar with **Apps** and
+**Settings** sits under the layout on every layout. The Z23
 apps section is built from the launcher list: every installed launchable
 package whose name starts with `org.z23.`, except the base app
-`org.z23.nativeapp` and `org.z23.voicepreview*`. Each card opens its app.
-Back from any screen returns Home; Back on Home does nothing. **Assistant**
-opens the voice and fleet screen described below. A pairing offer from a USB
-host opens that screen once when it arrives, and a camera scan shows the
-camera full screen with **Cancel**.
+`org.z23.nativeapp` and `org.z23.voicepreview*`, and that is signed with the
+same key as this app; any other app stays in the plain app list. Each card opens
+the launcher activity it was listed for. A balance that is out of date reads
+"Last known: ..." on Home.
+Back from any screen returns Home; Back on Home does nothing. When Z23 is the
+Home app, the Home button returns to Home from Apps and Settings (measured on a Pixel 3, Android 15);
+on the Assistant it leaves the screen as it is, so use Back there. **Assistant**
+opens the voice and fleet screen described below. **Scan** (also under More in
+the assistant) shows the camera full screen with **Cancel**; Back also cancels and
+shows nothing. A scanned fleet invitation opens the assistant with its review
+under More, and a scanned laptop pairing code opens the pairing review there, the
+same as an offer over USB. A clip, author or rater address, or other text, is shown
+on Home with the notice, selectable, up to 255 bytes (a clip address, 128 hex digits, and an
+author or rater address, 64, fit in full; longer text is cut). A code that looks like a pairing
+code or an invitation but cannot be read is never shown; Home says so instead. Nothing scanned is opened, followed
+or paid without a tap.
 
 Home is drawn from two data documents, so the look changes without an app
 release:
@@ -80,7 +92,7 @@ release:
   arrangements `row`, `column`, `stack`; leaves `video`, `image`, `text`,
   `counter`, `action`, `avatar`. A container with `"card": "<kind>"` repeats
   its children once per card of that kind and is omitted when there is none.
-  An `action` names only an action id (`assistant`, `apps`, `settings`, or
+  An `action` names only an action id (`scan`, `assistant`, `apps`, `settings`, or
   `launch` with `"field": "label"` inside an app card); a layout cannot name a
   URL or a method. Limits: 64 KiB, 8 levels, 256 nodes. An unknown primitive, a
   bad colour or a document over a limit refuses the whole layout; unknown
@@ -101,7 +113,7 @@ never hides them. To stop using Z23 as Home, open **Settings**, then
 
 ## Current limits
 
-The main screen shows one line for the node, one for the fleet, **Talk** and
+The Assistant screen shows one line for the node, one for the fleet, **Talk** and
 the conversation, newest exchange first. The node line says whether the node
 is stopped, starting, waiting for peers, catching up (height of target) or in
 sync, with its peer count. The fleet line repeats the paired host's cached
@@ -482,3 +494,9 @@ hardware-backed wallet custody are not qualified.
 The [isolated shielded transaction experiment](../../docs/experiments/2026-10-28-pixel-shielded-api.md)
 describes the existing regtest API demonstration and its evidence. It is not
 an app setup or a mainnet payment guide.
+
+## Scanning QR codes
+
+The Scan action reads one QR code with the camera and shows what it is without opening, fetching or paying anything. A fleet invitation goes to the join review. A laptop pairing code goes to the same six-digit review as an offer over USB, and the token is never shown. A clip, author or rater address, or any other text, is shown with a sentence saying nothing was done.
+
+On the laptop, `z23-speech-bridge --qr-window PATH` (an absolute path to `z23-qr-window`) also shows the pairing descriptor as a QR code in a window titled `Z23 pairing` with the six-digit code. The descriptor arrives on the window's standard input, never in its arguments. `make qr-window` builds `$(BUILD_DIR)/z23-qr-window` against X11. `make test` builds the same program without X11 and checks its `--dump` output, a binary PBM, against decoded payloads.

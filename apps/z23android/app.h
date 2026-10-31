@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "scan.h"
 #include "thermal.h"
 
 #define ZAPP_TEXT_CAP 65536
@@ -35,6 +36,9 @@ struct zapp_view {
     bool node_process_running;
     bool node_wanted;
     bool scanning;
+    unsigned scans_done;           /* Scan actions that have finished, with or without a code. */
+    enum zapp_scan_kind scan_kind; /* Kind of the last code scanned by the scan action. */
+    char scan_text[256];           /* That code's text when it is shown, else empty. */
     enum zapp_reply_state reply_state;
     enum zapp_voice_state voice_state;
     char voice_status[256];

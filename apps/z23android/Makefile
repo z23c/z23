@@ -17,6 +17,7 @@ APK := $(BUILD_DIR)/z23.apk
 APP_MANIFEST ?= AndroidManifest.xml
 QUIRC_DIR := $(abspath $(BUILD_DIR)/quirc)
 QUIRC_SOURCES := $(QUIRC_DIR)/quirc.c $(QUIRC_DIR)/decode.c $(QUIRC_DIR)/identify.c $(QUIRC_DIR)/version_db.c
+QUIRC_FLAGS := -DQUIRC_MAX_REGIONS=65534
 HOST_CC ?= cc
 HOST_WARNINGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic
 export JAVA_HOME
@@ -101,8 +102,8 @@ test-voice:
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/speech-client.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/speech-client-test' "$$scratch"
 
-test: prepare-quirc test-bridge test-voice test-host test-dexgen test-watch
-	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' \
+test: prepare-quirc test-bridge test-voice test-host test-dexgen test-watch test-scan test-qr-window
+	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../vendor/qrcodegen -I'$(QUIRC_DIR)' $(QUIRC_FLAGS) \
 	  tests/fleet_test.c fleet.c ../../vendor/qrcodegen/qrcodegen.c $(QUIRC_SOURCES) \
 	  -lm -o '$(BUILD_DIR)/fleet-test'
 	'$(BUILD_DIR)/fleet-test'
@@ -129,6 +130,25 @@ test: prepare-quirc test-bridge test-voice test-host test-dexgen test-watch
 	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/bridge-client-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/bridge-test.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/bridge-client-test' "$$scratch"
+
+
+QR_WINDOW_SOURCES := bridge/qr_window.c ../../vendor/qrcodegen/qrcodegen.c
+.PHONY: qr-window test-qr-window test-scan
+qr-window:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -I../../vendor/qrcodegen $(QR_WINDOW_SOURCES) -lX11 -o '$(BUILD_DIR)/z23-qr-window'
+
+test-qr-window: prepare-quirc
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) -DZAPP_QR_NO_X11 -I../../vendor/qrcodegen $(QR_WINDOW_SOURCES) -o '$(BUILD_DIR)/z23-qr-dump'
+	$(HOST_CC) $(HOST_WARNINGS) -I. -I'$(QUIRC_DIR)' tests/qr_window_test.c $(QUIRC_FLAGS) $(QUIRC_SOURCES) -lm -o '$(BUILD_DIR)/qr-window-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/qr-window-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/qr-window-test' '$(BUILD_DIR)/z23-qr-dump' "$$scratch"
+
+test-scan:
+	@mkdir -p '$(BUILD_DIR)'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/scan_test.c scan.c fleet.c speech_client.c bridge_client.c voice.c ../../vendor/qrcodegen/qrcodegen.c $(SPEECH_JSON) -o '$(BUILD_DIR)/scan-test'
+	'$(BUILD_DIR)/scan-test'
 
 check-node:
 	@test -x '$(NODE_BIN)' || { echo 'Build the Android node first' >&2; exit 1; }
@@ -204,5 +224,3 @@ test-host:
 	'$(BUILD_DIR)/layout-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/home_test.c home.c layout.c hosts.c pairing.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test'
 	'$(BUILD_DIR)/home-test'
-	$(HOST_CC) $(HOST_WARNINGS) -DZAPP_Z23_TEST_PACKAGE $(SPEECH_INCLUDES) tests/home_test.c home.c layout.c hosts.c pairing.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/home-test-clips'
-	'$(BUILD_DIR)/home-test-clips'

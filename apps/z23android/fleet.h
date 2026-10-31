@@ -6,6 +6,8 @@
 /* Extracts a token or the exact manager-produced join command. This is only
  * a syntax check; the fleet command verifies the signature and expiry. */
 bool zapp_fleet_invite_text(const char *text, char *token, size_t cap);
+/* Whether c may appear in an invitation token. */
+bool zapp_fleet_invite_char(char c);
 /* Returns a heap-allocated 24-bit BMP for a public fleet receipt, or NULL. */
 unsigned char *zapp_fleet_qr_bmp(const char *text, size_t *size);
 #endif

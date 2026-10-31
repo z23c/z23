@@ -30,9 +30,11 @@ struct target { enum target_kind kind; size_t index; char id[ZAPP_NAME_CAP]; siz
 
 static struct {
     jobject activity, roots[SCREEN_COUNT];
-    jobject notice_view, status_view, scan_view, apps_list;
+    zapp_native_action send;
+    jobject notice_views[SCREEN_COUNT], outcome_view, status_view, scan_view, apps_list;
     enum screen current, before_scan;
-    bool preview, pair_seen, scan_dismissed, user_layout;
+    bool preview, pair_seen, scan_dismissed, user_layout, rendered;
+    unsigned scans_seen;
     struct zapp_layout *layout;
     char builtin[ZAPP_NAME_CAP], layout_notice[320], action_notice[160];
     char files[PATH_CAP], external[PATH_CAP];
@@ -147,7 +149,7 @@ static void release_cards(void)
 }
 static void refresh_apps(JNIEnv *env, bool icons)
 {
-    char text[512];
+    char text[ZAPP_APP_CARD_CAP];
     release_cards();
     zapp_launcher_release(env, shell.apps, ZAPP_LAUNCHER_MAX);
     size_t count = zapp_launcher_list(env, shell.activity, shell.apps, ZAPP_LAUNCHER_MAX, icons);
@@ -195,21 +197,30 @@ static jobject column(JNIEnv *env, uint32_t color, int padding_dp, bool horizont
         zj_int_property(env, view, "setBackgroundColor", (jint)color) && zj_padding(env, view, padding_dp, padding_dp);
     return ok ? view : NULL;
 }
-static jobject notice_bar(JNIEnv *env)
+static jobject bar(JNIEnv *env, uint32_t color)
 {
     jobject view = zj_widget(env, "android/widget/TextView", shell.activity);
     bool ok = view && zj_typography(env, view, 14.0f, (jint)WHITE) && zj_padding(env, view, 16, 10) &&
-        zj_int_property(env, view, "setBackgroundColor", (jint)0xff7a1f1fu) && zj_visible(env, view, false);
+        zj_int_property(env, view, "setBackgroundColor", (jint)color) && zj_visible(env, view, false);
     return ok ? view : NULL;
 }
-/* Notice bar, the layout's host, and a footer that always offers Apps and Settings. */
+/* A red notice bar at the top of a screen. */
+static bool add_notice(JNIEnv *env, jobject root, enum screen which)
+{
+    jobject notice = bar(env, 0xff7a1f1fu);
+    bool ok = notice && zj_append(env, root, notice) && zj_keep(env, &shell.notice_views[which], notice);
+    if (notice) (*env)->DeleteLocalRef(env, notice);
+    return ok;
+}
+/* Notice and scan outcome bars, the layout's host, and a footer that always offers Apps and Settings. */
 static bool build_home(JNIEnv *env, jobject root)
 {
     jobject host = zj_widget(env, "android/widget/FrameLayout", shell.activity);
-    jobject notice = notice_bar(env), footer = column(env, DARK, 8, true);
-    bool ok = host && notice && footer && zj_padding(env, host, 20, 24) && zj_margins(env, host, MATCH, 0, 1.0f, 0, 0, 0, 0) &&
-        zapp_surface_create(env, shell.activity, host) && zj_keep(env, &shell.notice_view, notice) &&
-        zj_append(env, root, notice) && zj_append(env, root, host) && zj_append(env, root, footer) &&
+    jobject outcome = bar(env, 0xff2b2b2bu), footer = column(env, DARK, 8, true);
+    bool ok = host && outcome && footer && add_notice(env, root, SCREEN_HOME) && zj_bool_property(env, outcome, "setTextIsSelectable", true) &&
+        zj_keep(env, &shell.outcome_view, outcome) && zj_padding(env, host, 20, 24) && zj_margins(env, host, MATCH, 0, 1.0f, 0, 0, 0, 0) &&
+        zapp_surface_create(env, shell.activity, host) &&
+        zj_append(env, root, outcome) && zj_append(env, root, host) && zj_append(env, root, footer) &&
         button(env, footer, "Apps", CMD_APPS, 0, 1) && button(env, footer, "Settings", CMD_SETTINGS, 0, 1);
     return ok;
 }
@@ -217,7 +228,7 @@ static bool build_apps(JNIEnv *env, jobject root)
 {
     jobject header = column(env, DARK, 0, true), scroll = zj_widget(env, "android/widget/ScrollView", shell.activity);
     jobject list = column(env, DARK, 8, false);
-    bool ok = header && scroll && list && button(env, header, "Home", CMD_HOME, 0, 1) &&
+    bool ok = header && scroll && list && add_notice(env, root, SCREEN_APPS) && button(env, header, "Home", CMD_HOME, 0, 1) &&
         button(env, header, "Android home settings", CMD_HOME_SETTINGS, 0, 2) && zj_append(env, root, header) &&
         zj_margins(env, scroll, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, scroll, list) && zj_append(env, root, scroll) &&
         zj_keep(env, &shell.apps_list, list);
@@ -226,7 +237,7 @@ static bool build_apps(JNIEnv *env, jobject root)
 static bool build_settings(JNIEnv *env, jobject root)
 {
     jobject status = zj_widget(env, "android/widget/TextView", shell.activity);
-    bool ok = label(env, root, "Home settings", 24.0f, WHITE) && status && zj_typography(env, status, 15.0f, (jint)0xffb0b0b0u) &&
+    bool ok = add_notice(env, root, SCREEN_SETTINGS) && label(env, root, "Home settings", 24.0f, WHITE) && status && zj_typography(env, status, 15.0f, (jint)0xffb0b0b0u) &&
         zj_append(env, root, status) && zj_keep(env, &shell.status_view, status);
     for (size_t i = 0; ok && i < zapp_home_layout_count(); ++i) {
         char text[ZAPP_NAME_CAP + 16];
@@ -301,7 +312,8 @@ static void set_text(JNIEnv *env, jobject view, const char *text)
 }
 static void show_notice(JNIEnv *env)
 {
-    set_text(env, shell.notice_view, shell.layout_notice[0] ? shell.layout_notice : shell.action_notice);
+    const char *text = shell.action_notice[0] ? shell.action_notice : shell.layout_notice;
+    for (int i = 0; i < SCREEN_COUNT; ++i) set_text(env, shell.notice_views[i], text);
 }
 static void settings_status(JNIEnv *env)
 {
@@ -310,31 +322,37 @@ static void settings_status(JNIEnv *env)
     else snprintf(text, sizeof(text), "Using the built-in %s layout.%s", shell.builtin, shell.layout_notice[0] ? " The layout file was not used." : "");
     (void)zj_text(env, shell.status_view, text);
 }
+/* Adds the list row of app i: its icon and label. False when the local reference frame could not open. */
+static bool add_app_row(JNIEnv *env, size_t i)
+{
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return false; }
+    jobject row = column(env, DARK, 4, true), icon = zj_widget(env, "android/widget/ImageView", shell.activity);
+    jmethodID set = icon ? zj_method(env, icon, "setImageDrawable", "(Landroid/graphics/drawable/Drawable;)V") : NULL;
+    if (set && shell.apps[i].icon) (*env)->CallVoidMethod(env, icon, set, shell.apps[i].icon);
+    bool ok = row && icon && zj_clean(env) && zj_margins(env, icon, zj_dp(40.0f), zj_dp(40.0f), 0.0f, 0, 0, 12, 0) &&
+        zj_int_property(env, row, "setGravity", 16) && zj_append(env, row, icon) &&
+        label(env, row, shell.apps[i].entry.label, 17.0f, WHITE) && zj_append(env, shell.apps_list, row) &&
+        zj_keep(env, &shell.rows[shell.row_count], row);
+    if (ok) ++shell.row_count;
+    (*env)->PopLocalFrame(env, NULL);
+    return true;
+}
 static void fill_apps(JNIEnv *env)
 {
     jmethodID clear = zj_method(env, shell.apps_list, "removeAllViews", "()V");
     if (clear) (*env)->CallVoidMethod(env, shell.apps_list, clear);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);
     shell.row_count = 0;
-    for (size_t i = 0; i < shell.app_count; ++i) {
-        if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return; }
-        jobject row = column(env, DARK, 4, true), icon = zj_widget(env, "android/widget/ImageView", shell.activity);
-        jmethodID set = icon ? zj_method(env, icon, "setImageDrawable", "(Landroid/graphics/drawable/Drawable;)V") : NULL;
-        if (set && shell.apps[i].icon) (*env)->CallVoidMethod(env, icon, set, shell.apps[i].icon);
-        bool ok = row && icon && zj_clean(env) && zj_margins(env, icon, zj_dp(40.0f), zj_dp(40.0f), 0.0f, 0, 0, 12, 0) &&
-            zj_int_property(env, row, "setGravity", 16) && zj_append(env, row, icon) &&
-            label(env, row, shell.apps[i].entry.label, 17.0f, WHITE) && zj_append(env, shell.apps_list, row) &&
-            zj_keep(env, &shell.rows[shell.row_count], row);
-        if (ok) ++shell.row_count;
-        (*env)->PopLocalFrame(env, NULL);
-    }
+    for (size_t i = 0; i < shell.app_count && add_app_row(env, i); ++i) {}
 }
 static void go(JNIEnv *env, enum screen next)
 {
     shell.current = next;
     shell.action_notice[0] = 0;
+    set_text(env, shell.outcome_view, "");
     if (next == SCREEN_APPS) { refresh_apps(env, true); fill_apps(env); }
     if (next == SCREEN_SETTINGS) settings_status(env);
+    if (next == SCREEN_SCAN) zapp_shell_immersive(env);
     for (int i = 0; i < SCREEN_COUNT; ++i) (void)zj_visible(env, shell.roots[i], i == (int)next);
     if (next == SCREEN_HOME) show_home(env);
     show_notice(env);
@@ -358,6 +376,7 @@ static void back(JNIEnv *env)
         zapp_camera_stop(); shell.scan_dismissed = true;
         go(env, shell.before_scan);
     } else if (shell.current != SCREEN_HOME) go(env, SCREEN_HOME);
+    else set_text(env, shell.outcome_view, "");
 }
 static void choose_layout(JNIEnv *env, size_t index)
 {
@@ -368,33 +387,41 @@ static void choose_layout(JNIEnv *env, size_t index)
     if (!shell.user_layout) adopt_builtin("");
     settings_status(env);
 }
+static void open_home_settings(JNIEnv *env)
+{
+    if (zapp_launcher_home_settings(env, shell.activity)) { set_text(env, shell.outcome_view, ""); return; }
+    snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not open Android settings.");
+    show_notice(env);
+}
 static void run_nav(JNIEnv *env, const struct nav *nav)
 {
     switch (nav->command) {
     case CMD_HOME: go(env, SCREEN_HOME); break;
     case CMD_APPS: go(env, SCREEN_APPS); break;
     case CMD_SETTINGS: go(env, SCREEN_SETTINGS); break;
-    case CMD_HOME_SETTINGS: (void)zapp_launcher_home_settings(env, shell.activity); break;
+    case CMD_HOME_SETTINGS: open_home_settings(env); break;
     case CMD_LAYOUT: choose_layout(env, nav->arg); break;
     case CMD_SCAN_CANCEL: back(env); break;
     }
 }
-static void launch(JNIEnv *env, const char *package, const char *name)
+static void launch(JNIEnv *env, const char *package, const char *activity, const char *name)
 {
-    if (zapp_launcher_start(env, shell.activity, package)) return;
+    if (zapp_launcher_start(env, shell.activity, package, activity)) { set_text(env, shell.outcome_view, ""); return; }
     snprintf(shell.action_notice, sizeof(shell.action_notice), "Could not open %.100s.", name);
     show_notice(env);
 }
 static void run_tile(JNIEnv *env, const struct target *target)
 {
-    char package[ZAPP_APP_PACKAGE_CAP] = "", name[ZAPP_APP_LABEL_CAP] = "";
-    if (!strcmp(target->id, "assistant")) go(env, SCREEN_ASSISTANT);
+    char package[ZAPP_APP_PACKAGE_CAP] = "", activity[ZAPP_APP_ACTIVITY_CAP] = "", name[ZAPP_APP_LABEL_CAP] = "";
+    if (!strcmp(target->id, "scan")) shell.send("scan", "");
+    else if (!strcmp(target->id, "assistant")) go(env, SCREEN_ASSISTANT);
     else if (!strcmp(target->id, "apps")) go(env, SCREEN_APPS);
     else if (!strcmp(target->id, "settings")) go(env, SCREEN_SETTINGS);
     else if (!strcmp(target->id, "launch") && target->card != ZAPP_NO_CARD && target->card > 0 &&
              target->card <= shell.app_count && zapp_card_field(&shell.app_cards[target->card - 1], "package", package, sizeof(package))) {
         (void)zapp_card_field(&shell.app_cards[target->card - 1], "label", name, sizeof(name));
-        launch(env, package, name);
+        (void)zapp_card_field(&shell.app_cards[target->card - 1], "activity", activity, sizeof(activity));
+        launch(env, package, activity, name);
     }
 }
 static bool find_target(JNIEnv *env, float x, float y, struct target *target)
@@ -420,7 +447,7 @@ static void tap(JNIEnv *env, float x, float y)
     memset(&shell.pressed, 0, sizeof(shell.pressed));
     if (before.kind == TARGET_NONE || !find_target(env, x, y, &now) || !same_target(&before, &now)) return;
     if (now.kind == TARGET_NAV) run_nav(env, &shell.navs[now.index]);
-    else if (now.kind == TARGET_ROW) launch(env, shell.apps[now.index].entry.package, shell.apps[now.index].entry.label);
+    else if (now.kind == TARGET_ROW) launch(env, shell.apps[now.index].entry.package, shell.apps[now.index].entry.activity, shell.apps[now.index].entry.label);
     else run_tile(env, &now);
 }
 static void touch(JNIEnv *env, const AInputEvent *event)
@@ -460,18 +487,37 @@ void zapp_shell_preview(JNIEnv *env, const unsigned char *bmp, size_t len)
 {
     if (shell.activity && shell.current == SCREEN_SCAN) (void)zj_bitmap(env, shell.scan_view, bmp, len);
 }
+/* After a scan: a fleet invitation opens the assistant with its review, a laptop pairing code opens its
+ * review, and anything else is shown on Home with its text. A cancelled scan never gets here. */
+static void finish_scan(JNIEnv *env, const struct zapp_view *view)
+{
+    char text[ZAPP_NOTICE_CAP + sizeof(view->scan_text) + 4];
+    enum zapp_scan_target target = zapp_home_scan_target(view->scan_kind, view->pair_offer[0] != 0);
+    if (target == ZAPP_SCAN_TO_PAIR_REVIEW) shell.pair_seen = true;
+    if (target != ZAPP_SCAN_TO_HOME) go(env, SCREEN_ASSISTANT);
+    if (target == ZAPP_SCAN_TO_FLEET_REVIEW) zapp_native_ui_open_details(env);
+    if (target != ZAPP_SCAN_TO_HOME) return;
+    snprintf(text, sizeof(text), "%s%s%s", view->result, view->scan_text[0] ? "\n\n" : "", view->scan_text);
+    go(env, SCREEN_HOME);
+    set_text(env, shell.outcome_view, text);
+}
+
 void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
 {
     if (!shell.activity || !view) return;
-    bool offer = view->pair_offer[0] != 0;
+    if (!shell.rendered) {
+        shell.rendered = true; shell.scans_seen = view->scans_done; shell.scan_dismissed = view->scanning;
+    }
+    bool finished = view->scans_done != shell.scans_seen, dismissed = shell.scan_dismissed;
+    shell.scans_seen = view->scans_done;
     if (view->scanning) {
-        if (shell.current != SCREEN_SCAN && !shell.scan_dismissed) { shell.before_scan = shell.current; go(env, SCREEN_SCAN); }
+        if (shell.current != SCREEN_SCAN && !dismissed) { shell.before_scan = shell.current; go(env, SCREEN_SCAN); }
     } else {
         shell.scan_dismissed = false;
         if (shell.current == SCREEN_SCAN) go(env, shell.before_scan);
+        if (finished && !dismissed) finish_scan(env, view);
     }
-    if (offer && !shell.pair_seen && shell.current != SCREEN_SCAN) go(env, SCREEN_ASSISTANT);
-    shell.pair_seen = offer;
+    if (zapp_home_offer_jump(view->pair_offer[0] != 0, shell.current == SCREEN_SCAN, &shell.pair_seen)) go(env, SCREEN_ASSISTANT);
     set_phone_card(view);
     show_home(env);
 }
@@ -491,7 +537,7 @@ void zapp_shell_destroy(JNIEnv *env)
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (*env)->DeleteGlobalRef(env, shell.roots[i]);
-    jobject *views[] = {&shell.notice_view, &shell.status_view, &shell.scan_view, &shell.apps_list};
+    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.outcome_view, &shell.status_view, &shell.scan_view, &shell.apps_list};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
     release_cards();
     zapp_launcher_release(env, shell.apps, ZAPP_LAUNCHER_MAX);
@@ -500,12 +546,12 @@ void zapp_shell_destroy(JNIEnv *env)
     (*env)->DeleteGlobalRef(env, shell.activity);
     memset(&shell, 0, sizeof(shell));
 }
-bool zapp_shell_create(JNIEnv *env, jobject activity, jobject assistant, bool preview)
+bool zapp_shell_create(JNIEnv *env, jobject activity, jobject assistant, zapp_native_action send, bool preview)
 {
     char layouts[PATH_CAP + 16];
-    if (shell.activity) return false;
+    if (shell.activity || !send) return false;
     shell.activity = (*env)->NewGlobalRef(env, activity);
-    shell.preview = preview;
+    shell.send = send; shell.preview = preview;
     if (!shell.activity || !directory(env, activity, "getFilesDir", "()Ljava/io/File;", shell.files, sizeof(shell.files))) goto fail;
     (void)directory(env, activity, "getExternalFilesDir", "(Ljava/lang/String;)Ljava/io/File;", shell.external, sizeof(shell.external));
     if (shell.external[0]) { snprintf(layouts, sizeof(layouts), "%s/layouts", shell.external); (void)mkdir(layouts, 0770); }
