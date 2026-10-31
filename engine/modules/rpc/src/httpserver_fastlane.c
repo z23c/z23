@@ -41,6 +41,7 @@ bool rpc_http_test_fastlane_allows(const char *method, const char *params_json)
     return ok;
 }
 
+#if !defined(_WIN32)
 /* Content-Length of the header block [buf, buf+hdr_len), or -1. */
 static long fastlane_content_length(const char *buf, size_t hdr_len)
 {
@@ -68,6 +69,7 @@ static bool fastlane_body_allowed(const char *body, size_t len)
     json_free(&request);
     return allowed;
 }
+#endif
 
 bool rpc_http_fastlane_conn_matches(const struct rpc_conn *conn)
 {
