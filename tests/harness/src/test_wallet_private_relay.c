@@ -888,13 +888,16 @@ static void wprt_peer_silence(struct wprt_fx *f, const struct uint256 *id,
 
 /* Not seen back: a different onion peer after the resend interval. */
 static void wprt_peer_resend(struct wprt_fx *f, struct p2p_node *first,
-                             bool ok, int *failures)
+                             const struct uint256 *id, bool ok, int *failures)
 {
-    wprt_run((int64_t)WPR_RESEND_AFTER_S * 1000 - 2000, -1);
+    /* The first push happened at a random moment of its 2 to 20 s delay, so
+     * the end of the resend interval is read from the entry, not assumed. */
+    int64_t left = wprt_due_delay(id);
+    ok = ok && left > 0 && left <= (int64_t)WPR_RESEND_AFTER_S * 1000;
+    wprt_run(left > 1000 ? left - 1000 : 0, -1);
     bool quiet = wprt_all(f, "tx") == 1;
-    /* Worst case: first push at the maximum delay, then the interval, then a
-     * second maximum delay. */
-    wprt_run(2000 + 2 * WPR_DELAY_MAX_MS + 5000, -1);
+    /* Then the rest of the interval and one maximum delay for the resend. */
+    wprt_run(1000 + WPR_DELAY_MAX_MS + 5000, -1);
     size_t after = wprt_all(f, "tx");
     struct p2p_node *second = NULL;
     bool eligible = wprt_pushed_to_eligible(f, first, &second);
@@ -928,7 +931,7 @@ static int wprt_case_one_peer_per_attempt(void)
     struct p2p_node *first = NULL;
     wprt_peer_first_attempt(&f, ok, &first, &failures);
     wprt_peer_silence(&f, &id, ok && first, &failures);
-    wprt_peer_resend(&f, first, ok, &failures);
+    wprt_peer_resend(&f, first, &id, ok, &failures);
     wprt_close(&f);
     return failures;
 }
