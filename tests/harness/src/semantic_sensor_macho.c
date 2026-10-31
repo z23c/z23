@@ -174,9 +174,76 @@ static int ssm_t_closure(void)
     return failures;
 }
 
+/* The dylib libzfxc returning `value` into <root>/<dir>. */
+static bool ssm_build_c(const char *root, const char *dir, int value)
+{
+    char src[PATH_MAX], dst[PATH_MAX], body[96];
+    (void)snprintf(src, sizeof(src), "%s/c_%s.c", root, dir);
+    (void)snprintf(dst, sizeof(dst), "%s/%s/libzfxc.dylib", root, dir);
+    (void)snprintf(body, sizeof(body), "int zfx_c(void) { return %d; }\n", value);
+    const char *argv[] = {"/usr/bin/cc", "-dynamiclib", "-o", dst, src,
+                          "-install_name", "@rpath/libzfxc.dylib", NULL};
+    (void)unlink(dst);
+    return ssm_write(src, body) && ssm_run(argv);
+}
+
+/* A driver with two LC_RPATH entries (lib1 then lib2), each holding a
+ * libzfxc of different bytes. */
+static bool ssm_setup_order(const char *root)
+{
+    char path[PATH_MAX], m_src[PATH_MAX], m_dst[PATH_MAX], lflag[PATH_MAX + 4];
+    const char *dirs[] = {"lib1", "lib2", "bin-m"};
+    for (size_t k = 0; k < 3; k++) {
+        (void)snprintf(path, sizeof(path), "%s/%s", root, dirs[k]);
+        if (!scx_mkdir(path))
+            return false;
+    }
+    (void)snprintf(path, sizeof(path), "%s/ssm.c", root);
+    (void)snprintf(m_src, sizeof(m_src), "%s/main.c", root);
+    (void)snprintf(m_dst, sizeof(m_dst), "%s/bin-m/cc", root);
+    (void)snprintf(lflag, sizeof(lflag), "-L%s/lib1", root);
+    const char *m_argv[] = {"/usr/bin/cc", "-o", m_dst, m_src, lflag, "-lzfxc",
+                            "-Wl,-rpath,@executable_path/../lib1",
+                            "-Wl,-rpath,@executable_path/../lib2", NULL};
+    return ssm_write(path, "int ssm_value(int x) { return x + 1; }\n") &&
+           ssm_build_c(root, "lib1", 1) && ssm_build_c(root, "lib2", 2) &&
+           ssm_write(m_src, "int zfx_c(void);\n"
+                            "int main(void) { return zfx_c() * 0; }\n") &&
+           ssm_run(m_argv);
+}
+
+static int ssm_t_rpath_order(void)
+{
+    int failures = 0;
+    char root[1024] = {0}, h[3][65];
+    uint8_t *m[3] = {0};
+    size_t n[3] = {0};
+    TEST_CASE("semantic_sensor: a Mach-O compiler's identity binds the first LC_RPATH hit") {
+        ASSERT(test_mkdtemp(root, sizeof(root), "semsensor_rpath") != NULL);
+        ASSERT(ssm_setup_order(root));
+        ASSERT(ssm_emit(root, 0, &m[0], &n[0]));
+        ASSERT(ssm_libs(m[0], n[0], h[0]));
+        /* The shadowed second entry's file is not the one dyld loads. */
+        ASSERT(ssm_build_c(root, "lib2", 3));
+        ASSERT(ssm_emit(root, 1, &m[1], &n[1]));
+        ASSERT(ssm_libs(m[1], n[1], h[1]));
+        ASSERT(strcmp(h[0], h[1]) == 0);
+        /* The first entry's file is. */
+        ASSERT(ssm_build_c(root, "lib1", 4));
+        ASSERT(ssm_emit(root, 2, &m[2], &n[2]));
+        ASSERT(ssm_libs(m[2], n[2], h[2]));
+        ASSERT(strcmp(h[0], h[2]) != 0);
+    } TEST_END
+    for (size_t k = 0; k < 3; k++)
+        free(m[k]);
+    if (root[0] != '\0')
+        (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
 int semantic_sensor_macho_tests(void)
 {
-    return ssm_t_closure();
+    return ssm_t_closure() + ssm_t_rpath_order();
 }
 #else
 int semantic_sensor_macho_tests(void)

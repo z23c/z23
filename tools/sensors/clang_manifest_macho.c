@@ -35,6 +35,8 @@ struct cmm_walk {
     char (*seen)[PATH_MAX]; /* realpaths already folded */
     char (*rp)[PATH_MAX];   /* expanded LC_RPATH entries, innermost last */
     size_t nseen, nrp;
+    size_t seg[CMM_MAX_DEPTH + 2]; /* start of each image's LC_RPATH run */
+    size_t nseg;
     char exec_dir[PATH_MAX];
 };
 
@@ -123,10 +125,15 @@ static enum cmm_where cmm_locate(const struct cmm_walk *w, const char *name,
                                  const char *loader_dir, char out[PATH_MAX])
 {
     if (strncmp(name, "@rpath/", 7) == 0) {
-        for (size_t k = w->nrp; k > 0; k--) {
-            int n = snprintf(out, PATH_MAX, "%s/%s", w->rp[k - 1], name + 7);
-            if (n > 0 && (size_t)n < PATH_MAX && cmm_is_file(out))
-                return CMM_ON_DISK;
+        /* dyld's order: this image's entries, then its loader's, up to the
+         * main executable; each image's entries in load-command order. */
+        for (size_t s = w->nseg; s > 0; s--) {
+            size_t end = s == w->nseg ? w->nrp : w->seg[s];
+            for (size_t k = w->seg[s - 1]; k < end; k++) {
+                int n = snprintf(out, PATH_MAX, "%s/%s", w->rp[k], name + 7);
+                if (n > 0 && (size_t)n < PATH_MAX && cmm_is_file(out))
+                    return CMM_ON_DISK;
+            }
         }
         return CMM_NOWHERE;
     }
@@ -238,11 +245,17 @@ static bool cmm_slice(struct cmm_walk *w, FILE *fp, long base,
     cmds = zcl_malloc((size_t)h[5] + 1, "clang_manifest.macho_cmds");
     if (cmds == NULL)
         return false;
+    if (w->nseg >= sizeof(w->seg) / sizeof(w->seg[0])) {
+        free(cmds);
+        return false;
+    }
+    w->seg[w->nseg++] = mark;
     ok = fread(cmds, 1, h[5], fp) == h[5] &&
          cmm_push_rpaths(w, cmds, h[5], h[4], loader_dir) &&
          cmm_dependencies(w, cmds, h[5], h[4], loader_dir, depth);
     free(cmds);
     w->nrp = mark;
+    w->nseg--;
     return ok;
 }
 
@@ -313,6 +326,7 @@ static bool cmm_root(struct cmm_walk *w, const char *path)
     if (realpath(path, real) == NULL || !cmm_dir_of(real, w->exec_dir))
         return false;
     w->nrp = 0;
+    w->nseg = 0;
     return cmm_visit(w, real, 0);
 }
 
