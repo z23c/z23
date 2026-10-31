@@ -18,6 +18,7 @@
 #include "util/spawn.h"
 #include "zutf8/zutf8.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -139,6 +140,24 @@ static bool dvx_fixture(const char *dir)
 }
 
 int test_devagent_hot(void);
+/* Seed a file the call must refuse and name the refusal expected for it. APFS
+ * refuses a non-UTF-8 file name (EILSEQ), so that file cannot exist and the
+ * call is refused as an absent file instead of as bad input. */
+static bool dvx_seed_refused(const char *root, const char *name,
+                             const char **want_code)
+{
+    *want_code = "BAD_INPUT";
+    if (dvx_write(root, name, "/* unresolved */\n"))
+        return true;
+#if defined(__APPLE__)
+    if (errno == EILSEQ && !zutf8_validate_n(name, strlen(name))) {
+        *want_code = "FILE_NOT_FOUND";
+        return true;
+    }
+#endif
+    return false;
+}
+
 int test_devagent_hot(void)
 {
     int failures = 0;
@@ -225,12 +244,13 @@ int test_devagent_hot(void)
         const char *refused[] = {"a\xff.c", "a'b.c", expanded};
         for (size_t i = 0; i < 3; i++) {
             struct dvx_call c;
-            ASSERT(dvx_write(root, refused[i], "/* unresolved */\n"));
+            const char *want_code;
+            ASSERT(dvx_seed_refused(root, refused[i], &want_code));
             dvx_begin(&c);
             (void)json_push_kv_str(&c.input, "cwd", root);
             (void)json_push_kv_str(&c.input, "path", refused[i]);
             ASSERT(dvx_run(&c) && !dvx_ok(&c) && dvx_arr(&c, "next") == NULL);
-            ASSERT_STR_EQ(c.reply.error.code, "BAD_INPUT");
+            ASSERT_STR_EQ(c.reply.error.code, want_code);
             dvx_end(&c);
         }
         PASS();
