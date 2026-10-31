@@ -362,20 +362,24 @@ static bool refuse(struct mcp_refusal *why, const char *code,
 /* Accept the CLI spelling of a path ("dev land status", "z23 dev land
  * status") as well as the dotted one: agents copy commands from the manual
  * and got UNKNOWN_COMMAND (10-31). Returns path unchanged when it has no
- * blank, or the dotted form in s->cli_path. */
+ * blank, the dotted form in s->cli_path, or "" (which no command matches)
+ * when the dotted form would not fit: a truncated prefix may name a real
+ * command, so it must never be returned. */
 static const char *cli_spelling(struct mcp_serve *s, const char *path)
 {
     if (!path || !strpbrk(path, " \t"))
         return path;
     path += strspn(path, " \t");
-    if (!strncmp(path, "z23 ", 4))
-        path += 4;
+    if (!strncmp(path, "z23", 3) && (path[3] == ' ' || path[3] == '\t'))
+        path += 3 + strspn(path + 3, " \t");
     size_t n = 0;
     /* Each pass starts on a non-blank byte, so every word is non-empty. */
     for (const char *p = path; *p; p += strspn(p, " \t")) {
         size_t word = strcspn(p, " \t");
-        if (n + (n > 0) + word >= sizeof(s->cli_path))
-            break; /* too long for a path: let the lookup refuse it */
+        if (n + (n > 0) + word >= sizeof(s->cli_path)) {
+            s->cli_path[0] = '\0';
+            return s->cli_path;
+        }
         if (n)
             s->cli_path[n++] = '.';
         memcpy(s->cli_path + n, p, word);

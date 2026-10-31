@@ -522,6 +522,29 @@ static int case_cli_spelling(struct ms *m)
         ASSERT(has(m, "core.status.brief"));
         ASSERT(ms_tool(m, 46, "z23_run", "{\"path\":\"no such leaf\"}"));
         ASSERT(has(m, "UNKNOWN_COMMAND"));
+        ASSERT(ms_tool(m, 47, "z23_describe",
+                       "{\"path\":\"z23\\tdiscover search\"}"));
+        ASSERT(has(m, "\"isError\":false"));
+        ASSERT(has(m, "input_schema"));
+    } TEST_END
+    return failures;
+}
+
+static int case_cli_spelling_too_long(struct ms *m)
+{
+    int failures = 0;
+    TEST_CASE("a CLI path too long to convert is refused, never truncated") {
+        /* "discover search" then a word that overflows the path buffer: a
+         * truncated conversion would run discover.search. */
+        char args[400], tail[200]; /* longer than ZCL_COMMAND_MAX_PATH (128) */
+        memset(tail, 'x', sizeof(tail) - 1);
+        tail[sizeof(tail) - 1] = '\0';
+        (void)snprintf(args, sizeof(args),
+                       "{\"path\":\"discover search %s\",\"input\":"
+                       "{\"query\":\"status brief\"}}", tail);
+        ASSERT(ms_tool(m, 48, "z23_run", args));
+        ASSERT(has(m, "UNKNOWN_COMMAND"));
+        ASSERT(!has(m, "core.status.brief"));
     } TEST_END
     return failures;
 }
@@ -1046,6 +1069,7 @@ static int case_session(const char *home, const char *checkout)
     failures += case_list(&m);
     failures += case_read_leaf(&m);
     failures += case_cli_spelling(&m);
+    failures += case_cli_spelling_too_long(&m);
     failures += case_refusals(&m);
     failures += case_plan_commit(&m, home, checkout);
     failures += case_budget(&m);
