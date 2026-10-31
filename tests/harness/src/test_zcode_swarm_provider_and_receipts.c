@@ -663,8 +663,23 @@ static int rebind_case_bound_lift_io(struct sw_node *n, struct sw_pkg *p,
     return failures;
 }
 
-/* Ordinary work, then a restricted (fetch_from) rebind whose record write
- * fails: the caller learns RECORD_IO and the durable record stays unrestricted
+/* True when root is listed as unrestricted work awaiting providers; a
+ * provider-restricted download is never listed. */
+static bool rebind_unrestricted_in_memory(const struct sw_node *n,
+                                          const uint8_t root[32])
+{
+    uint8_t roots[VCS_SWARM_MAX_DOWNLOADS][32];
+    size_t count = vcs_swarm_engine_unadvertised_roots(
+        n->engine, roots, VCS_SWARM_MAX_DOWNLOADS);
+    for (size_t i = 0; i < count; i++)
+        if (memcmp(roots[i], root, 32) == 0)
+            return true;
+    return false;
+}
+
+/* Unannounced ordinary work, then a restricted (fetch_from) rebind whose
+ * record write fails: the caller learns RECORD_IO, the live download keeps
+ * its unrestricted provider set, and the durable record stays unrestricted
  * after a restart. */
 static int rebind_case_restricted_io(struct sw_node *n, struct sw_pkg *p,
                                      uint64_t peer)
@@ -675,12 +690,16 @@ static int rebind_case_restricted_io(struct sw_node *n, struct sw_pkg *p,
     SW_CHECK("rebind io: ordinary work starts",
              vcs_swarm_engine_fetch(n->engine, p->root, SW_DAY, 3) ==
                  VCS_SWARM_FETCH_OK);
+    SW_CHECK("rebind io: ordinary work awaits any provider",
+             rebind_unrestricted_in_memory(n, p->root));
     SW_CHECK("rebind io: block record writes again",
              rebind_set_downloads_mode(n, 0500));
     SW_CHECK("rebind io: restricted rebind reports record I/O",
              vcs_swarm_engine_fetch_from(n->engine, p->root, SW_DAY, 4,
                                          &peer, 1) ==
                  VCS_SWARM_FETCH_RECORD_IO);
+    SW_CHECK("rebind io: memory keeps the unrestricted provider set",
+             rebind_unrestricted_in_memory(n, p->root));
     SW_CHECK("rebind io: restore record writes after restricted",
              rebind_set_downloads_mode(n, 0700));
     rebind_restart(n);
@@ -699,15 +718,19 @@ static int rebind_case_record_io(void)
         return 0;
     }
     int failures = 0;
-    struct sw_node n;
-    /* Zeroed so a build that fails partway, or never runs, frees safely. */
+    /* Zeroed so a node or package that fails partway, or never starts,
+     * frees safely. */
+    struct sw_node n = {0};
     struct sw_pkg scout = {0}, ordinary = {0};
     uint8_t key[33];
     sw_key(96, key);
     const uint64_t peer = 906;
     const uint64_t bound = 1;
-    if (!sw_node_open(&n, "rebind_io", sw_score_contributor))
+    if (!sw_node_open(&n, "rebind_io", sw_score_contributor)) {
+        sw_node_close(&n);
+        test_rm_rf_recursive(n.datadir);
         return 1;
+    }
     /* 1-file roots are seed-blind, so the ordinary package has two. */
     if (!sw_make_package(&scout, 1, 36) ||
         !sw_make_package(&ordinary, 2, 37)) {
@@ -721,7 +744,8 @@ static int rebind_case_record_io(void)
              vcs_swarm_engine_peer_add(n.engine, peer, key));
     sw_announce(n.engine, peer, &scout);
     failures += rebind_case_bound_lift_io(&n, &scout, peer, bound);
-    sw_announce(n.engine, peer, &ordinary);
+    /* Ordinary stays unannounced: only unrestricted work with no live
+     * advertiser is listed, which is what makes the rollback visible. */
     failures += rebind_case_restricted_io(&n, &ordinary, peer);
     (void)rebind_set_downloads_mode(&n, 0700);
 
