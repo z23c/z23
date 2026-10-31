@@ -3080,6 +3080,17 @@ static int test_runner_group_home_is_private(void)
         GetDefaultDataDirUnder(home, under_home, sizeof(under_home));
         ASSERT(strcmp(under_home, canonical) != 0);
 
+#if defined(__APPLE__)
+        /* Darwin's default datadir sits two levels under HOME, and the datadir
+         * creator makes one level only; a real login HOME already has them. */
+        {
+            char lib[PATH_MAX];
+            snprintf(lib, sizeof(lib), "%s/Library", home);
+            ASSERT(mkdir(lib, 0700) == 0 || errno == EEXIST);
+            snprintf(lib, sizeof(lib), "%s/Library/Application Support", home);
+            ASSERT(mkdir(lib, 0700) == 0 || errno == EEXIST);
+        }
+#endif
         /* The un-pinned default datadir resolves under the private HOME. */
         char resolved[PATH_MAX];
         ASSERT(SetDataDir(""));
