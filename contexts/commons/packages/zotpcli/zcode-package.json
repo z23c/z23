@@ -24,7 +24,7 @@
     },
     {
       "name": "zbuf/zbuf",
-      "root": "fddbcc04ca70a8bb8a7c7489c43fa79f43a1b0e4285a6b2822f1abc35a48f00e",
+      "root": "2d06cf75dd3ffb022e12000172720b39050f77747ac5a7730b51e4bab1d432b7",
       "semver": "0.1.0"
     },
     {
@@ -44,7 +44,7 @@
     },
     {
       "name": "zjson/zjson",
-      "root": "18335d4eccd4d7adc6f8ed1ede781ec4b3ea290aa72ee84582fd020d5b3a3f2b",
+      "root": "439cecc343abbd8c6e82c416b3cd4a67e07a3b5cb1d454b18975eb875f84a1b3",
       "semver": "0.1.0"
     },
     {
