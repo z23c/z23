@@ -6,6 +6,7 @@
 #if !defined(ZCL_TESTING) || !defined(ZCL_RPC_COMPOSER_TEST)
 #include "main_cli_modes.h"
 #include "rpc/client.h"
+#include "base/safe_alloc.h"
 #include "util/ar_step_readonly.h"
 #include <sqlite3.h>
 #include <stdio.h>
@@ -177,7 +178,7 @@ static bool repair_utxos_scan_height(sqlite3 *db, sqlite3_stmt *ins, int port,
     /* Get block with full tx data */
     char bparams[128];
     snprintf(bparams, sizeof(bparams), "[\"%s\",2]", bhash);
-    char *bbuf = malloc(2*1024*1024); /* 2MB for block data */
+    char *bbuf = zcl_malloc(2*1024*1024, "repair_utxos_block"); /* 2MB for block data */
     if (!bbuf) return false;
     int brc = rpc_call_local(port, creds, "getblock", bparams, bbuf, 2*1024*1024);
     if (brc <= 0) { free(bbuf); return false; }
