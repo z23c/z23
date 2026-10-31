@@ -176,11 +176,10 @@ static unsigned char ascii_fold(unsigned char c)
     return c >= 'A' && c <= 'Z' ? (unsigned char)(c + ('a' - 'A')) : c;
 }
 
-/* Case-insensitive substring over ASCII letters only; every other byte
- * compares exactly. */
-static bool contains_folded(const char *hay, const char *needle)
+/* Case-insensitive substring (the first nl bytes of needle) over ASCII
+ * letters only; every other byte compares exactly. */
+static bool contains_folded_n(const char *hay, const char *needle, size_t nl)
 {
-    size_t nl = strlen(needle);
     if (nl == 0)
         return true;
     for (; *hay; hay++) {
@@ -195,45 +194,99 @@ static bool contains_folded(const char *hay, const char *needle)
     return false;
 }
 
-static bool applies_to_matches(const struct json_value *entry, const char *needle)
+/* One blank-separated word of a query. */
+struct wiki_word {
+    const char *p;
+    size_t n;
+};
+
+static bool word_in(const char *hay, struct wiki_word w)
+{
+    return hay && contains_folded_n(hay, w.p, w.n);
+}
+
+
+static bool applies_to_matches(const struct json_value *entry,
+                               struct wiki_word w)
 {
     const struct json_value *applies = json_get(entry, "applies_to");
     for (size_t i = 0; applies && i < json_size(applies); i++)
-        if (contains_folded(json_get_str(json_at(applies, i)), needle))
+        if (word_in(json_get_str(json_at(applies, i)), w))
             return true;
     return false;
 }
 
 static bool lesson_field_matches(const struct json_value *entry,
-                                 const char *key, const char *needle)
+                                 const char *key, struct wiki_word w)
 {
     const struct json_value *lessons = json_get(entry, "lessons");
     for (size_t i = 0; lessons && i < json_size(lessons); i++)
-        if (contains_folded(json_get_str(json_get(json_at(lessons, i), key)),
-                            needle))
+        if (word_in(json_get_str(json_get(json_at(lessons, i), key)), w))
             return true;
     return false;
+}
+
+/* The fields a query searches, in their fixed reporting order: an entry's
+ * slug, topic, summary, applies_to, rule and why, or a plain page's slug,
+ * title and summary. */
+struct wiki_fields {
+    const struct json_value *entry; /* NULL for a plain page */
+    const char *slug, *title, *summary;
+};
+
+/* Bit i set when field i holds w. */
+static unsigned word_bits(const struct wiki_fields *f, struct wiki_word w)
+{
+    unsigned bits = word_in(f->slug, w) ? 1u : 0u;
+    if (!f->entry)
+        return bits | (word_in(f->title, w) ? 2u : 0u) |
+               (word_in(f->summary, w) ? 4u : 0u);
+    return bits |
+           (word_in(json_get_str(json_get(f->entry, "topic")), w) ? 2u : 0u) |
+           (word_in(json_get_str(json_get(f->entry, "summary")), w) ? 4u : 0u) |
+           (applies_to_matches(f->entry, w) ? 8u : 0u) |
+           (lesson_field_matches(f->entry, "rule", w) ? 16u : 0u) |
+           (lesson_field_matches(f->entry, "why", w) ? 32u : 0u);
+}
+
+/* The fields holding any word of needle, as bits in reporting order; 0 when
+ * needle has no word or some word is in no field. So several words match
+ * only an entry that holds every one of them, in any of its fields. */
+static unsigned all_words_bits(const struct wiki_fields *f, const char *needle)
+{
+    unsigned all = 0;
+    for (const char *p = needle + strspn(needle, " \t"); *p;
+         p += strspn(p, " \t")) {
+        struct wiki_word w = {p, strcspn(p, " \t")};
+        unsigned bits = word_bits(f, w);
+        if (bits == 0)
+            return 0;
+        all |= bits;
+        p += w.n;
+    }
+    return all;
+}
+
+static size_t bit_names(unsigned bits, const char *const *names, size_t count,
+                        const char **out)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < count; i++)
+        if (bits & (1u << i))
+            out[n++] = names[i];
+    return n;
 }
 
 size_t fleet_wiki_entry_matched_fields(const struct json_value *entry,
     const char *slug, const char *needle, const char *out[FLEET_WIKI_MATCH_FIELDS])
 {
-    size_t n = 0;
-    if (!entry || !needle || !needle[0])
+    static const char *const names[FLEET_WIKI_MATCH_FIELDS] = {
+        "slug", "topic", "summary", "applies_to", "rule", "why"};
+    struct wiki_fields f = {.entry = entry, .slug = slug};
+    if (!entry || !needle)
         return 0;
-    if (slug && contains_folded(slug, needle))
-        out[n++] = "slug";
-    if (contains_folded(json_get_str(json_get(entry, "topic")), needle))
-        out[n++] = "topic";
-    if (contains_folded(json_get_str(json_get(entry, "summary")), needle))
-        out[n++] = "summary";
-    if (applies_to_matches(entry, needle))
-        out[n++] = "applies_to";
-    if (lesson_field_matches(entry, "rule", needle))
-        out[n++] = "rule";
-    if (lesson_field_matches(entry, "why", needle))
-        out[n++] = "why";
-    return n;
+    return bit_names(all_words_bits(&f, needle), names,
+                     FLEET_WIKI_MATCH_FIELDS, out);
 }
 
 void fleet_wiki_plain_summary(const char *text, size_t len,
@@ -254,16 +307,11 @@ void fleet_wiki_plain_summary(const char *text, size_t len,
 size_t fleet_wiki_page_matched_fields(const char *slug, const char *title,
     const char *summary, const char *needle, const char *out[3])
 {
-    size_t n = 0;
-    if (!needle || !needle[0])
+    static const char *const names[3] = {"slug", "title", "summary"};
+    struct wiki_fields f = {.slug = slug, .title = title, .summary = summary};
+    if (!needle)
         return 0;
-    if (slug && contains_folded(slug, needle))
-        out[n++] = "slug";
-    if (title && contains_folded(title, needle))
-        out[n++] = "title";
-    if (summary && contains_folded(summary, needle))
-        out[n++] = "summary";
-    return n;
+    return bit_names(all_words_bits(&f, needle), names, 3, out);
 }
 
 bool fleet_wiki_entry_matches(const struct json_value *entry,
@@ -291,11 +339,13 @@ bool fleet_wiki_entry_query_matches(const struct json_value *entry,
     const struct fleet_wiki_entry_query *query)
 {
     if (!entry || !query || !query->q) return false;
+    const char *fields[FLEET_WIKI_MATCH_FIELDS];
     if (query->topic && query->topic[0] &&
         strcmp(json_get_str(json_get(entry, "topic")), query->topic)) return false;
     return wiki_query_applies(entry, query->applies_to) &&
-        (fleet_wiki_entry_matches(entry, query->q) ||
-         (query->slug && query->slug[0] && contains_folded(query->slug, query->q)));
+        (!query->q[0] ||
+         fleet_wiki_entry_matched_fields(entry, query->slug, query->q,
+                                         fields) > 0);
 }
 
 static const char *review_violation(const struct json_value *root)

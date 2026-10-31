@@ -153,6 +153,23 @@ static bool confirmation_allows(const struct zcl_command_spec *spec,
     }
 }
 
+bool mcp_policy_fleet_write(const struct zcl_command_spec *spec)
+{
+    static const char *const leaves[] = {"fleet.board.post", "fleet.wiki.write",
+                                         "fleet.bundle.offer",
+                                         "fleet.bundle.fetch"};
+    if (!spec || spec->mode == ZCL_COMMAND_MODE_BRANCH ||
+        spec->effect != ZCL_COMMAND_EFFECT_MUTATE ||
+        spec->risk != ZCL_COMMAND_RISK_APP_WRITE ||
+        spec->authority == ZCL_COMMAND_AUTH_OWNER ||
+        spec->layer == ZCL_COMMAND_LAYER_CORE)
+        return false;
+    for (size_t i = 0; i < sizeof(leaves) / sizeof(leaves[0]); i++)
+        if (strcmp(spec->path, leaves[i]) == 0)
+            return true;
+    return false;
+}
+
 bool mcp_policy_allows(const struct zcl_command_spec *spec,
                        const struct zcl_command_registry *registry,
                        const struct json_value *input,

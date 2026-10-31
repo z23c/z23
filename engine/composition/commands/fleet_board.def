@@ -184,10 +184,11 @@ ZCL_COMMAND_READY_READ(
     "fleet.wiki.find", "fleet.wiki", "",
     "Find structured knowledge entries",
     "Read-only and local: never contacts a peer and never waits. Returns at "
-    "most 8 results. A valid entry (kind `entry`) matches when its topic, "
-    "applies_to, summary, slug or lesson rule or why contains `q`; a plain-text "
-    "page (kind `page`) matches on its slug, title or first line (its summary, "
-    "at most 120 bytes). `q` is ASCII case-insensitive, at most 128 bytes; an "
+    "most 8 results. A valid entry (kind `entry`) matches when every "
+    "blank-separated word of `q` is in its topic, applies_to, summary, slug or "
+    "a lesson rule or why (the words may sit in different fields); a "
+    "plain-text page (kind `page`) searches its slug, title and first line (its "
+    "summary, at most 120 bytes). `q` is ASCII case-insensitive, at most 128 bytes; an "
     "empty `q` matches all. Each result has a `matched` array naming the "
     "matching fields (slug, topic, title, summary, applies_to, rule, why; empty "
     "for an empty `q`). Optional exact topic and applies_to filters (1..64 "

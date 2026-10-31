@@ -134,9 +134,24 @@ void mcp_reply_tool_text(struct mcp_buf *b, const struct json_value *id,
  *   {"truncated":true,"original_bytes":N,"partial":"<escaped prefix>"}
  * when text is a JSON object (its first non-space byte is '{'); otherwise
  * the raw prefix followed by "\n[truncated: N bytes total]". Returns true
- * when it truncated. A prefix never splits a UTF-8 sequence. */
+ * when it truncated. A prefix never splits a UTF-8 sequence. When the object
+ * parses and has a `data` object, "fields" follows original_bytes: the
+ * serialized size of each data member (at most 32), so the caller can pick a
+ * select instead of reading an escaped prefix. */
 bool mcp_cap_text(struct mcp_buf *out, const char *text, size_t n,
                   size_t max_bytes);
+
+/* select: an array of 1..8 dot paths, each 1..128 bytes, whose segments are
+ * object keys, decimal array indexes or `*` (every element of an array).
+ * False names the problem in *why. */
+bool mcp_select_valid(const struct json_value *select, const char **why);
+
+/* Project a command reply onto a valid select:
+ *   {"ok":..,"status":..,"select":{"<path>":<value>,..}}
+ * with null where a path does not resolve. False, with out untouched, when
+ * text is not a JSON object. */
+bool mcp_select_reply(struct mcp_buf *out, const char *text, size_t n,
+                      const struct json_value *select);
 
 #ifdef __cplusplus
 }

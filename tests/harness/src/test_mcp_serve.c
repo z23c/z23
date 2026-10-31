@@ -580,6 +580,38 @@ static int case_budget(struct ms *m)
     return failures;
 }
 
+static int case_select(struct ms *m)
+{
+    int failures = 0;
+    TEST_CASE("select projects a reply; a truncated reply lists its data fields") {
+        ASSERT(ms_tool(m, 40, "z23_run",
+                       "{\"path\":\"discover.search\",\"input\":{\"query\":"
+                       "\"status brief\"},\"select\":[\"data.matches.*.path\","
+                       "\"data.matches.0.risk\",\"data.nope\"]}"));
+        ASSERT(has(m, "\"isError\":false"));
+        ASSERT(has(m, "data.matches.*.path\\\":[\\\"core.status.brief\\\""));
+        ASSERT(has(m, "data.matches.0.risk\\\":\\\"read\\\""));
+        ASSERT(has(m, "data.nope\\\":null"));
+        ASSERT(!has(m, "registry_digest"));
+        ASSERT(ms_tool(m, 41, "z23_run",
+                       "{\"path\":\"discover.search\",\"input\":{\"query\":"
+                       "\"status\"},\"select\":\"data\"}"));
+        ASSERT(has(m, "BAD_SELECT"));
+        ASSERT(has(m, "\"isError\":true"));
+        ASSERT(ms_tool(m, 42, "z23_run",
+                       "{\"path\":\"discover.search\",\"input\":{\"query\":"
+                       "\"status\"},\"select\":[\"data..count\"]}"));
+        ASSERT(has(m, "BAD_SELECT"));
+        ASSERT(ms_tool(m, 43, "z23_run",
+                       "{\"path\":\"discover.search\",\"input\":{\"query\":"
+                       "\"status\"},\"budget_bytes\":512}"));
+        ASSERT(has(m, "original_bytes"));
+        ASSERT(has(m, "fields\\\":{\\\"data.schema\\\":"));
+        ASSERT(has(m, "\\\"data.matches\\\":"));
+    } TEST_END
+    return failures;
+}
+
 static int case_code(struct ms *m)
 {
     int failures = 0;
@@ -919,6 +951,44 @@ static int case_policy_mutations(void)
     return failures;
 }
 
+static int case_policy_fleet_write(void)
+{
+    int failures = 0;
+    TEST_CASE("only the four fleet writes pass the --fleet-writes check") {
+        static const char *const listed[] = {"fleet.board.post",
+                                             "fleet.wiki.write",
+                                             "fleet.bundle.offer",
+                                             "fleet.bundle.fetch"};
+        struct zcl_command_spec spec;
+        for (size_t i = 0; i < 4; i++) {
+            ms_mut_spec(&spec, listed[i], "kind,text", ZCL_COMMAND_CONFIRM_NONE);
+            ASSERT(mcp_policy_fleet_write(&spec));
+            /* The plain policy still refuses them: the flag is the only door. */
+            ASSERT(ms_policy_code(&spec, "{}", "MUTATION_NO_CONFIRMATION_FLOW"));
+        }
+        ms_mut_spec(&spec, "fleet.steer.grant", "", ZCL_COMMAND_CONFIRM_NONE);
+        ASSERT(!mcp_policy_fleet_write(&spec));
+        ms_mut_spec(&spec, "dev.fleet.ship", "", ZCL_COMMAND_CONFIRM_NONE);
+        spec.risk = ZCL_COMMAND_RISK_DEV_MUTATION;
+        ASSERT(!mcp_policy_fleet_write(&spec));
+        /* A listed leaf that is reclassified falls back to the plain policy. */
+        ms_mut_spec(&spec, "fleet.board.post", "", ZCL_COMMAND_CONFIRM_NONE);
+        spec.authority = ZCL_COMMAND_AUTH_OWNER;
+        ASSERT(!mcp_policy_fleet_write(&spec));
+        ms_mut_spec(&spec, "fleet.board.post", "", ZCL_COMMAND_CONFIRM_NONE);
+        spec.layer = ZCL_COMMAND_LAYER_CORE;
+        ASSERT(!mcp_policy_fleet_write(&spec));
+        ms_mut_spec(&spec, "fleet.wiki.write", "", ZCL_COMMAND_CONFIRM_NONE);
+        spec.risk = ZCL_COMMAND_RISK_WALLET;
+        ASSERT(!mcp_policy_fleet_write(&spec));
+        ms_mut_spec(&spec, "fleet.bundle.fetch", "", ZCL_COMMAND_CONFIRM_NONE);
+        spec.effect = ZCL_COMMAND_EFFECT_DESTRUCTIVE;
+        ASSERT(!mcp_policy_fleet_write(&spec));
+        ASSERT(!mcp_policy_fleet_write(NULL));
+    } TEST_END
+    return failures;
+}
+
 static int case_policy_idempotency(void)
 {
     int failures = 0;
@@ -959,6 +1029,7 @@ static int case_session(const char *home, const char *checkout)
     failures += case_refusals(&m);
     failures += case_plan_commit(&m, home, checkout);
     failures += case_budget(&m);
+    failures += case_select(&m);
     failures += case_code(&m);
     failures += case_malformed(&m);
     failures += case_nul_frame(&m);
@@ -1004,24 +1075,28 @@ static int ms_stub_entry(char *out, size_t cap, const char *slug, int n)
     return ms_stub_entry_at(out, cap, slug, n, "2026-10-12T09:00:00Z");
 }
 
-/* The "wikidir" directory query in three pages, the newest entry on the
- * last: page one has no after_slug in its request, page two resumes from
- * dir-d, page three from dir-f. */
+/* The "wikidir" directory query in pages, the newest entry on the last:
+ * page one has no after_slug in its request, then dir-d resumes at dir-e,
+ * dir-e at dir-f, and dir-f reaches dir-new, the end. The whole query
+ * "wikidir dir-new" stands in for the leaf's every-word match: the same three
+ * pages, the first two empty, so only dir-new matches. */
 static int ms_stub_pages(char *body, size_t cap, const char *req)
 {
     static const char *const first[] = {"dir-a", "dir-b", "dir-c", "dir-d"};
     static const char *const second[] = {"dir-e", "dir-f"};
+    bool only_new = strstr(req, "wikidir dir-new") != NULL;
     const char *after = "";
     int n = snprintf(body, cap,
         "{\"result\":{\"ok\":true,\"identity_schema\":\"zcl.fleet_wiki_revision.v1\","
         "\"query_schema\":\"zcl.fleet_wiki_query.v1\",\"entries\":[");
     if (strstr(req, "after_slug") == NULL) {
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 4 && !only_new; i++)
             n += ms_stub_entry(body + n, cap - (size_t)n, first[i], i);
         after = "dir-d";
-    } else if (strstr(req, "dir-f") == NULL) {
-        for (int i = 0; i < 2; i++)
-            n += ms_stub_entry(body + n, cap - (size_t)n, second[i], i);
+    } else if (strstr(req, "dir-d") || strstr(req, "dir-e")) {
+        for (int i = strstr(req, "dir-e") ? 1 : 0, k = 0; i < 2 && !only_new;
+             i++, k++)
+            n += ms_stub_entry(body + n, cap - (size_t)n, second[i], k);
         after = "dir-f";
     } else {
         n += ms_stub_entry_at(body + n, cap - (size_t)n, "dir-new", 0,
@@ -1033,6 +1108,14 @@ static int ms_stub_pages(char *body, size_t cap, const char *req)
         "\"reason\":\"exhausted\"},\"error\":null,\"id\":1}",
         after[0] ? "true" : "false", after);
 }
+
+/* A verification-budget page: more to read, but the cursor cannot move. */
+static const char ms_stub_blocked[] =
+    "{\"result\":{\"ok\":true,\"identity_schema\":\"zcl.fleet_wiki_revision.v1\","
+    "\"query_schema\":\"zcl.fleet_wiki_query.v1\",\"entries\":[],\"returned\":0,"
+    "\"scanned\":0,\"verified\":0,\"truncated\":true,\"incomplete\":true,"
+    "\"after_slug\":\"\",\"blocked_slug\":\"blk-a\",\"reason\":"
+    "\"verification_budget\"},\"error\":null,\"id\":1}";
 
 /* The body for one request: a query naming native_command finds one stem
  * lesson, a query naming tools finds six directory lessons, any other query
@@ -1046,6 +1129,8 @@ static int ms_stub_body(char *body, size_t cap, const char *req)
     int n;
     if (strstr(req, "wikidir"))
         return ms_stub_pages(body, cap, req);
+    if (strstr(req, "wikiblock"))
+        return snprintf(body, cap, "%s", ms_stub_blocked);
     if (!strstr(req, "native_command") && !strstr(req, "tools"))
         return snprintf(body, cap, ms_find_result, 1, 2);
     n = snprintf(body, cap,
@@ -1128,15 +1213,23 @@ static pid_t ms_stub_start(const char *dir, int *port)
     return pid;
 }
 
-static bool ms_start_node(struct ms *m, const char *home, const char *checkout,
-                          const char *dd, int port, const char *errfile)
+/* extra: one more serve option (NULL for none). */
+static bool ms_start_node_opt(struct ms *m, const char *home,
+                              const char *checkout, const char *dd, int port,
+                              const char *errfile, const char *extra)
 {
     char a1[PATH_MAX + 16], a2[PATH_MAX + 16], a3[32];
-    const char *args[] = {MS_BIN, "mcp", "serve", a1, a2, a3, NULL};
+    const char *args[] = {MS_BIN, "mcp", "serve", a1, a2, a3, extra, NULL};
     snprintf(a1, sizeof(a1), "--checkout=%s", checkout);
     snprintf(a2, sizeof(a2), "--datadir=%s", dd);
     snprintf(a3, sizeof(a3), "--rpcport=%d", port);
     return ms_start(m, args, home, errfile) && ms_init(m);
+}
+
+static bool ms_start_node(struct ms *m, const char *home, const char *checkout,
+                          const char *dd, int port, const char *errfile)
+{
+    return ms_start_node_opt(m, home, checkout, dd, port, errfile, NULL);
 }
 
 #define MS_GUIDE_ARGS \
@@ -1176,6 +1269,37 @@ static int case_wiki_search(const char *home, const char *checkout)
         ASSERT(has(&m, "Run the full lint before pushing."));
         ASSERT(has(&m, "matched"));
         ASSERT(!has(&m, "lessons_unavailable"));
+        /* Several words go to the leaf whole; it keeps the entries holding
+         * every one (the fleet_board group proves that match). */
+        ASSERT(ms_tool(&m, 7, "z23_search",
+                       "{\"query\":\"wikidir dir-new\",\"scope\":\"wiki\"}"));
+        ASSERT(has(&m, "\"isError\":false"));
+        ASSERT(has(&m, "query\\\":\\\"wikidir dir-new\\\""));
+        ASSERT(has(&m, "incomplete\\\":false"));
+        ASSERT(has(&m, "\\\"slug\\\":\\\"dir-new"));
+        ASSERT(!has(&m, "dir-a"));
+        /* The limit fills mid-page: the cursor stops at the entry that
+         * filled it, so the resume returns the rest of that page. */
+        ASSERT(ms_tool(&m, 8, "z23_search",
+                       "{\"query\":\"wikidir\",\"scope\":\"wiki\",\"limit\":5}"));
+        ASSERT(has(&m, "\\\"slug\\\":\\\"dir-e"));
+        ASSERT(!has(&m, "\\\"slug\\\":\\\"dir-f"));
+        ASSERT(has(&m, "incomplete\\\":true"));
+        ASSERT(has(&m, "after_slug\\\":\\\"dir-e\\\""));
+        ASSERT(ms_tool(&m, 9, "z23_search",
+                       "{\"query\":\"wikidir\",\"scope\":\"wiki\","
+                       "\"after_slug\":\"dir-e\"}"));
+        ASSERT(has(&m, "\\\"slug\\\":\\\"dir-f"));
+        ASSERT(has(&m, "\\\"slug\\\":\\\"dir-new"));
+        ASSERT(!has(&m, "\\\"slug\\\":\\\"dir-e"));
+        ASSERT(has(&m, "incomplete\\\":false"));
+        /* A page that cannot move the cursor is stalled, not complete. */
+        ASSERT(ms_tool(&m, 10, "z23_search",
+                       "{\"query\":\"wikiblock\",\"scope\":\"wiki\"}"));
+        ASSERT(has(&m, "\"isError\":false"));
+        ASSERT(has(&m, "incomplete\\\":true"));
+        ASSERT(has(&m, "stalled\\\":true"));
+        ASSERT(has(&m, "blocked_slug\\\":\\\"blk-a\\\""));
         ASSERT_EQ(ms_finish(&m), 0);
         kill(stub, SIGKILL);
         waitpid(stub, NULL, 0);
@@ -1195,6 +1319,56 @@ static int case_wiki_search(const char *home, const char *checkout)
         ASSERT(has(&m, "lessons_unavailable"));
         ASSERT(has(&m, "NODE_UNAVAILABLE"));
         ASSERT(has(&m, "make lint-fast"));
+        ASSERT_EQ(ms_finish(&m), 0);
+    } TEST_END
+    return failures;
+}
+
+#define MS_POST_ARGS \
+    "{\"path\":\"fleet.board.post\",\"input\":{\"kind\":\"note\",\"text\":\"x\"}}"
+
+/* Fleet writes run only on a server started with --fleet-writes, and only
+ * the four listed leaves; a port nothing listens on makes the admitted post
+ * fail fast after the policy has passed it. */
+static int case_fleet_writes(const char *home, const char *checkout)
+{
+    int failures = 0;
+    char dd[PATH_MAX + 16], err[PATH_MAX + 32];
+    snprintf(dd, sizeof(dd), "%s/writesdd", home);
+    snprintf(err, sizeof(err), "%s/err_writes.txt", home);
+    (void)mkdir(dd, 0700);
+    TEST_CASE("--fleet-writes admits the four fleet writes and nothing else") {
+        struct ms m;
+        int dead = 0;
+        pid_t gone = ms_stub_start(dd, &dead);
+        ASSERT(gone > 0);
+        kill(gone, SIGKILL);
+        waitpid(gone, NULL, 0);
+        ASSERT(ms_start_node(&m, home, checkout, dd, dead, err));
+        ASSERT(!has(&m, "Fleet writes are on"));
+        ASSERT(ms_tool(&m, 2, "z23_run", MS_POST_ARGS));
+        ASSERT(has(&m, "MUTATION_NO_CONFIRMATION_FLOW"));
+        ASSERT_EQ(ms_finish(&m), 0);
+
+        ASSERT(ms_start_node_opt(&m, home, checkout, dd, dead, err,
+                                 "--fleet-writes"));
+        ASSERT(has(&m, "Fleet writes are on"));
+        ASSERT(ms_tool(&m, 2, "z23_run", MS_POST_ARGS));
+        ASSERT(!has(&m, "MUTATION_NO_CONFIRMATION_FLOW"));
+        /* Admitted: the leaf ran and reached its node call. */
+        ASSERT(has(&m, "NODE_UNAVAILABLE"));
+        /* An unlisted operator mutation with no confirmation flow, and an
+         * owner-authority one, stay refused. */
+        ASSERT(ms_tool(&m, 3, "z23_run",
+                       "{\"path\":\"fleet.experiment.predict\",\"input\":{}}"));
+        ASSERT(has(&m, "MUTATION_NO_CONFIRMATION_FLOW"));
+        ASSERT(ms_tool(&m, 5, "z23_run",
+                       "{\"path\":\"fleet.steer.grant\",\"input\":{}}"));
+        ASSERT(has(&m, "MUTATION_REFUSED_OWNER_AUTHORITY"));
+        ASSERT(ms_tool(&m, 4, "z23_run",
+                       "{\"path\":\"app.tokens.create\",\"input\":"
+                       "{\"wallet_scope\":\"dev\",\"ticker\":\"DEMO\"}}"));
+        ASSERT(has(&m, "MUTATION_REFUSED_WALLET_RISK"));
         ASSERT_EQ(ms_finish(&m), 0);
     } TEST_END
     return failures;
@@ -1335,6 +1509,7 @@ int test_mcp_serve(void)
     failures += case_unit_version();
     failures += case_policy_mutations();
     failures += case_policy_idempotency();
+    failures += case_policy_fleet_write();
     failures += case_policy_plan_stage();
     if (!ms_file_exists(MS_BIN)) {
         printf("mcp_serve: SKIP (server half: %s missing; make dev-bin)\n",
@@ -1362,6 +1537,7 @@ int test_mcp_serve(void)
     failures += case_not_toplevel(home, checkout);
     failures += case_session(home, checkout);
     failures += case_wiki_search(home, checkout);
+    failures += case_fleet_writes(home, checkout);
     failures += case_guide_lessons(home, checkout);
     TEST_DISCARD(test_rm_rf_recursive(home));
 #endif

@@ -49,6 +49,13 @@ tree are refused with `NO_CHECKOUT`; it never falls back to its working
 directory. An empty `--checkout=` is refused with `NO_CHECKOUT`. Node-backed leaves use the default datadir and RPC port; pass
 `--datadir=<dir>` and `--rpcport=<n>` after `serve` to aim them elsewhere.
 
+`--fleet-writes` (off by default) lets `z23_run` post on the board, write the
+wiki and offer or fetch a swarm bundle directly (`fleet.board.post`,
+`fleet.wiki.write`, `fleet.bundle.offer`, `fleet.bundle.fetch`); every other
+mutation keeps the policy above. `select` on `z23_run` and `z23_code` returns
+only the named dot paths (for example `data.posts.*.text`); a truncated reply
+lists the size of each `data` field to select from.
+
 Claude Code substitutes `${CLAUDE_PROJECT_DIR}` in a plugin's `.mcp.json`
 (documented under "Plugin MCP features" at
 <https://code.claude.com/docs/en/mcp>). If it is ever left unexpanded the

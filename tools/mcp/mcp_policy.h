@@ -36,6 +36,15 @@ bool mcp_policy_allows(const struct zcl_command_spec *spec,
                        const struct json_value *input,
                        struct mcp_refusal *why);
 
+/* The fleet collaboration writes `z23 mcp serve --fleet-writes` runs without
+ * a plan or confirm flow: fleet.board.post, fleet.wiki.write,
+ * fleet.bundle.offer and fleet.bundle.fetch. True only for those exact leaves
+ * while each stays an app-write mutation outside the owner authority and the
+ * core layer, so a reclassified leaf falls back to mcp_policy_allows. Off by
+ * default: a launcher that feeds the agent untrusted text keeps the plain
+ * policy. */
+bool mcp_policy_fleet_write(const struct zcl_command_spec *spec);
+
 #ifdef __cplusplus
 }
 #endif

@@ -3352,6 +3352,27 @@ static int test_fleet_wiki_entry_validation(void)
         ASSERT(fleet_wiki_entry_matches(&entry, "full lint"));
         ASSERT(fleet_wiki_entry_matches(&entry, "push-g"));
         ASSERT(!fleet_wiki_entry_matches(&entry, "nothing-here"));
+        /* Several words: each in some field, not necessarily the same one;
+         * one missing word fails the entry, and field names never match. */
+        ASSERT(fleet_wiki_entry_matches(&entry, "landing whole-tree"));
+        ASSERT(fleet_wiki_entry_matches(&entry, " GIT\tlint-fast "));
+        ASSERT(!fleet_wiki_entry_matches(&entry, "landing nothing-here"));
+        ASSERT(!fleet_wiki_entry_matches(&entry, "landing applies_to"));
+        ASSERT(!fleet_wiki_entry_matches(&entry, "  "));
+        {
+            const char *fields[FLEET_WIKI_MATCH_FIELDS];
+            ASSERT_EQ(fleet_wiki_entry_matched_fields(&entry, "rollback-drill",
+                          "rollback whole-tree", fields), 2);
+            ASSERT_STR_EQ(fields[0], "slug");
+            ASSERT_STR_EQ(fields[1], "why");
+            const char *pf[3];
+            ASSERT_EQ(fleet_wiki_page_matched_fields("ops-notes", "Deploy",
+                          "Restart one host", "deploy host", pf), 2);
+            ASSERT_STR_EQ(pf[0], "title");
+            ASSERT_STR_EQ(pf[1], "summary");
+            ASSERT_EQ(fleet_wiki_page_matched_fields("ops-notes", "Deploy",
+                          "Restart one host", "deploy nowhere", pf), 0);
+        }
         {
             struct fleet_wiki_entry_query sq = {.q = "rollback",
                 .slug = "rollback-drill"};

@@ -164,22 +164,172 @@ static bool mcp_text_is_object(const char *text, size_t n)
     return i < n && text[i] == '{';
 }
 
+#define MCP_FIELDS_MAX 32u
+#define MCP_SELECT_MAX 8u
+#define MCP_SELECT_PATH_MAX 128u
+
+/* "fields":{"data.<key>":<bytes>,..}, for a reply whose data is an object;
+ * nothing otherwise. */
+static void mcp_fields_hint(struct mcp_buf *hint, const char *text, size_t n)
+{
+    struct json_value doc;
+    json_init(&doc);
+    const struct json_value *data =
+        json_read(&doc, text, n) && doc.type == JSON_OBJ
+            ? json_get(&doc, "data") : NULL;
+    if (data && data->type == JSON_OBJ && data->keys) {
+        mcp_buf_str(hint, ",\"fields\":{");
+        for (size_t i = 0; i < data->num_children && i < MCP_FIELDS_MAX; i++) {
+            struct mcp_buf one;
+            char name[MCP_SELECT_PATH_MAX], size[24];
+            mcp_buf_init(&one);
+            mcp_buf_json_value(&one, &data->children[i]);
+            snprintf(size, sizeof(size), ":%zu", one.len);
+            hint->oom = hint->oom || one.oom; /* a short count is no size */
+            mcp_buf_free(&one);
+            snprintf(name, sizeof(name), "data.%s", data->keys[i]);
+            mcp_buf_str(hint, i ? "," : "");
+            mcp_buf_json_str(hint, name);
+            mcp_buf_str(hint, size);
+        }
+        mcp_buf_str(hint, "}");
+    }
+    json_free(&doc);
+}
+
 static void mcp_cap_object(struct mcp_buf *out, const char *text, size_t n,
                            size_t max_bytes)
 {
     char head[96];
+    struct mcp_buf hint;
     int hl = snprintf(head, sizeof(head),
-                      "{\"truncated\":true,\"original_bytes\":%zu,"
-                      "\"partial\":\"",
-                      n);
-    if (hl < 0 || (size_t)hl + 2 > max_bytes) {
+                      "{\"truncated\":true,\"original_bytes\":%zu", n);
+    mcp_buf_init(&hint);
+    mcp_fields_hint(&hint, text, n);
+    if (hint.oom || (size_t)hl + hint.len + 16 > max_bytes)
+        hint.len = 0; /* the hint must never crowd out the marker */
+    if (hl < 0 || (size_t)hl + hint.len + 14 > max_bytes) {
         mcp_buf_put(out, "{\"truncated\":true}", max_bytes >= 18 ? 18 : 0);
+        mcp_buf_free(&hint);
         return;
     }
-    size_t keep = mcp_escaped_prefix(text, n, max_bytes - (size_t)hl - 2);
+    size_t used = (size_t)hl + hint.len + 14;
+    size_t keep = mcp_escaped_prefix(text, n, max_bytes - used);
     mcp_buf_put(out, head, (size_t)hl);
+    mcp_buf_put(out, hint.p, hint.len);
+    mcp_buf_str(out, ",\"partial\":\"");
     mcp_buf_escaped_n(out, text, keep);
     mcp_buf_put(out, "\"}", 2);
+    mcp_buf_free(&hint);
+}
+
+/* ── select ───────────────────────────────────────────────────────────── */
+
+bool mcp_select_valid(const struct json_value *select, const char **why)
+{
+    size_t n = select && select->type == JSON_ARR ? json_size(select) : 0;
+    *why = "select must be an array of 1 to 8 paths";
+    if (n == 0 || n > MCP_SELECT_MAX)
+        return false;
+    *why = "each select path is 1..128 bytes of dot-separated keys, "
+           "decimal indexes or *";
+    for (size_t i = 0; i < n; i++) {
+        const struct json_value *p = json_at(select, i);
+        const char *s = p && p->type == JSON_STR ? json_get_str(p) : NULL;
+        size_t len = s ? strlen(s) : 0;
+        if (len == 0 || len > MCP_SELECT_PATH_MAX || s[0] == '.' ||
+            s[len - 1] == '.' || strstr(s, ".."))
+            return false;
+    }
+    *why = NULL;
+    return true;
+}
+
+static bool mcp_seg_index(const char *seg, size_t len, size_t *idx)
+{
+    size_t v = 0;
+    if (len == 0 || len > 9)
+        return false;
+    for (size_t i = 0; i < len; i++) {
+        if (seg[i] < '0' || seg[i] > '9')
+            return false;
+        v = v * 10 + (size_t)(seg[i] - '0');
+    }
+    *idx = v;
+    return true;
+}
+
+static void mcp_select_walk(struct mcp_buf *out, const struct json_value *v,
+                            const char *path);
+
+/* `*`: the rest of the path below every element of an array. */
+static void mcp_select_each(struct mcp_buf *out, const struct json_value *v,
+                            const char *rest)
+{
+    if (v->type != JSON_ARR) {
+        mcp_buf_str(out, "null");
+        return;
+    }
+    mcp_buf_str(out, "[");
+    for (size_t i = 0; i < json_size(v); i++) {
+        if (i)
+            mcp_buf_str(out, ",");
+        mcp_select_walk(out, json_at(v, i), rest);
+    }
+    mcp_buf_str(out, "]");
+}
+
+/* The value at path below v; a step that does not resolve writes null. */
+static void mcp_select_walk(struct mcp_buf *out, const struct json_value *v,
+                            const char *path)
+{
+    char key[MCP_SELECT_PATH_MAX + 1];
+    size_t idx;
+    if (!v || !*path) {
+        mcp_buf_json_value(out, v);
+        return;
+    }
+    const char *dot = strchr(path, '.');
+    size_t len = dot ? (size_t)(dot - path) : strlen(path);
+    const char *rest = path + len + (dot ? 1 : 0);
+    if (len == 1 && path[0] == '*') {
+        mcp_select_each(out, v, rest);
+        return;
+    }
+    if (v->type == JSON_ARR) {
+        bool in = mcp_seg_index(path, len, &idx) && idx < json_size(v);
+        mcp_select_walk(out, in ? json_at(v, idx) : NULL, rest);
+        return;
+    }
+    memcpy(key, path, len);
+    key[len] = '\0';
+    mcp_select_walk(out, v->type == JSON_OBJ ? json_get(v, key) : NULL, rest);
+}
+
+bool mcp_select_reply(struct mcp_buf *out, const char *text, size_t n,
+                      const struct json_value *select)
+{
+    struct json_value doc;
+    json_init(&doc);
+    if (!json_read(&doc, text, n) || doc.type != JSON_OBJ) {
+        json_free(&doc);
+        return false;
+    }
+    mcp_buf_str(out, "{\"ok\":");
+    mcp_select_walk(out, json_get(&doc, "ok"), "");
+    mcp_buf_str(out, ",\"status\":");
+    mcp_select_walk(out, json_get(&doc, "status"), "");
+    mcp_buf_str(out, ",\"select\":{");
+    for (size_t i = 0; i < json_size(select); i++) {
+        const char *path = json_get_str(json_at(select, i));
+        mcp_buf_str(out, i ? "," : "");
+        mcp_buf_json_str(out, path);
+        mcp_buf_str(out, ":");
+        mcp_select_walk(out, &doc, path);
+    }
+    mcp_buf_str(out, "}}");
+    json_free(&doc);
+    return true;
 }
 
 static void mcp_cap_raw(struct mcp_buf *out, const char *text, size_t n,

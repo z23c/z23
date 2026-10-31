@@ -48,17 +48,19 @@ enum fleet_wiki_parse_status fleet_wiki_entry_parse_checked(
 bool fleet_wiki_entry_parse(const char *text, size_t len,
                             struct json_value *out, const char **why_out);
 
-/* True when `needle` is a substring of the entry's topic, summary, any
- * applies_to string, or any lesson rule or why. Case is folded for ASCII
- * letters only. An empty needle matches every entry. */
+/* `needle` is one or more words separated by blanks (space or tab). An entry
+ * matches when every word is a substring of at least one of its topic,
+ * summary, applies_to strings, or lesson rules or whys; the words may sit in
+ * different fields. Case is folded for ASCII letters only. An empty needle
+ * matches every entry; a needle of blanks only matches none. */
 bool fleet_wiki_entry_matches(const struct json_value *entry,
                               const char *needle);
 
 #define FLEET_WIKI_MATCH_FIELDS 6
-/* Names the fields of `entry` (and `slug`, when non-NULL) that contain
- * `needle`, in the fixed order slug, topic, summary, applies_to, rule, why.
- * Writes static strings to `out` and returns their count; an empty needle
- * yields 0. */
+/* Names the fields of `entry` (and `slug`, when non-NULL) that hold a word
+ * of `needle`, in the fixed order slug, topic, summary, applies_to, rule,
+ * why, when every word is in some field; otherwise (and for an empty
+ * needle) yields 0. Writes static strings to `out` and returns their count. */
 size_t fleet_wiki_entry_matched_fields(const struct json_value *entry,
     const char *slug, const char *needle, const char *out[FLEET_WIKI_MATCH_FIELDS]);
 
@@ -68,9 +70,9 @@ size_t fleet_wiki_entry_matched_fields(const struct json_value *entry,
 void fleet_wiki_plain_summary(const char *text, size_t len,
                               char out[FLEET_WIKI_SUMMARY_MAX + 1]);
 
-/* Fields of a plain-text page that contain `needle`, in the fixed order
- * slug, title, summary. Writes static strings to `out`; an empty needle
- * yields 0. */
+/* The same word rule for a plain-text page: fields holding a word of
+ * `needle`, in the fixed order slug, title, summary, when every word is in
+ * some field. Writes static strings to `out`; an empty needle yields 0. */
 size_t fleet_wiki_page_matched_fields(const char *slug, const char *title,
     const char *summary, const char *needle, const char *out[3]);
 

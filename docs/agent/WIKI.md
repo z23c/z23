@@ -152,18 +152,19 @@ over the signed wiki below is `z23 fleet wiki find`, not `z23 wiki`.
 
 `z23 fleet wiki find <q>` returns at most 8 results in slug order, each with a `kind`:
 
-- `entry`: matches when `q` is a substring of its `topic`, `summary`, any
-  `applies_to` string, any lesson `rule` or `why`, or its slug. `evidence` is
-  not searched. Returned as `topic`, `summary`, `slug`, `updated` and `rules`.
-- `page`: a plain-text page matches on its slug, title or first line.
+- `entry`: searches its `topic`, `summary`, any `applies_to` string, any
+  lesson `rule` or `why`, and its slug. `evidence` is not searched. Returned
+  as `topic`, `summary`, `slug`, `updated` and `rules`.
+- `page`: a plain-text page searches its slug, title and first line.
   Returned as `slug`, `title` and `summary` (the first line, at most 120
   bytes).
 
 Every result also has `matched`, the fields that matched in the order `slug`,
 `topic`, `title`, `summary`, `applies_to`, `rule`, `why`, and the exact
-revision `id`. Matching is a substring test with ASCII letters compared
-case-insensitively; an empty `q` matches everything and `q` is at most 128
-bytes. Exact `topic` and `applies_to` filters (1..64 bytes) combine with `q`
+revision `id`. `q` is one or more blank-separated words; a result matches
+when each word is a substring of at least one searched field (the words may
+sit in different fields), ASCII letters compared case-insensitively. An empty
+`q` matches everything and `q` is at most 128 bytes. Exact `topic` and `applies_to` filters (1..64 bytes) combine with `q`
 by AND and exclude plain pages.
 
 One call verifies at most 256 revisions. When the answer is `incomplete`,
