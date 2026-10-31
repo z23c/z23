@@ -396,6 +396,28 @@ static bool zpd_publication_child_roundtrip(
     return roundtrip;
 }
 
+static bool zpd_publication_wire_write(const struct json_value *result,
+                                       char *wire, size_t wire_size)
+{
+    size_t len = json_write(result, wire, wire_size);
+    return len > 0 && len < wire_size;
+}
+
+static bool zpd_publication_fork_roundtrip(
+    const struct json_value *accept_input, const char *job_hex,
+    const char *accept_wire, const char *publish_wire)
+{
+    pid_t child = fork();
+    if (child == 0) {
+        _exit(zpd_publication_child_roundtrip(accept_input, job_hex,
+                                              accept_wire, publish_wire)
+              ? 0 : 1);
+    }
+    int status = 0;
+    bool waited = child > 0 && waitpid(child, &status, 0) == child;
+    return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 /* Serialize actual registered RPC results first, then consume them through
  * a separate process's real live-ledger forwarding path. This exercises both
  * envelope adapters without needing a listening network endpoint. */
@@ -417,28 +439,22 @@ static bool zpd_publication_rpc_roundtrip(
     bool ok = json_push_back(&params, accept_input) &&
         accept->actor(&params, false, &result) &&
         json_get_bool(json_get(&result, "ok"));
-    size_t len = ok ? json_write(&result, accept_wire, sizeof(accept_wire)) : 0;
-    ok = ok && len > 0 && len < sizeof(accept_wire);
+    ok = ok && zpd_publication_wire_write(&result, accept_wire,
+                                          sizeof(accept_wire));
     json_free(&params); json_set_array(&params);
     json_free(&result);
     ok = ok && json_push_back(&params, publish_input) &&
         publish->actor(&params, false, &result) &&
         json_get_bool(json_get(&result, "ok"));
-    len = ok ? json_write(&result, publish_wire, sizeof(publish_wire)) : 0;
-    ok = ok && len > 0 && len < sizeof(publish_wire);
+    ok = ok && zpd_publication_wire_write(&result, publish_wire,
+                                          sizeof(publish_wire));
     json_free(&params); json_free(&result);
     struct node_db resident = {0};
     ok = ok && node_db_open(&resident, db_path);
-    pid_t child = ok ? fork() : -1;
-    if (child == 0) {
-        _exit(zpd_publication_child_roundtrip(accept_input, job_hex,
-                                              accept_wire, publish_wire)
-              ? 0 : 1);
-    }
-    int status = 0;
-    bool waited = child > 0 && waitpid(child, &status, 0) == child;
+    bool roundtrip = ok && zpd_publication_fork_roundtrip(
+        accept_input, job_hex, accept_wire, publish_wire);
     if (resident.open) node_db_close(&resident);
-    return ok && waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    return roundtrip;
 }
 #endif
 
@@ -2966,6 +2982,24 @@ static int zpd_test_prepare_programs(const uint8_t pubkey[33])
     } _test_next:;
     return failures;
 }
+static const struct json_value *zpd_json_child(
+    const struct json_value *parent, const char *key)
+{
+    return parent ? json_get(parent, key) : NULL;
+}
+
+static bool zpd_json_arr_count_is(const struct json_value *value, size_t count)
+{
+    return value && value->type == JSON_ARR && value->num_children == count;
+}
+
+static bool zpd_json_arr_single_str_is(const struct json_value *array,
+                                       const char *text)
+{
+    return array && array->num_children == 1 &&
+        strcmp(json_get_str(json_at(array, 0)), text) == 0;
+}
+
 static int zpd_test_project_inspect(void)
 {
     int failures = 0;
@@ -2989,26 +3023,22 @@ static int zpd_test_project_inspect(void)
 
         const struct json_value *name = json_get(&reply.data, "name");
         const struct json_value *layout = json_get(&reply.data, "layout");
-        const struct json_value *headers = layout
-            ? json_get(layout, "public_headers") : NULL;
-        const struct json_value *sources = layout
-            ? json_get(layout, "sources") : NULL;
-        const struct json_value *tests = layout
-            ? json_get(layout, "tests") : NULL;
+        const struct json_value *headers =
+            zpd_json_child(layout, "public_headers");
+        const struct json_value *sources = zpd_json_child(layout, "sources");
+        const struct json_value *tests = zpd_json_child(layout, "tests");
         const struct json_value *profile =
             json_get(&reply.data, "suggested_profile");
         const struct json_value *profile_detail =
             json_get(&reply.data, "proof_profile");
-        const struct json_value *exact_policy = profile_detail
-            ? json_get(profile_detail, "exact_policy") : NULL;
+        const struct json_value *exact_policy =
+            zpd_json_child(profile_detail, "exact_policy");
         const struct json_value *expert = json_get(&reply.data, "expert");
         ASSERT(name && strcmp(json_get_str(name), "zclassic23/fixture") == 0);
         ASSERT(layout && layout->type == JSON_OBJ);
-        ASSERT(headers && headers->type == JSON_ARR &&
-               headers->num_children == 1);
-        ASSERT(sources && sources->type == JSON_ARR &&
-               sources->num_children == 1);
-        ASSERT(tests && tests->type == JSON_ARR && tests->num_children == 1);
+        ASSERT(zpd_json_arr_count_is(headers, 1));
+        ASSERT(zpd_json_arr_count_is(sources, 1));
+        ASSERT(zpd_json_arr_count_is(tests, 1));
         ASSERT(profile && strcmp(json_get_str(profile), "standard") == 0);
         ASSERT(profile_detail && profile_detail->type == JSON_OBJ);
         ASSERT(json_get(profile_detail, "warning_fatal") &&
@@ -3028,16 +3058,13 @@ static int zpd_test_project_inspect(void)
         /* app/main.c is on disk but undeclared, so this package installs no
          * executable: both program lists are empty and app/ is not a write
          * scope. */
-        const struct json_value *programs =
-            layout ? json_get(layout, "programs") : NULL;
+        const struct json_value *programs = zpd_json_child(layout, "programs");
         const struct json_value *outputs =
-            layout ? json_get(layout, "program_outputs") : NULL;
+            zpd_json_child(layout, "program_outputs");
         const struct json_value *scopes =
             json_get(&reply.data, "likely_write_scopes");
-        ASSERT(programs && programs->type == JSON_ARR &&
-               programs->num_children == 0);
-        ASSERT(outputs && outputs->type == JSON_ARR &&
-               outputs->num_children == 0);
+        ASSERT(zpd_json_arr_count_is(programs, 0));
+        ASSERT(zpd_json_arr_count_is(outputs, 0));
         ASSERT(scopes && !zpd_array_has(scopes, "app"));
         zcl_command_reply_free(&reply);
         json_free(&input);
@@ -3054,13 +3081,11 @@ static int zpd_test_project_inspect(void)
         zcl_native_handle_zcode_project_inspect(&request, &reply);
         ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
         layout = json_get(&reply.data, "layout");
-        programs = layout ? json_get(layout, "programs") : NULL;
-        outputs = layout ? json_get(layout, "program_outputs") : NULL;
+        programs = zpd_json_child(layout, "programs");
+        outputs = zpd_json_child(layout, "program_outputs");
         scopes = json_get(&reply.data, "likely_write_scopes");
-        ASSERT(programs && programs->num_children == 1 &&
-               strcmp(json_get_str(json_at(programs, 0)), "app/main.c") == 0);
-        ASSERT(outputs && outputs->num_children == 1 &&
-               strcmp(json_get_str(json_at(outputs, 0)), "bin/fixture") == 0);
+        ASSERT(zpd_json_arr_single_str_is(programs, "app/main.c"));
+        ASSERT(zpd_json_arr_single_str_is(outputs, "bin/fixture"));
         ASSERT(zpd_array_has(scopes, "app"));
         ASSERT(zpd_array_has(scopes, "src") && zpd_array_has(scopes, "tests"));
         zcl_command_reply_free(&reply);
@@ -3903,13 +3928,39 @@ static int zpd_test_work_start_license_filter(
     return failures;
 }
 
+static bool zpd_license_store_dirs_create(const char *zcode_dir)
+{
+    static const char *const store_dirs[] = {
+        "releases", "manifests", "recipes",
+    };
+    char path[512];
+    for (size_t i = 0; i < sizeof(store_dirs) / sizeof(store_dirs[0]); i++) {
+        (void)snprintf(path, sizeof(path), "%s/%s", zcode_dir,
+                       store_dirs[i]);
+        if (platform_directory_create(path, 0700) != 0) return false;
+    }
+    return true;
+}
+
+static bool zpd_license_next_avoids_use(
+    const struct zcl_command_reply *reply, const char *package_root)
+{
+    for (size_t i = 0; i < reply->next_count; i++) {
+        if (strcmp(reply->next[i].command, "zcode.use") == 0) return false;
+        if (reply->next[i].input_json[0] != '\0' &&
+            strstr(reply->next[i].input_json, package_root) != NULL)
+            return false;
+    }
+    return true;
+}
+
 static int zpd_test_work_start_license_lifecycle(
     secp256k1_context *ctx, const uint8_t secret[32],
     const uint8_t pubkey[33])
 {
     int failures = 0;
     TEST("zcode work start: license filter cannot hand off a superseded root") {
-        char base[256], zcode_dir[320], path[512];
+        char base[256], zcode_dir[320];
         char package_dir[256], mit_workspace[256], apache_workspace[256];
         (void)snprintf(base, sizeof(base),
                        "test-tmp/zcode-work-license-life-%ld",
@@ -3932,14 +3983,7 @@ static int zpd_test_work_start_license_lifecycle(
         ASSERT(platform_directory_create(base, 0700) == 0);
         (void)snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", base);
         ASSERT(platform_directory_create(zcode_dir, 0700) == 0);
-        static const char *const store_dirs[] = {
-            "releases", "manifests", "recipes",
-        };
-        for (size_t i = 0; i < sizeof(store_dirs) / sizeof(store_dirs[0]); i++) {
-            (void)snprintf(path, sizeof(path), "%s/%s", zcode_dir,
-                           store_dirs[i]);
-            ASSERT(platform_directory_create(path, 0700) == 0);
-        }
+        ASSERT(zpd_license_store_dirs_create(zcode_dir));
         ASSERT(zpd_fixture(mit_workspace, false));
         ASSERT(zpd_fixture(apache_workspace, false));
         ASSERT(zpd_reuse_package_fixture(
@@ -4003,11 +4047,7 @@ static int zpd_test_work_start_license_lifecycle(
         ASSERT(json_get_int(json_get(
                    reuse_expert,
                    "lifecycle_nonselected_release_rows")) == 1);
-        for (size_t i = 0; i < reply.next_count; i++) {
-            ASSERT(strcmp(reply.next[i].command, "zcode.use") != 0);
-            ASSERT(reply.next[i].input_json[0] == '\0' ||
-                   strstr(reply.next[i].input_json, package_root) == NULL);
-        }
+        ASSERT(zpd_license_next_avoids_use(&reply, package_root));
         zcl_command_reply_free(&reply);
         json_free(&input);
 
