@@ -17,6 +17,7 @@
 #include "platform/private_file.h"
 #include "services/wallet_restore_service.h"   /* datadir single-writer proof */
 #include "support/cleanse.h"
+#include "core/utiltime.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 #include "wallet/bip44.h"
@@ -411,6 +412,20 @@ static struct zcl_result wrc_load_passphrase(
     return ZCL_OK;
 }
 
+/* A restored wallet claims no scanned-through height until it is read; a
+ * created one has its birthday instead. */
+static void wrc_mark_unread(const struct wallet_recovery_request *req,
+                            struct wallet *w)
+{
+    if (req->record_birthday)
+        return;
+    w->scan_retry.pending = true;
+    w->scan_retry.from = 0;
+    w->scan_retry.since = GetTime();
+    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
+             WALLET_RESTORE_BLOCKER_UNREAD);
+}
+
 /* Store the birthday: the highest connected block (status >= 3) this datadir
  * holds, and the hash of the block WALLET_BIRTHDAY_MARGIN below it. Rows above
  * a rewound tip keep their status, so the tip itself may be stale; that is
@@ -694,6 +709,11 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
         out->keys_after = out->keys_before;
         goto done;
     }
+
+    /* A restored wallet has read none of the chain. Boot defers a long range, so
+     * the wallet must say so: a pending retry from height 0 keeps it reading
+     * incomplete until a rescan reads the range. Creation has its birthday. */
+    wrc_mark_unread(req, w);
 
     /* Creation policy may accept a one-shot environment passphrase, but that
      * variable must never auto-unlock the live wallet. Load it only across

@@ -471,8 +471,8 @@ void zcl_native_handle_wallet_recovery_restore(
 #define WRP_CREATE_LOST_REPLY_HINT                                          \
     "If an earlier create here lost its reply, no command can show that "   \
     "phrase again. Delete a datadir made only for that attempt and never "  \
-    "started, then create in a new one. A used datadir is restored from "   \
-    "the written phrase."
+    "started, then create in a new one. Restore a used wallet from its "    \
+    "written phrase into a new datadir."
 _Static_assert(sizeof(WRP_CREATE_LOST_REPLY_HINT) <= 256,
                "next_action holds 255 bytes");
 
@@ -603,7 +603,8 @@ void zcl_native_handle_wallet_create(
         return;
     }
     wrp_create_body(request, reply);
-    if (!wrp_stdout_restore(saved)) {
+    /* Only a body that committed carries a phrase; a refusal is left as it is. */
+    if (!wrp_stdout_restore(saved) && reply->error.mutated) {
         json_free(&reply->data);
         json_init(&reply->data);
         json_set_object(&reply->data);

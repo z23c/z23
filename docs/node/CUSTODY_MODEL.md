@@ -149,9 +149,19 @@ There is deliberately no discard flag: whether a wallet holds no coins cannot
 be proved from its own rows, because a payment sits on the chain until a scan
 finds it. The caller keeps the way back: it creates in a datadir made only for
 that attempt, deletes that datadir whole if the reply did not arrive (the
-wallet was never started as a node and its address never shown), and moves it
-into use only after the phrase is on screen. A datadir that was ever used is
-restored from the written phrase with `core wallet recovery restore`.
+wallet was never started as a node and its address never shown), and uses the
+datadir only after the phrase is on screen. A datadir that was ever used is
+never deleted; its wallet is restored from the written phrase with
+`core wallet recovery restore` into a NEW datadir, because restoring into the
+datadir that already holds the wallet is refused (`WALLET_ALREADY_PRESENT`).
+
+Restore. `core wallet recovery restore` writes the wallet with a pending scan
+retry from height 0 (blocker `WALLET_RESTORE_UNREAD`), so a restored wallet
+reads `incomplete` in `getwalletinfo` and never `complete` until its range has
+been read. A boot catch-up reads it on a chain of 1000 blocks or fewer; above
+that boot defers, and `core wallet rescan` over the whole marked range, from the
+marker to the tip with every block body read, clears the marker. A partial
+rescan keeps it.
 
 `tests/harness/src/test_wallet_create.c` holds the proof.
 

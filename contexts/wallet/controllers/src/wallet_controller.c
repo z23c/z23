@@ -738,9 +738,18 @@ static bool rpc_rescanblockchain(const struct json_value *params, bool help,
         LOG_FAIL("wallet", "rescanblockchain: start_height %d exceeds tip %d", start_height, tip);
     }
 
+    const bool was_marked = ctx->wallet->scan_retry.pending;
     struct wallet_rescan_report rep;
     wallet_rescan_report(ctx->wallet, &ctx->main_state->chain_active,
                          start_height, stop_height, ctx->datadir, &rep);
+    /* A rescan that cleared the unread marker must reach disk: the marker is
+     * what keeps the wallet reading incomplete across a restart. */
+    if (was_marked && !ctx->wallet->scan_retry.pending && ctx->wallet_db) {
+        struct zcl_result fr = wallet_flush_from_context(ctx);
+        if (!fr.ok)
+            LOG_WARN("wallet", "rescanblockchain: marker cleared but the "
+                     "flush failed (code=%d): %s", fr.code, fr.message);
+    }
     wallet_rescan_report_to_json(result, &rep);
     return true;
 }

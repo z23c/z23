@@ -54,6 +54,7 @@
 #include "models/database.h"
 
 #include "wallet/wallet.h"
+#include "wallet/sapling_keys.h"
 #include "util/safe_alloc.h"
 #include "wallet/wallet_sqlite.h"
 
@@ -184,6 +185,39 @@ static int wrc_boot_catch_up_body_root(struct wallet *w,
     w->initial_scan_floor = 0;
     w->best_block_height = WRC_NBLOCKS - 1;
 
+    /* I. The unread marker waits for a read of the whole marked range. A
+     * rescan that starts above it, stops before the tip or misses a body
+     * keeps it; one that reads from the marker to the tip clears it. */
+    w->scan_retry.pending = true;
+    w->scan_retry.from = 0;
+    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
+             WALLET_RESTORE_BLOCKER_UNREAD);
+    (void)wallet_rescan_report(w, &ms->chain_active, 50, -1, netdir, &rep);
+    WRC_CHECK("I: a rescan starting above the marker keeps it",
+              w->scan_retry.pending && rep.blocks_scanned == rep.blocks_in_range);
+    (void)wallet_rescan_report(w, &ms->chain_active, 0, 100, netdir, &rep);
+    WRC_CHECK("I: a rescan stopping before the tip keeps it",
+              w->scan_retry.pending);
+    (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
+    WRC_CHECK("I: a whole rescan that tried no Sapling key keeps it",
+              w->scan_retry.pending && rep.shielded_txs_unscanned > 0);
+    uint8_t sapling_seed[32];
+    memset(sapling_seed, 0x5c, sizeof(sapling_seed));
+    uint8_t sd[11], spk[32];
+    (void)sapling_keystore_set_seed(&w->sapling_keys, sapling_seed);
+    (void)sapling_keystore_new_address(&w->sapling_keys, sd, spk);
+    idx[100].nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
+    (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
+    WRC_CHECK("I: a rescan that misses one body keeps it",
+              w->scan_retry.pending && rep.blocks_scanned < rep.blocks_in_range);
+    idx[100].nStatus |= BLOCK_HAVE_DATA;
+    (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
+    WRC_CHECK("I: a whole rescan that read every body clears it",
+              !w->scan_retry.pending && rep.blocks_scanned == WRC_NBLOCKS &&
+              wallet_scanned_through_height(w) == WRC_NBLOCKS - 1);
+    sapling_keystore_free(&w->sapling_keys);
+    sapling_keystore_init(&w->sapling_keys);
+
     if (relaid)
         (void)rename(moved_to, moved_from);
     SetDataDir("");
@@ -237,6 +271,12 @@ static struct wallet *wrc_reboot_wallet(struct wrc_f *f)
     struct privkey key;
     if (wallet_dump_key(f->owner, f->kid, &key))
         (void)wallet_import_key(w, &key);
+    /* The same Sapling key as the fixture wallet: a rescan with none counts
+     * the shielded outputs untried and cannot clear the marker. */
+    uint8_t seed[32], d[11], pk[32];
+    memset(seed, 0x2e, sizeof(seed));
+    (void)sapling_keystore_set_seed(&w->sapling_keys, seed);
+    (void)sapling_keystore_new_address(&w->sapling_keys, d, pk);
     (void)wallet_sqlite_read_txs(f->ws, w);
     (void)wallet_sqlite_read_scan_state(f->ws, w);
     return w;
@@ -521,6 +561,12 @@ static int wrc_boot_catch_up_fail_closed(struct wrc_f *f)
     failures += wrc_expect("F: fresh wallet holds the fixture key",
                            wallet_dump_key(f->owner, f->kid, &key) &&
                            wallet_import_key(f->w, &key));
+    /* A Sapling key to try: a wallet that holds none has its shielded outputs
+     * counted untried, and an untried read cannot clear the unread marker. */
+    uint8_t fseed[32], fd[11], fpk[32];
+    memset(fseed, 0x2e, sizeof(fseed));
+    (void)sapling_keystore_set_seed(&f->w->sapling_keys, fseed);
+    (void)sapling_keystore_new_address(&f->w->sapling_keys, fd, fpk);
 
     for (int i = 0; i < WRC_NBLOCKS; i++)
         f->idx[i].nStatus |= BLOCK_HAVE_DATA;

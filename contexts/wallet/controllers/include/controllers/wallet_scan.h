@@ -34,7 +34,9 @@ int wallet_scan_blocks(struct node_db *ndb,
 #define WALLET_SCAN_BIRTHDAY_MARGIN WALLET_BIRTHDAY_MARGIN
 
 /* What the active chain says about a wallet's birthday:
- *   NONE    no birthday (old or restored wallet): scan from genesis as usual.
+ *   NONE    no birthday (old or restored wallet): scan from genesis. On a chain
+ *           above 1000 blocks the first boot catch-up defers that scan, and a
+ *           restored wallet carries a pending retry until a rescan reads it.
  *   VALID   the active chain holds the recorded floor block; `*floor` is its
  *           height and the first scan may start there.
  *   CHANGED a birthday exists but the active chain does not hold the floor

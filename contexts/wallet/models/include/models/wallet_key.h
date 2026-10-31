@@ -79,7 +79,9 @@ int db_sapling_key_count(struct node_db *ndb);
  * block (which proves every block below it is unchanged). The tip need not be
  * on the active chain: the floor block is what is checked. Absent for wallets
  * created before birthdays, for restored wallets and for chains of at most the
- * margin; those scan from the beginning. Written once, with the wallet. */
+ * margin; those scan from the beginning (a chain above 1000 blocks defers the
+ * first boot catch-up, so a restored wallet records a pending retry that only
+ * a rescan over the whole range clears). Written once, with the wallet. */
 bool db_wallet_birthday_get(struct node_db *ndb, int64_t *height,
                             uint8_t floor_hash[32]);
 bool db_wallet_birthday_set(struct node_db *ndb, int64_t height,

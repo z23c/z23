@@ -632,6 +632,8 @@ struct wallet_rescan_report {
 #define WALLET_RESCAN_BLOCKER_NO_BLOCK_DATA   "RESCAN_NO_BLOCK_DATA"
 #define WALLET_RESCAN_BLOCKER_INCOMPLETE      "RESCAN_INCOMPLETE_COVERAGE"
 #define WALLET_RESCAN_BLOCKER_INCONCLUSIVE    "RESCAN_INCONCLUSIVE_ZERO"
+/* A restored wallet whose chain range has not been read yet. */
+#define WALLET_RESTORE_BLOCKER_UNREAD         "WALLET_RESTORE_UNREAD"
 
 int wallet_scan_block(struct wallet *w, const struct block_index *pindex,
                       const char *datadir);

@@ -732,6 +732,53 @@ static int birthday_rewound(void)
     return failures;
 }
 
+/* The scan state a datadir persisted, read the way boot reads it. */
+static bool wcr_scan_marker(const char *dir, struct wallet *w)
+{
+    struct node_db ndb;
+    struct wallet_sqlite ws;
+    bool ok = wcr_open(&ndb, dir) && wallet_sqlite_open_r(&ws, ndb.db).ok;
+    if (ok) {
+        wallet_init(w);
+        ok = wallet_sqlite_read_scan_state(&ws, w);
+        wallet_sqlite_close(&ws);
+    }
+    if (ndb.open)
+        node_db_close(&ndb);
+    return ok;
+}
+
+/* A restored wallet has read none of the chain, and boot defers a long
+ * range, so it persists a pending retry from height 0 and reads incomplete.
+ * A created wallet has its birthday and carries no marker. */
+static int restored_marker(const char *created_dir)
+{
+    int failures = 0;
+    char dir[1024];
+    wcr_fixture(dir, sizeof(dir), "restored_marker");
+    struct wallet_recovery_report rep;
+    bool restored = wcr_restore(dir, "abandon abandon abandon abandon abandon "
+                                "abandon abandon abandon abandon abandon "
+                                "abandon about", &rep);
+    struct wallet *w = calloc(1, sizeof(*w));
+    bool read = restored && w && wcr_scan_marker(dir, w);
+    WCR_CHECK("a restored wallet persists a pending retry from height 0",
+              read && w->scan_retry.pending && w->scan_retry.from == 0 &&
+              strcmp(w->scan_retry.blocker, "WALLET_RESTORE_UNREAD") == 0);
+    WCR_CHECK("and claims no scanned-through height, so it reads incomplete",
+              read && wallet_scanned_through_height(w) < 0);
+    if (read)
+        wallet_free(w);
+    memset(w, 0, w ? sizeof(*w) : 0);
+    bool again = w && wcr_scan_marker(created_dir, w);
+    WCR_CHECK("a created wallet carries no such marker",
+              again && !w->scan_retry.pending);
+    if (again)
+        wallet_free(w);
+    free(w);
+    return failures;
+}
+
 static int birthday_absent_when_restored(void)
 {
     int failures = 0;
@@ -772,6 +819,7 @@ static int t_birthday(void)
     failures += birthday_stored(dir, &run);
     failures += birthday_chain_checks(dir);
     failures += birthday_rewound();
+    failures += restored_marker(dir);
     failures += birthday_absent_when_restored();
     return failures;
 }

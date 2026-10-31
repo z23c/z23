@@ -57,6 +57,13 @@ static void boot_wallet_catch_up_settle(struct wallet *w,
     const char *blocker = r->blocker[0] ? r->blocker
                                         : WALLET_RESCAN_BLOCKER_INCOMPLETE;
     zcl_mutex_lock(&w->cs);
+    if (read_all && r->shielded_txs_unscanned > 0 && w->scan_retry.pending) {
+        /* Every body was read but some Sapling outputs were never tried for
+         * want of a key: an existing marker must wait for a read that tried
+         * them. */
+        zcl_mutex_unlock(&w->cs);
+        return;
+    }
     if (read_all) {
         memset(&w->scan_retry, 0, sizeof(w->scan_retry));
         zcl_mutex_unlock(&w->cs);
