@@ -420,3 +420,7 @@ later lane flips it HARD.
 - 2026-10-31T10:11:49Z — REASON: connman.c: move outbound health accessors to a sibling file so the complexity split fits the file-size pin, with the feature-test macros connman.c defines;  behaviour-preserving
   old ROOT: fc5819143011022f63d1ac233ed07c38a0a7e9da5bd29a5202b93462048a3ae1
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T10:14:13Z — REASON: refactor(fast_sync.c): split 4 function(s) under the complexity cap;  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: 8bbb4e99da887726d7b2269d3a8812ad893c325283b81d1a49762de8d066335b
+  by: owner unseal ritual (make core-unseal)

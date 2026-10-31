@@ -98,6 +98,29 @@ uint64_t fast_sync_utxo_root_cache_version(void)
     return version;
 }
 
+/* Reads node_state tip_height into both height fields of a snapshot or manifest. */
+static void fast_sync_read_tip_height(sqlite3 *db, int32_t *height,
+                                      int32_t *peer_tip_height)
+{
+    sqlite3_stmt *s = NULL;
+    sqlite3_prepare_v2(db, "SELECT value FROM node_state WHERE key='tip_height'",
+                        -1, &s, NULL);
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+        int len = sqlite3_column_bytes(s, 0);
+        if (len == (int)sizeof(int64_t)) {
+            int64_t h;
+            memcpy(&h, sqlite3_column_blob(s, 0), sizeof(h));
+            *height = (int32_t)h;
+            *peer_tip_height = (int32_t)h;
+        } else if (len >= 1 && len <= 8) {
+            const void *blob = sqlite3_column_blob(s, 0);
+            memcpy(height, blob, len < 4 ? (size_t)len : 4);
+            *peer_tip_height = *height;
+        }
+    }
+    sqlite3_finalize(s);
+}
+
 bool fast_sync_build_offer(const char *datadir,
                             struct snapshot_offer *offer)
 {
@@ -117,22 +140,7 @@ bool fast_sync_build_offer(const char *datadir,
      * peer_tip_height to reject non-final live snapshots unless a future
      * finalized snapshot file advertises an older anchor. */
     sqlite3_stmt *s = NULL;
-    sqlite3_prepare_v2(db, "SELECT value FROM node_state WHERE key='tip_height'",
-                        -1, &s, NULL);
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        int len = sqlite3_column_bytes(s, 0);
-        if (len == (int)sizeof(int64_t)) {
-            int64_t h;
-            memcpy(&h, sqlite3_column_blob(s, 0), sizeof(h));
-            offer->height = (int32_t)h;
-            offer->peer_tip_height = (int32_t)h;
-        } else if (len >= 1 && len <= 8) {
-            const void *blob = sqlite3_column_blob(s, 0);
-            memcpy(&offer->height, blob, len < 4 ? (size_t)len : 4);
-            offer->peer_tip_height = offer->height;
-        }
-    }
-    sqlite3_finalize(s);
+    fast_sync_read_tip_height(db, &offer->height, &offer->peer_tip_height);
 
     sqlite3_prepare_v2(db,
         "SELECT value FROM node_state WHERE key='tip_hash'",
@@ -1126,6 +1134,46 @@ bool fast_sync_serve_chunk(const char *datadir, uint32_t chunk_index,
     return false;
 }
 
+/* Allocates the four per-lane serialization buffers; false if any allocation fails. */
+static bool fast_sync_alloc_ser_bufs(uint8_t *serbuf[4])
+{
+    bool ok = true;
+    for (int k = 0; k < 4 && ok; k++) {
+        serbuf[k] = zcl_malloc(FAST_SYNC_CHUNK_SER_MAX, "chunk_ser_buf");
+        if (!serbuf[k]) ok = false;
+    }
+    return ok;
+}
+
+/* Hashes each chunk of the manifest, four at a time, into out->chunk_hashes. */
+static void fast_sync_manifest_hash_chunks(sqlite3 *db, struct sync_manifest *out,
+                                           struct utxo_chunk *chunks,
+                                           uint8_t *serbuf[4])
+{
+    for (uint32_t ci = 0; ci < out->num_chunks; ci += 4) {
+        const uint8_t *msgs[4];
+        size_t lens[4];
+        bool store[4] = { false, false, false, false };
+        for (int k = 0; k < 4; k++) {
+            uint32_t idx = ci + k;
+            if (idx >= out->num_chunks) { msgs[k] = NULL; lens[k] = 0; continue; }
+            if (!fast_sync_serve_chunk_db(db, idx, out->chunk_size, &chunks[k])) {
+                /* Empty chunk at end is not expected but handle gracefully */
+                memset(out->chunk_hashes[idx], 0, 32);
+                msgs[k] = NULL; lens[k] = 0;
+                continue;
+            }
+            lens[k] = fast_sync_serialize_chunk_for_hash(&chunks[k], serbuf[k]);
+            msgs[k] = serbuf[k];
+            store[k] = true;
+        }
+        uint8_t out4[4][32];
+        sha3_256_x4(msgs, lens, out4);
+        for (int k = 0; k < 4; k++)
+            if (store[k]) memcpy(out->chunk_hashes[ci + k], out4[k], 32);
+    }
+}
+
 bool fast_sync_build_manifest_db(sqlite3 *db, struct sync_manifest *out)
 {
     GUARD(db && out, "sync", "build_manifest_db: db or out is NULL");
@@ -1136,23 +1184,7 @@ bool fast_sync_build_manifest_db(sqlite3 *db, struct sync_manifest *out)
 
     /* Get tip height */
     sqlite3_stmt *s = NULL;
-    sqlite3_prepare_v2(db,
-        "SELECT value FROM node_state WHERE key='tip_height'",
-        -1, &s, NULL);
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        int len = sqlite3_column_bytes(s, 0);
-        if (len == (int)sizeof(int64_t)) {
-            int64_t h;
-            memcpy(&h, sqlite3_column_blob(s, 0), sizeof(h));
-            out->height = (int32_t)h;
-            out->peer_tip_height = (int32_t)h;
-        } else if (len >= 1 && len <= 8) {
-            const void *blob = sqlite3_column_blob(s, 0);
-            memcpy(&out->height, blob, len < 4 ? (size_t)len : 4);
-            out->peer_tip_height = out->height;
-        }
-    }
-    sqlite3_finalize(s);
+    fast_sync_read_tip_height(db, &out->height, &out->peer_tip_height);
 
     /* Live manifests describe the current UTXO set, so block_hash remains
      * the current tip hash. peer_tip_height tells receivers whether that
@@ -1209,11 +1241,7 @@ bool fast_sync_build_manifest_db(sqlite3 *db, struct sync_manifest *out)
      * (unexpected empty tail) gets a zero hash and is excluded from the batch. */
     struct utxo_chunk *chunks = zcl_calloc(4, sizeof(struct utxo_chunk), "utxo_chunk_x4");
     uint8_t *serbuf[4] = { NULL, NULL, NULL, NULL };
-    bool ser_ok = (chunks != NULL);
-    for (int k = 0; k < 4 && ser_ok; k++) {
-        serbuf[k] = zcl_malloc(FAST_SYNC_CHUNK_SER_MAX, "chunk_ser_buf");
-        if (!serbuf[k]) ser_ok = false;
-    }
+    bool ser_ok = (chunks != NULL) && fast_sync_alloc_ser_bufs(serbuf);
     if (!ser_ok) {
         for (int k = 0; k < 4; k++) free(serbuf[k]);
         free(chunks);
@@ -1221,28 +1249,7 @@ bool fast_sync_build_manifest_db(sqlite3 *db, struct sync_manifest *out)
         LOG_FAIL("sync", "build_manifest_db: alloc chunk batch buffers failed");
     }
 
-    for (uint32_t ci = 0; ci < out->num_chunks; ci += 4) {
-        const uint8_t *msgs[4];
-        size_t lens[4];
-        bool store[4] = { false, false, false, false };
-        for (int k = 0; k < 4; k++) {
-            uint32_t idx = ci + k;
-            if (idx >= out->num_chunks) { msgs[k] = NULL; lens[k] = 0; continue; }
-            if (!fast_sync_serve_chunk_db(db, idx, out->chunk_size, &chunks[k])) {
-                /* Empty chunk at end is not expected but handle gracefully */
-                memset(out->chunk_hashes[idx], 0, 32);
-                msgs[k] = NULL; lens[k] = 0;
-                continue;
-            }
-            lens[k] = fast_sync_serialize_chunk_for_hash(&chunks[k], serbuf[k]);
-            msgs[k] = serbuf[k];
-            store[k] = true;
-        }
-        uint8_t out4[4][32];
-        sha3_256_x4(msgs, lens, out4);
-        for (int k = 0; k < 4; k++)
-            if (store[k]) memcpy(out->chunk_hashes[ci + k], out4[k], 32);
-    }
+    fast_sync_manifest_hash_chunks(db, out, chunks, serbuf);
     for (int k = 0; k < 4; k++) free(serbuf[k]);
     free(chunks);
 
@@ -1465,6 +1472,59 @@ void block_piece_manifest_free(struct block_piece_manifest *m)
     }
 }
 
+/* Reads the hash of the block at height into tip_hash; false when the query
+ * cannot be prepared. */
+static bool block_piece_manifest_read_tip_hash(sqlite3 *db, int32_t height,
+                                               uint8_t tip_hash[32])
+{
+    sqlite3_stmt *s = NULL;
+    int rc = sqlite3_prepare_v2(db,
+        "SELECT hash FROM blocks WHERE height = ?", -1, &s, NULL);
+    if (rc != SQLITE_OK || !s)
+        return false;
+    sqlite3_bind_int(s, 1, height);
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+        const void *h = sqlite3_column_blob(s, 0);
+        if (h && sqlite3_column_bytes(s, 0) >= 32)
+            memcpy(tip_hash, h, 32);
+    }
+    sqlite3_finalize(s);
+    return true;
+}
+
+/* Hashes the block rows of s, in height order, into piece hashes. */
+static void block_piece_manifest_hash_rows(sqlite3_stmt *s, uint32_t num_pieces,
+                                           uint8_t (*piece_block_hashes)[32],
+                                           uint8_t (*piece_hashes)[32])
+{
+    uint32_t piece_idx = 0;
+    uint32_t block_in_piece = 0;
+
+    while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+        const void *h = sqlite3_column_blob(s, 0);
+        if (h && sqlite3_column_bytes(s, 0) >= 32)
+            memcpy(piece_block_hashes[block_in_piece], h, 32);
+        block_in_piece++;
+
+        if (block_in_piece == BLOCKS_PER_PIECE) {
+            if (piece_idx < num_pieces) {
+                block_piece_hash((const uint8_t (*)[32])piece_block_hashes,
+                                 block_in_piece, piece_idx,
+                                 piece_hashes[piece_idx]);
+            }
+            piece_idx++;
+            block_in_piece = 0;
+        }
+    }
+
+    /* Final partial piece */
+    if (block_in_piece > 0 && piece_idx < num_pieces) {
+        block_piece_hash((const uint8_t (*)[32])piece_block_hashes,
+                         block_in_piece, piece_idx,
+                         piece_hashes[piece_idx]);
+    }
+}
+
 bool block_piece_manifest_build(const char *datadir,
                                  int32_t start_height, int32_t end_height,
                                  struct block_piece_manifest *out)
@@ -1512,25 +1572,15 @@ bool block_piece_manifest_build(const char *datadir,
                                   / BLOCKS_PER_PIECE);
 
     /* Get tip hash */
-    sqlite3_stmt *s = NULL;
-    int rc = sqlite3_prepare_v2(db,
-        "SELECT hash FROM blocks WHERE height = ?", -1, &s, NULL);
-    if (rc != SQLITE_OK || !s) { sqlite3_close(db); LOG_FAIL("sync", "piece_manifest_build: tip hash query prepare failed"); }
-    sqlite3_bind_int(s, 1, end_height);
-    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        const void *h = sqlite3_column_blob(s, 0);
-        if (h && sqlite3_column_bytes(s, 0) >= 32)
-            memcpy(out->tip_hash, h, 32);
-    }
-    sqlite3_finalize(s);
+    if (!block_piece_manifest_read_tip_hash(db, end_height, out->tip_hash)) { sqlite3_close(db); LOG_FAIL("sync", "piece_manifest_build: tip hash query prepare failed"); }
 
     /* Allocate piece hashes */
     out->piece_hashes = zcl_calloc(out->num_pieces, 32, "piece_hashes");
     if (!out->piece_hashes) { sqlite3_close(db); LOG_FAIL("sync", "piece_manifest_build: alloc piece_hashes failed for %u pieces", out->num_pieces); }
 
     /* Fetch all block hashes in range, compute piece hashes */
-    s = NULL;
-    rc = sqlite3_prepare_v2(db,
+    sqlite3_stmt *s = NULL;
+    int rc = sqlite3_prepare_v2(db,
         "SELECT hash FROM blocks WHERE height >= ? AND height <= ? "
         "ORDER BY height ASC", -1, &s, NULL);
     if (rc != SQLITE_OK || !s) {
@@ -1551,32 +1601,8 @@ bool block_piece_manifest_build(const char *datadir,
         LOG_FAIL("sync", "piece_manifest_build: alloc piece_block_hashes failed");
     }
 
-    uint32_t piece_idx = 0;
-    uint32_t block_in_piece = 0;
-
-    while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-        const void *h = sqlite3_column_blob(s, 0);
-        if (h && sqlite3_column_bytes(s, 0) >= 32)
-            memcpy(piece_block_hashes[block_in_piece], h, 32);
-        block_in_piece++;
-
-        if (block_in_piece == BLOCKS_PER_PIECE) {
-            if (piece_idx < out->num_pieces) {
-                block_piece_hash((const uint8_t (*)[32])piece_block_hashes,
-                                 block_in_piece, piece_idx,
-                                 out->piece_hashes[piece_idx]);
-            }
-            piece_idx++;
-            block_in_piece = 0;
-        }
-    }
-
-    /* Final partial piece */
-    if (block_in_piece > 0 && piece_idx < out->num_pieces) {
-        block_piece_hash((const uint8_t (*)[32])piece_block_hashes,
-                         block_in_piece, piece_idx,
-                         out->piece_hashes[piece_idx]);
-    }
+    block_piece_manifest_hash_rows(s, out->num_pieces, piece_block_hashes,
+                                   out->piece_hashes);
 
     free(piece_block_hashes);
     sqlite3_finalize(s);
@@ -1587,6 +1613,60 @@ bool block_piece_manifest_build(const char *datadir,
 
     sqlite3_close(db);
     return true;
+}
+
+/* First height in start_height..end_height with trusted block data, or
+ * end_height + 1 when there is none. */
+static int32_t block_piece_manifest_first_trusted(const struct active_chain *chain,
+                                                  int32_t start_height,
+                                                  int32_t end_height)
+{
+    int32_t first_data_height = start_height;
+    while (first_data_height <= end_height) {
+        const struct block_index *bi = active_chain_at(chain, first_data_height);
+        if (bi && bi->phashBlock && (bi->nStatus & BLOCK_HAVE_DATA))
+            break;
+        first_data_height++;
+    }
+    return first_data_height;
+}
+
+/* Hashes the trusted blocks first..end into piece hashes and the tip hash.
+ * Returns 0, or the first height whose trusted block data is missing. */
+static int32_t block_piece_manifest_chain_pieces(const struct active_chain *chain,
+                                                 int32_t first_data_height,
+                                                 int32_t end_height,
+                                                 struct block_piece_manifest *out,
+                                                 uint8_t (*piece_block_hashes)[32])
+{
+    uint32_t piece_idx = 0;
+    uint32_t block_in_piece = 0;
+
+    for (int32_t h = first_data_height; h <= end_height; h++) {
+        const struct block_index *bi = active_chain_at(chain, h);
+        if (!bi || !bi->phashBlock || !(bi->nStatus & BLOCK_HAVE_DATA))
+            return h;
+
+        memcpy(piece_block_hashes[block_in_piece], bi->phashBlock->data, 32);
+        if (h == end_height)
+            memcpy(out->tip_hash, bi->phashBlock->data, 32);
+        block_in_piece++;
+
+        if (block_in_piece == BLOCKS_PER_PIECE) {
+            block_piece_hash((const uint8_t (*)[32])piece_block_hashes,
+                             block_in_piece, piece_idx,
+                             out->piece_hashes[piece_idx]);
+            piece_idx++;
+            block_in_piece = 0;
+        }
+    }
+
+    if (block_in_piece > 0) {
+        block_piece_hash((const uint8_t (*)[32])piece_block_hashes,
+                         block_in_piece, piece_idx,
+                         out->piece_hashes[piece_idx]);
+    }
+    return 0;
 }
 
 bool block_piece_manifest_build_active_chain(
@@ -1606,13 +1686,8 @@ bool block_piece_manifest_build_active_chain(
                  "piece_manifest_build_chain: end height beyond active chain (%d/%d)",
                  end_height, chain_height);
 
-    int32_t first_data_height = start_height;
-    while (first_data_height <= end_height) {
-        const struct block_index *bi = active_chain_at(chain, first_data_height);
-        if (bi && bi->phashBlock && (bi->nStatus & BLOCK_HAVE_DATA))
-            break;
-        first_data_height++;
-    }
+    int32_t first_data_height =
+        block_piece_manifest_first_trusted(chain, start_height, end_height);
     if (first_data_height > end_height)
         LOG_FAIL("sync",
                  "piece_manifest_build_chain: no trusted block data in requested range h=%d..%d",
@@ -1642,38 +1717,16 @@ bool block_piece_manifest_build_active_chain(
                  "piece_manifest_build_chain: alloc piece_block_hashes failed");
     }
 
-    uint32_t piece_idx = 0;
-    uint32_t block_in_piece = 0;
-
-    for (int32_t h = first_data_height; h <= end_height; h++) {
-        const struct block_index *bi = active_chain_at(chain, h);
-        if (!bi || !bi->phashBlock || !(bi->nStatus & BLOCK_HAVE_DATA)) {
-            free(piece_block_hashes);
-            free(out->piece_hashes);
-            out->piece_hashes = NULL;
-            LOG_FAIL("sync",
-                     "piece_manifest_build_chain: missing trusted block data at h=%d",
-                     h);
-        }
-
-        memcpy(piece_block_hashes[block_in_piece], bi->phashBlock->data, 32);
-        if (h == end_height)
-            memcpy(out->tip_hash, bi->phashBlock->data, 32);
-        block_in_piece++;
-
-        if (block_in_piece == BLOCKS_PER_PIECE) {
-            block_piece_hash((const uint8_t (*)[32])piece_block_hashes,
-                             block_in_piece, piece_idx,
-                             out->piece_hashes[piece_idx]);
-            piece_idx++;
-            block_in_piece = 0;
-        }
-    }
-
-    if (block_in_piece > 0) {
-        block_piece_hash((const uint8_t (*)[32])piece_block_hashes,
-                         block_in_piece, piece_idx,
-                         out->piece_hashes[piece_idx]);
+    int32_t h = block_piece_manifest_chain_pieces(chain, first_data_height,
+                                                  end_height, out,
+                                                  piece_block_hashes);
+    if (h != 0) {
+        free(piece_block_hashes);
+        free(out->piece_hashes);
+        out->piece_hashes = NULL;
+        LOG_FAIL("sync",
+                 "piece_manifest_build_chain: missing trusted block data at h=%d",
+                 h);
     }
 
     free(piece_block_hashes);
