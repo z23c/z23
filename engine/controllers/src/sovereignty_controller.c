@@ -240,23 +240,19 @@ const char *sovereignty_trust_mode(bool proven_authority, bool self_folded)
     return self_folded ? "sovereign" : "release_assisted";
 }
 
-bool sovereignty_guard_allow(const char *action, char *reason,
-                             size_t reason_cap)
+/* The trust decision behind sovereignty_guard_allow, without its stamp write
+ * or its log line. `st_out` receives the derived state when a progress store
+ * is open; `why_out` receives the reason a refusal carries. */
+static bool sov_guard_eval(sqlite3 *pdb, const char *action, char *reason,
+                           size_t reason_cap, enum sync_trust_state *st_out,
+                           char *why, size_t why_cap)
 {
-    if (reason && reason_cap)
-        reason[0] = '\0';
-
-    sqlite3 *pdb = progress_store_db();
     if (!pdb) {
         if (reason && reason_cap)
             snprintf(reason, reason_cap, "progress_store_unavailable");
-        LOG_WARN("sovereignty", "%s refused: progress store not open",
-                 action ? action : "(action)");
         return false;
     }
-
     int32_t hstar = reducer_frontier_provable_tip_cached();
-    char why[96] = {0};
     /* Read the three provenance predicates under one consistent recursive-lock
      * scope and derive the trust state once, then route the action's allow
      * decision through the central capability table (services/sync_trust_
@@ -271,25 +267,55 @@ bool sovereignty_guard_allow(const char *action, char *reason,
     bool proven = coins_kv_is_proven_authority(pdb, NULL);
     bool refold = coins_kv_contains_refold_marker(pdb);
     bool self_derived = coins_kv_tip_is_self_derived(pdb, hstar, why,
-                                                     sizeof(why));
+                                                     why_cap);
     progress_store_tx_unlock();
 
     enum sync_trust_state st = sync_trust_derive(proven, refold, self_derived);
-    sov_stamp_transitions(pdb, st);
+    *st_out = st;
     enum sync_capability cap = (action && strcmp(action, "mint") == 0)
                                    ? SYNC_CAP_MINE
                                    : SYNC_CAP_WALLET_SPEND;
-    if (!sync_trust_cap_allowed(st, cap)) {
-        if (reason && reason_cap)
-            snprintf(reason, reason_cap, "release_assisted: %s",
-                     why[0] ? why : "not_self_derived");
+    if (sync_trust_cap_allowed(st, cap))
+        return true;
+    if (reason && reason_cap)
+        snprintf(reason, reason_cap, "release_assisted: %s",
+                 why[0] ? why : "not_self_derived");
+    return false;
+}
+
+bool sovereignty_guard_peek(const char *action, char *reason,
+                            size_t reason_cap)
+{
+    enum sync_trust_state st;
+    char why[96] = {0};
+    if (reason && reason_cap)
+        reason[0] = '\0';
+    return sov_guard_eval(progress_store_db(), action, reason, reason_cap, &st,
+                          why, sizeof(why));
+}
+
+bool sovereignty_guard_allow(const char *action, char *reason,
+                             size_t reason_cap)
+{
+    enum sync_trust_state st = SYNC_TRUST_EMPTY;
+    char why[96] = {0};
+    sqlite3 *pdb = progress_store_db();
+    if (reason && reason_cap)
+        reason[0] = '\0';
+    bool allowed = sov_guard_eval(pdb, action, reason, reason_cap, &st, why,
+                                  sizeof(why));
+    if (!pdb) {
+        LOG_WARN("sovereignty", "%s refused: progress store not open",
+                 action ? action : "(action)");
+        return false;
+    }
+    sov_stamp_transitions(pdb, st);
+    if (!allowed)
         LOG_WARN("sovereignty",
                  "%s refused — tip is release_assisted (borrowed shielded "
                  "history, not self-folded): %s",
                  action ? action : "(action)", why[0] ? why : "unknown");
-        return false;
-    }
-    return true;
+    return allowed;
 }
 
 /* One capability the v2 dumper reports, with its stable JSON key. */

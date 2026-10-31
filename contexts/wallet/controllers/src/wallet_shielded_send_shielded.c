@@ -27,6 +27,41 @@ static void z_sendmany_shielded_select_notes(
         }
 }
 
+/* The one test of a note's stored witness, shared by z_sendmany and the
+ * wallet summary so what the summary calls spendable cannot drift from what
+ * send accepts. Returns 0 when the witness is present, at the authoritative
+ * tip and deserializes; 1 when missing; 2 when stale (*height is the stored
+ * witness height); 3 when it cannot be deserialized. The decoded witness goes
+ * to `out` when it is not NULL. */
+int wallet_note_witness_status(struct node_db *ndb, const uint8_t txid[32],
+                               uint32_t output_index, int authoritative_tip,
+                               struct incremental_witness *out, int *height)
+{
+    struct incremental_witness scratch;
+    struct incremental_merkle_tree dummy_tree;
+    uint8_t *wblob = NULL;
+    size_t wlen = 0;
+    int wheight = 0;
+
+    if (!db_sapling_note_load_witness(ndb, txid, output_index, &wblob, &wlen,
+                                      &wheight) || !wblob)
+        return 1;
+    if (height)
+        *height = wheight;
+    if (wheight != authoritative_tip) {
+        free(wblob);
+        return 2;
+    }
+    sapling_tree_init(&dummy_tree);
+    struct byte_stream ws;
+    stream_init_from_data(&ws, wblob, wlen);
+    bool ok = incremental_witness_deserialize(
+        out ? out : &scratch, &ws, SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH,
+        dummy_tree.combine, dummy_tree.uncommitted);
+    free(wblob);
+    return ok ? 0 : 3;
+}
+
 /* Load and deserialize the witness of every selected note. Returns 0 on
  * success; otherwise 1 (not available), 2 (stale) or 3 (deserialize failed),
  * with the failing note index in *fail_i and, for 2 (stale) only, the
@@ -36,36 +71,21 @@ static int z_sendmany_shielded_load_witnesses(
     struct wallet_rpc_context *ctx,
     const struct db_sapling_note *selected_notes, size_t num_sel_notes,
     struct incremental_witness *witnesses,
-    const struct incremental_merkle_tree *dummy_tree,
     int authoritative_tip, size_t *fail_i, int *fail_height)
 {
         for (size_t i = 0; i < num_sel_notes; i++) {
-            uint8_t *wblob = NULL;
-            size_t wlen = 0;
             int wheight = 0;
-            if (!db_sapling_note_load_witness(ctx->node_db,
-                    selected_notes[i].txid, selected_notes[i].output_index,
-                    &wblob, &wlen, &wheight) || !wblob) {
+            int st = wallet_note_witness_status(
+                ctx->node_db, selected_notes[i].txid,
+                selected_notes[i].output_index, authoritative_tip,
+                &witnesses[i], &wheight);
+            if (st != 0) {
                 free(witnesses);
                 *fail_i = i;
-                return 1;
+                if (st == 2)
+                    *fail_height = wheight;
+                return st;
             }
-            if (wheight != authoritative_tip) {
-                free(wblob); free(witnesses);
-                *fail_i = i;
-                *fail_height = wheight;
-                return 2;
-            }
-            struct byte_stream ws;
-            stream_init_from_data(&ws, wblob, wlen);
-            if (!incremental_witness_deserialize(&witnesses[i], &ws,
-                    SAPLING_INCREMENTAL_MERKLE_TREE_DEPTH,
-                    dummy_tree->combine, dummy_tree->uncommitted)) {
-                free(wblob); free(witnesses);
-                *fail_i = i;
-                return 3;
-            }
-            free(wblob);
         }
         return 0;
 }
@@ -240,11 +260,8 @@ const char *z_sendmany_shielded_witness_gate(
         num, sizeof(struct incremental_witness), "sapling_witnesses");
     if (!witnesses)
         return "Out of memory";
-    struct incremental_merkle_tree dummy_tree;
-    sapling_tree_init(&dummy_tree);
     int wstat = z_sendmany_shielded_load_witnesses(
-        ctx, selected, num, witnesses, &dummy_tree, authoritative_tip,
-        fail_i, fail_height);
+        ctx, selected, num, witnesses, authoritative_tip, fail_i, fail_height);
     if (wstat != 0)
         return z_sendmany_shielded_witness_refusal(wstat);
     const char *refusal = z_sendmany_shielded_anchor_refusal(

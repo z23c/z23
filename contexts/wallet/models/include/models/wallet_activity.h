@@ -13,15 +13,36 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* How the nullifier of an unspent note stands against the chain's spent set.
+ * The reader leaves it UNCHECKED; the caller that owns the chain authority
+ * fills it. */
+enum wallet_note_chain_state {
+    WALLET_NOTE_UNCHECKED,
+    WALLET_NOTE_UNSPENT_ON_CHAIN,
+    WALLET_NOTE_SPENT_ON_CHAIN,  /* its nullifier is already revealed */
+    WALLET_NOTE_CHAIN_UNKNOWN,   /* the spent set could not be read */
+};
+
+/* Whether send would accept the note's stored witness. */
+enum wallet_note_witness {
+    WALLET_WITNESS_UNCHECKED,
+    WALLET_WITNESS_READY,
+    WALLET_WITNESS_UNUSABLE,     /* missing, stale or unreadable */
+};
+
 struct db_wallet_note_fact {
     uint8_t txid[32];
     uint32_t output_index;
     int64_t value;
     uint8_t ivk[32];
     int block_height;       /* 0 while unconfirmed */
-    bool spent;
-    uint8_t spent_txid[32]; /* valid when spent */
+    bool spent;             /* spent_txid is not NULL */
+    bool spent_txid_ok;     /* it holds a 32-byte id */
+    uint8_t spent_txid[32]; /* valid when spent_txid_ok */
     bool memo_present;      /* any byte other than 0x00 and 0xf6 */
+    uint8_t nullifier[32];
+    enum wallet_note_chain_state chain;
+    enum wallet_note_witness witness;
 };
 
 struct db_wallet_coin_fact {
@@ -30,7 +51,8 @@ struct db_wallet_coin_fact {
     int64_t value;
     int height;
     bool spent;
-    uint8_t spent_txid[32]; /* valid when spent */
+    bool spent_txid_ok;
+    uint8_t spent_txid[32]; /* valid when spent_txid_ok */
     bool coinbase;
 };
 
@@ -40,11 +62,18 @@ struct db_wallet_tx_fact {
     int64_t time_received; /* when the wallet recorded it */
     bool from_me;
     int64_t fee;            /* 0 when never recorded */
+    /* Read from the stored raw transaction by the caller; false when it is
+     * absent or does not parse. */
+    bool raw_known;
+    uint32_t vin_count;
+    uint32_t vout_count;
+    int64_t vout_total;
+    int64_t value_balance;  /* shielded pool in minus out; fee included */
 };
 
 /* Each reader heap-allocates *out (NULL when empty) and returns the row
- * count, or -1 on a closed database, allocation failure or SQL error. The
- * caller frees *out with free(). */
+ * count, or -1 on a closed database, allocation failure or any SQL error.
+ * The caller frees *out with free(). */
 int db_wallet_note_facts_alloc(struct node_db *ndb,
                                struct db_wallet_note_fact **out);
 int db_wallet_coin_facts_alloc(struct node_db *ndb,
@@ -53,8 +82,8 @@ int db_wallet_tx_facts_alloc(struct node_db *ndb,
                              struct db_wallet_tx_fact **out);
 
 /* Memo bytes and receiving address of every note one transaction created.
- * Writes at most `max` rows and returns the count; ivk filtering is the
- * caller's job. */
+ * Writes at most `max` rows and returns the count, or -1 on a closed
+ * database or SQL error; ivk filtering is the caller's job. */
 struct db_wallet_note_memo {
     uint32_t output_index;
     uint8_t ivk[32];

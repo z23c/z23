@@ -485,6 +485,9 @@ static int test_default_deny_surface(void)
             "core.wallet.restore",
             "core.wallet.rescan",
             "core.wallet.rescan-witnesses",
+            "core.wallet.summary",
+            "core.wallet.history",
+            "core.wallet.shielded.latest",
         };
         for (size_t i = 0; i < sizeof(denied) / sizeof(denied[0]); i++) {
             const struct zcl_command_spec *sp = spec_for(denied[i]);

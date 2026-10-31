@@ -8,17 +8,24 @@
 #include "controllers/wallet_shielded_internal.h"
 #include "controllers/wallet_activity.h"
 #include "controllers/sovereignty_controller.h"
+#include "jobs/reducer_frontier.h"
+#include "primitives/transaction.h"
 #include "services/node_health_service.h"
+#include "services/sync_monitor.h"
+#include "validation/main_state.h"
 #include "wallet/wallet_lock.h"
+#include "platform/time_compat.h"
 #include "core/uint256.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
 
-/* The one place the summary asks whether the wallet may send. */
+/* The one place the summary asks whether the wallet may send. It reads the
+ * guard's decision without the guard's progress-store stamp or its log line:
+ * a summary is a read and attempts no spend. */
 bool wallet_send_gate(char *reason, size_t cap)
 {
-    return sovereignty_guard_allow("wallet_spend", reason, cap);
+    return sovereignty_guard_peek("wallet_spend", reason, cap);
 }
 
 static void wa_kv_null(struct json_value *obj, const char *key)
@@ -44,6 +51,35 @@ static int wa_max_int(int a, int b)
     return a > b ? a : b;
 }
 
+/* An amount that is unknown renders as null in both forms, never as 0. */
+static void wa_kv_amount_known(struct json_value *obj, const char *zat_key,
+                               const char *str_key, bool known, int64_t v)
+{
+    if (known) {
+        wa_kv_amount(obj, zat_key, str_key, v);
+        return;
+    }
+    wa_kv_null(obj, zat_key);
+    wa_kv_null(obj, str_key);
+}
+
+/* A tip block newer than this is evidence the chain is live without a peer. */
+#define WA_TIP_RECENT_SECONDS 600
+
+/* The node has evidence the chain is live: a connected peer with a known best
+ * height that is at most one block ahead of the tip, or a tip block time
+ * within WA_TIP_RECENT_SECONDS. A node that is offline, or cannot tell,
+ * has none. */
+static bool wa_chain_live(const struct wallet_chain_view *v)
+{
+    bool peer = v->peer_count > 0 && v->peer_best_height > 0 &&
+                v->peer_best_height - v->tip_height <= 1;
+    return peer || v->tip_recent;
+}
+
+/* `current` needs a real tip, a real header, every shielded key loaded, a scan
+ * that reached the tip, a node within one block of what it knows and evidence
+ * the chain is live. */
 static void wa_summary_chain(const struct wallet_chain_view *v,
                              struct json_value *out)
 {
@@ -51,11 +87,16 @@ static void wa_summary_chain(const struct wallet_chain_view *v,
     int behind = ahead > v->tip_height ? ahead - v->tip_height : 0;
     json_push_kv_int(out, "tip_height", v->tip_height);
     json_push_kv_int(out, "header_height", v->header_height);
-    json_push_kv_int(out, "scanned_through_height", v->scanned_through);
+    if (v->scanned_through >= 0)
+        json_push_kv_int(out, "scanned_through_height", v->scanned_through);
+    else
+        wa_kv_null(out, "scanned_through_height");
     json_push_kv_int(out, "blocks_behind", behind);
     json_push_kv_bool(out, "current",
-                      v->tip_height >= 0 && v->scanned_through >= v->tip_height &&
-                      behind <= 1);
+                      v->tip_height > 0 && v->header_height > 0 &&
+                      v->shielded_known &&
+                      v->scanned_through >= v->tip_height && behind <= 1 &&
+                      wa_chain_live(v));
 }
 
 void wallet_summary_to_json(const struct wallet_summary *s,
@@ -65,12 +106,27 @@ void wallet_summary_to_json(const struct wallet_summary *s,
 {
     json_set_object(out);
     json_push_kv_str(out, "schema", "zcl.wallet_summary.v1");
-    wa_kv_amount(out, "spendable_zat", "spendable", s->spendable);
-    wa_kv_amount(out, "pending_zat", "pending", s->pending);
-    json_push_kv_int(out, "pending_notes", s->pending_count);
-    json_push_kv_int(out, "pending_min_confirmations_needed",
-                     s->pending_min_confs_needed);
-    wa_kv_amount(out, "sending_zat", "sending", s->sending);
+    bool z = v->shielded_known;
+    json_push_kv_str(out, "shielded_state", z ? "ok" : "keys_unavailable");
+    wa_kv_amount_known(out, "spendable_zat", "spendable", z, s->spendable);
+    wa_kv_amount_known(out, "pending_zat", "pending", z, s->pending);
+    if (z) {
+        json_push_kv_int(out, "pending_notes", s->pending_count);
+        json_push_kv_int(out, "pending_min_confirmations_needed",
+                         s->pending_min_confs_needed);
+    } else {
+        wa_kv_null(out, "pending_notes");
+        wa_kv_null(out, "pending_min_confirmations_needed");
+    }
+    wa_kv_amount_known(out, "unready_zat", "unready", z, s->unready);
+    if (z) {
+        json_push_kv_int(out, "unready_notes", s->unready_notes);
+        json_push_kv_int(out, "reconciling_notes", s->reconciling_notes);
+    } else {
+        wa_kv_null(out, "unready_notes");
+        wa_kv_null(out, "reconciling_notes");
+    }
+    wa_kv_amount_known(out, "sending_zat", "sending", z, s->sending);
     wa_kv_amount(out, "public_zat", "public", s->public_confirmed);
     wa_kv_amount(out, "immature_zat", "immature", s->immature);
     wa_summary_chain(v, out);
@@ -103,6 +159,10 @@ void wallet_history_entry_to_json(const struct wallet_history_entry *e,
         wa_kv_null(out, "time");
     json_push_kv_str(out, "direction", dir[e->direction]);
     json_push_kv_str(out, "kind", e->private_kind ? "private" : "public");
+    if (e->fully_shielded >= 0)
+        json_push_kv_bool(out, "fully_shielded", e->fully_shielded != 0);
+    else
+        wa_kv_null(out, "fully_shielded");
     if (e->amount_known)
         wa_kv_amount(out, "amount_zat", "amount", e->amount);
     else {
@@ -124,9 +184,12 @@ void wallet_history_entry_to_json(const struct wallet_history_entry *e,
 struct wa_keys {
     uint8_t (*ivk)[32];
     size_t n;
+    bool known; /* the viewing keys are loaded, or none can exist */
 };
 
-/* Copy the distinct loaded viewing keys. A repeated ivk is kept once. */
+/* Copy the distinct loaded viewing keys. A repeated ivk is kept once. A wallet
+ * that is locked and holds none cannot say whether it has shielded keys, so
+ * its shielded amounts are unknown, not zero. */
 static bool wa_keys_collect(struct wallet_rpc_context *ctx, struct wa_keys *k)
 {
     struct sapling_keystore *ks = &ctx->wallet->sapling_keys;
@@ -143,25 +206,40 @@ static bool wa_keys_collect(struct wallet_rpc_context *ctx, struct wa_keys *k)
             memcpy(k->ivk[k->n++], ks->keys[i].ivk, 32);
     }
     zcl_mutex_unlock(&ks->cs);
+    k->known = k->n > 0 || wallet_lock_is_unlocked();
     return true;
 }
 
-static void wa_chain_view(struct wallet_rpc_context *ctx,
+/* False when the chain tip is unknown: every confirmation depends on it. */
+static bool wa_chain_view(struct wallet_rpc_context *ctx,
                           const struct wa_keys *k,
                           struct wallet_chain_view *v)
 {
     struct node_health_snapshot h = {0};
     node_health_collect(&h, ctx->node_db, ctx->main_state);
     memset(v, 0, sizeof(*v));
+    if (h.tip_height <= 0)
+        LOG_FAIL("wallet_activity", "chain tip unknown");
+    const struct main_state *ms =
+        ctx->main_state ? ctx->main_state : sync_monitor_main_state();
     v->tip_height = h.tip_height;
-    if (v->tip_height < 0)
-        v->tip_height = db_wallet_chain_tip_height(ctx->node_db);
-    v->header_height = h.header_height;
+    v->header_height = ms && ms->pindex_best_header
+        ? ms->pindex_best_header->nHeight : 0;
     v->peer_best_height = h.peer_best_height;
+    v->peer_count = h.peer_count;
+    v->tip_recent = false;
+    if (ms) {
+        const struct block_index *tip = active_chain_tip(&ms->chain_active);
+        int64_t now = (int64_t)platform_time_wall_time_t();
+        if (tip && tip->nTime > 0 && now >= (int64_t)tip->nTime)
+            v->tip_recent = now - (int64_t)tip->nTime <= WA_TIP_RECENT_SECONDS;
+    }
     v->scanned_through = wallet_read_scanned_through_height(ctx->wallet);
     v->encrypted = wallet_lock_encrypted_at_rest();
     v->locked = !wallet_lock_is_unlocked();
     v->shielded_keys = k->n;
+    v->shielded_known = k->known;
+    return true;
 }
 
 struct wa_facts {
@@ -190,12 +268,113 @@ static bool wa_facts_load(struct node_db *ndb, struct wa_facts *f)
     return false;
 }
 
+static bool wa_ivk_in(const struct wa_keys *k, const uint8_t ivk[32])
+{
+    for (size_t i = 0; i < k->n; i++)
+        if (memcmp(k->ivk[i], ivk, 32) == 0)
+            return true;
+    return false;
+}
+
+/* Fill each unspent loaded note's chain and witness state from the same two
+ * authorities send consults: the durable spent set and the stored witness at
+ * the authoritative tip. Both are read-only here. */
+static void wa_notes_annotate(struct wallet_rpc_context *ctx,
+                              const struct wa_keys *k,
+                              struct db_wallet_note_fact *notes, int nn)
+{
+    int authoritative_tip = reducer_frontier_external_tip_height();
+    for (int i = 0; i < nn; i++) {
+        struct db_wallet_note_fact *n = &notes[i];
+        bool spent_on_chain = false;
+        if (n->spent || !wa_ivk_in(k, n->ivk))
+            continue;
+        if (!node_db_sapling_nullifier_is_spent(n->nullifier, &spent_on_chain))
+            n->chain = WALLET_NOTE_CHAIN_UNKNOWN;
+        else
+            n->chain = spent_on_chain ? WALLET_NOTE_SPENT_ON_CHAIN
+                                      : WALLET_NOTE_UNSPENT_ON_CHAIN;
+        n->witness = wallet_note_witness_status(
+                         ctx->node_db, n->txid, n->output_index,
+                         authoritative_tip, NULL, NULL) == 0
+            ? WALLET_WITNESS_READY : WALLET_WITNESS_UNUSABLE;
+    }
+}
+
+/* Read the shape of each transaction the wallet sent from its stored form. A
+ * transaction that is absent or does not parse stays raw_known = false. */
+static void wa_txs_enrich(struct node_db *ndb, struct db_wallet_tx_fact *txs,
+                          int nt)
+{
+    for (int i = 0; i < nt; i++) {
+        struct db_wallet_tx row;
+        struct transaction tx;
+        struct byte_stream bs;
+        if (!txs[i].from_me || !db_wallet_tx_find(ndb, txs[i].txid, &row))
+            continue;
+        transaction_init(&tx);
+        stream_init_from_data(&bs, row.raw_tx, row.raw_tx_len);
+        if (row.raw_tx && transaction_deserialize(&tx, &bs)) {
+            int64_t total = 0;
+            for (size_t j = 0; j < tx.num_vout; j++)
+                total += tx.vout[j].value;
+            txs[i].raw_known = true;
+            txs[i].vin_count = (uint32_t)tx.num_vin;
+            txs[i].vout_count = (uint32_t)tx.num_vout;
+            txs[i].vout_total = total;
+            txs[i].value_balance = tx.value_balance;
+        }
+        transaction_free(&tx);
+        db_wallet_tx_free(&row);
+    }
+}
+
 static bool wa_ready(struct wallet_rpc_context *ctx, struct json_value *result)
 {
     if (!ctx->wallet || !wallet_ctx_db_ready(ctx)) {
         json_set_str(result, "Wallet not available");
         LOG_FAIL("wallet_activity", "wallet or node database not ready");
     }
+    return true;
+}
+
+/* Everything one summary or history reply is computed from. */
+struct wa_state {
+    struct wa_keys keys;
+    struct wa_facts facts;
+    struct wallet_chain_view view;
+};
+
+static void wa_state_free(struct wa_state *st)
+{
+    wa_facts_free(&st->facts);
+    free(st->keys.ivk);
+}
+
+/* Load keys, fact rows and the chain view, or fail the command with the
+ * reason in `result`. Nothing is half-loaded on failure. */
+static bool wa_state_load(struct wallet_rpc_context *ctx, struct wa_state *st,
+                          bool for_history, struct json_value *result)
+{
+    memset(st, 0, sizeof(*st));
+    if (!wa_keys_collect(ctx, &st->keys)) {
+        json_set_str(result, "Out of memory");
+        LOG_FAIL("wallet_activity", "viewing key copy failed");
+    }
+    if (!wa_facts_load(ctx->node_db, &st->facts)) {
+        free(st->keys.ivk);
+        json_set_str(result, "Wallet database unreadable");
+        LOG_FAIL("wallet_activity", "fact load failed");
+    }
+    if (!wa_chain_view(ctx, &st->keys, &st->view)) {
+        wa_state_free(st);
+        json_set_str(result, "Chain tip unknown");
+        return false; // raw-return-ok:callee-logged
+    }
+    if (for_history)
+        wa_txs_enrich(ctx->node_db, st->facts.txs, st->facts.nt);
+    else
+        wa_notes_annotate(ctx, &st->keys, st->facts.notes, st->facts.nn);
     return true;
 }
 
@@ -209,61 +388,63 @@ bool rpc_walletsummary(const struct json_value *params, bool help,
     if (!wa_ready(ctx, result))
         return false; // raw-return-ok:callee-logged
 
-    struct wa_keys keys;
-    struct wa_facts f;
-    if (!wa_keys_collect(ctx, &keys)) {
-        json_set_str(result, "Out of memory");
-        return false;
-    }
-    if (!wa_facts_load(ctx->node_db, &f)) {
-        free(keys.ivk);
-        json_set_str(result, "Wallet database unreadable");
-        LOG_FAIL("wallet_activity", "walletsummary: fact load failed");
-    }
-    struct wallet_chain_view view;
+    struct wa_state st;
     struct wallet_summary sum;
-    wa_chain_view(ctx, &keys, &view);
-    wallet_summary_accumulate(f.notes, (size_t)f.nn, f.coins, (size_t)f.nc,
-                              f.txs, (size_t)f.nt,
-                              (const uint8_t (*)[32])keys.ivk, keys.n,
-                              view.tip_height, &sum);
+    if (!wa_state_load(ctx, &st, false, result))
+        return false; // raw-return-ok:callee-logged
+    const struct wa_facts *f = &st.facts;
+    if (!wallet_summary_accumulate(
+            f->notes, (size_t)f->nn, f->coins, (size_t)f->nc, f->txs,
+            (size_t)f->nt, (const uint8_t (*)[32])st.keys.ivk, st.keys.n,
+            st.view.tip_height, &sum)) {
+        wa_state_free(&st);
+        json_set_str(result, "Out of memory");
+        LOG_FAIL("wallet_activity", "walletsummary: working set failed");
+    }
     char reason[96] = {0};
     bool allowed = wallet_send_gate(reason, sizeof(reason));
-    wallet_summary_to_json(&sum, &view, allowed, reason, result);
-    wa_facts_free(&f);
-    free(keys.ivk);
+    wallet_summary_to_json(&sum, &st.view, allowed, reason, result);
+    wa_state_free(&st);
     return true;
 }
 
 /* ── history ─────────────────────────────────────────────────────── */
 
-static void wa_detail_memo(struct wallet_rpc_context *ctx,
+/* Add the receiving address and memo of the wallet's own notes in one
+ * transaction: the first address any of them has and the first memo any of
+ * them carries. False when the notes could not be read. */
+static bool wa_detail_memo(struct wallet_rpc_context *ctx,
                            const struct wa_keys *k, const uint8_t txid[32],
                            struct json_value *entry)
 {
     struct db_wallet_note_memo memos[32];
     int n = db_wallet_note_memos_for_tx(ctx->node_db, txid, memos, 32);
-    bool found = false;
-    for (int i = 0; i < n && !found; i++) {
-        bool mine = false;
-        for (size_t j = 0; j < k->n && !mine; j++)
-            mine = memcmp(k->ivk[j], memos[i].ivk, 32) == 0;
-        if (!mine)
+    bool have_address = false, have_memo = false;
+    if (n < 0)
+        LOG_FAIL("wallet_activity", "wallethistory: note read failed");
+    for (int i = 0; i < n; i++) {
+        if (!wa_ivk_in(k, memos[i].ivk))
             continue;
-        if (memos[i].address[0])
+        if (!have_address && memos[i].address[0]) {
             json_push_kv_str(entry, "address", memos[i].address);
-        size_t before = entry->num_children;
-        wallet_memo_to_json(entry, memos[i].memo, memos[i].memo_len);
-        found = entry->num_children > before;
+            have_address = true;
+        }
+        if (!have_memo) {
+            size_t before = entry->num_children;
+            wallet_memo_to_json(entry, memos[i].memo, memos[i].memo_len);
+            have_memo = entry->num_children > before;
+        }
     }
     wa_kv_null(entry, "counterparty");
     json_push_kv_bool(entry, "counterparty_known", false);
+    return true;
 }
 
 static bool wa_history_detail(struct wallet_rpc_context *ctx,
                               const struct wa_keys *k,
                               const struct wallet_history_entry *e, int n,
-                              const char *txid_hex, struct json_value *result)
+                              const char *txid_hex, bool shielded_known,
+                              struct json_value *result)
 {
     struct uint256 id;
     uint256_set_hex(&id, txid_hex);
@@ -273,19 +454,27 @@ static bool wa_history_detail(struct wallet_rpc_context *ctx,
         struct json_value entry;
         json_init(&entry);
         wallet_history_entry_to_json(&e[i], &entry);
-        wa_detail_memo(ctx, k, e[i].txid, &entry);
+        if (!wa_detail_memo(ctx, k, e[i].txid, &entry)) {
+            json_free(&entry);
+            json_set_str(result, "Wallet database unreadable");
+            return false; // raw-return-ok:callee-logged
+        }
         json_set_object(result);
         json_push_kv_str(result, "schema", "zcl.wallet_history.v1");
+        json_push_kv_str(result, "shielded_state",
+                         shielded_known ? "ok" : "keys_unavailable");
         json_push_kv(result, "entry", &entry);
         json_free(&entry);
         return true;
     }
-    json_set_str(result, "Transaction is not in wallet history");
+    json_set_str(result, shielded_known
+                 ? "Transaction is not in wallet history"
+                 : "Shielded history is unavailable while the wallet is locked");
     return false;
 }
 
 static void wa_history_page(const struct wallet_history_entry *e, int n,
-                            size_t start, size_t limit,
+                            size_t start, size_t limit, bool shielded_known,
                             struct json_value *result)
 {
     struct json_value list;
@@ -301,6 +490,8 @@ static void wa_history_page(const struct wallet_history_entry *e, int n,
     }
     json_set_object(result);
     json_push_kv_str(result, "schema", "zcl.wallet_history.v1");
+    json_push_kv_str(result, "shielded_state",
+                     shielded_known ? "ok" : "keys_unavailable");
     json_push_kv(result, "entries", &list);
     json_push_kv_int(result, "count", (int64_t)(end - start));
     json_free(&list);
@@ -314,7 +505,7 @@ static void wa_history_page(const struct wallet_history_entry *e, int n,
 }
 
 static bool wa_history_args(const struct json_value *params, size_t *limit,
-                            struct wallet_history_cursor *cur,
+                            struct wallet_history_page_key *cur,
                             const char **txid, struct json_value *result)
 {
     struct rpc_params p;
@@ -347,39 +538,30 @@ bool rpc_wallethistory(const struct json_value *params, bool help,
         return false; // raw-return-ok:callee-logged
     size_t limit = 0;
     const char *txid = "";
-    struct wallet_history_cursor cur = {0};
+    struct wallet_history_page_key cur = {0};
     if (!wa_history_args(params, &limit, &cur, &txid, result))
         return false; // raw-return-ok:callee-logged
 
-    struct wa_keys keys;
-    struct wa_facts f;
-    if (!wa_keys_collect(ctx, &keys)) {
-        json_set_str(result, "Out of memory");
-        return false;
-    }
-    if (!wa_facts_load(ctx->node_db, &f)) {
-        free(keys.ivk);
-        json_set_str(result, "Wallet database unreadable");
-        LOG_FAIL("wallet_activity", "wallethistory: fact load failed");
-    }
-    struct wallet_chain_view view;
-    wa_chain_view(ctx, &keys, &view);
+    struct wa_state st;
+    if (!wa_state_load(ctx, &st, true, result))
+        return false; // raw-return-ok:callee-logged
+    const struct wa_facts *f = &st.facts;
     struct wallet_history_entry *e = NULL;
-    int n = wallet_history_build(f.notes, (size_t)f.nn, f.coins, (size_t)f.nc,
-                                 f.txs, (size_t)f.nt,
-                                 (const uint8_t (*)[32])keys.ivk, keys.n,
-                                 view.tip_height, &e);
+    int n = wallet_history_build(f->notes, (size_t)f->nn, f->coins,
+                                 (size_t)f->nc, f->txs, (size_t)f->nt,
+                                 (const uint8_t (*)[32])st.keys.ivk,
+                                 st.keys.n, st.view.tip_height, &e);
     bool ok = n >= 0;
     if (!ok)
         json_set_str(result, "Out of memory");
     else if (txid[0])
-        ok = wa_history_detail(ctx, &keys, e, n, txid, result);
+        ok = wa_history_detail(ctx, &st.keys, e, n, txid,
+                               st.keys.known, result);
     else
         wa_history_page(e, n, wallet_history_page_start(e, (size_t)n, &cur),
-                        limit, result);
+                        limit, st.keys.known, result);
     free(e);
-    wa_facts_free(&f);
-    free(keys.ivk);
+    wa_state_free(&st);
     return ok;
 }
 
@@ -422,6 +604,10 @@ bool rpc_walletlatestaddress(const struct json_value *params, bool help,
         json_push_kv_str(result, "address", addr);
     else
         wa_kv_null(result, "address");
+    /* A locked wallet that holds no key cannot say it has none. */
+    json_push_kv_str(result, "state",
+                     have ? "ok" : wallet_lock_is_unlocked()
+                                       ? "none" : "keys_unavailable");
     return true;
 }
 

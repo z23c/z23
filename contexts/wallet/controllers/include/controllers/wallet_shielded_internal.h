@@ -99,6 +99,12 @@ void wallet_memo_to_json(struct json_value *entry, const uint8_t *memo,
  * above: z_sendmany because the store buyer calls it in-process, the prefix
  * test because its owning test group asserts it across all three networks. */
 
+/* The witness test z_sendmany applies to each selected note; see the
+ * definition for the return codes. `out` may be NULL. */
+int wallet_note_witness_status(struct node_db *ndb, const uint8_t txid[32],
+                               uint32_t output_index, int authoritative_tip,
+                               struct incremental_witness *out, int *height);
+
 /* wallet_shielded_send_shielded.c — z_sendmany shielded-spend branch.
  * Recipients are pre-parsed into the transparent/shielded output
  * arrays by rpc_z_sendmany. */

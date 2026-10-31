@@ -1,0 +1,452 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * The walletsummary, wallethistory and walletlatestaddress RPC handlers
+ * driven end to end over an isolated node.db and progress store: locked boot,
+ * failed reads, unknown tip, witness and spent-set state, memo detail and the
+ * log lines they write. No wallet file, key, node or network is involved. */
+
+#include "test/test_core.h"
+
+#include "base/safe_alloc.h"
+#include "controllers/wallet_activity.h"
+#include "controllers/wallet_helpers.h"
+#include "jobs/reducer_frontier.h"
+#include "json/json.h"
+#include "models/wallet_tx.h"
+#include "primitives/transaction.h"
+#include "sapling/incremental_merkle_tree.h"
+#include "storage/nullifier_kv.h"
+#include "storage/progress_store.h"
+#include "test/wallet_summary_fixture.h"
+#include "wallet/wallet.h"
+#include "wallet/wallet_lock.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#define ZCL1 100000000LL
+#define FEE 10000LL
+#define TIP 300
+#define MEMO_TEXT "hello memo for the owner only"
+#define ADDRESS_TEXT "zs1testaddressnotforlogs"
+
+static uint8_t g_ivk[32];
+
+struct rig {
+    struct wallet *wallet;
+    struct node_db ndb;
+    char dir[256];
+};
+
+static bool rig_key(struct rig *r, bool present)
+{
+    struct sapling_keystore *ks = &r->wallet->sapling_keys;
+    memset(&ks->keys[0], 0, sizeof(ks->keys[0]));
+    memcpy(ks->keys[0].ivk, g_ivk, 32);
+    ks->keys[0].used = present;
+    ks->num_keys = present ? 1 : 0;
+    return true;
+}
+
+static bool rig_open(struct rig *r, bool with_block)
+{
+    char path[320];
+    memset(r, 0, sizeof(*r));
+    test_make_tmpdir(r->dir, sizeof(r->dir), "wallet_summary_handlers", "rig");
+    snprintf(path, sizeof(path), "%s/node.db", r->dir);
+    if (!node_db_open(&r->ndb, path) || !progress_store_open(r->dir))
+        return false;
+    if (!nullifier_kv_initialize_history(progress_store_db(), 0))
+        return false;
+    if (with_block && !wsh_put_block(&r->ndb, TIP))
+        return false;
+    r->wallet = zcl_calloc(1, sizeof(*r->wallet), "test-wallet");
+    if (!r->wallet)
+        return false;
+    wallet_init(r->wallet);
+    rig_key(r, true);
+    wallet_lock_reset_for_test();
+    wallet_rpc_context_set_base(r->wallet, NULL, r->dir, NULL, NULL, NULL);
+    wallet_rpc_context_set_node_db(&r->ndb);
+    reducer_frontier_provable_tip_set(TIP);
+    return true;
+}
+
+static void rig_close(struct rig *r)
+{
+    wallet_rpc_context_set_node_db(NULL);
+    wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
+    reducer_frontier_provable_tip_reset();
+    wallet_lock_reset_for_test();
+    if (r->wallet) {
+        wallet_free(r->wallet);
+        free(r->wallet);
+    }
+    progress_store_close();
+    node_db_close(&r->ndb);
+    (void)test_rm_rf_recursive(r->dir);
+}
+
+/* A witness for note (tx, 0) as of `height`. */
+static bool save_witness(struct node_db *ndb, uint8_t tx, int height)
+{
+    struct incremental_merkle_tree t;
+    struct incremental_witness w;
+    struct uint256 leaf;
+    struct byte_stream s;
+    uint8_t txid[32];
+    sapling_tree_init(&t);
+    memset(&leaf, tx, sizeof(leaf));
+    incremental_tree_append(&t, &leaf);
+    incremental_witness_init(&w, &t);
+    stream_init(&s, 8192);
+    memset(txid, tx, sizeof(txid));
+    bool ok = incremental_witness_serialize(&w, &s) &&
+              db_sapling_note_save_witness(ndb, txid, 0, s.data, s.size,
+                                           height);
+    stream_free(&s);
+    return ok;
+}
+
+/* 0x61 ready, 0x62 no witness, 0x63 stale witness, 0x64 spent on the chain,
+ * 0x65 below its threshold. */
+static bool rig_notes(struct rig *r)
+{
+    struct node_db *n = &r->ndb;
+    uint8_t nf[32];
+    bool ok = wsh_put_note(n, 0x61, 0, g_ivk, 5 * ZCL1, 280, NULL);
+    ok = ok && wsh_put_note(n, 0x62, 0, g_ivk, 3 * ZCL1, 270, NULL);
+    ok = ok && wsh_put_note(n, 0x63, 0, g_ivk, 2 * ZCL1, 260, NULL);
+    ok = ok && wsh_put_note(n, 0x64, 0, g_ivk, 7 * ZCL1, 250, NULL);
+    ok = ok && wsh_put_note(n, 0x65, 0, g_ivk, 1 * ZCL1, 299, NULL);
+    ok = ok && save_witness(n, 0x61, TIP) && save_witness(n, 0x63, TIP - 1);
+    ok = ok && save_witness(n, 0x64, TIP);
+    wsh_note_nullifier(0x64, 0, nf);
+    return ok && nullifier_kv_add(progress_store_db(), nf,
+                                  NULLIFIER_POOL_SAPLING, 290);
+}
+
+static void call_summary(struct json_value *out, bool *ok)
+{
+    struct json_value p;
+    json_init(&p);
+    json_set_array(&p);
+    json_init(out);
+    *ok = rpc_walletsummary(&p, false, out);
+    json_free(&p);
+}
+
+static void call_history(struct json_value *out, bool *ok, const char *cursor,
+                         const char *txid)
+{
+    struct json_value p, v;
+    json_init(&p);
+    json_set_array(&p);
+    json_init(&v);
+    json_set_int(&v, 10);
+    json_push_back(&p, &v);
+    json_free(&v);
+    json_init(&v);
+    json_set_str(&v, cursor);
+    json_push_back(&p, &v);
+    json_free(&v);
+    json_init(&v);
+    json_set_str(&v, txid);
+    json_push_back(&p, &v);
+    json_free(&v);
+    json_init(out);
+    *ok = rpc_wallethistory(&p, false, out);
+    json_free(&p);
+}
+
+static int64_t field(const struct json_value *j, const char *key)
+{
+    return json_get_int(json_get(j, key));
+}
+
+static bool is_null(const struct json_value *j, const char *key)
+{
+    const struct json_value *v = json_get(j, key);
+    return v && v->type == JSON_NULL;
+}
+
+static int abort_every_query(void *unused)
+{
+    (void)unused;
+    return 1;
+}
+
+static int test_summary_matches_send(struct rig *r)
+{
+    int failures = 0;
+    TEST_CASE("walletsummary: spendable is what send would accept") {
+        struct json_value j;
+        bool ok;
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        ASSERT_STR_EQ(json_get_str(json_get(&j, "shielded_state")), "ok");
+        ASSERT_EQ(field(&j, "spendable_zat"), 5 * ZCL1);
+        ASSERT_EQ(field(&j, "unready_zat"), 5 * ZCL1);
+        ASSERT_EQ(field(&j, "unready_notes"), 2);
+        ASSERT_EQ(field(&j, "reconciling_notes"), 1);
+        ASSERT_EQ(field(&j, "pending_zat"), 1 * ZCL1);
+        ASSERT_EQ(field(&j, "tip_height"), TIP);
+        ASSERT(!json_get_bool(json_get(&j, "locked")));
+        ASSERT(!json_get_bool(json_get(&j, "current")));
+        json_free(&j);
+        (void)r;
+    } TEST_END
+    return failures;
+}
+
+static int test_locked_boot(struct rig *r)
+{
+    int failures = 0;
+    TEST_CASE("locked boot: shielded amounts are unknown, never zero") {
+        struct json_value j;
+        bool ok;
+        rig_key(r, false);
+        wallet_lock_note_encrypted_at_rest();
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        ASSERT_STR_EQ(json_get_str(json_get(&j, "shielded_state")),
+                      "keys_unavailable");
+        ASSERT(is_null(&j, "spendable_zat"));
+        ASSERT(is_null(&j, "pending_zat"));
+        ASSERT(is_null(&j, "unready_zat"));
+        ASSERT(json_get_bool(json_get(&j, "locked")));
+        ASSERT(!json_get_bool(json_get(&j, "current")));
+        json_free(&j);
+        call_history(&j, &ok, "", "");
+        ASSERT(ok);
+        ASSERT_STR_EQ(json_get_str(json_get(&j, "shielded_state")),
+                      "keys_unavailable");
+        json_free(&j);
+        struct json_value p;
+        json_init(&p);
+        json_init(&j);
+        ASSERT(rpc_walletlatestaddress(&p, false, &j));
+        ASSERT(is_null(&j, "address"));
+        ASSERT_STR_EQ(json_get_str(json_get(&j, "state")), "keys_unavailable");
+        json_free(&j);
+        wallet_lock_reset_for_test();
+        rig_key(r, true);
+    } TEST_END
+    return failures;
+}
+
+static int test_failed_reads(struct rig *r)
+{
+    int failures = 0;
+    TEST_CASE("handlers: a failed read or allocation fails the command") {
+        struct json_value j;
+        bool ok;
+        sqlite3_progress_handler(r->ndb.db, 1, abort_every_query, NULL);
+        call_summary(&j, &ok);
+        ASSERT(!ok);
+        json_free(&j);
+        call_history(&j, &ok, "", "");
+        ASSERT(!ok);
+        json_free(&j);
+        sqlite3_progress_handler(r->ndb.db, 0, NULL, NULL);
+        zcl_alloc_fault_fail_next("wallet spenders");
+        call_summary(&j, &ok);
+        ASSERT(!ok);
+        json_free(&j);
+        zcl_alloc_fault_fail_next("wallet ivk copy");
+        call_history(&j, &ok, "", "");
+        ASSERT(!ok);
+        json_free(&j);
+        zcl_alloc_fault_clear();
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        json_free(&j);
+    } TEST_END
+    return failures;
+}
+
+static int test_unknown_tip(void)
+{
+    int failures = 0;
+    TEST_CASE("handlers: an unknown chain tip fails the command") {
+        struct rig empty;
+        struct json_value j;
+        bool ok;
+        ASSERT(rig_open(&empty, false));
+        call_summary(&j, &ok);
+        ASSERT(!ok);
+        json_free(&j);
+        call_history(&j, &ok, "", "");
+        ASSERT(!ok);
+        json_free(&j);
+        rig_close(&empty);
+    } TEST_END
+    return failures;
+}
+
+static bool detail_fixture(struct rig *r)
+{
+    bool ok = wsh_put_note(&r->ndb, 0x66, 0, g_ivk, 250000000LL, 200, NULL);
+    ok = ok && wsh_put_note(&r->ndb, 0x66, 1, g_ivk, 350000000LL, 200, MEMO_TEXT);
+    return ok && sqlite3_exec(r->ndb.db,
+        "UPDATE wallet_sapling_notes SET address='" ADDRESS_TEXT "' "
+        "WHERE value IN (250000000, 350000000)", NULL, NULL, NULL) == SQLITE_OK;
+}
+
+static size_t count_of(const char *hay, const char *needle)
+{
+    size_t n = 0;
+    for (const char *p = hay; (p = strstr(p, needle)); p += strlen(needle))
+        n++;
+    return n;
+}
+
+static int test_memo_detail(struct rig *r)
+{
+    int failures = 0;
+    TEST_CASE("wallethistory: memo and address only in detail, address once") {
+        struct json_value j;
+        char text[4096];
+        bool ok;
+        ASSERT(detail_fixture(r));
+        call_history(&j, &ok, "", "");
+        ASSERT(ok);
+        ASSERT(json_write(&j, text, sizeof(text)) > 0);
+        ASSERT(strstr(text, "hello") == NULL && strstr(text, "zs1") == NULL);
+        json_free(&j);
+        call_history(&j, &ok, "",
+            "6666666666666666666666666666666666666666666666666666666666666666");
+        ASSERT(ok);
+        ASSERT(json_write(&j, text, sizeof(text)) > 0);
+        ASSERT(strstr(text, MEMO_TEXT) != NULL);
+        ASSERT_EQ(count_of(text, "\"address\""), 1);
+        json_free(&j);
+    } TEST_END
+    return failures;
+}
+
+/* Sends whose stored transaction gives the fee: a z-to-z with change. */
+static bool serialized_zz(uint8_t **raw, size_t *len)
+{
+    struct transaction tx;
+    struct byte_stream s;
+    transaction_init(&tx);
+    tx.overwintered = true;
+    tx.version = SAPLING_TX_VERSION;
+    tx.version_group_id = SAPLING_VERSION_GROUP_ID;
+    tx.value_balance = FEE;
+    stream_init(&s, 1024);
+    bool ok = transaction_serialize(&tx, &s);
+    *raw = ok ? zcl_malloc(s.size, "test raw tx") : NULL;
+    ok = ok && *raw;
+    if (ok) {
+        memcpy(*raw, s.data, s.size);
+        *len = s.size;
+    }
+    stream_free(&s);
+    transaction_free(&tx);
+    return ok;
+}
+
+static int test_sent_amount_from_stored_tx(struct rig *r)
+{
+    int failures = 0;
+    TEST_CASE("wallethistory: a z-to-z send recovers amount from its tx") {
+        struct db_wallet_tx t;
+        struct json_value j;
+        bool ok;
+        memset(&t, 0, sizeof(t));
+        ASSERT(wsh_put_note(&r->ndb, 0x50, 0, g_ivk, 10 * ZCL1, 200, NULL));
+        ASSERT(wsh_spend_note(&r->ndb, 0x50, 0, 0x53));
+        ASSERT(wsh_put_note(&r->ndb, 0x53, 0, g_ivk, 5 * ZCL1 - FEE, 211,
+                            NULL));
+        ASSERT(serialized_zz(&t.raw_tx, &t.raw_tx_len));
+        memset(t.txid, 0x53, 32);
+        t.has_block = true;
+        t.block_height = 211;
+        memset(t.block_hash, 0x40, 32);
+        t.time_received = 1700000211;
+        t.from_me = true;
+        ASSERT(db_wallet_tx_save(&r->ndb, &t));
+        free(t.raw_tx);
+        call_history(&j, &ok, "",
+            "5353535353535353535353535353535353535353535353535353535353535353");
+        ASSERT(ok);
+        const struct json_value *e = json_get(&j, "entry");
+        ASSERT_STR_EQ(json_get_str(json_get(e, "direction")), "sent");
+        ASSERT_STR_EQ(json_get_str(json_get(e, "kind")), "private");
+        ASSERT_EQ(field(e, "amount_zat"), 5 * ZCL1);
+        ASSERT_EQ(field(e, "fee_zat"), FEE);
+        json_free(&j);
+    } TEST_END
+    return failures;
+}
+
+/* Everything a log line must never carry: amounts, ids, addresses, memos. */
+static int test_log_hygiene(const char *log)
+{
+    int failures = 0;
+    TEST_CASE("handlers: no log line carries wallet data") {
+        static const char *const secret[] = {
+            MEMO_TEXT, ADDRESS_TEXT, "500000000", "5.00000000",
+            "6161616161616161", "a1a1a1a1a1a1a1a1", "6666666666666666",
+            "5353535353535353", "wallet_spend refused",
+        };
+        for (size_t i = 0; i < sizeof(secret) / sizeof(secret[0]); i++) {
+            if (strstr(log, secret[i]))
+                printf("\n  log carries: %s\n", secret[i]);
+            ASSERT(strstr(log, secret[i]) == NULL);
+        }
+    } TEST_END
+    return failures;
+}
+
+static int run_rig_tests(void)
+{
+    struct rig r;
+    int failures = 0;
+    if (!rig_open(&r, true) || !rig_notes(&r)) {
+        printf("wallet_summary_handlers: fixture FAIL\n");
+        return 1;
+    }
+    failures += test_summary_matches_send(&r);
+    failures += test_locked_boot(&r);
+    failures += test_failed_reads(&r);
+    failures += test_memo_detail(&r);
+    failures += test_sent_amount_from_stored_tx(&r);
+    rig_close(&r);
+    failures += test_unknown_tip();
+    return failures;
+}
+
+int wallet_summary_handlers_run(void);
+int wallet_summary_handlers_run(void)
+{
+    char path[256], log[16384] = {0};
+    int failures;
+    printf("\n=== wallet summary handlers ===\n");
+    memset(g_ivk, 0xa1, sizeof(g_ivk));
+    snprintf(path, sizeof(path), "./test-tmp/wsh_%d.log", (int)getpid());
+    (void)mkdir("./test-tmp", 0755);
+    fflush(stderr);
+    int saved = dup(STDERR_FILENO);
+    FILE *cap = saved >= 0 ? fopen(path, "w+") : NULL;
+    if (cap)
+        dup2(fileno(cap), STDERR_FILENO);
+    failures = run_rig_tests();
+    fflush(stderr);
+    if (cap) {
+        dup2(saved, STDERR_FILENO);
+        rewind(cap);
+        size_t got = fread(log, 1, sizeof(log) - 1, cap);
+        log[got] = '\0';
+        fclose(cap);
+        (void)unlink(path);
+    }
+    if (saved >= 0)
+        close(saved);
+    return failures + (cap ? test_log_hygiene(log) : 1);
+}

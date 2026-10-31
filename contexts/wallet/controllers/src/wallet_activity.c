@@ -57,10 +57,10 @@ static uint8_t (*wa_spenders(const struct db_wallet_note_fact *notes,
     if (!sp)
         return NULL;
     for (size_t i = 0; i < nn; i++)
-        if (notes[i].spent && wa_ivk_loaded(ivks, nk, notes[i].ivk))
+        if (notes[i].spent_txid_ok && wa_ivk_loaded(ivks, nk, notes[i].ivk))
             memcpy(sp[(*count)++], notes[i].spent_txid, 32);
     for (size_t i = 0; i < nc; i++)
-        if (coins[i].spent)
+        if (coins[i].spent_txid_ok)
             memcpy(sp[(*count)++], coins[i].spent_txid, 32);
     qsort(sp, *count, 32, wa_cmp32);
     return sp;
@@ -83,6 +83,9 @@ static const struct db_wallet_tx_fact *wa_find_tx(
     return NULL;
 }
 
+/* An unspent note lands in exactly one bucket: nowhere when the chain has
+ * already spent it, pending below its threshold, spendable when send would
+ * accept it, and unready otherwise. */
 static void wa_add_note(const struct db_wallet_note_fact *n,
                         const uint8_t (*spenders)[32], size_t ns, int tip,
                         struct wallet_summary *out)
@@ -90,15 +93,25 @@ static void wa_add_note(const struct db_wallet_note_fact *n,
     bool change = bsearch(n->txid, spenders, ns, 32, wa_cmp32) != NULL;
     int need = change ? WALLET_CONF_CHANGE : WALLET_CONF_RECEIVED;
     int confs = wa_confs(n->block_height, tip);
-    if (confs >= need) {
+    if (n->chain == WALLET_NOTE_SPENT_ON_CHAIN) {
+        out->reconciling_notes++;
+        return;
+    }
+    if (confs < need) {
+        out->pending += n->value;
+        out->pending_count++;
+        if (out->pending_min_confs_needed == 0 ||
+            need - confs < out->pending_min_confs_needed)
+            out->pending_min_confs_needed = need - confs;
+        return;
+    }
+    if (n->chain == WALLET_NOTE_UNSPENT_ON_CHAIN &&
+        n->witness == WALLET_WITNESS_READY) {
         out->spendable += n->value;
         return;
     }
-    out->pending += n->value;
-    out->pending_count++;
-    if (out->pending_min_confs_needed == 0 ||
-        need - confs < out->pending_min_confs_needed)
-        out->pending_min_confs_needed = need - confs;
+    out->unready += n->value;
+    out->unready_notes++;
 }
 
 static void wa_add_coin(const struct db_wallet_coin_fact *c, int tip,
@@ -113,13 +126,15 @@ static void wa_add_coin(const struct db_wallet_coin_fact *c, int tip,
 }
 
 static bool wa_unconfirmed_spender(const struct db_wallet_tx_fact *txs,
-                                   size_t nt, const uint8_t txid[32])
+                                   size_t nt, bool id_ok,
+                                   const uint8_t txid[32])
 {
-    const struct db_wallet_tx_fact *t = wa_find_tx(txs, nt, txid);
+    const struct db_wallet_tx_fact *t =
+        id_ok ? wa_find_tx(txs, nt, txid) : NULL;
     return t && t->block_height <= 0;
 }
 
-void wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
+bool wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
                                size_t nn,
                                const struct db_wallet_coin_fact *coins,
                                size_t nc,
@@ -131,7 +146,7 @@ void wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
     size_t ns = 0;
     uint8_t (*sp)[32] = wa_spenders(notes, nn, coins, nc, ivks, nk, &ns);
     if (!sp)
-        return;
+        return false; // raw-return-ok:callee-logged
     for (size_t i = 0; i < nn; i++) {
         if (i > 0 && wa_note_same(&notes[i], &notes[i - 1]))
             continue;
@@ -139,7 +154,8 @@ void wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
             continue;
         if (!notes[i].spent)
             wa_add_note(&notes[i], (const uint8_t (*)[32])sp, ns, tip, out);
-        else if (wa_unconfirmed_spender(txs, nt, notes[i].spent_txid))
+        else if (wa_unconfirmed_spender(txs, nt, notes[i].spent_txid_ok,
+                                        notes[i].spent_txid))
             out->sending += notes[i].value;
     }
     for (size_t i = 0; i < nc; i++) {
@@ -147,10 +163,12 @@ void wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
             continue;
         if (!coins[i].spent)
             wa_add_coin(&coins[i], tip, out);
-        else if (wa_unconfirmed_spender(txs, nt, coins[i].spent_txid))
+        else if (wa_unconfirmed_spender(txs, nt, coins[i].spent_txid_ok,
+                                        coins[i].spent_txid))
             out->sending += coins[i].value;
     }
     free(sp);
+    return true;
 }
 
 /* ── history ─────────────────────────────────────────────────────── */
@@ -158,6 +176,7 @@ void wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
 struct wa_acc {
     uint8_t txid[32];
     int64_t in_z, in_t, out_z, out_t;
+    uint32_t n_in_t;         /* wallet coins this transaction spent */
     int height;
     bool shielded;
     bool memo;
@@ -204,7 +223,7 @@ static void wa_acc_notes(struct wa_accs *a,
         c->memo = c->memo || n->memo_present;
         if (n->block_height > c->height)
             c->height = n->block_height;
-        if (n->spent) {
+        if (n->spent_txid_ok) {
             struct wa_acc *s = wa_acc_get(a, n->spent_txid);
             s->in_z += n->value;
             s->shielded = true;
@@ -223,32 +242,81 @@ static void wa_acc_coins(struct wa_accs *a,
         c->out_t += k->value;
         if (k->height > c->height)
             c->height = k->height;
-        if (k->spent)
-            wa_acc_get(a, k->spent_txid)->in_t += k->value;
+        if (k->spent_txid_ok) {
+            struct wa_acc *s = wa_acc_get(a, k->spent_txid);
+            s->in_t += k->value;
+            s->n_in_t++;
+        }
     }
 }
 
+/* The fee of an outgoing transaction, or false when it cannot be recovered.
+ * A recorded fee wins. Otherwise a transaction the wallet built has every
+ * input in the wallet, so fee = inputs - outputs; with the shielded pool's
+ * net flow (value_balance) from the stored transaction this is
+ * coins spent - transparent outputs + value_balance. It needs every
+ * transparent input accounted for. */
+static bool wa_outgoing_fee(const struct wa_acc *c, int64_t outflow,
+                            const struct db_wallet_tx_fact *tx, int64_t *fee)
+{
+    *fee = 0;
+    if (outflow == 0)
+        return true;
+    if (!tx || !tx->from_me)
+        return false;
+    if (tx->fee > 0) {
+        *fee = tx->fee;
+        return true;
+    }
+    if (!tx->raw_known || c->n_in_t != tx->vin_count)
+        return false;
+    *fee = c->in_t - tx->vout_total + tx->value_balance;
+    return *fee > 0;
+}
+
 /* Split an outgoing transaction into sent, internal or unknown. */
-static void wa_classify_outgoing(struct wallet_history_entry *e, int64_t in,
+static void wa_classify_outgoing(struct wallet_history_entry *e,
+                                 const struct wa_acc *c, int64_t in,
                                  int64_t out,
                                  const struct db_wallet_tx_fact *tx)
 {
     int64_t outflow = in - out;
+    int64_t fee = 0;
     e->net = -outflow;
     e->direction = WALLET_DIR_UNKNOWN;
-    if (outflow < 0)
-        return;
-    bool fee_known = outflow == 0 || (tx && tx->from_me && tx->fee > 0);
-    if (!fee_known)
-        return;
-    int64_t fee = outflow == 0 ? 0 : tx->fee;
-    if (fee > outflow)
+    if (outflow < 0 || !wa_outgoing_fee(c, outflow, tx, &fee) ||
+        fee > outflow)
         return;
     e->fee_known = true;
     e->fee = fee;
     e->amount_known = true;
     e->amount = outflow - fee;
     e->direction = e->amount == 0 ? WALLET_DIR_INTERNAL : WALLET_DIR_SENT;
+}
+
+/* A transaction the wallet sent is private only when its stored form shows no
+ * transparent input or output. One that cannot be read is not claimed
+ * private. */
+static bool wa_outgoing_private(const struct wa_acc *c,
+                                const struct db_wallet_tx_fact *tx)
+{
+    return c->shielded && tx && tx->raw_known && tx->vin_count == 0 &&
+           tx->vout_count == 0;
+}
+
+/* 1 when every input and output of the transaction is shielded, 0 when any is
+ * transparent, -1 when the wallet cannot tell. A transparent coin the wallet
+ * received or spent proves 0. Otherwise only the stored transaction shows the
+ * parts the wallet does not own (a sender's inputs, a recipient's outputs), so
+ * without it the answer is unknown, never 1. */
+static int wa_fully_shielded(const struct wa_acc *c,
+                             const struct db_wallet_tx_fact *tx)
+{
+    if (c->in_t > 0 || c->out_t > 0)
+        return 0;
+    if (!c->shielded || !tx || !tx->raw_known)
+        return -1;
+    return tx->vin_count == 0 && tx->vout_count == 0 ? 1 : 0;
 }
 
 static void wa_fill_entry(struct wallet_history_entry *e,
@@ -264,15 +332,17 @@ static void wa_fill_entry(struct wallet_history_entry *e,
     e->confirmations = wa_confs(e->height, tip);
     if (tx)
         e->time = tx->time_received;
-    e->private_kind = c->shielded;
     e->memo_present = c->memo;
+    e->fully_shielded = wa_fully_shielded(c, tx);
     if (in == 0) {
+        e->private_kind = c->shielded;
         e->direction = WALLET_DIR_RECEIVED;
         e->net = out;
         e->amount_known = true;
         e->amount = out;
     } else {
-        wa_classify_outgoing(e, in, out, tx);
+        e->private_kind = wa_outgoing_private(c, tx);
+        wa_classify_outgoing(e, c, in, out, tx);
     }
 }
 
@@ -320,7 +390,7 @@ int wallet_history_build(const struct db_wallet_note_fact *notes, size_t nn,
 /* ── paging ──────────────────────────────────────────────────────── */
 
 bool wallet_history_cursor_parse(const char *text,
-                                 struct wallet_history_cursor *out)
+                                 struct wallet_history_page_key *out)
 {
     memset(out, 0, sizeof(*out));
     if (!text || !text[0])
@@ -356,7 +426,7 @@ void wallet_history_cursor_format(const struct wallet_history_entry *e,
 
 size_t wallet_history_page_start(const struct wallet_history_entry *e,
                                  size_t n,
-                                 const struct wallet_history_cursor *cur)
+                                 const struct wallet_history_page_key *cur)
 {
     if (!cur->set)
         return 0;

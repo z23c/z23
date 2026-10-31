@@ -873,18 +873,32 @@ ZCL_COMMAND_READY_READ(
     "Spendable, pending and public funds with sync state",
     "One honest funds screen, read-only and answered while the wallet is "
     "locked from the loaded viewing keys. Every amount is integer zatoshi "
-    "plus an exact 8-decimal string. spendable is unspent shielded notes "
-    "confirmed 10 deep, or 3 deep when the note is the wallet's own change "
-    "(its transaction spent a wallet note or coin); pending is the rest with "
-    "pending_notes and pending_min_confirmations_needed; sending is wallet "
-    "funds spent by a not yet confirmed transaction; public is mature "
-    "confirmed transparent funds and immature is coinbase still maturing. "
-    "A note or ivk seen twice counts once. tip_height, header_height, "
-    "scanned_through_height and blocks_behind (the larger of header and peer "
-    "best height, minus tip) come with current, true only when the scan has "
-    "reached the tip and blocks_behind is at most 1. locked, encrypted and "
-    "shielded_keys describe the keystore. send_allowed and "
-    "send_blocked_reason report the wallet_spend guard; nothing here spends.",
+    "plus an exact 8-decimal string. An amount that cannot be read is null, "
+    "never 0: shielded_state is keys_unavailable, and every shielded amount "
+    "and count null, when the wallet is locked and holds no viewing key. "
+    "spendable is unspent shielded notes past 10 confirmations (3 for the "
+    "wallet's own change, whose transaction spent a wallet note or coin) "
+    "that z_sendmany would also accept: the nullifier is not yet on the "
+    "chain and the stored witness is current. unready is the confirmed "
+    "remainder send would refuse (missing or stale witness, or a spent set "
+    "that could not be read) with unready_notes; reconciling_notes counts "
+    "notes the chain already spent. pending is the rest below its "
+    "threshold with pending_notes and pending_min_confirmations_needed; "
+    "sending is wallet funds spent by a not yet confirmed transaction; "
+    "public is mature confirmed transparent funds and immature is coinbase "
+    "still maturing. A note or ivk seen twice counts once. tip_height, "
+    "header_height (0 when no header is known), scanned_through_height (null "
+    "when unknown) and blocks_behind (the larger of header and peer best "
+    "height, minus tip) come with current, true only when the tip and a "
+    "header are known, the shielded keys are loaded, the scan has reached "
+    "the tip, blocks_behind is at most 1 and the chain is live: a connected "
+    "peer with a known best height at most one block ahead of the tip, or a "
+    "tip block under 10 minutes old. An offline node is never current. A "
+    "node that cannot be reached replies NODE_UNAVAILABLE. An unknown chain tip, an "
+    "unreadable wallet database or an allocation failure fails the command. "
+    "locked, encrypted and shielded_keys describe the keystore. send_allowed "
+    "and send_blocked_reason report the wallet_spend guard without recording "
+    "or logging a refusal; nothing here spends.",
     0, "wallet,summary,balance,pending,spendable,sync",
     "zcl.command.empty_input.v1", "zcl.wallet_summary.v1", "", "",
     "z23 core wallet summary",
@@ -901,9 +915,17 @@ ZCL_COMMAND_READY_READ(
     "txid, status, height (null while pending), confirmations, time, "
     "direction (received, sent, internal, unknown), kind (private or "
     "public), amount_zat and amount, fee_zat and fee, net_zat (signed "
-    "change to the wallet) and memo_present. Outgoing detail that cannot be "
-    "recovered from persisted data (no recorded fee) is direction unknown "
-    "with null amount and fee, never a guess; net_zat stays exact. limit is "
+    "change to the wallet) and memo_present. kind is private only when the "
+    "stored transaction shows no transparent input or output; a z-to-t send "
+    "is public. fully_shielded is true only when every input and output is "
+    "shielded, false when any is transparent and null when the wallet "
+    "cannot tell (a payment received from another wallet's shielded "
+    "inputs is null). The fee comes from the recorded fee, else from the stored "
+    "transaction (coins spent minus transparent outputs plus value_balance). "
+    "Outgoing detail that cannot be recovered is direction unknown with null "
+    "amount and fee, never a guess; net_zat stays exact. shielded_state is "
+    "keys_unavailable when the wallet is locked and holds no viewing key, "
+    "so shielded entries may be missing. limit is "
     "1..16 (default 10); next_cursor is opaque and null on the last page. "
     "txid returns that one entry with memo text and address where the "
     "wallet holds them; counterparty is reported null with "
@@ -1265,9 +1287,11 @@ ZCL_COMMAND_READY_READ(
     "core.wallet.shielded.latest", "core.wallet.shielded", "",
     "Newest shielded receive address, or null",
     "Read-only: the most recently added Sapling address in the keystore as "
-    "{address: \"zs1...\"} or {address: null} for a wallet with none. It "
-    "never derives, imports or stores a key or address under any path; use "
-    "core.wallet.shielded.address to create one.", 0,
+    "{address, state}: state ok with the address, none with null for a "
+    "wallet with no shielded key, or keys_unavailable with null when the "
+    "wallet is locked and holds none. It never derives, imports or stores a "
+    "key or address under any path; use core.wallet.shielded.address to "
+    "create one.", 0,
     "shielded,sapling,address,latest,receive",
     "zcl.command.empty_input.v1", "zcl.wallet_latest_address.v1", "", "",
     "z23 core wallet shielded latest",

@@ -286,14 +286,19 @@ static int rpc_send_deadline(platform_socket_t sock, const void *data,
     return RPC_SEND_OK;
 }
 
-static char *rpc_transport_error(const char *reason)
+static char *rpc_transport_error_code(int code, const char *reason)
 {
     char *out = zcl_malloc(512, "rpc transport error json");
     if (!out)
         return NULL;
     snprintf(out, 512,
-        "{\"error\":{\"code\":-32603,\"message\":\"%s\"}}", reason);
+        "{\"error\":{\"code\":%d,\"message\":\"%s\"}}", code, reason);
     return out;
+}
+
+static char *rpc_transport_error(const char *reason)
+{
+    return rpc_transport_error_code(-32603, reason);
 }
 
 static int g_port = 18232;
@@ -435,7 +440,7 @@ static char *cookie_error_body(const char *datadir)
     char *out = zcl_malloc(768, "rpc cookie error json");
     if (!out) return NULL;
     snprintf(out, 768,
-        "{\"error\":{\"code\":-32603,\"message\":"
+        "{\"error\":{\"code\":-32097,\"message\":"
         "\"cannot read RPC auth cookie — is the node running and is the "
         "selected datadir correct?\"}}");
     return out;
@@ -611,14 +616,15 @@ static int64_t rpc_connect_deadline(const struct rpc_budget *budget,
 static char *rpc_connect_failure_body(int crc)
 {
     if (crc == -1)
-        return rpc_transport_error(
+        return rpc_transport_error_code(NODE_RPC_UNREACHABLE,
             "cannot connect to node (connection refused) — is the node "
             "running and is -rpcport correct?");
     if (crc == -2)
-        return rpc_transport_error(
+        return rpc_transport_error_code(NODE_RPC_UNREACHABLE,
             "cannot connect to node (connect timed out) — the RPC port "
             "is not accepting connections; check -rpcport and the node");
-    return rpc_transport_error("cannot connect to node");
+    return rpc_transport_error_code(NODE_RPC_UNREACHABLE,
+                                    "cannot connect to node");
 }
 
 enum rpc_request_state {

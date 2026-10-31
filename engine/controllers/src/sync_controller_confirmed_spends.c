@@ -134,6 +134,32 @@ static bool canonical_nullifier_history_is_complete(sqlite3 *db)
     return complete && cursor_found && activation_cursor == 0;
 }
 
+/* One Sapling nullifier against the durable spent set, under the progress
+ * lock. False when the lookup itself failed. */
+static bool canonical_nullifier_lookup(sqlite3 *db, const uint8_t nullifier[32],
+                                       bool *found, int64_t *height)
+{
+    progress_store_tx_lock();
+    bool ok = nullifier_kv_get(db, nullifier, NULLIFIER_POOL_SAPLING, found,
+                               height);
+    progress_store_tx_unlock();
+    return ok;
+}
+
+bool node_db_sapling_nullifier_is_spent(const uint8_t nullifier[32],
+                                        bool *spent)
+{
+    bool found = false;
+    int64_t height = -1;
+    sqlite3 *db = progress_store_db();
+    *spent = false;
+    if (!canonical_nullifier_history_is_complete(db) ||
+        !canonical_nullifier_lookup(db, nullifier, &found, &height))
+        return false; // raw-return-ok:ledger-unreadable-is-unknown
+    *spent = found;
+    return true;
+}
+
 bool node_db_reconcile_canonical_sapling_notes(
     struct node_db *ndb, struct main_state *ms, const char *datadir,
     size_t *reconciled_out)
@@ -154,10 +180,8 @@ bool node_db_reconcile_canonical_sapling_notes(
     for (int i = 0; i < count; i++) {
         bool found = false;
         int64_t height = -1;
-        progress_store_tx_lock();
-        bool read_ok = nullifier_kv_get(
-            db, notes[i].nullifier, NULLIFIER_POOL_SAPLING, &found, &height);
-        progress_store_tx_unlock();
+        bool read_ok = canonical_nullifier_lookup(db, notes[i].nullifier,
+                                                  &found, &height);
         if (!read_ok) {
             free(notes);
             LOG_FAIL("sync", "canonical note reconciliation: lookup failed");

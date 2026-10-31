@@ -63,6 +63,12 @@ char *node_rpc_call_at_deadline(const char *datadir, int rpc_port,
  * "asked, no answer". */
 #define NODE_RPC_DEADLINE_EXPIRED (-32098)
 
+/* JSON-RPC error code of the transport body returned when no node could be
+ * reached: the RPC auth cookie is unreadable or the connection was refused,
+ * timed out or failed. A node that answered with an error never carries it,
+ * so a caller can tell "no node" from "the node refused". */
+#define NODE_RPC_UNREACHABLE (-32097)
+
 /* Absolute-deadline variants. `deadline_ms` is an absolute reading of
  * platform_time_monotonic_ms(); ONE deadline bounds the cookie read, setup,
  * connect, send and receive. A deadline at or before "now" (including zero,

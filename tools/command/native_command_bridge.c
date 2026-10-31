@@ -816,6 +816,19 @@ static bool nc_bridge_check_rpc_error(
     if (body_doc->type != JSON_OBJ || !status_json_is_rpc_error(body_doc))
         return false;
     const char *msg = NULL;
+    if (err && err->type == JSON_OBJ &&
+        json_get_int(json_get(err, "code")) == NODE_RPC_UNREACHABLE) {
+        /* No node answered: a transient, retryable condition a caller can
+         * act on (start the node), not a failure the node reported. */
+        msg = json_get_str(json_get(err, "message"));
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_TRANSIENT, "NODE_UNAVAILABLE",
+                               "dispatch", true, false,
+                               msg && msg[0] ? msg : "no node answered",
+                               request->spec->path);
+        json_free(body_doc);
+        return true;
+    }
     if (err && err->type == JSON_OBJ)
         msg = json_get_str(json_get(err, "message"));
     else if (err && err->type == JSON_STR)

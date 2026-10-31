@@ -11,12 +11,14 @@
 #include "controllers/sovereignty_controller.h"
 #include "controllers/sync_controller.h"
 #include "controllers/wallet_activity.h"
+#include "base/safe_alloc.h"
 #include "json/json.h"
 #include "models/block.h"
 #include "models/database.h"
 #include "models/wallet_activity.h"
 #include "models/wallet_tx.h"
 #include "sapling/sapling.h"
+#include "test/wallet_summary_fixture.h"
 #include "wallet/sapling_keys.h"
 
 #include <stdio.h>
@@ -37,7 +39,7 @@ struct whf {
     int nn, nc, nt;
 };
 
-static bool put_block(struct node_db *ndb, int height)
+bool wsh_put_block(struct node_db *ndb, int height)
 {
     struct db_block blk;
     static uint8_t sol[] = { 0x01, 0x02 };
@@ -55,7 +57,7 @@ static bool put_block(struct node_db *ndb, int height)
     return db_block_save(ndb, &blk);
 }
 
-static bool put_note(struct node_db *ndb, uint8_t tx, uint32_t idx,
+bool wsh_put_note(struct node_db *ndb, uint8_t tx, uint32_t idx,
                      const uint8_t ivk[32], int64_t value, int height,
                      const char *memo_text)
 {
@@ -75,7 +77,7 @@ static bool put_note(struct node_db *ndb, uint8_t tx, uint32_t idx,
                                      ivk, div, pk_d, cm, nf, height);
 }
 
-static bool spend_note(struct node_db *ndb, uint8_t tx, uint32_t idx,
+bool wsh_spend_note(struct node_db *ndb, uint8_t tx, uint32_t idx,
                        uint8_t spender)
 {
     uint8_t nf[32], by[32];
@@ -83,6 +85,12 @@ static bool spend_note(struct node_db *ndb, uint8_t tx, uint32_t idx,
     nf[0] = (uint8_t)idx;
     memset(by, spender, 32);
     return db_sapling_note_mark_spent(ndb, nf, by) == DB_MARK_SPENT_OK;
+}
+
+void wsh_note_nullifier(uint8_t tx, uint32_t idx, uint8_t out[32])
+{
+    memset(out, tx ^ 0x5a, 32);
+    out[0] = (uint8_t)idx;
 }
 
 static bool put_coin(struct node_db *ndb, uint8_t tx, int64_t value,
@@ -136,48 +144,68 @@ static void unload(struct whf *f)
     free(f->txs);
 }
 
+/* Mark every note as one send would accept: unspent on the chain with a
+ * witness at the tip. Tests then spoil individual notes. */
+static void mark_ready(struct db_wallet_note_fact *notes, int n)
+{
+    for (int i = 0; i < n; i++) {
+        notes[i].chain = WALLET_NOTE_UNSPENT_ON_CHAIN;
+        notes[i].witness = WALLET_WITNESS_READY;
+    }
+}
+
+static struct db_wallet_note_fact *find_note(struct whf *f, uint8_t tx)
+{
+    for (int i = 0; i < f->nn; i++)
+        if (f->notes[i].txid[0] == tx)
+            return &f->notes[i];
+    return NULL;
+}
+
 static bool summarize(struct node_db *ndb, const uint8_t (*ivks)[32],
                       size_t nk, struct wallet_summary *out)
 {
     struct whf f;
     if (!load(ndb, &f))
         return false;
-    wallet_summary_accumulate(f.notes, (size_t)f.nn, f.coins, (size_t)f.nc,
-                              f.txs, (size_t)f.nt, ivks, nk, TIP, out);
+    mark_ready(f.notes, f.nn);
+    bool ok = wallet_summary_accumulate(f.notes, (size_t)f.nn, f.coins,
+                                        (size_t)f.nc, f.txs, (size_t)f.nt,
+                                        ivks, nk, TIP, out);
     unload(&f);
-    return true;
+    return ok;
 }
 
 /* Received at 1/9/10 confirmations, own change at 2/3, a spent note, a note
  * of a key that is not loaded. */
 static bool build_fixture_notes(struct node_db *ndb)
 {
-    bool ok = put_block(ndb, TIP);
-    ok = ok && put_note(ndb, 0x11, 0, IVK_A, 1 * ZCL1, 300, NULL);
-    ok = ok && put_note(ndb, 0x12, 0, IVK_A, 2 * ZCL1, 292, NULL);
-    ok = ok && put_note(ndb, 0x13, 0, IVK_A, 4 * ZCL1, 291, "hello memo");
-    ok = ok && put_note(ndb, 0x14, 0, IVK_A, 64 * ZCL1, 250, NULL);
-    ok = ok && spend_note(ndb, 0x14, 0, 0x20);
-    ok = ok && put_note(ndb, 0x20, 0, IVK_A, 16 * ZCL1, 299, NULL);
-    ok = ok && put_note(ndb, 0x20, 1, IVK_A, 32 * ZCL1, 298, NULL);
+    bool ok = wsh_put_block(ndb, TIP);
+    ok = ok && wsh_put_note(ndb, 0x11, 0, IVK_A, 1 * ZCL1, 300, NULL);
+    ok = ok && wsh_put_note(ndb, 0x12, 0, IVK_A, 2 * ZCL1, 292, NULL);
+    ok = ok && wsh_put_note(ndb, 0x13, 0, IVK_A, 4 * ZCL1, 291, "hello memo");
+    ok = ok && wsh_put_note(ndb, 0x14, 0, IVK_A, 64 * ZCL1, 250, NULL);
+    ok = ok && wsh_spend_note(ndb, 0x14, 0, 0x20);
+    ok = ok && wsh_put_note(ndb, 0x20, 0, IVK_A, 16 * ZCL1, 299, NULL);
+    ok = ok && wsh_put_note(ndb, 0x20, 1, IVK_A, 32 * ZCL1, 298, NULL);
     ok = ok && put_tx(ndb, 0x20, 299, FEE, true);
-    ok = ok && put_note(ndb, 0x15, 0, IVK_B, 100 * ZCL1, 100, NULL);
+    ok = ok && wsh_put_note(ndb, 0x15, 0, IVK_B, 100 * ZCL1, 100, NULL);
     return ok;
 }
 
 /* A pending send, an internal move with a fee, and a send of unknown fee. */
 static bool build_fixture_moves(struct node_db *ndb)
 {
-    bool ok = put_note(ndb, 0x16, 0, IVK_A, 128 * ZCL1, 200, NULL);
-    ok = ok && spend_note(ndb, 0x16, 0, 0x21);
+    bool ok = wsh_put_note(ndb, 0x16, 0, IVK_A, 128 * ZCL1, 200, NULL);
+    ok = ok && wsh_spend_note(ndb, 0x16, 0, 0x21);
     ok = ok && put_tx(ndb, 0x21, 0, FEE, true);
-    ok = ok && put_note(ndb, 0x17, 0, IVK_A, 20 * ZCL1, 210, NULL);
-    ok = ok && spend_note(ndb, 0x17, 0, 0x22);
-    ok = ok && put_note(ndb, 0x22, 0, IVK_A, 20 * ZCL1 - FEE, 211, NULL);
+    ok = ok && wsh_put_note(ndb, 0x17, 0, IVK_A, 20 * ZCL1, 210, NULL);
+    ok = ok && wsh_spend_note(ndb, 0x17, 0, 0x22);
+    ok = ok && wsh_put_note(ndb, 0x22, 0, IVK_A, 20 * ZCL1 - FEE, 211, NULL);
     ok = ok && put_tx(ndb, 0x22, 211, FEE, true);
-    ok = ok && put_note(ndb, 0x18, 0, IVK_A, 9 * ZCL1, 220, NULL);
-    ok = ok && spend_note(ndb, 0x18, 0, 0x23);
-    ok = ok && put_note(ndb, 0x23, 0, IVK_A, 4 * ZCL1, 295, NULL);
+    ok = ok && wsh_put_note(ndb, 0x18, 0, IVK_A, 9 * ZCL1, 220, NULL);
+    ok = ok && wsh_spend_note(ndb, 0x18, 0, 0x23);
+    ok = ok && wsh_put_note(ndb, 0x23, 0, IVK_A, 4 * ZCL1, 295, NULL);
     ok = ok && put_tx(ndb, 0x23, 295, 0, true);
     return ok;
 }
@@ -228,15 +256,17 @@ static int test_summary_double_count(struct node_db *ndb)
 
         struct whf f;
         ASSERT(load(ndb, &f));
+        mark_ready(f.notes, f.nn);
         size_t n = (size_t)f.nn;
         struct db_wallet_note_fact *rows = calloc(n * 2, sizeof(*rows));
         ASSERT(rows != NULL);
         for (size_t i = 0; i < n; i++)
             rows[2 * i] = rows[2 * i + 1] = f.notes[i];
         struct wallet_summary rep;
-        wallet_summary_accumulate(rows, n * 2, f.coins, (size_t)f.nc, f.txs,
-                                  (size_t)f.nt,
-                                  (const uint8_t (*)[32])&IVK_A, 1, TIP, &rep);
+        ASSERT(wallet_summary_accumulate(rows, n * 2, f.coins, (size_t)f.nc,
+                                         f.txs, (size_t)f.nt,
+                                         (const uint8_t (*)[32])&IVK_A, 1,
+                                         TIP, &rep));
         ASSERT_EQ(rep.spendable, one.spendable);
         ASSERT_EQ(rep.pending, one.pending);
         ASSERT_EQ(rep.pending_count, one.pending_count);
@@ -268,7 +298,7 @@ static int test_summary_json(void)
         struct wallet_summary s = { .spendable = 5999990000LL };
         struct wallet_chain_view v = { .tip_height = 300, .header_height = 305,
             .peer_best_height = 303, .scanned_through = 300, .encrypted = true,
-            .locked = true, .shielded_keys = 2 };
+            .locked = true, .shielded_keys = 2, .shielded_known = true };
         struct json_value j;
         json_init(&j);
         wallet_summary_to_json(&s, &v, true, "", &j);
@@ -281,7 +311,8 @@ static int test_summary_json(void)
         json_free(&j);
 
         v.header_height = 301;
-        v.peer_best_height = 0;
+        v.peer_best_height = 301;
+        v.peer_count = 1;
         json_init(&j);
         wallet_summary_to_json(&s, &v, false, "release_assisted", &j);
         ASSERT_EQ(json_get_int(json_get(&j, "blocks_behind")), 1);
@@ -354,6 +385,7 @@ static int test_history_outgoing(const struct wallet_history_entry *e, int n)
         ASSERT(in->fee_known && in->fee == FEE && in->amount == 0);
         const struct wallet_history_entry *u = find(e, n, 0x23);
         ASSERT(u && u->direction == WALLET_DIR_UNKNOWN);
+        ASSERT_EQ(u->fully_shielded, -1);
         ASSERT(!u->amount_known && !u->fee_known);
         ASSERT_EQ(u->net, -5 * ZCL1);
     } TEST_END
@@ -367,10 +399,12 @@ static int test_history_received(const struct wallet_history_entry *e, int n)
         const struct wallet_history_entry *r = find(e, n, 0x12);
         ASSERT(r && r->direction == WALLET_DIR_RECEIVED && r->amount == 2 * ZCL1);
         ASSERT(r->height == 292 && r->confirmations == 9 && r->private_kind);
+        ASSERT_EQ(r->fully_shielded, -1);
         const struct wallet_history_entry *m = find(e, n, 0x13);
         ASSERT(m && m->memo_present && !r->memo_present);
         const struct wallet_history_entry *c = find(e, n, 0x31);
         ASSERT(c && c->direction == WALLET_DIR_RECEIVED && !c->private_kind);
+        ASSERT_EQ(c->fully_shielded, 0);
         ASSERT(find(e, n, 0x15) == NULL);
     } TEST_END
     return failures;
@@ -392,7 +426,7 @@ static int test_history_directions(struct node_db *ndb)
 static int page_all(const struct wallet_history_entry *e, int n, size_t limit,
                     uint8_t *order, int max)
 {
-    struct wallet_history_cursor cur = {0};
+    struct wallet_history_page_key cur = {0};
     int got = 0;
     for (;;) {
         size_t start = wallet_history_page_start(e, (size_t)n, &cur);
@@ -423,13 +457,13 @@ static int test_history_paging(struct node_db *ndb)
         ASSERT(memcmp(whole, paged, (size_t)n) == 0);
 
         /* A newer transaction arriving between pages leaves the next page. */
-        struct wallet_history_cursor cur = {0};
+        struct wallet_history_page_key cur = {0};
         char text[96];
         wallet_history_cursor_format(&e[2], text, sizeof(text));
         ASSERT(wallet_history_cursor_parse(text, &cur));
         uint8_t next_before = e[wallet_history_page_start(e, (size_t)n, &cur)]
                                   .txid[0];
-        ASSERT(put_note(ndb, 0x77, 0, IVK_A, ZCL1, 300, NULL));
+        ASSERT(wsh_put_note(ndb, 0x77, 0, IVK_A, ZCL1, 300, NULL));
         struct wallet_history_entry *e2 = NULL;
         int n2 = build_history(ndb, &e2);
         ASSERT_EQ(n2, n + 1);
@@ -466,6 +500,295 @@ static int test_history_json(struct node_db *ndb)
         }
         ASSERT(total < 6500);
         free(e);
+    } TEST_END
+    return failures;
+}
+
+static bool acc(struct whf *f, struct wallet_summary *out)
+{
+    return wallet_summary_accumulate(f->notes, (size_t)f->nn, f->coins,
+                                     (size_t)f->nc, f->txs, (size_t)f->nt,
+                                     (const uint8_t (*)[32])&IVK_A, 1, TIP,
+                                     out);
+}
+
+static int test_summary_send_readiness(struct node_db *ndb)
+{
+    int failures = 0;
+    TEST_CASE("wallet_summary: spendable is what send would accept") {
+        struct whf f;
+        struct wallet_summary base, s;
+        ASSERT(load(ndb, &f));
+        mark_ready(f.notes, f.nn);
+        struct db_wallet_note_fact *n = find_note(&f, 0x22);
+        ASSERT(n != NULL);
+        ASSERT(acc(&f, &base));
+        n->witness = WALLET_WITNESS_UNUSABLE;
+        ASSERT(acc(&f, &s));
+        ASSERT_EQ(s.spendable, base.spendable - (20 * ZCL1 - FEE));
+        ASSERT_EQ(s.unready, (20 * ZCL1 - FEE));
+        ASSERT_EQ(s.unready_notes, 1);
+        n->witness = WALLET_WITNESS_READY;
+        n->chain = WALLET_NOTE_SPENT_ON_CHAIN;
+        ASSERT(acc(&f, &s));
+        ASSERT_EQ(s.spendable, base.spendable - (20 * ZCL1 - FEE));
+        ASSERT_EQ(s.unready, 0);
+        ASSERT_EQ(s.reconciling_notes, 1);
+        n->chain = WALLET_NOTE_CHAIN_UNKNOWN;
+        ASSERT(acc(&f, &s));
+        ASSERT_EQ(s.unready, (20 * ZCL1 - FEE));
+        n->chain = WALLET_NOTE_UNCHECKED;
+        n->witness = WALLET_WITNESS_UNCHECKED;
+        ASSERT(acc(&f, &s));
+        ASSERT_EQ(s.spendable, base.spendable - (20 * ZCL1 - FEE));
+        unload(&f);
+    } TEST_END
+    return failures;
+}
+
+/* A 31-byte spent_txid is still a spend marker. */
+static int test_malformed_spend_marker(struct node_db *ndb)
+{
+    int failures = 0;
+    TEST_CASE("wallet_activity: a malformed spend marker still means spent") {
+        struct whf f;
+        struct wallet_summary before, after;
+        ASSERT(summarize(ndb, (const uint8_t (*)[32])&IVK_A, 1, &before));
+        ASSERT(wsh_put_note(ndb, 0x78, 0, IVK_A, 8 * ZCL1, 250, NULL));
+        ASSERT(sqlite3_exec(ndb->db,
+            "UPDATE wallet_sapling_notes SET spent_txid = zeroblob(31) "
+            "WHERE value = 800000000", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(load(ndb, &f));
+        struct db_wallet_note_fact *n = find_note(&f, 0x78);
+        ASSERT(n && n->spent && !n->spent_txid_ok);
+        unload(&f);
+        ASSERT(summarize(ndb, (const uint8_t (*)[32])&IVK_A, 1, &after));
+        ASSERT_EQ(after.spendable, before.spendable);
+        ASSERT_EQ(after.pending, before.pending);
+        uint8_t gone[32];
+        memset(gone, 0x78, sizeof(gone));
+        ASSERT(db_sapling_note_delete_for_tx(ndb, gone));
+    } TEST_END
+    return failures;
+}
+
+static int abort_every_query(void *unused)
+{
+    (void)unused;
+    return 1;
+}
+
+static int test_failed_reads(struct node_db *ndb)
+{
+    int failures = 0;
+    TEST_CASE("wallet_activity: a failed read fails, never zero or partial") {
+        struct db_wallet_note_fact *notes = NULL;
+        struct db_wallet_coin_fact *coins = NULL;
+        struct db_wallet_tx_fact *txs = NULL;
+        struct db_wallet_note_memo memos[2];
+        uint8_t id[32];
+        memset(id, 0x13, sizeof(id));
+        sqlite3_progress_handler(ndb->db, 1, abort_every_query, NULL);
+        ASSERT_EQ(db_wallet_note_facts_alloc(ndb, &notes), -1);
+        ASSERT_EQ(db_wallet_coin_facts_alloc(ndb, &coins), -1);
+        ASSERT_EQ(db_wallet_tx_facts_alloc(ndb, &txs), -1);
+        ASSERT_EQ(db_wallet_note_memos_for_tx(ndb, id, memos, 2), -1);
+        sqlite3_progress_handler(ndb->db, 0, NULL, NULL);
+        ASSERT(notes == NULL && coins == NULL && txs == NULL);
+
+        ASSERT(sqlite3_exec(ndb->db, "ALTER TABLE wallet_utxos RENAME TO wu_x",
+                            NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT_EQ(db_wallet_coin_facts_alloc(ndb, &coins), -1);
+        ASSERT(sqlite3_exec(ndb->db, "ALTER TABLE wu_x RENAME TO wallet_utxos",
+                            NULL, NULL, NULL) == SQLITE_OK);
+
+        zcl_alloc_fault_fail_next("wallet note facts");
+        ASSERT_EQ(db_wallet_note_facts_alloc(ndb, &notes), -1);
+        ASSERT(db_wallet_note_facts_alloc(ndb, &notes) > 0);
+        free(notes);
+    } TEST_END
+    return failures;
+}
+
+static int test_failed_allocation(struct node_db *ndb)
+{
+    int failures = 0;
+    TEST_CASE("wallet_activity: an allocation failure fails the aggregate") {
+        struct wallet_summary s;
+        struct wallet_history_entry *e = NULL;
+        zcl_alloc_fault_fail_next("wallet spenders");
+        ASSERT(!summarize(ndb, (const uint8_t (*)[32])&IVK_A, 1, &s));
+        ASSERT_EQ(s.spendable, 0);
+        zcl_alloc_fault_fail_next("wallet history acc");
+        ASSERT_EQ(build_history(ndb, &e), -1);
+        ASSERT(e == NULL);
+        zcl_alloc_fault_fail_next("wallet history entries");
+        ASSERT_EQ(build_history(ndb, &e), -1);
+        ASSERT(e == NULL);
+        zcl_alloc_fault_clear();
+    } TEST_END
+    return failures;
+}
+
+static int test_unknown_shielded_json(void)
+{
+    int failures = 0;
+    TEST_CASE("wallet_summary: unreadable shielded amounts are null, never 0") {
+        struct wallet_summary s = {0};
+        struct wallet_chain_view v = { .tip_height = 300, .header_height = 300,
+            .scanned_through = 300, .locked = true, .encrypted = true,
+            .shielded_known = false };
+        struct json_value j;
+        json_init(&j);
+        wallet_summary_to_json(&s, &v, true, "", &j);
+        ASSERT_STR_EQ(json_get_str(json_get(&j, "shielded_state")),
+                      "keys_unavailable");
+        ASSERT(json_get(&j, "spendable_zat")->type == JSON_NULL);
+        ASSERT(json_get(&j, "spendable")->type == JSON_NULL);
+        ASSERT(json_get(&j, "pending_zat")->type == JSON_NULL);
+        ASSERT(json_get(&j, "unready_zat")->type == JSON_NULL);
+        ASSERT(json_get(&j, "sending_zat")->type == JSON_NULL);
+        ASSERT(json_get(&j, "pending_notes")->type == JSON_NULL);
+        ASSERT(json_get(&j, "public_zat")->type == JSON_INT);
+        ASSERT(!json_get_bool(json_get(&j, "current")));
+        json_free(&j);
+    } TEST_END
+    return failures;
+}
+
+static int test_current_needs_real_chain(void)
+{
+    int failures = 0;
+    TEST_CASE("wallet_summary: current needs a real tip and real headers") {
+        struct wallet_summary s = {0};
+        struct wallet_chain_view v = { .tip_height = 300, .header_height = 300,
+            .scanned_through = 300, .shielded_known = true };
+        struct json_value j;
+        /* Offline: header equals tip and no peer reports a height. */
+        json_init(&j);
+        wallet_summary_to_json(&s, &v, true, "", &j);
+        ASSERT(!json_get_bool(json_get(&j, "current")));
+        json_free(&j);
+        /* A peer count with no known height, and a height with no peer. */
+        v.peer_count = 1;
+        json_init(&j);
+        wallet_summary_to_json(&s, &v, true, "", &j);
+        ASSERT(!json_get_bool(json_get(&j, "current")));
+        json_free(&j);
+        v.peer_count = 0;
+        v.peer_best_height = 300;
+        json_init(&j);
+        wallet_summary_to_json(&s, &v, true, "", &j);
+        ASSERT(!json_get_bool(json_get(&j, "current")));
+        json_free(&j);
+        /* A connected peer that reports the tip is evidence. */
+        v.peer_count = 1;
+        json_init(&j);
+        wallet_summary_to_json(&s, &v, true, "", &j);
+        ASSERT(json_get_bool(json_get(&j, "current")));
+        json_free(&j);
+        /* A peer two blocks ahead of the tip is not current. */
+        v.peer_best_height = 302;
+        json_init(&j);
+        wallet_summary_to_json(&s, &v, true, "", &j);
+        ASSERT(!json_get_bool(json_get(&j, "current")));
+        json_free(&j);
+        /* No peer, but a tip block from the last minutes. */
+        v.peer_count = 0;
+        v.peer_best_height = 0;
+        v.tip_recent = true;
+        json_init(&j);
+        wallet_summary_to_json(&s, &v, true, "", &j);
+        ASSERT(json_get_bool(json_get(&j, "current")));
+        json_free(&j);
+        /* An old tip and no peer: an offline phone. */
+        v.tip_recent = false;
+        json_init(&j);
+        wallet_summary_to_json(&s, &v, true, "", &j);
+        ASSERT(!json_get_bool(json_get(&j, "current")));
+        json_free(&j);
+        v.peer_count = 1;
+        v.peer_best_height = 300;
+        v.header_height = 0;
+        json_init(&j);
+        wallet_summary_to_json(&s, &v, true, "", &j);
+        ASSERT(!json_get_bool(json_get(&j, "current")));
+        json_free(&j);
+        v.header_height = 300;
+        v.tip_height = 0;
+        v.scanned_through = 0;
+        json_init(&j);
+        wallet_summary_to_json(&s, &v, true, "", &j);
+        ASSERT(!json_get_bool(json_get(&j, "current")));
+        json_free(&j);
+    } TEST_END
+    return failures;
+}
+
+/* A z-to-t send and a z-to-z send whose recorded fee is 0: the stored
+ * transaction gives the fee and the kind. */
+static bool outgoing_fixture(struct node_db *ndb)
+{
+    bool ok = wsh_put_note(ndb, 0x50, 0, IVK_A, 10 * ZCL1, 200, NULL);
+    ok = ok && wsh_spend_note(ndb, 0x50, 0, 0x51);
+    ok = ok && wsh_put_note(ndb, 0x51, 0, IVK_A, 5 * ZCL1 - FEE, 210, NULL);
+    ok = ok && put_tx(ndb, 0x51, 210, 0, true);
+    ok = ok && wsh_put_note(ndb, 0x52, 0, IVK_A, 10 * ZCL1, 200, NULL);
+    ok = ok && wsh_spend_note(ndb, 0x52, 0, 0x53);
+    ok = ok && wsh_put_note(ndb, 0x53, 0, IVK_A, 5 * ZCL1 - FEE, 211, NULL);
+    ok = ok && put_tx(ndb, 0x53, 211, 0, true);
+    return ok;
+}
+
+static struct db_wallet_tx_fact *find_tx(struct whf *f, uint8_t id)
+{
+    for (int i = 0; i < f->nt; i++)
+        if (f->txs[i].txid[0] == id)
+            return &f->txs[i];
+    return NULL;
+}
+
+static int test_history_shielded_sends(struct node_db *ndb)
+{
+    int failures = 0;
+    TEST_CASE("wallet_history: z-to-t is public, z-to-z recovers its amount") {
+        struct whf f;
+        struct wallet_history_entry *e = NULL;
+        ASSERT(outgoing_fixture(ndb));
+        ASSERT(load(ndb, &f));
+        struct db_wallet_tx_fact *zt = find_tx(&f, 0x51);
+        struct db_wallet_tx_fact *zz = find_tx(&f, 0x53);
+        ASSERT(zt && zz);
+        zt->raw_known = true;
+        zt->vout_count = 1;
+        zt->vout_total = 5 * ZCL1;
+        zt->value_balance = 5 * ZCL1 + FEE;
+        zz->raw_known = true;
+        zz->value_balance = FEE;
+        int n = wallet_history_build(f.notes, (size_t)f.nn, f.coins,
+                                     (size_t)f.nc, f.txs, (size_t)f.nt,
+                                     (const uint8_t (*)[32])&IVK_A, 1, TIP, &e);
+        ASSERT(n > 0);
+        const struct wallet_history_entry *a = find(e, n, 0x51);
+        ASSERT(a && a->direction == WALLET_DIR_SENT && !a->private_kind);
+        ASSERT(a->amount_known && a->amount == 5 * ZCL1 && a->fee == FEE);
+        const struct wallet_history_entry *b = find(e, n, 0x53);
+        ASSERT(b && b->direction == WALLET_DIR_SENT && b->private_kind);
+        ASSERT(b->amount_known && b->amount == 5 * ZCL1 && b->fee == FEE);
+        ASSERT_EQ(a->fully_shielded, 0);
+        ASSERT_EQ(b->fully_shielded, 1);
+        struct json_value ja, jb;
+        json_init(&ja);
+        json_init(&jb);
+        wallet_history_entry_to_json(a, &ja);
+        wallet_history_entry_to_json(b, &jb);
+        ASSERT(json_get(&ja, "fully_shielded")->type == JSON_BOOL);
+        ASSERT(!json_get_bool(json_get(&ja, "fully_shielded")));
+        ASSERT(json_get_bool(json_get(&jb, "fully_shielded")));
+        json_free(&ja);
+        json_free(&jb);
+        free(e);
+        unload(&f);
     } TEST_END
     return failures;
 }
@@ -510,6 +833,7 @@ static int test_latest_address(struct node_db *ndb)
     return failures;
 }
 
+int wallet_summary_handlers_run(void);
 int test_wallet_summary_history(void);
 int test_wallet_summary_history(void)
 {
@@ -541,8 +865,16 @@ int test_wallet_summary_history(void)
     failures += test_summary_reorg(&ndb);
     failures += test_summary_json();
     failures += test_send_gate();
+    failures += test_summary_send_readiness(&ndb);
+    failures += test_malformed_spend_marker(&ndb);
+    failures += test_failed_reads(&ndb);
+    failures += test_failed_allocation(&ndb);
+    failures += test_unknown_shielded_json();
+    failures += test_current_needs_real_chain();
+    failures += test_history_shielded_sends(&ndb);
     failures += test_latest_address(&ndb);
     node_db_close(&ndb);
+    failures += wallet_summary_handlers_run();
     (void)test_rm_rf_recursive(dir);
     return failures;
 }

@@ -40,6 +40,9 @@
 #ifndef _WIN32
 #include <fcntl.h>
 #include <sys/file.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #endif
 
 void zcl_native_fleet_board_test_set_bootstrap(void (*fn)(void));
@@ -2030,6 +2033,68 @@ static int test_bridge_rpc_errors_fail_closed(void)
     g_bridge_rpc_error_fixture = NULL;
     g_bridge_rpc_method_fixture = NULL;
     node_rpc_client_set_test_hook(NULL);
+    return failures;
+}
+
+/* A loopback port nothing listens on: bind, read the port, close. */
+static int closed_loopback_port(void)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr = { .sin_family = AF_INET,
+                                .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t alen = sizeof(addr);
+    int port = -1;
+    if (fd >= 0 && bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
+        getsockname(fd, (struct sockaddr *)&addr, &alen) == 0)
+        port = ntohs(addr.sin_port);
+    if (fd >= 0)
+        close(fd);
+    return port;
+}
+
+/* The real transport, no test hook: nothing answers, so the summary replies
+ * NODE_UNAVAILABLE (blocked, retryable) and not a failure the node reported. */
+static int test_wallet_summary_stopped_node(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    const struct zcl_command_spec *s = find_spec(reg, "core.wallet.summary");
+    char dir[PATH_MAX] = "", cookie[PATH_MAX + 16] = "";
+    char out[ZCL_COMMAND_RESULT_BUDGET + 1];
+    TEST("core.wallet.summary on a stopped node replies NODE_UNAVAILABLE") {
+        ASSERT(s != NULL && s->handler == zcl_native_bridge_command);
+        ASSERT(zcl_native_bridge_body_for_path(s->path) != NULL);
+        ASSERT(test_mkdtemp(dir, sizeof(dir), "summary_stopped") != NULL);
+        int port = closed_loopback_port();
+        ASSERT(port > 0);
+        node_rpc_client_set_test_hook(NULL);
+        for (int pass = 0; pass < 2; pass++) {
+            /* Pass 0: no auth cookie. Pass 1: a cookie and a refused port. */
+            if (pass == 1) {
+                (void)snprintf(cookie, sizeof(cookie), "%s/.cookie", dir);
+                FILE *cf = fopen(cookie, "w");
+                ASSERT(cf != NULL);
+                (void)fprintf(cf, "user:pass\n");
+                (void)fclose(cf);
+            }
+            node_rpc_client_init(dir, port);
+            enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+            ASSERT(exec_leaf(reg, s, out, sizeof(out), &code));
+            ASSERT_EQ(code, ZCL_COMMAND_EXIT_TRANSIENT);
+            ASSERT(strstr(out, "\"ok\":false") != NULL);
+            ASSERT(strstr(out, "\"status\":\"blocked\"") != NULL);
+            ASSERT(strstr(out, "\"retryable\":true") != NULL);
+            ASSERT(strstr(out, "\"code\":\"NODE_UNAVAILABLE\"") != NULL);
+            ASSERT(strstr(out, "\"code\":\"TOOL_ERROR\"") == NULL);
+            ASSERT(strstr(out, dir) == NULL);
+        }
+        PASS();
+    } _test_next:;
+    node_rpc_client_init("", 0);
+    if (cookie[0])
+        (void)unlink(cookie);
+    if (dir[0])
+        (void)rmdir(dir);
     return failures;
 }
 
@@ -7337,6 +7402,7 @@ int test_command_registry_catalog(void)
     failures += test_messaging_inbox_rejects_invalid_index();
     failures += test_network_peer_add_binding();
     failures += test_bridge_rpc_errors_fail_closed();
+    failures += test_wallet_summary_stopped_node();
     failures += test_raw_transaction_string_is_typed();
     failures += test_raw_transaction_verbose_bool();
     failures += test_raw_transaction_error_string();

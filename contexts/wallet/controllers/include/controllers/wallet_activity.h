@@ -2,7 +2,7 @@
  *
  * core.wallet.summary and core.wallet.history: the pure aggregation over
  * wallet fact rows (wallet_activity.c) and the node RPC handlers and JSON
- * rendering on top of it (wallet_activity_rpc.c). Both are read-only and use
+ * rendering on top of it (wallet_shielded_activity_rpc.c). Both are read-only and use
  * only viewing keys: they never touch a spending key. */
 
 #ifndef ZCL_CONTROLLERS_WALLET_ACTIVITY_H
@@ -31,18 +31,30 @@ struct json_value;
 #define WALLET_HISTORY_MAX_LIMIT 16
 
 struct wallet_summary {
-    int64_t spendable;       /* confirmed, unspent shielded notes */
+    /* Confirmed, unspent shielded notes that send would accept now: past
+     * their threshold, an unspent nullifier on the chain, a witness at the
+     * authoritative tip. */
+    int64_t spendable;
     int64_t pending;         /* unspent shielded notes below threshold */
     int pending_count;
     int pending_min_confs_needed; /* smallest remaining; 0 when none */
+    /* Confirmed notes send would refuse for now: a missing or stale witness,
+     * or a spent set that could not be read. */
+    int64_t unready;
+    int unready_notes;
+    /* Notes whose nullifier the chain already holds; they count nowhere. */
+    int reconciling_notes;
     int64_t sending;         /* wallet funds spent by an unconfirmed tx */
     int64_t public_confirmed;
     int64_t immature;
 };
 
 /* Sum the wallet's holdings. Only notes whose ivk appears in `ivks` count; a
- * repeated ivk and a repeated note row each count once. */
-void wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
+ * repeated ivk and a repeated note row each count once. A note's chain and
+ * witness fields must be filled; an unchecked note is never spendable.
+ * False, with *out zeroed, when the working set cannot be allocated: the
+ * amounts are then unknown, not zero. */
+bool wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
                                size_t nn,
                                const struct db_wallet_coin_fact *coins,
                                size_t nc,
@@ -63,7 +75,10 @@ struct wallet_history_entry {
     int confirmations;
     int64_t time;            /* 0 when unknown */
     enum wallet_direction direction;
-    bool private_kind;       /* any shielded note involved */
+    bool private_kind;       /* shielded, with no transparent leg to others */
+    /* 1 when every input and output of the transaction is shielded, 0 when
+     * any is transparent, -1 when the wallet cannot tell. */
+    int fully_shielded;
     int64_t net;             /* signed change to the wallet's balance */
     bool amount_known;
     int64_t amount;          /* received, or value sent to others; 0 internal */
@@ -80,7 +95,7 @@ int wallet_history_build(const struct db_wallet_note_fact *notes, size_t nn,
                          const uint8_t (*ivks)[32], size_t nk, int tip,
                          struct wallet_history_entry **out);
 
-struct wallet_history_cursor {
+struct wallet_history_page_key {
     bool set;
     int key;                 /* height, or INT32_MAX while pending */
     uint8_t txid[32];
@@ -88,23 +103,28 @@ struct wallet_history_cursor {
 
 /* Cursor text is "<height|p>:<64 hex>" naming the last entry of a page. */
 bool wallet_history_cursor_parse(const char *text,
-                                 struct wallet_history_cursor *out);
+                                 struct wallet_history_page_key *out);
 void wallet_history_cursor_format(const struct wallet_history_entry *e,
                                   char *out, size_t cap);
 /* Index of the first entry strictly after the cursor. */
 size_t wallet_history_page_start(const struct wallet_history_entry *e,
                                  size_t n,
-                                 const struct wallet_history_cursor *cur);
+                                 const struct wallet_history_page_key *cur);
 
 /* Node state the summary reports beside the amounts. */
 struct wallet_chain_view {
-    int tip_height;
-    int header_height;
-    int peer_best_height;
-    int scanned_through;
+    int tip_height;          /* > 0: a command with no tip fails instead */
+    int header_height;       /* 0 when the node knows no header */
+    int peer_best_height;    /* 0 or less when no peer reports a height */
+    size_t peer_count;       /* connected peers */
+    bool tip_recent;         /* the tip block is under 10 minutes old */
+    int scanned_through;     /* < 0 when unknown */
     bool locked;
     bool encrypted;
     size_t shielded_keys;
+    /* False when the viewing keys were not loaded (a locked wallet that
+     * kept none), so no shielded amount can be read. */
+    bool shielded_known;
 };
 
 void wallet_summary_to_json(const struct wallet_summary *s,

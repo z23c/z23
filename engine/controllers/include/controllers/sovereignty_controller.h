@@ -88,4 +88,9 @@ const char *sovereignty_trust_mode(bool proven_authority, bool self_folded);
 bool sovereignty_guard_allow(const char *action, char *reason,
                              size_t reason_cap);
 
+/* The same decision as sovereignty_guard_allow for a caller that only reports
+ * it: no stamp write, no log line. `reason` is filled as for the guard. */
+bool sovereignty_guard_peek(const char *action, char *reason,
+                            size_t reason_cap);
+
 #endif

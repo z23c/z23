@@ -284,6 +284,12 @@ bool node_db_reconcile_canonical_sapling_notes(
     struct node_db *ndb, struct main_state *ms, const char *datadir,
     size_t *reconciled_out);
 
+/* Read-only: whether the durable Sapling spent set already holds `nullifier`.
+ * False, leaving *spent false, when that set is incomplete or unreadable, so
+ * a caller can tell "not spent" from "could not be checked". Writes nothing. */
+bool node_db_sapling_nullifier_is_spent(const uint8_t nullifier[32],
+                                        bool *spent);
+
 /* Delete an unrelayed wallet transaction through the node.db single-writer
  * lane. Used as the durable compensation step when a post-flush reservation
  * fails. */
