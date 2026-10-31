@@ -475,6 +475,27 @@ static int tgt_case_wallet(void)
     return failures;
 }
 
+/* Testnet WIF (version 0xEF): 51 characters from '9' uncompressed, 52 from 'c'
+ * compressed. Both must be refused like the mainnet shapes. */
+static int tgt_case_testnet_wif(void)
+{
+    int failures = 0;
+    TEST_CASE("telegram guard refuses testnet WIF keys") {
+        unsigned char wif[34];
+        char key[160];
+        memset(wif, 0x11, sizeof(wif));
+        wif[0] = 0xEF;
+        tgt_b58(wif, 33, key);
+        ASSERT(strlen(key) == 51 && key[0] == '9');
+        ASSERT(tg_secret_refusal(key, NULL) != NULL);
+        wif[33] = 0x01;
+        tgt_b58(wif, 34, key);
+        ASSERT(strlen(key) == 52 && key[0] == 'c');
+        ASSERT(tg_secret_refusal(key, NULL) != NULL);
+    } TEST_END
+    return failures;
+}
+
 static int tgt_registry_cases(void)
 {
     int failures = 0;
@@ -652,7 +673,7 @@ int test_telegram(void)
     }
     failures += tgt_case_0() + tgt_case_1() + tgt_case_2() + tgt_case_3() + tgt_case_4();
     failures += tgt_case_5() + tgt_case_6() + tgt_case_mono() + tgt_case_7();
-    failures += tgt_status_case() + tgt_case_9() + tgt_case_10() + tgt_registry_cases() + tgt_case_wallet();
+    failures += tgt_status_case() + tgt_case_9() + tgt_case_10() + tgt_registry_cases() + tgt_case_wallet() + tgt_case_testnet_wif();
     failures += tgt_legacy_sent_case();
     failures += tgt_legacy_sent_next_case();
     failures += tgt_curl_case();

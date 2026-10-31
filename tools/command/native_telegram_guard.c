@@ -47,7 +47,7 @@ static bool tg_base58_secret(const char *run, size_t len)
 {
     unsigned char payload[128];
     size_t out = 0;
-    bool wif_shape = (len == 51 || len == 52) && strchr("5KL", run[0]) != NULL;
+    bool wif_shape = (len == 51 || len == 52) && strchr("5KL9c", run[0]) != NULL;
     if (len >= 100 && (!strncmp(run, "xprv", 4) || !strncmp(run, "tprv", 4)))
         return true;
     if (len < 50 || len >= TG_B58_RUN_MAX)
