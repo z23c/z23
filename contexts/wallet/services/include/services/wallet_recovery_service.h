@@ -57,6 +57,13 @@ struct wallet_recovery_request {
     const char *passphrase;     /* at-rest passphrase; NULL = environment policy */
     bool        shielded_only;  /* mint no transparent key */
     bool        record_birthday; /* store the datadir chain tip as the birthday */
+    /* A restore of a phrase made just now: the birthday its create reply
+     * named. height is the birthday, hash the block WALLET_BIRTHDAY_MARGIN
+     * below it. Honoured only when this datadir holds that block; otherwise
+     * the wallet is marked unread from height 0. */
+    bool        has_birthday;
+    int64_t     birthday_height;
+    uint8_t     birthday_hash[32];
 };
 
 struct wallet_recovery_report {
@@ -95,7 +102,17 @@ struct wallet_recovery_report {
     bool     chain_history_consulted; /* a chain was available to scan */
     bool     transparent_scan_truncated;
     bool     birthday_recorded;
+    bool     encrypted_at_rest;     /* a committed run wrapped the keys */
     int64_t  birthday_height;       /* valid when birthday_recorded */
+    uint8_t  birthday_hash[32];     /* floor block hash, when birthday_recorded */
+    bool     birthday_rejected;     /* a birthday was supplied and not honoured */
+    /* The chain this datadir was seeded from holds no connected block below
+     * seed_floor_height, so coins received below it cannot be read here.
+     * history_below_seed_hidden is true when the wallet has no verified
+     * birthday and the datadir is seeded: the phrase may be older than the
+     * seed. */
+    int32_t  seed_floor_height;     /* 0 when the datadir is not seeded */
+    bool     history_below_seed_hidden;
     int64_t  sapling_keys_before;   /* wallet_sapling_keys rows in the target */
     int64_t  notes_before;          /* wallet_sapling_notes rows in the target */
 };

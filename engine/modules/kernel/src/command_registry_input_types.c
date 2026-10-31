@@ -99,6 +99,7 @@ static bool cr_bool_key(const char *key)
         "dry_run",           "require_existing_watcher", "allow_external",
         "runner_ok_only",    "dedupe",            "route_only",
         "route-only",        "explain",
+        "shielded_only",
     };
     return cr_key_in(key, keys, sizeof(keys) / sizeof(keys[0])) ||
            command_registry_devagent_input_extra_bool_key(key);
@@ -450,6 +451,19 @@ static bool cr_match_wallet_unlock(const char *path, const char *key,
     return true;
 }
 
+/* core.wallet.recovery.restore `birthday` is the {height, hash} object a wallet
+ * create reply gave; the handler checks its members. */
+static bool cr_match_restore_birthday(const char *path, const char *key,
+                                      const struct json_value *value,
+                                      bool *type_ok)
+{
+    if (strcmp(path, "core.wallet.recovery.restore") != 0 ||
+        strcmp(key, "birthday") != 0)
+        return false;
+    *type_ok = value->type == JSON_OBJ && value->num_children <= 2u;
+    return true;
+}
+
 /* core.network.onion.remote-status `timeout_secs` is an integer 5..60, the
  * fetch deadline the handler passes to the embedded-Tor blocking fetch. */
 static bool cr_match_onion_remote_status(const char *path, const char *key,
@@ -514,6 +528,7 @@ static bool cr_match_scoped_ints(const char *path, const char *key,
                                  const struct json_value *value, bool *type_ok)
 {
     return cr_match_wallet_unlock(path, key, value, type_ok) ||
+           cr_match_restore_birthday(path, key, value, type_ok) ||
            cr_match_onion_remote_status(path, key, value, type_ok) ||
            cr_match_wiki_chunk_ints(path, key, value, type_ok) ||
            cr_match_vanity_ints(path, key, value, type_ok) ||

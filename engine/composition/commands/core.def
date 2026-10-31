@@ -1400,12 +1400,17 @@ ZCL_COMMAND_READY_COMMAND(
     "DATADIR_LOCKED while a node holds the datadir or another recovery is "
     "writing it, and WALLET_ALREADY_PRESENT if a wallet is already there. "
     "Pass the words as phrase, or set ZCL_RECOVERY_PHRASE to keep them out "
-    "of shell history; they are never logged or echoed back. Keys come "
-    "back, history does not — next_steps names the rescans that rebuild "
-    "it.", ZCL_COMMAND_LIST_BUDGET,
+    "of shell history; they are never logged or echoed back. Optional: "
+    "passphrase (standard input via --input=- only, 12+ bytes, encrypts "
+    "from the first write), shielded_only (no transparent keys) and "
+    "birthday {height,hash} from a create reply, used only if this "
+    "datadir holds that block; else the wallet is marked unread from 0. "
+    "history_below_seed_hidden says a seeded node cannot show older "
+    "funds. Keys come back, history does not — next_steps names the "
+    "rescans.", ZCL_COMMAND_LIST_BUDGET,
     "wallet,recovery,phrase,seed,mnemonic,restore",
     "zcl.wallet_recovery_restore.input.v1", "zcl.wallet_recovery_restore.v1",
-    "phrase,datadir,confirm", "",
+    "phrase,datadir,confirm,passphrase,shielded_only,birthday", "",
     "z23 core wallet recovery restore "
     "--input='{\"datadir\":\"/tmp/recovered\"}'",
     ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,

@@ -1238,6 +1238,272 @@ static bool wcr_locked_payment_found(struct wallet *w, struct wallet_sqlite *ws,
            w->num_sapling_notes == 1;
 }
 
+/* ── case 13: the restore inputs the phone flow needs ──────────────── */
+
+#define WCR_RESTORE_PHRASE                                                 \
+    "abandon abandon abandon abandon abandon abandon abandon abandon "     \
+    "abandon abandon abandon about"
+#define WCR_HASH_09 "0909090909090909090909090909090909090909090909090909090909090909"
+#define WCR_HASH_77 "7777777777777777777777777777777777777777777777777777777777777777"
+
+static bool wcr_data_bool(const struct wcr_run *run, const char *key)
+{
+    struct json_value v;
+    json_init(&v);
+    bool ok = json_read(&v, run->wire, strlen(run->wire)) &&
+              json_get_bool_or(json_get(&v, "data"), key, false);
+    json_free(&v);
+    return ok;
+}
+
+static int64_t wcr_data_int(const struct wcr_run *run, const char *key)
+{
+    struct json_value v;
+    json_init(&v);
+    int64_t n = json_read(&v, run->wire, strlen(run->wire))
+                    ? json_get_int(json_get(json_get(&v, "data"), key)) : -1;
+    json_free(&v);
+    return n;
+}
+
+/* A datadir that holds a chain: connected blocks at 900 (hash 0x09) and 1000.
+ * Seeded from a snapshot it holds nothing below 900; from genesis it also
+ * holds block 0. */
+static bool wcr_seeded_chain(char *dir, size_t cap, const char *tag,
+                             bool from_genesis)
+{
+    wcr_fixture(dir, cap, tag);
+    return wcr_block(dir, 0x09, 900, 3) && wcr_block(dir, 0x0a, 1000, 3) &&
+           (!from_genesis || wcr_block(dir, 0x01, 0, 3));
+}
+
+/* `z23 core wallet recovery restore` on the production path. `extra` is the
+ * rest of the input object (leading comma included), `via_stdin` selects
+ * --input=- over --input=<json>. */
+static bool wcr_restore_cli(const char *dir, const char *extra,
+                            bool via_stdin, struct wcr_run *run)
+{
+    char text[2048], arg[2100];
+    snprintf(text, sizeof(text),
+             "{\"datadir\":\"%s\",\"phrase\":\"%s\",\"confirm\":true%s}", dir,
+             WCR_RESTORE_PHRASE, extra);
+    wallet_lock_reset_for_test();
+    memset(run, 0, sizeof(*run));
+    /* Without a passphrase the at-rest policy needs the plaintext opt-in. */
+    if (!strstr(extra, "passphrase"))
+        setenv("ZCL_ALLOW_PLAINTEXT_WALLET", "1", 1);
+    snprintf(arg, sizeof(arg), "--input=%s", text);
+    const char *by_stdin[] = {"wallet", "recovery", "restore", "--input=-",
+                              "--format=json"};
+    const char *by_argv[] = {"wallet", "recovery", "restore", arg,
+                             "--format=json"};
+    bool ok = via_stdin ? wcr_cli_args(by_stdin, 5, text, run)
+                        : wcr_cli_args(by_argv, 5, "", run);
+    unsetenv("ZCL_ALLOW_PLAINTEXT_WALLET");
+    if (run->rc != 0)
+        printf("    restore reply: %.500s\n", run->wire);
+    return ok;
+}
+
+static bool wcr_wallet_rows_exist(const char *dir)
+{
+    struct node_db ndb;
+    bool open = wcr_open(&ndb, dir);
+    bool any = open && (db_wallet_key_count(&ndb) > 0 ||
+                        db_sapling_key_count(&ndb) > 0);
+    if (open)
+        node_db_close(&ndb);
+    return any;
+}
+
+/* The passphrase decides how the wallet is written. */
+static int restore_passphrase_cases(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    WCR_CHECK("setup: a seeded datadir",
+              wcr_seeded_chain(dir, sizeof(dir), "rs_pass", false));
+    uint8_t seed[32];
+    wcr_phrase_seed(WCR_RESTORE_PHRASE, seed);
+    bool ran = wcr_restore_cli(dir, ",\"passphrase\":\"" WCR_PASS "\"", true,
+                               &run);
+    WCR_CHECK("a restore with a passphrase on standard input succeeds",
+              ran && run.rc == 0 && wcr_data_bool(&run, "committed"));
+    WCR_CHECK("the reply says the keys are encrypted at rest",
+              wcr_data_bool(&run, "encrypted_at_rest"));
+    WCR_CHECK("the raw seed is in no file of the datadir",
+              wcr_count_in_tree(dir, (const char *)seed, 32) == 0);
+    WCR_CHECK("neither the phrase nor the passphrase is in any file",
+              wcr_count_in_tree(dir, WCR_RESTORE_PHRASE,
+                                strlen(WCR_RESTORE_PHRASE)) == 0 &&
+              wcr_count_in_tree(dir, WCR_PASS, strlen(WCR_PASS)) == 0);
+    struct node_db ndb;
+    struct wallet_sqlite ws;
+    bool open = wcr_open(&ndb, dir) && wallet_sqlite_open_r(&ws, ndb.db).ok;
+    uint8_t got[32] = {0};
+    WCR_CHECK("without the passphrase the stored seed is locked",
+              open && wallet_sqlite_sapling_seed_state(&ws, got) ==
+                          WALLET_SEED_LOCKED);
+    bool unlocked = open && wallet_lock_unlock(NULL, NULL, WCR_PASS).ok;
+    WCR_CHECK("with the passphrase it decrypts to the phrase's seed",
+              unlocked &&
+              wallet_sqlite_sapling_seed_state(&ws, got) ==
+                  WALLET_SEED_UNLOCKED && memcmp(got, seed, 32) == 0);
+    wallet_lock_lock(NULL);
+    if (open) {
+        wallet_sqlite_close(&ws);
+        node_db_close(&ndb);
+    }
+    memory_cleanse(seed, sizeof(seed));
+    memory_cleanse(got, sizeof(got));
+
+    WCR_CHECK("setup: a second seeded datadir",
+              wcr_seeded_chain(dir, sizeof(dir), "rs_argv", false));
+    ran = wcr_restore_cli(dir, ",\"passphrase\":\"" WCR_PASS "\"", false,
+                          &run);
+    WCR_CHECK("a passphrase in argv is refused and nothing is written",
+              ran && wcr_error_is(&run, "STDIN_REQUIRED") &&
+              !wcr_wallet_rows_exist(dir));
+    ran = wcr_restore_cli(dir, ",\"passphrase\":\"short\"", true, &run);
+    WCR_CHECK("a passphrase under 12 bytes is refused and nothing is written",
+              ran && wcr_error_is(&run, "PASSPHRASE_TOO_SHORT") &&
+              !wcr_wallet_rows_exist(dir));
+    ran = wcr_restore_cli(dir, ",\"passphrase\":\"\"", true, &run);
+    WCR_CHECK("an empty passphrase is refused, not read as none",
+              ran && run.rc != 0 && wcr_error_is(&run, "INVALID_INPUT") &&
+              !wcr_wallet_rows_exist(dir));
+    return failures;
+}
+
+/* shielded_only mints no transparent key. */
+static int restore_shielded_only_case(void)
+{
+    int failures = 0;
+    char dir[1024], plain[1024];
+    struct wcr_run run;
+    WCR_CHECK("setup: seeded datadirs",
+              wcr_seeded_chain(dir, sizeof(dir), "rs_shielded", true) &&
+              wcr_seeded_chain(plain, sizeof(plain), "rs_both", true));
+    bool ran = wcr_restore_cli(dir, ",\"passphrase\":\"" WCR_PASS "\","
+                               "\"shielded_only\":true", true, &run);
+    struct node_db ndb;
+    bool open = ran && run.rc == 0 && wcr_open(&ndb, dir);
+    WCR_CHECK("shielded_only restores Sapling keys and no transparent key",
+              open && db_wallet_key_count(&ndb) == 0 &&
+              db_sapling_key_count(&ndb) > 0);
+    if (open)
+        node_db_close(&ndb);
+    ran = wcr_restore_cli(plain, ",\"passphrase\":\"" WCR_PASS "\"", true,
+                          &run);
+    open = ran && run.rc == 0 && wcr_open(&ndb, plain);
+    WCR_CHECK("without it the same phrase restores transparent keys too",
+              open && db_wallet_key_count(&ndb) > 0);
+    if (open)
+        node_db_close(&ndb);
+    return failures;
+}
+
+/* The persisted scan marker of `dir`, or false when none is pending. */
+static bool wcr_unread_from_zero(const char *dir)
+{
+    struct wallet *w = calloc(1, sizeof(*w));
+    bool read = w && wcr_scan_marker(dir, w);
+    bool unread = read && w->scan_retry.pending && w->scan_retry.from == 0 &&
+                  strcmp(w->scan_retry.blocker, "WALLET_RESTORE_UNREAD") == 0;
+    if (read)
+        wallet_free(w);
+    free(w);
+    return unread;
+}
+
+/* A birthday counts only when this datadir holds its block. */
+static int restore_birthday_cases(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    const char *good = ",\"birthday\":{\"height\":1000,\"hash\":\""
+                       WCR_HASH_09 "\"}";
+    WCR_CHECK("setup: a seeded datadir",
+              wcr_seeded_chain(dir, sizeof(dir), "rs_bday_ok", false));
+    bool ran = wcr_restore_cli(dir, good, true, &run);
+    struct node_db ndb;
+    int64_t b = 0;
+    uint8_t hash[32];
+    bool open = ran && run.rc == 0 && wcr_open(&ndb, dir);
+    WCR_CHECK("a birthday this datadir holds is stored",
+              open && db_wallet_birthday_get(&ndb, &b, hash) && b == 1000 &&
+              hash[0] == 0x09 && hash[31] == 0x09);
+    if (open)
+        node_db_close(&ndb);
+    WCR_CHECK("and the wallet carries no unread marker",
+              ran && !wcr_unread_from_zero(dir));
+    WCR_CHECK("the reply reports the birthday and nothing hidden below the seed",
+              wcr_data_bool(&run, "birthday_recorded") &&
+              !wcr_data_bool(&run, "birthday_rejected") &&
+              !wcr_data_bool(&run, "history_below_seed_hidden"));
+
+    WCR_CHECK("setup: a datadir for a wrong hash",
+              wcr_seeded_chain(dir, sizeof(dir), "rs_bday_bad", false));
+    ran = wcr_restore_cli(dir, ",\"birthday\":{\"height\":1000,\"hash\":\""
+                          WCR_HASH_77 "\"}", true, &run);
+    open = ran && run.rc == 0 && wcr_open(&ndb, dir);
+    WCR_CHECK("a wrong birthday hash stores no birthday",
+              open && !db_wallet_birthday_get(&ndb, &b, hash));
+    if (open)
+        node_db_close(&ndb);
+    WCR_CHECK("it falls back to a marker from height 0",
+              ran && wcr_unread_from_zero(dir));
+    WCR_CHECK("and the reply says it was rejected",
+              wcr_data_bool(&run, "birthday_rejected") &&
+              !wcr_data_bool(&run, "birthday_recorded"));
+
+    ran = wcr_restore_cli(dir, ",\"birthday\":{\"height\":50}", true, &run);
+    WCR_CHECK("a malformed birthday is refused before anything is written",
+              ran && wcr_error_is(&run, "BAD_BIRTHDAY"));
+    return failures;
+}
+
+/* A phrase with no birthday on a seeded node cannot show older funds, and the
+ * reply says so in a field the app can read. */
+static int restore_below_seed_cases(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    WCR_CHECK("setup: a seeded datadir",
+              wcr_seeded_chain(dir, sizeof(dir), "rs_seed", false));
+    bool ran = wcr_restore_cli(dir, "", false, &run);
+    WCR_CHECK("a restore with no birthday on a seeded node reports history "
+              "below the seed hidden, with the seed height",
+              ran && run.rc == 0 &&
+              wcr_data_bool(&run, "history_below_seed_hidden") &&
+              wcr_data_int(&run, "seed_floor_height") == 900 &&
+              strstr(run.wire, "history_warning") != NULL);
+    WCR_CHECK("setup: a datadir seeded from genesis",
+              wcr_seeded_chain(dir, sizeof(dir), "rs_genesis", true));
+    ran = wcr_restore_cli(dir, "", false, &run);
+    WCR_CHECK("a datadir with no seed floor hides nothing",
+              ran && run.rc == 0 &&
+              !wcr_data_bool(&run, "history_below_seed_hidden") &&
+              wcr_data_int(&run, "seed_floor_height") == 0);
+    ran = wcr_restore_cli(dir, "", false, &run);
+    WCR_CHECK("a second restore into that datadir is still refused",
+              ran && wcr_error_is(&run, "WALLET_ALREADY_PRESENT"));
+    return failures;
+}
+
+static int t_restore_inputs(void)
+{
+    int failures = 0;
+    failures += restore_passphrase_cases();
+    failures += restore_shielded_only_case();
+    failures += restore_birthday_cases();
+    failures += restore_below_seed_cases();
+    return failures;
+}
+
 /* DEPENDS ON THE WALLET-LOCK WORK (lane claude-app-status: wallet_lock.c and
  * wallet_sqlite.c). Until it lands the two checks named "needs wallet-lock"
  * fail: they assert behaviour of the lock layer on a created wallet, not of
@@ -1303,6 +1569,7 @@ int test_wallet_create(void)
     failures += t_legacy_wallet_directory();
     failures += t_boot_guards();
     failures += t_locked_wallet();
+    failures += t_restore_inputs();
     if (failures == 0)
         printf("wallet_create: OK (all wallet creation gates pass)\n");
     else

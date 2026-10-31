@@ -16,6 +16,7 @@
 #include "platform/private_directory.h"
 #include "platform/private_file.h"
 #include "services/wallet_restore_service.h"   /* datadir single-writer proof */
+#include "services/wallet_create_service.h"    /* the passphrase minimum */
 #include "support/cleanse.h"
 #include "core/utiltime.h"
 #include "util/log_macros.h"
@@ -29,6 +30,7 @@
 #include "wallet/wallet_sqlite.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -415,9 +417,9 @@ static struct zcl_result wrc_load_passphrase(
 /* A restored wallet claims no scanned-through height until it is read; a
  * created one has its birthday instead. */
 static void wrc_mark_unread(const struct wallet_recovery_request *req,
-                            struct wallet *w)
+                            struct wallet *w, bool birthday_honoured)
 {
-    if (req->record_birthday)
+    if (req->record_birthday || birthday_honoured)
         return;
     w->scan_retry.pending = true;
     w->scan_retry.from = 0;
@@ -426,8 +428,9 @@ static void wrc_mark_unread(const struct wallet_recovery_request *req,
              WALLET_RESTORE_BLOCKER_UNREAD);
 }
 
-/* Store the birthday: the highest connected block (status >= 3) this datadir
- * holds, and the hash of the block WALLET_BIRTHDAY_MARGIN below it. Rows above
+/* For a created wallet, store the birthday: the highest connected block
+ * (status >= 3) this datadir holds, and the hash of the block
+ * WALLET_BIRTHDAY_MARGIN below it. Rows above
  * a rewound tip keep their status, so the tip itself may be stale; that is
  * safe because every row here existed before the wallet did, and boot checks
  * the floor block, not the tip, against the active chain. A datadir with no
@@ -439,13 +442,142 @@ static void wrc_record_birthday(const struct wallet_recovery_request *req,
                                 struct wallet_recovery_report *out)
 {
     struct db_block floor_block;
-    int tip = req->record_birthday ? db_block_max_height(ndb) : -1;
+    if (!req->record_birthday)
+        return;
+    int tip = db_block_max_height(ndb);
     out->birthday_recorded =
         tip > WALLET_BIRTHDAY_MARGIN &&
         db_block_find_by_height(ndb, tip - WALLET_BIRTHDAY_MARGIN,
                                 &floor_block) &&
         db_wallet_birthday_set(ndb, tip, floor_block.hash);
     out->birthday_height = out->birthday_recorded ? tip : 0;
+    if (out->birthday_recorded)
+        memcpy(out->birthday_hash, floor_block.hash, sizeof(floor_block.hash));
+}
+
+/* True when the caller's birthday names a block this datadir holds: the block
+ * WALLET_BIRTHDAY_MARGIN below the height must exist, connected, with the
+ * given hash. This is the test wallet_birthday_check applies to the active
+ * chain at boot, made against the stored chain rows because an offline
+ * restore has no in-memory chain; boot repeats it and marks the wallet unread
+ * from 0 if the chain has since moved. Chain membership does not show the
+ * phrase is new: the caller vouches for that. */
+static bool wrc_birthday_verified(const struct wallet_recovery_request *req,
+                                  struct node_db *ndb)
+{
+    struct db_block floor_block;
+    if (!req->has_birthday || !ndb || !ndb->open ||
+        req->birthday_height <= WALLET_BIRTHDAY_MARGIN ||
+        req->birthday_height > INT_MAX)
+        return false;
+    return db_block_find_by_height(
+               ndb, (int)req->birthday_height - WALLET_BIRTHDAY_MARGIN,
+               &floor_block) &&
+           memcmp(floor_block.hash, req->birthday_hash,
+                  sizeof(floor_block.hash)) == 0;
+}
+
+/* Store a verified birthday for a restored wallet. False leaves the wallet
+ * without one, and the caller marks it unread. */
+static bool wrc_honour_birthday(const struct wallet_recovery_request *req,
+                                struct node_db *ndb,
+                                struct wallet_recovery_report *out)
+{
+    if (!wrc_birthday_verified(req, ndb) ||
+        !db_wallet_birthday_set(ndb, req->birthday_height,
+                                req->birthday_hash))
+        return false;
+    out->birthday_recorded = true;
+    out->birthday_height = req->birthday_height;
+    memcpy(out->birthday_hash, req->birthday_hash, sizeof(out->birthday_hash));
+    return true;
+}
+
+struct wrc_lowest {
+    int height;
+    bool found;
+};
+
+static bool wrc_lowest_cb(int height, const struct db_block *row, void *ctx)
+{
+    (void)row;
+    struct wrc_lowest *low = ctx;
+    low->height = height;
+    low->found = true;
+    return false;
+}
+
+/* What this datadir cannot show of the phrase's history. A datadir seeded
+ * from a snapshot holds no connected block below its seed height, so coins
+ * received there stay unseen unless a verified birthday shows the phrase is
+ * newer than the seed. The seed height is the lowest connected block the
+ * datadir holds; a datadir with no block is not seeded yet, and its wallet is
+ * marked unread. A read that fails counts as seeded. */
+static bool wrc_seeded(struct node_db *ndb, struct wallet_recovery_report *out)
+{
+    struct wrc_lowest low = { 0, false };
+    out->seed_floor_height = 0;
+    if (!ndb || !ndb->open)
+        return false;
+    bool done = db_block_scan_height_range_probe(ndb, 0, INT_MAX - 1,
+                                                 wrc_lowest_cb, &low);
+    if (!done && !low.found)
+        return true;
+    out->seed_floor_height = low.found ? low.height : 0;
+    return out->seed_floor_height > 0;
+}
+
+/* Facts the plan and the commit both report about history and the birthday. */
+static void wrc_report_history(const struct wallet_recovery_request *req,
+                               struct wallet_recovery_report *out,
+                               bool seeded, bool birthday_ok)
+{
+    out->history_below_seed_hidden =
+        seeded && !req->record_birthday && !birthday_ok;
+    out->birthday_rejected = req->has_birthday && !birthday_ok;
+}
+
+/* Read the history facts before any write handle exists, so the plan reports
+ * what the commit will do. Returns whether the datadir is seeded. */
+static bool wrc_assess_history(const struct wallet_recovery_request *req,
+                               struct node_db *ndb,
+                               struct wallet_recovery_report *out)
+{
+    bool seeded = wrc_seeded(ndb, out);
+    wrc_report_history(req, out, seeded, wrc_birthday_verified(req, ndb));
+    return seeded;
+}
+
+/* A restored wallet has read none of the chain. Boot defers a long range, so
+ * the wallet must say so: a verified birthday is stored, and without one a
+ * pending retry from height 0 keeps the wallet reading incomplete until a
+ * rescan reads the range. Creation has its own birthday. */
+static void wrc_settle_birthday(const struct wallet_recovery_request *req,
+                                struct node_db *ndb, struct wallet *w,
+                                bool seeded,
+                                struct wallet_recovery_report *out)
+{
+    bool honoured = wrc_honour_birthday(req, ndb, out);
+    wrc_mark_unread(req, w, honoured);
+    wrc_report_history(req, out, seeded, honoured);
+}
+
+/* The request's own shape, refused before anything is read or written. */
+static struct zcl_result wrc_check_request(
+    const struct wallet_recovery_request *req)
+{
+    if (!req->datadir || !req->datadir[0])
+        return ZCL_ERR(-63, "datadir path is empty");
+    if (!req->phrase || !req->phrase[0])
+        return ZCL_ERR(-60, "a recovery phrase is required");
+    if (req->passphrase &&
+        strlen(req->passphrase) < (size_t)WALLET_CREATE_MIN_PASSPHRASE)
+        return ZCL_ERR(-68,
+            "the passphrase is shorter than %d bytes. The wallet is encrypted "
+            "from its first write, so it is refused rather than written with "
+            "a weak one. Nothing was written",
+            WALLET_CREATE_MIN_PASSPHRASE);
+    return ZCL_OK;
 }
 
 /* ── recover ─────────────────────────────────────────────────────── */
@@ -460,10 +592,9 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
     wrc_reset(out, req->datadir);
     out->dry_run = req->dry_run;
 
-    if (!req->datadir || !req->datadir[0])
-        return ZCL_ERR(-63, "datadir path is empty");
-    if (!req->phrase || !req->phrase[0])
-        return ZCL_ERR(-60, "a recovery phrase is required");
+    struct zcl_result shape = wrc_check_request(req);
+    if (!shape.ok)
+        return shape;
 
     out->word_count = wrc_word_count(req->phrase);
     /* Refuse on shape, and describe the shape — never the words. */
@@ -631,6 +762,8 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
         wrc_count_shielded_rows(&ndb, out);
     }
 
+    bool seeded = wrc_assess_history(req, &ndb, out);
+
     /* Never write a second seed over a wallet that already has keys. */
     if (wrc_wallet_present(out)) {
         if (have_ws) wallet_sqlite_close(&ws);
@@ -711,10 +844,7 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
         goto done;
     }
 
-    /* A restored wallet has read none of the chain. Boot defers a long range, so
-     * the wallet must say so: a pending retry from height 0 keeps it reading
-     * incomplete until a rescan reads the range. Creation has its birthday. */
-    wrc_mark_unread(req, w);
+    wrc_settle_birthday(req, &ndb, w, seeded, out);
 
     /* Creation policy may accept a one-shot environment passphrase, but that
      * variable must never auto-unlock the live wallet. Load it only across
@@ -722,6 +852,7 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
     rc = wrc_load_passphrase(req, &recovery_pass_loaded);
     if (!rc.ok)
         goto done;
+    out->encrypted_at_rest = recovery_pass_loaded;
 
     /* One writer: the encryption-aware wallet_sqlite layer, in one
      * transaction, exactly as boot flushes a freshly minted keypool. */

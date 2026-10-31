@@ -41,6 +41,7 @@
 
 #include "chain/chainparams.h"
 #include "controllers/agent_controller.h"
+#include "base/hex.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "command/native_command.h"
@@ -341,7 +342,92 @@ static bool wrp_restore_datadir(const struct json_value *input,
     return true;
 }
 
-void zcl_native_handle_wallet_recovery_restore(
+/* The birthday a create reply named: {"height":N,"hash":"<64 hex>"}. Absent is
+ * fine; a present one that is not that shape is refused before anything is
+ * written, because a caller that sends it expects it to be used. */
+static bool wrp_parse_birthday(const struct json_value *input,
+                               struct wallet_recovery_request *req,
+                               struct zcl_command_reply *reply)
+{
+    const struct json_value *b = json_get(input, "birthday");
+    if (!b)
+        return true;
+    const struct json_value *h = json_get(b, "height");
+    const char *hex = json_get_str(json_get(b, "hash"));
+    int64_t height = h ? json_get_int(h) : 0;
+    if (height <= 0 || !hex || !zcl_hex_decode(hex, req->birthday_hash, 32)) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "BAD_BIRTHDAY",
+                 "birthday must be {\"height\": a positive number, \"hash\": "
+                 "64 hex characters}, exactly as a wallet create reply "
+                 "gave them. Nothing was written",
+                 "core.wallet.recovery.restore");
+        return false;
+    }
+    req->has_birthday = true;
+    req->birthday_height = height;
+    return true;
+}
+
+/* The passphrase arrives only on standard input, the way create takes it. */
+static bool wrp_restore_passphrase(const struct json_value *input,
+                                   const char **pass,
+                                   struct zcl_command_reply *reply)
+{
+    const struct json_value *p = json_get(input, "passphrase");
+    *pass = p ? json_get_str(p) : NULL;
+    if (!p || zcl_native_input_was_stdin())
+        return true;
+    wnh_fail(reply, ZCL_COMMAND_EXIT_DENIED, "STDIN_REQUIRED",
+             "the passphrase is accepted only through --input=-; it is never "
+             "taken from arguments or the environment",
+             "core.wallet.recovery.restore");
+    return false;
+}
+
+/* What the restore did with the birthday and what it cannot show. The app
+ * shows history_below_seed_hidden next to the balance. */
+static void wrp_push_history(struct zcl_command_reply *reply,
+                             const struct wallet_recovery_report *rep)
+{
+    (void)json_push_kv_bool(&reply->data, "birthday_recorded",
+                            rep->birthday_recorded);
+    (void)json_push_kv_bool(&reply->data, "birthday_rejected",
+                            rep->birthday_rejected);
+    (void)json_push_kv_int(&reply->data, "seed_floor_height",
+                           rep->seed_floor_height);
+    (void)json_push_kv_bool(&reply->data, "history_below_seed_hidden",
+                            rep->history_below_seed_hidden);
+    if (rep->history_below_seed_hidden)
+        (void)json_push_kv_str(&reply->data, "history_warning",
+            "this node was seeded from a snapshot and holds no blocks below "
+            "its seed height, and these words carry no birthday. Funds "
+            "received below the seed height are not visible here. A phrase "
+            "created just now has none; an older phrase may");
+}
+
+/* Lower-case hex of a 32-byte hash. */
+static void wrp_hash_hex(const uint8_t hash[32], char hex[65])
+{
+    for (size_t i = 0; i < 32; i++)
+        (void)snprintf(hex + 2 * i, 3, "%02x", hash[i]);
+}
+
+/* The birthday as the caller gave it, for the commit input a plan returns. */
+static void wrp_push_birthday_input(struct json_value *obj,
+                                    const struct wallet_recovery_request *req)
+{
+    char hex[65];
+    wrp_hash_hex(req->birthday_hash, hex);
+    struct json_value b;
+    json_init(&b);
+    json_set_object(&b);
+    (void)json_push_kv_int(&b, "height", req->birthday_height);
+    (void)json_push_kv_str(&b, "hash", hex);
+    (void)json_push_kv(obj, "birthday", &b);
+    json_free(&b);
+}
+
+static void wrp_restore_body(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     wrp_select_chain_params_if_standalone();
@@ -370,7 +456,12 @@ void zcl_native_handle_wallet_recovery_restore(
         .phrase  = phrase,
         .datadir = datadir,
         .dry_run = !confirm,
+        .shielded_only = json_get_bool_or(request->input, "shielded_only",
+                                          false),
     };
+    if (!wrp_restore_passphrase(request->input, &req.passphrase, reply) ||
+        !wrp_parse_birthday(request->input, &req, reply))
+        return;
     struct wallet_recovery_report rep;
     struct zcl_result r = wallet_recovery_run(&req, &rep);
 
@@ -387,6 +478,7 @@ void zcl_native_handle_wallet_recovery_restore(
          * failure and neither ever reports ok. */
         else if (r.code == -66) { code = "NODE_DB_UNREADABLE"; ex = ZCL_COMMAND_EXIT_BLOCKED; }
         else if (r.code == -67) { code = "WALLET_AT_REST_UNDECIDED"; ex = ZCL_COMMAND_EXIT_BLOCKED; }
+        else if (r.code == -68) { code = "PASSPHRASE_TOO_SHORT"; ex = ZCL_COMMAND_EXIT_INVALID; }
         /* r.message describes the shape of the failure and never quotes
          * the phrase; the evidence field carries the datadir, not the
          * words. */
@@ -396,6 +488,9 @@ void zcl_native_handle_wallet_recovery_restore(
 
     wrp_push_report(reply, &rep);
     wrp_push_scan(reply, &rep);
+    wrp_push_history(reply, &rep);
+    (void)json_push_kv_bool(&reply->data, "encrypted_at_rest",
+                            req.passphrase != NULL || !confirm);
     /* Said on every plan and every commit, because the failure it prevents
      * is silent: a phrase from other wallet software validates here, opens
      * a different empty wallet, and reports success. */
@@ -426,6 +521,10 @@ void zcl_native_handle_wallet_recovery_restore(
         (void)json_push_kv_str(&commit_value, "phrase", "<your words>");
         (void)json_push_kv_str(&commit_value, "datadir", datadir);
         (void)json_push_kv_bool(&commit_value, "confirm", true);
+        if (req.shielded_only)
+            (void)json_push_kv_bool(&commit_value, "shielded_only", true);
+        if (req.has_birthday)
+            wrp_push_birthday_input(&commit_value, &req);
         char commit[7000];
         if (json_write(&commit_value, commit, sizeof(commit)) == 0)
             snprintf(commit, sizeof(commit), "{\"error\":\"input too long\"}");
@@ -452,6 +551,8 @@ void zcl_native_handle_wallet_recovery_restore(
 
     (void)json_push_kv_str(&reply->data, "stage", "committed");
     (void)json_push_kv_bool(&reply->data, "committed", true);
+    (void)json_push_kv_bool(&reply->data, "encrypted_at_rest",
+                            rep.encrypted_at_rest);
     (void)json_push_kv_bool(&reply->data, "recovered", rep.seed_installed);
     reply->error.mutated = true;
 }
@@ -500,9 +601,13 @@ static void wrp_push_created(struct zcl_command_reply *reply,
                            (int64_t)rec->keys_after);
     (void)json_push_kv_bool(&reply->data, "birthday_recorded",
                             rec->birthday_recorded);
-    if (rec->birthday_recorded)
+    if (rec->birthday_recorded) {
         (void)json_push_kv_int(&reply->data, "birthday_height",
                                rec->birthday_height);
+        char hex[65];
+        wrp_hash_hex(rec->birthday_hash, hex);
+        (void)json_push_kv_str(&reply->data, "birthday_hash", hex);
+    }
     (void)json_push_kv_str(&reply->data, "phrase_shown_again",
         "never. The phrase is not stored anywhere and no command can print "
         "it again. Write it down now: it is the only backup");
@@ -588,6 +693,32 @@ static void wrp_create_body(const struct zcl_command_request *request,
     (void)json_push_kv_str(&reply->data, "phrase", rep.phrase);
     wallet_create_report_cleanse(&rep);
     reply->error.mutated = true;
+}
+
+/* The restore reply carries what the app reads (birthday, history_below_seed_
+ * hidden, encrypted_at_rest), so standard output holds only that document, as
+ * for create: the log lines of opening the datadir go to standard error. If
+ * standard output cannot be put back the reply is withheld, and a restore that
+ * had written the wallet says so. */
+void zcl_native_handle_wallet_recovery_restore(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    int saved = wrp_stdout_to_stderr();
+    wrp_restore_body(request, reply);
+    if (saved >= 0 && !wrp_stdout_restore(saved)) {
+        bool written = reply->error.mutated;
+        json_free(&reply->data);
+        json_init(&reply->data);
+        json_set_object(&reply->data);
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "STDOUT_RESTORE_FAILED",
+                 written ? "standard output could not be restored, so the "
+                           "reply was withheld. The wallet WAS written; read "
+                           "its state with core wallet recovery status"
+                         : "standard output could not be restored, so the "
+                           "reply was withheld. Nothing was written",
+                 "core.wallet.recovery.restore");
+        reply->error.mutated = written;
+    }
 }
 
 void zcl_native_handle_wallet_create(

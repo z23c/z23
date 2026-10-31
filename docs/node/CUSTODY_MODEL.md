@@ -169,6 +169,41 @@ that boot defers, and `core wallet rescan` over the whole marked range, from the
 marker to the tip with every block body read, clears the marker. A partial
 rescan keeps it.
 
+Restore inputs for the phone. Besides `phrase`, `datadir` and `confirm`,
+`core wallet recovery restore` takes:
+
+- `passphrase`: standard input only (`--input=-`); in argv it is refused
+  (`STDIN_REQUIRED`). At least 12 bytes (`PASSPHRASE_TOO_SHORT`; an empty
+  string fails input validation). The seed and Sapling keys are written under
+  it from the first write, so no plaintext reaches disk. Without it the creation policy of
+  the environment decides, as before.
+- `shielded_only`: no transparent key is minted, as create does.
+- `birthday`: `{"height","hash"}`: the birthday height and the hash of the block 100
+  below it, as a create reply gives them (`birthday_height`, `birthday_hash`).
+  It is honoured only when the datadir holds that block, connected, at that
+  hash; the wallet then scans from there and carries no marker. A birthday
+  whose block is not held (a wrong hash, a chain that moved) is not stored: the
+  reply sets `birthday_rejected` and the wallet is marked unread from 0. A
+  malformed birthday is refused (`BAD_BIRTHDAY`) before anything is written.
+  The check shows the block is on the chain, not that the phrase is new: the
+  caller vouches for that. A create run in an empty directory has no chain and
+  returns no birthday; the caller then takes the height and hash from the live
+  node's chain, 100 blocks below its tip, at the moment of creation.
+
+Below the seed. A datadir seeded from a snapshot holds no connected block
+below its seed height, the lowest block it holds. A restore with no verified birthday on such
+a datadir cannot show funds received below it, and says so:
+`history_below_seed_hidden` is true, `seed_floor_height` names the height, and
+`history_warning` says it in words. A datadir that holds block 0, or no block
+at all, reports false (a datadir with no block yet is read from 0 under the
+unread marker).
+
+The restore refuses while a node holds the datadir (`DATADIR_LOCKED`), so the
+node is stopped for it, and it refuses a datadir that already holds a wallet
+(`WALLET_ALREADY_PRESENT`). A node started without a passphrase or plaintext
+opt-in mints no wallet, so a seeded datadir that has only run that way accepts
+the restore.
+
 `tests/harness/src/test_wallet_create.c` holds the proof.
 
 ---
