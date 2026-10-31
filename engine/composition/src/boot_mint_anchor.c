@@ -623,7 +623,7 @@ bool boot_mint_anchor_run(const char *datadir)
         return false;
     mint_drive_leave(ds.lookahead);
     int32_t through = mint_frontier_through();
-    int64_t count = coins_kv_count(pdb);
+    int64_t count = coins_kv_count_quiesced(pdb); /* drive left: overlay unflushed */
     boot_mint_anchor_progress_log_tick(progress_log, through, anchor, ds.drive_start_us,
                            /*force=*/true);
     /* Restore durability BEFORE any artifact derives from the DB (shared by the
@@ -642,6 +642,13 @@ bool boot_mint_anchor_run(const char *datadir)
     if (ds.wal_manual) {
         mint_wal_autocheckpoint(pdb, 1000);
         (void)progress_store_checkpoint();
+    }
+    if (count < 0) {
+        LOG_ERROR("mint_anchor",
+                  "coins_kv anchor count failed at applied-through=%d "
+                  "(anchor=%d); refusing to conclude with an invalid count",
+                  through, anchor);
+        return false;
     }
     /* -full-fold: SKIP the cp->height ceremony; verdict + tip bundle export. */
     if (full_fold)

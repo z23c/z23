@@ -127,6 +127,12 @@ uint64_t coins_kv_prepare_count_thread(void);
 /* Count of live outputs. Returns -1 on error. */
 int64_t coins_kv_count(struct sqlite3 *db);
 
+/* Exact live count INCLUDING the un-flushed in-RAM overlay, callable from any
+ * thread. Only the caller that owns the fold (no concurrent overlay writer)
+ * may use it; coins_kv_count() returns the durable-only SQL count on a thread
+ * that is neither writer nor mint drive, which undercounts by the overlay net. */
+int64_t coins_kv_count_quiesced(struct sqlite3 *db);
+
 /* Exact O(batch) physical-row delta meter for the reducer commit invariant.
  * begin/finish/cancel are thread-local and must bracket one outer SQLite
  * transaction. While armed, every coins_kv add/spend records SQLite's
@@ -159,6 +165,9 @@ bool    coins_kv_get_prevout_sqlite(struct sqlite3 *db,
                                     size_t *script_len_out,
                                     int32_t *height_out,
                                     bool *is_coinbase_out);
+/* Tri-state durable probe: 1 present, 0 absent, -1 SQLite error. */
+int     coins_kv_exists_sqlite_checked(struct sqlite3 *db, const uint8_t txid[32],
+                                       uint32_t vout);
 bool    coins_kv_exists_sqlite(struct sqlite3 *db, const uint8_t txid[32],
                                uint32_t vout);
 bool    coins_kv_get_coins_sqlite(struct sqlite3 *db, const uint8_t txid[32],

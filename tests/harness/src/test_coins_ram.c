@@ -840,6 +840,60 @@ static int cr_highwater_flushes_at_cap(void)
     return failures;
 }
 
+/* ── count exactness: the genesis full fold logged coins_kv count 31 short of
+ *    the post-flush table because the count was read after the mint-drive
+ *    bracket closed (durable-only SQL COUNT while the overlay held an
+ *    un-flushed net delta). The quiesced count must equal the post-flush
+ *    COUNT(*) for spend-of-durable, add+spend, and spend+re-add patterns. */
+static int cr_count_quiesced_exact(void)
+{
+    int failures = 0;
+    char dirQ[256];
+    test_make_tmpdir(dirQ, sizeof(dirQ), "coins_ram_countq", "q");
+    CR_CHECK("cq: open", progress_store_open(dirQ));
+    sqlite3 *db = progress_store_db();
+    CR_CHECK("cq: schema", coins_kv_ensure_schema(db));
+    CR_CHECK("cq: init", coins_ram_init(db, 1000000,
+                                        coins_kv_set_applied_height_in_tx));
+    coins_ram_writer_enter();
+    struct uint256 a = cr_txid(0xA1), b = cr_txid(0xA2), c = cr_txid(0xA3),
+                   d = cr_txid(0xA4), e = cr_txid(0xA5);
+    const uint8_t sc[1] = { 1 };
+    CR_CHECK("cq: add A", coins_kv_add(db, a.data, 0, 1, 10, false, sc, 1));
+    CR_CHECK("cq: add B", coins_kv_add(db, b.data, 0, 2, 10, false, sc, 1));
+    CR_CHECK("cq: flush durable", coins_ram_flush(10));
+    /* Overlay window: spend durable A, spend durable B then re-add B, add C,
+     * add+spend D, add E. Net vs durable (A,B): -1 (A) +1 (C) +1 (E) = +1. */
+    CR_CHECK("cq: spend A", coins_kv_spend(db, a.data, 0));
+    CR_CHECK("cq: spend B", coins_kv_spend(db, b.data, 0));
+    CR_CHECK("cq: re-add B", coins_kv_add(db, b.data, 0, 2, 11, false, sc, 1));
+    CR_CHECK("cq: add C", coins_kv_add(db, c.data, 0, 3, 11, false, sc, 1));
+    CR_CHECK("cq: add D", coins_kv_add(db, d.data, 0, 4, 11, false, sc, 1));
+    CR_CHECK("cq: spend D", coins_kv_spend(db, d.data, 0));
+    CR_CHECK("cq: add E", coins_kv_add(db, e.data, 0, 5, 11, false, sc, 1));
+    int64_t ram = coins_ram_count();
+    coins_ram_writer_exit();   /* drive left: coins_kv_count is now durable-only */
+    int64_t quiesced = coins_kv_count_quiesced(db);
+    CR_CHECK("cq: ram count == 3", ram == 3);
+    CR_CHECK("cq: quiesced == ram count", quiesced == 3);
+    coins_ram_writer_enter();
+    CR_CHECK("cq: flush", coins_ram_flush(11));
+    CR_CHECK("cq: quiesced == post-flush COUNT(*)",
+             quiesced == cr_scalar_i64(db, "SELECT COUNT(*) FROM coins"));
+    coins_ram_writer_exit();
+    CR_CHECK("cq: checked exists present",
+             coins_kv_exists_sqlite_checked(db, b.data, 0) == 1);
+    CR_CHECK("cq: checked exists absent",
+             coins_kv_exists_sqlite_checked(db, a.data, 0) == 0);
+    CR_CHECK("cq: checked exists null db -> -1",
+             coins_kv_exists_sqlite_checked(NULL, a.data, 0) == -1);
+    coins_ram_shutdown();
+    progress_store_close();
+    test_rm_rf_recursive(dirQ);
+    return failures;
+}
+
+
 /* ──────────────────────────────────────────────────────────────────────
  * (d) UAF GUARD contract: coins_ram_writer_thread() is the per-thread
  *     "am-the-writer" flag the coins_kv.c READ shims gate overlay use on.
@@ -1369,6 +1423,7 @@ int test_coins_ram(void)
 
     failures += cr_mintdrive_tombstone_visibility();
     failures += cr_highwater_flushes_at_cap();
+    failures += cr_count_quiesced_exact();
     failures += cr_uaf_writer_thread_contract();
 
     printf("test_coins_ram: %d failures\n", failures);

@@ -485,6 +485,23 @@ bool coins_kv_exists_sqlite(sqlite3 *db, const uint8_t txid[32], uint32_t vout)
     return found;
 }
 
+int coins_kv_exists_sqlite_checked(sqlite3 *db, const uint8_t txid[32],
+                                   uint32_t vout)
+{
+    if (!db || !txid) return -1;
+    sqlite3_stmt *s = ckv_point_stmt(db, CKV_SQL_EXISTS, true, NULL);
+    if (!s) return -1;
+    int rc = sqlite3_bind_blob(s, 1, txid, 32, SQLITE_STATIC);
+    if (rc == SQLITE_OK) rc = sqlite3_bind_int(s, 2, (int)vout);
+    if (rc != SQLITE_OK) {
+        sqlite3_finalize(s);
+        return -1;
+    }
+    rc = sqlite3_step(s);  // raw-sql-ok:progress-kv-kernel-store
+    sqlite3_finalize(s);
+    return rc == SQLITE_ROW ? 1 : rc == SQLITE_DONE ? 0 : -1;
+}
+
 bool coins_kv_exists_sqlite_cached(sqlite3 *db, sqlite3_stmt **cache,
                                    const uint8_t txid[32], uint32_t vout)
 {
@@ -668,6 +685,13 @@ int64_t coins_kv_count_sqlite(sqlite3 *db)
         n = sqlite3_column_int64(s, 0);
     sqlite3_finalize(s);
     return n;
+}
+
+int64_t coins_kv_count_quiesced(sqlite3 *db)
+{
+    if (coins_ram_active())
+        return coins_ram_count();
+    return coins_kv_count_sqlite(db);
 }
 
 int64_t coins_kv_count(sqlite3 *db)

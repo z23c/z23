@@ -577,7 +577,8 @@ int64_t coins_ram_count(void)
     for (size_t i = 0; i < G.cap; i++) {
         const struct ram_slot *s = &G.slots[i];
         if (s->state == SLOT_EMPTY) continue;
-        bool in_durable = coins_kv_exists_sqlite(G.db, s->txid, s->vout);
+        int in_durable = coins_kv_exists_sqlite_checked(G.db, s->txid, s->vout);
+        if (in_durable < 0) return -1;  /* fail closed: never guess a count */
         if (s->state == SLOT_LIVE && !in_durable) eff++;
         else if (s->state == SLOT_TOMB && in_durable) eff--;
     }
