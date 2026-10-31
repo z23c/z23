@@ -393,23 +393,26 @@ static int sw_test_production_hook_height(void)
         return failures;
     }
 
-    uint8_t through_prev[32], through_g[32];
+    uint8_t through_prev[32] = { 0 }, through_g[32] = { 0 };
     for (int h = 0; h < G; h++) sw_apply_block(db, h);
-    coins_kv_commitment(db, through_prev);
+    bool prev_ok = coins_kv_commitment(db, through_prev) == 0;
     sw_apply_block(db, G);
-    coins_kv_commitment(db, through_g);
+    bool g_ok = coins_kv_commitment(db, through_g) == 0;
+    SW_CHECK("hook: both commitments computed", prev_ok && g_ok);
     SW_CHECK("hook: sets through G-1 and G differ",
              memcmp(through_prev, through_g, 32) != 0);
 
     /* Exactly the stage's call: inside the txn, after block G's coins landed. */
     progress_store_tx_lock();
-    sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+    bool began = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
     seal_candidate_hook_in_tx(db, &ms, G);
-    sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    bool committed = began &&
+        sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
     progress_store_tx_unlock();
 
     struct seal_record r = { 0 };
     bool found = false;
+    SW_CHECK("hook: txn began and committed", began && committed);
     SW_CHECK("hook: seal stored", seal_kv_newest(db, &r, &found) && found);
     SW_CHECK("hook: seal height == applied height", r.height == G);
     SW_CHECK("hook: block_hash == hash of the applied block",
