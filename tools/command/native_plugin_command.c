@@ -13,6 +13,7 @@
 
 #include "json/json.h"
 #include "plugin/plugin_pack.h"
+#include "plugin/plugin_attest.h"
 #include "plugin/plugin_run.h"
 #include "plugin/plugin_store.h"
 
@@ -395,6 +396,63 @@ void zcl_native_handle_plugin_status(const struct zcl_command_request *request,
     plugin_store_list_free(infos, count);
 }
 
+static void plg_gate_refuse(struct zcl_command_reply *reply, enum plugin_status st,
+                            const char *what, const struct plugin_gate_report *report)
+{
+    char evidence[320];
+    (void)snprintf(evidence, sizeof(evidence), "line=%u %s", report->line, report->detail);
+    plg_refuse(reply, st, what, evidence);
+}
+
+static void plg_gate_push(struct json_value *data, const struct plugin_gate_report *report)
+{
+    struct json_value value;
+    json_init(&value);
+    json_set_object(&value);
+    (void)json_push_kv_bool(&value, "required", report->required);
+    (void)json_push_kv_int(&value, "threshold", report->threshold);
+    (void)json_push_kv_int(&value, "builders_matched", report->builders_matched);
+    (void)json_push_kv(data, "attestation", &value);
+    json_free(&value);
+}
+
+void zcl_native_handle_plugin_attest_add(const struct zcl_command_request *request,
+                                         struct zcl_command_reply *reply)
+{
+    char root[PATH_MAX], path[4096] = {0};
+    if (!plg_begin(request, reply, "attest_add", root, sizeof(root))) return;
+    const char *name = plg_str(request, "name");
+    const struct json_value *paths = request->input ? json_get(request->input, "paths") : NULL;
+    const char *single = plg_str(request, "path");
+    size_t count = paths && paths->type == JSON_ARR ? json_size(paths) : single ? 1 : 0;
+    if ((paths && (paths->type != JSON_ARR || single)) || count > PLUGIN_ATTEST_FILES_MAX)
+        count = 0;
+    enum plugin_attest_status st = PLUGIN_ATTEST_ARGUMENT;
+    const char *source = NULL;
+    size_t added = 0;
+    for (size_t i = 0; i < count; i++) {
+        const struct json_value *item = paths ? json_at(paths, i) : NULL;
+        source = paths ? (item && item->type == JSON_STR ? json_get_str(item) : NULL) : single;
+        st = plugin_store_attest_add(root, name, source, path);
+        if (st != PLUGIN_ATTEST_OK) break;
+        added++;
+    }
+    if (st != PLUGIN_ATTEST_OK || !count) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                               plugin_attest_status_code(st), "attest_add", added != 0 || path[0], false,
+                               "plugin attest_add refused", source ? source : "");
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action), "%s",
+                       plugin_attest_status_next_action(st));
+        return;
+    }
+    json_set_object(&reply->data);
+    (void)json_push_kv_str(&reply->data, "schema", "zcl.plugin_attest_add.v1");
+    (void)json_push_kv_str(&reply->data, "name", name);
+    (void)json_push_kv_str(&reply->data, "attestation", path);
+    (void)json_push_kv_int(&reply->data, "added", (int64_t)added);
+    reply->error.mutated = true;
+}
+
 void zcl_native_handle_plugin_switch(const struct zcl_command_request *request,
                                      struct zcl_command_reply *reply)
 {
@@ -403,15 +461,17 @@ void zcl_native_handle_plugin_switch(const struct zcl_command_request *request,
         return;
     const char *name = plg_str(request, "name");
     const char *generation = plg_str(request, "generation");
-    enum plugin_status st = plugin_store_switch(root, name, generation);
+    struct plugin_gate_report report;
+    enum plugin_status st = plugin_store_switch_report(root, name, generation, &report);
     if (st != PLUGIN_OK) {
-        plg_refuse(reply, st, "switch", name);
+        plg_gate_refuse(reply, st, "switch", &report);
         return;
     }
     json_set_object(&reply->data);
     (void)json_push_kv_str(&reply->data, "schema", "zcl.plugin_switch.v1");
     (void)json_push_kv_str(&reply->data, "name", name);
     (void)json_push_kv_str(&reply->data, "current", generation);
+    plg_gate_push(&reply->data, &report);
     reply->error.mutated = true;
 }
 
@@ -422,15 +482,17 @@ void zcl_native_handle_plugin_rollback(const struct zcl_command_request *request
     if (!plg_begin(request, reply, "rollback", root, sizeof(root)))
         return;
     const char *name = plg_str(request, "name");
-    enum plugin_status st = plugin_store_rollback(root, name, restored);
+    struct plugin_gate_report report;
+    enum plugin_status st = plugin_store_rollback_report(root, name, restored, &report);
     if (st != PLUGIN_OK) {
-        plg_refuse(reply, st, "rollback", name);
+        plg_gate_refuse(reply, st, "rollback", &report);
         return;
     }
     json_set_object(&reply->data);
     (void)json_push_kv_str(&reply->data, "schema", "zcl.plugin_rollback.v1");
     (void)json_push_kv_str(&reply->data, "name", name);
     (void)json_push_kv_str(&reply->data, "current", restored);
+    plg_gate_push(&reply->data, &report);
     reply->error.mutated = true;
 }
 

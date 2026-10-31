@@ -4873,11 +4873,37 @@ static bool nc_main_guide_paths(struct nc_main_state *st, int *rc)
     return ok;
 }
 
+static bool nc_main_attest_paths(struct nc_main_state *st, int *rc)
+{
+    struct json_value paths, item;
+    json_init(&paths);
+    json_init(&item);
+    json_set_array(&paths);
+    bool ok = json_push_kv_str(&st->input, "name", st->positional[0]);
+    for (size_t i = 1; ok && i < st->npos; i++) {
+        json_set_str(&item, st->positional[i]);
+        ok = item.type == JSON_STR && json_push_back(&paths, &item);
+        json_free(&item);
+        json_init(&item);
+    }
+    ok = ok && json_push_kv(&st->input, "paths", &paths);
+    json_free(&paths);
+    if (!ok) {
+        json_free(&st->input);
+        nc_print_error(st->spec->path, "BAD_INPUT", "normalize",
+                       "could not set attestation paths", "paths", "", "", "");
+        *rc = ZCL_COMMAND_EXIT_INTERNAL;
+    }
+    return ok;
+}
+
 /* Map positionals onto positional_keys in order. */
 static bool nc_main_map_positionals(struct nc_main_state *st, int *rc)
 {
     if (st->npos == 0)
         return true;
+    if (st->npos > 1 && strcmp(st->spec->path, "plugin.attest_add") == 0)
+        return nc_main_attest_paths(st, rc);
     const char *pk = st->spec->positional_keys ? st->spec->positional_keys
                                                 : "";
     if (st->npos > 1 && strcmp(st->spec->path, "code.guide") == 0 &&

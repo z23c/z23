@@ -47,7 +47,17 @@ enum plugin_status {
     PLUGIN_ERR_KEY_MALFORMED,
     PLUGIN_ERR_KEY_EXISTS,
     PLUGIN_ERR_INTERFACE, /* the command does not run this interface version */
-    PLUGIN_ERR_BUSY /* another process holds the plugin mutation lock */
+    PLUGIN_ERR_BUSY, /* another process holds the plugin mutation lock */
+    PLUGIN_ERR_ATTEST_POLICY_INVALID,
+    PLUGIN_ERR_SWITCH_UNATTESTED
+};
+
+struct plugin_gate_report {
+    bool required;
+    uint32_t threshold;
+    uint32_t builders_matched;
+    unsigned line;
+    char detail[256];
 };
 
 /* Stable refusal code, for example "PLUGIN_KEY_UNKNOWN". */
@@ -110,6 +120,9 @@ enum plugin_status plugin_store_add_key(const char *root, const char *key,
  * first. */
 enum plugin_status plugin_store_switch(const char *root, const char *name,
                                        const char *generation);
+enum plugin_status plugin_store_switch_report(const char *root, const char *name,
+                                              const char *generation,
+                                              struct plugin_gate_report *report);
 
 /* Resolve the current generation of name for a one-shot call: verify its
  * signature, publisher key and executable SHA3-512 in full, then return the signed
@@ -122,6 +135,9 @@ enum plugin_status plugin_store_current(const char *root, const char *name,
 /* Make the last-good generation current. restored receives its id. */
 enum plugin_status plugin_store_rollback(const char *root, const char *name,
                                          char restored[PLUGIN_HEX_SHA3_512 + 1]);
+enum plugin_status plugin_store_rollback_report(const char *root, const char *name,
+                                                char restored[PLUGIN_HEX_SHA3_512 + 1],
+                                                struct plugin_gate_report *report);
 
 /* Automatic fallback: compare current under the mutation lock before restoring.
  * A different current or identical last-good is a successful no-op; changed is

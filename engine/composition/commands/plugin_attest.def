@@ -5,6 +5,25 @@
  * docs/dev/PLUGINS.md describes the record and the refusal codes. */
 
 ZCL_COMMAND_READY_COMMAND(
+    "plugin.attest_add", "plugin", "",
+    "Add a signed builder attestation to an installed plugin",
+    "Validates the canonical attestation and its builder signature, then stores "
+    "it under the plugin's attestations directory. Repeated builder and image "
+    "pairs are refused. This does not trust a builder or activate a plugin.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "plugin,attest,add,builder,signature",
+    "zcl.plugin_attest_add.input.v1", "zcl.plugin_attest_add.v1",
+    "name,path,paths", "name,path",
+    "z23 plugin attest_add hello ./hello.attest.json [more.attest.json ...]",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_plugin_attest_add)
+
+ZCL_COMMAND_READY_COMMAND(
     "plugin.attest", "plugin", "",
     "Sign an attestation that a built image came from a source package root",
     "Hashes the image you built (SHA3-512), then signs one canonical record "

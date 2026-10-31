@@ -84,6 +84,12 @@ enum plugin_attest_status plugin_attest_parse(const char *bytes, size_t len,
 enum plugin_attest_status plugin_attest_check_signature(
     const struct plugin_attest_record *rec);
 
+/* Store a verified record for an installed plugin; duplicate builder/image
+ * pairs are refused. out receives the stored path when publication occurred,
+ * including when the subsequent directory durability barrier fails. */
+enum plugin_attest_status plugin_store_attest_add(const char *root, const char *name,
+                                                 const char *path, char out[4096]);
+
 struct plugin_attest_request {
     const char *image_path;   /* the image the caller built */
     const char *key_path;     /* builder signing key: 32-byte Ed25519 seed */

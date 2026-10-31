@@ -9,6 +9,7 @@
 #endif
 
 #include "base/safe_alloc.h"
+#include "plugin/plugin_attest.h"
 #include "platform/atomic_link.h"
 
 #include <stdatomic.h>
@@ -540,6 +541,103 @@ static enum plugin_status ps_plugin_dir(const char *root, const char *name,
     return st == PLUGIN_OK ? plugin_check_dir(plugdir) : st;
 }
 
+static enum plugin_attest_status ps_attest_write(const char *dir, const char *path,
+                                                 const char *bytes, size_t len,
+                                                 bool *published)
+{
+    *published = false;
+#if defined(_WIN32)
+    (void)dir; (void)path; (void)bytes; (void)len;
+    return PLUGIN_ATTEST_IO;
+#else
+    char tmp[PLUGIN_PATH_MAX];
+    int n = snprintf(tmp, sizeof(tmp), "%s.tmp.%ld.%lu", path, (long)getpid(), ps_unique());
+    if (n <= 0 || (size_t)n >= sizeof(tmp)) return PLUGIN_ATTEST_IO;
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) return PLUGIN_ATTEST_IO;
+    bool ok = write(fd, bytes, len) == (ssize_t)len && fchmod(fd, 0444) == 0 && fsync(fd) == 0;
+    ok = close(fd) == 0 && ok;
+    enum plugin_attest_status st = PLUGIN_ATTEST_IO;
+    if (ok && link(tmp, path) == 0) {
+        *published = true;
+        st = plugin_fsync_dir(dir) ? PLUGIN_ATTEST_OK : PLUGIN_ATTEST_IO;
+    } else if (ok && errno == EEXIST)
+        st = PLUGIN_ATTEST_DUPLICATE_BUILDER;
+    (void)unlink(tmp);
+    return st;
+#endif
+}
+
+static enum plugin_attest_status ps_attest_duplicate(const char *dir,
+                                                     const struct plugin_attest_record *rec)
+{
+    DIR *d = opendir(dir);
+    if (!d) return PLUGIN_ATTEST_IO;
+    enum plugin_attest_status st = PLUGIN_ATTEST_OK;
+    struct dirent *e;
+    while ((e = ps_readdir(d, dir)) != NULL) {
+        size_t n = strlen(e->d_name), suffix = strlen(PLUGIN_ATTEST_SUFFIX);
+        if (n <= suffix || strcmp(e->d_name + n - suffix, PLUGIN_ATTEST_SUFFIX) != 0)
+            continue;
+        char path[PLUGIN_PATH_MAX], *bytes = NULL;
+        size_t len = 0;
+        struct plugin_attest_record existing;
+        if (!plugin_join(path, sizeof(path), dir, e->d_name, NULL, NULL) ||
+            !plugin_read_file(path, PLUGIN_ATTEST_RECORD_MAX, PLUGIN_OPEN_NOFOLLOW, &bytes, &len)) {
+            st = PLUGIN_ATTEST_IO;
+            break;
+        }
+        st = plugin_attest_parse(bytes, len, &existing);
+        free(bytes);
+        if (st != PLUGIN_ATTEST_OK) break;
+        if (strcmp(rec->builder_key, existing.builder_key) == 0 &&
+            strcmp(rec->image, existing.image) == 0) {
+            st = PLUGIN_ATTEST_DUPLICATE_BUILDER;
+            break;
+        }
+    }
+    if (st == PLUGIN_ATTEST_OK && errno != 0) st = PLUGIN_ATTEST_IO;
+    closedir(d);
+    return st;
+}
+
+enum plugin_attest_status plugin_store_attest_add(const char *root, const char *name,
+                                                 const char *path, char out[4096])
+{
+    char plugdir[PLUGIN_PATH_MAX], dir[PLUGIN_PATH_MAX], leaf[256], *bytes = NULL;
+    size_t len = 0;
+    struct plugin_attest_record rec;
+    if (!out || !path || ps_plugin_dir(root, name, plugdir, sizeof(plugdir)) != PLUGIN_OK)
+        return PLUGIN_ATTEST_ARGUMENT;
+    out[0] = '\0';
+    if (!plugin_read_file(path, PLUGIN_ATTEST_RECORD_MAX, PLUGIN_OPEN_NOFOLLOW, &bytes, &len))
+        return PLUGIN_ATTEST_IO;
+    enum plugin_attest_status st = plugin_attest_parse(bytes, len, &rec);
+    if (st == PLUGIN_ATTEST_OK) st = plugin_attest_check_signature(&rec);
+    if (st == PLUGIN_ATTEST_OK && strcmp(name, rec.name) != 0) st = PLUGIN_ATTEST_SUBJECT_MISMATCH;
+    struct plugin_lock lock;
+    bool locked = false;
+    bool published = false;
+    if (st == PLUGIN_ATTEST_OK) {
+        locked = plugin_lock_acquire(plugdir, &lock) == PLUGIN_OK;
+        if (!locked) st = PLUGIN_ATTEST_IO;
+    }
+    if (st == PLUGIN_ATTEST_OK) {
+        snprintf(leaf, sizeof(leaf), "%s-%s%s", rec.builder_key, rec.image, PLUGIN_ATTEST_SUFFIX);
+        if (!plugin_join(dir, sizeof(dir), plugdir, "attestations", NULL, NULL) ||
+            !plugin_mkdirs(dir) || plugin_check_dir(dir) != PLUGIN_OK ||
+            !plugin_join(out, 4096, dir, leaf, NULL, NULL)) st = PLUGIN_ATTEST_IO;
+        else {
+            st = ps_attest_duplicate(dir, &rec);
+            if (st == PLUGIN_ATTEST_OK) st = ps_attest_write(dir, out, bytes, len, &published);
+        }
+    }
+    if (locked) plugin_lock_release(&lock);
+    free(bytes);
+    if (!published) out[0] = '\0';
+    return st;
+}
+
 static enum plugin_status ps_point(const char *plugdir, const char *link,
                                    const char *generation)
 {
@@ -561,9 +659,126 @@ static enum plugin_status ps_point(const char *plugdir, const char *link,
 #endif
 }
 
-enum plugin_status plugin_store_switch(const char *root, const char *name,
-                                       const char *generation)
+struct ps_policy {
+    char builders[PLUGIN_PATH_MAX];
+    uint32_t threshold;
+    unsigned builders_line;
+    bool has_builders, has_threshold;
+};
+
+static bool ps_policy_line(struct ps_policy *p, const char *root, char *line)
 {
+    if (!*line || *line == '#')
+        return true;
+    if (strncmp(line, "threshold=", 10) == 0 && !p->has_threshold) {
+        const char *s = line + 10;
+        unsigned n = 0;
+        if (!*s)
+            return false;
+        for (; *s; s++) {
+            if (*s < '0' || *s > '9' || n > PLUGIN_ATTEST_PINS_MAX / 10)
+                return false;
+            n = n * 10 + (unsigned)(*s - '0');
+        }
+        if (!n || n > PLUGIN_ATTEST_PINS_MAX)
+            return false;
+        p->threshold = n;
+        p->has_threshold = true;
+        return true;
+    }
+    if (strncmp(line, "builders=", 9) == 0 && !p->has_builders && line[9]) {
+        const char *path = line + 9;
+        int n = path[0] == '/' ? snprintf(p->builders, sizeof(p->builders), "%s", path)
+                               : snprintf(p->builders, sizeof(p->builders), "%s/%s", root, path);
+        p->has_builders = n > 0 && (size_t)n < sizeof(p->builders);
+        return p->has_builders;
+    }
+    return false;
+}
+
+static enum plugin_status ps_policy_load(const char *root, struct ps_policy *p,
+                                         struct plugin_gate_report *report)
+{
+    char path[PLUGIN_PATH_MAX], *bytes = NULL;
+    size_t len = 0;
+    if (!plugin_join(path, sizeof(path), root, "attest.policy", NULL, NULL))
+        return PLUGIN_ERR_ATTEST_POLICY_INVALID;
+    if (!plugin_read_file(path, PLUGIN_FILE_MAX, PLUGIN_OPEN_NOFOLLOW | PLUGIN_OPEN_OWNER_ONLY,
+                          &bytes, &len))
+        return errno == ENOENT ? PLUGIN_OK : PLUGIN_ERR_ATTEST_POLICY_INVALID;
+    report->required = true;
+    unsigned line = 1;
+    char *start = bytes;
+    bool ok = true;
+    for (size_t i = 0; ok && i <= len; i++) {
+        if (i < len && bytes[i] == '\0') {
+            report->line = line;
+            ok = false;
+            break;
+        }
+        if (i != len && bytes[i] != '\n')
+            continue;
+        bytes[i] = '\0';
+        bool had_builders = p->has_builders;
+        ok = ps_policy_line(p, root, start);
+        if (!had_builders && p->has_builders) p->builders_line = line;
+        if (!ok) report->line = line;
+        start = bytes + i + 1;
+        line++;
+    }
+    free(bytes);
+    if (!ok || !p->has_threshold || !p->has_builders) {
+        if (!report->line) report->line = line;
+        return PLUGIN_ERR_ATTEST_POLICY_INVALID;
+    }
+    char *pins = NULL;
+    size_t pins_len = 0;
+    if (!plugin_read_file(p->builders, PLUGIN_FILE_MAX,
+                          PLUGIN_OPEN_NOFOLLOW | PLUGIN_OPEN_OWNER_ONLY, &pins, &pins_len)) {
+        report->line = p->builders_line;
+        return PLUGIN_ERR_ATTEST_POLICY_INVALID;
+    }
+    free(pins);
+    report->threshold = p->threshold;
+    return PLUGIN_OK;
+}
+
+static enum plugin_status ps_attest_gate(const char *root, const char *name,
+                                         const char *generation, struct plugin_gate_report *report)
+{
+    struct ps_policy policy = {0};
+    memset(report, 0, sizeof(*report));
+    enum plugin_status st = ps_policy_load(root, &policy, report);
+    if (st != PLUGIN_OK || !report->required)
+        return st;
+    struct ps_paths paths;
+    char dir[PLUGIN_PATH_MAX];
+    if (!ps_generation_paths(root, name, generation, &paths) ||
+        !plugin_join(dir, sizeof(dir), root, name, "attestations", NULL))
+        return PLUGIN_ERR_ATTEST_POLICY_INVALID;
+    if (plugin_check_dir(dir) != PLUGIN_OK) {
+        snprintf(report->detail, sizeof(report->detail), "%s", "PLUGIN_ATTEST_IO");
+        return PLUGIN_ERR_SWITCH_UNATTESTED;
+    }
+    struct plugin_attest_report *result = zcl_malloc(sizeof(*result), "plugin.gate.report");
+    if (!result)
+        return PLUGIN_ERR_IO;
+    enum plugin_attest_status as = plugin_attest_verify_dir(paths.manifest, dir, policy.builders,
+                                                            policy.threshold, NULL, result);
+    report->builders_matched = result->attested;
+    snprintf(report->detail, sizeof(report->detail), "%s", as == PLUGIN_ATTEST_UPSTREAM
+             ? plugin_status_code(result->cause) : plugin_attest_status_code(as));
+    free(result);
+    return as == PLUGIN_ATTEST_OK ? PLUGIN_OK : PLUGIN_ERR_SWITCH_UNATTESTED;
+}
+
+enum plugin_status plugin_store_switch_report(const char *root, const char *name,
+                                              const char *generation,
+                                              struct plugin_gate_report *report)
+{
+    struct plugin_gate_report local;
+    if (!report) report = &local;
+    memset(report, 0, sizeof(*report));
     char plugdir[PLUGIN_PATH_MAX], previous[PLUGIN_HEX_SHA3_512 + 1];
     enum plugin_status st = ps_plugin_dir(root, name, plugdir, sizeof(plugdir));
     if (st != PLUGIN_OK)
@@ -573,6 +788,8 @@ enum plugin_status plugin_store_switch(const char *root, const char *name,
     if (st != PLUGIN_OK)
         return st;
     st = plugin_verify_generation(root, name, generation);
+    if (st == PLUGIN_OK)
+        st = ps_attest_gate(root, name, generation, report);
     /* current is read only now, under the lock, so last-good is the true previous. */
     if (st == PLUGIN_OK && plugin_link_generation(plugdir, "current", previous)) {
         if (strcmp(previous, generation) == 0) {
@@ -585,6 +802,12 @@ enum plugin_status plugin_store_switch(const char *root, const char *name,
         st = ps_point(plugdir, "current", generation);
     plugin_lock_release(&lock);
     return st;
+}
+
+enum plugin_status plugin_store_switch(const char *root, const char *name,
+                                       const char *generation)
+{
+    return plugin_store_switch_report(root, name, generation, NULL);
 }
 
 enum plugin_status plugin_store_current(const char *root, const char *name,
@@ -606,8 +829,12 @@ enum plugin_status plugin_store_current(const char *root, const char *name,
 
 static enum plugin_status ps_rollback(const char *root, const char *name,
                                       const char *expected,
-                                      char restored[PLUGIN_HEX_SHA3_512 + 1], bool *changed)
+                                      char restored[PLUGIN_HEX_SHA3_512 + 1], bool *changed,
+                                      struct plugin_gate_report *report)
 {
+    struct plugin_gate_report local;
+    if (!report) report = &local;
+    memset(report, 0, sizeof(*report));
     char plugdir[PLUGIN_PATH_MAX];
     enum plugin_status st = ps_plugin_dir(root, name, plugdir, sizeof(plugdir));
     if (st != PLUGIN_OK)
@@ -640,6 +867,8 @@ static enum plugin_status ps_rollback(const char *root, const char *name,
     } else
         st = plugin_verify_generation(root, name, restored);
     if (st == PLUGIN_OK)
+        st = ps_attest_gate(root, name, restored, report);
+    if (st == PLUGIN_OK)
         st = ps_point(plugdir, "current", restored);
     if (st == PLUGIN_OK && changed)
         *changed = true;
@@ -650,7 +879,14 @@ static enum plugin_status ps_rollback(const char *root, const char *name,
 enum plugin_status plugin_store_rollback(const char *root, const char *name,
                                          char restored[PLUGIN_HEX_SHA3_512 + 1])
 {
-    return ps_rollback(root, name, NULL, restored, NULL);
+    return ps_rollback(root, name, NULL, restored, NULL, NULL);
+}
+
+enum plugin_status plugin_store_rollback_report(const char *root, const char *name,
+                                                char restored[PLUGIN_HEX_SHA3_512 + 1],
+                                                struct plugin_gate_report *report)
+{
+    return ps_rollback(root, name, NULL, restored, NULL, report);
 }
 
 enum plugin_status plugin_store_rollback_if_current(const char *root, const char *name,
@@ -663,7 +899,7 @@ enum plugin_status plugin_store_rollback_if_current(const char *root, const char
     if (!changed || !restored || !expected ||
         !plugin_hex_valid(expected, PLUGIN_HEX_SHA3_512))
         return PLUGIN_ERR_ARGUMENT;
-    return ps_rollback(root, name, expected, restored, changed);
+    return ps_rollback(root, name, expected, restored, changed, NULL);
 }
 
 static int ps_cmp_info(const void *a, const void *b)

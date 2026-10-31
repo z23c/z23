@@ -613,9 +613,9 @@ A publisher signature binds an executable to a publisher key. An attestation
 is a builder-key-signed claim linking an executable digest to a declared source
 package root and toolchain. Verification checks pinned builder signatures and
 matching image and source claims; it does not establish that compilation occurred
-or that the builders are independent. `plugin attest` and `plugin attest_verify` are owner-only,
-never remote, read and write files only, and are not wired into `install`,
-`switch` or any fetch: they decide nothing until a caller asks.
+or that the builders are independent. `plugin attest` and `plugin attest_verify` are owner-only
+and never remote. The optional activation policy below uses the same verifier;
+install and fetch do not activate a generation.
 
 ```sh
 z23 plugin attest ./build/hello --name=hello --version=1.0.0 \
@@ -669,6 +669,37 @@ sorted file order; the first bad one refuses the whole directory:
 A missing or group-writable pin file, an unreadable manifest or key and the
 like keep the store's own `PLUGIN_*` code. The library entry is
 `plugin_attest_verify_dir` in `plugin/plugin_attest.h`.
+
+## Builder quorum before activation
+
+An owner can require builder attestations before switching or rolling back a
+plugin by creating `~/.z23/plugins/attest.policy`:
+
+```text
+threshold=2
+builders=builders.pin
+```
+
+The file contains these two settings and optional `#` comment lines. A relative
+builders path is resolved beside the policy. The policy and pin file must be
+owned by the current user and must not be group- or world-writable. Without a
+policy, activation retains its existing behavior. A malformed or unsafe policy
+refuses activation with `PLUGIN_ATTEST_POLICY_INVALID`.
+
+Add signed records for a plugin before activation:
+
+```sh
+z23 plugin attest_add hello ./builder-one.attest.json ./builder-two.attest.json
+```
+
+The command checks each record's schema and signature and stores it under the
+plugin's `attestations` directory. Adding a record does not grant trust: the
+activation check still requires distinct pinned builders and matching claims.
+The verifier checks every record in the directory, including its image hash;
+replace records for a different generation before switching or rolling back.
+An attestation refusal leaves the current generation unchanged and returns
+`PLUGIN_SWITCH_UNATTESTED` with the underlying `PLUGIN_ATTEST_*` reason and a
+next action. The verifier's refusal codes are listed above.
 
 ## Tests
 

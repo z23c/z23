@@ -91,7 +91,11 @@ static const struct {
     [PLUGIN_ERR_INTERFACE] = { "PLUGIN_INTERFACE",
         "use plugin run for interface 1 and plugin call for interface 2" },
     [PLUGIN_ERR_BUSY] = { "PLUGIN_BUSY",
-        "another plugin install, switch or rollback is running for this plugin; wait for it to finish and retry" }
+        "another plugin install, switch or rollback is running for this plugin; wait for it to finish and retry" },
+    [PLUGIN_ERR_ATTEST_POLICY_INVALID] = { "PLUGIN_ATTEST_POLICY_INVALID",
+        "correct attest.policy and its builder pin file" },
+    [PLUGIN_ERR_SWITCH_UNATTESTED] = { "PLUGIN_SWITCH_UNATTESTED",
+        "add an attestation: z23 plugin attest_add NAME <path>" }
 };
 
 const char *plugin_status_code(enum plugin_status status)
