@@ -12,6 +12,7 @@
 #include "json/json.h"
 #include "platform/atomic_link.h"
 #include "platform/barrier.h"
+#include "plugin/plugin_attest.h"
 #include "plugin/plugin_pack.h"
 #include "plugin/plugin_run.h"
 #include "plugin/plugin_store.h"
@@ -206,6 +207,50 @@ static enum plugin_status pst_install(struct pst_fx *fx, const char *name,
     if (!pst_publish(fx, name, exe, o))
         return PLUGIN_ERR_IO;
     return plugin_store_install(fx->root, fx->manifest, &m, &present);
+}
+
+struct pst_attest_fx {
+    char key[3][PATH_MAX];
+    char pub[3][65];
+    char dir[PATH_MAX];
+    char policy[PATH_MAX];
+    char pins[PATH_MAX];
+};
+
+static bool pst_attest_open(const struct pst_fx *fx, struct pst_attest_fx *a)
+{
+    memset(a, 0, sizeof(*a));
+    if (!pst_path(a->dir, sizeof(a->dir), fx->base, "attest-input") ||
+        mkdir(a->dir, 0700) != 0 ||
+        !pst_path(a->policy, sizeof(a->policy), fx->root, "attest.policy") ||
+        !pst_path(a->pins, sizeof(a->pins), fx->root, "builders.pin"))
+        return false;
+    for (int i = 0; i < 3; i++) {
+        char leaf[16];
+        snprintf(leaf, sizeof(leaf), "builder%d.key", i);
+        if (!pst_path(a->key[i], sizeof(a->key[i]), fx->base, leaf) ||
+            plugin_keygen(a->key[i], a->pub[i]) != PLUGIN_OK)
+            return false;
+    }
+    char pins[160];
+    int n = snprintf(pins, sizeof(pins), "%s\n%s\n", a->pub[0], a->pub[1]);
+    return n > 0 && (size_t)n < sizeof(pins) &&
+           pst_write_private(a->pins, pins, (size_t)n);
+}
+
+static bool pst_attest_make(const struct pst_fx *fx, const struct pst_attest_fx *a,
+                            int builder, struct plugin_attest_result *result)
+{
+    char image[PATH_MAX];
+    if (!pst_path(image, sizeof(image), fx->src, "hello"))
+        return false;
+    struct plugin_attest_request request = {
+        .image_path = image, .key_path = a->key[builder], .name = "hello",
+        .version = "1.0.0",
+        .source_root = "1111111111111111111111111111111111111111111111111111111111111111",
+        .toolchain = "test", .dir = a->dir
+    };
+    return plugin_attest_make(&request, result) == PLUGIN_ATTEST_OK;
 }
 
 /* Target of NAME/link without the "generations/" prefix, or "". */
@@ -421,6 +466,214 @@ static int pst_case_switch_rollback(void)
         plugin_store_list_free(infos, count);
         pst_fx_close(&fx);
     } TEST_END
+    return failures;
+}
+
+static int pst_case_attest_policy(void)
+{
+    int failures = 0;
+    TEST_CASE("attestation policy is optional and invalid policy preserves current") {
+        struct pst_fx fx;
+        struct pst_attest_fx a;
+        struct pst_opts o = {0};
+        char first[PST_HEX], second[PST_HEX], cur[PST_HEX], back[PST_HEX];
+        struct plugin_gate_report report;
+        ASSERT(pst_fx_open(&fx, true) && pst_attest_open(&fx, &a));
+        ASSERT_EQ(pst_install(&fx, "hello", "version one", &o), PLUGIN_OK);
+        memcpy(first, fx.generation, PST_HEX);
+        ASSERT_EQ(pst_install(&fx, "hello", "version two", &o), PLUGIN_OK);
+        memcpy(second, fx.generation, PST_HEX);
+        ASSERT_EQ(plugin_store_switch_report(fx.root, "hello", first, &report), PLUGIN_OK);
+        ASSERT(!report.required);
+        const char *bad = "threshold=oops\nbuilders=builders.pin\n";
+        ASSERT(pst_write_private(a.policy, bad, strlen(bad)));
+        ASSERT_EQ(plugin_store_switch_report(fx.root, "hello", second, &report),
+                  PLUGIN_ERR_ATTEST_POLICY_INVALID);
+        pst_link(&fx, "hello", "current", cur);
+        ASSERT_STR_EQ(cur, first);
+        const char *valid = "threshold=2\nbuilders=builders.pin\n";
+        ASSERT(pst_write_private(a.policy, valid, strlen(valid)));
+        ASSERT_EQ(chmod(a.policy, 0666), 0);
+        ASSERT_EQ(plugin_store_switch_report(fx.root, "hello", second, &report),
+                  PLUGIN_ERR_ATTEST_POLICY_INVALID);
+        pst_link(&fx, "hello", "current", cur);
+        ASSERT_STR_EQ(cur, first);
+        ASSERT_EQ(chmod(a.policy, 0600), 0);
+        ASSERT_EQ(plugin_store_switch_report(fx.root, "hello", second, &report),
+                  PLUGIN_ERR_SWITCH_UNATTESTED);
+        pst_link(&fx, "hello", "current", cur);
+        ASSERT_STR_EQ(cur, first);
+        ASSERT_EQ(unlink(a.policy), 0);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", second), PLUGIN_OK);
+        ASSERT(pst_write_private(a.policy, valid, strlen(valid)));
+        ASSERT_EQ(plugin_store_rollback_report(fx.root, "hello", back, &report),
+                  PLUGIN_ERR_SWITCH_UNATTESTED);
+        pst_link(&fx, "hello", "current", cur);
+        ASSERT_STR_EQ(cur, second);
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
+static int pst_case_attest_gate(void)
+{
+    int failures = 0;
+    TEST_CASE("switch and rollback require two distinct pinned builders when configured") {
+        struct pst_fx fx;
+        struct pst_attest_fx a;
+        struct pst_opts o = {0};
+        struct plugin_attest_result record[3];
+        struct plugin_gate_report report;
+        char first[PST_HEX], second[PST_HEX], cur[PST_HEX], back[PST_HEX], out[4096];
+        const char *policy = "threshold=2\nbuilders=builders.pin\n";
+        ASSERT(pst_fx_open(&fx, true) && pst_attest_open(&fx, &a));
+        ASSERT_EQ(pst_install(&fx, "hello", "version one", &o), PLUGIN_OK);
+        memcpy(first, fx.generation, PST_HEX);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", first), PLUGIN_OK);
+        ASSERT_EQ(pst_install(&fx, "hello", "version two", &o), PLUGIN_OK);
+        memcpy(second, fx.generation, PST_HEX);
+        ASSERT(pst_attest_make(&fx, &a, 0, &record[0]));
+        ASSERT(pst_attest_make(&fx, &a, 1, &record[1]));
+        ASSERT(pst_attest_make(&fx, &a, 2, &record[2]));
+        ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", record[0].path, out), PLUGIN_ATTEST_OK);
+        ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", record[0].path, out),
+                  PLUGIN_ATTEST_DUPLICATE_BUILDER);
+        ASSERT(pst_write_private(a.policy, policy, strlen(policy)));
+        ASSERT_EQ(plugin_store_switch_report(fx.root, "hello", second, &report),
+                  PLUGIN_ERR_SWITCH_UNATTESTED);
+        pst_link(&fx, "hello", "current", cur);
+        ASSERT_STR_EQ(cur, first);
+        ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", record[1].path, out), PLUGIN_ATTEST_OK);
+        ASSERT_EQ(plugin_store_switch_report(fx.root, "hello", second, &report), PLUGIN_OK);
+        ASSERT(report.required && report.threshold == 2 && report.builders_matched == 2);
+        ASSERT_EQ(plugin_store_rollback_report(fx.root, "hello", back, &report),
+                  PLUGIN_ERR_SWITCH_UNATTESTED);
+        pst_link(&fx, "hello", "current", cur);
+        ASSERT_STR_EQ(cur, second);
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
+static int pst_case_attest_add_bad_signature(void)
+{
+    int failures = 0;
+    TEST_CASE("attest_add rejects a bad signature and malformed record") {
+        struct pst_fx fx;
+        struct pst_attest_fx a;
+        struct pst_opts o = {0};
+        struct plugin_attest_result record;
+        char bytes[PLUGIN_ATTEST_RECORD_MAX + 1], out[4096];
+        ASSERT(pst_fx_open(&fx, true) && pst_attest_open(&fx, &a));
+        ASSERT_EQ(pst_install(&fx, "hello", "version one", &o), PLUGIN_OK);
+        ASSERT(pst_attest_make(&fx, &a, 0, &record));
+        ASSERT(pst_slurp(record.path, bytes, sizeof(bytes)));
+        char *sig = strstr(bytes, "\"signature\":\"");
+        ASSERT(sig);
+        sig += strlen("\"signature\":\"");
+        *sig = *sig == '0' ? '1' : '0';
+        ASSERT(pst_write(record.path, bytes, strlen(bytes)));
+        ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", record.path, out), PLUGIN_ATTEST_SIG_BAD);
+        ASSERT(pst_write(record.path, "{}\n", 3));
+        ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", record.path, out), PLUGIN_ATTEST_MALFORMED);
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
+static int pst_case_attest_wrong_builders(void)
+{
+    int failures = 0;
+    TEST_CASE("wrong image and unpinned builders cannot satisfy the switch threshold") {
+        struct pst_fx fx;
+        struct pst_attest_fx a;
+        struct pst_opts o = {0};
+        struct plugin_attest_result wrong, pinned, unpinned;
+        struct plugin_gate_report report;
+        char first[PST_HEX], second[PST_HEX], cur[PST_HEX], out[4096];
+        const char *policy = "threshold=2\nbuilders=builders.pin\n";
+        ASSERT(pst_fx_open(&fx, true) && pst_attest_open(&fx, &a));
+        ASSERT_EQ(pst_install(&fx, "hello", "version one", &o), PLUGIN_OK);
+        memcpy(first, fx.generation, PST_HEX);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", first), PLUGIN_OK);
+        ASSERT(pst_attest_make(&fx, &a, 1, &wrong));
+        ASSERT_EQ(pst_install(&fx, "hello", "version two", &o), PLUGIN_OK);
+        memcpy(second, fx.generation, PST_HEX);
+        ASSERT(pst_attest_make(&fx, &a, 0, &pinned));
+        ASSERT(pst_attest_make(&fx, &a, 2, &unpinned));
+        ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", wrong.path, out), PLUGIN_ATTEST_OK);
+        ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", pinned.path, out), PLUGIN_ATTEST_OK);
+        ASSERT(pst_write_private(a.policy, policy, strlen(policy)));
+        ASSERT_EQ(plugin_store_switch_report(fx.root, "hello", second, &report),
+                  PLUGIN_ERR_SWITCH_UNATTESTED);
+        pst_link(&fx, "hello", "current", cur);
+        ASSERT_STR_EQ(cur, first);
+        ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", unpinned.path, out), PLUGIN_ATTEST_OK);
+        ASSERT_EQ(plugin_store_switch_report(fx.root, "hello", second, &report),
+                  PLUGIN_ERR_SWITCH_UNATTESTED);
+        pst_link(&fx, "hello", "current", cur);
+        ASSERT_STR_EQ(cur, first);
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
+static int pst_case_attest_rollback_accept(void)
+{
+    int failures = 0;
+    TEST_CASE("rollback accepts a last-good generation with two pinned attestations") {
+        struct pst_fx fx;
+        struct pst_attest_fx a;
+        struct pst_opts o = {0};
+        struct plugin_attest_result one, two;
+        struct plugin_gate_report report;
+        char first[PST_HEX], back[PST_HEX], cur[PST_HEX], out[4096];
+        const char *policy = "threshold=2\nbuilders=builders.pin\n";
+        ASSERT(pst_fx_open(&fx, true) && pst_attest_open(&fx, &a));
+        ASSERT_EQ(pst_install(&fx, "hello", "version one", &o), PLUGIN_OK);
+        memcpy(first, fx.generation, PST_HEX);
+        ASSERT(pst_attest_make(&fx, &a, 0, &one) && pst_attest_make(&fx, &a, 1, &two));
+        ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", one.path, out), PLUGIN_ATTEST_OK);
+        ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", two.path, out), PLUGIN_ATTEST_OK);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", first), PLUGIN_OK);
+        ASSERT_EQ(pst_install(&fx, "hello", "version two", &o), PLUGIN_OK);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", fx.generation), PLUGIN_OK);
+        ASSERT(pst_write_private(a.policy, policy, strlen(policy)));
+        ASSERT_EQ(plugin_store_rollback_report(fx.root, "hello", back, &report), PLUGIN_OK);
+        ASSERT_STR_EQ(back, first);
+        pst_link(&fx, "hello", "current", cur);
+        ASSERT_STR_EQ(cur, first);
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
+static int pst_case_attest_cli(void)
+{
+    int failures = 0;
+    struct pst_fx fx = {0};
+    struct pst_attest_fx a;
+    struct plugin_attest_result one, two;
+    struct pst_opts o = {0};
+    const char *old_home = getenv("HOME");
+    char *saved_home = old_home ? strdup(old_home) : NULL;
+    TEST_CASE("attest_add dispatch accepts multiple positional record paths") {
+        ASSERT(pst_fx_open(&fx, true) && pst_attest_open(&fx, &a));
+        ASSERT_EQ(pst_install(&fx, "hello", "version one", &o), PLUGIN_OK);
+        ASSERT(pst_attest_make(&fx, &a, 0, &one) && pst_attest_make(&fx, &a, 1, &two));
+        ASSERT_EQ(setenv("HOME", fx.home, 1), 0);
+        const char *args[] = {"attest_add", "hello", one.path, two.path};
+        ASSERT_EQ(zcl_native_command_main("plugin", args, 4, fx.base, 0,
+                                         CHAIN_MAIN, true), ZCL_COMMAND_EXIT_OK);
+        char out[4096];
+        ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", one.path, out),
+                  PLUGIN_ATTEST_DUPLICATE_BUILDER);
+        ASSERT_EQ(plugin_store_attest_add(fx.root, "hello", two.path, out),
+                  PLUGIN_ATTEST_DUPLICATE_BUILDER);
+    } TEST_END
+    if (saved_home) { setenv("HOME", saved_home, 1); free(saved_home); }
+    else unsetenv("HOME");
+    pst_fx_close(&fx);
     return failures;
 }
 
@@ -2002,6 +2255,12 @@ int test_plugin_store(void)
     failures += pst_case_strict_format();
     failures += pst_case_manifest_vocabulary();
     failures += pst_case_switch_rollback();
+    failures += pst_case_attest_policy();
+    failures += pst_case_attest_gate();
+    failures += pst_case_attest_add_bad_signature();
+    failures += pst_case_attest_wrong_builders();
+    failures += pst_case_attest_rollback_accept();
+    failures += pst_case_attest_cli();
     failures += pst_case_conditional_rollback();
     failures += pst_case_interrupted_swap();
     failures += pst_case_atomic_link_failure();
