@@ -6,7 +6,7 @@ Clips is a short-form video network with no central server and no signup.
 An author's own node and the machines of that owner's fleet host the
 author's videos. Followers' nodes fetch what they follow over the existing
 P2P and onion transport, check every chunk by hash and every record by
-signature, and play it. The Android app is the first client.
+signature, and play it. The Z23 Clips Android app is the first client.
 
 Status: **draft for owner review**. Nothing here is built unless a file or
 symbol is cited; where a piece does not exist the text says **new**. Clips
@@ -52,6 +52,12 @@ people who chose to follow them can watch it, with no company in the path.
 6. **One binary, nested CLI.** Everything is a leaf of `z23 clips ...`, with
    one handler behind the CLI, the app's JSON-RPC, REST and MCP
    ([5.1](#51-one-handler-four-adapters)).
+7. **General by default.** Every viewer has a content level, General unless the
+   owner changes it. A clip that is not shown to meet that level has no media
+   object fetched or stored. Its signed record is fetched to read its level and
+   is never given to any adapter. The node enforces this, so no layout, app or
+   agent can skip it. No level permits illegal content
+   ([6.6](#66-content-levels-and-moderation)).
 
 Reused today: signed hash-identified posts (fleet board, `docs/agent/FLEET_BOARD.md`),
 the content-addressed package swarm with flag-gated hosting
@@ -93,7 +99,7 @@ trailing-byte refusals (`core/modules/net/include/net/zmsg.h`).
   author's node into a mode 0600 exclusive-create key file, as `z23 plugin
   keygen` does. It is a Clips key, never a wallet key.
 - The wire author id is the raw public key. The display handle is
-  `base32(first 10 bytes of SHA3-256("z23.clips.handle.v1" NUL key))`. Human
+  `base32(first 10 bytes of SHA3-512("z23.clips.handle.v1" NUL key))`. Human
   names are optional (naming room, `contexts/naming`, or a ZNAM `SET_TEXT key="zid"`
   binding, `contexts/naming/modules/znam/include/znam/znam.h`); nothing in Clips depends on a name resolving.
 - **Rotation** uses the zid layer: a master key may be anchored on-chain and
@@ -120,7 +126,7 @@ offset  size  field        notes
 0       4     magic        "ZCLR"
 4       1     version      1
 5       1     kind         see 2.3
-6       1     lane         0 content chain, 1 social chain
+6       1     lane         0 content chain, 1 social chain, 2 rating chain
 7       1     alg          1 = Ed25519; anything else refused in version 1
 8       32    author       Ed25519 public key
 40      8     seq          per (author, lane), starts at 1, strictly +1
@@ -139,10 +145,11 @@ offset  size  field        notes
 - **Hash chain.** `prev` links each record to its predecessor in the same
   `(author, lane)`. A verifier checks each `prev` against the previous id and
   each `seq` against `+1`.
-- **Two lanes.** Lane 0 holds content (posts, profile, tombstones, lists);
-  lane 1 holds social acts (reactions, comments, follows, blocks, reports). A
-  follower syncs lane 0 to see everything an author published without
-  downloading every reaction they ever made.
+- **Three lanes.** Lane 0 holds content (posts, profile, tombstones, lists);
+  lane 1 holds social acts (reactions, comments, follows, blocks, reports);
+  lane 2 holds ratings. A follower syncs lane 0 to see everything an author
+  published without downloading every reaction they ever made, and a viewer
+  syncs only lane 2 of a rater, chosen per entry in `clipsub`.
 - **Time.** A `created_at` more than 600 seconds ahead of the verifier's clock
   is deferred. Ordering is by `seq`, never by time.
 - **Forks.** Two different records with the same `(author, lane, seq)` are an
@@ -161,19 +168,22 @@ offset  size  field        notes
 | 2 | 0 | profile | name, bio, avatar object, tip address |
 | 3 | 0 | tombstone | target id, reason |
 | 4 | 0 | list | published block or allow list ([6.2](#62-block-lists-and-local-filters)) |
+| 5 | 2 | rating | target id, level, descriptors, method ([6.6](#66-content-levels-and-moderation)) |
 | 10 | 1 | reaction | target id, code |
 | 11 | 1 | comment | target post, parent comment, text |
 | 12 | 1 | follow | target author, unfollow flag |
 | 13 | 1 | block | target type, target, unblock flag |
 | 14 | 1 | report | target id, reason, note |
 
-Kinds 5..9 and 15..255 are reserved and refused in version 1.
+Kinds 6..9 and 15..255 are reserved and refused in version 1.
 
 **Post (kind 1).**
 
 ```
 flags         1     bit0 has_manifest, bit1 has_reply_to, bit2 has_reshare_of;
                     bits 3..7 zero; bit0 or bit2 must be set
+level         1     the author's declared content level, 1..5 (6.6); 0 refused
+descriptors   2     what the level is for (6.6); unknown bits refused
 manifest_id   64    iff bit0: the video manifest (2.4)
 reply_to      64    iff bit1: the post this clip answers
 reshare_of    64    iff bit2: the post being reshared
@@ -183,21 +193,29 @@ tag_count     1     0..8
 tags          ...   each: len u8 (1..32) then bytes [a-z0-9_]
 ```
 
-Worst case 1 + 3 x 64 + 2 + 500 + 1 + 8 x 33 = 960 bytes, under the 1,024
-ceiling. A reply is a clip that answers a post; a reshare points at an
+Worst case 1 + 1 + 2 + 3 x 64 + 2 + 500 + 1 + 8 x 33 = 963 bytes, under the
+1,024 ceiling. A reply is a clip that answers a post; a reshare points at an
 existing post with or without a caption. An author may reshare a post whose
-bytes they do not hold; holders are found through the original author.
+bytes they do not hold; holders are found through the original author. A
+reshare is evaluated at the level of the strictest of itself and its target.
 
 **Other bodies.**
 
-- *Profile (2):* `name_len u8` (0..48) and name; `bio_len u8` (0..160) and
-  bio; `avatar_flag u8` and, if 1, an `avatar_id` (64 bytes); `tip_len u8`
+- *Profile (2):* `level u8` (the declared content level, 1..5; 0 refused);
+  `name_len u8` (0..48) and name; `bio_len u8` (0..160) and bio; `avatar_flag u8` and, if 1, an `avatar_id` (64 bytes); `tip_len u8`
   (0..128, a Sapling address string; 128 matches `ZMSG_MAX_ADDR`) and address.
   A later profile replaces an earlier one by `seq`.
 - *Tombstone (3):* `target_id` 64, `reason u8` (1 author_deleted, 2 mistake,
   3 superseded, 4 policy).
 - *List (4):* `list_object_id` 64, `entry_count u32` (at most 4000),
   `title_len u8` (0..64) and title, `list_kind u8` (1 block, 2 allow).
+- *Rating (5):* `target_id` 64 (a post, comment or profile record), `level u8`
+  (1..5, or 0 to retract this rater's earlier rating of the target),
+  `descriptors u16`, `method u8` (1 person, 2 automated, 3 both), `note_len u8`
+  (0..120) and note. The target id binds the rating to exact bytes through the
+  SHA3-512 chain from record to manifest to chunk. A re-encoded clip has new
+  ids and no ratings. A `method` of 0 or above 3 is refused, as is any kind on a
+  lane other than the one in the table above.
 - *Reaction (10):* `target_id` 64, `reaction u8` (0 retract, 1 like, 2 laugh,
   3 wow, 4 sad, 5 angry; higher refused).
 - *Comment (11):* `target_id` 64 (a post), `parent_id` 64 (zero for top
@@ -206,7 +224,8 @@ bytes they do not hold; holders are found through the original author.
 - *Block (13):* `target_type u8` (1 author, 2 content id), `target` 64 (an
   author key in the first 32 bytes, rest zero), `flags u8` (bit0 unblock).
 - *Report (14):* `target_id` 64, `reason u8` (1 spam, 2 abuse, 3 illegal, 4
-  sexual, 5 impersonation, 6 other), `note_len u16` (0..280) and note.
+  sexual, 5 impersonation, 6 other, 7 misrated), `note_len u16` (0..280) and
+  note.
 
 ### 2.4 Video manifest
 
@@ -302,9 +321,10 @@ platform widgets (`apps/z23android/native_ui.c`). Clips adds only NDK C APIs.
   encoder, muxer and audio-encode code is **new**.
 - Without a hardware AVC encoder the app refuses to record and says why,
   instead of burning CPU on a software encode.
-- Camera and microphone permissions are already declared in
-  `apps/z23android/AndroidManifest.xml`. Battery and network state reads are
-  **new** JNI calls ([4.7](#47-budgets-pace-power-and-link)).
+- Camera and microphone permissions are declared today in
+  `apps/z23android/AndroidManifest.xml` and move to the Clips package's manifest.
+  The base app's battery and network state reads are **new** JNI calls
+  ([4.7](#47-budgets-pace-power-and-link)).
 - NDK calls named here exist at API 30 or lower (`AMediaDataSource` 28,
   `AndroidBitmap_compress` 30); the app targets API 35.
 
@@ -349,7 +369,8 @@ The thumbnail comes from a preview frame the capture session already produces
 manifest, so a feed card renders before any video chunk arrives; 20 cards cost
 at most about 640 KiB.
 
-After the muxer closes, the node chunks the file, hashes, builds the manifest,
+After the muxer closes, the Clips app uploads the file to its node over loopback
+with its token (5.1). The node chunks the file, hashes, builds the manifest,
 signs the post and writes objects to the Commons package store (staged until verified, atomic
 rename, quota, pins that are never evicted, quarantine).
 The recording file is deleted only after the store re-reads and verifies every
@@ -427,13 +448,13 @@ spans 5 frames (`MESH_STREAM_FRAME_MAX`, 64 KiB).
 
 | frame | direction | body |
 |---|---|---|
-| `clipsub` (new) | follower to holder | `count u8` (0..64), `flags u8` (bit0 also lane 1), per author `author` 32 and `have_seq u64`. Count 0 clears. At most one per 60 s per peer |
+| `clipsub` (new) | follower to holder | `count u8` (0..64), `flags u8` (zero), per entry `author` 32, `lanes u8` (bit0 lane 0, bit1 lane 1, bit2 lane 2; zero or other bits refused) and `have_seq u64`. Count 0 clears. At most one per 60 s per peer |
 | `clipheads` (new) | holder to subscriber, pushed on change | `count u8` (1..32); per entry `author` 32, `lane u8`, `seq u64`, `head_id` 64 (105 bytes) |
 | `clipget` (new) | requester to holder | `req u64`, `author` 32, `lane u8`, `from_seq u64`, `max u8` (1..32) |
 | `cliprec` (new) | holder to requester | `req u64`, `count u8` (0..32), per record `len u16` and bytes |
 | `clipwant` (ZPSW v2 WANT) | requester to holder | `req u64`, root 64, `kind u8`, `file_index u32`, `chunk_index u32`, hash 64; one chunk per WANT |
 | `clipdata` (ZPSW v2 DATA) | holder to requester | the same fields, plus `len u32` and bytes |
-| `clipnot` (new) | either | `req u64`, `reason u8`: 1 not held, 2 refused by policy, 3 rate limited, 4 paused, 5 blocked hash, 6 too large |
+| `clipnot` (new) | either | `req u64`, `reason u8`: 1 not held, 2 refused by policy, 3 rate limited, 4 paused, 5 blocked hash, 6 too large, 7 above serve level (answers `clipwant` only; `clipget` serves records at every level so chains verify) |
 
 - `clipheads` is the **head announcement**: per followed author and lane, the
   holder's newest `(seq, head_id)`. A subscriber behind its own head sends
@@ -467,9 +488,12 @@ spans 5 frames (`MESH_STREAM_FRAME_MAX`, 64 KiB).
    |   verify each: id(chunk) == chunk_ids[i]; store          |
 ```
 
-1. **Records, then the manifest, then chunks.** Nothing is stored as a clip
-   until its record verifies; nothing is requested at scale until its
-   manifest verifies.
+1. **Records, then the rating decision, then the manifest, then chunks.** Nothing
+   is stored as a clip until its record verifies. Ratings from accepted raters
+   sync before any manifest they could rate, and `clips_rating_decide` runs on the
+   verified record before a manifest is requested; a hidden result ends the fetch
+   ([6.6](#66-content-levels-and-moderation)). Nothing is requested at scale until
+   its manifest verifies.
 2. **Verification gates storage.** A chunk whose id differs from the manifest
    is dropped. A peer sending two bad chunks in a session is disconnected and
    rate limited for an hour.
@@ -489,8 +513,8 @@ A reaction or comment is signed by its author, stored in their node (lane 1)
 and pushed as `cliprec` to the target author's known holders and relays. The
 target author's node verifies it, applies block and rate rules and, if
 accepted, serves it in the clip's comment index. Phase 3 adds a `target`
-filter to `clipget` (**new**); before it, lane 1 of an author is fetched
-whole. A target author hides a comment by a local block or a published list,
+filter to `clipget` for lanes 1 and 2 (**new**); before it, those lanes of an
+author or rater are fetched whole, which E12 measures. A target author hides a comment by a local block or a published list,
 never by deleting the commenter's chain.
 
 ### 4.5 Home relays and pinning
@@ -551,8 +575,8 @@ A home relay is an always-on node in the author's own fleet.
 | Power: `charging`, `battery`, low-battery flag | `BatteryManager` through JNI | **new** |
 | Link: `unmetered`, `metered`, `offline` | `ConnectivityManager` through JNI | **new** |
 
-The new inputs follow the pace mechanism: the app writes one word to a small
-datadir file and the node reads it at most once per second. A missing file
+The new inputs follow the pace mechanism: the base app, which runs the node,
+writes one word to a small datadir file and the node reads it at most once per second. A missing file
 means `metered` for link and the permissive value for power, so a node never
 told otherwise is cautious about data. Today moderate thermal status and above
 hold `gentle`, critical and above `pause`, and `pause` is held until the
@@ -608,8 +632,27 @@ needs no backend release and changing ordering needs no UI release.
   new command bundle under `engine/composition/commands` with typed input and
   output schemas, as every ready leaf must have
   (`engine/composition/commands/README.md`). No scripts, no separate programs.
-- **JSON-RPC.** The app calls its node over loopback with the datadir cookie
+- **JSON-RPC.** The Clips app calls the node over loopback
   (`apps/z23android/rpc.c`); Clips adds methods to that path and no listener.
+  Clips is its own Android package (`org.z23.clips`) with only network, camera
+  and microphone permissions and no node, wallet or key material. Android keeps
+  the base app's files private, so it cannot read the datadir cookie. Instead the
+  base app (`org.z23.nativeapp`, which runs the node), after the owner taps Allow,
+  checks that the Clips package has the base app's signing certificate
+  (`PackageManager.checkSignatures`), asks its node to mint a token limited to the
+  `clips.*` methods and `/api/v1/clips/*` routes, and hands it over by explicit
+  intent with `ActivityOptions.setShareIdentityEnabled`. The receiving activity in
+  Clips uses standard launch mode, so every handoff is a new instance. It reads
+  `Activity.getLaunchedFromUid`, resolves it to the package `org.z23.nativeapp` and
+  makes the same certificate check before keeping the token. A package with a
+  different certificate is refused in version 1, and a failed check on any handoff
+  refuses it. Each route checks the scope on every call, so the token cannot reach
+  wallet methods. It expires after 30 days. Renewal is pulled by Clips: while in
+  the foreground it starts the base app's handoff activity, which rechecks the
+  certificate and starts a new receiving activity with a fresh token and no new
+  tap. The owner can revoke the token in the base app. The token crosses loopback as
+  the cookie does, so its exposure is limited by its scope. The grant and token are
+  **new**.
 - **REST.** `/api/v1/clips/*` follows the versioned resource convention
   (`/api/v1/messages`, `/api/v1/names`) of
   `engine/controllers/src/api_controller_app_protocols.c`; Clips registers as
@@ -620,14 +663,16 @@ needs no backend release and changing ordering needs no UI release.
   consensus or publication authority beyond the leaf's declared policy.
 - **Media bytes** use one route that is not a card: `GET
   /api/v1/clips/posts/{id}/media` with `Range`, returning verified bytes
-  ([3.4](#34-playback)). It is served on loopback to the node's own app.
+  ([3.4](#34-playback)). It is served on loopback to a holder of a Clips token.
 
 All routes are **new**: `GET .../feed` (`clips feed`, a `zcl.feed_page.v1`),
 `GET .../posts/{id}` (`clips show`), `GET .../authors/{key}` (`clips author`),
 `GET .../posts/{id}/comments` (`clips comments`), `POST .../publish` (`clips
 publish`), `POST .../actions` (`clips act`), `GET` and `PUT .../recipes[/{id}]`
-(`clips recipe`), `GET` and `PUT .../layouts[/{id}]` (`clips layout`), `GET
-.../schemas` (`clips schemas`) and `GET .../status` (`clips status`).
+(`clips recipe`), `GET` and `PUT .../layouts[/{id}]` (`clips layout`), `GET`
+and `PUT .../level` (`clips level`), `GET` and `PUT .../raters` (`clips
+raters`), `GET .../schemas` (`clips schemas`) and `GET .../status` (`clips
+status`).
 
 <!-- claim: symbol-present zapp_rpc_call apps/z23android/rpc.c # the app's loopback call exists -->
 <!-- claim: symbol-present rest_resource engine/controllers/src/api_controller_app_protocols.c # the REST registry convention -->
@@ -651,6 +696,8 @@ convention: `zcl.clip_card.v1`, `zcl.author_card.v1`, `zcl.comment_card.v1`,
             "size": 1620000, "state": "complete",
             "url": "/api/v1/clips/posts/9c41.../media"},
   "counts": {"reactions": 12, "comments": 3, "reshares": 1},
+  "rating": {"level": "general", "declared": "general", "evidence": "rater",
+             "descriptors": [], "raters": 2},
   "reply_to": null, "reshare_of": null, "flags": [],
   "actions": [
     {"schema": "zcl.action_card.v1", "id": "react", "label": "Like",
@@ -666,8 +713,13 @@ convention: `zcl.clip_card.v1`, `zcl.author_card.v1`, `zcl.comment_card.v1`,
 - `media.state` is `complete`, `partial` (with `have` and `need` chunk counts),
   `remote` (manifest known, no chunks), `blocked` or `tombstoned`.
 - `flags` may include `author_forked`, `chain_gap`, `hidden_by_filter`,
-  `blocked_by_list` and `reported`. A filtered card stays available by id with
-  its flag; the UI decides whether to show it.
+  `blocked_by_list`, `reported`, `rating_above_level`, `rating_unverified`,
+  `own` and `owner_allowed`.
+- A card for which `clips_rating_decide` returns hidden, for any row, carries
+  only `id`, `author.key`, `author.handle`, `rating`, `flags`, `media.state =
+  "blocked"` and a `fallback_text` naming the reason. It has no caption, tags,
+  counts, thumbnail or media URL, so a layout has nothing to reveal
+  ([6.6](#66-content-levels-and-moderation)).
 - `actions` are advertised with argument shapes, so a UI can render an action
   it has never seen as a generic button. An action that moves money has
   `"needs_confirm": true` and is never sent without explicit user confirmation
@@ -707,6 +759,10 @@ evaluators in the node interprets it; it carries no code.
   with no keys, network or store access. **New**, phase 4.
 - Evaluation uses local data only; missing data appears as a card with
   `media.state = remote`. A cursor from an older recipe revision is refused.
+- Every source passes the rating decision of
+  [6.6](#66-content-levels-and-moderation) first. A recipe cannot select a
+  hidden clip; it can only choose whether a hidden clip appears as a placeholder
+  card (`{"op": "include_hidden_placeholders"}`, off by default).
 
 ### 5.4 Layout recipes
 
@@ -761,6 +817,24 @@ call arbitrary methods, load URLs or run code.
 - Every card schema has a golden JSON fixture, plus negative tests (an extra
   field accepted, a missing required field refused).
 
+### 5.6 Addresses and QR codes
+
+Everything is addressed by its SHA3-512 id or its key, in text a person can
+share or a camera can scan:
+
+| Address | Names | Scanning it |
+|---|---|---|
+| `z23:clip:<128 hex>` | a post record id | opens the clip's card, subject to the rating decision |
+| `z23:author:<64 hex>` | an author key | opens the author's card, with Follow as an action |
+| `z23:rater:<64 hex>` | a rater key | offers Accept this rater, after a confirmation |
+| `z23:pair:<descriptor>` | a laptop host | offers pairing, after the six-digit code is compared |
+
+The app's scanner classifies a payload and shows what it found; it acts on
+nothing without a tap. A fleet invitation keeps its existing form. An address
+or URL of any other kind is shown as text and is never opened or paid
+automatically. A scanned address never raises a level, never accepts a rater
+without a confirmation and never fetches a hidden clip.
+
 ---
 
 ## 6. Safety
@@ -777,7 +851,9 @@ evidence, not a central moderator.
 - The owner can block an author key or content id, delete any object and unpin
   any object at any time. A deletion removes bytes and adds a local block so
   the object is not fetched again.
-- A relay run for others sets its own policy; the protocol imposes none.
+- A node also stores ratings and reports from raters its owner accepted.
+- A relay run for others sets its own policy; the protocol imposes none. Its
+  default viewer and serve levels are those of 6.6.
 - A report (kind 14) is a signed claim by a key that names a target and reason. Recipients store it as evidence and may feed local rules; it proves nothing about the content and never deletes anything automatically.
 
 ### 6.2 Block lists and local filters
@@ -817,8 +893,8 @@ evidence, not a central moderator.
 1. **No unsolicited ingest** (6.1) removes most spam paths.
 2. **Rate limits per author** at ingest, defaults 10 posts per hour and 30 per
    day, 600 social records per day, plus records and bytes per peer per minute.
-   Excess is dropped and the peer rate limited. Values are policy, shown by
-   `clips status`.
+   Lane 2 has its own limit per rater, default 5,000 per day. Excess is dropped
+   and the peer rate limited. Values are policy, shown by `clips status`.
 3. **Size limits** of section 2 are checked before allocation.
 4. **Proof-of-work stamp (optional).** `stamp` is a nonce such that the leading
    `d` bits of `SHA3-512("z23.clips.stamp.v1" NUL ‖ id ‖ stamp)` are zero. A
@@ -840,7 +916,7 @@ static key, linking it to its onion sessions: one key serves all transports
 | Observer | Sees |
 |---|---|
 | A holder you fetch from | which objects you request and when, your Noise static key |
-| A holder you subscribe to | the author keys you follow, in `clipsub` |
+| A holder you subscribe to | the author keys you follow and the rater keys you accept, in `clipsub` |
 | Anyone fetching an author's endpoint record | that the key is served by that onion address |
 | Any node holding your records | your posts, reactions and comments, public and linkable by key |
 | On-path observer | peer addresses, timing, volume; Clips frames move only on Noise sessions |
@@ -850,7 +926,7 @@ static key, linking it to its onion sessions: one key serves all transports
   so it can push heads, but is not published as kind 12 unless the owner opts
   in. Friends-of-friends works only over follows others published.
 - Phase 4 evaluates a blinded subscription: the follower sends
-  `SHA3-256("ZCLB" ‖ author ‖ period)` and a holder matches only authors it
+  `SHA3-512("ZCLB" ‖ author ‖ period)` and a holder matches only authors it
   already holds, the pattern of the identity layer's blinded keys. **New**,
   unproven.
 - Version 1 has no private or friends-only clips; all content is public to
@@ -859,6 +935,152 @@ static key, linking it to its onion sessions: one key serves all transports
   characters and counts.
 
 <!-- claim: symbol-present noisetransport engine/composition/src/args.c # Noise is an opt-in flag, so Clips requires it -->
+
+### 6.6 Content levels and moderation
+
+Every node has a **viewer level**, General by default. A clip is hidden unless the
+evidence shows it meets that level. There is no central moderator: each node
+makes this decision from signed evidence its owner chose to accept.
+
+| Level | Id | Meaning |
+|---|---|---|
+| General | 1 | Suitable for all ages. No nudity, sexual content, strong language, drug use or realistic violence. |
+| Mild | 2 | Mild language or mild action violence. No sexual content. |
+| Sensitive | 3 | Some strong language, non-graphic violence, brief non-sexual nudity, references to drugs. |
+| Mature | 4 | Strong language, graphic violence, non-explicit sexual content. Adults. |
+| Explicit | 5 | Explicit sexual content or extreme violence. Adults. |
+
+`descriptors` is a bit set saying why: bit0 nudity, bit1 sexual, bit2 violence,
+bit3 language, bit4 drugs, bit5 self-harm, bit6 hate. Other bits are refused.
+
+Level and descriptor names are plain, tool-neutral words, so an open source
+classifier's labels can be mapped onto them. A rater owns that mapping and
+publishes only level numbers and descriptor bits.
+
+**No level permits illegal content.** No level, setting or allow makes sexual
+content involving a minor acceptable. The node refuses whatever a configured
+illegal-content list (6.3) matches, at every level, and an owner's allow never
+overrides that match. Detection is limited to what those lists match.
+
+**Evidence.** Three sources feed the decision:
+
+1. **The author's declaration.** A post cannot exist without a declared level;
+   it is signed and in the author's chain.
+2. **Accepted raters.** A rater is any key that publishes rating records (kind
+   5, lane 2): a person, an organization or a program. The owner picks raters;
+   Z23 ships none. A fleet's own rater key is offered when the node joins that
+   fleet. A rater is advice the owner chose to follow. Two records with the same
+   `(rater, 2, seq)` make that rater's ratings count at their strictest.
+3. **Local text check.** Captions, tags, comments, names and bios are checked
+   against the loaded word lists after normalizing case, NFC form, common digit
+   substitutions and repeated letters. Each list entry carries a level 2..5. The
+   check returns the highest matching level, 1 when nothing matches, or
+   `unverified` when no list is loaded or none covers the text's script.
+   `unverified` adds no level and no evidence. A small English starter list ships
+   with the node (**new**, Phase 3); before then the check returns `unverified`.
+   It is skipped when another source already puts the item above the viewer level.
+
+**Decision.** One pure function, `clips_rating_decide` (**new**), used by card
+building, the media route, fetching, serving and every adapter. The first row
+that applies decides:
+
+```
+effective = max(declared, each accepted rater's newest rating, text check level)
+evidence  = "rater"  if an accepted rater's newest rating of this id is 1..5
+            "author" if the owner accepted this author's declarations
+            "text"   for a comment, if the text check returned a level
+            "none"   otherwise
+
+0. Reshare or comment whose target is hidden or not held -> hidden.
+1. Matches an illegal-content list        -> hidden; no override.
+2. Owner blocked this author or id        -> hidden.
+3. Signed by the owner's own key          -> shown, flag own.
+4. Owner allowed this exact id            -> shown, flag owner_allowed.
+5. On a subscribed block list             -> hidden, flag blocked_by_list.
+6. Uncleared report held (see below)      -> hidden, flag reported.
+7. effective > viewer level               -> hidden, flag rating_above_level.
+8. evidence = none, show_unrated = false  -> hidden, flag rating_unverified.
+9. Otherwise                              -> shown.
+```
+
+The strictest source wins. A rater that retracts drops out and the decision is
+recomputed; results are never stored as truth. Missing, unreadable or invalid
+settings mean viewer level General with `show_unrated` false.
+
+- **Replies.** A reply clip is decided on its own; its card omits `reply_to` when
+  the parent is hidden.
+- **Comments.** A comment is decided by the rows above, with a passing text check
+  as evidence because a comment carries no image or video. Until the text check
+  exists (Phase 3), other people's comments are hidden at the default.
+- **Profiles.** A profile is decided by the same rows, on its own declared level.
+  A hidden profile leaves author cards and comment cards with `key` and `handle`
+  only, and its avatar is not fetched. A text check never covers an image.
+- **Serving.** Serving uses rows 1, 2, 5 and 7 with the serve level in place of
+  the viewer level, so a report held by this viewer does not stop serving. The
+  exemption for an owner's own fleet is a peer check, not a row.
+- **Reports.** Row 6 applies to a held report with reason abuse, illegal, sexual
+  or misrated from an accepted rater or a followed author. Following does not
+  sync lane 1, so this applies only to reports already held. A report deletes
+  nothing and proves nothing about the content.
+
+**At the default, an author's declaration alone does not show a clip.** The
+viewer needs an accepted rater or an explicit Accept this author's declarations,
+offered on the author's card and never turned on by following.
+
+**What hiding does, enforced in the node:**
+
+- A record is stored so its signature, chain and level can be checked. The body
+  of a hidden record is read only by `clips_rating_decide` and is never returned
+  by any adapter.
+- No manifest, chunk, thumbnail or avatar is requested for a hidden clip,
+  including at prefetch (4.7), at open by id or address, and for a reshare target.
+- Its card carries no caption, tags, counts, thumbnail or URL (5.2).
+- The media route answers 403 with the flag that hid the clip.
+- The node's **serve level**, General by default, is separate from its viewer
+  level. A `clipwant` from another owner's node for a manifest, thumbnail or chunk
+  of a clip above it gets `clipnot` reason 7. Records are still served, so chains
+  verify. A root's level is the highest of every held post that references it,
+  and an unreferenced root gets `clipnot` reason 1. An owner's own fleet still
+  holds and syncs that owner's clips.
+- Commons commands, the swarm want handler and `-packagehost` refuse any root
+  with a Clips package shape (2.4). Clips objects are fetched, read and served
+  only through the Clips routes and `clipwant`, which apply this decision.
+
+**Changing the level.** `z23 clips level set` takes `--level` and
+`--show-unrated`. Lowering a level or turning `show_unrated` off takes effect at
+once. Whenever a recomputed decision changes from shown to hidden, for any reason,
+the node deletes that clip's chunks, thumbnail and avatar from its store and
+caches, without adding a block. Lowering is complete when the delete finishes, and `clips status` reports
+the count purged.
+
+Raising a level, turning `show_unrated` on, accepting a rater or an author,
+allowing an id and clearing a report each widen what a person sees. Each needs a
+one-time confirmation token minted by the base app's own full-screen confirmation,
+which no layout draws, or by an interactive terminal prompt, never by the Clips
+package. The token is bound to the action and its exact arguments, expires in 60
+seconds, and the node spends it once. The Clips token cannot mint one. MCP refuses
+these actions. A caller with shell access to the
+datadir has the owner's authority. An optional app PIN guards raising; it stops
+casual changes and is not a security boundary against someone who controls the
+device.
+
+**Publishing.** The app asks the author for a level, offering the rubric above.
+The chosen level is what is signed; no default is applied without being shown.
+
+**Automated rating.** A program that classifies keyframes runs as a confined
+plugin on the owner's own machine (laptop or relay; **new**, phase 4) and signs
+ratings with its own key, `method` 2. It fetches into staging, where neither
+card building nor the media route can read. Nothing here treats a program as
+more than a rater: viewers accept it or not, and the strictest source still
+wins. No classifier is evaluated yet and none is claimed (E13).
+
+**Limits, stated plainly.** A signed rating says who claimed a level, not that
+the claim is right. An accepted author or rater can be wrong or lie; a word list
+misses things and flags innocent text; an automated rater will make errors in
+both directions; any followed author's report can hide an item for that viewer;
+text in a script no loaded list covers is not checked. A hidden record's text stays in the local store because the chain needs it, though
+no adapter returns it. Defaulting to hidden when evidence is missing reduces exposure
+and does not prove a shown clip is suitable.
 
 ---
 
@@ -913,7 +1135,10 @@ Record on the phone, publish to my node, watch on the phone, pinned on my
 servers. One author, one fleet, no other peers. Scope: `-noisetransport` in
 the app's node start, records and chain, manifest, Clips use of the package
 store, publish service, relay pinning over the paired stream,
-own-clips feed, media route, record, publish, my-clips and watch screens.
+own-clips feed, media route, record, publish, my-clips and watch screens,
+`clips_rating_decide`, `clips level`, `clips raters`, the media-route gate, the
+app's level and confirmation screens, and the scoped token between the base app
+and the Clips app.
 
 Groups to add:
 
@@ -936,6 +1161,13 @@ Groups to add:
 - `clips_api`: golden JSON for clip, author and feed-page cards; CLI and
   JSON-RPC return identical results.
 - `clips_policy`: the 4.7 table over every `(pace, power, link)` triple.
+- `clips_rating`: every row of the 6.6 decision over every level, evidence and
+  setting, with rater inputs as plain data; invalid settings decide as General; a
+  post with level 0 or an unknown descriptor bit refused; a hidden card carries
+  none of the forbidden fields; the media route answers 403 and returns no bytes;
+  every widening action without a spent confirmation token refused; a change from
+  shown to hidden purges the clip's objects without adding a block; Commons routes
+  refuse a Clips package root.
 - App units `clips_capture_test` and `clips_player_test`: profile parameters
   and thermal refusal, ranged-read mapping and deadline.
 
@@ -952,26 +1184,38 @@ Live checks on the Pixel:
    chunk and never plays unverified bytes.
 5. Record 60 s at 480p while logging battery and thermal status; at `gentle`
    and `pause` confirm refusal or 480p-only as 4.7 says.
+6. Publish a clip declared Mild on a phone at the default level through a second
+   viewer key: its card is a placeholder and the media route answers 403 with no
+   bytes. Accept the author and raise the viewer to Mild, each with a confirmation,
+   and it plays; lower to General and it is hidden again and its chunks are purged.
 
 ### Phase 2: follows across consenting nodes
 
-A second owner's node follows an author and watches their clips. Scope:
+A second owner's node follows an author and watches their clips. No clip from
+another person reaches a phone before the rating decision is in force. Scope:
 `clipsub`, `clipheads`, `clipget`, `cliprec`, inter-fleet grants, `-clipshost`,
-onion fetch, follow list, follower cache and budgets.
+onion fetch, follow list, follower cache and budgets, rating records, accepted
+raters and authors, serve level.
 
 Groups to add: `clips_follow` (subscription, head comparison, sync from
 `have_seq`, gaps, fork evidence); `clips_peer_policy` (no grant gives `clipnot`
 2, `-clipshost` off serves only own fleet, blocked author or hash never
-served); `clips_budget_sync` (prefetch honors pace, power, link and cap on a
-simulated clock); `clips_multi_holder` (one clip from two holders, one
-corrupt: result verified, corrupt holder penalized).
+served, a clip above serve level gets `clipnot` 7); `clips_budget_sync`
+(prefetch honors pace, power, link and cap on a simulated clock);
+`clips_multi_holder` (one clip from two holders, one corrupt: result verified,
+corrupt holder penalized); `clips_raters` (accept and remove a rater, rating and
+retraction change the decision, strictest of two raters wins, no bytes fetched
+for a clip a rater puts above the level).
 
 Live checks: (1) node B follows author A with a grant from both owners and B's
 phone plays A's new clip within a measured delay; (2) after A revokes the
 grant, B's request gets `clipnot` 2 and A serves no bytes; (3) with A's phone
 off, the clip arrives from A's relay; (4) on a metered link the data counter
 shows heads only; (5) when pace turns `gentle` during prefetch, chunk prefetch
-stops within one pace poll interval.
+stops within one pace poll interval; (6) at the default level B sees a
+placeholder for A's clip and the data counter shows no chunk bytes, then an
+accepted rater's General rating shows it and a second accepted rater's Mild
+hides it.
 
 Open decision: whether onion sessions use a separate Noise static key. Once
 Phase 1 enables Noise, the linking described in 6.5 can apply to a phone that
@@ -980,10 +1224,13 @@ also dials over TCP.
 ### Phase 3: reactions, comments, recipes and block lists
 
 Scope: lane 1 records, delivery to target authors, comment index, feed recipe
-registry, layout renderer, lists, reports, local filters.
+registry, layout renderer, lists, reports, local filters, word lists and the
+text check, the app PIN.
 
 Groups to add: `clips_social` (codecs, limits, comment delivery and
-acceptance, retract, unfollow); `clips_recipe` (each source and order function
+acceptance, retract, unfollow); `clips_text_level` (normalization, a listed
+word hides a comment at General, an uncovered script counts as unverified, a report
+from a followed author hides until review); `clips_recipe` (each source and order function
 over a fixture graph, unknown op refused, cursor stability); `clips_layout`
 (valid and invalid layouts, unknown primitive falls back) and the app unit
 `clips_layout_test` (primitive set, fallback); `clips_lists` (list
@@ -999,12 +1246,13 @@ hides the clips, and unsubscribing restores them.
 ### Phase 4: discovery and tips
 
 Scope: provider records beyond connected peers, topic discovery, blinded
-subscriptions, plugin orderers, perceptual-hash evaluation, ZCL tips, stamps,
-optional direct links.
+subscriptions, plugin orderers, perceptual-hash evaluation, the automated rater
+plugin, ZCL tips, stamps, optional direct links.
 
 Groups to add: `clips_discovery`, `clips_blinded_sub`, `clips_plugin_order`,
-`clips_tip` (confirm required, zero default, broker path only, no key read),
-`clips_stamp`. Live checks: discover a test author by topic; send a tip on
+`clips_auto_rater` (a confined plugin rates fixtures from staging and signs with
+its own key; its output is an ordinary rating record), `clips_tip` (confirm
+required, zero default, broker path only, no key read), `clips_stamp`. Live checks: discover a test author by topic; send a tip on
 fixtures only, after an explicit confirm; measure blinded-subscription cost
 against a holder with 10,000 authors.
 
@@ -1029,6 +1277,7 @@ a result changes the numbers here in the same commit.
 | E10 | Relay fan-out | 1, 10, 100 simulated followers fetch one 7 MB clip through a relay's onion service | relay egress budget |
 | E11 | A/V sync in the NDK path | 60 s playback on the audio clock; count dropped frames, measure drift | decoder and render approach |
 | E12 | Ingest cost of chain and fork checks | Ingest 100,000 records across 1,000 authors on a relay | store indexes, batching |
+| E13 | Automated rater accuracy | Report false-pass and false-block rates per level for one classifier on a vetted labelled benchmark, plus time per clip on the laptop and relay. The benchmark's source is an owner decision: web-scraped image sets are not used, since such sets have been found to contain illegal material (Stanford Internet Observatory, 2023, on LAION-5B) | whether to offer an automated rater, frames per clip |
 
 Risks and questions, each with its experiment:
 
@@ -1061,6 +1310,15 @@ Risks and questions, each with its experiment:
 - **Q10. Separate Noise key for onion sessions.** One static key serves all
   transports. Measure what a peer that sees both a TCP and an onion session
   can link, and whether a second key breaks grants or the fleet roster.
+- **Q11. Explicit content.** Rules for explicit content and age checks vary by
+  jurisdiction. No experiment resolves this; owner and legal review precede a
+  public release. The wire carries level numbers, so names can change with no
+  format change, and level 5 can be removed from the app's choices without
+  touching records.
+- **Q12. Cold start at the default.** With no accepted rater, a new viewer sees
+  placeholders until accepting an author or rater. Count the taps from install
+  to a first watched clip, and how many testers find the option, before changing
+  the flow. The fail-closed default does not change as a result.
 
 ---
 
@@ -1080,8 +1338,10 @@ contexts/clips/
   modules/       pure codecs and engines with no I/O: clips_codec, clips_wire,
                  clips_recipe
 engine/composition/commands/clips.def       the `z23 clips ...` bundle
-apps/z23android/                            capture, encoder, player, clips_ui,
-                                            hostenv (power and link words)
+apps/z23android/clips/                      the Clips app: capture, encoder, player,
+                                            screens
+apps/z23android/                            the base app: hostenv (power and link
+                                            words), the Clips token handoff
 tests/harness/src/test_clips_*.c            one registered group per file
 ```
 
