@@ -26,12 +26,6 @@ contexts/commons/packages/ztoml/tests/test_ztoml.c:test_fuzz:18
 contexts/commons/packages/ztoml/tests/test_ztoml.c:test_kat:17
 contexts/explorer/controllers/src/explorer_controller.c:rpc_call:22
 contexts/explorer/models/src/explorer_index_overlays.c:apply_znam:16
-contexts/wallet/controllers/src/vault_intent_controller.c:rpc_vi_plan_checked:48
-contexts/wallet/controllers/src/vault_intent_controller.c:vault_intent_commit_input:48
-contexts/wallet/controllers/src/vault_intent_controller.c:vi_build_prepared:20
-contexts/wallet/controllers/src/vault_intent_controller.c:vi_context_ready:22
-contexts/wallet/controllers/src/vault_intent_controller.c:vi_decode:25
-contexts/wallet/controllers/src/vault_intent_controller.c:vi_encode:16
 contexts/wallet/controllers/src/wallet_rescan_controller_coins.c:rpc_coinanalysis:22
 contexts/wallet/controllers/src/wallet_rescan_controller_witness.c:rpc_rescanwitnesses:23
 contexts/wallet/controllers/src/wallet_shielded_send.c:z_sendmany_run:64
