@@ -244,8 +244,25 @@ static void scanned_text_routes(void)
     assert(kind == ZAPP_SCAN_TEXT && zapp_home_scan_target(kind, true) == ZAPP_SCAN_TO_HOME);
 }
 
+/* Dark is the default: the activity theme and the first built-in Home layout. */
+static void dark_by_default(void)
+{
+    assert(!strcmp(zapp_home_layout_name(0), "default"));
+    assert(strstr(zapp_home_layout("default"), "\"background\":\"#000000\""));
+    static char manifest[16384];
+    FILE *file = fopen("AndroidManifest.xml", "r");
+    assert(file);
+    size_t size = fread(manifest, 1, sizeof(manifest) - 1, file);
+    assert(!ferror(file) && feof(file));
+    fclose(file);
+    manifest[size] = 0;
+    assert(strstr(manifest, "android:theme=\"@android:style/Theme.Material.NoActionBar\""));
+    assert(!strstr(manifest, "Light"));
+}
+
 int main(void)
 {
+    dark_by_default();
     phone_card_golden();
     phone_card_omits_secrets();
     phone_card_never_shows_wallet();

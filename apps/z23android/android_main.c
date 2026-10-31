@@ -5,6 +5,7 @@
 #include "camera.h"
 #include "clip_screen.h"
 #include "controller.h"
+#include "jni_util.h"
 #ifdef ZAPP_DEVKEY_PROBE
 #include "device_key_probe.h"
 #endif
@@ -12,6 +13,7 @@
 #include "node_service.h"
 #include "secure_window.h"
 #include <android/input.h>
+#include <android/log.h>
 #include <android/looper.h>
 #include <android/native_activity.h>
 #include <fcntl.h>
@@ -450,6 +452,22 @@ static void resume_activity(ANativeActivity *activity)
     zapp_devkey_probe(activity, ZAPP_DEVKEY_PROBE_RESUME);
 #endif
 }
+/* Asks the system for full screen brightness while this window is in front. */
+static void request_full_brightness(JNIEnv *env, jobject activity)
+{
+    if ((*env)->PushLocalFrame(env, 8) != JNI_OK) { (void)zj_clean(env); return; }
+    jobject window = zj_object_property(env, activity, "getWindow", "()Landroid/view/Window;");
+    jobject attributes = window ? zj_object_property(env, window, "getAttributes", "()Landroid/view/WindowManager$LayoutParams;") : NULL;
+    jclass type = attributes ? (*env)->GetObjectClass(env, attributes) : NULL;
+    jfieldID field = type ? (*env)->GetFieldID(env, type, "screenBrightness", "F") : NULL;
+    jmethodID apply = zj_clean(env) && field ? zj_method(env, window, "setAttributes", "(Landroid/view/WindowManager$LayoutParams;)V") : NULL;
+    if (apply) {
+        (*env)->SetFloatField(env, attributes, field, 1.0f);
+        (*env)->CallVoidMethod(env, window, apply, attributes);
+    }
+    if (!zj_clean(env) || !apply) __android_log_print(ANDROID_LOG_WARN, "z23", "full screen brightness was refused");
+    (*env)->PopLocalFrame(env, NULL);
+}
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size);
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size)
 {
@@ -475,6 +493,7 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
         !zapp_native_ui_package_preview(env, activity->clazz, &preview) ||
         !zapp_controller_start(activity->internalDataPath, native_dir, preview, notify) ||
         !zapp_native_ui_create(env, activity->clazz, action)) goto fail;
+    request_full_brightness(env, activity->clazz);
     zapp_camera_set_frame_notify(notify);
     char offer[256];
     if (intent_pairing(env, activity->clazz, offer, sizeof(offer))) {

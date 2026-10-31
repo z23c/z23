@@ -110,34 +110,33 @@ static bool special_text(JNIEnv *env, jobject view, const jobject *save)
 {
     if (save == &transcript_view) return line_spacing(env, view, 4.0f);
     return save != &voice_view || (zj_int_property(env, view, "setGravity", 1) &&
-        zj_int_property(env, view, "setTextColor", (jint)0xff5f6662));
+        zj_int_property(env, view, "setTextColor", (jint)0xff9a9a9a));
 }
 static bool add_text(JNIEnv *env, jobject layout, jobject activity, const char *label, jobject *save)
 {
     jobject view = zj_widget(env, "android/widget/TextView", activity);
-    bool ok = view && zj_typography(env, view, label_size(label, save), (jint)0xff262b2b) && zj_padding(env, view, 0, 4) &&
+    bool ok = view && zj_typography(env, view, label_size(label, save), (jint)0xffffffff) && zj_padding(env, view, 0, 4) &&
         zj_text(env, view, label) && special_text(env, view, save) &&
         zj_append(env, layout, view) && (!save || zj_keep(env, save, view));
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
-static bool primary_button(size_t i) { return i == 0 || i == 9 || i == 10 || i == 19; }
 static bool style_button(JNIEnv *env, jobject view, size_t i)
 {
     int min_height = zj_dp(i == 9 ? 64.0f : i == 15 ? 40.0f : 48.0f);
-    return zj_typography(env, view, i == 15 || i == 8 ? 15.0f : 16.0f, primary_button(i) ? (jint)0xffffffff : (jint)0xff264a43) &&
+    return zj_typography(env, view, i == 15 || i == 8 ? 15.0f : 16.0f, (jint)0xffffffff) &&
         zj_bool_property(env, view, "setAllCaps", false) &&
         zj_int_property(env, view, "setMinHeight", min_height) &&
         zj_int_property(env, view, "setMinimumHeight", min_height) &&
         zj_padding(env, view, 16, 8);
 }
-/* Talk and Confirm are green pills, the suggestion a pale pill, More plain text, Start node a slab. */
+/* Talk and Confirm are green pills, the suggestion a grey pill, More plain text, Start node a slab. */
 static bool shape_button(JNIEnv *env, jobject view, size_t i)
 {
     switch (i) {
     case 9: return zj_pill(env, view, (jint)0xff235e50, 32.0f) && zj_flatten(env, view) && zj_place(env, view, -1, -2, 0.0f, 0);
     case 10: case 19: return zj_pill(env, view, (jint)0xff235e50, 32.0f) && zj_flatten(env, view);
-    case 15: return zj_pill(env, view, (jint)0xffe4ebe7, 20.0f) && zj_flatten(env, view) && zj_place(env, view, -2, -2, 0.0f, 8);
+    case 15: return zj_pill(env, view, (jint)0xff2b2b2b, 20.0f) && zj_flatten(env, view) && zj_place(env, view, -2, -2, 0.0f, 8);
     case 8: return zj_int_property(env, view, "setBackgroundColor", 0);
     case 0: return zj_int_property(env, view, "setBackgroundColor", (jint)0xff235e50);
     default: return true;
@@ -236,7 +235,7 @@ static bool orient_layout(JNIEnv *env, jobject layout)
 }
 static bool style_prompt(JNIEnv *env, jobject field)
 {
-    return zj_typography(env, field, 16.0f, (jint)0xff262b2b) &&
+    return zj_typography(env, field, 16.0f, (jint)0xffffffff) &&
            zj_int_property(env, field, "setMinLines", 1) && zj_int_property(env, field, "setMaxLines", 4);
 }
 static bool prepare_layouts(JNIEnv *env, jobject layout, jobject details, jobject prompt, jobject invite, jobject receipt)
@@ -251,8 +250,8 @@ static bool assemble_root(JNIEnv *env, jobject root_layout, jobject scroll, jobj
 {
     return root_layout && scroll && bar && orient_layout(env, root_layout) && orient_layout(env, bar) &&
            zj_bool_property(env, root_layout, "setFitsSystemWindows", true) &&
-           zj_int_property(env, root_layout, "setBackgroundColor", (jint)0xfff7f5ef) &&
-           zj_int_property(env, bar, "setBackgroundColor", (jint)0xfff7f5ef) &&
+           zj_int_property(env, root_layout, "setBackgroundColor", (jint)0xff000000) &&
+           zj_int_property(env, bar, "setBackgroundColor", (jint)0xff000000) &&
            zj_int_property(env, bar, "setGravity", 1) && zj_padding4(env, bar, 20, 8, 20, 16) &&
            zj_place(env, scroll, -1, 0, 1.0f, 0) && zj_append(env, root_layout, scroll) &&
            zj_append(env, root_layout, bar) && zj_keep(env, &root, root_layout);
