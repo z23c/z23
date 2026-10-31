@@ -385,16 +385,26 @@ static void layout_surface(JNIEnv *env)
     if (params) (*env)->DeleteLocalRef(env, params);
 }
 
+static bool notice_visible(void)
+{
+    bool paused = s.player && zapp_clip_player_paused(s.player);
+    return s.phase == PHASE_REFUSED || (s.phase == PHASE_WATCH && (s.count == 0 || paused || s.error_shown));
+}
+
+static bool surface_visible(void)
+{
+    return s.phase != PHASE_REFUSED && s.phase != PHASE_PERMISSION && !(s.phase == PHASE_WATCH && s.count == 0);
+}
+
 static void show_phase(JNIEnv *env)
 {
     bool record = s.mode == ZAPP_CLIP_RECORD;
     show(env, s.controls[C_RECORD], record && (s.phase == PHASE_READY || s.phase == PHASE_RECORDING));
     show(env, s.panel, s.phase == PHASE_REVIEW);
-    bool paused = s.player && zapp_clip_player_paused(s.player);
-    show(env, s.notice, s.phase == PHASE_REFUSED || (s.phase == PHASE_WATCH && (s.count == 0 || paused || s.error_shown)));
+    show(env, s.notice, notice_visible());
     show(env, s.status, s.phase == PHASE_READY || s.phase == PHASE_RECORDING || s.phase == PHASE_FINISHING);
     show(env, s.info, s.phase == PHASE_WATCH && s.count > 0);
-    show(env, s.surface, s.phase != PHASE_REFUSED && s.phase != PHASE_PERMISSION && !(s.phase == PHASE_WATCH && s.count == 0));
+    show(env, s.surface, surface_visible());
     if (s.controls[C_RECORD]) (void)set_text(env, s.controls[C_RECORD], s.phase == PHASE_RECORDING ? "Stop" : "Record");
 }
 
@@ -763,6 +773,14 @@ static void begin(JNIEnv *env)
     show_phase(env);
 }
 
+/* Names the clips folder, then builds and attaches the views and starts the tick. */
+static bool prepare(JNIEnv *env, const char *files_dir)
+{
+    int n = snprintf(s.dir, sizeof(s.dir), "%s/clips", files_dir);
+    return n > 0 && (size_t)n + 48 < sizeof(s.pending) && (*env)->GetJavaVM(env, &s.vm) == JNI_OK &&
+        (mkdir(s.dir, 0700) == 0 || access(s.dir, W_OK) == 0) && read_density(env) && build_views(env) && attach(env) && start_timer();
+}
+
 bool zapp_clip_screen_open(JNIEnv *env, jobject activity, const char *files_dir, enum zapp_clip_mode mode)
 {
     if (s.active || !env || !activity || !files_dir) return false;
@@ -771,10 +789,8 @@ bool zapp_clip_screen_open(JNIEnv *env, jobject activity, const char *files_dir,
     s.timer = -1;
     s.mode = mode;
     s.activity = keep(env, activity);
-    int n = snprintf(s.dir, sizeof(s.dir), "%s/clips", files_dir);
     s.pace = ZAPP_CLIP_PACE_UNKNOWN;
-    bool ok = s.activity && n > 0 && (size_t)n + 48 < sizeof(s.pending) && (*env)->GetJavaVM(env, &s.vm) == JNI_OK &&
-        (mkdir(s.dir, 0700) == 0 || access(s.dir, W_OK) == 0) && read_density(env) && build_views(env) && attach(env) && start_timer();
+    bool ok = s.activity && prepare(env, files_dir);
     (void)zapp_clip_store_clean(s.dir, zapp_clip_recorder_path_owned);
     s.active = ok;
     if (ok) begin(env);

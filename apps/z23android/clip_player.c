@@ -331,25 +331,35 @@ static bool video_step(struct zapp_clip_player *p)
     return true;
 }
 
-static bool feed_sample(struct zapp_clip_player *p)
+/* The decoder that takes the next sample; at the end of the file, the one still owed its end-of-stream mark. */
+static AMediaCodec *input_codec(const struct zapp_clip_player *p, int track)
 {
-    int track = AMediaExtractor_getSampleTrackIndex(p->extractor);
-    AMediaCodec *codec = track == p->video_track ? p->video : track == p->audio_track ? p->audio : NULL;
-    bool end = track < 0;
-    if (end && p->video_input_done && (p->audio == NULL || p->audio_input_done)) return false;
-    if (end) codec = !p->video_input_done ? p->video : p->audio;
-    if (codec == NULL) { (void)AMediaExtractor_advance(p->extractor); return true; }
-    ssize_t i = AMediaCodec_dequeueInputBuffer(codec, 0);
-    if (i < 0) return false;
+    if (track >= 0) return track == p->video_track ? p->video : track == p->audio_track ? p->audio : NULL;
+    return !p->video_input_done ? p->video : p->audio;
+}
+
+static void queue_sample(struct zapp_clip_player *p, AMediaCodec *codec, size_t index, bool end)
+{
     size_t capacity = 0;
-    unsigned char *buffer = AMediaCodec_getInputBuffer(codec, (size_t)i, &capacity);
+    unsigned char *buffer = AMediaCodec_getInputBuffer(codec, index, &capacity);
     ssize_t n = !end && buffer != NULL ? AMediaExtractor_readSampleData(p->extractor, buffer, capacity) : 0;
     int64_t pts = end ? 0 : AMediaExtractor_getSampleTime(p->extractor);
-    (void)AMediaCodec_queueInputBuffer(codec, (size_t)i, 0,
-                                       n > 0 ? (size_t)n : 0, (uint64_t)(pts < 0 ? 0 : pts),
+    (void)AMediaCodec_queueInputBuffer(codec, index, 0, n > 0 ? (size_t)n : 0, (uint64_t)(pts < 0 ? 0 : pts),
                                        end ? AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM : 0);
     if (end) { if (codec == p->video) p->video_input_done = true; else p->audio_input_done = true; }
     else (void)AMediaExtractor_advance(p->extractor);
+}
+
+static bool feed_sample(struct zapp_clip_player *p)
+{
+    int track = AMediaExtractor_getSampleTrackIndex(p->extractor);
+    bool end = track < 0;
+    if (end && p->video_input_done && (p->audio == NULL || p->audio_input_done)) return false;
+    AMediaCodec *codec = input_codec(p, track);
+    if (codec == NULL) { (void)AMediaExtractor_advance(p->extractor); return true; }
+    ssize_t i = AMediaCodec_dequeueInputBuffer(codec, 0);
+    if (i < 0) return false;
+    queue_sample(p, codec, (size_t)i, end);
     return true;
 }
 

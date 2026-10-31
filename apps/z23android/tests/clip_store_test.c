@@ -166,6 +166,14 @@ static void order_and_bound_cases(void)
         for (size_t i = max; i < 16; ++i) assert(list[i].id[0] == 'S');
     }
     assert(zapp_clip_store_list(root, list, 0, NULL) == 0);
+}
+
+/* Seven clips are stored once the tied one is added: the list keeps the newest max and reports the total. */
+static void tie_and_cap_cases(void)
+{
+    char id[ZAPP_CLIP_ID_CAP];
+    struct zapp_clip list[16];
+    size_t total = 0;
     struct zapp_clip_meta tie = meta_of(2, 500);
     assert(commit("tied", &tie, id));
     assert(zapp_clip_store_list(root, list, 16, NULL) == 7);
@@ -273,6 +281,7 @@ int main(int argc, char **argv)
     refusal_cases();
     commit_and_tamper_cases();
     order_and_bound_cases();
+    tie_and_cap_cases();
     skip_and_delete_cases();
     clean_cases();
     rollback_case();
