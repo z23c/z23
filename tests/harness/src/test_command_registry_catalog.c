@@ -5327,6 +5327,62 @@ static int test_ops_state_requires_subsystem(void)
     return failures;
 }
 
+static int test_ops_state_covered_reply_serializes(void)
+{
+    int failures = 0;
+    struct json_value env;
+    json_init(&env);
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    TEST("ops.state covered telemetry preserves a serializable reply") {
+        const struct zcl_command_spec *spec = find_spec(reg, "ops.state");
+        ASSERT(spec != NULL);
+        /* Selected values from the Windows connman dump; no live RPC. */
+        g_bridge_rpc_method_fixture = "dumpstate";
+        g_bridge_rpc_error_fixture =
+            "{\"subsystem\":\"connman\",\"state\":{\"wired\":true,"
+            "\"outbound\":{\"total\":0,\"healthy\":0,\"connecting\":0}}}";
+        node_rpc_client_set_test_hook(bridge_rpc_error_mock);
+        struct json_value input;
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "subsystem", "connman");
+        struct zcl_command_context ctx = {
+            .registry = reg,
+            .granted_capabilities = UINT64_MAX,
+            .authority_ceiling = ZCL_COMMAND_AUTH_OWNER,
+        };
+        char out[ZCL_COMMAND_RESULT_BUDGET + 1];
+        enum zcl_command_exit code = ZCL_COMMAND_EXIT_INTERNAL;
+        size_t n = zcl_command_registry_execute_json(
+            reg, spec, &ctx, &input, false, "ops.state", "normal", 0, 0,
+            NULL, out, sizeof(out), &code);
+        node_rpc_client_set_test_hook(NULL);
+        g_bridge_rpc_method_fixture = NULL;
+        g_bridge_rpc_error_fixture = NULL;
+        json_free(&input);
+        ASSERT(n > 0);
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_read(&env, out, n));
+        const struct json_value *data = json_get(&env, "data");
+        ASSERT(json_get_bool(json_get(&env, "ok")));
+        ASSERT(json_get_bool(json_get(data, "meaning_available")));
+        ASSERT(json_get_bool(json_get(json_get(data, "state"), "wired")));
+        const struct json_value *next = json_at(json_get(&env, "next"), 0);
+        ASSERT(next != NULL);
+        const char *command = json_get_str(json_get(next, "command"));
+        ASSERT(command != NULL);
+        ASSERT_STR_EQ(command, "discover.describe");
+        const char *path = json_get_str(json_get(json_get(next, "input"), "path"));
+        ASSERT(path != NULL);
+        ASSERT_STR_EQ(path, "ops.state");
+        const char *reason = json_get_str(json_get(next, "reason"));
+        ASSERT(reason != NULL && strstr(reason, "explain") != NULL);
+        PASS();
+    } _test_next:;
+    json_free(&env);
+    return failures;
+}
+
 static int test_is_root_ownership(void)
 {
     int failures = 0;
@@ -7217,6 +7273,7 @@ int test_command_registry_catalog(void)
     failures += test_ops_selftest_registry();
     failures += test_ops_dash_dashboards_ported();
     failures += test_ops_state_requires_subsystem();
+    failures += test_ops_state_covered_reply_serializes();
     failures += test_dev_vcs_revert_release_stub();
     failures += test_dev_vcs_seal_grant_release_stub();
     failures += test_is_root_ownership();

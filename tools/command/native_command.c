@@ -866,11 +866,8 @@ static void nc_ops_state_attach_meaning(const struct zcl_command_request *reques
         json_free(&meaning);
     } else {
         (void)json_push_kv_bool(&reply->data, "meaning_available", true);
-        (void)zcl_command_reply_add_next(
-            reply, "ops.state",
-            "{\"subsystem\":\"<same>\",\"explain\":true}",
-            "re-run with explain to get each field judged against its "
-            "healthy range");
+        nc_add_describe_next(reply, request->spec->path,
+                             "inspect the explain input for telemetry meaning");
     }
 }
 
