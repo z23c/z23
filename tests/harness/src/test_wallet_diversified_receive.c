@@ -1223,9 +1223,15 @@ static int test_issued_address_is_owned(void)
         json_free(&rcp);
         json_free(&recips);
         json_init(&result);
-        (void)rpc_table_execute(f.tbl, "z_sendmany", &params, &result);
+        struct wallet_tx prepared;
+        memset(&prepared, 0, sizeof(prepared));
+        bool built = z_sendmany_prepare(&params, &prepared, &result);
+        /* The notes carry no witness here, so the build stops later; the
+         * refusal must not be that the from address is foreign. */
         const char *msg = json_get_str(&result);
-        ASSERT(!msg || strstr(msg, "not in wallet") == NULL);
+        ASSERT(!built);
+        ASSERT(msg != NULL);
+        ASSERT(strstr(msg, "not in wallet") == NULL);
         json_free(&params);
         json_free(&result);
         memory_cleanse(&acct, sizeof(acct));
