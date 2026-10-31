@@ -137,6 +137,15 @@ QB_COLUMN(fleet_board_posts, scope)
 QB_COLUMN(fleet_board_posts, room)
 QB_COLUMN(fleet_board_posts, arrival)
 
+/* wallet_send_once - engine/models/src/database_schema.c */
+QB_TABLE(wallet_send_once)
+QB_COLUMN(wallet_send_once, key_hash)
+QB_COLUMN(wallet_send_once, digest)
+QB_COLUMN(wallet_send_once, state)
+QB_COLUMN(wallet_send_once, txid)
+QB_COLUMN(wallet_send_once, created_at)
+QB_COLUMN(wallet_send_once, updated_at)
+
 /* Task contents belong to the user, independently of the serving program. */
 QB_TABLE(task_documents)
 QB_COLUMN(task_documents, app)

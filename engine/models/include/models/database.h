@@ -313,6 +313,10 @@ void node_db_utxo_count_gauge_test_reset(int64_t (*clock)(void));
  * Call before bulk block import. ~60x throughput improvement. */
 bool node_db_ibd_turbo_mode(struct node_db *ndb);
 
+/* The connection's PRAGMA synchronous level (0 OFF, 1 NORMAL, 2 FULL, 3 EXTRA),
+ * -1 when it cannot be read. */
+int node_db_synchronous_level(struct node_db *ndb);
+
 /* Normal mode: synchronous=NORMAL, rebuild indexes, truncate WAL.
  * Call after IBD completes. */
 bool node_db_normal_mode(struct node_db *ndb);

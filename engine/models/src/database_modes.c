@@ -13,6 +13,7 @@
  *   as database.c). */
 
 #include "util/log_macros.h"
+#include "models/activerecord.h"
 #include "models/database.h"
 #include "models/database_lifetime.h"
 #include "models/database_internal.h"
@@ -303,6 +304,21 @@ bool node_db_restore_cache_size(struct node_db *ndb)
     snprintf(sql, sizeof(sql), "PRAGMA cache_size=-%lld",
              (long long)node_db_budget_cache_kib());
     return db_exec_checked(ndb->db, sql, "restore_cache_size") == SQLITE_OK;
+}
+
+static bool modes_read_sync(struct node_db *ndb, int *level)
+{
+    sqlite3_stmt *s = NULL;
+    AR_QUERY_ONE_BOOL(ndb, s, "PRAGMA synchronous", (void)0,
+                      *level = (int)AR_COL_INT(s, 0));
+}
+
+int node_db_synchronous_level(struct node_db *ndb)
+{
+    int level = -1;
+    if (!ndb || !ndb->open || !modes_read_sync(ndb, &level))
+        return -1;
+    return level;
 }
 
 bool node_db_normal_mode(struct node_db *ndb)

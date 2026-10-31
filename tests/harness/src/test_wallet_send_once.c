@@ -1439,6 +1439,34 @@ static int case_retention(void)
     return failures;
 }
 
+/* The pool took the transaction, then the wallet flush failed and the
+ * admission was rolled back; a peer may already hold it. */
+static int real_flush_failure(struct fixture *fx, struct real_fix *rf)
+{
+    int failures = 0;
+    struct zcl_command_reply r;
+    WSO_CHECK("wallet flush made to fail",
+              node_db_exec(&fx->ndb,
+                  "CREATE TRIGGER wso_flush_fails BEFORE INSERT ON "
+                  "wallet_transactions BEGIN SELECT RAISE(ABORT,'wso'); END"));
+    plan_then_commit("0.1", "flush memo", "key-flush-fails", &r);
+    WSO_CHECK("a flush failure after pool entry is outcome_unknown with the "
+              "txid, not a rolled-back error",
+              replied_code(&r, "SEND_OUTCOME_UNKNOWN") &&
+              strlen(r.error.evidence) == 64 &&
+              tx_mempool_size(&rf->pool) == 1 &&
+              db_wallet_send_once_count(&fx->ndb) == 2);
+    zcl_command_reply_free(&r);
+    int builds = atomic_load(&g_builds);
+    plan_then_commit("0.1", "flush memo", "key-flush-fails", &r);
+    WSO_CHECK("the key is not free: the repeat sends nothing",
+              replied_code(&r, "SEND_OUTCOME_UNKNOWN") &&
+              atomic_load(&g_builds) == builds);
+    zcl_command_reply_free(&r);
+    (void)node_db_exec(&fx->ndb, "DROP TRIGGER wso_flush_fails");
+    return failures;
+}
+
 /* Real admission, real wallet database. */
 static int case_real_admission(void)
 {
@@ -1470,27 +1498,7 @@ static int case_real_admission(void)
               atomic_load(&g_builds) == 1 && tx_mempool_size(&rf.pool) == 1);
     zcl_command_reply_free(&r);
 
-    /* The pool took the transaction, then the wallet flush failed and the
-     * admission was rolled back; a peer may already hold it. */
-    WSO_CHECK("wallet flush made to fail",
-              node_db_exec(&fx.ndb,
-                  "CREATE TRIGGER wso_flush_fails BEFORE INSERT ON "
-                  "wallet_transactions BEGIN SELECT RAISE(ABORT,'wso'); END"));
-    plan_then_commit("0.1", "flush memo", "key-flush-fails", &r);
-    WSO_CHECK("a flush failure after pool entry is outcome_unknown with the "
-              "txid, not a rolled-back error",
-              replied_code(&r, "SEND_OUTCOME_UNKNOWN") &&
-              strlen(r.error.evidence) == 64 &&
-              tx_mempool_size(&rf.pool) == 1 &&
-              db_wallet_send_once_count(&fx.ndb) == 2);
-    zcl_command_reply_free(&r);
-    int builds = atomic_load(&g_builds);
-    plan_then_commit("0.1", "flush memo", "key-flush-fails", &r);
-    WSO_CHECK("the key is not free: the repeat sends nothing",
-              replied_code(&r, "SEND_OUTCOME_UNKNOWN") &&
-              atomic_load(&g_builds) == builds);
-    zcl_command_reply_free(&r);
-    (void)node_db_exec(&fx.ndb, "DROP TRIGGER wso_flush_fails");
+    failures += real_flush_failure(&fx, &rf);
 
     rf_close(&rf);
     fx_close(&fx, true);
@@ -1551,6 +1559,27 @@ static int case_built_row_is_synced(void)
     zcl_command_reply_free(&r);
     fx_close(&fx, true);
     cvfs_remove();
+    return failures;
+}
+
+/* Outside a keyed send both hooks are no-ops: an unkeyed send admits through
+ * the same commit path and must neither record nor refuse anything. */
+static int case_hooks_outside_keyed_send(void)
+{
+    int failures = 0;
+    struct fixture fx;
+    reset_counters();
+    if (!fx_open(&fx, "nohooks", true))
+        return 1;
+    struct uint256 id;
+    memset(id.data, 0x5C, 32);
+    wallet_send_once_after_commit(true);
+    wallet_send_once_after_commit(false);
+    WSO_CHECK("an unkeyed commit is not refused by the record hook",
+              wallet_send_once_before_commit(&id).ok);
+    WSO_CHECK("the hooks write no row outside a keyed send",
+              db_wallet_send_once_count(&fx.ndb) == 0);
+    fx_close(&fx, true);
     return failures;
 }
 
@@ -1696,6 +1725,7 @@ int test_wallet_send_once(void)
     failures += case_real_wallet_full();
     failures += case_built_row_is_synced();
     failures += case_built_row_has_own_transaction();
+    failures += case_hooks_outside_keyed_send();
     failures += case_real_zsendmany();
     failures += case_txid_not_logged();
     failures += case_retention();

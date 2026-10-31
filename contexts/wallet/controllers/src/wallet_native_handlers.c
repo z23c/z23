@@ -866,6 +866,21 @@ static char *wnh_shielded_send_params(const struct wnh_shielded_send_in *in)
     return rpc_arg_builder_to_json(&p);
 }
 
+/* The txid goes in the reply only; the log line carries no wallet data. */
+static void wnh_send_outcome_unknown(struct zcl_command_reply *reply,
+                                     const struct json_value *body)
+{
+    const char *tx = json_get_str(json_get(body, "txid"));
+    wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "SEND_OUTCOME_UNKNOWN",
+             "a send with this idempotency_key may have been made but is "
+             "not confirmed; nothing was sent again. The transaction can "
+             "still confirm until it expires, 20 blocks after it was "
+             "made, and the wallet list may not show it. Do not pay again "
+             "under a new key until the chain is more than 20 blocks past "
+             "the send; then check the wallet transaction list",
+             tx && tx[0] ? tx : "z_sendmany");
+}
+
 /* Refuse a send whose node-side record says it must not run again. Returns
  * true when the body is a committed send to render. */
 static bool wnh_shielded_send_state_ok(struct zcl_command_reply *reply,
@@ -893,15 +908,7 @@ static bool wnh_shielded_send_state_ok(struct zcl_command_reply *reply,
                  "and the idempotency_key is free to retry. Plan the send "
                  "again", "fee_zat");
     } else if (state && strcmp(state, "outcome_unknown") == 0) {
-        const char *tx = json_get_str(json_get(body, "txid"));
-        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "SEND_OUTCOME_UNKNOWN",
-                 "a send with this idempotency_key may have been made but is "
-                 "not confirmed; nothing was sent again. The transaction can "
-                 "still confirm until it expires, 20 blocks after it was "
-                 "made, and the wallet list may not show it. Do not pay again "
-                 "under a new key until the chain is more than 20 blocks past "
-                 "the send; then check the wallet transaction list",
-                 tx && tx[0] ? tx : "z_sendmany");
+        wnh_send_outcome_unknown(reply, body);
     } else if (state && strcmp(state, "key_conflict") == 0) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "IDEMPOTENCY_KEY_REUSED",
                  "this idempotency_key was already used for a different "

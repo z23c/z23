@@ -3,6 +3,7 @@
 
 #include "models/wallet_send_once.h"
 
+#include "models/query_builder.h"
 #include "util/log_macros.h"
 
 #include <string.h>
@@ -30,25 +31,28 @@ bool db_wallet_send_once_validate(const struct wallet_send_once_row *row,
     return !ar_errors_any(errors);
 }
 
+/* Column order of the wallet_send_once row reads. */
+enum wso_col { WSO_COL_DIGEST, WSO_COL_STATE, WSO_COL_TXID,
+               WSO_COL_CREATED, WSO_COL_UPDATED, WSO_COL_COUNT };
+
 bool db_wallet_send_once_insert(struct node_db *ndb,
                                 const struct wallet_send_once_row *row)
 {
     if (!ndb || !ndb->open || !row)
         LOG_FAIL("wallet_send_once", "insert: invalid argument");
-    sqlite3_stmt *s = NULL;
-    AR_ADHOC_SAVE(ndb, s,
-        "INSERT INTO wallet_send_once"
-        "(key_hash,digest,state,txid,created_at,updated_at) "
-        "VALUES(?,?,?,?,?,?)",
-        db_wallet_send_once_callbacks(), "wallet_send_once", row,
-        db_wallet_send_once_validate,
-        AR_BIND_BLOB(s, 1, row->key_hash, 32);
-        AR_BIND_BLOB(s, 2, row->digest, 32);
-        AR_BIND_INT(s, 3, row->state);
-        if (row->has_txid) AR_BIND_BLOB(s, 4, row->txid, 32);
-        else AR_BIND_NULL(s, 4);
-        AR_BIND_INT(s, 5, row->created_at);
-        AR_BIND_INT(s, 6, row->updated_at));
+    struct qb q;
+    qb_insert(&q, QB_T_wallet_send_once, QB_INSERT_PLAIN);
+    qb_value_blob(&q, QB_C_wallet_send_once_key_hash, row->key_hash, 32);
+    qb_value_blob(&q, QB_C_wallet_send_once_digest, row->digest, 32);
+    qb_value_int(&q, QB_C_wallet_send_once_state, row->state);
+    if (row->has_txid)
+        qb_value_blob(&q, QB_C_wallet_send_once_txid, row->txid, 32);
+    else
+        qb_value_null(&q, QB_C_wallet_send_once_txid);
+    qb_value_int(&q, QB_C_wallet_send_once_created_at, row->created_at);
+    qb_value_int(&q, QB_C_wallet_send_once_updated_at, row->updated_at);
+    QB_ADHOC_SAVE(ndb, &q, s, db_wallet_send_once_callbacks(),
+                  "wallet_send_once", row, db_wallet_send_once_validate);
 }
 
 bool db_wallet_send_once_find(struct node_db *ndb, const uint8_t key_hash[32],
@@ -57,18 +61,25 @@ bool db_wallet_send_once_find(struct node_db *ndb, const uint8_t key_hash[32],
     if (!ndb || !ndb->open || !key_hash || !out)
         LOG_FAIL("wallet_send_once", "find: invalid argument");
     memset(out, 0, sizeof(*out));
-    sqlite3_stmt *s = NULL;
-    AR_QUERY_ONE_BOOL(ndb, s,
-        "SELECT digest,state,txid,created_at,updated_at "
-        "FROM wallet_send_once WHERE key_hash=?",
-        AR_BIND_BLOB(s, 1, key_hash, 32),
+    static const enum qb_column cols[WSO_COL_COUNT] = {
+        [WSO_COL_DIGEST] = QB_C_wallet_send_once_digest,
+        [WSO_COL_STATE] = QB_C_wallet_send_once_state,
+        [WSO_COL_TXID] = QB_C_wallet_send_once_txid,
+        [WSO_COL_CREATED] = QB_C_wallet_send_once_created_at,
+        [WSO_COL_UPDATED] = QB_C_wallet_send_once_updated_at,
+    };
+    struct qb q;
+    qb_select(&q, QB_T_wallet_send_once);
+    qb_select_columns(&q, cols, WSO_COL_COUNT);
+    qb_where_blob(&q, QB_C_wallet_send_once_key_hash, QB_EQ, key_hash, 32);
+    QB_QUERY_ONE_BOOL(ndb, &q, s,
         memcpy(out->key_hash, key_hash, 32);
-        AR_READ_BLOB(s, 0, out->digest, 32);
-        out->state = (enum wallet_send_once_state)AR_COL_INT(s, 1);
-        out->has_txid = sqlite3_column_type(s, 2) == SQLITE_BLOB;
-        if (out->has_txid) AR_READ_BLOB(s, 2, out->txid, 32);
-        out->created_at = AR_COL_INT(s, 3);
-        out->updated_at = AR_COL_INT(s, 4));
+        AR_READ_BLOB(s, WSO_COL_DIGEST, out->digest, 32);
+        out->state = (enum wallet_send_once_state)AR_COL_INT(s, WSO_COL_STATE);
+        out->has_txid = sqlite3_column_type(s, WSO_COL_TXID) == SQLITE_BLOB;
+        if (out->has_txid) AR_READ_BLOB(s, WSO_COL_TXID, out->txid, 32);
+        out->created_at = AR_COL_INT(s, WSO_COL_CREATED);
+        out->updated_at = AR_COL_INT(s, WSO_COL_UPDATED));
 }
 
 bool db_wallet_send_once_advance(struct node_db *ndb,
@@ -79,16 +90,18 @@ bool db_wallet_send_once_advance(struct node_db *ndb,
     if (!ndb || !ndb->open || !key_hash || !txid || now <= 0 ||
         state <= WALLET_SEND_ONCE_STARTED || state > WALLET_SEND_ONCE_COMMITTED)
         LOG_FAIL("wallet_send_once", "advance: invalid argument");
-    sqlite3_stmt *s = NULL;
-    AR_EXEC_CHANGED_BOOL(ndb, s,
-        "UPDATE wallet_send_once SET state=?,txid=?,updated_at=? "
-        "WHERE key_hash=? AND state<? AND (txid IS NULL OR txid=?)",
-        AR_BIND_INT(s, 1, state);
-        AR_BIND_BLOB(s, 2, txid, 32);
-        AR_BIND_INT(s, 3, now);
-        AR_BIND_BLOB(s, 4, key_hash, 32);
-        AR_BIND_INT(s, 5, state);
-        AR_BIND_BLOB(s, 6, txid, 32));
+    struct qb q;
+    qb_update(&q, QB_T_wallet_send_once);
+    qb_set_int(&q, QB_C_wallet_send_once_state, state);
+    qb_set_blob(&q, QB_C_wallet_send_once_txid, txid, 32);
+    qb_set_int(&q, QB_C_wallet_send_once_updated_at, now);
+    qb_where_blob(&q, QB_C_wallet_send_once_key_hash, QB_EQ, key_hash, 32);
+    qb_where_int(&q, QB_C_wallet_send_once_state, QB_LT, state);
+    qb_group_begin(&q, QB_OR);
+    qb_where_null(&q, QB_C_wallet_send_once_txid, true);
+    qb_where_blob(&q, QB_C_wallet_send_once_txid, QB_EQ, txid, 32);
+    qb_group_end(&q);
+    QB_EXEC_CHANGED_BOOL(ndb, &q, s);
 }
 
 bool db_wallet_send_once_release(struct node_db *ndb,
@@ -97,44 +110,48 @@ bool db_wallet_send_once_release(struct node_db *ndb,
     if (!ndb || !ndb->open || !key_hash)
         LOG_FAIL("wallet_send_once", "release: invalid argument");
     struct wallet_send_once_row row = {0};
-    sqlite3_stmt *s = NULL;
-    AR_ADHOC_DESTROY(ndb, s,
-        "DELETE FROM wallet_send_once WHERE key_hash=? AND state<>3",
-        db_wallet_send_once_callbacks(), &row,
-        AR_BIND_BLOB(s, 1, key_hash, 32));
+    struct qb q;
+    qb_delete(&q, QB_T_wallet_send_once);
+    qb_where_blob(&q, QB_C_wallet_send_once_key_hash, QB_EQ, key_hash, 32);
+    qb_where_int(&q, QB_C_wallet_send_once_state, QB_NE,
+                 WALLET_SEND_ONCE_COMMITTED);
+    QB_ADHOC_DESTROY(ndb, &q, s, db_wallet_send_once_callbacks(), &row);
 }
 
 int db_wallet_send_once_count(struct node_db *ndb)
 {
     if (!ndb || !ndb->open)
         return 0;
-    AR_QUERY_COUNT_SQL(ndb, "SELECT COUNT(*) FROM wallet_send_once");
+    struct qb q;
+    qb_select(&q, QB_T_wallet_send_once);
+    qb_select_count_star(&q);
+    QB_QUERY_COUNT(ndb, &q, s);
+}
+
+/* Two statements: committed rows age out on the short window, every other
+ * state on the long one. Each is idempotent, so a partial run is harmless. */
+static bool wso_prune_state(struct node_db *ndb, enum qb_op op, int64_t before)
+{
+    struct qb q;
+    qb_delete(&q, QB_T_wallet_send_once);
+    qb_where_int(&q, QB_C_wallet_send_once_state, op,
+                 WALLET_SEND_ONCE_COMMITTED);
+    qb_where_int(&q, QB_C_wallet_send_once_created_at, QB_LT, before);
+    QB_EXEC_BOOL(ndb, &q, s);
 }
 
 bool db_wallet_send_once_prune(struct node_db *ndb, int64_t now)
 {
     if (!ndb || !ndb->open || now <= 0)
         LOG_FAIL("wallet_send_once", "prune: invalid argument");
-    sqlite3_stmt *s = NULL;
-    AR_EXEC_BOOL(ndb, s,
-        "DELETE FROM wallet_send_once WHERE "
-        "(state=3 AND created_at<?) OR (state<>3 AND created_at<?)",
-        AR_BIND_INT(s, 1, now - WALLET_SEND_ONCE_COMMITTED_RETAIN_SEC);
-        AR_BIND_INT(s, 2, now - WALLET_SEND_ONCE_UNRESOLVED_RETAIN_SEC));
+    bool committed = wso_prune_state(ndb, QB_EQ,
+                                     now - WALLET_SEND_ONCE_COMMITTED_RETAIN_SEC);
+    bool other = wso_prune_state(ndb, QB_NE,
+                                 now - WALLET_SEND_ONCE_UNRESOLVED_RETAIN_SEC);
+    return committed && other;
 }
 
 int db_wallet_send_once_sync_level(struct node_db *ndb)
 {
-    if (!ndb || !ndb->open)
-        return -1;
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(ndb->db, "PRAGMA synchronous", -1, &s, NULL) !=
-        SQLITE_OK) {
-        LOG_ERROR("wallet_send_once", "sync level: %s",
-                  sqlite3_errmsg(ndb->db));
-        return -1;
-    }
-    int level = sqlite3_step(s) == SQLITE_ROW ? sqlite3_column_int(s, 0) : -1;
-    sqlite3_finalize(s);
-    return level;
+    return node_db_synchronous_level(ndb);
 }
