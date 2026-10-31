@@ -646,21 +646,22 @@ static int t_list_end_claim_head(void)
     return failures;
 }
 
+/* Adds one scenario's failure count; returns false when the scenario
+ * returned -1 (its fixture case could not be opened). */
+static bool pcc_add_part(int *failures, int part)
+{
+    if (part < 0) return false;
+    *failures += part;
+    return true;
+}
+
 static int t_list_ends(void)
 {
     int failures = 0;
-    int part = t_list_end_last_file();
-    if (part < 0) return 1;
-    failures += part;
-    part = t_list_end_first_file();
-    if (part < 0) return 1;
-    failures += part;
-    part = t_list_end_claim_tail();
-    if (part < 0) return 1;
-    failures += part;
-    part = t_list_end_claim_head();
-    if (part < 0) return 1;
-    failures += part;
+    if (!pcc_add_part(&failures, t_list_end_last_file())) return 1;
+    if (!pcc_add_part(&failures, t_list_end_first_file())) return 1;
+    if (!pcc_add_part(&failures, t_list_end_claim_tail())) return 1;
+    if (!pcc_add_part(&failures, t_list_end_claim_head())) return 1;
 
     return failures;
 }
