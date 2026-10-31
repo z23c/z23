@@ -41,11 +41,7 @@ contexts/wallet/controllers/src/wallet_view_sync.c:wv_sync_wallet_from_zclassicd
 contexts/wallet/domain/src/mnemonic.c:mnemonic_decode_core:18
 contexts/wallet/modules/wallet/src/wallet.c:wallet_create_transaction_multi:16
 contexts/wallet/modules/wallet/src/wallet.c:wallet_sync_transaction:17
-contexts/wallet/modules/wallet/src/wallet_sqlite.c:wallet_sqlite_close:23
 contexts/wallet/modules/wallet/src/wallet_sqlite.c:wallet_sqlite_flush_scope_r:66
-contexts/wallet/modules/wallet/src/wallet_sqlite.c:wallet_sqlite_read_keys_r:19
-contexts/wallet/modules/wallet/src/wallet_sqlite.c:wallet_sqlite_read_sapling_keys:20
-contexts/wallet/modules/wallet/src/wallet_sqlite.c:wallet_sqlite_read_single_key:18
 contexts/wallet/modules/wallet/src/wallet_sqlite_key_crypto.c:wallet_sqlite_key_crypto_prepare:21
 contexts/wallet/modules/wallet/src/wallet_sqlite_key_crypto.c:wallet_sqlite_key_decrypt:23
 contexts/wallet/modules/wallet/src/wallet_sqlite_key_crypto.c:wallet_sqlite_key_encrypt:22

@@ -413,30 +413,21 @@ bool wallet_sqlite_open(struct wallet_sqlite *ws, sqlite3 *db)
              r.source_file ? r.source_file : "?", r.source_line, r.message);
 }
 
+static void wsql_finalize_stmt(sqlite3_stmt **stmt)
+{
+    if (*stmt) { sqlite3_finalize(*stmt); *stmt = NULL; }
+}
+
 void wallet_sqlite_close(struct wallet_sqlite *ws)
 {
     if (!ws) return;
-    if (ws->stmt_key_write)    { sqlite3_finalize(ws->stmt_key_write);    ws->stmt_key_write = NULL; }
-    if (ws->stmt_key_read)     { sqlite3_finalize(ws->stmt_key_read);     ws->stmt_key_read = NULL; }
-    if (ws->stmt_key_read_one) { sqlite3_finalize(ws->stmt_key_read_one); ws->stmt_key_read_one = NULL; }
-    if (ws->stmt_key_delete)   { sqlite3_finalize(ws->stmt_key_delete);   ws->stmt_key_delete = NULL; }
-    if (ws->stmt_keypool_write) { sqlite3_finalize(ws->stmt_keypool_write); ws->stmt_keypool_write = NULL; }
-    if (ws->stmt_keypool_read)  { sqlite3_finalize(ws->stmt_keypool_read);  ws->stmt_keypool_read = NULL; }
-    if (ws->stmt_keypool_clear) { sqlite3_finalize(ws->stmt_keypool_clear); ws->stmt_keypool_clear = NULL; }
-    if (ws->stmt_tx_write)     { sqlite3_finalize(ws->stmt_tx_write);     ws->stmt_tx_write = NULL; }
-    if (ws->stmt_tx_read)      { sqlite3_finalize(ws->stmt_tx_read);      ws->stmt_tx_read = NULL; }
-    if (ws->stmt_seed_write)   { sqlite3_finalize(ws->stmt_seed_write);   ws->stmt_seed_write = NULL; }
-    if (ws->stmt_seed_read)    { sqlite3_finalize(ws->stmt_seed_read);    ws->stmt_seed_read = NULL; }
-    if (ws->stmt_zkey_write)   { sqlite3_finalize(ws->stmt_zkey_write);   ws->stmt_zkey_write = NULL; }
-    if (ws->stmt_zkey_read)    { sqlite3_finalize(ws->stmt_zkey_read);    ws->stmt_zkey_read = NULL; }
-    if (ws->stmt_script_write) { sqlite3_finalize(ws->stmt_script_write); ws->stmt_script_write = NULL; }
-    if (ws->stmt_script_read)  { sqlite3_finalize(ws->stmt_script_read);  ws->stmt_script_read = NULL; }
-    if (ws->stmt_watch_write)  { sqlite3_finalize(ws->stmt_watch_write);  ws->stmt_watch_write = NULL; }
-    if (ws->stmt_watch_read)   { sqlite3_finalize(ws->stmt_watch_read);   ws->stmt_watch_read = NULL; }
-    if (ws->stmt_best_block_write)  { sqlite3_finalize(ws->stmt_best_block_write);  ws->stmt_best_block_write = NULL; }
-    if (ws->stmt_best_block_read)   { sqlite3_finalize(ws->stmt_best_block_read);   ws->stmt_best_block_read = NULL; }
-    if (ws->stmt_scan_height_write) { sqlite3_finalize(ws->stmt_scan_height_write); ws->stmt_scan_height_write = NULL; }
-    if (ws->stmt_scan_height_read)  { sqlite3_finalize(ws->stmt_scan_height_read);  ws->stmt_scan_height_read = NULL; }
+    wsql_finalize_stmt(&ws->stmt_key_write); wsql_finalize_stmt(&ws->stmt_key_read); wsql_finalize_stmt(&ws->stmt_key_read_one);
+    wsql_finalize_stmt(&ws->stmt_key_delete); wsql_finalize_stmt(&ws->stmt_keypool_write); wsql_finalize_stmt(&ws->stmt_keypool_read);
+    wsql_finalize_stmt(&ws->stmt_keypool_clear); wsql_finalize_stmt(&ws->stmt_tx_write); wsql_finalize_stmt(&ws->stmt_tx_read);
+    wsql_finalize_stmt(&ws->stmt_seed_write); wsql_finalize_stmt(&ws->stmt_seed_read); wsql_finalize_stmt(&ws->stmt_zkey_write);
+    wsql_finalize_stmt(&ws->stmt_zkey_read); wsql_finalize_stmt(&ws->stmt_script_write); wsql_finalize_stmt(&ws->stmt_script_read);
+    wsql_finalize_stmt(&ws->stmt_watch_write); wsql_finalize_stmt(&ws->stmt_watch_read); wsql_finalize_stmt(&ws->stmt_best_block_write);
+    wsql_finalize_stmt(&ws->stmt_best_block_read); wsql_finalize_stmt(&ws->stmt_scan_height_write); wsql_finalize_stmt(&ws->stmt_scan_height_read);
     ws->db = NULL;
     ws->open = false;
     wallet_sqlite_key_crypto_reset();
@@ -636,6 +627,38 @@ struct zcl_result wallet_sqlite_delete_key_r(struct wallet_sqlite *ws,
     return ZCL_OK;
 }
 
+static void wsql_wipe_free(uint8_t *plain, size_t len)
+{
+    if (plain) { memory_cleanse(plain, len); free(plain); }
+}
+
+/* Outcome of unwrapping a stored private-key blob into key->vch. */
+enum wsql_key_unwrap { WSQL_KEY_UNWRAP_OK, WSQL_KEY_UNWRAP_WKD1_FAIL, WSQL_KEY_UNWRAP_WKS1_FAIL };
+
+static enum wsql_key_unwrap wsql_unwrap_key_blob(sqlite3 *db, const uint8_t *pubkey_hash,
+                                                 const uint8_t *blob, size_t len,
+                                                 struct privkey *key)
+{
+    if (wallet_sqlite_key_is_envelope(blob, len)) {
+        size_t plain_len = 0;
+        if (!wallet_sqlite_key_decrypt(db, pubkey_hash, blob, len, key->vch,
+                sizeof(key->vch), &plain_len) || plain_len != 32)
+            return WSQL_KEY_UNWRAP_WKD1_FAIL;
+    } else if (is_wks1_blob(blob, len)) {
+        uint8_t *plain = NULL;
+        size_t plain_len = 0;
+        if (!wallet_decrypt_blob(blob, len, &plain, &plain_len) || plain_len < 32) {
+            wsql_wipe_free(plain, plain_len);
+            return WSQL_KEY_UNWRAP_WKS1_FAIL;
+        }
+        memcpy(key->vch, plain, 32);
+        wsql_wipe_free(plain, plain_len);
+    } else {
+        memcpy(key->vch, blob, 32);
+    }
+    return WSQL_KEY_UNWRAP_OK;
+}
+
 struct zcl_result wallet_sqlite_read_single_key(struct wallet_sqlite *ws,
                                                 const struct pubkey *pk,
                                                 struct privkey *out_key)
@@ -691,32 +714,19 @@ struct zcl_result wallet_sqlite_read_single_key(struct wallet_sqlite *ws,
             priv_len));
 
     privkey_init(out_key);
-    if (wallet_sqlite_key_is_envelope(priv_buf, (size_t)priv_len)) {
-        size_t plain_len = 0;
-        if (!wallet_sqlite_key_decrypt(ws->db, kid.id.data,
-                priv_buf, (size_t)priv_len, out_key->vch,
-                sizeof(out_key->vch), &plain_len) || plain_len != 32) {
-            memory_cleanse(priv_buf, sizeof(priv_buf));
-            memory_cleanse(out_key->vch, sizeof(out_key->vch));
-            return wsql_fail(ws, ZCL_ERR(WSQL_READ_FAIL,
-                "read_single_key: WKD1 decrypt failed "
-                "(wrong passphrase, row swap, or tamper?)"));
-        }
-    } else if (is_wks1_blob(priv_buf, (size_t)priv_len)) {
-        uint8_t *plain = NULL;
-        size_t plain_len = 0;
-        if (!wallet_decrypt_blob(priv_buf, (size_t)priv_len,
-                                 &plain, &plain_len) || plain_len < 32) {
-            if (plain) { memory_cleanse(plain, plain_len); free(plain); }
-            memory_cleanse(priv_buf, sizeof(priv_buf));
-            return wsql_fail(ws, ZCL_ERR(WSQL_READ_FAIL,
-                "read_single_key: decrypt failed (wrong passphrase?)"));
-        }
-        memcpy(out_key->vch, plain, 32);
-        memory_cleanse(plain, plain_len);
-        free(plain);
-    } else {
-        memcpy(out_key->vch, priv_buf, 32);
+    enum wsql_key_unwrap uw = wsql_unwrap_key_blob(ws->db, kid.id.data,
+        priv_buf, (size_t)priv_len, out_key);
+    if (uw == WSQL_KEY_UNWRAP_WKD1_FAIL) {
+        memory_cleanse(priv_buf, sizeof(priv_buf));
+        memory_cleanse(out_key->vch, sizeof(out_key->vch));
+        return wsql_fail(ws, ZCL_ERR(WSQL_READ_FAIL,
+            "read_single_key: WKD1 decrypt failed "
+            "(wrong passphrase, row swap, or tamper?)"));
+    }
+    if (uw == WSQL_KEY_UNWRAP_WKS1_FAIL) {
+        memory_cleanse(priv_buf, sizeof(priv_buf));
+        return wsql_fail(ws, ZCL_ERR(WSQL_READ_FAIL,
+            "read_single_key: decrypt failed (wrong passphrase?)"));
     }
     memory_cleanse(priv_buf, sizeof(priv_buf));
     out_key->fValid = true;
@@ -773,40 +783,26 @@ struct zcl_result wallet_sqlite_read_keys_r(struct wallet_sqlite *ws,
         privkey_init(&key);
 
         struct key_id kid = pubkey_get_id(&pk);
-        if (wallet_sqlite_key_is_envelope(priv_data, (size_t)priv_len)) {
-            size_t plain_len = 0;
-            if (!wallet_sqlite_key_decrypt(ws->db, kid.id.data,
-                    priv_data, (size_t)priv_len, key.vch,
-                    sizeof(key.vch), &plain_len) || plain_len != 32) {
-                memory_cleanse(key.vch, sizeof(key.vch));
-                fprintf(stderr,  // obs-ok:corrupt-row-counted-via-g_read_keys_corrupt_rows
-                    "[wallet_sqlite] %s:%d %s(): read_keys: dropping "
-                    "row rowid=%lld — WKD1 decrypt failed "
-                    "(wrong passphrase, row swap, or tamper?)\n",
-                    __FILE__, __LINE__, __func__, (long long)rowid);
-                g_read_keys_corrupt_rows++;
-                continue;
-            }
-        } else if (is_wks1_blob(priv_data, (size_t)priv_len)) {
-            uint8_t *plain = NULL;
-            size_t plain_len = 0;
-            if (!wallet_decrypt_blob(priv_data, (size_t)priv_len,
-                                     &plain, &plain_len) ||
-                plain_len < 32) {
-                if (plain) { memory_cleanse(plain, plain_len); free(plain); }
-                fprintf(stderr,  // obs-ok:corrupt-row-counted-via-g_read_keys_corrupt_rows
-                    "[wallet_sqlite] %s:%d %s(): read_keys: dropping "
-                    "row rowid=%lld — WKS1 decrypt failed "
-                    "(wrong passphrase or tampered envelope?)\n",
-                    __FILE__, __LINE__, __func__, (long long)rowid);
-                g_read_keys_corrupt_rows++;
-                continue;
-            }
-            memcpy(key.vch, plain, 32);
-            memory_cleanse(plain, plain_len);
-            free(plain);
-        } else {
-            memcpy(key.vch, priv_data, 32);
+        enum wsql_key_unwrap uw = wsql_unwrap_key_blob(ws->db, kid.id.data,
+            priv_data, (size_t)priv_len, &key);
+        if (uw == WSQL_KEY_UNWRAP_WKD1_FAIL) {
+            memory_cleanse(key.vch, sizeof(key.vch));
+            fprintf(stderr,  // obs-ok:corrupt-row-counted-via-g_read_keys_corrupt_rows
+                "[wallet_sqlite] %s:%d %s(): read_keys: dropping "
+                "row rowid=%lld — WKD1 decrypt failed "
+                "(wrong passphrase, row swap, or tamper?)\n",
+                __FILE__, __LINE__, __func__, (long long)rowid);
+            g_read_keys_corrupt_rows++;
+            continue;
+        }
+        if (uw == WSQL_KEY_UNWRAP_WKS1_FAIL) {
+            fprintf(stderr,  // obs-ok:corrupt-row-counted-via-g_read_keys_corrupt_rows
+                "[wallet_sqlite] %s:%d %s(): read_keys: dropping "
+                "row rowid=%lld — WKS1 decrypt failed "
+                "(wrong passphrase or tampered envelope?)\n",
+                __FILE__, __LINE__, __func__, (long long)rowid);
+            g_read_keys_corrupt_rows++;
+            continue;
         }
         key.fValid = true;
         key.fCompressed = (compressed != 0);
@@ -1129,6 +1125,24 @@ bool wallet_sqlite_write_sapling_key(struct wallet_sqlite *ws,
     return true;
 }
 
+static bool wsql_sapling_xsk_decrypt(const void *blob, size_t len, uint8_t **out_plain, size_t *out_len)
+{
+    if (!wallet_decrypt_blob(blob, len, out_plain, out_len) ||
+        *out_len < sizeof(struct zip32_xsk)) {
+        wsql_wipe_free(*out_plain, *out_len);
+        return false;
+    }
+    return true;
+}
+
+static void wsql_sapling_entry_set_xfvk(struct sapling_key_entry *entry, const void *xfvk, int xfvk_len)
+{
+    if (xfvk && xfvk_len >= (int)sizeof(struct zip32_xfvk))
+        memcpy(&entry->xfvk, xfvk, sizeof(struct zip32_xfvk));
+    else
+        zip32_xsk_to_xfvk(&entry->xfvk, &entry->xsk);
+}
+
 bool wallet_sqlite_read_sapling_keys(struct wallet_sqlite *ws,
                                        struct wallet *w)
 {
@@ -1165,34 +1179,23 @@ bool wallet_sqlite_read_sapling_keys(struct wallet_sqlite *ws,
         size_t xsk_plain_len = 0;
 
         if (is_wks1_blob(xsk_blob, (size_t)xsk_blob_len)) {
-            if (!wallet_decrypt_blob(xsk_blob, (size_t)xsk_blob_len,
-                                     &xsk_decrypted, &xsk_plain_len) ||
-                xsk_plain_len < sizeof(struct zip32_xsk)) {
-                if (xsk_decrypted) {
-                    memory_cleanse(xsk_decrypted, xsk_plain_len);
-                    free(xsk_decrypted);
-                }
+            if (!wsql_sapling_xsk_decrypt(xsk_blob, (size_t)xsk_blob_len,
+                                          &xsk_decrypted, &xsk_plain_len))
                 continue;
-            }
             xsk_data = xsk_decrypted;
             xsk_data_len = xsk_plain_len;
         }
 
         if (xsk_data_len < sizeof(struct zip32_xsk)) {
-            if (xsk_decrypted) {
-                memory_cleanse(xsk_decrypted, xsk_plain_len);
-                free(xsk_decrypted);
-            }
+            wsql_wipe_free(xsk_decrypted, xsk_plain_len);
             continue;
         }
 
         struct sapling_key_entry *entry = &sks->keys[sks->num_keys];
         memcpy(entry->ivk, ivk, 32);
         memcpy(&entry->xsk, xsk_data, sizeof(struct zip32_xsk));
-        if (xfvk && sqlite3_column_bytes(s, 2) >= (int)sizeof(struct zip32_xfvk))
-            memcpy(&entry->xfvk, xfvk, sizeof(struct zip32_xfvk));
-        else
-            zip32_xsk_to_xfvk(&entry->xfvk, &entry->xsk);
+        wsql_sapling_entry_set_xfvk(entry, xfvk,
+                                    xfvk ? sqlite3_column_bytes(s, 2) : 0);
         memcpy(entry->diversifier, div, 11);
         memcpy(entry->pk_d, pkd, 32);
         entry->child_index = (uint32_t)child;
@@ -1202,10 +1205,7 @@ bool wallet_sqlite_read_sapling_keys(struct wallet_sqlite *ws,
         if ((uint32_t)child >= sks->next_child_index)
             sks->next_child_index = (uint32_t)child + 1;
 
-        if (xsk_decrypted) {
-            memory_cleanse(xsk_decrypted, xsk_plain_len);
-            free(xsk_decrypted);
-        }
+        wsql_wipe_free(xsk_decrypted, xsk_plain_len);
     }
 
     /* Unconditional cursor release. This loop BREAKs at MAX_SAPLING_KEYS
