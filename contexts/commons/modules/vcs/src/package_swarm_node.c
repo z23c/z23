@@ -1661,13 +1661,26 @@ static enum vcs_swarm_fetch_result swarm_fetch_rebind_locked(
     }
     if (!restricted && maximum_package_bytes == 0 &&
         dl->maximum_package_bytes > 0) {
+        uint64_t durable_bound = dl->maximum_package_bytes;
         dl->maximum_package_bytes = 0;
-        (void)record_persist(engine, dl);
+        if (!record_persist(engine, dl)) {
+            /* Keep memory equal to the durable record. */
+            dl->maximum_package_bytes = durable_bound;
+            LOG_WARN(SWARM_LOG, "fetch %s: bound lift record I/O failed",
+                     dl->root_hex);
+            return VCS_SWARM_FETCH_RECORD_IO;
+        }
     }
     if (restricted) {
+        /* Memory keeps the tighter posture; the caller learns it is not
+         * durable, so no acknowledged restriction is lost on restart. */
         dl->provider_restricted = true;
         dl_set_providers(dl, provider_peers, provider_count);
-        (void)record_persist(engine, dl);
+        if (!record_persist(engine, dl)) {
+            LOG_WARN(SWARM_LOG, "fetch %s: restricted rebind record I/O "
+                     "failed", dl->root_hex);
+            return VCS_SWARM_FETCH_RECORD_IO;
+        }
     }
     return VCS_SWARM_FETCH_OK;
 }

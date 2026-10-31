@@ -589,6 +589,147 @@ static int bound_case_cached_complete(uint64_t bound)
     return failures;
 }
 
+#if !defined(_WIN32)
+/* Durable download record, read straight from disk. Wire layout (version 3):
+ * 8 magic, 2 version, 32 root, 8 created day, 1 restricted flag, 8 bound. */
+#define REBIND_WIRE_BYTES 59u
+static bool rebind_record_durable(const struct sw_node *n,
+                                  const uint8_t root[32], bool *restricted,
+                                  uint64_t *bound)
+{
+    char hex[65], path[512];
+    uint8_t wire[REBIND_WIRE_BYTES];
+    zcl_hex_encode(root, 32, hex);
+    snprintf(path, sizeof(path), "%s/downloads/%s", n->zcode_dir, hex);
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    size_t got = fread(wire, 1, sizeof(wire), f);
+    fclose(f);
+    if (got != sizeof(wire))
+        return false;
+    *restricted = wire[50] != 0;
+    *bound = 0;
+    for (size_t i = 0; i < 8; i++)
+        *bound |= (uint64_t)wire[51 + i] << (8 * i);
+    return true;
+}
+
+static bool rebind_set_downloads_mode(const struct sw_node *n, mode_t mode)
+{
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/downloads", n->zcode_dir);
+    return chmod(dir, mode) == 0;
+}
+
+static void rebind_restart(struct sw_node *n)
+{
+    vcs_swarm_engine_free(n->engine);
+    n->engine = vcs_swarm_engine_create(n->store, n->book, n->zcode_dir,
+                                        sw_score_contributor, NULL);
+}
+
+/* Bound scout, then ordinary unbounded demand whose record write fails: the
+ * lift must report RECORD_IO and keep the in-memory ceiling equal to disk. */
+static int rebind_case_bound_lift_io(struct sw_node *n, struct sw_pkg *p,
+                                     uint64_t peer, uint64_t bound)
+{
+    int failures = 0;
+    struct vcs_swarm_download_status status;
+    bool restricted = true;
+    uint64_t durable = 0;
+    SW_CHECK("rebind io: bounded scout starts",
+             vcs_swarm_engine_fetch_from_bounded(
+                 n->engine, p->root, SW_DAY, 1, &peer, 1, bound) ==
+                 VCS_SWARM_FETCH_OK);
+    SW_CHECK("rebind io: block record writes",
+             rebind_set_downloads_mode(n, 0500));
+    SW_CHECK("rebind io: ordinary lift reports record I/O",
+             vcs_swarm_engine_fetch(n->engine, p->root, SW_DAY, 2) ==
+                 VCS_SWARM_FETCH_RECORD_IO);
+    SW_CHECK("rebind io: memory keeps the scout ceiling",
+             vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+             status.maximum_package_bytes == bound);
+    SW_CHECK("rebind io: restore record writes",
+             rebind_set_downloads_mode(n, 0700));
+    rebind_restart(n);
+    SW_CHECK("rebind io: engine restarts", n->engine != NULL);
+    SW_CHECK("rebind io: durable record keeps the ceiling",
+             rebind_record_durable(n, p->root, &restricted, &durable) &&
+             durable == bound);
+    SW_CHECK("rebind io: restart keeps the scout ceiling",
+             vcs_swarm_engine_download_status(n->engine, p->root, &status) &&
+             status.maximum_package_bytes == bound);
+    return failures;
+}
+
+/* Ordinary work, then a restricted (fetch_from) rebind whose record write
+ * fails: the caller learns RECORD_IO and the durable record stays unrestricted
+ * after a restart. */
+static int rebind_case_restricted_io(struct sw_node *n, struct sw_pkg *p,
+                                     uint64_t peer)
+{
+    int failures = 0;
+    bool restricted = true;
+    uint64_t durable = 1;
+    SW_CHECK("rebind io: ordinary work starts",
+             vcs_swarm_engine_fetch(n->engine, p->root, SW_DAY, 3) ==
+                 VCS_SWARM_FETCH_OK);
+    SW_CHECK("rebind io: block record writes again",
+             rebind_set_downloads_mode(n, 0500));
+    SW_CHECK("rebind io: restricted rebind reports record I/O",
+             vcs_swarm_engine_fetch_from(n->engine, p->root, SW_DAY, 4,
+                                         &peer, 1) ==
+                 VCS_SWARM_FETCH_RECORD_IO);
+    SW_CHECK("rebind io: restore record writes after restricted",
+             rebind_set_downloads_mode(n, 0700));
+    rebind_restart(n);
+    SW_CHECK("rebind io: engine restarts after restricted",
+             n->engine != NULL);
+    SW_CHECK("rebind io: durable record stays unrestricted",
+             rebind_record_durable(n, p->root, &restricted, &durable) &&
+             !restricted && durable == 0);
+    return failures;
+}
+
+static int rebind_case_record_io(void)
+{
+    if (geteuid() == 0) {
+        printf("  zcode_swarm: rebind record I/O SKIP (root ignores chmod)\n");
+        return 0;
+    }
+    int failures = 0;
+    struct sw_node n;
+    struct sw_pkg scout, ordinary;
+    uint8_t key[33];
+    sw_key(96, key);
+    const uint64_t peer = 906;
+    const uint64_t bound = 1;
+    if (!sw_node_open(&n, "rebind_io", sw_score_contributor) ||
+        !sw_make_package(&scout, 1, 36) ||
+        !sw_make_package(&ordinary, 2, 37)) /* 1-file roots are seed-blind */
+        return 1;
+    SW_CHECK("rebind io: provider registers",
+             vcs_swarm_engine_peer_add(n.engine, peer, key));
+    sw_announce(n.engine, peer, &scout);
+    failures += rebind_case_bound_lift_io(&n, &scout, peer, bound);
+    sw_announce(n.engine, peer, &ordinary);
+    failures += rebind_case_restricted_io(&n, &ordinary, peer);
+    (void)rebind_set_downloads_mode(&n, 0700);
+
+    sw_free_package(&ordinary);
+    sw_free_package(&scout);
+    sw_node_close(&n);
+    test_rm_rf_recursive(n.datadir);
+    return failures;
+}
+#else
+static int rebind_case_record_io(void)
+{
+    return 0;
+}
+#endif
+
 int t_swarm_bounded_provider(void)
 {
     int failures = 0;
@@ -611,6 +752,7 @@ int t_swarm_bounded_provider(void)
                                                     bound);
     failures += bound_case_lift_authority(&n, &p, peer, bound);
     failures += bound_case_cached_complete(bound);
+    failures += rebind_case_record_io();
 
     sw_free_package(&p);
     sw_node_close(&n);
