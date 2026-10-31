@@ -43,6 +43,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -98,7 +99,7 @@ static const char *const k_opt_defaults[LP_O_COUNT] = {
 
 struct lp_ctx {
     const char *v[LP_O_COUNT];
-    char state[LP_PATH];
+    char state[PATH_MAX];
     int64_t now;
     char authors[LP_KEYS_MAX][65];
     int n_authors;
@@ -550,7 +551,7 @@ static bool lp_offer_record(const struct lp_ctx *c, const struct lp_made *m)
 static bool lp_offer_args(const struct lp_ctx *c, struct lp_made *m)
 {
     struct stat st;
-    char real[LP_PATH];
+    char real[PATH_MAX];
     if (!c->v[LP_O_LANE] || !c->v[LP_O_COMMIT] || !c->v[LP_O_STATE] ||
         !lp_commit(c->v[LP_O_COMMIT]) || !lp_name(c->v[LP_O_ROOM], 32) ||
         !lp_name(c->v[LP_O_AGENT], 32) || stat(c->v[LP_O_LANE], &st) != 0 ||
