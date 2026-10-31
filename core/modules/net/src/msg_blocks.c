@@ -809,6 +809,199 @@ static void msg_block_penalize_invalid(struct msg_processor *mp,
     }
 }
 
+static void msg_block_track_received(struct msg_processor *mp,
+                                     struct p2p_node *node,
+                                     const struct uint256 *hash, size_t bytes)
+{
+    /* Mark received in download manager (removes from in-flight) and
+     * capture who (if anyone) we asked for it. A plain "block" message
+     * is ONLY ever a getdata response in this protocol — the compact-
+     * block fast-relay path (BIP152 "sendcmpct"/"cmpctblock") is the
+     * one place a peer legitimately pushes block data unsolicited, and
+     * that goes through process_cmpctblock() in msg_compact.c, never
+     * here. So requester_id == UINT32_MAX (no in-flight slot for this hash, from
+     * ANY peer) is normally a provable unsolicited push.
+     *
+     * Two honest sources can produce the exact same "requester_id == UINT32_MAX"
+     * signal though, so this is NOT simply "never in-flight == ban":
+     * dl_drain_for_backpressure() (tip-stall backpressure) and
+     * dl_check_timeouts() reassigning a slow peer's block to someone
+     * else BOTH force-clear the in-flight slot without telling the
+     * peer — a legitimately-requested body (the original peer was just
+     * slow, or we were briefly overloaded) can still arrive afterward
+     * with no trace it was ever asked for. We can't tell that apart
+     * from a truly-unsolicited push by inspecting this hash alone, so
+     * we withhold scoring for DL_STALL_TIMEOUT_SECS after either event
+     * (ample time for an already-in-transit reply to land) rather than
+     * risk banning an honest-but-slow peer. */
+    struct download_manager *dm = get_download_mgr();
+    uint32_t requester_id = dl_mark_received(dm, hash);
+    if (requester_id == UINT32_MAX)
+        msg_block_note_unrequested(mp, node, dm);
+
+    /* Track block bytes for MB/s throughput reporting */
+    dl_add_bytes_received(dm, bytes);
+}
+
+static bool msg_block_defer_or_seen(struct msg_processor *mp,
+                                    const struct uint256 *hash)
+{
+    /* Defer block processing while snapshot sync is active (any state).
+     * During NEGOTIATING: blocks fail at height 0, accumulate dos points.
+     * During RECEIVING: starves P2P socket reads.
+     * During VERIFYING: SHA3 computation needs uncontested SQLite. */
+    if (msg_processor_snapshot_active(mp))
+        return true;
+
+    if (block_already_seen(hash))
+        return true;
+    return false;
+}
+
+static bool msg_block_run_intake(struct msg_processor *mp,
+                                 struct p2p_node *node, struct block *blk,
+                                 struct uint256 *hash,
+                                 struct validation_state *state)
+{
+    if (!mp || !mp->block_submit)
+        return false;
+    if (!msg_processor_enqueue_p2p_block(mp, blk, hash,
+                                         (uint32_t)node->id, state)) {
+        (void)mp->block_submit(blk, state, mp->block_submit_ctx);
+    }
+    return true;
+}
+
+static bool msg_block_classify_reject(struct msg_processor *mp,
+                                      struct p2p_node *node,
+                                      struct block *blk,
+                                      struct uint256 *hash,
+                                      struct validation_state *state,
+                                      bool *self_suspect)
+{
+    *self_suspect = false;
+    const bool reject_nonretryable =
+        !validation_state_is_valid(state) &&
+        !msg_block_validation_is_retryable(state);
+    if (reject_nonretryable)
+        *self_suspect = msg_block_reject_self_suspected(mp, node, blk, hash,
+                                                        state);
+    return reject_nonretryable;
+}
+
+static void msg_block_note_retryable(struct msg_processor *mp,
+                                     struct uint256 *hash,
+                                     const struct validation_state *state)
+{
+    if (!msg_block_validation_is_retryable(state))
+        return;
+    if (msg_block_retryable_needs_redownload(state))
+        msg_block_requeue_after_intake_backpressure(mp, hash);
+    msg_block_log_retryable(hash, state);
+}
+
+/* Post-accept bookkeeping. Returns the new tip when the block must also be
+ * relayed to peers (at tip, with a hash and a network manager), else NULL. */
+static struct block_index *msg_block_note_accepted(struct msg_processor *mp,
+                                                   struct p2p_node *node,
+                                                   struct uint256 *hash)
+{
+    /* Block accepted — give the peer a decay tick. Peers that mostly
+     * behave can work off earlier strikes; peers that only feed valid
+     * blocks stay at score 0 forever. Safe on trusted peers. */
+    peer_scoring_on_good_interaction(node, peer_scoring_now_ms());
+
+    /* mark seen only after successful activation. If the
+     * block is in block_index but NOT in active chain (e.g.
+     * activation was skipped), leave it out of the dedup ring so
+     * the next arrival retries and the controller has another
+     * chance to pick it up once the mutex is free. */
+        struct block_index *landed = block_map_find(
+            &mp->main_state->map_block_index, hash);
+        if (msg_blocks_should_mark_seen(&mp->main_state->chain_active,
+                                         landed))
+            block_mark_seen(hash);
+
+    struct block_index *new_tip = active_chain_tip(
+        &mp->main_state->chain_active);
+    if (!new_tip)
+        return NULL;
+    struct msg_block_acceptance acceptance;
+    node->last_block_time = (int64_t)platform_time_wall_time_t();
+    node->blocks_received++;
+    msg_processor_plan_valid_block_acceptance(&acceptance, mp, node,
+                                              new_tip);
+    event_emitf(EV_BLOCK_CONNECTED, (uint32_t)node->id,
+                "h=%d", new_tip->nHeight);
+    /* Let the app runtime refresh its tip-advance observers without
+     * making protocol handling depend on app-service ownership. */
+    msg_processor_note_block_connected(mp, new_tip->nHeight);
+
+    if (acceptance.reached_peer_tip)
+        msg_block_apply_caught_up(node, &acceptance, new_tip);
+
+    /* Progress logged by IBD progress timer (every 30s) */
+
+    msg_block_refresh_manifest_at_tip(mp, new_tip);
+
+    if (sync_get_state() == SYNC_AT_TIP && new_tip->phashBlock &&
+        mp->net_mgr)
+        return new_tip;
+    return NULL;
+}
+
+enum msg_block_relay_result {
+    MSG_BLOCK_RELAY_NONE,
+    MSG_BLOCK_RELAY_SOURCE_PROOF_FAILED,
+    MSG_BLOCK_RELAY_SOURCE_PROOF_OK,
+    MSG_BLOCK_RELAY_HEADER_FAILED_USE_INV,
+};
+
+static enum msg_block_relay_result
+msg_block_relay_to_peer(struct msg_processor *mp, struct p2p_node *node,
+                        struct p2p_node *peer, struct block_index *new_tip,
+                        struct inv_item *blk_inv)
+{
+    if (msg_blocks_should_echo_source_header(peer, node->id)) {
+        /* Never echo the full/compact block to its source.
+         * Its accepted block is exactly what advanced our
+         * tip, so echo only the small verified header to
+         * refresh the receiver's expiring chain vote. */
+        if (!push_verified_header_announcement(mp, peer, new_tip))
+            return MSG_BLOCK_RELAY_SOURCE_PROOF_FAILED;
+        return MSG_BLOCK_RELAY_SOURCE_PROOF_OK;
+    }
+    if (peer->id != node->id &&
+        peer->state >= PEER_HANDSHAKE_COMPLETE &&
+        !peer->disconnect) {
+        if (peer->send_compact) {
+            /* BIP 152: send compact block directly */
+            msg_block_send_compact_to_peer(mp, peer, new_tip);
+        } else if (peer->prefer_headers) {
+            /* BIP 130: direct verified header. If local
+             * bytes are unavailable, fall back to inv so
+             * the peer still learns that a block exists. */
+            if (!push_verified_header_announcement(mp, peer, new_tip))
+                return MSG_BLOCK_RELAY_HEADER_FAILED_USE_INV;
+        } else {
+            p2p_node_push_inventory(peer, blk_inv);
+        }
+    }
+    return MSG_BLOCK_RELAY_NONE;
+}
+
+static const char *msg_block_reject_reason(const struct validation_state *state)
+{
+    return state->reject_reason[0] ? state->reject_reason
+                                   : "invalid block";
+}
+
+static bool msg_block_dos_positive(const struct validation_state *state,
+                                   int *dos)
+{
+    return validation_state_get_dos(state, dos) && *dos > 0;
+}
+
 bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
                        struct byte_stream *s)
 {
@@ -837,45 +1030,9 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
     struct uint256 hash;
     block_get_hash(&blk, &hash);
 
-    /* Mark received in download manager (removes from in-flight) and
-     * capture who (if anyone) we asked for it. A plain "block" message
-     * is ONLY ever a getdata response in this protocol — the compact-
-     * block fast-relay path (BIP152 "sendcmpct"/"cmpctblock") is the
-     * one place a peer legitimately pushes block data unsolicited, and
-     * that goes through process_cmpctblock() in msg_compact.c, never
-     * here. So requester_id == UINT32_MAX (no in-flight slot for this hash, from
-     * ANY peer) is normally a provable unsolicited push.
-     *
-     * Two honest sources can produce the exact same "requester_id == UINT32_MAX"
-     * signal though, so this is NOT simply "never in-flight == ban":
-     * dl_drain_for_backpressure() (tip-stall backpressure) and
-     * dl_check_timeouts() reassigning a slow peer's block to someone
-     * else BOTH force-clear the in-flight slot without telling the
-     * peer — a legitimately-requested body (the original peer was just
-     * slow, or we were briefly overloaded) can still arrive afterward
-     * with no trace it was ever asked for. We can't tell that apart
-     * from a truly-unsolicited push by inspecting this hash alone, so
-     * we withhold scoring for DL_STALL_TIMEOUT_SECS after either event
-     * (ample time for an already-in-transit reply to land) rather than
-     * risk banning an honest-but-slow peer. */
-    struct download_manager *dm = get_download_mgr();
-    uint32_t requester_id = dl_mark_received(dm, &hash);
-    if (requester_id == UINT32_MAX)
-        msg_block_note_unrequested(mp, node, dm);
+    msg_block_track_received(mp, node, &hash, s->size);
 
-    /* Track block bytes for MB/s throughput reporting */
-    dl_add_bytes_received(dm, s->size);
-
-    /* Defer block processing while snapshot sync is active (any state).
-     * During NEGOTIATING: blocks fail at height 0, accumulate dos points.
-     * During RECEIVING: starves P2P socket reads.
-     * During VERIFYING: SHA3 computation needs uncontested SQLite. */
-    if (msg_processor_snapshot_active(mp)) {
-        block_free(&blk);
-        return true;
-    }
-
-    if (block_already_seen(&hash)) {
+    if (msg_block_defer_or_seen(mp, &hash)) {
         block_free(&blk);
         return true;
     }
@@ -890,13 +1047,9 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
     /* Block intake is owned by the app reducer/stage path injected at boot.
      * The verdict in `state` preserves the mark-seen + DoS/getheaders
      * contract below while keeping core/modules/net protocol handling app-agnostic. */
-    if (!mp || !mp->block_submit) {
+    if (!msg_block_run_intake(mp, node, &blk, &hash, &state)) {
         block_free(&blk);
         LOG_FAIL("net", "block submit callback not configured");
-    }
-    if (!msg_processor_enqueue_p2p_block(mp, &blk, &hash,
-                                         (uint32_t)node->id, &state)) {
-        (void)mp->block_submit(&blk, &state, mp->block_submit_ctx);
     }
 
     /* Decide ONCE whether a non-retryable reject is OUR fault (a local
@@ -908,11 +1061,8 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
      * body re-check for a strictly-more-work block at/above H*. */
     bool self_suspect = false;
     const bool reject_nonretryable =
-        !validation_state_is_valid(&state) &&
-        !msg_block_validation_is_retryable(&state);
-    if (reject_nonretryable)
-        self_suspect = msg_block_reject_self_suspected(mp, node, &blk, &hash,
-                                                       &state);
+        msg_block_classify_reject(mp, node, &blk, &hash, &state,
+                                  &self_suspect);
 
     if (reject_nonretryable) {
         char hex[65];
@@ -946,118 +1096,54 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
          * This forces the peer to send us the correct chain of headers,
          * which will include the valid block at the failed height. */
         msg_processor_request_invalid_block_headers(mp, node);
-    } else if (msg_block_validation_is_retryable(&state)) {
-        if (msg_block_retryable_needs_redownload(&state))
-            msg_block_requeue_after_intake_backpressure(mp, &hash);
-        msg_block_log_retryable(&hash, &state);
+    } else {
+        msg_block_note_retryable(mp, &hash, &state);
     }
 
     if (validation_state_is_valid(&state)) {
-        /* Block accepted — give the peer a decay tick. Peers that mostly
-         * behave can work off earlier strikes; peers that only feed valid
-         * blocks stay at score 0 forever. Safe on trusted peers. */
-        peer_scoring_on_good_interaction(node, peer_scoring_now_ms());
-
-        /* mark seen only after successful activation. If the
-         * block is in block_index but NOT in active chain (e.g.
-         * activation was skipped), leave it out of the dedup ring so
-         * the next arrival retries and the controller has another
-         * chance to pick it up once the mutex is free. */
-        {
-            struct block_index *landed = block_map_find(
-                &mp->main_state->map_block_index, &hash);
-            if (msg_blocks_should_mark_seen(&mp->main_state->chain_active,
-                                             landed))
-                block_mark_seen(&hash);
-        }
-
-        struct block_index *new_tip = active_chain_tip(
-            &mp->main_state->chain_active);
+        struct block_index *new_tip = msg_block_note_accepted(mp, node,
+                                                              &hash);
         if (new_tip) {
-            struct msg_block_acceptance acceptance;
-            node->last_block_time = (int64_t)platform_time_wall_time_t();
-            node->blocks_received++;
-            msg_processor_plan_valid_block_acceptance(&acceptance, mp, node,
-                                                      new_tip);
-            event_emitf(EV_BLOCK_CONNECTED, (uint32_t)node->id,
-                        "h=%d", new_tip->nHeight);
-            /* Let the app runtime refresh its tip-advance observers without
-             * making protocol handling depend on app-service ownership. */
-            msg_processor_note_block_connected(mp, new_tip->nHeight);
-
-            if (acceptance.reached_peer_tip)
-                msg_block_apply_caught_up(node, &acceptance, new_tip);
-
-            /* Progress logged by IBD progress timer (every 30s) */
-
-            msg_block_refresh_manifest_at_tip(mp, new_tip);
-
-            /* Relay accepted block to all connected peers (not during IBD).
-             * At the tip, we act as a full relay node. During IBD, relaying
-             * would flood peers with old blocks they already have.
-             * BIP 130: peers that sent "sendheaders" get a direct headers
-             * message (saves an inv→getheaders round-trip at the tip). */
-            if (sync_get_state() == SYNC_AT_TIP && new_tip->phashBlock) {
-                struct inv_item blk_inv;
-                inv_item_init_typed(&blk_inv, MSG_BLOCK, new_tip->phashBlock);
-                if (mp->net_mgr) {
-                    zcl_mutex_lock(&mp->net_mgr->cs_nodes);
-                    for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
-                        struct p2p_node *peer = mp->net_mgr->nodes[pi];
-                        if (msg_blocks_should_echo_source_header(
-                                peer, node->id)) {
-                            /* Never echo the full/compact block to its source.
-                             * Its accepted block is exactly what advanced our
-                             * tip, so echo only the small verified header to
-                             * refresh the receiver's expiring chain vote. */
-                            if (!push_verified_header_announcement(
-                                    mp, peer, new_tip)) {
-                                LOG_WARN("headers",
-                                         "source-peer tip proof failed "
-                                         "h=%d peer=%s",
-                                         new_tip->nHeight,
-                                         peer->addr_name);
-                            } else {
-                                LOG_INFO("headers",
-                                         "source-peer verified tip proof "
-                                         "h=%d peer=%s",
-                                         new_tip->nHeight,
-                                         peer->addr_name);
-                            }
-                        } else if (peer->id != node->id &&
-                            peer->state >= PEER_HANDSHAKE_COMPLETE &&
-                            !peer->disconnect) {
-                            if (peer->send_compact) {
-                                /* BIP 152: send compact block directly */
-                                msg_block_send_compact_to_peer(mp, peer,
-                                                               new_tip);
-                            } else if (peer->prefer_headers) {
-                                /* BIP 130: direct verified header. If local
-                                 * bytes are unavailable, fall back to inv so
-                                 * the peer still learns that a block exists. */
-                                if (!push_verified_header_announcement(
-                                        mp, peer, new_tip)) {
-                                    LOG_WARN("headers",
-                                             "new-tip header announcement "
-                                             "failed h=%d peer=%s; using inv",
-                                             new_tip->nHeight,
-                                             peer->addr_name);
-                                    p2p_node_push_inventory(peer, &blk_inv);
-                                }
-                            } else {
-                                p2p_node_push_inventory(peer, &blk_inv);
-                            }
-                        }
-                    }
-                    zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
+        /* Relay accepted block to all connected peers (not during IBD).
+         * At the tip, we act as a full relay node. During IBD, relaying
+         * would flood peers with old blocks they already have.
+         * BIP 130: peers that sent "sendheaders" get a direct headers
+         * message (saves an inv→getheaders round-trip at the tip). */
+            struct inv_item blk_inv;
+            inv_item_init_typed(&blk_inv, MSG_BLOCK, new_tip->phashBlock);
+            zcl_mutex_lock(&mp->net_mgr->cs_nodes);
+            for (size_t pi = 0; pi < mp->net_mgr->num_nodes; pi++) {
+                struct p2p_node *peer = mp->net_mgr->nodes[pi];
+                enum msg_block_relay_result relay =
+                    msg_block_relay_to_peer(mp, node, peer, new_tip,
+                                            &blk_inv);
+                if (relay == MSG_BLOCK_RELAY_SOURCE_PROOF_FAILED) {
+                    LOG_WARN("headers",
+                             "source-peer tip proof failed "
+                             "h=%d peer=%s",
+                             new_tip->nHeight,
+                             peer->addr_name);
+                } else if (relay == MSG_BLOCK_RELAY_SOURCE_PROOF_OK) {
+                    LOG_INFO("headers",
+                             "source-peer verified tip proof "
+                             "h=%d peer=%s",
+                             new_tip->nHeight,
+                             peer->addr_name);
+                } else if (relay == MSG_BLOCK_RELAY_HEADER_FAILED_USE_INV) {
+                    LOG_WARN("headers",
+                             "new-tip header announcement "
+                             "failed h=%d peer=%s; using inv",
+                             new_tip->nHeight,
+                             peer->addr_name);
+                    p2p_node_push_inventory(peer, &blk_inv);
                 }
             }
+            zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
         }
     } else {
         int dos = 0;
-        if (validation_state_get_dos(&state, &dos) && dos > 0) {
-            const char *rr = state.reject_reason[0] ? state.reject_reason
-                                                    : "invalid block";
+        if (msg_block_dos_positive(&state, &dos)) {
+            const char *rr = msg_block_reject_reason(&state);
             if (self_suspect) {
                 /* The fault is LOCAL, not the peer's: the block body is
                  * clean (re-derived via check_block) and on a strictly-
@@ -1075,10 +1161,9 @@ bool process_block_msg(struct msg_processor *mp, struct p2p_node *node,
             } else {
                 msg_block_penalize_invalid(mp, node, &state, dos, rr);
             }
-        } else if (!validation_state_is_valid(&state)) {
-            /* DoS=0 but invalid: orphan block or parent-failed.
-             * Don't penalize peer — this is normal during sync. */
         }
+        /* DoS=0 but invalid: orphan block or parent-failed.
+         * Don't penalize peer — this is normal during sync. */
     }
 
     block_free(&blk);

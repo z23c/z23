@@ -476,3 +476,7 @@ later lane flips it HARD.
 - 2026-10-31T16:48:37Z — REASON: Split process_version and the build identity prefix parser into helpers; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: 8f9eb0a082b47744789ccacbd6ced776319a30ea8ce044c536781f20471cbc77
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T16:53:55Z — REASON: Split process_block_msg into intake, accept and relay helpers; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: dd429eb15ab28d8dff2031597da23c6167b5610db497bf1923784b95a89aa426
+  by: owner unseal ritual (make core-unseal)
