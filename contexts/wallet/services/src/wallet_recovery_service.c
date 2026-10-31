@@ -431,8 +431,9 @@ static void wrc_mark_unread(const struct wallet_recovery_request *req,
  * a rewound tip keep their status, so the tip itself may be stale; that is
  * safe because every row here existed before the wallet did, and boot checks
  * the floor block, not the tip, against the active chain. A datadir with no
- * chain, or one no longer than the margin, records nothing and the wallet
- * scans from the beginning, which is slower and never misses a payment. */
+ * chain, or one no longer than the margin, records nothing: the wallet has no
+ * birthday and its first catch-up starts at genesis, or, when boot defers a
+ * long range, marks it unread so the wallet reads incomplete. */
 static void wrc_record_birthday(const struct wallet_recovery_request *req,
                                 struct node_db *ndb,
                                 struct wallet_recovery_report *out)

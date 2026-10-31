@@ -131,8 +131,14 @@ assumed. Boot then records a pending scan retry from height 0 with blocker
 `WALLET_BIRTHDAY_CHAIN_CHANGED`, so the wallet claims no scanned-through height
 and a tip that advances cannot stand in for blocks never read. The catch-up
 reads the whole chain; above 1000 blocks it defers the way every first catch-up
-does ("use rescanblockchain"), and the marker stays until a boot catch-up reads
-the range. A chain of 100 blocks or fewer records no birthday. Every other scan
+does ("use rescanblockchain"). The marker stays until a rescan over the whole
+marked range reads it (`core wallet rescan` or `rescanblockchain`); boot reads
+it only on a chain of 1000 blocks or fewer. A chain of 100 blocks or fewer
+records no birthday. A wallet that has scanned nothing and has no valid
+birthday (a create whose reply was lost before any block existed, a failed
+birthday write) gets the same marker, from the start it would have scanned,
+whenever boot defers its first catch-up: above 1000 blocks from genesis, or a
+gap of 50000 blocks or more. Every other scan
 covers its whole range: transparent scans, `rescanblockchain` and the full scan
 an imported key triggers never raise their start, so a coin received before the
 birthday by a key imported later is found.

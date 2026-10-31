@@ -150,24 +150,30 @@ static bool wcr_cap_end(struct wcr_cap *c, char *out, size_t cap)
     return ok;
 }
 
-/* Run `z23 core wallet create --input=-` in process with `stdin_text` on
- * standard input, capturing stdout and stderr. */
-static bool wcr_cli(const char *stdin_text, struct wcr_run *run)
+/* Run `z23 core <args>` in process with `stdin_text` on standard input,
+ * capturing stdout and stderr. */
+static bool wcr_cli_args(const char *const *args, int nargs,
+                         const char *stdin_text, struct wcr_run *run)
 {
     struct wcr_cap in, out, err;
     bool ok = wcr_cap_begin(&in, stdin, stdin_text);
     ok = wcr_cap_begin(&out, stdout, NULL) && ok;
     ok = wcr_cap_begin(&err, stderr, NULL) && ok;
     if (ok) {
-        const char *args[] = {"wallet", "create", "--input=-",
-                              "--format=json"};
-        run->rc = zcl_native_command_main("core", args, 4, "", 0,
+        run->rc = zcl_native_command_main("core", args, nargs, "", 0,
                                           CHAIN_MAIN, false);
     }
     ok = wcr_cap_end(&in, NULL, 0) && ok;
     ok = wcr_cap_end(&out, run->wire, sizeof(run->wire)) && ok;
     ok = wcr_cap_end(&err, run->err, sizeof(run->err)) && ok;
     return ok;
+}
+
+/* Run `z23 core wallet create --input=-` with `stdin_text` on standard input. */
+static bool wcr_cli(const char *stdin_text, struct wcr_run *run)
+{
+    const char *args[] = {"wallet", "create", "--input=-", "--format=json"};
+    return wcr_cli_args(args, 4, stdin_text, run);
 }
 
 static bool wcr_create(const char *datadir, const char *pass,
@@ -806,6 +812,76 @@ static int birthday_absent_when_restored(void)
     return failures;
 }
 
+static bool wcr_marked_deferred(const struct wallet *w, int from)
+{
+    return w && w->scan_retry.pending && w->scan_retry.from == from &&
+           strcmp(w->scan_retry.blocker, "WALLET_CATCH_UP_DEFERRED") == 0 &&
+           wallet_scanned_through_height(w) < from;
+}
+
+/* A wallet that has scanned nothing and holds no valid birthday must not read
+ * complete after boot defers its first catch-up. Created with no chain in the
+ * datadir (the lost-reply route), it has no birthday; a seed chain above 1000
+ * blocks arrives, and boot defers. The same holds for a valid floor whose gap
+ * to the tip is 50000 blocks or more. */
+static int birthday_deferred_marker(void)
+{
+    int failures = 0;
+    char dir[1024];
+    wcr_fixture(dir, sizeof(dir), "birthday_deferred");
+    struct wcr_run run;
+    memset(&run, 0, sizeof(run));
+    bool created = wcr_create(dir, WCR_PASS, &run) && run.rc == 0;
+    struct node_db ndb;
+    struct wcr_chain k, far;
+    bool open = created && wcr_open(&ndb, dir);
+    bool made = open && wcr_chain_make(&k, 1002, -1, 0);
+    int64_t b = 0;
+    uint8_t hash[32];
+    WCR_CHECK("a wallet created with no chain records no birthday",
+              open && !db_wallet_birthday_get(&ndb, &b, hash));
+    struct wallet *w = made ? wcr_boot_wallet(&ndb, &k, 0) : NULL;
+    WCR_CHECK("boot on a seed chain above 1000 blocks marks it unread from 0, "
+              "so it reads incomplete", wcr_marked_deferred(w, 0));
+    if (w) {
+        wallet_free(w);
+        free(w);
+    }
+    if (made)
+        wcr_chain_free(&k);
+    if (open)
+        node_db_close(&ndb);
+
+    char dir2[1024];
+    wcr_fixture(dir2, sizeof(dir2), "birthday_gap");
+    bool seeded = wcr_block(dir2, 0x09, 100, 3) && wcr_block(dir2, 0x0a, 200, 3);
+    struct wcr_run made_run;
+    memset(&made_run, 0, sizeof(made_run));
+    seeded = seeded && wcr_create(dir2, WCR_PASS, &made_run) &&
+             made_run.rc == 0;
+    bool open2 = seeded && wcr_open(&ndb, dir2);
+    bool made2 = open2 && wcr_chain_make(&far, 52000, 100, 0x09);
+    struct wallet *g = made2 ? wcr_boot_wallet(&ndb, &far, 0) : NULL;
+    WCR_CHECK("a valid floor 50000 or more blocks below the tip marks the "
+              "range unread from the floor", wcr_marked_deferred(g, 100));
+    struct wallet *s = made2 ? wcr_boot_wallet(&ndb, &far, 7) : NULL;
+    WCR_CHECK("a wallet that has scanned is not marked by the deferral",
+              s && !s->scan_retry.pending);
+    if (g) {
+        wallet_free(g);
+        free(g);
+    }
+    if (s) {
+        wallet_free(s);
+        free(s);
+    }
+    if (made2)
+        wcr_chain_free(&far);
+    if (open2)
+        node_db_close(&ndb);
+    return failures;
+}
+
 static int t_birthday(void)
 {
     int failures = 0;
@@ -821,6 +897,7 @@ static int t_birthday(void)
     failures += birthday_rewound();
     failures += restored_marker(dir);
     failures += birthday_absent_when_restored();
+    failures += birthday_deferred_marker();
     return failures;
 }
 

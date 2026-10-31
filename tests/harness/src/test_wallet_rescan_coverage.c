@@ -185,6 +185,29 @@ static int wrc_boot_catch_up_body_root(struct wallet *w,
     w->initial_scan_floor = 0;
     w->best_block_height = WRC_NBLOCKS - 1;
 
+    /* J. The boot catch-up keeps a pending marker when it read every body but
+     * tried no Sapling key; once the wallet holds one, the same read clears it. */
+    w->scan_retry.pending = true;
+    w->scan_retry.from = 0;
+    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
+             WALLET_RESTORE_BLOCKER_UNREAD);
+    memset(&rep, 0, sizeof(rep));
+    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
+    WRC_CHECK("J: a boot read that tried no Sapling key keeps the marker",
+              w->scan_retry.pending && rep.blocks_scanned == rep.blocks_in_range &&
+              rep.shielded_txs_unscanned > 0);
+    uint8_t jseed[32], jd[11], jpk[32];
+    memset(jseed, 0x3d, sizeof(jseed));
+    (void)sapling_keystore_set_seed(&w->sapling_keys, jseed);
+    (void)sapling_keystore_new_address(&w->sapling_keys, jd, jpk);
+    memset(&rep, 0, sizeof(rep));
+    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
+    WRC_CHECK("J: the same boot read with a Sapling key clears it",
+              !w->scan_retry.pending && rep.shielded_txs_unscanned == 0);
+    sapling_keystore_free(&w->sapling_keys);
+    sapling_keystore_init(&w->sapling_keys);
+    w->best_block_height = WRC_NBLOCKS - 1;
+
     /* I. The unread marker waits for a read of the whole marked range. A
      * rescan that starts above it, stops before the tip or misses a body
      * keeps it; one that reads from the marker to the tip clears it. */
@@ -591,6 +614,44 @@ static int wrc_boot_catch_up_fail_closed(struct wrc_f *f)
     test_cleanup_tmpdir(netdir);
     wallet_free(f->w);
     free(f->w);
+    return failures;
+}
+
+/* K. A rescan that clears the unread marker reaches disk through the real
+ * rescanblockchain RPC: the persisted marker is gone, not just the live one. */
+static int wrc_k_cleared_marker_persists(struct wallet *w,
+                                         struct wallet_sqlite *ws,
+                                         struct rpc_table *tbl,
+                                         struct block_index *idx, int last)
+{
+    int failures = 0;
+    for (int i = 0; i < WRC_NBLOCKS; i++)
+        idx[i].nStatus |= BLOCK_HAVE_DATA;
+    uint8_t seed[32], d[11], pk[32];
+    memset(seed, 0x4b, sizeof(seed));
+    (void)sapling_keystore_set_seed(&w->sapling_keys, seed);
+    (void)sapling_keystore_new_address(&w->sapling_keys, d, pk);
+    w->scan_retry.pending = true;
+    w->scan_retry.from = 0;
+    w->scan_retry.since = 1;
+    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
+             WALLET_RESTORE_BLOCKER_UNREAD);
+    struct wallet_scan_marker m;
+    WRC_CHECK("K: the pending marker is on disk before the rescan",
+              wallet_sqlite_write_scan_state(ws, w) &&
+              wallet_sqlite_read_scan_marker(ws, &m) && m.from == 0);
+    struct json_value params, result;
+    wrc_params(&params, 0, last);
+    json_init(&result);
+    bool ok = rpc_table_execute(tbl, "rescanblockchain", &params, &result);
+    WRC_CHECK("K: a whole rescan clears the live marker", ok &&
+              !w->scan_retry.pending);
+    WRC_CHECK("K: and the cleared marker reaches disk",
+              !wallet_sqlite_read_scan_marker(ws, &m));
+    json_free(&params);
+    json_free(&result);
+    sapling_keystore_free(&w->sapling_keys);
+    sapling_keystore_init(&w->sapling_keys);
     return failures;
 }
 
@@ -1164,6 +1225,8 @@ int test_wallet_rescan_coverage(void)
         };
         failures += wrc_boot_catch_up_fail_closed(&f);
     }
+    rpc_wallet_set_state(w1, &ms, datadir, &ws, &mempool, NULL);
+    failures += wrc_k_cleared_marker_persists(w1, &ws, &wtbl, idx, last);
 
     /* ── G. Kill-restart depth re-basing (self-contained fixture) ─────── */
     failures += wrc_g_kill_restart_baseline(w1, &kid, datadir);

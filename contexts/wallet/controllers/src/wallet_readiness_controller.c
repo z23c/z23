@@ -140,12 +140,14 @@ void wallet_readiness_append_scan(struct json_value *result)
     (void)json_push_kv_int(&scan, "scanned_through", through);
     (void)json_push_kv_int(&scan, "depth_height", depth_height);
     if (retry.pending) {
-        char warning[320];
+        char warning[448];
         snprintf(warning, sizeof(warning),
                  "%s: blocks from %d were not all read; coins in them can be "
                  "missing until a rescan reads them all, from %d to the tip: "
-                 "run rescanblockchain %d. A boot catch-up does the same only "
-                 "on a chain of 1000 blocks or fewer",
+                 "run rescanblockchain %d, which clears this only if every "
+                 "shielded output in the range was tried, and that needs a "
+                 "Sapling key. A boot catch-up does the same only on a chain "
+                 "of 1000 blocks or fewer",
                  retry.blocker, retry.from, retry.from, retry.from);
         (void)json_push_kv_str(&scan, "blocker", retry.blocker);
         (void)json_push_kv_int(&scan, "unread_from", retry.from);

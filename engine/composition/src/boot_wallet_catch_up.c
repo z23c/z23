@@ -88,6 +88,28 @@ static void boot_wallet_catch_up_settle(struct wallet *w,
              r->blocks_read_failed, from - 1, from);
 }
 
+#define BOOT_DEFERRED_BLOCKER "WALLET_CATCH_UP_DEFERRED"
+
+/* A first catch-up that defers leaves a wallet that has scanned nothing
+ * (best_block_height 0) with no record of the unread range, and the next tip
+ * would set its height over the gap. Mark the range from `from` unread, so the
+ * wallet reads incomplete until a rescan reads it. A marker already pending
+ * stays. */
+static void boot_wallet_defer_unread(struct wallet *w, int from)
+{
+    if (w->best_block_height != 0)
+        return;
+    zcl_mutex_lock(&w->cs);
+    if (!w->scan_retry.pending) {
+        w->scan_retry.pending = true;
+        w->scan_retry.from = from;
+        w->scan_retry.since = GetTime();
+        snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
+                 BOOT_DEFERRED_BLOCKER);
+    }
+    zcl_mutex_unlock(&w->cs);
+}
+
 int boot_wallet_catch_up(struct wallet *w, const struct active_chain *chain,
                          const char *datadir,
                          struct wallet_rescan_report *report)
@@ -106,12 +128,14 @@ int boot_wallet_catch_up(struct wallet *w, const struct active_chain *chain,
     if (scan_from == 0 && w->best_block_height == 0 && tip_height > 1000) {
         printf("Wallet scan height is 0 with %d blocks. Use rescanblockchain "
                "RPC for targeted rescan.\n", tip_height);
+        boot_wallet_defer_unread(w, scan_from);
         return -1;
     }
     if (tip_height - scan_from >= 50000) {
         printf("Wallet needs rescan from %d to %d (%d blocks). "
                "Deferring — use rescanblockchain RPC.\n",
                scan_from, tip_height, tip_height - scan_from);
+        boot_wallet_defer_unread(w, scan_from);
         return -1;
     }
     /* Bodies live under the network directory (<base>/regtest on regtest,
