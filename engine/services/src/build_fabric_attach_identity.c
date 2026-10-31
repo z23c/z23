@@ -363,6 +363,13 @@ struct zcl_result bfat_runtime_roots(
     uint8_t runtime_root[32], uint8_t verifier_root[32])
 {
     char path[4096];
+#if !defined(__linux__)
+    /* The closure is a Linux ldd/DT_NEEDED binding over a sealed memfd
+     * verifier; no equivalent exists here, so refuse by name. */
+    (void)workspace; (void)desc; (void)runtime_root; (void)verifier_root;
+    (void)path;
+    return ZCL_ERR(-1, "executor-runtime-closure-missing: unsupported platform");
+#endif
     ZCL_CHECK(bfw_worker_path(workspace, path, sizeof(path)));
     struct bfat_verifier_snapshot snapshot = { .fd = -1 };
     if (!bfat_verifier_snapshot_open(path, &snapshot).ok)

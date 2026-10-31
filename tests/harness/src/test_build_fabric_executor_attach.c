@@ -1709,6 +1709,24 @@ static int test_bf_worker_owner_cases(void)
 }
 #endif
 
+/* The attach executor key binds a Linux ldd/DT_NEEDED runtime closure and a
+ * sealed memfd verifier. Non-Linux hosts refuse with the typed
+ * executor-runtime-closure-missing reason, so these end-to-end cases are
+ * skipped there, explicitly; Linux always runs them. */
+static int att_run_linux_closure(int (*fn)(void), const char *name)
+{
+#if defined(__linux__)
+    (void)name;
+    return fn();
+#else
+    (void)fn;
+    printf("SKIP build_fabric_attach/%s: runtime closure and sealed verifier "
+           "snapshot are Linux-only (refused as "
+           "executor-runtime-closure-missing)\n", name);
+    return 0;
+#endif
+}
+
 int test_build_fabric_attach(void)
 {
     int failures = 0;
@@ -1719,12 +1737,18 @@ int test_build_fabric_attach(void)
     failures += test_bf_worker_owner_cases();
 #endif
     failures += test_bf_attach_executor_key_binds_tool_bytes();
-    failures += test_bf_attach_miss_and_poisoned_record();
+    failures += att_run_linux_closure(test_bf_attach_miss_and_poisoned_record,
+        "miss_and_poisoned_record");
     failures += test_bf_attach_input_cas_refusals();
     failures += test_bf_attach_unobserved_assembler_input_refused();
-    failures += test_bf_attach_avoids_second_compile();
-    failures += test_bf_attach_conflicting_physical_outputs();
-    failures += test_bf_attach_ambiguous_donor_vetoes_other_donor();
+    failures += att_run_linux_closure(test_bf_attach_avoids_second_compile,
+        "avoids_second_compile");
+    failures += att_run_linux_closure(
+        test_bf_attach_conflicting_physical_outputs,
+        "conflicting_physical_outputs");
+    failures += att_run_linux_closure(
+        test_bf_attach_ambiguous_donor_vetoes_other_donor,
+        "ambiguous_donor_vetoes_other_donor");
     failures += test_bf_attach_reproduction_never_attaches();
     printf("=== build_fabric_attach: %d failures ===\n", failures);
     return failures;
