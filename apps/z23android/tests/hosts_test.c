@@ -228,6 +228,38 @@ static void chain_evidence_tests(void)
         assert(!strcmp(zapp_sync_line(true, true, 3304001, 3304004, 5, NULL, long_line, sizeof(long_line)), "3 blocks to go."));
     }
 }
+/* Private mode dials only onion peers, so a shortage of peers is said as a shortage of onion peers. */
+static void private_line_tests(void)
+{
+    char line[96], long_line[160];
+    const struct zapp_chain_evidence tor = {.fleet_height = -1, .quiet_secs = 0, .onion_only = true};
+    const struct zapp_chain_evidence tor_fleet = {.fleet_height = 3304002, .quiet_secs = 0, .onion_only = true};
+    assert(!strcmp(zapp_node_line(true, true, false, false, 3304001, 3304001, 1, &tor, line, sizeof(line)),
+                   "Private · waiting for onion peers (1 of 2) · onion starting"));
+    assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304001, 0, &tor, line, sizeof(line)),
+                   "Private · waiting for onion peers (0 of 2) · onion ready"));
+    assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 0, 1, &tor, line, sizeof(line)),
+                   "Private · waiting for onion peers (1 of 2) · onion ready"));
+    assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304020, 1, &tor, line, sizeof(line)),
+                   "Private · waiting for onion peers (1 of 2) · onion ready"));
+    assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304001, -1, &tor, line, sizeof(line)),
+                   "Private · waiting for onion peers (0 of 2) · onion ready"));
+    /* At the floor the ordinary rule applies; so does a fleet height that agrees. */
+    assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304001, 2, &tor, line, sizeof(line)),
+                   "Node in sync · 3,304,001 · 2 peers · onion ready"));
+    assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304001, 1, &tor_fleet, line, sizeof(line)),
+                   "Node in sync · 3,304,001 · 1 peer · onion ready"));
+    assert(!strcmp(zapp_node_line(true, true, false, true, 3304001, 3304020, 2, &tor, line, sizeof(line)),
+                   "Behind · 3,304,001 of 3,304,020 · onion ready"));
+    /* Not private: the wording is the plain one. */
+    assert(!strncmp(zapp_node_line(true, true, false, true, 3304001, 3304001, 1, NULL, line, sizeof(line)), "Height ", 7));
+    assert(!strcmp(zapp_node_line(true, true, false, false, 3301133, 0, 0, NULL, line, sizeof(line)),
+                   "Node waiting for peers · 3,301,133 · onion starting"));
+    assert(!strcmp(zapp_sync_line(true, true, 3304001, 3304001, 1, &tor, long_line, sizeof(long_line)),
+                   "Private mode dials only onion peers. This node has 1 of 2."));
+    assert(!strcmp(zapp_sync_line(true, true, 3304001, 3304001, 2, &tor, long_line, sizeof(long_line)),
+                   "Your node has every block its peers report."));
+}
 int main(void)
 {
     static const char snapshot[] = "{\"hosts\":["
@@ -296,6 +328,7 @@ int main(void)
     assert(!strcmp(zapp_node_line(true, true, false, false, 3301554, 3301553, 4, NULL, line, sizeof(line)),
                    "Node in sync · 3,301,554 · 4 peers · onion starting"));
     chain_evidence_tests();
+    private_line_tests();
     const char *sync_text = "Behind · 3,301,133 of 3,301,537";
     const char *gentle_reply = "{\"ok\":true,\"data\":{\"provable_tip\":5,\"pace\":\"gentle\"}}";
     const char *old_reply = "{\"ok\":true,\"data\":{\"provable_tip\":5}}";

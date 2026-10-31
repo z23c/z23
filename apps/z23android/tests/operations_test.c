@@ -93,16 +93,25 @@ static int node_arguments(int argc, char **argv)
     const char *want = getenv("ZAPP_TEST_PARAMS_ARG");
     bool with_params = want && strcmp(want, "none") != 0;
     if (strcmp(argv[2], "-operator-lane=canonical") || strcmp(argv[3], "-tor") ||
-        strcmp(argv[4], "-onion-persist") || strcmp(argv[5], "-private-listeners") ||
-        strcmp(argv[6], "-observation=0")) return 4;
-    if (argc != (with_params ? 8 : 7) || (with_params && strcmp(argv[7], want) != 0)) return 7;
+        strcmp(argv[4], "-onion-persist")) return 4;
+    const char *peer = getenv("ZAPP_TEST_ADDNODE");
+    int next = 5, first = with_params ? 8 : 7, expected = first + 2 + (peer ? 1 : 0);
+    if (with_params && strcmp(argv[next++], want) != 0) return 7;
+    if (strcmp(argv[next++], "-private-listeners") || strcmp(argv[next++], "-observation=0")) return 5;
+    /* Private by default: onion peers only, no clearnet dial, no DNS seeding, loopback bind. */
+    if (argc != expected || strcmp(argv[first], "-onlynet=onion") || strcmp(argv[first + 1], "-bind=127.0.0.1")) return 8;
+    if (peer) {
+        char want_peer[200];
+        snprintf(want_peer, sizeof(want_peer), "-addnode=%s", peer);
+        if (strcmp(argv[first + 2], want_peer)) return 9;
+    }
     return 0;
 }
 
 static int child(int argc, char **argv)
 {
     if (!child_environment()) return 3;
-    if ((argc == 7 || argc == 8) && !strncmp(argv[1], "-datadir=", 9)) {
+    if ((argc >= 9 && argc <= 11) && !strncmp(argv[1], "-datadir=", 9)) {
         int bad = node_arguments(argc, argv);
         if (bad) return bad;
         puts("full node arguments accepted");
@@ -249,6 +258,24 @@ static void sized_file(const char *dir, int index, uint64_t size)
     int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     assert(fd >= 0 && ftruncate(fd, (off_t)size) == 0 && close(fd) == 0);
 }
+/* The fleet's onion peers the app holds reach the node as -addnode, and nothing else is added. */
+static void roster_case(struct zapp_runtime *r)
+{
+    static const char peer[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion:8033";
+    char file[1200], text[200];
+    assert(snprintf(file, sizeof(file), "%s/fleet-onion-peers", r->directory) > 0);
+    assert(snprintf(text, sizeof(text), "%s\n1.2.3.4:8033\nnot-an-onion.onion:1\n", peer) > 0);
+    int fd = open(file, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    assert(fd >= 0 && write(fd, text, strlen(text)) == (ssize_t)strlen(text) && close(fd) == 0);
+    assert(setenv("ZAPP_TEST_ADDNODE", peer, 1) == 0);
+    char out[128];
+    int status;
+    assert(setenv("ZAPP_TEST_PARAMS_ARG", "none", 1) == 0);
+    assert(zapp_node_start(r, out, sizeof(out)));
+    assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    r->node = 0;
+    assert(unsetenv("ZAPP_TEST_ADDNODE") == 0 && unlink(file) == 0);
+}
 static void start_expecting(struct zapp_runtime *r, const char *argument)
 {
     char out[128];
@@ -295,6 +322,7 @@ static void node_cases(struct zapp_runtime *r, const char *self, const char *dir
     assert(waitpid(r->node, &status, 0) == r->node && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     r->node = 0;
     params_argument_cases(r, directory);
+    roster_case(r);
     preview_cases(r);
     assert(zapp_node_stop(r, out, sizeof(out)) && !strcmp(out, "The local node is stopped.") && !zapp_node_wanted(r));
     earlier_cases(r, self, directory);

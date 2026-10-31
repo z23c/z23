@@ -3,6 +3,7 @@
 #include "controller.h"
 #include "conversation.h"
 #include "hosts.h"
+#include "private.h"
 #include "pairing.h"
 #include "operations.h"
 #include "camera.h"
@@ -183,7 +184,7 @@ static void observe_node(struct controller *c)
     const bool fleet_current = !c->view.fleet_stale && c->fleet_height_at && now - c->fleet_height_at <= ZAPP_FLEET_MAX_AGE_SECS;
     if (!n.responding) c->height_moved_at = 0;
     else if (n.height != c->seen_height || !c->height_moved_at) c->height_moved_at = now;
-    struct zapp_chain_evidence evidence = {.fleet_height = fleet_current ? c->fleet_height : -1,
+    struct zapp_chain_evidence evidence = {.onion_only = true, .fleet_height = fleet_current ? c->fleet_height : -1,
         .quiet_secs = n.responding && c->height_moved_at ? now - c->height_moved_at : -1};
     pthread_mutex_unlock(&c->lock);
     zapp_sync_line(n.responding, process_running, n.height, n.target, n.peers, &evidence, status, sizeof(status));
@@ -337,6 +338,8 @@ static bool fleet_hosts(struct controller *c, bool refresh, char *out)
     char *formatted = calloc(1, sizeof(c->view.fleet_status));
     bool answered = formatted && zapp_speech_client_fleet(c->files, refresh, out, ZAPP_TEXT_CAP, NULL);
     bool ok = answered && zapp_hosts_format(out, formatted, sizeof(c->view.fleet_status));
+    /* The fleet's onion peers, when the report names them, are what the next node start dials. */
+    if (ok) (void)zapp_private_roster_save(c->runtime.directory, out);
     pthread_mutex_lock(&c->lock);
     if (ok) {
         copy_text(c->view.fleet_status, sizeof(c->view.fleet_status), formatted);

@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "operations.h"
 #include "params.h"
+#include "private.h"
 #include "json/json.h"
 #include "base/cleanse.h"
 #include "rpc.h"
@@ -289,9 +290,18 @@ static int spawn_node(struct zapp_runtime *r)
     int fd = ok ? open(log, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
     off_t offset = fd >= 0 ? lseek(fd, 0, SEEK_END) : 0;
     int in = open("/dev/null", O_RDONLY | O_CLOEXEC);
-    char params[1200], *argv[9] = {r->executable, data, "-operator-lane=canonical", "-tor", "-onion-persist",
-                                    "-private-listeners", "-observation=0"};
-    if (zapp_params_arg(r->files, params, sizeof(params))) argv[7] = params;
+    /* Tor only: the node dials onion peers, resolves no DNS seed and never falls back to clearnet. */
+    char params[1200], roster[ZAPP_PRIVATE_PEERS_MAX * (ZAPP_ONION_PEER_MAX + 1) + 1];
+    char *argv[8 + ZAPP_PRIVATE_ARGV_MAX + ZAPP_PRIVATE_PEERS_MAX + 1] = {
+        r->executable, data, "-operator-lane=canonical", "-tor", "-onion-persist"};
+    size_t argc = 5;
+    struct zapp_private_args private_mode;
+    if (zapp_params_arg(r->files, params, sizeof(params))) argv[argc++] = params;
+    argv[argc++] = "-private-listeners";
+    argv[argc++] = "-observation=0";
+    (void)zapp_private_roster_load(r->directory, roster, sizeof(roster));
+    zapp_private_args(&private_mode, roster);
+    for (size_t i = 0; i < private_mode.argc; i++) argv[argc++] = private_mode.argv[i];
     int rc = fd >= 0 && in >= 0 ? spawn_redirect(r, argv, in, fd, &r->node) : EIO;
     if (fd >= 0) close(fd);
     if (in >= 0) close(in);

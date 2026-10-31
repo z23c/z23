@@ -19,8 +19,9 @@ const char *zapp_fleet_line(const char *report, bool stale, bool paired, char *o
  * runs; negative values are written plainly. Returns out. */
 const char *zapp_grouped(int64_t value, char out[32]);
 /* Evidence about the chain beyond the node's own height. fleet_height is the highest height a
- * reachable fleet host reports, or -1; quiet_secs is how long the node's tip has not moved, or -1. */
-struct zapp_chain_evidence { int64_t fleet_height, quiet_secs; };
+ * reachable fleet host reports, or -1; quiet_secs is how long the node's tip has not moved, or -1; onion_only is
+ * set when the node dials only onion peers, so a shortage of peers reads as a shortage of onion peers. */
+struct zapp_chain_evidence { int64_t fleet_height, quiet_secs; bool onion_only; };
 /* A node is called in sync only within ZAPP_CHAIN_SKEW blocks of the highest height it has heard of,
  * and only with proof the chain is live: at least ZAPP_CHAIN_MIN_PEERS peers, or a fleet height that
  * agrees. With fewer peers, or a tip silent for more than ZAPP_CHAIN_QUIET_SECS (about six block

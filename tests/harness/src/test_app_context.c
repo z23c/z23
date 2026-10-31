@@ -425,6 +425,72 @@ static int test_onlynet_onion_dial_and_seed_walk(void)
     return failures;
 }
 
+/* ── The Android app's node arguments: clearnet leak before, none after ──
+ *
+ * Before: -tor -onion-persist leaves -onlynet off, so every clearnet dial gate
+ * (netbase_clearnet_dial_allowed: connman_dialer.c candidate filter and
+ * connect_socket_start, netbase.c) admits a public peer, and the DNS seed pass
+ * (connman.c dns_seed_resolve: getaddrinfo) resolves a seed into addrman.
+ * After: the app also passes -onlynet=onion -bind=127.0.0.1 and both are closed.
+ * The seed is a numeric literal, so the lookup needs no network. */
+static int phone_node_leaks(char **argv, int argc, bool expect_private)
+{
+    int failures = 0;
+    struct app_context ctx;
+    bool parsed = onlynet_parse(argv, argc, &ctx) == -1;
+    if (expect_private && !app_tor_real_build_linked()) {
+        /* A Tor-stub test binary refuses the flag at parse time; the dial gates are still checked. */
+        ctx.onlynet_onion = true;
+    } else {
+        APPCTX_CHECK("the phone arguments parse", parsed);
+        if (expect_private)
+            APPCTX_CHECK("the phone arguments pass -onlynet=onion admission",
+                         app_onlynet_onion_refusal(&ctx, true) == NULL);
+    }
+    APPCTX_CHECK(expect_private ? "private phone arguments set -onlynet=onion" : "today's phone arguments leave -onlynet off",
+                 ctx.onlynet_onion == expect_private);
+
+    static struct chain_params params;
+    params = *chain_params_get();
+    params.nFixedSeeds = 0;
+    params.nSeeds = 1;
+    snprintf(params.vSeeds[0].host, sizeof(params.vSeeds[0].host), "8.8.8.8");
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    if (!connman_init(&cm, &params, &sigs))
+        return failures + 1;
+    netbase_set_onlynet_onion(ctx.onlynet_onion);
+    struct net_service peer;
+    net_service_init(&peer);
+    const unsigned char public_ip[4] = { 8, 8, 8, 8 };
+    net_addr_set_ipv4(&peer.addr, public_ip);
+    peer.port = 8033;
+    int before = onlynet_addrman_count(&cm);
+    connman_kick_seed_discovery(&cm);
+    int seeded = onlynet_addrman_count(&cm) - before;
+    zcl_socket_t s = ZCL_INVALID_SOCKET;
+    if (expect_private) {
+        APPCTX_CHECK("private: no clearnet dial is admitted", !netbase_clearnet_dial_allowed(&peer));
+        APPCTX_CHECK("private: a clearnet connect is refused before any socket",
+                     connect_socket_start(&peer, &s) == ZCL_CONNECT_START_ERROR && s == ZCL_INVALID_SOCKET);
+        APPCTX_CHECK("private: the DNS seed pass resolves nothing", seeded == 0);
+    } else {
+        APPCTX_CHECK("today: a public clearnet peer is admitted for a direct dial", netbase_clearnet_dial_allowed(&peer));
+        APPCTX_CHECK("today: the DNS seed pass resolves a seed into addrman", seeded == 1);
+    }
+    netbase_set_onlynet_onion(false);
+    connman_free(&cm);
+    return failures;
+}
+
+static int test_phone_node_arguments(void)
+{
+    char *today[] = { "z23", "-operator-lane=canonical", "-tor", "-onion-persist" };
+    char *private_mode[] = { "z23", "-operator-lane=canonical", "-tor", "-onion-persist", "-onlynet=onion", "-bind=127.0.0.1" };
+    return phone_node_leaks(today, 4, false) + phone_node_leaks(private_mode, 6, true);
+}
+
 static size_t onlynet_test_peer_source(void *ctx,
                                        struct boot_bundle_peer_seed *out,
                                        size_t max)
@@ -911,6 +977,7 @@ int test_app_context(void)
     failures += test_help_start_here_block();
     failures += test_onlynet_onion_args();
     failures += test_onlynet_onion_dial_and_seed_walk();
+    failures += test_phone_node_arguments();
     failures += test_observation_switch();
     failures += test_onlynet_clearnet_leaks_closed();
     failures += test_observation_small_buffer();

@@ -57,16 +57,18 @@ const char *zapp_grouped(int64_t value, char out[32])
  * live: enough peers, or a fleet height that agrees. Without that evidence, a quiet tip is unconfirmed,
  * never "in sync". Both the node line and the sync sentence read this, so they cannot disagree. */
 enum chain_state { CHAIN_WAITING, CHAIN_BEHIND, CHAIN_UNCONFIRMED, CHAIN_CURRENT };
-struct chain_verdict { enum chain_state state; int64_t reference; char reason[48]; };
+struct chain_verdict { enum chain_state state; int64_t reference; char reason[48]; bool onion_wait; };
 static int64_t abs_gap(int64_t a, int64_t b) { return a > b ? a - b : b - a; }
 static struct chain_verdict chain_verdict(int64_t height, int64_t target, int64_t peers,
                                           const struct zapp_chain_evidence *ev)
 {
     const int64_t fleet = ev ? ev->fleet_height : -1, quiet = ev ? ev->quiet_secs : -1;
     struct chain_verdict v = {.reference = target > fleet ? target : fleet};
+    const bool fleet_agrees = fleet >= 0 && abs_gap(fleet, height) <= ZAPP_CHAIN_SKEW;
+    /* Private mode dials only onion peers, so too few peers there means too few onion peers. */
+    v.onion_wait = ev && ev->onion_only && !fleet_agrees && peers < ZAPP_CHAIN_MIN_PEERS;
     if (v.reference <= 0) { v.state = CHAIN_WAITING; return v; }
     if (v.reference - height > ZAPP_CHAIN_SKEW) { v.state = CHAIN_BEHIND; return v; }
-    const bool fleet_agrees = fleet >= 0 && abs_gap(fleet, height) <= ZAPP_CHAIN_SKEW;
     v.state = CHAIN_UNCONFIRMED;
     if (!fleet_agrees && peers < ZAPP_CHAIN_MIN_PEERS)
         snprintf(v.reason, sizeof(v.reason), peers == 1 ? "only 1 peer" : peers == 0 ? "no peers" : "no peer count");
@@ -86,6 +88,9 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
     if (stopping) snprintf(out, cap, "Node stopping");
     else if (!responding) snprintf(out, cap, "Node %s", process_running ? "starting" : "stopped");
     else if (height < 0) snprintf(out, cap, "Node running%s%s", count, onion);
+    else if (v.onion_wait)
+        snprintf(out, cap, "Private · waiting for onion peers (%lld of %d)%s", (long long)(peers < 0 ? 0 : peers),
+                 ZAPP_CHAIN_MIN_PEERS, onion);
     else if (v.state == CHAIN_WAITING) snprintf(out, cap, "Node waiting for peers · %s%s", zapp_grouped(height, at), onion);
     else if (v.state == CHAIN_BEHIND)
         snprintf(out, cap, "Behind · %s of %s%s", zapp_grouped(height, at), zapp_grouped(v.reference, top), onion);
@@ -126,6 +131,9 @@ const char *zapp_sync_line(bool responding, bool process_running, int64_t height
     if (!responding) snprintf(out, cap, "%s", process_running ?
         "Waiting for the node to answer." : "Start the node to begin synchronization.");
     else if (height < 0) snprintf(out, cap, "Waiting for the node to report its height.");
+    else if (v.onion_wait)
+        snprintf(out, cap, "Private mode dials only onion peers. This node has %lld of %d.", (long long)(peers < 0 ? 0 : peers),
+                 ZAPP_CHAIN_MIN_PEERS);
     else if (v.state == CHAIN_WAITING) snprintf(out, cap, "Waiting for a peer that reports the current chain.");
     else if (v.state == CHAIN_BEHIND) snprintf(out, cap, "%s %s to go.", zapp_grouped(v.reference - height, gap),
                                             v.reference - height == 1 ? "block" : "blocks");

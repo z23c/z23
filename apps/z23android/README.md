@@ -191,6 +191,19 @@ output reaches the screen only as plain sentences; a JSON error shows its
 message alone, and audio failures show one sentence while their cause goes to
 logcat. The app runs one read-only node command, the node status, besides starting, stopping and joining a fleet. The wallet balance is read on no surface: Home shows a Wallet tile with no amount, the assistant gets no wallet field, and a balance question, typed or spoken, gets one plain sentence that the wallet is shown only on the wallet screen. The synchronization line adds only what the node line leaves out: the blocks still to go, or that the node has every block its peers report.
 
+A fleet height counts as evidence only while the report is no more than 180
+seconds old (its `observed_at`).
+
+The phone node always runs in private mode: it starts with `-onlynet=onion
+-bind=127.0.0.1`, so it dials only Tor onion peers, resolves no DNS seed, and
+never falls back to clearnet. Its dial targets are the built-in onion seed of
+the chain parameters (one today), the onion directory those seeds publish, and
+the fleet onion peers (`-addnode=<56 characters>.onion:<port>`) that the paired
+laptop host names in an `onion` field of its fleet report. The app keeps those
+in `fleet-onion-peers` beside the node data and passes only entries that pass
+a strict `.onion:port` check. With fewer than two onion peers the node line
+reads "Private · waiting for onion peers (1 of 2)".
+
 Under the fleet list in **More**, **Host** selects one fleet host, **Show errors**
 lists its last five `ERROR` log lines from the past 24 hours (`z23 ops logs`, read-only) and
 **Restart node** shows what a restart of its `z23-node.service` would do (`z23 ops node restart`
