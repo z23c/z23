@@ -317,8 +317,7 @@ static bool z_sendmany_shielded_with_key(
                                          &notes_total);
         if (notes_total < total_amount + fee) {
             json_set_str(result, "Insufficient shielded funds");
-            LOG_FAIL("wallet_shielded", "z_sendmany: insufficient shielded funds: have=%lld need=%lld",
-                     (long long)notes_total, (long long)(total_amount + fee));
+            LOG_FAIL("wallet_shielded", "z_sendmany: insufficient shielded funds");
         }
 
         /* Wallet proving is a capability, not an assumption. The backend is
