@@ -184,6 +184,31 @@ size_t boot_fleet_roster_publish(struct node_db *ndb, int64_t now);
 size_t boot_fleet_roster_dial(struct node_db *ndb, int64_t now,
                               void (*dial)(const char *host, int port));
 
+/* One verified, unrevoked machine on this box's own roster, as the roster
+ * reports it. `name` is the operator-sealed name ("" when the provider
+ * reports none), `onion` the machine's own signed claim ("" when it names
+ * none), `box` the key the operator admitted, `self` whether the line is
+ * this box. */
+#define BOOT_FLEET_ROSTER_ONION_MAX 96
+struct boot_fleet_roster_machine {
+    char name[32];
+    char onion[BOOT_FLEET_ROSTER_ONION_MAX];
+    uint8_t box[32];
+    int64_t enrolled_at; /* seconds the operator sealed it; 0 when unknown */
+    bool self;
+};
+
+/* Visit every roster line that verifies under the fleet root and whose box
+ * the head does not revoke: this box's local roster file first, then the
+ * roster rows held on the board. A machine re-admitted under the same key is
+ * visited once per row, each with its own enrolled_at. No root, a root the
+ * chain refuses, a gate switched off, or a head that cannot be trusted
+ * visits nobody. Returns how many lines were visited. This is the walk boot_fleet_roster_dial() dials from. */
+size_t boot_fleet_roster_each_machine(
+    struct node_db *ndb, int64_t now,
+    void (*visit)(const struct boot_fleet_roster_machine *m, void *user),
+    void *user);
+
 /* Refusal log lines are rate limited: one per kind per
  * BOOT_FLEET_ROSTER_LOG_WINDOW_S, and the lines that were left out are
  * counted. True when the caller should log now; `*skipped` (optional) then

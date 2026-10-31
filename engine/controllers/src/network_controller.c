@@ -7,6 +7,7 @@
 #include "config/state_offer_store.h"
 #include "controllers/agent_controller.h"
 #include "controllers/agent_security_posture.h"
+#include "controllers/fleet_status_controller.h"
 #include "controllers/network_controller.h"
 #include "controllers/node_binary_identity_json.h"
 #include "util/log_macros.h"
@@ -969,6 +970,7 @@ void register_net_rpc_commands(struct rpc_table *t)
         { "network", "bootstrapstatus",   rpc_bootstrapstatus,   true },
         { "network", "onionstatus",       network_onion_status_rpc, true },
         { "network", "onionremotestatus", network_onion_remote_status_rpc, true },
+        { "network", "fleetstatus",       fleet_status_rpc,      true },
         { "network", "getpeerinfo",       rpc_getpeerinfo,       true },
         { "network", "getconnectioncount", rpc_getconnectioncount, true },
         { "network", "peerincidents",     rpc_peerincidents,     true },

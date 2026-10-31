@@ -40,6 +40,14 @@ struct mmb_leaf;
  * instead of an RPC call to themselves. */
 int64_t rpc_blockchain_provable_tip_height(void);
 
+/* Height and hash (64 hex chars and a NUL) of the provable tip, the same best
+ * block getbestblockhash reports. False when none is resolved. */
+bool rpc_blockchain_provable_tip(int64_t *height, char hex[65]);
+
+/* Hash of the block at `height` on this node's active chain, for heights up
+ * to the provable tip. False above it or when the block is unknown. */
+bool rpc_blockchain_provable_hash_at(int64_t height, char hex[65]);
+
 void rpc_blockchain_mmb_append(const struct mmb_leaf *leaf);
 void rpc_blockchain_mmb_init_from_state(struct node_db *ndb);
 void rpc_blockchain_mmb_catchup(struct main_state *ms);

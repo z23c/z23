@@ -151,12 +151,44 @@ static bool gate_endpoint(const char *line, const uint8_t root[32],
     return true;
 }
 
+/* The name the operator sealed into one line, for status display only. */
+static bool gate_machine_name(const char *line, const uint8_t root[32],
+                              char *out, size_t cap, void *ctx)
+{
+    struct fleet_machine machine;
+    const char *why = NULL;
+    (void)ctx;
+    memset(&machine, 0, sizeof machine);
+    if (!fleet_machine_parse(line, root, &machine, &why))
+        return false;
+    if (strlen(machine.receipt.invite.name) >= cap)
+        return false;
+    (void)snprintf(out, cap, "%s", machine.receipt.invite.name);
+    return true;
+}
+
+/* When the operator sealed one line, for status display only. */
+static bool gate_enrolled_at(const char *line, const uint8_t root[32],
+                             int64_t *out, void *ctx)
+{
+    struct fleet_machine machine;
+    const char *why = NULL;
+    (void)ctx;
+    memset(&machine, 0, sizeof machine);
+    if (!fleet_machine_parse(line, root, &machine, &why))
+        return false;
+    *out = machine.enrolled_at;
+    return true;
+}
+
 static const struct zcl_fleet_roster_provider g_provider = {
     .root = gate_root,
     .verify = gate_verify,
     .head = gate_head,
     .each_line = gate_each_line,
     .endpoint = gate_endpoint,
+    .machine_name = gate_machine_name,
+    .enrolled_at = gate_enrolled_at,
     .ctx = NULL,
     .name = "fleet_enrol_roster",
 };

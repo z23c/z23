@@ -10,6 +10,7 @@
 #include "util/path_util.h"
 #include "controllers/explorer_controller.h"
 #include "controllers/api_controller.h"
+#include "controllers/fleet_tip.h"
 #include "chain/chain.h"
 #include "chain/chainparams.h"
 #include "chain/subsidy.h"
@@ -557,6 +558,7 @@ struct explorer_exact_route {
     size_t (*handler)(uint8_t *, size_t);
 };
 static const struct explorer_exact_route explorer_exact_routes[] = {
+    {"/explorer/tip",fleet_tip_serve},
     {"/explorer/stats",serve_stats}, {"/explorer/tokens",serve_tokens},
     {"/explorer/hodl",serve_hodl}, {"/explorer/events",serve_events},
     {"/explorer/factoids",serve_factoids}, {"/explorer/names",serve_names},

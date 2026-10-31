@@ -134,6 +134,23 @@ int64_t rpc_blockchain_provable_tip_height(void)
     return (tip && tip->phashBlock) ? tip->nHeight : -1;
 }
 
+bool rpc_blockchain_provable_hash_at(int64_t height, char hex[65])
+{
+    int32_t hstar = reducer_frontier_provable_tip_cached();
+    if (height < 0 || height > hstar)
+        return false;
+    return rpc_provable_hash_by_height(blockchain_ctx(), (int)height, hex);
+}
+
+bool rpc_blockchain_provable_tip(int64_t *height, char hex[65])
+{
+    int32_t hstar = reducer_frontier_provable_tip_cached();
+    if (hstar < 0 || !height || !rpc_blockchain_provable_hash_at(hstar, hex))
+        return false;
+    *height = hstar;
+    return true;
+}
+
 bool rpc_getchaintip(const struct json_value *params, bool help,
                      struct json_value *result)
 {

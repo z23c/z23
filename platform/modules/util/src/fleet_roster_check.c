@@ -111,3 +111,27 @@ bool zcl_fleet_roster_endpoint(const char *line, const uint8_t root[32],
         return false;
     return g_provider.endpoint(line, root, onion, cap, self, g_provider.ctx);
 }
+
+bool zcl_fleet_roster_machine_name(const char *line, const uint8_t root[32],
+                                   char *out, size_t cap)
+{
+    if (out && cap)
+        out[0] = '\0';
+    if (!line || !root || !out || !cap ||
+        !atomic_load_explicit(&g_ready, memory_order_acquire) ||
+        !g_provider.machine_name)
+        return false;
+    return g_provider.machine_name(line, root, out, cap, g_provider.ctx);
+}
+
+bool zcl_fleet_roster_enrolled_at(const char *line, const uint8_t root[32],
+                                  int64_t *out)
+{
+    if (out)
+        *out = 0;
+    if (!line || !root || !out ||
+        !atomic_load_explicit(&g_ready, memory_order_acquire) ||
+        !g_provider.enrolled_at)
+        return false;
+    return g_provider.enrolled_at(line, root, out, g_provider.ctx);
+}

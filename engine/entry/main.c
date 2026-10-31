@@ -43,6 +43,7 @@
 #include "mcp/mcp_serve.h"              /* z23 mcp serve (local stdio MCP) */
 #include "net/file_service.h"           /* -filesync fast path (fs_client_sync) */
 #include "controllers/agent_controller.h" /* rpc_agent_set_boot_context */
+#include "controllers/fleet_tip.h"
 #include "views/ui_present.h"           /* detached reviewed UI child */
 #include "views/ui_present_host.h"      /* resident reviewed UI host */
 #include "views/wallet_gui.h"           /* -gui launch */
@@ -883,8 +884,10 @@ static void main_run_service_loop(const struct app_context *ctx,
 
     while (!g_shutdown_requested &&
            !thread_registry_shutdown_requested() &&
-           app_is_running())
+           app_is_running()) {
+        fleet_tip_poll_tick();
         sleep(1);
+    }
     if (thread_registry_shutdown_requested())
         g_shutdown_requested = 1;
 

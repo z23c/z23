@@ -283,6 +283,78 @@ WARN and follows pairing plus role again). Use it on a member whose manager
 lapsed or whose roster is wrong, and on a manager you want silent. Public
 scope is never gated either way.
 
+## What a joined computer holds, and the wallet fleet status
+
+`fleet join` gives a computer the fleet root and nothing else. The root is the
+operator key inside the invite; join records it as this box's operator
+(`fleet_enrol_operator_write`) and the roster seam reads it back as the root
+(`tools/dev/fleet_roster_gate.c`, `gate_root`). Join writes no roster line, and
+`fleet admit` appends the new row only to the manager's own roster file.
+
+A joined computer therefore dials a machine only after it holds that machine's
+operator-sealed line, through one of two routes:
+
+- `fleet import <line>` with a line from the manager's roster. The line is
+  checked against the pinned root before anything is written. Import it before
+  the node starts, because the node dials its roster once, at start.
+- A roster row on the board, which arrives through a paired board pull. That
+  pull needs a pairing, so it cannot be the first route on a computer that
+  holds no line.
+
+Nothing else delivers the root or a roster line to a computer, and a computer
+that holds neither dials nothing.
+
+`z23 core wallet fleet status` (owner authority, local lane) reads the node
+and answers whether it is a fleet member, how many other roster machines
+exist, how many of them it holds an outbound onion connection to, and for each
+machine its name, whether it is connected and how its best block relates to
+this node's chain. It contains no wallet data and never waits on the network.
+
+| Field | Meaning |
+|---|---|
+| `member` | The node holds a fleet root (it joined, or it is the manager) |
+| `machines_total` | Other machines on the verified roster: sealed by the root, not revoked by the head, not this box, one per box key |
+| `machines_connected` | Of those, machines this node dialled over onion and holds a handshaken, not-disconnecting connection to |
+| `machines[].agreement` | `agrees`, `phone_behind`, `machine_behind`, `disagree` or `unknown`, below |
+| `verdict` | `not_member`, `none_connected`, `unchecked`, `agree` or `disagree`, below |
+| `refuses_send` | `true` only when a connected machine at this node's tip names a different block there |
+| `local_tip` | This node's provable tip height |
+
+A machine counts as connected only when the connection is outbound, past its
+handshake and not being disconnected, and its host is the `.onion` the
+machine's verified line names. A v3 onion host is its own key, so reaching it
+proves the peer holds the key the operator sealed into the line. A clearnet
+address, or an inbound stream (which Tor delivers from loopback and so names
+nobody), never counts. A box admitted twice has several lines under one key;
+the newest enrolment is the machine, so an onion the operator retired names
+nobody.
+
+Agreement compares block hashes, never heights alone, and never reads the
+height in a peer's version message, which is written once at connect and ages.
+Every node serves its provable tip (height and block hash) at
+`GET /explorer/tip` on its onion. The running node asks one connected machine
+every 10 seconds, each machine at most once per 60 seconds, from the main
+service loop and regardless of wallet activity, so a check never lines up with
+a send. It asks nobody while the pace file says `pause` or Tor is not ready.
+The status call reads that cache and never blocks. The tip is public chain
+data: the height is already in `/status`, and the explorer dashboard lists
+recent block hashes on the same onion.
+
+| Agreement | Meaning |
+|---|---|
+| `agrees` | the machine's hash is this node's block at its height, which is this node's tip |
+| `phone_behind` | the machine's height is above this node's tip; the normal sync path catches up |
+| `machine_behind` | the machine's hash is this node's block at a lower height |
+| `disagree` | the machine's height is at or below this node's tip and its hash is not this node's block there |
+| `unknown` | not connected, or no check within 5 minutes; never agreement |
+
+Verdict: `none_connected` when no roster machine is connected; `disagree` when
+any machine disagrees; `agree` when at least one fresh check is `agrees` or
+`machine_behind` and none disagrees; otherwise `unchecked`. A recent reorg and
+a machine stuck on an old fork both read `disagree`, because the lookup is
+exact at any depth. `refuses_send` is the narrow signal: true only when the
+differing machine is at or above this node's tip.
+
 ## What comes next
 
 The bridge is a bridge. The native path is mesh pairing over the node's own

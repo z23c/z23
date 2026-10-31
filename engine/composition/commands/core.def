@@ -836,6 +836,33 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_BRANCH("core.wallet.fleet", "core.wallet",
+                   "Fleet cross-check for the wallet", ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.fleet.status", "core.wallet.fleet", "",
+    "Report fleet membership and whether connected fleet machines agree",
+    "Whether this node is a fleet member, how many other machines its "
+    "verified roster names, how many of them this node holds an outbound "
+    "onion connection to, and for each machine its name, whether it is "
+    "connected and how its best block, read from a background check no "
+    "older than five minutes, relates to this node's chain: agrees (its "
+    "hash is this node's block at the tip), phone_behind (it is above this "
+    "node's tip), machine_behind (its hash is this node's block at a lower "
+    "height), disagree (at or below the tip with another block there) or "
+    "unknown (no fresh check; never agreement). The verdict is not_member, "
+    "none_connected, unchecked (connected machines, none with a fresh check "
+    "that settles it), agree or disagree. refuses_send is true only when a "
+    "machine at the tip names a different block there. A clearnet or "
+    "inbound connection never counts, and a retired onion names nobody. "
+    "Contains no wallet data.", 0,
+    "wallet,fleet,status,roster,onion,agree",
+    "zcl.command.empty_input.v1", "zcl.fleet_status.v1", "", "",
+    "z23 core wallet fleet status",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
 ZCL_COMMAND_BRANCH("core.wallet.address", "core.wallet",
                    "Transparent addresses", ZCL_COMMAND_LAYER_CORE)
 ZCL_COMMAND_READY_COMMAND(

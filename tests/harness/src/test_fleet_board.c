@@ -20,6 +20,9 @@
 #include "config/boot_internal.h"
 #include "config/mesh_stream.h"
 #include "config/runtime.h"
+#include "controllers/fleet_status_controller.h"
+#include "controllers/fleet_tip.h"
+#include "net/connman.h"
 #include "util/fleet_role_check.h"
 #include "base/hex.h"
 #include "base/safe_alloc.h"
@@ -7531,7 +7534,7 @@ struct fbr_ctx {
     bool root_fail;
     bool manager;
     uint8_t root_pub[32];
-    char lines[4][ZCL_FLEET_ROSTER_LINE_MAX];
+    char lines[8][ZCL_FLEET_ROSTER_LINE_MAX];
     size_t n_lines;
     bool remap;
     uint8_t remap_from[32];
@@ -9439,6 +9442,646 @@ static int test_fleet_board_roster_dial_own_key(void)
     return failures;
 }
 
+/* ── core.wallet.fleet.status ─────────────────────────────────────────── */
+
+#define FST_ALPHA FBD_ONION_A
+#define FST_ALPHA2 "aefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxabc.onion"
+#define FST_BRAVO FBD_ONION_B
+#define FST_CHARLIE FBD_ONION_C
+#define FST_SELF FBD_ONION_D
+#define FST_FORGED "eefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwxabc.onion"
+#define FST_LOCAL 5000
+#define FST_NOW 10000
+
+static uint8_t g_fst_self_box[32];
+
+/* One real sealed line whose receipt names `onion`, enrolled at `at`; the box
+ * key is test identity 0x80+signer_id, so a test knows it without parsing. */
+static bool fst_line(uint8_t root_id, const char *name, uint8_t signer_id,
+                     const char *onion, int64_t at, char *out, size_t cap)
+{
+    uint8_t op_seed[32], op_pub[32], box_seed[32], box_pub[32];
+    uint8_t invite_wire[FLEET_ENROL_INVITE_WIRE_MAX];
+    uint8_t receipt_wire[FLEET_ENROL_RECEIPT_WIRE_MAX];
+    char token[FLEET_ENROL_MACHINE_TEXT_MAX];
+    char receipt[FLEET_ENROL_MACHINE_TEXT_MAX];
+    struct fleet_invite invite;
+    struct fleet_receipt parsed;
+    struct fleet_box_facts facts;
+    struct fleet_signing_key signer;
+    size_t invite_len = 0, receipt_len = 0;
+    const char *why = NULL;
+    memset(&facts, 0, sizeof facts);
+    (void)snprintf(facts.hostname, sizeof facts.hostname, "%s", name);
+    fbr_root_pub(root_id, op_seed, op_pub);
+    fbr_root_pub((uint8_t)(0x80 + signer_id), box_seed, box_pub);
+    fb_test_identity(signer_id, signer.seed, signer.pubkey);
+    return fleet_invite_mint(name, 24, "", op_seed, op_pub, FBR_LINE_NOW,
+                             token, sizeof token, &invite, &why) &&
+           fleet_invite_parse(token, &invite, invite_wire, sizeof invite_wire,
+                              &invite_len, &why) &&
+           fleet_receipt_mint(invite_wire, invite_len, onion, &facts, "",
+                              box_seed, box_pub, &signer, receipt,
+                              sizeof receipt, &why) &&
+           fleet_receipt_parse(receipt, &parsed, receipt_wire,
+                               sizeof receipt_wire, &receipt_len, &why) &&
+           fleet_machine_mint(receipt_wire, receipt_len, at,
+                              FLEET_ENROL_PORT_FIRST, op_seed, op_pub, out,
+                              cap, &why);
+}
+
+/* The endpoint of a real line: its receipt's onion, and self when its box is
+ * the box this test plays. */
+static bool fst_endpoint_cb(const char *line, const uint8_t root[32],
+                            char *onion, size_t cap, bool *self, void *ctx)
+{
+    struct fleet_machine m;
+    const char *why = NULL;
+    (void)ctx;
+    memset(&m, 0, sizeof m);
+    if (!fleet_machine_parse(line, root, &m, &why) ||
+        strlen(m.receipt.onion) >= cap)
+        return false;
+    (void)snprintf(onion, cap, "%s", m.receipt.onion);
+    *self = memcmp(m.receipt.box_pubkey, g_fst_self_box, 32) == 0;
+    return true;
+}
+
+static bool fst_name_cb(const char *line, const uint8_t root[32], char *out,
+                        size_t cap, void *ctx)
+{
+    const struct zcl_fleet_roster_provider *real =
+        zcl_fleet_roster_gate_provider();
+    (void)ctx;
+    return real->machine_name(line, root, out, cap, real->ctx);
+}
+
+static bool fst_enrolled_cb(const char *line, const uint8_t root[32],
+                            int64_t *out, void *ctx)
+{
+    const struct zcl_fleet_roster_provider *real =
+        zcl_fleet_roster_gate_provider();
+    (void)ctx;
+    return real->enrolled_at(line, root, out, real->ctx);
+}
+
+static const struct zcl_fleet_roster_provider g_fst_provider = {
+    .root = fbr_root_cb, .verify = fbr_verify_cb, .head = fbr_head_cb,
+    .each_line = fbr_each_cb, .endpoint = fst_endpoint_cb,
+    .machine_name = fst_name_cb, .enrolled_at = fst_enrolled_cb,
+    .ctx = NULL, .name = "fleet-status-test" };
+
+static struct fleet_status g_fst;
+
+/* A chain whose block at height h has a hash only this node holds, and a
+ * forked chain that differs at every height. */
+static void fst_hash(int64_t h, bool forked, char hex[65])
+{
+    (void)snprintf(hex, 65, "%064llx",
+                   (unsigned long long)(h * 7919 + (forked ? 2 : 1)));
+}
+
+static bool fst_hash_at(int64_t h, char hex[65], void *ctx)
+{
+    (void)ctx;
+    if (h < FST_LOCAL - 100 || h > FST_LOCAL)
+        return false;
+    fst_hash(h, false, hex);
+    return true;
+}
+
+static const struct fleet_status_local g_fst_local = {
+    .tip = FST_LOCAL, .hash_at = fst_hash_at };
+
+/* A check of `onion` made at monotonic time `at`. */
+static void fst_check(const char *onion, int64_t h, bool forked, int64_t at)
+{
+    char key[BOOT_FLEET_ROSTER_ONION_MAX], hex[65];
+    fst_hash(h, forked, hex);
+    if (fleet_status_onion_key(onion, key, sizeof key))
+        fleet_tip_cache_put(key, h, hex, at);
+}
+
+static void fst_peer(struct fleet_status_peer *p, const char *host,
+                     bool inbound)
+{
+    memset(p, 0, sizeof *p);
+    (void)snprintf(p->host, sizeof p->host, "%s", host);
+    p->inbound = inbound;
+}
+
+static void fst_apply(const struct fleet_status_peer *peers, size_t n)
+{
+    fleet_status_apply(&g_fst, peers, n, &g_fst_local, FST_NOW);
+}
+
+enum fst_readmit { FST_ONCE = 0, FST_READMIT_LAST, FST_READMIT_FIRST };
+
+/* Append `line` to the roster at `first` or last. */
+static void fst_add_line(const char *line, bool first)
+{
+    if (first) {
+        memmove(g_fbr.lines[1], g_fbr.lines[0],
+                g_fbr.n_lines * sizeof g_fbr.lines[0]);
+        (void)snprintf(g_fbr.lines[0], sizeof g_fbr.lines[0], "%s", line);
+        g_fbr.n_lines++;
+        return;
+    }
+    (void)snprintf(g_fbr.lines[g_fbr.n_lines++], sizeof g_fbr.lines[0], "%s",
+                   line);
+}
+
+/* A verified roster of alpha, bravo, charlie, this box, and one line sealed
+ * by a root nobody trusts. bravo's box key is revoked when `revoke_bravo`.
+ * With a readmit, alpha is admitted again later under a new onion, and that
+ * row sits last or first in the roster. */
+static bool fst_open(struct node_db *db, bool revoke_bravo,
+                     enum fst_readmit readmit)
+{
+    char line[FLEET_ENROL_MACHINE_TEXT_MAX];
+    uint8_t seed[32];
+    const char *const names[] = { "alpha", "bravo", "charlie", "mallory",
+                                  "studio" };
+    const char *const onions[] = { FST_ALPHA, FST_BRAVO, FST_CHARLIE,
+                                   FST_FORGED, FST_SELF };
+    memset(db, 0, sizeof *db);
+    if (!node_db_open(db, ":memory:"))
+        return false;
+    fleet_tip_cache_reset();
+    fbr_install(FBR_ROOT, false);
+    zcl_fleet_roster_provider_install(&g_fst_provider);
+    fbr_root_pub((uint8_t)(0x80 + 15), seed, g_fst_self_box);
+    for (uint8_t i = 0; i < 5; i++) {
+        /* mallory (index 3) is sealed by a root this box does not trust. */
+        uint8_t root = i == 3 ? (uint8_t)(FBR_ROOT + 1) : FBR_ROOT;
+        if (!fst_line(root, names[i], (uint8_t)(11 + i), onions[i],
+                      FBR_LINE_NOW, line, sizeof line))
+            return false;
+        fst_add_line(line, false);
+    }
+    if (readmit != FST_ONCE) {
+        if (!fst_line(FBR_ROOT, "alpha", 11, FST_ALPHA2, FBR_LINE_NOW + 3600,
+                      line, sizeof line))
+            return false;
+        fst_add_line(line, readmit == FST_READMIT_FIRST);
+    }
+    if (revoke_bravo) {
+        g_fbr.head.state = ZCL_FLEET_HEAD_OK;
+        g_fbr.head.count = 1;
+        fbr_root_pub((uint8_t)(0x80 + 12), seed, g_fbr.head.revoked[0]);
+    }
+    return true;
+}
+
+static void fst_close(struct node_db *db)
+{
+    fbr_uninstall();
+    fleet_tip_cache_reset();
+    node_db_close(db);
+}
+
+static bool fst_listed(const char *name)
+{
+    for (size_t i = 0; i < g_fst.machine_count; i++)
+        if (strcmp(g_fst.machines[i].name, name) == 0)
+            return true;
+    return false;
+}
+
+static const struct fleet_status_machine *fst_machine(const char *name)
+{
+    for (size_t i = 0; i < g_fst.machine_count; i++)
+        if (strcmp(g_fst.machines[i].name, name) == 0)
+            return &g_fst.machines[i];
+    return NULL;
+}
+
+static int test_fleet_status_roster(void)
+{
+    int failures = 0;
+    struct node_db db;
+    TEST("fleet status: the roster lists only verified, unrevoked, other "
+         "machines, and a line sealed by another root is refused") {
+        ASSERT(fst_open(&db, true, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        ASSERT(g_fst.member);
+        ASSERT_EQ(g_fst.machine_count, (size_t)2);
+        ASSERT(fst_listed("alpha"));
+        ASSERT(fst_listed("charlie"));
+        ASSERT(!fst_listed("bravo"));   /* revoked */
+        ASSERT(!fst_listed("mallory")); /* forged */
+        ASSERT(!fst_listed("studio"));  /* this box */
+        fst_close(&db);
+        PASS();
+    }
+    TEST("fleet status: a box admitted again counts under its newest onion, "
+         "whichever row comes first, and the retired onion names nobody") {
+        const enum fst_readmit modes[] = { FST_READMIT_LAST,
+                                           FST_READMIT_FIRST };
+        struct fleet_status_peer peers[1];
+        for (size_t m = 0; m < 2; m++) {
+            ASSERT(fst_open(&db, false, modes[m]));
+            fleet_status_collect(&db, FBD_NOW, &g_fst);
+            ASSERT_EQ(g_fst.machine_count, (size_t)3);
+            ASSERT_STR_EQ(fst_machine("alpha")->onion, FST_ALPHA2);
+            ASSERT_EQ(fst_machine("alpha")->enrolled_at,
+                      FBR_LINE_NOW + 3600);
+            fst_peer(&peers[0], FST_ALPHA, false); /* the retired onion */
+            fst_apply(peers, 1);
+            ASSERT_EQ(g_fst.connected_count, (size_t)0);
+            ASSERT(!fleet_status_peer_on_roster(&g_fst, FST_ALPHA, false));
+            fst_peer(&peers[0], FST_ALPHA2 ":8033", false);
+            fst_apply(peers, 1);
+            ASSERT_EQ(g_fst.connected_count, (size_t)1);
+            ASSERT(fst_machine("alpha")->connected);
+            ASSERT(fleet_status_peer_on_roster(&g_fst, FST_ALPHA2, false));
+            fst_close(&db);
+        }
+        PASS();
+    }
+    TEST("fleet status: a node with no fleet root is not a member and "
+         "returns no machines") {
+        struct fleet_status_peer peers[1];
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        g_fbr.present = false;
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_peer(&peers[0], FST_ALPHA, false);
+        fst_apply(peers, 1);
+        ASSERT(!g_fst.member);
+        ASSERT_EQ(g_fst.machine_count, (size_t)0);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_NOT_MEMBER);
+        ASSERT(!fleet_status_peer_on_roster(&g_fst, FST_ALPHA, false));
+        fst_close(&db);
+        PASS();
+    }
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
+static int test_fleet_status_connections(void)
+{
+    int failures = 0;
+    struct node_db db;
+    struct fleet_status_peer peers[4];
+    TEST("fleet status: a clearnet or inbound connection from a roster "
+         "machine is not an onion connection") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_peer(&peers[0], "203.0.113.9:8033", false);
+        fst_peer(&peers[1], FST_ALPHA, true); /* inbound */
+        fst_apply(peers, 2);
+        ASSERT_EQ(g_fst.connected_count, (size_t)0);
+        ASSERT(!fst_machine("alpha")->connected);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_NONE_CONNECTED);
+        ASSERT(!fleet_status_peer_on_roster(&g_fst, "203.0.113.9:8033", false));
+        ASSERT(!fleet_status_peer_on_roster(&g_fst, FST_ALPHA, true));
+        ASSERT(fleet_status_peer_on_roster(&g_fst, FST_ALPHA ":8033", false));
+        fst_close(&db);
+        PASS();
+    }
+    TEST("fleet status: a revoked, forged or own onion is not on the "
+         "roster") {
+        ASSERT(fst_open(&db, true, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_peer(&peers[0], FST_BRAVO, false);
+        fst_peer(&peers[1], FST_FORGED, false);
+        fst_peer(&peers[2], FST_SELF, false);
+        fst_apply(peers, 3);
+        ASSERT_EQ(g_fst.connected_count, (size_t)0);
+        ASSERT(!fleet_status_peer_on_roster(&g_fst, FST_BRAVO, false));
+        ASSERT(!fleet_status_peer_on_roster(&g_fst, FST_FORGED, false));
+        ASSERT(!fleet_status_peer_on_roster(&g_fst, FST_SELF, false));
+        fst_close(&db);
+        PASS();
+    }
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
+static int test_fleet_status_agreement(void)
+{
+    int failures = 0;
+    struct node_db db;
+    struct fleet_status_peer peers[4];
+    TEST("fleet status: a machine whose hash is our block at the tip agrees, "
+         "one above the tip is the phone behind, one below on our chain is "
+         "the machine behind, and none of them disagree") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_check(FST_ALPHA, FST_LOCAL, false, FST_NOW - 5);
+        fst_check(FST_BRAVO, FST_LOCAL + 40, false, FST_NOW - 5);
+        fst_check(FST_CHARLIE, FST_LOCAL - 40, false, FST_NOW - 5);
+        fst_peer(&peers[0], FST_ALPHA ":8033", false);
+        fst_peer(&peers[1], FST_BRAVO, false);
+        fst_peer(&peers[2], FST_CHARLIE ":8033", false);
+        fst_apply(peers, 3);
+        ASSERT_EQ(g_fst.connected_count, (size_t)3);
+        ASSERT_EQ(fst_machine("alpha")->agreement, FLEET_STATUS_AGREES);
+        ASSERT_EQ(fst_machine("bravo")->agreement, FLEET_STATUS_PHONE_BEHIND);
+        ASSERT_EQ(fst_machine("charlie")->agreement,
+                  FLEET_STATUS_MACHINE_BEHIND);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_AGREE);
+        ASSERT(!g_fst.refuses_send);
+        /* A machine ahead of us alone settles nothing. */
+        fst_apply(&peers[1], 1);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_UNCHECKED);
+        fst_close(&db);
+        PASS();
+    }
+    TEST("fleet status: the same height with a different hash disagrees and "
+         "holds a send back, but a lower machine on a fork does not") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_check(FST_ALPHA, FST_LOCAL, true, FST_NOW - 5);
+        fst_check(FST_CHARLIE, FST_LOCAL - 3, true, FST_NOW - 5);
+        fst_peer(&peers[0], FST_ALPHA, false);
+        fst_peer(&peers[1], FST_CHARLIE, false);
+        fst_apply(peers, 2);
+        ASSERT_EQ(fst_machine("alpha")->agreement, FLEET_STATUS_MACHINE_DISAGREES);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_DISAGREE);
+        ASSERT(g_fst.refuses_send);
+        fst_apply(&peers[1], 1);
+        ASSERT_EQ(fst_machine("charlie")->agreement, FLEET_STATUS_MACHINE_DISAGREES);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_DISAGREE);
+        ASSERT(!g_fst.refuses_send);
+        fst_close(&db);
+        PASS();
+    }
+    TEST("fleet status: a connected machine with no check, or a check older "
+         "than the maximum age, is unknown and never agreement") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_peer(&peers[0], FST_ALPHA, false);
+        fst_apply(peers, 1); /* connected, never checked */
+        ASSERT(fst_machine("alpha")->connected);
+        ASSERT_EQ(fst_machine("alpha")->agreement, FLEET_STATUS_UNKNOWN);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_UNCHECKED);
+        ASSERT(!g_fst.refuses_send);
+        fst_check(FST_ALPHA, FST_LOCAL, false,
+                  FST_NOW - FLEET_TIP_MAX_AGE_SECS - 1);
+        fst_apply(peers, 1);
+        ASSERT_EQ(fst_machine("alpha")->agreement, FLEET_STATUS_UNKNOWN);
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_UNCHECKED);
+        fst_check(FST_ALPHA, FST_LOCAL, false,
+                  FST_NOW - FLEET_TIP_MAX_AGE_SECS);
+        fst_apply(peers, 1);
+        ASSERT_EQ(fst_machine("alpha")->agreement, FLEET_STATUS_AGREES);
+        /* A stale fork is not a disagreement either. */
+        fst_check(FST_ALPHA, FST_LOCAL, true,
+                  FST_NOW - FLEET_TIP_MAX_AGE_SECS - 1);
+        fst_apply(peers, 1);
+        ASSERT_EQ(fst_machine("alpha")->agreement, FLEET_STATUS_UNKNOWN);
+        ASSERT(!g_fst.refuses_send);
+        fst_close(&db);
+        PASS();
+    }
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
+/* Four connections on a fixture connection manager: alpha handshaked, bravo
+ * handshaked but disconnecting, charlie still mid-handshake, and this box's
+ * own onion inbound. */
+static bool fst_fleet_nodes(struct connman *cm, struct p2p_node *nodes[4])
+{
+    const char *const hosts[] = { FST_ALPHA, FST_BRAVO, FST_CHARLIE,
+                                  FST_SELF };
+    struct net_address addr;
+    memset(cm, 0, sizeof *cm);
+    net_manager_init(&cm->manager);
+    net_address_init(&addr);
+    cm->manager.nodes = zcl_calloc(4, sizeof *cm->manager.nodes, "fst_nodes");
+    if (!cm->manager.nodes)
+        return false;
+    for (size_t i = 0; i < 4; i++) {
+        nodes[i] = p2p_node_create(&cm->manager, ZCL_INVALID_SOCKET, &addr,
+                                   hosts[i], i == 3);
+        if (!nodes[i])
+            return false;
+        nodes[i]->state = PEER_HANDSHAKE_COMPLETE;
+        cm->manager.nodes[cm->manager.num_nodes++] = nodes[i];
+    }
+    atomic_store(&nodes[1]->disconnect, true);
+    nodes[2]->state = PEER_VERSION_SENT;
+    return true;
+}
+
+static void fst_free_nodes(struct connman *cm, struct p2p_node *nodes[4])
+{
+    for (size_t i = 0; i < 4; i++)
+        if (nodes[i])
+            p2p_node_free(nodes[i]);
+    free(cm->manager.nodes);
+    cm->manager.nodes = NULL;
+    cm->manager.num_nodes = 0;
+    net_manager_free(&cm->manager);
+}
+
+static int test_fleet_status_snapshot(void)
+{
+    int failures = 0;
+    struct node_db db;
+    struct connman cm;
+    struct p2p_node *nodes[4] = { NULL, NULL, NULL, NULL };
+    TEST("fleet status: only handshaken connections that are not "
+         "disconnecting count as connected, the filter connman uses") {
+        struct fleet_status_peer peers[4];
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        ASSERT(fst_fleet_nodes(&cm, nodes));
+        ASSERT_EQ(fleet_status_peers_snapshot(&cm, peers, 4), (size_t)2);
+        ASSERT_STR_EQ(peers[0].host, FST_ALPHA);
+        ASSERT(!peers[0].inbound);
+        ASSERT(peers[1].inbound);
+        ASSERT_EQ(fleet_status_peers_snapshot(NULL, peers, 4), (size_t)0);
+        fst_check(FST_ALPHA, FST_LOCAL, false, FST_NOW - 5);
+        fst_check(FST_BRAVO, FST_LOCAL, false, FST_NOW - 5);
+        fst_check(FST_CHARLIE, FST_LOCAL, false, FST_NOW - 5);
+        ASSERT(fleet_status_build(&db, &cm, &g_fst_local, FBD_NOW, FST_NOW,
+                                  &g_fst));
+        ASSERT_EQ(g_fst.machine_count, (size_t)3);
+        ASSERT_EQ(g_fst.connected_count, (size_t)1);
+        ASSERT(fst_machine("alpha")->connected);
+        ASSERT(!fst_machine("bravo")->connected); /* disconnecting */
+        ASSERT(!fst_machine("charlie")->connected); /* mid-handshake */
+        ASSERT_EQ(g_fst.verdict, FLEET_STATUS_AGREE);
+        PASS();
+    }
+    _test_next:;
+    fst_free_nodes(&cm, nodes);
+    fst_close(&db);
+    return failures;
+}
+
+static int g_fst_asked;
+static char g_fst_asked_key[4][BOOT_FLEET_ROSTER_ONION_MAX];
+static bool g_fst_answer;
+
+static bool fst_fetch(const char *onion, int64_t *height,
+                      char hash[FLEET_TIP_HASH_HEX + 1])
+{
+    if (g_fst_asked < 4)
+        (void)snprintf(g_fst_asked_key[g_fst_asked], BOOT_FLEET_ROSTER_ONION_MAX,
+                       "%s", onion);
+    g_fst_asked++;
+    *height = FST_LOCAL;
+    fst_hash(FST_LOCAL, false, hash);
+    return g_fst_answer;
+}
+
+static int test_fleet_status_schedule(void)
+{
+    int failures = 0;
+    struct node_db db;
+    struct fleet_status_peer peers[3];
+    TEST("fleet status: the background step asks one connected machine at "
+         "a time, each at most once a minute, and nobody while paused") {
+        char key[BOOT_FLEET_ROSTER_ONION_MAX];
+        struct fleet_tip t;
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_peer(&peers[0], FST_ALPHA, false);
+        fst_peer(&peers[1], FST_CHARLIE, false);
+        fst_apply(peers, 2); /* bravo is not connected */
+        g_fst_asked = 0;
+        g_fst_answer = true;
+        ASSERT(!fleet_tip_poll_step(&g_fst, FST_NOW, true, fst_fetch));
+        ASSERT_EQ(g_fst_asked, 0);
+        ASSERT(fleet_tip_poll_step(&g_fst, FST_NOW, false, fst_fetch));
+        ASSERT_EQ(g_fst_asked, 1);
+        ASSERT_STR_EQ(g_fst_asked_key[0], FST_ALPHA);
+        ASSERT(fleet_status_onion_key(FST_ALPHA, key, sizeof key));
+        ASSERT(fleet_tip_cache_get(key, &t));
+        ASSERT_EQ(t.height, (int64_t)FST_LOCAL);
+        ASSERT_EQ(t.fetched_at, (int64_t)FST_NOW);
+        ASSERT(fleet_tip_poll_step(&g_fst, FST_NOW + 1, false, fst_fetch));
+        ASSERT_STR_EQ(g_fst_asked_key[1], FST_CHARLIE);
+        ASSERT(!fleet_tip_poll_step(&g_fst, FST_NOW + 2, false, fst_fetch));
+        ASSERT(!fleet_tip_poll_step(&g_fst,
+                                    FST_NOW + FLEET_TIP_REFRESH_SECS - 1,
+                                    false, fst_fetch));
+        ASSERT_EQ(g_fst_asked, 2);
+        ASSERT(fleet_tip_poll_step(&g_fst, FST_NOW + FLEET_TIP_REFRESH_SECS,
+                                   false, fst_fetch));
+        ASSERT_STR_EQ(g_fst_asked_key[2], FST_ALPHA);
+        /* A failed ask is still a try: a dead machine is not asked again
+         * before the minute is out, so the next one is asked instead. */
+        g_fst_answer = false;
+        ASSERT(fleet_tip_poll_step(&g_fst,
+                                   FST_NOW + 2 * FLEET_TIP_REFRESH_SECS,
+                                   false, fst_fetch));
+        ASSERT_STR_EQ(g_fst_asked_key[3], FST_ALPHA);
+        ASSERT(fleet_tip_poll_step(&g_fst,
+                                   FST_NOW + 2 * FLEET_TIP_REFRESH_SECS + 1,
+                                   false, fst_fetch));
+        ASSERT_EQ(g_fst_asked, 5);
+        ASSERT(!fleet_tip_poll_step(&g_fst,
+                                    FST_NOW + 2 * FLEET_TIP_REFRESH_SECS + 2,
+                                    false, fst_fetch));
+        ASSERT_EQ(g_fst_asked, 5);
+        fst_close(&db);
+        PASS();
+    }
+    TEST("fleet status: a tip reply must be an object with a height and a "
+         "64-digit hash") {
+        int64_t h = -1;
+        char hash[FLEET_TIP_HASH_HEX + 1];
+        const char *const good =
+            "{\"schema\":\"zcl.tip.v1\",\"height\":7,\"hash\":\""
+            "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+            "\"}";
+        const char *const bad[] = {
+            "{\"height\":7,\"hash\":\"abc\"}",
+            "{\"height\":-1,\"hash\":\"0000000000000000000000000000000000000000"
+            "000000000000000000000000\"}",
+            "{\"height\":\"7\",\"hash\":\"00000000000000000000000000000000000000"
+            "00000000000000000000000000\"}",
+            "{\"height\":7,\"hash\":\"zz00000000000000000000000000000000"
+            "000000000000000000000000000000\"}",
+            "[7]", "" };
+        ASSERT(fleet_tip_parse((const uint8_t *)good, strlen(good), &h, hash));
+        ASSERT_EQ(h, (int64_t)7);
+        ASSERT_STR_EQ(hash, "abcdef0123456789abcdef0123456789abcdef0123456789"
+                            "abcdef0123456789");
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+            ASSERT(!fleet_tip_parse((const uint8_t *)bad[i], strlen(bad[i]),
+                                    &h, hash));
+        PASS();
+    }
+    TEST("fleet status: the tip a node serves is the tip a machine accepts") {
+        uint8_t page[512];
+        char want[65], got[65];
+        int64_t h = -1;
+        const char *body;
+        size_t n;
+        fst_hash(4242, false, want);
+        n = fleet_tip_render(4242, want, page, sizeof page);
+        ASSERT(n > 0 && n < sizeof page);
+        page[n] = 0;
+        ASSERT(strncmp((const char *)page, "HTTP/1.1 200 OK\r\n", 17) == 0);
+        body = strstr((const char *)page, "\r\n\r\n");
+        ASSERT(body != NULL);
+        body += 4;
+        ASSERT(fleet_tip_parse((const uint8_t *)body, strlen(body), &h, got));
+        ASSERT_EQ(h, (int64_t)4242);
+        ASSERT_STR_EQ(got, want);
+        ASSERT_EQ(fleet_tip_render(1, "short", page, sizeof page), (size_t)0);
+        PASS();
+    }
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
+static int test_fleet_status_reply(void)
+{
+    int failures = 0;
+    struct node_db db;
+    TEST("fleet status: the reply names only membership, counts, the "
+         "verdict, the send refusal, and per machine a name, connection and "
+         "agreement") {
+        struct fleet_status_peer peers[1];
+        struct json_value out;
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        fst_check(FST_ALPHA, FST_LOCAL, false, FST_NOW - 5);
+        fst_peer(&peers[0], FST_ALPHA, false);
+        fst_apply(peers, 1);
+        json_init(&out);
+        fleet_status_render(&g_fst, &out);
+        ASSERT_STR_EQ(json_get_str(json_get(&out, "verdict")), "agree");
+        ASSERT(!json_get_bool(json_get(&out, "refuses_send")));
+        ASSERT_EQ(json_get_int(json_get(&out, "machines_total")), 3);
+        ASSERT_EQ(json_get_int(json_get(&out, "machines_connected")), 1);
+        ASSERT_EQ(json_get_int(json_get(&out, "local_tip")), FST_LOCAL);
+        ASSERT_EQ(out.num_children, (size_t)8);
+        const struct json_value *rows = json_get(&out, "machines");
+        ASSERT_EQ(json_size(rows), (size_t)3);
+        for (size_t i = 0; i < json_size(rows); i++)
+            ASSERT_EQ(json_at(rows, i)->num_children, (size_t)3);
+        json_free(&out);
+        fst_close(&db);
+        PASS();
+    }
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
+static int test_fleet_status(void)
+{
+    int failures = 0;
+    failures += test_fleet_status_roster();
+    failures += test_fleet_status_connections();
+    failures += test_fleet_status_agreement();
+    failures += test_fleet_status_snapshot();
+    failures += test_fleet_status_schedule();
+    failures += test_fleet_status_reply();
+    return failures;
+}
+
 int test_fleet_board(void)
 {
     int failures = 0;
@@ -9506,6 +10149,7 @@ int test_fleet_board(void)
     failures += test_fleet_board_roster_dial_board();
     failures += test_fleet_board_roster_dial_guards();
     failures += test_fleet_board_roster_dial_own_key();
+    failures += test_fleet_status();
     failures += test_fleet_board_public_no_grant_needed();
     /* Leave the process as this group found it: the next group in the same
      * binary must not inherit an open gate. */

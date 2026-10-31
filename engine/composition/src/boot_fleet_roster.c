@@ -923,51 +923,41 @@ size_t boot_fleet_roster_publish(struct node_db *ndb, int64_t now)
 
 /* ── dialling the owner's other machines ─────────────────────────────── */
 
-#define DIAL_ONION_CAP 96
-
-struct dial_acc {
+struct walk_acc {
     const struct root_view *rv;
     const struct zcl_fleet_head *head;
-    void (*dial)(const char *host, int port);
+    void (*visit)(const struct boot_fleet_roster_machine *m, void *user);
+    void *user;
     size_t n;
-    char onions[BOOT_FLEET_ROSTER_MAX][DIAL_ONION_CAP];
 };
 
-static bool dial_seen(const struct dial_acc *a, const char *onion)
+/* One roster line: hand it to the visitor when it verifies under the root,
+ * names a box the head does not revoke, and its endpoint parses. */
+static void walk_line(const char *line, void *user)
 {
-    for (size_t i = 0; i < a->n; i++)
-        if (strcmp(a->onions[i], onion) == 0)
-            return true;
-    return false;
-}
-
-/* One roster line: dial its onion when it verifies under the root, names a
- * box the head does not revoke, is not this box, and has not been dialled
- * in this pass. */
-static void dial_line(const char *line, void *user)
-{
-    struct dial_acc *a = user;
-    uint8_t signer[32], box[32];
-    char onion[DIAL_ONION_CAP];
-    bool sealed = false, self = false;
-    if (a->n >= BOOT_FLEET_ROSTER_MAX)
-        return;
-    if (roster_verify(line, a->rv, signer, box, &sealed) &&
-        !head_revokes(a->head, box) && !head_revokes(a->head, signer) &&
-        zcl_fleet_roster_endpoint(line, a->rv->root, onion, sizeof onion,
-                                  &self) &&
-        !self && onion[0] && !dial_seen(a, onion)) {
-        memcpy(a->onions[a->n++], onion, sizeof onion);
-        a->dial(onion, 0);
+    struct walk_acc *a = user;
+    uint8_t signer[32];
+    struct boot_fleet_roster_machine m;
+    bool sealed = false;
+    memset(&m, 0, sizeof m);
+    if (roster_verify(line, a->rv, signer, m.box, &sealed) &&
+        !head_revokes(a->head, m.box) && !head_revokes(a->head, signer) &&
+        zcl_fleet_roster_endpoint(line, a->rv->root, m.onion, sizeof m.onion,
+                                  &m.self)) {
+        (void)zcl_fleet_roster_machine_name(line, a->rv->root, m.name,
+                                            sizeof m.name);
+        (void)zcl_fleet_roster_enrolled_at(line, a->rv->root, &m.enrolled_at);
+        a->visit(&m, a->user);
+        a->n++;
     }
     memset(signer, 0, sizeof signer);
 }
 
 /* The same verified rows enforcement folds, read from the board store: the
  * roster notes the manager published, so a box that never imported a line
- * still dials it. */
-static void dial_board_rows(struct node_db *ndb, int64_t now,
-                            struct dial_acc *a)
+ * still sees them. */
+static void walk_board_rows(struct node_db *ndb, int64_t now,
+                            struct walk_acc *a)
 {
     struct db_fleet_board_post *rows = zcl_calloc(
         BOOT_FLEET_ROSTER_SCAN_ROWS, sizeof *rows, "fleet_roster_dial_rows");
@@ -979,41 +969,80 @@ static void dial_board_rows(struct node_db *ndb, int64_t now,
         const struct fleet_board_post *p = &rows[i].post;
         if (boot_fleet_roster_is_row(p) && p->text_len > 0 &&
             p->text_len < ZCL_FLEET_ROSTER_LINE_MAX)
-            dial_line(p->text, a);
+            walk_line(p->text, a);
     }
     free(rows);
 }
 
-size_t boot_fleet_roster_dial(struct node_db *ndb, int64_t now,
-                              void (*dial)(const char *host, int port))
+size_t boot_fleet_roster_each_machine(
+    struct node_db *ndb, int64_t now,
+    void (*visit)(const struct boot_fleet_roster_machine *m, void *user),
+    void *user)
 {
     struct root_view rv;
     bool disabled = false;
     size_t n = 0;
-    if (!ndb || !dial || !zcl_fleet_roster_provider_installed())
+    if (!ndb || !visit || !zcl_fleet_roster_provider_installed())
         return 0;
     if (roster_root_view(ndb, &rv, &disabled) != SNAP_READY)
         return 0;
-    struct dial_acc *a = zcl_calloc(1, sizeof *a, "fleet_roster_dial");
+    struct walk_acc *a = zcl_calloc(1, sizeof *a, "fleet_roster_walk");
     struct zcl_fleet_head *head = zcl_calloc(1, sizeof *head,
-                                             "fleet_roster_dial_head");
+                                             "fleet_roster_walk_head");
     if (a && head) {
         zcl_fleet_roster_head(rv.root, head);
         /* A head that cannot be trusted admits nobody, here as in the gate. */
         if (head->state != ZCL_FLEET_HEAD_FAILED) {
             a->rv = &rv;
             a->head = head;
-            a->dial = dial;
-            (void)zcl_fleet_roster_each_line(dial_line, a);
-            dial_board_rows(ndb, now, a);
+            a->visit = visit;
+            a->user = user;
+            (void)zcl_fleet_roster_each_line(walk_line, a);
+            walk_board_rows(ndb, now, a);
             n = a->n;
         }
-        LOG_INFO(ROSTER_LOG, "fleet roster: dialling %zu other machine(s) "
-                 "by onion", n);
     }
     free(a);
     free(head);
     memset(rv.root, 0, sizeof rv.root);
+    return n;
+}
+
+struct dial_acc {
+    void (*dial)(const char *host, int port);
+    size_t n;
+    char onions[BOOT_FLEET_ROSTER_MAX][BOOT_FLEET_ROSTER_ONION_MAX];
+};
+
+/* Dial an other machine's onion once per pass. */
+static void dial_visit(const struct boot_fleet_roster_machine *m, void *user)
+{
+    struct dial_acc *a = user;
+    if (a->n >= BOOT_FLEET_ROSTER_MAX || m->self || !m->onion[0])
+        return;
+    for (size_t i = 0; i < a->n; i++)
+        if (strcmp(a->onions[i], m->onion) == 0)
+            return;
+    memcpy(a->onions[a->n++], m->onion, sizeof m->onion);
+    a->dial(m->onion, 0);
+}
+
+size_t boot_fleet_roster_dial(struct node_db *ndb, int64_t now,
+                              void (*dial)(const char *host, int port))
+{
+    struct dial_acc *a = NULL;
+    size_t n = 0;
+    if (!ndb || !dial || !zcl_fleet_roster_provider_installed())
+        return 0;
+    a = zcl_calloc(1, sizeof *a, "fleet_roster_dial");
+    if (!a)
+        return 0;
+    a->dial = dial;
+    (void)boot_fleet_roster_each_machine(ndb, now, dial_visit, a);
+    n = a->n;
+    LOG_INFO(ROSTER_LOG, "fleet roster: dialling %zu other machine(s) "
+             "by onion", n);
+    free(a);
     return n;
 }
 

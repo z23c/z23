@@ -103,6 +103,16 @@ struct zcl_fleet_roster_provider {
      * claim, not a fact: dialling it is how the claim gets tested. */
     bool (*endpoint)(const char *line, const uint8_t root[32], char *onion,
                      size_t cap, bool *self, void *ctx);
+    /* The human name the operator sealed into one line, written to `out`
+     * (empty when the line does not parse or verify under `root`). Optional;
+     * a provider without it names nobody. Read only for status display. */
+    bool (*machine_name)(const char *line, const uint8_t root[32], char *out,
+                         size_t cap, void *ctx);
+    /* When the operator sealed this line (unix seconds), written to `out`.
+     * Optional; a provider without it dates nobody, and a re-admitted
+     * machine then keeps its first row. Read only for status display. */
+    bool (*enrolled_at)(const char *line, const uint8_t root[32],
+                        int64_t *out, void *ctx);
     void *ctx;
     const char *name;
 };
@@ -130,5 +140,12 @@ bool zcl_fleet_roster_each_line(void (*visit)(const char *line, void *user),
  * callback, false: no endpoint is known. */
 bool zcl_fleet_roster_endpoint(const char *line, const uint8_t root[32],
                                char *onion, size_t cap, bool *self);
+/* The sealed name of one line. With no provider, or one without a
+ * machine_name callback, false and an empty string. */
+bool zcl_fleet_roster_machine_name(const char *line, const uint8_t root[32],
+                                   char *out, size_t cap);
+/* The enrolment time of one line, or false and 0 when it is not known. */
+bool zcl_fleet_roster_enrolled_at(const char *line, const uint8_t root[32],
+                                  int64_t *out);
 
 #endif /* ZCL_UTIL_FLEET_ROSTER_CHECK_H */
