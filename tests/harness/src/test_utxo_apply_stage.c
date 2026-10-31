@@ -103,6 +103,7 @@ static void synthetic_txid(struct uint256 *out, int h, int salt)
     uint256_set_null(out);
     out->data[0] = (uint8_t)(0x80 + h);
     out->data[1] = (uint8_t)salt;
+    out->data[2] = (uint8_t)((unsigned)h >> 8); /* distinct ids past h=255 */
 }
 
 static bool make_tx(struct transaction *tx, int h, bool coinbase,
