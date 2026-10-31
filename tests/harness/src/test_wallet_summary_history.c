@@ -314,6 +314,7 @@ static int test_summary_json(void)
         v.header_height = 301;
         v.peer_best_height = 301;
         v.peer_count = 1;
+        v.chain_fresh = true;
         json_init(&j);
         wallet_summary_to_json(&s, &v, false, "release_assisted", &j);
         ASSERT_EQ(json_get_int(json_get(&j, "blocks_behind")), 1);
@@ -399,7 +400,7 @@ static int test_history_received(const struct wallet_history_entry *e, int n)
     TEST_CASE("wallet_history: received entries") {
         const struct wallet_history_entry *r = find(e, n, 0x12);
         ASSERT(r && r->direction == WALLET_DIR_RECEIVED && r->amount == 2 * ZCL1);
-        ASSERT(r->height == 292 && r->confirmations == 9 && r->private_kind);
+        ASSERT(r->height == 292 && r->confirmations == 9 && !r->private_kind);
         ASSERT_EQ(r->fully_shielded, -1);
         const struct wallet_history_entry *m = find(e, n, 0x13);
         ASSERT(m && m->memo_present && !r->memo_present);
@@ -658,71 +659,68 @@ static int test_unknown_shielded_json(void)
     return failures;
 }
 
+static bool summary_current(const struct wallet_summary *s,
+                            const struct wallet_chain_view *v)
+{
+    struct json_value j;
+    json_init(&j);
+    wallet_summary_to_json(s, v, true, "", &j);
+    bool cur = json_get_bool(json_get(&j, "current"));
+    json_free(&j);
+    return cur;
+}
+
 static int test_current_needs_real_chain(void)
 {
     int failures = 0;
     TEST_CASE("wallet_summary: current needs a real tip and real headers") {
         struct wallet_summary s = {0};
         struct wallet_chain_view v = { .tip_height = 300, .header_height = 300,
-            .scanned_through = 300, .shielded_known = true };
+            .scanned_through = 300, .shielded_known = true,
+            .chain_fresh = true };
         struct json_value j;
-        /* Offline: header equals tip and no peer reports a height. */
-        json_init(&j);
-        wallet_summary_to_json(&s, &v, true, "", &j);
-        ASSERT(!json_get_bool(json_get(&j, "current")));
-        json_free(&j);
-        /* A peer count with no known height, and a height with no peer. */
+        /* Offline: no peer is never current, however fresh the last block. */
+        ASSERT(!summary_current(&s, &v));
+        /* A peer, but the newest block and header are old. */
         v.peer_count = 1;
-        json_init(&j);
-        wallet_summary_to_json(&s, &v, true, "", &j);
-        ASSERT(!json_get_bool(json_get(&j, "current")));
-        json_free(&j);
-        v.peer_count = 0;
-        v.peer_best_height = 300;
-        json_init(&j);
-        wallet_summary_to_json(&s, &v, true, "", &j);
-        ASSERT(!json_get_bool(json_get(&j, "current")));
-        json_free(&j);
-        /* A connected peer that reports the tip is evidence. */
-        v.peer_count = 1;
-        json_init(&j);
-        wallet_summary_to_json(&s, &v, true, "", &j);
-        ASSERT(json_get_bool(json_get(&j, "current")));
-        json_free(&j);
-        /* A peer two blocks ahead of the tip is not current. */
+        v.chain_fresh = false;
+        ASSERT(!summary_current(&s, &v));
+        /* A peer and a fresh block. */
+        v.chain_fresh = true;
+        ASSERT(summary_current(&s, &v));
+        /* A peer reporting a height below the tip makes no difference. */
+        v.peer_best_height = 250;
+        ASSERT(summary_current(&s, &v));
+        /* Two blocks behind the best header or the peers is not current. */
+        v.header_height = 302;
+        ASSERT(!summary_current(&s, &v));
+        v.header_height = 300;
         v.peer_best_height = 302;
-        json_init(&j);
-        wallet_summary_to_json(&s, &v, true, "", &j);
-        ASSERT(!json_get_bool(json_get(&j, "current")));
-        json_free(&j);
-        /* No peer, but a tip block from the last minutes. */
-        v.peer_count = 0;
+        ASSERT(!summary_current(&s, &v));
         v.peer_best_height = 0;
-        v.tip_recent = true;
-        json_init(&j);
-        wallet_summary_to_json(&s, &v, true, "", &j);
-        ASSERT(json_get_bool(json_get(&j, "current")));
-        json_free(&j);
-        /* An old tip and no peer: an offline phone. */
-        v.tip_recent = false;
-        json_init(&j);
-        wallet_summary_to_json(&s, &v, true, "", &j);
-        ASSERT(!json_get_bool(json_get(&j, "current")));
-        json_free(&j);
-        v.peer_count = 1;
-        v.peer_best_height = 300;
         v.header_height = 0;
-        json_init(&j);
-        wallet_summary_to_json(&s, &v, true, "", &j);
-        ASSERT(!json_get_bool(json_get(&j, "current")));
-        json_free(&j);
+        ASSERT(!summary_current(&s, &v));
         v.header_height = 300;
         v.tip_height = 0;
         v.scanned_through = 0;
-        json_init(&j);
-        wallet_summary_to_json(&s, &v, true, "", &j);
-        ASSERT(!json_get_bool(json_get(&j, "current")));
-        json_free(&j);
+        ASSERT(!summary_current(&s, &v));
+        (void)j;
+    } TEST_END
+    return failures;
+}
+
+static int test_chain_fresh(void)
+{
+    int failures = 0;
+    TEST_CASE("wallet_summary: a block or header is fresh for ten minutes") {
+        ASSERT(wallet_chain_fresh(1000, 1000, 0));
+        ASSERT(wallet_chain_fresh(1600, 1000, 0));
+        ASSERT(!wallet_chain_fresh(1601, 1000, 0));
+        ASSERT(wallet_chain_fresh(1601, 1000, 1100));
+        ASSERT(!wallet_chain_fresh(2000, 1000, 1100));
+        ASSERT(!wallet_chain_fresh(1000, 0, 0));
+        ASSERT(!wallet_chain_fresh(300, 0, 0));
+        ASSERT(wallet_chain_fresh(1000, 1200, 0));
     } TEST_END
     return failures;
 }
@@ -789,6 +787,56 @@ static int test_history_shielded_sends(struct node_db *ndb)
         ASSERT(json_get_bool(json_get(&jb, "fully_shielded")));
         json_free(&ja);
         json_free(&jb);
+        free(e);
+        unload(&f);
+    } TEST_END
+    return failures;
+}
+
+/* A payment from another wallet is private only when its stored transaction
+ * shows no transparent input or output. */
+static int test_history_received_privacy(struct node_db *ndb)
+{
+    int failures = 0;
+    TEST_CASE("wallet_history: a received payment is private only when shown") {
+        struct whf f;
+        struct wallet_history_entry *e = NULL;
+        ASSERT(wsh_put_note(ndb, 0x80, 0, IVK_A, 3 * ZCL1, 250, NULL) &&
+               put_tx(ndb, 0x80, 250, 0, false));
+        ASSERT(wsh_put_note(ndb, 0x81, 0, IVK_A, 3 * ZCL1, 250, NULL) &&
+               put_tx(ndb, 0x81, 250, 0, false));
+        ASSERT(wsh_put_note(ndb, 0x82, 0, IVK_A, 3 * ZCL1, 250, NULL) &&
+               put_tx(ndb, 0x82, 250, 0, false));
+        ASSERT(load(ndb, &f));
+        struct db_wallet_tx_fact *tz = find_tx(&f, 0x80);
+        struct db_wallet_tx_fact *zz = find_tx(&f, 0x81);
+        ASSERT(tz && zz);
+        tz->raw_known = true;
+        tz->vin_count = 1; /* a transparent sender */
+        zz->raw_known = true;
+        int n = wallet_history_build(f.notes, (size_t)f.nn, f.coins,
+                                     (size_t)f.nc, f.txs, (size_t)f.nt,
+                                     (const uint8_t (*)[32])&IVK_A, 1, TIP, &e);
+        ASSERT(n > 0);
+        const struct wallet_history_entry *a = find(e, n, 0x80);
+        const struct wallet_history_entry *b = find(e, n, 0x81);
+        const struct wallet_history_entry *c = find(e, n, 0x82);
+        ASSERT(a && b && c);
+        ASSERT_EQ(a->fully_shielded, 0);
+        ASSERT(!a->private_kind);
+        ASSERT_EQ(b->fully_shielded, 1);
+        ASSERT(b->private_kind);
+        ASSERT_EQ(c->fully_shielded, -1);
+        ASSERT(!c->private_kind);
+        struct json_value ja, jc;
+        json_init(&ja);
+        json_init(&jc);
+        wallet_history_entry_to_json(a, &ja);
+        wallet_history_entry_to_json(c, &jc);
+        ASSERT_STR_EQ(json_get_str(json_get(&ja, "kind")), "public");
+        ASSERT(json_get(&jc, "kind")->type == JSON_NULL);
+        json_free(&ja);
+        json_free(&jc);
         free(e);
         unload(&f);
     } TEST_END
@@ -873,7 +921,9 @@ int test_wallet_summary_history(void)
     failures += test_failed_allocation(&ndb);
     failures += test_unknown_shielded_json();
     failures += test_current_needs_real_chain();
+    failures += test_chain_fresh();
     failures += test_history_shielded_sends(&ndb);
+    failures += test_history_received_privacy(&ndb);
     failures += test_latest_address(&ndb);
     node_db_close(&ndb);
     failures += wallet_summary_handlers_run();

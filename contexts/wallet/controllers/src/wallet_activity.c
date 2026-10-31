@@ -216,6 +216,12 @@ bool wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
     return true;
 }
 
+bool wallet_chain_fresh(int64_t now, int64_t tip_time, int64_t header_time)
+{
+    int64_t newest = tip_time > header_time ? tip_time : header_time;
+    return newest > 0 && now - newest <= WALLET_CHAIN_FRESH_SECONDS;
+}
+
 /* ── history ─────────────────────────────────────────────────────── */
 
 struct wa_acc {
@@ -339,16 +345,6 @@ static void wa_classify_outgoing(struct wallet_history_entry *e,
     e->direction = e->amount == 0 ? WALLET_DIR_INTERNAL : WALLET_DIR_SENT;
 }
 
-/* A transaction the wallet sent is private only when its stored form shows no
- * transparent input or output. One that cannot be read is not claimed
- * private. */
-static bool wa_outgoing_private(const struct wa_acc *c,
-                                const struct db_wallet_tx_fact *tx)
-{
-    return c->shielded && tx && tx->raw_known && tx->vin_count == 0 &&
-           tx->vout_count == 0;
-}
-
 /* 1 when every input and output of the transaction is shielded, 0 when any is
  * transparent, -1 when the wallet cannot tell. A transparent coin the wallet
  * received or spent proves 0. Otherwise only the stored transaction shows the
@@ -379,14 +375,13 @@ static void wa_fill_entry(struct wallet_history_entry *e,
         e->time = tx->time_received;
     e->memo_present = c->memo;
     e->fully_shielded = wa_fully_shielded(c, tx);
+    e->private_kind = e->fully_shielded == 1;
     if (in == 0) {
-        e->private_kind = c->shielded;
         e->direction = WALLET_DIR_RECEIVED;
         e->net = out;
         e->amount_known = true;
         e->amount = out;
     } else {
-        e->private_kind = wa_outgoing_private(c, tx);
         wa_classify_outgoing(e, c, in, out, tx);
     }
 }

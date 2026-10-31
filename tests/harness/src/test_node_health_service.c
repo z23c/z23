@@ -215,6 +215,34 @@ static bool health_test_missing_tip_snapshot_ok(
     return ok;
 }
 
+static int health_test_handshaked_peer_count(void)
+{
+    int failures = 0;
+
+    printf("node_health_service: handshaked_peer_count skips peers short of the handshake... ");
+    {
+        struct node_health_snapshot health;
+        struct connman cm;
+        struct net_address addr;
+        struct p2p_node *node = NULL;
+        bool ok = health_test_init_connman_peer(&cm, &addr, &node,
+                                                "handshake-peer", 10);
+        if (ok) {
+            node_health_collect(&health, NULL, NULL);
+            ok = health.peer_count == 1 && health.handshaked_peer_count == 1;
+            node->state = PEER_VERSION_SENT;
+            node_health_collect(&health, NULL, NULL);
+            ok = ok && health.peer_count == 1 &&
+                 health.handshaked_peer_count == 0;
+        }
+        rpc_net_set_connman(NULL);
+        net_manager_free(&cm.manager);
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
 static int health_test_at_tip_missing_active_tip(void)
 {
     int failures = 0;
@@ -2028,6 +2056,7 @@ int test_node_health_service(void)
     failures += health_test_idle_snapshot_without_peers();
     failures += health_test_at_tip_without_peers();
     failures += health_test_at_tip_missing_active_tip();
+    failures += health_test_handshaked_peer_count();
     failures += health_test_headers_ahead_degraded();
     failures += health_test_stale_peer_heights_keep_header_lag();
     failures += health_test_small_gap_serving();

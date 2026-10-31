@@ -63,18 +63,13 @@ static void wa_kv_amount_known(struct json_value *obj, const char *zat_key,
     wa_kv_null(obj, str_key);
 }
 
-/* A tip block newer than this is evidence the chain is live without a peer. */
-#define WA_TIP_RECENT_SECONDS 600
-
-/* The node has evidence the chain is live: a connected peer with a known best
- * height that is at most one block ahead of the tip, or a tip block time
- * within WA_TIP_RECENT_SECONDS. A node that is offline, or cannot tell,
- * has none. */
+/* The node has evidence the chain is live: at least one peer past the
+ * handshake and a block or header from the last ten minutes. Peer start
+ * heights go stale, so they say nothing about the chain's progress; a node
+ * with no peer is offline, however recent its last block. */
 static bool wa_chain_live(const struct wallet_chain_view *v)
 {
-    bool peer = v->peer_count > 0 && v->peer_best_height > 0 &&
-                v->peer_best_height - v->tip_height <= 1;
-    return peer || v->tip_recent;
+    return v->peer_count > 0 && v->chain_fresh;
 }
 
 /* `current` needs a real tip, a real header, every shielded key loaded, a scan
@@ -160,7 +155,10 @@ void wallet_history_entry_to_json(const struct wallet_history_entry *e,
     else
         wa_kv_null(out, "time");
     json_push_kv_str(out, "direction", dir[e->direction]);
-    json_push_kv_str(out, "kind", e->private_kind ? "private" : "public");
+    if (e->fully_shielded >= 0)
+        json_push_kv_str(out, "kind", e->private_kind ? "private" : "public");
+    else
+        wa_kv_null(out, "kind");
     if (e->fully_shielded >= 0)
         json_push_kv_bool(out, "fully_shielded", e->fully_shielded != 0);
     else
@@ -228,14 +226,16 @@ static bool wa_chain_view(struct wallet_rpc_context *ctx,
     v->header_height = ms && ms->pindex_best_header
         ? ms->pindex_best_header->nHeight : 0;
     v->peer_best_height = h.peer_best_height;
-    v->peer_count = h.peer_count;
-    v->tip_recent = false;
+    v->peer_count = h.handshaked_peer_count;
+    int64_t tip_time = 0, header_time = 0;
     if (ms) {
         const struct block_index *tip = active_chain_tip(&ms->chain_active);
-        int64_t now = (int64_t)platform_time_wall_time_t();
-        if (tip && tip->nTime > 0 && now >= (int64_t)tip->nTime)
-            v->tip_recent = now - (int64_t)tip->nTime <= WA_TIP_RECENT_SECONDS;
+        tip_time = tip ? (int64_t)tip->nTime : 0;
+        header_time = ms->pindex_best_header
+            ? (int64_t)ms->pindex_best_header->nTime : 0;
     }
+    v->chain_fresh = wallet_chain_fresh((int64_t)platform_time_wall_time_t(),
+                                        tip_time, header_time);
     v->scanned_through = wallet_read_scanned_through_height(ctx->wallet);
     v->encrypted = wallet_lock_encrypted_at_rest();
     v->locked = !wallet_lock_is_unlocked();
@@ -303,7 +303,7 @@ static void wa_notes_annotate(struct wallet_rpc_context *ctx,
     }
 }
 
-/* Read the shape of each transaction the wallet sent from its stored form. A
+/* Read the shape of each stored transaction, the wallet's own and others'. A
  * transaction that is absent or does not parse stays raw_known = false. */
 static void wa_txs_enrich(struct node_db *ndb, struct db_wallet_tx_fact *txs,
                           int nt)
@@ -312,7 +312,7 @@ static void wa_txs_enrich(struct node_db *ndb, struct db_wallet_tx_fact *txs,
         struct db_wallet_tx row;
         struct transaction tx;
         struct byte_stream bs;
-        if (!txs[i].from_me || !db_wallet_tx_find(ndb, txs[i].txid, &row))
+        if (!db_wallet_tx_find(ndb, txs[i].txid, &row))
             continue;
         transaction_init(&tx);
         stream_init_from_data(&bs, row.raw_tx, row.raw_tx_len);

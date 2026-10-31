@@ -113,7 +113,7 @@ struct wallet_history_entry {
     int confirmations;
     int64_t time;            /* 0 when unknown */
     enum wallet_direction direction;
-    bool private_kind;       /* shielded, with no transparent leg to others */
+    bool private_kind;       /* fully_shielded is 1 */
     /* 1 when every input and output of the transaction is shielded, 0 when
      * any is transparent, -1 when the wallet cannot tell. */
     int fully_shielded;
@@ -149,13 +149,21 @@ size_t wallet_history_page_start(const struct wallet_history_entry *e,
                                  size_t n,
                                  const struct wallet_history_page_key *cur);
 
+/* A block or header newer than this many seconds shows the chain moving. */
+#define WALLET_CHAIN_FRESH_SECONDS 600
+
+/* True when the newest of the tip block and best header was stamped within
+ * WALLET_CHAIN_FRESH_SECONDS of `now`. A time of 0 is unknown and never
+ * fresh; a stamp ahead of `now` (clock skew) counts as fresh. */
+bool wallet_chain_fresh(int64_t now, int64_t tip_time, int64_t header_time);
+
 /* Node state the summary reports beside the amounts. */
 struct wallet_chain_view {
     int tip_height;          /* > 0: a command with no tip fails instead */
     int header_height;       /* 0 when the node knows no header */
     int peer_best_height;    /* 0 or less when no peer reports a height */
-    size_t peer_count;       /* connected peers */
-    bool tip_recent;         /* the tip block is under 10 minutes old */
+    size_t peer_count;       /* peers past the handshake; 0 when offline */
+    bool chain_fresh;        /* wallet_chain_fresh: a new block or header */
     int scanned_through;     /* < 0 when unknown */
     bool locked;
     bool encrypted;

@@ -389,11 +389,42 @@ static int test_sent_amount_from_stored_tx(struct rig *r)
     return failures;
 }
 
+static int test_received_privacy_from_stored_tx(struct rig *r)
+{
+    int failures = 0;
+    TEST_CASE("wallethistory: a received payment is private from its stored tx") {
+        struct db_wallet_tx t;
+        struct json_value j;
+        bool ok;
+        memset(&t, 0, sizeof(t));
+        ASSERT(wsh_put_note(&r->ndb, 0x54, 0, g_ivk, 4 * ZCL1, 211, NULL));
+        ASSERT(serialized_zz(&t.raw_tx, &t.raw_tx_len));
+        memset(t.txid, 0x54, 32);
+        t.has_block = true;
+        t.block_height = 211;
+        memset(t.block_hash, 0x40, 32);
+        t.time_received = 1700000211;
+        t.from_me = false;
+        ASSERT(db_wallet_tx_save(&r->ndb, &t));
+        free(t.raw_tx);
+        call_history(&j, &ok, "",
+            "5454545454545454545454545454545454545454545454545454545454545454");
+        ASSERT(ok);
+        const struct json_value *e = json_get(&j, "entry");
+        ASSERT_STR_EQ(json_get_str(json_get(e, "direction")), "received");
+        ASSERT_STR_EQ(json_get_str(json_get(e, "kind")), "private");
+        ASSERT(json_get_bool(json_get(e, "fully_shielded")));
+        json_free(&j);
+    } TEST_END
+    return failures;
+}
+
 /* Everything a log line must never carry: amounts, ids, addresses, memos. */
 static int test_log_hygiene(const char *log)
 {
     int failures = 0;
     TEST_CASE("handlers: no log line carries wallet data") {
+        ASSERT(strlen(log) > 0);
         static const char *const secret[] = {
             MEMO_TEXT, ADDRESS_TEXT, "500000000", "5.00000000",
             "6161616161616161", "a1a1a1a1a1a1a1a1", "6666666666666666",
@@ -567,6 +598,7 @@ static int run_rig_tests(void)
     failures += test_failed_reads(&r);
     failures += test_memo_detail(&r);
     failures += test_sent_amount_from_stored_tx(&r);
+    failures += test_received_privacy_from_stored_tx(&r);
     rig_close(&r);
     failures += test_unknown_tip();
     failures += test_send_skips_unready_note();

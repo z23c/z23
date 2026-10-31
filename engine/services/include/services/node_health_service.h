@@ -48,6 +48,8 @@ struct node_health_snapshot {
     bool tip_stale;
     bool queue_backed_up;
     size_t peer_count;
+    /* Peers past the version handshake that serve the chain. */
+    size_t handshaked_peer_count;
     int tip_height;
     int header_height;
     int peer_best_height;

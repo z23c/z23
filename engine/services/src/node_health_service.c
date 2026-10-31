@@ -666,7 +666,8 @@ static void health_scan_handshaked_peer_heights(
     int64_t plausible_ceiling,
     int64_t *raw_max,
     int *peers_above_band,
-    int64_t *newest_peer_block_time)
+    int64_t *newest_peer_block_time,
+    size_t *handshaked)
 {
     zcl_mutex_lock(&cm->manager.cs_nodes);
     for (size_t i = 0; i < cm->manager.num_nodes; i++) {
@@ -675,6 +676,7 @@ static void health_scan_handshaked_peer_heights(
             node->state < PEER_HANDSHAKE_COMPLETE ||
             (node->services & NODE_NETWORK) == 0)
             continue;
+        (*handshaked)++;
         int64_t claim = node->starting_height;
         if (claim > *raw_max)
             *raw_max = claim;
@@ -704,7 +706,8 @@ static void health_collect_peer_heights(struct node_health_snapshot *snapshot,
      * only — chain selection is untouched. */
     health_scan_handshaked_peer_heights(cm, plausible_ceiling, &raw_max,
                                         &peers_above_band,
-                                        &newest_peer_block_time);
+                                        &newest_peer_block_time,
+                                        &snapshot->handshaked_peer_count);
 
     struct network_consensus_view nmv;
     bool modal_ready = network_monitor_get_view(&nmv);
