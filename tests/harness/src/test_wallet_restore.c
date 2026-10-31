@@ -281,6 +281,8 @@ static void wr_rmdir_datadir(const char *dir)
     snprintf(p, sizeof(p), "%s/node.db-wal", dir);  unlink(p);
     snprintf(p, sizeof(p), "%s/node.db-shm", dir);  unlink(p);
     snprintf(p, sizeof(p), "%s/zclassic23.pid", dir); unlink(p);
+    /* Darwin keeps the owner lease in a sidecar file next to the database. */
+    snprintf(p, sizeof(p), "%s/node.db.owner-lock", dir); unlink(p);
     rmdir(dir);
 }
 
@@ -303,6 +305,23 @@ static void wr_remove_long_datadir(char *datadir, size_t root_len)
 static int wr_test_long_datadir_lock(void)
 {
     int failures = 0;
+#if defined(__APPLE__)
+    /* Darwin PATH_MAX is 1024, so the 1185-byte datadir cannot be created.
+     * The probe's capacity check (datadir plus pidfile name beyond its
+     * 1200-byte buffer) runs before any file is opened, so the same refusal
+     * is driven with a synthetic name: it must be the "too long" refusal, not
+     * a free datadir. Holding a lock at that depth is Linux-only coverage. */
+    {
+        char datadir[1400];
+        memset(datadir, 'l', 1185);
+        datadir[0] = '/';
+        datadir[1185] = '\0';
+        struct zcl_result r = wallet_restore_datadir_free(datadir);
+        WR_CHECK("long datadir is refused as too long, never free",
+                 !r.ok && strstr(r.message, "too long") != NULL);
+        return failures;
+    }
+#endif
     char datadir[1400];
     char pidfile[1450];
     size_t root_len;
@@ -442,6 +461,25 @@ static void wr_path_target_cleanup(const char *dir)
 static int wr_test_report_path_capacity(void)
 {
     int failures = 0;
+#if defined(__APPLE__)
+    /* Darwin PATH_MAX is 1024, so no directory this deep can exist; the
+     * capacity check runs before any file is touched, so the same refusals
+     * are driven with synthetic names that exist nowhere. */
+    {
+        char deep[1100], long_backup[1100], short_backup[1100];
+        memset(deep, 'p', 1018);
+        deep[0] = '/';
+        deep[1018] = '\0';
+        memset(long_backup, 'q', 1050);
+        long_backup[0] = '/';
+        long_backup[1050] = '\0';
+        snprintf(short_backup, sizeof(short_backup), "%s/absent.sqlite",
+                 wr_dir());
+        failures += wr_path_refusal(short_backup, deep);
+        failures += wr_path_refusal(long_backup, wr_dir());
+        return failures;
+    }
+#endif
     char dirs[8][1100], backup[1200], long_backup[1200];
     size_t count;
     bool built = wr_long_path_fixture(dirs, &count);
@@ -1107,6 +1145,11 @@ int test_wallet_restore(void)
     }
     wr_rm(backup_path);
     wr_rm(src_db);
+    {
+        char lease[512];
+        snprintf(lease, sizeof(lease), "%s.owner-lock", src_db);
+        wr_rm(lease);   /* Darwin's owner-lease sidecar; absent elsewhere */
+    }
     wr_rmdir_datadir(target);
     rmdir(backup_dir);
     WR_CHECK("removed the isolated restore fixture root", rmdir(scratch) == 0);
