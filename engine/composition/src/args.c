@@ -797,20 +797,32 @@ static int args_arm_reindex_backfill(const char *arg,
     return ARGS_ARM_TAKEN;
 }
 
-static int args_arm_tor(const char *arg,
-                        struct args_arm_state *st)
+/* -private-listeners takes no value; the other spellings are refused. */
+static int args_arm_private_listeners(const char *arg, struct app_context *ctx)
 {
-    struct app_context *ctx = st->ctx;
-    if (strcmp(arg, "-tor") == 0) ctx->tor = true;
-    else if (strcmp(arg, "-no-tor") == 0) ctx->no_tor = true;
-    else if (strcmp(arg, "-onlynet=onion") == 0) ctx->onlynet_onion = true;
-    else if (strcmp(arg, "-private-listeners") == 0) ctx->private_listeners = true;
-    else if (strncmp(arg, "--private-listeners", 19) == 0 ||
-             strncmp(arg, "-private-listeners=", 19) == 0) {
+    if (strcmp(arg, "-private-listeners") == 0) {
+        ctx->private_listeners = true;
+        return ARGS_ARM_TAKEN;
+    }
+    if (strncmp(arg, "--private-listeners", 19) == 0 ||
+        strncmp(arg, "-private-listeners=", 19) == 0) {
         fprintf(stderr, "Invalid option: %s (use -private-listeners with no "
                         "value)\n", arg);
         return 1;
     }
+    return ARGS_ARM_NOMATCH;
+}
+
+static int args_arm_tor(const char *arg,
+                        struct args_arm_state *st)
+{
+    struct app_context *ctx = st->ctx;
+    int private_rc = args_arm_private_listeners(arg, ctx);
+    if (private_rc != ARGS_ARM_NOMATCH)
+        return private_rc;
+    if (strcmp(arg, "-tor") == 0) ctx->tor = true;
+    else if (strcmp(arg, "-no-tor") == 0) ctx->no_tor = true;
+    else if (strcmp(arg, "-onlynet=onion") == 0) ctx->onlynet_onion = true;
     else if (strcmp(arg, "-observation=0") == 0) ctx->observation_off = true;
     else if (strcmp(arg, "-observation=1") == 0) ctx->observation_off = false;
     else if (strncmp(arg, "-onlynet=", 9) == 0 ||
@@ -1242,6 +1254,24 @@ static void args_apply_buildworker_config(int argc, char **argv,
         ctx->build_worker = worker[0] == '1';
 }
 
+/* Applies the -private-listeners defaults and refuses a contradictory
+ * -bind=. Returns 0 to continue, 1 after printing the refusal. */
+static int args_resolve_private_listeners(struct app_context *ctx)
+{
+    if (!ctx->private_listeners)
+        return 0;
+    if (!ctx->p2p_bind_address)
+        ctx->p2p_bind_address = "127.0.0.1";
+    ctx->observation_off = true;
+    const char *refusal =
+        app_private_listeners_refusal(ctx, app_tor_real_build_linked());
+    if (refusal) {
+        fprintf(stderr, "Refused: %s\n", refusal);
+        return 1;
+    }
+    return 0;
+}
+
 int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                             bool *show_metrics)
 {
@@ -1280,18 +1310,8 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
     if (!ctx->onion_persist && !ctx->onion_persist_forced_off)
         ctx->onion_persist = args_onion_persist_default(
             ctx->tor, ctx->addnode_peers, ctx->n_addnode_peers);
-    if (ctx->private_listeners && !ctx->p2p_bind_address)
-        ctx->p2p_bind_address = "127.0.0.1";
-    if (ctx->private_listeners)
-        ctx->observation_off = true;
-    {
-        const char *private_refusal = app_private_listeners_refusal(
-            ctx, app_tor_real_build_linked());
-        if (private_refusal) {
-            fprintf(stderr, "Refused: %s\n", private_refusal);
-            return 1;
-        }
-    }
+    if (args_resolve_private_listeners(ctx) != 0)
+        return 1;
     {
         const char *onlynet_refusal =
             app_onlynet_onion_refusal(ctx, app_tor_real_build_linked());

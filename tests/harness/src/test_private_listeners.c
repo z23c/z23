@@ -349,6 +349,32 @@ static bool pl_write_beta6_source(const char *root)
     return f && fclose(f) == 0 && ok;
 }
 
+static bool pl_make_tree(const char *root, const char *data, const char *home,
+                         const char *beta6, const char *cert, const char *key)
+{
+    const char *const dirs[] = {root, data, home, beta6};
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++)
+        if (mkdir(dirs[i], 0700) && errno != EEXIST) return false;
+    return pl_write_beta6_source(beta6) && pl_write_certificate(cert, key);
+}
+
+static bool pl_spawn(struct pl_node *node, char **argv, char **envp)
+{
+    node->pid = fork();
+    if (node->pid < 0) return false;
+    if (node->pid == 0) {
+        int fd = open(node->log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        int null = open("/dev/null", O_RDONLY);
+        if (fd < 0 || null < 0) _exit(126);
+        dup2(null, STDIN_FILENO);
+        dup2(fd, STDOUT_FILENO);
+        dup2(fd, STDERR_FILENO);
+        execve(PL_NODE_BIN, argv, envp);
+        _exit(127);
+    }
+    return true;
+}
+
 static bool pl_start(struct pl_node *node, bool private_listeners)
 {
     memset(node, 0, sizeof(*node));
@@ -364,10 +390,7 @@ static bool pl_start(struct pl_node *node, bool private_listeners)
     snprintf(beta6, sizeof(beta6), "%s/beta6", node->directory);
     snprintf(cert, sizeof(cert), "%s/rpc-cert.pem", node->directory);
     snprintf(key, sizeof(key), "%s/rpc-key.pem", node->directory);
-    if ((mkdir(node->directory, 0700) && errno != EEXIST) ||
-        (mkdir(data, 0700) && errno != EEXIST) ||
-        (mkdir(home, 0700) && errno != EEXIST) || (mkdir(beta6, 0700) && errno != EEXIST) ||
-        !pl_write_beta6_source(beta6) || !pl_write_certificate(cert, key))
+    if (!pl_make_tree(node->directory, data, home, beta6, cert, key))
         return false;
 
     char datadir[PATH_MAX + 16], rpc[32], p2p[32], https[32], fs[32];
@@ -390,19 +413,7 @@ static bool pl_start(struct pl_node *node, bool private_listeners)
     char *envp[] = {env_home, (char *)"PATH=/usr/bin:/bin", env_cert, env_key, env_port,
                     env_source, env_listen, NULL};
 
-    node->pid = fork();
-    if (node->pid < 0) return false;
-    if (node->pid == 0) {
-        int fd = open(node->log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-        int null = open("/dev/null", O_RDONLY);
-        if (fd < 0 || null < 0) _exit(126);
-        dup2(null, STDIN_FILENO);
-        dup2(fd, STDOUT_FILENO);
-        dup2(fd, STDERR_FILENO);
-        execve(PL_NODE_BIN, argv, envp);
-        _exit(127);
-    }
-    return true;
+    return pl_spawn(node, argv, envp);
 }
 
 static void pl_stop(struct pl_node *node)
