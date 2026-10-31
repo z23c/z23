@@ -530,7 +530,10 @@ static void a_missing_worker_ends_the_flow_before_the_commit(void)
     assert(strstr(ws_fail_text(&w.ws), "Nothing was sent"));
     world_init(&w, 42); to_commit(&w, &p);
     feed(&w, E(WS_EV_ABORT));
-    assert(w.ws.state == WS_FAILED && w.ws.fail == WS_FAIL_WORKER);
+    /* the commit may be running: no failure, no Nothing-was-sent text, the node answer still ends it */
+    assert(w.ws.state == WS_COMMIT && w.ws.fail == WS_FAIL_NONE);
+    commit_answer(&w, false, false);
+    assert(w.ws.state == WS_FAILED && !strstr(ws_fail_text(&w.ws), "Nothing was sent"));
     world_init(&w, 43); to_commit(&w, &p);
     commit_answer(&w, true, false);
     feed(&w, E(WS_EV_ABORT));

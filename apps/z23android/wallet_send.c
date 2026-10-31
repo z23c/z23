@@ -300,12 +300,12 @@ static void on_cancel(struct ws *ws, struct ws_actions *out)
 }
 /* The system credential screen backgrounds the app, so leaving during authentication is not a cancel: the
  * result belongs to the tap on this review. The owner can still cancel from the screen. */
-/* The worker could not be started, so nothing queued has run: the flow ends before any commit began. After a
- * commit the poll waits for the next tick instead. */
+/* The worker could not be started, so nothing queued has run: the flow ends before any commit began. A running commit
+ * may still reach the node, so it stays until the node answers; after it the poll waits for the next tick. */
 static void on_abort(struct ws *ws, struct ws_actions *out)
 {
     switch (ws->state) {
-    case WS_BROADCAST: case WS_DONE: case WS_FAILED: case WS_CANCELLED: case WS_IDLE: return;
+    case WS_COMMIT: case WS_BROADCAST: case WS_DONE: case WS_FAILED: case WS_CANCELLED: case WS_IDLE: return;
     default: finish(ws, out, WS_FAILED, WS_FAIL_WORKER, true);
     }
 }

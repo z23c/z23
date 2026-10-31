@@ -583,3 +583,13 @@ A scanned payment code opens a review; nothing is sent from a scan. `wallet_send
 - The wallet is unlocked only inside the send and locked on every way out. The passphrase goes to `core wallet security unlock` on standard input and is cleansed on every path.
 - The screen is protected with `FLAG_SECURE` and obscured-touch filtering before anything is shown, and shows nothing if either is refused. Send must be drawn as an Android View, because touches are read natively and obscured-touch filtering works only on Views.
 - Neither module logs. `make test-wallet-send` runs the directed tests, 100000 or more random event sequences against a model of the rules (commit only after tap and authentication on the same plan, no key committed twice unless refused, no unlock while a lock is owed), the screen over fakes including a real worker thread, and a check that the sources call no logging function.
+- Ticks are required while a lock is owed. After a failed lock the screen may be left, but `wss_end` stays false and only `wss_on_tick` asks for the lock again, so whichever code shows Home (the controller, not yet wired) must keep calling `wss_on_tick` until `wss_end` returns true; otherwise the wallet stays open until the node timer.
+
+Not yet wired. Each item must close before Send is drawn:
+
+- An adapter test that binds the released code to `WALLET_SEND_ONCE_CODE_RELEASED` in `wallet_send_once.h`.
+- An adapter test over the real `zapp_devkey_status_name` strings.
+- An adapter test against the real handler that plan then commit does not return `PLAN_TOKEN_MISMATCH`: the app holds `amount_zat`, the token hashes the amount string.
+- Node message text must never reach the screen: the node messages for `PLAN_TOKEN_MISMATCH` and `SEND_OUTCOME_UNKNOWN` contain "nothing was sent". Only the screen texts of the machine are shown.
+- The "Nothing was sent" of `FEE_CHANGED` holds only while the app re-commits a key solely after a release.
+- The send flow must refuse when the fleet status says `refuses_send`. The Funds screen will say "sending waits", and no lane reads the field yet, so a send would proceed while the screen says it waits. The field comes from `fleet_status_render` (lane claude-app-onion-line); the check belongs with the wiring slice.

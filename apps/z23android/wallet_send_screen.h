@@ -139,7 +139,8 @@ void wss_edit_address(struct wss *screen, const char *address);
 void wss_edit_memo(struct wss *screen, const char *memo, size_t len);
 void wss_on_pause(struct wss *screen);
 void wss_on_resume(struct wss *screen);
-/* Call about once a second while the screen is up. */
+/* Call about once a second for as long as the screen exists, and after it has been left until wss_end returns true:
+ * ticks are what ask again for a lock that is owed, so the wallet stays open until the node timer if they stop. */
 void wss_on_tick(struct wss *screen);
 
 void wss_view(struct wss *screen, struct wss_view *out);

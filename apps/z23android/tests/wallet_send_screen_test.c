@@ -446,7 +446,7 @@ static void unknown_commit_is_never_retried(void)
     tap_and_run(s, &f);
     struct wss_view v = view_of(s);
     assert(f.commits == 1 && v.state == WS_FAILED && !v.can_retry && !v.can_send && v.check_history);
-    assert(strstr(v.status, "Check History") && strstr(v.status, "not be sent again"));
+    assert(strstr(v.status, "Check History") && strstr(v.status, "not be sent again") && !strstr(v.status, "Nothing was sent"));
     wss_tap_retry(s); drain(&f);
     wss_tap_send(s, view_of(s).serial); drain(&f);
     wss_tap_send(s, v.serial); drain(&f);
@@ -677,7 +677,7 @@ static void outcome_mapping_is_pinned(void)
     /* WALLET_RPC_ERROR also covers an admitted transaction whose compensation failed: unknown */
     assert(wss_commit_outcome_of(true, false, "WALLET_RPC_ERROR") == WSS_UNKNOWN);
     assert(wss_commit_outcome_of(true, false, "PLAN_REQUIRED") == WSS_UNKNOWN);
-    /* none of these moved money, but a key reuse proves an earlier send exists: all read as unknown */
+    /* none of these proves that nothing was sent (a reused key proves an earlier send exists, an unknown outcome may have been sent): all read as unknown */
     static const char *const unknown[] = {"SEND_IN_PROGRESS", "SEND_OUTCOME_UNKNOWN", "IDEMPOTENCY_KEY_REUSED",
         "MISSING_IDEMPOTENCY_KEY", "INVALID_IDEMPOTENCY_KEY", "SEND_KEY_RELEASED"};
     for (size_t i = 0; i < sizeof(unknown) / sizeof(unknown[0]); ++i)
