@@ -6580,7 +6580,7 @@ static const char ic_split_make_after[] =
 static bool ic_split_git(const char *what)
 {
     char cmd[640];
-    return snprintf(cmd, sizeof(cmd), "cd " IC_SPLIT_REPO " && %s >/dev/null "
+    return snprintf(cmd, sizeof(cmd), "cd " IC_SPLIT_REPO " && ( %s ) >/dev/null "
                     "2>&1", what) < (int)sizeof(cmd) &&
            system(cmd) == 0;
 }
