@@ -137,6 +137,11 @@ test: prepare-quirc test-bridge test-voice test-host test-devkey test-dexgen tes
 	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/bridge-client-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/bridge-test.XXXXXX'); \
 	  trap 'rmdir "$$scratch"' 0; '$(BUILD_DIR)/bridge-client-test' "$$scratch"
+	$(HOST_CC) $(HOST_WARNINGS) -I. -I../../platform/modules/json/include \
+	  -I../../platform/modules/base/include tests/wallet_view_test.c wallet_view.c \
+	  ../../platform/modules/json/src/json.c ../../platform/modules/base/src/cleanse.c \
+	  ../../platform/modules/base/src/safe_alloc.c -o '$(BUILD_DIR)/wallet-view-test'
+	'$(BUILD_DIR)/wallet-view-test'
 
 QR_WINDOW_SOURCES := bridge/qr_window.c ../../vendor/qrcodegen/qrcodegen.c
 .PHONY: qr-window test-qr-window test-scan
