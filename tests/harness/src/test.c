@@ -133,9 +133,12 @@ static bool run_simnet_wire_argv_suite(int argc, char **argv, int *failures)
             const char *name = argv[i];
             if (strncmp(name, "test_", 5) == 0)
                 name += 5;
-            for (size_t c = 0; c < sizeof simnet_wire_cases / sizeof simnet_wire_cases[0]; c++)
-                if (strcmp(name, simnet_wire_cases[c].name) == 0)
+            for (size_t c = 0; c < sizeof simnet_wire_cases / sizeof simnet_wire_cases[0]; c++) {
+                if (strcmp(name, simnet_wire_cases[c].name) == 0) {
                     *failures += simnet_wire_cases[c].fn();
+                    break;
+                }
+            }
         }
     }
     printf("\n=== simnet_wire argv subset complete: %d failure(s) ===\n",
@@ -1134,7 +1137,7 @@ static const char *test_only_from_argv(int argc, char **argv)
     return only;
 }
 
-/* Full-suite part 1: foundation through hostile-input key tests. */
+/* Full-suite part 1: foundation tests through the soak harness. */
 static void run_full_suite_foundation(int *failures)
 {
     { extern int test_base_foundation(void);
@@ -1581,7 +1584,7 @@ static void run_full_suite_consensus_edges(int *failures)
     *failures += test_key_hostile_wif();
 }
 
-/* Full-suite part 3: defensive, consensus-regression and monitor tests. */
+/* Full-suite part 3: defensive and consensus-regression tests. */
 static void run_full_suite_defensive_gaps(int *failures)
 {
     /* Subsection 5/6 finish-drive: defensive + consensus unit-test gaps. */
@@ -1638,7 +1641,8 @@ static void run_full_suite_defensive_gaps(int *failures)
     *failures += test_sha512_isa_parity();
 }
 
-/* Full-suite part 4: sapling/script/wallet regressions through simnet. */
+/* Full-suite part 4: sapling/script/wallet regressions, simnet, domain
+ * consensus and later integration tests. */
 static void run_full_suite_crypto_and_wallet(int *failures)
 {
     /* Drive 4 finish-drive: sapling/script/wallet pedantic regression tests. */
