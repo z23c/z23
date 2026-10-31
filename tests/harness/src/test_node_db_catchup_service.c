@@ -18,6 +18,11 @@
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "storage/disk_block_io.h"
+#include "storage/anchor_kv.h"
+#include "storage/progress_store.h"
+#include "sapling/incremental_merkle_tree.h"
+#include "core/serialize.h"
+#include <sqlite3.h>
 
 #include <errno.h>
 #include <pthread.h>
@@ -1518,6 +1523,253 @@ static int ndc_check_shielded_values(int64_t balance, const char *label)
     return failures;
 }
 
+/* ── Sapling tree stays at the tip while old heights are walked ───────
+ * A node that backfills old bodies walks heights far below the persisted
+ * tree. The walk must not append their outputs to it, and a persisted copy
+ * that disagrees with its header root must be replaced from the reducer
+ * frontier or left alone, never extended. */
+enum { NDC_SAP_N = 4 };
+
+struct ndc_sap_fix {
+    char dir[256];
+    struct uint256 hashes[NDC_SAP_N + 1];
+    struct uint256 roots[NDC_SAP_N + 1];
+    struct block_index slots[NDC_SAP_N + 1];
+    struct active_chain ac;
+    struct uint256 cm_real;
+    struct uint256 cm_stray;
+    bool built;
+};
+
+static void ndc_sap_tree_blob(const struct uint256 *cms, size_t n,
+                              struct byte_stream *out)
+{
+    struct incremental_merkle_tree t;
+    sapling_tree_init(&t);
+    for (size_t i = 0; i < n; i++)
+        incremental_tree_append(&t, &cms[i]);
+    stream_init(out, 4096);
+    incremental_tree_serialize(&t, out);
+}
+
+static bool ndc_sap_make_block(struct block *b, int h, const struct uint256 *cm)
+{
+    block_init(b);
+    b->header.nVersion = 4;
+    b->header.nTime = 1700000200u + (uint32_t)h;
+    b->header.nBits = 0x2000ffffu;
+    b->header.hashPrevBlock.data[0] = (uint8_t)h;
+    b->header.hashMerkleRoot.data[0] = (uint8_t)(0x50 + h);
+    b->num_vtx = 1;
+    b->vtx = calloc(1, sizeof(struct transaction)); // raw-alloc-ok:test-fixture
+    if (!b->vtx)
+        return false;
+    transaction_init(&b->vtx[0]);
+    transaction_alloc(&b->vtx[0], 1, 1);
+    b->vtx[0].vin[0].sequence = 0xffffffffu;
+    b->vtx[0].vout[0].value = 5000000000LL + h;
+    if (!cm)
+        return true;
+    b->vtx[0].overwintered = true;
+    b->vtx[0].version = SAPLING_TX_VERSION;
+    b->vtx[0].version_group_id = SAPLING_VERSION_GROUP_ID;
+    b->vtx[0].v_shielded_output =
+        calloc(1, sizeof(struct output_description)); // raw-alloc-ok:test-fixture
+    if (!b->vtx[0].v_shielded_output)
+        return false;
+    b->vtx[0].num_shielded_output = 1;
+    b->vtx[0].v_shielded_output[0].cm = *cm;
+    return true;
+}
+
+/* Heights 1..4; only height 2 carries a Sapling output. */
+static bool ndc_sap_build(struct ndc_sap_fix *f)
+{
+    test_make_tmpdir(f->dir, sizeof(f->dir), "node_db_catchup", "sapling");
+    char blocks[512];
+    snprintf(blocks, sizeof(blocks), "%s/blocks", f->dir);
+    mkdir(blocks, 0755);
+    f->cm_real.data[0] = 0x11;
+    f->cm_stray.data[0] = 0x77;
+    struct incremental_merkle_tree t;
+    sapling_tree_init(&t);
+    struct disk_block_pos pos[NDC_SAP_N + 1];
+    unsigned char msg_start[4] = {0x24, 0xe9, 0x27, 0x64};
+    f->built = true;
+    for (int h = 1; h <= NDC_SAP_N && f->built; h++) {
+        struct block b;
+        f->built = ndc_sap_make_block(&b, h, h == 2 ? &f->cm_real : NULL);
+        if (f->built && h == 2)
+            incremental_tree_append(&t, &f->cm_real);
+        incremental_tree_root(&t, &f->roots[h]);
+        disk_block_pos_init(&pos[h]);
+        f->built = f->built && write_block_to_disk(&b, &pos[h], f->dir, msg_start);
+        block_get_hash(&b, &f->hashes[h]);
+        block_free(&b);
+    }
+    active_chain_init(&f->ac);
+    for (int h = 1; h <= NDC_SAP_N && f->built; h++) {
+        memset(&f->slots[h], 0, sizeof(f->slots[h]));
+        f->slots[h].nHeight = h;
+        f->slots[h].nStatus = BLOCK_HAVE_DATA;
+        f->slots[h].nFile = pos[h].nFile;
+        f->slots[h].nDataPos = pos[h].nPos;
+        f->slots[h].phashBlock = &f->hashes[h];
+        f->slots[h].hashFinalSaplingRoot = f->roots[h];
+        f->built = active_chain_install_tip_slot(&f->ac, &f->slots[h]);
+    }
+    return f->built;
+}
+
+static bool ndc_sap_seed(struct node_db *ndb, const struct uint256 *cms,
+                         size_t n, int64_t height)
+{
+    struct byte_stream ts;
+    ndc_sap_tree_blob(cms, n, &ts);
+    bool ok = node_db_state_set(ndb, "sapling_tree", ts.data, ts.size) &&
+              node_db_state_set_int(ndb, "sapling_tree_rebuild_height", height);
+    stream_free(&ts);
+    return ok;
+}
+
+static bool ndc_sap_read(struct node_db *ndb, size_t *size,
+                         struct uint256 *root, int64_t *height)
+{
+    uint8_t buf[8192];
+    size_t len = 0;
+    struct incremental_merkle_tree t;
+    sapling_tree_init(&t);
+    if (!node_db_state_get(ndb, "sapling_tree", buf, sizeof(buf), &len) ||
+        len == 0 ||
+        !node_db_state_get_int(ndb, "sapling_tree_rebuild_height", height))
+        return false;
+    struct byte_stream ts;
+    stream_init_from_data(&ts, buf, len);
+    if (!incremental_tree_deserialize(&t, &ts))
+        return false;
+    *size = incremental_tree_size(&t);
+    incremental_tree_root(&t, root);
+    return true;
+}
+
+enum ndc_sap_seed_kind { NDC_SEED_NONE, NDC_SEED_EMPTY, NDC_SEED_GOOD, NDC_SEED_WRONG };
+
+struct ndc_sap_case {
+    const char *name;
+    enum ndc_sap_seed_kind seed;
+    int64_t seed_height;
+    bool anchor;     /* reducer frontier {cm_real} at height 2 */
+    int cursor;      /* projection cursor before the walk */
+    long want_size;  /* -1: no persisted tree */
+    int64_t want_height;
+};
+
+static bool ndc_sap_seed_case(struct ndc_sap_fix *f, struct node_db *ndb,
+                              const struct ndc_sap_case *c)
+{
+    struct uint256 wrong[2] = {f->cm_real, f->cm_stray};
+    switch (c->seed) {
+    case NDC_SEED_NONE: return true;
+    case NDC_SEED_EMPTY: return ndc_sap_seed(ndb, NULL, 0, c->seed_height);
+    case NDC_SEED_GOOD: return ndc_sap_seed(ndb, &f->cm_real, 1, c->seed_height);
+    case NDC_SEED_WRONG: return ndc_sap_seed(ndb, wrong, 2, c->seed_height);
+    }
+    return false;
+}
+
+/* The reducer frontier goes into the real progress store; the walk reads it
+ * through progress_store_open_reader(), the production path. */
+static bool ndc_sap_open_store(struct ndc_sap_fix *f, const char *name,
+                              bool anchor)
+{
+    sqlite3 *db = NULL;
+    char sdir[512];
+    snprintf(sdir, sizeof(sdir), "%s/%s.store", f->dir, name);
+    mkdir(sdir, 0755);
+    if (!progress_store_open(sdir) || !(db = progress_store_db()) ||
+        !anchor_kv_ensure_schema(db) || !anchor_kv_initialize_history(db, 0))
+        return false;
+    if (!anchor)
+        return true;
+    struct incremental_merkle_tree good;
+    sapling_tree_init(&good);
+    incremental_tree_append(&good, &f->cm_real);
+    return anchor_kv_add_tree(db, ANCHOR_POOL_SAPLING, &good, 2);
+}
+
+static int ndc_sap_verify(const struct ndc_sap_fix *f, const struct ndc_sap_case *c,
+                          struct node_db *ndb, bool seeded, int rc)
+{
+    int failures = 0;
+    size_t size = 0;
+    int64_t height = -1;
+    struct uint256 root = {0};
+    bool read = seeded && ndc_sap_read(ndb, &size, &root, &height);
+    printf("sapling walk %s: rc=%d read=%d size=%zu height=%lld\n", c->name,
+           rc, read, size, (long long)height);
+    NDC_CHECK("sapling walk completes", seeded && rc >= 0);
+    if (c->want_size < 0) {
+        NDC_CHECK("sapling walk persists no tree", seeded && !read);
+        return failures;
+    }
+    NDC_CHECK("sapling tree size is the true size",
+              read && size == (size_t)c->want_size);
+    NDC_CHECK("sapling tree height is the walk height",
+              read && height == c->want_height);
+    if (c->want_size == 1)
+        NDC_CHECK("sapling tree root equals the header root",
+                  read && memcmp(root.data,
+                                 f->roots[c->want_height].data, 32) == 0);
+    return failures;
+}
+
+static int ndc_sap_run(struct ndc_sap_fix *f, const struct ndc_sap_case *c)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.db", f->dir, c->name);
+    struct node_db ndb;
+    bool opened = node_db_open(&ndb, path);
+    bool store = ndc_sap_open_store(f, c->name, c->anchor);
+    bool seeded = opened && store && ndc_sap_seed_case(f, &ndb, c) &&
+        (c->cursor == 0 ||
+         node_db_sync_set_tip(&ndb, f->hashes[c->cursor].data, c->cursor));
+    int rc = seeded ? node_db_catchup_service_run(&ndb, &f->ac, NULL, f->dir)
+                    : -99;
+    int failures = ndc_sap_verify(f, c, &ndb, seeded, rc);
+    if (store)
+        progress_store_close();
+    if (opened)
+        node_db_close(&ndb);
+    return failures;
+}
+
+static int ndc_check_sapling_tree_not_extended_by_old_heights(void)
+{
+    int failures = 0;
+    struct ndc_sap_fix f = {0};
+    NDC_CHECK("sapling fixture builds", ndc_sap_build(&f));
+    static const struct ndc_sap_case cases[] = {
+        /* A correct tip-sized tree; the walk revisits heights 1..4. */
+        {"backfill", NDC_SEED_GOOD, 4, false, 0, 1, 4},
+        /* A wrong copy replaced by the verified reducer frontier. */
+        {"repair", NDC_SEED_WRONG, 4, true, 0, 1, 4},
+        /* A wrong copy with no verified source is left untouched. */
+        {"unrepairable", NDC_SEED_WRONG, 4, false, 0, 2, 4},
+        /* A valid copy two heights behind the walk, bridged by header root. */
+        {"gap_bridge", NDC_SEED_GOOD, 2, false, 3, 1, 4},
+        /* A valid old copy, moved forward from the reducer frontier. */
+        {"gap_anchor", NDC_SEED_EMPTY, 1, true, 3, 1, 4},
+        /* No copy and no recorded height past Sapling: nothing is built. */
+        {"empty_past_activation", NDC_SEED_NONE, -1, false, 3, -1, -1},
+    };
+    if (f.built)
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+            failures += ndc_sap_run(&f, &cases[i]);
+    active_chain_free(&f.ac);
+    test_cleanup_tmpdir(f.dir);
+    return failures;
+}
+
 int test_node_db_catchup_service(void)
 {
     int failures = 0;
@@ -1535,6 +1787,7 @@ int test_node_db_catchup_service(void)
     failures += ndc_check_shielded_values(7, "positive");
     failures += ndc_check_shielded_values(-11, "negative");
     failures += ndc_check_torn_hashless_walk();
+    failures += ndc_check_sapling_tree_not_extended_by_old_heights();
 
     /* ── Commit cadence / BUSY_SNAPSHOT restart / abort-streak park ────
      * Five real on-disk blocks + active-chain slots drive three fresh

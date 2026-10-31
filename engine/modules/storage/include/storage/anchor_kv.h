@@ -64,6 +64,15 @@ enum anchor_kv_lookup_result anchor_kv_get(
     struct sqlite3 *db, int pool, const struct uint256 *root,
     struct incremental_merkle_tree *tree_out, int64_t *height_out);
 
+/* Frontier of the highest-height stored row at or below max_height: the tree
+ * after the last block up to max_height that added commitments, hence the
+ * tree at max_height itself. Same history-gate result as latest_tree when no
+ * row qualifies. */
+enum anchor_kv_lookup_result anchor_kv_tree_at_or_below(
+    struct sqlite3 *db, int pool, int64_t max_height,
+    struct incremental_merkle_tree *tree_out, struct uint256 *root_out,
+    int64_t *height_out);
+
 /* Current active-chain frontier: highest-height stored row, or the empty tree
  * when history is complete and the pool has not changed yet. */
 enum anchor_kv_lookup_result anchor_kv_latest_tree(

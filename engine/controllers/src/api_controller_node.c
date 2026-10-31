@@ -30,6 +30,9 @@
 #include "models/wallet_key.h"
 #include "models/wallet_tx.h"
 #include "sapling/incremental_merkle_tree.h"
+#include "storage/anchor_kv.h"
+#include "storage/progress_store.h"
+#include "validation/chainstate.h"
 #include "services/node_health_service.h"
 #include "net/snapshot_sync_contract.h"
 #include "validation/contextual_check_tx.h"
@@ -443,11 +446,26 @@ static void api_node_status_read_chain_tip(struct main_state *ms,
     }
 }
 
-/* Read current sapling tree from node_state (authoritative source,
- * updated by sync_controller on every block connection). */
-static void api_node_status_read_sapling_tree(size_t *sapling_tree_size,
-                                              char *sapling_tree_root_hex)
+/* True when root equals the header root at height on the active chain. */
+static bool api_node_status_copy_verified(struct main_state *ms,
+                                          const struct uint256 *root,
+                                          int64_t height)
 {
+    const struct block_index *bi = ms && height >= 0
+        ? active_chain_at(&ms->chain_active, (int)height) : NULL;
+    return bi && uint256_eq(root, &bi->hashFinalSaplingRoot);
+}
+
+/* Read the sapling tree copy from node_state. The catchup walk writes it, so
+ * it trails the tip for as long as that walk is behind. */
+static void api_node_status_read_sapling_copy(size_t *sapling_tree_size,
+                                              char *sapling_tree_root_hex,
+                                              struct main_state *ms,
+                                              int64_t *copy_height,
+                                              bool *copy_verified)
+{
+    *copy_height = -1;
+    *copy_verified = false;
     struct node_db *ndb = g_api_ctx.node_db ?
         g_api_ctx.node_db : app_runtime_node_db();
     if (ndb && ndb->db) {
@@ -467,10 +485,66 @@ static void api_node_status_read_sapling_tree(size_t *sapling_tree_size,
                     incremental_tree_root(&api_tree, &tree_root);
                     uint256_get_hex(&tree_root,
                                     sapling_tree_root_hex);
+                    if (node_db_state_get_int(ndb, "sapling_tree_rebuild_height",
+                                              copy_height))
+                        *copy_verified = api_node_status_copy_verified(
+                            ms, &tree_root, *copy_height);
                 }
             }
         }
     }
+}
+
+/* Latest reducer Sapling frontier, accepted only when its root equals the
+ * header root at its own height. The reducer checks every anchor against the
+ * header, so this is the tree of the applied tip. */
+static bool api_node_status_read_reducer_tree(struct main_state *ms,
+                                              size_t *size, char *root_hex,
+                                              int64_t *height,
+                                              char *header_root_hex)
+{
+    sqlite3 *rdb = ms ? progress_store_open_reader() : NULL;
+    if (!rdb)
+        return false; // raw-return-ok:store unavailable, caller falls back
+    struct incremental_merkle_tree t;
+    struct uint256 root;
+    enum anchor_kv_lookup_result lr = anchor_kv_latest_tree(
+        rdb, ANCHOR_POOL_SAPLING, &t, &root, height);
+    sqlite3_close(rdb);
+    const struct block_index *bi = lr == ANCHOR_KV_FOUND && *height >= 0
+        ? active_chain_at(&ms->chain_active, (int)*height) : NULL;
+    if (!bi || !uint256_eq(&root, &bi->hashFinalSaplingRoot))
+        return false; // raw-return-ok:no verified frontier, caller falls back
+    *size = incremental_tree_size(&t);
+    uint256_get_hex(&root, root_hex);
+    uint256_get_hex(&bi->hashFinalSaplingRoot, header_root_hex);
+    return *size > 0;
+}
+
+/* Sapling tree for the status page: the reducer frontier when it verifies,
+ * else the node_state copy. tree_source names the one reported and
+ * tree_height the height whose header root it is compared against (-1: the
+ * tip, as before). The persisted copy is always read, so copy_size,
+ * copy_height and copy_verified show its state even when the reducer
+ * frontier is reported. */
+static void api_node_status_read_sapling_tree(
+    struct main_state *ms, size_t *size, char *root_hex, int64_t *tree_height,
+    char *tree_header_root_hex, const char **source, size_t *copy_size,
+    int64_t *copy_height, bool *copy_verified)
+{
+    char copy_root_hex[65] = "null";
+    *copy_size = 0;
+    api_node_status_read_sapling_copy(copy_size, copy_root_hex, ms,
+                                      copy_height, copy_verified);
+    if (api_node_status_read_reducer_tree(ms, size, root_hex, tree_height,
+                                          tree_header_root_hex)) {
+        *source = "reducer";
+        return;
+    }
+    *tree_height = -1;
+    *source = "node_state";
+    *size = *copy_size;
+    memcpy(root_hex, copy_root_hex, sizeof(copy_root_hex));
 }
 
 /* Hex buffers that were never filled in still hold their "null" sentinel;
@@ -479,6 +553,59 @@ static const char *api_node_status_hex_or_null(const char *hex)
 {
     return strcmp(hex, "null") == 0 ? NULL : hex;
 }
+/* Witness readiness of the wallet's unspent local notes at the served tip. A
+ * note that is missing or stale cannot be spent until the tip path or a
+ * witness rescan brings it current. */
+static void api_node_status_push_witnesses(struct json_value *sapling,
+                                           int tip_height)
+{
+    struct node_db *ndb = g_api_ctx.node_db ?
+        g_api_ctx.node_db : app_runtime_node_db();
+    struct db_sapling_witness_summary ws = {0};
+    bool ok = ndb && ndb->db &&
+              db_sapling_note_witness_summary(ndb, tip_height, &ws);
+    json_push_kv_int(sapling, "witness_ready", ok ? ws.ready_notes : -1);
+    json_push_kv_int(sapling, "witness_missing", ok ? ws.missing_notes : -1);
+    json_push_kv_int(sapling, "witness_stale", ok ? ws.stale_notes : -1);
+}
+
+/* The "sapling" object of the status document. */
+static void api_node_status_push_sapling(struct json_value *body,
+                                         const char *tip_root_hex,
+                                         int tip_height)
+{
+    char root_hex[65] = "null";
+    char tree_header_root_hex[65] = "null";
+    size_t size = 0, copy_size = 0;
+    int64_t tree_height = -1, copy_height = -1;
+    bool copy_verified = false;
+    const char *source = "node_state";
+    api_node_status_read_sapling_tree(g_api_ctx.main_state, &size, root_hex,
+                                      &tree_height, tree_header_root_hex,
+                                      &source, &copy_size, &copy_height,
+                                      &copy_verified);
+    const char *compared = tree_height >= 0 ? tree_header_root_hex
+                                            : tip_root_hex;
+    struct json_value sapling;
+    json_init(&sapling);
+    json_set_object(&sapling);
+    json_push_kv_int(&sapling, "tree_size", (int64_t)size);
+    api_json_push_kv_nullable_str(&sapling, "tree_root",
+                                  api_node_status_hex_or_null(root_hex));
+    api_json_push_kv_nullable_str(&sapling, "header_root",
+                                  api_node_status_hex_or_null(tip_root_hex));
+    json_push_kv_int(&sapling, "tree_height", tree_height);
+    json_push_kv_str(&sapling, "tree_source", source);
+    json_push_kv_bool(&sapling, "roots_match",
+                      size > 0 && strcmp(root_hex, compared) == 0);
+    json_push_kv_int(&sapling, "copy_size", (int64_t)copy_size);
+    json_push_kv_int(&sapling, "copy_height", copy_height);
+    json_push_kv_bool(&sapling, "copy_verified", copy_verified);
+    api_node_status_push_witnesses(&sapling, tip_height);
+    json_push_kv(body, "sapling", &sapling);
+    json_free(&sapling);
+}
+
 /* Route: /api/node/status — comprehensive one-stop diagnostics */
 size_t api_serve_node_status(uint8_t *response, size_t response_max)
 {
@@ -509,16 +636,12 @@ size_t api_serve_node_status(uint8_t *response, size_t response_max)
     int tip_height = -1;
     int header_height = -1;
     int64_t tip_time = 0;
-    size_t sapling_tree_size = 0;
 
     api_node_status_read_chain_tip(g_api_ctx.main_state, &tip_height,
                                    &header_height, &tip_time,
                                    tip_hash_hex, sapling_root_hex,
                                    best_header_hex);
 
-    char sapling_tree_root_hex[65] = "null";
-    api_node_status_read_sapling_tree(&sapling_tree_size,
-                                      sapling_tree_root_hex);
 
     /* Download stats — read off the health snapshot already collected
      * above instead of re-fetching from the download manager. */
@@ -568,19 +691,7 @@ size_t api_serve_node_status(uint8_t *response, size_t response_max)
     json_push_kv(&body, "chain", &chain);
     json_free(&chain);
 
-    struct json_value sapling;
-    json_init(&sapling);
-    json_set_object(&sapling);
-    json_push_kv_int(&sapling, "tree_size", (int64_t)sapling_tree_size);
-    api_json_push_kv_nullable_str(&sapling, "tree_root",
-                                  api_node_status_hex_or_null(sapling_tree_root_hex));
-    api_json_push_kv_nullable_str(&sapling, "header_root",
-                                  api_node_status_hex_or_null(sapling_root_hex));
-    json_push_kv_bool(&sapling, "roots_match",
-                      sapling_tree_size > 0 &&
-                      strcmp(sapling_tree_root_hex, sapling_root_hex) == 0);
-    json_push_kv(&body, "sapling", &sapling);
-    json_free(&sapling);
+    api_node_status_push_sapling(&body, sapling_root_hex, tip_height);
 
     struct json_value network;
     json_init(&network);

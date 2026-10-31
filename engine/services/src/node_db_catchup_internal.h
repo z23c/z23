@@ -59,4 +59,33 @@ int node_db_catchup_try_sapling_decrypt(struct node_db *ndb,
                                         int height,
                                         bool *ok_out);
 
+struct sqlite3;
+struct active_chain;
+#include "sapling/incremental_merkle_tree.h"
+
+/* Catchup view of node_state["sapling_tree"]: the tree, the height it covers
+ * (-1 = none recorded), whether the walk may append to it, and whether it
+ * was replaced from the reducer frontier (dirty = not yet persisted). Defined in
+ * node_db_catchup_sapling_tree.c. */
+struct catchup_sapling_tree {
+    struct incremental_merkle_tree tree;
+    struct uint256 root;
+    int64_t height;
+    bool root_valid;
+    bool usable;
+    bool dirty;
+    int64_t anchor_retry_h;
+    int skipped;
+};
+
+void catchup_sapling_tree_load(struct node_db *ndb,
+                               const struct active_chain *chain,
+                               struct catchup_sapling_tree *ct);
+bool catchup_sapling_tree_prepare(struct catchup_sapling_tree *ct,
+                                  const struct active_chain *chain, int h);
+void catchup_sapling_tree_note_advanced(struct catchup_sapling_tree *ct, int h);
+void catchup_sapling_tree_note_skipped(struct catchup_sapling_tree *ct, int h);
+void catchup_sapling_tree_persist_dirty(struct node_db *ndb,
+                                        struct catchup_sapling_tree *ct);
+
 #endif /* ZCL_NODE_DB_CATCHUP_INTERNAL_H */

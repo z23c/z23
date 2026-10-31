@@ -149,7 +149,7 @@ engine/modules/storage/src/coins_ram_boot_reconcile.c:coins_ram_reconcile_boot:3
 engine/reducer/jobs/src/stage_repair_reducer_frontier_purge.c:stage_reducer_frontier_purge_noncanonical:39
 engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_stages_from_cold_import:18
 engine/services/src/legacy_import_service.c:legacy_import_service_run:19
-engine/services/src/node_db_catchup_service.c:node_db_catchup_service_run:63
+engine/services/src/node_db_catchup_service.c:node_db_catchup_service_run:78
 engine/services/src/node_db_import_service.c:node_db_import_service_run:29
 engine/services/src/nullifier_backfill_service.c:nullifier_backfill_service_run:16
 engine/services/src/property_grant_commit.c:commit_attempt:24

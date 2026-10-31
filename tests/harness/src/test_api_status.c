@@ -4,6 +4,11 @@
  */
 
 #include "test/api_test_fixtures.h"
+#include "controllers/sync_controller.h"
+#include "core/serialize.h"
+#include "sapling/incremental_merkle_tree.h"
+#include "storage/anchor_kv.h"
+#include "storage/progress_store.h"
 
 /* Datadir the agent boot context reports to authenticated callers. */
 #define API_STATUS_BOOT_DATADIR "/tmp/zcl-canonical"
@@ -769,10 +774,154 @@ static bool api_status_public_paths_absent(uint8_t *resp, size_t cap)
     return ok;
 }
 
+/* ── Sapling block of node status: reducer frontier and persisted copy ──
+ * The served tip is height 1. The reducer holds the frontier of that height;
+ * node_state holds a copy that is correct or carries extra commitments. */
+struct api_status_sapling {
+    struct main_state ms;
+    struct block_index *blocks[4];
+    struct node_db ndb;
+    char dir[256];
+    struct uint256 root;
+    bool up;
+};
+
+static void api_status_sapling_tree(struct incremental_merkle_tree *t,
+                                    int count)
+{
+    sapling_tree_init(t);
+    for (int i = 0; i < count; i++) {
+        struct uint256 cm = {{(uint8_t)(i + 1), 0x42}};
+        incremental_tree_append(t, &cm);
+    }
+}
+
+static bool api_status_sapling_set_copy(struct node_db *ndb, int count,
+                                        int64_t height)
+{
+    struct incremental_merkle_tree t;
+    struct byte_stream s;
+    api_status_sapling_tree(&t, count);
+    stream_init(&s, 4096);
+    incremental_tree_serialize(&t, &s);
+    bool ok = node_db_state_set(ndb, "sapling_tree", s.data, s.size) &&
+              node_db_state_set_int(ndb, "sapling_tree_rebuild_height",
+                                    height);
+    stream_free(&s);
+    return ok;
+}
+
+static void api_status_sapling_open(struct api_status_sapling *f,
+                                    bool with_reducer)
+{
+    struct incremental_merkle_tree t;
+    char path[300];
+    memset(f, 0, sizeof(*f));
+    test_reset_shared_globals();
+    test_make_tmpdir(f->dir, sizeof(f->dir), "api_status", "sapling");
+    snprintf(path, sizeof(path), "%s/node.db", f->dir);
+    api_status_sapling_tree(&t, 2);
+    incremental_tree_root(&t, &f->root);
+    f->up = api_test_build_chain(&f->ms, f->blocks, 4) &&
+            node_db_open(&f->ndb, path);
+    if (!f->up)
+        return;
+    f->blocks[1]->hashFinalSaplingRoot = f->root;
+    progress_store_close();
+    if (with_reducer)
+        f->up = progress_store_open(f->dir) &&
+                anchor_kv_ensure_schema(progress_store_db()) &&
+                anchor_kv_initialize_history(progress_store_db(), 1) &&
+                anchor_kv_add_tree(progress_store_db(), ANCHOR_POOL_SAPLING,
+                                   &t, 1);
+    reducer_frontier_provable_tip_set(1);
+    api_set_state(&f->ms, NULL, NULL, &f->ndb, api_test_datadir());
+}
+
+static void api_status_sapling_close(struct api_status_sapling *f)
+{
+    progress_store_close();
+    node_db_close(&f->ndb);
+    api_status_release_provable_chain(&f->ms);
+    test_cleanup_tmpdir(f->dir);
+}
+
+static bool api_status_sapling_check(
+    uint8_t *resp, size_t cap, const char *source, int64_t size,
+    int64_t tree_height, bool roots_match, int64_t copy_size,
+    int64_t copy_height, bool copy_verified, int64_t missing)
+{
+    struct json_value root;
+    size_t n = api_handle_request("GET", "/api/node/status", NULL, 0, resp,
+                                  cap);
+    bool ok = api_status_load_response(resp, n, cap, &root, true);
+    const struct json_value *s = ok ? json_get(&root, "sapling") : NULL;
+    const struct api_status_field fields[] = {
+        { NULL, API_STATUS_FIELD_PRESENT, NULL, 0, NULL },
+        { "tree_source", API_STATUS_FIELD_STR, source, 0, NULL },
+        { "tree_size", API_STATUS_FIELD_INT, NULL, size, NULL },
+        { "tree_height", API_STATUS_FIELD_INT, NULL, tree_height, NULL },
+        { "roots_match", API_STATUS_FIELD_BOOL, NULL, roots_match, NULL },
+        { "copy_size", API_STATUS_FIELD_INT, NULL, copy_size, NULL },
+        { "copy_height", API_STATUS_FIELD_INT, NULL, copy_height, NULL },
+        { "copy_verified", API_STATUS_FIELD_BOOL, NULL, copy_verified, NULL },
+        { "witness_ready", API_STATUS_FIELD_INT, NULL, 0, NULL },
+        { "witness_missing", API_STATUS_FIELD_INT, NULL, missing, NULL },
+        { "witness_stale", API_STATUS_FIELD_INT, NULL, 0, NULL },
+    };
+    ok = api_status_match_fields(s, fields, sizeof(fields) / sizeof(fields[0]),
+                                 ok);
+    json_free(&root);
+    return ok;
+}
+
+static int api_status_sapling_ok(uint8_t *resp, size_t cap)
+{
+    int failures = 0;
+    struct api_status_sapling f;
+
+    printf("api: sapling status reports the reducer frontier and shows an "
+           "inflated persisted copy... ");
+    api_status_sapling_open(&f, true);
+    if (f.up && api_status_sapling_set_copy(&f.ndb, 4, 1) &&
+        api_status_sapling_check(resp, cap, "reducer", 2, 1, true, 4, 1,
+                                 false, 0))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    api_status_sapling_close(&f);
+
+    printf("api: sapling status without a reducer frontier reports the "
+           "copy and whether it verifies... ");
+    api_status_sapling_open(&f, false);
+    bool ok = f.up && api_status_sapling_set_copy(&f.ndb, 2, 1) &&
+              api_status_sapling_check(resp, cap, "node_state", 2, -1, true,
+                                       2, 1, true, 0) &&
+              api_status_sapling_set_copy(&f.ndb, 4, 1) &&
+              api_status_sapling_check(resp, cap, "node_state", 4, -1, false,
+                                       4, 1, false, 0);
+    if (ok)
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    api_status_sapling_close(&f);
+
+    printf("api: sapling status counts a note without a witness... ");
+    api_status_sapling_open(&f, true);
+    uint8_t txid[32] = {0x21}, pad[512] = {0}, d[11] = {1}, k[32] = {1};
+    if (f.up && api_status_sapling_set_copy(&f.ndb, 2, 1) &&
+        node_db_sync_sapling_note(&f.ndb, txid, 0, 1000, k, pad, 512, k, d, k,
+                                  k, k, 1) &&
+        api_status_sapling_check(resp, cap, "reducer", 2, 1, true, 2, 1, true,
+                                 1))
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    api_status_sapling_close(&f);
+    return failures;
+}
+
 int api_status_focused_tests(void)
 {
     int failures = 0;
-    uint8_t resp[8192];
+    uint8_t resp[16384];
 
     printf("api: node status tip identity follows provable tip... ");
     if (api_status_node_tip_identity_ok(resp, sizeof(resp)))
@@ -830,6 +979,8 @@ int api_status_focused_tests(void)
     if (api_status_agent_alias_summary_ok(resp, sizeof(resp)))
         printf("OK\n");
     else { printf("FAIL\n"); failures++; }
+
+    failures += api_status_sapling_ok(resp, sizeof(resp));
 
     return failures;
 }

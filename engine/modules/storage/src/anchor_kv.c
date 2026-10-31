@@ -494,27 +494,43 @@ static enum anchor_kv_lookup_result anchor_kv_latest_empty_history(
     return ANCHOR_KV_FOUND;
 }
 
-enum anchor_kv_lookup_result anchor_kv_latest_tree(
-    sqlite3 *db, int pool, struct incremental_merkle_tree *tree_out,
-    struct uint256 *root_out, int64_t *height_out)
+/* Prepared latest-row query bounded by max_height; NULL (logged) on failure. */
+static sqlite3_stmt *anchor_latest_stmt(sqlite3 *db, int pool,
+                                        int64_t max_height)
+{
+    char sql[160];
+    int n = snprintf(sql, sizeof(sql),
+                     "SELECT anchor,height,tree FROM %s WHERE height<=? "
+                     "ORDER BY height DESC LIMIT 1", anchor_table(pool));
+    sqlite3_stmt *s = NULL;
+    if (n <= 0 || (size_t)n >= sizeof(sql) ||
+        sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) {
+        LOG_WARN(ANCHOR_SUBSYS, "latest_tree prepare failed: %s",
+                 sqlite3_errmsg(db));
+        return NULL; // raw-return-ok:failure logged above
+    }
+    if (sqlite3_bind_int64(s, 1, max_height) != SQLITE_OK) {
+        LOG_WARN(ANCHOR_SUBSYS, "latest_tree bind failed: %s",
+                 sqlite3_errmsg(db));
+        sqlite3_finalize(s);
+        return NULL; // raw-return-ok:failure logged above
+    }
+    return s;
+}
+
+enum anchor_kv_lookup_result anchor_kv_tree_at_or_below(
+    sqlite3 *db, int pool, int64_t max_height,
+    struct incremental_merkle_tree *tree_out, struct uint256 *root_out,
+    int64_t *height_out)
 {
     if (height_out) *height_out = -1;
     if (!db || !anchor_pool_valid(pool) || !tree_out) {
         LOG_WARN(ANCHOR_SUBSYS, "latest_tree: invalid args");
         return ANCHOR_KV_ERROR;
     }
-    char sql[160];
-    int n = snprintf(sql, sizeof(sql),
-                     "SELECT anchor,height,tree FROM %s "
-                     "ORDER BY height DESC LIMIT 1", anchor_table(pool));
-    if (n <= 0 || (size_t)n >= sizeof(sql))
+    sqlite3_stmt *s = anchor_latest_stmt(db, pool, max_height);
+    if (!s)
         return ANCHOR_KV_ERROR;
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK) {
-        LOG_WARN(ANCHOR_SUBSYS, "latest_tree prepare failed: %s",
-                 sqlite3_errmsg(db));
-        return ANCHOR_KV_ERROR;
-    }
     enum anchor_kv_lookup_result result = ANCHOR_KV_HISTORY_INCOMPLETE;
     int rc = sqlite3_step(s);  // raw-sql-ok:progress-kv-kernel-store
     if (rc == SQLITE_ROW) {
@@ -918,3 +934,10 @@ bool anchor_kv_seed_frontier_row(sqlite3 *db, int pool,
     return true;
 }
 
+enum anchor_kv_lookup_result anchor_kv_latest_tree(
+    sqlite3 *db, int pool, struct incremental_merkle_tree *tree_out,
+    struct uint256 *root_out, int64_t *height_out)
+{
+    return anchor_kv_tree_at_or_below(db, pool, INT64_MAX, tree_out, root_out,
+                                      height_out);
+}

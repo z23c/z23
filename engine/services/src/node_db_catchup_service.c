@@ -504,18 +504,32 @@ static int catchup_count_wallet_keys(const struct wallet *w)
     return wallet_keys;
 }
 
-static void catchup_load_sapling_tree(struct node_db *ndb,
-                                      struct incremental_merkle_tree *tree)
+/* Append block h to the persisted tree only when the tree covers h-1; an
+ * already-covered or non-adjacent height is left to whoever owns the tree. */
+static bool catchup_tree_step(struct node_db *ndb, const struct active_chain *chain,
+                              const struct block *blk,
+                              struct catchup_sapling_tree *ct, int h,
+                              struct wallet *w)
 {
-    uint8_t tree_buf[8192];
-    size_t tree_len = 0;
-    if (node_db_state_get(ndb, "sapling_tree", tree_buf, sizeof(tree_buf), &tree_len)
-        && tree_len > 0) {
-        struct byte_stream ts;
-        stream_init_from_data(&ts, tree_buf, tree_len);
-        sapling_tree_init(tree);
-        incremental_tree_deserialize(tree, &ts);
+    bool may = catchup_sapling_tree_prepare(ct, chain, h);
+    catchup_sapling_tree_persist_dirty(ndb, ct);
+    if (!may) {
+        catchup_sapling_tree_note_skipped(ct, h);
+        return true;
     }
+    if (!advance_wallet_witnesses(ndb, blk, &ct->tree, h, w))
+        return false; // raw-return-ok:caller logs the failed height
+    catchup_sapling_tree_note_advanced(ct, h);
+    return true;
+}
+
+/* Force the completion checkpoint when the tree covers the committed cursor. */
+static void catchup_final_checkpoint(const struct catchup_sapling_tree *ct,
+                                     const struct block_index *tip, int h)
+{
+    if (tip && tip->phashBlock && ct->height == h)
+        sapling_tree_flat_checkpoint_note(&ct->tree, h,
+                                          tip->phashBlock->data, true);
 }
 
 static void catchup_note_busy_snapshot(struct node_db *ndb, bool *busy_snapshot)
@@ -614,7 +628,7 @@ static void catchup_abort_pass(bool *restore_ok)
 /* Post-commit work of one batch: bounded WAL checkpoint, flat-file Sapling
  * checkpoint, progress line. */
 static void catchup_batch_committed(struct node_db *ndb, bool bulk_mode,
-                                    struct incremental_merkle_tree *tree,
+                                    const struct catchup_sapling_tree *ct,
                                     const struct block_index *pindex, int h,
                                     int indexed, int total, int wallet_hits,
                                     int64_t t_start)
@@ -637,8 +651,8 @@ static void catchup_batch_committed(struct node_db *ndb, bool bulk_mode,
      * h by appending this block's outputs. A clean restart resumes
      * replay from this height instead of re-folding from Sapling
      * activation. */
-    if (pindex->phashBlock)
-        sapling_tree_flat_checkpoint_note(tree, h,
+    if (pindex->phashBlock && ct->height == h)
+        sapling_tree_flat_checkpoint_note(&ct->tree, h,
                                           pindex->phashBlock->data,
                                           false);
     int64_t elapsed = (int64_t)platform_time_wall_time_t() - t_start;
@@ -767,18 +781,14 @@ static bool catchup_tip_hashed(const struct block_index *tip)
 static void catchup_final_commit_done(struct catchup_batch *cb,
                                       int last_indexed_height,
                                       const struct block_index *last_indexed_tip,
-                                      struct incremental_merkle_tree *sapling_tree)
+                                      const struct catchup_sapling_tree *ct)
 {
     cb->tx_open = false;
     cb->last_committed_height = last_indexed_height;
-    /* Force a fresh flat-file checkpoint at catchup completion
-     * (including on reaching tip), so the next boot has a
-     * checkpoint at the newest applied height. Guarded on a
-     * resolvable tip block hash for the {height, hash, root} key. */
-    if (catchup_tip_hashed(last_indexed_tip))
-        sapling_tree_flat_checkpoint_note(
-            sapling_tree, cb->last_committed_height,
-            last_indexed_tip->phashBlock->data, true);
+    /* Force a fresh flat-file checkpoint at catchup completion (including on
+     * reaching tip), so the next boot has a checkpoint at the newest applied
+     * height. */
+    catchup_final_checkpoint(ct, last_indexed_tip, cb->last_committed_height);
 }
 
 static void catchup_print_summary(bool interrupted, int indexed,
@@ -888,9 +898,8 @@ int node_db_catchup_service_run(struct node_db *ndb,
     node_db_catchup_block_mapping_init(&cached_mapping);
 
     /* Initialize Sapling commitment tree for catchup */
-    struct incremental_merkle_tree sapling_tree;
-    sapling_tree_init(&sapling_tree);
-    catchup_load_sapling_tree(ndb, &sapling_tree);
+    struct catchup_sapling_tree sapling_tree;
+    catchup_sapling_tree_load(ndb, chain, &sapling_tree);
 
     if (!node_db_begin_immediate(ndb)) {
         LOG_WARN("catchup", "catchup: failed to open main transaction");
@@ -900,6 +909,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
         return -1; // raw-return-ok:logged-above
     }
     cb.tx_open = true;
+    catchup_sapling_tree_persist_dirty(ndb, &sapling_tree);
 
     /* Unreadable blocks are LOUD HOLES, not abort triggers: on a
      * cold-import datadir the imported index carries the source node's
@@ -1049,7 +1059,7 @@ int node_db_catchup_service_run(struct node_db *ndb,
         }
 
         /* Advance Sapling tree + wallet witnesses */
-        if (!advance_wallet_witnesses(ndb, &blk, &sapling_tree, h, w)) {
+        if (!catchup_tree_step(ndb, chain, &blk, &sapling_tree, h, w)) {
             LOG_WARN("catchup", "catchup: witness/tree advance failed at height %d", h);
             block_free(&blk);
             failed = true;
