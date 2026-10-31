@@ -305,6 +305,45 @@ static bool attempt_option_valid(const char *id)
     return false;
 }
 
+/* The options whose value is numeric; parse_numeric_option() reads it. */
+static bool numeric_flag(const char *a)
+{
+    return strcmp(a, "--turns") == 0 || strcmp(a, "--rounds") == 0
+        || strcmp(a, "--timeout") == 0 || strcmp(a, "--gate-timeout") == 0
+        || strcmp(a, "--max-cost-usd") == 0 || strcmp(a, "--max-turns") == 0;
+}
+
+/* One numeric value. False when it is refused, and the caller reports it.
+ * --timeout and --gate-timeout are range-checked in main(). */
+static bool parse_numeric_option(const char *flag, const char *v,
+                                 struct unit_opts *o)
+{
+    if (strcmp(flag, "--turns") == 0 || strcmp(flag, "--rounds") == 0)
+        return engine_cli_turns_parse(v, &o->turns) && o->turns <= 10;
+    if (strcmp(flag, "--max-turns") == 0) {
+        o->cli_turns_set = true;
+        return engine_cli_turns_parse(v, &o->cli_turns);
+    }
+    if (strcmp(flag, "--timeout") == 0)
+        o->timeout_s = atoi(v);
+    else if (strcmp(flag, "--gate-timeout") == 0)
+        o->gate_timeout_s = atoi(v);
+    else
+        o->max_cost_usd = atof(v);
+    return true;
+}
+
+/* The options that take no value. False when a is not one of them. */
+static bool parse_switch_flag(const char *a, struct unit_opts *o)
+{
+    if (strcmp(a, "--no-group") == 0)     { o->no_group = true;   return true; }
+    if (strcmp(a, "--yes-dispatch") == 0) { o->yes_dispatch = true; return true; }
+    if (strcmp(a, "--dry-run") == 0)      { o->dry_run = true;    return true; }
+    if (strcmp(a, "--list") == 0)         { o->list = true;       return true; }
+    if (strcmp(a, "--probe") == 0)        { o->probe = true;      return true; }
+    return false;
+}
+
 static bool parse_args(int argc, char **argv, struct unit_opts *o)
 {
     memset(o, 0, sizeof(*o));
@@ -317,13 +356,12 @@ static bool parse_args(int argc, char **argv, struct unit_opts *o)
             continue;
         }
         if (strncmp(a, "--max-turns=", 12) == 0) {
-            o->cli_turns_set = true;
-            if (!engine_cli_turns_parse(a + 12, &o->cli_turns))
+            if (!parse_numeric_option("--max-turns", a + 12, o))
                 LOG_FAIL("engine_unit", "--max-turns requires decimal 1..256");
             continue;
         }
         if (strncmp(a, "--rounds=", 9) == 0) {
-            if (!engine_cli_turns_parse(a + 9, &o->turns) || o->turns > 10)
+            if (!parse_numeric_option("--rounds", a + 9, o))
                 LOG_FAIL("engine_unit", "--rounds requires decimal 1..10");
             continue;
         }
@@ -348,33 +386,19 @@ static bool parse_args(int argc, char **argv, struct unit_opts *o)
         TAKE("--state-dir", state_dir)
         TAKE("--fleet-ledger", fleet_ledger_bin)
 #undef TAKE
-        if (strcmp(a, "--turns") == 0 || strcmp(a, "--rounds") == 0 || strcmp(a, "--timeout") == 0
-            || strcmp(a, "--gate-timeout") == 0
-            || strcmp(a, "--max-cost-usd") == 0
-            || strcmp(a, "--max-turns") == 0) {
+        if (numeric_flag(a)) {
             if (!need_value(argc, i, a))
                 return false;
             const char *v = argv[++i];
-            if (strcmp(a, "--turns") == 0 || strcmp(a, "--rounds") == 0) {
-                if (!engine_cli_turns_parse(v, &o->turns) || o->turns > 10)
-                    LOG_FAIL("engine_unit", "--rounds requires decimal 1..10");
-            } else if (strcmp(a, "--max-turns") == 0) {
-                o->cli_turns_set = true;
-                if (!engine_cli_turns_parse(v, &o->cli_turns))
+            if (!parse_numeric_option(a, v, o)) {
+                if (strcmp(a, "--max-turns") == 0)
                     LOG_FAIL("engine_unit", "--max-turns requires decimal 1..256");
-            } else if (strcmp(a, "--timeout") == 0)
-                o->timeout_s = atoi(v);
-            else if (strcmp(a, "--gate-timeout") == 0)
-                o->gate_timeout_s = atoi(v);
-            else
-                o->max_cost_usd = atof(v);
+                LOG_FAIL("engine_unit", "--rounds requires decimal 1..10");
+            }
             continue;
         }
-        if (strcmp(a, "--no-group") == 0)     { o->no_group = true;   continue; }
-        if (strcmp(a, "--yes-dispatch") == 0) { o->yes_dispatch = true; continue; }
-        if (strcmp(a, "--dry-run") == 0)      { o->dry_run = true;    continue; }
-        if (strcmp(a, "--list") == 0)         { o->list = true;       continue; }
-        if (strcmp(a, "--probe") == 0)        { o->probe = true;      continue; }
+        if (parse_switch_flag(a, o))
+            continue;
         if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
             usage();
             exit(0);
@@ -778,6 +802,51 @@ static int append_body(char *p, size_t room, const char *heading,
     return snprintf(p, room, "%s\n\n%s\n\n", heading, body);
 }
 
+/* The territory section: the tree's measured brief when one resolved, else a
+ * line saying none was declared. Returns the snprintf() result. */
+static int compose_territory_head(const struct unit_opts *o, const char *brief,
+                                  char *out, size_t room)
+{
+    if (brief)
+        return snprintf(out, room,
+            "# Territory %s\n\n"
+            "What follows is the tree's own answer about this territory,\n"
+            "regenerated from the code index on this run. It is not a written\n"
+            "description and nobody maintains it by hand.\n"
+            "\n"
+            "Read `routed` and `reached` as the different facts they are.\n"
+            "Routed says which registered group runs when a file here\n"
+            "changes. Reached says a registered test entry point actually\n"
+            "calls that public function. They are never added together, and\n"
+            "`unknown` is the call graph refusing to answer — not a quiet\n"
+            "vote for either neighbour.\n"
+            "\n%s\n\n",
+            o->territory, brief);
+    return snprintf(out, room, "Territory: none declared.\n\n");
+}
+
+/* The closing instruction: how the unit is judged, or that it has no group. */
+static int compose_gate_note(const struct unit_opts *o, char *out, size_t room)
+{
+    if (o->no_group)
+        return snprintf(out, room,
+            "This unit was dispatched with no test group. Say plainly in your\n"
+            "reply what is therefore unverified. It will not be recorded as a\n"
+            "pass.\n");
+    return snprintf(out, room,
+        "After your reply is applied, this exact command is run:\n"
+        "    make t-fast-exact ONLY=%s\n"
+        "Its machine-readable SUITE VERDICT line must report a NON-ZERO\n"
+        "groups_ran, zero groups_failed, and a cold (not cached) run. A\n"
+        "groups_ran of 0 means the group is registered with nothing in it,\n"
+        "and counts as a FAILURE no matter what any exit code says.\n"
+        "\n"
+        "Nothing you write about your own work is read as evidence. If you\n"
+        "change nothing, the outcome is recorded as a FAILURE even if the\n"
+        "gate passes, because a passing gate over an unchanged tree is\n"
+        "evidence about the tree and not about you.\n", o->group);
+}
+
 static char *compose_prompt(const struct unit_opts *o,
                             const struct engine_vendor *v, const char *task,
                             const char *brief, const char *carried_preamble,
@@ -835,25 +904,7 @@ static char *compose_prompt(const struct unit_opts *o,
     EMIT(append_body(p + n, cap - (size_t)n, "## How to approach it",
                      engine_prompt_template_body(o->kind, "task")));
 
-    int head;
-    if (brief)
-        head = snprintf(p + n, cap - (size_t)n,
-            "# Territory %s\n\n"
-            "What follows is the tree's own answer about this territory,\n"
-            "regenerated from the code index on this run. It is not a written\n"
-            "description and nobody maintains it by hand.\n"
-            "\n"
-            "Read `routed` and `reached` as the different facts they are.\n"
-            "Routed says which registered group runs when a file here\n"
-            "changes. Reached says a registered test entry point actually\n"
-            "calls that public function. They are never added together, and\n"
-            "`unknown` is the call graph refusing to answer — not a quiet\n"
-            "vote for either neighbour.\n"
-            "\n%s\n\n",
-            o->territory, brief);
-    else
-        head = snprintf(p + n, cap - (size_t)n,
-            "Territory: none declared.\n\n");
+    const int head = compose_territory_head(o, brief, p + n, cap - (size_t)n);
     if (head < 0 || (size_t)head >= cap - (size_t)n) {
         free(p);
         LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
@@ -895,26 +946,7 @@ static char *compose_prompt(const struct unit_opts *o,
                      engine_prompt_template_body(o->kind, "judging")));
 #undef EMIT
 
-    int m;
-    if (o->no_group) {
-        m = snprintf(p + n, cap - (size_t)n,
-            "This unit was dispatched with no test group. Say plainly in your\n"
-            "reply what is therefore unverified. It will not be recorded as a\n"
-            "pass.\n");
-    } else {
-        m = snprintf(p + n, cap - (size_t)n,
-            "After your reply is applied, this exact command is run:\n"
-            "    make t-fast-exact ONLY=%s\n"
-            "Its machine-readable SUITE VERDICT line must report a NON-ZERO\n"
-            "groups_ran, zero groups_failed, and a cold (not cached) run. A\n"
-            "groups_ran of 0 means the group is registered with nothing in it,\n"
-            "and counts as a FAILURE no matter what any exit code says.\n"
-            "\n"
-            "Nothing you write about your own work is read as evidence. If you\n"
-            "change nothing, the outcome is recorded as a FAILURE even if the\n"
-            "gate passes, because a passing gate over an unchanged tree is\n"
-            "evidence about the tree and not about you.\n", o->group);
-    }
+    int m = compose_gate_note(o, p + n, cap - (size_t)n);
     if (m < 0 || (size_t)(n + m) >= cap) {
         free(p);
         LOG_NULL("engine_unit", "the composed prompt does not fit its cap");
@@ -1133,6 +1165,63 @@ static void probe_report_refusal(const char *log, int64_t elapsed_ms)
            (long long)elapsed_ms, excerpt);
 }
 
+/* Removes the probe's prompt file, when one was written. */
+static void probe_remove_prompt(const char *prompt_file)
+{
+    if (prompt_file[0]) (void)remove(prompt_file);
+}
+
+/* A file-mode row reads its prompt from a file, so the probe writes one under
+ * TMPDIR. False after reporting why it could not. */
+static bool probe_prompt_file(const char *ask, char *prompt_file, size_t cap)
+{
+    const char *dir = getenv("TMPDIR");
+    if (!dir || !dir[0]) dir = "/tmp";
+    if ((size_t)snprintf(prompt_file, cap, "%s/z23-probe-%ld.txt", dir,
+                         (long)getpid()) >= cap) {
+        printf("TEMP PATH TOO LONG\n");
+        return false;
+    }
+    if (!engine_emit_file(prompt_file, ask, strlen(ask))) {
+        printf("COULD NOT WRITE THE PROBE PROMPT\n");
+        return false;
+    }
+    return true;
+}
+
+/* A structured reply from a Grok-style CLI: its own observation, or the
+ * refusal explaining why there is none. */
+static int probe_grok_report(const struct engine_vendor *v, int rc,
+                             char *log, int64_t elapsed)
+{
+    struct engine_cli_observation observation;
+    if (!engine_cli_observation_parse(v, log, strlen(log), &observation)) {
+        probe_report_refusal(log, elapsed);
+        free(log);
+        return 1;
+    }
+    printf("exit %d in %lldms  model=%s turns=%lld session=%s\n", rc,
+           (long long)elapsed, observation.resolved_model,
+           (long long)observation.turns, observation.session_id);
+    free(log);
+    return rc == 0 ? 0 : 1;
+}
+
+/* The last non-empty line, flattened. A plain CLI prints a transcript;
+ * the probe reports that it answered, not what it said. */
+static void probe_last_line(char *log, char *tail, size_t tail_cap)
+{
+    size_t len = strlen(log);
+    while (len > 0 && (log[len - 1] == '\n' || log[len - 1] == '\r'))
+        log[--len] = '\0';
+    const char *last = log;
+    for (size_t i = 0; i < len; i++)
+        if (log[i] == '\n') last = log + i + 1;
+    size_t n = 0;
+    for (const char *p = last; *p && n < tail_cap - 1; p++)
+        tail[n++] = (*p == '\r') ? ' ' : *p;
+}
+
 /* A CLI vendor is probed by running it, because that is what dispatch does.
  * The prompt is written to a temp file for a file-mode row and passed
  * directly for an argument-mode one, so the probe exercises the same seam
@@ -1146,20 +1235,9 @@ static int probe_cli(const struct engine_vendor *v, const char *model_override,
     }
     char prompt_file[512] = {0};
     const char *ask = "Reply with exactly: ok";
-    if (v->cli_prompt == ENGINE_CLI_PROMPT_FILE) {
-        const char *dir = getenv("TMPDIR");
-        if (!dir || !dir[0]) dir = "/tmp";
-        if ((size_t)snprintf(prompt_file, sizeof(prompt_file),
-                             "%s/z23-probe-%ld.txt", dir, (long)getpid())
-            >= sizeof(prompt_file)) {
-            printf("TEMP PATH TOO LONG\n");
-            return 1;
-        }
-        if (!engine_emit_file(prompt_file, ask, strlen(ask))) {
-            printf("COULD NOT WRITE THE PROBE PROMPT\n");
-            return 1;
-        }
-    }
+    if (v->cli_prompt == ENGINE_CLI_PROMPT_FILE
+        && !probe_prompt_file(ask, prompt_file, sizeof(prompt_file)))
+        return 1;
     const struct engine_cli_inputs in = {
         .prompt  = v->cli_prompt == ENGINE_CLI_PROMPT_ARG ? ask : prompt_file,
         .workdir = ".",
@@ -1170,13 +1248,13 @@ static int probe_cli(const struct engine_vendor *v, const char *model_override,
     const char *argv[ENGINE_CLI_ARGV_MAX];
     if (engine_cli_argv_build(v, &in, argv, ENGINE_CLI_ARGV_MAX) == 0) {
         printf("ARGV REFUSED\n");
-        if (prompt_file[0]) (void)remove(prompt_file);
+        probe_remove_prompt(prompt_file);
         return 1;
     }
     char *log = zcl_malloc(UNIT_PROBE_LOG_BYTES, "engine_unit_probe_log");
     if (!log) {
         printf("NO BUFFER\n");
-        if (prompt_file[0]) (void)remove(prompt_file);
+        probe_remove_prompt(prompt_file);
         return 1;
     }
     const int64_t t0 = clock_now_monotonic_ns();
@@ -1184,7 +1262,7 @@ static int probe_cli(const struct engine_vendor *v, const char *model_override,
     const int rc = run_cli(v, argv, NULL, log, UNIT_PROBE_LOG_BYTES,
                            UNIT_PROBE_CLI_TIMEOUT_MS, &timed_out);
     const int64_t elapsed = (clock_now_monotonic_ns() - t0) / 1000000;
-    if (prompt_file[0]) (void)remove(prompt_file);
+    probe_remove_prompt(prompt_file);
 
     if (rc < 0) {
         printf("COULD NOT LAUNCH %s in %lldms\n", v->program,
@@ -1197,32 +1275,11 @@ static int probe_cli(const struct engine_vendor *v, const char *model_override,
         free(log);
         return 1;
     }
-    if (v->report_format == ENGINE_CLI_OUTPUT_GROK_JSON) {
-        struct engine_cli_observation observation;
-        if (!engine_cli_observation_parse(v, log, strlen(log), &observation)) {
-            probe_report_refusal(log, elapsed);
-            free(log);
-            return 1;
-        }
-        printf("exit %d in %lldms  model=%s turns=%lld session=%s\n", rc,
-               (long long)elapsed, observation.resolved_model,
-               (long long)observation.turns, observation.session_id);
-        free(log);
-        return rc == 0 ? 0 : 1;
-    }
+    if (v->report_format == ENGINE_CLI_OUTPUT_GROK_JSON)
+        return probe_grok_report(v, rc, log, elapsed);
 
-    /* The last non-empty line, flattened. A plain CLI prints a transcript;
-     * the probe reports that it answered, not what it said. */
     char tail[81] = {0};
-    size_t len = strlen(log);
-    while (len > 0 && (log[len - 1] == '\n' || log[len - 1] == '\r'))
-        log[--len] = '\0';
-    const char *last = log;
-    for (size_t i = 0; i < len; i++)
-        if (log[i] == '\n') last = log + i + 1;
-    size_t n = 0;
-    for (const char *p = last; *p && n < sizeof(tail) - 1; p++)
-        tail[n++] = (*p == '\r') ? ' ' : *p;
+    probe_last_line(log, tail, sizeof(tail));
     printf("exit %d in %lldms  model=%s  \"%s\"\n", rc, (long long)elapsed,
            in.model ? in.model : "(vendor default)", tail);
     free(log);
@@ -1434,6 +1491,62 @@ static void unit_cli_turn_cap(const struct unit_opts *o, char *buf, size_t cap)
     (void)snprintf(buf, cap, "%d", turns > 0 ? turns : 1);
 }
 
+/* The raw CLI transcript, kept under --state-dir for a later reader. */
+static void dispatch_preserve_capture(const struct unit_opts *o,
+                                      const char *log, int capture_ordinal)
+{
+    if (o->state_dir && o->state_dir[0]) {
+        char path[1024], capture_hex[65];
+        uint8_t capture_root[32];
+        zcl_sha3_256((const unsigned char *)log, strlen(log), capture_root);
+        zcl_hex_encode(capture_root, sizeof(capture_root), capture_hex);
+        if ((size_t)snprintf(path, sizeof(path), "%s/cli-capture-%d-%s.txt",
+                             o->state_dir, capture_ordinal, capture_hex) >= sizeof(path) ||
+            !engine_emit_file(path, log, strlen(log)))
+            engine_emit(stderr, "engine_unit: could not preserve CLI capture\n");
+    }
+}
+
+/* The model a CLI run is asked for: the caller's, else the vendor default. */
+static const char *dispatch_cli_model(const struct engine_vendor *v,
+                                      const char *model)
+{
+    return model && model[0] ? model : v->default_model;
+}
+
+/* A CLI run's parsed observation becomes the reply's usage and model. */
+static void dispatch_cli_adopt_usage(struct dispatch_result *dr)
+{
+    if (dr->cli_observation.known) {
+        /* The parser validated nonnegative, consistent totals for either
+         * cache accounting shape. Normalize the projected input count while
+         * retaining the exact raw observation in the receipt. */
+        dr->reply.usage.prompt_tokens =
+            dr->cli_observation.total_tokens -
+            dr->cli_observation.output_tokens;
+        dr->reply.usage.completion_tokens =
+            dr->cli_observation.output_tokens;
+        dr->reply.usage.total_tokens =
+            dr->cli_observation.total_tokens;
+        dr->reply.usage.cache_read_input_tokens =
+            dr->cli_observation.cache_read_input_tokens;
+        dr->reply.usage.cache_creation_input_tokens =
+            dr->cli_observation.cache_creation_input_tokens;
+        dr->reply.usage.reasoning_tokens =
+            dr->cli_observation.reasoning_tokens;
+        dr->reply.usage.prompt_tokens_known = true;
+        dr->reply.usage.completion_tokens_known = true;
+        dr->reply.usage.total_tokens_known = true;
+        dr->reply.usage.cache_read_input_tokens_known = true;
+        dr->reply.usage.cache_creation_input_tokens_known = true;
+        dr->reply.usage.reasoning_tokens_known =
+            dr->cli_observation.reasoning_tokens >= 0;
+        dr->reply.usage.tokens_known = true;
+        (void)snprintf(dr->reply.model, sizeof(dr->reply.model), "%s",
+                       dr->cli_observation.resolved_model);
+    }
+}
+
 static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
                          const char *prompt_text, const char *model,
                          const char *workdir, int timeout_ms,
@@ -1469,7 +1582,7 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
         .prompt  = prompt,
         .workdir = workdir,
         .turns   = turn_cap,
-        .model   = model && model[0] ? model : v->default_model,
+        .model   = dispatch_cli_model(v, model),
         .reasoning_effort = o->reasoning_effort,
         .resume_session_id = o->resume_session_id,
         .read_only = engine_prompt_kind_effect(o->kind) ==
@@ -1492,16 +1605,7 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
     const int rc = run_cli(
         v, argv, engine_cli_launch_cwd(v, &in), log, UNIT_GATE_LOG_BYTES,
         timeout_ms, &timed_out);
-    if (o->state_dir && o->state_dir[0]) {
-        char path[1024], capture_hex[65];
-        uint8_t capture_root[32];
-        zcl_sha3_256((const unsigned char *)log, strlen(log), capture_root);
-        zcl_hex_encode(capture_root, sizeof(capture_root), capture_hex);
-        if ((size_t)snprintf(path, sizeof(path), "%s/cli-capture-%d-%s.txt",
-                             o->state_dir, capture_ordinal, capture_hex) >= sizeof(path) ||
-            !engine_emit_file(path, log, strlen(log)))
-            engine_emit(stderr, "engine_unit: could not preserve CLI capture\n");
-    }
+    dispatch_preserve_capture(o, log, capture_ordinal);
     engine_emit(stderr, "engine_unit: %s child_exit=%d timeout=%s\n",
                 v->id, rc, timed_out ? "yes" : "no");
     if (rc < 0) {
@@ -1520,34 +1624,7 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
         dr->err = ENGINE_ERR_PARSE;
         return false;
     }
-    if (dr->cli_observation.known) {
-        /* The parser validated nonnegative, consistent totals for either
-         * cache accounting shape. Normalize the projected input count while
-         * retaining the exact raw observation in the receipt. */
-        dr->reply.usage.prompt_tokens =
-            dr->cli_observation.total_tokens -
-            dr->cli_observation.output_tokens;
-        dr->reply.usage.completion_tokens =
-            dr->cli_observation.output_tokens;
-        dr->reply.usage.total_tokens =
-            dr->cli_observation.total_tokens;
-        dr->reply.usage.cache_read_input_tokens =
-            dr->cli_observation.cache_read_input_tokens;
-        dr->reply.usage.cache_creation_input_tokens =
-            dr->cli_observation.cache_creation_input_tokens;
-        dr->reply.usage.reasoning_tokens =
-            dr->cli_observation.reasoning_tokens;
-        dr->reply.usage.prompt_tokens_known = true;
-        dr->reply.usage.completion_tokens_known = true;
-        dr->reply.usage.total_tokens_known = true;
-        dr->reply.usage.cache_read_input_tokens_known = true;
-        dr->reply.usage.cache_creation_input_tokens_known = true;
-        dr->reply.usage.reasoning_tokens_known =
-            dr->cli_observation.reasoning_tokens >= 0;
-        dr->reply.usage.tokens_known = true;
-        (void)snprintf(dr->reply.model, sizeof(dr->reply.model), "%s",
-                       dr->cli_observation.resolved_model);
-    }
+    dispatch_cli_adopt_usage(dr);
     /* Edit delivery retains its diff-and-gate exit policy. A report needs
      * a successful child exit; parsed usage remains available on failure. */
     dr->http_status = 0;
@@ -1854,18 +1931,13 @@ static char *build_task_with_file_contents(const char *text, size_t text_len,
  * because engine_unit is compiled straight from source with a small, fixed
  * source list (see ENGINE_UNIT_SRCS) for the TLS-client isolation reason
  * explained at the top of this file, and devloop.c is not on it. */
-static void gate_feedback_from_log(const char *log, size_t log_len, char *out,
-                                   size_t out_cap)
+/* The first line of the log naming a failure: the needles are tried in order
+ * on each line and the first line that matches any of them is copied. */
+static void gate_first_actionable(const char *log, size_t log_len, char *first,
+                                  size_t first_cap)
 {
-    if (!out || out_cap == 0)
-        return;
-    out[0] = '\0';
-    if (!log || log_len == 0)
-        return;
-
     static const char *const needles[] = { ": error:", "FAIL", "Assertion",
                                            "EXPECT" };
-    char first[240] = {0};
     size_t i = 0;
     while (i < log_len && !first[0]) {
         size_t line_start = i;
@@ -1878,8 +1950,8 @@ static void gate_feedback_from_log(const char *log, size_t log_len, char *out,
                 continue;
             for (size_t s = 0; s + nl <= line_len; s++) {
                 if (memcmp(log + line_start + s, needles[k], nl) == 0) {
-                    const size_t n = line_len < sizeof(first) - 1
-                                         ? line_len : sizeof(first) - 1;
+                    const size_t n = line_len < first_cap - 1
+                                         ? line_len : first_cap - 1;
                     memcpy(first, log + line_start, n);
                     first[n] = '\0';
                     break;
@@ -1891,9 +1963,13 @@ static void gate_feedback_from_log(const char *log, size_t log_len, char *out,
         if (i < log_len)
             i++;
     }
+}
 
-    /* The last 40 lines, trailing newline(s) stripped first so an empty
-     * final line does not count as one of the 40. */
+/* The last 40 lines, trailing newline(s) stripped first so an empty
+ * final line does not count as one of the 40. */
+static void gate_log_tail_bounds(const char *log, size_t log_len,
+                                 size_t *start_out, size_t *end_out)
+{
     size_t end = log_len;
     while (end > 0 && (log[end - 1] == '\n' || log[end - 1] == '\r'))
         end--;
@@ -1906,6 +1982,24 @@ static void gate_feedback_from_log(const char *log, size_t log_len, char *out,
     }
     if (start > 0 && log[start] == '\n')
         start++;
+    *start_out = start;
+    *end_out = end;
+}
+
+static void gate_feedback_from_log(const char *log, size_t log_len, char *out,
+                                   size_t out_cap)
+{
+    if (!out || out_cap == 0)
+        return;
+    out[0] = '\0';
+    if (!log || log_len == 0)
+        return;
+
+    char first[240] = {0};
+    gate_first_actionable(log, log_len, first, sizeof(first));
+    size_t start = 0;
+    size_t end = 0;
+    gate_log_tail_bounds(log, log_len, &start, &end);
 
     const int hn = snprintf(out, out_cap,
         "First actionable line: %s\n\nLast lines of the gate log:\n",
@@ -2170,6 +2264,68 @@ static bool receipt_push_run_totals(struct json_value *doc, int compactions,
            receipt_push_tokens_used(doc, usage, observation, totals_ambiguous);
 }
 
+/* The fields a parsed CLI observation supplies. Its counters are reported
+ * only when the run's totals are not ambiguous. */
+static bool receipt_push_observed(struct json_value *doc,
+                                  const struct engine_cli_observation *observation,
+                                  bool totals_ambiguous)
+{
+    return json_push_kv_str(doc, "resolved_model",
+                            observation->resolved_model) &&
+        json_push_kv_str(doc, "session_id", observation->session_id) &&
+        json_push_kv_str(doc, "request_id", observation->request_id) &&
+        json_push_kv_str(doc, "stop_reason", observation->stop_reason) &&
+        json_push_kv_int(doc, "turns", observation->turns) &&
+        receipt_push_counter(doc, "input_tokens", !totals_ambiguous,
+                             observation->input_tokens) &&
+        receipt_push_counter(doc, "cache_read_input_tokens", !totals_ambiguous,
+                         observation->cache_read_input_tokens) &&
+        receipt_push_counter(doc, "cache_creation_input_tokens", !totals_ambiguous,
+                         observation->cache_creation_input_tokens) &&
+        receipt_push_counter(doc, "output_tokens", !totals_ambiguous,
+                             observation->output_tokens) &&
+        receipt_push_counter(doc, "reasoning_tokens", !totals_ambiguous,
+                         observation->reasoning_tokens) &&
+        receipt_push_counter(doc, "total_tokens", !totals_ambiguous,
+                             observation->total_tokens);
+}
+
+/* The fields written when no observation was parsed: the model the reply
+ * named, nulls for what only an observation carries, and the usage counters. */
+static bool receipt_push_fallback(struct json_value *doc,
+                                  const char *reply_resolved_model,
+                                  const struct engine_usage *usage)
+{
+    bool ok = true;
+    if (reply_resolved_model && reply_resolved_model[0])
+        ok = json_push_kv_str(doc, "resolved_model",
+                              reply_resolved_model);
+    else
+        ok = receipt_push_null(doc, "resolved_model");
+    static const char *const unknown_keys[] = {
+        "session_id", "request_id", "stop_reason", "turns",
+    };
+    for (size_t i = 0;
+         ok && i < sizeof(unknown_keys) / sizeof(unknown_keys[0]); i++)
+        ok = receipt_push_null(doc, unknown_keys[i]);
+    if (ok)
+        ok = receipt_push_counter(doc,"input_tokens",
+                usage->prompt_tokens_known,usage->prompt_tokens) &&
+             receipt_push_counter(doc,"cache_read_input_tokens",
+                usage->cache_read_input_tokens_known,
+                usage->cache_read_input_tokens) &&
+             receipt_push_counter(doc,"cache_creation_input_tokens",
+                usage->cache_creation_input_tokens_known,
+                usage->cache_creation_input_tokens) &&
+             receipt_push_counter(doc,"output_tokens",
+                usage->completion_tokens_known,usage->completion_tokens) &&
+             receipt_push_counter(doc,"reasoning_tokens",
+                usage->reasoning_tokens_known,usage->reasoning_tokens) &&
+             receipt_push_counter(doc,"total_tokens",
+                usage->total_tokens_known,usage->total_tokens);
+    return ok;
+}
+
 static void write_receipt(const struct unit_opts *o,
                           const struct engine_vendor *v,
                           const struct engine_usage *usage,
@@ -2247,51 +2403,9 @@ static void write_receipt(const struct unit_opts *o,
                                   usage->completion_tokens_known,
                                   usage->completion_tokens);
     if (ok && observation && observation->known) {
-        ok = json_push_kv_str(&doc, "resolved_model",
-                              observation->resolved_model) &&
-            json_push_kv_str(&doc, "session_id", observation->session_id) &&
-            json_push_kv_str(&doc, "request_id", observation->request_id) &&
-            json_push_kv_str(&doc, "stop_reason", observation->stop_reason) &&
-            json_push_kv_int(&doc, "turns", observation->turns) &&
-            receipt_push_counter(&doc, "input_tokens", !totals_ambiguous,
-                                 observation->input_tokens) &&
-            receipt_push_counter(&doc, "cache_read_input_tokens", !totals_ambiguous,
-                             observation->cache_read_input_tokens) &&
-            receipt_push_counter(&doc, "cache_creation_input_tokens", !totals_ambiguous,
-                             observation->cache_creation_input_tokens) &&
-            receipt_push_counter(&doc, "output_tokens", !totals_ambiguous,
-                                 observation->output_tokens) &&
-            receipt_push_counter(&doc, "reasoning_tokens", !totals_ambiguous,
-                             observation->reasoning_tokens) &&
-            receipt_push_counter(&doc, "total_tokens", !totals_ambiguous,
-                                 observation->total_tokens);
+        ok = receipt_push_observed(&doc, observation, totals_ambiguous);
     } else if (ok) {
-        if (reply_resolved_model && reply_resolved_model[0])
-            ok = json_push_kv_str(&doc, "resolved_model",
-                                  reply_resolved_model);
-        else
-            ok = receipt_push_null(&doc, "resolved_model");
-        static const char *const unknown_keys[] = {
-            "session_id", "request_id", "stop_reason", "turns",
-        };
-        for (size_t i = 0;
-             ok && i < sizeof(unknown_keys) / sizeof(unknown_keys[0]); i++)
-            ok = receipt_push_null(&doc, unknown_keys[i]);
-        if (ok)
-            ok = receipt_push_counter(&doc,"input_tokens",
-                    usage->prompt_tokens_known,usage->prompt_tokens) &&
-                 receipt_push_counter(&doc,"cache_read_input_tokens",
-                    usage->cache_read_input_tokens_known,
-                    usage->cache_read_input_tokens) &&
-                 receipt_push_counter(&doc,"cache_creation_input_tokens",
-                    usage->cache_creation_input_tokens_known,
-                    usage->cache_creation_input_tokens) &&
-                 receipt_push_counter(&doc,"output_tokens",
-                    usage->completion_tokens_known,usage->completion_tokens) &&
-                 receipt_push_counter(&doc,"reasoning_tokens",
-                    usage->reasoning_tokens_known,usage->reasoning_tokens) &&
-                 receipt_push_counter(&doc,"total_tokens",
-                    usage->total_tokens_known,usage->total_tokens);
+        ok = receipt_push_fallback(&doc, reply_resolved_model, usage);
     }
     const size_t n = ok ? json_write(&doc, text, sizeof(text) - 2u) :
                           sizeof(text);
@@ -2548,6 +2662,37 @@ static void unit_ledger_pair(const char *key, int64_t value, char (*slots)[48],
     argv[(*n)++] = slot;
 }
 
+/* Appends the measured counters to the ledger argv, in ledger order. A
+ * counter the provider did not report is recorded as UNREPORTED. */
+static void unit_ledger_measures(const struct engine_usage *usage,
+                                 const struct engine_cli_observation *obs,
+                                 int64_t wall_ms, char (*slots)[48],
+                                 const char **argv, size_t *n, size_t cap)
+{
+    const bool tok = usage && usage->tokens_known;
+    /* tokens_in is the whole input side: on the CLI path prompt_tokens is
+     * total minus output, so it INCLUDES cached input (read and write). */
+    unit_ledger_pair("tokens_in", tok ? usage->prompt_tokens
+                                      : ENGINE_RECEIPT_UNREPORTED,
+                     slots, argv, n, cap);
+    unit_ledger_pair("tokens_out", tok ? usage->completion_tokens
+                                       : ENGINE_RECEIPT_UNREPORTED,
+                     slots, argv, n, cap);
+    const bool seen = obs && obs->known;
+    unit_ledger_pair("tokens_cached",
+                     seen ? obs->cache_read_input_tokens
+                          : ENGINE_RECEIPT_UNREPORTED,
+                     slots, argv, n, cap);
+    unit_ledger_pair("tokens_reasoning",
+                     seen ? obs->reasoning_tokens : ENGINE_RECEIPT_UNREPORTED,
+                     slots, argv, n, cap);
+    unit_ledger_pair("cost_micro_usd", unit_cost_micro_usd(usage), slots, argv,
+                     n, cap);
+    unit_ledger_pair("wall_ms", wall_ms, slots, argv, n, cap);
+    unit_ledger_pair("turns", seen ? obs->turns : ENGINE_RECEIPT_UNREPORTED,
+                     slots, argv, n, cap);
+}
+
 static void unit_ledger_row(const struct unit_opts *o,
                             const struct engine_vendor *v,
                             const struct engine_usage *usage,
@@ -2585,29 +2730,8 @@ static void unit_ledger_row(const struct unit_opts *o,
     argv[n++] = subject;
     argv[n++] = note;
     const size_t fixed = n;
-    const bool tok = usage && usage->tokens_known;
-    /* tokens_in is the whole input side: on the CLI path prompt_tokens is
-     * total minus output, so it INCLUDES cached input (read and write). */
-    unit_ledger_pair("tokens_in", tok ? usage->prompt_tokens
-                                      : ENGINE_RECEIPT_UNREPORTED,
-                     slots, argv, &n, sizeof(argv) / sizeof(argv[0]));
-    unit_ledger_pair("tokens_out", tok ? usage->completion_tokens
-                                       : ENGINE_RECEIPT_UNREPORTED,
-                     slots, argv, &n, sizeof(argv) / sizeof(argv[0]));
-    const bool seen = obs && obs->known;
-    unit_ledger_pair("tokens_cached",
-                     seen ? obs->cache_read_input_tokens
-                          : ENGINE_RECEIPT_UNREPORTED,
-                     slots, argv, &n, sizeof(argv) / sizeof(argv[0]));
-    unit_ledger_pair("tokens_reasoning",
-                     seen ? obs->reasoning_tokens : ENGINE_RECEIPT_UNREPORTED,
-                     slots, argv, &n, sizeof(argv) / sizeof(argv[0]));
-    unit_ledger_pair("cost_micro_usd", unit_cost_micro_usd(usage), slots, argv,
-                     &n, sizeof(argv) / sizeof(argv[0]));
-    unit_ledger_pair("wall_ms", wall_ms, slots, argv, &n,
-                     sizeof(argv) / sizeof(argv[0]));
-    unit_ledger_pair("turns", seen ? obs->turns : ENGINE_RECEIPT_UNREPORTED,
-                     slots, argv, &n, sizeof(argv) / sizeof(argv[0]));
+    unit_ledger_measures(usage, obs, wall_ms, slots, argv, &n,
+                         sizeof(argv) / sizeof(argv[0]));
     if (n == fixed)
         return; /* nothing was measured, so there is nothing to record */
     argv[n] = NULL;
@@ -2619,6 +2743,25 @@ static void unit_ledger_row(const struct unit_opts *o,
      * transcript somebody reads. */
     char sink[256];
     (void)zcl_spawn_capture(argv, sink, sizeof(sink), 10000);
+}
+
+/* Reads a predecessor attempt's state.txt into out, trailing newlines
+ * stripped. False when it cannot be opened or left nothing behind. */
+static bool attempt_read_sibling(const char *sibling, char *out,
+                                 size_t out_cap)
+{
+    FILE *f = fopen(sibling, "rb");
+    if (!f)
+        return false;
+    const size_t rd = fread(out, 1, out_cap - 1, f);
+    (void)fclose(f);
+    out[rd] = '\0';
+    size_t len = rd;
+    while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r'))
+        out[--len] = '\0';
+    if (len == 0)
+        return false; /* the sibling ran but left nothing behind */
+    return true;
 }
 
 /* ── carried state across attempts ───────────────────────────────────────
@@ -2658,17 +2801,8 @@ static bool load_attempt_state(const char *state_dir, char *out,
     if (sn < 0 || (size_t)sn >= sizeof(sibling))
         return false;
 
-    FILE *f = fopen(sibling, "rb");
-    if (!f)
+    if (!attempt_read_sibling(sibling, out, out_cap))
         return false;
-    const size_t rd = fread(out, 1, out_cap - 1, f);
-    (void)fclose(f);
-    out[rd] = '\0';
-    size_t len = rd;
-    while (len > 0 && (out[len - 1] == '\n' || out[len - 1] == '\r'))
-        out[--len] = '\0';
-    if (len == 0)
-        return false; /* the sibling ran but left nothing behind */
     char digits[32];
     (void)snprintf(digits, sizeof(digits), "%ld", n - 1);
     (void)snprintf(label, label_cap, "%s", digits);
