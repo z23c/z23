@@ -244,6 +244,60 @@ struct zcl_result wallet_flush_from_context(
     return wallet_flush_scope_from_context(ctx, false);
 }
 
+struct wallet_diversifier_lane_ctx {
+    struct wallet_sqlite *wallet_db;
+    const struct sapling_key_entry *acct;
+    uint8_t diversifier[ZC_DIVERSIFIER_SIZE];
+    uint8_t pk_d[32];
+    struct zcl_result result;
+};
+
+static bool wallet_diversifier_lane_write(struct node_db *ndb, void *opaque)
+{
+    struct wallet_diversifier_lane_ctx *lane = opaque;
+    if (ndb && ndb->sync_in_batch && !node_db_sync_flush(ndb)) {
+        lane->result = ZCL_ERR(-1,
+            "diversifier lane: pending node.db batch commit failed");
+        LOG_FAIL("wallet", "%s", lane->result.message);
+    }
+    if (!wallet_sqlite_diversifier_reserve(lane->wallet_db, lane->acct,
+                                           lane->diversifier, lane->pk_d)) {
+        lane->result = ZCL_ERR(-2,
+            "diversifier lane: index could not be recorded");
+        LOG_FAIL("wallet", "%s", lane->result.message);
+    }
+    lane->result = ZCL_OK;
+    return true;
+}
+
+struct zcl_result wallet_reserve_diversifier_from_context(
+    const struct wallet_rpc_context *ctx, const struct sapling_key_entry *acct,
+    uint8_t diversifier[ZC_DIVERSIFIER_SIZE], uint8_t pk_d[32])
+{
+    if (!ctx || !ctx->wallet_db || !acct)
+        return ZCL_ERR(-1, "diversifier reserve: no wallet database");
+    struct wallet_diversifier_lane_ctx lane = {
+        .wallet_db = ctx->wallet_db,
+        .acct = acct,
+        .result = ZCL_ERR(-1, "diversifier lane did not run"),
+    };
+    struct db_service *dbsvc = app_runtime_db_service();
+    if (dbsvc && db_service_is_started(dbsvc) && ctx->node_db &&
+        db_service_node_db(dbsvc) == ctx->node_db) {
+        bool ran = db_service_run_write(dbsvc, wallet_diversifier_lane_write,
+                                        &lane);
+        if (!ran && lane.result.ok)
+            return ZCL_ERR(-1, "diversifier lane failed without detail");
+    } else {
+        (void)wallet_diversifier_lane_write(ctx->node_db, &lane);
+    }
+    if (!lane.result.ok)
+        return lane.result;
+    memcpy(diversifier, lane.diversifier, ZC_DIVERSIFIER_SIZE);
+    memcpy(pk_d, lane.pk_d, 32);
+    return ZCL_OK;
+}
+
 struct zcl_result wallet_persist_commit_before_relay(
     const struct wallet_rpc_context *ctx, const struct wallet_tx *wtx)
 {

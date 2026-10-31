@@ -161,6 +161,21 @@ bool sapling_decode_payment_address(const char *str,
                                      uint8_t diversifier_out[ZC_DIVERSIFIER_SIZE],
                                      uint8_t pk_d_out[32]);
 
+/* Copy the wallet account: the used entry with the lowest child_index. Only
+ * viewing material is copied (spending key zeroed, secret_wiped set), so the
+ * copy is available whether the wallet is locked or not. False when the
+ * keystore holds no entry. */
+bool sapling_keystore_copy_account(struct sapling_keystore *sks,
+                                    struct sapling_key_entry *out);
+
+/* The first valid ZIP-32 diversified address of `acct` at or after
+ * `from_index`. The diversifier index found is written to `index_out`. Needs
+ * the diversifier key and the incoming viewing key only. */
+bool sapling_account_diversified_address(
+    const struct sapling_key_entry *acct, uint64_t from_index,
+    uint64_t *index_out, uint8_t diversifier_out[ZC_DIVERSIFIER_SIZE],
+    uint8_t pk_d_out[32]);
+
 bool sapling_keystore_have_spending_key(const struct sapling_keystore *sks,
                                          const uint8_t ivk[32]);
 

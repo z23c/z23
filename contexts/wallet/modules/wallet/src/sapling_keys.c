@@ -650,3 +650,53 @@ bool sapling_keystore_copy_seed(struct sapling_keystore *sks, uint8_t seed[32])
     zcl_mutex_unlock(&sks->cs);
     return ok;
 }
+
+bool sapling_keystore_copy_account(struct sapling_keystore *sks,
+                                    struct sapling_key_entry *out)
+{
+    memset(out, 0, sizeof(*out));
+    zcl_mutex_lock(&sks->cs);
+    const struct sapling_key_entry *acct = NULL;
+    for (size_t i = 0; i < sks->num_keys; i++) {
+        const struct sapling_key_entry *e = &sks->keys[i];
+        if (e->used && (!acct || e->child_index < acct->child_index))
+            acct = e;
+    }
+    if (acct) {
+        out->xfvk = acct->xfvk;
+        memcpy(out->diversifier, acct->diversifier, ZC_DIVERSIFIER_SIZE);
+        memcpy(out->pk_d, acct->pk_d, 32);
+        memcpy(out->ivk, acct->ivk, 32);
+        out->child_index = acct->child_index;
+        out->used = true;
+        out->secret_wiped = true;
+    }
+    zcl_mutex_unlock(&sks->cs);
+    return acct != NULL;
+}
+
+bool sapling_account_diversified_address(
+    const struct sapling_key_entry *acct, uint64_t from_index,
+    uint64_t *index_out, uint8_t diversifier_out[ZC_DIVERSIFIER_SIZE],
+    uint8_t pk_d_out[32])
+{
+    if (!acct || !acct->used || !index_out)
+        return false;
+    uint8_t j[11] = {0};
+    for (int k = 0; k < 8; k++)
+        j[k] = (uint8_t)(from_index >> (8 * k));
+    uint8_t d[ZC_DIVERSIFIER_SIZE];
+    if (!zip32_diversifier(acct->xfvk.dk, j, d))
+        return false;
+    if (j[8] | j[9] | j[10])
+        LOG_FAIL("sapling_keys",
+                 "diversified_address: index left the 64-bit range");
+    uint64_t slot = 0;
+    for (int k = 0; k < 8; k++)
+        slot |= (uint64_t)j[k] << (8 * k);
+    if (!sapling_ivk_to_pkd(acct->ivk, d, pk_d_out))
+        return false;
+    memcpy(diversifier_out, d, ZC_DIVERSIFIER_SIZE);
+    *index_out = slot;
+    return true;
+}

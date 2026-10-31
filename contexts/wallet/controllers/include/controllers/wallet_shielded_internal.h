@@ -68,6 +68,13 @@ static inline struct wallet_rpc_context *wallet_ctx(void)
 /* wallet_shielded_controller.c — addresses / balances / listing */
 bool rpc_z_getnewaddress(const struct json_value *params, bool help,
                          struct json_value *result);
+bool rpc_z_getreceiveaddress(const struct json_value *params, bool help,
+                              struct json_value *result);
+#ifdef ZCL_TESTING
+/* Test-only: fail z_getreceiveaddress after the index is durable and before
+ * the address is returned, as a crash at that point would. */
+void wallet_receive_fault_after_reserve_for_test(bool on);
+#endif
 bool rpc_z_listaddresses(const struct json_value *params, bool help,
                          struct json_value *result);
 bool rpc_z_getbalance(const struct json_value *params, bool help,

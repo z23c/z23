@@ -1126,6 +1126,23 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_wallet_shielded_address)
+ZCL_COMMAND_READY_COMMAND(
+    "core.wallet.shielded.receive", "core.wallet.shielded", "",
+    "Next fresh diversified receive address",
+    "The next unused diversified Sapling address of the wallet account, "
+    "from the running node's z_getreceiveaddress. The index is recorded in "
+    "the wallet database before the address is returned, so no address is "
+    "returned twice. It works while the wallet is locked and is never "
+    "available to an agent session.", 0,
+    "shielded,sapling,address,receive,diversified",
+    "zcl.command.empty_input.v1", "zcl.shielded_address.v1", "", "",
+    "z23 core wallet shielded receive",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_WALLET,
+    ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_wallet_shielded_receive)
 ZCL_COMMAND_READY_READ(
     "core.wallet.shielded.balance", "core.wallet.shielded", "",
     "Shielded balance for one address",

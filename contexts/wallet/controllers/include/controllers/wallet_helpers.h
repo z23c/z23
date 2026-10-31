@@ -8,6 +8,7 @@
 
 #include "rpc/server.h"
 #include "util/result.h"
+#include "wallet/sapling_keys.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -128,6 +129,15 @@ struct zcl_result wallet_reaccept_from_context(
  * deliberate in-memory configuration and returns ZCL_OK. */
 struct zcl_result wallet_flush_from_context(
     const struct wallet_rpc_context *ctx);
+
+/* Reserve the next diversified receive address of `acct` (a viewing-only copy
+ * of the wallet account) through the node.db single-writer lane: any open
+ * reducer batch is committed first, the new index is written and committed,
+ * and only then are the address bytes returned. Needs no spending key, so it
+ * works while the wallet is locked. */
+struct zcl_result wallet_reserve_diversifier_from_context(
+    const struct wallet_rpc_context *ctx, const struct sapling_key_entry *acct,
+    uint8_t diversifier[ZC_DIVERSIFIER_SIZE], uint8_t pk_d[32]);
 
 /* Durably flush an admitted wallet transaction before relay. On failure the
  * unrelayed wallet+mempool commit is rolled back. */

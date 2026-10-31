@@ -681,6 +681,8 @@ int test_rpc_timeout(void);
 int test_wallet_keystore(void);
 int test_wallet_sqlite_enc(void);
 int test_wallet_lock_shielded(void);
+int test_wallet_diversified_receive(void);
+int test_simnet_wallet_diversified_send(void);
 int test_disk_monitor(void);
 int test_binary_staleness(void);
 int test_binary_ab_fallback(void);

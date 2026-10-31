@@ -342,7 +342,11 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
 
     /* Is the from address transparent or Sapling? Decided against the active
      * chain's HRP (wallet_addr_is_sapling), not a mainnet literal. */
-    bool from_is_shielded = wallet_addr_is_sapling(from_addr);
+    /* The literal "account" names the wallet account: the send selects from
+     * every spendable note of its viewing key, whichever of its diversified
+     * addresses received them. */
+    bool from_account = strcmp(from_addr, "account") == 0;
+    bool from_is_shielded = from_account || wallet_addr_is_sapling(from_addr);
 
     /* Verify we own the from address */
     const struct chain_params *cp = chain_params_get();
@@ -353,7 +357,18 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
     const struct sapling_key_entry *from_z_key = NULL;
 
     struct tx_destination from_dest;
-    if (from_is_shielded) {
+    if (from_account) {
+        struct sapling_key_entry account;
+        if (sapling_keystore_copy_account(&ctx->wallet->sapling_keys, &account))
+            from_z_key = sapling_keystore_find_by_ivk(
+                &ctx->wallet->sapling_keys, account.ivk);
+        memory_cleanse(&account, sizeof(account));
+        if (!from_z_key) {
+            json_set_str(result, "The wallet has no shielded account");
+            LOG_FAIL("wallet_shielded", "z_sendmany: no account key");
+        }
+        memset(&from_dest, 0, sizeof(from_dest));
+    } else if (from_is_shielded) {
         if (!sapling_decode_payment_address(from_addr, from_z_diversifier, from_z_pk_d)) {
             json_set_str(result, "Invalid shielded from address");
             LOG_FAIL("wallet_shielded", "z_sendmany: cannot decode shielded from address %s", from_addr);

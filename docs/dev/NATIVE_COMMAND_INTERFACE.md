@@ -224,7 +224,7 @@ core
 │   ├── address new|list|import|export-key
 │   ├── utxo list
 │   ├── transaction list|get|send
-│   ├── shielded address|balance|notes|send
+│   ├── shielded address|receive|balance|notes|send
 │   ├── backup status|now
 │   └── audit|rescan|replay
 ├── storage

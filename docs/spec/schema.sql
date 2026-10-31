@@ -102,6 +102,11 @@ CREATE TABLE IF NOT EXISTS wallet_sapling_keys (
 
 CREATE INDEX IF NOT EXISTS idx_sapling_key_addr ON wallet_sapling_keys(address);
 
+CREATE TABLE IF NOT EXISTS wallet_sapling_diversifier (
+    ivk BLOB PRIMARY KEY CHECK(length(ivk) = 32),
+    next_index INTEGER NOT NULL CHECK(next_index >= 0)
+);
+
 CREATE TABLE IF NOT EXISTS wallet_scripts (
     script_hash BLOB PRIMARY KEY,
     redeem_script BLOB NOT NULL

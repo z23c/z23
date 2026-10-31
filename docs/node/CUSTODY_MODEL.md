@@ -354,6 +354,37 @@ The spending paths also use two independent runtime gates:
 - **the sync-verified `WALLET_SPEND` capability** — spending is disabled until
   the node's own state is self-verified.
 
+### 4.1 Fresh receive addresses (diversified)
+
+`core wallet shielded receive` (node RPC `z_getreceiveaddress`) returns the next
+unused ZIP-32 diversified address of the wallet's one account (the key with the
+lowest child index). All such addresses share one incoming viewing key, so a
+single key finds every note sent to any of them, and a payer cannot link two of
+them on chain. The reply is `{"address":"zs1..."}`.
+
+- **Recorded first.** The diversifier index is written to
+  `wallet_sapling_diversifier` and committed before the address is returned.
+  A crash between the write and the reply burns that index; an index is never
+  issued twice from one datadir.
+- **Works while locked.** The address comes from the viewing key and the
+  diversifier key, both resident while locked. No seed or spending key is read
+  or written, and the leaf is not on the agent surface: an agent session is
+  refused as for every unlisted wallet leaf.
+- **Notes.** Trial decryption with the account's incoming viewing key finds a
+  note sent to any diversified address. The note keeps its own diversifier and
+  `pk_d`, and the commitment, proof and nullifier of a spend use them.
+- **Spending.** `z_sendmany` with the from address `account` selects from every
+  spendable note of the account, across its addresses, in one transaction.
+  Change returns to the account's default address: a change output is
+  encrypted on chain, so a fresh address there adds no privacy.
+- **Restore.** A restore has no record of issued indexes. The next index
+  starts past the highest diversifier any found note of the account was
+  received on, searching `WALLET_DIVERSIFIER_GAP` (100) unused addresses past
+  each hit. An address issued but never paid may be issued again after a
+  restore. That links nothing unless two payers each used it. A note received
+  on an address more than 100 addresses past the last one used is found by the
+  scan of the chain but does not move the next index.
+
 ---
 
 ## 5. What the agent grant bounds

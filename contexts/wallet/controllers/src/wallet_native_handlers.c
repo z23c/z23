@@ -393,6 +393,33 @@ void zcl_native_handle_wallet_shielded_address(
     json_free(&body);
 }
 
+void zcl_native_handle_wallet_shielded_receive(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    (void)request;
+    struct json_value body;
+    if (!wnh_call_rpc_deadline(reply, "z_getreceiveaddress", NULL,
+                               RPC_WALLET_MUTATION_TIMEOUT_MS, &body))
+        return;
+    const char *addr = wnh_string_result(&body);
+    uint8_t diversifier[11], pk_d[32];
+    /* Same validation as shielded.address: the node issued the address for
+     * its own chain, so check the complete Sapling encoding here rather than
+     * this CLI process's unrelated default HRP. */
+    if (!addr || !sapling_decode_payment_address(addr, diversifier, pk_d)) {
+        const char *failure = addr && addr[0]
+            ? addr
+            : "z_getreceiveaddress did not return a shielded address";
+        wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "SHIELDED_RECEIVE_FAILED",
+                 failure, "z_getreceiveaddress");
+        json_free(&body);
+        return;
+    }
+    (void)json_push_kv_str(&reply->data, "address", addr);
+    reply->error.mutated = true;
+    json_free(&body);
+}
+
 void zcl_native_handle_wallet_address_import(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {

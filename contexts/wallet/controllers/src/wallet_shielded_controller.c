@@ -125,6 +125,79 @@ bool rpc_z_getnewaddress(const struct json_value *params, bool help,
     return true;
 }
 
+#ifdef ZCL_TESTING
+static bool g_receive_fault_after_reserve;
+
+void wallet_receive_fault_after_reserve_for_test(bool on)
+{
+    g_receive_fault_after_reserve = on;
+}
+#endif
+
+bool rpc_z_getreceiveaddress(const struct json_value *params, bool help,
+                             struct json_value *result)
+{
+    struct wallet_rpc_context *ctx = wallet_ctx();
+    (void)params;
+    RPC_HELP(help, result,
+        "z_getreceiveaddress\n"
+        "\nReturns the next unused diversified Sapling address of the wallet\n"
+        "account. The index is recorded in the wallet database before the\n"
+        "address is returned, so an address is never returned twice. Works\n"
+        "while the wallet is locked: it needs viewing material only.\n"
+        "\nResult:\n"
+        "\"address\"  (string) The new z-address\n");
+
+    ENSURE_WALLET(result);
+    if (!ctx->wallet_db || !ctx->wallet_db->open) {
+        json_set_str(result,
+            "Error: wallet durability backend unavailable; address not issued");
+        LOG_FAIL("wallet_shielded",
+                 "z_getreceiveaddress: refusing an address with no durable index");
+    }
+
+    /* Deliberately no wallet_lock_spend_guard(): the address comes from the
+     * account's incoming viewing key and diversifier key, both resident while
+     * locked. No seed or spending key is read or written. */
+    struct sapling_key_entry acct;
+    if (!sapling_keystore_copy_account(&ctx->wallet->sapling_keys, &acct)) {
+        json_set_str(result, "Error: the wallet has no shielded account");
+        LOG_FAIL("wallet_shielded",
+                 "z_getreceiveaddress: keystore holds no account");
+    }
+
+    uint8_t diversifier[ZC_DIVERSIFIER_SIZE];
+    uint8_t pk_d[32];
+    struct zcl_result reserved = wallet_reserve_diversifier_from_context(
+        ctx, &acct, diversifier, pk_d);
+    memory_cleanse(&acct, sizeof(acct));
+    if (!reserved.ok) {
+        json_set_str(result,
+            "Error: failed to record the address index. Address NOT issued.");
+        LOG_FAIL("wallet_shielded",
+                 "z_getreceiveaddress: index not recorded (code=%d): %s",
+                 reserved.code, reserved.message);
+    }
+#ifdef ZCL_TESTING
+    if (g_receive_fault_after_reserve) {
+        json_set_str(result, "Error: simulated failure after the index write");
+        LOG_FAIL("wallet_shielded", "z_getreceiveaddress: simulated failure");
+    }
+#endif
+
+    const struct chain_params *cp = chain_params_get();
+    char addr[128];
+    if (!sapling_encode_payment_address(diversifier, pk_d,
+            cp->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS],
+            addr, sizeof(addr))) {
+        json_set_str(result, "Failed to encode address");
+        LOG_FAIL("wallet_shielded",
+                 "z_getreceiveaddress: address encoding failed");
+    }
+    json_set_str(result, addr);
+    return true;
+}
+
 bool rpc_z_listaddresses(const struct json_value *params, bool help,
                                   struct json_value *result)
 {
@@ -508,6 +581,7 @@ void register_wallet_shielded_rpc_commands(struct rpc_table *t)
 {
     struct rpc_command cmds[] = {
         { "wallet", "z_getnewaddress",     rpc_z_getnewaddress,      false },
+        { "wallet", "z_getreceiveaddress", rpc_z_getreceiveaddress,  false },
         { "wallet", "z_listaddresses",     rpc_z_listaddresses,      false },
         { "wallet", "z_sendmany",          rpc_z_sendmany,           false },
         { "wallet", "z_getbalance",        rpc_z_getbalance,         false },
