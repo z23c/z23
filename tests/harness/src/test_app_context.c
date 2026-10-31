@@ -439,7 +439,9 @@ static int phone_node_leaks(char **argv, int argc, bool expect_private)
     struct app_context ctx;
     bool parsed = onlynet_parse(argv, argc, &ctx) == -1;
     if (expect_private && !app_tor_real_build_linked()) {
-        /* A Tor-stub test binary refuses the flag at parse time; the dial gates are still checked. */
+        /* A Tor-stub test binary refuses the flag at parse time: report the parse and admission checks as
+         * unobserved, never as passed, and check the dial gates with the flag set directly. */
+        printf("UNOBSERVED (app_context: the phone arguments parse and pass -onlynet=onion admission; Tor-stub test binary)\n");
         ctx.onlynet_onion = true;
     } else {
         APPCTX_CHECK("the phone arguments parse", parsed);

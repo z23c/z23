@@ -4,7 +4,6 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -40,7 +39,7 @@ static void arguments(void)
     zapp_private_args(&a, many);
     assert(a.argc == 2 + ZAPP_PRIVATE_PEERS_MAX && !a.argv[a.argc]);
 }
-static void roster(void)
+static void roster(const char *dir)
 {
     char snapshot[1024], peers[ZAPP_PRIVATE_PEERS_MAX * (ZAPP_ONION_PEER_MAX + 1) + 1];
     snprintf(snapshot, sizeof(snapshot), "{\"hosts\":[{\"host\":\"r1\",\"onion\":\"%s:8033\"},{\"host\":\"r2\",\"onion\":\"%s:8033\"},"
@@ -51,8 +50,7 @@ static void roster(void)
     assert(zapp_fleet_onion_peers("nope", peers, sizeof(peers)) == 0 && zapp_fleet_onion_peers(NULL, peers, sizeof(peers)) == 0);
     assert(zapp_fleet_onion_peers(snapshot, peers, 70) == 1);                 /* too small for the second line */
 
-    char dir[] = "/tmp/zapp-private-XXXXXX", text[512], file[128];
-    assert(mkdtemp(dir));
+    char text[512], file[128];
     assert(zapp_private_roster_load(dir, text, sizeof(text)) == 0 && !text[0]);
     assert(zapp_private_roster_save(dir, snapshot) && zapp_private_roster_load(dir, text, sizeof(text)) > 0);
     assert(!strcmp(text, A ":8033\n" B ":8033\n"));
@@ -61,13 +59,14 @@ static void roster(void)
     assert(zapp_private_roster_load(dir, text, sizeof(text)) > 0 && !strcmp(text, A ":8033\n" B ":8033\n"));
     assert(!zapp_private_roster_save("/nonexistent-zapp-dir", snapshot));
     snprintf(file, sizeof(file), "%s/fleet-onion-peers", dir);
-    assert(unlink(file) == 0 && rmdir(dir) == 0);
+    assert(unlink(file) == 0);
 }
-int main(void)
+int main(int argc, char **argv)
 {
+    assert(argc == 2);
     validation();
     arguments();
-    roster();
+    roster(argv[1]);
     puts("private tests passed");
     return 0;
 }

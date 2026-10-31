@@ -250,7 +250,8 @@ test-host:
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/hosts_test.c hosts.c pairing.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/hosts-test'
 	'$(BUILD_DIR)/hosts-test'
 	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/private_test.c private.c $(HOST_TEST_BASE) -o '$(BUILD_DIR)/private-test'
-	'$(BUILD_DIR)/private-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/private-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/private-test' "$$scratch"
 	$(HOST_CC) $(HOST_WARNINGS) -pthread -I. tests/nodelog_test.c nodelog.c -o '$(BUILD_DIR)/nodelog-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/nodelog-test.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/nodelog-test' "$$scratch"

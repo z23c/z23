@@ -83,11 +83,18 @@ static struct chain_verdict chain_verdict(int64_t height, int64_t target, int64_
     v.state = unconfirmed_reason(fleet_agrees, peers, quiet, v.reason, sizeof(v.reason)) ? CHAIN_UNCONFIRMED : CHAIN_CURRENT;
     return v;
 }
+/* "1 of 2" for a reported count, "count unknown" when the node reported none. */
+static const char *onion_count(int64_t peers, char *out, size_t cap)
+{
+    if (peers >= 0) snprintf(out, cap, "%lld of %d", (long long)peers, ZAPP_CHAIN_MIN_PEERS);
+    else snprintf(out, cap, "count unknown");
+    return out;
+}
 const char *zapp_node_line(bool responding, bool process_running, bool stopping, bool onion_ready,
                            int64_t height, int64_t target, int64_t peers,
                            const struct zapp_chain_evidence *evidence, char *out, size_t cap)
 {
-    char at[32], top[32], count[40] = "";
+    char at[32], top[32], count[40] = "", ratio[32];
     const char *onion = responding ? (onion_ready ? " · onion ready" : " · onion starting") : "";
     if (peers >= 0) snprintf(count, sizeof(count), " · %lld %s", (long long)peers, peers == 1 ? "peer" : "peers");
     const struct chain_verdict v = chain_verdict(height, target, peers, evidence);
@@ -95,8 +102,7 @@ const char *zapp_node_line(bool responding, bool process_running, bool stopping,
     else if (!responding) snprintf(out, cap, "Node %s", process_running ? "starting" : "stopped");
     else if (height < 0) snprintf(out, cap, "Node running%s%s", count, onion);
     else if (v.onion_wait)
-        snprintf(out, cap, "Private · waiting for onion peers (%lld of %d)%s", (long long)(peers < 0 ? 0 : peers),
-                 ZAPP_CHAIN_MIN_PEERS, onion);
+        snprintf(out, cap, "Private · waiting for onion peers (%s)%s", onion_count(peers, ratio, sizeof(ratio)), onion);
     else if (v.state == CHAIN_WAITING) snprintf(out, cap, "Node waiting for peers · %s%s", zapp_grouped(height, at), onion);
     else if (v.state == CHAIN_BEHIND)
         snprintf(out, cap, "Behind · %s of %s%s", zapp_grouped(height, at), zapp_grouped(v.reference, top), onion);
@@ -133,13 +139,15 @@ const char *zapp_sync_line(bool responding, bool process_running, int64_t height
                            const struct zapp_chain_evidence *evidence, char *out, size_t cap)
 {
     char gap[32];
+    char ratio[32];
     const struct chain_verdict v = chain_verdict(height, target, peers, evidence);
     if (!responding) snprintf(out, cap, "%s", process_running ?
         "Waiting for the node to answer." : "Start the node to begin synchronization.");
     else if (height < 0) snprintf(out, cap, "Waiting for the node to report its height.");
+    else if (v.onion_wait && peers < 0)
+        snprintf(out, cap, "Private mode dials only onion peers. The node has not reported its peer count.");
     else if (v.onion_wait)
-        snprintf(out, cap, "Private mode dials only onion peers. This node has %lld of %d.", (long long)(peers < 0 ? 0 : peers),
-                 ZAPP_CHAIN_MIN_PEERS);
+        snprintf(out, cap, "Private mode dials only onion peers. This node has %s.", onion_count(peers, ratio, sizeof(ratio)));
     else if (v.state == CHAIN_WAITING) snprintf(out, cap, "Waiting for a peer that reports the current chain.");
     else if (v.state == CHAIN_BEHIND) snprintf(out, cap, "%s %s to go.", zapp_grouped(v.reference - height, gap),
                                             v.reference - height == 1 ? "block" : "blocks");
