@@ -868,6 +868,55 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.summary", "core.wallet", "",
+    "Spendable, pending and public funds with sync state",
+    "One honest funds screen, read-only and answered while the wallet is "
+    "locked from the loaded viewing keys. Every amount is integer zatoshi "
+    "plus an exact 8-decimal string. spendable is unspent shielded notes "
+    "confirmed 10 deep, or 3 deep when the note is the wallet's own change "
+    "(its transaction spent a wallet note or coin); pending is the rest with "
+    "pending_notes and pending_min_confirmations_needed; sending is wallet "
+    "funds spent by a not yet confirmed transaction; public is mature "
+    "confirmed transparent funds and immature is coinbase still maturing. "
+    "A note or ivk seen twice counts once. tip_height, header_height, "
+    "scanned_through_height and blocks_behind (the larger of header and peer "
+    "best height, minus tip) come with current, true only when the scan has "
+    "reached the tip and blocks_behind is at most 1. locked, encrypted and "
+    "shielded_keys describe the keystore. send_allowed and "
+    "send_blocked_reason report the wallet_spend guard; nothing here spends.",
+    0, "wallet,summary,balance,pending,spendable,sync",
+    "zcl.command.empty_input.v1", "zcl.wallet_summary.v1", "", "",
+    "z23 core wallet summary",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.history", "core.wallet", "",
+    "Wallet transaction history, newest first, paged",
+    "Read-only history from the wallet's notes, coins and persisted "
+    "transactions, pending first then by descending height. Each entry has "
+    "txid, status, height (null while pending), confirmations, time, "
+    "direction (received, sent, internal, unknown), kind (private or "
+    "public), amount_zat and amount, fee_zat and fee, net_zat (signed "
+    "change to the wallet) and memo_present. Outgoing detail that cannot be "
+    "recovered from persisted data (no recorded fee) is direction unknown "
+    "with null amount and fee, never a guess; net_zat stays exact. limit is "
+    "1..16 (default 10); next_cursor is opaque and null on the last page. "
+    "txid returns that one entry with memo text and address where the "
+    "wallet holds them; counterparty is reported null with "
+    "counterparty_known false because Sapling does not record it.",
+    ZCL_COMMAND_LIST_BUDGET, "wallet,history,transactions,activity",
+    "zcl.core_wallet_history.input.v1", "zcl.wallet_history.v1",
+    "limit,cursor,txid", "",
+    "z23 core wallet history --limit=10",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
 ZCL_COMMAND_BRANCH("core.wallet.address", "core.wallet",
                    "Transparent addresses", ZCL_COMMAND_LAYER_CORE)
 ZCL_COMMAND_READY_COMMAND(
@@ -1208,6 +1257,21 @@ ZCL_COMMAND_READY_READ(
     "zcl.command.empty_input.v1", "zcl.shielded_notes.v1", "", "",
     "z23 core wallet shielded notes",
     ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.shielded.latest", "core.wallet.shielded", "",
+    "Newest shielded receive address, or null",
+    "Read-only: the most recently added Sapling address in the keystore as "
+    "{address: \"zs1...\"} or {address: null} for a wallet with none. It "
+    "never derives, imports or stores a key or address under any path; use "
+    "core.wallet.shielded.address to create one.", 0,
+    "shielded,sapling,address,latest,receive",
+    "zcl.command.empty_input.v1", "zcl.wallet_latest_address.v1", "", "",
+    "z23 core wallet shielded latest",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
     ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,

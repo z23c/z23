@@ -47,6 +47,15 @@ char *zcl_native_z_getbalance_body(const struct json_value *args,
 char *zcl_native_z_listunspent_body(const struct json_value *args,
                                      struct zcl_native_body_err *err);
 
+/* Typed activity reads: the node answers walletsummary and wallethistory;
+ * the reply is forwarded unchanged. history takes limit, cursor, txid. */
+char *zcl_native_wallet_summary_body(const struct json_value *args,
+                                     struct zcl_native_body_err *err);
+char *zcl_native_wallet_history_body(const struct json_value *args,
+                                     struct zcl_native_body_err *err);
+char *zcl_native_wallet_latest_body(const struct json_value *args,
+                                    struct zcl_native_body_err *err);
+
 /* Shared by every wallet native handler, published here rather than
  * copied: wallet_restore_native_handlers.c carried a byte-for-byte
  * duplicate of wnh_fail (wrn_fail), now deleted. One helper, one

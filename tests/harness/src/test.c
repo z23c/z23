@@ -1258,6 +1258,8 @@ static void run_full_suite_foundation(int *failures)
     *failures += test_strong_params();
     { extern int test_wallet_funds_safety(void);
       *failures += test_wallet_funds_safety(); }
+    { extern int test_wallet_summary_history(void);
+      *failures += test_wallet_summary_history(); }
     *failures += test_json();
     *failures += test_robustness();
     *failures += test_wallet();

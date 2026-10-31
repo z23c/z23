@@ -10,6 +10,7 @@
 #include "controllers/sovereignty_controller.h"
 #include "controllers/agent_session_controller.h"
 #include "controllers/vault_intent_controller.h"
+#include "controllers/wallet_activity.h"
 #include "controllers/yardsale_wallet_controller.h"
 #include "wallet/wallet_lock.h"
 void rpc_wallet_set_state(struct wallet *w, struct main_state *ms,
@@ -851,6 +852,7 @@ void register_wallet_rpc_commands(struct rpc_table *t)
     register_wallet_shielded_rpc_commands(t);
     register_wallet_diagnostic_rpc_commands(t);
     register_wallet_rescan_rpc_commands(t);
+    register_wallet_activity_rpc_commands(t);
     register_vault_intent_rpc_commands(t);
     /* The yardsale wallet glue (yardsale.seller.arm|disarm|status,
      * yardsale.buy) rides the wallet family for the same reason: the

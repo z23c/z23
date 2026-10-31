@@ -20,7 +20,7 @@
  * (bytes up to the first 0x00 or 0xf6, the canonical text terminator);
  * otherwise it is hex-encoded under "memo_hex" with trailing padding stripped.
  * memo_len bounds the scan (callers without a length pass 512). */
-static void wallet_memo_to_json(struct json_value *entry,
+void wallet_memo_to_json(struct json_value *entry,
                                 const uint8_t *memo, size_t memo_len)
 {
     size_t bound = memo_len < 512 ? memo_len : 512;

@@ -88,6 +88,11 @@ bool rpc_z_listreceivedbyaddress(const struct json_value *params, bool help,
 bool rpc_z_listallnotes(const struct json_value *params, bool help,
                         struct json_value *result);
 
+/* Memo projection shared with the wallet history detail (defined in
+ * wallet_shielded_controller.c). */
+void wallet_memo_to_json(struct json_value *entry, const uint8_t *memo,
+                         size_t memo_len);
+
 /* wallet_shielded_send.c — z_sendmany (t/z spend + build + broadcast) and
  * wallet_addr_is_sapling() (chain-aware Sapling prefix test) are BOTH
  * declared in the public controllers/wallet_shielded_controller.h, included
