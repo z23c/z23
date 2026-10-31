@@ -88,11 +88,17 @@
 
 static char g_tmpfs_root[PATH_MAX];
 static pid_t g_tmpfs_owner;
+static bool g_tmpfs_green;
+static bool g_tmpfs_retained;
 
 static void tmpfs_cleanup(void)
 {
-    if (g_tmpfs_owner == getpid() && g_tmpfs_root[0] &&
-        test_rm_rf_recursive(g_tmpfs_root) != 0)
+    if (g_tmpfs_owner != getpid() || !g_tmpfs_root[0]) return;
+    if (!g_tmpfs_green || g_tmpfs_retained) {
+        fprintf(stderr, "test_parallel: retained tmpfs root=%s\n", g_tmpfs_root);
+        return;
+    }
+    if (test_rm_rf_recursive(g_tmpfs_root) != 0)
         fprintf(stderr, "test_parallel: tmpfs cleanup failed: %s\n", strerror(errno));
 }
 static bool tmpfs_create_root(void)
@@ -129,7 +135,9 @@ static void tmpfs_setup(void)
         atexit(tmpfs_cleanup) != 0) {
         (void)unsetenv("ZCL_TEST_TMPROOT");
         (void)unsetenv("ZCL_TEST_TMPFS_ACTIVE");
+        g_tmpfs_green = true;
         tmpfs_cleanup();
+        g_tmpfs_green = false;
         g_tmpfs_root[0] = '\0';
         goto fallback;
     }
@@ -1887,6 +1895,9 @@ static void preserve_retry_first(const char *name, const char *first,
                                   char preserved[144])
 {
     if (!first[0]) return;
+#if defined(__linux__)
+    g_tmpfs_retained = true;
+#endif
     print_load_flaky_first_excerpt(name, first);
     snprintf(preserved, 144, "%s.first", first);
     if (rename(first, preserved) != 0) {
@@ -3693,7 +3704,11 @@ int main(int argc, char **argv)
 
     free(slots);
     free(results);
-    return retry_probe_exit(failed_groups, audit_diverged, observation_refused);
+    int exit_code = retry_probe_exit(failed_groups, audit_diverged, observation_refused);
+#if defined(__linux__)
+    g_tmpfs_green = exit_code == 0 && load_flaky_groups == 0;
+#endif
+    return exit_code;
 }
 
 /* The exact external-input denylist refuses cache reuse before any key or

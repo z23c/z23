@@ -3131,12 +3131,54 @@ static int test_runner_state_setup_refuses(void)
 }
 
 #if defined(__linux__)
+static int tgs_tmpfs_launch(const char *root, const char *exe, const char *mode,
+                            const char *limit, bool fail, char *out, size_t cap)
+{
+    const char *env = tgs_fixture_executable("/usr/bin/env", "/bin/env");
+    if (!env) return -1;
+    const char *args[] = {env, "-u", "ZCL_TEST_TMPROOT", "-u", "ZCL_TEST_TMPFS_ACTIVE",
+        mode, limit, exe, "--jobs=2", "--no-cache",
+        fail ? "--retry-evidence-probe" : "--verbose", "--exact=test_hex_codec", NULL};
+    bool timed_out = false;
+    int rc = zcl_spawn_capture_merged_in_dir_observed(args, root, out, cap, 60000, &timed_out);
+    return timed_out ? -1 : rc;
+}
+
+static int test_tmpfs_failure_retained(void)
+{
+    int failures = 0;
+    TEST("runner: failed tmpfs run retains attempt state") {
+        static char out[1024 * 1024];
+        char root[PATH_MAX], exe[PATH_MAX], state[PATH_MAX], tmpfs[PATH_MAX];
+        test_make_tmpdir(root, sizeof(root), "tgs_tmpfs", "failure");
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        ASSERT(tgs_tmpfs_launch(root, exe, "ZCL_TEST_TMPFS=1", "ZCL_TEST_TMPFS_MAX_MB=2048", true, out, sizeof(out)) != 0);
+        if (!strstr(out, "tmpfs unavailable or disabled")) {
+            const char *p = strstr(out, "retained_state=");
+            ASSERT(p != NULL && sscanf(p, "retained_state=%4095s", state) == 1);
+            char *leaf = strstr(state, "/runner-state-");
+            ASSERT(leaf != NULL);
+            size_t len = (size_t)(leaf - state);
+            ASSERT(len < sizeof(tmpfs));
+            memcpy(tmpfs, state, len);
+            tmpfs[len] = '\0';
+            struct stat st;
+            ASSERT(stat(state, &st) == 0 && S_ISDIR(st.st_mode));
+            ASSERT(strstr(out, "test_parallel: retained tmpfs root=") != NULL);
+            ASSERT(test_rm_rf_recursive(tmpfs) == 0);
+        }
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_tmpfs_fallback(void)
 {
     int failures = 0;
     TEST("runner: disabled tmpfs falls back and unsafe parent is refused") {
         static char out[1024 * 1024];
-        char root[PATH_MAX], exe[PATH_MAX], command[3 * PATH_MAX];
+        char root[PATH_MAX], exe[PATH_MAX];
         test_make_tmpdir(root, sizeof(root), "tgs_tmpfs", "fallback");
         ASSERT(test_tmpfs_parent_safe(root));
         ASSERT(chmod(root, 0777) == 0);
@@ -3165,19 +3207,10 @@ static int test_tmpfs_fallback(void)
         if (*saved_max) ASSERT(setenv("ZCL_TEST_TMPFS_MAX_MB", saved_max, 1) == 0);
         else ASSERT(unsetenv("ZCL_TEST_TMPFS_MAX_MB") == 0);
         ASSERT(os_proc_exe_path(exe, sizeof(exe)));
-        int n = snprintf(command, sizeof(command),
-            "cd '%s' && env -u ZCL_TEST_TMPROOT ZCL_TEST_TMPFS=0 '%s' "
-            "--jobs=1 --no-cache --exact=test_hex_codec 2>&1", root, exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        ASSERT(capture_command(command, out, sizeof(out)) == 0);
+        ASSERT(tgs_tmpfs_launch(root, exe, "ZCL_TEST_TMPFS=0", "ZCL_TEST_TMPFS_MAX_MB=2048", false, out, sizeof(out)) == 0);
         ASSERT(strstr(out, "tmpfs unavailable or disabled; using test-tmp") != NULL);
         ASSERT(strstr(out, "/test-tmp/runner-state-") != NULL);
-        n = snprintf(command, sizeof(command),
-            "cd '%s' && env -u ZCL_TEST_TMPROOT ZCL_TEST_TMPFS=1 "
-            "ZCL_TEST_TMPFS_MAX_MB=2048 '%s' --jobs=1 --no-cache "
-            "--exact=test_hex_codec 2>&1", root, exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        ASSERT(capture_command(command, out, sizeof(out)) == 0);
+        ASSERT(tgs_tmpfs_launch(root, exe, "ZCL_TEST_TMPFS=1", "ZCL_TEST_TMPFS_MAX_MB=2048", false, out, sizeof(out)) == 0);
         if (!strstr(out, "tmpfs unavailable or disabled")) {
             const char *start = strstr(out, "/dev/shm/z23t/");
             ASSERT(start != NULL);
@@ -3188,12 +3221,7 @@ static int test_tmpfs_fallback(void)
             tmpfs_root[end - start] = '\0';
             ASSERT(access(tmpfs_root, F_OK) != 0 && errno == ENOENT);
         }
-        n = snprintf(command, sizeof(command),
-            "cd '%s' && env -u ZCL_TEST_TMPROOT ZCL_TEST_TMPFS=1 "
-            "ZCL_TEST_TMPFS_MAX_MB=0 '%s' --jobs=1 --no-cache "
-            "--exact=test_hex_codec 2>&1", root, exe);
-        ASSERT(n > 0 && (size_t)n < sizeof(command));
-        ASSERT(capture_command(command, out, sizeof(out)) == 0);
+        ASSERT(tgs_tmpfs_launch(root, exe, "ZCL_TEST_TMPFS=1", "ZCL_TEST_TMPFS_MAX_MB=0", false, out, sizeof(out)) == 0);
         if (!strstr(out, "tmpfs unavailable or disabled")) {
             ASSERT(strstr(out, "tmpfs limit reached or usage unavailable") != NULL);
             ASSERT(strstr(out, "/test-tmp/runner-state-") != NULL);
@@ -3462,6 +3490,7 @@ int test_test_group_selector(void)
 #endif
 #if defined(__linux__)
     failures += test_tmpfs_fallback();
+    failures += test_tmpfs_failure_retained();
 #endif
     failures += test_runner_private_state();
     failures += test_runner_retry_evidence();
