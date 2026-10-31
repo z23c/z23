@@ -522,8 +522,8 @@ static bool pv_trace_entry_due(uint64_t *n)
     return *n < 3u || *n % 5000u == 0u;
 }
 
-/* Upstream script_validate frontier. False means the caller returns JOB_FATAL
- * (negative height or a frontier query failure). */
+/* Upstream script_validate frontier. False means a frontier query failure; the
+ * caller returns JOB_FATAL (it rejects a negative height before this call). */
 static bool pv_upstream_frontier(sqlite3 *db, uint64_t *sv_cursor)
 {
     int64_t t_upstream = platform_time_monotonic_us();
