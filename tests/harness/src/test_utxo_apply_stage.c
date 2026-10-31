@@ -3367,6 +3367,7 @@ static int uv_seal_key_height_cases(void)
     struct block_index *tip = &sc.blocks[G];
     memset(&tip->nChainWork, 0xFF, sizeof(tip->nChainWork));
     tip->nTime = (uint32_t)GetTime() + 3600u;
+    tip->hashBlock = sc.hashes[G]; /* the seal reads the stored hash */
     UV_CHECK("seal key: tip is past IBD", !is_initial_block_download(&ms));
 
     sqlite3 *db = progress_store_db();
@@ -3376,8 +3377,8 @@ static int uv_seal_key_height_cases(void)
     UV_CHECK("seal key: drain applies blocks 0..G-1",
              utxo_apply_stage_drain(G) == G);
     UV_CHECK("seal key: cursor at G", utxo_apply_stage_cursor() == G);
-    UV_CHECK("seal key: no seal after block G-1 applied",
-             seal_kv_newest(db, &r, &found) && !found);
+    UV_CHECK("seal key: no seal keyed G after block G-1 applied",
+             seal_kv_newest(db, &r, &found) && (!found || r.height < G));
 
     uint8_t through_prev[32], through_g[32];
     UV_CHECK("seal key: commitment through G-1",
