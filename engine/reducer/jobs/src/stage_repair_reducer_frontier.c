@@ -34,6 +34,69 @@ static bool maybe_emit_header(struct block_index *bi, bool apply,
     return true;
 }
 
+/* Flag-reconcile steps for one block_index entry that raise or set state from
+ * log evidence. Returns true when the entry needed a change. */
+static bool reconcile_block_flags_set(
+    struct block_index *bi,
+    const struct rf_log_evidence *ev,
+    bool readable,
+    bool apply,
+    struct stage_reducer_frontier_reconcile_result *out)
+{
+    bool changed = false;
+    if (ev->script_ok_hash &&
+        (bi->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_SCRIPTS) {
+        if (apply) {
+            bi->nStatus = (bi->nStatus & ~(unsigned)BLOCK_VALID_MASK)
+                          | BLOCK_VALID_SCRIPTS;
+        }
+        out->scripts_set++;
+        changed = true;
+    }
+
+    if (ev->validate_ok_hash && ev->body_ok && readable &&
+        (bi->nStatus & BLOCK_HAVE_DATA) == 0) {
+        if (apply)
+            bi->nStatus |= BLOCK_HAVE_DATA;
+        out->have_data_set++;
+        changed = true;
+    }
+    return changed;
+}
+
+/* Flag-reconcile steps for one block_index entry that clear state the evidence
+ * disproves. Returns true when the entry needed a change. */
+static bool reconcile_block_flags_clear(
+    struct block_index *bi,
+    const struct rf_log_evidence *ev,
+    bool readable,
+    bool apply,
+    struct stage_reducer_frontier_reconcile_result *out)
+{
+    bool changed = false;
+    if ((bi->nStatus & BLOCK_HAVE_DATA) && !readable) {
+        if (apply) {
+            bi->nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
+            bi->nFile = -1;
+            bi->nDataPos = 0;
+        }
+        out->have_data_cleared++;
+        if (out->lowest_have_data_cleared < 0 ||
+            bi->nHeight < out->lowest_have_data_cleared)
+            out->lowest_have_data_cleared = bi->nHeight;
+        changed = true;
+    }
+
+    if ((bi->nStatus & BLOCK_FAILED_MASK) &&
+        ev->script_ok_hash && ev->proof_ok_hash && ev->utxo_ok_hash) {
+        if (apply)
+            bi->nStatus &= ~(unsigned)BLOCK_FAILED_MASK;
+        out->failed_mask_cleared++;
+        changed = true;
+    }
+    return changed;
+}
+
 static bool reconcile_block_index_flags(
     sqlite3 *db,
     struct main_state *ms,
@@ -98,7 +161,6 @@ static bool reconcile_block_index_flags(
             break;
         }
 
-        bool changed = false;
         /* Full-block read + rehash ONLY when the verdict can depend on it:
          * the HAVE_DATA-set check needs it only with validate+body evidence
          * present, the HAVE_DATA-clear check only when the flag is set. The
@@ -110,44 +172,10 @@ static bool reconcile_block_index_flags(
             (ev.validate_ok_hash && ev.body_ok))
             readable = stage_reducer_frontier_block_pos_readable_hash(bi, datadir);
 
-        if (ev.script_ok_hash &&
-            (bi->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_SCRIPTS) {
-            if (apply) {
-                bi->nStatus = (bi->nStatus & ~(unsigned)BLOCK_VALID_MASK)
-                              | BLOCK_VALID_SCRIPTS;
-            }
-            out->scripts_set++;
+        bool changed =
+            reconcile_block_flags_set(bi, &ev, readable, apply, out);
+        if (reconcile_block_flags_clear(bi, &ev, readable, apply, out))
             changed = true;
-        }
-
-        if (ev.validate_ok_hash && ev.body_ok && readable &&
-            (bi->nStatus & BLOCK_HAVE_DATA) == 0) {
-            if (apply)
-                bi->nStatus |= BLOCK_HAVE_DATA;
-            out->have_data_set++;
-            changed = true;
-        }
-
-        if ((bi->nStatus & BLOCK_HAVE_DATA) && !readable) {
-            if (apply) {
-                bi->nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
-                bi->nFile = -1;
-                bi->nDataPos = 0;
-            }
-            out->have_data_cleared++;
-            if (out->lowest_have_data_cleared < 0 ||
-                bi->nHeight < out->lowest_have_data_cleared)
-                out->lowest_have_data_cleared = bi->nHeight;
-            changed = true;
-        }
-
-        if ((bi->nStatus & BLOCK_FAILED_MASK) &&
-            ev.script_ok_hash && ev.proof_ok_hash && ev.utxo_ok_hash) {
-            if (apply)
-                bi->nStatus &= ~(unsigned)BLOCK_FAILED_MASK;
-            out->failed_mask_cleared++;
-            changed = true;
-        }
 
         if (changed)
             maybe_emit_header(bi, apply,
@@ -253,6 +281,23 @@ static bool tip_finalize_rewind_churn_gate(
     return false;
 }
 
+static void tip_finalize_preserve_trusted_base(
+    sqlite3 *db, int cur, int *lo, int *hi,
+    struct stage_reducer_frontier_reconcile_result *out)
+{
+    if (stage_repair_preserve_trusted_base_transition(
+            db, out->hstar, cur, out)) {
+        *hi = cur;
+        if (*lo > *hi)
+            *lo = *hi;
+    }
+}
+
+static int tip_finalize_cursor_target(int cur, int lo, int hi)
+{
+    return cur < lo ? lo : (cur > hi ? hi : cur);
+}
+
 static bool reconcile_tip_finalize_cursor(
     sqlite3 *db,
     bool apply,
@@ -285,14 +330,9 @@ static bool reconcile_tip_finalize_cursor(
             lo = hi;
     }
 
-    if (stage_repair_preserve_trusted_base_transition(
-            db, out->hstar, cur, out)) {
-        hi = cur;
-        if (lo > hi)
-            lo = hi;
-    }
+    tip_finalize_preserve_trusted_base(db, cur, &lo, &hi, out);
 
-    int target = cur < lo ? lo : (cur > hi ? hi : cur);
+    int target = tip_finalize_cursor_target(cur, lo, hi);
     if (cur == target) {
         out->tip_finalize_cursor_after = cur;
         return true;
@@ -381,20 +421,38 @@ bool stage_reducer_frontier_reconcile_flags_for_testing(
 }
 #endif
 
-static bool reducer_frontier_reconcile_light_impl(
-    sqlite3 *db,
-    struct main_state *ms,
-    bool apply,
-    struct stage_reducer_frontier_reconcile_result *out)
+/* Outcome of one early-exit step of the reconcile: run the next step, publish
+ * the (final) result and return true, or return false. */
+enum rf_step {
+    RF_STEP_NEXT,
+    RF_STEP_DONE,
+    RF_STEP_FAIL,
+};
+
+/* Which throttled WARN the impl must emit for a finished step. */
+enum rf_warn {
+    RF_WARN_NONE,
+    RF_WARN_COIN_UNKNOWN,
+    RF_WARN_STALE_VALIDATE,
+    RF_WARN_L1_REFUSED,
+};
+
+static void rf_publish_result(
+    struct stage_reducer_frontier_reconcile_result *out,
+    const struct stage_reducer_frontier_reconcile_result *local)
 {
     if (out)
-        memset(out, 0, sizeof(*out));
-    if (!db)
-        LOG_FAIL("stage_repair", "reducer_frontier_reconcile: NULL db");
-    if (!ms)
-        LOG_FAIL("stage_repair", "reducer_frontier_reconcile: NULL main_state");
+        *out = *local;
+}
 
-    bool memo_eligible = db == progress_store_db();
+/* Serve a clean dry-run from the detect memo (true), or record the change
+ * counter sampled before the sweep (false). */
+static bool rf_detect_memo_lookup(
+    sqlite3 *db, bool apply, bool memo_eligible,
+    struct stage_reducer_frontier_reconcile_result *out,
+    int64_t *changes_at_entry)
+{
+    *changes_at_entry = 0;
     if (apply) {
         /* The repair may mutate flags/cursors/logs; never serve a result
          * captured before it (failed applies invalidate too — safe side). */
@@ -409,42 +467,56 @@ static bool reducer_frontier_reconcile_light_impl(
     }
     /* Sampled BEFORE the sweep: a write racing the sweep moves the counter
      * past this sample, so the next dry-run misses the memo and re-sweeps. */
-    int64_t changes_at_entry =
+    *changes_at_entry =
         memo_eligible ? sqlite3_total_changes64(db) : 0;
     g_detect_memo.valid = false;
+    return false;
+}
 
-    struct stage_reducer_frontier_reconcile_result local;
-    memset(&local, 0, sizeof(local));
-    local.tip_finalize_cursor_before = -1;
-    local.tip_finalize_cursor_after = -1;
-    local.validate_headers_cursor_before = -1;
-    local.validate_headers_cursor_after = -1;
-    local.body_fetch_cursor_before = -1;
-    local.body_fetch_cursor_after = -1;
-    local.body_persist_cursor_before = -1;
-    local.body_persist_cursor_after = -1;
-    local.lowest_have_data_cleared = -1;
-    local.lowest_validate_headers_refill_hole = -1;
-    local.lowest_validate_headers_hash_split = -1;
-    local.lowest_body_fetch_refill_hole = -1;
-    local.lowest_body_persist_refill_hole = -1;
-    local.lowest_script_validate_refill_hole = -1;
-    local.lowest_proof_validate_refill_hole = -1;
-    local.script_validate_cursor_before = -1;
-    local.script_validate_cursor_after = -1;
-    local.proof_validate_cursor_before = -1;
-    local.proof_validate_cursor_after = -1;
-    local.tipfin_backfill_height = -1;
-    local.tipfin_backfill_refused_height = -1;
-    local.tipfin_backfill_refused_log = STAGE_REPAIR_TIPFIN_LOG_UNKNOWN;
-    local.coins_applied_height = -1;
-    local.lowest_noncanonical = -1;
-    local.lowest_reorg_residue_tipfin = -1;
-    local.lowest_script_validate_hash_split = -1;
+static void rf_init_local(
+    struct stage_reducer_frontier_reconcile_result *local)
+{
+    memset(local, 0, sizeof(*local));
+    local->tip_finalize_cursor_before = -1;
+    local->tip_finalize_cursor_after = -1;
+    local->validate_headers_cursor_before = -1;
+    local->validate_headers_cursor_after = -1;
+    local->body_fetch_cursor_before = -1;
+    local->body_fetch_cursor_after = -1;
+    local->body_persist_cursor_before = -1;
+    local->body_persist_cursor_after = -1;
+    local->lowest_have_data_cleared = -1;
+    local->lowest_validate_headers_refill_hole = -1;
+    local->lowest_validate_headers_hash_split = -1;
+    local->lowest_body_fetch_refill_hole = -1;
+    local->lowest_body_persist_refill_hole = -1;
+    local->lowest_script_validate_refill_hole = -1;
+    local->lowest_proof_validate_refill_hole = -1;
+    local->script_validate_cursor_before = -1;
+    local->script_validate_cursor_after = -1;
+    local->proof_validate_cursor_before = -1;
+    local->proof_validate_cursor_after = -1;
+    local->tipfin_backfill_height = -1;
+    local->tipfin_backfill_refused_height = -1;
+    local->tipfin_backfill_refused_log = STAGE_REPAIR_TIPFIN_LOG_UNKNOWN;
+    local->coins_applied_height = -1;
+    local->lowest_noncanonical = -1;
+    local->lowest_reorg_residue_tipfin = -1;
+    local->lowest_script_validate_hash_split = -1;
+}
 
+/* Snapshot, then the label-splice re-bind, the non-canonical purge and the
+ * stale reorg-residue tip_finalize replacement, each re-reading the snapshot
+ * when it changed the store. */
+static bool rf_snapshot_and_purges(
+    sqlite3 *db,
+    struct main_state *ms,
+    bool apply,
+    struct stage_reducer_frontier_reconcile_result *local)
+{
     if (!stage_table_ensure(db))
         return false;
-    if (!stage_reducer_frontier_read_snapshot(db, &local))
+    if (!stage_reducer_frontier_read_snapshot(db, local))
         return false;  // raw-return-ok:callee LOG_WARNs every failure path
 
     /* Label-splice re-bind runs BEFORE every coin arm: a NULL-block_hash
@@ -455,11 +527,11 @@ static bool reducer_frontier_reconcile_light_impl(
      * one result for the remedy to disambiguate. H* is unchanged (the deleted
      * rows sit above the frontier). See stage_repair_reducer_frontier_rebind.c. */
     bool label_splice_mutated = false;
-    if (!stage_reducer_frontier_try_label_splice_rebind(db, apply, &local,
+    if (!stage_reducer_frontier_try_label_splice_rebind(db, apply, local,
                                                         &label_splice_mutated))
         return false;
     if (label_splice_mutated)
-        local.repaired = true;
+        local->repaired = true;
 
     /* Non-canonical residue purge runs FIRST: rows describing the wrong
      * block at their height (relabel/reorg residue) become ordinary
@@ -469,10 +541,10 @@ static bool reducer_frontier_reconcile_light_impl(
      * deletes: deletes without the clamp
      * strand the hole — the refill scan keys on the body_persist_log
      * anchor row the purge also deletes, so it reads no hole. */
-    if (!stage_reducer_frontier_purge_noncanonical(db, ms, apply, &local))
+    if (!stage_reducer_frontier_purge_noncanonical(db, ms, apply, local))
         return false;
-    if (local.noncanonical_purged > 0) {
-        local.repaired = true;
+    if (local->noncanonical_purged > 0) {
+        local->repaired = true;
         /* Rows were deleted and cursors may have moved; re-read the
          * snapshot so every gate below sees the post-purge frontier and
          * cursors, not the pre-purge world. Counters / clamp flags are
@@ -480,9 +552,9 @@ static bool reducer_frontier_reconcile_light_impl(
          * the frontier / cursor fields). The refusal flags are LATCHED
          * (the snapshot only ever SETS them true), so clear them first —
          * the re-read re-derives them from the post-purge store. */
-        local.refused_coin_tear = false;
-        local.refused_coin_unknown = false;
-        if (!stage_reducer_frontier_read_snapshot(db, &local))
+        local->refused_coin_tear = false;
+        local->refused_coin_unknown = false;
+        if (!stage_reducer_frontier_read_snapshot(db, local))
             return false;  // raw-return-ok:callee LOG_WARNs every failure path
     }
 
@@ -499,10 +571,10 @@ static bool reducer_frontier_reconcile_light_impl(
      * lifts the H* cap so the snapshot re-reads with no tear and the existing
      * refill + tip_finalize clamp re-derive the column. Runs in the SAME
      * dry-run/apply spirit as the noncanonical purge above. */
-    if (!stage_reducer_frontier_purge_stale_reorg_tipfin(db, apply, &local))
+    if (!stage_reducer_frontier_purge_stale_reorg_tipfin(db, apply, local))
         return false;
-    if (local.reorg_residue_tipfin_replaced > 0) {
-        local.repaired = true;
+    if (local->reorg_residue_tipfin_replaced > 0) {
+        local->repaired = true;
         /* The replacement moved H* (and may have cleared the tear); re-read
          * the snapshot so every gate below sees the lifted frontier. The
          * accumulated *_found / *_purged / *_replaced counters and `repaired`
@@ -510,40 +582,53 @@ static bool reducer_frontier_reconcile_light_impl(
          * the frontier / cursor fields, never these). The refusal flags
          * are LATCHED (the snapshot only ever SETS them true), so clear
          * them first — the re-read re-derives them from the lifted H*. */
-        local.refused_coin_tear = false;
-        local.refused_coin_unknown = false;
-        if (!stage_reducer_frontier_read_snapshot(db, &local))
+        local->refused_coin_tear = false;
+        local->refused_coin_unknown = false;
+        if (!stage_reducer_frontier_read_snapshot(db, local))
             return false;  // raw-return-ok:callee LOG_WARNs every failure path
     }
+    return true;
+}
 
-    if (local.refused_coin_unknown) {
-        /* De-storm: fires every apply pass while coins_applied_height stays
-         * absent. Key is constant (there is no varying identity here — the
-         * condition is either present or not) so this collapses to
-         * first-fire + 60 s keepalive, mirroring l1_refuse_throttle below. */
-        static struct log_throttle coin_unknown_throttle = LOG_THROTTLE_INIT;
-        uint64_t reps = 0;
-        if (log_throttle_should_emit(&coin_unknown_throttle, 1,
-                                     platform_time_wall_unix(), 60, &reps))
-            LOG_WARN("stage_repair",
-                     "[stage_repair] reducer_frontier L1 refused: "
-                     "coins_applied_height absent (coin frontier unknown) "
-                     "repeats=%llu", (unsigned long long)reps);
-        if (out)
-            *out = local;
-        return true;
-    }
+/* Step: an absent coin frontier is final. Sets *warn when the de-storm
+ * throttle admits the WARN (the impl emits it). */
+static enum rf_step rf_step_coin_unknown(
+    const struct stage_reducer_frontier_reconcile_result *local,
+    enum rf_warn *warn, uint64_t *reps)
+{
+    if (!local->refused_coin_unknown)
+        return RF_STEP_NEXT;
+    /* De-storm: fires every apply pass while coins_applied_height stays
+     * absent. Key is constant (there is no varying identity here — the
+     * condition is either present or not) so this collapses to
+     * first-fire + 60 s keepalive, mirroring l1_refuse_throttle below. */
+    static struct log_throttle coin_unknown_throttle = LOG_THROTTLE_INIT;
+    if (log_throttle_should_emit(&coin_unknown_throttle, 1,
+                                 platform_time_wall_unix(), 60, reps))
+        *warn = RF_WARN_COIN_UNKNOWN;
+    return RF_STEP_DONE;
+}
 
+static enum rf_step rf_step_replay(
+    sqlite3 *db,
+    struct main_state *ms,
+    bool apply,
+    struct stage_reducer_frontier_reconcile_result *local)
+{
     bool handled_replay = false;
     if (!stage_reducer_frontier_try_replay_repairs(
-            db, ms, apply, &local, &handled_replay))
-        return false;
-    if (handled_replay) {
-        if (out)
-            *out = local;
-        return true;
-    }
+            db, ms, apply, local, &handled_replay))
+        return RF_STEP_FAIL;
+    if (handled_replay)
+        return RF_STEP_DONE;
+    return RF_STEP_NEXT;
+}
 
+static enum rf_step rf_step_pre_refusal(
+    sqlite3 *db,
+    bool apply,
+    struct stage_reducer_frontier_reconcile_result *local)
+{
     /* Pre-refusal repairs, ordered: FIX-2a (clamp script/proof cursors back
      * to the lowest unapplied rowless hole) then FIX-1 (tip_finalize_log
      * backfill). Both exist for the coin-tear pin ONLY (see the decls in
@@ -557,33 +642,41 @@ static bool reducer_frontier_reconcile_light_impl(
      * live H*-pin class): served_floor > H* while coins are applied THROUGH the
      * span (applied-through >= served_floor), so the hash-bound insert-only
      * backfill fills it coins-backed. The unapplied-hole clamp stays tear-only. */
-    bool tipfin_only_hole = !local.refused_coin_tear && local.hstar > 0 &&
-        local.served_floor > local.hstar && local.coins_applied_found &&
-        local.coins_applied_height - 1 >= local.served_floor;
-    if (local.refused_coin_tear || tipfin_only_hole) {
+    bool tipfin_only_hole = !local->refused_coin_tear && local->hstar > 0 &&
+        local->served_floor > local->hstar && local->coins_applied_found &&
+        local->coins_applied_height - 1 >= local->served_floor;
+    if (local->refused_coin_tear || tipfin_only_hole) {
         bool handled_pre_refusal = false;
-        if (local.refused_coin_tear &&
+        if (local->refused_coin_tear &&
             !stage_reducer_frontier_try_unapplied_hole_clamp(
-                db, apply, &local, &handled_pre_refusal))
-            return false;
+                db, apply, local, &handled_pre_refusal))
+            return RF_STEP_FAIL;
         if (!handled_pre_refusal &&
             !stage_reducer_frontier_try_tipfin_backfill(
-                db, apply, &local, &handled_pre_refusal))
-            return false;
-        if (handled_pre_refusal) {
-            if (out)
-                *out = local;
-            return true;
-        }
+                db, apply, local, &handled_pre_refusal))
+            return RF_STEP_FAIL;
+        if (handled_pre_refusal)
+            return RF_STEP_DONE;
     }
+    return RF_STEP_NEXT;
+}
 
-    if (local.refused_coin_tear) {
+/* Step: the coin-tear refusal. A stale validate hash repaired before the
+ * refusal, or the refusal itself, is final; *warn names the throttled WARN
+ * the impl emits. */
+static enum rf_step rf_step_coin_tear(
+    sqlite3 *db,
+    bool apply,
+    struct stage_reducer_frontier_reconcile_result *local,
+    enum rf_warn *warn, uint64_t *reps)
+{
+    if (local->refused_coin_tear) {
         if (!stage_reducer_frontier_reconcile_validate_hash_split_cursor(
-                db, apply, &local))
-            return false;
-        if (local.clamped_validate_headers) {
-            local.refused_coin_tear = false;
-            local.repaired = true;
+                db, apply, local))
+            return RF_STEP_FAIL;
+        if (local->clamped_validate_headers) {
+            local->refused_coin_tear = false;
+            local->repaired = true;
             if (apply) {
                 /* De-storm: a wedged node re-hits this identical repair every
                  * reducer pass until the split genuinely clears. Key on the
@@ -594,60 +687,73 @@ static bool reducer_frontier_reconcile_light_impl(
                 static struct log_throttle stale_validate_throttle =
                     LOG_THROTTLE_INIT;
                 uint64_t key =
-                    ((uint64_t)(uint32_t)local.hstar << 32) |
-                    (uint32_t)local.validate_headers_cursor_after;
-                uint64_t reps = 0;
+                    ((uint64_t)(uint32_t)local->hstar << 32) |
+                    (uint32_t)local->validate_headers_cursor_after;
                 if (log_throttle_should_emit(&stale_validate_throttle, key,
                                              platform_time_wall_unix(), 60,
-                                             &reps))
-                    LOG_WARN("stage_repair",
-                             "[stage_repair] reducer_frontier repaired stale "
-                             "validate hash before coin-tear refusal "
-                             "hstar=%d coins_applied=%d validate_headers=%d->%d "
-                             "validate_hash_split=%d repeats=%llu",
-                             local.hstar, local.coins_applied_height,
-                             local.validate_headers_cursor_before,
-                             local.validate_headers_cursor_after,
-                             local.lowest_validate_headers_hash_split,
-                             (unsigned long long)reps);
+                                             reps))
+                    *warn = RF_WARN_STALE_VALIDATE;
             }
-            if (out)
-                *out = local;
-            return true;
+            return RF_STEP_DONE;
         }
     }
 
-    if (local.refused_coin_tear) {
+    if (local->refused_coin_tear) {
         /* De-storm: a wedged node reruns this reconcile every reducer pass.
          * Key on (coins_applied_height, hstar+1) so a moving frontier re-emits
          * but a stuck one collapses to first-fire + 60 s keepalive (reps). */
         static struct log_throttle l1_refuse_throttle = LOG_THROTTLE_INIT;
-        uint64_t key = ((uint64_t)(uint32_t)local.coins_applied_height << 32)
-                       | (uint32_t)(local.hstar + 1);
-        uint64_t reps = 0;
+        uint64_t key = ((uint64_t)(uint32_t)local->coins_applied_height << 32)
+                       | (uint32_t)(local->hstar + 1);
         if (log_throttle_should_emit(&l1_refuse_throttle, key,
-                                     platform_time_wall_unix(), 60, &reps))
-            LOG_WARN("stage_repair",
-                     "[stage_repair] reducer_frontier L1 refused: "
-                     "coins_applied_height=%d > hstar_cursor=%d (L2 required) "
-                     "repeats=%llu",
-                     local.coins_applied_height, local.hstar + 1,
-                     (unsigned long long)reps);
-        if (out)
-            *out = local;
-        return true;
+                                     platform_time_wall_unix(), 60, reps))
+            *warn = RF_WARN_L1_REFUSED;
+        return RF_STEP_DONE;
     }
+    return RF_STEP_NEXT;
+}
 
-    if (local.sweep_top > local.hstar &&
-        !reconcile_block_index_flags(db, ms, apply, &local))
+/* The early-exit steps in order; the first non-NEXT outcome wins. */
+static enum rf_step rf_run_steps(
+    sqlite3 *db,
+    struct main_state *ms,
+    bool apply,
+    struct stage_reducer_frontier_reconcile_result *local,
+    enum rf_warn *warn, uint64_t *reps)
+{
+    *warn = RF_WARN_NONE;
+    enum rf_step step = rf_step_coin_unknown(local, warn, reps);
+    if (step == RF_STEP_NEXT)
+        step = rf_step_replay(db, ms, apply, local);
+    if (step == RF_STEP_NEXT)
+        step = rf_step_pre_refusal(db, apply, local);
+    if (step == RF_STEP_NEXT)
+        step = rf_step_coin_tear(db, apply, local, warn, reps);
+    return step;
+}
+
+static bool rf_reconcile_sweeps(
+    sqlite3 *db,
+    struct main_state *ms,
+    bool apply,
+    struct stage_reducer_frontier_reconcile_result *local)
+{
+    if (local->sweep_top > local->hstar &&
+        !reconcile_block_index_flags(db, ms, apply, local))
         return false;
 
-    if (!stage_reducer_frontier_reconcile_refill_cursors(db, ms, apply, &local))
+    if (!stage_reducer_frontier_reconcile_refill_cursors(db, ms, apply, local))
         return false;
 
-    if (!reconcile_tip_finalize_cursor(db, apply, &local))
+    if (!reconcile_tip_finalize_cursor(db, apply, local))
         return false;
+    return true;
+}
 
+/* Whether a cursor clamp this pass counts as a repair. */
+static bool rf_clamp_repaired(
+    const struct stage_reducer_frontier_reconcile_result *local)
+{
     /* An UNRESOLVED script-side hash_split this pass (the dual replay did not
      * re-derive it — e.g. the canonical body is not yet on disk) must NOT
      * self-report `repaired` via a validate_headers / tip_finalize cursor clamp:
@@ -661,25 +767,39 @@ static bool reducer_frontier_reconcile_light_impl(
      * the residual non-advancing case (canonical body genuinely absent). A
      * genuine VALIDATE-side split still counts its clamp (it does advance H*). */
     bool unresolved_script_side_split =
-        local.lowest_script_validate_hash_split >= 0 &&
-        !local.stale_script_repaired;
+        local->lowest_script_validate_hash_split >= 0 &&
+        !local->stale_script_repaired;
     bool clamp_repaired =
         (!unresolved_script_side_split) &&
-        (local.clamped_tip_finalize || local.clamped_validate_headers);
+        (local->clamped_tip_finalize || local->clamped_validate_headers);
+    return clamp_repaired;
+}
 
-    local.repaired = local.repaired ||
+static void rf_update_repaired(
+    struct stage_reducer_frontier_reconcile_result *local)
+{
+    bool clamp_repaired = rf_clamp_repaired(local);
+
+    local->repaired = local->repaired ||
                      clamp_repaired ||
-                     local.clamped_body_fetch ||
-                     local.clamped_body_persist ||
-                     local.clamped_script_validate ||
-                     local.clamped_proof_validate ||
-                     local.pre_refusal_unapplied_clamp ||
-                     local.tipfin_backfill_count > 0 ||
-                     local.scripts_set > 0 ||
-                     local.have_data_set > 0 ||
-                     local.have_data_cleared > 0 ||
-                     local.failed_mask_cleared > 0;
+                     local->clamped_body_fetch ||
+                     local->clamped_body_persist ||
+                     local->clamped_script_validate ||
+                     local->clamped_proof_validate ||
+                     local->pre_refusal_unapplied_clamp ||
+                     local->tipfin_backfill_count > 0 ||
+                     local->scripts_set > 0 ||
+                     local->have_data_set > 0 ||
+                     local->have_data_cleared > 0 ||
+                     local->failed_mask_cleared > 0;
+}
 
+/* Whether the throttled "L1 repaired" WARN is admitted this pass. */
+static bool rf_l1_repaired_should_emit(
+    bool apply,
+    const struct stage_reducer_frontier_reconcile_result *local,
+    uint64_t *l1_repaired_reps)
+{
     /* De-storm: on a wedged node this reconcile "repairs" the same frontier
      * every reducer pass (~5s) — an unthrottled WARN is a co-mechanism of the
      * live 18k-line log storm. Key on the repair fingerprint (hstar,
@@ -688,15 +808,95 @@ static bool reducer_frontier_reconcile_light_impl(
      * keepalive. Mirrors l1_refuse_throttle ~60 lines above. */
     static struct log_throttle l1_repaired_throttle = LOG_THROTTLE_INIT;
     uint64_t l1_repaired_key =
-        ((uint64_t)(uint32_t)local.hstar << 32) |
-        (uint32_t)(((uint32_t)local.coins_applied_height << 12) ^
-                   (uint32_t)(local.have_data_cleared + local.failed_mask_cleared +
-                              local.have_data_set + local.scripts_set));
-    uint64_t l1_repaired_reps = 0;
-    if (apply && local.repaired &&
+        ((uint64_t)(uint32_t)local->hstar << 32) |
+        (uint32_t)(((uint32_t)local->coins_applied_height << 12) ^
+                   (uint32_t)(local->have_data_cleared + local->failed_mask_cleared +
+                              local->have_data_set + local->scripts_set));
+    return apply && local->repaired &&
         log_throttle_should_emit(&l1_repaired_throttle, l1_repaired_key,
                                  platform_time_wall_unix(), 60,
-                                 &l1_repaired_reps)) {
+                                 l1_repaired_reps);
+}
+
+static void rf_detect_memo_store(
+    bool apply, bool memo_eligible, int64_t changes_at_entry,
+    const struct stage_reducer_frontier_reconcile_result *local)
+{
+    /* Only this terminal exit caches: every early return above is an
+     * actionable/abnormal state the next tick must re-derive fresh. */
+    if (!apply && memo_eligible &&
+        stage_reducer_frontier_result_is_memo_clean(local)) {
+        g_detect_memo.valid = true;
+        g_detect_memo.swept_unix = platform_time_wall_unix();
+        g_detect_memo.total_changes = changes_at_entry;
+        g_detect_memo.result = *local;
+    }
+}
+
+static bool reducer_frontier_reconcile_light_impl(
+    sqlite3 *db,
+    struct main_state *ms,
+    bool apply,
+    struct stage_reducer_frontier_reconcile_result *out)
+{
+    if (out)
+        memset(out, 0, sizeof(*out));
+    if (!db)
+        LOG_FAIL("stage_repair", "reducer_frontier_reconcile: NULL db");
+    if (!ms)
+        LOG_FAIL("stage_repair", "reducer_frontier_reconcile: NULL main_state");
+
+    bool memo_eligible = db == progress_store_db();
+    int64_t changes_at_entry = 0;
+    if (rf_detect_memo_lookup(db, apply, memo_eligible, out, &changes_at_entry))
+        return true;
+
+    struct stage_reducer_frontier_reconcile_result local;
+    rf_init_local(&local);
+
+    if (!rf_snapshot_and_purges(db, ms, apply, &local))
+        return false;
+
+    enum rf_warn warn = RF_WARN_NONE;
+    uint64_t reps = 0;
+    enum rf_step step = rf_run_steps(db, ms, apply, &local, &warn, &reps);
+    if (step == RF_STEP_FAIL)
+        return false;
+    if (warn == RF_WARN_COIN_UNKNOWN)
+        LOG_WARN("stage_repair",
+                 "[stage_repair] reducer_frontier L1 refused: "
+                 "coins_applied_height absent (coin frontier unknown) "
+                 "repeats=%llu", (unsigned long long)reps);
+    else if (warn == RF_WARN_STALE_VALIDATE)
+        LOG_WARN("stage_repair",
+                 "[stage_repair] reducer_frontier repaired stale "
+                 "validate hash before coin-tear refusal "
+                 "hstar=%d coins_applied=%d validate_headers=%d->%d "
+                 "validate_hash_split=%d repeats=%llu",
+                 local.hstar, local.coins_applied_height,
+                 local.validate_headers_cursor_before,
+                 local.validate_headers_cursor_after,
+                 local.lowest_validate_headers_hash_split,
+                 (unsigned long long)reps);
+    else if (warn == RF_WARN_L1_REFUSED)
+        LOG_WARN("stage_repair",
+                 "[stage_repair] reducer_frontier L1 refused: "
+                 "coins_applied_height=%d > hstar_cursor=%d (L2 required) "
+                 "repeats=%llu",
+                 local.coins_applied_height, local.hstar + 1,
+                 (unsigned long long)reps);
+    if (step == RF_STEP_DONE) {
+        rf_publish_result(out, &local);
+        return true;
+    }
+
+    if (!rf_reconcile_sweeps(db, ms, apply, &local))
+        return false;
+
+    rf_update_repaired(&local);
+
+    uint64_t l1_repaired_reps = 0;
+    if (rf_l1_repaired_should_emit(apply, &local, &l1_repaired_reps)) {
         LOG_WARN("stage_repair",
                  "[stage_repair] reducer_frontier L1 repaired hstar=%d "
                  "served_floor=%d coins_applied=%d sweep_top=%d "
@@ -738,18 +938,9 @@ static bool reducer_frontier_reconcile_light_impl(
                  (unsigned long long)l1_repaired_reps);
     }
 
-    /* Only this terminal exit caches: every early return above is an
-     * actionable/abnormal state the next tick must re-derive fresh. */
-    if (!apply && memo_eligible &&
-        stage_reducer_frontier_result_is_memo_clean(&local)) {
-        g_detect_memo.valid = true;
-        g_detect_memo.swept_unix = platform_time_wall_unix();
-        g_detect_memo.total_changes = changes_at_entry;
-        g_detect_memo.result = local;
-    }
+    rf_detect_memo_store(apply, memo_eligible, changes_at_entry, &local);
 
-    if (out)
-        *out = local;
+    rf_publish_result(out, &local);
     return true;
 }
 
