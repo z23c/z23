@@ -17,6 +17,10 @@ bool boot_p2p_parse_bind_address(const char *text, struct net_service *out)
     net_service_init(out);
     if (!text || !text[0] || strlen(text) >= PLATFORM_IPV6_ADDRESS_TEXT_SIZE)
         return false;
+    /* Zones are refused by contract; Apple's inet_pton accepts "%lo" as a
+     * suffix where glibc refuses it, so the rule is stated here. */
+    if (strchr(text, '%'))
+        return false;
     unsigned char ipv4[4];
     if (platform_socket_parse_address(AF_INET, text, ipv4) == 1) {
         net_addr_set_ipv4(&out->addr, ipv4);
