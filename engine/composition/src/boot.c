@@ -28,6 +28,7 @@
 #include "config/boot_first_run_banner.h"
 #include "config/boot_wallet_phrase.h"
 #include "boot_timing_marks_internal.h"
+#include "boot_block_index_scan_internal.h"
 #include "support/cleanse.h"
 #include "net/snapshot_sync_contract.h"
 #include "services/chain_activation_service.h"
@@ -1211,19 +1212,6 @@ struct boot_seq {
     bool done;                         /* a one-shot verb completed the boot */
 };
 
-/* What the single-pass block-index scan learns, so the tip-resolution,
- * coverage and block-file-scan steps below need no further O(chain) pass. */
-struct boot_index_scan {
-    struct block_index *best_header;   /* most chain work */
-    struct block_index *fallback;      /* most work w/ data */
-    struct block_index *reindex_best;  /* highest w/ pprev+nChainTx */
-    int cleared_failed;
-    int max_have_data_h;
-    int have_data_count;
-    int missing_header_data;
-    int contiguous_data_h;
-};
-
 /* Observability, chain/datadir selection, postmortem, the
  * unclean-shutdown probe, disk/IBD guards, crypto + chain state. */
 static bool boot_seq_prologue(struct app_context *ctx, struct boot_seq *s)
@@ -2289,67 +2277,6 @@ static void boot_step_resolve_deferred_proof_height(struct app_context *ctx)
             fprintf(stderr, "Warning: -deferproofvalidationbelow hash must be 64 hex chars\n");
         }
     }
-}
-
-/* Track the most-work header, with a height tiebreak when either side's work
- * is zero (a rebuild-from-blocks data gap must not silently cap best_header —
- * same rule as promote_best_header_after_load). */
-static void boot_scan_track_best_header(struct boot_index_scan *scan,
-                                        struct block_index *sp)
-{
-    if (!scan->best_header || (arith_uint256_is_zero(&sp->nChainWork) || arith_uint256_is_zero(&scan->best_header->nChainWork)
-         ? sp->nHeight > scan->best_header->nHeight
-         : arith_uint256_compare(&sp->nChainWork, &scan->best_header->nChainWork) > 0))
-        scan->best_header = sp;
-}
-
-/* Track the restore fallback and the reindex target. */
-static void boot_scan_track_restore_targets(struct boot_index_scan *scan,
-                                            struct block_index *sp)
-{
-    /* Fallback: most work with HAVE_DATA + nChainTx */
-    if ((sp->nStatus & BLOCK_HAVE_DATA) && sp->nChainTx > 0) {
-        if (!scan->fallback ||
-            arith_uint256_compare(&sp->nChainWork,
-                                  &scan->fallback->nChainWork) > 0)
-            scan->fallback = sp;
-    }
-    /* Reindex target: highest with pprev + nChainTx */
-    if (sp->pprev && sp->nHeight > 0 && sp->nChainTx > 0) {
-        if (!scan->reindex_best ||
-            sp->nHeight > scan->reindex_best->nHeight)
-            scan->reindex_best = sp;
-    }
-}
-
-/* Max HAVE_DATA height + aggregate body-coverage count (gates the
- * reindex-target decision below; no extra O(chain) pass). */
-static void boot_scan_track_body_coverage(struct boot_index_scan *scan,
-                                          struct block_index *sp)
-{
-    if (sp->nStatus & BLOCK_HAVE_DATA) {
-        scan->have_data_count++;
-        if (sp->nHeight > scan->max_have_data_h)
-            scan->max_have_data_h = sp->nHeight;
-    }
-    if ((sp->nStatus & BLOCK_HAVE_DATA) && sp->nDataPos > 0 &&
-        sp->nHeight > 0 &&
-        (sp->nVersion == 0 || sp->nTime == 0 || sp->nBits == 0))
-        scan->missing_header_data++;
-}
-
-/* One entry of the single-pass block-index scan. */
-static void boot_scan_visit_index_entry(struct boot_index_scan *scan,
-                                        struct block_index *sp)
-{
-    /* Clear BLOCK_FAILED */
-    if (sp->nStatus & BLOCK_FAILED_MASK) {
-        sp->nStatus &= ~BLOCK_FAILED_MASK;
-        scan->cleared_failed++;
-    }
-    boot_scan_track_best_header(scan, sp);
-    boot_scan_track_restore_targets(scan, sp);
-    boot_scan_track_body_coverage(scan, sp);
 }
 
 /* ── Single-pass block index scan ────────────────────────────
