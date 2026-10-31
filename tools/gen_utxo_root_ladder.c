@@ -390,7 +390,8 @@ static bool parse_cli_check(const struct cli *c)
     return true;
 }
 
-static bool parse_cli(int argc, char **argv, struct cli *c)
+/* Sets every cli field to its built-in default value. */
+static void reset_cli_defaults(struct cli *c)
 {
     c->source_db = NULL;
     c->source_kernel_db = NULL;
@@ -403,6 +404,11 @@ static bool parse_cli(int argc, char **argv, struct cli *c)
     c->immutable_source = false;
     c->out_h = DEFAULT_OUT_H;
     c->out_c = DEFAULT_OUT_C;
+}
+
+static bool parse_cli(int argc, char **argv, struct cli *c)
+{
+    reset_cli_defaults(c);
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -818,6 +824,29 @@ static bool emit_tables(const struct cli *c, const struct entry *entries, size_t
 
 /* ── Main ────────────────────────────────────────────────────────── */
 
+/* Opens the optional second source db and attaches its kernel db; false
+ * only when a requested --second-db failed to open. */
+static bool open_second_source(const struct cli *c, sqlite3 **snd,
+                               bool *snd_has_kdb)
+{
+    *snd = NULL;
+    *snd_has_kdb = false;
+    if (!c->second_db) return true;
+    *snd = open_db_ro(c->second_db, c->immutable_source);
+    if (!*snd) return false;
+    *snd_has_kdb = attach_kernel_db(*snd, c->second_kernel_db,
+                                    c->immutable_source);
+    return true;
+}
+
+/* Clamps the requested --max-height to the source db's best-chain height. */
+static int32_t resolve_max_height(const struct cli *c, int32_t src_max)
+{
+    int32_t max_h = c->max_height >= 0 ? c->max_height : src_max;
+    if (max_h > src_max) max_h = src_max;
+    return max_h;
+}
+
 int main(int argc, char **argv)
 {
     struct cli c;
@@ -831,11 +860,9 @@ int main(int argc, char **argv)
 
     sqlite3 *snd = NULL;
     bool snd_has_kdb = false;
-    if (c.second_db) {
-        snd = open_db_ro(c.second_db, c.immutable_source);
-        if (!snd) { sqlite3_close(src); return 1; }
-        snd_has_kdb = attach_kernel_db(
-            snd, c.second_kernel_db, c.immutable_source);
+    if (!open_second_source(&c, &snd, &snd_has_kdb)) {
+        sqlite3_close(src);
+        return 1;
     }
 
     int32_t src_max = -1;
@@ -845,8 +872,7 @@ int main(int argc, char **argv)
         close_sources(src, snd);
         return 1;
     }
-    int32_t max_h = c.max_height >= 0 ? c.max_height : src_max;
-    if (max_h > src_max) max_h = src_max;
+    int32_t max_h = resolve_max_height(&c, src_max);
     if (snd) report_second_max(snd);
 
     printf("[gen_utxo_root_ladder] source=%s max_height=%d stride=%d%s\n",
