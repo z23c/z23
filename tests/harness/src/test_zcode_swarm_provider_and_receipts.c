@@ -711,6 +711,45 @@ static int rebind_case_restricted_io(struct sw_node *n, struct sw_pkg *p,
     return failures;
 }
 
+/* Work restricted to one provider, then a restricted rebind to another whose
+ * record write fails: memory keeps the first allowlist, so once the first
+ * request times out the retry goes to the first provider, never the second. */
+static int rebind_case_restricted_list_io(struct sw_node *n, struct sw_pkg *p,
+                                          uint64_t first, uint64_t second)
+{
+    int failures = 0;
+    uint8_t first_key[33], second_key[33];
+    struct vcs_package_swarm_object wants[2];
+    const uint64_t retry = 6 + VCS_SWARM_REQUEST_TIMEOUT_TICKS;
+    sw_key(97, first_key);
+    sw_key(98, second_key);
+    rebind_restart(n);
+    SW_CHECK("rebind io: list engine restarts", n->engine != NULL);
+    SW_CHECK("rebind io: both providers register",
+             vcs_swarm_engine_peer_add(n->engine, first, first_key) &&
+             vcs_swarm_engine_peer_add(n->engine, second, second_key));
+    SW_CHECK("rebind io: work restricted to the first provider starts",
+             vcs_swarm_engine_fetch_from(n->engine, p->root, SW_DAY, 5,
+                                         &first, 1) == VCS_SWARM_FETCH_OK);
+    vcs_swarm_engine_tick(n->engine, SW_DAY, 5);
+    SW_CHECK("rebind io: the first provider gets the manifest WANT",
+             sw_drain_wants(n, first, wants, 2) == 1 &&
+             sw_drain_wants(n, second, wants, 2) == 0);
+    SW_CHECK("rebind io: block record writes for the list",
+             rebind_set_downloads_mode(n, 0500));
+    SW_CHECK("rebind io: rebind to the second provider reports record I/O",
+             vcs_swarm_engine_fetch_from(n->engine, p->root, SW_DAY, 6,
+                                         &second, 1) ==
+                 VCS_SWARM_FETCH_RECORD_IO);
+    SW_CHECK("rebind io: restore record writes for the list",
+             rebind_set_downloads_mode(n, 0700));
+    vcs_swarm_engine_tick(n->engine, SW_DAY, retry);
+    SW_CHECK("rebind io: the retry keeps the first allowlist",
+             sw_drain_wants(n, second, wants, 2) == 0 &&
+             sw_drain_wants(n, first, wants, 2) == 1);
+    return failures;
+}
+
 static int rebind_case_record_io(void)
 {
     if (geteuid() == 0) {
@@ -721,7 +760,7 @@ static int rebind_case_record_io(void)
     /* Zeroed so a node or package that fails partway, or never starts,
      * frees safely. */
     struct sw_node n = {0};
-    struct sw_pkg scout = {0}, ordinary = {0};
+    struct sw_pkg scout = {0}, ordinary = {0}, listed = {0};
     uint8_t key[33];
     sw_key(96, key);
     const uint64_t peer = 906;
@@ -731,9 +770,11 @@ static int rebind_case_record_io(void)
         test_rm_rf_recursive(n.datadir);
         return 1;
     }
-    /* 1-file roots are seed-blind, so the ordinary package has two. */
+    /* 1-file roots are seed-blind, so the other packages have more. */
     if (!sw_make_package(&scout, 1, 36) ||
-        !sw_make_package(&ordinary, 2, 37)) {
+        !sw_make_package(&ordinary, 2, 37) ||
+        !sw_make_package(&listed, 3, 38)) {
+        sw_free_package(&listed);
         sw_free_package(&ordinary);
         sw_free_package(&scout);
         sw_node_close(&n);
@@ -747,8 +788,10 @@ static int rebind_case_record_io(void)
     /* Ordinary stays unannounced: only unrestricted work with no live
      * advertiser is listed, which is what makes the rollback visible. */
     failures += rebind_case_restricted_io(&n, &ordinary, peer);
+    failures += rebind_case_restricted_list_io(&n, &listed, peer, peer + 1);
     (void)rebind_set_downloads_mode(&n, 0700);
 
+    sw_free_package(&listed);
     sw_free_package(&ordinary);
     sw_free_package(&scout);
     sw_node_close(&n);
