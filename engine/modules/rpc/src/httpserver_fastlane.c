@@ -41,19 +41,27 @@ bool rpc_http_test_fastlane_allows(const char *method, const char *params_json)
     return ok;
 }
 
-#if !defined(_WIN32)
-/* Content-Length of the header block [buf, buf+hdr_len), or -1. */
+/* Content-Length of the header block [buf, buf+hdr_len), or -1. A repeated
+ * Content-Length (even an equal one) is ambiguous: the general dispatch path
+ * keeps the last value, so a first value that passes this classifier can
+ * leave the reserved worker waiting for bytes that never arrive. Refuse it. */
 static long fastlane_content_length(const char *buf, size_t hdr_len)
 {
+    long found = -1;
+    bool seen = false;
     for (const char *p = buf; p < buf + hdr_len; ) {
         const char *eol = memchr(p, '\n', (size_t)(buf + hdr_len - p));
         if (eol == NULL)
             break;
-        if ((size_t)(eol - p) > 15 && strncasecmp(p, "Content-Length:", 15) == 0)
-            return strtol(p + 15, NULL, 10);
+        if ((size_t)(eol - p) > 15 && strncasecmp(p, "Content-Length:", 15) == 0) {
+            if (seen)
+                return -1;
+            seen = true;
+            found = strtol(p + 15, NULL, 10);
+        }
         p = eol + 1;
     }
-    return -1;
+    return found;
 }
 
 static bool fastlane_body_allowed(const char *body, size_t len)
@@ -69,7 +77,26 @@ static bool fastlane_body_allowed(const char *body, size_t len)
     json_free(&request);
     return allowed;
 }
-#endif
+
+/* Classifies the peeked bytes [buf, buf+got); buf[got] must be 0. */
+static bool fastlane_peek_matches(const char *buf, size_t got)
+{
+    if (got < 5 || strncmp(buf, "POST ", 5) != 0)
+        return false;
+    const char *end = strstr(buf, "\r\n\r\n");
+    if (end == NULL)
+        return false;
+    size_t hdr_len = (size_t)(end - buf) + 4;
+    long clen = fastlane_content_length(buf, hdr_len);
+    if (clen <= 0 || (size_t)clen > got - hdr_len)
+        return false;
+    return fastlane_body_allowed(buf + hdr_len, (size_t)clen);
+}
+
+bool rpc_http_test_fastlane_peek_matches(const char *raw)
+{
+    return raw != NULL && fastlane_peek_matches(raw, strlen(raw));
+}
 
 bool rpc_http_fastlane_conn_matches(const struct rpc_conn *conn)
 {
@@ -82,18 +109,9 @@ bool rpc_http_fastlane_conn_matches(const struct rpc_conn *conn)
     char buf[FASTLANE_PEEK_CAP + 1];
     ssize_t got = recv(conn->fd, buf, FASTLANE_PEEK_CAP,
                        MSG_PEEK | MSG_DONTWAIT);
-    if (got < 5)
+    if (got < 0)
         return false;
     buf[got] = 0;
-    if (strncmp(buf, "POST ", 5) != 0)
-        return false;
-    const char *end = strstr(buf, "\r\n\r\n");
-    if (end == NULL)
-        return false;
-    size_t hdr_len = (size_t)(end - buf) + 4;
-    long clen = fastlane_content_length(buf, hdr_len);
-    if (clen <= 0 || (size_t)clen > (size_t)got - hdr_len)
-        return false;
-    return fastlane_body_allowed(buf + hdr_len, (size_t)clen);
+    return fastlane_peek_matches(buf, (size_t)got);
 #endif
 }

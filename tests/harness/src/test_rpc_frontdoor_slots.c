@@ -947,6 +947,34 @@ static bool rfs_case_fast_lane_allowlist(void)
     printf(ok ? "OK\n" : "FAIL\n");
     return ok;
 }
+
+/* The general dispatch path keeps the last Content-Length, so a repeated
+ * header must never be fast-lane classified: the first value could fit the
+ * peeked bytes while the worker would wait for the second, larger body. */
+static bool rfs_case_fast_lane_repeated_content_length(void)
+{
+    static const char body[] =
+        "{\"method\":\"dumpstate\",\"params\":[\"status_frontdoor\"]}";
+    char one[512], dup_big[512], dup_equal[512];
+    printf("frontdoor fast lane refuses a repeated Content-Length... ");
+    int n1 = snprintf(one, sizeof(one),
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: %zu\r\n\r\n%s",
+        strlen(body), body);
+    int n2 = snprintf(dup_big, sizeof(dup_big),
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: %zu\r\n"
+        "Content-Length: 1000000\r\n\r\n%s", strlen(body), body);
+    int n3 = snprintf(dup_equal, sizeof(dup_equal),
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: %zu\r\n"
+        "Content-Length: %zu\r\n\r\n%s", strlen(body), strlen(body), body);
+    bool ok = n1 > 0 && n2 > 0 && n3 > 0 &&
+        (size_t)n1 < sizeof(one) && (size_t)n2 < sizeof(dup_big) &&
+        (size_t)n3 < sizeof(dup_equal) &&
+        rpc_http_test_fastlane_peek_matches(one) &&
+        !rpc_http_test_fastlane_peek_matches(dup_big) &&
+        !rpc_http_test_fastlane_peek_matches(dup_equal);
+    printf(ok ? "OK\n" : "FAIL\n");
+    return ok;
+}
 #endif
 
 int test_rpc_frontdoor_slots(void)
@@ -983,11 +1011,12 @@ int test_rpc_frontdoor_slots(void)
     if (!rfs_case_drains_halfclosed_loopback()) failures++;
 #if !defined(_WIN32)
     if (!rfs_case_fast_lane_allowlist()) failures++;
+    if (!rfs_case_fast_lane_repeated_content_length()) failures++;
     if (!rfs_case_fast_lane_serves_status()) failures++;
 #endif
 
     rpc_http_test_queue_reset(-1);
 
-    printf("\n%d rpc front-door slot tests, %d failed\n", 10, failures);
+    printf("\n%d rpc front-door slot tests, %d failed\n", 11, failures);
     return failures;
 }
