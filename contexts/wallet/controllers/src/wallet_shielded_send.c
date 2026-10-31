@@ -9,6 +9,7 @@
 
 #include "controllers/wallet_shielded_internal.h"
 #include "controllers/wallet_spend_gate.h"
+#include "controllers/wallet_private_broadcast.h"
 #include "wallet/wallet_lock.h"
 #include "controllers/wallet_send_once.h"
 
@@ -348,7 +349,8 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
                            struct wallet_tx *prepared,
                            struct json_value *result, bool checkpoint_rule)
 {
-    struct wallet_rpc_context *ctx = wallet_ctx();
+    struct wallet_rpc_context send_view;
+    struct wallet_rpc_context *ctx = wallet_send_view_unless_prepared(wallet_ctx(), &send_view, prepared);
     RPC_HELP(help, result,
         "z_sendmany \"fromaddress\" [{\"address\":\"...\",\"amount\":...,\"memo\":\"...\"},...]\n"
         "\nSend from a transparent or shielded address to multiple recipients.\n"
@@ -792,8 +794,11 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
     if (wallet_ctx_db_ready(ctx))
         node_db_sync_wallet_tx(ctx->node_db, &wtx.tx, ctx->wallet, 0);
 
-    if (ctx->connman)
-        connman_relay_transaction(ctx->connman, &wtx.tx.hash);
+    if (!wallet_send_relay(ctx, &wtx)) {
+        json_set_str(result, "Private broadcast unavailable; send rolled back");
+        transaction_free(&wtx.tx);
+        LOG_FAIL("wallet_shielded", "z_sendmany: private broadcast not queued");
+    }
 
     char txid[65];
     uint256_get_hex(&wtx.tx.hash, txid);

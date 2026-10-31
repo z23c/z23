@@ -6,6 +6,7 @@
 #include "controllers/wallet_controller_internal.h"
 #include "controllers/wallet_shielded_controller.h"
 #include "controllers/wallet_diagnostic_controller.h"
+#include "controllers/wallet_private_broadcast.h"
 #include "controllers/wallet_rescan_controller.h"
 #include "controllers/sovereignty_controller.h"
 #include "controllers/agent_session_controller.h"
@@ -471,7 +472,8 @@ static bool rpc_listunspent(const struct json_value *params, bool help,
 static bool rpc_sendtoaddress(const struct json_value *params, bool help,
                                 struct json_value *result)
 {
-    struct wallet_rpc_context *ctx = wallet_ctx();
+    struct wallet_rpc_context send_view;
+    struct wallet_rpc_context *ctx = wallet_send_view(wallet_ctx(), &send_view);
     RPC_HELP(help, result, "sendtoaddress \"address\" amount\n"
         "Send an amount to a given address.");
 
@@ -570,9 +572,11 @@ static bool rpc_sendtoaddress(const struct json_value *params, bool help,
     if (wallet_ctx_db_ready(ctx))
         node_db_sync_wallet_tx(ctx->node_db, &wtx.tx, ctx->wallet, 0);
 
-    /* Relay to peers */
-    if (ctx->connman)
-        connman_relay_transaction(ctx->connman, &wtx.tx.hash);
+    if (!wallet_send_relay(ctx, &wtx)) {
+        json_set_str(result, "Private broadcast unavailable; send rolled back");
+        transaction_free(&wtx.tx);
+        LOG_FAIL("wallet", "sendtoaddress: private broadcast not queued");
+    }
 
     char txid[65];
     uint256_get_hex(&wtx.tx.hash, txid);
@@ -587,7 +591,8 @@ bool wallet_direct_sendtoaddress(const char *address, int64_t amount_sat,
                                   char *txid_out, size_t txid_out_size,
                                   char *error_out, size_t error_out_size)
 {
-    struct wallet_rpc_context *ctx = wallet_ctx();
+    struct wallet_rpc_context send_view;
+    struct wallet_rpc_context *ctx = wallet_send_view(wallet_ctx(), &send_view);
     (void)txid_out_size; /* always 65 bytes for hex txid */
     /* Sovereign guard, same as both RPC send paths. Fires first. This covers
      * the web-UI form's TRANSPARENT branch only — its shielded branch reaches
@@ -674,8 +679,12 @@ bool wallet_direct_sendtoaddress(const char *address, int64_t amount_sat,
 
     if (wallet_ctx_db_ready(ctx))
         node_db_sync_wallet_tx(ctx->node_db, &wtx.tx, ctx->wallet, 0);
-    if (ctx->connman)
-        connman_relay_transaction(ctx->connman, &wtx.tx.hash);
+    if (!wallet_send_relay(ctx, &wtx)) {
+        snprintf(error_out, error_out_size,
+                 "Private broadcast unavailable; send rolled back");
+        transaction_free(&wtx.tx);
+        LOG_FAIL("wallet", "direct_sendtoaddress: private broadcast not queued");
+    }
 
     uint256_get_hex(&wtx.tx.hash, txid_out);
     transaction_free(&wtx.tx);
@@ -853,6 +862,7 @@ void register_wallet_rpc_commands(struct rpc_table *t)
     register_wallet_diagnostic_rpc_commands(t);
     register_wallet_rescan_rpc_commands(t);
     register_wallet_activity_rpc_commands(t);
+    register_wallet_private_broadcast_rpc_commands(t);
     register_vault_intent_rpc_commands(t);
     /* The yardsale wallet glue (yardsale.seller.arm|disarm|status,
      * yardsale.buy) rides the wallet family for the same reason: the

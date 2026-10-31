@@ -690,6 +690,26 @@ publishes `height: null` until the blocks connect — the same store backs the
 
 ---
 
+## Private Wallet Broadcast
+
+`-walletbroadcast=auto|private|public` selects how this wallet's own sends
+reach the network. `auto` (default) is private when embedded Tor runs and
+public otherwise. In private mode a send is validated into a private pool, never
+enters the node's mempool, and is pushed once, after a random 2 to 20 s delay,
+to one outbound onion peer. With no such peer it waits (`waiting_for_route`) and
+is never sent to a clearnet peer. A send not seen back within 180 s goes to a
+different onion peer; it clears when the network offers it back or a block
+contains it, and an expired send is rolled back through the normal wallet path.
+
+```sh
+z23 core wallet broadcast status   # mode, pending, eligible onion peers, per-txid state
+```
+
+Scope: `sendtoaddress`, `sendmany` and `z_sendmany` only. Vault, ZSLP, ZDIR,
+ZNAM, ZID, blog, swap and raw transaction paths keep public relay. Timing
+correlation and a malicious first onion peer are not addressed; see
+[the experiment](experiments/2026-10-31-wallet-private-relay.md).
+
 ## RPC 429 (Rate Limited)
 
 **Symptoms:** RPC clients get HTTP 429. The `zcl_rpc_requests_total` counter

@@ -1390,9 +1390,9 @@ bool app_init_services(struct app_context *ctx, const struct chain_params *param
     t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.scrub_plaintext", "svc.init_wallet");
     boot_wire_msg_processor(svc, ctx, params);
     boot_init_connman(svc, ctx, params);
-    /* NETWORK_READY boundary: connman initialized + addrman loaded (peer
-     * manager ready); listeners are bound just below. Advances the boot-stage
-     * machine via the net record registered in boot.c. */
+    boot_start_wallet_broadcast(svc, ctx, params);
+    /* NETWORK_READY boundary: connman and addrman ready, listeners bound just
+     * below; advances the boot-stage machine via the net record in boot.c. */
     {
         struct zcl_result nr =
             sysinit_run_stage(BOOT_STAGE_NETWORK_READY, svc);

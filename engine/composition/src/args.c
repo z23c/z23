@@ -84,6 +84,12 @@ void print_usage_all(const char *prog)
     printf("                      probe, beta6 side listener and RPC TLS listener do not\n");
     printf("                      start, and /observation.json answers 404. Tor and the\n");
     printf("                      loopback RPC are unchanged. Default off.\n");
+    printf("  -walletbroadcast=M  How this wallet's own sends reach the network: private\n");
+    printf("                      (validated in a private pool, pushed once to one\n");
+    printf("                      outbound onion peer after a 2-20 s random delay, held\n");
+    printf("                      when none is connected, never clearnet), public\n");
+    printf("                      (announced to all peers) or auto (default: private\n");
+    printf("                      when Tor runs, public otherwise).\n");
     printf("  -observation=0      /observation.json on the onion answers 404 (hides\n");
     printf("                      hardware and peer telemetry). Default on (=1).\n");
     printf("  -no-tor             Turn Tor off: no hidden service, clearnet\n");
@@ -851,6 +857,22 @@ static int args_arm_tor(const char *arg,
     return ARGS_ARM_TAKEN;
 }
 
+static int args_arm_wallet_broadcast(const char *arg,
+                                    struct args_arm_state *st)
+{
+    static const char *const modes[] = { "auto", "private", "public" };
+    if (strncmp(arg, "-walletbroadcast=", 17) != 0) return ARGS_ARM_NOMATCH;
+    for (int i = 0; i < 3; i++) {
+        if (strcmp(arg + 17, modes[i]) == 0) {
+            st->ctx->wallet_broadcast = i;
+            return ARGS_ARM_TAKEN;
+        }
+    }
+    fprintf(stderr, "Invalid option: %s (use -walletbroadcast=auto, private "
+                    "or public)\n", arg);
+    return 1;
+}
+
 static int args_arm_enum_env_modes(const char *arg,
                                    struct args_arm_state *st)
 {
@@ -1239,6 +1261,7 @@ static const args_arm_fn k_args_arms[] = {
     args_arm_fold,
     args_arm_reindex_backfill,
     args_arm_tor,
+    args_arm_wallet_broadcast,
     args_arm_enum_env_modes,
     args_arm_profile_lane,
     args_arm_validation_filesync,

@@ -57,6 +57,8 @@ bool boot_wallet_is_sealed(const struct wallet *wallet);
  * policy applies, and no row carries an at-rest envelope. A wallet that booted
  * locked has sealed rows and is not plaintext. */
 bool boot_wallet_keys_plaintext_at_rest(int64_t pre_open_key_rows);
+void boot_start_wallet_broadcast(struct boot_svc_ctx *svc,
+    const struct app_context *ctx, const struct chain_params *params);
 void boot_wallet_top_up_legacy_keypool_or_exit(
     int64_t pre_open_key_rows, struct wallet_sqlite *wallet_db,
     struct wallet *wallet);

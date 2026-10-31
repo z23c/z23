@@ -25,6 +25,7 @@
 #include "services/market_moderation_service.h"
 #include "services/yardsale_prevout_service.h"
 #include "controllers/sync_controller.h"
+#include "services/wallet_private_relay.h"
 #include "controllers/yardsale_controller.h"
 #include "models/peer.h"
 #include "models/zmsg.h"
@@ -280,6 +281,7 @@ void boot_wallet_tx_accepted(const struct transaction *tx, void *ctx)
     if (!svc || !tx || !svc->wallet)
         return;
 
+    wpr_note_seen(wpr_global(), &tx->hash);
     wallet_sync_transaction(svc->wallet, tx, NULL);
     if (svc->node_db)
         (void)node_db_sync_wallet_tx(svc->node_db, tx, svc->wallet, 0);

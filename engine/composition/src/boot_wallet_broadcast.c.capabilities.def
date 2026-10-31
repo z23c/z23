@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the private wallet broadcast. */
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_wallet_broadcast.c", CAP_FS_WRITE, "prints the selected broadcast mode to stdout and a start failure to stderr; no file is written")

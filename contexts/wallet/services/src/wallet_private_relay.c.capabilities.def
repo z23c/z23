@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the private wallet broadcast. */
+ZCL_MODULE_CAPABILITY("contexts/wallet/services/src/wallet_private_relay.c", CAP_FS_READ, "reads the durable pending-transaction file in the datadir; writes go through the authority receipt writer")

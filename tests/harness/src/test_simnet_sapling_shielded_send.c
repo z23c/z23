@@ -53,6 +53,7 @@
 #include "sim/simnet.h"
 #include "sim/simnet_sapling.h"
 #include "sim/seed_tape.h"
+#include "test/wallet_private_relay_probe.h"
 
 #include "sapling/sapling.h"
 #include "sapling/sapling_prover.h"
@@ -855,6 +856,10 @@ static int build_and_verify(uint64_t seed, bool verify_ok,
 
     /* ── Drive the REAL durable nullifier path on the z->z block ── */
     build_and_verify_check_nullifiers(&zz, zz_height, spend_nf, &failures);
+
+    /* The same proved and verified send, taken through the private relay. */
+    if (zz_verified && verify_ok)
+        failures += wallet_private_relay_shielded_probe(&s, &zz);
 
     /* Mint z->z: appends the new note, stamps the tree root, advances tip via
      * connect_block. Ownership of zz's vin/vout transfers to simnet; the

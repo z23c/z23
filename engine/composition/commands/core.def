@@ -941,6 +941,25 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
+ZCL_COMMAND_BRANCH("core.wallet.broadcast", "core.wallet",
+                   "How the wallet's own sends reach the network",
+                   ZCL_COMMAND_LAYER_CORE)
+ZCL_COMMAND_READY_READ(
+    "core.wallet.broadcast.status", "core.wallet.broadcast", "",
+    "Private broadcast mode, pending sends and onion routes",
+    "Broadcast mode (private or public) for the wallet's own sends, the "
+    "count of pending private sends, the connected eligible onion peers, "
+    "and per pending transaction its state (waiting_for_route, scheduled, "
+    "sent, seen), attempts and seconds since the last attempt. Carries no "
+    "amounts or addresses.", 0,
+    "wallet,broadcast,private,relay,onion,status",
+    "zcl.command.empty_input.v1", "zcl.wallet_broadcast_status.v1",
+    "", "", "z23 core wallet broadcast status",
+    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OWNER,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
+    ZCL_COMMAND_CAP_WALLET_REQUEST, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
 ZCL_COMMAND_BRANCH("core.wallet.address", "core.wallet",
                    "Transparent addresses", ZCL_COMMAND_LAYER_CORE)
 ZCL_COMMAND_READY_COMMAND(

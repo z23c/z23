@@ -9,6 +9,7 @@
 #include "controllers/wallet_shielded_internal.h"
 #include "controllers/wallet_activity.h"
 #include "controllers/wallet_spend_gate.h"
+#include "controllers/wallet_private_broadcast.h"
 #include "jobs/reducer_frontier.h"
 #include "validation/chainstate.h"
 #include "wallet/wallet_lock.h"
@@ -696,8 +697,11 @@ shielded_cleanup:
             LOG_WARN("wallet_shielded",
                      "z_sendmany: wallet projection write failed after durable reservation");
 
-        if (ctx->connman)
-            connman_relay_transaction(ctx->connman, &wtx.tx.hash);
+        if (!wallet_send_relay(ctx, &wtx)) {
+            json_set_str(result, "Private broadcast unavailable; send rolled back");
+            transaction_free(&wtx.tx);
+            LOG_FAIL("wallet_shielded", "z_sendmany: private broadcast not queued");
+        }
 
         char txid_hex[65];
         uint256_get_hex(&wtx.tx.hash, txid_hex);
