@@ -6646,6 +6646,10 @@ LINT_FAST_GATES := \
     check-orient-facts \
     check-arena-view-stub \
     check-hotfork-stories \
+    check-silent-errors-services \
+    check-silent-errors-controllers \
+    check-silent-errors-jobs \
+    check-silent-errors-conditions \
     check-silent-errors-bool \
     check-no-raw-clock-outside-platform \
     check-hex-codec-single \
