@@ -1102,6 +1102,12 @@ static void lp_verify_post(struct lp_ctx *c, const struct json_value *post,
 {
     struct lp_parsed o;
     int prior;
+    /* The ledger is re-read for every post, under the run lock (one run per
+     * state dir at a time, so no other run appends meanwhile): an id handled
+     * earlier in this run, e.g. listed twice, is never processed again. */
+    c->stop = lp_load_handled(c);
+    if (c->stop)
+        return;
     const char *why = lp_gate(c, post, &prior);
     const char *id = lp_str(post, "id");
     if (why && !why[0])

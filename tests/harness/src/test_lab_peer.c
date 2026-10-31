@@ -21,9 +21,11 @@
 #include "test/test_core.h"
 #include "util/spawn.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -625,17 +627,56 @@ static int case_verify_handled_unwritable(void)
 {
     int failures = 0;
     struct lpt e;
+    char handled[800], gone[800];
     TEST_CASE("lab_peer: an unwritable handled.tsv stops verify with a typed code") {
         ASSERT(lpt_verify_env(&e, "verify_unwritable"));
-        ASSERT_EQ(lpt_verify_run(&e), 0); /* creates the lock; the ledger is written */
-        char handled[800];
+        /* handled.tsv is a dangling symlink: reading it is "missing", appending
+         * to it fails for every uid (its directory does not exist). */
         (void)snprintf(handled, sizeof(handled), "%s/handled.tsv", e.state);
-        ASSERT_EQ(unlink(handled), 0);
-        ASSERT_EQ(chmod(e.state, 0500), 0);
+        (void)snprintf(gone, sizeof(gone), "%s/no-such-dir/handled", e.state);
+        ASSERT_EQ(symlink(gone, handled), 0);
+        ASSERT_EQ(lpt_verify_run(&e), 1);
+        ASSERT(lpt_run_has("HANDLED_WRITE_FAILED"));
+        ASSERT_EQ(lpt_count(e.calls, "\tfetch\n"), 1);
+    } TEST_END
+    return failures;
+}
+
+static int case_verify_duplicate_post_in_run(void)
+{
+    int failures = 0;
+    struct lpt e;
+    char posts[16 * 1024] = "", ha[65];
+    TEST_CASE("lab_peer: a post listed twice in one run is processed once") {
+        lpt_hex(ha, 'a', 64);
+        ASSERT(lpt_verify_env(&e, "verify_dup"));
+        lpt_offer_post(posts, sizeof(posts), '1', ha, NULL, NULL, LPT_FUTURE);
+        lpt_offer_post(posts, sizeof(posts), '1', ha, NULL, NULL, LPT_FUTURE);
+        ASSERT(lpt_list(&e, posts));
+        ASSERT_EQ(lpt_verify_run(&e), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\tfetch\n"), 1);
+        ASSERT_EQ(lpt_count(e.calls, "\tresult\n"), 1);
+        ASSERT(lpt_run_has("ALREADY_HANDLED"));
+    } TEST_END
+    return failures;
+}
+
+static int case_verify_overlapping_run(void)
+{
+    int failures = 0;
+    struct lpt e;
+    char lock[800];
+    TEST_CASE("lab_peer: an overlapping run on the same state dir is refused") {
+        ASSERT(lpt_verify_env(&e, "verify_overlap"));
+        (void)snprintf(lock, sizeof(lock), "%s/lock", e.state);
+        const int fd = open(lock, O_RDWR | O_CREAT, 0600);
+        ASSERT(fd >= 0);
+        ASSERT_EQ(flock(fd, LOCK_EX | LOCK_NB), 0);
         const int rc = lpt_verify_run(&e);
-        (void)chmod(e.state, 0700);
-        ASSERT(geteuid() == 0 || rc == 1);
-        ASSERT(geteuid() == 0 || lpt_run_has("HANDLED_WRITE_FAILED"));
+        (void)close(fd);
+        ASSERT_EQ(rc, 1);
+        ASSERT(lpt_run_has("LOCKED"));
+        ASSERT_EQ(lpt_count(e.calls, "\tfetch\n"), 0);
     } TEST_END
     return failures;
 }
@@ -861,6 +902,8 @@ int test_lab_peer(void)
     failures += case_verify_nonzero_exit();
     failures += case_verify_handled_unreadable();
     failures += case_verify_handled_unwritable();
+    failures += case_verify_duplicate_post_in_run();
+    failures += case_verify_overlapping_run();
     failures += case_verify_authors_unreadable();
     failures += case_collect();
     failures += case_collect_upserts();
