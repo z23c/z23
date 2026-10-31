@@ -311,9 +311,10 @@ static bool log_row_active_match(sqlite3_stmt *st, int height,
 }
 
 static bool rewind_forward_child_if_stale(sqlite3 *db, uint64_t cursor,
-                                          bool *out_rewound)
+                                          bool *out_rewound, bool *out_halt)
 {
     *out_rewound = false;
+    *out_halt = false;
     if (!g_stage || !g_ms || cursor == 0)
         return true;
 
@@ -327,6 +328,7 @@ static bool rewind_forward_child_if_stale(sqlite3 *db, uint64_t cursor,
                  (unsigned long long)cursor);
         return false;  // raw-return-ok:logged-above
     }
+    *out_halt = target == HEADER_ADMIT_REWIND_REFUSED;
     if (target < 0)
         return true;
 
@@ -406,13 +408,48 @@ static enum rewind_scan_rc rewind_scan_window(sqlite3 *db, int floor_h,
     return rc;
 }
 
+/* Move the header_admit cursor back to a window-scan divergence, unless the
+ * shared anchor rule refuses it (then the pass ends). Cursor persistence
+ * failure is fatal. */
+static bool rewind_cursor_above_anchor(sqlite3 *db, uint64_t cursor,
+                                       int deepest_divergent, bool *out_halt)
+{
+    int target = header_admit_rewind_target_above_anchor(deepest_divergent,
+                                                         cursor);
+    *out_halt = target == HEADER_ADMIT_REWIND_REFUSED;
+    if (target < 0)
+        return true;
+    uint64_t rewind_to = (uint64_t)target;
+
+    if (!stage_set_cursor(g_stage, db, rewind_to)) {
+        LOG_WARN("header_admit", "[header_admit] reorg rewind failed from=%llu to=%llu", (unsigned long long)cursor, (unsigned long long)rewind_to);
+        return false;
+    }
+
+    atomic_fetch_add(&g_reorg_rewind_total, 1);
+    atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
+    event_emitf(EV_REORG_START, 0,
+                "header_admit reorg_cursor_rewind from=%llu to=%llu",
+                (unsigned long long)cursor,
+                (unsigned long long)rewind_to);
+    return true;
+}
+
 /* A divergence can sit below a matching tip, so scan the bounded recent
  * active-window overlap and rewind to the deepest mismatch. This mutates only
  * the stage cursor/log; SQL or cursor persistence failure is fatal. */
-static bool rewind_cursor_if_active_chain_reorged(sqlite3 *db)
+static bool rewind_cursor_if_active_chain_reorged(sqlite3 *db,
+                                                  bool *out_halt)
 {
+    *out_halt = false;
     if (!g_stage || !g_ms)
         return true;
+    /* First, for every cursor value: a malformed tip, or one whose height
+     * disagrees with its parent link, ends the whole pass. */
+    if (header_admit_tip_refused(db, &g_ms->chain_active)) {
+        *out_halt = true;
+        return true;
+    }
 
     uint64_t cursor = 0;
     if (!stage_cursor_read_or_zero(db, STAGE_NAME, STAGE_NAME, &cursor))
@@ -425,14 +462,15 @@ static bool rewind_cursor_if_active_chain_reorged(sqlite3 *db)
     }
 
     bool rewound_forward = false;
-    if (!rewind_forward_child_if_stale(db, cursor, &rewound_forward)) {
+    if (!rewind_forward_child_if_stale(db, cursor, &rewound_forward,
+                                      out_halt)) {
         LOG_WARN("header_admit",
                  "[header_admit] forward-child stale audit failed "
                  "cursor=%llu",
                  (unsigned long long)cursor);
         return false;  // raw-return-ok:logged-above
     }
-    if (rewound_forward)
+    if (rewound_forward || *out_halt)
         return true;
 
     int floor_h = 0, top_h = 0;
@@ -454,22 +492,7 @@ static bool rewind_cursor_if_active_chain_reorged(sqlite3 *db)
     if (deepest_divergent == floor_h && floor_h > 0)
         LOG_WARN("header_admit", "[header_admit] reorg rewind cap hit (depth=%d): divergence may extend below floor=%d", HEADER_ADMIT_REORG_REWIND_MAX_DEPTH, floor_h);
 
-    uint64_t rewind_to = (uint64_t)deepest_divergent;
-    if (rewind_to >= cursor)
-        return true;
-
-    if (!stage_set_cursor(g_stage, db, rewind_to)) {
-        LOG_WARN("header_admit", "[header_admit] reorg rewind failed from=%llu to=%llu", (unsigned long long)cursor, (unsigned long long)rewind_to);
-        return false;
-    }
-
-    atomic_fetch_add(&g_reorg_rewind_total, 1);
-    atomic_store(&g_last_blocked_unix, platform_time_wall_unix());
-    event_emitf(EV_REORG_START, 0,
-                "header_admit reorg_cursor_rewind from=%llu to=%llu",
-                (unsigned long long)cursor,
-                (unsigned long long)rewind_to);
-    return true;
+    return rewind_cursor_above_anchor(db, cursor, deepest_divergent, out_halt);
 }
 
 /* Produce a mapped index from staged bytes at want_height, or let the caller
@@ -686,10 +709,15 @@ static job_result_t header_admit_owned_stage_step_once(void)
     uint64_t generation = batched ? stage_batch_generation() : 0;
     if (!batched || generation != g_reorg_audit_batch_generation) {
         atomic_fetch_add(&g_reorg_audit_total, 1u);
-        if (!rewind_cursor_if_active_chain_reorged(db)) {
+        bool halt = false;
+        if (!rewind_cursor_if_active_chain_reorged(db, &halt)) {
             progress_store_tx_unlock();
             LOG_RETURN(JOB_FATAL, "header_admit",
                        "FATAL: active-chain reorg rewind failed");
+        }
+        if (halt) {
+            progress_store_tx_unlock();
+            return JOB_IDLE;  /* bad tip: no admission, no cursor move */
         }
         if (batched)
             g_reorg_audit_batch_generation = generation;

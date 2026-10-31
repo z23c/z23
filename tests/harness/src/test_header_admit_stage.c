@@ -25,6 +25,7 @@
 #include "jobs/reducer_frontier.h"
 #include "services/header_admit_inbox.h"
 #include "jobs/validate_headers_stage.h"
+#include "storage/coins_kv.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
 #include "util/safe_alloc.h"
@@ -77,7 +78,7 @@ static bool synth_chain_build(struct synth_chain *sc, int n)
     if (!sc->blocks) return false;
     sc->hashes = zcl_malloc(
         (size_t)n * sizeof(struct uint256), "synth_hashes");
-    if (!sc->hashes) { free(sc->blocks); return false; }
+    if (!sc->hashes) { free(sc->blocks); sc->blocks = NULL; return false; }
     for (int i = 0; i < n; i++) {
         block_index_init(&sc->blocks[i]);
         memset(&sc->hashes[i], 0, sizeof(struct uint256));
@@ -887,6 +888,248 @@ static int ha_forward_fork_heal_case(void)
     return failures;
 }
 
+void reducer_frontier_test_set_compiled_anchor(int32_t height);
+
+enum ha_floor_mode {
+    HA_FLOOR_ANCHOR,       /* forward target 3 sits at the anchor (3): refused */
+    HA_FLOOR_COINS,        /* utxo_apply must not drop below coins_applied = 5 */
+    HA_FLOOR_COINS_BAD,    /* unreadable coins frontier: no cursor moves at all */
+    HA_FLOOR_BAD_TIP,     /* tip nHeight disagrees with its hash-bound ancestry */
+    HA_FLOOR_BAD_TIP_AHEAD, /* same, with the bad height at or past the cursor */
+    HA_FLOOR_BAD_TIP_ZERO, /* same, at height 0 with a parent at height -1 */
+    HA_FLOOR_BAD_TIP_NEG,  /* same, a present tip with a negative height */
+    HA_FLOOR_BAD_TIP_CURSOR0, /* same, while the header cursor is still 0 */
+    HA_FLOOR_LOG_HASH,     /* legit reorg: stale log hash at tip height must still rewind */
+    HA_FLOOR_SCAN,         /* window-scan divergence at 2, anchor 3: refused */
+    HA_FLOOR_SCAN_CONTROL, /* the same divergence with anchor 0 does rewind */
+    HA_FLOOR_SCAN_IBD,     /* the same divergence, anchor 10 above cursor 4 (IBD): rewinds */
+    HA_FLOOR_BASE_TIP,     /* parentless tip = hash-bound trusted base: legit */
+    HA_FLOOR_BASE_TIP_UNBOUND, /* parentless tip with no trusted base: refused */
+};
+
+static int ha_floor_verify_untouched(const char *name, sqlite3 *db,
+                                     int header_at, unsigned long long rw0)
+{
+    int failures = 0;
+    HA_CHECK(name,
+             cursor_at(db, "header_admit") == header_at &&
+             cursor_at(db, "validate_headers") == 5 &&
+             cursor_at(db, "body_fetch") == 5 &&
+             cursor_at(db, "body_persist") == 5 &&
+             cursor_at(db, "script_validate") == 5 &&
+             cursor_at(db, "proof_validate") == 5 &&
+             cursor_at(db, "utxo_apply") == 5 &&
+             (unsigned long long)header_admit_stage_reorg_rewind_total()
+                 == rw0);
+    return failures;
+}
+
+static int ha_floor_seed_stale_row2(sqlite3 *db, const struct synth_chain *sc)
+{
+    int failures = 0;
+    struct uint256 other = sc->hashes[2];
+    other.data[5] ^= 0x33;
+    HA_CHECK("forward_floor: stale log hash at tip height",
+             put_header_row(db, 2, &other, &sc->hashes[1]));
+    return failures;
+}
+
+/* Row 3 links to the tip, so only the window scan sees the row-2 divergence.
+ * The header cursor sits at 4 so admission could advance unless the pass
+ * ends. */
+static int ha_floor_apply_scan(enum ha_floor_mode mode, sqlite3 *db,
+                               const struct synth_chain *sc)
+{
+    int failures = ha_floor_seed_stale_row2(db, sc);
+    HA_CHECK("forward_floor: row 3 parent matches tip",
+             put_header_row(db, 3, &sc->hashes[3], &sc->hashes[2]));
+    HA_CHECK("forward_floor: header cursor at 4",
+             force_cursor(db, "header_admit", 4));
+    if (mode == HA_FLOOR_SCAN)
+        reducer_frontier_test_set_compiled_anchor(3);
+    else if (mode == HA_FLOOR_SCAN_IBD)
+        reducer_frontier_test_set_compiled_anchor(10);
+    return failures;
+}
+
+/* A blocks-less checkpoint activation leaves the tip at the trusted base
+ * without a parent link; only the durable (height, hash) pair vouches. */
+static int ha_floor_apply_base_tip(enum ha_floor_mode mode, sqlite3 *db,
+                                   struct synth_chain *sc)
+{
+    int failures = 0;
+    sc->blocks[2].pprev = NULL;
+    if (mode == HA_FLOOR_BASE_TIP_UNBOUND)
+        return failures;
+    uint8_t height_blob[8] = {2, 0, 0, 0, 0, 0, 0, 0};
+    HA_CHECK("forward_floor: trusted base pair stored",
+             progress_meta_set(db, REDUCER_TRUSTED_BASE_HEIGHT_KEY,
+                               height_blob, sizeof(height_blob)) &&
+             progress_meta_set(db, REDUCER_TRUSTED_BASE_HASH_KEY,
+                               sc->hashes[2].data, sizeof(sc->hashes[2].data)));
+    return failures;
+}
+
+static int ha_floor_apply_bad_tip(enum ha_floor_mode mode, sqlite3 *db,
+                                  struct synth_chain *sc)
+{
+    int failures = 0;
+    if (mode == HA_FLOOR_BAD_TIP_AHEAD) {
+        /* What the window scan would rewind to if the pass reached it. */
+        failures += ha_floor_seed_stale_row2(db, sc);
+        sc->blocks[2].nHeight = 7;
+    } else {
+        sc->blocks[2].nHeight = mode == HA_FLOOR_BAD_TIP_ZERO ? 0
+                              : mode == HA_FLOOR_BAD_TIP_NEG  ? -1 : 1;
+    }
+    /* Height 0 over a parent at -1 still passes "parent one below". */
+    if (mode == HA_FLOOR_BAD_TIP_ZERO)
+        sc->blocks[1].nHeight = -1;
+    if (mode == HA_FLOOR_BAD_TIP_CURSOR0)
+        HA_CHECK("forward_floor: header cursor at 0",
+                 force_cursor(db, "header_admit", 0));
+    return failures;
+}
+
+static int ha_floor_apply_mode(enum ha_floor_mode mode, sqlite3 *db,
+                               struct synth_chain *sc)
+{
+    int failures = 0;
+    if (mode == HA_FLOOR_ANCHOR)
+        reducer_frontier_test_set_compiled_anchor(3);
+    else if (mode == HA_FLOOR_COINS)
+        HA_CHECK("forward_floor: coins_applied=5",
+                 coins_kv_set_applied_height_in_tx(db, 5));
+    else if (mode == HA_FLOOR_COINS_BAD)
+        /* A 4-byte blob is a hard read error, not an absent frontier. */
+        HA_CHECK("forward_floor: malformed coins_applied stored",
+                 progress_meta_set(db, COINS_APPLIED_HEIGHT_KEY,
+                                   (const uint8_t[4]){5, 0, 0, 0}, 4));
+    else if (mode == HA_FLOOR_LOG_HASH)
+        failures += ha_floor_seed_stale_row2(db, sc);
+    else if (mode == HA_FLOOR_SCAN || mode == HA_FLOOR_SCAN_CONTROL ||
+             mode == HA_FLOOR_SCAN_IBD)
+        failures += ha_floor_apply_scan(mode, db, sc);
+    else if (mode == HA_FLOOR_BASE_TIP || mode == HA_FLOOR_BASE_TIP_UNBOUND)
+        failures += ha_floor_apply_base_tip(mode, db, sc);
+    else
+        failures += ha_floor_apply_bad_tip(mode, db, sc);
+    return failures;
+}
+
+static int ha_floor_verify_scan(enum ha_floor_mode mode, sqlite3 *db,
+                                const struct synth_chain *sc,
+                                unsigned long long rw0, job_result_t r)
+{
+    int failures = 0;
+    if (mode == HA_FLOOR_SCAN_CONTROL || mode == HA_FLOOR_SCAN_IBD) {
+        HA_CHECK("forward_floor: window-scan control (anchor 0, or above the "
+                 "cursor during IBD) rewinds and re-admits h2",
+                 header_admit_stage_reorg_rewind_total() == rw0 + 1 &&
+                 cursor_at(db, "header_admit") == 3 &&
+                 header_admit_stage_has_record(2, &sc->hashes[2]));
+        return failures;
+    }
+    /* Raised to anchor+1 it would rewind again on every pass; refused, the
+     * pass ends before admission could move the cursor from 4. */
+    HA_CHECK("forward_floor: window-scan divergence at the anchor ends the pass",
+             r == JOB_IDLE &&
+             header_admit_stage_reorg_rewind_total() == rw0 &&
+             cursor_at(db, "header_admit") == 4 &&
+             !header_admit_stage_has_record(2, &sc->hashes[2]));
+    return failures;
+}
+
+static int ha_floor_verify_mode(enum ha_floor_mode mode, sqlite3 *db,
+                                const struct synth_chain *sc,
+                                unsigned long long rw0, job_result_t r)
+{
+    int failures = 0;
+    if (mode == HA_FLOOR_ANCHOR) {
+        HA_CHECK("forward_floor: anchor refusal ends the pass", r == JOB_IDLE);
+        failures += ha_floor_verify_untouched(
+            "forward_floor: target at the anchor refused, cursors untouched",
+            db, 5, rw0);
+    } else if (mode == HA_FLOOR_COINS_BAD) {
+        failures += ha_floor_verify_untouched(
+            "forward_floor: unreadable coins frontier moves no cursor",
+            db, 5, rw0);
+    } else if (mode == HA_FLOOR_COINS) {
+        HA_CHECK("forward_floor: utxo_apply not below coins_applied",
+                 cursor_at(db, "utxo_apply") == 5);
+        HA_CHECK("forward_floor: legit downstream still clamped",
+                 cursor_at(db, "validate_headers") == 3);
+    } else if (mode == HA_FLOOR_LOG_HASH || mode == HA_FLOOR_BASE_TIP) {
+        HA_CHECK("forward_floor: legit fork (stale tip log hash or trusted-base "
+                 "tip) rewinds",
+                 header_admit_stage_reorg_rewind_total() == rw0 + 1 &&
+                 cursor_at(db, "validate_headers") == 3 &&
+                 cursor_at(db, "utxo_apply") == 3);
+    } else if (mode == HA_FLOOR_SCAN || mode == HA_FLOOR_SCAN_CONTROL ||
+               mode == HA_FLOOR_SCAN_IBD) {
+        failures += ha_floor_verify_scan(mode, db, sc, rw0, r);
+    } else {
+        HA_CHECK("forward_floor: bad tip ends the pass with no progress",
+                 r == JOB_IDLE);
+        failures += ha_floor_verify_untouched(
+            "forward_floor: bad tip refuses rewind, all cursors untouched",
+            db, mode == HA_FLOOR_BAD_TIP_CURSOR0 ? 0 : 5, rw0);
+    }
+    return failures;
+}
+
+static int ha_forward_fork_floor_case(enum ha_floor_mode mode,
+                                      const char *tag)
+{
+    int failures = 0;
+    struct synth_chain sc;
+    if (!synth_chain_build(&sc, 5)) {
+        HA_CHECK("forward_floor: synth chain builds", false);
+        return failures;
+    }
+    char dir[256];
+    test_fmt_tmpdir(dir, sizeof(dir), "header_admit", tag);
+    mkdir_p_ha(dir);
+    HA_CHECK("forward_floor: store opens", progress_store_open(dir));
+
+    struct main_state ms;
+    memset(&ms, 0, sizeof(ms));
+    zcl_mutex_init(&ms.cs_main);
+    active_chain_init(&ms.chain_active);
+    active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]);
+    HA_CHECK("forward_floor: init", header_admit_stage_init(&ms));
+    HA_CHECK("forward_floor: admit active prefix",
+             header_admit_stage_drain(100) == 3);
+    ms.pindex_best_header = &sc.blocks[4];
+
+    sqlite3 *db = progress_store_db();
+    struct uint256 stale_parent = sc.hashes[2];
+    struct uint256 stale_h3 = sc.hashes[3];
+    stale_parent.data[7] ^= 0x55;
+    stale_h3.data[9] ^= 0x66;
+    HA_CHECK("forward_floor: seed stale row",
+             put_header_row(db, 3, &stale_h3, &stale_parent));
+    failures += ha_forward_fork_force_all_cursors(db);
+
+    failures += ha_floor_apply_mode(mode, db, &sc);
+
+    unsigned long long rw0 = header_admit_stage_reorg_rewind_total();
+    job_result_t r = header_admit_stage_step_once();
+    failures += ha_floor_verify_mode(mode, db, &sc, rw0, r);
+
+    reducer_frontier_test_set_compiled_anchor(0);
+    sc.blocks[2].nHeight = 2;
+    sc.blocks[2].pprev = &sc.blocks[1];
+    sc.blocks[1].nHeight = 1;
+    header_admit_stage_shutdown();
+    active_chain_free(&ms.chain_active);
+    zcl_mutex_destroy(&ms.cs_main);
+    synth_chain_free(&sc);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static int ha_fork_parent_guard_case(void)
 {
     int failures = 0;
@@ -1146,6 +1389,8 @@ int test_header_admit_stage(void)
     printf("\n=== header_admit_stage tests ===\n");
     int failures = 0;
 
+    /* Synthetic chains sit far below the mainnet checkpoint floor. */
+    reducer_frontier_test_set_compiled_anchor(0);
     blocker_module_init();
     failures += ha_outer_main_order_case();
     failures += ha_deferred_context_case();
@@ -1159,10 +1404,32 @@ int test_header_admit_stage(void)
     failures += ha_pre_init_guard_case();
     failures += ha_reorg_self_heal_case();
     failures += ha_forward_fork_heal_case();
+    failures += ha_forward_fork_floor_case(HA_FLOOR_ANCHOR, "floor_anchor");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_COINS, "floor_coins");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_COINS_BAD,
+                                           "floor_coins_bad");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_BAD_TIP, "floor_badtip");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_BAD_TIP_AHEAD,
+                                           "floor_badtip_ahead");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_BAD_TIP_ZERO,
+                                           "floor_badtip_zero");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_BAD_TIP_NEG,
+                                           "floor_badtip_neg");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_BAD_TIP_CURSOR0,
+                                           "floor_badtip_cursor0");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_LOG_HASH, "floor_loghash");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_SCAN, "floor_scan");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_BASE_TIP, "floor_base_tip");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_BASE_TIP_UNBOUND,
+                                           "floor_base_tip_unbound");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_SCAN_CONTROL,
+                                           "floor_scan_control");
+    failures += ha_forward_fork_floor_case(HA_FLOOR_SCAN_IBD, "floor_scan_ibd");
     failures += ha_fork_parent_guard_case();
     failures += ha_prior_hash_guard_case();
     failures += ha_trusted_base_parent_case();
 
+    reducer_frontier_test_set_compiled_anchor(-1);
     printf("header_admit_stage: %d failures\n", failures);
     return failures;
 }
