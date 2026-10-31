@@ -47,6 +47,24 @@ static void thermal_unknown(void)
     assert(zapp_clip_thermal_track(&pace, 0) && zapp_clip_thermal_track(&pace, 3));
 }
 
+/* The camera stays closed until the first Record tap, also on a screen recreated with the same extra. */
+static void camera_gate(void)
+{
+    struct zapp_clip_camera_gate gate;
+    zapp_clip_gate_init(&gate);
+    assert(!zapp_clip_gate_may_open(&gate));
+    zapp_clip_gate_pause(&gate);
+    assert(!zapp_clip_gate_may_open(&gate));
+    zapp_clip_gate_tap(&gate);
+    assert(zapp_clip_gate_may_open(&gate));
+    zapp_clip_gate_pause(&gate);
+    assert(zapp_clip_gate_may_open(&gate));
+    zapp_clip_gate_wait(&gate);
+    assert(!zapp_clip_gate_may_open(&gate));
+    zapp_clip_gate_init(&gate);
+    assert(!zapp_clip_gate_may_open(&gate));
+}
+
 static void clip_span(void)
 {
     assert(zapp_clip_sample_end_us(false, 1000000) == 1000000 + 1024 * 1000000 / 48000);
@@ -110,6 +128,7 @@ int main(void)
     thermal_gate();
     thermal_latch();
     thermal_unknown();
+    camera_gate();
     clip_span();
     rotation();
     encoder_choice();

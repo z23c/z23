@@ -28,6 +28,17 @@ struct zapp_codec_info {
 /* Index of the first hardware AVC encoder, or -1: recording never falls back to a software encode. */
 int zapp_clip_pick_encoder(const struct zapp_codec_info *list, size_t count);
 
+/* Whether the camera may open. It stays closed until the person taps Record: a fresh screen (also one
+ * recreated with the same launch extra) waits, and a pause only keeps waiting when no tap happened yet. */
+struct zapp_clip_camera_gate {
+    bool waiting, tapped;
+};
+void zapp_clip_gate_init(struct zapp_clip_camera_gate *gate);
+bool zapp_clip_gate_may_open(const struct zapp_clip_camera_gate *gate);
+void zapp_clip_gate_tap(struct zapp_clip_camera_gate *gate);
+void zapp_clip_gate_pause(struct zapp_clip_camera_gate *gate);
+void zapp_clip_gate_wait(struct zapp_clip_camera_gate *gate); /* the camera failed or was lost: wait for the next tap */
+
 /* The pace to start from when the node's pace is not known: pause, so recording is refused until the
  * status is below 3. */
 #define ZAPP_CLIP_PACE_UNKNOWN ZAPP_PACE_PAUSE

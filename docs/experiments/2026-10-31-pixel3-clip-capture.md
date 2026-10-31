@@ -137,5 +137,10 @@ The work stopped by the owner's decision before these were done:
   start.
 - The main-thread time of the stop at the cap, beyond the 200 ms collect log.
 - Picture orientation (dark scene).
+- The device builds are not ancestors of the branch tip. Build A is `a0c5e05be6` and
+  build B is `59ca93310c`; both were measured before the rebase onto the Home and
+  scanning changes and before later fixes (the camera staying closed until the
+  first Record tap, the swipe before the surface exists, the complexity splits).
+  No device run of the rebased input path (`android_main.c`) is recorded.
 - Build B repeats of the permission flow, swipe, tap-pause and tamper
   refusal; those results are build A.

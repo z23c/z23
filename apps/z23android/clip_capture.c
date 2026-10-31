@@ -60,6 +60,33 @@ bool zapp_clip_pick_size(const int32_t *configs, size_t count, int *width, int *
     return best >= 0;
 }
 
+void zapp_clip_gate_init(struct zapp_clip_camera_gate *gate)
+{
+    gate->waiting = true;
+    gate->tapped = false;
+}
+
+bool zapp_clip_gate_may_open(const struct zapp_clip_camera_gate *gate)
+{
+    return !gate->waiting;
+}
+
+void zapp_clip_gate_tap(struct zapp_clip_camera_gate *gate)
+{
+    gate->tapped = true;
+    gate->waiting = false;
+}
+
+void zapp_clip_gate_pause(struct zapp_clip_camera_gate *gate)
+{
+    gate->waiting = !gate->tapped;
+}
+
+void zapp_clip_gate_wait(struct zapp_clip_camera_gate *gate)
+{
+    gate->waiting = true;
+}
+
 int64_t zapp_clip_sample_end_us(bool video, int64_t pts_us)
 {
     const struct zapp_clip_profile *p = &zapp_clip_profile;

@@ -47,7 +47,8 @@ static const char *const level_meanings[5] = {
 };
 
 static struct {
-    bool active, paused, left, keyboard, sized, error_shown, camera_wait, hot, unsaved;
+    bool active, paused, left, keyboard, sized, error_shown, hot, unsaved;
+    struct zapp_clip_camera_gate gate;
     enum zapp_clip_mode mode;
     enum phase phase;
     JavaVM *vm;
@@ -430,7 +431,8 @@ static bool thermal_allows(JNIEnv *env)
 
 static const char *ready_text(void)
 {
-    return s.unsaved ? "The last recording was not saved" : "Ready";
+    if (s.unsaved) return "The last recording was not saved";
+    return s.recorder ? "Ready" : "Tap Record to open the camera";
 }
 
 static void new_pending(void)
@@ -584,7 +586,7 @@ static void play_current(JNIEnv *env)
     char text[ZAPP_CLIP_CAPTION_CAP + 80];
     if (s.player) { zapp_clip_player_close(s.player); s.player = NULL; }
     s.error_shown = false;
-    if (s.count == 0) return;
+    if (s.count == 0 || !acquire_window(env)) return;
     const struct zapp_clip *clip = &s.clips[s.index];
     s.player = zapp_clip_player_open(s.dir, clip->id, s.window);
     (void)snprintf(text, sizeof(text), "%s  %zu/%zu%s%s%s", level_names[clip->meta.level - 1], s.index + 1, s.count,
@@ -649,12 +651,11 @@ static bool open_camera(JNIEnv *env)
     char error[160] = "";
     if (!acquire_window(env)) return false;
     s.recorder = zapp_clip_recorder_open(s.window, s.encoder, error, sizeof(error));
-    s.camera_wait = s.recorder == NULL;
+    if (s.recorder == NULL) zapp_clip_gate_wait(&s.gate);
     (void)set_text(env, s.status, s.recorder ? ready_text() : error[0] ? error : "The camera is not available. Tap Record to try again.");
     return s.recorder != NULL;
 }
 
-/* The camera went away while idle: say so and wait for the person to ask again. */
 /* A recorder whose camera was lost is replaced, so the first tap after the loss works. */
 static bool ensure_camera(JNIEnv *env)
 {
@@ -665,13 +666,14 @@ static bool ensure_camera(JNIEnv *env)
     return s.recorder != NULL || open_camera(env);
 }
 
+/* The camera went away while idle: say so and wait for the person to ask again. */
 static void lose_camera(JNIEnv *env)
 {
     (void)set_text(env, s.status, zapp_clip_recorder_message(s.recorder)[0] ? zapp_clip_recorder_message(s.recorder) :
                    "The camera stopped. Tap Record to try again.");
     zapp_clip_recorder_close(s.recorder);
     s.recorder = NULL;
-    s.camera_wait = true;
+    zapp_clip_gate_wait(&s.gate);
 }
 
 static void tick_ready(JNIEnv *env)
@@ -680,7 +682,7 @@ static void tick_ready(JNIEnv *env)
     bool allowed = s.pace != ZAPP_PACE_PAUSE;
     if (!allowed || s.hot) (void)set_text(env, s.status, allowed ? ready_text() : ZAPP_CLIP_TOO_HOT);
     s.hot = !allowed;
-    if (!s.recorder && !s.camera_wait) (void)open_camera(env);
+    if (!s.recorder && zapp_clip_gate_may_open(&s.gate)) (void)open_camera(env);
 }
 
 static void tick(JNIEnv *env)
@@ -778,7 +780,7 @@ static bool prepare(JNIEnv *env, const char *files_dir)
 {
     int n = snprintf(s.dir, sizeof(s.dir), "%s/clips", files_dir);
     return n > 0 && (size_t)n + 48 < sizeof(s.pending) && (*env)->GetJavaVM(env, &s.vm) == JNI_OK &&
-        (mkdir(s.dir, 0700) == 0 || access(s.dir, W_OK) == 0) && read_density(env) && build_views(env) && attach(env) && start_timer();
+        (mkdir(s.dir, 0700) == 0 || access(s.dir, W_OK) == 0) && read_density(env) && build_views(env) && start_timer() && attach(env);
 }
 
 bool zapp_clip_screen_open(JNIEnv *env, jobject activity, const char *files_dir, enum zapp_clip_mode mode)
@@ -790,6 +792,7 @@ bool zapp_clip_screen_open(JNIEnv *env, jobject activity, const char *files_dir,
     s.mode = mode;
     s.activity = keep(env, activity);
     s.pace = ZAPP_CLIP_PACE_UNKNOWN;
+    zapp_clip_gate_init(&s.gate);
     bool ok = s.activity && prepare(env, files_dir);
     (void)zapp_clip_store_clean(s.dir, zapp_clip_recorder_path_owned);
     s.active = ok;
@@ -836,7 +839,7 @@ void zapp_clip_screen_pause(JNIEnv *env)
     s.left = s.left || s.phase == PHASE_PERMISSION;
     settle_recording(env);
     release_media(env);
-    s.camera_wait = false;
+    zapp_clip_gate_pause(&s.gate);
     s.pace = ZAPP_CLIP_PACE_UNKNOWN;
 }
 
@@ -871,7 +874,7 @@ static void press(JNIEnv *env, float x, float y)
     for (int i = 0; i < C_COUNT; ++i) {
         if (!s.controls[i] || !hit(env, s.controls[i], x, y)) continue;
         if (i != C_CAPTION) hide_keyboard(env);
-        if (i == C_RECORD && s.phase == PHASE_READY) { if (ensure_camera(env)) start_recording(env); }
+        if (i == C_RECORD && s.phase == PHASE_READY) { zapp_clip_gate_tap(&s.gate); if (ensure_camera(env)) start_recording(env); }
         else if (i == C_RECORD && s.phase == PHASE_RECORDING) finish_recording(env);
         else if (i == C_CAPTION) focus_caption(env);
         else if (i >= C_LEVEL && i < C_SAVE) select_level(env, i - C_LEVEL);
