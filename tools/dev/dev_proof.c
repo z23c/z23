@@ -2008,7 +2008,7 @@ static bool dp_split_contains(const char *l, size_t n, const char *needle)
 static bool dp_split_directive_ish(const char *l, size_t n)
 {
     bool mark = memchr(l, '#', n) || dp_split_contains(l, n, "%:") ||
-                dp_split_contains(l, n, "??=");
+                dp_split_contains(l, n, "?\?=");
     return mark && (dp_split_contains(l, n, "include") ||
                     dp_split_contains(l, n, "embed") ||
                     dp_split_contains(l, n, "import"));
