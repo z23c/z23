@@ -30,9 +30,9 @@ static int shell_receiver_unit(void)
         ASSERT(strstr(unit, "\nRestartSec=2\n") != NULL);
         ASSERT(strstr(unit, "\nNoNewPrivileges=yes\n") != NULL);
         ASSERT(strstr(unit, "\nProtectSystem=strict\n") != NULL);
-        /* Lifetime expiry exits 1; refused input (2) must not loop. */
+        /* Lifetime expiry exits 1; refused input (2), unsupported (3) and grant refusal (4) must not loop. */
         ASSERT(strstr(unit, "\nSuccessExitStatus=1\n") != NULL);
-        ASSERT(strstr(unit, "\nRestartPreventExitStatus=2 3\n") != NULL);
+        ASSERT(strstr(unit, "\nRestartPreventExitStatus=2 3 4\n") != NULL);
         ASSERT(strstr(unit, "\nEnvironmentFile=%h/") != NULL);
         ASSERT(strstr(unit, "\nEnvironmentFile=-") == NULL);
         ASSERT(strstr(unit, " ops mesh device host receiver --input-file=${Z23_TUNNEL_RECEIVER_INPUT}\n") != NULL);

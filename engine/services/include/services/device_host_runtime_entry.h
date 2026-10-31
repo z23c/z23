@@ -8,7 +8,9 @@
 #include <stddef.h>
 enum device_host_runtime_entry_exit {
     DEVICE_HOST_ENTRY_OK = 0, DEVICE_HOST_ENTRY_FAILED = 1,
-    DEVICE_HOST_ENTRY_INVALID = 2, DEVICE_HOST_ENTRY_UNSUPPORTED = 3
+    DEVICE_HOST_ENTRY_INVALID = 2, DEVICE_HOST_ENTRY_UNSUPPORTED = 3,
+    /* Receiver refused on its grant or approved root before listening; retrying cannot heal it. */
+    DEVICE_HOST_ENTRY_GRANT_REFUSED = 4
 };
 /* One exclusive foreground process owner; no concurrent calls or node boot.
  * Parse untrusted text through this bounded rail before run: exact object,

@@ -449,6 +449,7 @@ static enum device_host_bridge_result runtime_listener(const struct device_host_
 {
     struct device_pairing_guard guard = {0};
     enum device_host_bridge_result result = runtime_acquire(authority, deadline, &guard);
+    if (result == DEVICE_HOST_BRIDGE_REFUSED) out->grant_refused = true;
     if (result != DEVICE_HOST_BRIDGE_READY) return result;
     struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons(spec->listen_port),
         .sin_addr.s_addr = spec->listen_address_be};
@@ -595,7 +596,10 @@ static enum device_host_bridge_result device_host_runtime_receiver_run_state(
     memset(out, 0, sizeof(*out)); out->result = DEVICE_HOST_BRIDGE_REFUSED; out->cleanup_complete = true;
     if (!runtime_receiver_valid(spec)) return out->result;
     struct runtime_authority authority;
-    if (!runtime_authority_init(&authority, &spec->common, DEVICE_PAIRING_HOST_INBOUND)) return out->result;
+    if (!runtime_authority_init(&authority, &spec->common, DEVICE_PAIRING_HOST_INBOUND)) {
+        out->grant_refused = true;
+        return out->result;
+    }
     int64_t deadline = runtime_deadline(clock_now_monotonic_ns(), spec->lifetime_ms); int listener = -1;
     out->result = runtime_listener(spec, &authority, deadline, &listener, out);
     if (out->result != DEVICE_HOST_BRIDGE_READY) { if (listener >= 0) platform_socket_close(listener); return out->result; }

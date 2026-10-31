@@ -26,6 +26,9 @@ struct device_host_runtime_observation {
     int error_number;
     uint16_t listen_port;
     bool io_taken, cleanup_complete;
+    /* Set when the receiver refused on its grant or approved root before listening:
+     * the same refusal repeats until the operator renews, re-pairs or restores the grant. */
+    bool grant_refused;
     uint32_t accepted, completed, refused;
     uint32_t preauth_refused; /* Subset of refused that never authenticated; accepted counts only authenticated sessions. */
     uint64_t plaintext_read_bytes, plaintext_written_bytes;

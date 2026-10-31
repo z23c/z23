@@ -109,7 +109,10 @@ operator-specific peers. Copy and adapt before installing:
   ≤ 600000, max_sessions ≤ 64, max_active ≤ 4); `Restart=always` with
   `RestartSec=2` relaunches it, and every relaunch re-reads the grant. The
   leaf exits 1 on lifetime expiry, so the unit lists 1 in
-  `SuccessExitStatus=`; exit 2 (input refused) and 3 (unsupported) stop it.
+  `SuccessExitStatus=`; exit 2 (input refused), 3 (unsupported) and 4 (grant
+  refused before listening) stop it. Exit 4 prints `error=HOST_RUNTIME_GRANT_REFUSED`
+  with the operator action on stderr: check `z23 ops mesh device pair status`,
+  then renew or re-pair, and start the unit again.
   **PSK path:** the receiver reads no secret file. Create the key with
   `z23 ops mesh device psk new --key=<absent path in a private dir>`, carry
   it to the peer out of band, then on each end run `ops mesh device plan`

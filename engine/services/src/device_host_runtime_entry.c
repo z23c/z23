@@ -294,6 +294,11 @@ static enum device_host_runtime_entry_exit device_host_runtime_entry_run_state(c
     fprintf(stderr, "event=HOST_RUNTIME_TERMINAL route=%s result=%s cleanup_complete=%u accepted=%u completed=%u refused=%u plaintext_read=%llu plaintext_written=%llu preauth_refused=%u\n",
         runtime.route_id, raw_result_name(out.result), (unsigned)out.cleanup_complete, out.accepted, out.completed, out.refused,
         (unsigned long long)out.plaintext_read_bytes, (unsigned long long)out.plaintext_written_bytes, out.preauth_refused);
+    if (out.grant_refused) {
+        fprintf(stderr, "error=HOST_RUNTIME_GRANT_REFUSED route=%s exit=%d operator_action=run 'z23 ops mesh device pair status' for the peer; renew an expired grant with 'z23 ops mesh device pair renew', re-pair a revoked or re-rooted one, then restart the unit\n",
+            runtime.route_id, (int)DEVICE_HOST_ENTRY_GRANT_REFUSED);
+        return DEVICE_HOST_ENTRY_GRANT_REFUSED;
+    }
     return installed && stdio_ok && restored && out.result == DEVICE_HOST_BRIDGE_EOF ? DEVICE_HOST_ENTRY_OK : DEVICE_HOST_ENTRY_FAILED;
 }
 #else

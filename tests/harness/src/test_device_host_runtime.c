@@ -263,12 +263,17 @@ static bool runtime_input_common(struct json_value *input, const struct runtime_
         json_push_kv_int(input, "session_ms", runtime_long_caps ? 28800000 : 15000) &&
         json_push_kv_int(input, "idle_ms", runtime_long_caps ? 1800000 : 5000) && json_push_kv_bool(input, "confirm", true);
 }
-static bool runtime_input_receiver(struct json_value *input, const struct runtime_fixture *fixture, unsigned sessions)
+static bool runtime_input_receiver_at(struct json_value *input, const struct runtime_fixture *fixture,
+    unsigned sessions, uint16_t port)
 {
     return runtime_input_common(input, fixture, 1) && json_push_kv_str(input, "listen_address", "127.0.0.1") &&
-        json_push_kv_int(input, "listen_port", 0) && json_push_kv_bool(input, "allow_external", false) &&
+        json_push_kv_int(input, "listen_port", port) && json_push_kv_bool(input, "allow_external", false) &&
         json_push_kv_int(input, "lifetime_ms", runtime_long_caps ? 86400000 : 30000) && json_push_kv_int(input, "max_sessions", sessions) &&
         json_push_kv_int(input, "max_active", 2);
+}
+static bool runtime_input_receiver(struct json_value *input, const struct runtime_fixture *fixture, unsigned sessions)
+{
+    return runtime_input_receiver_at(input, fixture, sessions, 0);
 }
 static bool runtime_input_client(struct json_value *input, const struct runtime_fixture *fixture)
 {
@@ -657,6 +662,43 @@ static int runtime_client_authority_refusal(unsigned field)
         uint8_t byte; ASSERT_EQ(read(fixture.client.output, &byte, 1), 0);
         ASSERT(runtime_target_absent(&fixture));
     } TEST_END
+    json_free(&input); if (!runtime_fixture_close(&fixture)) ++failures; return failures;
+}
+/* A grant refusal before listening exits DEVICE_HOST_ENTRY_GRANT_REFUSED; a busy
+ * listen port is an IO failure and keeps the ordinary exit 1 that restarts. */
+static int runtime_receiver_grant_exit(bool busy_port)
+{
+    int failures = 0; struct runtime_fixture fixture; runtime_fixture_init(&fixture);
+    struct json_value input = {0}; int busy = -1;
+    TEST_CASE(busy_port ? "HOST receiver: busy listen port is a transient failure, exit 1"
+        : "HOST receiver: wrong approved root refuses before listening with exit 4") {
+        ASSERT(runtime_fixture_open(&fixture));
+        uint16_t port = 0;
+        if (busy_port) {
+            struct sockaddr_in address = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+            socklen_t size = sizeof(address);
+            busy = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, true);
+            ASSERT(busy >= 0 && bind(busy, (struct sockaddr *)&address, sizeof(address)) == 0 &&
+                listen(busy, 1) == 0 && getsockname(busy, (struct sockaddr *)&address, &size) == 0);
+            port = ntohs(address.sin_port);
+        }
+        else fixture.root[1][0] ^= 1;
+        ASSERT(runtime_input_receiver_at(&input, &fixture, 1, port));
+        ASSERT(runtime_process_start(&fixture.receiver, &fixture, &input, true, false));
+        json_free(&input);
+        ASSERT(runtime_process_wait(&fixture.receiver, clock_now_monotonic_ns() + INT64_C(5000000000)));
+        ASSERT(WIFEXITED(fixture.receiver.status));
+        ASSERT(runtime_diagnostics(&fixture.receiver));
+        const char *grant = strstr(fixture.receiver.diagnostic_text, "error=HOST_RUNTIME_GRANT_REFUSED");
+        if (busy_port) {
+            ASSERT_EQ(WEXITSTATUS(fixture.receiver.status), 1);
+            ASSERT(grant == NULL);
+        } else {
+            ASSERT_EQ(WEXITSTATUS(fixture.receiver.status), DEVICE_HOST_ENTRY_GRANT_REFUSED);
+            ASSERT(grant != NULL);
+        }
+    } TEST_END
+    if (busy >= 0) close(busy);
     json_free(&input); if (!runtime_fixture_close(&fixture)) ++failures; return failures;
 }
 static int runtime_route_connect(uint16_t port)
@@ -1792,6 +1834,7 @@ int test_device_host_runtime(void)
         runtime_hub_connect(false) + runtime_hub_connect(true);
     for (unsigned field = 0; field < 3; ++field)
         failures += runtime_client_authority_refusal(field);
+    failures += runtime_receiver_grant_exit(false) + runtime_receiver_grant_exit(true);
     for (unsigned fault = 0; fault < 6; ++fault)
         failures += runtime_entry_parser(fault);
     return failures + runtime_package_approval() + runtime_package_types() + runtime_package_terminal_bound() + runtime_truncated_handshake() + runtime_receiver_cancel(SIGTERM) + runtime_receiver_cancel(SIGHUP) +

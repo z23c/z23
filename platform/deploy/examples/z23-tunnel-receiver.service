@@ -18,13 +18,17 @@
 # (engine/services/src/device_host_runtime_entry.c):
 #   0  every one of max_sessions was accepted and drained (EOF)
 #   1  lifetime expiry (DEADLINE), SIGTERM from `systemctl stop` (CANCELLED),
-#      and also genuine IO or refusal failures -- the leaf does not tell them
-#      apart by exit code, read the HOST_RUNTIME_TERMINAL stderr line
-#   2  input refused (malformed JSON, out-of-range caps, profile/grant refused)
+#      and transient runtime failures such as a busy listen port (IO error);
+#      read the HOST_RUNTIME_TERMINAL stderr line for the result
+#   2  input refused (malformed JSON, out-of-range caps)
 #   3  unsupported platform
+#   4  grant refused before listening: the grant is absent, expired, revoked
+#      or re-rooted, or the approved root differs. stderr carries
+#      error=HOST_RUNTIME_GRANT_REFUSED with the operator action.
 # Lifetime expiry is the normal end of a run, so exit 1 is listed as success
-# and restarts; 2 and 3 cannot heal by retrying, so they stop the unit rather
-# than looping every RestartSec.
+# and restarts. 2, 3 and 4 cannot heal by retrying, so they stop the unit
+# rather than looping every RestartSec. After the operator fixes the cause,
+# start the unit again.
 
 [Unit]
 Description=Z23 hash-PSK tunnel receiver (bounded runs, supervised relaunch)
@@ -42,7 +46,7 @@ ExecStart=%h/.local/bin/z23 ops mesh device host receiver --input-file=${Z23_TUN
 Restart=always
 RestartSec=2
 SuccessExitStatus=1
-RestartPreventExitStatus=2 3
+RestartPreventExitStatus=2 3 4
 KillSignal=SIGTERM
 TimeoutStopSec=15
 
