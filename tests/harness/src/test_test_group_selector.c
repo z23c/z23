@@ -3020,7 +3020,7 @@ static int test_runner_private_state(void)
                  * ZCL_TEST_TMPROOT, and removes it, evidence included, on a
                  * green exit. test_tmpfs_inherited_root covers the tmpfs path. */
                 "cd '%s' && env -u ZCL_TEST_CANONICAL_DATADIR -u ZCL_TEST_REAL_HOME "
-                "-u ZCL_TEST_TMPROOT -u ZCL_TEST_TMPFS_ACTIVE ZCL_TEST_TMPFS=0 %s %s %s='%s' "
+                "-u ZCL_TEST_TMPROOT -u ZCL_TEST_TMPFS_ACTIVE %s %s ZCL_TEST_TMPFS=0 %s='%s' "
                 TGS_OVERSIZED_PROBE "=\"$(head -c 70000 /dev/zero | tr '\\0' x)\" ZCL_STATE_ROOT='%s' "
                 "ZCL_TEST_RUNNER_EXPECT_HOME='%s' "
                 "'%s' --jobs=2 --verbose --no-cache --state-isolation-probe "
