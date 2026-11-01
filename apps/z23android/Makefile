@@ -323,8 +323,9 @@ test-devkey:
 
 WALLET_SEND_INCLUDES := -I. -I../../platform/modules/json/include -I../../platform/modules/base/include \
   -I../../contexts/commons/packages/zutf8/include \
-  -I../../contexts/wallet/controllers/include -I../../platform/modules/util/include
+  -I../../contexts/wallet/controllers/include -I../../platform/modules/util/include -I../../platform/modules/sha3/include
 WALLET_SEND_SOURCES := wallet_send.c payment_code.c ../../contexts/commons/packages/zutf8/src/zutf8.c
+SEND_KEY_SOURCES := send_key.c ../../platform/modules/sha3/src/sha3.c
 # The send flow: the state machine with its random event sequences, then the screen over fake node, device
 # key and host. No wallet field may reach a log, so the two modules call no logging function.
 test-wallet-send:
@@ -332,9 +333,13 @@ test-wallet-send:
 	$(HOST_CC) $(HOST_WARNINGS) $(WALLET_SEND_INCLUDES) tests/wallet_send_test.c $(WALLET_SEND_SOURCES) \
 	  -o '$(BUILD_DIR)/wallet-send-test'
 	'$(BUILD_DIR)/wallet-send-test'
-	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_send_screen_test.c wallet_send_screen.c \
-	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-send-screen-test'
+	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_send_screen_test.c wallet_send_screen.c wallet_send_keeper.c \
+	  secure_window.c wallet_view.c $(SEND_KEY_SOURCES) $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-send-screen-test'
 	'$(BUILD_DIR)/wallet-send-screen-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(WALLET_SEND_INCLUDES) tests/send_key_test.c $(SEND_KEY_SOURCES) payment_code.c \
+	  ../../contexts/commons/packages/zutf8/src/zutf8.c $(SPEECH_JSON) -o '$(BUILD_DIR)/send-key-test'
+	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/send-key-test.XXXXXX'); \
+	  trap 'rm -rf "$$scratch"' 0; '$(BUILD_DIR)/send-key-test' "$$(cd "$$scratch" && pwd)"
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(WALLET_SEND_INCLUDES) tests/wallet_send_node_test.c wallet_send_node.c wallet_send_screen.c \
 	  secure_window.c wallet_view.c $(WALLET_SEND_SOURCES) $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-send-node-test'
 	'$(BUILD_DIR)/wallet-send-node-test'
@@ -345,7 +350,14 @@ test-wallet-send:
 	$(HOST_CC) $(HOST_WARNINGS) -pthread $(SPEECH_INCLUDES) -I../../vendor/qrcodegen tests/pay_stash_test.c pay_stash.c scan.c payment_code.c fleet.c speech_client.c bridge_client.c voice.c \
 	  ../../contexts/commons/packages/zutf8/src/zutf8.c ../../vendor/qrcodegen/qrcodegen.c $(SPEECH_JSON) -o '$(BUILD_DIR)/pay-stash-test'
 	'$(BUILD_DIR)/pay-stash-test'
-	@if grep -nE '(^|[^a-z_])(printf|fprintf|puts|fputs|perror|syslog)\(|nodelog|__android_log' wallet_send.c wallet_send_screen.c wallet_send_node.c wallet_send_device.c wallet_send_ui.c pay_stash.c; then \
+	@if grep -nE '(^|[^a-z_])(printf|fprintf|puts|fputs|perror|syslog)\(|nodelog|__android_log' wallet_send.c wallet_send_screen.c wallet_send_node.c wallet_send_device.c wallet_send_keeper.c wallet_send_ui.c pay_stash.c send_key.c; then \
 	  echo 'wallet_send must not log' >&2; exit 1; fi
 	@if grep -n 'zapp_pay_stash_take' $(WALLET_FREE); then \
 	  echo 'only the shell may take the payment out of the stash' >&2; exit 1; fi
+	@for flag in uiMode screenLayout smallestScreenSize density keyboard navigation; do \
+	  grep -q "android:configChanges=\"[^\"]*\b$$flag\b" AndroidManifest.xml || { echo "AndroidManifest.xml must handle the $$flag change itself: a recreated activity would orphan a payment in flight" >&2; exit 1; }; done
+	@test "$$(grep -c zapp_pay_stash_clear shell.c)" -ge 3 && grep -q zapp_pay_stash_clear android_main.c || { echo 'the payment stash must be cleared on Back while decoding, when a dismissed scan finishes, and on destroy' >&2; exit 1; }
+	@grep -q zapp_send_key_derive wallet_send_ui.c || { echo 'the send screen must derive the payment key from the request' >&2; exit 1; }
+	@grep -q "v->can_pay_again) (void)button_view(env, B_PAY_AGAIN" wallet_send_ui.c || { echo 'the send screen must draw Pay again when the view offers it' >&2; exit 1; }
+	@grep -q "make_screen, wait_for_lock, bind_screen}" wallet_send_ui.c || { echo 'the send screen must bind an adopted flow to the new window' >&2; exit 1; }
+	@grep -q zapp_send_ui_take_reshow shell.c || { echo 'the shell must show a payment kept from the replaced activity' >&2; exit 1; }

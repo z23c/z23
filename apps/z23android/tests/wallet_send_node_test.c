@@ -166,7 +166,9 @@ static void plan_then_commit_is_one_request(void)
     req.fee_zat = plan.fee_zat;
     snprintf(req.plan_token, sizeof(req.plan_token), "%s", plan.token);
     char echo[WS_TOKEN_MAX];
-    assert(ops.commit(ops.ctx, &req, echo) == WSS_COMMITTED && !strcmp(echo, TOKEN));
+    struct wss_commit_info info;
+    assert(ops.commit(ops.ctx, &req, echo, &info) == WSS_COMMITTED && !strcmp(echo, TOKEN));
+    assert(!info.replayed && strlen(info.txid) == WS_TXID_MAX - 1);
     assert(!strcmp(f.calls, "apc") && f.commits == 1);
 
     struct json_value a = {0}, c = {0};
@@ -199,7 +201,8 @@ static void commit_keeps_the_sender_of_its_plan(void)
     req.fee_zat = plan.fee_zat;
     snprintf(req.plan_token, sizeof(req.plan_token), "%s", plan.token);
     char echo[WS_TOKEN_MAX];
-    assert(ops.commit(ops.ctx, &req, echo) == WSS_COMMITTED);
+    struct wss_commit_info info;
+    assert(ops.commit(ops.ctx, &req, echo, &info) == WSS_COMMITTED);
     struct json_value c = {0};
     assert(json_read(&c, f.commit_input, strlen(f.commit_input)));
     assert(!strcmp(json_get_str(json_get(&c, "from")), FROM));
@@ -208,7 +211,7 @@ static void commit_keeps_the_sender_of_its_plan(void)
     /* A token this adapter did not plan: no node call at all, and nothing was sent. */
     snprintf(req.plan_token, sizeof(req.plan_token), "fedcba9876543210");
     f.commits = 0;
-    assert(ops.commit(ops.ctx, &req, echo) == WSS_FEE_CHANGED && f.commits == 0);
+    assert(ops.commit(ops.ctx, &req, echo, &info) == WSS_FEE_CHANGED && f.commits == 0);
 }
 
 static void plan_replies_are_read_by_shape(void)
@@ -249,12 +252,14 @@ static void plan_replies_are_read_by_shape(void)
 
 /* ---- the commit reply ---- */
 
+static struct wss_commit_info last_info;   /* what the latest commit_with reported */
 static enum wss_commit_outcome commit_with(const char *reply, bool ran, int *commits, unsigned *timeout)
 {
     struct fake f; struct wsn n; struct wss_node_ops ops;
     struct zapp_payment p = pay_of("");
     struct wss_send_req req; struct ws_plan plan = {0};
     char echo[WS_TOKEN_MAX];
+    struct wss_commit_info info;
     fake_init(&f);
     adapter(&f, &n, &ops);
     request_of(&req, 125000000ull, &p);
@@ -262,7 +267,8 @@ static enum wss_commit_outcome commit_with(const char *reply, bool ran, int *com
     req.fee_zat = plan.fee_zat;
     snprintf(req.plan_token, sizeof(req.plan_token), "%s", plan.token);
     say(&f.commit, ran, reply);
-    enum wss_commit_outcome out = ops.commit(ops.ctx, &req, echo);
+    enum wss_commit_outcome out = ops.commit(ops.ctx, &req, echo, &info);
+    last_info = info;
     if (commits) *commits = f.commits;
     if (timeout) *timeout = f.commit_timeout;
     return out;
@@ -291,6 +297,25 @@ static void commit_codes_are_pinned(void)
     assert(commit_with(text, true, NULL, NULL) == WSS_COMMITTED);
     /* A node that answered after the process was killed still answered. */
     assert(commit_with(text, false, NULL, NULL) == WSS_COMMITTED);
+}
+/* A replay is the node answering from its record of an earlier commit under the same key; the transaction it names is the
+ * earlier one. A reply that does not say, or names something that is not a transaction id, reports neither. */
+static void a_replay_is_reported_with_its_transaction(void)
+{
+    char text[WSN_REPLY_MAX], expected[WS_TXID_MAX];
+    snprintf(expected, sizeof(expected), "%064d", 7);
+    committed_json(text, sizeof(text), true);
+    assert(commit_with(text, true, NULL, NULL) == WSS_COMMITTED);
+    assert(last_info.replayed && !strcmp(last_info.txid, expected));
+    committed_json(text, sizeof(text), false);
+    assert(commit_with(text, true, NULL, NULL) == WSS_COMMITTED);
+    assert(!last_info.replayed && !strcmp(last_info.txid, expected));
+    const char *plain = "{\"ok\":true,\"data\":{\"committed\":true,\"plan_token\":\"" TOKEN "\"}}";
+    assert(commit_with(plain, true, NULL, NULL) == WSS_COMMITTED);
+    assert(!last_info.replayed && !last_info.txid[0]);
+    const char *odd = "{\"ok\":true,\"data\":{\"committed\":true,\"replayed\":\"yes\",\"txid\":\"nothex\",\"plan_token\":\"" TOKEN "\"}}";
+    assert(commit_with(odd, true, NULL, NULL) == WSS_COMMITTED);
+    assert(!last_info.replayed && !last_info.txid[0]);
 }
 static void commit_without_a_usable_answer_is_unknown(void)
 {
@@ -494,7 +519,7 @@ static struct wss *screen_over(struct fake *f, struct wsn *n, struct host *h)
     memset(h, 0, sizeof(*h));
     h->f = f; h->now = 10000; h->key = WSS_KEY_OK;
     d.device = (struct wss_device_ops){h, d_unwrap};
-    d.host = (struct wss_host_ops){h, h_random, h_now, h_spawn, h_redraw, NULL};
+    d.host = (struct wss_host_ops){h, h_random, h_now, h_spawn, h_redraw, NULL, NULL, NULL};
     d.secure = (struct zapp_secure_ops){h, s_on, s_on, s_on, s_on, s_on};
     struct wss *s = wss_create(&d);
     assert(s);
@@ -641,6 +666,7 @@ int main(void)
     commit_keeps_the_sender_of_its_plan();
     plan_replies_are_read_by_shape();
     commit_codes_are_pinned();
+    a_replay_is_reported_with_its_transaction();
     commit_without_a_usable_answer_is_unknown();
     commit_is_asked_once_and_given_time();
     gate_reads_numbers_and_never_shows_node_text();

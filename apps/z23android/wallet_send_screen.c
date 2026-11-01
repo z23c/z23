@@ -8,10 +8,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define QUEUE_MAX 16
 #define PUBLIC_WARNING "This payment is public. The amount and address are visible to everyone, forever."
 #define FLEET_CHECKED "Checked by your fleet"
+#define ALREADY_PAID "Already paid. Your node has this payment, so nothing new was sent."
 #define SENT_TO_NODE "The node has your payment. History shows when it leaves the phone."
 
 struct wss {
@@ -24,8 +26,10 @@ struct wss {
     bool dying;
     bool protected_window;
     bool begun;
+    bool closed;   /* the owner left the flow's outcome and no later payment has begun */
     uint8_t secret[32];
     char unlock_json[WSS_UNLOCK_JSON];
+    bool unprotected;   /* the window protections are not in force: the payment is not shown */
     struct wss_send_req tapped;   /* The plan the owner tapped Send on; the commit is bound to it. */
 };
 
@@ -89,6 +93,24 @@ static void fill_review(const struct ws *ws, struct wss_view *v)
     }
     wss_format_zat(ws->gate.spendable_zat - ws->plan.total_zat, v->remains, sizeof(v->remains));
 }
+/* "HH:MM UTC" of a time in seconds since the epoch; empty when there is none. */
+static void format_utc(int64_t seconds, char *out, size_t cap)
+{
+    struct tm utc;
+    time_t at = (time_t)seconds;
+    out[0] = 0;
+    if (seconds > 0 && gmtime_r(&at, &utc)) (void)strftime(out, cap, "%H:%M UTC", &utc);
+}
+/* The two states a payment waits in: for the wallet to catch up, and, in review, for the wallet to lock. */
+static void fill_hold_status(const struct ws *ws, struct wss_view *v)
+{
+    if (ws->state == WS_WAITING)
+        snprintf(v->status, sizeof(v->status),
+                 "The wallet is catching up with the chain, %u blocks behind. Sending waits until it is up to date.",
+                 (unsigned)ws->gate.blocks_behind);
+    else if (ws->lock_wanted)
+        snprintf(v->status, sizeof(v->status), "Locking the wallet. Sending is possible again in a moment.");
+}
 static void fill_status(const struct ws *ws, struct wss_view *v)
 {
     switch (ws->state) {
@@ -96,15 +118,8 @@ static void fill_status(const struct ws *ws, struct wss_view *v)
     case WS_VALIDATING: snprintf(v->status, sizeof(v->status), "Checking the address with your node."); break;
     case WS_GATE: snprintf(v->status, sizeof(v->status), "Checking the wallet."); break;
     case WS_WAITING:
-        snprintf(v->status, sizeof(v->status),
-                 "The wallet is catching up with the chain, %u blocks behind. Sending waits until it is up to date.",
-                 (unsigned)ws->gate.blocks_behind);
-        break;
+    case WS_REVIEW: fill_hold_status(ws, v); break;
     case WS_PLAN: snprintf(v->status, sizeof(v->status), "Preparing the payment."); break;
-    case WS_REVIEW:
-        if (ws->lock_wanted)
-            snprintf(v->status, sizeof(v->status), "Locking the wallet. Sending is possible again in a moment.");
-        break;
     case WS_AUTH: snprintf(v->status, sizeof(v->status), "Confirm with your screen lock to send."); break;
     case WS_COMMIT:
         snprintf(v->status, sizeof(v->status), "Building the payment. This can take about two minutes on this phone.");
@@ -113,6 +128,7 @@ static void fill_status(const struct ws *ws, struct wss_view *v)
     case WS_DONE: snprintf(v->status, sizeof(v->status), "The payment left the phone. History shows it."); break;
     case WS_FAILED: snprintf(v->status, sizeof(v->status), "%s", ws_fail_text(ws)); break;
     case WS_CANCELLED: snprintf(v->status, sizeof(v->status), "Cancelled. Nothing was sent."); break;
+    case WS_PAID: snprintf(v->status, sizeof(v->status), "%s", ALREADY_PAID); break;
     case WS_IDLE: break;
     }
 }
@@ -130,7 +146,7 @@ void wss_view(struct wss *s, struct wss_view *v)
     pthread_mutex_lock(&s->lock);
     const struct ws *ws = &s->ws;
     v->state = ws->state;
-    if (!s->begun) {
+    if (!s->begun || s->unprotected) {
         snprintf(v->status, sizeof(v->status), "This screen could not be protected, so the payment is not shown.");
         pthread_mutex_unlock(&s->lock);
         return;
@@ -142,6 +158,11 @@ void wss_view(struct wss *s, struct wss_view *v)
     v->can_send = ws_can_send(ws);
     v->can_retry = ws->state == WS_FAILED && ws->retry_ok;
     v->check_history = ws->state == WS_FAILED && ws->fail == WS_FAIL_COMMIT_UNKNOWN;
+    v->can_pay_again = ws_can_pay_again(ws);
+    if (ws->state == WS_PAID) {
+        snprintf(v->txid, sizeof(v->txid), "%s", ws->txid);
+        format_utc(ws->sent.answered_s, v->confirmed, sizeof(v->confirmed));
+    }
     v->can_cancel = ws->state != WS_COMMIT && ws->state != WS_BROADCAST && !ws_terminal(ws);
     v->can_leave = flow_over(ws);
     if (shows_review(ws->state) && ws->plan.token[0]) fill_review(ws, v);
@@ -299,13 +320,17 @@ static void do_commit(struct wss *s, uint32_t ticket)
     struct wss_send_req req;
     struct ws_event ev = {.kind = WS_EV_COMMIT, .ticket = ticket};
     char echo[WS_TOKEN_MAX] = "";
+    struct wss_commit_info info = {0};
     pthread_mutex_lock(&s->lock);
     bool ok = s->ws.ticket == ticket && s->ws.state == WS_COMMIT;
     if (ok) req = s->tapped;
     pthread_mutex_unlock(&s->lock);
     if (!ok) return;
-    enum wss_commit_outcome out = s->d.node.commit(s->d.node.ctx, &req, echo);
+    enum wss_commit_outcome out = s->d.node.commit(s->d.node.ctx, &req, echo, &info);
     ev.ok = out == WSS_COMMITTED;
+    if (ev.ok && s->d.host.wall_s) ev.wall_s = s->d.host.wall_s(s->d.host.ctx);
+    ev.replayed = ev.ok && info.replayed;
+    if (ev.ok) snprintf(ev.txid, sizeof(ev.txid), "%s", info.txid);
     ev.refused = out == WSS_KEY_RELEASED;
     ev.fee_changed = out == WSS_FEE_CHANGED;
     memcpy(ev.plan.token, echo, sizeof(echo));
@@ -367,11 +392,14 @@ static void run_action(struct wss *s, struct ws_action a)
 }
 static void destroy_now(struct wss *s)
 {
+    void (*release)(void *) = s->d.release;
+    void *release_ctx = s->d.release_ctx;
     cleanse_secrets(s);
     memory_cleanse(&s->tapped, sizeof(s->tapped));
     memory_cleanse(&s->ws, sizeof(s->ws));
     pthread_mutex_destroy(&s->lock);
     free(s);
+    if (release) release(release_ctx);
 }
 static void run_job(void *arg)
 {
@@ -415,10 +443,50 @@ bool wss_destroy(struct wss *s)
     if (!busy) destroy_now(s);
     return true;
 }
+void wss_close(struct wss *s)
+{
+    pthread_mutex_lock(&s->lock);
+    if (flow_over(&s->ws)) s->closed = true;
+    pthread_mutex_unlock(&s->lock);
+}
+bool wss_closed(struct wss *s)
+{
+    pthread_mutex_lock(&s->lock);
+    bool closed = s->closed;
+    pthread_mutex_unlock(&s->lock);
+    return closed;
+}
+void wss_unbind(struct wss *s)
+{
+    pthread_mutex_lock(&s->lock);
+    memset(&s->d.secure, 0, sizeof(s->d.secure));
+    s->unprotected = true;
+    pthread_mutex_unlock(&s->lock);
+}
+bool wss_rebind(struct wss *s, const struct zapp_secure_ops *secure)
+{
+    pthread_mutex_lock(&s->lock);
+    s->d.secure = *secure;
+    bool begun = s->begun;
+    pthread_mutex_unlock(&s->lock);
+    bool ok = !begun || zapp_secure_window_apply(secure, true);
+    if (!ok) (void)zapp_secure_window_apply(secure, false);
+    pthread_mutex_lock(&s->lock);
+    s->unprotected = !ok;
+    pthread_mutex_unlock(&s->lock);
+    return ok;
+}
+bool wss_exposed(struct wss *s)
+{
+    pthread_mutex_lock(&s->lock);
+    bool exposed = ws_wallet_exposed(&s->ws);
+    pthread_mutex_unlock(&s->lock);
+    return exposed;
+}
 bool wss_begin(struct wss *s, const struct zapp_payment *pay)
 {
     struct ws_actions acts;
-    struct ws_env env = {s->d.network, s->d.host.ctx, s->d.host.random};
+    struct ws_env env = {s->d.network, s->d.host.ctx, s->d.host.random, s->d.host.derive_key};
     pthread_mutex_lock(&s->lock);
     bool busy = s->begun && !flow_over(&s->ws);
     pthread_mutex_unlock(&s->lock);
@@ -429,6 +497,8 @@ bool wss_begin(struct wss *s, const struct zapp_payment *pay)
     }
     pthread_mutex_lock(&s->lock);
     s->protected_window = s->begun = true;
+    s->unprotected = false;
+    s->closed = false;
     ws_open(&s->ws, &env, pay, s->d.host.now_ms ? s->d.host.now_ms(s->d.host.ctx) : 0, &acts);
     enqueue(s, &acts);
     pthread_mutex_unlock(&s->lock);
@@ -436,10 +506,16 @@ bool wss_begin(struct wss *s, const struct zapp_payment *pay)
     if (s->d.host.redraw) s->d.host.redraw(s->d.host.ctx);
     return true;
 }
+/* Leaving the screen cancels a flow that has not reached the wallet. A flow in authentication is not cancelled: the
+ * system credential screen backgrounds the app, and the result of the prompt completes the payment. Only the Cancel
+ * button ends it. A running commit is never cancelled either; the wallet is locked when the node answers. */
 bool wss_end(struct wss *s)
 {
     struct ws_event ev = {.kind = WS_EV_CANCEL};
-    post(s, &ev);
+    pthread_mutex_lock(&s->lock);
+    bool authenticating = s->ws.state == WS_AUTH;
+    pthread_mutex_unlock(&s->lock);
+    if (!authenticating) post(s, &ev);
     pthread_mutex_lock(&s->lock);
     /* An exposed wallet keeps the screen alive: the lock is owed and only ticks can finish it. */
     bool done = flow_over(&s->ws) && !ws_wallet_exposed(&s->ws);
@@ -460,6 +536,7 @@ void wss_tap_send(struct wss *s, uint32_t serial)
 void wss_tap_retry(struct wss *s) { send_kind(s, WS_EV_RETRY); }
 void wss_tap_cancel(struct wss *s) { send_kind(s, WS_EV_CANCEL); }
 void wss_tap_make_private(struct wss *s) { send_kind(s, WS_EV_MAKE_PRIVATE); }
+void wss_tap_pay_again(struct wss *s) { send_kind(s, WS_EV_PAY_AGAIN); }
 void wss_on_pause(struct wss *s) { send_kind(s, WS_EV_BACKGROUND); }
 void wss_on_resume(struct wss *s) { send_kind(s, WS_EV_RESUME); }
 void wss_on_tick(struct wss *s) { send_kind(s, WS_EV_TICK); }

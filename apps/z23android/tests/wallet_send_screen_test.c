@@ -1,5 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #define _POSIX_C_SOURCE 200809L
+#include "send_key.h"
+#include "wallet_send_keeper.h"
 #include "wallet_send_screen.h"
 #include <assert.h>
 #include <pthread.h>
@@ -9,6 +11,8 @@
 #include <time.h>
 
 #define LOG_MAX 4096
+#define TXID "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+#define WALL_14_32 1767277920   /* 2026-01-01 14:32:00 UTC */
 #define PAID_MAX 16
 
 static const uint8_t SECRET[32] = {0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
@@ -16,6 +20,8 @@ static const uint8_t SECRET[32] = {0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4, 5, 6, 7, 
 #define SECRET_HEX "deadbeef0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c"
 
 /* A node, a device key and a host, all scripted. */
+/* One activity window: every protection call it receives, and what it was last told. */
+struct win { int calls, on_calls, off_calls; bool on; };
 struct fake {
     /* script */
     struct ws_gate gate;
@@ -32,7 +38,11 @@ struct fake {
     char commit_address[ZAPP_PAY_ADDRESS_MAX];
     uint64_t commit_amount;
     char plan_key[WS_KEY_HEX + 1];
-    int commits, unlocks, locks, prompts, repeated_keys, plan_required;
+    int commits, unlocks, locks, prompts, repeated_keys, plan_required, plans;
+    struct win *window;           /* when set, the screen is protected through this window */
+    bool derive_on;               /* the host derives the payment key from id */
+    struct zapp_send_id id;
+    int64_t wall;
     uint64_t commit_fee;
     bool spawn_fail;
     int ticks_in_lock;            /* Ticks that arrive while a lock call is blocked. */
@@ -83,6 +93,7 @@ static bool n_plan(void *c, const struct wss_send_req *r, struct ws_plan *out)
 {
     struct fake *f = c;
     note(f, 'p', r->address);
+    f->plans++;
     assert(r->key[0]);   /* the node binds the key into the token, so the plan request must carry it */
     memcpy(f->plan_key, r->key, sizeof(f->plan_key));
     out->amount_zat = r->amount_zat; out->fee_zat = f->fee; out->total_zat = r->amount_zat + f->fee;
@@ -115,10 +126,12 @@ static int paid_index(const struct fake *f, const char *key)
     for (int i = 0; i < f->paid_n; ++i) if (!strcmp(f->paid[i], key)) return i;
     return -1;
 }
-static enum wss_commit_outcome n_commit(void *c, const struct wss_send_req *r, char echo[WS_TOKEN_MAX])
+static enum wss_commit_outcome n_commit(void *c, const struct wss_send_req *r, char echo[WS_TOKEN_MAX],
+                                        struct wss_commit_info *info)
 {
     struct fake *f = c;
     char token[WS_TOKEN_MAX];
+    memset(info, 0, sizeof(*info));
     note(f, 'c', r->address);
     snprintf(f->commit_address, sizeof(f->commit_address), "%s", r->address);
     f->commit_amount = r->amount_zat;
@@ -134,6 +147,7 @@ static enum wss_commit_outcome n_commit(void *c, const struct wss_send_req *r, c
     if (seen >= 0) {   /* the real node replays the earlier answer for the same key and moves no funds */
         f->repeated_keys++;
         snprintf(echo, WS_TOKEN_MAX, "%s", f->paid_token[seen]);
+        if (f->paid_outcome[seen] == WSS_COMMITTED) { info->replayed = true; snprintf(info->txid, sizeof(info->txid), "%s", TXID); }
         return f->paid_outcome[seen];
     }
     if (f->commit_outcome != WSS_KEY_RELEASED && f->paid_n < PAID_MAX) {
@@ -142,6 +156,7 @@ static enum wss_commit_outcome n_commit(void *c, const struct wss_send_req *r, c
         f->paid_outcome[f->paid_n++] = f->commit_outcome;
     }
     snprintf(echo, WS_TOKEN_MAX, "%s", f->commit_outcome == WSS_UNKNOWN ? "" : token);
+    if (f->commit_outcome == WSS_COMMITTED) snprintf(info->txid, sizeof(info->txid), "%s", TXID);
     return f->commit_outcome;
 }
 static bool n_route(void *c, enum ws_route *out) { struct fake *f = c; note(f, 'r', NULL); *out = f->route; return true; }
@@ -201,9 +216,23 @@ static void h_redraw(void *c)
     while (!f->released) pthread_cond_wait(&f->cv, &f->mu);
     pthread_mutex_unlock(&f->mu);
 }
+static bool h_derive(void *c, const struct zapp_payment *pay, char out[WS_KEY_HEX + 1])
+{
+    return zapp_send_key_derive(&((struct fake *)c)->id, pay, out);
+}
+static int64_t h_wall(void *c) { return ((struct fake *)c)->wall; }
 static void h_private(void *c) { ((struct fake *)c)->make_private++; }
 static bool s_flag(void *c, bool on) { struct fake *f = c; if (f->flag_ok) f->flag_on = on; return f->flag_ok; }
 static bool s_granted(void *c, bool on) { (void)c; (void)on; return true; }
+static bool w_set(void *c, bool on)
+{
+    struct win *w = c;
+    w->calls++;
+    if (on) w->on_calls++; else w->off_calls++;
+    w->on = on;
+    return true;
+}
+static struct zapp_secure_ops win_ops(struct win *w) { return (struct zapp_secure_ops){w, w_set, w_set, w_set, w_set, w_set}; }
 static bool s_filter(void *c, bool on) { struct fake *f = c; if (f->filter_ok) f->filter_on = on; return f->filter_ok; }
 
 /* Runs queued worker jobs until none is left. Nothing runs on its own: the UI thread never waits. */
@@ -235,9 +264,10 @@ static struct wss *screen_of(struct fake *f)
         .network = ZAPP_PAY_MAINNET,
         .node = {f, n_validate, n_gate, n_plan, n_unlock, n_lock, n_commit, n_route},
         .device = {f, d_unwrap},
-        .host = {f, h_random, h_now, h_spawn, h_redraw, h_private},
+        .host = {f, h_random, h_now, h_spawn, h_redraw, h_private, f->derive_on ? h_derive : NULL, h_wall},
         .secure = {f, s_flag, s_filter, s_granted, s_granted, s_granted},
     };
+    if (f->window) d.secure = win_ops(f->window);
     struct wss *s = wss_create(&d);
     assert(s);
     f->screen = s;
@@ -608,6 +638,207 @@ static void concurrent_scan_with_the_real_worker(void)
     pause_ms(20);
 }
 
+/* The system credential screen pauses the app during authentication. Leaving the screen then must not cancel: the
+ * result of the prompt completes the payment, and only the Cancel button ends it. */
+static void leaving_during_authentication_does_not_cancel(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f);
+    struct wss *s = reviewed(&f, &p);
+    wss_tap_send(s, view_of(s).serial);
+    assert(view_of(s).state == WS_AUTH);
+    wss_on_pause(s);
+    assert(!wss_end(s));                       /* the screen stays; nothing was cancelled */
+    assert(view_of(s).state == WS_AUTH && f.commits == 0);
+    drain(&f);                                 /* the prompt answers */
+    struct wss_view v = view_of(s);
+    assert(f.commits == 1 && f.prompts == 1 && v.state == WS_DONE && !strstr(v.status, "Cancelled"));
+    assert(wss_end(s) && wss_destroy(s));
+    /* The Cancel button still ends an authentication. */
+    fake_init(&f);
+    s = reviewed(&f, &p);
+    wss_tap_send(s, view_of(s).serial);
+    wss_tap_cancel(s);
+    assert(view_of(s).state == WS_CANCELLED);
+    drain(&f);
+    assert(f.commits == 0);
+    wss_destroy(s);
+}
+/* Once the commit has started, leaving locks the wallet but never cancels or repeats the commit. */
+static void leaving_during_the_commit_never_cancels(void)
+{
+    struct zapp_payment a = pay_of(priv, "?amount=1");
+    struct fake *f = &threaded_fake;
+    fake_init(f);
+    f->threaded = f->hold = true;
+    f->main_thread = pthread_self();
+    struct wss *s = screen_of(f);
+    assert(wss_begin(s, &a));
+    wait_state(s, WS_REVIEW);
+    wss_tap_send(s, view_of(s).serial);
+    pthread_mutex_lock(&f->mu);
+    while (!f->parked) pthread_cond_wait(&f->cv, &f->mu);
+    pthread_mutex_unlock(&f->mu);
+    assert(view_of(s).state == WS_COMMIT);
+    wss_on_pause(s);
+    assert(!wss_end(s) && view_of(s).state == WS_COMMIT);
+    pthread_mutex_lock(&f->mu);
+    f->released = true;
+    pthread_cond_broadcast(&f->cv);
+    pthread_mutex_unlock(&f->mu);
+    wait_state(s, WS_DONE);
+    assert(f->commits == 1 && f->repeated_keys == 0);
+    wss_destroy(s);
+    pause_ms(20);
+}
+
+static void derived(struct fake *f);
+static struct wss *keeper_make(void *c) { return screen_of(c); }
+/* The host binds an adopted flow to the fake's own protections, as the app binds it to the new activity's window. */
+static void keeper_bind(void *c, struct wss *s)
+{
+    struct fake *f = c;
+    struct zapp_secure_ops ops = f->window ? win_ops(f->window) : (struct zapp_secure_ops){f, s_flag, s_filter, s_granted, s_granted, s_granted};
+    assert(wss_rebind(s, &ops));
+}
+/* The activity is destroyed and re-created while the commit runs. The new activity gets the same flow, not a second
+ * one: the same code scanned again is refused, and the outcome of the first payment is what the screen shows. */
+static void recreating_the_activity_during_a_commit_keeps_one_payment(void)
+{
+    struct zapp_payment a = pay_of(priv, "?amount=1");
+    struct fake *f = &threaded_fake;
+    struct wsk k;
+    fake_init(f);
+    f->threaded = f->hold = true;
+    f->main_thread = pthread_self();
+    wsk_init(&k, &(struct wsk_host){f, keeper_make, NULL, keeper_bind});
+    assert(wsk_attach(&k));
+    struct wss *first = k.screen;
+    assert(wss_begin(first, &a));
+    wait_state(first, WS_REVIEW);
+    wss_tap_send(first, view_of(first).serial);
+    pthread_mutex_lock(&f->mu);
+    while (!f->parked) pthread_cond_wait(&f->cv, &f->mu);
+    pthread_mutex_unlock(&f->mu);
+    assert(view_of(first).state == WS_COMMIT);
+    wsk_detach(&k);                                        /* the activity is destroyed */
+    assert(!k.screen && k.retired == first && wsk_owes(&k));
+    assert(wsk_attach(&k) && k.screen == first && k.reshow);   /* the new activity gets the flow back */
+    assert(view_of(k.screen).state == WS_COMMIT);
+    assert(!wss_begin(k.screen, &a));                      /* the same code again starts nothing */
+    assert(f->commits == 0 && view_of(k.screen).state == WS_COMMIT);
+    pthread_mutex_lock(&f->mu);
+    f->released = true;
+    pthread_cond_broadcast(&f->cv);
+    pthread_mutex_unlock(&f->mu);
+    wait_state(first, WS_DONE);
+    assert(f->commits == 1 && f->prompts == 1 && f->repeated_keys == 0);
+    /* Another re-creation after the outcome: it is shown again until the owner closes it. */
+    wsk_detach(&k);
+    assert(k.retired == first);
+    assert(wsk_attach(&k) && k.screen == first && !strcmp(view_of(first).status, "The payment left the phone. History shows it."));
+    wss_close(first);
+    assert(wss_end(first));
+    wsk_detach(&k);                                        /* closed: nothing is kept */
+    assert(!k.screen && !k.retired);
+    pause_ms(20);
+}
+/* A flow with nothing in flight is not kept. */
+static void a_flow_in_review_is_not_kept(void)
+{
+    struct zapp_payment a = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f);
+    struct wsk k;
+    wsk_init(&k, &(struct wsk_host){&f, keeper_make, NULL, keeper_bind});
+    assert(wsk_attach(&k));
+    assert(wss_begin(k.screen, &a));
+    drain(&f);
+    assert(view_of(k.screen).state == WS_REVIEW);
+    wsk_detach(&k);
+    assert(!k.screen && !k.retired);
+}
+
+/* A flow kept for a re-created activity is bound to the window it began on. Detach drops that binding, so the destroyed
+ * activity's window is never touched again; adoption protects the new window before the flow can be drawn. */
+static void an_adopted_flow_is_bound_to_the_new_window(void)
+{
+    struct zapp_payment a = pay_of(priv, "?amount=1");
+    struct win old_window = {0}, new_window = {0};
+    struct fake f; fake_init(&f);
+    f.window = &old_window;
+    struct wsk k;
+    wsk_init(&k, &(struct wsk_host){&f, keeper_make, NULL, keeper_bind});
+    assert(wsk_attach(&k));
+    struct wss *first = k.screen;
+    assert(wss_begin(first, &a));
+    drain(&f);
+    assert(old_window.on && old_window.on_calls == 5 && view_of(first).visible);
+    tap_and_run(first, &f);
+    assert(view_of(first).state == WS_DONE);
+    wsk_detach(&k);                                        /* the activity and its window are destroyed */
+    assert(k.retired == first);
+    int old_calls = old_window.calls;
+    assert(!view_of(first).visible);                       /* nothing is drawn until a window is bound */
+    f.window = &new_window;                                /* the new activity */
+    assert(wsk_attach(&k) && k.screen == first && k.reshow);
+    assert(new_window.on && new_window.on_calls == 5 && view_of(first).visible);
+    assert(view_of(first).state == WS_DONE);
+    wss_close(first);
+    assert(wss_end(first));                                /* Done: protections come off the new window */
+    assert(new_window.off_calls == 5 && !new_window.on);
+    assert(old_window.calls == old_calls);                 /* the old window is never called again */
+    wsk_detach(&k);
+    assert(old_window.calls == old_calls && !k.screen && !k.retired);
+}
+/* A window that cannot be protected keeps the adopted payment hidden. */
+static void an_unprotectable_new_window_keeps_the_flow_hidden(void)
+{
+    struct zapp_payment a = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f);
+    struct wsk k;
+    wsk_init(&k, &(struct wsk_host){&f, keeper_make, NULL, NULL});
+    assert(wsk_attach(&k));
+    assert(wss_begin(k.screen, &a));
+    drain(&f);
+    tap_and_run(k.screen, &f);
+    wsk_detach(&k);
+    assert(wsk_attach(&k) && !view_of(k.screen).visible);  /* adopted and not bound: hidden */
+    f.flag_ok = false;
+    struct zapp_secure_ops refusing = {&f, s_flag, s_filter, s_granted, s_granted, s_granted};
+    assert(!wss_rebind(k.screen, &refusing) && !view_of(k.screen).visible);
+    f.flag_ok = true;
+    assert(wss_rebind(k.screen, &refusing) && view_of(k.screen).visible);
+    wss_close(k.screen);
+    assert(wss_end(k.screen));
+    wsk_detach(&k);
+}
+
+/* An Already paid screen is an outcome the owner has not closed: a re-created activity shows it again, with Pay again, until Done. */
+static void an_already_paid_flow_is_kept_until_it_is_closed(void)
+{
+    struct zapp_payment a = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f); derived(&f);
+    struct wsk k;
+    wsk_init(&k, &(struct wsk_host){&f, keeper_make, NULL, keeper_bind});
+    assert(wsk_attach(&k));
+    assert(wss_begin(k.screen, &a));
+    drain(&f);
+    tap_and_run(k.screen, &f);
+    wss_close(k.screen);                                   /* the first payment was closed with Done */
+    assert(wss_begin(k.screen, &a));                       /* the same code scanned again */
+    drain(&f);
+    assert(view_of(k.screen).state == WS_PAID);
+    struct wss *first = k.screen;
+    wsk_detach(&k);
+    assert(!k.screen && k.retired == first);
+    assert(wsk_attach(&k) && k.screen == first && k.reshow);
+    assert(view_of(first).state == WS_PAID && view_of(first).can_pay_again);
+    wss_close(first);
+    assert(wss_end(first));
+    wsk_detach(&k);
+    assert(!k.screen && !k.retired);
+}
+
 /* Finding 8: the memo is data in its own field. It cannot fake a review line. */
 static void memo_cannot_spoof_a_line(void)
 {
@@ -680,7 +911,8 @@ static void the_node_replay_reads_as_sent(void)
     memcpy(again.key, f.plan_key, sizeof(again.key));
     node_token(&again, f.fee, again.plan_token);
     char echo[WS_TOKEN_MAX] = "";
-    assert(n_commit(&f, &again, echo) == WSS_COMMITTED && f.repeated_keys == 1 && echo[0]);
+    struct wss_commit_info info;
+    assert(n_commit(&f, &again, echo, &info) == WSS_COMMITTED && f.repeated_keys == 1 && echo[0] && info.replayed);
     wss_destroy(s);
 }
 static void outcome_mapping_is_pinned(void)
@@ -793,6 +1025,185 @@ static void a_missing_worker_fails_the_flow(void)
     wss_destroy(s);
 }
 
+/* ---- a payment request has one key, and the node's record decides what a rescan means ---- */
+
+static void derived(struct fake *f)
+{
+    f->derive_on = true;
+    memset(f->id.bytes, 7, sizeof(f->id.bytes));
+    f->wall = WALL_14_32;
+}
+/* A new process: a new screen over a node that still holds the keys the earlier one sent. */
+static void restarted(struct fake *next, const struct fake *old)
+{
+    fake_init(next);
+    derived(next);
+    memcpy(next->paid, old->paid, sizeof(next->paid));
+    memcpy(next->paid_token, old->paid_token, sizeof(next->paid_token));
+    memcpy(next->paid_outcome, old->paid_outcome, sizeof(next->paid_outcome));
+    next->paid_n = old->paid_n;
+    next->commit_outcome = old->commit_outcome;
+    memcpy(next->id.bytes, old->id.bytes, sizeof(next->id.bytes));
+}
+static void rescan(struct wss *s, struct fake *f, const struct zapp_payment *p)
+{
+    assert(wss_begin(s, p));
+    drain(f);
+}
+/* Another amount or another memo is another payment. */
+static void another_request_is_another_payment(struct wss *s, struct fake *f)
+{
+    struct zapp_payment other = pay_of(priv, "?amount=2&memo=aGk");
+    rescan(s, f, &other);
+    assert(view_of(s).state == WS_REVIEW && f->plans == 2);
+    wss_tap_cancel(s); drain(f);
+    other = pay_of(priv, "?amount=1&memo=aGo");
+    rescan(s, f, &other);
+    assert(view_of(s).state == WS_REVIEW && f->plans == 3 && strcmp(f->plan_key, f->commit_keys[0]) != 0);
+    wss_destroy(s);
+}
+/* Rescans come 40 minutes after the node's answer and start nothing: the screen shows the stored time, never now. */
+static void rescans_show_already_paid(struct wss *s, struct fake *f, const struct zapp_payment *p)
+{
+    f->wall += 2400;
+    for (int again = 0; again < 2; ++again) {
+        rescan(s, f, p);
+        struct wss_view v = view_of(s);
+        assert(v.state == WS_PAID && v.can_pay_again && v.can_leave && !v.busy && !v.can_send && !v.can_retry && !v.can_cancel);
+        assert(!strcmp(v.txid, TXID) && !strcmp(v.confirmed, "14:32 UTC") && strstr(v.status, "Already paid"));
+        assert(f->plans == 1 && f->commits == 1 && f->prompts == 1 && f->unlocks == 1 && f->repeated_keys == 0);
+    }
+}
+static void a_rescan_of_a_sent_payment_shows_already_paid(void)
+{
+    for (int waiting = 0; waiting < 2; ++waiting) {
+        struct zapp_payment p = pay_of(priv, "?amount=1&memo=aGk");
+        struct fake f; fake_init(&f); derived(&f);
+        f.route = waiting ? WS_ROUTE_WAITING : WS_ROUTE_SENT;
+        struct wss *s = reviewed(&f, &p);
+        tap_and_run(s, &f);
+        assert(view_of(s).state == (waiting ? WS_BROADCAST : WS_DONE));
+        assert(f.plans == 1 && f.commits == 1 && f.prompts == 1 && f.unlocks == 1);
+        rescans_show_already_paid(s, &f, &p);
+        another_request_is_another_payment(s, &f);
+    }
+}
+static void a_rescan_after_an_unknown_answer_starts_nothing(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f); derived(&f);
+    f.commit_outcome = WSS_UNKNOWN;
+    struct wss *s = reviewed(&f, &p);
+    tap_and_run(s, &f);
+    assert(view_of(s).check_history && f.commits == 1);
+    for (int again = 0; again < 2; ++again) {
+        rescan(s, &f, &p);
+        struct wss_view v = view_of(s);
+        assert(v.state == WS_FAILED && v.check_history && !v.can_retry && !v.can_send && !v.can_pay_again && v.can_leave);
+        assert(strstr(v.status, "Check History") && strstr(v.status, "not be sent again") && !v.txid[0]);
+        wss_tap_pay_again(s); drain(&f);
+        wss_tap_retry(s); drain(&f);
+        wss_tap_send(s, v.serial); drain(&f);
+        assert(view_of(s).state == WS_FAILED && !view_of(s).can_pay_again);
+        assert(f.plans == 1 && f.commits == 1 && f.prompts == 1 && f.unlocks == 1);
+    }
+    wss_destroy(s);
+}
+/* Pay again is a full review, planned under a new random key and committed under it. */
+static void pay_again_plans_under_a_new_key(struct wss *s, struct fake *f, const char *first)
+{
+    wss_tap_pay_again(s); drain(f);
+    struct wss_view v = view_of(s);
+    assert(v.state == WS_REVIEW && v.can_send && !v.can_pay_again && f->plans == 2 && f->commits == 1 && f->prompts == 1);
+    assert(strlen(f->plan_key) == WS_KEY_HEX && strcmp(f->plan_key, first) != 0);
+    tap_and_run(s, f);
+    assert(f->commits == 2 && f->prompts == 2 && f->unlocks == 2 && strcmp(f->commit_keys[1], first) != 0);
+    assert(!strcmp(f->commit_keys[1], f->plan_key) && f->repeated_keys == 0 && view_of(s).state == WS_DONE);
+}
+static void pay_again_is_offered_only_on_a_committed_payment(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f); derived(&f);
+    struct wss *s = reviewed(&f, &p);
+    assert(!view_of(s).can_pay_again);
+    wss_tap_pay_again(s); drain(&f);                   /* a review is not a paid payment */
+    assert(view_of(s).state == WS_REVIEW && f.plans == 1);
+    tap_and_run(s, &f);
+    char first[WS_KEY_HEX + 1];
+    memcpy(first, f.commit_keys[0], sizeof(first));
+    assert(view_of(s).state == WS_DONE && !view_of(s).can_pay_again);
+    rescan(s, &f, &p);
+    assert(view_of(s).can_pay_again);
+    pay_again_plans_under_a_new_key(s, &f, first);
+    rescan(s, &f, &p);                                 /* the request is still the one the node holds */
+    assert(view_of(s).state == WS_PAID && f.plans == 2 && f.commits == 2);
+    wss_destroy(s);
+}
+static void a_fresh_process_asks_the_node_and_the_node_decides(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f); derived(&f);
+    struct wss *s = reviewed(&f, &p);
+    tap_and_run(s, &f);
+    char first[WS_KEY_HEX + 1];
+    memcpy(first, f.commit_keys[0], sizeof(first));
+    assert(!strcmp(first, f.plan_key));
+    wss_destroy(s);
+    struct fake g; restarted(&g, &f);
+    g.wall = WALL_14_32 + 2400;
+    s = reviewed(&g, &p);
+    assert(!strcmp(g.plan_key, first) && view_of(s).state == WS_REVIEW);   /* the same request, the same key */
+    tap_and_run(s, &g);
+    struct wss_view v = view_of(s);
+    assert(v.state == WS_PAID && v.can_pay_again && !strcmp(v.txid, TXID) && !strcmp(v.confirmed, "15:12 UTC"));   /* the node answered just now */
+    assert(g.repeated_keys == 1 && g.commits == 1 && g.locks == 1 && !strchr(g.calls, 'r') && wss_end(s));
+    wss_destroy(s);
+    /* an unknown answer is just as lasting */
+    struct fake u; fake_init(&u); derived(&u);
+    u.commit_outcome = WSS_UNKNOWN;
+    s = reviewed(&u, &p);
+    tap_and_run(s, &u);
+    wss_destroy(s);
+    struct fake w; restarted(&w, &u);
+    s = reviewed(&w, &p);
+    tap_and_run(s, &w);
+    v = view_of(s);
+    assert(v.state == WS_FAILED && v.check_history && !v.can_retry && !v.can_pay_again && w.commits == 1 && w.repeated_keys == 1);
+    wss_destroy(s);
+}
+static void the_key_follows_the_request(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f); derived(&f);
+    struct wss *s = reviewed(&f, &p);
+    char k1[WS_KEY_HEX + 1], k2[WS_KEY_HEX + 1], k3[WS_KEY_HEX + 1];
+    memcpy(k1, f.plan_key, sizeof(k1));
+    wss_edit_amount(s, 200000000); drain(&f);
+    memcpy(k2, f.plan_key, sizeof(k2));
+    wss_edit_memo(s, "hi", 2); drain(&f);
+    memcpy(k3, f.plan_key, sizeof(k3));
+    assert(strcmp(k1, k2) && strcmp(k2, k3) && strcmp(k1, k3));
+    wss_edit_memo(s, "", 0); wss_edit_amount(s, 100000000); drain(&f);
+    assert(!strcmp(f.plan_key, k1));                    /* the same request again is the same key */
+    /* a fee that moved before the commit re-plans the same request under the same key */
+    f.fee = 25000;
+    tap_and_run(s, &f);
+    assert(view_of(s).state == WS_FAILED && view_of(s).can_retry && f.commits == 1);
+    wss_tap_retry(s); drain(&f);
+    assert(view_of(s).state == WS_REVIEW && !strcmp(f.plan_key, k1));
+    tap_and_run(s, &f);
+    assert(f.commits == 2 && !strcmp(f.commit_keys[0], k1) && !strcmp(f.commit_keys[1], k1) && f.repeated_keys == 0);
+    wss_destroy(s);
+    struct fake g; fake_init(&g); derived(&g);
+    s = reviewed(&g, &p);
+    assert(!strcmp(g.plan_key, k1));                    /* a new screen over the same wallet */
+    wss_destroy(s);
+    struct fake h; fake_init(&h); derived(&h);
+    memset(h.id.bytes, 9, sizeof(h.id.bytes));
+    s = reviewed(&h, &p);
+    assert(strcmp(h.plan_key, k1) != 0);                /* another wallet, another key */
+    wss_destroy(s);
+}
 int main(void)
 {
     memcpy(priv, "zs1", 3); memset(priv + 3, 'q', 75); priv[78] = 0;
@@ -815,6 +1226,13 @@ int main(void)
     second_scan_never_replaces_the_tapped_plan();
     a_dead_action_does_not_run();
     concurrent_scan_with_the_real_worker();
+    leaving_during_authentication_does_not_cancel();
+    leaving_during_the_commit_never_cancels();
+    recreating_the_activity_during_a_commit_keeps_one_payment();
+    a_flow_in_review_is_not_kept();
+    an_already_paid_flow_is_kept_until_it_is_closed();
+    an_adopted_flow_is_bound_to_the_new_window();
+    an_unprotectable_new_window_keeps_the_flow_hidden();
     memo_cannot_spoof_a_line();
     the_commit_carries_the_planned_fee();
     the_node_replay_reads_as_sent();
@@ -823,6 +1241,11 @@ int main(void)
     an_owed_lock_keeps_the_screen();
     ticks_cannot_starve_a_lock();
     a_missing_worker_fails_the_flow();
+    a_rescan_of_a_sent_payment_shows_already_paid();
+    a_rescan_after_an_unknown_answer_starts_nothing();
+    pay_again_is_offered_only_on_a_committed_payment();
+    a_fresh_process_asks_the_node_and_the_node_decides();
+    the_key_follows_the_request();
     puts("wallet_send_screen_test: ok");
     return 0;
 }

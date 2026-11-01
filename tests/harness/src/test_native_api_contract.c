@@ -2044,6 +2044,36 @@ static int test_wallet_mutating_native_e2e(void)
         ASSERT_EQ(phone_fee, 250);
         zcl_command_reply_free(&reply);
 
+        /* The same key and the same token with exactly one field changed
+         * are not the plan: the token binds each of them.  These run before
+         * the good commit, so the refusal cannot be the key's replay. */
+        int sent_before_phone = g_wallet_z_sendmany_calls;
+        for (int variant = 0; variant < 3; ++variant) {
+            struct json_value changed;
+            json_init(&changed);
+            json_set_object(&changed);
+            (void)json_push_kv_str(&changed, "wallet_scope", "prod");
+            (void)json_push_kv_str(&changed, "from", "zs1PhoneSource");
+            (void)json_push_kv_str(&changed, "to", variant == 1 ?
+                                   "zs1PhoneOther" : "zs1PhoneRecipient");
+            (void)json_push_kv_str(&changed, "amount", variant == 0 ?
+                                   "1.26000000" : "1.25000000");
+            (void)json_push_kv_int(&changed, "fee_zat",
+                                   variant == 2 ? phone_fee + 1 : phone_fee);
+            (void)json_push_kv_str(&changed, "memo_hex", "6869");
+            (void)json_push_kv_str(&changed, "idempotency_key",
+                                   "0123456789abcdef0123456789abcdef");
+            (void)json_push_kv_str(&changed, "plan_token", phone_token);
+            (void)json_push_kv_bool(&changed, "confirm", true);
+            shield_req.input = &changed;
+            zcl_command_reply_init(&reply, shield_spec->output_schema);
+            zcl_native_handle_wallet_shielded_send(&shield_req, &reply);
+            ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+            ASSERT_EQ(g_wallet_z_sendmany_calls, sent_before_phone);
+            zcl_command_reply_free(&reply);
+            json_free(&changed);
+        }
+
         struct json_value phone_commit;
         json_init(&phone_commit);
         json_set_object(&phone_commit);
@@ -2057,7 +2087,6 @@ static int test_wallet_mutating_native_e2e(void)
                                "0123456789abcdef0123456789abcdef");
         (void)json_push_kv_str(&phone_commit, "plan_token", phone_token);
         (void)json_push_kv_bool(&phone_commit, "confirm", true);
-        int sent_before_phone = g_wallet_z_sendmany_calls;
         shield_req.input = &phone_commit;
         zcl_command_reply_init(&reply, shield_spec->output_schema);
         zcl_native_handle_wallet_shielded_send(&shield_req, &reply);
@@ -2067,26 +2096,6 @@ static int test_wallet_mutating_native_e2e(void)
         ASSERT(json_get_bool(json_get(&reply.data, "committed")));
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "plan_token")),
                       phone_token);
-        ASSERT_EQ(g_wallet_z_sendmany_calls, sent_before_phone + 1);
-        zcl_command_reply_free(&reply);
-
-        /* A commit that changes one digit of the amount is not the plan. */
-        json_free(&phone_commit);
-        json_init(&phone_commit);
-        json_set_object(&phone_commit);
-        (void)json_push_kv_str(&phone_commit, "wallet_scope", "prod");
-        (void)json_push_kv_str(&phone_commit, "from", "zs1PhoneSource");
-        (void)json_push_kv_str(&phone_commit, "to", "zs1PhoneRecipient");
-        (void)json_push_kv_str(&phone_commit, "amount", "1.26000000");
-        (void)json_push_kv_int(&phone_commit, "fee_zat", phone_fee);
-        (void)json_push_kv_str(&phone_commit, "memo_hex", "6869");
-        (void)json_push_kv_str(&phone_commit, "idempotency_key",
-                               "fedcba9876543210fedcba9876543210");
-        (void)json_push_kv_str(&phone_commit, "plan_token", phone_token);
-        (void)json_push_kv_bool(&phone_commit, "confirm", true);
-        zcl_command_reply_init(&reply, shield_spec->output_schema);
-        zcl_native_handle_wallet_shielded_send(&shield_req, &reply);
-        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
         ASSERT_EQ(g_wallet_z_sendmany_calls, sent_before_phone + 1);
         zcl_command_reply_free(&reply);
         json_free(&phone_commit);

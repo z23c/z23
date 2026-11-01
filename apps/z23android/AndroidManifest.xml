@@ -26,7 +26,7 @@
         android:fullBackupContent="false" android:debuggable="false" android:hardwareAccelerated="true"
         android:extractNativeLibs="true" android:supportsRtl="true" android:enableOnBackInvokedCallback="false">
         <activity android:name="android.app.NativeActivity"
-            android:exported="true" android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="true" android:configChanges="mcc|mnc|locale|touchscreen|keyboard|keyboardHidden|navigation|screenLayout|fontScale|uiMode|orientation|density|layoutDirection|colorMode|screenSize|smallestScreenSize|fontWeightAdjustment"
             android:launchMode="singleTask" android:windowSoftInputMode="adjustResize">
             <meta-data android:name="android.app.lib_name" android:value="z23android" />
             <intent-filter>

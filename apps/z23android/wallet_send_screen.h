@@ -18,6 +18,7 @@
 #define WSS_AMOUNT 48
 #define WSS_ADDRESS 160
 #define WSS_LINE 200
+#define WSS_CONFIRMED 16
 #define WSS_UNLOCK_JSON 128
 #define WSS_MEMO 4200   /* A memo of ZAPP_PAY_MEMO_MAX bytes with every character written out in full. */
 
@@ -43,6 +44,12 @@ struct wss_send_req {
  * whose row was kept. Only WSS_KEY_RELEASED and WSS_FEE_CHANGED may say "Nothing was sent". */
 enum wss_commit_outcome { WSS_COMMITTED, WSS_KEY_RELEASED, WSS_FEE_CHANGED, WSS_UNKNOWN };
 enum wss_commit_outcome wss_commit_outcome_of(bool answered, bool committed, const char *error_code);
+/* What a committed answer adds: whether the node answered from its record of an earlier commit under the same key
+ * (replayed true: nothing new was built), and the transaction id it reported. Empty strings when it reported none. */
+struct wss_commit_info {
+    bool replayed;
+    char txid[WS_TXID_MAX];
+};
 
 /* Typed node calls. Each returns false when the node could not be asked. */
 struct wss_node_ops {
@@ -53,7 +60,8 @@ struct wss_node_ops {
     /* core wallet security unlock: json is read from standard input and never put in argv. */
     bool (*unlock)(void *ctx, const char *stdin_json, size_t len, uint32_t seconds);
     bool (*lock)(void *ctx);                                                 /* core wallet security lock */
-    enum wss_commit_outcome (*commit)(void *ctx, const struct wss_send_req *req, char token_echo[WS_TOKEN_MAX]);
+    enum wss_commit_outcome (*commit)(void *ctx, const struct wss_send_req *req, char token_echo[WS_TOKEN_MAX],
+                                      struct wss_commit_info *info);
     bool (*route)(void *ctx, enum ws_route *out);                            /* core wallet broadcast status */
 };
 /* The device key. unwrap is the only way to the 32 byte wallet secret and it authenticates the owner for
@@ -81,6 +89,10 @@ struct wss_host_ops {
     bool (*spawn)(void *ctx, void (*job)(void *arg), void *arg);
     void (*redraw)(void *ctx);
     void (*open_make_private)(void *ctx);
+    /* The key of a payment request (wallet_send.h, ws_env). Optional: without it every review gets a random key. */
+    bool (*derive_key)(void *ctx, const struct zapp_payment *pay, char out[WS_KEY_HEX + 1]);
+    /* Seconds since the Unix epoch, read when the node's committed answer arrives. Optional. */
+    int64_t (*wall_s)(void *ctx);
 };
 struct wss_deps {
     enum zapp_pay_network network;
@@ -88,6 +100,9 @@ struct wss_deps {
     struct wss_device_ops device;
     struct wss_host_ops host;
     struct zapp_secure_ops secure;
+    /* Called once, after the screen is freed, so the context the ops point to can be released with it. Optional. */
+    void (*release)(void *ctx);
+    void *release_ctx;
 };
 
 /* Everything the renderer draws. Fields not in use are empty strings. */
@@ -102,6 +117,7 @@ struct wss_view {
     bool check_history;               /* The send has an unknown result: say so and point to History. */
     bool can_leave;                   /* Draw Done: the flow ended, or the node holds the payment and only History can say more. */
     bool can_cancel;
+    bool can_pay_again;               /* Draw Pay again: the node holds an earlier payment of this request as committed. */
     bool offer_make_private;
     uint32_t serial;                  /* Pass back with the Send tap. */
     char amount[WSS_AMOUNT];
@@ -113,6 +129,8 @@ struct wss_view {
     char memo[WSS_MEMO];              /* Data only: control and bidi characters are written as <U+XXXX>. */
     char warning[WSS_LINE];           /* The public destination warning. */
     char note[WSS_LINE];              /* Insufficient private funds. */
+    char txid[WS_TXID_MAX];           /* The earlier payment's transaction, in WS_PAID. */
+    char confirmed[WSS_CONFIRMED];    /* When the node gave the committed answer, as "HH:MM UTC"; empty when the phone has no clock. */
     char fleet[WSS_LINE];             /* "Checked by your fleet" or "Not checked by your fleet". */
     char status[WSS_LINE];
 };
@@ -122,6 +140,18 @@ struct wss *wss_create(const struct wss_deps *deps);
 /* Wipes and frees. Call only when wss_end returned true or the flow never began. Returns false and keeps the
  * screen when the wallet may still be open: the lock is owed and ticks must continue. */
 bool wss_destroy(struct wss *screen);
+/* True while the wallet may be open: the lock is owed and ticks must continue. */
+bool wss_exposed(struct wss *screen);
+/* The owner pressed Done on the flow's outcome: it is no longer kept for a re-created activity. A later wss_begin
+ * reopens it. */
+void wss_close(struct wss *screen);
+bool wss_closed(struct wss *screen);
+/* A flow kept for a re-created activity is bound to the window it was begun on. wss_unbind drops that binding, so no
+ * later call can reach a window that may be gone, and hides the payment until it is bound again. wss_rebind binds the
+ * flow to the new window's protections and applies them before the flow is drawn; false means a protection is not in
+ * force and the payment stays hidden. UI thread only, like wss_begin and wss_end. */
+void wss_unbind(struct wss *screen);
+bool wss_rebind(struct wss *screen, const struct zapp_secure_ops *secure);
 
 /* Protects the window and opens the review of an accepted payment code. False, with nothing started and
  * the flow in progress untouched, when a send is still in progress or when either protection is not in
@@ -136,6 +166,9 @@ void wss_tap_send(struct wss *screen, uint32_t serial);
 void wss_tap_retry(struct wss *screen);
 void wss_tap_cancel(struct wss *screen);
 void wss_tap_make_private(struct wss *screen);
+/* Pay again, offered only on a payment the node reports as already paid. Starts a full review, and the owner's tap and
+ * authentication, under a new random key. */
+void wss_tap_pay_again(struct wss *screen);
 void wss_edit_amount(struct wss *screen, uint64_t amount_zat);
 void wss_edit_address(struct wss *screen, const char *address);
 void wss_edit_memo(struct wss *screen, const char *memo, size_t len);

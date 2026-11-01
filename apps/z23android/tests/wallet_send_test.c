@@ -40,7 +40,7 @@ static void world_init(struct world *w, uint64_t seed)
     w->rnd.s = seed;
     w->now = 1000;
 }
-static struct ws_env env_of(struct world *w) { return (struct ws_env){ZAPP_PAY_MAINNET, &w->rnd, fake_random}; }
+static struct ws_env env_of(struct world *w) { return (struct ws_env){ZAPP_PAY_MAINNET, &w->rnd, fake_random, NULL}; }
 static void record(struct world *w)
 {
     for (size_t i = 0; i < w->acts.count; ++i)
@@ -376,7 +376,7 @@ static void gate_refusals(void)
     feed(&w, pl);
     assert(w.ws.fail == WS_FAIL_PLAN);
     /* no random source: no key, so no plan is asked for and no review */
-    struct ws_env bad = {ZAPP_PAY_MAINNET, NULL, no_random};
+    struct ws_env bad = {ZAPP_PAY_MAINNET, NULL, no_random, NULL};
     ws_open(&w.ws, &bad, &p, w.now, &w.acts);
     feed(&w, tk_ev(&w, WS_EV_ADDRESS, true)); feed(&w, gate_ev(&w, good_gate()));
     assert(w.ws.fail == WS_FAIL_NO_RANDOM && !w.ws.key[0] && !emitted(&w, WS_ACT_PLAN) && w.ws.state == WS_FAILED);

@@ -18,7 +18,7 @@ endif()
 
 add_library(z23android SHARED
     android_main.c node_service.c node_watch.c camera.c native_ui.c jni_util.c shell.c surface.c launcher.c layout.c home.c controller.c conversation.c bridge_client.c operations.c rpc.c fleet.c
-    device_key.c device_key_jni.c payment_code.c wallet_view.c secure_window.c wallet_send.c wallet_send_screen.c wallet_send_node.c wallet_send_device.c wallet_send_ui.c pay_stash.c
+    device_key.c device_key_jni.c payment_code.c wallet_view.c secure_window.c wallet_send.c wallet_send_screen.c wallet_send_node.c wallet_send_device.c wallet_send_keeper.c wallet_send_ui.c pay_stash.c send_key.c
     audio.c speech_client.c voice.c hosts.c private.c pairing.c scan.c thermal.c nodelog.c params.c params_install.c params_job.c params_android.c
     wallet_screens.c wallet_ui.c
     clip_store.c clip_capture.c clip_player.c clip_screen.c

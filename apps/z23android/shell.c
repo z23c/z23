@@ -429,6 +429,7 @@ static void back(JNIEnv *env)
 {
     if (shell.current == SCREEN_SCAN) {
         zapp_camera_stop(); shell.scan_dismissed = true;
+        zapp_pay_stash_clear();   /* a code still being decoded is dropped when it finishes */
         go(env, shell.before_scan);
     } else if (shell.current == SCREEN_WALLET) {
         if (wallet_screens_back()) zapp_wallet_ui_render(env);
@@ -616,12 +617,15 @@ static void render_scan(JNIEnv *env, const struct zapp_view *view, bool finished
         return;
     }
     shell.scan_dismissed = false;
+    if (finished && dismissed) zapp_pay_stash_clear();
     if (shell.current == SCREEN_SCAN && !(finished && !dismissed && scan_goes_to_send(view))) go(env, shell.before_scan);
     if (finished && !dismissed) finish_scan(env, view);
 }
 void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
 {
     if (!shell.activity || !view) return;
+    /* A payment kept from the activity that was replaced is shown with its progress or outcome. */
+    if (zapp_send_ui_take_reshow()) go(env, SCREEN_SEND);
     if (!shell.rendered) {
         shell.rendered = true; shell.scans_seen = view->scans_done; shell.scan_dismissed = view->scanning;
     }
@@ -637,7 +641,9 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
 void zapp_shell_pause(JNIEnv *env)
 {
     if (shell.activity && shell.current == SCREEN_SEND) {
-        /* A payment being built, or an authentication in progress, stays; a flow that ended returns to Home. */
+        /* A flow in authentication or building stays on this screen: the system credential screen pauses the app and its
+         * result completes the payment, and a running commit is never cancelled. Any other flow is cancelled and returns
+         * to Home, and a flow that ended returns to Home. */
         zapp_send_ui_pause();
         go(env, SCREEN_HOME);
         return;
@@ -680,6 +686,7 @@ void zapp_shell_destroy(JNIEnv *env)
     wallet_screens_close();
     zapp_wallet_ui_destroy(env);
     zapp_send_ui_destroy(env);
+    zapp_pay_stash_clear();
     zapp_surface_destroy(env);
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);

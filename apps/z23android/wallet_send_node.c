@@ -366,15 +366,38 @@ static bool lock(void *ctx)
     return ok;
 }
 
+static bool is_txid(const char *text)
+{
+    size_t n = 0;
+    for (; text && text[n]; ++n)
+        if (!((text[n] >= '0' && text[n] <= '9') || (text[n] >= 'a' && text[n] <= 'f'))) return false;
+    return n == WS_TXID_MAX - 1;
+}
+/* Whether the node's answer is a committed payment under the plan this adapter made, with what it reports about it. A
+ * replay is the node answering from its record of an earlier commit under this key: nothing was built. */
+static bool commit_answer(const struct reply *r, char token_echo[WS_TOKEN_MAX], struct wss_commit_info *info)
+{
+    bool flag = false, replayed = false;
+    if (!r->parsed || !r->ok || !is_object(r->data)) return false;
+    const char *echo = text_of(r->data, "plan_token");
+    const char *txid = text_of(r->data, "txid");
+    if (!flag_of(r->data, "committed", &flag) || !flag || !echo || strlen(echo) >= WS_TOKEN_MAX) return false;
+    snprintf(token_echo, WS_TOKEN_MAX, "%s", echo);
+    if (flag_of(r->data, "replayed", &replayed)) info->replayed = replayed;
+    if (is_txid(txid)) snprintf(info->txid, sizeof(info->txid), "%s", txid);
+    return true;
+}
 /* core wallet shielded send with confirm. The reply is read whatever the exit status, because a process that was
  * killed after the node answered still carried the answer. A missing or unreadable reply is unknown, and the commit
  * is never repeated. The node's message is never read. */
-static enum wss_commit_outcome commit(void *ctx, const struct wss_send_req *req, char token_echo[WS_TOKEN_MAX])
+static enum wss_commit_outcome commit(void *ctx, const struct wss_send_req *req, char token_echo[WS_TOKEN_MAX],
+                                      struct wss_commit_info *info)
 {
     struct wsn *n = ctx;
     char amount[32], input[WSN_INPUT_MAX], text[WSN_REPLY_MAX];
     struct reply r;
     token_echo[0] = 0;
+    memset(info, 0, sizeof(*info));
     /* A plan this adapter did not make, or an older one, cannot be committed: no call is made, nothing is sent. */
     if (!n->from[0] || strcmp(n->token, req->plan_token) || !wsn_format_amount(req->amount_zat, amount, sizeof(amount)) ||
         !request_json(n, req, n->from, amount, true, input, sizeof(input)))
@@ -383,13 +406,7 @@ static enum wss_commit_outcome commit(void *ctx, const struct wss_send_req *req,
     (void)n->runner.run(n->runner.ctx, "commit", input, WSN_COMMIT_TIMEOUT_MS, text, sizeof(text));
     memory_cleanse(input, sizeof(input));
     reply_read(&r, text);
-    bool committed = r.parsed && r.ok && is_object(r.data);
-    if (committed) {
-        bool flag = false;
-        const char *echo = text_of(r.data, "plan_token");
-        committed = flag_of(r.data, "committed", &flag) && flag && echo && strlen(echo) < WS_TOKEN_MAX;
-        if (committed) snprintf(token_echo, WS_TOKEN_MAX, "%s", echo);
-    }
+    bool committed = commit_answer(&r, token_echo, info);
     enum wss_commit_outcome outcome = wss_commit_outcome_of(r.parsed, committed, r.code);
     reply_free(&r);
     memory_cleanse(text, sizeof(text));

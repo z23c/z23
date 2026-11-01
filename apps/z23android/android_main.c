@@ -12,6 +12,7 @@
 #endif
 #include "native_ui.h"
 #include "node_service.h"
+#include "pay_stash.h"
 #include "secure_window.h"
 #include "wallet_send_ui.h"
 #include "wallet_ui.h"
@@ -443,6 +444,7 @@ static void detach_activity(JNIEnv *env)
     zapp_clip_screen_close(env);
     /* Before the controller goes: a lock still owed is asked for through it. */
     zapp_send_detach(env);
+    zapp_pay_stash_clear();
     zapp_controller_detach();
     zapp_camera_set_frame_notify(NULL);
     zapp_camera_stop();

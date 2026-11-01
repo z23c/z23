@@ -6,8 +6,10 @@
 #include "device_key.h"
 #include "jni_util.h"
 #include "scan.h"
+#include "send_key.h"
 #include "secure_window.h"
 #include "wallet_send_device.h"
+#include "wallet_send_keeper.h"
 #include "wallet_send_node.h"
 #include <pthread.h>
 #include <stdlib.h>
@@ -30,19 +32,17 @@
 #define GRAVITY_CENTER_HORIZONTAL 1
 #define BUTTONS_MAX 8
 #define TEXT_CAP (ZAPP_PAY_INPUT_MAX + 1)
-#define DETACH_WAIT_STEPS 12
 
-enum button { B_SEND, B_CANCEL, B_RETRY, B_DONE, B_SCAN, B_ENTER, B_USE_ADDRESS, B_SET_AMOUNT };
+enum button { B_SEND, B_CANCEL, B_RETRY, B_DONE, B_SCAN, B_ENTER, B_USE_ADDRESS, B_SET_AMOUNT, B_PAY_AGAIN };
 
 static struct {
     ANativeActivity *activity;
     JavaVM *vm;
-    jobject app, container, address_input, amount_input, buttons[BUTTONS_MAX];
+    jobject app, key_app, container, address_input, amount_input, buttons[BUTTONS_MAX];
+    pthread_mutex_t key_lock;   /* guards key_app, which a worker reads while the activity is replaced */
     enum button button_id[BUTTONS_MAX];
     size_t button_count;
-    struct wss *screen, *retired;
-    struct wsn node;
-    struct wsd device;
+    struct wsk keeper;
     void (*changed)(void);
     bool flow;       /* a payment is open on the screen and has not been left */
     bool entering;   /* the address field is shown */
@@ -73,6 +73,11 @@ static uint64_t host_now(void *ctx)
     (void)ctx;
     clock_gettime(CLOCK_MONOTONIC, &at);
     return (uint64_t)at.tv_sec * 1000u + (uint64_t)at.tv_nsec / 1000000u;
+}
+static int64_t host_wall(void *ctx)
+{
+    (void)ctx;
+    return (int64_t)time(NULL);
 }
 static void host_redraw(void *ctx)
 {
@@ -111,8 +116,13 @@ static bool host_spawn(void *ctx, void (*job)(void *arg), void *arg)
 static bool key_ops(void *ctx, struct zapp_devkey_ops *out)
 {
     (void)ctx;
-    if (!worker_env || !ui.app) return false;
-    worker_key = (struct zapp_devkey_jni){worker_env, ui.app};
+    if (!worker_env) return false;
+    /* The worker takes its own reference, so replacing the activity cannot free the one it is using. */
+    pthread_mutex_lock(&ui.key_lock);
+    jobject app = ui.key_app ? (*worker_env)->NewLocalRef(worker_env, ui.key_app) : NULL;
+    pthread_mutex_unlock(&ui.key_lock);
+    if (!app) return false;
+    worker_key = (struct zapp_devkey_jni){worker_env, app};
     zapp_devkey_jni_ops(out, &worker_key);
     return true;
 }
@@ -127,34 +137,82 @@ static bool node_paused(void *ctx)
     return zapp_controller_node_paused();
 }
 
-bool zapp_send_attach(ANativeActivity *activity, void (*changed)(void))
+/* The ops of one flow live and die with its screen: a retired flow's worker keeps using them after the activity that
+ * made them is gone, and a new screen never shares or resets them. */
+struct parts {
+    struct wsn node;
+    struct wsd device;
+    struct zapp_send_id id;   /* the wallet id the payment keys derive from */
+    bool id_ok;
+};
+static bool host_derive(void *ctx, const struct zapp_payment *pay, char out[WS_KEY_HEX + 1])
+{
+    const struct parts *parts = ctx;
+    return parts && parts->id_ok && zapp_send_key_derive(&parts->id, pay, out);
+}
+static void parts_release(void *ctx)
+{
+    memory_cleanse(ctx, sizeof(struct parts));
+    free(ctx);
+}
+static struct wss *make_screen(void *ctx)
 {
     struct wss_deps deps = {.network = ZAPP_SCAN_NETWORK};
-    if (!activity || ui.screen) return false;
-    if (ui.retired && wss_destroy(ui.retired)) ui.retired = NULL;
+    struct parts *parts = calloc(1, sizeof(*parts));
+    (void)ctx;
+    if (!parts || !ui.activity) { free(parts); return NULL; }
+    wsn_init(&parts->node, &(struct wsn_runner){NULL, node_run, node_paused}, ZAPP_SCAN_NETWORK);
+    wsn_ops(&parts->node, &deps.node);
+    if (!wsd_init(&parts->device, NULL, key_ops, ui.activity->internalDataPath)) { free(parts); return NULL; }
+    wsd_ops(&parts->device, &deps.device);
+    parts->id_ok = zapp_send_id_load(ui.activity->internalDataPath, &parts->id);
+    deps.host = (struct wss_host_ops){parts, host_random, host_now, host_spawn, host_redraw, NULL, host_derive, host_wall};
+    zapp_secure_window_ops(&deps.secure, ui.activity);
+    deps.release = parts_release;
+    deps.release_ctx = parts;
+    struct wss *screen = wss_create(&deps);
+    if (!screen) free(parts);
+    return screen;
+}
+/* A flow adopted from the replaced activity is bound to this activity's window, and protected, before it is drawn. */
+static void bind_screen(void *ctx, struct wss *screen)
+{
+    struct zapp_secure_ops secure;
+    (void)ctx;
+    if (!ui.activity) return;
+    zapp_secure_window_ops(&secure, ui.activity);
+    (void)wss_rebind(screen, &secure);
+}
+static void wait_for_lock(void *ctx)
+{
+    struct timespec step = {.tv_nsec = 250000000L};
+    (void)ctx;
+    nanosleep(&step, NULL);
+}
+
+bool zapp_send_attach(ANativeActivity *activity, void (*changed)(void))
+{
+    if (!activity || ui.keeper.screen) return false;
     ui.activity = activity;
     ui.vm = activity->vm;
     ui.changed = changed;
-    wsn_init(&ui.node, &(struct wsn_runner){NULL, node_run, node_paused}, ZAPP_SCAN_NETWORK);
-    wsn_ops(&ui.node, &deps.node);
-    if (!wsd_init(&ui.device, NULL, key_ops, activity->internalDataPath)) return false;
-    wsd_ops(&ui.device, &deps.device);
-    deps.host = (struct wss_host_ops){NULL, host_random, host_now, host_spawn, host_redraw, NULL};
-    zapp_secure_window_ops(&deps.secure, activity);
-    ui.screen = wss_create(&deps);
-    return ui.screen != NULL;
+    if (!ui.keeper.host.make) wsk_init(&ui.keeper, &(struct wsk_host){NULL, make_screen, wait_for_lock, bind_screen});
+    if (!wsk_attach(&ui.keeper)) return false;
+    /* A flow kept from the activity that was replaced is shown at once, with its progress or outcome. */
+    if (ui.keeper.reshow) ui.flow = true;
+    return true;
+}
+bool zapp_send_ui_take_reshow(void)
+{
+    bool reshow = ui.keeper.reshow;
+    ui.keeper.reshow = false;
+    return reshow;
 }
 
 void zapp_send_detach(JNIEnv *env)
 {
-    struct timespec step = {.tv_nsec = 250000000L};
-    for (int i = 0; ui.screen && i < DETACH_WAIT_STEPS; ++i) {
-        if (wss_destroy(ui.screen)) ui.screen = NULL;
-        else { wss_on_tick(ui.screen); nanosleep(&step, NULL); }
-    }
-    /* A wallet that is still locking keeps its screen and the activity reference its worker may use. */
-    if (ui.screen) { ui.retired = ui.screen; ui.screen = NULL; }
-    else if (ui.app) { (*env)->DeleteGlobalRef(env, ui.app); ui.app = NULL; }
+    (void)env;
+    wsk_detach(&ui.keeper);
     ui.flow = false;
     ui.activity = NULL;
 }
@@ -245,10 +303,24 @@ static void draw_review(JNIEnv *env, const struct wss_view *v)
         (void)memo_view(env, v->memo);
     }
 }
+/* The earlier payment the node holds: its transaction and when the node confirmed it. */
+static void draw_paid(JNIEnv *env, const struct wss_view *v)
+{
+    char text[WSS_LINE];
+    if (v->txid[0]) {
+        snprintf(text, sizeof(text), "Transaction %s", v->txid);
+        (void)text_view(env, text, 14.0f, SOFT);
+    }
+    if (v->confirmed[0]) {
+        snprintf(text, sizeof(text), "Your node confirmed this payment at %s", v->confirmed);
+        (void)text_view(env, text, 14.0f, SOFT);
+    }
+}
 static void draw_flow(JNIEnv *env, const struct wss_view *v)
 {
     if (v->review) draw_review(env, v);
     line_if(env, v->status, 16.0f, v->check_history ? AMBER : SOFT);
+    if (v->state == WS_PAID) draw_paid(env, v);
     line_if(env, ui.hint, 14.0f, AMBER);
     if (ui.dropped) (void)text_view(env, "Another app is drawing over this screen, so your tap was ignored.", 14.0f, AMBER);
     if (v->state == WS_PARSED) {
@@ -257,6 +329,7 @@ static void draw_flow(JNIEnv *env, const struct wss_view *v)
     }
     if (v->can_send) (void)button_view(env, B_SEND, "Send", SEND_COLOR, true);
     if (v->can_retry) (void)button_view(env, B_RETRY, "Try again", BUTTON_COLOR, false);
+    if (v->can_pay_again) (void)button_view(env, B_PAY_AGAIN, "Pay again", BUTTON_COLOR, false);
     if (v->can_cancel) (void)button_view(env, B_CANCEL, "Cancel", BUTTON_COLOR, false);
     if (v->can_leave && v->state != WS_BROADCAST) (void)button_view(env, B_SCAN, "Scan another code", BUTTON_COLOR, false);
     if (v->can_leave) (void)button_view(env, B_DONE, "Done", BUTTON_COLOR, false);
@@ -279,14 +352,14 @@ void zapp_send_ui_render(JNIEnv *env)
     struct wss_view v;
     if (!ui.container) return;
     memset(&v, 0, sizeof(v));
-    if (ui.flow && ui.screen) {
-        wss_view(ui.screen, &v);
+    if (ui.flow && ui.keeper.screen) {
+        wss_view(ui.keeper.screen, &v);
         v.elapsed_s = 0;
     }
     if (ui.is_drawn && ui.drawn_version == ui.version && !memcmp(&v, &ui.drawn, sizeof(v))) return;
     release_widgets(env);
     (void)text_view(env, "Send", 24.0f, WHITE);
-    if (ui.flow && ui.screen) draw_flow(env, &v);
+    if (ui.flow && ui.keeper.screen) draw_flow(env, &v);
     else draw_blank(env);
     /* The phone must not sleep while a payment is built: it takes about two minutes. */
     (void)zj_bool_property(env, ui.container, "setKeepScreenOn", v.busy);
@@ -309,9 +382,17 @@ static void say(char *field, const char *text)
     snprintf(field, WSS_LINE, "%s", text);
     ui.version++;
 }
+/* The flow on screen stays there, with its progress or outcome, when a later code is refused or turned away. */
+static bool flow_live(void)
+{
+    struct wss_view v;
+    if (!ui.flow || !ui.keeper.screen) return false;
+    wss_view(ui.keeper.screen, &v);
+    return v.visible;
+}
 static void open_payment(const struct zapp_payment *pay)
 {
-    if (ui.screen && wss_begin(ui.screen, pay)) {
+    if (ui.keeper.screen && wss_begin(ui.keeper.screen, pay)) {
         ui.flow = true;
         ui.notice[0] = ui.hint[0] = 0;
         ui.entering = false;
@@ -323,7 +404,7 @@ static void open_payment(const struct zapp_payment *pay)
     char text[WSS_LINE];
     if (refused) snprintf(text, sizeof(text), "This phone would not let the app %s, so the payment is not shown.", refused);
     else snprintf(text, sizeof(text), "Another payment is still finishing. Try again in a moment.");
-    ui.flow = false;
+    ui.flow = flow_live();
     say(ui.notice, text);
 }
 void zapp_send_ui_open(JNIEnv *env, const struct zapp_payment *pay, const char *notice)
@@ -332,14 +413,14 @@ void zapp_send_ui_open(JNIEnv *env, const struct zapp_payment *pay, const char *
     ui.hint[0] = 0;
     say(ui.notice, notice ? notice : "");
     if (pay) open_payment(pay);
-    else ui.flow = false;
+    else ui.flow = flow_live();
     zapp_send_ui_render(env);
 }
 
 bool zapp_send_ui_leave(JNIEnv *env)
 {
-    if (ui.flow && ui.screen) {
-        if (!wss_end(ui.screen)) return false;
+    if (ui.flow && ui.keeper.screen) {
+        if (!wss_end(ui.keeper.screen)) return false;
         ui.flow = false;
     }
     ui.entering = false;
@@ -351,16 +432,15 @@ bool zapp_send_ui_leave(JNIEnv *env)
 }
 void zapp_send_ui_pause(void)
 {
-    if (ui.flow && ui.screen) wss_on_pause(ui.screen);
+    if (ui.flow && ui.keeper.screen) wss_on_pause(ui.keeper.screen);
 }
 void zapp_send_ui_tick(JNIEnv *env)
 {
-    if (ui.flow && ui.screen) wss_on_tick(ui.screen);
-    if (ui.retired && wss_destroy(ui.retired)) ui.retired = NULL;
-    else if (ui.retired) wss_on_tick(ui.retired);
+    if (ui.flow && ui.keeper.screen) wss_on_tick(ui.keeper.screen);
+    wsk_tick(&ui.keeper);
     (void)env;
 }
-bool zapp_send_ui_owes(void) { return ui.flow || ui.retired; }
+bool zapp_send_ui_owes(void) { return ui.flow || wsk_owes(&ui.keeper); }
 void zapp_send_ui_dropped(JNIEnv *env)
 {
     ui.dropped = true;
@@ -416,17 +496,18 @@ static void set_amount(JNIEnv *env)
     if (!ok) { say(ui.hint, "That is not an amount. Write it in ZCL, for example 1.5."); return; }
     ui.hint[0] = 0;
     ui.version++;
-    wss_edit_amount(ui.screen, zat);
+    wss_edit_amount(ui.keeper.screen, zat);
 }
 
 /* The buttons that act on the flow. The first is the only call that starts an authentication: the owner's tap on the
  * Send button of the plan on screen. */
 static void press_flow(JNIEnv *env, int id)
 {
-    if (!ui.flow || !ui.screen) return;
-    if (id == B_SEND) wss_tap_send(ui.screen, ui.drawn.serial);
-    else if (id == B_CANCEL) wss_tap_cancel(ui.screen);
-    else if (id == B_RETRY) wss_tap_retry(ui.screen);
+    if (!ui.flow || !ui.keeper.screen) return;
+    if (id == B_SEND) wss_tap_send(ui.keeper.screen, ui.drawn.serial);
+    else if (id == B_CANCEL) wss_tap_cancel(ui.keeper.screen);
+    else if (id == B_RETRY) wss_tap_retry(ui.keeper.screen);
+    else if (id == B_PAY_AGAIN) wss_tap_pay_again(ui.keeper.screen);
     else if (id == B_SET_AMOUNT) set_amount(env);
 }
 enum zapp_send_outcome zapp_send_ui_press(JNIEnv *env, size_t button)
@@ -435,7 +516,10 @@ enum zapp_send_outcome zapp_send_ui_press(JNIEnv *env, size_t button)
     if (button >= ui.button_count) return outcome;
     ui.dropped = false;
     int id = (int)ui.button_id[button];
-    if (id == B_DONE) outcome = ZAPP_SEND_LEAVE;
+    if (id == B_DONE) {
+        if (ui.flow && ui.keeper.screen) wss_close(ui.keeper.screen);
+        outcome = ZAPP_SEND_LEAVE;
+    }
     else if (id == B_SCAN) outcome = ZAPP_SEND_SCAN;
     else if (id == B_ENTER) { ui.entering = true; ui.version++; }
     else if (id == B_USE_ADDRESS) use_address(env);
@@ -449,16 +533,29 @@ enum zapp_send_outcome zapp_send_ui_press(JNIEnv *env, size_t button)
 bool zapp_send_ui_create(JNIEnv *env, jobject activity, jobject container)
 {
     if (ui.container) return false;
-    /* A reference left by a screen that was still locking stays with its worker; this activity gets its own. */
     ui.app = (*env)->NewGlobalRef(env, activity);
     ui.container = (*env)->NewGlobalRef(env, container);
-    if (ui.app && ui.container && zj_int_property(env, ui.container, "setGravity", GRAVITY_CENTER_HORIZONTAL)) return true;
+    /* A flow kept from an earlier activity asks the keystore through the newest activity from here on. */
+    jobject key_app = (*env)->NewGlobalRef(env, activity);
+    pthread_mutex_lock(&ui.key_lock);
+    jobject old = ui.key_app;
+    ui.key_app = key_app;
+    pthread_mutex_unlock(&ui.key_lock);
+    if (old) (*env)->DeleteGlobalRef(env, old);
+    if (ui.app && ui.container && key_app && zj_int_property(env, ui.container, "setGravity", GRAVITY_CENTER_HORIZONTAL)) return true;
     zapp_send_ui_destroy(env);
     return false;
 }
 void zapp_send_ui_destroy(JNIEnv *env)
 {
     zapp_send_ui_clear(env);
+    pthread_mutex_lock(&ui.key_lock);
+    jobject key_app = ui.key_app;
+    ui.key_app = NULL;
+    pthread_mutex_unlock(&ui.key_lock);
+    if (key_app) (*env)->DeleteGlobalRef(env, key_app);
+    if (ui.app) (*env)->DeleteGlobalRef(env, ui.app);
+    ui.app = NULL;
     if (ui.container) (*env)->DeleteGlobalRef(env, ui.container);
     ui.container = NULL;
 }

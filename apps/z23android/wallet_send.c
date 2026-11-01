@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "wallet_send.h"
+#include <stdio.h>
 #include <string.h>
 
 #define WS_GATE_REFRESH_MS 10000u
@@ -42,16 +43,49 @@ static void clear_review(struct ws *ws)
 {
     memset(&ws->plan, 0, sizeof(ws->plan));
     memset(ws->key, 0, sizeof(ws->key));
+    memset(ws->txid, 0, sizeof(ws->txid));
     ws->tapped = false;
     ws->insufficient = false;
     ws->fail = WS_FAIL_NONE;
     ws->retry_ok = false;
+}
+static void derive_request_key(struct ws *ws)
+{
+    ws->request_key[0] = 0;
+    if (!ws->env.derive_key || !ws->pay.has_amount) return;
+    if (!ws->env.derive_key(ws->env.ctx, &ws->pay, ws->request_key)) ws->request_key[0] = 0;
+}
+static void remember(struct ws *ws, enum ws_sent_kind kind, const char *txid, int64_t answered_s)
+{
+    memset(&ws->sent, 0, sizeof(ws->sent));
+    ws->sent.kind = kind;
+    memcpy(ws->sent.request_key, ws->request_key, sizeof(ws->sent.request_key));
+    ws->sent.answered_s = answered_s;
+    if (txid) snprintf(ws->sent.txid, sizeof(ws->sent.txid), "%s", txid);
+}
+/* Whether this request was already sent from this phone and the node's answer is still on hand. */
+static bool request_was_sent(const struct ws *ws)
+{
+    return !ws->fresh_key && ws->sent.kind != WS_SENT_NONE && ws->request_key[0] &&
+           strcmp(ws->sent.request_key, ws->request_key) == 0;
+}
+/* A request the node already holds is shown as what it is. Nothing is planned, authenticated or committed. */
+static void show_sent(struct ws *ws, struct ws_actions *out)
+{
+    if (ws->sent.kind == WS_SENT_COMMITTED) {
+        snprintf(ws->txid, sizeof(ws->txid), "%s", ws->sent.txid);
+        finish(ws, out, WS_PAID, WS_FAIL_NONE, false);
+    } else {
+        finish(ws, out, WS_FAILED, WS_FAIL_COMMIT_UNKNOWN, false);
+    }
 }
 /* A new review: every earlier tap, plan and key is void. */
 static void begin_validation(struct ws *ws, struct ws_actions *out)
 {
     clear_review(ws);
     ws->serial++;
+    derive_request_key(ws);
+    if (request_was_sent(ws)) { show_sent(ws, out); return; }
     enter(ws, WS_VALIDATING);
     ask(ws, out, WS_ACT_VALIDATE_ADDRESS);
 }
@@ -59,6 +93,7 @@ void ws_open(struct ws *ws, const struct ws_env *env, const struct zapp_payment 
              struct ws_actions *out)
 {
     uint32_t seq = ws->seq, serial = ws->serial, lock_ticket = ws->lock_ticket;
+    struct ws_sent sent = ws->sent;
     unsigned attempts = ws->lock_attempts;
     uint64_t lock_ms = ws->lock_ms;
     bool exposed = ws->unlock_requested, wanted = ws->lock_wanted;
@@ -66,6 +101,7 @@ void ws_open(struct ws *ws, const struct ws_env *env, const struct zapp_payment 
     memset(out, 0, sizeof(*out));
     ws->env = *env;
     ws->pay = *pay;
+    ws->sent = sent;
     ws->seq = seq;
     ws->serial = serial + 1;
     /* A lock the earlier flow still owes outlives it. */
@@ -83,6 +119,11 @@ static bool new_key(struct ws *ws)
 {
     static const char hex[] = "0123456789abcdef";
     uint8_t raw[WS_KEY_HEX / 2];
+    if (ws->env.derive_key && !ws->fresh_key) {
+        if (!ws->request_key[0]) return false;
+        memcpy(ws->key, ws->request_key, sizeof(ws->key));
+        return true;
+    }
     if (!ws->env.random || !ws->env.random(ws->env.ctx, raw, sizeof(raw))) return false;
     for (size_t i = 0; i < sizeof(raw); ++i) {
         ws->key[2 * i] = hex[raw[i] >> 4];
@@ -202,6 +243,14 @@ static void on_commit(struct ws *ws, const struct ws_event *ev, struct ws_action
 {
     if (ws->state != WS_COMMIT || ev->ticket != ws->ticket) return;
     if (ev->ok && strncmp(ev->plan.token, ws->plan.token, sizeof(ws->plan.token)) == 0) {
+        char txid[WS_TXID_MAX];
+        snprintf(txid, sizeof(txid), "%s", ev->txid);
+        remember(ws, WS_SENT_COMMITTED, txid, ev->wall_s);
+        if (ev->replayed) {
+            snprintf(ws->txid, sizeof(ws->txid), "%s", txid);
+            finish(ws, out, WS_PAID, WS_FAIL_NONE, false);
+            return;
+        }
         ask_lock(ws, out);
         enter(ws, WS_BROADCAST);
         ask(ws, out, WS_ACT_POLL_ROUTE);
@@ -212,7 +261,10 @@ static void on_commit(struct ws *ws, const struct ws_event *ev, struct ws_action
      * second commit for this review. A changed fee needs a new plan, so it returns to a new review. */
     if (!ev->ok && ev->fee_changed) finish(ws, out, WS_FAILED, WS_FAIL_FEE_CHANGED, true);
     else if (!ev->ok && ev->refused) finish(ws, out, WS_FAILED, WS_FAIL_COMMIT_REFUSED, true);
-    else finish(ws, out, WS_FAILED, WS_FAIL_COMMIT_UNKNOWN, false);
+    else {
+        remember(ws, WS_SENT_UNKNOWN, NULL, 0);
+        finish(ws, out, WS_FAILED, WS_FAIL_COMMIT_UNKNOWN, false);
+    }
 }
 static void on_route(struct ws *ws, const struct ws_event *ev)
 {
@@ -290,10 +342,22 @@ static void on_retry(struct ws *ws, struct ws_actions *out)
     }
     if (ws->pay.has_amount) begin_validation(ws, out);
 }
+bool ws_can_pay_again(const struct ws *ws)
+{
+    return ws->state == WS_PAID && ws->sent.kind == WS_SENT_COMMITTED;
+}
+/* The owner chose to pay a request the node already holds a second time: full review and authentication again, under a
+ * new random key. */
+static void on_pay_again(struct ws *ws, struct ws_actions *out)
+{
+    if (!ws_can_pay_again(ws)) return;
+    ws->fresh_key = true;
+    begin_validation(ws, out);
+}
 static void on_cancel(struct ws *ws, struct ws_actions *out)
 {
     switch (ws->state) {
-    case WS_COMMIT: case WS_BROADCAST: case WS_DONE: case WS_FAILED: case WS_CANCELLED: case WS_IDLE:
+    case WS_COMMIT: case WS_BROADCAST: case WS_DONE: case WS_PAID: case WS_FAILED: case WS_CANCELLED: case WS_IDLE:
         return;
     default: finish(ws, out, WS_CANCELLED, WS_FAIL_NONE, false);
     }
@@ -305,7 +369,7 @@ static void on_cancel(struct ws *ws, struct ws_actions *out)
 static void on_abort(struct ws *ws, struct ws_actions *out)
 {
     switch (ws->state) {
-    case WS_COMMIT: case WS_BROADCAST: case WS_DONE: case WS_FAILED: case WS_CANCELLED: case WS_IDLE: return;
+    case WS_COMMIT: case WS_BROADCAST: case WS_DONE: case WS_PAID: case WS_FAILED: case WS_CANCELLED: case WS_IDLE: return;
     default: finish(ws, out, WS_FAILED, WS_FAIL_WORKER, true);
     }
 }
@@ -373,6 +437,7 @@ static void step_owner(struct ws *ws, const struct ws_event *ev, struct ws_actio
     case WS_EV_SET_ADDRESS: on_set_address(ws, ev, out); break;
     case WS_EV_SET_MEMO: on_set_memo(ws, ev, out); break;
     case WS_EV_RETRY: on_retry(ws, out); break;
+    case WS_EV_PAY_AGAIN: on_pay_again(ws, out); break;
     case WS_EV_CANCEL: on_cancel(ws, out); break;
     case WS_EV_BACKGROUND: on_background(ws, out); break;
     case WS_EV_ABORT: on_abort(ws, out); break;
@@ -391,7 +456,7 @@ void ws_step(struct ws *ws, const struct ws_event *ev, struct ws_actions *out)
 
 bool ws_terminal(const struct ws *ws)
 {
-    return ws->state == WS_DONE || ws->state == WS_FAILED || ws->state == WS_CANCELLED || ws->state == WS_IDLE;
+    return ws->state == WS_DONE || ws->state == WS_PAID || ws->state == WS_FAILED || ws->state == WS_CANCELLED || ws->state == WS_IDLE;
 }
 bool ws_wallet_exposed(const struct ws *ws) { return ws->unlock_requested; }
 uint32_t ws_serial(const struct ws *ws) { return ws->serial; }
@@ -427,6 +492,6 @@ const char *ws_fail_text(const struct ws *ws)
 const char *ws_state_name(enum ws_state state)
 {
     static const char *const names[] = {"idle", "parsed", "validating", "gate", "waiting", "plan", "review",
-        "auth", "commit", "broadcast", "done", "failed", "cancelled"};
+        "auth", "commit", "broadcast", "done", "failed", "cancelled", "paid"};
     return (unsigned)state < sizeof(names) / sizeof(names[0]) ? names[state] : "unknown";
 }

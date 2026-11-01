@@ -25,6 +25,7 @@
 
 #define WS_KEY_HEX 32
 #define WS_TOKEN_MAX 40
+#define WS_TXID_MAX 65   /* 64 hex characters and a NUL */
 #define WS_REASON_MAX 160
 #define WS_UNLOCK_SECONDS 300u   /* A phone proof takes about 101 s; the lock right after the answer closes the window. */
 #define WS_UNLOCK_WINDOW_MS 300000u
@@ -46,7 +47,8 @@ enum ws_state {
     WS_BROADCAST,   /* Committed; waiting for a private route. */
     WS_DONE,
     WS_FAILED,
-    WS_CANCELLED
+    WS_CANCELLED,
+    WS_PAID         /* The node already holds this payment: it was sent before and is not sent again. */
 };
 
 enum ws_fail {
@@ -107,6 +109,7 @@ enum ws_event_kind {
     WS_EV_SET_AMOUNT,    /* amount_zat. */
     WS_EV_SET_ADDRESS,   /* text. */
     WS_EV_SET_MEMO,      /* text; empty clears. */
+    WS_EV_PAY_AGAIN,     /* Only from WS_PAID: a new payment of the same request under a new random key. */
     WS_EV_RETRY,
     WS_EV_CANCEL,
     WS_EV_BACKGROUND,    /* The app left the foreground. */
@@ -121,9 +124,12 @@ struct ws_event {
     bool ok;
     bool refused;       /* The node released the key: nothing was sent. */
     bool fee_changed;   /* The node refused the stale fee before building: nothing was sent. */
+    bool replayed;      /* ok: the node answered from its record of an earlier commit under this key. */
     enum ws_auth_result auth;
     enum ws_route route;
     struct ws_gate gate;
+    char txid[WS_TXID_MAX];   /* ok: the transaction the node reports. */
+    int64_t wall_s;           /* ok: when the node answered, seconds since the epoch; 0 when the host has no clock. */
     struct ws_plan plan;
     uint64_t amount_zat;
     uint64_t now_ms;
@@ -145,11 +151,24 @@ enum ws_action_kind {
 struct ws_action { enum ws_action_kind kind; uint32_t ticket; };
 struct ws_actions { struct ws_action item[WS_ACTIONS_MAX]; size_t count; };
 
-/* The only outside input the machine has: random bytes for the idempotency key. */
+/* The outside input of the machine: random bytes, and the key a payment request derives. With derive_key set, a
+ * payment request has one key for good: the same address, amount and memo give the same key, so a request that was
+ * sent is recognised and never built twice. A new random key is made only for WS_EV_PAY_AGAIN. Without derive_key
+ * every review gets a random key. */
 struct ws_env {
     enum zapp_pay_network network;
     void *ctx;
     bool (*random)(void *ctx, uint8_t *out, size_t len);
+    bool (*derive_key)(void *ctx, const struct zapp_payment *pay, char out[WS_KEY_HEX + 1]);
+};
+
+/* What the machine remembers of the last payment request it sent, past ws_open: the request key and what became of it. */
+enum ws_sent_kind { WS_SENT_NONE, WS_SENT_COMMITTED, WS_SENT_UNKNOWN };
+struct ws_sent {
+    enum ws_sent_kind kind;
+    char request_key[WS_KEY_HEX + 1];
+    char txid[WS_TXID_MAX];
+    int64_t answered_s;   /* When the node gave the committed answer, seconds since the epoch; 0 when unknown. */
 };
 
 struct ws {
@@ -160,6 +179,10 @@ struct ws {
     struct ws_gate gate;
     struct ws_plan plan;
     char key[WS_KEY_HEX + 1];
+    char request_key[WS_KEY_HEX + 1];   /* The key this request derives; empty when the environment derives none. */
+    bool fresh_key;           /* The owner chose Pay again: this request is sent under a random key. */
+    struct ws_sent sent;      /* Survives ws_open. */
+    char txid[WS_TXID_MAX];   /* The transaction of an earlier payment, while in WS_PAID. */
     char blocked[WS_REASON_MAX];
     uint32_t ticket;
     uint32_t serial;          /* Counts reviews; a new plan is a new serial. */
@@ -193,6 +216,8 @@ uint32_t ws_serial(const struct ws *ws);
 const char *ws_fail_text(const struct ws *ws);
 /* Whether the review can be sent: a plan exists and the private funds cover it. */
 bool ws_can_send(const struct ws *ws);
+/* Whether Pay again may be offered: only on a request the node reports as paid, never while an earlier attempt is unknown. */
+bool ws_can_pay_again(const struct ws *ws);
 /* The text a waiting wallet shows. */
 const char *ws_state_name(enum ws_state state);
 
