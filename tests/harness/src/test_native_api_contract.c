@@ -410,167 +410,199 @@ static bool validate_emitted_next(const struct json_value *root,
                                                sizeof(why));
 }
 
-static bool run_dev_failure_api_fixture(void)
-{
-    bool ok = false;
+struct dev_failure_fixture {
     char home[PATH_MAX], repo[PATH_MAX];
-    char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
-    if (getenv("HOME") && !saved_home)
-        return false;
-    test_make_tmpdir(home, sizeof(home), "native_api", "dev_failure");
-    if (snprintf(repo, sizeof(repo), "%s/repo", home) <= 0 ||
-        mkdir(repo, 0700) != 0 || setenv("HOME", home, 1) != 0)
-        goto cleanup;
+    struct json_value empty, root, ref;
+    char out[16384];
+    enum zcl_command_exit exit_code;
+    size_t len;
+    char capsule[1023];
+    struct zcl_dev_failure_record record;
+};
 
 #define API_REQUIRE(expr)                                                    \
     do {                                                                     \
         if (!(expr)) {                                                       \
             fprintf(stderr, "dev-failure API fixture failed at %s:%d: %s\n", \
                     __FILE__, __LINE__, #expr);                              \
-            goto cleanup;                                                    \
+            return false;                                                    \
         }                                                                    \
     } while (0)
 
-    struct json_value empty;
-    json_init(&empty);
-    json_set_object(&empty);
-    char out[16384];
-    enum zcl_command_exit exit_code = ZCL_COMMAND_EXIT_INTERNAL;
-    size_t len = exec_dev_handler(
-        "dev.diagnose.latest", zcl_native_handle_dev_diagnose_latest, repo,
-        &empty, "normal", out, sizeof(out), &exit_code);
-    API_REQUIRE(len > 0 && len <= 2048 && exit_code == ZCL_COMMAND_EXIT_OK);
-    struct json_value root;
-    json_init(&root);
-    API_REQUIRE(json_read(&root, out, len));
-    const struct json_value *data = json_get(&root, "data");
+static bool dev_failure_phase_empty_store(struct dev_failure_fixture *f)
+{
+    json_init(&f->empty);
+    json_set_object(&f->empty);
+    f->exit_code = ZCL_COMMAND_EXIT_INTERNAL;
+    f->len = exec_dev_handler(
+        "dev.diagnose.latest", zcl_native_handle_dev_diagnose_latest, f->repo,
+        &f->empty, "normal", f->out, sizeof(f->out), &f->exit_code);
+    API_REQUIRE(f->len > 0 && f->len <= 2048 &&
+                f->exit_code == ZCL_COMMAND_EXIT_OK);
+    json_init(&f->root);
+    API_REQUIRE(json_read(&f->root, f->out, f->len));
+    const struct json_value *data = json_get(&f->root, "data");
     API_REQUIRE(data && data->type == JSON_OBJ);
     API_REQUIRE(strcmp(json_get_str(json_get(data, "schema")),
                        "zcl.dev_failure_latest_result.v1") == 0);
     API_REQUIRE(json_get(data, "found") &&
                 !json_get(data, "found")->val.b);
-    API_REQUIRE(json_get(&root, "next")->num_children == 0);
-    json_free(&root);
+    API_REQUIRE(json_get(&f->root, "next")->num_children == 0);
+    json_free(&f->root);
+    return true;
+}
 
+static bool dev_failure_phase_record(struct dev_failure_fixture *f)
+{
     char source[65], mutation[65], execution[65];
     memset(source, 'a', 64);
     memset(mutation, 'b', 64);
     memset(execution, 'c', 64);
     source[64] = mutation[64] = execution[64] = 0;
-    char first_error[511], capsule[1023];
+    char first_error[511];
     first_error[0] = 'x';
     for (size_t i = 1; i < sizeof(first_error) - 1; i++)
         first_error[i] = i % 2 ? '"' : '\\';
     first_error[sizeof(first_error) - 1] = 0;
-    for (size_t i = 0; i < sizeof(capsule) - 1; i++)
-        capsule[i] = i % 2 ? '"' : '\\';
-    capsule[sizeof(capsule) - 1] = 0;
-    struct zcl_dev_failure_record record;
+    for (size_t i = 0; i < sizeof(f->capsule) - 1; i++)
+        f->capsule[i] = i % 2 ? '"' : '\\';
+    f->capsule[sizeof(f->capsule) - 1] = 0;
     char why[192] = {0};
     API_REQUIRE(zcl_dev_failure_record_failure(
-        repo, source, mutation, execution, "verify.compile", first_error,
-        capsule, "dev.ff", &record, why, sizeof(why)));
+        f->repo, source, mutation, execution, "verify.compile", first_error,
+        f->capsule, "dev.ff", &f->record, why, sizeof(why)));
+    return true;
+}
 
-    len = exec_dev_handler(
-        "dev.diagnose.latest", zcl_native_handle_dev_diagnose_latest, repo,
-        &empty, "normal", out, sizeof(out), &exit_code);
-    API_REQUIRE(len > 0 && len <= 2048 && exit_code == ZCL_COMMAND_EXIT_OK);
-    json_init(&root);
-    API_REQUIRE(json_read(&root, out, len));
-    data = json_get(&root, "data");
+static bool dev_failure_phase_latest_found(struct dev_failure_fixture *f)
+{
+    f->len = exec_dev_handler(
+        "dev.diagnose.latest", zcl_native_handle_dev_diagnose_latest, f->repo,
+        &f->empty, "normal", f->out, sizeof(f->out), &f->exit_code);
+    API_REQUIRE(f->len > 0 && f->len <= 2048 &&
+                f->exit_code == ZCL_COMMAND_EXIT_OK);
+    json_init(&f->root);
+    API_REQUIRE(json_read(&f->root, f->out, f->len));
+    const struct json_value *data = json_get(&f->root, "data");
     API_REQUIRE(data && json_get(data, "found")->val.b);
     API_REQUIRE(strcmp(json_get_str(json_get(data, "failure_id")),
-                       record.failure_id) == 0);
-    API_REQUIRE(validate_emitted_next(&root, 0, "dev.diagnose.show"));
-    const struct json_value *next = json_get(&root, "next");
+                       f->record.failure_id) == 0);
+    API_REQUIRE(validate_emitted_next(&f->root, 0, "dev.diagnose.show"));
+    const struct json_value *next = json_get(&f->root, "next");
     const struct json_value *next_input =
         json_get(&next->children[0], "input");
     API_REQUIRE(strcmp(json_get_str(json_get(next_input, "failure_id")),
-                       record.failure_id) == 0);
-    json_free(&root);
+                       f->record.failure_id) == 0);
+    json_free(&f->root);
+    return true;
+}
 
-    struct json_value ref;
-    json_init(&ref);
-    json_set_object(&ref);
-    API_REQUIRE(json_push_kv_str(&ref, "failure_id", record.failure_id));
-    len = exec_dev_handler(
-        "dev.diagnose.show", zcl_native_handle_dev_diagnose_show, repo,
-        &ref, "summary", out, sizeof(out), &exit_code);
-    API_REQUIRE(len > 0 && len <= 2048 && exit_code == ZCL_COMMAND_EXIT_OK);
-    json_init(&root);
-    API_REQUIRE(json_read(&root, out, len));
-    data = json_get(&root, "data");
+static bool dev_failure_phase_show_summary(struct dev_failure_fixture *f)
+{
+    json_init(&f->ref);
+    json_set_object(&f->ref);
+    API_REQUIRE(json_push_kv_str(&f->ref, "failure_id", f->record.failure_id));
+    f->len = exec_dev_handler(
+        "dev.diagnose.show", zcl_native_handle_dev_diagnose_show, f->repo,
+        &f->ref, "summary", f->out, sizeof(f->out), &f->exit_code);
+    API_REQUIRE(f->len > 0 && f->len <= 2048 &&
+                f->exit_code == ZCL_COMMAND_EXIT_OK);
+    json_init(&f->root);
+    API_REQUIRE(json_read(&f->root, f->out, f->len));
+    const struct json_value *data = json_get(&f->root, "data");
     API_REQUIRE(data && strcmp(json_get_str(json_get(data, "schema")),
                                "zcl.dev_failure_show.v1") == 0);
     API_REQUIRE(!json_get(data, "record_sha3"));
     API_REQUIRE(!json_get(data, "failure_capsule"));
-    API_REQUIRE(validate_emitted_next(&root, 0, "dev.ff"));
-    json_free(&root);
+    API_REQUIRE(validate_emitted_next(&f->root, 0, "dev.ff"));
+    json_free(&f->root);
+    return true;
+}
 
-    len = exec_dev_handler(
-        "dev.diagnose.show", zcl_native_handle_dev_diagnose_show, repo,
-        &ref, "normal", out, sizeof(out), &exit_code);
+static bool dev_failure_phase_show_normal(struct dev_failure_fixture *f)
+{
+    f->len = exec_dev_handler(
+        "dev.diagnose.show", zcl_native_handle_dev_diagnose_show, f->repo,
+        &f->ref, "normal", f->out, sizeof(f->out), &f->exit_code);
     /* Response size bound, including the per-command latency fields
      * (budget_ms/elapsed_ms/budget_exceeded, ~55 bytes) in every envelope. */
-    API_REQUIRE(len > 0 && len <= 2144 && exit_code == ZCL_COMMAND_EXIT_OK);
-    json_init(&root);
-    API_REQUIRE(json_read(&root, out, len));
-    data = json_get(&root, "data");
+    API_REQUIRE(f->len > 0 && f->len <= 2144 &&
+                f->exit_code == ZCL_COMMAND_EXIT_OK);
+    json_init(&f->root);
+    API_REQUIRE(json_read(&f->root, f->out, f->len));
+    const struct json_value *data = json_get(&f->root, "data");
     API_REQUIRE(json_get(data, "record_sha3") != NULL);
     API_REQUIRE(json_get(data, "first_source_mutation_sha256") != NULL);
     API_REQUIRE(json_get(data, "first_execution_id_sha3") != NULL);
     API_REQUIRE(json_get(data, "capsule_available")->val.b);
     API_REQUIRE(!json_get(data, "failure_capsule"));
-    json_free(&root);
+    json_free(&f->root);
+    return true;
+}
 
-    len = exec_dev_handler(
-        "dev.diagnose.show", zcl_native_handle_dev_diagnose_show, repo,
-        &ref, "full", out, sizeof(out), &exit_code);
-    API_REQUIRE(len > 0 && len <= 6144 && exit_code == ZCL_COMMAND_EXIT_OK);
-    json_init(&root);
-    API_REQUIRE(json_read(&root, out, len));
-    data = json_get(&root, "data");
+static bool dev_failure_phase_show_full(struct dev_failure_fixture *f)
+{
+    f->len = exec_dev_handler(
+        "dev.diagnose.show", zcl_native_handle_dev_diagnose_show, f->repo,
+        &f->ref, "full", f->out, sizeof(f->out), &f->exit_code);
+    API_REQUIRE(f->len > 0 && f->len <= 6144 &&
+                f->exit_code == ZCL_COMMAND_EXIT_OK);
+    json_init(&f->root);
+    API_REQUIRE(json_read(&f->root, f->out, f->len));
+    const struct json_value *data = json_get(&f->root, "data");
     API_REQUIRE(strcmp(json_get_str(json_get(data, "failure_capsule")),
-                       capsule) == 0);
+                       f->capsule) == 0);
     API_REQUIRE(strcmp(json_get_str(json_get(data, "retry_command")),
                        "dev.ff") == 0);
-    json_free(&root);
+    json_free(&f->root);
+    return true;
+}
 
+static bool dev_failure_phase_uppercase_id(struct dev_failure_fixture *f)
+{
     char uppercase[65];
     memset(uppercase, 'A', 64);
     uppercase[64] = 0;
-    json_free(&ref);
-    json_init(&ref);
-    json_set_object(&ref);
-    API_REQUIRE(json_push_kv_str(&ref, "failure_id", uppercase));
-    len = exec_dev_handler(
-        "dev.diagnose.show", zcl_native_handle_dev_diagnose_show, repo,
-        &ref, "normal", out, sizeof(out), &exit_code);
-    API_REQUIRE(len > 0 && exit_code == ZCL_COMMAND_EXIT_INVALID);
-    API_REQUIRE(strstr(out, "\"code\":\"INVALID_FAILURE_ID\"") != NULL);
+    json_free(&f->ref);
+    json_init(&f->ref);
+    json_set_object(&f->ref);
+    API_REQUIRE(json_push_kv_str(&f->ref, "failure_id", uppercase));
+    f->len = exec_dev_handler(
+        "dev.diagnose.show", zcl_native_handle_dev_diagnose_show, f->repo,
+        &f->ref, "normal", f->out, sizeof(f->out), &f->exit_code);
+    API_REQUIRE(f->len > 0 && f->exit_code == ZCL_COMMAND_EXIT_INVALID);
+    API_REQUIRE(strstr(f->out, "\"code\":\"INVALID_FAILURE_ID\"") != NULL);
+    return true;
+}
 
+static bool dev_failure_phase_missing_id(struct dev_failure_fixture *f)
+{
     char missing[65];
     memset(missing, 'f', 64);
     missing[64] = 0;
-    json_free(&ref);
-    json_init(&ref);
-    json_set_object(&ref);
-    API_REQUIRE(json_push_kv_str(&ref, "failure_id", missing));
-    len = exec_dev_handler(
-        "dev.diagnose.show", zcl_native_handle_dev_diagnose_show, repo,
-        &ref, "normal", out, sizeof(out), &exit_code);
-    API_REQUIRE(len > 0 && exit_code == ZCL_COMMAND_EXIT_FAILED);
-    API_REQUIRE(strstr(out, "\"code\":\"FAILURE_NOT_FOUND\"") != NULL);
-    json_init(&root);
-    API_REQUIRE(json_read(&root, out, len));
-    API_REQUIRE(validate_emitted_next(&root, 0, "dev.diagnose.latest"));
-    json_free(&root);
+    json_free(&f->ref);
+    json_init(&f->ref);
+    json_set_object(&f->ref);
+    API_REQUIRE(json_push_kv_str(&f->ref, "failure_id", missing));
+    f->len = exec_dev_handler(
+        "dev.diagnose.show", zcl_native_handle_dev_diagnose_show, f->repo,
+        &f->ref, "normal", f->out, sizeof(f->out), &f->exit_code);
+    API_REQUIRE(f->len > 0 && f->exit_code == ZCL_COMMAND_EXIT_FAILED);
+    API_REQUIRE(strstr(f->out, "\"code\":\"FAILURE_NOT_FOUND\"") != NULL);
+    json_init(&f->root);
+    API_REQUIRE(json_read(&f->root, f->out, f->len));
+    API_REQUIRE(validate_emitted_next(&f->root, 0, "dev.diagnose.latest"));
+    json_free(&f->root);
+    return true;
+}
 
+static bool dev_failure_phase_corrupt_store(struct dev_failure_fixture *f)
+{
     char latest_path[PATH_MAX];
     API_REQUIRE(snprintf(
         latest_path, sizeof(latest_path),
         "%s/.local/state/zclassic23-dev/workspaces/%s/latest-failure.json",
-        home, record.workspace_id) > 0);
+        f->home, f->record.workspace_id) > 0);
     int fd = open(latest_path, O_WRONLY | O_CLOEXEC);
 #if defined(_WIN32)
     /* A real file fd: the TU-wide close macro targets sockets. */
@@ -578,15 +610,49 @@ static bool run_dev_failure_api_fixture(void)
 #else
     API_REQUIRE(fd >= 0 && pwrite(fd, "X", 1, 0) == 1 && close(fd) == 0);
 #endif
-    len = exec_dev_handler(
-        "dev.diagnose.latest", zcl_native_handle_dev_diagnose_latest, repo,
-        &empty, "normal", out, sizeof(out), &exit_code);
-    API_REQUIRE(len > 0 && exit_code == ZCL_COMMAND_EXIT_INTERNAL);
-    API_REQUIRE(strstr(out, "\"code\":\"FAILURE_STORE_INVALID\"") != NULL);
+    f->len = exec_dev_handler(
+        "dev.diagnose.latest", zcl_native_handle_dev_diagnose_latest, f->repo,
+        &f->empty, "normal", f->out, sizeof(f->out), &f->exit_code);
+    API_REQUIRE(f->len > 0 && f->exit_code == ZCL_COMMAND_EXIT_INTERNAL);
+    API_REQUIRE(strstr(f->out, "\"code\":\"FAILURE_STORE_INVALID\"") != NULL);
+    json_free(&f->ref);
+    json_free(&f->empty);
+    return true;
+}
 
-    json_free(&ref);
-    json_free(&empty);
-    ok = true;
+#undef API_REQUIRE
+
+static bool dev_failure_phases_show(struct dev_failure_fixture *f)
+{
+    return dev_failure_phase_show_summary(f) &&
+           dev_failure_phase_show_normal(f) &&
+           dev_failure_phase_show_full(f);
+}
+
+static bool dev_failure_phases_run(struct dev_failure_fixture *f)
+{
+    return dev_failure_phase_empty_store(f) &&
+           dev_failure_phase_record(f) &&
+           dev_failure_phase_latest_found(f) &&
+           dev_failure_phases_show(f) &&
+           dev_failure_phase_uppercase_id(f) &&
+           dev_failure_phase_missing_id(f) &&
+           dev_failure_phase_corrupt_store(f);
+}
+
+static bool run_dev_failure_api_fixture(void)
+{
+    bool ok = false;
+    struct dev_failure_fixture f;
+    char *saved_home = getenv("HOME") ? strdup(getenv("HOME")) : NULL;
+    if (getenv("HOME") && !saved_home)
+        return false;
+    test_make_tmpdir(f.home, sizeof(f.home), "native_api", "dev_failure");
+    if (snprintf(f.repo, sizeof(f.repo), "%s/repo", f.home) <= 0 ||
+        mkdir(f.repo, 0700) != 0 || setenv("HOME", f.home, 1) != 0)
+        goto cleanup;
+
+    ok = dev_failure_phases_run(&f);
 
 cleanup:
     if (saved_home) {
@@ -594,8 +660,7 @@ cleanup:
         free(saved_home);
     } else
         (void)unsetenv("HOME");
-    test_rm_rf_recursive(home);
-#undef API_REQUIRE
+    test_rm_rf_recursive(f.home);
     return ok;
 }
 
