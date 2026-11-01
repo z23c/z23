@@ -628,7 +628,9 @@ int sp_analyze(struct sp_file *f, const char *text, size_t n)
     sp_logs(f);
     sp_includes(f);
     sp_header(f, text, n);
+    fprintf(stderr, "DBG before name_comments cm=%zu nspan=%zu\n", f->cm.n, f->nspan);
     sp_name_comments(f);
+    fprintf(stderr, "DBG after name_comments\n");
     return f->err || f->cm.err || f->lg.err || f->inc.err;
 }
 
