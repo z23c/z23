@@ -297,7 +297,7 @@ int t_boot_shutdown_connman_holders_stop_first(void)
             buf, "static bool shutdown_quiesce_network_and_flush_coins(",
             &q_end);
         char *drain = function_body(
-            buf, "static void shutdown_stop_runtime_and_drain_workers(",
+            buf, "static bool shutdown_stop_runtime_and_drain_workers(",
             &d_end);
         char *persist = function_body(
             buf, "static bool shutdown_persist_runtime_state(", &p_end);

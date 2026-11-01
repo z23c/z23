@@ -268,16 +268,6 @@ static bool shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
      * live; otherwise a periodic health callback can race the DB close below
      * and dereference closed runtime state. */
     health_stop();
-    /* The sweeper was the last periodic node_health_collect caller (RPC and
-     * diagnostics stopped earlier). Stop the chain-evidence maintenance
-     * helper it fed. A run parked behind node.db or CSR still holds raw
-     * pointers to both, so a false here keeps them open downstream. */
-    bool maint_drained = chain_evidence_maintain_stop(SHUTDOWN_CEC_MAINT_WAIT_MS);
-    if (!maint_drained)
-        fprintf(stderr,
-                "[shutdown] chain-evidence maintenance run still parked after "
-                "%d ms; node.db and owned state retained\n",
-                SHUTDOWN_CEC_MAINT_WAIT_MS);
     /* Stop + join the self-heal condition runner FIRST, while main_state and
      * the progress store are still live: the runner dereferences both inside a
      * condition tick, so it must never outlive them (they are freed in
@@ -285,6 +275,17 @@ static bool shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
      * network-quiesce stage (before connman_free); this idempotent call only
      * covers paths that skip that stage. */
     self_heal_stop();
+    /* The sweeper (health_stop above) was the last periodic
+     * node_health_collect caller (RPC and diagnostics stopped earlier). Stop
+     * the chain-evidence maintenance helper it fed. A run parked behind
+     * node.db or CSR still holds raw pointers to both, so a false here keeps
+     * them open downstream. */
+    bool maint_drained = chain_evidence_maintain_stop(SHUTDOWN_CEC_MAINT_WAIT_MS);
+    if (!maint_drained)
+        fprintf(stderr,
+                "[shutdown] chain-evidence maintenance run still parked after "
+                "%d ms; node.db and owned state retained\n",
+                SHUTDOWN_CEC_MAINT_WAIT_MS);
     zcl_service_kernel_stop_all(&svc->runtime_kernel);
     /* The base service kernel currently owns mempool_limits. Its stop hook is
      * the only authority that sets zcl_mempool_lim's stop token, so it must run
