@@ -15,6 +15,7 @@
 #include "validation/chainstate.h"
 #include "validation/connect_block.h"
 #include "chain/chain.h"
+#include "chain/chainparams.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
 #include "storage/disk_block_io.h"
@@ -1528,7 +1529,16 @@ static int ndc_check_shielded_values(int64_t balance, const char *label)
  * tree. The walk must not append their outputs to it, and a persisted copy
  * that disagrees with its header root must be replaced from the reducer
  * frontier or left alone, never extended. */
-enum { NDC_SAP_N = 4 };
+/* Fixture heights are NDC_SAP_OFF + 1 .. NDC_SAP_OFF + NDC_SAP_N on the test
+ * network, whose Sapling activation is NDC_SAP_OFF. */
+enum { NDC_SAP_N = 4, NDC_SAP_OFF = 20 };
+
+enum ndc_sap_mutation { NDC_MUT_NONE, NDC_MUT_ZERO_ROOT_3, NDC_MUT_NO_SLOT_3 };
+
+static int64_t ndc_sap_h(int64_t local)
+{
+    return local < 0 ? local : local + NDC_SAP_OFF;
+}
 
 struct ndc_sap_fix {
     char dir[256];
@@ -1583,9 +1593,10 @@ static bool ndc_sap_make_block(struct block *b, int h, const struct uint256 *cm)
 }
 
 /* Heights 1..4; only height 2 carries a Sapling output. */
-static bool ndc_sap_build(struct ndc_sap_fix *f)
+static bool ndc_sap_build(struct ndc_sap_fix *f, const char *label,
+                          enum ndc_sap_mutation mut)
 {
-    test_make_tmpdir(f->dir, sizeof(f->dir), "node_db_catchup", "sapling");
+    test_make_tmpdir(f->dir, sizeof(f->dir), "node_db_catchup", label);
     char blocks[512];
     snprintf(blocks, sizeof(blocks), "%s/blocks", f->dir);
     mkdir(blocks, 0755);
@@ -1610,12 +1621,16 @@ static bool ndc_sap_build(struct ndc_sap_fix *f)
     active_chain_init(&f->ac);
     for (int h = 1; h <= NDC_SAP_N && f->built; h++) {
         memset(&f->slots[h], 0, sizeof(f->slots[h]));
-        f->slots[h].nHeight = h;
+        f->slots[h].nHeight = NDC_SAP_OFF + h;
         f->slots[h].nStatus = BLOCK_HAVE_DATA;
         f->slots[h].nFile = pos[h].nFile;
         f->slots[h].nDataPos = pos[h].nPos;
         f->slots[h].phashBlock = &f->hashes[h];
         f->slots[h].hashFinalSaplingRoot = f->roots[h];
+        if (mut == NDC_MUT_ZERO_ROOT_3 && h == 3)
+            memset(f->slots[h].hashFinalSaplingRoot.data, 0, 32);
+        if (mut == NDC_MUT_NO_SLOT_3 && h == 3)
+            continue;
         f->built = active_chain_install_tip_slot(&f->ac, &f->slots[h]);
     }
     return f->built;
@@ -1670,9 +1685,12 @@ static bool ndc_sap_seed_case(struct ndc_sap_fix *f, struct node_db *ndb,
     struct uint256 wrong[2] = {f->cm_real, f->cm_stray};
     switch (c->seed) {
     case NDC_SEED_NONE: return true;
-    case NDC_SEED_EMPTY: return ndc_sap_seed(ndb, NULL, 0, c->seed_height);
-    case NDC_SEED_GOOD: return ndc_sap_seed(ndb, &f->cm_real, 1, c->seed_height);
-    case NDC_SEED_WRONG: return ndc_sap_seed(ndb, wrong, 2, c->seed_height);
+    case NDC_SEED_EMPTY:
+        return ndc_sap_seed(ndb, NULL, 0, ndc_sap_h(c->seed_height));
+    case NDC_SEED_GOOD:
+        return ndc_sap_seed(ndb, &f->cm_real, 1, ndc_sap_h(c->seed_height));
+    case NDC_SEED_WRONG:
+        return ndc_sap_seed(ndb, wrong, 2, ndc_sap_h(c->seed_height));
     }
     return false;
 }
@@ -1694,7 +1712,8 @@ static bool ndc_sap_open_store(struct ndc_sap_fix *f, const char *name,
     struct incremental_merkle_tree good;
     sapling_tree_init(&good);
     incremental_tree_append(&good, &f->cm_real);
-    return anchor_kv_add_tree(db, ANCHOR_POOL_SAPLING, &good, 2);
+    return anchor_kv_add_tree(db, ANCHOR_POOL_SAPLING, &good,
+                              ndc_sap_h(2));
 }
 
 static int ndc_sap_verify(const struct ndc_sap_fix *f, const struct ndc_sap_case *c,
@@ -1715,7 +1734,7 @@ static int ndc_sap_verify(const struct ndc_sap_fix *f, const struct ndc_sap_case
     NDC_CHECK("sapling tree size is the true size",
               read && size == (size_t)c->want_size);
     NDC_CHECK("sapling tree height is the walk height",
-              read && height == c->want_height);
+              read && height == ndc_sap_h(c->want_height));
     if (c->want_size == 1)
         NDC_CHECK("sapling tree root equals the header root",
                   read && memcmp(root.data,
@@ -1732,7 +1751,8 @@ static int ndc_sap_run(struct ndc_sap_fix *f, const struct ndc_sap_case *c)
     bool store = ndc_sap_open_store(f, c->name, c->anchor);
     bool seeded = opened && store && ndc_sap_seed_case(f, &ndb, c) &&
         (c->cursor == 0 ||
-         node_db_sync_set_tip(&ndb, f->hashes[c->cursor].data, c->cursor));
+         node_db_sync_set_tip(&ndb, f->hashes[c->cursor].data,
+                              (int)ndc_sap_h(c->cursor)));
     int rc = seeded ? node_db_catchup_service_run(&ndb, &f->ac, NULL, f->dir)
                     : -99;
     int failures = ndc_sap_verify(f, c, &ndb, seeded, rc);
@@ -1743,11 +1763,36 @@ static int ndc_sap_run(struct ndc_sap_fix *f, const struct ndc_sap_case *c)
     return failures;
 }
 
+/* An empty tree is the right tree only before Sapling activates. Past it, a
+ * parent header without a root (zeroed, or absent from the chain) is damage,
+ * not the pre-Sapling state: the walk must not start a tree there. */
+static int ndc_check_sapling_empty_tree_needs_activation(void)
+{
+    static const struct ndc_sap_case c = {
+        "empty_no_parent_root", NDC_SEED_NONE, -1, false, 3, -1, -1};
+    static const enum ndc_sap_mutation muts[] = {
+        NDC_MUT_ZERO_ROOT_3, NDC_MUT_NO_SLOT_3};
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(muts) / sizeof(muts[0]); i++) {
+        struct ndc_sap_fix f = {0};
+        bool built = ndc_sap_build(&f, i == 0 ? "zeroroot" : "noslot",
+                                   muts[i]);
+        NDC_CHECK("sapling variant fixture builds", built);
+        if (built)
+            failures += ndc_sap_run(&f, &c);
+        active_chain_free(&f.ac);
+        test_cleanup_tmpdir(f.dir);
+    }
+    return failures;
+}
+
 static int ndc_check_sapling_tree_not_extended_by_old_heights(void)
 {
     int failures = 0;
     struct ndc_sap_fix f = {0};
-    NDC_CHECK("sapling fixture builds", ndc_sap_build(&f));
+    chain_params_select(CHAIN_TESTNET); /* Sapling active from NDC_SAP_OFF */
+    NDC_CHECK("sapling fixture builds",
+              ndc_sap_build(&f, "sapling", NDC_MUT_NONE));
     static const struct ndc_sap_case cases[] = {
         /* A correct tip-sized tree; the walk revisits heights 1..4. */
         {"backfill", NDC_SEED_GOOD, 4, false, 0, 1, 4},
@@ -1767,6 +1812,8 @@ static int ndc_check_sapling_tree_not_extended_by_old_heights(void)
             failures += ndc_sap_run(&f, &cases[i]);
     active_chain_free(&f.ac);
     test_cleanup_tmpdir(f.dir);
+    failures += ndc_check_sapling_empty_tree_needs_activation();
+    chain_params_select(CHAIN_MAIN);
     return failures;
 }
 

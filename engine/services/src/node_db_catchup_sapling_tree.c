@@ -23,6 +23,8 @@
 #include "node_db_catchup_internal.h"
 
 #include "chain/chain.h"
+#include "chain/chainparams.h"
+#include "consensus/params.h"
 #include "core/serialize.h"
 #include "models/database.h"
 #include "sapling/incremental_merkle_tree.h"
@@ -52,6 +54,17 @@ static bool header_root_for(const struct active_chain *chain, int64_t h,
         return false; // raw-return-ok:absent root is a normal pre-Sapling state
     *root = bi->hashFinalSaplingRoot;
     return true;
+}
+
+/* True when h precedes the network Sapling activation: no commitment can
+ * exist yet, so an empty tree is the correct tree there. A missing header
+ * root proves nothing; only the activation height does. */
+static bool before_sapling(int64_t h)
+{
+    const struct chain_params *cp = chain_params_get();
+    return cp && h >= 0 && h <= INT32_MAX &&
+           !consensus_network_upgrade_active(&cp->consensus, (int)h,
+                                             UPGRADE_SAPLING);
 }
 
 static const struct uint256 *tree_root(struct catchup_sapling_tree *ct)
@@ -131,11 +144,10 @@ void catchup_sapling_tree_load(struct node_db *ndb,
     if (!node_db_state_get_int(ndb, "sapling_tree_rebuild_height",
                                &ct->height))
         ct->height = -1;
-    struct uint256 unused;
     if (parsed && ct->height >= 0 &&
         (root_matches_header(ct, chain, ct->height) ||
          (incremental_tree_size(&ct->tree) == 0 &&
-          !header_root_for(chain, ct->height, &unused)))) {
+          before_sapling(ct->height)))) {
         ct->usable = true;
         return;
     }
@@ -156,14 +168,13 @@ bool catchup_sapling_tree_prepare(struct catchup_sapling_tree *ct,
                                   const struct active_chain *chain, int h)
 {
     const int64_t prev = (int64_t)h - 1;
-    struct uint256 unused;
     if (ct->height >= h)
         return false; // raw-return-ok:tree already covers h
     if (ct->usable) {
         if (ct->height == prev)
             return true;
         if (incremental_tree_size(&ct->tree) == 0 &&
-            !header_root_for(chain, prev, &unused))
+            before_sapling(prev))
             return true; /* before Sapling: nothing to append */
         if (root_matches_header(ct, chain, prev)) {
             ct->height = prev;
