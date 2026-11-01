@@ -503,6 +503,15 @@ static int case_read_leaf(struct ms *m)
         ASSERT(ms_tool(m, 7, "z23_describe", "{\"path\":\"no.such.leaf\"}"));
         ASSERT(has(m, "UNKNOWN_COMMAND"));
         ASSERT(has(m, "\"isError\":true"));
+        ASSERT(ms_tool(m, 49, "z23_run", "{\"path\":\"core.status.bref\"}"));
+        ASSERT(has(m, "UNKNOWN_COMMAND"));
+        ASSERT(has(m, "did_you_mean\\\":[\\\"core.status.brief\\\""));
+        ASSERT(ms_tool(m, 50, "z23_run", "{\"command\":\"core.status.brief\"}"));
+        ASSERT(has(m, "expected key path; got command"));
+        ASSERT(ms_tool(m, 51, "z23_describe", "{\"command\":\"core.status.brief\"}"));
+        ASSERT(has(m, "expected key path; got command"));
+        ASSERT(ms_tool(m, 52, "z23_describe", "{\"path\":\"core.status.bref\"}"));
+        ASSERT(has(m, "did_you_mean\\\":[\\\"core.status.brief\\\""));
     } TEST_END
     return failures;
 }
@@ -1509,6 +1518,65 @@ static int case_units(void)
     return failures;
 }
 
+/* Project one reply through mcp_select_reply; true when it projected and the
+ * whole projection fits out. */
+static bool sm_project(const char *reply, const char *select, char *out,
+                       size_t cap)
+{
+    struct json_value sel;
+    struct mcp_buf b;
+    bool ok;
+    json_init(&sel);
+    mcp_buf_init(&b);
+    ok = json_read(&sel, select, strlen(select)) &&
+         mcp_select_reply(&b, reply, strlen(reply), &sel) && b.len < cap;
+    if (ok)
+        memcpy(out, b.p, b.len + 1);
+    mcp_buf_free(&b);
+    json_free(&sel);
+    return ok;
+}
+
+static int case_select_missing(void)
+{
+    int failures = 0;
+    char out[2048], reply[2048];
+    TEST_CASE("select_missing names the keys above an unresolved path; resolved selects are unchanged") {
+        ASSERT(sm_project("{\"ok\":true,\"status\":\"ok\",\"data\":{\"steer\":1,"
+                          "\"in_flight\":2}}",
+                          "[\"data.rows.*.seq\"]", out, sizeof(out)));
+        ASSERT(strcmp(out,
+                      "{\"ok\":true,\"status\":\"ok\",\"select\":"
+                      "{\"data.rows.*.seq\":null},\"select_missing\":"
+                      "{\"data.rows.*.seq\":{\"resolved\":\"data\","
+                      "\"keys\":[\"steer\",\"in_flight\"]}}}") == 0);
+        ASSERT(sm_project("{\"ok\":true,\"status\":\"ok\",\"data\":{\"steer\":1}}",
+                          "[\"data.steer\",\"status\"]", out, sizeof(out)));
+        ASSERT(strcmp(out,
+                      "{\"ok\":true,\"status\":\"ok\",\"select\":"
+                      "{\"data.steer\":1,\"status\":\"ok\"}}") == 0);
+        ASSERT(sm_project("{\"ok\":true,\"status\":\"ok\",\"data\":{\"rows\":"
+                          "[{\"a\":1},{\"a\":2},{\"a\":3}]}}",
+                          "[\"data.rows.*.seq\"]", out, sizeof(out)));
+        ASSERT(strcmp(out,
+                      "{\"ok\":true,\"status\":\"ok\",\"select\":"
+                      "{\"data.rows.*.seq\":[null,null,null]},"
+                      "\"select_missing\":{\"data.rows.*.seq\":"
+                      "{\"resolved\":\"data.rows\",\"length\":3}}}") == 0);
+        size_t at = (size_t)snprintf(reply, sizeof(reply),
+                                     "{\"ok\":true,\"status\":\"ok\",\"data\":{");
+        for (int i = 0; i < 40; i++)
+            at += (size_t)snprintf(reply + at, sizeof(reply) - at, "%s\"k%02d\":1",
+                                   i ? "," : "", i);
+        (void)snprintf(reply + at, sizeof(reply) - at, "}}");
+        ASSERT(sm_project(reply, "[\"data.rows.*.seq\"]", out, sizeof(out)));
+        ASSERT(strstr(out, "\"keys\":[\"k00\",\"k01\"") != NULL);
+        ASSERT(strstr(out, "\"k31\",\"...\"]") != NULL);
+        ASSERT(strstr(out, "\"k32\"") == NULL);
+    } TEST_END
+    return failures;
+}
+
 /* The policy gate on read-effect leaves, called directly (no server). */
 static int case_policy_reads(void)
 {
@@ -1549,6 +1617,7 @@ int test_mcp_serve(void)
 #else
     char home[PATH_MAX], checkout[PATH_MAX + 16], head[128];
     failures += case_units();
+    failures += case_select_missing();
     failures += case_policy_reads();
     failures += case_unit_version();
     failures += case_policy_mutations();
