@@ -185,69 +185,89 @@ void connect_block_shielded_values(const struct block *block,
         *sapling = sapling_value;
 }
 
-bool connect_block(const struct block *block,
-                   struct validation_state *state,
-                   struct block_index *pindex,
-                   struct coins_view_cache *view,
-                   const struct chain_params *params,
-                   bool just_check)
-{
-    /* Use pre-computed hash from block_index. */
-    struct uint256 block_hash;
-    if (pindex->phashBlock)
-        block_hash = *pindex->phashBlock;
-    else
-        block_header_get_hash(&block->header, &block_hash);
+/* Collected inputs for one block's parallel script verification. */
+struct connect_script_work {
+    struct script_check *checks;
+    void **check_ptrs;
+    struct precomputed_tx_data *txdatas;
+    size_t checks_cap;
+    size_t txdatas_cap;
+    size_t num_checks;
+    size_t num_txdatas;
+};
 
+/* Copy the index hash, or hash the header when the index has none. */
+static void connect_block_load_block_hash(const struct block_index *pindex,
+                                          const struct block *block,
+                                          struct uint256 *block_hash)
+{
+    memset(block_hash, 0, sizeof(*block_hash));
+    /* Use pre-computed hash from block_index. */
+    if (pindex->phashBlock)
+        *block_hash = *pindex->phashBlock;
+    else
+        block_header_get_hash(&block->header, block_hash);
+}
+
+/* Checkpoints and the deferred-proof floor skip PoW and size limits. */
+static bool connect_block_expensive_checks_enabled(
+    const struct chain_params *params,
+    const struct block_index *pindex)
+{
     bool expensive_checks = true;
     if (checkpoint_covers(&params->checkpointData, pindex->nHeight))
         expensive_checks = false;
-    if (g_deferred_proof_validation_below_height >= 0 && pindex->nHeight <= g_deferred_proof_validation_below_height)
+    if (g_deferred_proof_validation_below_height >= 0 &&
+        pindex->nHeight <= g_deferred_proof_validation_below_height)
         expensive_checks = false;
+    return expensive_checks;
+}
 
-    /* Re-validate block. Merkle root is always checked (cheap SHA256d
-     * over txids — catches data corruption even below deferred proof validation).
-     * PoW and size limits gated by expensive_checks. */
-    if (!check_block(block, state, params, expensive_checks,
-                     !just_check, true)) {
-        LOG_FAIL("connect", "check_block failed at height %d",
-                 pindex->nHeight);
+/* Record the genesis hash as the view tip unless this is a dry run. */
+static void connect_block_commit_genesis(struct coins_view_cache *view,
+                                        const struct uint256 *block_hash,
+                                        bool just_check)
+{
+    if (!just_check) {
+        /* Low-level: bypasses csr — `view` here is a stack-local
+         * scratchpad (see process_block.c:817) that wraps coins_tip
+         * as backing. The real tip commit runs in
+         * process_block_commit_tip() → csr_commit_tip() after the flush
+         * policy propagates this view to the global coins_tip. There is
+         * no block_map / active_chain
+         * mutation here; this is a single-field write inside an
+         * in-flight block apply. */
+        coins_view_cache_set_best_block(view, block_hash);
     }
+}
 
-    /* Genesis block: just set best block, no validation needed */
-    if (uint256_cmp(&block_hash, &params->consensus.hashGenesisBlock) == 0) {
-        if (!just_check) {
-            /* Low-level: bypasses csr — `view` here is a stack-local
-             * scratchpad (see process_block.c:817) that wraps coins_tip
-             * as backing. The real tip commit runs in
-             * process_block_commit_tip() → csr_commit_tip() after the flush
-             * policy propagates this view to the global coins_tip. There is
-             * no block_map / active_chain
-             * mutation here; this is a single-field write inside an
-             * in-flight block apply. */
-            coins_view_cache_set_best_block(view, &block_hash);
-        }
-        return true;
-    }
-
-    event_emitf(EV_BLOCK_CONNECT_START, 0,
-                "height=%d ntx=%zu", pindex->nHeight, block->num_vtx);
-
+/* True when the view tip is empty or equals the header's prev block.
+ * On a mismatch, vhex and phex receive the two hashes. */
+static bool connect_block_view_prev_ok(struct coins_view_cache *view,
+                                      const struct block *block,
+                                      char *vhex,
+                                      char *phex)
+{
+    vhex[0] = '\0';
+    phex[0] = '\0';
     /* ── View/prevblock invariant (zclassicd main.cpp:2513) ── */
-    {
-        struct uint256 view_best;
-        coins_view_cache_get_best_block(view, &view_best);
-        if (!uint256_is_null(&view_best) &&
-            uint256_cmp(&block->header.hashPrevBlock, &view_best) != 0) {
-            char vhex[65], phex[65];
-            uint256_get_hex(&view_best, vhex);
-            uint256_get_hex(&block->header.hashPrevBlock, phex);
-            fprintf(stderr, "connect_block: FATAL view/prevblock mismatch "  // obs-ok:helper-context-logged
-                    "h=%d view=%s prev=%s\n", pindex->nHeight, vhex, phex);
-            REJECT_FATAL(state, "connect_block-view-mismatch");
-        }
-    }
+    struct uint256 view_best;
+    coins_view_cache_get_best_block(view, &view_best);
+    if (uint256_is_null(&view_best))
+        return true;
+    if (uint256_cmp(&block->header.hashPrevBlock, &view_best) == 0)
+        return true;
+    uint256_get_hex(&view_best, vhex);
+    uint256_get_hex(&block->header.hashPrevBlock, phex);
+    return false;
+}
 
+/* Propagate Sprout and Sapling pool totals and reject a negative pool. */
+static bool connect_block_apply_shielded_turnstile(
+    const struct block *block,
+    struct block_index *pindex,
+    struct validation_state *state)
+{
     /* ── ZIP-209: Turnstile enforcement ─────────────────────── *
      * Shielded value pools (Sprout and Sapling) must never go negative.
      * This matches zclassicd ConnectBlock lines 2537-2551.
@@ -258,110 +278,118 @@ bool connect_block(const struct block *block,
      * i.e., when every ancestor block's per-block value was computed.
      * If the parent's chain value is unknown (imported from LevelDB where
      * these weren't tracked), skip the check. */
-    if (pindex->pprev) {
-        /* Compute per-block shielded value from transactions */
-        int64_t sprout_value = 0;
-        int64_t sapling_value = 0;
-        connect_block_shielded_values(block, &sprout_value, &sapling_value);
-        pindex->nSproutValue = sprout_value;
-        pindex->has_sprout_value = true;
-        pindex->nSaplingValue = sapling_value;
+    if (!pindex->pprev)
+        return true;
 
-        /* Propagate cumulative chain values only when parent is known */
-        if (pindex->pprev->has_chain_sprout_value) {
-            pindex->nChainSproutValue =
-                pindex->pprev->nChainSproutValue + sprout_value;
-            pindex->has_chain_sprout_value = true;
+    /* Compute per-block shielded value from transactions */
+    int64_t sprout_value = 0;
+    int64_t sapling_value = 0;
+    connect_block_shielded_values(block, &sprout_value, &sapling_value);
+    pindex->nSproutValue = sprout_value;
+    pindex->has_sprout_value = true;
+    pindex->nSaplingValue = sapling_value;
 
-            /* ZIP-209: Sprout pool can't go negative */
-            if (pindex->nChainSproutValue < 0) {
-                return validation_state_dos(state, 100, false,
-                    REJECT_INVALID,
-                    "bad-txns-sprout-turnstile-violation", false, NULL);
-            }
-        }
+    /* Propagate cumulative chain values only when parent is known */
+    if (pindex->pprev->has_chain_sprout_value) {
+        pindex->nChainSproutValue =
+            pindex->pprev->nChainSproutValue + sprout_value;
+        pindex->has_chain_sprout_value = true;
 
-        if (pindex->pprev->has_chain_sapling_value) {
-            pindex->nChainSaplingValue =
-                pindex->pprev->nChainSaplingValue + sapling_value;
-            pindex->has_chain_sapling_value = true;
-
-            /* ZIP-209: Sapling pool can't go negative */
-            if (pindex->nChainSaplingValue < 0) {
-                return validation_state_dos(state, 100, false,
-                    REJECT_INVALID,
-                    "bad-txns-sapling-turnstile-violation", false, NULL);
-            }
-        }
+        /* ZIP-209: Sprout pool can't go negative */
+        if (pindex->nChainSproutValue < 0)
+            return validation_state_dos(state, 100, false,
+                REJECT_INVALID,
+                "bad-txns-sprout-turnstile-violation", false, NULL);
     }
 
-    /* ── BIP30: no overwriting unspent transactions ─────────── *
-     * Skip below deferred proof validation: when re-connecting blocks on top of an
-     * imported UTXO snapshot, the coinbase outputs already exist in the
-     * UTXO set. These blocks were validated by zclassicd — BIP30 is
-     * redundant and would false-positive on the imported coinbases. */
-    bool skip_bip30 = (g_deferred_proof_validation_below_height >= 0 &&
-                       pindex->nHeight <= g_deferred_proof_validation_below_height);
-    for (size_t i = 0; !skip_bip30 && i < block->num_vtx; i++) {
-        if (coins_view_cache_have_coins(view, &block->vtx[i].hash)) {
-            struct coins existing;
-            coins_init(&existing);
-            if (coins_view_cache_get_coins(view, &block->vtx[i].hash,
-                                           &existing)) {
-                if (!coins_is_pruned(&existing)) {
-                    /* Self-write tolerance: when the existing unspent
-                     * coin for one of THIS block's own transactions was
-                     * created at THIS exact height, it is the residue of
-                     * a prior partial apply of the same block (the UTXO
-                     * set landed at H+1 while the tip cursor rewound to
-                     * H — see BOOT_INVARIANTS.md "at-tip kill-9 ordering"
-                     * and the BIP30 self-write wedge). connect_block is
-                     * re-connecting the very block whose outputs are
-                     * already present.
-                     *
-                     * This is NOT a real BIP30 violation: BIP30 forbids a
-                     * DIFFERENT block from overwriting another block's
-                     * still-unspent coinbase. A genuine duplicate would
-                     * carry an existing coin from a DIFFERENT (earlier)
-                     * height. Post-BIP34 every coinbase embeds its own
-                     * height, so duplicate txids across distinct heights
-                     * cannot occur — `existing.height == pindex->nHeight`
-                     * uniquely identifies "the block's own prior write".
-                     *
-                     * Tolerating it lets the validator overwrite the
-                     * stale coins with the freshly-validated ones and
-                     * advance the tip; the full script/proof validation
-                     * below still runs. Without this, a personal-stack
-                     * node that took a kill-9 mid-connect wedges forever
-                     * on its own coins. A partial apply can leave the
-                     * block's NON-coinbase outputs in the set too, so
-                     * every same-height self-write is tolerated, coinbase
-                     * and non-coinbase alike. */
-                    bool own_self_write =
-                        existing.height == pindex->nHeight &&
-                        pindex->nHeight > 0;
-                    if (own_self_write) {
-                        char txid[65];
-                        uint256_get_hex(&block->vtx[i].hash, txid);
-                        fprintf(stderr, // obs-ok:bip30-self-write-heal
-                                "connect_block: tolerating same-height "
-                                "self-write h=%d vtx=%zu txid=%s "
-                                "coinbase=%d (stale local UTXO from prior "
-                                "partial apply, BIP34 height-unique)\n",
-                                pindex->nHeight, i, txid,
-                                (int)existing.is_coinbase);
-                        coins_free(&existing);
-                        continue;
-                    }
-                    coins_free(&existing);
-                    return validation_state_dos(state, 100, false,
-                        REJECT_INVALID, "bad-txns-BIP30", false, NULL);
-                }
-            }
-            coins_free(&existing);
-        }
-    }
+    if (pindex->pprev->has_chain_sapling_value) {
+        pindex->nChainSaplingValue =
+            pindex->pprev->nChainSaplingValue + sapling_value;
+        pindex->has_chain_sapling_value = true;
 
+        /* ZIP-209: Sapling pool can't go negative */
+        if (pindex->nChainSaplingValue < 0)
+            return validation_state_dos(state, 100, false,
+                REJECT_INVALID,
+                "bad-txns-sapling-turnstile-violation", false, NULL);
+    }
+    return true;
+}
+
+/* True when this height is inside the deferred-proof replay window. */
+static bool connect_block_skip_bip30(const struct block_index *pindex)
+{
+    return g_deferred_proof_validation_below_height >= 0 &&
+           pindex->nHeight <= g_deferred_proof_validation_below_height;
+}
+
+/* Next same-height BIP30 self-write (1, coin left allocated), a real
+ * violation (-1, coin freed), or end of scan (0). */
+static int connect_block_next_bip30_self_write(
+    const struct block *block,
+    const struct block_index *pindex,
+    struct coins_view_cache *view,
+    bool skip_bip30,
+    size_t *index,
+    char *txid,
+    struct coins *existing)
+{
+    coins_init(existing);
+    txid[0] = '\0';
+    for (; !skip_bip30 && *index < block->num_vtx; (*index)++) {
+        if (!coins_view_cache_have_coins(view, &block->vtx[*index].hash))
+            continue;
+        coins_init(existing);
+        if (!coins_view_cache_get_coins(view, &block->vtx[*index].hash,
+                                       existing)) {
+            coins_free(existing);
+            continue;
+        }
+        if (coins_is_pruned(existing)) {
+            coins_free(existing);
+            continue;
+        }
+        /* Self-write tolerance: when the existing unspent
+         * coin for one of THIS block's own transactions was
+         * created at THIS exact height, it is the residue of
+         * a prior partial apply of the same block (the UTXO
+         * set landed at H+1 while the tip cursor rewound to
+         * H — see BOOT_INVARIANTS.md "at-tip kill-9 ordering"
+         * and the BIP30 self-write wedge). connect_block is
+         * re-connecting the very block whose outputs are
+         * already present.
+         *
+         * This is NOT a real BIP30 violation: BIP30 forbids a
+         * DIFFERENT block from overwriting another block's
+         * still-unspent coinbase. A genuine duplicate would
+         * carry an existing coin from a DIFFERENT (earlier)
+         * height. Post-BIP34 every coinbase embeds its own
+         * height, so duplicate txids across distinct heights
+         * cannot occur — `existing.height == pindex->nHeight`
+         * uniquely identifies "the block's own prior write".
+         *
+         * Tolerating it lets the validator overwrite the
+         * stale coins with the freshly-validated ones and
+         * advance the tip; the full script/proof validation
+         * below still runs. Without this, a personal-stack
+         * node that took a kill-9 mid-connect wedges forever
+         * on its own coins. A partial apply can leave the
+         * block's NON-coinbase outputs in the set too, so
+         * every same-height self-write is tolerated, coinbase
+         * and non-coinbase alike. */
+        if (existing->height == pindex->nHeight && pindex->nHeight > 0) {
+            uint256_get_hex(&block->vtx[*index].hash, txid);
+            return 1;
+        }
+        coins_free(existing);
+        return -1;
+    }
+    return 0;
+}
+
+/* P2SH | CHECKLOCKTIMEVERIFY, plus CHECKDATASIG_SIGOPS when enforced. */
+static uint32_t connect_block_script_flags(void)
+{
     uint32_t flags = SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_CHECKLOCKTIMEVERIFY;
     /* DEFAULT-OFF parity (-enforce-checkdatasig-sigops). zclassicd ORs
      * SCRIPT_VERIFY_CHECKDATASIG_SIGOPS into ConnectBlock's flags
@@ -372,23 +400,27 @@ bool connect_block(const struct block *block,
     if (atomic_load_explicit(&g_enforce_checkdatasig_sigops,
                              memory_order_relaxed))
         flags |= SCRIPT_VERIFY_CHECKDATASIG_SIGOPS;
+    return flags;
+}
 
-    struct block_undo blockundo;
-    block_undo_init(&blockundo);
-    if (block->num_vtx > 1) {
-        if (!block_undo_alloc(&blockundo, block->num_vtx - 1)) {
-            block_undo_free(&blockundo);
-            LOG_FAIL("connect", "block_undo_alloc failed at height %d ntx=%zu",
-                     pindex->nHeight, block->num_vtx);
-        }
-    }
+/* Init undo storage; allocate one slot per non-coinbase tx. */
+static bool connect_block_prepare_undo(struct block_undo *undo,
+                                      const struct block *block)
+{
+    block_undo_init(undo);
+    if (block->num_vtx <= 1)
+        return true;
+    if (block_undo_alloc(undo, block->num_vtx - 1))
+        return true;
+    block_undo_free(undo);
+    return false;
+}
 
-    uint32_t branch_id = consensus_current_epoch_branch_id(
-        pindex->nHeight, &params->consensus);
-
-    int64_t fees = 0;
-    unsigned int sig_ops = 0;
-
+/* Pre-size and allocate the script-check buffers. False leaves them freed. */
+static bool connect_block_alloc_script_work(const struct block *block,
+                                           struct connect_script_work *work)
+{
+    memset(work, 0, sizeof(*work));
     /* ── Parallel script verification: collection arrays ─── *
      * Phase 1 (in the loop below): gather all script checks.
      * Phase 2 (after the loop): dispatch to workpool.
@@ -406,304 +438,454 @@ bool connect_block(const struct block *block,
      * Fix: pre-scan the block once to get exact upper bounds on
      * num_checks and num_txdatas, then allocate those sizes up
      * front.  No realloc during collection, no dangling pointers. */
-    size_t checks_cap = 0;
-    size_t txdatas_cap = 0;
     for (size_t pi = 0; pi < block->num_vtx; pi++) {
         const struct transaction *ptx = &block->vtx[pi];
         if (transaction_is_coinbase(ptx))
             continue;
-        txdatas_cap++;
-        checks_cap += ptx->num_vin;
+        work->txdatas_cap++;
+        work->checks_cap += ptx->num_vin;
     }
     /* Defensive: at least one slot so NULL-alloc branches
      * stay simple; bump cap if caller wants extra. */
-    if (checks_cap == 0) checks_cap = 1;
-    if (txdatas_cap == 0) txdatas_cap = 1;
+    if (work->checks_cap == 0) work->checks_cap = 1;
+    if (work->txdatas_cap == 0) work->txdatas_cap = 1;
 
-    struct script_check *checks =
-        zcl_malloc(checks_cap * sizeof(*checks), "connect_checks");
-    void **check_ptrs =
-        zcl_malloc(checks_cap * sizeof(*check_ptrs), "connect_check_ptrs");
-    struct precomputed_tx_data *txdatas =
-        zcl_malloc(txdatas_cap * sizeof(*txdatas), "connect_txdatas");
-    if (!checks || !check_ptrs || !txdatas) {
-        free(checks);
-        free(check_ptrs);
-        free(txdatas);
-        block_undo_free(&blockundo);
-        REJECT_FATAL(state, "out-of-memory");
+    work->checks = zcl_malloc(work->checks_cap * sizeof(*work->checks),
+                              "connect_checks");
+    work->check_ptrs = zcl_malloc(
+        work->checks_cap * sizeof(*work->check_ptrs), "connect_check_ptrs");
+    work->txdatas = zcl_malloc(work->txdatas_cap * sizeof(*work->txdatas),
+                               "connect_txdatas");
+    if (!work->checks || !work->check_ptrs || !work->txdatas) {
+        free(work->checks);
+        free(work->check_ptrs);
+        free(work->txdatas);
+        work->checks = NULL;
+        work->check_ptrs = NULL;
+        work->txdatas = NULL;
+        return false;
     }
-    size_t num_checks = 0;
-    size_t num_txdatas = 0;
+    return true;
+}
 
-    for (size_t i = 0; i < block->num_vtx; i++) {
-        const struct transaction *tx = &block->vtx[i];
+/* Free script-check buffers and undo, then record a consensus reject. */
+static int connect_block_reject_cleaned(struct validation_state *state,
+                                       struct block_undo *undo,
+                                       struct connect_script_work *work,
+                                       const char *reason,
+                                       bool corrupt,
+                                       bool fatal)
+{
+    free(work->checks);
+    free(work->check_ptrs);
+    free(work->txdatas);
+    work->checks = NULL;
+    work->check_ptrs = NULL;
+    work->txdatas = NULL;
+    block_undo_free(undo);
+    if (fatal)
+        (void)validation_state_error(state, reason);
+    else
+        (void)validation_state_dos(state, 100, false, REJECT_INVALID,
+                                  reason, corrupt, NULL);
+    return -1;
+}
 
-        /* ── Sigops check ─────────────────────────────── */
-        sig_ops += (unsigned int)get_legacy_sig_op_count(tx, flags);
-        if (sig_ops > MAX_BLOCK_SIGOPS) {
-            free(checks); free(check_ptrs); free(txdatas);
-            block_undo_free(&blockundo);
-            return validation_state_dos(state, 100, false,
-                REJECT_INVALID, "bad-blk-sigops", false, NULL);
-        }
-
-        if (!transaction_is_coinbase(tx)) {
-            /* ── Coinbase maturity (100 blocks) ───────── */
-            for (size_t j = 0; j < tx->num_vin; j++) {
-                struct coins prev_coins;
-                coins_init(&prev_coins);
-                if (coins_view_cache_get_coins(view,
-                        &tx->vin[j].prevout.hash, &prev_coins)) {
-                    if (prev_coins.is_coinbase &&
-                        pindex->nHeight - prev_coins.height < COINBASE_MATURITY) {
-                        coins_free(&prev_coins);
-                        free(checks); free(check_ptrs); free(txdatas);
-                        block_undo_free(&blockundo);
-                        return validation_state_dos(state, 100, false,
-                            REJECT_INVALID,
-                            "bad-txns-premature-spend-of-coinbase",
-                            false, NULL);
-                    }
-                }
+/* Maturity, input presence, joinsplit anchors, and P2SH sigops. */
+static int connect_block_check_spend_inputs(
+    const struct transaction *tx,
+    struct validation_state *state,
+    const struct block_index *pindex,
+    struct coins_view_cache *view,
+    const struct uint256 *block_hash,
+    uint32_t flags,
+    unsigned int *sig_ops,
+    struct block_undo *undo,
+    struct connect_script_work *work)
+{
+    /* ── Coinbase maturity (100 blocks) ───────── */
+    for (size_t j = 0; j < tx->num_vin; j++) {
+        struct coins prev_coins;
+        coins_init(&prev_coins);
+        if (coins_view_cache_get_coins(view,
+                &tx->vin[j].prevout.hash, &prev_coins)) {
+            if (prev_coins.is_coinbase &&
+                pindex->nHeight - prev_coins.height < COINBASE_MATURITY) {
                 coins_free(&prev_coins);
-            }
-
-            /* ── All inputs must exist and be unspent ── */
-            if (!coins_view_cache_have_inputs(view, tx)) {
-                /* The missing input is identified + repaired by the reducer
-                 * prevout_unresolved path (engine/jobs/script_validate_stage.c),
-                 * not here — connect_block just rejects. Emit a structured
-                 * reject so consensus_reject_index can answer "why?". */
-                char bhex[65];
-                uint256_get_hex(&block_hash, bhex);
-                event_emitf(EV_CONSENSUS_REJECT_BLOCK, 0,
-                            "hash=%s reason=bad-txns-inputs-missingorspent "
-                            "dos=100", bhex);
-                free(checks); free(check_ptrs); free(txdatas);
-                block_undo_free(&blockundo);
-                return validation_state_dos(state, 100, false, REJECT_INVALID,
-                    "bad-txns-inputs-missingorspent", false, NULL);
-            }
-
-            /* ── JoinSplit anchor requirements ─────────── */
-            if (!coins_view_cache_have_joinsplit_requirements(view, tx)) {
-                free(checks); free(check_ptrs); free(txdatas);
-                block_undo_free(&blockundo);
-                return validation_state_dos(state, 100, false,
-                    REJECT_INVALID,
-                    "bad-txns-joinsplit-requirements-not-met", false,
-                    NULL);
-            }
-
-            /* ── P2SH sigops ────────────────────── *
-             * Add sigops done by pay-to-script-hash inputs; prevents a
-             * rogue miner from hiding an expensive-to-validate block
-             * inside a small scriptSig.  Mirrors zclassicd
-             * src/main.cpp::GetP2SHSigOpCount + the ConnectBlock check
-             * at main.cpp:2634-2637.  Must run AFTER have_inputs so the
-             * prevouts are guaranteed to be in the view cache. */
-            sig_ops += (unsigned int)get_p2sh_sig_op_count(tx, view, flags);
-            if (sig_ops > MAX_BLOCK_SIGOPS) {
-                free(checks); free(check_ptrs); free(txdatas);
-                block_undo_free(&blockundo);
-                return validation_state_dos(state, 100, false,
-                    REJECT_INVALID, "bad-blk-sigops", false, NULL);
+                return connect_block_reject_cleaned(
+                    state, undo, work,
+                    "bad-txns-premature-spend-of-coinbase", false, false);
             }
         }
-
-        /* ── Fee calculation with per-input MoneyRange ─── */
-        if (!transaction_is_coinbase(tx)) {
-            int64_t value_in = coins_view_cache_get_value_in(view, tx);
-            int64_t value_out = transaction_get_value_out(tx);
-
-            /* get_value_in returns -1 on missing inputs or out-of-range values.
-             * This catches corrupted coins before they propagate. */
-            if (value_in < 0) {
-                free(checks); free(check_ptrs); free(txdatas);
-                block_undo_free(&blockundo);
-                return validation_state_dos(state, 100, false,
-                    REJECT_INVALID, "bad-txns-inputvalues-outofrange",
-                    false, NULL);
-            }
-
-            /* Per-input value range check (zclassicd CheckTxInputs:2075) */
-            if (!MoneyRange(value_in)) {
-                free(checks); free(check_ptrs); free(txdatas);
-                block_undo_free(&blockundo);
-                return validation_state_dos(state, 100, false,
-                    REJECT_INVALID, "bad-txns-inputvalues-outofrange",
-                    false, NULL);
-            }
-
-            /* Inputs must cover outputs (no money creation) */
-            if (value_in < value_out) {
-                free(checks); free(check_ptrs); free(txdatas);
-                block_undo_free(&blockundo);
-                return validation_state_dos(state, 100, false,
-                    REJECT_INVALID, "bad-txns-in-belowout", false, NULL);
-            }
-
-            int64_t tx_fee = value_in - value_out;
-
-            /* Fee sanity: non-negative and no overflow */
-            if (tx_fee < 0) {
-                free(checks); free(check_ptrs); free(txdatas);
-                block_undo_free(&blockundo);
-                return validation_state_dos(state, 100, false,
-                    REJECT_INVALID, "bad-txns-fee-negative", false, NULL);
-            }
-            if (!MoneyRange(fees + tx_fee)) {
-                free(checks); free(check_ptrs); free(txdatas);
-                block_undo_free(&blockundo);
-                return validation_state_dos(state, 100, false,
-                    REJECT_INVALID, "bad-txns-fee-outofrange", false, NULL);
-            }
-            fees += tx_fee;
-
-            event_emitf(EV_TX_INPUTS_CHECKED, 0,
-                        "h=%d tx=%zu value_in=%lld fee=%lld",
-                        pindex->nHeight, i,
-                        (long long)value_in, (long long)tx_fee);
-
-            /* ── Script verification (Phase 1: collect) ─── */
-            if (expensive_checks) {
-                if (num_txdatas >= txdatas_cap) {
-                    txdatas_cap = txdatas_cap ? txdatas_cap * 2 : 64;
-                    struct precomputed_tx_data *nt = zcl_realloc(txdatas,
-                                      txdatas_cap * sizeof(*txdatas), "connect_txdatas");
-                    if (!nt) {
-                        free(checks);
-                        free(check_ptrs);
-                        free(txdatas);
-                        block_undo_free(&blockundo);
-                        REJECT_FATAL(state, "out-of-memory");
-                    }
-                    txdatas = nt;
-                }
-                precompute_tx_data(tx, &txdatas[num_txdatas]);
-                num_txdatas++;
-
-                for (size_t j = 0; j < tx->num_vin; j++) {
-                    const struct tx_out *prev_out =
-                        coins_view_cache_get_output_for(view, &tx->vin[j]);
-                    if (!prev_out) {
-                        free(checks);
-                        free(check_ptrs);
-                        free(txdatas);
-                        block_undo_free(&blockundo);
-                        return validation_state_dos(state, 100, false,
-                            REJECT_INVALID, "bad-txns-inputs-missingorspent",
-                            false, NULL);
-                    }
-
-                    /* Per-input value in valid range */
-                    if (!MoneyRange(prev_out->value)) {
-                        free(checks);
-                        free(check_ptrs);
-                        free(txdatas);
-                        block_undo_free(&blockundo);
-                        return validation_state_dos(state, 100, false,
-                            REJECT_INVALID,
-                            "bad-txns-inputvalues-outofrange",
-                            false, NULL);
-                    }
-
-                    if (num_checks >= checks_cap) {
-                        checks_cap = checks_cap ? checks_cap * 2 : 256;
-                        struct script_check *nc = zcl_realloc(checks,
-                                         checks_cap * sizeof(*checks), "connect_checks");
-                        void **np = zcl_realloc(check_ptrs,
-                                             checks_cap * sizeof(*check_ptrs), "connect_check_ptrs");
-                        if (!nc || !np) {
-                            free(nc ? nc : checks);
-                            free(np ? np : check_ptrs);
-                            free(txdatas);
-                            block_undo_free(&blockundo);
-                            REJECT_FATAL(state, "out-of-memory");
-                        }
-                        checks = nc;
-                        check_ptrs = np;
-                    }
-
-                    struct script_check *sc = &checks[num_checks];
-                    sc->script_sig = &tx->vin[j].script_sig;
-                    sc->script_pub_key = &prev_out->script_pub_key;
-                    sc->flags = flags;
-                    sc->branch_id = branch_id;
-                    sc->txdata = &txdatas[num_txdatas - 1];
-                    tx_sig_checker_init(&sc->tsc, tx, (unsigned int)j,
-                                        prev_out->value, branch_id,
-                                        sc->txdata);
-                    check_ptrs[num_checks] = sc;
-                    num_checks++;
-                }
-            }
-        }
-
-        /* ── Update UTXO set ──────────────────────────── */
-        if (i > 0) {
-            if (!update_coins_with_undo(tx, view, &blockundo.vtxundo[i - 1],
-                                        pindex->nHeight)) {
-                free(checks); free(check_ptrs); free(txdatas);
-                block_undo_free(&blockundo);
-                return validation_state_dos(state, 100, false, REJECT_INVALID,
-                    "bad-txns-utxo-update-failed", true, NULL);
-            }
-        } else {
-            struct tx_undo dummy;
-            tx_undo_init(&dummy);
-            bool ok = update_coins_with_undo(tx, view, &dummy,
-                                              pindex->nHeight);
-            tx_undo_free(&dummy);
-            if (!ok) {
-                free(checks); free(check_ptrs); free(txdatas);
-                block_undo_free(&blockundo);
-                return validation_state_dos(state, 100, false, REJECT_INVALID,
-                    "bad-txns-utxo-update-failed", true, NULL);
-            }
-        }
+        coins_free(&prev_coins);
     }
 
+    /* ── All inputs must exist and be unspent ── */
+    if (!coins_view_cache_have_inputs(view, tx)) {
+        /* The missing input is identified + repaired by the reducer
+         * prevout_unresolved path (engine/jobs/script_validate_stage.c),
+         * not here — connect_block just rejects. Emit a structured
+         * reject so consensus_reject_index can answer "why?". */
+        char bhex[65];
+        uint256_get_hex(block_hash, bhex);
+        event_emitf(EV_CONSENSUS_REJECT_BLOCK, 0,
+                    "hash=%s reason=bad-txns-inputs-missingorspent "
+                    "dos=100", bhex);
+        return connect_block_reject_cleaned(
+            state, undo, work,
+            "bad-txns-inputs-missingorspent", false, false);
+    }
+
+    /* ── JoinSplit anchor requirements ─────────── */
+    if (!coins_view_cache_have_joinsplit_requirements(view, tx))
+        return connect_block_reject_cleaned(
+            state, undo, work,
+            "bad-txns-joinsplit-requirements-not-met", false, false);
+
+    /* ── P2SH sigops ────────────────────── *
+     * Add sigops done by pay-to-script-hash inputs; prevents a
+     * rogue miner from hiding an expensive-to-validate block
+     * inside a small scriptSig.  Mirrors zclassicd
+     * src/main.cpp::GetP2SHSigOpCount + the ConnectBlock check
+     * at main.cpp:2634-2637.  Must run AFTER have_inputs so the
+     * prevouts are guaranteed to be in the view cache. */
+    *sig_ops += (unsigned int)get_p2sh_sig_op_count(tx, view, flags);
+    if (*sig_ops > MAX_BLOCK_SIGOPS)
+        return connect_block_reject_cleaned(
+            state, undo, work, "bad-blk-sigops", false, false);
+    return 0;
+}
+
+/* Range-check input value, require it to cover outputs, and add the fee. */
+static int connect_block_account_tx_fee(
+    const struct transaction *tx,
+    struct validation_state *state,
+    const struct block_index *pindex,
+    struct coins_view_cache *view,
+    size_t tx_index,
+    struct block_undo *undo,
+    struct connect_script_work *work,
+    int64_t *fees)
+{
+    /* ── Fee calculation with per-input MoneyRange ─── */
+    int64_t value_in = coins_view_cache_get_value_in(view, tx);
+    int64_t value_out = transaction_get_value_out(tx);
+
+    /* get_value_in returns -1 on missing inputs or out-of-range values.
+     * This catches corrupted coins before they propagate. */
+    if (value_in < 0)
+        return connect_block_reject_cleaned(
+            state, undo, work, "bad-txns-inputvalues-outofrange", false, false);
+
+    /* Per-input value range check (zclassicd CheckTxInputs:2075) */
+    if (!MoneyRange(value_in))
+        return connect_block_reject_cleaned(
+            state, undo, work, "bad-txns-inputvalues-outofrange", false, false);
+
+    /* Inputs must cover outputs (no money creation) */
+    if (value_in < value_out)
+        return connect_block_reject_cleaned(
+            state, undo, work, "bad-txns-in-belowout", false, false);
+
+    int64_t tx_fee = value_in - value_out;
+
+    /* Fee sanity: non-negative and no overflow */
+    if (tx_fee < 0)
+        return connect_block_reject_cleaned(
+            state, undo, work, "bad-txns-fee-negative", false, false);
+    if (!MoneyRange(*fees + tx_fee))
+        return connect_block_reject_cleaned(
+            state, undo, work, "bad-txns-fee-outofrange", false, false);
+    *fees += tx_fee;
+
+    event_emitf(EV_TX_INPUTS_CHECKED, 0,
+                "h=%d tx=%zu value_in=%lld fee=%lld",
+                pindex->nHeight, tx_index,
+                (long long)value_in, (long long)tx_fee);
+    return 0;
+}
+
+/* Append one precomputed tx record, growing the buffer when the cap is hit. */
+static int connect_block_push_txdata(const struct transaction *tx,
+                                    struct validation_state *state,
+                                    struct block_undo *undo,
+                                    struct connect_script_work *work)
+{
+    if (work->num_txdatas >= work->txdatas_cap) {
+        work->txdatas_cap = work->txdatas_cap ? work->txdatas_cap * 2 : 64;
+        struct precomputed_tx_data *nt = zcl_realloc(
+            work->txdatas, work->txdatas_cap * sizeof(*work->txdatas),
+            "connect_txdatas");
+        if (!nt)
+            return connect_block_reject_cleaned(
+                state, undo, work, "out-of-memory", false, true);
+        work->txdatas = nt;
+    }
+    precompute_tx_data(tx, &work->txdatas[work->num_txdatas]);
+    work->num_txdatas++;
+    return 0;
+}
+
+/* Queue one input's script check, growing the check arrays when needed. */
+static int connect_block_collect_one_input(
+    const struct transaction *tx,
+    size_t j,
+    struct validation_state *state,
+    struct coins_view_cache *view,
+    uint32_t flags,
+    uint32_t branch_id,
+    struct block_undo *undo,
+    struct connect_script_work *work)
+{
+    const struct tx_out *prev_out =
+        coins_view_cache_get_output_for(view, &tx->vin[j]);
+    if (!prev_out)
+        return connect_block_reject_cleaned(
+            state, undo, work, "bad-txns-inputs-missingorspent", false, false);
+
+    /* Per-input value in valid range */
+    if (!MoneyRange(prev_out->value))
+        return connect_block_reject_cleaned(
+            state, undo, work,
+            "bad-txns-inputvalues-outofrange", false, false);
+
+    if (work->num_checks >= work->checks_cap) {
+        work->checks_cap = work->checks_cap ? work->checks_cap * 2 : 256;
+        struct script_check *nc = zcl_realloc(
+            work->checks, work->checks_cap * sizeof(*work->checks),
+            "connect_checks");
+        void **np = zcl_realloc(
+            work->check_ptrs, work->checks_cap * sizeof(*work->check_ptrs),
+            "connect_check_ptrs");
+        if (!nc || !np) {
+            if (nc)
+                work->checks = nc;
+            if (np)
+                work->check_ptrs = np;
+            return connect_block_reject_cleaned(
+                state, undo, work, "out-of-memory", false, true);
+        }
+        work->checks = nc;
+        work->check_ptrs = np;
+    }
+
+    struct script_check *sc = &work->checks[work->num_checks];
+    sc->script_sig = &tx->vin[j].script_sig;
+    sc->script_pub_key = &prev_out->script_pub_key;
+    sc->flags = flags;
+    sc->branch_id = branch_id;
+    sc->txdata = &work->txdatas[work->num_txdatas - 1];
+    tx_sig_checker_init(&sc->tsc, tx, (unsigned int)j,
+                        prev_out->value, branch_id,
+                        sc->txdata);
+    work->check_ptrs[work->num_checks] = sc;
+    work->num_checks++;
+    return 0;
+}
+
+/* Queue a script check for every input of one transaction. */
+static int connect_block_collect_tx_inputs(
+    const struct transaction *tx,
+    struct validation_state *state,
+    struct coins_view_cache *view,
+    uint32_t flags,
+    uint32_t branch_id,
+    struct block_undo *undo,
+    struct connect_script_work *work)
+{
+    for (size_t j = 0; j < tx->num_vin; j++) {
+        int rc = connect_block_collect_one_input(
+            tx, j, state, view, flags, branch_id, undo, work);
+        if (rc != 0)
+            return rc;
+    }
+    return 0;
+}
+
+/* When expensive checks are on, precompute this tx and queue its inputs. */
+static int connect_block_collect_scripts(
+    const struct transaction *tx,
+    struct validation_state *state,
+    struct coins_view_cache *view,
+    uint32_t flags,
+    uint32_t branch_id,
+    bool expensive_checks,
+    struct block_undo *undo,
+    struct connect_script_work *work)
+{
+    /* ── Script verification (Phase 1: collect) ─── */
+    if (!expensive_checks)
+        return 0;
+    int rc = connect_block_push_txdata(tx, state, undo, work);
+    if (rc != 0)
+        return rc;
+    return connect_block_collect_tx_inputs(
+        tx, state, view, flags, branch_id, undo, work);
+}
+
+/* Apply this tx to the view, keeping undo for every non-coinbase tx. */
+static int connect_block_update_tx_coins(
+    const struct transaction *tx,
+    struct validation_state *state,
+    const struct block_index *pindex,
+    struct coins_view_cache *view,
+    size_t tx_index,
+    struct block_undo *undo,
+    struct connect_script_work *work)
+{
+    /* ── Update UTXO set ──────────────────────────── */
+    if (tx_index > 0) {
+        bool updated = update_coins_with_undo(
+            tx, view, &undo->vtxundo[tx_index - 1], pindex->nHeight);
+        if (!updated)
+            return connect_block_reject_cleaned(
+                state, undo, work, "bad-txns-utxo-update-failed", true, false);
+        return 0;
+    }
+    struct tx_undo dummy;
+    tx_undo_init(&dummy);
+    bool ok = update_coins_with_undo(tx, view, &dummy, pindex->nHeight);
+    tx_undo_free(&dummy);
+    if (!ok)
+        return connect_block_reject_cleaned(
+            state, undo, work, "bad-txns-utxo-update-failed", true, false);
+    return 0;
+}
+
+/* Sigops, non-coinbase input checks, fee, script collection, then UTXO. */
+static int connect_block_apply_one_tx(
+    const struct block *block,
+    size_t tx_index,
+    struct validation_state *state,
+    const struct block_index *pindex,
+    struct coins_view_cache *view,
+    const struct uint256 *block_hash,
+    uint32_t flags,
+    uint32_t branch_id,
+    bool expensive_checks,
+    struct block_undo *undo,
+    struct connect_script_work *work,
+    int64_t *fees,
+    unsigned int *sig_ops)
+{
+    const struct transaction *tx = &block->vtx[tx_index];
+
+    /* ── Sigops check ─────────────────────────────── */
+    *sig_ops += (unsigned int)get_legacy_sig_op_count(tx, flags);
+    if (*sig_ops > MAX_BLOCK_SIGOPS)
+        return connect_block_reject_cleaned(
+            state, undo, work, "bad-blk-sigops", false, false);
+
+    if (!transaction_is_coinbase(tx)) {
+        int rc = connect_block_check_spend_inputs(
+            tx, state, pindex, view, block_hash, flags, sig_ops, undo, work);
+        if (rc != 0)
+            return rc;
+    }
+
+    if (!transaction_is_coinbase(tx)) {
+        int rc = connect_block_account_tx_fee(
+            tx, state, pindex, view, tx_index, undo, work, fees);
+        if (rc != 0)
+            return rc;
+        rc = connect_block_collect_scripts(
+            tx, state, view, flags, branch_id, expensive_checks, undo, work);
+        if (rc != 0)
+            return rc;
+    }
+
+    return connect_block_update_tx_coins(
+        tx, state, pindex, view, tx_index, undo, work);
+}
+
+/* Run collected script checks; always frees the check buffers. */
+static int connect_block_verify_scripts(struct validation_state *state,
+                                       struct block_index *pindex,
+                                       struct block_undo *undo,
+                                       struct connect_script_work *work)
+{
     /* ── Script verification (Phase 2: parallel dispatch) ─── *
      * All inputs have been collected into checks[]. Now verify them
      * in parallel via the workpool. UTXO updates above are already
      * complete, so the coins view is not accessed by workers. */
-    if (num_checks > 0) {
-        struct workpool *pool = get_script_pool();
-        bool scripts_ok;
-
-        if (pool && num_checks >= 4) {
-            /* Parallel path: dispatch to worker threads */
-            scripts_ok = workpool_run(pool, check_ptrs, num_checks);
-        } else {
-            /* Sequential fallback: < 4 inputs or pool init failed */
-            scripts_ok = true;
-            for (size_t c = 0; c < num_checks && scripts_ok; c++)
-                scripts_ok = script_check_fn(check_ptrs[c]);
-        }
-
-        free(checks);
-        free(check_ptrs);
-        free(txdatas);
-
-        if (!scripts_ok) {
-            block_undo_free(&blockundo);
-            return validation_state_dos(state, 100, false,
-                REJECT_INVALID, "mandatory-script-verify-flag-failed",
-                false, NULL);
-        }
-
-        event_emitf(EV_SCRIPT_VERIFIED, 0,
-                    "h=%d inputs=%zu parallel=%s",
-                    pindex->nHeight, num_checks,
-                    (pool && num_checks >= 4) ? "yes" : "no");
-    } else {
-        free(checks);
-        free(check_ptrs);
-        free(txdatas);
+    size_t num_checks = work->num_checks;
+    if (num_checks == 0) {
+        free(work->checks);
+        free(work->check_ptrs);
+        free(work->txdatas);
+        work->checks = NULL;
+        work->check_ptrs = NULL;
+        work->txdatas = NULL;
+        return 0;
     }
 
+    struct workpool *pool = get_script_pool();
+    bool scripts_ok;
+    if (pool && num_checks >= 4) {
+        /* Parallel path: dispatch to worker threads */
+        scripts_ok = workpool_run(pool, work->check_ptrs, num_checks);
+    } else {
+        /* Sequential fallback: < 4 inputs or pool init failed */
+        scripts_ok = true;
+        for (size_t c = 0; c < num_checks && scripts_ok; c++)
+            scripts_ok = script_check_fn(work->check_ptrs[c]);
+    }
+
+    free(work->checks);
+    free(work->check_ptrs);
+    free(work->txdatas);
+    work->checks = NULL;
+    work->check_ptrs = NULL;
+    work->txdatas = NULL;
+
+    if (!scripts_ok) {
+        block_undo_free(undo);
+        (void)validation_state_dos(state, 100, false,
+            REJECT_INVALID, "mandatory-script-verify-flag-failed",
+            false, NULL);
+        return -1;
+    }
+
+    event_emitf(EV_SCRIPT_VERIFIED, 0,
+                "h=%d inputs=%zu parallel=%s",
+                pindex->nHeight, num_checks,
+                (pool && num_checks >= 4) ? "yes" : "no");
+    return 0;
+}
+
+/* Connect every tx, then verify the collected scripts. */
+static int connect_block_apply_transactions(
+    const struct block *block,
+    struct validation_state *state,
+    struct block_index *pindex,
+    struct coins_view_cache *view,
+    const struct uint256 *block_hash,
+    uint32_t flags,
+    uint32_t branch_id,
+    bool expensive_checks,
+    struct block_undo *undo,
+    struct connect_script_work *work,
+    int64_t *fees,
+    unsigned int *sig_ops)
+{
+    for (size_t i = 0; i < block->num_vtx; i++) {
+        int rc = connect_block_apply_one_tx(
+            block, i, state, pindex, view, block_hash, flags, branch_id,
+            expensive_checks, undo, work, fees, sig_ops);
+        if (rc != 0)
+            return rc;
+    }
+    return connect_block_verify_scripts(state, pindex, undo, work);
+}
+
+/* 0 when the Sapling root is acceptable, 1 when it is all zeros,
+ * 2 when enforced recomputation does not match the header. */
+static int connect_block_sapling_root_status(
+    const struct block *block,
+    const struct block_index *pindex,
+    const struct chain_params *params,
+    bool just_check)
+{
     /* ── Sapling commitment tree root verification ─────────── *
      * The Sapling tree is maintained by sync_controller which handles
      * both tree updates AND wallet witness advancement. It verifies
@@ -713,59 +895,61 @@ bool connect_block(const struct block *block,
      * connect_block validates the tree root was set correctly in the
      * block header by checking it's not all-zeros after Sapling activation
      * (a basic sanity check — full verification is in sync_controller). */
-    if (!just_check) {
-        bool sapling_active = consensus_network_upgrade_active(
-            &params->consensus, pindex->nHeight, UPGRADE_SAPLING);
-        if (sapling_active) {
-            static const uint8_t zeros[32] = {0};
-            if (memcmp(block->header.hashFinalSaplingRoot.data, zeros, 32) == 0) {
-                fprintf(stderr, "connect_block: hashFinalSaplingRoot is "  // obs-ok:helper-context-logged
-                        "all-zeros at Sapling height %d\n", pindex->nHeight);
-                block_undo_free(&blockundo);
-                return validation_state_dos(state, 100, false,
-                    REJECT_INVALID, "bad-sapling-root-zeroed", false,
-                    NULL);
-            }
+    if (just_check)
+        return 0;
+    bool sapling_active = consensus_network_upgrade_active(
+        &params->consensus, pindex->nHeight, UPGRADE_SAPLING);
+    if (!sapling_active)
+        return 0;
+    static const uint8_t zeros[32] = {0};
+    if (memcmp(block->header.hashFinalSaplingRoot.data, zeros, 32) == 0)
+        return 1;
 
-            /* DEFAULT-OFF full parity reject. Only runs when the operator
-             * has enabled -enforce-sapling-root (default false), so default
-             * behavior above is byte-identical to today (zeros-only reject).
-             * Recompute is PURE: sapling_root_matches folds a value-copy of
-             * the pre-block frontier; with no frontier wired (g_sapling_tree
-             * NULL) it returns true and cannot false-reject. Enabling this
-             * requires a full-history replay (0 false-rejects) FIRST — see
-             * the h=478544 lesson in connect_block.h. */
-            if (atomic_load_explicit(&g_enforce_sapling_root,
-                                     memory_order_relaxed) &&
-                !sapling_root_matches(block, g_sapling_tree)) {
-                fprintf(stderr, "connect_block: hashFinalSaplingRoot "  // obs-ok:helper-context-logged
-                        "mismatch at Sapling height %d "
-                        "(-enforce-sapling-root)\n", pindex->nHeight);
-                block_undo_free(&blockundo);
-                return validation_state_dos(state, 100, false,
-                    REJECT_INVALID, "bad-sapling-root-mismatch", false,
-                    NULL);
-            }
-        }
-    }
+    /* DEFAULT-OFF full parity reject. Only runs when the operator
+     * has enabled -enforce-sapling-root (default false), so default
+     * behavior above is byte-identical to today (zeros-only reject).
+     * Recompute is PURE: sapling_root_matches folds a value-copy of
+     * the pre-block frontier; with no frontier wired (g_sapling_tree
+     * NULL) it returns true and cannot false-reject. Enabling this
+     * requires a full-history replay (0 false-rejects) FIRST — see
+     * the h=478544 lesson in connect_block.h. */
+    if (atomic_load_explicit(&g_enforce_sapling_root,
+                             memory_order_relaxed) &&
+        !sapling_root_matches(block, g_sapling_tree))
+        return 2;
+    return 0;
+}
 
+/* Reject an over-subsidy coinbase, then either drop undo or commit the tip. */
+static bool connect_block_finish_reward(
+    const struct block *block,
+    struct validation_state *state,
+    struct block_index *pindex,
+    struct coins_view_cache *view,
+    const struct chain_params *params,
+    const struct uint256 *block_hash,
+    int64_t fees,
+    unsigned int sig_ops,
+    bool just_check,
+    struct block_undo *undo)
+{
     /* ── Coinbase reward validation ───────────────────────── */
     int64_t subsidy = get_block_subsidy(pindex->nHeight, &params->consensus);
     if (fees > INT64_MAX - subsidy) {
-        block_undo_free(&blockundo);
+        block_undo_free(undo);
         return validation_state_dos(state, 100, false, REJECT_INVALID,
             "bad-cb-reward-overflow", false, NULL);
     }
 
     int64_t block_reward = fees + subsidy;
     if (transaction_get_value_out(&block->vtx[0]) > block_reward) {
-        block_undo_free(&blockundo);
+        block_undo_free(undo);
         return validation_state_dos(state, 100, false, REJECT_INVALID,
             "bad-cb-amount", false, NULL);
     }
 
     if (just_check) {
-        block_undo_free(&blockundo);
+        block_undo_free(undo);
         return true;
     }
 
@@ -774,14 +958,136 @@ bool connect_block(const struct block *block,
      * tip commit happens in update_tip() → process_block_commit_tip()
      * → csr_commit_tip() after the flush policy promotes this view's
      * pending writes to the global coins_tip. */
-    coins_view_cache_set_best_block(view, &block_hash);
+    coins_view_cache_set_best_block(view, block_hash);
 
     event_emitf(EV_BLOCK_CONNECT_DONE, 0,
                 "height=%d fees=%lld sigops=%u",
                 pindex->nHeight, (long long)fees, sig_ops);
 
-    block_undo_free(&blockundo);
+    block_undo_free(undo);
     return true;
+}
+
+bool connect_block(const struct block *block,
+                   struct validation_state *state,
+                   struct block_index *pindex,
+                   struct coins_view_cache *view,
+                   const struct chain_params *params,
+                   bool just_check)
+{
+    struct uint256 block_hash;
+    connect_block_load_block_hash(pindex, block, &block_hash);
+
+    bool expensive_checks =
+        connect_block_expensive_checks_enabled(params, pindex);
+
+    /* Re-validate block. Merkle root is always checked (cheap SHA256d
+     * over txids — catches data corruption even below deferred proof validation).
+     * PoW and size limits gated by expensive_checks. */
+    if (!check_block(block, state, params, expensive_checks,
+                     !just_check, true)) {
+        LOG_FAIL("connect", "check_block failed at height %d",
+                 pindex->nHeight);
+    }
+
+    /* Genesis block: just set best block, no validation needed */
+    if (uint256_cmp(&block_hash, &params->consensus.hashGenesisBlock) == 0) {
+        connect_block_commit_genesis(view, &block_hash, just_check);
+        return true;
+    }
+
+    event_emitf(EV_BLOCK_CONNECT_START, 0,
+                "height=%d ntx=%zu", pindex->nHeight, block->num_vtx);
+
+    char vhex[65], phex[65];
+    bool view_ok = connect_block_view_prev_ok(view, block, vhex, phex);
+    if (!view_ok) {
+        fprintf(stderr, "connect_block: FATAL view/prevblock mismatch "  // obs-ok:helper-context-logged
+                "h=%d view=%s prev=%s\n", pindex->nHeight, vhex, phex);
+        REJECT_FATAL(state, "connect_block-view-mismatch");
+    }
+
+    bool pools_ok = connect_block_apply_shielded_turnstile(block, pindex, state);
+    if (!pools_ok)
+        return false;
+
+    /* ── BIP30: no overwriting unspent transactions ─────────── *
+     * Skip below deferred proof validation: when re-connecting blocks on top of an
+     * imported UTXO snapshot, the coinbase outputs already exist in the
+     * UTXO set. These blocks were validated by zclassicd — BIP30 is
+     * redundant and would false-positive on the imported coinbases. */
+    size_t bip_i = 0;
+    char txid[65];
+    struct coins bip_coins;
+    int bip_step = 0;
+    bool skip_bip30 = connect_block_skip_bip30(pindex);
+    while ((bip_step = connect_block_next_bip30_self_write(
+                block, pindex, view, skip_bip30,
+                &bip_i, txid, &bip_coins)) == 1) {
+        fprintf(stderr, // obs-ok:bip30-self-write-heal
+                "connect_block: tolerating same-height "
+                "self-write h=%d vtx=%zu txid=%s "
+                "coinbase=%d (stale local UTXO from prior "
+                "partial apply, BIP34 height-unique)\n",
+                pindex->nHeight, bip_i, txid,
+                (int)bip_coins.is_coinbase);
+        coins_free(&bip_coins);
+        bip_i++;
+    }
+    if (bip_step < 0)
+        return validation_state_dos(state, 100, false,
+            REJECT_INVALID, "bad-txns-BIP30", false, NULL);
+
+    uint32_t flags = connect_block_script_flags();
+
+    struct block_undo blockundo;
+    bool undo_ok = connect_block_prepare_undo(&blockundo, block);
+    if (!undo_ok) {
+        LOG_FAIL("connect", "block_undo_alloc failed at height %d ntx=%zu",
+                 pindex->nHeight, block->num_vtx);
+    }
+
+    uint32_t branch_id = consensus_current_epoch_branch_id(
+        pindex->nHeight, &params->consensus);
+
+    struct connect_script_work work;
+    bool work_ok = connect_block_alloc_script_work(block, &work);
+    if (!work_ok) {
+        block_undo_free(&blockundo);
+        REJECT_FATAL(state, "out-of-memory");
+    }
+
+    int64_t fees = 0;
+    unsigned int sig_ops = 0;
+    int applied = connect_block_apply_transactions(
+        block, state, pindex, view, &block_hash, flags, branch_id,
+        expensive_checks, &blockundo, &work, &fees, &sig_ops);
+    if (applied != 0)
+        return false;
+
+    int sapling = connect_block_sapling_root_status(
+        block, pindex, params, just_check);
+    if (sapling == 1) {
+        fprintf(stderr, "connect_block: hashFinalSaplingRoot is "  // obs-ok:helper-context-logged
+                "all-zeros at Sapling height %d\n", pindex->nHeight);
+        block_undo_free(&blockundo);
+        return validation_state_dos(state, 100, false,
+            REJECT_INVALID, "bad-sapling-root-zeroed", false,
+            NULL);
+    }
+    if (sapling == 2) {
+        fprintf(stderr, "connect_block: hashFinalSaplingRoot "  // obs-ok:helper-context-logged
+                "mismatch at Sapling height %d "
+                "(-enforce-sapling-root)\n", pindex->nHeight);
+        block_undo_free(&blockundo);
+        return validation_state_dos(state, 100, false,
+            REJECT_INVALID, "bad-sapling-root-mismatch", false,
+            NULL);
+    }
+
+    return connect_block_finish_reward(
+        block, state, pindex, view, params, &block_hash,
+        fees, sig_ops, just_check, &blockundo);
 }
 
 bool disconnect_block(const struct block *block,

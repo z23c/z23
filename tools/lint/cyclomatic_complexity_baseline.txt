@@ -58,7 +58,6 @@ core/modules/validation/src/accept_block_header.c:accept_block_header:42
 core/modules/validation/src/block_successor.c:main_state_best_known_successor:24
 core/modules/validation/src/chainstate.c:active_chain_extend_window_have_data:48
 core/modules/validation/src/chainstate.c:select_most_work_eligible:27
-core/modules/validation/src/connect_block.c:connect_block:81
 core/modules/validation/src/process_block_invalidate.c:process_block_clear_invalid:17
 core/modules/validation/src/process_block_invalidate.c:process_block_invalidate:26
 core/modules/validation/src/process_block_invalidate.c:process_block_reconsider:17
