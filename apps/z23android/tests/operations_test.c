@@ -86,6 +86,19 @@ static int orphan(const char *mode, const char *data)
     return 0;
 }
 
+/* Private by default: onion peers only, no clearnet dial, no DNS seeding, loopback bind, then one
+ * -addnode for the fleet peer the test supplies. Returns 0 when argv from index first on is exactly that. */
+static int private_tail(int argc, char **argv, int first, const char *peer)
+{
+    if (argc != first + 2 + (peer ? 1 : 0) || strcmp(argv[first], "-onlynet=onion") ||
+        strcmp(argv[first + 1], "-bind=127.0.0.1")) return 8;
+    if (peer) {
+        char want_peer[200];
+        snprintf(want_peer, sizeof(want_peer), "-addnode=%s", peer);
+        if (strcmp(argv[first + 2], want_peer)) return 9;
+    }
+    return 0;
+}
 /* The node arguments the app builds. ZAPP_TEST_PARAMS_ARG is the one extra argument it must add;
  * "none" or unset means none. Returns 0 when they are right. */
 static int node_arguments(int argc, char **argv)
@@ -94,18 +107,10 @@ static int node_arguments(int argc, char **argv)
     bool with_params = want && strcmp(want, "none") != 0;
     if (strcmp(argv[2], "-operator-lane=canonical") || strcmp(argv[3], "-tor") ||
         strcmp(argv[4], "-onion-persist")) return 4;
-    const char *peer = getenv("ZAPP_TEST_ADDNODE");
-    int next = 5, first = with_params ? 8 : 7, expected = first + 2 + (peer ? 1 : 0);
+    int next = 5, first = with_params ? 8 : 7;
     if (with_params && strcmp(argv[next++], want) != 0) return 7;
     if (strcmp(argv[next++], "-private-listeners") || strcmp(argv[next++], "-observation=0")) return 5;
-    /* Private by default: onion peers only, no clearnet dial, no DNS seeding, loopback bind. */
-    if (argc != expected || strcmp(argv[first], "-onlynet=onion") || strcmp(argv[first + 1], "-bind=127.0.0.1")) return 8;
-    if (peer) {
-        char want_peer[200];
-        snprintf(want_peer, sizeof(want_peer), "-addnode=%s", peer);
-        if (strcmp(argv[first + 2], want_peer)) return 9;
-    }
-    return 0;
+    return private_tail(argc, argv, first, getenv("ZAPP_TEST_ADDNODE"));
 }
 
 static int child(int argc, char **argv)
