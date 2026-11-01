@@ -628,6 +628,22 @@ static bool dlq_test_args(struct dlq *q, char *out, size_t cap)
     return true;
 }
 
+/* "ONLY=<group>,<group>..." into `only`. False when it would not fit. */
+static bool dlq_only_arg(char *only, size_t cap, const struct dlq_groups *g)
+{
+    int n = snprintf(only, cap, "ONLY=");
+    if (n < 0 || (size_t)n >= cap)
+        return false;
+    size_t used = (size_t)n;
+    for (size_t i = 0; i < g->count; i++) {
+        n = snprintf(only + used, cap - used, "%s%s", i ? "," : "", g->name[i]);
+        if (n < 0 || (size_t)n >= cap - used)
+            return false;
+        used += (size_t)n;
+    }
+    return true;
+}
+
 /* All affected groups in one harness invocation: its workers run the groups
  * in parallel and each reports its own verdict. */
 static bool dlq_run_groups(struct dlq *q, const struct dlq_groups *g)
@@ -638,22 +654,19 @@ static bool dlq_run_groups(struct dlq *q, const struct dlq_groups *g)
         return false;
     struct dlq_section *sections = (struct dlq_section *)zcl_malloc(
         g->count * sizeof(*sections), "dev.land.qualify.sections");
-    char *only = (char *)zcl_malloc(g->count * (ZCL_AGENT_IMPACT_GROUP_MAX + 1) + 8,
-                                    "dev.land.qualify.only");
+    size_t only_cap = g->count * (ZCL_AGENT_IMPACT_GROUP_MAX + 1) + 8;
+    char *only = (char *)zcl_malloc(only_cap, "dev.land.qualify.only");
     const char *goals[] = { "t-fast-exact", only,
                              capped ? test_args : NULL, NULL };
     char *text = NULL;
-    size_t used = 0;
     int rc = -1;
     bool ok = false;
-    if (!sections || !only) {
+    if (!sections || !only || !dlq_only_arg(only, only_cap, g)) {
         free(sections);
         free(only);
         return dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED, "groups", NULL);
     }
-    used = (size_t)sprintf(only, "ONLY=");
     for (size_t i = 0; i < g->count; i++) {
-        used += (size_t)sprintf(only + used, "%s%s", i ? "," : "", g->name[i]);
         memset(&sections[i], 0, sizeof(sections[i]));
         (void)snprintf(sections[i].name, sizeof(sections[i].name), "%s",
                        g->name[i]);

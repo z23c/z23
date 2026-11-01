@@ -64,7 +64,11 @@ static const char *fri_rel(const char *abs)
 static void fri_parent(char path[PATH_MAX])
 {
     char *slash = strrchr(path, '/');
-    if (!slash || slash == path) { strcpy(path, "/"); return; }
+    if (!slash || slash == path) {
+        path[0] = '/'; /* fixed two-byte literal into PATH_MAX bytes */
+        path[1] = '\0';
+        return;
+    }
     *slash = '\0';
 }
 

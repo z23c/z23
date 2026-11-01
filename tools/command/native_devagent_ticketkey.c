@@ -183,6 +183,15 @@ static int dvt_git(const char *cwd, const char *const args[], char *buf,
     return zcl_spawn_capture(argv, buf, cap, DVT_GIT_TIMEOUT_MS);
 }
 
+/* Append one argv word, space-separated, to the diagnostic text. False when
+ * it would not fit: the caller fails instead of cutting the text. */
+static bool dvt_argv_text_add(char *text, size_t cap, const char *word)
+{
+    size_t used = strlen(text);
+    int n = snprintf(text + used, cap - used, "%s%s", used ? " " : "", word);
+    return n >= 0 && (size_t)n < cap - used;
+}
+
 /* `git <args...>` must exit 0 and print one non-empty stripped line that
  * fits `line_cap`. Anything else is a GIT_FAILED naming the argv. */
 static bool dvt_git_line(struct zcl_command_reply *reply, const char *cwd,
@@ -195,10 +204,10 @@ static bool dvt_git_line(struct zcl_command_reply *reply, const char *cwd,
     int rc;
     argv_text[0] = '\0';
     for (i = 0; args[i]; i++) {
-        if (strlen(argv_text) + strlen(args[i]) + 5 < sizeof(argv_text)) {
-            if (argv_text[0])
-                (void)strcat(argv_text, " ");
-            (void)strcat(argv_text, args[i]);
+        if (!dvt_argv_text_add(argv_text, sizeof(argv_text), args[i])) {
+            dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED", "execute",
+                     "git arguments did not fit the diagnostic buffer", "");
+            return false;
         }
     }
     rc = dvt_git(cwd, args, out, sizeof(out));
@@ -782,10 +791,20 @@ static void dvt_read_cflags(const char *top, char cflags[65536])
     }
 }
 
+/* The epoch text is bounded: an overflow fails the key rather than hashing
+ * a cut CFLAGS line. */
+static bool dvt_epoch_overflow(struct zcl_command_reply *reply)
+{
+    dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "BAD_INPUT", "execute",
+             "checkout CFLAGS too long for the epoch digest", "");
+    return false;
+}
+
 /* Toolchain epoch: SHA3-256 over "cc:<first `cc --version` line>\n" plus
  * the CFLAGS logical line from the checkout Makefile. See the EPOCH block
  * in the file contract for why this is re-derived here. */
-static bool dvt_epoch(const char *top, char epoch_hex[65])
+static bool dvt_epoch(struct zcl_command_reply *reply, const char *top,
+                      char epoch_hex[65])
 {
     const char *cc_argv[] = {"cc", "--version", NULL};
     char cc_out[4096];
@@ -795,6 +814,8 @@ static bool dvt_epoch(const char *top, char epoch_hex[65])
     struct sha3_256_ctx ctx;
     unsigned char digest[32];
     size_t i;
+    size_t len;
+    int n;
     int rc = zcl_spawn_capture(cc_argv, cc_out, sizeof(cc_out),
                                DVT_GIT_TIMEOUT_MS);
     if (rc != 0 || cc_out[0] == '\0') {
@@ -809,8 +830,10 @@ static bool dvt_epoch(const char *top, char epoch_hex[65])
     dvt_read_cflags(top, cflags);
     if (cflags[0] == '\0')
         (void)snprintf(cflags, sizeof(cflags), "unavailable");
-    (void)snprintf(cflags_src, sizeof(cflags_src), "cc:%s\nmakefile:%s\n",
-                   cc_line, cflags);
+    n = snprintf(cflags_src, sizeof(cflags_src), "cc:%s\nmakefile:%s\n",
+                 cc_line, cflags);
+    if (n < 0 || (size_t)n >= sizeof(cflags_src))
+        return dvt_epoch_overflow(reply);
     /* The continuation join leaves one trailing blank per line; strip
      * trailing blanks so reformatting the Makefile without changing flags
      * keeps the epoch. The compiler line is kept verbatim. */
@@ -820,7 +843,12 @@ static bool dvt_epoch(const char *top, char epoch_hex[65])
         else
             break;
     }
-    (void)strcat(cflags_src, "\n");
+    /* The second newline is kept on purpose: it is part of the epoch bytes. */
+    len = strlen(cflags_src);
+    if (len + 2u > sizeof(cflags_src))
+        return dvt_epoch_overflow(reply);
+    cflags_src[len] = '\n';
+    cflags_src[len + 1u] = '\0';
     sha3_256_init(&ctx);
     sha3_256_write(&ctx, (const unsigned char *)cflags_src,
                    strlen(cflags_src));
@@ -1087,7 +1115,7 @@ static bool dvt_compute_key(struct zcl_command_reply *reply,
 {
     struct sha3_256_ctx kctx;
     unsigned char kdigest[32];
-    if (!dvt_epoch(req->top, epoch_hex))
+    if (!dvt_epoch(reply, req->top, epoch_hex))
         return false;
     sha3_256_init(&kctx);
     for (size_t i = 0; i < set->len; i++) {

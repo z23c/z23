@@ -311,8 +311,8 @@ static bool burst_copy_begin(const struct json_value *v,char id[64],char owner[6
 {
     bool yes=false;
     const char *state=get_s(v,"data.state"),*lookup=get_s(v,"data.lookup_id"),*token=get_s(v,"data.owner_token");
-    bool ok=get_b(v,"ok",&yes)&&yes&&state&&!strcmp(state,"pending")&&lookup&&token&&strlen(lookup)<64&&strlen(token)<64;
-    if(ok){strcpy(id,lookup);strcpy(owner,token);}
+    bool ok=get_b(v,"ok",&yes)&&yes&&state&&!strcmp(state,"pending")&&lookup&&token;
+    if(ok)ok=snprintf(id,64,"%s",lookup)<64&&snprintf(owner,64,"%s",token)<64;
     return ok;
 }
 static bool burst_load_begin(const char *dir,int index,char id[64],char owner[64])

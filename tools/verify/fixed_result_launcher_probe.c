@@ -102,8 +102,12 @@ static void fast_args_digest(char out[65])
 static void fill_roots(struct probe *p)
 {
     for (unsigned i = 0; i < NROOTS; ++i) {
-        snprintf(p->roots[i], sizeof p->roots[i], "%02x", i + 1u);
-        for (unsigned j = 0; j < 31u; ++j) strcat(p->roots[i], "ab");
+        int n = snprintf(p->roots[i], sizeof p->roots[i], "%02x", i + 1u);
+        for (unsigned j = 0; j < 31u; ++j) {
+            size_t room = sizeof p->roots[i] - (size_t)n;
+            if (snprintf(p->roots[i] + n, room, "ab") >= (int)room) exit(1);
+            n += 2;
+        }
     }
     fast_args_digest(p->roots[1]);
     memset(p->roots[11], 'c', 64);

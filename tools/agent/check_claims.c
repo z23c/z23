@@ -65,11 +65,6 @@ static void *ccl_grow(void *p, size_t n)
     return q;
 }
 
-static char *ccl_dup(const char *s)
-{
-    return strcpy(ccl_grow(nullptr, strlen(s) + 1), s);
-}
-
 static char *ccl_dupn(const char *s, size_t n)
 {
     char *d = ccl_grow(nullptr, n + 1);
@@ -77,6 +72,11 @@ static char *ccl_dupn(const char *s, size_t n)
     memcpy(d, s, n);
     d[n] = '\0';
     return d;
+}
+
+static char *ccl_dup(const char *s)
+{
+    return ccl_dupn(s, strlen(s));
 }
 
 static char *ccl_vfmt(const char *fmt, va_list ap) __attribute__((format(printf, 1, 0)));
@@ -1079,8 +1079,12 @@ static char *ccl_git_head(void)
     char *out;
 
     if (ccl_capture(argv, &out) != 0) {
-        out = ccl_grow(out, strlen(out) + sizeof "UNKNOWN");
-        strcat(out, "UNKNOWN");
+        size_t n = strlen(out);
+
+        out = ccl_grow(out, n + sizeof "UNKNOWN");
+        if (snprintf(out + n, sizeof "UNKNOWN", "UNKNOWN") >=
+            (int)sizeof "UNKNOWN")
+            ccl_die(2, "git head: buffer too small");
     }
     ccl_chomp(out);
     return out;

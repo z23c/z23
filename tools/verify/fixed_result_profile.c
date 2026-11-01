@@ -64,12 +64,17 @@ static char *frp_expand_one(const char *arg, const char *cwd)
 {
     size_t tags = 0, tlen = strlen(FRP_TAG), clen = strlen(cwd);
     for (const char *p = arg; (p = strstr(p, FRP_TAG)); p += tlen) ++tags;
-    char *out = zcl_malloc(strlen(arg) + tags * clen + 1u, "frp_expand"), *w = out;
+    size_t cap = strlen(arg) + tags * clen + 1u;
+    char *out = zcl_malloc(cap, "frp_expand"), *w = out;
     if (!out) return nullptr;
     for (const char *p = arg, *hit; ; p = hit + tlen) {
         hit = strstr(p, FRP_TAG);
         if (!hit) {
-            strcpy(w, p);
+            size_t room = cap - (size_t)(w - out);
+            if (snprintf(w, room, "%s", p) >= (int)room) {
+                free(out);
+                return nullptr;
+            }
             return out;
         }
         memcpy(w, p, (size_t)(hit - p));
