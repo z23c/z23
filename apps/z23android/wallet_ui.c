@@ -24,7 +24,7 @@
 #define GRAVITY_START_CENTER 0x800013 /* Gravity.START | Gravity.CENTER_VERTICAL */
 #define GRAVITY_CENTER_HORIZONTAL 1
 #define ROW_AMOUNT_SCALE 1.5f
-#define BOTTOM_SPACE_DP 48
+#define BOTTOM_SPACE_DP 24
 
 static struct {
     jobject activity, container, input, buttons[WALLET_ITEMS_MAX];
@@ -106,7 +106,8 @@ static void row_style(JNIEnv *env, jobject view, const char *text)
     enlarge_amount(env, view, text, (jint)(end - text));
     (*env)->PopLocalFrame(env, NULL);
 }
-/* Empty room under the last item, so that its last line can be scrolled clear of the screen edge and the system bars. */
+/* Empty room under the last item (twice the padding, about 48 dp, plus an empty line), so that its last line can be
+ * scrolled clear of the screen edge and the system bars. */
 static bool bottom_space(JNIEnv *env)
 {
     jobject view = zj_widget(env, "android/widget/TextView", ui.activity);

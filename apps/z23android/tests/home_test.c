@@ -278,7 +278,7 @@ static void dark_by_default(void)
     "\"blocks_behind\":0,\"current\":true,\"locked\":false,\"encrypted\":true,\"shielded_keys\":1,\"send_allowed\":true," \
     "\"send_blocked_reason\":\"\"}}"
 #define MARKER_HISTORY \
-    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entries\":[{\"txid\":\"" MARKER_TXID "\",\"status\":\"confirmed\"," \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"shielded_state\":\"ok\",\"entries\":[{\"txid\":\"" MARKER_TXID "\",\"status\":\"confirmed\"," \
     "\"height\":1,\"confirmations\":1,\"time\":1700000000,\"direction\":\"received\",\"kind\":\"private\",\"amount_zat\":777," \
     "\"memo_present\":true}],\"count\":1,\"next_cursor\":null}}"
 #define MARKER_DETAIL \

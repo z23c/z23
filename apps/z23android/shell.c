@@ -53,9 +53,6 @@ static struct {
     float down_x, down_y;
     /* Obscured touches are dropped while the wallet is shown, whatever the window gate does. */
     struct zapp_touch_gate gate;
-    /* Set while the app goes out of view on a wallet screen: the wallet data goes and the window protection stays
-     * until wallet_screens_settle() runs on a tick after the app returns. */
-    bool parking;
 } shell;
 
 static void go(JNIEnv *env, enum screen next);
@@ -369,8 +366,9 @@ static void enter_wallet(JNIEnv *env)
 }
 static void leave_wallet(JNIEnv *env)
 {
-    if (shell.parking) wallet_screens_pause();
-    else wallet_screens_close();
+    /* Leaving for any screen, in the app or out of it, keeps the window protection until a tick finds the next screen
+     * drawn (wallet_screens_settle), so a screen recording never catches the wallet content unprotected. */
+    wallet_screens_pause();
     zapp_wallet_ui_clear(env);
 }
 static void go(JNIEnv *env, enum screen next)
@@ -583,9 +581,7 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
 void zapp_shell_pause(JNIEnv *env)
 {
     if (!shell.activity || shell.current != SCREEN_WALLET) return;
-    shell.parking = true;
     go(env, SCREEN_HOME);
-    shell.parking = false;
 }
 void zapp_shell_dropped(JNIEnv *env)
 {
@@ -612,6 +608,7 @@ void zapp_shell_destroy(JNIEnv *env)
 {
     if (!shell.activity) return;
     leave_wallet(env);
+    wallet_screens_close();
     zapp_wallet_ui_destroy(env);
     zapp_surface_destroy(env);
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);

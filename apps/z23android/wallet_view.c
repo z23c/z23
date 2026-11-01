@@ -15,6 +15,8 @@
 #define TEXT_PENDING_UNKNOWN "Pending amount unknown"
 #define TEXT_PUBLIC_UNKNOWN "Public amount unknown"
 #define TEXT_IMMATURE_UNKNOWN "Maturing amount unknown"
+#define TEXT_UNREADY_UNKNOWN "Amount waiting on the wallet unknown"
+#define TEXT_HIDDEN "Private balance hidden while the wallet is locked"
 #define TEXT_SYNC_UNKNOWN "Sync state unknown"
 #define TEXT_SEND_UNAVAILABLE "Sending is unavailable until the wallet state loads."
 #define TEXT_SEND_RELEASE "Sending is paused until this node verifies the chain tip itself."
@@ -23,7 +25,14 @@
 
 /* The fields of a well-formed reply. Every one is validated before any line is rendered. The
  * reason points into the parsed tree, so the summary is rendered before that tree is freed. */
+/* How an optional amount arrived: not at all, as null (unreadable), as a valid amount, or malformed. */
+enum presence { P_ABSENT, P_NULL, P_VALUE, P_BAD };
+
 struct summary {
+    bool hidden; /* shielded_state is keys_unavailable: no private amount is known */
+    enum presence unready_state, total_state;
+    int64_t unready;
+    int64_t total;
     int64_t spendable;
     int64_t pending;
     int64_t pending_notes;
@@ -85,24 +94,62 @@ static bool read_zat(const struct json_value *data, const char *zat_key, const c
            format_full(*zat, want, sizeof(want)) && !strcmp(json_get_str(str), want);
 }
 
-static bool parse_amounts(const struct json_value *data, struct summary *s)
+/* An amount that may be missing or null: null is unreadable, missing is not reported, and anything else must be valid. */
+static enum presence read_optional_zat(const struct json_value *data, const char *zat_key, const char *str_key,
+                                       int64_t *zat)
 {
-    return read_zat(data, "spendable_zat", "spendable", &s->spendable) &&
-           read_zat(data, "pending_zat", "pending", &s->pending) &&
-           read_zat(data, "public_zat", "public", &s->public_zat) &&
+    const struct json_value *z = json_get(data, zat_key), *str = json_get(data, str_key);
+    if (!z && !str) return P_ABSENT;
+    if (z && str && z->type == JSON_NULL && str->type == JSON_NULL) return P_NULL;
+    return read_zat(data, zat_key, str_key, zat) ? P_VALUE : P_BAD;
+}
+
+/* shielded_state: "ok", or "keys_unavailable" when a locked wallet holds no viewing key. A node that does not say
+ * has amounts that are checked one by one. */
+static bool parse_state(const struct json_value *data, struct summary *s)
+{
+    const struct json_value *state = json_get(data, "shielded_state");
+    s->hidden = false;
+    if (!state) return true;
+    if (state->type != JSON_STR) return false;
+    s->hidden = !strcmp(json_get_str(state), "keys_unavailable");
+    return s->hidden || !strcmp(json_get_str(state), "ok");
+}
+
+static bool parse_public(const struct json_value *data, struct summary *s)
+{
+    return read_zat(data, "public_zat", "public", &s->public_zat) &&
            read_zat(data, "immature_zat", "immature", &s->immature);
 }
 
-static bool parse_pending(const struct json_value *data, struct summary *s)
+static bool parse_private(const struct json_value *data, struct summary *s)
 {
-    return read_count(data, "pending_notes", &s->pending_notes) &&
-           read_count(data, "pending_min_confirmations_needed", &s->pending_confirmations);
+    s->unready_state = read_optional_zat(data, "unready_zat", "unready", &s->unready);
+    s->total_state = read_optional_zat(data, "spendable_total_zat", "spendable_total", &s->total);
+    return read_zat(data, "spendable_zat", "spendable", &s->spendable) &&
+           read_zat(data, "pending_zat", "pending", &s->pending) &&
+           read_count(data, "pending_notes", &s->pending_notes) &&
+           read_count(data, "pending_min_confirmations_needed", &s->pending_confirmations) &&
+           s->unready_state != P_BAD && s->total_state != P_BAD;
+}
+
+static bool parse_amounts(const struct json_value *data, struct summary *s)
+{
+    return parse_public(data, s) && (s->hidden || parse_private(data, s));
+}
+
+/* The height the wallet has scanned to; null when it has scanned nothing it can name, which counts as behind. */
+static bool read_scanned(const struct json_value *data, struct summary *s)
+{
+    const struct json_value *v = json_get(data, "scanned_through_height");
+    if (v && v->type == JSON_NULL) { s->scanned = -1; return true; }
+    return read_int(data, "scanned_through_height", &s->scanned);
 }
 
 static bool parse_chain(const struct json_value *data, struct summary *s)
 {
     return read_int(data, "tip_height", &s->tip) && read_int(data, "header_height", &s->header) &&
-           read_int(data, "scanned_through_height", &s->scanned) &&
+           read_scanned(data, s) &&
            read_count(data, "blocks_behind", &s->blocks_behind) &&
            read_flag(data, "current", &s->current) && (!s->current || s->tip >= 0);
 }
@@ -129,8 +176,8 @@ static bool parse_summary(const struct json_value *data, struct summary *s)
 {
     const struct json_value *schema = json_get(data, "schema");
     return schema && schema->type == JSON_STR &&
-           !strcmp(json_get_str(schema), WALLET_VIEW_SCHEMA) && parse_amounts(data, s) &&
-           parse_pending(data, s) && parse_chain(data, s) && parse_keystore(data) &&
+           !strcmp(json_get_str(schema), WALLET_VIEW_SCHEMA) && parse_state(data, s) && parse_amounts(data, s) &&
+           parse_chain(data, s) && parse_keystore(data) &&
            parse_send(data, s);
 }
 
@@ -149,6 +196,7 @@ static void set_unknown(struct wallet_view *out)
     put(out->pending, sizeof(out->pending), TEXT_PENDING_UNKNOWN);
     put(out->public_line, sizeof(out->public_line), TEXT_PUBLIC_UNKNOWN);
     put(out->immature_line, sizeof(out->immature_line), TEXT_IMMATURE_UNKNOWN);
+    put(out->unready_line, sizeof(out->unready_line), TEXT_UNREADY_UNKNOWN);
     put(out->sync, sizeof(out->sync), TEXT_SYNC_UNKNOWN);
     put(out->send, sizeof(out->send), TEXT_SEND_UNAVAILABLE);
 }
@@ -162,6 +210,7 @@ static bool amount_text(int64_t zat, char *out, size_t cap)
 static void render_balance(const struct summary *s, struct wallet_view *out)
 {
     char amount[32];
+    if (s->hidden) { put(out->balance, sizeof(out->balance), TEXT_HIDDEN); return; }
     if (!amount_text(s->spendable, amount, sizeof(amount))) return;
     snprintf(out->balance, sizeof(out->balance), "%s ZCL", amount);
 }
@@ -172,7 +221,7 @@ static void render_pending(const struct summary *s, struct wallet_view *out)
 {
     char amount[32];
     out->pending[0] = '\0';
-    if (s->pending == 0 || !zapp_zat_format((uint64_t)s->pending, amount, sizeof(amount))) return;
+    if (s->hidden || s->pending == 0 || !zapp_zat_format((uint64_t)s->pending, amount, sizeof(amount))) return;
     const char *unit = s->pending_confirmations == 1 ? "" : "s";
     if (s->pending_notes == 1 && s->pending_confirmations > 0)
         snprintf(out->pending, sizeof(out->pending), "%s ZCL arriving in %lld confirmation%s", amount,
@@ -182,6 +231,21 @@ static void render_pending(const struct summary *s, struct wallet_view *out)
                  amount, (long long)s->pending_notes, (long long)s->pending_confirmations, unit);
     else
         snprintf(out->pending, sizeof(out->pending), "%s ZCL pending", amount);
+}
+
+/* Confirmed funds that a send would refuse until the wallet catches up (a missing or stale witness), and the total of all
+ * spendable notes when one send cannot reach them all. Neither is added to the spendable amount. */
+static void render_unready(const struct summary *s, struct wallet_view *out)
+{
+    char amount[32];
+    out->unready_line[0] = '\0';
+    out->total_line[0] = '\0';
+    if (s->hidden) return;
+    if (s->unready_state == P_NULL) put(out->unready_line, sizeof(out->unready_line), TEXT_UNREADY_UNKNOWN);
+    else if (s->unready_state == P_VALUE && s->unready > 0 && amount_text(s->unready, amount, sizeof(amount)))
+        snprintf(out->unready_line, sizeof(out->unready_line), "%s ZCL received, spendable once the wallet catches up", amount);
+    if (s->total_state == P_VALUE && s->total > s->spendable && amount_text(s->total, amount, sizeof(amount)))
+        snprintf(out->total_line, sizeof(out->total_line), "%s ZCL spendable in all, but one payment can send at most the amount above", amount);
 }
 
 static void render_immature(const struct summary *s, struct wallet_view *out)
@@ -240,6 +304,7 @@ static void render_known(const struct summary *s, struct wallet_view *out)
     out->known = true;
     render_balance(s, out);
     render_pending(s, out);
+    render_unready(s, out);
     render_public(s, out);
     render_immature(s, out);
     out->scanning = s->blocks_behind > 0 || s->scanned < s->header;

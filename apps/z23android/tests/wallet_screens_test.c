@@ -79,6 +79,18 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
     "\"immature\":\"20.00000000\",\"tip_height\":3000000,\"header_height\":3000000,"                     \
     "\"scanned_through_height\":3000000,\"blocks_behind\":0,\"current\":true,\"locked\":false,"          \
     "\"encrypted\":true,\"shielded_keys\":1,\"send_allowed\":true,\"send_blocked_reason\":\"\"}}"
+/* Summaries that carry the node's word on private amounts. */
+#define PRIVATE_OK(spendable_zat, spendable, extra)                                                      \
+    "\"spendable_zat\":" spendable_zat ",\"spendable\":\"" spendable "\",\"pending_zat\":0,\"pending\":\"0.00000000\"," \
+    "\"pending_notes\":0,\"pending_min_confirmations_needed\":0," extra
+#define PRIVATE_HIDDEN                                                                                   \
+    "\"spendable_zat\":null,\"spendable\":null,\"pending_zat\":null,\"pending\":null,\"pending_notes\":null," \
+    "\"pending_min_confirmations_needed\":null,\"unready_zat\":null,\"unready\":null,"
+#define SUMMARY_STATE(state, private_part, public_zat, public)                                            \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"" state "\"," private_part \
+    "\"public_zat\":" public_zat ",\"public\":\"" public "\",\"immature_zat\":0,\"immature\":\"0.00000000\"," \
+    "\"tip_height\":3000000,\"header_height\":3000000,\"scanned_through_height\":3000000,\"blocks_behind\":0," \
+    "\"current\":true,\"locked\":false,\"encrypted\":true,\"shielded_keys\":1,\"send_allowed\":true,\"send_blocked_reason\":\"\"}}"
 #define GOOD_SUMMARY SUMMARY("123456789", "1.23456789", "50000000", "0.50000000", "10000000", "0.10000000")
 #define UNKNOWN_COMMAND_ERROR "{\"ok\":false,\"error\":{\"code\":\"UNKNOWN_COMMAND\"}}"
 #define NODE_UNAVAILABLE_ERROR "{\"ok\":false,\"error\":{\"code\":\"NODE_UNAVAILABLE\"}}"
@@ -101,9 +113,13 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
     "{\"txid\":\"" txid "\",\"status\":\"" status "\",\"height\":2999990,\"confirmations\":11,\"time\":" time "," \
     "\"direction\":\"" direction "\",\"kind\":\"" kind "\",\"amount_zat\":" amount ",\"amount\":null," \
     "\"fee_zat\":null,\"fee\":null,\"net_zat\":0,\"memo_present\":" memo "," extra "}"
-#define PAGE(rows, count, next)                                                                          \
-    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entries\":[" rows "],\"count\":" count "," \
+/* A history page with the node's word on private payments: state is "\"shielded_state\":\"ok\"," or similar, or "". */
+#define PAGE_STATE(state, rows, count, next)                                                             \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\"," state "\"entries\":[" rows "],\"count\":" count "," \
     "\"next_cursor\":" next "}}"
+#define STATE_OK "\"shielded_state\":\"ok\","
+#define STATE_HIDDEN "\"shielded_state\":\"keys_unavailable\","
+#define PAGE(rows, count, next) PAGE_STATE(STATE_OK, rows, count, next)
 #define ROW_SENT ROW("sent", "private", "confirmed", "150000000", "1700000000", TX_A, "true")
 #define ROW_RECEIVED ROW("received", "public", "pending", "null", "1700003600", TX_B, "false")
 #define ROW_INTERNAL ROW("internal", "private", "bogus", "1", "null", TX_C, "false")
@@ -1232,6 +1248,56 @@ static void test_receive_address_whole(void)
     }
 }
 
+/* Confirmed funds a send would refuse for now are said in one plain line, never added to what is spendable; a
+ * total that one send cannot reach is said too; unreadable or hidden private amounts are never shown as zero. */
+static void test_funds_unready(void)
+{
+    start(false);
+    fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("0", "0.00000000", "\"unready_zat\":5000000000,\"unready\":\"50.00000000\",\"unready_notes\":2,"), "0", "0.00000000");
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("50 ZCL received, spendable once the wallet catches up") && has("0 ZCL"));
+    CHECK(!strcmp(text_at(snap(), find(snap(), WALLET_ITEM_AMOUNT, WALLET_ACT_NONE)), "0 ZCL"));
+    fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":0,\"unready\":\"0.00000000\",\"spendable_total_zat\":900000000,\"spendable_total\":\"9.00000000\","), "0", "0.00000000");
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("9 ZCL spendable in all, but one payment can send at most the amount above") && !has("catches up"));
+    fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":0,\"unready\":\"0.00000000\",\"spendable_total_zat\":100000000,\"spendable_total\":\"1.00000000\","), "0", "0.00000000");
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(!has("spendable in all") && !has("catches up"));
+    fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":null,\"unready\":null,"), "0", "0.00000000");
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("Amount waiting on the wallet unknown") && has("1 ZCL") && !has("catches up"));
+    fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":5,\"unready\":\"0.5\","), "0", "0.00000000");   /* a malformed amount is no reply */
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("Balance unknown") && !has("catches up"));
+    fake.summary = SUMMARY_STATE("keys_unavailable", PRIVATE_HIDDEN, "10000000", "0.10000000");
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("Private balance hidden while the wallet is locked") && has("0.1 ZCL public") && !has("catches up") && !has("0 ZCL") && !has("unknown"));
+    wallet_screens_close();
+}
+
+/* A history page that does not say "ok" for private payments is not the whole history: its rows show with one plain line,
+ * and an empty one is never called empty. */
+static void test_history_incomplete(void)
+{
+    start(false);
+    fake.history[0] = PAGE_STATE(STATE_HIDDEN, ROW_RECEIVED, "1", "null");
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    CHECK(has("Private payments are hidden while the wallet is locked") && has("Received") && !has("No transactions yet") && !has("None found"));
+    fake.history[0] = PAGE_STATE(STATE_HIDDEN, "", "0", "null");
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    CHECK(has("Private payments are hidden while the wallet is locked") && !has("No transactions yet") && !has("None found") && !has("No older"));
+    fake.history[0] = PAGE_STATE("", "", "0", "null");                       /* a node that says nothing about it */
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    CHECK(has("did not say whether this list is complete") && !has("No transactions yet") && !has("None found"));
+    fake.history[0] = PAGE_STATE("\"shielded_state\":\"bogus\",", ROW_RECEIVED, "1", "null");
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    CHECK(has("did not say whether this list is complete") && has("Received"));
+    fake.history[0] = PAGE_STATE(STATE_OK, "", "0", "null");                 /* complete and empty */
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    CHECK(has("No transactions yet.") && !has("hidden") && !has("did not say"));
+    wallet_screens_close();
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "stale")) test_refresh_and_stale();
@@ -1260,6 +1326,8 @@ int main(int argc, char **argv)
     test_history_while_scanning();
     test_funds_lines();
     test_funds_plain_words();
+    test_funds_unready();
+    test_history_incomplete();
     test_scan_notice();
     test_receive_address_whole();
     test_receive_order();

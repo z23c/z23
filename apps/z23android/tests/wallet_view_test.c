@@ -362,6 +362,56 @@ static void test_reply_text_is_wiped(void)
     assert(!process_holds(marker));
 }
 
+/* Confirmed funds a send would refuse for now, and the total of all spendable notes, get their own lines; a node that
+ * holds no viewing key hides every private amount; none of them is ever shown as zero. */
+static void test_unready_total_and_hidden(void)
+{
+    static const char *const schema = "\"schema\":\"zcl.wallet_summary.v1\",";
+    char json[2048];
+    struct wallet_view v;
+    replace_once(json, sizeof(json), VALID_REPLY, schema,
+                 "\"schema\":\"zcl.wallet_summary.v1\",\"unready_zat\":5000000000,\"unready\":\"50.00000000\",\"unready_notes\":2,");
+    assert(wallet_view_from_summary(json, &v) && v.known);
+    assert(!strcmp(v.unready_line, "50 ZCL received, spendable once the wallet catches up") && !v.total_line[0]);
+    replace_once(json, sizeof(json), VALID_REPLY, schema,
+                 "\"schema\":\"zcl.wallet_summary.v1\",\"unready_zat\":0,\"unready\":\"0.00000000\","
+                 "\"spendable_total_zat\":900000000,\"spendable_total\":\"9.00000000\",");
+    assert(wallet_view_from_summary(json, &v) && !v.unready_line[0]);
+    assert(!strcmp(v.total_line, "9 ZCL spendable in all, but one payment can send at most the amount above"));
+    replace_once(json, sizeof(json), VALID_REPLY, schema,
+                 "\"schema\":\"zcl.wallet_summary.v1\",\"spendable_total_zat\":123456789,\"spendable_total\":\"1.23456789\",");
+    assert(wallet_view_from_summary(json, &v) && !v.total_line[0] && !v.unready_line[0]);
+    replace_once(json, sizeof(json), VALID_REPLY, schema,
+                 "\"schema\":\"zcl.wallet_summary.v1\",\"unready_zat\":null,\"unready\":null,");
+    assert(wallet_view_from_summary(json, &v) && v.known && !strcmp(v.unready_line, "Amount waiting on the wallet unknown"));
+    replace_once(json, sizeof(json), VALID_REPLY, schema,
+                 "\"schema\":\"zcl.wallet_summary.v1\",\"unready_zat\":5,\"unready\":\"0.5\",");
+    assert(!wallet_view_from_summary(json, &v));
+    assert_unknown(&v);
+    replace_once(json, sizeof(json), VALID_REPLY, schema,
+                 "\"schema\":\"zcl.wallet_summary.v1\",\"spendable_total_zat\":-1,\"spendable_total\":\"x\",");
+    assert(!wallet_view_from_summary(json, &v));
+    static const char hidden[] =
+        "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"keys_unavailable\","
+        "\"spendable_zat\":null,\"spendable\":null,\"pending_zat\":null,\"pending\":null,\"pending_notes\":null,"
+        "\"pending_min_confirmations_needed\":null,\"unready_zat\":null,\"unready\":null,\"unready_notes\":null,"
+        "\"public_zat\":10000000,\"public\":\"0.10000000\",\"immature_zat\":0,\"immature\":\"0.00000000\","
+        "\"tip_height\":3000000,\"header_height\":3000000,\"scanned_through_height\":null,\"blocks_behind\":0,"
+        "\"current\":false,\"locked\":true,\"encrypted\":true,\"shielded_keys\":0,\"send_allowed\":false,"
+        "\"send_blocked_reason\":\"progress_store_unavailable\"}}";
+    assert(wallet_view_from_summary(hidden, &v) && v.known);
+    assert(!strcmp(v.balance, "Private balance hidden while the wallet is locked") && !strstr(v.balance, "ZCL"));
+    assert(!v.pending[0] && !v.unready_line[0] && !v.total_line[0] && !v.current && v.scanning);
+    assert(!strncmp(v.public_line, "0.1 ZCL public", 14));
+    replace_once(json, sizeof(json), VALID_REPLY, schema, "\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"bogus\",");
+    assert(!wallet_view_from_summary(json, &v));
+    replace_once(json, sizeof(json), VALID_REPLY, schema, "\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":7,");
+    assert(!wallet_view_from_summary(json, &v));
+    replace_once(json, sizeof(json), VALID_REPLY, schema, "\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"ok\",");
+    assert(wallet_view_from_summary(json, &v) && v.known && !strcmp(v.balance, "1.23456789 ZCL"));
+    printf("  unready and total lines, hidden private amounts\n");
+}
+
 int main(void)
 {
     printf("wallet view model:\n");
@@ -376,6 +426,7 @@ int main(void)
     test_malformed_fields_are_unknown();
     test_bad_input_is_unknown();
     test_group_address();
+    test_unready_total_and_hidden();
     test_reply_text_is_wiped();
     printf("wallet view model: all tests passed\n");
     return 0;

@@ -26,6 +26,9 @@ enum direction { DIR_UNKNOWN, DIR_SENT, DIR_RECEIVED, DIR_INTERNAL };
 /* What the node reports in fully_shielded: true, false, or null (or nothing) when the wallet cannot tell. */
 enum shield { SHIELD_UNKNOWN, SHIELD_FULL, SHIELD_PART };
 enum status { STATUS_UNKNOWN, STATUS_CONFIRMED, STATUS_PENDING };
+/* What the node says about private payments in a history page: complete, hidden because a locked wallet holds no viewing
+ * key, or nothing usable. Only a page that says "ok" is the whole history. */
+enum history_state { HIST_UNSAID, HIST_OK, HIST_HIDDEN };
 enum kind { K_SUMMARY, K_FLEET, K_LATEST, K_NEW, K_HISTORY, K_DETAIL, K_COUNT };
 
 struct entry {
@@ -49,6 +52,7 @@ struct data {
     enum zapp_pay_network network;
     char address[ZAPP_PAY_ADDRESS_MAX], code[ZAPP_RECEIVE_CODE_MAX], note[NOTE_MAX], scan_note[NOTE_MAX];
     bool history_pending, history_failed, has_more;
+    enum history_state history_state;
     unsigned page, detail;
     size_t rows;
     char cursor[PAGES_MAX][WALLET_CURSOR_MAX], next[WALLET_CURSOR_MAX];
@@ -194,6 +198,8 @@ static void funds_items(struct wallet_screen *s)
         line(s, "Spendable now");
         (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, d->view.balance);
         if (d->view.pending[0]) line(s, d->view.pending);
+        if (d->view.unready_line[0]) line(s, d->view.unready_line);
+        if (d->view.total_line[0]) line(s, d->view.total_line);
         if (d->view.public_line[0]) line(s, d->view.public_line);
         if (d->view.immature_line[0]) line(s, d->view.immature_line);
         if (d->funds_fresh) line(s, d->view.sync);
@@ -284,15 +290,29 @@ static const char *empty_history_text(const struct data *d)
     if (d->view.scanning) return "None found so far. The wallet is still scanning the chain.";
     return d->view.current ? "No transactions yet." : "None found so far. The node is not up to date.";
 }
+/* The line above the rows: loading, a failure, what the node says is missing from the list, or why it is empty. An
+ * empty list is never called empty unless the node says it holds every payment. */
+static void history_status(struct wallet_screen *s, const struct data *d)
+{
+    if (d->history_pending) { line(s, "Loading…"); return; }
+    if (d->history_failed) { note(s, "History could not be read. Check that your node is running, then open History again."); return; }
+    if (d->history_state == HIST_HIDDEN) {
+        note(s, "Private payments are hidden while the wallet is locked. Only public ones are listed.");
+        return;
+    }
+    if (d->history_state != HIST_OK) {
+        note(s, "The node did not say whether this list is complete, so private payments may be missing.");
+        return;
+    }
+    if (!d->rows) line(s, d->page ? "No older transactions." : empty_history_text(d));
+}
+
 static void history_items(struct wallet_screen *s)
 {
     const struct data *d = &st.d;
     char text[WALLET_TEXT_MAX];
     title(s, "History");
-    if (d->history_pending) line(s, "Loading…");
-    else if (d->history_failed) note(s, "History could not be read. Check that your node is running, then open History again.");
-    else if (!d->rows && d->page) line(s, "No older transactions.");
-    else if (!d->rows) line(s, empty_history_text(d));
+    history_status(s, d);
     for (size_t i = 0; i < d->rows; ++i) {
         row_text(&d->entry[i], text, sizeof(text));
         struct wallet_item *item = add(s, WALLET_ITEM_BUTTON, WALLET_ACT_DETAIL, text);
@@ -525,6 +545,11 @@ static void read_entry(const struct json_value *row, struct entry *e)
     e->shield = !shielded ? SHIELD_UNKNOWN : json_get_bool(shielded) ? SHIELD_FULL : SHIELD_PART;
 }
 /* Reads the page. False when the reply is not exactly the typed frame, which is an error and not an empty wallet. */
+static enum history_state read_history_state(const struct json_value *data)
+{
+    const char *state = text_of(data, "shielded_state");
+    return is(state, "ok") ? HIST_OK : is(state, "keys_unavailable") ? HIST_HIDDEN : HIST_UNSAID;
+}
 static bool read_page(const struct json_value *data)
 {
     const struct json_value *entries = typed(data, "entries", JSON_ARR), *count = typed(data, "count", JSON_INT);
@@ -534,6 +559,7 @@ static bool read_page(const struct json_value *data)
     if (next->type != JSON_NULL && !(next->type == JSON_STR && wallet_cursor_valid(json_get_str(next)))) return false;
     for (size_t i = 0; i < json_size(entries); ++i) if (json_at(entries, i)->type != JSON_OBJ) return false;
     for (size_t i = 0; i < json_size(entries); ++i) read_entry(json_at(entries, i), &st.d.entry[i]);
+    st.d.history_state = read_history_state(data);
     st.d.rows = json_size(entries);
     st.d.has_more = next->type == JSON_STR;
     if (st.d.has_more) copy(st.d.next, sizeof(st.d.next), json_get_str(next));
@@ -544,6 +570,7 @@ static void apply_history(bool ok, const char *json)
     struct json_value root;
     const struct json_value *data;
     st.d.history_pending = false;
+    st.d.history_state = HIST_UNSAID;
     st.d.rows = 0;
     st.d.has_more = false;
     json_init(&root);

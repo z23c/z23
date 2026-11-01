@@ -195,10 +195,15 @@ test-wallet:
 	  $(SPEECH_JSON) -o '$(BUILD_DIR)/wallet-run-test'
 	@set -e; scratch=$$(mktemp -d '$(BUILD_DIR)/wallet-run.XXXXXX'); \
 	  trap 'rm -rf "$$scratch"' 0; ZAPP_TEST_DIR="$$(cd "$$scratch" && pwd)" '$(BUILD_DIR)/wallet-run-test'
+	$(HOST_CC) $(HOST_WARNINGS) $(SPEECH_INCLUDES) tests/json_wipe_test.c $(SPEECH_JSON) -Wl,--wrap=realloc -Wl,--wrap=free \
+	  -o '$(BUILD_DIR)/json-wipe-test'
+	'$(BUILD_DIR)/json-wipe-test'
 	@if grep -nwE 'printf|fprintf|puts|perror|__android_log_print|__android_log_write' wallet_screens.c wallet_ui.c; then \
 	  echo 'wallet screens must not write to a log or console' >&2; exit 1; fi
 	@if grep -nE '#include "(wallet_screens|wallet_view|wallet_ui|payment_code)\.h"' $(WALLET_FREE); then \
 	  echo 'only the wallet files, the command layer and the shell may include the wallet headers' >&2; exit 1; fi
+	@if test "$$(grep -c wallet_screens_close shell.c)" != 1; then \
+	  echo 'the shell may close the wallet screens only when it is destroyed; every other exit pauses them' >&2; exit 1; fi
 	@if grep -nE 'setTextIsSelectable", true|ClipboardManager|setPrimaryClip' wallet_ui.c; then \
 	  echo 'wallet text must not be selectable or copied' >&2; exit 1; fi
 
