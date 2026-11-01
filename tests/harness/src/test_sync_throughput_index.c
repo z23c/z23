@@ -35,9 +35,7 @@ struct st_flat_fixture {
 static void st_flat_build(struct st_flat_fixture *fx, int n, int *failures)
 {
     memset(fx, 0, sizeof(*fx));
-    memset(&fx->ms, 0, sizeof(fx->ms));
-    block_map_init(&fx->ms.map_block_index);
-    active_chain_init(&fx->ms.chain_active);
+    main_state_init(&fx->ms);
     struct uint256 prev;
     memset(&prev, 0, sizeof(prev));
     for (int h = 0; h < n; h++) {
@@ -86,7 +84,7 @@ static void st_flat_teardown(struct st_flat_fixture *fx)
     snprintf(path, sizeof(path), "%s/block_index.bin", fx->dir);
     unlink(path);
     rmdir(fx->dir);
-    block_map_free(&fx->ms.map_block_index);
+    main_state_free(&fx->ms);
     fx->live = 0;
 }
 

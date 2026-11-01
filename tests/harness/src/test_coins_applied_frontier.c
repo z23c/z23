@@ -469,15 +469,14 @@ static int caf_g_self_derived(struct caf_branch *br,
         failures += caf_g_before_fold(pdb);
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         active_chain_move_window_tip(&ms.chain_active, &br->blocks[br->n - 1]);
         struct caf_ctx ctx = { .active = br, .ext = ext, .n_ext = 0 };
         failures += caf_g_fold_branch(pdb, br, &ms, &ctx);
         failures += caf_g_after_fold(pdb, br->n);
 
         utxo_apply_stage_shutdown();
-        active_chain_free(&ms.chain_active);
+        main_state_free(&ms);
         event_log_close(lg);
     }
     progress_store_close();
@@ -511,8 +510,7 @@ static int caf_g_borrowed(struct caf_branch *br,
                   !caf_meta_is_one(pdb, COINS_KV_SELF_FOLDED_KEY));
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         active_chain_move_window_tip(&ms.chain_active, &br->blocks[br->n - 1]);
         struct caf_ctx ctx = { .active = br, .ext = ext, .n_ext = 0 };
         failures += caf_g_fold_branch(pdb, br, &ms, &ctx);
@@ -528,7 +526,7 @@ static int caf_g_borrowed(struct caf_branch *br,
                   !coins_kv_contains_refold_marker(pdb));
 
         utxo_apply_stage_shutdown();
-        active_chain_free(&ms.chain_active);
+        main_state_free(&ms);
         event_log_close(lg);
     }
     progress_store_close();
@@ -747,8 +745,7 @@ static int caf_a_session(sqlite3 *pdb, const struct caf_ext_coin *ext,
     seed_base_coins(pdb, ext, 2);
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     active_chain_move_window_tip(&ms.chain_active, &L->blocks[L->n - 1]);
 
     struct caf_ctx ctx = { .active = L, .ext = ext, .n_ext = 2 };
@@ -775,7 +772,7 @@ static int caf_a_session(sqlite3 *pdb, const struct caf_ext_coin *ext,
     failures += caf_a_reorg_readvance(pdb, W);
 
     utxo_apply_stage_shutdown();
-    active_chain_free(&ms.chain_active);
+    main_state_free(&ms);
     return failures;
 }
 
@@ -812,8 +809,7 @@ static int caf_b_session(sqlite3 *pdb, const struct caf_ext_coin *ext,
 {
     int failures = 0;
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     active_chain_move_window_tip(&ms.chain_active, &F->blocks[F->n - 1]);
 
     struct caf_ctx ctx = { .active = F, .ext = ext, .n_ext = 0 };
@@ -845,7 +841,7 @@ static int caf_b_session(sqlite3 *pdb, const struct caf_ext_coin *ext,
     blocker_clear("utxo_apply.apply_failed");
 
     utxo_apply_stage_shutdown();
-    active_chain_free(&ms.chain_active);
+    main_state_free(&ms);
     return failures;
 }
 
@@ -1094,8 +1090,7 @@ static int caf_e_session(sqlite3 *pdb, const struct caf_ext_coin *ext,
 {
     int failures = 0;
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     active_chain_move_window_tip(&ms.chain_active, &R->blocks[R->n - 1]);
 
     /* n_ext = 0 → caf_lookup never resolves the phantom spend. */
@@ -1124,7 +1119,7 @@ static int caf_e_session(sqlite3 *pdb, const struct caf_ext_coin *ext,
     blocker_clear("utxo_apply.apply_failed");
 
     utxo_apply_stage_shutdown();
-    active_chain_free(&ms.chain_active);
+    main_state_free(&ms);
     return failures;
 }
 
@@ -1294,8 +1289,7 @@ static int caf_h_fold_dir(const char *tag, int nblocks,
     CAF_CHECK("selfmint: schema ready", schema);
     if (lg && built && schema) {
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         active_chain_move_window_tip(&ms.chain_active, &H.blocks[H.n - 1]);
         struct caf_ctx ctx = { .active = &H, .ext = NULL, .n_ext = 0 };
         failures += caf_g_fold_branch(pdb, &H, &ms, &ctx);
@@ -1328,7 +1322,7 @@ static int caf_h_fold_dir(const char *tag, int nblocks,
             }
         }
         utxo_apply_stage_shutdown();
-        active_chain_free(&ms.chain_active);
+        main_state_free(&ms);
     }
     if (lg)
         event_log_close(lg);

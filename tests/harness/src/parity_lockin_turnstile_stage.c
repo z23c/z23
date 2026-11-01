@@ -243,11 +243,9 @@ static bool pt_seed_script(sqlite3 *db, const struct pt_chain *c)
 static int pt_setup(const char *tag, char *dir, size_t dir_size,
                     struct main_state *ms, struct pt_chain *c)
 {
-    /* *ms is zeroed and its chain and block map are initialised before the
-     * first failure return, so every return path leaves *ms initialised. */
-    memset(ms, 0, sizeof(*ms));
-    active_chain_init(&ms->chain_active);
-    block_map_init(&ms->map_block_index);
+    /* *ms is fully initialised (mutex, chain, block map) before the first
+     * failure return, so every return path leaves *ms initialised. */
+    main_state_init(ms);
     test_fmt_tmpdir(dir, dir_size, "utxo_apply", tag);
     if (mkdir("./test-tmp", 0700) != 0 && errno != EEXIST)
         return 1;
@@ -274,8 +272,7 @@ static void pt_teardown(const char *dir, struct main_state *ms,
                         struct pt_chain *c)
 {
     utxo_apply_stage_shutdown();
-    active_chain_free(&ms->chain_active);
-    block_map_free(&ms->map_block_index);
+    main_state_free(ms);
     pt_free(c);
     projection_store_close();
     progress_store_close();

@@ -124,6 +124,7 @@ static bool fixture_init(struct prune_fixture *f, int num_blocks,
                          const char *tag)
 {
     memset(f, 0, sizeof(*f));
+    main_state_init(&f->ms);   /* before any early return: fixture_destroy frees it */
     f->num_blocks = num_blocks;
     snprintf(f->datadir, sizeof(f->datadir),
              PRUNE_SCRATCH "_%d_%s", (int)getpid(), tag);
@@ -150,7 +151,6 @@ static bool fixture_init(struct prune_fixture *f, int num_blocks,
     }
 
     /* Set up active chain */
-    active_chain_init(&f->ms.chain_active);
     active_chain_move_window_tip(&f->ms.chain_active, &f->blocks[num_blocks - 1]);
 
     /* Init pruning service */
@@ -160,7 +160,7 @@ static bool fixture_init(struct prune_fixture *f, int num_blocks,
 
 static void fixture_destroy(struct prune_fixture *f)
 {
-    active_chain_free(&f->ms.chain_active);
+    main_state_free(&f->ms);
     free(f->blocks);
     free(f->hashes);
 
@@ -620,8 +620,7 @@ static int prune_case_status_snapshot(void)
     {
         struct block_pruning_service svc;
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
 
         block_pruning_init(&svc, &ms, "/tmp/fake");
 
@@ -634,7 +633,7 @@ static int prune_case_status_snapshot(void)
         PRUNE_CHECK("prune: default keep_blocks is 1000",
                     st.keep_blocks == BLOCK_PRUNING_DEFAULT_KEEP_BLOCKS);
 
-        active_chain_free(&ms.chain_active);
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -662,8 +661,7 @@ static int prune_case_min_keep(void)
     {
         struct block_pruning_service svc;
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
 
         /* Temporarily set env to something too low */
         setenv("ZCL_PRUNE_KEEP_BLOCKS", "10", 1);
@@ -679,7 +677,7 @@ static int prune_case_min_keep(void)
 
         /* Clean up env */
         unsetenv("ZCL_PRUNE_KEEP_BLOCKS");
-        active_chain_free(&ms.chain_active);
+        main_state_free(&ms);
     }
     return failures;
 }

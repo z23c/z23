@@ -391,7 +391,7 @@ static bool la_fold_args_ok(int n, int start_cursor, int body_gap)
 static void la_fold_release(struct main_state *ms, struct la_chain *sc)
 {
     la_chain_free(sc);
-    active_chain_free(&ms->chain_active);
+    main_state_free(ms);
     progress_store_close();
 }
 
@@ -485,8 +485,7 @@ static void la_fold_from(struct la_result *out, const char *tag, int n,
     test_make_tmpdir(dir, sizeof(dir), "pv_lookahead", tag);
     if (!progress_store_open(dir))
         return;
-    memset(&ms, 0, sizeof(ms));
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     if (!la_chain_build(&sc, n, plain_first)) {
         progress_store_close();
         return;
@@ -566,7 +565,7 @@ static void la_pool_fixture_init(struct la_pool_fixture *fx, const char *tag,
     memset(fx, 0, sizeof(*fx));
     test_make_tmpdir(fx->dir, sizeof(fx->dir), "pv_lookahead", tag);
     fx->ok = progress_store_open(fx->dir);
-    active_chain_init(&fx->ms.chain_active);
+    main_state_init(&fx->ms);
     fx->ok = fx->ok && la_chain_build(&fx->sc, n, false);
     if (!fx->ok)
         return;
@@ -582,7 +581,7 @@ static void la_pool_fixture_destroy(struct la_pool_fixture *fx)
     if (fx->stage_up)
         proof_validate_stage_shutdown();   /* stops the pool first */
     la_chain_free(&fx->sc);
-    active_chain_free(&fx->ms.chain_active);
+    main_state_free(&fx->ms);
     progress_store_close();
     test_cleanup_tmpdir(fx->dir);
 }
@@ -991,8 +990,7 @@ static int la_test_keying(void)
     struct la_chain sc;
     test_make_tmpdir(dir, sizeof(dir), "pv_lookahead", "keying");
     bool setup = progress_store_open(dir);
-    memset(&ms, 0, sizeof(ms));
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     setup = setup && la_chain_build(&sc, 4, false);
     if (setup) {
         active_chain_move_window_tip(&ms.chain_active, &sc.blocks[3]);
@@ -1021,7 +1019,7 @@ static int la_test_keying(void)
                !pv_lookahead_take(2, &sc.hashes[2], la_verifier, &sc, &v));
     proof_validate_stage_shutdown();
     la_chain_free(&sc);
-    active_chain_free(&ms.chain_active);
+    main_state_free(&ms);
     progress_store_close();
     test_cleanup_tmpdir(dir);
     return failures;

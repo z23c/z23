@@ -410,6 +410,9 @@ static void cg_seed_tip(int height, const struct uint256 *hash)
 static int cg_setup(const char *tag, char *dir_out, size_t dir_out_size,
                     struct main_state *ms, struct cg_chain *sc)
 {
+    /* Init first so every early return below leaves a valid state for
+     * cg_teardown (a zeroed cs_main is not a valid mutex on Darwin). */
+    main_state_init(ms);
     test_fmt_tmpdir(dir_out, dir_out_size, "contextual_gate", tag);
     cg_mkdir_p("./test-tmp");
     cg_mkdir_p(dir_out);
@@ -417,9 +420,6 @@ static int cg_setup(const char *tag, char *dir_out, size_t dir_out_size,
     if (!SetDataDir(dir_out)) return 3;
     if (!progress_store_open(dir_out)) return 1;
 
-    memset(ms, 0, sizeof(*ms));
-    zcl_mutex_init(&ms->cs_main);
-    active_chain_init(&ms->chain_active);
     if (!cg_chain_build(sc, CG_CHAIN_LEN)) return 2;
     return 0;
 }
@@ -442,8 +442,7 @@ static void cg_teardown(const char *dir, struct main_state *ms,
 {
     script_validate_stage_shutdown();
     cg_seed_tip(-1, NULL);  /* never leak a finalized tip to later tests */
-    active_chain_free(&ms->chain_active);
-    zcl_mutex_destroy(&ms->cs_main);
+    main_state_free(ms);
     cg_chain_free(sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);

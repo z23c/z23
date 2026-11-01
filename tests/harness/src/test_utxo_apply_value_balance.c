@@ -885,8 +885,7 @@ static int uavb_check_reorg_finality_clamp(struct uavb_coin coin)
         }
 
         struct main_state ms;
-        memset(&ms, 0, sizeof(ms));
-        active_chain_init(&ms.chain_active);
+        main_state_init(&ms);
         bool chain_up = active_chain_move_window_tip(&ms.chain_active,
                                                      &nodes[UAVB_ON - 1]);
         UAVB_CHECK("(o) active chain builds", chain_up);
@@ -906,7 +905,7 @@ static int uavb_check_reorg_finality_clamp(struct uavb_coin coin)
         }
         if (st)
             stage_destroy(st);
-        active_chain_free(&ms.chain_active);
+        main_state_free(&ms);
         uavb_repair_fixture_close(dir);
     }
     return failures;

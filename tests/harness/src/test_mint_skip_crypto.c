@@ -594,10 +594,8 @@ static int run_fold(const char *tag, struct synth_chain *sc, bool skip,
     memset(out, 0, sizeof(*out));
     out->count = -1;
 
-    memset(&ms, 0, sizeof(ms));
     /* A zeroed pthread mutex is only valid on Linux; Darwin needs it initialized. */
-    zcl_mutex_init(&ms.cs_main);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     for (int h = 0; h < sc->n; h++)
         sc->blocks[h].nStatus = BLOCK_HAVE_DATA;
     active_chain_move_window_tip(&ms.chain_active, &sc->blocks[sc->n - 1]);
@@ -652,8 +650,7 @@ done:
     proof_validate_stage_shutdown();
     script_validate_stage_shutdown();
     mint_skip_crypto_set(false);        /* never leak the toggle to other tests */
-    active_chain_free(&ms.chain_active);
-    zcl_mutex_destroy(&ms.cs_main);
+    main_state_free(&ms);
     progress_store_close();
     test_cleanup_tmpdir(dir);
     return drained;
