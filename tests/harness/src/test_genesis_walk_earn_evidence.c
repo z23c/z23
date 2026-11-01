@@ -149,6 +149,22 @@ static bool gw_follow_to_tip(struct gw_fixture *f)
     return true;
 }
 
+static void gw_free(struct gw_fixture *f);
+
+/* Undo what gw_init opened before a store failed to open: the caller never
+ * sees, uses or frees a partial fixture. */
+static bool gw_init_fail(struct gw_fixture *f, bool progress_store_opened)
+{
+    if (progress_store_opened)
+        progress_store_close();
+    main_state_free(&f->ms);
+    test_cleanup_tmpdir(f->dir);
+    csr_test_reset_singleton();
+    return false;
+}
+
+/* True with a complete fixture the caller must gw_free; false with nothing
+ * left to free. */
 static bool gw_init(struct gw_fixture *f)
 {
     memset(f, 0, sizeof(*f));
@@ -157,8 +173,10 @@ static bool gw_init(struct gw_fixture *f)
     csr_test_reset_singleton();
     main_state_init(&f->ms);
     test_make_tmpdir(f->dir, sizeof(f->dir), "genesis_walk_earn", "t");
-    if (!progress_store_open(f->dir) || !node_db_open(&f->ndb, ":memory:"))
-        return false;
+    if (!progress_store_open(f->dir))
+        return gw_init_fail(f, false);
+    if (!node_db_open(&f->ndb, ":memory:"))
+        return gw_init_fail(f, true);
     gw_seed_coins();
     gw_init_blocks(f);
     struct coins_view null_view;
@@ -171,7 +189,10 @@ static bool gw_init(struct gw_fixture *f)
     f->svc.ndb = &f->ndb;
     atomic_store(&f->svc.verified_tip_height, -1);
     atomic_store(&f->svc.progress.verified_height, -1);
-    return gw_follow_to_tip(f);
+    if (gw_follow_to_tip(f))
+        return true;
+    gw_free(f);
+    return false;
 }
 
 static void gw_free(struct gw_fixture *f)
@@ -227,7 +248,8 @@ static int test_completed_genesis_walk_publishes(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    failures += gw_check("fixture", gw_init(&f));
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
     struct chain_evidence_controller_view v;
     gw_view(&f, &v);
     failures += gw_check("forward record carries neither flag before the walk",
@@ -260,7 +282,8 @@ static int test_same_height_reorg_refuses(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    failures += gw_check("fixture", gw_init(&f));
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
     gw_walk_verified(&f, 5, 0);
     failures += gw_check("walk verified a rival of the active tip: refuses, untouched",
              refuses(&f, false) == 0);
@@ -272,7 +295,8 @@ static int test_no_verified_hash_refuses(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    failures += gw_check("fixture", gw_init(&f));
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
     atomic_store(&f.svc.progress.verified_height, GW_TIP);
     failures += gw_check("height without a walked hash (resume) refuses",
              refuses(&f, false) == 0);
@@ -284,7 +308,8 @@ static int test_best_work_failure_refuses(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    failures += gw_check("fixture", gw_init(&f));
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
     gw_walk_verified(&f, GW_TIP, 0);
     arith_uint256_set_u64(&f.blocks[5].nChainWork, 99);
     failures += gw_check("a connectable higher-work rival vetoes: refuses, untouched",
@@ -297,7 +322,8 @@ static int test_walk_gaps_refuse(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    failures += gw_check("fixture", gw_init(&f));
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
     gw_walk_verified(&f, GW_TIP, 1);
     failures += gw_check("script skips refuse", refuses(&f, false) == 0);
     gw_walk_verified(&f, GW_TIP, 0);
@@ -315,7 +341,8 @@ static int test_snapshot_seeded_path_unchanged(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    failures += gw_check("fixture", gw_init(&f));
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
     gw_walk_verified(&f, GW_TIP, 0);
     failures += gw_check("assisted path without root-bound snapshot evidence refuses "
              "and earns nothing", refuses(&f, true) == 0);
@@ -329,7 +356,8 @@ static int test_authority_survives_advance_and_restart(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    failures += gw_check("fixture", gw_init(&f));
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
     gw_walk_verified(&f, GW_TIP, 0);
     failures += gw_check("publishes", bg_validation_authority_publish(
                               &f.svc, false, true).ok);
@@ -368,7 +396,8 @@ static int test_earn_refuses_when_tip_moves_before_write(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    failures += gw_check("fixture", gw_init(&f));
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
     g_hook_fixture = &f;
     chain_evidence_earn_test_set_before_write_hook(hook_move_persisted_tip);
     struct zcl_result r = chain_evidence_controller_earn_active_tip_evidence(
@@ -391,7 +420,8 @@ static int test_mark_at_tip_moved_is_retryable_not_frozen(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    failures += gw_check("fixture", gw_init(&f));
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
     struct zcl_result e = chain_evidence_controller_earn_active_tip_evidence(
         &f.authority, &f.hashes[GW_TIP], f.blocks[GW_TIP].nHeight, true,
         true);
@@ -462,7 +492,8 @@ static int test_two_thread_earn_waits_for_live_advance(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    failures += gw_check("fixture", gw_init(&f));
+    if (!gw_init(&f))
+        return gw_check("fixture", false);
     atomic_store(&g_b_parked, 0);
     atomic_store(&g_b_release, 0);
     atomic_store(&g_a_done, 0);
@@ -554,7 +585,10 @@ static int test_mark_refuses_same_height_rival_after_scan(void)
     int failures = 0;
     for (int mode = 0; mode < 2; mode++) {
         struct gw_fixture f;
-        failures += gw_check("fixture", gw_init(&f));
+        if (!gw_init(&f)) {
+            failures += gw_check("fixture", false);
+            continue;
+        }
         failures += refused_retryable_unpublished(&f, mode);
         gw_free(&f);
     }
