@@ -138,32 +138,62 @@ static bool shk_oversized_tor_log(const char *datadir, int64_t bound,
     return shk_write_file(path_out, bound + 4096);
 }
 
-/* Poll (bounded count, never graded on elapsed time) until the sweep counter
- * reaches `want`. */
-static bool shk_wait_sweeps(int64_t want)
+/* The one wait in this group: the service runs on its own thread, so a case
+ * polls `done(arg)` up to `tries` times, 20 ms apart. The try count only ends
+ * a hung case; the predicate is what is checked, never the elapsed time. */
+static bool shk_poll(bool (*done)(void *), void *arg, int tries)
 {
-    for (int i = 0; i < 500; i++) {
-        struct storage_housekeeping_stats s;
-        storage_housekeeping_stats(&s);
-        if (s.sweeps >= want)
+    for (int i = 0; i < tries; i++) {
+        if (done(arg))
             return true;
-        platform_sleep_ms(20);
+        platform_sleep_ms(20); /* real-clock: bounded wait on the service thread; the predicate is the check, the try count only ends a hung case */
     }
     return false;
+}
+
+static bool shk_sweeps_reached(void *arg)
+{
+    struct storage_housekeeping_stats s;
+    storage_housekeeping_stats(&s);
+    return s.sweeps >= *(const int64_t *)arg;
+}
+
+static bool shk_finished_reached(void *arg)
+{
+    struct storage_housekeeping_stats s;
+    storage_housekeeping_stats(&s);
+    return s.sweeps_finished >= *(const int64_t *)arg;
+}
+
+static bool shk_interrupted_above(void *arg)
+{
+    struct storage_housekeeping_stats s;
+    storage_housekeeping_stats(&s);
+    return s.sweeps_interrupted > *(const int64_t *)arg;
+}
+
+static bool shk_flag_set(void *arg)
+{
+    return atomic_load((atomic_bool *)arg);
+}
+
+static bool shk_thread_gone(void *arg)
+{
+    (void)arg;
+    return !storage_housekeeping_test_thread_running();
+}
+
+/* Poll until the sweep counter reaches `want`. */
+static bool shk_wait_sweeps(int64_t want)
+{
+    return shk_poll(shk_sweeps_reached, &want, 500);
 }
 
 /* Same poll, on sweeps that ran to their end (every step attempted); an
  * interrupted sweep never counts. */
 static bool shk_wait_finished(int64_t want)
 {
-    for (int i = 0; i < 500; i++) {
-        struct storage_housekeeping_stats s;
-        storage_housekeeping_stats(&s);
-        if (s.sweeps_finished >= want)
-            return true;
-        platform_sleep_ms(20);
-    }
-    return false;
+    return shk_poll(shk_finished_reached, &want, 500);
 }
 
 /* ── 1b. the boot service start must not wait on a held storage lock ── */
@@ -212,12 +242,7 @@ static int shk_case_boot_start_not_blocked_by_held_lock(void)
         test_cleanup_tmpdir(dir);
         return failures;
     }
-    bool returned = false;
-    for (int i = 0; i < 250 && !returned; i++) {
-        returned = atomic_load(&ctx.start_returned);
-        if (!returned)
-            platform_sleep_ms(20);
-    }
+    bool returned = shk_poll(shk_flag_set, &ctx.start_returned, 250);
     SHK_CHECK("boot start returns while the maintenance token is held",
               returned);
 
@@ -272,12 +297,7 @@ static int shk_case_stop_ends_sweep_blocked_on_token(void)
         test_cleanup_tmpdir(dir);
         return failures;
     }
-    bool stopped = false;
-    for (int i = 0; i < 250 && !stopped; i++) {
-        stopped = atomic_load(&done);
-        if (!stopped)
-            platform_sleep_ms(20);
-    }
+    bool stopped = shk_poll(shk_flag_set, &done, 250);
     SHK_CHECK("stop returns while the first sweep waits on the token",
               stopped);
 
@@ -346,24 +366,13 @@ static int shk_case_stop_after_token_won(void)
     /* Do NOT call stop() yet: it would latch the flag itself and the thread
      * could see it before winning the token, hiding the race. Wait until the
      * hook-latched stop has ended the sweep, then join. */
-    bool ended = false;
-    for (int i = 0; i < 500 && !ended; i++) {
-        struct storage_housekeeping_stats s;
-        storage_housekeeping_stats(&s);
-        ended = s.sweeps_interrupted > before.sweeps_interrupted;
-        if (!ended)
-            platform_sleep_ms(20);
-    }
+    int64_t interrupted_before = before.sweeps_interrupted;
+    bool ended = shk_poll(shk_interrupted_above, &interrupted_before, 500);
     SHK_CHECK("after-token: the sweep ended on the hook-latched stop", ended);
     /* The hook-stopped thread exits by itself. Wait for that, then stop()
      * must still join it exactly once (a stop that returned early would leave
      * the worker unjoined). */
-    bool exited = false;
-    for (int i = 0; i < 500 && !exited; i++) {
-        exited = !storage_housekeeping_test_thread_running();
-        if (!exited)
-            platform_sleep_ms(20);
-    }
+    bool exited = shk_poll(shk_thread_gone, NULL, 500);
     SHK_CHECK("after-token: the thread exited by itself", exited);
     uint64_t joins_before = storage_housekeeping_test_joins();
     storage_housekeeping_stop();
