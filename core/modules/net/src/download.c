@@ -889,76 +889,175 @@ size_t dl_queue_blocks(struct download_manager *dm,
     return dl_queue_blocks_class(dm, hashes, heights, count, DL_WORK_FORWARD);
 }
 
-size_t dl_queue_blocks_class(struct download_manager *dm,
-                             const struct uint256 *hashes,
-                             const int32_t *heights,
-                             size_t count,
-                             enum dl_work_class work_class)
+struct dl_stage_step {
+    size_t n;
+    bool promoted;
+};
+
+struct dl_stage_batch {
+    struct dl_stage_item *items;
+    size_t n;
+    bool promoted;
+};
+
+/* Skip an in-flight hash, promote queued history, or append one staged row. */
+static struct dl_stage_step dl_stage_one(struct download_manager *dm,
+                                        const struct uint256 *hash,
+                                        const int32_t *height,
+                                        enum dl_work_class work_class,
+                                        int64_t now_q,
+                                        struct dl_stage_item *items,
+                                        size_t n,
+                                        bool promoted)
 {
-    if (!dm || !hashes ||
-        (work_class != DL_WORK_FORWARD && work_class != DL_WORK_HISTORY))
-        return 0;
-    zcl_mutex_lock(&dm->cs);
+    struct dl_stage_step step = { n, promoted };
+    struct dl_in_flight *s = find_slot(dm, hash, false);
+    /* Skip live (in-flight) hashes and received-pending tombstones:
+     * the body is already on its way onto disk, so re-queueing it
+     * here is what produced the duplicate-download traffic. */
+    if (s && dl_slot_blocks_requeue(dm, s, now_q))
+        return step;
+    const struct dl_queued_key *queued = dl_qset_find(dm, hash);
+    if (queued) {
+        if (work_class == DL_WORK_FORWARD &&
+            queued->work_class == DL_WORK_HISTORY)
+            step.promoted = dl_promote_queued_history(dm, hash, height) ||
+                            step.promoted;
+        return step;
+    }
+    dl_qset_insert_raw(dm, hash, work_class);
+    items[step.n].hash = *hash;
+    items[step.n].height = height ? *height : -1;
+    items[step.n].work_class = work_class;
+    step.n++;
+    return step;
+}
 
-    /* Bulk enqueue is sort + single merge, NOT count repeated sorted
-     * inserts: callers legitimately hand over tens of thousands of
-     * blocks per call (gap_fill window, header batches), and a per-item
-     * insert is an O(queue_len) memmove — O(n^2) per call while holding
-     * cs, which starves the whole node. */
+/* True when the manager, hash list, and work class can be enqueued. */
+static bool dl_queue_blocks_args_ok(const struct download_manager *dm,
+                                    const struct uint256 *hashes,
+                                    enum dl_work_class work_class)
+{
+    return dm && hashes &&
+           (work_class == DL_WORK_FORWARD || work_class == DL_WORK_HISTORY);
+}
 
+static struct dl_stage_batch dl_stage_incoming(struct download_manager *dm,
+                                              const struct uint256 *hashes,
+                                              const int32_t *heights,
+                                              size_t count,
+                                              enum dl_work_class work_class)
+{
+    struct dl_stage_batch batch = {0};
     /* 1. Filter into a staging array: not in-flight, not queued, not a
      *    duplicate within this batch (the qset insert handles that).
      *    Capacity is reserved ONCE up-front so no rebuild can fire
      *    mid-loop — a mid-batch rebuild repopulates from dm->queue only
      *    and would wipe the staged hashes' membership (see
      *    dl_qset_reserve_n). */
-    struct dl_stage_item *stage = NULL;
-    size_t n_stage = 0;
-    bool promoted = false;
     if (count > 0)
-        stage = zcl_malloc(count * sizeof(*stage), "dl_stage");
-    if (!stage) {
-        zcl_mutex_unlock(&dm->cs);
-        return 0;
-    }
+        batch.items = zcl_malloc(count * sizeof(*batch.items), "dl_stage");
+    if (!batch.items)
+        return batch;
     dl_qset_reserve_n(dm, count);
     const int64_t now_q = (int64_t)platform_time_wall_time_t();
     for (size_t i = 0; i < count; i++) {
-        struct dl_in_flight *s = find_slot(dm, &hashes[i], false);
-        /* Skip live (in-flight) hashes and received-pending tombstones:
-         * the body is already on its way onto disk, so re-queueing it
-         * here is what produced the duplicate-download traffic. */
-        if (s && dl_slot_blocks_requeue(dm, s, now_q)) continue;
-        const struct dl_queued_key *queued = dl_qset_find(dm, &hashes[i]);
-        if (queued) {
-            if (work_class == DL_WORK_FORWARD &&
-                queued->work_class == DL_WORK_HISTORY)
-                promoted = dl_promote_queued_history(
-                    dm, &hashes[i],
-                    heights ? &heights[i] : NULL) || promoted;
-            continue;
+        const int32_t *height = heights ? &heights[i] : NULL;
+        struct dl_stage_step step = dl_stage_one(
+            dm, &hashes[i], height, work_class, now_q,
+            batch.items, batch.n, batch.promoted);
+        batch.n = step.n;
+        batch.promoted = step.promoted;
+    }
+    return batch;
+}
+
+/* Walk queue and stage in order, writing every merged row. */
+static void dl_merge_fill(const struct download_manager *dm,
+                          const struct dl_stage_item *stage, size_t n_stage,
+                          struct uint256 *mh, int32_t *mg,
+                          uint32_t *map, int64_t *mau,
+                          enum dl_work_class *mc)
+{
+    size_t qi = 0, si = 0, mi = 0;
+    while (qi < dm->queue_len || si < n_stage) {
+        bool take_stage;
+        if (qi >= dm->queue_len)      take_stage = true;
+        else if (si >= n_stage)       take_stage = false;
+        else take_stage = dl_queue_order(
+                              stage[si].work_class, stage[si].height,
+                              dm->queue_classes[qi],
+                              dm->queue_heights[qi]) < 0;
+        if (take_stage) {
+            mh[mi] = stage[si].hash;
+            mg[mi] = stage[si].height;
+            map[mi] = 0;
+            mau[mi] = 0;
+            mc[mi] = stage[si].work_class;
+            si++;
+        } else {
+            mh[mi] = dm->queue[qi];
+            mg[mi] = dm->queue_heights[qi];
+            map[mi] = dm->queue_avoid_peers[qi];
+            mau[mi] = dm->queue_avoid_until[qi];
+            mc[mi] = dm->queue_classes[qi];
+            qi++;
         }
-        dl_qset_insert_raw(dm, &hashes[i], work_class);
-        stage[n_stage].hash = hashes[i];
-        stage[n_stage].height = heights ? heights[i] : -1;
-        stage[n_stage].work_class = work_class;
-        n_stage++;
+        mi++;
     }
-    if (n_stage == 0) {
-        if (promoted)
-            dl_generation_advance(&dm->queue_generation);
-        free(stage);
-        zcl_mutex_unlock(&dm->cs);
-        return 0;
+}
+
+/* Install the lowest queue_cap merged rows and count staged rows kept. */
+static size_t dl_merge_keep(struct download_manager *dm,
+                            const struct dl_stage_item *stage, size_t n_stage,
+                            size_t total, struct uint256 *mh, int32_t *mg,
+                            uint32_t *map, int64_t *mau,
+                            enum dl_work_class *mc)
+{
+    size_t keep = total > dm->queue_cap ? dm->queue_cap : total;
+    for (size_t i = keep; i < total; i++) {
+        dl_qset_remove(dm, &mh[i]);
+        dm->total_queue_evicted++;
     }
+    memcpy(dm->queue, mh, keep * sizeof(*mh));
+    memcpy(dm->queue_heights, mg, keep * sizeof(*mg));
+    memcpy(dm->queue_avoid_peers, map, keep * sizeof(*map));
+    memcpy(dm->queue_avoid_until, mau, keep * sizeof(*mau));
+    memcpy(dm->queue_classes, mc, keep * sizeof(*mc));
+    dm->queue_len = keep;
+    /* Count the newcomers that survived the cap: a newcomer is in
+     * the queue iff its membership entry is still live. */
+    size_t added = n_stage;
+    if (total > keep) {
+        added = 0;
+        for (size_t i = 0; i < n_stage; i++)
+            if (dl_qset_contains(dm, &stage[i].hash))
+                added++;
+    }
+    return added;
+}
 
-    /* 2. Sort the newcomers by height (lowest first). */
-    qsort(stage, n_stage, sizeof(*stage), dl_stage_cmp);
+static size_t dl_stage_push_fallback(struct download_manager *dm,
+                                     const struct dl_stage_item *stage,
+                                     size_t n_stage)
+{
+    /* Alloc failure: fall back to per-item sorted inserts (rare;
+     * correctness over speed). qset entries for items the push
+     * rejects must be erased. */
+    size_t added = 0;
+    for (size_t i = 0; i < n_stage; i++) {
+        dl_qset_remove(dm, &stage[i].hash);
+        if (dl_queue_push(dm, &stage[i].hash, stage[i].height, 0, 0,
+                          stage[i].work_class))
+            added++;
+    }
+    return added;
+}
 
-    /* 3. Grow toward the merged size (bounded by DL_QUEUE_MAX_CAP). */
-    while (dm->queue_len + n_stage > dm->queue_cap && dl_queue_grow(dm))
-        ;
-
+static size_t dl_merge_staged_or_push(struct download_manager *dm,
+                                      const struct dl_stage_item *stage,
+                                      size_t n_stage)
+{
     /* 4. Single forward merge of (queue, stage) into fresh buffers,
      *    keeping only the lowest queue_cap entries; everything past the
      *    cap (the highest heights, from either source) is dropped and
@@ -972,71 +1071,61 @@ size_t dl_queue_blocks_class(struct download_manager *dm,
         zcl_calloc(total, sizeof(*mc), "dl_merge_classes");
     size_t added = 0;
     if (mh && mg && map && mau && mc) {
-        size_t qi = 0, si = 0, mi = 0;
-        while (qi < dm->queue_len || si < n_stage) {
-            bool take_stage;
-            if (qi >= dm->queue_len)      take_stage = true;
-            else if (si >= n_stage)       take_stage = false;
-            else take_stage = dl_queue_order(
-                                  stage[si].work_class, stage[si].height,
-                                  dm->queue_classes[qi],
-                                  dm->queue_heights[qi]) < 0;
-            if (take_stage) {
-                mh[mi] = stage[si].hash;
-                mg[mi] = stage[si].height;
-                map[mi] = 0;
-                mau[mi] = 0;
-                mc[mi] = stage[si].work_class;
-                si++;
-            } else {
-                mh[mi] = dm->queue[qi];
-                mg[mi] = dm->queue_heights[qi];
-                map[mi] = dm->queue_avoid_peers[qi];
-                mau[mi] = dm->queue_avoid_until[qi];
-                mc[mi] = dm->queue_classes[qi];
-                qi++;
-            }
-            mi++;
-        }
-        size_t keep = total > dm->queue_cap ? dm->queue_cap : total;
-        for (size_t i = keep; i < total; i++) {
-            dl_qset_remove(dm, &mh[i]);
-            dm->total_queue_evicted++;
-        }
-        memcpy(dm->queue, mh, keep * sizeof(*mh));
-        memcpy(dm->queue_heights, mg, keep * sizeof(*mg));
-        memcpy(dm->queue_avoid_peers, map, keep * sizeof(*map));
-        memcpy(dm->queue_avoid_until, mau, keep * sizeof(*mau));
-        memcpy(dm->queue_classes, mc, keep * sizeof(*mc));
-        dm->queue_len = keep;
-        /* Count the newcomers that survived the cap: a newcomer is in
-         * the queue iff its membership entry is still live. */
-        added = n_stage;
-        if (total > keep) {
-            added = 0;
-            for (size_t i = 0; i < n_stage; i++)
-                if (dl_qset_contains(dm, &stage[i].hash))
-                    added++;
-        }
+        dl_merge_fill(dm, stage, n_stage, mh, mg, map, mau, mc);
+        added = dl_merge_keep(dm, stage, n_stage, total,
+                              mh, mg, map, mau, mc);
     } else {
-        /* Alloc failure: fall back to per-item sorted inserts (rare;
-         * correctness over speed). qset entries for items the push
-         * rejects must be erased. */
-        for (size_t i = 0; i < n_stage; i++) {
-            dl_qset_remove(dm, &stage[i].hash);
-            if (dl_queue_push(dm, &stage[i].hash, stage[i].height, 0, 0,
-                              stage[i].work_class))
-                added++;
-        }
+        added = dl_stage_push_fallback(dm, stage, n_stage);
     }
     free(mh);
     free(mg);
     free(map);
     free(mau);
     free(mc);
-    free(stage);
+    return added;
+}
 
-    if (added > 0 || promoted)
+size_t dl_queue_blocks_class(struct download_manager *dm,
+                             const struct uint256 *hashes,
+                             const int32_t *heights,
+                             size_t count,
+                             enum dl_work_class work_class)
+{
+    if (!dl_queue_blocks_args_ok(dm, hashes, work_class))
+        return 0;
+    zcl_mutex_lock(&dm->cs);
+
+    /* Bulk enqueue is sort + single merge, NOT count repeated sorted
+     * inserts: callers legitimately hand over tens of thousands of
+     * blocks per call (gap_fill window, header batches), and a per-item
+     * insert is an O(queue_len) memmove — O(n^2) per call while holding
+     * cs, which starves the whole node. */
+
+    struct dl_stage_batch batch = dl_stage_incoming(
+        dm, hashes, heights, count, work_class);
+    if (!batch.items) {
+        zcl_mutex_unlock(&dm->cs);
+        return 0;
+    }
+    if (batch.n == 0) {
+        if (batch.promoted)
+            dl_generation_advance(&dm->queue_generation);
+        free(batch.items);
+        zcl_mutex_unlock(&dm->cs);
+        return 0;
+    }
+
+    /* 2. Sort the newcomers by height (lowest first). */
+    qsort(batch.items, batch.n, sizeof(*batch.items), dl_stage_cmp);
+
+    /* 3. Grow toward the merged size (bounded by DL_QUEUE_MAX_CAP). */
+    while (dm->queue_len + batch.n > dm->queue_cap && dl_queue_grow(dm))
+        ;
+
+    size_t added = dl_merge_staged_or_push(dm, batch.items, batch.n);
+    free(batch.items);
+
+    if (added > 0 || batch.promoted)
         dl_generation_advance(&dm->queue_generation);
 
     zcl_mutex_unlock(&dm->cs);
@@ -1165,6 +1254,426 @@ static size_t dl_scan_queue_for_peer(struct download_manager *dm,
     return scan_to;
 }
 
+struct dl_assign_load {
+    size_t peer_count;
+    size_t history_peer_count;
+    size_t history_global_count;
+    size_t forward_queued;
+    size_t history_queued;
+};
+
+struct dl_assign_windows {
+    size_t available;
+    size_t global_limit;
+    size_t history_available;
+};
+
+struct dl_pick_scan {
+    size_t npick;
+    size_t history_picked;
+    bool avoid_blocked;
+    int64_t retry_after;
+};
+
+struct dl_assign_applied {
+    size_t assigned;
+    size_t history_assigned;
+    bool attempted_slot;
+};
+
+struct dl_assign_outcome {
+    size_t assigned;
+    bool attempted_slot;
+    bool avoid_blocked;
+    int64_t retry_after;
+};
+
+/* Count this peer's in-flight slots and the queued forward/history split. */
+static struct dl_assign_load dl_assign_measure(const struct download_manager *dm,
+                                              uint32_t peer_id)
+{
+    struct dl_assign_load load = {0};
+    for (size_t i = 0; i < dm->num_slots; i++) {
+        if (!dm->slots[i].active)
+            continue;
+        if (dm->slots[i].work_class == DL_WORK_HISTORY) {
+            load.history_global_count++;
+            if (dm->slots[i].peer_id == peer_id)
+                load.history_peer_count++;
+        }
+        if (dm->slots[i].peer_id == peer_id)
+            load.peer_count++;
+    }
+    for (size_t i = 0; i < dm->queue_len; i++) {
+        if (dm->queue_classes[i] == DL_WORK_HISTORY)
+            load.history_queued++;
+        else
+            load.forward_queued++;
+    }
+    return load;
+}
+
+static size_t dl_assign_peer_limit(const struct dl_peer_stats *ps)
+{
+    /* Adaptive per-peer limit: fast peers get larger windows.
+     * bandwidth_score 0-63 → 16 slots, 64-127 → 32-64, 128+ → 64-128.
+     * This naturally gives ~4x more work to 4x-faster peers. */
+    size_t peer_limit = dl_get_max_in_flight_per_peer(); /* default for new peers */
+    if (ps && ps->is_loopback) {
+        /* K2: loopback has no WAN-fairness constraint and effectively
+         * unlimited bandwidth. Use the elevated cap; the global limit
+         * (DL_MAX_IN_FLIGHT_TOTAL_IBD=4096) and the consumer-side reducer
+         * pipeline are the real backpressure. */
+        peer_limit = DL_MAX_IN_FLIGHT_PER_LOOPBACK;
+    } else if (ps && ps->bandwidth_score > 0) {
+        /* Scale: score/128 * MAX, clamped to [16, MAX] */
+        size_t max_peer = dl_get_max_in_flight_per_peer();
+        peer_limit = (size_t)ps->bandwidth_score
+                     * max_peer / 128;
+        if (peer_limit < 16) peer_limit = 16;
+        if (peer_limit > max_peer)
+            peer_limit = max_peer;
+    }
+    return peer_limit;
+}
+
+static size_t dl_assign_history_room(size_t history_global_count,
+                                     size_t history_peer_count,
+                                     size_t history_queued)
+{
+    /* History owns a subordinate lane. These limits never charge forward
+     * work, so a saturated history lane cannot block a new tip request. */
+    size_t history_available = 0;
+    if (history_global_count < DL_MAX_HISTORY_IN_FLIGHT &&
+        history_peer_count < DL_MAX_HISTORY_PER_PEER) {
+        history_available = DL_MAX_HISTORY_IN_FLIGHT - history_global_count;
+        size_t peer_history_available =
+            DL_MAX_HISTORY_PER_PEER - history_peer_count;
+        if (history_available > peer_history_available)
+            history_available = peer_history_available;
+        if (history_available > history_queued)
+            history_available = history_queued;
+    }
+    return history_available;
+}
+
+static struct dl_assign_windows dl_assign_windows(
+    const struct download_manager *dm,
+    size_t peer_count, size_t peer_limit, size_t max_assign,
+    size_t history_global_count, size_t history_peer_count,
+    size_t forward_queued, size_t history_queued)
+{
+    struct dl_assign_windows w = {0};
+    if (peer_count < peer_limit)
+        w.available = peer_limit - peer_count;
+    if (w.available > max_assign) w.available = max_assign;
+    if (w.available > dm->queue_len) w.available = dm->queue_len;
+
+    /* Also respect global limit (dynamic: aggressive during IBD).
+     * num_active can legitimately EXCEED the limit (it shrinks when IBD
+     * ends) — the unguarded subtraction underflowed size_t and handed
+     * the pop loop a near-infinite `available`, overflowing the
+     * caller's out_hashes[max_assign] buffer. */
+    w.global_limit = dl_get_max_in_flight_total();
+    if (dm->num_active >= w.global_limit)
+        w.available = 0;
+    else if (dm->num_active + w.available > w.global_limit)
+        w.available = w.global_limit - dm->num_active;
+
+    w.history_available = dl_assign_history_room(
+        history_global_count, history_peer_count, history_queued);
+    size_t class_available = forward_queued + w.history_available;
+    if (w.available > class_available)
+        w.available = class_available;
+    return w;
+}
+
+/* Initial assign_result from the queue and the windows, before any pick. */
+static int dl_assign_prelim_result(size_t queue_before, size_t max_assign,
+                                   size_t peer_count, size_t peer_limit,
+                                   size_t active_before, size_t global_limit,
+                                   size_t forward_queued, size_t history_queued,
+                                   size_t history_available)
+{
+    int assign_result = DL_ASSIGN_ASSIGNED;
+    if (queue_before == 0)
+        assign_result = DL_ASSIGN_NO_QUEUE;
+    else if (max_assign == 0)
+        assign_result = DL_ASSIGN_MAX_ZERO;
+    else if (peer_count >= peer_limit)
+        assign_result = DL_ASSIGN_PEER_WINDOW_FULL;
+    else if (active_before >= global_limit)
+        assign_result = DL_ASSIGN_GLOBAL_WINDOW_FULL;
+    else if (forward_queued == 0 && history_queued > 0 &&
+             history_available == 0)
+        assign_result = DL_ASSIGN_HISTORY_THROTTLED;
+    return assign_result;
+}
+
+static size_t dl_assign_tip_bias(const struct download_manager *dm,
+                                 const struct dl_peer_stats *ps,
+                                 size_t history_queued)
+{
+    /* S2.3: bias the lowest-height (tip-adjacent, most-urgent) entries
+     * toward a demonstrably faster peer. The queue is height-sorted
+     * ascending, so indices [0, tip_bias_skip) are the tip-adjacent
+     * reserve. Skipped for loopback (already bypasses bandwidth scaling)
+     * and for peers with no established score yet (score 0 — a brand-new
+     * peer gets a fair first shot rather than being penalized on no
+     * evidence). `available` (this peer's quota) is computed independently,
+     * so a biased peer still gets its full quota, just sourced from beyond
+     * the reserve when possible. */
+    size_t tip_bias_skip = 0;
+    if (ps && !ps->is_loopback &&
+        ps->bandwidth_score > 0) {
+        uint32_t best_score = dl_best_bandwidth_score(dm);
+        if (best_score >= ps->bandwidth_score * 2)
+            tip_bias_skip = DL_TIP_BIAS_RESERVE;
+    }
+    if (tip_bias_skip > dm->queue_len)
+        tip_bias_skip = dm->queue_len;
+    if (history_queued > 0)
+        tip_bias_skip = 0;
+    return tip_bias_skip;
+}
+
+/* True when one forward pass can take this batch without moving tip bias. */
+static bool dl_assign_can_batch(size_t available, size_t tip_bias_skip,
+                                size_t queue_len)
+{
+    return available > 0 &&
+           available <= DL_MAX_IN_FLIGHT_PER_LOOPBACK &&
+           (tip_bias_skip == 0 ||
+            queue_len > available + tip_bias_skip);
+}
+
+/* Append eligible indices in [from, to) and record avoid-cooldown state. */
+static struct dl_pick_scan dl_assign_collect_picks(
+    const struct download_manager *dm,
+    uint32_t peer_id, int64_t now,
+    size_t from, size_t to,
+    size_t available, size_t history_available,
+    size_t *picks, size_t npick, size_t history_picked,
+    bool avoid_blocked, int64_t retry_after)
+{
+    struct dl_pick_scan scan = {
+        npick, history_picked, avoid_blocked, retry_after
+    };
+    for (size_t i = from; i < to && scan.npick < available; i++) {
+        if (dm->queue_classes[i] == DL_WORK_HISTORY &&
+            scan.history_picked >= history_available)
+            continue;
+        if (dl_queue_item_avoids_peer(dm, i, peer_id, now)) {
+            scan.avoid_blocked = true;
+            if (scan.retry_after == 0 ||
+                dm->queue_avoid_until[i] < scan.retry_after)
+                scan.retry_after = dm->queue_avoid_until[i];
+            continue;
+        }
+        picks[scan.npick++] = i;
+        if (dm->queue_classes[i] == DL_WORK_HISTORY)
+            scan.history_picked++;
+    }
+    return scan;
+}
+
+static struct dl_assign_applied dl_assign_apply_picks(
+    struct download_manager *dm, uint32_t peer_id, int64_t now,
+    const size_t *picks, size_t npick, size_t clamp,
+    struct uint256 *out_hashes)
+{
+    struct dl_assign_applied applied = {0};
+    if (npick == 0)
+        return applied;
+    applied.attempted_slot = true;
+    /* Apply: move each pick into the in-flight table. The queue
+     * arrays stay untouched until the single compaction below, so
+     * dm->queue[picks[p]] still refers to the original index. */
+    for (size_t p = 0; p < npick; p++) {
+        struct uint256 hash = dm->queue[picks[p]];
+        int32_t height = dm->queue_heights[picks[p]];
+        enum dl_work_class work_class = dm->queue_classes[picks[p]];
+        dl_qset_remove(dm, &hash);
+        maybe_grow(dm);
+        struct dl_in_flight *slot = find_slot(dm, &hash, true);
+        if (!slot)
+            continue;
+        slot->hash = hash;
+        slot->height = height;
+        slot->peer_id = peer_id;
+        slot->request_time = now;
+        slot->received_time = 0; /* activation clears any stale
+                                  * tombstone */
+        slot->work_class = work_class;
+        slot->active = true;
+        dm->num_active++;
+        dm->total_requested++;
+        out_hashes[applied.assigned++] = hash;
+        if (work_class == DL_WORK_HISTORY)
+            applied.history_assigned++;
+    }
+    /* Build the ascending index set for the single compaction. The
+     * picks form two ascending runs (primary appended first, then
+     * fallback) with every fallback index < clamp <= every primary
+     * index, so fallback-run ++ primary-run is globally sorted. */
+    size_t spick[DL_MAX_IN_FLIGHT_PER_LOOPBACK];
+    size_t ns = 0;
+    for (size_t p = 0; p < npick; p++)
+        if (picks[p] < clamp)
+            spick[ns++] = picks[p];   /* fallback run (ascending) */
+    for (size_t p = 0; p < npick; p++)
+        if (picks[p] >= clamp)
+            spick[ns++] = picks[p];   /* primary run (ascending) */
+    dl_queue_remove_sorted(dm, spick, ns);
+    return applied;
+}
+
+static struct dl_assign_outcome dl_assign_batch(
+    struct download_manager *dm, uint32_t peer_id, int64_t now,
+    size_t available, size_t history_available, size_t tip_bias_skip,
+    struct uint256 *out_hashes)
+{
+    struct dl_assign_outcome outcome = {0};
+    size_t orig_len = dm->queue_len;
+    size_t clamp = tip_bias_skip < orig_len ? tip_bias_skip : orig_len;
+    size_t picks[DL_MAX_IN_FLIGHT_PER_LOOPBACK];  /* assignment order */
+    /* Primary region [clamp, orig_len): tip-adjacent reserve skipped. */
+    struct dl_pick_scan scan = dl_assign_collect_picks(
+        dm, peer_id, now, clamp, orig_len, available, history_available,
+        picks, 0, 0, false, 0);
+    /* Fallback region [0, clamp): entered only after the primary is
+     * exhausted, matching the per-iteration fallback in the loop form. */
+    if (scan.npick < available && clamp > 0) {
+        scan = dl_assign_collect_picks(
+            dm, peer_id, now, 0, clamp, available, history_available,
+            picks, scan.npick, scan.history_picked,
+            scan.avoid_blocked, scan.retry_after);
+    }
+    struct dl_assign_applied applied = dl_assign_apply_picks(
+        dm, peer_id, now, picks, scan.npick, clamp, out_hashes);
+    outcome.assigned = applied.assigned;
+    outcome.attempted_slot = applied.attempted_slot;
+    outcome.avoid_blocked = scan.avoid_blocked;
+    outcome.retry_after = scan.retry_after;
+    return outcome;
+}
+
+/* Assign up to available hashes, removing each pick before the next scan. */
+static struct dl_assign_outcome dl_assign_scan_loop(
+    struct download_manager *dm, uint32_t peer_id, int64_t now,
+    size_t available, size_t history_available, size_t tip_bias_skip,
+    struct uint256 *out_hashes)
+{
+    struct dl_assign_outcome o = {0};
+    size_t history_assigned = 0;
+    while (o.assigned < available && dm->queue_len > 0) {
+        size_t bias_skip = tip_bias_skip < dm->queue_len
+                               ? tip_bias_skip : dm->queue_len;
+        size_t pick = dl_scan_queue_for_peer(dm, peer_id, now, bias_skip,
+                                             dm->queue_len, &o.avoid_blocked,
+                                             &o.retry_after);
+        if (pick == dm->queue_len && bias_skip > 0) {
+            /* Nothing eligible past the tip-adjacent reserve — fall back
+             * into the reserve itself so a slower peer still gets work
+             * rather than stalling. */
+            pick = dl_scan_queue_for_peer(dm, peer_id, now, 0, bias_skip,
+                                          &o.avoid_blocked, &o.retry_after);
+        }
+        if (pick == dm->queue_len)
+            break;
+
+        struct uint256 hash = dm->queue[pick];
+        int32_t height = dm->queue_heights[pick];
+        enum dl_work_class work_class = dm->queue_classes[pick];
+        if (work_class == DL_WORK_HISTORY &&
+            history_assigned >= history_available)
+            break;
+        dl_qset_remove(dm, &hash);
+        dl_queue_remove_at(dm, pick);
+
+        maybe_grow(dm);
+        o.attempted_slot = true;
+        struct dl_in_flight *slot = find_slot(dm, &hash, true);
+        if (!slot) continue;
+
+        slot->hash = hash;
+        slot->height = height;
+        slot->peer_id = peer_id;
+        slot->request_time = now;
+        slot->received_time = 0; /* activation clears any stale
+                                  * tombstone */
+        slot->work_class = work_class;
+        slot->active = true;
+        dm->num_active++;
+        dm->total_requested++;
+
+        out_hashes[o.assigned++] = hash;
+        if (work_class == DL_WORK_HISTORY)
+            history_assigned++;
+    }
+    return o;
+}
+
+/* Fold the pick outcome into assign_result. */
+static int dl_assign_resolve(size_t assigned, bool attempted_slot,
+                             bool avoid_blocked, int assign_result)
+{
+    if (assigned > 0)
+        assign_result = DL_ASSIGN_ASSIGNED;
+    else if (!attempted_slot && avoid_blocked &&
+             assign_result == DL_ASSIGN_ASSIGNED)
+        assign_result = DL_ASSIGN_PEER_AVOID_COOLDOWN;
+    else if (assign_result == DL_ASSIGN_ASSIGNED)
+        assign_result = DL_ASSIGN_NO_SLOT;
+    return assign_result;
+}
+
+/* Update assign_result, peer park state, and the manager's assign counters. */
+static void dl_assign_commit(struct download_manager *dm,
+                             struct dl_peer_stats *ps, uint32_t peer_id,
+                             size_t max_assign, size_t available,
+                             size_t assigned, size_t queue_before,
+                             size_t active_before, size_t peer_count,
+                             size_t peer_limit, size_t global_limit,
+                             int assign_result, bool attempted_slot,
+                             bool avoid_blocked, int64_t retry_after)
+{
+    if (assigned > 0 && ps) {
+        ps->blocks_requested += (uint32_t)assigned;
+        ps->zero_assign_generation = 0;
+        ps->zero_assign_retry_after = 0;
+        ps->zero_assign_global_limit = 0;
+        ps->zero_assign_result = DL_ASSIGN_NONE;
+    }
+    assign_result = dl_assign_resolve(assigned, attempted_slot, avoid_blocked,
+                                      assign_result);
+    if (assigned == 0 && ps &&
+        dl_assign_result_is_parkable(assign_result)) {
+        ps->zero_assign_generation = dl_assign_dependency_generation(
+            dm, assign_result);
+        ps->zero_assign_retry_after =
+            assign_result == DL_ASSIGN_PEER_AVOID_COOLDOWN ? retry_after : 0;
+        ps->zero_assign_global_limit = global_limit;
+        ps->zero_assign_result = assign_result;
+    }
+
+    dm->assign_attempts++;
+    if (assigned > 0)
+        dm->assign_successes++;
+    else
+        dm->assign_zero_results++;
+    dm->last_assign_peer_id = peer_id;
+    dm->last_assign_max_requested = (uint64_t)max_assign;
+    dm->last_assign_available = (uint64_t)available;
+    dm->last_assign_assigned = (uint64_t)assigned;
+    dm->last_assign_queue_len = (uint64_t)queue_before;
+    dm->last_assign_active = (uint64_t)active_before;
+    dm->last_assign_peer_in_flight = (uint64_t)peer_count;
+    dm->last_assign_peer_limit = (uint64_t)peer_limit;
+    dm->last_assign_global_limit = (uint64_t)global_limit;
+    dm->last_assign_result = assign_result;
+}
+
 size_t dl_assign_to_peer(struct download_manager *dm,
                          uint32_t peer_id,
                          struct uint256 *out_hashes,
@@ -1180,114 +1689,18 @@ size_t dl_assign_to_peer(struct download_manager *dm,
     size_t queue_before = dm->queue_len;
     size_t active_before = dm->num_active;
 
-    /* Adaptive per-peer limit: fast peers get larger windows.
-     * bandwidth_score 0-63 → 16 slots, 64-127 → 32-64, 128+ → 64-128.
-     * This naturally gives ~4x more work to 4x-faster peers. */
-    size_t peer_count = 0;
-    size_t history_peer_count = 0;
-    size_t history_global_count = 0;
-    for (size_t i = 0; i < dm->num_slots; i++) {
-        if (!dm->slots[i].active)
-            continue;
-        if (dm->slots[i].work_class == DL_WORK_HISTORY) {
-            history_global_count++;
-            if (dm->slots[i].peer_id == peer_id)
-                history_peer_count++;
-        }
-        if (dm->slots[i].peer_id == peer_id)
-            peer_count++;
-    }
-    size_t forward_queued = 0;
-    size_t history_queued = 0;
-    for (size_t i = 0; i < dm->queue_len; i++) {
-        if (dm->queue_classes[i] == DL_WORK_HISTORY)
-            history_queued++;
-        else
-            forward_queued++;
-    }
-    size_t peer_limit = dl_get_max_in_flight_per_peer(); /* default for new peers */
-    if (ps_assign && ps_assign->is_loopback) {
-        /* K2: loopback has no WAN-fairness constraint and effectively
-         * unlimited bandwidth. Use the elevated cap; the global limit
-         * (DL_MAX_IN_FLIGHT_TOTAL_IBD=4096) and the consumer-side reducer
-         * pipeline are the real backpressure. */
-        peer_limit = DL_MAX_IN_FLIGHT_PER_LOOPBACK;
-    } else if (ps_assign && ps_assign->bandwidth_score > 0) {
-        /* Scale: score/128 * MAX, clamped to [16, MAX] */
-        size_t max_peer = dl_get_max_in_flight_per_peer();
-        peer_limit = (size_t)ps_assign->bandwidth_score
-                     * max_peer / 128;
-        if (peer_limit < 16) peer_limit = 16;
-        if (peer_limit > max_peer)
-            peer_limit = max_peer;
-    }
-    size_t available = 0;
-    if (peer_count < peer_limit)
-        available = peer_limit - peer_count;
-    if (available > max_assign) available = max_assign;
-    if (available > dm->queue_len) available = dm->queue_len;
-
-    /* Also respect global limit (dynamic: aggressive during IBD).
-     * num_active can legitimately EXCEED the limit (it shrinks when IBD
-     * ends) — the unguarded subtraction underflowed size_t and handed
-     * the pop loop a near-infinite `available`, overflowing the
-     * caller's out_hashes[max_assign] buffer. */
-    size_t global_limit = dl_get_max_in_flight_total();
-    if (dm->num_active >= global_limit)
-        available = 0;
-    else if (dm->num_active + available > global_limit)
-        available = global_limit - dm->num_active;
-
-    /* History owns a subordinate lane. These limits never charge forward
-     * work, so a saturated history lane cannot block a new tip request. */
-    size_t history_available = 0;
-    if (history_global_count < DL_MAX_HISTORY_IN_FLIGHT &&
-        history_peer_count < DL_MAX_HISTORY_PER_PEER) {
-        history_available = DL_MAX_HISTORY_IN_FLIGHT - history_global_count;
-        size_t peer_history_available =
-            DL_MAX_HISTORY_PER_PEER - history_peer_count;
-        if (history_available > peer_history_available)
-            history_available = peer_history_available;
-        if (history_available > history_queued)
-            history_available = history_queued;
-    }
-    size_t class_available = forward_queued + history_available;
-    if (available > class_available)
-        available = class_available;
-
-    int assign_result = DL_ASSIGN_ASSIGNED;
-    if (queue_before == 0)
-        assign_result = DL_ASSIGN_NO_QUEUE;
-    else if (max_assign == 0)
-        assign_result = DL_ASSIGN_MAX_ZERO;
-    else if (peer_count >= peer_limit)
-        assign_result = DL_ASSIGN_PEER_WINDOW_FULL;
-    else if (active_before >= global_limit)
-        assign_result = DL_ASSIGN_GLOBAL_WINDOW_FULL;
-    else if (forward_queued == 0 && history_queued > 0 &&
-             history_available == 0)
-        assign_result = DL_ASSIGN_HISTORY_THROTTLED;
-
-    /* S2.3: bias the lowest-height (tip-adjacent, most-urgent) entries
-     * toward a demonstrably faster peer. The queue is height-sorted
-     * ascending, so indices [0, tip_bias_skip) are the tip-adjacent
-     * reserve. Skipped for loopback (already bypasses bandwidth scaling)
-     * and for peers with no established score yet (score 0 — a brand-new
-     * peer gets a fair first shot rather than being penalized on no
-     * evidence). `available` (this peer's quota) is computed independently,
-     * so a biased peer still gets its full quota, just sourced from beyond
-     * the reserve when possible. */
-    size_t tip_bias_skip = 0;
-    if (ps_assign && !ps_assign->is_loopback &&
-        ps_assign->bandwidth_score > 0) {
-        uint32_t best_score = dl_best_bandwidth_score(dm);
-        if (best_score >= ps_assign->bandwidth_score * 2)
-            tip_bias_skip = DL_TIP_BIAS_RESERVE;
-    }
-    if (tip_bias_skip > dm->queue_len)
-        tip_bias_skip = dm->queue_len;
-    if (history_queued > 0)
-        tip_bias_skip = 0;
+    struct dl_assign_load load = dl_assign_measure(dm, peer_id);
+    size_t peer_limit = dl_assign_peer_limit(ps_assign);
+    struct dl_assign_windows win = dl_assign_windows(
+        dm, load.peer_count, peer_limit, max_assign,
+        load.history_global_count, load.history_peer_count,
+        load.forward_queued, load.history_queued);
+    int assign_result = dl_assign_prelim_result(
+        queue_before, max_assign, load.peer_count, peer_limit,
+        active_before, win.global_limit, load.forward_queued,
+        load.history_queued, win.history_available);
+    size_t tip_bias_skip = dl_assign_tip_bias(
+        dm, ps_assign, load.history_queued);
 
     /* Pick the first non-avoided entry in height order. A timed-out hash
      * should be immediately available to other peers, but the same peer
@@ -1299,7 +1712,6 @@ size_t dl_assign_to_peer(struct download_manager *dm,
      * unscored, or no faster peer known) this is byte-identical to the old
      * whole-queue scan. */
     size_t assigned = 0;
-    size_t history_assigned = 0;
     bool avoid_blocked = false;
     bool attempted_slot = false;
     int64_t retry_after = 0;
@@ -1322,184 +1734,26 @@ size_t dl_assign_to_peer(struct download_manager *dm,
      * tip_bias_skip) — that is exactly the deep-queue case that matters for
      * throughput. The rare shallow-queue + active-tip-bias corner keeps the
      * loop below, where the per-pick memmove is cheap anyway. */
-    bool can_batch = available > 0 &&
-                     available <= DL_MAX_IN_FLIGHT_PER_LOOPBACK &&
-                     (tip_bias_skip == 0 ||
-                      dm->queue_len > available + tip_bias_skip);
-    if (can_batch) {
-        size_t orig_len = dm->queue_len;
-        size_t clamp = tip_bias_skip < orig_len ? tip_bias_skip : orig_len;
-        size_t picks[DL_MAX_IN_FLIGHT_PER_LOOPBACK];  /* assignment order */
-        size_t npick = 0;
-        size_t history_picked = 0;
-
-        /* Primary region [clamp, orig_len): tip-adjacent reserve skipped. */
-        for (size_t i = clamp; i < orig_len && npick < available; i++) {
-            if (dm->queue_classes[i] == DL_WORK_HISTORY &&
-                history_picked >= history_available)
-                continue;
-            if (dl_queue_item_avoids_peer(dm, i, peer_id, now)) {
-                avoid_blocked = true;
-                if (retry_after == 0 || dm->queue_avoid_until[i] < retry_after)
-                    retry_after = dm->queue_avoid_until[i];
-                continue;
-            }
-            picks[npick++] = i;
-            if (dm->queue_classes[i] == DL_WORK_HISTORY)
-                history_picked++;
-        }
-        /* Fallback region [0, clamp): entered only after the primary is
-         * exhausted, matching the per-iteration fallback in the loop form. */
-        if (npick < available && clamp > 0) {
-            for (size_t i = 0; i < clamp && npick < available; i++) {
-                if (dm->queue_classes[i] == DL_WORK_HISTORY &&
-                    history_picked >= history_available)
-                    continue;
-                if (dl_queue_item_avoids_peer(dm, i, peer_id, now)) {
-                    avoid_blocked = true;
-                    if (retry_after == 0 ||
-                        dm->queue_avoid_until[i] < retry_after)
-                        retry_after = dm->queue_avoid_until[i];
-                    continue;
-                }
-                picks[npick++] = i;
-                if (dm->queue_classes[i] == DL_WORK_HISTORY)
-                    history_picked++;
-            }
-        }
-
-        if (npick > 0) {
-            attempted_slot = true;
-            /* Apply: move each pick into the in-flight table. The queue
-             * arrays stay untouched until the single compaction below, so
-             * dm->queue[picks[p]] still refers to the original index. */
-            for (size_t p = 0; p < npick; p++) {
-                struct uint256 hash = dm->queue[picks[p]];
-                int32_t height = dm->queue_heights[picks[p]];
-                enum dl_work_class work_class =
-                    dm->queue_classes[picks[p]];
-                dl_qset_remove(dm, &hash);
-                maybe_grow(dm);
-                struct dl_in_flight *slot = find_slot(dm, &hash, true);
-                if (!slot)
-                    continue;
-                slot->hash = hash;
-                slot->height = height;
-                slot->peer_id = peer_id;
-                slot->request_time = now;
-                slot->received_time = 0; /* activation clears any stale
-                                          * tombstone */
-                slot->work_class = work_class;
-                slot->active = true;
-                dm->num_active++;
-                dm->total_requested++;
-                out_hashes[assigned++] = hash;
-                if (work_class == DL_WORK_HISTORY)
-                    history_assigned++;
-            }
-            /* Build the ascending index set for the single compaction. The
-             * picks form two ascending runs (primary appended first, then
-             * fallback) with every fallback index < clamp <= every primary
-             * index, so fallback-run ++ primary-run is globally sorted. */
-            size_t spick[DL_MAX_IN_FLIGHT_PER_LOOPBACK];
-            size_t ns = 0;
-            for (size_t p = 0; p < npick; p++)
-                if (picks[p] < clamp)
-                    spick[ns++] = picks[p];   /* fallback run (ascending) */
-            for (size_t p = 0; p < npick; p++)
-                if (picks[p] >= clamp)
-                    spick[ns++] = picks[p];   /* primary run (ascending) */
-            dl_queue_remove_sorted(dm, spick, ns);
-        }
+    struct dl_assign_outcome outcome = {0};
+    if (dl_assign_can_batch(win.available, tip_bias_skip, dm->queue_len)) {
+        outcome = dl_assign_batch(dm, peer_id, now, win.available,
+                                  win.history_available, tip_bias_skip,
+                                  out_hashes);
     } else {
-        while (assigned < available && dm->queue_len > 0) {
-            size_t bias_skip = tip_bias_skip < dm->queue_len
-                                   ? tip_bias_skip : dm->queue_len;
-            size_t pick = dl_scan_queue_for_peer(dm, peer_id, now, bias_skip,
-                                                 dm->queue_len, &avoid_blocked,
-                                                 &retry_after);
-            if (pick == dm->queue_len && bias_skip > 0) {
-                /* Nothing eligible past the tip-adjacent reserve — fall back
-                 * into the reserve itself so a slower peer still gets work
-                 * rather than stalling. */
-                pick = dl_scan_queue_for_peer(dm, peer_id, now, 0, bias_skip,
-                                              &avoid_blocked, &retry_after);
-            }
-            if (pick == dm->queue_len)
-                break;
-
-            struct uint256 hash = dm->queue[pick];
-            int32_t height = dm->queue_heights[pick];
-            enum dl_work_class work_class = dm->queue_classes[pick];
-            if (work_class == DL_WORK_HISTORY &&
-                history_assigned >= history_available)
-                break;
-            dl_qset_remove(dm, &hash);
-            dl_queue_remove_at(dm, pick);
-
-            maybe_grow(dm);
-            attempted_slot = true;
-            struct dl_in_flight *slot = find_slot(dm, &hash, true);
-            if (!slot) continue;
-
-            slot->hash = hash;
-            slot->height = height;
-            slot->peer_id = peer_id;
-            slot->request_time = now;
-            slot->received_time = 0; /* activation clears any stale
-                                      * tombstone */
-            slot->work_class = work_class;
-            slot->active = true;
-            dm->num_active++;
-            dm->total_requested++;
-
-            out_hashes[assigned++] = hash;
-            if (work_class == DL_WORK_HISTORY)
-                history_assigned++;
-        }
+        outcome = dl_assign_scan_loop(dm, peer_id, now, win.available,
+                                      win.history_available, tip_bias_skip,
+                                      out_hashes);
     }
+    assigned = outcome.assigned;
+    avoid_blocked = outcome.avoid_blocked;
+    attempted_slot = outcome.attempted_slot;
+    retry_after = outcome.retry_after;
 
-    if (assigned > 0) {
-        if (ps_assign) {
-            ps_assign->blocks_requested += (uint32_t)assigned;
-            ps_assign->zero_assign_generation = 0;
-            ps_assign->zero_assign_retry_after = 0;
-            ps_assign->zero_assign_global_limit = 0;
-            ps_assign->zero_assign_result = DL_ASSIGN_NONE;
-        }
-        assign_result = DL_ASSIGN_ASSIGNED;
-    } else if (!attempted_slot && avoid_blocked &&
-               assign_result == DL_ASSIGN_ASSIGNED) {
-        assign_result = DL_ASSIGN_PEER_AVOID_COOLDOWN;
-    } else if (assign_result == DL_ASSIGN_ASSIGNED) {
-        assign_result = DL_ASSIGN_NO_SLOT;
-    }
-
-    if (assigned == 0 && ps_assign &&
-        dl_assign_result_is_parkable(assign_result)) {
-        ps_assign->zero_assign_generation = dl_assign_dependency_generation(
-            dm, assign_result);
-        ps_assign->zero_assign_retry_after =
-            assign_result == DL_ASSIGN_PEER_AVOID_COOLDOWN ? retry_after : 0;
-        ps_assign->zero_assign_global_limit = global_limit;
-        ps_assign->zero_assign_result = assign_result;
-    }
-
-    dm->assign_attempts++;
-    if (assigned > 0)
-        dm->assign_successes++;
-    else
-        dm->assign_zero_results++;
-    dm->last_assign_peer_id = peer_id;
-    dm->last_assign_max_requested = (uint64_t)max_assign;
-    dm->last_assign_available = (uint64_t)available;
-    dm->last_assign_assigned = (uint64_t)assigned;
-    dm->last_assign_queue_len = (uint64_t)queue_before;
-    dm->last_assign_active = (uint64_t)active_before;
-    dm->last_assign_peer_in_flight = (uint64_t)peer_count;
-    dm->last_assign_peer_limit = (uint64_t)peer_limit;
-    dm->last_assign_global_limit = (uint64_t)global_limit;
-    dm->last_assign_result = assign_result;
+    dl_assign_commit(dm, ps_assign, peer_id, max_assign, win.available,
+                     assigned, queue_before, active_before,
+                     load.peer_count, peer_limit, win.global_limit,
+                     assign_result, attempted_slot, avoid_blocked,
+                     retry_after);
 
     zcl_mutex_unlock(&dm->cs);
     return assigned;

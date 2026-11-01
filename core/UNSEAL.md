@@ -817,3 +817,7 @@ later lane flips it HARD.
 - 2026-11-02T12:46:34Z — REASON: refactor(msg_headers): move getheaders request builders to msg_headers_getheaders.c; behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: 4c5ed6853c9048eba00ff0d2a7cd801fd30700826a4ca33233b36ab2f7b04278
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-02T12:47:00Z — REASON: refactor(download): split 2 function(s) under the complexity cap (grok); behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: d24d38f96c68138ac6a2cb2f4fd9fad234e20b4dd242830363f49aa6b555de69
+  by: owner unseal ritual (make core-unseal)
