@@ -29,6 +29,37 @@ bool merkle_tree_serialize(const struct partial_merkle_tree *t,
     return ok;
 }
 
+/* Expand packed flag bytes into *bits_out. Returns 0 on allocation or read failure. */
+static int merkle_tree_read_flag_bits(unsigned char **bits_out,
+                                      size_t *num_bits_out,
+                                      struct byte_stream *s,
+                                      uint64_t num_bytes)
+{
+    *bits_out = NULL;
+    *num_bits_out = 0;
+
+    unsigned char *packed = zcl_calloc((size_t)num_bytes > 0 ? (size_t)num_bytes : 1, 1, "merkle_packed_read");
+    if (!packed)
+        return 0;
+    int read_ok = stream_read_bytes(s, packed, (size_t)num_bytes);
+    if (!read_ok) {
+        free(packed);
+        return 0;
+    }
+
+    size_t num_bits = (size_t)num_bytes * 8;
+    *num_bits_out = num_bits;
+    *bits_out = zcl_calloc(num_bits > 0 ? num_bits : 1, 1, "merkle_bits");
+    if (!*bits_out) {
+        free(packed);
+        return 0;
+    }
+    for (size_t p = 0; p < num_bits; p++)
+        (*bits_out)[p] = (packed[p / 8] >> (p % 8)) & 1;
+    free(packed);
+    return 1;
+}
+
 bool merkle_tree_deserialize(struct partial_merkle_tree *t,
                              struct byte_stream *s)
 {
@@ -49,16 +80,7 @@ bool merkle_tree_deserialize(struct partial_merkle_tree *t,
     uint64_t num_bytes;
     if (!stream_read_compact_size(s, &num_bytes)) return false;
     if (num_bytes > MAX_MERKLE_BITS / 8) return false;
-    unsigned char *packed = zcl_calloc((size_t)num_bytes > 0 ? (size_t)num_bytes : 1, 1, "merkle_packed_read");
-    if (!packed) return false;
-    if (!stream_read_bytes(s, packed, (size_t)num_bytes)) { free(packed); return false; }
-
-    t->num_bits = (size_t)num_bytes * 8;
-    t->bits = zcl_calloc(t->num_bits > 0 ? t->num_bits : 1, 1, "merkle_bits");
-    if (!t->bits) { free(packed); return false; }
-    for (size_t p = 0; p < t->num_bits; p++)
-        t->bits[p] = (packed[p / 8] >> (p % 8)) & 1;
-    free(packed);
+    if (!merkle_tree_read_flag_bits(&t->bits, &t->num_bits, s, num_bytes)) return false;
 
     t->bad = false;
     return true;
