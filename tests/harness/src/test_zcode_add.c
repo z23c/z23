@@ -2600,22 +2600,54 @@ static int za_e2e_tampered_objects_and_outputs(const struct za_e2e_env *env)
 // transcript (publish, plan, commit, upgrade, roll back, then the three
 // refusals) against ONE fixture datadir; splitting it would either
 // duplicate a slow real build or hide the ordering the assertions depend on.
-static int t_e2e(void)
+
+/* The state the ordered transcript carries from one phase to the next. */
+struct za_e2e_fix {
+    char base[4096];
+    char zcode[4200];
+    int64_t t0;
+    bool aborted;
+    uint8_t ring_root[32];
+    char installed_dir[4400];
+    char root_hex[65];
+    struct package_lifecycle_commit_report commit;
+    char archive[4600];
+    char header[4600];
+    uint8_t a_archive_sha[32], a_header_sha[32];
+    bool a_fingerprinted;
+    struct za_user_data user_data;
+    char workspace[4200];
+    bool workspace_ready;
+    char locked_work_id_text[40];
+    uint8_t ring_receipt[32];
+    struct vcs_package_build_receipt inspected_receipt;
+    uint8_t active[32];
+    size_t gens;
+    bool present;
+    struct za_e2e_env env;
+    struct package_lifecycle_reproduce_report repro;
+    uint8_t ring2_root[32];
+    char installed2[4400];
+    struct package_lifecycle_rollback_report rb;
+};
+
+static int za_e2e_setup(struct za_e2e_fix *fx)
 {
     int failures = 0;
-    char base[4096];
-    snprintf(base, sizeof(base), "test-tmp/za_e2e_%ld", (long)getpid());
-    za_rm_rf(base);
-    char zcode[4200];
-    snprintf(zcode, sizeof(zcode), "%s/zcode", base);
-    if (!za_mkdir_p(zcode)) {
+    snprintf(fx->base, sizeof(fx->base), "test-tmp/za_e2e_%ld",
+             (long)getpid());
+    za_rm_rf(fx->base);
+    snprintf(fx->zcode, sizeof(fx->zcode), "%s/zcode", fx->base);
+    if (!za_mkdir_p(fx->zcode)) {
         printf("  zcode_add: cannot create the fixture datadir... FAIL\n");
+        fx->aborted = true;
         return 1;
     }
     if (!za_exists("build/bin/z23-package-verify-dev")) {
         printf("  zcode_add: build/bin/z23-package-verify-dev missing "
                "(make dev-bin)... FAIL\n");
-        za_rm_rf(base);
+        za_rm_rf(fx->base);
+        fx->aborted = true;
         return 1;
     }
 
@@ -2627,44 +2659,22 @@ static int t_e2e(void)
         { "src/ring.c", ZA_RING_C },
         { "test/test_ring.c", ZA_RING_TEST },
     };
-    uint8_t ring_root[32];
-    bool published = za_publish(zcode, "alice/ringbuffer", "1.0.0", 1,
+    bool published = za_publish(fx->zcode, "alice/ringbuffer", "1.0.0", 1,
                                 ring_files, 5, "src/ring.h", "src/ring.c",
-                                "test/test_ring.c", "src", ring_root);
+                                "test/test_ring.c", "src", fx->ring_root);
     ZA_CHECK("fixture package published into the local store", published);
     if (!published) {
-        za_rm_rf(base);
+        za_rm_rf(fx->base);
+        fx->aborted = true;
         return failures;
     }
 
-    const int64_t t0 = 1700000000;
-    failures += t_addplans_parent_symlink(base, zcode, t0);
-    struct package_lifecycle_plan_report plan;
-    struct zcl_result r =
-        package_lifecycle_plan(base, "alice/ringbuffer", t0, &plan);
-    ZA_CHECK("add plan resolves a NAME to one verified, ready step",
-             r.ok && plan.ready && plan.plan.step_count == 1 &&
-                 plan.plan.steps[0].state == VCS_PACKAGE_LIFECYCLE_VERIFIED &&
-                 memcmp(plan.plan.target_root, ring_root, 32) == 0);
+    fx->t0 = 1700000000;
+    return failures;
+}
 
-    /* An expired plan must refuse BEFORE anything is built or installed. */
-    struct package_lifecycle_commit_report late;
-    struct zcl_result lr = package_lifecycle_commit(
-        base, plan.plan_id, t0 + VCS_PACKAGE_PLAN_TTL_SECONDS + 1, &late);
-    char installed_dir[4400];
-    char root_hex[65];
-    za_hex(ring_root, 32, root_hex);
-    snprintf(installed_dir, sizeof(installed_dir), "%s/installed/%s", zcode,
-             root_hex);
-    ZA_CHECK("an expired plan_id is refused and installs nothing",
-             !lr.ok && strcmp(late.rule, "plan-expired") == 0 &&
-                 !za_exists(installed_dir));
-
-    /* A hand-edited plan file no longer hashes to its own id. */
-    char plan_path[4500];
-    char plan_hex[65];
-    za_hex(plan.plan_id, 32, plan_hex);
-    snprintf(plan_path, sizeof(plan_path), "%s/addplans/%s", zcode, plan_hex);
+static bool za_e2e_edit_plan_file(const char *plan_path)
+{
     bool edited = false;
     {
         FILE *f = fopen(plan_path, "r+b");
@@ -2679,6 +2689,45 @@ static int t_e2e(void)
             fclose(f);
         }
     }
+    return edited;
+}
+
+static int za_e2e_plan_refusals(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    const char *zcode = fx->zcode;
+    const int64_t t0 = fx->t0;
+    uint8_t *ring_root = fx->ring_root;
+    char *root_hex = fx->root_hex;
+    char *installed_dir = fx->installed_dir;
+
+    failures += t_addplans_parent_symlink(base, zcode, t0);
+    struct package_lifecycle_plan_report plan;
+    struct zcl_result r =
+        package_lifecycle_plan(base, "alice/ringbuffer", t0, &plan);
+    ZA_CHECK("add plan resolves a NAME to one verified, ready step",
+             r.ok && plan.ready && plan.plan.step_count == 1 &&
+                 plan.plan.steps[0].state == VCS_PACKAGE_LIFECYCLE_VERIFIED &&
+                 memcmp(plan.plan.target_root, ring_root, 32) == 0);
+
+    /* An expired plan must refuse BEFORE anything is built or installed. */
+    struct package_lifecycle_commit_report late;
+    struct zcl_result lr = package_lifecycle_commit(
+        base, plan.plan_id, t0 + VCS_PACKAGE_PLAN_TTL_SECONDS + 1, &late);
+    za_hex(ring_root, 32, root_hex);
+    snprintf(installed_dir, sizeof(fx->installed_dir), "%s/installed/%s",
+             zcode, root_hex);
+    ZA_CHECK("an expired plan_id is refused and installs nothing",
+             !lr.ok && strcmp(late.rule, "plan-expired") == 0 &&
+                 !za_exists(installed_dir));
+
+    /* A hand-edited plan file no longer hashes to its own id. */
+    char plan_path[4500];
+    char plan_hex[65];
+    za_hex(plan.plan_id, 32, plan_hex);
+    snprintf(plan_path, sizeof(plan_path), "%s/addplans/%s", zcode, plan_hex);
+    bool edited = za_e2e_edit_plan_file(plan_path);
     struct package_lifecycle_commit_report tampered;
     struct zcl_result tr =
         package_lifecycle_commit(base, plan.plan_id, t0 + 1, &tampered);
@@ -2687,6 +2736,21 @@ static int t_e2e(void)
                  (strcmp(tampered.rule, "plan-tampered") == 0 ||
                   strcmp(tampered.rule, "plan-invalid") == 0) &&
                  !za_exists(installed_dir));
+    return failures;
+}
+
+static int za_e2e_install(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    const char *zcode = fx->zcode;
+    const int64_t t0 = fx->t0;
+    uint8_t *ring_root = fx->ring_root;
+    char *root_hex = fx->root_hex;
+    char *installed_dir = fx->installed_dir;
+    struct package_lifecycle_commit_report *commit = &fx->commit;
+    char *archive = fx->archive;
+    char *header = fx->header;
 
     failures += t_installed_root_symlink(base, zcode, installed_dir, t0);
     failures += t_buildwork_parent_symlink(base, zcode, installed_dir,
@@ -2694,21 +2758,20 @@ static int t_e2e(void)
     failures += t_receipt_parent_symlink(base, zcode, installed_dir, t0);
 
     /* Re-plan after the blocked attempt and commit for real. */
-    r = package_lifecycle_plan(base, "alice/ringbuffer", t0, &plan);
-    struct package_lifecycle_commit_report commit;
+    struct package_lifecycle_plan_report plan;
+    struct zcl_result r =
+        package_lifecycle_plan(base, "alice/ringbuffer", t0, &plan);
     struct zcl_result cr =
-        package_lifecycle_commit(base, plan.plan_id, t0 + 1, &commit);
+        package_lifecycle_commit(base, plan.plan_id, t0 + 1, commit);
     if (!cr.ok)
         printf("  zcode_add: commit failed rule=%s detail=%s msg=%s\n",
-               commit.rule, commit.detail, cr.message);
+               commit->rule, commit->detail, cr.message);
     ZA_CHECK("add commit installs the package", r.ok && cr.ok &&
-                                                    commit.installed);
+                                                    commit->installed);
 
-    char archive[4600];
-    char header[4600];
-    snprintf(archive, sizeof(archive), "%s/lib/libringbuffer.a",
+    snprintf(archive, sizeof(fx->archive), "%s/lib/libringbuffer.a",
              installed_dir);
-    snprintf(header, sizeof(header), "%s/include/ring.h", installed_dir);
+    snprintf(header, sizeof(fx->header), "%s/include/ring.h", installed_dir);
     ZA_CHECK("a static archive and the public header land under "
              "installed/<root>/",
              za_exists(installed_dir) && za_exists(archive) &&
@@ -2722,22 +2785,20 @@ static int t_e2e(void)
      * user is running. The rollback below has to land back on exactly these
      * bytes — "a working build of roughly the old thing" is not the
      * property being claimed. */
-    uint8_t a_archive_sha[32], a_header_sha[32];
-    bool a_fingerprinted = za_file_sha3(archive, a_archive_sha) &&
-                           za_file_sha3(header, a_header_sha);
+    fx->a_fingerprinted = za_file_sha3(archive, fx->a_archive_sha) &&
+                           za_file_sha3(header, fx->a_header_sha);
     ZA_CHECK("version A's installed artifacts are fingerprinted",
-             a_fingerprinted);
+             fx->a_fingerprinted);
 
     /* The user-data thread lives in its own three functions below, so the
      * transcript gains the claims without gaining their branches. */
-    struct za_user_data user_data;
-    failures += za_user_data_after_install(base, zcode, &user_data);
+    failures += za_user_data_after_install(base, zcode, &fx->user_data);
     ZA_CHECK("the step reached PINNED (seedable) or names why not",
-             commit.step_count == 1 &&
-                 (commit.steps[0].state == VCS_PACKAGE_LIFECYCLE_PINNED ||
-                  commit.steps[0].rule[0] != '\0'));
+             commit->step_count == 1 &&
+                 (commit->steps[0].state == VCS_PACKAGE_LIFECYCLE_PINNED ||
+                  commit->steps[0].rule[0] != '\0'));
     ZA_CHECK("the install carries a build receipt id",
-             commit.steps[0].has_receipt);
+             commit->steps[0].has_receipt);
     struct package_lifecycle_step reuse_inspection;
     bool reuse_installed = false;
     struct zcl_result reuse_inspected =
@@ -2748,20 +2809,37 @@ static int t_e2e(void)
                  reuse_inspection.already_installed &&
                  reuse_inspection.has_receipt &&
                  memcmp(reuse_inspection.root, ring_root, 32) == 0);
+    return failures;
+}
+
+static int za_e2e_declared_readers(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    const int64_t t0 = fx->t0;
+    uint8_t *ring_root = fx->ring_root;
+    char *installed_dir = fx->installed_dir;
+    struct package_lifecycle_commit_report *commit = &fx->commit;
+    char *header = fx->header;
 
     failures += za_installed_plan_evidence(base, ring_root, installed_dir,
-                                           commit.steps[0].receipt_id, t0 + 1);
+                                           commit->steps[0].receipt_id, t0 + 1);
 
     failures += za_declared_reader_limits(base, ring_root);
     failures += za_declared_reader_replacement(base, ring_root, header);
     failures += za_declared_reader_mutation(base, ring_root, header);
     failures += za_declared_reader_growth(base, ring_root, header);
-    failures += za_declared_reader_evidence(base, ring_root, installed_dir, commit.steps[0].receipt_id);
+    failures += za_declared_reader_evidence(base, ring_root, installed_dir, commit->steps[0].receipt_id);
     failures += za_declared_reader_nonregular(base, ring_root, header);
-    failures += za_declared_reader_midcopy(base, ring_root, header, installed_dir, commit.steps[0].receipt_id);
+    failures += za_declared_reader_midcopy(base, ring_root, header, installed_dir, commit->steps[0].receipt_id);
+    return failures;
+}
 
-    char workspace[4200], workspace_path[4400];
-    snprintf(workspace, sizeof(workspace), "%s/workspace", base);
+static void za_e2e_workspace_prepare(struct za_e2e_fix *fx)
+{
+    char *workspace = fx->workspace;
+    char workspace_path[4400];
+    snprintf(workspace, sizeof(fx->workspace), "%s/workspace", fx->base);
     snprintf(workspace_path, sizeof(workspace_path), "%s/include", workspace);
     bool workspace_ready = za_mkdir_p(workspace_path);
     snprintf(workspace_path, sizeof(workspace_path), "%s/src", workspace);
@@ -2795,9 +2873,74 @@ static int t_e2e(void)
              workspace);
     workspace_ready = workspace_ready && za_write_file(
         workspace_path, harness_meta, strlen(harness_meta), 0600);
+    fx->workspace_ready = workspace_ready;
+}
+
+static bool za_e2e_saw_ring_symbol(const struct json_value *apis)
+{
+    bool saw_ring_symbol = false;
+    for (size_t i = 0; apis && i < apis->num_children; i++) {
+        const struct json_value *api = json_at(apis, i);
+        if (api && api->type == JSON_STR &&
+            strcmp(json_get_str(api), "ring_push") == 0)
+            saw_ring_symbol = true;
+    }
+    return saw_ring_symbol;
+}
+
+static bool za_e2e_reuse_next_ok(struct zcl_command_reply *work_reply,
+                                 struct json_value *reuse_next_input,
+                                 const char *root_hex, const char *base)
+{
+    bool reuse_next_ok = work_reply->next_count == 1 &&
+        json_read(reuse_next_input, work_reply->next[0].input_json,
+                  strlen(work_reply->next[0].input_json)) &&
+        reuse_next_input->type == JSON_OBJ &&
+        reuse_next_input->num_children == 2 &&
+        strcmp(json_get_str(json_get(reuse_next_input, "name_or_root")),
+               root_hex) == 0 &&
+        strcmp(json_get_str(json_get(reuse_next_input, "datadir")),
+               base) == 0;
+    const struct zcl_command_spec *reuse_next_spec =
+        zcl_command_registry_find(zcl_command_catalog(), "zcode.use", NULL);
+    char reuse_next_why[160] = {0};
+    reuse_next_ok = reuse_next_ok && reuse_next_spec &&
+        zcl_command_registry_input_validate(
+            reuse_next_spec, reuse_next_input, reuse_next_why,
+            sizeof(reuse_next_why));
+    return reuse_next_ok;
+}
+
+static bool za_e2e_reuse_exact_head_ok(bool input_ready,
+                                       struct zcl_command_reply *work_reply,
+                                       const struct json_value *reuse_plan,
+                                       const struct json_value *selected,
+                                       bool saw_ring_symbol,
+                                       const char *workspace_path)
+{
+    return input_ready &&
+                 work_reply->status == ZCL_COMMAND_STATUS_PASSED &&
+                 strcmp(json_get_str(json_get(&work_reply->data, "state")),
+                        "REUSE_READY") == 0 &&
+                 strcmp(json_get_str(json_get(&work_reply->data, "work_id")),
+                        "") == 0 &&
+                 reuse_plan && !json_get_bool(json_get(
+                     reuse_plan, "new_code_required")) &&
+                 selected && json_get_bool(json_get(selected, "installed")) &&
+                 saw_ring_symbol && !za_exists(workspace_path);
+}
+
+static int za_e2e_reuse_exact(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    char *root_hex = fx->root_hex;
+    char *workspace = fx->workspace;
+    char workspace_path[4400];
+
     struct json_value work_input;
     json_init(&work_input); json_set_object(&work_input);
-    bool input_ready = workspace_ready &&
+    bool input_ready = fx->workspace_ready &&
         json_push_kv_str(&work_input, "workspace", workspace) &&
         json_push_kv_str(&work_input, "goal",
                          "use alice/ringbuffer@1.0.0") &&
@@ -2814,110 +2957,60 @@ static int t_e2e(void)
         ? json_get(reuse_plan, "reused") : NULL;
     const struct json_value *selected = reused ? json_at(reused, 0) : NULL;
     const struct json_value *apis = selected ? json_get(selected, "apis") : NULL;
-    bool saw_ring_symbol = false;
-    for (size_t i = 0; apis && i < apis->num_children; i++) {
-        const struct json_value *api = json_at(apis, i);
-        if (api && api->type == JSON_STR &&
-            strcmp(json_get_str(api), "ring_push") == 0)
-            saw_ring_symbol = true;
-    }
+    bool saw_ring_symbol = za_e2e_saw_ring_symbol(apis);
     snprintf(workspace_path, sizeof(workspace_path), "%s/.zvcs", workspace);
     struct json_value reuse_next_input;
     json_init(&reuse_next_input);
-    bool reuse_next_ok = work_reply.next_count == 1 &&
-        json_read(&reuse_next_input, work_reply.next[0].input_json,
-                  strlen(work_reply.next[0].input_json)) &&
-        reuse_next_input.type == JSON_OBJ &&
-        reuse_next_input.num_children == 2 &&
-        strcmp(json_get_str(json_get(&reuse_next_input, "name_or_root")),
-               root_hex) == 0 &&
-        strcmp(json_get_str(json_get(&reuse_next_input, "datadir")),
-               base) == 0;
-    const struct zcl_command_spec *reuse_next_spec =
-        zcl_command_registry_find(zcl_command_catalog(), "zcode.use", NULL);
-    char reuse_next_why[160] = {0};
-    reuse_next_ok = reuse_next_ok && reuse_next_spec &&
-        zcl_command_registry_input_validate(
-            reuse_next_spec, &reuse_next_input, reuse_next_why,
-            sizeof(reuse_next_why));
+    bool reuse_next_ok = za_e2e_reuse_next_ok(&work_reply, &reuse_next_input,
+                                              root_hex, base);
     ZA_CHECK("work start reuses exact installed APIs and creates zero task",
-             input_ready &&
-                 work_reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 strcmp(json_get_str(json_get(&work_reply.data, "state")),
-                        "REUSE_READY") == 0 &&
-                 strcmp(json_get_str(json_get(&work_reply.data, "work_id")),
-                        "") == 0 &&
-                 reuse_plan && !json_get_bool(json_get(
-                     reuse_plan, "new_code_required")) &&
-                 selected && json_get_bool(json_get(selected, "installed")) &&
-                 saw_ring_symbol && !za_exists(workspace_path) &&
+             za_e2e_reuse_exact_head_ok(input_ready, &work_reply, reuse_plan,
+                                        selected, saw_ring_symbol,
+                                        workspace_path) &&
                  reuse_next_ok &&
                  strcmp(work_reply.next[0].command, "zcode.use") == 0 &&
                  strstr(work_reply.next[0].input_json, root_hex) != NULL);
     json_free(&reuse_next_input);
     zcl_command_reply_free(&work_reply);
     json_free(&work_input);
+    return failures;
+}
 
-    struct za_file stack_files[] = {
-        { "LICENSE", ZA_LICENSE },
-        { "src/stack.h", ZA_STACK_H },
-        { "src/stack.c", ZA_STACK_C },
-        { "test/test_stack.c", ZA_STACK_TEST },
-    };
-    uint8_t stack_root[32];
-    bool stack_published = za_publish(
-        zcode, "alice/stack", "1.0.0", 3, stack_files, 4,
-        "src/stack.h", "src/stack.c", "test/test_stack.c", "src",
-        stack_root);
-    char stack_root_hex[65];
-    za_hex(stack_root, sizeof(stack_root), stack_root_hex);
-    json_init(&work_input); json_set_object(&work_input);
-    input_ready = stack_published &&
-        json_push_kv_str(&work_input, "workspace", workspace) &&
-        json_push_kv_str(&work_input, "goal",
-                         "Make harness use alice/stack") &&
-        json_push_kv_str(&work_input, "context_symbol", "harness") &&
-        json_push_kv_str(&work_input, "profile", "quick") &&
-        json_push_kv_str(&work_input, "datadir", base);
-    work_request.input = &work_input;
-    zcl_command_reply_init(&work_reply,
-                           "zcl.zcode_reuse_preparation.v1");
-    if (input_ready)
-        zcl_native_handle_zcode_work_start(&work_request, &work_reply);
-    const struct json_value *prepare_plan =
-        json_get(&work_reply.data, "reuse_plan");
-    const struct json_value *prepare_reused = prepare_plan
-        ? json_get(prepare_plan, "reused") : NULL;
-    const struct json_value *prepare_available = prepare_plan
-        ? json_get(prepare_plan, "available_after_use") : NULL;
-    struct json_value prepare_next_input;
-    json_init(&prepare_next_input);
-    bool prepare_next_ok = work_reply.next_count == 1 &&
-        json_read(&prepare_next_input, work_reply.next[0].input_json,
-                  strlen(work_reply.next[0].input_json));
+static bool za_e2e_prepare_next_ok(struct zcl_command_reply *work_reply,
+                                   struct json_value *prepare_next_input)
+{
+    bool prepare_next_ok = work_reply->next_count == 1 &&
+        json_read(prepare_next_input, work_reply->next[0].input_json,
+                  strlen(work_reply->next[0].input_json));
     const struct zcl_command_spec *prepare_next_spec =
         zcl_command_registry_find(zcl_command_catalog(), "zcode.use", NULL);
     char prepare_next_why[160] = {0};
     prepare_next_ok = prepare_next_ok && prepare_next_spec &&
         zcl_command_registry_input_validate(
-            prepare_next_spec, &prepare_next_input, prepare_next_why,
+            prepare_next_spec, prepare_next_input, prepare_next_why,
             sizeof(prepare_next_why));
-    snprintf(workspace_path, sizeof(workspace_path), "%s/.zvcs", workspace);
-    ZA_CHECK("known source is explicitly used before it can count as reuse",
-             input_ready && work_reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 strcmp(json_get_str(json_get(&work_reply.data, "state")),
+    return prepare_next_ok;
+}
+
+static bool za_e2e_prepare_head_ok(bool input_ready,
+                                   struct zcl_command_reply *work_reply,
+                                   const struct json_value *prepare_reused,
+                                   const struct json_value *prepare_available)
+{
+    return input_ready && work_reply->status == ZCL_COMMAND_STATUS_PASSED &&
+                 strcmp(json_get_str(json_get(&work_reply->data, "state")),
                         "REUSE_PREPARATION_REQUIRED") == 0 &&
                  prepare_reused && prepare_reused->num_children == 0 &&
-                 prepare_available && prepare_available->num_children == 1 &&
-                 prepare_next_ok &&
-                 strcmp(work_reply.next[0].command, "zcode.use") == 0 &&
-                 strcmp(json_get_str(json_get(
-                            &prepare_next_input, "name_or_root")),
-                        stack_root_hex) == 0 &&
-                 strstr(work_reply.next[0].input_json, stack_root_hex) != NULL &&
-                 !za_exists(workspace_path));
+                 prepare_available && prepare_available->num_children == 1;
+}
+
+static int za_e2e_prepare_use(bool prepare_next_ok,
+                              struct json_value *prepare_next_input,
+                              const char *stack_root_hex)
+{
+    int failures = 0;
     struct zcl_command_request prepare_use_request = {
-        .input = &prepare_next_input,
+        .input = prepare_next_input,
     };
     struct zcl_command_reply prepare_use_reply;
     zcl_command_reply_init(&prepare_use_reply,
@@ -2932,31 +3025,82 @@ static int t_e2e(void)
                             &prepare_use_reply.data, "target_root")),
                         stack_root_hex) == 0);
     zcl_command_reply_free(&prepare_use_reply);
-    json_free(&prepare_next_input);
-    zcl_command_reply_free(&work_reply);
-    json_free(&work_input);
+    return failures;
+}
 
-    bool dependency_workspace_ready = workspace_ready;
+static int za_e2e_reuse_preparation(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    const char *zcode = fx->zcode;
+    char *workspace = fx->workspace;
+    char workspace_path[4400];
+
+    struct za_file stack_files[] = {
+        { "LICENSE", ZA_LICENSE },
+        { "src/stack.h", ZA_STACK_H },
+        { "src/stack.c", ZA_STACK_C },
+        { "test/test_stack.c", ZA_STACK_TEST },
+    };
+    uint8_t stack_root[32];
+    bool stack_published = za_publish(
+        zcode, "alice/stack", "1.0.0", 3, stack_files, 4,
+        "src/stack.h", "src/stack.c", "test/test_stack.c", "src",
+        stack_root);
+    char stack_root_hex[65];
+    za_hex(stack_root, sizeof(stack_root), stack_root_hex);
+    struct json_value work_input;
     json_init(&work_input); json_set_object(&work_input);
-    input_ready = dependency_workspace_ready &&
+    bool input_ready = stack_published &&
         json_push_kv_str(&work_input, "workspace", workspace) &&
         json_push_kv_str(&work_input, "goal",
-                         "Make harness call ring_push") &&
+                         "Make harness use alice/stack") &&
         json_push_kv_str(&work_input, "context_symbol", "harness") &&
         json_push_kv_str(&work_input, "profile", "quick") &&
         json_push_kv_str(&work_input, "datadir", base);
-    work_request.input = &work_input;
-    zcl_command_reply_init(&work_reply, "zcl.zcode_locked_context_start.v1");
+    struct zcl_command_request work_request = {.input = &work_input};
+    struct zcl_command_reply work_reply;
+    zcl_command_reply_init(&work_reply,
+                           "zcl.zcode_reuse_preparation.v1");
     if (input_ready)
         zcl_native_handle_zcode_work_start(&work_request, &work_reply);
-    const struct json_value *locked_work_id =
-        json_get(&work_reply.data, "work_id");
-    char locked_work_id_text[40] = {0};
-    if (locked_work_id && locked_work_id->type == JSON_STR)
-        snprintf(locked_work_id_text, sizeof(locked_work_id_text), "%s",
-                 json_get_str(locked_work_id));
-    const struct json_value *partial_reuse_plan =
+    const struct json_value *prepare_plan =
         json_get(&work_reply.data, "reuse_plan");
+    const struct json_value *prepare_reused = prepare_plan
+        ? json_get(prepare_plan, "reused") : NULL;
+    const struct json_value *prepare_available = prepare_plan
+        ? json_get(prepare_plan, "available_after_use") : NULL;
+    struct json_value prepare_next_input;
+    json_init(&prepare_next_input);
+    bool prepare_next_ok = za_e2e_prepare_next_ok(&work_reply,
+                                                  &prepare_next_input);
+    snprintf(workspace_path, sizeof(workspace_path), "%s/.zvcs", workspace);
+    ZA_CHECK("known source is explicitly used before it can count as reuse",
+             za_e2e_prepare_head_ok(input_ready, &work_reply, prepare_reused,
+                                    prepare_available) &&
+                 prepare_next_ok &&
+                 strcmp(work_reply.next[0].command, "zcode.use") == 0 &&
+                 strcmp(json_get_str(json_get(
+                            &prepare_next_input, "name_or_root")),
+                        stack_root_hex) == 0 &&
+                 strstr(work_reply.next[0].input_json, stack_root_hex) != NULL &&
+                 !za_exists(workspace_path));
+    failures += za_e2e_prepare_use(prepare_next_ok, &prepare_next_input,
+                                   stack_root_hex);
+    json_free(&prepare_next_input);
+    zcl_command_reply_free(&work_reply);
+    json_free(&work_input);
+    return failures;
+}
+
+static bool za_e2e_partial_reuse_ok(bool input_ready,
+                                    struct zcl_command_reply *work_reply,
+                                    const char *locked_work_id_text,
+                                    const char *workspace)
+{
+    char workspace_path[4400];
+    const struct json_value *partial_reuse_plan =
+        json_get(&work_reply->data, "reuse_plan");
     const struct json_value *partial_reused = partial_reuse_plan
         ? json_get(partial_reuse_plan, "reused") : NULL;
     const struct json_value *partial_selected = partial_reused
@@ -2971,104 +3115,226 @@ static int t_e2e(void)
     const struct json_value *authoritative_dependencies =
         authoritative_metadata_read
             ? json_get(&authoritative_metadata, "dependencies") : NULL;
-    ZA_CHECK("a partial reuse goal enters the existing bounded work lifecycle",
-             input_ready && work_reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 strcmp(json_get_str(json_get(&work_reply.data, "state")),
+    bool ok = input_ready && work_reply->status == ZCL_COMMAND_STATUS_PASSED &&
+                 strcmp(json_get_str(json_get(&work_reply->data, "state")),
                         "AWAITING_CANDIDATE") == 0 &&
                  partial_composition &&
                  strcmp(partial_composition, "candidate_only") == 0 &&
                  authoritative_dependencies &&
                  authoritative_dependencies->num_children == 0 &&
-                 strncmp(locked_work_id_text, "work-", 5) == 0);
+                 strncmp(locked_work_id_text, "work-", 5) == 0;
     if (authoritative_metadata_read) json_free(&authoritative_metadata);
+    return ok;
+}
+
+static int za_e2e_partial_reuse(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    char *workspace = fx->workspace;
+    char *locked_work_id_text = fx->locked_work_id_text;
+
+    bool dependency_workspace_ready = fx->workspace_ready;
+    struct json_value work_input;
+    json_init(&work_input); json_set_object(&work_input);
+    bool input_ready = dependency_workspace_ready &&
+        json_push_kv_str(&work_input, "workspace", workspace) &&
+        json_push_kv_str(&work_input, "goal",
+                         "Make harness call ring_push") &&
+        json_push_kv_str(&work_input, "context_symbol", "harness") &&
+        json_push_kv_str(&work_input, "profile", "quick") &&
+        json_push_kv_str(&work_input, "datadir", base);
+    struct zcl_command_request work_request = {.input = &work_input};
+    struct zcl_command_reply work_reply;
+    zcl_command_reply_init(&work_reply, "zcl.zcode_locked_context_start.v1");
+    if (input_ready)
+        zcl_native_handle_zcode_work_start(&work_request, &work_reply);
+    const struct json_value *locked_work_id =
+        json_get(&work_reply.data, "work_id");
+    if (locked_work_id && locked_work_id->type == JSON_STR)
+        snprintf(locked_work_id_text, sizeof(fx->locked_work_id_text), "%s",
+                 json_get_str(locked_work_id));
+    ZA_CHECK("a partial reuse goal enters the existing bounded work lifecycle",
+             za_e2e_partial_reuse_ok(input_ready, &work_reply,
+                                     locked_work_id_text, workspace));
     zcl_command_reply_free(&work_reply);
     json_free(&work_input);
+    return failures;
+}
 
-    json_init(&work_input); json_set_object(&work_input);
-    input_ready = locked_work_id_text[0] &&
-        json_push_kv_str(&work_input, "workspace", workspace) &&
-        json_push_kv_str(&work_input, "work", locked_work_id_text) &&
-        json_push_kv_str(&work_input, "adapter", "manual") &&
-        json_push_kv_str(&work_input, "datadir", base);
-    work_request.input = &work_input;
-    zcl_command_reply_init(&work_reply, "zcl.zcode_locked_context_run.v1");
-    if (input_ready)
-        zcl_native_handle_zcode_work_run(&work_request, &work_reply);
-    const struct json_value *adapter_packet =
-        json_get(&work_reply.data, "adapter_packet_path");
-    const struct json_value *candidate_workspace =
-        json_get(&work_reply.data, "candidate_workspace");
-    struct json_value packet_json;
-    bool packet_read = adapter_packet && adapter_packet->type == JSON_STR &&
-        za_read_json_file(json_get_str(adapter_packet), &packet_json);
-    const struct json_value *locked_dependencies = packet_read
-        ? json_get(&packet_json, "locked_dependencies") : NULL;
-    const struct json_value *dependency_context = packet_read
-        ? json_get(&packet_json, "selected_dependency_context") : NULL;
-    const struct json_value *ring_context = dependency_context
-        ? json_at(dependency_context, 0) : NULL;
-    const struct json_value *ring_headers = ring_context
-        ? json_get(ring_context, "headers") : NULL;
-    const struct json_value *ring_header = ring_headers
-        ? json_at(ring_headers, 0) : NULL;
-    const struct json_value *ring_content = ring_header
-        ? json_get(ring_header, "content") : NULL;
+struct za_e2e_ring_chain {
+    const struct json_value *locked_dependencies;
+    const struct json_value *dependency_context;
+    const struct json_value *ring_context;
+    const struct json_value *ring_headers;
+    const struct json_value *ring_header;
+    const struct json_value *ring_content;
+};
+
+static void za_e2e_ring_chain_read(const struct json_value *packet_json,
+                                   bool packet_read,
+                                   struct za_e2e_ring_chain *v)
+{
+    v->locked_dependencies = packet_read
+        ? json_get(packet_json, "locked_dependencies") : NULL;
+    v->dependency_context = packet_read
+        ? json_get(packet_json, "selected_dependency_context") : NULL;
+    v->ring_context = v->dependency_context
+        ? json_at(v->dependency_context, 0) : NULL;
+    v->ring_headers = v->ring_context
+        ? json_get(v->ring_context, "headers") : NULL;
+    v->ring_header = v->ring_headers
+        ? json_at(v->ring_headers, 0) : NULL;
+    v->ring_content = v->ring_header
+        ? json_get(v->ring_header, "content") : NULL;
+}
+
+static bool za_e2e_candidate_metadata_read(
+    const struct json_value *candidate_workspace,
+    struct json_value *candidate_metadata)
+{
     char candidate_metadata_path[4500] = {0};
-    struct json_value candidate_metadata;
     bool candidate_metadata_read = candidate_workspace &&
         snprintf(candidate_metadata_path, sizeof(candidate_metadata_path),
                  "%s/zcode-package.json",
                  json_get_str(candidate_workspace)) > 0 &&
-        za_read_json_file(candidate_metadata_path, &candidate_metadata);
+        za_read_json_file(candidate_metadata_path, candidate_metadata);
+    return candidate_metadata_read;
+}
+
+static void za_e2e_scan_ring_apis(const struct json_value *ring_apis,
+                                  bool *saw_selected_ring_api,
+                                  bool *saw_unrelated_noise_api)
+{
+    for (size_t i = 0; ring_apis && i < ring_apis->num_children; i++) {
+        const char *api = json_get_str(json_at(ring_apis, i));
+        if (api && strcmp(api, "ring_push") == 0)
+            *saw_selected_ring_api = true;
+        if (api && strcmp(api, "noise_only") == 0)
+            *saw_unrelated_noise_api = true;
+    }
+}
+
+static bool za_e2e_packet_ok_a(bool input_ready,
+                               struct zcl_command_reply *work_reply,
+                               const struct za_e2e_ring_chain *v,
+                               const struct json_value *candidate_dependency,
+                               const char *root_hex)
+{
+    return input_ready &&
+                 work_reply->status == ZCL_COMMAND_STATUS_PASSED &&
+                 v->locked_dependencies && v->locked_dependencies->num_children == 1 &&
+                 v->dependency_context && v->dependency_context->num_children == 1 &&
+                 json_get_bool(json_get(
+                     &work_reply->data,
+                     "candidate_dependency_metadata_changed")) &&
+                 candidate_dependency &&
+                 strcmp(json_get_str(json_get(candidate_dependency, "root")),
+                        root_hex) == 0;
+}
+
+static bool za_e2e_packet_ok_b(const struct za_e2e_ring_chain *v,
+                               const char *root_hex)
+{
+    return v->ring_context &&
+                 strcmp(json_get_str(json_get(v->ring_context, "package_root")),
+                        root_hex) == 0 &&
+                 v->ring_headers && v->ring_headers->num_children == 1 &&
+                 v->ring_content && strstr(json_get_str(v->ring_content),
+                                        "ring_push") != NULL &&
+                 strstr(json_get_str(v->ring_content), "noise_only") == NULL;
+}
+
+static bool za_e2e_packet_ok_c(const struct za_e2e_ring_chain *v,
+                               bool saw_selected_ring_api,
+                               bool saw_unrelated_noise_api,
+                               const struct json_value *packet_json)
+{
+    return saw_selected_ring_api && !saw_unrelated_noise_api &&
+                 json_get_int(json_get(v->ring_header, "bytes")) > 0 &&
+                 json_get(v->ring_header, "content_root") == NULL &&
+                 json_get(packet_json, "dependency_context_bytes") == NULL;
+}
+
+static int za_e2e_packet_check(bool input_ready,
+                               struct zcl_command_reply *work_reply,
+                               const char *root_hex)
+{
+    int failures = 0;
+    const struct json_value *adapter_packet =
+        json_get(&work_reply->data, "adapter_packet_path");
+    const struct json_value *candidate_workspace =
+        json_get(&work_reply->data, "candidate_workspace");
+    struct json_value packet_json;
+    bool packet_read = adapter_packet && adapter_packet->type == JSON_STR &&
+        za_read_json_file(json_get_str(adapter_packet), &packet_json);
+    struct za_e2e_ring_chain v;
+    za_e2e_ring_chain_read(&packet_json, packet_read, &v);
+    struct json_value candidate_metadata;
+    bool candidate_metadata_read = za_e2e_candidate_metadata_read(
+        candidate_workspace, &candidate_metadata);
     const struct json_value *candidate_dependencies = candidate_metadata_read
         ? json_get(&candidate_metadata, "dependencies") : NULL;
     const struct json_value *candidate_dependency = candidate_dependencies
         ? json_at(candidate_dependencies, 0) : NULL;
-    const struct json_value *ring_apis = ring_context
-        ? json_get(ring_context, "apis") : NULL;
+    const struct json_value *ring_apis = v.ring_context
+        ? json_get(v.ring_context, "apis") : NULL;
     bool saw_selected_ring_api = false;
     bool saw_unrelated_noise_api = false;
-    for (size_t i = 0; ring_apis && i < ring_apis->num_children; i++) {
-        const char *api = json_get_str(json_at(ring_apis, i));
-        if (api && strcmp(api, "ring_push") == 0)
-            saw_selected_ring_api = true;
-        if (api && strcmp(api, "noise_only") == 0)
-            saw_unrelated_noise_api = true;
-    }
+    za_e2e_scan_ring_apis(ring_apis, &saw_selected_ring_api,
+                          &saw_unrelated_noise_api);
     ZA_CHECK("the model packet contains only lock-bound receipt-verified C23 APIs",
-             input_ready &&
-                 work_reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                 locked_dependencies && locked_dependencies->num_children == 1 &&
-                 dependency_context && dependency_context->num_children == 1 &&
-                 json_get_bool(json_get(
-                     &work_reply.data,
-                     "candidate_dependency_metadata_changed")) &&
-                 candidate_dependency &&
-                 strcmp(json_get_str(json_get(candidate_dependency, "root")),
-                        root_hex) == 0 &&
-                 ring_context &&
-                 strcmp(json_get_str(json_get(ring_context, "package_root")),
-                        root_hex) == 0 &&
-                 ring_headers && ring_headers->num_children == 1 &&
-                 ring_content && strstr(json_get_str(ring_content),
-                                        "ring_push") != NULL &&
-                 strstr(json_get_str(ring_content), "noise_only") == NULL &&
-                 saw_selected_ring_api && !saw_unrelated_noise_api &&
-                 json_get_int(json_get(ring_header, "bytes")) > 0 &&
-                 json_get(ring_header, "content_root") == NULL &&
-                 json_get(&packet_json, "dependency_context_bytes") == NULL);
+             za_e2e_packet_ok_a(input_ready, work_reply, &v,
+                                candidate_dependency, root_hex) &&
+                 za_e2e_packet_ok_b(&v, root_hex) &&
+                 za_e2e_packet_ok_c(&v, saw_selected_ring_api,
+                                    saw_unrelated_noise_api, &packet_json));
     if (candidate_metadata_read) json_free(&candidate_metadata);
     if (packet_read) json_free(&packet_json);
-    zcl_command_reply_free(&work_reply);
-    json_free(&work_input);
+    return failures;
+}
 
+static int za_e2e_locked_packet(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    char *workspace = fx->workspace;
+    char *locked_work_id_text = fx->locked_work_id_text;
+
+    struct json_value work_input;
     json_init(&work_input); json_set_object(&work_input);
-    input_ready = locked_work_id_text[0] &&
+    bool input_ready = locked_work_id_text[0] &&
         json_push_kv_str(&work_input, "workspace", workspace) &&
         json_push_kv_str(&work_input, "work", locked_work_id_text) &&
         json_push_kv_str(&work_input, "adapter", "manual") &&
         json_push_kv_str(&work_input, "datadir", base);
-    work_request.input = &work_input;
+    struct zcl_command_request work_request = {.input = &work_input};
+    struct zcl_command_reply work_reply;
+    zcl_command_reply_init(&work_reply, "zcl.zcode_locked_context_run.v1");
+    if (input_ready)
+        zcl_native_handle_zcode_work_run(&work_request, &work_reply);
+    failures += za_e2e_packet_check(input_ready, &work_reply, fx->root_hex);
+    zcl_command_reply_free(&work_reply);
+    json_free(&work_input);
+    return failures;
+}
+
+static int za_e2e_composition_not_behavior(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    char *workspace = fx->workspace;
+    char *locked_work_id_text = fx->locked_work_id_text;
+
+    struct json_value work_input;
+    json_init(&work_input); json_set_object(&work_input);
+    bool input_ready = locked_work_id_text[0] &&
+        json_push_kv_str(&work_input, "workspace", workspace) &&
+        json_push_kv_str(&work_input, "work", locked_work_id_text) &&
+        json_push_kv_str(&work_input, "adapter", "manual") &&
+        json_push_kv_str(&work_input, "datadir", base);
+    struct zcl_command_request work_request = {.input = &work_input};
+    struct zcl_command_reply work_reply;
     zcl_command_reply_init(&work_reply,
                            "zcl.zcode_composition_not_behavior.v1");
     if (input_ready)
@@ -3083,15 +3349,27 @@ static int t_e2e(void)
                      "candidate_dependency_metadata_changed")));
     zcl_command_reply_free(&work_reply);
     json_free(&work_input);
+    return failures;
+}
+
+static int za_e2e_header_tamper(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    char *workspace = fx->workspace;
+    char *locked_work_id_text = fx->locked_work_id_text;
+    char *header = fx->header;
 
     bool header_damaged = za_write_file(header, "corrupt\n", 8, 0600);
+    struct json_value work_input;
     json_init(&work_input); json_set_object(&work_input);
-    input_ready = header_damaged && locked_work_id_text[0] &&
+    bool input_ready = header_damaged && locked_work_id_text[0] &&
         json_push_kv_str(&work_input, "workspace", workspace) &&
         json_push_kv_str(&work_input, "work", locked_work_id_text) &&
         json_push_kv_str(&work_input, "adapter", "manual") &&
         json_push_kv_str(&work_input, "datadir", base);
-    work_request.input = &work_input;
+    struct zcl_command_request work_request = {.input = &work_input};
+    struct zcl_command_reply work_reply;
     zcl_command_reply_init(&work_reply, "zcl.zcode_locked_context_tamper.v1");
     if (input_ready)
         zcl_native_handle_zcode_work_run(&work_request, &work_reply);
@@ -3103,39 +3381,60 @@ static int t_e2e(void)
     json_free(&work_input);
     ZA_CHECK("the exact verified fixture header is restored",
              za_write_file(header, ZA_RING_H, strlen(ZA_RING_H), 0600));
+    return failures;
+}
 
-    uint8_t ring_receipt[32];
-    memcpy(ring_receipt, commit.steps[0].receipt_id, sizeof(ring_receipt));
-    struct vcs_package_build_receipt inspected_receipt;
+static int za_e2e_receipt_and_reproduce(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    const char *zcode = fx->zcode;
+    uint8_t *ring_root = fx->ring_root;
+    char *root_hex = fx->root_hex;
+    struct package_lifecycle_commit_report *commit = &fx->commit;
+    uint8_t *ring_receipt = fx->ring_receipt;
+    struct vcs_package_build_receipt *inspected_receipt =
+        &fx->inspected_receipt;
+    uint8_t *active = fx->active;
+
+    memcpy(ring_receipt, commit->steps[0].receipt_id, sizeof(fx->ring_receipt));
     struct zcl_result inspected = package_lifecycle_receipt_read(
-        base, ring_receipt, &inspected_receipt);
+        base, ring_receipt, inspected_receipt);
     ZA_CHECK("the filed receipt is readable only through its rederived exact id",
              inspected.ok &&
-                 memcmp(inspected_receipt.package_root, ring_root, 32) == 0 &&
-                 inspected_receipt.test_ran &&
-                 inspected_receipt.result_class ==
+                 memcmp(inspected_receipt->package_root, ring_root, 32) == 0 &&
+                 inspected_receipt->test_ran &&
+                 inspected_receipt->result_class ==
                      VCS_PACKAGE_BUILD_RESULT_TEST_PASS);
     ZA_CHECK("a newly built package does not claim receipt reuse",
-             !commit.steps[0].receipt_reused);
+             !commit->steps[0].receipt_reused);
 
-    uint8_t active[32];
-    size_t gens = 0;
-    bool present = false;
+    fx->gens = 0;
+    fx->present = false;
     struct zcl_result ar =
-        package_lifecycle_active(base, "alice/ringbuffer", active, &gens,
-                                 &present);
+        package_lifecycle_active(base, "alice/ringbuffer", active, &fx->gens,
+                                 &fx->present);
     ZA_CHECK("the installed root is the active generation",
-             ar.ok && present && gens == 1 &&
+             ar.ok && fx->present && fx->gens == 1 &&
                  memcmp(active, ring_root, 32) == 0);
 
-    struct za_e2e_env env = {
+    fx->env = (struct za_e2e_env){
         .base = base, .zcode = zcode, .root_hex = root_hex,
-        .archive = archive, .ring_root = ring_root,
-        .ring_receipt = ring_receipt, .recipe_root = inspected_receipt.recipe_root,
-        .t0 = t0,
+        .archive = fx->archive, .ring_root = ring_root,
+        .ring_receipt = ring_receipt, .recipe_root = inspected_receipt->recipe_root,
+        .t0 = fx->t0,
     };
-    struct package_lifecycle_reproduce_report repro;
-    failures += za_e2e_reproduce_identity(&env, &repro);
+    failures += za_e2e_reproduce_identity(&fx->env, &fx->repro);
+    return failures;
+}
+
+static int za_e2e_fastcache_command(const char *base, const char *fast_dir);
+
+static int za_e2e_fastcache_runs(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    struct package_lifecycle_reproduce_report *repro = &fx->repro;
 
     /* --- an optional fastobj cache rides along to the worker ------------
      * The confined worker is the cache's only writer: a directory that did
@@ -3152,7 +3451,7 @@ static int t_e2e(void)
                fc_repro.rule, fc_repro.detail, fcr.message);
     ZA_CHECK("a reproduce handed a fastobj cache still matches and re-files",
              fcr.ok && fc_repro.matched && fc_repro.filed &&
-                 memcmp(fc_repro.receipt_id, repro.receipt_id, 32) == 0);
+                 memcmp(fc_repro.receipt_id, repro->receipt_id, 32) == 0);
     ZA_CHECK("the cache directory was created and populated by the worker",
              fc_repro.fast_cache_used && za_exists(fast_dir) &&
                  za_dir_entries(fast_dir) > 0);
@@ -3170,8 +3469,14 @@ static int t_e2e(void)
              fc2r.ok && fc2_repro.matched && fc2_repro.filed &&
                  fc2_repro.fast_cache_hits > 0 &&
                  fc2_repro.fast_cache_misses == 0 &&
-                 memcmp(fc2_repro.receipt_id, repro.receipt_id, 32) == 0);
+                 memcmp(fc2_repro.receipt_id, repro->receipt_id, 32) == 0);
+    failures += za_e2e_fastcache_command(base, fast_dir);
+    return failures;
+}
 
+static int za_e2e_fastcache_command(const char *base, const char *fast_dir)
+{
+    int failures = 0;
     /* The native command accepts the optional field and renders the cache
      * outcome in its reply (idempotently, against the same cache). */
     struct json_value fc_input;
@@ -3201,6 +3506,14 @@ static int t_e2e(void)
                  strcmp(fc_admission, "local_candidate") == 0);
     zcl_command_reply_free(&fc_reply);
     json_free(&fc_input);
+    return failures;
+}
+
+static int za_e2e_blank_fast_cache(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    struct package_lifecycle_reproduce_report *repro = &fx->repro;
 
     /* An empty-after-trim fast_cache is exactly the cold rebuild: the flag
      * must be omitted, not passed empty (an empty --fast-cache= makes the
@@ -3211,7 +3524,21 @@ static int t_e2e(void)
     ZA_CHECK("an empty fast_cache string is the cold rebuild",
              blankr.ok && blank_repro.matched && blank_repro.filed &&
                  !blank_repro.fast_cache_used &&
-                 memcmp(blank_repro.receipt_id, repro.receipt_id, 32) == 0);
+                 memcmp(blank_repro.receipt_id, repro->receipt_id, 32) == 0);
+    return failures;
+}
+
+static int za_e2e_second_version(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    const char *zcode = fx->zcode;
+    const int64_t t0 = fx->t0;
+    uint8_t *ring_root = fx->ring_root;
+    char *installed_dir = fx->installed_dir;
+    uint8_t *ring2_root = fx->ring2_root;
+    char *installed2 = fx->installed2;
+
     /* --- a second version, then rollback -------------------------------- */
     struct za_file ring2_files[] = {
         { "LICENSE", ZA_LICENSE },
@@ -3219,7 +3546,6 @@ static int t_e2e(void)
         { "src/ring.c", ZA_RING_C "/* v2 */\n" },
         { "test/test_ring.c", ZA_RING_TEST },
     };
-    uint8_t ring2_root[32];
     bool p2 = za_publish(zcode, "alice/ringbuffer", "1.0.1", 2, ring2_files,
                          4, "src/ring.h", "src/ring.c", "test/test_ring.c",
                          "src", ring2_root);
@@ -3244,15 +3570,23 @@ static int t_e2e(void)
     ZA_CHECK("the upgrade installs and reports the previous root",
              cr2.ok && commit2.installed && commit2.had_previous &&
                  memcmp(commit2.previous_root, ring_root, 32) == 0);
-    char installed2[4400];
     char root2_hex[65];
     za_hex(ring2_root, 32, root2_hex);
-    snprintf(installed2, sizeof(installed2), "%s/installed/%s", zcode,
+    snprintf(installed2, sizeof(fx->installed2), "%s/installed/%s", zcode,
              root2_hex);
     ZA_CHECK("BOTH generations are on disk after the upgrade",
              za_exists(installed_dir) && za_exists(installed2));
+    return failures;
+}
 
-    failures += za_user_data_after_update(&user_data);
+static int za_e2e_break_b(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    const char *zcode = fx->zcode;
+    char *installed2 = fx->installed2;
+
+    failures += za_user_data_after_update(&fx->user_data);
 
     /* --- NOW BREAK B, then go back ---------------------------------------
      * Reverting a version that still works proves almost nothing. The whole
@@ -3279,21 +3613,44 @@ static int t_e2e(void)
     ZA_CHECK("the most recently changed package is named without being asked",
              lar.ok && last_present &&
                  strcmp(last_name, "alice/ringbuffer") == 0);
+    return failures;
+}
 
-    struct package_lifecycle_rollback_report rb;
+static int za_e2e_rollback(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *base = fx->base;
+    const int64_t t0 = fx->t0;
+    uint8_t *ring_root = fx->ring_root;
+    uint8_t *ring2_root = fx->ring2_root;
+    uint8_t *active = fx->active;
+    struct package_lifecycle_rollback_report *rb = &fx->rb;
+
     struct zcl_result rbr =
-        package_lifecycle_rollback(base, NULL, t0 + 4, &rb);
+        package_lifecycle_rollback(base, NULL, t0 + 4, rb);
     ZA_CHECK("rollback with no name goes back one step on that package",
-             rbr.ok && rb.selected_by_default &&
-                 strcmp(rb.name, "alice/ringbuffer") == 0);
+             rbr.ok && rb->selected_by_default &&
+                 strcmp(rb->name, "alice/ringbuffer") == 0);
     ZA_CHECK("rollback re-activates the previous root even though B is gone",
-             rbr.ok && memcmp(rb.from_root, ring2_root, 32) == 0 &&
-                 memcmp(rb.to_root, ring_root, 32) == 0);
-    ar = package_lifecycle_active(base, "alice/ringbuffer", active, &gens,
-                                  &present);
+             rbr.ok && memcmp(rb->from_root, ring2_root, 32) == 0 &&
+                 memcmp(rb->to_root, ring_root, 32) == 0);
+    struct zcl_result ar = package_lifecycle_active(
+        base, "alice/ringbuffer", active, &fx->gens, &fx->present);
     ZA_CHECK("A is active again and history was appended, not rewritten",
-             ar.ok && present && gens == 3 &&
+             ar.ok && fx->present && fx->gens == 3 &&
                  memcmp(active, ring_root, 32) == 0);
+    return failures;
+}
+
+static int za_e2e_rollback_bytes(struct za_e2e_fix *fx)
+{
+    int failures = 0;
+    const char *zcode = fx->zcode;
+    uint8_t *ring_root = fx->ring_root;
+    char *installed_dir = fx->installed_dir;
+    uint8_t *active = fx->active;
+    struct package_lifecycle_rollback_report *rb = &fx->rb;
+
     char link[4400];
     char resolved[4400];
     snprintf(link, sizeof(link), "%s/active/alice/ringbuffer", zcode);
@@ -3317,20 +3674,48 @@ static int t_e2e(void)
     bool back_hashed = za_file_sha3(back_archive, back_archive_sha) &&
                        za_file_sha3(back_header, back_header_sha);
     ZA_CHECK("the user is running BYTE-EXACTLY version A again",
-             a_fingerprinted && back_hashed &&
-                 memcmp(back_archive_sha, a_archive_sha, 32) == 0 &&
-                 memcmp(back_header_sha, a_header_sha, 32) == 0);
+             fx->a_fingerprinted && back_hashed &&
+                 memcmp(back_archive_sha, fx->a_archive_sha, 32) == 0 &&
+                 memcmp(back_header_sha, fx->a_header_sha, 32) == 0);
     ZA_CHECK("and the root it went back to is A's exact identity",
-             memcmp(rb.to_root, ring_root, 32) == 0 &&
+             memcmp(rb->to_root, ring_root, 32) == 0 &&
                  memcmp(active, ring_root, 32) == 0);
+    return failures;
+}
 
-    failures += za_user_data_after_rollback(&user_data);
+static int t_e2e(void)
+{
+    int failures = 0;
+    struct za_e2e_fix fx = {0};
+    failures += za_e2e_setup(&fx);
+    if (fx.aborted)
+        return failures;
 
-    failures += za_e2e_dependent_package(&env);
+    failures += za_e2e_plan_refusals(&fx);
+    failures += za_e2e_install(&fx);
+    failures += za_e2e_declared_readers(&fx);
+    za_e2e_workspace_prepare(&fx);
+    failures += za_e2e_reuse_exact(&fx);
+    failures += za_e2e_reuse_preparation(&fx);
+    failures += za_e2e_partial_reuse(&fx);
+    failures += za_e2e_locked_packet(&fx);
+    failures += za_e2e_composition_not_behavior(&fx);
+    failures += za_e2e_header_tamper(&fx);
+    failures += za_e2e_receipt_and_reproduce(&fx);
+    failures += za_e2e_fastcache_runs(&fx);
+    failures += za_e2e_blank_fast_cache(&fx);
+    failures += za_e2e_second_version(&fx);
+    failures += za_e2e_break_b(&fx);
+    failures += za_e2e_rollback(&fx);
+    failures += za_e2e_rollback_bytes(&fx);
 
-    failures += za_e2e_tampered_objects_and_outputs(&env);
+    failures += za_user_data_after_rollback(&fx.user_data);
 
-    za_rm_rf(base);
+    failures += za_e2e_dependent_package(&fx.env);
+
+    failures += za_e2e_tampered_objects_and_outputs(&fx.env);
+
+    za_rm_rf(fx.base);
     return failures;
 }
 

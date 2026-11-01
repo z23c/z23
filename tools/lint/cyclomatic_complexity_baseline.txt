@@ -115,7 +115,6 @@ tests/harness/src/test_wallet_destruction_drill.c:act1_transparent:73
 tests/harness/src/test_wallet_destruction_drill.c:act2_bodyless_restore_must_fail_loud:29
 tests/harness/src/test_wallet_destruction_drill.c:act3_shielded:61
 tests/harness/src/test_wallet_destruction_drill.c:act4_recovery_phrase:26
-tests/harness/src/test_zcode_add.c:t_e2e:239
 tests/harness/src/test_zcode_package_dev.c:zpd_test_twelve_task_benchmark:30
 tests/harness/src/test_zcode_package_dev.c:zpd_test_work_start:56
 tools/acme/tls_client.c:tls_client_fetch:36
