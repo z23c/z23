@@ -324,6 +324,39 @@ static void params_arm_proving_locked(const char *params_dir,
                  zclassic_sapling_prover_status());
 }
 
+enum {
+    PARAMS_PHGR_ABSENT = 0,
+    PARAMS_PHGR_PARSED = 1,
+    PARAMS_PHGR_REJECTED = -1
+};
+
+/* Parse phgr_data into phgr_vk: PARSED, REJECTED, or ABSENT when data is NULL. */
+static int params_parse_first_phgr(uint8_t *phgr_data, size_t len)
+{
+    if (!phgr_data)
+        return PARAMS_PHGR_ABSENT;
+    bool parsed = ppzksnark_vk_read(&phgr_vk, phgr_data, len);
+    if (!parsed)
+        return PARAMS_PHGR_REJECTED;
+    return PARAMS_PHGR_PARSED;
+}
+
+/* True when the active chain parameters name the main network. */
+static bool params_chain_is_mainnet(void)
+{
+    const struct chain_params *cp = chain_params_get();
+    return cp && strcmp(cp->strNetworkID, "main") == 0;
+}
+
+/* Publish Groth16 verifying keys, the PHGR13 key when phgr_ok, and mark them loaded. */
+static void params_publish_first_loaded(bool phgr_ok)
+{
+    params_publish_groth16_vks();
+    if (phgr_ok)
+        sprout_phgr_set_vk(&phgr_vk);
+    atomic_store(&params_loaded, true);
+}
+
 /* The FIRST load: nothing of ours is published yet, so this parses every key,
  * publishes the three Groth16 VKs at the single publish point, and then arms
  * proving. Caller holds params_mu. */
@@ -410,36 +443,35 @@ static bool params_load_first_locked(const char *params_dir)
                                                 "sprout-verifying.key",
                                                 SPROUT_VERIFYING_KEY_SHA512,
                                                 &len);
-        if (phgr_data) {
+        int phgr_st = params_parse_first_phgr(phgr_data, len);
+        if (phgr_st == PARAMS_PHGR_PARSED) {
             /* Parsed, not published: publication is deferred to the single
              * publish point below, with the three Groth16 VKs. */
-            if (ppzksnark_vk_read(&phgr_vk, phgr_data, len)) {
                 LOG_INFO("sapling_params",
                          "Loaded Sprout PHGR13 verification key: %zu bytes "
                          "(%zu IC points)", len, phgr_vk.ic_len);
-                phgr_ok = true;
-            } else {
-                LOG_WARN("sapling_params",
-                         "ERROR: Failed to parse sprout-verifying.key");
-            }
+            phgr_ok = true;
             free(phgr_data);
         } else {
-            /* Unreadable, or present but failed its SHA-512 pin —
-             * params_read_pinned logs the expected/actual digests itself, so
-             * do not claim "not found" here for what may have been
-             * tampering. */
+            if (phgr_st == PARAMS_PHGR_REJECTED) {
+                LOG_WARN("sapling_params",
+                         "ERROR: Failed to parse sprout-verifying.key");
+                free(phgr_data);
+            } else {
+                /* Unreadable, or present but failed its SHA-512 pin —
+                 * params_read_pinned logs the expected/actual digests itself, so
+                 * do not claim "not found" here for what may have been
+                 * tampering. */
             LOG_WARN("sapling_params",
                      "ERROR: sprout-verifying.key unusable in %s "
                      "(missing/unreadable, or failed its pinned SHA-512)",
                      params_dir);
-        }
+            }
 
-        /* Hard-fail on mainnet — PHGR13 proofs are consensus-critical for
-         * pre-Sapling blocks. The silent non-fatal path let this bug survive
-         * for months (see PHGR13_INVESTIGATION.md). */
-        if (!phgr_ok) {
-            const struct chain_params *cp = chain_params_get();
-            if (cp && strcmp(cp->strNetworkID, "main") == 0) {
+            /* Hard-fail on mainnet — PHGR13 proofs are consensus-critical for
+             * pre-Sapling blocks. The silent non-fatal path let this bug survive
+             * for months (see PHGR13_INVESTIGATION.md). */
+            if (params_chain_is_mainnet()) {
                 /* Nothing is published yet, so this only frees. The release
                  * helper still clears the globals first and NULLs every field
                  * it frees, so the invariant holds by construction rather than
@@ -463,10 +495,7 @@ static bool params_load_first_locked(const char *params_dir)
      * below (the proving keys, the prover self-test) is best-effort and
      * cannot fail the function. The prover self-test verifies through
      * sapling_check_spend/_output, so it must run after this. */
-    params_publish_groth16_vks();
-    if (phgr_ok)
-        sprout_phgr_set_vk(&phgr_vk);
-    atomic_store(&params_loaded, true);
+    params_publish_first_loaded(phgr_ok);
 
     params_arm_proving_locked(params_dir, spend_bytes, spend_len,
                               output_bytes, output_len);
