@@ -855,3 +855,8 @@ later lane flips it HARD.
   old ROOT: ab77ad2dca2a69f3758177f5bfeb27c2dc19b4e03fc620fcf018674a73b1858e
   by: appended by the lane author after make core-seal; not the unseal ritual
   (the new ROOT is the one in core/MANIFEST.sha3 at the commit that carries this entry)
+
+- 2026-11-01T12:08:18Z — REASON: reseal after rebasing the private wallet broadcast lane onto origin/main 1f1fcb2f0c, which carries the wallet lock, screens and Sapling pair loader unseals. The lane's own core/modules/net changes (tor_integration.c, tor_integration.h, tor_config_log.c) replay unchanged; core/MANIFEST.sha3 and the two hotswap seal headers were taken from main during the rebase and recomputed with make core-seal.
+  old ROOT: a63df6dc83dc8eafc1c8a04acb83d83f8139fb674630c85ac4e0bed1faa37df5
+  by: appended by the lane author after make core-seal; not the unseal ritual
+  (the new ROOT is the one in core/MANIFEST.sha3 at the commit that carries this entry)
