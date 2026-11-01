@@ -1234,6 +1234,92 @@ static bool coins_ram_flush_write(sqlite3 *db, struct coins_kv_add_row *adds,
     return ok;
 }
 
+/* flushed_height <= durable_height, unless since_flush > 0 and last_applied > durable_height. */
+static bool coins_ram_flush_is_stale(int32_t flushed_height,
+                                     int32_t durable_height)
+{
+    return flushed_height <= durable_height &&
+           !(G.since_flush > 0 && G.last_applied > durable_height);
+}
+
+/* last_applied when it is greater than flushed_height, else flushed_height. */
+static int32_t coins_ram_flush_effective_height(int32_t flushed_height)
+{
+    if (G.last_applied > flushed_height)
+        return G.last_applied;
+    return flushed_height;
+}
+
+/* Number of occupied slots whose state is SLOT_TOMB. */
+static size_t coins_ram_flush_count_tombs(void)
+{
+    size_t nspend = 0;
+    for (size_t k = 0; k < G.occupied_count; k++)
+        if (G.slots[G.occupied[k]].state == SLOT_TOMB)
+            nspend++;
+    return nspend;
+}
+
+/* 0 on success, 1 on add-row allocation failure, 2 on spend-row failure after freeing adds. */
+static int coins_ram_flush_alloc_rows(size_t nadd, size_t nspend,
+                                      struct coins_kv_add_row **adds,
+                                      struct coins_kv_spend_row **spends)
+{
+    *adds = NULL;
+    *spends = NULL;
+    if (nadd) {
+        *adds = zcl_malloc(nadd * sizeof(**adds), "coins_ram_flush_adds");
+        if (!*adds)
+            return 1;
+    }
+    if (nspend) {
+        *spends = zcl_malloc(nspend * sizeof(**spends), "coins_ram_flush_spends");
+        if (!*spends) {
+            free(*adds);
+            return 2;
+        }
+    }
+    return 0;
+}
+
+/* 0 after COMMIT, 1 if BEGIN fails, 2 if the row write fails, 3 if COMMIT fails. */
+static int coins_ram_flush_apply_tx(sqlite3 *db, struct coins_kv_add_row *adds,
+                                    size_t nadd, struct coins_kv_spend_row *spends,
+                                    size_t nspend, int32_t flushed_height,
+                                    char **err)
+{
+    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, err) != SQLITE_OK)
+        return 1;
+    if (coins_ram_flush_write(db, adds, nadd, spends, nspend, flushed_height)) {
+        if (sqlite3_exec(db, "COMMIT", NULL, NULL, err) != SQLITE_OK)
+            return 3;
+        return 0;
+    }
+    return 2;
+}
+
+/* Free err when non-NULL, then free the row arrays. */
+static void coins_ram_flush_release_rows(char *err,
+                                        struct coins_kv_add_row *adds,
+                                        struct coins_kv_spend_row *spends)
+{
+    if (err)
+        sqlite3_free(err);
+    free(adds);
+    free(spends);
+}
+
+/* Release occupied scripts, mark those slots empty, then zero occupied_count, live_count, used, and since_flush. */
+static void coins_ram_flush_clear_occupied(void)
+{
+    for (size_t k = 0; k < G.occupied_count; k++) {
+        struct ram_slot *s = &G.slots[G.occupied[k]];
+        slot_release_script(s);
+        s->state = SLOT_EMPTY;
+    }
+    G.occupied_count = 0; G.live_count = 0; G.used = 0; G.since_flush = 0;
+}
+
 bool coins_ram_flush(int32_t flushed_height)
 {
     if (!coins_ram_active()) return false;
@@ -1251,69 +1337,46 @@ bool coins_ram_flush(int32_t flushed_height)
             LOG_FAIL("coins_ram", "flush: durable watermark read failed");
         LOG_FAIL("coins_ram", "flush: malformed watermark len=%zu", prior_wm_len);
     }
-    if (flushed_height <= durable_height && !(G.since_flush > 0 && G.last_applied > durable_height)) {
+    if (coins_ram_flush_is_stale(flushed_height, durable_height)) {
         progress_store_tx_unlock();
         LOG_INFO("coins_ram", "[coins_ram] stale flush skipped requested=%d durable=%d",
                  flushed_height, durable_height);
         return true;
     }
-    if (G.last_applied > flushed_height) flushed_height = G.last_applied;
+    flushed_height = coins_ram_flush_effective_height(flushed_height);
     if (!coins_ram_flush_has_reducer_witness(db, flushed_height)) {
         progress_store_tx_unlock();
         LOG_FAIL("coins_ram", "flush: reducer witness missing at height=%d",
                  flushed_height);
     }
-    size_t nadd = G.live_count, nspend = 0;
-    for (size_t k = 0; k < G.occupied_count; k++)
-        if (G.slots[G.occupied[k]].state == SLOT_TOMB) nspend++;
-
+    size_t nadd = G.live_count;
+    size_t nspend = coins_ram_flush_count_tombs();
     struct coins_kv_add_row   *adds   = NULL;
     struct coins_kv_spend_row *spends = NULL;
-    if (nadd) {
-        adds = zcl_malloc(nadd * sizeof(*adds), "coins_ram_flush_adds");
-        if (!adds) {
-            progress_store_tx_unlock();
+    int alloc_rc = coins_ram_flush_alloc_rows(nadd, nspend, &adds, &spends);
+    if (alloc_rc) {
+        progress_store_tx_unlock();
+        if (alloc_rc == 1)
             LOG_FAIL("coins_ram", "flush: OOM adds");
-        }
-    }
-    if (nspend) {
-        spends = zcl_malloc(nspend * sizeof(*spends), "coins_ram_flush_spends");
-        if (!spends) {
-            free(adds);
-            progress_store_tx_unlock();
-            LOG_FAIL("coins_ram", "flush: OOM spends");
-        }
+        LOG_FAIL("coins_ram", "flush: OOM spends");
     }
     coins_ram_flush_fill_rows(adds, spends);
-    char *err = NULL; bool ok = true;
-    if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) != SQLITE_OK) {
+    char *err = NULL;
+    int tx_rc = coins_ram_flush_apply_tx(db, adds, nadd, spends, nspend,
+                                         flushed_height, &err);
+    if (tx_rc == 1)
         LOG_WARN("coins_ram", "flush: BEGIN failed: %s", err ? err : "?");
-        ok = false;
-    }
-    if (ok && !coins_ram_flush_write(db, adds, nadd, spends, nspend, flushed_height))
-        ok = false;
-
-    if (ok && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) != SQLITE_OK) {
+    if (tx_rc == 3)
         LOG_WARN("coins_ram", "flush: COMMIT failed: %s", err ? err : "?");
-        ok = false;
-    }
-    if (!ok) {
+    if (tx_rc) {
         sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         progress_store_tx_unlock();
-        if (err) sqlite3_free(err);
-        free(adds); free(spends);
+        coins_ram_flush_release_rows(err, adds, spends);
         LOG_FAIL("coins_ram", "flush: failed at height=%d (rolled back)",
                  flushed_height);
     }
-    if (err) sqlite3_free(err);
-    free(adds); free(spends);
-
-    for (size_t k = 0; k < G.occupied_count; k++) {
-        struct ram_slot *s = &G.slots[G.occupied[k]];
-        slot_release_script(s);
-        s->state = SLOT_EMPTY;
-    }
-    G.occupied_count = 0; G.live_count = 0; G.used = 0; G.since_flush = 0;
+    coins_ram_flush_release_rows(err, adds, spends);
+    coins_ram_flush_clear_occupied();
     progress_store_tx_unlock();
     LOG_INFO("coins_ram", "[coins_ram] flushed through height=%d "
              "(%zu adds, %zu spends)", flushed_height, nadd, nspend);
