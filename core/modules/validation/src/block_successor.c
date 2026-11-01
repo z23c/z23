@@ -37,12 +37,23 @@ static bool successor_failed_by_hash(struct main_state *ms,
            block_has_any_failure(owner);
 }
 
-struct block_index *main_state_best_known_successor(struct main_state *ms,
-                                                    struct block_index *parent)
+/* True when best is absent, candidate has more chainwork, or chainwork
+ * is equal and only candidate has BLOCK_HAVE_DATA. */
+static bool successor_candidate_beats(const struct block_index *candidate,
+                                      const struct block_index *best)
 {
-    if (!ms || !parent || !parent->phashBlock)
-        return NULL;
+    return !best ||
+           arith_uint256_compare(&candidate->nChainWork,
+                                 &best->nChainWork) > 0 ||
+           (arith_uint256_compare(&candidate->nChainWork,
+                                  &best->nChainWork) == 0 &&
+            (candidate->nStatus & BLOCK_HAVE_DATA) &&
+            !(best->nStatus & BLOCK_HAVE_DATA));
+}
 
+static struct block_index *successor_active_chain_next(struct main_state *ms,
+                                                       struct block_index *parent)
+{
     /* O(1): parent sits on the active chain below the tip — the
      * successor is the next window slot. This is every hop of a normal
      * serve. (A connected active-chain child always has data, matching
@@ -57,7 +68,12 @@ struct block_index *main_state_best_known_successor(struct main_state *ms,
         /* parent is the active tip (or the slot is unusable): try the
          * header-only zone above the validated tip. */
     }
+    return NULL;
+}
 
+static struct block_index *successor_best_header_next(struct main_state *ms,
+                                                      struct block_index *parent)
+{
     /* O(log n): parent lies on the best-header path — serve along it.
      * Covers announcing/serving headers above the validated tip while
      * bodies are still downloading, without touching the map scan. */
@@ -72,7 +88,12 @@ struct block_index *main_state_best_known_successor(struct main_state *ms,
                 return next;
         }
     }
+    return NULL;
+}
 
+static struct block_index *successor_scan_best_child(struct main_state *ms,
+                                                     struct block_index *parent)
+{
     /* Slow path: parent is a genuinely off-path branch point (stale
      * fork). Full map scan for its best non-failed child — acceptable
      * here because stale branches are short and planting one costs the
@@ -89,15 +110,25 @@ struct block_index *main_state_best_known_successor(struct main_state *ms,
             continue;
         if (successor_failed_by_hash(ms, candidate))
             continue;
-        if (!best ||
-            arith_uint256_compare(&candidate->nChainWork,
-                                  &best->nChainWork) > 0 ||
-            (arith_uint256_compare(&candidate->nChainWork,
-                                   &best->nChainWork) == 0 &&
-             (candidate->nStatus & BLOCK_HAVE_DATA) &&
-             !(best->nStatus & BLOCK_HAVE_DATA))) {
+        if (successor_candidate_beats(candidate, best))
             best = candidate;
-        }
     }
     return best;
+}
+
+struct block_index *main_state_best_known_successor(struct main_state *ms,
+                                                    struct block_index *parent)
+{
+    if (!ms || !parent || !parent->phashBlock)
+        return NULL;
+
+    struct block_index *active = successor_active_chain_next(ms, parent);
+    if (active)
+        return active;
+
+    struct block_index *header = successor_best_header_next(ms, parent);
+    if (header)
+        return header;
+
+    return successor_scan_best_child(ms, parent);
 }

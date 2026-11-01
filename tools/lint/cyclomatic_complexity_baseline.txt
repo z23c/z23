@@ -55,7 +55,6 @@ core/modules/sapling/src/groth16_prover.c:g2_msm:18
 core/modules/sapling/src/groth16_prover.c:groth16_pk_read:20
 core/modules/sapling/src/groth16_prover.c:groth16_prove:63
 core/modules/validation/src/accept_block_header.c:accept_block_header:42
-core/modules/validation/src/block_successor.c:main_state_best_known_successor:24
 core/modules/validation/src/chainstate.c:active_chain_extend_window_have_data:48
 core/modules/validation/src/chainstate.c:select_most_work_eligible:27
 core/modules/validation/src/process_block_invalidate.c:process_block_clear_invalid:17
