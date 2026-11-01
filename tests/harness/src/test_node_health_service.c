@@ -215,6 +215,47 @@ static bool health_test_missing_tip_snapshot_ok(
     return ok;
 }
 
+static int health_test_chain_progress_age(void)
+{
+    int failures = 0;
+
+    printf("node_health_service: chain_progress_age_ms follows the local clock... ");
+    {
+        struct node_health_snapshot health;
+        struct main_state ms_a, ms_b;
+        struct block_index tip_a, tip_b;
+        struct uint256 hash_a, hash_b;
+        /* A tip stamped two hours ahead: miner time must not matter. */
+        bool ok = health_test_init_main_tip(&ms_a, &tip_a, &hash_a, 100, 0x01,
+                                            -7200) &&
+                  health_test_init_main_tip(&ms_b, &tip_b, &hash_b, 101, 0x02,
+                                            -7200);
+        if (ok) {
+            node_health_test_reset_chain_progress(1000);
+            node_health_collect(&health, NULL, &ms_a);
+            ok = health.chain_progress_age_ms == -1; /* baseline only */
+            node_health_test_reset_chain_progress(1000);
+            node_health_collect(&health, NULL, &ms_a);
+            node_health_collect(&health, NULL, &ms_a);
+            ok = ok && health.chain_progress_age_ms == -1;
+            node_health_test_reset_chain_progress(5000);
+            node_health_collect(&health, NULL, &ms_a);
+            node_health_collect(&health, NULL, &ms_b);
+            ok = ok && health.chain_progress_age_ms == 0;
+            node_health_test_set_mono_ms(5000 + 599000);
+            node_health_collect(&health, NULL, &ms_b);
+            ok = ok && health.chain_progress_age_ms == 599000;
+            node_health_test_set_mono_ms(5000 + 700000);
+            node_health_collect(&health, NULL, &ms_b);
+            ok = ok && health.chain_progress_age_ms == 700000;
+            node_health_test_reset_chain_progress(-1);
+        }
+        if (ok) printf("OK\n");
+        else { printf("FAIL\n"); failures++; }
+    }
+    return failures;
+}
+
 static int health_test_handshaked_peer_count(void)
 {
     int failures = 0;
@@ -2057,6 +2098,7 @@ int test_node_health_service(void)
     failures += health_test_at_tip_without_peers();
     failures += health_test_at_tip_missing_active_tip();
     failures += health_test_handshaked_peer_count();
+    failures += health_test_chain_progress_age();
     failures += health_test_headers_ahead_degraded();
     failures += health_test_stale_peer_heights_keep_header_lag();
     failures += health_test_small_gap_serving();

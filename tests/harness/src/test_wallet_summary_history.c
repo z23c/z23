@@ -712,15 +712,12 @@ static int test_current_needs_real_chain(void)
 static int test_chain_fresh(void)
 {
     int failures = 0;
-    TEST_CASE("wallet_summary: a block or header is fresh for ten minutes") {
-        ASSERT(wallet_chain_fresh(1000, 1000, 0));
-        ASSERT(wallet_chain_fresh(1600, 1000, 0));
-        ASSERT(!wallet_chain_fresh(1601, 1000, 0));
-        ASSERT(wallet_chain_fresh(1601, 1000, 1100));
-        ASSERT(!wallet_chain_fresh(2000, 1000, 1100));
-        ASSERT(!wallet_chain_fresh(1000, 0, 0));
-        ASSERT(!wallet_chain_fresh(300, 0, 0));
-        ASSERT(wallet_chain_fresh(1000, 1200, 0));
+    TEST_CASE("wallet_summary: the chain is fresh for ten minutes of local time") {
+        ASSERT(!wallet_chain_fresh(-1));
+        ASSERT(wallet_chain_fresh(0));
+        ASSERT(wallet_chain_fresh(600 * 1000));
+        ASSERT(!wallet_chain_fresh(600 * 1000 + 1));
+        ASSERT(!wallet_chain_fresh(INT64_MIN));
     } TEST_END
     return failures;
 }

@@ -323,12 +323,20 @@ static bool z_sendmany_shielded_from(struct wallet_rpc_context *ctx,
     return true;
 }
 
-/* z_sendmany selects from the notes the wallet summary calls spendable unless
- * the caller names a minconf (a third parameter), which keeps the raw RPC's
- * own selection. */
-bool z_sendmany_spendable_only(const struct json_value *params)
+/* The optional third parameter, minconf: an extra confirmation floor on top of
+ * the depth the wallet summary requires, never a way around it. Absent is 0.
+ * False when present but not a non-negative integer. */
+bool z_sendmany_minconf(const struct json_value *params, int *min_conf)
 {
-    return json_size(params) < 3;
+    *min_conf = 0;
+    if (json_size(params) < 3)
+        return true;
+    const struct json_value *v = json_at(params, 2);
+    if (!v || v->type != JSON_INT || json_get_int(v) < 0 ||
+        json_get_int(v) > 1000000)
+        return false;
+    *min_conf = (int)json_get_int(v);
+    return true;
 }
 
 static bool z_sendmany_run(const struct json_value *params, bool help,
@@ -480,11 +488,16 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
 
     /* ── Shielded spend path (z→z, z→t) ──────────────────────────── */
     if (from_is_shielded) {
+        int min_conf = 0;
+        if (!z_sendmany_minconf(params, &min_conf)) {
+            json_set_str(result, "Invalid minconf");
+            LOG_FAIL("wallet_shielded", "z_sendmany: invalid minconf");
+        }
         return z_sendmany_shielded(ctx, cp, from_z_key, total_amount,
                                    t_dests, t_amounts, num_t_out,
                                    z_diversifiers, z_pk_ds, z_amounts,
                                    z_memos, z_has_memo, num_z_out,
-                                   z_sendmany_spendable_only(params), prepared, result);
+                                   min_conf, prepared, result);
     }
 
 

@@ -50,6 +50,10 @@ struct node_health_snapshot {
     size_t peer_count;
     /* Peers past the version handshake that serve the chain. */
     size_t handshaked_peer_count;
+    /* Milliseconds on the local monotonic clock since this node last saw its
+     * active tip or best header advance; -1 when none has advanced since
+     * start. Never derived from block timestamps. */
+    int64_t chain_progress_age_ms;
     int tip_height;
     int header_height;
     int peer_best_height;
@@ -224,6 +228,9 @@ void node_health_test_set_log_head_override(int log_head);
 void node_health_test_set_chain_advance_decision_override(
     const struct bsp_decision *decision);
 void node_health_test_set_memory_rss_mb_override(int64_t memory_rss_mb);
+/* Forget the observed chain position and pin the monotonic clock (-1 unpins). */
+void node_health_test_reset_chain_progress(int64_t mono_ms);
+void node_health_test_set_mono_ms(int64_t mono_ms);
 #endif
 
 #endif

@@ -10,7 +10,10 @@
 #include "base/safe_alloc.h"
 #include "controllers/wallet_activity.h"
 #include "controllers/wallet_helpers.h"
+#include "controllers/network_controller.h"
 #include "controllers/wallet_shielded_internal.h"
+#include "net/connman.h"
+#include "net/net.h"
 #include "chain/chainparams.h"
 #include "validation/main_state.h"
 #include "jobs/reducer_frontier.h"
@@ -440,10 +443,10 @@ static int test_log_hygiene(const char *log)
 }
 
 /* One native-path send of `amount` from key `key`, as z_sendmany runs it. The
- * result string explains a refusal. With spendable_only false it is the raw
- * z_sendmany call that names an explicit minconf. */
-static void send_try(struct rig *r, size_t key, int64_t amount,
-                     bool spendable_only, struct json_value *res)
+ * result string explains a refusal. min_conf is the optional z_sendmany
+ * minconf, an extra floor over the summary's own depth. */
+static void send_try(struct rig *r, size_t key, int64_t amount, int min_conf,
+                     struct json_value *res)
 {
     struct main_state *ms = zcl_calloc(1, sizeof(*ms), "test main state");
     json_init(res);
@@ -451,7 +454,7 @@ static void send_try(struct rig *r, size_t key, int64_t amount,
     (void)z_sendmany_shielded(wallet_ctx(), chain_params_get(),
                               &r->wallet->sapling_keys.keys[key], amount,
                               NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, 0,
-                              spendable_only, NULL, res);
+                              min_conf, NULL, res);
     wallet_rpc_context_set_base(r->wallet, NULL, r->dir, NULL, NULL, NULL);
     free(ms);
 }
@@ -491,12 +494,12 @@ static int test_send_skips_unready_note(void)
         ASSERT_EQ(field(&j, "unready_zat"), 2 * ZCL1);
         json_free(&j);
         /* 1.5 ZCL needs the stale note: refused, not "Witness stale". */
-        send_try(&r, 0, ZCL1 + ZCL1 / 2, true, &res);
+        send_try(&r, 0, ZCL1 + ZCL1 / 2, 0, &res);
         ASSERT(refused_insufficient(&res));
         json_free(&res);
-        /* The explicit-minconf call keeps selecting every unspent note. */
-        send_try(&r, 0, ZCL1 + ZCL1 / 2, false, &res);
-        ASSERT(!refused_insufficient(&res));
+        /* An explicit minconf never lifts the rule. */
+        send_try(&r, 0, ZCL1 + ZCL1 / 2, 1, &res);
+        ASSERT(refused_insufficient(&res));
         json_free(&res);
         rig_close(&r);
     } TEST_END
@@ -522,10 +525,10 @@ static int test_send_spends_one_key(void)
         ASSERT_EQ(field(&j, "spendable_zat"), 1 * ZCL1);
         ASSERT_EQ(field(&j, "spendable_total_zat"), 2 * ZCL1);
         json_free(&j);
-        send_try(&r, 0, ZCL1 + ZCL1 / 2, true, &res);
+        send_try(&r, 0, ZCL1 + ZCL1 / 2, 0, &res);
         ASSERT(refused_insufficient(&res));
         json_free(&res);
-        send_try(&r, 1, ZCL1 + ZCL1 / 2, true, &res);
+        send_try(&r, 1, ZCL1 + ZCL1 / 2, 0, &res);
         ASSERT(refused_insufficient(&res));
         json_free(&res);
         rig_close(&r);
@@ -550,22 +553,23 @@ static int test_send_waits_for_depth(void)
         ASSERT_EQ(field(&j, "spendable_zat"), 0);
         ASSERT_EQ(field(&j, "pending_zat"), 5 * ZCL1);
         json_free(&j);
-        send_try(&r, 0, ZCL1, true, &res);
+        send_try(&r, 0, ZCL1, 0, &res);
         ASSERT(refused_insufficient(&res));
         json_free(&res);
-        send_try(&r, 0, ZCL1, false, &res);
-        ASSERT(!refused_insufficient(&res));
+        send_try(&r, 0, ZCL1, 10, &res);
+        ASSERT(refused_insufficient(&res));
         json_free(&res);
         rig_close(&r);
     } TEST_END
     return failures;
 }
 
-static int test_send_rule_by_params(void)
+static int test_send_minconf_param(void)
 {
     int failures = 0;
-    TEST_CASE("send: an explicit minconf keeps the raw selection") {
+    TEST_CASE("send: minconf is an optional non-negative integer") {
         struct json_value p, v;
+        int mc = -1;
         json_init(&p);
         json_set_array(&p);
         for (int i = 0; i < 2; i++) {
@@ -574,13 +578,142 @@ static int test_send_rule_by_params(void)
             json_push_back(&p, &v);
             json_free(&v);
         }
-        ASSERT(z_sendmany_spendable_only(&p));
+        ASSERT(z_sendmany_minconf(&p, &mc) && mc == 0);
         json_init(&v);
-        json_set_int(&v, 1);
+        json_set_int(&v, 25);
         json_push_back(&p, &v);
         json_free(&v);
-        ASSERT(!z_sendmany_spendable_only(&p));
+        ASSERT(z_sendmany_minconf(&p, &mc) && mc == 25);
         json_free(&p);
+        json_init(&p);
+        json_set_array(&p);
+        for (int i = 0; i < 3; i++) {
+            json_init(&v);
+            json_set_int(&v, i == 2 ? -1 : i);
+            json_push_back(&p, &v);
+            json_free(&v);
+        }
+        ASSERT(!z_sendmany_minconf(&p, &mc));
+        json_free(&p);
+    } TEST_END
+    return failures;
+}
+
+/* minconf is an extra floor: a ready 21-confirmation note passes minconf 21
+ * and fails minconf 22. */
+static int test_send_minconf_floor(void)
+{
+    int failures = 0;
+    TEST_CASE("send: minconf adds a floor above the summary rule") {
+        struct rig r;
+        struct json_value res;
+        ASSERT(rig_open(&r, true));
+        ASSERT(wsh_put_note(&r.ndb, 0x76, 0, g_ivk, 5 * ZCL1, TIP - 20, NULL));
+        ASSERT(save_witness(&r.ndb, 0x76, TIP));
+        send_try(&r, 0, ZCL1, 21, &res);
+        ASSERT(!refused_insufficient(&res));
+        json_free(&res);
+        send_try(&r, 0, ZCL1, 22, &res);
+        ASSERT(refused_insufficient(&res));
+        json_free(&res);
+        rig_close(&r);
+    } TEST_END
+    return failures;
+}
+
+/* The per-send cap applies to spendable notes: 100 unready 1 ZCL notes beside
+ * 300 ready 0.1 ZCL notes leave a cap's worth of ready notes, 25.6 ZCL. */
+static bool save_witness_at(struct node_db *ndb, uint8_t tx, uint32_t idx,
+                            int height)
+{
+    struct incremental_merkle_tree t;
+    struct incremental_witness w;
+    struct uint256 leaf;
+    struct byte_stream s;
+    uint8_t txid[32];
+    sapling_tree_init(&t);
+    memset(&leaf, tx, sizeof(leaf));
+    incremental_tree_append(&t, &leaf);
+    incremental_witness_init(&w, &t);
+    stream_init(&s, 8192);
+    memset(txid, tx, sizeof(txid));
+    bool ok = incremental_witness_serialize(&w, &s) &&
+              db_sapling_note_save_witness(ndb, txid, idx, s.data, s.size,
+                                           height);
+    stream_free(&s);
+    return ok;
+}
+
+static int test_send_cap_after_filter(void)
+{
+    int failures = 0;
+    TEST_CASE("send: the note cap counts spendable notes only") {
+        struct rig r;
+        struct json_value j, res;
+        bool ok;
+        ASSERT(rig_open(&r, true));
+        for (uint32_t i = 0; i < 100; i++)
+            ASSERT(wsh_put_note(&r.ndb, 0x91, i, g_ivk, 1 * ZCL1, 270, NULL));
+        for (uint32_t i = 0; i < 300; i++) {
+            uint8_t tx = (uint8_t)(0x92 + i / 150);
+            uint32_t idx = i % 150;
+            ASSERT(wsh_put_note(&r.ndb, tx, idx, g_ivk, ZCL1 / 10, 270, NULL));
+            ASSERT(save_witness_at(&r.ndb, tx, idx, TIP));
+        }
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        ASSERT_EQ(field(&j, "spendable_zat"), 256 * (ZCL1 / 10));
+        ASSERT_EQ(field(&j, "spendable_total_zat"), 300 * (ZCL1 / 10));
+        ASSERT_EQ(field(&j, "unready_notes"), 100);
+        json_free(&j);
+        send_try(&r, 0, 26 * ZCL1, 0, &res);
+        ASSERT(refused_insufficient(&res));
+        json_free(&res);
+        send_try(&r, 0, 25 * ZCL1, 0, &res);
+        ASSERT(!refused_insufficient(&res));
+        json_free(&res);
+        rig_close(&r);
+    } TEST_END
+    return failures;
+}
+
+/* The summary reports the peers past the handshake, not every connection. */
+static int test_summary_peer_count(void)
+{
+    int failures = 0;
+    TEST_CASE("walletsummary: peer_count counts handshaked peers") {
+        struct rig r;
+        struct connman cm;
+        struct net_address addr;
+        struct p2p_node *node;
+        struct json_value j;
+        bool ok;
+        ASSERT(rig_open(&r, true));
+        memset(&cm, 0, sizeof(cm));
+        memset(&addr, 0, sizeof(addr));
+        net_manager_init(&cm.manager);
+        cm.manager.nodes = zcl_calloc(1, sizeof(*cm.manager.nodes), "nodes");
+        ASSERT(cm.manager.nodes != NULL);
+        node = p2p_node_create(&cm.manager, ZCL_INVALID_SOCKET, &addr, "p",
+                               false);
+        ASSERT(node != NULL);
+        node->state = PEER_HANDSHAKE_COMPLETE;
+        node->services = NODE_NETWORK;
+        cm.manager.nodes[0] = node;
+        cm.manager.num_nodes = 1;
+        rpc_net_set_connman(&cm);
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        ASSERT_EQ(field(&j, "peer_count"), 1);
+        json_free(&j);
+        node->state = PEER_VERSION_SENT;
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        ASSERT_EQ(field(&j, "peer_count"), 0);
+        json_free(&j);
+        rpc_net_set_connman(NULL);
+        net_manager_free(&cm.manager);
+        rig_close(&r);
     } TEST_END
     return failures;
 }
@@ -604,7 +737,10 @@ static int run_rig_tests(void)
     failures += test_send_skips_unready_note();
     failures += test_send_spends_one_key();
     failures += test_send_waits_for_depth();
-    failures += test_send_rule_by_params();
+    failures += test_send_minconf_param();
+    failures += test_send_minconf_floor();
+    failures += test_send_cap_after_filter();
+    failures += test_summary_peer_count();
     return failures;
 }
 

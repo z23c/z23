@@ -112,11 +112,28 @@ bool wallet_note_is_spendable(const struct db_wallet_note_fact *n,
                WALLET_NOTE_SPENDABLE;
 }
 
+/* A spendable note of key `key`. */
+struct wa_spend {
+    size_t key;
+    int64_t value;
+};
+
+static int wa_spend_cmp(const void *x, const void *y)
+{
+    const struct wa_spend *a = x, *b = y;
+    if (a->key != b->key)
+        return a->key < b->key ? -1 : 1;
+    if (a->value != b->value)
+        return a->value > b->value ? -1 : 1;
+    return 0;
+}
+
 /* An unspent note lands in exactly one bucket (see wallet_note_classify).
- * Spendable notes add to their key's total in *key_sum. */
+ * Spendable notes are recorded in sv for the per-key send cap. */
 static void wa_add_note(const struct db_wallet_note_fact *n,
                         const uint8_t (*spenders)[32], size_t ns, int tip,
-                        struct wallet_summary *out, int64_t *key_sum)
+                        struct wallet_summary *out, struct wa_spend *sv,
+                        size_t *nsv, size_t key)
 {
     int short_by;
     switch (wallet_note_classify(n, spenders, ns, tip, &short_by)) {
@@ -131,7 +148,9 @@ static void wa_add_note(const struct db_wallet_note_fact *n,
             out->pending_min_confs_needed = short_by;
         break;
     case WALLET_NOTE_SPENDABLE:
-        *key_sum += n->value;
+        sv[*nsv].key = key;
+        sv[*nsv].value = n->value;
+        (*nsv)++;
         out->spendable_total += n->value;
         break;
     default:
@@ -180,10 +199,11 @@ bool wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
     memset(out, 0, sizeof(*out));
     size_t ns = 0;
     uint8_t (*sp)[32] = wallet_note_spenders(notes, nn, coins, nc, ivks, nk, &ns);
-    int64_t *per_key = zcl_calloc(nk + 1, sizeof(*per_key), "wallet key sums");
-    if (!sp || !per_key) {
+    struct wa_spend *sv = zcl_calloc(nn + 1, sizeof(*sv), "wallet spendable notes");
+    size_t nsv = 0;
+    if (!sp || !sv) {
         free(sp);
-        free(per_key);
+        free(sv);
         return false; // raw-return-ok:callee-logged
     }
     for (size_t i = 0; i < nn; i++) {
@@ -194,7 +214,7 @@ bool wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
             continue;
         if (!notes[i].spent)
             wa_add_note(&notes[i], (const uint8_t (*)[32])sp, ns, tip, out,
-                        &per_key[ki]);
+                        sv, &nsv, ki);
         else if (wa_unconfirmed_spender(txs, nt, notes[i].spent_txid_ok,
                                         notes[i].spent_txid))
             out->sending += notes[i].value;
@@ -208,18 +228,26 @@ bool wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
                                         coins[i].spent_txid))
             out->sending += coins[i].value;
     }
-    for (size_t i = 0; i < nk; i++)
-        if (per_key[i] > out->spendable)
-            out->spendable = per_key[i];
-    free(per_key);
+    qsort(sv, nsv, sizeof(*sv), wa_spend_cmp);
+    int64_t sum = 0;
+    for (size_t i = 0, taken = 0; i < nsv; i++) {
+        if (i == 0 || sv[i].key != sv[i - 1].key) {
+            taken = 0;
+            sum = 0;
+        }
+        if (taken++ < WALLET_SEND_MAX_NOTES)
+            sum += sv[i].value;
+        if (sum > out->spendable)
+            out->spendable = sum;
+    }
+    free(sv);
     free(sp);
     return true;
 }
 
-bool wallet_chain_fresh(int64_t now, int64_t tip_time, int64_t header_time)
+bool wallet_chain_fresh(int64_t age_ms)
 {
-    int64_t newest = tip_time > header_time ? tip_time : header_time;
-    return newest > 0 && now - newest <= WALLET_CHAIN_FRESH_SECONDS;
+    return age_ms >= 0 && age_ms <= WALLET_CHAIN_FRESH_SECONDS * 1000;
 }
 
 /* ── history ─────────────────────────────────────────────────────── */

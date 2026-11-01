@@ -14,7 +14,6 @@
 #include "services/sync_monitor.h"
 #include "validation/main_state.h"
 #include "wallet/wallet_lock.h"
-#include "platform/time_compat.h"
 #include "core/uint256.h"
 
 #include <inttypes.h>
@@ -64,7 +63,8 @@ static void wa_kv_amount_known(struct json_value *obj, const char *zat_key,
 }
 
 /* The node has evidence the chain is live: at least one peer past the
- * handshake and a block or header from the last ten minutes. Peer start
+ * handshake and a tip or header that advanced, on the node's own monotonic
+ * clock, within the last ten minutes. Peer start
  * heights go stale, so they say nothing about the chain's progress; a node
  * with no peer is offline, however recent its last block. */
 static bool wa_chain_live(const struct wallet_chain_view *v)
@@ -87,6 +87,7 @@ static void wa_summary_chain(const struct wallet_chain_view *v,
     else
         wa_kv_null(out, "scanned_through_height");
     json_push_kv_int(out, "blocks_behind", behind);
+    json_push_kv_int(out, "peer_count", (int64_t)v->peer_count);
     json_push_kv_bool(out, "current",
                       v->tip_height > 0 && v->header_height > 0 &&
                       v->shielded_known &&
@@ -227,15 +228,7 @@ static bool wa_chain_view(struct wallet_rpc_context *ctx,
         ? ms->pindex_best_header->nHeight : 0;
     v->peer_best_height = h.peer_best_height;
     v->peer_count = h.handshaked_peer_count;
-    int64_t tip_time = 0, header_time = 0;
-    if (ms) {
-        const struct block_index *tip = active_chain_tip(&ms->chain_active);
-        tip_time = tip ? (int64_t)tip->nTime : 0;
-        header_time = ms->pindex_best_header
-            ? (int64_t)ms->pindex_best_header->nTime : 0;
-    }
-    v->chain_fresh = wallet_chain_fresh((int64_t)platform_time_wall_time_t(),
-                                        tip_time, header_time);
+    v->chain_fresh = wallet_chain_fresh(h.chain_progress_age_ms);
     v->scanned_through = wallet_read_scanned_through_height(ctx->wallet);
     v->encrypted = wallet_lock_encrypted_at_rest();
     v->locked = !wallet_lock_is_unlocked();
@@ -410,8 +403,31 @@ bool rpc_walletsummary(const struct json_value *params, bool help,
     return true;
 }
 
+/* The fact row of a note: the facts are sorted by transaction id, then output. */
+static const struct db_wallet_note_fact *wa_fact_of(
+    const struct wa_facts *f, const struct db_sapling_note *n)
+{
+    size_t lo = 0, hi = (size_t)f->nn;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        const struct db_wallet_note_fact *m = &f->notes[mid];
+        int c = memcmp(m->txid, n->txid, 32);
+        if (c == 0)
+            c = m->output_index == n->output_index
+                ? 0 : (m->output_index < n->output_index ? -1 : 1);
+        if (c == 0)
+            return m;
+        if (c < 0)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return NULL;
+}
+
 int wallet_send_spendable_notes(struct wallet_rpc_context *ctx,
-                                struct db_sapling_note *notes, int n)
+                                const uint8_t ivk[32], int min_conf,
+                                struct db_sapling_note *out, int cap)
 {
     struct json_value unused;
     struct wa_state st;
@@ -426,23 +442,23 @@ int wallet_send_spendable_notes(struct wallet_rpc_context *ctx,
     uint8_t (*sp)[32] = wallet_note_spenders(
         f->notes, (size_t)f->nn, f->coins, (size_t)f->nc,
         (const uint8_t (*)[32])st.keys.ivk, st.keys.n, &ns);
-    if (!sp) {
-        wa_state_free(&st);
-        return -1; // raw-return-ok:callee-logged
+    int total = db_sapling_note_count_unspent(ctx->node_db);
+    struct db_sapling_note *all = total >= 0
+        ? zcl_calloc((size_t)total + 1, sizeof(*all), "send note scan") : NULL;
+    int got = all ? db_sapling_note_list_unspent_for_ivk(
+                        ctx->node_db, ivk, all, (size_t)total) : -1;
+    int kept = got < 0 || !sp ? -1 : 0;
+    for (int i = 0; i < got && kept >= 0 && kept < cap; i++) {
+        const struct db_wallet_note_fact *fact = wa_fact_of(f, &all[i]);
+        int confs = fact && fact->block_height > 0 &&
+                    fact->block_height <= st.view.tip_height
+            ? st.view.tip_height - fact->block_height + 1 : 0;
+        if (fact && confs >= min_conf &&
+            wallet_note_is_spendable(fact, (const uint8_t (*)[32])sp, ns,
+                                     st.view.tip_height))
+            out[kept++] = all[i];
     }
-    int kept = 0;
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < f->nn; j++) {
-            const struct db_wallet_note_fact *fact = &f->notes[j];
-            if (fact->output_index != notes[i].output_index ||
-                memcmp(fact->txid, notes[i].txid, 32) != 0)
-                continue;
-            if (wallet_note_is_spendable(fact, (const uint8_t (*)[32])sp, ns,
-                                         st.view.tip_height))
-                notes[kept++] = notes[i];
-            break;
-        }
-    }
+    free(all);
     free(sp);
     wa_state_free(&st);
     return kept;

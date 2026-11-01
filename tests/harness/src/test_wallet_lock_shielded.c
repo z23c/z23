@@ -837,7 +837,7 @@ static int test_lock_during_send_cannot_sign_with_wiped_key(void)
         ASSERT(!z_sendmany_shielded(ctx, cp, key, 1000, NULL, NULL, 0,
                                     (const uint8_t (*)[11])zd,
                                     (const uint8_t (*)[32])zp, za,
-                                    (const uint8_t (*)[512])zm, zh, 1, NULL,
+                                    (const uint8_t (*)[512])zm, zh, 1, 0, NULL,
                                     &r));
         ASSERT(strstr(wls_str(&r), "locked") == NULL);
         json_free(&r);
@@ -848,7 +848,7 @@ static int test_lock_during_send_cannot_sign_with_wiped_key(void)
         ASSERT(!z_sendmany_shielded(ctx, cp, key, 1000, NULL, NULL, 0,
                                     (const uint8_t (*)[11])zd,
                                     (const uint8_t (*)[32])zp, za,
-                                    (const uint8_t (*)[512])zm, zh, 1, NULL,
+                                    (const uint8_t (*)[512])zm, zh, 1, 0, NULL,
                                     &r));
         ASSERT(strstr(wls_str(&r), "locked") != NULL);
         json_free(&r);
@@ -1346,7 +1346,7 @@ static int test_one_damaged_row_does_not_block_the_rest(void)
             ASSERT(!z_sendmany_shielded(ctx, cp, key, 1000, NULL, NULL, 0,
                                         (const uint8_t (*)[11])zd,
                                         (const uint8_t (*)[32])zp, za,
-                                        (const uint8_t (*)[512])zm, zh, 1,
+                                        (const uint8_t (*)[512])zm, zh, 1, 0,
                                         NULL, &r));
             ASSERT((strstr(wls_str(&r), "decrypted") != NULL) == (i == 1));
             ASSERT(strstr(wls_str(&r), "wallet is locked") == NULL);

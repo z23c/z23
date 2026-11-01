@@ -351,7 +351,7 @@ static bool z_sendmany_shielded_with_key(
     size_t num_t_out,
     const uint8_t (*z_diversifiers)[11], const uint8_t (*z_pk_ds)[32],
     const int64_t *z_amounts, const uint8_t (*z_memos)[512],
-    const bool *z_has_memo, size_t num_z_out, bool spendable_only,
+    const bool *z_has_memo, size_t num_z_out, int min_conf,
     struct wallet_tx *prepared, struct json_value *result)
 {
         if (!wallet_ctx_db_ready(ctx)) {
@@ -402,16 +402,16 @@ static bool z_sendmany_shielded_with_key(
                      "z_sendmany: no notes remain after canonical reconciliation");
         }
 
-        /* With spendable_only the inputs are the notes the wallet summary
-         * calls spendable (wallet_note_is_spendable): a note that fails that
-         * rule is skipped, so the send accepts what the summary reports. */
-        if (spendable_only) {
-            num_notes = wallet_send_spendable_notes(ctx, notes, num_notes);
-            if (num_notes < 0) {
-                json_set_str(result, "Spendable note state is unavailable");
-                LOG_FAIL("wallet_shielded",
-                         "z_sendmany: spendable note filter failed");
-            }
+        /* The inputs are the notes the wallet summary calls spendable
+         * (wallet_note_is_spendable), taken before the per-send cap, with
+         * min_conf as an extra confirmation floor: a note that fails is
+         * skipped, so the send accepts what the summary reports. */
+        num_notes = wallet_send_spendable_notes(
+            ctx, from_z_key->ivk, min_conf, notes, WALLET_SEND_MAX_NOTES);
+        if (num_notes < 0) {
+            json_set_str(result, "Spendable note state is unavailable");
+            LOG_FAIL("wallet_shielded",
+                     "z_sendmany: spendable note filter failed");
         }
 
         /* Coin selection: pick notes until we have enough */
@@ -668,7 +668,7 @@ bool z_sendmany_shielded(
     size_t num_t_out,
     const uint8_t (*z_diversifiers)[11], const uint8_t (*z_pk_ds)[32],
     const int64_t *z_amounts, const uint8_t (*z_memos)[512],
-    const bool *z_has_memo, size_t num_z_out,
+    const bool *z_has_memo, size_t num_z_out, int min_conf,
     struct wallet_tx *prepared, struct json_value *result)
 {
     struct sapling_key_entry key_copy;
@@ -688,7 +688,7 @@ bool z_sendmany_shielded(
     bool ok = z_sendmany_shielded_with_key(
         ctx, cp, &key_copy, total_amount, t_dests, t_amounts, num_t_out,
         z_diversifiers, z_pk_ds, z_amounts, z_memos, z_has_memo, num_z_out,
-        prepared, result);
+        min_conf, prepared, result);
     memory_cleanse(&key_copy, sizeof(key_copy));
     return ok;
 }

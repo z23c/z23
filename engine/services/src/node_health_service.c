@@ -93,11 +93,39 @@ static int health_tip_finalize_log_head(void)
     return (int)persisted;
 }
 
+static _Atomic int64_t g_chain_seen_key = -1;
+static _Atomic int64_t g_chain_progress_mono_ms;
+#ifdef ZCL_TESTING
+static _Atomic int64_t g_test_mono_ms = -1;
+#endif
+
+static int64_t health_mono_ms(void)
+{
+#ifdef ZCL_TESTING
+    int64_t pinned = atomic_load(&g_test_mono_ms);
+    if (pinned >= 0)
+        return pinned;
+#endif
+    return platform_time_monotonic_ms();
+}
+
 #ifdef ZCL_TESTING
 static _Atomic int g_test_log_head_override = -2;
 static _Atomic int64_t g_test_memory_rss_mb_override = -1;
 static bool g_test_chain_advance_decision_override_enabled;
 static struct bsp_decision g_test_chain_advance_decision_override;
+
+void node_health_test_set_mono_ms(int64_t mono_ms)
+{
+    atomic_store(&g_test_mono_ms, mono_ms);
+}
+
+void node_health_test_reset_chain_progress(int64_t mono_ms)
+{
+    atomic_store(&g_chain_seen_key, -1);
+    atomic_store(&g_chain_progress_mono_ms, 0);
+    atomic_store(&g_test_mono_ms, mono_ms);
+}
 
 void node_health_test_set_log_head_override(int log_head)
 {
@@ -688,6 +716,25 @@ static void health_scan_handshaked_peer_heights(
     zcl_mutex_unlock(&cm->manager.cs_nodes);
 }
 
+/* Note when the active tip or best header last moved, on this node's own
+ * monotonic clock. The first position seen is only a baseline: a node that
+ * just started has seen no progress. */
+static void health_observe_chain_progress(struct node_health_snapshot *snapshot)
+{
+    snapshot->chain_progress_age_ms = -1;
+    if (snapshot->tip_height < 0 || snapshot->header_height < 0)
+        return;
+    int64_t key = ((int64_t)snapshot->tip_height << 32) |
+                  (int64_t)(uint32_t)snapshot->header_height;
+    int64_t now = health_mono_ms();
+    int64_t prev = atomic_exchange(&g_chain_seen_key, key);
+    if (prev >= 0 && prev != key)
+        atomic_store(&g_chain_progress_mono_ms, now > 0 ? now : 1);
+    int64_t at = atomic_load(&g_chain_progress_mono_ms);
+    if (at > 0 && now >= at)
+        snapshot->chain_progress_age_ms = now - at;
+}
+
 static void health_collect_peer_heights(struct node_health_snapshot *snapshot,
                                         struct connman *cm)
 {
@@ -1121,6 +1168,7 @@ void node_health_collect(struct node_health_snapshot *snapshot,
     health_collect_active_tip(snapshot, ms);
     health_collect_db_status(snapshot, ndb);
     health_collect_header_height(snapshot, ms);
+    health_observe_chain_progress(snapshot);
     health_collect_peer_heights(snapshot, cm);
 
     health_collect_tip_lag(snapshot);

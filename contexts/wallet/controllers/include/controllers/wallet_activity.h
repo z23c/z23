@@ -33,13 +33,14 @@ struct db_sapling_note;
 #define WALLET_HISTORY_MAX_LIMIT 16
 
 struct wallet_summary {
-    /* The most one send can spend now: a send draws on one key, so this is
-     * the largest per-key sum of confirmed, unspent shielded notes past their
+    /* The most one send can spend now: a send draws on one key and takes at
+     * most WALLET_SEND_MAX_NOTES inputs, largest first, so this is the largest
+     * per-key sum of that many confirmed, unspent shielded notes past their
      * threshold with an unspent nullifier on the chain and a witness at the
      * authoritative tip. The notes are exactly those wallet_note_classify
      * calls spendable, which z_sendmany uses to select its inputs. */
     int64_t spendable;
-    /* The same notes summed across every key. */
+    /* Every such note summed across every key, with no per-send cap. */
     int64_t spendable_total;
     int64_t pending;         /* unspent shielded notes below threshold */
     int pending_count;
@@ -81,11 +82,14 @@ uint8_t (*wallet_note_spenders(const struct db_wallet_note_fact *notes,
                                size_t nc, const uint8_t (*ivks)[32], size_t nk,
                                size_t *count))[32];
 
-/* The notes z_sendmany would select from: `notes` (one key's unspent notes)
- * reduced in place to those wallet_note_is_spendable accepts. Returns the new
- * count, or -1 when the wallet state cannot be read. */
+/* The notes z_sendmany selects from: up to `cap` of one key's unspent notes,
+ * largest first, that wallet_note_is_spendable accepts and that have at least
+ * `min_conf` confirmations (an extra floor, never a bypass). Filtering comes
+ * before the cap. Returns the count, or -1 when the wallet state cannot be
+ * read. */
 int wallet_send_spendable_notes(struct wallet_rpc_context *ctx,
-                                struct db_sapling_note *notes, int n);
+                                const uint8_t ivk[32], int min_conf,
+                                struct db_sapling_note *out, int cap);
 
 /* Sum the wallet's holdings. Only notes whose ivk appears in `ivks` count; a
  * repeated ivk and a repeated note row each count once. A note's chain and
@@ -152,10 +156,15 @@ size_t wallet_history_page_start(const struct wallet_history_entry *e,
 /* A block or header newer than this many seconds shows the chain moving. */
 #define WALLET_CHAIN_FRESH_SECONDS 600
 
-/* True when the newest of the tip block and best header was stamped within
- * WALLET_CHAIN_FRESH_SECONDS of `now`. A time of 0 is unknown and never
- * fresh; a stamp ahead of `now` (clock skew) counts as fresh. */
-bool wallet_chain_fresh(int64_t now, int64_t tip_time, int64_t header_time);
+/* True when this node saw its tip or best header advance within
+ * WALLET_CHAIN_FRESH_SECONDS, `age_ms` being the node's own monotonic age of
+ * that observation (node_health_snapshot.chain_progress_age_ms). Negative
+ * means none was seen, which is never fresh. Block timestamps and the wall
+ * clock play no part. */
+bool wallet_chain_fresh(int64_t age_ms);
+
+/* The most notes one send spends, and so the most the summary counts per key. */
+#define WALLET_SEND_MAX_NOTES 256
 
 /* Node state the summary reports beside the amounts. */
 struct wallet_chain_view {
@@ -163,7 +172,7 @@ struct wallet_chain_view {
     int header_height;       /* 0 when the node knows no header */
     int peer_best_height;    /* 0 or less when no peer reports a height */
     size_t peer_count;       /* peers past the handshake; 0 when offline */
-    bool chain_fresh;        /* wallet_chain_fresh: a new block or header */
+    bool chain_fresh;        /* wallet_chain_fresh: the chain moved lately */
     int scanned_through;     /* < 0 when unknown */
     bool locked;
     bool encrypted;

@@ -637,7 +637,7 @@ static int wfs_view_note_spend_attempt(struct wfs_view_state *vs)
         sent = z_sendmany_shielded(&ctx, vs->cp, vs->key1, 1,
                                    NULL, NULL, 0,
                                    NULL, NULL, NULL, NULL, NULL, 0,
-                                   true, NULL, &result);
+                                   0, NULL, &result);
     } else {
         json_set_str(&result, "setup failed");
     }
