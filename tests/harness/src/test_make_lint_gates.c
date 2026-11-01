@@ -265,7 +265,14 @@ static int build_needs_fixture_run(const char *root, const char *fixture,
         root, fixture, NULL};
     struct zcl_devloop_process_result run = {0};
     bool opted = setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0;
-    bool ran = opted && zcl_devloop_process_run(root, argv, 30000, &run);
+    /* The script runs about fifteen fixture makes plus a 1/2/4-job
+     * dispatch loop. The bound only stops a wedge: 30 s killed a healthy
+     * run at load ~100 on the gate host (11-01: timeout=1 signal=15 with
+     * every printed case OK). Fixed, under the runner's 300 s silence
+     * watchdog; the case assertions are unchanged. */
+    enum { BUILD_NEEDS_FIXTURE_DEADLINE_MS = 180 * 1000 };
+    bool ran = opted && zcl_devloop_process_run(root, argv,
+                                                BUILD_NEEDS_FIXTURE_DEADLINE_MS, &run);
     int restored = had_prior ? setenv("ZCL_DEVLOOP_TEST_PROCESS", saved, 1)
                          : unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
     return build_needs_fixture_result(ran, &run, restored);
