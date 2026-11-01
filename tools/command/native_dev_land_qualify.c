@@ -12,10 +12,20 @@
  *   - the affected groups are the routes `code tests` reports for each path
  *     the lane changes relative to origin/main, run in one harness
  *     invocation (t-fast-exact over the whole set) so its workers run them
- *     in parallel; each group still gets its own section log. A selection
- *     that lost groups (a path routing to more than the accumulator holds,
- *     an overlong token, or a truncated path list) is refused, never run
- *     short.
+ *     in parallel; each group still gets its own section log;
+ *   - a selection that cannot be listed exactly runs the universal set, never
+ *     a short one: a path whose route lost groups, a union past
+ *     DLQ_GROUPS_MAX, or a path list the capture truncated. A truncated path
+ *     list goes universal too, because the universal set covers every path
+ *     whatever the list held. The universal set is the selector the land
+ *     proof runs for a plan it cannot narrow (every group the host can run),
+ *     so qualify runs what the proof will. The result records selection
+ *     "routed" or "universal" and, for universal, its cause. A group name
+ *     the registry does not resolve is still refused;
+ *   - the universal run prints tens of megabytes. Its capture cap and
+ *     timeout scale up, and a capture that reaches its cap is refused as
+ *     log_overflow: a group whose section was cut off must not read as a
+ *     missing verdict.
  * Every command's merged output is kept under build/scratch/qualify-*.log in
  * the worktree, and a refusal names the log of the command that failed.
  */
@@ -25,6 +35,9 @@
 #include "base/safe_alloc.h"
 #include "command/native_command.h"
 #include "controllers/agent_impact_rules.h"
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+#include "dev_proof.h"
+#endif
 #include "platform/logical_cpu.h"
 #include "platform/private_directory.h"
 #include "util/spawn.h"
@@ -38,19 +51,28 @@
 #define DLQ_LOG_CAP (32u * 1024u * 1024u)
 #define DLQ_GIT_CAP (1024u * 1024u)
 #define DLQ_MAKE_TIMEOUT_MS (90 * 60 * 1000)
+#define DLQ_UNIVERSAL_LOG_CAP (256u * 1024u * 1024u)
+#define DLQ_UNIVERSAL_TIMEOUT_MS (240 * 60 * 1000)
 #define DLQ_GIT_TIMEOUT_MS (10 * 60 * 1000)
 #define DLQ_GROUPS_MAX 256u
+#define DLQ_GATED_CAP (64u * 1024u)
 
 struct dlq {
     const char *wt;
     bool exempt;
     char make_jobs[16];
+    size_t log_cap;
+    int make_timeout_ms;
+    bool log_overflow;
     struct zcl_land_qualify *out;
 };
 
+/* `cap` names fit in `name`. A routed selection stops at DLQ_GROUPS_MAX; the
+ * universal one needs room for the whole catalog. */
 struct dlq_groups {
     size_t count;
-    char name[DLQ_GROUPS_MAX][ZCL_AGENT_IMPACT_GROUP_MAX];
+    size_t cap;
+    char (*name)[ZCL_AGENT_IMPACT_GROUP_MAX];
 };
 
 const char *zcl_dev_land_qualify_refusal(enum zcl_land_qualify_code code)
@@ -126,21 +148,38 @@ static void dlq_write_log(struct dlq *q, const char *name, const char *text)
     (void)fclose(f);
 }
 
+#if defined(ZCL_TESTING)
+static size_t g_dlq_log_cap;
+#endif
+
+/* The capture cap for a step's merged output. */
+static size_t dlq_log_cap(const struct dlq *q)
+{
+#if defined(ZCL_TESTING)
+    if (g_dlq_log_cap)
+        return g_dlq_log_cap;
+#endif
+    return q->log_cap;
+}
+
 /* Run argv with merged output, keep it as the step's log and return it in
  * `*text` (owned by the caller, NULL when allocation failed). */
 static int dlq_run(struct dlq *q, const char *name, const char *const argv[],
                    char **text)
 {
     bool timed_out = false;
-    char *buf = (char *)zcl_malloc(DLQ_LOG_CAP, "dev.land.qualify.log");
+    char *buf = (char *)zcl_malloc(dlq_log_cap(q), "dev.land.qualify.log");
     int rc;
     *text = buf;
     if (!buf)
         return -1;
-    rc = zcl_spawn_capture_merged_observed(argv, buf, DLQ_LOG_CAP,
-                                           DLQ_MAKE_TIMEOUT_MS, &timed_out);
+    rc = zcl_spawn_capture_merged_observed(argv, buf, dlq_log_cap(q),
+                                           q->make_timeout_ms, &timed_out);
     if (timed_out)
         rc = -1;
+    /* The capture keeps cap-1 bytes and reports nothing more; a full buffer
+     * is treated as cut off. */
+    q->log_overflow = strlen(buf) + 1 >= dlq_log_cap(q);
     dlq_write_log(q, name, buf);
     return rc;
 }
@@ -383,20 +422,22 @@ static bool dlq_complexity(struct dlq *q)
                                  "check-cyclomatic-complexity", NULL);
 }
 
-static bool dlq_group_add(struct dlq_groups *g, const char *name)
+enum dlq_add { DLQ_ADD_OK, DLQ_ADD_UNRESOLVED, DLQ_ADD_FULL };
+
+static enum dlq_add dlq_group_add(struct dlq_groups *g, const char *name)
 {
     char full[ZCL_TEST_GROUP_FULL_MAX];
     if (!zcl_test_group_resolve_exact(name, full) ||
         strlen(full) >= sizeof(g->name[0]))
-        return false;
+        return DLQ_ADD_UNRESOLVED;
     for (size_t i = 0; i < g->count; i++) {
         if (strcmp(g->name[i], full) == 0)
-            return true;
+            return DLQ_ADD_OK;
     }
-    if (g->count >= DLQ_GROUPS_MAX)
-        return false;
+    if (g->count >= g->cap || g->count >= DLQ_GROUPS_MAX)
+        return DLQ_ADD_FULL;
     (void)snprintf(g->name[g->count++], sizeof(g->name[0]), "%s", full);
-    return true;
+    return DLQ_ADD_OK;
 }
 
 static int dlq_group_cmp(const void *a, const void *b)
@@ -407,6 +448,10 @@ static int dlq_group_cmp(const void *a, const void *b)
 #if defined(ZCL_TESTING)
 static void (*g_dlq_route)(const char *path, struct agent_impact_acc *acc);
 static size_t g_dlq_capture_cap;
+void zcl_dev_land_qualify_test_log_cap(size_t cap)
+{
+    g_dlq_log_cap = cap;
+}
 
 void zcl_dev_land_qualify_test_limits(
     void (*route)(const char *path, struct agent_impact_acc *acc),
@@ -438,54 +483,123 @@ static size_t dlq_capture_cap(void)
     return DLQ_GIT_CAP;
 }
 
-/* Add one path's routed groups. False when the router dropped any. */
-static bool dlq_select_path(struct dlq_groups *g, const char *path)
+enum dlq_pick { DLQ_PICK_OK, DLQ_PICK_LOST, DLQ_PICK_UNRESOLVED };
+
+/* Add one path's routed groups. LOST when the router dropped any or the union
+ * would pass DLQ_GROUPS_MAX; `*cause` then names which. */
+static enum dlq_pick dlq_select_path(struct dlq_groups *g, const char *path,
+                                     const char **cause)
 {
     struct agent_impact_acc acc = {0};
     dlq_route(path, &acc);
-    if (acc.groups_lost)
-        return false;
-    for (size_t i = 0; i < acc.groups_len; i++) {
-        if (!dlq_group_add(g, acc.groups[i]))
-            return false;
+    if (acc.groups_lost) {
+        *cause = "groups_lost";
+        return DLQ_PICK_LOST;
     }
+    for (size_t i = 0; i < acc.groups_len; i++) {
+        enum dlq_add added = dlq_group_add(g, acc.groups[i]);
+        if (added == DLQ_ADD_UNRESOLVED)
+            return DLQ_PICK_UNRESOLVED;
+        if (added == DLQ_ADD_FULL) {
+            *cause = "over_cap";
+            return DLQ_PICK_LOST;
+        }
+    }
+    return DLQ_PICK_OK;
+}
+
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* The proof's universal selector for the worktree, comma-separated. */
+static bool dlq_universal_selector(struct dlq *q, char *selector, size_t cap)
+{
+    char *gated = (char *)zcl_malloc(DLQ_GATED_CAP, "dev.land.qualify.gated");
+    uint32_t count = 0;
+    bool ok = gated != NULL &&
+              zcl_dev_proof_universal_groups(q->wt, selector, cap, &count,
+                                             gated, DLQ_GATED_CAP) &&
+              count > 0;
+    free(gated);
+    return ok;
+}
+#else
+/* The release binary does not carry dev_proof.c, so it cannot name the
+ * universal set; it refuses rather than run a short one. */
+static bool dlq_universal_selector(struct dlq *q, char *selector, size_t cap)
+{
+    (void)selector;
+    (void)cap;
+    (void)snprintf(q->out->detail, sizeof(q->out->detail), "%s",
+                   "the universal selector is available only in z23-dev");
+    return false;
+}
+#endif
+
+/* Replace the selection with the universal set and scale the run for it. */
+static bool dlq_universal(struct dlq *q, struct dlq_groups *g,
+                          const char *cause)
+{
+    size_t cap = zcl_test_group_catalog_count() *
+                     (ZCL_AGENT_IMPACT_GROUP_MAX + 1) + 1;
+    char *selector = (char *)zcl_malloc(cap, "dev.land.qualify.universal");
+    bool ok = selector && dlq_universal_selector(q, selector, cap);
+    g->count = 0;
+    for (char *tok = ok ? selector : NULL; ok && *tok;) {
+        size_t n = strcspn(tok, ",");
+        ok = n > 0 && n < sizeof(g->name[0]) && g->count < g->cap;
+        if (ok) {
+            memcpy(g->name[g->count], tok, n);
+            g->name[g->count++][n] = '\0';
+        }
+        tok += n + (tok[n] == ',' ? 1 : 0);
+    }
+    free(selector);
+    if (!ok)
+        return dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED,
+                          "universal_selection", NULL);
+    (void)snprintf(q->out->selection, sizeof(q->out->selection), "universal");
+    (void)snprintf(q->out->selection_cause, sizeof(q->out->selection_cause),
+                   "%s", cause);
+    q->log_cap = DLQ_UNIVERSAL_LOG_CAP;
+    q->make_timeout_ms = DLQ_UNIVERSAL_TIMEOUT_MS;
     return true;
 }
 
 /* The union of the routes for every path the lane changes. A selection that
- * lost groups, or read a truncated path list, is refused rather than run
- * short.
+ * cannot be listed exactly (a route that lost groups, a union past
+ * DLQ_GROUPS_MAX, a truncated path list) runs the universal set instead; a
+ * group name the registry does not resolve is refused.
  *
  * zcl_spawn_capture() does not report overflow: it returns the child's exit
  * status (0 here) and silently keeps only the first cap-1 bytes. A capture
  * whose length reaches cap-1 is therefore treated as truncated, which also
- * refuses a list of exactly cap-1 bytes; refusing is the safe side. */
+ * covers a list of exactly cap-1 bytes. */
 static bool dlq_select(struct dlq *q, struct dlq_groups *g)
 {
     const char *args[] = { "diff", "--name-only", "origin/main...HEAD", NULL };
     size_t cap = dlq_capture_cap();
     char *paths = (char *)zcl_malloc(cap, "dev.land.qualify.paths");
+    const char *cause = NULL;
     bool ok = true;
     if (!paths || dlq_git(q, args, paths, cap) != 0) {
         free(paths);
         return dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED, "group_selection",
                           NULL);
     }
-    if (strlen(paths) + 1 >= cap) {
-        free(paths);
-        return dlq_refuse(q, ZCL_LAND_QUALIFY_GROUP_SELECTION,
-                          "path_list_truncated", NULL);
-    }
-    for (char *line = paths; ok && *line;) {
+    if (strlen(paths) + 1 >= cap)
+        cause = "path_list_truncated";
+    for (char *line = paths; ok && !cause && *line;) {
         char *end = strchr(line, '\n');
         if (end)
             *end = '\0';
-        if (!dlq_select_path(g, line))
-            ok = dlq_refuse(q, ZCL_LAND_QUALIFY_GROUP_SELECTION, "groups_lost",
-                            line);
+        enum dlq_pick pick = dlq_select_path(g, line, &cause);
+        if (pick == DLQ_PICK_UNRESOLVED)
+            ok = dlq_refuse(q, ZCL_LAND_QUALIFY_GROUP_SELECTION,
+                            "group_unresolved", line);
         line = end ? end + 1 : line + strlen(line);
     }
     free(paths);
+    if (ok && cause)
+        ok = dlq_universal(q, g, cause);
     qsort(g->name, g->count, sizeof(g->name[0]), dlq_group_cmp);
     return ok;
 }
@@ -672,7 +786,12 @@ static bool dlq_run_groups(struct dlq *q, const struct dlq_groups *g)
                        g->name[i]);
     }
     rc = dlq_make(q, "groups", goals, false, &text);
-    if (text) {
+    if (text && q->log_overflow) {
+        (void)snprintf(q->out->detail, sizeof(q->out->detail),
+                       "test output reached the %zu byte capture cap; "
+                       "later group sections are cut off", dlq_log_cap(q));
+        ok = dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED, "log_overflow", NULL);
+    } else if (text) {
         dlq_sections(text, sections, g->count);
         ok = dlq_judge_groups(q, g, sections);
         if (ok && !(rc == 0 && dlq_line_starts(text, "ALL TESTS PASSED")))
@@ -685,26 +804,45 @@ static bool dlq_run_groups(struct dlq *q, const struct dlq_groups *g)
     return ok;
 }
 
-/* Name the selected groups in the result, even when none are routed. */
+/* Name the selected groups in the result, even when none are routed. The
+ * list keeps whole names up to its capacity; group_count stays the true count
+ * and groups_truncated says the list is shorter. */
 static void dlq_record_groups(struct dlq *q, const struct dlq_groups *g)
 {
     size_t used = 0;
     q->out->group_count = g->count;
     q->out->groups[0] = '\0';
-    for (size_t i = 0; i < g->count; i++)
+    q->out->groups_truncated = false;
+    for (size_t i = 0; i < g->count; i++) {
+        size_t need = strlen(g->name[i]) + (i ? 1 : 0);
+        if (used + need >= sizeof(q->out->groups)) {
+            q->out->groups_truncated = true;
+            break;
+        }
         used += (size_t)snprintf(q->out->groups + used,
                                  sizeof(q->out->groups) - used, "%s%s",
                                  i ? " " : "", g->name[i]);
+    }
 }
 
 static bool dlq_groups_run(struct dlq *q)
 {
     struct dlq_groups *g =
         (struct dlq_groups *)zcl_malloc(sizeof(*g), "dev.land.qualify.groups");
+    size_t cap = zcl_test_group_catalog_count();
     bool ok = g != NULL;
-    if (!ok)
+    if (ok) {
+        g->count = 0;
+        g->cap = cap > DLQ_GROUPS_MAX ? cap : DLQ_GROUPS_MAX;
+        g->name = (char (*)[ZCL_AGENT_IMPACT_GROUP_MAX])zcl_malloc(
+            g->cap * sizeof(g->name[0]), "dev.land.qualify.group_names");
+        ok = g->name != NULL;
+    }
+    if (!ok) {
+        free(g);
         return dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED, "groups", NULL);
-    g->count = 0;
+    }
+    (void)snprintf(q->out->selection, sizeof(q->out->selection), "routed");
     ok = dlq_select(q, g);
     for (size_t i = 0; ok && i < g->count; i++) {
         if (!dlq_group_name_ok(g->name[i]))
@@ -715,6 +853,7 @@ static bool dlq_groups_run(struct dlq *q)
         dlq_record_groups(q, g);
     if (ok && g->count > 0)
         ok = dlq_run_groups(q, g);
+    free(g->name);
     free(g);
     return ok;
 }
@@ -735,7 +874,9 @@ static bool dlq_finish(struct dlq *q)
 bool zcl_dev_land_qualify(const char *wt, bool signing_exempt,
                           struct zcl_land_qualify *out)
 {
-    struct dlq q = { .wt = wt, .exempt = signing_exempt, .out = out };
+    struct dlq q = { .wt = wt, .exempt = signing_exempt, .out = out,
+                     .log_cap = DLQ_LOG_CAP,
+                     .make_timeout_ms = DLQ_MAKE_TIMEOUT_MS };
     memset(out, 0, sizeof(*out));
     /* An explicit admitted cap controls every Make phase, not only dev-bin. */
     if (getenv("ZCL_BUILD_MAX_JOBS") &&

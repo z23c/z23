@@ -3568,7 +3568,9 @@ static const char *dl_submit_tip(const struct zcl_command_request *req,
     return tip;
 }
 
-/* A qualified submission says which test groups it ran, [] when none. */
+/* A qualified submission says which test groups it ran, [] when none, how many
+ * there were, and whether they were routed or the universal set. A listed
+ * universal selection is cut at the record's capacity; group_count is exact. */
 static void dl_submit_report_groups(struct zcl_command_reply *reply,
                                     const struct zcl_land_qualify *qr)
 {
@@ -3590,6 +3592,13 @@ static void dl_submit_report_groups(struct zcl_command_reply *reply,
     }
     (void)json_push_kv(&reply->data, "groups", &list);
     json_free(&list);
+    (void)json_push_kv_int(&reply->data, "group_count",
+                           (int64_t)qr->group_count);
+    (void)json_push_kv_bool(&reply->data, "groups_truncated",
+                            qr->groups_truncated);
+    (void)json_push_kv_str(&reply->data, "selection", qr->selection);
+    (void)json_push_kv_str(&reply->data, "selection_cause",
+                           qr->selection_cause);
 }
 
 /* The local lint precheck, before anything is queued. note_buf holds the note

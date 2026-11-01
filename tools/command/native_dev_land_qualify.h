@@ -34,8 +34,13 @@ struct zcl_land_qualify {
     char paths[1024];  /* space-separated paths a refusal names */
     char detail[256];  /* first failing line, when the log has one */
     char tip[41];      /* qualified tip, set on ZCL_LAND_QUALIFY_OK */
-    char groups[17000]; /* space-separated affected groups, sorted */
-    size_t group_count;
+    char groups[17000]; /* space-separated affected groups, sorted; whole
+                         * names only, cut at capacity */
+    size_t group_count; /* the true count, also when `groups` is cut */
+    bool groups_truncated; /* `groups` lists fewer than group_count names */
+    char selection[16];    /* "routed" or "universal" */
+    char selection_cause[48]; /* why universal: groups_lost, over_cap or
+                               * path_list_truncated; empty when routed */
 };
 
 /* Run the gates in worktree `wt` and report the first refusal, or OK with the
@@ -54,10 +59,12 @@ const char *zcl_dev_land_qualify_refusal(enum zcl_land_qualify_code code);
 #if defined(ZCL_TESTING)
 struct agent_impact_acc;
 /* Replace the path-to-groups router and the path-list capture cap so a test
- * can drive the lost-group refusals; NULL and 0 restore the defaults. */
+ * can drive the universal fallbacks; NULL and 0 restore the defaults. */
 void zcl_dev_land_qualify_test_limits(
     void (*route)(const char *path, struct agent_impact_acc *acc),
     size_t capture_cap);
+/* Replace the capture cap of every step's merged output; 0 restores it. */
+void zcl_dev_land_qualify_test_log_cap(size_t cap);
 #endif
 
 #endif

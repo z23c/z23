@@ -288,6 +288,7 @@ static bool dlx_qualify_rig(struct dlx_rig *rig, const char *tag,
 static void dlx_qualify_restore(void)
 {
     zcl_dev_land_qualify_test_limits(NULL, 0);
+    zcl_dev_land_qualify_test_log_cap(0);
     unsetenv("QFX");
     unsetenv("QFAIL");
     unsetenv("QCRASH");
@@ -949,7 +950,110 @@ int test_dev_land_qualify_wide_route(void)
         ASSERT(dlx_qualify_submit(&c, &rig) && dlx_ok(&c));
         groups = dlx_arr(&c, "groups");
         ASSERT(groups != NULL && groups->num_children == DLX_WIDE_GROUPS);
+        ASSERT_STR_EQ(dlx_str(&c, "selection"), "routed");
         ASSERT(dlx_queue_has_one());
+        PASS();
+    }
+_test_next:;
+    if (called) dlx_end(&c);
+    dlx_qualify_restore();
+    return failures;
+}
+
+/* Add the first-to-last valid catalog names, counted from the start. */
+static void dlx_add_catalog(struct agent_impact_acc *acc, size_t first,
+                            size_t last)
+{
+    size_t seen = 0;
+    for (size_t i = 0; i < zcl_test_group_catalog_count() && seen < last; i++) {
+        const char *name = zcl_test_group_catalog_at(i);
+        if (!name || strlen(name) >= ZCL_AGENT_IMPACT_GROUP_MAX)
+            continue;
+        if (seen++ >= first)
+            agent_impact_add_group(acc, name);
+    }
+}
+
+/* Two paths whose routes fit alone but whose union passes the 256 cap. */
+static void dlx_route_over_cap(const char *path, struct agent_impact_acc *acc)
+{
+    if (strstr(path, "land_window"))
+        dlx_add_catalog(acc, 100, 300);
+    else
+        dlx_add_catalog(acc, 0, 200);
+}
+
+static size_t dlx_only_count(const struct dlx_rig *rig)
+{
+    char path[1400];
+    size_t n = 0;
+    int ch;
+    FILE *f;
+    if (snprintf(path, sizeof(path), "%s/qualify-only.txt", rig->clone) >=
+        (int)sizeof(path))
+        return 0;
+    f = fopen(path, "r");
+    if (!f)
+        return 0;
+    while ((ch = fgetc(f)) != EOF)
+        n += ch == ',' || ch == '\n';
+    (void)fclose(f);
+    return n;
+}
+
+/* A universal selection that qualifies: the run names its mode and cause, the
+ * record keeps the true count while its list is cut at capacity, and the make
+ * target receives every selected group. */
+static int dlx_universal_case(const char *tag, unsigned files,
+                              void (*route)(const char *,
+                                            struct agent_impact_acc *),
+                              size_t capture_cap, const char *cause)
+{
+    int failures = 0;
+    struct dlx_call c;
+    bool called = false;
+    TEST("land: qualify runs the universal set instead of refusing") {
+        struct dlx_rig rig;
+        const struct json_value *groups, *cut;
+        dlx_isolate(tag);
+        ASSERT(dlx_qualify_rig(&rig, tag, "", "", files));
+        zcl_dev_land_qualify_test_limits(route, capture_cap);
+        called = true;
+        ASSERT(dlx_qualify_submit(&c, &rig) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "selection"), "universal");
+        ASSERT_STR_EQ(dlx_str(&c, "selection_cause"), cause);
+        ASSERT(dlx_int(&c, "group_count") > 256);
+        groups = dlx_arr(&c, "groups");
+        ASSERT(groups != NULL &&
+               (int64_t)groups->num_children < dlx_int(&c, "group_count"));
+        cut = json_get(&c.reply.data, "groups_truncated");
+        ASSERT(cut != NULL && json_get_bool(cut));
+        ASSERT((int64_t)dlx_only_count(&rig) == dlx_int(&c, "group_count"));
+        ASSERT(dlx_queue_has_one());
+        PASS();
+    }
+_test_next:;
+    if (called) dlx_end(&c);
+    dlx_qualify_restore();
+    return failures;
+}
+
+static int dlx_log_overflow_case(void)
+{
+    int failures = 0;
+    struct dlx_call c;
+    bool called = false;
+    TEST("land: qualify refuses test output that reached the capture cap") {
+        struct dlx_rig rig;
+        dlx_isolate("qualify_log_overflow");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_log_overflow", "", "",
+                               DLX_Q_LEAF_SMOKE));
+        zcl_dev_land_qualify_test_limits(dlx_route_wide, 0);
+        zcl_dev_land_qualify_test_log_cap(4096);
+        called = true;
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        ASSERT(dlx_qualify_refused(&c, "QUALIFY_STEP_FAILED"));
+        ASSERT_STR_EQ(dlx_str(&c, "step"), "log_overflow");
         PASS();
     }
 _test_next:;
@@ -960,28 +1064,14 @@ _test_next:;
 
 int test_dev_land_qualify_selection_refusals(void)
 {
-    int failures = 0;
-    TEST("land: qualify refuses a selection that lost groups or paths") {
-        struct dlx_rig rig;
-        struct dlx_call c;
-        dlx_isolate("qualify_lost");
-        ASSERT(dlx_qualify_rig(&rig, "qualify_lost", "", "", DLX_Q_LEAF_SMOKE));
-        zcl_dev_land_qualify_test_limits(dlx_route_lost, 0);
-        ASSERT(dlx_qualify_submit(&c, &rig));
-        ASSERT(dlx_qualify_refused(&c, "QUALIFY_GROUP_SELECTION"));
-        ASSERT_STR_EQ(dlx_str(&c, "step"), "groups_lost");
-        ASSERT(dlx_str(&c, "paths")[0] != '\0');
-        dlx_end(&c);
-        zcl_dev_land_qualify_test_limits(NULL, 16);
-        ASSERT(dlx_qualify_submit(&c, &rig));
-        ASSERT(dlx_qualify_refused(&c, "QUALIFY_GROUP_SELECTION"));
-        ASSERT_STR_EQ(dlx_str(&c, "step"), "path_list_truncated");
-        dlx_end(&c);
-        PASS();
-    }
-_test_next:;
-    dlx_qualify_restore();
-    return failures;
+    return dlx_universal_case("qualify_lost", DLX_Q_LEAF_SMOKE, dlx_route_lost,
+                              0, "groups_lost") +
+           dlx_universal_case("qualify_over_cap",
+                              DLX_Q_LEAF_SMOKE | DLX_Q_LAND_WINDOW,
+                              dlx_route_over_cap, 0, "over_cap") +
+           dlx_universal_case("qualify_path_list", DLX_Q_LEAF_SMOKE, NULL, 16,
+                              "path_list_truncated") +
+           dlx_log_overflow_case();
 }
 
 int test_dev_land_qualify_origin_moves(void)

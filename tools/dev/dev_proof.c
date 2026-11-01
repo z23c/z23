@@ -8651,6 +8651,26 @@ size_t zcl_dev_proof_select_groups_capacity(void)
            (ZCL_TEST_GROUP_FULL_MAX + 1);
 }
 
+/* The universal closure for `root` as a comma-separated selector: the groups
+ * a proof of a plan that cannot be narrowed runs. Host-gated groups are left
+ * out and named in `gated`; an umbrella whose shards all run is not repeated.
+ * False when the buffers are too small or a group has no host-need row. */
+bool zcl_dev_proof_universal_groups(const char *root, char *out,
+                                    size_t out_size, uint32_t *count_out,
+                                    char *gated, size_t gated_size)
+{
+    size_t pos = 0;
+    uint32_t count = 0;
+    if (!root || !out || out_size == 0 || !count_out)
+        return false;
+    out[0] = '\0';
+    if (!dp_selector_universal(root, out, out_size, &pos, &count, gated,
+                               gated_size))
+        return false;
+    *count_out = count;
+    return true;
+}
+
 /* Where the range's changed-set list is staged: under the checkout's own
  * build/scratch, created on demand. */
 static bool dp_select_scratch(const char *root, char *scratch, size_t size)

@@ -395,6 +395,13 @@ struct zcl_dev_proof_range_selection {
     char gated[PROOF_HOST_GATED_MAX];
 };
 size_t zcl_dev_proof_select_groups_capacity(void);
+/* The selector a proof of an un-narrowable plan runs for `root`: every
+ * registered group the host can run, comma-separated, with the host-gated
+ * ones named in `gated`. Land qualify selects it when a lane's routed
+ * groups do not fit, so qualify runs what the proof runs. */
+bool zcl_dev_proof_universal_groups(const char *root, char *out,
+                                    size_t out_size, uint32_t *count_out,
+                                    char *gated, size_t gated_size);
 bool zcl_dev_proof_select_range(const char *root, const char *base,
                                 const char *local,
                                 struct zcl_dev_proof_range_selection *out,
