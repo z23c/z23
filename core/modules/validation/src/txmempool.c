@@ -294,6 +294,38 @@ static int find_entry_by_hash(const struct tx_mempool *pool,
     return -1;
 }
 
+/* If projected occupancy would exceed 70% of next_tx_cap, grow the map.
+ * Returns false when growth fails and true otherwise. */
+static bool mempool_reserve_outpoint_map(struct tx_mempool *pool,
+                                         size_t projected)
+{
+    if (projected * 10 > pool->next_tx_cap * 7) {
+        size_t target = (projected * 4 < OUTPOINT_MAP_CAP)
+                        ? (size_t)OUTPOINT_MAP_CAP : projected * 4;
+        if (target <= pool->next_tx_cap)
+            target = pool->next_tx_cap * 2;
+        return outpoint_map_grow(pool, target);
+    }
+    return true;
+}
+
+/* If the entries array is full, double it. Returns NULL only when that
+ * realloc fails, and then the pool is left unchanged. */
+static struct mempool_entry *mempool_grow_entries_if_full(struct tx_mempool *pool)
+{
+    if (pool->num_entries < pool->entries_cap)
+        return pool->entries != NULL ? pool->entries
+                                      : (struct mempool_entry *)(void *)pool;
+    size_t newcap = pool->entries_cap * 2;
+    struct mempool_entry *tmp = zcl_realloc(pool->entries,
+                                             newcap * sizeof(*tmp), "mempool_entries_grow");
+    if (tmp == NULL)
+        return NULL;
+    pool->entries = tmp;
+    pool->entries_cap = newcap;
+    return tmp;
+}
+
 bool tx_mempool_add_unchecked(struct tx_mempool *pool,
                                const struct uint256 *hash,
                                const struct mempool_entry *entry)
@@ -328,16 +360,10 @@ bool tx_mempool_add_unchecked(struct tx_mempool *pool,
         struct outpoint op;
         op.hash = entry->tx.vin[i].prevout.hash;
         op.n = entry->tx.vin[i].prevout.n;
-        uint32_t idx = outpoint_hash(&op, pool->next_tx_cap);
-        for (size_t j = 0; j < pool->next_tx_cap; j++) {
-            size_t pos = (idx + j) % pool->next_tx_cap;
-            if (!pool->next_tx[pos].used) break;
-            if (uint256_eq(&pool->next_tx[pos].key.hash, &op.hash) &&
-                pool->next_tx[pos].key.n == op.n) {
-                /* Input already spent by another mempool tx */
-                zcl_mutex_unlock(&pool->cs);
-                LOG_FAIL("mempool", "double-spend detected: input already spent by mempool tx");
-            }
+        if (outpoint_find(pool->next_tx, pool->next_tx_cap, &op) != NULL) {
+            /* Input already spent by another mempool tx */
+            zcl_mutex_unlock(&pool->cs);
+            LOG_FAIL("mempool", "double-spend detected: input already spent by mempool tx");
         }
     }
 
@@ -350,26 +376,14 @@ bool tx_mempool_add_unchecked(struct tx_mempool *pool,
      * Failure here is a hard add failure — never proceed with a
      * saturated map, which would let a double-spend slip through. */
     size_t projected = pool->next_tx_used + entry->tx.num_vin;
-    if (projected * 10 > pool->next_tx_cap * 7) {
-        size_t target = (projected * 4 < OUTPOINT_MAP_CAP)
-                        ? (size_t)OUTPOINT_MAP_CAP : projected * 4;
-        if (target <= pool->next_tx_cap)
-            target = pool->next_tx_cap * 2;
-        if (!outpoint_map_grow(pool, target)) {
-            zcl_mutex_unlock(&pool->cs);
-            LOG_FAIL("mempool", "outpoint map grow failed (cap=%zu, projected=%zu)",
-                     pool->next_tx_cap, projected);
-        }
+    if (!mempool_reserve_outpoint_map(pool, projected)) {
+        zcl_mutex_unlock(&pool->cs);
+        LOG_FAIL("mempool", "outpoint map grow failed (cap=%zu, projected=%zu)",
+                 pool->next_tx_cap, projected);
     }
 
-    if (pool->num_entries >= pool->entries_cap) {
-        size_t newcap = pool->entries_cap * 2;
-        struct mempool_entry *tmp = zcl_realloc(pool->entries,
-                                             newcap * sizeof(*tmp), "mempool_entries_grow");
-        if (!tmp) { zcl_mutex_unlock(&pool->cs); LOG_FAIL("mempool", "realloc failed expanding entries from %zu", pool->entries_cap); }
-        pool->entries = tmp;
-        pool->entries_cap = newcap;
-    }
+    struct mempool_entry *tmp = mempool_grow_entries_if_full(pool);
+    if (!tmp) { zcl_mutex_unlock(&pool->cs); LOG_FAIL("mempool", "realloc failed expanding entries from %zu", pool->entries_cap); }
 
     struct mempool_entry *e = &pool->entries[pool->num_entries];
     mempool_entry_init(e, &entry->tx, entry->fee, entry->time,
