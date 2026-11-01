@@ -35,8 +35,7 @@ struct zcl_result csr_commit_tip_result(
 static bool csr_lock_bounded(struct chain_state_repository *csr)
 {
     struct timespec dl;
-    /* platform-ok: pthread_mutex_timedlock takes an absolute CLOCK_REALTIME deadline */
-    if (clock_gettime(CLOCK_REALTIME, &dl) != 0)
+    if (clock_gettime(CLOCK_REALTIME, &dl) != 0) // platform-ok: timedlock needs an absolute CLOCK_REALTIME deadline
         return false;  // raw-return-ok:no clock means no deadline: answer busy, never wait unbounded
     dl.tv_nsec += CSR_SNAPSHOT_BOUNDED_WAIT_NS;
     if (dl.tv_nsec >= 1000000000L) {
