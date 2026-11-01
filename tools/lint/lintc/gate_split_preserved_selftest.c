@@ -90,6 +90,15 @@ static const struct sps_case k_sps_cases[] = {
       SPS_LIC "static void h(void)\n{\n    LOG_ERROR_IN(\"f\", \"d\", \"e\");\n}\n"
       "int f(void)\n{\n    o.h();\n    p -> h();\n    return 0;\n}\n", 0, 1,
       "LOG call missing from f" },
+    { "a LOG_ERROR_IN whose named function calls h after a postfix decrement (n-->h())",
+      SPS_LIC "int f(void)\n{\n    LOG_ERROR(\"d\", \"e\");\n    return 0;\n}\n",
+      SPS_LIC "static int h(void)\n{\n    LOG_ERROR_IN(\"f\", \"d\", \"e\");\n    return 0;\n}\n"
+      "int f(void)\n{\n    int n = 1;\n    if (n-->h())\n        return 1;\n    return 0;\n}\n",
+      0, 0, NULL },
+    { "a LOG_ERROR_IN whose named function reaches h only as p--->h()",
+      SPS_LIC "int f(void)\n{\n    LOG_ERROR(\"d\", \"e\");\n    return 0;\n}\n",
+      SPS_LIC "static int h(void)\n{\n    LOG_ERROR_IN(\"f\", \"d\", \"e\");\n    return 0;\n}\n"
+      "int f(void)\n{\n    p--->h();\n    return 0;\n}\n", 0, 1, "LOG call missing from f" },
     { "a LOG_ERROR_IN with a space after '(' keeps it, as the plain call had it",
       SPS_LIC "int f(void)\n{\n    LOG_ERROR( \"d\", \"e\");\n    return 0;\n}\n",
       SPS_LIC "static void h(void)\n{\n    LOG_ERROR_IN( \"f\", \"d\", \"e\");\n}\n"

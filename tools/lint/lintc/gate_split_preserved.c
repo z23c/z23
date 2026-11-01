@@ -368,15 +368,22 @@ static const char *sp_func_at(const struct sp_file *f, size_t off)
 }
 
 /* Whether the identifier at i is reached through a member access: the last
- * non-space byte before it ends "." or "->" (obj.h() or obj->h() is not a
- * call of the file's static h). */
+ * token before it is "." or "->" (obj.h() or obj->h() is not a call of the
+ * file's static h). C lexes a run of '-' before '>' greedily into "--"
+ * pairs, so the run ends in "->" only when its length is odd: n-->h() is
+ * n-- > h(), a real call, while p--->h() is p-- ->h(). */
 static int sp_is_member(const struct sp_file *f, size_t i)
 {
     while (i > 0 && isspace((unsigned char)f->code[i - 1]))
         i--;
     if (i > 0 && f->code[i - 1] == '.')
         return 1;
-    return i > 1 && f->code[i - 1] == '>' && f->code[i - 2] == '-';
+    if (i < 2 || f->code[i - 1] != '>')
+        return 0;
+    size_t dashes = 0;
+    for (size_t j = i - 1; j > 0 && f->code[j - 1] == '-'; j--)
+        dashes++;
+    return dashes % 2 == 1;
 }
 
 /* Whether code[a..b) calls name directly: the name as a whole identifier,
