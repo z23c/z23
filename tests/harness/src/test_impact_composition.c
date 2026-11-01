@@ -7070,6 +7070,16 @@ static bool ic_fresh_edit_proto_ext(void)
                         "int fresh_probe_run(int x)\n{\n    return x + 41;\n}\n");
 }
 
+/* `int x, f(void);` declares the object x beside the prototype of f. */
+static bool ic_fresh_edit_proto_comma(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+                        "/* situation - an object beside its prototype */\n"
+                        "#include \"a.h\"\n\n"
+                        "int fresh_lone_obj, fresh_probe_run(int x);\n\n"
+                        "int fresh_probe_run(int x)\n{\n    return x + 41;\n}\n");
+}
+
 /* A macro-typed object reads like a prototype: `unsigned T_(1) x;`. */
 static bool ic_fresh_edit_macro_object(void)
 {
@@ -7151,6 +7161,7 @@ static bool ic_fresh_fixture_build(void)
         {"freshmacroobj", ic_fresh_edit_macro_object},
         {"freshproto", ic_fresh_edit_proto},
         {"freshprotoext", ic_fresh_edit_proto_ext},
+        {"freshprotocomma", ic_fresh_edit_proto_comma},
         {"freshobject", ic_fresh_edit_object},
         {"freshheader", ic_fresh_edit_header},
         {"freshdeleted", ic_fresh_edit_deleted},
@@ -7189,6 +7200,7 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"freshuncalled", 'A', NULL, NULL},  /* a public function no change calls */
     {"freshmacroobj", 'A', NULL, NULL},  /* unsigned T_(1) x; is an object */
     {"freshprotoext", 'A', NULL, NULL},  /* a prototype it does not define */
+    {"freshprotocomma", 'A', NULL, NULL}, /* int x, f(void); declares x */
     {"freshobject", 'A', NULL, NULL},    /* a public file-scope object */
     {"freshheader", 'A', NULL, NULL},    /* an added header beside it */
     {"freshdeleted", 'D', NULL, NULL},   /* a deletion beside it */
