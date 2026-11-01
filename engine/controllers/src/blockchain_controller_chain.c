@@ -189,6 +189,31 @@ static void gbci_push_upgrades(struct json_value *result,
     json_free(&upgrades);
 }
 
+/* initialblockdownload needs cs_main until the node latches at-tip, and
+ * cs_main can be held across a stalled node.db call. Try-enter with a short
+ * bound; if busy, OMIT the field and name it in "unavailable" (an array
+ * present only when something is unavailable) instead of guessing a value. */
+static void gbci_push_ibd(struct json_value *result, struct main_state *ms)
+{
+    for (int i = 0; i < 5; i++) {
+        if (zcl_mutex_trylock(&ms->cs_main)) {
+            bool ibd = is_initial_block_download(ms);
+            zcl_mutex_unlock(&ms->cs_main);
+            json_push_kv_bool(result, "initialblockdownload", ibd);
+            return;
+        }
+        platform_sleep_ms(10);
+    }
+    struct json_value unavail = {0};
+    struct json_value name = {0};
+    json_set_array(&unavail);
+    json_set_str(&name, "initialblockdownload");
+    json_push_back(&unavail, &name);
+    json_free(&name);
+    json_push_kv(result, "unavailable", &unavail);
+    json_free(&unavail);
+}
+
 bool rpc_getblockchaininfo(const struct json_value *params, bool help,
                                    struct json_value *result)
 {
@@ -245,34 +270,7 @@ bool rpc_getblockchaininfo(const struct json_value *params, bool help,
     int header_height = best_hdr ? best_hdr->nHeight : 0;
     json_push_kv_int(result, "headers", header_height);
     json_push_kv_int(result, "best_header_height", header_height);
-    /* initialblockdownload needs cs_main until the node latches at-tip, and
-     * cs_main can be held across a stalled node.db call. Try-enter with a
-     * short bound; if busy, OMIT the field and name it in "unavailable"
-     * (an array present only when something is unavailable) instead of
-     * guessing a value. */
-    bool ibd = false;
-    bool ibd_known = false;
-    for (int i = 0; i < 5 && !ibd_known; i++) {
-        if (zcl_mutex_trylock(&ctx->main_state->cs_main)) {
-            ibd = is_initial_block_download(ctx->main_state);
-            zcl_mutex_unlock(&ctx->main_state->cs_main);
-            ibd_known = true;
-        } else {
-            platform_sleep_ms(10);
-        }
-    }
-    if (ibd_known)
-        json_push_kv_bool(result, "initialblockdownload", ibd);
-    else {
-        struct json_value unavail = {0};
-        struct json_value name = {0};
-        json_set_array(&unavail);
-        json_set_str(&name, "initialblockdownload");
-        json_push_back(&unavail, &name);
-        json_free(&name);
-        json_push_kv(result, "unavailable", &unavail);
-        json_free(&unavail);
-    }
+    gbci_push_ibd(result, ctx->main_state);
 
     gbci_push_tip_identity(result, tip);
 
