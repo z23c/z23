@@ -69,66 +69,53 @@ static void set_err(char *buf, size_t cap, const char *fmt, ...)
     va_end(ap);
 }
 
-/* Parse the complete declared payload without interpreting its consensus
- * contents.  A body digest authenticates bytes; it does not make an ambiguous
- * byte layout safe.  Requiring exact consumption here prevents a producer from
- * appending an unknown region that an older reader silently ignores. */
-static bool uss_layout_exact(const struct uss_handle *h,
-                             char *err, size_t err_sz)
+/* Accept a v1 body that stops on the last UTXO byte. */
+static bool uss_layout_v1_end(const uint8_t *p, const uint8_t *end,
+                              char *err, size_t err_sz)
 {
-    if (!h) {
-        set_err(err, err_sz, "null snapshot layout");
+    if (p != end) {
+        set_err(err, err_sz, "v1 trailing payload bytes");
         return false;
     }
-    const uint8_t *p = h->base + h->body_off;
-    const uint8_t *end = h->base + h->size;
-    for (uint64_t i = 0; i < h->hdr.count; i++) {
-        if ((size_t)(end - p) < 32u + 4u + 8u + 4u) {
-            set_err(err, err_sz, "truncated UTXO record %llu",
-                    (unsigned long long)i);
-            return false;
-        }
-        p += 32u + 4u + 8u;
-        uint32_t script_len = rd_le32(p);
-        p += 4;
-        if ((uint64_t)(end - p) < (uint64_t)script_len + 4u + 1u) {
-            set_err(err, err_sz, "truncated UTXO script %llu",
-                    (unsigned long long)i);
-            return false;
-        }
-        p += (size_t)script_len + 4u + 1u;
-    }
+    return true;
+}
 
-    if (h->hdr.version == USS_VERSION_V1) {
-        if (p != end) {
-            set_err(err, err_sz, "v1 trailing payload bytes");
-            return false;
-        }
-        return true;
-    }
-
-    if ((size_t)(end - p) < 4u) {
+/* Read the Sapling section, or report it missing or truncated. */
+static bool uss_layout_sapling(const uint8_t **cursor, const uint8_t *end,
+                               uint32_t *sapling_len, char *err, size_t err_sz)
+{
+    *sapling_len = 0;
+    if ((size_t)(end - *cursor) < 4u) {
         set_err(err, err_sz, "missing Sapling section length");
         return false;
     }
-    uint32_t sapling_len = rd_le32(p);
-    p += 4;
-    if ((uint64_t)(end - p) < (uint64_t)sapling_len) {
+    *sapling_len = rd_le32(*cursor);
+    *cursor += 4;
+    if ((uint64_t)(end - *cursor) < (uint64_t)*sapling_len) {
         set_err(err, err_sz, "truncated Sapling section");
         return false;
     }
-    p += sapling_len;
+    *cursor += *sapling_len;
+    return true;
+}
 
-    if (h->hdr.version == USS_VERSION_V2) {
-        if (sapling_len == 0 || p != end) {
-            set_err(err, err_sz, sapling_len == 0
-                                     ? "empty v2 Sapling section"
-                                     : "v2 trailing payload bytes");
-            return false;
-        }
-        return true;
+/* Accept a non-empty v2 Sapling section that ends the body. */
+static bool uss_layout_v2_end(const uint8_t *p, const uint8_t *end,
+                              uint32_t sapling_len, char *err, size_t err_sz)
+{
+    if (sapling_len == 0 || p != end) {
+        set_err(err, err_sz, sapling_len == 0
+                                 ? "empty v2 Sapling section"
+                                 : "v2 trailing payload bytes");
+        return false;
     }
+    return true;
+}
 
+/* Read Sprout, then require the nullifier bytes to end the body. */
+static bool uss_layout_v3_tail(const uint8_t *p, const uint8_t *end,
+                               char *err, size_t err_sz)
+{
     if ((size_t)(end - p) < 4u) {
         set_err(err, err_sz, "missing Sprout section length");
         return false;
@@ -160,6 +147,117 @@ static bool uss_layout_exact(const struct uss_handle *h,
     return true;
 }
 
+/* Parse the complete declared payload without interpreting its consensus
+ * contents.  A body digest authenticates bytes; it does not make an ambiguous
+ * byte layout safe.  Requiring exact consumption here prevents a producer from
+ * appending an unknown region that an older reader silently ignores. */
+static bool uss_layout_exact(const struct uss_handle *h,
+                             char *err, size_t err_sz)
+{
+    if (!h) {
+        set_err(err, err_sz, "null snapshot layout");
+        return false;
+    }
+    const uint8_t *p = h->base + h->body_off;
+    const uint8_t *end = h->base + h->size;
+    for (uint64_t i = 0; i < h->hdr.count; i++) {
+        if ((size_t)(end - p) < 32u + 4u + 8u + 4u) {
+            set_err(err, err_sz, "truncated UTXO record %llu",
+                    (unsigned long long)i);
+            return false;
+        }
+        p += 32u + 4u + 8u;
+        uint32_t script_len = rd_le32(p);
+        p += 4;
+        if ((uint64_t)(end - p) < (uint64_t)script_len + 4u + 1u) {
+            set_err(err, err_sz, "truncated UTXO script %llu",
+                    (unsigned long long)i);
+            return false;
+        }
+        p += (size_t)script_len + 4u + 1u;
+    }
+
+    if (h->hdr.version == USS_VERSION_V1)
+        return uss_layout_v1_end(p, end, err, err_sz);
+    uint32_t sapling_len = 0;
+    bool sapling_ok = uss_layout_sapling(&p, end, &sapling_len, err, err_sz);
+    if (!sapling_ok)
+        return false;
+    if (h->hdr.version == USS_VERSION_V2)
+        return uss_layout_v2_end(p, end, sapling_len, err, err_sz);
+    return uss_layout_v3_tail(p, end, err, err_sz);
+}
+
+/* True when the snapshot call succeeds and size is at least a header, at most SIZE_MAX. */
+static bool uss_open_span_ok(const struct platform_positioned_file *file,
+                             struct platform_positioned_file_snapshot *snapshot)
+{
+    memset(snapshot, 0, sizeof(*snapshot));
+    return platform_positioned_file_snapshot(file, snapshot) &&
+           !(snapshot->size < USS_HEADER_BYTES || snapshot->size > SIZE_MAX);
+}
+
+/* True for snapshot versions 1, 2, and 3. */
+static bool uss_version_known(uint32_t version)
+{
+    return version == USS_VERSION_V1 || version == USS_VERSION_V2 ||
+           version == USS_VERSION_V3;
+}
+
+/* True when header bytes 12..15 and 20..23 are zero. */
+static bool uss_header_reserved_clear(const uint8_t *base)
+{
+    return base[12] == 0 && base[13] == 0 && base[14] == 0 && base[15] == 0 &&
+           base[20] == 0 && base[21] == 0 && base[22] == 0 && base[23] == 0;
+}
+
+/* Reject a negative header supply; otherwise require an exact body layout. */
+static bool uss_header_supply_layout_ok(struct uss_handle *h,
+                                        char *err, size_t err_sz)
+{
+    if (h->hdr.total_supply < 0) {
+        set_err(err, err_sz, "negative header supply");
+        return false;
+    }
+    return uss_layout_exact(h, err, err_sz);
+}
+
+/* True when no expected hash was passed or it matches the header. */
+static bool uss_expected_sha3_ok(const uint8_t *actual,
+                                 const uint8_t *expected_sha3)
+{
+    return !expected_sha3 || memcmp(actual, expected_sha3, 32) == 0;
+}
+
+/* True when full-body SHA3 was not requested or it matches the header. */
+static bool uss_body_sha3_ok(const struct uss_handle *h, bool verify_full_sha3)
+{
+    if (!verify_full_sha3)
+        return true;
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    sha3_256_write(&ctx, h->base + h->body_off, h->body_len);
+    uint8_t computed[32];
+    sha3_256_finalize(&ctx, computed);
+    return memcmp(computed, h->hdr.sha3_hash, 32) == 0;
+}
+
+/* True when a fresh file snapshot matches the one taken at open. */
+static bool uss_snapshot_still_held(const struct uss_handle *h)
+{
+    struct platform_positioned_file_snapshot after;
+    return platform_positioned_file_snapshot(&h->file, &after) &&
+           uss_snapshot_equal(&h->snapshot, &after);
+}
+
+/* Copy the header out when the caller provided a destination. */
+static void uss_header_export(const struct uss_handle *h,
+                              struct uss_header *hdr_out)
+{
+    if (hdr_out)
+        *hdr_out = h->hdr;
+}
+
 struct uss_handle *uss_open(const char *path,
                             bool verify_full_sha3,
                             const uint8_t *expected_sha3,
@@ -181,8 +279,8 @@ struct uss_handle *uss_open(const char *path,
         LOG_NULL("uss", "open failed: %s", strerror(errno));
         return NULL;
     }
-    if (!platform_positioned_file_snapshot(&file, &snapshot) ||
-        snapshot.size < USS_HEADER_BYTES || snapshot.size > SIZE_MAX) {
+    bool span_ok = uss_open_span_ok(&file, &snapshot);
+    if (!span_ok) {
         set_err(err, err_sz, "too small or metadata failed");
         platform_positioned_file_close(&file);
         LOG_NULL("uss", "metadata or size");
@@ -228,56 +326,48 @@ struct uss_handle *uss_open(const char *path,
     memcpy(h->hdr.anchor_block_hash, base + 40, 32);
     memcpy(h->hdr.sha3_hash,         base + 72, 32);
 
-    if (h->hdr.version != USS_VERSION_V1 && h->hdr.version != USS_VERSION_V2 &&
-        h->hdr.version != USS_VERSION_V3) {
+    bool version_ok = uss_version_known(h->hdr.version);
+    if (!version_ok) {
         set_err(err, err_sz, "bad version %u", h->hdr.version);
         uss_close(h);
         LOG_NULL("uss", "version");
         return NULL;
     }
-    if (base[12] != 0 || base[13] != 0 || base[14] != 0 || base[15] != 0 ||
-        base[20] != 0 || base[21] != 0 || base[22] != 0 || base[23] != 0) {
+    bool reserved_clear = uss_header_reserved_clear(base);
+    if (!reserved_clear) {
         set_err(err, err_sz, "nonzero reserved header bytes");
         uss_close(h);
         LOG_NULL("uss", "nonzero reserved header bytes");
         return NULL;
     }
-    if (h->hdr.total_supply < 0 || !uss_layout_exact(h, err, err_sz)) {
-        if (h->hdr.total_supply < 0)
-            set_err(err, err_sz, "negative header supply");
+    bool layout_ok = uss_header_supply_layout_ok(h, err, err_sz);
+    if (!layout_ok) {
         uss_close(h);
         LOG_NULL("uss", "invalid exact layout");
         return NULL;
     }
-    if (expected_sha3 &&
-        memcmp(h->hdr.sha3_hash, expected_sha3, 32) != 0) {
+    bool expected_ok = uss_expected_sha3_ok(h->hdr.sha3_hash, expected_sha3);
+    if (!expected_ok) {
         set_err(err, err_sz, "expected sha3 mismatch");
         uss_close(h);
         LOG_NULL("uss", "expected sha3 mismatch");
         return NULL;
     }
-    if (verify_full_sha3) {
-        struct sha3_256_ctx ctx;
-        sha3_256_init(&ctx);
-        sha3_256_write(&ctx, base + h->body_off, h->body_len);
-        uint8_t computed[32];
-        sha3_256_finalize(&ctx, computed);
-        if (memcmp(computed, h->hdr.sha3_hash, 32) != 0) {
-            set_err(err, err_sz, "body sha3 mismatch");
-            uss_close(h);
-            LOG_NULL("uss", "body sha3 mismatch");
-            return NULL;
-        }
+    bool body_ok = uss_body_sha3_ok(h, verify_full_sha3);
+    if (!body_ok) {
+        set_err(err, err_sz, "body sha3 mismatch");
+        uss_close(h);
+        LOG_NULL("uss", "body sha3 mismatch");
+        return NULL;
     }
-    struct platform_positioned_file_snapshot after;
-    if (!platform_positioned_file_snapshot(&h->file, &after) ||
-        !uss_snapshot_equal(&h->snapshot, &after)) {
+    bool held = uss_snapshot_still_held(h);
+    if (!held) {
         set_err(err, err_sz, "snapshot changed during validation");
         uss_close(h);
         LOG_NULL("uss", "snapshot identity changed");
         return NULL;
     }
-    if (hdr_out) *hdr_out = h->hdr;
+    uss_header_export(h, hdr_out);
     return h;
 }
 
@@ -335,9 +425,10 @@ struct uss_component_ctx {
     uint32_t snapshot_height;
 };
 
-static bool uss_component_record(const struct uss_record *r, void *vctx)
+/* Return false for a null context or record, no txid, or script_len without a script. */
+static bool uss_component_record_wellformed(const struct uss_record *r,
+                                            struct uss_component_ctx *ctx)
 {
-    struct uss_component_ctx *ctx = vctx;
     if (!ctx || !r || !r->txid ||
         (r->script_len > 0 && !r->script)) {
         if (ctx) {
@@ -346,6 +437,30 @@ static bool uss_component_record(const struct uss_record *r, void *vctx)
         }
         return false;
     }
+    return true;
+}
+
+/* When a prior outpoint exists, reject a record that does not follow it. */
+static bool uss_component_record_ordered(struct uss_component_ctx *ctx,
+                                         const struct uss_record *r)
+{
+    if (!ctx->have_prior)
+        return true;
+    int order = memcmp(ctx->prior_txid, r->txid, 32);
+    if (order > 0 || (order == 0 && ctx->prior_vout >= r->vout)) {
+        ctx->failed = true;
+        ctx->reason = "non-canonical or duplicate UTXO order";
+        return false;
+    }
+    return true;
+}
+
+static bool uss_component_record(const struct uss_record *r, void *vctx)
+{
+    struct uss_component_ctx *ctx = vctx;
+    bool wellformed = uss_component_record_wellformed(r, ctx);
+    if (!wellformed)
+        return false;
     if (!MoneyRange(r->value)) {
         ctx->failed = true;
         ctx->reason = "UTXO value outside MoneyRange";
@@ -361,14 +476,9 @@ static bool uss_component_record(const struct uss_record *r, void *vctx)
         ctx->reason = "non-canonical coinbase flag";
         return false;
     }
-    if (ctx->have_prior) {
-        int order = memcmp(ctx->prior_txid, r->txid, 32);
-        if (order > 0 || (order == 0 && ctx->prior_vout >= r->vout)) {
-            ctx->failed = true;
-            ctx->reason = "non-canonical or duplicate UTXO order";
-            return false;
-        }
-    }
+    bool ordered = uss_component_record_ordered(ctx, r);
+    if (!ordered)
+        return false;
     int64_t next_supply = 0;
     if (__builtin_add_overflow(ctx->total_supply, r->value, &next_supply)) {
         ctx->failed = true;
@@ -487,50 +597,97 @@ bool uss_frontier(struct uss_handle *h, const uint8_t **blob_out,
     return true;
 }
 
+/* Assign each non-NULL shielded output from the span passed for it. */
+static void uss_shielded_set_outs(
+    const uint8_t **sapling_out, uint32_t *sapling_len_out,
+    const uint8_t **sprout_out, uint32_t *sprout_len_out,
+    const uint8_t **nf_out, uint64_t *nf_count_out,
+    const uint8_t *sap, uint32_t sap_len,
+    const uint8_t *spr, uint32_t spr_len,
+    const uint8_t *nf, uint64_t nf_count)
+{
+    if (sapling_out) *sapling_out = sap;
+    if (sapling_len_out) *sapling_len_out = sap_len;
+    if (sprout_out) *sprout_out = spr;
+    if (sprout_len_out) *sprout_len_out = spr_len;
+    if (nf_out) *nf_out = nf;
+    if (nf_count_out) *nf_count_out = nf_count;
+}
+
+/* Read one [u32 length][bytes] section into *blob and *len, or return false. */
+static bool uss_shielded_u32_section(const uint8_t **cursor, const uint8_t *end,
+                                     const uint8_t **blob, uint32_t *len)
+{
+    *blob = NULL;
+    *len = 0;
+    if ((size_t)(end - *cursor) < 4)
+        return false;
+    uint32_t n = rd_le32(*cursor);
+    *cursor += 4;
+    if ((uint64_t)(end - *cursor) < (uint64_t)n)
+        return false;
+    *blob = n ? *cursor : NULL;
+    *len = n;
+    *cursor += n;
+    return true;
+}
+
+/* Read the nullifier count and record bytes, or return false. */
+static bool uss_shielded_nullifiers(const uint8_t **cursor, const uint8_t *end,
+                                    const uint8_t **blob, uint64_t *count)
+{
+    *blob = NULL;
+    *count = 0;
+    if ((size_t)(end - *cursor) < 8)
+        return false;
+    uint64_t nf_count = rd_le64(*cursor);
+    *cursor += 8;
+    uint64_t nf_bytes = nf_count * (uint64_t)SNAPSHOT_NF_RECORD_BYTES;
+    if (nf_count > (UINT64_MAX / SNAPSHOT_NF_RECORD_BYTES))
+        return false;
+    if ((uint64_t)(end - *cursor) < nf_bytes)
+        return false;
+    *blob = nf_count ? *cursor : NULL;
+    *count = nf_count;
+    return true;
+}
+
 bool uss_shielded(struct uss_handle *h,
                   const uint8_t **sapling_out, uint32_t *sapling_len_out,
                   const uint8_t **sprout_out,  uint32_t *sprout_len_out,
                   const uint8_t **nf_out,      uint64_t *nf_count_out)
 {
-    if (sapling_out)     *sapling_out = NULL;
-    if (sapling_len_out) *sapling_len_out = 0;
-    if (sprout_out)      *sprout_out = NULL;
-    if (sprout_len_out)  *sprout_len_out = 0;
-    if (nf_out)          *nf_out = NULL;
-    if (nf_count_out)    *nf_count_out = 0;
+    uss_shielded_set_outs(sapling_out, sapling_len_out,
+                          sprout_out, sprout_len_out,
+                          nf_out, nf_count_out,
+                          NULL, 0, NULL, 0, NULL, 0);
     if (!h || h->hdr.version != USS_VERSION_V3) return false;
 
     const uint8_t *end = NULL;
     const uint8_t *p = uss_body_after_records(h, &end);
     if (!p) return false;
 
+    const uint8_t *sap = NULL;
+    uint32_t sap_len = 0;
     /* [u32 sapling_len][sapling] */
-    if ((size_t)(end - p) < 4) return false;
-    uint32_t sap_len = rd_le32(p); p += 4;
-    if ((uint64_t)(end - p) < (uint64_t)sap_len) return false;
-    const uint8_t *sap = sap_len ? p : NULL;
-    p += sap_len;
+    bool sap_ok = uss_shielded_u32_section(&p, end, &sap, &sap_len);
+    if (!sap_ok) return false;
 
+    const uint8_t *spr = NULL;
+    uint32_t spr_len = 0;
     /* [u32 sprout_len][sprout] */
-    if ((size_t)(end - p) < 4) return false;
-    uint32_t spr_len = rd_le32(p); p += 4;
-    if ((uint64_t)(end - p) < (uint64_t)spr_len) return false;
-    const uint8_t *spr = spr_len ? p : NULL;
-    p += spr_len;
+    bool spr_ok = uss_shielded_u32_section(&p, end, &spr, &spr_len);
+    if (!spr_ok) return false;
 
+    const uint8_t *nf = NULL;
+    uint64_t nf_count = 0;
     /* [u64 nf_count][records] */
-    if ((size_t)(end - p) < 8) return false;
-    uint64_t nf_count = rd_le64(p); p += 8;
-    uint64_t nf_bytes = nf_count * (uint64_t)SNAPSHOT_NF_RECORD_BYTES;
-    if (nf_count > (UINT64_MAX / SNAPSHOT_NF_RECORD_BYTES)) return false;
-    if ((uint64_t)(end - p) < nf_bytes) return false;
-    const uint8_t *nf = nf_count ? p : NULL;
+    bool nf_ok = uss_shielded_nullifiers(&p, end, &nf, &nf_count);
+    if (!nf_ok) return false;
 
-    if (sapling_out)     *sapling_out = sap;
-    if (sapling_len_out) *sapling_len_out = sap_len;
-    if (sprout_out)      *sprout_out = spr;
-    if (sprout_len_out)  *sprout_len_out = spr_len;
-    if (nf_out)          *nf_out = nf;
-    if (nf_count_out)    *nf_count_out = nf_count;
+    uss_shielded_set_outs(sapling_out, sapling_len_out,
+                          sprout_out, sprout_len_out,
+                          nf_out, nf_count_out,
+                          sap, sap_len, spr, spr_len, nf, nf_count);
     return true;
 }
