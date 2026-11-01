@@ -409,6 +409,51 @@ void jub_mul_by_cofactor(struct jub_point *r, const struct jub_point *p)
     jub_double(r, &t);
 }
 
+/* Write (p - 1) >> 32 into t_bytes, little-endian. */
+static void fr_sqrt_tonelli_t_bytes(uint8_t t_bytes[32])
+{
+    /* t = (p-1) >> 32 in bytes */
+    uint64_t pm1[4];
+    memcpy(pm1, FR_P, 32);
+    /* p - 1: subtract 1 from p[0] */
+    pm1[0]--;
+    /* >> 32: shift right by 32 bits */
+    for (int i = 0; i < 4; i++) {
+        uint64_t hi = (i < 3) ? pm1[i + 1] : 0;
+        pm1[i] = (pm1[i] >> 32) | (hi << 32);
+    }
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 8; j++)
+            t_bytes[i * 8 + j] = (uint8_t)(pm1[i] >> (j * 8));
+}
+
+/* Square-and-multiply base_in into *r. exp is 32 little-endian bytes,
+ * scanned from bit 0 through bit 255. */
+static inline void fr_sqrt_pow_le(struct fr *r, const struct fr *base_in,
+                                   const uint8_t exp[32])
+{
+    struct fr base = *base_in;
+    fr_one(r);
+    for (int i = 0; i < 256; i++) {
+        if ((exp[i / 8] >> (i % 8)) & 1)
+            fr_mul(r, r, &base);
+        fr_sq(&base, &base);
+    }
+}
+
+/* Subtract one from a 32-byte little-endian integer, then shift it right one bit. */
+static void fr_sqrt_le_sub1_shr1(uint8_t t1h_bytes[32])
+{
+    /* (t-1)/2: subtract 1 then shift right by 1 */
+    /* t is odd, so t-1 is even */
+    if (t1h_bytes[0] >= 1) t1h_bytes[0]--;
+    else { t1h_bytes[0] = 0xff; for (int i = 1; i < 32; i++) { if (t1h_bytes[i] > 0) { t1h_bytes[i]--; break; } t1h_bytes[i] = 0xff; } }
+    /* >> 1 */
+    for (int i = 0; i < 31; i++)
+        t1h_bytes[i] = (t1h_bytes[i] >> 1) | ((t1h_bytes[i + 1] & 1) << 7);
+    t1h_bytes[31] >>= 1;
+}
+
 /* Square root mod p using Tonelli-Shanks.
  * p - 1 = 2^32 * q where q = (p-1)/2^32
  * Returns false if no square root exists. */
@@ -426,59 +471,20 @@ bool fr_sqrt(struct fr *r, const struct fr *a)
     fr_from_bytes(&g, five_bytes);
 
     /* Compute g^t (generator of 2-Sylow subgroup) */
-    /* t = (p-1) >> 32 in bytes */
     uint8_t t_bytes[32];
-    {
-        uint64_t pm1[4];
-        memcpy(pm1, FR_P, 32);
-        /* p - 1: subtract 1 from p[0] */
-        pm1[0]--;
-        /* >> 32: shift right by 32 bits */
-        for (int i = 0; i < 4; i++) {
-            uint64_t hi = (i < 3) ? pm1[i + 1] : 0;
-            pm1[i] = (pm1[i] >> 32) | (hi << 32);
-        }
-        for (int i = 0; i < 4; i++)
-            for (int j = 0; j < 8; j++)
-                t_bytes[i * 8 + j] = (uint8_t)(pm1[i] >> (j * 8));
-    }
+    fr_sqrt_tonelli_t_bytes(t_bytes);
 
     /* w = g^t */
     struct fr w;
-    {
-        struct fr base = g;
-        fr_one(&w);
-        for (int i = 0; i < 256; i++) {
-            if ((t_bytes[i / 8] >> (i % 8)) & 1)
-                fr_mul(&w, &w, &base);
-            fr_sq(&base, &base);
-        }
-    }
+    fr_sqrt_pow_le(&w, &g, t_bytes);
 
     /* x = a^((t-1)/2) */
     uint8_t t1h_bytes[32];
     memcpy(t1h_bytes, t_bytes, 32);
-    {
-        /* (t-1)/2: subtract 1 then shift right by 1 */
-        /* t is odd, so t-1 is even */
-        if (t1h_bytes[0] >= 1) t1h_bytes[0]--;
-        else { t1h_bytes[0] = 0xff; for (int i = 1; i < 32; i++) { if (t1h_bytes[i] > 0) { t1h_bytes[i]--; break; } t1h_bytes[i] = 0xff; } }
-        /* >> 1 */
-        for (int i = 0; i < 31; i++)
-            t1h_bytes[i] = (t1h_bytes[i] >> 1) | ((t1h_bytes[i + 1] & 1) << 7);
-        t1h_bytes[31] >>= 1;
-    }
+    fr_sqrt_le_sub1_shr1(t1h_bytes);
 
     struct fr x;
-    {
-        struct fr base = *a;
-        fr_one(&x);
-        for (int i = 0; i < 256; i++) {
-            if ((t1h_bytes[i / 8] >> (i % 8)) & 1)
-                fr_mul(&x, &x, &base);
-            fr_sq(&base, &base);
-        }
-    }
+    fr_sqrt_pow_le(&x, a, t1h_bytes);
 
     /* b = a * x^2, y = a * x */
     struct fr b, y;
