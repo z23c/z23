@@ -9,6 +9,7 @@
 #include "models/database.h"
 #include "storage/progress_store.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <sqlite3.h>
 #include <string.h>
@@ -48,20 +49,21 @@ static bool csr_lock_bounded(struct chain_state_repository *csr)
 /* Try-enter the node.db connection mutex (serialized build: the shared
  * connection's mutex is recursive and an ingest statement can hold it for a
  * long time).  While held, every sqlite call the observer makes on this
- * connection re-enters it without waiting.  A busy mutex answers false.  A
- * missing/closed db needs no mutex: *token stays NULL and true is returned. */
-bool csr_ndb_try_enter(struct node_db *ndb, void **token)
+ * connection re-enters it without waiting.  A busy mutex answers EBUSY.  A
+ * missing/closed db needs no mutex: *token stays NULL and the answer is ok. */
+struct zcl_result csr_ndb_try_enter(struct node_db *ndb, void **token)
 {
     *token = NULL;
     if (!ndb || !ndb->open || !ndb->db)
-        return true;
+        return ZCL_OK;
     sqlite3_mutex *mu = sqlite3_db_mutex(ndb->db);
     if (!mu)
-        return true;
+        return ZCL_OK;
     if (sqlite3_mutex_try(mu) != SQLITE_OK)
-        return false;  // raw-return-ok:busy connection mutex is the typed busy answer
+        return ZCL_ERR(EBUSY, "node.db connection mutex busy (an ingest "
+                              "statement owns it)");
     *token = mu;
-    return true;
+    return ZCL_OK;
 }
 
 void csr_ndb_leave(void *token)
@@ -138,23 +140,23 @@ void csr_snapshot(struct chain_state_repository *csr,
     out->sql_max_height = csr_internal_sqlite_max_block_height(ndb);
 }
 
-bool csr_snapshot_bounded(struct chain_state_repository *csr,
-                          struct chain_state_view *out)
+struct zcl_result csr_snapshot_bounded(struct chain_state_repository *csr,
+                                       struct chain_state_view *out)
 {
     struct node_db *ndb = NULL;
     struct active_chain *chain = NULL;
 
     if (!out)
-        return false;  // raw-return-ok:null out parameter, nothing to fill
+        return ZCL_ERR(EINVAL, "csr_snapshot_bounded: no view to fill");
     csr_snapshot_view_reset(out);
     if (!csr || !csr->initialized)
-        return true;
+        return ZCL_OK;
 
     /* csr->lock is taken with a deadline and released BEFORE the progress
      * store is touched: never PS while holding CSR, never CSR while holding
      * PS (csr_commit_tip / csr_clear_active_tip take CSR then PS). */
     if (!csr_lock_bounded(csr))
-        return false;  // raw-return-ok:busy lock is the typed busy answer, not a fault
+        return ZCL_ERR(EBUSY, "chain state lock busy past its bound");
     ndb = csr_snapshot_copy_locked(csr, out, &chain);
     pthread_mutex_unlock(&csr->lock);
 
@@ -166,20 +168,21 @@ bool csr_snapshot_bounded(struct chain_state_repository *csr,
      * owns it: answer busy, never queue. */
     if (chain) {
         if (!progress_store_tx_trylock())
-            return false;  // raw-return-ok:busy lock is the typed busy answer, not a fault
+            return ZCL_ERR(EBUSY, "progress store busy (an ingest owns it)");
         out->tip_height = active_chain_height(chain);
         progress_store_tx_unlock();
     }
     /* utxo_count is not part of any bounded observation: its COUNT(*) scan
      * is skipped (left at -1) instead of racing the ingest's writes.  The
      * sql_max read goes through the shared node.db connection, whose mutex an
-     * ingest statement can hold for long: try-enter it, busy answers false. */
+     * ingest statement can hold for long: try-enter it, busy answers EBUSY. */
     void *ndb_token = NULL;
-    if (!csr_ndb_try_enter(ndb, &ndb_token))
-        return false;  // raw-return-ok:busy connection mutex is the typed busy answer
+    struct zcl_result entered = csr_ndb_try_enter(ndb, &ndb_token);
+    if (!entered.ok)
+        return entered;
     out->sql_max_height = csr_internal_sqlite_max_block_height(ndb);
     csr_ndb_leave(ndb_token);
-    return true;
+    return ZCL_OK;
 }
 
 int64_t csr_header_height(struct chain_state_repository *csr)

@@ -89,7 +89,7 @@ static bool snapshot_copy_csr_tips(
 
     memset(&csv, 0, sizeof(csv));
     if (bounded) {
-        if (!csr_snapshot_bounded(authority->csr, &csv))
+        if (!csr_snapshot_bounded(authority->csr, &csv).ok)
             return false;  // raw-return-ok:busy lock is the typed busy answer, not a fault
     } else {
         csr_snapshot(authority->csr, &csv);
@@ -336,7 +336,7 @@ static bool snapshot_fill(struct chain_evidence_controller *authority,
     /* Bounded: the whole node.db read section runs under a try-entered
      * connection mutex (recursive, so each read re-enters without waiting);
      * no PS or CSR lock is held here. */
-    if (bounded && !csr_ndb_try_enter(authority->ndb, &ndb_token))
+    if (bounded && !csr_ndb_try_enter(authority->ndb, &ndb_token).ok)
         return false;  // raw-return-ok:busy connection mutex is the typed busy answer
     snapshot_fill_from_ndb(authority, out);
     csr_ndb_leave(ndb_token);

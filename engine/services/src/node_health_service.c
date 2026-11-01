@@ -543,7 +543,7 @@ static bool health_ndb_utxo_count(struct node_db *ndb,
                                   int64_t *count, bool *busy)
 {
     void *token = NULL;
-    if (!csr_ndb_try_enter(ndb, &token)) {
+    if (!csr_ndb_try_enter(ndb, &token).ok) {
         *busy = true;
         return false;  // raw-return-ok:busy connection mutex is reported as a stale tick
     }
@@ -558,7 +558,7 @@ static void health_ndb_tip_height(struct node_health_snapshot *snapshot,
                                   struct node_health_store_port *store)
 {
     void *token = NULL;
-    if (!csr_ndb_try_enter(ndb, &token)) {
+    if (!csr_ndb_try_enter(ndb, &token).ok) {
         health_add_warning(snapshot, "tip_height_stale_node_db_busy");
         return;
     }

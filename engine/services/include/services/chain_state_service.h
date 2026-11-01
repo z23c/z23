@@ -261,14 +261,15 @@ bool csr_align_coins_best_block(struct chain_state_repository *csr,
 /* ── Read-only introspection ──────────────────────────────────── */
 /* Non-blocking csr_snapshot for live-node diagnostics: csr->lock is taken with
  * a short deadline, the progress-store lock with a try, and the COUNT(*) utxo
- * scan is skipped (utxo_count stays -1).  Returns false (view partial, do not
- * use) when either lock is busy, i.e. an ingest may own it. */
+ * scan is skipped (utxo_count stays -1).  Not ok (code EBUSY: view partial,
+ * do not use) when a lock is busy, i.e. an ingest may own it. */
 /* Bounded node.db access for observers: try-enter the shared connection mutex
- * (false = busy, an ingest statement owns it).  Pair with csr_ndb_leave. */
-bool csr_ndb_try_enter(struct node_db *ndb, void **token);
+ * (not ok, code EBUSY = an ingest statement owns it).  Pair with
+ * csr_ndb_leave. */
+struct zcl_result csr_ndb_try_enter(struct node_db *ndb, void **token);
 void csr_ndb_leave(void *token);
-bool csr_snapshot_bounded(struct chain_state_repository *csr,
-                          struct chain_state_view *out);
+struct zcl_result csr_snapshot_bounded(struct chain_state_repository *csr,
+                                       struct chain_state_view *out);
 void csr_snapshot(struct chain_state_repository *csr,
                    struct chain_state_view *out);
 

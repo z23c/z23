@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the bounded evidence-maintenance helper. */
+ZCL_MODULE_CAPABILITY("engine/services/src/chain_evidence_maintenance.c", CAP_CLOCK, "reads CLOCK_REALTIME for the pthread_cond_timedwait deadline that bounds each wait")
