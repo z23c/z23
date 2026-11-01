@@ -73,55 +73,31 @@ static bool output_point_to_xy(struct fr *x, struct fr *y,
     return true;
 }
 
-/* ── Output Circuit Synthesis ───────────────────────────────────── */
-
-/* C23 port of sapling-crypto Output::synthesize at the pinned parameter commit.
- * Allocation order and A/B/C orientation are trusted-setup inputs, not merely
- * implementation details. The production shape is 5 public inputs, 7821 aux
- * variables, and 7827 constraints.
- *
- * Steps:
- *   1. expose_value_commitment: value_bits→fixed_base_mul(G_v) +
- *      rcv_bits→fixed_base_mul(G_rcv) + add → inputize cv
- *   2. witness g_d + on_curve + not_small_order + repr (256 bits)
- *   3. esk_bits → g_d.mul(esk) → inputize epk
- *   4. pk_d witness: y_bits(255) + x_sign_bit(1) = 256 bits
- *   5. pedersen_hash(NoteCommitment, value_bits||g_d_repr||pk_d_repr)
- *   6. rcm_bits→fixed_base_mul(G_rcm) + add → cm.x inputize */
-
-bool sapling_output_synthesize(struct constraint_system *cs,
-                                const struct sapling_output_witness *wit,
-                                const struct sapling_output_inputs *pub)
+/* True when cv, epk, or cm fails to decode, in that order. */
+static bool output_public_fields_malformed(struct fr *cv_pub_x,
+                                           struct fr *cv_pub_y,
+                                           struct fr *epk_pub_x,
+                                           struct fr *epk_pub_y,
+                                           struct fr *cm_fr,
+                                           const struct sapling_output_inputs *pub)
 {
-    if (!cs || !wit || !pub)
-        LOG_FAIL("sapling_circuit", "output_synthesize: NULL argument");
+    memset(cv_pub_x, 0, sizeof(*cv_pub_x));
+    memset(cv_pub_y, 0, sizeof(*cv_pub_y));
+    memset(epk_pub_x, 0, sizeof(*epk_pub_x));
+    memset(epk_pub_y, 0, sizeof(*epk_pub_y));
+    memset(cm_fr, 0, sizeof(*cm_fr));
+    return !output_point_to_xy(cv_pub_x, cv_pub_y, pub->cv) ||
+           !output_point_to_xy(epk_pub_x, epk_pub_y, pub->epk) ||
+           !fr_from_bytes(cm_fr, pub->cm);
+}
 
-    /* Bellman has a separate input namespace. Allocate all five inputs first
-     * so our unified variable vector has ONE, inputs, then auxiliaries. */
-    struct fr cv_pub_x, cv_pub_y, epk_pub_x, epk_pub_y, cm_fr;
-    if (!output_point_to_xy(&cv_pub_x, &cv_pub_y, pub->cv) ||
-        !output_point_to_xy(&epk_pub_x, &epk_pub_y, pub->epk) ||
-        !fr_from_bytes(&cm_fr, pub->cm))
-        LOG_FAIL("sapling_circuit",
-                 "output_synthesize: malformed public input encoding");
-    size_t in_cv_x = cs_alloc_input(cs, &cv_pub_x);
-    size_t in_cv_y = cs_alloc_input(cs, &cv_pub_y);
-    size_t in_epk_x = cs_alloc_input(cs, &epk_pub_x);
-    size_t in_epk_y = cs_alloc_input(cs, &epk_pub_y);
-    size_t in_cm = cs_alloc_input(cs, &cm_fr);
-
-    /* note_contents accumulates boolean variable indices:
-     * value(64) + g_d_repr(256) + pk_d_repr(256) = 576 bits */
-    size_t *note_contents = zcl_malloc(576 * sizeof(size_t), "note_contents");
-    if (!note_contents)
-        LOG_FAIL("sapling_circuit",
-                 "note_contents: zcl_malloc(%zu) failed", 576 * sizeof(size_t));
-    size_t nc_idx = 0;
-
-    /* ════════════════════════════════════════════════════════
-     * Step 1: Value Commitment — expose_value_commitment()
-     * ════════════════════════════════════════════════════════ */
-
+/* Booleanize value and rcv, enforce cv, and append the value bits. */
+static size_t output_synthesize_value_commitment(struct constraint_system *cs,
+                                                 size_t *note_contents,
+                                                 size_t nc_idx,
+                                                 const struct sapling_output_witness *wit,
+                                                 size_t in_cv_x, size_t in_cv_y)
+{
     /* 1a. Booleanize value (64 bits) */
     struct fr value_fr;
     {
@@ -169,6 +145,98 @@ bool sapling_output_synthesize(struct constraint_system *cs,
     /* 1f. Inputize cv (public inputs 1,2: cv.x, cv.y) */
     output_enforce_equal(cs, cv_x, in_cv_x);
     output_enforce_equal(cs, cv_y, in_cv_y);
+    return nc_idx;
+}
+
+/* Append pk_d as 255 y-coordinate bits plus the x sign bit. */
+static size_t output_synthesize_pkd_repr(struct constraint_system *cs,
+                                         size_t *note_contents,
+                                         size_t nc_idx,
+                                         const struct sapling_output_witness *wit)
+{
+    /* pk_d is witnessable as any 256 bits (no constraints).
+     * Representation: y_bits(255) + x_sign_bit(1) */
+    struct jub_point pkd_point;
+    jub_from_bytes(&pkd_point, wit->pk_d);
+    struct fr pkd_x_val, pkd_y_val;
+    jub_get_x(&pkd_x_val, &pkd_point);
+    jub_get_y(&pkd_y_val, &pkd_point);
+
+    /* field_into_boolean_vec_le emits Fr::NUM_BITS == 255 bits and no
+     * packing constraint. pk_d is intentionally not checked on-curve. */
+    size_t pkd_y_bits[255];
+    output_boolean_vec_le(cs, pkd_y_bits, 255, &pkd_y_val);
+
+    /* Get x sign bit */
+    uint8_t pkd_x_bytes[32];
+    fr_to_bytes(pkd_x_bytes, &pkd_x_val);
+    bool x_is_odd = pkd_x_bytes[0] & 1;
+    size_t pkd_x_sign = gadget_alloc_boolean(cs, x_is_odd);
+
+    /* repr = y_bits(first 255) + x_sign_bit */
+    for (size_t i = 0; i < 255; i++)
+        note_contents[nc_idx++] = pkd_y_bits[i];
+    note_contents[nc_idx++] = pkd_x_sign;
+    return nc_idx;
+}
+
+/* True when inputs, aux, or constraints differ from 5, 7821, and 7827. */
+static bool output_production_shape_mismatch(const struct constraint_system *cs)
+{
+    return cs->num_inputs != 5 || cs->num_constraints != 7827 ||
+           cs->num_vars - cs->num_inputs - 1 != 7821;
+}
+
+/* ── Output Circuit Synthesis ───────────────────────────────────── */
+
+/* C23 port of sapling-crypto Output::synthesize at the pinned parameter commit.
+ * Allocation order and A/B/C orientation are trusted-setup inputs, not merely
+ * implementation details. The production shape is 5 public inputs, 7821 aux
+ * variables, and 7827 constraints.
+ *
+ * Steps:
+ *   1. expose_value_commitment: value_bits→fixed_base_mul(G_v) +
+ *      rcv_bits→fixed_base_mul(G_rcv) + add → inputize cv
+ *   2. witness g_d + on_curve + not_small_order + repr (256 bits)
+ *   3. esk_bits → g_d.mul(esk) → inputize epk
+ *   4. pk_d witness: y_bits(255) + x_sign_bit(1) = 256 bits
+ *   5. pedersen_hash(NoteCommitment, value_bits||g_d_repr||pk_d_repr)
+ *   6. rcm_bits→fixed_base_mul(G_rcm) + add → cm.x inputize */
+
+bool sapling_output_synthesize(struct constraint_system *cs,
+                                const struct sapling_output_witness *wit,
+                                const struct sapling_output_inputs *pub)
+{
+    if (!cs || !wit || !pub)
+        LOG_FAIL("sapling_circuit", "output_synthesize: NULL argument");
+
+    /* Bellman has a separate input namespace. Allocate all five inputs first
+     * so our unified variable vector has ONE, inputs, then auxiliaries. */
+    struct fr cv_pub_x, cv_pub_y, epk_pub_x, epk_pub_y, cm_fr;
+    if (output_public_fields_malformed(&cv_pub_x, &cv_pub_y,
+                                      &epk_pub_x, &epk_pub_y, &cm_fr, pub))
+        LOG_FAIL("sapling_circuit",
+                 "output_synthesize: malformed public input encoding");
+    size_t in_cv_x = cs_alloc_input(cs, &cv_pub_x);
+    size_t in_cv_y = cs_alloc_input(cs, &cv_pub_y);
+    size_t in_epk_x = cs_alloc_input(cs, &epk_pub_x);
+    size_t in_epk_y = cs_alloc_input(cs, &epk_pub_y);
+    size_t in_cm = cs_alloc_input(cs, &cm_fr);
+
+    /* note_contents accumulates boolean variable indices:
+     * value(64) + g_d_repr(256) + pk_d_repr(256) = 576 bits */
+    size_t *note_contents = zcl_malloc(576 * sizeof(size_t), "note_contents");
+    if (!note_contents)
+        LOG_FAIL("sapling_circuit",
+                 "note_contents: zcl_malloc(%zu) failed", 576 * sizeof(size_t));
+    size_t nc_idx = 0;
+
+    /* ════════════════════════════════════════════════════════
+     * Step 1: Value Commitment — expose_value_commitment()
+     * ════════════════════════════════════════════════════════ */
+
+    nc_idx = output_synthesize_value_commitment(cs, note_contents, nc_idx,
+                                               wit, in_cv_x, in_cv_y);
 
     /* ════════════════════════════════════════════════════════
      * Step 2: Witness g_d, verify not small order, compute repr
@@ -223,31 +291,7 @@ bool sapling_output_synthesize(struct constraint_system *cs,
      * Step 4: pk_d witness — 256 bits for note contents
      * ════════════════════════════════════════════════════════ */
 
-    {
-        /* pk_d is witnessable as any 256 bits (no constraints).
-         * Representation: y_bits(255) + x_sign_bit(1) */
-        struct jub_point pkd_point;
-        jub_from_bytes(&pkd_point, wit->pk_d);
-        struct fr pkd_x_val, pkd_y_val;
-        jub_get_x(&pkd_x_val, &pkd_point);
-        jub_get_y(&pkd_y_val, &pkd_point);
-
-        /* field_into_boolean_vec_le emits Fr::NUM_BITS == 255 bits and no
-         * packing constraint. pk_d is intentionally not checked on-curve. */
-        size_t pkd_y_bits[255];
-        output_boolean_vec_le(cs, pkd_y_bits, 255, &pkd_y_val);
-
-        /* Get x sign bit */
-        uint8_t pkd_x_bytes[32];
-        fr_to_bytes(pkd_x_bytes, &pkd_x_val);
-        bool x_is_odd = pkd_x_bytes[0] & 1;
-        size_t pkd_x_sign = gadget_alloc_boolean(cs, x_is_odd);
-
-        /* repr = y_bits(first 255) + x_sign_bit */
-        for (size_t i = 0; i < 255; i++)
-            note_contents[nc_idx++] = pkd_y_bits[i];
-        note_contents[nc_idx++] = pkd_x_sign;
-    }
+    nc_idx = output_synthesize_pkd_repr(cs, note_contents, nc_idx, wit);
 
     /* ════════════════════════════════════════════════════════
      * Step 5: Note commitment via Pedersen hash
@@ -299,8 +343,7 @@ bool sapling_output_synthesize(struct constraint_system *cs,
     memory_cleanse(note_contents, 576 * sizeof(size_t));
     free(note_contents);
 
-    if (cs->num_inputs != 5 || cs->num_constraints != 7827 ||
-        cs->num_vars - cs->num_inputs - 1 != 7821)
+    if (output_production_shape_mismatch(cs))
         LOG_FAIL("sapling_circuit",
                  "output_synthesize: production shape mismatch "
                  "(inputs=%zu aux=%zu constraints=%zu)",
