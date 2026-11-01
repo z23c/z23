@@ -34,7 +34,7 @@ struct zcl_result csr_commit_tip_result(
 static bool csr_lock_bounded(struct chain_state_repository *csr)
 {
     struct timespec dl;
-    clock_gettime(CLOCK_REALTIME, &dl);
+    clock_gettime(CLOCK_REALTIME, &dl); // platform-ok: pthread_mutex_timedlock takes an absolute CLOCK_REALTIME deadline
     dl.tv_nsec += CSR_SNAPSHOT_BOUNDED_WAIT_NS;
     if (dl.tv_nsec >= 1000000000L) {
         dl.tv_sec += 1;
@@ -118,7 +118,7 @@ bool csr_snapshot_bounded(struct chain_state_repository *csr,
     struct active_chain *chain = NULL;
 
     if (!out)
-        return false;
+        return false;  // raw-return-ok:null out parameter, nothing to fill
     csr_snapshot_view_reset(out);
     if (!csr || !csr->initialized)
         return true;
@@ -127,7 +127,7 @@ bool csr_snapshot_bounded(struct chain_state_repository *csr,
      * store is touched: never PS while holding CSR, never CSR while holding
      * PS (csr_commit_tip / csr_clear_active_tip take CSR then PS). */
     if (!csr_lock_bounded(csr))
-        return false;
+        return false;  // raw-return-ok:busy lock is the typed busy answer, not a fault
     ndb = csr_snapshot_copy_locked(csr, out, &chain);
     pthread_mutex_unlock(&csr->lock);
 
@@ -139,7 +139,7 @@ bool csr_snapshot_bounded(struct chain_state_repository *csr,
      * owns it: answer busy, never queue. */
     if (chain) {
         if (!progress_store_tx_trylock())
-            return false;
+            return false;  // raw-return-ok:busy lock is the typed busy answer, not a fault
         out->tip_height = active_chain_height(chain);
         progress_store_tx_unlock();
     }

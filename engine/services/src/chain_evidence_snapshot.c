@@ -90,7 +90,7 @@ static bool snapshot_copy_csr_tips(
     memset(&csv, 0, sizeof(csv));
     if (bounded) {
         if (!csr_snapshot_bounded(authority->csr, &csv))
-            return false;
+            return false;  // raw-return-ok:busy lock is the typed busy answer, not a fault
     } else {
         csr_snapshot(authority->csr, &csv);
     }
@@ -306,7 +306,7 @@ static bool snapshot_fill(struct chain_evidence_controller *authority,
                           bool bounded)
 {
     if (!out)
-        return false;
+        return false;  // raw-return-ok:null out parameter, nothing to fill
     snapshot_view_reset(out);
     if (!authority)
         return true;
