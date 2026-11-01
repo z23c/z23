@@ -94,7 +94,6 @@ core/modules/sapling/src/sapling_circuit.c:sapling_output_synthesize:18
 core/modules/sapling/src/sapling_prover_native.c:native_output_proof_raw:16
 core/modules/sapling/src/sapling_prover_native.c:native_self_test_bundle:26
 core/modules/sapling/src/sapling_prover_native.c:native_spend_proof_raw:20
-core/modules/script/src/script_error.c:ScriptErrorString:35
 core/modules/script/src/sigencoding.c:is_valid_signature_encoding:19
 core/modules/sync/src/stage_lcc.c:stage_lcc_check_raise:18
 core/modules/validation/src/accept_block_header.c:accept_block_header:42
