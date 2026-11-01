@@ -118,21 +118,30 @@ int64_t clock_now_monotonic_raw_us(void)
     return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000LL;
 }
 
-int64_t clock_now_boottime_ms(void)
+/* Milliseconds on `id`; false when the clock cannot be read. */
+static bool clock_read_ms(clockid_t id, int64_t *ms)
 {
     struct timespec ts;
+    if (clock_gettime(id, &ts) != 0)
+        return false;
+    *ms = (int64_t)ts.tv_sec * 1000LL + (int64_t)ts.tv_nsec / 1000000LL;
+    return true;
+}
+
+int64_t clock_now_boottime_ms(void)
+{
+    int64_t ms = 0;
 #if defined(CLOCK_BOOTTIME)
-    if (clock_gettime(CLOCK_BOOTTIME, &ts) == 0)
-        return (int64_t)ts.tv_sec * 1000LL + (int64_t)ts.tv_nsec / 1000000LL;
+    if (clock_read_ms(CLOCK_BOOTTIME, &ms))
+        return ms;
 #endif
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-        int e = errno;
-        fprintf(stderr, // obs-ok:platform-primitive
-            "[platform] %s:%d %s(): clock_gettime(CLOCK_MONOTONIC) failed errno=%d\n",
-            __FILE__, __LINE__, __func__, e);
-        return 0;
-    }
-    return (int64_t)ts.tv_sec * 1000LL + (int64_t)ts.tv_nsec / 1000000LL;
+    if (clock_read_ms(CLOCK_MONOTONIC, &ms))
+        return ms;
+    int e = errno;
+    fprintf(stderr, // obs-ok:platform-primitive
+        "[platform] %s:%d %s(): clock_gettime(CLOCK_MONOTONIC) failed errno=%d\n",
+        __FILE__, __LINE__, __func__, e);
+    return 0;
 }
 
 int64_t clock_thread_cpu_ns(void)
