@@ -356,10 +356,13 @@ static void *sh_thread_fn(void *arg)
     return NULL;
 }
 
+static void sh_stop_locked(void);
+
 /* Shared launch. `inline_boot_sweep` true runs the first sweep on the
  * caller's thread before returning; false leaves it to the new thread, which
  * runs it immediately, so the caller never waits on a storage lock. */
-static struct zcl_result sh_start(const char *datadir, bool inline_boot_sweep)
+static struct zcl_result sh_start_locked(const char *datadir,
+                                        bool inline_boot_sweep)
 {
     /* A sweeper with no datadir is a misconfiguration, not a degraded mode:
      * the log bound would silently never run. Refuse it by name so the
@@ -377,16 +380,10 @@ static struct zcl_result sh_start(const char *datadir, bool inline_boot_sweep)
         return ZCL_ERR(-1, "storage_housekeeping_start: already running");
     }
     if (g_thread_joinable) {
-        /* The previous thread exited on its own and nobody joined it yet. */
-        pthread_t old = g_thread;
-        g_thread_joinable = false;
+        /* A thread that exited on its own is still owned until stop() joins
+         * it; starting over it would lose that ownership. */
         pthread_mutex_unlock(&g_lock);
-        pthread_join(old, NULL);
-        pthread_mutex_lock(&g_lock);
-        if (g_thread_running || g_thread_joinable) {
-            pthread_mutex_unlock(&g_lock);
-            return ZCL_ERR(-1, "storage_housekeeping_start: already running");
-        }
+        return ZCL_ERR(-1, "storage_housekeeping_start: already running");
     }
     snprintf(g_datadir, sizeof(g_datadir), "%s", datadir ? datadir : "");
     g_stop_requested = false;
@@ -405,7 +402,7 @@ static struct zcl_result sh_start(const char *datadir, bool inline_boot_sweep)
 
     struct zcl_result sup = sh_register_supervisor();
     if (!sup.ok) {
-        storage_housekeeping_stop();
+        sh_stop_locked();
         return sup;
     }
 
@@ -414,6 +411,20 @@ static struct zcl_result sh_start(const char *datadir, bool inline_boot_sweep)
     if (inline_boot_sweep)
         storage_housekeeping_sweep(datadir);
     return ZCL_OK;
+}
+
+/* start() and stop() are serialised by one lifecycle mutex held across the
+ * whole of each, so a start can never interleave with a stop's join. g_lock
+ * still guards only the data it always guarded. sh_stop_locked() is the body
+ * of stop() for callers that already hold the lifecycle mutex. */
+static pthread_mutex_t g_lifecycle = PTHREAD_MUTEX_INITIALIZER;
+
+static struct zcl_result sh_start(const char *datadir, bool inline_boot_sweep)
+{
+    pthread_mutex_lock(&g_lifecycle);
+    struct zcl_result r = sh_start_locked(datadir, inline_boot_sweep);
+    pthread_mutex_unlock(&g_lifecycle);
+    return r;
 }
 
 struct zcl_result storage_housekeeping_start(const char *datadir)
@@ -432,7 +443,22 @@ struct zcl_result storage_housekeeping_start_deferred(const char *datadir)
     return sh_start(datadir, false);
 }
 
-void storage_housekeeping_stop(void)
+#ifdef ZCL_TESTING
+static _Atomic uint64_t g_joins;
+uint64_t storage_housekeeping_test_joins(void)
+{
+    return atomic_load(&g_joins);
+}
+bool storage_housekeeping_test_thread_running(void)
+{
+    pthread_mutex_lock(&g_lock);
+    bool running = g_thread_running;
+    pthread_mutex_unlock(&g_lock);
+    return running;
+}
+#endif
+
+static void sh_stop_locked(void)
 {
     supervisor_child_id sup_id = atomic_load(&g_supervisor_id);
     if (sup_id != SUPERVISOR_INVALID_ID)
@@ -443,18 +469,34 @@ void storage_housekeeping_stop(void)
         pthread_mutex_unlock(&g_lock);
         return;
     }
-    /* Join even a thread that already exited by itself; clearing joinable
-     * under the lock keeps a second stop() from joining it twice. */
+    /* Join even a thread that already exited by itself. */
     g_stop_requested = true;
     pthread_t thread = g_thread;
+    pthread_mutex_unlock(&g_lock);
+    int jrc = pthread_join(thread, NULL);
+    if (jrc != 0) {
+        /* Ownership is not lost: the thread stays joinable so a later stop()
+         * can try again. */
+        LOG_WARN(SH_SUBSYS, "stop: pthread_join failed errno=%d (%s)", jrc,
+                 strerror(jrc));
+        return;
+    }
+    pthread_mutex_lock(&g_lock);
     g_thread_joinable = false;
     pthread_mutex_unlock(&g_lock);
-    pthread_join(thread, NULL);
 #ifdef ZCL_TESTING
+    atomic_fetch_add(&g_joins, 1);
     sup_id = atomic_exchange(&g_supervisor_id, SUPERVISOR_INVALID_ID);
     if (sup_id != SUPERVISOR_INVALID_ID)
         supervisor_unregister(sup_id);
 #endif
+}
+
+void storage_housekeeping_stop(void)
+{
+    pthread_mutex_lock(&g_lifecycle);
+    sh_stop_locked();
+    pthread_mutex_unlock(&g_lifecycle);
 }
 
 void storage_housekeeping_stats(struct storage_housekeeping_stats *out)

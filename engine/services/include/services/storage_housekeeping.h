@@ -84,6 +84,8 @@ void storage_housekeeping_stop(void);
 void storage_housekeeping_test_set_after_token_hook(void (*hook)(void));
 void storage_housekeeping_test_request_stop(void);
 uint64_t storage_housekeeping_test_store_calls(void);
+uint64_t storage_housekeeping_test_joins(void);   /* successful joins in stop() */
+bool storage_housekeeping_test_thread_running(void);
 #endif
 
 void storage_housekeeping_stats(struct storage_housekeeping_stats *out);

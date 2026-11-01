@@ -355,7 +355,23 @@ static int shk_case_stop_after_token_won(void)
             platform_sleep_ms(20);
     }
     SHK_CHECK("after-token: the sweep ended on the hook-latched stop", ended);
+    /* The hook-stopped thread exits by itself. Wait for that, then stop()
+     * must still join it exactly once (a stop that returned early would leave
+     * the worker unjoined). */
+    bool exited = false;
+    for (int i = 0; i < 500 && !exited; i++) {
+        exited = !storage_housekeeping_test_thread_running();
+        if (!exited)
+            platform_sleep_ms(20);
+    }
+    SHK_CHECK("after-token: the thread exited by itself", exited);
+    uint64_t joins_before = storage_housekeeping_test_joins();
     storage_housekeeping_stop();
+    SHK_CHECK("after-token: stop() joined the self-exited thread once",
+              storage_housekeeping_test_joins() == joins_before + 1);
+    storage_housekeeping_stop();
+    SHK_CHECK("after-token: a second stop() joins nothing",
+              storage_housekeeping_test_joins() == joins_before + 1);
     storage_housekeeping_test_set_after_token_hook(NULL);
 
     struct storage_housekeeping_stats after;
@@ -370,8 +386,7 @@ static int shk_case_stop_after_token_won(void)
     SHK_CHECK("after-token: the token was handed back", regained);
     if (regained)
         storage_pacing_maintenance_end();
-    /* The hook-stopped thread exited by itself before stop() ran; a fresh
-     * start/stop round trip still works afterwards. */
+    /* After the join a fresh start/stop round trip works again. */
     struct zcl_result again = storage_housekeeping_start_deferred(dir);
     SHK_CHECK("after-token: restart after a self-exited thread", again.ok);
     storage_housekeeping_stop();
