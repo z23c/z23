@@ -36,6 +36,8 @@
 #include "validation/process_block.h"
 #include "storage/ldb_snapshot.h"
 #include "util/ar_step_readonly.h"
+#include "util/blocker.h"
+#include "services/sapling_tip_root_blocker.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -853,6 +855,22 @@ static void boot_sapling_rebuild_after_mismatch(struct app_context *ctx,
     boot_persist_block_index(ctx->datadir, st);
 }
 
+/* The check endpoint has no Sapling root: name the blocker that the wallet
+ * send path reads. */
+static void boot_sapling_raise_tip_root_missing(int tip_height)
+{
+    char reason[BLOCKER_REASON_MAX];
+    snprintf(reason, sizeof(reason),
+             "block index has no Sapling root at height=%d; the loaded tree "
+             "cannot be checked", tip_height);
+    struct blocker_record rec;
+    /* blocker-id: sapling_tree.tip_root_missing */
+    if (blocker_init(&rec, BLOCKER_ID_SAPLING_TIP_ROOT_MISSING, "boot.sapling_tree",
+                     BLOCKER_PERMANENT, reason))
+        blocker_set(&rec);
+    LOG_ERROR("sapling_tree", "%s", reason);
+}
+
 /* Verify the Sapling tree root against the coins-applied endpoint. */
 static void boot_step_verify_sapling_root(struct app_context *ctx,
                                           struct main_state *st,
@@ -862,8 +880,10 @@ static void boot_step_verify_sapling_root(struct app_context *ctx,
 {
     /* Verify Sapling tree root matches chain tip. If mismatched,
      * rebuild from block files before P2P starts (no concurrency risk).
-     * Skip if hashFinalSaplingRoot is all-zeros (block_index.bin doesn't
-     * store this field yet, so it will be zero after flat file load). */
+     * A zero hashFinalSaplingRoot past Sapling activation cannot come from a
+     * validated chain (connect_block rejects it), so it means a damaged block
+     * index: the check cannot run, a named blocker is raised and the wallet
+     * refuses shielded spends. */
     if (!st->sapling_tree_loaded || !datadir)
         return;
     /* Resolve the comparison endpoint from coins-applied state, NOT the
@@ -891,10 +911,12 @@ static void boot_step_verify_sapling_root(struct app_context *ctx,
         }
     }
     static const uint8_t zeros[32] = {0};
-    bool tip_has_sapling_root = tip && tip->nHeight > 476969 &&
-        memcmp(tip->hashFinalSaplingRoot.data, zeros, 32) != 0;
-    if (!tip_has_sapling_root)
+    if (!tip || tip->nHeight <= 476969)
         return;
+    if (memcmp(tip->hashFinalSaplingRoot.data, zeros, 32) == 0) {
+        boot_sapling_raise_tip_root_missing(tip->nHeight);
+        return;
+    }
     struct uint256 tree_root;
     incremental_tree_root(&st->sapling_tree, &tree_root);
     if (memcmp(tree_root.data, tip->hashFinalSaplingRoot.data, 32) == 0)

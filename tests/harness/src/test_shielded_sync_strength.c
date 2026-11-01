@@ -66,6 +66,7 @@
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 #include "config/boot.h"
+#include "services/sapling_tip_root_blocker.h"
 #include "util/thread_registry.h"
 #include "../../../engine/composition/src/boot_steps_internal.h"
 
@@ -1308,7 +1309,8 @@ static int test_sst_boot_repairs_inflated_tree(void)
                sst_boot_persisted_is_true(b) &&
                !atomic_load(&g_sapling_tree_rebuilding) &&
                thread_registry_unreaped_count() == live &&
-               !sst_fail_closed_active();
+               !sst_fail_closed_active() &&
+               !blocker_exists(BLOCKER_ID_SAPLING_TIP_ROOT_MISSING);
     }
     sst_boot_close(b);
     return sst_boot_report("an inflated persisted tree is rebuilt to the tip "
@@ -1374,8 +1376,9 @@ static int test_sst_boot_defers_repair_above_one_million(void)
                            pass);
 }
 
-/* A tip header without a Sapling root skips the check entirely: an inflated
- * tree stays loaded, unrepaired and unreported. */
+/* A tip header without a Sapling root past activation is a damaged block
+ * index: the check cannot run, so boot names a blocker (which the wallet send
+ * path reads) and leaves the loaded tree untouched. */
 static int test_sst_boot_zero_tip_root_skips_check(void)
 {
     struct sst_boot *b = sst_boot_open("zeroroot", 0, -1, false);
@@ -1384,11 +1387,12 @@ static int test_sst_boot_zero_tip_root_skips_check(void)
         memset(b->w->bis[SST_BOOT_WINDOW - 1].hashFinalSaplingRoot.data, 0,
                32);
         boot_sapling_tree_boot_load(&b->ctx, &b->ms, &b->ndb, b->dir);
-        pass = sst_boot_tree_is_inflated(b) && !sst_fail_closed_active();
+        pass = sst_boot_tree_is_inflated(b) && !sst_fail_closed_active() &&
+               blocker_exists(BLOCKER_ID_SAPLING_TIP_ROOT_MISSING);
     }
     sst_boot_close(b);
-    return sst_boot_report("a zero tip root skips the boot check and leaves "
-                           "the loaded tree as it was", pass);
+    return sst_boot_report("a zero tip root names a blocker and leaves the "
+                           "loaded tree as it was", pass);
 }
 
 static int test_sst_boot_sapling_tree_repair(void)

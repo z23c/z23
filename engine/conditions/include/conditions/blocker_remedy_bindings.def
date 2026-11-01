@@ -499,6 +499,7 @@ ZCL_BLOCKER_REMEDY(service.declaration_diverged,                OWNER)
  *     without the seed, and inventing one would mean holding the master
  *     identity in the node. ─────────────────────────────────────────────── */
 ZCL_BLOCKER_REMEDY(zcode_dht.own_delegation_expired,            OWNER)
+ZCL_BLOCKER_REMEDY(sapling_tree.tip_root_missing,                OWNER)
 
 /*   tor.start_failed — the embedded Tor thread is not running while this boot
  *     asked for an onion (engine/composition/src/boot_tor_watch.c). The

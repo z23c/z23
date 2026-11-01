@@ -9,6 +9,8 @@
 #include "controllers/wallet_shielded_internal.h"
 #include "jobs/reducer_frontier.h"
 #include "wallet/wallet_lock.h"
+#include "services/sapling_tip_root_blocker.h"
+#include "util/blocker.h"
 
 /* Select notes until the running total covers target; returns the running
  * total through notes_total and the selected count through num_sel_notes. */
@@ -65,6 +67,22 @@ static int z_sendmany_shielded_load_witnesses(
             free(wblob);
         }
         return 0;
+}
+
+enum { Z_SENDMANY_WITNESS_TREE_UNVERIFIED = 4 };
+
+/* The refusal text for a witness load status, NULL when the load succeeded. */
+static const char *z_sendmany_shielded_witness_refusal(int wstat)
+{
+    switch (wstat) {
+    case 1: return "Witness not available (run rescanwitnesses)";
+    case 2: return "Witness stale (run rescanwitnesses)";
+    case 3: return "Failed to deserialize witness";
+    case Z_SENDMANY_WITNESS_TREE_UNVERIFIED:
+        return "Shielded spends are refused: the block index has no Sapling "
+               "root at the tip";
+    default: return NULL;
+    }
 }
 
 /* Return the index of the first witness (from 1) whose root differs from the
@@ -354,25 +372,21 @@ static bool z_sendmany_shielded_with_key(
         int authoritative_tip = reducer_frontier_external_tip_height();
         size_t i = 0;
         int wheight = 0;
-        int wstat = z_sendmany_shielded_load_witnesses(
-            ctx, selected_notes, num_sel_notes, witnesses, &dummy_tree,
-            authoritative_tip, &i, &wheight);
-        if (wstat == 1) {
-            json_set_str(result, "Witness not available (run rescanwitnesses)");
+        /* A boot check endpoint without a Sapling root leaves the loaded tree
+         * and every witness derived from it unverified: refuse before any
+         * witness work. */
+        int wstat = blocker_exists(BLOCKER_ID_SAPLING_TIP_ROOT_MISSING)
+            ? Z_SENDMANY_WITNESS_TREE_UNVERIFIED
+            : z_sendmany_shielded_load_witnesses(
+                  ctx, selected_notes, num_sel_notes, witnesses, &dummy_tree,
+                  authoritative_tip, &i, &wheight);
+        const char *wrefusal = z_sendmany_shielded_witness_refusal(wstat);
+        if (wrefusal) {
+            json_set_str(result, wrefusal);
             LOG_FAIL("wallet_shielded", // wallet-log-ok:note-index-label
-                     "z_sendmany: witness not available for note %zu", i);
-        }
-        if (wstat == 2) {
-            json_set_str(result,
-                         "Witness stale (run rescanwitnesses)");
-            LOG_FAIL("wallet_shielded", // wallet-log-ok:note-index-label
-                     "z_sendmany: witness height=%d authoritative_tip=%d note=%zu",
-                     wheight, authoritative_tip, i);
-        }
-        if (wstat == 3) {
-            json_set_str(result, "Failed to deserialize witness");
-            LOG_FAIL("wallet_shielded", // wallet-log-ok:note-index-label
-                     "z_sendmany: witness deserialize failed for note %zu", i);
+                     "z_sendmany: witness refused status=%d height=%d "
+                     "authoritative_tip=%d note=%zu",
+                     wstat, wheight, authoritative_tip, i);
         }
 
         /* Anchor = witness root at chain tip.

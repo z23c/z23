@@ -363,3 +363,14 @@ ZCL_BLOCKER_DECISION(zcode_dht.own_delegation_expired,
     "There is deliberately no option that keeps serving under the expired "
     "document. An expired delegation is exactly the claim other nodes are "
     "supposed to reject, and honouring it locally would only hide that.")
+ZCL_BLOCKER_DECISION(sapling_tree.tip_root_missing,
+    "The block index has no Sapling root at the boot check endpoint, which a "
+    "validated chain cannot produce, so the loaded Sapling tree and every "
+    "witness derived from it cannot be verified. A person must choose how to "
+    "restore the index. OPTION A - restart so the block index is rebuilt from "
+    "the block files and headers, then confirm the blocker is gone; cost is a "
+    "restart and a rebuild. OPTION B - leave the node running: consensus and "
+    "relay are unaffected, but the wallet refuses shielded spends until the "
+    "blocker clears, because a spend anchored to an unverified tree could be "
+    "rejected by the network or reveal the wallet's notes. There is "
+    "deliberately no automatic repair of the index.")
