@@ -170,7 +170,10 @@ static bool feed_chunks(struct noise_transport *t, const uint8_t *in, size_t n,
                   pl == 0;
         uint8_t *grown = ok ? realloc(*wire, *wlen + wl + 1) : NULL;
         if (grown) {
-            memcpy(grown + *wlen, w, wl);
+            /* A feed that produced no reply leaves w NULL; memcpy's source
+             * must not be NULL even for zero bytes. */
+            if (wl)
+                memcpy(grown + *wlen, w, wl);
             *wire = grown;
             *wlen += wl;
         }
