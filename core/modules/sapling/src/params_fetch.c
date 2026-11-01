@@ -254,6 +254,85 @@ bool zcl_param_manifest_verify(int file_idx, const uint8_t *leaves,
 
 /* ── Streaming recomputation from a real file ───────────────────────── */
 
+/* True when the snapshot fails or the size is 0 or above the file maximum. */
+static bool param_recompute_snapshot_rejected(
+    const struct platform_positioned_file *file,
+    struct platform_positioned_file_snapshot *before)
+{
+    memset(before, 0, sizeof(*before));
+    return !platform_positioned_file_snapshot(file, before) ||
+           before->size == 0 || before->size > ZCL_PARAM_MAX_FILE_BYTES;
+}
+
+/* Hash each chunk into whole and leaves; false on a non-positive read or a full leaf table. */
+static inline bool param_recompute_absorb_chunks(
+    const struct platform_positioned_file *file,
+    uint64_t file_size,
+    uint8_t *buf,
+    uint8_t *leaves,
+    struct sha256_ctx *whole,
+    uint64_t *total,
+    uint32_t *nleaves)
+{
+    *total = 0;
+    *nleaves = 0;
+    while (*total < file_size) {
+        uint64_t remaining = file_size - *total;
+        size_t wanted = remaining < ZCL_PARAM_CHUNK_BYTES
+                            ? (size_t)remaining
+                            : ZCL_PARAM_CHUNK_BYTES;
+        size_t filled = 0;
+        while (filled < wanted) {
+            int64_t got = platform_positioned_file_read(
+                file, buf + filled, wanted - filled, *total + filled);
+            if (got <= 0)
+                return false;
+            filled += (size_t)got;
+        }
+        *total += filled;
+        if (*nleaves >= ZCL_PARAM_MAX_CHUNKS)
+            return false;
+        sha256_write(whole, (const unsigned char *)buf, filled);
+        zcl_param_leaf_hash(buf, filled,
+                            leaves + (size_t)(*nleaves) * ZCL_PARAM_HASH_BYTES);
+        (*nleaves)++;
+    }
+    return true;
+}
+
+/* True when no leaf was stored, the snapshot fails, or an identity field differs. */
+static bool param_recompute_snapshot_drifted(
+    const struct platform_positioned_file *file,
+    const struct platform_positioned_file_snapshot *before,
+    uint32_t nleaves)
+{
+    struct platform_positioned_file_snapshot after;
+    return nleaves == 0 || !platform_positioned_file_snapshot(file, &after) ||
+           before->size != after.size || before->volume != after.volume ||
+           before->file_low != after.file_low ||
+           before->file_high != after.file_high ||
+           before->modified_seconds != after.modified_seconds ||
+           before->modified_nanoseconds != after.modified_nanoseconds ||
+           before->changed_seconds != after.changed_seconds ||
+           before->changed_nanoseconds != after.changed_nanoseconds;
+}
+
+/* Store total when requested and finalize the whole-file hash, using scratch when out_sha256 is absent. */
+static void param_recompute_emit_digest(uint64_t total,
+                                        struct sha256_ctx *whole,
+                                        uint64_t *out_bytes,
+                                        uint8_t out_sha256[ZCL_PARAM_HASH_BYTES])
+{
+    if (out_bytes)
+        *out_bytes = total;
+    if (out_sha256)
+        sha256_finalize(whole, out_sha256);
+    else {
+        uint8_t scratch[ZCL_PARAM_HASH_BYTES];
+        sha256_finalize(whole, scratch);
+    }
+}
+
 bool zcl_param_pin_recompute_from_file(const char *path, uint64_t *out_bytes,
                                        uint8_t out_sha256[ZCL_PARAM_HASH_BYTES],
                                        uint8_t out_root[ZCL_PARAM_HASH_BYTES])
@@ -262,12 +341,11 @@ bool zcl_param_pin_recompute_from_file(const char *path, uint64_t *out_bytes,
         return false;
 
     struct platform_positioned_file file;
-    struct platform_positioned_file_snapshot before, after;
+    struct platform_positioned_file_snapshot before;
     platform_positioned_file_init(&file);
     if (!platform_positioned_file_open(&file, path))
         return false;
-    if (!platform_positioned_file_snapshot(&file, &before) ||
-        before.size == 0 || before.size > ZCL_PARAM_MAX_FILE_BYTES) {
+    if (param_recompute_snapshot_rejected(&file, &before)) {
         platform_positioned_file_close(&file);
         return false;
     }
@@ -283,45 +361,13 @@ bool zcl_param_pin_recompute_from_file(const char *path, uint64_t *out_bytes,
     sha256_init(&whole);
     uint64_t total = 0;
     uint32_t nleaves = 0;
-
-    while (total < before.size) {
-        uint64_t remaining = before.size - total;
-        size_t wanted = remaining < ZCL_PARAM_CHUNK_BYTES
-                            ? (size_t)remaining
-                            : ZCL_PARAM_CHUNK_BYTES;
-        size_t filled = 0;
-        while (filled < wanted) {
-            int64_t got = platform_positioned_file_read(
-                &file, buf + filled, wanted - filled, total + filled);
-            if (got <= 0)
-                goto done;
-            filled += (size_t)got;
-        }
-        total += filled;
-        if (nleaves >= ZCL_PARAM_MAX_CHUNKS)
-            goto done;
-        sha256_write(&whole, (const unsigned char *)buf, filled);
-        zcl_param_leaf_hash(buf, filled,
-                            leaves + (size_t)nleaves * ZCL_PARAM_HASH_BYTES);
-        nleaves++;
-    }
-    if (nleaves == 0 || !platform_positioned_file_snapshot(&file, &after) ||
-        before.size != after.size || before.volume != after.volume ||
-        before.file_low != after.file_low || before.file_high != after.file_high ||
-        before.modified_seconds != after.modified_seconds ||
-        before.modified_nanoseconds != after.modified_nanoseconds ||
-        before.changed_seconds != after.changed_seconds ||
-        before.changed_nanoseconds != after.changed_nanoseconds)
+    if (!param_recompute_absorb_chunks(&file, before.size, buf, leaves, &whole,
+                                       &total, &nleaves))
+        goto done;
+    if (param_recompute_snapshot_drifted(&file, &before, nleaves))
         goto done;
 
-    if (out_bytes)
-        *out_bytes = total;
-    if (out_sha256)
-        sha256_finalize(&whole, out_sha256);
-    else {
-        uint8_t scratch[ZCL_PARAM_HASH_BYTES];
-        sha256_finalize(&whole, scratch);
-    }
+    param_recompute_emit_digest(total, &whole, out_bytes, out_sha256);
     if (out_root && !zcl_param_merkle_root(leaves, nleaves, out_root))
         goto done;
     ok = true;
