@@ -1001,6 +1001,7 @@ int test_tip_finalize_post_step(void);
 int test_reducer_frontier(void);
 int test_always_sync_chaos(void);
 int test_waitforheight_provable(void);
+int test_rpc_chaininfo_nodb(void);
 int test_refold_progress_floor(void);
 int test_refold_cadence(void);
 int test_refold_rate_verdict(void);

@@ -29,6 +29,7 @@
 #include "util/safe_alloc.h"
 #include "validation/main_state.h"
 
+#include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -68,9 +69,25 @@ static bool rpc_provable_hash_by_height(struct blockchain_context *ctx,
     }
 
     if (ctx->node_db && ctx->node_db->open) {
+        /* node.db fallback, bounded: the connection mutex can be held for
+         * many seconds by a stuck disk read. Try-enter it (and keep it across
+         * the query so the query cannot block after the check); if it stays
+         * busy, report the hash as unresolved rather than queueing an RPC
+         * worker behind it. Never substitutes a different hash. */
+        sqlite3_mutex *mu = sqlite3_db_mutex(ctx->node_db->db);
+        bool held = false;
+        for (int i = 0; mu && i < 5 && !held; i++) {
+            held = sqlite3_mutex_try(mu) == SQLITE_OK;
+            if (!held)
+                platform_sleep_ms(10);
+        }
+        if (!held)
+            return false;
         struct db_block b;
         memset(&b, 0, sizeof(b));
-        if (db_block_find_by_height(ctx->node_db, height, &b)) {
+        bool found = db_block_find_by_height(ctx->node_db, height, &b);
+        sqlite3_mutex_leave(mu);
+        if (found) {
             struct uint256 hash;
             memcpy(hash.data, b.hash, sizeof(hash.data));
             uint256_get_hex(&hash, out_hex);
