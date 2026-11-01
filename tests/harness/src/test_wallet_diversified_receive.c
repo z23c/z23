@@ -1812,6 +1812,7 @@ int test_simnet_wallet_diversified_send(void)
     struct simnet s;
     struct incremental_merkle_tree tree;
     struct main_state ms;
+    struct block_index tip_bi;
     bool sim_open = false, ms_open = false, trusted = false;
     memset(&f, 0, sizeof(f));
     memset(&s, 0, sizeof(s));
@@ -1877,6 +1878,15 @@ int test_simnet_wallet_diversified_send(void)
         trusted = true;
         main_state_init(&ms);
         ms_open = true;
+        /* The send checks its anchor against the Sapling root the chain's own
+         * header commits to at the tip: the header here carries the wallet's
+         * tree root. */
+        block_index_init(&tip_bi);
+        tip_bi.nHeight = height;
+        struct uint256 tip_root;
+        incremental_tree_root(&tree, &tip_root);
+        tip_bi.hashFinalSaplingRoot = tip_root;
+        ASSERT(active_chain_install_tip_slot(&ms.chain_active, &tip_bi));
         f.w->best_block_height = height;
         rpc_wallet_set_state(f.w, &ms, f.dir, &f.ws, NULL, NULL);
         wallet_rpc_context_set_node_db(&f.ndb);
