@@ -16,7 +16,6 @@ contexts/wallet/domain/src/mnemonic.c:mnemonic_decode_core:18
 contexts/wallet/modules/wallet/src/wallet_sqlite.c:wallet_sqlite_flush_scope_r:65
 contexts/wallet/services/src/wallet_backup_service.c:wbs_hash_regular_file:23
 contexts/wallet/services/src/wallet_recovery_service.c:wallet_recovery_run:41
-core/chainparams/src/pow.c:GetNextWorkRequired:21
 core/consensus/src/coinbase.c:domain_consensus_coinbase_build:16
 core/consensus/src/sapling_structural.c:domain_consensus_check_transaction_sapling_structural:27
 core/consensus/src/script_interp.c:domain_consensus_eval_script:260

@@ -36,6 +36,58 @@ unsigned int IncreaseDifficultyBy(unsigned int nBits, int64_t multiplier,
     return out;
 }
 
+/* True when the upgrade-fork difficulty window applies at nHeight. */
+static bool pow_in_upgrade_difficulty_window(const struct consensus_params *params,
+                                            int nHeight)
+{
+    return params->scaleDifficultyAtUpgradeFork &&
+           ((nHeight >= params->vUpgrades[UPGRADE_DIFFADJ].nActivationHeight &&
+             nHeight < params->vUpgrades[UPGRADE_DIFFADJ].nActivationHeight + params->nPowAveragingWindow) ||
+            (nHeight >= params->vUpgrades[UPGRADE_BUTTERCUP].nActivationHeight &&
+             nHeight < params->vUpgrades[UPGRADE_BUTTERCUP].nActivationHeight + params->nPowAveragingWindow));
+}
+
+/* On a lateness-ramp match, sets *out_work to that target and returns true. */
+static bool pow_upgrade_fork_ramp_work(const struct block_index *pindexLast,
+                                      const struct block_header *pblock,
+                                      const struct consensus_params *params,
+                                      int nHeight,
+                                      unsigned int nProofOfWorkLimit,
+                                      unsigned int *out_work)
+{
+    *out_work = 0;
+    int64_t spacing = consensus_pow_target_spacing(params, nHeight);
+    if (pblock && block_header_get_time(pblock) >
+        block_index_get_time(pindexLast) + spacing * 12) {
+        *out_work = nProofOfWorkLimit;
+        return true;
+    } else if (pblock && block_header_get_time(pblock) >
+               block_index_get_time(pindexLast) + spacing * 6) {
+        *out_work = IncreaseDifficultyBy(nProofOfWorkLimit, 128, params);
+        return true;
+    } else if (pblock && block_header_get_time(pblock) >
+               block_index_get_time(pindexLast) + spacing * 2) {
+        *out_work = IncreaseDifficultyBy(nProofOfWorkLimit, 256, params);
+        return true;
+    }
+    return false;
+}
+
+/* True when min-difficulty blocks are enabled and this block is over 6 spacings late. */
+static bool pow_min_difficulty_blocks_allow_limit(const struct block_index *pindexLast,
+                                                 const struct block_header *pblock,
+                                                 const struct consensus_params *params)
+{
+    if (params->nPowAllowMinDifficultyEnabled &&
+        pindexLast->nHeight >= params->nPowAllowMinDifficultyBlocksAfterHeight) {
+        int64_t spacing = consensus_pow_target_spacing(params, pindexLast->nHeight + 1);
+        if (pblock && block_header_get_time(pblock) >
+            block_index_get_time(pindexLast) + spacing * 6)
+            return true;
+    }
+    return false;
+}
+
 unsigned int GetNextWorkRequired(const struct block_index *pindexLast,
                                  const struct block_header *pblock,
                                  const struct consensus_params *params)
@@ -49,32 +101,15 @@ unsigned int GetNextWorkRequired(const struct block_index *pindexLast,
 
     int nHeight = pindexLast->nHeight + 1;
 
-    if (params->scaleDifficultyAtUpgradeFork &&
-        ((nHeight >= params->vUpgrades[UPGRADE_DIFFADJ].nActivationHeight &&
-          nHeight < params->vUpgrades[UPGRADE_DIFFADJ].nActivationHeight + params->nPowAveragingWindow) ||
-         (nHeight >= params->vUpgrades[UPGRADE_BUTTERCUP].nActivationHeight &&
-          nHeight < params->vUpgrades[UPGRADE_BUTTERCUP].nActivationHeight + params->nPowAveragingWindow))) {
-
-        int64_t spacing = consensus_pow_target_spacing(params, nHeight);
-        if (pblock && block_header_get_time(pblock) >
-            block_index_get_time(pindexLast) + spacing * 12) {
-            return nProofOfWorkLimit;
-        } else if (pblock && block_header_get_time(pblock) >
-                   block_index_get_time(pindexLast) + spacing * 6) {
-            return IncreaseDifficultyBy(nProofOfWorkLimit, 128, params);
-        } else if (pblock && block_header_get_time(pblock) >
-                   block_index_get_time(pindexLast) + spacing * 2) {
-            return IncreaseDifficultyBy(nProofOfWorkLimit, 256, params);
-        }
+    if (pow_in_upgrade_difficulty_window(params, nHeight)) {
+        unsigned int scaled = 0;
+        if (pow_upgrade_fork_ramp_work(pindexLast, pblock, params, nHeight,
+                                      nProofOfWorkLimit, &scaled))
+            return scaled;
     }
 
-    if (params->nPowAllowMinDifficultyEnabled &&
-        pindexLast->nHeight >= params->nPowAllowMinDifficultyBlocksAfterHeight) {
-        int64_t spacing = consensus_pow_target_spacing(params, pindexLast->nHeight + 1);
-        if (pblock && block_header_get_time(pblock) >
-            block_index_get_time(pindexLast) + spacing * 6)
-            return nProofOfWorkLimit;
-    }
+    if (pow_min_difficulty_blocks_allow_limit(pindexLast, pblock, params))
+        return nProofOfWorkLimit;
 
     /* Validate averaging window is positive — zero would cause division by zero */
     if (params->nPowAveragingWindow <= 0)
