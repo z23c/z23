@@ -625,12 +625,17 @@ static void contest_set(struct contest *c, _Atomic int *flag)
     pthread_mutex_unlock(&c->mu);
 }
 
-/* A failed clock call is a test failure, never silently ignored: the caller's
- * time-dependent check then fails with its own name, after this message. */
+/* A failed clock call is a test failure, never silently ignored: it is
+ * counted here and the group fails on it (test_stage_dump_trylock below),
+ * even where a caller, such as a watchdog wait whose flag was already set,
+ * could otherwise go on as if nothing happened. */
+static _Atomic int g_sdt_clock_failures;
+
 static bool sdt_clock(clockid_t id, struct timespec *ts)
 {
     if (clock_gettime(id, ts) == 0)
         return true;
+    atomic_fetch_add(&g_sdt_clock_failures, 1);
     printf("stage_dump_trylock: clock_gettime(%d) FAILED\n", (int)id);
     return false;
 }
@@ -996,6 +1001,12 @@ int test_stage_dump_trylock(void)
     failures += case_chain_evidence_ingest_contention();
     failures += case_bounded_snapshot_ndb_mutex();
     failures += case_dumper_ndb_mutex_busy();
+    int clock_failures = atomic_load(&g_sdt_clock_failures);
+    if (clock_failures != 0) {
+        printf("test_stage_dump_trylock: %d clock_gettime failure(s); "
+               "the timed checks cannot be trusted\n", clock_failures);
+        failures += clock_failures;
+    }
     if (failures == 0)
         printf("test_stage_dump_trylock: ALL PASSED\n");
     else
