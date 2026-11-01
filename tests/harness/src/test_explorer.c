@@ -1327,6 +1327,8 @@ static int ex_case_17(void)
     return failures;
 }
 
+/* ── Supply calculation edge cases ───────────────────── */
+
 static int ex_case_18(void)
 {
     int failures = 0;
