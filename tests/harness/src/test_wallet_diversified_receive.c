@@ -1015,6 +1015,86 @@ static int test_bulk_entry_syncs_first(void)
     return failures;
 }
 
+/* A bulk pass whose log could not be fully folded stays at synchronous=NORMAL
+ * and still succeeds, so catch-up and import are never refused; once the
+ * obstacle is gone, the next pass folds and runs unsynced. */
+static bool wdr_bulk_stays_normal(struct wdr *f)
+{
+    int normal = wdr_sync_level(f);
+    bool ok = node_db_ibd_turbo_mode(&f->ndb) &&
+              wdr_sync_level(f) == normal;
+    char a[128];
+    ok = ok && wdr_receive(f, a, sizeof(a));
+    return node_db_normal_mode(&f->ndb) && ok;
+}
+
+static bool wdr_bulk_goes_off(struct wdr *f)
+{
+    bool ok = node_db_ibd_turbo_mode(&f->ndb) && wdr_sync_level(f) == 0;
+    return node_db_normal_mode(&f->ndb) && ok;
+}
+
+/* A second connection holds a snapshot from before the receive committed, so
+ * the fold stops short of the index row. */
+static int test_bulk_entry_reader_holds_log(void)
+{
+    int failures = 0;
+    struct wdr f;
+    memset(&f, 0, sizeof(f));
+    sqlite3 *reader = NULL;
+    TEST("wallet_diversified_receive: a held snapshot keeps bulk mode at NORMAL") {
+        ASSERT(wdr_restore(&f));
+        wdr_use_start(0x7373ULL);
+        char dbpath[320], a[128];
+        snprintf(dbpath, sizeof(dbpath), "%s/node.db", f.dir);
+        ASSERT(sqlite3_exec(f.ndb.db, "PRAGMA wal_checkpoint(TRUNCATE)", NULL,
+                            NULL, NULL) == SQLITE_OK);
+        ASSERT(sqlite3_open_v2(dbpath, &reader, SQLITE_OPEN_READONLY, NULL) ==
+               SQLITE_OK);
+        ASSERT(sqlite3_exec(reader, "BEGIN; SELECT count(*) FROM sqlite_master",
+                            NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(wdr_receive(&f, a, sizeof(a)));
+        ASSERT(wdr_bulk_stays_normal(&f));
+        ASSERT(sqlite3_exec(reader, "COMMIT", NULL, NULL, NULL) == SQLITE_OK);
+        ASSERT(wdr_bulk_goes_off(&f));
+        PASS();
+    } _test_next:;
+    if (reader)
+        sqlite3_close(reader);
+    wdr_use_system_rng();
+    wdr_teardown(&f);
+    return failures;
+}
+
+/* A statement stepped and not reset on the shared connection makes the
+ * checkpoint report SQLITE_LOCKED; catch-up still gets a success. */
+static int test_bulk_entry_locked_checkpoint(void)
+{
+    int failures = 0;
+    struct wdr f;
+    memset(&f, 0, sizeof(f));
+    sqlite3_stmt *held = NULL;
+    TEST("wallet_diversified_receive: a locked checkpoint does not stop bulk mode") {
+        ASSERT(wdr_restore(&f));
+        wdr_use_start(0x7474ULL);
+        char a[128];
+        ASSERT(wdr_receive(&f, a, sizeof(a)));
+        ASSERT(sqlite3_prepare_v2(f.ndb.db, "SELECT name FROM sqlite_master",
+                                  -1, &held, NULL) == SQLITE_OK);
+        ASSERT(sqlite3_step(held) == SQLITE_ROW);
+        ASSERT(wdr_bulk_stays_normal(&f));
+        ASSERT(sqlite3_finalize(held) == SQLITE_OK);
+        held = NULL;
+        ASSERT(wdr_bulk_goes_off(&f));
+        PASS();
+    } _test_next:;
+    if (held)
+        sqlite3_finalize(held);
+    wdr_use_system_rng();
+    wdr_teardown(&f);
+    return failures;
+}
+
 #define WDR_THREADS 2
 #define WDR_PER_THREAD 20
 
@@ -1295,6 +1375,8 @@ int test_wallet_diversified_receive(void)
     failures += test_random_failure_refuses();
     failures += test_index_synced_before_return();
     failures += test_bulk_entry_syncs_first();
+    failures += test_bulk_entry_reader_holds_log();
+    failures += test_bulk_entry_locked_checkpoint();
     failures += test_concurrent_receives();
     failures += test_index_exhaustion();
     failures += test_issued_address_balance();

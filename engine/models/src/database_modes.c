@@ -240,16 +240,38 @@ bool node_db_rebuild_indexes(struct node_db *ndb)
     return all_ok;
 }
 
+#define TURBO_FOLD_ATTEMPTS 3
+#define TURBO_FOLD_RETRY_MS 50
+
+/* Fold the whole log into the database and sync it, at the connection's
+ * current level, before synchronous=OFF. Rows committed in normal mode may
+ * still be only in the log; the first checkpoint under OFF would fold them
+ * into the database without a sync and reset the log, so a power loss could
+ * take back a row that was reported durable (a receive-index record, for one).
+ * A reader holding an old snapshot, or a statement stepped and not reset on
+ * this connection, leaves the fold partial or refused; it is retried briefly,
+ * and when it stays incomplete the bulk pass keeps synchronous=NORMAL: slower,
+ * durable, and never a reason to stop catch-up or an import. */
+static bool turbo_fold_log(struct node_db *ndb)
+{
+    struct wal_ckpt_record rec;
+    for (int attempt = 1; attempt <= TURBO_FOLD_ATTEMPTS; attempt++) {
+        if (node_db_wal_checkpoint_result(ndb, &rec) &&
+            rec.outcome == WAL_CKPT_DRAINED)
+            return true;
+        if (attempt < TURBO_FOLD_ATTEMPTS)
+            platform_sleep_ms(TURBO_FOLD_RETRY_MS);
+    }
+    LOG_WARN("db", "[db] ibd_turbo_mode: the log was not fully folded "
+             "(outcome=%s rc=%d wal_frames=%lld moved=%lld); this bulk pass "
+             "keeps synchronous=NORMAL", wal_ckpt_outcome_name(rec.outcome),
+             rec.rc, (long long)rec.log_frames, (long long)rec.ckpt_frames);
+    return false;
+}
+
 bool node_db_ibd_turbo_mode(struct node_db *ndb)
 {
     if (!ndb || !ndb->open) return false;
-    /* Fold and sync the log at the connection's current level before
-     * synchronous=OFF. Rows committed in normal mode may still be only in the
-     * log; the first checkpoint under OFF would fold them into the database
-     * without a sync and reset the log, so a power loss could take back a
-     * row that was reported durable (a receive-index record, for one). */
-    if (!node_db_wal_checkpoint(ndb))
-        return false;
     /* Turbo-mode PRAGMAs are performance optimisations, not integrity
      * invariants — if any of them fail, fall back to the safe
      * defaults and carry on, never leaving a partial-turbo state (e.g.
@@ -263,7 +285,6 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb)
      * enough to survive a slow disk, and journal_size_limit is what actually
      * returns the .wal file's blocks to the filesystem afterwards. */
     static const char *const turbo_pragmas[] = {
-        "PRAGMA synchronous=OFF",
         "PRAGMA wal_autocheckpoint="
             ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_WAL_AUTOCKPT_PAGES_BULK),
         "PRAGMA journal_size_limit="
@@ -280,6 +301,10 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb)
                             "ibd_turbo_mode pragma") != SQLITE_OK)
             turbo_ok = false;
     }
+    if (turbo_fold_log(ndb) &&
+        db_exec_checked(ndb->db, "PRAGMA synchronous=OFF",
+                        "ibd_turbo_mode synchronous") != SQLITE_OK)
+        turbo_ok = false;
     sqlite3_busy_timeout(ndb->db, 10000);
 
     if (!turbo_ok) {
