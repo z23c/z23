@@ -70,9 +70,12 @@ void storage_housekeeping_sweep(const char *datadir);
 /* Launch/stop the periodic thread. start() refuses, with a named zcl_result,
  * a NULL/empty datadir or one that does not exist (a sweeper with nothing to
  * bound is a misconfiguration, not a degraded mode), and refuses while a
- * thread is running or not yet joined. The first sweep runs on the new
- * thread at once, never before start() returns, so a sweep blocked on a
- * storage lock cannot hold the READY transition. stop() joins the thread,
+ * thread is running or not yet joined. The first sweep is due at once on
+ * the new thread, never on the caller's, so a sweep blocked on a storage
+ * lock cannot hold the READY transition; start() does not wait for it, so a
+ * sweep may or may not have run when it returns. A stop() that arrives before
+ * the thread begins that sweep ends the thread without it (the bounds are
+ * datadir-size bounds, applied by the next start). stop() joins the thread,
  * so no sweep outlives it; it is a no-op when nothing was started. */
 struct zcl_result storage_housekeeping_start(const char *datadir);
 void storage_housekeeping_stop(void);
