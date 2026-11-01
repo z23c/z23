@@ -1021,6 +1021,46 @@ static bool hc_persisted_tip(struct node_db *ndb)
     return node_db_state_get_int(ndb, "cec.active_tip_height", &h) && h == 7;
 }
 
+/* Phase 3: shutdown with a run parked behind node.db. stop reports it (not
+ * drained) inside its bound, so shutdown keeps node.db open; it drains once
+ * node.db frees; a stopped helper starts no new run; resume re-arms it. */
+static int hc_shutdown_phase(struct node_db *ndb, struct ndb_contest *n)
+{
+    int failures = 0;
+    pthread_t th;
+    contest_reset(&n->c);
+    int r3 = pthread_create(&th, NULL, ndb_holder_thread, n);
+    SD_CHECK("hcbusy: shutdown-phase holder starts", r3 == 0);
+    if (r3 == 0) {
+        (void)contest_wait(&n->c, &n->c.csr_held, 10);
+        SD_CHECK("hcbusy: a run requested while node.db is owned stays pending",
+                 chain_evidence_maintain_bounded(ndb, NULL, 50) ==
+                     CEC_MAINT_PENDING);
+        struct timespec t0;
+        bool have_t0 = sdt_clock(CLOCK_MONOTONIC, &t0);
+        bool drained = chain_evidence_maintain_stop(200);
+        long ms = have_t0 ? cev_ms_since(&t0) : -1;
+        SD_CHECK("hcbusy: shutdown stop reports the parked run, inside its bound",
+                 !drained && ms >= 0 && ms < CONTEST_BOUND_MS);
+        contest_set(&n->c, &n->c.release_h);
+        pthread_join(th, NULL);
+        SD_CHECK("hcbusy: stop drains once node.db frees",
+                 chain_evidence_maintain_stop(10000));
+        have_t0 = sdt_clock(CLOCK_MONOTONIC, &t0);
+        enum cec_maint_result after = chain_evidence_maintain_bounded(
+            ndb, NULL, 5000);
+        ms = have_t0 ? cev_ms_since(&t0) : -1;
+        SD_CHECK("hcbusy: a stopped helper starts no new run",
+                 after == CEC_MAINT_PENDING && ms >= 0 && ms < 1000);
+    }
+    chain_evidence_maintain_resume();
+    SD_CHECK("hcbusy: resume re-arms the helper",
+             chain_evidence_maintain_bounded(ndb, NULL, 10000) ==
+                 CEC_MAINT_DONE);
+    chain_evidence_maintain_quiesce();
+    return failures;
+}
+
 static int case_health_collect_ndb_busy(void)
 {
     int failures = 0;
@@ -1089,40 +1129,7 @@ static int case_health_collect_ndb_busy(void)
     SD_CHECK("hcbusy: next tick writes nothing again (exactly-once persist)",
              sqlite3_total_changes(fx.ndb.db) == before);
 
-    /* Phase 3: shutdown with a run parked behind node.db. stop reports it
-     * (not drained) inside its bound, so shutdown keeps node.db open; it
-     * drains once node.db frees; a stopped helper starts no new run; resume
-     * re-arms it. */
-    contest_reset(&n.c);
-    int r3 = pthread_create(&th, NULL, ndb_holder_thread, &n);
-    SD_CHECK("hcbusy: shutdown-phase holder starts", r3 == 0);
-    if (r3 == 0) {
-        (void)contest_wait(&n.c, &n.c.csr_held, 10);
-        SD_CHECK("hcbusy: a run requested while node.db is owned stays pending",
-                 chain_evidence_maintain_bounded(&fx.ndb, NULL, 50) ==
-                     CEC_MAINT_PENDING);
-        struct timespec t0;
-        bool have_t0 = sdt_clock(CLOCK_MONOTONIC, &t0);
-        bool drained = chain_evidence_maintain_stop(200);
-        long ms = have_t0 ? cev_ms_since(&t0) : -1;
-        SD_CHECK("hcbusy: shutdown stop reports the parked run, inside its bound",
-                 !drained && ms >= 0 && ms < CONTEST_BOUND_MS);
-        contest_set(&n.c, &n.c.release_h);
-        pthread_join(th, NULL);
-        SD_CHECK("hcbusy: stop drains once node.db frees",
-                 chain_evidence_maintain_stop(10000));
-        have_t0 = sdt_clock(CLOCK_MONOTONIC, &t0);
-        enum cec_maint_result after = chain_evidence_maintain_bounded(
-            &fx.ndb, NULL, 5000);
-        ms = have_t0 ? cev_ms_since(&t0) : -1;
-        SD_CHECK("hcbusy: a stopped helper starts no new run",
-                 after == CEC_MAINT_PENDING && ms >= 0 && ms < 1000);
-    }
-    chain_evidence_maintain_resume();
-    SD_CHECK("hcbusy: resume re-arms the helper",
-             chain_evidence_maintain_bounded(&fx.ndb, NULL, 10000) ==
-                 CEC_MAINT_DONE);
-    chain_evidence_maintain_quiesce();
+    failures += hc_shutdown_phase(&fx.ndb, &n);
 
     chain_evidence_pending_tip_test_reset();
     app_runtime_set_current(NULL);
