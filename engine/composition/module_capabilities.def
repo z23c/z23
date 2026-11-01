@@ -392,6 +392,7 @@ ZCL_MODULE_CAPABILITY("engine/services/src/chain_restore_disk_repair.c", CAP_FS_
 ZCL_MODULE_CAPABILITY("engine/services/src/chain_restore_executor.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/chain_restore_repair.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/chain_state_service.c", CAP_CLOCK|CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/services/src/chain_state_snapshot_service.c", CAP_CLOCK, "the bounded csr->lock wait takes an absolute CLOCK_REALTIME deadline")
 ZCL_MODULE_CAPABILITY("engine/services/src/chain_state_validator.c", CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/chain_tip.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/services/src/consensus_reject_index.c", CAP_FS_WRITE, "")

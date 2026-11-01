@@ -644,6 +644,9 @@ ZCL_CAPABILITY_SYMBOL("nanosleep", CAP_CLOCK, "")
 ZCL_CAPABILITY_SYMBOL("pthread_cond_timedwait", CAP_CLOCK,
     "Blocks against a kernel measured deadline, so its outcome depends "
     "on elapsed time rather than only on the predicate.")
+ZCL_CAPABILITY_SYMBOL("pthread_mutex_timedlock", CAP_CLOCK,
+    "Blocks against an absolute kernel measured deadline, so whether it "
+    "acquires depends on elapsed time.")
 ZCL_CAPABILITY_SYMBOL("pthread_timedjoin_np", CAP_CLOCK,
     "Blocks against a kernel measured deadline.")
 ZCL_CAPABILITY_SYMBOL("sem_timedwait", CAP_CLOCK,
