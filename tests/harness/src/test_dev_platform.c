@@ -6699,9 +6699,59 @@ static bool dp_restart_mixed_source_build(const char *root,
     return true;
 }
 
-static bool run_resident_restart_fixture(void)
-{
+struct dp_rr_fx {
     char root[PATH_MAX], cache_rel[PATH_MAX], compiler_rel[PATH_MAX];
+    const char *stage;
+    char why[256];
+    char cwd[PATH_MAX], cache[PATH_MAX], compiler[PATH_MAX], plan[PATH_MAX * 4];
+    char saved_cache[PATH_MAX];
+    char saved_process[32];
+    char saved_force_copy[32];
+    bool had_cache, had_process, had_force_copy;
+    bool ok;
+    const char *changed[1];
+    struct zcl_devloop_restart_build_receipt receipt;
+    struct zcl_devloop_process_result process;
+    char first_build_key[65], first_build_hash[65];
+    struct zcl_devloop_plan proof_plan;
+    char expected_all[4096], expected_now[4096], expected_later[4096];
+    uint32_t expected_total, expected_immediate, expected_deferred;
+    struct zcl_devloop_restart_proof_receipt proof;
+};
+
+static bool dp_rr_paths(struct dp_rr_fx *f)
+{
+    return snprintf(f->root, sizeof(f->root), "test-tmp/dev_resident_restart_%ld",
+                 (long)getpid()) < (int)sizeof(f->root) &&
+        snprintf(f->cache_rel, sizeof(f->cache_rel),
+                 "test-tmp/dev_restart_shared_cache_%ld", (long)getpid()) <
+            (int)sizeof(f->cache_rel) &&
+        snprintf(f->compiler_rel, sizeof(f->compiler_rel),
+                 "test-tmp/dev_restart_fake_cc_%ld.sh", (long)getpid()) <
+            (int)sizeof(f->compiler_rel);
+}
+
+static void dp_rr_save_env(struct dp_rr_fx *f)
+{
+    const char *prior_cache = getenv("ZCL_DEV_ARTIFACT_CACHE");
+    const char *prior_process = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    const char *prior_force_copy =
+        getenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY");
+    f->had_cache = prior_cache && prior_cache[0];
+    f->had_process = prior_process && prior_process[0];
+    f->had_force_copy = prior_force_copy && prior_force_copy[0];
+    if (f->had_cache)
+        (void)snprintf(f->saved_cache, sizeof(f->saved_cache), "%s", prior_cache);
+    if (f->had_process)
+        (void)snprintf(f->saved_process, sizeof(f->saved_process), "%s",
+                       prior_process);
+    if (f->had_force_copy)
+        (void)snprintf(f->saved_force_copy, sizeof(f->saved_force_copy), "%s",
+                       prior_force_copy);
+}
+
+static bool dp_rr_setup_compiler(struct dp_rr_fx *f)
+{
     static const char fake_compiler[] =
         "#!/usr/bin/env bash\n"
         "set -eu\n"
@@ -6780,100 +6830,84 @@ static bool run_resident_restart_fixture(void)
         "  fi\n"
         "  chmod 0700 \"$out\"\n"
         "fi\n";
-    bool ok = false;
-    const char *stage = "fixture setup";
-    char why[256] = {0};
-    char cwd[PATH_MAX], cache[PATH_MAX], compiler[PATH_MAX], plan[PATH_MAX * 4];
-    char saved_cache[PATH_MAX] = {0};
-    char saved_process[32] = {0};
-    char saved_force_copy[32] = {0};
-    const char *prior_cache = getenv("ZCL_DEV_ARTIFACT_CACHE");
-    const char *prior_process = getenv("ZCL_DEVLOOP_TEST_PROCESS");
-    const char *prior_force_copy =
-        getenv("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY");
-    bool had_cache = prior_cache && prior_cache[0];
-    bool had_process = prior_process && prior_process[0];
-    bool had_force_copy = prior_force_copy && prior_force_copy[0];
-    if (snprintf(root, sizeof(root), "test-tmp/dev_resident_restart_%ld",
-                 (long)getpid()) >= (int)sizeof(root) ||
-        snprintf(cache_rel, sizeof(cache_rel),
-                 "test-tmp/dev_restart_shared_cache_%ld", (long)getpid()) >=
-            (int)sizeof(cache_rel) ||
-        snprintf(compiler_rel, sizeof(compiler_rel),
-                 "test-tmp/dev_restart_fake_cc_%ld.sh", (long)getpid()) >=
-            (int)sizeof(compiler_rel))
-        return false;
-    if (had_cache)
-        (void)snprintf(saved_cache, sizeof(saved_cache), "%s", prior_cache);
-    if (had_process)
-        (void)snprintf(saved_process, sizeof(saved_process), "%s",
-                       prior_process);
-    if (had_force_copy)
-        (void)snprintf(saved_force_copy, sizeof(saved_force_copy), "%s",
-                       prior_force_copy);
-    test_rm_rf_recursive(root);
-    test_rm_rf_recursive(cache_rel);
-    (void)unlink(compiler_rel);
-    if (!getcwd(cwd, sizeof(cwd)) ||
-        snprintf(cache, sizeof(cache), "%s/%s", cwd, cache_rel) >=
-            (int)sizeof(cache) ||
-        snprintf(compiler, sizeof(compiler), "%s/%s", cwd, compiler_rel) >=
-            (int)sizeof(compiler) ||
-        !dp_mk_write(".", compiler_rel, fake_compiler) ||
-        chmod(compiler_rel, 0700) != 0 ||
-        !dp_mk_write(root, "Makefile", "# fixture\n") ||
-        !dp_restart_write_unit(root, "tools/dev/restart_fixture.c",
+    test_rm_rf_recursive(f->root);
+    test_rm_rf_recursive(f->cache_rel);
+    (void)unlink(f->compiler_rel);
+    return getcwd(f->cwd, sizeof(f->cwd)) &&
+        snprintf(f->cache, sizeof(f->cache), "%s/%s", f->cwd, f->cache_rel) <
+            (int)sizeof(f->cache) &&
+        snprintf(f->compiler, sizeof(f->compiler), "%s/%s", f->cwd, f->compiler_rel) <
+            (int)sizeof(f->compiler) &&
+        dp_mk_write(".", f->compiler_rel, fake_compiler) &&
+        chmod(f->compiler_rel, 0700) == 0 &&
+        dp_mk_write(f->root, "Makefile", "# fixture\n");
+}
+
+static bool dp_rr_setup_units(struct dp_rr_fx *f)
+{
+    return dp_restart_write_unit(f->root, "tools/dev/restart_fixture.c",
                                "int restart_fixture(void) { return 7; }\n",
-                               "tools/dev/restart_fixture.h") ||
-        !dp_restart_write_unit(root, "tools/dev/restart_second.c",
+                               "tools/dev/restart_fixture.h") &&
+        dp_restart_write_unit(f->root, "tools/dev/restart_second.c",
                                "int restart_second(void) { return 8; }\n",
-                               "tools/dev/restart_second.h") ||
-        !dp_restart_write_unit(
-            root, "tests/harness/src/restart_test_only.c",
+                               "tools/dev/restart_second.h") &&
+        dp_restart_write_unit(
+            f->root, "tests/harness/src/restart_test_only.c",
             "int restart_test_only(void) { return 9; }\n",
-            "tests/harness/src/restart_test_only.h") ||
-        !dp_restart_write_unit(root, "tools/command/native_code_command.c",
+            "tests/harness/src/restart_test_only.h") &&
+        dp_restart_write_unit(f->root, "tools/command/native_code_command.c",
                                "int native_code_fixture(void) { return 23; }\n",
-                               "tools/command/native_code_command.h") ||
-        !dp_restart_write_unit(
-            root, "platform/modules/util/src/clientversion.c",
+                               "tools/command/native_code_command.h") &&
+        dp_restart_write_unit(
+            f->root, "platform/modules/util/src/clientversion.c",
             "const char *resident_identity_fixture(void) { return \"identity\"; }\n",
-            "platform/modules/util/src/clientversion.h") ||
-        !dp_mk_write(root,
+            "platform/modules/util/src/clientversion.h");
+}
+
+static bool dp_rr_setup_dev_objects(struct dp_rr_fx *f)
+{
+    return dp_mk_write(f->root,
                      "build/dev-obj/fixture/tools/dev/restart_fixture.o",
-                     "old-object\n") ||
-        !dp_mk_write(root,
+                     "old-object\n") &&
+        dp_mk_write(f->root,
                      "build/dev-obj/fixture/tools/dev/restart_second.o",
-                     "old-second-object\n") ||
-        !dp_mk_write(root,
+                     "old-second-object\n") &&
+        dp_mk_write(f->root,
                      "build/dev-obj/fixture/tools/command/native_code_command.o",
-                     "old-code-object\n") ||
-        !dp_mk_write(root, "build/dev-obj/fixture/platform/modules/base/src/other.o",
-                     "other-object\n") ||
-        !dp_mk_write(root, "build/dev-obj/fixture/platform/modules/util/src/clientversion.o",
-                     "stale-dev-identity\n") ||
-        !dp_mk_write(root, "build/dev-obj/fixture/link-inputs.rsp",
-                     "build/dev-obj/fixture/tools/dev/restart_fixture.o build/dev-obj/fixture/tools/dev/restart_second.o build/dev-obj/fixture/tools/command/native_code_command.o build/dev-obj/fixture/platform/modules/util/src/clientversion.o build/dev-obj/fixture/platform/modules/base/src/other.o\n") ||
-        !dp_mk_write(root, "build/dev-obj/fixture/restart-base.o",
-                     "frozen-dev-base\n") ||
-        !dp_mk_write(root,
+                     "old-code-object\n") &&
+        dp_mk_write(f->root, "build/dev-obj/fixture/platform/modules/base/src/other.o",
+                     "other-object\n") &&
+        dp_mk_write(f->root, "build/dev-obj/fixture/platform/modules/util/src/clientversion.o",
+                     "stale-dev-identity\n") &&
+        dp_mk_write(f->root, "build/dev-obj/fixture/link-inputs.rsp",
+                     "build/dev-obj/fixture/tools/dev/restart_fixture.o build/dev-obj/fixture/tools/dev/restart_second.o build/dev-obj/fixture/tools/command/native_code_command.o build/dev-obj/fixture/platform/modules/util/src/clientversion.o build/dev-obj/fixture/platform/modules/base/src/other.o\n") &&
+        dp_mk_write(f->root, "build/dev-obj/fixture/restart-base.o",
+                     "frozen-dev-base\n");
+}
+
+static bool dp_rr_setup_test_objects(struct dp_rr_fx *f)
+{
+    return dp_mk_write(f->root,
                      "build/test-obj/fixture/tools/dev/restart_fixture.o",
-                     "old-test-object\n") ||
-        !dp_mk_write(root,
+                     "old-test-object\n") &&
+        dp_mk_write(f->root,
                      "build/test-obj/fixture/tools/command/native_code_command.o",
-                     "old-test-code-object\n") ||
-        !dp_mk_write(root, "build/test-obj/fixture/platform/modules/base/src/other.o",
-                     "other-test-object\n") ||
-        !dp_mk_write(root, "build/test-obj/fixture/platform/modules/util/src/clientversion.o",
-                     "stale-test-identity\n") ||
-        !dp_mk_write(root, "build/test-obj/fixture/link-inputs.rsp",
-                     "build/test-obj/fixture/tools/dev/restart_fixture.o build/test-obj/fixture/tools/command/native_code_command.o build/test-obj/fixture/platform/modules/util/src/clientversion.o build/test-obj/fixture/platform/modules/base/src/other.o\n") ||
-        !dp_mk_write(root, "build/test-obj/fixture/restart-base.o",
-                     "frozen-test-base\n") ||
-        platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", cache, 1) != 0)
-        goto out;
+                     "old-test-code-object\n") &&
+        dp_mk_write(f->root, "build/test-obj/fixture/platform/modules/base/src/other.o",
+                     "other-test-object\n") &&
+        dp_mk_write(f->root, "build/test-obj/fixture/platform/modules/util/src/clientversion.o",
+                     "stale-test-identity\n") &&
+        dp_mk_write(f->root, "build/test-obj/fixture/link-inputs.rsp",
+                     "build/test-obj/fixture/tools/dev/restart_fixture.o build/test-obj/fixture/tools/command/native_code_command.o build/test-obj/fixture/platform/modules/util/src/clientversion.o build/test-obj/fixture/platform/modules/base/src/other.o\n") &&
+        dp_mk_write(f->root, "build/test-obj/fixture/restart-base.o",
+                     "frozen-test-base\n") &&
+        platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", f->cache, 1) == 0;
+}
+
+static bool dp_rr_setup_plan(struct dp_rr_fx *f)
+{
     int n = snprintf(
-        plan, sizeof(plan),
+        f->plan, sizeof(f->plan),
         "CC=%s\n"
         "COMPILER_ID=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
         "BASE_GENERATION=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n"
@@ -6889,319 +6923,436 @@ static bool run_resident_restart_fixture(void)
         "TEST_OBJ_DIR=build/test-obj/fixture\n"
         "TEST_LINK_RSP=build/test-obj/fixture/link-inputs.rsp\n"
         "TEST_BASE_RELOC=build/test-obj/fixture/restart-base.o\n",
-        compiler);
-    if (n <= 0 || n >= (int)sizeof(plan) ||
-        !dp_mk_write(root, "build/dev-loop/restart.env", plan) ||
-        platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) != 0 ||
-        platform_environment_set("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "1", 1) != 0 ||
-        platform_environment_set("ZCL_DEVLOOP_TEST_FAIL_GROUPS", "0", 1) != 0)
-        goto out;
+        f->compiler);
+    return n > 0 && n < (int)sizeof(f->plan) &&
+        dp_mk_write(f->root, "build/dev-loop/restart.env", f->plan) &&
+        platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0 &&
+        platform_environment_set("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", "1", 1) == 0 &&
+        platform_environment_set("ZCL_DEVLOOP_TEST_FAIL_GROUPS", "0", 1) == 0;
+}
 
-    stage = "first candidate build";
-    const char *changed[] = { "tools/dev/restart_fixture.c" };
-    struct zcl_devloop_restart_build_receipt receipt = {0};
-    struct zcl_devloop_process_result process = {0};
-    stage = "attempted failed link accounting";
-    if (!dp_restart_failed_link_accounting(root, changed, &receipt, &process, why, sizeof(why))) goto out;
-    memset(&receipt, 0, sizeof(receipt)); memset(&process, 0, sizeof(process));
-    stage = "first candidate build";
+static bool dp_rr_setup(struct dp_rr_fx *f)
+{
+    return dp_rr_setup_compiler(f) && dp_rr_setup_units(f) &&
+        dp_rr_setup_dev_objects(f) && dp_rr_setup_test_objects(f) &&
+        dp_rr_setup_plan(f);
+}
+
+static bool dp_rr_first_build(struct dp_rr_fx *f)
+{
+    struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
+    struct zcl_devloop_process_result *process = &f->process;
+    f->stage = "first candidate build";
+    f->changed[0] = "tools/dev/restart_fixture.c";
+    f->stage = "attempted failed link accounting";
+    if (!dp_restart_failed_link_accounting(f->root, f->changed, receipt, process, f->why, sizeof(f->why))) return false;
+    memset(receipt, 0, sizeof(*receipt)); memset(process, 0, sizeof(*process));
+    f->stage = "first candidate build";
     bool first_build_ok = zcl_devloop_restart_build(
-        root, changed, 1, &receipt, &process, why, sizeof(why));
-    if (!first_build_ok || !dp_restart_first_receipt_ok(&receipt) ||
-        !dp_restart_first_identity_ok(&receipt)) {
+        f->root, f->changed, 1, receipt, process, f->why, sizeof(f->why));
+    if (!first_build_ok || !dp_restart_first_receipt_ok(receipt) ||
+        !dp_restart_first_identity_ok(receipt)) {
         fprintf(stderr, "resident first build process output (%zu bytes):\n%s\n",
-                process.output_len, process.output);
+                process->output_len, process->output);
         fprintf(stderr, "resident first build: ok=%d probe=%d changed=%u hit=%d "
                 "compile=%u link=%u full_link=%u probe_process=%u guard=%u "
                 "timing=%lld/%lld/%lld/%lld/%lld/%lld probe=%s overlay=%d "
                 "hashlen=%zu/%zu/%zu\n",
-                first_build_ok, receipt.candidate_probe_passed,
-                receipt.changed_sources, receipt.artifact_cache_hit,
-                receipt.compiler_processes, receipt.linker_processes,
-                receipt.complete_graph_linker_processes, receipt.probe_processes,
-                receipt.source_guard_captures,
-                (long long)receipt.compile_startup_us,
-                (long long)receipt.compile_body_us,
-                (long long)receipt.link_startup_us,
-                (long long)receipt.link_body_us,
-                (long long)receipt.probe_startup_us,
-                (long long)receipt.probe_body_us,
-                receipt.probe, receipt.source_identity_overlay,
-                strlen(receipt.source_cas_sha3),
-                strlen(receipt.artifact_sha256),
-                strlen(receipt.artifact_cache_key));
-        goto out;
+                first_build_ok, receipt->candidate_probe_passed,
+                receipt->changed_sources, receipt->artifact_cache_hit,
+                receipt->compiler_processes, receipt->linker_processes,
+                receipt->complete_graph_linker_processes, receipt->probe_processes,
+                receipt->source_guard_captures,
+                (long long)receipt->compile_startup_us,
+                (long long)receipt->compile_body_us,
+                (long long)receipt->link_startup_us,
+                (long long)receipt->link_body_us,
+                (long long)receipt->probe_startup_us,
+                (long long)receipt->probe_body_us,
+                receipt->probe, receipt->source_identity_overlay,
+                strlen(receipt->source_cas_sha3),
+                strlen(receipt->artifact_sha256),
+                strlen(receipt->artifact_cache_key));
+        return false;
     }
-    stage = "first cache copy";
-    if (!dp_restart_cache_copy_distinct(cache, &receipt)) goto out;
+    f->stage = "first cache copy";
+    return dp_restart_cache_copy_distinct(f->cache, receipt);
+}
 
+static bool dp_rr_mixed_build(struct dp_rr_fx *f)
+{
     /* A test edit following a resident service publication carries both TUs
      * into the proof epoch. The runtime candidate compiles and links only the
      * service TU; the exact test candidate later compiles and links both with
      * TEST_CFLAGS, including APIs that exist only under ZCL_TESTING. */
-    stage = "runtime and test changed";
-    if (!dp_restart_mixed_source_build(root, &receipt, &process, why, sizeof(why))) goto out;
+    f->stage = "runtime and test changed";
+    if (!dp_restart_mixed_source_build(f->root, &f->receipt, &f->process, f->why, sizeof(f->why))) return false;
     if (dp_environment_unset("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY") != 0)
-        goto out;
-    char first_build_key[65], first_build_hash[65];
-    (void)snprintf(first_build_key, sizeof(first_build_key), "%s",
-                   receipt.artifact_cache_key);
-    (void)snprintf(first_build_hash, sizeof(first_build_hash), "%s",
-                   receipt.artifact_sha256);
+        return false;
+    (void)snprintf(f->first_build_key, sizeof(f->first_build_key), "%s",
+                   f->receipt.artifact_cache_key);
+    (void)snprintf(f->first_build_hash, sizeof(f->first_build_hash), "%s",
+                   f->receipt.artifact_sha256);
+    return true;
+}
 
-    stage = "complete resident proof";
-    struct zcl_devloop_plan proof_plan = {0};
-    if (!zcl_devloop_plan_files(changed, 1, &proof_plan))
-        goto out;
+static bool dp_rr_complete_proof_a(struct dp_rr_fx *f)
+{
+    struct zcl_devloop_restart_proof_receipt *proof = &f->proof;
+    return zcl_devloop_restart_prove(f->root, f->changed, 1, &f->proof_plan, proof,
+                                   &f->process, f->why, sizeof(f->why)) &&
+        proof->proof_complete && proof->immediate_proof_complete &&
+        !proof->integration_proof_deferred && proof->deferred_group_count == 0 &&
+        proof->group_count == f->expected_total &&
+        strcmp(proof->groups, f->expected_all) == 0 &&
+        proof->groups_ran + proof->groups_cached == f->expected_total &&
+        proof->groups_cached == 1 &&
+        proof->self_skips == 0 &&
+        strstr(proof->groups, "test_dev_platform") &&
+        dp_has_heavy_groups(proof->groups);
+}
+
+static bool dp_rr_complete_proof_b(const struct zcl_devloop_restart_proof_receipt *proof)
+{
+    return !proof->artifact_cache_hit && proof->compiler_processes == 2 &&
+        proof->linker_processes == 1 &&
+        proof->complete_graph_linker_processes == dp_restart_complete_links(proof->linker_processes) &&
+        proof->test_processes == 2 && proof->source_guard_captures == 2 &&
+        strcmp(proof->priority_group, "test_make_lint_gates") == 0 &&
+        strcmp(proof->priority_reason, "direct_owner_invariant") == 0 &&
+        proof->priority_test_us > 0 &&
+        proof->selection_us > 0;
+}
+
+static bool dp_rr_complete_proof_c(const struct zcl_devloop_restart_proof_receipt *proof)
+{
+    return proof->compile_startup_us > 0 && proof->compile_body_us > 0 &&
+        proof->link_startup_us > 0 && proof->link_body_us > 0 &&
+        proof->test_startup_us > 0 && proof->test_body_us > 0 &&
+        strlen(proof->artifact_sha256) == 64 &&
+        strlen(proof->artifact_cache_key) == 64 &&
+        proof->source_identity_overlay &&
+        strlen(proof->source_cas_sha3) == 64 &&
+        strlen(proof->groups_sha256) == 64;
+}
+
+static bool dp_rr_complete_proof(struct dp_rr_fx *f)
+{
+    f->stage = "complete resident proof";
+    memset(&f->proof_plan, 0, sizeof(f->proof_plan));
+    if (!zcl_devloop_plan_files(f->changed, 1, &f->proof_plan))
+        return false;
     for (size_t d = 0; d < ZCL_DEVLOOP_DIM__COUNT; d++)
-        proof_plan.dims[d].status = ZCL_DEVLOOP_DIM_NOT_APPLICABLE;
-    char expected_all[4096], expected_now[4096], expected_later[4096];
-    uint32_t expected_total = 0, expected_immediate = 0, expected_deferred = 0;
-    if (!dp_expected_proof_groups(&proof_plan, expected_all, expected_now,
-                                  expected_later, &expected_total,
-                                  &expected_immediate, &expected_deferred))
-        goto out;
-    struct zcl_devloop_restart_proof_receipt proof = {0};
-    if (!zcl_devloop_restart_prove(root, changed, 1, &proof_plan, &proof,
-                                   &process, why, sizeof(why)) ||
-        !proof.proof_complete || !proof.immediate_proof_complete ||
-        proof.integration_proof_deferred || proof.deferred_group_count != 0 ||
-        proof.group_count != expected_total ||
-        strcmp(proof.groups, expected_all) != 0 ||
-        proof.groups_ran + proof.groups_cached != expected_total ||
-        proof.groups_cached != 1 ||
-        proof.self_skips != 0 ||
-        !strstr(proof.groups, "test_dev_platform") ||
-        !dp_has_heavy_groups(proof.groups) ||
-        proof.artifact_cache_hit || proof.compiler_processes != 2 ||
-        proof.linker_processes != 1 ||
-        proof.complete_graph_linker_processes != dp_restart_complete_links(proof.linker_processes) ||
-        proof.test_processes != 2 || proof.source_guard_captures != 2 ||
-        strcmp(proof.priority_group, "test_make_lint_gates") != 0 ||
-        strcmp(proof.priority_reason, "direct_owner_invariant") != 0 ||
-        proof.priority_test_us <= 0 ||
-        proof.selection_us <= 0 ||
-        proof.compile_startup_us <= 0 || proof.compile_body_us <= 0 ||
-        proof.link_startup_us <= 0 || proof.link_body_us <= 0 ||
-        proof.test_startup_us <= 0 || proof.test_body_us <= 0 ||
-        strlen(proof.artifact_sha256) != 64 ||
-        strlen(proof.artifact_cache_key) != 64 ||
-        !proof.source_identity_overlay ||
-        strlen(proof.source_cas_sha3) != 64 ||
-        strlen(proof.groups_sha256) != 64)
-        goto out;
+        f->proof_plan.dims[d].status = ZCL_DEVLOOP_DIM_NOT_APPLICABLE;
+    if (!dp_expected_proof_groups(&f->proof_plan, f->expected_all, f->expected_now,
+                                  f->expected_later, &f->expected_total,
+                                  &f->expected_immediate, &f->expected_deferred))
+        return false;
+    memset(&f->proof, 0, sizeof(f->proof));
+    return dp_rr_complete_proof_a(f) && dp_rr_complete_proof_b(&f->proof) &&
+        dp_rr_complete_proof_c(&f->proof);
+}
 
+static bool dp_rr_red_proofs(struct dp_rr_fx *f)
+{
     /* Born red: a real exact-group failure must not be collapsed into the
      * runner-accounting fallback. The next action needs the failing count. */
-    stage = "born red proof";
+    f->stage = "born red proof";
     if (platform_environment_set("ZCL_DEVLOOP_TEST_FAIL_GROUPS", "2", 1) != 0)
-        goto out;
+        return false;
     if (!dp_restart_red_names_group(
-            root, changed, &proof_plan, &process, "direct_owner_invariant",
+            f->root, f->changed, &f->proof_plan, &f->process, "direct_owner_invariant",
             "failure-first direct owner group test_make_lint_gates failed"))
-        goto out;
+        return false;
 
     /* The failing group is now the remembered RED. Failing it again must
      * name it as previously failing, not repeat the direct-owner wording;
      * a stale previous_failure group must never read as a verdict on this
      * unrelated edit. */
-    stage = "remembered red still failing";
+    f->stage = "remembered red still failing";
     if (!dp_restart_red_names_group(
-            root, changed, &proof_plan, &process, "previous_failure",
+            f->root, f->changed, &f->proof_plan, &f->process, "previous_failure",
             "previously failing group test_make_lint_gates is still red "
             "(runs first until it passes)"))
-        goto out;
-    if (platform_environment_set("ZCL_DEVLOOP_TEST_FAIL_GROUPS", "0", 1) != 0)
-        goto out;
+        return false;
+    return platform_environment_set("ZCL_DEVLOOP_TEST_FAIL_GROUPS", "0", 1) == 0;
+}
 
+static bool dp_rr_remembered_red(struct dp_rr_fx *f)
+{
     /* The next edit for the same task executes the remembered RED before
      * default/catalog order. Passing it clears the warm scheduling hint; it
      * never substitutes for the complete affected batch that follows. */
-    stage = "remembered red proof";
-    memset(&proof, 0, sizeof(proof));
-    memset(&process, 0, sizeof(process));
-    if (!zcl_devloop_restart_prove(root, changed, 1, &proof_plan, &proof,
-                                   &process, why, sizeof(why)) ||
-        !proof.proof_complete || proof.test_processes != 2 ||
-        strcmp(proof.priority_group, "test_make_lint_gates") != 0 ||
-        strcmp(proof.priority_reason, "previous_failure") != 0)
-        goto out;
+    f->stage = "remembered red proof";
+    memset(&f->proof, 0, sizeof(f->proof));
+    memset(&f->process, 0, sizeof(f->process));
+    return zcl_devloop_restart_prove(f->root, f->changed, 1, &f->proof_plan, &f->proof,
+                                   &f->process, f->why, sizeof(f->why)) &&
+        f->proof.proof_complete && f->proof.test_processes == 2 &&
+        strcmp(f->proof.priority_group, "test_make_lint_gates") == 0 &&
+        strcmp(f->proof.priority_reason, "previous_failure") == 0;
+}
 
+static bool dp_rr_overlay_proofs(struct dp_rr_fx *f)
+{
     /* A tooling edit whose mapped closure includes code_capsule must carry
      * the epoch-generated clientversion overlay through a complete resident
      * proof. The second source keeps the fixture runner's bounded
      * changed-source probe deterministic. */
-    stage = "code capsule overlay proof";
-    if (!dp_restart_code_capsule_ok(root, &process, why, sizeof(why)))
-        goto out;
-    stage = "stale persistent overlay resolves live";
-    if (!dp_restart_overlay_live_ok(root, &process, why, sizeof(why), &stage))
-        goto out;
-    stage = "stale persistent overlay fails closed";
-    if (!dp_restart_overlay_stale_ok(root, &process, why, sizeof(why)))
-        goto out;
+    f->stage = "code capsule overlay proof";
+    if (!dp_restart_code_capsule_ok(f->root, &f->process, f->why, sizeof(f->why)))
+        return false;
+    f->stage = "stale persistent overlay resolves live";
+    if (!dp_restart_overlay_live_ok(f->root, &f->process, f->why, sizeof(f->why), &f->stage))
+        return false;
+    f->stage = "stale persistent overlay fails closed";
+    return dp_restart_overlay_stale_ok(f->root, &f->process, f->why, sizeof(f->why));
+}
 
-    stage = "immediate proof";
-    memset(&proof, 0, sizeof(proof));
-    memset(&process, 0, sizeof(process));
-    if (!zcl_devloop_restart_prove_immediate(
-            root, changed, 1, &proof_plan, &proof, &process,
-            why, sizeof(why)) ||
-        proof.proof_complete || !proof.immediate_proof_complete ||
-        !proof.integration_proof_deferred ||
-        proof.group_count != expected_immediate ||
-        proof.deferred_group_count != expected_deferred ||
-        strcmp(proof.groups, expected_now) != 0 ||
-        strcmp(proof.deferred_groups, expected_later) != 0 ||
-        proof.groups_ran + proof.groups_cached != expected_immediate ||
-        proof.groups_cached != 1 ||
-        proof.self_skips != 0 ||
-        !proof.artifact_cache_hit || proof.compiler_processes != 2 ||
-        proof.linker_processes != 0 || proof.complete_graph_linker_processes != 0 ||
-        strstr(proof.groups, "test_make_lint_gates") ||
-        !dp_has_heavy_groups(proof.deferred_groups) ||
-        strlen(proof.deferred_groups_sha256) != 64)
-        goto out;
+static bool dp_rr_immediate_a(struct dp_rr_fx *f)
+{
+    struct zcl_devloop_restart_proof_receipt *proof = &f->proof;
+    return zcl_devloop_restart_prove_immediate(
+            f->root, f->changed, 1, &f->proof_plan, proof, &f->process,
+            f->why, sizeof(f->why)) &&
+        !proof->proof_complete && proof->immediate_proof_complete &&
+        proof->integration_proof_deferred &&
+        proof->group_count == f->expected_immediate &&
+        proof->deferred_group_count == f->expected_deferred &&
+        strcmp(proof->groups, f->expected_now) == 0 &&
+        strcmp(proof->deferred_groups, f->expected_later) == 0 &&
+        proof->groups_ran + proof->groups_cached == f->expected_immediate;
+}
 
+static bool dp_rr_immediate_b(const struct zcl_devloop_restart_proof_receipt *proof)
+{
+    return proof->groups_cached == 1 &&
+        proof->self_skips == 0 &&
+        proof->artifact_cache_hit && proof->compiler_processes == 2 &&
+        proof->linker_processes == 0 && proof->complete_graph_linker_processes == 0 &&
+        !strstr(proof->groups, "test_make_lint_gates") &&
+        dp_has_heavy_groups(proof->deferred_groups) &&
+        strlen(proof->deferred_groups_sha256) == 64;
+}
+
+static bool dp_rr_immediate_proof(struct dp_rr_fx *f)
+{
+    f->stage = "immediate proof";
+    memset(&f->proof, 0, sizeof(f->proof));
+    memset(&f->process, 0, sizeof(f->process));
+    return dp_rr_immediate_a(f) && dp_rr_immediate_b(&f->proof);
+}
+
+static bool dp_rr_exact_edit_revert(struct dp_rr_fx *f)
+{
+    struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
     /* Exact, edit, and revert cycles compile the source for diagnostic
      * freshness, but only new complete-graph link inputs may invoke a linker. */
-    stage = "exact edit revert build";
-    memset(&receipt, 0, sizeof(receipt));
-    if (!zcl_devloop_restart_build(root, changed, 1, &receipt, &process,
-                                   why, sizeof(why)) ||
-        !receipt.artifact_cache_hit || receipt.compiler_processes != 2 ||
-        receipt.linker_processes != 0 || receipt.complete_graph_linker_processes != 0 ||
-        strcmp(receipt.artifact_cache_key, first_build_key) != 0 ||
-        strcmp(receipt.artifact_sha256, first_build_hash) != 0) {
+    f->stage = "exact edit revert build";
+    memset(receipt, 0, sizeof(*receipt));
+    if (!zcl_devloop_restart_build(f->root, f->changed, 1, receipt, &f->process,
+                                   f->why, sizeof(f->why)) ||
+        !receipt->artifact_cache_hit || receipt->compiler_processes != 2 ||
+        receipt->linker_processes != 0 || receipt->complete_graph_linker_processes != 0 ||
+        strcmp(receipt->artifact_cache_key, f->first_build_key) != 0 ||
+        strcmp(receipt->artifact_sha256, f->first_build_hash) != 0) {
         fprintf(stderr,
                 "exact edit revert: hit=%d compile=%u link=%u "
                 "key_match=%d hash_match=%d why=%s\n",
-                receipt.artifact_cache_hit, receipt.compiler_processes,
-                receipt.linker_processes,
-                strcmp(receipt.artifact_cache_key, first_build_key) == 0,
-                strcmp(receipt.artifact_sha256, first_build_hash) == 0, why);
-        goto out;
+                receipt->artifact_cache_hit, receipt->compiler_processes,
+                receipt->linker_processes,
+                strcmp(receipt->artifact_cache_key, f->first_build_key) == 0,
+                strcmp(receipt->artifact_sha256, f->first_build_hash) == 0, f->why);
+        return false;
     }
-    if (!dp_mk_write(root, "tools/dev/restart_fixture.c",
-                     "int restart_fixture(void) { return 9; }\n"))
-        goto out;
-    memset(&receipt, 0, sizeof(receipt));
-    if (!zcl_devloop_restart_build(root, changed, 1, &receipt, &process,
-                                   why, sizeof(why)) ||
-        receipt.artifact_cache_hit || receipt.compiler_processes != 2 ||
-        receipt.linker_processes != 1 ||
-        receipt.complete_graph_linker_processes != dp_restart_complete_links(receipt.linker_processes) ||
-        strcmp(receipt.artifact_cache_key, first_build_key) == 0)
-        goto out;
-    if (!dp_mk_write(root, "tools/dev/restart_fixture.c",
-                     "int restart_fixture(void) { return 7; }\n"))
-        goto out;
-    memset(&receipt, 0, sizeof(receipt));
-    if (!zcl_devloop_restart_build(root, changed, 1, &receipt, &process,
-                                   why, sizeof(why)) ||
-        !receipt.artifact_cache_hit || receipt.compiler_processes != 2 ||
-        receipt.linker_processes != 0 || receipt.complete_graph_linker_processes != 0 ||
-        strcmp(receipt.artifact_cache_key, first_build_key) != 0 ||
-        strcmp(receipt.artifact_sha256, first_build_hash) != 0)
-        goto out;
+    return true;
+}
 
-    struct zcl_devloop_plan overwide = proof_plan;
+static bool dp_rr_edit_build(struct dp_rr_fx *f)
+{
+    struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
+    if (!dp_mk_write(f->root, "tools/dev/restart_fixture.c",
+                     "int restart_fixture(void) { return 9; }\n"))
+        return false;
+    memset(receipt, 0, sizeof(*receipt));
+    return zcl_devloop_restart_build(f->root, f->changed, 1, receipt, &f->process,
+                                   f->why, sizeof(f->why)) &&
+        !receipt->artifact_cache_hit && receipt->compiler_processes == 2 &&
+        receipt->linker_processes == 1 &&
+        receipt->complete_graph_linker_processes == dp_restart_complete_links(receipt->linker_processes) &&
+        strcmp(receipt->artifact_cache_key, f->first_build_key) != 0;
+}
+
+static bool dp_rr_revert_build(struct dp_rr_fx *f)
+{
+    struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
+    if (!dp_mk_write(f->root, "tools/dev/restart_fixture.c",
+                     "int restart_fixture(void) { return 7; }\n"))
+        return false;
+    memset(receipt, 0, sizeof(*receipt));
+    return zcl_devloop_restart_build(f->root, f->changed, 1, receipt, &f->process,
+                                   f->why, sizeof(f->why)) &&
+        receipt->artifact_cache_hit && receipt->compiler_processes == 2 &&
+        receipt->linker_processes == 0 && receipt->complete_graph_linker_processes == 0 &&
+        strcmp(receipt->artifact_cache_key, f->first_build_key) == 0 &&
+        strcmp(receipt->artifact_sha256, f->first_build_hash) == 0;
+}
+
+static bool dp_rr_overwide_a(struct dp_rr_fx *f, const struct zcl_devloop_plan *overwide)
+{
+    struct zcl_devloop_restart_proof_receipt *proof = &f->proof;
+    return zcl_devloop_restart_prove_immediate(
+            f->root, f->changed, 1, overwide, proof, &f->process,
+            f->why, sizeof(f->why)) &&
+        proof->immediate_proof_complete && !proof->proof_complete &&
+        proof->integration_proof_deferred && proof->bounded_proof_deferred &&
+        proof->group_count != 0 && proof->group_count <= 32 &&
+        proof->deferred_group_count != 0;
+}
+
+static bool dp_rr_overwide_b(const struct zcl_devloop_restart_proof_receipt *proof)
+{
+    return strstr(proof->groups, "test_dev_platform") &&
+        !strstr(proof->groups, "test_wallet") && !strstr(proof->groups, "test_net") &&
+        strstr(proof->deferred_groups, "test_wallet") &&
+        strstr(proof->deferred_groups, "test_net") &&
+        proof->compiler_processes == 2 && proof->linker_processes == 0 && proof->complete_graph_linker_processes == 0 &&
+        proof->test_processes == 1;
+}
+
+static bool dp_rr_overwide(struct dp_rr_fx *f)
+{
+    struct zcl_devloop_plan overwide = f->proof_plan;
     (void)snprintf(overwide.closure_groups[0],
                    sizeof(overwide.closure_groups[0]), "%s", "wallet");
     (void)snprintf(overwide.closure_groups[1],
                    sizeof(overwide.closure_groups[1]), "%s", "net");
     overwide.closure_groups_len = 2;
-    memset(&proof, 0, sizeof(proof));
-    memset(&process, 0, sizeof(process));
-    if (!zcl_devloop_restart_prove_immediate(
-            root, changed, 1, &overwide, &proof, &process,
-            why, sizeof(why)) ||
-        !proof.immediate_proof_complete || proof.proof_complete ||
-        !proof.integration_proof_deferred || !proof.bounded_proof_deferred ||
-        proof.group_count == 0 || proof.group_count > 32 ||
-        proof.deferred_group_count == 0 ||
-        !strstr(proof.groups, "test_dev_platform") ||
-        strstr(proof.groups, "test_wallet") || strstr(proof.groups, "test_net") ||
-        !strstr(proof.deferred_groups, "test_wallet") ||
-        !strstr(proof.deferred_groups, "test_net") ||
-        proof.compiler_processes != 2 || proof.linker_processes != 0 || proof.complete_graph_linker_processes != 0 ||
-        proof.test_processes != 1)
-        goto out;
+    memset(&f->proof, 0, sizeof(f->proof));
+    memset(&f->process, 0, sizeof(f->process));
+    return dp_rr_overwide_a(f, &overwide) && dp_rr_overwide_b(&f->proof);
+}
 
-    struct zcl_devloop_plan substituted = proof_plan;
+static bool dp_rr_substituted(struct dp_rr_fx *f)
+{
+    struct zcl_devloop_plan substituted = f->proof_plan;
     (void)snprintf(substituted.path_groups[0],
                    sizeof(substituted.path_groups[0]), "%s", "json");
-    memset(&proof, 0, sizeof(proof));
-    memset(&process, 0, sizeof(process));
-    if (zcl_devloop_restart_prove(root, changed, 1, &substituted, &proof,
-                                  &process, why, sizeof(why)) ||
-        strcmp(why,
-               "affected proof plan does not match the changed source set") != 0 ||
-        proof.compiler_processes != 0 || proof.linker_processes != 0 || proof.complete_graph_linker_processes != 0 ||
-        proof.test_processes != 0)
-        goto out;
+    memset(&f->proof, 0, sizeof(f->proof));
+    memset(&f->process, 0, sizeof(f->process));
+    return !zcl_devloop_restart_prove(f->root, f->changed, 1, &substituted, &f->proof,
+                                  &f->process, f->why, sizeof(f->why)) &&
+        strcmp(f->why,
+               "affected proof plan does not match the changed source set") == 0 &&
+        f->proof.compiler_processes == 0 && f->proof.linker_processes == 0 && f->proof.complete_graph_linker_processes == 0 &&
+        f->proof.test_processes == 0;
+}
 
+static bool dp_rr_second_build(struct dp_rr_fx *f)
+{
+    struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
     /* A later edit links both its new overlay and the prior source's still
      * exact overlay. The fake linker always requires the first overlay, so
      * this second call fails if the resident forgets earlier direct edits. */
     const char *second[] = { "tools/dev/restart_second.c" };
-    memset(&receipt, 0, sizeof(receipt));
-    if (!zcl_devloop_restart_build(root, second, 1, &receipt, &process,
-                                   why, sizeof(why)) ||
-        !receipt.candidate_probe_passed || receipt.compiler_processes != 2 ||
-        receipt.linker_processes != 1 ||
-        receipt.complete_graph_linker_processes != dp_restart_complete_links(receipt.linker_processes) ||
-        receipt.probe_processes != 1)
-        goto out;
+    memset(receipt, 0, sizeof(*receipt));
+    return zcl_devloop_restart_build(f->root, second, 1, receipt, &f->process,
+                                   f->why, sizeof(f->why)) &&
+        receipt->candidate_probe_passed && receipt->compiler_processes == 2 &&
+        receipt->linker_processes == 1 &&
+        receipt->complete_graph_linker_processes == dp_restart_complete_links(receipt->linker_processes) &&
+        receipt->probe_processes == 1;
+}
 
-    if (!dp_mk_write(root, "tools/dev/restart_second.c",
+static bool dp_rr_second_refused(struct dp_rr_fx *f)
+{
+    struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
+    const char *second[] = { "tools/dev/restart_second.c" };
+    if (!dp_mk_write(f->root, "tools/dev/restart_second.c",
                      "const char *restart_second(void) { return \".init_array\"; }\n"))
-        goto out;
-    memset(&receipt, 0, sizeof(receipt));
-    if (zcl_devloop_restart_build(root, second, 1, &receipt, &process,
-                                  why, sizeof(why)) ||
-        strcmp(why,
-               "overlay link input is missing, unreadable, or owns process initialization") != 0 ||
-        receipt.compiler_processes != 2 || receipt.linker_processes != 0 || receipt.complete_graph_linker_processes != 0 ||
-        receipt.complete_graph_linker_processes != dp_restart_complete_links(receipt.linker_processes) ||
-        receipt.probe_processes != 0)
-        goto out;
+        return false;
+    memset(receipt, 0, sizeof(*receipt));
+    return !zcl_devloop_restart_build(f->root, second, 1, receipt, &f->process,
+                                  f->why, sizeof(f->why)) &&
+        strcmp(f->why,
+               "overlay link input is missing, unreadable, or owns process initialization") == 0 &&
+        receipt->compiler_processes == 2 && receipt->linker_processes == 0 && receipt->complete_graph_linker_processes == 0 &&
+        receipt->complete_graph_linker_processes == dp_restart_complete_links(receipt->linker_processes) &&
+        receipt->probe_processes == 0;
+}
 
+static bool dp_rr_forbidden(struct dp_rr_fx *f)
+{
+    struct zcl_devloop_restart_build_receipt *receipt = &f->receipt;
     const char *forbidden[] = { "core/consensus/src/restart_fixture.c" };
-    memset(&receipt, 0, sizeof(receipt));
-    if (zcl_devloop_restart_build(root, forbidden, 1, &receipt, &process,
-                                  why, sizeof(why)) ||
-        strcmp(why, "consensus-risk input is excluded from fast restart") != 0 ||
-        receipt.compiler_processes != 0 || receipt.linker_processes != 0 || receipt.complete_graph_linker_processes != 0 ||
-        receipt.probe_processes != 0)
-        goto out;
+    memset(receipt, 0, sizeof(*receipt));
+    return !zcl_devloop_restart_build(f->root, forbidden, 1, receipt, &f->process,
+                                  f->why, sizeof(f->why)) &&
+        strcmp(f->why, "consensus-risk input is excluded from fast restart") == 0 &&
+        receipt->compiler_processes == 0 && receipt->linker_processes == 0 && receipt->complete_graph_linker_processes == 0 &&
+        receipt->probe_processes == 0;
+}
 
-    stage = "focused scope, stop and supersede";
-    why[0] = 0;
-    ok = dp_restart_focused_scope_ok(root, changed, &proof_plan, why,
-                                     sizeof(why));
+static bool dp_rr_focused(struct dp_rr_fx *f)
+{
+    f->stage = "focused scope, stop and supersede";
+    f->why[0] = 0;
+    return dp_restart_focused_scope_ok(f->root, f->changed, &f->proof_plan, f->why,
+                                     sizeof(f->why));
+}
 
-out:
-    if (!ok)
+static bool dp_rr_stages_build(struct dp_rr_fx *f)
+{
+    return dp_rr_setup(f) && dp_rr_first_build(f) && dp_rr_mixed_build(f);
+}
+
+static bool dp_rr_stages_proof(struct dp_rr_fx *f)
+{
+    return dp_rr_complete_proof(f) && dp_rr_red_proofs(f) &&
+        dp_rr_remembered_red(f) && dp_rr_overlay_proofs(f) &&
+        dp_rr_immediate_proof(f);
+}
+
+static bool dp_rr_stages_edits(struct dp_rr_fx *f)
+{
+    return dp_rr_exact_edit_revert(f) && dp_rr_edit_build(f) &&
+        dp_rr_revert_build(f) && dp_rr_overwide(f) && dp_rr_substituted(f) &&
+        dp_rr_second_build(f) && dp_rr_second_refused(f) && dp_rr_forbidden(f);
+}
+
+static void dp_rr_restore_env(const char *name, bool had, const char *saved)
+{
+    if (had)
+        (void)platform_environment_set(name, saved, 1);
+    else
+        (void)dp_environment_unset(name);
+}
+
+static void dp_rr_cleanup(struct dp_rr_fx *f)
+{
+    if (!f->ok)
         fprintf(stderr, "resident restart fixture failed at %s: %s\n",
-                stage, why[0] ? why : "no build reason");
+                f->stage, f->why[0] ? f->why : "no build reason");
     (void)dp_environment_unset("ZCL_DEVLOOP_TEST_FAIL_GROUPS");
-    if (had_cache)
-        (void)platform_environment_set("ZCL_DEV_ARTIFACT_CACHE", saved_cache, 1);
-    else
-        (void)dp_environment_unset("ZCL_DEV_ARTIFACT_CACHE");
-    if (had_process)
-        (void)platform_environment_set("ZCL_DEVLOOP_TEST_PROCESS", saved_process, 1);
-    else
-        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_PROCESS");
-    if (had_force_copy)
-        (void)platform_environment_set("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", saved_force_copy, 1);
-    else
-        (void)dp_environment_unset("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY");
-    test_rm_rf_recursive(root);
-    test_rm_rf_recursive(cache_rel);
-    (void)unlink(compiler_rel);
-    return ok;
+    dp_rr_restore_env("ZCL_DEV_ARTIFACT_CACHE", f->had_cache, f->saved_cache);
+    dp_rr_restore_env("ZCL_DEVLOOP_TEST_PROCESS", f->had_process, f->saved_process);
+    dp_rr_restore_env("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY", f->had_force_copy, f->saved_force_copy);
+    test_rm_rf_recursive(f->root);
+    test_rm_rf_recursive(f->cache_rel);
+    (void)unlink(f->compiler_rel);
+}
+
+static bool run_resident_restart_fixture(void)
+{
+    struct dp_rr_fx f = {0};
+    f.stage = "fixture setup";
+    if (!dp_rr_paths(&f))
+        return false;
+    dp_rr_save_env(&f);
+    f.ok = dp_rr_stages_build(&f) && dp_rr_stages_proof(&f) &&
+        dp_rr_stages_edits(&f) && dp_rr_focused(&f);
+    dp_rr_cleanup(&f);
+    return f.ok;
 }
 
 static const char dp_restart_plan_fields[] =
