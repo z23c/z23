@@ -52,7 +52,6 @@ core/modules/primitives/src/transaction.c:transaction_deserialize:59
 core/modules/primitives/src/transaction.c:transaction_serialize:39
 core/modules/sapling/src/bn254.c:ppzksnark_vk_read:23
 core/modules/sapling/src/circuit_bits.c:gadget_blake2s:16
-core/modules/sapling/src/circuit_pedersen.c:gadget_pedersen_hash_pers:18
 core/modules/sapling/src/circuit_spend.c:sapling_spend_synthesize_traced:49
 core/modules/sapling/src/groth16_prover.c:g1_msm:18
 core/modules/sapling/src/groth16_prover.c:g2_msm:18

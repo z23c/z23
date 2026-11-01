@@ -671,38 +671,17 @@ static struct ph_bit ph_next_bit(const struct constraint_system *cs,
     return out;
 }
 
-void gadget_pedersen_hash_pers(struct constraint_system *cs,
-                               const bool pers_bits[6],
-                               const size_t *input_bits, size_t n_bits,
-                               size_t *x_out, size_t *y_out)
+/* Fold occupied 3-bit windows into segments, convert each segment to
+ * Edwards, and add the segments. *x_acc and *y_acc are SIZE_MAX when no
+ * segment is synthesized. */
+static void ph_accumulate_segments(struct constraint_system *cs,
+                                   const bool pers_bits[6],
+                                   const size_t *input_bits,
+                                   size_t total_bits,
+                                   size_t *x_acc, size_t *y_acc)
 {
-    if (!x_out || !y_out) {
-        LOG_ERROR("circuit_gadgets",
-                  "pedersen_hash: NULL output pointer (x_out=%p y_out=%p)",
-                  (const void *)x_out, (const void *)y_out);
-        return;
-    }
-    *x_out = SIZE_MAX;
-    *y_out = SIZE_MAX;
-    if (!cs || !pers_bits || (n_bits > 0 && !input_bits)) {
-        LOG_ERROR("circuit_gadgets",
-                  "pedersen_hash: missing input (cs=%p pers=%p bits=%p "
-                  "n_bits=%zu)", (const void *)cs, (const void *)pers_bits,
-                  (const void *)input_bits, n_bits);
-        return;
-    }
-
-    const size_t total_bits = 6 + n_bits;
-    const size_t capacity =
-        (size_t)PEDERSEN_NUM_GEN * PEDERSEN_CHUNKS_PER_GEN * 3;
-    if (total_bits > capacity) {
-        LOG_ERROR("circuit_gadgets",
-                  "pedersen_hash: %zu preimage bits exceed the %zu-bit "
-                  "capacity of %d generators", total_bits, capacity,
-                  PEDERSEN_NUM_GEN);
-        return;
-    }
-    ensure_ph_windows();
+    *x_acc = SIZE_MAX;
+    *y_acc = SIZE_MAX;
 
     size_t bit_pos = 0;
     size_t acc_x = SIZE_MAX, acc_y = SIZE_MAX;
@@ -767,6 +746,47 @@ void gadget_pedersen_hash_pers(struct constraint_system *cs,
             acc_y = ny;
         }
     }
+
+    *x_acc = acc_x;
+    *y_acc = acc_y;
+}
+
+void gadget_pedersen_hash_pers(struct constraint_system *cs,
+                               const bool pers_bits[6],
+                               const size_t *input_bits, size_t n_bits,
+                               size_t *x_out, size_t *y_out)
+{
+    if (!x_out || !y_out) {
+        LOG_ERROR("circuit_gadgets",
+                  "pedersen_hash: NULL output pointer (x_out=%p y_out=%p)",
+                  (const void *)x_out, (const void *)y_out);
+        return;
+    }
+    *x_out = SIZE_MAX;
+    *y_out = SIZE_MAX;
+    if (!cs || !pers_bits || (n_bits > 0 && !input_bits)) {
+        LOG_ERROR("circuit_gadgets",
+                  "pedersen_hash: missing input (cs=%p pers=%p bits=%p "
+                  "n_bits=%zu)", (const void *)cs, (const void *)pers_bits,
+                  (const void *)input_bits, n_bits);
+        return;
+    }
+
+    const size_t total_bits = 6 + n_bits;
+    const size_t capacity =
+        (size_t)PEDERSEN_NUM_GEN * PEDERSEN_CHUNKS_PER_GEN * 3;
+    if (total_bits > capacity) {
+        LOG_ERROR("circuit_gadgets",
+                  "pedersen_hash: %zu preimage bits exceed the %zu-bit "
+                  "capacity of %d generators", total_bits, capacity,
+                  PEDERSEN_NUM_GEN);
+        return;
+    }
+    ensure_ph_windows();
+
+    size_t acc_x = SIZE_MAX, acc_y = SIZE_MAX;
+    ph_accumulate_segments(cs, pers_bits, input_bits, total_bits,
+                           &acc_x, &acc_y);
 
     if (acc_x == SIZE_MAX || acc_y == SIZE_MAX) {
         LOG_ERROR("circuit_gadgets",
