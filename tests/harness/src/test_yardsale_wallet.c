@@ -396,6 +396,691 @@ static bool yw_capture_contains(const struct yw_capture *c,
     return false;
 }
 
+/* Seal one ad and ingest it into the yardsale cache. */
+static bool yw_seal_and_ingest(struct zswap_quote_v1 *q, uint8_t root[32],
+                               const uint8_t token_id[32],
+                               uint64_t token_amount, uint64_t zcl_amount,
+                               uint64_t nonce)
+{
+    memset(q, 0, sizeof(*q));
+    memset(root, 0, 32);
+    return yw_make_ad(q, token_id, token_amount, zcl_amount, nonce) &&
+           yw_ingest_ad(q, root);
+}
+
+/* Open the in-memory plan ledger and fund the seller and buyer wallets. */
+static bool yw_fund_wallet_fixtures(struct wallet *seller, struct wallet *buyer,
+                                    struct node_db *ndb,
+                                    struct key_id *seller_kid,
+                                    struct key_id *buyer_kid,
+                                    uint8_t token_txid[32])
+{
+    memset(ndb, 0, sizeof(*ndb));
+    memset(seller_kid, 0, sizeof(*seller_kid));
+    memset(buyer_kid, 0, sizeof(*buyer_kid));
+    memset(token_txid, 0, 32);
+    char addr[128];
+    uint8_t seller_zcl_txid[32], buyer_zcl_txid[32];
+    return node_db_open(ndb, ":memory:") &&
+        yw_wallet_open(seller, 0x5a, seller_kid, addr, sizeof(addr)) &&
+        yw_fund_token(seller, seller_kid, YW_TOKEN_SUPPLY, token_txid) &&
+        yw_fund_ordinary(seller, seller_kid, YW_FUND_VALUE,
+                         seller_zcl_txid) &&
+        yw_wallet_open(buyer, 0x6b, buyer_kid, addr, sizeof(addr)) &&
+        yw_fund_ordinary(buyer, buyer_kid, YW_FUND_VALUE, buyer_zcl_txid);
+}
+
+/* True when ok, stage is plan, committed is false, root is 64 hex
+ * chars, and terms is present. */
+static bool yw_arm_plan_stage_ok(bool ok, const char *stage, const char *root,
+                                 const struct json_value *out,
+                                 const struct json_value *terms)
+{
+    return ok && stage && strcmp(stage, "plan") == 0 &&
+           !json_get_bool(json_get(out, "committed")) &&
+           root && strlen(root) == 64 && terms;
+}
+
+/* True when arm terms match the coin, price, addresses, and deadline,
+ * with no profile. */
+static bool yw_arm_plan_terms_ok(const struct json_value *terms)
+{
+    return json_get_int(json_get(terms, "token_vout")) == 1 &&
+           json_get_int(json_get(terms, "token_input_sats")) ==
+               YW_TOKEN_DUST_VALUE &&
+           json_get_int(json_get(terms, "token_amount")) ==
+               (int64_t)YW_TOKEN_SUPPLY &&
+           json_get_int(json_get(terms, "zcl_amount_sats")) ==
+               (int64_t)YW_ZCL_PRICE &&
+           json_get_str(json_get(terms, "zcl_recv_address")) != NULL &&
+           json_get_str(json_get(terms, "change_address")) != NULL &&
+           json_get_int(json_get(terms, "deadline_unix")) == YW_EXPIRES &&
+           !yardsale_seller_profile_configured();
+}
+
+/* ── status before any arm ───────────────────────────────────── */
+static int yw_check_status_before_arm(void)
+{
+    int failures = 0;
+    struct json_value out;
+    json_init(&out);
+    YW_CHECK("status: unarmed node answers configured=false",
+             yardsale_wallet_seller_status(YW_NOW, &out) ==
+                 YARDSALE_WALLET_OK &&
+             !json_get_bool(json_get(&out, "configured")));
+    json_free(&out);
+    return failures;
+}
+
+/* ── arm: plan ───────────────────────────────────────────────── */
+static int yw_check_arm_plan(struct wallet *seller, struct node_db *ndb,
+                             const uint8_t token_txid[32],
+                             const uint8_t ad_root[32],
+                             char *plan_root_a, size_t plan_root_cap)
+{
+    plan_root_a[0] = '\0';
+    int failures = 0;
+    struct json_value out;
+    json_init(&out);
+    bool ok = yardsale_wallet_seller_arm(
+        seller, ndb, token_txid, 1, ad_root, false, YW_NOW,
+        &out) == YARDSALE_WALLET_OK;
+    const char *stage = json_get_str(json_get(&out, "stage"));
+    const char *root = json_get_str(json_get(&out, "plan_root"));
+    const struct json_value *terms = json_get(&out, "terms");
+    YW_CHECK("arm plan: exact terms rendered, nothing armed",
+             yw_arm_plan_stage_ok(ok, stage, root, &out, terms) &&
+             yw_arm_plan_terms_ok(terms));
+    if (root)
+        snprintf(plan_root_a, plan_root_cap, "%s", root);
+    else
+        plan_root_a[0] = '\0';
+    json_free(&out);
+
+    struct db_yardsale_plan row;
+    char request_hex[65];
+    struct json_value probe;
+    json_init(&probe);
+    /* The row persisted; its plan_root matches the rendered one. */
+    bool row_ok = false;
+    if (yardsale_wallet_seller_arm(seller, ndb, token_txid, 1,
+                                   ad_root, false, YW_NOW,
+                                   &probe) == YARDSALE_WALLET_OK) {
+        const char *rh = json_get_str(json_get(&probe, "request_hash"));
+        const char *root2 = json_get_str(json_get(&probe, "plan_root"));
+        if (rh && root2) {
+            snprintf(request_hex, sizeof(request_hex), "%s", rh);
+            row_ok = strcmp(root2, plan_root_a) == 0 &&
+                     db_yardsale_plan_find(ndb, plan_root_a, &row) &&
+                     strcmp(row.state, YARDSALE_PLAN_STATE_PLANNED) ==
+                         0;
+        }
+    }
+    json_free(&probe);
+    YW_CHECK("arm plan: idempotent re-plan, same plan_root, row "
+             "persisted", row_ok);
+    return failures;
+}
+
+/* ── arm: outpoint the wallet does not own ───────────────────── */
+static int yw_check_arm_foreign_outpoint(struct wallet *seller,
+                                         struct node_db *ndb,
+                                         const uint8_t ad_root[32])
+{
+    int failures = 0;
+    uint8_t foreign[32];
+    yw_pattern32(foreign, 0x77);
+    struct json_value out;
+    json_init(&out);
+    enum yardsale_wallet_status st = yardsale_wallet_seller_arm(
+        seller, ndb, foreign, 0, ad_root, false, YW_NOW, &out);
+    const char *code = json_get_str(json_get(&out, "code"));
+    YW_CHECK("arm: foreign outpoint refuses, names INPUT_NOT_OWNED",
+             st == YARDSALE_WALLET_ERR_INPUT_NOT_OWNED &&
+             !json_get_bool(json_get(&out, "ok")) && code &&
+             strcmp(code, "INPUT_NOT_OWNED") == 0);
+    json_free(&out);
+    YW_CHECK("arm: refusal configured no profile",
+             !yardsale_seller_profile_configured());
+    return failures;
+}
+
+/* ── arm: token amount mismatch ──────────────────────────────── */
+static int yw_check_arm_token_mismatch(struct wallet *seller,
+                                       struct node_db *ndb,
+                                       const uint8_t token_txid[32])
+{
+    int failures = 0;
+    struct zswap_quote_v1 wrong_ad;
+    uint8_t wrong_root[32];
+    bool have = yw_seal_and_ingest(&wrong_ad, wrong_root, token_txid,
+                                   YW_TOKEN_SUPPLY - 1, YW_ZCL_PRICE,
+                                   0x0102030405060709ULL);
+    struct json_value out;
+    json_init(&out);
+    enum yardsale_wallet_status st = yardsale_wallet_seller_arm(
+        seller, ndb, token_txid, 1, wrong_root, false, YW_NOW, &out);
+    const char *code = json_get_str(json_get(&out, "code"));
+    YW_CHECK("arm: coin holding the wrong amount refuses "
+             "TOKEN_MISMATCH", have &&
+             st == YARDSALE_WALLET_ERR_TOKEN_MISMATCH && code &&
+             strcmp(code, "TOKEN_MISMATCH") == 0);
+    json_free(&out);
+    YW_CHECK("arm: mismatch configured no profile",
+             !yardsale_seller_profile_configured());
+    return failures;
+}
+
+/* ── arm: commit, replay, answer ─────────────────────────────── */
+static int yw_check_arm_commit_replay(struct wallet *seller,
+                                      struct node_db *ndb,
+                                      const uint8_t token_txid[32],
+                                      const uint8_t ad_root[32],
+                                      const char *plan_root_a)
+{
+    int failures = 0;
+    struct json_value out;
+    json_init(&out);
+    bool ok = yardsale_wallet_seller_arm(
+        seller, ndb, token_txid, 1, ad_root, true, YW_NOW,
+        &out) == YARDSALE_WALLET_OK;
+    const char *digest = json_get_str(json_get(&out, "terms_digest"));
+    YW_CHECK("arm commit: profile armed, digest rendered", ok &&
+        json_get_bool(json_get(&out, "committed")) &&
+        !json_get_bool(json_get(&out, "idempotent_replay")) &&
+        json_get_bool(json_get(&out, "profile_configured")) &&
+        digest && strlen(digest) == 64 &&
+        yardsale_seller_profile_configured());
+    json_free(&out);
+
+    struct db_yardsale_plan row;
+    YW_CHECK("arm commit: ledger row COMMITTED/armed",
+             db_yardsale_plan_find(ndb, plan_root_a, &row) &&
+             strcmp(row.state, YARDSALE_PLAN_STATE_COMMITTED) == 0 &&
+             strcmp(row.result, "armed") == 0);
+
+    struct json_value replay;
+    json_init(&replay);
+    YW_CHECK("arm commit: replay is idempotent, no double arm",
+             yardsale_wallet_seller_arm(seller, ndb, token_txid, 1,
+                                        ad_root, true, YW_NOW,
+                                        &replay) == YARDSALE_WALLET_OK &&
+             json_get_bool(json_get(&replay, "idempotent_replay")) &&
+             yardsale_seller_profile_configured());
+    json_free(&replay);
+    return failures;
+}
+
+/* ── status while armed ──────────────────────────────────────── */
+static int yw_check_status_while_armed(void)
+{
+    int failures = 0;
+    struct json_value out;
+    json_init(&out);
+    bool ok = yardsale_wallet_seller_status(YW_NOW, &out) ==
+                  YARDSALE_WALLET_OK &&
+              json_get_bool(json_get(&out, "configured"));
+    const char *digest = json_get_str(json_get(&out, "terms_digest"));
+    YW_CHECK("status: armed node renders digest + deadline, never a "
+             "key", ok && digest && strlen(digest) == 64 &&
+             json_get(json_get(&out, "terms"), "zcl_recv_address") &&
+             json_get_int(json_get(&out, "deadline_unix")) ==
+                 YW_EXPIRES);
+    json_free(&out);
+    return failures;
+}
+
+/* ── armed: the ceremony accept is ANSWERED ──────────────────── */
+static int yw_check_armed_seller_answers(const struct zswap_quote_v1 *ad)
+{
+    int failures = 0;
+    uint8_t wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES];
+    size_t wire_len = 0;
+    uint8_t respond[ZSWAP_PARTIAL_WIRE_MAX_BYTES];
+    size_t respond_len = 0;
+    bool have = yw_accept_wire(ad, 0x60, wire, sizeof(wire), &wire_len);
+    int verdict = have ? yardsale_ceremony_accept_ingest(
+        wire, wire_len, 7, YW_NOW, respond, sizeof(respond),
+        &respond_len) : -1;
+    YW_CHECK("armed seller answers the accept (RESPOND)",
+             verdict == ZSWAP_CEREMONY_WIRE_RESPOND && respond_len > 0);
+    return failures;
+}
+
+/* ── disarm: the seller does NOT answer ──────────────────────── */
+static int yw_check_disarm_seller(const struct zswap_quote_v1 *ad)
+{
+    int failures = 0;
+    struct json_value out;
+    json_init(&out);
+    YW_CHECK("disarm: was_configured -> cleared",
+             yardsale_wallet_seller_disarm(&out) ==
+                 YARDSALE_WALLET_OK &&
+             json_get_bool(json_get(&out, "was_configured")) &&
+             !json_get_bool(json_get(&out, "configured")) &&
+             !yardsale_seller_profile_configured());
+    json_free(&out);
+
+    /* A DIFFERENT accept wire (the first is dedup-consumed): known
+     * sign, no profile -> relay, never an answer. */
+    uint8_t wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES];
+    size_t wire_len = 0;
+    uint8_t respond[ZSWAP_PARTIAL_WIRE_MAX_BYTES];
+    size_t respond_len = 0;
+    bool have = yw_accept_wire(ad, 0x61, wire, sizeof(wire), &wire_len);
+    int verdict = have ? yardsale_ceremony_accept_ingest(
+        wire, wire_len, 8, YW_NOW, respond, sizeof(respond),
+        &respond_len) : -1;
+    YW_CHECK("disarmed seller does NOT answer (RELAY, keys cleansed "
+             "out of the profile)",
+             verdict == ZSWAP_CEREMONY_WIRE_RELAY && respond_len == 0);
+
+    struct json_value again;
+    json_init(&again);
+    YW_CHECK("disarm: idempotent on an unarmed node",
+             yardsale_wallet_seller_disarm(&again) ==
+                 YARDSALE_WALLET_OK &&
+             !json_get_bool(json_get(&again, "was_configured")));
+    json_free(&again);
+    return failures;
+}
+
+/* ── arm: commit after plan expiry refuses and does not arm ──── */
+static int yw_check_arm_plan_expired(struct wallet *seller,
+                                     struct node_db *ndb,
+                                     const uint8_t token_txid[32])
+{
+    int failures = 0;
+    struct zswap_quote_v1 ad2;
+    uint8_t ad2_root[32];
+    bool have = yw_seal_and_ingest(&ad2, ad2_root, token_txid,
+                                   YW_TOKEN_SUPPLY, YW_ZCL_PRICE,
+                                   0x010203040506070aULL);
+    struct json_value out;
+    json_init(&out);
+    bool planned = have && yardsale_wallet_seller_arm(
+        seller, ndb, token_txid, 1, ad2_root, false, YW_NOW,
+        &out) == YARDSALE_WALLET_OK;
+    json_free(&out);
+    struct json_value late;
+    json_init(&late);
+    enum yardsale_wallet_status st = yardsale_wallet_seller_arm(
+        seller, ndb, token_txid, 1, ad2_root, true,
+        YW_NOW + YARDSALE_WALLET_PLAN_TTL_SECS + 1, &late);
+    const char *code = json_get_str(json_get(&late, "code"));
+    YW_CHECK("arm: commit after plan expiry refuses PLAN_EXPIRED",
+             planned && st == YARDSALE_WALLET_ERR_PLAN_EXPIRED &&
+             code && strcmp(code, "PLAN_EXPIRED") == 0);
+    json_free(&late);
+    YW_CHECK("arm: expired commit did NOT arm the profile",
+             !yardsale_seller_profile_configured());
+    return failures;
+}
+
+/* ── buy: insufficient confirmed balance names the shortfall ─── */
+static int yw_check_buy_shortfall(struct wallet *buyer, struct node_db *ndb,
+                                  const uint8_t token_txid[32])
+{
+    int failures = 0;
+    struct zswap_quote_v1 dear_ad;
+    uint8_t dear_root[32];
+    bool have = yw_seal_and_ingest(&dear_ad, dear_root, token_txid,
+                                   YW_TOKEN_SUPPLY, YW_FUND_VALUE * 5,
+                                   0x010203040506070bULL);
+    struct json_value out;
+    json_init(&out);
+    enum yardsale_wallet_status st = yardsale_wallet_buy(
+        buyer, ndb, dear_root, false, YW_NOW, &out);
+    const char *code = json_get_str(json_get(&out, "code"));
+    int64_t required = json_get_int(json_get(&out, "required_sats"));
+    int64_t available = json_get_int(json_get(&out, "available_sats"));
+    int64_t shortfall = json_get_int(json_get(&out, "shortfall_sats"));
+    YW_CHECK("buy: insufficient balance refuses and names the "
+             "shortfall", have &&
+             st == YARDSALE_WALLET_ERR_INSUFFICIENT && code &&
+             strcmp(code, "INSUFFICIENT_CONFIRMED_FUNDS") == 0 &&
+             required == (int64_t)YW_FUND_VALUE * 5 + YW_WALLET_FEE &&
+             available == YW_FUND_VALUE &&
+             shortfall == required - available);
+    json_free(&out);
+    return failures;
+}
+
+/* True when ok, the stage is plan, the root is 64 chars, and price,
+ * fee, one input, and deadline match. */
+static bool yw_buy_plan_fields_ok(bool ok, const char *stage, const char *root,
+                                  const struct json_value *terms,
+                                  const struct json_value *inputs)
+{
+    return ok && stage && strcmp(stage, "plan") == 0 &&
+           root && strlen(root) == 64 && terms &&
+           json_get_int(json_get(terms, "price_sats")) ==
+               (int64_t)YW_ZCL_PRICE &&
+           json_get_int(json_get(terms, "fee_sats")) == YW_WALLET_FEE &&
+           inputs && json_size(inputs) == 1 &&
+           json_get_int(json_get(terms, "deadline_unix")) == YW_EXPIRES;
+}
+
+/* Render the buy plan and check the idempotent re-plan. */
+static int yw_check_buy_plan(struct wallet *buyer, struct node_db *ndb,
+                             const uint8_t token_txid[32],
+                             uint8_t buy_root[32], char *buy_plan_root,
+                             size_t buy_plan_root_cap)
+{
+    memset(buy_root, 0, 32);
+    buy_plan_root[0] = '\0';
+    int failures = 0;
+    struct zswap_quote_v1 buy_ad;
+    bool have = yw_seal_and_ingest(&buy_ad, buy_root, token_txid,
+                                   YW_TOKEN_SUPPLY, YW_ZCL_PRICE,
+                                   0x010203040506070cULL);
+    struct json_value out;
+    json_init(&out);
+    bool ok = have && yardsale_wallet_buy(
+        buyer, ndb, buy_root, false, YW_NOW,
+        &out) == YARDSALE_WALLET_OK;
+    const char *stage = json_get_str(json_get(&out, "stage"));
+    const char *root = json_get_str(json_get(&out, "plan_root"));
+    const struct json_value *terms = json_get(&out, "terms");
+    const struct json_value *inputs =
+        terms ? json_get(terms, "inputs") : NULL;
+    YW_CHECK("buy plan: price, fee, and the selected input rendered",
+             yw_buy_plan_fields_ok(ok, stage, root, terms, inputs));
+    if (root)
+        snprintf(buy_plan_root, buy_plan_root_cap, "%s", root);
+    else
+        buy_plan_root[0] = '\0';
+    json_free(&out);
+
+    struct json_value replan;
+    json_init(&replan);
+    const char *root2 = NULL;
+    bool ok2 = yardsale_wallet_buy(buyer, ndb, buy_root, false,
+                                   YW_NOW,
+                                   &replan) == YARDSALE_WALLET_OK;
+    root2 = json_get_str(json_get(&replan, "plan_root"));
+    YW_CHECK("buy plan: idempotent re-plan, same plan_root",
+             ok2 && root2 && strcmp(root2, buy_plan_root) == 0);
+    json_free(&replan);
+    return failures;
+}
+
+/* Commit the buy, check the ledger row, and replay it. */
+static int yw_check_buy_commit_replay(struct wallet *buyer,
+                                      struct node_db *ndb,
+                                      const uint8_t buy_root[32],
+                                      const char *buy_plan_root,
+                                      const struct yw_flood_capture *flood)
+{
+    int failures = 0;
+    struct json_value commit;
+    json_init(&commit);
+    bool cok = yardsale_wallet_buy(buyer, ndb, buy_root, true,
+                                   YW_NOW,
+                                   &commit) == YARDSALE_WALLET_OK;
+    YW_CHECK("buy commit: zswapaccept flooded once, one pending buy",
+             cok && json_get_bool(json_get(&commit, "committed")) &&
+             !json_get_bool(json_get(&commit, "idempotent_replay")) &&
+             flood->count == 1 &&
+             strcmp(flood->last_command, ZSWAP_MSG_ACCEPT) == 0 &&
+             flood->last_len > 0 &&
+             yardsale_pending_count(YW_NOW) == 1);
+    json_free(&commit);
+
+    struct db_yardsale_plan row;
+    YW_CHECK("buy commit: ledger row COMMITTED/begun",
+             db_yardsale_plan_find(ndb, buy_plan_root, &row) &&
+             strcmp(row.state, YARDSALE_PLAN_STATE_COMMITTED) == 0 &&
+             strcmp(row.result, "begun") == 0);
+
+    struct json_value replay;
+    json_init(&replay);
+    YW_CHECK("buy commit: replay is idempotent — no double pending "
+             "buy, no second flood",
+             yardsale_wallet_buy(buyer, ndb, buy_root, true,
+                                 YW_NOW, &replay) ==
+                 YARDSALE_WALLET_OK &&
+             json_get_bool(json_get(&replay, "idempotent_replay")) &&
+             flood->count == 1 &&
+             yardsale_pending_count(YW_NOW) == 1);
+    json_free(&replay);
+    return failures;
+}
+
+/* ── buy: commit after plan expiry refuses ──────────────── */
+static int yw_check_buy_expired(struct wallet *buyer, struct node_db *ndb,
+                                const uint8_t token_txid[32],
+                                struct yw_flood_capture *flood)
+{
+    int failures = 0;
+    struct zswap_quote_v1 ad3;
+    uint8_t ad3_root[32];
+    bool have3 = yw_seal_and_ingest(&ad3, ad3_root, token_txid,
+                                    YW_TOKEN_SUPPLY, YW_ZCL_PRICE,
+                                    0x010203040506070dULL);
+    struct json_value p3;
+    json_init(&p3);
+    bool planned3 = have3 && yardsale_wallet_buy(
+        buyer, ndb, ad3_root, false, YW_NOW,
+        &p3) == YARDSALE_WALLET_OK;
+    json_free(&p3);
+    struct yw_flood_capture flood3 = { 0 };
+    yardsale_ceremony_set_flood(yw_flood_fn, &flood3);
+    struct json_value late;
+    json_init(&late);
+    enum yardsale_wallet_status st3 = yardsale_wallet_buy(
+        buyer, ndb, ad3_root, true,
+        YW_NOW + YARDSALE_WALLET_PLAN_TTL_SECS + 1, &late);
+    const char *code3 = json_get_str(json_get(&late, "code"));
+    YW_CHECK("buy: commit after plan expiry refuses, nothing "
+             "flooded, no pending buy",
+             planned3 && st3 == YARDSALE_WALLET_ERR_PLAN_EXPIRED &&
+             code3 && strcmp(code3, "PLAN_EXPIRED") == 0 &&
+             flood3.count == 0);
+    json_free(&late);
+    yardsale_ceremony_set_flood(yw_flood_fn, flood);
+    return failures;
+}
+
+/* A durable ARMING claim is exclusive. A second confirmation must
+ * refuse before key access or any outbound accept. */
+static int yw_check_buy_arming_excludes(struct wallet *buyer,
+                                        struct node_db *ndb,
+                                        const uint8_t token_txid[32],
+                                        struct yw_flood_capture *flood)
+{
+    int failures = 0;
+    struct zswap_quote_v1 claim_ad;
+    uint8_t claim_root[32];
+    bool have_claim = yw_seal_and_ingest(&claim_ad, claim_root, token_txid,
+                                         YW_TOKEN_SUPPLY, YW_ZCL_PRICE,
+                                         0x010203040506070fULL);
+    struct json_value claim_plan;
+    json_init(&claim_plan);
+    bool planned_claim = have_claim && yardsale_wallet_buy(
+        buyer, ndb, claim_root, false, YW_NOW,
+        &claim_plan) == YARDSALE_WALLET_OK;
+    const char *claim_plan_root =
+        json_get_str(json_get(&claim_plan, "plan_root"));
+    struct db_yardsale_plan claimed_row;
+    bool found_claim = claim_plan_root &&
+        db_yardsale_plan_find(ndb, claim_plan_root, &claimed_row);
+    enum db_yardsale_plan_claim_result claim_result = found_claim
+        ? db_yardsale_plan_claim(ndb, &claimed_row, YW_NOW)
+        : DB_YARDSALE_PLAN_CLAIM_ERROR;
+    json_free(&claim_plan);
+    struct yw_flood_capture claim_flood = { 0 };
+    yardsale_ceremony_set_flood(yw_flood_fn, &claim_flood);
+    struct json_value claim_retry;
+    json_init(&claim_retry);
+    enum yardsale_wallet_status claim_status = yardsale_wallet_buy(
+        buyer, ndb, claim_root, true, YW_NOW, &claim_retry);
+    const char *claim_code =
+        json_get_str(json_get(&claim_retry, "code"));
+    YW_CHECK("buy: an ARMING plan excludes a second confirmation",
+             planned_claim &&
+             claim_result == DB_YARDSALE_PLAN_CLAIMED &&
+             claim_status == YARDSALE_WALLET_ERR_PLAN_CONFLICT &&
+             claim_code && strcmp(claim_code, "PLAN_CONFLICT") == 0 &&
+             claim_flood.count == 0);
+    json_free(&claim_retry);
+    yardsale_ceremony_set_flood(yw_flood_fn, flood);
+    return failures;
+}
+
+/* ── buy: plan, commit, replay ───────────────────────────────── */
+static int yw_check_buy_plan_through_claim(struct wallet *buyer,
+                                           struct node_db *ndb,
+                                           const uint8_t token_txid[32])
+{
+    int failures = 0;
+    char buy_plan_root[65];
+    uint8_t buy_root[32];
+    struct yw_flood_capture flood = { 0 };
+    yardsale_ceremony_set_flood(yw_flood_fn, &flood);
+    failures += yw_check_buy_plan(buyer, ndb, token_txid, buy_root,
+                                  buy_plan_root, sizeof buy_plan_root);
+    failures += yw_check_buy_commit_replay(buyer, ndb, buy_root,
+                                           buy_plan_root, &flood);
+    failures += yw_check_buy_expired(buyer, ndb, token_txid, &flood);
+    failures += yw_check_buy_arming_excludes(buyer, ndb, token_txid, &flood);
+    return failures;
+}
+
+/* Plan rows: no key bytes in any column; the scan is proven by
+ * the ad_root prefix that MUST be present in the payloads. */
+static int yw_check_plan_rows_keyless(struct node_db *ndb,
+                                      const struct privkey *seller_key,
+                                      const struct privkey *buyer_key,
+                                      bool have_keys, bool have_wifs,
+                                      const char *seller_hex,
+                                      const char *buyer_hex,
+                                      const char *seller_wif,
+                                      const char *buyer_wif,
+                                      const uint8_t ad_root[32])
+{
+    int failures = 0;
+    char ad_root_hex[65];
+    zcl_hex_encode(ad_root, 32, ad_root_hex);
+    YW_CHECK("keys: seller + buyer keys available for the scan",
+             have_keys && have_wifs && seller_key->fValid &&
+             buyer_key->fValid);
+    YW_CHECK("keys: plan rows carry neither key (hex form)",
+             yw_plans_contain(ndb, seller_hex) == 0 &&
+             yw_plans_contain(ndb, buyer_hex) == 0);
+    YW_CHECK("keys: plan rows carry neither key (WIF form)",
+             yw_plans_contain(ndb, seller_wif) == 0 &&
+             yw_plans_contain(ndb, buyer_wif) == 0);
+    YW_CHECK("keys: anti-vacuous — the scan finds the ad root that "
+             "IS in a payload",
+             yw_plans_contain(ndb, ad_root_hex) > 0);
+    return failures;
+}
+
+/* Logs: replay an arm commit (idempotent path touches no key —
+ * so drive a FRESH arm plan+commit for a new ad under the
+ * capture) plus a buy commit, then scan stdout/stderr. */
+static int yw_check_commit_logs_keyless(struct wallet *seller,
+                                        struct node_db *ndb,
+                                        const uint8_t token_txid[32],
+                                        const char *seller_hex,
+                                        const char *buyer_hex,
+                                        const char *seller_wif,
+                                        const char *buyer_wif)
+{
+    int failures = 0;
+    char dir[PATH_MAX];
+    bool logged = false, anti = false;
+    if (test_mkdtemp(dir, sizeof dir, "ywlog")) {
+        struct zswap_quote_v1 ad4;
+        uint8_t ad4_root[32];
+        bool have4 = yw_seal_and_ingest(&ad4, ad4_root, token_txid,
+                                        YW_TOKEN_SUPPLY, YW_ZCL_PRICE,
+                                        0x010203040506070eULL);
+        struct yw_capture cap;
+        if (have4 && yw_capture_begin(&cap, dir)) {
+            struct json_value o1, o2;
+            json_init(&o1);
+            json_init(&o2);
+            (void)yardsale_wallet_seller_arm(seller, ndb,
+                                             token_txid, 1, ad4_root,
+                                             false, YW_NOW, &o1);
+            json_free(&o1);
+            (void)yardsale_wallet_seller_arm(seller, ndb,
+                                             token_txid, 1, ad4_root,
+                                             true, YW_NOW, &o2);
+            json_free(&o2);
+            yw_capture_end(&cap);
+            logged = !yw_capture_contains(&cap, seller_hex) &&
+                     !yw_capture_contains(&cap, buyer_hex) &&
+                     !yw_capture_contains(&cap, seller_wif) &&
+                     !yw_capture_contains(&cap, buyer_wif);
+            /* ANTI-VACUOUS: the same capture harness, handed the
+             * key hex through a plain fprintf, DOES find it. */
+            if (yw_capture_begin(&cap, dir)) {
+                fprintf(stdout, "%s\n", seller_hex);
+                yw_capture_end(&cap);
+                anti = yw_capture_contains(&cap, seller_hex);
+            }
+            unlink(cap.path_out);
+            unlink(cap.path_err);
+        }
+        rmdir(dir);
+        yardsale_seller_profile_clear(); /* leave nothing armed */
+    }
+    YW_CHECK("keys: neither key reaches stdout/stderr during "
+             "plan+commit", logged);
+    YW_CHECK("keys: anti-vacuous — the log scanner sees a real leak",
+             anti);
+    return failures;
+}
+
+/* ── key material never persists ─────────────────────────────── */
+static int yw_check_keys_never_persist(struct wallet *seller,
+                                       struct wallet *buyer,
+                                       struct node_db *ndb,
+                                       const struct key_id *seller_kid,
+                                       const struct key_id *buyer_kid,
+                                       const uint8_t token_txid[32],
+                                       const uint8_t ad_root[32])
+{
+    int failures = 0;
+    /* The exact key bytes the commits handled: the seller's token
+     * coin key and the buyer's funding coin key. */
+    struct privkey seller_key, buyer_key;
+    memset(&seller_key, 0, sizeof(seller_key));
+    memset(&buyer_key, 0, sizeof(buyer_key));
+    bool have_keys = wallet_dump_key(seller, seller_kid, &seller_key) &&
+                     wallet_dump_key(buyer, buyer_kid, &buyer_key);
+    char seller_hex[65] = { 0 }, buyer_hex[65] = { 0 };
+    zcl_hex_encode(seller_key.vch, 32, seller_hex);
+    zcl_hex_encode(buyer_key.vch, 32, buyer_hex);
+    const struct chain_params *cp = chain_params_get();
+    size_t sec_len = 0;
+    const unsigned char *sec_pfx =
+        chain_params_base58_prefix(cp, B58_SECRET_KEY, &sec_len);
+    char seller_wif[128] = { 0 }, buyer_wif[128] = { 0 };
+    bool have_wifs =
+        encode_secret(&seller_key, sec_pfx, sec_len, seller_wif,
+                      sizeof(seller_wif)) &&
+        encode_secret(&buyer_key, sec_pfx, sec_len, buyer_wif,
+                      sizeof(buyer_wif));
+    failures += yw_check_plan_rows_keyless(ndb, &seller_key, &buyer_key,
+                                           have_keys, have_wifs,
+                                           seller_hex, buyer_hex,
+                                           seller_wif, buyer_wif, ad_root);
+    failures += yw_check_commit_logs_keyless(seller, ndb, token_txid,
+                                             seller_hex, buyer_hex,
+                                             seller_wif, buyer_wif);
+    memory_cleanse(&seller_key, sizeof(seller_key));
+    memory_cleanse(&buyer_key, sizeof(buyer_key));
+    memory_cleanse(seller_hex, sizeof(seller_hex));
+    memory_cleanse(buyer_hex, sizeof(buyer_hex));
+    memory_cleanse(seller_wif, sizeof(seller_wif));
+    memory_cleanse(buyer_wif, sizeof(buyer_wif));
+    return failures;
+}
+
 /* ── the group ───────────────────────────────────────────────────── */
 
 int test_yardsale_wallet(void)
@@ -418,17 +1103,12 @@ int test_yardsale_wallet(void)
 #define seller_w (wallets->seller)
 #define buyer_w (wallets->buyer)
     struct key_id seller_kid, buyer_kid;
-    char addr[128];
-    uint8_t token_txid[32], seller_zcl_txid[32], buyer_zcl_txid[32];
-    bool fixture = wallets != NULL &&
-        node_db_open(&ndb, ":memory:") &&
-        yw_wallet_open(&seller_w, 0x5a, &seller_kid, addr, sizeof(addr)) &&
-        yw_fund_token(&seller_w, &seller_kid, YW_TOKEN_SUPPLY, token_txid) &&
-        yw_fund_ordinary(&seller_w, &seller_kid, YW_FUND_VALUE,
-                         seller_zcl_txid) &&
-        yw_wallet_open(&buyer_w, 0x6b, &buyer_kid, addr, sizeof(addr)) &&
-        yw_fund_ordinary(&buyer_w, &buyer_kid, YW_FUND_VALUE,
-                         buyer_zcl_txid);
+    uint8_t token_txid[32];
+    bool fixture = false;
+    if (wallets)
+        fixture = yw_fund_wallet_fixtures(&seller_w, &buyer_w, &ndb,
+                                          &seller_kid, &buyer_kid,
+                                          token_txid);
     YW_CHECK("fixture: wallets funded and plan ledger open", fixture);
     if (!fixture)
         goto done;
@@ -437,512 +1117,26 @@ int test_yardsale_wallet(void)
     struct zswap_quote_v1 ad;
     uint8_t ad_root[32];
     YW_CHECK("fixture: ad sealed and ingested",
-             yw_make_ad(&ad, token_txid, YW_TOKEN_SUPPLY, YW_ZCL_PRICE,
-                        0x0102030405060708ULL) &&
-             yw_ingest_ad(&ad, ad_root));
+             yw_seal_and_ingest(&ad, ad_root, token_txid, YW_TOKEN_SUPPLY,
+                                YW_ZCL_PRICE, 0x0102030405060708ULL));
 
-    /* ── status before any arm ───────────────────────────────────── */
-    {
-        struct json_value out;
-        json_init(&out);
-        YW_CHECK("status: unarmed node answers configured=false",
-                 yardsale_wallet_seller_status(YW_NOW, &out) ==
-                     YARDSALE_WALLET_OK &&
-                 !json_get_bool(json_get(&out, "configured")));
-        json_free(&out);
-    }
-
-    /* ── arm: plan ───────────────────────────────────────────────── */
+    failures += yw_check_status_before_arm();
     char plan_root_a[65];
-    {
-        struct json_value out;
-        json_init(&out);
-        bool ok = yardsale_wallet_seller_arm(
-            &seller_w, &ndb, token_txid, 1, ad_root, false, YW_NOW,
-            &out) == YARDSALE_WALLET_OK;
-        const char *stage = json_get_str(json_get(&out, "stage"));
-        const char *root = json_get_str(json_get(&out, "plan_root"));
-        const struct json_value *terms = json_get(&out, "terms");
-        YW_CHECK("arm plan: exact terms rendered, nothing armed", ok &&
-            stage && strcmp(stage, "plan") == 0 &&
-            !json_get_bool(json_get(&out, "committed")) &&
-            root && strlen(root) == 64 && terms &&
-            json_get_int(json_get(terms, "token_vout")) == 1 &&
-            json_get_int(json_get(terms, "token_input_sats")) ==
-                YW_TOKEN_DUST_VALUE &&
-            json_get_int(json_get(terms, "token_amount")) ==
-                (int64_t)YW_TOKEN_SUPPLY &&
-            json_get_int(json_get(terms, "zcl_amount_sats")) ==
-                (int64_t)YW_ZCL_PRICE &&
-            json_get_str(json_get(terms, "zcl_recv_address")) != NULL &&
-            json_get_str(json_get(terms, "change_address")) != NULL &&
-            json_get_int(json_get(terms, "deadline_unix")) == YW_EXPIRES &&
-            !yardsale_seller_profile_configured());
-        if (root)
-            snprintf(plan_root_a, sizeof(plan_root_a), "%s", root);
-        else
-            plan_root_a[0] = '\0';
-        json_free(&out);
-
-        struct db_yardsale_plan row;
-        char request_hex[65];
-        struct json_value probe;
-        json_init(&probe);
-        /* The row persisted; its plan_root matches the rendered one. */
-        bool row_ok = false;
-        if (yardsale_wallet_seller_arm(&seller_w, &ndb, token_txid, 1,
-                                       ad_root, false, YW_NOW,
-                                       &probe) == YARDSALE_WALLET_OK) {
-            const char *rh = json_get_str(json_get(&probe, "request_hash"));
-            const char *root2 = json_get_str(json_get(&probe, "plan_root"));
-            if (rh && root2) {
-                snprintf(request_hex, sizeof(request_hex), "%s", rh);
-                row_ok = strcmp(root2, plan_root_a) == 0 &&
-                         db_yardsale_plan_find(&ndb, plan_root_a, &row) &&
-                         strcmp(row.state, YARDSALE_PLAN_STATE_PLANNED) ==
-                             0;
-            }
-        }
-        json_free(&probe);
-        YW_CHECK("arm plan: idempotent re-plan, same plan_root, row "
-                 "persisted", row_ok);
-    }
-
-    /* ── arm: outpoint the wallet does not own ───────────────────── */
-    {
-        uint8_t foreign[32];
-        yw_pattern32(foreign, 0x77);
-        struct json_value out;
-        json_init(&out);
-        enum yardsale_wallet_status st = yardsale_wallet_seller_arm(
-            &seller_w, &ndb, foreign, 0, ad_root, false, YW_NOW, &out);
-        const char *code = json_get_str(json_get(&out, "code"));
-        YW_CHECK("arm: foreign outpoint refuses, names INPUT_NOT_OWNED",
-                 st == YARDSALE_WALLET_ERR_INPUT_NOT_OWNED &&
-                 !json_get_bool(json_get(&out, "ok")) && code &&
-                 strcmp(code, "INPUT_NOT_OWNED") == 0);
-        json_free(&out);
-        YW_CHECK("arm: refusal configured no profile",
-                 !yardsale_seller_profile_configured());
-    }
-
-    /* ── arm: token amount mismatch ──────────────────────────────── */
-    {
-        struct zswap_quote_v1 wrong_ad;
-        uint8_t wrong_root[32];
-        bool have = yw_make_ad(&wrong_ad, token_txid, YW_TOKEN_SUPPLY - 1,
-                               YW_ZCL_PRICE, 0x0102030405060709ULL) &&
-                    yw_ingest_ad(&wrong_ad, wrong_root);
-        struct json_value out;
-        json_init(&out);
-        enum yardsale_wallet_status st = yardsale_wallet_seller_arm(
-            &seller_w, &ndb, token_txid, 1, wrong_root, false, YW_NOW,
-            &out);
-        const char *code = json_get_str(json_get(&out, "code"));
-        YW_CHECK("arm: coin holding the wrong amount refuses "
-                 "TOKEN_MISMATCH", have &&
-                 st == YARDSALE_WALLET_ERR_TOKEN_MISMATCH && code &&
-                 strcmp(code, "TOKEN_MISMATCH") == 0);
-        json_free(&out);
-        YW_CHECK("arm: mismatch configured no profile",
-                 !yardsale_seller_profile_configured());
-    }
-
-    /* ── arm: commit, replay, answer ─────────────────────────────── */
-    {
-        struct json_value out;
-        json_init(&out);
-        bool ok = yardsale_wallet_seller_arm(
-            &seller_w, &ndb, token_txid, 1, ad_root, true, YW_NOW,
-            &out) == YARDSALE_WALLET_OK;
-        const char *digest = json_get_str(json_get(&out, "terms_digest"));
-        YW_CHECK("arm commit: profile armed, digest rendered", ok &&
-            json_get_bool(json_get(&out, "committed")) &&
-            !json_get_bool(json_get(&out, "idempotent_replay")) &&
-            json_get_bool(json_get(&out, "profile_configured")) &&
-            digest && strlen(digest) == 64 &&
-            yardsale_seller_profile_configured());
-        json_free(&out);
-
-        struct db_yardsale_plan row;
-        YW_CHECK("arm commit: ledger row COMMITTED/armed",
-                 db_yardsale_plan_find(&ndb, plan_root_a, &row) &&
-                 strcmp(row.state, YARDSALE_PLAN_STATE_COMMITTED) == 0 &&
-                 strcmp(row.result, "armed") == 0);
-
-        struct json_value replay;
-        json_init(&replay);
-        YW_CHECK("arm commit: replay is idempotent, no double arm",
-                 yardsale_wallet_seller_arm(&seller_w, &ndb, token_txid, 1,
-                                            ad_root, true, YW_NOW,
-                                            &replay) == YARDSALE_WALLET_OK &&
-                 json_get_bool(json_get(&replay, "idempotent_replay")) &&
-                 yardsale_seller_profile_configured());
-        json_free(&replay);
-    }
-
-    /* ── status while armed ──────────────────────────────────────── */
-    {
-        struct json_value out;
-        json_init(&out);
-        bool ok = yardsale_wallet_seller_status(YW_NOW, &out) ==
-                      YARDSALE_WALLET_OK &&
-                  json_get_bool(json_get(&out, "configured"));
-        const char *digest = json_get_str(json_get(&out, "terms_digest"));
-        YW_CHECK("status: armed node renders digest + deadline, never a "
-                 "key", ok && digest && strlen(digest) == 64 &&
-                 json_get(json_get(&out, "terms"), "zcl_recv_address") &&
-                 json_get_int(json_get(&out, "deadline_unix")) ==
-                     YW_EXPIRES);
-        json_free(&out);
-    }
-
-    /* ── armed: the ceremony accept is ANSWERED ──────────────────── */
-    {
-        uint8_t wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES];
-        size_t wire_len = 0;
-        uint8_t respond[ZSWAP_PARTIAL_WIRE_MAX_BYTES];
-        size_t respond_len = 0;
-        bool have = yw_accept_wire(&ad, 0x60, wire, sizeof(wire),
-                                   &wire_len);
-        int verdict = have ? yardsale_ceremony_accept_ingest(
-            wire, wire_len, 7, YW_NOW, respond, sizeof(respond),
-            &respond_len) : -1;
-        YW_CHECK("armed seller answers the accept (RESPOND)",
-                 verdict == ZSWAP_CEREMONY_WIRE_RESPOND && respond_len > 0);
-    }
-
-    /* ── disarm: the seller does NOT answer ──────────────────────── */
-    {
-        struct json_value out;
-        json_init(&out);
-        YW_CHECK("disarm: was_configured -> cleared",
-                 yardsale_wallet_seller_disarm(&out) ==
-                     YARDSALE_WALLET_OK &&
-                 json_get_bool(json_get(&out, "was_configured")) &&
-                 !json_get_bool(json_get(&out, "configured")) &&
-                 !yardsale_seller_profile_configured());
-        json_free(&out);
-
-        /* A DIFFERENT accept wire (the first is dedup-consumed): known
-         * sign, no profile -> relay, never an answer. */
-        uint8_t wire[ZSWAP_ACCEPT_WIRE_MAX_BYTES];
-        size_t wire_len = 0;
-        uint8_t respond[ZSWAP_PARTIAL_WIRE_MAX_BYTES];
-        size_t respond_len = 0;
-        bool have = yw_accept_wire(&ad, 0x61, wire, sizeof(wire),
-                                   &wire_len);
-        int verdict = have ? yardsale_ceremony_accept_ingest(
-            wire, wire_len, 8, YW_NOW, respond, sizeof(respond),
-            &respond_len) : -1;
-        YW_CHECK("disarmed seller does NOT answer (RELAY, keys cleansed "
-                 "out of the profile)",
-                 verdict == ZSWAP_CEREMONY_WIRE_RELAY && respond_len == 0);
-
-        struct json_value again;
-        json_init(&again);
-        YW_CHECK("disarm: idempotent on an unarmed node",
-                 yardsale_wallet_seller_disarm(&again) ==
-                     YARDSALE_WALLET_OK &&
-                 !json_get_bool(json_get(&again, "was_configured")));
-        json_free(&again);
-    }
-
-    /* ── arm: commit after plan expiry refuses and does not arm ──── */
-    {
-        struct zswap_quote_v1 ad2;
-        uint8_t ad2_root[32];
-        bool have = yw_make_ad(&ad2, token_txid, YW_TOKEN_SUPPLY,
-                               YW_ZCL_PRICE, 0x010203040506070aULL) &&
-                    yw_ingest_ad(&ad2, ad2_root);
-        struct json_value out;
-        json_init(&out);
-        bool planned = have && yardsale_wallet_seller_arm(
-            &seller_w, &ndb, token_txid, 1, ad2_root, false, YW_NOW,
-            &out) == YARDSALE_WALLET_OK;
-        json_free(&out);
-        struct json_value late;
-        json_init(&late);
-        enum yardsale_wallet_status st = yardsale_wallet_seller_arm(
-            &seller_w, &ndb, token_txid, 1, ad2_root, true,
-            YW_NOW + YARDSALE_WALLET_PLAN_TTL_SECS + 1, &late);
-        const char *code = json_get_str(json_get(&late, "code"));
-        YW_CHECK("arm: commit after plan expiry refuses PLAN_EXPIRED",
-                 planned && st == YARDSALE_WALLET_ERR_PLAN_EXPIRED &&
-                 code && strcmp(code, "PLAN_EXPIRED") == 0);
-        json_free(&late);
-        YW_CHECK("arm: expired commit did NOT arm the profile",
-                 !yardsale_seller_profile_configured());
-    }
-
-    /* ── buy: insufficient confirmed balance names the shortfall ─── */
-    {
-        struct zswap_quote_v1 dear_ad;
-        uint8_t dear_root[32];
-        bool have = yw_make_ad(&dear_ad, token_txid, YW_TOKEN_SUPPLY,
-                               YW_FUND_VALUE * 5,
-                               0x010203040506070bULL) &&
-                    yw_ingest_ad(&dear_ad, dear_root);
-        struct json_value out;
-        json_init(&out);
-        enum yardsale_wallet_status st = yardsale_wallet_buy(
-            &buyer_w, &ndb, dear_root, false, YW_NOW, &out);
-        const char *code = json_get_str(json_get(&out, "code"));
-        int64_t required = json_get_int(json_get(&out, "required_sats"));
-        int64_t available = json_get_int(json_get(&out, "available_sats"));
-        int64_t shortfall = json_get_int(json_get(&out, "shortfall_sats"));
-        YW_CHECK("buy: insufficient balance refuses and names the "
-                 "shortfall", have &&
-                 st == YARDSALE_WALLET_ERR_INSUFFICIENT && code &&
-                 strcmp(code, "INSUFFICIENT_CONFIRMED_FUNDS") == 0 &&
-                 required == (int64_t)YW_FUND_VALUE * 5 + YW_WALLET_FEE &&
-                 available == YW_FUND_VALUE &&
-                 shortfall == required - available);
-        json_free(&out);
-    }
-
-    /* ── buy: plan, commit, replay ───────────────────────────────── */
-    char buy_plan_root[65];
-    struct yw_flood_capture flood = { 0 };
-    yardsale_ceremony_set_flood(yw_flood_fn, &flood);
-    {
-        struct zswap_quote_v1 buy_ad;
-        uint8_t buy_root[32];
-        bool have = yw_make_ad(&buy_ad, token_txid, YW_TOKEN_SUPPLY,
-                               YW_ZCL_PRICE, 0x010203040506070cULL) &&
-                    yw_ingest_ad(&buy_ad, buy_root);
-        struct json_value out;
-        json_init(&out);
-        bool ok = have && yardsale_wallet_buy(
-            &buyer_w, &ndb, buy_root, false, YW_NOW,
-            &out) == YARDSALE_WALLET_OK;
-        const char *stage = json_get_str(json_get(&out, "stage"));
-        const char *root = json_get_str(json_get(&out, "plan_root"));
-        const struct json_value *terms = json_get(&out, "terms");
-        const struct json_value *inputs =
-            terms ? json_get(terms, "inputs") : NULL;
-        YW_CHECK("buy plan: price, fee, and the selected input rendered",
-                 ok && stage && strcmp(stage, "plan") == 0 &&
-                 root && strlen(root) == 64 && terms &&
-                 json_get_int(json_get(terms, "price_sats")) ==
-                     (int64_t)YW_ZCL_PRICE &&
-                 json_get_int(json_get(terms, "fee_sats")) ==
-                     YW_WALLET_FEE &&
-                 inputs && json_size(inputs) == 1 &&
-                 json_get_int(json_get(terms, "deadline_unix")) ==
-                     YW_EXPIRES);
-        if (root)
-            snprintf(buy_plan_root, sizeof(buy_plan_root), "%s", root);
-        else
-            buy_plan_root[0] = '\0';
-        json_free(&out);
-
-        struct json_value replan;
-        json_init(&replan);
-        const char *root2 = NULL;
-        bool ok2 = yardsale_wallet_buy(&buyer_w, &ndb, buy_root, false,
-                                       YW_NOW,
-                                       &replan) == YARDSALE_WALLET_OK;
-        root2 = json_get_str(json_get(&replan, "plan_root"));
-        YW_CHECK("buy plan: idempotent re-plan, same plan_root",
-                 ok2 && root2 && strcmp(root2, buy_plan_root) == 0);
-        json_free(&replan);
-
-        struct json_value commit;
-        json_init(&commit);
-        bool cok = yardsale_wallet_buy(&buyer_w, &ndb, buy_root, true,
-                                       YW_NOW,
-                                       &commit) == YARDSALE_WALLET_OK;
-        YW_CHECK("buy commit: zswapaccept flooded once, one pending buy",
-                 cok && json_get_bool(json_get(&commit, "committed")) &&
-                 !json_get_bool(json_get(&commit, "idempotent_replay")) &&
-                 flood.count == 1 &&
-                 strcmp(flood.last_command, ZSWAP_MSG_ACCEPT) == 0 &&
-                 flood.last_len > 0 &&
-                 yardsale_pending_count(YW_NOW) == 1);
-        json_free(&commit);
-
-        struct db_yardsale_plan row;
-        YW_CHECK("buy commit: ledger row COMMITTED/begun",
-                 db_yardsale_plan_find(&ndb, buy_plan_root, &row) &&
-                 strcmp(row.state, YARDSALE_PLAN_STATE_COMMITTED) == 0 &&
-                 strcmp(row.result, "begun") == 0);
-
-        struct json_value replay;
-        json_init(&replay);
-        YW_CHECK("buy commit: replay is idempotent — no double pending "
-                 "buy, no second flood",
-                 yardsale_wallet_buy(&buyer_w, &ndb, buy_root, true,
-                                     YW_NOW, &replay) ==
-                     YARDSALE_WALLET_OK &&
-                 json_get_bool(json_get(&replay, "idempotent_replay")) &&
-                 flood.count == 1 &&
-                 yardsale_pending_count(YW_NOW) == 1);
-        json_free(&replay);
-
-        /* ── buy: commit after plan expiry refuses ──────────────── */
-        struct zswap_quote_v1 ad3;
-        uint8_t ad3_root[32];
-        bool have3 = yw_make_ad(&ad3, token_txid, YW_TOKEN_SUPPLY,
-                                YW_ZCL_PRICE, 0x010203040506070dULL) &&
-                     yw_ingest_ad(&ad3, ad3_root);
-        struct json_value p3;
-        json_init(&p3);
-        bool planned3 = have3 && yardsale_wallet_buy(
-            &buyer_w, &ndb, ad3_root, false, YW_NOW,
-            &p3) == YARDSALE_WALLET_OK;
-        json_free(&p3);
-        struct yw_flood_capture flood3 = { 0 };
-        yardsale_ceremony_set_flood(yw_flood_fn, &flood3);
-        struct json_value late;
-        json_init(&late);
-        enum yardsale_wallet_status st3 = yardsale_wallet_buy(
-            &buyer_w, &ndb, ad3_root, true,
-            YW_NOW + YARDSALE_WALLET_PLAN_TTL_SECS + 1, &late);
-        const char *code3 = json_get_str(json_get(&late, "code"));
-        YW_CHECK("buy: commit after plan expiry refuses, nothing "
-                 "flooded, no pending buy",
-                 planned3 && st3 == YARDSALE_WALLET_ERR_PLAN_EXPIRED &&
-                 code3 && strcmp(code3, "PLAN_EXPIRED") == 0 &&
-                 flood3.count == 0);
-        json_free(&late);
-        yardsale_ceremony_set_flood(yw_flood_fn, &flood);
-
-        /* A durable ARMING claim is exclusive. A second confirmation must
-         * refuse before key access or any outbound accept. */
-        struct zswap_quote_v1 claim_ad;
-        uint8_t claim_root[32];
-        bool have_claim = yw_make_ad(&claim_ad, token_txid,
-                                     YW_TOKEN_SUPPLY, YW_ZCL_PRICE,
-                                     0x010203040506070fULL) &&
-                          yw_ingest_ad(&claim_ad, claim_root);
-        struct json_value claim_plan;
-        json_init(&claim_plan);
-        bool planned_claim = have_claim && yardsale_wallet_buy(
-            &buyer_w, &ndb, claim_root, false, YW_NOW,
-            &claim_plan) == YARDSALE_WALLET_OK;
-        const char *claim_plan_root =
-            json_get_str(json_get(&claim_plan, "plan_root"));
-        struct db_yardsale_plan claimed_row;
-        bool found_claim = claim_plan_root &&
-            db_yardsale_plan_find(&ndb, claim_plan_root, &claimed_row);
-        enum db_yardsale_plan_claim_result claim_result = found_claim
-            ? db_yardsale_plan_claim(&ndb, &claimed_row, YW_NOW)
-            : DB_YARDSALE_PLAN_CLAIM_ERROR;
-        json_free(&claim_plan);
-        struct yw_flood_capture claim_flood = { 0 };
-        yardsale_ceremony_set_flood(yw_flood_fn, &claim_flood);
-        struct json_value claim_retry;
-        json_init(&claim_retry);
-        enum yardsale_wallet_status claim_status = yardsale_wallet_buy(
-            &buyer_w, &ndb, claim_root, true, YW_NOW, &claim_retry);
-        const char *claim_code =
-            json_get_str(json_get(&claim_retry, "code"));
-        YW_CHECK("buy: an ARMING plan excludes a second confirmation",
-                 planned_claim &&
-                 claim_result == DB_YARDSALE_PLAN_CLAIMED &&
-                 claim_status == YARDSALE_WALLET_ERR_PLAN_CONFLICT &&
-                 claim_code && strcmp(claim_code, "PLAN_CONFLICT") == 0 &&
-                 claim_flood.count == 0);
-        json_free(&claim_retry);
-        yardsale_ceremony_set_flood(yw_flood_fn, &flood);
-    }
-
-    /* ── key material never persists ─────────────────────────────── */
-    {
-        /* The exact key bytes the commits handled: the seller's token
-         * coin key and the buyer's funding coin key. */
-        struct privkey seller_key, buyer_key;
-        memset(&seller_key, 0, sizeof(seller_key));
-        memset(&buyer_key, 0, sizeof(buyer_key));
-        bool have_keys = wallet_dump_key(&seller_w, &seller_kid,
-                                         &seller_key) &&
-                         wallet_dump_key(&buyer_w, &buyer_kid, &buyer_key);
-        char seller_hex[65] = { 0 }, buyer_hex[65] = { 0 };
-        zcl_hex_encode(seller_key.vch, 32, seller_hex);
-        zcl_hex_encode(buyer_key.vch, 32, buyer_hex);
-        const struct chain_params *cp = chain_params_get();
-        size_t sec_len = 0;
-        const unsigned char *sec_pfx =
-            chain_params_base58_prefix(cp, B58_SECRET_KEY, &sec_len);
-        char seller_wif[128] = { 0 }, buyer_wif[128] = { 0 };
-        bool have_wifs =
-            encode_secret(&seller_key, sec_pfx, sec_len, seller_wif,
-                          sizeof(seller_wif)) &&
-            encode_secret(&buyer_key, sec_pfx, sec_len, buyer_wif,
-                          sizeof(buyer_wif));
-
-        /* Plan rows: no key bytes in any column; the scan is proven by
-         * the ad_root prefix that MUST be present in the payloads. */
-        char ad_root_hex[65];
-        zcl_hex_encode(ad_root, 32, ad_root_hex);
-        YW_CHECK("keys: seller + buyer keys available for the scan",
-                 have_keys && have_wifs && seller_key.fValid &&
-                 buyer_key.fValid);
-        YW_CHECK("keys: plan rows carry neither key (hex form)",
-                 yw_plans_contain(&ndb, seller_hex) == 0 &&
-                 yw_plans_contain(&ndb, buyer_hex) == 0);
-        YW_CHECK("keys: plan rows carry neither key (WIF form)",
-                 yw_plans_contain(&ndb, seller_wif) == 0 &&
-                 yw_plans_contain(&ndb, buyer_wif) == 0);
-        YW_CHECK("keys: anti-vacuous — the scan finds the ad root that "
-                 "IS in a payload",
-                 yw_plans_contain(&ndb, ad_root_hex) > 0);
-
-        /* Logs: replay an arm commit (idempotent path touches no key —
-         * so drive a FRESH arm plan+commit for a new ad under the
-         * capture) plus a buy commit, then scan stdout/stderr. */
-        char dir[PATH_MAX];
-        bool logged = false, anti = false;
-        if (test_mkdtemp(dir, sizeof dir, "ywlog")) {
-            struct zswap_quote_v1 ad4;
-            uint8_t ad4_root[32];
-            bool have4 = yw_make_ad(&ad4, token_txid, YW_TOKEN_SUPPLY,
-                                    YW_ZCL_PRICE,
-                                    0x010203040506070eULL) &&
-                         yw_ingest_ad(&ad4, ad4_root);
-            struct yw_capture cap;
-            if (have4 && yw_capture_begin(&cap, dir)) {
-                struct json_value o1, o2;
-                json_init(&o1);
-                json_init(&o2);
-                (void)yardsale_wallet_seller_arm(&seller_w, &ndb,
-                                                 token_txid, 1, ad4_root,
-                                                 false, YW_NOW, &o1);
-                json_free(&o1);
-                (void)yardsale_wallet_seller_arm(&seller_w, &ndb,
-                                                 token_txid, 1, ad4_root,
-                                                 true, YW_NOW, &o2);
-                json_free(&o2);
-                yw_capture_end(&cap);
-                logged = !yw_capture_contains(&cap, seller_hex) &&
-                         !yw_capture_contains(&cap, buyer_hex) &&
-                         !yw_capture_contains(&cap, seller_wif) &&
-                         !yw_capture_contains(&cap, buyer_wif);
-                /* ANTI-VACUOUS: the same capture harness, handed the
-                 * key hex through a plain fprintf, DOES find it. */
-                if (yw_capture_begin(&cap, dir)) {
-                    fprintf(stdout, "%s\n", seller_hex);
-                    yw_capture_end(&cap);
-                    anti = yw_capture_contains(&cap, seller_hex);
-                }
-                unlink(cap.path_out);
-                unlink(cap.path_err);
-            }
-            rmdir(dir);
-            yardsale_seller_profile_clear(); /* leave nothing armed */
-        }
-        YW_CHECK("keys: neither key reaches stdout/stderr during "
-                 "plan+commit", logged);
-        YW_CHECK("keys: anti-vacuous — the log scanner sees a real leak",
-                 anti);
-        memory_cleanse(&seller_key, sizeof(seller_key));
-        memory_cleanse(&buyer_key, sizeof(buyer_key));
-        memory_cleanse(seller_hex, sizeof(seller_hex));
-        memory_cleanse(buyer_hex, sizeof(buyer_hex));
-        memory_cleanse(seller_wif, sizeof(seller_wif));
-        memory_cleanse(buyer_wif, sizeof(buyer_wif));
-    }
+    failures += yw_check_arm_plan(&seller_w, &ndb, token_txid, ad_root,
+                                  plan_root_a, sizeof plan_root_a);
+    failures += yw_check_arm_foreign_outpoint(&seller_w, &ndb, ad_root);
+    failures += yw_check_arm_token_mismatch(&seller_w, &ndb, token_txid);
+    failures += yw_check_arm_commit_replay(&seller_w, &ndb, token_txid,
+                                           ad_root, plan_root_a);
+    failures += yw_check_status_while_armed();
+    failures += yw_check_armed_seller_answers(&ad);
+    failures += yw_check_disarm_seller(&ad);
+    failures += yw_check_arm_plan_expired(&seller_w, &ndb, token_txid);
+    failures += yw_check_buy_shortfall(&buyer_w, &ndb, token_txid);
+    failures += yw_check_buy_plan_through_claim(&buyer_w, &ndb, token_txid);
+    failures += yw_check_keys_never_persist(&seller_w, &buyer_w, &ndb,
+                                            &seller_kid, &buyer_kid,
+                                            token_txid, ad_root);
 
     wallet_free(&seller_w);
     wallet_free(&buyer_w);
