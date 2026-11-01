@@ -406,17 +406,13 @@ static struct zcl_result sh_start_locked(const char *datadir,
         return sup;
     }
 
-    /* Inline start: one synchronous sweep before returning. The deferred
-     * start skips it; the thread already owes that sweep right now. */
-    if (inline_boot_sweep)
-        storage_housekeeping_sweep(datadir);
     return ZCL_OK;
 }
 
 /* start() and stop() are serialised by one lifecycle mutex held across the
- * whole of each, so a start can never interleave with a stop's join. g_lock
- * still guards only the data it always guarded. sh_stop_locked() is the body
- * of stop() for callers that already hold the lifecycle mutex. */
+ * spawn and the join, so a start can never interleave with a stop's join.
+ * g_lock still guards only the data it always guarded. sh_stop_locked() is
+ * the body of stop() for callers that already hold the lifecycle mutex. */
 static pthread_mutex_t g_lifecycle = PTHREAD_MUTEX_INITIALIZER;
 
 static struct zcl_result sh_start(const char *datadir, bool inline_boot_sweep)
@@ -424,6 +420,12 @@ static struct zcl_result sh_start(const char *datadir, bool inline_boot_sweep)
     pthread_mutex_lock(&g_lifecycle);
     struct zcl_result r = sh_start_locked(datadir, inline_boot_sweep);
     pthread_mutex_unlock(&g_lifecycle);
+    /* Inline start: one synchronous sweep before returning, run only after
+     * the lifecycle mutex is released. The sweep waits for the maintenance
+     * token, and a token holder may call stop(), which needs that mutex.
+     * The deferred start skips it; its thread owes that sweep right now. */
+    if (r.ok && inline_boot_sweep)
+        storage_housekeeping_sweep(datadir);
     return r;
 }
 
