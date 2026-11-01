@@ -140,6 +140,20 @@ uint64_t coins_math_decompress_amount(uint64_t x)
 
 /* ── Pure script-shape compression ────────────────────────────────── */
 
+/* Size 35, push-33, leading 0x02 or 0x03, and a trailing OP_CHECKSIG. */
+static bool script_is_compressed_p2pk(const struct script *s)
+{
+    return s->size == 35 && s->data[0] == 33 && s->data[34] == OP_CHECKSIG &&
+           (s->data[1] == 0x02 || s->data[1] == 0x03);
+}
+
+/* Size 67, push-65, leading 0x04, and a trailing OP_CHECKSIG. */
+static bool script_is_uncompressed_p2pk_pattern(const struct script *s)
+{
+    return s->size == 67 && s->data[0] == 65 && s->data[66] == OP_CHECKSIG &&
+           s->data[1] == 0x04;
+}
+
 bool coins_math_script_compress(const struct script *s,
                                 unsigned char *out, size_t *out_len)
 {
@@ -147,33 +161,28 @@ bool coins_math_script_compress(const struct script *s,
         return false;
 
     /* P2PKH: OP_DUP OP_HASH160 <20> <hash> OP_EQUALVERIFY OP_CHECKSIG */
-    if (s->size == 25 && s->data[0] == OP_DUP && s->data[1] == OP_HASH160 &&
-        s->data[2] == 20 && s->data[23] == OP_EQUALVERIFY &&
-        s->data[24] == OP_CHECKSIG) {
+    if (script_is_p2pkh(s)) {
         *out_len = 21;
         out[0] = 0x00;
         memcpy(out + 1, s->data + 3, 20);
         return true;
     }
     /* P2SH: OP_HASH160 <20> <hash> OP_EQUAL */
-    if (s->size == 23 && s->data[0] == OP_HASH160 && s->data[1] == 20 &&
-        s->data[22] == OP_EQUAL) {
+    if (script_is_p2sh(s)) {
         *out_len = 21;
         out[0] = 0x01;
         memcpy(out + 1, s->data + 2, 20);
         return true;
     }
     /* P2PK compressed: <33> <compressed pubkey> OP_CHECKSIG */
-    if (s->size == 35 && s->data[0] == 33 && s->data[34] == OP_CHECKSIG &&
-        (s->data[1] == 0x02 || s->data[1] == 0x03)) {
+    if (script_is_compressed_p2pk(s)) {
         *out_len = 33;
         out[0] = s->data[1];
         memcpy(out + 1, s->data + 2, 32);
         return true;
     }
     /* P2PK uncompressed: <65> <04 pubkey> OP_CHECKSIG */
-    if (s->size == 67 && s->data[0] == 65 && s->data[66] == OP_CHECKSIG &&
-        s->data[1] == 0x04) {
+    if (script_is_uncompressed_p2pk_pattern(s)) {
         struct pubkey pk;
         pubkey_set(&pk, s->data + 1, 65);
         if (!pubkey_is_fully_valid(&pk))

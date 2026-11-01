@@ -38,7 +38,7 @@
 #       pair — the sealed core's identity, mirrored into
 #       hotswap/core_seal_root.h. FROZEN: SECTION/TREE are additive and
 #       do not enter this preimage.
-7f6923fed0afa6423f44d77b6be0ae56e7083976267e600aacd92cb3106e31a2  core/UNSEAL.md
+e675ff9b934db32a4ea27bbe76f918f80f545affb76e4582407ab7fb6662dbc6  core/UNSEAL.md
 0154dee8b452e80f28e6d9c915483ab19cf93ee834518edc355885204dad4119  core/chainparams/include/chain/chainparams.h
 76417939b54d9b0d0b2309c66b90fd20a510de3492bb6f97a11f4198292aa01f  core/chainparams/include/chain/chainparamsbase.h
 1b38019875d5bb928f13ca3ac4f2d93f346c4a12699fbb41265f23cc3d7ee8c2  core/chainparams/include/chain/checkpoints.h
@@ -71,7 +71,7 @@ ca35c84dbf6958242224160aa7bc2669d0edc73173e6b11388fc91fc01b336c4  core/consensus
 bfae1f0e7082359f1701b41beb5663be5dffb0cd3c20644b4e97a642cfe4ecae  core/consensus/src/check_block.c
 be3cfedc662670b3bbd89e4ccfabae014909d83f45e17a6686d7d89041152293  core/consensus/src/checkpoints.c
 e4f9e1cb68b80844ce9f92ea879048d6cb445cdf8bdc0422964ca4c11eed752c  core/consensus/src/coinbase.c
-b2d2d8ac8105b0ce0386824aae5f83cc4c900c561378a2cbb5723fb847a13e39  core/consensus/src/coins_math.c
+cd97b5efd8c9df70c957a77374744659a954a42aecfbedb008b77c751eb44a7f  core/consensus/src/coins_math.c
 a08afc48f8cad33aa3cde3de7dd9c26e7d305217318d39c6455f2b0279fc4862  core/consensus/src/equihash.c
 53502c605c7dae35e91c1e2a68498768cc21dd0ea75bda4b36bdb7c71cd9601a  core/consensus/src/header_accept.c
 e7f62ec281e3848c1272ace80d8b8ae85848f9420bc2ea05d9a020aed53bb2f0  core/consensus/src/locktime.c
@@ -605,16 +605,16 @@ e84a4566fb4a01985ccbec9a4d3136a278422e1efe4f00cb8d0cf01480531064  core/params/in
 5ed0e4562789e7ea0bd9ff1238a27172669074b3d26201195aafffe1f863558e  core/params/module.cfg
 4d62b9a9b8824925e2f7efebca536ff924a96c7464067472cb07b9dd57e356dc  core/params/src/params.c
 9907071da9b95e13d236ac70fe8fa95612c7873ff9a88102d988c83ba8492b89  core/params/src/upgrades.c
-SECTION  567  4  1caf6f4a895e6e8d611b1ba5abf1a9216da6c540eaaa87c8c333b75633d5a6d8  core
+SECTION  567  4  296735028caec027cc65a48a7048dc2a76f8663cdcfc767358e461698aa0eb7f  core
 SECTION  12  16  6169522647bfed2194c0519612c2d0feeb318858ce714a56550e426c63b44f14  core/chainparams
 SECTION  6  24  63dff36c30ea1f9c45ed358d05006795f91e44b502d1d1b1196fc4a2cca2570b  core/chainparams/include
 SECTION  6  30  c247859f7b026dc314874fe7f2bfda58f885c05c44ff2fd601ebc3ce25ebeb48  core/chainparams/include/chain
 SECTION  6  20  e8e6989c7106c089c2a518cf992ebe45a4b97b2ae52fdc5e90d898331ceb766b  core/chainparams/src
-SECTION  36  14  87b7fc5e0a7b37a1c20f77a8b19f0a4b2d5d296d4c866ec7cbc437e8de0348d1  core/consensus
+SECTION  36  14  87c0c29490377cc5f846cdab4dbf043770fa1bc57713111d31862aa9345e97a6  core/consensus
 SECTION  17  22  9559692f7fa69fb22ef84266cbf87183f16208aa1a9e6ed3ee9178545d0cc295  core/consensus/include
 SECTION  17  29  6072e26bba85c0a24adbd98da9749c7e6b8ac10872726a2c7272df8cc7322fc0  core/consensus/include/domain
 SECTION  17  39  b8a8cb81bbcb38ef4e106701e3df63fb1a4385e27c904f592d8d686dc310879f  core/consensus/include/domain/consensus
-SECTION  19  18  817631ff8b111d22ed546a929d258243129ec1248f47c4cc17f4323d7fc6e56f  core/consensus/src
+SECTION  19  18  7d4b77618f1ce64008fa126b7f6b15010066797191a19199019b1391aea028d3  core/consensus/src
 SECTION  10  9  4a12df854665934805645f7b11b9ce279b93b7568fe58dde37f68d84913813da  core/math
 SECTION  5  17  3d74828940990b6914192791641041d1ad63de1b84d7693d2533f1c9b29a7edd  core/math/include
 SECTION  5  22  13bc29100524578193cb79036f24fe9e1d8538c0f45dcc4dd87956a25f4f2b38  core/math/include/core
@@ -685,5 +685,5 @@ SECTION  7  11  9b023bcd18300a51052f45e69609bb741b2832e3ce6e6a02fd21a12ea94647c0
 SECTION  4  19  e07dc0f2326862830b48105e02648f8d76dfeee9a859b7c56679c461e2cca7f1  core/params/include
 SECTION  4  29  5680a2f2d804163e77f94854ee18838480d785b74b297265f2f8a77db9d02242  core/params/include/consensus
 SECTION  2  15  8fdd673c41b8758e48c6fb225c15d7bbdf79f6816066a1d0c793d4bee2c5f6b1  core/params/src
-TREE  b732496931e363058d22d0680965d22e00057f1c334b385ab45b4302047e9896
-ROOT  9503ee107213be517ca9831abacf9e748678604a1b60ee43bc00a47b0702e8ff
+TREE  4b823bb9009a6b402535ebb69d48fe5d2e84d97e7568c97f7c9862d0d19751de
+ROOT  71ef769117a92abfcdff3cfa38ba14ec172e4f32f8e599361280c82a5544dbe7
