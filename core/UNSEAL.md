@@ -701,3 +701,7 @@ later lane flips it HARD.
 - 2026-11-01T21:03:57Z — REASON: test_tor: skip the write-failure half only when /dev/full is absent (ENOENT);  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: 7f9a83114dcad8a07da6d2715ad2b2faad098cba7914ccdf3b6e5c6a92d85f2b
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T21:04:12Z — REASON: Save peer state before the clean marker, not inside release-resources;  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: 014e91d505ced79a21656f7ccfa572d22f53e35a27a2ea1c0a15df2e6a9c2822
+  by: owner unseal ritual (make core-unseal)

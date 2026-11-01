@@ -377,6 +377,15 @@ static bool shutdown_persist_runtime_state(struct boot_svc_ctx *svc,
 {
     bool ok = true;
 
+    /* Peer state (banlist incl. its debounced tail, peers.dat + sidecar,
+     * anchors.dat) is durable operator state: save it here, in the
+     * durability-critical stage that precedes the clean marker. connman_free
+     * used to be its only saver, inside release-resources, a stage the
+     * watchdog may cut under load. Every connman thread is joined by now and
+     * the handles are still live. Best-effort like the periodic saves. */
+    if (svc->connman)
+        connman_save_addrman(svc->connman);
+
     rpc_blockchain_mmr_save(boot_node_db(svc));
     rpc_blockchain_mmb_save(boot_node_db(svc));
     rpc_blockchain_commitment_mmr_save(boot_node_db(svc));
@@ -469,6 +478,11 @@ static void shutdown_release_owned_resources(struct boot_svc_ctx *svc,
      * runner, supervisor (sticky escalator, net supervisor children) and the
      * thread registry in worker-drain / runtime-persist. An undrained
      * diagnostics capture returned early above and keeps it. */
+    /* Peer state was saved before the clean marker (runtime-persist).
+     * connman_save_addrman returns at once without a datadir, so this keeps
+     * connman_free from repeating that fsync-heavy save in the cuttable
+     * stage. Every thread that read the field is joined. */
+    svc->connman->datadir = NULL;
     connman_free(svc->connman);
     t = shutdown_submark("release.connman_free", t);
     printf("[shutdown] connman stopped\n");
