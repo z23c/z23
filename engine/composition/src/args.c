@@ -1349,6 +1349,44 @@ static int args_resolve_private_listeners(struct app_context *ctx)
     return 0;
 }
 
+/* Applies the defaults that depend on the whole argv and runs every
+ * fail-closed admission check. Returns 0 to continue booting, 1 on a refusal. */
+static int args_admit_options(struct app_context *ctx)
+{
+    /* Resolve the -onion-persist default AFTER the whole loop so flag order
+     * never matters (-addnode=/-tor/-onion-persist can appear in any
+     * order). Only applies when the operator did not name either explicit
+     * form above — see args_onion_persist_default(). */
+    if (!ctx->onion_persist && !ctx->onion_persist_forced_off)
+        ctx->onion_persist = args_onion_persist_default(
+            ctx->tor, ctx->addnode_peers, ctx->n_addnode_peers);
+    if (args_resolve_private_listeners(ctx) != 0)
+        return 1;
+    {
+        const char *onlynet_refusal =
+            app_onlynet_onion_refusal(ctx, app_tor_real_build_linked());
+        if (onlynet_refusal) {
+            fprintf(stderr, "Refused: %s\n", onlynet_refusal);
+            return 1;
+        }
+    }
+    /* Fail-closed Tor admission, LAST in the ladder so every flag it reads
+     * has been parsed, and still at parse time so a refused argv never
+     * reaches a datadir. The link-time fact is read HERE and injected, which
+     * is what lets the policy itself stay pure and testable on both build
+     * identities from one test binary. */
+    {
+        const bool real_tor_linked = app_tor_real_build_linked();
+        const char *tor_refusal =
+            app_tor_policy_refusal_code(ctx, real_tor_linked);
+        if (tor_refusal) {
+            args_report_tor_refusal(ctx, tor_refusal, real_tor_linked);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
                             bool *show_metrics)
 {
@@ -1384,37 +1422,8 @@ int args_parse_node_options(int argc, char **argv, struct app_context *ctx,
      * must still be honored, never silently dropped. */
     if (args_wallet_broadcast_policy(ctx))
         return 1;
-    /* Resolve the -onion-persist default AFTER the whole loop so flag order
-     * never matters (-addnode=/-tor/-onion-persist can appear in any
-     * order). Only applies when the operator did not name either explicit
-     * form above — see args_onion_persist_default(). */
-    if (!ctx->onion_persist && !ctx->onion_persist_forced_off)
-        ctx->onion_persist = args_onion_persist_default(
-            ctx->tor, ctx->addnode_peers, ctx->n_addnode_peers);
-    if (args_resolve_private_listeners(ctx) != 0)
+    if (args_admit_options(ctx) != 0)
         return 1;
-    {
-        const char *onlynet_refusal =
-            app_onlynet_onion_refusal(ctx, app_tor_real_build_linked());
-        if (onlynet_refusal) {
-            fprintf(stderr, "Refused: %s\n", onlynet_refusal);
-            return 1;
-        }
-    }
-    /* Fail-closed Tor admission, LAST in the ladder so every flag it reads
-     * has been parsed, and still at parse time so a refused argv never
-     * reaches a datadir. The link-time fact is read HERE and injected, which
-     * is what lets the policy itself stay pure and testable on both build
-     * identities from one test binary. */
-    {
-        const bool real_tor_linked = app_tor_real_build_linked();
-        const char *tor_refusal =
-            app_tor_policy_refusal_code(ctx, real_tor_linked);
-        if (tor_refusal) {
-            args_report_tor_refusal(ctx, tor_refusal, real_tor_linked);
-            return 1;
-        }
-    }
 
     return -1; /* parsed OK — caller continues booting */
 }
