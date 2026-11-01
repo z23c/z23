@@ -624,9 +624,12 @@ const uint8_t *sapling_get_spend_pk(size_t *len)
     return spend_pk_data;
 }
 
+static void pair_selftest_forget_locked(void);
+
 void sapling_free_params(void)
 {
     pthread_mutex_lock(&params_mu);
+    pair_selftest_forget_locked();
     if (!atomic_load(&params_loaded)) {
         pthread_mutex_unlock(&params_mu);
         return;
@@ -891,6 +894,7 @@ static bool pair_files_present(const char *dir)
  * stands for these exact files and ends when either is replaced or changed. */
 struct pair_identity {
     bool valid;
+    dev_t dev[2];
     ino_t ino[2];
     off_t size[2];
     time_t mtime[2];
@@ -912,6 +916,16 @@ struct pair_identity {
 #endif
 
 static struct pair_identity pair_refused_id; /* guarded by pair_mu */
+/* Files whose bytes passed the SHA-512 pins and then the prover self-test in
+ * this process. The verdict depends only on those bytes, the compiled-in keys
+ * and this binary, so it stands for the same files; a replaced or touched file
+ * differs in identity and is tested again. A failure is never stored. */
+static struct pair_identity pair_selftest_passed; /* guarded by params_mu */
+
+static void pair_selftest_forget_locked(void)
+{
+    memset(&pair_selftest_passed, 0, sizeof(pair_selftest_passed));
+}
 
 static bool pair_identity_read(const char *dir, struct pair_identity *id)
 {
@@ -924,6 +938,7 @@ static bool pair_identity_read(const char *dir, struct pair_identity *id)
         snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
         if (stat(path, &st) != 0)
             return false;
+        id->dev[i] = st.st_dev;
         id->ino[i] = st.st_ino;
         id->size[i] = st.st_size;
         id->mtime[i] = st.st_mtime;
@@ -996,13 +1011,30 @@ static bool full_set_failed_locked(void)
            !zclassic_sapling_prover_is_ready();
 }
 
+/* The prover self-test, skipped when these exact files already passed it in
+ * this process. `files` is NULL when the bytes have no stable file identity,
+ * which always runs it. A failed run clears the stored verdict. Caller holds
+ * params_mu. */
+static bool pair_selftest_passes_locked(const struct pair_identity *files)
+{
+    if (files && pair_identity_same(&pair_selftest_passed, files) &&
+        zclassic_sapling_prover_adopt_verified()) {
+        LOG_INFO("sapling_params",
+                 "prover self-test skipped: these files already passed it");
+        return true;
+    }
+    pair_selftest_forget_locked();
+    return zclassic_sapling_prover_run_self_test();
+}
+
 /* Takes ownership of both buffers, which have already passed their pinned
  * SHA-512. Checks the verifying-key prefix, arms the backend and runs its
  * self-test; on any refusal the buffers are freed and nothing stays resident.
  * Caller holds params_mu. */
 static bool params_pair_arm_locked(const char *params_dir,
                                    uint8_t *spend_bytes, size_t spend_len,
-                                   uint8_t *output_bytes, size_t output_len)
+                                   uint8_t *output_bytes, size_t output_len,
+                                   const struct pair_identity *files)
 {
     if (!params_pair_prefix_matches(spend_bytes, spend_len, output_bytes,
                                     output_len)) {
@@ -1023,7 +1055,7 @@ static bool params_pair_arm_locked(const char *params_dir,
         (const uint8_t *)SAPLING_PAIR_SPROUT_SENTINEL,
         strlen(SAPLING_PAIR_SPROUT_SENTINEL), "none");
 
-    if (!zclassic_sapling_prover_run_self_test()) {
+    if (!pair_selftest_passes_locked(files)) {
         zclassic_sapling_prover_unarm();
         params_discard_proving_keys_locked();
         /* The bytes passed their SHA-512 pin, so remembering their identity
@@ -1036,6 +1068,8 @@ static bool params_pair_arm_locked(const char *params_dir,
         return false;
     }
 
+    if (files)
+        pair_selftest_passed = *files;
     atomic_store(&proving_mode, SAPLING_PROVING_PAIR_ARMED);
     atomic_store(&proving_params_loaded, true);
     atomic_store(&pair_refusal, NULL);
@@ -1111,6 +1145,8 @@ static uint8_t *pair_read_pinned(const char *dir, const struct pair_file *pf)
 /* Caller holds params_mu. */
 static bool params_load_pair_locked(const char *params_dir)
 {
+    struct pair_identity before, after;
+    bool stable = pair_identity_read(params_dir, &before);
     if (full_set_failed_locked())
         return pair_refuse("full_set_loaded_but_self_test_failed");
 
@@ -1130,8 +1166,13 @@ static bool params_load_pair_locked(const char *params_dir)
         return false;
     }
 
+    /* The identity counts only if the files did not change while they were
+     * read and pinned. */
+    stable = stable && pair_identity_read(params_dir, &after) &&
+             pair_identity_same(&before, &after);
     return params_pair_arm_locked(params_dir, spend_bytes, PAIR_SPEND.size,
-                                  output_bytes, PAIR_OUTPUT.size);
+                                  output_bytes, PAIR_OUTPUT.size,
+                                  stable ? &after : NULL);
 }
 
 bool sapling_proving_available(void)
@@ -1244,7 +1285,8 @@ bool sapling_test_pair_arm_buffers(const uint8_t *spend, size_t spend_len,
     pthread_mutex_lock(&params_mu);
     bool ok = false;
     if (atomic_load(&params_loaded) || params_install_embedded_locked())
-        ok = params_pair_arm_locked("(test)", s, spend_len, o, output_len);
+        ok = params_pair_arm_locked("(test)", s, spend_len, o, output_len,
+                                    NULL);
     else {
         free(s); free(o);
     }

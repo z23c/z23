@@ -28,7 +28,10 @@
  *   6. A full four-file set still loads through sapling_init_params, reports
  *      full_set, and is not released when a send ends.
  *   7. The boot gate selects the pair only when both Sapling files are
- *      present, and otherwise behaves as before.
+ *      present, on every network, and otherwise behaves as before.
+ *   8. The self-test runs once per proven pair: a second send of the same
+ *      files skips it, replaced files are tested again, and a failure is never
+ *      remembered as a pass.
  *
  * Legs that need real parameter bytes read ~/.zcash-params and never write to
  * it: staged directories hold symlinks, plus private copies for the planted
@@ -148,6 +151,27 @@ static bool pair_copy_flipped(const char *real_dir, const char *dir,
             ok = false;
     }
     free(buf);
+    return ok;
+}
+
+/* Private byte-exact copy of one real file: a new inode, the same content. */
+static bool pair_copy_exact(const char *real_dir, const char *dir,
+                            const char *name)
+{
+    char src[1400], dst[1400];
+    pair_path(src, sizeof(src), real_dir, name);
+    pair_path(dst, sizeof(dst), dir, name);
+    FILE *in = fopen(src, "rb");
+    FILE *out = in ? fopen(dst, "wb") : NULL;
+    bool ok = out != NULL;
+    uint8_t buf[65536];
+    size_t n;
+    while (ok && (n = fread(buf, 1, sizeof(buf), in)) > 0)
+        ok = fwrite(buf, 1, n, out) == n;
+    if (in)
+        fclose(in);
+    if (out && fclose(out) != 0)
+        ok = false;
     return ok;
 }
 
@@ -902,6 +926,117 @@ static int pair_gate_legs(const char *real)
 
 int simnet_shielded_wallet_e2e_run_parts(int (*after_send)(const char *send));
 
+/* Open and close one proving context; true when it armed. */
+static bool pair_send_once(void)
+{
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    void *c = zclassic_sapling_proving_ctx_init();
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    printf("sapling_proving_pair: send context setup %ld ms\n",
+           (long)((t1.tv_sec - t0.tv_sec) * 1000 +
+                  (t1.tv_nsec - t0.tv_nsec) / 1000000));
+    bool armed = c != NULL && zclassic_sapling_prover_is_ready();
+    zclassic_sapling_proving_ctx_free(c);
+    return armed;
+}
+
+/* The self-test runs once per proven pair, not once per send: a second send
+ * of the same files skips it, replaced files are tested again, and a failure
+ * is never remembered as a pass. */
+static int pair_cache_legs(const char *real)
+{
+    int failures = 0;
+    char dir[1200], p[1400];
+    pair_reset();
+    PAIR_CHECK("cache fixture", pair_make_dir(dir, sizeof(dir)) &&
+                                pair_link(real, dir, kSpend) &&
+                                pair_link(real, dir, kOutput));
+    sapling_note_proving_pair_dir(dir);
+    int runs = zclassic_test_prover_self_test_runs();
+
+    PAIR_CHECK("the first send arms and runs the self-test",
+               pair_send_once() &&
+               zclassic_test_prover_self_test_runs() == runs + 1);
+    PAIR_CHECK("a second send of the same files arms without the self-test",
+               pair_send_once() &&
+               zclassic_test_prover_self_test_runs() == runs + 1);
+    PAIR_CHECK("a third send still skips it and nothing stays resident",
+               pair_send_once() &&
+               zclassic_test_prover_self_test_runs() == runs + 1 &&
+               pair_unarmed());
+
+    pair_path(p, sizeof(p), dir, kSpend);
+    PAIR_CHECK("replacing the spend file", unlink(p) == 0 &&
+               pair_copy_exact(real, dir, kSpend));
+    PAIR_CHECK("a replaced file is self-tested again",
+               pair_send_once() &&
+               zclassic_test_prover_self_test_runs() == runs + 2);
+    PAIR_CHECK("and the new files then skip it",
+               pair_send_once() &&
+               zclassic_test_prover_self_test_runs() == runs + 2);
+    pair_remove_dir(dir);
+    pair_reset();
+
+    PAIR_CHECK("failure fixture", pair_make_dir(dir, sizeof(dir)) &&
+                                  pair_link(real, dir, kSpend) &&
+                                  pair_link(real, dir, kOutput) &&
+                                  sapling_install_embedded_vks());
+    sapling_note_proving_pair_dir(dir);
+    sapling_set_spend_vk(NULL);
+    runs = zclassic_test_prover_self_test_runs();
+    PAIR_CHECK("a failing self-test refuses the send",
+               !pair_send_once() &&
+               zclassic_test_prover_self_test_runs() == runs + 1);
+    PAIR_CHECK("a failure is not remembered as a pass: it is tested and "
+               "refused again",
+               !pair_send_once() &&
+               zclassic_test_prover_self_test_runs() == runs + 2 &&
+               pair_unarmed());
+    pair_remove_dir(dir);
+    pair_reset();
+    return failures;
+}
+
+/* A node with only the Sapling pair, on a network other than mainnet. */
+static int pair_net_legs(const char *real, enum chain_network net)
+{
+    int failures = 0;
+    char dir[1200], empty[1200];
+    struct app_context ctx = {0};
+    enum chain_network prev = pair_network_of(chain_params_get());
+    chain_params_select(net);
+    pair_reset();
+    sapling_note_proving_pair_dir(NULL);
+    blocker_clear("shielded_spend_unavailable");
+
+    PAIR_CHECK("net fixture", pair_make_dir(dir, sizeof(dir)) &&
+                              pair_make_dir(empty, sizeof(empty)) &&
+                              pair_link(real, dir, kSpend) &&
+                              pair_link(real, dir, kOutput));
+    ctx.params_dir = empty;
+    PAIR_CHECK("no pair: the gate leaves the full-set loader to run",
+               boot_params_gate_evaluate(&ctx, chain_params_get(), empty) ==
+               BOOT_PARAMS_GATE_PRESENT);
+    ctx.params_dir = dir;
+    PAIR_CHECK("a pair-only directory selects the pair on this network",
+               boot_params_gate_evaluate(&ctx, chain_params_get(), dir) ==
+               BOOT_PARAMS_GATE_PAIR);
+    PAIR_CHECK("shielded verification is armed from the compiled-in keys",
+               pair_validation_armed());
+    PAIR_CHECK("no spend-unavailable blocker is raised",
+               !pair_blocker_present("shielded_spend_unavailable"));
+    PAIR_CHECK("nothing is resident before the first send", pair_unarmed());
+    PAIR_CHECK("the first send arms and proves the self-test bundle",
+               pair_send_once());
+    PAIR_CHECK("and nothing stays resident after it", pair_unarmed());
+    pair_remove_dir(dir);
+    pair_remove_dir(empty);
+    pair_reset();
+    chain_params_select(prev);
+    return failures;
+}
+
 /* Reads one whole file; the caller frees. */
 static uint8_t *pair_slurp(const char *real, const char *name, size_t *len)
 {
@@ -1069,6 +1204,9 @@ int test_sapling_proving_pair(void)
     failures += pair_selftest_memory_legs(real);
     failures += pair_arm_legs(real);
     failures += pair_gate_legs(real);
+    failures += pair_cache_legs(real);
+    failures += pair_net_legs(real, CHAIN_REGTEST);
+    failures += pair_net_legs(real, CHAIN_TESTNET);
     failures += pair_prefix_arm_legs(real);
     failures += pair_threads_leg(real);
     failures += pair_e2e_leg(real);

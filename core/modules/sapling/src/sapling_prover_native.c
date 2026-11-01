@@ -393,6 +393,14 @@ cleanup:
     return ok;
 }
 
+#ifdef ZCL_TESTING
+static _Atomic int g_self_test_runs;
+int zclassic_test_prover_self_test_runs(void)
+{
+    return atomic_load(&g_self_test_runs);
+}
+#endif
+
 bool zclassic_sapling_prover_run_self_test(void)
 {
     int expected = NATIVE_PROVER_INITIALIZED;
@@ -403,6 +411,9 @@ bool zclassic_sapling_prover_run_self_test(void)
         LOG_FAIL("sapling_prover", "cannot run native self-test from state=%s",
                  native_state_name(expected));
     }
+#ifdef ZCL_TESTING
+    atomic_fetch_add(&g_self_test_runs, 1);
+#endif
     if (!native_self_test_bundle()) {
         atomic_store(&g_native_state, NATIVE_PROVER_FAILED);
         LOG_FAIL("sapling_prover",
@@ -432,6 +443,13 @@ void zclassic_init_zksnark_params(
     }
     atomic_store(&g_native_params_initialized, true);
     atomic_store(&g_native_state, NATIVE_PROVER_INITIALIZED);
+}
+
+bool zclassic_sapling_prover_adopt_verified(void)
+{
+    int expected = NATIVE_PROVER_INITIALIZED;
+    return atomic_compare_exchange_strong(&g_native_state, &expected,
+                                          NATIVE_PROVER_READY);
 }
 
 void zclassic_sapling_prover_unarm(void)

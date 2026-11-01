@@ -87,7 +87,8 @@ stays listed with its remedy, but it does not mark the node unhealthy, stop
 public serving, or set `operator_needed`.
 
 Regtest and testnet never enforced the old params gate and still do not;
-none of the above is new for those networks.
+none of the above is new for those networks. The Sapling pair below is the one
+exception to "never enforced": it is used on every network.
 
 ## Sending from the Sapling pair alone (phones)
 
@@ -105,8 +106,13 @@ shielded funds from the pair.
   arms the prover and runs its self-test: a real Spend, Output and binding
   bundle that this node's own consensus verifier must accept.
 - **When the send ends** the proving bytes are freed and the prover is disarmed;
-  the next send repeats the checks. Files copied in or replaced after boot are
-  used with no restart.
+  the next send repeats the pin and prefix checks. The self-test runs once per
+  proven pair in a process: a later send of the same files (same device,
+  inode, size and times) skips it, a replaced or touched file is tested again,
+  and a failed self-test is never remembered as a pass. Files copied in or
+  replaced after boot are used with no restart.
+- **Every network** uses the pair the same way, including regtest and testnet,
+  whenever the full four-file set is not complete.
 - **A failed check refuses that one send** with a short reason code in the
   error's `status=` field and leaves the node validating on the compiled-in
   keys.

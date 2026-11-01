@@ -89,10 +89,10 @@ boot_params_gate_evaluate(const struct app_context *ctx,
 
     /* -mint-anchor-fast passes the crypto stages through without running
      * (jobs/mint_skip_crypto.h), so offline self-mint legitimately needs no zk
-     * params. Non-mainnet never enforced this gate. */
-    if (!params || strcmp(params->strNetworkID, "main") != 0 ||
-        !ctx || ctx->mint_anchor_fast)
+     * params. */
+    if (!params || !ctx || ctx->mint_anchor_fast)
         return BOOT_PARAMS_GATE_PRESENT;
+    const bool mainnet = strcmp(params->strNetworkID, "main") == 0;
 
     const char *missing = NULL;
     char missing_path[1100] = {0};
@@ -101,8 +101,17 @@ boot_params_gate_evaluate(const struct app_context *ctx,
     if (!missing)
         return BOOT_PARAMS_GATE_PRESENT;
 
-    /* Load-bearing step. A failure here is the original fatal condition. */
+    /* Outside mainnet an incomplete set was never enforced, and still is not,
+     * except that a Sapling pair is used exactly as on mainnet: the full-set
+     * loader runs for everything else. */
+    if (!mainnet && sapling_proving_status() != SAPLING_PROVING_PAIR_PRESENT)
+        return BOOT_PARAMS_GATE_PRESENT;
+
+    /* Load-bearing step. A failure here is the original fatal condition on
+     * mainnet; elsewhere the full-set loader is left to decide. */
     if (!sapling_install_embedded_vks()) {
+        if (!mainnet)
+            return BOOT_PARAMS_GATE_PRESENT;
         struct blocker_record rec;
         if (blocker_init(&rec, "params_missing", "crypto.params",
                          BLOCKER_PERMANENT,
@@ -120,7 +129,8 @@ boot_params_gate_evaluate(const struct app_context *ctx,
     }
 
     /* The full set is incomplete but the Sapling pair is there: a device that
-     * cannot carry the Sprout parameters can still prove Sapling spends. The
+     * cannot carry the Sprout parameters can still prove Sapling spends, on
+     * every network, since nothing in a Sapling spend reads a Sprout file. The
      * pair is checked and loaded at the first shielded send, and a refusal
      * there fails that send only. */
     if (sapling_proving_status() == SAPLING_PROVING_PAIR_PRESENT) {

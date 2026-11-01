@@ -529,3 +529,7 @@ later lane flips it HARD.
 - 2026-11-01T00:44:56Z — REASON: Sapling proving pair: include unistd.h for the access check in pair_unreadable_is_transient (params_init.c); owner unseal grant 2026-10-30 (you have authority to unseal core), wallet-side proving only, no verifier or consensus predicate touched
   old ROOT: d201db1f59cbf926503d1fb889c045587aa58d45e0c94fc505dee22c2c1fff5a
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T04:27:19Z — REASON: Sapling pair proving on every network and a per-process self-test verdict for unchanged pinned pair files: params_init.c gains a file-identity-keyed pass cache for the pair self-test and sapling_prover_native.c gains zclassic_sapling_prover_adopt_verified; owner-authorized 2026-10-30 for behaviour-scoped core changes. No verifying key, verification path or consensus predicate is touched.
+  old ROOT: 0b74d6fba3ef53dbdaa8fff52aabb6567f0c0b247d0d5593d65407cf56b2c65d
+  by: owner unseal ritual (make core-unseal)
