@@ -43,12 +43,14 @@ static int skip(size_t *pos, size_t len, size_t n)
     *pos += n; return 1;
 }
 
-/* Scan one transaction for Sapling output commitments.
- * Returns number of cms extracted, -1 on error. */
-static int scan_tx(const uint8_t *d, size_t len, size_t *pos,
-                   uint8_t (*cms)[32], int max_cms, int *total)
+/* On success, write overwintered, version, and is_sapling. Returns 0, or -1 when the header is short. */
+static int scan_tx_read_header(const uint8_t *d, size_t len, size_t *pos,
+                               int *overwintered_out, int *version_out,
+                               int *is_sapling_out)
 {
-    int found = 0;
+    *overwintered_out = 0;
+    *version_out = 0;
+    *is_sapling_out = 0;
 
     /* Header: version(4) — check overwintered bit and version */
     if (*pos + 4 > len) return -1;
@@ -64,7 +66,15 @@ static int scan_tx(const uint8_t *d, size_t len, size_t *pos,
     }
 
     int is_sapling = (overwintered && version == 4 && vgid == 0x892F2085U);
+    *overwintered_out = overwintered;
+    *version_out = version;
+    *is_sapling_out = is_sapling;
+    return 0;
+}
 
+/* Skip the transparent inputs. Returns 0, or -1 when the tx is short. */
+static inline int scan_tx_skip_vin(const uint8_t *d, size_t len, size_t *pos)
+{
     /* vin */
     uint64_t num_vin;
     if (!read_compact(d, len, pos, &num_vin)) return -1;
@@ -75,7 +85,12 @@ static int scan_tx(const uint8_t *d, size_t len, size_t *pos,
         if (!skip(pos, len, (size_t)script_len)) return -1; /* scriptSig */
         if (!skip(pos, len, 4)) return -1; /* sequence */
     }
+    return 0;
+}
 
+/* Skip the transparent outputs. Returns 0, or -1 when the tx is short. */
+static inline int scan_tx_skip_vout(const uint8_t *d, size_t len, size_t *pos)
+{
     /* vout */
     uint64_t num_vout;
     if (!read_compact(d, len, pos, &num_vout)) return -1;
@@ -85,50 +100,54 @@ static int scan_tx(const uint8_t *d, size_t len, size_t *pos,
         if (!read_compact(d, len, pos, &script_len)) return -1;
         if (!skip(pos, len, (size_t)script_len)) return -1; /* scriptPubKey */
     }
+    return 0;
+}
 
-    /* lock_time */
-    if (!skip(pos, len, 4)) return -1;
+/* Skip one Sprout JoinSplit body. Returns 0, or -1 when the tx is short. */
+static inline int scan_tx_skip_joinsplit(size_t *pos, size_t len,
+                                         int overwintered, int version)
+{
+    if (!skip(pos, len, 8 + 8 + 32)) return -1; /* vpub_old + vpub_new + anchor */
+    if (!skip(pos, len, 32 * 2)) return -1; /* nullifiers */
+    if (!skip(pos, len, 32 * 2)) return -1; /* commitments */
+    if (!skip(pos, len, 32)) return -1; /* ephemeral_key */
+    if (!skip(pos, len, 32)) return -1; /* random_seed */
+    if (!skip(pos, len, 32 * 2)) return -1; /* macs */
+    /* proof size: groth=192, phgr=296 */
+    int proof_size = (overwintered && version >= 4) ? 192 : 296;
+    if (!skip(pos, len, (size_t)proof_size)) return -1;
+    if (!skip(pos, len, 601 * 2)) return -1; /* ciphertexts */
+    return 0;
+}
 
-    if (!is_sapling) {
-        /* Pre-Sapling or Overwinter: skip JoinSplits if present */
-        if (overwintered) {
-            if (!skip(pos, len, 4)) return -1; /* expiry_height */
-        }
-        if (version >= 2) {
-            uint64_t num_js;
-            if (!read_compact(d, len, pos, &num_js)) return -1;
-            for (uint64_t i = 0; i < num_js; i++) {
-                if (!skip(pos, len, 8 + 8 + 32)) return -1; /* vpub_old + vpub_new + anchor */
-                if (!skip(pos, len, 32 * 2)) return -1; /* nullifiers */
-                if (!skip(pos, len, 32 * 2)) return -1; /* commitments */
-                if (!skip(pos, len, 32)) return -1; /* ephemeral_key */
-                if (!skip(pos, len, 32)) return -1; /* random_seed */
-                if (!skip(pos, len, 32 * 2)) return -1; /* macs */
-                /* proof size: groth=192, phgr=296 */
-                int proof_size = (overwintered && version >= 4) ? 192 : 296;
-                if (!skip(pos, len, (size_t)proof_size)) return -1;
-                if (!skip(pos, len, 601 * 2)) return -1; /* ciphertexts */
-            }
-            if (num_js > 0) {
-                if (!skip(pos, len, 32 + 64)) return -1; /* joinsplit_pubkey + sig */
-            }
-        }
-        return 0;
+/* Skip a non-Sapling tx suffix. Returns 0, or -1 when the tx is short. */
+static inline int scan_tx_skip_presapling(const uint8_t *d, size_t len, size_t *pos,
+                                          int overwintered, int version)
+{
+    /* Pre-Sapling or Overwinter: skip JoinSplits if present */
+    if (overwintered) {
+        if (!skip(pos, len, 4)) return -1; /* expiry_height */
     }
+    if (version >= 2) {
+        uint64_t num_js;
+        if (!read_compact(d, len, pos, &num_js)) return -1;
+        for (uint64_t i = 0; i < num_js; i++) {
+            if (scan_tx_skip_joinsplit(pos, len, overwintered, version) < 0)
+                return -1;
+        }
+        if (num_js > 0) {
+            if (!skip(pos, len, 32 + 64)) return -1; /* joinsplit_pubkey + sig */
+        }
+    }
+    return 0;
+}
 
-    /* Sapling v4 transaction */
-    if (!skip(pos, len, 4)) return -1; /* expiry_height */
-    if (!skip(pos, len, 8)) return -1; /* value_balance */
-
-    /* Shielded spends */
-    uint64_t num_spend;
-    if (!read_compact(d, len, pos, &num_spend)) return -1;
-    /* Each spend: cv(32) + anchor(32) + nullifier(32) + rk(32) + proof(192) + sig(64) */
-    if (!skip(pos, len, (size_t)num_spend * (32+32+32+32+192+64))) return -1;
-
-    /* Shielded outputs — THIS IS WHAT WE WANT */
-    uint64_t num_output;
-    if (!read_compact(d, len, pos, &num_output)) return -1;
+/* Copy each output cm that fits and skip the rest of that output. Returns how many were copied, or -1 when the tx is short. */
+static inline int scan_tx_copy_outputs(const uint8_t *d, size_t len, size_t *pos,
+                                       uint64_t num_output,
+                                       uint8_t (*cms)[32], int max_cms, int *total)
+{
+    int found = 0;
     /* Each output: cv(32) + CM(32) + ephemeral_key(32) + enc_ciphertext(580) + out_ciphertext(80) + proof(192) */
     for (uint64_t i = 0; i < num_output; i++) {
         if (*pos + 32 + 32 > len) return -1;
@@ -143,7 +162,13 @@ static int scan_tx(const uint8_t *d, size_t len, size_t *pos,
         /* Skip rest: ephemeral_key(32) + enc(580) + out(80) + proof(192) */
         if (!skip(pos, len, 32 + 580 + 80 + 192)) return -1;
     }
+    return found;
+}
 
+/* Skip v4 JoinSplits, their signature, and a binding signature when spends or outputs exist. Returns 0, or -1 when the tx is short. */
+static inline int scan_tx_sapling_tail(const uint8_t *d, size_t len, size_t *pos,
+                                       uint64_t num_spend, uint64_t num_output)
+{
     /* JoinSplits (still possible in v4) */
     uint64_t num_js;
     if (!read_compact(d, len, pos, &num_js)) return -1;
@@ -157,7 +182,61 @@ static int scan_tx(const uint8_t *d, size_t len, size_t *pos,
     if (num_spend > 0 || num_output > 0)
         if (!skip(pos, len, 64)) return -1;
 
+    return 0;
+}
+
+/* Parse the Sapling v4 suffix. Returns how many cms were copied, or -1 when the tx is short. */
+static int scan_tx_sapling(const uint8_t *d, size_t len, size_t *pos,
+                           uint8_t (*cms)[32], int max_cms, int *total)
+{
+    /* Sapling v4 transaction */
+    if (!skip(pos, len, 4)) return -1; /* expiry_height */
+    if (!skip(pos, len, 8)) return -1; /* value_balance */
+
+    /* Shielded spends */
+    uint64_t num_spend;
+    if (!read_compact(d, len, pos, &num_spend)) return -1;
+    /* Each spend: cv(32) + anchor(32) + nullifier(32) + rk(32) + proof(192) + sig(64) */
+    if (!skip(pos, len, (size_t)num_spend * (32+32+32+32+192+64))) return -1;
+
+    /* Shielded outputs — THIS IS WHAT WE WANT */
+    uint64_t num_output;
+    if (!read_compact(d, len, pos, &num_output)) return -1;
+    int found = scan_tx_copy_outputs(d, len, pos, num_output, cms, max_cms, total);
+    if (found < 0)
+        return -1;
+
+    if (scan_tx_sapling_tail(d, len, pos, num_spend, num_output) < 0)
+        return -1;
     return found;
+}
+
+/* Scan one transaction for Sapling output commitments.
+ * Returns number of cms extracted, -1 on error. */
+static int scan_tx(const uint8_t *d, size_t len, size_t *pos,
+                   uint8_t (*cms)[32], int max_cms, int *total)
+{
+    int overwintered = 0;
+    int version = 0;
+    int is_sapling = 0;
+
+    if (scan_tx_read_header(d, len, pos, &overwintered, &version,
+                            &is_sapling) < 0)
+        return -1;
+
+    if (scan_tx_skip_vin(d, len, pos) < 0)
+        return -1;
+
+    if (scan_tx_skip_vout(d, len, pos) < 0)
+        return -1;
+
+    /* lock_time */
+    if (!skip(pos, len, 4)) return -1;
+
+    if (!is_sapling)
+        return scan_tx_skip_presapling(d, len, pos, overwintered, version);
+
+    return scan_tx_sapling(d, len, pos, cms, max_cms, total);
 }
 
 int fast_scan_sapling_commitments(const uint8_t *block_data, size_t block_len,
