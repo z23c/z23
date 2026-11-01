@@ -246,8 +246,14 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb)
     /* Turbo-mode PRAGMAs are performance optimisations, not integrity
      * invariants — if any of them fail, fall back to the safe
      * defaults and carry on, never leaving a partial-turbo state (e.g.
-     * synchronous=OFF applied but the WAL bound not, so the WAL grows
+     * a fast pragma applied but the WAL bound not, so the WAL grows
      * unbounded). */
+    /* The level stays NORMAL, never OFF. In WAL mode NORMAL syncs nothing at
+     * commit, so commits cost the same, but every checkpoint, automatic or
+     * explicit, pays for the syncs: the log before it folds and the database
+     * file before the log is reset (measured by test_node_db_turbo_sync). At
+     * OFF a checkpoint resets the log with the folded pages still unsynced,
+     * and a power failure then takes back writes that had been acknowledged. */
     /* Bulk sync checkpoints RARELY, never NEVER. `wal_autocheckpoint=0`
      * removes the bound entirely, and bulk mode is only left by
      * node_db_normal_mode() at the END of a sync, so a process that dies
@@ -256,7 +262,7 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb)
      * enough to survive a slow disk, and journal_size_limit is what actually
      * returns the .wal file's blocks to the filesystem afterwards. */
     static const char *const turbo_pragmas[] = {
-        "PRAGMA synchronous=OFF",
+        "PRAGMA synchronous=NORMAL",
         "PRAGMA wal_autocheckpoint="
             ZCL_NODE_DB_PRAGMA_NUM(ZCL_NODE_DB_WAL_AUTOCKPT_PAGES_BULK),
         "PRAGMA journal_size_limit="
@@ -293,7 +299,7 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb)
 
     node_db_drop_indexes(ndb);
     node_db_note_turbo_mode(ndb, true, "ibd_turbo_mode", SQLITE_OK);
-    printf("db: IBD turbo mode (synchronous=OFF, indexes dropped)\n");
+    printf("db: IBD turbo mode (synchronous=NORMAL, bulk checkpoints, indexes dropped)\n");
     return true;
 }
 

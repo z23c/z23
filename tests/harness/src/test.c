@@ -2053,6 +2053,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     { extern int test_wallet_recovery_safety(void);
       *failures += test_wallet_recovery_safety(); }
     *failures += test_wallet_lock_shielded();
+    *failures += test_node_db_turbo_sync();
     *failures += test_wallet_diversified_receive();
     *failures += test_simnet_wallet_diversified_send();
     { extern int test_hstar_integrity(void);
