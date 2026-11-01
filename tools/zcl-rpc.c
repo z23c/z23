@@ -277,7 +277,7 @@ static void describe_curl_failure(int code, int max_secs, char *why,
 {
     switch (code) {
     case 7:
-        snprintf(why, cap, "could not connect (connection refused)");
+        snprintf(why, cap, "could not connect to the node");
         break;
     case 28:
         snprintf(why, cap, "timed out waiting for the node's reply after %d s",

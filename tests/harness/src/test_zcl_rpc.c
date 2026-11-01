@@ -83,6 +83,31 @@ static bool zrpc_datadir(char *dir, size_t cap)
     return fclose(f) == 0 && wrote;
 }
 
+/* Read the whole request, headers then Content-Length bytes of body, so the
+ * close that follows sends FIN, not RST: bytes left unread at close would
+ * turn curl's "empty reply" (52) into "connection reset" (56) when the
+ * request arrives in more than one segment. */
+static void zrpc_drain_request(int cfd)
+{
+    char req[8192];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        ssize_t n = read(cfd, req + got, sizeof(req) - 1 - got);
+        if (n <= 0) return;
+        got += (size_t)n;
+        req[got] = '\0';
+        const char *end = strstr(req, "\r\n\r\n");
+        if (!end) continue;
+        size_t body = 0;
+        const char *cl = strstr(req, "Content-Length:");
+        if (cl && cl < end)
+            for (cl += 15; *cl == ' '; cl++) {}
+        if (cl && cl < end)
+            for (; *cl >= '0' && *cl <= '9'; cl++) body = body * 10 + (size_t)(*cl - '0');
+        if (got >= (size_t)(end + 4 - req) + body) return;
+    }
+}
+
 /* Child side of a fork: accept one connection, read the request, send
  * reply_len bytes (possibly none) and close. Only async-signal-safe calls
  * run before _exit, so no atexit handler touches the parent's state. */
@@ -90,8 +115,7 @@ static void zrpc_serve_once(int lfd, const char *reply, size_t reply_len)
 {
     int cfd = accept(lfd, NULL, NULL);
     if (cfd >= 0) {
-        char req[4096];
-        (void)read(cfd, req, sizeof(req));
+        zrpc_drain_request(cfd);
         size_t off = 0;
         while (off < reply_len) {
             ssize_t n = write(cfd, reply + off, reply_len - off);
