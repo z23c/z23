@@ -824,6 +824,12 @@ static int test_ic_closure_capacity_follows_corpus(void)
     return failures;
 }
 
+/* The planner holds ZCL_DEVLOOP_MAX_PLAN_GROUPS groups. The fixture below
+ * names more than the 64-group accumulator the router used before it was
+ * widened; it cannot exceed the current accumulator, so the planner bound
+ * is checked against that earlier floor. */
+#define IC_WIDE_PLAN_MIN 64u
+
 /* A representative high-fanout graph plan must retain substantially more
  * groups than the direct path floor without becoming incomplete. */
 static const char *const ic_many_group_files[] = {
@@ -942,14 +948,14 @@ static int test_ic_large_plan_preserves_groups(void)
         ASSERT(zcl_devloop_plan_files(files, 1, &plan));
         ASSERT(zcl_devloop_plan_add_closure(IC_FIX_GROUP, files, 1, &plan));
 
-        ASSERT(plan.closure_groups_len > ZCL_AGENT_IMPACT_MAX_GROUPS);
+        ASSERT(plan.closure_groups_len > IC_WIDE_PLAN_MIN);
         ASSERT(plan.dims[ZCL_DEVLOOP_DIM_SEMANTIC].status ==
                ZCL_DEVLOOP_DIM_COMPLETE);
         ASSERT(ic_planned(&plan, "download"));
 
         struct zcl_devloop_plan direct;
         ASSERT(zcl_devloop_plan_files(ic_many_group_files, n, &direct));
-        ASSERT(direct.path_groups_len > ZCL_AGENT_IMPACT_MAX_GROUPS);
+        ASSERT(direct.path_groups_len > IC_WIDE_PLAN_MIN);
         ASSERT(direct.dims[ZCL_DEVLOOP_DIM_OPAQUE].status ==
                ZCL_DEVLOOP_DIM_COMPLETE);
 

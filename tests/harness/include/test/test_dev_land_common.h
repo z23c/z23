@@ -440,6 +440,7 @@ int test_dev_land_qualify_dirty_tree(void);
 int test_dev_land_qualify_group_verdicts(void);
 int test_dev_land_qualify_groups_reported(void);
 int test_dev_land_qualify_selection_refusals(void);
+int test_dev_land_qualify_wide_route(void);
 int test_dev_land_qualify_origin_moves(void);
 int test_dev_land_qualify_rebase_and_fetch_failures(void);
 int test_dev_land_drive_seq_landed_reply_stands_alone(void);

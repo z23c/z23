@@ -915,6 +915,49 @@ static void dlx_route_lost(const char *path, struct agent_impact_acc *acc)
     acc->groups_lost = true;
 }
 
+#define DLX_WIDE_GROUPS 100u
+
+/* One path routed to more groups than a 64-entry accumulator could hold. */
+static void dlx_route_wide(const char *path, struct agent_impact_acc *acc)
+{
+    size_t added = 0;
+    (void)path;
+    for (size_t i = 0; i < zcl_test_group_catalog_count() &&
+                       added < DLX_WIDE_GROUPS; i++) {
+        const char *name = zcl_test_group_catalog_at(i);
+        if (name && strlen(name) < ZCL_AGENT_IMPACT_GROUP_MAX) {
+            agent_impact_add_group(acc, name);
+            added++;
+        }
+    }
+}
+
+int test_dev_land_qualify_wide_route(void)
+{
+    int failures = 0;
+    struct dlx_call c;
+    bool called = false;
+    TEST("land: qualify selects every group of a path routed to more than 64") {
+        struct dlx_rig rig;
+        const struct json_value *groups;
+        ASSERT(DLX_WIDE_GROUPS > 64);
+        dlx_isolate("qualify_wide");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_wide", "", "",
+                               DLX_Q_LEAF_SMOKE));
+        zcl_dev_land_qualify_test_limits(dlx_route_wide, 0);
+        called = true;
+        ASSERT(dlx_qualify_submit(&c, &rig) && dlx_ok(&c));
+        groups = dlx_arr(&c, "groups");
+        ASSERT(groups != NULL && groups->num_children == DLX_WIDE_GROUPS);
+        ASSERT(dlx_queue_has_one());
+        PASS();
+    }
+_test_next:;
+    if (called) dlx_end(&c);
+    dlx_qualify_restore();
+    return failures;
+}
+
 int test_dev_land_qualify_selection_refusals(void)
 {
     int failures = 0;
