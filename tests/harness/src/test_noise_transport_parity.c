@@ -317,7 +317,7 @@ static void *handshake_thread(void *arg)
 }
 
 /* The whole handshake and a round trip use less than 64 KiB of thread stack. */
-static bool handshake_fits_small_stack(void)
+[[maybe_unused]] static bool handshake_fits_small_stack(void)
 {
     uint8_t *base = aligned_alloc(4096, PROBE_REGION_BYTES);
     if (!base)
@@ -666,7 +666,13 @@ int test_noise_transport_parity(void)
         }
         ASSERT(refuses_old_prologue_peer());
         ASSERT(stalls_on_classical_xx_peer());
+#if !defined(__SANITIZE_ADDRESS__)
+        /* AddressSanitizer pads every frame with redzones and may move locals
+         * to its fake stack, so a stack-depth budget measures the
+         * instrumentation, not the handshake. The fast and release runs of
+         * this group enforce the 64 KiB budget. */
         ASSERT(handshake_fits_small_stack());
+#endif
 
         /* Handshake deadline. */
         uint8_t ipriv[32], rpriv[32];
