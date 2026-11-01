@@ -63,8 +63,8 @@ static void wa_kv_amount_known(struct json_value *obj, const char *zat_key,
 }
 
 /* The node has evidence the chain is live: at least one peer past the
- * handshake and a tip or header that advanced, on the node's own monotonic
- * clock, within the last ten minutes. Peer start
+ * handshake and a block the node connected, by its own suspend-proof clock,
+ * within the last ten minutes. Peer start
  * heights go stale, so they say nothing about the chain's progress; a node
  * with no peer is offline, however recent its last block. */
 static bool wa_chain_live(const struct wallet_chain_view *v)

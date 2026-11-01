@@ -131,6 +131,17 @@ void reducer_frontier_provable_tip_set(int32_t hstar);
  * high value from a prior run/test group cannot leak into a fresh boot. */
 void reducer_frontier_provable_tip_reset(void);
 
+/* Milliseconds, on a clock that counts through device suspend, since the
+ * provable tip last advanced past a height this process had already
+ * published. -1 when it has not advanced since start (the first publish is
+ * only a baseline) or after a reset. Stamped where the tip is published, so
+ * it is when the node connected the block, not when anyone looked. */
+int64_t reducer_frontier_provable_tip_advance_age_ms(void);
+#ifdef ZCL_TESTING
+/* Pin the age clock to `now_ms`; a negative value restores the real clock. */
+void reducer_frontier_test_set_age_clock_ms(int64_t now_ms);
+#endif
+
 /* Durable trusted-base declaration (progress_meta, 8-byte LE height blob +
  * 32-byte hash blob — the coins_applied_height storage convention). Written
  * RAISE-ONLY by the cold-import/snapshot seed (tip_finalize_anchor.c);

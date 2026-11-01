@@ -21,6 +21,7 @@
 #include "jobs/refold_progress.h"
 #include "chain/chainparams.h"
 #include "chain/checkpoints.h"
+#include "platform/clock.h"
 #include "platform/time_compat.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
@@ -141,6 +142,33 @@ bool reducer_frontier_provable_tip_is_published(void)
     return atomic_load(&g_provable_tip) >= 0;
 }
 
+/* Boottime milliseconds of the last advance of the published tip; 0 = none. */
+static _Atomic int64_t g_provable_tip_advanced_ms;
+static _Atomic int64_t g_age_clock_pin_ms = -1;
+
+static int64_t frontier_age_clock_ms(void)
+{
+    int64_t pinned = atomic_load(&g_age_clock_pin_ms);
+    if (pinned >= 0)
+        return pinned;
+    int64_t now = clock_now_boottime_ms();
+    return now > 0 ? now : 1;
+}
+
+int64_t reducer_frontier_provable_tip_advance_age_ms(void)
+{
+    int64_t at = atomic_load(&g_provable_tip_advanced_ms);
+    int64_t now = frontier_age_clock_ms();
+    return at > 0 && now >= at ? now - at : -1;
+}
+
+#ifdef ZCL_TESTING
+void reducer_frontier_test_set_age_clock_ms(int64_t now_ms)
+{
+    atomic_store(&g_age_clock_pin_ms, now_ms);
+}
+#endif
+
 void reducer_frontier_provable_tip_set(int32_t hstar)
 {
     /* Store the value as given: the caller passes a value already produced by
@@ -148,7 +176,9 @@ void reducer_frontier_provable_tip_set(int32_t hstar)
      * finality anchor on a normal boot (and legitimately below it only during
      * a from-genesis refold, where reporting the folded prefix is correct).
      * Re-clamping here would mask a refold's true (below-anchor) H*. */
-    atomic_store(&g_provable_tip, (int_least32_t)hstar);
+    int_least32_t prev = atomic_exchange(&g_provable_tip, (int_least32_t)hstar);
+    if (prev >= 0 && hstar > prev)
+        atomic_store(&g_provable_tip_advanced_ms, frontier_age_clock_ms());
 }
 
 void reducer_frontier_provable_tip_reset(void)
@@ -157,6 +187,7 @@ void reducer_frontier_provable_tip_reset(void)
      * stage's g_last_advance_height=-1 reset. The next finalize advance
      * republishes the true H*; until then 0 is the honest provable height. */
     atomic_store(&g_provable_tip, REDUCER_FRONTIER_TIP_UNPUBLISHED);
+    atomic_store(&g_provable_tip_advanced_ms, 0);
     /* A refold/reorg reset rewrites the fold prefix from the (new) floor, so
      * drop the integrity-tag watermark too: the next fold re-verifies every row
      * it folds rather than trusting a prefix from before the reset. */

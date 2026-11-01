@@ -156,11 +156,12 @@ size_t wallet_history_page_start(const struct wallet_history_entry *e,
 /* A block or header newer than this many seconds shows the chain moving. */
 #define WALLET_CHAIN_FRESH_SECONDS 600
 
-/* True when this node saw its tip or best header advance within
- * WALLET_CHAIN_FRESH_SECONDS, `age_ms` being the node's own monotonic age of
- * that observation (node_health_snapshot.chain_progress_age_ms). Negative
- * means none was seen, which is never fresh. Block timestamps and the wall
- * clock play no part. */
+/* True when this node connected a block that advanced its tip within
+ * WALLET_CHAIN_FRESH_SECONDS, `age_ms` being the age of that event on a clock
+ * that counts through device suspend
+ * (node_health_snapshot.chain_progress_age_ms). Negative means none since
+ * start, which is never fresh. Block timestamps and the wall clock play no
+ * part. */
 bool wallet_chain_fresh(int64_t age_ms);
 
 /* The most notes one send spends, and so the most the summary counts per key. */

@@ -20,6 +20,7 @@
 #include "storage/body_history.h"
 #include "storage/progress_store.h"
 #include "event/event.h"
+#include "jobs/reducer_frontier.h"
 #include "platform/os_proc.h"
 #include "util/alerts.h"
 #include "util/mem_pressure.h"
@@ -219,37 +220,46 @@ static int health_test_chain_progress_age(void)
 {
     int failures = 0;
 
-    printf("node_health_service: chain_progress_age_ms follows the local clock... ");
+    printf("node_health_service: chain_progress_age_ms is the age of the tip advance... ");
     {
         struct node_health_snapshot health;
-        struct main_state ms_a, ms_b;
-        struct block_index tip_a, tip_b;
-        struct uint256 hash_a, hash_b;
-        /* A tip stamped two hours ahead: miner time must not matter. */
-        bool ok = health_test_init_main_tip(&ms_a, &tip_a, &hash_a, 100, 0x01,
-                                            -7200) &&
-                  health_test_init_main_tip(&ms_b, &tip_b, &hash_b, 101, 0x02,
-                                            -7200);
-        if (ok) {
-            node_health_test_reset_chain_progress(1000);
-            node_health_collect(&health, NULL, &ms_a);
-            ok = health.chain_progress_age_ms == -1; /* baseline only */
-            node_health_test_reset_chain_progress(1000);
-            node_health_collect(&health, NULL, &ms_a);
-            node_health_collect(&health, NULL, &ms_a);
-            ok = ok && health.chain_progress_age_ms == -1;
-            node_health_test_reset_chain_progress(5000);
-            node_health_collect(&health, NULL, &ms_a);
-            node_health_collect(&health, NULL, &ms_b);
-            ok = ok && health.chain_progress_age_ms == 0;
-            node_health_test_set_mono_ms(5000 + 599000);
-            node_health_collect(&health, NULL, &ms_b);
-            ok = ok && health.chain_progress_age_ms == 599000;
-            node_health_test_set_mono_ms(5000 + 700000);
-            node_health_collect(&health, NULL, &ms_b);
-            ok = ok && health.chain_progress_age_ms == 700000;
-            node_health_test_reset_chain_progress(-1);
-        }
+        bool ok = true;
+        reducer_frontier_provable_tip_reset();
+        reducer_frontier_test_set_age_clock_ms(1000);
+        node_health_collect(&health, NULL, NULL);
+        ok = ok && health.chain_progress_age_ms == -1;
+        reducer_frontier_provable_tip_set(100); /* first publish: baseline */
+        reducer_frontier_test_set_age_clock_ms(2000);
+        node_health_collect(&health, NULL, NULL);
+        ok = ok && health.chain_progress_age_ms == -1;
+        /* The block arrives at 2000; nobody looks until much later. */
+        reducer_frontier_provable_tip_set(101);
+        reducer_frontier_test_set_age_clock_ms(3000);
+        reducer_frontier_provable_tip_set(101); /* no advance, no restamp */
+        reducer_frontier_test_set_age_clock_ms(2000 + 599000);
+        node_health_collect(&health, NULL, NULL);
+        ok = ok && health.chain_progress_age_ms == 599000;
+        reducer_frontier_test_set_age_clock_ms(2000 + 700000);
+        node_health_collect(&health, NULL, NULL);
+        ok = ok && health.chain_progress_age_ms == 700000;
+        /* A suspend: the boottime clock jumps two hours. */
+        reducer_frontier_test_set_age_clock_ms(2000 + 7200000);
+        node_health_collect(&health, NULL, NULL);
+        ok = ok && health.chain_progress_age_ms == 7200000;
+        /* A rewind is not progress. */
+        reducer_frontier_provable_tip_set(99);
+        node_health_collect(&health, NULL, NULL);
+        ok = ok && health.chain_progress_age_ms == 7200000;
+        /* The real clock: an advance, 30 ms of waiting, then a read. */
+        reducer_frontier_test_set_age_clock_ms(-1);
+        reducer_frontier_provable_tip_reset();
+        reducer_frontier_provable_tip_set(100);
+        reducer_frontier_provable_tip_set(101);
+        platform_sleep_ms(30);
+        node_health_collect(&health, NULL, NULL);
+        ok = ok && health.chain_progress_age_ms >= 25 &&
+             health.chain_progress_age_ms < 5000;
+        reducer_frontier_provable_tip_reset();
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
