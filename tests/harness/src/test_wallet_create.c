@@ -822,9 +822,8 @@ static bool wcr_marked_deferred(const struct wallet *w, int from)
 /* A wallet that has scanned nothing and holds no valid birthday must not read
  * complete after boot defers its first catch-up. Created with no chain in the
  * datadir (the lost-reply route), it has no birthday; a seed chain above 1000
- * blocks arrives, and boot defers. The same holds for a valid floor whose gap
- * to the tip is 50000 blocks or more. */
-static int birthday_deferred_marker(void)
+ * blocks arrives, and boot defers. */
+static int birthday_deferred_no_chain(void)
 {
     int failures = 0;
     char dir[1024];
@@ -833,7 +832,7 @@ static int birthday_deferred_marker(void)
     memset(&run, 0, sizeof(run));
     bool created = wcr_create(dir, WCR_PASS, &run) && run.rc == 0;
     struct node_db ndb;
-    struct wcr_chain k, far;
+    struct wcr_chain k;
     bool open = created && wcr_open(&ndb, dir);
     bool made = open && wcr_chain_make(&k, 1002, -1, 0);
     int64_t b = 0;
@@ -851,7 +850,16 @@ static int birthday_deferred_marker(void)
         wcr_chain_free(&k);
     if (open)
         node_db_close(&ndb);
+    return failures;
+}
 
+/* The same holds for a valid floor whose gap to the tip is 50000 blocks or
+ * more, and a wallet that has already scanned is not marked. */
+static int birthday_deferred_gap(void)
+{
+    int failures = 0;
+    struct node_db ndb;
+    struct wcr_chain far;
     char dir2[1024];
     wcr_fixture(dir2, sizeof(dir2), "birthday_gap");
     bool seeded = wcr_block(dir2, 0x09, 100, 3) && wcr_block(dir2, 0x0a, 200, 3);
@@ -897,7 +905,8 @@ static int t_birthday(void)
     failures += birthday_rewound();
     failures += restored_marker(dir);
     failures += birthday_absent_when_restored();
-    failures += birthday_deferred_marker();
+    failures += birthday_deferred_no_chain();
+    failures += birthday_deferred_gap();
     return failures;
 }
 
@@ -1193,11 +1202,11 @@ static bool wcr_payment_tx(struct transaction *tx, const char *address,
     uint8_t out[ZC_SAPLING_OUTCIPHERTEXT_SIZE] = {0};
     uint8_t proof[GROTH_PROOF_SIZE] = {0};
     memset(ovk, 0x5a, sizeof(ovk));
+    transaction_init(tx);
     if (!sapling_decode_payment_address(address, d, pk_d) ||
         !sapling_build_output_description(ovk, d, pk_d, value, NULL, cv, cm,
                                           epk, enc, out, proof, NULL))
         return false;
-    transaction_init(tx);
     tx->version = 4;
     tx->overwintered = true;
     tx->value_balance = -(int64_t)value;
@@ -1357,10 +1366,18 @@ static int restore_passphrase_cases(void)
     }
     memory_cleanse(seed, sizeof(seed));
     memory_cleanse(got, sizeof(got));
+    return failures;
+}
 
+/* A passphrase that cannot be used writes nothing. */
+static int restore_passphrase_refusals(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
     WCR_CHECK("setup: a second seeded datadir",
               wcr_seeded_chain(dir, sizeof(dir), "rs_argv", false));
-    ran = wcr_restore_cli(dir, ",\"passphrase\":\"" WCR_PASS "\"", false,
+    bool ran = wcr_restore_cli(dir, ",\"passphrase\":\"" WCR_PASS "\"", false,
                           &run);
     WCR_CHECK("a passphrase in argv is refused and nothing is written",
               ran && wcr_error_is(&run, "STDIN_REQUIRED") &&
@@ -1444,11 +1461,23 @@ static int restore_birthday_cases(void)
               !wcr_data_bool(&run, "birthday_rejected") &&
               !wcr_data_bool(&run, "history_below_seed_hidden"));
 
+    return failures;
+}
+
+/* A birthday this datadir cannot verify falls back to the marker from 0. */
+static int restore_birthday_rejected(void)
+{
+    int failures = 0;
+    char dir[1024];
+    struct wcr_run run;
+    struct node_db ndb;
+    int64_t b = 0;
+    uint8_t hash[32];
     WCR_CHECK("setup: a datadir for a wrong hash",
               wcr_seeded_chain(dir, sizeof(dir), "rs_bday_bad", false));
-    ran = wcr_restore_cli(dir, ",\"birthday\":{\"height\":1000,\"hash\":\""
+    bool ran = wcr_restore_cli(dir, ",\"birthday\":{\"height\":1000,\"hash\":\""
                           WCR_HASH_77 "\"}", true, &run);
-    open = ran && run.rc == 0 && wcr_open(&ndb, dir);
+    bool open = ran && run.rc == 0 && wcr_open(&ndb, dir);
     WCR_CHECK("a wrong birthday hash stores no birthday",
               open && !db_wallet_birthday_get(&ndb, &b, hash));
     if (open)
@@ -1498,8 +1527,10 @@ static int t_restore_inputs(void)
 {
     int failures = 0;
     failures += restore_passphrase_cases();
+    failures += restore_passphrase_refusals();
     failures += restore_shielded_only_case();
     failures += restore_birthday_cases();
+    failures += restore_birthday_rejected();
     failures += restore_below_seed_cases();
     return failures;
 }

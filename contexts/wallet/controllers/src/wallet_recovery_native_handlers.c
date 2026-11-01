@@ -57,8 +57,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/resource.h>
 #include <unistd.h>
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
@@ -427,6 +429,34 @@ static void wrp_push_birthday_input(struct json_value *obj,
     json_free(&b);
 }
 
+/* The reply code for a refused recovery. The names are separate because they
+ * are separate operator moves: "your database is damaged and I did not touch
+ * it" differs from "decide how these keys are stored first". None is a generic
+ * failure and none ever reports ok. */
+static const char *wrp_failure_code(int code, enum zcl_command_exit *ex)
+{
+    static const struct {
+        int code;
+        const char *name;
+        enum zcl_command_exit exit;
+    } map[] = {
+        { -60, "INVALID_PHRASE", ZCL_COMMAND_EXIT_INVALID },
+        { -61, "DATADIR_LOCKED", ZCL_COMMAND_EXIT_BLOCKED },
+        { -62, "WALLET_ALREADY_PRESENT", ZCL_COMMAND_EXIT_BLOCKED },
+        { -66, "NODE_DB_UNREADABLE", ZCL_COMMAND_EXIT_BLOCKED },
+        { -67, "WALLET_AT_REST_UNDECIDED", ZCL_COMMAND_EXIT_BLOCKED },
+        { -68, "PASSPHRASE_TOO_SHORT", ZCL_COMMAND_EXIT_INVALID },
+    };
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        if (map[i].code == code) {
+            *ex = map[i].exit;
+            return map[i].name;
+        }
+    }
+    *ex = ZCL_COMMAND_EXIT_FAILED;
+    return "RECOVERY_REFUSED";
+}
+
 static void wrp_restore_body(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -467,18 +497,8 @@ static void wrp_restore_body(
 
     if (!r.ok) {
         wrp_push_report(reply, &rep);
-        const char *code = "RECOVERY_REFUSED";
-        enum zcl_command_exit ex = ZCL_COMMAND_EXIT_FAILED;
-        if (r.code == -60) { code = "INVALID_PHRASE"; ex = ZCL_COMMAND_EXIT_INVALID; }
-        else if (r.code == -61) { code = "DATADIR_LOCKED"; ex = ZCL_COMMAND_EXIT_BLOCKED; }
-        else if (r.code == -62) { code = "WALLET_ALREADY_PRESENT"; ex = ZCL_COMMAND_EXIT_BLOCKED; }
-        /* Separate names because they are separate operator moves: one says
-         * "your database is damaged and I did not touch it", the other says
-         * "decide how these keys are stored first". Neither is a generic
-         * failure and neither ever reports ok. */
-        else if (r.code == -66) { code = "NODE_DB_UNREADABLE"; ex = ZCL_COMMAND_EXIT_BLOCKED; }
-        else if (r.code == -67) { code = "WALLET_AT_REST_UNDECIDED"; ex = ZCL_COMMAND_EXIT_BLOCKED; }
-        else if (r.code == -68) { code = "PASSPHRASE_TOO_SHORT"; ex = ZCL_COMMAND_EXIT_INVALID; }
+        enum zcl_command_exit ex;
+        const char *code = wrp_failure_code(r.code, &ex);
         /* r.message describes the shape of the failure and never quotes
          * the phrase; the evidence field carries the datadir, not the
          * words. */
@@ -621,8 +641,10 @@ static void wrp_push_created(struct zcl_command_reply *reply,
  * one path that outlives it. */
 static void wrp_disable_core_dumps(void)
 {
+#ifndef _WIN32
     struct rlimit none = { 0, 0 };
     (void)setrlimit(RLIMIT_CORE, &none);
+#endif
 #ifdef __linux__
     (void)prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
 #endif

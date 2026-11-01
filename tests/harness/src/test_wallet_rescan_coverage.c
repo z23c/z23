@@ -123,6 +123,95 @@ static void wrc_params(struct json_value *p, int start, int stop)
     json_free(&v);
 }
 
+/* H and J. A first boot scan starts at the birthday floor, and a pending
+ * marker survives a boot read that tried no Sapling key. */
+static int wrc_boot_floor_and_marker(struct wallet *w, struct main_state *ms,
+                                     const char *datadir)
+{
+    int failures = 0;
+    struct wallet_rescan_report rep;
+    /* H. A wallet that has scanned nothing starts at the birthday floor
+     * boot gave it; a wallet that has scanned does not, whatever the floor. */
+    w->best_block_height = 0;
+    w->initial_scan_floor = 100;
+    memset(&rep, 0, sizeof(rep));
+    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
+    WRC_CHECK("H: a first scan starts at the birthday floor, not at genesis",
+              rep.start_height == 100 && rep.stop_height == WRC_NBLOCKS - 1);
+    w->best_block_height = 149;
+    memset(&rep, 0, sizeof(rep));
+    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
+    WRC_CHECK("H: a wallet that has scanned continues from its scan height",
+              rep.start_height == 150);
+    w->initial_scan_floor = 0;
+    w->best_block_height = WRC_NBLOCKS - 1;
+
+    /* J. The boot catch-up keeps a pending marker when it read every body but
+     * tried no Sapling key; once the wallet holds one, the same read clears it. */
+    w->scan_retry.pending = true;
+    w->scan_retry.from = 0;
+    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
+             WALLET_RESTORE_BLOCKER_UNREAD);
+    memset(&rep, 0, sizeof(rep));
+    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
+    WRC_CHECK("J: a boot read that tried no Sapling key keeps the marker",
+              w->scan_retry.pending && rep.blocks_scanned == rep.blocks_in_range &&
+              rep.shielded_txs_unscanned > 0);
+    uint8_t jseed[32], jd[11], jpk[32];
+    memset(jseed, 0x3d, sizeof(jseed));
+    (void)sapling_keystore_set_seed(&w->sapling_keys, jseed);
+    (void)sapling_keystore_new_address(&w->sapling_keys, jd, jpk);
+    memset(&rep, 0, sizeof(rep));
+    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
+    WRC_CHECK("J: the same boot read with a Sapling key clears it",
+              !w->scan_retry.pending && rep.shielded_txs_unscanned == 0);
+    sapling_keystore_free(&w->sapling_keys);
+    sapling_keystore_init(&w->sapling_keys);
+    w->best_block_height = WRC_NBLOCKS - 1;
+    return failures;
+}
+
+/* I. A rescan clears the marker only when it reads the whole marked range. */
+static int wrc_rescan_marker(struct wallet *w, struct main_state *ms,
+                             const char *netdir, struct block_index *idx)
+{
+    int failures = 0;
+    struct wallet_rescan_report rep;
+    /* I. The unread marker waits for a read of the whole marked range. A
+     * rescan that starts above it, stops before the tip or misses a body
+     * keeps it; one that reads from the marker to the tip clears it. */
+    w->scan_retry.pending = true;
+    w->scan_retry.from = 0;
+    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
+             WALLET_RESTORE_BLOCKER_UNREAD);
+    (void)wallet_rescan_report(w, &ms->chain_active, 50, -1, netdir, &rep);
+    WRC_CHECK("I: a rescan starting above the marker keeps it",
+              w->scan_retry.pending && rep.blocks_scanned == rep.blocks_in_range);
+    (void)wallet_rescan_report(w, &ms->chain_active, 0, 100, netdir, &rep);
+    WRC_CHECK("I: a rescan stopping before the tip keeps it",
+              w->scan_retry.pending);
+    (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
+    WRC_CHECK("I: a whole rescan that tried no Sapling key keeps it",
+              w->scan_retry.pending && rep.shielded_txs_unscanned > 0);
+    uint8_t sapling_seed[32];
+    memset(sapling_seed, 0x5c, sizeof(sapling_seed));
+    uint8_t sd[11], spk[32];
+    (void)sapling_keystore_set_seed(&w->sapling_keys, sapling_seed);
+    (void)sapling_keystore_new_address(&w->sapling_keys, sd, spk);
+    idx[100].nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
+    (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
+    WRC_CHECK("I: a rescan that misses one body keeps it",
+              w->scan_retry.pending && rep.blocks_scanned < rep.blocks_in_range);
+    idx[100].nStatus |= BLOCK_HAVE_DATA;
+    (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
+    WRC_CHECK("I: a whole rescan that read every body clears it",
+              !w->scan_retry.pending && rep.blocks_scanned == WRC_NBLOCKS &&
+              wallet_scanned_through_height(w) == WRC_NBLOCKS - 1);
+    sapling_keystore_free(&w->sapling_keys);
+    sapling_keystore_init(&w->sapling_keys);
+    return failures;
+}
+
 /* E. The boot catch-up on a regtest node's own layout. node.db lives in the
  * base datadir, but every block writer puts bodies under
  * <base>/regtest/blocks. Boot hands the catch-up its base datadir. A rescan
@@ -169,77 +258,8 @@ static int wrc_boot_catch_up_body_root(struct wallet *w,
     WRC_CHECK("E: a wallet already at the tip runs no rescan",
               boot_wallet_catch_up(w, &ms->chain_active, datadir, NULL) == -1);
 
-    /* H. A wallet that has scanned nothing starts at the birthday floor
-     * boot gave it; a wallet that has scanned does not, whatever the floor. */
-    w->best_block_height = 0;
-    w->initial_scan_floor = 100;
-    memset(&rep, 0, sizeof(rep));
-    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
-    WRC_CHECK("H: a first scan starts at the birthday floor, not at genesis",
-              rep.start_height == 100 && rep.stop_height == WRC_NBLOCKS - 1);
-    w->best_block_height = 149;
-    memset(&rep, 0, sizeof(rep));
-    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
-    WRC_CHECK("H: a wallet that has scanned continues from its scan height",
-              rep.start_height == 150);
-    w->initial_scan_floor = 0;
-    w->best_block_height = WRC_NBLOCKS - 1;
-
-    /* J. The boot catch-up keeps a pending marker when it read every body but
-     * tried no Sapling key; once the wallet holds one, the same read clears it. */
-    w->scan_retry.pending = true;
-    w->scan_retry.from = 0;
-    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
-             WALLET_RESTORE_BLOCKER_UNREAD);
-    memset(&rep, 0, sizeof(rep));
-    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
-    WRC_CHECK("J: a boot read that tried no Sapling key keeps the marker",
-              w->scan_retry.pending && rep.blocks_scanned == rep.blocks_in_range &&
-              rep.shielded_txs_unscanned > 0);
-    uint8_t jseed[32], jd[11], jpk[32];
-    memset(jseed, 0x3d, sizeof(jseed));
-    (void)sapling_keystore_set_seed(&w->sapling_keys, jseed);
-    (void)sapling_keystore_new_address(&w->sapling_keys, jd, jpk);
-    memset(&rep, 0, sizeof(rep));
-    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
-    WRC_CHECK("J: the same boot read with a Sapling key clears it",
-              !w->scan_retry.pending && rep.shielded_txs_unscanned == 0);
-    sapling_keystore_free(&w->sapling_keys);
-    sapling_keystore_init(&w->sapling_keys);
-    w->best_block_height = WRC_NBLOCKS - 1;
-
-    /* I. The unread marker waits for a read of the whole marked range. A
-     * rescan that starts above it, stops before the tip or misses a body
-     * keeps it; one that reads from the marker to the tip clears it. */
-    w->scan_retry.pending = true;
-    w->scan_retry.from = 0;
-    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
-             WALLET_RESTORE_BLOCKER_UNREAD);
-    (void)wallet_rescan_report(w, &ms->chain_active, 50, -1, netdir, &rep);
-    WRC_CHECK("I: a rescan starting above the marker keeps it",
-              w->scan_retry.pending && rep.blocks_scanned == rep.blocks_in_range);
-    (void)wallet_rescan_report(w, &ms->chain_active, 0, 100, netdir, &rep);
-    WRC_CHECK("I: a rescan stopping before the tip keeps it",
-              w->scan_retry.pending);
-    (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
-    WRC_CHECK("I: a whole rescan that tried no Sapling key keeps it",
-              w->scan_retry.pending && rep.shielded_txs_unscanned > 0);
-    uint8_t sapling_seed[32];
-    memset(sapling_seed, 0x5c, sizeof(sapling_seed));
-    uint8_t sd[11], spk[32];
-    (void)sapling_keystore_set_seed(&w->sapling_keys, sapling_seed);
-    (void)sapling_keystore_new_address(&w->sapling_keys, sd, spk);
-    idx[100].nStatus &= ~(unsigned)BLOCK_HAVE_DATA;
-    (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
-    WRC_CHECK("I: a rescan that misses one body keeps it",
-              w->scan_retry.pending && rep.blocks_scanned < rep.blocks_in_range);
-    idx[100].nStatus |= BLOCK_HAVE_DATA;
-    (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
-    WRC_CHECK("I: a whole rescan that read every body clears it",
-              !w->scan_retry.pending && rep.blocks_scanned == WRC_NBLOCKS &&
-              wallet_scanned_through_height(w) == WRC_NBLOCKS - 1);
-    sapling_keystore_free(&w->sapling_keys);
-    sapling_keystore_init(&w->sapling_keys);
+    failures += wrc_boot_floor_and_marker(w, ms, datadir);
+    failures += wrc_rescan_marker(w, ms, netdir, idx);
 
     if (relaid)
         (void)rename(moved_to, moved_from);
