@@ -286,17 +286,17 @@ z23-lab-peer collect --state=DIR [--room=lab] [--require=1]
   Tor package swarm and posts `lab-offer v1 root=<hex> size=<n> onion=<onion>
   offer=<manifest>` as kind `offer` in public room `lab` (a post over the
   board's 2048-byte text cap is refused, not posted). One row per offer goes to
-  `STATE/offers.tsv`.
+  `offers.tsv` in the state directory.
 - `verify` reads the room, and for each offer from a key in the authors file
   (one 64-hex key per line) that is unexpired, strictly well-formed and not in
-  `STATE/handled.tsv`: fetches the bundle, runs `reverify_offer` in a scratch
+  `handled.tsv` in the state directory: fetches the bundle, runs `reverify_offer` in a scratch
   worktree of `--repo`, and posts `lab-receipt v1 offer=<id> verdict=ok
   receipt=<json>` (or `verdict=refused code=<CODE>`) as kind `result` with
   `ref` = the offer post. A failed fetch is retried on later runs, three
   attempts in all.
 - `collect` gathers the `verdict=ok` receipts answering each `offers.tsv` row
-  into `STATE/receipts/`, runs `qualify_offer`, and writes
-  `STATE/qualified.tsv`, one upserted row per offer post (post id, lane, commit,
+  into `receipts/` in the state directory, runs `qualify_offer`, and writes
+  `qualified.tsv` there, one upserted row per offer post (post id, lane, commit,
   verdict, qualified count, signers,
   rejected codes).
 
