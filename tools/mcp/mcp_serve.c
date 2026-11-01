@@ -75,7 +75,10 @@ static const struct mcp_tool mcp_tools[] = {
      "input. A server started with --fleet-writes also runs fleet.board.post, "
      "fleet.wiki.write, fleet.bundle.offer and fleet.bundle.fetch directly. "
      "select (up to 8 dot paths; keys, indexes, * for every element, e.g. "
-     "data.posts.*.text) returns only those values. Reply is capped at "
+     "data.posts.*.text) returns only those values; a path that does not "
+     "resolve is null and also listed in select_missing with the deepest "
+     "prefix that did resolve and its keys. An unknown path answers "
+     "UNKNOWN_COMMAND with did_you_mean (the nearest command paths). Reply is capped at "
      "budget_bytes (default 16384, max 131072); a truncated reply lists the "
      "size of each data field to select from." MCP_DATA_NOTE,
      "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},"
@@ -100,6 +103,8 @@ static const struct mcp_tool mcp_tools[] = {
      true},
 };
 
+#define DYM_MAX 3
+
 struct mcp_serve {
     struct mcp_identity id;
     char checkout[PATH_MAX];
@@ -113,6 +118,8 @@ struct mcp_serve {
     struct json_value empty_input;
     char code_path[ZCL_COMMAND_MAX_PATH];
     char cli_path[ZCL_COMMAND_MAX_PATH];
+    char suggest[DYM_MAX * (ZCL_COMMAND_MAX_PATH + 4) + 4];
+    char bad_arg[96];
     char *out;
     size_t out_cap;
 };
@@ -356,7 +363,117 @@ static bool refuse(struct mcp_refusal *why, const char *code,
     why->code = code;
     why->message = message;
     why->detail = NULL;
+    why->did_you_mean_json = NULL;
     return false;
+}
+
+/* Edit distance between two dotted paths, capped at ZCL_COMMAND_MAX_PATH
+ * bytes each (a longer given path compares by its first 128 bytes). */
+static size_t path_distance(const char *a, const char *b)
+{
+    size_t row[2][ZCL_COMMAND_MAX_PATH + 1];
+    size_t la = strnlen(a, ZCL_COMMAND_MAX_PATH);
+    size_t lb = strnlen(b, ZCL_COMMAND_MAX_PATH);
+    for (size_t j = 0; j <= lb; j++)
+        row[0][j] = j;
+    for (size_t i = 1; i <= la; i++) {
+        size_t *prev = row[(i - 1) & 1], *cur = row[i & 1];
+        cur[0] = i;
+        for (size_t j = 1; j <= lb; j++) {
+            size_t best = prev[j - 1] + (a[i - 1] != b[j - 1]);
+            if (prev[j] + 1 < best)
+                best = prev[j] + 1;
+            if (cur[j - 1] + 1 < best)
+                best = cur[j - 1] + 1;
+            cur[j] = best;
+        }
+    }
+    return row[la & 1][lb];
+}
+
+/* Another first segment costs this much distance: a same-family command is
+ * preferred, but a much closer one elsewhere still wins. */
+#define DYM_FAMILY_PENALTY 3
+
+/* Fill s->suggest with a JSON array of up to 3 registered command paths
+ * nearest to path, and return it (NULL when the registry is empty). */
+static const char *suggest_paths(struct mcp_serve *s, const char *path)
+{
+    const struct zcl_command_registry *reg = s->cmd.registry;
+    const char *best[DYM_MAX] = {0};
+    size_t score[DYM_MAX] = {0};
+    size_t first = strcspn(path, ".");
+    size_t at = 0;
+    for (size_t i = 0; reg && i < reg->count; i++) {
+        const char *cand = reg->commands[i].path;
+        size_t sc = path_distance(path, cand);
+        size_t slot = DYM_MAX;
+        if (strncmp(path, cand, first) != 0 || cand[first] != path[first])
+            sc += DYM_FAMILY_PENALTY;
+        for (size_t k = 0; k < DYM_MAX; k++)
+            if (!best[k] || sc < score[k]) {
+                slot = k;
+                break;
+            }
+        if (slot == DYM_MAX)
+            continue;
+        for (size_t k = DYM_MAX - 1; k > slot; k--) {
+            best[k] = best[k - 1];
+            score[k] = score[k - 1];
+        }
+        best[slot] = cand;
+        score[slot] = sc;
+    }
+    if (!best[0])
+        return NULL;
+    s->suggest[at++] = '[';
+    for (size_t k = 0; k < DYM_MAX && best[k]; k++) {
+        int w = snprintf(s->suggest + at, sizeof(s->suggest) - at, "%s\"%s\"",
+                         k ? "," : "", best[k]);
+        at += w > 0 ? (size_t)w : 0;
+    }
+    s->suggest[at++] = ']';
+    s->suggest[at] = '\0';
+    return s->suggest;
+}
+
+/* UNKNOWN_COMMAND text with did_you_mean (command paths are plain ASCII
+ * identifiers, so they need no escaping). */
+static void text_unknown_command(struct mcp_buf *text, const char *dym)
+{
+    mcp_buf_str(text, "{\"ok\":false,\"error\":{\"code\":\"UNKNOWN_COMMAND\","
+                      "\"message\":\"no such command in this build; try "
+                      "z23_search\"");
+    if (dym) {
+        mcp_buf_str(text, ",\"did_you_mean\":");
+        mcp_buf_str(text, dym);
+    }
+    mcp_buf_str(text, "}}");
+}
+
+/* The message for a call whose path argument is missing or not a string:
+ * names the expected key and the first argument key the caller sent that
+ * this tool does not take ("expected key path; got command"). */
+static const char *bad_path_message(struct mcp_serve *s,
+                                    const struct json_value *args,
+                                    bool takes_run_keys)
+{
+    static const char *const run_keys[] = {"path", "input", "select",
+                                           "budget_bytes"};
+    size_t known = takes_run_keys ? 4 : 1;
+    if (json_get(args, "path") || args->type != JSON_OBJ)
+        return "path must be a string";
+    for (size_t i = 0; i < json_size(args); i++) {
+        bool ok = false;
+        for (size_t k = 0; k < known; k++)
+            ok = ok || strcmp(args->keys[i], run_keys[k]) == 0;
+        if (!ok) {
+            snprintf(s->bad_arg, sizeof(s->bad_arg),
+                     "expected key path; got %.48s", args->keys[i]);
+            return s->bad_arg;
+        }
+    }
+    return "path must be a string; expected key path";
 }
 
 /* Accept the CLI spelling of a path ("dev land status", "z23 dev land
@@ -416,14 +533,17 @@ static bool resolve_target(struct mcp_serve *s, const struct mcp_tool *tool,
     } else {
         path = cli_spelling(s, arg_str(args, "path"));
         if (!path)
-            return refuse(why, "BAD_ARGUMENT", "path must be a string");
+            return refuse(why, "BAD_ARGUMENT", bad_path_message(s, args, true));
     }
     *spec = zcl_command_registry_find(s->cmd.registry, path, alias);
-    if (!*spec)
-        return refuse(why, tool == &mcp_tools[T_CODE]
-                               ? "CODE_SUBCOMMAND_UNAVAILABLE"
-                               : "UNKNOWN_COMMAND",
-                      "no such command in this build; try z23_search");
+    if (!*spec) {
+        bool code = tool == &mcp_tools[T_CODE];
+        refuse(why, code ? "CODE_SUBCOMMAND_UNAVAILABLE" : "UNKNOWN_COMMAND",
+               "no such command in this build; try z23_search");
+        if (!code)
+            why->did_you_mean_json = suggest_paths(s, path);
+        return false;
+    }
     return true;
 }
 
@@ -765,9 +885,12 @@ static bool tool_describe(struct mcp_serve *s, const struct json_value *args,
                           s->cmd.registry, path, s->out, s->out_cap)
                     : 0;
     if (n == 0) {
-        text_error(text, path ? "UNKNOWN_COMMAND" : "BAD_ARGUMENT",
-                   path ? "no such command in this build; try z23_search"
-                        : "path must be a string");
+        if (path && suggest_paths(s, path))
+            text_unknown_command(text, s->suggest);
+        else
+            text_error(text, path ? "UNKNOWN_COMMAND" : "BAD_ARGUMENT",
+                       path ? "no such command in this build; try z23_search"
+                            : bad_path_message(s, args, false));
         *is_error = true;
         return true;
     }
@@ -809,7 +932,10 @@ static bool tool_exec(struct mcp_serve *s, const struct mcp_tool *tool,
     const struct json_value *select = json_get(args, "select");
     const char *bad_select = NULL;
     if (!resolve_target(s, tool, args, &spec, &alias, &input, &why)) {
-        text_error(text, why.code, why.message);
+        if (why.did_you_mean_json)
+            text_unknown_command(text, why.did_you_mean_json);
+        else
+            text_error(text, why.code, why.message);
         *is_error = true;
         return true;
     }

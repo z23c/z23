@@ -643,7 +643,8 @@ static int case_select(struct ms *m)
         ASSERT(has(m, "data.matches.*.path\\\":[\\\"core.status.brief\\\""));
         ASSERT(has(m, "data.matches.0.risk\\\":\\\"read\\\""));
         ASSERT(has(m, "data.nope\\\":null"));
-        ASSERT(!has(m, "registry_digest"));
+        ASSERT(has(m, "select_missing\\\":{\\\"data.nope\\\":{\\\"resolved\\\":\\\"data\\\""));
+        ASSERT(!has(m, "registry_digest\\\":"));
         ASSERT(ms_tool(m, 41, "z23_run",
                        "{\"path\":\"discover.search\",\"input\":{\"query\":"
                        "\"status\"},\"select\":\"data\"}"));

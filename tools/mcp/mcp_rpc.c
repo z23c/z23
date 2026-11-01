@@ -306,6 +306,83 @@ static void mcp_select_walk(struct mcp_buf *out, const struct json_value *v,
     mcp_select_walk(out, v->type == JSON_OBJ ? json_get(v, key) : NULL, rest);
 }
 
+/* Where a select path stopped resolving: the node it stopped at and how many
+ * bytes of the path lead to it (no trailing dot). */
+struct mcp_select_stop {
+    const struct json_value *node;
+    size_t prefix;
+    bool set;
+};
+
+/* True when every step of path resolves below v. On the first failure,
+ * records the node and the resolved prefix in stop (when stop is non-NULL).
+ * A `*` step resolves when v is an array and the rest resolves below every
+ * element; a failure below an element is reported at the array. base is the
+ * offset of path within the whole select path. */
+static bool mcp_select_probe(const struct json_value *v, const char *path,
+                             size_t base, struct mcp_select_stop *stop)
+{
+    char key[MCP_SELECT_PATH_MAX + 1];
+    size_t idx;
+    if (!*path)
+        return true;
+    const char *dot = strchr(path, '.');
+    size_t len = dot ? (size_t)(dot - path) : strlen(path);
+    const char *rest = path + len + (dot ? 1 : 0);
+    size_t at = base > 0 ? base - 1 : 0; /* prefix before this step */
+    bool ok;
+    if (len == 1 && path[0] == '*') {
+        ok = v->type == JSON_ARR;
+        for (size_t i = 0; ok && i < json_size(v); i++)
+            ok = mcp_select_probe(json_at(v, i), rest, base + len + 1, NULL);
+    } else if (v->type == JSON_ARR) {
+        ok = mcp_seg_index(path, len, &idx) && idx < json_size(v);
+        if (ok)
+            return mcp_select_probe(json_at(v, idx), rest, base + len + 1, stop);
+    } else {
+        const struct json_value *next;
+        memcpy(key, path, len);
+        key[len] = '\0';
+        next = v->type == JSON_OBJ ? json_get(v, key) : NULL;
+        if (next)
+            return mcp_select_probe(next, rest, base + len + 1, stop);
+        ok = false;
+    }
+    if (!ok && stop && !stop->set) {
+        stop->node = v;
+        stop->prefix = at;
+        stop->set = true;
+    }
+    return ok;
+}
+
+#define MCP_SELECT_KEYS_MAX 32
+
+/* One select_missing entry body: the resolved prefix and what lies there. */
+static void mcp_select_missing_entry(struct mcp_buf *out, const char *path,
+                                     const struct mcp_select_stop *stop)
+{
+    const struct json_value *v = stop->node;
+    mcp_buf_str(out, "{\"resolved\":");
+    mcp_buf_json_str_n(out, path, stop->prefix);
+    if (v->type == JSON_OBJ) {
+        size_t n = json_size(v);
+        mcp_buf_str(out, ",\"keys\":[");
+        for (size_t i = 0; i < n && i < MCP_SELECT_KEYS_MAX; i++) {
+            mcp_buf_str(out, i ? "," : "");
+            mcp_buf_json_str(out, v->keys[i]);
+        }
+        if (n > MCP_SELECT_KEYS_MAX)
+            mcp_buf_str(out, ",\"...\"");
+        mcp_buf_str(out, "]");
+    } else if (v->type == JSON_ARR) {
+        char num[32];
+        (void)snprintf(num, sizeof(num), ",\"length\":%zu", json_size(v));
+        mcp_buf_str(out, num);
+    }
+    mcp_buf_str(out, "}");
+}
+
 bool mcp_select_reply(struct mcp_buf *out, const char *text, size_t n,
                       const struct json_value *select)
 {
@@ -333,7 +410,24 @@ bool mcp_select_reply(struct mcp_buf *out, const char *text, size_t n,
         mcp_buf_str(out, ":");
         mcp_select_walk(out, &doc, path);
     }
-    mcp_buf_str(out, "}}");
+    mcp_buf_str(out, "}");
+    const char *sep = ",\"select_missing\":{";
+    bool any = false;
+    for (size_t i = 0; i < json_size(select); i++) {
+        const char *path = json_get_str(json_at(select, i));
+        struct mcp_select_stop stop = {0};
+        if (mcp_select_probe(&doc, path, 0, &stop) || !stop.set)
+            continue;
+        mcp_buf_str(out, sep);
+        sep = ",";
+        any = true;
+        mcp_buf_json_str(out, path);
+        mcp_buf_str(out, ":");
+        mcp_select_missing_entry(out, path, &stop);
+    }
+    if (any)
+        mcp_buf_str(out, "}");
+    mcp_buf_str(out, "}");
     json_free(&doc);
     return true;
 }
@@ -515,6 +609,10 @@ static void mcp_refusal_text(struct mcp_buf *text,
     if (why->detail) {
         mcp_buf_str(text, ",\"detail\":");
         mcp_buf_json_str(text, why->detail);
+    }
+    if (why->did_you_mean_json) {
+        mcp_buf_str(text, ",\"did_you_mean\":");
+        mcp_buf_str(text, why->did_you_mean_json);
     }
     mcp_buf_str(text, "}}");
 }

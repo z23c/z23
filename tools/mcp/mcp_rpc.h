@@ -61,6 +61,7 @@ struct mcp_refusal {
     const char *code;
     const char *message;
     const char *detail;
+    const char *did_you_mean_json; /* complete JSON array, or NULL */
 };
 
 /* Authority: runs after tool lookup and before call, with the arguments
@@ -148,7 +149,13 @@ bool mcp_select_valid(const struct json_value *select, const char **why);
 
 /* Project a command reply onto a valid select:
  *   {"ok":..,"status":..,"select":{"<path>":<value>,..}}
- * with null where a path does not resolve. False, with out untouched, when
+ * with null where a path does not resolve. When any path does not resolve
+ * the reply also carries
+ *   "select_missing":{"<path>":{"resolved":"<deepest prefix that resolved>",
+ *                               "keys":[..up to 32 names, then "..."]}}
+ * ("length":N instead of keys when that prefix is an array), so a caller can
+ * tell a missing key from a null value; it is absent, and the reply
+ * byte-identical, when every path resolves. False, with out untouched, when
  * text is not a JSON object; false with out->oom set when text is valid JSON
  * that could not be parsed for lack of memory. */
 bool mcp_select_reply(struct mcp_buf *out, const char *text, size_t n,
