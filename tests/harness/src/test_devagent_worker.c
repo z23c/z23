@@ -753,6 +753,48 @@ static void wtx_count_bump(void)
     }
 }
 
+/* The wake rig asks the executor child to stamp the monotonic time it
+ * starts, through a file beside the run count (a child cannot hand back
+ * process memory). The stamp is the last point the queue event drives:
+ * wake, claim, fork. Everything after it is the job's own run. */
+static bool g_wtx_stamp_exec;
+
+static bool wtx_stamp_path(char *out, size_t cap)
+{
+    return g_fx_count[0] &&
+           snprintf(out, cap, "%s.start", g_fx_count) < (int)cap;
+}
+
+static void wtx_stamp_exec_start(void)
+{
+    char path[1100];
+    long long now = (long long)platform_time_monotonic_ms();
+    FILE *f;
+    if (!g_wtx_stamp_exec || !wtx_stamp_path(path, sizeof(path)))
+        return;
+    f = fopen(path, "wb");
+    if (f) {
+        (void)fwrite(&now, sizeof(now), 1, f);
+        (void)fclose(f);
+    }
+}
+
+static long long wtx_stamp_read(void)
+{
+    char path[1100];
+    long long v = -1;
+    FILE *f;
+    if (!wtx_stamp_path(path, sizeof(path)))
+        return -1;
+    f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    if (fread(&v, sizeof(v), 1, f) != 1)
+        v = -1;
+    (void)fclose(f);
+    return v;
+}
+
 static long long wtx_count_read(void)
 {
     FILE *f;
@@ -852,6 +894,7 @@ static void wtx_fixture_receipt_block(const struct wkr_job *job)
 
 static bool wtx_fixture(const struct wkr_job *job, struct wkr_result *res)
 {
+    wtx_stamp_exec_start();
     wtx_count_bump();
     wtx_task_record(job);
     if (g_fx_mode == 5)
@@ -981,6 +1024,11 @@ static void wtx_opts(struct wkr_drive_opts *o, const char *worker,
  * however long a loaded host takes to set the drive up. */
 static int g_wtx_claim_fd = -1;
 
+/* Set by wtx_drive_late_post when the executor stamped its start: the
+ * time from the post to the executor child starting, 2^40 when unstamped
+ * so a missing stamp fails the bound. */
+static long long g_wtx_wake_ms = -1;
+
 static void wtx_note_empty_claim(void)
 {
     if (g_wtx_claim_fd >= 0) {
@@ -1064,6 +1112,7 @@ static long long wtx_drive_late_post(struct wkr_drive_opts *o,
     (void)close(post_pipe[0]);
     *after_post_ms = done_ms - posted_ms;
     *after_start_ms = done_ms - start_ms;
+    g_wtx_wake_ms = wtx_stamp_read() >= 0 ? wtx_stamp_read() - posted_ms : (1LL << 40);
     (void)waitpid(pid, &st, 0);
     return jobs;
 }
@@ -2152,14 +2201,22 @@ int test_devagent_worker(void)
         o.idle_start_s = 30;
         o.idle_limit_s = 60;
         o.deadline_s = 60;
+        /* The bound is on the wake (post to the executor child running):
+         * the drive's own return also pays the job's fork, spawn poll and
+         * result mail, which a loaded host stretches without the queue
+         * watch being any slower. That total is still reported. */
+        g_wtx_stamp_exec = true;
         ASSERT_EQ(wtx_drive_late_post(&o, "wtx-wake", 1500, &after_post_ms,
                                       &after_start_ms),
                   1);
+        g_wtx_stamp_exec = false;
         ASSERT_EQ(wtx_count_read(), 1);
-        (void)printf("    devagent_worker wake latency: %lld ms after post\n",
-                     after_post_ms);
+        (void)printf("    devagent_worker wake latency: %lld ms after post "
+                     "(drive return %lld ms)\n",
+                     g_wtx_wake_ms, after_post_ms);
         ASSERT(after_post_ms >= 0);
-        ASSERT(after_post_ms < 3000);
+        ASSERT(g_wtx_wake_ms > -1000);
+        ASSERT(g_wtx_wake_ms < 3000);
         wtx_restore();
         PASS();
     }
