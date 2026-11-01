@@ -204,6 +204,15 @@ bool chain_evidence_controller_record_finalized_tip(
     struct block_index *finalized_tip,
     const char *reason);
 
+/* Upgrade the persisted LOCAL_IMPORT active-tip record with the two flags the
+ * genesis walk established for exactly this tip (bytes via the walk, best
+ * work via the core predicate). Refuses unless the persisted record names
+ * tip_hash at tip_height; the three evidence keys change in one transaction. */
+struct zcl_result chain_evidence_controller_earn_active_tip_evidence(
+    struct chain_evidence_controller *authority,
+    const struct uint256 *tip_hash, int tip_height,
+    bool nakamoto_selected_best_work, bool block_bytes_hash_checked);
+
 /* Reducer-side half of the live evidence follow: stamp the just-published
  * tip into a pending slot guarded by ONE leaf mutex (nothing else is ever
  * acquired while it is held), safe under any lock the drive holds. */

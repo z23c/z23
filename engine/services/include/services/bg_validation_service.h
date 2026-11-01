@@ -122,6 +122,15 @@ struct bg_validation_service {
 
     /* Progress tracking */
     struct bg_validation_progress progress;
+
+    /* The exact block the walk last booked as verified: its height and hash
+     * words. Written only where a block body was read, hash-checked against
+     * the index and fully validated (never on resume, reset or completion),
+     * so the authority publisher can bind its evidence to the active tip by
+     * HASH. Single writer (the walk thread); readers validate the height
+     * before and after copying the words. See bg_validation_note_verified_tip. */
+    _Atomic int verified_tip_height;
+    _Atomic uint64_t verified_tip_words[4];
 };
 
 /* Initialize the service (does not start the thread). */

@@ -54,6 +54,7 @@ void bg_validation_init(struct bg_validation_service *svc,
     svc->max_script_batch = hw_profile_script_batch_cap(hw_profile_ram_bytes());
 
     atomic_store(&svc->progress.state, BG_VALIDATION_IDLE);
+    atomic_store(&svc->verified_tip_height, -1);
     atomic_store(&svc->progress.verified_height, -1);
     atomic_store(&svc->progress.chain_height, 0);
     atomic_store(&svc->progress.sigs_verified, 0);

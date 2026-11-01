@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 struct bg_validation_service;
+struct block_index;
 
 /* Pure fail-closed predicate shared by production and the KAT. */
 bool bg_validation_authority_claim_is_complete(
@@ -47,5 +48,18 @@ bool bg_validation_authority_catchup_wanted(
 struct zcl_result bg_validation_authority_publish(
     struct bg_validation_service *svc, bool external_seeded,
     bool coverage_complete);
+
+/* Record the block the walk just booked as verified at `height` (call it
+ * immediately before storing progress.verified_height). The publisher binds
+ * the active tip to this exact hash; a height alone cannot tell a same-height
+ * reorg apart. */
+void bg_validation_note_verified_tip(struct bg_validation_service *svc,
+                                     int height,
+                                     const struct block_index *pindex);
+
+/* Copy the last noted verified tip; false when none was noted or a note raced
+ * the copy. */
+bool bg_validation_verified_tip(const struct bg_validation_service *svc,
+                                int *height, uint8_t hash[32]);
 
 #endif /* ZCL_BG_VALIDATION_AUTHORITY_H */

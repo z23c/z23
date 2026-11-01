@@ -561,6 +561,7 @@ int test_chain_evidence_live_advance(void)
     failures += test_live_advance_keeps_genuine_freeze();
     failures += test_live_advance_keeps_unreconciled_divergence();
     failures += test_live_advance_rejects_bad_args();
+    failures += test_genesis_walk_earn_evidence();
     if (failures == 0)
         printf("  all chain_evidence_live_advance tests passed\n");
     else

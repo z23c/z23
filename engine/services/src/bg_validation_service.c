@@ -801,6 +801,7 @@ static bool bg_validation_catch_up_round(
         atomic_fetch_add(&svc->progress.sigs_verified, sigs);
         atomic_fetch_add(&svc->progress.proofs_verified, proofs);
         atomic_fetch_add(&svc->progress.script_verif_skipped_no_undo, skips);
+        bg_validation_note_verified_tip(svc, h, pindex);
         atomic_store(&svc->progress.verified_height, h);
         atomic_store(&svc->progress.chain_height, h);
         h++;
@@ -1082,6 +1083,7 @@ static void *bg_validation_thread(void *arg)
         total_sigs += block_sigs;
         total_proofs += block_proofs;
         total_skips += block_skips;
+        bg_validation_note_verified_tip(svc, h, pindex);
         atomic_store(&svc->progress.verified_height, h);
         atomic_store(&svc->progress.sigs_verified, total_sigs);
         atomic_store(&svc->progress.proofs_verified, total_proofs);
@@ -1259,6 +1261,7 @@ void bg_validation_reset(struct bg_validation_service *svc)
     save_progress(&svc->progress_store, -1);
     save_skips(&svc->progress_store, 0);
     atomic_store(&svc->progress.verified_height, -1);
+    atomic_store(&svc->verified_tip_height, -1);
     atomic_store(&svc->progress.sigs_verified, 0);
     atomic_store(&svc->progress.proofs_verified, 0);
     atomic_store(&svc->progress.script_verif_skipped_no_undo, 0);

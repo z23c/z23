@@ -23,6 +23,7 @@
 #include "util/log_macros.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
+#include "validation/process_block.h"
 
 #include <sqlite3.h>
 #include <stdatomic.h>
@@ -97,6 +98,106 @@ static bool bgv_auth_evidence_ready(
                  "genesis walk lacks publishable local active-tip evidence");
         return false;
     }
+    return true;
+}
+
+void bg_validation_note_verified_tip(struct bg_validation_service *svc,
+                                     int height,
+                                     const struct block_index *pindex)
+{
+    uint64_t words[4];
+    if (!svc || !pindex || !pindex->phashBlock)
+        return;
+    memcpy(words, pindex->phashBlock->data, sizeof(words));
+    atomic_store(&svc->verified_tip_height, -1);
+    for (int i = 0; i < 4; i++)
+        atomic_store(&svc->verified_tip_words[i], words[i]);
+    atomic_store(&svc->verified_tip_height, height);
+}
+
+bool bg_validation_verified_tip(const struct bg_validation_service *svc,
+                                int *height, uint8_t hash[32])
+{
+    uint64_t words[4];
+    if (!svc || !height || !hash)
+        return false;
+    int before = atomic_load(&svc->verified_tip_height);
+    if (before < 0)
+        return false;
+    for (int i = 0; i < 4; i++)
+        words[i] = atomic_load(&svc->verified_tip_words[i]);
+    if (atomic_load(&svc->verified_tip_height) != before)
+        return false;
+    memcpy(hash, words, sizeof(words));
+    *height = before;
+    return true;
+}
+
+/* True when the walk's last booked block IS this tip, by hash. */
+static bool bgv_auth_walk_verified_tip_is(
+    const struct bg_validation_service *svc, const struct block_index *tip)
+{
+    int height = -1;
+    uint8_t hash[32];
+    return tip && tip->phashBlock && bg_validation_verified_tip(svc, &height,
+                                                                hash) &&
+           height == tip->nHeight &&
+           memcmp(hash, tip->phashBlock->data, sizeof(hash)) == 0;
+}
+
+static bool bgv_auth_tip_is_best_work(struct bg_validation_service *svc,
+                                      const struct block_index *tip)
+{
+    /* The process_block path runs this predicate under cs_main. It is taken
+     * alone here: no progress or coins lock is held (the frontier scan has
+     * released it) and csr->lock is never nested inside. */
+    zcl_mutex_lock(&svc->ms->cs_main);
+    bool best = process_block_tip_is_best_work(svc->ms, tip);
+    zcl_mutex_unlock(&svc->ms->cs_main);
+    return best;
+}
+
+static bool bgv_auth_record_needs_earning(
+    const struct chain_evidence_controller_view *view)
+{
+    const struct chain_evidence_record *rec = &view->active_tip_evidence;
+    return rec->source_class == CEC_SOURCE_CLASS_LOCAL_IMPORT &&
+           rec->publish_state == CEC_PUBLISH_LOCAL_EVIDENCE &&
+           rec->header_ancestry_linked && rec->chainwork_recomputed &&
+           !chain_evidence_record_has_block_index_required(rec);
+}
+
+/* Genesis path only: earn the two flags live advance and boot reconcile leave
+ * false, for the exact tip the walk verified. Each is set from a check that
+ * ran on that tip by hash: bytes from the walk (its body read is hash-checked
+ * against the index, then fully validated), best work from the core
+ * predicate. Anything short of both leaves the record alone and the caller's
+ * refusal to explain it. */
+static bool bgv_auth_genesis_tip_prepare(
+    struct bg_validation_service *svc,
+    struct chain_evidence_controller *authority,
+    struct chain_evidence_controller_view *view, bool external_seeded,
+    char reason[192])
+{
+    if (external_seeded || view->snapshot_evidence_loaded ||
+        !bgv_auth_record_needs_earning(view))
+        return true;
+    struct block_index *tip = active_chain_tip(&svc->ms->chain_active);
+    bool bytes = bgv_auth_walk_verified_tip_is(svc, tip);
+    if (!bytes) {
+        snprintf(reason, 192,
+                 "genesis walk did not verify the active tip block by hash");
+        return false;
+    }
+    struct zcl_result earned = chain_evidence_controller_earn_active_tip_evidence(
+        authority, tip->phashBlock, tip->nHeight,
+        bgv_auth_tip_is_best_work(svc, tip), bytes);
+    if (!earned.ok) {
+        snprintf(reason, 192, "genesis walk could not earn active-tip "
+                              "evidence: %.140s", earned.message);
+        return false;
+    }
+    chain_evidence_controller_snapshot(authority, view);
     return true;
 }
 
@@ -204,6 +305,10 @@ struct zcl_result bg_validation_authority_publish(
         blocker_clear("bg_validation.full_history_unproven");
         return ZCL_OK;
     }
+
+    if (!bgv_auth_genesis_tip_prepare(svc, &authority, &view,
+                                      external_seeded, reason))
+        return bgv_auth_refuse(reason);
 
     if (!bgv_auth_evidence_ready(&view, external_seeded, reason))
         return bgv_auth_refuse(reason);
