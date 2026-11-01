@@ -87,9 +87,12 @@ static void srbf_reset(struct connman *cm, struct download_manager *dm,
     memset(cm, 0, sizeof(*cm));
     memset(dm, 0, sizeof(*dm));
     memset(ms, 0, sizeof(*ms));
+    main_state_init(ms);
+    /* Keep the zeroed IBD tip age and no-checkpoint flag. */
+    ms->nMaxTipAge = 0;
+    ms->fCheckpointsEnabled = false;
     zcl_mutex_init(&cm->manager.cs_nodes);
     zcl_mutex_init(&dm->cs);
-    zcl_mutex_init(&ms->cs_main);
     sync_monitor_init();
     sync_monitor_set_context(cm, dm, ms);
     register_sync_rate_below_floor();
@@ -160,6 +163,7 @@ static bool srbf_overflow_floor_uses_default(struct srbf_fake_clock *fc,
     const bool tripped = sync_rate_below_floor_test_remedy_calls() == 1 &&
                          blocker_exists("sync_rate_below_floor");
     srbf_cleanup();
+    main_state_free(&ms);
 
     const int restore_rc = old_was_set
                                ? setenv("ZCL_SYNC_RATE_FLOOR_BPS", old_copy, 1)
@@ -237,6 +241,7 @@ static int srbf_check_healthy_fold_windows(
         SRBF_CHECK("rate comfortably above floor never trips across many "
                   "windows", ok);
         srbf_cleanup();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -301,6 +306,7 @@ static int srbf_check_throttle_dominated_window(
         SRBF_CHECK("a throttle-dominated window is skipped, not counted "
                   "below-floor", ok);
         srbf_cleanup();
+        main_state_free(&ms);
     }
     return failures;
 }
@@ -376,6 +382,7 @@ int test_sync_rate_below_floor(void)
         SRBF_CHECK("rate recovering above floor clears the blocker", ok2);
 
         srbf_cleanup();
+        main_state_free(&ms);
     }
 
     failures = srbf_check_healthy_fold_windows(
@@ -427,6 +434,7 @@ int test_sync_rate_below_floor(void)
         }
         SRBF_CHECK("network_tip <= log_head (no backlog) never trips", ok);
         srbf_cleanup();
+        main_state_free(&ms);
     }
 
     printf("=== test_sync_rate_below_floor complete: %d failure(s) ===\n",

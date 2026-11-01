@@ -84,7 +84,10 @@ static bool sd_open(struct sd_fx *fx, int n, int64_t cursor)
     fx->hash = zcl_calloc((size_t)n, sizeof(struct uint256), "sd_hash");
     fx->sprout = zcl_calloc((size_t)n, sizeof(int64_t), "sd_sp");
     fx->sapling = zcl_calloc((size_t)n, sizeof(int64_t), "sd_sa");
-    active_chain_init(&fx->ms.chain_active);
+    main_state_init(&fx->ms);
+    /* Keep the zeroed IBD tip age and no-checkpoint flag. */
+    fx->ms.nMaxTipAge = 0;
+    fx->ms.fCheckpointsEnabled = false;
     for (int i = 0; i < n; i++) {
         fx->hash[i].data[0] = (unsigned char)(i & 0xff);
         fx->hash[i].data[1] = (unsigned char)(i >> 8);
@@ -117,7 +120,7 @@ static void sd_close(struct sd_fx *fx)
 {
     utxo_apply_turnstile_seed_reset_for_test();
     sqlite3_close(fx->db);
-    active_chain_free(&fx->ms.chain_active);
+    main_state_free(&fx->ms);
     free(fx->bi);
     free(fx->hash);
     free(fx->sprout);

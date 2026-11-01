@@ -1480,11 +1480,14 @@ static int t_p71_update_tip_propagates_csr_rejection(void)
     orphan.phashBlock = &h;
     orphan.nHeight = 5;
 
-    /* update_tip only dereferences ms->chain_active on the NULL-tip
-     * disconnect branch (which we don't take); a zeroed main_state
-     * is safe for the rejection path. */
+    /* update_tip reads ms through the tip publisher, so the state needs
+     * main_state_init; a zeroed pthread mutex is not valid on Darwin. */
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
+    main_state_init(&ms);
+    /* Keep the zeroed IBD tip age and no-checkpoint flag. */
+    ms.nMaxTipAge = 0;
+    ms.fCheckpointsEnabled = false;
 
     process_block_set_tip_publication_hooks(test_process_block_commit_tip,
                                             NULL, NULL);
@@ -1502,6 +1505,7 @@ static int t_p71_update_tip_propagates_csr_rejection(void)
             ok);
 
     csr_test_reset_singleton();
+    main_state_free(&ms);
 
     csr_fix_free(&f);
     return failures;

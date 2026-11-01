@@ -807,7 +807,10 @@ static bool e2e_fixture_init(struct e2e_fixture *f)
         if (h > 0) f->blocks[h].pprev = &f->blocks[h - 1];
     }
 
-    active_chain_init(&f->ms.chain_active);
+    main_state_init(&f->ms);
+    /* Keep the zeroed IBD tip age and no-checkpoint flag. */
+    f->ms.nMaxTipAge = 0;
+    f->ms.fCheckpointsEnabled = false;
     active_chain_move_window_tip(&f->ms.chain_active,
                                  &f->blocks[OPRIDX_E2E_HEIGHTS - 1]);
 
@@ -817,7 +820,7 @@ static bool e2e_fixture_init(struct e2e_fixture *f)
 
 static void e2e_fixture_free(struct e2e_fixture *f)
 {
-    active_chain_free(&f->ms.chain_active);
+    main_state_free(&f->ms);
     node_db_close(&f->ndb);
     char cmd[512];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", f->datadir);

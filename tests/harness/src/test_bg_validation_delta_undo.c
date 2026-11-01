@@ -271,8 +271,10 @@ static bool du_open(const char *dir, struct main_state *ms, struct du_chain *c)
     if (!progress_store_open(dir) || !projection_store_open(dir))
         return false;
     memset(ms, 0, sizeof(*ms));
-    active_chain_init(&ms->chain_active);
-    block_map_init(&ms->map_block_index);
+    main_state_init(ms);
+    /* Keep the zeroed IBD tip age and no-checkpoint flag. */
+    ms->nMaxTipAge = 0;
+    ms->fCheckpointsEnabled = false;
     active_chain_move_window_tip(&ms->chain_active, &c->idx[DU_BLOCKS - 1]);
     if (!du_seed_upstream(progress_store_db(), c) ||
         !utxo_apply_stage_init(ms) ||
@@ -286,8 +288,7 @@ static bool du_open(const char *dir, struct main_state *ms, struct du_chain *c)
 static void du_close(struct main_state *ms)
 {
     utxo_apply_stage_shutdown();
-    active_chain_free(&ms->chain_active);
-    block_map_free(&ms->map_block_index);
+    main_state_free(ms);
     projection_store_close();
     progress_store_close();
     SetDataDir("");

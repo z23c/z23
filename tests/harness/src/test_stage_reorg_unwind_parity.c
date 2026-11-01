@@ -457,7 +457,10 @@ int test_stage_reorg_unwind_parity(void)
 
             struct main_state ms;
             memset(&ms, 0, sizeof(ms));
-            active_chain_init(&ms.chain_active);
+            main_state_init(&ms);
+            /* Keep the zeroed IBD tip age and no-checkpoint flag. */
+            ms.nMaxTipAge = 0;
+            ms.fCheckpointsEnabled = false;
             active_chain_move_window_tip(&ms.chain_active, &L.blocks[L.n - 1]);
 
             struct sru_ctx ctx = { .active = &L, .ext = ext, .n_ext = 2 };
@@ -516,7 +519,7 @@ int test_stage_reorg_unwind_parity(void)
                       !coins_kv_exists(pdb, ext[1].txid.data, 0));
 
             utxo_apply_stage_shutdown();
-            active_chain_free(&ms.chain_active);
+            main_state_free(&ms);
         }
         if (lg) event_log_close(lg);
         progress_store_close();
@@ -538,7 +541,10 @@ int test_stage_reorg_unwind_parity(void)
 
             struct main_state ms;
             memset(&ms, 0, sizeof(ms));
-            active_chain_init(&ms.chain_active);
+            main_state_init(&ms);
+            /* Keep the zeroed IBD tip age and no-checkpoint flag. */
+            ms.nMaxTipAge = 0;
+            ms.fCheckpointsEnabled = false;
             active_chain_move_window_tip(&ms.chain_active, &W.blocks[W.n - 1]);
 
             struct sru_ctx ctx = { .active = &W, .ext = ext, .n_ext = 2 };
@@ -561,7 +567,7 @@ int test_stage_reorg_unwind_parity(void)
             SRU_CHECK("run2: commitment computed", have_c2);
 
             utxo_apply_stage_shutdown();
-            active_chain_free(&ms.chain_active);
+            main_state_free(&ms);
         }
         if (lg) event_log_close(lg);
         progress_store_close();

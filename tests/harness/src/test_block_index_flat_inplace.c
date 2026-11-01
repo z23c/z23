@@ -45,8 +45,10 @@ static void bfip_hash(struct uint256 *h, size_t i)
 static bool bfip_open(struct bfip_fixture *f, size_t total)
 {
     memset(f, 0, sizeof(*f));
-    block_map_init(&f->ms.map_block_index);
-    active_chain_init(&f->ms.chain_active);
+    main_state_init(&f->ms);
+    /* Keep the zeroed IBD tip age and no-checkpoint flag. */
+    f->ms.nMaxTipAge = 0;
+    f->ms.fCheckpointsEnabled = false;
     f->total = total;
     f->arena = calloc(total, sizeof(*f->arena)); // raw-alloc-ok:test
     if (!f->arena || !block_map_reserve(&f->ms.map_block_index, total + 16))
@@ -77,7 +79,7 @@ static bool bfip_insert_to(struct bfip_fixture *f, size_t upto)
 
 static void bfip_close(struct bfip_fixture *f)
 {
-    block_map_free(&f->ms.map_block_index);
+    main_state_free(&f->ms);
     free(f->arena); // raw-alloc-ok:test
 }
 
@@ -110,11 +112,13 @@ static bool bfip_loads(const char *dir, size_t want)
 {
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
-    block_map_init(&ms.map_block_index);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
+    /* Keep the zeroed IBD tip age and no-checkpoint flag. */
+    ms.nMaxTipAge = 0;
+    ms.fCheckpointsEnabled = false;
     bool ok = load_block_index_flat(dir, &ms).ok &&
               ms.map_block_index.size == want;
-    block_map_free(&ms.map_block_index);
+    main_state_free(&ms);
     return ok;
 }
 
@@ -238,14 +242,16 @@ static int bfip_roundtrip_no_ext(const char *dir)
     BFIP_CHECK("roundtrip save", ok);
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
-    block_map_init(&ms.map_block_index);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
+    /* Keep the zeroed IBD tip age and no-checkpoint flag. */
+    ms.nMaxTipAge = 0;
+    ms.fCheckpointsEnabled = false;
     ok = ok && load_block_index_flat(dir, &ms).ok &&
          ms.map_block_index.size == N;
     BFIP_CHECK("roundtrip load", ok);
     ok = ok && bfip_roundtrip_tuples_match(&f.ms, &ms, N);
     BFIP_CHECK("flat-loaded entries have no extension and read zero", ok);
-    block_map_free(&ms.map_block_index);
+    main_state_free(&ms);
     for (size_t i = 0; i < N; i++)
         f.arena[i].ext = NULL;
     bfip_close(&f);
@@ -276,8 +282,10 @@ static int bfip_live_header_ext(void)
     int failures = 0;
     struct main_state ms;
     memset(&ms, 0, sizeof(ms));
-    block_map_init(&ms.map_block_index);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
+    /* Keep the zeroed IBD tip age and no-checkpoint flag. */
+    ms.nMaxTipAge = 0;
+    ms.fCheckpointsEnabled = false;
 
     struct block_header hdr;
     bfip_fill_header(&hdr);
@@ -286,7 +294,7 @@ static int bfip_live_header_ext(void)
     bool ok = bi != NULL && bi->ext != NULL;
     BFIP_CHECK("accepted header gets a header extension", ok);
     if (!ok) {
-        block_map_free(&ms.map_block_index);
+        main_state_free(&ms);
         return failures + 1;
     }
     size_t len = 0;
@@ -316,7 +324,7 @@ static int bfip_live_header_ext(void)
          len == 0 && memcmp(&m, &zero, sizeof(zero)) == 0;
     BFIP_CHECK("teardown frees the extension once and leaves zero accessors", ok);
 
-    block_map_free(&ms.map_block_index);
+    main_state_free(&ms);
     free(bi);
     return failures;
 }
