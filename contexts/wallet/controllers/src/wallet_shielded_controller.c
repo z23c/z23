@@ -172,8 +172,10 @@ bool rpc_z_getreceiveaddress(const struct json_value *params, bool help,
         ctx, &acct, diversifier, pk_d);
     memory_cleanse(&acct, sizeof(acct));
     if (!reserved.ok) {
-        json_set_str(result,
-            "Error: failed to record the address index. Address NOT issued.");
+        json_set_str(result, reserved.code == WALLET_RESERVE_CATCHING_UP
+            ? "Error: the node is catching up; a new address is available "
+              "when it is in sync"
+            : "Error: failed to record the address index. Address NOT issued.");
         LOG_FAIL("wallet_shielded",
                  "z_getreceiveaddress: index not recorded (code=%d): %s",
                  reserved.code, reserved.message);

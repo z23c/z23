@@ -260,6 +260,11 @@ static bool wallet_diversifier_lane_write(struct node_db *ndb, void *opaque)
             "diversifier lane: pending node.db batch commit failed");
         LOG_FAIL("wallet", "%s", lane->result.message);
     }
+    if (wallet_sqlite_unsynced(lane->wallet_db)) {
+        lane->result = ZCL_ERR(WALLET_RESERVE_CATCHING_UP,
+            "diversifier lane: the node is catching up");
+        LOG_FAIL("wallet", "%s", lane->result.message);
+    }
     if (!wallet_sqlite_diversifier_reserve(lane->wallet_db, lane->acct,
                                            lane->diversifier, lane->pk_d)) {
         lane->result = ZCL_ERR(-2,

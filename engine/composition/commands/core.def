@@ -1133,7 +1133,8 @@ ZCL_COMMAND_READY_COMMAND(
     "from the running node's z_getreceiveaddress. The index is recorded in "
     "the wallet database before the address is returned, so no address is "
     "returned twice. It works while the wallet is locked and is never "
-    "available to an agent session.", 0,
+    "available to an agent session. While the node is catching up it "
+    "refuses and issues nothing.", 0,
     "shielded,sapling,address,receive,diversified",
     "zcl.command.empty_input.v1", "zcl.shielded_address.v1", "", "",
     "z23 core wallet shielded receive",

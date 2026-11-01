@@ -135,6 +135,10 @@ struct zcl_result wallet_flush_from_context(
  * reducer batch is committed first, the new index is written and committed,
  * and only then are the address bytes returned. Needs no spending key, so it
  * works while the wallet is locked. */
+/* Result code of wallet_reserve_diversifier_from_context while the node is in
+ * bulk-sync mode: nothing is issued and no index is consumed. */
+#define WALLET_RESERVE_CATCHING_UP (-3)
+
 struct zcl_result wallet_reserve_diversifier_from_context(
     const struct wallet_rpc_context *ctx, const struct sapling_key_entry *acct,
     uint8_t diversifier[ZC_DIVERSIFIER_SIZE], uint8_t pk_d[32]);

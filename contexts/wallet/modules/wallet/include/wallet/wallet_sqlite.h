@@ -339,6 +339,10 @@ bool wallet_sqlite_diversifier_reserve(
     struct wallet_sqlite *ws, const struct sapling_key_entry *acct,
     uint8_t diversifier_out[ZC_DIVERSIFIER_SIZE], uint8_t pk_d_out[32]);
 
+/* True while the connection runs at synchronous=OFF, the node's bulk-sync
+ * mode. wallet_sqlite_diversifier_reserve issues nothing then. */
+bool wallet_sqlite_unsynced(struct wallet_sqlite *ws);
+
 #ifdef ZCL_TESTING
 /* Replace the CSPRNG that picks a starting index; NULL restores it. */
 void wallet_sqlite_diversifier_set_rng_for_test(bool (*fn)(uint8_t *, size_t));

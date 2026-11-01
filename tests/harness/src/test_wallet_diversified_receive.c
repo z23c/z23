@@ -186,7 +186,9 @@ static void wdr_teardown(struct wdr *f)
 
 /* ── Calls ───────────────────────────────────────────────────────── */
 
-static bool wdr_receive(struct wdr *f, char *out, size_t size)
+/* z_getreceiveaddress: true with the address in `out`, or false with the
+ * refusal text in `out`. */
+static bool wdr_receive_text(struct wdr *f, char *out, size_t size)
 {
     struct json_value params, result;
     json_init(&params);
@@ -195,13 +197,24 @@ static bool wdr_receive(struct wdr *f, char *out, size_t size)
     bool ok = rpc_table_execute(f->tbl, "z_getreceiveaddress", &params,
                                 &result);
     const char *s = json_get_str(&result);
-    if (ok && s && strncmp(s, "zs1", 3) == 0)
+    if (ok && s && strncmp(s, "zs1", 3) == 0) {
         snprintf(out, size, "%s", s);
-    else
+    } else {
         ok = false;
+        snprintf(out, size, "%s", s ? s : "");
+    }
     json_free(&params);
     json_free(&result);
     return ok;
+}
+
+static bool wdr_receive(struct wdr *f, char *out, size_t size)
+{
+    char text[256];
+    if (!wdr_receive_text(f, text, sizeof(text)))
+        return false;
+    snprintf(out, size, "%s", text);
+    return true;
 }
 
 static bool wdr_account(struct wdr *f, struct sapling_key_entry *acct)
@@ -244,6 +257,21 @@ static bool wdr_default(const struct sapling_key_entry *acct, char *out,
                         size_t size)
 {
     return wdr_expected_from(acct, 0, 0, out, size);
+}
+
+/* The default payment key of an unrelated seed: no wallet address shares its
+ * pk_d. */
+static bool wdr_foreign(uint8_t d[11], uint8_t pk_d[32])
+{
+    uint8_t seed[32];
+    memset(seed, 0x11, sizeof(seed));
+    struct zip32_xsk xsk;
+    struct zip32_xfvk xfvk;
+    zip32_xsk_master(&xsk, seed, sizeof(seed));
+    zip32_xsk_to_xfvk(&xfvk, &xsk);
+    bool ok = zip32_xfvk_address(&xfvk, d, pk_d);
+    memory_cleanse(&xsk, sizeof(xsk));
+    return ok;
 }
 
 /* A fixed random source: the starting index is WDR_START_MIN + g_wdr_draw. */
@@ -887,9 +915,9 @@ static int wdr_sync_level(struct wdr *f)
 }
 
 /* The index reaches the disk before the address leaves: the receive itself
- * syncs the write-ahead log, in normal mode and in bulk-sync mode, the
- * connection's mode is put back afterwards, and when the sync fails no
- * address is returned. */
+ * syncs the write-ahead log, the connection's mode is put back afterwards,
+ * and when the sync fails no address is returned. In bulk-sync mode, which
+ * does not sync, no address is issued at all. */
 static int test_index_synced_before_return(void)
 {
     int failures = 0;
@@ -901,7 +929,7 @@ static int test_index_synced_before_return(void)
         vfs_on = true;
         ASSERT(wdr_restore(&f));
         wdr_use_start(0x5151ULL);
-        char warm[128], a[128], b[128], c[128], d[128];
+        char warm[128], a[128], c[128], d[128];
         int normal = wdr_sync_level(&f);
         ASSERT_EQ(normal, 1);
 
@@ -915,12 +943,24 @@ static int test_index_synced_before_return(void)
         ASSERT(spv_count(SPV_SYNC_WAL) > 0);
         ASSERT_EQ(wdr_sync_level(&f), normal);
 
+        /* While the node is catching up the connection does not sync, so no
+         * index may be issued: the refusal says why and consumes nothing. */
+        struct sapling_key_entry acct;
+        ASSERT(wdr_account(&f, &acct));
+        uint64_t before = 0, after = 0;
+        ASSERT(wdr_stored_next(&f, &acct, &before));
         ASSERT(node_db_ibd_turbo_mode(&f.ndb));
         int bulk = wdr_sync_level(&f);
-        spv_reset();
-        ASSERT(wdr_receive(&f, b, sizeof(b)));
-        ASSERT(spv_count(SPV_SYNC_WAL) > 0);
+        ASSERT_EQ(bulk, 0);
+        char why[256];
+        ASSERT(!wdr_receive_text(&f, why, sizeof(why)));
+        ASSERT(strstr(why, "catching up") != NULL);
+        ASSERT(wdr_stored_next(&f, &acct, &after));
+        ASSERT_EQ(after, before);
         ASSERT_EQ(wdr_sync_level(&f), bulk);
+        memory_cleanse(&acct, sizeof(acct));
+        ASSERT(node_db_normal_mode(&f.ndb));
+        ASSERT_EQ(wdr_sync_level(&f), normal);
 
         spv_fail_wal_sync(true);
         c[0] = '\0';
@@ -928,11 +968,10 @@ static int test_index_synced_before_return(void)
         spv_fail_wal_sync(false);
         ASSERT(failed);
         ASSERT_STR_EQ(c, "");
-        ASSERT_EQ(wdr_sync_level(&f), bulk);
+        ASSERT_EQ(wdr_sync_level(&f), normal);
 
         ASSERT(wdr_receive(&f, d, sizeof(d)));
         ASSERT(strcmp(d, a) != 0);
-        ASSERT(strcmp(d, b) != 0);
         PASS();
     } _test_next:;
     spv_fail_wal_sync(false);
@@ -1048,9 +1087,37 @@ static int test_index_exhaustion(void)
     return failures;
 }
 
-/* The balance of an issued address is what was paid to that address: the
- * funded one reports its notes, an issued but unpaid one and the default
- * report nothing. */
+/* z_getbalance of `address` as text; minconf < 0 leaves the argument out, so
+ * the handler's default applies. */
+static bool wdr_balance(struct wdr *f, const char *address, int minconf,
+                        char *out, size_t size)
+{
+    struct json_value params, arg, result;
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&arg);
+    json_set_str(&arg, address);
+    bool ok = json_push_back(&params, &arg);
+    json_free(&arg);
+    if (ok && minconf >= 0) {
+        json_init(&arg);
+        json_set_int(&arg, minconf);
+        ok = json_push_back(&params, &arg);
+        json_free(&arg);
+    }
+    json_init(&result);
+    ok = ok && rpc_table_execute(f->tbl, "z_getbalance", &params, &result);
+    snprintf(out, size, "%s",
+             json_get_str(&result) ? json_get_str(&result) : "");
+    json_free(&params);
+    json_free(&result);
+    return ok;
+}
+
+/* The balance of an issued address is what was paid to that address and is
+ * still unspent: the funded one reports its notes, an issued but unpaid one,
+ * the default and an address that only borrows a wallet diversifier report
+ * nothing, at the default minconf and at zero. */
 static int test_issued_address_balance(void)
 {
     int failures = 0;
@@ -1061,32 +1128,39 @@ static int test_issued_address_balance(void)
         struct sapling_key_entry acct;
         ASSERT(wdr_account(&f, &acct));
         wdr_use_start(0xabcdefULL);
-        char x[128], y[128], def[128];
+        char x[128], y[128], def[128], stolen[128];
         ASSERT(wdr_receive(&f, x, sizeof(x)));
         ASSERT(wdr_receive(&f, y, sizeof(y)));
         ASSERT(wdr_default(&acct, def, sizeof(def)));
-        ASSERT_EQ(wdr_deliver(&f, x, 3 * WDR_UNIT, 1), 1);
 
-        const char *const addr[3] = { x, y, def };
-        const char *const want[3] = { "3.00000000", "0.00000000",
-                                      "0.00000000" };
-        for (int which = 0; which < 3; which++) {
-            struct json_value params, arg, result;
-            json_init(&params);
-            json_set_array(&params);
-            json_init(&arg);
-            json_set_str(&arg, addr[which]);
-            ASSERT(json_push_back(&params, &arg));
-            json_free(&arg);
-            json_init(&arg);
-            json_set_int(&arg, 0);
-            ASSERT(json_push_back(&params, &arg));
-            json_free(&arg);
-            json_init(&result);
-            ASSERT(rpc_table_execute(f.tbl, "z_getbalance", &params, &result));
-            ASSERT_STR_EQ(json_get_str(&result), want[which]);
-            json_free(&params);
-            json_free(&result);
+        /* The foreign key under the diversifier of a funded address: the wallet
+         * does not own it, so it holds nothing. */
+        uint8_t xd[11], xpk[32], fd[11], fpk[32];
+        ASSERT(sapling_decode_payment_address(x, xd, xpk));
+        ASSERT(wdr_foreign(fd, fpk));
+        ASSERT(wdr_encode(xd, fpk, stolen, sizeof(stolen)));
+
+        /* Notes sit at height 100; the tip is later, so minconf 1 counts them. */
+        f.w->best_block_height = 200;
+        ASSERT_EQ(wdr_deliver(&f, x, 3 * WDR_UNIT, 1), 1);
+        ASSERT_EQ(wdr_deliver(&f, x, 2 * WDR_UNIT, 2), 1);
+        const struct sapling_received_note *spent =
+            &f.w->sapling_notes[f.w->num_sapling_notes - 1];
+        ASSERT_EQ(spent->value, 2 * WDR_UNIT);
+        uint8_t by[32];
+        memset(by, 0x77, sizeof(by));
+        ASSERT_EQ(db_sapling_note_mark_spent(&f.ndb, spent->nf, by),
+                  DB_MARK_SPENT_OK);
+
+        const char *const addr[4] = { x, y, def, stolen };
+        const char *const want[4] = { "3.00000000", "0.00000000",
+                                      "0.00000000", "0.00000000" };
+        for (int mc = -1; mc <= 0; mc++) {
+            for (int which = 0; which < 4; which++) {
+                char got[32];
+                ASSERT(wdr_balance(&f, addr[which], mc, got, sizeof(got)));
+                ASSERT_STR_EQ(got, want[which]);
+            }
         }
         memory_cleanse(&acct, sizeof(acct));
         PASS();
@@ -1408,9 +1482,10 @@ static bool wds_nf(const struct sapling_key_entry *key, const char *address,
 }
 
 /* Build, without committing, a send of `amount` to `payee` from `from`
- * ("account" or an address). Prints the refusal when the build fails. */
-static bool wds_prepare(const char *from, const char *payee,
-                        const char *amount, struct wallet_tx *out)
+ * ("account" or an address). The refusal, if any, is copied to `why`. */
+static bool wds_prepare_why(const char *from, const char *payee,
+                            const char *amount, struct wallet_tx *out,
+                            char *why, size_t why_size)
 {
     struct json_value params, recips, rcp, result;
     json_init(&params);
@@ -1430,10 +1505,21 @@ static bool wds_prepare(const char *from, const char *payee,
     json_free(&recips);
     json_init(&result);
     ok = ok && z_sendmany_prepare(&params, out, &result);
-    if (!ok)
-        printf("(z_sendmany_prepare: %s) ", json_get_str(&result));
+    if (why && why_size)
+        snprintf(why, why_size, "%s",
+                 !ok && json_get_str(&result) ? json_get_str(&result) : "");
     json_free(&params);
     json_free(&result);
+    return ok;
+}
+
+static bool wds_prepare(const char *from, const char *payee,
+                        const char *amount, struct wallet_tx *out)
+{
+    char why[160];
+    bool ok = wds_prepare_why(from, payee, amount, out, why, sizeof(why));
+    if (!ok)
+        printf("(z_sendmany_prepare: %s) ", why);
     return ok;
 }
 
@@ -1470,6 +1556,16 @@ static int wds_spend_all(struct wdr *f, struct simnet *s,
         sapling_crh_ivk(pxfvk.fvk.ak, pxfvk.fvk.nk, pivk);
         char payee[128];
         ASSERT(wdr_encode(pd, ppk, payee, sizeof(payee)));
+
+        /* An address of an unrelated seed is foreign: a send from it is
+         * refused, however its key relates to the wallet's. */
+        {
+            struct wallet_tx foreign;
+            char why[160];
+            ASSERT(!wds_prepare_why(payee, addrs[0], "0.10000000", &foreign,
+                                    why, sizeof(why)));
+            ASSERT(strstr(why, "not in wallet") != NULL);
+        }
 
         /* A send from one issued address builds, spends the account's notes
          * and the verifier accepts it: the address is owned, not foreign. */

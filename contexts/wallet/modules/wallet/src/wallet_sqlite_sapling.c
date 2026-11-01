@@ -545,6 +545,11 @@ static int wsql_synchronous_level(sqlite3 *db)
     return level;
 }
 
+bool wallet_sqlite_unsynced(struct wallet_sqlite *ws)
+{
+    return ws && ws->open && wsql_synchronous_level(ws->db) == 0;
+}
+
 static bool wsql_set_synchronous(sqlite3 *db, int level)
 {
     char sql[32];
@@ -634,6 +639,11 @@ bool wallet_sqlite_diversifier_reserve(
     if (!sqlite3_get_autocommit(ws->db))
         LOG_FAIL("wallet_sqlite", "diversifier reserve: refused inside an open "
                  "transaction");
+    /* Bulk-sync mode never syncs, so a write made there could be taken back
+     * by power loss after its address was shown: issue none. */
+    if (wallet_sqlite_unsynced(ws))
+        LOG_FAIL("wallet_sqlite", "diversifier reserve: the connection is not "
+                 "syncing (bulk-sync mode); no address issued");
     /* Read, derive and write are one step: two callers must not read one
      * index, and the synchronous level is restored by whoever raised it. */
     if (!zcl_once_call(&g_div_once, wsql_div_lock_init))
