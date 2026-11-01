@@ -317,7 +317,7 @@ static bool snapshot_fill(struct chain_evidence_controller *authority,
      * self-deadlocks against the DB worker. Boot init owns those repairs. */
     out->state = chain_evidence_controller_load_state_readonly(authority);
     if (!snapshot_copy_csr_tips(authority, out, bounded))
-        return false;
+        return false;  // raw-return-ok:busy lock is the typed busy answer, not a fault
     snapshot_load_persisted_markers(authority->ndb, out);
     snapshot_load_persisted_enums(authority->ndb, out);
     snapshot_load_evidence_records(authority->ndb, out);
