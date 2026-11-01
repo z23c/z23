@@ -693,3 +693,7 @@ later lane flips it HARD.
 - 2026-11-01T21:03:35Z — REASON: tor_integration: ZCL_TESTING-only seam to append one torrc line (DisableNetwork 1) so the in-process SIGTERM test needs no public network;   no production or consensus change
   old ROOT: 95fc58911b02d8aaaa9e4379d5110458ca0db47a55417e3b2294bea12ebf0ae9
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T21:03:44Z — REASON: tor_write_torrc: check removal of a partial torrc and log failure;   no consensus change
+  old ROOT: 517bd420f816621d54d07199b17d6073cd4764d74b29b400e4d72813630dde9e
+  by: owner unseal ritual (make core-unseal)

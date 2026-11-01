@@ -1143,20 +1143,36 @@ static int test_tor_write_torrc_reports_write_failure(void)
     snprintf(missing, sizeof(missing), "%s/no_such_dir", tmpdir);
     bool open_fail_reported = !tor_write_torrc(missing, 8033, false);
 
-    /* torrc as a symlink to /dev/full: open succeeds, every write fails. */
+    /* torrc as a symlink to /dev/full: open succeeds, every write fails.
+     * Prove the fixture is what it claims (a link that really points at
+     * /dev/full) before trusting any verdict drawn from it; without
+     * /dev/full the check cannot run and says so. */
     char torrc[600];
     snprintf(torrc, sizeof(torrc), "%s/torrc", tmpdir);
+    struct stat dev_full_st;
+    if (stat("/dev/full", &dev_full_st) != 0) {
+        printf("OK (skipped write-failure half: /dev/full absent; open-failure=%d)\n",
+               open_fail_reported);
+        remove_tree(tmpdir);
+        return open_fail_reported ? 0 : 1;
+    }
     bool linked = symlink("/dev/full", torrc) == 0;
-    bool write_fail_reported = linked && !tor_write_torrc(tmpdir, 8033, false);
-    bool partial_removed = linked && access(torrc, F_OK) != 0;
+    char target[64] = {0};
+    struct stat lst;
+    bool fixture_ok = linked && lstat(torrc, &lst) == 0 && S_ISLNK(lst.st_mode) &&
+                      readlink(torrc, target, sizeof(target) - 1) > 0 &&
+                      strcmp(target, "/dev/full") == 0;
+    bool write_fail_reported = fixture_ok && !tor_write_torrc(tmpdir, 8033, false);
+    /* lstat, not stat: a surviving dangling link must not count as gone. */
+    bool partial_removed = fixture_ok && lstat(torrc, &lst) != 0 && errno == ENOENT;
 
     remove_tree(tmpdir);
-    if (open_fail_reported && write_fail_reported && partial_removed) {
+    if (open_fail_reported && fixture_ok && write_fail_reported && partial_removed) {
         printf("OK\n");
         return 0;
     }
-    printf("FAIL (open=%d linked=%d write=%d removed=%d)\n",
-           open_fail_reported, linked, write_fail_reported, partial_removed);
+    printf("FAIL (open=%d fixture=%d write=%d removed=%d)\n",
+           open_fail_reported, fixture_ok, write_fail_reported, partial_removed);
     return 1;
 }
 

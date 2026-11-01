@@ -6,8 +6,10 @@
 #include "util/log_macros.h"
 #include "util/log_rotate.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 /* The [rend] info stream lives in its OWN file. Tor publishes the one line
  * that proves this node's onion descriptor reached an HSDir —
@@ -63,7 +65,11 @@ bool tor_write_torrc(const char *datadir, uint16_t p2p_port,
     bool flushed = wrote && fflush(f) == 0 && !ferror(f);
     bool closed = fclose(f) == 0;
     if (!wrote || !flushed || !closed) {
-        remove(torrc_path);
+        /* tor_integration_start() returns false on our false, so Tor is never
+         * started on this file; still, say so if the partial file survives. */
+        if (unlink(torrc_path) != 0 && errno != ENOENT)
+            ZCL_LOG_ERROR_ORIGIN("tor", "could not remove partial torrc %s: %s",
+                                 torrc_path, strerror(errno));
         LOG_FAIL("tor", "failed to write torrc %s (wrote=%d flushed=%d closed=%d)",
                  torrc_path, wrote, flushed, closed);
     }
