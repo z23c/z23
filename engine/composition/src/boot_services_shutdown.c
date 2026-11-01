@@ -24,6 +24,7 @@
 #include "supervisors/staged_sync_supervisor.h"
 #include "services/block_index_loader.h"
 #include "services/block_index_flat_anchor.h"
+#include "services/chain_evidence_authority_service.h"
 #include "controllers/blockchain_controller.h"
 #include "controllers/diagnostics_controller.h"
 #include "controllers/network_controller.h"
@@ -243,7 +244,14 @@ static bool shutdown_quiesce_network_and_flush_coins(struct boot_svc_ctx *svc,
     return final_flush_ok;
 }
 
-static void shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
+/* Bound on a chain-evidence maintenance run at shutdown. A run parked longer
+ * is behind a stalled node.db read; shutdown then keeps node.db and owned
+ * state open instead of waiting on the disk (see readers_drained). */
+#define SHUTDOWN_CEC_MAINT_WAIT_MS 10000
+
+/* Returns false when a chain-evidence maintenance run is still parked, so
+ * node.db and owned state must stay open. */
+static bool shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
 {
     printf("[shutdown] stopping runtime services\n");
     /* Signal the NAT probe worker FIRST (non-blocking): a worker sitting in
@@ -260,6 +268,16 @@ static void shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
      * live; otherwise a periodic health callback can race the DB close below
      * and dereference closed runtime state. */
     health_stop();
+    /* The sweeper was the last periodic node_health_collect caller (RPC and
+     * diagnostics stopped earlier). Stop the chain-evidence maintenance
+     * helper it fed. A run parked behind node.db or CSR still holds raw
+     * pointers to both, so a false here keeps them open downstream. */
+    bool maint_drained = chain_evidence_maintain_stop(SHUTDOWN_CEC_MAINT_WAIT_MS);
+    if (!maint_drained)
+        fprintf(stderr,
+                "[shutdown] chain-evidence maintenance run still parked after "
+                "%d ms; node.db and owned state retained\n",
+                SHUTDOWN_CEC_MAINT_WAIT_MS);
     /* Stop + join the self-heal condition runner FIRST, while main_state and
      * the progress store are still live: the runner dereferences both inside a
      * condition tick, so it must never outlive them (they are freed in
@@ -321,6 +339,7 @@ static void shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
         thread_registry_join_all_owned_except(db_threads, db_thread_count);
     }
     printf("[shutdown] runtime consumers drained; DB provider retained\n");
+    return maint_drained;
 }
 
 /* progress.kv may have run synchronous=OFF during IBD. Restore its safe
@@ -650,14 +669,18 @@ void app_shutdown_svc(struct boot_svc_ctx *svc)
      * not be closed while a consumer is live. A legitimate slow callback gets
      * bounded graces; a true wedge still exits loudly and unclean. */
     shutdown_stagewatch_enter("worker-drain", 60, true, true);
-    shutdown_stop_runtime_and_drain_workers(svc);
+    /* A parked chain-evidence maintenance run is an owned reader of node.db
+     * and owned state, like an undrained diagnostics capture: either keeps
+     * them open below. Durability (flush, checkpoint, marker) is unchanged. */
+    bool readers_drained =
+        shutdown_stop_runtime_and_drain_workers(svc) && diagnostics_drained;
     /* Capture while state and progress.kv are still live, after every writer
      * that could move their frontier has been joined. */
     boot_fast_restart_capture_shutdown_facts(svc->state);
     /* runtime-persist holds the final WAL checkpoint + wallet flush + mempool
      * save. Durability-critical: never skipped, only graced. */
     shutdown_stagewatch_enter("runtime-persist", 45, true, true);
-    if (!shutdown_persist_runtime_state(svc, diagnostics_drained))
+    if (!shutdown_persist_runtime_state(svc, readers_drained))
         durability_ok = false;
 
     /* The gate is durability-only by construction: an abandoned diagnostics
@@ -701,7 +724,7 @@ void app_shutdown_svc(struct boot_svc_ctx *svc)
     /* Every worker was joined before persistence; destructive release is now
      * ownership-safe and cannot race a timed-out background callback. */
     shutdown_stagewatch_enter("release-resources", 15, false, true);
-    shutdown_release_owned_resources(svc, diagnostics_drained);
+    shutdown_release_owned_resources(svc, readers_drained);
 
     printf("Shutdown complete.\n");
     /* Closes the last stage, cancels the alarm, writes the CLEAN receipt. */

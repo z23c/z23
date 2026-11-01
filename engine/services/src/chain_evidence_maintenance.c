@@ -30,7 +30,7 @@
  *     that finds an older run still in flight only waits and reports PENDING,
  *     and the next request starts a fresh run. */
 
-// supervisor-ok:bounded-one-shot-maintenance — the only thread is a one-shot evidence maintenance run, joined before the next run and by chain_evidence_maintain_quiesce; the requester never waits on it beyond a deadline, and a stuck run only reports PENDING
+// supervisor-ok:bounded-one-shot-maintenance — the only thread is a one-shot evidence maintenance run, joined before the next run, by chain_evidence_maintain_quiesce, and by chain_evidence_maintain_stop at shutdown (node.db and CSR stay open while it is parked); the requester never waits on it beyond a deadline, and a stuck run only reports PENDING
 // one-result-type-ok:bounded-wait-verdict — the public surface returns enum cec_maint_result (DONE or PENDING), a time-bounded wait verdict that carries no failure reason; the bool is a private wait predicate
 
 #include "services/chain_evidence_authority_service.h"
@@ -45,6 +45,7 @@
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cv = PTHREAD_COND_INITIALIZER;
 static bool g_inflight;
+static bool g_stopped;
 static bool g_have_tid;
 static pthread_t g_tid;
 static struct node_db *g_ndb;
@@ -86,6 +87,10 @@ enum cec_maint_result chain_evidence_maintain_bounded(
 {
     enum cec_maint_result result = CEC_MAINT_PENDING;
     pthread_mutex_lock(&g_mu);
+    if (g_stopped) { /* shutdown: node.db and CSR are about to close */
+        pthread_mutex_unlock(&g_mu);
+        return CEC_MAINT_PENDING;
+    }
     if (g_inflight) {
         (void)wait_idle_locked(wait_ms); /* older run: never claimed as DONE */
         pthread_mutex_unlock(&g_mu);
@@ -121,5 +126,25 @@ void chain_evidence_maintain_quiesce(void)
         pthread_join(g_tid, NULL);
         g_have_tid = false;
     }
+    pthread_mutex_unlock(&g_mu);
+}
+
+bool chain_evidence_maintain_stop(int wait_ms)
+{
+    pthread_mutex_lock(&g_mu);
+    g_stopped = true;
+    bool idle = wait_idle_locked(wait_ms);
+    if (idle && g_have_tid) {
+        pthread_join(g_tid, NULL);
+        g_have_tid = false;
+    }
+    pthread_mutex_unlock(&g_mu);
+    return idle;
+}
+
+void chain_evidence_maintain_resume(void)
+{
+    pthread_mutex_lock(&g_mu);
+    g_stopped = false;
     pthread_mutex_unlock(&g_mu);
 }
