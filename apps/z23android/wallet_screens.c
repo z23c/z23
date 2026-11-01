@@ -185,6 +185,23 @@ static void memo_items(struct wallet_screen *s, const char *raw)
     if (used) { chunk[used] = '\0'; (void)add(s, WALLET_ITEM_MEMO, WALLET_ACT_NONE, chunk); }
 }
 
+/* What the node reported, in the order the owner asks: spendable now, what is arriving, waiting, public and maturing, then
+ * how current it is. */
+static void funds_lines(struct wallet_screen *s, const struct data *d)
+{
+    line(s, "Spendable now");
+    (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, d->view.balance);
+    if (d->view.pending[0]) line(s, d->view.pending);
+    if (d->view.unready_line[0]) line(s, d->view.unready_line);
+    if (d->view.total_line[0]) line(s, d->view.total_line);
+    if (d->view.public_line[0]) line(s, d->view.public_line);
+    if (d->view.immature_line[0]) line(s, d->view.immature_line);
+    if (d->funds_fresh) line(s, d->view.sync);
+    else note(s, "Last read more than 30 seconds ago, so these amounts and the sync state may be out of date. Check that your node is running.");
+    if (!d->view.known) note(s, "The wallet could not be read. Check that your node is running, then open this screen again.");
+    if (d->view.send[0]) note(s, d->view.send);
+}
+
 static void funds_items(struct wallet_screen *s)
 {
     const struct data *d = &st.d;
@@ -194,19 +211,7 @@ static void funds_items(struct wallet_screen *s)
     else if (d->node_silent) {
         line(s, "The node is not answering. Start it to see your funds.");
         button(s, WALLET_ACT_START_NODE, "Start node");
-    } else {
-        line(s, "Spendable now");
-        (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, d->view.balance);
-        if (d->view.pending[0]) line(s, d->view.pending);
-        if (d->view.unready_line[0]) line(s, d->view.unready_line);
-        if (d->view.total_line[0]) line(s, d->view.total_line);
-        if (d->view.public_line[0]) line(s, d->view.public_line);
-        if (d->view.immature_line[0]) line(s, d->view.immature_line);
-        if (d->funds_fresh) line(s, d->view.sync);
-        else note(s, "Last read more than 30 seconds ago, so these amounts and the sync state may be out of date. Check that your node is running.");
-        if (!d->view.known) note(s, "The wallet could not be read. Check that your node is running, then open this screen again.");
-        if (d->view.send[0]) note(s, d->view.send);
-    }
+    } else funds_lines(s, d);
     if (d->fleet_loaded && !d->node_silent) line(s, d->fleet_fresh ? d->fleet : WALLET_FLEET_UNCHECKED);
     button(s, WALLET_ACT_RECEIVE, "Receive");
     button(s, WALLET_ACT_SEND, d->scan_note[0] ? "Scan again" : "Send");

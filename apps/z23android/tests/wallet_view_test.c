@@ -391,6 +391,16 @@ static void test_unready_total_and_hidden(void)
     replace_once(json, sizeof(json), VALID_REPLY, schema,
                  "\"schema\":\"zcl.wallet_summary.v1\",\"spendable_total_zat\":-1,\"spendable_total\":\"x\",");
     assert(!wallet_view_from_summary(json, &v));
+    assert(!strstr(v.unready_line, " 0 ZCL"));
+    printf("  unready and total lines\n");
+}
+
+/* A locked wallet with no viewing key hides every private amount and still reports the public ones. */
+static void test_hidden_private_amounts(void)
+{
+    static const char *const schema = "\"schema\":\"zcl.wallet_summary.v1\",";
+    char json[2048];
+    struct wallet_view v;
     static const char hidden[] =
         "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"keys_unavailable\","
         "\"spendable_zat\":null,\"spendable\":null,\"pending_zat\":null,\"pending\":null,\"pending_notes\":null,"
@@ -409,7 +419,7 @@ static void test_unready_total_and_hidden(void)
     assert(!wallet_view_from_summary(json, &v));
     replace_once(json, sizeof(json), VALID_REPLY, schema, "\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"ok\",");
     assert(wallet_view_from_summary(json, &v) && v.known && !strcmp(v.balance, "1.23456789 ZCL"));
-    printf("  unready and total lines, hidden private amounts\n");
+    printf("  hidden private amounts\n");
 }
 
 int main(void)
@@ -427,6 +437,7 @@ int main(void)
     test_bad_input_is_unknown();
     test_group_address();
     test_unready_total_and_hidden();
+    test_hidden_private_amounts();
     test_reply_text_is_wiped();
     printf("wallet view model: all tests passed\n");
     return 0;
