@@ -10308,6 +10308,68 @@ static bool fst_hash_none(int64_t h, char hex[65], void *ctx)
     return false;
 }
 
+/* A chain that forks from ours at height *fork_from: the block at h is ours
+ * below that height and a fork's at or above it. */
+static bool fst_hash_fork_at(int64_t h, char hex[65], void *ctx)
+{
+    const int64_t *fork_from = ctx;
+    if (h < FST_LOCAL - 100 || h > FST_LOCAL)
+        return false;
+    fst_hash(h, h >= *fork_from, hex);
+    return true;
+}
+
+/* A check of the machine with box key `box` naming block h on the chain of
+ * `forked`, settled against `local` as the background step does. */
+static void fst_settle(struct node_db *db, const uint8_t box[32], int64_t h,
+                       bool forked, const struct fleet_status_local *local)
+{
+    struct fleet_tip t;
+    memset(&t, 0, sizeof t);
+    t.height = h;
+    fst_hash(h, forked, t.hash);
+    fleet_status_note_check(db, box, &t, local);
+}
+
+static int test_fleet_status_refusal_keeps_highest(void)
+{
+    int failures = 0;
+    struct node_db db;
+    struct fleet_status_local local;
+    int64_t fork_from = FST_LOCAL + 1;
+    uint8_t box[32];
+    TEST("fleet status: a refusal keeps the highest height it was raised at, "
+         "so a machine back below it on our chain lifts nothing") {
+        ASSERT(fst_open(&db, false, FST_ONCE));
+        fleet_status_collect(&db, FBD_NOW, &g_fst);
+        ASSERT(fst_box_of(FST_ALPHA, box));
+        local.tip = FST_LOCAL - 10;
+        local.hash_at = fst_hash_fork_at;
+        local.ctx = &fork_from;
+        /* alpha names a fork's block at 100 and is refused at 100. */
+        fst_settle(&db, box, FST_LOCAL - 10, true, &local);
+        ASSERT_EQ(fst_refusal_of(FST_ALPHA), (int64_t)(FST_LOCAL - 10));
+        /* The phone moves onto a fork from 108 and reaches 110. Alpha returns
+         * and names another block at 110: the refusal rises to 110. */
+        fork_from = FST_LOCAL - 2;
+        local.tip = FST_LOCAL;
+        fst_settle(&db, box, FST_LOCAL, false, &local);
+        ASSERT_EQ(fst_refusal_of(FST_ALPHA), (int64_t)FST_LOCAL);
+        /* Alpha resyncs to 105 on the phone's chain: machine_behind, but
+         * below the refused 110, so nothing lifts. */
+        fst_settle(&db, box, FST_LOCAL - 5, false, &local);
+        ASSERT_EQ(fst_refusal_of(FST_ALPHA), (int64_t)FST_LOCAL);
+        /* A check that reaches 110 on the phone's chain lifts it. */
+        fst_settle(&db, box, FST_LOCAL, true, &local);
+        ASSERT_EQ(fst_refusal_of(FST_ALPHA), (int64_t)0);
+        fst_close(&db);
+        PASS();
+    }
+    _test_next:;
+    fbr_uninstall();
+    return failures;
+}
+
 static int test_fleet_status_standing_refusal(void)
 {
     int failures = 0;
@@ -10574,7 +10636,6 @@ enum { FST_CLONE_NEWUSER = 0x10000000, FST_CLONE_NEWTIME = 0x00000080 };
 enum {
     FST_SKEW_SEEN = 0,    /* the age clock shows the shift */
     FST_SKEW_MISSED = 1,  /* it does not */
-    FST_SKEW_NAMESPACE = 3, /* 3 to 5: the host forbids the namespaces */
     FST_SKEW_BROKEN = 6   /* the observer itself failed */
 };
 
@@ -10726,6 +10787,7 @@ static int test_fleet_status(void)
     failures += test_fleet_tip_fetch();
     failures += test_fleet_status_ahead();
     failures += test_fleet_status_standing_refusal();
+    failures += test_fleet_status_refusal_keeps_highest();
     failures += test_fleet_status_depth();
     failures += test_fleet_status_fairness();
     failures += test_fleet_status_clock();

@@ -259,13 +259,13 @@ void fleet_tip_cache_raise_refusal(const char *key, int64_t height)
         for (size_t i = 0; i < BOOT_FLEET_ROSTER_MAX && !e; i++)
             if (g_refusals[i].height == 0)
                 e = &g_refusals[i];
-        /* Full of boxes no longer on the roster: the oldest slot goes, and
-         * the stored refusal is reloaded by the next status build. */
+        /* Full of boxes no longer on the roster: the next slot in turn goes,
+         * and the stored refusal is reloaded by the next status build. */
         if (!e)
             e = &g_refusals[g_refusal_next++ % BOOT_FLEET_ROSTER_MAX];
         (void)snprintf(e->key, sizeof e->key, "%s", key);
         e->height = height;
-    } else if (height < e->height) {
+    } else if (height > e->height) {
         e->height = height;
     }
     pthread_mutex_unlock(&g_lock);

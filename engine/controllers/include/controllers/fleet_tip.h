@@ -80,7 +80,7 @@ bool fleet_tip_cache_get(const char *key, struct fleet_tip *out);
 /* Standing send refusals, one per machine, keyed by the machine's box key as
  * 64 lowercase hex digits (FLEET_TIP_REFUSAL_KEY_MAX with the NUL), so that
  * a box admitted again under another onion keeps its refusal. A refusal is
- * the lowest height at which the machine named another block, 0 when none.
+ * the highest height at which the machine named another block, 0 when none.
  * Persistence is the caller's: see fleet_status_note_check(). */
 #define FLEET_TIP_REFUSAL_KEY_MAX 65
 void fleet_tip_cache_raise_refusal(const char *key, int64_t height);
