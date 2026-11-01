@@ -117,16 +117,38 @@ static int t_thread_qos_background_attr_applies_before_entry(void)
 #else
 
 struct tq_worker_result {
+    bool  sched_reset_ok;
+    bool  io_reset_ok;
     bool  qos_call_ok;
     int   sched_policy;
     long  ioprio_value;
     bool  ioprio_call_ok;
 };
 
+#ifndef IOPRIO_CLASS_BE
+#define IOPRIO_CLASS_BE 2
+#endif
+
+/* Put the calling thread on the default policy (SCHED_OTHER, I/O best-effort
+ * level 4) before it is measured. A thread inherits its creator's policy and
+ * I/O class, and the host scheduler may launch the whole suite in the idle
+ * I/O class to keep builds below the node; without this reset the baseline
+ * below would read IDLE for a reason that has nothing to do with the helper.
+ * Unprivileged callers may set SCHED_OTHER and any best-effort level; a
+ * restrictive sandbox may still deny ioprio_set, which io_reset_ok records. */
+static void tq_reset_default_policy(struct tq_worker_result *r)
+{
+    struct sched_param normal = {0};
+    r->sched_reset_ok = sched_setscheduler(0, SCHED_OTHER, &normal) == 0;
+    r->io_reset_ok = syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
+                             (IOPRIO_CLASS_BE << TQ_IOPRIO_CLASS_SHIFT) | 4) == 0;
+}
+
 static void *tq_worker(void *arg)
 {
     struct tq_worker_result *r = arg;
 
+    tq_reset_default_policy(r);
     r->qos_call_ok = zcl_thread_qos_background();
 
     /* Read back the CALLING thread's own scheduling policy — pid=0 means
@@ -145,14 +167,15 @@ static void *tq_worker(void *arg)
     return NULL;
 }
 
-/* Baseline: on the box's default scheduling policy (SCHED_OTHER == 0), a
- * fresh thread must NOT already read back SCHED_BATCH / IOPRIO_CLASS_IDLE
- * on its own — otherwise the test below would pass for free and prove
- * nothing. */
+/* Baseline: after the same reset the applied worker starts from, a thread
+ * that never calls the helper must read back SCHED_OTHER and best-effort,
+ * not SCHED_BATCH / IOPRIO_CLASS_IDLE; otherwise the test below would pass
+ * for free and prove nothing. */
 static void *tq_baseline_worker(void *arg)
 {
     struct tq_worker_result *r = arg;
 
+    tq_reset_default_policy(r);
     r->qos_call_ok = true; /* not exercised on the baseline thread */
     r->sched_policy = sched_getscheduler(0);
 
@@ -177,14 +200,22 @@ static int t_thread_qos_applies_sched_batch_and_ioprio_idle(void)
          * any freshly spawned thread on this host. */
         ASSERT_EQ(pthread_create(&t, NULL, tq_baseline_worker, &baseline), 0);
         ASSERT_EQ(pthread_join(t, NULL), 0);
-        ASSERT(baseline.sched_policy != SCHED_BATCH);
-        if (baseline.ioprio_call_ok)
+        ASSERT(baseline.sched_reset_ok);
+        ASSERT_EQ(baseline.sched_policy, SCHED_OTHER);
+        /* With the reset applied the class must read best-effort exactly;
+         * where a sandbox denies ioprio_set, keep the original check that
+         * a thread is not already idle on its own. */
+        if (baseline.io_reset_ok && baseline.ioprio_call_ok)
+            ASSERT_EQ(TQ_IOPRIO_CLASS(baseline.ioprio_value), IOPRIO_CLASS_BE);
+        else if (baseline.ioprio_call_ok)
             ASSERT(TQ_IOPRIO_CLASS(baseline.ioprio_value) != IOPRIO_CLASS_IDLE);
 
-        /* Applied thread: calls zcl_thread_qos_background() on itself, then
-         * reads its own policy/class back. */
+        /* Applied thread: starts from the same reset, calls
+         * zcl_thread_qos_background() on itself, then reads its own
+         * policy/class back. */
         ASSERT_EQ(pthread_create(&t, NULL, tq_worker, &applied), 0);
         ASSERT_EQ(pthread_join(t, NULL), 0);
+        ASSERT(applied.sched_reset_ok);
 
         /* sched_setscheduler(SCHED_BATCH) needs no special privilege on
          * Linux — it must always take. */
