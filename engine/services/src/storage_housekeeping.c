@@ -56,6 +56,25 @@ static char g_datadir[1024];
  * rotational storage: holding the token across the whole sweep would
  * serialise them against other threads but not against each other. */
 
+/* Take the maintenance token without ever waiting past a stop request. The
+ * plain begin() is an uninterruptible mutex lock, and the boot sweep now runs
+ * on this service's thread: a token held for minutes by a boot-time scan would
+ * make storage_housekeeping_stop()'s join wait it out. try_begin() naps at
+ * most 200 ms per attempt, so the stop flag is seen at that cadence. Returns
+ * false (token NOT held) once a stop or registry shutdown is requested. */
+static bool sh_maintenance_begin(void)
+{
+    for (;;) {
+        pthread_mutex_lock(&g_lock);
+        bool stop = g_stop_requested;
+        pthread_mutex_unlock(&g_lock);
+        if (stop || thread_registry_shutdown_requested())
+            return false;
+        if (storage_pacing_maintenance_try_begin(200))
+            return true;
+    }
+}
+
 static void sweep_projection(const struct storage_pacing *pacing)
 {
     /* Compaction can refuse before measuring a closed or unavailable store.
@@ -64,7 +83,7 @@ static void sweep_projection(const struct storage_pacing *pacing)
         .page_size = -1, .page_count = -1, .free_pages = -1,
         .file_bytes = -1, .live_bytes = -1, .free_bytes = -1,
     };
-    if (!storage_pacing_maintenance_begin())
+    if (!sh_maintenance_begin())
         return;
     bool compacted = projection_store_compact_if_needed(
         pacing->compact_floor_bytes, pacing->compact_ratio_pct, NULL,
@@ -82,7 +101,7 @@ static void sweep_projection(const struct storage_pacing *pacing)
 static void sweep_topology(const struct storage_pacing *pacing)
 {
     int64_t wal_before = -1;
-    if (!storage_pacing_maintenance_begin())
+    if (!sh_maintenance_begin())
         return;
     bool truncated = topology_store_wal_checkpoint_if_over(
         pacing->wal_truncate_bytes, &wal_before);
@@ -100,7 +119,7 @@ static void sweep_logs(const char *datadir, const struct storage_pacing *pacing)
 {
     if (!datadir || !datadir[0])
         return;
-    if (!storage_pacing_maintenance_begin())
+    if (!sh_maintenance_begin())
         return;
     int rotated = tor_logs_rotate(datadir, pacing->log_rotate_bytes);
     storage_pacing_maintenance_end();
@@ -335,6 +354,11 @@ void storage_housekeeping_stop(void)
     pthread_t thread = g_thread;
     pthread_mutex_unlock(&g_lock);
     pthread_join(thread, NULL);
+    /* Clear the request so a direct storage_housekeeping_sweep() after stop
+     * (tests, tools) is not mistaken for an abandoned one. */
+    pthread_mutex_lock(&g_lock);
+    g_stop_requested = false;
+    pthread_mutex_unlock(&g_lock);
 #ifdef ZCL_TESTING
     sup_id = atomic_exchange(&g_supervisor_id, SUPERVISOR_INVALID_ID);
     if (sup_id != SUPERVISOR_INVALID_ID)

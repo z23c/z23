@@ -212,6 +212,55 @@ static int shk_case_boot_start_not_blocked_by_held_lock(void)
     return failures;
 }
 
+/* ── 1c. stop must end a first sweep that is blocked on the token ── */
+static void *shk_stop_thread(void *arg)
+{
+    atomic_bool *done = arg;
+    storage_housekeeping_stop();
+    atomic_store(done, true);
+    return NULL;
+}
+
+/* The token is held by this thread for the whole case, so the deferred first
+ * sweep sits waiting for it. storage_housekeeping_stop() must still return
+ * (the join cannot wait out a token held for minutes at boot). Red with the
+ * plain blocking begin(): stop never returns while the token is held. */
+static int shk_case_stop_ends_sweep_blocked_on_token(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "storage_housekeeping", "stopblocked");
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_ROTATIONAL);
+
+    struct storage_housekeeping_stats before;
+    storage_housekeeping_stats(&before);
+    SHK_CHECK("stop blocked: token taken", storage_pacing_maintenance_begin());
+    struct zcl_result r = storage_housekeeping_start_deferred(dir);
+    SHK_CHECK("stop blocked: deferred start ok", r.ok);
+    SHK_CHECK("stop blocked: first sweep entered",
+              shk_wait_sweeps(before.sweeps + 1));
+
+    atomic_bool done;
+    atomic_init(&done, false);
+    pthread_t th;
+    SHK_CHECK("stop blocked: stopper thread spawned",
+              pthread_create(&th, NULL, shk_stop_thread, &done) == 0);
+    bool stopped = false;
+    for (int i = 0; i < 250 && !stopped; i++) {
+        stopped = atomic_load(&done);
+        if (!stopped)
+            platform_sleep_ms(20);
+    }
+    SHK_CHECK("stop returns while the first sweep waits on the token",
+              stopped);
+
+    storage_pacing_maintenance_end();
+    pthread_join(th, NULL);
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 /* ── 1. start/stop round trip on an empty datadir ── */
 static int shk_case_start_stop_round_trip(void)
 {
@@ -627,6 +676,7 @@ int test_storage_housekeeping(void)
     failures += shk_case_sweep_under_bound_noop(pacing);
     failures += shk_case_stop_with_tick_due(pacing);
     failures += shk_case_boot_start_not_blocked_by_held_lock();
+    failures += shk_case_stop_ends_sweep_blocked_on_token();
 
     shk_restore_pacing();
     if (failures == 0)
