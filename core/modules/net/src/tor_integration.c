@@ -752,6 +752,35 @@ static bool tor_reduced_padding_for_platform(void)
 #endif
 }
 
+#ifdef ZCL_TESTING
+/* Test seam: one extra torrc line appended after tor_write_torrc(), so an
+ * in-process test can start the real Tor with DisableNetwork 1 and never
+ * touch the public network. Absent from production builds. */
+static char g_test_extra_torrc[128];
+
+void tor_integration_set_extra_torrc_for_test(const char *line)
+{
+    snprintf(g_test_extra_torrc, sizeof(g_test_extra_torrc), "%s",
+             line ? line : "");
+}
+
+static bool tor_append_test_torrc(const char *datadir)
+{
+    if (!g_test_extra_torrc[0])
+        return true;
+    char path[1024];
+    int pn = snprintf(path, sizeof(path), "%s/torrc", datadir);
+    if (pn < 0 || (size_t)pn >= sizeof(path))
+        return false;
+    FILE *f = fopen(path, "a");
+    if (!f)
+        return false;
+    bool ok = fprintf(f, "%s\n", g_test_extra_torrc) > 0;
+    ok = (fflush(f) == 0 && !ferror(f)) && ok;
+    return (fclose(f) == 0) && ok;
+}
+#endif
+
 bool tor_integration_start(const char *datadir, uint16_t p2p_port)
 {
     if (atomic_load(&g_tor_running))
@@ -816,6 +845,11 @@ bool tor_integration_start(const char *datadir, uint16_t p2p_port)
     if (!tor_write_torrc(datadir, p2p_port,
                           tor_reduced_padding_for_platform()))
         LOG_FAIL("tor", "failed to write torrc to %s", datadir);
+
+#ifdef ZCL_TESTING
+    if (!tor_append_test_torrc(datadir))
+        LOG_FAIL("tor", "failed to append test torrc line in %s", datadir);
+#endif
 
     /* Register our handler with Tor's dynhost before starting.
      * All .onion HTTP requests will route through dynhost_bridge →

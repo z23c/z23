@@ -278,6 +278,9 @@ typedef int (*tor_fetch_dispatch_fn)(const char *onion_address,
 #ifdef ZCL_TESTING
 /* Test seam: force the outbound-dial readiness flag without a Tor client. */
 void tor_integration_set_dial_ready_for_test(bool ready);
+/* Test seam: append one line to the torrc tor_integration_start() writes
+ * (e.g. "DisableNetwork 1"). "" clears it. */
+void tor_integration_set_extra_torrc_for_test(const char *line);
 #endif
 
 #ifdef ZCL_TESTING

@@ -689,3 +689,7 @@ later lane flips it HARD.
 - 2026-11-01T21:03:22Z — REASON: tor_write_torrc: check every write and fclose, remove partial torrc on failure, so __DisableSignalHandlers 1 cannot be silently lost;   no consensus change
   old ROOT: 6b33247d60b651efdd284dc98266a643eba9c91ac59ba678b8d23db9da1ee25a
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T21:03:35Z — REASON: tor_integration: ZCL_TESTING-only seam to append one torrc line (DisableNetwork 1) so the in-process SIGTERM test needs no public network;   no production or consensus change
+  old ROOT: 95fc58911b02d8aaaa9e4379d5110458ca0db47a55417e3b2294bea12ebf0ae9
+  by: owner unseal ritual (make core-unseal)

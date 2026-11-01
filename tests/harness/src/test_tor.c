@@ -1194,7 +1194,7 @@ static bool wait_tor_main_loop(const char *datadir, int seconds)
  * SIGTERM disposition, Tor logs "Catching signal TERM" and its thread ends
  * (tor_integration_is_enabled() drops to false) while the node never learns
  * of the signal. Needs a binary that linked real Tor; Tor's bootstrap
- * attempts to reach the network are irrelevant here and are cut off by
+ * attempts are disabled with DisableNetwork 1 (test seam), and Tor is stopped by
  * tor_integration_stop(). */
 static int test_tor_leaves_sigterm_to_the_node(void)
 {
@@ -1213,6 +1213,8 @@ static int test_tor_leaves_sigterm_to_the_node(void)
     sigaction(SIGTERM, NULL, &old_term);
     sigaction(SIGINT, NULL, &old_int);
     g_node_term_seen = 0;
+    /* Local fixtures only: Tor must not bootstrap to the public network. */
+    tor_integration_set_extra_torrc_for_test("DisableNetwork 1");
 
     int fails = 0;
     const char *why = "";
@@ -1232,6 +1234,7 @@ static int test_tor_leaves_sigterm_to_the_node(void)
     }
 
     tor_integration_stop();
+    tor_integration_set_extra_torrc_for_test("");
     sigaction(SIGTERM, &old_term, NULL);
     sigaction(SIGINT, &old_int, NULL);
     remove_tree(tmpdir);
