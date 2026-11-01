@@ -39,6 +39,136 @@ void dl_get_stats(struct download_manager *dm,
     zcl_mutex_unlock(&dm->cs);
 }
 
+/* Age of a request in seconds, clamped at zero. */
+static int64_t dl_slot_age_seconds(int64_t now, int64_t request_time)
+{
+    return now >= request_time ? now - request_time : 0;
+}
+
+/* Find a peer id in the recorded id list; NULL when absent. */
+static const uint32_t *dl_find_recorded_peer_id(const uint32_t *ids,
+                                                size_t count, uint32_t peer_id)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (ids[i] == peer_id)
+            return &ids[i];
+    }
+    return NULL;
+}
+
+/* Snapshot active peer ownership into the diagnostic peer rows. */
+static void dl_collect_peer_downloads(struct download_manager *dm,
+                                      struct dl_diagnostics *out,
+                                      int64_t now)
+{
+    out->peer_download_count = 0;
+    out->peer_download_truncated = false;
+    out->peer_download_total = 0;
+    for (size_t i = 0; i < dm->num_peers; i++) {
+        const struct dl_peer_stats *ps = &dm->peers[i];
+        if (!ps->active)
+            continue;
+        out->peer_download_total++;
+        if (out->peer_download_count >= DL_DIAGNOSTIC_PEER_CAP) {
+            out->peer_download_truncated = true;
+            continue;
+        }
+        struct dl_peer_diagnostic *pd =
+            &out->peer_downloads[out->peer_download_count++];
+        pd->peer_id = ps->peer_id;
+        pd->requested = ps->blocks_requested;
+        pd->received = ps->blocks_received;
+        pd->timed_out = ps->blocks_timed_out;
+        pd->avg_delivery_us = ps->avg_delivery_us;
+        pd->last_body_age_seconds =
+            ps->last_body_received_time > 0 &&
+            now >= ps->last_body_received_time
+                ? now - ps->last_body_received_time
+                : -1;
+        pd->oldest_in_flight_age_seconds = -1;
+        pd->oldest_in_flight_height = -1;
+        pd->bandwidth_score = ps->bandwidth_score;
+        pd->is_loopback = ps->is_loopback;
+    }
+}
+
+/* Count queued work classes and peer avoid-window extents. */
+static void dl_scan_queue_avoid(struct download_manager *dm,
+                                struct dl_diagnostics *out,
+                                int64_t now)
+{
+    out->queued_history = 0;
+    out->queued_forward = 0;
+    out->queue_peer_avoid_count = 0;
+    out->queue_peer_avoid_max_seconds = 0;
+    for (size_t i = 0; i < dm->queue_len; i++) {
+        if (dm->queue_classes[i] == DL_WORK_HISTORY)
+            out->queued_history++;
+        else
+            out->queued_forward++;
+        if (dm->queue_avoid_until[i] <= now)
+            continue;
+        int64_t remaining = dm->queue_avoid_until[i] - now;
+        out->queue_peer_avoid_count++;
+        if (remaining > out->queue_peer_avoid_max_seconds)
+            out->queue_peer_avoid_max_seconds = remaining;
+    }
+}
+
+/* Fold active in-flight slots into class, overdue, oldest and per-peer rows. */
+static void dl_scan_in_flight_slots(struct download_manager *dm,
+                                    struct dl_diagnostics *out,
+                                    int64_t now, int timeout)
+{
+    out->in_flight_history = 0;
+    out->in_flight_forward = 0;
+    out->overdue_in_flight = 0;
+    out->oldest_in_flight_age_seconds = -1;
+    out->oldest_in_flight_height = -1;
+    out->oldest_in_flight_peer_id = 0;
+    out->in_flight_peer_count = 0;
+    uint32_t peer_ids[DL_MAX_TRACKED_PEERS];
+    size_t peer_count = 0;
+    for (size_t i = 0; i < dm->num_slots; i++) {
+        struct dl_in_flight *s = &dm->slots[i];
+        if (!s->active)
+            continue;
+
+        if (s->work_class == DL_WORK_HISTORY)
+            out->in_flight_history++;
+        else
+            out->in_flight_forward++;
+
+        int64_t age = dl_slot_age_seconds(now, s->request_time);
+        if (out->oldest_in_flight_age_seconds < 0 ||
+            age > out->oldest_in_flight_age_seconds) {
+            out->oldest_in_flight_age_seconds = age;
+            out->oldest_in_flight_height = s->height;
+            out->oldest_in_flight_peer_id = s->peer_id;
+        }
+        if (age >= timeout)
+            out->overdue_in_flight++;
+
+        for (size_t p = 0; p < out->peer_download_count; p++) {
+            struct dl_peer_diagnostic *pd = &out->peer_downloads[p];
+            if (pd->peer_id != s->peer_id)
+                continue;
+            pd->in_flight++;
+            if (pd->oldest_in_flight_age_seconds < 0 ||
+                age > pd->oldest_in_flight_age_seconds) {
+                pd->oldest_in_flight_age_seconds = age;
+                pd->oldest_in_flight_height = s->height;
+            }
+            break;
+        }
+
+        if (!dl_find_recorded_peer_id(peer_ids, peer_count, s->peer_id) &&
+            peer_count < sizeof(peer_ids) / sizeof(peer_ids[0]))
+            peer_ids[peer_count++] = s->peer_id;
+    }
+    out->in_flight_peer_count = (uint64_t)peer_count;
+}
+
 void dl_get_diagnostics(struct download_manager *dm,
                         struct dl_diagnostics *out)
 {
@@ -56,8 +186,6 @@ void dl_get_diagnostics(struct download_manager *dm,
     if (!dm)
         return;
 
-    uint32_t peer_ids[DL_MAX_TRACKED_PEERS];
-    size_t peer_count = 0;
     int64_t now = (int64_t)platform_time_wall_time_t();
     int timeout = dl_get_request_timeout_secs();
 
@@ -89,87 +217,8 @@ void dl_get_diagnostics(struct download_manager *dm,
      * held. Without these rows, a full queue plus low H* could name the oldest
      * peer only; operators could not distinguish one slow peer holding the
      * urgent window from balanced network variance. */
-    for (size_t i = 0; i < dm->num_peers; i++) {
-        const struct dl_peer_stats *ps = &dm->peers[i];
-        if (!ps->active)
-            continue;
-        out->peer_download_total++;
-        if (out->peer_download_count >= DL_DIAGNOSTIC_PEER_CAP) {
-            out->peer_download_truncated = true;
-            continue;
-        }
-        struct dl_peer_diagnostic *pd =
-            &out->peer_downloads[out->peer_download_count++];
-        pd->peer_id = ps->peer_id;
-        pd->requested = ps->blocks_requested;
-        pd->received = ps->blocks_received;
-        pd->timed_out = ps->blocks_timed_out;
-        pd->avg_delivery_us = ps->avg_delivery_us;
-        pd->last_body_age_seconds =
-            ps->last_body_received_time > 0 &&
-            now >= ps->last_body_received_time
-                ? now - ps->last_body_received_time
-                : -1;
-        pd->oldest_in_flight_age_seconds = -1;
-        pd->oldest_in_flight_height = -1;
-        pd->bandwidth_score = ps->bandwidth_score;
-        pd->is_loopback = ps->is_loopback;
-    }
-    for (size_t i = 0; i < dm->queue_len; i++) {
-        if (dm->queue_classes[i] == DL_WORK_HISTORY)
-            out->queued_history++;
-        else
-            out->queued_forward++;
-        if (dm->queue_avoid_until[i] <= now)
-            continue;
-        int64_t remaining = dm->queue_avoid_until[i] - now;
-        out->queue_peer_avoid_count++;
-        if (remaining > out->queue_peer_avoid_max_seconds)
-            out->queue_peer_avoid_max_seconds = remaining;
-    }
-    for (size_t i = 0; i < dm->num_slots; i++) {
-        struct dl_in_flight *s = &dm->slots[i];
-        if (!s->active)
-            continue;
-
-        if (s->work_class == DL_WORK_HISTORY)
-            out->in_flight_history++;
-        else
-            out->in_flight_forward++;
-
-        int64_t age = now >= s->request_time ? now - s->request_time : 0;
-        if (out->oldest_in_flight_age_seconds < 0 ||
-            age > out->oldest_in_flight_age_seconds) {
-            out->oldest_in_flight_age_seconds = age;
-            out->oldest_in_flight_height = s->height;
-            out->oldest_in_flight_peer_id = s->peer_id;
-        }
-        if (age >= timeout)
-            out->overdue_in_flight++;
-
-        for (size_t p = 0; p < out->peer_download_count; p++) {
-            struct dl_peer_diagnostic *pd = &out->peer_downloads[p];
-            if (pd->peer_id != s->peer_id)
-                continue;
-            pd->in_flight++;
-            if (pd->oldest_in_flight_age_seconds < 0 ||
-                age > pd->oldest_in_flight_age_seconds) {
-                pd->oldest_in_flight_age_seconds = age;
-                pd->oldest_in_flight_height = s->height;
-            }
-            break;
-        }
-
-        bool seen_peer = false;
-        for (size_t p = 0; p < peer_count; p++) {
-            if (peer_ids[p] == s->peer_id) {
-                seen_peer = true;
-                break;
-            }
-        }
-        if (!seen_peer && peer_count < sizeof(peer_ids) / sizeof(peer_ids[0]))
-            peer_ids[peer_count++] = s->peer_id;
-    }
-    out->in_flight_peer_count = (uint64_t)peer_count;
+    dl_collect_peer_downloads(dm, out, now);
+    dl_scan_queue_avoid(dm, out, now);
+    dl_scan_in_flight_slots(dm, out, now, timeout);
     zcl_mutex_unlock(&dm->cs);
 }
