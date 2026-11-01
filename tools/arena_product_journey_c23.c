@@ -307,12 +307,13 @@ static int sparse_proof(int argc,char **argv)
 }
 static int begin_fields(int argc,char **argv)
 {if(argc!=3)return 2;uint8_t*p=NULL;size_t n=0;if(!read_file(argv[2],&p,&n))return 1;struct json_value v;json_init(&v);bool ok=json_read(&v,(char*)p,n);free(p);if(!ok)return 1;const char*x=get_s(&v,"data.lookup_id"),*y=get_s(&v,"data.owner_token");if(x&&y)printf("%s %s\n",x,y);else ok=false;json_free(&v);return ok?0:1;}
+static bool fmt_fits(int r,size_t cap){return r>=0&&(size_t)r<cap;}
 static bool burst_copy_begin(const struct json_value *v,char id[64],char owner[64])
 {
     bool yes=false;
     const char *state=get_s(v,"data.state"),*lookup=get_s(v,"data.lookup_id"),*token=get_s(v,"data.owner_token");
     bool ok=get_b(v,"ok",&yes)&&yes&&state&&!strcmp(state,"pending")&&lookup&&token;
-    if(ok)ok=snprintf(id,64,"%s",lookup)<64&&snprintf(owner,64,"%s",token)<64;
+    if(ok)ok=fmt_fits(snprintf(id,64,"%s",lookup),64)&&fmt_fits(snprintf(owner,64,"%s",token),64);
     return ok;
 }
 static bool burst_load_begin(const char *dir,int index,char id[64],char owner[64])

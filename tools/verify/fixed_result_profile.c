@@ -60,6 +60,8 @@ bool frp_lines_load(const char *path, struct frp_lines *out)
     return ok;
 }
 
+static bool fmt_fits(int r, size_t cap) { return r >= 0 && (size_t)r < cap; }
+
 static char *frp_expand_one(const char *arg, const char *cwd)
 {
     size_t tags = 0, tlen = strlen(FRP_TAG), clen = strlen(cwd);
@@ -71,7 +73,7 @@ static char *frp_expand_one(const char *arg, const char *cwd)
         hit = strstr(p, FRP_TAG);
         if (!hit) {
             size_t room = cap - (size_t)(w - out);
-            if (snprintf(w, room, "%s", p) >= (int)room) {
+            if (!fmt_fits(snprintf(w, room, "%s", p), room)) {
                 free(out);
                 return nullptr;
             }

@@ -99,13 +99,16 @@ static void fast_args_digest(char out[65])
     hex_of(digest, out);
 }
 
+static bool fmt_fits(int r, size_t cap) { return r >= 0 && (size_t)r < cap; }
+
 static void fill_roots(struct probe *p)
 {
     for (unsigned i = 0; i < NROOTS; ++i) {
         int n = snprintf(p->roots[i], sizeof p->roots[i], "%02x", i + 1u);
+        if (!fmt_fits(n, sizeof p->roots[i])) exit(1);
         for (unsigned j = 0; j < 31u; ++j) {
             size_t room = sizeof p->roots[i] - (size_t)n;
-            if (snprintf(p->roots[i] + n, room, "ab") >= (int)room) exit(1);
+            if (!fmt_fits(snprintf(p->roots[i] + n, room, "ab"), room)) exit(1);
             n += 2;
         }
     }

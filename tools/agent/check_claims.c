@@ -1082,8 +1082,8 @@ static char *ccl_git_head(void)
         size_t n = strlen(out);
 
         out = ccl_grow(out, n + sizeof "UNKNOWN");
-        if (snprintf(out + n, sizeof "UNKNOWN", "UNKNOWN") >=
-            (int)sizeof "UNKNOWN")
+        int r = snprintf(out + n, sizeof "UNKNOWN", "UNKNOWN");
+        if (r < 0 || (size_t)r >= sizeof "UNKNOWN")
             ccl_die(2, "git head: buffer too small");
     }
     ccl_chomp(out);

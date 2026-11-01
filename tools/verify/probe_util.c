@@ -122,10 +122,13 @@ bool pu_copy(const char *src, const char *dst)
     return ok;
 }
 
+static bool fmt_fits(int r, size_t cap) { return r >= 0 && (size_t)r < cap; }
+
 bool pu_mkdirs(const char *path)
 {
     char buf[PU_PATH_MAX];
-    if (snprintf(buf, sizeof buf, "%s", path) >= (int)sizeof buf) return false;
+    if (!fmt_fits(snprintf(buf, sizeof buf, "%s", path), sizeof buf))
+        return false;
     for (char *p = buf + 1; *p; ++p) {
         if (*p != '/') continue;
         *p = '\0';
@@ -230,7 +233,8 @@ bool pu_scratch_make(const char *templ, char *out, size_t cap)
     install_handlers();
     signal_set(&set);
     sigprocmask(SIG_BLOCK, &set, &old);
-    ok = snprintf(out, cap, "%s", templ) < (int)cap && mkdtemp(out) != nullptr;
+    ok = fmt_fits(snprintf(out, cap, "%s", templ), cap) &&
+         mkdtemp(out) != nullptr;
     if (ok) {
         /* mkdtemp keeps the length, and strlen(templ) < PU_PATH_MAX above. */
         memcpy(g_dirs[g_count], out, strlen(out) + 1u);

@@ -4171,7 +4171,8 @@ static int main_parse_args(int argc, char **argv, struct main_opts *opts)
             keyb[klen] = '\0';
             value = eq + 1;
         } else {
-            if (snprintf(keyb, sizeof(keyb), "%s", arg) >= (int)sizeof(keyb))
+            int r = snprintf(keyb, sizeof(keyb), "%s", arg);
+            if (r < 0 || (size_t)r >= sizeof(keyb))
                 return 2;
             if (strcmp(keyb, "--register-corpus") == 0) {
                 opts->register_corpus = true;
