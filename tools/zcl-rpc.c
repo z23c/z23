@@ -73,7 +73,9 @@ static int read_credential_file(const char *path, char *buf, size_t cap)
         errno = 0;
         size_t got = fread(buf + n, 1, cap - n, f);
         n += got;
-        if (got > 0 || feof(f))
+        if (feof(f))
+            break;
+        if (got > 0)
             continue;
         if (errno == EINTR) {
             clearerr(f);
