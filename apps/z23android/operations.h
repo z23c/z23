@@ -58,6 +58,16 @@ bool zapp_operation_run(struct zapp_runtime *r, const char *id, char *out, size_
  * (arg is the transaction id). Command line only, never logged. False, with a plain sentence or the node
  * error text in out, when the command fails, does not exist or is given an argument that is not valid. */
 bool zapp_wallet_run(struct zapp_runtime *r, const char *op, const char *arg, char *out, size_t cap);
+/* The commit of a send may take this long at the least; a shorter request is raised to it. */
+#define ZAPP_WALLET_COMMIT_MIN_MS 300000u
+#define ZAPP_WALLET_SEND_TIMEOUT_MAX_MS 600000u
+/* Runs one step of a send and leaves its reply in out. op is "summary", "fleet" or "latest" (the read commands of
+ * zapp_wallet_run, no input), "validateaddress" (input is the JSON-RPC parameter array, sent to the node over its local
+ * RPC port), "lock" (no input), or "unlock", "plan" or "commit" (input is the request). The request of those three goes
+ * to the node on standard input, never on the command line, and is read as is: the caller cleanses it. A command is
+ * killed after timeout_ms, and a commit never sooner than ZAPP_WALLET_COMMIT_MIN_MS. False when the step fails, is
+ * killed, or does not exist; out then holds the node reply, which may still be a typed error, or a plain sentence. */
+bool zapp_wallet_send_run(struct zapp_runtime *r, const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap);
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap);
 /* True when the node has published its onion address: a valid Tor v3 hostname file. */
 bool zapp_onion_ready(const struct zapp_runtime *r);

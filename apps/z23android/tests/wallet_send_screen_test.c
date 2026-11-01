@@ -312,7 +312,7 @@ static void tap_runs_the_whole_send(void)
     assert(wss_secrets_clear(s));
     for (size_t i = 0; i < strlen(f.stdin_seen); ++i) assert(f.stdin_ptr[i] == 0);
     struct wss_view v = view_of(s);
-    assert(v.state == WS_DONE && !strcmp(v.status, "Payment sent.") && !v.busy && !v.check_history);
+    assert(v.state == WS_DONE && !strcmp(v.status, "The payment left the phone. History shows it.") && !v.busy && !v.check_history);
     assert(!strstr(v.status, priv) && !strstr(v.status, "2 ZCL"));
     assert(wss_end(s) && !f.flag_on && !f.filter_on);
     wss_destroy(s);
@@ -507,9 +507,23 @@ static void progress_shows_the_wait(void)
     f.commit_outcome = WSS_COMMITTED; f.route = WS_ROUTE_WAITING;
     tap_and_run(s, &f);
     v = view_of(s);
-    assert(v.state == WS_BROADCAST && v.busy && strstr(v.status, "private route") && !v.can_cancel);
+    assert(v.state == WS_BROADCAST && v.busy && strstr(v.status, "The node has your payment") && !strstr(v.status, "Sent") && !v.can_cancel && v.can_leave);
     f.route = WS_ROUTE_SENT; f.now += 4000; wss_on_tick(s); drain(&f);
     assert(view_of(s).state == WS_DONE);
+    wss_destroy(s);
+}
+/* The review says whether the owner's fleet checked the wallet, from the gate and from nothing else. */
+static void review_says_whether_the_fleet_checked(void)
+{
+    struct zapp_payment p = pay_of(priv, "?amount=1");
+    struct fake f; fake_init(&f);
+    struct wss *s = reviewed(&f, &p);
+    assert(view_of(s).review && !strcmp(view_of(s).fleet, "Not checked by your fleet"));
+    wss_destroy(s);
+    fake_init(&f);
+    f.gate.fleet_checked = true;
+    s = reviewed(&f, &p);
+    assert(view_of(s).review && !strcmp(view_of(s).fleet, "Checked by your fleet"));
     wss_destroy(s);
 }
 /* Finding 4: a second scan while a send is in progress opens nothing; the commit carries the tapped plan. */
@@ -797,6 +811,7 @@ int main(void)
     refused_commit_retries_with_a_new_prompt();
     an_edit_voids_the_old_tap();
     progress_shows_the_wait();
+    review_says_whether_the_fleet_checked();
     second_scan_never_replaces_the_tapped_plan();
     a_dead_action_does_not_run();
     concurrent_scan_with_the_real_worker();

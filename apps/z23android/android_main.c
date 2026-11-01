@@ -13,6 +13,7 @@
 #include "native_ui.h"
 #include "node_service.h"
 #include "secure_window.h"
+#include "wallet_send_ui.h"
 #include "wallet_ui.h"
 #include <android/input.h>
 #include <android/log.h>
@@ -246,7 +247,10 @@ static int tick_ready(int fd, int events, void *context)
     (void)context;
     if (!(events & ALOOPER_EVENT_INPUT)) return 1;
     while (read(fd, &expirations, sizeof(expirations)) > 0) {}
-    if (foreground && current_vm && (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK) zapp_native_ui_tick(env);
+    if (!current_vm || (*current_vm)->GetEnv(current_vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) return 1;
+    /* Out of view the timer runs only while a payment may have left the wallet open: ticks ask for the lock again. */
+    if (foreground) zapp_native_ui_tick(env);
+    else if (zapp_send_ui_owes()) zapp_send_ui_tick(env);
     return 1;
 }
 static int input_ready(int fd, int events, void *context)
@@ -437,6 +441,8 @@ static void finish_previous(JNIEnv *env)
 static void detach_activity(JNIEnv *env)
 {
     zapp_clip_screen_close(env);
+    /* Before the controller goes: a lock still owed is asked for through it. */
+    zapp_send_detach(env);
     zapp_controller_detach();
     zapp_camera_set_frame_notify(NULL);
     zapp_camera_stop();
@@ -479,7 +485,7 @@ static void pause_activity(ANativeActivity *activity)
 #endif
     zapp_native_ui_pause(activity->env);
     foreground = false;
-    (void)arm_tick(false);
+    if (!zapp_send_ui_owes()) (void)arm_tick(false);
     zapp_clip_screen_pause(activity->env);
     zapp_controller_visible(false);
     if (!atomic_load(&camera_dialog)) zapp_camera_stop();
@@ -537,6 +543,14 @@ static void forward_pairing(JNIEnv *env, jobject activity)
     (void)zapp_controller_action("pair_offer", offer, "");
     memory_cleanse(offer, sizeof(offer));
 }
+/* Prepares the surface and starts the controller and the native screens, in the order the app needs them. */
+static bool start_services(JNIEnv *env, ANativeActivity *activity, const char *native_dir, bool *preview)
+{
+    return release_surface(env, activity->clazz) && zapp_native_ui_package_preview(env, activity->clazz, preview) &&
+           zapp_controller_start(activity->internalDataPath, native_dir, *preview, notify) &&
+           zapp_native_ui_create(env, activity->clazz, action) && zapp_wallet_attach(activity, notify) &&
+           zapp_send_attach(activity, notify);
+}
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size);
 JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, size_t state_size)
 {
@@ -560,11 +574,7 @@ JNIEXPORT void ANativeActivity_onCreate(ANativeActivity *activity, void *state, 
         ALooper_addFd(looper, signal_pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, signal_ready, NULL) != 1) goto fail;
     if (!start_tick()) goto fail;
     pthread_mutex_lock(&lock); active = (*env)->NewGlobalRef(env, activity->clazz); pthread_mutex_unlock(&lock);
-    if (!clean(env) || !active || !release_surface(env, activity->clazz) ||
-        !zapp_native_ui_package_preview(env, activity->clazz, &preview) ||
-        !zapp_controller_start(activity->internalDataPath, native_dir, preview, notify) ||
-        !zapp_native_ui_create(env, activity->clazz, action) ||
-        !zapp_wallet_attach(activity, notify)) goto fail;
+    if (!clean(env) || !active || !start_services(env, activity, native_dir, &preview)) goto fail;
     request_full_brightness(env, activity->clazz);
     zapp_camera_set_frame_notify(notify);
     forward_pairing(env, activity->clazz);

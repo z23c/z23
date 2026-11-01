@@ -6,6 +6,7 @@
 #include "private.h"
 #include "pairing.h"
 #include "operations.h"
+#include "pay_stash.h"
 #include "camera.h"
 #include "audio.h"
 #include "voice.h"
@@ -555,6 +556,7 @@ static bool offer_pairing(struct controller *c, const char *descriptor)
 static bool scan_payload(struct controller *c, uint64_t ticket, char *out)
 {
     char error[256] = "";
+    zapp_pay_stash_clear();
     char *value = calloc(1, ZAPP_TEXT_CAP);
     bool ok = zapp_camera_scan(ticket, out, ZAPP_TEXT_CAP, error, sizeof(error));
     if (!ok || !value) {
@@ -564,6 +566,8 @@ static bool scan_payload(struct controller *c, uint64_t ticket, char *out)
         return false;
     }
     enum zapp_scan_kind kind = zapp_scan_classify(out, value, ZAPP_TEXT_CAP);
+    /* The payment is handed to the send screen before out is replaced by the notice; the view never carries it. */
+    (void)zapp_pay_stash_offer(out, kind);
     const char *notice = NULL;
     if (kind == ZAPP_SCAN_PAIR && zapp_speech_client_paired(c->files, value)) {
         kind = ZAPP_SCAN_TEXT; value[0] = 0; notice = "That laptop is already paired.";
@@ -1001,4 +1005,22 @@ bool zapp_controller_wallet_run(const char *op, const char *arg, char *out, size
         return false;
     }
     return zapp_wallet_run(&c->runtime, op, arg, out, cap);
+}
+bool zapp_controller_send_run(const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap)
+{
+    pthread_mutex_lock(&startup_lock);
+    struct controller *c = current;
+    pthread_mutex_unlock(&startup_lock);
+    if (!c) {
+        if (out && cap) snprintf(out, cap, "The app is not ready.");
+        return false;
+    }
+    return zapp_wallet_send_run(&c->runtime, op, input, timeout_ms, out, cap);
+}
+bool zapp_controller_node_paused(void)
+{
+    pthread_mutex_lock(&startup_lock);
+    struct controller *c = current;
+    pthread_mutex_unlock(&startup_lock);
+    return c && zapp_node_pace(&c->runtime) == ZAPP_PACE_PAUSE;
 }

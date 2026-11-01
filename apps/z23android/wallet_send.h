@@ -69,13 +69,14 @@ enum ws_fail {
 };
 
 /* What the wallet reports before a send. blocks_behind and spendable come from `core wallet summary`.
- * blocked_reason is the node's send_blocked_reason sentence. */
+ * blocked_reason is a sentence of the app, never the node's. */
 struct ws_gate {
     bool known;
     bool send_allowed;
     char blocked_reason[WS_REASON_MAX];
     uint32_t blocks_behind;
     bool thermal_paused;      /* The phone's thermal state has paused the node. */
+    bool fleet_checked;       /* The fleet machines agree with the node; false when the node is not part of a fleet. */
     uint64_t spendable_zat;   /* Private funds the send may use. */
     uint64_t public_zat;      /* Public funds, never drawn on by a private send. */
 };

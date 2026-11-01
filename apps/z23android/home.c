@@ -116,10 +116,14 @@ void zapp_home_fit_label(char *out, size_t cap, const char *text)
 enum zapp_scan_target zapp_home_scan_target(enum zapp_scan_kind kind, bool pair_offer)
 {
     if (kind == ZAPP_SCAN_FLEET) return ZAPP_SCAN_TO_FLEET_REVIEW;
-    if (kind == ZAPP_SCAN_PAY) return ZAPP_SCAN_TO_PAYMENT_REVIEW;
+    if (kind == ZAPP_SCAN_PAY || kind == ZAPP_SCAN_PAY_REFUSED) return ZAPP_SCAN_TO_PAYMENT_REVIEW;
     return kind == ZAPP_SCAN_PAIR && pair_offer ? ZAPP_SCAN_TO_PAIR_REVIEW : ZAPP_SCAN_TO_HOME;
 }
 bool zapp_home_scan_returns_to_wallet(enum zapp_scan_target target, bool began_in_wallet)
 {
-    return began_in_wallet && (target == ZAPP_SCAN_TO_HOME || target == ZAPP_SCAN_TO_PAYMENT_REVIEW);
+    return began_in_wallet && target == ZAPP_SCAN_TO_HOME;
+}
+bool zapp_home_scan_stays_on_send(bool started_on_send, enum zapp_scan_target target)
+{
+    return started_on_send && target == ZAPP_SCAN_TO_HOME;
 }

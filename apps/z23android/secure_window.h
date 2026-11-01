@@ -65,6 +65,8 @@ void zapp_secure_window_release(void);
 /* Call from the UI thread on entering (on) and leaving (off) the wallet screens. Both protections are set
  * through JNI before the call returns and read back; false means one is not in force. */
 bool zapp_secure_window(ANativeActivity *activity, bool on);
+/* The five protections of the activity as typed operations, for a screen that applies them itself. */
+void zapp_secure_window_ops(struct zapp_secure_ops *ops, ANativeActivity *activity);
 /* True when the input event is a motion event the gate drops. Call on the UI thread. */
 bool zapp_secure_window_drops(const AInputEvent *event);
 #endif

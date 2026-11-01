@@ -14,6 +14,17 @@
 /* Run with arguments, this program stands in for the node's command line: it prints what it was asked. */
 static int fake_node(int argc, char **argv)
 {
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--input=-")) continue;
+        char body[256] = "";
+        size_t got = fread(body, 1, sizeof(body) - 1, stdin);
+        body[got] = 0;
+        if (strstr(body, "SLEEP")) sleep(2);
+        printf("{\"ok\":true,\"data\":{\"argv\":\"");
+        for (int j = 1; j < argc; ++j) printf("%s%s", j > 1 ? " " : "", argv[j]);
+        printf("\",\"stdin\":\"%s\"}}\n", body);
+        return 0;
+    }
     printf("{\"ok\":true,\"data\":{\"argv\":\"");
     for (int i = 1; i < argc; ++i) printf("%s%s", i > 1 ? " " : "", argv[i]);
     printf("\"}}\n");
@@ -32,6 +43,45 @@ static void expect_refused(struct zapp_runtime *r, const char *op, const char *a
     char out[512];
     assert(!zapp_wallet_run(r, op, arg, out, sizeof(out)));
     assert(strstr(out, why) && !strstr(out, "argv"));
+}
+
+/* A send's commands: the payment goes on standard input, never on the command line. */
+static void send_commands_run(struct zapp_runtime *r)
+{
+    char got[512];
+    assert(zapp_wallet_send_run(r, "plan", "{\"to\":\"X\"}", 60000, got, sizeof(got)));
+    assert(strstr(got, "\"argv\":\"core wallet shielded send -datadir=") && strstr(got, "--input=-"));
+    assert(strstr(got, "\"stdin\":\"{\"to\":\"X\"}\""));
+    assert(zapp_wallet_send_run(r, "unlock", "{}", 60000, got, sizeof(got)) && strstr(got, "core wallet security unlock"));
+    assert(zapp_wallet_send_run(r, "lock", NULL, 60000, got, sizeof(got)) && strstr(got, "core wallet security lock"));
+    assert(!strstr(got, "--input"));
+    assert(zapp_wallet_send_run(r, "summary", NULL, 60000, got, sizeof(got)) && strstr(got, "core wallet summary"));
+    assert(zapp_wallet_send_run(r, "fleet", NULL, 60000, got, sizeof(got)) && strstr(got, "core wallet fleet status"));
+    assert(zapp_wallet_send_run(r, "latest", NULL, 60000, got, sizeof(got)) && strstr(got, "core wallet shielded latest"));
+}
+/* Input where none is taken, none where it is required, no time, too much time, and any other command: refused. */
+static void send_refusals_run(struct zapp_runtime *r)
+{
+    char got[512];
+    assert(!zapp_wallet_send_run(r, "lock", "{}", 60000, got, sizeof(got)) && !strstr(got, "argv"));
+    assert(!zapp_wallet_send_run(r, "plan", NULL, 60000, got, sizeof(got)) && !strstr(got, "argv"));
+    assert(!zapp_wallet_send_run(r, "commit", "{}", 0, got, sizeof(got)) && !strstr(got, "argv"));
+    assert(!zapp_wallet_send_run(r, "commit", "{}", ZAPP_WALLET_SEND_TIMEOUT_MAX_MS + 1, got, sizeof(got)) && !strstr(got, "argv"));
+    assert(!zapp_wallet_send_run(r, "summary", "{}", 60000, got, sizeof(got)));
+    static const char *const other[] = {"export", "create", "restore", "send", "address", "history", "", "Plan"};
+    for (size_t i = 0; i < sizeof(other) / sizeof(other[0]); ++i) {
+        assert(!zapp_wallet_send_run(r, other[i], "{}", 60000, got, sizeof(got)));
+        assert(strstr(got, "not available") && !strstr(got, "argv"));
+    }
+    assert(!zapp_wallet_send_run(r, "plan", "{}", 60000, got, 8) && !zapp_wallet_send_run(r, NULL, NULL, 1, got, sizeof(got)));
+}
+/* A step is killed at its own limit; a commit never sooner than its floor, so one second of work is not cut by a 1 ms limit. */
+static void send_timeouts_run(struct zapp_runtime *r)
+{
+    char got[512];
+    assert(!zapp_wallet_send_run(r, "plan", "SLEEP", 300, got, sizeof(got)) && strstr(got, "timed out"));
+    assert(zapp_wallet_send_run(r, "commit", "SLEEP", 1, got, sizeof(got)) && strstr(got, "\"stdin\":\"SLEEP\""));
+    assert(ZAPP_WALLET_COMMIT_MIN_MS >= 300000u);
 }
 
 /* The scratch directory comes from the caller: the test makes no path of its own. */
@@ -77,6 +127,10 @@ int main(int argc, char **argv)
     }
     assert(!zapp_wallet_run(&r, NULL, "", out, sizeof(out)) && !zapp_wallet_run(&r, "summary", NULL, out, sizeof(out)));
     assert(!zapp_wallet_run(&r, "summary", "", out, 8));
+
+    send_commands_run(&r);
+    send_refusals_run(&r);
+    send_timeouts_run(&r);
 
     r.preview = true;
     assert(!zapp_wallet_run(&r, "summary", "", out, sizeof(out)) && strstr(out, "no wallet"));

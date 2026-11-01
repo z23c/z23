@@ -7,6 +7,8 @@
 #include "layout.h"
 #include "secure_window.h"
 #include "surface.h"
+#include "pay_stash.h"
+#include "wallet_send_ui.h"
 #include "wallet_ui.h"
 #include <android/keycodes.h>
 #include <errno.h>
@@ -23,9 +25,9 @@
 #define BUTTON_COLOR 0xff2b2b2bu
 #define WHITE 0xffffffffu
 
-enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_WALLET, SCREEN_COUNT };
+enum screen { SCREEN_HOME, SCREEN_ASSISTANT, SCREEN_APPS, SCREEN_SETTINGS, SCREEN_SCAN, SCREEN_WALLET, SCREEN_SEND, SCREEN_COUNT };
 enum command { CMD_HOME, CMD_APPS, CMD_SETTINGS, CMD_HOME_SETTINGS, CMD_LAYOUT, CMD_SCAN_CANCEL };
-enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET };
+enum target_kind { TARGET_NONE, TARGET_NAV, TARGET_ROW, TARGET_TILE, TARGET_WALLET, TARGET_SEND };
 
 struct nav { jobject view; enum command command; size_t arg; };
 struct target { enum target_kind kind; size_t index; char id[ZAPP_NAME_CAP]; size_t card; };
@@ -269,6 +271,15 @@ static bool build_wallet(JNIEnv *env, jobject root)
     if (content) (*env)->DeleteLocalRef(env, content);
     return ok;
 }
+static bool build_send(JNIEnv *env, jobject root)
+{
+    jobject scroll = zj_widget(env, "android/widget/ScrollView", shell.activity), content = column(env, DARK, 16, false);
+    bool ok = scroll && content && add_notice(env, root, SCREEN_SEND) && zj_margins(env, scroll, MATCH, 0, 1.0f, 0, 0, 0, 0) && zj_append(env, scroll, content) &&
+        zj_append(env, root, scroll) && zapp_send_ui_create(env, shell.activity, content);
+    if (scroll) (*env)->DeleteLocalRef(env, scroll);
+    if (content) (*env)->DeleteLocalRef(env, content);
+    return ok;
+}
 static bool add_screen(JNIEnv *env, jobject stage, enum screen which, jobject root)
 {
     bool ok = root && zj_margins(env, root, MATCH, MATCH, 0.0f, 0, 0, 0, 0) && zj_visible(env, root, which == SCREEN_HOME) &&
@@ -276,16 +287,20 @@ static bool add_screen(JNIEnv *env, jobject stage, enum screen which, jobject ro
     if (root && which != SCREEN_ASSISTANT) (*env)->DeleteLocalRef(env, root);
     return ok;
 }
+static bool build_pages(JNIEnv *env, jobject stage, jobject home, jobject apps, jobject settings)
+{
+    jobject scan = column(env, 0xff000000u, 0, false), wallet = column(env, DARK, 0, false), send = column(env, DARK, 0, false);
+    return build_home(env, home) && build_apps(env, apps) && build_settings(env, settings) && build_scan(env, scan) &&
+           build_wallet(env, wallet) && build_send(env, send) && add_screen(env, stage, SCREEN_HOME, home) &&
+           add_screen(env, stage, SCREEN_APPS, apps) && add_screen(env, stage, SCREEN_SETTINGS, settings) &&
+           add_screen(env, stage, SCREEN_SCAN, scan) && add_screen(env, stage, SCREEN_WALLET, wallet) &&
+           add_screen(env, stage, SCREEN_SEND, send);
+}
 static bool build_stage(JNIEnv *env, jobject assistant)
 {
     jobject stage = zj_widget(env, "android/widget/FrameLayout", shell.activity);
-    jobject home = column(env, DARK, 0, false), apps = column(env, DARK, 12, false);
-    jobject settings = column(env, DARK, 20, false), scan = column(env, 0xff000000u, 0, false), wallet = column(env, DARK, 0, false);
-    bool ok = stage && build_home(env, home) && build_apps(env, apps) && build_settings(env, settings) && build_scan(env, scan) && build_wallet(env, wallet) &&
-        add_screen(env, stage, SCREEN_HOME, home) && add_screen(env, stage, SCREEN_ASSISTANT, assistant) &&
-        add_screen(env, stage, SCREEN_APPS, apps) && add_screen(env, stage, SCREEN_SETTINGS, settings) &&
-        add_screen(env, stage, SCREEN_SCAN, scan) &&
-        add_screen(env, stage, SCREEN_WALLET, wallet);
+    jobject home = column(env, DARK, 0, false), apps = column(env, DARK, 12, false), settings = column(env, DARK, 20, false);
+    bool ok = stage && build_pages(env, stage, home, apps, settings) && add_screen(env, stage, SCREEN_ASSISTANT, assistant);
     if (ok) {
         jmethodID set = zj_method(env, shell.activity, "setContentView", "(Landroid/view/View;)V");
         if (set) (*env)->CallVoidMethod(env, shell.activity, set, stage);
@@ -371,10 +386,20 @@ static void leave_wallet(JNIEnv *env)
     wallet_screens_pause();
     zapp_wallet_ui_clear(env);
 }
+/* The Send screen is left only when its flow is over and the wallet is locked; while a payment is being built or the
+ * wallet is open the owner stays, and the next tick or tap tries again. */
+static bool leave_send(JNIEnv *env)
+{
+    if (zapp_send_ui_leave(env)) return true;
+    snprintf(shell.action_notice, sizeof(shell.action_notice), "Wait for the payment to finish. This screen closes when the wallet is locked.");
+    show_notice(env);
+    return false;
+}
 static void go(JNIEnv *env, enum screen next)
 {
+    if (shell.current == SCREEN_SEND && next != SCREEN_SEND && !leave_send(env)) return;
     if (shell.current == SCREEN_WALLET) leave_wallet(env);
-    if (next == SCREEN_WALLET) shell.gate.protect = true;
+    if (next == SCREEN_WALLET || next == SCREEN_SEND) shell.gate.protect = true;
     else zapp_touch_gate_release(&shell.gate);
     shell.current = next;
     shell.action_notice[0] = 0;
@@ -464,6 +489,7 @@ static bool find_target(JNIEnv *env, float x, float y, struct target *target)
     for (size_t i = 0; i < shell.nav_count; ++i)
         if (zj_hit(env, shell.navs[i].view, x, y)) { target->kind = TARGET_NAV; target->index = i; return true; }
     if (shell.current == SCREEN_WALLET && zapp_wallet_ui_hit(env, x, y, &target->index)) { target->kind = TARGET_WALLET; return true; }
+    if (shell.current == SCREEN_SEND && zapp_send_ui_hit(env, x, y, &target->index)) { target->kind = TARGET_SEND; return true; }
     for (size_t i = 0; shell.current == SCREEN_APPS && i < shell.row_count; ++i)
         if (zj_hit(env, shell.rows[i], x, y)) { target->kind = TARGET_ROW; target->index = i; return true; }
     if (shell.current == SCREEN_HOME && zapp_surface_hit(env, x, y, target->id, &target->card)) {
@@ -483,6 +509,13 @@ static void run_wallet(JNIEnv *env, size_t button)
     else if (outcome == WALLET_START_NODE) shell.send("node_start", "");
     else if (outcome == WALLET_LEAVE) go(env, SCREEN_HOME);
 }
+/* The Send screen: Scan again leaves it first, so a scan never starts while a lock is owed. */
+static void run_send(JNIEnv *env, size_t button)
+{
+    enum zapp_send_outcome outcome = zapp_send_ui_press(env, button);
+    if (outcome == ZAPP_SEND_SCAN && leave_send(env)) shell.send("scan", "");
+    else if (outcome == ZAPP_SEND_LEAVE) go(env, SCREEN_HOME);
+}
 static void tap(JNIEnv *env, float x, float y)
 {
     struct target now, before = shell.pressed;
@@ -490,6 +523,7 @@ static void tap(JNIEnv *env, float x, float y)
     if (before.kind == TARGET_NONE || !find_target(env, x, y, &now) || !same_target(&before, &now)) return;
     if (now.kind == TARGET_NAV) run_nav(env, &shell.navs[now.index]);
     else if (now.kind == TARGET_WALLET) run_wallet(env, now.index);
+    else if (now.kind == TARGET_SEND) run_send(env, now.index);
     else if (now.kind == TARGET_ROW) launch(env, shell.apps[now.index].entry.package, shell.apps[now.index].entry.activity, shell.apps[now.index].entry.label);
     else run_tile(env, &now);
 }
@@ -535,21 +569,36 @@ void zapp_shell_preview(JNIEnv *env, const unsigned char *bmp, size_t len)
 {
     if (shell.activity && shell.current == SCREEN_SCAN) (void)zj_bitmap(env, shell.scan_view, bmp, len);
 }
-/* After a scan: a fleet invitation opens the assistant with its review, a laptop pairing code opens its
- * review, and anything else is shown on Home with its text. A cancelled scan never gets here. */
+/* Whether a finished scan opens the Send screen: a payment code, accepted or refused, and any scan that was started on
+ * Send and is not a fleet invitation or a pairing code. */
+static bool scan_goes_to_send(const struct zapp_view *view)
+{
+    enum zapp_scan_target target = zapp_home_scan_target(view->scan_kind, view->pair_offer[0] != 0);
+    return target == ZAPP_SCAN_TO_PAYMENT_REVIEW || zapp_home_scan_stays_on_send(shell.before_scan == SCREEN_SEND, target);
+}
+/* After a scan: a payment code opens the Send screen with its review, or with the reason it was refused; a fleet
+ * invitation opens the assistant with its review, a laptop pairing code opens its review, and anything else is shown
+ * on Home with its text, or, when the scan began on Send, stays on Send. A cancelled scan never gets here. */
 static void finish_scan(JNIEnv *env, const struct zapp_view *view)
 {
     char text[ZAPP_NOTICE_CAP + sizeof(view->scan_text) + 4];
     enum zapp_scan_target target = zapp_home_scan_target(view->scan_kind, view->pair_offer[0] != 0);
     if (target == ZAPP_SCAN_TO_PAIR_REVIEW) shell.pair_seen = true;
-    /* The send review screen is drawn by wallet_send_screen once the wallet screens are wired; until then a
-     * payment code is acknowledged on Home with its notice and nothing is started. */
-    bool home = target == ZAPP_SCAN_TO_HOME || target == ZAPP_SCAN_TO_PAYMENT_REVIEW;
+    if (scan_goes_to_send(view)) {
+        struct zapp_payment pay;
+        bool have = zapp_pay_stash_take(&pay);
+        const char *why = view->scan_kind == ZAPP_SCAN_PAY_REFUSED ? view->scan_text : "That is not a payment code.";
+        go(env, SCREEN_SEND);
+        if (shell.current == SCREEN_SEND) zapp_send_ui_open(env, have ? &pay : NULL, have ? "" : why);
+        memory_cleanse(&pay, sizeof(pay));
+        return;
+    }
     if (zapp_home_scan_returns_to_wallet(target, shell.before_scan == SCREEN_WALLET && shell.current == SCREEN_WALLET)) {
         wallet_screens_scan_notice(view->result);
         zapp_wallet_ui_render(env);
         return;
     }
+    bool home = target == ZAPP_SCAN_TO_HOME;
     if (!home) go(env, SCREEN_ASSISTANT);
     if (target == ZAPP_SCAN_TO_FLEET_REVIEW) zapp_native_ui_open_details(env);
     if (!home) return;
@@ -558,6 +607,18 @@ static void finish_scan(JNIEnv *env, const struct zapp_view *view)
     set_text(env, shell.outcome_view, text);
 }
 
+/* The camera screen opens while a scan runs and closes when it ends; a payment code goes from the camera screen
+ * straight to Send and does not pass through the screen it came from. */
+static void render_scan(JNIEnv *env, const struct zapp_view *view, bool finished, bool dismissed)
+{
+    if (view->scanning) {
+        if (shell.current != SCREEN_SCAN && !dismissed) { shell.before_scan = shell.current; go(env, SCREEN_SCAN); }
+        return;
+    }
+    shell.scan_dismissed = false;
+    if (shell.current == SCREEN_SCAN && !(finished && !dismissed && scan_goes_to_send(view))) go(env, shell.before_scan);
+    if (finished && !dismissed) finish_scan(env, view);
+}
 void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
 {
     if (!shell.activity || !view) return;
@@ -566,30 +627,38 @@ void zapp_shell_render(JNIEnv *env, const struct zapp_view *view)
     }
     bool finished = view->scans_done != shell.scans_seen, dismissed = shell.scan_dismissed;
     shell.scans_seen = view->scans_done;
-    if (view->scanning) {
-        if (shell.current != SCREEN_SCAN && !dismissed) { shell.before_scan = shell.current; go(env, SCREEN_SCAN); }
-    } else {
-        shell.scan_dismissed = false;
-        if (shell.current == SCREEN_SCAN) go(env, shell.before_scan);
-        if (finished && !dismissed) finish_scan(env, view);
-    }
+    render_scan(env, view, finished, dismissed);
     if (zapp_home_offer_jump(view->pair_offer[0] != 0, shell.current == SCREEN_SCAN, &shell.pair_seen)) go(env, SCREEN_ASSISTANT);
     set_phone_card(view);
     show_home(env);
     if (shell.current == SCREEN_WALLET) zapp_wallet_ui_render(env);
+    if (shell.current == SCREEN_SEND) zapp_send_ui_render(env);
 }
 void zapp_shell_pause(JNIEnv *env)
 {
+    if (shell.activity && shell.current == SCREEN_SEND) {
+        /* A payment being built, or an authentication in progress, stays; a flow that ended returns to Home. */
+        zapp_send_ui_pause();
+        go(env, SCREEN_HOME);
+        return;
+    }
     if (!shell.activity || shell.current != SCREEN_WALLET) return;
     go(env, SCREEN_HOME);
 }
 void zapp_shell_dropped(JNIEnv *env)
 {
+    if (shell.activity && shell.current == SCREEN_SEND) zapp_send_ui_dropped(env);
     if (shell.activity && shell.current == SCREEN_WALLET) zapp_wallet_ui_dropped(env, shell.gate.obscured_gestures);
 }
 void zapp_shell_tick(JNIEnv *env)
 {
     if (!shell.activity) return;
+    /* Ticks are what ask again for a lock that is owed, on this screen or off it. */
+    zapp_send_ui_tick(env);
+    if (shell.current == SCREEN_SEND) {
+        zapp_send_ui_render(env);
+        return;
+    }
     /* Off the wallet screens, the first tick after the app returned finds Home on screen: the protection a pause
      * kept can go. */
     if (shell.current == SCREEN_WALLET) zapp_wallet_ui_tick(env);
@@ -610,11 +679,12 @@ void zapp_shell_destroy(JNIEnv *env)
     leave_wallet(env);
     wallet_screens_close();
     zapp_wallet_ui_destroy(env);
+    zapp_send_ui_destroy(env);
     zapp_surface_destroy(env);
     for (size_t i = 0; i < shell.nav_count; ++i) (*env)->DeleteGlobalRef(env, shell.navs[i].view);
     for (size_t i = 0; i < shell.row_count; ++i) (*env)->DeleteGlobalRef(env, shell.rows[i]);
     for (int i = 0; i < SCREEN_COUNT; ++i) if (shell.roots[i]) (*env)->DeleteGlobalRef(env, shell.roots[i]);
-    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.outcome_view, &shell.status_view, &shell.scan_view, &shell.apps_list};
+    jobject *views[] = {&shell.notice_views[SCREEN_HOME], &shell.notice_views[SCREEN_APPS], &shell.notice_views[SCREEN_SETTINGS], &shell.notice_views[SCREEN_SEND], &shell.outcome_view, &shell.status_view, &shell.scan_view, &shell.apps_list};
     for (size_t i = 0; i < sizeof(views) / sizeof(views[0]); ++i) if (*views[i]) (*env)->DeleteGlobalRef(env, *views[i]);
     release_cards();
     zapp_launcher_release(env, shell.apps, ZAPP_LAUNCHER_MAX);

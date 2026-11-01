@@ -373,7 +373,8 @@ void zapp_runtime_destroy(struct zapp_runtime *r)
     pthread_mutex_destroy(&r->mutex);
 }
 
-struct pump { int input, output; pid_t pid; const char *body; size_t sent, length, used; bool truncated; };
+#define COMMAND_TIMEOUT_MS 15000
+struct pump { int input, output; pid_t pid; const char *body; size_t sent, length, used; bool truncated; unsigned timeout_ms; };
 
 static void pump_output(struct pump *p, char *out, size_t cap)
 {
@@ -418,7 +419,7 @@ static bool pump_success(const struct pump *p, bool ended, int status)
 static bool pump_command(struct pump *p, char *out, size_t cap)
 {
     int status = 0; bool ended = false; int64_t start = milliseconds();
-    int64_t now = start, end = start < 0 ? -1 : start + 15000;
+    int64_t now = start, end = start < 0 ? -1 : start + (int64_t)p->timeout_ms;
     while ((!ended || p->output >= 0) && now >= 0 && now < end) {
         struct pollfd fds[2] = {{p->output, POLLIN, 0}, {p->input, POLLOUT, 0}};
         if (poll(fds, 2, 50) < 0 && errno != EINTR) break;
@@ -433,8 +434,8 @@ static bool pump_command(struct pump *p, char *out, size_t cap)
     return pump_success(p, ended, status);
 }
 
-static bool command(struct zapp_runtime *r, const char *const *args,
-                    const char *input, char *out, size_t cap)
+static bool command_timed(struct zapp_runtime *r, const char *const *args, const char *input,
+                          unsigned timeout_ms, char *out, size_t cap)
 {
     if (!out || cap < 64) return false;
     out[0] = 0;
@@ -449,7 +450,7 @@ static bool command(struct zapp_runtime *r, const char *const *args,
     argv[n++] = data;
     if (input) argv[n++] = "--input=-";
     argv[n] = NULL;
-    struct pump pump = {.input = stdin_pipe[1], .output = pipes[0], .body = input ? input : "", .length = input ? strlen(input) : 0};
+    struct pump pump = {.input = stdin_pipe[1], .output = pipes[0], .body = input ? input : "", .length = input ? strlen(input) : 0, .timeout_ms = timeout_ms};
     pthread_mutex_lock(&r->mutex);
     int rc = r->stopping ? ECANCELED :
              spawn_redirect(r, argv, stdin_pipe[0], pipes[1], &pump.pid);
@@ -458,6 +459,10 @@ static bool command(struct zapp_runtime *r, const char *const *args,
     if (rc) { close(stdin_pipe[1]); close(pipes[0]); snprintf(out, cap, "Unable to run native Z23: %s", strerror(rc)); return false; }
     if (!pump.length) { close(pump.input); pump.input = -1; }
     return pump_command(&pump, out, cap);
+}
+static bool command(struct zapp_runtime *r, const char *const *args, const char *input, char *out, size_t cap)
+{
+    return command_timed(r, args, input, COMMAND_TIMEOUT_MS, out, cap);
 }
 
 static void direct_note(const char *id, const char *why)
@@ -572,6 +577,56 @@ bool zapp_wallet_run(struct zapp_runtime *r, const char *op, const char *arg, ch
     }
     snprintf(out, cap, "This wallet command is not available in the phone's permission set.");
     return false;
+}
+
+/* The node RPC validateaddress over loopback: the address goes in the request body, never on a command line. */
+static bool validate_address_run(struct zapp_runtime *r, const char *params, char *out, size_t cap)
+{
+    char why[160] = "";
+    if (r->preview) { snprintf(out, cap, "The preview app has no wallet."); return false; }
+    bool ok = zapp_rpc_call(r->directory, "validateaddress", params, DIRECT_TIMEOUT_MS, out, cap, why, sizeof(why)) == ZAPP_RPC_OK;
+    if (!ok) snprintf(out, cap, "%s", why[0] ? why : "The node did not answer.");
+    return ok;
+}
+
+/* The wallet commands of a send, by the id the send adapter asks with. Their arguments are never on the
+ * command line: the payment, the plan token, the idempotency key and the passphrase go on standard input. */
+struct send_command { const char *id; const char *args[5]; bool input; };
+static const struct send_command send_commands[] = {
+    {"unlock", {"core", "wallet", "security", "unlock"}, true},
+    {"lock", {"core", "wallet", "security", "lock"}, false},
+    {"plan", {"core", "wallet", "shielded", "send"}, true},
+    {"commit", {"core", "wallet", "shielded", "send"}, true},
+};
+static const struct send_command *send_command_of(const char *op)
+{
+    for (size_t i = 0; i < sizeof(send_commands) / sizeof(send_commands[0]); ++i)
+        if (!strcmp(op, send_commands[i].id)) return &send_commands[i];
+    return NULL;
+}
+
+static bool send_args_valid(const struct send_command *c, const char *input, unsigned timeout_ms)
+{
+    return c->input == (input != NULL) && timeout_ms && timeout_ms <= ZAPP_WALLET_SEND_TIMEOUT_MAX_MS;
+}
+/* A commit builds a proof, about 100 seconds on a phone: no caller may cut it shorter than the floor. */
+static unsigned send_timeout(const char *op, unsigned timeout_ms)
+{
+    return !strcmp(op, "commit") && timeout_ms < ZAPP_WALLET_COMMIT_MIN_MS ? ZAPP_WALLET_COMMIT_MIN_MS : timeout_ms;
+}
+bool zapp_wallet_send_run(struct zapp_runtime *r, const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap)
+{
+    if (!r || !op || !out || cap < 64) return false;
+    if (!strcmp(op, "summary") || !strcmp(op, "fleet") || !strcmp(op, "latest")) return !input && zapp_wallet_run(r, op, "", out, cap);
+    if (!strcmp(op, "validateaddress")) return input && validate_address_run(r, input, out, cap);
+    const struct send_command *c = send_command_of(op);
+    if (!c) { snprintf(out, cap, "This wallet command is not available in the phone's permission set."); return false; }
+    if (r->preview) { snprintf(out, cap, "The preview app has no wallet."); return false; }
+    if (!send_args_valid(c, input, timeout_ms)) {
+        snprintf(out, cap, "This wallet command was given arguments it does not take.");
+        return false;
+    }
+    return command_timed(r, c->args, input, send_timeout(op, timeout_ms), out, cap);
 }
 
 bool zapp_fleet_join_run(struct zapp_runtime *r, const char *token, char *out, size_t cap)

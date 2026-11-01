@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
 #include "wallet_send_screen.h"
 #include "base/cleanse.h"
+#include "wallet_screens.h"
 #include "wallet_view.h"
 #include "zutf8/zutf8.h"
 #include <pthread.h>
@@ -10,6 +11,8 @@
 
 #define QUEUE_MAX 16
 #define PUBLIC_WARNING "This payment is public. The amount and address are visible to everyone, forever."
+#define FLEET_CHECKED "Checked by your fleet"
+#define SENT_TO_NODE "The node has your payment. History shows when it leaves the phone."
 
 struct wss {
     pthread_mutex_t lock;
@@ -77,6 +80,7 @@ static void fill_review(const struct ws *ws, struct wss_view *v)
         snprintf(v->address, sizeof(v->address), "Address cannot be shown");
     snprintf(v->kind, sizeof(v->kind), "%s", ws->pay.kind == ZAPP_PAY_PUBLIC ? "Public" : "Private");
     fill_memo(&ws->pay, v);
+    snprintf(v->fleet, sizeof(v->fleet), "%s", ws->gate.fleet_checked ? FLEET_CHECKED : WALLET_FLEET_UNCHECKED);
     if (ws->pay.kind == ZAPP_PAY_PUBLIC) snprintf(v->warning, sizeof(v->warning), "%s", PUBLIC_WARNING);
     if (ws->insufficient) {
         snprintf(v->note, sizeof(v->note), "Not enough private funds for this payment. Public funds are never used for it.");
@@ -105,8 +109,8 @@ static void fill_status(const struct ws *ws, struct wss_view *v)
     case WS_COMMIT:
         snprintf(v->status, sizeof(v->status), "Building the payment. This can take about two minutes on this phone.");
         break;
-    case WS_BROADCAST: snprintf(v->status, sizeof(v->status), "Sent. Waiting for a private route."); break;
-    case WS_DONE: snprintf(v->status, sizeof(v->status), "Payment sent."); break;
+    case WS_BROADCAST: snprintf(v->status, sizeof(v->status), "%s", SENT_TO_NODE); break;
+    case WS_DONE: snprintf(v->status, sizeof(v->status), "The payment left the phone. History shows it."); break;
     case WS_FAILED: snprintf(v->status, sizeof(v->status), "%s", ws_fail_text(ws)); break;
     case WS_CANCELLED: snprintf(v->status, sizeof(v->status), "Cancelled. Nothing was sent."); break;
     case WS_IDLE: break;
@@ -117,6 +121,8 @@ static bool is_busy(enum ws_state state)
     return state == WS_VALIDATING || state == WS_GATE || state == WS_PLAN || state == WS_AUTH || state == WS_COMMIT ||
            state == WS_BROADCAST || state == WS_WAITING;
 }
+/* The flow has nothing left to ask of the owner: it ended, or the node holds the payment and only History can say more. */
+static bool flow_over(const struct ws *ws) { return ws_terminal(ws) || ws->state == WS_BROADCAST; }
 static bool shows_review(enum ws_state state) { return state == WS_REVIEW || state == WS_AUTH || state == WS_COMMIT; }
 void wss_view(struct wss *s, struct wss_view *v)
 {
@@ -137,6 +143,7 @@ void wss_view(struct wss *s, struct wss_view *v)
     v->can_retry = ws->state == WS_FAILED && ws->retry_ok;
     v->check_history = ws->state == WS_FAILED && ws->fail == WS_FAIL_COMMIT_UNKNOWN;
     v->can_cancel = ws->state != WS_COMMIT && ws->state != WS_BROADCAST && !ws_terminal(ws);
+    v->can_leave = flow_over(ws);
     if (shows_review(ws->state) && ws->plan.token[0]) fill_review(ws, v);
     fill_status(ws, v);
     pthread_mutex_unlock(&s->lock);
@@ -238,7 +245,7 @@ static void post(struct wss *s, struct ws_event *ev)
     enum ws_state before = s->ws.state;
     ws_step(&s->ws, ev, &acts);
     if (ev->kind == WS_EV_TAP_SEND && before == WS_REVIEW && s->ws.state == WS_AUTH) freeze(s);
-    if (ws_terminal(&s->ws)) memory_cleanse(&s->tapped, sizeof(s->tapped));
+    if (flow_over(&s->ws)) memory_cleanse(&s->tapped, sizeof(s->tapped));
     enqueue(s, &acts);
     pthread_mutex_unlock(&s->lock);
     kick(s);
@@ -413,7 +420,7 @@ bool wss_begin(struct wss *s, const struct zapp_payment *pay)
     struct ws_actions acts;
     struct ws_env env = {s->d.network, s->d.host.ctx, s->d.host.random};
     pthread_mutex_lock(&s->lock);
-    bool busy = s->begun && !ws_terminal(&s->ws);
+    bool busy = s->begun && !flow_over(&s->ws);
     pthread_mutex_unlock(&s->lock);
     if (busy) return false;   /* A second code never replaces a flow that has not ended. */
     if (!zapp_secure_window_apply(&s->d.secure, true)) {
@@ -435,7 +442,7 @@ bool wss_end(struct wss *s)
     post(s, &ev);
     pthread_mutex_lock(&s->lock);
     /* An exposed wallet keeps the screen alive: the lock is owed and only ticks can finish it. */
-    bool done = ws_terminal(&s->ws) && !ws_wallet_exposed(&s->ws);
+    bool done = flow_over(&s->ws) && !ws_wallet_exposed(&s->ws);
     pthread_mutex_unlock(&s->lock);
     if (done) (void)zapp_secure_window_apply(&s->d.secure, false);
     return done;

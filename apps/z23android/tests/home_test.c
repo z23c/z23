@@ -158,11 +158,16 @@ static void scan_destinations(void)
     assert(zapp_home_scan_target(ZAPP_SCAN_UNREADABLE, true) == ZAPP_SCAN_TO_HOME);
     assert(zapp_home_scan_target(ZAPP_SCAN_PAY, false) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
     assert(zapp_home_scan_target(ZAPP_SCAN_PAY, true) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
-    assert(zapp_home_scan_target(ZAPP_SCAN_PAY_REFUSED, false) == ZAPP_SCAN_TO_HOME);
-    /* A scan begun at Send that opens no review returns to the wallet; every review still opens, and Home scans stay on Home. */
-    assert(zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_HOME, true) && zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_PAYMENT_REVIEW, true));
+    assert(zapp_home_scan_target(ZAPP_SCAN_PAY_REFUSED, false) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
+    assert(zapp_home_scan_target(ZAPP_SCAN_PAY_REFUSED, true) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
+    /* A scan begun at a wallet screen that opens no review returns to the wallet; every review still opens (a payment on Send), and Home scans stay on Home. */
+    assert(zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_HOME, true) && !zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_PAYMENT_REVIEW, true));
     assert(!zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_FLEET_REVIEW, true) && !zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_PAIR_REVIEW, true));
     assert(!zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_HOME, false) && !zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_PAYMENT_REVIEW, false));
+    /* A scan started on Send that is not a payment stays on Send; a scan started elsewhere never goes there. */
+    assert(zapp_home_scan_stays_on_send(true, ZAPP_SCAN_TO_HOME) && !zapp_home_scan_stays_on_send(false, ZAPP_SCAN_TO_HOME));
+    assert(!zapp_home_scan_stays_on_send(true, ZAPP_SCAN_TO_FLEET_REVIEW) && !zapp_home_scan_stays_on_send(true, ZAPP_SCAN_TO_PAIR_REVIEW));
+    assert(!zapp_home_scan_stays_on_send(true, ZAPP_SCAN_TO_PAYMENT_REVIEW));
 }
 /* The largest label, package and activity, with every label character escaped, still make a card. */
 static void worst_case_card_fits(void)
@@ -232,21 +237,21 @@ static void scanned_text_routes(void)
     assert(kind == ZAPP_SCAN_PAY && zapp_home_scan_target(kind, true) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
     snprintf(text, sizeof(text), "\n %s", addr);
     kind = zapp_scan_classify(text, value, sizeof(value));
-    assert(kind == ZAPP_SCAN_PAY_REFUSED && !strstr(value, "zs1") && zapp_home_scan_target(kind, true) == ZAPP_SCAN_TO_HOME);
+    assert(kind == ZAPP_SCAN_PAY_REFUSED && !strstr(value, "zs1") && zapp_home_scan_target(kind, true) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
     char upper[ZAPP_PAY_ADDRESS_MAX];
     memcpy(upper, "ZS1", 3); memset(upper + 3, 'Q', 75); upper[78] = 0;
     kind = zapp_scan_classify(upper, value, sizeof(value));
-    assert(kind == ZAPP_SCAN_PAY_REFUSED && !strstr(value, "ZS1") && zapp_home_scan_target(kind, false) == ZAPP_SCAN_TO_HOME);
+    assert(kind == ZAPP_SCAN_PAY_REFUSED && !strstr(value, "ZS1") && zapp_home_scan_target(kind, false) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
     static const char *const tails[] = {"?amount=1\n", "?amount=1&req-x=1", "?amount=1.123456789", "\n", "\t", "?amount=1\r\n"};
     for (size_t i = 0; i < sizeof(tails) / sizeof(tails[0]); ++i) {
         snprintf(text, sizeof(text), "zclassic:%s%s", addr, tails[i]);
         kind = zapp_scan_classify(text, value, sizeof(value));
         assert(kind == ZAPP_SCAN_PAY_REFUSED && value[0] && !strstr(value, "zs1"));
-        assert(zapp_home_scan_target(kind, false) == ZAPP_SCAN_TO_HOME);
+        assert(zapp_home_scan_target(kind, false) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
     }
     snprintf(text, sizeof(text), "%s\n", addr);
     kind = zapp_scan_classify(text, value, sizeof(value));
-    assert(kind == ZAPP_SCAN_PAY_REFUSED && !strstr(value, "zs1") && zapp_home_scan_target(kind, true) == ZAPP_SCAN_TO_HOME);
+    assert(kind == ZAPP_SCAN_PAY_REFUSED && !strstr(value, "zs1") && zapp_home_scan_target(kind, true) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
     kind = zapp_scan_classify("hello world", value, sizeof(value));
     assert(kind == ZAPP_SCAN_TEXT && zapp_home_scan_target(kind, true) == ZAPP_SCAN_TO_HOME);
 }

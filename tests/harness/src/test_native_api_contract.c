@@ -2014,6 +2014,84 @@ static int test_wallet_mutating_native_e2e(void)
         zcl_command_reply_free(&reply);
         json_free(&shield_plan);
 
+        /* The phone sends the plan's own fields back as its commit: the
+         * amount as the exact eight-place text the plan echoed, with the fee
+         * and token of that plan, and no commit_input.  The handler must
+         * accept that document, as it accepts the commit_input it builds. */
+        json_init(&shield_plan);
+        json_set_object(&shield_plan);
+        (void)json_push_kv_str(&shield_plan, "wallet_scope", "prod");
+        (void)json_push_kv_str(&shield_plan, "from", "zs1PhoneSource");
+        (void)json_push_kv_str(&shield_plan, "to", "zs1PhoneRecipient");
+        (void)json_push_kv_str(&shield_plan, "amount", "1.25000000");
+        (void)json_push_kv_str(&shield_plan, "memo_hex", "6869");
+        (void)json_push_kv_str(&shield_plan, "idempotency_key",
+                               "0123456789abcdef0123456789abcdef");
+        shield_req.input = &shield_plan;
+        zcl_command_reply_init(&reply, shield_spec->output_schema);
+        zcl_native_handle_wallet_shielded_send(&shield_req, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")), "plan");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "amount")),
+                      "1.25000000");
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "amount_zat")),
+                  125000000);
+        char phone_token[64];
+        (void)snprintf(phone_token, sizeof(phone_token), "%s",
+                       json_get_str(json_get(&reply.data, "plan_token")));
+        ASSERT_EQ(strlen(phone_token), 16);
+        int64_t phone_fee = json_get_int(json_get(&reply.data, "fee_zat"));
+        ASSERT_EQ(phone_fee, 250);
+        zcl_command_reply_free(&reply);
+
+        struct json_value phone_commit;
+        json_init(&phone_commit);
+        json_set_object(&phone_commit);
+        (void)json_push_kv_str(&phone_commit, "wallet_scope", "prod");
+        (void)json_push_kv_str(&phone_commit, "from", "zs1PhoneSource");
+        (void)json_push_kv_str(&phone_commit, "to", "zs1PhoneRecipient");
+        (void)json_push_kv_str(&phone_commit, "amount", "1.25000000");
+        (void)json_push_kv_int(&phone_commit, "fee_zat", phone_fee);
+        (void)json_push_kv_str(&phone_commit, "memo_hex", "6869");
+        (void)json_push_kv_str(&phone_commit, "idempotency_key",
+                               "0123456789abcdef0123456789abcdef");
+        (void)json_push_kv_str(&phone_commit, "plan_token", phone_token);
+        (void)json_push_kv_bool(&phone_commit, "confirm", true);
+        int sent_before_phone = g_wallet_z_sendmany_calls;
+        shield_req.input = &phone_commit;
+        zcl_command_reply_init(&reply, shield_spec->output_schema);
+        zcl_native_handle_wallet_shielded_send(&shield_req, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "stage")),
+                      "committed");
+        ASSERT(json_get_bool(json_get(&reply.data, "committed")));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "plan_token")),
+                      phone_token);
+        ASSERT_EQ(g_wallet_z_sendmany_calls, sent_before_phone + 1);
+        zcl_command_reply_free(&reply);
+
+        /* A commit that changes one digit of the amount is not the plan. */
+        json_free(&phone_commit);
+        json_init(&phone_commit);
+        json_set_object(&phone_commit);
+        (void)json_push_kv_str(&phone_commit, "wallet_scope", "prod");
+        (void)json_push_kv_str(&phone_commit, "from", "zs1PhoneSource");
+        (void)json_push_kv_str(&phone_commit, "to", "zs1PhoneRecipient");
+        (void)json_push_kv_str(&phone_commit, "amount", "1.26000000");
+        (void)json_push_kv_int(&phone_commit, "fee_zat", phone_fee);
+        (void)json_push_kv_str(&phone_commit, "memo_hex", "6869");
+        (void)json_push_kv_str(&phone_commit, "idempotency_key",
+                               "fedcba9876543210fedcba9876543210");
+        (void)json_push_kv_str(&phone_commit, "plan_token", phone_token);
+        (void)json_push_kv_bool(&phone_commit, "confirm", true);
+        zcl_command_reply_init(&reply, shield_spec->output_schema);
+        zcl_native_handle_wallet_shielded_send(&shield_req, &reply);
+        ASSERT(reply.exit_code != ZCL_COMMAND_EXIT_OK);
+        ASSERT_EQ(g_wallet_z_sendmany_calls, sent_before_phone + 1);
+        zcl_command_reply_free(&reply);
+        json_free(&phone_commit);
+        json_free(&shield_plan);
+
         /* 5. raw create/sign do not broadcast; raw broadcast itself obeys
          *    the plan/commit boundary. */
         const struct zcl_command_spec *raw_create =

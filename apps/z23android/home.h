@@ -45,12 +45,16 @@ bool zapp_home_offer_jump(bool offer, bool on_scan_screen, bool *seen);
 enum zapp_scan_target { ZAPP_SCAN_TO_HOME, ZAPP_SCAN_TO_FLEET_REVIEW, ZAPP_SCAN_TO_PAIR_REVIEW, ZAPP_SCAN_TO_PAYMENT_REVIEW };
 /* A fleet invitation opens its review, and a laptop pairing code opens the pairing review when the
  * controller holds an offer for it, whether or not the owner saw an earlier offer.
- * A payment code that payment_code.h accepts opens the send review and nothing more. Everything else is
- * shown on Home. */
+ * A payment code, accepted or refused by payment_code.h, goes to the Send screen: an accepted one opens the review and
+ * nothing more, a refused one stays there with its reason, Scan again and Enter address. Everything else is shown on
+ * Home. */
 enum zapp_scan_target zapp_home_scan_target(enum zapp_scan_kind kind, bool pair_offer);
 /* Whether a finished scan returns to the wallet screen it began on, with its words there, instead of to Home: when it
- * began on a wallet screen and ends without a review to open. */
+ * began on a wallet screen and is not a review (a payment code opens Send). */
 bool zapp_home_scan_returns_to_wallet(enum zapp_scan_target target, bool began_in_wallet);
+/* Whether a scan that was started on the Send screen and is not a payment, a fleet invitation or a pairing code stays
+ * on Send, with Scan code and Enter address, instead of dropping to Home. */
+bool zapp_home_scan_stays_on_send(bool started_on_send, enum zapp_scan_target target);
 /* Copies text into out (cap bytes), cutting on a character boundary when it does not fit. */
 void zapp_home_fit_label(char *out, size_t cap, const char *text);
 #endif

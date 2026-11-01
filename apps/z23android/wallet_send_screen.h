@@ -100,6 +100,7 @@ struct wss_view {
     bool can_send;
     bool can_retry;
     bool check_history;               /* The send has an unknown result: say so and point to History. */
+    bool can_leave;                   /* Draw Done: the flow ended, or the node holds the payment and only History can say more. */
     bool can_cancel;
     bool offer_make_private;
     uint32_t serial;                  /* Pass back with the Send tap. */
@@ -112,6 +113,7 @@ struct wss_view {
     char memo[WSS_MEMO];              /* Data only: control and bidi characters are written as <U+XXXX>. */
     char warning[WSS_LINE];           /* The public destination warning. */
     char note[WSS_LINE];              /* Insufficient private funds. */
+    char fleet[WSS_LINE];             /* "Checked by your fleet" or "Not checked by your fleet". */
     char status[WSS_LINE];
 };
 

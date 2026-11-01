@@ -143,9 +143,14 @@ static bool jni_filter_touches(void *context, bool on)
     (*env)->PopLocalFrame(env, NULL);
     return ok;
 }
+void zapp_secure_window_ops(struct zapp_secure_ops *ops, ANativeActivity *activity)
+{
+    *ops = (struct zapp_secure_ops){activity, jni_flag_secure, jni_filter_touches, jni_hide_overlays, jni_recents, jni_accessibility};
+}
 bool zapp_secure_window(ANativeActivity *activity, bool on)
 {
-    struct zapp_secure_ops ops = {activity, jni_flag_secure, jni_filter_touches, jni_hide_overlays, jni_recents, jni_accessibility};
+    struct zapp_secure_ops ops;
+    zapp_secure_window_ops(&ops, activity);
     return zapp_secure_window_apply(&ops, on);
 }
 bool zapp_secure_window_drops(const AInputEvent *event)

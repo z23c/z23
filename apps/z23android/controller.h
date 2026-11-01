@@ -15,4 +15,9 @@ bool zapp_controller_node_running(void);
 /* Runs one wallet command on the calling thread (see zapp_wallet_run); the controller worker stays free,
  * so a slow wallet command never delays the node status. Safe from any thread. */
 bool zapp_controller_wallet_run(const char *op, const char *arg, char *out, size_t cap);
+/* Runs one step of a send on the calling thread (see zapp_wallet_send_run), never on the controller worker. Safe from any
+ * thread. */
+bool zapp_controller_send_run(const char *op, const char *input, unsigned timeout_ms, char *out, size_t cap);
+/* True while the phone's thermal state has paused the node. */
+bool zapp_controller_node_paused(void);
 #endif
