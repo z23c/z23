@@ -7079,21 +7079,21 @@ struct ic_fresh_case {
 };
 
 static const struct ic_fresh_case ic_fresh_cases[] = {
-    {"fresh", 0, "devagent_situation"},   /* new impl, its rule's group */
-    {"freshtest", 0, "devagent_start"},   /* new test file, its own group */
+    {"fresh", 0, "devagent_situation", NULL},   /* new impl, its rule's group */
+    {"freshtest", 0, "devagent_start", NULL},   /* new test file, its own group */
     {"freshsidecar", 0, "devagent_situation", "package_capability_claim"},
-    {"freshmention", 'A', NULL},   /* an unchanged file names the stem */
-    {"freshbasename", 'A', NULL},  /* defines a name the base tree holds */
-    {"freshhook", 'A', NULL},      /* a constructor registers it unseen */
-    {"freshcore", 'A', NULL},      /* under core/ */
-    {"freshsidecarrow", 'A', NULL},  /* a row for another file */
-    {"freshsidecarorphan", 'A', NULL}, /* a sidecar with no fresh owner */
-    {"freshobject", 'A', NULL},    /* a public file-scope object */
-    {"freshheader", 'A', NULL},    /* an added header beside it */
-    {"freshdeleted", 'D', NULL},   /* a deletion beside it */
-    {"freshrename", 'D', NULL},    /* a rename: delete plus add */
-    {"freshtype", 'T', NULL},      /* a type change */
-    {"freshtext", 'A', NULL},      /* an added non-source file */
+    {"freshmention", 'A', NULL, NULL},   /* an unchanged file names the stem */
+    {"freshbasename", 'A', NULL, NULL},  /* defines a name the base tree holds */
+    {"freshhook", 'A', NULL, NULL},      /* a constructor registers it unseen */
+    {"freshcore", 'A', NULL, NULL},      /* under core/ */
+    {"freshsidecarrow", 'A', NULL, NULL},  /* a row for another file */
+    {"freshsidecarorphan", 'A', NULL, NULL}, /* a sidecar with no fresh owner */
+    {"freshobject", 'A', NULL, NULL},    /* a public file-scope object */
+    {"freshheader", 'A', NULL, NULL},    /* an added header beside it */
+    {"freshdeleted", 'D', NULL, NULL},   /* a deletion beside it */
+    {"freshrename", 'D', NULL, NULL},    /* a rename: delete plus add */
+    {"freshtype", 'T', NULL, NULL},      /* a type change */
+    {"freshtext", 'A', NULL, NULL},      /* an added non-source file */
 };
 
 static int test_ic_changed_set_fresh_source_closure(void)
