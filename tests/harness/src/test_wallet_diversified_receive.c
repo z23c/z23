@@ -142,6 +142,7 @@ static void wdr_close(struct wdr *f)
     if (f->ws_open)
         wallet_sqlite_close(&f->ws);
     f->ws_open = false;
+    wallet_rpc_context_set_node_db(NULL);
     if (f->db_open)
         node_db_close(&f->ndb);
     f->db_open = false;
@@ -982,6 +983,38 @@ static int test_index_synced_before_return(void)
     return failures;
 }
 
+/* Entering bulk mode syncs the database before the log is first truncated,
+ * so a receive-index row that was only in the log is on disk when the
+ * connection stops syncing. */
+static int test_bulk_entry_syncs_first(void)
+{
+    int failures = 0;
+    struct wdr f;
+    memset(&f, 0, sizeof(f));
+    bool vfs_on = false;
+    TEST("wallet_diversified_receive: bulk entry syncs the database first") {
+        ASSERT(spv_install());
+        vfs_on = true;
+        ASSERT(wdr_restore(&f));
+        wdr_use_start(0x7272ULL);
+        char a[128];
+        ASSERT(wdr_receive(&f, a, sizeof(a)));
+        spv_reset();
+        ASSERT(node_db_ibd_turbo_mode(&f.ndb));
+        ASSERT_EQ(wdr_sync_level(&f), 0);
+        ASSERT(spv_count(SPV_SYNC_DB) > 0);
+        ASSERT(spv_count(SPV_TRUNC_WAL) > 0);
+        ASSERT(spv_first(SPV_SYNC_DB) < spv_first(SPV_TRUNC_WAL));
+        ASSERT(node_db_normal_mode(&f.ndb));
+        PASS();
+    } _test_next:;
+    wdr_use_system_rng();
+    wdr_teardown(&f);
+    if (vfs_on)
+        spv_uninstall();
+    return failures;
+}
+
 #define WDR_THREADS 2
 #define WDR_PER_THREAD 20
 
@@ -1261,6 +1294,7 @@ int test_wallet_diversified_receive(void)
     failures += test_random_start();
     failures += test_random_failure_refuses();
     failures += test_index_synced_before_return();
+    failures += test_bulk_entry_syncs_first();
     failures += test_concurrent_receives();
     failures += test_index_exhaustion();
     failures += test_issued_address_balance();

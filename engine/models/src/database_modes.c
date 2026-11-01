@@ -243,6 +243,13 @@ bool node_db_rebuild_indexes(struct node_db *ndb)
 bool node_db_ibd_turbo_mode(struct node_db *ndb)
 {
     if (!ndb || !ndb->open) return false;
+    /* Fold and sync the log at the connection's current level before
+     * synchronous=OFF. Rows committed in normal mode may still be only in the
+     * log; the first checkpoint under OFF would fold them into the database
+     * without a sync and reset the log, so a power loss could take back a
+     * row that was reported durable (a receive-index record, for one). */
+    if (!node_db_wal_checkpoint(ndb))
+        return false;
     /* Turbo-mode PRAGMAs are performance optimisations, not integrity
      * invariants — if any of them fail, fall back to the safe
      * defaults and carry on, never leaving a partial-turbo state (e.g.

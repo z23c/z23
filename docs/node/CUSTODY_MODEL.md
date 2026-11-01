@@ -387,9 +387,9 @@ them on chain. The reply is `{"address":"zs1..."}`.
 - **A balance is per address, a spend is per account.** `z_getbalance` on an
   issued address reports only the notes received at that address, but a send
   "from" an issued address may spend any unspent note of the account, not just
-  that address's. The wallet treats the diversified addresses as one account:
-  the phone shows one balance, and a later change is to make account-wide
-  spending the rule for every from address.
+  that address's. Every owned shielded from address spends account-wide today
+  (`wallet_shielded_send_shielded.c:276,303`): the diversified addresses are
+  one account for spending.
 - **Restore.** The index record is not in the wallet backup, and a restored
   wallet has not read the chain, so it cannot know which addresses an earlier
   copy issued. A wallet with no record, new or restored, starts at a random
