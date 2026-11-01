@@ -77,6 +77,24 @@ boot_params_gate_find_missing(const struct app_context *ctx,
     return missing;
 }
 
+/* The compiled-in keys failed their own integrity check: page the operator. */
+static void boot_params_gate_report_bad_embedded_keys(void)
+{
+    struct blocker_record rec;
+    if (blocker_init(&rec, "params_missing", "crypto.params",
+                     BLOCKER_PERMANENT,
+                     "compiled-in zk verifying keys failed their integrity "
+                     "check — proof validation cannot run") &&
+        blocker_set(&rec) == 0)
+        event_emitf(EV_OPERATOR_NEEDED, 0,
+                    "check=params_missing reason=embedded_vk_integrity");
+    LOG_WARN("crypto.params",
+             "[crypto.params] compiled-in verifying keys failed integrity "
+             "verification — this binary cannot validate shielded proofs; "
+             "NOT advancing CRYPTO_READY, parking alive-degraded after "
+             "paging the operator");
+}
+
 enum boot_params_gate_result
 boot_params_gate_evaluate(const struct app_context *ctx,
                           const struct chain_params *params,
@@ -112,19 +130,7 @@ boot_params_gate_evaluate(const struct app_context *ctx,
     if (!sapling_install_embedded_vks()) {
         if (!mainnet)
             return BOOT_PARAMS_GATE_PRESENT;
-        struct blocker_record rec;
-        if (blocker_init(&rec, "params_missing", "crypto.params",
-                         BLOCKER_PERMANENT,
-                         "compiled-in zk verifying keys failed their integrity "
-                         "check — proof validation cannot run") &&
-            blocker_set(&rec) == 0)
-            event_emitf(EV_OPERATOR_NEEDED, 0,
-                        "check=params_missing reason=embedded_vk_integrity");
-        LOG_WARN("crypto.params",
-                 "[crypto.params] compiled-in verifying keys failed integrity "
-                 "verification — this binary cannot validate shielded proofs; "
-                 "NOT advancing CRYPTO_READY, parking alive-degraded after "
-                 "paging the operator");
+        boot_params_gate_report_bad_embedded_keys();
         return BOOT_PARAMS_GATE_PARK;
     }
 

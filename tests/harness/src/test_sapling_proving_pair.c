@@ -944,7 +944,7 @@ static bool pair_send_once(void)
 /* The self-test runs once per proven pair, not once per send: a second send
  * of the same files skips it, replaced files are tested again, and a failure
  * is never remembered as a pass. */
-static int pair_cache_legs(const char *real)
+static int pair_cache_pass_legs(const char *real)
 {
     int failures = 0;
     char dir[1200], p[1400];
@@ -977,14 +977,21 @@ static int pair_cache_legs(const char *real)
                zclassic_test_prover_self_test_runs() == runs + 2);
     pair_remove_dir(dir);
     pair_reset();
+    return failures;
+}
 
+static int pair_cache_fail_legs(const char *real)
+{
+    int failures = 0;
+    char dir[1200];
+    pair_reset();
     PAIR_CHECK("failure fixture", pair_make_dir(dir, sizeof(dir)) &&
                                   pair_link(real, dir, kSpend) &&
                                   pair_link(real, dir, kOutput) &&
                                   sapling_install_embedded_vks());
     sapling_note_proving_pair_dir(dir);
     sapling_set_spend_vk(NULL);
-    runs = zclassic_test_prover_self_test_runs();
+    int runs = zclassic_test_prover_self_test_runs();
     PAIR_CHECK("a failing self-test refuses the send",
                !pair_send_once() &&
                zclassic_test_prover_self_test_runs() == runs + 1);
@@ -996,6 +1003,11 @@ static int pair_cache_legs(const char *real)
     pair_remove_dir(dir);
     pair_reset();
     return failures;
+}
+
+static int pair_cache_legs(const char *real)
+{
+    return pair_cache_pass_legs(real) + pair_cache_fail_legs(real);
 }
 
 /* A node with only the Sapling pair, on a network other than mainnet. */
