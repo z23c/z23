@@ -44,7 +44,7 @@
 #include "platform/os_sandbox.h"
 #include "platform/time_compat.h"
 #if !defined(_WIN32)
-#include <sched.h>
+#include <time.h>
 #endif
 #include "sha3/sha3.h"
 #include "vcs/package_build.h"
@@ -877,7 +877,11 @@ static bool rlc_task_wait_detail(struct task_update *update, const char **reason
             if (reason) *reason = "unexpected_pending_state";
             return false;
         }
-        (void)sched_yield();
+        /* Event cadence, not a fixed wait: the worker thread publishes its
+         * completion through an atomic, so yield the core for 1 ms per look
+         * instead of spinning against the niced worker and its confined child. */
+        const struct timespec rlc_tick = { 0, 1000000 };
+        (void)nanosleep(&rlc_tick, NULL);
     }
     if (update->pending && reason) *reason = "deadline_pending";
     return !update->pending;
