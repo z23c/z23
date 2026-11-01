@@ -133,9 +133,12 @@ struct zcl_result domain_consensus_coinbase_script_sig_with_extra_nonce(
     return ZCL_OK;
 }
 
-struct zcl_result domain_consensus_coinbase_build(
+/* Reject null out_tx, null inputs, null params, null miner_script,
+ * negative height, height above DCB_HEIGHT_MAX, negative fees, or
+ * negative subsidy. Returns ZCL_OK when none of those hold. */
+static struct zcl_result dcb_build_reject_bad_inputs(
         const struct domain_consensus_coinbase_inputs *in,
-        struct transaction *out_tx)
+        const struct transaction *out_tx)
 {
     if (!out_tx)
         return ZCL_ERR(DOMAIN_CONSENSUS_COINBASE_ERR_NULL_OUT,
@@ -164,6 +167,16 @@ struct zcl_result domain_consensus_coinbase_build(
         return ZCL_ERR(DOMAIN_CONSENSUS_COINBASE_ERR_NEG_SUBSIDY,
                        "coinbase_build: negative subsidy %lld",
                        (long long)in->subsidy);
+    return ZCL_OK;
+}
+
+struct zcl_result domain_consensus_coinbase_build(
+        const struct domain_consensus_coinbase_inputs *in,
+        struct transaction *out_tx)
+{
+    struct zcl_result input_err = dcb_build_reject_bad_inputs(in, out_tx);
+    if (!input_err.ok)
+        return input_err;
     if (out_tx->num_vin != 1 || out_tx->num_vout != 1 ||
         !out_tx->vin || !out_tx->vout)
         return ZCL_ERR(DOMAIN_CONSENSUS_COINBASE_ERR_NOT_PREALLOC,
