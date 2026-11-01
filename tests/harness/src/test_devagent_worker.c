@@ -2217,6 +2217,9 @@ int test_devagent_worker(void)
         ASSERT(after_post_ms >= 0);
         ASSERT(g_wtx_wake_ms > -1000);
         ASSERT(g_wtx_wake_ms < 3000);
+        /* The whole drive keeps its own bound: when it trips, the line above
+         * shows whether the wake or the claim-fork-run after it was slow. */
+        ASSERT(after_post_ms < 3000);
         wtx_restore();
         PASS();
     }
