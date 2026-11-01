@@ -64,10 +64,16 @@
 #include "util/blocker.h"
 #include "util/safe_alloc.h"
 #include "validation/chainstate.h"
+#include "validation/main_state.h"
+#include "config/boot.h"
+#include "util/thread_registry.h"
+#include "../../../engine/composition/src/boot_steps_internal.h"
 
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define SST_SAPLING_ACTIVATION 476969 /* matches sapling_tree_rebuild()'s
                                        * hardcoded activation height */
@@ -596,12 +602,13 @@ struct sst_window_opts {
     int bodies_from_idx; /* bodies exist only at idx >= this (cure-seeded) */
     int anchor_idx;      /* -1 none: capture the frontier after this leaf */
     uint8_t tag;
+    int base;            /* 0: Sapling activation */
 };
 
 static struct sst_window *sst_window_build(const char *dir,
                                            const struct sst_window_opts *o)
 {
-    const int base = SST_SAPLING_ACTIVATION;
+    const int base = o->base ? o->base : SST_SAPLING_ACTIVATION;
     struct sst_window *w = zcl_calloc(1, sizeof(*w), "sst_window");
     if (!w)
         return NULL;
@@ -1151,6 +1158,247 @@ static int test_sst_merkle_tree_math_golden_root_unchanged(void)
     return failures;
 }
 
+/* ── Boot repair of a persisted Sapling tree extended by old heights ──────
+ * boot_sapling_tree_boot_load() loads node_state["sapling_tree"], compares its
+ * root with the tip header root and repairs a mismatch: a synchronous rebuild
+ * from block files at or below height 1,000,000, a background rebuild above
+ * it. The tree under test is the shape the old catchup walk produced: the true
+ * commitments plus stray ones appended from old heights, stamped with an old
+ * height so no fold-forward applies. */
+enum { SST_STRAY_LEAVES = 3, SST_OLD_HEIGHT_OFFSET = 3, SST_BOOT_WINDOW = 11,
+       SST_BOOT_DEFERRED_BASE = 1000001 };
+
+struct sst_boot {
+    char dir[256];
+    struct node_db ndb;
+    struct main_state ms;
+    struct app_context ctx;
+    struct sst_window *w;
+    bool store;
+    bool ok;
+};
+
+static bool sst_boot_seed_inflated(struct sst_boot *b, int base)
+{
+    struct incremental_merkle_tree t = b->w->true_tree;
+    for (int i = 0; i < SST_STRAY_LEAVES; i++) {
+        struct uint256 cm;
+        memset(cm.data, 0, 32);
+        cm.data[0] = (uint8_t)(0xA0 + i);
+        cm.data[31] = 0x5A;
+        incremental_tree_append(&t, &cm);
+    }
+    struct byte_stream ss;
+    stream_init(&ss, 4096);
+    bool ok = incremental_tree_serialize(&t, &ss) &&
+              node_db_state_set(&b->ndb, "sapling_tree", ss.data, ss.size) &&
+              node_db_state_set_int(&b->ndb, "sapling_tree_rebuild_height",
+                                    base + SST_OLD_HEIGHT_OFFSET);
+    stream_free(&ss);
+    return ok;
+}
+
+static bool sst_boot_open_anchor(struct sst_boot *b)
+{
+    sqlite3 *pdb = NULL;
+    b->store = progress_store_open(b->dir);
+    return b->store && (pdb = progress_store_db()) != NULL &&
+           anchor_kv_ensure_schema(pdb) &&
+           anchor_kv_add_tree(pdb, ANCHOR_POOL_SAPLING, &b->w->anchor_tree,
+                              b->w->anchor_height);
+}
+
+/* base 0: the window starts at Sapling activation. anchor: the reducer
+ * frontier after leaf 4 is in the progress store. missing_idx: that body is
+ * absent from disk (-1: none). */
+static struct sst_boot *sst_boot_open(const char *label, int base,
+                                      int missing_idx, bool anchor)
+{
+    struct sst_boot *b = zcl_calloc(1, sizeof(*b), "sst_boot");
+    if (!b)
+        return NULL;
+    char dbpath[512];
+    test_make_tmpdir(b->dir, sizeof(b->dir), "sst_boot", label);
+    snprintf(dbpath, sizeof(dbpath), "%s/node.db", b->dir);
+    blocker_module_init();
+    blocker_reset_for_testing();
+    const struct sst_window_opts opts = {
+        .base = base, .missing_idx = missing_idx, .corrupt_idx = -1,
+        .bodies_from_idx = 0, .anchor_idx = anchor ? 4 : -1, .tag = 0x30,
+    };
+    main_state_init(&b->ms);
+    b->ok = node_db_open(&b->ndb, dbpath);
+    b->w = b->ok ? sst_window_build(b->dir, &opts) : NULL;
+    b->ok = b->ok && b->w != NULL;
+    for (int i = 0; i < SST_BOOT_WINDOW && b->ok; i++)
+        b->ok = active_chain_install_tip_slot(&b->ms.chain_active,
+                                              &b->w->bis[i]);
+    b->ok = b->ok && (!anchor || sst_boot_open_anchor(b)) &&
+            sst_boot_seed_inflated(b, base ? base : SST_SAPLING_ACTIVATION);
+    app_context_defaults(&b->ctx);
+    b->ctx.datadir = b->dir;
+    return b;
+}
+
+static void sst_boot_close(struct sst_boot *b)
+{
+    if (!b)
+        return;
+    if (b->store)
+        progress_store_close();
+    main_state_free(&b->ms);
+    sst_window_free(b->w);
+    node_db_close(&b->ndb);
+    test_rm_rf_recursive(b->dir);
+    free(b);
+}
+
+static const struct block_index *sst_boot_tip(const struct sst_boot *b)
+{
+    return &b->w->bis[SST_BOOT_WINDOW - 1];
+}
+
+static bool sst_boot_tree_is_true(const struct incremental_merkle_tree *t,
+                                  const struct sst_boot *b)
+{
+    struct uint256 root;
+    incremental_tree_root(t, &root);
+    return incremental_tree_size(t) == SST_BOOT_WINDOW &&
+           memcmp(root.data, sst_boot_tip(b)->hashFinalSaplingRoot.data,
+                  32) == 0;
+}
+
+/* The persisted copy, as the next boot would read it. */
+static bool sst_boot_persisted_is_true(struct sst_boot *b)
+{
+    uint8_t buf[8192];
+    size_t len = 0;
+    struct incremental_merkle_tree t;
+    sapling_tree_init(&t);
+    if (!node_db_state_get(&b->ndb, "sapling_tree", buf, sizeof(buf), &len))
+        return false;
+    struct byte_stream ts;
+    stream_init_from_data(&ts, buf, len);
+    return incremental_tree_deserialize(&t, &ts) &&
+           sst_boot_tree_is_true(&t, b);
+}
+
+static bool sst_boot_tree_is_inflated(const struct sst_boot *b)
+{
+    return incremental_tree_size(&b->ms.sapling_tree) ==
+           SST_BOOT_WINDOW + SST_STRAY_LEAVES;
+}
+
+static int sst_boot_report(const char *name, bool pass)
+{
+    printf("boot sapling tree: %s... %s\n", name, pass ? "OK" : "FAIL");
+    return pass ? 0 : 1;
+}
+
+/* Tip at 476979 is below the deferral height: the repair runs before
+ * boot_sapling_tree_boot_load returns. */
+static int test_sst_boot_repairs_inflated_tree(void)
+{
+    struct sst_boot *b = sst_boot_open("repair", 0, -1, false);
+    bool pass = b && b->ok;
+    if (pass) {
+        int live = thread_registry_unreaped_count();
+        boot_sapling_tree_boot_load(&b->ctx, &b->ms, &b->ndb, b->dir);
+        pass = sst_boot_tree_is_true(&b->ms.sapling_tree, b) &&
+               sst_boot_persisted_is_true(b) &&
+               !atomic_load(&g_sapling_tree_rebuilding) &&
+               thread_registry_unreaped_count() == live &&
+               !sst_fail_closed_active();
+    }
+    sst_boot_close(b);
+    return sst_boot_report("an inflated persisted tree is rebuilt to the tip "
+                           "header root and boot continues", pass);
+}
+
+/* A body missing below the tip makes the rebuild fail closed: the repair is
+ * refused with a named blocker, and boot still returns. */
+static int test_sst_boot_repair_failure_names_blocker(void)
+{
+    struct sst_boot *b = sst_boot_open("fail", 0, 5, false);
+    bool pass = b && b->ok;
+    if (pass) {
+        boot_sapling_tree_boot_load(&b->ctx, &b->ms, &b->ndb, b->dir);
+        pass = sst_fail_closed_active() &&
+               sst_boot_tree_is_inflated(b) &&
+               !atomic_load(&g_sapling_tree_rebuilding);
+    }
+    sst_boot_close(b);
+    return sst_boot_report("a failed repair names a blocker, leaves the "
+                           "loaded tree and boot continues", pass);
+}
+
+/* Waits for the deferred rebuild thread alone; the supervisor threads other
+ * tests leave registered are excluded from the join. */
+static bool sst_join_deferred_rebuild(void)
+{
+    for (int i = 0; i < 6000 && atomic_load(&g_sapling_tree_rebuilding); i++)
+        nanosleep(&(struct timespec){ .tv_nsec = 10000000 }, NULL);
+    struct thread_registry_view view[ZCL_THREAD_REGISTRY_CAP];
+    pthread_t keep[ZCL_THREAD_REGISTRY_CAP];
+    int n = thread_registry_snapshot(view, ZCL_THREAD_REGISTRY_CAP);
+    size_t kept = 0;
+    for (int i = 0; i < n; i++)
+        if (strcmp(view[i].name, "zcl_sapling_defer") != 0)
+            keep[kept++] = view[i].tid;
+    return thread_registry_join_all_except(60, keep, kept) == 0;
+}
+
+/* Above height 1,000,000 boot only schedules the rebuild: the background
+ * thread is registered before the call returns, and once joined the tree
+ * equals the tip header root. The reducer frontier makes the replay start
+ * inside the fixture window. */
+static int test_sst_boot_defers_repair_above_one_million(void)
+{
+    struct sst_boot *b = sst_boot_open("deferred", SST_BOOT_DEFERRED_BASE, -1,
+                                       true);
+    bool pass = b && b->ok;
+    if (pass) {
+        int before = thread_registry_unreaped_count();
+        boot_sapling_tree_boot_load(&b->ctx, &b->ms, &b->ndb, b->dir);
+        bool scheduled = thread_registry_unreaped_count() == before + 1;
+        bool joined = sst_join_deferred_rebuild();
+        pass = scheduled && joined &&
+               sst_boot_tree_is_true(&b->ms.sapling_tree, b) &&
+               sst_boot_persisted_is_true(b) &&
+               !atomic_load(&g_sapling_tree_rebuilding) &&
+               !sst_fail_closed_active();
+    }
+    sst_boot_close(b);
+    return sst_boot_report("above height 1000000 the repair is deferred to a "
+                           "background rebuild that reaches the tip root",
+                           pass);
+}
+
+/* A tip header without a Sapling root skips the check entirely: an inflated
+ * tree stays loaded, unrepaired and unreported. */
+static int test_sst_boot_zero_tip_root_skips_check(void)
+{
+    struct sst_boot *b = sst_boot_open("zeroroot", 0, -1, false);
+    bool pass = b && b->ok;
+    if (pass) {
+        memset(b->w->bis[SST_BOOT_WINDOW - 1].hashFinalSaplingRoot.data, 0,
+               32);
+        boot_sapling_tree_boot_load(&b->ctx, &b->ms, &b->ndb, b->dir);
+        pass = sst_boot_tree_is_inflated(b) && !sst_fail_closed_active();
+    }
+    sst_boot_close(b);
+    return sst_boot_report("a zero tip root skips the boot check and leaves "
+                           "the loaded tree as it was", pass);
+}
+
+static int test_sst_boot_sapling_tree_repair(void)
+{
+    return test_sst_boot_repairs_inflated_tree() +
+           test_sst_boot_repair_failure_names_blocker() +
+           test_sst_boot_defers_repair_above_one_million() +
+           test_sst_boot_zero_tip_root_skips_check();
+}
+
 int test_shielded_sync_strength(void)
 {
     int failures = 0;
@@ -1163,6 +1411,7 @@ int test_shielded_sync_strength(void)
     failures += test_sst_root_mismatch_classification();
     failures += test_sst_preflight_refuses_impossible_replay();
     failures += test_sst_merkle_tree_math_golden_root_unchanged();
+    failures += test_sst_boot_sapling_tree_repair();
 
     return failures;
 }
