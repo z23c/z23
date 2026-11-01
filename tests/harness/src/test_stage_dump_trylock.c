@@ -46,6 +46,7 @@
 
 #include "test/test_core.h"
 
+#include "controllers/diagnostics_internal.h"
 #include "controllers/sovereignty_controller.h"
 #include "jobs/proof_validate_stage.h"
 #include "jobs/refold_progress.h"
@@ -471,6 +472,56 @@ static int case_sovereignty_dump_busy_path(void)
     return failures;
 }
 
+/* Chain-evidence dumper: while the reducer owns progress_store_tx_lock for
+ * an ingest, the dumper answers the typed busy marker instead of queueing
+ * behind it (a blocking dumper deadlocks here: the holder releases only on
+ * our signal), and answers normally once the lock is free. */
+static int case_chain_evidence_busy_ingest(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "stage_dump_trylock", "cev");
+    progress_store_close();
+    bool opened = progress_store_open(dir);
+    SD_CHECK("cev: progress_store opens", opened);
+    if (!opened) {
+        test_cleanup_tmpdir(dir);
+        return failures;
+    }
+    struct locker lk = { 0, 0 };
+    pthread_t th;
+    int rc = pthread_create(&th, NULL, locker_thread, &lk);
+    SD_CHECK("cev: locker thread starts", rc == 0);
+    if (rc == 0) {
+        for (int i = 0; i < 500000 && !atomic_load(&lk.locked); i++) {
+            struct timespec ts = { 0, 200000 };
+            nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
+        }
+        SD_CHECK("cev: locker holds the progress lock",
+                 atomic_load(&lk.locked));
+        struct json_value out;
+        json_init(&out);
+        bool d = diag_chain_evidence_dump_state_json(&out, NULL);
+        SD_CHECK("cev busy: dump returns true", d);
+        SD_CHECK("cev busy: progress_store_busy marker", is_busy_marker(&out));
+        SD_CHECK("cev busy: coins_frontier busy_ingest",
+                 json_status_is(&out, "coins_frontier", "busy_ingest"));
+        json_init(&out);
+        d = diag_chain_evidence_dump_state_json(&out, "health_reason");
+        SD_CHECK("cev busy: health_reason key also busy-marked",
+                 d && is_busy_marker(&out));
+        atomic_store(&lk.release, 1);
+        pthread_join(th, NULL);
+        json_init(&out);
+        d = diag_chain_evidence_dump_state_json(&out, NULL);
+        SD_CHECK("cev free: dump returns true and is not busy",
+                 d && !is_busy_marker(&out));
+    }
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_stage_dump_trylock(void)
 {
     int failures = 0;
@@ -479,6 +530,7 @@ int test_stage_dump_trylock(void)
     failures += case_diag_dumps_busy_path();
     failures += case_validate_headers_ok0_index_used();
     failures += case_sovereignty_dump_busy_path();
+    failures += case_chain_evidence_busy_ingest();
     if (failures == 0)
         printf("test_stage_dump_trylock: ALL PASSED\n");
     else

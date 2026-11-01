@@ -10,6 +10,7 @@
 #include "json/json.h"
 #include "services/chain_evidence_authority_service.h"
 #include "services/chain_state_service.h"
+#include "storage/progress_store.h"
 #include "validation/contextual_check_tx.h"
 
 #include <stdint.h>
@@ -56,6 +57,20 @@ static void push_hash_json(struct json_value *out, const char *key,
     json_push_kv_str(out, key, present ? hex : "");
 }
 
+/* The reducer owns progress_store_tx_lock for a whole ingest, and both the
+ * pending-tip drain (clamp -> reducer_frontier_derive_coins_best_now) and
+ * csr_snapshot (active_chain_height -> tip_finalize_log) take it BLOCKING.
+ * A dumper runs on an RPC worker, so it try-locks once up front, holds the
+ * recursive lock across the observation, and answers a typed busy marker
+ * when the reducer owns it instead of queueing behind the ingest. */
+static void push_busy_ingest_json(struct json_value *out)
+{
+    json_push_kv_str(out, "snapshot_status", "progress_store_busy");
+    json_push_kv_bool(out, "retryable", true);
+    json_push_kv_str(out, "sync_state", "busy_ingest");
+    json_push_kv_str(out, "coins_frontier", "busy_ingest");
+}
+
 bool diag_chain_evidence_dump_state_json(struct json_value *out,
                                          const char *key)
 {
@@ -65,10 +80,15 @@ bool diag_chain_evidence_dump_state_json(struct json_value *out,
     struct chain_evidence_controller_view view;
 
     json_set_object(out);
+    if (!progress_store_tx_trylock()) {
+        push_busy_ingest_json(out);
+        return true;
+    }
     chain_evidence_controller_init(&authority, app_runtime_node_db(),
                                    csr_instance());
     (void)chain_evidence_drain_pending_tip(&authority);
     chain_evidence_controller_snapshot(&authority, &view);
+    progress_store_tx_unlock();
 
     /* Same evidence authority as the full report; only unrelated projection
      * serialization and the explorer-history scan are omitted. */
