@@ -114,20 +114,25 @@ static void tmpfs_cleanup(void)
     if (test_rm_rf_recursive(g_tmpfs_root) != 0)
         fprintf(stderr, "test_parallel: tmpfs cleanup failed: %s\n", strerror(errno));
 }
+/* The parent directory is named "z23-scratch" on purpose: leaves such as
+ * zcode.workspace.source.bundle.fetch accept an output path only when a
+ * segment of it (and of its canonical form) is "tmp", "test-tmp" or contains
+ * "scratch" (zcl_native_zcode_workspace_is_explicit_scratch). A bare "z23t"
+ * made every fixture under the tmpfs root fail that check. */
 static bool tmpfs_create_root(void)
 {
     struct statfs fs;
     if (statfs("/dev/shm", &fs) != 0 ||
         (unsigned long)fs.f_type != (unsigned long)TMPFS_MAGIC) return false;
-    if (mkdir("/dev/shm/z23t", 0700) != 0 && errno != EEXIST) return false;
-    if (!test_tmpfs_parent_safe("/dev/shm/z23t")) return false;
+    if (mkdir("/dev/shm/z23-scratch", 0700) != 0 && errno != EEXIST) return false;
+    if (!test_tmpfs_parent_safe("/dev/shm/z23-scratch")) return false;
     char cwd[PATH_MAX];
     if (!getcwd(cwd, sizeof(cwd))) return false;
     uint32_t hash = 2166136261u;
     for (const unsigned char *p = (const unsigned char *)cwd; *p; ++p)
         hash = (hash ^ *p) * 16777619u;
     int n = snprintf(g_tmpfs_root, sizeof(g_tmpfs_root),
-                     "/dev/shm/z23t/%08x.XXXXXX", hash);
+                     "/dev/shm/z23-scratch/%08x.XXXXXX", hash);
     if (n < 0 || (size_t)n >= sizeof(g_tmpfs_root) || !mkdtemp(g_tmpfs_root)) {
         g_tmpfs_root[0] = '\0';
         return false;

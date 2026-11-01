@@ -3156,7 +3156,7 @@ static int tgs_tmpfs_launch(const char *root, const char *exe, const char *mode,
     return timed_out ? -1 : rc;
 }
 
-/* Entries under /dev/shm/z23t named for the runner's cwd hash (the same
+/* Entries under /dev/shm/z23-scratch named for the runner's cwd hash (the same
  * FNV-1a the runner uses), or -1 when the parent cannot be read. */
 static int tgs_tmpfs_roots_for(const char *cwd)
 {
@@ -3165,7 +3165,7 @@ static int tgs_tmpfs_roots_for(const char *cwd)
         hash = (hash ^ *p) * 16777619u;
     char prefix[16];
     snprintf(prefix, sizeof(prefix), "%08x.", hash);
-    DIR *d = opendir("/dev/shm/z23t");
+    DIR *d = opendir("/dev/shm/z23-scratch");
     if (!d) return errno == ENOENT ? 0 : -1;
     int n = 0;
     for (struct dirent *e; (e = readdir(d)) != NULL; )
@@ -3317,7 +3317,7 @@ static int test_tmpfs_fallback(void)
         ASSERT(strstr(out, "/test-tmp/runner-state-") != NULL);
         ASSERT(tgs_tmpfs_launch(root, exe, "ZCL_TEST_TMPFS=1", "ZCL_TEST_TMPFS_MAX_MB=2048", false, out, sizeof(out)) == 0);
         if (!strstr(out, "tmpfs unavailable or disabled")) {
-            const char *start = strstr(out, "/dev/shm/z23t/");
+            const char *start = strstr(out, "/dev/shm/z23-scratch/");
             ASSERT(start != NULL);
             const char *end = strstr(start, "/runner-state-");
             ASSERT(end != NULL && (size_t)(end - start) < PATH_MAX);
