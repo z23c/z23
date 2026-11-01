@@ -830,7 +830,8 @@ static bool wpr_tick_settled(struct wpr *r, const struct wpr_entry *snap,
          * until the wallet shows it mined. A send that is dropped and then
          * passes its expiry is not settled: it falls through to the expiry
          * check so its coins are released. */
-        if (!wpr_wallet_confirmed(r, &snap->txid))
+        bool confirmed = wpr_wallet_confirmed(r, &snap->txid);
+        if (!confirmed)
             return false;
         zcl_mutex_lock(&r->lock);
         struct wpr_entry *e = wpr_find_locked(r, &snap->txid);
