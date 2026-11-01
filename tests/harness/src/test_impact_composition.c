@@ -7028,6 +7028,36 @@ static bool ic_fresh_edit_array(void)
                         "int fresh_probe_run(int x)\n{\n    return x + 41;\n}\n");
 }
 
+/* A public function no other changed row calls can interpose a library or
+ * runtime symbol (memalign, secure_getenv) that nothing in the tree names. */
+static bool ic_fresh_edit_uncalled(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+                        IC_FRESH_BODY("situation")
+                        "\nint fresh_lone_run(void)\n{\n    return 2;\n}\n");
+}
+
+/* A static helper nobody else names stays private: the file is still fresh. */
+static bool ic_fresh_edit_static(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+                        "/* situation - a private helper */\n#include \"a.h\"\n\n"
+                        "static int fresh_lone_help(int x)\n{\n"
+                        "    return x + 40;\n}\n\n"
+                        "int fresh_probe_run(int x)\n{\n"
+                        "    return fresh_lone_help(x) + 1;\n}\n");
+}
+
+/* A macro-typed object reads like a prototype: `unsigned T_(1) x;`. */
+static bool ic_fresh_edit_macro_object(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+                        "/* situation - a macro-typed object */\n"
+                        "#include \"a.h\"\n\n"
+                        "unsigned T_(1) fresh_lone_obj;\n\n"
+                        "int fresh_probe_run(int x)\n{\n    return x + 41;\n}\n");
+}
+
 /* A row after a comment on the same line is live, not a comment. */
 static bool ic_fresh_edit_sidecar_comment(void)
 {
@@ -7094,6 +7124,9 @@ static bool ic_fresh_fixture_build(void)
         {"freshsidecarcomment", ic_fresh_edit_sidecar_comment},
         {"freshreserved", ic_fresh_edit_reserved},
         {"fresharray", ic_fresh_edit_array},
+        {"freshuncalled", ic_fresh_edit_uncalled},
+        {"freshstatic", ic_fresh_edit_static},
+        {"freshmacroobj", ic_fresh_edit_macro_object},
         {"freshobject", ic_fresh_edit_object},
         {"freshheader", ic_fresh_edit_header},
         {"freshdeleted", ic_fresh_edit_deleted},
@@ -7118,6 +7151,7 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"fresh", 0, "devagent_situation", NULL},   /* new impl, its rule's group */
     {"freshtest", 0, "devagent_start", NULL},   /* new test file, its own group */
     {"freshsidecar", 0, "devagent_situation", "package_capability_claim"},
+    {"freshstatic", 0, "devagent_situation", NULL}, /* a private helper */
     {"freshmention", 'A', NULL, NULL},   /* an unchanged file names the stem */
     {"freshbasename", 'A', NULL, NULL},  /* defines a name the base tree holds */
     {"freshhook", 'A', NULL, NULL},      /* a constructor registers it unseen */
@@ -7127,6 +7161,8 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"freshsidecarcomment", 'A', NULL, NULL}, /* a row hidden after a comment */
     {"freshreserved", 'A', NULL, NULL},  /* a reserved (runtime hook) name */
     {"fresharray", 'A', NULL, NULL},     /* char buf[sizeof(long)]; is an object */
+    {"freshuncalled", 'A', NULL, NULL},  /* a public function no change calls */
+    {"freshmacroobj", 'A', NULL, NULL},  /* unsigned T_(1) x; is an object */
     {"freshobject", 'A', NULL, NULL},    /* a public file-scope object */
     {"freshheader", 'A', NULL, NULL},    /* an added header beside it */
     {"freshdeleted", 'D', NULL, NULL},   /* a deletion beside it */
