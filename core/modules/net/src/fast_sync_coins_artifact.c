@@ -239,6 +239,87 @@ static enum fast_sync_coins_artifact_status artifact_publish(
     return FAST_SYNC_COINS_ARTIFACT_OK;
 }
 
+/* Allocate the reusable chunk scratch buffers; returns ALLOCATION_FAILED if
+ * either allocation did not succeed. */
+static enum fast_sync_coins_artifact_status artifact_alloc_workbuffers(
+    struct utxo_chunk **chunk, uint8_t **buffer)
+{
+    *chunk = NULL;
+    *buffer = NULL;
+    *chunk = zcl_calloc(1, sizeof(**chunk), "fast_sync_artifact_chunk");
+    *buffer = zcl_malloc(ARTIFACT_CHUNK_BYTES, "fast_sync_artifact_buffer");
+    if (!*chunk || !*buffer)
+        return FAST_SYNC_COINS_ARTIFACT_ALLOCATION_FAILED;
+    return FAST_SYNC_COINS_ARTIFACT_OK;
+}
+
+/* Stream every exported chunk into the staged artifact, preserving the
+ * caller's incoming status; fails with EXPORT_FAILED if the export ends in
+ * any step other than DONE. */
+static enum fast_sync_coins_artifact_status artifact_export_all_chunks(
+    struct artifact_writer *writer, struct fast_sync_coins_export *exporter,
+    struct utxo_chunk *chunk, uint8_t *buffer,
+    enum fast_sync_coins_artifact_status status)
+{
+    enum fast_sync_coins_export_step step = FAST_SYNC_COINS_EXPORT_ERROR;
+    uint8_t hash[32];
+    while (status == FAST_SYNC_COINS_ARTIFACT_OK &&
+           (step = fast_sync_coins_export_next_chunk(exporter, chunk, hash)) ==
+                    FAST_SYNC_COINS_EXPORT_CHUNK) {
+        status = artifact_append_chunk(writer, chunk, hash, buffer);
+    }
+    if (status == FAST_SYNC_COINS_ARTIFACT_OK &&
+        step != FAST_SYNC_COINS_EXPORT_DONE)
+        status = FAST_SYNC_COINS_ARTIFACT_EXPORT_FAILED;
+    return status;
+}
+
+/* Finish the export and validate the final facts against what was written;
+ * returns EXPORT_FAILED if the finish call fails or the counts disagree. */
+static enum fast_sync_coins_artifact_status artifact_collect_final_facts(
+    struct fast_sync_coins_export *exporter, uint8_t root[32],
+    uint64_t *count, const struct artifact_writer *writer)
+{
+    *count = 0;
+    bool finished = fast_sync_coins_export_finish(exporter, root, count);
+    if (!finished || *count == 0 || *count != writer->entries ||
+        writer->chunks == 0 ||
+        writer->chunks != (*count + SYNC_CHUNK_SIZE - 1u) / SYNC_CHUNK_SIZE)
+        return FAST_SYNC_COINS_ARTIFACT_EXPORT_FAILED;
+    return FAST_SYNC_COINS_ARTIFACT_OK;
+}
+
+/* Copy the successfully built artifact's facts and hashes into the output
+ * and transfer ownership of the hash array away from the writer. */
+static void artifact_fill_success_output(
+    struct fast_sync_coins_artifact *out, struct artifact_writer *writer,
+    const struct fast_sync_coins_export_info *info, uint64_t count,
+    const uint8_t root[32], const uint8_t merkle_root[32])
+{
+    out->applied_height = info->applied_height;
+    out->authority_generation = info->authority_generation;
+    out->num_utxos = count;
+    out->artifact_bytes = writer->bytes;
+    out->num_chunks = writer->chunks;
+    out->chunk_size = SYNC_CHUNK_SIZE;
+    memcpy(out->utxo_root, root, 32);
+    memcpy(out->merkle_root, merkle_root, 32);
+    out->chunk_hashes = writer->hashes;
+    writer->hashes = NULL;
+}
+
+/* Abort a still-open exporter and discard the stage unless the write
+ * succeeded. */
+static void artifact_cleanup_after_write(
+    struct artifact_writer *writer, struct fast_sync_coins_export *exporter,
+    enum fast_sync_coins_artifact_status status)
+{
+    if (exporter)
+        fast_sync_coins_export_abort(exporter);
+    if (status != FAST_SYNC_COINS_ARTIFACT_OK)
+        artifact_discard_stage(writer);
+}
+
 enum fast_sync_coins_artifact_status fast_sync_coins_artifact_write(
     const char *destination_path, struct fast_sync_coins_artifact *out)
 {
@@ -258,37 +339,23 @@ enum fast_sync_coins_artifact_status fast_sync_coins_artifact_write(
         fast_sync_coins_export_abort(exporter);
         return FAST_SYNC_COINS_ARTIFACT_IO_FAILED;
     }
-    struct utxo_chunk *chunk = zcl_calloc(1, sizeof(*chunk),
-                                           "fast_sync_artifact_chunk");
-    uint8_t *buffer = zcl_malloc(ARTIFACT_CHUNK_BYTES,
-                                 "fast_sync_artifact_buffer");
+    struct utxo_chunk *chunk;
+    uint8_t *buffer;
     enum fast_sync_coins_artifact_status status =
-        chunk && buffer ? FAST_SYNC_COINS_ARTIFACT_OK
-                        : FAST_SYNC_COINS_ARTIFACT_ALLOCATION_FAILED;
-    enum fast_sync_coins_export_step step = FAST_SYNC_COINS_EXPORT_ERROR;
-    uint8_t hash[32];
-    while (status == FAST_SYNC_COINS_ARTIFACT_OK &&
-           (step = fast_sync_coins_export_next_chunk(exporter, chunk, hash)) ==
-                    FAST_SYNC_COINS_EXPORT_CHUNK) {
-        status = artifact_append_chunk(&writer, chunk, hash, buffer);
-    }
-    if (status == FAST_SYNC_COINS_ARTIFACT_OK &&
-        step != FAST_SYNC_COINS_EXPORT_DONE)
-        status = FAST_SYNC_COINS_ARTIFACT_EXPORT_FAILED;
+        artifact_alloc_workbuffers(&chunk, &buffer);
+    status = artifact_export_all_chunks(&writer, exporter, chunk, buffer,
+                                        status);
 
     uint8_t root[32] = {0};
     uint64_t count = 0;
     if (status == FAST_SYNC_COINS_ARTIFACT_OK) {
-        bool finished = fast_sync_coins_export_finish(exporter, root, &count);
+        status = artifact_collect_final_facts(exporter, root, &count,
+                                              &writer);
         exporter = NULL;
-        if (!finished || count == 0 || count != writer.entries ||
-            writer.chunks == 0 ||
-            writer.chunks != (count + SYNC_CHUNK_SIZE - 1u) /
-                                  SYNC_CHUNK_SIZE) {
+        if (status != FAST_SYNC_COINS_ARTIFACT_OK) {
             LOG_WARN("fast_sync", "artifact: incomplete final facts count=%llu rows=%llu chunks=%u",
                      (unsigned long long)count,
                      (unsigned long long)writer.entries, writer.chunks);
-            status = FAST_SYNC_COINS_ARTIFACT_EXPORT_FAILED;
         }
     }
     uint8_t merkle_root[32] = {0};
@@ -303,22 +370,10 @@ enum fast_sync_coins_artifact_status fast_sync_coins_artifact_write(
     if (status == FAST_SYNC_COINS_ARTIFACT_OK)
         status = artifact_publish(&writer);
 
-    if (exporter)
-        fast_sync_coins_export_abort(exporter);
-    if (status != FAST_SYNC_COINS_ARTIFACT_OK)
-        artifact_discard_stage(&writer);
-    if (status == FAST_SYNC_COINS_ARTIFACT_OK) {
-        out->applied_height = info.applied_height;
-        out->authority_generation = info.authority_generation;
-        out->num_utxos = count;
-        out->artifact_bytes = writer.bytes;
-        out->num_chunks = writer.chunks;
-        out->chunk_size = SYNC_CHUNK_SIZE;
-        memcpy(out->utxo_root, root, 32);
-        memcpy(out->merkle_root, merkle_root, 32);
-        out->chunk_hashes = writer.hashes;
-        writer.hashes = NULL;
-    }
+    artifact_cleanup_after_write(&writer, exporter, status);
+    if (status == FAST_SYNC_COINS_ARTIFACT_OK)
+        artifact_fill_success_output(out, &writer, &info, count, root,
+                                     merkle_root);
     free(writer.hashes);
     free(buffer);
     free(chunk);
