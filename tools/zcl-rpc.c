@@ -50,7 +50,7 @@ static bool write_all(int fd, const char *buf, size_t len)
  * A truncated password is indistinguishable from a bad node to an operator,
  * and accepting an overlong fgets fragment could treat its continuation as a
  * separate directive. Return 1 for a complete pair, 0 when absent, -1 when
- * the file contains an invalid credential value. */
+ * the file cannot be read or contains an invalid credential value. */
 static int load_conf_auth(const char *path, char *cookie, size_t cookie_cap)
 {
     FILE *f = fopen(path, "r");
@@ -59,6 +59,7 @@ static int load_conf_auth(const char *path, char *cookie, size_t cookie_cap)
 
     char user[128] = "", pass[128] = "", line[256];
     bool invalid = false;
+    errno = 0;
     while (fgets(line, sizeof(line), f)) {
         const char *value = NULL;
         char *dst = NULL;
@@ -83,8 +84,14 @@ static int load_conf_auth(const char *path, char *cookie, size_t cookie_cap)
         memcpy(dst, value, len);
         dst[len] = '\0';
     }
+    int read_err = ferror(f) ? (errno ? errno : EIO) : 0;
     fclose(f);
 
+    if (read_err) {
+        fprintf(stderr, "zcl-rpc: reading %s failed: %s\n", path,
+                strerror(read_err));
+        return -1;
+    }
     if (invalid) {
         fprintf(stderr,
                 "zcl-rpc: invalid or overlong RPC credential in %s\n", path);
@@ -98,6 +105,69 @@ static int load_conf_auth(const char *path, char *cookie, size_t cookie_cap)
         return -1;
     }
     return 1;
+}
+
+/* Space, tab, CR and LF: the bytes skipped around a JSON value here. */
+static bool json_space(char c)
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+/* zcl-rpc links no JSON parser, so a body counts as JSON-shaped when, after
+ * leading and trailing space, tab, CR and LF are skipped, it begins with '{'
+ * and ends with '}', or begins with '[' and ends with ']'. Nothing else is
+ * checked: nested syntax, strings and numbers are not validated, so a complete
+ * but malformed object passes and a truncated one does not. An empty body is
+ * not JSON. */
+static bool body_is_json(const char *s, size_t len)
+{
+    size_t first = 0;
+    while (first < len && json_space(s[first]))
+        first++;
+    size_t last = len;
+    while (last > first && json_space(s[last - 1]))
+        last--;
+    if (first == last)
+        return false;
+    char open = s[first];
+    char close = s[last - 1];
+    return (open == '{' && close == '}') || (open == '[' && close == ']');
+}
+
+/* Decide whether one complete reply may be printed as the node's answer.
+ * status is the HTTP status, or -1 when none was seen; body is len bytes.
+ * Only a 200 with a JSON-shaped, non-empty body passes. Every other case
+ * writes its reason to why and returns false: a missing status, a non-200
+ * (named by whether its body is JSON), an empty body, or a 200 body that is
+ * truncated or not JSON. The caller still returns the length, so the
+ * Unauthorized retry can run; why decides the exit status. */
+static bool reply_is_usable(long status, const char *body, size_t len,
+                            char *why, size_t cap)
+{
+    if (status < 0) {
+        snprintf(why, cap, "node reply carried no HTTP status");
+        return false;
+    }
+    bool json = body_is_json(body, len);
+    if (status != 200) {
+        if (json)
+            snprintf(why, cap, "node replied HTTP %ld with a JSON error body",
+                     status);
+        else
+            snprintf(why, cap, "node replied HTTP %ld without a JSON body",
+                     status);
+        return false;
+    }
+    if (len == 0) {
+        snprintf(why, cap, "node replied with an empty body");
+        return false;
+    }
+    if (!json) {
+        snprintf(why, cap,
+                 "node replied HTTP 200 with a truncated or non-JSON body");
+        return false;
+    }
+    return true;
 }
 
 #if defined(_WIN32)
@@ -133,12 +203,6 @@ static bool send_all(SOCKET sock, const char *buf, size_t len)
     }
     return true;
 }
-
-static const char *http_body(const char *response)
-{
-    const char *body = strstr(response, "\r\n\r\n");
-    return body ? body + 4 : response;
-}
 #endif
 
 #if !defined(_WIN32)
@@ -173,19 +237,113 @@ static bool shell_quote(const char *in, char *out, size_t cap)
 #endif
 
 #if defined(_WIN32)
-static int rpc_call_windows(const char *host, int port, const char *cookie,
-                            const char *body, int body_n, char *out,
-                            size_t out_len)
+/* Name a Winsock failure with the POSIX words for the same case: a timeout and
+ * a reset get their own reason, anything else gets the caller's fallback. */
+static void name_winsock_failure(int err, const char *fallback, char *why,
+                                 size_t cap)
 {
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        fprintf(stderr, "zcl-rpc: WSAStartup failed\n");
+    if (err == WSAETIMEDOUT)
+        snprintf(why, cap,
+                 "timed out waiting for the node's reply after 30 s");
+    else if (err == WSAECONNRESET)
+        snprintf(why, cap, "node closed or reset the connection mid-reply");
+    else
+        snprintf(why, cap, "%s", fallback);
+}
+
+/* One recv that retries WSAEINTR. Returns the byte count, 0 at a clean close,
+ * or -1 with *err set to the Winsock error. */
+static int recv_once(SOCKET sock, char *buf, size_t cap, int *err)
+{
+    for (;;) {
+        int n = recv(sock, buf, (int)cap, 0);
+        if (n >= 0)
+            return n;
+        int e = WSAGetLastError();
+        if (e != WSAEINTR) {
+            *err = e;
+            return -1;
+        }
+    }
+}
+
+/* Read the reply into out until the peer closes or cap bytes are in. Returns
+ * the byte count and leaves out NUL-terminated; *err is set on a recv error. */
+static size_t windows_read_reply(SOCKET sock, char *out, size_t cap, int *err)
+{
+    size_t total = 0;
+    while (total < cap) {
+        int n = recv_once(sock, out + total, cap - total, err);
+        if (n <= 0)
+            break;
+        total += (size_t)n;
+    }
+    out[total] = '\0';
+    return total;
+}
+
+/* A full buffer is an oversize reply only when one more byte arrives. */
+static bool windows_has_more(SOCKET sock, int *err)
+{
+    char probe;
+    return recv_once(sock, &probe, 1, err) > 0;
+}
+
+/* Turn the raw HTTP reply in out into the body, in place, and classify it
+ * with the same rules as the POSIX path. Returns the body length; why names
+ * any failure. A reply with no header block is refused with -1. */
+static long finish_windows_reply(char *out, char *why, size_t cap)
+{
+    const char *sep = strstr(out, "\r\n\r\n");
+    if (!sep) {
+        snprintf(why, cap, "node reply has no HTTP header block");
         return -1;
     }
+    long status = -1;
+    if (sscanf(out, "HTTP/%*d.%*d %ld", &status) != 1)
+        status = -1;
+    const char *payload = sep + 4;
+    size_t len = strlen(payload);
+    memmove(out, payload, len + 1);
+    (void)reply_is_usable(status, out, len, why, cap);
+    return (long)len;
+}
+
+/* Read and classify the reply on an open socket. Returns the body length, or
+ * -1 with why set for a recv error, an oversize reply or an empty reply. */
+static int windows_read_and_finish(SOCKET sock, char *out, size_t out_len,
+                                   char *why, size_t why_cap)
+{
+    int err = 0;
+    size_t total = windows_read_reply(sock, out, out_len - 1, &err);
+    bool overflow = err == 0 && total == out_len - 1 &&
+                    windows_has_more(sock, &err);
+    if (err != 0) {
+        name_winsock_failure(err, "node closed the connection before replying",
+                             why, why_cap);
+        return -1;
+    }
+    if (overflow) {
+        snprintf(why, why_cap, "node reply exceeds the %zu-byte reply buffer",
+                 out_len);
+        return -1;
+    }
+    if (total == 0) {
+        snprintf(why, why_cap, "node closed the connection before replying");
+        return -1;
+    }
+    return (int)finish_windows_reply(out, why, why_cap);
+}
+
+/* Open a connected socket to host:port with the 30 s budget. On failure why
+ * names the case and INVALID_SOCKET is returned. */
+static SOCKET windows_connect(const char *host, int port, char *why,
+                              size_t why_cap)
+{
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) {
-        WSACleanup();
-        return -1;
+        snprintf(why, why_cap, "could not create a socket for the node");
+        return INVALID_SOCKET;
     }
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -193,8 +351,8 @@ static int rpc_call_windows(const char *host, int port, const char *cookie,
     addr.sin_port = htons((u_short)port);
     if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
         closesocket(sock);
-        WSACleanup();
-        return -1;
+        snprintf(why, why_cap, "could not connect to the node");
+        return INVALID_SOCKET;
     }
     DWORD timeout_ms = 30000;
     (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout_ms,
@@ -202,15 +360,25 @@ static int rpc_call_windows(const char *host, int port, const char *cookie,
     (void)setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout_ms,
                      sizeof(timeout_ms));
     if (connect(sock, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        int err = WSAGetLastError();
         closesocket(sock);
-        WSACleanup();
-        return -1;
+        name_winsock_failure(err, "could not connect to the node", why,
+                             why_cap);
+        return INVALID_SOCKET;
     }
+    return sock;
+}
+
+/* Send the POST for body on sock. Returns false with why set when the
+ * credential cannot be encoded, the request is too long, or the send fails. */
+static bool windows_send_request(SOCKET sock, const char *host, int port,
+                                 const char *cookie, const char *body,
+                                 int body_n, char *why, size_t why_cap)
+{
     char auth_b64[512];
     if (!b64_encode(cookie, strlen(cookie), auth_b64, sizeof(auth_b64))) {
-        closesocket(sock);
-        WSACleanup();
-        return -1;
+        snprintf(why, why_cap, "RPC credential is too long to encode");
+        return false;
     }
     char req[16384];
     int rlen = snprintf(req, sizeof(req),
@@ -219,28 +387,38 @@ static int rpc_call_windows(const char *host, int port, const char *cookie,
         "Content-Type: text/plain\r\n"
         "Content-Length: %d\r\nConnection: close\r\n\r\n%s",
         host, port, auth_b64, body_n, body);
-    if (rlen <= 0 || (size_t)rlen >= sizeof(req) ||
-        !send_all(sock, req, (size_t)rlen)) {
-        closesocket(sock);
-        WSACleanup();
+    if (rlen <= 0 || (size_t)rlen >= sizeof(req)) {
+        snprintf(why, why_cap, "request body is too long");
+        return false;
+    }
+    if (!send_all(sock, req, (size_t)rlen)) {
+        name_winsock_failure(WSAGetLastError(),
+                             "could not send the request to the node", why,
+                             why_cap);
+        return false;
+    }
+    return true;
+}
+
+static int rpc_call_windows(const char *host, int port, const char *cookie,
+                            const char *body, int body_n, char *out,
+                            size_t out_len, char *why, size_t why_cap)
+{
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        snprintf(why, why_cap, "could not start Winsock");
         return -1;
     }
-    size_t total = 0;
-    while (total + 1 < out_len) {
-        int n = recv(sock, out + total, (int)(out_len - 1 - total), 0);
-        if (n <= 0) break;
-        total += (size_t)n;
+    int n = -1;
+    SOCKET sock = windows_connect(host, port, why, why_cap);
+    if (sock != INVALID_SOCKET) {
+        if (windows_send_request(sock, host, port, cookie, body, body_n, why,
+                                 why_cap))
+            n = windows_read_and_finish(sock, out, out_len, why, why_cap);
+        closesocket(sock);
     }
-    out[total] = '\0';
-    closesocket(sock);
     WSACleanup();
-    const char *payload = http_body(out);
-    if (payload != out) {
-        size_t payload_len = strlen(payload);
-        memmove(out, payload, payload_len + 1);
-        total = payload_len;
-    }
-    return total > 0 ? (int)total : -1;
+    return n;
 }
 #else
 /* Bound curl's own budget for the single RPC call below. Defaults to 30s;
@@ -299,21 +477,69 @@ static void describe_curl_failure(int code, int max_secs, char *why,
     }
 }
 
-/* Read at most out_len-1 reply bytes. A longer reply sets *truncated and is
- * drained so curl can finish. Returns the byte count, or -1 on a read error. */
-static long read_curl_reply(FILE *p, char *out, size_t out_len,
-                            bool *truncated)
+/* A failed read of the curl pipe is its own reason, never the end of data. */
+static long read_failed(int err, char *why, size_t cap)
 {
-    size_t total = fread(out, 1, out_len - 1, p);
-    bool read_ok = !ferror(p);
-    out[total] = '\0';
-    if (read_ok && total == out_len - 1 && fgetc(p) != EOF) {
-        char scratch[4096];
-        *truncated = true;
-        while (fread(scratch, 1, sizeof(scratch), p) > 0)
-            ;
+    snprintf(why, cap, "read failed: %s", strerror(err ? err : EIO));
+    return -1;
+}
+
+/* Read up to cap bytes from the curl pipe into buf, stopping early at end of
+ * file. EINTR is retried after clearing the stream error; any other read
+ * error returns its errno value. */
+static int read_pipe_upto(FILE *p, char *buf, size_t cap, size_t *got)
+{
+    *got = 0;
+    while (*got < cap) {
+        errno = 0;
+        *got += fread(buf + *got, 1, cap - *got, p);
+        if (!ferror(p))
+            break;
+        int err = errno ? errno : EIO;
+        clearerr(p);
+        if (err != EINTR)
+            return err;
     }
-    return read_ok ? (long)total : -1;
+    return 0;
+}
+
+/* Discard the rest of the curl pipe so curl can finish. Returns total, or -1
+ * with why set when a read fails. */
+static long drain_curl_reply(FILE *p, long total, char *why, size_t why_cap)
+{
+    char scratch[4096];
+    for (;;) {
+        size_t got = 0;
+        int err = read_pipe_upto(p, scratch, sizeof(scratch), &got);
+        if (err)
+            return read_failed(err, why, why_cap);
+        if (got == 0)
+            return total;
+    }
+}
+
+/* Read at most out_len-1 reply bytes. A longer reply sets *truncated and is
+ * drained so curl can finish. Returns the byte count, or -1 with why set to
+ * "read failed: ..." when the pipe reports an error. */
+static long read_curl_reply(FILE *p, char *out, size_t out_len,
+                            bool *truncated, char *why, size_t why_cap)
+{
+    size_t total = 0;
+    int err = read_pipe_upto(p, out, out_len - 1, &total);
+    out[total] = '\0';
+    if (err)
+        return read_failed(err, why, why_cap);
+    if (total < out_len - 1)
+        return (long)total;
+    char probe;
+    size_t extra = 0;
+    err = read_pipe_upto(p, &probe, 1, &extra);
+    if (err)
+        return read_failed(err, why, why_cap);
+    if (extra == 0)
+        return (long)total;
+    *truncated = true;
+    return drain_curl_reply(p, (long)total, why, why_cap);
 }
 
 /* Remove the trailing status marker and return the HTTP status it carries,
@@ -333,26 +559,20 @@ static long split_http_status(char *out, size_t *total)
     return status;
 }
 
-static bool body_is_json(const char *s)
-{
-    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
-    return *s == '{' || *s == '[';
-}
-
 /* Decide the outcome of one curl run. A transport failure returns -1 with
- * why set. A reply that is not JSON from a non-200 status, or an empty
- * reply, returns its length with why set, so the caller can still run its
- * Unauthorized retry and reports the reason only if nothing better arrives. */
+ * why set. Any reply that reply_is_usable refuses returns its length with
+ * why set, so the caller can still run its Unauthorized retry and reports the
+ * reason only if nothing better arrives. */
 static long finish_curl_reply(int code, char *out, long total, bool truncated,
                               size_t out_len, int max_secs, char *why,
                               size_t cap)
 {
+    /* A read error is ours and is named first; curl's exit code after we
+     * stopped reading is only a consequence of it. */
+    if (total < 0)
+        return -1;
     if (code != 0) {
         describe_curl_failure(code, max_secs, why, cap);
-        return -1;
-    }
-    if (total < 0) {
-        snprintf(why, cap, "reading the node's reply failed");
         return -1;
     }
     if (truncated) {
@@ -362,10 +582,7 @@ static long finish_curl_reply(int code, char *out, long total, bool truncated,
     }
     size_t len = (size_t)total;
     long status = split_http_status(out, &len);
-    if (status > 0 && status != 200 && !body_is_json(out))
-        snprintf(why, cap, "node replied HTTP %ld without a JSON body", status);
-    else if (len == 0)
-        snprintf(why, cap, "node replied with an empty body");
+    (void)reply_is_usable(status, out, len, why, cap);
     return (long)len;
 }
 
@@ -433,7 +650,7 @@ static int rpc_call_posix(const char *host, int port, const char *cookie,
     }
 
     bool truncated = false;
-    long total = read_curl_reply(p, out, out_len, &truncated);
+    long total = read_curl_reply(p, out, out_len, &truncated, why, why_cap);
     int status = pclose(p);
     unlink(tmpf);
     int code = (status >= 0 && WIFEXITED(status)) ? WEXITSTATUS(status) : -1;
@@ -456,7 +673,8 @@ static int rpc_call(const char *host, int port, const char *cookie,
         return -1;
     }
 #if defined(_WIN32)
-    int n = rpc_call_windows(host, port, cookie, body, body_n, out, out_len);
+    int n = rpc_call_windows(host, port, cookie, body, body_n, out, out_len,
+                             why, why_cap);
     if (n < 0 && why[0] == '\0')
         snprintf(why, why_cap, "could not reach the node");
     return n;
@@ -492,30 +710,40 @@ static bool compose_path(char *out, size_t cap, const char *datadir,
 }
 
 /* Read the node cookie from path into cookie, stripping one trailing
- * newline. A missing or unreadable file leaves cookie untouched so the
- * caller can fall back to conf credentials. */
-static void read_cookie_file(const char *path, char *cookie, size_t cap)
+ * newline. A missing file leaves cookie untouched so the caller can fall back
+ * to conf credentials. A file that exists but cannot be read is named and
+ * returns -1. */
+static int read_cookie_file(const char *path, char *cookie, size_t cap)
 {
     FILE *cf = fopen(path, "r");
-    if (cf) {
-        if (fgets(cookie, cap, cf)) {
-            char *nl = strchr(cookie, '\n');
-            if (nl) *nl = '\0';
-        }
-        fclose(cf);
+    if (!cf)
+        return 0;
+    errno = 0;
+    if (fgets(cookie, cap, cf)) {
+        char *nl = strchr(cookie, '\n');
+        if (nl) *nl = '\0';
     }
+    int read_err = ferror(cf) ? (errno ? errno : EIO) : 0;
+    fclose(cf);
+    if (read_err) {
+        fprintf(stderr, "zcl-rpc: reading %s failed: %s\n", path,
+                strerror(read_err));
+        return -1;
+    }
+    return 0;
 }
 
 /* Acquire the RPC credential: the cookie file first, then
  * rpcuser:rpcpassword from the conf. Returns 0 with cookie filled,
- * 1 when no credential exists anywhere (cookie left empty), or -1 when
- * the conf credential is invalid, which load_conf_auth has already
- * reported to stderr. */
+ * 1 when no credential exists anywhere (cookie left empty), or -1 when a
+ * credential file cannot be read or the conf credential is invalid; each
+ * case has already been reported to stderr. */
 static int load_any_auth(const char *cookie_path, const char *conf_path,
                          char *cookie, size_t cookie_cap)
 {
     /* Try cookie auth first (C23 node uses cookies) */
-    read_cookie_file(cookie_path, cookie, cookie_cap);
+    if (read_cookie_file(cookie_path, cookie, cookie_cap) < 0)
+        return -1;
 
     /* Fall back to rpcuser:rpcpassword from conf (zclassicd) */
     if (cookie[0] == '\0') {
@@ -641,8 +869,9 @@ int main(int argc, char *argv[])
 
     char cookie[256] = "";
 
-    /* 0 = credential acquired, 1 = none found (reported below), -1 = the
-     * conf credential was invalid (already reported by load_conf_auth). */
+    /* 0 = credential acquired, 1 = none found (reported below), -1 = a
+     * credential file could not be read or the conf credential was invalid
+     * (already reported). */
     int auth = load_any_auth(cookie_path, conf_path, cookie, sizeof(cookie));
     if (auth != 0) {
         if (auth == 1)
