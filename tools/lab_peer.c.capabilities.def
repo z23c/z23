@@ -1,2 +1,2 @@
 /* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
-ZCL_MODULE_CAPABILITY("tools/lab_peer.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK, "Runs z23 and z23-dev by argv (no shell) to offer, re-verify and count lab commits; reads and writes only its state directory, the lane worktree it is pointed at, and the authors file it is given.")
+ZCL_MODULE_CAPABILITY("tools/lab_peer.c", CAP_FS_READ|CAP_FS_WRITE, "Runs z23 and z23-dev by argv (no shell) to offer, re-verify and count lab commits; reads and writes only its state directory, the lane worktree it is pointed at, and the authors file it is given.")

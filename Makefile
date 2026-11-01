@@ -13511,7 +13511,10 @@ lab-peer: $(LAB_PEER_BIN) $(LAB_PEER_FAKE_BIN)
 # check-capability-closure grades the objects of the dev epoch, and these two
 # standalone programs link into neither z23-dev nor the package verifier:
 # build their objects there so their capability rows are graded, not missing.
-check-capability-closure: $(DEV_OBJ_DIR)/tools/lab_peer.o $(DEV_OBJ_DIR)/tools/lab_peer_fake.o
+CAPABILITY_STANDALONE_OBJS += $(DEV_OBJ_DIR)/tools/lab_peer.o $(DEV_OBJ_DIR)/tools/lab_peer_fake.o
+# Every path that runs the gate (the make target, parallel lint, lint-preflight)
+# builds them first.
+check-capability-closure lint lint-preflight: $(CAPABILITY_STANDALONE_OBJS)
 $(LAB_PEER_FAKE_BIN): tools/lab_peer_fake.c
 	mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
