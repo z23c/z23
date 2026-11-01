@@ -508,6 +508,30 @@ static void blake2s_compression(struct constraint_system *cs,
     }
 }
 
+/* Fill m[0..15] from input bits at block bi, using constant false past n_bits. */
+static void blake2s_load_message_block(struct cu32 m[16],
+                                       const struct cbit *input,
+                                       size_t n_bits, size_t bi)
+{
+    for (size_t w = 0; w < 16; w++) {
+        struct cbit word[32];
+        for (size_t j = 0; j < 32; j++) {
+            const size_t idx = bi * 512u + w * 32u + j;
+            word[j] = (idx < n_bits) ? input[idx] : cbit_constant(false);
+        }
+        m[w] = cu32_from_bits_le(word);
+    }
+}
+
+/* Copy h[0..7].bits into out[0..255] in that order. */
+static void blake2s_write_digest_bits(struct cbit out[256],
+                                      const struct cu32 h[8])
+{
+    for (size_t i = 0; i < 8; i++)
+        for (size_t j = 0; j < 32; j++)
+            out[i * 32u + j] = h[i].bits[j];
+}
+
 bool gadget_blake2s(struct constraint_system *cs,
                     const struct cbit *input, size_t n_bits,
                     const uint8_t personalization[8],
@@ -538,14 +562,7 @@ bool gadget_blake2s(struct constraint_system *cs,
 
     for (size_t bi = 0; bi < n_blocks; bi++) {
         struct cu32 m[16];
-        for (size_t w = 0; w < 16; w++) {
-            struct cbit word[32];
-            for (size_t j = 0; j < 32; j++) {
-                const size_t idx = bi * 512u + w * 32u + j;
-                word[j] = (idx < n_bits) ? input[idx] : cbit_constant(false);
-            }
-            m[w] = cu32_from_bits_le(word);
-        }
+        blake2s_load_message_block(m, input, n_bits, bi);
 
         const bool last = (bi + 1u == n_blocks);
         /* Counter: full blocks so far for a non-final block, total input BYTES
@@ -555,9 +572,7 @@ bool gadget_blake2s(struct constraint_system *cs,
         blake2s_compression(cs, h, m, t, last);
     }
 
-    for (size_t i = 0; i < 8; i++)
-        for (size_t j = 0; j < 32; j++)
-            out[i * 32u + j] = h[i].bits[j];
+    blake2s_write_digest_bits(out, h);
 
     return true;
 }
