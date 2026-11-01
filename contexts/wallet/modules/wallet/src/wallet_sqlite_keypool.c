@@ -1,5 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * Purpose: persist and restore transparent wallet keypool membership. */
+ * Purpose: persist and restore transparent wallet keypool membership, and count
+ * persisted Sapling key rows. */
 
 #include "wallet_sqlite_internal.h"
 #include "util/ar_step_readonly.h"
@@ -78,4 +79,19 @@ bool wallet_sqlite_replace_keypool_locked(struct wallet_sqlite *ws,
     }
     sqlite3_reset(write);
     return true;
+}
+
+int wallet_sqlite_sapling_key_count(struct wallet_sqlite *ws)
+{
+    if (!ws || !ws->open || !ws->db)
+        return -1;
+    sqlite3_stmt *s = NULL;
+    int n = -1;
+    if (sqlite3_prepare_v2(ws->db, "SELECT COUNT(*) FROM wallet_sapling_keys",
+                           -1, &s, NULL) != SQLITE_OK || !s)
+        return -1;
+    if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW)
+        n = sqlite3_column_int(s, 0);
+    sqlite3_finalize(s);
+    return n;
 }

@@ -322,6 +322,9 @@ bool wallet_sqlite_write_sapling_key(struct wallet_sqlite *ws,
                                        const struct sapling_key_entry *entry);
 bool wallet_sqlite_read_sapling_keys(struct wallet_sqlite *ws,
                                        struct wallet *w);
+/* Number of persisted Sapling key rows, loaded or not; -1 when it cannot be
+ * read. Read-only. */
+int wallet_sqlite_sapling_key_count(struct wallet_sqlite *ws);
 
 /* Diversifier indexes at or past this are never issued. */
 #define WALLET_DIVERSIFIER_INDEX_MAX ((uint64_t)1 << 62)

@@ -188,6 +188,17 @@ struct wa_keys {
     bool known; /* the viewing keys are loaded, or none can exist */
 };
 
+/* True when an empty keystore means the wallet has no shielded keys: it is
+ * unlocked and no Sapling key row is persisted. While an unlock is still
+ * reloading keys from disk the keystore is empty although rows exist, and the
+ * count cannot be read when the database is unavailable; both are unknown. */
+static bool wa_no_sapling_keys_certain(const struct wallet_rpc_context *ctx)
+{
+    return wallet_lock_is_unlocked() &&
+           (!ctx->wallet_db ||
+            wallet_sqlite_sapling_key_count(ctx->wallet_db) == 0);
+}
+
 /* Copy the distinct loaded viewing keys. A repeated ivk is kept once. A wallet
  * that is locked and holds none cannot say whether it has shielded keys, so
  * its shielded amounts are unknown, not zero. */
@@ -207,7 +218,7 @@ static bool wa_keys_collect(struct wallet_rpc_context *ctx, struct wa_keys *k)
             memcpy(k->ivk[k->n++], ks->keys[i].ivk, 32);
     }
     zcl_mutex_unlock(&ks->cs);
-    k->known = k->n > 0 || wallet_lock_is_unlocked();
+    k->known = k->n > 0 || wa_no_sapling_keys_certain(ctx);
     return true;
 }
 
@@ -660,9 +671,10 @@ bool rpc_walletlatestaddress(const struct json_value *params, bool help,
         json_push_kv_str(result, "address", addr);
     else
         wa_kv_null(result, "address");
-    /* A locked wallet that holds no key cannot say it has none. */
+    /* A wallet that holds no loaded key cannot say it has none unless it is
+     * unlocked and no key is persisted. */
     json_push_kv_str(result, "state",
-                     have ? "ok" : wallet_lock_is_unlocked()
+                     have ? "ok" : wa_no_sapling_keys_certain(ctx)
                                        ? "none" : "keys_unavailable");
     return true;
 }

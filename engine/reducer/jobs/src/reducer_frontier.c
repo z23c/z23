@@ -144,6 +144,9 @@ bool reducer_frontier_provable_tip_is_published(void)
 
 /* Boottime milliseconds of the last advance of the published tip; 0 = none. */
 static _Atomic int64_t g_provable_tip_advanced_ms;
+/* Highest tip published by this process; a refold or reorg that replays
+ * heights already seen is local work, not network progress. */
+static _Atomic int_least32_t g_provable_tip_high_water = -1;
 static _Atomic int64_t g_age_clock_pin_ms = -1;
 
 static int64_t frontier_age_clock_ms(void)
@@ -167,6 +170,11 @@ void reducer_frontier_test_set_age_clock_ms(int64_t now_ms)
 {
     atomic_store(&g_age_clock_pin_ms, now_ms);
 }
+
+void reducer_frontier_test_reset_high_water(void)
+{
+    atomic_store(&g_provable_tip_high_water, -1);
+}
 #endif
 
 void reducer_frontier_provable_tip_set(int32_t hstar)
@@ -176,8 +184,12 @@ void reducer_frontier_provable_tip_set(int32_t hstar)
      * finality anchor on a normal boot (and legitimately below it only during
      * a from-genesis refold, where reporting the folded prefix is correct).
      * Re-clamping here would mask a refold's true (below-anchor) H*. */
-    int_least32_t prev = atomic_exchange(&g_provable_tip, (int_least32_t)hstar);
-    if (prev >= 0 && hstar > prev)
+    atomic_store(&g_provable_tip, (int_least32_t)hstar);
+    int_least32_t seen = atomic_load(&g_provable_tip_high_water);
+    if (hstar <= seen)
+        return;
+    atomic_store(&g_provable_tip_high_water, (int_least32_t)hstar);
+    if (seen >= 0)
         atomic_store(&g_provable_tip_advanced_ms, frontier_age_clock_ms());
 }
 

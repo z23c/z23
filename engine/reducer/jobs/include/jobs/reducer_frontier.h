@@ -132,14 +132,17 @@ void reducer_frontier_provable_tip_set(int32_t hstar);
 void reducer_frontier_provable_tip_reset(void);
 
 /* Milliseconds, on a clock that counts through device suspend, since the
- * provable tip last advanced past a height this process had already
- * published. -1 when it has not advanced since start (the first publish is
- * only a baseline) or after a reset. Stamped where the tip is published, so
+ * provable tip last rose above the highest height this process has
+ * published, so blocks a refold or reorg replays from local storage do not
+ * count. -1 when it has not risen since start (the first publish is only a
+ * baseline) or after a reset. Stamped where the tip is published, so
  * it is when the node connected the block, not when anyone looked. */
 int64_t reducer_frontier_provable_tip_advance_age_ms(void);
 #ifdef ZCL_TESTING
 /* Pin the age clock to `now_ms`; a negative value restores the real clock. */
 void reducer_frontier_test_set_age_clock_ms(int64_t now_ms);
+/* Forget the highest published tip, so a test can start from a fresh process. */
+void reducer_frontier_test_reset_high_water(void);
 #endif
 
 /* Durable trusted-base declaration (progress_meta, 8-byte LE height blob +

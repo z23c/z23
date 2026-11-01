@@ -224,6 +224,7 @@ static int health_test_chain_progress_age(void)
     {
         struct node_health_snapshot health;
         bool ok = true;
+        reducer_frontier_test_reset_high_water();
         reducer_frontier_provable_tip_reset();
         reducer_frontier_test_set_age_clock_ms(1000);
         node_health_collect(&health, NULL, NULL);
@@ -250,8 +251,20 @@ static int health_test_chain_progress_age(void)
         reducer_frontier_provable_tip_set(99);
         node_health_collect(&health, NULL, NULL);
         ok = ok && health.chain_progress_age_ms == 7200000;
+        /* A refold replays heights this process already published, with no
+         * peer sending anything: no stamp until a height above 101. */
+        reducer_frontier_provable_tip_reset();
+        for (int h = 1; h <= 101; h++)
+            reducer_frontier_provable_tip_set(h);
+        node_health_collect(&health, NULL, NULL);
+        ok = ok && health.chain_progress_age_ms == -1;
+        reducer_frontier_test_set_age_clock_ms(2000 + 7300000);
+        reducer_frontier_provable_tip_set(102);
+        node_health_collect(&health, NULL, NULL);
+        ok = ok && health.chain_progress_age_ms == 0;
         /* The real clock: an advance, 30 ms of waiting, then a read. */
         reducer_frontier_test_set_age_clock_ms(-1);
+        reducer_frontier_test_reset_high_water();
         reducer_frontier_provable_tip_reset();
         reducer_frontier_provable_tip_set(100);
         reducer_frontier_provable_tip_set(101);

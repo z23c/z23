@@ -26,6 +26,7 @@
 #include "test/wallet_summary_fixture.h"
 #include "wallet/wallet.h"
 #include "wallet/wallet_lock.h"
+#include "wallet/wallet_sqlite.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -241,6 +242,73 @@ static int test_locked_boot(struct rig *r)
         json_free(&j);
         wallet_lock_reset_for_test();
         rig_key(r, true);
+    } TEST_END
+    return failures;
+}
+
+/* wallet_lock_unlock marks the wallet unlocked before it reloads the Sapling
+ * keys. In that window the keystore is empty although key rows exist. */
+static int test_unlock_window(void)
+{
+    int failures = 0;
+    TEST_CASE("unlock window: unloaded Sapling keys read as unknown, not zero") {
+        struct rig r;
+        struct wallet_sqlite ws;
+        struct json_value j, p;
+        bool ok;
+        memset(&ws, 0, sizeof(ws));
+        ASSERT(rig_open(&r, true));
+        ASSERT(wallet_sqlite_open_r(&ws, r.ndb.db).ok);
+        wallet_rpc_context_set_base(r.wallet, NULL, r.dir, &ws, NULL, NULL);
+        rig_key(&r, false);
+        json_init(&p);
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        ASSERT_STR_EQ(json_get_str(json_get(&j, "shielded_state")), "ok");
+        ASSERT(!is_null(&j, "spendable_zat"));
+        json_free(&j);
+        json_init(&j);
+        ASSERT(rpc_walletlatestaddress(&p, false, &j));
+        ASSERT_STR_EQ(json_get_str(json_get(&j, "state")), "none");
+        json_free(&j);
+        struct sapling_key_entry e;
+        memset(&e, 0, sizeof(e));
+        memcpy(e.ivk, g_ivk, 32);
+        e.used = true;
+        ASSERT(wallet_sqlite_write_sapling_key(&ws, 0, &e));
+        ASSERT(wallet_sqlite_sapling_key_count(&ws) == 1);
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        ASSERT_STR_EQ(json_get_str(json_get(&j, "shielded_state")),
+                      "keys_unavailable");
+        ASSERT(is_null(&j, "spendable_zat"));
+        ASSERT(is_null(&j, "spendable_total_zat"));
+        ASSERT(!json_get_bool(json_get(&j, "current")));
+        json_free(&j);
+        json_init(&j);
+        ASSERT(rpc_walletlatestaddress(&p, false, &j));
+        ASSERT(is_null(&j, "address"));
+        ASSERT_STR_EQ(json_get_str(json_get(&j, "state")), "keys_unavailable");
+        json_free(&j);
+        rig_key(&r, true);
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        ASSERT_STR_EQ(json_get_str(json_get(&j, "shielded_state")), "ok");
+        json_free(&j);
+        /* A key count that cannot be read is unknown too. */
+        rig_key(&r, false);
+        ws.open = false;
+        ASSERT(wallet_sqlite_sapling_key_count(&ws) < 0);
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        ASSERT_STR_EQ(json_get_str(json_get(&j, "shielded_state")),
+                      "keys_unavailable");
+        json_free(&j);
+        ws.open = true;
+        json_free(&p);
+        wallet_rpc_context_set_base(r.wallet, NULL, r.dir, NULL, NULL, NULL);
+        wallet_sqlite_close(&ws);
+        rig_close(&r);
     } TEST_END
     return failures;
 }
@@ -599,6 +667,25 @@ static int test_send_minconf_param(void)
     return failures;
 }
 
+/* A negative minconf is refused before any note is chosen, even when a ready
+ * note would cover the amount. */
+static int test_send_negative_minconf(void)
+{
+    int failures = 0;
+    TEST_CASE("send: a negative minconf replies Invalid minconf") {
+        struct rig r;
+        struct json_value res;
+        ASSERT(rig_open(&r, true));
+        ASSERT(wsh_put_note(&r.ndb, 0x77, 0, g_ivk, 5 * ZCL1, TIP - 20, NULL));
+        ASSERT(save_witness(&r.ndb, 0x77, TIP));
+        send_try(&r, 0, ZCL1, -1, &res);
+        ASSERT_STR_EQ(json_get_str(&res), "Invalid minconf");
+        json_free(&res);
+        rig_close(&r);
+    } TEST_END
+    return failures;
+}
+
 /* minconf is an extra floor: a ready 21-confirmation note passes minconf 21
  * and fails minconf 22. */
 static int test_send_minconf_floor(void)
@@ -734,11 +821,13 @@ static int run_rig_tests(void)
     failures += test_received_privacy_from_stored_tx(&r);
     rig_close(&r);
     failures += test_unknown_tip();
+    failures += test_unlock_window();
     failures += test_send_skips_unready_note();
     failures += test_send_spends_one_key();
     failures += test_send_waits_for_depth();
     failures += test_send_minconf_param();
     failures += test_send_minconf_floor();
+    failures += test_send_negative_minconf();
     failures += test_send_cap_after_filter();
     failures += test_summary_peer_count();
     return failures;
