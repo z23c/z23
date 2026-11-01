@@ -16,6 +16,7 @@
 #include "util/file_io.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
+#include "sapling_prover_internal.h"
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -817,7 +818,9 @@ bool sapling_install_embedded_vks(void)
  * verifying key, arm the backend and pass the prover self-test, a real
  * Spend + Output + binding bundle accepted by this node's consensus verifier.
  * When the last proving context of the send is freed the proving bytes are
- * released and the backend is disarmed, so the next send repeats the checks.
+ * released and the backend is disarmed, so the next send repeats the pin and
+ * prefix checks. The self-test is skipped when the same files already passed
+ * it in this process; replaced or touched files are tested again.
  * Files copied in after boot are picked up with no restart.
  *
  * Any failure refuses that one send with a short reason code and leaves the

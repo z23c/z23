@@ -1,7 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * The zk-parameter boot gate: decide what a mainnet node can do when
- * ~/.zcash-params is absent.
+ * The zk-parameter boot gate: decide what a node can do when
+ * ~/.zcash-params is absent or incomplete. Mainnet enforces it; other networks
+ * apply it only to use a Sapling pair.
  *
  * A Zcash parameter file is a verifying key followed by a proving key.
  * Consensus validation reads only the verifying-key prefix — 6357 bytes

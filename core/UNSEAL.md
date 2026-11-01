@@ -533,3 +533,7 @@ later lane flips it HARD.
 - 2026-11-01T04:27:19Z — REASON: Sapling pair proving on every network and a per-process self-test verdict for unchanged pinned pair files: params_init.c gains a file-identity-keyed pass cache for the pair self-test and sapling_prover_native.c gains zclassic_sapling_prover_adopt_verified; owner-authorized 2026-10-30 for behaviour-scoped core changes. No verifying key, verification path or consensus predicate is touched.
   old ROOT: 0b74d6fba3ef53dbdaa8fff52aabb6567f0c0b247d0d5593d65407cf56b2c65d
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T08:29:40Z — REASON: Pair review fixes: comments now state the per-process self-test skip, and zclassic_sapling_prover_adopt_verified moves from the public sapling_prover.h to src/sapling_prover_internal.h. No behaviour, verifying key or consensus predicate changes.
+  old ROOT: a92cf67b9f5c7793702a85b04dcfd27a434467cfd2e2fc0e20eecb008e299747
+  by: owner unseal ritual (make core-unseal)

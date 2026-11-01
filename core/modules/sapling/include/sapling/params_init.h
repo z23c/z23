@@ -70,7 +70,8 @@ const char *sapling_proving_status_name(void);
  *
  * The session pair brackets a send. Acquire arms proving if it is not armed:
  * SHA-512 pin of each file, compiled-in verifying-key prefix of each, then the
- * prover self-test. It returns false with sapling_proving_last_refusal() set
+ * prover self-test, which is skipped when the same files (same device, inode,
+ * size and times) already passed it in this process. It returns false with sapling_proving_last_refusal() set
  * to a short reason code when any step fails, leaving the node running.
  * Release frees the proving bytes and disarms a pair-armed backend once the
  * last session ends. A full set loaded by sapling_init_params is unaffected.

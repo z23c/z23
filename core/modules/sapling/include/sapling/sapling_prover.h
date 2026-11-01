@@ -31,10 +31,6 @@ bool zclassic_sapling_prover_is_ready(void);
  * zclassic_init_zksnark_params. Used when an on-demand pair load ends or
  * fails; the full-set path never calls it. */
 void zclassic_sapling_prover_unarm(void);
-/* Mark a freshly initialised backend ready without running the self-test.
- * Only for parameter files whose identical bytes already passed it in this
- * process; false unless the backend is initialised and untested. */
-bool zclassic_sapling_prover_adopt_verified(void);
 const char *zclassic_sapling_prover_status(void);
 const char *zclassic_sapling_prover_backend(void);
 

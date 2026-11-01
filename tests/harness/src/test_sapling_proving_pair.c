@@ -1005,9 +1005,43 @@ static int pair_cache_fail_legs(const char *real)
     return failures;
 }
 
+/* Same inode, new times: the files differ in identity, so the self-test
+ * runs once more. */
+static int pair_cache_touch_legs(const char *real)
+{
+    int failures = 0;
+    char dir[1200], p[1400];
+    pair_reset();
+    PAIR_CHECK("touch fixture", pair_make_dir(dir, sizeof(dir)) &&
+                                pair_copy_exact(real, dir, kSpend) &&
+                                pair_link(real, dir, kOutput));
+    sapling_note_proving_pair_dir(dir);
+    int runs = zclassic_test_prover_self_test_runs();
+    PAIR_CHECK("the private copy is self-tested once",
+               pair_send_once() &&
+               zclassic_test_prover_self_test_runs() == runs + 1);
+    pair_path(p, sizeof(p), dir, kSpend);
+    struct stat before, after;
+    struct timespec ts[2] = {{.tv_sec = 1700000000}, {.tv_sec = 1700000000}};
+    PAIR_CHECK("touching the file in place with utimensat",
+               stat(p, &before) == 0 && utimensat(AT_FDCWD, p, ts, 0) == 0 &&
+               stat(p, &after) == 0 && after.st_ino == before.st_ino &&
+               after.st_dev == before.st_dev);
+    PAIR_CHECK("a touched file (same inode, new times) is tested again",
+               pair_send_once() &&
+               zclassic_test_prover_self_test_runs() == runs + 2);
+    PAIR_CHECK("and is then skipped again",
+               pair_send_once() &&
+               zclassic_test_prover_self_test_runs() == runs + 2);
+    pair_remove_dir(dir);
+    pair_reset();
+    return failures;
+}
+
 static int pair_cache_legs(const char *real)
 {
-    return pair_cache_pass_legs(real) + pair_cache_fail_legs(real);
+    return pair_cache_pass_legs(real) + pair_cache_touch_legs(real) +
+           pair_cache_fail_legs(real);
 }
 
 /* A node with only the Sapling pair, on a network other than mainnet. */
