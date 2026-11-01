@@ -91,8 +91,11 @@ static void sst_init_index(struct block_index *bi, int height, uint8_t tag)
  * in *pos. The commitment written is `cm` — deliberately a caller-chosen
  * parameter so a "corrupted body" scenario can write a DIFFERENT value than
  * what was folded into the header-side expectation tree. */
-static bool sst_write_output_block(const char *dir, const struct uint256 *cm,
-                                   struct disk_block_pos *pos_out)
+static bool sst_write_output_block_rooted(const char *dir,
+                                          const struct uint256 *cm,
+                                          const struct uint256 *sapling_root,
+                                          struct disk_block_pos *pos_out,
+                                          struct uint256 *hash_out)
 {
     struct block blk;
     block_init(&blk);
@@ -119,12 +122,23 @@ static bool sst_write_output_block(const char *dir, const struct uint256 *cm,
     blk.header.nVersion = 4;
     blk.header.nTime = 1700000000u;
     blk.header.nBits = 0x2000ffffu;
+    if (sapling_root)
+        blk.header.hashFinalSaplingRoot = *sapling_root;
     struct uint256 txid = blk.vtx[0].hash;
     blk.header.hashMerkleRoot = compute_merkle_root(&txid, 1);
 
     static const unsigned char msg[4] = {0x24, 0xe9, 0x27, 0x64};
     disk_block_pos_init(pos_out);
-    return write_block_to_disk(&blk, pos_out, dir, msg);
+    bool ok = write_block_to_disk(&blk, pos_out, dir, msg);
+    if (hash_out)
+        block_get_hash(&blk, hash_out);
+    return ok;
+}
+
+static bool sst_write_output_block(const char *dir, const struct uint256 *cm,
+                                   struct disk_block_pos *pos_out)
+{
+    return sst_write_output_block_rooted(dir, cm, NULL, pos_out, NULL);
 }
 
 /* Scans the active blocker registry for any "sapling_tree_rebuild.*" record
@@ -1379,7 +1393,7 @@ static int test_sst_boot_defers_repair_above_one_million(void)
 /* A tip header without a Sapling root past activation is a damaged block
  * index: the check cannot run, so boot names a blocker (which the wallet send
  * path reads) and leaves the loaded tree untouched. */
-static int test_sst_boot_zero_tip_root_skips_check(void)
+static int test_sst_boot_zero_tip_root_names_blocker(void)
 {
     struct sst_boot *b = sst_boot_open("zeroroot", 0, -1, false);
     bool pass = b && b->ok;
@@ -1387,12 +1401,55 @@ static int test_sst_boot_zero_tip_root_skips_check(void)
         memset(b->w->bis[SST_BOOT_WINDOW - 1].hashFinalSaplingRoot.data, 0,
                32);
         boot_sapling_tree_boot_load(&b->ctx, &b->ms, &b->ndb, b->dir);
+        struct blocker_snapshot snap;
         pass = sst_boot_tree_is_inflated(b) && !sst_fail_closed_active() &&
-               blocker_exists(BLOCKER_ID_SAPLING_TIP_ROOT_MISSING);
+               blocker_find_by_id_prefix(BLOCKER_ID_SAPLING_TIP_ROOT_MISSING,
+                                         &snap) &&
+               snap.capability_only;
     }
     sst_boot_close(b);
     return sst_boot_report("a zero tip root names a blocker and leaves the "
                            "loaded tree as it was", pass);
+}
+
+/* A zero root in the loaded index is repaired from the tip block's own
+ * header: boot reads it from the block file, requires the header to hash to
+ * the indexed block, stores the root and carries on with the check. */
+static bool sst_boot_rewrite_tip_with_root(struct sst_boot *b)
+{
+    struct block_index *tip = &b->w->bis[SST_BOOT_WINDOW - 1];
+    struct uint256 cm, root = tip->hashFinalSaplingRoot;
+    memset(cm.data, 0, 32);
+    cm.data[0] = (uint8_t)(0x30 + SST_BOOT_WINDOW - 1);
+    cm.data[1] = (uint8_t)(SST_BOOT_WINDOW - 1);
+    struct disk_block_pos pos;
+    struct uint256 hash;
+    if (!sst_write_output_block_rooted(b->dir, &cm, &root, &pos, &hash))
+        return false;
+    tip->hashBlock = hash;
+    tip->nFile = pos.nFile;
+    tip->nDataPos = pos.nPos;
+    memset(tip->hashFinalSaplingRoot.data, 0, 32);
+    return true;
+}
+
+static int test_sst_boot_recovers_zero_tip_root_from_block_file(void)
+{
+    struct sst_boot *b = sst_boot_open("recover", 0, -1, false);
+    bool pass = b && b->ok && sst_boot_rewrite_tip_with_root(b);
+    struct uint256 want;
+    if (pass) {
+        /* the true root is what a rebuild reaches: recompute from the tree */
+        incremental_tree_root(&b->w->true_tree, &want);
+        boot_sapling_tree_boot_load(&b->ctx, &b->ms, &b->ndb, b->dir);
+        pass = memcmp(sst_boot_tip(b)->hashFinalSaplingRoot.data, want.data,
+                      32) == 0 &&
+               sst_boot_tree_is_true(&b->ms.sapling_tree, b) &&
+               !blocker_exists(BLOCKER_ID_SAPLING_TIP_ROOT_MISSING);
+    }
+    sst_boot_close(b);
+    return sst_boot_report("a zero tip root is read back from the tip block "
+                           "file and the check carries on", pass);
 }
 
 static int test_sst_boot_sapling_tree_repair(void)
@@ -1400,7 +1457,8 @@ static int test_sst_boot_sapling_tree_repair(void)
     return test_sst_boot_repairs_inflated_tree() +
            test_sst_boot_repair_failure_names_blocker() +
            test_sst_boot_defers_repair_above_one_million() +
-           test_sst_boot_zero_tip_root_skips_check();
+           test_sst_boot_zero_tip_root_names_blocker() +
+           test_sst_boot_recovers_zero_tip_root_from_block_file();
 }
 
 int test_shielded_sync_strength(void)

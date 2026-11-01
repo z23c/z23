@@ -36,6 +36,8 @@
 #include "validation/process_block.h"
 #include "storage/ldb_snapshot.h"
 #include "util/ar_step_readonly.h"
+#include "storage/disk_block_io.h"
+#include "primitives/block.h"
 #include "util/blocker.h"
 #include "services/sapling_tip_root_blocker.h"
 #include "util/log_macros.h"
@@ -855,6 +857,36 @@ static void boot_sapling_rebuild_after_mismatch(struct app_context *ctx,
     boot_persist_block_index(ctx->datadir, st);
 }
 
+/* The loaded index has no Sapling root for the check endpoint. The header in
+ * its block file is authoritative: read it, require that it hashes to the
+ * indexed block, and store its root in the index. False when the block file
+ * cannot supply it. */
+static bool boot_sapling_recover_tip_root(struct app_context *ctx,
+                                          struct main_state *st,
+                                          const struct block_index *tip,
+                                          const char *datadir)
+{
+    static const uint8_t zeros[32] = {0};
+    struct block_index *bi = (struct block_index *)tip; /* owned by st */
+    if (!(bi->nStatus & BLOCK_HAVE_DATA) || !bi->phashBlock)
+        return false; // raw-return-ok:no body to read the header from
+    struct block blk;
+    block_init(&blk);
+    struct uint256 hash;
+    bool ok = read_block_from_disk_index_pread(&blk, bi, datadir);
+    if (ok) {
+        block_get_hash(&blk, &hash);
+        ok = uint256_eq(&hash, bi->phashBlock) &&
+             memcmp(blk.header.hashFinalSaplingRoot.data, zeros, 32) != 0;
+    }
+    if (ok)
+        bi->hashFinalSaplingRoot = blk.header.hashFinalSaplingRoot;
+    block_free(&blk);
+    if (ok)
+        boot_persist_block_index(ctx->datadir, st);
+    return ok;
+}
+
 /* The check endpoint has no Sapling root: name the blocker that the wallet
  * send path reads. */
 static void boot_sapling_raise_tip_root_missing(int tip_height)
@@ -866,8 +898,12 @@ static void boot_sapling_raise_tip_root_missing(int tip_height)
     struct blocker_record rec;
     /* blocker-id: sapling_tree.tip_root_missing */
     if (blocker_init(&rec, BLOCKER_ID_SAPLING_TIP_ROOT_MISSING, "boot.sapling_tree",
-                     BLOCKER_PERMANENT, reason))
+                     BLOCKER_PERMANENT, reason)) {
+        /* A capability blocker: the node keeps serving and syncing; only
+         * shielded spends depend on the unchecked tree. */
+        rec.capability_only = true;
         blocker_set(&rec);
+    }
     LOG_ERROR("sapling_tree", "%s", reason);
 }
 
@@ -913,7 +949,8 @@ static void boot_step_verify_sapling_root(struct app_context *ctx,
     static const uint8_t zeros[32] = {0};
     if (!tip || tip->nHeight <= 476969)
         return;
-    if (memcmp(tip->hashFinalSaplingRoot.data, zeros, 32) == 0) {
+    if (memcmp(tip->hashFinalSaplingRoot.data, zeros, 32) == 0 &&
+        !boot_sapling_recover_tip_root(ctx, st, tip, datadir)) {
         boot_sapling_raise_tip_root_missing(tip->nHeight);
         return;
     }

@@ -364,13 +364,18 @@ ZCL_BLOCKER_DECISION(zcode_dht.own_delegation_expired,
     "document. An expired delegation is exactly the claim other nodes are "
     "supposed to reject, and honouring it locally would only hide that.")
 ZCL_BLOCKER_DECISION(sapling_tree.tip_root_missing,
-    "The block index has no Sapling root at the boot check endpoint, which a "
-    "validated chain cannot produce, so the loaded Sapling tree and every "
-    "witness derived from it cannot be verified. A person must choose how to "
-    "restore the index. OPTION A - restart so the block index is rebuilt from "
-    "the block files and headers, then confirm the blocker is gone; cost is a "
-    "restart and a rebuild. OPTION B - leave the node running: consensus and "
-    "relay are unaffected, but the wallet refuses shielded spends until the "
-    "blocker clears, because a spend anchored to an unverified tree could be "
-    "rejected by the network or reveal the wallet's notes. There is "
-    "deliberately no automatic repair of the index.")
+    "The block index has no Sapling root at the boot check endpoint, and the "
+    "tip block file could not supply one: boot reads that block's header and "
+    "uses its root only when the header hashes to the indexed block. A "
+    "validated chain cannot produce this, so the block file or index is "
+    "damaged and the loaded Sapling tree cannot be verified. A person must "
+    "choose how to restore it. OPTION A - restore the tip block file (for "
+    "example by re-fetching it from peers or from a verified snapshot) or "
+    "rebuild the block index with a supervised reindex, then restart; a "
+    "restart alone does not clear the blocker while the block file stays "
+    "unreadable. Cost is a restart and the time to re-fetch or reindex. "
+    "OPTION B - leave the node running: consensus, relay and serving are "
+    "unaffected, and every shielded spend is still checked against the chain "
+    "Sapling root and refused when they disagree, but the wallet refuses "
+    "shielded spends while no root is available to check them against. "
+    "There is deliberately no automatic repair of the index.")
