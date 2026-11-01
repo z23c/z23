@@ -80,38 +80,24 @@ static bool sh_maintenance_begin(bool cancelable)
     }
 }
 
-/* What one sweep step did. One rule for every step:
- *   DONE        the step ran and its call succeeded (including "ran, and the
- *               store was under its bound");
- *   SKIPPED     its store or target was unavailable (not open, no datadir,
- *               bound disabled), so no bound was looked at;
- *   FAILED      the call ran against an over-bound target and the bound is
- *               still exceeded afterwards;
- *   INTERRUPTED a stop request ended the wait for the maintenance token.
- * Only a sweep whose every step is DONE counts as completed. */
-enum sh_step {
-    SH_STEP_DONE,
-    SH_STEP_SKIPPED,
-    SH_STEP_FAILED,
-    SH_STEP_INTERRUPTED,
-};
+/* The three steps keep their pre-existing behaviour: each attempts its bound
+ * and ignores the store's result, as before this change. The only thing a
+ * step reports is whether it ran at all: false means a stop request ended the
+ * wait for the maintenance token, so the step did not run. */
 
-static enum sh_step sweep_projection(const struct storage_pacing *pacing,
-                                     bool cancelable)
+static bool sweep_projection(const struct storage_pacing *pacing,
+                             bool cancelable)
 {
-    /* The unavailable sentinel survives until the store supplies a reading;
-     * `before` stays -1 exactly when the store is closed or unreadable. */
-    struct projection_store_usage before = {
+    /* Compaction can refuse before measuring a closed or unavailable store.
+     * Preserve the unavailable sentinel until it supplies an observation. */
+    struct projection_store_usage after = {
         .page_size = -1, .page_count = -1, .free_pages = -1,
         .file_bytes = -1, .live_bytes = -1, .free_bytes = -1,
     };
-    struct projection_store_usage after = before;
-    if (pacing->compact_floor_bytes <= 0 || pacing->compact_ratio_pct <= 100)
-        return SH_STEP_SKIPPED; /* bound disabled */
     if (!sh_maintenance_begin(cancelable))
-        return SH_STEP_INTERRUPTED;
+        return false; // raw-return-ok:stop_requested_interrupt
     bool compacted = projection_store_compact_if_needed(
-        pacing->compact_floor_bytes, pacing->compact_ratio_pct, &before,
+        pacing->compact_floor_bytes, pacing->compact_ratio_pct, NULL,
         &after);
     storage_pacing_maintenance_end();
 
@@ -121,23 +107,15 @@ static enum sh_step sweep_projection(const struct storage_pacing *pacing,
     if (compacted)
         g_stats.projection_compactions++;
     pthread_mutex_unlock(&g_lock);
-    if (before.file_bytes < 0)
-        return SH_STEP_SKIPPED; /* store not open / unreadable */
-    if (!compacted && projection_store_over_bound(&before,
-                                                  pacing->compact_floor_bytes,
-                                                  pacing->compact_ratio_pct))
-        return SH_STEP_FAILED; /* over bound, compaction did not succeed */
-    return SH_STEP_DONE;
+    return true;
 }
 
-static enum sh_step sweep_topology(const struct storage_pacing *pacing,
-                                   bool cancelable)
+static bool sweep_topology(const struct storage_pacing *pacing,
+                           bool cancelable)
 {
     int64_t wal_before = -1;
-    if (pacing->wal_truncate_bytes <= 0)
-        return SH_STEP_SKIPPED; /* bound disabled */
     if (!sh_maintenance_begin(cancelable))
-        return SH_STEP_INTERRUPTED;
+        return false; // raw-return-ok:stop_requested_interrupt
     bool truncated = topology_store_wal_checkpoint_if_over(
         pacing->wal_truncate_bytes, &wal_before);
     storage_pacing_maintenance_end();
@@ -148,32 +126,16 @@ static enum sh_step sweep_topology(const struct storage_pacing *pacing,
     if (truncated)
         g_stats.topology_checkpoints++;
     pthread_mutex_unlock(&g_lock);
-    if (wal_before < 0)
-        return SH_STEP_SKIPPED; /* store closed / WAL unmeasurable */
-    if (!truncated && wal_before > pacing->wal_truncate_bytes)
-        return SH_STEP_FAILED; /* over bound, checkpoint did not truncate */
-    return SH_STEP_DONE;
+    return true;
 }
 
-/* A Tor log still above its bound after the rotation pass. */
-static bool sh_log_still_over(const char *datadir, int64_t max_bytes)
+static bool sweep_logs(const char *datadir, const struct storage_pacing *pacing,
+                       bool cancelable)
 {
-    char path[1024];
-    if (tor_log_path(datadir, path, sizeof(path)) &&
-        log_rotate_file_size(path) > max_bytes)
+    if (!datadir || !datadir[0])
         return true;
-    return tor_rend_log_path(datadir, path, sizeof(path)) &&
-           log_rotate_file_size(path) > max_bytes;
-}
-
-static enum sh_step sweep_logs(const char *datadir,
-                               const struct storage_pacing *pacing,
-                               bool cancelable)
-{
-    if (!datadir || !datadir[0] || pacing->log_rotate_bytes <= 0)
-        return SH_STEP_SKIPPED; /* no datadir, or bound disabled */
     if (!sh_maintenance_begin(cancelable))
-        return SH_STEP_INTERRUPTED;
+        return false; // raw-return-ok:stop_requested_interrupt
     int rotated = tor_logs_rotate(datadir, pacing->log_rotate_bytes);
     storage_pacing_maintenance_end();
 
@@ -182,21 +144,18 @@ static enum sh_step sweep_logs(const char *datadir,
         g_stats.log_rotations += rotated;
         pthread_mutex_unlock(&g_lock);
     }
-    if (sh_log_still_over(datadir, pacing->log_rotate_bytes))
-        return SH_STEP_FAILED; /* rotation could not bring the log under */
-    return SH_STEP_DONE;
+    return true;
 }
 
-/* Completed sweeps. Separate from g_stats.sweeps, which is bumped on entry
- * for the operator-visible counter; the supervisor needs one that only
- * advances when the work finished. */
+/* Finished sweeps: the supervisor's progress marker. Separate from
+ * g_stats.sweeps, which is bumped on entry. Advances for every sweep that ran
+ * to its end (every step attempted), exactly as before this change; it does
+ * not advance for a sweep abandoned on stop. */
 static _Atomic uint64_t g_sweeps_done = 0;
 
 /* One sweep. `cancelable` is true only for the service thread: a stop request
- * then abandons the sweep at the next token wait. Only a sweep whose steps
- * are all DONE bumps sweeps_completed; an incomplete one bumps exactly one of
- * sweeps_interrupted / sweeps_failed / sweeps_skipped (that precedence).
- * A direct call is never cancelable. */
+ * then abandons the sweep at the next token wait and counts it in
+ * sweeps_interrupted. A direct call is never cancelable. */
 static bool sh_sweep(const char *datadir, bool cancelable)
 {
     const struct storage_pacing *pacing = storage_pacing();
@@ -205,38 +164,19 @@ static bool sh_sweep(const char *datadir, bool cancelable)
     g_stats.sweeps++;
     pthread_mutex_unlock(&g_lock);
 
-    enum sh_step steps[3];
-    steps[0] = sweep_topology(pacing, cancelable);
-    steps[1] = steps[0] == SH_STEP_INTERRUPTED
-                   ? SH_STEP_INTERRUPTED : sweep_projection(pacing, cancelable);
-    steps[2] = steps[1] == SH_STEP_INTERRUPTED
-                   ? SH_STEP_INTERRUPTED
-                   : sweep_logs(datadir, pacing, cancelable);
-    bool interrupted = false, failed = false, skipped = false, all_done = true;
-    for (int i = 0; i < 3; i++) {
-        interrupted |= steps[i] == SH_STEP_INTERRUPTED;
-        failed |= steps[i] == SH_STEP_FAILED;
-        skipped |= steps[i] == SH_STEP_SKIPPED;
-        all_done &= steps[i] == SH_STEP_DONE;
-    }
-    /* Precedence for the single stat an incomplete sweep bumps:
-     * interrupted > failed > skipped. */
+    bool ran = sweep_topology(pacing, cancelable) &&
+               sweep_projection(pacing, cancelable) &&
+               sweep_logs(datadir, pacing, cancelable);
+
     pthread_mutex_lock(&g_lock);
-    if (all_done)
-        g_stats.sweeps_completed++;
-    else if (interrupted)
+    if (ran)
+        g_stats.sweeps_finished++;
+    else
         g_stats.sweeps_interrupted++;
-    else if (failed)
-        g_stats.sweeps_failed++;
-    else if (skipped)
-        g_stats.sweeps_skipped++;
     pthread_mutex_unlock(&g_lock);
-    /* The supervisor's progress marker advances whenever the sweep ran to
-     * its end, completed or not: a skipped or failed bound is a named stat,
-     * not a wedge. Only an interrupted sweep (shutdown) leaves it alone. */
-    if (!interrupted)
+    if (ran)
         atomic_fetch_add(&g_sweeps_done, 1);
-    return all_done; // raw-return-ok:incomplete_sweep_counted
+    return ran; // raw-return-ok:interrupted_sweep_counted
 }
 
 void storage_housekeeping_sweep(const char *datadir)
@@ -472,10 +412,8 @@ bool storage_housekeeping_dump_state_json(struct json_value *out,
 
     json_set_object(out);
     json_push_kv_int(out, "sweeps", s.sweeps);
-    json_push_kv_int(out, "sweeps_completed", s.sweeps_completed);
+    json_push_kv_int(out, "sweeps_finished", s.sweeps_finished);
     json_push_kv_int(out, "sweeps_interrupted", s.sweeps_interrupted);
-    json_push_kv_int(out, "sweeps_skipped", s.sweeps_skipped);
-    json_push_kv_int(out, "sweeps_failed", s.sweeps_failed);
     json_push_kv_int(out, "projection_compactions", s.projection_compactions);
     json_push_kv_int(out, "topology_checkpoints", s.topology_checkpoints);
     json_push_kv_int(out, "log_rotations", s.log_rotations);

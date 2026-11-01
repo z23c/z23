@@ -152,19 +152,14 @@ static bool shk_wait_sweeps(int64_t want)
     return false;
 }
 
-/* Sweeps that ran to their end, whatever the outcome (completed, failed or
- * skipped). An interrupted sweep never counts. */
-static int64_t shk_finished(const struct storage_housekeeping_stats *s)
-{
-    return s->sweeps_completed + s->sweeps_failed + s->sweeps_skipped;
-}
-
+/* Same poll, on sweeps that ran to their end (every step attempted); an
+ * interrupted sweep never counts. */
 static bool shk_wait_finished(int64_t want)
 {
     for (int i = 0; i < 500; i++) {
         struct storage_housekeeping_stats s;
         storage_housekeeping_stats(&s);
-        if (shk_finished(&s) >= want)
+        if (s.sweeps_finished >= want)
             return true;
         platform_sleep_ms(20);
     }
@@ -229,7 +224,7 @@ static int shk_case_boot_start_not_blocked_by_held_lock(void)
     storage_pacing_maintenance_end();
     pthread_join(th, NULL);
     SHK_CHECK("the deferred boot sweep completes once the token is free",
-              shk_wait_finished(shk_finished(&before) + 1));
+              shk_wait_finished(before.sweeps_finished + 1));
 
     zcl_service_kernel_stop_all(&ctx.kernel);
     storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
@@ -293,39 +288,20 @@ static int shk_case_stop_ends_sweep_blocked_on_token(void)
     storage_housekeeping_stats(&mid);
     SHK_CHECK("the abandoned first sweep is counted as interrupted",
               mid.sweeps_interrupted == before.sweeps_interrupted + 1);
-    SHK_CHECK("the abandoned first sweep is not counted as completed",
-              mid.sweeps_completed == before.sweeps_completed);
+    SHK_CHECK("the abandoned first sweep is not counted as finished",
+              mid.sweeps_finished == before.sweeps_finished);
+    SHK_CHECK("the abandoned first sweep was started",
+              mid.sweeps == before.sweeps + 1);
 
-    /* A normal sweep still completes, and stays uncancelable although the
+    /* A direct sweep still finishes, and stays uncancelable although the
      * stop request is still latched (only the service thread honours it). */
-    SHK_CHECK("direct sweep fixture: topology store opens",
-              topology_store_open(dir));
-    struct net_addr edge = shk_ipv4(66, 70, 182, 9);
-    SHK_CHECK("direct sweep fixture: an edge gives the WAL a file",
-              topology_store_record_self_edge(&edge, 8233, 1, NULL));
-    SHK_CHECK("direct sweep fixture: projection store opens",
-              projection_store_open(dir));
     storage_housekeeping_sweep(dir);
     struct storage_housekeeping_stats after;
     storage_housekeeping_stats(&after);
-    SHK_CHECK("a direct sweep counts as completed",
-              after.sweeps_completed == mid.sweeps_completed + 1);
+    SHK_CHECK("a direct sweep counts as finished",
+              after.sweeps_finished == mid.sweeps_finished + 1);
     SHK_CHECK("a direct sweep is not counted as interrupted",
               after.sweeps_interrupted == mid.sweeps_interrupted);
-
-    /* A sweep whose log step has no datadir skipped a bound: it is counted
-     * as skipped, never as completed. */
-    storage_housekeeping_sweep(NULL);
-    struct storage_housekeeping_stats last;
-    storage_housekeeping_stats(&last);
-    SHK_CHECK("a sweep with a skipped log step is counted as skipped",
-              last.sweeps_skipped == after.sweeps_skipped + 1);
-    SHK_CHECK("a sweep with a skipped log step is not counted as completed",
-              last.sweeps_completed == after.sweeps_completed);
-    SHK_CHECK("a sweep with a skipped log step is not counted as interrupted",
-              last.sweeps_interrupted == after.sweeps_interrupted);
-    topology_store_close();
-    projection_store_close();
     storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
     test_cleanup_tmpdir(dir);
     return failures;
@@ -419,7 +395,7 @@ static int shk_case_service_registration(void)
         /* The boot start is deferred: the sweep runs on the service's own
          * thread, so wait (bounded by a poll count, not a clock) for it. */
         SHK_CHECK("the start wrapper called through (boot sweep ran)",
-                  shk_wait_finished(shk_finished(&before) + 1));
+                  shk_wait_finished(before.sweeps_finished + 1));
         storage_housekeeping_stats(&after);
 
         zcl_service_kernel_stop_all(&kernel);
@@ -727,163 +703,6 @@ static int shk_case_stop_with_tick_due(const struct storage_pacing *pacing)
     return failures;
 }
 
-/* ── 6. every step outcome maps to exactly one sweep stat ── */
-enum shk_st { SHK_ST_DONE, SHK_ST_SKIP, SHK_ST_FAIL };
-enum shk_log { SHK_LOG_DONE, SHK_LOG_NODIR, SHK_LOG_FAIL };
-enum shk_want { SHK_WANT_COMPLETED, SHK_WANT_SKIPPED, SHK_WANT_FAILED };
-
-struct shk_row {
-    const char *name;
-    enum shk_st topology;
-    enum shk_st projection;
-    enum shk_log logs;
-    enum shk_want want;
-};
-
-struct shk_fixture {
-    sqlite3 *wal_reader;     /* second connection pinning topology.db's WAL */
-    sqlite3_stmt *kv_active; /* in-flight statement: VACUUM must refuse */
-    char blocker_dir[560];   /* tor.log.1 as a non-empty directory */
-    char blocker_file[620];
-};
-
-static void shk_fixture_topology(struct shk_fixture *fx,
-                                 struct shk_sweep_bound_ctx *ctx,
-                                 const struct storage_pacing *pacing,
-                                 enum shk_st st, int *failures_out)
-{
-    int failures = 0;
-    if (st == SHK_ST_DONE) {
-        SHK_CHECK("row: topology opens", topology_store_open(ctx->dir));
-        struct net_addr a = shk_ipv4(66, 70, 182, 11);
-        SHK_CHECK("row: topology edge recorded",
-                  topology_store_record_self_edge(&a, 8233, 1, NULL));
-    } else if (st == SHK_ST_FAIL) {
-        failures += shk_drive_wal_over_bound(ctx, pacing);
-        char path[300];
-        snprintf(path, sizeof(path), "%s/topology.db", ctx->dir);
-        SHK_CHECK("row: WAL-pinning reader opens",
-                  sqlite3_open(path, &fx->wal_reader) == SQLITE_OK);
-        SHK_CHECK("row: reader holds a read snapshot",
-                  fx->wal_reader &&
-                  sqlite3_exec(fx->wal_reader,
-                               "BEGIN; SELECT count(*) FROM sqlite_master;",
-                               NULL, NULL, NULL) == SQLITE_OK);
-    }
-    *failures_out += failures;
-}
-
-static void shk_fixture_projection(struct shk_fixture *fx,
-                                   struct shk_sweep_bound_ctx *ctx,
-                                   const struct storage_pacing *pacing,
-                                   enum shk_st st, int *failures_out)
-{
-    int failures = 0;
-    if (st == SHK_ST_DONE) {
-        SHK_CHECK("row: projection opens", projection_store_open(ctx->dir));
-    } else if (st == SHK_ST_FAIL) {
-        failures += shk_drive_progress_kv_over_bound(ctx, pacing);
-        sqlite3 *proj = projection_store_db();
-        SHK_CHECK("row: projection handle for the in-flight statement",
-                  proj != NULL);
-        if (proj) {
-            projection_store_tx_lock();
-            int rc = sqlite3_exec(proj,
-                                  "CREATE TABLE IF NOT EXISTS shk_keep(k INTEGER);"
-                                  "INSERT INTO shk_keep VALUES(1),(2)",
-                                  NULL, NULL, NULL);
-            projection_store_tx_unlock();
-            SHK_CHECK("row: keep rows written", rc == SQLITE_OK);
-            SHK_CHECK("row: statement left in flight",
-                      sqlite3_prepare_v2(proj, "SELECT k FROM shk_keep", -1,
-                                         &fx->kv_active, NULL) == SQLITE_OK &&
-                      sqlite3_step(fx->kv_active) == SQLITE_ROW);
-        }
-    }
-    *failures_out += failures;
-}
-
-static int shk_run_row(const struct shk_row *row,
-                       const struct storage_pacing *pacing)
-{
-    int failures = 0;
-    struct shk_sweep_bound_ctx ctx = {0};
-    struct shk_fixture fx = {0};
-    printf("storage_housekeeping: row [%s]\n", row->name);
-    test_make_tmpdir(ctx.dir, sizeof(ctx.dir), "storage_housekeeping", "row");
-
-    shk_fixture_topology(&fx, &ctx, pacing, row->topology, &failures);
-    shk_fixture_projection(&fx, &ctx, pacing, row->projection, &failures);
-    if (row->logs == SHK_LOG_FAIL) {
-        SHK_CHECK("row: oversized tor.log written",
-                  shk_oversized_tor_log(ctx.dir, pacing->log_rotate_bytes,
-                                        ctx.log_path, sizeof(ctx.log_path)));
-        snprintf(fx.blocker_dir, sizeof(fx.blocker_dir), "%s.1", ctx.log_path);
-        snprintf(fx.blocker_file, sizeof(fx.blocker_file), "%s/keep",
-                 fx.blocker_dir);
-        SHK_CHECK("row: rotation target made unwritable",
-                  mkdir(fx.blocker_dir, 0700) == 0 &&
-                  shk_write_file(fx.blocker_file, 16));
-    }
-
-    struct storage_housekeeping_stats b, a;
-    storage_housekeeping_stats(&b);
-    storage_housekeeping_sweep(row->logs == SHK_LOG_NODIR ? NULL : ctx.dir);
-    storage_housekeeping_stats(&a);
-
-    SHK_CHECK("row: one sweep started", a.sweeps == b.sweeps + 1);
-    SHK_CHECK("row: completed moved only for the all-done row",
-              a.sweeps_completed ==
-              b.sweeps_completed + (row->want == SHK_WANT_COMPLETED ? 1 : 0));
-    SHK_CHECK("row: skipped stat is exact",
-              a.sweeps_skipped ==
-              b.sweeps_skipped + (row->want == SHK_WANT_SKIPPED ? 1 : 0));
-    SHK_CHECK("row: failed stat is exact",
-              a.sweeps_failed ==
-              b.sweeps_failed + (row->want == SHK_WANT_FAILED ? 1 : 0));
-    SHK_CHECK("row: interrupted did not move",
-              a.sweeps_interrupted == b.sweeps_interrupted);
-
-    if (fx.kv_active)
-        sqlite3_finalize(fx.kv_active);
-    if (fx.wal_reader)
-        sqlite3_close(fx.wal_reader);
-    if (fx.blocker_file[0])
-        remove(fx.blocker_file);
-    if (fx.blocker_dir[0])
-        rmdir(fx.blocker_dir);
-    topology_store_close();
-    projection_store_close();
-    test_cleanup_tmpdir(ctx.dir);
-    return failures;
-}
-
-static int shk_case_step_outcome_table(const struct storage_pacing *pacing)
-{
-    static const struct shk_row rows[] = {
-        { "all steps done", SHK_ST_DONE, SHK_ST_DONE, SHK_LOG_DONE,
-          SHK_WANT_COMPLETED },
-        { "topology store closed", SHK_ST_SKIP, SHK_ST_DONE, SHK_LOG_DONE,
-          SHK_WANT_SKIPPED },
-        { "projection store closed", SHK_ST_DONE, SHK_ST_SKIP, SHK_LOG_DONE,
-          SHK_WANT_SKIPPED },
-        { "no datadir for the log bound", SHK_ST_DONE, SHK_ST_DONE,
-          SHK_LOG_NODIR, SHK_WANT_SKIPPED },
-        { "topology checkpoint cannot truncate", SHK_ST_FAIL, SHK_ST_DONE,
-          SHK_LOG_DONE, SHK_WANT_FAILED },
-        { "projection compaction refused", SHK_ST_DONE, SHK_ST_FAIL,
-          SHK_LOG_DONE, SHK_WANT_FAILED },
-        { "log rotation cannot write", SHK_ST_DONE, SHK_ST_DONE,
-          SHK_LOG_FAIL, SHK_WANT_FAILED },
-        { "failed outranks skipped", SHK_ST_SKIP, SHK_ST_FAIL, SHK_LOG_NODIR,
-          SHK_WANT_FAILED },
-    };
-    int failures = 0;
-    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
-        failures += shk_run_row(&rows[i], pacing);
-    return failures;
-}
-
 int test_storage_housekeeping(void)
 {
     printf("\n=== storage_housekeeping tests ===\n");
@@ -904,7 +723,6 @@ int test_storage_housekeeping(void)
     failures += shk_case_stop_with_tick_due(pacing);
     failures += shk_case_boot_start_not_blocked_by_held_lock();
     failures += shk_case_stop_ends_sweep_blocked_on_token();
-    failures += shk_case_step_outcome_table(pacing);
 
     shk_restore_pacing();
     if (failures == 0)

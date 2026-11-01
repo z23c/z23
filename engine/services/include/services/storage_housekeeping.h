@@ -43,25 +43,15 @@ struct json_value; /* fwd; see json/json.h */
  * the sweep itself, which is three size measurements when nothing is over. */
 #define STORAGE_HOUSEKEEPING_TICK_SECONDS 60
 
-/* One sweep's outcome, for tests and for typed status.
- *
- * Each of the three steps (topology WAL, projection compaction, log rotation)
- * ends DONE (ran, succeeded, or was under its bound), SKIPPED (store not open,
- * no datadir, bound disabled), FAILED (ran on an over-bound target, bound
- * still exceeded) or INTERRUPTED (stop requested while waiting for the
- * maintenance token). sweeps_completed counts only sweeps whose steps are all
- * DONE. Any other sweep bumps exactly one of sweeps_interrupted,
- * sweeps_failed, sweeps_skipped, by precedence interrupted > failed > skipped.
- * `sweeps` counts sweeps started, so sweeps = completed + interrupted +
- * failed + skipped once none is in flight. */
+/* One sweep's outcome, for tests and for typed status. */
 struct storage_housekeeping_stats {
-    int64_t sweeps;                  /* sweeps STARTED */
-    int64_t sweeps_completed;        /* all three bounds applied */
-    int64_t sweeps_interrupted;      /* a stop request ended the sweep */
-    int64_t sweeps_failed;           /* a step ran and its bound still stands */
-    int64_t sweeps_skipped;          /* a step had nothing to act on (no datadir
-                                      * for the log bound): bounds not all
-                                      * applied, so not completed */
+    int64_t sweeps;              /* sweeps STARTED */
+    /* Sweeps that ran to their end (every step attempted). Says nothing about
+     * whether a step succeeded: same as before this change. A sweep abandoned
+     * on stop counts in sweeps_interrupted instead and does not advance
+     * supervisor progress. */
+    int64_t sweeps_finished;
+    int64_t sweeps_interrupted;  /* sweeps a stop request ended early */
     int64_t projection_compactions;
     int64_t topology_checkpoints;
     int64_t log_rotations;
