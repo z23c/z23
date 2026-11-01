@@ -2289,12 +2289,14 @@ static bool dp_split_private_start(const char *st)
 }
 
 /* A file-scope `;` statement that declares an object: neither a prototype
- * (a '(' and no '=') nor a private declaration. A function pointer counts. */
+ * (a '(' and no '=') nor a private declaration. A function pointer counts,
+ * and so does an array whose '[' comes before any '(' (char b[sizeof(x)];). */
 static bool dp_split_public_object(const char *st)
 {
     if (!*st || dp_split_private_start(st)) return false;
+    const char *paren = strchr(st, '('), *bracket = strchr(st, '[');
     return strchr(st, '=') || strstr(st, "(*") || strstr(st, "( *") ||
-           !strchr(st, '(');
+           !paren || (bracket && bracket < paren);
 }
 
 /* A file-scope statement ended by ';': an invocation with no type tokens
@@ -2528,6 +2530,16 @@ static bool dp_fresh_named_only_by_changed(const struct dp_split_ctx *c,
     return ok;
 }
 
+/* A name the C implementation reserves (a leading underscore) can be a
+ * runtime or toolchain hook, such as __asan_default_options or
+ * __cyg_profile_func_enter, that no tracked file names; it is never fresh. */
+static bool dp_fresh_names_unreserved(const struct dp_split_funcs *f)
+{
+    for (size_t i = 0; i < f->count; i++)
+        if (f->name[i][0] == '_') return false;
+    return true;
+}
+
 /* No tracked file at `base` mentions any of the names `f` holds. */
 static bool dp_fresh_names_absent_at_base(const struct dp_split_ctx *c,
                                           const struct dp_split_funcs *f)
@@ -2578,7 +2590,7 @@ static bool dp_fresh_admit(const struct dp_split_ctx *c, const char **refs,
     struct dp_split_funcs f = {0};
     bool ok = side && !dp_fresh_hooked(side) &&
               dp_split_parse_funcs(side, &f) && !f.overflow && !f.object &&
-              f.count > 0 &&
+              f.count > 0 && dp_fresh_names_unreserved(&f) &&
               dp_fresh_names_absent_at_base(c, &f);
     free(diff);
     free(side);
@@ -2616,7 +2628,12 @@ static bool dp_fresh_sidecar_lines(const char *side, const char *owner)
     size_t n;
     if (hn <= 0 || (size_t)hn >= sizeof(head)) return false;
     while (dp_split_next(&cur, &l, &n)) {
-        if (n == 0 || dp_split_is_comment(l, n)) continue;
+        /* A row placed after a closed comment on the same line is live, not
+         * a comment: any line that names the macro must open with this
+         * owner's row. */
+        if (n == 0 || (dp_split_is_comment(l, n) &&
+                       !dp_split_contains(l, n, "ZCL_MODULE_CAPABILITY")))
+            continue;
         if (n < (size_t)hn || memcmp(l, head, (size_t)hn) != 0) return false;
     }
     return true;
