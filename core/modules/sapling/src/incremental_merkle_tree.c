@@ -460,6 +460,56 @@ static uint64_t ckpt_read_u64_le(const uint8_t *p)
     return v;
 }
 
+/* Write the checkpoint header and serialized tree into body. */
+static void ckpt_flush_fill_body(uint8_t *body,
+                                 const struct incremental_merkle_tree *t,
+                                 int64_t height,
+                                 const struct uint256 *root,
+                                 const uint8_t *block_hash,
+                                 const struct byte_stream *blob)
+{
+    memcpy(body + 0, SAPLING_CKPT_MAGIC, 4);
+    ckpt_write_u32_le(body + 4, SAPLING_CKPT_VERSION);
+    ckpt_write_u64_le(body + 8, (uint64_t)height);
+    memcpy(body + 16, root->data, 32);
+    if (block_hash)
+        memcpy(body + SAPLING_CKPT_OFF_BLOCKHASH, block_hash, 32);
+    else
+        memset(body + SAPLING_CKPT_OFF_BLOCKHASH, 0, 32);
+    ckpt_write_u32_le(body + SAPLING_CKPT_OFF_TREESIZE,
+                      (uint32_t)incremental_tree_size(t));
+    ckpt_write_u32_le(body + SAPLING_CKPT_OFF_BLOBLEN, (uint32_t)blob->size);
+    memcpy(body + SAPLING_CKPT_HEADER_SZ, blob->data, blob->size);
+}
+
+/* Initialize staged and create the private temporary file when tmp_len fits. */
+static bool ckpt_flush_stage_open(int tmp_len, size_t tmp_cap,
+                                  const char *tmp_path,
+                                  struct platform_private_file *staged)
+{
+    platform_private_file_init(staged);
+    if (tmp_len < 0 || (size_t)tmp_len >= tmp_cap)
+        return false;
+    return platform_private_file_create(tmp_path, staged);
+}
+
+/* Write the body and trailer, then flush, replace, and flush the parent. */
+static bool ckpt_flush_commit(struct platform_private_file *staged,
+                              const uint8_t *body, size_t body_sz,
+                              const uint8_t *trailer,
+                              const char *tmp_path,
+                              const char *resolved,
+                              const char *parent)
+{
+    return platform_private_file_write_at(staged, body, body_sz, 0) &&
+           platform_private_file_write_at(staged, trailer,
+                                          SAPLING_CKPT_TRAILER_SZ,
+                                          body_sz) &&
+           platform_private_file_flush(staged) &&
+           platform_private_file_replace(staged, tmp_path, resolved) &&
+           platform_private_parent_flush(parent);
+}
+
 bool sapling_tree_flush_checkpoint(const struct incremental_merkle_tree *t,
                                    int64_t height,
                                    const uint8_t block_hash[32],
@@ -498,18 +548,7 @@ bool sapling_tree_flush_checkpoint(const struct incremental_merkle_tree *t,
         LOG_FAIL("sapling_tree",
                  "flush_checkpoint: alloc body %zu failed", body_sz);
     }
-    memcpy(body + 0, SAPLING_CKPT_MAGIC, 4);
-    ckpt_write_u32_le(body + 4, SAPLING_CKPT_VERSION);
-    ckpt_write_u64_le(body + 8, (uint64_t)height);
-    memcpy(body + 16, root.data, 32);
-    if (block_hash)
-        memcpy(body + SAPLING_CKPT_OFF_BLOCKHASH, block_hash, 32);
-    else
-        memset(body + SAPLING_CKPT_OFF_BLOCKHASH, 0, 32);
-    ckpt_write_u32_le(body + SAPLING_CKPT_OFF_TREESIZE,
-                      (uint32_t)incremental_tree_size(t));
-    ckpt_write_u32_le(body + SAPLING_CKPT_OFF_BLOBLEN, (uint32_t)blob.size);
-    memcpy(body + SAPLING_CKPT_HEADER_SZ, blob.data, blob.size);
+    ckpt_flush_fill_body(body, t, height, &root, block_hash, &blob);
     stream_free(&blob);
 
     uint8_t trailer[SAPLING_CKPT_TRAILER_SZ];
@@ -528,9 +567,8 @@ bool sapling_tree_flush_checkpoint(const struct incremental_merkle_tree *t,
     char tmp_path[32768];
     int tmp_len = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", resolved);
     struct platform_private_file staged;
-    platform_private_file_init(&staged);
-    if (tmp_len < 0 || (size_t)tmp_len >= sizeof(tmp_path) ||
-        !platform_private_file_create(tmp_path, &staged)) {
+    if (!ckpt_flush_stage_open(tmp_len, sizeof(tmp_path), tmp_path,
+                              &staged)) {
         fprintf(stderr,  // obs-ok:helper-context-logged
                 "[sapling_tree] %s:%d %s(): flush_checkpoint: "
                 "private staging creation failed\n",
@@ -539,16 +577,12 @@ bool sapling_tree_flush_checkpoint(const struct incremental_merkle_tree *t,
         return false;
     }
 
-    bool ok = platform_private_file_write_at(&staged, body, body_sz, 0) &&
-              platform_private_file_write_at(&staged, trailer,
-                                              SAPLING_CKPT_TRAILER_SZ,
-                                              body_sz) &&
-              platform_private_file_flush(&staged) &&
-              platform_private_file_replace(&staged, tmp_path, resolved) &&
-              platform_private_parent_flush(parent);
+    bool ok = ckpt_flush_commit(&staged, body, body_sz, trailer,
+                               tmp_path, resolved, parent);
     free(body);
 
     if (!ok) {
+        /* Retire and close staged when it holds an open file. */
         if (staged.native != (uintptr_t)-1) {
             (void)platform_private_file_retire(&staged, tmp_path);
             platform_private_file_close(&staged);
@@ -560,6 +594,106 @@ bool sapling_tree_flush_checkpoint(const struct incremental_merkle_tree *t,
         return false;
     }
     return true;
+}
+
+/* 1: size missing or too small. 2: too large. 0: within the checkpoint bounds. */
+static int ckpt_load_size_status(const struct platform_positioned_file *file,
+                                 uint64_t *file_size)
+{
+    *file_size = 0;
+    bool got = platform_positioned_file_size(file, file_size);
+    if (!got ||
+        *file_size < SAPLING_CKPT_HEADER_SZ + SAPLING_CKPT_TRAILER_SZ)
+        return 1;
+    if (*file_size >
+        SAPLING_CKPT_HEADER_SZ + SAPLING_CKPT_MAX_BLOB + SAPLING_CKPT_TRAILER_SZ)
+        return 2;
+    return 0;
+}
+
+/* Read file_size bytes, close the file, and return 1 on a short or failed read. */
+static int ckpt_load_read_status(struct platform_positioned_file *file,
+                                 uint8_t *buf, uint64_t file_size)
+{
+    int64_t read = platform_positioned_file_read(file, buf,
+                                                 (size_t)file_size, 0);
+    platform_positioned_file_close(file);
+    if (read < 0 || (uint64_t)read != file_size)
+        return 1;
+    return 0;
+}
+
+/* Return 1 when the trailer, magic, version, or blob length is rejected. */
+static int ckpt_load_header_status(const uint8_t *buf, uint64_t file_size,
+                                  int64_t *height_out, uint32_t *blob_len_out)
+{
+    *height_out = 0;
+    *blob_len_out = 0;
+
+    size_t body_sz = (size_t)file_size - SAPLING_CKPT_TRAILER_SZ;
+    uint8_t expected_trailer[SAPLING_CKPT_TRAILER_SZ];
+    zcl_sha3_256(buf, body_sz, expected_trailer);
+
+    /* Integrity check must run before any field-level parsing so a
+     * tampered magic byte can never steer the loader. */
+    if (memcmp(buf + body_sz, expected_trailer,
+               SAPLING_CKPT_TRAILER_SZ) != 0)
+        return 1;
+
+    if (memcmp(buf, SAPLING_CKPT_MAGIC, 4) != 0)
+        return 1;
+    uint32_t version = ckpt_read_u32_le(buf + 4);
+    if (version != SAPLING_CKPT_VERSION)
+        return 1;
+    int64_t height = (int64_t)ckpt_read_u64_le(buf + 8);
+    uint32_t blob_len = ckpt_read_u32_le(buf + SAPLING_CKPT_OFF_BLOBLEN);
+    if (blob_len > SAPLING_CKPT_MAX_BLOB ||
+        SAPLING_CKPT_HEADER_SZ + (size_t)blob_len != body_sz)
+        return 1;
+    *height_out = height;
+    *blob_len_out = blob_len;
+    return 0;
+}
+
+/* Return 1 when the blob does not deserialize or its root does not match. */
+static int ckpt_load_tree_status(struct incremental_merkle_tree *scratch,
+                                 const uint8_t *buf, uint32_t blob_len)
+{
+    /* Deserialize the tree blob into a scratch tree (preserves the
+     * caller's tree on any failure below). */
+    sapling_tree_init(scratch);
+    struct byte_stream s;
+    stream_init_from_data(&s, buf + SAPLING_CKPT_HEADER_SZ, blob_len);
+    bool parsed = incremental_tree_deserialize(scratch, &s);
+    if (!parsed)
+        return 1;
+
+    /* Root from the loaded tree must match the root field in the file.
+     * The SHA3 trailer already guarantees bit-for-bit integrity, but
+     * the root check also catches pointer-mismatch bugs — e.g. a
+     * future format change that ships a stale root alongside a valid
+     * blob. */
+    struct uint256 computed_root;
+    incremental_tree_root(scratch, &computed_root);
+    if (memcmp(computed_root.data, buf + 16, 32) != 0)
+        return 1;
+    return 0;
+}
+
+/* Copy the block hash, release the buffer, and publish the tree and height. */
+static void ckpt_load_commit(struct incremental_merkle_tree *t,
+                             const struct incremental_merkle_tree *scratch,
+                             int64_t height, int64_t *height_out,
+                             uint8_t *block_hash_out, uint8_t *buf)
+{
+    if (block_hash_out)
+        memcpy(block_hash_out, buf + SAPLING_CKPT_OFF_BLOCKHASH, 32);
+
+    free(buf);
+
+    *t = *scratch;
+    if (height_out)
+        *height_out = height;
 }
 
 bool sapling_tree_load_checkpoint(struct incremental_merkle_tree *t,
@@ -578,13 +712,12 @@ bool sapling_tree_load_checkpoint(struct incremental_merkle_tree *t,
         return false; /* missing file is a silent not-found */
 
     uint64_t file_size = 0;
-    if (!platform_positioned_file_size(&file, &file_size) ||
-        file_size < SAPLING_CKPT_HEADER_SZ + SAPLING_CKPT_TRAILER_SZ) {
+    int size_status = ckpt_load_size_status(&file, &file_size);
+    if (size_status == 1) {
         platform_positioned_file_close(&file);
         return false; /* too small — treat as corrupt */
     }
-    if (file_size >
-        SAPLING_CKPT_HEADER_SZ + SAPLING_CKPT_MAX_BLOB + SAPLING_CKPT_TRAILER_SZ) {
+    if (size_status == 2) {
         platform_positioned_file_close(&file);
         return false; /* too large — refuse */
     }
@@ -595,74 +728,25 @@ bool sapling_tree_load_checkpoint(struct incremental_merkle_tree *t,
         platform_positioned_file_close(&file);
         return false;
     }
-    int64_t read = platform_positioned_file_read(&file, buf,
-                                                 (size_t)file_size, 0);
-    platform_positioned_file_close(&file);
-    if (read < 0 || (uint64_t)read != file_size) {
+    if (ckpt_load_read_status(&file, buf, file_size) != 0) {
         free(buf);
         return false;
     }
 
-    size_t body_sz = (size_t)file_size - SAPLING_CKPT_TRAILER_SZ;
-    uint8_t expected_trailer[SAPLING_CKPT_TRAILER_SZ];
-    zcl_sha3_256(buf, body_sz, expected_trailer);
-
-    /* Integrity check must run before any field-level parsing so a
-     * tampered magic byte can never steer the loader. */
-    if (memcmp(buf + body_sz, expected_trailer,
-               SAPLING_CKPT_TRAILER_SZ) != 0) {
+    int64_t height = 0;
+    uint32_t blob_len = 0;
+    if (ckpt_load_header_status(buf, file_size, &height, &blob_len) != 0) {
         free(buf);
         return false;
     }
 
-    if (memcmp(buf, SAPLING_CKPT_MAGIC, 4) != 0) {
-        free(buf);
-        return false;
-    }
-    uint32_t version = ckpt_read_u32_le(buf + 4);
-    if (version != SAPLING_CKPT_VERSION) {
-        free(buf);
-        return false;
-    }
-    int64_t height = (int64_t)ckpt_read_u64_le(buf + 8);
-    uint32_t blob_len = ckpt_read_u32_le(buf + SAPLING_CKPT_OFF_BLOBLEN);
-    if (blob_len > SAPLING_CKPT_MAX_BLOB ||
-        SAPLING_CKPT_HEADER_SZ + (size_t)blob_len != body_sz) {
-        free(buf);
-        return false;
-    }
-
-    /* Deserialize the tree blob into a scratch tree (preserves the
-     * caller's tree on any failure below). */
     struct incremental_merkle_tree scratch;
-    sapling_tree_init(&scratch);
-    struct byte_stream s;
-    stream_init_from_data(&s, buf + SAPLING_CKPT_HEADER_SZ, blob_len);
-    if (!incremental_tree_deserialize(&scratch, &s)) {
+    if (ckpt_load_tree_status(&scratch, buf, blob_len) != 0) {
         free(buf);
         return false;
     }
 
-    /* Root from the loaded tree must match the root field in the file.
-     * The SHA3 trailer already guarantees bit-for-bit integrity, but
-     * the root check also catches pointer-mismatch bugs — e.g. a
-     * future format change that ships a stale root alongside a valid
-     * blob. */
-    struct uint256 computed_root;
-    incremental_tree_root(&scratch, &computed_root);
-    if (memcmp(computed_root.data, buf + 16, 32) != 0) {
-        free(buf);
-        return false;
-    }
-
-    if (block_hash_out)
-        memcpy(block_hash_out, buf + SAPLING_CKPT_OFF_BLOCKHASH, 32);
-
-    free(buf);
-
-    *t = scratch;
-    if (height_out)
-        *height_out = height;
+    ckpt_load_commit(t, &scratch, height, height_out, block_hash_out, buf);
     return true;
 }
 
@@ -782,6 +866,52 @@ void incremental_witness_append(struct incremental_witness *w,
     }
 }
 
+/* Set the depth-0 left and right inputs for a witness root. */
+static void witness_root_depth0_sides(const struct incremental_witness *w,
+                                      const struct incremental_merkle_tree *t,
+                                      struct uint256 *combine_left,
+                                      struct uint256 *combine_right)
+{
+    if (t->has_left) {
+        *combine_left = t->left;
+    } else {
+        t->uncommitted(combine_left);
+    }
+
+    if (t->has_right) {
+        *combine_right = t->right;
+    } else {
+        /* Use first filled or uncommitted */
+        if (w->num_filled > 0 || w->has_cursor) {
+            size_t fi = 0;
+            if (fi < w->num_filled) {
+                *combine_right = w->filled[fi];
+                fi++;
+            } else {
+                t->uncommitted(combine_right);
+            }
+        } else {
+            t->uncommitted(combine_right);
+        }
+    }
+}
+
+/* Set filler from the next filled hash, the cursor root, or an empty root. */
+static inline void witness_root_take_filler(
+    const struct incremental_witness *w,
+    const struct incremental_merkle_tree *t,
+    size_t *filled_idx, size_t depth, struct uint256 *filler)
+{
+    if (*filled_idx < w->num_filled) {
+        *filler = w->filled[(*filled_idx)++];
+    } else if (w->has_cursor && *filled_idx == w->num_filled) {
+        incremental_tree_root(&w->cursor, filler);
+        (*filled_idx)++;
+    } else {
+        empty_root_at_depth(t, depth, filler);
+    }
+}
+
 void incremental_witness_root(const struct incremental_witness *w,
                                struct uint256 *out)
 {
@@ -789,29 +919,8 @@ void incremental_witness_root(const struct incremental_witness *w,
     const struct incremental_merkle_tree *t = &w->tree;
 
     struct uint256 combine_left;
-    if (t->has_left) {
-        combine_left = t->left;
-    } else {
-        t->uncommitted(&combine_left);
-    }
-
     struct uint256 combine_right;
-    if (t->has_right) {
-        combine_right = t->right;
-    } else {
-        /* Use first filled or uncommitted */
-        if (w->num_filled > 0 || w->has_cursor) {
-            size_t fi = 0;
-            if (fi < w->num_filled) {
-                combine_right = w->filled[fi];
-                fi++;
-            } else {
-                t->uncommitted(&combine_right);
-            }
-        } else {
-            t->uncommitted(&combine_right);
-        }
-    }
+    witness_root_depth0_sides(w, t, &combine_left, &combine_right);
 
     struct uint256 root;
     t->combine(&combine_left, &combine_right, 0, &root);
@@ -825,14 +934,7 @@ void incremental_witness_root(const struct incremental_witness *w,
             t->combine(&t->parents[i], &root, d, &next_val);
         } else {
             struct uint256 filler;
-            if (filled_idx < w->num_filled) {
-                filler = w->filled[filled_idx++];
-            } else if (w->has_cursor && filled_idx == w->num_filled) {
-                incremental_tree_root(&w->cursor, &filler);
-                filled_idx++;
-            } else {
-                empty_root_at_depth(t, d, &filler);
-            }
+            witness_root_take_filler(w, t, &filled_idx, d, &filler);
             t->combine(&root, &filler, d, &next_val);
         }
         root = next_val;
