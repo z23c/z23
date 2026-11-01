@@ -481,6 +481,131 @@ static void stage_step_rollback(sqlite3 *db, bool batched)
 
 /* ── Run one step ──────────────────────────────────────────────────── */
 
+/* Handle a JOB_ADVANCED verdict: enforce the cursor contract, persist the
+ * cursor, commit, and record profiling. Entered with s->lock and the
+ * progress-store txn lock held; releases both before returning. */
+static job_result_t stage_run_once_advance(stage_t *s, sqlite3 *db,
+                                           struct stage_step_ctx ctx,
+                                           uint64_t cur, bool cursor_existed,
+                                           bool batched, int64_t run_t0,
+                                           int64_t step_t0)
+{
+    char *err = NULL;
+    if (ctx.cursor_out <= cur) {
+        /* Contract violation: JOB_ADVANCED must move the cursor
+         * forward. Roll back to keep the invariant intact. */
+        fprintf(stderr,  // obs-ok:stage-advance-noop
+            "[stage] %s: ADVANCED but cursor_out(%llu) <= cursor_in(%llu); rolling back\n",
+            s->name,
+            (unsigned long long)ctx.cursor_out,
+            (unsigned long long)cur);
+        stage_step_rollback(db, batched);
+        pthread_mutex_unlock(&s->lock);
+        progress_store_tx_unlock();
+        return stage_note_fatal(s, "ADVANCED but cursor did not move");
+    }
+    if (!cursor_write_locked_known_prev(db, s->name, ctx.cursor_out, cur,
+                                        batched, cursor_existed)) {
+        stage_step_rollback(db, batched);
+        pthread_mutex_unlock(&s->lock);
+        progress_store_tx_unlock();
+        return stage_note_fatal(s, "cursor_write failed (sqlite)");
+    }
+    /* Test-only crash-point seam (see util/stage.h): the cursor write and
+     * this step's output are staged but NOT yet committed. A hook that
+     * kills the process here simulates a real kill -9 landing exactly at
+     * this commit boundary, deterministically (by ordinal, not timing). */
+    if (g_boundary_hook)
+        g_boundary_hook(s->name, g_boundary_seq++);
+    if (stage_step_commit(db, batched, &err) != SQLITE_OK) {
+        fprintf(stderr, "[stage] COMMIT: %s\n",  // obs-ok:stage-commit-failure
+                err ? err : "(no message)");
+        if (err) sqlite3_free(err);
+        stage_step_rollback(db, batched);
+        pthread_mutex_unlock(&s->lock);
+        progress_store_tx_unlock();
+        return stage_note_fatal(s, "COMMIT failed");
+    }
+    s->cursor = ctx.cursor_out;
+    atomic_fetch_add(&s->advanced_count, 1u);
+    /* Attribute ONE fully committed step to this stage's profile domain.
+     * Central rather than per-stage: the five profiled stages used to
+     * record this themselves and three never did, so a fold profile could
+     * show the parts and never the whole -- the 2026-08-24 C3 cold-start
+     * artifact accounted for only a quarter of its own wall time because
+     * utxo_apply and tip_finalize reported no total at all. TOTAL begins
+     * before the stage/cursor locks and therefore includes cursor read,
+     * savepoint open, the step body, cursor write, and savepoint release.
+     * FRAMEWORK isolates the pre-body portion that the old step_t0-based
+     * total silently omitted. Advancing steps only, so idle ticks waiting
+     * on an upstream frontier never dilute us/block. */
+    {
+        int prof_domain = reducer_stage_profile_domain_for(s->name);
+        if (prof_domain >= 0) {
+            int64_t now_us = GetTimeMicros();
+            int64_t prof_us = now_us - run_t0;
+            int64_t framework_us = step_t0 - run_t0;
+            reducer_stage_profile_observe_us(
+                (enum reducer_profile_domain)prof_domain, RPF_TOTAL_US,
+                prof_us > 0 ? (uint64_t)prof_us : 0);
+            reducer_stage_profile_observe_us(
+                (enum reducer_profile_domain)prof_domain,
+                RPF_FRAMEWORK_US,
+                framework_us > 0 ? (uint64_t)framework_us : 0);
+            reducer_stage_profile_add(
+                (enum reducer_profile_domain)prof_domain, RPF_BLOCKS, 1);
+        }
+    }
+    pthread_mutex_unlock(&s->lock);
+    progress_store_tx_unlock();
+    return JOB_ADVANCED;
+}
+
+/* Handle a non-advancing verdict (BLOCKED, IDLE, FATAL): roll back this
+ * step's work, release both locks, then record the result. */
+static job_result_t stage_run_once_nonadvance(stage_t *s, sqlite3 *db,
+                                              struct stage_step_ctx ctx,
+                                              job_result_t r, bool batched)
+{
+    /* Non-advancing outcomes: roll back this step's work (the step may have
+     * touched scratch state) and surface the result. Batched: undo only this
+     * block's savepoint, leaving earlier advanced blocks in the open batch. */
+    stage_step_rollback(db, batched);
+    pthread_mutex_unlock(&s->lock);
+    progress_store_tx_unlock();
+
+    if (r == JOB_BLOCKED) {
+        /* Record the blocker if the step filled out an id. Empty id
+         * means the step signalled BLOCKED but didn't fill the record
+         * — log and treat as ERROR so the caller is not misled. */
+        if (ctx.blocker.id[0] == '\0') {
+            return stage_note_fatal(s, "BLOCKED with empty blocker id");
+        }
+        if (ctx.blocker.owner_subsystem[0] == '\0') {
+            /* Owner field is bounded; truncate the (longer) stage name
+             * with explicit precision so -Wformat-truncation is happy. */
+            snprintf(ctx.blocker.owner_subsystem,
+                     sizeof(ctx.blocker.owner_subsystem),
+                     "%.*s",
+                     (int)(sizeof(ctx.blocker.owner_subsystem) - 1),
+                     s->name);
+        }
+        (void)blocker_set(&ctx.blocker);
+        atomic_fetch_add(&s->blocked_count, 1u);
+        return JOB_BLOCKED;
+    }
+
+    if (r == JOB_IDLE) {
+        atomic_fetch_add(&s->idle_count, 1u);
+        return JOB_IDLE;
+    }
+
+    /* JOB_FATAL or any other value: the step itself signalled a terminal
+     * error verdict (cursor unchanged). This is the dominant FATAL source —
+     * surface it loudly and latch it for the drain driver. */
+    return stage_note_fatal(s, "step returned FATAL verdict");
+}
+
 job_result_t stage_run_once(stage_t *s, sqlite3 *db)
 {
     if (!s || !db) {
@@ -546,114 +671,11 @@ job_result_t stage_run_once(stage_t *s, sqlite3 *db)
     job_result_t r = s->step(&ctx);
     stage_record_step_timing(s, GetTimeMicros() - step_t0);
 
-    if (r == JOB_ADVANCED) {
-        if (ctx.cursor_out <= cur) {
-            /* Contract violation: JOB_ADVANCED must move the cursor
-             * forward. Roll back to keep the invariant intact. */
-            fprintf(stderr,  // obs-ok:stage-advance-noop
-                "[stage] %s: ADVANCED but cursor_out(%llu) <= cursor_in(%llu); rolling back\n",
-                s->name,
-                (unsigned long long)ctx.cursor_out,
-                (unsigned long long)cur);
-            stage_step_rollback(db, batched);
-            pthread_mutex_unlock(&s->lock);
-            progress_store_tx_unlock();
-            return stage_note_fatal(s, "ADVANCED but cursor did not move");
-        }
-        if (!cursor_write_locked_known_prev(db, s->name, ctx.cursor_out, cur,
-                                            batched, cursor_existed)) {
-            stage_step_rollback(db, batched);
-            pthread_mutex_unlock(&s->lock);
-            progress_store_tx_unlock();
-            return stage_note_fatal(s, "cursor_write failed (sqlite)");
-        }
-        /* Test-only crash-point seam (see util/stage.h): the cursor write and
-         * this step's output are staged but NOT yet committed. A hook that
-         * kills the process here simulates a real kill -9 landing exactly at
-         * this commit boundary, deterministically (by ordinal, not timing). */
-        if (g_boundary_hook)
-            g_boundary_hook(s->name, g_boundary_seq++);
-        if (stage_step_commit(db, batched, &err) != SQLITE_OK) {
-            fprintf(stderr, "[stage] COMMIT: %s\n",  // obs-ok:stage-commit-failure
-                    err ? err : "(no message)");
-            if (err) sqlite3_free(err);
-            stage_step_rollback(db, batched);
-            pthread_mutex_unlock(&s->lock);
-            progress_store_tx_unlock();
-            return stage_note_fatal(s, "COMMIT failed");
-        }
-        s->cursor = ctx.cursor_out;
-        atomic_fetch_add(&s->advanced_count, 1u);
-        /* Attribute ONE fully committed step to this stage's profile domain.
-         * Central rather than per-stage: the five profiled stages used to
-         * record this themselves and three never did, so a fold profile could
-         * show the parts and never the whole -- the 2026-08-24 C3 cold-start
-         * artifact accounted for only a quarter of its own wall time because
-         * utxo_apply and tip_finalize reported no total at all. TOTAL begins
-         * before the stage/cursor locks and therefore includes cursor read,
-         * savepoint open, the step body, cursor write, and savepoint release.
-         * FRAMEWORK isolates the pre-body portion that the old step_t0-based
-         * total silently omitted. Advancing steps only, so idle ticks waiting
-         * on an upstream frontier never dilute us/block. */
-        {
-            int prof_domain = reducer_stage_profile_domain_for(s->name);
-            if (prof_domain >= 0) {
-                int64_t now_us = GetTimeMicros();
-                int64_t prof_us = now_us - run_t0;
-                int64_t framework_us = step_t0 - run_t0;
-                reducer_stage_profile_observe_us(
-                    (enum reducer_profile_domain)prof_domain, RPF_TOTAL_US,
-                    prof_us > 0 ? (uint64_t)prof_us : 0);
-                reducer_stage_profile_observe_us(
-                    (enum reducer_profile_domain)prof_domain,
-                    RPF_FRAMEWORK_US,
-                    framework_us > 0 ? (uint64_t)framework_us : 0);
-                reducer_stage_profile_add(
-                    (enum reducer_profile_domain)prof_domain, RPF_BLOCKS, 1);
-            }
-        }
-        pthread_mutex_unlock(&s->lock);
-        progress_store_tx_unlock();
-        return JOB_ADVANCED;
-    }
+    if (r == JOB_ADVANCED)
+        return stage_run_once_advance(s, db, ctx, cur, cursor_existed,
+                                      batched, run_t0, step_t0);
 
-    /* Non-advancing outcomes: roll back this step's work (the step may have
-     * touched scratch state) and surface the result. Batched: undo only this
-     * block's savepoint, leaving earlier advanced blocks in the open batch. */
-    stage_step_rollback(db, batched);
-    pthread_mutex_unlock(&s->lock);
-    progress_store_tx_unlock();
-
-    if (r == JOB_BLOCKED) {
-        /* Record the blocker if the step filled out an id. Empty id
-         * means the step signalled BLOCKED but didn't fill the record
-         * — log and treat as ERROR so the caller is not misled. */
-        if (ctx.blocker.id[0] == '\0') {
-            return stage_note_fatal(s, "BLOCKED with empty blocker id");
-        }
-        if (ctx.blocker.owner_subsystem[0] == '\0') {
-            /* Owner field is bounded; truncate the (longer) stage name
-             * with explicit precision so -Wformat-truncation is happy. */
-            snprintf(ctx.blocker.owner_subsystem,
-                     sizeof(ctx.blocker.owner_subsystem),
-                     "%.*s",
-                     (int)(sizeof(ctx.blocker.owner_subsystem) - 1),
-                     s->name);
-        }
-        (void)blocker_set(&ctx.blocker);
-        atomic_fetch_add(&s->blocked_count, 1u);
-        return JOB_BLOCKED;
-    }
-
-    if (r == JOB_IDLE) {
-        atomic_fetch_add(&s->idle_count, 1u);
-        return JOB_IDLE;
-    }
-
-    /* JOB_FATAL or any other value: the step itself signalled a terminal
-     * error verdict (cursor unchanged). This is the dominant FATAL source —
-     * surface it loudly and latch it for the drain driver. */
-    return stage_note_fatal(s, "step returned FATAL verdict");
+    return stage_run_once_nonadvance(s, db, ctx, r, batched);
 }
 
 /* ── Boot-time restore ─────────────────────────────────────────────── */
