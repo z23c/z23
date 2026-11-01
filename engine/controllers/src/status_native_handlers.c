@@ -280,7 +280,7 @@ static void status_full_fetch_rpc_results(struct status_full_rpc *r)
     r->sv = node_rpc_call("dumpstate", "[\"sovereignty\"]");
 }
 
-/* Attaches the six RPC bodies and five drill-down dumpstate bodies to the
+/* Attaches three RPC bodies and five drill-down dumpstate bodies to the
  * full document, in their original order. */
 static void status_full_push_rpc_bodies(struct json_value *root,
                                         const struct status_full_rpc *r)
