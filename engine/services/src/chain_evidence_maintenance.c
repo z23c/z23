@@ -1,5 +1,4 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
-// supervisor-ok:bounded-one-shot-maintenance — the only thread is a one-shot evidence maintenance run, joined before the next run and by chain_evidence_maintain_quiesce; the requester never waits on it beyond a deadline, and a stuck run only reports PENDING
  *
  * Off-thread chain-evidence maintenance for the health collector.
  *
@@ -30,6 +29,9 @@
  *   - DONE means a run that STARTED after this request finished; a request
  *     that finds an older run still in flight only waits and reports PENDING,
  *     and the next request starts a fresh run. */
+
+// supervisor-ok:bounded-one-shot-maintenance — the only thread is a one-shot evidence maintenance run, joined before the next run and by chain_evidence_maintain_quiesce; the requester never waits on it beyond a deadline, and a stuck run only reports PENDING
+// one-result-type-ok:bounded-wait-verdict — the public surface returns enum cec_maint_result (DONE or PENDING), a time-bounded wait verdict that carries no failure reason; the bool is a private wait predicate
 
 #include "services/chain_evidence_authority_service.h"
 #include "services/chain_state_service.h"
