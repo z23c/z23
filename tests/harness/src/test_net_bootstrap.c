@@ -323,11 +323,8 @@ static int check_peer_state_save_failure_sources(void)
     int failures = 0;
     static const char *const targets[] = { "banlist.dat", "peers.dat",
                                            "anchors.dat" };
-    char tmpdir[] = "/tmp/zcl_peer_save_XXXXXX";
-    if (!mkdtemp(tmpdir)) {
-        NBOOT_CHECK("peer-save: mkdtemp", false);
-        return failures;
-    }
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "net_bootstrap", "peer_save");
     chain_params_select(CHAIN_MAIN);
     const struct chain_params *params = chain_params_get();
     struct connman cm;
@@ -391,11 +388,7 @@ static int check_peer_state_save_failure_sources(void)
     cm.datadir = tmpdir;
     connman_free(&cm);
 out:
-    {
-        char cmd[700];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
-        TEST_DISCARD(system(cmd));
-    }
+    NBOOT_CHECK("peer-save: fixture removed", test_rm_rf_recursive(tmpdir) == 0);
     return failures;
 }
 

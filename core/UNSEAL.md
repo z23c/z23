@@ -713,3 +713,7 @@ later lane flips it HARD.
 - 2026-11-01T21:04:46Z — REASON: Test each peer-state save failure source and the shutdown retry seam;  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: 632c90b5bed4908ada767f71672f2f386846f92666539226502767e67abb8b13
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T21:05:07Z — REASON: test_net_bootstrap: peer-save fixture under test-tmp, removed recursively;  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: 0104ee41728005c25195204e454dea443358ecf3f28f258fc9a0a44df71815ea
+  by: owner unseal ritual (make core-unseal)
