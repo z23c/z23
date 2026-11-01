@@ -872,6 +872,24 @@ static bool api_status_sapling_check(
     return ok;
 }
 
+/* The public status carries no wallet note state: while the wallet holds a
+ * received note, no witness counter appears, because polling one would link
+ * the note to a block height. */
+static bool api_status_no_witness_counts(uint8_t *resp, size_t cap)
+{
+    static const char *const keys[] = {
+        "witness_ready", "witness_missing", "witness_stale"};
+    size_t n = api_handle_request("GET", "/api/node/status", NULL, 0, resp,
+                                  cap);
+    if (n == 0 || n >= cap)
+        return false;
+    resp[n] = 0;
+    bool ok = true;
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+        ok = ok && strstr((const char *)resp, keys[i]) == NULL;
+    return ok;
+}
+
 static int api_status_sapling_ok(uint8_t *resp, size_t cap)
 {
     int failures = 0;
@@ -897,6 +915,17 @@ static int api_status_sapling_ok(uint8_t *resp, size_t cap)
               api_status_sapling_check(resp, cap, "node_state", 4, -1, false,
                                        4, 1, false);
     if (ok)
+        printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    api_status_sapling_close(&f);
+
+    printf("api: node status carries no wallet note witness counts... ");
+    api_status_sapling_open(&f, true);
+    uint8_t txid[32] = {0x21}, pad[512] = {0}, d[11] = {1}, k[32] = {1};
+    if (f.up && api_status_sapling_set_copy(&f.ndb, 2, 1) &&
+        node_db_sync_sapling_note(&f.ndb, txid, 0, 1000, k, pad, 512, k, d, k,
+                                  k, k, 1) &&
+        api_status_no_witness_counts(resp, cap))
         printf("OK\n");
     else { printf("FAIL\n"); failures++; }
     api_status_sapling_close(&f);
