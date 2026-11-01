@@ -200,6 +200,33 @@ static bool bgv_auth_genesis_tip_prepare(
     return true;
 }
 
+/* A live-advance write for a newer tip can replace the earned record
+ * between the earn and the snapshot that follows. Earning is tip-by-hash
+ * and idempotent, so retry once from a fresh snapshot; if the record is
+ * still unearned, refuse BEFORE mark_fully_validated, which would freeze
+ * the controller on missing evidence.
+ * Residual window (documented, not closed): a replacement landing between
+ * the final snapshot and mark_fully_validated's own load still freezes the
+ * controller until boot. Closing it needs mark_fully_validated to take the
+ * tip hash, a wider controller change. */
+static bool bgv_auth_prepare_and_check(
+    struct bg_validation_service *svc,
+    struct chain_evidence_controller *authority,
+    struct chain_evidence_controller_view *view, bool external_seeded,
+    char reason[192])
+{
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (attempt > 0)
+            chain_evidence_controller_snapshot(authority, view);
+        if (!bgv_auth_genesis_tip_prepare(svc, authority, view,
+                                          external_seeded, reason))
+            return false;
+        if (bgv_auth_evidence_ready(view, external_seeded, reason))
+            return true;
+    }
+    return false;
+}
+
 static bool bgv_auth_dependencies_ready(struct bg_validation_service *svc)
 {
     return svc && svc->ms && svc->ndb && svc->ndb->open && svc->ndb->db;
@@ -305,25 +332,8 @@ struct zcl_result bg_validation_authority_publish(
         return ZCL_OK;
     }
 
-    /* A live-advance write for a newer tip can replace the earned record
-     * between the earn and this snapshot. Earning is tip-by-hash and
-     * idempotent, so retry once from a fresh snapshot; if the record is
-     * still unearned, refuse here, BEFORE mark_fully_validated, which would
-     * freeze the controller on missing evidence.
-     * Residual window (documented, not closed): a replacement landing
-     * between this final snapshot and mark_fully_validated's own load still
-     * freezes until boot. Closing it needs mark_fully_validated to take the
-     * tip hash, a wider controller change. */
-    bool ready = false;
-    for (int attempt = 0; attempt < 2 && !ready; attempt++) {
-        if (attempt > 0)
-            chain_evidence_controller_snapshot(&authority, &view);
-        if (!bgv_auth_genesis_tip_prepare(svc, &authority, &view,
-                                          external_seeded, reason))
-            return bgv_auth_refuse(reason);
-        ready = bgv_auth_evidence_ready(&view, external_seeded, reason);
-    }
-    if (!ready)
+    if (!bgv_auth_prepare_and_check(svc, &authority, &view, external_seeded,
+                                    reason))
         return bgv_auth_refuse(reason);
 
     uint8_t authority_root_bytes[32];
