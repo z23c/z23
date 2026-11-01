@@ -35,6 +35,7 @@ core.wallet.transaction.send  exempt: signs+broadcasts, no privileged datadir in
 core.wallet.shielded.send     exempt: signs+broadcasts, no privileged datadir install
 core.mining.regtest-mine      exempt: produces regtest blocks, no privileged artifact installation
 core.wallet.shielded.address  exempt: wallet-local, rebuildable projection
+core.wallet.shielded.receive  exempt: records the next diversifier index in the wallet database; installs no privileged artifact and changes no running binary
 core.wallet.backup.now     exempt: wallet-local, rebuildable projection
 core.wallet.rescan         exempt: wallet-local, rebuildable projection
 core.wallet.replay         exempt: wallet-local, rebuildable projection

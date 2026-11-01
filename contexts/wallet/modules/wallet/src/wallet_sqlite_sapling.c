@@ -8,6 +8,7 @@
 #include "wallet/wallet_keystore.h"
 #include "wallet/wallet_lock.h"
 #include "wallet/wallet_sqlite_key_crypto.h"
+#include "base/serialize_le.h"
 #include "support/cleanse.h"
 #include "util/ar_step_readonly.h"
 #include "util/log_macros.h"
@@ -539,7 +540,7 @@ static int wsql_synchronous_level(sqlite3 *db)
     if (sqlite3_prepare_v2(db, "PRAGMA synchronous", -1, &s, NULL) !=
             SQLITE_OK || !s)
         return -1;
-    int level = sqlite3_step(s) == SQLITE_ROW ? sqlite3_column_int(s, 0) : -1;
+    int level = sqlite3_step(s) == SQLITE_ROW ? sqlite3_column_int(s, 0) : -1;  // raw-sql-ok:wallet-pragma-read
     sqlite3_finalize(s);
     return level;
 }
@@ -572,9 +573,7 @@ static bool wsql_div_first_free(struct wallet_sqlite *ws,
         if (!wsql_div_random(r, sizeof(r)))
             LOG_FAIL("wallet_sqlite", "diversifier reserve: no randomness; "
                      "no address issued");
-        uint64_t v = 0;
-        for (int k = 0; k < 8; k++)
-            v |= (uint64_t)r[k] << (8 * k);
+        uint64_t v = zcl_read_u64_le(r);
         memory_cleanse(r, sizeof(r));
         stored = WSQL_DIV_START_MIN + v % WSQL_DIV_START_SPAN;
     }

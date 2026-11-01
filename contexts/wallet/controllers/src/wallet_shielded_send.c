@@ -309,8 +309,7 @@ static bool z_sendmany_shielded_from(struct wallet_rpc_context *ctx,
         if (!sapling_decode_payment_address(from_addr, diversifier, pk_d)) {
             json_set_str(result, "Invalid shielded from address");
             LOG_FAIL("wallet_shielded",
-                     "z_sendmany: cannot decode shielded from address %s",
-                     from_addr);
+                     "z_sendmany: cannot decode shielded from address");
         }
         key = sapling_keystore_find_by_owned_address(
             &ctx->wallet->sapling_keys, diversifier, pk_d);

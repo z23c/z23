@@ -298,6 +298,7 @@ static bool wdr_stored_next(struct wdr *f, const struct sapling_key_entry *acct,
 static bool wdr_build_tx(struct transaction *tx, const char *address,
                          uint64_t value)
 {
+    transaction_init(tx);
     uint8_t d[11], pk_d[32];
     if (!sapling_decode_payment_address(address, d, pk_d))
         return false;
@@ -311,7 +312,6 @@ static bool wdr_build_tx(struct transaction *tx, const char *address,
     if (!sapling_build_output_description(ovk, d, pk_d, value, NULL, cv, cm,
                                           epk, enc, out, proof, NULL))
         return false;
-    transaction_init(tx);
     tx->version = 4;
     tx->overwintered = true;
     tx->value_balance = -(int64_t)value;
@@ -1314,6 +1314,7 @@ static bool wds_pay(struct simnet *s,
                     const struct uint256 *coinbase, const char *address,
                     int64_t value, struct transaction *copy_out)
 {
+    transaction_init(copy_out);
     uint8_t d[11], pk_d[32];
     if (!sapling_decode_payment_address(address, d, pk_d))
         return false;
@@ -1353,7 +1354,6 @@ static bool wds_pay(struct simnet *s,
                                            sighash.data, tz.binding_sig);
     transaction_compute_hash(&tz);
     ok = ok && wds_verify(&tz, cp, height);
-    transaction_init(copy_out);
     ok = ok && transaction_copy(copy_out, &tz);
     transaction_compute_hash(copy_out);
     ok = ok && simnet_mint_txs(s, &tz, 1);
