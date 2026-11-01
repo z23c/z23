@@ -277,6 +277,18 @@ void chain_evidence_pending_tip_test_reset(void);
 bool chain_evidence_drain_pending_tip(
     struct chain_evidence_controller *authority);
 
+/* Off-thread chain-evidence maintenance for the health collector: runs
+ * chain_evidence_controller_init (state load, boot reconcile) and
+ * chain_evidence_drain_pending_tip on one helper thread and waits at most
+ * wait_ms.  PENDING = not finished in time (or an older run is still in
+ * flight): the caller must report the tick stale/unavailable, never fresh.
+ * The helper keeps running and completes when node.db frees up; the next
+ * request retries.  Quiesce joins the helper (shutdown, tests). */
+enum cec_maint_result { CEC_MAINT_DONE = 0, CEC_MAINT_PENDING };
+enum cec_maint_result chain_evidence_maintain_bounded(
+    struct node_db *ndb, struct chain_state_repository *csr, int wait_ms);
+void chain_evidence_maintain_quiesce(void);
+
 /* Guard A (coins-durability): the genuine applied coins frontier is the height
  * of the block whose hash is coins_best_block (the connect_block authority).
  * cec.coins_best_block_height must NEVER be persisted above it, or recovery

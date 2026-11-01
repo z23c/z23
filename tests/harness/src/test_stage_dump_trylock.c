@@ -53,6 +53,8 @@
 #include "jobs/script_validate_stage.h"
 #include "jobs/utxo_apply_stage.h"
 #include "jobs/validate_headers_stage.h"
+#include "services/chain_evidence_authority_service.h"
+#include "services/node_health_service.h"
 #include "services/chain_state_service.h"
 #include "json/json.h"
 #include "config/db_service.h"
@@ -989,6 +991,111 @@ static int case_dumper_ndb_mutex_busy(void)
     return failures;
 }
 
+/* Health collector against a busy node.db connection mutex (the 11-01 r1
+ * freeze shape: the sweep ring queued behind a long node.db statement).
+ * Phase 1: thread M owns the connection mutex, a finalized tip is pending.
+ * The collect must return inside the bound, mark the tick unavailable (never
+ * fresh), and persist nothing.  Phase 2: after release the helper finishes
+ * on its own and persists the pending tip once; the next tick is DONE, clean,
+ * and writes nothing again. */
+static struct {
+    struct node_health_snapshot snap;
+    long ms;
+} g_hc;
+
+static void *ndb_health_thread(void *arg)
+{
+    struct ndb_contest *n = (struct ndb_contest *)arg;
+    struct timespec t0;
+    contest_wait(&n->c, &n->c.csr_held, 60);
+    bool have_t0 = sdt_clock(CLOCK_MONOTONIC, &t0);
+    node_health_collect(&g_hc.snap, n->ndb, NULL);
+    g_hc.ms = have_t0 ? cev_ms_since(&t0) : -1;
+    contest_set(&n->c, &n->c.d_done);
+    return NULL;
+}
+
+static bool hc_persisted_tip(struct node_db *ndb)
+{
+    int64_t h = -1;
+    return node_db_state_get_int(ndb, "cec.active_tip_height", &h) && h == 7;
+}
+
+static int case_health_collect_ndb_busy(void)
+{
+    int failures = 0;
+    static struct dump_ndb_fixture fx;
+    static struct ndb_contest n = {
+        .c = { .mu = PTHREAD_MUTEX_INITIALIZER,
+               .cv = PTHREAD_COND_INITIALIZER } };
+    memset(&fx, 0, sizeof(fx));
+    bool ok = node_db_open(&fx.ndb, ":memory:");
+    SD_CHECK("hcbusy: node.db fixture opens", ok);
+    if (!ok)
+        return failures;
+    db_service_init(&fx.dbsvc);
+    ok = db_service_attach(&fx.dbsvc, &fx.ndb) && db_service_start(&fx.dbsvc);
+    SD_CHECK("hcbusy: db_service fixture starts", ok);
+    if (!ok) {
+        node_db_close(&fx.ndb);
+        return failures;
+    }
+    fx.runtime.db_service = &fx.dbsvc;
+    app_runtime_set_current(&fx.runtime);
+
+    struct block_index tip;
+    memset(&tip, 0, sizeof(tip));
+    tip.nHeight = 7;
+    memset(&tip.hashBlock, 0x5a, sizeof(tip.hashBlock));
+    tip.phashBlock = &tip.hashBlock;
+    chain_evidence_pending_tip_test_reset();
+    chain_evidence_note_finalized_tip(&tip);
+
+    n.ndb = &fx.ndb;
+    contest_reset(&n.c);
+    pthread_t th, td;
+    int rh = pthread_create(&th, NULL, ndb_holder_thread, &n);
+    int rd = rh == 0 ? pthread_create(&td, NULL, ndb_health_thread, &n) : -1;
+    SD_CHECK("hcbusy: threads start", rh == 0 && rd == 0);
+    bool answered = rd == 0 && contest_wait(&n.c, &n.c.d_done, 10);
+    SD_CHECK("hcbusy: collect returns while the node.db connection mutex is "
+             "owned", answered);
+    if (answered) {
+        SD_CHECK("hcbusy: it came back in under the bound",
+                 g_hc.ms >= 0 && g_hc.ms < CONTEST_BOUND_MS);
+        SD_CHECK("hcbusy: the tick is marked chain_evidence_unavailable_busy "
+                 "(not fresh)",
+                 strstr(g_hc.snap.warning_reasons,
+                        "chain_evidence_unavailable_busy") != NULL);
+    }
+    contest_set(&n.c, &n.c.release_h);
+    if (rh == 0) {
+        contest_set(&n.c, &n.c.csr_held);
+        pthread_join(th, NULL);
+    }
+    if (rd == 0)
+        pthread_join(td, NULL);
+
+    /* Phase 2: the helper, parked behind M, now completes by itself. */
+    chain_evidence_maintain_quiesce();
+    SD_CHECK("hcbusy: pending tip persisted after release",
+             hc_persisted_tip(&fx.ndb));
+    int before = sqlite3_total_changes(fx.ndb.db);
+    node_health_collect(&g_hc.snap, &fx.ndb, NULL);
+    chain_evidence_maintain_quiesce();
+    SD_CHECK("hcbusy: next tick is not marked unavailable",
+             strstr(g_hc.snap.warning_reasons,
+                    "chain_evidence_unavailable_busy") == NULL);
+    SD_CHECK("hcbusy: next tick writes nothing again (exactly-once persist)",
+             sqlite3_total_changes(fx.ndb.db) == before);
+
+    chain_evidence_pending_tip_test_reset();
+    app_runtime_set_current(NULL);
+    db_service_stop(&fx.dbsvc);
+    node_db_close(&fx.ndb);
+    return failures;
+}
+
 int test_stage_dump_trylock(void)
 {
     int failures = 0;
@@ -1001,6 +1108,7 @@ int test_stage_dump_trylock(void)
     failures += case_chain_evidence_ingest_contention();
     failures += case_bounded_snapshot_ndb_mutex();
     failures += case_dumper_ndb_mutex_busy();
+    failures += case_health_collect_ndb_busy();
     int clock_failures = atomic_load(&g_sdt_clock_failures);
     if (clock_failures != 0) {
         printf("test_stage_dump_trylock: %d clock_gettime failure(s); "

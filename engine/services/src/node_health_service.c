@@ -531,6 +531,42 @@ static void health_collect_active_tip(struct node_health_snapshot *snapshot,
  * table each time. The count is at most UTXO_COUNT_GAUGE_MAX_AGE_SECS old. */
 static struct utxo_count_cache g_health_utxo_cache;
 
+/* Reads on the SHARED node.db connection (the node_health_store port's query
+ * handle IS node_db->db: db_service_open_query_db) go through a try-entered
+ * connection mutex: an ingest statement can hold it for a long time, and the
+ * health collector runs on the sweep ring the watchdog's liveness gate reads.
+ * Busy is reported to the caller (never waited on) so the tick is marked
+ * stale.  The mutex is recursive, so the reads inside re-enter without
+ * waiting. */
+static bool health_ndb_utxo_count(struct node_db *ndb,
+                                  struct node_health_store_port *store,
+                                  int64_t *count, bool *busy)
+{
+    void *token = NULL;
+    if (!csr_ndb_try_enter(ndb, &token)) {
+        *busy = true;
+        return false;  // raw-return-ok:busy connection mutex is reported as a stale tick
+    }
+    bool ok = store->utxo_count(store->self, count) ||
+              node_db_utxo_count_checked(ndb, count);
+    csr_ndb_leave(token);
+    return ok;
+}
+
+static void health_ndb_tip_height(struct node_health_snapshot *snapshot,
+                                  struct node_db *ndb,
+                                  struct node_health_store_port *store)
+{
+    void *token = NULL;
+    if (!csr_ndb_try_enter(ndb, &token)) {
+        health_add_warning(snapshot, "tip_height_stale_node_db_busy");
+        return;
+    }
+    if (!store->tip_height_from_blocks(store->self, &snapshot->tip_height))
+        snapshot->tip_height = db_block_max_height(ndb);
+    csr_ndb_leave(token);
+}
+
 static void health_collect_utxo_count(struct node_health_snapshot *snapshot,
                                       struct node_db *ndb,
                                       struct node_health_store_port *store)
@@ -541,8 +577,10 @@ static void health_collect_utxo_count(struct node_health_snapshot *snapshot,
                              &snapshot->utxo_count))
         return;
     int64_t count = 0;
-    bool ok = store->utxo_count(store->self, &count) ||
-              node_db_utxo_count_checked(ndb, &count);
+    bool ndb_busy = false;
+    bool ok = health_ndb_utxo_count(ndb, store, &count, &ndb_busy);
+    if (ndb_busy)
+        health_add_warning(snapshot, "utxo_count_stale_node_db_busy");
     if (!ok) {
         static struct log_throttle warn = LOG_THROTTLE_INIT;
         uint64_t reps = 0;
@@ -604,12 +642,8 @@ static void health_collect_db_status(struct node_health_snapshot *snapshot,
                 snapshot->db_last_activity_age_seconds =
                     now - dbs.last_activity_time;
         }
-        if (snapshot->tip_height < 0) {
-            if (!store.tip_height_from_blocks(store.self,
-                                              &snapshot->tip_height)) {
-                snapshot->tip_height = db_block_max_height(ndb);
-            }
-        }
+        if (snapshot->tip_height < 0)
+            health_ndb_tip_height(snapshot, ndb, &store);
         health_collect_utxo_count(snapshot, ndb, &store);
 
         int64_t wal_bytes = 0;
@@ -920,6 +954,9 @@ static void health_collect_watchdog_stats(struct node_health_snapshot *snapshot)
              "%s", wd.last_recovery_trigger);
 }
 
+/* How long a collector waits for the off-thread evidence maintenance run. */
+#define HEALTH_CEC_MAINT_WAIT_MS 500
+
 static void health_apply_chain_evidence(struct node_health_snapshot *snapshot,
                                         struct node_db *ndb)
 {
@@ -928,15 +965,25 @@ static void health_apply_chain_evidence(struct node_health_snapshot *snapshot,
      * It does not claim that the process is hung or ask systemd to restart. */
     struct chain_evidence_controller cec;
     struct chain_evidence_controller_view view;
-    chain_evidence_controller_init(&cec, ndb, csr_instance());
-    /* Drain the reducer's pending published tip BEFORE snapshotting:
-     * the durable evidence follow runs here — the health path owns the
-     * established csr->coins_kv lock order — never on the drive (ABBA
-     * deadlock). Doing it first means the snapshot below compares
-     * against evidence that already names the served tip, so a green
-     * node reads healthy. */
-    (void)chain_evidence_drain_pending_tip(&cec);
-    chain_evidence_controller_snapshot(&cec, &view);
+    /* The mutating init (state load, boot reconcile) and the drain of the
+     * reducer's pending published tip both touch node.db, whose shared
+     * connection mutex an ingest statement can hold for a long time.  They run
+     * on the maintenance helper thread (same work, same lock order, still
+     * BEFORE the snapshot so a green node reads healthy); this thread waits at
+     * most HEALTH_CEC_MAINT_WAIT_MS and binds its own controller with NO
+     * node.db access.  A run that is not finished, or a snapshot that finds
+     * node.db / the chain-state locks busy, marks the tick unavailable: no
+     * evidence-derived verdict is claimed, healthy is left to the other
+     * checks, and the warning says why.  The helper completes later and the
+     * next tick retries (see chain_evidence_maintenance.c). */
+    chain_evidence_controller_init_unloaded(&cec, ndb, csr_instance());
+    if (chain_evidence_maintain_bounded(ndb, csr_instance(),
+                                        HEALTH_CEC_MAINT_WAIT_MS) !=
+            CEC_MAINT_DONE ||
+        !chain_evidence_controller_snapshot_bounded(&cec, &view)) {
+        health_add_warning(snapshot, "chain_evidence_unavailable_busy");
+        return;
+    }
     if (view.state == CEC_CONTRADICTION_FROZEN) {
         if (snapshot->degraded_reason[0] == '\0') {
             snprintf(snapshot->degraded_reason,
