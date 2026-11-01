@@ -1238,6 +1238,25 @@ static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
         PASS();
     }
 
+    TEST("land.reverify_offer: a check that is an integer or an empty string "
+         "refuses OFFER_BAD_ARGUMENT naming input.check; it is never cx") {
+        dlt_begin(&c, "dev.land.reverify_offer");
+        (void)json_push_kv_str(&c.input, "bundle", b2);
+        (void)json_push_kv_str(&c.input, "offer", o2);
+        (void)json_push_kv_str(&c.input, "repo", r->queue);
+        (void)json_push_kv_int(&c.input, "check", 5);
+        dlt_cd(r->queue);
+        zcl_native_handle_dev_land_remote(&c.request, &c.reply);
+        ASSERT(dlt_refused(&c, "OFFER_BAD_ARGUMENT"));
+        ASSERT(strstr(c.reply.error.evidence, "input.check") != NULL);
+        dlt_end(&c);
+        dlt_rv_mode(&c, r, b2, o2, rc2, "", 0);
+        ASSERT(dlt_refused(&c, "OFFER_BAD_ARGUMENT"));
+        dlt_end(&c);
+        ASSERT(dlt_rv_clean(r, tmp));
+        PASS();
+    }
+
 _test_next:;
     zcl_dlr_verify_seam_set(NULL);
     return failures;
