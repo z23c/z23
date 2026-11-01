@@ -180,10 +180,10 @@ struct zcl_result wallet_commit_from_context(
     if (!ctx || !wtx)
         return ZCL_ERR(-1, "wallet commit context: NULL context or transaction");
     /* Private mode: the send is recorded durably before the wallet admits it. */
-    struct zcl_result recorded =
+    struct zcl_result prepared =
         wallet_private_broadcast_before_commit(ctx, &wtx->tx.hash);
-    if (!recorded.ok)
-        return recorded;
+    if (!prepared.ok)
+        return prepared;
     struct wallet_tx_admission admission = {
         .mempool = ctx->mempool,
         .coins_tip = ctx->coins_tip,
