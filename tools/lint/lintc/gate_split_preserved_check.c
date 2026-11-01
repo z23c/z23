@@ -197,16 +197,11 @@ int sp_compare(const char *path, const char *base, size_t base_len,
     struct sp_ctx c = { path, &b, &n, dedup, exists, out, 0 };
     int bad = sp_analyze(&b, base, base_len) || sp_analyze(&n, cur, cur_len) ||
               sp_diff(&b.inc, &n.inc) || sp_diff(&b.lg, &n.lg) || sp_diff(&b.cm, &n.cm);
-    fprintf(stderr, "DBG compare bad=%d\n", bad);
     if (!bad) {
         sp_check_header(&c);
-        fprintf(stderr, "DBG header ok\n");
         sp_check_includes(&c, &b, &n);
-        fprintf(stderr, "DBG includes ok\n");
         sp_check_logs(&c, &b, &n);
-        fprintf(stderr, "DBG logs ok\n");
         sp_check_comments(&c, &b);
-        fprintf(stderr, "DBG comments ok\n");
     }
     sp_free(&b);
     sp_free(&n);

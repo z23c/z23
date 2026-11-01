@@ -515,7 +515,6 @@ static int sp_in_accept(const struct sp_file *f, size_t off, const char *fn)
 
 static void sp_add_log(struct sp_file *f, size_t i, size_t end, unsigned line)
 {
-    fprintf(stderr, "DBG add_log i=%zu end=%zu n=%zu nspan=%zu\n", i, end, f->n, f->nspan);
     char *call = sp_norm(f->code, f->lit, i, end);
     char *rew = NULL, *infn = NULL;
     const char *fn = sp_func_at(f, i);
@@ -628,9 +627,7 @@ int sp_analyze(struct sp_file *f, const char *text, size_t n)
     sp_logs(f);
     sp_includes(f);
     sp_header(f, text, n);
-    fprintf(stderr, "DBG before name_comments cm=%zu nspan=%zu\n", f->cm.n, f->nspan);
     sp_name_comments(f);
-    fprintf(stderr, "DBG after name_comments\n");
     return f->err || f->cm.err || f->lg.err || f->inc.err;
 }
 
