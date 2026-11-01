@@ -110,6 +110,27 @@ static bool log_row_hash_match(sqlite3 *db, int height,
     return true;
 }
 
+enum { FORK_WALK_MAX = 256 };
+
+/* The deepest ancestor of the published tip that the best-header chain still
+ * contains: the block a replacement branch extends when the tip sits on an
+ * abandoned block. NULL when the tip is on the best-header chain or its
+ * ancestry does not reach that chain within FORK_WALK_MAX blocks. */
+static struct block_index *fork_point_below_tip(struct block_index *best_header,
+                                                struct block_index *tip)
+{
+    if (!best_header || !tip)
+        return NULL;
+    struct block_index *t = tip;
+    for (int i = 0; t && i < FORK_WALK_MAX; i++) {
+        if (t->nHeight <= best_header->nHeight &&
+            block_index_get_ancestor(best_header, t->nHeight) == t)
+            return t == tip ? NULL : t;
+        t = t->pprev;
+    }
+    return NULL;
+}
+
 bool header_admit_forward_replay_parent_ok(sqlite3 *db,
                                            struct main_state *ms,
                                            const struct block_index *bi,
@@ -120,7 +141,13 @@ bool header_admit_forward_replay_parent_ok(sqlite3 *db,
     if (!ms || !bi || !bi->pprev || !bi->pprev->phashBlock)
         return false;
 
+    /* A published tip on an abandoned block does not own the heights the
+     * replacement branch replays: the fork point below it does. */
     int active_h = active_chain_height(&ms->chain_active);
+    const struct block_index *fork = fork_point_below_tip(
+        ms->pindex_best_header, active_chain_tip(&ms->chain_active));
+    if (fork)
+        active_h = fork->nHeight;
     if (height <= active_h)
         return false;
 
@@ -217,19 +244,21 @@ int header_admit_rewind_target_above_anchor(int target, uint64_t cursor)
     return (uint64_t)target >= cursor ? HEADER_ADMIT_REWIND_NONE : target;
 }
 
-/* A sibling of the same parent passes the parent audit. When the best-header
- * chain extends the active tip at next_h with a different hash than the logged
- * row, the row is a stale fork child (never while the window owns the slot or
- * when the child failed): nothing else re-requests its body
- * because the downstream cursors already sit past it. */
-static bool row_names_sibling_of_best_header(sqlite3 *db,
-                                             struct block_index *best_header,
-                                             const struct block_index *tip,
-                                             int next_h)
+/* A sibling of the same parent passes the parent audit. When the block the
+ * node is following at next_h (the window slot, else the best-header chain)
+ * extends the tip with a different hash than the logged row, the row is a
+ * stale fork child (never when that block failed): nothing else re-requests
+ * its body or rebinds the downstream verdicts, because the downstream cursors
+ * already sit past it. */
+static bool row_names_sibling_of_followed_block(sqlite3 *db,
+                                                struct block_index *best_header,
+                                                struct active_chain *chain,
+                                                const struct block_index *tip,
+                                                int next_h)
 {
-    if (!best_header || best_header->nHeight < next_h)
-        return false;
-    const struct block_index *want = block_index_get_ancestor(best_header, next_h);
+    const struct block_index *want = active_chain_at(chain, next_h);
+    if (!want && best_header && best_header->nHeight >= next_h)
+        want = block_index_get_ancestor(best_header, next_h);
     if (!want || !want->phashBlock || block_has_any_failure(want) ||
         !want->pprev || !want->pprev->phashBlock ||
         !uint256_eq(want->pprev->phashBlock, tip->phashBlock))
@@ -238,6 +267,41 @@ static bool row_names_sibling_of_best_header(sqlite3 *db,
     if (!log_row_hash_match(db, next_h, want->phashBlock, &known, &matches))
         return false;  // raw-return-ok:logged-above
     return known && !matches;
+}
+
+/* Audits the header_admit_log row above tip. Sets *out_target and *out_reason
+ * only when that row needs a rewind. */
+static bool audit_row_above(sqlite3 *db, struct block_index *best_header,
+                            struct active_chain *chain, uint64_t cursor,
+                            struct block_index *tip, int *out_target,
+                            const char **out_reason)
+{
+    if (tip_unusable_for_rewind(tip))
+        return true;
+
+    int next_h = tip->nHeight + 1;
+    if ((uint64_t)next_h >= cursor)
+        return true;
+
+    bool row_known = false;
+    bool parent_matches = false;
+    if (!log_row_parent_match(db, next_h, tip->phashBlock,
+                              &row_known, &parent_matches)) {
+        LOG_WARN("header_admit",
+                 "[header_admit] forward-fork parent audit failed h=%d",
+                 next_h);
+        return false;  // raw-return-ok:logged-above
+    }
+    if (row_known && parent_matches &&
+        !row_names_sibling_of_followed_block(db, best_header, chain, tip,
+                                             next_h))
+        return true;
+
+    /* The rewind height, HEADER_ADMIT_REWIND_NONE, or REFUSED (logged). */
+    *out_target = header_admit_rewind_target_above_anchor(next_h, cursor);
+    *out_reason = !row_known ? "missing_row"
+                   : parent_matches ? "hash_mismatch" : "parent_mismatch";
+    return true;
 }
 
 bool header_admit_forward_rewind_target(sqlite3 *db,
@@ -261,33 +325,24 @@ bool header_admit_forward_rewind_target(sqlite3 *db,
         return false;
     }
 
+    /* The published tip is never moved: repair windows are bounded by it.
+     * When it sits on an abandoned block, the replacement branch extends the
+     * fork point below it, so audit the row above that point: a stale sibling
+     * row is repaired and the replacement body requested. A failed tip is
+     * audited from the fork point alone: no row can extend it, so a row above
+     * it would be rewound on every pass. */
     struct block_index *tip = active_chain_tip(chain);
-    if (tip_unusable_for_rewind(tip))
-        return true;
-
-    int next_h = tip->nHeight + 1;
-    if ((uint64_t)next_h >= cursor)
-        return true;
-
-    bool row_known = false;
-    bool parent_matches = false;
-    if (!log_row_parent_match(db, next_h, tip->phashBlock,
-                              &row_known, &parent_matches)) {
-        LOG_WARN("header_admit",
-                 "[header_admit] forward-fork parent audit failed h=%d",
-                 next_h);
+    struct block_index *fork = fork_point_below_tip(best_header, tip);
+    if (fork && block_has_any_failure(tip))
+        return audit_row_above(db, best_header, chain, cursor, fork,
+                               out_target, out_reason);
+    if (!audit_row_above(db, best_header, chain, cursor, tip, out_target,
+                         out_reason))
         return false;  // raw-return-ok:logged-above
-    }
-    if (row_known && parent_matches &&
-        (active_chain_at(chain, next_h) ||
-         !row_names_sibling_of_best_header(db, best_header, tip, next_h)))
+    if (!fork || *out_target != HEADER_ADMIT_REWIND_NONE)
         return true;
-
-    /* The rewind height, HEADER_ADMIT_REWIND_NONE, or REFUSED (logged). */
-    *out_target = header_admit_rewind_target_above_anchor(next_h, cursor);
-    *out_reason = !row_known ? "missing_row"
-                   : parent_matches ? "hash_mismatch" : "parent_mismatch";
-    return true;
+    return audit_row_above(db, best_header, chain, cursor, fork, out_target,
+                           out_reason);
 }
 
 static const char *const k_downstream[] = {
