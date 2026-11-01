@@ -74,7 +74,7 @@ static bool sh_maintenance_begin(bool cancelable)
         bool stop = g_stop_requested;
         pthread_mutex_unlock(&g_lock);
         if (stop || thread_registry_shutdown_requested())
-            return false;
+            return false; // raw-return-ok:stop_requested_interrupt
         if (storage_pacing_maintenance_try_begin(200))
             return true;
     }
@@ -89,7 +89,7 @@ static bool sweep_projection(const struct storage_pacing *pacing, bool cancelabl
         .file_bytes = -1, .live_bytes = -1, .free_bytes = -1,
     };
     if (!sh_maintenance_begin(cancelable))
-        return false;
+        return false; // raw-return-ok:stop_requested_interrupt
     bool compacted = projection_store_compact_if_needed(
         pacing->compact_floor_bytes, pacing->compact_ratio_pct, NULL,
         &after);
@@ -108,7 +108,7 @@ static bool sweep_topology(const struct storage_pacing *pacing, bool cancelable)
 {
     int64_t wal_before = -1;
     if (!sh_maintenance_begin(cancelable))
-        return false;
+        return false; // raw-return-ok:stop_requested_interrupt
     bool truncated = topology_store_wal_checkpoint_if_over(
         pacing->wal_truncate_bytes, &wal_before);
     storage_pacing_maintenance_end();
@@ -128,7 +128,7 @@ static bool sweep_logs(const char *datadir, const struct storage_pacing *pacing,
     if (!datadir || !datadir[0])
         return true;
     if (!sh_maintenance_begin(cancelable))
-        return false;
+        return false; // raw-return-ok:stop_requested_interrupt
     int rotated = tor_logs_rotate(datadir, pacing->log_rotate_bytes);
     storage_pacing_maintenance_end();
 
@@ -164,7 +164,7 @@ static bool sh_sweep(const char *datadir, bool cancelable)
         pthread_mutex_lock(&g_lock);
         g_stats.sweeps_interrupted++;
         pthread_mutex_unlock(&g_lock);
-        return false;
+        return false; // raw-return-ok:interrupted_sweep_counted
     }
 
     pthread_mutex_lock(&g_lock);
