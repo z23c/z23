@@ -334,22 +334,39 @@ static const struct json_value *mcp_select_child(const struct json_value *v,
 static bool mcp_select_probe(const struct json_value *v, const char *path,
                              size_t base, struct mcp_select_stop *stop);
 
-/* `*`: v is an array and the rest resolves below every element. */
+/* `*`: v is an array and the rest resolves below every element. Every element
+ * is probed; the stop reported is the deepest one any element reached (ties
+ * keep the first element). A non-array v fails with no stop, so the caller
+ * reports it at v. */
 static bool mcp_select_probe_each(const struct json_value *v, const char *rest,
-                                  size_t base)
+                                  size_t base, struct mcp_select_stop *stop)
 {
+    struct mcp_select_stop deepest = {0};
+    bool ok = true;
     if (v->type != JSON_ARR)
         return false;
-    for (size_t i = 0; i < json_size(v); i++)
-        if (!mcp_select_probe(json_at(v, i), rest, base, NULL))
-            return false;
-    return true;
+    for (size_t i = 0; i < json_size(v); i++) {
+        struct mcp_select_stop es = {0};
+        if (mcp_select_probe(json_at(v, i), rest, base, &es))
+            continue;
+        if (ok || es.prefix > deepest.prefix)
+            deepest = es;
+        ok = false;
+    }
+    if (!ok && stop)
+        *stop = deepest;
+    return ok;
 }
 
-/* True when every step of path resolves below v. On the first failure,
- * records the node and the resolved prefix in stop (when stop is non-NULL).
- * A failure below a `*` element is reported at the array. base is the offset
- * of path within the whole select path. */
+/* True when every step of path resolves below v. On failure, records in stop
+ * (when stop is non-NULL) the node and the prefix of the select path that
+ * resolved. The rule: the prefix is the longest one that resolves on at least
+ * one branch. A `*` counts as resolved on each element of an array, so a step
+ * that no element has is reported with the prefix ending at the wildcard
+ * (e.g. "data.rows.*", with that element's keys or length); a step that some
+ * elements have is reported at the deepest such step (e.g. "data.rows.*.seq").
+ * Where a `*` is applied to a non-array, the prefix ends before the `*`.
+ * base is the offset of path within the whole select path. */
 static bool mcp_select_probe(const struct json_value *v, const char *path,
                              size_t base, struct mcp_select_stop *stop)
 {
@@ -360,7 +377,8 @@ static bool mcp_select_probe(const struct json_value *v, const char *path,
     const char *rest = path + len + (dot ? 1 : 0);
     bool star = len == 1 && path[0] == '*';
     const struct json_value *next = star ? NULL : mcp_select_child(v, path, len);
-    if (star ? mcp_select_probe_each(v, rest, base + len + 1) : next != NULL) {
+    if (star ? mcp_select_probe_each(v, rest, base + len + 1, stop)
+             : next != NULL) {
         if (star)
             return true;
         return mcp_select_probe(next, rest, base + len + 1, stop);
