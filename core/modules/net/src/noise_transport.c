@@ -305,6 +305,131 @@ noise_transport_feed_key_sent_locked(struct noise_transport *t,
     return STEP_CONSUMED;
 }
 
+/* refill acc from `in`, bounded by SESSION_FRAME_MAX_WIRE */
+static void refill_acc_from_input(struct noise_transport *t,
+                                  const uint8_t *in, size_t n,
+                                  size_t *in_off)
+{
+    size_t space = SESSION_FRAME_MAX_WIRE - t->acc_len;
+    if (space && *in_off < n) {
+        size_t take = n - *in_off;
+        if (take > space)
+            take = space;
+        memcpy(t->acc + t->acc_len, in + *in_off, take);
+        t->acc_len += take;
+        *in_off += take;
+    }
+}
+
+/* NOISE_DETECT step: sniff plaintext magic vs. handshake msg1, answer with
+ * msg2 and advance to NOISE_KEY_RECV. Caller holds t->lock. */
+static enum step_result
+feed_detect_step_locked(struct noise_transport *t,
+                        uint8_t **wire, size_t *wlen, size_t *wcap,
+                        uint8_t **pt, size_t *plen, size_t *pcap)
+{
+    if (t->acc_len < 4)
+        return STEP_NEEDMORE;
+    if (memcmp(t->acc, t->magic, 4) == 0) {
+        /* v1 zclassicd peer: surface the buffered raw bytes as
+         * plaintext and signal the caller to drop the transport. */
+        if (!buf_append(pt, plen, pcap, t->acc, t->acc_len))
+            return STEP_FAIL;
+        t->acc_len = 0;
+        t->state = NOISE_PLAINTEXT_FALLBACK;
+        return STEP_STOP;
+    }
+    const size_t need = noise_transport_handshake_msg_len(0);
+    if (t->acc_len < need)
+        return STEP_NEEDMORE;
+    uint8_t payload[NOISE_MAX_MESSAGE];
+    size_t payload_len = 0;
+    if (!noise_hs_read_message(&t->hs, t->acc, need, payload, &payload_len))
+        return STEP_FAIL;
+    uint8_t msg2[NOISE_MAX_MESSAGE];
+    size_t msg2_len = 0;
+    if (!noise_hs_write_message(&t->hs, NULL, 0, msg2, &msg2_len))
+        return STEP_FAIL;
+    if (!buf_append(wire, wlen, wcap, msg2, msg2_len))
+        return STEP_FAIL;
+    memmove(t->acc, t->acc + need, t->acc_len - need);
+    t->acc_len -= need;
+    t->state = NOISE_KEY_RECV;
+    return STEP_CONSUMED;
+}
+
+/* NOISE_KEY_RECV step: consume the final handshake message and establish. */
+static enum step_result
+feed_key_recv_step_locked(struct noise_transport *t,
+                          uint8_t **wire, size_t *wlen, size_t *wcap)
+{
+    const size_t need = noise_transport_handshake_msg_len(2);
+    if (t->acc_len < need)
+        return STEP_NEEDMORE;
+    uint8_t payload[NOISE_MAX_MESSAGE];
+    size_t payload_len = 0;
+    if (!noise_hs_read_message(&t->hs, t->acc, need, payload, &payload_len))
+        return STEP_FAIL;
+    if (!establish_and_flush_locked(t, wire, wlen, wcap))
+        return STEP_FAIL;
+    memmove(t->acc, t->acc + need, t->acc_len - need);
+    t->acc_len -= need;
+    return STEP_CONSUMED;
+}
+
+/* NOISE_ESTABLISHED step: unseal one DATA record into the plaintext sink. */
+static enum step_result
+feed_established_step_locked(struct noise_transport *t,
+                             uint8_t **pt, size_t *plen, size_t *pcap)
+{
+    if (t->acc_len < SESSION_FRAME_LEN_BYTES)
+        return STEP_NEEDMORE;
+    size_t L = (size_t)t->acc[0] |
+               ((size_t)t->acc[1] << 8) |
+               ((size_t)t->acc[2] << 16);
+    size_t frame = SESSION_FRAME_LEN_BYTES + L;
+    if (L == 0 || frame > SESSION_FRAME_MAX_WIRE)
+        return STEP_FAIL;
+    if (t->acc_len < frame)
+        return STEP_NEEDMORE;
+    uint8_t ptbuf[SESSION_MAX_PAYLOAD];
+    size_t ptlen = 0;
+    enum session_channel ch = SESSION_CH_DATA;
+    if (!session_transport_decrypt(&t->rec, &ch, t->acc, frame,
+                                   ptbuf, &ptlen))
+        return STEP_FAIL;
+    if (ch != SESSION_CH_DATA)
+        return STEP_FAIL;
+    if (!buf_append(pt, plen, pcap, ptbuf, ptlen))
+        return STEP_FAIL;
+    t->recv_frames++;
+    memmove(t->acc, t->acc + frame, t->acc_len - frame);
+    t->acc_len -= frame;
+    return STEP_CONSUMED;
+}
+
+/* dispatch the per-state step handler for t->state. Caller holds t->lock. */
+static enum step_result
+dispatch_step_locked(struct noise_transport *t,
+                     uint8_t **wire, size_t *wlen, size_t *wcap,
+                     uint8_t **pt, size_t *plen, size_t *pcap)
+{
+    switch (t->state) {
+    case NOISE_DETECT:
+        return feed_detect_step_locked(t, wire, wlen, wcap, pt, plen, pcap);
+    case NOISE_KEY_SENT:
+        return noise_transport_feed_key_sent_locked(t, wire, wlen, wcap);
+    case NOISE_KEY_RECV:
+        return feed_key_recv_step_locked(t, wire, wlen, wcap);
+    case NOISE_ESTABLISHED:
+        return feed_established_step_locked(t, pt, plen, pcap);
+    case NOISE_PLAINTEXT_FALLBACK:
+        return STEP_STOP;
+    default: /* NOISE_FAILED */
+        return STEP_FAIL;
+    }
+}
+
 bool noise_transport_feed(struct noise_transport *t,
                        const uint8_t *in, size_t n,
                        uint8_t **wire_out, size_t *wire_out_len,
@@ -327,108 +452,10 @@ bool noise_transport_feed(struct noise_transport *t,
     bool ok = true;
 
     for (;;) {
-        /* refill acc from `in`, bounded by SESSION_FRAME_MAX_WIRE */
-        size_t space = SESSION_FRAME_MAX_WIRE - t->acc_len;
-        if (space && in_off < n) {
-            size_t take = n - in_off;
-            if (take > space)
-                take = space;
-            memcpy(t->acc + t->acc_len, in + in_off, take);
-            t->acc_len += take;
-            in_off += take;
-        }
+        refill_acc_from_input(t, in, n, &in_off);
 
-        enum step_result r = STEP_NEEDMORE;
-        switch (t->state) {
-        case NOISE_DETECT: {
-            if (t->acc_len < 4) { r = STEP_NEEDMORE; break; }
-            if (memcmp(t->acc, t->magic, 4) == 0) {
-                /* v1 zclassicd peer: surface the buffered raw bytes as
-                 * plaintext and signal the caller to drop the transport. */
-                if (!buf_append(&pt, &plen, &pcap, t->acc, t->acc_len)) {
-                    r = STEP_FAIL; break;
-                }
-                t->acc_len = 0;
-                t->state = NOISE_PLAINTEXT_FALLBACK;
-                r = STEP_STOP;
-                break;
-            }
-            const size_t need = noise_transport_handshake_msg_len(0);
-            if (t->acc_len < need) { r = STEP_NEEDMORE; break; }
-            uint8_t payload[NOISE_MAX_MESSAGE];
-            size_t payload_len = 0;
-            if (!noise_hs_read_message(&t->hs, t->acc, need,
-                                       payload, &payload_len)) {
-                r = STEP_FAIL; break;
-            }
-            uint8_t msg2[NOISE_MAX_MESSAGE];
-            size_t msg2_len = 0;
-            if (!noise_hs_write_message(&t->hs, NULL, 0, msg2, &msg2_len)) {
-                r = STEP_FAIL; break;
-            }
-            if (!buf_append(&wire, &wlen, &wcap, msg2, msg2_len)) {
-                r = STEP_FAIL; break;
-            }
-            memmove(t->acc, t->acc + need, t->acc_len - need);
-            t->acc_len -= need;
-            t->state = NOISE_KEY_RECV;
-            r = STEP_CONSUMED;
-            break;
-        }
-        case NOISE_KEY_SENT:
-            r = noise_transport_feed_key_sent_locked(t, &wire, &wlen, &wcap);
-            break;
-        case NOISE_KEY_RECV: {
-            const size_t need = noise_transport_handshake_msg_len(2);
-            if (t->acc_len < need) { r = STEP_NEEDMORE; break; }
-            uint8_t payload[NOISE_MAX_MESSAGE];
-            size_t payload_len = 0;
-            if (!noise_hs_read_message(&t->hs, t->acc, need,
-                                       payload, &payload_len)) {
-                r = STEP_FAIL; break;
-            }
-            if (!establish_and_flush_locked(t, &wire, &wlen, &wcap)) {
-                r = STEP_FAIL; break;
-            }
-            memmove(t->acc, t->acc + need, t->acc_len - need);
-            t->acc_len -= need;
-            r = STEP_CONSUMED;
-            break;
-        }
-        case NOISE_ESTABLISHED: {
-            if (t->acc_len < SESSION_FRAME_LEN_BYTES) { r = STEP_NEEDMORE; break; }
-            size_t L = (size_t)t->acc[0] |
-                       ((size_t)t->acc[1] << 8) |
-                       ((size_t)t->acc[2] << 16);
-            size_t frame = SESSION_FRAME_LEN_BYTES + L;
-            if (L == 0 || frame > SESSION_FRAME_MAX_WIRE) {
-                r = STEP_FAIL; break;
-            }
-            if (t->acc_len < frame) { r = STEP_NEEDMORE; break; }
-            uint8_t ptbuf[SESSION_MAX_PAYLOAD];
-            size_t ptlen = 0;
-            enum session_channel ch = SESSION_CH_DATA;
-            if (!session_transport_decrypt(&t->rec, &ch, t->acc, frame,
-                                           ptbuf, &ptlen)) {
-                r = STEP_FAIL; break;
-            }
-            if (ch != SESSION_CH_DATA) { r = STEP_FAIL; break; }
-            if (!buf_append(&pt, &plen, &pcap, ptbuf, ptlen)) {
-                r = STEP_FAIL; break;
-            }
-            t->recv_frames++;
-            memmove(t->acc, t->acc + frame, t->acc_len - frame);
-            t->acc_len -= frame;
-            r = STEP_CONSUMED;
-            break;
-        }
-        case NOISE_PLAINTEXT_FALLBACK:
-            r = STEP_STOP;
-            break;
-        default: /* NOISE_FAILED */
-            r = STEP_FAIL;
-            break;
-        }
+        enum step_result r = dispatch_step_locked(t, &wire, &wlen, &wcap,
+                                                  &pt, &plen, &pcap);
 
         if (r == STEP_FAIL) { ok = false; break; }
         if (r == STEP_CONSUMED) continue;

@@ -757,3 +757,7 @@ later lane flips it HARD.
 - 2026-11-02T05:10:13Z — REASON: repin core/modules/crypto zclassic23/sha3 dependency root (sha3 pins zclassic23/base, whose root moved when base log_macros.h gained LOG_X_IN forms); metadata only, no consensus predicate change
   old ROOT: 7d0194ae6bc82e0756d0e9f5cad1f8bb4f5dd4d0565aa52f500301196a536969
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-02T06:21:16Z — REASON: refactor(noise_transport): split 1 function(s) under the complexity cap (glm); behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: ab1bb4862a23a11bfd53b8cf107f12c5f77f743fff77de2547e964f7169e282a
+  by: owner unseal ritual (make core-unseal)
