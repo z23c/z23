@@ -21,6 +21,60 @@
 #include <string.h>
 #include "util/safe_alloc.h"
 
+/* Grow entry->coins.vout through nPos when needed, null the new slots,
+ * and account the resize. Returns 1 if realloc fails, with *out_new_size
+ * set to the requested count; otherwise returns 0. */
+static int grow_entry_vout_for_spend(struct coins_view_cache *inputs,
+                                     struct coins_cache_entry *entry,
+                                     unsigned int nPos,
+                                     size_t *out_new_size)
+{
+    *out_new_size = 0;
+    /* Grow vout array if needed */
+    if (nPos >= entry->coins.num_vout) {
+        size_t old_size = entry->coins.num_vout;
+        size_t new_size = nPos + 1;
+        struct tx_out *nv = zcl_realloc(entry->coins.vout,
+            new_size * sizeof(struct tx_out), "coins_vout_grow");
+        if (!nv) {
+            *out_new_size = new_size;
+            return 1;
+        }
+        for (size_t k = entry->coins.num_vout; k < new_size; k++)
+            tx_out_set_null(&nv[k]);
+        entry->coins.vout = nv;
+        entry->coins.num_vout = new_size;
+        coins_view_cache_account_vout_resize(
+            inputs, old_size, new_size);
+    }
+    return 0;
+}
+
+/* Add each live in-range output to the commitment. Returns 1 and sets
+ * *out_vi when a live output fails MoneyRange. */
+static int add_new_outputs_to_commitment(struct coins_view_cache *inputs,
+                                         const struct transaction *tx,
+                                         struct coins_cache_entry *new_entry,
+                                         int nHeight,
+                                         size_t *out_vi)
+{
+    *out_vi = 0;
+    /* Validate new output values before adding to commitment */
+    for (size_t vi = 0; vi < new_entry->coins.num_vout; vi++) {
+        if (!tx_out_is_null(&new_entry->coins.vout[vi])) {
+            if (!MoneyRange(new_entry->coins.vout[vi].value)) {
+                *out_vi = vi;
+                return 1;
+            }
+            utxo_commitment_add(&inputs->commitment,
+                                 tx->hash.data, (uint32_t)vi,
+                                 new_entry->coins.vout[vi].value,
+                                 nHeight);
+        }
+    }
+    return 0;
+}
+
 bool update_coins_with_undo(const struct transaction *tx,
                             struct coins_view_cache *inputs,
                             struct tx_undo *txundo,
@@ -41,22 +95,11 @@ bool update_coins_with_undo(const struct transaction *tx,
             }
             unsigned int nPos = tx->vin[i].prevout.n;
 
-            /* Grow vout array if needed */
-            if (nPos >= entry->coins.num_vout) {
-                size_t old_size = entry->coins.num_vout;
-                size_t new_size = nPos + 1;
-                struct tx_out *nv = zcl_realloc(entry->coins.vout,
-                    new_size * sizeof(struct tx_out), "coins_vout_grow");
-                if (!nv)
-                    LOG_FAIL("update_coins", "realloc failed new_size=%zu h=%d",
-                             new_size, nHeight);
-                for (size_t k = entry->coins.num_vout; k < new_size; k++)
-                    tx_out_set_null(&nv[k]);
-                entry->coins.vout = nv;
-                entry->coins.num_vout = new_size;
-                coins_view_cache_account_vout_resize(
-                    inputs, old_size, new_size);
-            }
+            size_t new_size = 0;
+            if (grow_entry_vout_for_spend(inputs, entry, nPos,
+                                          &new_size) != 0)
+                LOG_FAIL("update_coins", "realloc failed new_size=%zu h=%d",
+                         new_size, nHeight);
             if (tx_out_is_null(&entry->coins.vout[nPos])) {
                 char hex[65];
                 uint256_get_hex(&tx->vin[i].prevout.hash, hex);
@@ -109,19 +152,12 @@ bool update_coins_with_undo(const struct transaction *tx,
     coins_view_cache_account_vout_resize(
         inputs, old_size, new_entry->coins.num_vout);
 
-    /* Validate new output values before adding to commitment */
-    for (size_t vi = 0; vi < new_entry->coins.num_vout; vi++) {
-        if (!tx_out_is_null(&new_entry->coins.vout[vi])) {
-            if (!MoneyRange(new_entry->coins.vout[vi].value))
-                LOG_FAIL("update_coins",
-                         "new output[%zu] value %lld out of range at h=%d",
-                         vi, (long long)new_entry->coins.vout[vi].value, nHeight);
-            utxo_commitment_add(&inputs->commitment,
-                                 tx->hash.data, (uint32_t)vi,
-                                 new_entry->coins.vout[vi].value,
-                                 nHeight);
-        }
-    }
+    size_t vi = 0;
+    if (add_new_outputs_to_commitment(inputs, tx, new_entry, nHeight,
+                                      &vi) != 0)
+        LOG_FAIL("update_coins",
+                 "new output[%zu] value %lld out of range at h=%d",
+                 vi, (long long)new_entry->coins.vout[vi].value, nHeight);
 
     return true;
 }
