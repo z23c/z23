@@ -1,4 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
+// supervisor-ok:bounded-one-shot-maintenance — the only thread is a one-shot evidence maintenance run, joined before the next run and by chain_evidence_maintain_quiesce; the requester never waits on it beyond a deadline, and a stuck run only reports PENDING
  *
  * Off-thread chain-evidence maintenance for the health collector.
  *
