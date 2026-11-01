@@ -38,7 +38,7 @@
 #       pair — the sealed core's identity, mirrored into
 #       hotswap/core_seal_root.h. FROZEN: SECTION/TREE are additive and
 #       do not enter this preimage.
-ca51f2e9675691ff3cebae56695e1803de84e3b814b5f0fdae8902cebc303a68  core/UNSEAL.md
+2fd0283aff9ff456b47d34f8a03821723a86d95c9299aa69b7e1755f7dc7d4b2  core/UNSEAL.md
 0154dee8b452e80f28e6d9c915483ab19cf93ee834518edc355885204dad4119  core/chainparams/include/chain/chainparams.h
 76417939b54d9b0d0b2309c66b90fd20a510de3492bb6f97a11f4198292aa01f  core/chainparams/include/chain/chainparamsbase.h
 1b38019875d5bb928f13ca3ac4f2d93f346c4a12699fbb41265f23cc3d7ee8c2  core/chainparams/include/chain/checkpoints.h
@@ -497,7 +497,7 @@ f28976f1c5651eb3b5a290e8ec68c15fe1dedca2a9244a3e2c46fcdd0a460922  core/modules/s
 8ab5d900e30f8fb6c71ff9645b338821782bab5668733f7f36212f768eaa2ad8  core/modules/sapling/src/note_encryption.c
 12822d7701c6b51c51322816eda705583988a209e2ca99420f927a25ffd450e9  core/modules/sapling/src/params_fetch.c
 b2519e65ec58e00caa42e32088b76eec9f4f2a67339e37a5739d8a566bba0630  core/modules/sapling/src/params_fetch_internal.h
-24483f586b6a9f41a310ad5e703905e3f70a0b08a881e657f1f39bf9e31e3751  core/modules/sapling/src/params_fetch_session.c
+efab39476c917a0bdeb3ed6e00cdf5044d45dfd7af36ea6432c2eb82dbd02dbb  core/modules/sapling/src/params_fetch_session.c
 508b00c447fa8171ce583e479e6afc7ce54ec15228eaebf3295bcd1f29d67ffb  core/modules/sapling/src/params_init.c
 f39bce4a47d55a8bc5356eb156a37b4a83df45c64cdbed576deac6adb1328a4f  core/modules/sapling/src/params_vk_embedded.c
 1c48b7b2c95762fef5dd86696ff4ce4e4776e1da4664b6d45fad7baa34b88f3b  core/modules/sapling/src/pedersen_hash.c
@@ -605,7 +605,7 @@ e84a4566fb4a01985ccbec9a4d3136a278422e1efe4f00cb8d0cf01480531064  core/params/in
 5ed0e4562789e7ea0bd9ff1238a27172669074b3d26201195aafffe1f863558e  core/params/module.cfg
 4d62b9a9b8824925e2f7efebca536ff924a96c7464067472cb07b9dd57e356dc  core/params/src/params.c
 9907071da9b95e13d236ac70fe8fa95612c7873ff9a88102d988c83ba8492b89  core/params/src/upgrades.c
-SECTION  567  4  bb9cdca79039afc279fe92040964ab73ab1c94f119313ef77657db4379e40dff  core
+SECTION  567  4  a23753c5b7e3ac6b6a20fea6e08895f54238cd1cfdff264ce95a31528d5cbbda  core
 SECTION  12  16  8f1a4eb8e2634b666158a5f9613906f708e252178a13d6e27e374d72425c4ba5  core/chainparams
 SECTION  6  24  63dff36c30ea1f9c45ed358d05006795f91e44b502d1d1b1196fc4a2cca2570b  core/chainparams/include
 SECTION  6  30  c247859f7b026dc314874fe7f2bfda58f885c05c44ff2fd601ebc3ce25ebeb48  core/chainparams/include/chain
@@ -619,7 +619,7 @@ SECTION  10  9  4a12df854665934805645f7b11b9ce279b93b7568fe58dde37f68d84913813da
 SECTION  5  17  3d74828940990b6914192791641041d1ad63de1b84d7693d2533f1c9b29a7edd  core/math/include
 SECTION  5  22  13bc29100524578193cb79036f24fe9e1d8538c0f45dcc4dd87956a25f4f2b38  core/math/include/core
 SECTION  5  13  bed7851826222b99834c6ee74bb3e7ce6155798a5ef78c798fe2f836bbf30862  core/math/src
-SECTION  501  12  e827a23aef66754268e1402b3726aa6a5117cb5b849fda59d9b3b11e41a1105d  core/modules
+SECTION  501  12  20cd46b7208153423ba2f704ba3ad1df319d4fae001d4869b1ef763f42cbfcb2  core/modules
 SECTION  6  18  ac31397c188f3b23c7c5fe7eab8d30978ae4009a7098e938da44255a9e7fb2a1  core/modules/bloom
 SECTION  3  26  25f9f764136ebc796a9aaed6dc708deba3347052954808e4efacd66eed7255c6  core/modules/bloom/include
 SECTION  3  32  2648501012a71f5658485e08ef8fb567f46f716f1fd96cbfcb93666c234a6686  core/modules/bloom/include/bloom
@@ -665,10 +665,10 @@ SECTION  4  23  127899b104bab13d0b9249346c1918aec82a5608ef72ac52217727304a31966d
 SECTION  2  31  fb543e2fcd2ab6312213620b54dbec42ea1e25ee9bab19b87432c2b3ebbffeed  core/modules/primitives/include
 SECTION  2  42  c2dbe794dcd4eeb295573eccaa8f812fb009d2372986242c042f7ebc94b676c5  core/modules/primitives/include/primitives
 SECTION  2  27  5b123ca06dbb27096c81daf97c370e56c4000e6b767ad70505d576bab20f898f  core/modules/primitives/src
-SECTION  62  20  45e9ebb137dba9ae275e5d5bd51f796b525285fde67c1b8d78210eb5b4c1a66f  core/modules/sapling
+SECTION  62  20  a39ffcddd3320b592a38c2a092c2720e988f28e7a5879b2cf31179f191057808  core/modules/sapling
 SECTION  27  28  a7c3f15f75f17dedcce2b7a9ea205bca26113d6c27d1a9465add49f27e077749  core/modules/sapling/include
 SECTION  27  36  cf646338371eeb14409f8d92c4a8017f8604a867f201bb8f3e2445ab952eac85  core/modules/sapling/include/sapling
-SECTION  35  24  ba0fa08b2ca4bf9015d2233bc857333a99df549b7df01772fea45a26c21ba8d8  core/modules/sapling/src
+SECTION  35  24  79bb02e994237bf0dcaa4ca6c23344d9bbb7f49f8ad80d68098aa01070004c98  core/modules/sapling/src
 SECTION  17  19  03ea56d529a6793630485453d6f054615d07733b3f0e1aebd9ecced96c25cd08  core/modules/script
 SECTION  10  27  eaae1477bc044f5a2a633b056b1b86a0bdcb79ce6657c7f0f9ab0931549d0a4e  core/modules/script/include
 SECTION  10  34  3daa4cbc5be6fe218b34e9f41081b9277f9686a2c2a1621975d8dccbf55e24e4  core/modules/script/include/script
@@ -685,5 +685,5 @@ SECTION  7  11  9b023bcd18300a51052f45e69609bb741b2832e3ce6e6a02fd21a12ea94647c0
 SECTION  4  19  e07dc0f2326862830b48105e02648f8d76dfeee9a859b7c56679c461e2cca7f1  core/params/include
 SECTION  4  29  5680a2f2d804163e77f94854ee18838480d785b74b297265f2f8a77db9d02242  core/params/include/consensus
 SECTION  2  15  8fdd673c41b8758e48c6fb225c15d7bbdf79f6816066a1d0c793d4bee2c5f6b1  core/params/src
-TREE  6e71fe793ed117a10aa8833a20a36cb277c018e617e4f70b63c771a4dff15206
-ROOT  6e1c17dbc4fe92fbed354b46d56e8b59aa786aa08b1bb920a0a1cf2aaec2dc75
+TREE  4670ea11d97fd2142376c8cf1336273e50a058d20c09580296ee855396476375
+ROOT  5c55df764d0c75529cf560ab3e51fd0e59ad777cfaa7e4a32a6890881094b584

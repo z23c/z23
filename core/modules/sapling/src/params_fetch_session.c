@@ -178,41 +178,40 @@ static void state_write(struct zcl_param_fetch *s)
         unlink(tmp);
 }
 
-/* Load the state file, then PROVE it: the manifest must re-verify against the
- * compiled-in Merkle root, and every chunk the bitmap claims must re-hash to
- * its manifest leaf. Anything that fails is simply dropped — we keep the
- * chunks that survive and re-fetch the rest. */
-static void state_load_and_reverify(struct zcl_param_fetch *s)
+/* Check a state file header's fields against the pin for this file. */
+static bool state_header_matches(const struct zcl_param_fetch *s,
+                                 const struct zcl_param_pin *p,
+                                 const uint8_t *hdr)
 {
-    const struct zcl_param_pin *p = &zcl_param_pins[s->file_idx];
-    size_t bm_len = bitmap_bytes(s->chunk_count);
-    size_t man_len = (size_t)s->chunk_count * ZCL_PARAM_HASH_BYTES;
-    size_t hdr_len = ZPART_MAGIC_LEN + 4 + 4 + 8 + ZCL_PARAM_HASH_BYTES;
-    size_t want_len = hdr_len + man_len + bm_len;
+    uint32_t fi = 0, cc = 0;
+    uint64_t bytes = 0;
+    fi = zcl_read_u32_le(hdr + 8);
+    cc = zcl_read_u32_le(hdr + 12);
+    bytes = zcl_read_u64_le(hdr + 16);
+    uint8_t pinned[ZCL_PARAM_HASH_BYTES];
+    return fi == (uint32_t)s->file_idx && cc == s->chunk_count &&
+           bytes == p->bytes && zcl_pf_hex_to_32(p->sha256_hex, pinned) &&
+           memcmp(hdr + 24, pinned, ZCL_PARAM_HASH_BYTES) == 0;
+}
 
-    struct stat st;
-    if (stat(s->state_path, &st) != 0 || (size_t)st.st_size != want_len)
-        return;
-
-    FILE *f = fopen(s->state_path, "rb");
-    if (!f)
-        return;
+/* Read the state file's header and check it against the pin, then read the
+ * manifest and bitmap into fresh allocations. On success the out-pointers
+ * own them; on failure both are NULL. */
+static bool state_read_manifest_and_bitmap(const struct zcl_param_fetch *s,
+                                           const struct zcl_param_pin *p,
+                                           FILE *f, size_t hdr_len,
+                                           size_t man_len, size_t bm_len,
+                                           uint8_t **out_man, uint8_t **out_bm)
+{
+    *out_man = NULL;
+    *out_bm = NULL;
 
     uint8_t hdr[64];
     bool ok = fread(hdr, hdr_len, 1, f) == 1;
     if (ok)
         ok = memcmp(hdr, ZPART_MAGIC, ZPART_MAGIC_LEN) == 0;
-    if (ok) {
-        uint32_t fi = 0, cc = 0;
-        uint64_t bytes = 0;
-        fi = zcl_read_u32_le(hdr + 8);
-        cc = zcl_read_u32_le(hdr + 12);
-        bytes = zcl_read_u64_le(hdr + 16);
-        uint8_t pinned[ZCL_PARAM_HASH_BYTES];
-        ok = fi == (uint32_t)s->file_idx && cc == s->chunk_count &&
-             bytes == p->bytes && zcl_pf_hex_to_32(p->sha256_hex, pinned) &&
-             memcmp(hdr + 24, pinned, ZCL_PARAM_HASH_BYTES) == 0;
-    }
+    if (ok)
+        ok = state_header_matches(s, p, hdr);
 
     uint8_t *man = NULL, *bm = NULL;
     if (ok) {
@@ -221,27 +220,26 @@ static void state_load_and_reverify(struct zcl_param_fetch *s)
         ok = man && bm && fread(man, man_len, 1, f) == 1 &&
              fread(bm, bm_len, 1, f) == 1;
     }
-    fclose(f);
 
-    /* The manifest from our own state file gets exactly the same scrutiny a
-     * peer's would: fold it and compare to the compiled-in root. */
-    if (ok)
-        ok = zcl_param_manifest_verify(s->file_idx, man, s->chunk_count);
-
-    if (!ok) {
+    if (ok) {
+        *out_man = man;
+        *out_bm = bm;
+    } else {
         free(man);
         free(bm);
-        return;
     }
+    return ok;
+}
 
-    memcpy(s->manifest, man, man_len);
-    s->have_manifest = true;
-    free(man);
-
+/* Re-verify each chunk the state file's bitmap claims against the manifest
+ * in s->manifest, marking survivors in s->bitmap; returns how many passed. */
+static uint32_t reverify_claimed_chunks(struct zcl_param_fetch *s,
+                                        const uint8_t *bm)
+{
+    uint32_t confirmed = 0;
     /* Re-hash every chunk the bitmap claims. An unclean shutdown can leave
      * the hint ahead of the data, and the cost of believing it wrongly is a
      * silently corrupt proving key. */
-    uint32_t confirmed = 0;
     for (uint32_t i = 0; i < s->chunk_count; i++) {
         if (!bit_get(bm, i))
             continue;
@@ -275,6 +273,50 @@ static void state_load_and_reverify(struct zcl_param_fetch *s)
         bit_set(s->bitmap, i);
         confirmed++;
     }
+    return confirmed;
+}
+
+/* Load the state file, then PROVE it: the manifest must re-verify against the
+ * compiled-in Merkle root, and every chunk the bitmap claims must re-hash to
+ * its manifest leaf. Anything that fails is simply dropped — we keep the
+ * chunks that survive and re-fetch the rest. */
+static void state_load_and_reverify(struct zcl_param_fetch *s)
+{
+    const struct zcl_param_pin *p = &zcl_param_pins[s->file_idx];
+    size_t bm_len = bitmap_bytes(s->chunk_count);
+    size_t man_len = (size_t)s->chunk_count * ZCL_PARAM_HASH_BYTES;
+    size_t hdr_len = ZPART_MAGIC_LEN + 4 + 4 + 8 + ZCL_PARAM_HASH_BYTES;
+    size_t want_len = hdr_len + man_len + bm_len;
+
+    struct stat st;
+    if (stat(s->state_path, &st) != 0 || (size_t)st.st_size != want_len)
+        return;
+
+    FILE *f = fopen(s->state_path, "rb");
+    if (!f)
+        return;
+
+    uint8_t *man = NULL, *bm = NULL;
+    bool ok = state_read_manifest_and_bitmap(s, p, f, hdr_len, man_len, bm_len,
+                                             &man, &bm);
+    fclose(f);
+
+    /* The manifest from our own state file gets exactly the same scrutiny a
+     * peer's would: fold it and compare to the compiled-in root. */
+    if (ok)
+        ok = zcl_param_manifest_verify(s->file_idx, man, s->chunk_count);
+
+    if (!ok) {
+        free(man);
+        free(bm);
+        return;
+    }
+
+    memcpy(s->manifest, man, man_len);
+    s->have_manifest = true;
+    free(man);
+
+    uint32_t confirmed = reverify_claimed_chunks(s, bm);
     s->have_count = confirmed;
     free(bm);
 
