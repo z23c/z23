@@ -103,6 +103,54 @@ static bool insert_wrapped_dek(sqlite3 *db, const uint8_t *wrapped,
     return rc == SQLITE_DONE;
 }
 
+static bool wkey_decrypt_dek(const uint8_t *wrapped, size_t wrapped_len,
+                             const char *pass, uint8_t (*dek)[WKEY_DEK_LEN])
+{
+    size_t dek_len = 0;
+    return wks_decrypt(wrapped, wrapped_len, pass, *dek, sizeof(*dek),
+                       &dek_len) && dek_len == sizeof(*dek);
+}
+
+static bool wkey_insert_new_dek(bool ok, sqlite3 *db, const char *pass,
+                                uint8_t (*dek)[WKEY_DEK_LEN],
+                                uint8_t (*wrapped)[WKS_HEADER_LEN + WKEY_DEK_LEN],
+                                bool *reread)
+{
+    *reread = false;
+    if (!ok)
+        return ok;
+    /* Creating the wrapped DEK inside somebody else's transaction could
+     * cache material whose row is later rolled back. Callers prepare
+     * before BEGIN; fail closed if a new caller violates that contract. */
+    ok = sqlite3_get_autocommit(db) != 0 &&
+         RAND_bytes(*dek, sizeof(*dek)) == 1;
+    size_t created_len = 0;
+    if (ok)
+        ok = wks_encrypt(*dek, sizeof(*dek), pass,
+                         wks_default_iterations(), *wrapped,
+                         sizeof(*wrapped), &created_len) &&
+             insert_wrapped_dek(db, *wrapped, created_len);
+    /* INSERT OR IGNORE is race-safe. If another writer won, use the
+     * authoritative stored wrapper rather than our candidate. */
+    if (ok && sqlite3_changes(db) == 0)
+        *reread = true;
+    return ok;
+}
+
+static bool wkey_reread_authoritative_dek(
+    sqlite3 *db, const char *pass, uint8_t (*dek)[WKEY_DEK_LEN],
+    uint8_t (*wrapped)[WKS_HEADER_LEN + WKEY_DEK_LEN],
+    size_t *wrapped_len, bool *found)
+{
+    *wrapped_len = 0;
+    *found = false;
+    bool ok = read_wrapped_dek(db, *wrapped, sizeof(*wrapped),
+                               wrapped_len, found) && *found;
+    if (ok)
+        ok = wkey_decrypt_dek(*wrapped, *wrapped_len, pass, dek);
+    return ok;
+}
+
 bool wallet_sqlite_key_crypto_prepare(sqlite3 *db)
 {
     if (!db)
@@ -136,34 +184,14 @@ bool wallet_sqlite_key_crypto_prepare(sqlite3 *db)
     memset(dek, 0, sizeof(dek));
 
     if (ok && found) {
-        size_t dek_len = 0;
-        ok = wks_decrypt(wrapped, wrapped_len, pass, dek, sizeof(dek),
-                         &dek_len) && dek_len == sizeof(dek);
-    } else if (ok) {
-        /* Creating the wrapped DEK inside somebody else's transaction could
-         * cache material whose row is later rolled back. Callers prepare
-         * before BEGIN; fail closed if a new caller violates that contract. */
-        ok = sqlite3_get_autocommit(db) != 0 &&
-             RAND_bytes(dek, sizeof(dek)) == 1;
-        size_t created_len = 0;
-        if (ok)
-            ok = wks_encrypt(dek, sizeof(dek), pass,
-                             wks_default_iterations(), wrapped,
-                             sizeof(wrapped), &created_len) &&
-                 insert_wrapped_dek(db, wrapped, created_len);
-        /* INSERT OR IGNORE is race-safe. If another writer won, use the
-         * authoritative stored wrapper rather than our candidate. */
-        if (ok && sqlite3_changes(db) == 0) {
+        ok = wkey_decrypt_dek(wrapped, wrapped_len, pass, &dek);
+    } else {
+        bool reread = false;
+        ok = wkey_insert_new_dek(ok, db, pass, &dek, &wrapped, &reread);
+        if (reread) {
             memory_cleanse(dek, sizeof(dek));
-            wrapped_len = 0;
-            found = false;
-            ok = read_wrapped_dek(db, wrapped, sizeof(wrapped),
-                                  &wrapped_len, &found) && found;
-            size_t dek_len = 0;
-            if (ok)
-                ok = wks_decrypt(wrapped, wrapped_len, pass, dek,
-                                 sizeof(dek), &dek_len) &&
-                     dek_len == sizeof(dek);
+            ok = wkey_reread_authoritative_dek(db, pass, &dek, &wrapped,
+                                               &wrapped_len, &found);
         }
     }
 
@@ -202,6 +230,35 @@ static bool wkey_begin_output(size_t *out_len)
     return true;
 }
 
+static bool wkey_encrypt_args_ok(sqlite3 *db,
+                                 const uint8_t pubkey_hash[20],
+                                 const uint8_t *plaintext,
+                                 size_t plaintext_len,
+                                 uint8_t *out, size_t out_cap,
+                                 size_t *out_len)
+{
+    if (!wkey_begin_output(out_len) || !db || !pubkey_hash ||
+        (!plaintext && plaintext_len) || !out ||
+        plaintext_len > (size_t)INT_MAX ||
+        out_cap < wallet_sqlite_key_envelope_size(plaintext_len))
+        return false;
+    return true;
+}
+
+static bool wkey_gcm_encrypt_aad(EVP_CIPHER_CTX *ctx, const uint8_t *dek,
+                                 const uint8_t (*nonce)[WKEY_NONCE_LEN],
+                                 const uint8_t pubkey_hash[20], int *n)
+{
+    *n = 0;
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
+                            sizeof(*nonce), NULL) != 1 ||
+        EVP_EncryptInit_ex(ctx, NULL, NULL, dek, *nonce) != 1 ||
+        EVP_EncryptUpdate(ctx, NULL, n, pubkey_hash, 20) != 1)
+        return false;
+    return true;
+}
+
 bool wallet_sqlite_key_encrypt(sqlite3 *db,
                                const uint8_t pubkey_hash[20],
                                const uint8_t *plaintext,
@@ -209,10 +266,10 @@ bool wallet_sqlite_key_encrypt(sqlite3 *db,
                                uint8_t *out, size_t out_cap,
                                size_t *out_len)
 {
-    if (!wkey_begin_output(out_len) || !db || !pubkey_hash ||
-        (!plaintext && plaintext_len) || !out ||
-        plaintext_len > (size_t)INT_MAX ||
-        out_cap < wallet_sqlite_key_envelope_size(plaintext_len))
+    bool args_ok = wkey_encrypt_args_ok(db, pubkey_hash, plaintext,
+                                        plaintext_len, out, out_cap,
+                                        out_len);
+    if (!args_ok)
         return false;
     uint8_t dek[WKEY_DEK_LEN], nonce[WKEY_NONCE_LEN], tag[WKEY_TAG_LEN];
     if (!copy_dek(db, dek) || RAND_bytes(nonce, sizeof(nonce)) != 1) {
@@ -229,11 +286,7 @@ bool wallet_sqlite_key_encrypt(sqlite3 *db,
     memcpy(out, WSQL_KEY_ENVELOPE_MAGIC, WSQL_KEY_ENVELOPE_MAGIC_LEN);
     zcl_write_u32_be(out + 4, WKEY_VERSION);
     memcpy(out + 8, nonce, sizeof(nonce));
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1 ||
-        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
-                            sizeof(nonce), NULL) != 1 ||
-        EVP_EncryptInit_ex(ctx, NULL, NULL, dek, nonce) != 1 ||
-        EVP_EncryptUpdate(ctx, NULL, &n, pubkey_hash, 20) != 1)
+    if (!wkey_gcm_encrypt_aad(ctx, dek, &nonce, pubkey_hash, &n))
         goto done;
     if (plaintext_len &&
         (EVP_EncryptUpdate(ctx, out + WSQL_KEY_ENVELOPE_OVERHEAD, &n,
@@ -255,6 +308,48 @@ done:
     return ok;
 }
 
+static bool wkey_decrypt_args_ok(sqlite3 *db,
+                                 const uint8_t pubkey_hash[20],
+                                 const uint8_t *envelope,
+                                 size_t envelope_len,
+                                 uint8_t *out, size_t out_cap,
+                                 size_t *out_len,
+                                 size_t *out_ciphertext_len)
+{
+    *out_ciphertext_len = 0;
+    if (!wkey_begin_output(out_len) || !db || !pubkey_hash || !envelope ||
+        !out ||
+        !wallet_sqlite_key_is_envelope(envelope, envelope_len))
+        return false;
+    size_t ciphertext_len = envelope_len - WSQL_KEY_ENVELOPE_OVERHEAD;
+    if (ciphertext_len > out_cap || ciphertext_len > (size_t)INT_MAX)
+        return false;
+    *out_ciphertext_len = ciphertext_len;
+    return true;
+}
+
+static bool wkey_gcm_decrypt_aad(EVP_CIPHER_CTX *ctx, const uint8_t *dek,
+                                 const uint8_t *nonce,
+                                 const uint8_t pubkey_hash[20], int *n)
+{
+    *n = 0;
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1 ||
+        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
+                            WKEY_NONCE_LEN, NULL) != 1 ||
+        EVP_DecryptInit_ex(ctx, NULL, NULL, dek, nonce) != 1 ||
+        EVP_DecryptUpdate(ctx, NULL, n, pubkey_hash, 20) != 1)
+        return false;
+    return true;
+}
+
+static bool wkey_gcm_decrypt_final(EVP_CIPHER_CTX *ctx)
+{
+    int final_len = 0;
+    if (EVP_DecryptFinal_ex(ctx, NULL, &final_len) != 1 || final_len != 0)
+        return false;
+    return true;
+}
+
 bool wallet_sqlite_key_decrypt(sqlite3 *db,
                                const uint8_t pubkey_hash[20],
                                const uint8_t *envelope,
@@ -262,12 +357,11 @@ bool wallet_sqlite_key_decrypt(sqlite3 *db,
                                uint8_t *out, size_t out_cap,
                                size_t *out_len)
 {
-    if (!wkey_begin_output(out_len) || !db || !pubkey_hash || !envelope ||
-        !out ||
-        !wallet_sqlite_key_is_envelope(envelope, envelope_len))
-        return false;
-    size_t ciphertext_len = envelope_len - WSQL_KEY_ENVELOPE_OVERHEAD;
-    if (ciphertext_len > out_cap || ciphertext_len > (size_t)INT_MAX)
+    size_t ciphertext_len = 0;
+    bool args_ok = wkey_decrypt_args_ok(db, pubkey_hash, envelope,
+                                        envelope_len, out, out_cap, out_len,
+                                        &ciphertext_len);
+    if (!args_ok)
         return false;
     uint8_t dek[WKEY_DEK_LEN];
     if (!copy_dek(db, dek))
@@ -281,11 +375,7 @@ bool wallet_sqlite_key_decrypt(sqlite3 *db,
     }
     bool ok = false;
     int n = 0;
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1 ||
-        EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
-                            WKEY_NONCE_LEN, NULL) != 1 ||
-        EVP_DecryptInit_ex(ctx, NULL, NULL, dek, nonce) != 1 ||
-        EVP_DecryptUpdate(ctx, NULL, &n, pubkey_hash, 20) != 1)
+    if (!wkey_gcm_decrypt_aad(ctx, dek, nonce, pubkey_hash, &n))
         goto done;
     if (ciphertext_len &&
         (EVP_DecryptUpdate(ctx, out, &n,
@@ -296,8 +386,7 @@ bool wallet_sqlite_key_decrypt(sqlite3 *db,
     if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG,
                             WKEY_TAG_LEN, (void *)(uintptr_t)tag) != 1)
         goto done;
-    int final_len = 0;
-    if (EVP_DecryptFinal_ex(ctx, NULL, &final_len) != 1 || final_len != 0)
+    if (!wkey_gcm_decrypt_final(ctx))
         goto done;
     *out_len = ciphertext_len;
     ok = true;
@@ -387,9 +476,11 @@ static bool wkey_transparent_migration_needed(sqlite3 *db)
     return needed;
 }
 
-struct zcl_result wallet_sqlite_migrate_transparent_keys_r(
-    struct wallet_sqlite *ws, struct wallet *wallet)
+static struct zcl_result wkey_migrate_precheck(struct wallet_sqlite *ws,
+                                               struct wallet *wallet,
+                                               bool *proceed)
 {
+    *proceed = false;
     if (!ws || !wallet)
         return ZCL_ERR(WSQL_NULL_ARG, "key migration: NULL wallet argument");
     if (!ws->open)
@@ -401,17 +492,13 @@ struct zcl_result wallet_sqlite_migrate_transparent_keys_r(
     if (!wallet_sqlite_key_crypto_prepare(ws->db))
         return wkey_scrub_fail(ws, ZCL_ERR(WSQL_WRITE_FAIL,
             "key migration: wallet data-encryption key unavailable"));
+    *proceed = true;
+    return ZCL_OK;
+}
 
-    char *error = NULL;
-    if (sqlite3_exec(ws->db, "BEGIN IMMEDIATE", NULL, NULL, &error)
-            != SQLITE_OK) {
-        struct zcl_result result = ZCL_ERR(WSQL_TXN_BEGIN_FAIL,
-            "key migration: BEGIN IMMEDIATE failed: %s",
-            error ? error : "(unknown)");
-        if (error) sqlite3_free(error);
-        return wkey_scrub_fail(ws, result);
-    }
-
+static struct zcl_result wkey_migrate_loaded_keys(struct wallet_sqlite *ws,
+                                                  struct wallet *wallet)
+{
     struct zcl_result first_failure = ZCL_OK;
     zcl_mutex_lock(&wallet->keystore.cs);
     for (size_t i = 0; i < wallet->keystore.num_keys; i++) {
@@ -432,6 +519,28 @@ struct zcl_result wallet_sqlite_migrate_transparent_keys_r(
         }
     }
     zcl_mutex_unlock(&wallet->keystore.cs);
+    return first_failure;
+}
+
+struct zcl_result wallet_sqlite_migrate_transparent_keys_r(
+    struct wallet_sqlite *ws, struct wallet *wallet)
+{
+    bool proceed = false;
+    struct zcl_result pre = wkey_migrate_precheck(ws, wallet, &proceed);
+    if (!proceed)
+        return pre;
+
+    char *error = NULL;
+    if (sqlite3_exec(ws->db, "BEGIN IMMEDIATE", NULL, NULL, &error)
+            != SQLITE_OK) {
+        struct zcl_result result = ZCL_ERR(WSQL_TXN_BEGIN_FAIL,
+            "key migration: BEGIN IMMEDIATE failed: %s",
+            error ? error : "(unknown)");
+        if (error) sqlite3_free(error);
+        return wkey_scrub_fail(ws, result);
+    }
+
+    struct zcl_result first_failure = wkey_migrate_loaded_keys(ws, wallet);
     if (!first_failure.ok) {
         sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, NULL);
         return wkey_scrub_fail(ws, first_failure);
@@ -449,22 +558,71 @@ struct zcl_result wallet_sqlite_migrate_transparent_keys_r(
     return ZCL_OK;
 }
 
+static bool wkey_scrub_prepare_stmts(sqlite3 *db, sqlite3_stmt **scan,
+                                     sqlite3_stmt **update)
+{
+    *scan = NULL;
+    *update = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT rowid,pubkey_hash,privkey FROM wallet_keys",
+            -1, scan, NULL) != SQLITE_OK || !*scan ||
+        sqlite3_prepare_v2(db,
+            "UPDATE wallet_keys SET privkey=?1 WHERE rowid=?2",
+            -1, update, NULL) != SQLITE_OK || !*update) {
+        if (*scan) sqlite3_finalize(*scan);
+        if (*update) sqlite3_finalize(*update);
+        return false;
+    }
+    return true;
+}
+
+static inline bool wkey_scrub_row_usable(const void *hash, int hash_len,
+                                         const void *blob, int blob_len)
+{
+    if (!hash || hash_len != 20 || !blob || blob_len <= 0)
+        return false;
+    return true;
+}
+
+static inline bool wkey_wrap_transparent_row(struct wallet_sqlite *ws,
+                                             const void *hash,
+                                             const void *blob, int blob_len,
+                                             uint8_t **legacy_plain,
+                                             size_t *plain_len,
+                                             uint8_t **wrapped, size_t *cap,
+                                             size_t *wrapped_len)
+{
+    *legacy_plain = NULL;
+    *plain_len = 0;
+    *wrapped = NULL;
+    *cap = 0;
+    *wrapped_len = 0;
+    const uint8_t *plain = blob;
+    *plain_len = (size_t)blob_len;
+    bool decrypted = true;
+    if (wkey_is_wks1(blob, (size_t)blob_len))
+        decrypted = wkey_legacy_decrypt(blob, (size_t)blob_len,
+                                        legacy_plain, plain_len);
+    if (decrypted && *legacy_plain)
+        plain = *legacy_plain;
+    if (decrypted) {
+        *cap = wallet_sqlite_key_envelope_size(*plain_len);
+        *wrapped = zcl_malloc(*cap, "wallet_key_wkd1_migration");
+        *wrapped_len = 0;
+        decrypted = *wrapped && wallet_sqlite_key_encrypt(
+            ws->db, hash, plain, *plain_len, *wrapped, *cap, wrapped_len);
+    }
+    return decrypted;
+}
+
 /* Upgrade transparent rows to WKD1. Legacy WKS1 rows pay their PBKDF2
  * cost once; future boots unwrap one wallet DEK. */
 static int wkey_scrub_transparent(struct wallet_sqlite *ws)
 {
     sqlite3_stmt *scan = NULL;
     sqlite3_stmt *update = NULL;
-    if (sqlite3_prepare_v2(ws->db,
-            "SELECT rowid,pubkey_hash,privkey FROM wallet_keys",
-            -1, &scan, NULL) != SQLITE_OK || !scan ||
-        sqlite3_prepare_v2(ws->db,
-            "UPDATE wallet_keys SET privkey=?1 WHERE rowid=?2",
-            -1, &update, NULL) != SQLITE_OK || !update) {
-        if (scan) sqlite3_finalize(scan);
-        if (update) sqlite3_finalize(update);
+    if (!wkey_scrub_prepare_stmts(ws->db, &scan, &update))
         return -1;
-    }
     int upgraded = 0;
     bool failed = false;
     int rc;
@@ -473,7 +631,7 @@ static int wkey_scrub_transparent(struct wallet_sqlite *ws)
         int hash_len = sqlite3_column_bytes(scan, 1);
         const void *blob = sqlite3_column_blob(scan, 2);
         int blob_len = sqlite3_column_bytes(scan, 2);
-        if (!hash || hash_len != 20 || !blob || blob_len <= 0) {
+        if (!wkey_scrub_row_usable(hash, hash_len, blob, blob_len)) {
             failed = true;
             break;
         }
@@ -481,21 +639,13 @@ static int wkey_scrub_transparent(struct wallet_sqlite *ws)
             continue;
 
         uint8_t *legacy_plain = NULL;
-        const uint8_t *plain = blob;
-        size_t plain_len = (size_t)blob_len;
-        if (wkey_is_wks1(blob, (size_t)blob_len)) {
-            if (!wkey_legacy_decrypt(blob, (size_t)blob_len,
-                                     &legacy_plain, &plain_len)) {
-                failed = true;
-                break;
-            }
-            plain = legacy_plain;
-        }
-        size_t cap = wallet_sqlite_key_envelope_size(plain_len);
-        uint8_t *wrapped = zcl_malloc(cap, "wallet_key_wkd1_migration");
+        size_t plain_len = 0;
+        uint8_t *wrapped = NULL;
+        size_t cap = 0;
         size_t wrapped_len = 0;
-        bool encrypted = wrapped && wallet_sqlite_key_encrypt(
-            ws->db, hash, plain, plain_len, wrapped, cap, &wrapped_len);
+        bool encrypted = wkey_wrap_transparent_row(
+            ws, hash, blob, blob_len, &legacy_plain, &plain_len,
+            &wrapped, &cap, &wrapped_len);
         if (legacy_plain) {
             memory_cleanse(legacy_plain, plain_len);
             free(legacy_plain);
@@ -586,8 +736,10 @@ static struct zcl_result wkey_scrub_fail(struct wallet_sqlite *ws,
     return result;
 }
 
-struct zcl_result wallet_sqlite_scrub_plaintext_r(struct wallet_sqlite *ws)
+static struct zcl_result wkey_scrub_precheck(struct wallet_sqlite *ws,
+                                             bool *proceed)
 {
+    *proceed = false;
     if (!ws)
         return ZCL_ERR(WSQL_NULL_ARG, "wallet_sqlite pointer is NULL");
     if (!ws->open)
@@ -598,6 +750,32 @@ struct zcl_result wallet_sqlite_scrub_plaintext_r(struct wallet_sqlite *ws)
     if (!wallet_sqlite_key_crypto_prepare(ws->db))
         return wkey_scrub_fail(ws, ZCL_ERR(WSQL_WRITE_FAIL,
             "scrub: wallet key data-encryption key unavailable"));
+    *proceed = true;
+    return ZCL_OK;
+}
+
+static bool wkey_scrub_upgrade_rows(struct wallet_sqlite *ws,
+                                    int *transparent, int *sapling, int *seed)
+{
+    *transparent = 0;
+    *sapling = 0;
+    *seed = 0;
+    *transparent = wkey_scrub_transparent(ws);
+    *sapling = *transparent < 0 ? -1 : wkey_scrub_legacy_column(
+        ws->db, "wallet_sapling_keys", "xsk");
+    *seed = *transparent < 0 || *sapling < 0 ? -1 :
+        wkey_scrub_legacy_column(ws->db, "wallet_seed", "seed");
+    if (*transparent < 0 || *sapling < 0 || *seed < 0)
+        return false;
+    return true;
+}
+
+struct zcl_result wallet_sqlite_scrub_plaintext_r(struct wallet_sqlite *ws)
+{
+    bool proceed = false;
+    struct zcl_result pre = wkey_scrub_precheck(ws, &proceed);
+    if (!proceed)
+        return pre;
 
     char *error = NULL;
     if (sqlite3_exec(ws->db, "BEGIN IMMEDIATE", NULL, NULL, &error)
@@ -608,12 +786,10 @@ struct zcl_result wallet_sqlite_scrub_plaintext_r(struct wallet_sqlite *ws)
         if (error) sqlite3_free(error);
         return wkey_scrub_fail(ws, result);
     }
-    int transparent = wkey_scrub_transparent(ws);
-    int sapling = transparent < 0 ? -1 : wkey_scrub_legacy_column(
-        ws->db, "wallet_sapling_keys", "xsk");
-    int seed = transparent < 0 || sapling < 0 ? -1 :
-        wkey_scrub_legacy_column(ws->db, "wallet_seed", "seed");
-    if (transparent < 0 || sapling < 0 || seed < 0) {
+    int transparent = 0;
+    int sapling = 0;
+    int seed = 0;
+    if (!wkey_scrub_upgrade_rows(ws, &transparent, &sapling, &seed)) {
         sqlite3_exec(ws->db, "ROLLBACK", NULL, NULL, NULL);
         return wkey_scrub_fail(ws, ZCL_ERR(WSQL_WRITE_FAIL,
             "scrub: at-rest upgrade failed: %s", sqlite3_errmsg(ws->db)));
