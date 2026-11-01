@@ -73,10 +73,12 @@ void storage_housekeeping_sweep(const char *datadir);
  * thread is running or not yet joined. The first sweep is due at once on
  * the new thread, never on the caller's, so a sweep blocked on a storage
  * lock cannot hold the READY transition; start() does not wait for it, so a
- * sweep may or may not have run when it returns. A stop() that arrives before
- * the thread begins that sweep ends the thread without it (the bounds are
- * datadir-size bounds, applied by the next start). stop() joins the thread,
- * so no sweep outlives it; it is a no-op when nothing was started. */
+ * sweep may or may not have run when it returns. The thread reads the stop
+ * request before each sweep: a stop() it sees before the first one ends the
+ * thread without it, and a later stop() lets the sweep under way finish or
+ * end at its own stop check (the bounds are datadir-size bounds, applied by
+ * the next start). stop() joins the thread, so no sweep outlives it; it is a
+ * no-op when nothing was started. */
 struct zcl_result storage_housekeeping_start(const char *datadir);
 void storage_housekeeping_stop(void);
 

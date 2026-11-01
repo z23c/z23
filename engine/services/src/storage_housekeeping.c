@@ -317,7 +317,8 @@ static void *sh_thread_fn(void *arg)
     (void)arg;
     /* The first sweep is due at once, on this thread, so start() never
      * waits on a storage lock and stop() joins the thread that runs it. A
-     * stop requested before this loop's first check skips it. */
+     * stop this loop reads before the first sweep skips it; a later one is
+     * left to the sweep's own stop checks. */
     int64_t next_at_ms = platform_time_monotonic_ms();
     for (;;) {
         pthread_mutex_lock(&g_lock);
@@ -353,8 +354,8 @@ static void *sh_thread_fn(void *arg)
 static void sh_stop_locked(void);
 
 /* Launch with the lifecycle mutex held. The first sweep is due at once on
- * the new thread (unless a stop comes first), so the caller never waits on
- * a storage lock. */
+ * the new thread (skipped only when the thread reads a stop before it), so
+ * the caller never waits on a storage lock. */
 static struct zcl_result sh_start_locked(const char *datadir)
 {
     /* A sweeper with no datadir is a misconfiguration, not a degraded mode:
@@ -413,9 +414,10 @@ static pthread_mutex_t g_lifecycle = PTHREAD_MUTEX_INITIALIZER;
  * restart while an inline first sweep blocked the service kernel and so the
  * READY transition. The bounds it applies are datadir-size bounds, not
  * correctness, so the sweep is due on the service thread at once, never on
- * the caller's thread: start() returns without waiting, a stop() before the
- * thread begins it skips it, and stop() joins the thread that runs every
- * sweep, so none outlives it. */
+ * the caller's thread: start() returns without waiting, a stop() the thread
+ * reads before the first sweep skips it (a later one is left to the sweep's
+ * own stop checks), and stop() joins the thread that runs every sweep, so
+ * none outlives it. */
 struct zcl_result storage_housekeeping_start(const char *datadir)
 {
     pthread_mutex_lock(&g_lifecycle);
