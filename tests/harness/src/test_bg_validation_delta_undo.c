@@ -276,13 +276,21 @@ static bool du_open(const char *dir, struct main_state *ms, struct du_chain *c)
     ms->nMaxTipAge = 0;
     ms->fCheckpointsEnabled = false;
     active_chain_move_window_tip(&ms->chain_active, &c->idx[DU_BLOCKS - 1]);
-    if (!du_seed_upstream(progress_store_db(), c) ||
-        !utxo_apply_stage_init(ms) ||
-        !du_seed_script_verdicts(progress_store_db(), c))
-        return false;
+    if (!du_seed_upstream(progress_store_db(), c) || !utxo_apply_stage_init(ms))
+        goto fail;
+    if (!du_seed_script_verdicts(progress_store_db(), c)) {
+        utxo_apply_stage_shutdown();
+        goto fail;
+    }
     utxo_apply_stage_set_reader(du_reader, c);
     utxo_apply_stage_set_lookup(du_lookup, c);
     return true;
+fail:
+    /* Callers skip du_close when du_open fails: release what it opened. */
+    main_state_free(ms);
+    projection_store_close();
+    progress_store_close();
+    return false;
 }
 
 static void du_close(struct main_state *ms)

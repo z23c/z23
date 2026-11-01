@@ -814,7 +814,10 @@ static bool e2e_fixture_init(struct e2e_fixture *f)
     active_chain_move_window_tip(&f->ms.chain_active,
                                  &f->blocks[OPRIDX_E2E_HEIGHTS - 1]);
 
-    if (!node_db_open(&f->ndb, ":memory:") || !f->ndb.open) return false;
+    if (!node_db_open(&f->ndb, ":memory:") || !f->ndb.open) {
+        main_state_free(&f->ms); /* callers skip e2e_fixture_free on false */
+        return false;
+    }
     return true;
 }
 
