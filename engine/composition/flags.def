@@ -265,7 +265,7 @@ Z23_FLAG("ZCL_BODY_HISTORY_BACKFILL_MODE", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_BOOTSTRAP_CC", "env_build", "cc", "-",
           "undocumented; first use tools/dev/source-identity-batch-bootstrap.sh:auto")
 Z23_FLAG("ZCL_BRIEF", "env_runtime", "-", "-",
-          "first use engine/entry/main_cli_modes.c:auto; documented at docs/dev/NATIVE_COMMAND_INTERFACE.md:1032: ZCL_BRIEF=1 remains only as a compatibility formatting option for raw")
+          "first use engine/entry/main_cli_dispatch.c:auto; documented at docs/dev/NATIVE_COMMAND_INTERFACE.md:1032: ZCL_BRIEF=1 remains only as a compatibility formatting option for raw")
 Z23_FLAG("ZCL_BUILD_BENCH_FAKE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/build_bench.sh:auto")
 Z23_FLAG("ZCL_BUILD_BENCH_GROUP", "env_build", "netbase_split_host_port", "-",
@@ -2092,7 +2092,7 @@ Z23_FLAG("ZCL_RPC_COOKIE_ROTATE_SEC", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_RPC_DEADLINE_MS", "env_runtime", "10000", "-",
           "first use engine/controllers/src/rpc_client.c:auto; bounds the overall connect/send/receive allowance of one env-defaulted loopback node RPC call after cookie loading and request formatting (1..600000 ms; a non-numeric or out-of-range value falls back to the default); explicit-deadline callers do not read it.")
 Z23_FLAG("ZCL_RPCPORT", "env_runtime", "18232", "-",
-          "first use engine/entry/main_cli_modes.c:auto; documented at docs/quality/BENCHMARKS_LOG.md:34: | 2026-06-04 | 671fd79e3 | #6 soak-ci proxy (make soak-ci, 180s --ci-proxy) | machinery...")
+          "first use engine/entry/main_cli_dispatch.c:auto; documented at docs/quality/BENCHMARKS_LOG.md:34: | 2026-06-04 | 671fd79e3 | #6 soak-ci proxy (make soak-ci, 180s --ci-proxy) | machinery...")
 Z23_FLAG("ZCL_RPC_MAX_TIME_SECS", "env_runtime", "30", "-",
           "first use tools/zcl-rpc.c:auto; bounds curl's --max-time for a single zcl-rpc call (POSIX transport); refused with a named stderr error if set to a non-numeric or non-positive value.")
 Z23_FLAG("ZCL_RPC_QUEUE_WAIT_MS", "env_runtime", "-", "-",

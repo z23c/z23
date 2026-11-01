@@ -16,6 +16,7 @@
 #if !defined(ZCL_TESTING) || !defined(ZCL_RPC_COMPOSER_TEST)
 #include "main_cli_modes.h"
 #include "cli_compare_runtime.h"
+#include "main_cli_dispatch.h"
 #include "config/boot.h"
 #include "config/boot_cold_start.h"     /* -cold-start staged driver */
 #include "hotswap/hotswap_module.h"
@@ -2325,7 +2326,6 @@ static int cli_run_static_agent_method(const char *method,
     json_free(&params);
     return exit_code;
 }
-enum { CLI_MAX_PARAMS = 128 };
 /* Forward decl: defined below alongside is_cli_mode (the pair is easiest to
  * read together); cli_main is defined above that point in the file. */
 static int cli_validate_client_argv(int argc, char **argv);
@@ -2365,118 +2365,34 @@ static void cli_apply_service_port(struct cli_service_snapshot *service,
     }
 }
 
-int cli_main(int argc, char **argv)
+/* Settles the datadir from the default service when the operator named none
+ * and the default datadir holds no cookie. */
+static void cli_apply_service_datadir(struct cli_service_snapshot *service,
+                                      struct cli_target_args *t)
 {
-    /* Strict operator-target-flag validation FIRST — before datadir/home
-     * default resolution even begins (see cli_validate_client_argv's doc
-     * comment / the SAFETY FOOTGUN fix). */
-    int argrc = cli_validate_client_argv(argc, argv);
-    if (argrc >= 0)
-        return argrc;
-    const char *home = getenv("HOME");
-    char datadir[CLI_TARGET_DATADIR_CAP];
-    const bool default_fit =
-        zcl_cli_lane_default_datadir(datadir, sizeof(datadir), home);
-    bool datadir_set = false;
-    bool rpcport_set = false;
-    bool p2pport_set = false;
-    bool httpsport_set = false;
-    bool fsport_set = false;
-    struct cli_service_snapshot service = {0};
-    bool testnet_set = false, regtest_set = false;
-    enum zcl_operator_lane operator_lane = ZCL_OPERATOR_LANE_UNKNOWN;
-    enum zcl_runtime_profile runtime_profile = ZCL_RUNTIME_FULL;
-    const char *method = NULL;
-    const char *params_storage[CLI_MAX_PARAMS];
-    int nparams = 0;
-    const char *env_lane = getenv("ZCL_OPERATOR_LANE");
-    if (env_lane && env_lane[0] &&
-        !app_operator_lane_parse(env_lane, &operator_lane)) {
-        fprintf(stderr, "Ignoring unknown ZCL_OPERATOR_LANE=%s\n", env_lane);
-    }
-    /* Operator target flags are accepted before or after the method so
-     * `z23 agent -datadir=... -rpcport=...` cannot accidentally query
-     * the default service while an agent is trying to inspect a lane. */
-    for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "-datadir=", 9) == 0) {
-            /* cli_validate_client_argv already refused an over-long value;
-             * re-check so the copy never depends on that ordering. */
-            if (cli_flag_value_overflows_path_buffer(argv[i]))
-                return cli_refuse_overlong_datadir(argv[i]);
-            snprintf(datadir, sizeof(datadir), "%s", argv[i] + 9);
-            datadir_set = true;
-        } else if (strncmp(argv[i], "-rpcport=", 9) == 0) {
-            cli_port = atoi(argv[i] + 9);
-            rpcport_set = true;
-        } else if (strncmp(argv[i], "-port=", 6) == 0) {
-            cli_p2p_port = atoi(argv[i] + 6);
-            p2pport_set = true;
-        } else if (strncmp(argv[i], "-httpsport=", 11) == 0) {
-            cli_https_port = atoi(argv[i] + 11);
-            httpsport_set = true;
-        } else if (strncmp(argv[i], "-fsport=", 8) == 0) {
-            cli_fs_port = atoi(argv[i] + 8);
-            fsport_set = true;
-        } else if (strncmp(argv[i], "-operator-lane=", 15) == 0) {
-            if (!app_operator_lane_parse(argv[i] + 15, &operator_lane)) {
-                fprintf(stderr, "Unknown operator lane: %s\n", argv[i] + 15);
-                return 1;
-            }
-        } else if (strncmp(argv[i], "-profile=", 9) == 0) {
-            if (!app_runtime_profile_parse(argv[i] + 9, &runtime_profile)) {
-                fprintf(stderr, "Unknown runtime profile: %s\n", argv[i] + 9);
-                return 1;
-            }
-        } else if (strcmp(argv[i], "-testnet") == 0) { testnet_set = true;
-        } else if (strcmp(argv[i], "-regtest") == 0) { regtest_set = true;
-        } else if (!method) {
-            method = argv[i];
-        } else {
-            if (nparams >= CLI_MAX_PARAMS) {
-                fprintf(stderr, "Too many RPC parameters (max %d)\n",
-                        CLI_MAX_PARAMS);
-                return 1;
-            }
-            params_storage[nparams++] = argv[i];
+    char service_datadir[512];
+    if (!t->datadir_set && !cli_cookie_exists(t->datadir)) {
+        if (cli_service_exec_arg(service, "datadir", service_datadir,
+                                 sizeof(service_datadir)) &&
+            cli_cookie_exists(service_datadir)) {
+            snprintf(t->datadir, t->datadir_cap, "%s", service_datadir);
         }
     }
-    cli_bound_method = method;
-    cli_bound_params = params_storage;
-    cli_bound_nparams = nparams;
-    /* ZCL_DATADIR / ZCL_RPCPORT env naming (the convention tools/zcl-rpc.c,
-     * the soak harness, and the crash-recovery tests already pin): an
-     * env-named target is an OPERATOR-named target — it sets the same
-     * datadir_set/rpcport_set bits the flags set, so the E4 port
-     * autodiscovery, the systemctl-default-service fallbacks, and the
-     * bare-status sibling listing below ALL skip. Flags win over env:
-     * the argv loop above already set the bits when a flag was given.
-     * Without this the native CLI (status / dumpstate / every registry
-     * command) silently answered from the LIVE node even when the caller
-     * had pinned env to an isolated instance. */
-    if (!zcl_cli_lane_settle_datadir(datadir, sizeof(datadir), &datadir_set,
-                                     default_fit, getenv("ZCL_DATADIR")))
-        return ZCL_COMMAND_EXIT_INVALID;
-    if (!rpcport_set) {
-        const char *env_rp = getenv("ZCL_RPCPORT");
-        if (env_rp && env_rp[0]) {
-            int port = atoi(env_rp);
-            if (port > 0 && port < 65536) {
-                cli_port = port;
-                rpcport_set = true;
-            } else {
-                fprintf(stderr, "Ignoring invalid ZCL_RPCPORT=%s\n", env_rp);
-            }
-        }
-    }
-    if (!method) {
-        print_usage(argv[0]);
-        return 1;
-    }
-    if (testnet_set && regtest_set) {
-        fprintf(stderr, "error=CONFLICTING_NETWORK_FLAGS "
-                "detail=-testnet and -regtest cannot target one invocation\n");
-        return ZCL_COMMAND_EXIT_INVALID;
-    }
+}
+
+static void cli_apply_service_ports(struct cli_service_snapshot *service,
+                                    const struct cli_target_args *t)
+{
+    if (!t->rpcport_set) cli_apply_service_port(service, "rpcport", t->rpc_port);
+    if (!t->p2pport_set) cli_apply_service_port(service, "port", t->p2p_port);
+    if (!t->httpsport_set)
+        cli_apply_service_port(service, "httpsport", t->https_port);
+    if (!t->fsport_set) cli_apply_service_port(service, "fsport", t->fs_port);
+}
+
+/* -1 to carry on, otherwise the exit code of the refusal. */
+static int cli_resolve_rpcport_datadir(struct cli_target_args *t)
+{
     /* E4 auth auto-discovery: `-rpcport=<N>` with no `-datadir=` names a
      * specific target instance, not "whatever the default systemd unit
      * runs" — scan sibling datadirs for the one recording port <N> BEFORE
@@ -2492,54 +2408,149 @@ int cli_main(int argc, char **argv)
      * service datadir would answer with the default lane's cookie for a port
      * that names a DIFFERENT instance. The operator must pass -datadir=DIR
      * explicitly. */
-    if (rpcport_set && !datadir_set) {
-        char discovered[512];
-        enum cli_autodiscover_outcome outcome =
-            cli_autodiscover_datadir_for_port(cli_port, discovered,
-                                              sizeof(discovered));
-        if (outcome == CLI_AUTODISCOVER_UNIQUE) {
-            snprintf(datadir, sizeof(datadir), "%s", discovered);
-            datadir_set = true;
-            fprintf(stderr,
-                   "z23: -rpcport=%d given without -datadir — "
-                   "auto-discovered datadir %s (pass -datadir=DIR to "
-                   "target a different instance)\n",
-                   cli_port, datadir);
-        } else {
-            return cli_refuse_rpcport_autodiscovery(cli_port, outcome);
-        }
-    }
+    if (!t->rpcport_set || t->datadir_set)
+        return -1;
+    char discovered[512];
+    enum cli_autodiscover_outcome outcome =
+        cli_autodiscover_datadir_for_port(*t->rpc_port, discovered,
+                                          sizeof(discovered));
+    if (outcome != CLI_AUTODISCOVER_UNIQUE)
+        return cli_refuse_rpcport_autodiscovery(*t->rpc_port, outcome);
+    snprintf(t->datadir, t->datadir_cap, "%s", discovered);
+    t->datadir_set = true;
+    fprintf(stderr,
+           "z23: -rpcport=%d given without -datadir — "
+           "auto-discovered datadir %s (pass -datadir=DIR to "
+           "target a different instance)\n",
+           *t->rpc_port, t->datadir);
+    return -1;
+}
 
-    if (!datadir_set && !cli_cookie_exists(datadir)) {
-        char service_datadir[512];
-        if (cli_service_exec_arg(&service, "datadir", service_datadir,
-                                 sizeof(service_datadir)) &&
-            cli_cookie_exists(service_datadir)) {
-            snprintf(datadir, sizeof(datadir), "%s", service_datadir);
-        }
+static int cli_rpc_failure_exit(enum cli_rpc_outcome rpc_outcome)
+{
+    switch (rpc_outcome) {
+    case CLI_RPC_CONNECT_REFUSED:
+        return ZCL_COMMAND_EXIT_BLOCKED;
+    case CLI_RPC_TIMEOUT:
+        return ZCL_COMMAND_EXIT_TRANSIENT;
+    default:
+        return ZCL_COMMAND_EXIT_FAILED;
     }
-    if (!rpcport_set) cli_apply_service_port(&service, "rpcport", &cli_port);
-    if (!p2pport_set) {
-        char service_p2pport[32];
-        if (cli_service_exec_arg(&service, "port", service_p2pport,
-                                 sizeof(service_p2pport))) {
-            int port = atoi(service_p2pport);
-            if (port > 0 && port < 65536)
-                cli_p2p_port = port;
-        }
-    }
-    if (!httpsport_set)
-        cli_apply_service_port(&service, "httpsport", &cli_https_port);
-    if (!fsport_set) cli_apply_service_port(&service, "fsport", &cli_fs_port);
+}
 
-    if (strcmp(method, "--agent") == 0 || strcmp(method, "-agent") == 0)
-        method = "agent";
-    else if (strcmp(method, "--status") == 0 ||
-             strcmp(method, "-status") == 0)
-        method = "status";
-    else if (strcmp(method, "--summary") == 0 ||
-             strcmp(method, "-summary") == 0)
-        method = "summary";
+/* -1 when resp is not a method-not-found reply, otherwise the exit code. */
+static int cli_method_not_found_exit(const char *resp, const char *method,
+                                     const struct cli_target_args *t)
+{
+    char rpc_error_message[192];
+    if (!cli_rpc_error_is_method_not_found(resp, rpc_error_message,
+                                           sizeof(rpc_error_message)))
+        return -1;
+    if (cli_print_peer_incidents_dumpstate_fallback(method,
+                                                    rpc_error_message))
+        return 0;
+    if (cli_print_contract_method_skew_diagnostic(method, t->datadir,
+                                                  t->operator_lane,
+                                                  t->runtime_profile,
+                                                  rpc_error_message))
+        return 1;
+    cli_print_unknown_command_diagnostic(method);
+    return ZCL_COMMAND_EXIT_INVALID;
+}
+
+/* -1 when the target is usable, otherwise the exit code of the refusal. */
+static int cli_check_target(const char *argv0, const struct cli_target_args *t)
+{
+    if (!t->method) {
+        print_usage(argv0);
+        return 1;
+    }
+    if (t->testnet_set && t->regtest_set) {
+        fprintf(stderr, "error=CONFLICTING_NETWORK_FLAGS "
+                "detail=-testnet and -regtest cannot target one invocation\n");
+        return ZCL_COMMAND_EXIT_INVALID;
+    }
+    return -1;
+}
+
+/* -1 when resp is a usable reply, otherwise the exit code its failure maps
+ * to. A NULL resp is a failed call; the caller frees a non-NULL resp. */
+static int cli_reply_exit(const char *resp, enum cli_rpc_outcome rpc_outcome,
+                          const char *method, const struct cli_target_args *t)
+{
+    if (!resp) {
+        /* cli_rpc_call_internal_ex already printed the specific
+         * error=<TAXONOMY> line; just map it to the matching documented
+         * exit code (docs/dev/NATIVE_COMMAND_INTERFACE.md's stable table) so
+         * a monitor can branch without scraping stderr text. */
+        return cli_rpc_failure_exit(rpc_outcome);
+    }
+    if (rpc_outcome == CLI_RPC_AUTH_REJECTED) {
+        fprintf(stderr,
+               "error=AUTH_REJECTED detail=127.0.0.1:%d rejected the "
+               "cookie read from %s/.cookie try=pass -datadir=DIR for the "
+               "node actually listening on this port (auth cookies are "
+               "per-datadir and do not follow -rpcport alone)\n",
+               cli_port, t->datadir);
+        return ZCL_COMMAND_EXIT_DENIED;
+    }
+    return cli_method_not_found_exit(resp, method, t);
+}
+
+int cli_main(int argc, char **argv)
+{
+    /* Strict operator-target-flag validation FIRST — before datadir/home
+     * default resolution even begins (see cli_validate_client_argv's doc
+     * comment / the SAFETY FOOTGUN fix). */
+    int argrc = cli_validate_client_argv(argc, argv);
+    if (argrc >= 0)
+        return argrc;
+    const char *home = getenv("HOME");
+    char datadir[CLI_TARGET_DATADIR_CAP];
+    const bool default_fit =
+        zcl_cli_lane_default_datadir(datadir, sizeof(datadir), home);
+    struct cli_service_snapshot service = {0};
+    const char *params_storage[CLI_MAX_PARAMS];
+    struct cli_target_args t = {
+        .datadir = datadir, .datadir_cap = sizeof(datadir),
+        .rpc_port = &cli_port, .p2p_port = &cli_p2p_port,
+        .https_port = &cli_https_port, .fs_port = &cli_fs_port,
+        .operator_lane = ZCL_OPERATOR_LANE_UNKNOWN,
+        .runtime_profile = ZCL_RUNTIME_FULL, .params = params_storage,
+    };
+    cli_apply_env_operator_lane(&t.operator_lane);
+    int parse_rc = cli_parse_target_args(argc, argv, &t);
+    if (parse_rc != CLI_ARGS_OK)
+        return parse_rc;
+    cli_bound_method = t.method;
+    cli_bound_params = params_storage;
+    cli_bound_nparams = t.nparams;
+    /* ZCL_DATADIR / ZCL_RPCPORT env naming (the convention tools/zcl-rpc.c,
+     * the soak harness, and the crash-recovery tests already pin): an
+     * env-named target is an OPERATOR-named target — it sets the same
+     * datadir_set/rpcport_set bits the flags set, so the E4 port
+     * autodiscovery, the systemctl-default-service fallbacks, and the
+     * bare-status sibling listing below ALL skip. Flags win over env:
+     * the argv loop above already set the bits when a flag was given.
+     * Without this the native CLI (status / dumpstate / every registry
+     * command) silently answered from the LIVE node even when the caller
+     * had pinned env to an isolated instance. */
+    if (!zcl_cli_lane_settle_datadir(datadir, sizeof(datadir),
+                                     &t.datadir_set, default_fit,
+                                     getenv("ZCL_DATADIR")))
+        return ZCL_COMMAND_EXIT_INVALID;
+    cli_apply_env_rpcport(&t.rpcport_set, &cli_port);
+    int target_rc = cli_check_target(argv[0], &t);
+    if (target_rc >= 0)
+        return target_rc;
+    int discover_rc = cli_resolve_rpcport_datadir(&t);
+    if (discover_rc >= 0)
+        return discover_rc;
+
+    cli_apply_service_datadir(&service, &t);
+    cli_apply_service_ports(&service, &t);
+
+    const char *method = cli_canonical_method(t.method);
 
     /* E4: the bare `status` command with no live node in the (still
      * default — no -datadir= given, and it never resolved a cookie above)
@@ -2549,7 +2560,7 @@ int cli_main(int argc, char **argv)
      * leaf (not core.status etc.) and only when nothing narrowed the
      * target already (an explicit -datadir= or a resolved cookie there
      * both skip this — the operator asked for something specific). */
-    if (strcmp(method, "status") == 0 && !datadir_set &&
+    if (strcmp(method, "status") == 0 && !t.datadir_set &&
         !cli_cookie_exists(datadir))
         return cli_print_local_instances_status_fallback(datadir);
 
@@ -2560,18 +2571,18 @@ int cli_main(int argc, char **argv)
      * becomes an RPC method. */
     if (zcl_native_command_is_root(method)) {
         return cli_native_registry_dispatch(method,
-            (const char *const *)params_storage, nparams, datadir, cli_port,
-            regtest_set, testnet_set, datadir_set);
+            (const char *const *)params_storage, t.nparams, datadir, cli_port,
+            t.regtest_set, t.testnet_set, t.datadir_set);
     }
 
     if (cli_static_agent_method(method)) {
         agent_runtime_availability_reset();
-        rpc_agent_set_boot_context(app_operator_lane_name(operator_lane),
-                                   app_runtime_profile_name(runtime_profile),
+        rpc_agent_set_boot_context(app_operator_lane_name(t.operator_lane),
+                                   app_runtime_profile_name(t.runtime_profile),
                                    datadir, cli_port, cli_p2p_port,
                                    cli_https_port, cli_fs_port);
         cli_probe_static_agent_target(datadir);
-        return cli_run_static_agent_method(method, params_storage, nparams);
+        return cli_run_static_agent_method(method, params_storage, t.nparams);
     }
 
     if (!cli_read_cookie(datadir)) {
@@ -2583,40 +2594,13 @@ int cli_main(int argc, char **argv)
         return ZCL_COMMAND_EXIT_BLOCKED;
     }
 
-    /* CLI UX contract: `z23 dumpstate <subsystem> field=a,b` (and, in
-     * principle, any other raw RPC method) — pull a bare `field=` token out
-     * of the forwarded RPC params before the call, then select just those
-     * names out of the response afterward. `dumpstate`'s result nests the
-     * subsystem's own fields under "state" (see diag_rpc_dumpstate_builtin);
-     * every other method is selected at the top level of "result". */
-    const char *field_csv = NULL;
-    bool saw_format_json = false;
-    const char *rpc_params_storage[CLI_MAX_PARAMS];
-    int rpc_nparams = 0;
-    for (int i = 0; i < nparams; i++) {
-        const char *p = params_storage[i];
-        if (p && strncmp(p, "field=", 6) == 0 && p[6] && !field_csv) {
-            field_csv = p + 6;
-            continue;
-        }
-        if (p && strcmp(p, "--format=json") == 0)
-            saw_format_json = true;
-        if (rpc_nparams < CLI_MAX_PARAMS)
-            rpc_params_storage[rpc_nparams++] = p;
-    }
-    /* CLI UX contract: ZCL_BRIEF=1 makes `dumpstate` default to the flat
-     * field-selected rendering (every top-level key of the subsystem's own
-     * `.state`) without typing `field=`; --format=json still escapes it. The
-     * `status` is always compact native output; this is the raw-RPC-path twin for
-     * dumpstate, which has no separate brief body to fetch). */
-    const char *env_brief = getenv("ZCL_BRIEF");
-    bool zcl_brief_on = env_brief && env_brief[0] && strcmp(env_brief, "0") != 0;
-    bool auto_all_fields = !field_csv && zcl_brief_on && !saw_format_json &&
-                           strcmp(method, "dumpstate") == 0;
+    struct cli_rpc_params rpc;
+    cli_split_rpc_params((const char *const *)params_storage, t.nparams, &rpc);
+    bool auto_all_fields = cli_brief_all_fields(&rpc, method);
 
     char pbuf[32768];
-    if (!cli_compose_rpc_params(method, rpc_params_storage,
-                                (size_t)rpc_nparams, pbuf, sizeof(pbuf))) {
+    if (!cli_compose_rpc_params(method, rpc.storage, (size_t)rpc.count, pbuf,
+                                sizeof(pbuf))) {
         return 1;
     }
 
@@ -2627,112 +2611,17 @@ int cli_main(int argc, char **argv)
 
     enum cli_rpc_outcome rpc_outcome = CLI_RPC_OK;
     char *resp = cli_rpc_call_ex(body, sizeof(body), blen, &rpc_outcome);
-    if (!resp) {
-        /* cli_rpc_call_internal_ex already printed the specific
-         * error=<TAXONOMY> line; just map it to the matching documented
-         * exit code (docs/dev/NATIVE_COMMAND_INTERFACE.md's stable table) so
-         * a monitor can branch without scraping stderr text. */
-        switch (rpc_outcome) {
-        case CLI_RPC_CONNECT_REFUSED:
-            return ZCL_COMMAND_EXIT_BLOCKED;
-        case CLI_RPC_TIMEOUT:
-            return ZCL_COMMAND_EXIT_TRANSIENT;
-        default:
-            return ZCL_COMMAND_EXIT_FAILED;
-        }
-    }
-    if (rpc_outcome == CLI_RPC_AUTH_REJECTED) {
-        fprintf(stderr,
-               "error=AUTH_REJECTED detail=127.0.0.1:%d rejected the "
-               "cookie read from %s/.cookie try=pass -datadir=DIR for the "
-               "node actually listening on this port (auth cookies are "
-               "per-datadir and do not follow -rpcport alone)\n",
-               cli_port, datadir);
+    int reply_rc = cli_reply_exit(resp, rpc_outcome, method, &t);
+    if (reply_rc >= 0) {
         free(resp);
-        return ZCL_COMMAND_EXIT_DENIED;
-    }
-    char rpc_error_message[192];
-    if (cli_rpc_error_is_method_not_found(resp, rpc_error_message,
-                                          sizeof(rpc_error_message))) {
-        if (cli_print_peer_incidents_dumpstate_fallback(method,
-                                                        rpc_error_message)) {
-            free(resp);
-            return 0;
-        }
-        if (cli_print_contract_method_skew_diagnostic(method, datadir,
-                                                      operator_lane,
-                                                      runtime_profile,
-                                                      rpc_error_message)) {
-            free(resp);
-            return 1;
-        }
-        cli_print_unknown_command_diagnostic(method);
-        free(resp);
-        return ZCL_COMMAND_EXIT_INVALID;
+        return reply_rc;
     }
 
-    if (field_csv || auto_all_fields) {
-        struct json_value root;
-        bool handled = false;
-        if (json_read(&root, resp, strlen(resp)) && root.type == JSON_OBJ) {
-            const struct json_value *result = json_get(&root, "result");
-            if (result && strcmp(method, "dumpstate") == 0) {
-                const struct json_value *state = json_get(result, "state");
-                if (state && state->type == JSON_OBJ)
-                    result = state;
-            }
-            /* ZCL_BRIEF auto-select: no field= was given, so select every
-             * top-level key of `result` — same selection function, no
-             * second data path. */
-            char all_fields[2048];
-            const char *use_csv = field_csv;
-            if (!use_csv && result && result->type == JSON_OBJ) {
-                size_t alen = 0;
-                for (size_t k = 0; k < result->num_children; k++) {
-                    int an = snprintf(all_fields + alen,
-                                     sizeof(all_fields) - alen, "%s%s",
-                                     alen ? "," : "", result->keys[k]);
-                    if (an > 0 && (size_t)an < sizeof(all_fields) - alen)
-                        alen += (size_t)an;
-                }
-                use_csv = all_fields;
-            }
-            char sel[ZCL_COMMAND_LIST_BUDGET + 1];
-            char selerr[320];
-            if (result && use_csv && use_csv[0] &&
-                zcl_native_render_field_selection(result, use_csv, sel,
-                                                  sizeof(sel), selerr,
-                                                  sizeof(selerr))) {
-                fputs(sel, stdout);
-                handled = true;
-            } else if (field_csv) {
-                /* Only an explicit field= failure is a hard error; an
-                 * auto-select with nothing to select from just falls
-                 * through to the normal full-result print below. */
-                fprintf(stderr, "error=UNKNOWN_FIELD detail=%s try=%s\n",
-                       result ? selerr : "this method returned no selectable "
-                                          "result",
-                       method);
-                json_free(&root);
-                free(resp);
-                return ZCL_COMMAND_EXIT_INVALID;
-            }
-        }
-        json_free(&root);
-        if (handled) {
-            free(resp);
-            return 0;
-        }
-        if (field_csv) {
-            free(resp);
-            fprintf(stderr,
-                   "error=UNKNOWN_FIELD detail=response did not parse "
-                   "try=%s\n", method);
-            return ZCL_COMMAND_EXIT_INVALID;
-        }
-        /* auto_all_fields found nothing to flatten (e.g. malformed
-         * response) — fall through to the normal full print so ZCL_BRIEF
-         * never hides a real error behind a silent no-op. */
+    int field_rc = cli_print_selected_fields(resp, method, rpc.field_csv,
+                                             auto_all_fields);
+    if (field_rc >= 0) {
+        free(resp);
+        return field_rc;
     }
 
     int rc = rpc_cli_print_json_result(resp, stdout, stderr);
