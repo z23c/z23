@@ -32,7 +32,6 @@ core/modules/crypto/src/equihash.c:equihash_is_valid_solution:33
 core/modules/crypto/src/sha3_256_x4.c:sha3_256_x4_avx512:17
 core/modules/crypto/src/sha3_256_x4.c:sha3_256_x4_neon:17
 core/modules/crypto_registry/src/crypto_registry.c:crypto_registry_register:16
-core/modules/mining/src/gen.c:try_solve_equihash:16
 core/modules/net/src/addrman_codec.c:addrman_deserialize:19
 core/modules/net/src/download.c:dl_assign_to_peer:90
 core/modules/net/src/download.c:dl_queue_blocks_class:39

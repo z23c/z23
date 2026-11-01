@@ -44,6 +44,83 @@ static bool mining_cancelled(void *arg)
     return !atomic_load_explicit(running, memory_order_relaxed);
 }
 
+/* Search up to 256 random nonces with the Tromp solver for a valid solution. */
+static bool try_solve_equihash_tromp(struct block *blk,
+                                     const struct chain_params *params,
+                                     const struct equihash_params *ep,
+                                     const struct blake2b_ctx *base_state,
+                                     _Atomic bool *running)
+{
+    struct eh_solver *solver = eh_solver_new();
+    if (!solver)
+        return false;
+
+    /* Try nonces until a solution is found */
+    for (int nonce_try = 0; nonce_try < 256; nonce_try++) {
+        for (int b = 0; b < 32; b++)
+            blk->header.nNonce.data[b] = (unsigned char)(GetRand(256));
+
+        struct blake2b_ctx curr = *base_state;
+        blake2b_update(&curr, blk->header.nNonce.data, 32);
+
+        eh_solver_set_state(solver, &curr);
+        uint32_t nsols = eh_solver_run_cancelable(
+            solver, mining_cancelled, running);
+        metrics_increment_eh_solver_runs();
+        if (solver->cancelled)
+            break;
+
+        for (uint32_t i = 0; i < nsols; i++) {
+            /* Convert indices to minimal/compressed solution */
+            unsigned char sol_bytes[EH_SOL_BYTES];
+            size_t sol_len = eh_get_minimal_from_indices(
+                solver->sols[i], EH_PROOFSIZE,
+                ep->collision_bit_length,
+                sol_bytes, sizeof(sol_bytes));
+
+            if (sol_len != EH_SOL_BYTES)
+                continue;
+
+            /* Set solution on block */
+            memcpy(blk->header.nSolution, sol_bytes, sol_len);
+            blk->header.nSolutionSize = sol_len;
+
+            /* Verify: hash must meet target */
+            struct uint256 hash;
+            block_header_get_hash(&blk->header, &hash);
+            if (CheckProofOfWork(hash, blk->header.nBits,
+                                 &params->consensus)) {
+                /* Double-check equihash validity */
+                if (check_equihash_solution(&blk->header, params)) {
+                    eh_solver_free(solver);
+                    return true;
+                }
+            }
+        }
+    }
+    eh_solver_free(solver);
+    return false;
+}
+
+/* Search up to 1000000 random nonces for a header hash that meets target. */
+static bool try_solve_equihash_fallback(struct block *blk,
+                                        const struct chain_params *params)
+{
+    for (unsigned int attempt = 0; attempt < 1000000; attempt++) {
+        for (int b = 0; b < 32; b++)
+            blk->header.nNonce.data[b] = (unsigned char)(GetRand(256));
+
+        struct uint256 hash;
+        block_header_get_hash(&blk->header, &hash);
+
+        if (CheckProofOfWork(hash, blk->header.nBits,
+                             &params->consensus)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool try_solve_equihash(struct block *blk,
                                 const struct chain_params *params,
                                 int height, _Atomic bool *running)
@@ -90,54 +167,8 @@ static bool try_solve_equihash(struct block *blk,
 
     /* Tromp solver path is for post-Bubbles mainnet (192,7). */
     if (n == 192 && k == 7) {
-        struct eh_solver *solver = eh_solver_new();
-        if (!solver)
-            return false;
-
-        /* Try nonces until a solution is found */
-        for (int nonce_try = 0; nonce_try < 256; nonce_try++) {
-            for (int b = 0; b < 32; b++)
-                blk->header.nNonce.data[b] = (unsigned char)(GetRand(256));
-
-            struct blake2b_ctx curr = base_state;
-            blake2b_update(&curr, blk->header.nNonce.data, 32);
-
-            eh_solver_set_state(solver, &curr);
-            uint32_t nsols = eh_solver_run_cancelable(
-                solver, mining_cancelled, running);
-            metrics_increment_eh_solver_runs();
-            if (solver->cancelled)
-                break;
-
-            for (uint32_t i = 0; i < nsols; i++) {
-                /* Convert indices to minimal/compressed solution */
-                unsigned char sol_bytes[EH_SOL_BYTES];
-                size_t sol_len = eh_get_minimal_from_indices(
-                    solver->sols[i], EH_PROOFSIZE,
-                    ep.collision_bit_length,
-                    sol_bytes, sizeof(sol_bytes));
-
-                if (sol_len != EH_SOL_BYTES)
-                    continue;
-
-                /* Set solution on block */
-                memcpy(blk->header.nSolution, sol_bytes, sol_len);
-                blk->header.nSolutionSize = sol_len;
-
-                /* Verify: hash must meet target */
-                struct uint256 hash;
-                block_header_get_hash(&blk->header, &hash);
-                if (CheckProofOfWork(hash, blk->header.nBits,
-                                      &params->consensus)) {
-                    /* Double-check equihash validity */
-                    if (check_equihash_solution(&blk->header, params)) {
-                        eh_solver_free(solver);
-                        return true;
-                    }
-                }
-            }
-        }
-        eh_solver_free(solver);
+        return try_solve_equihash_tromp(blk, params, &ep, &base_state,
+                                        running);
     } else {
         /* Mainnet/testnet (200,9) fallback, unchanged and unreached by
          * regtest (handled by the fMineBlocksOnDemand delegate above). It
@@ -146,21 +177,8 @@ static bool try_solve_equihash(struct block *blk,
          * was rather than altering mainnet block production. In-process
          * (200,9) mining is not a supported path; real miners use
          * getblocktemplate + submitblock. */
-        for (unsigned int attempt = 0; attempt < 1000000; attempt++) {
-            for (int b = 0; b < 32; b++)
-                blk->header.nNonce.data[b] = (unsigned char)(GetRand(256));
-
-            struct uint256 hash;
-            block_header_get_hash(&blk->header, &hash);
-
-            if (CheckProofOfWork(hash, blk->header.nBits,
-                                  &params->consensus)) {
-                return true;
-            }
-        }
+        return try_solve_equihash_fallback(blk, params);
     }
-
-    return false;
 }
 
 static void *miner_thread(void *arg)
