@@ -1775,8 +1775,11 @@ struct dp_split_funcs {
     char name[DP_SPLIT_FUNCS_MAX][DP_SPLIT_NAME_MAX];
     size_t count;
     bool overflow;
-    /* A file-scope object with external linkage (or one the reader cannot
-     * tell is private) was seen: it can silently take over a weak symbol. */
+    /* name[i] is defined without `static`: it has external linkage. */
+    bool pub[DP_SPLIT_FUNCS_MAX];
+    /* A file-scope statement the reader cannot prove private was seen (an
+     * object with external linkage, or a shape that may be one): it can
+     * silently take over a weak or library symbol. */
     bool object;
 };
 
@@ -2246,6 +2249,26 @@ static bool dp_split_name(const char *st, size_t n, const char **start,
 }
 
 static bool dp_split_private_start(const char *st);
+static bool dp_split_public_object(const char *st);
+
+/* Does the word at *q equal `w`? On a match, step *q past it and its spaces. */
+static bool dp_split_word(const char **q, const char *w)
+{
+    size_t n = strlen(w);
+    if (strncmp(*q, w, n) != 0 || dp_split_ident((*q)[n])) return false;
+    *q += n;
+    while (**q == ' ') (*q)++;
+    return true;
+}
+
+/* Is a function definition's declarator opened by `static` (or `inline
+ * static`)? Any other spelling counts as external linkage. */
+static bool dp_split_static_start(const char *st)
+{
+    const char *q = st;
+    (void)dp_split_word(&q, "inline");
+    return dp_split_word(&q, "static");
+}
 
 /* The declarator of a '{' at file scope: name it, or fail closed. */
 static void dp_split_declarator(struct dp_split_parse *s)
@@ -2257,7 +2280,7 @@ static void dp_split_declarator(struct dp_split_parse *s)
     size_t n = strlen(st);
     while (n > 0 && st[n - 1] == ' ') st[--n] = '\0';
     if (strchr(st, '=') || !strchr(st, '(')) { /* object or aggregate */
-        if (strchr(st, '=') && !dp_split_private_start(st))
+        if (strchr(st, '=') && dp_split_public_object(st))
             s->funcs->object = true;
         return;
     }
@@ -2267,10 +2290,12 @@ static void dp_split_declarator(struct dp_split_parse *s)
             return;
         }
     const char *start, *end;
+    size_t k = s->funcs->count;
     if (!dp_split_name(st, n, &start, &end))
         s->bad = true;
     else
         dp_split_funcs_add(s->funcs, start, (size_t)(end - start));
+    if (s->funcs->count > k) s->funcs->pub[k] = !dp_split_static_start(st);
 }
 
 /* Does the file-scope statement `st` start with a storage word that keeps its
@@ -2288,15 +2313,17 @@ static bool dp_split_private_start(const char *st)
     return false;
 }
 
-/* A file-scope `;` statement that declares an object: neither a prototype
- * (a '(' and no '=') nor a private declaration. A function pointer counts,
- * and so does an array whose '[' comes before any '(' (char b[sizeof(x)];). */
+/* A file-scope declaration the reader cannot prove private: anything not
+ * opened by static, typedef or a static assertion, and an extern only when
+ * it has an initializer (then it defines). A non-static prototype counts
+ * too: `unsigned T_(1) x;` cannot be told from one, so only the fresh rule
+ * reads this and refuses rather than guesses. */
 static bool dp_split_public_object(const char *st)
 {
-    if (!*st || dp_split_private_start(st)) return false;
-    const char *paren = strchr(st, '('), *bracket = strchr(st, '[');
-    return strchr(st, '=') || strstr(st, "(*") || strstr(st, "( *") ||
-           !paren || (bracket && bracket < paren);
+    const char *q = st;
+    if (!*st) return false;
+    if (dp_split_word(&q, "extern")) return strchr(st, '=') != NULL;
+    return !dp_split_private_start(st);
 }
 
 /* A file-scope statement ended by ';': an invocation with no type tokens
@@ -2464,6 +2491,10 @@ static bool dp_split_admit(const struct dp_split_ctx *c, const char **refs,
  *   - no tracked file at `base` mentions any name it defines, so no base
  *     code can reach it and it moves nothing out of the base tree, and it
  *     defines no public file-scope object (a weak symbol could be taken over);
+ *   - every function it defines without `static` is called from another
+ *     changed row, no name it defines is reserved (a leading underscore),
+ *     and every other file-scope declaration is provably private, so it
+ *     cannot interpose a library or runtime symbol nothing names;
  * It stays in the closure input, and the plan also takes the groups of the
  * source-universe policy and of the test registry (dp_changed_set_widen): a
  * new file enters what the enumerators walk. Anything else, and any git
@@ -2540,6 +2571,41 @@ static bool dp_fresh_names_unreserved(const struct dp_split_funcs *f)
     return true;
 }
 
+/* A changed row other than `added` names `name` at `local`. */
+static bool dp_fresh_name_called(const struct dp_split_ctx *c, const char *name,
+                                 const char *added, const char **refs,
+                                 size_t count)
+{
+    char *listing = zcl_malloc(ZCL_DEVLOOP_OUTPUT_MAX, "proof fresh callers");
+    if (!listing) return false;
+    const char *argv[] = {"git", "grep", "-l", "-a", "-w", "-F", "-e", name,
+                          c->local, "--", NULL};
+    int rc = dp_split_git(c->root, argv, listing, ZCL_DEVLOOP_OUTPUT_MAX);
+    size_t lead = strlen(c->local);
+    bool called = false;
+    char *save = NULL;
+    for (char *line = rc == 0 ? strtok_r(listing, "\n", &save) : NULL;
+         !called && line; line = strtok_r(NULL, "\n", &save))
+        called = dp_fresh_hit_changed(c, line, refs, count) &&
+                 strcmp(line + lead + 1, added) != 0;
+    free(listing);
+    return called;
+}
+
+/* Every function `f` defines with external linkage is called from another
+ * changed row: a public symbol nothing in the change names could interpose
+ * a library or runtime one (memalign) that no tracked file names either. */
+static bool dp_fresh_public_called(const struct dp_split_ctx *c,
+                                   const struct dp_split_funcs *f,
+                                   const char *added, const char **refs,
+                                   size_t count)
+{
+    for (size_t i = 0; i < f->count; i++)
+        if (f->pub[i] && !dp_fresh_name_called(c, f->name[i], added, refs, count))
+            return false;
+    return true;
+}
+
 /* No tracked file at `base` mentions any of the names `f` holds. */
 static bool dp_fresh_names_absent_at_base(const struct dp_split_ctx *c,
                                           const struct dp_split_funcs *f)
@@ -2591,7 +2657,8 @@ static bool dp_fresh_admit(const struct dp_split_ctx *c, const char **refs,
     bool ok = side && !dp_fresh_hooked(side) &&
               dp_split_parse_funcs(side, &f) && !f.overflow && !f.object &&
               f.count > 0 && dp_fresh_names_unreserved(&f) &&
-              dp_fresh_names_absent_at_base(c, &f);
+              dp_fresh_names_absent_at_base(c, &f) &&
+              dp_fresh_public_called(c, &f, added, refs, count);
     free(diff);
     free(side);
     return ok;
