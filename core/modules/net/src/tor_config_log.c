@@ -39,7 +39,12 @@ bool tor_write_torrc(const char *datadir, uint16_t p2p_port,
         "SocksPort 127.0.0.1:%u\n"
         "DataDirectory %s/tor_data\n"
         "Log notice file %s/" TOR_LOG_BASENAME "\n"
-        "Log info [rend] file %s/" TOR_REND_LOG_BASENAME "\n",
+        "Log info [rend] file %s/" TOR_REND_LOG_BASENAME "\n"
+        /* The node owns SIGTERM/SIGINT (platform signal_handler). Left on,
+         * Tor's libevent handlers swallow the node's shutdown signal, exit 0
+         * on their own and the node never shuts down. Tor is ended by
+         * tor_integration_stop(), not by a signal. */
+        "__DisableSignalHandlers 1\n",
         bootstrap_port, datadir, datadir, datadir);
     if (reduced_padding)
         fprintf(f, "ReducedConnectionPadding 1\n");

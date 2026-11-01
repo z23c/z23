@@ -681,3 +681,7 @@ later lane flips it HARD.
 - 2026-11-01T21:02:56Z — REASON: refactor(params_init): split 1 function(s) under the complexity cap (grok);  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: 6088d2bce6b6bb614ddd05f48346d76ee70318aed6b5e287c995278e9379da81
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T21:03:12Z — REASON: embedded Tor must not take the node's SIGTERM;   __DisableSignalHandlers 1;   no consensus change
+  old ROOT: 4c9ffca2861e0c4fc7affaf21a585b750a5ab3660843da2bfdf01a8babc8e658
+  by: owner unseal ritual (make core-unseal)

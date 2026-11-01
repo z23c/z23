@@ -1097,6 +1097,36 @@ static bool read_torrc_text(const char *dir, char *buf, size_t size)
     return true;
 }
 
+/* Embedded Tor must not install its own libevent handlers for SIGTERM/SIGINT:
+ * it would swallow the node's shutdown signal, exit 0 on its own, and leave
+ * the node running until SIGKILL. The torrc must say so, padding on or off. */
+static int test_tor_write_torrc_disables_signal_handlers(void)
+{
+    printf("test_tor_write_torrc_disables_signal_handlers: ");
+
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "nosig");
+    char td[512];
+    snprintf(td, sizeof(td), "%s/tor_data", tmpdir);
+    mkdir(td, 0700);
+
+    char got[3072];
+    bool off_ok = tor_write_torrc(tmpdir, 8033, false) &&
+                  read_torrc_text(tmpdir, got, sizeof(got)) &&
+                  strstr(got, "\n__DisableSignalHandlers 1\n") != NULL;
+    bool on_ok = tor_write_torrc(tmpdir, 8033, true) &&
+                 read_torrc_text(tmpdir, got, sizeof(got)) &&
+                 strstr(got, "\n__DisableSignalHandlers 1\n") != NULL;
+
+    remove_tree(tmpdir);
+    if (off_ok && on_ok) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (padding_off=%d padding_on=%d)\n", off_ok, on_ok);
+    return 1;
+}
+
 static int test_tor_write_torrc_reduced_padding(void)
 {
     int failures = 0;
@@ -1113,7 +1143,8 @@ static int test_tor_write_torrc_reduced_padding(void)
         "SocksPort 127.0.0.1:19999\n"
         "DataDirectory %s/tor_data\n"
         "Log notice file %s/" TOR_LOG_BASENAME "\n"
-        "Log info [rend] file %s/" TOR_REND_LOG_BASENAME "\n",
+        "Log info [rend] file %s/" TOR_REND_LOG_BASENAME "\n"
+        "__DisableSignalHandlers 1\n",
         tmpdir, tmpdir, tmpdir);
     snprintf(want_on, sizeof(want_on),
         "%sReducedConnectionPadding 1\n", want_off);
@@ -1150,6 +1181,7 @@ int test_tor(void)
     /* torrc generation — bootstrap port derivation */
     failures += test_tor_write_torrc_bootstrap_port();
     failures += test_tor_write_torrc_reduced_padding();
+    failures += test_tor_write_torrc_disables_signal_handlers();
     failures += test_tor_write_torrc_no_collision();
     failures += test_tor_write_torrc_datadir();
     failures += test_tor_write_torrc_idempotent();
