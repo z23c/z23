@@ -6,6 +6,7 @@
 
 #undef NDEBUG
 #include <assert.h>
+#include <stdio.h>
 #include <string.h>
 
 static bool digest(const uint8_t *bytes, size_t length, uint8_t output[32]) {
