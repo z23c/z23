@@ -211,7 +211,9 @@ static void render_balance(const struct summary *s, struct wallet_view *out)
 {
     char amount[32];
     if (s->hidden) { put(out->balance, sizeof(out->balance), TEXT_HIDDEN); return; }
-    if (!amount_text(s->spendable, amount, sizeof(amount))) return;
+    /* The headline is everything spendable, across all keys; spendable is what one payment can use. */
+    bool whole = s->total_state == P_VALUE && s->total >= s->spendable;
+    if (!amount_text(whole ? s->total : s->spendable, amount, sizeof(amount))) return;
     snprintf(out->balance, sizeof(out->balance), "%s ZCL", amount);
 }
 
@@ -233,8 +235,8 @@ static void render_pending(const struct summary *s, struct wallet_view *out)
         snprintf(out->pending, sizeof(out->pending), "%s ZCL pending", amount);
 }
 
-/* Confirmed funds that a send would refuse until the wallet catches up (a missing or stale witness), and the total of all
- * spendable notes when one send cannot reach them all. Neither is added to the spendable amount. */
+/* Confirmed funds that a send would refuse until the wallet catches up (a missing or stale witness), and the most one
+ * payment can use when that is less than the total spendable. Unready funds are not added to the spendable amount. */
 static void render_unready(const struct summary *s, struct wallet_view *out)
 {
     char amount[32];
@@ -244,8 +246,8 @@ static void render_unready(const struct summary *s, struct wallet_view *out)
     if (s->unready_state == P_NULL) put(out->unready_line, sizeof(out->unready_line), TEXT_UNREADY_UNKNOWN);
     else if (s->unready_state == P_VALUE && s->unready > 0 && amount_text(s->unready, amount, sizeof(amount)))
         snprintf(out->unready_line, sizeof(out->unready_line), "%s ZCL received, spendable once the wallet catches up", amount);
-    if (s->total_state == P_VALUE && s->total > s->spendable && amount_text(s->total, amount, sizeof(amount)))
-        snprintf(out->total_line, sizeof(out->total_line), "%s ZCL spendable in all, but one payment can send at most the amount above", amount);
+    if (s->total_state == P_VALUE && s->total > s->spendable && amount_text(s->spendable, amount, sizeof(amount)))
+        snprintf(out->total_line, sizeof(out->total_line), "Up to %s ZCL in one payment", amount);
 }
 
 static void render_immature(const struct summary *s, struct wallet_view *out)

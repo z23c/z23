@@ -1259,10 +1259,11 @@ static void test_funds_unready(void)
     CHECK(!strcmp(text_at(snap(), find(snap(), WALLET_ITEM_AMOUNT, WALLET_ACT_NONE)), "0 ZCL"));
     fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":0,\"unready\":\"0.00000000\",\"spendable_total_zat\":900000000,\"spendable_total\":\"9.00000000\","), "0", "0.00000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("9 ZCL spendable in all, but one payment can send at most the amount above") && !has("catches up"));
+    CHECK(has("Up to 1 ZCL in one payment") && !has("catches up"));
+    CHECK(!strcmp(text_at(snap(), find(snap(), WALLET_ITEM_AMOUNT, WALLET_ACT_NONE)), "9 ZCL"));
     fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":0,\"unready\":\"0.00000000\",\"spendable_total_zat\":100000000,\"spendable_total\":\"1.00000000\","), "0", "0.00000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(!has("spendable in all") && !has("catches up"));
+    CHECK(!has("in one payment") && !has("catches up"));
     fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":null,\"unready\":null,"), "0", "0.00000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     CHECK(has("Amount waiting on the wallet unknown") && has("1 ZCL") && !has("catches up"));
@@ -1272,6 +1273,23 @@ static void test_funds_unready(void)
     fake.summary = SUMMARY_STATE("keys_unavailable", PRIVATE_HIDDEN, "10000000", "0.10000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     CHECK(has("Private balance hidden while the wallet is locked") && has("0.1 ZCL public") && !has("catches up") && !has("0 ZCL") && !has("unknown"));
+    wallet_screens_close();
+}
+
+/* A row whose kind and fully_shielded are null is neither Private nor Public. */
+#define NULL_PRIVACY_ROW                                                                                 \
+    "{\"txid\":\"" TX_A "\",\"status\":\"confirmed\",\"height\":2999990,\"confirmations\":11,\"time\":1700000000," \
+    "\"direction\":\"received\",\"kind\":null,\"amount_zat\":100,\"amount\":null,\"fee_zat\":null,\"fee\":null,\"net_zat\":0," \
+    "\"memo_present\":false,\"fully_shielded\":null}"
+static void test_null_privacy(void)
+{
+    start(false);
+    fake.history[0] = PAGE(NULL_PRIVACY_ROW, "1", "null");
+    CHECK(wallet_screens_open(WALLET_PAGE_HISTORY));
+    long at = find_text(snap(), "Received ·");
+    CHECK(at >= 0 && !strstr(text_at(snap(), at), "Private") && !strstr(text_at(snap(), at), "Public"));
+    tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
+    CHECK(has("The node does not say whether every part of this payment was private.") && !has("Private"));
     wallet_screens_close();
 }
 
@@ -1328,6 +1346,7 @@ int main(int argc, char **argv)
     test_funds_plain_words();
     test_funds_unready();
     test_history_incomplete();
+    test_null_privacy();
     test_scan_notice();
     test_receive_address_whole();
     test_receive_order();

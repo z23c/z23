@@ -377,10 +377,13 @@ static void test_unready_total_and_hidden(void)
                  "\"schema\":\"zcl.wallet_summary.v1\",\"unready_zat\":0,\"unready\":\"0.00000000\","
                  "\"spendable_total_zat\":900000000,\"spendable_total\":\"9.00000000\",");
     assert(wallet_view_from_summary(json, &v) && !v.unready_line[0]);
-    assert(!strcmp(v.total_line, "9 ZCL spendable in all, but one payment can send at most the amount above"));
+    assert(!strcmp(v.balance, "9 ZCL") && !strcmp(v.total_line, "Up to 1.23456789 ZCL in one payment"));
     replace_once(json, sizeof(json), VALID_REPLY, schema,
                  "\"schema\":\"zcl.wallet_summary.v1\",\"spendable_total_zat\":123456789,\"spendable_total\":\"1.23456789\",");
-    assert(wallet_view_from_summary(json, &v) && !v.total_line[0] && !v.unready_line[0]);
+    assert(wallet_view_from_summary(json, &v) && !v.total_line[0] && !v.unready_line[0] && !strcmp(v.balance, "1.23456789 ZCL"));
+    replace_once(json, sizeof(json), VALID_REPLY, schema,
+                 "\"schema\":\"zcl.wallet_summary.v1\",\"spendable_total_zat\":5,\"spendable_total\":\"0.00000005\",");
+    assert(wallet_view_from_summary(json, &v) && !v.total_line[0] && !strcmp(v.balance, "1.23456789 ZCL"));
     replace_once(json, sizeof(json), VALID_REPLY, schema,
                  "\"schema\":\"zcl.wallet_summary.v1\",\"unready_zat\":null,\"unready\":null,");
     assert(wallet_view_from_summary(json, &v) && v.known && !strcmp(v.unready_line, "Amount waiting on the wallet unknown"));
