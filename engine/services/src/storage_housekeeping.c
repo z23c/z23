@@ -80,7 +80,13 @@ static bool sh_maintenance_begin(bool cancelable)
     }
 }
 
-static bool sweep_projection(const struct storage_pacing *pacing, bool cancelable)
+/* What one sweep step did. SKIPPED (a step with nothing to act on, e.g. the
+ * log bound with no datadir) and INTERRUPTED (a stop request ended the wait
+ * for the token) both mean the bound was NOT applied, so neither may be
+ * counted as a completed sweep. */
+enum sh_step { SH_STEP_DONE, SH_STEP_SKIPPED, SH_STEP_INTERRUPTED };
+
+static enum sh_step sweep_projection(const struct storage_pacing *pacing, bool cancelable)
 {
     /* Compaction can refuse before measuring a closed or unavailable store.
      * Preserve the unavailable sentinel until it supplies an observation. */
@@ -89,7 +95,7 @@ static bool sweep_projection(const struct storage_pacing *pacing, bool cancelabl
         .file_bytes = -1, .live_bytes = -1, .free_bytes = -1,
     };
     if (!sh_maintenance_begin(cancelable))
-        return false; // raw-return-ok:stop_requested_interrupt
+        return SH_STEP_INTERRUPTED;
     bool compacted = projection_store_compact_if_needed(
         pacing->compact_floor_bytes, pacing->compact_ratio_pct, NULL,
         &after);
@@ -101,14 +107,14 @@ static bool sweep_projection(const struct storage_pacing *pacing, bool cancelabl
     if (compacted)
         g_stats.projection_compactions++;
     pthread_mutex_unlock(&g_lock);
-    return true;
+    return SH_STEP_DONE;
 }
 
-static bool sweep_topology(const struct storage_pacing *pacing, bool cancelable)
+static enum sh_step sweep_topology(const struct storage_pacing *pacing, bool cancelable)
 {
     int64_t wal_before = -1;
     if (!sh_maintenance_begin(cancelable))
-        return false; // raw-return-ok:stop_requested_interrupt
+        return SH_STEP_INTERRUPTED;
     bool truncated = topology_store_wal_checkpoint_if_over(
         pacing->wal_truncate_bytes, &wal_before);
     storage_pacing_maintenance_end();
@@ -119,16 +125,17 @@ static bool sweep_topology(const struct storage_pacing *pacing, bool cancelable)
     if (truncated)
         g_stats.topology_checkpoints++;
     pthread_mutex_unlock(&g_lock);
-    return true;
+    return SH_STEP_DONE;
 }
 
-static bool sweep_logs(const char *datadir, const struct storage_pacing *pacing,
-                       bool cancelable)
+static enum sh_step sweep_logs(const char *datadir,
+                               const struct storage_pacing *pacing,
+                               bool cancelable)
 {
     if (!datadir || !datadir[0])
-        return true;
+        return SH_STEP_SKIPPED; /* no datadir: log bound not applied */
     if (!sh_maintenance_begin(cancelable))
-        return false; // raw-return-ok:stop_requested_interrupt
+        return SH_STEP_INTERRUPTED;
     int rotated = tor_logs_rotate(datadir, pacing->log_rotate_bytes);
     storage_pacing_maintenance_end();
 
@@ -137,7 +144,7 @@ static bool sweep_logs(const char *datadir, const struct storage_pacing *pacing,
         g_stats.log_rotations += rotated;
         pthread_mutex_unlock(&g_lock);
     }
-    return true;
+    return SH_STEP_DONE;
 }
 
 /* Completed sweeps. Separate from g_stats.sweeps, which is bumped on entry
@@ -147,8 +154,10 @@ static _Atomic uint64_t g_sweeps_done = 0;
 
 /* One sweep. `cancelable` is true only for the service thread: a stop request
  * then abandons the sweep at the next token wait, and the abandoned sweep is
- * counted as interrupted, never as completed (no g_sweeps_done, no
- * sweeps_completed). A direct call is never cancelable. */
+ * counted as interrupted, never as completed; a sweep with a skipped step
+ * (no datadir for the log bound) is counted as skipped. Neither bumps
+ * g_sweeps_done or
+ * sweeps_completed. A direct call is never cancelable. */
 static bool sh_sweep(const char *datadir, bool cancelable)
 {
     const struct storage_pacing *pacing = storage_pacing();
@@ -157,20 +166,32 @@ static bool sh_sweep(const char *datadir, bool cancelable)
     g_stats.sweeps++;
     pthread_mutex_unlock(&g_lock);
 
-    bool done = sweep_topology(pacing, cancelable) &&
-                sweep_projection(pacing, cancelable) &&
-                sweep_logs(datadir, pacing, cancelable);
-    if (!done) {
+    enum sh_step steps[3];
+    steps[0] = sweep_topology(pacing, cancelable);
+    steps[1] = steps[0] == SH_STEP_INTERRUPTED
+                   ? SH_STEP_INTERRUPTED : sweep_projection(pacing, cancelable);
+    steps[2] = steps[1] == SH_STEP_INTERRUPTED
+                   ? SH_STEP_INTERRUPTED
+                   : sweep_logs(datadir, pacing, cancelable);
+    bool interrupted = false, skipped = false;
+    for (int i = 0; i < 3; i++) {
+        interrupted |= steps[i] == SH_STEP_INTERRUPTED;
+        skipped |= steps[i] == SH_STEP_SKIPPED;
+    }
+    if (interrupted || skipped) {
         pthread_mutex_lock(&g_lock);
-        g_stats.sweeps_interrupted++;
+        if (interrupted)
+            g_stats.sweeps_interrupted++;
+        else
+            g_stats.sweeps_skipped++;
         pthread_mutex_unlock(&g_lock);
-        return false; // raw-return-ok:interrupted_sweep_counted
+        return false; // raw-return-ok:incomplete_sweep_counted
     }
 
     pthread_mutex_lock(&g_lock);
     g_stats.sweeps_completed++;
     pthread_mutex_unlock(&g_lock);
-    /* Bumped only here, after the three bounds have actually been applied:
+    /* Bumped only here, after all three bounds have actually been applied:
      * this is the counter the supervisor watches for forward progress. */
     atomic_fetch_add(&g_sweeps_done, 1);
     return true;
@@ -411,6 +432,7 @@ bool storage_housekeeping_dump_state_json(struct json_value *out,
     json_push_kv_int(out, "sweeps", s.sweeps);
     json_push_kv_int(out, "sweeps_completed", s.sweeps_completed);
     json_push_kv_int(out, "sweeps_interrupted", s.sweeps_interrupted);
+    json_push_kv_int(out, "sweeps_skipped", s.sweeps_skipped);
     json_push_kv_int(out, "projection_compactions", s.projection_compactions);
     json_push_kv_int(out, "topology_checkpoints", s.topology_checkpoints);
     json_push_kv_int(out, "log_rotations", s.log_rotations);

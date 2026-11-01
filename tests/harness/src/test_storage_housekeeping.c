@@ -299,6 +299,18 @@ static int shk_case_stop_ends_sweep_blocked_on_token(void)
               after.sweeps_completed == mid.sweeps_completed + 1);
     SHK_CHECK("a direct sweep is not counted as interrupted",
               after.sweeps_interrupted == mid.sweeps_interrupted);
+
+    /* A sweep whose log step has no datadir skipped a bound: it is counted
+     * as skipped, never as completed. */
+    storage_housekeeping_sweep(NULL);
+    struct storage_housekeeping_stats last;
+    storage_housekeeping_stats(&last);
+    SHK_CHECK("a sweep with a skipped log step is counted as skipped",
+              last.sweeps_skipped == after.sweeps_skipped + 1);
+    SHK_CHECK("a sweep with a skipped log step is not counted as completed",
+              last.sweeps_completed == after.sweeps_completed);
+    SHK_CHECK("a sweep with a skipped log step is not counted as interrupted",
+              last.sweeps_interrupted == after.sweeps_interrupted);
     storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
     test_cleanup_tmpdir(dir);
     return failures;

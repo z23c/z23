@@ -48,6 +48,9 @@ struct storage_housekeeping_stats {
     int64_t sweeps;                  /* sweeps STARTED */
     int64_t sweeps_completed;        /* all three bounds applied */
     int64_t sweeps_interrupted;      /* abandoned by a stop request */
+    int64_t sweeps_skipped;          /* a step had nothing to act on (no datadir
+                                      * for the log bound): bounds not all
+                                      * applied, so not completed */
     int64_t projection_compactions;
     int64_t topology_checkpoints;
     int64_t log_rotations;
