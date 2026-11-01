@@ -721,3 +721,7 @@ later lane flips it HARD.
 - 2026-11-01T21:05:29Z — REASON: Export process_block_tip_is_best_work from the sealed validation core so the genesis walk publisher can earn the best-work flag by the same predicate;  behavior-preserving, no consensus predicate change (re-seal after rebase onto current main)
   old ROOT: 724851fdb0435ccf6a79a353d4f91bc60cd41573b45551aeb962ae76ab0b21ad
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T21:19:13Z — REASON: refactor(stage_lcc): split 1 function(s) under the complexity cap (glm); behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: cc7fb7696310870353ca6870904e131dce4cccf068ab93366cb594cb90c95556
+  by: owner unseal ritual (make core-unseal)

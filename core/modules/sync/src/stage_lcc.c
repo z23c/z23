@@ -171,6 +171,49 @@ bool stage_lcc_first_gap(sqlite3 *db, const char *name,
     return have;
 }
 
+/* Decide whether a gap found in [old_cursor, new_cursor) is tolerated by the
+ * durable trusted base, recounting only the unvetted tail. Returns true when
+ * the raise is tolerated (whole span at/below base, exempt table, transient
+ * SQL error, or contiguous above the base), false when a hole remains. On a
+ * false return, *low, *cnt2 and *base describe the unvetted span for the
+ * caller's error message. */
+static bool lcc_gap_tolerated_by_trusted_base(sqlite3 *db, const char *name,
+                                              uint64_t old_cursor,
+                                              uint64_t new_cursor,
+                                              long long cnt,
+                                              uint64_t *low,
+                                              long long *cnt2,
+                                              uint64_t *base_out)
+{
+    *low = old_cursor;
+    *cnt2 = cnt;
+    *base_out = 0;
+
+    /* A gap exists in the raw covered span. It is tolerated only for heights at
+     * or below the durable trusted base (a crypto-vetted install commits
+     * complete state up to and including B, so the cursor may sit at B+1). A
+     * base of 0 / absent exempts nothing. */
+    uint64_t base = stage_lcc_trusted_base(db);
+    uint64_t exempt_below = base ? base + 1 : 0; /* heights < this are vetted */
+    uint64_t lo = old_cursor > exempt_below ? old_cursor : exempt_below;
+    if (lo >= new_cursor)
+        return true;                /* whole covered span at/below the base */
+
+    long long c2 = cnt;
+    if (lo != old_cursor) {
+        bool m2 = false;
+        c2 = lcc_count_rows(db, name, lo, new_cursor, &m2);
+        if (m2)
+            return true;
+        if (c2 < 0)
+            return true;            /* fail OPEN (logged) */
+    }
+    *low = lo;
+    *cnt2 = c2;
+    *base_out = base;
+    return (uint64_t)c2 >= (new_cursor - lo); /* contiguous above the base */
+}
+
 bool stage_lcc_check_raise(sqlite3 *db, const char *name,
                            uint64_t old_cursor, uint64_t new_cursor,
                            char *err, size_t errcap)
@@ -195,27 +238,12 @@ bool stage_lcc_check_raise(sqlite3 *db, const char *name,
     if ((uint64_t)cnt >= span)
         return true;                 /* fully backed: contiguous raise */
 
-    /* A gap exists in the raw covered span. It is tolerated only for heights at
-     * or below the durable trusted base (a crypto-vetted install commits
-     * complete state up to and including B, so the cursor may sit at B+1). A
-     * base of 0 / absent exempts nothing. */
-    uint64_t base = stage_lcc_trusted_base(db);
-    uint64_t exempt_below = base ? base + 1 : 0; /* heights < this are vetted */
-    uint64_t low = old_cursor > exempt_below ? old_cursor : exempt_below;
-    if (low >= new_cursor)
-        return true;                 /* whole covered span at/below the base */
-
+    uint64_t low = old_cursor;
     long long cnt2 = cnt;
-    if (low != old_cursor) {
-        bool m2 = false;
-        cnt2 = lcc_count_rows(db, name, low, new_cursor, &m2);
-        if (m2)
-            return true;
-        if (cnt2 < 0)
-            return true;             /* fail OPEN (logged) */
-    }
-    if ((uint64_t)cnt2 >= (new_cursor - low))
-        return true;                 /* contiguous above the base */
+    uint64_t base = 0;
+    if (lcc_gap_tolerated_by_trusted_base(db, name, old_cursor, new_cursor,
+                                          cnt, &low, &cnt2, &base))
+        return true;
 
     /* Refuse: name the first rowless height so the caller's rollback is a loud,
      * located blocker rather than a silent pin. */
