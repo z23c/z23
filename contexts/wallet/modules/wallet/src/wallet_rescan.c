@@ -168,8 +168,8 @@ static void wallet_rescan_log_done(const struct wallet_rescan_report *r,
 
 /* A rescan that read every block from the marker to the tip is the read the
  * marker waits for. A partial one (starting above the marker, stopping before
- * the tip, missing a body, or leaving shielded outputs untried for want of a
- * key) proves nothing about the rest and keeps it. */
+ * the tip, missing a body, leaving shielded outputs untried for want of a
+ * key, or holding a stored key that cannot scan while locked) proves nothing about the rest and keeps it. */
 static void wallet_rescan_clear_marker(struct wallet *w, int start_height,
                                        int stop_height, int tip,
                                        const struct wallet_rescan_report *r)
@@ -177,7 +177,7 @@ static void wallet_rescan_clear_marker(struct wallet *w, int start_height,
     zcl_mutex_lock(&w->cs);
     if (w->scan_retry.pending && start_height <= w->scan_retry.from &&
         stop_height >= tip && r->blocks_scanned == r->blocks_in_range &&
-        r->shielded_txs_unscanned == 0)
+        r->shielded_txs_unscanned == 0 && w->sapling_keys.num_unscannable == 0)
         memset(&w->scan_retry, 0, sizeof(w->scan_retry));
     zcl_mutex_unlock(&w->cs);
 }

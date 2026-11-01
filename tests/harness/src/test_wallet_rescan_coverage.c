@@ -165,6 +165,17 @@ static int wrc_boot_floor_and_marker(struct wallet *w, struct main_state *ms,
     (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
     WRC_CHECK("J: the same boot read with a Sapling key clears it",
               !w->scan_retry.pending && rep.shielded_txs_unscanned == 0);
+    /* A stored key that cannot scan while locked keeps the marker too. */
+    w->scan_retry.pending = true;
+    w->scan_retry.from = 0;
+    snprintf(w->scan_retry.blocker, sizeof(w->scan_retry.blocker), "%s",
+             WALLET_RESTORE_BLOCKER_UNREAD);
+    w->sapling_keys.num_unscannable = 1;
+    memset(&rep, 0, sizeof(rep));
+    (void)boot_wallet_catch_up(w, &ms->chain_active, datadir, &rep);
+    WRC_CHECK("J: a boot read keeps the marker while a stored key is unscannable",
+              w->scan_retry.pending && rep.shielded_txs_unscanned == 0);
+    w->sapling_keys.num_unscannable = 0;
     sapling_keystore_free(&w->sapling_keys);
     sapling_keystore_init(&w->sapling_keys);
     w->best_block_height = WRC_NBLOCKS - 1;
@@ -203,6 +214,11 @@ static int wrc_rescan_marker(struct wallet *w, struct main_state *ms,
     WRC_CHECK("I: a rescan that misses one body keeps it",
               w->scan_retry.pending && rep.blocks_scanned < rep.blocks_in_range);
     idx[100].nStatus |= BLOCK_HAVE_DATA;
+    w->sapling_keys.num_unscannable = 1;
+    (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
+    WRC_CHECK("I: a whole rescan keeps it while a stored key is unscannable",
+              w->scan_retry.pending && rep.blocks_scanned == WRC_NBLOCKS);
+    w->sapling_keys.num_unscannable = 0;
     (void)wallet_rescan_report(w, &ms->chain_active, 0, -1, netdir, &rep);
     WRC_CHECK("I: a whole rescan that read every body clears it",
               !w->scan_retry.pending && rep.blocks_scanned == WRC_NBLOCKS &&
