@@ -342,8 +342,7 @@ static bool sd_bootstrapstatus_ready_zclassic23_bootstrap(const struct json_valu
     return ok;
 }
 
-static bool sd_bootstrapstatus_ready_snapshot_loader(const struct json_value *result,
-                                           const char *snap_path)
+static bool sd_bootstrapstatus_ready_snapshot_loader(const struct json_value *result)
 {
     bool ok = true;
     const struct json_value *loader =
@@ -354,15 +353,13 @@ static bool sd_bootstrapstatus_ready_snapshot_loader(const struct json_value *re
     ok = ok && json_get_bool(json_get(loader, "bundle_present"));
     ok = ok && json_get_int(json_get(loader,
                                      "bundle_seed_height")) == 3170000;
-    ok = ok && strcmp(json_get_str(json_get(loader, "bundle_path")),
-                      snap_path) == 0;
+    ok = ok && !json_get(loader, "bundle_path") && !json_get(loader, "datadir");
     ok = ok && json_get_bool(json_get(loader,
                                       "block_index_present"));
     ok = ok && json_get_bool(json_get(loader, "bootable_bundle"));
     ok = ok && json_get_bool(json_get(loader,
         "active_loader_configured"));
-    ok = ok && strcmp(json_get_str(json_get(loader,
-        "active_loader_path")), snap_path) == 0;
+    ok = ok && !json_get(loader, "active_loader_path");
     ok = ok && json_get_bool(json_get(loader,
         "active_loader_matches_bundle"));
     ok = ok && strcmp(json_get_str(json_get(loader,
@@ -528,7 +525,7 @@ static bool sd_bootstrapstatus_ready_phase1(struct sd_bootstrap_ctx *ctx)
     ok = sd_bootstrapstatus_ready_first_verified_peer(&ctx->result) && ok;
     ok = sd_bootstrapstatus_ready_addrman(&ctx->result) && ok;
     ok = sd_bootstrapstatus_ready_zclassic23_bootstrap(&ctx->result) && ok;
-    ok = sd_bootstrapstatus_ready_snapshot_loader(&ctx->result, ctx->snap_path) && ok;
+    ok = sd_bootstrapstatus_ready_snapshot_loader(&ctx->result) && ok;
     ok = sd_bootstrapstatus_ready_snapshot_authority_and_legacy(&ctx->result) && ok;
     ok = sd_bootstrapstatus_ready_beta6_snapshot(&ctx->result) && ok;
     ok = sd_bootstrapstatus_state_source(&ctx->result) && ok;
