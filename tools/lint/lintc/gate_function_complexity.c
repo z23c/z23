@@ -62,6 +62,8 @@
 #include "gate_function_complexity_priv.h"
 
 enum { CYC_MAX = 15, CYC_TOP = 20 };
+/* --report histogram: M = CYC_HIST_LO .. CYC_HIST_LO + CYC_HIST_N - 1. */
+enum { CYC_HIST_LO = 11, CYC_HIST_N = 5 };
 enum { LX_CODE = 0, LX_LINE, LX_BLOCK, LX_STR, LX_CHR };
 
 static const char k_cyc_base_rel[] =
@@ -849,6 +851,8 @@ struct cyc_acc {
     const char *mode;
     int funcs, viol;
     int gt10, gt15, gt20;
+    int hist[CYC_HIST_N];      /* counts at M = CYC_HIST_LO + index */
+    int out_hist[CYC_HIST_N];  /* the same, outside sealed/custody paths */
     struct cyc_top_ent {
         char path[RS_PATH];
         char name[CYC_NAME];
@@ -880,6 +884,23 @@ static void cyc_top_feed(struct cyc_acc *a, const char *path,
     a->top[i].m = m;
 }
 
+/* The sealed and custody rooms: core/, contexts/wallet/, engine/reducer/. */
+static int cyc_sealed_path(const char *p)
+{
+    return strncmp(p, "core/", 5) == 0
+        || strncmp(p, "contexts/wallet/", 16) == 0
+        || strncmp(p, "engine/reducer/", 15) == 0;
+}
+
+static void cyc_hist_feed(struct cyc_acc *a, const char *path, int m)
+{
+    if (m < CYC_HIST_LO || m >= CYC_HIST_LO + CYC_HIST_N)
+        return;
+    a->hist[m - CYC_HIST_LO]++;
+    if (!cyc_sealed_path(path))
+        a->out_hist[m - CYC_HIST_LO]++;
+}
+
 static int cyc_on_func(const char *path, const char *name, int line, int m,
                        void *ctx)
 {
@@ -892,6 +913,7 @@ static int cyc_on_func(const char *path, const char *name, int line, int m,
     if (m > 20)
         a->gt20++;
     cyc_top_feed(a, path, name, m);
+    cyc_hist_feed(a, path, m);
     char key[LB_KEY];
     if (cyc_key(key, sizeof key, path, name))
         return 2;
@@ -947,14 +969,31 @@ static int cyc_dump_viol(const struct cyc_acc *a, FILE *hits,
     return strcmp(mode, "WARN") == 0 ? 0 : 1;
 }
 
-/* --report: distribution summary plus the top-M table. */
+/* One histogram row: the lead text, then "M=11: n  M=12: n ..." over the
+ * CYC_HIST_N counts, and a newline. Returns nonzero on a write failure. */
+static int cyc_hist_line(FILE *out, const char *lead, const int *h)
+{
+    if (fputs(lead, out) == EOF)
+        return 1;
+    for (int i = 0; i < CYC_HIST_N; i++)
+        if (fprintf(out, "%sM=%d: %d", i ? "  " : "", CYC_HIST_LO + i,
+                    h[i]) < 0)
+            return 1;
+    return fputc('\n', out) == EOF;
+}
+
+/* --report: distribution summary, the M=11..15 histogram (all paths, then
+ * outside the sealed/custody rooms), and the top-M table. */
 static int cyc_report(const struct cyc_acc *a, int files, FILE *out)
 {
     int rc2 = fprintf(out, "check_cyclomatic_complexity report: %d "
                       "functions in %d files\n  M>10: %d  M>15: %d  "
-                      "M>20: %d\n  top %d by M:\n",
-                      a->funcs, files, a->gt10, a->gt15, a->gt20,
-                      CYC_TOP) < 0;
+                      "M>20: %d\n",
+                      a->funcs, files, a->gt10, a->gt15, a->gt20) < 0;
+    rc2 = rc2 || cyc_hist_line(out, "  ", a->hist);
+    rc2 = rc2 || cyc_hist_line(out, "  outside sealed/custody: ",
+                               a->out_hist);
+    rc2 = rc2 || fprintf(out, "  top %d by M:\n", CYC_TOP) < 0;
     for (int i = 0; !rc2 && i < CYC_TOP && a->top[i].path[0]; i++)
         rc2 = fprintf(out, "    M=%d %s:%s\n", a->top[i].m, a->top[i].path,
                       a->top[i].name) < 0;

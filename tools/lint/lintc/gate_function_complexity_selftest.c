@@ -557,9 +557,108 @@ static int cyc_st_writeback(const char *root)
     return bad;
 }
 
+/* Write one C function `name` with cyclomatic M = m (m - 1 if statements)
+ * into buf. Returns 0, or 1 when the text would not fit. */
+static int cyc_st_fn(char *buf, size_t cap, const char *name, int m)
+{
+    int n = snprintf(buf, cap, "int %s(int x)\n{\n    int r = 0;\n", name);
+    for (int i = 1; i < m && n >= 0 && (size_t)n < cap; i++)
+        n += snprintf(buf + n, cap - (size_t)n, "    if (x > %d) r++;\n", i);
+    if (n < 0 || (size_t)n >= cap)
+        return 1;
+    n += snprintf(buf + n, cap - (size_t)n, "    return r;\n}\n");
+    return n < 0 || (size_t)n >= cap;
+}
+
+/* One fixture file: its path under the root, its function and its M. */
+struct cyc_st_hist_case {
+    const char *rel;
+    const char *name;
+    int m;
+};
+
+/* The sealed/custody prefixes are core/, contexts/wallet/ and
+ * engine/reducer/; coreish/ and contexts/market/ must count as outside. */
+static const struct cyc_st_hist_case k_cyc_st_hist_cases[] = {
+    { "calm.c", "calm", 1 },
+    { "util/u11.c", "u11", 11 },
+    { "util/u12.c", "u12", 12 },
+    { "core/c13.c", "c13", 13 },
+    { "coreish/k13.c", "k13", 13 },
+    { "contexts/wallet/w14.c", "w14", 14 },
+    { "engine/reducer/r15.c", "r15", 15 },
+    { "contexts/market/m15.c", "m15", 15 },
+};
+
+static int cyc_st_hist_write(const char *root,
+                             const struct cyc_st_hist_case *c)
+{
+    char path[8192], text[8192];
+    if (ovf(snprintf(path, sizeof path, "%s/%s", root, c->rel), sizeof path)
+        || cyc_st_fn(text, sizeof text, c->name, c->m)
+        || csr_write(path, text))
+        return 1;
+    return 0;
+}
+
+static int cyc_st_hist_fixture(const char *root)
+{
+    size_t n = sizeof k_cyc_st_hist_cases / sizeof k_cyc_st_hist_cases[0];
+    for (size_t i = 0; i < n; i++)
+        if (cyc_st_hist_write(root, &k_cyc_st_hist_cases[i]))
+            return 1;
+    return 0;
+}
+
+/* --report prints the M=11..15 histogram after the M>10 line, and a second
+ * line with the same five counts for paths outside the sealed/custody
+ * rooms. The M>10 line itself must stay byte-identical. */
+static const char k_cyc_st_hist_want[] =
+    "  M>10: 7  M>15: 0  M>20: 0\n"
+    "  M=11: 1  M=12: 1  M=13: 2  M=14: 1  M=15: 2\n"
+    "  outside sealed/custody: M=11: 1  M=12: 1  M=13: 1  M=14: 0  M=15: 1\n"
+    "  top 20 by M:\n";
+
+static int cyc_st_hist_run(const char *root, struct cyc_st_run *r)
+{
+    FILE *out = tmpfile(), *err = tmpfile();
+    if (!out || !err) {
+        if (out)
+            fclose(out);
+        if (err)
+            fclose(err);
+        return 1;
+    }
+    r->rc = cyc_check(root, NULL, "RATCHET", 1, 0, out, err);
+    int bad = csr_slurp(out, r->out, sizeof r->out)
+        || csr_slurp(err, r->err, sizeof r->err);
+    fclose(out);
+    fclose(err);
+    return bad;
+}
+
+static int cyc_st_hist(void)
+{
+    const char *td = env_or("TMPDIR", cyc_tmp_default);
+    char tmpl[4096];
+    if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-cych-XXXXXX", td),
+            sizeof tmpl))
+        return 1;
+    char *root = mkdtemp(tmpl);
+    if (!root)
+        return 1;
+    int bad = cyc_st_hist_fixture(root);
+    struct cyc_st_run r;
+    if (!bad)
+        bad = cyc_st_hist_run(root, &r)
+            || cyc_st_want(&r, "report histogram", 0, k_cyc_st_hist_want);
+    (void)rap_rm_rf(root);
+    return bad;
+}
+
 int check_cyclomatic_complexity_selftest(void)
 {
-    int bad = cyc_st_metric();
+    int bad = cyc_st_metric() | cyc_st_hist();
     const char *td = env_or("TMPDIR", cyc_tmp_default);
     char tmpl[4096];
     if (ovf(snprintf(tmpl, sizeof tmpl, "%s/z23-lint-cyc-XXXXXX", td),
