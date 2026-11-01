@@ -7008,6 +7008,39 @@ static bool ic_fresh_edit_sidecar_orphan(void)
                             "tools/command/native_devagent_start.c");
 }
 
+/* A reserved name can be a runtime hook no tracked file names: the sanitizer
+ * runtime calls __asan_default_options without any caller in the tree. */
+static bool ic_fresh_edit_reserved(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+                        "/* situation - a runtime hook */\n#include \"a.h\"\n\n"
+                        "const char *__asan_default_options(void)\n{\n"
+                        "    return \"\";\n}\n\n"
+                        "int fresh_probe_run(int x)\n{\n    return x + 41;\n}\n");
+}
+
+/* An array object whose size expression holds a '(' is still an object. */
+static bool ic_fresh_edit_array(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+                        "/* situation - a public array */\n#include \"a.h\"\n\n"
+                        "char fresh_buf[sizeof(long)];\n\n"
+                        "int fresh_probe_run(int x)\n{\n    return x + 41;\n}\n");
+}
+
+/* A row after a comment on the same line is live, not a comment. */
+static bool ic_fresh_edit_sidecar_comment(void)
+{
+    return ic_fresh_edit_fresh() &&
+           ic_split_w("tools/command/native_devagent_situation.c"
+                      ".capabilities.def",
+                      "/* sidecar */\n"
+                      "ZCL_MODULE_CAPABILITY(\"tools/command/"
+                      "native_devagent_situation.c\", CAP_FS_READ, \"reads\")\n"
+                      "/* x */ ZCL_MODULE_CAPABILITY(\"tools/command/"
+                      "native_devagent_start.c\", CAP_NETWORK, \"\")\n");
+}
+
 static bool ic_fresh_edit_core(void)
 {
     return ic_fresh_add("core/b/fresh_core.c", IC_FRESH_BODY("core"));
@@ -7058,6 +7091,9 @@ static bool ic_fresh_fixture_build(void)
         {"freshsidecar", ic_fresh_edit_sidecar},
         {"freshsidecarrow", ic_fresh_edit_sidecar_row},
         {"freshsidecarorphan", ic_fresh_edit_sidecar_orphan},
+        {"freshsidecarcomment", ic_fresh_edit_sidecar_comment},
+        {"freshreserved", ic_fresh_edit_reserved},
+        {"fresharray", ic_fresh_edit_array},
         {"freshobject", ic_fresh_edit_object},
         {"freshheader", ic_fresh_edit_header},
         {"freshdeleted", ic_fresh_edit_deleted},
@@ -7088,6 +7124,9 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"freshcore", 'A', NULL, NULL},      /* under core/ */
     {"freshsidecarrow", 'A', NULL, NULL},  /* a row for another file */
     {"freshsidecarorphan", 'A', NULL, NULL}, /* a sidecar with no fresh owner */
+    {"freshsidecarcomment", 'A', NULL, NULL}, /* a row hidden after a comment */
+    {"freshreserved", 'A', NULL, NULL},  /* a reserved (runtime hook) name */
+    {"fresharray", 'A', NULL, NULL},     /* char buf[sizeof(long)]; is an object */
     {"freshobject", 'A', NULL, NULL},    /* a public file-scope object */
     {"freshheader", 'A', NULL, NULL},    /* an added header beside it */
     {"freshdeleted", 'D', NULL, NULL},   /* a deletion beside it */
