@@ -147,8 +147,9 @@ static void windows_projection_reject_row(char *reason, size_t reason_size, cons
 
 /* Report whether a sqlite_schema row is an allowed projection-only object. */
 static bool windows_projection_row_allowed(const char *type, const char *name, const char *table) {
-    return windows_projection_table_object(type, name, table) ||
-           windows_projection_index_object(type, table);
+    bool table_object = windows_projection_table_object(type, name, table);
+    bool index_object = windows_projection_index_object(type, table);
+    return table_object || index_object;
 }
 
 static bool windows_projection_snapshot_allowed(sqlite3 *db, char *reason,
