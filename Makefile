@@ -13508,6 +13508,10 @@ LAB_PEER_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/incl
 # against (a C program: the test starts no shell).
 LAB_PEER_FAKE_BIN = $(BIN_DIR)/lab-peer-fake
 lab-peer: $(LAB_PEER_BIN) $(LAB_PEER_FAKE_BIN)
+# check-capability-closure grades the objects of the dev epoch, and these two
+# standalone programs link into neither z23-dev nor the package verifier:
+# build their objects there so their capability rows are graded, not missing.
+check-capability-closure: $(DEV_OBJ_DIR)/tools/lab_peer.o $(DEV_OBJ_DIR)/tools/lab_peer_fake.o
 $(LAB_PEER_FAKE_BIN): tools/lab_peer_fake.c
 	mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \

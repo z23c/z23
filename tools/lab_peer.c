@@ -1194,7 +1194,11 @@ static int lp_save_receipt(const struct lp_ctx *c, const struct lp_row *r,
                 host) ||
         strstr(list, path) || !lp_compact(json, one, sizeof(one) - 1))
         return 0;
-    (void)strcat(one, "\n");
+    /* lp_compact filled at most sizeof(one) - 2 bytes, so the newline and
+     * its terminator fit. */
+    const size_t len = strlen(one);
+    one[len] = '\n';
+    one[len + 1] = '\0';
     if (!lp_write(path, one))
         return -1;
     const size_t used = strlen(list);
