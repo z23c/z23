@@ -526,12 +526,31 @@ struct rie_env {
     struct main_state ms;
     struct rie_ctx ctx;
     struct rie_counter_ctx cc;
+    bool uas_up;
+    bool tfs_up;
     bool ok;
 };
 
+static void rie_env_close(struct rie_env *e);
+
 /* Open progress/log, init the active chain + stages, seed the base coins,
- * and install the reader/lookup over `active`. */
+ * and install the reader/lookup over `active`. On failure everything it
+ * opened is released here, because callers close only an opened env. */
+static bool rie_env_open_steps(struct rie_env *e, const char *tag,
+                               struct rie_branch *active,
+                               const struct rie_ext_coin *ext, int n_ext);
+
 static bool rie_env_open(struct rie_env *e, const char *tag,
+                         struct rie_branch *active,
+                         const struct rie_ext_coin *ext, int n_ext)
+{
+    if (rie_env_open_steps(e, tag, active, ext, n_ext))
+        return true;
+    rie_env_close(e);
+    return false;
+}
+
+static bool rie_env_open_steps(struct rie_env *e, const char *tag,
                          struct rie_branch *active,
                          const struct rie_ext_coin *ext, int n_ext)
 {
@@ -559,9 +578,11 @@ static bool rie_env_open(struct rie_env *e, const char *tag,
     e->cc.base_count = 0;
 
     if (!utxo_apply_stage_init(&e->ms)) return false;
+    e->uas_up = true;
     utxo_apply_stage_set_reader(rie_reader, &e->ctx);
     utxo_apply_stage_set_lookup(rie_lookup, &e->ctx);
     if (!tip_finalize_stage_init(&e->ms)) return false;
+    e->tfs_up = true;
     tip_finalize_stage_set_utxo_counter(rie_utxo_counter, &e->cc);
 
     e->ok = true;
@@ -570,8 +591,10 @@ static bool rie_env_open(struct rie_env *e, const char *tag,
 
 static void rie_env_close(struct rie_env *e)
 {
-    tip_finalize_stage_shutdown();
-    utxo_apply_stage_shutdown();
+    if (e->tfs_up)
+        tip_finalize_stage_shutdown();
+    if (e->uas_up)
+        utxo_apply_stage_shutdown();
     main_state_free(&e->ms);
     if (e->lg) event_log_close(e->lg);
     progress_store_close();
