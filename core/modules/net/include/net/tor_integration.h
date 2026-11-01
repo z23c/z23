@@ -309,6 +309,12 @@ int tor_integration_network_gate_step_for_test(void *global, bool serve,
                                                bool (*enable)(void),
                                                bool *enabled);
 void tor_integration_service_reset_for_test(void);
+/* Test seam: one enable attempt, the failures counted so far, and a reset.
+ * With no control connection every attempt fails; the backoff then makes most
+ * immediate retries return without counting. */
+bool tor_integration_enable_network_for_test(void);
+unsigned tor_integration_enable_failures_for_test(void);
+void tor_integration_enable_reset_for_test(void);
 #endif
 
 #ifdef ZCL_TESTING

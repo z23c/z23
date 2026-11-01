@@ -1454,6 +1454,26 @@ static int test_tor_network_gate_order(void)
     return 0;
 }
 
+/* A network enable that keeps failing backs off: a tight retry loop makes a
+ * handful of attempts, not one per call. */
+static int test_tor_enable_backs_off(void)
+{
+    printf("test_tor_enable_backs_off: ");
+    tor_integration_enable_reset_for_test();
+    bool any = false;
+    for (int i = 0; i < 1000; i++)
+        any = tor_integration_enable_network_for_test() || any;
+    unsigned failures = tor_integration_enable_failures_for_test();
+    tor_integration_enable_reset_for_test();
+    if (any || failures < 1 || failures > 3) {
+        printf("FAIL (enabled=%d attempts=%u of 1000 calls)\n", any,
+               failures);
+        return 1;
+    }
+    printf("OK\n");
+    return 0;
+}
+
 /* Tor's bootstrap line, and only it, makes a no-service node dial-ready. */
 static int test_tor_log_has_bootstrap_complete(void)
 {
@@ -1526,6 +1546,7 @@ int test_tor(void)
     failures += test_tor_log_has_bootstrap_complete();
     failures += test_tor_no_service_claim();
     failures += test_tor_network_gate_order();
+    failures += test_tor_enable_backs_off();
 
     /* dynhost reassembly admission cap (vendored handlers under test) */
     failures += test_dynhost_reassembly_cap();

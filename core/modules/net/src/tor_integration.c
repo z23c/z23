@@ -670,6 +670,8 @@ static tor_control_socket_t g_tor_control = TOR_CONTROL_SOCKET_NONE;
 static _Atomic bool g_serve_onion = true;
 static _Atomic int64_t g_claim_ms = -1;
 static _Atomic int64_t g_network_enabled_ms = -1;
+static _Atomic unsigned g_enable_failures;
+static _Atomic int64_t g_enable_retry_ms;
 
 static int64_t tor_wall_ms(void)
 {
@@ -883,28 +885,50 @@ int tor_integration_network_gate_step_for_test(void *global, bool serve,
 #endif
 
 /* Clear DisableNetwork over the owning control connection, which Tor
- * pre-authenticates. True only on Tor's "250 OK". */
-static bool tor_enable_network(void)
+ * pre-authenticates. NULL only on Tor's "250 OK"; otherwise why it failed. */
+static const char *tor_control_enable(void)
 {
 #ifdef _WIN32
-    LOG_FAIL("tor", "clearing DisableNetwork is not supported on this "
-                    "platform; the network stays disabled");
+    return "clearing DisableNetwork is not supported on this platform";
 #else
     if (g_tor_control == TOR_CONTROL_SOCKET_NONE)
-        LOG_FAIL("tor", "no control connection to enable the network");
+        return "no control connection to enable the network";
     static const char cmd[] = "SETCONF DisableNetwork=0\r\n";
     struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
     (void)setsockopt(g_tor_control, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     if (send(g_tor_control, cmd, sizeof(cmd) - 1, 0) !=
         (ssize_t)(sizeof(cmd) - 1))
-        LOG_FAIL("tor", "sending SETCONF DisableNetwork=0 failed");
+        return "sending SETCONF DisableNetwork=0 failed";
     char reply[128];
     ssize_t n = recv(g_tor_control, reply, sizeof(reply) - 1, 0);
     if (n < 3)
-        LOG_FAIL("tor", "no reply to SETCONF DisableNetwork=0");
+        return "no reply to SETCONF DisableNetwork=0";
     reply[n] = '\0';
     if (strncmp(reply, "250", 3) != 0)
-        LOG_FAIL("tor", "SETCONF DisableNetwork=0 refused: %s", reply);
+        return "SETCONF DisableNetwork=0 was refused";
+    return NULL;
+#endif
+}
+
+/* A failed enable is retried with a doubling pause (20 ms up to about 5 s)
+ * and logged on attempts 1, 2, 4, 8, ... only, so a missing control socket
+ * does not spin the monitor or flood the log. */
+static bool tor_enable_network(void)
+{
+    if (tor_wall_ms() < atomic_load(&g_enable_retry_ms))
+        return false;
+    const char *why = tor_control_enable();
+    if (why) {
+        unsigned failures = atomic_fetch_add(&g_enable_failures, 1) + 1;
+        unsigned shift = failures < 9 ? failures : 9;
+        atomic_store(&g_enable_retry_ms, tor_wall_ms() + (10LL << shift));
+        if ((failures & (failures - 1)) == 0)
+            LOG_ERROR("tor", "%s (attempt %u); the network stays disabled "
+                             "and the enable is retried", why, failures);
+        return false;
+    }
+    atomic_store(&g_enable_failures, 0);
+    atomic_store(&g_enable_retry_ms, 0);
     int64_t now = tor_wall_ms();
     atomic_store(&g_network_enabled_ms, now);
     printf("Tor: claim verified at %lld ms, network enabled at %lld ms "
@@ -912,8 +936,25 @@ static bool tor_enable_network(void)
            (long long)atomic_load(&g_claim_ms), (long long)now);
     fflush(stdout);
     return true;
-#endif
 }
+
+#ifdef ZCL_TESTING
+bool tor_integration_enable_network_for_test(void)
+{
+    return tor_enable_network();
+}
+
+unsigned tor_integration_enable_failures_for_test(void)
+{
+    return atomic_load(&g_enable_failures);
+}
+
+void tor_integration_enable_reset_for_test(void)
+{
+    atomic_store(&g_enable_failures, 0);
+    atomic_store(&g_enable_retry_ms, 0);
+}
+#endif
 
 /* The monitor of a node that serves no onion: run the gate, then wait for
  * Tor to bootstrap, then keep verifying for as long as Tor runs. */

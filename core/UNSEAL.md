@@ -841,3 +841,12 @@ later lane flips it HARD.
 - 2026-10-31T17:37:41Z — REASON: Private wallet broadcast runs no onion service: start embedded Tor with DisableNetwork, claim dynhost hs_service, verify, then enable the network; default unchanged for other nodes. Owner grant 2026-10-30 to unseal core for reviewed, behaviour-scoped changes; no consensus predicate touched.
   old ROOT: d9bd425d5f66793bdf253ce2717af74e90aa19681b561cd2be83d5d37a6048e8
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T23:21:25Z — REASON: Private wallet broadcast: back off and rate-limit the log of a failing DisableNetwork enable in core/modules/net/src/tor_integration.c (a missing control socket retried every millisecond). Owner grant 2026-10-30 to unseal core for reviewed, behaviour-scoped changes; no consensus predicate changes.
+  old ROOT: e1d38182e1ab35f6e7c240d9d1e21c711727b3c635770bb6e6092ea2c819452e
+  by: owner unseal ritual (make core-unseal)
+
+- 2026-10-31T21:52:24Z — REASON: commit 2cf81eec86 changed core/modules/net/src/tor_integration.c to read the wall clock through clock_now_wall_ms (check-no-raw-clock-outside-platform); behaviour-preserving, no consensus predicate changes. RECORDED AFTERWARDS: this entry was appended at 2026-10-31T23:21:42Z, after the reseal, because the reseal ran under the 2026-10-31T17:37:41Z token without a new entry. The time is that of core/MANIFEST.sha3 on r1 (mtime 21:52:24Z) and of the reseal log.
+  old ROOT: adad80000fb59f9f2caee58b7d10c3a6b666db9e9898bde7e25c985b657026e1
+  new ROOT: e1d38182e1ab35f6e7c240d9d1e21c711727b3c635770bb6e6092ea2c819452e
+  by: appended by the lane author; not the unseal ritual
