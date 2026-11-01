@@ -155,22 +155,36 @@ static bool lmi_origin_ok(void)
            strstr(b, "help_error") == NULL;
 }
 
+/* Runs fn under capture and checks the one line it printed: the "[dom]"
+ * domain, then "<want>" (function token and message) with an origin token
+ * naming this file. */
+static bool lmi_logged(void (*fn)(void), const char *want)
+{
+    char line[1024];
+    if (!lmi_capture(fn, line, sizeof line))
+        return false;
+    const char *dom = strstr(line, "[dom]");
+    const char *msg = dom ? strstr(dom, want) : NULL;
+    return msg != NULL && strstr(msg, " origin=test_log_macros_in.c:") != NULL;
+}
+
 /* The plain returning forms return the plain macro's value from their own
- * function (they have no _IN form; see log_macros.h). */
+ * function and log the line the plain macro logs there (they have no _IN
+ * form; see log_macros.h). */
 static bool lmi_returns_ok(void)
 {
-    char sink[1024];
     bool ok = true;
     g_lmi_bool = true;
-    ok = ok && lmi_capture(lmi_orig_fail, sink, sizeof sink) && g_lmi_bool == false;
+    ok = ok && lmi_logged(lmi_orig_fail, "orig_fail(): fail 7") && g_lmi_bool == false;
     g_lmi_int = 0;
-    ok = ok && lmi_capture(lmi_orig_err, sink, sizeof sink) && g_lmi_int == -1;
+    ok = ok && lmi_logged(lmi_orig_err, "orig_err(): err 7") && g_lmi_int == -1;
     g_lmi_ptr = &g_lmi_int;
-    ok = ok && lmi_capture(lmi_orig_null, sink, sizeof sink) && g_lmi_ptr == NULL;
+    ok = ok && lmi_logged(lmi_orig_null, "orig_null(): null 7") && g_lmi_ptr == NULL;
     g_lmi_int = 0;
-    ok = ok && lmi_capture(lmi_orig_ret, sink, sizeof sink) && g_lmi_int == 42;
+    ok = ok && lmi_logged(lmi_orig_ret, "orig_ret(): ret 7") && g_lmi_int == 42;
     g_lmi_bool = true;
-    ok = ok && lmi_capture(lmi_orig_guard, sink, sizeof sink) && g_lmi_bool == false;
+    ok = ok && lmi_logged(lmi_orig_guard, "orig_guard(): GUARD FAILED: guard 7") &&
+         g_lmi_bool == false;
     return ok;
 }
 

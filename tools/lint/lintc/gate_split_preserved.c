@@ -367,8 +367,21 @@ static const char *sp_func_at(const struct sp_file *f, size_t off)
     return s ? s->name : "";
 }
 
+/* Whether the identifier at i is reached through a member access: the last
+ * non-space byte before it ends "." or "->" (obj.h() or obj->h() is not a
+ * call of the file's static h). */
+static int sp_is_member(const struct sp_file *f, size_t i)
+{
+    while (i > 0 && isspace((unsigned char)f->code[i - 1]))
+        i--;
+    if (i > 0 && f->code[i - 1] == '.')
+        return 1;
+    return i > 1 && f->code[i - 1] == '>' && f->code[i - 2] == '-';
+}
+
 /* Whether code[a..b) calls name directly: the name as a whole identifier,
- * outside a literal, followed by '('. Comments are already blank in code. */
+ * outside a literal, not a member access, followed by '('. Comments are
+ * already blank in code. */
 static int sp_calls(const struct sp_file *f, size_t a, size_t b, const char *name)
 {
     size_t nl = strlen(name);
@@ -377,7 +390,7 @@ static int sp_calls(const struct sp_file *f, size_t a, size_t b, const char *nam
         if (f->lit[i] || (i > 0 && sp_isid(f->code[i - 1])) ||
             memcmp(f->code + i, name, nl) != 0)
             continue;
-        if (k < f->n && sp_isid(f->code[k]))
+        if ((k < f->n && sp_isid(f->code[k])) || sp_is_member(f, i))
             continue;
         while (k < f->n && isspace((unsigned char)f->code[k]))
             k++;
@@ -486,7 +499,10 @@ static int sp_in_rewrite(const char *call, char **out, char **fn)
         ;
     if (!sp_in_kept(call, nl) || call[p] != '(')
         return 0;
-    a = ++p;
+    /* Spacing after '(' stays with the '(' in the rewrite, as it would in
+     * the plain call: LOG_X_IN( "F", a) becomes LOG_X( a). */
+    for (a = p + 1; call[a] == ' '; a++)
+        ;
     e = sp_arg_end(call, a);
     if (e - a < 2 || call[a] != '"' || call[e - 1] != '"')
         return 0;
