@@ -2565,7 +2565,7 @@ static void dp_changed_set_split_classify(
                 }
             continue;
         }
-        if (false && candidates <= DP_SPLIT_CANDIDATES_MAX &&
+        if (candidates <= DP_SPLIT_CANDIDATES_MAX &&
             dp_fresh_admit(c, refs, count, i)) {
             if (!set->fresh_path) set->fresh_path = refs[i];
             set->fresh_count++;
