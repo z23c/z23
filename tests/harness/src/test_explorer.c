@@ -485,16 +485,10 @@ done:
     return ok?0:1;
 }
 
-int test_explorer(void)
+static int ex_case_01(void)
 {
     int failures = 0;
-    failures += ex_shielded_sign_witness();
-    failures += ex_favicon_boundaries();
-    failures += ex_route_precedence_witness();
-    failures += ex_route_native_chain_witness();
     uint8_t resp[8192];
-    failures += ex_rpc_tx_rows();
-
     printf("explorer: NULL path returns 0... ");
     {
         size_t n = explorer_handle_request("GET", NULL, NULL, 0,
@@ -503,7 +497,13 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_02(void)
+{
+    int failures = 0;
+    uint8_t resp[8192];
     printf("explorer: NULL response returns 0... ");
     {
         size_t n = explorer_handle_request("GET", "/explorer", NULL, 0,
@@ -512,7 +512,13 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_03(void)
+{
+    int failures = 0;
+    uint8_t resp[8192];
     printf("explorer: /api/ delegation to api controller... ");
     {
         size_t n = explorer_handle_request("GET", "/api/nonexistent", NULL, 0,
@@ -522,7 +528,13 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_04(void)
+{
+    int failures = 0;
+    uint8_t resp[8192];
     printf("explorer: unknown path returns 0... ");
     {
         size_t n = explorer_handle_request("GET", "/foobar", NULL, 0,
@@ -531,7 +543,25 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool ex_case_05_tokens_text(uint8_t *out)
+{
+    return
+             strstr((char *)out, "Token Index Warming") != NULL &&
+             strstr((char *)out, "Open blocks") != NULL &&
+             strstr((char *)out, "/api/v1/status") != NULL &&
+             strstr((char *)out, "Loading Token Data") == NULL &&
+             strstr((char *)out, "http-equiv='refresh'") == NULL &&
+             strstr((char *)out, "Auto-refresh") == NULL &&
+             strstr((char *)out, "Refresh in a minute") == NULL &&
+             strstr((char *)out, "please retry") == NULL;
+}
+
+static int ex_case_05(void)
+{
+    int failures = 0;
     printf("explorer: projection status pages do not ask users to refresh... ");
     {
         uint8_t out[16384];
@@ -551,19 +581,17 @@ int test_explorer(void)
         n = explorer_view_tokens_loading(out, sizeof(out) - 1);
         out[n < sizeof(out) ? n : sizeof(out) - 1] = '\0';
         ok = ok && n > 0 &&
-             strstr((char *)out, "Token Index Warming") != NULL &&
-             strstr((char *)out, "Open blocks") != NULL &&
-             strstr((char *)out, "/api/v1/status") != NULL &&
-             strstr((char *)out, "Loading Token Data") == NULL &&
-             strstr((char *)out, "http-equiv='refresh'") == NULL &&
-             strstr((char *)out, "Auto-refresh") == NULL &&
-             strstr((char *)out, "Refresh in a minute") == NULL &&
-             strstr((char *)out, "please retry") == NULL;
+                  ex_case_05_tokens_text(out);
 
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_06(void)
+{
+    int failures = 0;
     printf("explorer: dashboard exposes verified bootstrap peers... ");
     {
         uint8_t out[65536];
@@ -596,7 +624,13 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_07(void)
+{
+    int failures = 0;
+    uint8_t resp[8192];
     printf("explorer: top-level /factoids redirects canonical... ");
     {
         size_t n = explorer_handle_request("GET", "/factoids", NULL, 0,
@@ -609,7 +643,13 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_08(void)
+{
+    int failures = 0;
+    uint8_t resp[8192];
     printf("explorer: top-level /hodl redirects canonical... ");
     {
         size_t n = explorer_handle_request("GET", "/hodl", NULL, 0,
@@ -621,7 +661,71 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool ex_case_09_text_a(uint8_t *out)
+{
+    return
+             strstr((char *)out, "<main class='hodl-page'>") != NULL &&
+             strstr((char *)out, "<h1 class='hodl-title'>") != NULL &&
+             strstr((char *)out, ".hodl-stats{display:grid") != NULL &&
+             strstr((char *)out, "class='stats-row hodl-stats'") != NULL &&
+             strstr((char *)out, "class='hodl-table-wrap'") != NULL &&
+             strstr((char *)out, "class='txlist hodl-table'") != NULL &&
+             strstr((char *)out, "id='hodl-survival-wave'") != NULL &&
+             strstr((char *)out, "id='hodl-survival-canvas'") != NULL &&
+             strstr((char *)out,
+                    "class='hodl-chart-canvas'><svg id='hodl-survival-wave'") != NULL &&
+             strstr((char *)out,
+                    "var wrap=document.getElementById('hodl-survival-canvas')") != NULL &&
+             strstr((char *)out, "Historical HODL wave") != NULL &&
+             strstr((char *)out, "4 verified samples") != NULL;
+}
+
+static bool ex_case_09_text_b(uint8_t *out)
+{
+    return
+             strstr((char *)out, "Source: historical UTXO snapshots") != NULL &&
+             strstr((char *)out, "class='hodl-end-label'") != NULL &&
+             strstr((char *)out, "class='hodl-x-tick'") != NULL &&
+             strstr((char *)out, ".hodl-x-tick{display:none;}") != NULL &&
+             strstr((char *)out, "touch-action:pan-x pan-y") != NULL &&
+             strstr((char *)out, "touchstart',onTouch,{passive:true}") != NULL &&
+             strstr((char *)out, "touchmove',onTouch,{passive:true}") != NULL &&
+             strstr((char *)out, "passive:false") == NULL &&
+             strstr((char *)out, "Timeline by block height") == NULL &&
+             strstr((char *)out, "id='hodl-survival-wrap'") != NULL &&
+             strstr((char *)out, "requestAnimationFrame(maybeScrollLatest)") != NULL &&
+             strstr((char *)out, "var hmin=") != NULL &&
+             strstr((char *)out, "var tmin=") == NULL &&
+             strstr((char *)out, "6 months") != NULL &&
+             strstr((char *)out, "2 years") != NULL;
+}
+
+static bool ex_case_09_text_c(uint8_t *out, int one_year_segments)
+{
+    return
+             strstr((char *)out, "5 years") != NULL &&
+             strstr((char *)out, "214748") == NULL &&
+             strstr((char *)out, "id='hodl-survival-dot-0'") != NULL &&
+             strstr((char *)out, "class='hodl-svg-title'") == NULL &&
+             strstr((char *)out, "{{") == NULL &&
+             strstr((char *)out, "[4320,1000,400,20000,12500,6250,0,80,50,25,0]") != NULL &&
+             strstr((char *)out, "[8640,2000,800,37500,25000,12500,6250,300,200,100,50]") != NULL &&
+             strstr((char *)out, "[25920,6000,1000,90000,80000,50000,20000,900,800,500,200]") != NULL &&
+             strstr((char *)out, "id='hodl-ts'") == NULL &&
+             one_year_segments == 1 &&
+             strstr((char *)out, "surviving creation") == NULL &&
+             strstr((char *)out,
+                    "style='max-width:1000px;margin:20px auto'") == NULL &&
+             strstr((char *)out,
+                    "style='max-width:1000px;margin:18px auto'") == NULL;
+}
+
+static int ex_case_09(void)
+{
+    int failures = 0;
     printf("explorer: HODL page uses historical snapshots for time series... ");
     {
         char dbdir[256];
@@ -671,57 +775,21 @@ int test_explorer(void)
             scan++;
         }
         ok = ok && n > 0 &&
-             strstr((char *)out, "<main class='hodl-page'>") != NULL &&
-             strstr((char *)out, "<h1 class='hodl-title'>") != NULL &&
-             strstr((char *)out, ".hodl-stats{display:grid") != NULL &&
-             strstr((char *)out, "class='stats-row hodl-stats'") != NULL &&
-             strstr((char *)out, "class='hodl-table-wrap'") != NULL &&
-             strstr((char *)out, "class='txlist hodl-table'") != NULL &&
-             strstr((char *)out, "id='hodl-survival-wave'") != NULL &&
-             strstr((char *)out, "id='hodl-survival-canvas'") != NULL &&
-             strstr((char *)out,
-                    "class='hodl-chart-canvas'><svg id='hodl-survival-wave'") != NULL &&
-             strstr((char *)out,
-                    "var wrap=document.getElementById('hodl-survival-canvas')") != NULL &&
-             strstr((char *)out, "Historical HODL wave") != NULL &&
-             strstr((char *)out, "4 verified samples") != NULL &&
-             strstr((char *)out, "Source: historical UTXO snapshots") != NULL &&
-             strstr((char *)out, "class='hodl-end-label'") != NULL &&
-             strstr((char *)out, "class='hodl-x-tick'") != NULL &&
-             strstr((char *)out, ".hodl-x-tick{display:none;}") != NULL &&
-             strstr((char *)out, "touch-action:pan-x pan-y") != NULL &&
-             strstr((char *)out, "touchstart',onTouch,{passive:true}") != NULL &&
-             strstr((char *)out, "touchmove',onTouch,{passive:true}") != NULL &&
-             strstr((char *)out, "passive:false") == NULL &&
-             strstr((char *)out, "Timeline by block height") == NULL &&
-             strstr((char *)out, "id='hodl-survival-wrap'") != NULL &&
-             strstr((char *)out, "requestAnimationFrame(maybeScrollLatest)") != NULL &&
-             strstr((char *)out, "var hmin=") != NULL &&
-             strstr((char *)out, "var tmin=") == NULL &&
-             strstr((char *)out, "6 months") != NULL &&
-             strstr((char *)out, "2 years") != NULL &&
-             strstr((char *)out, "5 years") != NULL &&
-             strstr((char *)out, "214748") == NULL &&
-             strstr((char *)out, "id='hodl-survival-dot-0'") != NULL &&
-             strstr((char *)out, "class='hodl-svg-title'") == NULL &&
-             strstr((char *)out, "{{") == NULL &&
-             strstr((char *)out, "[4320,1000,400,20000,12500,6250,0,80,50,25,0]") != NULL &&
-             strstr((char *)out, "[8640,2000,800,37500,25000,12500,6250,300,200,100,50]") != NULL &&
-             strstr((char *)out, "[25920,6000,1000,90000,80000,50000,20000,900,800,500,200]") != NULL &&
-             strstr((char *)out, "id='hodl-ts'") == NULL &&
-             one_year_segments == 1 &&
-             strstr((char *)out, "surviving creation") == NULL &&
-             strstr((char *)out,
-                    "style='max-width:1000px;margin:20px auto'") == NULL &&
-             strstr((char *)out,
-                    "style='max-width:1000px;margin:18px auto'") == NULL;
+             ex_case_09_text_a(out) &&
+             ex_case_09_text_b(out) &&
+             ex_case_09_text_c(out, one_year_segments);
 
         ok &= fixture_rm_ok(dbdir);
 
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_10(void)
+{
+    int failures = 0;
     printf("explorer: HODL sparse history falls back to cohort wave... ");
     {
         char dbdir[256];
@@ -776,7 +844,46 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool ex_case_11_text_a(uint8_t *out)
+{
+    return
+             strstr((char *)out, "Unspent transparent value by age") != NULL &&
+             strstr((char *)out,
+                    "Current transparent UTXO value distribution") != NULL &&
+             strstr((char *)out, "id='hodl-age-wave'") != NULL &&
+             strstr((char *)out, "id='hodl-age-wrap'") != NULL &&
+             strstr((char *)out, "id='hodl-age-canvas'") != NULL &&
+             strstr((char *)out,
+                    "class='hodl-chart-canvas'><svg id='hodl-age-wave'") != NULL &&
+             strstr((char *)out,
+                    "var wrap=document.getElementById('hodl-age-canvas')") != NULL &&
+             strstr((char *)out, "class='hodl-age-hit'") != NULL;
+}
+
+static bool ex_case_11_text_b(uint8_t *out)
+{
+    return
+             strstr((char *)out, "aria-label='") != NULL &&
+             strstr((char *)out, "requestAnimationFrame(maybeScrollSelected)") != NULL &&
+             strstr((char *)out,
+                    "touchstart',function(e){render(+el.dataset.i);},{passive:true}") != NULL &&
+             strstr((char *)out,
+                    "touchmove',function(e){render(+el.dataset.i);},{passive:true}") != NULL &&
+             strstr((char *)out, "stroke-width='1'><title>") == NULL &&
+             strstr((char *)out, "stroke-width='2'><title>") == NULL &&
+             strstr((char *)out, "svg.addEventListener('keydown'") != NULL &&
+             strstr((char *)out, "id='hodl-ts'") == NULL &&
+             strstr((char *)out, "{{") == NULL &&
+             strstr((char *)out, "Refresh in a minute") == NULL &&
+             strstr((char *)out, "still being indexed") == NULL;
+}
+
+static int ex_case_11(void)
+{
+    int failures = 0;
     printf("explorer: HODL page renders latest measurement without refresh prompt... ");
     {
         char dbdir[256];
@@ -810,30 +917,8 @@ int test_explorer(void)
         out[n < sizeof(out) ? n : sizeof(out) - 1] = '\0';
 
         ok = ok && n > 0 &&
-             strstr((char *)out, "Unspent transparent value by age") != NULL &&
-             strstr((char *)out,
-                    "Current transparent UTXO value distribution") != NULL &&
-             strstr((char *)out, "id='hodl-age-wave'") != NULL &&
-             strstr((char *)out, "id='hodl-age-wrap'") != NULL &&
-             strstr((char *)out, "id='hodl-age-canvas'") != NULL &&
-             strstr((char *)out,
-                    "class='hodl-chart-canvas'><svg id='hodl-age-wave'") != NULL &&
-             strstr((char *)out,
-                    "var wrap=document.getElementById('hodl-age-canvas')") != NULL &&
-             strstr((char *)out, "class='hodl-age-hit'") != NULL &&
-             strstr((char *)out, "aria-label='") != NULL &&
-             strstr((char *)out, "requestAnimationFrame(maybeScrollSelected)") != NULL &&
-             strstr((char *)out,
-                    "touchstart',function(e){render(+el.dataset.i);},{passive:true}") != NULL &&
-             strstr((char *)out,
-                    "touchmove',function(e){render(+el.dataset.i);},{passive:true}") != NULL &&
-             strstr((char *)out, "stroke-width='1'><title>") == NULL &&
-             strstr((char *)out, "stroke-width='2'><title>") == NULL &&
-             strstr((char *)out, "svg.addEventListener('keydown'") != NULL &&
-             strstr((char *)out, "id='hodl-ts'") == NULL &&
-             strstr((char *)out, "{{") == NULL &&
-             strstr((char *)out, "Refresh in a minute") == NULL &&
-             strstr((char *)out, "still being indexed") == NULL;
+                  ex_case_11_text_a(out) &&
+                  ex_case_11_text_b(out);
         ok = ok && strstr((char *)out, "Unspent transparent value by age") <
                    strstr((char *)out, "class='stats-row hodl-stats'");
 
@@ -842,26 +927,26 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    printf("explorer: HODL page cache is keyed by block hash... ");
-    {
-        char dbdir[384];
-        char dbpath[448];
-        char cachepath[512];
-        sqlite3 *db = NULL;
-        /* ABSOLUTE, unlike the read-only fixtures above: the HODL view
-         * persists its snapshot through platform_private_path_resolve, which
-         * realpath()s the destination's parent and refuses any pathname that
-         * does not start at the root ("destination parent is not a safe real
-         * directory"). A relative datadir means the cache file is never
-         * written and the cache assertion below can never pass. */
-        test_make_tmpdir(dbdir, sizeof(dbdir), "explorer", "hodl_cache");
-        snprintf(dbpath, sizeof(dbpath), "%s/node.db", dbdir);
-        snprintf(cachepath, sizeof(cachepath),
-                 "%s/explorer/hodl-current-v1.cache", dbdir);
+struct ex_hodl_cache_fx {
+    char dbdir[384];
+    char dbpath[448];
+    char cachepath[512];
+    sqlite3 *db;
+    bool ok;
+    uint8_t out1[65536];
+    uint8_t out2[65536];
+    uint8_t out3[65536];
+    uint8_t out4[65536];
+    size_t n1, n2, n3, n4;
+};
 
-        bool ok = sqlite3_open(dbpath, &db) == SQLITE_OK;
-        ok = ok && sqlite3_exec(db,
+static void ex_case_12_seed(struct ex_hodl_cache_fx *fx)
+{
+        fx->ok = sqlite3_open(fx->dbpath, &fx->db) == SQLITE_OK;
+        fx->ok = fx->ok && sqlite3_exec(fx->db,
             "CREATE TABLE blocks(height INTEGER, hash BLOB, time INTEGER);"
             "CREATE TABLE utxos(height INTEGER, value INTEGER);"
             "CREATE TABLE hodl_history(height INTEGER, time INTEGER,"
@@ -875,60 +960,68 @@ int test_explorer(void)
             "(10,x'1111111111111111111111111111111111111111111111111111111111111111',1000);"
             "INSERT INTO utxos(height,value) VALUES(10,100000000);",
             NULL, NULL, NULL) == SQLITE_OK;
-        if (db)
-            sqlite3_close(db);
+        if (fx->db)
+            sqlite3_close(fx->db);
+}
 
+static void ex_case_12_view1(struct ex_hodl_cache_fx *fx)
+{
         reducer_frontier_provable_tip_set(10);
-        uint8_t out1[65536];
-        uint8_t out2[65536];
-        uint8_t out3[65536];
-        uint8_t out4[65536];
-        size_t n1 = explorer_view_hodl(dbdir, out1, sizeof(out1) - 1);
-        out1[n1 < sizeof(out1) ? n1 : sizeof(out1) - 1] = '\0';
+        fx->n1 = explorer_view_hodl(fx->dbdir, fx->out1, sizeof(fx->out1) - 1);
+        fx->out1[fx->n1 < sizeof(fx->out1) ? fx->n1 : sizeof(fx->out1) - 1] = '\0';
         explorer_test_reset_hodl_view_cache();
+}
 
-        ok = ok && sqlite3_open(dbpath, &db) == SQLITE_OK;
-        ok = ok && sqlite3_exec(db,
+static void ex_case_12_view2(struct ex_hodl_cache_fx *fx)
+{
+        fx->ok = fx->ok && sqlite3_open(fx->dbpath, &fx->db) == SQLITE_OK;
+        fx->ok = fx->ok && sqlite3_exec(fx->db,
             "DELETE FROM utxos;"
             "INSERT INTO utxos(height,value) VALUES(10,200000000);",
             NULL, NULL, NULL) == SQLITE_OK;
-        if (db) {
-            sqlite3_close(db);
-            db = NULL;
+        if (fx->db) {
+            sqlite3_close(fx->db);
+            fx->db = NULL;
         }
 
-        size_t n2 = explorer_view_hodl(dbdir, out2, sizeof(out2) - 1);
-        out2[n2 < sizeof(out2) ? n2 : sizeof(out2) - 1] = '\0';
+        fx->n2 = explorer_view_hodl(fx->dbdir, fx->out2, sizeof(fx->out2) - 1);
+        fx->out2[fx->n2 < sizeof(fx->out2) ? fx->n2 : sizeof(fx->out2) - 1] = '\0';
         explorer_test_reset_hodl_view_cache();
+}
 
-        ok = ok && sqlite3_open(dbpath, &db) == SQLITE_OK;
-        ok = ok && sqlite3_exec(db,
+static void ex_case_12_view3(struct ex_hodl_cache_fx *fx)
+{
+        fx->ok = fx->ok && sqlite3_open(fx->dbpath, &fx->db) == SQLITE_OK;
+        fx->ok = fx->ok && sqlite3_exec(fx->db,
             "UPDATE blocks SET hash="
             "x'2222222222222222222222222222222222222222222222222222222222222222'"
             "WHERE height=10;",
             NULL, NULL, NULL) == SQLITE_OK;
-        if (db)
-            sqlite3_close(db);
+        if (fx->db)
+            sqlite3_close(fx->db);
 
-        size_t n3 = explorer_view_hodl(dbdir, out3, sizeof(out3) - 1);
-        out3[n3 < sizeof(out3) ? n3 : sizeof(out3) - 1] = '\0';
+        fx->n3 = explorer_view_hodl(fx->dbdir, fx->out3, sizeof(fx->out3) - 1);
+        fx->out3[fx->n3 < sizeof(fx->out3) ? fx->n3 : sizeof(fx->out3) - 1] = '\0';
         explorer_test_reset_hodl_view_cache();
+}
 
-        ok = ok && sqlite3_open(dbpath, &db) == SQLITE_OK;
-        ok = ok && sqlite3_exec(db,
+static void ex_case_12_view4(struct ex_hodl_cache_fx *fx)
+{
+        fx->ok = fx->ok && sqlite3_open(fx->dbpath, &fx->db) == SQLITE_OK;
+        fx->ok = fx->ok && sqlite3_exec(fx->db,
             "INSERT INTO blocks(height,hash,time) VALUES"
             "(11,x'3333333333333333333333333333333333333333333333333333333333333333',1100);"
             "DELETE FROM utxos;"
             "INSERT INTO utxos(height,value) VALUES(11,300000000);",
             NULL, NULL, NULL) == SQLITE_OK;
-        if (db) {
-            sqlite3_close(db);
-            db = NULL;
+        if (fx->db) {
+            sqlite3_close(fx->db);
+            fx->db = NULL;
         }
 
         reducer_frontier_provable_tip_set(11);
-        size_t n4 = explorer_view_hodl(dbdir, out4, sizeof(out4) - 1);
-        out4[n4 < sizeof(out4) ? n4 : sizeof(out4) - 1] = '\0';
+        fx->n4 = explorer_view_hodl(fx->dbdir, fx->out4, sizeof(fx->out4) - 1);
+        fx->out4[fx->n4 < sizeof(fx->out4) ? fx->n4 : sizeof(fx->out4) - 1] = '\0';
         for (int spin = 0;
              spin < 200 && explorer_test_hodl_view_refresh_active();
              spin++) {
@@ -936,25 +1029,59 @@ int test_explorer(void)
             nanosleep(&ts, NULL);
         }
         reducer_frontier_provable_tip_reset();
+}
 
-        ok = ok && n1 > 0 && n2 > 0 && n3 > 0 && n4 > 0 &&
-             access(cachepath, F_OK) == 0 &&
-             strstr((char *)out1, "1.00000000") != NULL &&
-             strstr((char *)out2, "1.00000000") != NULL &&
-             strstr((char *)out2, "2.00000000") == NULL &&
-             strstr((char *)out3, "2.00000000") != NULL &&
-             strstr((char *)out4, "verified cached snapshot") != NULL &&
-             strstr((char *)out4, "2.00000000") != NULL &&
-             strstr((char *)out4, "3.00000000") == NULL &&
-             strstr((char *)out4,
+static void ex_case_12_check(struct ex_hodl_cache_fx *fx)
+{
+        fx->ok = fx->ok && fx->n1 > 0 && fx->n2 > 0 && fx->n3 > 0 && fx->n4 > 0 &&
+             access(fx->cachepath, F_OK) == 0 &&
+             strstr((char *)fx->out1, "1.00000000") != NULL &&
+             strstr((char *)fx->out2, "1.00000000") != NULL &&
+             strstr((char *)fx->out2, "2.00000000") == NULL &&
+             strstr((char *)fx->out3, "2.00000000") != NULL &&
+             strstr((char *)fx->out4, "verified cached snapshot") != NULL &&
+             strstr((char *)fx->out4, "2.00000000") != NULL &&
+             strstr((char *)fx->out4, "3.00000000") == NULL &&
+             strstr((char *)fx->out4,
                     "verified cached transparent UTXO set") != NULL;
+}
 
-        ok &= fixture_rm_ok(dbdir);
+static int ex_case_12(void)
+{
+    int failures = 0;
+    printf("explorer: HODL page cache is keyed by block hash... ");
+    {
+        struct ex_hodl_cache_fx fx;
+        fx.db = NULL;
+        /* ABSOLUTE, unlike the read-only fixtures above: the HODL view
+         * persists its snapshot through platform_private_path_resolve, which
+         * realpath()s the destination's parent and refuses any pathname that
+         * does not start at the root ("destination parent is not a safe real
+         * directory"). A relative datadir means the cache file is never
+         * written and the cache assertion below can never pass. */
+        test_make_tmpdir(fx.dbdir, sizeof(fx.dbdir), "explorer", "hodl_cache");
+        snprintf(fx.dbpath, sizeof(fx.dbpath), "%s/node.db", fx.dbdir);
+        snprintf(fx.cachepath, sizeof(fx.cachepath),
+                 "%s/explorer/hodl-current-v1.cache", fx.dbdir);
 
-        if (ok) printf("OK\n");
+        ex_case_12_seed(&fx);
+        ex_case_12_view1(&fx);
+        ex_case_12_view2(&fx);
+        ex_case_12_view3(&fx);
+        ex_case_12_view4(&fx);
+        ex_case_12_check(&fx);
+
+        fx.ok &= fixture_rm_ok(fx.dbdir);
+
+        if (fx.ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_13(void)
+{
+    int failures = 0;
     printf("explorer: factoids HTML caps to served frontier... ");
     {
         char dbdir[256];
@@ -994,7 +1121,72 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool ex_case_14_p1(bool ok, const char *dbdir, uint8_t *out)
+{
+            reducer_frontier_provable_tip_set(8);
+            explorer_test_set_datadir(dbdir);
+            explorer_test_reset_factoids_cache();
+            ok = ok && explorer_test_compute_factoids_cache_now();
+
+            size_t n1 = explorer_handle_request("GET", "/explorer/factoids",
+                                                NULL, 0, out, 262143);
+            out[n1 < 262144 ? n1 : 262143] = '\0';
+            ok = ok && n1 > 0 &&
+                 strstr((char *)out, "1111111111111111") != NULL;
+    return ok;
+}
+
+static bool ex_case_14_p2(bool ok, const char *dbpath, uint8_t *out)
+{
+    sqlite3 *db = NULL;
+            ok = ok && sqlite3_open(dbpath, &db) == SQLITE_OK;
+            ok = ok && sqlite3_exec(db,
+                "UPDATE blocks SET hash="
+                "x'2222222222222222222222222222222222222222222222222222222222222222'"
+                "WHERE height=8;",
+                NULL, NULL, NULL) == SQLITE_OK;
+            if (db) {
+                sqlite3_close(db);
+                db = NULL;
+            }
+
+            size_t n2 = explorer_handle_request("GET", "/explorer/factoids",
+                                                NULL, 0, out, 262143);
+            out[n2 < 262144 ? n2 : 262143] = '\0';
+            ok = ok && n2 > 0 &&
+                 strstr((char *)out, "1111111111111111") == NULL;
+            for (int spin = 0;
+                 spin < 200 && explorer_test_factoids_compute_active();
+                 spin++) {
+                struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000L };
+                nanosleep(&ts, NULL);
+            }
+            ok = ok && !explorer_test_factoids_compute_active();
+    return ok;
+}
+
+static bool ex_case_14_p3(bool ok, uint8_t *out)
+{
+            ok = ok && explorer_test_compute_factoids_cache_now();
+            size_t n3 = explorer_handle_request("GET", "/explorer/factoids",
+                                                NULL, 0, out, 262143);
+            out[n3 < 262144 ? n3 : 262143] = '\0';
+            ok = ok && n3 > 0 &&
+                 strstr((char *)out, "2222222222222222") != NULL &&
+                 strstr((char *)out, "1111111111111111") == NULL;
+
+            explorer_test_reset_factoids_cache();
+            explorer_test_set_datadir(NULL);
+            reducer_frontier_provable_tip_reset();
+    return ok;
+}
+
+static int ex_case_14(void)
+{
+    int failures = 0;
     printf("explorer: factoids cache is keyed by block hash... ");
     {
         char dbdir[256];
@@ -1052,52 +1244,9 @@ int test_explorer(void)
         uint8_t *out = malloc(262144);
         ok = ok && out != NULL;
         if (ok) {
-            reducer_frontier_provable_tip_set(8);
-            explorer_test_set_datadir(dbdir);
-            explorer_test_reset_factoids_cache();
-            ok = ok && explorer_test_compute_factoids_cache_now();
-
-            size_t n1 = explorer_handle_request("GET", "/explorer/factoids",
-                                                NULL, 0, out, 262143);
-            out[n1 < 262144 ? n1 : 262143] = '\0';
-            ok = ok && n1 > 0 &&
-                 strstr((char *)out, "1111111111111111") != NULL;
-
-            ok = ok && sqlite3_open(dbpath, &db) == SQLITE_OK;
-            ok = ok && sqlite3_exec(db,
-                "UPDATE blocks SET hash="
-                "x'2222222222222222222222222222222222222222222222222222222222222222'"
-                "WHERE height=8;",
-                NULL, NULL, NULL) == SQLITE_OK;
-            if (db) {
-                sqlite3_close(db);
-                db = NULL;
-            }
-
-            size_t n2 = explorer_handle_request("GET", "/explorer/factoids",
-                                                NULL, 0, out, 262143);
-            out[n2 < 262144 ? n2 : 262143] = '\0';
-            ok = ok && n2 > 0 &&
-                 strstr((char *)out, "1111111111111111") == NULL;
-            for (int spin = 0;
-                 spin < 200 && explorer_test_factoids_compute_active();
-                 spin++) {
-                struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000L };
-                nanosleep(&ts, NULL);
-            }
-            ok = ok && !explorer_test_factoids_compute_active();
-
-            ok = ok && explorer_test_compute_factoids_cache_now();
-            size_t n3 = explorer_handle_request("GET", "/explorer/factoids",
-                                                NULL, 0, out, 262143);
-            out[n3 < 262144 ? n3 : 262143] = '\0';
-            ok = ok && n3 > 0 &&
-                 strstr((char *)out, "2222222222222222") != NULL &&
-                 strstr((char *)out, "1111111111111111") == NULL;
-
-            explorer_test_reset_factoids_cache();
-            explorer_test_set_datadir(NULL);
-            reducer_frontier_provable_tip_reset();
+            ok = ex_case_14_p1(ok, dbdir, out);
+            ok = ex_case_14_p2(ok, dbpath, out);
+            ok = ex_case_14_p3(ok, out);
         }
         free(out);
 
@@ -1106,7 +1255,13 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_15(void)
+{
+    int failures = 0;
+    uint8_t resp[8192];
     printf("explorer: /explorer/style.css returns CSS... ");
     {
         size_t n = explorer_handle_request("GET", "/explorer/style.css", NULL, 0,
@@ -1116,7 +1271,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (n=%zu)\n", n); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_16(void)
+{
+    int failures = 0;
     printf("explorer: compiled CSS includes full explorer stylesheet... ");
     {
         const char *css = site_css;
@@ -1127,7 +1287,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_17(void)
+{
+    int failures = 0;
     printf("explorer: compiled CSS wins over stale datadir stylesheet... ");
     {
         char dbdir[256];
@@ -1159,9 +1324,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
-    /* ── Supply calculation edge cases ───────────────────── */
-
+static int ex_case_18(void)
+{
+    int failures = 0;
     printf("explorer: supply at negative height is 0... ");
     {
         int64_t s = compute_supply_at_height(-1);
@@ -1169,7 +1337,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (got %" PRId64 ")\n", s); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_19(void)
+{
+    int failures = 0;
     printf("explorer: supply at height 2387001 shows next halving... ");
     {
         /* At 2,387,001: halvings_raw = (2387001-707000-1)/1680000 = 1680000/1680000 = 1
@@ -1188,7 +1361,12 @@ int test_explorer(void)
         else { printf("FAIL (inc_before=%" PRId64 ", inc_after=%" PRId64 ")\n",
                       inc_before, inc_after); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_20(void)
+{
+    int failures = 0;
     printf("explorer: SHA3 receipt is deterministic... ");
     {
         /* compute_receipt is static in factoids — test SHA3 directly */
@@ -1208,7 +1386,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_21(void)
+{
+    int failures = 0;
     printf("explorer: SHA3 different inputs give different hashes... ");
     {
         struct sha3_256_ctx ctx;
@@ -1228,7 +1411,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_22(void)
+{
+    int failures = 0;
     printf("explorer: factoids checkpoint section renders receipts... ");
     {
         sqlite3 *db = NULL;
@@ -1259,7 +1447,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_23(void)
+{
+    int failures = 0;
     printf("explorer: factoids integrity section renders coverage and hash... ");
     {
         sqlite3 *db = NULL;
@@ -1306,7 +1499,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_24(void)
+{
+    int failures = 0;
     printf("explorer: factoids difficulty section renders records... ");
     {
         sqlite3 *db = NULL;
@@ -1345,7 +1543,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_25(void)
+{
+    int failures = 0;
     printf("explorer: factoids empty-block section renders records... ");
     {
         sqlite3 *db = NULL;
@@ -1396,7 +1599,32 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool ex_case_26_text(uint8_t *out, const char *pre_expected, const char *post_expected, const char *records_expected)
+{
+    return
+                  strstr((const char *)out, "13. Block Time Analysis") != NULL &&
+                  strstr((const char *)out, "Pre-Buttercup") != NULL &&
+                  strstr((const char *)out, "155.0s") != NULL &&
+                  strstr((const char *)out, "150s") != NULL &&
+                  strstr((const char *)out, "160s") != NULL &&
+                  strstr((const char *)out, "Post-Buttercup") != NULL &&
+                  strstr((const char *)out, "1853.0s") != NULL &&
+                  strstr((const char *)out, "5s") != NULL &&
+                  strstr((const char *)out, "3701s") != NULL &&
+                  strstr((const char *)out, "Block Interval Records") != NULL &&
+                  strstr((const char *)out, "1 (25.0%)") != NULL &&
+                  strstr((const char *)out, "Blocks over 1 hour apart:</b></td><td>1") != NULL &&
+                  strstr((const char *)out, pre_expected) != NULL &&
+                  strstr((const char *)out, post_expected) != NULL &&
+                  strstr((const char *)out, records_expected) != NULL;
+}
+
+static int ex_case_26(void)
+{
+    int failures = 0;
     printf("explorer: factoids blocktime section renders cadence records... ");
     {
         sqlite3 *db = NULL;
@@ -1430,26 +1658,47 @@ int test_explorer(void)
         out[n < sizeof(out) ? n : sizeof(out) - 1] = '\0';
 
         bool ok = n > 0 &&
-                  strstr((const char *)out, "13. Block Time Analysis") != NULL &&
-                  strstr((const char *)out, "Pre-Buttercup") != NULL &&
-                  strstr((const char *)out, "155.0s") != NULL &&
-                  strstr((const char *)out, "150s") != NULL &&
-                  strstr((const char *)out, "160s") != NULL &&
-                  strstr((const char *)out, "Post-Buttercup") != NULL &&
-                  strstr((const char *)out, "1853.0s") != NULL &&
-                  strstr((const char *)out, "5s") != NULL &&
-                  strstr((const char *)out, "3701s") != NULL &&
-                  strstr((const char *)out, "Block Interval Records") != NULL &&
-                  strstr((const char *)out, "1 (25.0%)") != NULL &&
-                  strstr((const char *)out, "Blocks over 1 hour apart:</b></td><td>1") != NULL &&
-                  strstr((const char *)out, pre_expected) != NULL &&
-                  strstr((const char *)out, post_expected) != NULL &&
-                  strstr((const char *)out, records_expected) != NULL;
+                  ex_case_26_text(out, pre_expected, post_expected, records_expected);
         sqlite3_close(db);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool ex_case_27_text_a(uint8_t *out)
+{
+    return
+                  strstr((const char *)out, "14. Transaction Archaeology") != NULL &&
+                  strstr((const char *)out, "Total transactions:</b></td><td>4") != NULL &&
+                  strstr((const char *)out, "Coinbase transactions:</b></td><td>2") != NULL &&
+                  strstr((const char *)out, "Non-coinbase transactions:</b></td><td>2") != NULL &&
+                  strstr((const char *)out, "Total transparent inputs:</b></td><td>3") != NULL &&
+                  strstr((const char *)out, "Total transparent outputs:</b></td><td>4") != NULL &&
+                  strstr((const char *)out, "Total OP_RETURN outputs:</b></td><td>2") != NULL &&
+                  strstr((const char *)out,
+                         "<tr><td>2016</td><td>4</td><td>2</td><td>2</td><td>2.00</td></tr>") != NULL;
+}
+
+static bool ex_case_27_text_b(uint8_t *out, const char *summary_expected, const char *records_expected)
+{
+    return
+                  strstr((const char *)out, "10.00000000 ZCL across 4 outputs") != NULL &&
+                  strstr((const char *)out, "3 outputs at block") != NULL &&
+                  strstr((const char *)out, "/explorer/block/2") != NULL &&
+                  strstr((const char *)out, "4.00000000 ZCL") != NULL &&
+                  strstr((const char *)out, "/explorer/block/1") != NULL &&
+                  strstr((const char *)out, "Avg inputs per spending tx:</b></td><td>1.50") != NULL &&
+                  strstr((const char *)out, "<tr><td>P2PKH</td><td>2</td></tr>") != NULL &&
+                  strstr((const char *)out, "<tr><td>P2SH</td><td>1</td></tr>") != NULL &&
+                  strstr((const char *)out, "<tr><td>OP_RETURN</td><td>1</td></tr>") != NULL &&
+                  strstr((const char *)out, summary_expected) != NULL &&
+                  strstr((const char *)out, records_expected) != NULL;
+}
+
+static int ex_case_27(void)
+{
+    int failures = 0;
     printf("explorer: factoids transaction section renders records... ");
     {
         sqlite3 *db = NULL;
@@ -1507,31 +1756,18 @@ int test_explorer(void)
         out[n < sizeof(out) ? n : sizeof(out) - 1] = '\0';
 
         bool ok = n > 0 &&
-                  strstr((const char *)out, "14. Transaction Archaeology") != NULL &&
-                  strstr((const char *)out, "Total transactions:</b></td><td>4") != NULL &&
-                  strstr((const char *)out, "Coinbase transactions:</b></td><td>2") != NULL &&
-                  strstr((const char *)out, "Non-coinbase transactions:</b></td><td>2") != NULL &&
-                  strstr((const char *)out, "Total transparent inputs:</b></td><td>3") != NULL &&
-                  strstr((const char *)out, "Total transparent outputs:</b></td><td>4") != NULL &&
-                  strstr((const char *)out, "Total OP_RETURN outputs:</b></td><td>2") != NULL &&
-                  strstr((const char *)out,
-                         "<tr><td>2016</td><td>4</td><td>2</td><td>2</td><td>2.00</td></tr>") != NULL &&
-                  strstr((const char *)out, "10.00000000 ZCL across 4 outputs") != NULL &&
-                  strstr((const char *)out, "3 outputs at block") != NULL &&
-                  strstr((const char *)out, "/explorer/block/2") != NULL &&
-                  strstr((const char *)out, "4.00000000 ZCL") != NULL &&
-                  strstr((const char *)out, "/explorer/block/1") != NULL &&
-                  strstr((const char *)out, "Avg inputs per spending tx:</b></td><td>1.50") != NULL &&
-                  strstr((const char *)out, "<tr><td>P2PKH</td><td>2</td></tr>") != NULL &&
-                  strstr((const char *)out, "<tr><td>P2SH</td><td>1</td></tr>") != NULL &&
-                  strstr((const char *)out, "<tr><td>OP_RETURN</td><td>1</td></tr>") != NULL &&
-                  strstr((const char *)out, summary_expected) != NULL &&
-                  strstr((const char *)out, records_expected) != NULL;
+                  ex_case_27_text_a(out) &&
+                  ex_case_27_text_b(out, summary_expected, records_expected);
         sqlite3_close(db);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_28(void)
+{
+    int failures = 0;
     printf("explorer: stats gather collapses tx_outputs aggregates... ");
     {
         sqlite3 *db = NULL;
@@ -1585,7 +1821,49 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool ex_case_29_text_a(uint8_t *out)
+{
+    return
+                  strstr((const char *)out, "5. All-Time Records") != NULL &&
+                  strstr((const char *)out,
+                         "Largest unspent transparent output") != NULL &&
+                  strstr((const char *)out, "12.00000000 ZCL") != NULL &&
+                  strstr((const char *)out,
+                         "Largest transparent output ever") != NULL &&
+                  strstr((const char *)out, "20.00000000 ZCL") != NULL &&
+                  strstr((const char *)out, "Most transactions in a block") != NULL &&
+                  strstr((const char *)out, "/explorer/block/2") != NULL &&
+                  strstr((const char *)out, "Most JoinSplits in a block") != NULL &&
+                  strstr((const char *)out, "Most Sapling outputs in a block") != NULL;
+}
+
+static bool ex_case_29_text_b(uint8_t *out, const char *unspent_expected, const char *ever_expected, const char *hodl_expected)
+{
+    return
+                  strstr((const char *)out,
+                         "Largest single-block shielding") != NULL &&
+                  strstr((const char *)out, "5.00000000 ZCL") != NULL &&
+                  strstr((const char *)out,
+                         "Largest single-block unshielding") != NULL &&
+                  strstr((const char *)out, "3.00000000 ZCL") != NULL &&
+                  strstr((const char *)out,
+                         "Most blocks mined in one UTC day") != NULL &&
+                  strstr((const char *)out, "Oldest coin still unspent") != NULL &&
+                  strstr((const char *)out,
+                         "Supply dormant &gt; 1 year") != NULL &&
+                  strstr((const char *)out,
+                         "Coins predating Buttercup") != NULL &&
+                  strstr((const char *)out, unspent_expected) != NULL &&
+                  strstr((const char *)out, ever_expected) != NULL &&
+                  strstr((const char *)out, hodl_expected) != NULL;
+}
+
+static int ex_case_29(void)
+{
+    int failures = 0;
     printf("explorer: factoids records section renders records... ");
     {
         sqlite3 *db = NULL;
@@ -1651,38 +1929,50 @@ int test_explorer(void)
         out[n < sizeof(out) ? n : sizeof(out) - 1] = '\0';
 
         bool ok = n > 0 &&
-                  strstr((const char *)out, "5. All-Time Records") != NULL &&
-                  strstr((const char *)out,
-                         "Largest unspent transparent output") != NULL &&
-                  strstr((const char *)out, "12.00000000 ZCL") != NULL &&
-                  strstr((const char *)out,
-                         "Largest transparent output ever") != NULL &&
-                  strstr((const char *)out, "20.00000000 ZCL") != NULL &&
-                  strstr((const char *)out, "Most transactions in a block") != NULL &&
-                  strstr((const char *)out, "/explorer/block/2") != NULL &&
-                  strstr((const char *)out, "Most JoinSplits in a block") != NULL &&
-                  strstr((const char *)out, "Most Sapling outputs in a block") != NULL &&
-                  strstr((const char *)out,
-                         "Largest single-block shielding") != NULL &&
-                  strstr((const char *)out, "5.00000000 ZCL") != NULL &&
-                  strstr((const char *)out,
-                         "Largest single-block unshielding") != NULL &&
-                  strstr((const char *)out, "3.00000000 ZCL") != NULL &&
-                  strstr((const char *)out,
-                         "Most blocks mined in one UTC day") != NULL &&
-                  strstr((const char *)out, "Oldest coin still unspent") != NULL &&
-                  strstr((const char *)out,
-                         "Supply dormant &gt; 1 year") != NULL &&
-                  strstr((const char *)out,
-                         "Coins predating Buttercup") != NULL &&
-                  strstr((const char *)out, unspent_expected) != NULL &&
-                  strstr((const char *)out, ever_expected) != NULL &&
-                  strstr((const char *)out, hodl_expected) != NULL;
+                  ex_case_29_text_a(out) &&
+                  ex_case_29_text_b(out, unspent_expected, ever_expected, hodl_expected);
         sqlite3_close(db);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static bool ex_case_30_text_a(uint8_t *out)
+{
+    return
+                  strstr((const char *)out, "7. Address Statistics") != NULL &&
+                  strstr((const char *)out,
+                         "Addresses currently holding coins:</b> 2") != NULL &&
+                  strstr((const char *)out,
+                         "(of 3 in the index; 1 carry a zero balance)") != NULL &&
+                  strstr((const char *)out, "Holding \xe2\x89\xa5 1 ZCL") != NULL &&
+                  strstr((const char *)out, "Holding \xe2\x89\xa5 1,000 ZCL") != NULL &&
+                  strstr((const char *)out,
+                         "None \xe2\x80\x94 no address holds a million ZCL") != NULL &&
+                  strstr((const char *)out,
+                         "Distribution &amp; Concentration") != NULL;
+}
+
+static bool ex_case_30_text_b(uint8_t *out, const char *stats_expected, const char *concentration_expected)
+{
+    return
+                  strstr((const char *)out,
+                         "Top 10 addresses hold</b></td><td>100.00%") != NULL &&
+                  strstr((const char *)out,
+                         "1100.00000000 ZCL held across 2 funded") != NULL &&
+                  strstr((const char *)out, "1000.00000000 ZCL") != NULL &&
+                  strstr((const char *)out, "550.00000000 ZCL") != NULL &&
+                  strstr((const char *)out, "/explorer/block/10") != NULL &&
+                  strstr((const char *)out, "Top 10 Richest Addresses") != NULL &&
+                  strstr((const char *)out, "AAAAAAAAAAAAAAAA...") != NULL &&
+                  strstr((const char *)out, stats_expected) != NULL &&
+                  strstr((const char *)out, concentration_expected) != NULL;
+}
+
+static int ex_case_30(void)
+{
+    int failures = 0;
     printf("explorer: factoids address section renders holders... ");
     {
         sqlite3 *db = NULL;
@@ -1722,33 +2012,18 @@ int test_explorer(void)
         out[n < sizeof(out) ? n : sizeof(out) - 1] = '\0';
 
         bool ok = n > 0 &&
-                  strstr((const char *)out, "7. Address Statistics") != NULL &&
-                  strstr((const char *)out,
-                         "Addresses currently holding coins:</b> 2") != NULL &&
-                  strstr((const char *)out,
-                         "(of 3 in the index; 1 carry a zero balance)") != NULL &&
-                  strstr((const char *)out, "Holding \xe2\x89\xa5 1 ZCL") != NULL &&
-                  strstr((const char *)out, "Holding \xe2\x89\xa5 1,000 ZCL") != NULL &&
-                  strstr((const char *)out,
-                         "None \xe2\x80\x94 no address holds a million ZCL") != NULL &&
-                  strstr((const char *)out,
-                         "Distribution &amp; Concentration") != NULL &&
-                  strstr((const char *)out,
-                         "Top 10 addresses hold</b></td><td>100.00%") != NULL &&
-                  strstr((const char *)out,
-                         "1100.00000000 ZCL held across 2 funded") != NULL &&
-                  strstr((const char *)out, "1000.00000000 ZCL") != NULL &&
-                  strstr((const char *)out, "550.00000000 ZCL") != NULL &&
-                  strstr((const char *)out, "/explorer/block/10") != NULL &&
-                  strstr((const char *)out, "Top 10 Richest Addresses") != NULL &&
-                  strstr((const char *)out, "AAAAAAAAAAAAAAAA...") != NULL &&
-                  strstr((const char *)out, stats_expected) != NULL &&
-                  strstr((const char *)out, concentration_expected) != NULL;
+                  ex_case_30_text_a(out) &&
+                  ex_case_30_text_b(out, stats_expected, concentration_expected);
         sqlite3_close(db);
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_31(void)
+{
+    int failures = 0;
     printf("explorer: difficulty_from_bits handles edge cases... ");
     {
         double d0 = explorer_difficulty_from_bits(0);
@@ -1784,7 +2059,12 @@ int test_explorer(void)
                        d0);
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_32(void)
+{
+    int failures = 0;
     printf("explorer: format_zcl handles negative values... ");
     {
         char buf[64];
@@ -1793,7 +2073,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (got '%s')\n", buf); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_33(void)
+{
+    int failures = 0;
     printf("explorer: format_zcl handles zero... ");
     {
         char buf[64];
@@ -1802,7 +2087,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (got '%s')\n", buf); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_34(void)
+{
+    int failures = 0;
     printf("explorer: format_zcl handles 12.5 ZCL... ");
     {
         char buf[64];
@@ -1811,7 +2101,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL (got '%s')\n", buf); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_35(void)
+{
+    int failures = 0;
     printf("explorer: HODL wave bucket boundaries are canonical... ");
     {
         int young = hodl_wave_bucket_index(0);
@@ -1822,7 +2117,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_36(void)
+{
+    int failures = 0;
     printf("explorer: HODL wave validation catches drift... ");
     {
         struct hodl_wave_snapshot h = {0};
@@ -1841,7 +2141,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_37(void)
+{
+    int failures = 0;
     printf("explorer: history validation rejects display-order genesis... ");
     {
         sqlite3 *db = NULL;
@@ -1866,7 +2171,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_38(void)
+{
+    int failures = 0;
     printf("explorer: history validation catches partial derived tables... ");
     {
         sqlite3 *db = NULL;
@@ -1900,7 +2210,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_39(void)
+{
+    int failures = 0;
     printf("explorer: history validation tolerates bounded sparse holes... ");
     {
         sqlite3 *db = NULL;
@@ -1933,7 +2248,12 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+static int ex_case_40(void)
+{
+    int failures = 0;
     printf("explorer: history validation still rejects large sparse holes... ");
     {
         sqlite3 *db = NULL;
@@ -1968,6 +2288,56 @@ int test_explorer(void)
         if (ok) printf("OK\n");
         else { printf("FAIL\n"); failures++; }
     }
+    return failures;
+}
 
+int test_explorer(void)
+{
+    int failures = 0;
+    failures += ex_shielded_sign_witness();
+    failures += ex_favicon_boundaries();
+    failures += ex_route_precedence_witness();
+    failures += ex_route_native_chain_witness();
+    failures += ex_rpc_tx_rows();
+    failures += ex_case_01();
+    failures += ex_case_02();
+    failures += ex_case_03();
+    failures += ex_case_04();
+    failures += ex_case_05();
+    failures += ex_case_06();
+    failures += ex_case_07();
+    failures += ex_case_08();
+    failures += ex_case_09();
+    failures += ex_case_10();
+    failures += ex_case_11();
+    failures += ex_case_12();
+    failures += ex_case_13();
+    failures += ex_case_14();
+    failures += ex_case_15();
+    failures += ex_case_16();
+    failures += ex_case_17();
+    failures += ex_case_18();
+    failures += ex_case_19();
+    failures += ex_case_20();
+    failures += ex_case_21();
+    failures += ex_case_22();
+    failures += ex_case_23();
+    failures += ex_case_24();
+    failures += ex_case_25();
+    failures += ex_case_26();
+    failures += ex_case_27();
+    failures += ex_case_28();
+    failures += ex_case_29();
+    failures += ex_case_30();
+    failures += ex_case_31();
+    failures += ex_case_32();
+    failures += ex_case_33();
+    failures += ex_case_34();
+    failures += ex_case_35();
+    failures += ex_case_36();
+    failures += ex_case_37();
+    failures += ex_case_38();
+    failures += ex_case_39();
+    failures += ex_case_40();
     return failures;
 }
