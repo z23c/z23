@@ -6985,7 +6985,7 @@ static bool ic_fresh_edit_deleted(void)
 /* A rename is a delete and an add (the capture runs --no-renames). */
 static bool ic_fresh_edit_rename(void)
 {
-    return ic_split_git("git mv core/a/other.c "
+    return ic_split_git("mkdir -p tools/command && git mv core/a/other.c "
                         "tools/command/native_devagent_start.c") &&
            ic_split_w("Makefile", "SRC = core/a/big.c "
                       "tools/command/native_devagent_start.c\n");
