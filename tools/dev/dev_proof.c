@@ -1774,6 +1774,9 @@ struct dp_split_funcs {
     char name[DP_SPLIT_FUNCS_MAX][DP_SPLIT_NAME_MAX];
     size_t count;
     bool overflow;
+    /* A file-scope object with external linkage (or one the reader cannot
+     * tell is private) was seen: it can silently take over a weak symbol. */
+    bool object;
 };
 
 static const char *dp_split_leaf(const char *path)
@@ -2250,7 +2253,11 @@ static void dp_split_declarator(struct dp_split_parse *s)
     while (*st == ' ') st++;
     size_t n = strlen(st);
     while (n > 0 && st[n - 1] == ' ') st[--n] = '\0';
-    if (strchr(st, '=') || !strchr(st, '(')) return; /* object or aggregate */
+    if (strchr(st, '=') || !strchr(st, '(')) { /* object or aggregate */
+        if (strchr(st, '=') && !dp_split_private_start(st))
+            s->funcs->object = true;
+        return;
+    }
     for (size_t i = 0; i < sizeof(refuse) / sizeof(refuse[0]); i++)
         if (strstr(st, refuse[i])) {
             s->bad = true;
@@ -2263,12 +2270,37 @@ static void dp_split_declarator(struct dp_split_parse *s)
         dp_split_funcs_add(s->funcs, start, (size_t)(end - start));
 }
 
+/* Does the file-scope statement `st` start with a storage word that keeps its
+ * declaration from defining a public object? */
+static bool dp_split_private_start(const char *st)
+{
+    static const char *const words[] = {"static", "typedef", "extern",
+                                        "static_assert", "_Static_assert"};
+    const char *q = st;
+    while (dp_split_ident(*q)) q++;
+    size_t id = (size_t)(q - st);
+    for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++)
+        if (id == strlen(words[i]) && memcmp(st, words[i], id) == 0)
+            return true;
+    return false;
+}
+
+/* A file-scope `;` statement that declares an object: neither a prototype
+ * (a '(' and no '=') nor a private declaration. A function pointer counts. */
+static bool dp_split_public_object(const char *st)
+{
+    if (!*st || dp_split_private_start(st)) return false;
+    return strchr(st, '=') || strstr(st, "(*") || strstr(st, "( *") ||
+           !strchr(st, '(');
+}
+
 /* A file-scope statement ended by ';': an invocation with no type tokens
  * before the name is a macro that may define a function. */
 static void dp_split_statement(struct dp_split_parse *s)
 {
     const char *st = s->stmt;
     while (*st == ' ') st++;
+    if (dp_split_public_object(st)) s->funcs->object = true;
     const char *q = st;
     while (dp_split_ident(*q)) q++;
     size_t id = (size_t)(q - st);
@@ -2425,11 +2457,19 @@ static bool dp_split_admit(const struct dp_split_ctx *c, const char **refs,
  *     at least one function, probes no include, and carries no attribute,
  *     pragma, constructor or section hook that could register it unseen;
  *   - no tracked file at `base` mentions any name it defines, so no base
- *     code can reach it and it moves nothing out of the base tree.
- * It stays in the closure input. Anything else, and any git failure, leaves
+ *     code can reach it and it moves nothing out of the base tree, and it
+ *     defines no public file-scope object (a weak symbol could be taken over);
+ * It stays in the closure input, and the plan also takes the groups of the
+ * source-universe policy and of the test registry (dp_changed_set_widen): a
+ * new file enters what the enumerators walk. Anything else, and any git
+ * failure, leaves
  * the row structural. A deleted, renamed or type-changed row never comes
  * here: its dependents live in the base tree. */
 #define DP_FRESH_NAMES_ARGV_MAX (DP_SPLIT_FUNCS_MAX * 2 + 16)
+/* The rule subjects a new source file reaches without being named by them. */
+#define DP_FRESH_UNIVERSE_PATH \
+    "cognition/modules/codeindex/include/codeindex/source_roots.def"
+#define DP_FRESH_REGISTRY_PATH "tools/dev/test_group_catalog.def"
 
 static bool dp_fresh_path_allowed(const char *path)
 {
@@ -2534,7 +2574,8 @@ static bool dp_fresh_admit(const struct dp_split_ctx *c, const char **refs,
     char *side = diff ? dp_split_side(diff, '+') : NULL;
     struct dp_split_funcs f = {0};
     bool ok = side && !dp_fresh_hooked(side) &&
-              dp_split_parse_funcs(side, &f) && !f.overflow && f.count > 0 &&
+              dp_split_parse_funcs(side, &f) && !f.overflow && !f.object &&
+              f.count > 0 &&
               dp_fresh_names_absent_at_base(c, &f);
     free(diff);
     free(side);
@@ -8330,6 +8371,14 @@ bool zcl_dev_proof_test_build_test_selector(
 static bool dp_changed_set_widen(const struct zcl_dev_proof_changed_set *set,
                                  struct zcl_devloop_plan *plan)
 {
+    if (set && set->fresh_count > 0 && !set->structural_path) {
+        /* A fresh source file enters the source universe the inventory,
+         * ontology, catalog and platform enumerators walk, and the test
+         * registry's own checks see its group: route both subjects, which
+         * are not changed rows, through the shared rules. */
+        zcl_devloop_plan_take_rule_path(plan, DP_FRESH_UNIVERSE_PATH);
+        zcl_devloop_plan_take_rule_path(plan, DP_FRESH_REGISTRY_PATH);
+    }
     if (!set || !set->structural_path) return false;
     plan->closure_universal = true;
     plan->docs_only = false;

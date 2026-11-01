@@ -706,6 +706,12 @@ static void plan_take_rule_groups(struct zcl_devloop_plan *out,
         plan_take_path_group(out, own_group, dim, path);
 }
 
+void zcl_devloop_plan_take_rule_path(struct zcl_devloop_plan *plan,
+                                     const char *path)
+{
+    if (plan && path) plan_take_rule_groups(plan, path);
+}
+
 static bool plan_files_args_invalid(const struct zcl_devloop_plan *out,
                                     const char *const *files,
                                     size_t file_count)

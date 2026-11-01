@@ -6966,6 +6966,15 @@ static bool ic_fresh_edit_hook(void)
                         "fresh_probe_run(void)\n{\n}\n");
 }
 
+static bool ic_fresh_edit_object(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_reviewscore.c",
+                        "/* reviewscore - a public object */\n"
+                        "int fresh_global = 3;\n\n"
+                        "int fresh_probe_run(int x)\n{\n"
+                        "    return x + fresh_global;\n}\n");
+}
+
 static bool ic_fresh_edit_core(void)
 {
     return ic_fresh_add("core/b/fresh_core.c", IC_FRESH_BODY("core"));
@@ -7013,6 +7022,7 @@ static bool ic_fresh_fixture_build(void)
         {"freshbasename", ic_fresh_edit_basename},
         {"freshhook", ic_fresh_edit_hook},
         {"freshcore", ic_fresh_edit_core},
+        {"freshobject", ic_fresh_edit_object},
         {"freshheader", ic_fresh_edit_header},
         {"freshdeleted", ic_fresh_edit_deleted},
         {"freshrename", ic_fresh_edit_rename},
@@ -7038,6 +7048,7 @@ static const struct ic_fresh_case ic_fresh_cases[] = {
     {"freshbasename", 'A', NULL},  /* defines a name the base tree holds */
     {"freshhook", 'A', NULL},      /* a constructor registers it unseen */
     {"freshcore", 'A', NULL},      /* under core/ */
+    {"freshobject", 'A', NULL},    /* a public file-scope object */
     {"freshheader", 'A', NULL},    /* an added header beside it */
     {"freshdeleted", 'D', NULL},   /* a deletion beside it */
     {"freshrename", 'D', NULL},    /* a rename: delete plus add */
@@ -7106,6 +7117,11 @@ static int test_ic_changed_set_fresh_source_closure(void)
                 ASSERT(strcmp(reason, "fresh-source-closure") == 0);
                 ASSERT((size_t)selected < zcl_test_group_catalog_count());
                 ASSERT(c->group && strstr(selector, c->group));
+                /* The source-universe walkers and the registry's own
+                 * checks see a new source file though no row names them. */
+                ASSERT(strstr(selector, "code_inventory"));
+                ASSERT(strstr(selector, "codeindex"));
+                ASSERT(strstr(selector, "test_group_selector"));
             } else {
                 ASSERT(set.structural_path != NULL);
                 ASSERT(set.structural_status == c->kind);

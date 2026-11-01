@@ -252,6 +252,12 @@ void zcl_devloop_capacity_note(struct zcl_devloop_plan *plan,
                                const char *input);
 void zcl_devloop_capacity_set_node(struct zcl_devloop_plan *plan, const char *node);
 void zcl_devloop_capacity_reset_closure(struct zcl_devloop_plan *plan);
+/* Add the groups the shared impact rules map `path` to, as if `path` were a
+ * changed row, to the plan's path floor. For a path that is not itself in the
+ * change: a caller that knows the change reaches a rule's subject through some
+ * other door (a new source file entering the source universe). */
+void zcl_devloop_plan_take_rule_path(struct zcl_devloop_plan *plan,
+                                     const char *path);
 
 /* Is this plan admissible as PROOF that a change is covered?
  *
