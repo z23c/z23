@@ -345,6 +345,13 @@ int process_block_get_utxo_activation_paused_height(void);
  * Cleared at the start of each drain pass. */
 bool process_block_active_tip_has_pending(void);
 
+/* The nakamoto best-work predicate behind the tip-evidence flag: true when no
+ * connectable competing chain in map_block_index beats `tip`. Callers hold
+ * ms->cs_main, as the process_block path does. Exported so the genesis walk
+ * earns the same flag with the same predicate instead of a second copy. */
+bool process_block_tip_is_best_work(const struct main_state *ms,
+                                    const struct block_index *tip);
+
 #ifdef ZCL_TESTING
 void process_block_test_set_utxo_fail_state(int height, int count);
 int  process_block_test_get_utxo_fail_count(void);

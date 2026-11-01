@@ -98,8 +98,8 @@ static bool process_block_chainwork_recomputed(const struct block_index *tip)
  * tip->nHeight) to a real block != tip, so this still returns false and
  * the reorg path runs. Only the unresolvable (NULL) torn-fork case is
  * reclassified, and that case was never a valid reorg target. */
-static bool process_block_tip_is_best_work(const struct main_state *ms,
-                                           const struct block_index *tip)
+bool process_block_tip_is_best_work(const struct main_state *ms,
+                                    const struct block_index *tip)
 {
     size_t iter = 0;
     struct block_index *candidate = NULL;
