@@ -283,7 +283,7 @@ static void review_shows_the_address_and_calls_nothing_else(void)
     struct zapp_payment p = pay_of(priv, "?amount=1.5&memo=aGk");
     struct wss *s = reviewed(&f, &p);
     struct wss_view v = view_of(s);
-    assert(!strncmp(v.address, "zs1q qqqq qqqq", 14) && v.address[strlen(v.address) - 1] == 'q');
+    assert(!strncmp(v.address, "zs1 qqqq qqqq", 13) && v.address[strlen(v.address) - 1] == 'q');
     char plain[ZAPP_PAY_ADDRESS_MAX]; size_t n = 0;
     for (const char *c = v.address; *c; ++c) if (*c != ' ') plain[n++] = *c;
     plain[n] = 0;

@@ -49,7 +49,8 @@ static void assert_unknown(const struct wallet_view *v)
     assert(!strcmp(v->pending, "Pending amount unknown"));
     assert(!strcmp(v->public_line, "Public amount unknown"));
     assert(!strcmp(v->sync, "Sync state unknown"));
-    assert(!v->immature_line[0] && !v->scanning && !v->current);
+    assert(!strcmp(v->immature_line, "Maturing amount unknown") && !strstr(v->immature_line, "0 ZCL"));
+    assert(!v->scanning && !v->current);
     assert(!strcmp(v->send, "Sending is unavailable until the wallet state loads."));
 }
 
@@ -60,8 +61,8 @@ static void test_valid_reply(void)
     assert(v.known);
     assert(!strcmp(v.balance, "1.23456789 ZCL"));
     assert(!v.immature_line[0] && !v.scanning && v.current);
-    assert(!strcmp(v.pending, "0.5 ZCL pending. The next arrives in 7 confirmations."));
-    assert(!strcmp(v.public_line, "0.1 ZCL public"));
+    assert(!strcmp(v.pending, "0.5 ZCL pending in 2 payments. The next arrives in 7 confirmations."));
+    assert(!strcmp(v.public_line, "0.1 ZCL public: visible to everyone, not part of the spendable amount"));
     assert(!strcmp(v.sync, "Up to date at block 3000000"));
     assert(v.send[0] == '\0');
     assert(v.send_allowed);
@@ -83,7 +84,7 @@ static void test_empty_lines_and_singular(void)
     replace_once(json, sizeof(json), VALID_REPLY, "\"pending_min_confirmations_needed\":7",
                  "\"pending_min_confirmations_needed\":1");
     assert(wallet_view_from_summary(json, &v) && v.known);
-    assert(!strcmp(v.pending, "0.5 ZCL pending. The next arrives in 1 confirmation."));
+    assert(!strcmp(v.pending, "0.5 ZCL pending in 2 payments. The next arrives in 1 confirmation."));
 
     replace_once(json, sizeof(json), VALID_REPLY, "\"pending_notes\":2", "\"pending_notes\":0");
     replace_once(json2, sizeof(json2), json, "\"pending_min_confirmations_needed\":7",
@@ -98,7 +99,7 @@ static void test_empty_lines_and_singular(void)
     replace_once(json2, sizeof(json2), json, "\"pending_min_confirmations_needed\":7",
                  "\"pending_min_confirmations_needed\":1");
     assert(wallet_view_from_summary(json2, &v) && v.known);
-    assert(!strcmp(v.pending, "6 ZCL pending. The next arrives in 1 confirmation.") && !strstr(v.pending, "arriving"));
+    assert(!strcmp(v.pending, "6 ZCL pending in 2 payments. The next arrives in 1 confirmation.") && !strstr(v.pending, "arriving"));
 
     /* One note arrives whole. */
     replace_once(json, sizeof(json), VALID_REPLY, "\"pending_notes\":2", "\"pending_notes\":1");
@@ -145,7 +146,7 @@ static void test_immature_and_scan(void)
     replace_once(json, sizeof(json), VALID_REPLY, "\"immature_zat\":0,\"immature\":\"0.00000000\"",
                  "\"immature_zat\":2000000000,\"immature\":\"20.00000000\"");
     assert(wallet_view_from_summary(json, &v) && v.known);
-    assert(!strcmp(v.immature_line, "20 ZCL maturing, not yet spendable"));
+    assert(!strcmp(v.immature_line, "20 ZCL of mined coins maturing, not yet spendable"));
     replace_once(json, sizeof(json), VALID_REPLY, "\"scanned_through_height\":3000000",
                  "\"scanned_through_height\":2999000");
     assert(wallet_view_from_summary(json, &v) && v.known && v.scanning);
@@ -322,7 +323,14 @@ static void test_group_address(void)
     assert(wallet_view_group_address("a", out, sizeof(out)));
     assert(!strcmp(out, "a"));
     assert(wallet_view_group_address("zs1q2w3e4r5t6y", out, sizeof(out)));
-    assert(!strcmp(out, "zs1q 2w3e 4r5t 6y"));
+    assert(!strcmp(out, "zs1 q2w3 e4r5 t6y"));
+    /* The prefix stays whole on every network; an address without one is grouped from its start. */
+    assert(wallet_view_group_address("zregtestsapling1qpzry9x8gf2tvdw0s3jn54khce6mua7l", out, sizeof(out)));
+    assert(!strcmp(out, "zregtestsapling1 qpzr y9x8 gf2t vdw0 s3jn 54kh ce6m ua7l"));
+    assert(wallet_view_group_address("zs1qpzry", out, sizeof(out)) && !strcmp(out, "zs1 qpzr y"));
+    assert(wallet_view_group_address("zs1", out, sizeof(out)) && !strcmp(out, "zs1"));
+    assert(wallet_view_group_address("t1Xyz1abcdefg", out, sizeof(out)) && !strcmp(out, "t1Xy z1ab cdef g"));
+    assert(!wallet_view_group_address("zs1qpzry", out, 10) && wallet_view_group_address("zs1qpzry", out, 11));
     /* Ten bytes hold "abcd efgh" plus its NUL; nine do not. */
     assert(!wallet_view_group_address("abcdefgh", out, 9));
     assert(wallet_view_group_address("abcdefgh", out, 10));

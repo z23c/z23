@@ -159,6 +159,10 @@ static void scan_destinations(void)
     assert(zapp_home_scan_target(ZAPP_SCAN_PAY, false) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
     assert(zapp_home_scan_target(ZAPP_SCAN_PAY, true) == ZAPP_SCAN_TO_PAYMENT_REVIEW);
     assert(zapp_home_scan_target(ZAPP_SCAN_PAY_REFUSED, false) == ZAPP_SCAN_TO_HOME);
+    /* A scan begun at Send that opens no review returns to the wallet; every review still opens, and Home scans stay on Home. */
+    assert(zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_HOME, true) && zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_PAYMENT_REVIEW, true));
+    assert(!zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_FLEET_REVIEW, true) && !zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_PAIR_REVIEW, true));
+    assert(!zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_HOME, false) && !zapp_home_scan_returns_to_wallet(ZAPP_SCAN_TO_PAYMENT_REVIEW, false));
 }
 /* The largest label, package and activity, with every label character escaped, still make a card. */
 static void worst_case_card_fits(void)

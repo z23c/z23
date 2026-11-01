@@ -547,6 +547,11 @@ static void finish_scan(JNIEnv *env, const struct zapp_view *view)
     /* The send review screen is drawn by wallet_send_screen once the wallet screens are wired; until then a
      * payment code is acknowledged on Home with its notice and nothing is started. */
     bool home = target == ZAPP_SCAN_TO_HOME || target == ZAPP_SCAN_TO_PAYMENT_REVIEW;
+    if (zapp_home_scan_returns_to_wallet(target, shell.before_scan == SCREEN_WALLET && shell.current == SCREEN_WALLET)) {
+        wallet_screens_scan_notice(view->result);
+        zapp_wallet_ui_render(env);
+        return;
+    }
     if (!home) go(env, SCREEN_ASSISTANT);
     if (target == ZAPP_SCAN_TO_FLEET_REVIEW) zapp_native_ui_open_details(env);
     if (!home) return;

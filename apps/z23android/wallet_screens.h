@@ -139,6 +139,10 @@ void wallet_screens_tick(void);
  * happened, until a tap reaches it. Call on the UI thread; the count is of new drops. */
 void wallet_screens_dropped(unsigned taps);
 
+/* Words about a scan that began at Send and ended without a payment to review, shown on Funds until the owner leaves
+ * it, with the Send button reading "Scan again". Does nothing unless Funds is in front. */
+void wallet_screens_scan_notice(const char *text);
+
 /* Copies the current screen. Returns its version, which changes whenever it does. */
 unsigned wallet_screens_snapshot(struct wallet_screen *out);
 /* Whether a wallet screen is in front. */

@@ -47,7 +47,7 @@ struct data {
     bool address_pending, has_amount, no_receive, reused;
     uint64_t amount_zat;
     enum zapp_pay_network network;
-    char address[ZAPP_PAY_ADDRESS_MAX], code[ZAPP_RECEIVE_CODE_MAX], note[NOTE_MAX];
+    char address[ZAPP_PAY_ADDRESS_MAX], code[ZAPP_RECEIVE_CODE_MAX], note[NOTE_MAX], scan_note[NOTE_MAX];
     bool history_pending, history_failed, has_more;
     unsigned page, detail;
     size_t rows;
@@ -185,12 +185,13 @@ static void funds_items(struct wallet_screen *s)
 {
     const struct data *d = &st.d;
     title(s, "Wallet");
+    if (d->scan_note[0]) note(s, d->scan_note);
     if (!d->funds_loaded) line(s, "Loading…");
     else if (d->node_silent) {
         line(s, "The node is not answering. Start it to see your funds.");
         button(s, WALLET_ACT_START_NODE, "Start node");
     } else {
-        line(s, "Spendable");
+        line(s, "Spendable now");
         (void)add(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE, d->view.balance);
         if (d->view.pending[0]) line(s, d->view.pending);
         if (d->view.public_line[0]) line(s, d->view.public_line);
@@ -202,7 +203,7 @@ static void funds_items(struct wallet_screen *s)
     }
     if (d->fleet_loaded && !d->node_silent) line(s, d->fleet_fresh ? d->fleet : WALLET_FLEET_UNCHECKED);
     button(s, WALLET_ACT_RECEIVE, "Receive");
-    button(s, WALLET_ACT_SEND, "Send");
+    button(s, WALLET_ACT_SEND, d->scan_note[0] ? "Scan again" : "Send");
     button(s, WALLET_ACT_HISTORY, "History");
     button(s, WALLET_ACT_BACK, "Home");
 }
@@ -276,6 +277,13 @@ static void row_text(const struct entry *e, char *out, size_t cap)
     snprintf(out, cap, "%s\n%s%s%s · %s · %s", amount, direction_label(e->direction), pool[0] ? " · " : "", pool, state_label(e->status), date);
 }
 
+/* The sentence for a first page with no rows. "No transactions yet." only when the node says it is current. */
+static const char *empty_history_text(const struct data *d)
+{
+    if (!d->funds_loaded || !d->view.known) return "None found so far.";
+    if (d->view.scanning) return "None found so far. The wallet is still scanning the chain.";
+    return d->view.current ? "No transactions yet." : "None found so far. The node is not up to date.";
+}
 static void history_items(struct wallet_screen *s)
 {
     const struct data *d = &st.d;
@@ -284,9 +292,7 @@ static void history_items(struct wallet_screen *s)
     if (d->history_pending) line(s, "Loading…");
     else if (d->history_failed) note(s, "History could not be read. Check that your node is running, then open History again.");
     else if (!d->rows && d->page) line(s, "No older transactions.");
-    else if (!d->rows) line(s, !d->funds_loaded || !d->view.known ? "None found so far." :
-                              d->view.scanning ? "None found so far. The wallet is still scanning the chain." :
-                              !d->view.current ? "None found so far. The node is not up to date." : "No transactions yet.");
+    else if (!d->rows) line(s, empty_history_text(d));
     for (size_t i = 0; i < d->rows; ++i) {
         row_text(&d->entry[i], text, sizeof(text));
         struct wallet_item *item = add(s, WALLET_ITEM_BUTTON, WALLET_ACT_DETAIL, text);
@@ -903,6 +909,16 @@ bool wallet_screens_set_amount(const char *text)
     }
     pthread_mutex_unlock(&st.lock);
     return ok;
+}
+
+void wallet_screens_scan_notice(const char *text)
+{
+    pthread_mutex_lock(&st.lock);
+    if (st.ready && !st.blocked && st.page == WALLET_PAGE_FUNDS && text) {
+        copy(st.d.scan_note, sizeof(st.d.scan_note), text);
+        touch();
+    }
+    pthread_mutex_unlock(&st.lock);
 }
 
 void wallet_screens_dropped(unsigned taps)

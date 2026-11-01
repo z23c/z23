@@ -24,6 +24,7 @@
 #define GRAVITY_START_CENTER 0x800013 /* Gravity.START | Gravity.CENTER_VERTICAL */
 #define GRAVITY_CENTER_HORIZONTAL 1
 #define ROW_AMOUNT_SCALE 1.5f
+#define BOTTOM_SPACE_DP 48
 
 static struct {
     jobject activity, container, input, buttons[WALLET_ITEMS_MAX];
@@ -77,13 +78,9 @@ static bool input_view(JNIEnv *env, const char *hint)
     if (view) (*env)->DeleteLocalRef(env, view);
     return ok;
 }
-/* A history row: left aligned, the amount on the first line in a larger size, then one line of kind, state and
- * date. The text is already set; a failure here leaves it plain. */
-static void row_style(JNIEnv *env, jobject view, const char *text)
+/* Sets the first line of a row's text, the amount, larger. A failure leaves the text plain. */
+static void enlarge_amount(JNIEnv *env, jobject view, const char *text, jint amount_len)
 {
-    const char *end = strchr(text, '\n');
-    if (!end || (*env)->PushLocalFrame(env, 8) != JNI_OK) return;
-    (void)zj_int_property(env, view, "setGravity", GRAVITY_START_CENTER);
     jclass spannable = (*env)->FindClass(env, "android/text/SpannableString");
     jclass span = zj_clean(env) ? (*env)->FindClass(env, "android/text/style/RelativeSizeSpan") : NULL;
     jmethodID make = spannable ? (*env)->GetMethodID(env, spannable, "<init>", "(Ljava/lang/CharSequence;)V") : NULL;
@@ -94,11 +91,29 @@ static void row_style(JNIEnv *env, jobject view, const char *text)
     jobject text_span = plain ? (*env)->NewObject(env, spannable, make, plain) : NULL;
     jobject big = text_span ? (*env)->NewObject(env, span, size, ROW_AMOUNT_SCALE) : NULL;
     if (big && zj_clean(env)) {
-        (*env)->CallVoidMethod(env, text_span, put, big, 0, (jint)(end - text), 0x11 /* SPAN_EXCLUSIVE_EXCLUSIVE */);
+        (*env)->CallVoidMethod(env, text_span, put, big, 0, amount_len, 0x11 /* SPAN_EXCLUSIVE_EXCLUSIVE */);
         if (zj_clean(env)) (*env)->CallVoidMethod(env, view, set, text_span);
     }
     (void)zj_clean(env);
+}
+/* A history row: left aligned, the amount on the first line in a larger size, then one line of kind, state and
+ * date. The text is already set; a failure here leaves it plain. */
+static void row_style(JNIEnv *env, jobject view, const char *text)
+{
+    const char *end = strchr(text, '\n');
+    if (!end || (*env)->PushLocalFrame(env, 8) != JNI_OK) return;
+    (void)zj_int_property(env, view, "setGravity", GRAVITY_START_CENTER);
+    enlarge_amount(env, view, text, (jint)(end - text));
     (*env)->PopLocalFrame(env, NULL);
+}
+/* Empty room under the last item, so that its last line can be scrolled clear of the screen edge and the system bars. */
+static bool bottom_space(JNIEnv *env)
+{
+    jobject view = zj_widget(env, "android/widget/TextView", ui.activity);
+    bool ok = view && zj_padding(env, view, 0, BOTTOM_SPACE_DP) && zj_margins(env, view, MATCH, WRAP, 0.0f, 0, 0, 0, 0) &&
+        zj_append(env, ui.container, view);
+    if (view) (*env)->DeleteLocalRef(env, view);
+    return ok;
 }
 static bool button_view(JNIEnv *env, size_t item, const char *text, bool row)
 {
@@ -155,6 +170,7 @@ void zapp_wallet_ui_render(JNIEnv *env)
     if (ui.drawn && version == ui.version) return;
     release_widgets(env);
     for (size_t i = 0; i < ui.screen.count; ++i) (void)draw_item(env, i);
+    if (ui.screen.count) (void)bottom_space(env);
     ui.version = version;
     ui.drawn = true;
 }

@@ -14,6 +14,7 @@
 #define TEXT_BALANCE_UNKNOWN "Balance unknown"
 #define TEXT_PENDING_UNKNOWN "Pending amount unknown"
 #define TEXT_PUBLIC_UNKNOWN "Public amount unknown"
+#define TEXT_IMMATURE_UNKNOWN "Maturing amount unknown"
 #define TEXT_SYNC_UNKNOWN "Sync state unknown"
 #define TEXT_SEND_UNAVAILABLE "Sending is unavailable until the wallet state loads."
 #define TEXT_SEND_RELEASE "Sending is paused until this node verifies the chain tip itself."
@@ -147,6 +148,7 @@ static void set_unknown(struct wallet_view *out)
     put(out->balance, sizeof(out->balance), TEXT_BALANCE_UNKNOWN);
     put(out->pending, sizeof(out->pending), TEXT_PENDING_UNKNOWN);
     put(out->public_line, sizeof(out->public_line), TEXT_PUBLIC_UNKNOWN);
+    put(out->immature_line, sizeof(out->immature_line), TEXT_IMMATURE_UNKNOWN);
     put(out->sync, sizeof(out->sync), TEXT_SYNC_UNKNOWN);
     put(out->send, sizeof(out->send), TEXT_SEND_UNAVAILABLE);
 }
@@ -176,8 +178,8 @@ static void render_pending(const struct summary *s, struct wallet_view *out)
         snprintf(out->pending, sizeof(out->pending), "%s ZCL arriving in %lld confirmation%s", amount,
                  (long long)s->pending_confirmations, unit);
     else if (s->pending_notes > 1 && s->pending_confirmations > 0)
-        snprintf(out->pending, sizeof(out->pending), "%s ZCL pending. The next arrives in %lld confirmation%s.", amount,
-                 (long long)s->pending_confirmations, unit);
+        snprintf(out->pending, sizeof(out->pending), "%s ZCL pending in %lld payments. The next arrives in %lld confirmation%s.",
+                 amount, (long long)s->pending_notes, (long long)s->pending_confirmations, unit);
     else
         snprintf(out->pending, sizeof(out->pending), "%s ZCL pending", amount);
 }
@@ -187,7 +189,7 @@ static void render_immature(const struct summary *s, struct wallet_view *out)
     char amount[32];
     out->immature_line[0] = '\0';
     if (s->immature == 0 || !amount_text(s->immature, amount, sizeof(amount))) return;
-    snprintf(out->immature_line, sizeof(out->immature_line), "%s ZCL maturing, not yet spendable", amount);
+    snprintf(out->immature_line, sizeof(out->immature_line), "%s ZCL of mined coins maturing, not yet spendable", amount);
 }
 
 static void render_public(const struct summary *s, struct wallet_view *out)
@@ -195,7 +197,7 @@ static void render_public(const struct summary *s, struct wallet_view *out)
     char amount[32];
     out->public_line[0] = '\0';
     if (s->public_zat == 0 || !zapp_zat_format((uint64_t)s->public_zat, amount, sizeof(amount))) return;
-    snprintf(out->public_line, sizeof(out->public_line), "%s ZCL public", amount);
+    snprintf(out->public_line, sizeof(out->public_line), "%s ZCL public: visible to everyone, not part of the spendable amount", amount);
 }
 
 /* Up to date only at zero blocks behind. A gap of one or more blocks says so, whatever current
@@ -268,18 +270,39 @@ static bool is_printable_address(const char *address, size_t n)
     return true;
 }
 
+/* The length of the bech32 prefix with its separator ("zs1", "zregtestsapling1"), kept whole as the first group, or 0
+ * when the address has none. The prefix is two or more lowercase letters, then the last '1'. */
+static size_t prefix_length(const char *address, size_t n)
+{
+    size_t sep = 0;
+    for (size_t i = 0; i < n; i++)
+        if (address[i] == '1') sep = i;
+    if (sep < 2 || sep + 1 >= n) return 0;
+    for (size_t i = 0; i < sep; i++)
+        if (address[i] < 'a' || address[i] > 'z') return 0;
+    return sep + 1;
+}
+
+/* The length of address when it is a displayable address of at most WALLET_VIEW_ADDRESS_MAX bytes, otherwise 0. */
+static size_t displayable_length(const char *address)
+{
+    size_t n = 0;
+    while (n <= WALLET_VIEW_ADDRESS_MAX && address[n]) n++;
+    return n > 0 && n <= WALLET_VIEW_ADDRESS_MAX && is_printable_address(address, n) ? n : 0;
+}
+
 bool wallet_view_group_address(const char *address, char *out, size_t cap)
 {
     if (out && cap) out[0] = '\0';
     if (!address || !out || !cap) return false;
-    size_t n = 0;
-    while (n <= WALLET_VIEW_ADDRESS_MAX && address[n]) n++;
-    if (n == 0 || n > WALLET_VIEW_ADDRESS_MAX || !is_printable_address(address, n)) return false;
-    size_t spaces = (n - 1) / WALLET_VIEW_GROUP;
+    size_t n = displayable_length(address);
+    if (n == 0) return false;
+    size_t head = prefix_length(address, n), rest = n - head;
+    size_t spaces = (rest ? (rest - 1) / WALLET_VIEW_GROUP : 0) + (head && rest ? 1 : 0);
     if (n + spaces + 1 > cap) return false;
     size_t o = 0;
     for (size_t i = 0; i < n; i++) {
-        if (i && i % WALLET_VIEW_GROUP == 0) out[o++] = ' ';
+        if (i && i >= head && (i - head) % WALLET_VIEW_GROUP == 0) out[o++] = ' ';
         out[o++] = address[i];
     }
     out[o] = '\0';

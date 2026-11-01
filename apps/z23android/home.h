@@ -48,6 +48,9 @@ enum zapp_scan_target { ZAPP_SCAN_TO_HOME, ZAPP_SCAN_TO_FLEET_REVIEW, ZAPP_SCAN_
  * A payment code that payment_code.h accepts opens the send review and nothing more. Everything else is
  * shown on Home. */
 enum zapp_scan_target zapp_home_scan_target(enum zapp_scan_kind kind, bool pair_offer);
+/* Whether a finished scan returns to the wallet screen it began on, with its words there, instead of to Home: when it
+ * began on a wallet screen and ends without a review to open. */
+bool zapp_home_scan_returns_to_wallet(enum zapp_scan_target target, bool began_in_wallet);
 /* Copies text into out (cap bytes), cutting on a character boundary when it does not fit. */
 void zapp_home_fit_label(char *out, size_t cap, const char *text);
 #endif

@@ -69,6 +69,16 @@ _Static_assert(sizeof(A1) == 79 && sizeof(A2) == 79 && sizeof(PUBLIC_ADDR) == 36
     "\"tip_height\":3000000,\"header_height\":3000000,\"scanned_through_height\":3000000,"              \
     "\"blocks_behind\":0,\"current\":false,\"locked\":false,\"encrypted\":true,\"shielded_keys\":1,"     \
     "\"send_allowed\":true,\"send_blocked_reason\":\"\"}}"
+#define RT_ADDR "zregtestsapling1" Q70 "qqqqq"
+/* Spendable 2, 0.5 pending in two payments with 7 confirmations to the first, 0.1 public, 20 maturing. */
+#define SUMMARY_ALL                                                                                     \
+    "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_summary.v1\",\"spendable_zat\":200000000,"          \
+    "\"spendable\":\"2.00000000\",\"pending_zat\":50000000,\"pending\":\"0.50000000\",\"pending_notes\":2," \
+    "\"pending_min_confirmations_needed\":7,\"sending_zat\":0,\"sending\":\"0.00000000\","               \
+    "\"public_zat\":10000000,\"public\":\"0.10000000\",\"immature_zat\":2000000000,"                     \
+    "\"immature\":\"20.00000000\",\"tip_height\":3000000,\"header_height\":3000000,"                     \
+    "\"scanned_through_height\":3000000,\"blocks_behind\":0,\"current\":true,\"locked\":false,"          \
+    "\"encrypted\":true,\"shielded_keys\":1,\"send_allowed\":true,\"send_blocked_reason\":\"\"}}"
 #define GOOD_SUMMARY SUMMARY("123456789", "1.23456789", "50000000", "0.50000000", "10000000", "0.10000000")
 #define UNKNOWN_COMMAND_ERROR "{\"ok\":false,\"error\":{\"code\":\"UNKNOWN_COMMAND\"}}"
 #define NODE_UNAVAILABLE_ERROR "{\"ok\":false,\"error\":{\"code\":\"NODE_UNAVAILABLE\"}}"
@@ -251,8 +261,8 @@ static void test_funds(void)
     struct wallet_screen *s = snap();
     long amount = find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE), pending = find_text(s, "pending"), pub = find_text(s, "public");
     CHECK(amount >= 0 && !strcmp(text_at(s, amount), "1.23456789 ZCL"));
-    CHECK(pending > amount && !strcmp(text_at(s, pending), "0.5 ZCL pending. The next arrives in 7 confirmations."));
-    CHECK(pub > pending && !strcmp(text_at(s, pub), "0.1 ZCL public"));
+    CHECK(pending > amount && !strcmp(text_at(s, pending), "0.5 ZCL pending in 2 payments. The next arrives in 7 confirmations."));
+    CHECK(pub > pending && !strcmp(text_at(s, pub), "0.1 ZCL public: visible to everyone, not part of the spendable amount"));
     CHECK(find_text(s, "Up to date at block 3000000") > pub);
     CHECK(find_text(s, WALLET_FLEET_UNCHECKED) > 0);     /* the fake node has no fleet command */
     CHECK(strcmp(text_at(s, amount), text_at(s, pending)) && !strstr(text_at(s, amount), "0.5"));
@@ -262,13 +272,14 @@ static void test_funds(void)
     wallet_screens_close();
 }
 
-static void test_funds_replies(void)
+static void funds_no_extra_lines(void)
 {
-    start(false);
     fake.summary = SUMMARY("5", "0.00000005", "0", "0.00000000", "0", "0.00000000");   /* nothing arriving and no public funds: no such lines */
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     CHECK(!has("arriving") && !has("public") && has("0.00000005 ZCL"));
-
+}
+static void funds_node_silent(void)
+{
     fake.summary = NODE_UNAVAILABLE_ERROR;    /* a node that does not answer: one line and Start node, never a zero that was not read */
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     CHECK(has("The node is not answering. Start it to see your funds.") && !has("unknown") && !has("ZCL") && !has("could not be read"));
@@ -280,6 +291,9 @@ static void test_funds_replies(void)
     fake.summary = "{\"ok\":false}\nThe command timed out.";                       /* so does one that takes too long */
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     CHECK(has("The node is not answering. Start it to see your funds.") && find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_START_NODE) >= 0);
+}
+static void funds_node_answers(void)
+{
     static const char *const answering[] = {                       /* a node that answers, even with an error, is running: Start would only say so */
         OTHER_ERROR, UNKNOWN_COMMAND_ERROR, "{\"ok\":false,\"error\":{\"code\":\"WALLET_DB_UNREADABLE\",\"message\":\"Wallet database unreadable\"}}",
     };
@@ -302,6 +316,13 @@ static void test_funds_replies(void)
     fake.always_ok = false;
     fake.summary = GOOD_SUMMARY;
 
+}
+static void test_funds_replies(void)
+{
+    start(false);
+    funds_no_extra_lines();
+    funds_node_silent();
+    funds_node_answers();
     int before = fake.op_count;               /* Send opens the camera and nothing else */
     tap(WALLET_ACT_SEND, 0, WALLET_SCAN);
     CHECK(fake.op_count == before && snap()->page == WALLET_PAGE_FUNDS);
@@ -440,7 +461,7 @@ static void test_receive(void)
     CHECK(count_ops("receive") == 0);          /* opening Receive makes no key */
     long qr = find(s, WALLET_ITEM_QR, WALLET_ACT_NONE), address = find(s, WALLET_ITEM_ADDRESS, WALLET_ACT_NONE);
     CHECK(qr >= 0 && !strcmp(text_at(s, qr), A1) && address >= 0);
-    CHECK(!strncmp(text_at(s, address), "zs1q qqqq qqqq", 14) && find_text(s, "diversified") < 0);
+    CHECK(!strncmp(text_at(s, address), "zs1 qqqq qqqq", 13) && find_text(s, "diversified") < 0);
     CHECK(find(s, WALLET_ITEM_INPUT, WALLET_ACT_NONE) >= 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_NEW_ADDRESS) >= 0);
     CHECK(has("may have been shown before"));                               /* the latest address is not a fresh one */
 
@@ -826,7 +847,7 @@ static void pause_during(const char *op, const char *arg)
 }
 /* The app goes out of view with a wallet screen in front: what the screens hold goes at once, and the window
  * protection stays in force until the caller has drawn a screen without wallet data and closes. */
-static void test_pause(void)
+static void pause_on_each_page(void)
 {
     static const enum wallet_page pages[] = {WALLET_PAGE_FUNDS, WALLET_PAGE_RECEIVE, WALLET_PAGE_HISTORY};
     for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); ++i) {
@@ -842,6 +863,9 @@ static void test_pause(void)
         wallet_screens_close();                                              /* the caller drew a screen without wallet data */
         CHECK(!fake.secure_on && fake.secure_off_calls == 1 && fake.secure_on_calls == 1);
     }
+}
+static void pause_then_return(void)
+{
     start(false);                                                            /* back into the wallet before the release */
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
     wallet_screens_pause();
@@ -850,6 +874,11 @@ static void test_pause(void)
     wallet_screens_pause();
     wallet_screens_shutdown();                                               /* the app is destroyed while held */
     CHECK(!fake.secure_on && fake.secure_off_calls == 1);
+}
+static void test_pause(void)
+{
+    pause_on_each_page();
+    pause_then_return();
     start(false);                                                            /* a reply that lands after the pause is dropped */
     fake.during = pause_during;
     CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
@@ -950,7 +979,7 @@ static void test_funds_lines(void)
     start(false);
     fake.summary = SUMMARY_IMMATURE("2000000000", "20.00000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("20 ZCL maturing, not yet spendable") && has("25 ZCL") && !has("25.0"));
+    CHECK(has("20 ZCL of mined coins maturing, not yet spendable") && has("25 ZCL") && !has("25.0"));
     start(false);
     fake.summary = SUMMARY_OFFLINE;
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
@@ -1132,6 +1161,75 @@ static void test_async(void)
 }
 
 /* With "stale" or "async" as the argument only that test runs, so a thread sanitizer can cover it in reasonable time. */
+/* Funds says in plain words what can be spent now, what is arriving, what is maturing and what is public, and
+ * shows no number the node did not report. */
+static void test_funds_plain_words(void)
+{
+    start(false);
+    fake.summary = SUMMARY_ALL;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    struct wallet_screen *s = snap();
+    long label = find_text(s, "Spendable now"), amount = find(s, WALLET_ITEM_AMOUNT, WALLET_ACT_NONE);
+    CHECK(label >= 0 && amount == label + 1 && !strcmp(text_at(s, amount), "2 ZCL"));
+    CHECK(has("0.5 ZCL pending in 2 payments. The next arrives in 7 confirmations."));
+    CHECK(has("20 ZCL of mined coins maturing, not yet spendable"));
+    CHECK(has("0.1 ZCL public: visible to everyone, not part of the spendable amount"));
+    fake.summary = "{\"ok\":true,\"data\":{\"x\":1}}";
+    fake.always_ok = true;
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(has("Balance unknown") && has("Pending amount unknown") && has("Public amount unknown") && has("Maturing amount unknown"));
+    CHECK(!has(" 0 ZCL") && !has("0.0") && !has("Up to date"));
+    wallet_screens_close();
+}
+
+/* A scan begun at Send that ends without a payment to review leaves the owner on Funds with the words and a way to try again. */
+static void test_scan_notice(void)
+{
+    start(false);
+    wallet_screens_scan_notice("This payment code was refused. Nothing was done.");   /* nothing open: ignored */
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    CHECK(!has("refused") && !strcmp(text_at(snap(), find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_SEND)), "Send"));
+    wallet_screens_scan_notice("This payment code was refused. Nothing was done.");
+    struct wallet_screen *s = snap();
+    long send = find(s, WALLET_ITEM_BUTTON, WALLET_ACT_SEND);
+    CHECK(s->page == WALLET_PAGE_FUNDS && has("This payment code was refused. Nothing was done.") && has("1.23456789 ZCL"));
+    CHECK(send >= 0 && !strcmp(text_at(s, send), "Scan again") && find(s, WALLET_ITEM_NOTE, WALLET_ACT_NONE) >= 0);
+    fake.now += 100000;                                                      /* a refresh keeps the words */
+    wallet_screens_tick();
+    CHECK(has("This payment code was refused."));
+    tap(WALLET_ACT_SEND, 0, WALLET_SCAN);
+    tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
+    wallet_screens_scan_notice("not on Funds");                              /* only Funds shows it */
+    CHECK(!has("not on Funds") && !has("refused"));
+    CHECK(wallet_screens_back() && !has("refused") && !strcmp(text_at(snap(), find(snap(), WALLET_ITEM_BUTTON, WALLET_ACT_SEND)), "Send"));
+    wallet_screens_close();
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS) && !has("refused"));
+    wallet_screens_close();
+}
+
+/* The whole address is shown on every network, its prefix kept in one piece, so no group starts inside the prefix. */
+static void test_receive_address_whole(void)
+{
+    static const char *const addresses[] = {A1, RT_ADDR};
+    static const char *const prefixes[] = {"zs1", "zregtestsapling1"};
+    for (size_t i = 0; i < 2; ++i) {
+        char reply_text[256], flat[256] = "";
+        snprintf(reply_text, sizeof(reply_text), "{\"ok\":true,\"data\":{\"address\":\"%s\"}}", addresses[i]);
+        start(false);
+        fake.latest = reply_text;
+        CHECK(wallet_screens_open(WALLET_PAGE_RECEIVE));
+        struct wallet_screen *s = snap();
+        const char *shown = text_at(s, find(s, WALLET_ITEM_ADDRESS, WALLET_ACT_NONE));
+        size_t prefix = strlen(prefixes[i]), used = 0;
+        CHECK(!strncmp(shown, prefixes[i], prefix) && shown[prefix] == ' ');
+        for (const char *c = shown; *c; ++c) if (*c != ' ') flat[used++] = *c;
+        CHECK(!strcmp(flat, addresses[i]));
+        for (const char *c = shown + prefix + 1, *start_of = c; *c; ++c)
+            if (*c == ' ') { CHECK(c - start_of == 4); start_of = c + 1; }
+        wallet_screens_close();
+    }
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "stale")) test_refresh_and_stale();
@@ -1159,6 +1257,9 @@ int main(int argc, char **argv)
     test_privacy_claims();
     test_history_while_scanning();
     test_funds_lines();
+    test_funds_plain_words();
+    test_scan_notice();
+    test_receive_address_whole();
     test_receive_order();
     test_funds_send_paused();
     test_dropped_taps();
