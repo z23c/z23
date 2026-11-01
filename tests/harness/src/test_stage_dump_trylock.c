@@ -55,6 +55,8 @@
 #include "jobs/validate_headers_stage.h"
 #include "services/chain_state_service.h"
 #include "json/json.h"
+#include "config/db_service.h"
+#include "config/runtime.h"
 #include "models/database.h"
 #include "storage/progress_store.h"
 
@@ -623,11 +625,23 @@ static void contest_set(struct contest *c, _Atomic int *flag)
     pthread_mutex_unlock(&c->mu);
 }
 
-/* Block (bounded, condvar) until *flag is set; false on timeout. */
+/* A failed clock call is a test failure, never silently ignored: the caller's
+ * time-dependent check then fails with its own name, after this message. */
+static bool sdt_clock(clockid_t id, struct timespec *ts)
+{
+    if (clock_gettime(id, ts) == 0)
+        return true;
+    printf("stage_dump_trylock: clock_gettime(%d) FAILED\n", (int)id);
+    return false;
+}
+
+/* Block (bounded, condvar) until *flag is set; false on timeout or when the
+ * deadline clock is unavailable (never waits unbounded). */
 static bool contest_wait(struct contest *c, _Atomic int *flag, int secs)
 {
     struct timespec dl;
-    clock_gettime(CLOCK_REALTIME, &dl);
+    if (!sdt_clock(CLOCK_REALTIME, &dl))
+        return atomic_load(flag) != 0;
     dl.tv_sec += secs;
     pthread_mutex_lock(&c->mu);
     int wrc = 0;
@@ -662,10 +676,12 @@ static void *contest_i_thread(void *arg)
     return NULL;
 }
 
+/* Milliseconds since t0, or -1 when the clock fails (callers assert >= 0). */
 static long cev_ms_since(const struct timespec *t0)
 {
     struct timespec t1;
-    clock_gettime(CLOCK_MONOTONIC, &t1);
+    if (!sdt_clock(CLOCK_MONOTONIC, &t1))
+        return -1;
     return (long)((t1.tv_sec - t0->tv_sec) * 1000L +
                   (t1.tv_nsec - t0->tv_nsec) / 1000000L);
 }
@@ -673,9 +689,9 @@ static long cev_ms_since(const struct timespec *t0)
 static long cev_timed_dump(const char *key, struct cev_reply *r)
 {
     struct timespec t0;
-    clock_gettime(CLOCK_MONOTONIC, &t0);
+    bool have_t0 = sdt_clock(CLOCK_MONOTONIC, &t0);
     cev_dump(key, r);
-    return cev_ms_since(&t0);
+    return have_t0 ? cev_ms_since(&t0) : -1;
 }
 
 static void *contest_d_thread(void *arg)
@@ -838,9 +854,9 @@ static void *ndb_snap_thread(void *arg)
     struct chain_state_view v;
     struct timespec t0;
     contest_wait(&n->c, &n->c.csr_held, 60);
-    clock_gettime(CLOCK_MONOTONIC, &t0);
+    bool have_t0 = sdt_clock(CLOCK_MONOTONIC, &t0);
     atomic_store(&n->snap_ret, csr_snapshot_bounded(csr_instance(), &v));
-    n->snap_ms = cev_ms_since(&t0);
+    n->snap_ms = have_t0 ? cev_ms_since(&t0) : -1;
     contest_set(&n->c, &n->c.d_done);
     return NULL;
 }
@@ -855,8 +871,10 @@ static int case_bounded_snapshot_ndb_mutex(void)
     memset(&ndb, 0, sizeof(ndb));
     bool opened = sqlite3_open(":memory:", &ndb.db) == SQLITE_OK;
     SD_CHECK("ndbmu: in-memory db opens", opened);
-    if (!opened)
+    if (!opened) {
+        sqlite3_close_v2(ndb.db); /* a handle is allocated even when open fails */
         return failures;
+    }
     ndb.open = true;
     struct chain_state_repository *csr = csr_instance();
     bool was_initialized = csr->initialized;
@@ -895,6 +913,77 @@ static int case_bounded_snapshot_ndb_mutex(void)
     return failures;
 }
 
+/* The real dumper against the node.db the production path uses
+ * (app_runtime_node_db(), installed through the same db_service +
+ * app_runtime_set_current fixture the dbquery tests use), with PS and CSR
+ * both FREE and only the node.db connection mutex owned by thread M.  This
+ * is the dumper's own node.db guard (snapshot_fill): it must answer the exact
+ * busy shape, for both keys, and well inside CONTEST_BOUND_MS. */
+struct dump_ndb_fixture {
+    struct node_db ndb;
+    struct db_service dbsvc;
+    struct app_runtime_context runtime;
+};
+
+static void *ndb_dump_thread(void *arg)
+{
+    struct ndb_contest *n = (struct ndb_contest *)arg;
+    contest_wait(&n->c, &n->c.csr_held, 60);
+    n->c.plain_ms = cev_timed_dump(NULL, &n->c.plain);
+    n->c.reason_ms = cev_timed_dump("health_reason", &n->c.reason);
+    contest_set(&n->c, &n->c.d_done);
+    return NULL;
+}
+
+static int case_dumper_ndb_mutex_busy(void)
+{
+    int failures = 0;
+    static struct dump_ndb_fixture fx;
+    static struct ndb_contest n = {
+        .c = { .mu = PTHREAD_MUTEX_INITIALIZER,
+               .cv = PTHREAD_COND_INITIALIZER } };
+    memset(&fx, 0, sizeof(fx));
+    bool ok = node_db_open(&fx.ndb, ":memory:");
+    SD_CHECK("dumpndb: node.db fixture opens", ok);
+    if (!ok)
+        return failures;
+    db_service_init(&fx.dbsvc);
+    ok = db_service_attach(&fx.dbsvc, &fx.ndb) &&
+         db_service_start(&fx.dbsvc);
+    SD_CHECK("dumpndb: db_service fixture starts", ok);
+    if (!ok) {
+        node_db_close(&fx.ndb);
+        return failures;
+    }
+    fx.runtime.db_service = &fx.dbsvc;
+    app_runtime_set_current(&fx.runtime);
+    SD_CHECK("dumpndb: dumper sees the fixture node.db",
+             app_runtime_node_db() == &fx.ndb);
+
+    n.ndb = &fx.ndb;
+    contest_reset(&n.c);
+    pthread_t th, td;
+    int rh = pthread_create(&th, NULL, ndb_holder_thread, &n);
+    int rd = rh == 0 ? pthread_create(&td, NULL, ndb_dump_thread, &n) : -1;
+    SD_CHECK("dumpndb: threads start", rh == 0 && rd == 0);
+    bool answered = rd == 0 && contest_wait(&n.c, &n.c.d_done, 5);
+    SD_CHECK("dumpndb: dumper returns while the node.db connection mutex is "
+             "owned (PS and CSR free)", answered);
+    contest_set(&n.c, &n.c.release_h);
+    if (rh == 0) {
+        contest_set(&n.c, &n.c.csr_held); /* unblock D if H never latched */
+        pthread_join(th, NULL);
+    }
+    if (rd == 0)
+        pthread_join(td, NULL);
+    if (answered)
+        failures += contest_check_replies(&n.c, "dumpndb");
+    app_runtime_set_current(NULL);
+    db_service_stop(&fx.dbsvc);
+    node_db_close(&fx.ndb);
+    return failures;
+}
+
 int test_stage_dump_trylock(void)
 {
     int failures = 0;
@@ -906,6 +995,7 @@ int test_stage_dump_trylock(void)
     failures += case_chain_evidence_busy_ingest();
     failures += case_chain_evidence_ingest_contention();
     failures += case_bounded_snapshot_ndb_mutex();
+    failures += case_dumper_ndb_mutex_busy();
     if (failures == 0)
         printf("test_stage_dump_trylock: ALL PASSED\n");
     else

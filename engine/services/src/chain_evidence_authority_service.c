@@ -205,6 +205,18 @@ void chain_evidence_controller_init_readonly(
     (void)chain_evidence_controller_load_state_readonly(authority);
 }
 
+void chain_evidence_controller_init_unloaded(
+    struct chain_evidence_controller *authority, struct node_db *ndb,
+    struct chain_state_repository *csr)
+{
+    if (!authority)
+        return;
+    memset(authority, 0, sizeof(*authority));
+    authority->ndb = ndb;
+    authority->csr = csr ? csr : csr_instance();
+    authority->state = CEC_EMPTY;
+}
+
 enum chain_evidence_controller_state
 chain_evidence_controller_load_state_readonly(
     struct chain_evidence_controller *authority)

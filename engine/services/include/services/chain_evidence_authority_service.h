@@ -164,6 +164,13 @@ void chain_evidence_controller_init_readonly(
     struct chain_evidence_controller *authority, struct node_db *ndb,
     struct chain_state_repository *csr);
 
+/* Bind a controller with NO node.db access at all (not even the readonly
+ * state load): the bounded snapshot loads state itself, under its try-entered
+ * connection mutex.  For live-node dumpers that must never wait on node.db. */
+void chain_evidence_controller_init_unloaded(
+    struct chain_evidence_controller *authority, struct node_db *ndb,
+    struct chain_state_repository *csr);
+
 enum chain_evidence_controller_state chain_evidence_controller_load_state(
     struct chain_evidence_controller *authority);
 

@@ -71,6 +71,10 @@ static void push_hash_json(struct json_value *out, const char *key,
  *      no other lock taken, so an ingest cannot slip in between check and
  *      use).
  *
+ * The controller is bound with init_unloaded (no node.db access, no boot
+ * reconcile); the snapshot does its node.db reads under a try-entered
+ * connection mutex.
+ *
  * Any miss answers the typed busy marker.  The drain of the pending finalized
  * tip is NOT run here: it mutates CSR (csr_align_coins_best_block) and node.db
  * and takes PS through the coins-frontier clamp, none of which is boundable
@@ -101,8 +105,8 @@ bool diag_chain_evidence_dump_state_json(struct json_value *out,
         return true;
     }
     progress_store_tx_unlock();
-    chain_evidence_controller_init(&authority, app_runtime_node_db(),
-                                   csr_instance());
+    chain_evidence_controller_init_unloaded(&authority, app_runtime_node_db(),
+                                           csr_instance());
     if (!chain_evidence_controller_snapshot_bounded(&authority, &view)) {
         push_busy_ingest_json(out);
         return true;
