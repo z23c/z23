@@ -198,8 +198,14 @@ static int de_test_skips(void)
          "stage and name why") {
         char root[PATH_MAX], empty[PATH_MAX], rel[PATH_MAX];
         ASSERT(getcwd(root, sizeof(root)) != NULL);
-        test_make_tmpdir(empty, sizeof(empty), "devloop_early", "nofacts");
-        ASSERT(strncmp(empty, root, strlen(root)) == 0);
+        /* The facts directory is confined to the checkout, so this fixture
+         * lives under <cwd>/test-tmp even when the runner points fixtures
+         * at a tmpfs root outside the checkout. */
+        ASSERT(snprintf(empty, sizeof(empty), "%s/test-tmp/devloop_early_%d_nofacts",
+                        root, (int)getpid()) < (int)sizeof(empty));
+        ASSERT(test_rm_rf_recursive(empty) == 0 || errno == ENOENT);
+        ASSERT(mkdir("test-tmp", 0700) == 0 || errno == EEXIST);
+        ASSERT(mkdir(empty, 0700) == 0);
         (void)snprintf(rel, sizeof(rel), "%s", empty + strlen(root) + 1);
         ASSERT(de_skips(root, NULL, "facts_dir_unset"));
         ASSERT(de_skips(root, "", "facts_dir_unset"));
