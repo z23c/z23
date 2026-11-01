@@ -848,5 +848,10 @@ later lane flips it HARD.
 
 - 2026-10-31T21:52:24Z — REASON: commit 2cf81eec86 changed core/modules/net/src/tor_integration.c to read the wall clock through clock_now_wall_ms (check-no-raw-clock-outside-platform); behaviour-preserving, no consensus predicate changes. RECORDED AFTERWARDS: this entry was appended at 2026-10-31T23:21:42Z, after the reseal, because the reseal ran under the 2026-10-31T17:37:41Z token without a new entry. The time is that of core/MANIFEST.sha3 on r1 (mtime 21:52:24Z) and of the reseal log.
   old ROOT: adad80000fb59f9f2caee58b7d10c3a6b666db9e9898bde7e25c985b657026e1
-  new ROOT: e1d38182e1ab35f6e7c240d9d1e21c711727b3c635770bb6e6092ea2c819452e
   by: appended by the lane author; not the unseal ritual
+  (the new ROOT was e1d38182e1ab35f6e7c240d9d1e21c711727b3c635770bb6e6092ea2c819452e at 2cf81eec86)
+
+- 2026-11-01T00:17:37Z — REASON: reseal after rebasing the private wallet broadcast lane onto origin/main 5c1d134912, which carries another writer's core/modules/net unseal entries; the sealed files of this lane (core/modules/net/src/tor_integration.c, core/modules/net/src/tor_config_log.c, core/modules/net/include/net/tor_integration.h) are unchanged by the rebase. Written at the time of the reseal.
+  old ROOT: ab77ad2dca2a69f3758177f5bfeb27c2dc19b4e03fc620fcf018674a73b1858e
+  by: appended by the lane author after make core-seal; not the unseal ritual
+  (the new ROOT is the one in core/MANIFEST.sha3 at the commit that carries this entry)
