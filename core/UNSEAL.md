@@ -697,3 +697,7 @@ later lane flips it HARD.
 - 2026-11-01T21:03:44Z — REASON: tor_write_torrc: check removal of a partial torrc and log failure;   no consensus change
   old ROOT: 517bd420f816621d54d07199b17d6073cd4764d74b29b400e4d72813630dde9e
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T21:03:57Z — REASON: test_tor: skip the write-failure half only when /dev/full is absent (ENOENT);  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: 7f9a83114dcad8a07da6d2715ad2b2faad098cba7914ccdf3b6e5c6a92d85f2b
+  by: owner unseal ritual (make core-unseal)

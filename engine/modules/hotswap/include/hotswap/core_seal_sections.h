@@ -36,7 +36,7 @@
 
 /* Root node digest over the whole sealed set (dirpath ""). */
 #define ZCL_CORE_SEAL_TREE \
-    "e6cc5864f47187108fc076b193f022afb497bb533be7bd179e503e68371b8b48"
+    "69b98fa836196598494d028e6021c01a49e6efca4658d95c607a7b911ce698e9"
 
 /* SECTION lines in core/MANIFEST.sha3 at generation time. */
 #define ZCL_CORE_SEAL_SECTION_COUNT 80u
@@ -45,7 +45,7 @@
  * hotswap/hotswap_module.h defines it as an initializer element. */
 #define ZCL_CORE_SEAL_SECTION_ROWS \
     ZCL_HOTSWAP_SECTION_ROW("core", \
-        "3438e4ff64f94765ab602d667be07aa16b68d861ab76afb8984d998203cc5528") \
+        "858324167b239c58a0ce01cf34b0ec1c104a341af1c59d46e09883e06633f66d") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams", \
         "8f1a4eb8e2634b666158a5f9613906f708e252178a13d6e27e374d72425c4ba5") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams/include", \

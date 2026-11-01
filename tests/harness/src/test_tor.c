@@ -1151,9 +1151,15 @@ static int test_tor_write_torrc_reports_write_failure(void)
     snprintf(torrc, sizeof(torrc), "%s/torrc", tmpdir);
     struct stat dev_full_st;
     if (stat("/dev/full", &dev_full_st) != 0) {
+        /* Only a truly absent /dev/full skips; any other stat error fails. */
+        int stat_errno = errno;
+        remove_tree(tmpdir);
+        if (stat_errno != ENOENT) {
+            printf("FAIL (stat /dev/full: %s)\n", strerror(stat_errno));
+            return 1;
+        }
         printf("OK (skipped write-failure half: /dev/full absent; open-failure=%d)\n",
                open_fail_reported);
-        remove_tree(tmpdir);
         return open_fail_reported ? 0 : 1;
     }
     bool linked = symlink("/dev/full", torrc) == 0;
