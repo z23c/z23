@@ -23,6 +23,11 @@
 #include "controllers/sync_controller.h"
 #include "json/json.h"
 #include "util/safe_alloc.h"
+#include "util/blocker.h"
+#include "services/sapling_tip_root_blocker.h"
+#include "sapling/incremental_merkle_tree.h"
+#include "validation/chainstate.h"
+#include "validation/main_state.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -710,6 +715,140 @@ static int wfs_test_nullifier_placeholder_refresh(void)
     return failures;
 }
 
+/* ── Witness gate of a shielded send ─────────────────────────────────
+ * The gate refuses before any proving or spent-state change: while the boot
+ * blocker is active, and when the anchor the witnesses produce is not the
+ * Sapling root the chain header commits to at the authoritative tip. */
+enum { WFS_GATE_TIP = 300 };
+
+struct wfs_gate {
+    struct node_db *ndb;
+    struct main_state ms;
+    struct block_index bi;
+    struct wallet_rpc_context ctx;
+    struct db_sapling_note note;
+    struct uint256 witness_root;
+    bool ok;
+};
+
+static bool wfs_gate_seed_note(struct wfs_gate *g, const uint8_t ivk[32])
+{
+    struct incremental_merkle_tree t;
+    sapling_tree_init(&t);
+    uint8_t cm[32];
+    memset(cm, 0x9C, 32);
+    struct uint256 cmu;
+    memcpy(cmu.data, cm, 32);
+    incremental_tree_append(&t, &cmu);
+    struct incremental_witness w;
+    incremental_witness_init(&w, &t);
+    incremental_witness_root(&w, &g->witness_root);
+    struct byte_stream ws;
+    stream_init(&ws, 2048);
+    uint8_t txid[32], rcm[32], div[11], pk_d[32], nf[32], memo[512];
+    memset(txid, 0x9D, 32); memset(rcm, 0x05, 32); memset(div, 0x07, 11);
+    memset(pk_d, 0x08, 32); memset(nf, 0x9E, 32); memset(memo, 0xF6, 512);
+    bool ok = incremental_witness_serialize(&w, &ws) &&
+        node_db_sync_sapling_note(g->ndb, txid, 0, 9000, rcm, memo, 512, ivk,
+                                  div, pk_d, cm, nf, 200) &&
+        db_sapling_note_save_witness(g->ndb, txid, 0, ws.data, ws.size,
+                                     WFS_GATE_TIP) &&
+        db_sapling_note_list_unspent_for_ivk(g->ndb, ivk, &g->note, 1) == 1;
+    stream_free(&ws);
+    return ok;
+}
+
+static bool wfs_gate_open(struct wfs_gate *g, struct node_db *ndb)
+{
+    uint8_t ivk[32];
+    memset(ivk, 0x9B, 32);
+    memset(g, 0, sizeof(*g));
+    g->ndb = ndb;
+    main_state_init(&g->ms);
+    block_index_init(&g->bi);
+    g->bi.nHeight = WFS_GATE_TIP;
+    g->ok = wfs_gate_seed_note(g, ivk) &&
+            active_chain_install_tip_slot(&g->ms.chain_active, &g->bi);
+    g->ctx.node_db = ndb;
+    g->ctx.main_state = &g->ms;
+    blocker_module_init();
+    blocker_reset_for_testing();
+    return g->ok;
+}
+
+/* Runs the gate once; *w is freed by this helper when the gate passes. */
+static const char *wfs_gate_run(struct wfs_gate *g, bool *passed)
+{
+    uint8_t anchor[32];
+    struct incremental_witness *w = NULL;
+    size_t fi = 0;
+    int fh = 0;
+    const char *r = z_sendmany_shielded_witness_gate(
+        &g->ctx, &g->note, 1, WFS_GATE_TIP, &w, anchor, &fi, &fh);
+    *passed = r == NULL && w != NULL &&
+              memcmp(anchor, g->witness_root.data, 32) == 0;
+    free(w);
+    return r;
+}
+
+static bool wfs_gate_spent_untouched(struct wfs_gate *g)
+{
+    uint8_t ivk[32];
+    struct db_sapling_note n[2];
+    memset(ivk, 0x9B, 32);
+    return db_sapling_note_list_unspent_for_ivk(g->ndb, ivk, n, 2) == 1;
+}
+
+static int wfs_test_send_witness_gate(struct node_db *ndb)
+{
+    int failures = 0;
+    struct wfs_gate g;
+    bool passed = false;
+    bool ok = wfs_gate_open(&g, ndb);
+    WFS_CHECK("witness gate fixture builds", ok);
+    if (!ok) { main_state_free(&g.ms); return failures; }
+
+    /* The chain header commits to the witness root: the send proceeds. */
+    g.bi.hashFinalSaplingRoot = g.witness_root;
+    const char *r = wfs_gate_run(&g, &passed);
+    WFS_CHECK("a witness matching the header Sapling root passes the gate",
+              r == NULL && passed);
+
+    /* A corrupted witness: its root is not the header root. */
+    g.bi.hashFinalSaplingRoot.data[0] ^= 0x01;
+    r = wfs_gate_run(&g, &passed);
+    WFS_CHECK("a witness that disagrees with the header root is refused",
+              r != NULL && strstr(r, "does not match") != NULL && !passed &&
+              wfs_gate_spent_untouched(&g));
+
+    /* A header without a root cannot vouch for the witness. */
+    memset(g.bi.hashFinalSaplingRoot.data, 0, 32);
+    r = wfs_gate_run(&g, &passed);
+    WFS_CHECK("a zero header root refuses the send",
+              r != NULL && strstr(r, "no Sapling root") != NULL && !passed);
+
+    /* The boot blocker refuses before any allocation, and spends nothing. */
+    g.bi.hashFinalSaplingRoot = g.witness_root;
+    struct blocker_record rec;
+    ok = blocker_init(&rec, BLOCKER_ID_SAPLING_TIP_ROOT_MISSING,
+                      "boot.sapling_tree", BLOCKER_PERMANENT, "test");
+    if (ok)
+        (void)blocker_set(&rec);
+    static const char alloc_label[] = "sapling_witnesses";
+    zcl_alloc_fault_fail_nth(alloc_label, 1);
+    r = wfs_gate_run(&g, &passed);
+    bool allocated = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    WFS_CHECK("the boot blocker refuses the send, allocates nothing and "
+              "marks no note spent",
+              ok && r != NULL && strstr(r, "block index") != NULL &&
+              !passed && !allocated && wfs_gate_spent_untouched(&g));
+
+    blocker_reset_for_testing();
+    main_state_free(&g.ms);
+    return failures;
+}
+
 int test_wallet_funds_safety(void);
 int test_wallet_funds_safety(void)
 {
@@ -740,6 +879,7 @@ int test_wallet_funds_safety(void)
     failures += wfs_test_compensation_deletes_wallet_row(&ndb);
     failures += wfs_test_view_note_inertness(&ndb);
     failures += wfs_test_nullifier_placeholder_refresh();
+    failures += wfs_test_send_witness_gate(&ndb);
 
     node_db_close(&ndb);
     (void)test_rm_rf_recursive(dbdir);

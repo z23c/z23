@@ -8,6 +8,7 @@
 
 #include "controllers/wallet_shielded_internal.h"
 #include "jobs/reducer_frontier.h"
+#include "validation/chainstate.h"
 #include "wallet/wallet_lock.h"
 #include "services/sapling_tip_root_blocker.h"
 #include "util/blocker.h"
@@ -198,6 +199,64 @@ static const char *z_sendmany_shielded_build_outputs(
         return spend_err;
 }
 
+/* The witnesses must all produce one anchor, and that anchor must be the
+ * Sapling root the chain's own header at the authoritative tip commits to. A
+ * zero or missing header root cannot vouch for a witness. Returns the refusal
+ * text or NULL, and sets anchor on success. */
+static const char *z_sendmany_shielded_anchor_refusal(
+    const struct wallet_rpc_context *ctx,
+    struct incremental_witness *witnesses, size_t num, int tip,
+    uint8_t anchor[32])
+{
+    static const uint8_t zeros[32] = {0};
+    struct uint256 w0root, wroot;
+    incremental_witness_root(&witnesses[0], &w0root);
+    memcpy(anchor, w0root.data, 32);
+    if (z_sendmany_shielded_first_root_mismatch(witnesses, num, anchor,
+                                                &wroot) != 0)
+        return "Witness roots inconsistent (run rescanwitnesses)";
+    const struct block_index *bi = ctx->main_state && tip >= 0
+        ? active_chain_at(&ctx->main_state->chain_active, tip) : NULL;
+    if (!bi || memcmp(bi->hashFinalSaplingRoot.data, zeros, 32) == 0)
+        return "Shielded spend refused: the chain has no Sapling root at the "
+               "tip to check the witnesses against";
+    if (memcmp(bi->hashFinalSaplingRoot.data, anchor, 32) != 0)
+        return "Shielded spend refused: the witness root does not match the "
+               "chain's Sapling root at the tip (run rescanwitnesses)";
+    return NULL;
+}
+
+const char *z_sendmany_shielded_witness_gate(
+    struct wallet_rpc_context *ctx, const struct db_sapling_note *selected,
+    size_t num, int authoritative_tip,
+    struct incremental_witness **witnesses_out, uint8_t anchor[32],
+    size_t *fail_i, int *fail_height)
+{
+    *witnesses_out = NULL;
+    if (blocker_exists(BLOCKER_ID_SAPLING_TIP_ROOT_MISSING))
+        return z_sendmany_shielded_witness_refusal(
+            Z_SENDMANY_WITNESS_TREE_UNVERIFIED);
+    struct incremental_witness *witnesses = zcl_calloc(
+        num, sizeof(struct incremental_witness), "sapling_witnesses");
+    if (!witnesses)
+        return "Out of memory";
+    struct incremental_merkle_tree dummy_tree;
+    sapling_tree_init(&dummy_tree);
+    int wstat = z_sendmany_shielded_load_witnesses(
+        ctx, selected, num, witnesses, &dummy_tree, authoritative_tip,
+        fail_i, fail_height);
+    if (wstat != 0)
+        return z_sendmany_shielded_witness_refusal(wstat);
+    const char *refusal = z_sendmany_shielded_anchor_refusal(
+        ctx, witnesses, num, authoritative_tip, anchor);
+    if (refusal) {
+        free(witnesses);
+        return refusal;
+    }
+    *witnesses_out = witnesses;
+    return NULL;
+}
+
 /* value_balance = sum(spend) - sum(output) */
 static int64_t z_sendmany_shielded_value_balance(
     const struct db_sapling_note *selected_notes, size_t num_sel_notes,
@@ -358,57 +417,22 @@ static bool z_sendmany_shielded_with_key(
         }
 
         /* Witnesses are maintained incrementally by connect_block and bulk_blocks.
-         * Load them directly — they are already at chain tip. */
+         * The gate loads them at the authoritative tip and checks the anchor
+         * they produce against the chain's own Sapling root. */
         uint8_t anchor[32];
-        struct incremental_witness *witnesses = zcl_calloc(num_sel_notes,
-            sizeof(struct incremental_witness), "sapling_witnesses");
-        if (!witnesses) {
-            json_set_str(result, "Out of memory");
-            LOG_FAIL("wallet_shielded", "z_sendmany: calloc witnesses failed for %zu notes", num_sel_notes);
-        }
-        struct incremental_merkle_tree dummy_tree;
-        sapling_tree_init(&dummy_tree);
-
+        struct incremental_witness *witnesses = NULL;
         int authoritative_tip = reducer_frontier_external_tip_height();
         size_t i = 0;
         int wheight = 0;
-        /* A boot check endpoint without a Sapling root leaves the loaded tree
-         * and every witness derived from it unverified: refuse before any
-         * witness work. */
-        int wstat = blocker_exists(BLOCKER_ID_SAPLING_TIP_ROOT_MISSING)
-            ? Z_SENDMANY_WITNESS_TREE_UNVERIFIED
-            : z_sendmany_shielded_load_witnesses(
-                  ctx, selected_notes, num_sel_notes, witnesses, &dummy_tree,
-                  authoritative_tip, &i, &wheight);
-        const char *wrefusal = z_sendmany_shielded_witness_refusal(wstat);
+        const char *wrefusal = z_sendmany_shielded_witness_gate(
+            ctx, selected_notes, num_sel_notes, authoritative_tip,
+            &witnesses, anchor, &i, &wheight);
         if (wrefusal) {
             json_set_str(result, wrefusal);
             LOG_FAIL("wallet_shielded", // wallet-log-ok:note-index-label
-                     "z_sendmany: witness refused status=%d height=%d "
+                     "z_sendmany: witness refused: %s height=%d "
                      "authoritative_tip=%d note=%zu",
-                     wstat, wheight, authoritative_tip, i);
-        }
-
-        /* Anchor = witness root at chain tip.
-         * All witnesses share the same tree state, so use witness[0]'s root. */
-        {
-            struct uint256 w0root;
-            incremental_witness_root(&witnesses[0], &w0root);
-            memcpy(anchor, w0root.data, 32);
-        }
-
-        /* Verify ALL witness roots match the anchor */
-        struct uint256 wroot;
-        size_t vi = z_sendmany_shielded_first_root_mismatch(
-            witnesses, num_sel_notes, anchor, &wroot);
-        if (vi != 0) {
-            char ah[65], wh[65];
-            uint256_get_hex((const struct uint256 *)anchor, ah);
-            uint256_get_hex(&wroot, wh);
-            free(witnesses);
-            json_set_str(result, "Witness roots inconsistent (run rescanwitnesses)");
-            LOG_FAIL("wallet_shielded", "z_sendmany: witness %zu root differs from witness 0 "
-                "w0=%s w%zu=%s", vi, ah, vi, wh);
+                     wrefusal, wheight, authoritative_tip, i);
         }
 
         /* Build transaction */

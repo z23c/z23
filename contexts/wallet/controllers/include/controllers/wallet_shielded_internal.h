@@ -105,6 +105,19 @@ bool z_sendmany_shielded(
     const bool *z_has_memo, size_t num_z_out,
     struct wallet_tx *prepared, struct json_value *result);
 
+/* Witness stage of a shielded send: loads the selected notes witnesses at
+ * the authoritative tip and checks the anchor they produce against the
+ * chain Sapling root at that tip. Returns the refusal text, or NULL with
+ * *witnesses_out (caller frees) and anchor set. Allocates nothing before a
+ * refusal on the boot blocker, and nothing is marked spent here. */
+struct incremental_witness;
+struct db_sapling_note;
+const char *z_sendmany_shielded_witness_gate(
+    struct wallet_rpc_context *ctx, const struct db_sapling_note *selected,
+    size_t num, int authoritative_tip,
+    struct incremental_witness **witnesses_out, uint8_t anchor[32],
+    size_t *fail_i, int *fail_height);
+
 /* wallet_shielded_keys.c — key/viewing-key import/export + memo */
 bool rpc_z_exportkey(const struct json_value *params, bool help,
                      struct json_value *result);
