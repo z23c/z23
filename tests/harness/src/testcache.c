@@ -607,6 +607,7 @@ static bool group_reads_external_inputs(const char *name)
         "syncdiag_rpc",
         "utxo_root_ladder",
         "verify_bench_selftest",
+        "wallet_e2e_regtest",
         "wallet_persistence_cycle",
         "wallet_view",
         /* pkgl_run_worker spawns z23-package-verify-dev from

@@ -1753,6 +1753,7 @@ static void run_full_suite_crypto_and_wallet(int *failures)
     *failures += test_simnet_input_value_range();
     *failures += test_simnet_sapling_activation();
     *failures += test_simnet_sapling_shielded_send();
+    *failures += test_wallet_e2e_regtest();
     *failures += test_simnet_wallet_import_backup();
     *failures += test_simnet_zmsg_onchain();
     *failures += test_coinbase_subsidy_adversarial();

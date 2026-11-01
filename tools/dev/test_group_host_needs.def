@@ -360,6 +360,10 @@ ZCL_TEST_GROUP_BUILD_NEED("test_cli_argv_strict", "build/bin/zcl-rpc",
 ZCL_TEST_GROUP_BUILD_NEED("test_importblockindex_cli_dispatch",
                           "build/bin/zclassic23", "zclassic23")
 
+/* tests/harness/src/test_wallet_e2e_regtest.c drives the built z23 as a real
+ * regtest node and self-skips where it is absent. */
+ZCL_TEST_GROUP_BUILD_NEED("test_wallet_e2e_regtest", "build/bin/z23", "z23")
+
 /* tests/harness/src/test_freebsd_sh.c execs build/bin/fbsh and self-skips
  * where it is absent. The proof's prefork step builds fbsh for every test
  * selection, so only a local run needs this row. */
