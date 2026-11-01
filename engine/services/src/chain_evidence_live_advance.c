@@ -276,6 +276,15 @@ void chain_evidence_live_test_set_after_begin_hook(
 }
 #endif
 
+/* Test parking point; a no-op in production builds. */
+static void cec_live_test_pause(void)
+{
+#ifdef ZCL_TESTING
+    if (g_live_after_begin_hook)
+        g_live_after_begin_hook();
+#endif
+}
+
 static bool cec_persist_finalized_tip_evidence_locked(
     struct chain_evidence_controller *authority,
     const struct block_index *finalized_tip, int coins_height,
@@ -290,10 +299,7 @@ static bool cec_persist_finalized_tip_evidence_locked(
         txn = db_txn_begin(authority->ndb, "cec.record_finalized_tip");
 
     bool persisted = false;
-#ifdef ZCL_TESTING
-    if (g_live_after_begin_hook)
-        g_live_after_begin_hook();
-#endif
+    cec_live_test_pause();
     if (outer_txn_present || txn) {
         persisted =
             chain_evidence_controller_mark_block_evidence(
