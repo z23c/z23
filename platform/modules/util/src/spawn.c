@@ -1080,29 +1080,18 @@ int zcl_spawn_capture_cancelable_fd_measured(
 #endif
 }
 
-/* Inputs the exact capture accepts. A positive deadline bounds the child;
- * until_exit waits on the child's own exit event instead (the caller owns
- * the outer bound, e.g. a test runner's per-group watchdog). */
-static bool spawn_capture_binary_inputs_ok(
-    const char *const argv[], void *buf, size_t cap, int timeout_ms,
-    bool until_exit, const struct zcl_spawn_binary_observation *out)
-{
-    if (!out || !argv || !argv[0] || !buf || cap == 0) return false;
-    return timeout_ms > 0 || until_exit;
-}
-
 /* One exact capture for both stderr dispositions: the success predicate
  * and every observation field are the same, so only the child's stderr
  * changes hands. */
 static struct zcl_result spawn_capture_binary_impl(
     const char *const argv[], void *buf, size_t cap, int timeout_ms,
-    bool merge_stderr, bool until_exit, struct zcl_spawn_binary_observation *out)
+    bool merge_stderr, struct zcl_spawn_binary_observation *out)
 {
     if (out) {
         memset(out, 0, sizeof(*out));
         out->exit_code = -1;
     }
-    if (!spawn_capture_binary_inputs_ok(argv, buf, cap, timeout_ms, until_exit, out))
+    if (!out || !argv || !argv[0] || !buf || cap == 0 || timeout_ms <= 0)
         return ZCL_ERR(-1, "spawn: exact binary capture requires bounded inputs");
 #ifdef _WIN32
     (void)merge_stderr;
@@ -1123,21 +1112,14 @@ struct zcl_result zcl_spawn_capture_binary(
     const char *const argv[], void *buf, size_t cap, int timeout_ms,
     struct zcl_spawn_binary_observation *out)
 {
-    return spawn_capture_binary_impl(argv, buf, cap, timeout_ms, false, false, out);
+    return spawn_capture_binary_impl(argv, buf, cap, timeout_ms, false, out);
 }
 
 struct zcl_result zcl_spawn_capture_binary_merged(
     const char *const argv[], void *buf, size_t cap, int timeout_ms,
     struct zcl_spawn_binary_observation *out)
 {
-    return spawn_capture_binary_impl(argv, buf, cap, timeout_ms, true, false, out);
-}
-
-struct zcl_result zcl_spawn_capture_binary_merged_until_exit(
-    const char *const argv[], void *buf, size_t cap,
-    struct zcl_spawn_binary_observation *out)
-{
-    return spawn_capture_binary_impl(argv, buf, cap, 0, true, true, out);
+    return spawn_capture_binary_impl(argv, buf, cap, timeout_ms, true, out);
 }
 
 int zcl_spawn_capture_observed(const char *const argv[], char *buf, size_t cap,

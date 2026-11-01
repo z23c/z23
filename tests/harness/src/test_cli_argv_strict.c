@@ -847,15 +847,18 @@ static bool cas_capture_bind_refusal(const char *root, uint16_t port,
         "-operator-lane=test", "-rpcport=0", "-httpsport=-1", "-fsport=0",
         "-nolegacyimport", "-nobgvalidation", "-nofilesync", "-showmetrics=0", NULL,
     };
-    /* The native capture owns its child group and reaps it. Nonzero is
-     * expected, but truncation or an unobserved status never qualify.
-     * There is deliberately no kill deadline: a full node boot reaches the
-     * P2P bind after sqlite migration and Tor start, 5 s idle but 45 s at
-     * load 100+ (a scaled 20 s kill truncated the healthy child mid-boot and
-     * failed 'qualified'). The event waited on is the child's own exit; a
-     * wedged child is bounded by the runner's per-group watchdog. */
-    struct zcl_result capture =
-        zcl_spawn_capture_binary_merged_until_exit(argv, out, cap-1, observed);
+    /* The native capture owns its child group and bounded reap. Nonzero is
+     * expected, but timeout, truncation or unobserved status never qualify.
+     * The deadline only bounds a wedged child, so it is fixed and generous,
+     * not a guess scaled from a hash sample: a full node boot reaches the P2P
+     * bind after sqlite migration and Tor start, 5 s idle but 45 s at load
+     * 100+, where a scaled 20 s kill truncated the healthy child mid-boot.
+     * It stays under the runner's 300 s silence watchdog (test_parallel.c),
+     * which SIGKILLs only this test process and would orphan the child's own
+     * process group; this capture kills that group itself. */
+    enum { CAS_BIND_REFUSAL_DEADLINE_MS = 180 * 1000 };
+    struct zcl_result capture = zcl_spawn_capture_binary_merged(
+        argv, out, cap-1, CAS_BIND_REFUSAL_DEADLINE_MS, observed);
     bool complete_refusal = observed->exit_observed && observed->exit_code == 1 &&
         observed->eof && !observed->timed_out && !observed->overflow;
     /* Expected exit 1 makes capture.ok false; the observation is authority. */
