@@ -172,6 +172,57 @@ static bool wbs_aead_decrypt(const uint8_t *ciphertext, size_t plain_len,
     return true;
 }
 
+/* True when open failed and the path is not confirmed absent, or the
+ * opened file is not private. */
+static bool wbs_destination_refused(const char *destination)
+{
+    struct platform_positioned_file existing;
+    platform_positioned_file_init(&existing);
+    bool exists = platform_positioned_file_open(&existing, destination);
+    bool replaceable = exists &&
+        platform_positioned_file_is_private(&existing);
+    platform_positioned_file_close(&existing);
+    return (!exists && !platform_private_path_absent(destination)) ||
+        (exists && !replaceable);
+}
+
+/* Create a unique private staging file and copy its path to tmp_out.
+ * Returns 0, 1 when the path does not fit, or 2 when creation fails. */
+static int wbs_open_private_staging(const char *destination,
+                                    char *tmp_out,
+                                    struct platform_private_file *staging)
+{
+    static _Atomic uint64_t tmp_sequence;
+    char tmp[1100];
+    bool created = false;
+
+    platform_private_file_init(staging);
+    tmp_out[0] = 0;
+    for (unsigned int attempt = 0; attempt < 16 && !created; attempt++) {
+        uint64_t sequence = atomic_fetch_add_explicit(
+            &tmp_sequence, 1, memory_order_relaxed);
+        int n = snprintf(tmp, sizeof(tmp), "%s.tmp.%llu", destination,
+                         (unsigned long long)sequence);
+        if (n <= 0 || (size_t)n >= sizeof(tmp))
+            return 1;
+        created = platform_private_file_create(tmp, staging);
+    }
+    if (!created)
+        return 2;
+    memcpy(tmp_out, tmp, strlen(tmp) + 1);
+    return 0;
+}
+
+/* True when a zero-length write is skipped or the bytes are written, and
+ * the authority flush succeeds. */
+static bool wbs_staging_bytes_flushed(struct platform_private_file *staging,
+                                      const uint8_t *buf, size_t len)
+{
+    return (len == 0 || platform_private_file_write_at(
+                              staging, buf, len, 0)) &&
+           platform_private_file_authority_flush(staging);
+}
+
 /* Publish bytes through a unique owner-private sibling and a durable,
  * handle-bound replacement. Existing destinations must already be private
  * regular files; links/reparse points fail closed. */
@@ -197,40 +248,21 @@ static bool wbs_write_file_atomic(const char *path,
                  "(a relative destination, or a relative -datadir=, lands "
                  "here)", path);
 
-    struct platform_positioned_file existing;
-    platform_positioned_file_init(&existing);
-    bool exists = platform_positioned_file_open(&existing, destination);
-    bool replaceable = exists &&
-        platform_positioned_file_is_private(&existing);
-    platform_positioned_file_close(&existing);
-    if ((!exists && !platform_private_path_absent(destination)) ||
-        (exists && !replaceable))
+    if (wbs_destination_refused(destination))
         LOG_FAIL("wallet_backup",
                  "write_file_atomic: destination is not private/no-reparse");
 
-    static _Atomic uint64_t tmp_sequence;
     char tmp[1100];
     struct platform_private_file staging;
-    platform_private_file_init(&staging);
-    bool created = false;
-    for (unsigned int attempt = 0; attempt < 16 && !created; attempt++) {
-        uint64_t sequence = atomic_fetch_add_explicit(
-            &tmp_sequence, 1, memory_order_relaxed);
-        int n = snprintf(tmp, sizeof(tmp), "%s.tmp.%llu", destination,
-                         (unsigned long long)sequence);
-        if (n <= 0 || (size_t)n >= sizeof(tmp))
-            LOG_FAIL("wallet_backup", "write_file_atomic: path too long (%s)",
-                     path);
-        created = platform_private_file_create(tmp, &staging);
-    }
-    if (!created)
+    int staged = wbs_open_private_staging(destination, tmp, &staging);
+    if (staged == 1)
+        LOG_FAIL("wallet_backup", "write_file_atomic: path too long (%s)",
+                 path);
+    if (staged == 2)
         LOG_FAIL("wallet_backup",
                  "write_file_atomic: private staging creation failed");
 
-    bool written = (len == 0 || platform_private_file_write_at(
-                                  &staging, buf, len, 0)) &&
-                   platform_private_file_authority_flush(&staging);
-    if (!written) {
+    if (!wbs_staging_bytes_flushed(&staging, buf, len)) {
         (void)platform_private_file_retire(&staging, tmp);
         platform_private_file_close(&staging);
         LOG_FAIL("wallet_backup", "write_file_atomic: durable write failed");
@@ -322,18 +354,21 @@ struct zcl_result wallet_backup_encrypt_file(const char *src_path,
     return ZCL_OK;
 }
 
-struct zcl_result wallet_backup_decrypt_file(const char *src_path,
-                                 const char *dst_path,
-                                 const char *password)
+/* True when src_path, dst_path, or password is NULL, or password is empty. */
+static bool wbs_decrypt_args_rejected(const char *src_path,
+                                      const char *dst_path,
+                                      const char *password)
 {
-    if (!src_path || !dst_path || !password || !*password)
-        return ZCL_ERR(-1, "decrypt_file: NULL or empty argument");
+    return !src_path || !dst_path || !password || !*password;
+}
 
-    uint8_t *enc = NULL;
-    size_t   elen = 0;
-    if (!zcl_read_whole_file(src_path, 0, &enc, &elen, "wallet_backup"))
-        return ZCL_ERR(-2, "decrypt_file: failed to read %s", src_path);
-
+/* Reject a bad backup header. Frees enc on failure; writes iterations
+ * on success. */
+static struct zcl_result wbs_decrypt_header_checked(uint8_t *enc, size_t elen,
+                                                    const char *src_path,
+                                                    uint32_t *its_out)
+{
+    *its_out = 0;
     if (elen < (size_t)(WALLET_BACKUP_ENC_HEADER_LEN +
                          WALLET_BACKUP_ENC_TAG_LEN)) {
         free(enc); return ZCL_ERR(-3, "decrypt_file: %s too short (%zu bytes)", src_path, elen);
@@ -357,6 +392,40 @@ struct zcl_result wallet_backup_decrypt_file(const char *src_path,
     if (its == 0 || its > (1u << 24)) { /* sanity cap */
         free(enc); return ZCL_ERR(-6, "decrypt_file: bad iteration count %u in %s", its, src_path);
     }
+    *its_out = its;
+    return ZCL_OK;
+}
+
+/* Allocate the decrypt buffer when plain_len > 0. Returns 0, or -7
+ * when that allocation fails. */
+static int wbs_decrypt_alloc_plain(size_t plain_len, uint8_t **plain_out)
+{
+    *plain_out = NULL;
+    if (plain_len > 0) {
+        *plain_out = zcl_malloc(plain_len, "wallet_backup decrypt_buf");
+        if (!*plain_out)
+            return -7;
+    }
+    return 0;
+}
+
+struct zcl_result wallet_backup_decrypt_file(const char *src_path,
+                                 const char *dst_path,
+                                 const char *password)
+{
+    if (wbs_decrypt_args_rejected(src_path, dst_path, password))
+        return ZCL_ERR(-1, "decrypt_file: NULL or empty argument");
+
+    uint8_t *enc = NULL;
+    size_t   elen = 0;
+    if (!zcl_read_whole_file(src_path, 0, &enc, &elen, "wallet_backup"))
+        return ZCL_ERR(-2, "decrypt_file: failed to read %s", src_path);
+
+    uint32_t its = 0;
+    struct zcl_result hdr = wbs_decrypt_header_checked(enc, elen, src_path,
+                                                       &its);
+    if (!hdr.ok)
+        return hdr;
 
     const uint8_t *salt  = enc + 16;
     const uint8_t *nonce = enc + 32;
@@ -370,13 +439,10 @@ struct zcl_result wallet_backup_decrypt_file(const char *src_path,
     size_t plain_len = body_len - WALLET_BACKUP_ENC_TAG_LEN;
 
     uint8_t *plain = NULL;
-    if (plain_len > 0) {
-        plain = zcl_malloc(plain_len, "wallet_backup decrypt_buf");
-        if (!plain) {
-            free(enc);
-            memory_cleanse(key, sizeof(key));
-            return ZCL_ERR(-7, "decrypt_file: malloc failed (%zu bytes) for %s", plain_len, src_path);
-        }
+    if (wbs_decrypt_alloc_plain(plain_len, &plain) != 0) {
+        free(enc);
+        memory_cleanse(key, sizeof(key));
+        return ZCL_ERR(-7, "decrypt_file: malloc failed (%zu bytes) for %s", plain_len, src_path);
     }
 
     const uint8_t *ciphertext = enc + WALLET_BACKUP_ENC_HEADER_LEN;
