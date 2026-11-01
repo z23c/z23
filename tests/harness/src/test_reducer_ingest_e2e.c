@@ -526,8 +526,6 @@ struct rie_env {
     struct main_state ms;
     struct rie_ctx ctx;
     struct rie_counter_ctx cc;
-    bool uas_up;
-    bool tfs_up;
     bool ok;
 };
 
@@ -578,11 +576,9 @@ static bool rie_env_open_steps(struct rie_env *e, const char *tag,
     e->cc.base_count = 0;
 
     if (!utxo_apply_stage_init(&e->ms)) return false;
-    e->uas_up = true;
     utxo_apply_stage_set_reader(rie_reader, &e->ctx);
     utxo_apply_stage_set_lookup(rie_lookup, &e->ctx);
     if (!tip_finalize_stage_init(&e->ms)) return false;
-    e->tfs_up = true;
     tip_finalize_stage_set_utxo_counter(rie_utxo_counter, &e->cc);
 
     e->ok = true;
@@ -591,10 +587,10 @@ static bool rie_env_open_steps(struct rie_env *e, const char *tag,
 
 static void rie_env_close(struct rie_env *e)
 {
-    if (e->tfs_up)
-        tip_finalize_stage_shutdown();
-    if (e->uas_up)
-        utxo_apply_stage_shutdown();
+    /* Both shutdowns are safe after a partial or failed init: they check
+     * their own state and reset every hook this env registered. */
+    tip_finalize_stage_shutdown();
+    utxo_apply_stage_shutdown();
     main_state_free(&e->ms);
     if (e->lg) event_log_close(e->lg);
     progress_store_close();
