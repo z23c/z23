@@ -21,6 +21,8 @@ TX_NONCHAIN_COMMAND("core.wallet.address.export-key", "wallet_key_management",
     "Discloses an existing private key to its owner; it creates no chain transaction.")
 TX_NONCHAIN_COMMAND("core.wallet.shielded.address", "wallet_key_management",
     "Derives and persists a local Sapling receive key; it creates no chain transaction.")
+TX_NONCHAIN_COMMAND("core.wallet.shielded.receive", "wallet_key_management",
+    "Records the next diversifier index of the local Sapling account and returns that address; it creates no chain transaction.")
 TX_NONCHAIN_COMMAND("core.wallet.backup.now", "wallet_backup",
     "Writes an encrypted local wallet backup; it creates no chain transaction.")
 TX_NONCHAIN_COMMAND("core.wallet.backup.decrypt", "wallet_backup",

@@ -411,7 +411,7 @@ static int check_api_tx_type_reverse_aliases_real_types(void)
         size_t nonchain_count = 0;
         const struct zcl_transaction_nonchain_command *nonchain =
             zcl_transaction_nonchain_command_catalog(&nonchain_count);
-        ok = ok && nonchain && nonchain_count == 36;
+        ok = ok && nonchain && nonchain_count == 37;
         for (size_t i = 0; ok && i < nonchain_count; i++)
             ok = tx_type_nonchain_row_ok(registry, types, type_count,
                                          nonchain, i) &&
@@ -694,7 +694,7 @@ static bool tx_type_index_policy_ok(const struct json_value *root)
            json_get_int(json_get(root,
                "alternate_command_route_count")) == 13 &&
            json_get_int(json_get(root,
-               "explicit_non_chain_command_count")) == 36 &&
+               "explicit_non_chain_command_count")) == 37 &&
            strcmp(json_get_str(json_get(root,
                        "checked_in_proof_source")),
                   "docs/quality/transaction-lab-events.jsonl") == 0 &&
