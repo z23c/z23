@@ -15296,6 +15296,11 @@ build/lintc-obj/%.o: tools/lint/lintc/%.c tools/lint/lintc/lintc.h tools/lint/li
 
 $(LINTC_PREMISE_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o) build/lintc-obj/main.o: \
 	tools/lint/lintc/premise.h tools/lint/lintc/selection_gates.def
+# The split-preserved gate's three objects share one private header, so a
+# struct change there must rebuild all three (a stale object reads spans at
+# the old stride).
+build/lintc-obj/gate_split_preserved.o build/lintc-obj/gate_split_preserved_check.o \
+build/lintc-obj/gate_split_preserved_selftest.o: tools/lint/lintc/gate_split_preserved_priv.h
 
 build/lintc-obj/node/%.o: %.c
 	@mkdir -p $(dir $@)
