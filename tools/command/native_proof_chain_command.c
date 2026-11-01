@@ -398,8 +398,9 @@ static bool pcw_rung1_ancestors(struct pcw_walk *w,
 }
 
 /* Decode the supplied header into w->header and run both PoW halves on
- * it, recording the header fields and the verdict on the rung. On failure
- * the rung is already marked FAILED and false is returned. */
+ * it, recording the header fields on the rung; the final PASSED verdict
+ * is the caller's, set only after the ancestors check. On failure the
+ * rung is already marked FAILED and false is returned. */
 static bool pcw_rung1_check_header(struct pcw_walk *w, struct pcw_rung *r,
                                    const char *hdr_hex,
                                    const struct chain_params *cp)
@@ -1115,9 +1116,9 @@ static const char *pcw_doc_hex_source(const struct json_value *input,
                                       size_t why_size)
 {
     const char *doc_hex = pcw_input_str(input, "doc");
+    const char *doc_file = pcw_input_str(input, "doc_file");
     if (doc_hex)
         return doc_hex;
-    const char *doc_file = pcw_input_str(input, "doc_file");
     if (!doc_file) {
         (void)snprintf(why, why_size,
                        "give --doc=<hex> (a zid document, e.g. from "
