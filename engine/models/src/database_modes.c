@@ -240,6 +240,9 @@ bool node_db_rebuild_indexes(struct node_db *ndb)
     return all_ok;
 }
 
+static bool wal_checkpoint_run(struct node_db *ndb, struct wal_ckpt_record *out,
+                              bool bounded);
+
 #define TURBO_FOLD_ATTEMPTS 3
 #define TURBO_FOLD_RETRY_MS 50
 
@@ -251,12 +254,14 @@ bool node_db_rebuild_indexes(struct node_db *ndb)
  * A reader holding an old snapshot, or a statement stepped and not reset on
  * this connection, leaves the fold partial or refused; it is retried briefly,
  * and when it stays incomplete the bulk pass keeps synchronous=NORMAL: slower,
- * durable, and never a reason to stop catch-up or an import. */
+ * durable, and never a reason to stop catch-up or an import. The fold is
+ * bounded: it never waits on a reader, because the connection mutex is held
+ * for the wait and every other caller would stall behind it. */
 static bool turbo_fold_log(struct node_db *ndb)
 {
     struct wal_ckpt_record rec;
     for (int attempt = 1; attempt <= TURBO_FOLD_ATTEMPTS; attempt++) {
-        if (node_db_wal_checkpoint_result(ndb, &rec) &&
+        if (wal_checkpoint_run(ndb, &rec, true) &&
             rec.outcome == WAL_CKPT_DRAINED)
             return true;
         if (attempt < TURBO_FOLD_ATTEMPTS)
@@ -301,11 +306,11 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb)
                             "ibd_turbo_mode pragma") != SQLITE_OK)
             turbo_ok = false;
     }
-    if (turbo_fold_log(ndb) &&
-        db_exec_checked(ndb->db, "PRAGMA synchronous=OFF",
-                        "ibd_turbo_mode synchronous") != SQLITE_OK)
-        turbo_ok = false;
-    sqlite3_busy_timeout(ndb->db, 10000);
+    bool unsynced = turbo_fold_log(ndb);
+    if (unsynced && db_exec_checked(ndb->db, "PRAGMA synchronous=OFF",
+                                    "ibd_turbo_mode synchronous") != SQLITE_OK)
+        turbo_ok = unsynced = false;
+    sqlite3_busy_timeout(ndb->db, ZCL_NODE_DB_BUSY_TIMEOUT_MS);
 
     if (!turbo_ok) {
         LOG_WARN("db", "[db] ibd_turbo_mode: one or more PRAGMAs failed; " "falling back to safe defaults (IBD will be slower " "but correct)");
@@ -325,7 +330,8 @@ bool node_db_ibd_turbo_mode(struct node_db *ndb)
 
     node_db_drop_indexes(ndb);
     node_db_note_turbo_mode(ndb, true, "ibd_turbo_mode", SQLITE_OK);
-    printf("db: IBD turbo mode (synchronous=OFF, indexes dropped)\n");
+    printf("db: IBD turbo mode (synchronous=%s, indexes dropped)\n",
+           unsynced ? "OFF" : "NORMAL");
     return true;
 }
 
@@ -535,6 +541,36 @@ static void wal_checkpoint_out_set_unattempted(struct wal_ckpt_record *out)
 bool node_db_wal_checkpoint_result(struct node_db *ndb,
                                    struct wal_ckpt_record *out)
 {
+    return wal_checkpoint_run(ndb, out, false);
+}
+
+/* The file reset after PASSIVE; -1 when it is not attempted. A bounded caller
+ * resets only after PASSIVE folded the whole log, and does not wait. */
+static int wal_checkpoint_reset_file(struct node_db *ndb, int passive_rc,
+                                     int log_frames, int ckpt_frames,
+                                     bool bounded)
+{
+    if (passive_rc != SQLITE_OK)
+        return -1;
+    if (bounded) {
+        if (log_frames < 0 || ckpt_frames < log_frames)
+            return -1;
+        sqlite3_busy_timeout(ndb->db, 0);
+    }
+    int rc = sqlite3_wal_checkpoint_v2(ndb->db, NULL, SQLITE_CHECKPOINT_TRUNCATE,
+                                         NULL, NULL);
+    if (bounded)
+        sqlite3_busy_timeout(ndb->db, ZCL_NODE_DB_BUSY_TIMEOUT_MS);
+    return rc;
+}
+
+/* `bounded` is for a caller that must not hold the connection while another
+ * connection's reader drains: the file reset runs only after PASSIVE folded
+ * the whole log, and without the busy-timeout wait. A partial fold can never
+ * be drained, so resetting the file after it would only wait. */
+static bool wal_checkpoint_run(struct node_db *ndb, struct wal_ckpt_record *out,
+                              bool bounded)
+{
     /* Give `out` a definite meaning on every exit, including the two early
      * ones. A caller that reads a record this function never touched would be
      * reading the last checkpoint's numbers as if they were this one's. */
@@ -586,11 +622,8 @@ bool node_db_wal_checkpoint_result(struct node_db *ndb,
                                                 SQLITE_CHECKPOINT_PASSIVE,
                                                 &log_frames, &ckpt_frames);
     wal_checkpoint_note_locked(ndb, passive_rc);
-    int truncate_rc = -1;
-    if (passive_rc == SQLITE_OK)
-        truncate_rc = sqlite3_wal_checkpoint_v2(ndb->db, NULL,
-                                                 SQLITE_CHECKPOINT_TRUNCATE,
-                                                 NULL, NULL);
+    int truncate_rc = wal_checkpoint_reset_file(ndb, passive_rc, log_frames,
+                                                ckpt_frames, bounded);
     bool truncate_hard_failure =
         wal_checkpoint_truncate_hard_failure(truncate_rc);
     int rc = truncate_hard_failure ? truncate_rc : passive_rc;

@@ -50,6 +50,9 @@
 #define ZCL_NODE_DB_JOURNAL_SIZE_LIMIT        67108864   /* 64 MiB   */
 #define ZCL_NODE_DB_JOURNAL_SIZE_LIMIT_BULK   268435456  /* 256 MiB  */
 
+/* How long a node.db connection waits on another connection by default. */
+#define ZCL_NODE_DB_BUSY_TIMEOUT_MS 10000
+
 /* Paste one of the constants above into a PRAGMA string at compile time, so
  * the number in the SQL and the number a test asserts are the same token. */
 #define ZCL_NODE_DB_PRAGMA_NUM_(x_) #x_

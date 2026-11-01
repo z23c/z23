@@ -390,7 +390,6 @@ static bool prepare_statements(struct node_db *ndb)
 #define ZCL_NODE_DB_TURBO_CONSTRAINED_KIB (64LL * 1024)
 #define ZCL_NODE_DB_MIDRANGE_BYTES     (8LL * 1024 * 1024 * 1024)
 #define ZCL_NODE_DB_MIDRANGE_MMAP      (64LL * 1024 * 1024)
-#define ZCL_NODE_DB_BUSY_TIMEOUT_MS 10000
 
 /* Test seam: when set, replaces only the host-measured physical RAM. The
  * cgroup cap below still runs, so tests keep the cgroup half of the

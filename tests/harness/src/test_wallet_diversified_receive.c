@@ -1018,11 +1018,26 @@ static int test_bulk_entry_syncs_first(void)
 /* A bulk pass whose log could not be fully folded stays at synchronous=NORMAL
  * and still succeeds, so catch-up and import are never refused; once the
  * obstacle is gone, the next pass folds and runs unsynced. */
-static bool wdr_bulk_stays_normal(struct wdr *f)
+static int wdr_count_busy(void *counter, int attempts)
+{
+    (void)attempts;
+    ++*(int *)counter;
+    return 0;
+}
+
+/* `waits`, when given, counts how often SQLite would have waited on another
+ * connection during the entry: the connection mutex is held for that wait, so
+ * any wait stalls every other caller of the node database. A counting handler
+ * refuses each wait at once instead of timing it. */
+static bool wdr_bulk_stays_normal(struct wdr *f, int *waits)
 {
     int normal = wdr_sync_level(f);
-    bool ok = node_db_ibd_turbo_mode(&f->ndb) &&
-              wdr_sync_level(f) == normal;
+    if (waits) {
+        *waits = 0;
+        sqlite3_busy_handler(f->ndb.db, wdr_count_busy, waits);
+    }
+    bool ok = node_db_ibd_turbo_mode(&f->ndb);
+    ok = ok && wdr_sync_level(f) == normal;
     char a[128];
     ok = ok && wdr_receive(f, a, sizeof(a));
     return node_db_normal_mode(&f->ndb) && ok;
@@ -1054,7 +1069,9 @@ static int test_bulk_entry_reader_holds_log(void)
         ASSERT(sqlite3_exec(reader, "BEGIN; SELECT count(*) FROM sqlite_master",
                             NULL, NULL, NULL) == SQLITE_OK);
         ASSERT(wdr_receive(&f, a, sizeof(a)));
-        ASSERT(wdr_bulk_stays_normal(&f));
+        int waits = -1;
+        ASSERT(wdr_bulk_stays_normal(&f, &waits));
+        ASSERT_EQ(waits, 0);
         ASSERT(sqlite3_exec(reader, "COMMIT", NULL, NULL, NULL) == SQLITE_OK);
         ASSERT(wdr_bulk_goes_off(&f));
         PASS();
@@ -1082,7 +1099,7 @@ static int test_bulk_entry_locked_checkpoint(void)
         ASSERT(sqlite3_prepare_v2(f.ndb.db, "SELECT name FROM sqlite_master",
                                   -1, &held, NULL) == SQLITE_OK);
         ASSERT(sqlite3_step(held) == SQLITE_ROW);
-        ASSERT(wdr_bulk_stays_normal(&f));
+        ASSERT(wdr_bulk_stays_normal(&f, NULL));
         ASSERT(sqlite3_finalize(held) == SQLITE_OK);
         held = NULL;
         ASSERT(wdr_bulk_goes_off(&f));
@@ -1316,7 +1333,7 @@ static int test_native_send_from_account(void)
         ASSERT(json_push_kv_str(&in, "from", "account"));
         ASSERT(json_push_kv_str(&in, "to", "zs1payee"));
         ASSERT(json_push_kv_str(&in, "amount", "1.00000000"));
-        ASSERT(json_push_kv_bool(&in, "confirm", true));
+        ASSERT(json_push_kv_str(&in, "idempotency_key", "wdr-send-1"));
         struct zcl_command_request req = {
             .spec = spec, .input = &in, .view = "normal",
         };
@@ -1326,11 +1343,22 @@ static int test_native_send_from_account(void)
         zcl_command_reply_init(&reply, spec->output_schema);
         zcl_native_handle_wallet_shielded_send(&req, &reply);
         ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        struct json_value commit;
+        const char *text = json_get_str(json_get(&reply.data, "commit_input"));
+        ASSERT(text != NULL);
+        json_init(&commit);
+        ASSERT(json_read(&commit, text, strlen(text)));
+        zcl_command_reply_free(&reply);
+        req.input = &commit;
+        zcl_command_reply_init(&reply, spec->output_schema);
+        zcl_native_handle_wallet_shielded_send(&req, &reply);
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "from")), "account");
         ASSERT(strncmp(g_wdr_send_params, "[\"account\",", 11) == 0);
         zcl_command_reply_free(&reply);
         node_rpc_client_set_test_hook(NULL);
         json_free(&in);
+        json_free(&commit);
         PASS();
     } _test_next:;
     node_rpc_client_set_test_hook(NULL);
