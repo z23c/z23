@@ -487,6 +487,7 @@ static void la_fold_from(struct la_result *out, const char *tag, int n,
         return;
     main_state_init(&ms);
     if (!la_chain_build(&sc, n, plain_first)) {
+        main_state_free(&ms);
         progress_store_close();
         return;
     }

@@ -50,6 +50,7 @@ static void st_flat_build(struct st_flat_fixture *fx, int n, int *failures)
         if (!pi) {
             printf("  S6 fixture insert h=%d... FAIL\n", h);
             (*failures)++;
+            main_state_free(&fx->ms); /* live stays 0: teardown skips it */
             return;
         }
         pi->nHeight = h;

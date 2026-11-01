@@ -124,7 +124,7 @@ static bool fixture_init(struct prune_fixture *f, int num_blocks,
                          const char *tag)
 {
     memset(f, 0, sizeof(*f));
-    main_state_init(&f->ms);   /* before any early return: fixture_destroy frees it */
+    main_state_init(&f->ms);   /* fixture_destroy frees it, after a false return too */
     f->num_blocks = num_blocks;
     snprintf(f->datadir, sizeof(f->datadir),
              PRUNE_SCRATCH "_%d_%s", (int)getpid(), tag);
@@ -137,7 +137,11 @@ static bool fixture_init(struct prune_fixture *f, int num_blocks,
 
     f->hashes = zcl_malloc((size_t)num_blocks * sizeof(struct uint256),
                            "prune_test_hashes");
-    if (!f->hashes) { free(f->blocks); return false; }
+    if (!f->hashes) {
+        free(f->blocks);
+        f->blocks = NULL;   /* fixture_destroy frees it again otherwise */
+        return false;
+    }
 
     /* Initialize block indices */
     for (int i = 0; i < num_blocks; i++) {
@@ -215,9 +219,8 @@ static int prune_case_blk_unlink_refused(void)
                 PRUNE_CHECK("prune: refused blk unlink emits no prune event",
                             atomic_load(&g_prune_events) == 0);
             }
-
-            fixture_destroy(&f);
         }
+        fixture_destroy(&f);
     }
     return failures;
 }
@@ -303,8 +306,10 @@ static int prune_case_rev_unlink_retry(void)
     struct prune_fixture f;
     bool setup_ok = fixture_init(&f, 3001, "rev_unlink_retry");
     PRUNE_CHECK("prune: fixture init (rev unlink retry)", setup_ok);
-    if (!setup_ok)
+    if (!setup_ok) {
+        fixture_destroy(&f);
         return failures;
+    }
 
     bool files_ok = prune_retry_setup(&f);
     PRUNE_CHECK("prune: create undo-retry fixture", files_ok);
