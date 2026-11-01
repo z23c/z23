@@ -285,6 +285,45 @@ static int z_sendmany_sign_inputs(struct wallet_rpc_context *ctx,
 }
 
 
+/* The key a shielded from address names: the wallet account for the literal
+ * "account", else the key owning the address, whichever of its diversified
+ * addresses it is. Sets `result` and returns false when there is none. */
+static bool z_sendmany_shielded_from(struct wallet_rpc_context *ctx,
+                                     const char *from_addr, bool from_account,
+                                     const struct sapling_key_entry **key_out,
+                                     struct json_value *result)
+{
+    const struct sapling_key_entry *key = NULL;
+    if (from_account) {
+        struct sapling_key_entry account;
+        if (sapling_keystore_copy_account(&ctx->wallet->sapling_keys, &account))
+            key = sapling_keystore_find_by_ivk(&ctx->wallet->sapling_keys,
+                                               account.ivk);
+        memory_cleanse(&account, sizeof(account));
+        if (!key) {
+            json_set_str(result, "The wallet has no shielded account");
+            LOG_FAIL("wallet_shielded", "z_sendmany: no account key");
+        }
+    } else {
+        uint8_t diversifier[11], pk_d[32];
+        if (!sapling_decode_payment_address(from_addr, diversifier, pk_d)) {
+            json_set_str(result, "Invalid shielded from address");
+            LOG_FAIL("wallet_shielded",
+                     "z_sendmany: cannot decode shielded from address %s",
+                     from_addr);
+        }
+        key = sapling_keystore_find_by_owned_address(
+            &ctx->wallet->sapling_keys, diversifier, pk_d);
+        if (!key) {
+            json_set_str(result, "Shielded from address not in wallet");
+            LOG_FAIL("wallet_shielded",
+                     "z_sendmany: shielded from addr not found in keystore");
+        }
+    }
+    *key_out = key;
+    return true;
+}
+
 static bool z_sendmany_run(const struct json_value *params, bool help,
                            struct wallet_tx *prepared,
                            struct json_value *result)
@@ -352,33 +391,13 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
     const struct chain_params *cp = chain_params_get();
 
     /* For shielded from: decode the z-address, find key, validate ownership */
-    uint8_t from_z_diversifier[11];
-    uint8_t from_z_pk_d[32];
     const struct sapling_key_entry *from_z_key = NULL;
 
     struct tx_destination from_dest;
-    if (from_account) {
-        struct sapling_key_entry account;
-        if (sapling_keystore_copy_account(&ctx->wallet->sapling_keys, &account))
-            from_z_key = sapling_keystore_find_by_ivk(
-                &ctx->wallet->sapling_keys, account.ivk);
-        memory_cleanse(&account, sizeof(account));
-        if (!from_z_key) {
-            json_set_str(result, "The wallet has no shielded account");
-            LOG_FAIL("wallet_shielded", "z_sendmany: no account key");
-        }
-        memset(&from_dest, 0, sizeof(from_dest));
-    } else if (from_is_shielded) {
-        if (!sapling_decode_payment_address(from_addr, from_z_diversifier, from_z_pk_d)) {
-            json_set_str(result, "Invalid shielded from address");
-            LOG_FAIL("wallet_shielded", "z_sendmany: cannot decode shielded from address %s", from_addr);
-        }
-        from_z_key = sapling_keystore_find_by_owned_address(
-            &ctx->wallet->sapling_keys, from_z_diversifier, from_z_pk_d);
-        if (!from_z_key) {
-            json_set_str(result, "Shielded from address not in wallet");
-            LOG_FAIL("wallet_shielded", "z_sendmany: shielded from addr not found in keystore");
-        }
+    if (from_is_shielded) {
+        if (!z_sendmany_shielded_from(ctx, from_addr, from_account, &from_z_key,
+                                      result))
+            return false;
         memset(&from_dest, 0, sizeof(from_dest));
     } else if (!wallet_decode_address(from_addr, &from_dest)) {
         json_set_str(result, "Invalid from address");
