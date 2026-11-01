@@ -642,7 +642,7 @@ static enum wpr_push_result wpr_push(struct wpr *r, const struct wpr_entry *e,
 static bool wpr_wallet_confirmed(struct wpr *r, const struct uint256 *txid)
 {
     if (!r->env.wallet)
-        return false;
+        return false;  // raw-return-ok:no wallet, nothing is confirmed
     struct wallet_tx wtx;
     memset(&wtx, 0, sizeof(wtx));
     if (!wallet_get_tx_copy(r->env.wallet, txid, &wtx))
