@@ -94,7 +94,8 @@ static void append_sapling_note_entry(struct json_value *z_arr,
     json_free(&ze);
 }
 
-/* Summarise all sapling notes into balances, counts and a JSON array. */
+/* Summarise up to 8,192 sapling notes (both spent and unspent) into
+ * balances, counts and a JSON array. */
 static void scan_sapling_notes(struct wallet_rpc_context *ctx,
                                struct json_value *z_arr,
                                int64_t *z_balance, int *z_unspent, int *z_spent,
