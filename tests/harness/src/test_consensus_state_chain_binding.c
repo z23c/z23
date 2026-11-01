@@ -324,10 +324,10 @@ static int check_evidence_build_refusals(void)
     CSB_CHECK("null build refuses without evidence",
               !consensus_state_chain_evidence_build(NULL, &evidence).ok &&
               evidence == NULL);
-    struct main_state uninitialized_main;
-    memset(&uninitialized_main, 0, sizeof(uninitialized_main));
+    struct main_state refused_main;
+    main_state_init(&refused_main);
     struct consensus_state_chain_binding_request bad_lane_request = {
-        .main = &uninitialized_main,
+        .main = &refused_main,
         .artifact = (void *)1,
         .target_lane = CONSENSUS_STATE_TARGET_LANE_UNKNOWN,
     };
@@ -348,6 +348,7 @@ static int check_evidence_build_refusals(void)
                   CONSENSUS_STATE_TARGET_LANE_COPY_PROOF));
     CSB_CHECK("checkpoint-authority accessor rejects null",
               !consensus_state_chain_evidence_used_checkpoint_authority(NULL));
+    main_state_free(&refused_main);
     return failures;
 }
 
