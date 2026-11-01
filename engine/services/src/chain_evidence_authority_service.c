@@ -65,6 +65,7 @@ const char *chain_evidence_controller_result_name(enum chain_evidence_controller
     case CEC_REJECTED_UTXO_AHEAD_OF_INDEX:    return "utxo_ahead_of_index";
     case CEC_REJECTED_CSR:                    return "csr";
     case CEC_REJECTED_PERSIST:                return "persist";
+    case CEC_REJECTED_TIP_MOVED:              return "tip_moved";
     }
     return "unknown";
 }
@@ -849,14 +850,86 @@ static bool cec_persist_genesis_fully_validated(
            persist_state(authority, CEC_FULLY_VALIDATED);
 }
 
-enum chain_evidence_controller_result chain_evidence_controller_mark_fully_validated(
+enum cec_genesis_mark_outcome {
+    CEC_GENESIS_MARK_OK,
+    CEC_GENESIS_MARK_TIP_MOVED,
+    CEC_GENESIS_MARK_UNUSABLE,
+    CEC_GENESIS_MARK_PERSIST,
+};
+
+static bool cec_persisted_tip_is(struct chain_evidence_controller *authority,
+                                 const struct uint256 *tip_hash)
+{
+    uint8_t persisted[32];
+    size_t len = 0;
+    return node_db_state_get(authority->ndb, "cec.active_tip_hash", persisted,
+                             sizeof(persisted), &len) &&
+           len == sizeof(persisted) &&
+           memcmp(persisted, tip_hash->data, sizeof(persisted)) == 0;
+}
+
+/* The genesis publication read-check-write in ONE transaction, so the record
+ * it checks is the record it stamps. With `tip_hash` the persisted active
+ * tip must still name it, else TIP_MOVED (retryable: nothing is written and
+ * nothing freezes). The caller freezes on UNUSABLE after the transaction has
+ * rolled back, so the freeze record is not itself rolled back. */
+static enum cec_genesis_mark_outcome cec_mark_genesis_in_txn(
     struct chain_evidence_controller *authority,
-    const struct uint256 *utxo_sha3)
+    const struct uint256 *utxo_sha3, const struct uint256 *tip_hash)
+{
+    struct node_db_status st = {0};
+    node_db_get_status(authority->ndb, &st);
+    __attribute__((cleanup(db_txn_auto_rollback)))
+    struct db_txn *txn = NULL;
+    if (!st.tx_open)
+        txn = db_txn_begin(authority->ndb, "cec.mark_fully_validated_genesis");
+    if (!st.tx_open && !txn)
+        return CEC_GENESIS_MARK_PERSIST;
+    if (tip_hash && !cec_persisted_tip_is(authority, tip_hash))
+        return CEC_GENESIS_MARK_TIP_MOVED;
+    struct chain_evidence_record rec;
+    memset(&rec, 0, sizeof(rec));
+    struct zcl_result loaded = chain_evidence_store_load(
+        authority->ndb, "cec.active_tip_evidence", &rec);
+    if (cec_genesis_tip_evidence_unusable(&loaded, &rec))
+        return CEC_GENESIS_MARK_UNUSABLE;
+    rec.full_validation_complete = true;
+    if (!cec_persist_genesis_fully_validated(authority, utxo_sha3, &rec))
+        return CEC_GENESIS_MARK_PERSIST;
+    if (txn && !db_txn_commit(txn))
+        return CEC_GENESIS_MARK_PERSIST;
+    return CEC_GENESIS_MARK_OK;
+}
+
+static enum chain_evidence_controller_result cec_mark_genesis(
+    struct chain_evidence_controller *authority,
+    const struct uint256 *utxo_sha3, const struct uint256 *tip_hash)
+{
+    switch (cec_mark_genesis_in_txn(authority, utxo_sha3, tip_hash)) {
+    case CEC_GENESIS_MARK_OK:
+        return CEC_OK;
+    case CEC_GENESIS_MARK_TIP_MOVED:
+        return CEC_REJECTED_TIP_MOVED;
+    case CEC_GENESIS_MARK_UNUSABLE:
+        chain_evidence_controller_freeze(
+            authority,
+            "genesis full validation missing local active-tip evidence");
+        return CEC_REJECTED_BAD_PROOF;
+    case CEC_GENESIS_MARK_PERSIST:
+        break;
+    }
+    return CEC_REJECTED_PERSIST;
+}
+
+/* The one publication body. `tip_hash` NULL keeps the historical contract;
+ * non-NULL (genesis path) binds the publication to that exact persisted
+ * active tip and answers a moved tip with the retryable TIP_MOVED. */
+static enum chain_evidence_controller_result cec_mark_fully_validated_impl(
+    struct chain_evidence_controller *authority,
+    const struct uint256 *utxo_sha3, const struct uint256 *tip_hash)
 {
     struct chain_evidence_record snapshot_evidence;
-    struct chain_evidence_record active_tip_evidence;
     struct zcl_result snapshot_loaded;
-    struct zcl_result active_tip_loaded;
     bool snapshot_metadata_present = false;
 
     if (!authority || !utxo_sha3)
@@ -912,19 +985,22 @@ enum chain_evidence_controller_result chain_evidence_controller_mark_fully_valid
             authority, "genesis full validation requested from invalid state");
         return CEC_REJECTED_BAD_STATE;
     }
-    memset(&active_tip_evidence, 0, sizeof(active_tip_evidence));
-    active_tip_loaded = chain_evidence_store_load(
-        authority->ndb, "cec.active_tip_evidence", &active_tip_evidence);
-    if (cec_genesis_tip_evidence_unusable(&active_tip_loaded,
-                                          &active_tip_evidence)) {
-        chain_evidence_controller_freeze(
-            authority,
-            "genesis full validation missing local active-tip evidence");
-        return CEC_REJECTED_BAD_PROOF;
-    }
-    active_tip_evidence.full_validation_complete = true;
-    if (!cec_persist_genesis_fully_validated(authority, utxo_sha3,
-                                             &active_tip_evidence))
-        return CEC_REJECTED_PERSIST;
-    return CEC_OK;
+    return cec_mark_genesis(authority, utxo_sha3, tip_hash);
+}
+
+enum chain_evidence_controller_result chain_evidence_controller_mark_fully_validated(
+    struct chain_evidence_controller *authority,
+    const struct uint256 *utxo_sha3)
+{
+    return cec_mark_fully_validated_impl(authority, utxo_sha3, NULL);
+}
+
+enum chain_evidence_controller_result
+chain_evidence_controller_mark_fully_validated_at_tip(
+    struct chain_evidence_controller *authority,
+    const struct uint256 *utxo_sha3, const struct uint256 *tip_hash)
+{
+    if (!tip_hash)
+        return CEC_REJECTED_NULL_ARG;
+    return cec_mark_fully_validated_impl(authority, utxo_sha3, tip_hash);
 }

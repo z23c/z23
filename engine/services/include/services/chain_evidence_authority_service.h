@@ -42,6 +42,9 @@ enum chain_evidence_controller_result {
     CEC_REJECTED_UTXO_AHEAD_OF_INDEX,
     CEC_REJECTED_CSR,
     CEC_REJECTED_PERSIST,
+    /* Retryable, never freezes: the persisted active tip is not the tip the
+     * caller asked about (a live advance moved it). */
+    CEC_REJECTED_TIP_MOVED,
 };
 
 enum chain_evidence_source_class {
@@ -203,11 +206,27 @@ bool chain_evidence_controller_record_finalized_tip(
     struct chain_evidence_controller *authority,
     struct block_index *finalized_tip,
     const char *reason);
+/* Why an earn was refused; the failing zcl_result.code carries it.
+ * TRANSIENT (CEC_EARN_TIP_MOVED, CEC_EARN_STORE_BUSY): nothing was written
+ * and a later publish pass can succeed, because the live follow had not
+ * caught up to the walk's tip, moved it, or the store/transaction was busy.
+ * FINAL for the given inputs (CEC_EARN_FINAL, CEC_EARN_NOT_LOCAL_IMPORT):
+ * bad arguments, a flag not established, or a persisted record that is not a
+ * local import with ancestry and chainwork; retrying the same call cannot
+ * change that (the next pass re-derives its inputs). */
+enum chain_evidence_earn_outcome {
+    CEC_EARN_OK = 0,
+    CEC_EARN_FINAL = -1,
+    CEC_EARN_TIP_MOVED = -2,
+    CEC_EARN_STORE_BUSY = -3,
+    CEC_EARN_NOT_LOCAL_IMPORT = -4,
+};
 
 /* Upgrade the persisted LOCAL_IMPORT active-tip record with the two flags the
  * genesis walk established for exactly this tip (bytes via the walk, best
- * work via the core predicate). Refuses unless the persisted record names
- * tip_hash at tip_height; the three evidence keys change in one transaction. */
+ * work via the core predicate). The persisted record must name tip_hash at
+ * tip_height; that check, the load and the three evidence-key writes run in
+ * ONE transaction, so flags are never attached to a different tip. */
 struct zcl_result chain_evidence_controller_earn_active_tip_evidence(
     struct chain_evidence_controller *authority,
     const struct uint256 *tip_hash, int tip_height,
@@ -252,6 +271,16 @@ enum chain_evidence_controller_result chain_evidence_controller_mark_fully_valid
     struct chain_evidence_controller *authority,
     const struct uint256 *utxo_sha3);
 
+/* Genesis publication bound to the exact active tip the caller verified.
+ * The persisted active tip not naming tip_hash returns CEC_REJECTED_TIP_MOVED
+ * (retryable, writes nothing, never freezes); genuinely missing evidence for
+ * that tip still freezes, as mark_fully_validated does. Read, check and write
+ * run in one transaction. */
+enum chain_evidence_controller_result
+chain_evidence_controller_mark_fully_validated_at_tip(
+    struct chain_evidence_controller *authority,
+    const struct uint256 *utxo_sha3, const struct uint256 *tip_hash);
+
 void chain_evidence_controller_freeze(struct chain_evidence_controller *authority,
                            const char *reason);
 
@@ -278,6 +307,12 @@ bool chain_evidence_record_has_snapshot_required(
 void chain_evidence_request_startup_reconcile(const char *why);
 
 #ifdef ZCL_TESTING
+typedef void (*chain_evidence_earn_test_hook_fn)(
+    struct chain_evidence_controller *authority);
+/* Runs after the earn's early check and before its transaction: the window
+ * the in-transaction check closes. */
+void chain_evidence_earn_test_set_before_write_hook(
+    chain_evidence_earn_test_hook_fn fn);
 void chain_evidence_controller_test_fail_commit_after_csr(bool fail);
 /* Clears the process-lifetime startup-reconcile once-guard so each test
  * case gets a fresh reconcile run (production never resets it). */

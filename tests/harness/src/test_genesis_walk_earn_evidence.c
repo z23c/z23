@@ -34,13 +34,14 @@
 #define GW_BLOCKS 6
 #define GW_TIP 3
 
-#define GW_CHECK(label, cond)                                              \
-    do {                                                                   \
-        if (!(cond)) {                                                     \
-            printf("  FAIL: %s\n", label);                                 \
-            failures++;                                                    \
-        }                                                                  \
-    } while (0)
+/* One assertion: returns the failure count to add (0 or 1). */
+static int gw_check(const char *label, bool cond)
+{
+    if (cond)
+        return 0;
+    printf("  FAIL: %s\n", label);
+    return 1;
+}
 
 struct gw_fixture {
     char dir[256];
@@ -223,19 +224,19 @@ static int test_completed_genesis_walk_publishes(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    GW_CHECK("fixture", gw_init(&f));
+    failures += gw_check("fixture", gw_init(&f));
     struct chain_evidence_controller_view v;
     gw_view(&f, &v);
-    GW_CHECK("forward record carries neither flag before the walk",
+    failures += gw_check("forward record carries neither flag before the walk",
              !v.active_tip_evidence.nakamoto_selected_best_work &&
              !v.active_tip_evidence.block_bytes_hash_checked);
     gw_walk_verified(&f, GW_TIP, 0);
     struct zcl_result r = bg_validation_authority_publish(&f.svc, false, true);
-    GW_CHECK("completed genesis walk publishes authority", r.ok);
-    GW_CHECK("posture is review-free genesis history",
+    failures += gw_check("completed genesis walk publishes authority", r.ok);
+    failures += gw_check("posture is review-free genesis history",
              gw_posture_review_free(&f));
     gw_view(&f, &v);
-    GW_CHECK("both flags earned on the active tip record",
+    failures += gw_check("both flags earned on the active tip record",
              v.active_tip_evidence.nakamoto_selected_best_work &&
              v.active_tip_evidence.block_bytes_hash_checked &&
              v.active_tip_evidence.full_validation_complete);
@@ -256,9 +257,9 @@ static int test_same_height_reorg_refuses(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    GW_CHECK("fixture", gw_init(&f));
+    failures += gw_check("fixture", gw_init(&f));
     gw_walk_verified(&f, 5, 0);
-    GW_CHECK("walk verified a rival of the active tip: refuses, untouched",
+    failures += gw_check("walk verified a rival of the active tip: refuses, untouched",
              refuses(&f, false) == 0);
     gw_free(&f);
     return failures;
@@ -268,9 +269,9 @@ static int test_no_verified_hash_refuses(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    GW_CHECK("fixture", gw_init(&f));
+    failures += gw_check("fixture", gw_init(&f));
     atomic_store(&f.svc.progress.verified_height, GW_TIP);
-    GW_CHECK("height without a walked hash (resume) refuses",
+    failures += gw_check("height without a walked hash (resume) refuses",
              refuses(&f, false) == 0);
     gw_free(&f);
     return failures;
@@ -280,10 +281,10 @@ static int test_best_work_failure_refuses(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    GW_CHECK("fixture", gw_init(&f));
+    failures += gw_check("fixture", gw_init(&f));
     gw_walk_verified(&f, GW_TIP, 0);
     arith_uint256_set_u64(&f.blocks[5].nChainWork, 99);
-    GW_CHECK("a connectable higher-work rival vetoes: refuses, untouched",
+    failures += gw_check("a connectable higher-work rival vetoes: refuses, untouched",
              refuses(&f, false) == 0);
     gw_free(&f);
     return failures;
@@ -293,16 +294,16 @@ static int test_walk_gaps_refuse(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    GW_CHECK("fixture", gw_init(&f));
+    failures += gw_check("fixture", gw_init(&f));
     gw_walk_verified(&f, GW_TIP, 1);
-    GW_CHECK("script skips refuse", refuses(&f, false) == 0);
+    failures += gw_check("script skips refuse", refuses(&f, false) == 0);
     gw_walk_verified(&f, GW_TIP, 0);
     atomic_store(&f.svc.progress.verified_height, GW_TIP - 1);
-    GW_CHECK("verified below tip refuses", refuses(&f, false) == 0);
+    failures += gw_check("verified below tip refuses", refuses(&f, false) == 0);
     gw_walk_verified(&f, GW_TIP, 0);
     struct zcl_result gap =
         bg_validation_authority_publish(&f.svc, false, false);
-    GW_CHECK("a coverage gap refuses", !gap.ok && gw_flags_unearned(&f));
+    failures += gw_check("a coverage gap refuses", !gap.ok && gw_flags_unearned(&f));
     gw_free(&f);
     return failures;
 }
@@ -311,9 +312,9 @@ static int test_snapshot_seeded_path_unchanged(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    GW_CHECK("fixture", gw_init(&f));
+    failures += gw_check("fixture", gw_init(&f));
     gw_walk_verified(&f, GW_TIP, 0);
-    GW_CHECK("assisted path without root-bound snapshot evidence refuses "
+    failures += gw_check("assisted path without root-bound snapshot evidence refuses "
              "and earns nothing", refuses(&f, true) == 0);
     gw_free(&f);
     return failures;
@@ -325,23 +326,89 @@ static int test_authority_survives_advance_and_restart(void)
 {
     int failures = 0;
     struct gw_fixture f;
-    GW_CHECK("fixture", gw_init(&f));
+    failures += gw_check("fixture", gw_init(&f));
     gw_walk_verified(&f, GW_TIP, 0);
-    GW_CHECK("publishes", bg_validation_authority_publish(
+    failures += gw_check("publishes", bg_validation_authority_publish(
                               &f.svc, false, true).ok);
-    GW_CHECK("advance: reducer moves the tip",
+    failures += gw_check("advance: reducer moves the tip",
              active_chain_move_window_tip(&f.ms.chain_active, &f.blocks[4]));
-    GW_CHECK("advance: live follow records the new tip",
+    failures += gw_check("advance: live follow records the new tip",
              chain_evidence_controller_record_finalized_tip(
                  &f.authority, &f.blocks[4], "unit.finalize"));
-    GW_CHECK("review-free after advancing", gw_posture_review_free(&f));
+    failures += gw_check("review-free after advancing", gw_posture_review_free(&f));
     chain_evidence_controller_test_reset_startup_reconcile();
     chain_evidence_controller_init(&f.authority, &f.ndb, csr_instance());
-    GW_CHECK("review-free after restart", gw_posture_review_free(&f));
+    failures += gw_check("review-free after restart", gw_posture_review_free(&f));
     struct chain_evidence_controller_view v;
     gw_view(&f, &v);
-    GW_CHECK("repaired marker still set after restart",
+    failures += gw_check("repaired marker still set after restart",
              v.repaired_active_tip_evidence);
+    gw_free(&f);
+    return failures;
+}
+
+static struct gw_fixture *g_hook_fixture;
+
+/* The interleaving the in-transaction check closes: the walk's tip was
+ * checked, then a live advance persists a different tip before the write. */
+static void hook_move_persisted_tip(struct chain_evidence_controller *authority)
+{
+    (void)authority;
+    struct gw_fixture *f = g_hook_fixture;
+    (void)node_db_state_set(&f->ndb, "cec.active_tip_hash",
+                            f->hashes[4].data, 32);
+    (void)node_db_state_set_int(&f->ndb, "cec.active_tip_height",
+                                f->blocks[4].nHeight);
+}
+
+static int test_earn_refuses_when_tip_moves_before_write(void)
+{
+    int failures = 0;
+    struct gw_fixture f;
+    failures += gw_check("fixture", gw_init(&f));
+    g_hook_fixture = &f;
+    chain_evidence_earn_test_set_before_write_hook(hook_move_persisted_tip);
+    struct zcl_result r = chain_evidence_controller_earn_active_tip_evidence(
+        &f.authority, &f.hashes[GW_TIP], f.blocks[GW_TIP].nHeight, true,
+        true);
+    chain_evidence_earn_test_set_before_write_hook(NULL);
+    failures += gw_check("earn refuses once the tip moved before the write",
+                         !r.ok);
+    failures += gw_check("the refusal is the transient tip-moved class",
+                         r.code == CEC_EARN_TIP_MOVED);
+    failures += gw_check("no flag attached to the moved tip's record",
+                         gw_flags_unearned(&f));
+    gw_free(&f);
+    return failures;
+}
+
+/* mark_fully_validated_at_tip: a moved tip is a retryable refusal that
+ * writes nothing and never freezes; the exact tip publishes. */
+static int test_mark_at_tip_moved_is_retryable_not_frozen(void)
+{
+    int failures = 0;
+    struct gw_fixture f;
+    failures += gw_check("fixture", gw_init(&f));
+    struct zcl_result e = chain_evidence_controller_earn_active_tip_evidence(
+        &f.authority, &f.hashes[GW_TIP], f.blocks[GW_TIP].nHeight, true,
+        true);
+    failures += gw_check("earn on the exact tip", e.ok);
+    struct uint256 root;
+    memset(&root, 0x11, sizeof(root));
+    enum chain_evidence_controller_result moved =
+        chain_evidence_controller_mark_fully_validated_at_tip(
+            &f.authority, &root, &f.hashes[4]);
+    failures += gw_check("a different tip is TIP_MOVED",
+                         moved == CEC_REJECTED_TIP_MOVED);
+    struct chain_evidence_controller_view v;
+    gw_view(&f, &v);
+    failures += gw_check("not frozen and not published",
+                         v.state != CEC_CONTRADICTION_FROZEN &&
+                         v.state != CEC_FULLY_VALIDATED);
+    failures += gw_check("the exact tip publishes",
+                         chain_evidence_controller_mark_fully_validated_at_tip(
+                             &f.authority, &root, &f.hashes[GW_TIP]) ==
+                             CEC_OK);
     gw_free(&f);
     return failures;
 }
@@ -357,6 +424,8 @@ int test_genesis_walk_earn_evidence(void)
     failures += test_walk_gaps_refuse();
     failures += test_snapshot_seeded_path_unchanged();
     failures += test_authority_survives_advance_and_restart();
+    failures += test_earn_refuses_when_tip_moves_before_write();
+    failures += test_mark_at_tip_moved_is_retryable_not_frozen();
     if (failures == 0)
         printf("  all genesis_walk_earn_evidence tests passed\n");
     return failures;

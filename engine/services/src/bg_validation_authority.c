@@ -192,8 +192,17 @@ static bool bgv_auth_genesis_tip_prepare(
     struct zcl_result earned = chain_evidence_controller_earn_active_tip_evidence(
         authority, &tip_hash, tip_height, best, bytes);
     if (!earned.ok) {
+        /* Transient (tip moved / store busy) vs final-for-these-inputs: see
+         * enum chain_evidence_earn_outcome. Either way the refusal is
+         * returned, not latched: the re-verify loop republishes every
+         * BG_PUBLISH_RETRY_CYCLES while the authority is unpublished, and
+         * each pass re-derives the tip and re-earns from scratch. */
+        bool transient = earned.code == CEC_EARN_TIP_MOVED ||
+                         earned.code == CEC_EARN_STORE_BUSY;
         snprintf(reason, 192, "genesis walk could not earn active-tip "
-                              "evidence: %.140s", earned.message);
+                              "evidence (%s): %.120s",
+                 transient ? "transient, retried next pass" : "final",
+                 earned.message);
         return false;
     }
     chain_evidence_controller_snapshot(authority, view);
@@ -205,10 +214,9 @@ static bool bgv_auth_genesis_tip_prepare(
  * and idempotent, so retry once from a fresh snapshot; if the record is
  * still unearned, refuse BEFORE mark_fully_validated, which would freeze
  * the controller on missing evidence.
- * Residual window (documented, not closed): a replacement landing between
- * the final snapshot and mark_fully_validated's own load still freezes the
- * controller until boot. Closing it needs mark_fully_validated to take the
- * tip hash, a wider controller change. */
+ * The remaining window (a replacement after this snapshot) is closed in the
+ * controller: the publisher marks with the verified tip hash, and a moved
+ * tip answers CEC_REJECTED_TIP_MOVED, a retryable refusal, not a freeze. */
 static bool bgv_auth_prepare_and_check(
     struct bg_validation_service *svc,
     struct chain_evidence_controller *authority,
@@ -286,6 +294,23 @@ static bool bgv_auth_resolve_authority_root(
            root_len == 32;
 }
 
+/* Publish through the controller. The genesis path binds the publication to
+ * the persisted tip of the snapshot the evidence was judged ready on, so a
+ * tip that moved since answers the retryable CEC_REJECTED_TIP_MOVED instead
+ * of a freeze; the assisted path is bound by its snapshot record instead. */
+static enum chain_evidence_controller_result bgv_auth_mark(
+    struct chain_evidence_controller *authority,
+    const struct chain_evidence_controller_view *view, bool external_seeded,
+    const struct uint256 *root)
+{
+    if (external_seeded)
+        return chain_evidence_controller_mark_fully_validated(authority, root);
+    if (!view->has_persisted_active_tip_hash)
+        return CEC_REJECTED_TIP_MOVED;
+    return chain_evidence_controller_mark_fully_validated_at_tip(
+        authority, root, &view->persisted_active_tip_hash);
+}
+
 struct zcl_result bg_validation_authority_publish(
     struct bg_validation_service *svc, bool external_seeded,
     bool coverage_complete)
@@ -345,11 +370,12 @@ struct zcl_result bg_validation_authority_publish(
     struct uint256 root;
     memcpy(root.data, authority_root_bytes, sizeof(root.data));
     enum chain_evidence_controller_result result =
-        chain_evidence_controller_mark_fully_validated(&authority, &root);
+        bgv_auth_mark(&authority, &view, external_seeded, &root);
     if (result != CEC_OK) {
         snprintf(reason, sizeof(reason),
-                 "CEC full-validation publication refused result=%s",
-                 chain_evidence_controller_result_name(result));
+                 "CEC full-validation publication refused result=%s%s",
+                 chain_evidence_controller_result_name(result),
+                 result == CEC_REJECTED_TIP_MOVED ? " (retryable)" : "");
         return bgv_auth_refuse(reason);
     }
 
