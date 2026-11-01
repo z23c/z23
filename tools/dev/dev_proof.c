@@ -1763,6 +1763,7 @@ static bool dp_changed_set_structural_change(char status)
  *   - the added file defines at least one function and probes no include.
  * Anything else, and any git failure, leaves the row structural. */
 #define DP_SPLIT_FUNCS_MAX 128
+#define DP_SPLIT_DECLS_MAX 32
 #define DP_SPLIT_NAME_MAX 64
 #define DP_SPLIT_CANDIDATES_MAX 64
 #define DP_SPLIT_LEAF_MAX 120
@@ -1781,6 +1782,10 @@ struct dp_split_funcs {
      * object with external linkage, or a shape that may be one): it can
      * silently take over a weak or library symbol. */
     bool object;
+    /* Names of public file-scope prototypes (`int f(void);`): the fresh
+     * rule admits each only when the same text defines it. */
+    char decl[DP_SPLIT_DECLS_MAX][DP_SPLIT_NAME_MAX];
+    size_t decls;
 };
 
 static const char *dp_split_leaf(const char *path)
@@ -2316,8 +2321,8 @@ static bool dp_split_private_start(const char *st)
 /* A file-scope declaration the reader cannot prove private: anything not
  * opened by static, typedef or a static assertion, and an extern only when
  * it has an initializer (then it defines). A non-static prototype counts
- * too: `unsigned T_(1) x;` cannot be told from one, so only the fresh rule
- * reads this and refuses rather than guesses. */
+ * too: dp_split_public_decl records it, and the fresh rule admits it only
+ * as a prototype of a function the same text defines. */
 static bool dp_split_public_object(const char *st)
 {
     const char *q = st;
@@ -2326,13 +2331,35 @@ static bool dp_split_public_object(const char *st)
     return !dp_split_private_start(st);
 }
 
+/* A public `;` statement: a prototype shape (no '=', no '[' or function
+ * pointer before its name, the name's '(' the first and closed at the end)
+ * is recorded by name; any other shape may be an object. `unsigned T_(1) x;`
+ * does not end in ')', and `int T_(x);` is admitted only if the same text
+ * defines a function T_. */
+static void dp_split_public_decl(struct dp_split_funcs *f, char *st)
+{
+    size_t n = strlen(st);
+    while (n > 0 && st[n - 1] == ' ') st[--n] = '\0';
+    const char *paren = strchr(st, '('), *bracket = strchr(st, '[');
+    const char *start, *end;
+    if (!paren || strchr(st, '=') || strstr(st, "(*") || strstr(st, "( *") ||
+        (bracket && bracket < paren) || !dp_split_name(st, n, &start, &end) ||
+        (size_t)(end - start) >= DP_SPLIT_NAME_MAX ||
+        f->decls >= DP_SPLIT_DECLS_MAX) {
+        f->object = true;
+        return;
+    }
+    memcpy(f->decl[f->decls], start, (size_t)(end - start));
+    f->decl[f->decls++][end - start] = '\0';
+}
+
 /* A file-scope statement ended by ';': an invocation with no type tokens
  * before the name is a macro that may define a function. */
 static void dp_split_statement(struct dp_split_parse *s)
 {
-    const char *st = s->stmt;
+    char *st = s->stmt;
     while (*st == ' ') st++;
-    if (dp_split_public_object(st)) s->funcs->object = true;
+    if (dp_split_public_object(st)) dp_split_public_decl(s->funcs, st);
     const char *q = st;
     while (dp_split_ident(*q)) q++;
     size_t id = (size_t)(q - st);
@@ -2493,8 +2520,9 @@ static bool dp_split_admit(const struct dp_split_ctx *c, const char **refs,
  *     defines no public file-scope object (a weak symbol could be taken over);
  *   - every function it defines without `static` is called from another
  *     changed row, no name it defines is reserved (a leading underscore),
- *     and every other file-scope declaration is provably private, so it
- *     cannot interpose a library or runtime symbol nothing names;
+ *     and every other file-scope declaration is provably private or a
+ *     prototype of a function it defines, so it cannot interpose a library
+ *     or runtime symbol nothing names;
  * It stays in the closure input, and the plan also takes the groups of the
  * source-universe policy and of the test registry (dp_changed_set_widen): a
  * new file enters what the enumerators walk. Anything else, and any git
@@ -2639,6 +2667,14 @@ static bool dp_fresh_stem(const char *added, char *stem, size_t size)
     return true;
 }
 
+/* Every public prototype the text declares is of a function it defines. */
+static bool dp_fresh_decls_defined(const struct dp_split_funcs *f)
+{
+    for (size_t i = 0; i < f->decls; i++)
+        if (!dp_split_funcs_has(f, f->decl[i])) return false;
+    return true;
+}
+
 /* The added text `side` of fresh `.c` `added` reads whole, hooks nothing,
  * and defines only names no base file holds and the change itself calls. */
 static bool dp_fresh_text_ok(const struct dp_split_ctx *c, const char *side,
@@ -2648,7 +2684,8 @@ static bool dp_fresh_text_ok(const struct dp_split_ctx *c, const char *side,
     struct dp_split_funcs f = {0};
     return side && !dp_fresh_hooked(side) &&
            dp_split_parse_funcs(side, &f) && !f.overflow && !f.object &&
-           f.count > 0 && dp_fresh_names_unreserved(&f) &&
+           f.count > 0 && dp_fresh_decls_defined(&f) &&
+           dp_fresh_names_unreserved(&f) &&
            dp_fresh_names_absent_at_base(c, &f) &&
            dp_fresh_public_called(c, &f, added, refs, count);
 }
