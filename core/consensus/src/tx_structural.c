@@ -42,149 +42,156 @@
         return ZCL_ERR((err_code), fmt __VA_OPT__(,) __VA_ARGS__);     \
     } while (0)
 
-struct zcl_result domain_consensus_check_transaction_structural(
+/* Coinbase shielded-component and scriptSig limits, or null prevouts. */
+static struct zcl_result tx_structural_check_coinbase_restrictions(
         const struct transaction *tx,
-        enum domain_tx_check_context ctx,
         struct domain_consensus_tx_structural_failure *out_failure)
 {
-    if (out_failure) {
-        out_failure->reject_reason = NULL;
-        out_failure->dos = 0;
-    }
-
-    if (!tx)
-        return ZCL_ERR(DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_NULL_TX,
-                       "check_transaction_structural: null tx");
-
-    /* ── Version checks ─────────────────────────────────────── */
-    if (!tx->overwintered && tx->version < SPROUT_MIN_TX_VERSION)
-        DOMAIN_TX_FAIL(out_failure,
-                       DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VERSION_TOO_LOW,
-                       "bad-txns-version-too-low", 100,
-                       "version %d below SPROUT_MIN_TX_VERSION (%d)",
-                       (int)tx->version, SPROUT_MIN_TX_VERSION);
-
-    if (tx->overwintered) {
-        if (tx->version < OVERWINTER_MIN_TX_VERSION)
+    /* ── Coinbase restrictions ──────────────────────────────── */
+    if (transaction_is_coinbase(tx)) {
+        if (tx->num_joinsplit > 0)
             DOMAIN_TX_FAIL(out_failure,
-                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_OVERWINTER_VERSION_TOO_LOW,
-                "bad-tx-overwinter-version-too-low", 100,
-                "overwintered tx version %d below OVERWINTER_MIN_TX_VERSION (%d)",
-                (int)tx->version, OVERWINTER_MIN_TX_VERSION);
-
-        if (tx->version_group_id != OVERWINTER_VERSION_GROUP_ID &&
-            tx->version_group_id != SAPLING_VERSION_GROUP_ID)
+                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_CB_HAS_JOINSPLITS,
+                "bad-cb-has-joinsplits", 100,
+                "coinbase has %zu joinsplits", tx->num_joinsplit);
+        if (tx->num_shielded_spend > 0)
             DOMAIN_TX_FAIL(out_failure,
-                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VERSION_GROUP_ID,
-                "bad-tx-version-group-id", 100,
-                "unknown version_group_id 0x%08x",
-                (unsigned)tx->version_group_id);
-
-        if (tx->expiry_height >= TX_EXPIRY_HEIGHT_THRESHOLD)
+                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_CB_HAS_SPEND_DESC,
+                "bad-cb-has-spend-description", 100,
+                "coinbase has %zu shielded spends", tx->num_shielded_spend);
+        if (tx->num_shielded_output > 0)
             DOMAIN_TX_FAIL(out_failure,
-                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_EXPIRY_HEIGHT_TOO_HIGH,
-                "bad-tx-expiry-height-too-high", 100,
-                "expiry_height %u >= threshold %u",
-                (unsigned)tx->expiry_height,
-                (unsigned)TX_EXPIRY_HEIGHT_THRESHOLD);
-    }
-
-    /* ── Input/output existence ─────────────────────────────── */
-    if (tx->num_vin == 0 && tx->num_joinsplit == 0 &&
-        tx->num_shielded_spend == 0)
-        DOMAIN_TX_FAIL(out_failure,
-                       DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VIN_EMPTY,
-                       "bad-txns-vin-empty", 10,
-                       "no transparent vin, joinsplit, or shielded spend");
-
-    if (tx->num_vout == 0 && tx->num_joinsplit == 0 &&
-        tx->num_shielded_output == 0)
-        DOMAIN_TX_FAIL(out_failure,
-                       DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VOUT_EMPTY,
-                       "bad-txns-vout-empty", 10,
-                       "no transparent vout, joinsplit, or shielded output");
-
-    /* ── Size limit ─────────────────────────────────────────── */
-    size_t tx_size = transaction_serialize_size(tx);
-    if (tx_size > MAX_TX_SIZE_AFTER_SAPLING) {
-        /* Empirical grandfather (zclassicd LIVE-behavior parity): the
-         * canonical chain carries 413 post-Sapling txs above 102000
-         * (mined when the effective cap was MAX_BLOCK_SIZE; zclassicd
-         * tightened the constant later without grandfathering, so its
-         * own text false-rejects them on resync — proven at block
-         * 478544). Excuse exactly those txs, in-block only, under a
-         * hard MAX_BLOCK_SIZE structural ceiling. The txid is
-         * recomputed from the serialized bytes — never trust a
-         * possibly-stale tx->hash on an accept path. Cold path: fires
-         * at most 413 times in a full reindex. */
-        bool excused = false;
-        if (ctx == DOMAIN_TX_CTX_BLOCK && tx_size <= MAX_BLOCK_SIZE) {
-            struct uint256 txid;
-            if (transaction_hash_serialized(tx, &txid))
-                excused = domain_consensus_tx_oversize_grandfathered(
-                                  &txid, tx_size);
+                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_CB_HAS_OUTPUT_DESC,
+                "bad-cb-has-output-description", 100,
+                "coinbase has %zu shielded outputs", tx->num_shielded_output);
+        if (tx->vin[0].script_sig.size < 2 ||
+            tx->vin[0].script_sig.size > 100)
+            DOMAIN_TX_FAIL(out_failure,
+                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_CB_LENGTH,
+                "bad-cb-length", 100,
+                "coinbase scriptSig size %zu outside [2, 100]",
+                tx->vin[0].script_sig.size);
+    } else {
+        /* Non-coinbase: no null prevouts */
+        for (size_t i = 0; i < tx->num_vin; i++) {
+            if (outpoint_is_null(&tx->vin[i].prevout))
+                DOMAIN_TX_FAIL(out_failure,
+                    DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_PREVOUT_NULL,
+                    "bad-txns-prevout-null", 10,
+                    "non-coinbase vin[%zu] has null prevout", i);
         }
-        if (!excused)
-            DOMAIN_TX_FAIL(out_failure,
-                           DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_OVERSIZE,
-                           "bad-txns-oversize", 100,
-                           "serialize_size %zu > %u",
-                           tx_size, (unsigned)MAX_TX_SIZE_AFTER_SAPLING);
     }
 
-    /* ── Output value validation ────────────────────────────── */
-    int64_t value_out = 0;
-    for (size_t i = 0; i < tx->num_vout; i++) {
-        if (tx->vout[i].value < 0)
-            DOMAIN_TX_FAIL(out_failure,
-                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VOUT_NEGATIVE,
-                "bad-txns-vout-negative", 100,
-                "vout[%zu].value=%lld < 0",
-                i, (long long)tx->vout[i].value);
+    return ZCL_OK;
+}
 
-        if (tx->vout[i].value > MAX_MONEY)
-            DOMAIN_TX_FAIL(out_failure,
-                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VOUT_TOOLARGE,
-                "bad-txns-vout-toolarge", 100,
-                "vout[%zu].value=%lld > MAX_MONEY",
-                i, (long long)tx->vout[i].value);
-
-        value_out += tx->vout[i].value;
-        if (!MoneyRange(value_out))
-            DOMAIN_TX_FAIL(out_failure,
-                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VOUT_TOTAL_TOOLARGE,
-                "bad-txns-txouttotal-toolarge", 100,
-                "vout running total %lld out of range after index %zu",
-                (long long)value_out, i);
+/* Duplicate Sapling spend nullifiers, then coinbase restrictions. */
+static struct zcl_result tx_structural_check_duplicate_spend_nullifiers(
+        const struct transaction *tx,
+        struct domain_consensus_tx_structural_failure *out_failure)
+{
+    /* ── Duplicate Sapling nullifiers ───────────────────────── */
+    for (size_t i = 0; i < tx->num_shielded_spend; i++) {
+        for (size_t j = i + 1; j < tx->num_shielded_spend; j++) {
+            if (uint256_cmp(&tx->v_shielded_spend[i].nullifier,
+                            &tx->v_shielded_spend[j].nullifier) == 0)
+                DOMAIN_TX_FAIL(out_failure,
+                    DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_SPEND_NULLIFIERS_DUPLICATE,
+                    "bad-spend-description-nullifiers-duplicate", 100,
+                    "shielded_spend[%zu] and shielded_spend[%zu] share nullifier",
+                    i, j);
+        }
     }
 
-    /* ── Sapling valueBalance ───────────────────────────────── */
-    if (tx->num_shielded_spend == 0 && tx->num_shielded_output == 0 &&
-        tx->value_balance != 0)
-        DOMAIN_TX_FAIL(out_failure,
-            DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VALUEBALANCE_NONZERO,
-            "bad-txns-valuebalance-nonzero", 100,
-            "value_balance=%lld but no shielded spend/output",
-            (long long)tx->value_balance);
+    return tx_structural_check_coinbase_restrictions(tx, out_failure);
+}
 
-    if (tx->value_balance > MAX_MONEY || tx->value_balance < -MAX_MONEY)
-        DOMAIN_TX_FAIL(out_failure,
-            DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VALUEBALANCE_TOOLARGE,
-            "bad-txns-valuebalance-toolarge", 100,
-            "value_balance=%lld outside [-MAX_MONEY, MAX_MONEY]",
-            (long long)tx->value_balance);
-
-    /* Negative valueBalance takes from transparent pool */
-    if (tx->value_balance <= 0) {
-        value_out += -tx->value_balance;
-        if (!MoneyRange(value_out))
-            DOMAIN_TX_FAIL(out_failure,
-                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VOUT_TOTAL_TOOLARGE,
-                "bad-txns-txouttotal-toolarge", 100,
-                "vout total + |value_balance| %lld out of range",
-                (long long)value_out);
+/* Duplicate transparent prevouts and JoinSplit nullifiers, then later checks. */
+static struct zcl_result tx_structural_check_duplicate_inputs_and_js_nullifiers(
+        const struct transaction *tx,
+        struct domain_consensus_tx_structural_failure *out_failure)
+{
+    /* ── Duplicate transparent inputs ───────────────────────── */
+    for (size_t i = 0; i < tx->num_vin; i++) {
+        for (size_t j = i + 1; j < tx->num_vin; j++) {
+            if (outpoint_cmp(&tx->vin[i].prevout,
+                             &tx->vin[j].prevout) == 0)
+                DOMAIN_TX_FAIL(out_failure,
+                    DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_INPUTS_DUPLICATE,
+                    "bad-txns-inputs-duplicate", 100,
+                    "vin[%zu] and vin[%zu] share prevout", i, j);
+        }
     }
 
+    /* ── Duplicate JoinSplit nullifiers ──────────────────────── */
+    for (size_t i = 0; i < tx->num_joinsplit; i++) {
+        for (int ni = 0; ni < ZC_NUM_JS_INPUTS; ni++) {
+            const struct uint256 *nf = &tx->v_joinsplit[i].nullifiers[ni];
+            for (size_t j = 0; j < i; j++) {
+                for (int nj = 0; nj < ZC_NUM_JS_INPUTS; nj++) {
+                    if (uint256_cmp(nf,
+                                    &tx->v_joinsplit[j].nullifiers[nj]) == 0)
+                        DOMAIN_TX_FAIL(out_failure,
+                            DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_JS_NULLIFIERS_DUPLICATE,
+                            "bad-joinsplits-nullifiers-duplicate", 100,
+                            "joinsplit[%zu].nullifier[%d] duplicates joinsplit[%zu].nullifier[%d]",
+                            i, ni, j, nj);
+                }
+            }
+            for (int nj = 0; nj < ni; nj++) {
+                if (uint256_cmp(nf,
+                                &tx->v_joinsplit[i].nullifiers[nj]) == 0)
+                    DOMAIN_TX_FAIL(out_failure,
+                        DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_JS_NULLIFIERS_DUPLICATE,
+                        "bad-joinsplits-nullifiers-duplicate", 100,
+                        "joinsplit[%zu] nullifier[%d] duplicates nullifier[%d]",
+                        i, ni, nj);
+            }
+        }
+    }
+
+    return tx_structural_check_duplicate_spend_nullifiers(tx, out_failure);
+}
+
+/* JoinSplit vpub_new and positive valueBalance input-total bounds, then later checks. */
+static struct zcl_result tx_structural_check_input_totals(
+        const struct transaction *tx,
+        struct domain_consensus_tx_structural_failure *out_failure)
+{
+    /* ── Input value overflow check ─────────────────────────── */
+    {
+        int64_t value_in = 0;
+        for (size_t i = 0; i < tx->num_joinsplit; i++) {
+            value_in += tx->v_joinsplit[i].vpub_new;
+            if (!MoneyRange(tx->v_joinsplit[i].vpub_new) ||
+                !MoneyRange(value_in))
+                DOMAIN_TX_FAIL(out_failure,
+                    DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_TXINTOTAL_TOOLARGE,
+                    "bad-txns-txintotal-toolarge", 100,
+                    "vpub_new running total %lld out of range after js %zu",
+                    (long long)value_in, i);
+        }
+        if (tx->value_balance >= 0) {
+            value_in += tx->value_balance;
+            if (!MoneyRange(value_in))
+                DOMAIN_TX_FAIL(out_failure,
+                    DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_TXINTOTAL_TOOLARGE,
+                    "bad-txns-txintotal-toolarge", 100,
+                    "vin total + value_balance %lld out of range",
+                    (long long)value_in);
+        }
+    }
+
+    return tx_structural_check_duplicate_inputs_and_js_nullifiers(
+            tx, out_failure);
+}
+
+/* JoinSplit vpub bounds, folding vpub_old into the output total, then later checks. */
+static struct zcl_result tx_structural_check_joinsplit_values(
+        const struct transaction *tx,
+        struct domain_consensus_tx_structural_failure *out_failure,
+        int64_t value_out)
+{
     /* ── JoinSplit value validation ─────────────────────────── */
     for (size_t i = 0; i < tx->num_joinsplit; i++) {
         const struct js_description *js = &tx->v_joinsplit[i];
@@ -228,118 +235,197 @@ struct zcl_result domain_consensus_check_transaction_structural(
                 (long long)value_out, i);
     }
 
-    /* ── Input value overflow check ─────────────────────────── */
-    {
-        int64_t value_in = 0;
-        for (size_t i = 0; i < tx->num_joinsplit; i++) {
-            value_in += tx->v_joinsplit[i].vpub_new;
-            if (!MoneyRange(tx->v_joinsplit[i].vpub_new) ||
-                !MoneyRange(value_in))
-                DOMAIN_TX_FAIL(out_failure,
-                    DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_TXINTOTAL_TOOLARGE,
-                    "bad-txns-txintotal-toolarge", 100,
-                    "vpub_new running total %lld out of range after js %zu",
-                    (long long)value_in, i);
-        }
-        if (tx->value_balance >= 0) {
-            value_in += tx->value_balance;
-            if (!MoneyRange(value_in))
-                DOMAIN_TX_FAIL(out_failure,
-                    DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_TXINTOTAL_TOOLARGE,
-                    "bad-txns-txintotal-toolarge", 100,
-                    "vin total + value_balance %lld out of range",
-                    (long long)value_in);
-        }
-    }
+    return tx_structural_check_input_totals(tx, out_failure);
+}
 
-    /* ── Duplicate transparent inputs ───────────────────────── */
-    for (size_t i = 0; i < tx->num_vin; i++) {
-        for (size_t j = i + 1; j < tx->num_vin; j++) {
-            if (outpoint_cmp(&tx->vin[i].prevout,
-                             &tx->vin[j].prevout) == 0)
-                DOMAIN_TX_FAIL(out_failure,
-                    DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_INPUTS_DUPLICATE,
-                    "bad-txns-inputs-duplicate", 100,
-                    "vin[%zu] and vin[%zu] share prevout", i, j);
-        }
-    }
+/* Sapling valueBalance bounds, folding a negative balance into the output total, then later checks. */
+static struct zcl_result tx_structural_check_value_balance(
+        const struct transaction *tx,
+        struct domain_consensus_tx_structural_failure *out_failure,
+        int64_t value_out)
+{
+    /* ── Sapling valueBalance ───────────────────────────────── */
+    if (tx->num_shielded_spend == 0 && tx->num_shielded_output == 0 &&
+        tx->value_balance != 0)
+        DOMAIN_TX_FAIL(out_failure,
+            DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VALUEBALANCE_NONZERO,
+            "bad-txns-valuebalance-nonzero", 100,
+            "value_balance=%lld but no shielded spend/output",
+            (long long)tx->value_balance);
 
-    /* ── Duplicate JoinSplit nullifiers ──────────────────────── */
-    for (size_t i = 0; i < tx->num_joinsplit; i++) {
-        for (int ni = 0; ni < ZC_NUM_JS_INPUTS; ni++) {
-            const struct uint256 *nf = &tx->v_joinsplit[i].nullifiers[ni];
-            for (size_t j = 0; j < i; j++) {
-                for (int nj = 0; nj < ZC_NUM_JS_INPUTS; nj++) {
-                    if (uint256_cmp(nf,
-                                    &tx->v_joinsplit[j].nullifiers[nj]) == 0)
-                        DOMAIN_TX_FAIL(out_failure,
-                            DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_JS_NULLIFIERS_DUPLICATE,
-                            "bad-joinsplits-nullifiers-duplicate", 100,
-                            "joinsplit[%zu].nullifier[%d] duplicates joinsplit[%zu].nullifier[%d]",
-                            i, ni, j, nj);
-                }
-            }
-            for (int nj = 0; nj < ni; nj++) {
-                if (uint256_cmp(nf,
-                                &tx->v_joinsplit[i].nullifiers[nj]) == 0)
-                    DOMAIN_TX_FAIL(out_failure,
-                        DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_JS_NULLIFIERS_DUPLICATE,
-                        "bad-joinsplits-nullifiers-duplicate", 100,
-                        "joinsplit[%zu] nullifier[%d] duplicates nullifier[%d]",
-                        i, ni, nj);
-            }
-        }
-    }
+    if (tx->value_balance > MAX_MONEY || tx->value_balance < -MAX_MONEY)
+        DOMAIN_TX_FAIL(out_failure,
+            DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VALUEBALANCE_TOOLARGE,
+            "bad-txns-valuebalance-toolarge", 100,
+            "value_balance=%lld outside [-MAX_MONEY, MAX_MONEY]",
+            (long long)tx->value_balance);
 
-    /* ── Duplicate Sapling nullifiers ───────────────────────── */
-    for (size_t i = 0; i < tx->num_shielded_spend; i++) {
-        for (size_t j = i + 1; j < tx->num_shielded_spend; j++) {
-            if (uint256_cmp(&tx->v_shielded_spend[i].nullifier,
-                            &tx->v_shielded_spend[j].nullifier) == 0)
-                DOMAIN_TX_FAIL(out_failure,
-                    DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_SPEND_NULLIFIERS_DUPLICATE,
-                    "bad-spend-description-nullifiers-duplicate", 100,
-                    "shielded_spend[%zu] and shielded_spend[%zu] share nullifier",
-                    i, j);
-        }
-    }
-
-    /* ── Coinbase restrictions ──────────────────────────────── */
-    if (transaction_is_coinbase(tx)) {
-        if (tx->num_joinsplit > 0)
+    /* Negative valueBalance takes from transparent pool */
+    if (tx->value_balance <= 0) {
+        value_out += -tx->value_balance;
+        if (!MoneyRange(value_out))
             DOMAIN_TX_FAIL(out_failure,
-                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_CB_HAS_JOINSPLITS,
-                "bad-cb-has-joinsplits", 100,
-                "coinbase has %zu joinsplits", tx->num_joinsplit);
-        if (tx->num_shielded_spend > 0)
-            DOMAIN_TX_FAIL(out_failure,
-                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_CB_HAS_SPEND_DESC,
-                "bad-cb-has-spend-description", 100,
-                "coinbase has %zu shielded spends", tx->num_shielded_spend);
-        if (tx->num_shielded_output > 0)
-            DOMAIN_TX_FAIL(out_failure,
-                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_CB_HAS_OUTPUT_DESC,
-                "bad-cb-has-output-description", 100,
-                "coinbase has %zu shielded outputs", tx->num_shielded_output);
-        if (tx->vin[0].script_sig.size < 2 ||
-            tx->vin[0].script_sig.size > 100)
-            DOMAIN_TX_FAIL(out_failure,
-                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_CB_LENGTH,
-                "bad-cb-length", 100,
-                "coinbase scriptSig size %zu outside [2, 100]",
-                tx->vin[0].script_sig.size);
-    } else {
-        /* Non-coinbase: no null prevouts */
-        for (size_t i = 0; i < tx->num_vin; i++) {
-            if (outpoint_is_null(&tx->vin[i].prevout))
-                DOMAIN_TX_FAIL(out_failure,
-                    DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_PREVOUT_NULL,
-                    "bad-txns-prevout-null", 10,
-                    "non-coinbase vin[%zu] has null prevout", i);
-        }
+                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VOUT_TOTAL_TOOLARGE,
+                "bad-txns-txouttotal-toolarge", 100,
+                "vout total + |value_balance| %lld out of range",
+                (long long)value_out);
     }
 
-    return ZCL_OK;
+    return tx_structural_check_joinsplit_values(tx, out_failure, value_out);
+}
+
+/* Transparent output ranges and their running total, then later checks. */
+static struct zcl_result tx_structural_check_vout_values(
+        const struct transaction *tx,
+        struct domain_consensus_tx_structural_failure *out_failure)
+{
+    /* ── Output value validation ────────────────────────────── */
+    int64_t value_out = 0;
+    for (size_t i = 0; i < tx->num_vout; i++) {
+        if (tx->vout[i].value < 0)
+            DOMAIN_TX_FAIL(out_failure,
+                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VOUT_NEGATIVE,
+                "bad-txns-vout-negative", 100,
+                "vout[%zu].value=%lld < 0",
+                i, (long long)tx->vout[i].value);
+
+        if (tx->vout[i].value > MAX_MONEY)
+            DOMAIN_TX_FAIL(out_failure,
+                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VOUT_TOOLARGE,
+                "bad-txns-vout-toolarge", 100,
+                "vout[%zu].value=%lld > MAX_MONEY",
+                i, (long long)tx->vout[i].value);
+
+        value_out += tx->vout[i].value;
+        if (!MoneyRange(value_out))
+            DOMAIN_TX_FAIL(out_failure,
+                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VOUT_TOTAL_TOOLARGE,
+                "bad-txns-txouttotal-toolarge", 100,
+                "vout running total %lld out of range after index %zu",
+                (long long)value_out, i);
+    }
+
+    return tx_structural_check_value_balance(tx, out_failure, value_out);
+}
+
+/* Serialized-size cap, with the in-block oversize grandfather, then later checks. */
+static struct zcl_result tx_structural_check_serialized_size(
+        const struct transaction *tx,
+        enum domain_tx_check_context ctx,
+        struct domain_consensus_tx_structural_failure *out_failure)
+{
+    /* ── Size limit ─────────────────────────────────────────── */
+    size_t tx_size = transaction_serialize_size(tx);
+    if (tx_size > MAX_TX_SIZE_AFTER_SAPLING) {
+        /* Empirical grandfather (zclassicd LIVE-behavior parity): the
+         * canonical chain carries 413 post-Sapling txs above 102000
+         * (mined when the effective cap was MAX_BLOCK_SIZE; zclassicd
+         * tightened the constant later without grandfathering, so its
+         * own text false-rejects them on resync — proven at block
+         * 478544). Excuse exactly those txs, in-block only, under a
+         * hard MAX_BLOCK_SIZE structural ceiling. The txid is
+         * recomputed from the serialized bytes — never trust a
+         * possibly-stale tx->hash on an accept path. Cold path: fires
+         * at most 413 times in a full reindex. */
+        bool excused = false;
+        if (ctx == DOMAIN_TX_CTX_BLOCK && tx_size <= MAX_BLOCK_SIZE) {
+            struct uint256 txid;
+            if (transaction_hash_serialized(tx, &txid))
+                excused = domain_consensus_tx_oversize_grandfathered(
+                                  &txid, tx_size);
+        }
+        if (!excused)
+            DOMAIN_TX_FAIL(out_failure,
+                           DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_OVERSIZE,
+                           "bad-txns-oversize", 100,
+                           "serialize_size %zu > %u",
+                           tx_size, (unsigned)MAX_TX_SIZE_AFTER_SAPLING);
+    }
+
+    return tx_structural_check_vout_values(tx, out_failure);
+}
+
+/* Non-empty transparent or shielded inputs and outputs, then later checks. */
+static struct zcl_result tx_structural_check_input_output_presence(
+        const struct transaction *tx,
+        enum domain_tx_check_context ctx,
+        struct domain_consensus_tx_structural_failure *out_failure)
+{
+    /* ── Input/output existence ─────────────────────────────── */
+    if (tx->num_vin == 0 && tx->num_joinsplit == 0 &&
+        tx->num_shielded_spend == 0)
+        DOMAIN_TX_FAIL(out_failure,
+                       DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VIN_EMPTY,
+                       "bad-txns-vin-empty", 10,
+                       "no transparent vin, joinsplit, or shielded spend");
+
+    if (tx->num_vout == 0 && tx->num_joinsplit == 0 &&
+        tx->num_shielded_output == 0)
+        DOMAIN_TX_FAIL(out_failure,
+                       DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VOUT_EMPTY,
+                       "bad-txns-vout-empty", 10,
+                       "no transparent vout, joinsplit, or shielded output");
+
+    return tx_structural_check_serialized_size(tx, ctx, out_failure);
+}
+
+/* Version, version-group, and expiry bounds, then the later structural checks. */
+static struct zcl_result tx_structural_check_versions(
+        const struct transaction *tx,
+        enum domain_tx_check_context ctx,
+        struct domain_consensus_tx_structural_failure *out_failure)
+{
+    /* ── Version checks ─────────────────────────────────────── */
+    if (!tx->overwintered && tx->version < SPROUT_MIN_TX_VERSION)
+        DOMAIN_TX_FAIL(out_failure,
+                       DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VERSION_TOO_LOW,
+                       "bad-txns-version-too-low", 100,
+                       "version %d below SPROUT_MIN_TX_VERSION (%d)",
+                       (int)tx->version, SPROUT_MIN_TX_VERSION);
+
+    if (tx->overwintered) {
+        if (tx->version < OVERWINTER_MIN_TX_VERSION)
+            DOMAIN_TX_FAIL(out_failure,
+                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_OVERWINTER_VERSION_TOO_LOW,
+                "bad-tx-overwinter-version-too-low", 100,
+                "overwintered tx version %d below OVERWINTER_MIN_TX_VERSION (%d)",
+                (int)tx->version, OVERWINTER_MIN_TX_VERSION);
+
+        if (tx->version_group_id != OVERWINTER_VERSION_GROUP_ID &&
+            tx->version_group_id != SAPLING_VERSION_GROUP_ID)
+            DOMAIN_TX_FAIL(out_failure,
+                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_VERSION_GROUP_ID,
+                "bad-tx-version-group-id", 100,
+                "unknown version_group_id 0x%08x",
+                (unsigned)tx->version_group_id);
+
+        if (tx->expiry_height >= TX_EXPIRY_HEIGHT_THRESHOLD)
+            DOMAIN_TX_FAIL(out_failure,
+                DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_EXPIRY_HEIGHT_TOO_HIGH,
+                "bad-tx-expiry-height-too-high", 100,
+                "expiry_height %u >= threshold %u",
+                (unsigned)tx->expiry_height,
+                (unsigned)TX_EXPIRY_HEIGHT_THRESHOLD);
+    }
+
+    return tx_structural_check_input_output_presence(tx, ctx, out_failure);
+}
+
+struct zcl_result domain_consensus_check_transaction_structural(
+        const struct transaction *tx,
+        enum domain_tx_check_context ctx,
+        struct domain_consensus_tx_structural_failure *out_failure)
+{
+    if (out_failure) {
+        out_failure->reject_reason = NULL;
+        out_failure->dos = 0;
+    }
+
+    if (!tx)
+        return ZCL_ERR(DOMAIN_CONSENSUS_TX_STRUCTURAL_ERR_NULL_TX,
+                       "check_transaction_structural: null tx");
+
+    return tx_structural_check_versions(tx, ctx, out_failure);
 }
 
 bool domain_consensus_tx_oversize_grandfathered(const struct uint256 *txid,

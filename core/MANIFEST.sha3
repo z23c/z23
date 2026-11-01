@@ -38,7 +38,7 @@
 #       pair — the sealed core's identity, mirrored into
 #       hotswap/core_seal_root.h. FROZEN: SECTION/TREE are additive and
 #       do not enter this preimage.
-b4ad1e05bde88d5cdacb4595ff18724b3e7ea7b7dd91e15a94227756b450b6f3  core/UNSEAL.md
+9aed466ca7cb4ab4691642b1fd84ec388b3d82af1b7899fb6d9ed040ba9f1afb  core/UNSEAL.md
 0154dee8b452e80f28e6d9c915483ab19cf93ee834518edc355885204dad4119  core/chainparams/include/chain/chainparams.h
 76417939b54d9b0d0b2309c66b90fd20a510de3492bb6f97a11f4198292aa01f  core/chainparams/include/chain/chainparamsbase.h
 1b38019875d5bb928f13ca3ac4f2d93f346c4a12699fbb41265f23cc3d7ee8c2  core/chainparams/include/chain/checkpoints.h
@@ -84,7 +84,7 @@ b801543b5e8383e5c490b758992121c46676ff604a94a4a1a06295b764325dd0  core/consensus
 0933ef813d43ac3906d42e0422459601eb443577890e319dae965bde488a3057  core/consensus/src/sighash.c
 7a88ab748db7219da99e8648e7a9a50100fd3c8603427204d168004c3f1fbbec  core/consensus/src/sigops.c
 417cbc905e30b7efacfc5c6d57b05b2eec2c23bcb78c60d3e0bb44a78722b559  core/consensus/src/subsidy.c
-d83b52db063061a543507b8379b52adc41dde738a4ec431c8f4b8de0338a4c64  core/consensus/src/tx_structural.c
+3b17265cc2065e06866ab306b7ed3b8059d8fd705c8c5ea4bc3d5db5d1a83ffc  core/consensus/src/tx_structural.c
 d5d1f5604f46c287795e3d7d53f1739dc93aaa0fac4efe0a7c931e0717b1cbfb  core/consensus/src/upgrades.c
 9e8e2223f403799048c70f1b2347c4357ff0989fcd4d7624b69cd25494503043  core/consensus/src/verify.c
 5d7f97229b8811c216117220f74b79869540c262041639aaea29b74f98ea1806  core/math/include/core/arith_uint256.h
@@ -605,16 +605,16 @@ e84a4566fb4a01985ccbec9a4d3136a278422e1efe4f00cb8d0cf01480531064  core/params/in
 5ed0e4562789e7ea0bd9ff1238a27172669074b3d26201195aafffe1f863558e  core/params/module.cfg
 4d62b9a9b8824925e2f7efebca536ff924a96c7464067472cb07b9dd57e356dc  core/params/src/params.c
 9907071da9b95e13d236ac70fe8fa95612c7873ff9a88102d988c83ba8492b89  core/params/src/upgrades.c
-SECTION  567  4  f90886ee8fc0d5b4a9e13b9ff2762141a8f49195106dd20d6bb4fb2645521023  core
+SECTION  567  4  5949ba6090ac547d75ea939e10c92fba3b72cc90e3303d2a46b7ea34200c7e89  core
 SECTION  12  16  6169522647bfed2194c0519612c2d0feeb318858ce714a56550e426c63b44f14  core/chainparams
 SECTION  6  24  63dff36c30ea1f9c45ed358d05006795f91e44b502d1d1b1196fc4a2cca2570b  core/chainparams/include
 SECTION  6  30  c247859f7b026dc314874fe7f2bfda58f885c05c44ff2fd601ebc3ce25ebeb48  core/chainparams/include/chain
 SECTION  6  20  e8e6989c7106c089c2a518cf992ebe45a4b97b2ae52fdc5e90d898331ceb766b  core/chainparams/src
-SECTION  36  14  fee86f21ef5f8cec3ea433e07970a8e273fc0898924aa094186334f09df1f017  core/consensus
+SECTION  36  14  87b7fc5e0a7b37a1c20f77a8b19f0a4b2d5d296d4c866ec7cbc437e8de0348d1  core/consensus
 SECTION  17  22  9559692f7fa69fb22ef84266cbf87183f16208aa1a9e6ed3ee9178545d0cc295  core/consensus/include
 SECTION  17  29  6072e26bba85c0a24adbd98da9749c7e6b8ac10872726a2c7272df8cc7322fc0  core/consensus/include/domain
 SECTION  17  39  b8a8cb81bbcb38ef4e106701e3df63fb1a4385e27c904f592d8d686dc310879f  core/consensus/include/domain/consensus
-SECTION  19  18  086ae2be2f22ac1858d4db41fa17b1130a078114864773a1a8435298ed50e08a  core/consensus/src
+SECTION  19  18  817631ff8b111d22ed546a929d258243129ec1248f47c4cc17f4323d7fc6e56f  core/consensus/src
 SECTION  10  9  4a12df854665934805645f7b11b9ce279b93b7568fe58dde37f68d84913813da  core/math
 SECTION  5  17  3d74828940990b6914192791641041d1ad63de1b84d7693d2533f1c9b29a7edd  core/math/include
 SECTION  5  22  13bc29100524578193cb79036f24fe9e1d8538c0f45dcc4dd87956a25f4f2b38  core/math/include/core
@@ -685,5 +685,5 @@ SECTION  7  11  9b023bcd18300a51052f45e69609bb741b2832e3ce6e6a02fd21a12ea94647c0
 SECTION  4  19  e07dc0f2326862830b48105e02648f8d76dfeee9a859b7c56679c461e2cca7f1  core/params/include
 SECTION  4  29  5680a2f2d804163e77f94854ee18838480d785b74b297265f2f8a77db9d02242  core/params/include/consensus
 SECTION  2  15  8fdd673c41b8758e48c6fb225c15d7bbdf79f6816066a1d0c793d4bee2c5f6b1  core/params/src
-TREE  a6e56e66742e6b8d9676bbeab38cad0a4ca40011f5d6060b2a61542a724b19a6
-ROOT  cf627c9264d539c718065e63750e0c95b247d3511fcf9006e543a5673f52d766
+TREE  b7098150709092dfef4e1904903a2157049836c63ad50b7844d5318e54fa9f23
+ROOT  1228ab4631ad9b402a4cbb904295a953bc58c6ce32aa9c40fffe5cea43b180f5
