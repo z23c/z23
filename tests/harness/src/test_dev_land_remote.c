@@ -1017,36 +1017,39 @@ static int dlt_rvf_spawn(const char *const argv[], const char *cwd, char *buf,
  * 1 a merge commit alone beyond base, 2 an empty commit (it cannot be
  * cherry-picked). True when it refused with `code` and never launched the
  * child. */
+static bool dlt_rv_direct_commit(const char *wt, const char *base, int shape,
+                                 char *sha, size_t cap)
+{
+    char tree[64], parent[64], prev[80];
+    bool ok = true;
+    (void)snprintf(prev, sizeof(prev), "%s~1", base);
+    if (shape == 0)
+        return dlt_commit(wt, "d1.txt", "1\n") &&
+               dlt_commit(wt, "d2.txt", "2\n") &&
+               DLT_GIT(sha, cap, wt, "rev-parse", "HEAD") == 0;
+    if (shape == 2)
+        return DLT_GIT(NULL, 0, wt, "commit", "--quiet", "--no-verify",
+                       "--allow-empty", "-m", "empty") == 0 &&
+               DLT_GIT(sha, cap, wt, "rev-parse", "HEAD") == 0;
+    ok = DLT_GIT(tree, sizeof(tree), wt, "rev-parse", "HEAD^{tree}") == 0 &&
+         DLT_GIT(parent, sizeof(parent), wt, "rev-parse", prev) == 0;
+    tree[strcspn(tree, "\n")] = '\0';
+    parent[strcspn(parent, "\n")] = '\0';
+    return ok && DLT_GIT(sha, cap, wt, "commit-tree", tree, "-p", base, "-p",
+                         parent, "-m", "merge") == 0;
+}
+
 static bool dlt_rv_direct(const struct dlt_rig *r, const char *base, int shape,
                           const char *code)
 {
-    char wt[900], sha[64] = "", tree[64], parent[64], prev[80];
+    char wt[900], sha[64] = "";
     struct dlt_call c;
     bool ok;
     (void)snprintf(wt, sizeof(wt), "%s/dwt%d", r->base, shape);
-    (void)snprintf(prev, sizeof(prev), "%s~1", base);
     ok = DLT_GIT(NULL, 0, r->sender, "worktree", "add", "--quiet", "--detach",
-                 wt, base) == 0;
-    if (shape == 0)
-        ok = ok && dlt_commit(wt, "d1.txt", "1\n") &&
-             dlt_commit(wt, "d2.txt", "2\n");
-    else if (shape == 1)
-        ok = ok && DLT_GIT(tree, sizeof(tree), wt, "rev-parse",
-                           "HEAD^{tree}") == 0 &&
-             DLT_GIT(parent, sizeof(parent), wt, "rev-parse", prev) == 0;
-    if (ok && shape == 1) {
-        tree[strcspn(tree, "\n")] = '\0';
-        parent[strcspn(parent, "\n")] = '\0';
-        ok = DLT_GIT(sha, sizeof(sha), wt, "commit-tree", tree, "-p", base,
-                     "-p", parent, "-m", "merge") == 0 &&
-             DLT_GIT(NULL, 0, wt, "reset", "--quiet", "--hard", base) == 0;
-    } else if (shape == 2) {
-        ok = ok && DLT_GIT(NULL, 0, wt, "commit", "--quiet", "--no-verify",
-                           "--allow-empty", "-m", "empty") == 0;
-    }
-    if (shape != 1)
-        ok = ok && DLT_GIT(sha, sizeof(sha), wt, "rev-parse", "HEAD") == 0 &&
-             DLT_GIT(NULL, 0, wt, "reset", "--quiet", "--hard", base) == 0;
+                 wt, base) == 0 &&
+         dlt_rv_direct_commit(wt, base, shape, sha, sizeof(sha)) &&
+         DLT_GIT(NULL, 0, wt, "reset", "--quiet", "--hard", base) == 0;
     sha[strcspn(sha, "\n")] = '\0';
     g_rvf.calls = 0;
     dlt_begin(&c, "dev.land.reverify_offer");
