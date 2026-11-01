@@ -69,6 +69,22 @@ static const struct sps_case k_sps_cases[] = {
       SPS_LIC "void f(void)\n{\n    LOG_WARN(\"d\", \"w\");\n}\n",
       SPS_LIC "static void h(void)\n{\n    LOG_WARN_IN(\"f\", \"d\", \"w\");\n}\n"
       "void f(void)\n{\n    h();\n}\n", 0, 0, NULL },
+    { "a LOG_ERROR moved into a static helper that the named function calls",
+      SPS_LIC "int f(void)\n{\n    LOG_ERROR(\"d\", \"e\");\n    return 0;\n}\n",
+      SPS_LIC "static void h(void)\n{\n    LOG_ERROR_IN(\"f\", \"d\", \"e\");\n}\n"
+      "int f(void)\n{\n    h();\n    return 0;\n}\n", 0, 0, NULL },
+    { "a LOG_ERROR_IN naming a function that does not call the helper",
+      SPS_LIC "int f(void)\n{\n    LOG_ERROR(\"d\", \"e\");\n    return 0;\n}\n",
+      SPS_LIC "static void h(void)\n{\n    LOG_ERROR_IN(\"f\", \"d\", \"e\");\n}\n"
+      "int f(void)\n{\n    return 0;\n}\n", 0, 1, "LOG call missing from f" },
+    { "a LOG_ERROR_IN in a helper that is not static",
+      SPS_LIC "int f(void)\n{\n    LOG_ERROR(\"d\", \"e\");\n    return 0;\n}\n",
+      SPS_LIC "void h(void)\n{\n    LOG_ERROR_IN(\"f\", \"d\", \"e\");\n}\n"
+      "int f(void)\n{\n    h();\n    return 0;\n}\n", 0, 1, "LOG call missing from f" },
+    { "a LOG_ERROR_IN naming a function missing from the file",
+      SPS_LIC "int f(void)\n{\n    LOG_ERROR(\"d\", \"e\");\n    return 0;\n}\n",
+      SPS_LIC "static void h(void)\n{\n    LOG_ERROR_IN(\"nope\", \"d\", \"e\");\n}\n"
+      "int f(void)\n{\n    h();\n    return 0;\n}\n", 0, 1, "LOG call missing from f" },
     { "a LOG call joined onto one line with other spacing",
       SPS_LIC SPS_DUP, SPS_LIC "\n/* twin note */\nint dup(void)\n{\n    /* inside twin */\n"
       "    LOG_ERR(\"dup %d\",     1);\n    return 0;\n}\n", 0, 0, NULL },
