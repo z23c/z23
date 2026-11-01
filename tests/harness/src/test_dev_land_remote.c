@@ -487,7 +487,10 @@ static bool dlt_flip(const char *src, const char *dst)
     if (!f)
         return false;
     n = fread(blob, 1, sizeof(blob), f);
-    ok = fclose(f) == 0 && n > 0 && n < sizeof(blob);
+    ok = !ferror(f);
+    ok = fclose(f) == 0 && ok && n > 0 && n < sizeof(blob);
+    if (!ok)
+        return false;
     blob[n - 1] ^= 0xff;
     f = fopen(dst, "wb");
     if (!f)
@@ -888,6 +891,8 @@ static bool dlt_rv_offer(const struct dlt_rig *r, const char *branch,
                           "int big(void){return 1;}\nint big_a(void){return "
                           "3;}\nint other(void){return 2;}\n") &&
          DLT_GIT(sha, sizeof(sha), r->sender, "rev-parse", "HEAD") == 0;
+    if (!ok)
+        return false;
     sha[strcspn(sha, "\n")] = '\0';
     dlt_send_x(&c, r, sha, bundle, false);
     ok = c.reply.status == ZCL_COMMAND_STATUS_PASSED;
