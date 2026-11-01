@@ -1,5 +1,11 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: The Mach-O half of the object compiler's IDENTITY: the driver (an xcode-select shim followed to the real compiler), its transitive dylib closure read from the load commands, and the OS and dyld shared cache identity for the dylibs that live only in the cache. */
+/* realpath() is declared only under _DEFAULT_SOURCE on glibc without the
+ * fortify inline; set it before the first header pulls in <features.h>. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
+
 #include "clang_manifest_core.h"
 
 #if defined(__APPLE__)
