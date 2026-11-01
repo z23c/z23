@@ -213,6 +213,13 @@ int64_t node_db_turbo_cache_kib(void);
  * ram <= 0 (unreadable RAM) yields the constrained size. */
 int64_t node_db_turbo_cache_kib_for_ram(int64_t ram);
 
+/* Test seam: force the effective RAM (bytes) that the cache and mmap
+ * sizing on database open reads, instead of the host's measurement and
+ * cgroup caps. ram <= 0 simulates unreadable RAM. Tests must call
+ * node_db_test_clear_effective_ram() afterwards. */
+void node_db_test_set_effective_ram(int64_t ram);
+void node_db_test_clear_effective_ram(void);
+
 /* Execute `sql`, logging any error with `where` context. Returns the
  * sqlite3 rc so callers can make tolerance decisions. (Defined in
  * database.c; used by migrations and performance-mode helpers.) */
