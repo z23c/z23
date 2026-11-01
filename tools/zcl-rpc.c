@@ -264,21 +264,134 @@ static int rpc_max_time_secs(void)
     return (int)v;
 }
 
+/* curl appends this marker after the body (-w), so the HTTP status is known
+ * even when the body is empty or not JSON. split_http_status strips it before
+ * the body reaches the caller: a successful reply is byte-identical. */
+#define ZCL_RPC_STATUS_MARK "\nZCLRPC_HTTP_STATUS:"
+
+/* Name the transport failure in why. curl's exit code is the only signal
+ * left once the node has closed the socket, so each case gets its own words
+ * and an operator can tell a refusal, a timeout and a silent close apart. */
+static void describe_curl_failure(int code, int max_secs, char *why,
+                                  size_t cap)
+{
+    switch (code) {
+    case 7:
+        snprintf(why, cap, "could not connect (connection refused)");
+        break;
+    case 28:
+        snprintf(why, cap, "timed out waiting for the node's reply after %d s",
+                 max_secs);
+        break;
+    case 52:
+        snprintf(why, cap, "node closed the connection before replying");
+        break;
+    case 18:
+    case 56:
+        snprintf(why, cap,
+                 "node closed or reset the connection mid-reply (curl exit %d)",
+                 code);
+        break;
+    default:
+        snprintf(why, cap, "curl failed talking to the node (curl exit %d)",
+                 code);
+        break;
+    }
+}
+
+/* Read at most out_len-1 reply bytes. A longer reply sets *truncated and is
+ * drained so curl can finish. Returns the byte count, or -1 on a read error. */
+static long read_curl_reply(FILE *p, char *out, size_t out_len,
+                            bool *truncated)
+{
+    size_t total = fread(out, 1, out_len - 1, p);
+    bool read_ok = !ferror(p);
+    out[total] = '\0';
+    if (read_ok && total == out_len - 1 && fgetc(p) != EOF) {
+        char scratch[4096];
+        *truncated = true;
+        while (fread(scratch, 1, sizeof(scratch), p) > 0)
+            ;
+    }
+    return read_ok ? (long)total : -1;
+}
+
+/* Remove the trailing status marker and return the HTTP status it carries,
+ * or -1 when no marker is present. *total shrinks to the body length. */
+static long split_http_status(char *out, size_t *total)
+{
+    const size_t mark_len = sizeof(ZCL_RPC_STATUS_MARK) - 1;
+    char *mark = NULL;
+    for (char *p = out; (p = strstr(p, ZCL_RPC_STATUS_MARK)) != NULL; p++)
+        mark = p;
+    if (!mark) return -1;
+    char *end = NULL;
+    long status = strtol(mark + mark_len, &end, 10);
+    if (end == mark + mark_len || *end != '\0') return -1;
+    *mark = '\0';
+    *total = (size_t)(mark - out);
+    return status;
+}
+
+static bool body_is_json(const char *s)
+{
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    return *s == '{' || *s == '[';
+}
+
+/* Decide the outcome of one curl run. A transport failure returns -1 with
+ * why set. A reply that is not JSON from a non-200 status, or an empty
+ * reply, returns its length with why set, so the caller can still run its
+ * Unauthorized retry and reports the reason only if nothing better arrives. */
+static long finish_curl_reply(int code, char *out, long total, bool truncated,
+                              size_t out_len, int max_secs, char *why,
+                              size_t cap)
+{
+    if (code != 0) {
+        describe_curl_failure(code, max_secs, why, cap);
+        return -1;
+    }
+    if (total < 0) {
+        snprintf(why, cap, "reading the node's reply failed");
+        return -1;
+    }
+    if (truncated) {
+        snprintf(why, cap, "node reply exceeds the %zu-byte reply buffer",
+                 out_len);
+        return -1;
+    }
+    size_t len = (size_t)total;
+    long status = split_http_status(out, &len);
+    if (status > 0 && status != 200 && !body_is_json(out))
+        snprintf(why, cap, "node replied HTTP %ld without a JSON body", status);
+    else if (len == 0)
+        snprintf(why, cap, "node replied with an empty body");
+    return (long)len;
+}
+
 static int rpc_call_posix(const char *host, int port, const char *cookie,
-                          const char *body, char *out, size_t out_len)
+                          const char *body, char *out, size_t out_len,
+                          char *why, size_t why_cap)
 {
     int max_time_secs = rpc_max_time_secs();
-    if (max_time_secs < 0) return -1;
+    if (max_time_secs < 0) {
+        snprintf(why, why_cap, "ZCL_RPC_MAX_TIME_SECS is not a positive integer");
+        return -1;
+    }
 
     /* Write body to temp file to avoid shell quoting issues */
     char tmpf[] = "/tmp/zcl-rpc-XXXXXX";
     int tfd = mkstemp(tmpf);
-    if (tfd < 0) return -1;
+    if (tfd < 0) {
+        snprintf(why, why_cap, "could not create the request body file");
+        return -1;
+    }
     if (!write_all(tfd, body, strlen(body))) {
         fprintf(stderr, "zcl-rpc: writing request body to %s failed: %s\n",
                 tmpf, strerror(errno));
         close(tfd);
         unlink(tmpf);
+        snprintf(why, why_cap, "could not write the request body");
         return -1;
     }
     /* close(2) can report a deferred write error; the body must be complete
@@ -287,6 +400,7 @@ static int rpc_call_posix(const char *host, int port, const char *cookie,
         fprintf(stderr, "zcl-rpc: closing request body %s failed: %s\n",
                 tmpf, strerror(errno));
         unlink(tmpf);
+        snprintf(why, why_cap, "could not close the request body file");
         return -1;
     }
 
@@ -294,54 +408,61 @@ static int rpc_call_posix(const char *host, int port, const char *cookie,
     if (!shell_quote(cookie, quoted_cookie, sizeof(quoted_cookie))) {
         fprintf(stderr, "zcl-rpc: RPC credential is too long to quote\n");
         unlink(tmpf);
+        snprintf(why, why_cap, "RPC credential is too long to quote");
         return -1;
     }
     char cmd[16384];
     int cmd_n = snprintf(cmd, sizeof(cmd),
         "curl -s --max-time %d --user %s "
         "-d @%s -H 'content-type:text/plain;' "
+        "-w '\\nZCLRPC_HTTP_STATUS:%%{http_code}' "
         "http://%s:%d/ 2>/dev/null",
         max_time_secs, quoted_cookie, tmpf, host, port);
     if (cmd_n <= 0 || (size_t)cmd_n >= sizeof(cmd)) {
         fprintf(stderr, "zcl-rpc: curl command is too long\n");
         unlink(tmpf);
+        snprintf(why, why_cap, "curl command is too long");
         return -1;
     }
 
     FILE *p = popen(cmd, "r");
     if (!p) {
         unlink(tmpf);
+        snprintf(why, why_cap, "could not start curl");
         return -1;
     }
 
-    size_t total = fread(out, 1, out_len - 1, p);
-    bool read_ok = !ferror(p);
-    out[total] = '\0';
+    bool truncated = false;
+    long total = read_curl_reply(p, out, out_len, &truncated);
     int status = pclose(p);
     unlink(tmpf);
-    if (!read_ok || status < 0 || !WIFEXITED(status) ||
-        WEXITSTATUS(status) != 0)
-        return -1;
-    return (int)total;
+    int code = (status >= 0 && WIFEXITED(status)) ? WEXITSTATUS(status) : -1;
+    return (int)finish_curl_reply(code, out, total, truncated, out_len,
+                                  max_time_secs, why, why_cap);
 }
 #endif
 
 static int rpc_call(const char *host, int port, const char *cookie,
                     const char *method, const char *params_json,
-                    char *out, size_t out_len)
+                    char *out, size_t out_len, char *why, size_t why_cap)
 {
+    why[0] = '\0';
     char body[8192];
     int body_n = snprintf(body, sizeof(body),
         "{\"jsonrpc\":\"1.0\",\"method\":\"%s\",\"params\":[%s],\"id\":1}",
         method, params_json ? params_json : "");
     if (body_n <= 0 || (size_t)body_n >= sizeof(body)) {
-        fprintf(stderr, "zcl-rpc: request body is too long\n");
+        snprintf(why, why_cap, "request body is too long");
         return -1;
     }
 #if defined(_WIN32)
-    return rpc_call_windows(host, port, cookie, body, body_n, out, out_len);
+    int n = rpc_call_windows(host, port, cookie, body, body_n, out, out_len);
+    if (n < 0 && why[0] == '\0')
+        snprintf(why, why_cap, "could not reach the node");
+    return n;
 #else
-    return rpc_call_posix(host, port, cookie, body, out, out_len);
+    return rpc_call_posix(host, port, cookie, body, out, out_len, why,
+                          why_cap);
 #endif
 }
 
@@ -459,7 +580,8 @@ static bool compose_auth_paths(char *cookie_path, size_t cookie_cap,
  * negative value means the caller must stop. */
 static int conf_retry_auth(int *n_out, const char *datadir, const char *home,
                            int port, const char *method, const char *params,
-                           char *response, size_t response_cap)
+                           char *response, size_t response_cap, char *why,
+                           size_t why_cap)
 {
     char conf_path2[512];
     if (datadir)
@@ -472,8 +594,27 @@ static int conf_retry_auth(int *n_out, const char *datadir, const char *home,
     int auth = load_conf_auth(conf_path2, fallback, sizeof(fallback));
     if (auth > 0)
         *n_out = rpc_call("127.0.0.1", port, fallback, method, params,
-                          response, response_cap);
+                          response, response_cap, why, why_cap);
     return auth;
+}
+
+/* Print the one-line failure for a reply that never produced a usable
+ * body. The line names the case, the endpoint and the method. */
+static int report_rpc_failure(const char *why, int port, const char *method)
+{
+    fprintf(stderr, "zcl-rpc: %s (127.0.0.1:%d method=%s)\n",
+            why[0] != '\0' ? why : "no reply from the node", port, method);
+    return 1;
+}
+
+/* Print a usable reply, or report why there is none. */
+static int finish_rpc_reply(int n, const char *response, const char *why,
+                            int port, const char *method)
+{
+    if (n <= 0 || why[0] != '\0')
+        return report_rpc_failure(why, port, method);
+    printf("%s\n", response);
+    return 0;
 }
 
 int main(int argc, char *argv[])
@@ -520,24 +661,24 @@ int main(int argc, char *argv[])
     const char *port_env = getenv("ZCL_RPCPORT");
     int port = rpc_port_from_env(port_env);
 
-    char response[1024 * 1024];
+    /* The reply buffer carries the status marker curl appends, so it is a
+     * little larger than the 1 MiB reply it admits. */
+    char response[1024 * 1024 + 256];
+    char why[256] = "";
     int n = rpc_call("127.0.0.1", port, cookie, argv[1], params,
-                     response, sizeof(response));
-    if (n < 0) {
-        fprintf(stderr, "Connection failed (port %d)\n", port);
-        return 1;
-    }
+                     response, sizeof(response), why, sizeof(why));
+    if (n < 0)
+        return report_rpc_failure(why, port, argv[1]);
 
     /* If we got "Unauthorized", retry with conf auth */
     if (n == 0 || strstr(response, "Unauthorized")) {
         int retried = n;
         if (conf_retry_auth(&retried, datadir, home, port, argv[1],
-                            params, response, sizeof(response)) < 0)
+                            params, response, sizeof(response), why,
+                            sizeof(why)) < 0)
             return 1;
         n = retried;
     }
 
-    if (n > 0)
-        printf("%s\n", response);
-    return n > 0 ? 0 : 1;
+    return finish_rpc_reply(n, response, why, port, argv[1]);
 }
