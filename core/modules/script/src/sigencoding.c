@@ -8,7 +8,8 @@
 #include "script/sigencoding.h"
 #include "keys/pubkey.h"
 
-static bool is_valid_signature_encoding(const unsigned char *sig, size_t len)
+/* True when len is in [8, 72] and the SEQUENCE tag and length match. */
+static bool is_valid_signature_der_header(const unsigned char *sig, size_t len)
 {
     if (len < 8 || len > 72)
         return false;
@@ -19,23 +20,41 @@ static bool is_valid_signature_encoding(const unsigned char *sig, size_t len)
     if (sig[1] != len - 2)
         return false;
 
+    return true;
+}
+
+/* Byte offset of the S tag after the R INTEGER checks pass; otherwise 0. */
+static uint32_t signature_r_integer_s_offset(const unsigned char *sig,
+                                             size_t len)
+{
     if (sig[2] != 0x02)
-        return false;
+        return 0;
 
     uint32_t lenR = sig[3];
     if (lenR == 0)
-        return false;
+        return 0;
 
     if (sig[4] & 0x80)
-        return false;
+        return 0;
 
     if (lenR > (len - 7))
-        return false;
+        return 0;
 
     if (lenR > 1 && sig[4] == 0x00 && !(sig[5] & 0x80))
+        return 0;
+
+    return lenR + 4;
+}
+
+static bool is_valid_signature_encoding(const unsigned char *sig, size_t len)
+{
+    if (!is_valid_signature_der_header(sig, len))
         return false;
 
-    uint32_t startS = lenR + 4;
+    uint32_t startS = signature_r_integer_s_offset(sig, len);
+    if (startS == 0)
+        return false;
+
     if (sig[startS] != 0x02)
         return false;
 
