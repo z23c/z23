@@ -70,7 +70,8 @@ int main(void) {
     pair[1].hash[0] ^= 1;
     assert(!blue_app_catalog_unique_hash(pair, count, "ZCL",
                                          entries[0].hash));
-    strcpy(pair[1].name, "OTHER");
+    int written = snprintf(pair[1].name, sizeof pair[1].name, "%s", "OTHER");
+    assert(written == 5);
     assert(blue_app_catalog_unique_hash(pair, count, "ZCL",
                                         entries[0].hash));
     assert(blue_app_catalog_parse(two, sizeof two, entries, 1,

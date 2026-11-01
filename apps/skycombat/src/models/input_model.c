@@ -83,6 +83,14 @@ static float normalize_axis(short value) {
     return value / 32767.0f;
 }
 
+/* Copy a validation message into the model's last_error. An over-long message
+ * is replaced by a fixed, shorter one so the error is still reported. */
+static void input_model_store_error(input_model_t* model, const char* text) {
+    int written = snprintf(model->last_error, sizeof model->last_error, "%s", text);
+    if (written < 0 || (size_t)written >= sizeof model->last_error)
+        snprintf(model->last_error, sizeof model->last_error, "%s", "input invalid");
+}
+
 validated_input_t input_model_validate(const input_model_t* model,
                                        const short* axes,
                                        const short* buttons) {
@@ -98,7 +106,7 @@ validated_input_t input_model_validate(const input_model_t* model,
             result.is_valid = false;
             snprintf(result.validation_error, sizeof(result.validation_error),
                      "Axis %d out of range: %d", i, axes[i]);
-            strcpy(((input_model_t*)model)->last_error, result.validation_error);
+            input_model_store_error((input_model_t*)model, result.validation_error);
             return result;
         }
         
@@ -107,7 +115,7 @@ validated_input_t input_model_validate(const input_model_t* model,
             result.is_valid = false;
             snprintf(result.validation_error, sizeof(result.validation_error),
                      "L2 trigger invalid value: %d", axes[i]);
-            strcpy(((input_model_t*)model)->last_error, result.validation_error);
+            input_model_store_error((input_model_t*)model, result.validation_error);
             return result;
         }
         
@@ -115,7 +123,7 @@ validated_input_t input_model_validate(const input_model_t* model,
             result.is_valid = false;
             snprintf(result.validation_error, sizeof(result.validation_error),
                      "R2 trigger invalid value: %d (must be -32767 to 0)", axes[i]);
-            strcpy(((input_model_t*)model)->last_error, result.validation_error);
+            input_model_store_error((input_model_t*)model, result.validation_error);
             return result;
         }
         
@@ -131,7 +139,7 @@ validated_input_t input_model_validate(const input_model_t* model,
         result.is_valid = false;
         snprintf(result.validation_error, sizeof(result.validation_error),
                  "Invalid button state for gas/brake");
-        strcpy(((input_model_t*)model)->last_error, result.validation_error);
+        input_model_store_error((input_model_t*)model, result.validation_error);
         return result;
     }
     

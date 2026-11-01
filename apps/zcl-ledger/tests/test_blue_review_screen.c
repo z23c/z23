@@ -40,8 +40,9 @@ static void test_output_pages(void) {
     assert(strcmp(lines[1], "AMOUNT: 0.00000100 ZCL") == 0);
     assert(strcmp(lines[2], "ZCL MAINNET ADDRESS") == 0);
     char displayed[40];
-    strcpy(displayed, lines[3]);
-    strcat(displayed, lines[4]);
+    int written = snprintf(displayed, sizeof displayed, "%.*s%.*s",
+        (int)sizeof lines[3], lines[3], (int)sizeof lines[4], lines[4]);
+    assert(written >= 0 && (size_t)written < sizeof displayed);
     assert(strcmp(displayed, address) == 0);
     assert(strcmp(lines[5], "READ ONLY; NO SIGNING") == 0);
     assert(blue_review_screen_output(wire, length, 1, digest, lines));
@@ -68,8 +69,9 @@ static void test_output_pages(void) {
                                     address) == 0);
     assert(blue_review_screen_output(wire, length, 0, digest, lines));
     assert(strcmp(lines[0], "OUTPUT 1/2: P2SH") == 0);
-    strcpy(displayed, lines[3]);
-    strcat(displayed, lines[4]);
+    written = snprintf(displayed, sizeof displayed, "%.*s%.*s",
+        (int)sizeof lines[3], lines[3], (int)sizeof lines[4], lines[4]);
+    assert(written >= 0 && (size_t)written < sizeof displayed);
     assert(strcmp(displayed, address) == 0);
     assert(!blue_review_screen_output(wire, length, 2, digest, lines));
     assert(!blue_review_screen_output(wire, length - 1, 0, digest, lines));

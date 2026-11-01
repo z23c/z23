@@ -21,6 +21,16 @@ static size_t shown_count;
 static wallet_boot_material boot_material;
 static uint8_t external_hash[20], internal_hash[20];
 static unsigned derivations, displays, exits, aborts, signer_wipes;
+
+/* Append one address line to out (holding `used` bytes), asserting that it fits. */
+static size_t append_address_line(char *out, size_t out_size, size_t used,
+    const char *line, size_t line_size) {
+    size_t length = strnlen(line, line_size);
+    assert(length < out_size - used);
+    memcpy(out + used, line, length);
+    out[used + length] = 0;
+    return used + length;
+}
 static bool reject_second_path, reject_pin, reject_init,
     reject_init_status, reject_pair;
 static bool pin_lost, drop_pin_on_internal_pair;
@@ -839,8 +849,10 @@ int main(void) {
     assert(zcl_address_from_hash160(external_hash, false, expected) == 0);
     assert(strcmp(receive_address, expected) == 0);
     char combined[ZCL_WALLET_ADDRESS_CHARS + 1] = {0};
+    size_t combined_used = 0;
     for (size_t i = 0; i < ZCL_WALLET_ADDRESS_LINES; ++i)
-        strcat(combined, address_lines[i]);
+        combined_used = append_address_line(combined, sizeof combined,
+            combined_used, address_lines[i], sizeof address_lines[i]);
     assert(strcmp(combined, expected) == 0);
     for (unsigned event = SEPROXYHAL_TAG_USB_EVENT_RESET;
          event <= SEPROXYHAL_TAG_USB_EVENT_SUSPENDED; ++event) {

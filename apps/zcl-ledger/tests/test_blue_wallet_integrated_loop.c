@@ -36,6 +36,16 @@ static bool reset_during_blake_init;
 static unsigned signer_interrupt;
 static char observed_recipient[40];
 static char observed_amount[32];
+
+/* Append one address line to out (holding `used` bytes), asserting that it fits. */
+static size_t append_address_line(char *out, size_t out_size, size_t used,
+    const char *line, size_t line_size) {
+    size_t length = strnlen(line, line_size);
+    assert(length < out_size - used);
+    memcpy(out + used, line, length);
+    out[used + length] = 0;
+    return used + length;
+}
 static const uint8_t fixture_digest[32] = {
     0xbc, 0x49, 0xff, 0x23, 0x8f, 0xbb, 0x4a, 0x74,
     0x67, 0xfd, 0x9c, 0x4e, 0x30, 0xad, 0x85, 0xa2,
@@ -378,8 +388,12 @@ static bool device_continue(void *context, uint32_t index,
         strcmp(payment.screen.address, expected_address) == 0 &&
         strcmp(screen->address, expected_address) == 0);
     char displayed_address[40] = {0};
+    size_t displayed_used = 0;
     for (unsigned line = 0; line < 3; ++line)
-        strcat(displayed_address, payment.screen.address_lines[line]);
+        displayed_used = append_address_line(displayed_address,
+            sizeof displayed_address, displayed_used,
+            payment.screen.address_lines[line],
+            sizeof payment.screen.address_lines[line]);
     assert(strcmp(displayed_address, expected_address) == 0);
     assert(find_text("ZCL MAINNET ADDRESS") && find_text("EXIT"));
     if (index == 1) {
@@ -891,9 +905,11 @@ static void test_gui_matches_blue(void) {
     assert(strcmp(loaded.app_version, "0.3.46") != 0);
     assert(strcmp(receive_address, loaded.receive) == 0);
     char joined[40] = {0};
+    size_t joined_used = 0;
     for (unsigned line = 0; line < 3; ++line) {
         assert(find_text(address_lines[line]));
-        strcat(joined, address_lines[line]);
+        joined_used = append_address_line(joined, sizeof joined, joined_used,
+            address_lines[line], sizeof address_lines[line]);
     }
     assert(strcmp(joined, loaded.receive) == 0);
     unsigned before = sign_calls;

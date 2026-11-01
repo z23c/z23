@@ -141,7 +141,9 @@ static void test_accessible_wrap(void) {
     assert(!blue_review_accessible_wrap("\x01", wrapped));
     blue_review_app app = {0};
     blue_review_app_reset(&app);
-    strcpy(app.lines[0], "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
+    int written = snprintf(app.lines[0], sizeof app.lines[0], "%s",
+                           "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
+    assert(written == 31);
     char path[96];
     assert(snprintf(path, sizeof path, "/tmp/zcl-accessible-%ld.png",
                     (long)getpid()) > 0);
@@ -220,7 +222,8 @@ static void simulate_rejected_review(void) {
     memcpy(apdu, (uint8_t[]){0xa5, 0x11, 0, 0, 8,
                             4, 0, 0, 0x80, 0x85, 0x20, 0x2f, 0x89}, 13);
     assert(command(&app, apdu, 13, &reply_length) == 0x9000);
-    strcpy(app.lines[0], "UPLOADING");
+    int written = snprintf(app.lines[0], sizeof app.lines[0], "%s", "UPLOADING");
+    assert(written == 9);
     apdu[4] = 9;
     assert(command(&app, apdu, 13, &reply_length) == 0x6700);
     assert(reply_length == 0);

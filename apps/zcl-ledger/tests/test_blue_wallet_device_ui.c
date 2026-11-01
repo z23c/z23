@@ -1116,7 +1116,7 @@ static void test_sign_facts_change_after_display_aborts(void) {
         case 5:
             payment.input_zat += 100000000;
             payment.fee_zat += 100000000;
-            strcpy(fee_text, "2.00000000 ZCL");
+            assert(snprintf(fee_text, sizeof fee_text, "%s", "2.00000000 ZCL") == 14);
             break;
         case 6: payment.input_record[0][0] ^= 1u; break;
         case 7: payment.review.replay.commitment[0] ^= 1u; break;

@@ -23,9 +23,11 @@ static bool reject_hash(const uint8_t *bytes, size_t length,
 static void check_address(const blue_payment_screen *screen,
     const char *expected) {
     char combined[40];
-    strcpy(combined, screen->address_lines[0]);
-    strcat(combined, screen->address_lines[1]);
-    strcat(combined, screen->address_lines[2]);
+    int written = snprintf(combined, sizeof combined, "%.*s%.*s%.*s",
+        (int)sizeof screen->address_lines[0], screen->address_lines[0],
+        (int)sizeof screen->address_lines[1], screen->address_lines[1],
+        (int)sizeof screen->address_lines[2], screen->address_lines[2]);
+    assert(written >= 0 && (size_t)written < sizeof combined);
     assert(strlen(combined) == 35);
     assert(strcmp(combined, screen->address) == 0);
     assert(strcmp(combined, expected) == 0);
