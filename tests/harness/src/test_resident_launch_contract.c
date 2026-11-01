@@ -42,7 +42,6 @@
 #include "../../../contexts/explorer/modules/presentation/src/presentation_focus_internal.h"
 #include "platform/os_proc.h"
 #include "platform/os_sandbox.h"
-#include "platform/clock.h"
 #include "platform/time_compat.h"
 #if !defined(_WIN32)
 #include <time.h>
@@ -112,11 +111,6 @@ static_assert(RESIDENT_RESULT_DEADLINE_MS > RESIDENT_STARTUP_PLATFORM_MS,
  * (exec, dynamic link, first write), not a speed claim, so it is generous
  * enough that a pool of 28 busy workers cannot starve a healthy child past it. */
 #define RLC_READY_WAIT_MS 120000
-/* Wall bound for typing while a preview runs: catches typing that waits on
- * the preview longer than this, not a speed claim (the CPU bound in
- * rlc_task_typing is). */
-#define RLC_TYPING_WALL_MS 2000
-
 #define RLC_CHECK(name, expr) do {                                        \
     printf("resident_launch_contract: %s... ", (name));                   \
     fflush(stdout);                                                       \
@@ -933,18 +927,34 @@ static bool rlc_task_try_keep(struct task_update *update)
         task_update_keep(update).ok && rlc_task_wait(update);
 }
 
+/* Nanoseconds this thread has spent runnable but waiting for a CPU (field 2
+ * of /proc/thread-self/schedstat), or -1 where the kernel does not say. */
+static int64_t rlc_runqueue_wait_ns(void)
+{
+#if defined(__linux__)
+    FILE *f = fopen("/proc/thread-self/schedstat", "r");
+    if (!f)
+        return -1;
+    unsigned long long on_cpu = 0, waited = 0;
+    int got = fscanf(f, "%llu %llu", &on_cpu, &waited);
+    (void)fclose(f);
+    return got == 2 && waited <= (unsigned long long)INT64_MAX ? (int64_t)waited : -1;
+#else
+    return -1;
+#endif
+}
+
 static int rlc_task_typing(struct task_editor *editor)
 {
     int failures = 0;
-    /* Two bounds. This thread's CPU time grades the work done (50 ms, as
-     * before) without counting a core taken away by 28 busy workers. Wall time
-     * keeps the "while preview runs" claim: a CPU clock does not advance while
-     * the thread is blocked, so typing that waited on the preview worker or
-     * its confined child would pass the CPU bound alone; the wall bound
-     * catches any such wait longer than RLC_TYPING_WALL_MS while tolerating
-     * starvation of about 1 ms of work by three orders of magnitude. */
-    int64_t wall_before = platform_time_monotonic_us();
-    int64_t before = clock_thread_cpu_ns();
+    /* 50 ms of wall time, as before, minus only the time this thread sat
+     * runnable on the run queue while other jobs held every core (28 test
+     * workers on a loaded host). Time spent blocked, on the preview worker,
+     * its confined child or anything else, still counts, so typing that waits
+     * on the preview fails as it always did. Where the kernel does not report
+     * run-queue time, nothing is subtracted and the bound is plain wall time. */
+    int64_t queued_before = rlc_runqueue_wait_ns();
+    int64_t before = platform_time_monotonic_us();
     struct zcl_result typed = ZCL_OK;
     const char *text = "Typing while preview runs";
     for (size_t i = 0; text[i] && typed.ok; ++i)
@@ -954,13 +964,14 @@ static int rlc_task_typing(struct task_editor *editor)
     struct zcl_present_model_bitmap_v1 frame = {0};
     char error[256];
     bool pixels = rendered.ok && zcl_present_model_render_editor_v1(&model, &frame, error, sizeof(error));
-    int64_t elapsed = (clock_thread_cpu_ns() - before) / 1000;
-    int64_t wall_ms = (platform_time_monotonic_us() - wall_before) / 1000;
+    int64_t wall_us = platform_time_monotonic_us() - before;
+    int64_t queued_after = rlc_runqueue_wait_ns();
+    int64_t queued_us = queued_before >= 0 && queued_after >= queued_before
+        ? (queued_after - queued_before) / 1000 : 0;
+    int64_t elapsed = wall_us - queued_us;
     RLC_CHECK("task updates: typing reaches real frame while preview runs", typed.ok && pixels && elapsed < 50000);
-    RLC_CHECK("task updates: typing does not wait on the running preview",
-              wall_ms < RLC_TYPING_WALL_MS);
-    printf("task updates: input_to_frame_us=%lld wall_ms=%lld\n", (long long)elapsed,
-           (long long)wall_ms);
+    printf("task updates: input_to_frame_us=%lld wall_us=%lld runqueue_us=%lld\n",
+           (long long)elapsed, (long long)wall_us, (long long)queued_us);
     zcl_present_model_bitmap_free_v1(&frame);
     return failures;
 }
