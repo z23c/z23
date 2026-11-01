@@ -61,9 +61,14 @@ static char g_datadir[1024];
  * on this service's thread: a token held for minutes by a boot-time scan would
  * make storage_housekeeping_stop()'s join wait it out. try_begin() naps at
  * most 200 ms per attempt, so the stop flag is seen at that cadence. Returns
- * false (token NOT held) once a stop or registry shutdown is requested. */
-static bool sh_maintenance_begin(void)
+ * false (token NOT held; the caller must not call maintenance_end) once a
+ * stop or registry shutdown is requested. A non-cancelable caller (a direct
+ * storage_housekeeping_sweep(), which no stop request governs) keeps the
+ * original blocking begin and always gets the token. */
+static bool sh_maintenance_begin(bool cancelable)
 {
+    if (!cancelable)
+        return storage_pacing_maintenance_begin();
     for (;;) {
         pthread_mutex_lock(&g_lock);
         bool stop = g_stop_requested;
@@ -75,7 +80,7 @@ static bool sh_maintenance_begin(void)
     }
 }
 
-static void sweep_projection(const struct storage_pacing *pacing)
+static bool sweep_projection(const struct storage_pacing *pacing, bool cancelable)
 {
     /* Compaction can refuse before measuring a closed or unavailable store.
      * Preserve the unavailable sentinel until it supplies an observation. */
@@ -83,8 +88,8 @@ static void sweep_projection(const struct storage_pacing *pacing)
         .page_size = -1, .page_count = -1, .free_pages = -1,
         .file_bytes = -1, .live_bytes = -1, .free_bytes = -1,
     };
-    if (!sh_maintenance_begin())
-        return;
+    if (!sh_maintenance_begin(cancelable))
+        return false;
     bool compacted = projection_store_compact_if_needed(
         pacing->compact_floor_bytes, pacing->compact_ratio_pct, NULL,
         &after);
@@ -96,13 +101,14 @@ static void sweep_projection(const struct storage_pacing *pacing)
     if (compacted)
         g_stats.projection_compactions++;
     pthread_mutex_unlock(&g_lock);
+    return true;
 }
 
-static void sweep_topology(const struct storage_pacing *pacing)
+static bool sweep_topology(const struct storage_pacing *pacing, bool cancelable)
 {
     int64_t wal_before = -1;
-    if (!sh_maintenance_begin())
-        return;
+    if (!sh_maintenance_begin(cancelable))
+        return false;
     bool truncated = topology_store_wal_checkpoint_if_over(
         pacing->wal_truncate_bytes, &wal_before);
     storage_pacing_maintenance_end();
@@ -113,14 +119,16 @@ static void sweep_topology(const struct storage_pacing *pacing)
     if (truncated)
         g_stats.topology_checkpoints++;
     pthread_mutex_unlock(&g_lock);
+    return true;
 }
 
-static void sweep_logs(const char *datadir, const struct storage_pacing *pacing)
+static bool sweep_logs(const char *datadir, const struct storage_pacing *pacing,
+                       bool cancelable)
 {
     if (!datadir || !datadir[0])
-        return;
-    if (!sh_maintenance_begin())
-        return;
+        return true;
+    if (!sh_maintenance_begin(cancelable))
+        return false;
     int rotated = tor_logs_rotate(datadir, pacing->log_rotate_bytes);
     storage_pacing_maintenance_end();
 
@@ -129,6 +137,7 @@ static void sweep_logs(const char *datadir, const struct storage_pacing *pacing)
         g_stats.log_rotations += rotated;
         pthread_mutex_unlock(&g_lock);
     }
+    return true;
 }
 
 /* Completed sweeps. Separate from g_stats.sweeps, which is bumped on entry
@@ -136,7 +145,11 @@ static void sweep_logs(const char *datadir, const struct storage_pacing *pacing)
  * advances when the work finished. */
 static _Atomic uint64_t g_sweeps_done = 0;
 
-void storage_housekeeping_sweep(const char *datadir)
+/* One sweep. `cancelable` is true only for the service thread: a stop request
+ * then abandons the sweep at the next token wait, and the abandoned sweep is
+ * counted as interrupted, never as completed (no g_sweeps_done, no
+ * sweeps_completed). A direct call is never cancelable. */
+static bool sh_sweep(const char *datadir, bool cancelable)
 {
     const struct storage_pacing *pacing = storage_pacing();
 
@@ -144,13 +157,28 @@ void storage_housekeeping_sweep(const char *datadir)
     g_stats.sweeps++;
     pthread_mutex_unlock(&g_lock);
 
-    sweep_topology(pacing);
-    sweep_projection(pacing);
-    sweep_logs(datadir, pacing);
+    bool done = sweep_topology(pacing, cancelable) &&
+                sweep_projection(pacing, cancelable) &&
+                sweep_logs(datadir, pacing, cancelable);
+    if (!done) {
+        pthread_mutex_lock(&g_lock);
+        g_stats.sweeps_interrupted++;
+        pthread_mutex_unlock(&g_lock);
+        return false;
+    }
 
+    pthread_mutex_lock(&g_lock);
+    g_stats.sweeps_completed++;
+    pthread_mutex_unlock(&g_lock);
     /* Bumped only here, after the three bounds have actually been applied:
      * this is the counter the supervisor watches for forward progress. */
     atomic_fetch_add(&g_sweeps_done, 1);
+    return true;
+}
+
+void storage_housekeeping_sweep(const char *datadir)
+{
+    (void)sh_sweep(datadir, false);
 }
 
 /* ── supervisor liveness ───────────────────────────────────────────── */
@@ -261,7 +289,7 @@ static void *sh_thread_fn(void *arg)
             pthread_mutex_lock(&g_lock);
             snprintf(datadir, sizeof(datadir), "%s", g_datadir);
             pthread_mutex_unlock(&g_lock);
-            storage_housekeeping_sweep(datadir);
+            (void)sh_sweep(datadir, true);
             next_at_ms = platform_time_monotonic_ms() +
                          (int64_t)STORAGE_HOUSEKEEPING_TICK_SECONDS * 1000;
         }
@@ -354,11 +382,6 @@ void storage_housekeeping_stop(void)
     pthread_t thread = g_thread;
     pthread_mutex_unlock(&g_lock);
     pthread_join(thread, NULL);
-    /* Clear the request so a direct storage_housekeeping_sweep() after stop
-     * (tests, tools) is not mistaken for an abandoned one. */
-    pthread_mutex_lock(&g_lock);
-    g_stop_requested = false;
-    pthread_mutex_unlock(&g_lock);
 #ifdef ZCL_TESTING
     sup_id = atomic_exchange(&g_supervisor_id, SUPERVISOR_INVALID_ID);
     if (sup_id != SUPERVISOR_INVALID_ID)
@@ -386,6 +409,8 @@ bool storage_housekeeping_dump_state_json(struct json_value *out,
 
     json_set_object(out);
     json_push_kv_int(out, "sweeps", s.sweeps);
+    json_push_kv_int(out, "sweeps_completed", s.sweeps_completed);
+    json_push_kv_int(out, "sweeps_interrupted", s.sweeps_interrupted);
     json_push_kv_int(out, "projection_compactions", s.projection_compactions);
     json_push_kv_int(out, "topology_checkpoints", s.topology_checkpoints);
     json_push_kv_int(out, "log_rotations", s.log_rotations);

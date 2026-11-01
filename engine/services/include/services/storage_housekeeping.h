@@ -45,7 +45,9 @@ struct json_value; /* fwd; see json/json.h */
 
 /* One sweep's outcome, for tests and for typed status. */
 struct storage_housekeeping_stats {
-    int64_t sweeps;
+    int64_t sweeps;                  /* sweeps STARTED */
+    int64_t sweeps_completed;        /* all three bounds applied */
+    int64_t sweeps_interrupted;      /* abandoned by a stop request */
     int64_t projection_compactions;
     int64_t topology_checkpoints;
     int64_t log_rotations;

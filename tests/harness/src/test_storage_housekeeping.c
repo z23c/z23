@@ -152,6 +152,19 @@ static bool shk_wait_sweeps(int64_t want)
     return false;
 }
 
+/* Same poll, on the COMPLETED-sweep counter (an abandoned sweep never counts). */
+static bool shk_wait_completed(int64_t want)
+{
+    for (int i = 0; i < 500; i++) {
+        struct storage_housekeeping_stats s;
+        storage_housekeeping_stats(&s);
+        if (s.sweeps_completed >= want)
+            return true;
+        platform_sleep_ms(20);
+    }
+    return false;
+}
+
 /* ── 1b. the boot service start must not wait on a held storage lock ── */
 struct shk_boot_start_ctx {
     struct zcl_service_kernel kernel;
@@ -190,8 +203,14 @@ static int shk_case_boot_start_not_blocked_by_held_lock(void)
     SHK_CHECK("boot start: token taken", storage_pacing_maintenance_begin());
 
     pthread_t th;
-    SHK_CHECK("boot start: launcher thread spawned",
-              pthread_create(&th, NULL, shk_boot_start_thread, &ctx) == 0);
+    int rc = pthread_create(&th, NULL, shk_boot_start_thread, &ctx);
+    SHK_CHECK("boot start: launcher thread spawned", rc == 0);
+    if (rc != 0) {
+        storage_pacing_maintenance_end();
+        storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
+        test_cleanup_tmpdir(dir);
+        return failures;
+    }
     bool returned = false;
     for (int i = 0; i < 250 && !returned; i++) {
         returned = atomic_load(&ctx.start_returned);
@@ -204,7 +223,7 @@ static int shk_case_boot_start_not_blocked_by_held_lock(void)
     storage_pacing_maintenance_end();
     pthread_join(th, NULL);
     SHK_CHECK("the deferred boot sweep completes once the token is free",
-              shk_wait_sweeps(before.sweeps + 1));
+              shk_wait_completed(before.sweeps_completed + 1));
 
     zcl_service_kernel_stop_all(&ctx.kernel);
     storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
@@ -243,8 +262,15 @@ static int shk_case_stop_ends_sweep_blocked_on_token(void)
     atomic_bool done;
     atomic_init(&done, false);
     pthread_t th;
-    SHK_CHECK("stop blocked: stopper thread spawned",
-              pthread_create(&th, NULL, shk_stop_thread, &done) == 0);
+    int rc = pthread_create(&th, NULL, shk_stop_thread, &done);
+    SHK_CHECK("stop blocked: stopper thread spawned", rc == 0);
+    if (rc != 0) {
+        storage_pacing_maintenance_end();
+        storage_housekeeping_stop();
+        storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
+        test_cleanup_tmpdir(dir);
+        return failures;
+    }
     bool stopped = false;
     for (int i = 0; i < 250 && !stopped; i++) {
         stopped = atomic_load(&done);
@@ -256,6 +282,23 @@ static int shk_case_stop_ends_sweep_blocked_on_token(void)
 
     storage_pacing_maintenance_end();
     pthread_join(th, NULL);
+
+    struct storage_housekeeping_stats mid;
+    storage_housekeeping_stats(&mid);
+    SHK_CHECK("the abandoned first sweep is counted as interrupted",
+              mid.sweeps_interrupted == before.sweeps_interrupted + 1);
+    SHK_CHECK("the abandoned first sweep is not counted as completed",
+              mid.sweeps_completed == before.sweeps_completed);
+
+    /* A normal sweep still completes, and stays uncancelable although the
+     * stop request is still latched (only the service thread honours it). */
+    storage_housekeeping_sweep(dir);
+    struct storage_housekeeping_stats after;
+    storage_housekeeping_stats(&after);
+    SHK_CHECK("a direct sweep counts as completed",
+              after.sweeps_completed == mid.sweeps_completed + 1);
+    SHK_CHECK("a direct sweep is not counted as interrupted",
+              after.sweeps_interrupted == mid.sweeps_interrupted);
     storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
     test_cleanup_tmpdir(dir);
     return failures;
@@ -349,7 +392,7 @@ static int shk_case_service_registration(void)
         /* The boot start is deferred: the sweep runs on the service's own
          * thread, so wait (bounded by a poll count, not a clock) for it. */
         SHK_CHECK("the start wrapper called through (boot sweep ran)",
-                  shk_wait_sweeps(before.sweeps + 1));
+                  shk_wait_completed(before.sweeps_completed + 1));
         storage_housekeeping_stats(&after);
 
         zcl_service_kernel_stop_all(&kernel);
