@@ -2639,6 +2639,20 @@ static bool dp_fresh_stem(const char *added, char *stem, size_t size)
     return true;
 }
 
+/* The added text `side` of fresh `.c` `added` reads whole, hooks nothing,
+ * and defines only names no base file holds and the change itself calls. */
+static bool dp_fresh_text_ok(const struct dp_split_ctx *c, const char *side,
+                             const char *added, const char **refs,
+                             size_t count)
+{
+    struct dp_split_funcs f = {0};
+    return side && !dp_fresh_hooked(side) &&
+           dp_split_parse_funcs(side, &f) && !f.overflow && !f.object &&
+           f.count > 0 && dp_fresh_names_unreserved(&f) &&
+           dp_fresh_names_absent_at_base(c, &f) &&
+           dp_fresh_public_called(c, &f, added, refs, count);
+}
+
 /* Is the added `.c` at refs[i] fresh code (see above)? */
 static bool dp_fresh_admit(const struct dp_split_ctx *c, const char **refs,
                            size_t count, size_t i)
@@ -2653,12 +2667,7 @@ static bool dp_fresh_admit(const struct dp_split_ctx *c, const char **refs,
         return false;
     char *diff = dp_split_diff(c, added);
     char *side = diff ? dp_split_side(diff, '+') : NULL;
-    struct dp_split_funcs f = {0};
-    bool ok = side && !dp_fresh_hooked(side) &&
-              dp_split_parse_funcs(side, &f) && !f.overflow && !f.object &&
-              f.count > 0 && dp_fresh_names_unreserved(&f) &&
-              dp_fresh_names_absent_at_base(c, &f) &&
-              dp_fresh_public_called(c, &f, added, refs, count);
+    bool ok = dp_fresh_text_ok(c, side, added, refs, count);
     free(diff);
     free(side);
     return ok;
