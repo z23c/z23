@@ -59,13 +59,17 @@
  *          worktree the commit is cherry-picked as a real commit and
  *          `make agent-verify ONLY=@changed` runs as one bounded child
  *          (--timeout_s, default 3600, 1..86400; the process group is killed
- *          on timeout) behind the host admission rail (devbuild --wait when
- *          on PATH, else make directly; ZCL_TESTING builds may name a fake
- *          with ZCL_LAND_REVERIFY_RUNNER). Fetched code executes only inside
- *          that child, under this box's local policy; offers come only from
- *          allowlisted authors. Refusals: REVERIFY_APPLY,
- *          REVERIFY_VERIFY_FAILED (exit and output tail as evidence),
- *          REVERIFY_VERIFY_TIMEOUT, REVERIFY_SETUP; no REVERIFY_NOT_A_SPLIT.
+ *          on timeout) behind the host admission rail (devbuild --wait;
+ *          with no devbuild installed it refuses REVERIFY_NO_RAIL, never a
+ *          direct make). Only a single non-merge commit is re-verified
+ *          (REVERIFY_MERGE, REVERIFY_NOT_SINGLE). Fetched code
+ *          executes only inside that child, under this box's local policy;
+ *          offers come only from allowlisted authors. Refusals:
+ *          REVERIFY_APPLY, REVERIFY_VERIFY_FAILED (exit and the tail of
+ *          agent-verify's verdict file as evidence), REVERIFY_VERIFY_TIMEOUT,
+ *          REVERIFY_EMPTY_SELECTION (a pass that selected no group),
+ *          REVERIFY_SELECTION_BASE (selected against another base),
+ *          REVERIFY_SETUP; no REVERIFY_NOT_A_SPLIT.
  *          A pass is signed with checks "bundle_sha256,bundle_verify,head,
  *          base,agent_verify". Reply: data {commit, base, check "verify",
  *          verdict, receipt?}.

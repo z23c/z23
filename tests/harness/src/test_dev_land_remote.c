@@ -11,6 +11,7 @@
 
 #include "command/native_command.h"
 #include "command/native_dev_land_precheck.h"
+#include "command/native_dev_land_remote_shared.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -487,8 +488,6 @@ static bool dlt_flip(const char *src, const char *dst)
         return false;
     n = fread(blob, 1, sizeof(blob), f);
     ok = fclose(f) == 0 && n > 0 && n < sizeof(blob);
-    if (!ok)
-        return false;
     blob[n - 1] ^= 0xff;
     f = fopen(dst, "wb");
     if (!f)
@@ -890,8 +889,6 @@ static bool dlt_rv_offer(const struct dlt_rig *r, const char *branch,
                           "3;}\nint other(void){return 2;}\n") &&
          DLT_GIT(sha, sizeof(sha), r->sender, "rev-parse", "HEAD") == 0;
     sha[strcspn(sha, "\n")] = '\0';
-    if (!ok)
-        return false;
     dlt_send_x(&c, r, sha, bundle, false);
     ok = c.reply.status == ZCL_COMMAND_STATUS_PASSED;
     dlt_end(&c);
@@ -924,22 +921,142 @@ static bool dlt_rv_fixture(const struct dlt_rig *r, const char *base_x,
     return dlt_write(p, "#!/bin/sh\nexit 0\n", 0755);
 }
 
-/* --check=verify: the fake admission rail (ZCL_LAND_REVERIFY_RUNNER) logs its
- * argv, the scratch HEAD's files and whether the tree is clean (the commit
- * was applied as a real commit), then passes, or while rn.fail exists fails
- * with exit 3, or while rn.sleep exists outlives any bound (a grandchild
- * `sleep`, so only a process-group kill ends it). */
-#define DLT_RV_RUNNER                                                        \
-    "#!/bin/sh\n"                                                            \
-    "d=$(dirname \"$0\")\n"                                                  \
-    "ch=$(git diff --name-only HEAD~1 HEAD | tr '\\n' ',')\n"                \
-    "st=$(git status --porcelain | wc -l | tr -d ' ')\n"                     \
-    "echo \"$* changed=$ch dirty=$st\" > \"$d/rn.log\"\n"                    \
-    "if [ -f \"$d/rn.sleep\" ]; then sleep 60; fi\n"                         \
-    "if [ -f \"$d/rn.fail\" ]; then\n"                                       \
-    "  echo 'agent-verify: FAILED step=test'; exit 3\n"                      \
-    "fi\n"                                                                   \
-    "echo 'agent-verify: OK'\n"
+/* --check=verify: a C23 fake of the child launch, installed through
+ * zcl_dlr_verify_seam_set() (no shell runner, no build macro). It records the
+ * argv and what the scratch worktree holds (commits ahead of the base, files
+ * changed, clean tree), then writes agent-verify's verdict file the way the
+ * Makefile does, as g_rvf.mode says. The real timeout path is exercised by
+ * delegating to the real spawn with a `sleep`. */
+enum dlt_rvf_mode { RVF_PASS, RVF_FAIL, RVF_TIMEOUT, RVF_EMPTY, RVF_BASE,
+                    RVF_NOVERDICT };
+static struct {
+    enum dlt_rvf_mode mode;
+    int calls;
+    char base[64];
+    char seen[1500];
+} g_rvf;
+
+static void dlt_rvf_verdict(const char *cwd, const char *groups,
+                            const char *base, bool fail)
+{
+    char p[1200];
+    FILE *f;
+    (void)snprintf(p, sizeof(p), "%s/build", cwd);
+    (void)mkdir(p, 0755);
+    (void)snprintf(p, sizeof(p), "%s/build/scratch", cwd);
+    (void)mkdir(p, 0755);
+    (void)snprintf(p, sizeof(p), "%s/build/scratch/agent-verify.rc", cwd);
+    f = fopen(p, "w");
+    if (!f)
+        return;
+    (void)fprintf(f, "agent-verify: selection targeted groups=%s reason=plan "
+                     "detail=none base=%s\n",
+                  groups, base);
+    for (int i = 0; fail && i < 400; i++)
+        (void)fprintf(f, "agent-verify: filler-step-%03d rc=0\n", i);
+    if (fail)
+        (void)fputs("agent-verify: t-fast-exact rc=1\nSUITE VERDICT: FAIL 1 of "
+                    "9\nagent-verify: FAILED (t-fast-exact)\n",
+                    f);
+    else
+        (void)fputs("agent-verify: t-fast-exact rc=0\nagent-verify: OK\n", f);
+    (void)fclose(f);
+}
+
+static int dlt_rvf_spawn(const char *const argv[], const char *cwd, char *buf,
+                         size_t cap, int timeout_ms, bool *timed_out)
+{
+    char names[512] = "", count[32] = "", dirty[256] = "", range[200];
+    size_t used = 0;
+    g_rvf.calls++;
+    g_rvf.seen[0] = '\0';
+    for (size_t i = 0; argv[i] && used < sizeof(g_rvf.seen) - 80; i++)
+        used += (size_t)snprintf(g_rvf.seen + used, sizeof(g_rvf.seen) - used,
+                                 "%s ", argv[i]);
+    (void)snprintf(range, sizeof(range), "%s..HEAD", g_rvf.base);
+    (void)DLT_GIT(names, sizeof(names), cwd, "diff", "--name-only",
+                  g_rvf.base, "HEAD");
+    (void)DLT_GIT(count, sizeof(count), cwd, "rev-list", "--count", range);
+    (void)DLT_GIT(dirty, sizeof(dirty), cwd, "status", "--porcelain");
+    for (char *c = names; *c; c++)
+        if (*c == '\n')
+            *c = ',';
+    count[strcspn(count, "\n")] = '\0';
+    (void)snprintf(g_rvf.seen + used, sizeof(g_rvf.seen) - used,
+                   "n=%s changed=%s dirty=%d", count, names,
+                   dirty[0] ? 1 : 0);
+    if (g_rvf.mode == RVF_TIMEOUT) {
+        const char *sl[] = {"sleep", "60", NULL};
+        return zcl_spawn_capture_merged_in_dir_observed(sl, cwd, buf, cap,
+                                                        timeout_ms, timed_out);
+    }
+    *timed_out = false;
+    /* the head of the capture is noise: only the verdict file has the end */
+    (void)snprintf(buf, cap, "CAPTURE-HEAD-NOISE\n");
+    switch (g_rvf.mode) {
+    case RVF_FAIL:
+        dlt_rvf_verdict(cwd, "2", g_rvf.base, true);
+        return 3;
+    case RVF_EMPTY:
+        dlt_rvf_verdict(cwd, "0", g_rvf.base, false);
+        return 0;
+    case RVF_BASE:
+        dlt_rvf_verdict(cwd, "2", "0000000000000000000000000000000000000000",
+                        false);
+        return 0;
+    case RVF_NOVERDICT:
+        return 0; /* exit 0 and no verdict file: not a pass */
+    default:
+        dlt_rvf_verdict(cwd, "2", g_rvf.base, false);
+        return 0;
+    }
+}
+
+/* zcl_dlr_verify_run on a scratch worktree of the sender detached at `base`,
+ * given an offered commit that is not one plain commit: shape 0 two commits,
+ * 1 a merge commit alone beyond base, 2 an empty commit (it cannot be
+ * cherry-picked). True when it refused with `code` and never launched the
+ * child. */
+static bool dlt_rv_direct(const struct dlt_rig *r, const char *base, int shape,
+                          const char *code)
+{
+    char wt[900], sha[64] = "", tree[64], parent[64], prev[80];
+    struct dlt_call c;
+    bool ok;
+    (void)snprintf(wt, sizeof(wt), "%s/dwt%d", r->base, shape);
+    (void)snprintf(prev, sizeof(prev), "%s~1", base);
+    ok = DLT_GIT(NULL, 0, r->sender, "worktree", "add", "--quiet", "--detach",
+                 wt, base) == 0;
+    if (shape == 0)
+        ok = ok && dlt_commit(wt, "d1.txt", "1\n") &&
+             dlt_commit(wt, "d2.txt", "2\n");
+    else if (shape == 1)
+        ok = ok && DLT_GIT(tree, sizeof(tree), wt, "rev-parse",
+                           "HEAD^{tree}") == 0 &&
+             DLT_GIT(parent, sizeof(parent), wt, "rev-parse", prev) == 0;
+    if (ok && shape == 1) {
+        tree[strcspn(tree, "\n")] = '\0';
+        parent[strcspn(parent, "\n")] = '\0';
+        ok = DLT_GIT(sha, sizeof(sha), wt, "commit-tree", tree, "-p", base,
+                     "-p", parent, "-m", "merge") == 0 &&
+             DLT_GIT(NULL, 0, wt, "reset", "--quiet", "--hard", base) == 0;
+    } else if (shape == 2) {
+        ok = ok && DLT_GIT(NULL, 0, wt, "commit", "--quiet", "--no-verify",
+                           "--allow-empty", "-m", "empty") == 0;
+    }
+    if (shape != 1)
+        ok = ok && DLT_GIT(sha, sizeof(sha), wt, "rev-parse", "HEAD") == 0 &&
+             DLT_GIT(NULL, 0, wt, "reset", "--quiet", "--hard", base) == 0;
+    sha[strcspn(sha, "\n")] = '\0';
+    g_rvf.calls = 0;
+    dlt_begin(&c, "dev.land.reverify_offer");
+    ok = ok && !zcl_dlr_verify_run(wt, sha, 5, "dev.land.reverify_offer",
+                                   &c.reply) &&
+         dlt_refused(&c, code) && g_rvf.calls == 0;
+    dlt_end(&c);
+    (void)DLT_GIT(NULL, 0, r->sender, "worktree", "remove", "--force", wt);
+    return ok;
+}
 
 static void dlt_rv_mode(struct dlt_call *c, const struct dlt_rig *r,
                         const char *bundle, const char *offer,
@@ -960,41 +1077,60 @@ static void dlt_rv_mode(struct dlt_call *c, const struct dlt_rig *r,
     zcl_native_handle_dev_land_remote(&c->request, &c->reply);
 }
 
+
+/* One refused verify run: the code, that no receipt was written and that no
+ * scratch worktree, ref or temp file is left. `calls` is how many times the
+ * child launch ran (0 when the refusal comes before it). */
+static bool dlt_rv_refused(struct dlt_call *c, const struct dlt_rig *r,
+                           const char *tmp, const char *code, const char *rc,
+                           int calls)
+{
+    bool ok = dlt_refused(c, code) && g_rvf.calls == calls &&
+              access(rc, F_OK) != 0 && dlt_rv_clean(r, tmp);
+    return ok;
+}
+
 /* b2/o2 is a commit touching two .c files: not a split, so --check=cx refuses
  * it and only the general mode takes it. */
 static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
-                               const char *b2, const char *o2)
+                               const char *base, const char *b2, const char *o2)
 {
     int failures = 0;
     struct dlt_call c;
-    char runner[900], log[900], fail[900], sleepf[900], rc[900], rc2[900];
-    char text[2048];
-    (void)snprintf(runner, sizeof(runner), "%s/rn.sh", r->base);
-    (void)snprintf(log, sizeof(log), "%s/rn.log", r->base);
-    (void)snprintf(fail, sizeof(fail), "%s/rn.fail", r->base);
-    (void)snprintf(sleepf, sizeof(sleepf), "%s/rn.sleep", r->base);
+    char rail[900], absent[900], rc[900], rc2[900];
+    char text[2048], want[1200];
+    const struct zcl_dlr_verify_seam seam = {rail, dlt_rvf_spawn};
+    const struct zcl_dlr_verify_seam norail = {absent, dlt_rvf_spawn};
+    (void)snprintf(rail, sizeof(rail), "%s/rail-stub", r->base);
+    (void)snprintf(absent, sizeof(absent), "%s/no-such-rail", r->base);
     (void)snprintf(rc, sizeof(rc), "%s/rvv.receipt.json", r->base);
     (void)snprintf(rc2, sizeof(rc2), "%s/rvv2.receipt.json", r->base);
-    if (!dlt_write(runner, DLT_RV_RUNNER, 0755)) {
-        printf("runner setup FAILED\n");
+    (void)snprintf(g_rvf.base, sizeof(g_rvf.base), "%s", base);
+    if (!dlt_write(rail, "stub\n", 0755)) {
+        printf("verify rail stub setup FAILED\n");
         return 1;
     }
-    (void)setenv("ZCL_LAND_REVERIFY_RUNNER", runner, 1);
+    zcl_dlr_verify_seam_set(&seam);
 
-    TEST("land.reverify_offer --check=verify: a non-split commit with a "
-         "passing runner signs a receipt whose checks end in agent_verify") {
+    TEST("land.reverify_offer --check=verify: a non-split commit through the "
+         "rail passes, signs a receipt, and ran as a real clean commit") {
+        g_rvf.mode = RVF_PASS;
+        g_rvf.calls = 0;
         dlt_rv_mode(&c, r, b2, o2, rc, "verify", 0);
         ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "check")), "verify");
         ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "receipt")), rc);
         dlt_end(&c);
+        ASSERT(g_rvf.calls == 1);
         ASSERT(dlt_slurp(rc, text, sizeof(text)));
         ASSERT(strstr(text, "bundle_sha256,bundle_verify,head,base,"
                             "agent_verify\"") != NULL);
-        ASSERT(dlt_slurp(log, text, sizeof(text)));
-        ASSERT(strstr(text, "--wait --project z23 make agent-verify "
-                            "ONLY=@changed changed=" DLT_RV_BASELINE
-                            ",tools/x.c,tools/y.c, dirty=0") != NULL);
+        (void)snprintf(want, sizeof(want),
+                       "%s --wait --project z23 make agent-verify "
+                       "ONLY=@changed n=1 changed=" DLT_RV_BASELINE
+                       ",tools/x.c,tools/y.c, dirty=0",
+                       rail);
+        ASSERT_STR_EQ(g_rvf.seen, want);
         dlt_vfy(&c, rc, o2);
         ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "checks")),
@@ -1004,31 +1140,83 @@ static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
         PASS();
     }
 
-    TEST("land.reverify_offer --check=verify: a failing runner refuses "
-         "REVERIFY_VERIFY_FAILED with exit and tail, and writes no receipt") {
-        ASSERT(dlt_write(fail, "x\n", 0644));
-        dlt_rv_mode(&c, r, b2, o2, rc2, "verify", 0);
-        ASSERT(dlt_refused(&c, "REVERIFY_VERIFY_FAILED"));
-        ASSERT(strstr(c.reply.error.evidence, "exit=3") != NULL);
-        ASSERT(strstr(c.reply.error.evidence, "agent-verify: FAILED step=test") !=
-               NULL);
-        dlt_end(&c);
-        ASSERT(access(rc2, F_OK) != 0);
-        ASSERT(dlt_rv_clean(r, tmp));
-        ASSERT(remove(fail) == 0);
+    TEST("land.reverify_offer --check=verify: not one plain commit refuses "
+         "typed before the child: two commits REVERIFY_NOT_SINGLE, a merge "
+         "REVERIFY_MERGE, an empty commit REVERIFY_APPLY") {
+        ASSERT(dlt_rv_direct(r, base, 0, "REVERIFY_NOT_SINGLE"));
+        ASSERT(dlt_rv_direct(r, base, 1, "REVERIFY_MERGE"));
+        ASSERT(dlt_rv_direct(r, base, 2, "REVERIFY_APPLY"));
         PASS();
     }
 
-    TEST("land.reverify_offer --check=verify: a runner past timeout_s is "
+    TEST("land.reverify_offer --check=verify: no admission rail refuses "
+         "REVERIFY_NO_RAIL, runs nothing and leaves nothing") {
+        zcl_dlr_verify_seam_set(&norail);
+        g_rvf.calls = 0;
+        dlt_rv_mode(&c, r, b2, o2, rc2, "verify", 0);
+        zcl_dlr_verify_seam_set(&seam);
+        ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_NO_RAIL", rc2, 0));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.reverify_offer --check=verify: a run that selected zero "
+         "groups refuses REVERIFY_EMPTY_SELECTION, never a pass") {
+        g_rvf.mode = RVF_EMPTY;
+        g_rvf.calls = 0;
+        dlt_rv_mode(&c, r, b2, o2, rc2, "verify", 0);
+        ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_EMPTY_SELECTION", rc2, 1));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.reverify_offer --check=verify: a selection against another "
+         "base than the offered one refuses REVERIFY_SELECTION_BASE") {
+        g_rvf.mode = RVF_BASE;
+        g_rvf.calls = 0;
+        dlt_rv_mode(&c, r, b2, o2, rc2, "verify", 0);
+        ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_SELECTION_BASE", rc2, 1));
+        ASSERT(strstr(c.reply.error.evidence, "0000000000") != NULL);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.reverify_offer --check=verify: exit 0 with no verdict file is "
+         "not a pass: REVERIFY_VERIFY_FAILED") {
+        g_rvf.mode = RVF_NOVERDICT;
+        g_rvf.calls = 0;
+        dlt_rv_mode(&c, r, b2, o2, rc2, "verify", 0);
+        ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_VERIFY_FAILED", rc2, 1));
+        ASSERT(strstr(c.reply.error.evidence, "exit=0") != NULL);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.reverify_offer --check=verify: a failing long run refuses "
+         "REVERIFY_VERIFY_FAILED with the exit and the END of the run") {
+        g_rvf.mode = RVF_FAIL;
+        g_rvf.calls = 0;
+        dlt_rv_mode(&c, r, b2, o2, rc2, "verify", 0);
+        ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_VERIFY_FAILED", rc2, 1));
+        ASSERT(strstr(c.reply.error.evidence, "exit=3") != NULL);
+        ASSERT(strstr(c.reply.error.evidence, "SUITE VERDICT: FAIL 1 of 9") !=
+               NULL);
+        ASSERT(strstr(c.reply.error.evidence,
+                      "agent-verify: FAILED (t-fast-exact)") != NULL);
+        ASSERT(strstr(c.reply.error.evidence, "CAPTURE-HEAD-NOISE") == NULL);
+        ASSERT(strstr(c.reply.error.evidence, "filler-step-000") == NULL);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.reverify_offer --check=verify: a child past timeout_s is "
          "killed and refuses REVERIFY_VERIFY_TIMEOUT, leaving nothing") {
-        ASSERT(dlt_write(sleepf, "x\n", 0644));
+        g_rvf.mode = RVF_TIMEOUT;
+        g_rvf.calls = 0;
         dlt_rv_mode(&c, r, b2, o2, rc2, "verify", 1);
-        ASSERT(dlt_refused(&c, "REVERIFY_VERIFY_TIMEOUT"));
+        ASSERT(dlt_rv_refused(&c, r, tmp, "REVERIFY_VERIFY_TIMEOUT", rc2, 1));
         ASSERT(strstr(c.reply.error.evidence, "timeout_s=1") != NULL);
         dlt_end(&c);
-        ASSERT(access(rc2, F_OK) != 0);
-        ASSERT(dlt_rv_clean(r, tmp));
-        ASSERT(remove(sleepf) == 0);
         PASS();
     }
 
@@ -1048,7 +1236,7 @@ static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
     }
 
 _test_next:;
-    (void)unsetenv("ZCL_LAND_REVERIFY_RUNNER");
+    zcl_dlr_verify_seam_set(NULL);
     return failures;
 }
 
@@ -1197,7 +1385,7 @@ static int dlt_reverify_cases(void)
     }
 
 _test_next:;
-    failures += dlt_rv_verify_cases(&r, tmp, b2, o2);
+    failures += dlt_rv_verify_cases(&r, tmp, base, b2, o2);
     if (saved[0])
         (void)setenv("TMPDIR", saved, 1);
     else

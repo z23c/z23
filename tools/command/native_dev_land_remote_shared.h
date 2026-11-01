@@ -100,6 +100,18 @@ bool zcl_dlr_timeout_arg(const struct zcl_command_request *req,
 bool zcl_dlr_verify_run(const char *wt, const char *commit, int secs,
                         const char *leaf, struct zcl_command_reply *reply);
 
+/* The re-verification's test seam, set only by tests: `rail` names the
+ * admission rail program (NULL: devbuild; it is still looked up and refused
+ * as REVERIFY_NO_RAIL when absent), `spawn` replaces the child launch (NULL:
+ * zcl_spawn_capture_merged_in_dir_observed). zcl_dlr_verify_seam_set(NULL)
+ * restores both. */
+struct zcl_dlr_verify_seam {
+    const char *rail;
+    int (*spawn)(const char *const argv[], const char *cwd, char *buf,
+                 size_t cap, int timeout_ms, bool *timed_out);
+};
+void zcl_dlr_verify_seam_set(const struct zcl_dlr_verify_seam *seam);
+
 /* check_offer, attest_offer, verify_offer_receipt, reverify_offer,
  * qualify_offer: true when path named one of them. */
 bool zcl_dlr_offer_dispatch(const char *path,
