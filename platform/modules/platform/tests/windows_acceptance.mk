@@ -877,6 +877,8 @@ ZCL_WINDOWS_ACCEPTANCE_plugin_store_SOURCES := \
 	contexts/commons/modules/plugin/src/plugin_pack.c \
 	contexts/commons/modules/plugin/src/plugin_fs.c \
 	contexts/commons/modules/plugin/src/plugin_store.c \
+	contexts/commons/modules/plugin/src/plugin_attest.c \
+	contexts/commons/modules/plugin/src/plugin_attest_verify.c \
 	contexts/commons/modules/plugin/src/plugin_manifest.c \
 	platform/modules/platform/src/directory_transaction.c \
 	platform/modules/platform/src/directory_transaction_paths.c \
