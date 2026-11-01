@@ -1620,6 +1620,9 @@ void zcl_dev_proof_changed_set_release(struct zcl_dev_proof_changed_set *set)
     set->structural_count = 0;
     set->split_path = NULL;
     set->split_count = 0;
+    set->structural_status = 0;
+    set->fresh_path = NULL;
+    set->fresh_count = 0;
 }
 
 /* Read a captured list whole. Refuses with the observed byte count rather than
@@ -2407,9 +2410,141 @@ static bool dp_split_admit(const struct dp_split_ctx *c, const char **refs,
     return ok;
 }
 
+/* ---- Added fresh `.c` ----
+ *
+ * An added `.c` that is new code, not a move: nothing in the base tree can
+ * name or call it, so the only way it changes what a group runs is through
+ * the changed rows that call or list it, and those are planned as modified
+ * rows. It is admitted as exact only when ALL of these hold, each read at
+ * `local` or `base` by revision:
+ *   - the row is a safe-named `.c` outside the consensus and wallet roots;
+ *   - every file at `local` that names its extension-less stem (an include,
+ *     `__has_include`, build list, runtime path or document alike) is itself
+ *     a changed row, so an unchanged file can never observe it appear;
+ *   - its text is read whole by the fail-closed definition reader, defines
+ *     at least one function, probes no include, and carries no attribute,
+ *     pragma, constructor or section hook that could register it unseen;
+ *   - no tracked file at `base` mentions any name it defines, so no base
+ *     code can reach it and it moves nothing out of the base tree.
+ * It stays in the closure input. Anything else, and any git failure, leaves
+ * the row structural. A deleted, renamed or type-changed row never comes
+ * here: its dependents live in the base tree. */
+#define DP_FRESH_NAMES_ARGV_MAX (DP_SPLIT_FUNCS_MAX * 2 + 16)
+
+static bool dp_fresh_path_allowed(const char *path)
+{
+    static const char *const denied[] = {
+        "core/", "contexts/wallet/", "platform/modules/sha3/", "engine/jobs/"};
+    for (size_t i = 0; i < sizeof(denied) / sizeof(denied[0]); i++)
+        if (strncmp(path, denied[i], strlen(denied[i])) == 0) return false;
+    return true;
+}
+
+/* Text no fresh file may carry: a hook that registers code without a caller. */
+static bool dp_fresh_hooked(const char *side)
+{
+    static const char *const hooks[] = {
+        "__attribute__", "constructor", "destructor", "section", "pragma",
+        "_Pragma", "__has_include", "__has_embed", "#embed", "asm"};
+    for (size_t i = 0; i < sizeof(hooks) / sizeof(hooks[0]); i++)
+        if (strstr(side, hooks[i])) return true;
+    return false;
+}
+
+/* Is `file` (a `git grep -l` hit, `local:path`) a changed row other than
+ * the added one? */
+static bool dp_fresh_hit_changed(const struct dp_split_ctx *c,
+                                 const char *hit, const char **refs,
+                                 size_t count)
+{
+    size_t lead = strlen(c->local);
+    if (strlen(hit) <= lead + 1 || memcmp(hit, c->local, lead) != 0 ||
+        hit[lead] != ':')
+        return false;
+    for (size_t i = 0; i < count; i++)
+        if (strcmp(hit + lead + 1, refs[i]) == 0) return true;
+    return false;
+}
+
+/* Every file at `local` naming `stem` is a changed row. */
+static bool dp_fresh_named_only_by_changed(const struct dp_split_ctx *c,
+                                           const char *stem, const char **refs,
+                                           size_t count)
+{
+    char *listing = zcl_malloc(ZCL_DEVLOOP_OUTPUT_MAX, "proof fresh listing");
+    if (!listing) return false;
+    const char *argv[] = {"git", "grep", "-l", "-a", "-F", "-e", stem,
+                          c->local, "--", NULL};
+    int rc = dp_split_git(c->root, argv, listing, ZCL_DEVLOOP_OUTPUT_MAX);
+    bool ok = rc == 1 || rc == 0;
+    char *save = NULL;
+    for (char *line = rc == 0 ? strtok_r(listing, "\n", &save) : NULL;
+         ok && line; line = strtok_r(NULL, "\n", &save))
+        ok = dp_fresh_hit_changed(c, line, refs, count);
+    free(listing);
+    return ok;
+}
+
+/* No tracked file at `base` mentions any of the names `f` holds. */
+static bool dp_fresh_names_absent_at_base(const struct dp_split_ctx *c,
+                                          const struct dp_split_funcs *f)
+{
+    const char *argv[DP_FRESH_NAMES_ARGV_MAX];
+    size_t n = 0;
+    argv[n++] = "git";
+    argv[n++] = "grep";
+    argv[n++] = "-q";
+    argv[n++] = "-a";
+    argv[n++] = "-w";
+    argv[n++] = "-F";
+    if (f->count == 0 || f->count > DP_SPLIT_FUNCS_MAX) return false;
+    for (size_t i = 0; i < f->count; i++) {
+        argv[n++] = "-e";
+        argv[n++] = f->name[i];
+    }
+    argv[n++] = c->base;
+    argv[n++] = "--";
+    argv[n] = NULL;
+    return dp_split_git(c->root, argv, NULL, 0) == 1;
+}
+
+static bool dp_fresh_stem(const char *added, char *stem, size_t size)
+{
+    const char *leaf = dp_split_leaf(added);
+    size_t n = strlen(leaf);
+    if (n < 3 || n - 2 >= size || n - 2 < 4) return false;
+    memcpy(stem, leaf, n - 2);
+    stem[n - 2] = '\0';
+    return true;
+}
+
+/* Is the added `.c` at refs[i] fresh code (see above)? */
+static bool dp_fresh_admit(const struct dp_split_ctx *c, const char **refs,
+                           size_t count, size_t i)
+{
+    const char *added = refs[i];
+    char stem[DP_SPLIT_LEAF_MAX + 1];
+    if (!dp_split_is_c(added) || !dp_split_name_safe(added) ||
+        strlen(dp_split_leaf(added)) > DP_SPLIT_LEAF_MAX ||
+        !dp_fresh_path_allowed(added) ||
+        !dp_fresh_stem(added, stem, sizeof(stem)) ||
+        !dp_fresh_named_only_by_changed(c, stem, refs, count))
+        return false;
+    char *diff = dp_split_diff(c, added);
+    char *side = diff ? dp_split_side(diff, '+') : NULL;
+    struct dp_split_funcs f = {0};
+    bool ok = side && !dp_fresh_hooked(side) &&
+              dp_split_parse_funcs(side, &f) && !f.overflow && f.count > 0 &&
+              dp_fresh_names_absent_at_base(c, &f);
+    free(diff);
+    free(side);
+    return ok;
+}
+
 /* Settle every deferred added `.c` row: admitted ones are counted as splits
- * and leave the closure input (the sibling carries their impact); the rest
- * become structural exactly as an added path always was. */
+ * and leave the closure input (the sibling carries their impact); a fresh one
+ * is counted and stays in it; the rest become structural exactly as an added
+ * path always was. */
 static void dp_changed_set_split_classify(
     const struct dp_split_ctx *c, const char **refs, const char *status,
     struct zcl_dev_proof_changed_set *set)
@@ -2430,7 +2565,16 @@ static void dp_changed_set_split_classify(
                 }
             continue;
         }
-        if (!set->structural_path) set->structural_path = refs[i];
+        if (false && candidates <= DP_SPLIT_CANDIDATES_MAX &&
+            dp_fresh_admit(c, refs, count, i)) {
+            if (!set->fresh_path) set->fresh_path = refs[i];
+            set->fresh_count++;
+            continue;
+        }
+        if (!set->structural_path) {
+            set->structural_path = refs[i];
+            set->structural_status = 'A';
+        }
         set->structural_count++;
     }
 }
@@ -2443,7 +2587,10 @@ static void dp_changed_set_mark_row(struct zcl_dev_proof_changed_set *mark,
 {
     bool deferred = kinds && status == 'A' && dp_split_is_c(path);
     if (!dp_changed_set_structural_change(status) || deferred) return;
-    if (!mark->structural_path) mark->structural_path = path;
+    if (!mark->structural_path) {
+        mark->structural_path = path;
+        mark->structural_status = status;
+    }
     mark->structural_count++;
 }
 
@@ -7856,12 +8003,13 @@ bool zcl_dev_proof_test_needs_argv_for_files(const char *jobs,
  * test-selection.log and `dev proof select`, so a lane verify and the proof
  * cannot word the same decision differently. */
 static const char *dp_selection_reason(const struct zcl_devloop_plan *plan,
-                                       bool widened, bool split)
+                                       bool widened, bool split, bool fresh)
 {
     return widened                   ? "changed-input-structure"
            : plan->path_universal    ? "path-group-cap"
            : plan->closure_universal ? "closure-universal"
            : split                   ? "split-sibling-closure"
+           : fresh                   ? "fresh-source-closure"
                                      : "impact-plan";
 }
 
@@ -7910,12 +8058,12 @@ void zcl_dev_proof_test_capacity_note(FILE *f, const struct zcl_devloop_plan *pl
  * has to infer a smaller run from a count. "-" means nothing was left out. */
 static bool proof_note_test_selection(const struct proof_paths *paths,
                                       const struct zcl_devloop_plan *plan,
-                                      bool widened, bool split,
+                                      bool widened, bool split, bool fresh,
                                       uint32_t selected,
                                       const char *host_gated)
 {
     bool universal = plan->closure_universal;
-    const char *reason = dp_selection_reason(plan, widened, split);
+    const char *reason = dp_selection_reason(plan, widened, split, fresh);
     char path[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s/%s.test-selection.log", paths->logs,
                  paths->key) >= (int)sizeof(path))
@@ -8213,7 +8361,7 @@ const char *zcl_dev_proof_test_changed_set_reason(
         !zcl_devloop_plan_files(set->files, set->count, &plan))
         return NULL;
     bool widened = dp_changed_set_widen(set, &plan);
-    return dp_selection_reason(&plan, widened, set->split_count > 0);
+    return dp_selection_reason(&plan, widened, set->split_count > 0, set->fresh_count > 0);
 }
 #endif
 
@@ -8307,6 +8455,23 @@ void zcl_dev_proof_test_select_capacity_detail(
 }
 #endif
 
+/* Name the row that widened the selection: its path (escaped as one field,
+ * cut to the detail's size) and its git status letter, so a universal run
+ * says why without a second diagnosis. */
+static void dp_select_structure_detail(
+    struct zcl_dev_proof_range_selection *out,
+    const struct zcl_dev_proof_changed_set *set)
+{
+    char encoded[PROOF_CHANGED_PATH_MAX * 3 + 1];
+    const char *path = set->structural_path ? set->structural_path : "unknown";
+    if (!dp_capacity_encode(path, encoded, sizeof(encoded)))
+        (void)snprintf(encoded, sizeof(encoded), "unknown");
+    (void)snprintf(out->detail, sizeof(out->detail),
+                   "kind=%c rows=%zu path=%s",
+                   set->structural_status ? set->structural_status : '?',
+                   set->structural_count, encoded);
+}
+
 /* Close and widen the plan the way the proof worker does. The first close may
  * be what builds the code index, and the proof asks again after its graph
  * refresh, so ask once more. A plan that still cannot close never narrows: a
@@ -8322,8 +8487,10 @@ static void dp_select_close(const char *root,
         admitted = dp_changed_set_close(root, set, plan, &refusal);
     bool widened = dp_changed_set_widen(set, plan);
     if (admitted) {
-        out->reason = dp_selection_reason(plan, widened, set->split_count > 0);
+        out->reason = dp_selection_reason(plan, widened, set->split_count > 0,
+                                         set->fresh_count > 0);
         dp_select_capacity_detail(out, plan);
+        if (widened) dp_select_structure_detail(out, set);
         return;
     }
     (void)zcl_devloop_plan_refusal_text(plan, out->detail,
@@ -8333,6 +8500,7 @@ static void dp_select_close(const char *root,
     plan->closure_universal = true;
     plan->docs_only = false;
     out->reason = widened ? "changed-input-structure" : "plan-not-closed";
+    if (widened) dp_select_structure_detail(out, set);
 }
 
 /* Route screen: the plan's path-floor groups (the shared-rule route of every
@@ -9736,6 +9904,7 @@ struct dp_worker {
     /* The docs-fresh checkers still running beside the read-only steps. */
     struct dp_docs_fresh_run *docs;
     bool split_closure;
+    bool fresh_closure;
     bool structure_widened;
     struct zcl_devloop_plan plan;
     char plan_json[ZCL_DEVLOOP_PLAN_WIRE_MAX];
@@ -9820,13 +9989,16 @@ static void dp_worker_widen(struct dp_worker *w, size_t file_count)
     w->structure_widened =
         dp_changed_set_widen(w->changed, &w->plan);
     w->split_closure = w->changed && w->changed->split_count > 0;
+    w->fresh_closure = w->changed && w->changed->fresh_count > 0;
     if (!w->paths->phases[0]) return;
     char note[PROOF_CHANGED_PATH_MAX + 96];
     if (w->structure_widened)
         (void)snprintf(note, sizeof(note),
                        "widened reason=changed_input_structure path=%s "
-                       "rows=%zu", w->changed->structural_path,
-                       w->changed->structural_count);
+                       "rows=%zu kind=%c", w->changed->structural_path,
+                       w->changed->structural_count,
+                       w->changed->structural_status
+                           ? w->changed->structural_status : '?');
     else if (w->plan.path_universal)
         (void)snprintf(note, sizeof(note),
                        "widened reason=path_group_cap rows=%zu cap=%d",
@@ -9835,6 +10007,10 @@ static void dp_worker_widen(struct dp_worker *w, size_t file_count)
         (void)snprintf(note, sizeof(note),
                        "split_sibling_closure path=%s rows=%zu",
                        w->changed->split_path, w->changed->split_count);
+    else if (w->fresh_closure && !w->plan.closure_universal)
+        (void)snprintf(note, sizeof(note),
+                       "fresh_source_closure path=%s rows=%zu",
+                       w->changed->fresh_path, w->changed->fresh_count);
     else
         return;
     (void)zcl_dev_proof_phase_note(w->paths->phases, "changed_set", note);
@@ -10108,6 +10284,7 @@ static bool dp_worker_select(struct dp_worker *w, char *why, size_t why_len)
      * whole-catalog run. */
     if (!proof_note_test_selection(&w->execution, &w->plan,
                                    w->structure_widened, w->split_closure,
+                                   w->fresh_closure,
                                    test_count, host_gated)) {
         proof_why(why, why_len, "test_selection_note_unwritable");
         return false;

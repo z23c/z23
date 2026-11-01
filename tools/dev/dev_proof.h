@@ -325,6 +325,17 @@ struct zcl_dev_proof_changed_set {
      * such row, `split_count` how many. */
     const char *split_path;
     size_t split_count;
+    /* The git status letter (A, D or T) of `structural_path`, 0 when none. */
+    char structural_status;
+    /* An added `.c` that defines only symbols absent from the base tree, is
+     * named only by other changed files, and carries no registration hook is
+     * not structural either: no unchanged file can observe it and no base
+     * code can call it, so its impact is what the planner already maps for a
+     * modified file at that path. It stays in the closure input and the
+     * selection is exact, under the reason fresh-source-closure.
+     * `fresh_path` is the first such row, `fresh_count` how many. */
+    const char *fresh_path;
+    size_t fresh_count;
 };
 
 #if defined(ZCL_TESTING)

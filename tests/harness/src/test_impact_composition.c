@@ -6778,6 +6778,7 @@ static bool ic_split_base_build(void)
                       "int other(void)\n{\n    return 0;\n}\n") &&
            ic_split_w("Makefile", ic_split_make_base) &&
            ic_split_w("mk/extra.mk", "EXTRA = $(D)/other.c\n") &&
+           ic_split_w("docs/NOTES.txt", "pending: native_devagent_rules\n") &&
            ic_split_git("git add -A && git commit -qm base && git checkout -q "
                         "-B base");
 }
@@ -6909,6 +6910,218 @@ static int test_ic_changed_set_split_sibling_closure(void)
     return failures;
 }
 
+/* ── an added fresh `.c` keeps the plan's own groups ───────────────────────
+ *
+ * New code nothing in the base tree can name or call, named only by changed
+ * rows, with no registration hook, takes the groups the planner already maps
+ * for that path (fresh-source-closure). Every other added row, and every
+ * deleted, renamed or type-changed one, stays the full catalog. */
+static const char ic_fresh_caller[] =
+    "int fresh_probe_run(int x);\nint other(void)\n{\n"
+    "    return fresh_probe_run(1);\n}\n";
+
+static bool ic_fresh_add(const char *path, const char *body)
+{
+    char make[256];
+    return snprintf(make, sizeof(make), "SRC = core/a/big.c core/a/other.c "
+                    "%s\n", path) < (int)sizeof(make) &&
+           ic_split_w(path, body) && ic_split_w("Makefile", make) &&
+           ic_split_w("core/a/other.c", ic_fresh_caller);
+}
+
+#define IC_FRESH_BODY(name) \
+    "/* " name " - fresh */\n#include \"a.h\"\n\n" \
+    "int fresh_probe_run(int x)\n{\n    return x + 41;\n}\n"
+
+static bool ic_fresh_edit_fresh(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_situation.c",
+                        IC_FRESH_BODY("situation"));
+}
+
+static bool ic_fresh_edit_test(void)
+{
+    return ic_fresh_add("tests/harness/src/test_devagent_start.c",
+                        IC_FRESH_BODY("start"));
+}
+
+static bool ic_fresh_edit_mention(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_rules.c",
+                        IC_FRESH_BODY("rules"));
+}
+
+static bool ic_fresh_edit_basename(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_usage.c",
+                        "/* usage - names a base function */\n"
+                        "int other(int x)\n{\n    return x;\n}\n");
+}
+
+static bool ic_fresh_edit_hook(void)
+{
+    return ic_fresh_add("tools/command/native_devagent_outcomes.c",
+                        "/* outcomes - registers itself */\n"
+                        "__attribute__((constructor)) static void "
+                        "fresh_probe_run(void)\n{\n}\n");
+}
+
+static bool ic_fresh_edit_core(void)
+{
+    return ic_fresh_add("core/b/fresh_core.c", IC_FRESH_BODY("core"));
+}
+
+static bool ic_fresh_edit_header(void)
+{
+    return ic_fresh_edit_fresh() &&
+           ic_split_w("tools/command/native_devagent_situation.h", "/* h */\n");
+}
+
+static bool ic_fresh_edit_deleted(void)
+{
+    return ic_fresh_edit_fresh() && ic_split_git("git rm -q mk/extra.mk");
+}
+
+/* A rename is a delete and an add (the capture runs --no-renames). */
+static bool ic_fresh_edit_rename(void)
+{
+    return ic_split_git("git mv core/a/other.c "
+                        "tools/command/native_devagent_start.c") &&
+           ic_split_w("Makefile", "SRC = core/a/big.c "
+                      "tools/command/native_devagent_start.c\n");
+}
+
+static bool ic_fresh_edit_typechange(void)
+{
+    return ic_split_git("rm core/a/other.c && ln -s a.h core/a/other.c");
+}
+
+static bool ic_fresh_edit_text(void)
+{
+    return ic_split_w("docs/new.txt", "text\n");
+}
+
+static bool ic_fresh_fixture_build(void)
+{
+    static const struct {
+        const char *name;
+        bool (*edit)(void);
+    } branches[] = {
+        {"fresh", ic_fresh_edit_fresh},
+        {"freshtest", ic_fresh_edit_test},
+        {"freshmention", ic_fresh_edit_mention},
+        {"freshbasename", ic_fresh_edit_basename},
+        {"freshhook", ic_fresh_edit_hook},
+        {"freshcore", ic_fresh_edit_core},
+        {"freshheader", ic_fresh_edit_header},
+        {"freshdeleted", ic_fresh_edit_deleted},
+        {"freshrename", ic_fresh_edit_rename},
+        {"freshtype", ic_fresh_edit_typechange},
+        {"freshtext", ic_fresh_edit_text},
+    };
+    if (!ic_split_base_build()) return false;
+    for (size_t i = 0; i < sizeof branches / sizeof branches[0]; i++)
+        if (!ic_split_branch(branches[i].name, branches[i].edit)) return false;
+    return ic_split_git("git rev-parse base > ../base.sha");
+}
+
+struct ic_fresh_case {
+    const char *name;
+    char kind;                /* 0: exact; else the first structural kind */
+    const char *group;        /* a group the exact selection must hold */
+};
+
+static const struct ic_fresh_case ic_fresh_cases[] = {
+    {"fresh", 0, "devagent_situation"},   /* new impl, its rule's group */
+    {"freshtest", 0, "devagent_start"},   /* new test file, its own group */
+    {"freshmention", 'A', NULL},   /* an unchanged file names the stem */
+    {"freshbasename", 'A', NULL},  /* defines a name the base tree holds */
+    {"freshhook", 'A', NULL},      /* a constructor registers it unseen */
+    {"freshcore", 'A', NULL},      /* under core/ */
+    {"freshheader", 'A', NULL},    /* an added header beside it */
+    {"freshdeleted", 'D', NULL},   /* a deletion beside it */
+    {"freshrename", 'D', NULL},    /* a rename: delete plus add */
+    {"freshtype", 'T', NULL},      /* a type change */
+    {"freshtext", 'A', NULL},      /* an added non-source file */
+};
+
+static int test_ic_changed_set_fresh_source_closure(void)
+{
+    int failures = 0;
+    static char saved[4096];
+    bool was_set = ic_host_fixture_save(saved, sizeof(saved));
+    TEST("proof changed set: an added fresh .c keeps its mapped groups") {
+        ASSERT(ic_fresh_fixture_build());
+        ASSERT(ic_host_need_full_root(IC_FIX_HOST_FULL));
+        ic_host_fixture_env(true);
+        static char selector[ZCL_DEVLOOP_MAX_PLAN_SELECTIONS *
+                             (ZCL_TEST_GROUP_FULL_MAX + 1)];
+        char gated[PROOF_HOST_GATED_MAX];
+        char base[65];
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        FILE *bf = fopen(IC_FIX_SPLIT "/base.sha", "r");
+        ASSERT(bf && fgets(base, sizeof(base), bf));
+        fclose(bf);
+        base[strcspn(base, "\n")] = '\0';
+        bool bad_case = false;
+        size_t n = sizeof ic_fresh_cases / sizeof ic_fresh_cases[0];
+        for (size_t i = 0; i < n; i++) {
+            const struct ic_fresh_case *c = &ic_fresh_cases[i];
+            char rel[64], head[65], scratch[640], cwd[512];
+            ASSERT(snprintf(rel, sizeof(rel), IC_FIX_SPLIT "/%s.sha",
+                            c->name) < (int)sizeof(rel));
+            FILE *hf = fopen(rel, "r");
+            ASSERT(hf && fgets(head, sizeof(head), hf));
+            fclose(hf);
+            head[strcspn(head, "\n")] = '\0';
+            ASSERT(snprintf(rel, sizeof(rel), "%s.cap", c->name) > 0);
+            ASSERT(getcwd(cwd, sizeof(cwd)) && snprintf(scratch, sizeof(scratch), "%s/" IC_FIX_SPLIT "/%s", cwd, rel) < (int)sizeof(scratch));
+            struct zcl_dev_proof_changed_set set = {0};
+            char why[256] = {0};
+            ASSERT(zcl_dev_proof_changed_set_capture(
+                IC_SPLIT_REPO, base, head, scratch, NULL, &set, why,
+                sizeof(why)));
+            uint32_t selected = 0;
+            bool universal = false;
+            memset(selector, 0, sizeof(selector));
+            ASSERT(zcl_dev_proof_test_changed_set_selector(
+                &set, IC_FIX_HOST_FULL, selector, sizeof(selector),
+                &selected, &universal, gated, sizeof(gated)));
+            const char *reason = zcl_dev_proof_test_changed_set_reason(&set);
+            printf("invariant=fresh_source case=%s rows=%zu structural=%zu "
+                   "kind=%c fresh=%zu universal=%d selected=%u reason=%s\n",
+                   c->name, set.count, set.structural_count,
+                   set.structural_status ? set.structural_status : '-',
+                   set.fresh_count, universal ? 1 : 0, (unsigned)selected,
+                   reason ? reason : "-");
+            ASSERT(reason != NULL);
+            if (universal != (c->kind != 0)) {
+                bad_case = true;
+                zcl_dev_proof_changed_set_release(&set);
+                continue;
+            }
+            if (c->kind == 0) {
+                ASSERT(set.structural_path == NULL && set.split_count == 0);
+                ASSERT(set.fresh_count == 1 && set.fresh_path);
+                ASSERT(strcmp(reason, "fresh-source-closure") == 0);
+                ASSERT((size_t)selected < zcl_test_group_catalog_count());
+                ASSERT(c->group && strstr(selector, c->group));
+            } else {
+                ASSERT(set.structural_path != NULL);
+                ASSERT(set.structural_status == c->kind);
+                ASSERT(strcmp(reason, "changed-input-structure") == 0);
+            }
+            zcl_dev_proof_changed_set_release(&set);
+        }
+        ASSERT(!bad_case);
+        PASS();
+    } _test_next:;
+    (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+    ic_host_fixture_restore(saved, was_set);
+    return failures;
+}
+
+
 /* `dev proof select` / `make agent-verify ONLY=@changed`: a lane verify runs
  * the proof worker's own selection for base..local. Pinned here: a structural
  * range selects the proof's universal set under the proof's own reason, and a
@@ -6967,6 +7180,9 @@ static int test_ic_proof_select_range_matches_proof_selector(void)
         ASSERT(sel.count == proof_count);
         ASSERT(strcmp(lane, proof) == 0);
         ASSERT(sel.files == 1);
+        /* The detail names the row that widened it and how it changed. */
+        ASSERT(strstr(sel.detail, "kind=A") != NULL);
+        ASSERT(strstr(sel.detail, "path=optional.h") != NULL);
 
         /* Content-only range in a tree with no code index: the plan cannot
          * close, so the selection is the universal set, never a narrow one. */
@@ -15388,6 +15604,7 @@ int test_impact_composition(void)
     failures += test_ic_changed_set_carries_a_landing_batch();
     failures += test_ic_changed_set_widens_structural_changes();
     failures += test_ic_changed_set_split_sibling_closure();
+    failures += test_ic_changed_set_fresh_source_closure();
     failures += test_ic_proof_select_range_matches_proof_selector();
     failures += test_ic_proof_select_route_only();
     failures += test_ic_deleted_input_closes_current_graph();
