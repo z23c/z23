@@ -165,6 +165,15 @@ int64_t reducer_frontier_provable_tip_advance_age_ms(void)
     return at > 0 && now >= at ? now - at : -1;
 }
 
+void reducer_frontier_provable_tip_seed_high_water(int32_t height)
+{
+    int_least32_t seen = atomic_load(&g_provable_tip_high_water);
+    while (height > seen &&
+           !atomic_compare_exchange_weak(&g_provable_tip_high_water, &seen,
+                                         (int_least32_t)height)) {
+    }
+}
+
 #ifdef ZCL_TESTING
 void reducer_frontier_test_set_age_clock_ms(int64_t now_ms)
 {

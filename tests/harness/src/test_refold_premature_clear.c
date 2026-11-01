@@ -20,6 +20,7 @@
 #include "test/test_core.h"
 
 #include "jobs/refold_progress.h"
+#include "jobs/reducer_frontier.h"
 #include "storage/progress_store.h"
 
 #include <sqlite3.h>
@@ -155,9 +156,40 @@ static int case_bump_invariants(void)
     return failures;
 }
 
+/* A from-anchor refold to a resume target above the tip the boot seeded
+ * (the finalize log ends above the coins-restored tip) is local work all the
+ * way up: no height up to the target counts as chain progress. */
+static int case_seeds_high_water(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK)
+        return 1;
+    RP_CHECK("meta table ensure", progress_meta_table_ensure(db));
+    refold_progress_test_set_cached(false);
+    reducer_frontier_test_reset_high_water();
+    reducer_frontier_provable_tip_reset();
+    reducer_frontier_provable_tip_seed_high_water(100);
+    RP_CHECK("mark from-anchor ok",
+             refold_progress_mark_started_from_anchor(db, 120));
+    for (int32_t h = 1; h <= 120; h++)
+        reducer_frontier_provable_tip_set(h);
+    RP_CHECK("climb to the resume target stamps nothing",
+             reducer_frontier_provable_tip_advance_age_ms() == -1);
+    reducer_frontier_provable_tip_set(121);
+    RP_CHECK("a height above the resume target does",
+             reducer_frontier_provable_tip_advance_age_ms() >= 0);
+    reducer_frontier_provable_tip_reset();
+    reducer_frontier_test_reset_high_water();
+    refold_progress_test_set_cached(false);
+    sqlite3_close(db);
+    return failures;
+}
+
 int test_refold_premature_clear(void)
 {
     int failures = 0;
+    failures += case_seeds_high_water();
     failures += case_advance_during_fold();
     failures += case_bump_invariants();
     if (failures == 0)

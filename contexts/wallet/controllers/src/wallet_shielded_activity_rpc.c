@@ -195,8 +195,8 @@ struct wa_keys {
 static bool wa_no_sapling_keys_certain(const struct wallet_rpc_context *ctx)
 {
     return wallet_lock_is_unlocked() &&
-           (!ctx->wallet_db ||
-            wallet_sqlite_sapling_key_count(ctx->wallet_db) == 0);
+           ctx->wallet_db &&
+           wallet_sqlite_sapling_key_count(ctx->wallet_db) == 0;
 }
 
 /* Copy the distinct loaded viewing keys. A repeated ivk is kept once. A wallet

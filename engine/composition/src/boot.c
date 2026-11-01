@@ -3424,7 +3424,6 @@ static bool boot_seq_finalize_chain(struct app_context *ctx, struct boot_seq *s)
      * passes; logs a loud stderr line + fills what it can when it does
      * not. Safe on every boot — O(block_map) + one disk read per nBits
      * gap; the real live-node shape is ≤200 reads.
-     *
      * Part L: honor the return value. A failed post-restore check at
      * a non-trivial tip height means the on-disk state is corrupted
      * past automatic repair (e.g. 3M holes in active_chain). The user
@@ -3434,6 +3433,7 @@ static bool boot_seq_finalize_chain(struct app_context *ctx, struct boot_seq *s)
     boot_step_clamp_reducer_cursor();
     boot_step_activate_best_via_controller(s);
     boot_step_rewind_placeholder_tip();
+    reducer_frontier_provable_tip_seed_high_water(active_chain_height(&g_state.chain_active));
     if (!boot_step_finalize_post_restore(ctx, s->index_repaired))
         return false;
     boot_step_scan_wallet_blocks(ctx);

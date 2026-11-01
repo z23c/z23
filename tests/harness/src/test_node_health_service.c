@@ -216,6 +216,36 @@ static bool health_test_missing_tip_snapshot_ok(
     return ok;
 }
 
+/* A refold, with and without the stored tip seeded, against tip 101. */
+static bool health_refold_cases(struct node_health_snapshot *health)
+{
+    bool ok = true;
+    /* A refold replays heights this process already published, with no
+     * peer sending anything: no stamp until a height above 101. */
+    reducer_frontier_provable_tip_reset();
+    for (int h = 1; h <= 101; h++)
+        reducer_frontier_provable_tip_set(h);
+    node_health_collect(health, NULL, NULL);
+    ok = ok && health->chain_progress_age_ms == -1;
+    reducer_frontier_test_set_age_clock_ms(2000 + 7300000);
+    reducer_frontier_provable_tip_set(102);
+    node_health_collect(health, NULL, NULL);
+    ok = ok && health->chain_progress_age_ms == 0;
+    /* A restart: the stored tip 101 is seeded before a from-anchor
+     * refold climbs back to it, so the whole climb is local work. */
+    reducer_frontier_test_reset_high_water();
+    reducer_frontier_provable_tip_reset();
+    reducer_frontier_provable_tip_seed_high_water(101);
+    for (int h = 1; h <= 101; h++)
+        reducer_frontier_provable_tip_set(h);
+    node_health_collect(health, NULL, NULL);
+    ok = ok && health->chain_progress_age_ms == -1;
+    reducer_frontier_provable_tip_set(102);
+    node_health_collect(health, NULL, NULL);
+    ok = ok && health->chain_progress_age_ms == 0;
+    return ok;
+}
+
 static int health_test_chain_progress_age(void)
 {
     int failures = 0;
@@ -251,17 +281,7 @@ static int health_test_chain_progress_age(void)
         reducer_frontier_provable_tip_set(99);
         node_health_collect(&health, NULL, NULL);
         ok = ok && health.chain_progress_age_ms == 7200000;
-        /* A refold replays heights this process already published, with no
-         * peer sending anything: no stamp until a height above 101. */
-        reducer_frontier_provable_tip_reset();
-        for (int h = 1; h <= 101; h++)
-            reducer_frontier_provable_tip_set(h);
-        node_health_collect(&health, NULL, NULL);
-        ok = ok && health.chain_progress_age_ms == -1;
-        reducer_frontier_test_set_age_clock_ms(2000 + 7300000);
-        reducer_frontier_provable_tip_set(102);
-        node_health_collect(&health, NULL, NULL);
-        ok = ok && health.chain_progress_age_ms == 0;
+        ok = ok && health_refold_cases(&health);
         /* The real clock: an advance, 30 ms of waiting, then a read. */
         reducer_frontier_test_set_age_clock_ms(-1);
         reducer_frontier_test_reset_high_water();

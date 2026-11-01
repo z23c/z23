@@ -197,6 +197,9 @@ bool refold_progress_mark_started_from_anchor(sqlite3 *db, int32_t resume_target
     atomic_store(&g_refold_in_progress, true);
     atomic_store(&g_refold_from_anchor, true);
     atomic_store(&g_from_anchor_target, resume_target);
+    /* Every height up to the resume target is already stored: the fold climbing
+     * to it is local work, not network progress. */
+    reducer_frontier_provable_tip_seed_high_water(resume_target);
     LOG_INFO("refold",
              "from-ANCHOR refold marked in progress — H* floor HELD at the "
              "compiled anchor (%d) and below-anchor self-repair suspended until "

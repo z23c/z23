@@ -138,6 +138,13 @@ void reducer_frontier_provable_tip_reset(void);
  * baseline) or after a reset. Stamped where the tip is published, so
  * it is when the node connected the block, not when anyone looked. */
 int64_t reducer_frontier_provable_tip_advance_age_ms(void);
+
+/* Record that the node already holds blocks up to `height`, without
+ * publishing a tip. Boot calls it with the stored active tip, and a from-anchor
+ * refold with its resume target, before the fold steps run (not before the
+ * resets), so a refold climbing back to that height is local work and never
+ * stamps the advance age. */
+void reducer_frontier_provable_tip_seed_high_water(int32_t height);
 #ifdef ZCL_TESTING
 /* Pin the age clock to `now_ms`; a negative value restores the real clock. */
 void reducer_frontier_test_set_age_clock_ms(int64_t now_ms);

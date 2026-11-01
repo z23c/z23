@@ -47,6 +47,7 @@ struct rig {
     struct wallet *wallet;
     struct node_db ndb;
     char dir[256];
+    struct wallet_sqlite ws;
 };
 
 static bool rig_key(struct rig *r, bool present)
@@ -67,6 +68,8 @@ static bool rig_open(struct rig *r, bool with_block)
     snprintf(path, sizeof(path), "%s/node.db", r->dir);
     if (!node_db_open(&r->ndb, path) || !progress_store_open(r->dir))
         return false;
+    if (!wallet_sqlite_open_r(&r->ws, r->ndb.db).ok)
+        return false;
     if (!nullifier_kv_initialize_history(progress_store_db(), 0))
         return false;
     if (with_block && !wsh_put_block(&r->ndb, TIP))
@@ -77,7 +80,7 @@ static bool rig_open(struct rig *r, bool with_block)
     wallet_init(r->wallet);
     rig_key(r, true);
     wallet_lock_reset_for_test();
-    wallet_rpc_context_set_base(r->wallet, NULL, r->dir, NULL, NULL, NULL);
+    wallet_rpc_context_set_base(r->wallet, NULL, r->dir, &r->ws, NULL, NULL);
     wallet_rpc_context_set_node_db(&r->ndb);
     reducer_frontier_provable_tip_set(TIP);
     return true;
@@ -93,6 +96,7 @@ static void rig_close(struct rig *r)
         wallet_free(r->wallet);
         free(r->wallet);
     }
+    wallet_sqlite_close(&r->ws);
     progress_store_close();
     node_db_close(&r->ndb);
     (void)test_rm_rf_recursive(r->dir);
@@ -253,15 +257,19 @@ static int test_unlock_window(void)
     int failures = 0;
     TEST_CASE("unlock window: unloaded Sapling keys read as unknown, not zero") {
         struct rig r;
-        struct wallet_sqlite ws;
         struct json_value j, p;
         bool ok;
-        memset(&ws, 0, sizeof(ws));
         ASSERT(rig_open(&r, true));
-        ASSERT(wallet_sqlite_open_r(&ws, r.ndb.db).ok);
-        wallet_rpc_context_set_base(r.wallet, NULL, r.dir, &ws, NULL, NULL);
         rig_key(&r, false);
         json_init(&p);
+        /* No wallet database: the key rows cannot be counted, so unknown. */
+        wallet_rpc_context_set_base(r.wallet, NULL, r.dir, NULL, NULL, NULL);
+        call_summary(&j, &ok);
+        ASSERT(ok);
+        ASSERT_STR_EQ(json_get_str(json_get(&j, "shielded_state")),
+                      "keys_unavailable");
+        json_free(&j);
+        wallet_rpc_context_set_base(r.wallet, NULL, r.dir, &r.ws, NULL, NULL);
         call_summary(&j, &ok);
         ASSERT(ok);
         ASSERT_STR_EQ(json_get_str(json_get(&j, "shielded_state")), "ok");
@@ -275,8 +283,8 @@ static int test_unlock_window(void)
         memset(&e, 0, sizeof(e));
         memcpy(e.ivk, g_ivk, 32);
         e.used = true;
-        ASSERT(wallet_sqlite_write_sapling_key(&ws, 0, &e));
-        ASSERT(wallet_sqlite_sapling_key_count(&ws) == 1);
+        ASSERT(wallet_sqlite_write_sapling_key(&r.ws, 0, &e));
+        ASSERT(wallet_sqlite_sapling_key_count(&r.ws) == 1);
         call_summary(&j, &ok);
         ASSERT(ok);
         ASSERT_STR_EQ(json_get_str(json_get(&j, "shielded_state")),
@@ -297,17 +305,15 @@ static int test_unlock_window(void)
         json_free(&j);
         /* A key count that cannot be read is unknown too. */
         rig_key(&r, false);
-        ws.open = false;
-        ASSERT(wallet_sqlite_sapling_key_count(&ws) < 0);
+        r.ws.open = false;
+        ASSERT(wallet_sqlite_sapling_key_count(&r.ws) < 0);
         call_summary(&j, &ok);
         ASSERT(ok);
         ASSERT_STR_EQ(json_get_str(json_get(&j, "shielded_state")),
                       "keys_unavailable");
         json_free(&j);
-        ws.open = true;
+        r.ws.open = true;
         json_free(&p);
-        wallet_rpc_context_set_base(r.wallet, NULL, r.dir, NULL, NULL, NULL);
-        wallet_sqlite_close(&ws);
         rig_close(&r);
     } TEST_END
     return failures;
@@ -518,12 +524,12 @@ static void send_try(struct rig *r, size_t key, int64_t amount, int min_conf,
 {
     struct main_state *ms = zcl_calloc(1, sizeof(*ms), "test main state");
     json_init(res);
-    wallet_rpc_context_set_base(r->wallet, ms, r->dir, NULL, NULL, NULL);
+    wallet_rpc_context_set_base(r->wallet, ms, r->dir, &r->ws, NULL, NULL);
     (void)z_sendmany_shielded(wallet_ctx(), chain_params_get(),
                               &r->wallet->sapling_keys.keys[key], amount,
                               NULL, NULL, 0, NULL, NULL, NULL, NULL, NULL, 0,
                               min_conf, NULL, res);
-    wallet_rpc_context_set_base(r->wallet, NULL, r->dir, NULL, NULL, NULL);
+    wallet_rpc_context_set_base(r->wallet, NULL, r->dir, &r->ws, NULL, NULL);
     free(ms);
 }
 
