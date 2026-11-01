@@ -325,7 +325,8 @@ static bool z_sendmany_shielded_from(struct wallet_rpc_context *ctx,
 
 /* The optional third parameter, minconf: an extra confirmation floor on top of
  * the depth the wallet summary requires, never a way around it. Absent is 0.
- * False when present but not a non-negative integer. */
+ * False, with *min_conf set to -1, when present but not a non-negative
+ * integer; z_sendmany_shielded rejects a negative floor. */
 bool z_sendmany_minconf(const struct json_value *params, int *min_conf)
 {
     *min_conf = 0;
@@ -333,8 +334,10 @@ bool z_sendmany_minconf(const struct json_value *params, int *min_conf)
         return true;
     const struct json_value *v = json_at(params, 2);
     if (!v || v->type != JSON_INT || json_get_int(v) < 0 ||
-        json_get_int(v) > 1000000)
+        json_get_int(v) > 1000000) {
+        *min_conf = -1;
         return false;
+    }
     *min_conf = (int)json_get_int(v);
     return true;
 }
@@ -489,10 +492,7 @@ static bool z_sendmany_run(const struct json_value *params, bool help,
     /* ── Shielded spend path (z→z, z→t) ──────────────────────────── */
     if (from_is_shielded) {
         int min_conf = 0;
-        if (!z_sendmany_minconf(params, &min_conf)) {
-            json_set_str(result, "Invalid minconf");
-            LOG_FAIL("wallet_shielded", "z_sendmany: invalid minconf");
-        }
+        (void)z_sendmany_minconf(params, &min_conf);
         return z_sendmany_shielded(ctx, cp, from_z_key, total_amount,
                                    t_dests, t_amounts, num_t_out,
                                    z_diversifiers, z_pk_ds, z_amounts,

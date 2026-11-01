@@ -593,7 +593,7 @@ static int test_send_minconf_param(void)
             json_push_back(&p, &v);
             json_free(&v);
         }
-        ASSERT(!z_sendmany_minconf(&p, &mc));
+        ASSERT(!z_sendmany_minconf(&p, &mc) && mc == -1);
         json_free(&p);
     } TEST_END
     return failures;

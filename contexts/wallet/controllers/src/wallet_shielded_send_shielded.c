@@ -340,6 +340,70 @@ static const char *z_sendmany_shielded_sign(
         return spend_err;
 }
 
+/* Load the key's unspent notes, reconcile them with the canonical chain and
+ * keep the ones the wallet summary calls spendable. Returns the count, or -1
+ * with the error set on result. */
+static int z_sendmany_shielded_load_notes(
+    struct wallet_rpc_context *ctx, const struct chain_params *cp,
+    const struct sapling_key_entry *from_z_key, int min_conf,
+    struct db_sapling_note *notes, struct json_value *result)
+{
+    if (min_conf < 0) {
+        json_set_str(result, "Invalid minconf");
+        LOG_ERR("wallet_shielded", "z_sendmany: invalid minconf");
+    }
+    /* Preserve the precise view-only/no-funds diagnostic before requiring
+     * live chain authority. This is only a capability probe; actual coin
+     * selection re-reads the notes after canonical reconciliation. */
+    int num_notes = db_sapling_note_list_unspent_for_ivk(
+        ctx->node_db, from_z_key->ivk, notes, 256);
+    if (num_notes <= 0) {
+        char from_addr[128] = "";
+        if (sapling_encode_payment_address(
+                from_z_key->diversifier, from_z_key->pk_d,
+                cp->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS],
+                from_addr, sizeof(from_addr)) &&
+            db_sapling_note_count_unspent_view_for_address(
+                ctx->node_db, from_addr) > 0) {
+            json_set_str(result,
+                         "view-only balance synced from zclassicd");
+            LOG_ERR("wallet_shielded",
+                     "z_sendmany: view-only zclassicd balance is not spendable");
+        }
+        json_set_str(result, "No unspent shielded notes for this address");
+        LOG_ERR("wallet_shielded", "z_sendmany: no unspent notes for from z-address");
+    }
+
+    size_t reconciled = 0;
+    if (!node_db_reconcile_canonical_sapling_notes(
+            ctx->node_db, ctx->main_state, ctx->datadir, &reconciled)) {
+        json_set_str(result,
+                     "Canonical shielded note state is unavailable");
+        LOG_ERR("wallet_shielded",
+                 "z_sendmany: canonical note reconciliation failed");
+    }
+    num_notes = db_sapling_note_list_unspent_for_ivk(
+        ctx->node_db, from_z_key->ivk, notes, 256);
+    if (num_notes <= 0) {
+        json_set_str(result, "No unspent shielded notes for this address");
+        LOG_ERR("wallet_shielded",
+                 "z_sendmany: no notes remain after canonical reconciliation");
+    }
+
+    /* The inputs are the notes the wallet summary calls spendable
+     * (wallet_note_is_spendable), taken before the per-send cap, with
+     * min_conf as an extra confirmation floor: a note that fails is
+     * skipped, so the send accepts what the summary reports. */
+    num_notes = wallet_send_spendable_notes(
+        ctx, from_z_key->ivk, min_conf, notes, WALLET_SEND_MAX_NOTES);
+    if (num_notes < 0) {
+        json_set_str(result, "Spendable note state is unavailable");
+        LOG_ERR("wallet_shielded",
+                 "z_sendmany: spendable note filter failed");
+    }
+    return num_notes;
+}
+
 /* Body of the shielded spend. `from_z_key` is the caller's private copy of the
  * keystore entry, never a pointer into the keystore. */
 static bool z_sendmany_shielded_with_key(
@@ -363,56 +427,11 @@ static bool z_sendmany_shielded_with_key(
 
         int64_t fee = ctx->wallet->default_fee;
 
-        /* Preserve the precise view-only/no-funds diagnostic before requiring
-         * live chain authority. This is only a capability probe; actual coin
-         * selection re-reads the notes after canonical reconciliation. */
         struct db_sapling_note notes[256];
-        int num_notes = db_sapling_note_list_unspent_for_ivk(
-            ctx->node_db, from_z_key->ivk, notes, 256);
-        if (num_notes <= 0) {
-            char from_addr[128] = "";
-            if (sapling_encode_payment_address(
-                    from_z_key->diversifier, from_z_key->pk_d,
-                    cp->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS],
-                    from_addr, sizeof(from_addr)) &&
-                db_sapling_note_count_unspent_view_for_address(
-                    ctx->node_db, from_addr) > 0) {
-                json_set_str(result,
-                             "view-only balance synced from zclassicd");
-                LOG_FAIL("wallet_shielded",
-                         "z_sendmany: view-only zclassicd balance is not spendable");
-            }
-            json_set_str(result, "No unspent shielded notes for this address");
-            LOG_FAIL("wallet_shielded", "z_sendmany: no unspent notes for from z-address");
-        }
-
-        size_t reconciled = 0;
-        if (!node_db_reconcile_canonical_sapling_notes(
-                ctx->node_db, ctx->main_state, ctx->datadir, &reconciled)) {
-            json_set_str(result,
-                         "Canonical shielded note state is unavailable");
-            LOG_FAIL("wallet_shielded",
-                     "z_sendmany: canonical note reconciliation failed");
-        }
-        num_notes = db_sapling_note_list_unspent_for_ivk(
-            ctx->node_db, from_z_key->ivk, notes, 256);
-        if (num_notes <= 0) {
-            json_set_str(result, "No unspent shielded notes for this address");
-            LOG_FAIL("wallet_shielded",
-                     "z_sendmany: no notes remain after canonical reconciliation");
-        }
-
-        /* The inputs are the notes the wallet summary calls spendable
-         * (wallet_note_is_spendable), taken before the per-send cap, with
-         * min_conf as an extra confirmation floor: a note that fails is
-         * skipped, so the send accepts what the summary reports. */
-        num_notes = wallet_send_spendable_notes(
-            ctx, from_z_key->ivk, min_conf, notes, WALLET_SEND_MAX_NOTES);
-        if (num_notes < 0) {
-            json_set_str(result, "Spendable note state is unavailable");
-            LOG_FAIL("wallet_shielded",
-                     "z_sendmany: spendable note filter failed");
-        }
+        int num_notes = z_sendmany_shielded_load_notes(
+            ctx, cp, from_z_key, min_conf, notes, result);
+        if (num_notes < 0)
+            return false;
 
         /* Coin selection: pick notes until we have enough */
         struct db_sapling_note selected_notes[256];

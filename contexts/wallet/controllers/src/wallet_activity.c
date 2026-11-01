@@ -188,6 +188,24 @@ static bool wa_unconfirmed_spender(const struct db_wallet_tx_fact *txs,
     return t && t->block_height <= 0;
 }
 
+/* Largest per-key sum of at most WALLET_SEND_MAX_NOTES notes; sv is sorted by
+ * key, largest note first. */
+static int64_t wa_best_key_sum(const struct wa_spend *sv, size_t nsv)
+{
+    int64_t best = 0, sum = 0;
+    for (size_t i = 0, taken = 0; i < nsv; i++) {
+        if (i == 0 || sv[i].key != sv[i - 1].key) {
+            taken = 0;
+            sum = 0;
+        }
+        if (taken++ < WALLET_SEND_MAX_NOTES)
+            sum += sv[i].value;
+        if (sum > best)
+            best = sum;
+    }
+    return best;
+}
+
 bool wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
                                size_t nn,
                                const struct db_wallet_coin_fact *coins,
@@ -229,17 +247,7 @@ bool wallet_summary_accumulate(const struct db_wallet_note_fact *notes,
             out->sending += coins[i].value;
     }
     qsort(sv, nsv, sizeof(*sv), wa_spend_cmp);
-    int64_t sum = 0;
-    for (size_t i = 0, taken = 0; i < nsv; i++) {
-        if (i == 0 || sv[i].key != sv[i - 1].key) {
-            taken = 0;
-            sum = 0;
-        }
-        if (taken++ < WALLET_SEND_MAX_NOTES)
-            sum += sv[i].value;
-        if (sum > out->spendable)
-            out->spendable = sum;
-    }
+    out->spendable = wa_best_key_sum(sv, nsv);
     free(sv);
     free(sp);
     return true;
