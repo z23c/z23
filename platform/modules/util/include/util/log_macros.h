@@ -44,25 +44,18 @@ static inline const char *zcl_log_origin_basename(const char *path)
  * because the line would then name the helper. The _IN forms take the
  * function name as a leading string-literal argument `fn` and emit exactly
  * what the plain macro emits when called from `fn` (file:line differ, as
- * after any edit). Each plain macro below is defined in terms of its _IN
- * form with __func__, so there is one body per macro.
+ * after any edit). The plain macros below name __func__ directly.
  *
- *   LOG_WARN_IN(fn, domain, fmt, ...)      LOG_INFO_IN    LOG_ERROR_IN
- *   LOG_FAIL_IN(fn, domain, fmt, ...)      returns false
- *   LOG_ERR_IN(fn, domain, fmt, ...)       returns -1
- *   LOG_NULL_IN(fn, domain, fmt, ...)      returns NULL
- *   LOG_RETURN_IN(val, fn, domain, fmt, ...)
- *   GUARD_IN(cond, fn, domain, fmt, ...)   GUARD_NOT_NULL_IN(ptr, fn, domain,
- *   label)   GUARD_NOT_NULL_RET_NULL_IN   GUARD_NOT_NULL_ERR_IN
+ *   LOG_WARN_IN(fn, domain, fmt, ...)
+ *   LOG_INFO_IN(fn, domain, fmt, ...)
+ *   LOG_ERROR_IN(fn, domain, fmt, ...)
  *
- * RULES: use _IN only inside a helper split out of `fn`, and pass the name
- * of the ORIGINAL function as a literal. The returning forms (FAIL, ERR,
- * NULL, RETURN, GUARD*) return from the HELPER: the helper must return the
- * same type as the macro returns, and every caller must propagate that
- * return immediately (`if (!helper(...)) return false;`), so the original
- * function's observable returns and log order are unchanged. Anywhere else
- * use the plain macro. `z23-lint check-split-preserved` counts
- * LOG_X_IN("F", args) as LOG_X(args) inside F and rejects a different name. */
+ * RULE: a helper returns a status and the original function keeps every
+ * control-flow log. LOG_FAIL, LOG_ERR, LOG_NULL, LOG_RETURN and GUARD* each
+ * return from the function that holds them, so none has an _IN form: only
+ * plain log lines may move into a helper, and the original function does the
+ * returning. `z23-lint check-split-preserved` counts LOG_X_IN("F", args) as
+ * LOG_X(args) inside F, and only for the names above (see its header). */
 
 /* One ERROR-rank line naming fn: the exact base body
  * "[domain] file:line fn(): msg" followed by " origin=<basename>:<line>". */
@@ -89,49 +82,9 @@ static inline const char *zcl_log_origin_basename(const char *path)
     ZCL_LOG_ERROR_ORIGIN_IN(fn, domain, fmt __VA_OPT__(,) __VA_ARGS__); \
 } while (0)
 
-#define LOG_FAIL_IN(fn, domain, fmt, ...) do { \
-    ZCL_LOG_ERROR_ORIGIN_IN(fn, domain, fmt __VA_OPT__(,) __VA_ARGS__); \
-    return false; \
-} while (0)
-#define LOG_ERR_IN(fn, domain, fmt, ...) do { \
-    ZCL_LOG_ERROR_ORIGIN_IN(fn, domain, fmt __VA_OPT__(,) __VA_ARGS__); \
-    return -1; \
-} while (0)
-#define LOG_NULL_IN(fn, domain, fmt, ...) do { \
-    ZCL_LOG_ERROR_ORIGIN_IN(fn, domain, fmt __VA_OPT__(,) __VA_ARGS__); \
-    return NULL; \
-} while (0)
-#define LOG_RETURN_IN(val, fn, domain, fmt, ...) do { \
-    ZCL_LOG_ERROR_ORIGIN_IN(fn, domain, fmt __VA_OPT__(,) __VA_ARGS__); \
-    return (val); \
-} while (0)
-
-#define GUARD_IN(cond, fn, domain, fmt, ...) do { \
-    if (!(cond)) { \
-        ZCL_LOG_ERROR_ORIGIN_IN(fn, domain, "GUARD FAILED: " fmt __VA_OPT__(,) __VA_ARGS__); \
-        return false; \
-    } \
-} while (0)
-#define GUARD_NOT_NULL_IN(ptr, fn, domain, label) do { \
-    if (!(ptr)) { \
-        ZCL_LOG_ERROR_ORIGIN_IN(fn, domain, "%s is NULL", (label)); \
-        return false; \
-    } \
-} while (0)
-#define GUARD_NOT_NULL_RET_NULL_IN(ptr, fn, domain, label) do { \
-    if (!(ptr)) { \
-        ZCL_LOG_ERROR_ORIGIN_IN(fn, domain, "%s is NULL", (label)); \
-        return NULL; \
-    } \
-} while (0)
-#define GUARD_NOT_NULL_ERR_IN(ptr, fn, domain, label) do { \
-    if (!(ptr)) { \
-        ZCL_LOG_ERROR_ORIGIN_IN(fn, domain, "%s is NULL", (label)); \
-        return -1; \
-    } \
-} while (0)
-
-/* The plain macros: each is its _IN form named by __func__. */
+/* The plain macros: LOG_WARN, LOG_INFO and LOG_ERROR are their _IN form named
+ * by __func__; the returning and guard forms log through ZCL_LOG_ERROR_ORIGIN
+ * (which names __func__ at the expansion site) and then return. */
 #undef LOG_WARN
 #define LOG_WARN(domain, fmt, ...) \
     LOG_WARN_IN(__func__, domain, fmt __VA_OPT__(,) __VA_ARGS__)
@@ -142,28 +95,52 @@ static inline const char *zcl_log_origin_basename(const char *path)
 #define LOG_ERROR(domain, fmt, ...) \
     LOG_ERROR_IN(__func__, domain, fmt __VA_OPT__(,) __VA_ARGS__)
 #undef LOG_FAIL
-#define LOG_FAIL(domain, fmt, ...) \
-    LOG_FAIL_IN(__func__, domain, fmt __VA_OPT__(,) __VA_ARGS__)
+#define LOG_FAIL(domain, fmt, ...) do { \
+    ZCL_LOG_ERROR_ORIGIN(domain, fmt __VA_OPT__(,) __VA_ARGS__); \
+    return false; \
+} while (0)
 #undef LOG_ERR
-#define LOG_ERR(domain, fmt, ...) \
-    LOG_ERR_IN(__func__, domain, fmt __VA_OPT__(,) __VA_ARGS__)
+#define LOG_ERR(domain, fmt, ...) do { \
+    ZCL_LOG_ERROR_ORIGIN(domain, fmt __VA_OPT__(,) __VA_ARGS__); \
+    return -1; \
+} while (0)
 #undef LOG_NULL
-#define LOG_NULL(domain, fmt, ...) \
-    LOG_NULL_IN(__func__, domain, fmt __VA_OPT__(,) __VA_ARGS__)
+#define LOG_NULL(domain, fmt, ...) do { \
+    ZCL_LOG_ERROR_ORIGIN(domain, fmt __VA_OPT__(,) __VA_ARGS__); \
+    return NULL; \
+} while (0)
 #undef LOG_RETURN
-#define LOG_RETURN(val, domain, fmt, ...) \
-    LOG_RETURN_IN(val, __func__, domain, fmt __VA_OPT__(,) __VA_ARGS__)
+#define LOG_RETURN(val, domain, fmt, ...) do { \
+    ZCL_LOG_ERROR_ORIGIN(domain, fmt __VA_OPT__(,) __VA_ARGS__); \
+    return (val); \
+} while (0)
 #undef GUARD
-#define GUARD(cond, domain, fmt, ...) \
-    GUARD_IN(cond, __func__, domain, fmt __VA_OPT__(,) __VA_ARGS__)
+#define GUARD(cond, domain, fmt, ...) do { \
+    if (!(cond)) { \
+        ZCL_LOG_ERROR_ORIGIN(domain, "GUARD FAILED: " fmt __VA_OPT__(,) __VA_ARGS__); \
+        return false; \
+    } \
+} while (0)
 #undef GUARD_NOT_NULL
-#define GUARD_NOT_NULL(ptr, domain, label) \
-    GUARD_NOT_NULL_IN(ptr, __func__, domain, label)
+#define GUARD_NOT_NULL(ptr, domain, label) do { \
+    if (!(ptr)) { \
+        ZCL_LOG_ERROR_ORIGIN(domain, "%s is NULL", (label)); \
+        return false; \
+    } \
+} while (0)
 #undef GUARD_NOT_NULL_RET_NULL
-#define GUARD_NOT_NULL_RET_NULL(ptr, domain, label) \
-    GUARD_NOT_NULL_RET_NULL_IN(ptr, __func__, domain, label)
+#define GUARD_NOT_NULL_RET_NULL(ptr, domain, label) do { \
+    if (!(ptr)) { \
+        ZCL_LOG_ERROR_ORIGIN(domain, "%s is NULL", (label)); \
+        return NULL; \
+    } \
+} while (0)
 #undef GUARD_NOT_NULL_ERR
-#define GUARD_NOT_NULL_ERR(ptr, domain, label) \
-    GUARD_NOT_NULL_ERR_IN(ptr, __func__, domain, label)
+#define GUARD_NOT_NULL_ERR(ptr, domain, label) do { \
+    if (!(ptr)) { \
+        ZCL_LOG_ERROR_ORIGIN(domain, "%s is NULL", (label)); \
+        return -1; \
+    } \
+} while (0)
 
 #endif /* ZCL_LOG_MACROS_FORWARD_H */

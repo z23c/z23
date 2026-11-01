@@ -152,14 +152,15 @@ macros (each logs `error` with `file`/`line`/`func` + varargs):
 
 **Splitting a long ladder:** every `LOG_*` line prints `__func__`, so a log call
 moved into a helper would name the helper. Inside a helper split out of `fn`
-use the explicit-name forms (`LOG_WARN_IN("fn", domain, fmt, ...)`,
-`LOG_FAIL_IN`, `LOG_ERR_IN`, `LOG_NULL_IN`, `LOG_INFO_IN`, `LOG_ERROR_IN`,
-`LOG_RETURN_IN(val, "fn", ...)`, `GUARD*_IN`); the emitted line is the one the
-plain macro prints from `fn`. The returning forms return from the helper, so
-it must return the macro's type and the caller must propagate that return
-immediately. Never use `_IN` outside such a split. `check-split-preserved`
-counts `LOG_X_IN("F", args)` as `LOG_X(args)` in `F` and rejects a different
-name or arguments.
+use the explicit-name forms `LOG_WARN_IN("fn", domain, fmt, ...)`,
+`LOG_INFO_IN` and `LOG_ERROR_IN`; the emitted line is the one the plain macro
+prints from `fn`. Only plain, non-returning log lines may move. A helper
+returns a status and the original function keeps every `LOG_FAIL`, `LOG_ERR`,
+`LOG_NULL`, `LOG_RETURN` and `GUARD*`, so each still returns from `fn`. Never
+use `_IN` outside such a split. `check-split-preserved` counts
+`LOG_X_IN("F", args)` as `LOG_X(args)` in `F` only when `F` is defined in the
+file and calls the static helper that holds the call; any other name is
+compared as written and fails the gate.
 
 ### Release a stepped sqlite cursor BEFORE the log-and-return macros
 
