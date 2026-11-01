@@ -5,12 +5,12 @@
  *
  * Every failure of the HTTP exchange must name its case on stderr and exit
  * nonzero: a node that closes the connection before replying, a connect
- * refused, a reply that never arrives, a non-200 reply without a JSON body
- * (including a truncated JSON body) and an oversize reply. Each line names the
- * reason, then the endpoint and method. A closed socket and a timeout used to
- * look the same (rc=1, no output). A successful reply must stay
- * byte-identical. Each case runs against a local listener on 127.0.0.1 with a
- * cookie-only datadir. */
+ * refused, a reply that never arrives, a non-200 reply (with or without a JSON
+ * body), a 200 reply whose body is truncated and an oversize reply. Each
+ * failure prints exactly one line naming the reason, then the endpoint and
+ * method, and nothing else. A closed socket and a timeout used to look the same
+ * (rc=1, no output). A successful reply must stay byte-identical. Each case runs
+ * against a local listener on 127.0.0.1 with a cookie-only datadir. */
 
 #include "test/test_core.h"
 #include "util/spawn.h"
@@ -30,23 +30,28 @@ int test_zcl_rpc(void)
 #else
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define ZCL_RPC_BIN "build/bin/zcl-rpc"
 #define ZCL_RPC_RUN_TIMEOUT_MS 30000
 #define ZCL_RPC_CHILD_LIFE_S 30
+#define ZCL_RPC_REAP_CAP_MS 30000
 #define ZCL_RPC_REPLY_CAP (2 * 1024 * 1024 + 4096)
 #define ZCL_RPC_JSON_REPLY "{\"result\":42,\"error\":null,\"id\":1}"
 /* zcl-rpc's reply buffer size (response[] in main): 1 MiB plus 256 bytes. */
 #define ZCL_RPC_REPLY_BUF_BYTES 1048832
 
 /* Bind 127.0.0.1 on an ephemeral port, read the port back, and optionally
- * start listening. Returns the fd, or -1. */
+ * start listening. The port is read from the bound socket, so no other
+ * process can take it between a probe and the real bind. Returns the fd, or
+ * -1. */
 static int zrpc_bind(int *port_out, bool listening)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -140,23 +145,36 @@ static void zrpc_serve_once(int lfd, const char *reply, size_t reply_len)
     _exit(0);
 }
 
-/* Stop and reap a fake-node child this test forked. SIGKILL is immediate and
- * the child has already closed its socket by the time zcl-rpc has returned,
- * so the wait cannot block on a live node. */
-static void zrpc_reap(pid_t pid)
+/* Wait for the fake-node child this test forked, polling WNOHANG for at most
+ * ZCL_RPC_REAP_CAP_MS. Returns true when it exited in time. On timeout only
+ * this child's PID is killed and reaped, and the caller fails its case. */
+static bool zrpc_reap(pid_t pid)
 {
     int status = 0;
+    struct timespec tick = {0, 10 * 1000 * 1000};
+    for (int waited_ms = 0; waited_ms < ZCL_RPC_REAP_CAP_MS; waited_ms += 10) {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) return true;
+        if (r < 0 && errno != EINTR) return false;
+        (void)nanosleep(&tick, NULL);
+    }
+    fprintf(stderr, "zcl_rpc: fake node pid %ld did not exit within %d s; "
+                    "killing that child\n", (long)pid,
+            ZCL_RPC_REAP_CAP_MS / 1000);
     (void)kill(pid, SIGKILL);
     (void)waitpid(pid, &status, 0);
+    return false;
 }
 
 /* Run `zcl-rpc dumpstate` against 127.0.0.1:port with merged stdout and
  * stderr in out. max_secs > 0 sets ZCL_RPC_MAX_TIME_SECS for the child;
  * 0 leaves it unset so the client default applies. The environment is set
  * for the child only and is cleared again afterwards. Returns the exit
- * status, or -1 when the spawn itself failed. */
+ * status, or -1 when the spawn itself failed. *timed_out reports whether the
+ * harness had to stop the child. The child is started by fork and execv
+ * inside zcl_spawn; no shell runs. */
 static int zrpc_run(const char *dir, int port, int max_secs, char *out,
-                    size_t out_cap)
+                    size_t out_cap, bool *timed_out)
 {
     char port_s[16] = "", secs_s[16] = "";
     (void)snprintf(port_s, sizeof(port_s), "%d", port);
@@ -168,12 +186,12 @@ static int zrpc_run(const char *dir, int port, int max_secs, char *out,
     else
         (void)unsetenv("ZCL_RPC_MAX_TIME_SECS");
     int rc = -1;
+    *timed_out = false;
     if (ok) {
-        bool timed_out = false;
         const char *argv[] = {ZCL_RPC_BIN, "dumpstate", NULL};
         rc = zcl_spawn_capture_merged_observed(argv, out, out_cap,
                                                ZCL_RPC_RUN_TIMEOUT_MS,
-                                               &timed_out);
+                                               timed_out);
     }
     (void)unsetenv("ZCL_DATADIR");
     (void)unsetenv("ZCL_RPCPORT");
@@ -219,12 +237,15 @@ static int test_zcl_rpc_closed_before_reply(void)
         if (pid == 0)
             zrpc_serve_once(lfd, "", 0);
         close(lfd);
-        int rc = zrpc_run(dir, port, 0, out, sizeof(out));
-        zrpc_reap(pid);
+        bool timed_out = false;
+        int rc = zrpc_run(dir, port, 0, out, sizeof(out), &timed_out);
+        bool reaped = zrpc_reap(pid);
         zrpc_want_line(want, sizeof(want),
                        "node closed the connection before replying", port);
+        ASSERT(reaped);
+        ASSERT(!timed_out);
         ASSERT(rc == 1);
-        ASSERT(strstr(out, want) != NULL);
+        ASSERT_STR_EQ(out, want);
         (void)test_rm_rf_recursive(dir);
         PASS();
     } _test_next:;
@@ -243,13 +264,15 @@ static int test_zcl_rpc_timeout(void)
         ASSERT(lfd >= 0 && zrpc_datadir(dir, sizeof(dir)));
         /* Nothing calls accept(): the connection waits in the backlog and
          * curl's one-second budget expires before any reply arrives. */
-        int rc = zrpc_run(dir, port, 1, out, sizeof(out));
+        bool timed_out = false;
+        int rc = zrpc_run(dir, port, 1, out, sizeof(out), &timed_out);
         close(lfd);
         zrpc_want_line(want, sizeof(want),
                        "timed out waiting for the node's reply after 1 s",
                        port);
+        ASSERT(!timed_out);
         ASSERT(rc == 1);
-        ASSERT(strstr(out, want) != NULL);
+        ASSERT_STR_EQ(out, want);
         (void)test_rm_rf_recursive(dir);
         PASS();
     } _test_next:;
@@ -266,12 +289,14 @@ static int test_zcl_rpc_connect_refused(void)
         int port = 0;
         int fd = zrpc_refusing(&port);
         ASSERT(fd >= 0 && zrpc_datadir(dir, sizeof(dir)));
-        int rc = zrpc_run(dir, port, 0, out, sizeof(out));
+        bool timed_out = false;
+        int rc = zrpc_run(dir, port, 0, out, sizeof(out), &timed_out);
         close(fd);
         zrpc_want_line(want, sizeof(want), "could not connect to the node",
                        port);
+        ASSERT(!timed_out);
         ASSERT(rc == 1);
-        ASSERT(strstr(out, want) != NULL);
+        ASSERT_STR_EQ(out, want);
         (void)test_rm_rf_recursive(dir);
         PASS();
     } _test_next:;
@@ -296,12 +321,15 @@ static int test_zcl_rpc_non_json_status(void)
         if (pid == 0)
             zrpc_serve_once(lfd, reply, sizeof(reply) - 1);
         close(lfd);
-        int rc = zrpc_run(dir, port, 0, out, sizeof(out));
-        zrpc_reap(pid);
+        bool timed_out = false;
+        int rc = zrpc_run(dir, port, 0, out, sizeof(out), &timed_out);
+        bool reaped = zrpc_reap(pid);
         zrpc_want_line(want, sizeof(want),
                        "node replied HTTP 500 without a JSON body", port);
+        ASSERT(reaped);
+        ASSERT(!timed_out);
         ASSERT(rc == 1);
-        ASSERT(strstr(out, want) != NULL);
+        ASSERT_STR_EQ(out, want);
         (void)test_rm_rf_recursive(dir);
         PASS();
     } _test_next:;
@@ -331,13 +359,94 @@ static int test_zcl_rpc_truncated_json_status(void)
         if (pid == 0)
             zrpc_serve_once(lfd, reply, reply_len);
         close(lfd);
-        int rc = zrpc_run(dir, port, 0, out, sizeof(out));
-        zrpc_reap(pid);
+        bool timed_out = false;
+        int rc = zrpc_run(dir, port, 0, out, sizeof(out), &timed_out);
+        bool reaped = zrpc_reap(pid);
         zrpc_want_line(want, sizeof(want),
                        "node replied HTTP 500 without a JSON body", port);
+        ASSERT(reaped);
+        ASSERT(!timed_out);
         ASSERT(rc == 1);
-        ASSERT(strstr(out, want) != NULL);
-        ASSERT(strstr(out, truncated) == NULL);
+        ASSERT_STR_EQ(out, want);
+        (void)test_rm_rf_recursive(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A complete JSON-RPC error answered with a non-200 status is a failure: the
+ * exit status must not report success, and the body is not printed as the
+ * answer. */
+static int test_zcl_rpc_json_error_status(void)
+{
+    int failures = 0;
+    char dir[4096] = "";
+    char out[2048] = "";
+    char want[256] = "";
+    static char reply[4096];
+    static const char error_body[] =
+        "{\"result\":null,\"error\":{\"code\":-5,\"message\":\"no\"},\"id\":1}";
+    int port = 0;
+    TEST("zcl-rpc: HTTP 500 with a JSON error body exits nonzero, named") {
+        int lfd = zrpc_listen(&port);
+        ASSERT(lfd >= 0 && zrpc_datadir(dir, sizeof(dir)));
+        size_t reply_len = zrpc_build_reply(
+            reply, sizeof(reply), "HTTP/1.1 500 Internal Server Error",
+            error_body, sizeof(error_body) - 1);
+        ASSERT(reply_len > 0);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0)
+            zrpc_serve_once(lfd, reply, reply_len);
+        close(lfd);
+        bool timed_out = false;
+        int rc = zrpc_run(dir, port, 0, out, sizeof(out), &timed_out);
+        bool reaped = zrpc_reap(pid);
+        zrpc_want_line(want, sizeof(want),
+                       "node replied HTTP 500 with a JSON error body", port);
+        ASSERT(reaped);
+        ASSERT(!timed_out);
+        ASSERT(rc == 1);
+        ASSERT_STR_EQ(out, want);
+        (void)test_rm_rf_recursive(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A 200 body cut short is not a usable answer: the status alone does not make
+ * a truncated body a success. */
+static int test_zcl_rpc_truncated_json_200(void)
+{
+    int failures = 0;
+    char dir[4096] = "";
+    char out[2048] = "";
+    char want[256] = "";
+    static char reply[4096];
+    static const char truncated[] = "{\"result\":42,";
+    int port = 0;
+    TEST("zcl-rpc: HTTP 200 with a truncated JSON body is named, not printed") {
+        int lfd = zrpc_listen(&port);
+        ASSERT(lfd >= 0 && zrpc_datadir(dir, sizeof(dir)));
+        size_t reply_len = zrpc_build_reply(
+            reply, sizeof(reply), "HTTP/1.1 200 OK", truncated,
+            sizeof(truncated) - 1);
+        ASSERT(reply_len > 0);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0)
+            zrpc_serve_once(lfd, reply, reply_len);
+        close(lfd);
+        bool timed_out = false;
+        int rc = zrpc_run(dir, port, 0, out, sizeof(out), &timed_out);
+        bool reaped = zrpc_reap(pid);
+        zrpc_want_line(want, sizeof(want),
+                       "node replied HTTP 200 with a truncated or non-JSON body",
+                       port);
+        ASSERT(reaped);
+        ASSERT(!timed_out);
+        ASSERT(rc == 1);
+        ASSERT_STR_EQ(out, want);
         (void)test_rm_rf_recursive(dir);
         PASS();
     } _test_next:;
@@ -366,13 +475,16 @@ static int test_zcl_rpc_oversize_reply(void)
         if (pid == 0)
             zrpc_serve_once(lfd, reply, reply_len);
         close(lfd);
-        int rc = zrpc_run(dir, port, 0, out, sizeof(out));
-        zrpc_reap(pid);
+        bool timed_out = false;
+        int rc = zrpc_run(dir, port, 0, out, sizeof(out), &timed_out);
+        bool reaped = zrpc_reap(pid);
         zrpc_want_line(want, sizeof(want),
                        "node reply exceeds the 1048832-byte reply buffer",
                        port);
+        ASSERT(reaped);
+        ASSERT(!timed_out);
         ASSERT(rc == 1);
-        ASSERT(strstr(out, want) != NULL);
+        ASSERT_STR_EQ(out, want);
         (void)test_rm_rf_recursive(dir);
         PASS();
     } _test_next:;
@@ -399,8 +511,11 @@ static int test_zcl_rpc_success_unchanged(void)
         if (pid == 0)
             zrpc_serve_once(lfd, reply, reply_len);
         close(lfd);
-        int rc = zrpc_run(dir, port, 0, out, sizeof(out));
-        zrpc_reap(pid);
+        bool timed_out = false;
+        int rc = zrpc_run(dir, port, 0, out, sizeof(out), &timed_out);
+        bool reaped = zrpc_reap(pid);
+        ASSERT(reaped);
+        ASSERT(!timed_out);
         ASSERT(rc == 0);
         ASSERT(strcmp(out, ZCL_RPC_JSON_REPLY "\n") == 0);
         (void)test_rm_rf_recursive(dir);
@@ -423,6 +538,8 @@ int test_zcl_rpc(void)
     failures += test_zcl_rpc_connect_refused();
     failures += test_zcl_rpc_non_json_status();
     failures += test_zcl_rpc_truncated_json_status();
+    failures += test_zcl_rpc_json_error_status();
+    failures += test_zcl_rpc_truncated_json_200();
     failures += test_zcl_rpc_oversize_reply();
     failures += test_zcl_rpc_success_unchanged();
     return failures;
