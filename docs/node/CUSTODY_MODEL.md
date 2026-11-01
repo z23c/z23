@@ -365,10 +365,14 @@ them on chain. The reply is `{"address":"zs1..."}`.
 - **Recorded first, synced to disk.** The diversifier index is written to
   `wallet_sapling_diversifier` and committed before the address is returned.
   The write runs at `synchronous=FULL` whatever the connection mode (normal
-  mode syncs the log only at checkpoints, bulk-sync mode never), so power loss
-  after the address is shown cannot take the index back. When the sync fails no
-  address is returned. A crash between the write and the reply burns that
-  index; an index is never issued twice from one datadir.
+  mode syncs the log only at checkpoints), so power loss after the address is
+  shown cannot take the index back. When the sync fails no address is
+  returned. A crash between the write and the reply burns that index; an index
+  is never issued twice from one datadir.
+- **Not while the node is catching up.** Bulk-sync mode runs the database
+  without syncing, so a write there could be taken back by power loss. The
+  command refuses with "the node is catching up; a new address is available
+  when it is in sync" and consumes no index.
 - **Works while locked.** The address comes from the viewing key and the
   diversifier key, both resident while locked. No seed or spending key is read
   or written, and the leaf is not on the agent surface: an agent session is
@@ -380,6 +384,12 @@ them on chain. The reply is `{"address":"zs1..."}`.
   spendable note of the account, across its addresses, in one transaction.
   Change returns to the account's default address: a change output is
   encrypted on chain, so a fresh address there adds no privacy.
+- **A balance is per address, a spend is per account.** `z_getbalance` on an
+  issued address reports only the notes received at that address, but a send
+  "from" an issued address may spend any unspent note of the account, not just
+  that address's. The wallet treats the diversified addresses as one account:
+  the phone shows one balance, and a later change is to make account-wide
+  spending the rule for every from address.
 - **Restore.** The index record is not in the wallet backup, and a restored
   wallet has not read the chain, so it cannot know which addresses an earlier
   copy issued. A wallet with no record, new or restored, starts at a random
@@ -390,6 +400,11 @@ them on chain. The reply is `{"address":"zs1..."}`.
   2^-60 per issued address. Notes sent to any index are found by trial
   decryption with the one incoming viewing key, so no address list is needed,
   and a balance query reports the notes received at that address.
+- **Copies roll the index back.** The index lives in `node.db`. Restoring a
+  file copy of `node.db` over a running wallet, or running a cloned datadir
+  beside the original, returns the index to an earlier value, and the copy
+  issues addresses the other already showed. Both are unsupported for a wallet
+  in use; recover from the phrase instead, which starts at a random index.
 
 ---
 

@@ -414,7 +414,7 @@ static struct zcl_result market_purchase_source_owned(
     if (wallet_addr_is_sapling(source)) {
         uint8_t d[11], pk_d[32];
         if (!sapling_decode_payment_address(source, d, pk_d) ||
-            !sapling_keystore_find_by_address(
+            !sapling_keystore_find_by_owned_address(
                 &ctx->wallet->sapling_keys, d, pk_d))
             return ZCL_ERR(-2, "source address is not a wallet spending key");
         return ZCL_OK;
