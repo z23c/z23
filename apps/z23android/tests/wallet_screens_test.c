@@ -740,7 +740,9 @@ static size_t memo_items_total(const struct wallet_screen *s)
 static const struct wallet_screen *long_memo(const char *member, size_t count, const char *piece)
 {
     char body[4000] = "";
-    for (size_t i = 0; i < count; ++i) strcat(body, piece);
+    size_t used = 0, length = strlen(piece);
+    for (size_t i = 0; i < count && used + length < sizeof(body); ++i, used += length) memcpy(body + used, piece, length);
+    body[used] = '\0';
     snprintf(long_memo_reply, sizeof(long_memo_reply), "{\"ok\":true,\"data\":{\"schema\":\"zcl.wallet_history.v1\",\"entry\":{\"txid\":\"" TX_A "\",\"%s\":\"%s\"}}}", member, body);
     fake.detail = long_memo_reply;
     tap(WALLET_ACT_DETAIL, 0, WALLET_STAY);
