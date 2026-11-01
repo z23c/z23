@@ -112,6 +112,10 @@ static_assert(RESIDENT_RESULT_DEADLINE_MS > RESIDENT_STARTUP_PLATFORM_MS,
  * (exec, dynamic link, first write), not a speed claim, so it is generous
  * enough that a pool of 28 busy workers cannot starve a healthy child past it. */
 #define RLC_READY_WAIT_MS 120000
+/* Wall bound for typing while a preview runs: catches typing that waits on
+ * the preview longer than this, not a speed claim (the CPU bound in
+ * rlc_task_typing is). */
+#define RLC_TYPING_WALL_MS 2000
 
 #define RLC_CHECK(name, expr) do {                                        \
     printf("resident_launch_contract: %s... ", (name));                   \
@@ -932,9 +936,14 @@ static bool rlc_task_try_keep(struct task_update *update)
 static int rlc_task_typing(struct task_editor *editor)
 {
     int failures = 0;
-    /* This thread's CPU time, not wall: typing and rendering are synchronous on
-     * this thread (no wait on the preview), so the 50 ms bound still grades the
-     * work done, but a core taken away by 28 busy workers no longer counts. */
+    /* Two bounds. This thread's CPU time grades the work done (50 ms, as
+     * before) without counting a core taken away by 28 busy workers. Wall time
+     * keeps the "while preview runs" claim: a CPU clock does not advance while
+     * the thread is blocked, so typing that waited on the preview worker or
+     * its confined child would pass the CPU bound alone; the wall bound
+     * catches any such wait longer than RLC_TYPING_WALL_MS while tolerating
+     * starvation of about 1 ms of work by three orders of magnitude. */
+    int64_t wall_before = platform_time_monotonic_us();
     int64_t before = clock_thread_cpu_ns();
     struct zcl_result typed = ZCL_OK;
     const char *text = "Typing while preview runs";
@@ -946,8 +955,12 @@ static int rlc_task_typing(struct task_editor *editor)
     char error[256];
     bool pixels = rendered.ok && zcl_present_model_render_editor_v1(&model, &frame, error, sizeof(error));
     int64_t elapsed = (clock_thread_cpu_ns() - before) / 1000;
+    int64_t wall_ms = (platform_time_monotonic_us() - wall_before) / 1000;
     RLC_CHECK("task updates: typing reaches real frame while preview runs", typed.ok && pixels && elapsed < 50000);
-    printf("task updates: input_to_frame_us=%lld\n", (long long)elapsed);
+    RLC_CHECK("task updates: typing does not wait on the running preview",
+              wall_ms < RLC_TYPING_WALL_MS);
+    printf("task updates: input_to_frame_us=%lld wall_ms=%lld\n", (long long)elapsed,
+           (long long)wall_ms);
     zcl_present_model_bitmap_free_v1(&frame);
     return failures;
 }
