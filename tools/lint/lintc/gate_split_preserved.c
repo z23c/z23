@@ -183,9 +183,10 @@ static void sp_lex_all(struct sp_lex *lx)
 
 struct sp_sc {
     struct sp_file *f;
-    size_t i, decl, from;
+    size_t i, decl, from, body;
     long depth;
     char *name; /* the function being scanned, or NULL */
+    int stat;   /* the function being scanned is declared static */
 };
 
 static size_t sp_next_line(const struct sp_file *f, size_t p)
@@ -233,6 +234,28 @@ static char *sp_decl_name(const char *d, size_t len)
     return best ? sp_dup(best, bl) : NULL;
 }
 
+/* Whether the declaration d[0..len) has the word "static" at paren depth 0, so
+ * a parameter such as "int a[static 3]" does not make a function static. */
+static int sp_decl_static(const char *d, size_t len)
+{
+    int depth = 0;
+    for (size_t i = 0; i < len;) {
+        if (isalpha((unsigned char)d[i]) || d[i] == '_') {
+            size_t j = i;
+            while (j < len && sp_isid(d[j]))
+                j++;
+            if (depth == 0 && j - i == 6 && memcmp(d + i, "static", 6) == 0)
+                return 1;
+            i = j;
+            continue;
+        }
+        depth += d[i] == '(';
+        depth -= d[i] == ')' && depth > 0;
+        i++;
+    }
+    return 0;
+}
+
 static void sp_span_add(struct sp_sc *sc, size_t to)
 {
     struct sp_file *f = sc->f;
@@ -248,14 +271,19 @@ static void sp_span_add(struct sp_sc *sc, size_t to)
         f->span = nv;
         f->capspan = nc;
     }
-    f->span[f->nspan++] = (struct sp_span){ sc->name, sc->from, to };
+    f->span[f->nspan++] = (struct sp_span){ sc->name, sc->from, sc->body, to, sc->stat };
     sc->name = NULL;
 }
 
 static void sp_sc_open(struct sp_sc *sc)
 {
-    if (sc->depth++ == 0)
-        sc->name = sp_decl_name(sc->f->code + sc->decl, sc->i - sc->decl);
+    if (sc->depth++ == 0) {
+        const char *d = sc->f->code + sc->decl;
+        size_t len = sc->i - sc->decl;
+        sc->name = sp_decl_name(d, len);
+        sc->stat = sp_decl_static(d, len);
+        sc->body = sc->i;
+    }
 }
 
 static void sp_sc_boundary(struct sp_sc *sc, size_t end)
@@ -313,13 +341,50 @@ static void sp_spans(struct sp_file *f)
         sp_span_add(&sc, f->n);
 }
 
-static const char *sp_func_at(const struct sp_file *f, size_t off)
+/* The function whose span holds offset off, or NULL. */
+static const struct sp_span *sp_span_at(const struct sp_file *f, size_t off)
 {
     for (size_t i = 0; i < f->nspan; i++) {
         if (off >= f->span[i].from && off < f->span[i].to)
-            return f->span[i].name;
+            return &f->span[i];
     }
-    return "";
+    return NULL;
+}
+
+/* The function defined under this name in the file, or NULL. */
+static const struct sp_span *sp_span_named(const struct sp_file *f, const char *name)
+{
+    for (size_t i = 0; i < f->nspan; i++) {
+        if (strcmp(f->span[i].name, name) == 0)
+            return &f->span[i];
+    }
+    return NULL;
+}
+
+static const char *sp_func_at(const struct sp_file *f, size_t off)
+{
+    const struct sp_span *s = sp_span_at(f, off);
+    return s ? s->name : "";
+}
+
+/* Whether code[a..b) calls name directly: the name as a whole identifier,
+ * outside a literal, followed by '('. Comments are already blank in code. */
+static int sp_calls(const struct sp_file *f, size_t a, size_t b, const char *name)
+{
+    size_t nl = strlen(name);
+    for (size_t i = a; i + nl <= b; i++) {
+        size_t k = i + nl;
+        if (f->lit[i] || (i > 0 && sp_isid(f->code[i - 1])) ||
+            memcmp(f->code + i, name, nl) != 0)
+            continue;
+        if (k < f->n && sp_isid(f->code[k]))
+            continue;
+        while (k < f->n && isspace((unsigned char)f->code[k]))
+            k++;
+        if (k < f->n && f->code[k] == '(')
+            return 1;
+    }
+    return 0;
 }
 
 /* ---- LOG calls, includes, header ---- */
@@ -382,71 +447,98 @@ static size_t sp_arg_end(const char *c, size_t i)
     return i;
 }
 
-/* For a normalized call NAME_IN(...): the index of the argument that names the
- * function (1 for LOG_RETURN_IN, whose first argument is the value, else 0);
- * -1 when NAME (nl bytes) is not an _IN form. */
-static int sp_in_argidx(const char *call, size_t nl)
+/* The explicit-name forms the gate reads. Only plain, non-returning logs may
+ * move into a helper (log_macros.h), so no other _IN name is rewritten. */
+static int sp_in_kept(const char *call, size_t nl)
 {
-    if (nl <= 3 || memcmp(call + nl - 3, "_IN", 3) != 0)
-        return -1;
-    return nl == 13 && memcmp(call, "LOG_RETURN_IN", 13) == 0;
+    static const char *const k_in[] = { "LOG_WARN_IN", "LOG_INFO_IN", "LOG_ERROR_IN" };
+    for (size_t i = 0; i < sizeof k_in / sizeof k_in[0]; i++) {
+        if (strlen(k_in[i]) == nl && memcmp(k_in[i], call, nl) == 0)
+            return 1;
+    }
+    return 0;
 }
 
-/* Rewrites a normalized LOG_X_IN("F", args) call to the LOG_X(args) text the
- * plain macro would have had inside F, storing F in *fn. Returns NULL (and
- * *fn stays NULL) when the call is not an _IN form with a literal name, so it
- * is then compared as written and fails closed. */
-static char *sp_in_rewrite(const char *call, char **fn)
+/* The LOG_X(args) text of LOG_X_IN("F", args): the name without _IN, the
+ * spacing and '(' up to a (the first argument), then the text from s on. */
+static char *sp_in_build(const char *call, size_t nl, size_t a, size_t s)
 {
-    size_t nl = 0, p, a, e, s;
-    char *out;
-    while (sp_isid((unsigned char)call[nl]))
-        nl++;
-    int k = sp_in_argidx(call, nl);
-    for (p = nl; call[p] == ' '; p++)
-        ;
-    if (k < 0 || call[p] != '(')
-        return NULL;
-    a = ++p;
-    if (k == 1) {
-        a = sp_arg_end(call, a);
-        if (call[a] != ',')
-            return NULL;
-        for (a++; call[a] == ' '; a++)
-            ;
-    }
-    e = sp_arg_end(call, a);
-    if (e - a < 2 || call[a] != '"' || call[e - 1] != '"')
-        return NULL;
-    for (s = e + (call[e] == ','); call[s] == ' '; s++)
-        ;
-    out = malloc(nl + (p - nl) + (a - p) + strlen(call + s) + 1); // raw-alloc-ok:lint-runtime
+    char *out = malloc(a + strlen(call + s) + 1); // raw-alloc-ok:lint-runtime
     if (!out)
         return NULL;
     memcpy(out, call, nl - 3);
-    memcpy(out + nl - 3, call + nl, p - nl + (a - p));
-    strcpy(out + p - 3 + (a - p), call + s);
-    *fn = sp_dup(call + a + 1, e - a - 2);
+    memcpy(out + nl - 3, call + nl, a - nl);
+    strcpy(out + a - 3, call + s);
     return out;
+}
+
+/* Rewrites a normalized LOG_X_IN("F", args) call to the LOG_X(args) text the
+ * plain macro would have had inside F, storing that text in *out and F in
+ * *fn. Returns 1 on a rewrite, 0 when the call is not a kept _IN form with a
+ * literal name (it is then compared as written, so it fails closed), and -1
+ * when memory ran out. */
+static int sp_in_rewrite(const char *call, char **out, char **fn)
+{
+    size_t nl = 0, p, a, e, s;
+    while (sp_isid((unsigned char)call[nl]))
+        nl++;
+    for (p = nl; call[p] == ' '; p++)
+        ;
+    if (!sp_in_kept(call, nl) || call[p] != '(')
+        return 0;
+    a = ++p;
+    e = sp_arg_end(call, a);
+    if (e - a < 2 || call[a] != '"' || call[e - 1] != '"')
+        return 0;
+    for (s = e + (call[e] == ','); call[s] == ' '; s++)
+        ;
+    *fn = sp_dup(call + a + 1, e - a - 2);
+    *out = *fn ? sp_in_build(call, nl, a, s) : NULL;
+    if (*out)
+        return 1;
+    free(*fn);
+    *fn = NULL;
+    return -1;
+}
+
+/* The attribution rule for LOG_X_IN("F", ...) inside function G at offset
+ * off. The call prints as F only when F is a function defined in this file,
+ * G is declared static, and F's body calls G by name: then G is part of F's
+ * own control flow. Any other call stays attributed to G, so a wrong or
+ * invented name shows up as a moved log line and the gate fails. */
+static int sp_in_accept(const struct sp_file *f, size_t off, const char *fn)
+{
+    const struct sp_span *g = sp_span_at(f, off);
+    const struct sp_span *t = sp_span_named(f, fn);
+    return g && t && g->stat && sp_calls(f, t->body, t->to, g->name);
 }
 
 static void sp_add_log(struct sp_file *f, size_t i, size_t end, unsigned line)
 {
     char *call = sp_norm(f->code, f->lit, i, end);
-    char *infn = NULL;
-    char *re = call ? sp_in_rewrite(call, &infn) : NULL;
-    if (re) {
+    char *rew = NULL, *infn = NULL;
+    const char *fn = sp_func_at(f, i);
+    int rc = call ? sp_in_rewrite(call, &rew, &infn) : 0;
+    if (rc < 0) {
+        f->err = 1;
         free(call);
-        call = re;
+        return;
     }
-    const char *fn = infn ? infn : sp_func_at(f, i);
+    if (rc > 0 && sp_in_accept(f, i, infn)) {
+        free(call);
+        call = rew;
+        fn = infn;
+    } else {
+        free(rew);
+    }
     size_t cl = call ? strlen(call) : 0;
-    char *key = call ? malloc(strlen(fn) + cl + 2) : NULL; // raw-alloc-ok:lint-runtime
+    char *func = sp_dup(fn, strlen(fn));
+    char *key = call && func ? malloc(strlen(fn) + cl + 2) : NULL; // raw-alloc-ok:lint-runtime
     if (key)
         sprintf(key, "%s\t%s", fn, call);
     free(call);
-    sp_add(&f->lg, key, sp_dup(fn, strlen(fn)), line, i);
     free(infn);
+    sp_add(&f->lg, key, func, line, i);
 }
 
 static void sp_logs(struct sp_file *f)

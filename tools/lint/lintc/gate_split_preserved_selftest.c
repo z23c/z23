@@ -49,10 +49,10 @@ static const struct sps_case k_sps_cases[] = {
       SPS_LIC SPS_F1,
       SPS_LIC "static bool h(void)\n{\n    LOG_FAIL(\"f broke\");\n    return false;\n}\n"
       "int f(void)\n{\n    /* keep me */\n    return h();\n}\n", 0, 1, "LOG call missing from f" },
-    { "a LOG_FAIL moved into a helper as LOG_FAIL_IN naming the original",
+    { "a LOG_FAIL_IN is not a kept form, so it is compared as written",
       SPS_LIC SPS_F1,
       SPS_LIC "static bool h(void)\n{\n    LOG_FAIL_IN(\"f\", \"f broke\");\n    return false;\n}\n"
-      "int f(void)\n{\n    /* keep me */\n    return h();\n}\n", 0, 0, NULL },
+      "int f(void)\n{\n    /* keep me */\n    return h();\n}\n", 0, 1, "LOG call missing from f" },
     { "a LOG_FAIL_IN naming another function",
       SPS_LIC SPS_F1,
       SPS_LIC "static bool h(void)\n{\n    LOG_FAIL_IN(\"g\", \"f broke\");\n    return false;\n}\n"
@@ -61,10 +61,10 @@ static const struct sps_case k_sps_cases[] = {
       SPS_LIC SPS_F1,
       SPS_LIC "static bool h(void)\n{\n    LOG_FAIL_IN(\"f\", \"f broke!\");\n    return false;\n}\n"
       "int f(void)\n{\n    /* keep me */\n    return h();\n}\n", 0, 1, "LOG call missing from f" },
-    { "a LOG_RETURN moved into a helper as LOG_RETURN_IN naming the original",
+    { "a LOG_RETURN_IN is not a kept form, so it is compared as written",
       SPS_LIC "int f(void)\n{\n    LOG_RETURN((-2), \"d\", \"x %d\", 1);\n}\n",
       SPS_LIC "static int h(void)\n{\n    LOG_RETURN_IN((-2), \"f\", \"d\", \"x %d\", 1);\n}\n"
-      "int f(void)\n{\n    return h();\n}\n", 0, 0, NULL },
+      "int f(void)\n{\n    return h();\n}\n", 0, 1, "LOG call missing from f" },
     { "a LOG_WARN moved into a helper as LOG_WARN_IN naming the original",
       SPS_LIC "void f(void)\n{\n    LOG_WARN(\"d\", \"w\");\n}\n",
       SPS_LIC "static void h(void)\n{\n    LOG_WARN_IN(\"f\", \"d\", \"w\");\n}\n"

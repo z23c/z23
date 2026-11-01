@@ -27,11 +27,13 @@ struct sp_list {
     int err;
 };
 
-/* A function definition: its name and the byte range from the line after the
- * previous declaration to its closing brace. */
+/* A function definition: its name, the byte range from the line after the
+ * previous declaration to its closing brace, the offset of its opening brace
+ * (body), and whether it is declared static. */
 struct sp_span {
     char *name;
-    size_t from, to;
+    size_t from, body, to;
+    int stat;
 };
 
 struct sp_file {
