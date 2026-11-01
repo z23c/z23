@@ -303,6 +303,67 @@ static int test_zcl_rpc_connect_refused(void)
     return failures;
 }
 
+/* A cookie path that exists but cannot be opened is named and stops the
+ * call; it is never taken for a missing cookie and silently replaced by the
+ * conf fallback. Here the datadir is a regular file, so opening
+ * <datadir>/.cookie fails with ENOTDIR whoever runs the test (EACCES would
+ * not reproduce as root). Auth runs before any connection, so no node. */
+static int test_zcl_rpc_cookie_open_error(void)
+{
+    int failures = 0;
+    char dir[4096] = "";
+    char file[4200] = "";
+    char out[2048] = "";
+    char want[4400] = "";
+    TEST("zcl-rpc: a cookie path that cannot be opened is named, not skipped") {
+        test_make_tmpdir(dir, sizeof(dir), "zcl_rpc", "case");
+        int n = snprintf(file, sizeof(file), "%s/datadir-is-a-file", dir);
+        ASSERT(n > 0 && (size_t)n < sizeof(file));
+        FILE *f = fopen(file, "w");
+        ASSERT(f != NULL);
+        ASSERT_EQ(fclose(f), 0);
+        bool timed_out = false;
+        int rc = zrpc_run(file, 1, 0, out, sizeof(out), &timed_out);
+        (void)snprintf(want, sizeof(want),
+                       "zcl-rpc: opening %s/.cookie failed: %s\n", file,
+                       strerror(ENOTDIR));
+        ASSERT(!timed_out);
+        ASSERT(rc == 1);
+        ASSERT_STR_EQ(out, want);
+        (void)test_rm_rf_recursive(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* A cookie that opens but cannot be read (a directory named .cookie: read
+ * fails with EISDIR) is named and stops the call. */
+static int test_zcl_rpc_cookie_read_error(void)
+{
+    int failures = 0;
+    char dir[4096] = "";
+    char cookie[4200] = "";
+    char out[2048] = "";
+    char want[4400] = "";
+    TEST("zcl-rpc: a cookie that cannot be read is named, not skipped") {
+        test_make_tmpdir(dir, sizeof(dir), "zcl_rpc", "case");
+        int n = snprintf(cookie, sizeof(cookie), "%s/.cookie", dir);
+        ASSERT(n > 0 && (size_t)n < sizeof(cookie));
+        ASSERT_EQ(mkdir(cookie, 0700), 0);
+        bool timed_out = false;
+        int rc = zrpc_run(dir, 1, 0, out, sizeof(out), &timed_out);
+        (void)snprintf(want, sizeof(want),
+                       "zcl-rpc: reading %s failed: %s\n", cookie,
+                       strerror(EISDIR));
+        ASSERT(!timed_out);
+        ASSERT(rc == 1);
+        ASSERT_STR_EQ(out, want);
+        (void)test_rm_rf_recursive(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_zcl_rpc_non_json_status(void)
 {
     int failures = 0;
@@ -536,6 +597,8 @@ int test_zcl_rpc(void)
     failures += test_zcl_rpc_closed_before_reply();
     failures += test_zcl_rpc_timeout();
     failures += test_zcl_rpc_connect_refused();
+    failures += test_zcl_rpc_cookie_open_error();
+    failures += test_zcl_rpc_cookie_read_error();
     failures += test_zcl_rpc_non_json_status();
     failures += test_zcl_rpc_truncated_json_status();
     failures += test_zcl_rpc_json_error_status();

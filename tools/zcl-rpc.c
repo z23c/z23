@@ -46,21 +46,77 @@ static bool write_all(int fd, const char *buf, size_t len)
 }
 #endif
 
+/* Read a small credential file whole into buf (NUL-terminated, at most
+ * cap - 1 bytes). Returns 1 when read, 0 only when the file does not exist
+ * (ENOENT: the caller may fall back to the next credential source), and -1,
+ * named on stderr, when it exists but cannot be opened (permissions, a
+ * directory, ...) or read, or is larger than the buffer. An interrupted open
+ * or read (EINTR) is retried. */
+static int read_credential_file(const char *path, char *buf, size_t cap)
+{
+    FILE *f;
+    do {
+        errno = 0;
+        f = fopen(path, "rb");
+    } while (!f && errno == EINTR);
+    if (!f) {
+        if (errno == ENOENT)
+            return 0;
+        int open_err = errno ? errno : EIO;
+        fprintf(stderr, "zcl-rpc: opening %s failed: %s\n", path,
+                strerror(open_err));
+        return -1;
+    }
+    size_t n = 0;
+    int read_err = 0;
+    while (n < cap) {
+        errno = 0;
+        size_t got = fread(buf + n, 1, cap - n, f);
+        n += got;
+        if (got > 0 || feof(f))
+            continue;
+        if (errno == EINTR) {
+            clearerr(f);
+            continue;
+        }
+        read_err = errno ? errno : EIO;
+        break;
+    }
+    bool more = n >= cap;
+    fclose(f);
+    if (read_err) {
+        fprintf(stderr, "zcl-rpc: reading %s failed: %s\n", path,
+                strerror(read_err));
+        return -1;
+    }
+    if (more) {
+        fprintf(stderr, "zcl-rpc: %s is larger than %zu bytes - refusing "
+                "(no silent truncation of a credential)\n", path, cap - 1);
+        return -1;
+    }
+    buf[n] = '\0';
+    return 1;
+}
+
 /* Read legacy zclassic.conf credentials without silently truncating them.
- * A truncated password is indistinguishable from a bad node to an operator,
- * and accepting an overlong fgets fragment could treat its continuation as a
- * separate directive. Return 1 for a complete pair, 0 when absent, -1 when
- * the file cannot be read or contains an invalid credential value. */
+ * A truncated password is indistinguishable from a bad node to an operator.
+ * The file is read whole, so a long line is one line, never fragments whose
+ * continuation could pose as a separate directive. Return 1 for a complete
+ * pair, 0 when absent, -1 when the file cannot be read or contains an
+ * invalid credential value. */
 static int load_conf_auth(const char *path, char *cookie, size_t cookie_cap)
 {
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return 0;
+    static char text[65536];
+    int got = read_credential_file(path, text, sizeof(text));
+    if (got <= 0)
+        return got;
 
-    char user[128] = "", pass[128] = "", line[256];
+    char user[128] = "", pass[128] = "";
     bool invalid = false;
-    errno = 0;
-    while (fgets(line, sizeof(line), f)) {
+    for (char *line = text, *next; line; line = next) {
+        next = strchr(line, '\n');
+        if (next)
+            *next++ = '\0';
         const char *value = NULL;
         char *dst = NULL;
         size_t cap = 0;
@@ -83,14 +139,6 @@ static int load_conf_auth(const char *path, char *cookie, size_t cookie_cap)
         }
         memcpy(dst, value, len);
         dst[len] = '\0';
-    }
-    int read_err = ferror(f) ? (errno ? errno : EIO) : 0;
-    fclose(f);
-
-    if (read_err) {
-        fprintf(stderr, "zcl-rpc: reading %s failed: %s\n", path,
-                strerror(read_err));
-        return -1;
     }
     if (invalid) {
         fprintf(stderr,
@@ -709,27 +757,24 @@ static bool compose_path(char *out, size_t cap, const char *datadir,
     return true;
 }
 
-/* Read the node cookie from path into cookie, stripping one trailing
- * newline. A missing file leaves cookie untouched so the caller can fall back
- * to conf credentials. A file that exists but cannot be read is named and
- * returns -1. */
+/* Read the node cookie (its first line) from path into cookie. A missing
+ * file (ENOENT only) leaves cookie untouched so the caller can fall back to
+ * conf credentials. A file that exists but cannot be opened or read, or
+ * whose first line does not fit, is named and returns -1. */
 static int read_cookie_file(const char *path, char *cookie, size_t cap)
 {
-    FILE *cf = fopen(path, "r");
-    if (!cf)
-        return 0;
-    errno = 0;
-    if (fgets(cookie, cap, cf)) {
-        char *nl = strchr(cookie, '\n');
-        if (nl) *nl = '\0';
-    }
-    int read_err = ferror(cf) ? (errno ? errno : EIO) : 0;
-    fclose(cf);
-    if (read_err) {
-        fprintf(stderr, "zcl-rpc: reading %s failed: %s\n", path,
-                strerror(read_err));
+    char text[1024];
+    int got = read_credential_file(path, text, sizeof(text));
+    if (got <= 0)
+        return got;
+    size_t len = strcspn(text, "\n");
+    if (len >= cap) {
+        fprintf(stderr, "zcl-rpc: the cookie in %s is longer than %zu bytes "
+                "- refusing (no silent truncation)\n", path, cap - 1);
         return -1;
     }
+    memcpy(cookie, text, len);
+    cookie[len] = '\0';
     return 0;
 }
 
