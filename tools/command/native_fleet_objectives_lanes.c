@@ -180,7 +180,10 @@ bool zcl_objectives_agent_index_build(struct zcl_agent_index *ix)
     }
     if (ix->oom)
         return false;
-    qsort(ix->items, ix->n, sizeof(*ix->items), lanes_cmp);
+    /* No lanes leaves items NULL; qsort's array argument must not be NULL
+     * even for a zero count (UBSan nonnull under t-asan). */
+    if (ix->n > 1)
+        qsort(ix->items, ix->n, sizeof(*ix->items), lanes_cmp);
     return true;
 }
 
