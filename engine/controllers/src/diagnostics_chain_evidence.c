@@ -60,9 +60,19 @@ static void push_hash_json(struct json_value *out, const char *key,
 /* The reducer owns progress_store_tx_lock for a whole ingest, and both the
  * pending-tip drain (clamp -> reducer_frontier_derive_coins_best_now) and
  * csr_snapshot (active_chain_height -> tip_finalize_log) take it BLOCKING.
- * A dumper runs on an RPC worker, so it try-locks once up front, holds the
- * recursive lock across the observation, and answers a typed busy marker
- * when the reducer owns it instead of queueing behind the ingest. */
+ * A dumper runs on an RPC worker, so it PROBES the lock once up front
+ * (trylock, then immediately unlock) and answers a typed busy marker when
+ * the reducer owns it instead of queueing behind the ingest.
+ *
+ * LOCK ORDER: the probe is released BEFORE the observation.  Holding it
+ * across drain/snapshot would take csr->lock while holding the progress
+ * store lock, the inverse of csr_commit_tip / csr_clear_active_tip (csr->lock
+ * then active_chain_height -> progress_store_tx_lock), and two threads could
+ * deadlock.  Without a lock held across it, the observation takes its locks
+ * in each callee's own order, exactly like the health collector.  A reducer
+ * that starts an ingest between the probe and the observation can still make
+ * the observation wait, as it did before the probe existed; the probe only
+ * removes the common case. */
 static void push_busy_ingest_json(struct json_value *out)
 {
     json_push_kv_str(out, "snapshot_status", "progress_store_busy");
@@ -84,11 +94,11 @@ bool diag_chain_evidence_dump_state_json(struct json_value *out,
         push_busy_ingest_json(out);
         return true;
     }
+    progress_store_tx_unlock();
     chain_evidence_controller_init(&authority, app_runtime_node_db(),
                                    csr_instance());
     (void)chain_evidence_drain_pending_tip(&authority);
     chain_evidence_controller_snapshot(&authority, &view);
-    progress_store_tx_unlock();
 
     /* Same evidence authority as the full report; only unrelated projection
      * serialization and the explorer-history scan are omitted. */
