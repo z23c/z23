@@ -2859,12 +2859,15 @@ static int wtx_cancel_and_group_cases(void)
     {
         struct wkr_drive_opts o;
         struct wtx_call c;
-        char verdict[64], brief[1024];
+        char verdict[64], brief[1024], dir[1024];
         FILE *f;
         long long rc = -1;
         wtx_isolate("extgate");
-        (void)snprintf(brief, sizeof(brief), "%s/brief.txt", g_wtx_state);
-        (void)mkdir(g_wtx_state, 0700);
+        /* A brief must sit inside the checkout or the state root
+         * (<state>/z23/dev), so the fixture writes it there. */
+        (void)snprintf(dir, sizeof(dir), "%s/z23/dev", g_wtx_state);
+        wtx_mkdir_p(dir);
+        (void)snprintf(brief, sizeof(brief), "%s/brief.txt", dir);
         f = fopen(brief, "wb");
         ASSERT(f != NULL);
         if (f) {
