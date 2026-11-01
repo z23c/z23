@@ -60,6 +60,16 @@ static bool rekey_direction(uint8_t key[32], uint32_t *epoch,
     return true;
 }
 
+/* Rekey the receive direction when a rekey threshold is crossed. */
+static bool recv_rekey_if_needed(struct session_transport *t)
+{
+    if (t->recv_n >= SESSION_REKEY_FRAME_LIMIT ||
+        t->recv_bytes_epoch >= SESSION_REKEY_BYTE_LIMIT)
+        return rekey_direction(t->recv_key, &t->recv_epoch, &t->recv_n,
+                               &t->recv_bytes_epoch);
+    return true;
+}
+
 void session_transport_init(struct session_transport *t,
                             const uint8_t send_key[32], const uint8_t recv_key[32])
 {
@@ -131,12 +141,8 @@ bool session_transport_decrypt(struct session_transport *t,
         LOG_FAIL("session", "decrypt: inner length %zu out of range", inner_len);
 
     /* Rekey the recv direction in lockstep with the sender (same thresholds). */
-    if (t->recv_n >= SESSION_REKEY_FRAME_LIMIT ||
-        t->recv_bytes_epoch >= SESSION_REKEY_BYTE_LIMIT) {
-        if (!rekey_direction(t->recv_key, &t->recv_epoch, &t->recv_n,
-                             &t->recv_bytes_epoch))
-            LOG_FAIL("session", "decrypt: recv rekey failed; refusing frame");
-    }
+    if (!recv_rekey_if_needed(t))
+        LOG_FAIL("session", "decrypt: recv rekey failed; refusing frame");
 
     uint8_t nonce[12]; frame_nonce(t->recv_n, nonce);
     uint8_t aad[7];    frame_aad(t->recv_epoch, wire_len, aad);

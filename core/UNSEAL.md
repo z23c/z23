@@ -537,3 +537,7 @@ later lane flips it HARD.
 - 2026-11-01T08:29:40Z — REASON: Pair review fixes: comments now state the per-process self-test skip, and zclassic_sapling_prover_adopt_verified moves from the public sapling_prover.h to src/sapling_prover_internal.h. No behaviour, verifying key or consensus predicate changes.
   old ROOT: a92cf67b9f5c7793702a85b04dcfd27a434467cfd2e2fc0e20eecb008e299747
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T13:18:24Z — REASON: refactor(session_transport): split 1 function(s) under the complexity cap (glm); behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: a63df6dc83dc8eafc1c8a04acb83d83f8139fb674630c85ac4e0bed1faa37df5
+  by: owner unseal ritual (make core-unseal)
