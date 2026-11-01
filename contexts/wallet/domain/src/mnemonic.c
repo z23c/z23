@@ -2297,6 +2297,49 @@ cleanup:
 
 /* ── Mnemonic → entropy (with checksum validation) ────────────────── */
 
+/* Tokenize a normalized phrase and map each word to its wordlist index;
+ * returns ZCL_ERR on an over-long, unknown-word, or bad-count phrase. */
+static struct zcl_result mnemonic_decode_parse_words(
+        char *buf,
+        int *indices,
+        int *word_count_out)
+{
+    *word_count_out = 0;
+    int word_count = 0;
+
+    char *saveptr = NULL;
+    char *token = strtok_r(buf, " ", &saveptr);
+    while (token) {
+        if (word_count >= DOMAIN_WALLET_BIP39_MAX_WORDS) {
+            return ZCL_ERR(DOMAIN_WALLET_MNEMONIC_ERR_BAD_WORD_COUNT,
+                           "mnemonic decode: more than %d words",
+                           DOMAIN_WALLET_BIP39_MAX_WORDS);
+        }
+        int idx = domain_wallet_mnemonic_wordlist_find(token);
+        if (idx < 0) {
+            /* The POSITION, never the word. This message reaches node.log,
+             * and a word out of someone's recovery phrase — even a mistyped
+             * one — narrows a search over the phrase for anyone who reads
+             * the file later. A position is just as useful to the person
+             * fixing their typo and useless to everyone else. */
+            return ZCL_ERR(DOMAIN_WALLET_MNEMONIC_ERR_UNKNOWN_WORD,
+                           "mnemonic decode: word %d is not in the "
+                           "wordlist", word_count + 1);
+        }
+        indices[word_count++] = idx;
+        token = strtok_r(NULL, " ", &saveptr);
+    }
+
+    if (word_count != 12 && word_count != 15 && word_count != 18
+        && word_count != 21 && word_count != 24) {
+        return ZCL_ERR(DOMAIN_WALLET_MNEMONIC_ERR_BAD_WORD_COUNT,
+                       "mnemonic decode: bad word count: %d", word_count);
+    }
+
+    *word_count_out = word_count;
+    return ZCL_OK;
+}
+
 /* Shared decode core — parses words, packs bits, verifies checksum,
  * optionally writes entropy. Used by mnemonic_to_entropy and validate. */
 static struct zcl_result mnemonic_decode_core(
@@ -2343,37 +2386,13 @@ static struct zcl_result mnemonic_decode_core(
     }
 
     int word_count = 0;
-
-    char *saveptr = NULL;
-    char *token = strtok_r(buf, " ", &saveptr);
-    while (token) {
-        if (word_count >= DOMAIN_WALLET_BIP39_MAX_WORDS) {
-            result = ZCL_ERR(DOMAIN_WALLET_MNEMONIC_ERR_BAD_WORD_COUNT,
-                             "mnemonic decode: more than %d words",
-                             DOMAIN_WALLET_BIP39_MAX_WORDS);
+    {
+        struct zcl_result pr =
+            mnemonic_decode_parse_words(buf, indices, &word_count);
+        if (!pr.ok) {
+            result = pr;
             goto cleanup;
         }
-        int idx = domain_wallet_mnemonic_wordlist_find(token);
-        if (idx < 0) {
-            /* The POSITION, never the word. This message reaches node.log,
-             * and a word out of someone's recovery phrase — even a mistyped
-             * one — narrows a search over the phrase for anyone who reads
-             * the file later. A position is just as useful to the person
-             * fixing their typo and useless to everyone else. */
-            result = ZCL_ERR(DOMAIN_WALLET_MNEMONIC_ERR_UNKNOWN_WORD,
-                             "mnemonic decode: word %d is not in the "
-                             "wordlist", word_count + 1);
-            goto cleanup;
-        }
-        indices[word_count++] = idx;
-        token = strtok_r(NULL, " ", &saveptr);
-    }
-
-    if (word_count != 12 && word_count != 15 && word_count != 18
-        && word_count != 21 && word_count != 24) {
-        result = ZCL_ERR(DOMAIN_WALLET_MNEMONIC_ERR_BAD_WORD_COUNT,
-                         "mnemonic decode: bad word count: %d", word_count);
-        goto cleanup;
     }
 
     size_t total_bits = (size_t)word_count * 11;
