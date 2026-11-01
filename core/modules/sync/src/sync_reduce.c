@@ -325,6 +325,45 @@ static bool chunk_root_is_set(const struct zcl_chunk_root *r)
     return false;
 }
 
+/* Fold ONE emitted action into the next state, returning the updated state. */
+static struct sync_kernel_state apply_sync_action(struct sync_kernel_state ns,
+                                                  const struct sync_event *e,
+                                                  enum sync_action action)
+{
+    switch (action) {
+    case SYNC_ACTION_STORE_OFFER:
+        ns.height = e->height;
+        ns.chunks_total = e->chunks_total;
+        ns.chunks_received.value = 0;
+        zcl_chunk_root_copy(&ns.chunk_root, &e->chunk_root);
+        zcl_utxo_root_copy(&ns.utxo_root, &e->utxo_root); /* claimed root */
+        ns.proof_ok = false;
+        break;
+    case SYNC_ACTION_RESET_OFFSET:
+        ns.chunks_received.value = 0;
+        break;
+    case SYNC_ACTION_APPLY_CHUNK:
+        /* Bounded: a chunk counter can NEVER exceed the offered total. */
+        if (ns.chunks_received.value < ns.chunks_total.value)
+            ns.chunks_received.value += 1;
+        break;
+    case SYNC_ACTION_STAGE_BUNDLE:
+        ns.proof_ok = true;
+        zcl_utxo_root_copy(&ns.utxo_root, &e->utxo_root); /* proven root */
+        break;
+    case SYNC_ACTION_NONE:
+    case SYNC_ACTION_BEGIN_RECEIVE:
+    case SYNC_ACTION_START_VERIFY:
+    case SYNC_ACTION_RAISE_CONTAINMENT_BLOCKER:
+    case SYNC_ACTION_PENALIZE_PEER:
+    case SYNC_ACTION_FAIL:
+        break;
+    case SYNC_ACTION_COUNT:
+        break;
+    }
+    return ns;
+}
+
 /* Given the current state, the event, and the phase/action core the arm chose,
  * produce the COMPLETE next state. This is the ONLY place a state field is
  * updated — the adapter adopts the result verbatim. */
@@ -347,39 +386,8 @@ static struct sync_kernel_state apply_state(struct sync_kernel_state s,
         ns.peer = e->peer;
     }
 
-    for (int i = 0; i < core->action_count; i++) {
-        switch (core->actions[i]) {
-        case SYNC_ACTION_STORE_OFFER:
-            ns.height = e->height;
-            ns.chunks_total = e->chunks_total;
-            ns.chunks_received.value = 0;
-            zcl_chunk_root_copy(&ns.chunk_root, &e->chunk_root);
-            zcl_utxo_root_copy(&ns.utxo_root, &e->utxo_root); /* claimed root */
-            ns.proof_ok = false;
-            break;
-        case SYNC_ACTION_RESET_OFFSET:
-            ns.chunks_received.value = 0;
-            break;
-        case SYNC_ACTION_APPLY_CHUNK:
-            /* Bounded: a chunk counter can NEVER exceed the offered total. */
-            if (ns.chunks_received.value < ns.chunks_total.value)
-                ns.chunks_received.value += 1;
-            break;
-        case SYNC_ACTION_STAGE_BUNDLE:
-            ns.proof_ok = true;
-            zcl_utxo_root_copy(&ns.utxo_root, &e->utxo_root); /* proven root */
-            break;
-        case SYNC_ACTION_NONE:
-        case SYNC_ACTION_BEGIN_RECEIVE:
-        case SYNC_ACTION_START_VERIFY:
-        case SYNC_ACTION_RAISE_CONTAINMENT_BLOCKER:
-        case SYNC_ACTION_PENALIZE_PEER:
-        case SYNC_ACTION_FAIL:
-            break;
-        case SYNC_ACTION_COUNT:
-            break;
-        }
-    }
+    for (int i = 0; i < core->action_count; i++)
+        ns = apply_sync_action(ns, e, core->actions[i]);
 
     /* A reset back to IDLE clears the whole session envelope so a fresh session
      * starts from a clean slate (no stale peer/root/counter leaks across it). */

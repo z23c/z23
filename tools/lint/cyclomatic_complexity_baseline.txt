@@ -102,7 +102,6 @@ core/modules/script/src/script_error.c:ScriptErrorString:35
 core/modules/script/src/sigencoding.c:is_valid_signature_encoding:19
 core/modules/sync/src/stage.c:stage_run_once:22
 core/modules/sync/src/stage_lcc.c:stage_lcc_check_raise:18
-core/modules/sync/src/sync_reduce.c:apply_state:19
 core/modules/validation/src/accept_block_header.c:accept_block_header:42
 core/modules/validation/src/accept_to_mempool.c:accept_to_mempool_detailed:31
 core/modules/validation/src/block_successor.c:main_state_best_known_successor:24
