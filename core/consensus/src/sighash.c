@@ -164,6 +164,101 @@ static uint32_t tx_get_header(const struct transaction *tx)
     return tx->version | (tx->overwintered ? (1U << 31) : 0);
 }
 
+/* Prevout and sequence digests for this sighash type, or null when omitted. */
+static void sighash_overwinter_prevout_sequence(
+    const struct transaction *tx,
+    struct sighash_type hash_type,
+    const struct domain_consensus_precomputed_tx_data *cache,
+    struct uint256 *hash_prevouts,
+    struct uint256 *hash_sequence)
+{
+    memset(hash_prevouts, 0, sizeof(*hash_prevouts));
+    memset(hash_sequence, 0, sizeof(*hash_sequence));
+
+    struct uint256 null_hash;
+    uint256_set_null(&null_hash);
+
+    if (!sighash_has_anyone_can_pay(hash_type)) {
+        if (cache)
+            *hash_prevouts = cache->hash_prevouts;
+        else
+            get_prevout_hash(tx, hash_prevouts);
+    } else {
+        *hash_prevouts = null_hash;
+    }
+
+    if (!sighash_has_anyone_can_pay(hash_type) &&
+        sighash_get_base_type(hash_type) != BASE_SIGHASH_SINGLE &&
+        sighash_get_base_type(hash_type) != BASE_SIGHASH_NONE) {
+        if (cache)
+            *hash_sequence = cache->hash_sequence;
+        else
+            get_sequence_hash(tx, hash_sequence);
+    } else {
+        *hash_sequence = null_hash;
+    }
+}
+
+/* Outputs digest: all outputs, the single output at nIn, or the null hash. */
+static void sighash_overwinter_outputs(
+    const struct transaction *tx,
+    unsigned int nIn,
+    struct sighash_type hash_type,
+    const struct domain_consensus_precomputed_tx_data *cache,
+    struct uint256 *hash_outputs)
+{
+    memset(hash_outputs, 0, sizeof(*hash_outputs));
+
+    struct uint256 null_hash;
+    uint256_set_null(&null_hash);
+
+    if (sighash_get_base_type(hash_type) != BASE_SIGHASH_SINGLE &&
+        sighash_get_base_type(hash_type) != BASE_SIGHASH_NONE) {
+        if (cache)
+            *hash_outputs = cache->hash_outputs;
+        else
+            get_outputs_hash(tx, hash_outputs);
+    } else if (sighash_get_base_type(hash_type) == BASE_SIGHASH_SINGLE &&
+               nIn < tx->num_vout) {
+        struct byte_stream s;
+        stream_init(&s, 256);
+        tx_out_serialize(&tx->vout[nIn], &s);
+        blake2b_hash_personal(s.data, s.size, OUTPUTS_PERSONAL, hash_outputs);
+        stream_free(&s);
+    } else {
+        *hash_outputs = null_hash;
+    }
+}
+
+/* Write script_code->size as a compact-size prefix into varbuf and set *varlen. */
+static void sighash_script_compact_size(
+    const struct script *script_code,
+    unsigned char varbuf[9],
+    size_t *varlen)
+{
+    *varlen = 0;
+    memset(varbuf, 0, 9);
+    if (script_code->size < 0xfd) {
+        varbuf[0] = (unsigned char)script_code->size;
+        *varlen = 1;
+    } else if (script_code->size <= 0xffff) {
+        varbuf[0] = 0xfd;
+        uint16_t s16 = (uint16_t)script_code->size;
+        memcpy(varbuf + 1, &s16, 2);
+        *varlen = 3;
+    } else if (script_code->size <= 0xffffffffUL) {
+        varbuf[0] = 0xfe;
+        uint32_t s32 = (uint32_t)script_code->size;
+        memcpy(varbuf + 1, &s32, 4);
+        *varlen = 5;
+    } else {
+        varbuf[0] = 0xff;
+        uint64_t s64 = (uint64_t)script_code->size;
+        memcpy(varbuf + 1, &s64, 8);
+        *varlen = 9;
+    }
+}
+
 static bool sighash_overwinter_sapling(
     const struct script *script_code,
     const struct transaction *tx,
@@ -176,45 +271,9 @@ static bool sighash_overwinter_sapling(
     struct uint256 *result)
 {
     struct uint256 hash_prevouts, hash_sequence, hash_outputs;
-    struct uint256 null_hash;
-    uint256_set_null(&null_hash);
-
-    if (!sighash_has_anyone_can_pay(hash_type)) {
-        if (cache)
-            hash_prevouts = cache->hash_prevouts;
-        else
-            get_prevout_hash(tx, &hash_prevouts);
-    } else {
-        hash_prevouts = null_hash;
-    }
-
-    if (!sighash_has_anyone_can_pay(hash_type) &&
-        sighash_get_base_type(hash_type) != BASE_SIGHASH_SINGLE &&
-        sighash_get_base_type(hash_type) != BASE_SIGHASH_NONE) {
-        if (cache)
-            hash_sequence = cache->hash_sequence;
-        else
-            get_sequence_hash(tx, &hash_sequence);
-    } else {
-        hash_sequence = null_hash;
-    }
-
-    if (sighash_get_base_type(hash_type) != BASE_SIGHASH_SINGLE &&
-        sighash_get_base_type(hash_type) != BASE_SIGHASH_NONE) {
-        if (cache)
-            hash_outputs = cache->hash_outputs;
-        else
-            get_outputs_hash(tx, &hash_outputs);
-    } else if (sighash_get_base_type(hash_type) == BASE_SIGHASH_SINGLE &&
-               nIn < tx->num_vout) {
-        struct byte_stream s;
-        stream_init(&s, 256);
-        tx_out_serialize(&tx->vout[nIn], &s);
-        blake2b_hash_personal(s.data, s.size, OUTPUTS_PERSONAL, &hash_outputs);
-        stream_free(&s);
-    } else {
-        hash_outputs = null_hash;
-    }
+    sighash_overwinter_prevout_sequence(tx, hash_type, cache,
+                                        &hash_prevouts, &hash_sequence);
+    sighash_overwinter_outputs(tx, nIn, hash_type, cache, &hash_outputs);
 
     uint32_t le_branch = consensus_branch_id;
     unsigned char personalization[16] = {0};
@@ -288,25 +347,7 @@ static bool sighash_overwinter_sapling(
         /* Script code as varint-length-prefixed bytes */
         unsigned char varbuf[9];
         size_t varlen = 0;
-        if (script_code->size < 0xfd) {
-            varbuf[0] = (unsigned char)script_code->size;
-            varlen = 1;
-        } else if (script_code->size <= 0xffff) {
-            varbuf[0] = 0xfd;
-            uint16_t s16 = (uint16_t)script_code->size;
-            memcpy(varbuf + 1, &s16, 2);
-            varlen = 3;
-        } else if (script_code->size <= 0xffffffffUL) {
-            varbuf[0] = 0xfe;
-            uint32_t s32 = (uint32_t)script_code->size;
-            memcpy(varbuf + 1, &s32, 4);
-            varlen = 5;
-        } else {
-            varbuf[0] = 0xff;
-            uint64_t s64 = (uint64_t)script_code->size;
-            memcpy(varbuf + 1, &s64, 8);
-            varlen = 9;
-        }
+        sighash_script_compact_size(script_code, varbuf, &varlen);
         blake2b_update(&ctx, varbuf, varlen);
         blake2b_update(&ctx, script_code->data, script_code->size);
 
@@ -316,6 +357,39 @@ static bool sighash_overwinter_sapling(
 
     blake2b_final(&ctx, result->data, 32);
     return true;
+}
+
+/* Serialize inputs */
+static void sighash_sprout_write_inputs(
+    struct byte_stream *s,
+    const struct script *script_code,
+    const struct transaction *tx,
+    unsigned int nIn,
+    struct sighash_type hash_type)
+{
+    unsigned int n_inputs = sighash_has_anyone_can_pay(hash_type) ? 1 : (unsigned int)tx->num_vin;
+    stream_write_compact_size(s, n_inputs);
+    for (unsigned int i = 0; i < n_inputs; i++) {
+        unsigned int idx = sighash_has_anyone_can_pay(hash_type) ? nIn : i;
+
+        outpoint_serialize(&tx->vin[idx].prevout, s);
+
+        if (idx != nIn) {
+            /* Blank out other inputs' scripts */
+            stream_write_compact_size(s, 0);
+        } else {
+            stream_write_compact_size(s, script_code->size);
+            stream_write_bytes(s, script_code->data, script_code->size);
+        }
+
+        if (idx != nIn &&
+            (sighash_get_base_type(hash_type) == BASE_SIGHASH_SINGLE ||
+             sighash_get_base_type(hash_type) == BASE_SIGHASH_NONE)) {
+            stream_write_u32_le(s, 0);
+        } else {
+            stream_write_u32_le(s, tx->vin[idx].sequence);
+        }
+    }
 }
 
 static bool sighash_sprout(
@@ -330,30 +404,7 @@ static bool sighash_sprout(
 
     stream_write_u32_le(&s, (uint32_t)tx->version);
 
-    /* Serialize inputs */
-    unsigned int n_inputs = sighash_has_anyone_can_pay(hash_type) ? 1 : (unsigned int)tx->num_vin;
-    stream_write_compact_size(&s, n_inputs);
-    for (unsigned int i = 0; i < n_inputs; i++) {
-        unsigned int idx = sighash_has_anyone_can_pay(hash_type) ? nIn : i;
-
-        outpoint_serialize(&tx->vin[idx].prevout, &s);
-
-        if (idx != nIn) {
-            /* Blank out other inputs' scripts */
-            stream_write_compact_size(&s, 0);
-        } else {
-            stream_write_compact_size(&s, script_code->size);
-            stream_write_bytes(&s, script_code->data, script_code->size);
-        }
-
-        if (idx != nIn &&
-            (sighash_get_base_type(hash_type) == BASE_SIGHASH_SINGLE ||
-             sighash_get_base_type(hash_type) == BASE_SIGHASH_NONE)) {
-            stream_write_u32_le(&s, 0);
-        } else {
-            stream_write_u32_le(&s, tx->vin[idx].sequence);
-        }
-    }
+    sighash_sprout_write_inputs(&s, script_code, tx, nIn, hash_type);
 
     /* Serialize outputs */
     unsigned int n_outputs;
