@@ -2687,6 +2687,28 @@ static bool sqlite_test_server_turbo_cache(void)
     return ok;
 }
 
+/* Small effective RAM wins over a roomy cgroup and host: the open path must
+ * take the 16 MiB budget cache, so the seam is what the PRAGMA reads. */
+static bool sqlite_test_small_ram_seam(void)
+{
+    struct os_proc_mem roomy = {
+        .rss_bytes = 1024 * 1024,
+        .vsize_bytes = 2 * 1024 * 1024,
+        .cgroup_high = 16LL * 1024 * 1024 * 1024,
+        .cgroup_max = 32LL * 1024 * 1024 * 1024,
+        .sys_total_bytes = 64LL * 1024 * 1024 * 1024,
+        .sys_avail_bytes = 32LL * 1024 * 1024 * 1024,
+    };
+    os_proc_mem_set_override(&roomy);
+    node_db_test_set_effective_ram(2LL * 1024 * 1024 * 1024);
+    struct node_db ndb;
+    bool ok = node_db_open(&ndb, ":memory:") &&
+              sqlite_test_cache_pages(&ndb) == -(16 * 1024);
+    if (ndb.open) node_db_close(&ndb);
+    node_db_test_clear_effective_ram();
+    return ok;
+}
+
 /* Unreadable RAM (ram <= 0) takes the constrained turbo size; 4 GiB is the
  * last constrained size and one byte above it is the server size. */
 static bool sqlite_test_unreadable_ram_turbo(void)
@@ -2727,6 +2749,7 @@ static void check_sqlite_47_sqlite_pragma_tuning_honors_constrained_(int *failur
     if (ndb.open) node_db_close(&ndb);
     node_db_test_clear_effective_ram();
     ok = ok && sqlite_test_server_turbo_cache();
+    ok = ok && sqlite_test_small_ram_seam();
     ok = ok && sqlite_test_unreadable_ram_turbo();
     os_proc_mem_set_override(NULL);
     if (ok) printf("OK (cache=%lld mmap=0)\n",
