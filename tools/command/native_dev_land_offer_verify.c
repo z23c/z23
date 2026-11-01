@@ -65,20 +65,26 @@
 #define DLRV_GIT_MS (10 * 60 * 1000)
 
 /* --check: absent or "cx" is false (the split mode), "verify" is true;
- * anything else refuses with `code`. */
+ * anything else, a non-string or empty value included, refuses with `code`
+ * naming input.check. */
 bool zcl_dlr_check_arg(const struct zcl_command_request *req, const char *leaf,
                        const char *code, bool *verify,
                        struct zcl_command_reply *reply)
 {
+    const struct json_value *v =
+        req->input ? json_get(req->input, "check") : NULL;
     const char *c = zcl_dlr_str(req, "check");
     *verify = false;
-    if (!c || strcmp(c, "cx") == 0)
+    if (!v)
         return true;
-    if (strcmp(c, "verify") == 0) {
+    if (c && strcmp(c, "cx") == 0)
+        return true;
+    if (c && strcmp(c, "verify") == 0) {
         *verify = true;
         return true;
     }
-    zcl_dlr_fail(reply, leaf, code, "input", "check is cx or verify", c);
+    zcl_dlr_fail(reply, leaf, code, "input", "check is cx or verify",
+                 "input.check");
     return false;
 }
 
@@ -347,6 +353,13 @@ static bool dlrv_child(const char *wt, const char *rail, const char *base,
     char *text, *verdict;
     text = zcl_calloc(1, DLRV_OUT_MAX, "dev_land_verify.out");
     verdict = zcl_calloc(1, DLRV_RC_MAX, "dev_land_verify.rc");
+    if (!text || !verdict) {
+        free(verdict);
+        free(text);
+        zcl_dlr_fail(reply, leaf, "REVERIFY_SETUP", "agent_verify",
+                     "could not allocate the verification buffers", "calloc");
+        return false;
+    }
     argv[n++] = rail;
     argv[n++] = "--wait";
     argv[n++] = "--project";
