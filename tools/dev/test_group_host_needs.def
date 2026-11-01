@@ -152,6 +152,14 @@ ZCL_TEST_GROUP_BUILD_NEED("test_plugin_package",
     "build/fixtures/plugin_run_child", "build/fixtures/plugin_run_child")
 #endif
 
+/* The ACME worker is tested by running build/bin/z23-acme (see the Makefile
+ * note on test_acme_worker). The proof's prefork already builds it, but
+ * t-asan, t-tsan and a fresh t-fast tree did not: without this row the group
+ * failed there with "z23-acme is a required test prerequisite". */
+#if !defined(_WIN32)
+ZCL_TEST_GROUP_BUILD_NEED("test_acme_worker", "build/bin/z23-acme", "z23-acme")
+#endif
+
 /* The generator is exercised through its built binary on fixture trees. */
 #if !defined(_WIN32)
 ZCL_TEST_GROUP_BUILD_NEED("test_toolgen", "build/bin/z23-toolgen",
