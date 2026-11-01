@@ -100,7 +100,7 @@ static int64_t seal_rewind_read_cursor(sqlite3 *db)
         LOG_WARN_IN("seal_rewind_to_nearest", "seal_rewind",
                     "[seal_rewind] utxo_apply cursor too large: %llu",
                     (unsigned long long)cursor);
-        return -1;
+        return -1; // raw-return-ok:logged_by_LOG_WARN_IN_above
     }
     return (int64_t)cursor;
 }
