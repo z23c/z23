@@ -42,19 +42,20 @@ static int zendp_onion_check(const struct zendp *ep)
 }
 
 /* Address shape check: 0 = ok, 1 = flag set but address all zero,
- * 2 = flag set but port 0, 3 = fields set without the flag. */
+ * 2 = flag set but port 0, 3 = fields set without the flag. The port is
+ * read through a pointer so it is only examined after the address. */
 static int zendp_addr_claim_check(uint8_t flags, uint8_t has_flag,
                                   const uint8_t *addr, size_t addr_len,
-                                  uint16_t port)
+                                  const uint16_t *port)
 {
     if (flags & has_flag) {
         if (zendp_all_zero(addr, addr_len))
             return 1;
-        if (port == 0)
+        if (*port == 0)
             return 2;
         return 0;
     }
-    if (!zendp_all_zero(addr, addr_len) || port != 0)
+    if (!zendp_all_zero(addr, addr_len) || *port != 0)
         return 3;
     return 0;
 }
@@ -103,7 +104,7 @@ bool zendp_valid(const struct zendp *ep)
     }
 
     r = zendp_addr_claim_check(ep->flags, ZENDP_HAS_IPV4, ep->ipv4,
-                               sizeof(ep->ipv4), ep->ipv4_port);
+                               sizeof(ep->ipv4), &ep->ipv4_port);
     if (r != 0) {
         if (r == 1)
             LOG_FAIL(ZENDP_LOG, "valid: 0.0.0.0 reaches nobody");
@@ -116,7 +117,7 @@ bool zendp_valid(const struct zendp *ep)
     }
 
     r = zendp_addr_claim_check(ep->flags, ZENDP_HAS_IPV6, ep->ipv6,
-                               sizeof(ep->ipv6), ep->ipv6_port);
+                               sizeof(ep->ipv6), &ep->ipv6_port);
     if (r != 0) {
         if (r == 1)
             LOG_FAIL(ZENDP_LOG, "valid: :: reaches nobody");
