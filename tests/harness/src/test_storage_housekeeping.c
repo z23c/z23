@@ -232,90 +232,6 @@ static int shk_case_boot_start_not_blocked_by_held_lock(void)
     return failures;
 }
 
-struct shk_inline_start_ctx {
-    const char *dir;
-    bool ok;
-    atomic_bool returned;
-};
-
-static void *shk_inline_start_thread(void *arg)
-{
-    struct shk_inline_start_ctx *c = arg;
-    c->ok = storage_housekeeping_start(c->dir).ok;
-    atomic_store(&c->returned, true);
-    return NULL;
-}
-
-static void *shk_stop_thread(void *arg);
-
-/* The maintenance token is held by this thread while another thread runs the
- * inline start, whose synchronous first sweep waits for that token. A stop()
- * from the token holder's side must still return: the inline sweep may not
- * run under the lifecycle mutex stop() needs. Red when it does: stop waits on
- * the mutex, the sweep waits on the token, and neither moves until the token
- * is released. */
-static int shk_case_stop_during_inline_start(void)
-{
-    int failures = 0;
-    char dir[256];
-    test_make_tmpdir(dir, sizeof(dir), "storage_housekeeping", "inlinestop");
-    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_ROTATIONAL);
-
-    struct storage_housekeeping_stats before;
-    storage_housekeeping_stats(&before);
-    bool held = storage_pacing_maintenance_begin();
-    SHK_CHECK("inline stop: token taken", held);
-    if (!held) {
-        storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
-        test_cleanup_tmpdir(dir);
-        return failures;
-    }
-
-    struct shk_inline_start_ctx sc = {.dir = dir, .ok = false};
-    atomic_init(&sc.returned, false);
-    pthread_t starter;
-    int rc = pthread_create(&starter, NULL, shk_inline_start_thread, &sc);
-    SHK_CHECK("inline stop: starter thread spawned", rc == 0);
-    if (rc != 0) {
-        storage_pacing_maintenance_end();
-        storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
-        test_cleanup_tmpdir(dir);
-        return failures;
-    }
-    SHK_CHECK("inline stop: the inline sweep entered and waits on the token",
-              shk_wait_sweeps(before.sweeps + 1));
-
-    atomic_bool done;
-    atomic_init(&done, false);
-    pthread_t stopper;
-    rc = pthread_create(&stopper, NULL, shk_stop_thread, &done);
-    SHK_CHECK("inline stop: stopper thread spawned", rc == 0);
-    bool stopped = false;
-    for (int i = 0; rc == 0 && i < 250 && !stopped; i++) {
-        stopped = atomic_load(&done);
-        if (!stopped)
-            platform_sleep_ms(20);
-    }
-    SHK_CHECK("inline stop: stop returns while the inline sweep waits on "
-              "the token", stopped);
-    SHK_CHECK("inline stop: start has not returned yet (its sweep waits)",
-              !atomic_load(&sc.returned));
-
-    /* Release the token either way so a red run ends instead of hanging. */
-    storage_pacing_maintenance_end();
-    pthread_join(starter, NULL);
-    if (rc == 0)
-        pthread_join(stopper, NULL);
-    SHK_CHECK("inline stop: start returned ok once the token was free", sc.ok);
-    SHK_CHECK("inline stop: no worker left running",
-              !storage_housekeeping_test_thread_running());
-    storage_housekeeping_stop();
-
-    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
-    test_cleanup_tmpdir(dir);
-    return failures;
-}
-
 /* ── 1c. stop must end a first sweep that is blocked on the token ── */
 static void *shk_stop_thread(void *arg)
 {
@@ -339,7 +255,7 @@ static int shk_case_stop_ends_sweep_blocked_on_token(void)
     struct storage_housekeeping_stats before;
     storage_housekeeping_stats(&before);
     SHK_CHECK("stop blocked: token taken", storage_pacing_maintenance_begin());
-    struct zcl_result r = storage_housekeeping_start_deferred(dir);
+    struct zcl_result r = storage_housekeeping_start(dir);
     SHK_CHECK("stop blocked: deferred start ok", r.ok);
     SHK_CHECK("stop blocked: first sweep entered",
               shk_wait_sweeps(before.sweeps + 1));
@@ -421,7 +337,7 @@ static int shk_case_stop_after_token_won(void)
         return failures;
     }
     storage_housekeeping_test_set_after_token_hook(shk_hook_request_stop);
-    struct zcl_result r = storage_housekeeping_start_deferred(dir);
+    struct zcl_result r = storage_housekeeping_start(dir);
     SHK_CHECK("after-token: deferred start ok", r.ok);
     SHK_CHECK("after-token: first sweep entered",
               shk_wait_sweeps(before.sweeps + 1));
@@ -471,7 +387,7 @@ static int shk_case_stop_after_token_won(void)
     if (regained)
         storage_pacing_maintenance_end();
     /* After the join a fresh start/stop round trip works again. */
-    struct zcl_result again = storage_housekeeping_start_deferred(dir);
+    struct zcl_result again = storage_housekeeping_start(dir);
     SHK_CHECK("after-token: restart after a self-exited thread", again.ok);
     storage_housekeeping_stop();
 
@@ -494,9 +410,9 @@ static int shk_case_start_stop_round_trip(void)
         struct zcl_result r = storage_housekeeping_start(dir);
         SHK_CHECK_RESULT("start succeeds on an empty datadir", r);
 
+        SHK_CHECK("the first sweep finished on the service thread",
+                  shk_wait_finished(before.sweeps_finished + 1));
         storage_housekeeping_stats(&after);
-        SHK_CHECK("the synchronous boot sweep ran",
-                  after.sweeps >= before.sweeps + 1);
         SHK_CHECK("an unmeasured projection reports unavailable byte counts",
                   after.projection_file_bytes == -1 &&
                   after.projection_live_bytes == -1);
@@ -841,7 +757,9 @@ static int shk_case_stop_with_tick_due(const struct storage_pacing *pacing)
         storage_housekeeping_stats(&before);
 
         struct zcl_result r = storage_housekeeping_start(dir);
-        SHK_CHECK_RESULT("start runs its synchronous boot sweep", r);
+        SHK_CHECK_RESULT("start succeeds", r);
+        SHK_CHECK("the first sweep finished on the service thread",
+                  shk_wait_finished(before.sweeps_finished + 1));
         storage_housekeeping_stats(&after);
         SHK_CHECK("the boot sweep rotated the oversized log",
                   after.log_rotations == before.log_rotations + 1);
@@ -862,6 +780,8 @@ static int shk_case_stop_with_tick_due(const struct storage_pacing *pacing)
         struct zcl_result restart = storage_housekeeping_start(dir);
         SHK_CHECK_RESULT("restart after stop proves the thread exited",
                          restart);
+        SHK_CHECK("the restart's first sweep finished on the service thread",
+                  shk_wait_finished(before.sweeps_finished + 2));
         storage_housekeeping_stats(&after);
         SHK_CHECK("the restart boot sweep rotated the due tick's log",
                   after.log_rotations == before.log_rotations + 2);
@@ -897,7 +817,6 @@ int test_storage_housekeeping(void)
     failures += shk_case_boot_start_not_blocked_by_held_lock();
     failures += shk_case_stop_ends_sweep_blocked_on_token();
     failures += shk_case_stop_after_token_won();
-    failures += shk_case_stop_during_inline_start();
 
     shk_restore_pacing();
     if (failures == 0)

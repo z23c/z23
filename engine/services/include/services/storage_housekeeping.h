@@ -67,14 +67,14 @@ struct storage_housekeeping_stats {
  * Never fatal: a bound that cannot be applied this tick is applied the next. */
 void storage_housekeeping_sweep(const char *datadir);
 
-/* Launch/stop the periodic thread. Idempotent. start() refuses, with a named
- * zcl_result, a NULL/empty datadir or one that does not exist: a sweeper
- * with nothing to bound is a misconfiguration, not a degraded mode. */
+/* Launch/stop the periodic thread. start() refuses, with a named zcl_result,
+ * a NULL/empty datadir or one that does not exist (a sweeper with nothing to
+ * bound is a misconfiguration, not a degraded mode), and refuses while a
+ * thread is running or not yet joined. The first sweep runs on the new
+ * thread at once, never before start() returns, so a sweep blocked on a
+ * storage lock cannot hold the READY transition. stop() joins the thread,
+ * so no sweep outlives it; it is a no-op when nothing was started. */
 struct zcl_result storage_housekeeping_start(const char *datadir);
-/* Same refusals as start(), but the first sweep runs on the new thread at
- * once instead of before this call returns. The boot service uses it so a
- * sweep blocked on a storage lock cannot hold the READY transition. */
-struct zcl_result storage_housekeeping_start_deferred(const char *datadir);
 void storage_housekeeping_stop(void);
 
 #ifdef ZCL_TESTING
