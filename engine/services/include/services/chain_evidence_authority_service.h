@@ -300,6 +300,13 @@ chain_evidence_controller_mark_fully_validated_at_tip(
 void chain_evidence_controller_freeze(struct chain_evidence_controller *authority,
                            const char *reason);
 
+/* Non-blocking snapshot for live-node diagnostics: same view, but every lock
+ * on the path is a bounded try.  Returns false (view not usable) when the
+ * chain-state or progress-store lock is busy. */
+bool chain_evidence_controller_snapshot_bounded(
+    struct chain_evidence_controller *authority,
+    struct chain_evidence_controller_view *out);
+
 void chain_evidence_controller_snapshot(struct chain_evidence_controller *authority,
                              struct chain_evidence_controller_view *out);
 

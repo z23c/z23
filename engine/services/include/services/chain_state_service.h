@@ -259,6 +259,12 @@ bool csr_align_coins_best_block(struct chain_state_repository *csr,
                                 const struct uint256 *hash);
 
 /* ── Read-only introspection ──────────────────────────────────── */
+/* Non-blocking csr_snapshot for live-node diagnostics: csr->lock is taken with
+ * a short deadline, the progress-store lock with a try, and the COUNT(*) utxo
+ * scan is skipped (utxo_count stays -1).  Returns false (view partial, do not
+ * use) when either lock is busy, i.e. an ingest may own it. */
+bool csr_snapshot_bounded(struct chain_state_repository *csr,
+                          struct chain_state_view *out);
 void csr_snapshot(struct chain_state_repository *csr,
                    struct chain_state_view *out);
 

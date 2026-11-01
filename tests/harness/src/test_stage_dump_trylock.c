@@ -486,6 +486,8 @@ struct cev_reply {
     bool has_sync_state;
     bool has_normal_fields; /* active_tip, publish_state, health_reason */
     bool has_health_reason;
+    bool exact_busy;        /* exactly the 4 documented busy fields, nothing else */
+    bool any_normal;        /* ANY normal chain_evidence field present */
 };
 
 static void cev_dump(const char *key, struct cev_reply *r)
@@ -500,6 +502,13 @@ static void cev_dump(const char *key, struct cev_reply *r)
     r->frontier_busy = json_status_is(&out, "coins_frontier", "busy_ingest");
     r->has_sync_state = json_get(&out, "sync_state") != NULL;
     r->has_health_reason = json_get(&out, "health_reason") != NULL;
+    r->any_normal = json_get(&out, "active_tip") || json_get(&out, "publish_state") ||
+                    r->has_health_reason || json_get(&out, "header_tip") ||
+                    json_get(&out, "active_tip_hash") ||
+                    json_get(&out, "contradiction_reason") ||
+                    json_get(&out, "explorer_index_state");
+    r->exact_busy = json_size(&out) == 4 && r->busy_marker &&
+                    r->sync_busy && r->frontier_busy;
     r->has_normal_fields = json_get(&out, "active_tip") != NULL &&
                            json_get(&out, "publish_state") != NULL &&
                            r->has_health_reason;
@@ -540,10 +549,13 @@ static int case_chain_evidence_busy_ingest(void)
                  r.busy_marker);
         SD_CHECK("cev busy: sync_state busy_ingest", r.sync_busy);
         SD_CHECK("cev busy: coins_frontier busy_ingest", r.frontier_busy);
-        SD_CHECK("cev busy: no normal fields leaked", !r.has_normal_fields);
+        SD_CHECK("cev busy: no normal chain_evidence field at all",
+                 !r.any_normal);
+        SD_CHECK("cev busy: reply is EXACTLY the 4 busy fields",
+                 r.exact_busy);
         cev_dump("health_reason", &r);
-        SD_CHECK("cev busy: health_reason key also busy-marked with all fields",
-                 r.ret && r.busy_marker && r.sync_busy && r.frontier_busy);
+        SD_CHECK("cev busy: health_reason key: exact busy shape, no normal field",
+                 r.ret && r.exact_busy && !r.any_normal);
         atomic_store(&lk.release, 1);
         pthread_join(th, NULL);
         cev_dump(NULL, &r);
@@ -563,75 +575,163 @@ static int case_chain_evidence_busy_ingest(void)
     return failures;
 }
 
-/* Deadlock shape: thread B holds the chain-state (CSR) lock and then wants
- * the progress-store lock (the order csr_commit_tip uses: CSR, then
- * active_chain_height -> tip_finalize_log under progress_store_tx_lock). If
- * the dumper held the progress-store lock while it waited for CSR, the two
- * would deadlock.  B waits (bounded) until another thread holds the
- * progress-store lock, so a dumper that holds it across its CSR work is
- * caught on every run; then B takes it blocking.  The dumper must answer
- * (normal or busy) within the bound and B must finish. */
-struct csr_vs_dump {
-    _Atomic int csr_held;     /* B owns csr->lock */
-    _Atomic int dump_started; /* D is about to call the dumper */
-    _Atomic int b_done;
+/* Deterministic contested-lock cases for the chain-evidence dumper.
+ *
+ * Production order: an ingest owns progress_store_tx_lock (PS) for a whole
+ * ingest and then publishes through the chain-state repository (CSR), so it
+ * HOLDS PS and WAITS for CSR; csr_commit_tip / csr_clear_active_tip are the
+ * inverse (CSR, then PS).  Thread H below holds csr->lock under a latch until
+ * the main thread has seen the dumper answer, so nothing on the dumper's path
+ * can ever get CSR while H lives.
+ *
+ *  - "ingest" scenario: thread I takes PS (latched: ps_held), then blocks on
+ *    CSR (held by H).  PS is owned and I is parked on CSR at the moment the
+ *    dumper runs.
+ *  - "residual" scenario: PS is FREE (no I thread), so the dumper's PS probe
+ *    succeeds and the dumper proceeds to the work behind it, exactly the state
+ *    an ingest-in-flight leaves after the probe; CSR is held by H.
+ *
+ * In both, the dumper must answer the exact busy shape within the bound.  A
+ * dumper that waits for CSR (the old blocking csr_snapshot) cannot answer
+ * until H is released, so the bounded wait expires: the case then FAILS,
+ * releases H on its own (so nothing hangs) and joins everything. */
+struct contest {
+    _Atomic int csr_held;   /* H owns csr->lock */
+    _Atomic int ps_held;    /* I owns progress_store_tx_lock */
+    _Atomic int i_waiting;  /* I is about to block on csr->lock */
+    _Atomic int release_h;  /* main: H may drop csr->lock */
+    _Atomic int i_done;
     _Atomic int d_done;
-    _Atomic int d_ret;
-    _Atomic int d_answer_ok;  /* busy marker or normal fields */
+    struct cev_reply plain; /* dump(NULL) */
+    struct cev_reply reason;/* dump("health_reason") */
     pthread_mutex_t mu;
     pthread_cond_t cv;
 };
 
-static void csr_vs_dump_signal(struct csr_vs_dump *s, _Atomic int *flag)
+static void contest_set(struct contest *c, _Atomic int *flag)
 {
-    pthread_mutex_lock(&s->mu);
+    pthread_mutex_lock(&c->mu);
     atomic_store(flag, 1);
-    pthread_cond_broadcast(&s->cv);
-    pthread_mutex_unlock(&s->mu);
+    pthread_cond_broadcast(&c->cv);
+    pthread_mutex_unlock(&c->mu);
 }
 
-static void *csr_holder_thread(void *arg)
+/* Block (bounded, condvar) until *flag is set; false on timeout. */
+static bool contest_wait(struct contest *c, _Atomic int *flag, int secs)
 {
-    struct csr_vs_dump *s = (struct csr_vs_dump *)arg;
-    struct chain_state_repository *csr = csr_instance();
-    pthread_mutex_lock(&csr->lock);
-    atomic_store(&s->csr_held, 1);
-    for (int i = 0; i < 4000000 && !atomic_load(&s->dump_started); i++)
-        sched_yield();
-    /* Wait until the dumper (another thread) owns the progress-store lock:
-     * the lock-free holder probe says so (a trylock probe here would itself
-     * make the dumper's own try-lock collide and answer busy).  A correct
-     * dumper never holds it across its CSR work, so the poll runs out and we
-     * proceed. */
-    for (int i = 0; i < 1000000; i++) {
-        if (progress_store_tx_holder(NULL, NULL))
-            break;
-        sched_yield();
-    }
-    progress_store_tx_lock(); /* CSR, then progress store */
+    struct timespec dl;
+    clock_gettime(CLOCK_REALTIME, &dl);
+    dl.tv_sec += secs;
+    pthread_mutex_lock(&c->mu);
+    int wrc = 0;
+    while (wrc == 0 && !atomic_load(flag))
+        wrc = pthread_cond_timedwait(&c->cv, &c->mu, &dl);
+    bool ok = atomic_load(flag) != 0;
+    pthread_mutex_unlock(&c->mu);
+    return ok;
+}
+
+static void *contest_h_thread(void *arg)
+{
+    struct contest *c = (struct contest *)arg;
+    pthread_mutex_lock(&csr_instance()->lock);
+    contest_set(c, &c->csr_held);
+    contest_wait(c, &c->release_h, 60); /* watchdog: never wedge the suite */
+    pthread_mutex_unlock(&csr_instance()->lock);
+    return NULL;
+}
+
+static void *contest_i_thread(void *arg)
+{
+    struct contest *c = (struct contest *)arg;
+    contest_wait(c, &c->csr_held, 60);
+    progress_store_tx_lock();            /* ingest: PS ... */
+    contest_set(c, &c->ps_held);
+    contest_set(c, &c->i_waiting);
+    pthread_mutex_lock(&csr_instance()->lock); /* ... then wants CSR */
+    pthread_mutex_unlock(&csr_instance()->lock);
     progress_store_tx_unlock();
-    pthread_mutex_unlock(&csr->lock);
-    csr_vs_dump_signal(s, &s->b_done);
+    contest_set(c, &c->i_done);
     return NULL;
 }
 
-static void *csr_dumper_thread(void *arg)
+static void *contest_d_thread(void *arg)
 {
-    struct csr_vs_dump *s = (struct csr_vs_dump *)arg;
-    for (int i = 0; i < 4000000 && !atomic_load(&s->csr_held); i++)
-        sched_yield();
-    atomic_store(&s->dump_started, 1);
-    struct cev_reply r;
-    cev_dump(NULL, &r);
-    atomic_store(&s->d_ret, r.ret);
-    atomic_store(&s->d_answer_ok,
-                 (r.busy_marker && r.sync_busy && r.frontier_busy) ||
-                 (!r.busy_marker && r.has_sync_state && r.has_normal_fields));
-    csr_vs_dump_signal(s, &s->d_done);
+    struct contest *c = (struct contest *)arg;
+    contest_wait(c, &c->csr_held, 60);
+    cev_dump(NULL, &c->plain);
+    cev_dump("health_reason", &c->reason);
+    contest_set(c, &c->d_done);
     return NULL;
 }
 
-static int case_chain_evidence_csr_order(void)
+static int contest_run(const char *tag, bool ingest_owns_ps)
+{
+    int failures = 0;
+    static struct contest c = {
+        .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER };
+    char name[160];
+    atomic_store(&c.csr_held, 0);
+    atomic_store(&c.ps_held, 0);
+    atomic_store(&c.i_waiting, 0);
+    atomic_store(&c.release_h, 0);
+    atomic_store(&c.i_done, 0);
+    atomic_store(&c.d_done, 0);
+    memset(&c.plain, 0, sizeof(c.plain));
+    memset(&c.reason, 0, sizeof(c.reason));
+
+    pthread_t th, ti, td;
+    int rh = pthread_create(&th, NULL, contest_h_thread, &c);
+    int ri = ingest_owns_ps ? pthread_create(&ti, NULL, contest_i_thread, &c)
+                            : 0;
+    SD_CHECK("contest: H and I threads start", rh == 0 && ri == 0);
+    if (rh != 0 || ri != 0) {
+        atomic_store(&c.release_h, 1);
+        return failures + 1;
+    }
+    bool latched = contest_wait(&c, &c.csr_held, 20);
+    if (ingest_owns_ps)
+        latched = latched && contest_wait(&c, &c.ps_held, 20) &&
+                  contest_wait(&c, &c.i_waiting, 20);
+    snprintf(name, sizeof(name),
+             "%s: latch reached (H holds CSR%s)", tag,
+             ingest_owns_ps ? ", I holds PS and waits for CSR" : ", PS free");
+    SD_CHECK(name, latched);
+    int rd = pthread_create(&td, NULL, contest_d_thread, &c);
+    SD_CHECK("contest: dumper thread starts", rd == 0);
+
+    /* The dumper must answer while H still holds CSR. */
+    bool answered = rd == 0 && contest_wait(&c, &c.d_done, 5);
+    snprintf(name, sizeof(name),
+             "%s: dumper answers within the bound while CSR is held "
+             "(never queues behind the ingest)", tag);
+    SD_CHECK(name, answered);
+    if (!answered)
+        printf("stage_dump_trylock: %s: dumper still blocked; releasing H "
+               "to recover\n", tag);
+    contest_set(&c, &c.release_h);       /* now let the CSR holder go */
+    pthread_join(th, NULL);
+    if (ingest_owns_ps) {
+        bool done = contest_wait(&c, &c.i_done, 20);
+        SD_CHECK("contest: the ingest completes after CSR is released",
+                 done);
+        pthread_join(ti, NULL);
+    }
+    if (rd == 0)
+        pthread_join(td, NULL);
+    if (answered) {
+        snprintf(name, sizeof(name), "%s: dump returns true", tag);
+        SD_CHECK(name, c.plain.ret && c.reason.ret);
+        snprintf(name, sizeof(name),
+                 "%s: reply is EXACTLY the busy shape (4 fixed fields, no "
+                 "normal chain_evidence field), both keys", tag);
+        SD_CHECK(name, c.plain.exact_busy && c.reason.exact_busy &&
+                       !c.plain.any_normal && !c.reason.any_normal);
+    }
+    return failures;
+}
+
+static int case_chain_evidence_ingest_contention(void)
 {
     int failures = 0;
     char dir[256];
@@ -648,44 +748,8 @@ static int case_chain_evidence_csr_order(void)
     if (!was_initialized)
         csr_init(csr, NULL, NULL, NULL, NULL, NULL, NULL);
 
-    static struct csr_vs_dump s = {
-        .mu = PTHREAD_MUTEX_INITIALIZER, .cv = PTHREAD_COND_INITIALIZER };
-    atomic_store(&s.csr_held, 0);
-    atomic_store(&s.dump_started, 0);
-    atomic_store(&s.b_done, 0);
-    atomic_store(&s.d_done, 0);
-    pthread_t tb, td;
-    int rb = pthread_create(&tb, NULL, csr_holder_thread, &s);
-    int rd = pthread_create(&td, NULL, csr_dumper_thread, &s);
-    SD_CHECK("cevcsr: threads start", rb == 0 && rd == 0);
-
-    bool both = false;
-    if (rb == 0 && rd == 0) {
-        struct timespec dl;
-        clock_gettime(CLOCK_REALTIME, &dl);
-        dl.tv_sec += 20;
-        pthread_mutex_lock(&s.mu);
-        int wrc = 0;
-        while (wrc == 0 &&
-               !(atomic_load(&s.b_done) && atomic_load(&s.d_done)))
-            wrc = pthread_cond_timedwait(&s.cv, &s.mu, &dl);
-        both = atomic_load(&s.b_done) && atomic_load(&s.d_done);
-        pthread_mutex_unlock(&s.mu);
-    }
-    SD_CHECK("cevcsr: CSR holder and dumper both finish within the bound "
-             "(no lock-order deadlock)", both);
-    if (!both) {
-        /* Deadlocked threads cannot be joined or cleaned up safely; fail
-         * fast with the verdict already printed. */
-        printf("test_stage_dump_trylock: %d FAILURE(S)\n", failures);
-        fflush(stdout);
-        _exit(1);
-    }
-    pthread_join(tb, NULL);
-    pthread_join(td, NULL);
-    SD_CHECK("cevcsr: dumper returns true", atomic_load(&s.d_ret));
-    SD_CHECK("cevcsr: answer is the busy marker or the normal fields",
-             atomic_load(&s.d_answer_ok));
+    failures += contest_run("cevcsr ingest (I holds PS, waits CSR)", true);
+    failures += contest_run("cevcsr residual (PS free, CSR held)", false);
 
     if (!was_initialized)
         csr_free(csr);
@@ -703,7 +767,7 @@ int test_stage_dump_trylock(void)
     failures += case_validate_headers_ok0_index_used();
     failures += case_sovereignty_dump_busy_path();
     failures += case_chain_evidence_busy_ingest();
-    failures += case_chain_evidence_csr_order();
+    failures += case_chain_evidence_ingest_contention();
     if (failures == 0)
         printf("test_stage_dump_trylock: ALL PASSED\n");
     else

@@ -57,22 +57,28 @@ static void push_hash_json(struct json_value *out, const char *key,
     json_push_kv_str(out, key, present ? hex : "");
 }
 
-/* The reducer owns progress_store_tx_lock for a whole ingest, and both the
- * pending-tip drain (clamp -> reducer_frontier_derive_coins_best_now) and
- * csr_snapshot (active_chain_height -> tip_finalize_log) take it BLOCKING.
- * A dumper runs on an RPC worker, so it PROBES the lock once up front
- * (trylock, then immediately unlock) and answers a typed busy marker when
- * the reducer owns it instead of queueing behind the ingest.
+/* A dumper runs on an RPC worker and must never queue behind an ingest.  The
+ * reducer owns progress_store_tx_lock for a whole ingest, and a chain-state
+ * (CSR) holder can itself be parked on that lock (csr_commit_tip and
+ * csr_clear_active_tip take CSR, then PS), so waiting on either lock is a
+ * wait on the ingest.  Every acquisition on this path is therefore bounded:
  *
- * LOCK ORDER: the probe is released BEFORE the observation.  Holding it
- * across drain/snapshot would take csr->lock while holding the progress
- * store lock, the inverse of csr_commit_tip / csr_clear_active_tip (csr->lock
- * then active_chain_height -> progress_store_tx_lock), and two threads could
- * deadlock.  Without a lock held across it, the observation takes its locks
- * in each callee's own order, exactly like the health collector.  A reducer
- * that starts an ingest between the probe and the observation can still make
- * the observation wait, as it did before the probe existed; the probe only
- * removes the common case. */
+ *   1. the up-front PS probe below (trylock + immediate unlock): a cheap
+ *      early out, NOT the guarantee;
+ *   2. chain_evidence_controller_snapshot_bounded -> csr_snapshot_bounded:
+ *      csr->lock with a 50 ms deadline, released before PS is touched, then
+ *      PS by trylock held only across active_chain_height (recursive inside,
+ *      no other lock taken, so an ingest cannot slip in between check and
+ *      use).
+ *
+ * Any miss answers the typed busy marker.  The drain of the pending finalized
+ * tip is NOT run here: it mutates CSR (csr_align_coins_best_block) and node.db
+ * and takes PS through the coins-frontier clamp, none of which is boundable
+ * from a read-only dumper; the health collector owns that drain.
+ *
+ * LOCK ORDER: PS is never held while CSR is taken (the inverse of
+ * csr_commit_tip / csr_clear_active_tip), and CSR is never held while PS is
+ * taken. */
 static void push_busy_ingest_json(struct json_value *out)
 {
     json_push_kv_str(out, "snapshot_status", "progress_store_busy");
@@ -97,8 +103,10 @@ bool diag_chain_evidence_dump_state_json(struct json_value *out,
     progress_store_tx_unlock();
     chain_evidence_controller_init(&authority, app_runtime_node_db(),
                                    csr_instance());
-    (void)chain_evidence_drain_pending_tip(&authority);
-    chain_evidence_controller_snapshot(&authority, &view);
+    if (!chain_evidence_controller_snapshot_bounded(&authority, &view)) {
+        push_busy_ingest_json(out);
+        return true;
+    }
 
     /* Same evidence authority as the full report; only unrelated projection
      * serialization and the explorer-history scan are omitted. */

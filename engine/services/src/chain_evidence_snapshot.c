@@ -5,6 +5,7 @@
 // out-view from persisted state with no fallible service decision. Every
 // per-field load tolerates absence (defaults already set) so there is no
 // failure reason to carry. Single, coherent return type by construction.
+// The _bounded sibling returns bool only to say "a lock was busy, no view".
 
 #include "services/chain_evidence_authority_service.h"
 #include "services/chain_evidence_persistence_service.h"
@@ -78,15 +79,21 @@ static void snapshot_view_reset(struct chain_evidence_controller_view *out)
         *absent_heights[i] = -1;
 }
 
-/* Copy live CSR tip heights and hashes into the view. */
-static void snapshot_copy_csr_tips(
+/* Copy live CSR tip heights and hashes into the view.  `bounded` takes every
+ * lock with a deadline/try and returns false when one is busy. */
+static bool snapshot_copy_csr_tips(
     struct chain_evidence_controller *authority,
-    struct chain_evidence_controller_view *out)
+    struct chain_evidence_controller_view *out, bool bounded)
 {
     struct chain_state_view csv;
 
     memset(&csv, 0, sizeof(csv));
-    csr_snapshot(authority->csr, &csv);
+    if (bounded) {
+        if (!csr_snapshot_bounded(authority->csr, &csv))
+            return false;
+    } else {
+        csr_snapshot(authority->csr, &csv);
+    }
     out->active_tip_height = csv.tip_height;
     out->header_tip_height = csv.header_height;
     out->sqlite_max_height = (int)csv.sql_max_height;
@@ -101,6 +108,7 @@ static void snapshot_copy_csr_tips(
             *(*authority->csr->pindex_best_hdr)->phashBlock;
         out->has_header_tip_hash = true;
     }
+    return true;
 }
 
 /* Load the persisted cec.* tip hash and height markers. */
@@ -275,22 +283,41 @@ static void snapshot_set_health_reason(
     }
 }
 
+static bool snapshot_fill(struct chain_evidence_controller *authority,
+                          struct chain_evidence_controller_view *out,
+                          bool bounded);
+
 void chain_evidence_controller_snapshot(
     struct chain_evidence_controller *authority,
     struct chain_evidence_controller_view *out)
 {
+    (void)snapshot_fill(authority, out, false);
+}
+
+bool chain_evidence_controller_snapshot_bounded(
+    struct chain_evidence_controller *authority,
+    struct chain_evidence_controller_view *out)
+{
+    return snapshot_fill(authority, out, true);
+}
+
+static bool snapshot_fill(struct chain_evidence_controller *authority,
+                          struct chain_evidence_controller_view *out,
+                          bool bounded)
+{
     if (!out)
-        return;
+        return false;
     snapshot_view_reset(out);
     if (!authority)
-        return;
+        return true;
 
     /* A snapshot is an observation, never a reconciliation boundary. The
      * mutating loader may clear/backfill stale freeze state and can submit a
      * DB-service write; doing that while a diagnostic holds sqlite3_db_mutex
      * self-deadlocks against the DB worker. Boot init owns those repairs. */
     out->state = chain_evidence_controller_load_state_readonly(authority);
-    snapshot_copy_csr_tips(authority, out);
+    if (!snapshot_copy_csr_tips(authority, out, bounded))
+        return false;
     snapshot_load_persisted_markers(authority->ndb, out);
     snapshot_load_persisted_enums(authority->ndb, out);
     snapshot_load_evidence_records(authority->ndb, out);
@@ -299,4 +326,5 @@ void chain_evidence_controller_snapshot(
     snapshot_classify_tip_evidence(out);
     snapshot_classify_hash_agreement(authority->ndb, out);
     snapshot_set_health_reason(out);
+    return true;
 }

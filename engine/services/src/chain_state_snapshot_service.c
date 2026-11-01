@@ -7,7 +7,11 @@
 
 #include "coins/coins_view.h"
 #include "models/database.h"
+#include "storage/progress_store.h"
+
+#include <pthread.h>
 #include <string.h>
+#include <time.h>
 
 struct zcl_result csr_commit_tip_result(
     struct chain_state_repository *csr,
@@ -21,33 +25,32 @@ struct zcl_result csr_commit_tip_result(
                    commit && commit->reason ? commit->reason : "");
 }
 
-void csr_snapshot(struct chain_state_repository *csr,
-                  struct chain_state_view *out)
+/* Bounded csr->lock acquisition for the non-blocking observer: a holder that
+ * waits on progress_store_tx_lock (csr_commit_tip / csr_clear_active_tip take
+ * CSR, then PS) can itself be parked behind an ingest, so waiting on CSR can
+ * be a transitive wait on the ingest.  Wait at most this long. */
+#define CSR_SNAPSHOT_BOUNDED_WAIT_NS 50000000L
+
+static bool csr_lock_bounded(struct chain_state_repository *csr)
 {
-    struct node_db *ndb = NULL;
-    struct active_chain *chain = NULL;
+    struct timespec dl;
+    clock_gettime(CLOCK_REALTIME, &dl);
+    dl.tv_nsec += CSR_SNAPSHOT_BOUNDED_WAIT_NS;
+    if (dl.tv_nsec >= 1000000000L) {
+        dl.tv_sec += 1;
+        dl.tv_nsec -= 1000000000L;
+    }
+    return pthread_mutex_timedlock(&csr->lock, &dl) == 0;
+}
 
-    if (!out)
-        return;
-    memset(out, 0, sizeof(*out));
-    out->tip_height = -1;
-    out->header_height = -1;
-    out->utxo_count = -1;
-    out->sql_max_height = -1;
-    if (!csr || !csr->initialized)
-        return;
-
-    /* LOCK-ORDER LAW: reducer stages hold progress_store_tx_lock before they
-     * publish through the CSR.  Copy only repository-owned memory while this
-     * mutex is held.  The external progress.kv/node.db observations below run
-     * after unlock, otherwise health/agent snapshotting creates the inverse
-     * csr->progress edge and deadlocks the reducer. active_chain_height is
-     * one of those observations: it reads tip_finalize_log under
-     * progress_store_tx_lock. */
-    pthread_mutex_lock(&csr->lock);
-    chain = csr->chain_active;
-    if (chain) {
-        struct block_index *tip = active_chain_cached_tip(chain);
+/* Copy repository-owned memory under csr->lock (caller holds it). */
+static struct node_db *csr_snapshot_copy_locked(
+    struct chain_state_repository *csr, struct chain_state_view *out,
+    struct active_chain **chain)
+{
+    *chain = csr->chain_active;
+    if (*chain) {
+        struct block_index *tip = active_chain_cached_tip(*chain);
         if (tip && tip->phashBlock)
             out->tip_hash = *tip->phashBlock;
     }
@@ -61,7 +64,39 @@ void csr_snapshot(struct chain_state_repository *csr,
     out->commits_ok = csr->commits_ok;
     for (int i = 0; i < CSR_NUM_RESULTS; i++)
         out->commits_rejected_total += csr->commits_rejected[i];
-    ndb = csr->ndb;
+    return csr->ndb;
+}
+
+static void csr_snapshot_view_reset(struct chain_state_view *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->tip_height = -1;
+    out->header_height = -1;
+    out->utxo_count = -1;
+    out->sql_max_height = -1;
+}
+
+void csr_snapshot(struct chain_state_repository *csr,
+                  struct chain_state_view *out)
+{
+    struct node_db *ndb = NULL;
+    struct active_chain *chain = NULL;
+
+    if (!out)
+        return;
+    csr_snapshot_view_reset(out);
+    if (!csr || !csr->initialized)
+        return;
+
+    /* LOCK-ORDER LAW: reducer stages hold progress_store_tx_lock before they
+     * publish through the CSR.  Copy only repository-owned memory while this
+     * mutex is held.  The external progress.kv/node.db observations below run
+     * after unlock, otherwise health/agent snapshotting creates the inverse
+     * csr->progress edge and deadlocks the reducer. active_chain_height is
+     * one of those observations: it reads tip_finalize_log under
+     * progress_store_tx_lock. */
+    pthread_mutex_lock(&csr->lock);
+    ndb = csr_snapshot_copy_locked(csr, out, &chain);
     pthread_mutex_unlock(&csr->lock);
 
     /* These projection counts are independent point-in-time observations;
@@ -74,6 +109,44 @@ void csr_snapshot(struct chain_state_repository *csr,
      * this field's public contract is the rebuildable node.db projection. */
     out->utxo_count = ndb ? node_db_utxo_count(ndb) : -1;
     out->sql_max_height = csr_internal_sqlite_max_block_height(ndb);
+}
+
+bool csr_snapshot_bounded(struct chain_state_repository *csr,
+                          struct chain_state_view *out)
+{
+    struct node_db *ndb = NULL;
+    struct active_chain *chain = NULL;
+
+    if (!out)
+        return false;
+    csr_snapshot_view_reset(out);
+    if (!csr || !csr->initialized)
+        return true;
+
+    /* csr->lock is taken with a deadline and released BEFORE the progress
+     * store is touched: never PS while holding CSR, never CSR while holding
+     * PS (csr_commit_tip / csr_clear_active_tip take CSR then PS). */
+    if (!csr_lock_bounded(csr))
+        return false;
+    ndb = csr_snapshot_copy_locked(csr, out, &chain);
+    pthread_mutex_unlock(&csr->lock);
+
+    /* active_chain_height reads tip_finalize_log under the (blocking,
+     * recursive) progress-store lock.  Take that lock with a try and HOLD it
+     * for just that call: while held, the callee's own acquisition is a
+     * recursive no-wait, and no CSR/other lock is taken inside, so an ingest
+     * cannot slip in between the check and the use.  Busy means an ingest
+     * owns it: answer busy, never queue. */
+    if (chain) {
+        if (!progress_store_tx_trylock())
+            return false;
+        out->tip_height = active_chain_height(chain);
+        progress_store_tx_unlock();
+    }
+    /* utxo_count is not part of any bounded observation: its COUNT(*) scan
+     * is skipped (left at -1) instead of racing the ingest's writes. */
+    out->sql_max_height = csr_internal_sqlite_max_block_height(ndb);
+    return true;
 }
 
 int64_t csr_header_height(struct chain_state_repository *csr)
