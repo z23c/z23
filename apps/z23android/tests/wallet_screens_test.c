@@ -916,6 +916,12 @@ static void test_settle(void)
     CHECK(fake.secure_on && fake.secure_off_calls == 0);
     wallet_screens_pause();
     CHECK(fake.secure_on && fake.secure_off_calls == 0);
+    wallet_screens_settle();                                                 /* the pause tick is too early: Funds may still be on screen */
+    CHECK(fake.secure_on && fake.secure_off_calls == 0);
+    fake.now += 249;
+    wallet_screens_settle();
+    CHECK(fake.secure_on && fake.secure_off_calls == 0);
+    fake.now += 1;
     wallet_screens_settle();
     CHECK(!fake.secure_on && fake.secure_off_calls == 1);
     wallet_screens_settle();                                                 /* once only */
@@ -1255,11 +1261,11 @@ static void test_funds_unready(void)
     start(false);
     fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("0", "0.00000000", "\"unready_zat\":5000000000,\"unready\":\"50.00000000\",\"unready_notes\":2,"), "0", "0.00000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("50 ZCL received, spendable once the wallet catches up") && has("0 ZCL"));
+    CHECK(has("50 ZCL received, not spendable yet") && has("0 ZCL"));
     CHECK(!strcmp(text_at(snap(), find(snap(), WALLET_ITEM_AMOUNT, WALLET_ACT_NONE)), "0 ZCL"));
     fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":0,\"unready\":\"0.00000000\",\"spendable_total_zat\":900000000,\"spendable_total\":\"9.00000000\","), "0", "0.00000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("Up to 1 ZCL in one payment") && !has("catches up"));
+    CHECK(has("One payment can use up to 1 ZCL, fee included") && !has("catches up"));
     CHECK(!strcmp(text_at(snap(), find(snap(), WALLET_ITEM_AMOUNT, WALLET_ACT_NONE)), "9 ZCL"));
     fake.summary = SUMMARY_STATE("ok", PRIVATE_OK("100000000", "1.00000000", "\"unready_zat\":0,\"unready\":\"0.00000000\",\"spendable_total_zat\":100000000,\"spendable_total\":\"1.00000000\","), "0", "0.00000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
@@ -1272,7 +1278,7 @@ static void test_funds_unready(void)
     CHECK(has("Balance unknown") && !has("catches up"));
     fake.summary = SUMMARY_STATE("keys_unavailable", PRIVATE_HIDDEN, "10000000", "0.10000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("Private balance hidden while the wallet is locked") && has("0.1 ZCL public") && !has("catches up") && !has("0 ZCL") && !has("unknown"));
+    CHECK(has("Private balance hidden while the wallet is locked") && has("Wallet locked: unlock to see private amounts") && !has("Catching up") && has("0.1 ZCL public") && !has("catches up") && !has("0 ZCL") && !has("unknown"));
     wallet_screens_close();
 }
 

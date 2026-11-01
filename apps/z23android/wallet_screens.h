@@ -123,7 +123,7 @@ void wallet_screens_close(void);
  * with wallet_screens_close() once a screen that holds no wallet data has been drawn. */
 void wallet_screens_pause(void);
 /* Call on the UI thread once a screen that holds no wallet data has been drawn after a pause: removes the
- * protection the pause kept. Does nothing when no pause is waiting or the owner went back into the wallet. */
+ * protection the pause kept. Does nothing when no pause is waiting, the owner went back into the wallet, or the pause is under 250 ms old. */
 void wallet_screens_settle(void);
 /* Back one step inside the wallet; false when already on Funds, where Back leaves for Home. */
 bool wallet_screens_back(void);

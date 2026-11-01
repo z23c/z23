@@ -18,6 +18,7 @@
 #define TEXT_UNREADY_UNKNOWN "Amount waiting on the wallet unknown"
 #define TEXT_HIDDEN "Private balance hidden while the wallet is locked"
 #define TEXT_SYNC_UNKNOWN "Sync state unknown"
+#define TEXT_SYNC_LOCKED "Wallet locked: unlock to see private amounts"
 #define TEXT_SEND_UNAVAILABLE "Sending is unavailable until the wallet state loads."
 #define TEXT_SEND_RELEASE "Sending is paused until this node verifies the chain tip itself."
 #define TEXT_SEND_STORE "Sending is paused because this node's progress store is not open."
@@ -127,6 +128,8 @@ static bool parse_private(const struct json_value *data, struct summary *s)
     s->unready_state = read_optional_zat(data, "unready_zat", "unready", &s->unready);
     s->total_state = read_optional_zat(data, "spendable_total_zat", "spendable_total", &s->total);
     return read_zat(data, "spendable_zat", "spendable", &s->spendable) &&
+           /* The node's spendable is the largest per-key sum, so it never exceeds the total. */
+           !(s->total_state == P_VALUE && s->spendable > s->total) &&
            read_zat(data, "pending_zat", "pending", &s->pending) &&
            read_count(data, "pending_notes", &s->pending_notes) &&
            read_count(data, "pending_min_confirmations_needed", &s->pending_confirmations) &&
@@ -212,7 +215,7 @@ static void render_balance(const struct summary *s, struct wallet_view *out)
     char amount[32];
     if (s->hidden) { put(out->balance, sizeof(out->balance), TEXT_HIDDEN); return; }
     /* The headline is everything spendable, across all keys; spendable is what one payment can use. */
-    bool whole = s->total_state == P_VALUE && s->total >= s->spendable;
+    bool whole = s->total_state == P_VALUE;
     if (!amount_text(whole ? s->total : s->spendable, amount, sizeof(amount))) return;
     snprintf(out->balance, sizeof(out->balance), "%s ZCL", amount);
 }
@@ -245,9 +248,9 @@ static void render_unready(const struct summary *s, struct wallet_view *out)
     if (s->hidden) return;
     if (s->unready_state == P_NULL) put(out->unready_line, sizeof(out->unready_line), TEXT_UNREADY_UNKNOWN);
     else if (s->unready_state == P_VALUE && s->unready > 0 && amount_text(s->unready, amount, sizeof(amount)))
-        snprintf(out->unready_line, sizeof(out->unready_line), "%s ZCL received, spendable once the wallet catches up", amount);
+        snprintf(out->unready_line, sizeof(out->unready_line), "%s ZCL received, not spendable yet", amount);
     if (s->total_state == P_VALUE && s->total > s->spendable && amount_text(s->spendable, amount, sizeof(amount)))
-        snprintf(out->total_line, sizeof(out->total_line), "Up to %s ZCL in one payment", amount);
+        snprintf(out->total_line, sizeof(out->total_line), "One payment can use up to %s ZCL, fee included", amount);
 }
 
 static void render_immature(const struct summary *s, struct wallet_view *out)
@@ -270,6 +273,7 @@ static void render_public(const struct summary *s, struct wallet_view *out)
  * says, so a stale balance is never shown as confirmed. */
 static void render_sync(const struct summary *s, struct wallet_view *out)
 {
+    if (s->hidden) { put(out->sync, sizeof(out->sync), TEXT_SYNC_LOCKED); return; }
     if (s->blocks_behind > 1)
         snprintf(out->sync, sizeof(out->sync), "Catching up, %lld blocks behind: amounts may change",
                  (long long)s->blocks_behind);

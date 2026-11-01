@@ -20,10 +20,10 @@ struct wallet_view {
     /* "0.5 ZCL pending. The next arrives in 7 confirmations.", "0.5 ZCL arriving in 7 confirmations" for a single
      * note, or "" when nothing is pending. */
     char pending[WALLET_VIEW_LINE];
-    /* "50 ZCL received, spendable once the wallet catches up" for confirmed funds a send would refuse for now, "" when
+    /* "50 ZCL received, not spendable yet" for confirmed funds a send would refuse for now, "" when
      * there are none, and "Amount waiting on the wallet unknown" when the node could not read them. */
     char unready_line[WALLET_VIEW_LINE];
-    /* "Up to 1.5 ZCL in one payment" when one send cannot use every spendable note, otherwise "". */
+    /* "One payment can use up to 1.5 ZCL, fee included" when one send cannot use every spendable note, otherwise "". */
     char total_line[WALLET_VIEW_LINE];
     /* "0.1 ZCL public", or "" when there is no public balance. */
     char public_line[WALLET_VIEW_LINE];

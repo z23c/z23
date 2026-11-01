@@ -372,18 +372,20 @@ static void test_unready_total_and_hidden(void)
     replace_once(json, sizeof(json), VALID_REPLY, schema,
                  "\"schema\":\"zcl.wallet_summary.v1\",\"unready_zat\":5000000000,\"unready\":\"50.00000000\",\"unready_notes\":2,");
     assert(wallet_view_from_summary(json, &v) && v.known);
-    assert(!strcmp(v.unready_line, "50 ZCL received, spendable once the wallet catches up") && !v.total_line[0]);
+    assert(!strcmp(v.unready_line, "50 ZCL received, not spendable yet") && !v.total_line[0]);
     replace_once(json, sizeof(json), VALID_REPLY, schema,
                  "\"schema\":\"zcl.wallet_summary.v1\",\"unready_zat\":0,\"unready\":\"0.00000000\","
                  "\"spendable_total_zat\":900000000,\"spendable_total\":\"9.00000000\",");
     assert(wallet_view_from_summary(json, &v) && !v.unready_line[0]);
-    assert(!strcmp(v.balance, "9 ZCL") && !strcmp(v.total_line, "Up to 1.23456789 ZCL in one payment"));
+    assert(!strcmp(v.balance, "9 ZCL") && !strcmp(v.total_line, "One payment can use up to 1.23456789 ZCL, fee included"));
     replace_once(json, sizeof(json), VALID_REPLY, schema,
                  "\"schema\":\"zcl.wallet_summary.v1\",\"spendable_total_zat\":123456789,\"spendable_total\":\"1.23456789\",");
     assert(wallet_view_from_summary(json, &v) && !v.total_line[0] && !v.unready_line[0] && !strcmp(v.balance, "1.23456789 ZCL"));
     replace_once(json, sizeof(json), VALID_REPLY, schema,
                  "\"schema\":\"zcl.wallet_summary.v1\",\"spendable_total_zat\":5,\"spendable_total\":\"0.00000005\",");
-    assert(wallet_view_from_summary(json, &v) && !v.total_line[0] && !strcmp(v.balance, "1.23456789 ZCL"));
+    /* Corrected expectation: a spendable amount above the total cannot come from the node, so the reply is malformed and every amount is unknown. */
+    assert(!wallet_view_from_summary(json, &v));
+    assert_unknown(&v);
     replace_once(json, sizeof(json), VALID_REPLY, schema,
                  "\"schema\":\"zcl.wallet_summary.v1\",\"unready_zat\":null,\"unready\":null,");
     assert(wallet_view_from_summary(json, &v) && v.known && !strcmp(v.unready_line, "Amount waiting on the wallet unknown"));
@@ -415,6 +417,7 @@ static void test_hidden_private_amounts(void)
     assert(wallet_view_from_summary(hidden, &v) && v.known);
     assert(!strcmp(v.balance, "Private balance hidden while the wallet is locked") && !strstr(v.balance, "ZCL"));
     assert(!v.pending[0] && !v.unready_line[0] && !v.total_line[0] && !v.current && v.scanning);
+    assert(!strcmp(v.sync, "Wallet locked: unlock to see private amounts"));
     assert(!strncmp(v.public_line, "0.1 ZCL public", 14));
     replace_once(json, sizeof(json), VALID_REPLY, schema, "\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"bogus\",");
     assert(!wallet_view_from_summary(json, &v));
