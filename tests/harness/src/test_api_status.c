@@ -849,7 +849,7 @@ static void api_status_sapling_close(struct api_status_sapling *f)
 static bool api_status_sapling_check(
     uint8_t *resp, size_t cap, const char *source, int64_t size,
     int64_t tree_height, bool roots_match, int64_t copy_size,
-    int64_t copy_height, bool copy_verified, int64_t missing)
+    int64_t copy_height, bool copy_verified)
 {
     struct json_value root;
     size_t n = api_handle_request("GET", "/api/node/status", NULL, 0, resp,
@@ -865,9 +865,6 @@ static bool api_status_sapling_check(
         { "copy_size", API_STATUS_FIELD_INT, NULL, copy_size, NULL },
         { "copy_height", API_STATUS_FIELD_INT, NULL, copy_height, NULL },
         { "copy_verified", API_STATUS_FIELD_BOOL, NULL, copy_verified, NULL },
-        { "witness_ready", API_STATUS_FIELD_INT, NULL, 0, NULL },
-        { "witness_missing", API_STATUS_FIELD_INT, NULL, missing, NULL },
-        { "witness_stale", API_STATUS_FIELD_INT, NULL, 0, NULL },
     };
     ok = api_status_match_fields(s, fields, sizeof(fields) / sizeof(fields[0]),
                                  ok);
@@ -885,7 +882,7 @@ static int api_status_sapling_ok(uint8_t *resp, size_t cap)
     api_status_sapling_open(&f, true);
     if (f.up && api_status_sapling_set_copy(&f.ndb, 4, 1) &&
         api_status_sapling_check(resp, cap, "reducer", 2, 1, true, 4, 1,
-                                 false, 0))
+                                 false))
         printf("OK\n");
     else { printf("FAIL\n"); failures++; }
     api_status_sapling_close(&f);
@@ -895,23 +892,11 @@ static int api_status_sapling_ok(uint8_t *resp, size_t cap)
     api_status_sapling_open(&f, false);
     bool ok = f.up && api_status_sapling_set_copy(&f.ndb, 2, 1) &&
               api_status_sapling_check(resp, cap, "node_state", 2, -1, true,
-                                       2, 1, true, 0) &&
+                                       2, 1, true) &&
               api_status_sapling_set_copy(&f.ndb, 4, 1) &&
               api_status_sapling_check(resp, cap, "node_state", 4, -1, false,
-                                       4, 1, false, 0);
+                                       4, 1, false);
     if (ok)
-        printf("OK\n");
-    else { printf("FAIL\n"); failures++; }
-    api_status_sapling_close(&f);
-
-    printf("api: sapling status counts a note without a witness... ");
-    api_status_sapling_open(&f, true);
-    uint8_t txid[32] = {0x21}, pad[512] = {0}, d[11] = {1}, k[32] = {1};
-    if (f.up && api_status_sapling_set_copy(&f.ndb, 2, 1) &&
-        node_db_sync_sapling_note(&f.ndb, txid, 0, 1000, k, pad, 512, k, d, k,
-                                  k, k, 1) &&
-        api_status_sapling_check(resp, cap, "reducer", 2, 1, true, 2, 1, true,
-                                 1))
         printf("OK\n");
     else { printf("FAIL\n"); failures++; }
     api_status_sapling_close(&f);

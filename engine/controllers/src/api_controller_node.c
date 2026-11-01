@@ -553,26 +553,10 @@ static const char *api_node_status_hex_or_null(const char *hex)
 {
     return strcmp(hex, "null") == 0 ? NULL : hex;
 }
-/* Witness readiness of the wallet's unspent local notes at the served tip. A
- * note that is missing or stale cannot be spent until the tip path or a
- * witness rescan brings it current. */
-static void api_node_status_push_witnesses(struct json_value *sapling,
-                                           int tip_height)
-{
-    struct node_db *ndb = g_api_ctx.node_db ?
-        g_api_ctx.node_db : app_runtime_node_db();
-    struct db_sapling_witness_summary ws = {0};
-    bool ok = ndb && ndb->db &&
-              db_sapling_note_witness_summary(ndb, tip_height, &ws);
-    json_push_kv_int(sapling, "witness_ready", ok ? ws.ready_notes : -1);
-    json_push_kv_int(sapling, "witness_missing", ok ? ws.missing_notes : -1);
-    json_push_kv_int(sapling, "witness_stale", ok ? ws.stale_notes : -1);
-}
 
 /* The "sapling" object of the status document. */
 static void api_node_status_push_sapling(struct json_value *body,
-                                         const char *tip_root_hex,
-                                         int tip_height)
+                                         const char *tip_root_hex)
 {
     char root_hex[65] = "null";
     char tree_header_root_hex[65] = "null";
@@ -601,7 +585,6 @@ static void api_node_status_push_sapling(struct json_value *body,
     json_push_kv_int(&sapling, "copy_size", (int64_t)copy_size);
     json_push_kv_int(&sapling, "copy_height", copy_height);
     json_push_kv_bool(&sapling, "copy_verified", copy_verified);
-    api_node_status_push_witnesses(&sapling, tip_height);
     json_push_kv(body, "sapling", &sapling);
     json_free(&sapling);
 }
@@ -691,7 +674,7 @@ size_t api_serve_node_status(uint8_t *response, size_t response_max)
     json_push_kv(&body, "chain", &chain);
     json_free(&chain);
 
-    api_node_status_push_sapling(&body, sapling_root_hex, tip_height);
+    api_node_status_push_sapling(&body, sapling_root_hex);
 
     struct json_value network;
     json_init(&network);
