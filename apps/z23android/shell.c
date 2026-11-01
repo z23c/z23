@@ -37,6 +37,7 @@ static struct {
     zapp_native_action send;
     jobject notice_views[SCREEN_COUNT], outcome_view, status_view, scan_view, apps_list;
     enum screen current, before_scan;
+    bool send_from_wallet;
     bool preview, pair_seen, scan_dismissed, user_layout, rendered;
     unsigned scans_seen;
     struct zapp_layout *layout;
@@ -395,8 +396,16 @@ static bool leave_send(JNIEnv *env)
     show_notice(env);
     return false;
 }
+/* Remembers where Send was opened from, so Back returns there; a scan begun on Send keeps the place Send began. */
+static void note_send_origin(enum screen next)
+{
+    if (next != SCREEN_SEND || shell.current == SCREEN_SEND) return;
+    enum screen origin = shell.current == SCREEN_SCAN ? shell.before_scan : shell.current;
+    shell.send_from_wallet = zapp_home_send_opened_from_wallet(origin == SCREEN_SEND, origin == SCREEN_WALLET, shell.send_from_wallet);
+}
 static void go(JNIEnv *env, enum screen next)
 {
+    note_send_origin(next);
     if (shell.current == SCREEN_SEND && next != SCREEN_SEND && !leave_send(env)) return;
     if (shell.current == SCREEN_WALLET) leave_wallet(env);
     if (next == SCREEN_WALLET || next == SCREEN_SEND) shell.gate.protect = true;
@@ -434,6 +443,8 @@ static void back(JNIEnv *env)
     } else if (shell.current == SCREEN_WALLET) {
         if (wallet_screens_back()) zapp_wallet_ui_render(env);
         else go(env, SCREEN_HOME);
+    } else if (shell.current == SCREEN_SEND) {
+        go(env, shell.send_from_wallet ? SCREEN_WALLET : SCREEN_HOME);
     } else if (shell.current != SCREEN_HOME) go(env, SCREEN_HOME);
     else set_text(env, shell.outcome_view, "");
 }
@@ -506,16 +517,19 @@ static bool same_target(const struct target *a, const struct target *b)
 static void run_wallet(JNIEnv *env, size_t button)
 {
     enum wallet_outcome outcome = zapp_wallet_ui_press(env, button);
-    if (outcome == WALLET_SCAN) shell.send("scan", "");
+    if (outcome == WALLET_SEND) {
+        go(env, SCREEN_SEND);
+        if (shell.current == SCREEN_SEND) zapp_send_ui_open(env, NULL, "");
+    }
     else if (outcome == WALLET_START_NODE) shell.send("node_start", "");
     else if (outcome == WALLET_LEAVE) go(env, SCREEN_HOME);
 }
-/* The Send screen: Scan again leaves it first, so a scan never starts while a lock is owed. */
+/* The Send screen: Scan code leaves it first, so a scan never starts while a lock is owed. */
 static void run_send(JNIEnv *env, size_t button)
 {
     enum zapp_send_outcome outcome = zapp_send_ui_press(env, button);
     if (outcome == ZAPP_SEND_SCAN && leave_send(env)) shell.send("scan", "");
-    else if (outcome == ZAPP_SEND_LEAVE) go(env, SCREEN_HOME);
+    else if (outcome == ZAPP_SEND_LEAVE) go(env, shell.send_from_wallet ? SCREEN_WALLET : SCREEN_HOME);
 }
 static void tap(JNIEnv *env, float x, float y)
 {
@@ -588,7 +602,7 @@ static void finish_scan(JNIEnv *env, const struct zapp_view *view)
     if (scan_goes_to_send(view)) {
         struct zapp_payment pay;
         bool have = zapp_pay_stash_take(&pay);
-        const char *why = view->scan_kind == ZAPP_SCAN_PAY_REFUSED ? view->scan_text : "That is not a payment code.";
+        const char *why = zapp_home_send_notice(view->scan_kind, view->scan_text, view->result);
         go(env, SCREEN_SEND);
         if (shell.current == SCREEN_SEND) zapp_send_ui_open(env, have ? &pay : NULL, have ? "" : why);
         memory_cleanse(&pay, sizeof(pay));

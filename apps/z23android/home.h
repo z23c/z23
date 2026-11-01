@@ -55,6 +55,14 @@ bool zapp_home_scan_returns_to_wallet(enum zapp_scan_target target, bool began_i
 /* Whether a scan that was started on the Send screen and is not a payment, a fleet invitation or a pairing code stays
  * on Send, with Scan code and Enter address, instead of dropping to Home. */
 bool zapp_home_scan_stays_on_send(bool started_on_send, enum zapp_scan_target target);
+/* The label of the Send screen camera button: Scan code until a scan has ended without a payment, then Scan again. */
+const char *zapp_home_send_scan_label(const char *notice);
+/* The words the Send screen shows when a scan begun on it ends without a payment to review: the reason a payment code
+ * was refused, otherwise what the scan reported, a camera refusal included. */
+const char *zapp_home_send_notice(enum zapp_scan_kind kind, const char *scan_text, const char *result);
+/* Whether Back from Send returns to the wallet: Send was opened from the wallet, directly or through a scan begun there. A scan
+ * begun on Send keeps the place Send was first opened from. */
+bool zapp_home_send_opened_from_wallet(bool origin_is_send, bool origin_is_wallet, bool was_from_wallet);
 /* Copies text into out (cap bytes), cutting on a character boundary when it does not fit. */
 void zapp_home_fit_label(char *out, size_t cap, const char *text);
 #endif

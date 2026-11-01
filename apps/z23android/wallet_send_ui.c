@@ -4,6 +4,7 @@
 #include "base/cleanse.h"
 #include "controller.h"
 #include "device_key.h"
+#include "home.h"
 #include "jni_util.h"
 #include "scan.h"
 #include "send_key.h"
@@ -338,7 +339,7 @@ static void draw_flow(JNIEnv *env, const struct wss_view *v)
 static void draw_blank(JNIEnv *env)
 {
     line_if(env, ui.notice, 16.0f, SOFT);
-    (void)button_view(env, B_SCAN, "Scan again", BUTTON_COLOR, false);
+    (void)button_view(env, B_SCAN, zapp_home_send_scan_label(ui.notice), BUTTON_COLOR, false);
     (void)button_view(env, B_ENTER, "Enter address", BUTTON_COLOR, false);
     if (ui.entering) {
         (void)input_view(env, "Address or payment code", INPUT_TYPE_ADDRESS, &ui.address_input);
@@ -475,7 +476,7 @@ static void use_address(JNIEnv *env)
     struct zapp_payment pay;
     if (!text) return;
     if (!read_input(env, ui.address_input, text, TEXT_CAP)) text[0] = 0;
-    enum zapp_pay_refusal why = zapp_payment_parse(text, strlen(text), ZAPP_SCAN_NETWORK, &pay);
+    enum zapp_pay_refusal why = zapp_scan_payment(text, &pay);
     memory_cleanse(text, TEXT_CAP);
     free(text);
     if (why != ZAPP_PAY_OK) {

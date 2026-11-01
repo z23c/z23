@@ -127,3 +127,16 @@ bool zapp_home_scan_stays_on_send(bool started_on_send, enum zapp_scan_target ta
 {
     return started_on_send && target == ZAPP_SCAN_TO_HOME;
 }
+const char *zapp_home_send_scan_label(const char *notice)
+{
+    return notice && notice[0] ? "Scan again" : "Scan code";
+}
+const char *zapp_home_send_notice(enum zapp_scan_kind kind, const char *scan_text, const char *result)
+{
+    if (kind == ZAPP_SCAN_PAY_REFUSED && scan_text && scan_text[0]) return scan_text;
+    return result && result[0] ? result : "That is not a payment code.";
+}
+bool zapp_home_send_opened_from_wallet(bool origin_is_send, bool origin_is_wallet, bool was_from_wallet)
+{
+    return origin_is_send ? was_from_wallet : origin_is_wallet;
+}

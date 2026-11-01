@@ -131,6 +131,16 @@ static void small_buffers(void)
     assert(zapp_scan_classify(text, small, 0) == ZAPP_SCAN_TEXT);
     assert(zapp_scan_classify(NULL, small, sizeof(small)) == ZAPP_SCAN_TEXT);
 }
+/* An address typed or pasted on Send goes through the scanner's parser: the same accept, the same refusal words. */
+static void a_typed_address_is_read_like_a_scanned_one(void)
+{
+    char addr[ZAPP_PAY_ADDRESS_MAX];
+    struct zapp_payment pay;
+    memcpy(addr, "zs1", 3); memset(addr + 3, 'q', 75); addr[78] = 0;
+    assert(zapp_scan_payment(addr, &pay) == ZAPP_PAY_OK && zapp_scan_payment("not an address", &pay) != ZAPP_PAY_OK);
+    assert(scan("zclassic:not-an-address?amount=1") == ZAPP_SCAN_PAY_REFUSED);
+    assert(!strcmp(value, zapp_scan_refusal_text(zapp_scan_payment("zclassic:not-an-address?amount=1", &pay))));
+}
 /* A payment code opens the send review and does nothing else; a refused one says why; other text is untouched. */
 static void payment_codes(void)
 {
@@ -219,6 +229,7 @@ int main(void)
 {
     typed_addresses();
     payment_codes();
+    a_typed_address_is_read_like_a_scanned_one();
     refused_payments_never_become_text();
     wrong_lengths();
     uppercase_hex();

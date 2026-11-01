@@ -896,12 +896,12 @@ static size_t new_address(struct job *jobs)
     return count;
 }
 
-/* The jobs a tap on the Funds page starts, or WALLET_SCAN for Send. */
+/* The jobs a tap on the Funds page starts, or WALLET_SEND for Send. */
 static size_t from_funds(enum wallet_action action, struct job *jobs, enum wallet_outcome *outcome)
 {
     if (action == WALLET_ACT_RECEIVE) return enter(WALLET_PAGE_RECEIVE, jobs);
     if (action == WALLET_ACT_HISTORY) return enter(WALLET_PAGE_HISTORY, jobs);
-    if (action == WALLET_ACT_SEND) *outcome = WALLET_SCAN;
+    if (action == WALLET_ACT_SEND) *outcome = WALLET_SEND;
     if (action == WALLET_ACT_START_NODE) *outcome = WALLET_START_NODE;
     return 0;
 }

@@ -339,8 +339,8 @@ static void test_funds_replies(void)
     funds_no_extra_lines();
     funds_node_silent();
     funds_node_answers();
-    int before = fake.op_count;               /* Send opens the camera and nothing else */
-    tap(WALLET_ACT_SEND, 0, WALLET_SCAN);
+    int before = fake.op_count;               /* Send opens the Send screen and starts nothing */
+    tap(WALLET_ACT_SEND, 0, WALLET_SEND);
     CHECK(fake.op_count == before && snap()->page == WALLET_PAGE_FUNDS);
     tap(WALLET_ACT_BACK, 0, WALLET_LEAVE);
     wallet_screens_close();
@@ -801,7 +801,7 @@ static void test_dropped_taps(void)
     CHECK(has("Another app is drawing over this screen") && s->items[1].kind == WALLET_ITEM_NOTE && s->items[0].kind == WALLET_ITEM_TITLE);
     CHECK(find(s, WALLET_ITEM_BUTTON, WALLET_ACT_RECEIVE) >= 0 && find(s, WALLET_ITEM_BUTTON, WALLET_ACT_HISTORY) >= 0);
     version = wallet_screens_snapshot(&screen);
-    tap(WALLET_ACT_SEND, 0, WALLET_SCAN);                       /* a tap that reaches the screen ends the notice, whatever it does */
+    tap(WALLET_ACT_SEND, 0, WALLET_SEND);                       /* a tap that reaches the screen ends the notice, whatever it does */
     CHECK(snap()->page == WALLET_PAGE_FUNDS && !has("drawing over this screen") && wallet_screens_snapshot(&screen) != version);
     wallet_screens_dropped(1);
     CHECK(has("drawing over this screen"));
@@ -1230,7 +1230,7 @@ static void test_scan_notice(void)
     fake.now += 100000;                                                      /* a refresh keeps the words */
     wallet_screens_tick();
     CHECK(has("This payment code was refused."));
-    tap(WALLET_ACT_SEND, 0, WALLET_SCAN);
+    tap(WALLET_ACT_SEND, 0, WALLET_SEND);
     tap(WALLET_ACT_RECEIVE, 0, WALLET_STAY);
     wallet_screens_scan_notice("not on Funds");                              /* only Funds shows it */
     CHECK(!has("not on Funds") && !has("refused"));

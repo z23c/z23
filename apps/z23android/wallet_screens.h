@@ -70,7 +70,7 @@ enum wallet_action {
 };
 enum wallet_outcome {
     WALLET_STAY,  /* the screen changed or nothing happened */
-    WALLET_SCAN,  /* open the camera scan screen and nothing else */
+    WALLET_SEND,  /* open the Send screen; the camera starts only from its Scan code button */
     WALLET_LEAVE, /* leave the wallet for Home */
     WALLET_START_NODE /* ask the controller to start the node, and nothing else */
 };

@@ -168,6 +168,18 @@ static void scan_destinations(void)
     assert(zapp_home_scan_stays_on_send(true, ZAPP_SCAN_TO_HOME) && !zapp_home_scan_stays_on_send(false, ZAPP_SCAN_TO_HOME));
     assert(!zapp_home_scan_stays_on_send(true, ZAPP_SCAN_TO_FLEET_REVIEW) && !zapp_home_scan_stays_on_send(true, ZAPP_SCAN_TO_PAIR_REVIEW));
     assert(!zapp_home_scan_stays_on_send(true, ZAPP_SCAN_TO_PAYMENT_REVIEW));
+    /* The Send screen offers Scan code first and Scan again after a scan ended without a payment. */
+    assert(!strcmp(zapp_home_send_scan_label(NULL), "Scan code") && !strcmp(zapp_home_send_scan_label(""), "Scan code"));
+    assert(!strcmp(zapp_home_send_scan_label("Camera permission was not given."), "Scan again"));
+    /* A refused code shows its reason; a camera refusal shows its own words; anything else says it is not a payment code. */
+    assert(!strcmp(zapp_home_send_notice(ZAPP_SCAN_PAY_REFUSED, "reason", "result"), "reason"));
+    assert(!strcmp(zapp_home_send_notice(ZAPP_SCAN_TEXT, "", "Camera permission was not given."), "Camera permission was not given."));
+    assert(!strcmp(zapp_home_send_notice(ZAPP_SCAN_PAY_REFUSED, "", "result"), "result"));
+    assert(!strcmp(zapp_home_send_notice(ZAPP_SCAN_TEXT, "", ""), "That is not a payment code."));
+    assert(!strcmp(zapp_home_send_notice(ZAPP_SCAN_TEXT, "plain", NULL), "That is not a payment code."));
+    /* Back from Send returns to where Send was opened: the wallet, directly or through a scan begun there, else Home. */
+    assert(zapp_home_send_opened_from_wallet(false, true, false) && !zapp_home_send_opened_from_wallet(false, false, true));
+    assert(zapp_home_send_opened_from_wallet(true, false, true) && !zapp_home_send_opened_from_wallet(true, false, false));
 }
 /* The largest label, package and activity, with every label character escaped, still make a card. */
 static void worst_case_card_fits(void)
