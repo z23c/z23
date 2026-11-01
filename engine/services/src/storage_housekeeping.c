@@ -44,6 +44,9 @@ static struct storage_housekeeping_stats g_stats = {
 static pthread_t g_thread;
 static bool g_thread_running = false;
 static bool g_stop_requested = false;
+/* True when the thread owes its first sweep at once (the deferred boot start)
+ * instead of one tick after launch. Set under g_lock before the spawn. */
+static bool g_first_sweep_now = false;
 static char g_datadir[1024];
 
 /* ── the sweep ─────────────────────────────────────────────────────── */
@@ -216,8 +219,13 @@ static struct zcl_result sh_register_supervisor(void)
 static void *sh_thread_fn(void *arg)
 {
     (void)arg;
+    pthread_mutex_lock(&g_lock);
+    bool first_now = g_first_sweep_now;
+    pthread_mutex_unlock(&g_lock);
     int64_t next_at_ms = platform_time_monotonic_ms() +
-                         (int64_t)STORAGE_HOUSEKEEPING_TICK_SECONDS * 1000;
+                         (first_now ? 0
+                                    : (int64_t)STORAGE_HOUSEKEEPING_TICK_SECONDS *
+                                          1000);
     for (;;) {
         pthread_mutex_lock(&g_lock);
         bool stop = g_stop_requested;
@@ -249,7 +257,10 @@ static void *sh_thread_fn(void *arg)
     return NULL;
 }
 
-struct zcl_result storage_housekeeping_start(const char *datadir)
+/* Shared launch. `inline_boot_sweep` true runs the first sweep on the
+ * caller's thread before returning; false leaves it to the new thread, which
+ * runs it immediately, so the caller never waits on a storage lock. */
+static struct zcl_result sh_start(const char *datadir, bool inline_boot_sweep)
 {
     /* A sweeper with no datadir is a misconfiguration, not a degraded mode:
      * the log bound would silently never run. Refuse it by name so the
@@ -268,6 +279,7 @@ struct zcl_result storage_housekeeping_start(const char *datadir)
     }
     snprintf(g_datadir, sizeof(g_datadir), "%s", datadir ? datadir : "");
     g_stop_requested = false;
+    g_first_sweep_now = !inline_boot_sweep;
     g_thread_running = true;
     int rc = thread_registry_spawn("zcl_storage_housekeeping", sh_thread_fn,
                                    NULL, &g_thread);
@@ -285,11 +297,27 @@ struct zcl_result storage_housekeeping_start(const char *datadir)
         return sup;
     }
 
-    /* One synchronous sweep at start, so a node that boots with a datadir
-     * already over its bounds — the 2.9 GB progress.kv this service exists
-     * for — is fixed before it starts serving rather than a minute later. */
-    storage_housekeeping_sweep(datadir);
+    /* Inline start: one synchronous sweep before returning. The deferred
+     * start skips it; the thread already owes that sweep right now. */
+    if (inline_boot_sweep)
+        storage_housekeeping_sweep(datadir);
     return ZCL_OK;
+}
+
+struct zcl_result storage_housekeeping_start(const char *datadir)
+{
+    return sh_start(datadir, true);
+}
+
+/* Boot-path start. The first sweep takes storage locks (maintenance token,
+ * projection-store and topology locks) that other boot-time writers hold; the
+ * live boot log shows "started service=storage_housekeeping" taking 212-850 s
+ * per warm restart while START blocked the service kernel and therefore the
+ * READY transition. The bounds it applies are datadir-size bounds, not
+ * correctness, so the sweep runs on its own thread at once. */
+struct zcl_result storage_housekeeping_start_deferred(const char *datadir)
+{
+    return sh_start(datadir, false);
 }
 
 void storage_housekeeping_stop(void)
@@ -353,7 +381,7 @@ bool storage_housekeeping_dump_state_json(struct json_value *out,
 static bool sh_service_start(void *ctx)
 {
     const char *datadir = ctx;
-    struct zcl_result r = storage_housekeeping_start(datadir);
+    struct zcl_result r = storage_housekeeping_start_deferred(datadir);
     if (r.ok) {
         printf("Storage housekeeping started (%ds tick; storage=%s)\n",
                STORAGE_HOUSEKEEPING_TICK_SECONDS,

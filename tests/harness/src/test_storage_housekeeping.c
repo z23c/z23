@@ -42,6 +42,8 @@
 
 #include "test/setup_result.h"
 
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -136,6 +138,80 @@ static bool shk_oversized_tor_log(const char *datadir, int64_t bound,
     return shk_write_file(path_out, bound + 4096);
 }
 
+/* Poll (bounded count, never graded on elapsed time) until the sweep counter
+ * reaches `want`. */
+static bool shk_wait_sweeps(int64_t want)
+{
+    for (int i = 0; i < 500; i++) {
+        struct storage_housekeeping_stats s;
+        storage_housekeeping_stats(&s);
+        if (s.sweeps >= want)
+            return true;
+        platform_sleep_ms(20);
+    }
+    return false;
+}
+
+/* ── 1b. the boot service start must not wait on a held storage lock ── */
+struct shk_boot_start_ctx {
+    struct zcl_service_kernel kernel;
+    atomic_bool start_returned;
+};
+
+static void *shk_boot_start_thread(void *arg)
+{
+    struct shk_boot_start_ctx *c = arg;
+    (void)zcl_service_kernel_start_all(&c->kernel);
+    atomic_store(&c->start_returned, true);
+    return NULL;
+}
+
+/* The maintenance token is held by this thread, as a long writer would hold
+ * it. The registered boot service's start must still return (its first sweep
+ * is deferred to the service thread); the sweep itself only completes once
+ * the token is released. Red when start runs its first sweep inline: start
+ * then blocks on the token and never returns inside the poll budget. */
+static int shk_case_boot_start_not_blocked_by_held_lock(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "storage_housekeeping", "bootstart");
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_ROTATIONAL);
+
+    struct shk_boot_start_ctx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    atomic_init(&ctx.start_returned, false);
+    zcl_service_kernel_init(&ctx.kernel);
+    SHK_CHECK("boot start: service registered",
+              storage_housekeeping_register_service(&ctx.kernel, dir));
+
+    struct storage_housekeeping_stats before;
+    storage_housekeeping_stats(&before);
+    SHK_CHECK("boot start: token taken", storage_pacing_maintenance_begin());
+
+    pthread_t th;
+    SHK_CHECK("boot start: launcher thread spawned",
+              pthread_create(&th, NULL, shk_boot_start_thread, &ctx) == 0);
+    bool returned = false;
+    for (int i = 0; i < 250 && !returned; i++) {
+        returned = atomic_load(&ctx.start_returned);
+        if (!returned)
+            platform_sleep_ms(20);
+    }
+    SHK_CHECK("boot start returns while the maintenance token is held",
+              returned);
+
+    storage_pacing_maintenance_end();
+    pthread_join(th, NULL);
+    SHK_CHECK("the deferred boot sweep completes once the token is free",
+              shk_wait_sweeps(before.sweeps + 1));
+
+    zcl_service_kernel_stop_all(&ctx.kernel);
+    storage_pacing_force_class_for_testing(PLATFORM_STORAGE_CLASS_SOLID);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 /* ── 1. start/stop round trip on an empty datadir ── */
 static int shk_case_start_stop_round_trip(void)
 {
@@ -221,9 +297,11 @@ static int shk_case_service_registration(void)
         entry = zcl_service_kernel_find(&kernel, "storage_housekeeping");
         SHK_CHECK("entry is STARTED after start_all",
                   entry && entry->state == ZCL_SERVICE_STARTED);
-        storage_housekeeping_stats(&after);
+        /* The boot start is deferred: the sweep runs on the service's own
+         * thread, so wait (bounded by a poll count, not a clock) for it. */
         SHK_CHECK("the start wrapper called through (boot sweep ran)",
-                  after.sweeps >= before.sweeps + 1);
+                  shk_wait_sweeps(before.sweeps + 1));
+        storage_housekeeping_stats(&after);
 
         zcl_service_kernel_stop_all(&kernel);
         entry = zcl_service_kernel_find(&kernel, "storage_housekeeping");
@@ -548,6 +626,7 @@ int test_storage_housekeeping(void)
     failures += shk_case_sweep_performs_each_bound(pacing);
     failures += shk_case_sweep_under_bound_noop(pacing);
     failures += shk_case_stop_with_tick_due(pacing);
+    failures += shk_case_boot_start_not_blocked_by_held_lock();
 
     shk_restore_pacing();
     if (failures == 0)

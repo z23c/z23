@@ -65,6 +65,10 @@ void storage_housekeeping_sweep(const char *datadir);
  * zcl_result, a NULL/empty datadir or one that does not exist: a sweeper
  * with nothing to bound is a misconfiguration, not a degraded mode. */
 struct zcl_result storage_housekeeping_start(const char *datadir);
+/* Same refusals as start(), but the first sweep runs on the new thread at
+ * once instead of before this call returns. The boot service uses it so a
+ * sweep blocked on a storage lock cannot hold the READY transition. */
+struct zcl_result storage_housekeeping_start_deferred(const char *datadir);
 void storage_housekeeping_stop(void);
 
 void storage_housekeeping_stats(struct storage_housekeeping_stats *out);
