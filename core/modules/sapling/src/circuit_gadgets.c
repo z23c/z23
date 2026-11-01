@@ -624,6 +624,46 @@ void gadget_synth_coeffs(size_t window_size, const struct fr *constants,
     }
 }
 
+/* Build the x or y lookup constraint, omitting each padded-bit term. */
+static void lookup3_enforce_padded_coord(struct constraint_system *cs,
+                                         size_t b0, size_t b1, size_t b2,
+                                         bool b1_pad, bool b2_pad,
+                                         bool have_precomp, size_t precomp,
+                                         const struct fr *one_val,
+                                         const struct fr c[8],
+                                         size_t result)
+{
+    struct linear_combination la, lb, lc;
+    lc_init(&la);
+    lc_add_term(&la, CS_ONE, &c[0b001]);
+    if (!b1_pad) lc_add_term(&la, b1, &c[0b011]);
+    if (!b2_pad) lc_add_term(&la, b2, &c[0b101]);
+    if (have_precomp) lc_add_term(&la, precomp, &c[0b111]);
+
+    lc_init(&lb);
+    lc_add_term(&lb, b0, one_val);
+
+    lc_init(&lc);
+    lc_add_term(&lc, result, one_val);
+    struct fr neg_c0; fr_neg(&neg_c0, &c[0b000]);
+    lc_add_term(&lc, CS_ONE, &neg_c0);
+    if (!b1_pad) {
+        struct fr neg_c2; fr_neg(&neg_c2, &c[0b010]);
+        lc_add_term(&lc, b1, &neg_c2);
+    }
+    if (!b2_pad) {
+        struct fr neg_c4; fr_neg(&neg_c4, &c[0b100]);
+        lc_add_term(&lc, b2, &neg_c4);
+    }
+    if (have_precomp) {
+        struct fr neg_c6; fr_neg(&neg_c6, &c[0b110]);
+        lc_add_term(&lc, precomp, &neg_c6);
+    }
+
+    cs_enforce(cs, &la, &lb, &lc);
+    lc_free(&la); lc_free(&lb); lc_free(&lc);
+}
+
 /* lookup3_xy with bellman's constant-false PADDING for the two high bits.
  *
  * `b1_pad` / `b2_pad` say that bit is `Boolean::constant(false)` rather than a
@@ -698,70 +738,12 @@ static void lookup3_xy_padded(struct constraint_system *cs,
     /* x-coordinate constraint (1 constraint):
      * (xc[001] + b1*xc[011] + b2*xc[101] + precomp*xc[111]) * b0
      *   = rx - xc[000] - b1*xc[010] - b2*xc[100] - precomp*xc[110] */
-    {
-        struct linear_combination la, lb, lc;
-        lc_init(&la);
-        lc_add_term(&la, CS_ONE, &xc[0b001]);
-        if (!b1_pad) lc_add_term(&la, b1, &xc[0b011]);
-        if (!b2_pad) lc_add_term(&la, b2, &xc[0b101]);
-        if (have_precomp) lc_add_term(&la, precomp, &xc[0b111]);
-
-        lc_init(&lb);
-        lc_add_term(&lb, b0, &one_val);
-
-        lc_init(&lc);
-        lc_add_term(&lc, *rx, &one_val);
-        struct fr neg_xc0; fr_neg(&neg_xc0, &xc[0b000]);
-        lc_add_term(&lc, CS_ONE, &neg_xc0);
-        if (!b1_pad) {
-            struct fr neg_xc2; fr_neg(&neg_xc2, &xc[0b010]);
-            lc_add_term(&lc, b1, &neg_xc2);
-        }
-        if (!b2_pad) {
-            struct fr neg_xc4; fr_neg(&neg_xc4, &xc[0b100]);
-            lc_add_term(&lc, b2, &neg_xc4);
-        }
-        if (have_precomp) {
-            struct fr neg_xc6; fr_neg(&neg_xc6, &xc[0b110]);
-            lc_add_term(&lc, precomp, &neg_xc6);
-        }
-
-        cs_enforce(cs, &la, &lb, &lc);
-        lc_free(&la); lc_free(&lb); lc_free(&lc);
-    }
+    lookup3_enforce_padded_coord(cs, b0, b1, b2, b1_pad, b2_pad,
+                                 have_precomp, precomp, &one_val, xc, *rx);
 
     /* y-coordinate constraint (1 constraint): same structure */
-    {
-        struct linear_combination la, lb, lc;
-        lc_init(&la);
-        lc_add_term(&la, CS_ONE, &yc[0b001]);
-        if (!b1_pad) lc_add_term(&la, b1, &yc[0b011]);
-        if (!b2_pad) lc_add_term(&la, b2, &yc[0b101]);
-        if (have_precomp) lc_add_term(&la, precomp, &yc[0b111]);
-
-        lc_init(&lb);
-        lc_add_term(&lb, b0, &one_val);
-
-        lc_init(&lc);
-        lc_add_term(&lc, *ry, &one_val);
-        struct fr neg_yc0; fr_neg(&neg_yc0, &yc[0b000]);
-        lc_add_term(&lc, CS_ONE, &neg_yc0);
-        if (!b1_pad) {
-            struct fr neg_yc2; fr_neg(&neg_yc2, &yc[0b010]);
-            lc_add_term(&lc, b1, &neg_yc2);
-        }
-        if (!b2_pad) {
-            struct fr neg_yc4; fr_neg(&neg_yc4, &yc[0b100]);
-            lc_add_term(&lc, b2, &neg_yc4);
-        }
-        if (have_precomp) {
-            struct fr neg_yc6; fr_neg(&neg_yc6, &yc[0b110]);
-            lc_add_term(&lc, precomp, &neg_yc6);
-        }
-
-        cs_enforce(cs, &la, &lb, &lc);
-        lc_free(&la); lc_free(&lb); lc_free(&lc);
-    }
+    lookup3_enforce_padded_coord(cs, b0, b1, b2, b1_pad, b2_pad,
+                                 have_precomp, precomp, &one_val, yc, *ry);
 }
 
 /* ── Fixed-Base Scalar Multiplication (windowed) ───────────────── */
