@@ -778,6 +778,15 @@ bool shutdown_clean_marker_permitted(bool durability_ok,
  * `since` and returns the clock now, so consecutive calls chain. */
 int64_t shutdown_submark(const char *name, int64_t since);
 
+struct connman;
+/* Peer-state shutdown seam (unit-tested in test_net_bootstrap).
+ * shutdown_save_peer_state: the runtime-persist save of banlist, peers.dat and
+ * anchors; true on success (NULL connman counts as success), logged on
+ * failure. shutdown_peer_state_before_free: clears cm->datadir only when
+ * `saved`, so connman_free retries a failed save and skips a redundant one. */
+bool shutdown_save_peer_state(struct connman *cm);
+void shutdown_peer_state_before_free(struct connman *cm, bool saved);
+
 /* Pure gate consulted when the offline-worker-drain deadline fires (pure;
  * unit-tested in test_debug_bundle). True iff the caller's own durable
  * output (a completed -mint-anchor / -full-fold bundle) already landed

@@ -377,6 +377,26 @@ static void shutdown_persist_node_db(struct boot_svc_ctx *svc,
  * then. False (the default) lets connman_free save as before. */
 static bool g_peer_state_saved;
 
+/* The runtime-persist peer-state save. Returns whether it succeeded (a NULL
+ * connman has nothing to save and counts as success); a failure is logged. */
+bool shutdown_save_peer_state(struct connman *cm)
+{
+    if (!cm || connman_save_addrman(cm))
+        return true;
+    LOG_WARN("shutdown", "peer state save (banlist, peers.dat, anchors) "
+             "failed before the clean marker; connman_free will retry");
+    return false;
+}
+
+/* Called just before connman_free: after a successful save, clear the
+ * datadir so connman_free does not repeat the fsync-heavy save in the
+ * cuttable stage; after a failed one leave it set so connman_free retries. */
+void shutdown_peer_state_before_free(struct connman *cm, bool saved)
+{
+    if (saved)
+        cm->datadir = NULL;
+}
+
 static bool shutdown_persist_runtime_state(struct boot_svc_ctx *svc,
                                           bool diagnostics_drained)
 {
@@ -395,12 +415,7 @@ static bool shutdown_persist_runtime_state(struct boot_svc_ctx *svc,
      * peers.dat. Peer state is best-effort by design (see the anchors comment
      * in connman_save_addrman). A failure is logged and remembered so the
      * release step leaves connman_free to retry the save. */
-    g_peer_state_saved = true;
-    if (svc->connman && !connman_save_addrman(svc->connman)) {
-        g_peer_state_saved = false;
-        LOG_WARN("shutdown", "peer state save (banlist, peers.dat, anchors) "
-                 "failed before the clean marker; connman_free will retry");
-    }
+    g_peer_state_saved = shutdown_save_peer_state(svc->connman);
 
     rpc_blockchain_mmr_save(boot_node_db(svc));
     rpc_blockchain_mmb_save(boot_node_db(svc));
@@ -498,8 +513,7 @@ static void shutdown_release_owned_resources(struct boot_svc_ctx *svc,
      * connman_save_addrman returns at once without a datadir, so this keeps
      * connman_free from repeating that fsync-heavy save in the cuttable
      * stage. Every thread that read the field is joined. */
-    if (g_peer_state_saved)
-        svc->connman->datadir = NULL; /* else connman_free retries the save */
+    shutdown_peer_state_before_free(svc->connman, g_peer_state_saved);
     connman_free(svc->connman);
     t = shutdown_submark("release.connman_free", t);
     printf("[shutdown] connman stopped\n");

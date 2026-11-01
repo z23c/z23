@@ -709,3 +709,7 @@ later lane flips it HARD.
 - 2026-11-01T21:04:27Z — REASON: connman_save_addrman returns bool (behaviour-preserving) so shutdown can see a failed peer-state save;   owner-authorised via lead
   old ROOT: a69296e429104c29f2caed0d20c835896e8814dfccaf432e35417b8c5ae0070f
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T21:04:46Z — REASON: Test each peer-state save failure source and the shutdown retry seam;  behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: 632c90b5bed4908ada767f71672f2f386846f92666539226502767e67abb8b13
+  by: owner unseal ritual (make core-unseal)

@@ -13,6 +13,8 @@
 #include "net/connman.h"
 
 #include "net/addnode_file.h"
+#include "config/boot_internal.h"
+#include <sys/stat.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -312,6 +314,91 @@ static int check_addrman_save_load_roundtrip(void)
     return failures;
 }
 
+/* connman_save_addrman must report EACH durable-write failure on its own, with
+ * the other two writes succeeding: a directory squatting on a target's staging
+ * path (<name>.tmp) makes that one write fail and nothing else. The shutdown
+ * seam must clear the datadir only after a successful save. */
+static int check_peer_state_save_failure_sources(void)
+{
+    int failures = 0;
+    static const char *const targets[] = { "banlist.dat", "peers.dat",
+                                           "anchors.dat" };
+    char tmpdir[] = "/tmp/zcl_peer_save_XXXXXX";
+    if (!mkdtemp(tmpdir)) {
+        NBOOT_CHECK("peer-save: mkdtemp", false);
+        return failures;
+    }
+    chain_params_select(CHAIN_MAIN);
+    const struct chain_params *params = chain_params_get();
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool init_ok = connman_init(&cm, params, &sigs);
+    NBOOT_CHECK("peer-save: connman_init", init_ok);
+    if (!init_ok) goto out;
+    cm.datadir = tmpdir;
+
+    /* Clean case, and an empty addrman (none added yet): both succeed. */
+    NBOOT_CHECK("peer-save: empty addrman, clean datadir -> true",
+                connman_save_addrman(&cm));
+
+    struct net_address a;
+    struct net_addr src;
+    bootstrap_set_ipv4(&a, 45, 33, 10, 1, 8033);
+    net_addr_init(&src);
+    NBOOT_CHECK("peer-save: addrman_add", addrman_add(&cm.manager.addrman,
+                                                      &a, &src, 0));
+    NBOOT_CHECK("peer-save: populated, clean datadir -> true",
+                connman_save_addrman(&cm));
+
+    for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
+        char blocker[600], name[96];
+        snprintf(blocker, sizeof(blocker), "%s/%s.tmp", tmpdir, targets[i]);
+        (void)unlink(blocker);
+        bool made = mkdir(blocker, 0700) == 0;
+        snprintf(name, sizeof(name), "peer-save: %s blocked (setup)",
+                 targets[i]);
+        NBOOT_CHECK(name, made);
+        snprintf(name, sizeof(name), "peer-save: only %s fails -> false",
+                 targets[i]);
+        NBOOT_CHECK(name, made && !connman_save_addrman(&cm));
+        if (made) (void)rmdir(blocker);
+        snprintf(name, sizeof(name), "peer-save: %s unblocked -> true",
+                 targets[i]);
+        NBOOT_CHECK(name, connman_save_addrman(&cm));
+    }
+
+    /* Shutdown seam: datadir survives a failed save (connman_free retries)
+     * and is cleared after a successful one. */
+    NBOOT_CHECK("shutdown: NULL connman save counts as success",
+                shutdown_save_peer_state(NULL));
+    NBOOT_CHECK("shutdown: clean save -> true", shutdown_save_peer_state(&cm));
+    {
+        char blocker[600];
+        snprintf(blocker, sizeof(blocker), "%s/peers.dat.tmp", tmpdir);
+        bool made = mkdir(blocker, 0700) == 0;
+        bool saved = shutdown_save_peer_state(&cm);
+        NBOOT_CHECK("shutdown: blocked save -> false", made && !saved);
+        shutdown_peer_state_before_free(&cm, saved);
+        NBOOT_CHECK("shutdown: datadir kept after failed save (retry)",
+                    cm.datadir == tmpdir);
+        if (made) (void)rmdir(blocker);
+        saved = shutdown_save_peer_state(&cm);
+        shutdown_peer_state_before_free(&cm, saved);
+        NBOOT_CHECK("shutdown: datadir cleared after successful save",
+                    saved && cm.datadir == NULL);
+    }
+    cm.datadir = tmpdir;
+    connman_free(&cm);
+out:
+    {
+        char cmd[700];
+        snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
+        TEST_DISCARD(system(cmd));
+    }
+    return failures;
+}
+
 int test_net_bootstrap(void)
 {
     printf("\n=== net bootstrap-surface tests ===\n");
@@ -321,6 +408,7 @@ int test_net_bootstrap(void)
     failures += check_addnode_load_missing_file_noop();
     failures += check_addnode_load_skips_bad_lines();
     failures += check_addrman_save_load_roundtrip();
+    failures += check_peer_state_save_failure_sources();
 
     return failures;
 }
