@@ -284,12 +284,17 @@ static void poll_sync_state(const char *cookie, char *rpc_buf, int bufsz,
 
 /* Print a line whenever the reported sync state changes. */
 static void report_state_change(const char *state, long height, double elapsed,
-                                char *last_state)
+                                char *last_state, size_t cap)
 {
     if (strcmp(state, last_state) != 0) {
+        size_t state_len = strlen(state);
+        if (state_len >= cap) {
+            fprintf(stderr, "sync state over %zu bytes; not reported\n", cap - 1);
+            return;
+        }
         printf("  %-20s %5.1fs   state=%s height=%ld\n",
                "", elapsed, state, height);
-        strcpy(last_state, state);
+        memcpy(last_state, state, state_len + 1);
     }
 }
 
@@ -499,7 +504,7 @@ int main(void)
         long height = -1;
         poll_sync_state(cookie, rpc_buf, sizeof(rpc_buf), state, sizeof(state), &height);
 
-        report_state_change(state, height, elapsed, last_state);
+        report_state_change(state, height, elapsed, last_state, sizeof(last_state));
 
         mark_file_sync_phases(logfile, elapsed, &t_filesync, &t_filesync_done);
         mark_flyclient_verified(logfile, elapsed, &t_fc);

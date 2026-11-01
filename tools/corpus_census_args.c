@@ -80,8 +80,9 @@ static bool args_next_token(int argc, char **argv, int *i, char *key,
         *value = eq + 1;
         return true;
     }
-    if (strlen(arg) >= key_sz) return false;
-    strcpy(key, arg);
+    size_t arg_len = strlen(arg);
+    if (arg_len >= key_sz) return false;
+    memcpy(key, arg, arg_len + 1);
     if (*i + 1 >= argc) return false;
     *value = argv[++*i];
     return true;

@@ -2945,7 +2945,7 @@ static bool dp_source_parent(const char *source, char parent[PATH_MAX])
     }
     memcpy(parent, source, len + 1);
     char *slash = strrchr(parent, '/');
-    if (!slash) strcpy(parent, ".");
+    if (!slash) memcpy(parent, ".", 2);
     else if (slash == parent) slash[1] = 0;
     else *slash = 0;
     return true;

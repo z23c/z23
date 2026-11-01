@@ -197,7 +197,10 @@ zxml_status zxml_elem_open(zxml *x, const char *name) {
     x->kids[x->depth - 1] = true;
   x->kids[x->depth] = false;
   x->last_elem[x->depth] = false;
-  strcpy(x->names[x->depth], name); /* bounded by name_valid() */
+  size_t name_len = strlen(name); /* name_valid() bounds it to ZXML_MAX_NAME */
+  if (name_len > ZXML_MAX_NAME)
+    return (x->err = ZXML_ERR_NAME);
+  memcpy(x->names[x->depth], name, name_len + 1);
   x->depth++;
   x->in_tag = true;
   if (x->depth == 1)

@@ -227,13 +227,14 @@ static bool recipe_strings_insert(struct vcs_package_recipe_strings *list,
         list->items = nitems;
         list->cap = ncap;
     }
-    char *copy = zcl_malloc(strlen(entry) + 1, "vcs_recipe_entry");
+    size_t entry_len = strlen(entry);
+    char *copy = zcl_malloc(entry_len + 1, "vcs_recipe_entry");
     if (!copy) {
         if (err_out)
             *err_out = VCS_PACKAGE_RECIPE_ERR_ALLOC;
         return false;
     }
-    strcpy(copy, entry);
+    memcpy(copy, entry, entry_len + 1);
     memmove(list->items + lo + 1, list->items + lo,
             (list->count - lo) * sizeof(*list->items));
     list->items[lo] = copy;

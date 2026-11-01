@@ -141,10 +141,23 @@ static void test_capacity_one(void) {
   zlru_destroy(c);
 }
 
+struct key_acc {
+  char *buf;
+  size_t cap;
+};
+
 static bool collect_key(void *ctx, const char *key, void *value) {
+  struct key_acc *acc = ctx;
   (void)value;
-  strcat(ctx, key);
-  strcat(ctx, " ");
+  size_t len = strlen(acc->buf);
+  size_t key_len = strlen(key);
+  if (key_len + 2 > acc->cap - len) {
+    fprintf(stderr, "FAIL %s:%d: key list over %zu bytes\n", __FILE__, __LINE__, acc->cap);
+    failures++;
+    return false;
+  }
+  memcpy(acc->buf + len, key, key_len);
+  memcpy(acc->buf + len + key_len, " ", 2);
   return true;
 }
 
@@ -157,11 +170,12 @@ static void test_visit_order(void) {
   zlru_get(c, "a"); /* promote a: order b? no: c? order is b? recompute */
   /* MRU order now: a c b */
   char acc[64] = "";
-  zlru_visit_mru_first(c, collect_key, acc);
+  struct key_acc ka = { acc, sizeof(acc) };
+  zlru_visit_mru_first(c, collect_key, &ka);
   CHECK(!strcmp(acc, "a c b "));
   /* The visit must not promote: same order again. */
   memset(acc, 0, sizeof(acc));
-  zlru_visit_mru_first(c, collect_key, acc);
+  zlru_visit_mru_first(c, collect_key, &ka);
   CHECK(!strcmp(acc, "a c b "));
   zlru_destroy(c);
 }

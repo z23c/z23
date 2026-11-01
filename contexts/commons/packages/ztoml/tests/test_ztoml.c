@@ -255,8 +255,10 @@ static void test_err(void) {
   /* Depth bound. */
   {
     char doc[64] = "k = ";
-    size_t i;
-    for (i = 0; i < ZTOML_MAX_DEPTH + 2; i++) strcat(doc, "[");
+    size_t i, doc_len = strlen(doc);
+    CHECK(doc_len + ZTOML_MAX_DEPTH + 2 < sizeof(doc));
+    for (i = 0; i < ZTOML_MAX_DEPTH + 2; i++) doc[doc_len++] = '[';
+    doc[doc_len] = '\0';
     evlog log;
     CHECK(parse_all(doc, &log) == ZTOML_ERR_RANGE);
   }

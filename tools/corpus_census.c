@@ -1450,7 +1450,10 @@ static int census_write_checkpoint_artifacts(struct census_ctx *ctx)
     if (!write_hex_artifact(ctx->args.out, name, ctx->checkpoint_wire,
                             ctx->checkpoint_wire_len))
         return 1;
-    strcpy(ctx->checkpoint_file, name);
+    size_t name_len = strlen(name);
+    if (name_len >= sizeof(ctx->checkpoint_file))
+        return 1;
+    memcpy(ctx->checkpoint_file, name, name_len + 1);
     for (size_t i = 0; i < ctx->shard_count; i++) {
         (void)snprintf(name, sizeof(name), "shard-%06llu-%zu.hex",
                        (unsigned long long)ctx->args.sequence, i);

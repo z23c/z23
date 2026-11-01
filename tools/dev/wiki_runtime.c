@@ -130,8 +130,10 @@ static bool wr_peer_read(const struct json_value *v, struct wr_participant *p)
         !(p->argc = json_size(args)) || p->argc > WR_ARGS) return false;
     for (size_t i = 0; i < p->argc; i++) {
         const char *arg = json_get_str(json_at(args, i));
-        if (!arg || strlen(arg) >= WR_ARG_CAP) return false;
-        strcpy(p->argv[i], arg);
+        if (!arg) return false;
+        size_t arg_len = strlen(arg);
+        if (arg_len >= WR_ARG_CAP) return false;
+        memcpy(p->argv[i], arg, arg_len + 1);
     }
     return wr_native_prefix(p);
 }

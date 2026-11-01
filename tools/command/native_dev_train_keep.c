@@ -335,7 +335,10 @@ static bool dtk_state_save(const struct dtk_paths *p,
     json_free(&v);
     if (need >= sizeof(buf) - 2)
         return false;
-    (void)strcat(buf, "\n");
+    size_t len = strlen(buf);
+    if (len + 2 > sizeof(buf))
+        return false;
+    memcpy(buf + len, "\n", 2);
     return dtk_write_atomic(p->state, buf);
 }
 

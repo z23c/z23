@@ -74,10 +74,12 @@ bool plugin_write_atomic(const char *path, const char *data, size_t len)
 #else
 
     char tmp[PLUGIN_PATH_MAX];
-    if (!plugin_join(tmp, sizeof(tmp), path, NULL, NULL, NULL) ||
-        strlen(tmp) + 5 >= sizeof(tmp))
+    if (!plugin_join(tmp, sizeof(tmp), path, NULL, NULL, NULL))
         return false;
-    strcat(tmp, ".tmp");
+    size_t tmp_len = strlen(tmp);
+    if (tmp_len + 5 >= sizeof(tmp))
+        return false;
+    memcpy(tmp + tmp_len, ".tmp", 5);
     (void)unlink(tmp);
     int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
     if (fd < 0)
@@ -140,10 +142,12 @@ static enum plugin_status pp_store_exe(const char *src, const char *dst,
 #else
 
     char tmp[PLUGIN_PATH_MAX];
-    if (!plugin_join(tmp, sizeof(tmp), dst, NULL, NULL, NULL) ||
-        strlen(tmp) + 5 >= sizeof(tmp))
+    if (!plugin_join(tmp, sizeof(tmp), dst, NULL, NULL, NULL))
         return PLUGIN_ERR_ARGUMENT;
-    strcat(tmp, ".tmp");
+    size_t tmp_len = strlen(tmp);
+    if (tmp_len + 5 >= sizeof(tmp))
+        return PLUGIN_ERR_ARGUMENT;
+    memcpy(tmp + tmp_len, ".tmp", 5);
     (void)unlink(tmp);
     enum plugin_status st = plugin_copy_file(src, tmp, 0755, sha);
     if (st == PLUGIN_OK && (chmod(tmp, 0755) != 0 || rename(tmp, dst) != 0))
