@@ -770,6 +770,46 @@ static int test_wrong_passphrase_keeps_shielded_wallet_locked(void)
     return failures;
 }
 
+/* While the unlock reads the Sapling rows the wallet must not report unlocked. */
+struct wls_unlock_probe {
+    struct wls_fixture *f;
+    int reads;
+    int saw_unlocked;
+};
+
+static int wls_probe_unlocked_during_reload(void *ctx)
+{
+    struct wls_unlock_probe *p = ctx;
+    if (!sqlite3_stmt_busy(p->f->ws.stmt_zkey_read))
+        return 0;
+    p->reads++;
+    if (wallet_lock_is_unlocked() || !wls_locked())
+        p->saw_unlocked++;
+    return 0;
+}
+
+static int test_wallet_is_not_unlocked_before_its_keys_are_loaded(void)
+{
+    int failures = 0;
+    struct wls_fixture f;
+    TEST("wallet_lock_shielded: a wallet reports locked until an unlock has loaded its keys") {
+        ASSERT(wls_provision(&f, true, false));
+        ASSERT(wls_boot_locked(&f));
+        struct wls_unlock_probe p = { .f = &f };
+        sqlite3_progress_handler(f.db, 1, wls_probe_unlocked_during_reload, &p);
+        struct zcl_result u = wallet_lock_unlock(f.w, &f.ws, WLS_PASS);
+        sqlite3_progress_handler(f.db, 0, NULL, NULL);
+        ASSERT(u.ok);
+        ASSERT(p.reads > 0);
+        ASSERT(p.saw_unlocked == 0);
+        ASSERT(wallet_lock_is_unlocked() && !wls_locked());
+        ASSERT(wls_secrets_restored(&f, f.w));
+        wls_teardown(&f);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_lock_during_send_cannot_sign_with_wiped_key(void)
 {
     int failures = 0;
@@ -2142,6 +2182,7 @@ int test_wallet_lock_shielded(void)
     failures += test_locked_boot_scans_and_computes_nullifiers();
     failures += test_row_without_viewing_key_is_reported();
     failures += test_wrong_passphrase_keeps_shielded_wallet_locked();
+    failures += test_wallet_is_not_unlocked_before_its_keys_are_loaded();
     failures += test_lock_during_send_cannot_sign_with_wiped_key();
     failures += test_plaintext_wallet_is_unchanged();
     failures += test_sealed_boot_keeps_wallet_records();

@@ -45,6 +45,8 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static char  g_runtime_pass[WLK_MAX_PASS + 1];
 static bool  g_have_runtime_pass;   /* an unlock cached a passphrase */
 static bool  g_force_locked;        /* an explicit lock — wins over env */
+static bool  g_unlock_loading;       /* an unlock published the passphrase and is
+                                       still reading the key rows back */
 static bool  g_encrypted_at_rest;   /* the wallet uses WKS1 at-rest wrapping */
 static uint64_t g_timeout_generation;
 #ifdef ZCL_TESTING
@@ -181,7 +183,8 @@ bool wallet_lock_encrypted_at_rest(void)
 bool wallet_lock_is_locked(void)
 {
     pthread_mutex_lock(&g_mu);
-    bool locked = g_encrypted_at_rest && effective_pass_locked() == NULL;
+    bool locked = g_encrypted_at_rest &&
+                  (effective_pass_locked() == NULL || g_unlock_loading);
     pthread_mutex_unlock(&g_mu);
     return locked;
 }
@@ -191,8 +194,11 @@ bool wallet_lock_is_unlocked(void)
     pthread_mutex_lock(&g_mu);
     /* A plaintext wallet has nothing to unlock — always "unlocked". An
      * encrypted wallet is unlocked only while an effective passphrase is
-     * available. */
-    bool unlocked = !g_encrypted_at_rest || (effective_pass_locked() != NULL);
+     * available. It is also not
+     * unlocked while an unlock is still reading its keys back: the passphrase
+     * is live for that read, but no key is loaded yet. */
+    bool unlocked = !g_encrypted_at_rest ||
+                    (effective_pass_locked() != NULL && !g_unlock_loading);
 #ifdef ZCL_TESTING
     if (g_flip_after_unlock_checks && --g_flip_after_unlock_checks == 0) {
         memory_cleanse(g_runtime_pass, sizeof(g_runtime_pass));
@@ -232,6 +238,15 @@ static void wlk_publish(const char *passphrase, size_t plen,
     g_runtime_pass[plen] = '\0';
     g_have_runtime_pass = true;
     g_force_locked = false;
+    g_unlock_loading = true;
+    pthread_mutex_unlock(&g_mu);
+}
+
+/* The unlock read every key class back: the wallet now reports unlocked. */
+static void wlk_loaded(void)
+{
+    pthread_mutex_lock(&g_mu);
+    g_unlock_loading = false;
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -243,6 +258,7 @@ static void wlk_rollback(struct wallet *w, struct wlk_prev *prev)
     memcpy(g_runtime_pass, prev->pass, sizeof(prev->pass));
     g_have_runtime_pass = prev->have;
     g_force_locked = prev->force;
+    g_unlock_loading = false;
     bool encrypted = g_encrypted_at_rest;
     pthread_mutex_unlock(&g_mu);
     if (!prev->have)
@@ -307,6 +323,7 @@ static struct zcl_result wlk_unlock_locked(struct wallet *w,
         return ZCL_ERR(WLK_STORE_UNREADABLE,
             "unlock: stored keys could not be read; wallet stays locked");
     }
+    wlk_loaded();
     memory_cleanse(&prev, sizeof(prev));
     return ZCL_OK;
 }
@@ -353,6 +370,7 @@ struct zcl_result wallet_lock_unlock(struct wallet *w, struct wallet_sqlite *ws,
         /* Register-only unlock (no keystore wired / unit test): accept. */
         struct wlk_prev prev;
         wlk_publish(passphrase, plen, &prev);
+        wlk_loaded();
         memory_cleanse(&prev, sizeof(prev));
         r = ZCL_OK;
     } else {
@@ -537,6 +555,7 @@ void wallet_lock_reset_for_test(void)
     memory_cleanse(g_runtime_pass, sizeof(g_runtime_pass));
     g_have_runtime_pass = false;
     g_force_locked = false;
+    g_unlock_loading = false;
 #ifdef ZCL_TESTING
     g_flip_after_unlock_checks = 0;
     g_unlock_entries = 0;
