@@ -409,13 +409,6 @@ bool boot_mint_anchor_normal_boot_preflight(const char *datadir) {
     (void)projection_present;
     return ok;
 }
-bool boot_mint_anchor_preflight_run_all(const char *datadir, struct json_value *report) {
-    (void)datadir;
-    (void)report;
-    fprintf(stderr, "REFUSED: -mint-anchor is unavailable on Windows until the "
-                    "directory-handle-relative containment transaction is qualified\n");
-    return false;
-}
 bool boot_mint_anchor_preflight_dump_state_json(struct json_value *out, const char *key) {
     (void)out;
     (void)key;
@@ -1105,7 +1098,7 @@ static bool preflight_run_one_check(size_t index, const char *datadir, struct js
     return ok;
 }
 
-bool boot_mint_anchor_preflight_run_all(const char *datadir, struct json_value *report) {
+static bool preflight_run_all_checks(const char *datadir, struct json_value *report) {
     if (!datadir || !datadir[0])
         LOG_FAIL(PREFLIGHT_SUBSYS, "preflight run_all: missing datadir");
     struct json_value checks_arr = {0};
@@ -1172,3 +1165,19 @@ bool boot_mint_anchor_preflight_dump_state_json(struct json_value *out, const ch
 }
 
 #endif
+
+/* One definition for both platforms: the Windows refusal and the POSIX
+ * preflight are selected inside the body, so the symbol is not defined
+ * in two preprocessor arms. */
+bool boot_mint_anchor_preflight_run_all(const char *datadir, struct json_value *report) {
+#if defined(_WIN32)
+    (void)datadir;
+    (void)report;
+    fprintf(stderr, "REFUSED: -mint-anchor is unavailable on Windows until the "
+                    "directory-handle-relative containment transaction is qualified\n");
+    return false;
+#else
+    return preflight_run_all_checks(datadir, report);
+#endif
+}
+
