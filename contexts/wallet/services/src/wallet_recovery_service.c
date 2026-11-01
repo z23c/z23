@@ -819,6 +819,10 @@ struct zcl_result wallet_recovery_run(const struct wallet_recovery_request *req,
         return ZCL_ERR(-64, "out of memory building the recovered wallet");
     }
     wallet_init(w);
+    /* This wallet is a scratch built for another datadir, never the running
+     * node's: the process-wide lock belongs to that wallet and must not
+     * refuse the keys written here. */
+    w->sapling_keys.follows_wallet_lock = false;
 
     struct zcl_result rc = ZCL_OK;
     bool recovery_pass_loaded = false;

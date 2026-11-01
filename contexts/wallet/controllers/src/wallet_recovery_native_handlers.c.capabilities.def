@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the wallet create and restore handlers. */
+ZCL_MODULE_CAPABILITY("contexts/wallet/controllers/src/wallet_recovery_native_handlers.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PRIVILEGE, "standard output is moved to standard error (dup, dup2, close, fflush) so it holds only the reply; core dumps are disabled (setrlimit, prctl) so the phrase cannot reach a core file")
