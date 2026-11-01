@@ -19,6 +19,7 @@
 #include "models/database.h"
 #include "models/db_txn.h"
 
+#include <pthread.h>
 #include <string.h>
 
 static bool earn_persisted_names_tip(struct node_db *ndb,
@@ -59,17 +60,23 @@ void chain_evidence_earn_test_set_before_write_hook(
  * were earned on. A live advance that moved the persisted tip after the
  * caller's check either committed first (the in-transaction check below
  * then refuses) or must wait for this commit. */
-static enum chain_evidence_earn_outcome earn_check_and_write(
+static enum chain_evidence_earn_outcome earn_check_and_write_locked(
     struct chain_evidence_controller *authority,
     const struct uint256 *tip_hash, int tip_height)
 {
+    /* Held under the evidence write lock, the earn has no outer transaction
+     * of its own: a transaction already open on the shared handle belongs to
+     * another writer (promote_tip, boot reconcile). Joining it would commit
+     * or roll back with that writer and read its half-written keys, so the
+     * earn refuses (transient) rather than join. */
     struct node_db_status st = {0};
     node_db_get_status(authority->ndb, &st);
+    if (st.tx_open)
+        return CEC_EARN_STORE_BUSY;
     __attribute__((cleanup(db_txn_auto_rollback)))
-    struct db_txn *txn = NULL;
-    if (!st.tx_open)
-        txn = db_txn_begin(authority->ndb, "cec.earn_active_tip_evidence");
-    if (!st.tx_open && !txn)
+    struct db_txn *txn =
+        db_txn_begin(authority->ndb, "cec.earn_active_tip_evidence");
+    if (!txn)
         return CEC_EARN_STORE_BUSY;
     if (!earn_persisted_names_tip(authority->ndb, tip_hash, tip_height))
         return CEC_EARN_TIP_MOVED;
@@ -91,6 +98,31 @@ static enum chain_evidence_earn_outcome earn_check_and_write(
     if (!ok || (txn && !db_txn_commit(txn)))
         return CEC_EARN_STORE_BUSY;
     return CEC_EARN_OK;
+}
+
+/* Process-wide: controllers are built per call (stack structs over the one
+ * shared node_db handle), so the lock cannot live in the controller. */
+static pthread_mutex_t g_evidence_write_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void chain_evidence_write_lock(void)
+{
+    pthread_mutex_lock(&g_evidence_write_lock);
+}
+
+void chain_evidence_write_unlock(void)
+{
+    pthread_mutex_unlock(&g_evidence_write_lock);
+}
+
+static enum chain_evidence_earn_outcome earn_check_and_write(
+    struct chain_evidence_controller *authority,
+    const struct uint256 *tip_hash, int tip_height)
+{
+    chain_evidence_write_lock();
+    enum chain_evidence_earn_outcome out =
+        earn_check_and_write_locked(authority, tip_hash, tip_height);
+    chain_evidence_write_unlock();
+    return out;
 }
 
 struct zcl_result chain_evidence_controller_earn_active_tip_evidence(

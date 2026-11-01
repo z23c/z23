@@ -27,7 +27,10 @@
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
 
+#include <pthread.h>
 #include <sqlite3.h>
+#include <stdatomic.h>
+#include <time.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -413,6 +416,88 @@ static int test_mark_at_tip_moved_is_retryable_not_frozen(void)
     return failures;
 }
 
+/* Two real threads over the one shared handle. B is the live advance: it
+ * opens its transaction and parks (hook) before writing the new tip. A is
+ * the genesis walk's earn for the OLD tip. The evidence write lock must
+ * make A wait for B's commit, after which A sees the new tip and refuses;
+ * A must never write the old tip's flags into B's transaction or record. */
+static _Atomic int g_b_parked;
+static _Atomic int g_b_release;
+static _Atomic int g_a_done;
+static struct zcl_result g_a_result;
+
+static void sleep_ms(long ms)
+{
+    struct timespec ts = {.tv_sec = ms / 1000,
+                          .tv_nsec = (ms % 1000) * 1000000L};
+    nanosleep(&ts, NULL);
+}
+
+static void hook_park_live_advance(void)
+{
+    atomic_store(&g_b_parked, 1);
+    for (int i = 0; i < 1000 && !atomic_load(&g_b_release); i++)
+        sleep_ms(10); /* watchdog: 10s, then proceed */
+}
+
+static void *thread_live_advance(void *arg)
+{
+    struct gw_fixture *f = arg;
+    (void)chain_evidence_controller_record_finalized_tip(
+        &f->authority, &f->blocks[4], "unit.two_thread");
+    return NULL;
+}
+
+static void *thread_earn_old_tip(void *arg)
+{
+    struct gw_fixture *f = arg;
+    g_a_result = chain_evidence_controller_earn_active_tip_evidence(
+        &f->authority, &f->hashes[GW_TIP], f->blocks[GW_TIP].nHeight, true,
+        true);
+    atomic_store(&g_a_done, 1);
+    return NULL;
+}
+
+static int test_two_thread_earn_waits_for_live_advance(void)
+{
+    int failures = 0;
+    struct gw_fixture f;
+    failures += gw_check("fixture", gw_init(&f));
+    atomic_store(&g_b_parked, 0);
+    atomic_store(&g_b_release, 0);
+    atomic_store(&g_a_done, 0);
+    failures += gw_check("advance: reducer moves the tip",
+                         active_chain_move_window_tip(&f.ms.chain_active,
+                                                      &f.blocks[4]));
+    chain_evidence_live_test_set_after_begin_hook(hook_park_live_advance);
+    pthread_t b, a;
+    failures += gw_check("start live-advance thread",
+                         pthread_create(&b, NULL, thread_live_advance, &f) ==
+                             0);
+    for (int i = 0; i < 500 && !atomic_load(&g_b_parked); i++)
+        sleep_ms(10);
+    failures += gw_check("live advance parked inside its transaction",
+                         atomic_load(&g_b_parked) == 1);
+    failures += gw_check("start earn thread",
+                         pthread_create(&a, NULL, thread_earn_old_tip, &f) ==
+                             0);
+    sleep_ms(400);
+    failures += gw_check("earn waits while the live advance holds the write "
+                         "lock", atomic_load(&g_a_done) == 0);
+    atomic_store(&g_b_release, 1);
+    pthread_join(b, NULL);
+    pthread_join(a, NULL);
+    chain_evidence_live_test_set_after_begin_hook(NULL);
+    failures += gw_check("earn refused after the advance committed",
+                         !g_a_result.ok);
+    failures += gw_check("refusal is TIP_MOVED",
+                         g_a_result.code == CEC_EARN_TIP_MOVED);
+    failures += gw_check("old tip's flags never reached the record",
+                         gw_flags_unearned(&f));
+    gw_free(&f);
+    return failures;
+}
+
 int test_genesis_walk_earn_evidence(void)
 {
     int failures = 0;
@@ -426,6 +511,7 @@ int test_genesis_walk_earn_evidence(void)
     failures += test_authority_survives_advance_and_restart();
     failures += test_earn_refuses_when_tip_moves_before_write();
     failures += test_mark_at_tip_moved_is_retryable_not_frozen();
+    failures += test_two_thread_earn_waits_for_live_advance();
     if (failures == 0)
         printf("  all genesis_walk_earn_evidence tests passed\n");
     return failures;

@@ -873,12 +873,16 @@ static bool cec_persisted_tip_is(struct chain_evidence_controller *authority,
  * tip must still name it, else TIP_MOVED (retryable: nothing is written and
  * nothing freezes). The caller freezes on UNUSABLE after the transaction has
  * rolled back, so the freeze record is not itself rolled back. */
-static enum cec_genesis_mark_outcome cec_mark_genesis_in_txn(
+static enum cec_genesis_mark_outcome cec_mark_genesis_locked(
     struct chain_evidence_controller *authority,
     const struct uint256 *utxo_sha3, const struct uint256 *tip_hash)
 {
     struct node_db_status st = {0};
     node_db_get_status(authority->ndb, &st);
+    /* Tip-bound publication never joins another writer's transaction (see
+     * the evidence write lock order in the header): refuse, retry later. */
+    if (tip_hash && st.tx_open)
+        return CEC_GENESIS_MARK_PERSIST;
     __attribute__((cleanup(db_txn_auto_rollback)))
     struct db_txn *txn = NULL;
     if (!st.tx_open)
@@ -899,6 +903,17 @@ static enum cec_genesis_mark_outcome cec_mark_genesis_in_txn(
     if (txn && !db_txn_commit(txn))
         return CEC_GENESIS_MARK_PERSIST;
     return CEC_GENESIS_MARK_OK;
+}
+
+static enum cec_genesis_mark_outcome cec_mark_genesis_in_txn(
+    struct chain_evidence_controller *authority,
+    const struct uint256 *utxo_sha3, const struct uint256 *tip_hash)
+{
+    chain_evidence_write_lock();
+    enum cec_genesis_mark_outcome out =
+        cec_mark_genesis_locked(authority, utxo_sha3, tip_hash);
+    chain_evidence_write_unlock();
+    return out;
 }
 
 static enum chain_evidence_controller_result cec_mark_genesis(

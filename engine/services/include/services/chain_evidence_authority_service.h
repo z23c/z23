@@ -206,6 +206,22 @@ bool chain_evidence_controller_record_finalized_tip(
     struct chain_evidence_controller *authority,
     struct block_index *finalized_tip,
     const char *reason);
+
+/* EVIDENCE WRITE LOCK. One process-wide mutex (controllers are per-call stack
+ * structs over one shared node_db handle, so it cannot live in them) held
+ * across the whole check+load+write of every writer of the cec.active_tip_*
+ * evidence keys that can race the genesis walk: earn_active_tip_evidence,
+ * the live-advance record (chain_evidence_controller_record_finalized_tip's
+ * evidence persist), and mark_fully_validated(_at_tip). It is INNERMOST and
+ * non-recursive: take it only after cs_main, csr->lock, the coins/progress
+ * locks; while holding it touch only the node_db handle and never take any
+ * of those. Earn and the tip-bound mark never join a transaction another
+ * writer already opened on the handle (they refuse, transient). Not covered:
+ * promote_tip and boot reconcile, which run in their own caller-owned
+ * transaction. */
+void chain_evidence_write_lock(void);
+void chain_evidence_write_unlock(void);
+
 /* Why an earn was refused; the failing zcl_result.code carries it.
  * TRANSIENT (CEC_EARN_TIP_MOVED, CEC_EARN_STORE_BUSY): nothing was written
  * and a later publish pass can succeed, because the live follow had not
@@ -311,6 +327,12 @@ typedef void (*chain_evidence_earn_test_hook_fn)(
     struct chain_evidence_controller *authority);
 /* Runs after the earn's early check and before its transaction: the window
  * the in-transaction check closes. */
+typedef void (*chain_evidence_live_test_hook_fn)(void);
+/* Runs inside the live-advance evidence persist, after its transaction is
+ * open (or joined) and before it writes: the parking point for the
+ * two-thread test. */
+void chain_evidence_live_test_set_after_begin_hook(
+    chain_evidence_live_test_hook_fn fn);
 void chain_evidence_earn_test_set_before_write_hook(
     chain_evidence_earn_test_hook_fn fn);
 void chain_evidence_controller_test_fail_commit_after_csr(bool fail);

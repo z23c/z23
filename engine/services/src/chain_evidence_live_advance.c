@@ -266,7 +266,17 @@ static void cec_lift_boot_tip_divergence_freeze(
  * mirrors promote_tip — join a caller-owned transaction, else own the
  * commit. Any failure rolls the whole set back; the caller's throttled
  * persist-miss path retries on the next health tick. */
-static bool cec_persist_finalized_tip_evidence(
+#ifdef ZCL_TESTING
+static chain_evidence_live_test_hook_fn g_live_after_begin_hook;
+
+void chain_evidence_live_test_set_after_begin_hook(
+    chain_evidence_live_test_hook_fn fn)
+{
+    g_live_after_begin_hook = fn;
+}
+#endif
+
+static bool cec_persist_finalized_tip_evidence_locked(
     struct chain_evidence_controller *authority,
     const struct block_index *finalized_tip, int coins_height,
     const struct chain_evidence_record *forward)
@@ -280,6 +290,10 @@ static bool cec_persist_finalized_tip_evidence(
         txn = db_txn_begin(authority->ndb, "cec.record_finalized_tip");
 
     bool persisted = false;
+#ifdef ZCL_TESTING
+    if (g_live_after_begin_hook)
+        g_live_after_begin_hook();
+#endif
     if (outer_txn_present || txn) {
         persisted =
             chain_evidence_controller_mark_block_evidence(
@@ -309,6 +323,18 @@ static bool cec_persist_finalized_tip_evidence(
     if (persisted && txn)
         persisted = db_txn_commit(txn);
     return persisted;
+}
+
+static bool cec_persist_finalized_tip_evidence(
+    struct chain_evidence_controller *authority,
+    const struct block_index *finalized_tip, int coins_height,
+    const struct chain_evidence_record *forward)
+{
+    chain_evidence_write_lock();
+    bool ok = cec_persist_finalized_tip_evidence_locked(
+        authority, finalized_tip, coins_height, forward);
+    chain_evidence_write_unlock();
+    return ok;
 }
 
 /* Argument gate for chain_evidence_controller_record_finalized_tip: the
