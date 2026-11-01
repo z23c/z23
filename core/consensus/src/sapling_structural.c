@@ -33,6 +33,152 @@
         return ZCL_ERR((err_code), fmt __VA_OPT__(,) __VA_ARGS__);      \
     } while (0)
 
+/* ZCL_ERR for a null tx, null params, or a negative height; else ZCL_OK. */
+static struct zcl_result sapling_structural_check_caller_args(
+        const struct transaction *tx,
+        const struct consensus_params *params,
+        int n_height)
+{
+    if (!tx)
+        return ZCL_ERR(DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_NULL_TX,
+                       "check_transaction_sapling_structural: null tx");
+    if (!params)
+        return ZCL_ERR(DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_NULL_PARAMS,
+                       "check_transaction_sapling_structural: null params");
+    if (n_height < 0)
+        return ZCL_ERR(DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_NEG_HEIGHT,
+                       "check_transaction_sapling_structural: negative height %d",
+                       n_height);
+    return ZCL_OK;
+}
+
+/* ZCL_ERR when isSprout is true and tx->overwintered is set; else ZCL_OK. */
+static struct zcl_result sapling_structural_check_sprout_overwintered(
+        const struct transaction *tx,
+        int n_height,
+        int dos_level,
+        struct domain_consensus_sapling_structural_failure *out_failure,
+        bool isSprout)
+{
+    if (out_failure) {
+        out_failure->reject_reason = NULL;
+        out_failure->dos = 0;
+    }
+
+    if (isSprout && tx->overwintered)
+        DOMAIN_SAP_FAIL(out_failure,
+            DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_OVERWINTER_NOT_ACTIVE,
+            "tx-overwinter-not-active", dos_level,
+            "tx is overwintered but Overwinter not active at height %d",
+            n_height);
+    return ZCL_OK;
+}
+
+/* ZCL_ERR for a Sapling version, version-group, or overwintered-flag mismatch. */
+static struct zcl_result sapling_structural_check_sapling_versions(
+        const struct transaction *tx,
+        int dos_level,
+        struct domain_consensus_sapling_structural_failure *out_failure)
+{
+    if (out_failure) {
+        out_failure->reject_reason = NULL;
+        out_failure->dos = 0;
+    }
+
+    if (tx->version >= SAPLING_MIN_TX_VERSION && !tx->overwintered)
+        DOMAIN_SAP_FAIL(out_failure,
+            DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_SAPLING_OVERWINTERED_FLAG,
+            "tx-overwintered-flag-not-set", dos_level,
+            "Sapling-version tx (version=%d) missing overwintered flag",
+            (int)tx->version);
+
+    if (tx->overwintered &&
+        tx->version_group_id != SAPLING_VERSION_GROUP_ID)
+        DOMAIN_SAP_FAIL(out_failure,
+            DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_SAPLING_VERSION_GROUP_ID,
+            "bad-sapling-tx-version-group-id", dos_level,
+            "overwintered tx version_group_id 0x%08x != SAPLING(0x%08x)",
+            (unsigned)tx->version_group_id,
+            (unsigned)SAPLING_VERSION_GROUP_ID);
+
+    if (tx->overwintered && tx->version < SAPLING_MIN_TX_VERSION)
+        DOMAIN_SAP_FAIL(out_failure,
+            DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_SAPLING_VERSION_TOO_LOW,
+            "bad-tx-sapling-version-too-low", 100,
+            "overwintered tx version %d below SAPLING_MIN_TX_VERSION(%d)",
+            (int)tx->version, SAPLING_MIN_TX_VERSION);
+
+    if (tx->overwintered && tx->version > SAPLING_MAX_TX_VERSION)
+        DOMAIN_SAP_FAIL(out_failure,
+            DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_SAPLING_VERSION_TOO_HIGH,
+            "bad-tx-sapling-version-too-high", 100,
+            "overwintered tx version %d above SAPLING_MAX_TX_VERSION(%d)",
+            (int)tx->version, SAPLING_MAX_TX_VERSION);
+
+    return ZCL_OK;
+}
+
+/* ZCL_ERR for an Overwinter version, version-group, or overwintered-flag mismatch. */
+static struct zcl_result sapling_structural_check_overwinter_versions(
+        const struct transaction *tx,
+        int dos_level,
+        struct domain_consensus_sapling_structural_failure *out_failure)
+{
+    if (out_failure) {
+        out_failure->reject_reason = NULL;
+        out_failure->dos = 0;
+    }
+
+    if (tx->version >= OVERWINTER_MIN_TX_VERSION && !tx->overwintered)
+        DOMAIN_SAP_FAIL(out_failure,
+            DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_OVERWINTER_FLAG_NOT_SET,
+            "tx-overwinter-flag-not-set", dos_level,
+            "Overwinter-version tx (version=%d) missing overwintered flag",
+            (int)tx->version);
+
+    if (tx->overwintered &&
+        tx->version_group_id != OVERWINTER_VERSION_GROUP_ID)
+        DOMAIN_SAP_FAIL(out_failure,
+            DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_OVERWINTER_VERSION_GROUP_ID,
+            "bad-overwinter-tx-version-group-id", dos_level,
+            "overwintered tx version_group_id 0x%08x != OVERWINTER(0x%08x)",
+            (unsigned)tx->version_group_id,
+            (unsigned)OVERWINTER_VERSION_GROUP_ID);
+
+    if (tx->overwintered && tx->version > OVERWINTER_MAX_TX_VERSION)
+        DOMAIN_SAP_FAIL(out_failure,
+            DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_OVERWINTER_VERSION_TOO_HIGH,
+            "bad-tx-overwinter-version-too-high", 100,
+            "overwintered tx version %d above OVERWINTER_MAX_TX_VERSION(%d)",
+            (int)tx->version, OVERWINTER_MAX_TX_VERSION);
+
+    return ZCL_OK;
+}
+
+/* ZCL_ERR when saplingActive is false and serialized size exceeds the cap. */
+static struct zcl_result sapling_structural_check_presapling_size(
+        const struct transaction *tx,
+        struct domain_consensus_sapling_structural_failure *out_failure,
+        bool saplingActive)
+{
+    if (out_failure) {
+        out_failure->reject_reason = NULL;
+        out_failure->dos = 0;
+    }
+
+    if (!saplingActive) {
+        size_t tx_size = transaction_serialize_size(tx);
+        if (tx_size > MAX_TX_SIZE_BEFORE_SAPLING)
+            DOMAIN_SAP_FAIL(out_failure,
+                DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_OVERSIZE,
+                "bad-txns-oversize", 100,
+                "tx size %zu > MAX_TX_SIZE_BEFORE_SAPLING(%u)",
+                tx_size, (unsigned)MAX_TX_SIZE_BEFORE_SAPLING);
+    }
+
+    return ZCL_OK;
+}
+
 struct zcl_result domain_consensus_check_transaction_sapling_structural(
         const struct transaction *tx,
         const struct consensus_params *params,
@@ -45,16 +191,10 @@ struct zcl_result domain_consensus_check_transaction_sapling_structural(
         out_failure->dos = 0;
     }
 
-    if (!tx)
-        return ZCL_ERR(DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_NULL_TX,
-                       "check_transaction_sapling_structural: null tx");
-    if (!params)
-        return ZCL_ERR(DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_NULL_PARAMS,
-                       "check_transaction_sapling_structural: null params");
-    if (n_height < 0)
-        return ZCL_ERR(DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_NEG_HEIGHT,
-                       "check_transaction_sapling_structural: negative height %d",
-                       n_height);
+    struct zcl_result args = sapling_structural_check_caller_args(
+            tx, params, n_height);
+    if (!args.ok)
+        return args;
 
     bool overwinterActive = consensus_network_upgrade_active(
         params, n_height, UPGRADE_OVERWINTER);
@@ -63,66 +203,21 @@ struct zcl_result domain_consensus_check_transaction_sapling_structural(
     bool isSprout = !overwinterActive;
 
     /* ── Network upgrade version rules ──────────────────────── */
-    if (isSprout && tx->overwintered)
-        DOMAIN_SAP_FAIL(out_failure,
-            DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_OVERWINTER_NOT_ACTIVE,
-            "tx-overwinter-not-active", dos_level,
-            "tx is overwintered but Overwinter not active at height %d",
-            n_height);
+    struct zcl_result sprout = sapling_structural_check_sprout_overwintered(
+            tx, n_height, dos_level, out_failure, isSprout);
+    if (!sprout.ok)
+        return sprout;
 
     if (saplingActive) {
-        if (tx->version >= SAPLING_MIN_TX_VERSION && !tx->overwintered)
-            DOMAIN_SAP_FAIL(out_failure,
-                DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_SAPLING_OVERWINTERED_FLAG,
-                "tx-overwintered-flag-not-set", dos_level,
-                "Sapling-version tx (version=%d) missing overwintered flag",
-                (int)tx->version);
-
-        if (tx->overwintered &&
-            tx->version_group_id != SAPLING_VERSION_GROUP_ID)
-            DOMAIN_SAP_FAIL(out_failure,
-                DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_SAPLING_VERSION_GROUP_ID,
-                "bad-sapling-tx-version-group-id", dos_level,
-                "overwintered tx version_group_id 0x%08x != SAPLING(0x%08x)",
-                (unsigned)tx->version_group_id,
-                (unsigned)SAPLING_VERSION_GROUP_ID);
-
-        if (tx->overwintered && tx->version < SAPLING_MIN_TX_VERSION)
-            DOMAIN_SAP_FAIL(out_failure,
-                DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_SAPLING_VERSION_TOO_LOW,
-                "bad-tx-sapling-version-too-low", 100,
-                "overwintered tx version %d below SAPLING_MIN_TX_VERSION(%d)",
-                (int)tx->version, SAPLING_MIN_TX_VERSION);
-
-        if (tx->overwintered && tx->version > SAPLING_MAX_TX_VERSION)
-            DOMAIN_SAP_FAIL(out_failure,
-                DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_SAPLING_VERSION_TOO_HIGH,
-                "bad-tx-sapling-version-too-high", 100,
-                "overwintered tx version %d above SAPLING_MAX_TX_VERSION(%d)",
-                (int)tx->version, SAPLING_MAX_TX_VERSION);
+        struct zcl_result sap = sapling_structural_check_sapling_versions(
+                tx, dos_level, out_failure);
+        if (!sap.ok)
+            return sap;
     } else if (overwinterActive) {
-        if (tx->version >= OVERWINTER_MIN_TX_VERSION && !tx->overwintered)
-            DOMAIN_SAP_FAIL(out_failure,
-                DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_OVERWINTER_FLAG_NOT_SET,
-                "tx-overwinter-flag-not-set", dos_level,
-                "Overwinter-version tx (version=%d) missing overwintered flag",
-                (int)tx->version);
-
-        if (tx->overwintered &&
-            tx->version_group_id != OVERWINTER_VERSION_GROUP_ID)
-            DOMAIN_SAP_FAIL(out_failure,
-                DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_OVERWINTER_VERSION_GROUP_ID,
-                "bad-overwinter-tx-version-group-id", dos_level,
-                "overwintered tx version_group_id 0x%08x != OVERWINTER(0x%08x)",
-                (unsigned)tx->version_group_id,
-                (unsigned)OVERWINTER_VERSION_GROUP_ID);
-
-        if (tx->overwintered && tx->version > OVERWINTER_MAX_TX_VERSION)
-            DOMAIN_SAP_FAIL(out_failure,
-                DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_OVERWINTER_VERSION_TOO_HIGH,
-                "bad-tx-overwinter-version-too-high", 100,
-                "overwintered tx version %d above OVERWINTER_MAX_TX_VERSION(%d)",
-                (int)tx->version, OVERWINTER_MAX_TX_VERSION);
+        struct zcl_result ow = sapling_structural_check_overwinter_versions(
+                tx, dos_level, out_failure);
+        if (!ow.ok)
+            return ow;
     }
 
     /* ── Overwinter "must be overwintered" rule ───────────────
@@ -147,15 +242,6 @@ struct zcl_result domain_consensus_check_transaction_sapling_structural(
             n_height);
 
     /* ── Pre-Sapling serialized-size limit ──────────────────── */
-    if (!saplingActive) {
-        size_t tx_size = transaction_serialize_size(tx);
-        if (tx_size > MAX_TX_SIZE_BEFORE_SAPLING)
-            DOMAIN_SAP_FAIL(out_failure,
-                DOMAIN_CONSENSUS_SAPLING_STRUCTURAL_ERR_OVERSIZE,
-                "bad-txns-oversize", 100,
-                "tx size %zu > MAX_TX_SIZE_BEFORE_SAPLING(%u)",
-                tx_size, (unsigned)MAX_TX_SIZE_BEFORE_SAPLING);
-    }
-
-    return ZCL_OK;
+    return sapling_structural_check_presapling_size(
+            tx, out_failure, saplingActive);
 }
