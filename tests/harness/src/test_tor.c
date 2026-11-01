@@ -11,6 +11,7 @@
 #include "config/boot_internal.h"
 #include "platform/time_compat.h"
 #include "util/thread_registry.h"
+#include "util/signal_handler.h"
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <signal.h>
@@ -1127,6 +1128,121 @@ static int test_tor_write_torrc_disables_signal_handlers(void)
     return 1;
 }
 
+/* A failed torrc write must not leave a half-written torrc behind: a
+ * truncated file could omit __DisableSignalHandlers and still be read by Tor.
+ * /dev/full accepts the open and refuses the write, so the only way the
+ * writer can notice is by checking fflush/fclose; pointing the datadir at a
+ * path whose torrc cannot be created covers the open failure. */
+static int test_tor_write_torrc_reports_write_failure(void)
+{
+    printf("test_tor_write_torrc_reports_write_failure: ");
+
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "wfail");
+    char missing[600];
+    snprintf(missing, sizeof(missing), "%s/no_such_dir", tmpdir);
+    bool open_fail_reported = !tor_write_torrc(missing, 8033, false);
+
+    /* torrc as a symlink to /dev/full: open succeeds, every write fails. */
+    char torrc[600];
+    snprintf(torrc, sizeof(torrc), "%s/torrc", tmpdir);
+    bool linked = symlink("/dev/full", torrc) == 0;
+    bool write_fail_reported = linked && !tor_write_torrc(tmpdir, 8033, false);
+    bool partial_removed = linked && access(torrc, F_OK) != 0;
+
+    remove_tree(tmpdir);
+    if (open_fail_reported && write_fail_reported && partial_removed) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (open=%d linked=%d write=%d removed=%d)\n",
+           open_fail_reported, linked, write_fail_reported, partial_removed);
+    return 1;
+}
+
+static volatile sig_atomic_t g_node_term_seen;
+static void node_term_handler(int sig)
+{
+    (void)sig;
+    g_node_term_seen = 1;
+}
+
+/* Poll tor.log until Tor's main loop has run handle_signals(): the
+ * "Bootstrapped 0%" notice is logged right after it. */
+static bool wait_tor_main_loop(const char *datadir, int seconds)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/" TOR_LOG_BASENAME, datadir);
+    for (int i = 0; i < seconds * 10; i++) {
+        char buf[16384];
+        FILE *f = fopen(path, "r");
+        if (f) {
+            size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+            buf[n] = '\0';
+            fclose(f);
+            if (strstr(buf, "Bootstrapped 0%")) return true;
+        }
+        platform_sleep_ms(100); /* real-clock: waits on another thread's Tor init */
+    }
+    return false;
+}
+
+/* The real thing: start embedded Tor in this process with the torrc the node
+ * writes, install the node's termination handler, deliver SIGTERM, and
+ * require that the NODE's handler saw it and Tor did not take it and exit on
+ * its own. With Tor's signal handlers enabled, libevent replaces the node's
+ * SIGTERM disposition, Tor logs "Catching signal TERM" and its thread ends
+ * (tor_integration_is_enabled() drops to false) while the node never learns
+ * of the signal. Needs a binary that linked real Tor; Tor's bootstrap
+ * attempts to reach the network are irrelevant here and are cut off by
+ * tor_integration_stop(). */
+static int test_tor_leaves_sigterm_to_the_node(void)
+{
+    printf("test_tor_leaves_sigterm_to_the_node: ");
+    if (!app_tor_real_build_linked()) {
+        printf("OK (stub Tor linked: torrc content checked by the "
+               "disables_signal_handlers test)\n");
+        return 0;
+    }
+
+    tor_integration_stop();
+    char tmpdir[512];
+    test_make_tmpdir(tmpdir, sizeof(tmpdir), "torrc", "livesig");
+
+    struct sigaction old_term, old_int;
+    sigaction(SIGTERM, NULL, &old_term);
+    sigaction(SIGINT, NULL, &old_int);
+    g_node_term_seen = 0;
+
+    int fails = 0;
+    const char *why = "";
+    if (signal_handler_install_termination(node_term_handler) != 0) {
+        fails = 1; why = "install_termination";
+    } else if (!tor_integration_start(tmpdir, 39250)) {
+        fails = 1; why = "tor_integration_start";
+    } else if (!wait_tor_main_loop(tmpdir, 90)) {
+        fails = 1; why = "tor main loop never reached";
+    } else {
+        kill(getpid(), SIGTERM);
+        for (int i = 0; i < 30 && !g_node_term_seen; i++)
+            platform_sleep_ms(100); /* real-clock: signal delivery to this process */
+        platform_sleep_ms(1000); /* real-clock: give a rogue Tor handler time to end its thread */
+        if (!g_node_term_seen) { fails = 1; why = "node handler never saw SIGTERM"; }
+        else if (!tor_integration_is_enabled()) { fails = 1; why = "Tor exited on its own"; }
+    }
+
+    tor_integration_stop();
+    sigaction(SIGTERM, &old_term, NULL);
+    sigaction(SIGINT, &old_int, NULL);
+    remove_tree(tmpdir);
+    if (!fails) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (%s)\n", why);
+    return 1;
+}
+
 static int test_tor_write_torrc_reduced_padding(void)
 {
     int failures = 0;
@@ -1182,6 +1298,8 @@ int test_tor(void)
     failures += test_tor_write_torrc_bootstrap_port();
     failures += test_tor_write_torrc_reduced_padding();
     failures += test_tor_write_torrc_disables_signal_handlers();
+    failures += test_tor_write_torrc_reports_write_failure();
+    failures += test_tor_leaves_sigterm_to_the_node();
     failures += test_tor_write_torrc_no_collision();
     failures += test_tor_write_torrc_datadir();
     failures += test_tor_write_torrc_idempotent();

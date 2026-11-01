@@ -685,3 +685,7 @@ later lane flips it HARD.
 - 2026-11-01T21:03:12Z — REASON: embedded Tor must not take the node's SIGTERM;   __DisableSignalHandlers 1;   no consensus change
   old ROOT: 4c9ffca2861e0c4fc7affaf21a585b750a5ab3660843da2bfdf01a8babc8e658
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-01T21:03:22Z — REASON: tor_write_torrc: check every write and fclose, remove partial torrc on failure, so __DisableSignalHandlers 1 cannot be silently lost;   no consensus change
+  old ROOT: 6b33247d60b651efdd284dc98266a643eba9c91ac59ba678b8d23db9da1ee25a
+  by: owner unseal ritual (make core-unseal)

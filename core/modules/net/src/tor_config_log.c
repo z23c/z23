@@ -25,17 +25,16 @@ bool tor_write_torrc(const char *datadir, uint16_t p2p_port,
                     bool reduced_padding)
 {
     char torrc_path[1024];
-    snprintf(torrc_path, sizeof(torrc_path), "%s/torrc", datadir);
-
-    FILE *f = fopen(torrc_path, "w");
-    if (!f)
-        LOG_FAIL("tor", "failed to open torrc for writing: %s", torrc_path);
+    int pn = snprintf(torrc_path, sizeof(torrc_path), "%s/torrc", datadir);
+    if (pn < 0 || (size_t)pn >= sizeof(torrc_path))
+        LOG_FAIL("tor", "torrc path too long for datadir: %s", datadir);
 
     /* Localhost-only SocksPort — NOTHING connects to this. It exists only
      * because Tor will not bootstrap without a listener. Derivation keeps
      * isolated instances disjoint (8033→19999, 8035→20001). */
     uint16_t bootstrap_port = (uint16_t)(p2p_port + 11966);
-    fprintf(f,
+    char body[8192];
+    int bn = snprintf(body, sizeof(body),
         "SocksPort 127.0.0.1:%u\n"
         "DataDirectory %s/tor_data\n"
         "Log notice file %s/" TOR_LOG_BASENAME "\n"
@@ -44,12 +43,30 @@ bool tor_write_torrc(const char *datadir, uint16_t p2p_port,
          * Tor's libevent handlers swallow the node's shutdown signal, exit 0
          * on their own and the node never shuts down. Tor is ended by
          * tor_integration_stop(), not by a signal. */
-        "__DisableSignalHandlers 1\n",
-        bootstrap_port, datadir, datadir, datadir);
-    if (reduced_padding)
-        fprintf(f, "ReducedConnectionPadding 1\n");
+        "__DisableSignalHandlers 1\n"
+        "%s",
+        bootstrap_port, datadir, datadir, datadir,
+        reduced_padding ? "ReducedConnectionPadding 1\n" : "");
+    if (bn < 0 || (size_t)bn >= sizeof(body))
+        LOG_FAIL("tor", "torrc for %s does not fit its %zu-byte buffer",
+                 datadir, sizeof(body));
 
-    fclose(f);
+    FILE *f = fopen(torrc_path, "w");
+    if (!f)
+        LOG_FAIL("tor", "failed to open torrc for writing: %s", torrc_path);
+
+    /* A short or failed write would leave a torrc without
+     * __DisableSignalHandlers (or any later line) that Tor still parses:
+     * check the write, the flush and the close, and never leave the partial
+     * file behind. */
+    bool wrote = fwrite(body, 1, (size_t)bn, f) == (size_t)bn;
+    bool flushed = wrote && fflush(f) == 0 && !ferror(f);
+    bool closed = fclose(f) == 0;
+    if (!wrote || !flushed || !closed) {
+        remove(torrc_path);
+        LOG_FAIL("tor", "failed to write torrc %s (wrote=%d flushed=%d closed=%d)",
+                 torrc_path, wrote, flushed, closed);
+    }
     return true;
 }
 
