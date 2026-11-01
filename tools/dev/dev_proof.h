@@ -336,6 +336,8 @@ struct zcl_dev_proof_changed_set {
      * `fresh_path` is the first such row, `fresh_count` how many. */
     const char *fresh_path;
     size_t fresh_count;
+    /* Added capability sidecars of fresh rows (see dp_fresh_sidecar_admit). */
+    size_t fresh_sidecars;
 };
 
 #if defined(ZCL_TESTING)

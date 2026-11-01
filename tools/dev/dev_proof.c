@@ -1623,6 +1623,7 @@ void zcl_dev_proof_changed_set_release(struct zcl_dev_proof_changed_set *set)
     set->structural_status = 0;
     set->fresh_path = NULL;
     set->fresh_count = 0;
+    set->fresh_sidecars = 0;
 }
 
 /* Read a captured list whole. Refuses with the observed byte count rather than
@@ -2244,6 +2245,8 @@ static bool dp_split_name(const char *st, size_t n, const char **start,
     return dp_split_has_lower(*start, *end);
 }
 
+static bool dp_split_private_start(const char *st);
+
 /* The declarator of a '{' at file scope: name it, or fail closed. */
 static void dp_split_declarator(struct dp_split_parse *s)
 {
@@ -2582,12 +2585,114 @@ static bool dp_fresh_admit(const struct dp_split_ctx *c, const char **refs,
     return ok;
 }
 
+/* ---- Added capability sidecar of a fresh `.c` ----
+ *
+ * `<owner>.c.capabilities.def` is the source-owned spelling of rows in
+ * module_capabilities.def: the capability gates (lint, always run in full)
+ * read it, and the groups that consume capability declarations are the ones
+ * the shared rules map module_capabilities.def to. It is admitted only when
+ * its owner is an added row admitted as fresh, only changed rows name the
+ * owner's stem, and every line of it is blank, a comment, or a
+ * ZCL_MODULE_CAPABILITY row for the owner itself. Anything else stays
+ * structural. */
+#define DP_FRESH_SIDECAR ".capabilities.def"
+#define DP_FRESH_CAPS_PATH "engine/composition/module_capabilities.def"
+#define DP_FRESH_ROW_HEAD "ZCL_MODULE_CAPABILITY(\""
+
+static bool dp_fresh_is_sidecar(const char *path)
+{
+    size_t n = strlen(path), s = strlen(DP_FRESH_SIDECAR);
+    return n > s + 2 && strcmp(path + n - s, DP_FRESH_SIDECAR) == 0 &&
+           path[n - s - 1] == 'c' &&
+           path[n - s - 2] == '.';
+}
+
+/* Is every line of `side` blank, a comment, or a row for `owner`? */
+static bool dp_fresh_sidecar_lines(const char *side, const char *owner)
+{
+    char head[PATH_MAX + 64];
+    int hn = snprintf(head, sizeof(head), DP_FRESH_ROW_HEAD "%s\"", owner);
+    const char *cur = side, *l;
+    size_t n;
+    if (hn <= 0 || (size_t)hn >= sizeof(head)) return false;
+    while (dp_split_next(&cur, &l, &n)) {
+        if (n == 0 || dp_split_is_comment(l, n)) continue;
+        if (n < (size_t)hn || memcmp(l, head, (size_t)hn) != 0) return false;
+    }
+    return true;
+}
+
+static bool dp_fresh_sidecar_admit(const struct dp_split_ctx *c,
+                                   const char **refs, const char *status,
+                                   size_t count, size_t i)
+{
+    const char *added = refs[i];
+    size_t n = strlen(added) - strlen(DP_FRESH_SIDECAR);
+    char owner[PATH_MAX], stem[DP_SPLIT_LEAF_MAX + 1];
+    if (!dp_split_name_safe(added) || !dp_fresh_path_allowed(added) ||
+        n >= sizeof(owner))
+        return false;
+    memcpy(owner, added, n);
+    owner[n] = '\0';
+    bool paired = false;
+    for (size_t j = 0; j < count; j++)
+        paired = paired || (status[j] == 'F' && strcmp(refs[j], owner) == 0);
+    if (!paired || !dp_fresh_stem(owner, stem, sizeof(stem)) ||
+        !dp_fresh_named_only_by_changed(c, stem, refs, count))
+        return false;
+    char *diff = dp_split_diff(c, added);
+    char *side = diff ? dp_split_side(diff, '+') : NULL;
+    bool ok = side && dp_fresh_sidecar_lines(side, owner);
+    free(diff);
+    free(side);
+    return ok;
+}
+
+static void dp_set_drop_current(struct zcl_dev_proof_changed_set *set,
+                                const char *ref)
+{
+    for (size_t k = 0; k < set->current_count; k++)
+        if (set->current_files[k] == ref) {
+            memmove(&set->current_files[k], &set->current_files[k + 1],
+                    (set->current_count - k - 1) * sizeof(*ref));
+            set->current_count--;
+            return;
+        }
+}
+
+static void dp_set_add_structural(struct zcl_dev_proof_changed_set *set,
+                                  const char *ref)
+{
+    if (!set->structural_path) {
+        set->structural_path = ref;
+        set->structural_status = 'A';
+    }
+    set->structural_count++;
+}
+
+/* An added capability sidecar rides on its fresh owner (see
+ * dp_fresh_sidecar_admit): its consumers are the groups the shared rules map
+ * module_capabilities.def to, taken in dp_changed_set_widen. */
+static void dp_changed_set_sidecar_classify(
+    const struct dp_split_ctx *c, const char **refs, const char *status,
+    struct zcl_dev_proof_changed_set *set)
+{
+    size_t count = set->count;
+    for (size_t i = 0; i < count; i++) {
+        if (status[i] != 'A' || !dp_fresh_is_sidecar(refs[i])) continue;
+        if (dp_fresh_sidecar_admit(c, refs, status, count, i)) {
+            set->fresh_sidecars++;
+            dp_set_drop_current(set, refs[i]);
+        } else dp_set_add_structural(set, refs[i]);
+    }
+}
+
 /* Settle every deferred added `.c` row: admitted ones are counted as splits
  * and leave the closure input (the sibling carries their impact); a fresh one
  * is counted and stays in it; the rest become structural exactly as an added
- * path always was. */
+ * path always was. Then settle the capability sidecars. */
 static void dp_changed_set_split_classify(
-    const struct dp_split_ctx *c, const char **refs, const char *status,
+    const struct dp_split_ctx *c, const char **refs, char *status,
     struct zcl_dev_proof_changed_set *set)
 {
     size_t candidates = 0, count = set->count;
@@ -2597,27 +2702,15 @@ static void dp_changed_set_split_classify(
             dp_split_admit(c, refs, status, count, i)) {
             if (!set->split_path) set->split_path = refs[i];
             set->split_count++;
-            for (size_t k = 0; k < set->current_count; k++)
-                if (set->current_files[k] == refs[i]) {
-                    memmove(&set->current_files[k], &set->current_files[k + 1],
-                            (set->current_count - k - 1) * sizeof(*refs));
-                    set->current_count--;
-                    break;
-                }
-            continue;
-        }
-        if (candidates <= DP_SPLIT_CANDIDATES_MAX &&
-            dp_fresh_admit(c, refs, count, i)) {
+            dp_set_drop_current(set, refs[i]);
+        } else if (candidates <= DP_SPLIT_CANDIDATES_MAX &&
+                   dp_fresh_admit(c, refs, count, i)) {
             if (!set->fresh_path) set->fresh_path = refs[i];
             set->fresh_count++;
-            continue;
-        }
-        if (!set->structural_path) {
-            set->structural_path = refs[i];
-            set->structural_status = 'A';
-        }
-        set->structural_count++;
+            status[i] = 'F';
+        } else dp_set_add_structural(set, refs[i]);
     }
+    dp_changed_set_sidecar_classify(c, refs, status, set);
 }
 
 /* Mark a structural row. With `kinds` the caller settles an added `.c`
@@ -2626,7 +2719,8 @@ static void dp_changed_set_split_classify(
 static void dp_changed_set_mark_row(struct zcl_dev_proof_changed_set *mark,
                                     const char *path, char status, bool kinds)
 {
-    bool deferred = kinds && status == 'A' && dp_split_is_c(path);
+    bool deferred = kinds && status == 'A' &&
+                    (dp_split_is_c(path) || dp_fresh_is_sidecar(path));
     if (!dp_changed_set_structural_change(status) || deferred) return;
     if (!mark->structural_path) {
         mark->structural_path = path;
@@ -8378,6 +8472,8 @@ static bool dp_changed_set_widen(const struct zcl_dev_proof_changed_set *set,
          * are not changed rows, through the shared rules. */
         zcl_devloop_plan_take_rule_path(plan, DP_FRESH_UNIVERSE_PATH);
         zcl_devloop_plan_take_rule_path(plan, DP_FRESH_REGISTRY_PATH);
+        if (set->fresh_sidecars > 0)
+            zcl_devloop_plan_take_rule_path(plan, DP_FRESH_CAPS_PATH);
     }
     if (!set || !set->structural_path) return false;
     plan->closure_universal = true;

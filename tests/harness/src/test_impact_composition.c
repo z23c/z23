@@ -6975,6 +6975,39 @@ static bool ic_fresh_edit_object(void)
                         "    return x + fresh_global;\n}\n");
 }
 
+static bool ic_fresh_sidecar(const char *owner, const char *row_owner)
+{
+    char path[160], body[512];
+    return snprintf(path, sizeof(path), "%s.capabilities.def", owner) <
+               (int)sizeof(path) &&
+           snprintf(body, sizeof(body), "/* sidecar */\n"
+                    "ZCL_MODULE_CAPABILITY(\"%s\", CAP_FS_READ, \"reads\")\n",
+                    row_owner) < (int)sizeof(body) &&
+           ic_split_w(path, body);
+}
+
+static bool ic_fresh_edit_sidecar(void)
+{
+    return ic_fresh_edit_fresh() &&
+           ic_fresh_sidecar("tools/command/native_devagent_situation.c",
+                            "tools/command/native_devagent_situation.c");
+}
+
+/* A row that declares a capability for some other file is not its own. */
+static bool ic_fresh_edit_sidecar_row(void)
+{
+    return ic_fresh_edit_fresh() &&
+           ic_fresh_sidecar("tools/command/native_devagent_situation.c",
+                            "tools/command/native_devagent_start.c");
+}
+
+/* A sidecar whose owner is not in the change has nothing fresh to ride on. */
+static bool ic_fresh_edit_sidecar_orphan(void)
+{
+    return ic_fresh_sidecar("tools/command/native_devagent_start.c",
+                            "tools/command/native_devagent_start.c");
+}
+
 static bool ic_fresh_edit_core(void)
 {
     return ic_fresh_add("core/b/fresh_core.c", IC_FRESH_BODY("core"));
@@ -7022,6 +7055,9 @@ static bool ic_fresh_fixture_build(void)
         {"freshbasename", ic_fresh_edit_basename},
         {"freshhook", ic_fresh_edit_hook},
         {"freshcore", ic_fresh_edit_core},
+        {"freshsidecar", ic_fresh_edit_sidecar},
+        {"freshsidecarrow", ic_fresh_edit_sidecar_row},
+        {"freshsidecarorphan", ic_fresh_edit_sidecar_orphan},
         {"freshobject", ic_fresh_edit_object},
         {"freshheader", ic_fresh_edit_header},
         {"freshdeleted", ic_fresh_edit_deleted},
@@ -7039,15 +7075,19 @@ struct ic_fresh_case {
     const char *name;
     char kind;                /* 0: exact; else the first structural kind */
     const char *group;        /* a group the exact selection must hold */
+    const char *group2;       /* and a second one, or NULL */
 };
 
 static const struct ic_fresh_case ic_fresh_cases[] = {
     {"fresh", 0, "devagent_situation"},   /* new impl, its rule's group */
     {"freshtest", 0, "devagent_start"},   /* new test file, its own group */
+    {"freshsidecar", 0, "devagent_situation", "package_capability_claim"},
     {"freshmention", 'A', NULL},   /* an unchanged file names the stem */
     {"freshbasename", 'A', NULL},  /* defines a name the base tree holds */
     {"freshhook", 'A', NULL},      /* a constructor registers it unseen */
     {"freshcore", 'A', NULL},      /* under core/ */
+    {"freshsidecarrow", 'A', NULL},  /* a row for another file */
+    {"freshsidecarorphan", 'A', NULL}, /* a sidecar with no fresh owner */
     {"freshobject", 'A', NULL},    /* a public file-scope object */
     {"freshheader", 'A', NULL},    /* an added header beside it */
     {"freshdeleted", 'D', NULL},   /* a deletion beside it */
@@ -7117,6 +7157,7 @@ static int test_ic_changed_set_fresh_source_closure(void)
                 ASSERT(strcmp(reason, "fresh-source-closure") == 0);
                 ASSERT((size_t)selected < zcl_test_group_catalog_count());
                 ASSERT(c->group && strstr(selector, c->group));
+                ASSERT(!c->group2 || strstr(selector, c->group2));
                 /* The source-universe walkers and the registry's own
                  * checks see a new source file though no row names them. */
                 ASSERT(strstr(selector, "code_inventory"));
