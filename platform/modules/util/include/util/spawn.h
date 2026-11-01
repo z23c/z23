@@ -150,6 +150,18 @@ struct zcl_result zcl_spawn_capture_binary_merged(
     const char *const argv[], void *buf, size_t cap, int timeout_ms,
     struct zcl_spawn_binary_observation *out);
 
+/* The same merged capture, but with no deadline: the child's own exit (and
+ * the EOF that follows it) is the event waited on. For a child whose runtime
+ * is set by host load and cannot be guessed (a full node boot refusing a bind
+ * took 5 s idle and 45 s at load 100+), where any fixed kill time either
+ * truncates a healthy child or waits too long on a wedged one. The caller
+ * must run under an outer bound that is not a guess about this child, such as
+ * the test runner's per-group watchdog, which kills the group and reports it
+ * WEDGED. The success/observation contract is otherwise identical. */
+struct zcl_result zcl_spawn_capture_binary_merged_until_exit(
+    const char *const argv[], void *buf, size_t cap,
+    struct zcl_spawn_binary_observation *out);
+
 /* The same bounded capture with the deadline outcome preserved separately
  * from the child's status. `timed_out` is always initialized when non-NULL
  * and is true only when this function killed the process group because the

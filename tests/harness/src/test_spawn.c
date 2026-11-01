@@ -599,6 +599,28 @@ static int test_spawn_binary_empty(void)
     return failures;
 }
 
+static int test_spawn_binary_until_exit_outlives_any_deadline(void)
+{
+    int failures = 0;
+    TEST("spawn: until-exit capture waits for the child's exit where a short deadline kills it") {
+        const char *argv[] = { "/bin/sh", "-c",
+            "sleep 2; echo late; echo err >&2; exit 7", NULL };
+        char bounded[64] = {0}, waited[64] = {0};
+        struct zcl_spawn_binary_observation cut = {0}, done = {0};
+        (void)zcl_spawn_capture_binary_merged(argv, bounded, sizeof(bounded) - 1,
+                                              500, &cut);
+        ASSERT(cut.timed_out && !cut.eof);
+        struct zcl_result r = zcl_spawn_capture_binary_merged_until_exit(
+            argv, waited, sizeof(waited) - 1, &done);
+        ASSERT(!r.ok);
+        ASSERT(done.exit_observed && done.exit_code == 7 && done.eof);
+        ASSERT(!done.timed_out && !done.overflow);
+        ASSERT(strstr(waited, "late") && strstr(waited, "err"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int spawn_binary_closed_child(unsigned mask)
 {
     for (unsigned fd = 0; fd < 3; ++fd)
@@ -657,6 +679,7 @@ static int test_spawn_platform_arm(void)
     failures += test_spawn_binary_refusals();
     failures += test_spawn_binary_unknown_exit();
     failures += test_spawn_binary_empty();
+    failures += test_spawn_binary_until_exit_outlives_any_deadline();
     failures += test_spawn_binary_closed_stdio();
     failures += test_spawn_capture_in_dir();
     failures += test_spawn_capture_in_dir_fails_closed();
