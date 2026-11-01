@@ -1817,6 +1817,113 @@ static bool vk_read_g2_libsnark(struct bn_g2 *pt, const uint8_t *data,
     return true;
 }
 
+/* Read the seven fixed VK curve points and the accumulation vector's first G1.
+ * Returns 0 on success and -1 on failure. */
+static int vk_read_libsnark_header(struct bn_g2 *alpha_a_g2,
+                                   struct bn_g1 *alpha_b_g1,
+                                   struct bn_g2 *alpha_c_g2,
+                                   struct bn_g2 *gamma_g2,
+                                   struct bn_g1 *gamma_beta_g1,
+                                   struct bn_g2 *gamma_beta_g2,
+                                   struct bn_g2 *rc_z_g2,
+                                   struct bn_g1 *first,
+                                   const uint8_t *data, size_t len,
+                                   size_t *off)
+{
+    memset(alpha_a_g2, 0, sizeof(*alpha_a_g2));
+    memset(alpha_b_g1, 0, sizeof(*alpha_b_g1));
+    memset(alpha_c_g2, 0, sizeof(*alpha_c_g2));
+    memset(gamma_g2, 0, sizeof(*gamma_g2));
+    memset(gamma_beta_g1, 0, sizeof(*gamma_beta_g1));
+    memset(gamma_beta_g2, 0, sizeof(*gamma_beta_g2));
+    memset(rc_z_g2, 0, sizeof(*rc_z_g2));
+    memset(first, 0, sizeof(*first));
+
+    /* 7 VK fields — no separators (BINARY_OUTPUT) */
+    if (!vk_read_g2_libsnark(alpha_a_g2, data, len, off)) return -1;
+    if (!vk_read_g1_libsnark(alpha_b_g1, data, len, off)) return -1;
+    if (!vk_read_g2_libsnark(alpha_c_g2, data, len, off)) return -1;
+    if (!vk_read_g2_libsnark(gamma_g2, data, len, off)) return -1;
+    if (!vk_read_g1_libsnark(gamma_beta_g1, data, len, off)) return -1;
+    if (!vk_read_g2_libsnark(gamma_beta_g2, data, len, off)) return -1;
+    if (!vk_read_g2_libsnark(rc_z_g2, data, len, off)) return -1;
+
+    /* accumulation_vector<G1>: first(G1) + rest(sparse_vector) */
+    if (!vk_read_g1_libsnark(first, data, len, off)) return -1;
+    return 0;
+}
+
+/* Read domain_size, the index count, and the index list.
+ * Returns 0 on success and -1 on failure. On failure *indices_out is NULL. */
+static int vk_read_sparse_vector_indices(uint64_t *domain_size,
+                                         uint64_t *idx_count,
+                                         uint64_t **indices_out,
+                                         const uint8_t *data, size_t len,
+                                         size_t *off)
+{
+    *domain_size = 0;
+    *idx_count = 0;
+    *indices_out = NULL;
+
+    if (!vk_read_text_int(domain_size, data, len, off)) return -1;
+    if (!vk_read_text_int(idx_count, data, len, off)) return -1;
+    if (*idx_count > 1000 || *idx_count > *domain_size) return -1;
+
+    uint64_t *indices = zcl_calloc(*idx_count, sizeof(uint64_t), "phgr_vk_indices");
+    if (!indices && *idx_count > 0) return -1;
+    for (uint64_t i = 0; i < *idx_count; i++) {
+        if (!vk_read_text_int(&indices[i], data, len, off)) {
+            free(indices); return -1;
+        }
+    }
+    *indices_out = indices;
+    return 0;
+}
+
+/* Read values_count, set ic[0] to first, and place each G1 at ic[index + 1].
+ * Frees indices. Returns 0 on success and -1 on failure. */
+static int vk_read_sparse_vector_values(struct bn_g1 **ic_out,
+                                        size_t *ic_len_out,
+                                        const struct bn_g1 *first,
+                                        uint64_t *indices,
+                                        uint64_t domain_size,
+                                        uint64_t idx_count,
+                                        const uint8_t *data, size_t len,
+                                        size_t *off)
+{
+    *ic_out = NULL;
+    *ic_len_out = 0;
+
+    /* values_count (same as idx_count for a well-formed sparse_vector) */
+    uint64_t val_count;
+    if (!vk_read_text_int(&val_count, data, len, off)) {
+        free(indices); return -1;
+    }
+    if (val_count != idx_count) { free(indices); return -1; }
+
+    /* Allocate IC: first + domain_size entries */
+    uint32_t ic_len = (uint32_t)(domain_size + 1);
+    *ic_out = zcl_calloc(ic_len, sizeof(struct bn_g1), "phgr_vk_ic");
+    if (!*ic_out) { free(indices); return -1; }
+    *ic_len_out = ic_len;
+    struct bn_g1 *ic = *ic_out;
+    ic[0] = *first;
+
+    /* Read G1 values in order, placed at indices[i]+1 in ic[] */
+    for (uint64_t i = 0; i < val_count; i++) {
+        uint64_t idx = indices[i];
+        if (idx + 1 >= ic_len) {
+            free(indices); free(ic); *ic_out = NULL; return -1;
+        }
+        if (!vk_read_g1_libsnark(&ic[idx + 1], data, len, off)) {
+            free(indices); free(ic); *ic_out = NULL; return -1;
+        }
+    }
+
+    free(indices);
+    return 0;
+}
+
 /* Parse sprout-verifying.key in libsnark BINARY_OUTPUT + NO_PT_COMPRESSION format.
  *
  * The zcash fork of libsnark uses -DBINARY_OUTPUT -DNO_PT_COMPRESSION:
@@ -1841,60 +1948,27 @@ bool ppzksnark_vk_read(struct ppzksnark_vk *vk, const uint8_t *data, size_t len)
     memset(vk, 0, sizeof(*vk));
     size_t off = 0;
 
-    /* 7 VK fields — no separators (BINARY_OUTPUT) */
-    if (!vk_read_g2_libsnark(&vk->alpha_a_g2, data, len, &off)) return false;
-    if (!vk_read_g1_libsnark(&vk->alpha_b_g1, data, len, &off)) return false;
-    if (!vk_read_g2_libsnark(&vk->alpha_c_g2, data, len, &off)) return false;
-    if (!vk_read_g2_libsnark(&vk->gamma_g2, data, len, &off)) return false;
-    if (!vk_read_g1_libsnark(&vk->gamma_beta_g1, data, len, &off)) return false;
-    if (!vk_read_g2_libsnark(&vk->gamma_beta_g2, data, len, &off)) return false;
-    if (!vk_read_g2_libsnark(&vk->rc_z_g2, data, len, &off)) return false;
-
-    /* accumulation_vector<G1>: first(G1) + rest(sparse_vector) */
     struct bn_g1 first;
-    if (!vk_read_g1_libsnark(&first, data, len, &off)) return false;
+    if (vk_read_libsnark_header(&vk->alpha_a_g2, &vk->alpha_b_g1,
+                                &vk->alpha_c_g2, &vk->gamma_g2,
+                                &vk->gamma_beta_g1, &vk->gamma_beta_g2,
+                                &vk->rc_z_g2, &first,
+                                data, len, &off) != 0)
+        return false;
 
     /* sparse_vector text fields: domain_size, indices_count, indices[],
      * values_count, then binary G1 values. */
-    uint64_t domain_size, idx_count;
-    if (!vk_read_text_int(&domain_size, data, len, &off)) return false;
-    if (!vk_read_text_int(&idx_count, data, len, &off)) return false;
-    if (idx_count > 1000 || idx_count > domain_size) return false;
+    uint64_t domain_size = 0;
+    uint64_t idx_count = 0;
+    uint64_t *indices = NULL;
+    if (vk_read_sparse_vector_indices(&domain_size, &idx_count, &indices,
+                                      data, len, &off) != 0)
+        return false;
 
-    uint64_t *indices = zcl_calloc(idx_count, sizeof(uint64_t), "phgr_vk_indices");
-    if (!indices && idx_count > 0) return false;
-    for (uint64_t i = 0; i < idx_count; i++) {
-        if (!vk_read_text_int(&indices[i], data, len, &off)) {
-            free(indices); return false;
-        }
-    }
+    if (vk_read_sparse_vector_values(&vk->ic, &vk->ic_len, &first, indices,
+                                     domain_size, idx_count, data, len, &off) != 0)
+        return false;
 
-    /* values_count (same as idx_count for a well-formed sparse_vector) */
-    uint64_t val_count;
-    if (!vk_read_text_int(&val_count, data, len, &off)) {
-        free(indices); return false;
-    }
-    if (val_count != idx_count) { free(indices); return false; }
-
-    /* Allocate IC: first + domain_size entries */
-    uint32_t ic_len = (uint32_t)(domain_size + 1);
-    vk->ic = zcl_calloc(ic_len, sizeof(struct bn_g1), "phgr_vk_ic");
-    if (!vk->ic) { free(indices); return false; }
-    vk->ic_len = ic_len;
-    vk->ic[0] = first;
-
-    /* Read G1 values in order, placed at indices[i]+1 in ic[] */
-    for (uint64_t i = 0; i < val_count; i++) {
-        uint64_t idx = indices[i];
-        if (idx + 1 >= ic_len) {
-            free(indices); free(vk->ic); vk->ic = NULL; return false;
-        }
-        if (!vk_read_g1_libsnark(&vk->ic[idx + 1], data, len, &off)) {
-            free(indices); free(vk->ic); vk->ic = NULL; return false;
-        }
-    }
-
-    free(indices);
     return true;
 }
 
