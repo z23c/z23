@@ -1044,7 +1044,7 @@ static pid_t wtx_post_later(const char *name, int delay_ms, int post_fd,
 {
     pid_t pid = fork();
     if (pid == 0) {
-        long long posted_ms;
+        long long posted[2];
         char b;
         (void)close(claim_wr);
         /* EOF without a byte: the drive ended with no empty claim. */
@@ -1052,9 +1052,13 @@ static pid_t wtx_post_later(const char *name, int delay_ms, int post_fd,
             _exit(0);
         (void)close(claim_rd);
         platform_sleep_ms(delay_ms);
+        /* [0] before the post: no claim can precede it, so a wake measured
+         * from it is never negative. [1] after it returns: the drive-return
+         * bound keeps measuring from there. */
+        posted[0] = (long long)platform_time_monotonic_ms();
         wtx_queue_post(name);
-        posted_ms = (long long)platform_time_monotonic_ms();
-         TEST_DISCARD(write(post_fd, &posted_ms, sizeof(posted_ms)));
+        posted[1] = (long long)platform_time_monotonic_ms();
+        TEST_DISCARD(write(post_fd, posted, sizeof(posted)));
         (void)close(post_fd);
         _exit(0);
     }
@@ -1106,13 +1110,15 @@ static long long wtx_drive_late_post(struct wkr_drive_opts *o,
     if (g_wtx_claim_fd >= 0)
         (void)close(g_wtx_claim_fd);
     g_wtx_claim_fd = -1;
-    if (read(post_pipe[0], &posted_ms, sizeof(posted_ms)) !=
-        (ssize_t)sizeof(posted_ms))
+    long long posted[2] = {-1, -1};
+    if (read(post_pipe[0], posted, sizeof(posted)) != (ssize_t)sizeof(posted))
         jobs = -1;
+    posted_ms = posted[1];
     (void)close(post_pipe[0]);
     *after_post_ms = done_ms - posted_ms;
     *after_start_ms = done_ms - start_ms;
-    g_wtx_wake_ms = wtx_stamp_read() >= 0 ? wtx_stamp_read() - posted_ms : (1LL << 40);
+    long long exec_ms = wtx_stamp_read();
+    g_wtx_wake_ms = exec_ms >= 0 ? exec_ms - posted[0] : (1LL << 40);
     (void)waitpid(pid, &st, 0);
     return jobs;
 }
@@ -2215,7 +2221,7 @@ int test_devagent_worker(void)
                      "(drive return %lld ms)\n",
                      g_wtx_wake_ms, after_post_ms);
         ASSERT(after_post_ms >= 0);
-        ASSERT(g_wtx_wake_ms > -1000);
+        ASSERT(g_wtx_wake_ms >= 0);
         ASSERT(g_wtx_wake_ms < 3000);
         /* The whole drive keeps its own bound: when it trips, the line above
          * shows whether the wake or the claim-fork-run after it was slow. */
