@@ -202,6 +202,161 @@ struct block_index *add_to_block_index(struct main_state *ms,
     return pindex;
 }
 
+/* True when an already-known index entry's parent link or height no
+ * longer matches its delivered parent. */
+static bool block_index_needs_relink(const struct block_index *pindex,
+                                     const struct block_index *header_prev)
+{
+    return pindex->pprev != header_prev ||
+           pindex->nHeight != header_prev->nHeight + 1;
+}
+
+/* Re-derives each stacked node's height and chain work from its parent. */
+static void block_index_propagate_heights_down(struct block_index **stack,
+                                               int depth)
+{
+    for (int i = depth - 1; i >= 0; i--) {
+        struct block_index *fix = stack[i];
+        if (fix->pprev) {
+            fix->nHeight = fix->pprev->nHeight + 1;
+            struct arith_uint256 proof = GetBlockProof(fix);
+            arith_uint256_add(&fix->nChainWork,
+                              &fix->pprev->nChainWork, &proof);
+        }
+    }
+}
+
+/* Fix scrambled heights from LDB import.  After snapshot sync,
+ * block_map entries above the coins tip may have nHeight=0 or
+ * wrong values because the flat-file/LDB import didn't walk
+ * pprev chains for blocks it couldn't fully validate.  Walk UP
+ * the pprev chain to find the first correct ancestor, then
+ * propagate heights DOWN — same algorithm as boot_index.c.
+ * Without this, the getheaders loop stalls forever because
+ * pindex_best_header never advances past the wrong height. */
+static void block_index_repair_scrambled_heights(struct block_index *start)
+{
+    if (!(start && start->pprev &&
+          start->nHeight != start->pprev->nHeight + 1))
+        return;
+    /* Walk up to find first correct ancestor */
+    struct block_index *stack[2048];
+    int depth = 0;
+    struct block_index *cur = start;
+    /* monotonicity guard (see same site at L1575). */
+    /* monotonicity guard. A corrupt pprev cycle
+     * would otherwise hold this thread until depth==2048, but
+     * also poison every block we push on the stack. Bail clean. */
+    while (cur->pprev &&
+           cur->pprev->nHeight < cur->nHeight &&
+           cur->nHeight != cur->pprev->nHeight + 1 &&
+           depth < 2048) {
+        stack[depth++] = cur;
+        cur = cur->pprev;
+    }
+    /* Fix cur if needed */
+    if (cur->pprev && cur->nHeight != cur->pprev->nHeight + 1) {
+        cur->nHeight = cur->pprev->nHeight + 1;
+        struct arith_uint256 proof = GetBlockProof(cur);
+        arith_uint256_add(&cur->nChainWork,
+                          &cur->pprev->nChainWork, &proof);
+    }
+    /* Propagate down the stack */
+    block_index_propagate_heights_down(stack, depth);
+}
+
+/* Repairs height scrambles and stale status bits on the index entry
+ * of a re-delivered, already-known header. */
+static void accept_block_header_repair_known_index(struct block_index *pindex)
+{
+    block_index_repair_scrambled_heights(pindex);
+    if ((pindex->nStatus & BLOCK_FAILED_MASK) == BLOCK_FAILED_CHILD)
+        pindex->nStatus &= ~BLOCK_FAILED_CHILD;
+    /* Re-arriving headers must promote nStatus from
+     * BLOCK_VALID_HEADER to BLOCK_VALID_TREE. Without this, blocks
+     * stored to block_map by body-pull / direct-import (which
+     * leave status at BLOCK_VALID_HEADER + BLOCK_HAVE_DATA) stay
+     * invisible to find_most_work_chain forever — that filter
+     * requires VALID_TREE. The new-pindex path below does this
+     * promotion correctly; the existing-pindex path was silently
+     * skipping it, leaving the node wedged with on-disk bodies the
+     * chain refuses to connect. pprev_valid here means we've
+     * already gone through the "Fix scrambled heights" pass above,
+     * so ancestry is linked. */
+    if ((pindex->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE &&
+        !(pindex->nStatus & BLOCK_FAILED_MASK)) {
+        pindex->nStatus = (pindex->nStatus & ~BLOCK_VALID_MASK) |
+                          BLOCK_VALID_TREE;
+    }
+}
+
+/* Resolves the parent index for a not-yet-known header; *ok is false
+ * only when state was already populated with the rejection. */
+static struct block_index *accept_block_header_find_prev(
+        struct main_state *ms,
+        const struct chain_params *params,
+        const struct block_header *header,
+        const struct uint256 *hash,
+        struct validation_state *state,
+        bool *ok)
+{
+    *ok = true;
+    if (uint256_cmp(hash, &params->consensus.hashGenesisBlock) == 0)
+        return NULL;
+    struct block_index *pindex_prev = block_map_find(&ms->map_block_index,
+                                                     &header->hashPrevBlock);
+    if (!pindex_prev) {
+        /* Parent not in our block index — this is an orphan block.
+         * Normal during sync (blocks arrive before headers).
+         * DoS=0: don't penalize the peer for out-of-order delivery. */
+        *ok = validation_state_invalid(state, false, 0,
+                                       "bad-prevblk", NULL);
+        return NULL;
+    }
+    if (pindex_prev->nStatus & BLOCK_FAILED_MASK) {
+        /* Don't ban peer — parent may have been marked failed by a
+         * prior validation bug (e.g. turnstile false positive).
+         * The block is invalid from our perspective, but the peer
+         * isn't misbehaving. DoS=0 rejects without penalty. */
+        *ok = validation_state_invalid(state, false, REJECT_INVALID,
+                                       "bad-prevblk", NULL);
+        return NULL;
+    }
+    return pindex_prev;
+}
+
+/* Runs the contextual header check unless it must be skipped; the
+ * return value is the check's own result (true when skipped or OK). */
+static bool accept_block_header_contextual_check_ok(
+        const struct block_header *header,
+        struct validation_state *state,
+        const struct chain_params *params,
+        struct main_state *ms,
+        struct block_index *pindex_prev)
+{
+    if (!pindex_prev)
+        return true;
+    if (process_block_should_skip_contextual_header(ms, pindex_prev,
+                                                    &params->consensus))
+        return true;
+    return contextual_check_block_header(header, state, params, pindex_prev,
+                                         ms->fCheckpointsEnabled);
+}
+
+/* Promotes a freshly added index entry to BLOCK_VALID_TREE and
+ * reports it to the caller. */
+static void accept_block_header_finish_new_index(
+        struct block_index *pindex,
+        struct block_index **ppindex)
+{
+    if ((pindex->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE)
+        pindex->nStatus = (pindex->nStatus & ~BLOCK_VALID_MASK) |
+                           BLOCK_VALID_TREE;
+
+    if (ppindex)
+        *ppindex = pindex;
+}
+
 bool accept_block_header(const struct block_header *header,
                          struct validation_state *state,
                          struct main_state *ms,
@@ -233,8 +388,7 @@ bool accept_block_header(const struct block_header *header,
              * the wrong blocks. The hash-linked derive-walk below is the
              * only height repair. */
             int expected_height = header_prev->nHeight + 1;
-            if (pindex->pprev != header_prev ||
-                pindex->nHeight != expected_height) {
+            if (block_index_needs_relink(pindex, header_prev)) {
                 if (pindex->nHeight != expected_height)
                     LOG_WARN("validation",
                              "accept_block_header: relink h=%d->%d "
@@ -248,90 +402,16 @@ bool accept_block_header(const struct block_header *header,
                                   &header_prev->nChainWork, &proof);
             }
         }
-        /* Fix scrambled heights from LDB import.  After snapshot sync,
-         * block_map entries above the coins tip may have nHeight=0 or
-         * wrong values because the flat-file/LDB import didn't walk
-         * pprev chains for blocks it couldn't fully validate.  Walk UP
-         * the pprev chain to find the first correct ancestor, then
-         * propagate heights DOWN — same algorithm as boot_index.c.
-         * Without this, the getheaders loop stalls forever because
-         * pindex_best_header never advances past the wrong height. */
-        if (pindex->pprev &&
-            pindex->nHeight != pindex->pprev->nHeight + 1) {
-            /* Walk up to find first correct ancestor */
-            struct block_index *stack[2048];
-            int depth = 0;
-            struct block_index *cur = pindex;
-            /* monotonicity guard. A corrupt pprev cycle
-             * would otherwise hold this thread until depth==2048, but
-             * also poison every block we push on the stack. Bail clean. */
-            while (cur->pprev &&
-                   cur->pprev->nHeight < cur->nHeight &&
-                   cur->nHeight != cur->pprev->nHeight + 1 &&
-                   depth < 2048) {
-                stack[depth++] = cur;
-                cur = cur->pprev;
-            }
-            /* Fix cur if needed */
-            if (cur->pprev && cur->nHeight != cur->pprev->nHeight + 1) {
-                cur->nHeight = cur->pprev->nHeight + 1;
-                struct arith_uint256 proof = GetBlockProof(cur);
-                arith_uint256_add(&cur->nChainWork,
-                                  &cur->pprev->nChainWork, &proof);
-            }
-            /* Propagate down the stack */
-            for (int i = depth - 1; i >= 0; i--) {
-                struct block_index *fix = stack[i];
-                if (fix->pprev) {
-                    fix->nHeight = fix->pprev->nHeight + 1;
-                    struct arith_uint256 proof = GetBlockProof(fix);
-                    arith_uint256_add(&fix->nChainWork,
-                                      &fix->pprev->nChainWork, &proof);
-                }
-            }
-        }
-        if ((pindex->nStatus & BLOCK_FAILED_MASK) == BLOCK_FAILED_CHILD)
-            pindex->nStatus &= ~BLOCK_FAILED_CHILD;
-        /* Re-arriving headers must promote nStatus from
-         * BLOCK_VALID_HEADER to BLOCK_VALID_TREE. Without this, blocks
-         * stored to block_map by body-pull / direct-import (which
-         * leave status at BLOCK_VALID_HEADER + BLOCK_HAVE_DATA) stay
-         * invisible to find_most_work_chain forever — that filter
-         * requires VALID_TREE. The new-pindex path below does this
-         * promotion correctly; the existing-pindex path was silently
-         * skipping it, leaving the node wedged with on-disk bodies the
-         * chain refuses to connect. pprev_valid here means we've
-         * already gone through the "Fix scrambled heights" pass above,
-         * so ancestry is linked. */
-        if ((pindex->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE &&
-            !(pindex->nStatus & BLOCK_FAILED_MASK)) {
-            pindex->nStatus = (pindex->nStatus & ~BLOCK_VALID_MASK) |
-                              BLOCK_VALID_TREE;
-        }
+        accept_block_header_repair_known_index(pindex);
         return true;
     }
 
     /* Get prev block index */
-    struct block_index *pindex_prev = NULL;
-    if (uint256_cmp(&hash, &params->consensus.hashGenesisBlock) != 0) {
-        pindex_prev = block_map_find(&ms->map_block_index,
-                                      &header->hashPrevBlock);
-        if (!pindex_prev) {
-            /* Parent not in our block index — this is an orphan block.
-             * Normal during sync (blocks arrive before headers).
-             * DoS=0: don't penalize the peer for out-of-order delivery. */
-            return validation_state_invalid(state, false, 0,
-                                            "bad-prevblk", NULL);
-        }
-        if (pindex_prev->nStatus & BLOCK_FAILED_MASK) {
-            /* Don't ban peer — parent may have been marked failed by a
-             * prior validation bug (e.g. turnstile false positive).
-             * The block is invalid from our perspective, but the peer
-             * isn't misbehaving. DoS=0 rejects without penalty. */
-            return validation_state_invalid(state, false, REJECT_INVALID,
-                                            "bad-prevblk", NULL);
-        }
-    }
+    bool prev_ok = true;
+    struct block_index *pindex_prev = accept_block_header_find_prev(
+        ms, params, header, &hash, state, &prev_ok);
+    if (!prev_ok)
+        return false;
 
     if (!check_block_header(header, state, params, true)) {
         LOG_FAIL("validation", "check_block_header failed for accepted header");
@@ -343,35 +423,7 @@ bool accept_block_header(const struct block_header *header,
      * fully resolved.  Without this fix, contextual_check_block_header
      * applies rules for the WRONG height (e.g. pre-Sapling equihash size
      * check at computed height 2 for a block really at height 2M+). */
-    if (pindex_prev && pindex_prev->pprev &&
-        pindex_prev->nHeight != pindex_prev->pprev->nHeight + 1) {
-        struct block_index *stack[2048];
-        int depth = 0;
-        struct block_index *cur = pindex_prev;
-        /* monotonicity guard (see same site at L1575). */
-        while (cur->pprev &&
-               cur->pprev->nHeight < cur->nHeight &&
-               cur->nHeight != cur->pprev->nHeight + 1 &&
-               depth < 2048) {
-            stack[depth++] = cur;
-            cur = cur->pprev;
-        }
-        if (cur->pprev && cur->nHeight != cur->pprev->nHeight + 1) {
-            cur->nHeight = cur->pprev->nHeight + 1;
-            struct arith_uint256 proof = GetBlockProof(cur);
-            arith_uint256_add(&cur->nChainWork,
-                              &cur->pprev->nChainWork, &proof);
-        }
-        for (int i = depth - 1; i >= 0; i--) {
-            struct block_index *fix = stack[i];
-            if (fix->pprev) {
-                fix->nHeight = fix->pprev->nHeight + 1;
-                struct arith_uint256 proof = GetBlockProof(fix);
-                arith_uint256_add(&fix->nChainWork,
-                                  &fix->pprev->nChainWork, &proof);
-            }
-        }
-    }
+    block_index_repair_scrambled_heights(pindex_prev);
 
     /* Skip contextual header check during IBD when the block index has
      * scrambled heights from snapshot/LDB import, OR when the post-
@@ -380,11 +432,8 @@ bool accept_block_header(const struct block_header *header,
      * check would spuriously fail; full validation happens later in
      * connect_block(). This mirrors Bitcoin Core's header-first sync
      * model, where header structure is checked before block connection. */
-    if (pindex_prev &&
-        !process_block_should_skip_contextual_header(ms, pindex_prev,
-                                                     &params->consensus) &&
-        !contextual_check_block_header(header, state, params, pindex_prev,
-                                        ms->fCheckpointsEnabled))
+    if (!accept_block_header_contextual_check_ok(header, state, params, ms,
+                                                 pindex_prev))
         LOG_FAIL("validation", "contextual_check_block_header failed for header at height %d",
                  pindex_prev->nHeight + 1);
 
@@ -392,12 +441,7 @@ bool accept_block_header(const struct block_header *header,
     if (!pindex)
         return validation_state_error(state, "add-to-block-index-failed");
 
-    if ((pindex->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE)
-        pindex->nStatus = (pindex->nStatus & ~BLOCK_VALID_MASK) |
-                           BLOCK_VALID_TREE;
-
-    if (ppindex)
-        *ppindex = pindex;
+    accept_block_header_finish_new_index(pindex, ppindex);
 
     return true;
 }

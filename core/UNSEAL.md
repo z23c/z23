@@ -761,3 +761,7 @@ later lane flips it HARD.
 - 2026-11-02T06:21:16Z — REASON: refactor(noise_transport): split 1 function(s) under the complexity cap (glm); behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
   old ROOT: ab1bb4862a23a11bfd53b8cf107f12c5f77f743fff77de2547e964f7169e282a
   by: owner unseal ritual (make core-unseal)
+
+- 2026-11-02T06:21:36Z — REASON: refactor(accept_block_header): split 1 function(s) under the complexity cap (glm); behaviour-preserving, each split gpt-terra LAND, no consensus predicate change
+  old ROOT: 76c3c0ad3638a0c64edbab51306a6cacf23f01f284035b7b3892b10b4a8ace99
+  by: owner unseal ritual (make core-unseal)
