@@ -947,6 +947,80 @@ bool sapling_value_commit(uint64_t value, const uint8_t rcv[32],
     return true;
 }
 
+/* True when any of rcm, rcv, esk could not be drawn. */
+static bool sapling_output_scalars_draw_failed(uint8_t rcm[32], uint8_t rcv[32],
+                                               uint8_t esk[32])
+{
+    /* Generate random scalars */
+    return !sapling_generate_r(rcm) || !sapling_generate_r(rcv) ||
+        !sapling_generate_r(esk);
+}
+
+/* 3. Build note plaintext: d(11) + value(8) + rcm(32) + memo(512) = 563 bytes
+ * With leading byte 0x01 (Sapling) = 564 bytes */
+static void sapling_fill_note_plaintext(uint8_t plaintext[564],
+                                        const uint8_t to_d[11],
+                                        uint64_t value, const uint8_t rcm[32],
+                                        const uint8_t memo[512])
+{
+    plaintext[0] = 0x01; /* Sapling note type */
+    memcpy(plaintext + 1, to_d, 11);
+    for (int i = 0; i < 8; i++)
+        plaintext[12 + i] = (uint8_t)(value >> (i * 8));
+    memcpy(plaintext + 20, rcm, 32);
+    if (memo)
+        memcpy(plaintext + 52, memo, 512);
+    else
+        memset(plaintext + 52, 0xF6, 512);
+}
+
+/* Call the output prover when a proving key is loaded; zero od_proof otherwise.
+ * Returns false when proving fails. */
+static bool sapling_fill_output_proof(
+    uint64_t value,
+    const uint8_t to_d[11], const uint8_t to_pk_d[32],
+    const uint8_t rcm[32], const uint8_t esk[32], const uint8_t rcv[32],
+    const uint8_t od_cv[32], const uint8_t od_epk[32], const uint8_t od_cm[32],
+    struct sapling_output_witness *wit,
+    uint8_t od_proof[192], size_t *pk_len_out, bool *proved)
+{
+    memset(wit, 0, sizeof(*wit));
+    *pk_len_out = 0;
+    *proved = false;
+
+    /* Generate Groth16 output proof */
+    size_t pk_len = 0;
+    const uint8_t *pk_data = sapling_get_output_pk(&pk_len);
+    *pk_len_out = pk_len;
+    if (pk_data && pk_len > 0) {
+        memset(wit, 0, sizeof(*wit));
+        wit->value = value;
+        memcpy(wit->diversifier, to_d, 11);
+        memcpy(wit->pk_d, to_pk_d, 32);
+        memcpy(wit->rcm, rcm, 32);
+        memcpy(wit->esk, esk, 32);
+        memcpy(wit->rcv, rcv, 32);
+
+        struct sapling_output_inputs pub;
+        memcpy(pub.cv, od_cv, 32);
+        memcpy(pub.epk, od_epk, 32);
+        memcpy(pub.cm, od_cm, 32);
+
+        *proved = sapling_create_output_proof(pk_data, pk_len, wit, &pub, od_proof);
+        return *proved;
+    } else {
+        memset(od_proof, 0, 192);
+    }
+    return true;
+}
+
+/* Return rcv for binding signature accumulation */
+static void sapling_store_rcv_out(uint8_t *rcv_out, const uint8_t rcv[32])
+{
+    if (rcv_out)
+        memcpy(rcv_out, rcv, 32);
+}
+
 /* --- Build output description --- */
 
 bool sapling_build_output_description(
@@ -957,10 +1031,8 @@ bool sapling_build_output_description(
     uint8_t od_enc[580], uint8_t od_out[80], uint8_t od_proof[192],
     uint8_t rcv_out[32])
 {
-    /* Generate random scalars */
     uint8_t rcm[32], rcv[32], esk[32];
-    if (!sapling_generate_r(rcm) || !sapling_generate_r(rcv) ||
-        !sapling_generate_r(esk))
+    if (sapling_output_scalars_draw_failed(rcm, rcv, esk))
         LOG_FAIL("sapling", "build_output_description: sapling_generate_r failed (RNG hygiene)");
 
     /* Compute note commitment: cm */
@@ -987,18 +1059,8 @@ bool sapling_build_output_description(
     if (!sapling_kdf(enc_key, dhsecret, od_epk))
         LOG_FAIL("sapling", "build_output_description: sapling_kdf failed");
 
-    /* 3. Build note plaintext: d(11) + value(8) + rcm(32) + memo(512) = 563 bytes
-     * With leading byte 0x01 (Sapling) = 564 bytes */
     uint8_t plaintext[564];
-    plaintext[0] = 0x01; /* Sapling note type */
-    memcpy(plaintext + 1, to_d, 11);
-    for (int i = 0; i < 8; i++)
-        plaintext[12 + i] = (uint8_t)(value >> (i * 8));
-    memcpy(plaintext + 20, rcm, 32);
-    if (memo)
-        memcpy(plaintext + 52, memo, 512);
-    else
-        memset(plaintext + 52, 0xF6, 512);
+    sapling_fill_note_plaintext(plaintext, to_d, value, rcm, memo);
 
     /* 4. Encrypt: enc_ciphertext = AEAD(key, plaintext) → 580 bytes */
     if (!sapling_note_encrypt(enc_key, plaintext, 564, od_enc))
@@ -1019,43 +1081,24 @@ bool sapling_build_output_description(
     if (!sapling_out_encrypt(ock, out_plaintext, 64, od_out))
         LOG_FAIL("sapling", "build_output_description: sapling_out_encrypt failed");
 
-    /* Generate Groth16 output proof */
-    {
-        size_t pk_len = 0;
-        const uint8_t *pk_data = sapling_get_output_pk(&pk_len);
-        if (pk_data && pk_len > 0) {
-            struct sapling_output_witness wit;
-            memset(&wit, 0, sizeof(wit));
-            wit.value = value;
-            memcpy(wit.diversifier, to_d, 11);
-            memcpy(wit.pk_d, to_pk_d, 32);
-            memcpy(wit.rcm, rcm, 32);
-            memcpy(wit.esk, esk, 32);
-            memcpy(wit.rcv, rcv, 32);
-
-            struct sapling_output_inputs pub;
-            memcpy(pub.cv, od_cv, 32);
-            memcpy(pub.epk, od_epk, 32);
-            memcpy(pub.cm, od_cm, 32);
-
-            if (!sapling_create_output_proof(pk_data, pk_len, &wit, &pub, od_proof)) {
-                memset(plaintext, 0, 564);
-                memset(rcm, 0, 32);
-                memset(rcv, 0, 32);
-                memset(esk, 0, 32);
-                LOG_FAIL("sapling",
-                         "build_output_description: sapling_create_output_proof failed (pk_len=%zu)",
-                         pk_len);
-            }
-            memory_cleanse(&wit, sizeof(wit));
-        } else {
-            memset(od_proof, 0, 192);
-        }
+    struct sapling_output_witness wit;
+    size_t pk_len = 0;
+    bool proved = false;
+    if (!sapling_fill_output_proof(value, to_d, to_pk_d, rcm, esk, rcv,
+                                   od_cv, od_epk, od_cm, &wit, od_proof,
+                                   &pk_len, &proved)) {
+        memset(plaintext, 0, 564);
+        memset(rcm, 0, 32);
+        memset(rcv, 0, 32);
+        memset(esk, 0, 32);
+        LOG_FAIL("sapling",
+                 "build_output_description: sapling_create_output_proof failed (pk_len=%zu)",
+                 pk_len);
     }
+    if (proved)
+        memory_cleanse(&wit, sizeof(wit));
 
-    /* Return rcv for binding signature accumulation */
-    if (rcv_out)
-        memcpy(rcv_out, rcv, 32);
+    sapling_store_rcv_out(rcv_out, rcv);
 
     /* Cleanse secrets */
     memset(plaintext, 0, 564);
