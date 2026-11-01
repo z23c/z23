@@ -126,6 +126,17 @@ static bool native_accumulate_rcv(struct native_proving_ctx *ctx,
     return true;
 }
 
+/* True when an output-proof argument or the output proving key is absent. */
+static bool native_output_proof_inputs_missing(
+    const struct native_proving_ctx *ctx, const uint8_t esk[32],
+    const uint8_t diversifier[11], const uint8_t pk_d[32],
+    const uint8_t rcm[32], const uint8_t cv[32],
+    const uint8_t zkproof[192], const uint8_t *pk, size_t pk_len)
+{
+    return !ctx || !esk || !diversifier || !pk_d || !rcm || !cv || !zkproof ||
+        !pk || pk_len == 0;
+}
+
 static bool native_output_proof_raw(
     struct native_proving_ctx *ctx, const uint8_t esk[32],
     const uint8_t diversifier[11], const uint8_t pk_d[32],
@@ -141,8 +152,8 @@ static bool native_output_proof_raw(
 
     size_t pk_len = 0;
     const uint8_t *pk = sapling_get_output_pk(&pk_len);
-    if (!ctx || !esk || !diversifier || !pk_d || !rcm || !cv || !zkproof ||
-        !pk || pk_len == 0)
+    if (native_output_proof_inputs_missing(ctx, esk, diversifier, pk_d, rcm,
+                                           cv, zkproof, pk, pk_len))
         goto cleanup;
     if (!sapling_generate_r(rcv))
         goto cleanup;
@@ -170,6 +181,17 @@ cleanup:
     return ok;
 }
 
+/* True when ctx, ak, nsk, diversifier, rcm, ar, anchor, witness, cv or rk is null. */
+static bool native_spend_proof_inputs_missing(
+    const struct native_proving_ctx *ctx, const uint8_t ak[32],
+    const uint8_t nsk[32], const uint8_t diversifier[11],
+    const uint8_t rcm[32], const uint8_t ar[32], const uint8_t anchor[32],
+    const uint8_t *witness, const uint8_t cv[32], const uint8_t rk[32])
+{
+    return !ctx || !ak || !nsk || !diversifier || !rcm || !ar || !anchor ||
+        !witness || !cv || !rk;
+}
+
 static bool native_spend_proof_raw(
     struct native_proving_ctx *ctx, const uint8_t ak[32],
     const uint8_t nsk[32], const uint8_t diversifier[11],
@@ -186,8 +208,9 @@ static bool native_spend_proof_raw(
 
     size_t pk_len = 0;
     const uint8_t *pk = sapling_get_spend_pk(&pk_len);
-    if (!ctx || !ak || !nsk || !diversifier || !rcm || !ar || !anchor ||
-        !witness || !cv || !rk || !zkproof || !pk || pk_len == 0)
+    if (native_spend_proof_inputs_missing(ctx, ak, nsk, diversifier, rcm, ar,
+                                          anchor, witness, cv, rk) ||
+        !zkproof || !pk || pk_len == 0)
         goto cleanup;
     if (!sapling_generate_r(rcv))
         goto cleanup;
@@ -283,6 +306,109 @@ static bool native_find_diversifier(uint8_t diversifier[11])
     return false;
 }
 
+/* True when any self-test scalar draw fails. */
+static bool native_self_test_random_scalars_missing(
+    uint8_t ask[32], uint8_t nsk[32], uint8_t spend_rcm[32],
+    uint8_t ar[32], uint8_t output_rcm[32], uint8_t esk[32])
+{
+    memset(ask, 0, 32);
+    memset(nsk, 0, 32);
+    memset(spend_rcm, 0, 32);
+    memset(ar, 0, 32);
+    memset(output_rcm, 0, 32);
+    memset(esk, 0, 32);
+    return !sapling_generate_r(ask) || !sapling_generate_r(nsk) ||
+        !sapling_generate_r(spend_rcm) || !sapling_generate_r(ar) ||
+        !sapling_generate_r(output_rcm) || !sapling_generate_r(esk);
+}
+
+/* True when no diversifier is found, or pk_d or the note commitment fails. */
+static bool native_self_test_recipient_rejected(
+    const uint8_t ask[32], const uint8_t nsk[32],
+    const uint8_t spend_rcm[32], uint64_t value, uint8_t d[11],
+    uint8_t ak[32], uint8_t nk[32], uint8_t ivk[32], uint8_t pk_d[32],
+    uint8_t spend_cm[32])
+{
+    memset(d, 0, 11);
+    memset(ak, 0, 32);
+    memset(nk, 0, 32);
+    memset(ivk, 0, 32);
+    memset(pk_d, 0, 32);
+    memset(spend_cm, 0, 32);
+    bool rejected = !native_find_diversifier(d);
+    if (!rejected) {
+        sapling_ask_to_ak(ask, ak);
+        sapling_nsk_to_nk(nsk, nk);
+        sapling_crh_ivk(ak, nk, ivk);
+        rejected = !sapling_ivk_to_pkd(ivk, d, pk_d) ||
+            !sapling_compute_cm(d, pk_d, value, spend_rcm, spend_cm);
+    }
+    return rejected;
+}
+
+/* True when the proving context is null or the spend proof or nullifier fails. */
+static bool native_self_test_spend_rejected(
+    struct native_proving_ctx *pctx, const uint8_t ak[32],
+    const uint8_t nsk[32], const uint8_t d[11],
+    const uint8_t spend_rcm[32], const uint8_t ar[32], uint64_t value,
+    const uint8_t anchor[32], const uint8_t *compact_witness,
+    size_t compact_len, uint8_t spend_cv[32], uint8_t rk[32],
+    uint8_t spend_proof[192], uint8_t nf[32], const uint8_t nk[32],
+    const uint8_t pk_d[32])
+{
+    memset(spend_cv, 0, 32);
+    memset(rk, 0, 32);
+    memset(spend_proof, 0, 192);
+    memset(nf, 0, 32);
+    return !pctx || !native_spend_proof_raw(
+            pctx, ak, nsk, d, spend_rcm, ar, value, anchor,
+            compact_witness, compact_len, spend_cv, rk, spend_proof) ||
+        !sapling_compute_nf(d, pk_d, value, spend_rcm, ak, nk, 0, nf);
+}
+
+/* True when the output proof, note commitment, epk or binding signature fails. */
+static bool native_self_test_output_rejected(
+    struct native_proving_ctx *pctx, const uint8_t esk[32],
+    const uint8_t d[11], const uint8_t pk_d[32],
+    const uint8_t output_rcm[32], uint64_t value, uint8_t output_cv[32],
+    uint8_t output_proof[192], uint8_t output_cm[32], uint8_t epk[32],
+    const uint8_t sighash[32], uint8_t binding_sig[64])
+{
+    memset(output_cv, 0, 32);
+    memset(output_proof, 0, 192);
+    memset(output_cm, 0, 32);
+    memset(epk, 0, 32);
+    memset(binding_sig, 0, 64);
+    return !native_output_proof_raw(pctx, esk, d, pk_d, output_rcm, value,
+                                    output_cv, output_proof) ||
+        !sapling_compute_cm(d, pk_d, value, output_rcm, output_cm) ||
+        !sapling_ka_derivepublic(d, esk, epk) ||
+        !native_binding_sig_raw(pctx, sighash, binding_sig);
+}
+
+/* Consensus stage that rejected the bundle, or NULL when every check passed. */
+static const char *native_self_test_consensus_failure(
+    const uint8_t spend_cv[32], const uint8_t anchor[32],
+    const uint8_t nf[32], const uint8_t rk[32],
+    const uint8_t spend_proof[192], const uint8_t spend_sig[64],
+    const uint8_t sighash[32], const uint8_t output_cv[32],
+    const uint8_t output_cm[32], const uint8_t epk[32],
+    const uint8_t output_proof[192], const uint8_t binding_sig[64])
+{
+    struct sapling_verification_ctx vctx;
+    sapling_verification_ctx_init(&vctx);
+    const char *stage = NULL;
+    if (!sapling_check_spend(&vctx, spend_cv, anchor, nf, rk,
+                             spend_proof, spend_sig, sighash))
+        stage = "spend_consensus_verifier";
+    else if (!sapling_check_output(&vctx, output_cv, output_cm, epk,
+                                   output_proof))
+        stage = "output_consensus_verifier";
+    else if (!sapling_final_check(&vctx, 0, binding_sig, sighash))
+        stage = "binding_consensus_verifier";
+    return stage;
+}
+
 static bool native_self_test_bundle(void)
 {
     const uint64_t value = UINT64_C(12345);
@@ -299,18 +425,12 @@ static bool native_self_test_bundle(void)
     uint8_t binding_sig[64] = {0}, sighash[32] = {0};
     uint8_t compact_witness[SAPLING_COMPACT_WITNESS_LEN] = {0};
 
-    if (!sapling_generate_r(ask) || !sapling_generate_r(nsk) ||
-        !sapling_generate_r(spend_rcm) || !sapling_generate_r(ar) ||
-        !sapling_generate_r(output_rcm) || !sapling_generate_r(esk))
+    if (native_self_test_random_scalars_missing(ask, nsk, spend_rcm, ar,
+                                                output_rcm, esk))
         goto cleanup;
     failed_at = "recipient";
-    if (!native_find_diversifier(d))
-        goto cleanup;
-    sapling_ask_to_ak(ask, ak);
-    sapling_nsk_to_nk(nsk, nk);
-    sapling_crh_ivk(ak, nk, ivk);
-    if (!sapling_ivk_to_pkd(ivk, d, pk_d) ||
-        !sapling_compute_cm(d, pk_d, value, spend_rcm, spend_cm))
+    if (native_self_test_recipient_rejected(ask, nsk, spend_rcm, value, d,
+                                            ak, nk, ivk, pk_d, spend_cm))
         goto cleanup;
 
     struct incremental_merkle_tree tree;
@@ -330,10 +450,10 @@ static bool native_self_test_bundle(void)
 
     pctx = native_ctx_new();
     failed_at = "spend_proof";
-    if (!pctx || !native_spend_proof_raw(
+    if (native_self_test_spend_rejected(
             pctx, ak, nsk, d, spend_rcm, ar, value, anchor.data,
-            compact_witness, compact_len, spend_cv, rk, spend_proof) ||
-        !sapling_compute_nf(d, pk_d, value, spend_rcm, ak, nk, 0, nf))
+            compact_witness, compact_len, spend_cv, rk, spend_proof, nf,
+            nk, pk_d))
         goto cleanup;
 
     struct fs ask_fs, ar_fs, rsk_fs;
@@ -352,26 +472,18 @@ static bool native_self_test_bundle(void)
     memory_cleanse(&rsk_fs, sizeof(rsk_fs));
 
     failed_at = "output_proof";
-    if (!native_output_proof_raw(pctx, esk, d, pk_d, output_rcm, value,
-                                 output_cv, output_proof) ||
-        !sapling_compute_cm(d, pk_d, value, output_rcm, output_cm) ||
-        !sapling_ka_derivepublic(d, esk, epk) ||
-        !native_binding_sig_raw(pctx, sighash, binding_sig))
+    if (native_self_test_output_rejected(
+            pctx, esk, d, pk_d, output_rcm, value, output_cv, output_proof,
+            output_cm, epk, sighash, binding_sig))
         goto cleanup;
 
-    struct sapling_verification_ctx vctx;
-    sapling_verification_ctx_init(&vctx);
-    failed_at = "spend_consensus_verifier";
-    if (!sapling_check_spend(&vctx, spend_cv, anchor.data, nf, rk,
-                             spend_proof, spend_sig, sighash))
+    const char *consensus_failure = native_self_test_consensus_failure(
+        spend_cv, anchor.data, nf, rk, spend_proof, spend_sig, sighash,
+        output_cv, output_cm, epk, output_proof, binding_sig);
+    if (consensus_failure) {
+        failed_at = consensus_failure;
         goto cleanup;
-    failed_at = "output_consensus_verifier";
-    if (!sapling_check_output(&vctx, output_cv, output_cm, epk,
-                              output_proof))
-        goto cleanup;
-    failed_at = "binding_consensus_verifier";
-    if (!sapling_final_check(&vctx, 0, binding_sig, sighash))
-        goto cleanup;
+    }
     ok = true;
 
 cleanup:
