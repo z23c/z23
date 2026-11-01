@@ -867,6 +867,50 @@ static int case_collect(void)
     return failures;
 }
 
+static int lpt_collect_run_check(const struct lpt *e, const char *check)
+{
+    char state[700];
+    (void)snprintf(state, sizeof(state), "--state=%s", e->state);
+    const char *const extra[] = {state, "--require=2", check, NULL};
+    return lpt_run(e, "collect", extra);
+}
+
+static int case_collect_check_option(void)
+{
+    int failures = 0;
+    struct lpt_ids i;
+    struct lpt e;
+    TEST_CASE("lab_peer: collect passes no --check by default, --check=verify to qualify_offer") {
+        lpt_ids(&i);
+        ASSERT(lpt_collect_env(&e, &i, "collect_check_default", 1));
+        ASSERT_EQ(lpt_collect_run(&e, "2"), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\tqualify_offer\n"), 1);
+        ASSERT_EQ(lpt_count(e.calls, "--check"), 0);
+        ASSERT(lpt_collect_env(&e, &i, "collect_check_cx", 1));
+        ASSERT_EQ(lpt_collect_run_check(&e, "--check=cx"), 0);
+        ASSERT_EQ(lpt_count(e.calls, "--check"), 0);
+        ASSERT(lpt_collect_env(&e, &i, "collect_check_verify", 1));
+        ASSERT_EQ(lpt_collect_run_check(&e, "--check=verify"), 0);
+        ASSERT_EQ(lpt_count(e.calls, "\tqualify_offer\n"), 1);
+        ASSERT_EQ(lpt_count(e.calls, "\t--check=verify\n"), 1);
+    } TEST_END
+    return failures;
+}
+
+static int case_collect_check_bad(void)
+{
+    int failures = 0;
+    struct lpt_ids i;
+    struct lpt e;
+    TEST_CASE("lab_peer: collect refuses a bad --check value") {
+        lpt_ids(&i);
+        ASSERT(lpt_collect_env(&e, &i, "collect_check_bad", 1));
+        ASSERT_EQ(lpt_collect_run_check(&e, "--check=bogus"), 2);
+        ASSERT_EQ(lpt_count(e.calls, "qualify_offer"), 0);
+    } TEST_END
+    return failures;
+}
+
 static int case_collect_upserts(void)
 {
     int failures = 0;
@@ -974,6 +1018,8 @@ int test_lab_peer(void)
     failures += case_verify_overlapping_run();
     failures += case_verify_authors_unreadable();
     failures += case_collect();
+    failures += case_collect_check_option();
+    failures += case_collect_check_bad();
     failures += case_collect_upserts();
     failures += case_collect_duplicate_offer_rows();
     failures += case_collect_offers_unreadable();

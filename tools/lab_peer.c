@@ -21,8 +21,9 @@
  *       check only, so a general offer is refused REVERIFY_NOT_A_SPLIT;
  *       --check=verify passes --check=verify (make agent-verify ONLY=@changed
  *       behind the admission rail) and waits LP_VERIFY_S + LP_VERIFY_MARGIN_S.
- *       Any other value is a usage error (exit 2). collect's qualify_offer has
- *       no check option and is unaffected.
+ *       Any other value is a usage error (exit 2). collect takes the same
+ *       option and passes --check=verify to qualify_offer, which then counts
+ *       agent_verify receipts instead of cx_check ones.
  *   collect --state=DIR [--room=lab] [--require=1]
  *       board list -> the verdict=ok receipts answering each offers.tsv row
  *       -> STATE/receipts/<post>-<host12>.json -> dev land qualify_offer ->
@@ -328,6 +329,18 @@ static const char *lp_err_code(const struct json_value *root, const char *fallba
     if (!lp_code_ok(c) || !lp_fmt(out, cap, "%s", c))
         (void)lp_fmt(out, cap, "%s", fallback);
     return out;
+}
+
+/* --check: absent or "cx" (reverify_offer's split check, no flag passed) or
+ * "verify" (its general agent-verify check); anything else is a usage error. */
+static bool lp_check_ok(const char *v)
+{
+    return !v || strcmp(v, "cx") == 0 || strcmp(v, "verify") == 0;
+}
+
+static bool lp_is_verify(const struct lp_ctx *c)
+{
+    return c->v[LP_O_CHECK] && strcmp(c->v[LP_O_CHECK], "verify") == 0;
 }
 
 /* ── options, state, output ────────────────────────────────────────────── */
@@ -988,7 +1001,7 @@ static bool lp_reverify(const struct lp_ctx *c, const char *bundle,
         !lp_fmt(repo, sizeof(repo), "--repo=%s", c->v[LP_O_REPO]))
         return *retry = true, false;
     (void)unlink(receipt);
-    const bool general = c->v[LP_O_CHECK] && strcmp(c->v[LP_O_CHECK], "verify") == 0;
+    const bool general = lp_is_verify(c);
     /* cx: the NULL slot ends argv, so the argv is byte-identical to before. */
     const char *const argv[] = {c->v[LP_O_Z23DEV], "dev", "land", "reverify_offer",
                                 b, o, repo, r, general ? "--check=verify" : NULL,
@@ -1107,13 +1120,6 @@ static const char *lp_gate(const struct lp_ctx *c, const struct json_value *post
     return NULL;
 }
 
-
-/* --check: absent or "cx" (reverify_offer's split check, no flag passed) or
- * "verify" (its general agent-verify check); anything else is a usage error. */
-static bool lp_check_ok(const char *v)
-{
-    return !v || strcmp(v, "cx") == 0 || strcmp(v, "verify") == 0;
-}
 
 static bool lp_verify_args(struct lp_ctx *c, int64_t *max)
 {
@@ -1289,7 +1295,8 @@ static void lp_qualify(const struct lp_ctx *c, const struct lp_row *r,
         !lp_fmt(req, sizeof(req), "--require=%s", c->v[LP_O_REQUIRE]))
         return;
     const char *const argv[] = {c->v[LP_O_Z23DEV], "dev", "land", "qualify_offer",
-                                offer, recs, req, NULL};
+                                offer, recs, req,
+                                lp_is_verify(c) ? "--check=verify" : NULL, NULL};
     if (lp_run(argv, NULL, LP_QUICK_S, &root))
         lp_qual_fill(&root, q);
     json_free(&root);
@@ -1430,6 +1437,7 @@ static int lp_cmd_collect(struct lp_ctx *c)
     struct json_value posts;
     int64_t require;
     if (!c->v[LP_O_STATE] || !lp_name(c->v[LP_O_ROOM], 32) ||
+        !lp_check_ok(c->v[LP_O_CHECK]) ||
         !lp_decimal(c->v[LP_O_REQUIRE], 16, &require) || !lp_state_init(c))
         return lp_usage();
     if (!lp_lock(c))
