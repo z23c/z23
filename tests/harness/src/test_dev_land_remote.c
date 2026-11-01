@@ -993,8 +993,8 @@ static int dlt_rv_verify_cases(const struct dlt_rig *r, const char *tmp,
                             "agent_verify\"") != NULL);
         ASSERT(dlt_slurp(log, text, sizeof(text)));
         ASSERT(strstr(text, "--wait --project z23 make agent-verify "
-                            "ONLY=@changed changed=tools/x.c,tools/y.c, "
-                            "dirty=0") != NULL);
+                            "ONLY=@changed changed=" DLT_RV_BASELINE
+                            ",tools/x.c,tools/y.c, dirty=0") != NULL);
         dlt_vfy(&c, rc, o2);
         ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "checks")),
