@@ -119,6 +119,7 @@ static int t_thread_qos_background_attr_applies_before_entry(void)
 struct tq_worker_result {
     bool  sched_reset_ok;
     bool  io_reset_ok;
+    int   io_reset_errno;
     bool  qos_call_ok;
     int   sched_policy;
     long  ioprio_value;
@@ -135,13 +136,22 @@ struct tq_worker_result {
  * I/O class to keep builds below the node; without this reset the baseline
  * below would read IDLE for a reason that has nothing to do with the helper.
  * Unprivileged callers may set SCHED_OTHER and any best-effort level; a
- * restrictive sandbox may still deny ioprio_set, which io_reset_ok records. */
+ * restrictive sandbox may still deny ioprio_set, which io_reset_ok and
+ * io_reset_errno record. */
 static void tq_reset_default_policy(struct tq_worker_result *r)
 {
     struct sched_param normal = {0};
     r->sched_reset_ok = sched_setscheduler(0, SCHED_OTHER, &normal) == 0;
     r->io_reset_ok = syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
                              (IOPRIO_CLASS_BE << TQ_IOPRIO_CLASS_SHIFT) | 4) == 0;
+    r->io_reset_errno = r->io_reset_ok ? 0 : errno;
+}
+
+/* A sandbox (seccomp, LSM) refuses ioprio_set with EPERM or ENOSYS; any
+ * other errno is a real failure, not a reason to skip. */
+static bool tq_sandbox_denied(int err)
+{
+    return err == EPERM || err == ENOSYS;
 }
 
 static void *tq_worker(void *arg)
@@ -205,6 +215,8 @@ static int t_thread_qos_applies_sched_batch_and_ioprio_idle(void)
         /* With the reset applied the class must read best-effort exactly;
          * where a sandbox denies ioprio_set, keep the original check that
          * a thread is not already idle on its own. */
+        if (!baseline.io_reset_ok)
+            ASSERT(tq_sandbox_denied(baseline.io_reset_errno));
         if (baseline.io_reset_ok && baseline.ioprio_call_ok)
             ASSERT_EQ(TQ_IOPRIO_CLASS(baseline.ioprio_value), IOPRIO_CLASS_BE);
         else if (baseline.ioprio_call_ok)
@@ -249,13 +261,15 @@ static int t_thread_qos_background_attr_applies_before_entry(void)
     return failures;
 }
 
-#endif
-
 /* Inheritance witness: a parent in the idle I/O class (as a suite launched
  * idle would be) hands idle to a child that does not reset, and the reset
  * restores best-effort. This is why the baseline resets first. */
 struct tq_inherit_result {
-    bool parent_idle_ok;
+    int idle_errno;            /* 0, or errno from ioprio_set(IDLE) */
+    int plain_create_rc;
+    int plain_join_rc;
+    int reset_create_rc;
+    int reset_join_rc;
     struct tq_worker_result plain;
     struct tq_worker_result reset;
 };
@@ -269,16 +283,28 @@ static void *tq_plain_worker(void *arg)
     return NULL;
 }
 
+/* Run fn on a child thread and record both results; a child that was not
+ * created is never joined. */
+static void tq_run_child(void *(*fn)(void *), void *arg,
+                         int *create_rc, int *join_rc)
+{
+    pthread_t t;
+    *create_rc = pthread_create(&t, NULL, fn, arg);
+    *join_rc = *create_rc == 0 ? pthread_join(t, NULL) : -1;
+}
+
 static void *tq_idle_parent(void *arg)
 {
     struct tq_inherit_result *r = arg;
-    r->parent_idle_ok = syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
-                                IOPRIO_CLASS_IDLE << TQ_IOPRIO_CLASS_SHIFT) == 0;
-    pthread_t t;
-    if (r->parent_idle_ok && pthread_create(&t, NULL, tq_plain_worker, &r->plain) == 0)
-        pthread_join(t, NULL);
-    if (r->parent_idle_ok && pthread_create(&t, NULL, tq_baseline_worker, &r->reset) == 0)
-        pthread_join(t, NULL);
+    if (syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0,
+                IOPRIO_CLASS_IDLE << TQ_IOPRIO_CLASS_SHIFT) != 0) {
+        r->idle_errno = errno;
+        return NULL;
+    }
+    tq_run_child(tq_plain_worker, &r->plain,
+                 &r->plain_create_rc, &r->plain_join_rc);
+    tq_run_child(tq_baseline_worker, &r->reset,
+                 &r->reset_create_rc, &r->reset_join_rc);
     return NULL;
 }
 
@@ -287,24 +313,43 @@ static int t_thread_qos_baseline_ignores_inherited_idle(void)
     int failures = 0;
 
     TEST("thread_qos: the baseline reset undoes an inherited idle I/O class") {
-        struct tq_inherit_result r = {0};
+        /* Static so a bailed join can never leave the parent writing into
+         * a dead stack frame. */
+        static struct tq_inherit_result r;
+        r = (struct tq_inherit_result){0};
         pthread_t t;
         ASSERT_EQ(pthread_create(&t, NULL, tq_idle_parent, &r), 0);
         ASSERT_EQ(pthread_join(t, NULL), 0);
-        if (!r.parent_idle_ok) {
-            printf("  (ioprio_set denied here; inheritance not observable)\n");
+        if (r.idle_errno != 0) {
+            ASSERT(tq_sandbox_denied(r.idle_errno));
+            printf("  (ioprio_set denied, errno %d; inheritance not observable)\n",
+                   r.idle_errno);
             PASS();
             goto _test_next;
         }
+        ASSERT_EQ(r.plain_create_rc, 0);
+        ASSERT_EQ(r.plain_join_rc, 0);
+        ASSERT_EQ(r.reset_create_rc, 0);
+        ASSERT_EQ(r.reset_join_rc, 0);
         ASSERT(r.plain.ioprio_call_ok);
         ASSERT_EQ(TQ_IOPRIO_CLASS(r.plain.ioprio_value), IOPRIO_CLASS_IDLE);
-        ASSERT(r.reset.io_reset_ok && r.reset.ioprio_call_ok);
+        ASSERT(r.reset.sched_reset_ok);
+        if (!r.reset.io_reset_ok) {
+            ASSERT(tq_sandbox_denied(r.reset.io_reset_errno));
+            printf("  (raising idle to best-effort denied, errno %d)\n",
+                   r.reset.io_reset_errno);
+            PASS();
+            goto _test_next;
+        }
+        ASSERT(r.reset.ioprio_call_ok);
         ASSERT_EQ(TQ_IOPRIO_CLASS(r.reset.ioprio_value), IOPRIO_CLASS_BE);
         PASS();
     } _test_next:;
 
     return failures;
 }
+
+#endif
 
 /* Idempotency: calling the helper twice from the same thread must not
  * error or change the outcome. */
@@ -344,7 +389,9 @@ static int test_thread_qos_platform_arm(void)
     int failures = 0;
     failures += t_thread_qos_applies_sched_batch_and_ioprio_idle();
     failures += t_thread_qos_background_attr_applies_before_entry();
+#if !defined(__APPLE__)
     failures += t_thread_qos_baseline_ignores_inherited_idle();
+#endif
     failures += t_thread_qos_idempotent();
     return failures;
 }
