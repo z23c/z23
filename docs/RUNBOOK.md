@@ -746,7 +746,9 @@ or any later caller cannot enter the main mempool whatever its controller
 does.
 
 Status wording follows what happened. `preparing` and `waiting_for_route`
-before any push say nothing was sent. Once a push was queued to a peer the
+before any push say nothing was sent. Callers (the wallet view and messaging
+replies) report a send as held, not sent, from the moment it is accepted until
+it is handed to a peer, including its 2 to 20 s delay with a peer connected. Once a push was queued to a peer the
 status never says that again, in the same run or after a restart (the fact is
 persisted): it says the send may already be on the network and not to pay
 again. `sent` means the transaction was queued on the connection to one onion

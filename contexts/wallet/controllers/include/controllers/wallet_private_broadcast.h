@@ -37,12 +37,20 @@ bool wallet_send_relay(struct wallet_rpc_context *ctx, struct wallet_tx *wtx);
  * again. Valid until the next wallet_send_relay call. */
 const char *wallet_send_relay_failure_text(void);
 
-/* True when a private send is recorded but waiting for a connected onion
- * peer: accepted, not sent. Callers must say so instead of "sent". */
+/* True when a private send is recorded and not yet handed to a peer, whether
+ * it waits for a connected onion peer or for its random delay: accepted, not
+ * sent. Callers must say so instead of "sent". */
 bool wallet_private_broadcast_is_held(const struct uint256 *txid);
 
-/* Re-reserve the shielded notes of a recorded send the wallet holds. */
-void wallet_private_broadcast_reserve_spends(const struct transaction *tx);
+/* Re-reserve the shielded notes of a recorded send the wallet holds, from the
+ * relay environment alone (resume runs before the shared wallet context). */
+void wallet_private_broadcast_reserve_spends(const struct wpr_env *env,
+                                             const struct transaction *tx);
+
+/* The environment the relay runs with: `in` plus the default reservation
+ * callback. wallet_private_broadcast_start uses exactly this. */
+void wallet_private_broadcast_arm_env(const struct wpr_env *in,
+                                      struct wpr_env *out);
 
 #define WALLET_PBCAST_TICK_MS 1000
 /* Spacing of the held-send warning, which carries a count only. */

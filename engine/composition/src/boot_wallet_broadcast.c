@@ -46,6 +46,7 @@ bool boot_start_wallet_broadcast(struct boot_svc_ctx *svc,
         .wallet = svc->wallet, .connman = svc->connman,
         .coins_tip = svc->coins_tip, .main_state = svc->state,
         .params = params, .datadir = ctx->datadir,
+        .node_db = boot_node_db(svc),
         .min_relay_fee = svc->mempool ? svc->mempool->min_relay_fee : 0,
     };
     if (!wallet_private_broadcast_start(mode, &env))

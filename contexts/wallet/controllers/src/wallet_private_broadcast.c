@@ -309,16 +309,24 @@ void wallet_private_broadcast_stop(void)
         platform_sleep_ms(25);
 }
 
-void wallet_private_broadcast_reserve_spends(const struct transaction *tx)
+void wallet_private_broadcast_reserve_spends(const struct wpr_env *env,
+                                             const struct transaction *tx)
 {
-    struct wallet_rpc_context *base = wallet_rpc_context_current();
-    if (!tx || tx->num_shielded_spend == 0)
+    if (!env || !tx || tx->num_shielded_spend == 0)
         return;
-    if (base->node_db && !node_db_sync_wallet_sapling_spends(base->node_db, tx))
+    if (env->node_db && !node_db_sync_wallet_sapling_spends(env->node_db, tx))
         LOG_WARN("wallet_pbcast", "re-reserving the notes of a recorded "
                  "send failed");
-    if (base->wallet)
-        wallet_mark_sapling_nullifiers_spent(base->wallet, tx);
+    if (env->wallet)
+        wallet_mark_sapling_nullifiers_spent(env->wallet, tx);
+}
+
+void wallet_private_broadcast_arm_env(const struct wpr_env *in,
+                                      struct wpr_env *out)
+{
+    *out = *in;
+    if (!out->reserve)
+        out->reserve = wallet_private_broadcast_reserve_spends;
 }
 
 bool wallet_private_broadcast_start(enum wpr_mode mode,
@@ -327,9 +335,7 @@ bool wallet_private_broadcast_start(enum wpr_mode mode,
     struct wpr *relay = wpr_global();
     struct wpr_env armed;
     if (env) {
-        armed = *env;
-        if (!armed.reserve)
-            armed.reserve = wallet_private_broadcast_reserve_spends;
+        wallet_private_broadcast_arm_env(env, &armed);
         env = &armed;
     }
     wpr_configure(relay, mode, env);
@@ -359,10 +365,12 @@ bool wallet_private_broadcast_start(enum wpr_mode mode,
 bool wallet_private_broadcast_is_held(const struct uint256 *txid)
 {
     enum wpr_state st;
+    bool handed = false;
     struct wpr *relay = wpr_global();
     return wpr_get_mode(relay) == WPR_MODE_PRIVATE &&
-           wpr_entry_state(relay, txid, &st, NULL) &&
-           (st == WPR_WAITING_FOR_ROUTE || st == WPR_PREPARED);
+           wpr_entry_state(relay, txid, &st, &handed) && !handed &&
+           (st == WPR_WAITING_FOR_ROUTE || st == WPR_PREPARED ||
+            st == WPR_SCHEDULED);
 }
 
 /* What the owner can safely do for a send in this state. No amounts or

@@ -493,7 +493,7 @@ static bool wpr_resume_one(struct wpr *r, const struct uint256 *txid,
         return false;
     }
     if (r->env.reserve)
-        r->env.reserve(&wtx.tx);
+        r->env.reserve(&r->env, &wtx.tx);
     bool done = wtx.confirms > 0;
     bool in_pool = !done && wpr_admit(r, &wtx.tx);
     int64_t delay = 0;
@@ -705,13 +705,41 @@ static void wpr_revalidate(struct wpr *r, const struct wpr_entry *snap,
     zcl_mutex_unlock(&r->lock);
 }
 
+/* Record, durably, that a push is about to happen. False leaves the entry
+ * unchanged: nothing may be pushed that the record cannot say was pushed. */
+static bool wpr_record_handed_intent(struct wpr *r, const struct uint256 *txid,
+                                     int64_t now)
+{
+    zcl_mutex_lock(&r->lock);
+    struct wpr_entry *e = wpr_find_locked(r, txid);
+    bool ok = e != NULL;
+    if (e && !e->handed) {
+        e->handed = true;
+        ok = wpr_persist_locked(r);
+        if (!ok) {
+            e->handed = false;
+            e->due_ms = now + (int64_t)WPR_RETRY_S * 1000;
+        }
+    }
+    zcl_mutex_unlock(&r->lock);
+    return ok;
+}
+
 static void wpr_attempt_push(struct wpr *r, const struct wpr_entry *snap,
                              int64_t now, struct wpr_tick_result *out)
 {
     uint32_t peer = 0;
+    if (!wpr_record_handed_intent(r, &snap->txid, now))
+        return;
     enum wpr_push_result res = wpr_push(r, snap, &peer);
     zcl_mutex_lock(&r->lock);
     struct wpr_entry *e = wpr_find_locked(r, &snap->txid);
+    if (e && res != WPR_PUSH_OK && !snap->handed) {
+        /* Nothing was queued: undo the intent (best effort; a failed write
+         * leaves the conservative fact on disk). */
+        e->handed = false;
+        (void)wpr_persist_locked(r);
+    }
     if (e && res == WPR_PUSH_OK) {
         e->attempts++;
         e->last_attempt_ms = now;
@@ -721,8 +749,6 @@ static void wpr_attempt_push(struct wpr *r, const struct wpr_entry *snap,
             e->num_tried++;
         e->state = WPR_SENT;
         e->due_ms = now + (int64_t)WPR_RESEND_AFTER_S * 1000;
-        e->handed = true;
-        (void)wpr_persist_locked(r);
         out->pushed++;
     } else if (e && res == WPR_PUSH_NO_TX) {
         e->in_pool = false;
@@ -801,16 +827,18 @@ static bool wpr_tick_settled(struct wpr *r, const struct wpr_entry *snap,
         return false;
     if (snap->state == WPR_SEEN && !snap->mined) {
         /* Seen back but not yet in a block: the record stays, with a status,
-         * until the wallet shows it mined. */
-        if (wpr_wallet_confirmed(r, &snap->txid)) {
-            zcl_mutex_lock(&r->lock);
-            struct wpr_entry *e = wpr_find_locked(r, &snap->txid);
-            if (e && e->state == WPR_SEEN) {
-                e->mined = true;
-                e->seen_ms = now;
-            }
-            zcl_mutex_unlock(&r->lock);
+         * until the wallet shows it mined. A send that is dropped and then
+         * passes its expiry is not settled: it falls through to the expiry
+         * check so its coins are released. */
+        if (!wpr_wallet_confirmed(r, &snap->txid))
+            return false;
+        zcl_mutex_lock(&r->lock);
+        struct wpr_entry *e = wpr_find_locked(r, &snap->txid);
+        if (e && e->state == WPR_SEEN) {
+            e->mined = true;
+            e->seen_ms = now;
         }
+        zcl_mutex_unlock(&r->lock);
         return true;
     }
     wpr_prune_terminal(r, snap, now);
@@ -855,6 +883,8 @@ static void wpr_tick_entry(struct wpr *r, size_t slot, int wallet_height,
             out->expired[out->num_expired++] = snap.txid;
         return;
     }
+    if (snap.state == WPR_SEEN)
+        return;  /* seen back: nothing to push, only the expiry above */
     wpr_tick_live(r, &snap, now, out);
 }
 

@@ -405,8 +405,9 @@ static size_t render_send_success_page(uint8_t *r, size_t max, size_t off,
             "<a href='/explorer/tx/%s' class='hash' "
             "style='word-break:break-all'>%s</a>"
             "<div style='color:#888;font-size:14px;margin-top:8px'>"
-            "Accepted but not sent: waiting for a connected onion peer. "
-            "The coins stay reserved. Do not send it again.</div>",
+            "Accepted but not sent yet: it goes to one connected onion peer "
+            "after a short delay, or waits for one. The coins stay reserved. "
+            "Do not send it again.</div>",
             safe_txid, safe_txid);
     else if (is_opid)
         snprintf(txid_html, sizeof(txid_html),

@@ -2317,7 +2317,13 @@ static int wprt_case_resume_reserves_notes(void)
          wprt_seed_note(&f, 0x77) &&
          wpr_prepare(wpr_global(), &wtx.tx.hash).ok;
     bool free_before = ok && wprt_note_free(&f);
-    wpr_global()->env.reserve = wallet_private_broadcast_reserve_spends;
+    /* The boot order: the relay resumes from its own environment, before the
+     * shared wallet context is filled. */
+    struct wpr_env boot_env = wpr_global()->env;
+    boot_env.node_db = &f.ndb;
+    wallet_private_broadcast_arm_env(&boot_env, &wpr_global()->env);
+    wallet_rpc_context_set_base(NULL, NULL, NULL, NULL, NULL, NULL);
+    wallet_rpc_context_set_node_db(NULL);
     wprt_restart_relay(&f);
     bool resumed = ok && wpr_resume(wpr_global()).ok;
     bool free_after = ok && wprt_note_free(&f);
@@ -2379,6 +2385,97 @@ static int wprt_case_held_and_seen(void)
     wprt_report("a send seen back but never mined keeps a status that says so",
                 ok && wprt_state(&id, &found) == WPR_SEEN && found &&
                     wprt_status_next_has(&f, &id, "not in a block yet"),
+                &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* ── accepted is not sent: held until handed to a peer ──────────────── */
+
+static int wprt_case_held_at_zero(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
+    struct uint256 a, b;
+    ok = ok && wprt_rpc_send(&f, false, 10.0, &a);
+    wprt_report("right after a send with no onion peer it is reported held",
+                ok && wallet_private_broadcast_is_held(&a), &failures);
+    struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
+    ok = ok && onion && wprt_rpc_send(&f, true, 10.0, &b);
+    wprt_report("right after a send with a peer, still inside its delay, it "
+                "is reported held, not sent",
+                ok && wprt_count(onion, "tx") == 0 &&
+                    wallet_private_broadcast_is_held(&b), &failures);
+    wprt_run(2 * WPR_DELAY_MAX_MS, -1);
+    wprt_report("once handed to the peer neither is reported held",
+                onion && wprt_count(onion, "tx") >= 1 &&
+                    !wallet_private_broadcast_is_held(&b), &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* ── the handed fact is saved before the push ───────────────────────── */
+
+static int wprt_case_handed_saved_first(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 1, false);
+    struct p2p_node *onion = ok ? wprt_add_peer(&f, WPRT_ONION_OUT) : NULL;
+    struct uint256 id;
+    ok = ok && onion && wprt_rpc_send(&f, false, 10.0, &id);
+    snprintf(wpr_global()->datadir, sizeof(wpr_global()->datadir), "%s",
+             "/nonexistent/wallet-private-relay");
+    wprt_run(WPR_DELAY_MAX_MS + 1000, -1);
+    wprt_report("with the pending record unwritable nothing is pushed",
+                ok && wprt_count(onion, "tx") == 0 &&
+                    wprt_attempts(&id) == 0, &failures);
+    snprintf(wpr_global()->datadir, sizeof(wpr_global()->datadir), "%s",
+             f.dir);
+    wprt_run((int64_t)WPR_RETRY_S * 1000 + 2 * WPR_DELAY_MAX_MS, -1);
+    wprt_report("once the record can be written it is pushed once",
+                ok && wprt_count(onion, "tx") == 1 && wprt_attempts(&id) == 1,
+                &failures);
+    wprt_restart_relay(&f);
+    bool resumed = ok && wpr_resume(wpr_global()).ok;
+    wprt_report("a restart remembers the push: the status never says nothing "
+                "was sent",
+                resumed && !wprt_status_next_has(&f, &id, "Nothing was sent")
+                    && wprt_status_next_has(&f, &id,
+                                            "Do not send the payment again"),
+                &failures);
+    wprt_close(&f);
+    return failures;
+}
+
+/* ── seen back, then dropped, then past expiry ──────────────────────── */
+
+static int wprt_case_seen_then_expired(void)
+{
+    int failures = 0;
+    struct wprt_fx f;
+    bool ok = wprt_wallet_ready(&f, WPR_MODE_PRIVATE, 2, false);
+    wprt_overwinter_on(&f);
+    struct uint256 id;
+    struct outpoint spent;
+    memset(&spent, 0, sizeof(spent));
+    ok = ok && wprt_add_peer(&f, WPRT_ONION_OUT) &&
+         wprt_rpc_send(&f, false, 10.0, &id);
+    int e = (int)wprt_expiry_of(&f, &id, &spent);
+    wprt_run(WPR_DELAY_MAX_MS + 1000, -1);
+    wpr_note_seen(wpr_global(), &id);
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS);
+    bool found = false;
+    wprt_report("a seen-back send inside the expiry margin keeps its status",
+                ok && wprt_state(&id, &found) == WPR_SEEN && found &&
+                    wallet_is_outpoint_spent(f.wallet, &spent.hash, spent.n),
+                &failures);
+    wprt_tick_at_height(&f, e + WPR_EXPIRY_MARGIN_BLOCKS + 1);
+    wprt_report("a seen-back send never mined is rolled back past its expiry "
+                "and its coins return",
+                ok && wprt_state(&id, &found) == WPR_EXPIRED && found &&
+                    !wallet_is_outpoint_spent(f.wallet, &spent.hash, spent.n),
                 &failures);
     wprt_close(&f);
     return failures;
@@ -2454,6 +2551,9 @@ int test_wallet_private_relay(void)
     failures += wprt_case_resume_reserves_notes();
     failures += wprt_case_nullifier_hold();
     failures += wprt_case_held_and_seen();
+    failures += wprt_case_held_at_zero();
+    failures += wprt_case_handed_saved_first();
+    failures += wprt_case_seen_then_expired();
     failures += wprt_case_config();
     return failures;
 }

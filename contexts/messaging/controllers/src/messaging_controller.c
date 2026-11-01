@@ -173,8 +173,9 @@ static bool msg_onchain_store_and_report(const char *to_addr, const char *body,
     json_push_kv_str(result, "status", held ? "held" : "sent");
     if (held)
         json_push_kv_str(result, "note",
-                         "Held: waiting for a connected onion peer. Nothing "
-                         "was sent yet; do not send the message again.");
+                         "Held: not handed to an onion peer yet (it waits "
+                         "for its delay or for a connected peer); do not "
+                         "send the message again.");
     json_free(sub);
     printf("zmsg: %s on-chain message to %s\n", held ? "held" : "sent",
            to_addr);

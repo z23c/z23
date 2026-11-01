@@ -26,6 +26,8 @@
 #include "util/sync.h"
 #include "validation/txmempool.h"
 
+struct node_db;
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -87,10 +89,14 @@ struct wpr_env {
     const struct chain_params *params;
     const char *datadir;
     int64_t min_relay_fee;
+    /* The node database that records spent Sapling notes. May be NULL. */
+    struct node_db *node_db;
     /* Called for a recorded send the wallet holds, on resume, before anything
      * else: re-reserves the notes it spends, which a crash between the wallet
-     * write and the note reservation leaves free. May be NULL. */
-    void (*reserve)(const struct transaction *tx);
+     * write and the note reservation leaves free. It reads only this
+     * environment, because resume runs before the shared wallet context is
+     * filled. May be NULL. */
+    void (*reserve)(const struct wpr_env *env, const struct transaction *tx);
 };
 
 struct wpr_entry {
