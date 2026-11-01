@@ -10,6 +10,7 @@
 #include "controllers/fleet_status_controller.h"
 
 #include "base/cleanse.h"
+#include "base/hex.h"
 #include "platform/clock.h"
 #include "config/runtime.h"
 #include "controllers/blockchain_controller.h"
@@ -181,12 +182,7 @@ static bool disagreement_refuses(const struct fleet_tip *t,
 /* The refusal key of a machine: its box key as lowercase hex. */
 static void box_key(const uint8_t box[32], char out[FLEET_TIP_REFUSAL_KEY_MAX])
 {
-    static const char digits[] = "0123456789abcdef";
-    for (size_t i = 0; i < 32; i++) {
-        out[2 * i] = digits[box[i] >> 4];
-        out[2 * i + 1] = digits[box[i] & 15];
-    }
-    out[64] = '\0';
+    zcl_hex_encode(box, 32, out);
 }
 
 /* The node_state name of the standing refusal of the machine `key`. */
