@@ -618,6 +618,85 @@ static int t_force_now_repeatable(void)
 
 /* ── 9b. One-shot encryption does not require an env secret ───── */
 
+/* Check the last_* path suffixes recorded in a status snapshot. */
+static void wb_force_enc_path_suffixes(
+    const struct wallet_backup_status *status,
+    bool *has_encrypted_suffix, bool *latest_is_plaintext)
+{
+    *has_encrypted_suffix = false;
+    *latest_is_plaintext = false;
+    size_t path_len = strlen(status->last_encrypted_path);
+    size_t suffix_len = strlen(WALLET_BACKUP_FILENAME_SUFFIX_ENC);
+    *has_encrypted_suffix = path_len >= suffix_len &&
+        strcmp(status->last_encrypted_path + path_len - suffix_len,
+               WALLET_BACKUP_FILENAME_SUFFIX_ENC) == 0;
+    size_t latest_len = strlen(status->last_path);
+    size_t plain_suffix_len = strlen(WALLET_BACKUP_FILENAME_SUFFIX);
+    *latest_is_plaintext = latest_len >= plain_suffix_len &&
+        strcmp(status->last_path + latest_len - plain_suffix_len,
+               WALLET_BACKUP_FILENAME_SUFFIX) == 0;
+}
+
+/* Decrypt the recorded encrypted backup and count its wallet_keys rows. */
+static int64_t wb_force_enc_decrypt_rows(const char *backup_dir,
+    const struct wallet_backup_status *status, bool has_encrypted_suffix)
+{
+    char restored[640];
+    snprintf(restored, sizeof(restored), "%s/restored-one-shot.sqlite",
+             backup_dir);
+    bool decrypted = has_encrypted_suffix &&
+        wallet_backup_decrypt_file(status->last_encrypted_path, restored,
+                                   "invocation-only-password").ok;
+    return decrypted
+        ? wb_count_rows_in_file(restored, "wallet_keys") : -1;
+}
+
+/* Append one byte to the encrypted backup to tamper with it. */
+static void wb_force_enc_append_tamper_byte(bool *tampered, const char *path)
+{
+    *tampered = false;
+    int tamper_fd = open(path, O_WRONLY | O_APPEND | O_CLOEXEC);
+    uint8_t tamper = 0xa5;
+    *tampered = tamper_fd >= 0 && write(tamper_fd, &tamper, 1) == 1;
+    if (tamper_fd >= 0)
+        close(tamper_fd);
+}
+
+/* Verify the explicit encrypted run's counters survived the plaintext run. */
+static bool wb_force_enc_run_preserved(bool started, bool ran,
+    bool plaintext_ran, bool has_encrypted_suffix, bool latest_is_plaintext,
+    int seeded, int64_t rows,
+    const struct wallet_backup_status *after_start,
+    const struct wallet_backup_status *encrypted_status,
+    const struct wallet_backup_status *status)
+{
+    return started && ran && plaintext_ran && has_encrypted_suffix &&
+           latest_is_plaintext && seeded == 3 && rows == 3 &&
+           status->total_runs == after_start->total_runs + 2 &&
+           status->last_encrypted_run_unix ==
+               encrypted_status->last_run_unix &&
+           status->last_encrypted_key_count == 3 &&
+           status->last_encrypted_tables_verified ==
+               status->wallet_table_count &&
+           status->total_failures == after_start->total_failures;
+}
+
+/* Verify a restart restored the encrypted-backup authority exactly. */
+static bool wb_force_enc_restart_preserved(bool restarted,
+    const struct wallet_backup_status *encrypted_status,
+    const struct wallet_backup_status *status,
+    const struct wallet_backup_status *restored_status)
+{
+    return restarted &&
+           restored_status->last_encrypted_run_unix ==
+               encrypted_status->last_run_unix &&
+           restored_status->last_encrypted_key_count == 3 &&
+           restored_status->last_encrypted_tables_verified ==
+               restored_status->wallet_table_count &&
+           strcmp(restored_status->last_encrypted_path,
+                  status->last_encrypted_path) == 0;
+}
+
 static int t_force_now_encrypted(void)
 {
     int failures = 0;
@@ -659,54 +738,27 @@ static int t_force_now_encrypted(void)
     wallet_backup_status_snapshot(&restored_status);
     wallet_backup_stop();
 
-    size_t path_len = strlen(status.last_encrypted_path);
-    size_t suffix_len = strlen(WALLET_BACKUP_FILENAME_SUFFIX_ENC);
-    bool has_encrypted_suffix = path_len >= suffix_len &&
-        strcmp(status.last_encrypted_path + path_len - suffix_len,
-               WALLET_BACKUP_FILENAME_SUFFIX_ENC) == 0;
-    size_t latest_len = strlen(status.last_path);
-    size_t plain_suffix_len = strlen(WALLET_BACKUP_FILENAME_SUFFIX);
-    bool latest_is_plaintext = latest_len >= plain_suffix_len &&
-        strcmp(status.last_path + latest_len - plain_suffix_len,
-               WALLET_BACKUP_FILENAME_SUFFIX) == 0;
-    char restored[640];
-    snprintf(restored, sizeof(restored), "%s/restored-one-shot.sqlite",
-             f.backup_dir);
-    bool decrypted = has_encrypted_suffix &&
-        wallet_backup_decrypt_file(status.last_encrypted_path, restored,
-                                   "invocation-only-password").ok;
-    int64_t rows = decrypted
-        ? wb_count_rows_in_file(restored, "wallet_keys") : -1;
+    bool has_encrypted_suffix, latest_is_plaintext;
+    wb_force_enc_path_suffixes(&status, &has_encrypted_suffix,
+                               &latest_is_plaintext);
+    int64_t rows = wb_force_enc_decrypt_rows(f.backup_dir, &status,
+                                             has_encrypted_suffix);
 
-    int tamper_fd = open(status.last_encrypted_path,
-                         O_WRONLY | O_APPEND | O_CLOEXEC);
-    uint8_t tamper = 0xa5;
-    bool tampered = tamper_fd >= 0 && write(tamper_fd, &tamper, 1) == 1;
-    if (tamper_fd >= 0)
-        close(tamper_fd);
+    bool tampered;
+    wb_force_enc_append_tamper_byte(&tampered, status.last_encrypted_path);
     bool tamper_restart = wallet_backup_start(&cfg, &f.ndb).ok;
     struct wallet_backup_status tamper_status;
     wallet_backup_status_snapshot(&tamper_status);
     wallet_backup_stop();
 
     WB_RUN("wb: later plaintext run preserves encrypted-backup authority",
-           started && ran && plaintext_ran && has_encrypted_suffix &&
-           latest_is_plaintext && seeded == 3 && rows == 3 &&
-           status.total_runs == after_start.total_runs + 2 &&
-           status.last_encrypted_run_unix ==
-               encrypted_status.last_run_unix &&
-           status.last_encrypted_key_count == 3 &&
-           status.last_encrypted_tables_verified ==
-               status.wallet_table_count &&
-           status.total_failures == after_start.total_failures &&
-           restarted &&
-           restored_status.last_encrypted_run_unix ==
-               encrypted_status.last_run_unix &&
-           restored_status.last_encrypted_key_count == 3 &&
-           restored_status.last_encrypted_tables_verified ==
-               restored_status.wallet_table_count &&
-           strcmp(restored_status.last_encrypted_path,
-                  status.last_encrypted_path) == 0 &&
+           wb_force_enc_run_preserved(started, ran, plaintext_ran,
+                                      has_encrypted_suffix,
+                                      latest_is_plaintext, seeded, rows,
+                                      &after_start, &encrypted_status,
+                                      &status) &&
+           wb_force_enc_restart_preserved(restarted, &encrypted_status,
+                                          &status, &restored_status) &&
            tampered && tamper_restart &&
            tamper_status.last_encrypted_run_unix == 0 &&
            tamper_status.last_encrypted_path[0] == '\0');
@@ -1905,7 +1957,8 @@ static int t_authority_sync_backend(void)
 #else
     WB_RUN("wallet backup uses POSIX fsync authority barrier",
            barrier_ok &&
-           strcmp(platform_authority_sync_backend(), "fsync") == 0);
+           strcmp(platform_authority_sync_backend(),
+                                "fsync") == 0);
 #endif
     return failures;
 }
