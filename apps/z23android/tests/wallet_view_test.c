@@ -417,7 +417,11 @@ static void test_hidden_private_amounts(void)
     assert(wallet_view_from_summary(hidden, &v) && v.known);
     assert(!strcmp(v.balance, "Private balance hidden while the wallet is locked") && !strstr(v.balance, "ZCL"));
     assert(!v.pending[0] && !v.unready_line[0] && !v.total_line[0] && !v.current && v.scanning);
-    assert(!strcmp(v.sync, "Wallet locked: unlock to see private amounts"));
+    assert(!strcmp(v.sync, "Wallet locked, so private amounts are hidden"));
+    /* Blocks behind keep their own wording while locked: the public amounts may still change. */
+    replace_once(json, sizeof(json), hidden, "\"blocks_behind\":0,", "\"blocks_behind\":500,");
+    assert(wallet_view_from_summary(json, &v) && !strcmp(v.sync, "Catching up, 500 blocks behind: amounts may change"));
+    assert(!strncmp(v.public_line, "0.1 ZCL public", 14));
     assert(!strncmp(v.public_line, "0.1 ZCL public", 14));
     replace_once(json, sizeof(json), VALID_REPLY, schema, "\"schema\":\"zcl.wallet_summary.v1\",\"shielded_state\":\"bogus\",");
     assert(!wallet_view_from_summary(json, &v));

@@ -74,6 +74,7 @@ static struct {
     struct wallet_env env;
     bool ready, secure, blocked, held;
     uint64_t held_at; /* when the pause kept the protection */
+    unsigned held_ticks; /* settle calls since then */
     char why[96]; /* what the refused protection could not do, for the notice shown instead of the wallet */
     unsigned epoch, version, dropped;
     enum wallet_page page;
@@ -83,8 +84,9 @@ static struct {
 
 /* ---- small helpers ---- */
 
-/* A frame without wallet data is on screen this long after the pause before the protection goes. */
-enum { WALLET_SETTLE_MS = 250 };
+/* The protection a pause kept goes only after this long and this many ticks, so a stalled UI thread cannot
+ * release it before a screen without wallet data has been drawn. */
+enum { WALLET_SETTLE_MS = 250, WALLET_SETTLE_TICKS = 2 };
 
 static void touch(void) { ++st.version; }
 static void copy(char *dst, size_t cap, const char *src) { snprintf(dst, cap, "%s", src); }
@@ -773,6 +775,7 @@ static void leave_locked(bool keep_protection)
 {
     st.held = keep_protection && st.secure;
     st.held_at = st.held ? now() : 0;
+    st.held_ticks = 0;
     ++st.epoch;
     wipe();
     drop_queued();
@@ -989,7 +992,10 @@ void wallet_screens_tick(void)
 void wallet_screens_settle(void)
 {
     pthread_mutex_lock(&st.lock);
-    if (st.ready && st.held && st.page == WALLET_PAGE_NONE && now() - st.held_at >= WALLET_SETTLE_MS) leave_locked(false);
+    if (st.ready && st.held && st.page == WALLET_PAGE_NONE) {
+        if (st.held_ticks < WALLET_SETTLE_TICKS) ++st.held_ticks;
+        if (st.held_ticks >= WALLET_SETTLE_TICKS && now() - st.held_at >= WALLET_SETTLE_MS) leave_locked(false);
+    }
     pthread_mutex_unlock(&st.lock);
 }
 

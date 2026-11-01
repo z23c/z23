@@ -18,7 +18,7 @@
 #define TEXT_UNREADY_UNKNOWN "Amount waiting on the wallet unknown"
 #define TEXT_HIDDEN "Private balance hidden while the wallet is locked"
 #define TEXT_SYNC_UNKNOWN "Sync state unknown"
-#define TEXT_SYNC_LOCKED "Wallet locked: unlock to see private amounts"
+#define TEXT_SYNC_LOCKED "Wallet locked, so private amounts are hidden"
 #define TEXT_SEND_UNAVAILABLE "Sending is unavailable until the wallet state loads."
 #define TEXT_SEND_RELEASE "Sending is paused until this node verifies the chain tip itself."
 #define TEXT_SEND_STORE "Sending is paused because this node's progress store is not open."
@@ -273,7 +273,6 @@ static void render_public(const struct summary *s, struct wallet_view *out)
  * says, so a stale balance is never shown as confirmed. */
 static void render_sync(const struct summary *s, struct wallet_view *out)
 {
-    if (s->hidden) { put(out->sync, sizeof(out->sync), TEXT_SYNC_LOCKED); return; }
     if (s->blocks_behind > 1)
         snprintf(out->sync, sizeof(out->sync), "Catching up, %lld blocks behind: amounts may change",
                  (long long)s->blocks_behind);
@@ -281,6 +280,8 @@ static void render_sync(const struct summary *s, struct wallet_view *out)
         put(out->sync, sizeof(out->sync), "Catching up, 1 block behind: amounts may change");
     else if (s->current)
         snprintf(out->sync, sizeof(out->sync), "Up to date at block %lld", (long long)s->tip);
+    else if (s->hidden)
+        put(out->sync, sizeof(out->sync), TEXT_SYNC_LOCKED);
     else
         put(out->sync, sizeof(out->sync), "Catching up: amounts may change");
 }

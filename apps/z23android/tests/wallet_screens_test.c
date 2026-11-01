@@ -940,6 +940,15 @@ static void test_settle(void)
     wallet_screens_pause();
     wallet_screens_settle();
     CHECK(!fake.secure_on);
+
+    start(false);                                                            /* a stalled thread: time passes but only one tick ran */
+    CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
+    wallet_screens_pause();
+    fake.now += 5000;
+    wallet_screens_settle();
+    CHECK(fake.secure_on && fake.secure_off_calls == 0);
+    wallet_screens_settle();
+    CHECK(!fake.secure_on && fake.secure_off_calls == 1);
 }
 
 /* Only the node's fully_shielded says whether a transaction was private: true is Private and false is Public, in every
@@ -1278,7 +1287,7 @@ static void test_funds_unready(void)
     CHECK(has("Balance unknown") && !has("catches up"));
     fake.summary = SUMMARY_STATE("keys_unavailable", PRIVATE_HIDDEN, "10000000", "0.10000000");
     CHECK(wallet_screens_open(WALLET_PAGE_FUNDS));
-    CHECK(has("Private balance hidden while the wallet is locked") && has("Wallet locked: unlock to see private amounts") && !has("Catching up") && has("0.1 ZCL public") && !has("catches up") && !has("0 ZCL") && !has("unknown"));
+    CHECK(has("Private balance hidden while the wallet is locked") && has("Up to date at block 3000000") && !has("Catching up") && has("0.1 ZCL public") && !has("catches up") && !has("0 ZCL") && !has("unknown"));
     wallet_screens_close();
 }
 
