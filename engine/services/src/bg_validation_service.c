@@ -741,7 +741,8 @@ static enum bg_validation_step bg_validation_walk_step(
     const char *datadir, const struct chain_params *params, int num_workers,
     enum bg_validation_state ready_state, uint64_t *applied_next,
     unsigned *row_retries, int64_t *block_sigs,
-    int64_t *block_proofs, int64_t *block_skips)
+    int64_t *block_proofs, int64_t *block_skips,
+    struct block_index **validated)
 {
     if (!bg_validation_wait_until_applied(svc, h, applied_next))
         return BG_VALIDATION_STEP_STOP;
@@ -763,6 +764,9 @@ static enum bg_validation_step bg_validation_walk_step(
     if (result == BG_VALIDATION_HEIGHT_FAILED)
         return BG_VALIDATION_STEP_FAILED;
     block_free(&blk);
+    /* The index validation actually used (the resilient read may have
+     * swapped it); the only one a caller may record as verified. */
+    *validated = pindex;
     return BG_VALIDATION_STEP_BOOKED;
 }
 
@@ -790,9 +794,11 @@ static bool bg_validation_catch_up_round(
         if (!pindex)
             break;
         int64_t sigs = 0, proofs = 0, skips = 0;
+        struct block_index *validated = NULL;
         enum bg_validation_step step = bg_validation_walk_step(
             svc, h, pindex, datadir, params, num_workers,
-            BG_VALIDATION_COMPLETE, &applied_next, &row_retries, &sigs, &proofs, &skips);
+            BG_VALIDATION_COMPLETE, &applied_next, &row_retries, &sigs, &proofs, &skips,
+            &validated);
         if (step == BG_VALIDATION_STEP_RETRY &&
             ++retries <= BG_CATCHUP_MAX_RETRIES)
             continue;
@@ -801,7 +807,7 @@ static bool bg_validation_catch_up_round(
         atomic_fetch_add(&svc->progress.sigs_verified, sigs);
         atomic_fetch_add(&svc->progress.proofs_verified, proofs);
         atomic_fetch_add(&svc->progress.script_verif_skipped_no_undo, skips);
-        bg_validation_note_verified_tip(svc, h, pindex);
+        bg_validation_note_verified_tip(svc, h, validated);
         atomic_store(&svc->progress.verified_height, h);
         atomic_store(&svc->progress.chain_height, h);
         h++;
@@ -1064,10 +1070,12 @@ static void *bg_validation_thread(void *arg)
         /* One shared block step (fold wait, row pre-check with backoff,
          * resilient body read, full validation); see bg_validation_walk_step. */
         int64_t block_sigs = 0, block_proofs = 0, block_skips = 0;
+        struct block_index *validated = NULL;
         enum bg_validation_step step = bg_validation_walk_step(
             svc, h, pindex, datadir, params, num_workers,
             BG_VALIDATION_RUNNING, &applied_next,
-            &row_retries, &block_sigs, &block_proofs, &block_skips);
+            &row_retries, &block_sigs, &block_proofs, &block_skips,
+            &validated);
         if (step == BG_VALIDATION_STEP_RETRY) {
             h--;
             continue;
@@ -1083,7 +1091,7 @@ static void *bg_validation_thread(void *arg)
         total_sigs += block_sigs;
         total_proofs += block_proofs;
         total_skips += block_skips;
-        bg_validation_note_verified_tip(svc, h, pindex);
+        bg_validation_note_verified_tip(svc, h, validated);
         atomic_store(&svc->progress.verified_height, h);
         atomic_store(&svc->progress.sigs_verified, total_sigs);
         atomic_store(&svc->progress.proofs_verified, total_proofs);

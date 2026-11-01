@@ -145,18 +145,6 @@ static bool bgv_auth_walk_verified_tip_is(
            memcmp(hash, tip->phashBlock->data, sizeof(hash)) == 0;
 }
 
-static bool bgv_auth_tip_is_best_work(struct bg_validation_service *svc,
-                                      const struct block_index *tip)
-{
-    /* The process_block path runs this predicate under cs_main. It is taken
-     * alone here: no progress or coins lock is held (the frontier scan has
-     * released it) and csr->lock is never nested inside. */
-    zcl_mutex_lock(&svc->ms->cs_main);
-    bool best = process_block_tip_is_best_work(svc->ms, tip);
-    zcl_mutex_unlock(&svc->ms->cs_main);
-    return best;
-}
-
 static bool bgv_auth_record_needs_earning(
     const struct chain_evidence_controller_view *view)
 {
@@ -182,16 +170,27 @@ static bool bgv_auth_genesis_tip_prepare(
     if (external_seeded || view->snapshot_evidence_loaded ||
         !bgv_auth_record_needs_earning(view))
         return true;
+    /* Tip read, hash comparison and best-work evaluation under ONE cs_main
+     * hold, so the tip judged best is the tip read. cs_main is released
+     * before the controller call: the controller never runs under it. */
+    zcl_mutex_lock(&svc->ms->cs_main);
     struct block_index *tip = active_chain_tip(&svc->ms->chain_active);
     bool bytes = bgv_auth_walk_verified_tip_is(svc, tip);
+    bool best = bytes && process_block_tip_is_best_work(svc->ms, tip);
+    struct uint256 tip_hash;
+    int tip_height = -1;
+    if (bytes) {
+        tip_hash = *tip->phashBlock;
+        tip_height = tip->nHeight;
+    }
+    zcl_mutex_unlock(&svc->ms->cs_main);
     if (!bytes) {
         snprintf(reason, 192,
                  "genesis walk did not verify the active tip block by hash");
         return false;
     }
     struct zcl_result earned = chain_evidence_controller_earn_active_tip_evidence(
-        authority, tip->phashBlock, tip->nHeight,
-        bgv_auth_tip_is_best_work(svc, tip), bytes);
+        authority, &tip_hash, tip_height, best, bytes);
     if (!earned.ok) {
         snprintf(reason, 192, "genesis walk could not earn active-tip "
                               "evidence: %.140s", earned.message);
@@ -306,11 +305,25 @@ struct zcl_result bg_validation_authority_publish(
         return ZCL_OK;
     }
 
-    if (!bgv_auth_genesis_tip_prepare(svc, &authority, &view,
-                                      external_seeded, reason))
-        return bgv_auth_refuse(reason);
-
-    if (!bgv_auth_evidence_ready(&view, external_seeded, reason))
+    /* A live-advance write for a newer tip can replace the earned record
+     * between the earn and this snapshot. Earning is tip-by-hash and
+     * idempotent, so retry once from a fresh snapshot; if the record is
+     * still unearned, refuse here, BEFORE mark_fully_validated, which would
+     * freeze the controller on missing evidence.
+     * Residual window (documented, not closed): a replacement landing
+     * between this final snapshot and mark_fully_validated's own load still
+     * freezes until boot. Closing it needs mark_fully_validated to take the
+     * tip hash, a wider controller change. */
+    bool ready = false;
+    for (int attempt = 0; attempt < 2 && !ready; attempt++) {
+        if (attempt > 0)
+            chain_evidence_controller_snapshot(&authority, &view);
+        if (!bgv_auth_genesis_tip_prepare(svc, &authority, &view,
+                                          external_seeded, reason))
+            return bgv_auth_refuse(reason);
+        ready = bgv_auth_evidence_ready(&view, external_seeded, reason);
+    }
+    if (!ready)
         return bgv_auth_refuse(reason);
 
     uint8_t authority_root_bytes[32];

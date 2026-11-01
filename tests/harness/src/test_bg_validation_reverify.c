@@ -1334,6 +1334,84 @@ static int test_bg_validation_catchup_verifies_new_tip_block(void)
     return failures;
 }
 
+static struct main_state *g_swap_ms;
+static struct block_index *g_swap_sibling;
+static int g_swap_reads;
+
+/* First read of the height: a same-height reorg lands during the read, so
+ * the resilient read must go stale and re-read the replacement. */
+static bool body_read_swaps_active_tip(
+    struct block *block, const struct block_index *index, const char *datadir)
+{
+    (void)block;
+    (void)index;
+    (void)datadir;
+    if (g_swap_reads++ == 0) {
+        zcl_mutex_lock(&g_swap_ms->cs_main);
+        active_chain_move_window_tip(&g_swap_ms->chain_active, g_swap_sibling);
+        zcl_mutex_unlock(&g_swap_ms->cs_main);
+    }
+    return true;
+}
+
+static int test_bg_validation_catchup_notes_the_validated_tip(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: catch-up notes the index validation used, not the "
+         "one fetched before a same-height reorg") {
+        struct main_state ms;
+        struct bg_validation_service svc;
+        main_state_init(&ms);
+        struct uint256 h0_hash, a_hash;
+        struct block_index *h0 = make_repair_index(&ms, &h0_hash);
+        ASSERT(h0 != NULL);
+        ASSERT(extend_repair_chain(&ms, h0, &a_hash) != NULL);
+        struct uint256 b_hash;
+        memset(&b_hash, 0, sizeof(b_hash));
+        b_hash.data[0] = 4;
+        struct block_index *b =
+            chainstate_insert_block_index((struct chainstate *)&ms, &b_hash);
+        ASSERT(b != NULL);
+        b->nHeight = 1;
+        b->pprev = h0;
+        b->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+        b->nFile = 52;
+        b->nDataPos = 8;
+        arith_uint256_set_u64(&b->nChainWork, 4);
+        walk_svc_init(&svc, &ms);
+        atomic_store(&svc.progress.verified_height, 0);
+        atomic_store(&svc.progress.chain_height, 0);
+        atomic_store(&svc.progress.state, BG_VALIDATION_COMPLETE);
+        g_restart_progress = 0;
+        g_catchup_stub_skips = 0;
+        g_catchup_stub_verdict = true;
+        g_swap_ms = &ms;
+        g_swap_sibling = b;
+        g_swap_reads = 0;
+        bg_validation_test_set_body_repair_stubs(body_read_swaps_active_tip,
+                                                 body_repair_no_sleep);
+        bg_validation_test_set_validate_stub(catchup_validate_stub);
+        bool reached =
+            bg_validation_test_catch_up_round(&svc, 1, "unused", NULL, 1);
+        bg_validation_test_set_validate_stub(NULL);
+        bg_validation_test_set_body_repair_stubs(NULL, NULL);
+        reducer_frontier_body_read_note_reset_for_testing();
+        ASSERT(reached);
+        ASSERT(g_swap_reads >= 2);
+        int noted_height = -1;
+        uint8_t noted[32];
+        ASSERT(bg_validation_verified_tip(&svc, &noted_height, noted));
+        ASSERT_EQ(noted_height, 1);
+        ASSERT(memcmp(noted, b_hash.data, sizeof(noted)) == 0);
+        ASSERT(memcmp(noted, a_hash.data, sizeof(noted)) != 0);
+        main_state_free(&ms);
+        g_restart_progress = 1;
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bg_validation_catchup_never_forgives_skips_or_gaps(void)
 {
     int failures = 0;
@@ -1612,6 +1690,7 @@ int test_bg_validation_reverify(void)
     failures += test_bg_validation_walk_waits_for_fold();
     failures += test_bg_validation_authority_requires_complete_coverage();
     failures += test_bg_validation_catchup_verifies_new_tip_block();
+    failures += test_bg_validation_catchup_notes_the_validated_tip();
     failures += test_bg_validation_catchup_never_forgives_skips_or_gaps();
     failures += test_bg_validation_catchup_block_failure_stays_unverified();
     return failures;
