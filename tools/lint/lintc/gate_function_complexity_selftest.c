@@ -562,12 +562,16 @@ static int cyc_st_writeback(const char *root)
 static int cyc_st_fn(char *buf, size_t cap, const char *name, int m)
 {
     int n = snprintf(buf, cap, "int %s(int x)\n{\n    int r = 0;\n", name);
-    for (int i = 1; i < m && n >= 0 && (size_t)n < cap; i++)
-        n += snprintf(buf + n, cap - (size_t)n, "    if (x > %d) r++;\n", i);
     if (n < 0 || (size_t)n >= cap)
         return 1;
-    n += snprintf(buf + n, cap - (size_t)n, "    return r;\n}\n");
-    return n < 0 || (size_t)n >= cap;
+    for (int i = 1; i < m; i++) {
+        int w = snprintf(buf + n, cap - (size_t)n, "    if (x > %d) r++;\n", i);
+        if (w < 0 || (size_t)w >= cap - (size_t)n)
+            return 1;
+        n += w;
+    }
+    int w = snprintf(buf + n, cap - (size_t)n, "    return r;\n}\n");
+    return w < 0 || (size_t)w >= cap - (size_t)n;
 }
 
 /* One fixture file: its path under the root, its function and its M. */
