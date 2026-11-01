@@ -374,6 +374,30 @@ int64_t db_sapling_note_balance_for_ivk_minconf(struct node_db *ndb,
         AR_BIND_INT(s, 2, max_height));
 }
 
+int64_t db_sapling_note_balance_for_diversifier_minconf(
+    struct node_db *ndb, const uint8_t ivk[32], const uint8_t diversifier[11],
+    int tip_height, int minconf)
+{
+    if (!ndb || !ndb->open || !ivk || !diversifier) return 0;
+    sqlite3_stmt *s = NULL;
+    if (minconf <= 0) {
+        AR_QUERY_INT64_BOUND(ndb, s,
+            "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes"
+            " WHERE ivk=? AND diversifier=? AND spent_txid IS NULL",
+            AR_BIND_BLOB(s, 1, ivk, 32);
+            AR_BIND_BLOB(s, 2, diversifier, 11));
+    }
+    int max_height = tip_height - minconf + 1;
+    AR_QUERY_INT64_BOUND(ndb, s,
+        "SELECT COALESCE(SUM(value),0) FROM wallet_sapling_notes"
+        " WHERE ivk=? AND diversifier=? AND spent_txid IS NULL"
+        "   AND block_height IS NOT NULL AND block_height >= 1"
+        "   AND block_height <= ?",
+        AR_BIND_BLOB(s, 1, ivk, 32);
+        AR_BIND_BLOB(s, 2, diversifier, 11);
+        AR_BIND_INT(s, 3, max_height));
+}
+
 int64_t db_sapling_note_balance_for_address(struct node_db *ndb,
                                             const char *address)
 {

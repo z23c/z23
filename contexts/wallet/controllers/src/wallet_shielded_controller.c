@@ -269,8 +269,8 @@ bool rpc_z_getbalance(const struct json_value *params, bool help,
                     if (db_h >= 0)
                         tip = db_h;
                 }
-                balance = db_sapling_note_balance_for_ivk_minconf(
-                    ctx->node_db, ske->ivk, tip, minconf);
+                balance = db_sapling_note_balance_for_diversifier_minconf(
+                    ctx->node_db, ske->ivk, z_d, tip, minconf);
             }
         }
         char buf[32];

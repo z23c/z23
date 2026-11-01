@@ -13,15 +13,14 @@
 #include "util/log_macros.h"
 #include "util/result.h"
 #include "util/safe_alloc.h"
+#include "util/sync.h"
 #include "encoding/utilstrencodings.h"
 #include "storage/event_log_payloads.h"
 #include "event/event.h"
 #include "crypto/random_secret.h"
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <threads.h>
 
 /* A secret row must never be written in the clear while a passphrase is
  * loaded or the wallet wraps its secrets at rest. */
@@ -481,7 +480,13 @@ bool wallet_sqlite_read_sapling_keys(struct wallet_sqlite *ws,
 #define WSQL_DIV_START_MIN ((uint64_t)1 << 40)
 #define WSQL_DIV_START_SPAN ((uint64_t)1 << 60)
 
-static atomic_flag g_div_busy = ATOMIC_FLAG_INIT;
+static zcl_mutex_t g_div_lock;
+static zcl_once_t g_div_once = ZCL_ONCE_INIT;
+
+static void wsql_div_lock_init(void)
+{
+    zcl_mutex_init(&g_div_lock);
+}
 
 #ifdef ZCL_TESTING
 static bool (*g_div_rng)(uint8_t *buf, size_t n);
@@ -632,9 +637,9 @@ bool wallet_sqlite_diversifier_reserve(
                  "transaction");
     /* Read, derive and write are one step: two callers must not read one
      * index, and the synchronous level is restored by whoever raised it. */
-    while (atomic_flag_test_and_set_explicit(&g_div_busy,
-                                             memory_order_acquire))
-        thrd_yield();
+    if (!zcl_once_call(&g_div_once, wsql_div_lock_init))
+        LOG_FAIL("wallet_sqlite", "diversifier reserve: lock unavailable");
+    zcl_mutex_lock(&g_div_lock);
     bool ok = false;
     uint64_t first_free = 0;
     uint64_t slot = 0;
@@ -647,7 +652,7 @@ bool wallet_sqlite_diversifier_reserve(
         else if (wsql_div_write_durable(ws, acct->ivk, slot + 1))
             ok = true;
     }
-    atomic_flag_clear_explicit(&g_div_busy, memory_order_release);
+    zcl_mutex_unlock(&g_div_lock);
     if (!ok)
         return false;
     memcpy(diversifier_out, d, ZC_DIVERSIFIER_SIZE);

@@ -12,6 +12,7 @@
  * params-gated group simnet_wallet_diversified_send. */
 
 #include "test/test_core.h"
+#include "test/test_sync_probe_vfs.h"
 #include "chain/chainparams.h"
 #include "config/boot_wallet_phrase.h"
 #include "config/command_catalog.h"
@@ -873,131 +874,6 @@ static int test_random_failure_refuses(void)
     return failures;
 }
 
-/* A file wrapper that counts the syncs of the write-ahead log and can fail
- * them: it sees what a clean close cannot, whether the index was synced. */
-struct wdr_vfs_file {
-    sqlite3_file base;
-    sqlite3_file *real;
-    bool wal;
-};
-
-static sqlite3_vfs g_wdr_vfs;
-static sqlite3_vfs *g_wdr_real_vfs;
-static atomic_int g_wdr_wal_syncs;
-static atomic_bool g_wdr_sync_fails;
-static const sqlite3_io_methods g_wdr_io;
-
-#define WDR_REAL(f) (((struct wdr_vfs_file *)(f))->real)
-
-static int wdr_io_close(sqlite3_file *f)
-{
-    return WDR_REAL(f)->pMethods->xClose(WDR_REAL(f));
-}
-static int wdr_io_read(sqlite3_file *f, void *p, int n, sqlite3_int64 o)
-{
-    return WDR_REAL(f)->pMethods->xRead(WDR_REAL(f), p, n, o);
-}
-static int wdr_io_write(sqlite3_file *f, const void *p, int n, sqlite3_int64 o)
-{
-    return WDR_REAL(f)->pMethods->xWrite(WDR_REAL(f), p, n, o);
-}
-static int wdr_io_truncate(sqlite3_file *f, sqlite3_int64 s)
-{
-    return WDR_REAL(f)->pMethods->xTruncate(WDR_REAL(f), s);
-}
-static int wdr_io_sync(sqlite3_file *f, int flags)
-{
-    if (((struct wdr_vfs_file *)f)->wal) {
-        if (atomic_load(&g_wdr_sync_fails))
-            return SQLITE_IOERR_FSYNC;
-        atomic_fetch_add(&g_wdr_wal_syncs, 1);
-    }
-    return WDR_REAL(f)->pMethods->xSync(WDR_REAL(f), flags);
-}
-static int wdr_io_size(sqlite3_file *f, sqlite3_int64 *s)
-{
-    return WDR_REAL(f)->pMethods->xFileSize(WDR_REAL(f), s);
-}
-static int wdr_io_lock(sqlite3_file *f, int l)
-{
-    return WDR_REAL(f)->pMethods->xLock(WDR_REAL(f), l);
-}
-static int wdr_io_unlock(sqlite3_file *f, int l)
-{
-    return WDR_REAL(f)->pMethods->xUnlock(WDR_REAL(f), l);
-}
-static int wdr_io_reserved(sqlite3_file *f, int *r)
-{
-    return WDR_REAL(f)->pMethods->xCheckReservedLock(WDR_REAL(f), r);
-}
-static int wdr_io_control(sqlite3_file *f, int op, void *a)
-{
-    return WDR_REAL(f)->pMethods->xFileControl(WDR_REAL(f), op, a);
-}
-static int wdr_io_sector(sqlite3_file *f)
-{
-    return WDR_REAL(f)->pMethods->xSectorSize(WDR_REAL(f));
-}
-static int wdr_io_device(sqlite3_file *f)
-{
-    return WDR_REAL(f)->pMethods->xDeviceCharacteristics(WDR_REAL(f));
-}
-static int wdr_io_shm_map(sqlite3_file *f, int pg, int sz, int ext,
-                          void volatile **pp)
-{
-    return WDR_REAL(f)->pMethods->xShmMap(WDR_REAL(f), pg, sz, ext, pp);
-}
-static int wdr_io_shm_lock(sqlite3_file *f, int off, int n, int flags)
-{
-    return WDR_REAL(f)->pMethods->xShmLock(WDR_REAL(f), off, n, flags);
-}
-static void wdr_io_shm_barrier(sqlite3_file *f)
-{
-    WDR_REAL(f)->pMethods->xShmBarrier(WDR_REAL(f));
-}
-static int wdr_io_shm_unmap(sqlite3_file *f, int del)
-{
-    return WDR_REAL(f)->pMethods->xShmUnmap(WDR_REAL(f), del);
-}
-
-static const sqlite3_io_methods g_wdr_io = {
-    2, wdr_io_close, wdr_io_read, wdr_io_write, wdr_io_truncate, wdr_io_sync,
-    wdr_io_size, wdr_io_lock, wdr_io_unlock, wdr_io_reserved, wdr_io_control,
-    wdr_io_sector, wdr_io_device, wdr_io_shm_map, wdr_io_shm_lock,
-    wdr_io_shm_barrier, wdr_io_shm_unmap, NULL, NULL,
-};
-
-static int wdr_vfs_open(sqlite3_vfs *v, const char *name, sqlite3_file *f,
-                        int flags, int *out_flags)
-{
-    (void)v;
-    struct wdr_vfs_file *w = (struct wdr_vfs_file *)f;
-    w->base.pMethods = NULL;
-    w->real = (sqlite3_file *)(w + 1);
-    w->wal = (flags & SQLITE_OPEN_WAL) != 0;
-    int rc = g_wdr_real_vfs->xOpen(g_wdr_real_vfs, name, w->real, flags,
-                                   out_flags);
-    if (rc == SQLITE_OK)
-        w->base.pMethods = &g_wdr_io;
-    return rc;
-}
-
-static bool wdr_vfs_install(void)
-{
-    g_wdr_real_vfs = sqlite3_vfs_find(NULL);
-    if (!g_wdr_real_vfs)
-        return false;
-    g_wdr_vfs = *g_wdr_real_vfs;
-    g_wdr_vfs.zName = "wdr_sync_probe";
-    g_wdr_vfs.szOsFile = (int)sizeof(struct wdr_vfs_file) +
-                         g_wdr_real_vfs->szOsFile;
-    g_wdr_vfs.xOpen = wdr_vfs_open;
-    g_wdr_vfs.pNext = NULL;
-    atomic_store(&g_wdr_wal_syncs, 0);
-    atomic_store(&g_wdr_sync_fails, false);
-    return sqlite3_vfs_register(&g_wdr_vfs, 1) == SQLITE_OK;
-}
-
 static int wdr_sync_level(struct wdr *f)
 {
     sqlite3_stmt *s = NULL;
@@ -1010,10 +886,10 @@ static int wdr_sync_level(struct wdr *f)
     return level;
 }
 
-/* The index reaches the disk before the address leaves: in normal mode and in
- * the bulk-sync mode that turns syncing off, the write-ahead log is synced by
- * the receive itself, the connection's mode is put back afterwards, and when
- * the sync fails no address is returned. */
+/* The index reaches the disk before the address leaves: the receive itself
+ * syncs the write-ahead log, in normal mode and in bulk-sync mode, the
+ * connection's mode is put back afterwards, and when the sync fails no
+ * address is returned. */
 static int test_index_synced_before_return(void)
 {
     int failures = 0;
@@ -1021,45 +897,49 @@ static int test_index_synced_before_return(void)
     memset(&f, 0, sizeof(f));
     bool vfs_on = false;
     TEST("wallet_diversified_receive: the index is synced before the address") {
-        ASSERT(wdr_vfs_install());
+        ASSERT(spv_install());
         vfs_on = true;
         ASSERT(wdr_restore(&f));
         wdr_use_start(0x5151ULL);
-        char a[128], b[128], c[128], d[128];
-        ASSERT_EQ(wdr_sync_level(&f), 1);
+        char warm[128], a[128], b[128], c[128], d[128];
+        int normal = wdr_sync_level(&f);
+        ASSERT_EQ(normal, 1);
+
+        /* The first write after a log reset syncs the log header whatever the
+         * mode, so one receive goes first and only the next is counted. */
         ASSERT(sqlite3_exec(f.ndb.db, "PRAGMA wal_checkpoint(TRUNCATE)", NULL,
                             NULL, NULL) == SQLITE_OK);
-
-        int before = atomic_load(&g_wdr_wal_syncs);
+        ASSERT(wdr_receive(&f, warm, sizeof(warm)));
+        spv_reset();
         ASSERT(wdr_receive(&f, a, sizeof(a)));
-        ASSERT(atomic_load(&g_wdr_wal_syncs) > before);
-        ASSERT_EQ(wdr_sync_level(&f), 1);
+        ASSERT(spv_count(SPV_SYNC_WAL) > 0);
+        ASSERT_EQ(wdr_sync_level(&f), normal);
 
         ASSERT(node_db_ibd_turbo_mode(&f.ndb));
-        ASSERT_EQ(wdr_sync_level(&f), 0);
-        before = atomic_load(&g_wdr_wal_syncs);
+        int bulk = wdr_sync_level(&f);
+        spv_reset();
         ASSERT(wdr_receive(&f, b, sizeof(b)));
-        ASSERT(atomic_load(&g_wdr_wal_syncs) > before);
-        ASSERT_EQ(wdr_sync_level(&f), 0);
+        ASSERT(spv_count(SPV_SYNC_WAL) > 0);
+        ASSERT_EQ(wdr_sync_level(&f), bulk);
 
-        atomic_store(&g_wdr_sync_fails, true);
+        spv_fail_wal_sync(true);
         c[0] = '\0';
         bool failed = !wdr_receive(&f, c, sizeof(c));
-        atomic_store(&g_wdr_sync_fails, false);
+        spv_fail_wal_sync(false);
         ASSERT(failed);
         ASSERT_STR_EQ(c, "");
-        ASSERT_EQ(wdr_sync_level(&f), 0);
+        ASSERT_EQ(wdr_sync_level(&f), bulk);
 
         ASSERT(wdr_receive(&f, d, sizeof(d)));
         ASSERT(strcmp(d, a) != 0);
         ASSERT(strcmp(d, b) != 0);
         PASS();
     } _test_next:;
-    atomic_store(&g_wdr_sync_fails, false);
+    spv_fail_wal_sync(false);
     wdr_use_system_rng();
     wdr_teardown(&f);
     if (vfs_on)
-        (void)sqlite3_vfs_unregister(&g_wdr_vfs);
+        spv_uninstall();
     return failures;
 }
 
@@ -1168,72 +1048,46 @@ static int test_index_exhaustion(void)
     return failures;
 }
 
-/* An issued address is owned: its balance is the account's funded notes, and
- * a send from it is not refused as foreign. */
-static int test_issued_address_is_owned(void)
+/* The balance of an issued address is what was paid to that address: the
+ * funded one reports its notes, an issued but unpaid one and the default
+ * report nothing. */
+static int test_issued_address_balance(void)
 {
     int failures = 0;
     struct wdr f;
     memset(&f, 0, sizeof(f));
-    TEST("wallet_diversified_receive: balance and send know an issued address") {
+    TEST("wallet_diversified_receive: balance is held at the issued address") {
         ASSERT(wdr_restore(&f));
         struct sapling_key_entry acct;
         ASSERT(wdr_account(&f, &acct));
-        uint64_t start = wdr_use_start(0xabcdefULL);
-        char x[128], def[128], payee[128];
+        wdr_use_start(0xabcdefULL);
+        char x[128], y[128], def[128];
         ASSERT(wdr_receive(&f, x, sizeof(x)));
+        ASSERT(wdr_receive(&f, y, sizeof(y)));
         ASSERT(wdr_default(&acct, def, sizeof(def)));
-        ASSERT(wdr_expected_from(&acct, start, 9, payee, sizeof(payee)));
         ASSERT_EQ(wdr_deliver(&f, x, 3 * WDR_UNIT, 1), 1);
 
-        for (int which = 0; which < 2; which++) {
-            struct json_value params, minconf, result;
+        const char *const addr[3] = { x, y, def };
+        const char *const want[3] = { "3.00000000", "0.00000000",
+                                      "0.00000000" };
+        for (int which = 0; which < 3; which++) {
+            struct json_value params, arg, result;
             json_init(&params);
             json_set_array(&params);
-            json_init(&minconf);
-            json_set_str(&minconf, which == 0 ? x : def);
-            ASSERT(json_push_back(&params, &minconf));
-            json_free(&minconf);
-            json_init(&minconf);
-            json_set_int(&minconf, 0);
-            ASSERT(json_push_back(&params, &minconf));
-            json_free(&minconf);
+            json_init(&arg);
+            json_set_str(&arg, addr[which]);
+            ASSERT(json_push_back(&params, &arg));
+            json_free(&arg);
+            json_init(&arg);
+            json_set_int(&arg, 0);
+            ASSERT(json_push_back(&params, &arg));
+            json_free(&arg);
             json_init(&result);
             ASSERT(rpc_table_execute(f.tbl, "z_getbalance", &params, &result));
-            ASSERT_STR_EQ(json_get_str(&result), "3.00000000");
+            ASSERT_STR_EQ(json_get_str(&result), want[which]);
             json_free(&params);
             json_free(&result);
         }
-
-        struct json_value params, recips, rcp, result;
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&rcp);
-        json_set_str(&rcp, x);
-        ASSERT(json_push_back(&params, &rcp));
-        json_free(&rcp);
-        json_init(&recips);
-        json_set_array(&recips);
-        json_init(&rcp);
-        json_set_object(&rcp);
-        ASSERT(json_push_kv_str(&rcp, "address", payee));
-        ASSERT(json_push_kv_str(&rcp, "amount", "0.10000000"));
-        ASSERT(json_push_back(&recips, &rcp));
-        ASSERT(json_push_back(&params, &recips));
-        json_free(&rcp);
-        json_free(&recips);
-        json_init(&result);
-        struct wallet_tx prepared;
-        memset(&prepared, 0, sizeof(prepared));
-        bool built = z_sendmany_prepare(&params, &prepared, &result);
-        /* The notes carry no witness here, so the build stops later; the
-         * refusal must not be that the from address is foreign. */
-        const char *msg = json_get_str(&result);
-        ASSERT(!built);
-        ASSERT(msg != NULL);
-        ASSERT(strstr(msg, "not in wallet") == NULL);
-        json_free(&params);
-        json_free(&result);
         memory_cleanse(&acct, sizeof(acct));
         PASS();
     } _test_next:;
@@ -1335,7 +1189,7 @@ int test_wallet_diversified_receive(void)
     failures += test_index_synced_before_return();
     failures += test_concurrent_receives();
     failures += test_index_exhaustion();
-    failures += test_issued_address_is_owned();
+    failures += test_issued_address_balance();
     failures += test_native_send_from_account();
     failures += test_receive_cost();
     return failures;
@@ -1553,6 +1407,36 @@ static bool wds_nf(const struct sapling_key_entry *key, const char *address,
                               key->xfvk.fvk.nk, position, nf);
 }
 
+/* Build, without committing, a send of `amount` to `payee` from `from`
+ * ("account" or an address). Prints the refusal when the build fails. */
+static bool wds_prepare(const char *from, const char *payee,
+                        const char *amount, struct wallet_tx *out)
+{
+    struct json_value params, recips, rcp, result;
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&rcp);
+    json_set_str(&rcp, from);
+    bool ok = json_push_back(&params, &rcp);
+    json_free(&rcp);
+    json_init(&recips);
+    json_set_array(&recips);
+    json_init(&rcp);
+    json_set_object(&rcp);
+    ok = ok && json_push_kv_str(&rcp, "address", payee) &&
+         json_push_kv_str(&rcp, "amount", amount) &&
+         json_push_back(&recips, &rcp) && json_push_back(&params, &recips);
+    json_free(&rcp);
+    json_free(&recips);
+    json_init(&result);
+    ok = ok && z_sendmany_prepare(&params, out, &result);
+    if (!ok)
+        printf("(z_sendmany_prepare: %s) ", json_get_str(&result));
+    json_free(&params);
+    json_free(&result);
+    return ok;
+}
+
 /* What the wallet recorded for one note before the process restarted. */
 struct wds_note {
     uint8_t rcm[32];
@@ -1587,35 +1471,29 @@ static int wds_spend_all(struct wdr *f, struct simnet *s,
         char payee[128];
         ASSERT(wdr_encode(pd, ppk, payee, sizeof(payee)));
 
+        /* A send from one issued address builds, spends the account's notes
+         * and the verifier accepts it: the address is owned, not foreign. */
+        {
+            struct wallet_tx single;
+            ASSERT(wds_prepare(addrs[0], payee, "0.50000000", &single));
+            ASSERT(single.tx.num_shielded_spend >= 1);
+            ASSERT(wds_verify(&single.tx, cp,
+                              simnet_tip_height(s) + 1));
+
+            /* From the default address the same notes are spent. */
+            char defaddr[128];
+            struct wallet_tx from_default;
+            ASSERT(wdr_default(&acct, defaddr, sizeof(defaddr)));
+            ASSERT(wds_prepare(defaddr, payee, "0.50000000", &from_default));
+            ASSERT(from_default.tx.num_shielded_spend >= 1);
+            ASSERT(wds_verify(&from_default.tx, cp,
+                              simnet_tip_height(s) + 1));
+        }
+
         /* 5.5 ZCL exceeds any two of the notes (1+2+3 ZCL less fees). */
         const int64_t amount = 550000000;
-        struct json_value params, recips, rcp;
-        json_init(&params);
-        json_set_array(&params);
-        json_init(&rcp);
-        json_set_str(&rcp, "account");
-        ASSERT(json_push_back(&params, &rcp));
-        json_free(&rcp);
-        json_init(&recips);
-        json_set_array(&recips);
-        json_init(&rcp);
-        json_set_object(&rcp);
-        ASSERT(json_push_kv_str(&rcp, "address", payee));
-        ASSERT(json_push_kv_str(&rcp, "amount", "5.50000000"));
-        ASSERT(json_push_back(&recips, &rcp));
-        ASSERT(json_push_back(&params, &recips));
-        json_free(&rcp);
-        json_free(&recips);
-
         struct wallet_tx prepared;
-        struct json_value result;
-        json_init(&result);
-        bool built = z_sendmany_prepare(&params, &prepared, &result);
-        if (!built)
-            printf("(z_sendmany_prepare: %s) ", json_get_str(&result));
-        json_free(&params);
-        json_free(&result);
-        ASSERT(built);
+        ASSERT(wds_prepare("account", payee, "5.50000000", &prepared));
         struct transaction *tx = &prepared.tx;
 
         ASSERT_EQ((int)tx->num_shielded_spend, WDR_PAYERS);

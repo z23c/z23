@@ -389,8 +389,7 @@ them on chain. The reply is `{"address":"zs1..."}`.
   hand out an address the earlier copy issued, except by a chance of about
   2^-60 per issued address. Notes sent to any index are found by trial
   decryption with the one incoming viewing key, so no address list is needed,
-  and a balance query on any address of the account reports the account's
-  notes.
+  and a balance query reports the notes received at that address.
 
 ---
 

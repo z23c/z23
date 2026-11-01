@@ -291,6 +291,11 @@ int64_t db_sapling_note_balance_for_ivk(struct node_db *ndb,
 int64_t db_sapling_note_balance_for_ivk_minconf(struct node_db *ndb,
                                                 const uint8_t ivk[32],
                                                 int tip_height, int minconf);
+/* As db_sapling_note_balance_for_ivk_minconf, restricted to notes received on
+ * one diversifier: the balance held at one address of the account. */
+int64_t db_sapling_note_balance_for_diversifier_minconf(
+    struct node_db *ndb, const uint8_t ivk[32], const uint8_t diversifier[11],
+    int tip_height, int minconf);
 int64_t db_sapling_note_balance_with_count(struct node_db *ndb, int *note_count);
 int64_t db_sapling_note_balance_for_address(struct node_db *ndb,
                                             const char *address);
