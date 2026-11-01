@@ -199,6 +199,8 @@ static const struct cr_int_bound *cr_find_int_bound(const char *key)
         { "raw_bytes", 1, 1024 },
         { "slot", 1, 100 },
         { "window_hours", 1, 168 },
+        /* core.mining.regtest-mine: the handler reads a JSON integer in 1..101. */
+        { "blocks", 1, 101 },
         /* dev.factory report window in hours. */
         { "hours", 1, 720 },
         /* fleet.objectives.verdict: the snapshot row seqs to compare. */

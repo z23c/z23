@@ -931,6 +931,37 @@ static int t_moved_ttl_bounds(void)
     return failures;
 }
 
+/* core.mining.regtest-mine `blocks` is the JSON integer the handler reads
+ * (1..101). Without its k_bounds entry the key fell to the string default and
+ * the normalize stage refused every numeric count, so the command could not
+ * be invoked from the CLI at all. */
+static int t_regtest_mine_blocks(void)
+{
+    int failures = 0;
+    char why[192];
+    const char *path = "core.mining.regtest-mine";
+
+    CIB_CHECK("regtest-mine admits blocks=1 (low edge)",
+              cib_accepts_int(path, "blocks", 1));
+    CIB_CHECK("regtest-mine admits blocks=101 (high edge)",
+              cib_accepts_int(path, "blocks", 101));
+    CIB_CHECK("regtest-mine refuses blocks=0",
+              !cib_accepts_int_why(path, "blocks", 0, why, sizeof(why)) &&
+              cib_type_refusal(why, "blocks"));
+    CIB_CHECK("regtest-mine refuses blocks=102",
+              !cib_accepts_int_why(path, "blocks", 102, why, sizeof(why)) &&
+              cib_type_refusal(why, "blocks"));
+    CIB_CHECK("regtest-mine refuses blocks typed as a string",
+              !cib_accepts(path, "blocks", 3, why, sizeof(why)) &&
+              cib_type_refusal(why, "blocks"));
+    CIB_CHECK("regtest-mine response budget fits 101 block hashes (67 bytes each)",
+              zcl_command_registry_find(zcl_command_catalog(), path, NULL) &&
+              (size_t)zcl_command_registry_find(zcl_command_catalog(), path,
+                                                NULL)->budget_bytes >=
+                  101U * 67U + 1024U);
+    return failures;
+}
+
 /* core.wallet.security.unlock `timeout_seconds` is the integer the handler
  * reads (default 300) and wallet_lock_arm_timeout bounds to 1..3600. Before
  * the leaf rule it fell to the string default and every numeric timeout was
@@ -1628,6 +1659,7 @@ int test_command_input_bounds(void)
     failures += t_fleet_usage_days();
     failures += t_moved_dual_shape_since();
     failures += t_moved_ttl_bounds();
+    failures += t_regtest_mine_blocks();
     failures += t_wallet_unlock_timeout();
     failures += t_moved_chunks_paid_bounds();
     failures += t_moved_chunk_start_bounds();

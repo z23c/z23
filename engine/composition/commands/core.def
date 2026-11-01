@@ -1974,7 +1974,7 @@ ZCL_COMMAND_READY_COMMAND(
     "Plans or mines 1 to 101 blocks to a transparent regtest address. "
     "Commit requires confirm:true and a node reporting regtest; the node "
     "also enforces its mining and sovereignty guards. An interrupted commit "
-    "has an unknown outcome and must not be retried blindly.", 0,
+    "has an unknown outcome and must not be retried blindly.", ZCL_COMMAND_LIST_BUDGET,
     "mining,regtest,blocks", "zcl.regtest_mine.input.v1",
     "zcl.regtest_mine.v1", "address,blocks,confirm", "",
     "z23 core mining regtest-mine --input='{\"address\":\"<regtest-address>\",\"blocks\":1}'",
