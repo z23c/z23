@@ -50,7 +50,6 @@ core/modules/net/src/msgprocessor_snapshot_payload.c:mp_block_payload_submit_all
 core/modules/net/src/noise_transport.c:noise_transport_feed:37
 core/modules/net/src/rom_fetch.c:rf_download_verified_core:23
 core/modules/net/src/rom_fetch.c:rom_fetch_download:18
-core/modules/policy/src/fees.c:tx_confirm_stats_estimate_median:18
 core/modules/primitives/src/transaction.c:js_description_deserialize:16
 core/modules/primitives/src/transaction.c:js_description_serialize:16
 core/modules/primitives/src/transaction.c:transaction_deserialize:59

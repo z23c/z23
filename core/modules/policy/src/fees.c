@@ -143,6 +143,31 @@ void tx_confirm_stats_update_averages(struct tx_confirm_stats *s)
     }
 }
 
+static double median_of_bucket_span(const struct tx_confirm_stats *s,
+                                    unsigned int best_near,
+                                    unsigned int best_far,
+                                    bool found)
+{
+    double median = -1;
+    double tx_sum = 0;
+    unsigned int min_b = best_near < best_far ? best_near : best_far;
+    unsigned int max_b = best_near > best_far ? best_near : best_far;
+    for (unsigned int j = min_b; j <= max_b; j++)
+        tx_sum += s->tx_ct_avg[j];
+    if (found && tx_sum != 0) {
+        tx_sum /= 2;
+        for (unsigned int j = min_b; j <= max_b; j++) {
+            if (s->tx_ct_avg[j] < tx_sum)
+                tx_sum -= s->tx_ct_avg[j];
+            else {
+                median = s->avg[j] / s->tx_ct_avg[j];
+                break;
+            }
+        }
+    }
+    return median;
+}
+
 double tx_confirm_stats_estimate_median(struct tx_confirm_stats *s,
                                         int conf_target,
                                         double sufficient_tx_val,
@@ -191,24 +216,7 @@ double tx_confirm_stats_estimate_median(struct tx_confirm_stats *s,
         }
     }
 
-    double median = -1;
-    double tx_sum = 0;
-    unsigned int min_b = best_near < best_far ? best_near : best_far;
-    unsigned int max_b = best_near > best_far ? best_near : best_far;
-    for (unsigned int j = min_b; j <= max_b; j++)
-        tx_sum += s->tx_ct_avg[j];
-    if (found && tx_sum != 0) {
-        tx_sum /= 2;
-        for (unsigned int j = min_b; j <= max_b; j++) {
-            if (s->tx_ct_avg[j] < tx_sum)
-                tx_sum -= s->tx_ct_avg[j];
-            else {
-                median = s->avg[j] / s->tx_ct_avg[j];
-                break;
-            }
-        }
-    }
-    return median;
+    return median_of_bucket_span(s, best_near, best_far, found);
 }
 
 unsigned int tx_confirm_stats_max_confirms(const struct tx_confirm_stats *s)
