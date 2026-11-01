@@ -2231,8 +2231,10 @@ static bool bil_peak_write_fixture(const char *dir, int rows)
         struct uint256 hash = make_test_hash(h);
         struct block_index *pi =
             chainstate_insert_block_index((struct chainstate *)&ms, &hash);
-        if (!pi)
+        if (!pi) {
+            main_state_free(&ms);
             return false;
+        }
         pi->nHeight = h;
         pi->nBits = 0x1f07ffff;
         pi->nTime = 1000000 + (uint32_t)h * 150;
@@ -2246,6 +2248,7 @@ static bool bil_peak_write_fixture(const char *dir, int rows)
         prev = pi;
     }
     save_block_index_flat(dir, &ms);
+    main_state_free(&ms);
     return true;
 }
 
@@ -2280,6 +2283,7 @@ static int bil_peak_load_child(const char *dir, int rows, int out_fd)
     char msg[96];
     int n = snprintf(msg, sizeof(msg), "%d %d %ld\n", ok ? 1 : 0,
                      linked ? 1 : 0, growth);
+    main_state_free(&ms); /* after the peak is read, so it cannot lower it */
     return n > 0 && write(out_fd, msg, (size_t)n) == n ? 0 : 1;
 }
 
