@@ -159,6 +159,19 @@ static void sym_init(struct noise_symmetric *s, const char *name)
     s->has_key = false;
 }
 
+/* Resolve the premessage static to MixHash from this side's perspective:
+ * the static belonging to the premessage side, or NULL if not held. */
+static const uint8_t *hs_premessage_static(const struct noise_handshake *hs,
+                                           bool initiator,
+                                           bool want_responder_static)
+{
+    if (want_responder_static)
+        return initiator ? (hs->have_rs ? hs->rs : NULL)
+                         : (hs->have_s ? hs->s_pub : NULL);
+    return initiator ? (hs->have_s ? hs->s_pub : NULL)
+                     : (hs->have_rs ? hs->rs : NULL);
+}
+
 bool noise_hs_init(struct noise_handshake *hs, const struct noise_pattern *pattern,
                    bool initiator, const uint8_t *prologue, size_t prologue_len,
                    const uint8_t *s_priv, const uint8_t *rs)
@@ -187,16 +200,14 @@ bool noise_hs_init(struct noise_handshake *hs, const struct noise_pattern *patte
     case NOISE_PRE_NONE:
         break;
     case NOISE_PRE_RESPONDER_S: {
-        const uint8_t *key = initiator ? (hs->have_rs ? hs->rs : NULL)
-                                       : (hs->have_s ? hs->s_pub : NULL);
+        const uint8_t *key = hs_premessage_static(hs, initiator, true);
         if (!key) LOG_FAIL("noise", "hs_init: NK premessage needs responder static "
                                     "(%s side missing it)", initiator ? "initiator" : "responder");
         sym_mixhash(&hs->sym, key, 32);
         break;
     }
     case NOISE_PRE_INITIATOR_S: {
-        const uint8_t *key = initiator ? (hs->have_s ? hs->s_pub : NULL)
-                                       : (hs->have_rs ? hs->rs : NULL);
+        const uint8_t *key = hs_premessage_static(hs, initiator, false);
         if (!key) LOG_FAIL("noise", "hs_init: premessage needs initiator static");
         sym_mixhash(&hs->sym, key, 32);
         break;

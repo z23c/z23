@@ -38,7 +38,7 @@
 #       pair — the sealed core's identity, mirrored into
 #       hotswap/core_seal_root.h. FROZEN: SECTION/TREE are additive and
 #       do not enter this preimage.
-1ba02918141fa0b13568c78f79f2f7bfbe3da4678136bb87738c00131e8cb368  core/UNSEAL.md
+35260f14c62d755e69f4468d4076fd1978571369c1f9c1a3d2f69450ebf909ab  core/UNSEAL.md
 0154dee8b452e80f28e6d9c915483ab19cf93ee834518edc355885204dad4119  core/chainparams/include/chain/chainparams.h
 76417939b54d9b0d0b2309c66b90fd20a510de3492bb6f97a11f4198292aa01f  core/chainparams/include/chain/chainparamsbase.h
 1b38019875d5bb928f13ca3ac4f2d93f346c4a12699fbb41265f23cc3d7ee8c2  core/chainparams/include/chain/checkpoints.h
@@ -437,7 +437,7 @@ e8f6eecde45ccf22b446239c3a202ec383dbb311887adf2878991af9372f0053  core/modules/n
 471ece444488b1411f02939f3f4f2e1ae36390fe136929f554b791ce0c724ee1  core/modules/net/src/zmsg.c
 09eee149667a0ef776e07cbe52a5fa44baa8cfb00099c8a63f8e5a735baca7c8  core/modules/noise/include/noise/noise_handshake.h
 ed3a63df621a4ae5e8a13d68fb301f7fa118f3f4f8f64ab328b829be4ed809a1  core/modules/noise/include/noise/session_transport.h
-f765757fcef0a3dda57be94a33f96a3d6db027c42d5e40aaceadc67976580fa7  core/modules/noise/src/noise_handshake.c
+edc0552b28f92e34602a6fc287846ef86d43e8abf714a5ce4aa5494f7d29b523  core/modules/noise/src/noise_handshake.c
 7af3f81e3d2e0712e345dff308451cca9da0205bad276bda8f900ae33dfa839f  core/modules/noise/src/session_transport.c
 60fb84dbb4a85eab9a0ada4f4f36e7bab310f632f96ffec21e87ac0fab828ddc  core/modules/policy/include/policy/anchor_finality.h
 3d52ab3b8079bf796f2a82e1768dc7d22e62ba1511775be17953065018eadf39  core/modules/policy/include/policy/fees.h
@@ -605,7 +605,7 @@ e84a4566fb4a01985ccbec9a4d3136a278422e1efe4f00cb8d0cf01480531064  core/params/in
 5ed0e4562789e7ea0bd9ff1238a27172669074b3d26201195aafffe1f863558e  core/params/module.cfg
 4d62b9a9b8824925e2f7efebca536ff924a96c7464067472cb07b9dd57e356dc  core/params/src/params.c
 9907071da9b95e13d236ac70fe8fa95612c7873ff9a88102d988c83ba8492b89  core/params/src/upgrades.c
-SECTION  567  4  e0fffd039ec37969c216aaaf710ebe76a4b0d00da9e700c89a916c18b3d208f9  core
+SECTION  567  4  de20c092c907410f8c608d55b530004e40e91a6fd470b72edefd110545b83e6b  core
 SECTION  12  16  6169522647bfed2194c0519612c2d0feeb318858ce714a56550e426c63b44f14  core/chainparams
 SECTION  6  24  63dff36c30ea1f9c45ed358d05006795f91e44b502d1d1b1196fc4a2cca2570b  core/chainparams/include
 SECTION  6  30  c247859f7b026dc314874fe7f2bfda58f885c05c44ff2fd601ebc3ce25ebeb48  core/chainparams/include/chain
@@ -619,7 +619,7 @@ SECTION  10  9  4a12df854665934805645f7b11b9ce279b93b7568fe58dde37f68d84913813da
 SECTION  5  17  3d74828940990b6914192791641041d1ad63de1b84d7693d2533f1c9b29a7edd  core/math/include
 SECTION  5  22  13bc29100524578193cb79036f24fe9e1d8538c0f45dcc4dd87956a25f4f2b38  core/math/include/core
 SECTION  5  13  bed7851826222b99834c6ee74bb3e7ce6155798a5ef78c798fe2f836bbf30862  core/math/src
-SECTION  501  12  1b371726836522f4c0de644c9f86bc360e08855ff3a6c7393333f42bb81749f7  core/modules
+SECTION  501  12  da2e04a89fecd02e8f66ee0fa82a9ddcbdaf054b8381e64b9df58efe122a0a03  core/modules
 SECTION  6  18  d39a267ed7843199fea7ad58a9c6cbc6d0acd538ff04e13d69147a51924c8648  core/modules/bloom
 SECTION  3  26  25f9f764136ebc796a9aaed6dc708deba3347052954808e4efacd66eed7255c6  core/modules/bloom/include
 SECTION  3  32  2648501012a71f5658485e08ef8fb567f46f716f1fd96cbfcb93666c234a6686  core/modules/bloom/include/bloom
@@ -653,10 +653,10 @@ SECTION  233  16  b15d6dd3f1a284f7b0ea7a049724c798eff4531a4d562751601a853ac31779
 SECTION  82  24  c5f463661a094fd4ab8f23d8b9a1518ad32869ad6848585f584bcb024f767a45  core/modules/net/include
 SECTION  82  28  44fceaf96671c21733b99a97b36d3976dcdc51f4400b76cdd5ae332a9893341f  core/modules/net/include/net
 SECTION  151  20  ec1d255ae4902b9a4d5dbac6916eea7834a9ec76d6d9a82d95b7c45a26b03b8a  core/modules/net/src
-SECTION  4  18  6ceabf8da32531b9c6c804a831142b652b2d5afc8b6c4657704b4a28142a2ed9  core/modules/noise
+SECTION  4  18  e42cfdc83e077ddbcdf0ef107b353614ca36a7b18c10492a396ebbbfe42e3eda  core/modules/noise
 SECTION  2  26  ae8dc34b2105c5595db940bec52b2ace8987066b93f754403132738e9108935c  core/modules/noise/include
 SECTION  2  32  d0793e6266b2dd67fc0949beafe91ffb5f49933a78c3527477804742d0626266  core/modules/noise/include/noise
-SECTION  2  22  a35ae3e597e101b7e1460b9260b34e46f807db34f91ceb7132e3103d2890e464  core/modules/noise/src
+SECTION  2  22  8c2651993539567adf9bc3b4f0b5c488a4412698832027872b1a4cd2c90d8141  core/modules/noise/src
 SECTION  4  19  8ba2d75d61c38591d93b6181ecda817255a0f119927fbd1e39a6fcc8af15c40a  core/modules/policy
 SECTION  2  27  5a6bee138a60997003977f0554a65e50b0d60fd61f784745c7d2803abd70627d  core/modules/policy/include
 SECTION  2  34  07f78ba6f0e71688f6e8730c9fb8e8000c3d3273f52454595fdeb2ea117be781  core/modules/policy/include/policy
@@ -685,5 +685,5 @@ SECTION  7  11  9b023bcd18300a51052f45e69609bb741b2832e3ce6e6a02fd21a12ea94647c0
 SECTION  4  19  e07dc0f2326862830b48105e02648f8d76dfeee9a859b7c56679c461e2cca7f1  core/params/include
 SECTION  4  29  5680a2f2d804163e77f94854ee18838480d785b74b297265f2f8a77db9d02242  core/params/include/consensus
 SECTION  2  15  8fdd673c41b8758e48c6fb225c15d7bbdf79f6816066a1d0c793d4bee2c5f6b1  core/params/src
-TREE  46d81f26b3e15815281f94bcb9d5f5892fc8e192ed2b04b3b730607291559201
-ROOT  1fb6dc002cb72ca0a2f53f37aca3f3138e38568815cd411aa638ad6f8f87b052
+TREE  3bb8ff7f78e25ec97a70e1284750d7c7df3a045024a710007d56a4e57f79824d
+ROOT  374b6eff8f12196128115aff2ac56b287a8c75252acdebf8fab951ea246929b9
