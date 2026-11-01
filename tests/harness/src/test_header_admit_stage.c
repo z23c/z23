@@ -398,9 +398,7 @@ static int ha_drain_five_block_chain_case(void)
     HA_CHECK("progress_store opens", progress_store_open(dir));
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    zcl_mutex_init(&ms.cs_main);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
 
     struct synth_chain sc;
     HA_CHECK("synth chain builds", synth_chain_build(&sc, 5));
@@ -443,8 +441,7 @@ static int ha_drain_five_block_chain_case(void)
              header_admit_stage_cursor() == 5);
 
     header_admit_stage_shutdown();
-    active_chain_free(&ms.chain_active);
-    zcl_mutex_destroy(&ms.cs_main);
+    main_state_free(&ms);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -461,9 +458,7 @@ static int ha_replay_reopen_case(void)
 
     HA_CHECK("replay: store opens", progress_store_open(dir));
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    zcl_mutex_init(&ms.cs_main);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     struct synth_chain sc;
     synth_chain_build(&sc, 3);
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]);
@@ -492,8 +487,7 @@ static int ha_replay_reopen_case(void)
              log_row_count(db) == 3);
 
     header_admit_stage_shutdown();
-    active_chain_free(&ms.chain_active);
-    zcl_mutex_destroy(&ms.cs_main);
+    main_state_free(&ms);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -510,9 +504,7 @@ static int ha_missing_pprev_blocked_case(void)
     HA_CHECK("blocked: store opens", progress_store_open(dir));
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    zcl_mutex_init(&ms.cs_main);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     struct synth_chain sc;
     synth_chain_build(&sc, 3);
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]);
@@ -531,8 +523,7 @@ static int ha_missing_pprev_blocked_case(void)
              header_admit_stage_cursor() == 1);
 
     header_admit_stage_shutdown();
-    active_chain_free(&ms.chain_active);
-    zcl_mutex_destroy(&ms.cs_main);
+    main_state_free(&ms);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -549,9 +540,7 @@ static int ha_authoritative_hook_case(void)
     HA_CHECK("auth: store opens", progress_store_open(dir));
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    zcl_mutex_init(&ms.cs_main);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     struct synth_chain sc;
     synth_chain_build(&sc, 2);
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[1]);
@@ -568,8 +557,7 @@ static int ha_authoritative_hook_case(void)
              log_row_count(progress_store_db()) == 1);
 
     header_admit_stage_shutdown();
-    active_chain_free(&ms.chain_active);
-    zcl_mutex_destroy(&ms.cs_main);
+    main_state_free(&ms);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -693,9 +681,7 @@ static int ha_dump_state_json_case(void)
     progress_store_open(dir);
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    zcl_mutex_init(&ms.cs_main);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     struct synth_chain sc;
     synth_chain_build(&sc, 2);
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[1]);
@@ -719,8 +705,7 @@ static int ha_dump_state_json_case(void)
     json_free(&v);
 
     header_admit_stage_shutdown();
-    active_chain_free(&ms.chain_active);
-    zcl_mutex_destroy(&ms.cs_main);
+    main_state_free(&ms);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -751,9 +736,7 @@ static int ha_reorg_self_heal_case(void)
     HA_CHECK("reorg_heal: store opens", progress_store_open(dir));
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    zcl_mutex_init(&ms.cs_main);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     struct synth_chain sc;
     synth_chain_build(&sc, 5);
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[4]);
@@ -786,8 +769,7 @@ static int ha_reorg_self_heal_case(void)
              header_admit_stage_has_record(2, &sc.hashes[2]));
 
     header_admit_stage_shutdown();
-    active_chain_free(&ms.chain_active);
-    zcl_mutex_destroy(&ms.cs_main);
+    main_state_free(&ms);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -823,9 +805,7 @@ static int ha_forward_fork_heal_case(void)
     HA_CHECK("forward_fork: store opens", progress_store_open(dir));
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    zcl_mutex_init(&ms.cs_main);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     struct synth_chain sc;
     synth_chain_build(&sc, 5);
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]);
@@ -880,8 +860,7 @@ static int ha_forward_fork_heal_case(void)
              header_admit_stage_cursor() == 5);
 
     header_admit_stage_shutdown();
-    active_chain_free(&ms.chain_active);
-    zcl_mutex_destroy(&ms.cs_main);
+    main_state_free(&ms);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -1093,9 +1072,7 @@ static int ha_forward_fork_floor_case(enum ha_floor_mode mode,
     HA_CHECK("forward_floor: store opens", progress_store_open(dir));
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    zcl_mutex_init(&ms.cs_main);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]);
     HA_CHECK("forward_floor: init", header_admit_stage_init(&ms));
     HA_CHECK("forward_floor: admit active prefix",
@@ -1122,8 +1099,7 @@ static int ha_forward_fork_floor_case(enum ha_floor_mode mode,
     sc.blocks[2].pprev = &sc.blocks[1];
     sc.blocks[1].nHeight = 1;
     header_admit_stage_shutdown();
-    active_chain_free(&ms.chain_active);
-    zcl_mutex_destroy(&ms.cs_main);
+    main_state_free(&ms);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -1142,9 +1118,7 @@ static int ha_fork_parent_guard_case(void)
     HA_CHECK("fork_guard: store opens", progress_store_open(dir));
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    zcl_mutex_init(&ms.cs_main);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     struct synth_chain sc;
     synth_chain_build(&sc, 5);
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]);
@@ -1192,8 +1166,7 @@ static int ha_fork_parent_guard_case(void)
              header_admit_stage_cursor() == 3);
 
     header_admit_stage_shutdown();
-    active_chain_free(&ms.chain_active);
-    zcl_mutex_destroy(&ms.cs_main);
+    main_state_free(&ms);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -1211,9 +1184,7 @@ static int ha_prior_hash_guard_case(void)
     HA_CHECK("prior_hash_guard: store opens", progress_store_open(dir));
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    zcl_mutex_init(&ms.cs_main);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     struct synth_chain sc;
     synth_chain_build(&sc, 5);
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[2]);
@@ -1244,8 +1215,7 @@ static int ha_prior_hash_guard_case(void)
              !header_admit_stage_has_record(4, &sc.hashes[4]));
 
     header_admit_stage_shutdown();
-    active_chain_free(&ms.chain_active);
-    zcl_mutex_destroy(&ms.cs_main);
+    main_state_free(&ms);
     synth_chain_free(&sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -1264,9 +1234,7 @@ static int ha_trusted_base_parent_case(void)
     HA_CHECK("trusted_base_parent: store opens", progress_store_open(dir));
 
     struct main_state ms;
-    memset(&ms, 0, sizeof(ms));
-    zcl_mutex_init(&ms.cs_main);
-    active_chain_init(&ms.chain_active);
+    main_state_init(&ms);
     atomic_store(&ms.chain_active.height, 10);
 
     struct uint256 parent_hash = {0};
@@ -1297,8 +1265,7 @@ static int ha_trusted_base_parent_case(void)
     HA_CHECK("trusted_base_parent: mismatched parent is refused",
              !header_admit_forward_replay_parent_ok(db, &ms, &child, 11));
 
-    active_chain_free(&ms.chain_active);
-    zcl_mutex_destroy(&ms.cs_main);
+    main_state_free(&ms);
     progress_store_close();
     test_cleanup_tmpdir(dir);
     return failures;
