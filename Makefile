@@ -4111,6 +4111,9 @@ $(TEST_PARALLEL_BIN): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
 $(TEST_PARALLEL_FAST_BIN): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
 $(TEST_PARALLEL_REL_CANDIDATE): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
 $(TEST_PARALLEL_FAST_CANDIDATE): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
+# The ASan tree carries the real hot-swap loader too (ZCL_DEV_BUILD above),
+# so test_hotswap_rollback's real-image cases run under t-asan and need them.
+$(TEST_ASAN_CANDIDATE): | $(HOTSWAP_ROLLBACK_FIXTURE_SOS)
 endif
 
 # ── Clean-zygote reflex runner proof images ───────────────────────────────
