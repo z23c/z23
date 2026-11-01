@@ -623,6 +623,19 @@ int test_ecosystem(void)
     zcl_command_reply_init(&reply, "zcl.app_presentation_ecosystem.v1");
     zcl_native_handle_presentation_ecosystem(&request, &reply);
     failures += eco_check_text_headless(&reply, dir);
+    zcl_command_reply_free(&reply);
+
+    /* The nested-root refusal needs a root below a real Git toplevel; a
+     * fixture outside any work tree is refused as "not a Git work tree". */
+    char nested[640];
+    (void)snprintf(nested, sizeof(nested), "%s/nested", dir_repo);
+    struct zcl_command_context ctx_nested = { .source_root = nested };
+    struct zcl_command_request request_nested = {
+        .input = &input,
+        .context = &ctx_nested,
+    };
+    zcl_command_reply_init(&reply, "zcl.app_presentation_ecosystem.v1");
+    zcl_native_handle_presentation_ecosystem(&request_nested, &reply);
     failures += eco_check_text_reply_gaps(&reply);
     zcl_command_reply_free(&reply);
 
