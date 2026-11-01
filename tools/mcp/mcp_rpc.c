@@ -314,46 +314,63 @@ struct mcp_select_stop {
     bool set;
 };
 
-/* True when every step of path resolves below v. On the first failure,
- * records the node and the resolved prefix in stop (when stop is non-NULL).
- * A `*` step resolves when v is an array and the rest resolves below every
- * element; a failure below an element is reported at the array. base is the
- * offset of path within the whole select path. */
-static bool mcp_select_probe(const struct json_value *v, const char *path,
-                             size_t base, struct mcp_select_stop *stop)
+/* The element or member a non-`*` step of path names below v, or NULL. */
+static const struct json_value *mcp_select_child(const struct json_value *v,
+                                                 const char *seg, size_t len)
 {
     char key[MCP_SELECT_PATH_MAX + 1];
     size_t idx;
+    if (v->type == JSON_ARR)
+        return mcp_seg_index(seg, len, &idx) && idx < json_size(v)
+                   ? json_at(v, idx)
+                   : NULL;
+    if (v->type != JSON_OBJ)
+        return NULL;
+    memcpy(key, seg, len);
+    key[len] = '\0';
+    return json_get(v, key);
+}
+
+static bool mcp_select_probe(const struct json_value *v, const char *path,
+                             size_t base, struct mcp_select_stop *stop);
+
+/* `*`: v is an array and the rest resolves below every element. */
+static bool mcp_select_probe_each(const struct json_value *v, const char *rest,
+                                  size_t base)
+{
+    if (v->type != JSON_ARR)
+        return false;
+    for (size_t i = 0; i < json_size(v); i++)
+        if (!mcp_select_probe(json_at(v, i), rest, base, NULL))
+            return false;
+    return true;
+}
+
+/* True when every step of path resolves below v. On the first failure,
+ * records the node and the resolved prefix in stop (when stop is non-NULL).
+ * A failure below a `*` element is reported at the array. base is the offset
+ * of path within the whole select path. */
+static bool mcp_select_probe(const struct json_value *v, const char *path,
+                             size_t base, struct mcp_select_stop *stop)
+{
     if (!*path)
         return true;
     const char *dot = strchr(path, '.');
     size_t len = dot ? (size_t)(dot - path) : strlen(path);
     const char *rest = path + len + (dot ? 1 : 0);
-    size_t at = base > 0 ? base - 1 : 0; /* prefix before this step */
-    bool ok;
-    if (len == 1 && path[0] == '*') {
-        ok = v->type == JSON_ARR;
-        for (size_t i = 0; ok && i < json_size(v); i++)
-            ok = mcp_select_probe(json_at(v, i), rest, base + len + 1, NULL);
-    } else if (v->type == JSON_ARR) {
-        ok = mcp_seg_index(path, len, &idx) && idx < json_size(v);
-        if (ok)
-            return mcp_select_probe(json_at(v, idx), rest, base + len + 1, stop);
-    } else {
-        const struct json_value *next;
-        memcpy(key, path, len);
-        key[len] = '\0';
-        next = v->type == JSON_OBJ ? json_get(v, key) : NULL;
-        if (next)
-            return mcp_select_probe(next, rest, base + len + 1, stop);
-        ok = false;
+    bool star = len == 1 && path[0] == '*';
+    const struct json_value *next = star ? NULL : mcp_select_child(v, path, len);
+    if (star ? mcp_select_probe_each(v, rest, base + len + 1) : next != NULL) {
+        if (star)
+            return true;
+        return mcp_select_probe(next, rest, base + len + 1, stop);
     }
-    if (!ok && stop && !stop->set) {
+    if (stop && !stop->set) {
         stop->node = v;
-        stop->prefix = at;
+        stop->prefix = base > 0 ? base - 1 : 0; /* before this step's dot */
         stop->set = true;
     }
-    return ok;
+    return false;
 }
 
 #define MCP_SELECT_KEYS_MAX 32
