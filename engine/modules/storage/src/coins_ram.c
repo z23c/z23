@@ -1282,7 +1282,7 @@ static int coins_ram_flush_alloc_rows(size_t nadd, size_t nspend,
     return 0;
 }
 
-/* 0 after COMMIT, 1 if BEGIN fails, 2 if the row write fails, 3 if COMMIT fails. */
+/* 0 after COMMIT, 1 if BEGIN fails, 2 if coins_ram_flush_write returns false, 3 if COMMIT fails. */
 static int coins_ram_flush_apply_tx(sqlite3 *db, struct coins_kv_add_row *adds,
                                     size_t nadd, struct coins_kv_spend_row *spends,
                                     size_t nspend, int32_t flushed_height,
